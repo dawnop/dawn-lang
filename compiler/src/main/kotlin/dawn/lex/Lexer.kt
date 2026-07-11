@@ -169,9 +169,7 @@ class Lexer(
 
     private fun lexString() {
         val start = pos
-        if (peek(1) == '"' && peek(2) == '"') {
-            throw DawnError("multiline strings (\"\"\") are not implemented in v0.1", spanAt(pos, 3))
-        }
+        if (peek(1) == '"' && peek(2) == '"') return lexTripleString()
         pos++ // opening quote
         val segments = ArrayList<StrSegment>()
         val text = StringBuilder()
@@ -181,19 +179,7 @@ class Lexer(
             }
             when (val c = src[pos]) {
                 '"' -> { pos++; break }
-                '\\' -> {
-                    pos++
-                    when (val e = peek()) {
-                        'n' -> text.append('\n')
-                        't' -> text.append('\t')
-                        '\\' -> text.append('\\')
-                        '"' -> text.append('"')
-                        '{' -> text.append('{')
-                        'u' -> text.append(lexUnicodeEscape())
-                        else -> throw DawnError("unknown escape: \\$e", spanAt(pos - 1, 2))
-                    }
-                    pos++
-                }
+                '\\' -> lexEscapeInto(text)
                 '{' -> {
                     if (text.isNotEmpty()) { segments.add(StrSegment.Text(text.toString())); text.clear() }
                     segments.add(lexInterpolation())
@@ -204,6 +190,117 @@ class Lexer(
         if (text.isNotEmpty()) segments.add(StrSegment.Text(text.toString()))
         val span = Span(baseOffset + start, baseOffset + pos)
         tokens.add(Token(TokenType.STRING, src.substring(start, pos), span, segments = segments))
+    }
+
+    /** on entry pos points at '\\'; consumes the escape and appends the character(s) */
+    private fun lexEscapeInto(text: StringBuilder) {
+        pos++
+        when (val e = peek()) {
+            'n' -> text.append('\n')
+            't' -> text.append('\t')
+            '\\' -> text.append('\\')
+            '"' -> text.append('"')
+            '{' -> text.append('{')
+            'u' -> text.append(lexUnicodeEscape())
+            else -> throw DawnError("unknown escape: \\$e", spanAt(pos - 1, 2))
+        }
+        pos++
+    }
+
+    /**
+     * Multiline string: """ ... """ (spec §1.6). The newline right after the
+     * opening quotes and the one before the closing quotes are stripped, as is
+     * the common indentation of the non-blank lines. Escapes and interpolation
+     * work as in single-line strings; a lone " or "" is content.
+     */
+    private fun lexTripleString() {
+        val start = pos
+        pos += 3 // opening """
+        val segments = ArrayList<StrSegment>()
+        val text = StringBuilder()
+        while (true) {
+            if (pos >= src.length) {
+                throw DawnError("unterminated \"\"\" string", spanAt(start, 3))
+            }
+            if (src[pos] == '"' && peek(1) == '"' && peek(2) == '"') { pos += 3; break }
+            when (src[pos]) {
+                '\\' -> lexEscapeInto(text)
+                '{' -> {
+                    if (text.isNotEmpty()) { segments.add(StrSegment.Text(text.toString())); text.clear() }
+                    segments.add(lexInterpolation())
+                }
+                else -> { text.append(src[pos]); pos++ }
+            }
+        }
+        if (text.isNotEmpty()) segments.add(StrSegment.Text(text.toString()))
+        val span = Span(baseOffset + start, baseOffset + pos)
+        tokens.add(Token(TokenType.STRING, src.substring(start, pos), span,
+            segments = stripTripleIndent(segments)))
+    }
+
+    /** Strip the leading/trailing newlines and the common indentation (spec §1.6). */
+    private fun stripTripleIndent(segsIn: List<StrSegment>): List<StrSegment> {
+        if (segsIn.isEmpty()) return segsIn
+        val parts = segsIn.toMutableList()
+        (parts.first() as? StrSegment.Text)?.let {
+            if (it.value.startsWith("\n")) parts[0] = StrSegment.Text(it.value.removePrefix("\n"))
+        }
+        (parts.last() as? StrSegment.Text)?.let {
+            val i = it.value.lastIndexOf('\n')
+            if (i >= 0 && it.value.substring(i + 1).isBlank())
+                parts[parts.size - 1] = StrSegment.Text(it.value.substring(0, i))
+        }
+        // measure: whitespace run at each line start (may end at an interpolation);
+        // lines that are pure whitespace don't count
+        var minIndent = Int.MAX_VALUE
+        var atStart = true
+        var runWs = 0
+        for (p in parts) {
+            when (p) {
+                is StrSegment.Code -> {
+                    if (atStart) { minIndent = minOf(minIndent, runWs); atStart = false; runWs = 0 }
+                }
+                is StrSegment.Text -> {
+                    var j = 0
+                    val v = p.value
+                    while (j < v.length) {
+                        if (atStart) {
+                            while (j < v.length && (v[j] == ' ' || v[j] == '\t')) { runWs++; j++ }
+                            if (j >= v.length) break // whitespace continues into the next part
+                            if (v[j] == '\n') { atStart = true; runWs = 0; j++ } // blank line
+                            else { minIndent = minOf(minIndent, runWs); atStart = false; runWs = 0 }
+                        } else {
+                            if (v[j] == '\n') { atStart = true; runWs = 0 }
+                            j++
+                        }
+                    }
+                }
+            }
+        }
+        if (minIndent == Int.MAX_VALUE || minIndent == 0) return parts.filterNot {
+            it is StrSegment.Text && it.value.isEmpty()
+        }
+        // strip: drop up to minIndent whitespace chars after every line start
+        val out = ArrayList<StrSegment>()
+        var atStart2 = true
+        var toDrop = minIndent
+        for (p in parts) {
+            when (p) {
+                is StrSegment.Code -> { atStart2 = false; toDrop = 0; out.add(p) }
+                is StrSegment.Text -> {
+                    val sb = StringBuilder()
+                    for (c in p.value) {
+                        when {
+                            atStart2 && toDrop > 0 && (c == ' ' || c == '\t') -> toDrop--
+                            c == '\n' -> { atStart2 = true; toDrop = minIndent; sb.append(c) }
+                            else -> { atStart2 = false; toDrop = 0; sb.append(c) }
+                        }
+                    }
+                    if (sb.isNotEmpty()) out.add(StrSegment.Text(sb.toString()))
+                }
+            }
+        }
+        return out
     }
 
     private fun lexUnicodeEscape(): String {
