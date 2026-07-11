@@ -64,7 +64,9 @@ VS Code 扩展与 Neovim / Helix 配置见 [editors/](editors/)。
 `!io` 效果检查、自递归尾调用消除、字符串插值、`dawn run` / `dawn build --native`。
 M1 已落地：**ADT（和类型）**——构造器按位置/按名传参、构造器模式（含嵌套与 `..`）、
 结构相等、基于 usefulness 算法（Maranget）的**模式穷尽性检查**（缺分支精确列出缺失构造器）；
-**record**——字面量、同名简写、函数式更新 `Point { ..p, x: 3.0 }`、字段访问、记录模式。
+**record**——字面量、同名简写、函数式更新 `Point { ..p, x: 3.0 }`、字段访问、记录模式；
+**泛型**——`fn`/`type` 类型参数、调用点自动推导（含 `or_default(None, 5)` 这类跨实参推导）、
+擦除 + 装箱实现；prelude 自带 `Option`/`Result`；内建 `List`（字面量、`++`、`len`/`get`/`range`）。
 详见 [docs/design.md](docs/design.md) 里程碑。编译器 Kotlin + ASM，
-测试 67 项（`gradle :compiler:test`）。native 二进制启动约 7ms，
+测试 85 项（`gradle :compiler:test`）。native 二进制启动约 7ms，
 JVM 与 native 输出逐字节一致。

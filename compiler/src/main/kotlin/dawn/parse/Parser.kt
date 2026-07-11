@@ -106,12 +106,26 @@ class Parser(tokens: List<Token>, private val sink: DiagnosticSink = DiagnosticS
 
     // ---- type declarations ----
 
+    /** [T, U] on fn/type declarations */
+    private fun typeParams(): List<String> {
+        if (!at(LBRACKET)) return emptyList()
+        advance()
+        val names = ArrayList<String>()
+        while (!at(RBRACKET)) {
+            names.add(expect(TYPEIDENT, "a type parameter name (uppercase)").text)
+            if (at(COMMA)) advance() else break
+        }
+        expect(RBRACKET, "`]`")
+        if (names.isEmpty()) throw err("type parameter list cannot be empty")
+        return names
+    }
+
     private fun typeDecl(pub: Boolean): TypeDecl {
         val kw = expect(TYPE, "`type`")
         val name = expect(TYPEIDENT, "a type name (uppercase)")
-        if (at(LBRACKET)) throw err("generic type parameters are not implemented yet")
+        val tparams = typeParams()
         expect(EQ, "`=`")
-        if (at(LBRACE)) return recordDecl(pub, kw, name)
+        if (at(LBRACE)) return recordDecl(pub, kw, name, tparams)
         val ctors = ArrayList<CtorDecl>()
         if (at(PIPE)) advance() // leading | is optional
         skipNewlines()
@@ -125,12 +139,12 @@ class Parser(tokens: List<Token>, private val sink: DiagnosticSink = DiagnosticS
             skipNewlines()
             ctors.add(ctorDecl())
         }
-        return TypeDecl(pub, name.text, ctors, isRecord = false,
+        return TypeDecl(pub, name.text, tparams, ctors, isRecord = false,
             Span(kw.span.start, ctors.last().span.end), name.span)
     }
 
     /** type Point = { x: Float, y: Float } — a single-constructor product type */
-    private fun recordDecl(pub: Boolean, kw: Token, name: Token): TypeDecl {
+    private fun recordDecl(pub: Boolean, kw: Token, name: Token, tparams: List<String>): TypeDecl {
         advance() // {
         skipNewlines()
         val fields = ArrayList<FieldDecl>()
@@ -146,7 +160,7 @@ class Parser(tokens: List<Token>, private val sink: DiagnosticSink = DiagnosticS
         if (fields.isEmpty())
             throw DawnError("a record must declare at least one field", Span(kw.span.start, close.span.end))
         val ctor = CtorDecl(name.text, fields, Span(name.span.start, close.span.end), name.span)
-        return TypeDecl(pub, name.text, listOf(ctor), isRecord = true,
+        return TypeDecl(pub, name.text, tparams, listOf(ctor), isRecord = true,
             Span(kw.span.start, close.span.end), name.span)
     }
 
@@ -177,6 +191,7 @@ class Parser(tokens: List<Token>, private val sink: DiagnosticSink = DiagnosticS
     private fun fnDecl(pub: Boolean): FnDecl {
         val fnTok = expect(FN, "`fn`")
         val nameTok = expect(IDENT, "a function name (lowercase)")
+        val tparams = typeParams()
         expect(LPAREN, "`(`")
         val params = ArrayList<Param>()
         skipNewlines()
@@ -202,14 +217,22 @@ class Parser(tokens: List<Token>, private val sink: DiagnosticSink = DiagnosticS
         expect(EQ, "`=` (function body)")
         skipNewlines()
         val body = expression()
-        return FnDecl(pub, nameTok.text, params, ret, declaredIo, body,
+        return FnDecl(pub, nameTok.text, tparams, params, ret, declaredIo, body,
             Span(fnTok.span.start, body.span.end), nameTok.span)
     }
 
     private fun typeRef(): TypeRef {
         val t = expect(TYPEIDENT, "a type name (uppercase)")
-        if (at(LBRACKET)) throw err("generic types are not implemented in M0")
-        return TypeRef(t.text, t.span)
+        if (!at(LBRACKET)) return TypeRef(t.text, emptyList(), t.span)
+        advance()
+        val args = ArrayList<TypeRef>()
+        while (!at(RBRACKET)) {
+            args.add(typeRef())
+            if (at(COMMA)) advance() else break
+        }
+        val close = expect(RBRACKET, "`]`")
+        if (args.isEmpty()) throw err("type argument list cannot be empty")
+        return TypeRef(t.text, args, Span(t.span.start, close.span.end))
     }
 
     // ---- statements ----
@@ -395,7 +418,7 @@ class Parser(tokens: List<Token>, private val sink: DiagnosticSink = DiagnosticS
             MATCH -> matchExpr()
             LBRACE -> block()
             LPAREN -> parenExpr()
-            LBRACKET -> throw err("list literals are not implemented in M0")
+            LBRACKET -> listLit()
             FN -> throw err("lambdas are not implemented in M0",
                 "use a top-level function name on the right side of |>")
             COMPTIME -> throw err("comptime is not implemented in M0")
@@ -501,6 +524,19 @@ class Parser(tokens: List<Token>, private val sink: DiagnosticSink = DiagnosticS
             }
         }
         return StrLit(parts, t.span)
+    }
+
+    private fun listLit(): Expr = bracketed {
+        val open = advance() // [
+        skipNewlines()
+        val elems = ArrayList<Expr>()
+        while (!at(RBRACKET)) {
+            elems.add(expression())
+            skipNewlines()
+            if (at(COMMA)) { advance(); skipNewlines() } else break
+        }
+        val close = expect(RBRACKET, "`]`")
+        ListLit(elems, Span(open.span.start, close.span.end))
     }
 
     private fun parenExpr(): Expr {

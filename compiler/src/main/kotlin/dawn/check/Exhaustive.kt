@@ -32,6 +32,12 @@ internal fun toSPat(p: Pattern): SPat = when (p) {
     }
 }
 
+/** Constructor field types with the column's type arguments substituted in. */
+private fun instFields(c: CtorInfo, column: Type): List<Type> =
+    if (column is Type.TAdt && c.adt.typeParams.isNotEmpty())
+        c.fields.map { subst(it.type, c.adt.typeParams.zip(column.args).toMap()) }
+    else c.fields.map { it.type }
+
 /** Would a value matching [q] slip through every row of [matrix]? */
 internal fun useful(matrix: List<List<SPat>>, q: List<SPat>, types: List<Type>): Boolean {
     if (q.isEmpty()) return matrix.isEmpty()
@@ -40,7 +46,7 @@ internal fun useful(matrix: List<List<SPat>>, q: List<SPat>, types: List<Type>):
         is SCtor -> useful(
             specializeCtor(matrix, head.ctor),
             head.subs + q.drop(1),
-            head.ctor.fields.map { it.type } + types.drop(1),
+            instFields(head.ctor, t) + types.drop(1),
         )
         is SLit -> useful(specializeLit(matrix, head.value), q.drop(1), types.drop(1))
         is SWild -> {
@@ -53,7 +59,7 @@ internal fun useful(matrix: List<List<SPat>>, q: List<SPat>, types: List<Type>):
                         useful(
                             specializeCtor(matrix, c),
                             List(c.fields.size) { SWild } + q.drop(1),
-                            c.fields.map { it.type } + types.drop(1),
+                            instFields(c, t) + types.drop(1),
                         )
                     }
                 }

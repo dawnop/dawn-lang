@@ -37,18 +37,32 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
     private var ioWitness: Span? = null
     private var ioWitnessName: String? = null
 
+    /** type parameters of the declaration currently being checked (for annotations in bodies) */
+    private var currentTParams: Map<String, TVar> = emptyMap()
+
     fun check() {
+        // 0. prelude: Option/Result and their constructors
+        for (info in PRELUDE_ADTS) {
+            adts[info.name] = info
+            for (c in info.ctors) ctors[c.name] = c
+        }
         // 1. type headers first (shells only), so recursive types resolve
         for (d in module.types) {
-            if (Type.named(d.name) != null) {
+            if (Type.named(d.name) != null || d.name == "List") {
                 sink.error("`${d.name}` is a builtin type and cannot be redefined", d.nameSpan)
                 continue
             }
             if (adts.containsKey(d.name)) {
-                sink.error("type `${d.name}` is defined twice", d.nameSpan)
+                sink.error(
+                    if (PRELUDE_ADTS.any { it.name == d.name })
+                        "`${d.name}` is a prelude type and cannot be redefined"
+                    else "type `${d.name}` is defined twice",
+                    d.nameSpan)
                 continue
             }
-            val info = AdtInfo(d.name, d.nameSpan, d.isRecord)
+            if (d.typeParams.toSet().size != d.typeParams.size)
+                sink.error("duplicate type parameter names", d.nameSpan)
+            val info = AdtInfo(d.name, d.nameSpan, d.isRecord, d.typeParams.map { TVar(it) })
             adts[d.name] = info
             for (c in d.ctors) {
                 val ci = CtorInfo(info, c.name, c.nameSpan)
@@ -68,6 +82,8 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
         }
         // 2. constructor field types (may reference any type declared above)
         for (d in module.types) {
+            val info = d.ctors.firstOrNull()?.info?.adt
+            val tp = info?.typeParams?.associateBy { it.name } ?: emptyMap()
             for (c in d.ctors) {
                 val ci = c.info ?: continue
                 for (f in c.fields) {
@@ -75,7 +91,7 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
                         sink.error("field `${f.name}` is declared twice in `${c.name}`", f.span)
                         continue
                     }
-                    var ft = resolveType(f.typeRef)
+                    var ft = resolveType(f.typeRef, tp)
                     if (ft == TUnit) {
                         sink.error("constructor fields cannot be Unit", f.span,
                             "a no-payload case is just a bare constructor")
@@ -87,13 +103,18 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
         }
         // 3. function signatures
         for (d in module.fns) {
+            if (d.typeParams.toSet().size != d.typeParams.size)
+                sink.error("duplicate type parameter names", d.nameSpan)
+            val tvars = d.typeParams.map { TVar(it) }
+            val tp = tvars.associateBy { it.name }
             val sig = FnSig(
                 d.name,
-                d.params.map { resolveType(it.typeName) },
+                d.params.map { resolveType(it.typeName, tp) },
                 d.params.map { it.name },
-                resolveType(d.retType),
+                resolveType(d.retType, tp),
                 d.declaredIo,
                 isBuiltin = false,
+                typeParams = tvars,
                 nameSpan = d.nameSpan,
             )
             d.sig = sig
@@ -118,15 +139,72 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
         for (d in module.fns) checkFn(d)
     }
 
-    private fun resolveType(ref: TypeRef): Type =
-        Type.named(ref.name) ?: adts[ref.name]?.type ?: run {
-            sink.error("unknown type: ${ref.name}", ref.span,
-                "builtin types: Int, Float, Bool, String, Unit — or declare `type ${ref.name} = ...`")
-            TError
+    private fun resolveType(ref: TypeRef, tparams: Map<String, TVar> = currentTParams): Type {
+        // type parameters shadow everything
+        tparams[ref.name]?.let {
+            if (ref.args.isNotEmpty()) {
+                sink.error("type parameter `${ref.name}` cannot take type arguments", ref.span)
+                return TError
+            }
+            return it
         }
+        if (ref.name == "List") {
+            if (ref.args.size != 1) {
+                sink.error("List takes exactly one type argument: List[T]", ref.span)
+                return TError
+            }
+            return TList(resolveType(ref.args[0], tparams))
+        }
+        Type.named(ref.name)?.let {
+            if (ref.args.isNotEmpty()) {
+                sink.error("`${ref.name}` is not generic", ref.span)
+                return TError
+            }
+            return it
+        }
+        val info = adts[ref.name] ?: run {
+            sink.error("unknown type: ${ref.name}", ref.span,
+                "builtin types: Int, Float, Bool, String, Unit, List — or declare `type ${ref.name} = ...`")
+            return TError
+        }
+        if (ref.args.size != info.typeParams.size) {
+            sink.error("`${info.name}` takes ${info.typeParams.size} type parameter(s), got ${ref.args.size}",
+                ref.span)
+            return TError
+        }
+        return TAdt(info, ref.args.map { resolveType(it, tparams) })
+    }
+
+    /**
+     * Structural unification of a declared type (may contain the callee's type
+     * variables) against an actual argument type, accumulating bindings.
+     */
+    private fun unifyInto(declared: Type, actual: Type, map: HashMap<TVar, Type>): Boolean = when {
+        actual.isErrorish -> true
+        declared is TVar -> {
+            val bound = map[declared]
+            if (bound == null) { map[declared] = actual; true } else bound == actual
+        }
+        declared is TAdt && actual is TAdt ->
+            declared.info === actual.info &&
+                declared.args.zip(actual.args).all { (d, a) -> unifyInto(d, a, map) }
+        declared is TList && actual is TList -> unifyInto(declared.elem, actual.elem, map)
+        else -> declared == actual
+    }
+
+    /** does this expression need an expected type to check at all? */
+    private fun needsExpected(e: Expr): Boolean = when (e) {
+        is ListLit -> e.elems.isEmpty() || e.elems.all { needsExpected(it) }
+        is CtorCall -> {
+            val ci = ctors[e.ctorName]
+            ci != null && ci.fields.isEmpty() && ci.adt.typeParams.isNotEmpty()
+        }
+        else -> false
+    }
 
     private fun checkFn(d: FnDecl) {
         val sig = d.sig!!
+        currentTParams = sig.typeParams.associateBy { it.name }
         usesIo = false
         ioWitness = null
         ioWitnessName = null
@@ -225,9 +303,10 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
                 sym.type
             }
         }
-        is Call -> checkCall(e)
-        is CtorCall -> checkCtorCall(e)
+        is Call -> checkCall(e, expected)
+        is CtorCall -> checkCtorCall(e, expected)
         is FieldAccess -> checkFieldAccess(e)
+        is ListLit -> checkListLit(e, expected)
         is Binary -> checkBinary(e)
         is Unary -> when (e.op) {
             UnOp.NOT -> {
@@ -246,26 +325,53 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
         is Block -> checkBlock(e, expected)
     }
 
-    private fun checkCall(e: Call): Type {
+    private fun isConcrete(t: Type): Boolean = when (t) {
+        is TVar -> false
+        is TAdt -> t.args.all { isConcrete(it) }
+        is TList -> isConcrete(t.elem)
+        else -> true
+    }
+
+    private fun checkCall(e: Call, expected: Type?): Type {
         val sig = fns[e.callee] ?: BUILTINS[e.callee]
         if (sig == null) {
             // still check the arguments so their subtrees get types/symbols
             for (arg in e.args) checkExpr(arg)
             return error("undefined function: ${e.callee}", e.calleeSpan,
-                if (lookup(e.callee) != null) "`${e.callee}` is a variable, not a function (M0 has no function values)" else null)
+                if (lookup(e.callee) != null) "`${e.callee}` is a variable, not a function (function values are not implemented yet)" else null)
         }
         e.sig = sig
         if (e.args.size != sig.paramTypes.size) {
             for (arg in e.args) checkExpr(arg)
             sink.error("`${e.callee}` takes ${sig.paramTypes.size} argument(s), got ${e.args.size}",
                 e.span, "signature: ${sig.render()}")
-            return sig.ret
+            return if (sig.typeParams.isEmpty()) sig.ret else TError
         }
-        for ((arg, pt) in e.args.zip(sig.paramTypes)) {
-            val at = checkExpr(arg, expected = pt)
-            if (!assignable(at, pt))
-                sink.error("argument type mismatch: expected $pt, got $at", arg.span,
-                    "signature: ${sig.render()}")
+        val map = HashMap<TVar, Type>()
+        // seed inference from the expected result type (helps nested cases like Some(None))
+        if (sig.typeParams.isNotEmpty() && expected != null && isConcrete(expected))
+            unifyInto(sig.ret, expected, map)
+        // two rounds: self-sufficient arguments first (they bind type variables),
+        // then inference-needing ones (bare None, []) with what was learned
+        val argTypes = arrayOfNulls<Type>(e.args.size)
+        for (round in 0..1) {
+            for ((i, arg) in e.args.withIndex()) {
+                if (argTypes[i] != null) continue
+                if (round == 0 && needsExpected(arg)) continue
+                val exp = subst(sig.paramTypes[i], map).takeIf { isConcrete(it) }
+                val at = checkExpr(arg, expected = exp)
+                argTypes[i] = at
+                if (!unifyInto(sig.paramTypes[i], at, map))
+                    sink.error("argument type mismatch: expected ${subst(sig.paramTypes[i], map)}, got $at",
+                        arg.span, "signature: ${sig.render()}")
+            }
+        }
+        // return-position inference: let x: Option[Int] = ...
+        if (sig.typeParams.any { it !in map } && expected != null) unifyInto(sig.ret, expected, map)
+        val unbound = sig.typeParams.filter { it !in map }
+        if (unbound.isNotEmpty()) {
+            return error("cannot infer type parameter(s) ${unbound.joinToString(", ")} for `${e.callee}`",
+                e.span, "add a type annotation at the use site")
         }
         if (sig.io && !usesIo) {
             usesIo = true
@@ -274,10 +380,10 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
         } else if (sig.io) {
             usesIo = true
         }
-        return sig.ret
+        return subst(sig.ret, map)
     }
 
-    private fun checkCtorCall(e: CtorCall): Type {
+    private fun checkCtorCall(e: CtorCall, expected: Type?): Type {
         val ci = ctors[e.ctorName]
         if (ci == null) {
             e.spread?.let { checkExpr(it) }
@@ -289,23 +395,29 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
                 else null)
         }
         e.ctor = ci
+        val adt = ci.adt
         val n = ci.fields.size
         if (!e.hasParens && n > 0) {
             return error(
-                if (ci.adt.isRecord)
+                if (adt.isRecord)
                     "record `${ci.name}` must be built with braces: ${ci.name} { ... }"
                 else "constructor `${ci.name}` has $n field(s) and cannot be used bare",
                 e.span, "constructor: ${ci.render()}")
         }
+        val map = HashMap<TVar, Type>()
+        // seed inference from the expected result type (helps nested cases like Some(None))
+        if (adt.typeParams.isNotEmpty() && expected != null && isConcrete(expected))
+            unifyInto(adt.type, expected, map)
         if (e.spread != null) {
-            if (!ci.adt.isRecord)
+            if (!adt.isRecord)
                 sink.error("`..base` functional update only works on records", e.spread!!.span)
-            val bt = checkExpr(e.spread!!, expected = ci.adt.type)
-            if (!assignable(bt, ci.adt.type))
-                sink.error("`..base` must be a ${ci.adt.name}, got $bt", e.spread!!.span)
+            val bt = checkExpr(e.spread!!, expected = adt.type.takeIf { isConcrete(it) })
+            if (!unifyInto(adt.type, bt, map))
+                sink.error("`..base` must be a ${adt.name}, got $bt", e.spread!!.span)
         }
-        // map arguments (positional prefix, then named) onto fields
+        // resolve the argument → field mapping (positional prefix, then named)
         val slots = arrayOfNulls<Expr>(n)
+        val idxOf = IntArray(e.args.size) { -1 }
         var sawNamed = false
         var argsBroken = false
         for ((i, a) in e.args.withIndex()) {
@@ -335,12 +447,24 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
                 checkExpr(a.expr)
                 continue
             }
-            val ft = ci.fields[idx].type
-            val at = checkExpr(a.expr, expected = ft)
-            if (!assignable(at, ft))
-                sink.error("field `${ci.fields[idx].name}` of `${ci.name}` is $ft, got $at", a.expr.span,
-                    "constructor: ${ci.render()}")
             slots[idx] = a.expr
+            idxOf[i] = idx
+        }
+        // two rounds of checking (see checkCall)
+        val done = BooleanArray(e.args.size)
+        for (round in 0..1) {
+            for ((i, a) in e.args.withIndex()) {
+                val idx = idxOf[i]
+                if (idx < 0 || done[i]) continue
+                if (round == 0 && needsExpected(a.expr)) continue
+                done[i] = true
+                val declared = ci.fields[idx].type
+                val exp = subst(declared, map).takeIf { isConcrete(it) }
+                val at = checkExpr(a.expr, expected = exp)
+                if (!unifyInto(declared, at, map))
+                    sink.error("field `${ci.fields[idx].name}` of `${ci.name}` is ${subst(declared, map)}, got $at",
+                        a.expr.span, "constructor: ${ci.render()}")
+            }
         }
         if (!argsBroken) {
             val missing = ci.fields.filterIndexed { i, _ -> slots[i] == null }
@@ -353,7 +477,14 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
         }
         // with a spread, unspecified fields come from the base
         if (slots.all { it != null } || e.spread != null) e.fieldExprs = slots.toList()
-        return ci.adt.type
+        // instantiate the type arguments; fall back to the expected type (bare None etc.)
+        if (adt.typeParams.any { it !in map } && expected != null) unifyInto(adt.type, expected, map)
+        val unbound = adt.typeParams.filter { it !in map }
+        if (unbound.isNotEmpty()) {
+            return error("cannot infer type parameter(s) ${unbound.joinToString(", ")} for `${ci.name}`",
+                e.span, "add a type annotation, e.g. let x: ${adt.name}[...] = ${ci.name}")
+        }
+        return subst(adt.type, map)
     }
 
     private fun checkFieldAccess(e: FieldAccess): Type {
@@ -368,7 +499,24 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
                 "fields: ${ci.fields.joinToString(", ") { it.name }}")
         e.owner = ci
         e.field = field
-        return field.type
+        return subst(field.type, tt.info.typeParams.zip(tt.args).toMap())
+    }
+
+    private fun checkListLit(e: ListLit, expected: Type?): Type {
+        val expectedElem = (expected as? TList)?.elem
+        if (e.elems.isEmpty()) {
+            return TList(expectedElem
+                ?: return error("cannot infer the element type of an empty list", e.span,
+                    "add a type annotation: let xs: List[Int] = []"))
+        }
+        var elemT: Type = expectedElem ?: TNever
+        // inference-needing elements (bare None, nested []) go last
+        val order = e.elems.sortedBy { needsExpected(it) }
+        for (el in order) {
+            val t = checkExpr(el, expected = elemT.takeIf { it != TNever && isConcrete(it) })
+            elemT = unify(elemT, t, el.span, "the list elements")
+        }
+        return TList(elemT)
     }
 
     private fun checkBinary(e: Binary): Type {
@@ -378,7 +526,7 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
         if (lt.isErrorish || rt.isErrorish) return when (e.op) {
             BinOp.ADD, BinOp.SUB, BinOp.MUL, BinOp.DIV, BinOp.MOD ->
                 if (lt.isNumeric) lt else if (rt.isNumeric) rt else TError
-            BinOp.CONCAT -> TString
+            BinOp.CONCAT -> if (lt is TList) lt else if (rt is TList) rt else TString
             else -> TBool
         }
         fun bothNumericSame(): Type {
@@ -389,11 +537,13 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
         }
         return when (e.op) {
             BinOp.ADD, BinOp.SUB, BinOp.MUL, BinOp.DIV, BinOp.MOD -> bothNumericSame()
-            BinOp.CONCAT -> {
-                if (lt != TString || rt != TString)
-                    error("`++` concatenates Strings (M0), got $lt ++ $rt", e.opSpan,
-                        "use + for numbers; interpolation \"{x}{y}\" also builds strings")
-                else TString
+            BinOp.CONCAT -> when {
+                lt == TString && rt == TString -> TString
+                lt is TList && rt is TList ->
+                    if (lt != rt) error("`++` needs lists of the same element type: $lt vs $rt", e.opSpan)
+                    else lt
+                else -> error("`++` concatenates Strings or Lists, got $lt ++ $rt", e.opSpan,
+                    "use + for numbers; interpolation \"{x}{y}\" also builds strings")
             }
             BinOp.EQ, BinOp.NEQ -> {
                 if (lt != rt) error("== requires both sides to have the same type: $lt vs $rt", e.opSpan)
@@ -508,11 +658,17 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
             return
         }
         p.ctor = ci
-        if (scrutType !is TAdt || scrutType.info != ci.adt) {
+        if (scrutType !is TAdt || scrutType.info !== ci.adt) {
             if (!scrutType.isErrorish)
                 sink.error("`${p.ctorName}` is a ${ci.adt.name} constructor, but the scrutinee is $scrutType",
                     p.nameSpan)
         }
+        // instantiate field types with the scrutinee's type arguments
+        val instMap: Map<TVar, Type> =
+            if (scrutType is TAdt && scrutType.info === ci.adt) ci.adt.typeParams.zip(scrutType.args).toMap()
+            else emptyMap()
+        val fieldTypes = ci.fields.map { subst(it.type, instMap) }
+        p.fieldTypes = fieldTypes
         val n = ci.fields.size
         if (!p.hasParens && n > 0) {
             sink.error("constructor `${ci.name}` has $n field(s); a bare name does not match it", p.span,
@@ -548,7 +704,7 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
                 continue
             }
             slots[idx] = a.pattern
-            checkPattern(a.pattern, ci.fields[idx].type)
+            checkPattern(a.pattern, fieldTypes[idx])
         }
         if (p.args.size > n) {
             sink.error("`${ci.name}` has $n field(s), the pattern names ${p.args.size}", p.span,

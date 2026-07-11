@@ -1,8 +1,10 @@
 package dawn.codegen
 
 import dawn.ast.*
+import dawn.check.AdtInfo
 import dawn.check.BUILTINS
 import dawn.check.CtorInfo
+import dawn.check.PRELUDE_ADTS
 import dawn.check.Symbol
 import dawn.check.Type
 import dawn.check.Type.*
@@ -26,15 +28,22 @@ class CodeGen(private val module: Module, private val className: String) {
 
     companion object {
         const val PANIC_CLASS = "dawn/rt/PanicError"
+        const val LISTS_CLASS = "dawn/rt/Lists"
         private const val SB = "java/lang/StringBuilder"
         private const val OBJ = "java/lang/Object"
+        private const val JLIST = "java/util/List"
+        private const val ARRAYLIST = "java/util/ArrayList"
     }
+
+    /** every ADT we emit classes for: prelude (Option/Result) + this module's */
+    private val allAdts: List<AdtInfo> =
+        PRELUDE_ADTS + module.types.mapNotNull { it.ctors.firstOrNull()?.info?.adt }
 
     /** super of every class we generate, so frames can be computed without loading them */
     private val adtSupers: Map<String, String> = buildMap {
-        for (t in module.types) {
-            put(t.name, OBJ)
-            if (!t.isRecord) for (c in t.ctors) put("${t.name}$${c.name}", t.name)
+        for (a in allAdts) {
+            put(a.jvmName, OBJ)
+            if (!a.isRecord) for (c in a.ctors) put(c.jvmName, a.jvmName)
         }
     }
 
@@ -77,7 +86,7 @@ class CodeGen(private val module: Module, private val className: String) {
 
     fun generate(): Map<String, ByteArray> {
         val out = HashMap<String, ByteArray>()
-        for (t in module.types) genAdt(t, out)
+        for (a in allAdts) genAdt(a, out)
 
         val cw = DawnClassWriter()
         cw.visit(V17, ACC_PUBLIC or ACC_FINAL, className, null, OBJ, null)
@@ -87,6 +96,7 @@ class CodeGen(private val module: Module, private val className: String) {
 
         out[className] = cw.toByteArray()
         out[PANIC_CLASS] = genPanicClass()
+        out[LISTS_CLASS] = genListsClass()
         return out
     }
 
@@ -100,7 +110,9 @@ class CodeGen(private val module: Module, private val className: String) {
         TUnit -> "V"
         TNever -> "V" // only in return position in theory; Never expressions end in athrow
         TError -> "V" // unreachable: codegen only runs when there are no errors
+        is TVar -> "L$OBJ;" // erasure: type parameters are Object (spec §12.2)
         is TAdt -> "L${t.info.jvmName};"
+        is TList -> "L$JLIST;"
     }
 
     private fun methodDesc(params: List<Type>, ret: Type): String =
@@ -109,21 +121,63 @@ class CodeGen(private val module: Module, private val className: String) {
     private fun slotsOf(t: Type): Int = when (t) {
         TInt, TFloat -> 2
         TBool -> 1
-        TString -> 1
-        is TAdt -> 1
         TUnit, TNever, TError -> 0
+        else -> 1 // all references
     }
 
-    private fun isRef(t: Type) = t == TString || t is TAdt
+    private fun isRef(t: Type) = t == TString || t is TAdt || t is TList || t is TVar
+
+    // ---- erasure coercions ----
+
+    /** box a primitive on the stack (it is about to sit in an erased Object position) */
+    private fun box(t: Type) {
+        when (t) {
+            TInt -> mv.visitMethodInsn(INVOKESTATIC, "java/lang/Long", "valueOf", "(J)Ljava/lang/Long;", false)
+            TFloat -> mv.visitMethodInsn(INVOKESTATIC, "java/lang/Double", "valueOf", "(D)Ljava/lang/Double;", false)
+            TBool -> mv.visitMethodInsn(INVOKESTATIC, "java/lang/Boolean", "valueOf", "(Z)Ljava/lang/Boolean;", false)
+            else -> {}
+        }
+    }
+
+    /** the stack holds an erased Object; recover the concrete type [t] */
+    private fun unerase(t: Type) {
+        when (t) {
+            TInt -> {
+                mv.visitTypeInsn(CHECKCAST, "java/lang/Long")
+                mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/Long", "longValue", "()J", false)
+            }
+            TFloat -> {
+                mv.visitTypeInsn(CHECKCAST, "java/lang/Double")
+                mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/Double", "doubleValue", "()D", false)
+            }
+            TBool -> {
+                mv.visitTypeInsn(CHECKCAST, "java/lang/Boolean")
+                mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/Boolean", "booleanValue", "()Z", false)
+            }
+            TString -> mv.visitTypeInsn(CHECKCAST, "java/lang/String")
+            is TAdt -> mv.visitTypeInsn(CHECKCAST, t.info.jvmName)
+            is TList -> mv.visitTypeInsn(CHECKCAST, JLIST)
+            else -> {} // TVar stays erased; Unit/Never carry no value
+        }
+    }
+
+    /** stack holds a value of static type [actual]; the target position is declared as [declared] */
+    private fun adaptTo(actual: Type, declared: Type) {
+        if (declared is TVar) box(actual)
+    }
+
+    /** stack holds a value produced from a position declared as [declared]; it is used as [actual] */
+    private fun adaptFrom(declared: Type, actual: Type) {
+        if (declared is TVar) unerase(actual)
+    }
 
     // ---- ADT classes (spec §12.2) ----
 
-    private fun genAdt(d: TypeDecl, out: MutableMap<String, ByteArray>) {
-        val base = d.name
-        if (d.isRecord) {
+    private fun genAdt(a: AdtInfo, out: MutableMap<String, ByteArray>) {
+        val base = a.jvmName
+        if (a.isRecord) {
             // a record is one final class, no abstract base (spec §12.2)
-            val ci = d.ctors.single().info!!
-            out[ci.jvmName] = genCtorClass(OBJ, ci)
+            out[base] = genCtorClass(OBJ, a.ctors.single())
             return
         }
         val bw = DawnClassWriter()
@@ -138,10 +192,7 @@ class CodeGen(private val module: Module, private val className: String) {
         bw.visitEnd()
         out[base] = bw.toByteArray()
 
-        for (c in d.ctors) {
-            val ci = c.info!! // codegen only runs on error-free modules
-            out[ci.jvmName] = genCtorClass(base, ci)
-        }
+        for (ci in a.ctors) out[ci.jvmName] = genCtorClass(base, ci)
     }
 
     private fun genCtorClass(base: String, ci: CtorInfo): ByteArray {
@@ -250,11 +301,11 @@ class CodeGen(private val module: Module, private val className: String) {
         mv.visitLabel(start)
         val falls = genExpr(d.body, tail = true)
         if (falls) {
-            when (sig.ret) {
-                TInt -> mv.visitInsn(LRETURN)
-                TFloat -> mv.visitInsn(DRETURN)
-                TBool -> mv.visitInsn(IRETURN)
-                TString, is TAdt -> mv.visitInsn(ARETURN)
+            when {
+                sig.ret == TInt -> mv.visitInsn(LRETURN)
+                sig.ret == TFloat -> mv.visitInsn(DRETURN)
+                sig.ret == TBool -> mv.visitInsn(IRETURN)
+                isRef(sig.ret) -> mv.visitInsn(ARETURN)
                 else -> mv.visitInsn(RETURN)
             }
         }
@@ -292,6 +343,94 @@ class CodeGen(private val module: Module, private val className: String) {
         m.visitInsn(RETURN)
         m.visitMaxs(0, 0)
         m.visitEnd()
+    }
+
+    /**
+     * dawn/rt/Lists: runtime helpers for the builtin list type.
+     *   get(List, long) -> Option   (bounds-checked; the Dawn `get` builtin)
+     *   range(long, long) -> List   (right-open integer range)
+     *   concat(List, List) -> List  (the `++` operator)
+     */
+    private fun genListsClass(): ByteArray {
+        val cw = DawnClassWriter()
+        cw.visit(V17, ACC_PUBLIC or ACC_FINAL, LISTS_CLASS, null, OBJ, null)
+
+        val get = cw.visitMethod(ACC_PUBLIC or ACC_STATIC, "get", "(L$JLIST;J)LOption;", null, null)
+        get.visitCode()
+        val none = Label()
+        get.visitVarInsn(LLOAD, 1)
+        get.visitInsn(LCONST_0)
+        get.visitInsn(LCMP)
+        get.visitJumpInsn(IFLT, none)
+        get.visitVarInsn(LLOAD, 1)
+        get.visitVarInsn(ALOAD, 0)
+        get.visitMethodInsn(INVOKEINTERFACE, JLIST, "size", "()I", true)
+        get.visitInsn(I2L)
+        get.visitInsn(LCMP)
+        get.visitJumpInsn(IFGE, none)
+        get.visitTypeInsn(NEW, "Option\$Some")
+        get.visitInsn(DUP)
+        get.visitVarInsn(ALOAD, 0)
+        get.visitVarInsn(LLOAD, 1)
+        get.visitInsn(L2I)
+        get.visitMethodInsn(INVOKEINTERFACE, JLIST, "get", "(I)L$OBJ;", true)
+        get.visitMethodInsn(INVOKESPECIAL, "Option\$Some", "<init>", "(L$OBJ;)V", false)
+        get.visitInsn(ARETURN)
+        get.visitLabel(none)
+        get.visitFieldInsn(GETSTATIC, "Option\$None", "INSTANCE", "LOption\$None;")
+        get.visitInsn(ARETURN)
+        get.visitMaxs(0, 0)
+        get.visitEnd()
+
+        val rng = cw.visitMethod(ACC_PUBLIC or ACC_STATIC, "range", "(JJ)L$JLIST;", null, null)
+        rng.visitCode()
+        rng.visitTypeInsn(NEW, ARRAYLIST)
+        rng.visitInsn(DUP)
+        rng.visitMethodInsn(INVOKESPECIAL, ARRAYLIST, "<init>", "()V", false)
+        rng.visitVarInsn(ASTORE, 4)
+        rng.visitVarInsn(LLOAD, 0)
+        rng.visitVarInsn(LSTORE, 5)
+        val loop = Label()
+        val done = Label()
+        rng.visitLabel(loop)
+        rng.visitVarInsn(LLOAD, 5)
+        rng.visitVarInsn(LLOAD, 2)
+        rng.visitInsn(LCMP)
+        rng.visitJumpInsn(IFGE, done)
+        rng.visitVarInsn(ALOAD, 4)
+        rng.visitVarInsn(LLOAD, 5)
+        rng.visitMethodInsn(INVOKESTATIC, "java/lang/Long", "valueOf", "(J)Ljava/lang/Long;", false)
+        rng.visitMethodInsn(INVOKEVIRTUAL, ARRAYLIST, "add", "(L$OBJ;)Z", false)
+        rng.visitInsn(POP)
+        rng.visitVarInsn(LLOAD, 5)
+        rng.visitInsn(LCONST_1)
+        rng.visitInsn(LADD)
+        rng.visitVarInsn(LSTORE, 5)
+        rng.visitJumpInsn(GOTO, loop)
+        rng.visitLabel(done)
+        rng.visitVarInsn(ALOAD, 4)
+        rng.visitInsn(ARETURN)
+        rng.visitMaxs(0, 0)
+        rng.visitEnd()
+
+        val cat = cw.visitMethod(ACC_PUBLIC or ACC_STATIC, "concat", "(L$JLIST;L$JLIST;)L$JLIST;", null, null)
+        cat.visitCode()
+        cat.visitTypeInsn(NEW, ARRAYLIST)
+        cat.visitInsn(DUP)
+        cat.visitVarInsn(ALOAD, 0)
+        cat.visitMethodInsn(INVOKESPECIAL, ARRAYLIST, "<init>", "(Ljava/util/Collection;)V", false)
+        cat.visitVarInsn(ASTORE, 2)
+        cat.visitVarInsn(ALOAD, 2)
+        cat.visitVarInsn(ALOAD, 1)
+        cat.visitMethodInsn(INVOKEVIRTUAL, ARRAYLIST, "addAll", "(Ljava/util/Collection;)Z", false)
+        cat.visitInsn(POP)
+        cat.visitVarInsn(ALOAD, 2)
+        cat.visitInsn(ARETURN)
+        cat.visitMaxs(0, 0)
+        cat.visitEnd()
+
+        cw.visitEnd()
+        return cw.toByteArray()
     }
 
     /** dawn/rt/PanicError extends Error */
@@ -433,9 +572,11 @@ class CodeGen(private val module: Module, private val className: String) {
             else {
                 val f = e.field!!
                 mv.visitFieldInsn(GETFIELD, e.owner!!.jvmName, f.name, descOf(f.type))
+                adaptFrom(f.type, e.type!!)
                 true
             }
         }
+        is ListLit -> genListLit(e)
         is Binary -> genBinary(e)
         is Unary -> {
             genExpr(e.operand, tail = false)
@@ -493,9 +634,13 @@ class CodeGen(private val module: Module, private val className: String) {
         if (builtin != null) return genBuiltinCall(e)
 
         val self = currentFn
+        val sig = e.sig!!
         // self-recursive tail call → write args back to param slots + goto entry (spec §12.4)
         if (tail && self != null && e.callee == self.name) {
-            for (a in e.args) genExpr(a, tail = false)
+            for ((a, pt) in e.args.zip(sig.paramTypes)) {
+                genExpr(a, tail = false)
+                adaptTo(a.type!!, pt)
+            }
             for (p in self.params.reversed()) {
                 val sym = p.symbol!!
                 if (slotsOf(sym.type) > 0) storeVar(sym)
@@ -503,9 +648,12 @@ class CodeGen(private val module: Module, private val className: String) {
             mv.visitJumpInsn(GOTO, fnStart!!)
             return false
         }
-        for (a in e.args) genExpr(a, tail = false)
-        val sig = e.sig!!
+        for ((a, pt) in e.args.zip(sig.paramTypes)) {
+            genExpr(a, tail = false)
+            adaptTo(a.type!!, pt)
+        }
         mv.visitMethodInsn(INVOKESTATIC, className, e.callee, methodDesc(sig.paramTypes, sig.ret), false)
+        adaptFrom(sig.ret, e.type!!)
         return true
     }
 
@@ -539,8 +687,9 @@ class CodeGen(private val module: Module, private val className: String) {
         for ((i, arg) in e.fieldExprs!!.withIndex()) {
             if (arg != null) {
                 loadSlot(mv, arg.type!!, tempOf[arg]!!)
+                adaptTo(arg.type!!, ci.fields[i].type)
             } else {
-                // field not given: take it from the spread base
+                // field not given: take it from the spread base (already erased)
                 val f = ci.fields[i]
                 mv.visitVarInsn(ALOAD, spreadSlot)
                 mv.visitFieldInsn(GETFIELD, sub, f.name, descOf(f.type))
@@ -548,6 +697,20 @@ class CodeGen(private val module: Module, private val className: String) {
         }
         val desc = "(" + ci.fields.joinToString("") { descOf(it.type) } + ")V"
         mv.visitMethodInsn(INVOKESPECIAL, sub, "<init>", desc, false)
+        return true
+    }
+
+    private fun genListLit(e: ListLit): Boolean {
+        mv.visitTypeInsn(NEW, ARRAYLIST)
+        mv.visitInsn(DUP)
+        mv.visitMethodInsn(INVOKESPECIAL, ARRAYLIST, "<init>", "()V", false)
+        for (el in e.elems) {
+            mv.visitInsn(DUP)
+            if (!genExpr(el, tail = false)) return false
+            box(el.type!!) // list elements are stored erased
+            mv.visitMethodInsn(INVOKEVIRTUAL, ARRAYLIST, "add", "(L$OBJ;)Z", false)
+            mv.visitInsn(POP)
+        }
         return true
     }
 
@@ -577,6 +740,34 @@ class CodeGen(private val module: Module, private val className: String) {
             mv.visitInsn(ATHROW)
             false
         }
+        "to_float" -> {
+            genExpr(e.args[0], tail = false)
+            mv.visitInsn(L2D)
+            true
+        }
+        "to_int" -> {
+            genExpr(e.args[0], tail = false)
+            mv.visitInsn(D2L)
+            true
+        }
+        "len" -> {
+            genExpr(e.args[0], tail = false)
+            mv.visitMethodInsn(INVOKEINTERFACE, JLIST, "size", "()I", true)
+            mv.visitInsn(I2L)
+            true
+        }
+        "get" -> {
+            genExpr(e.args[0], tail = false)
+            genExpr(e.args[1], tail = false)
+            mv.visitMethodInsn(INVOKESTATIC, LISTS_CLASS, "get", "(L$JLIST;J)LOption;", false)
+            true
+        }
+        "range" -> {
+            genExpr(e.args[0], tail = false)
+            genExpr(e.args[1], tail = false)
+            mv.visitMethodInsn(INVOKESTATIC, LISTS_CLASS, "range", "(JJ)L$JLIST;", false)
+            true
+        }
         else -> error("unknown builtin: ${e.callee}")
     }
 
@@ -605,10 +796,14 @@ class CodeGen(private val module: Module, private val className: String) {
             BinOp.DIV -> mv.visitInsn(if (t == TInt) LDIV else DDIV)
             BinOp.MOD -> mv.visitInsn(if (t == TInt) LREM else DREM)
             BinOp.CONCAT ->
-                mv.visitMethodInsn(
-                    INVOKEVIRTUAL, "java/lang/String", "concat",
-                    "(Ljava/lang/String;)Ljava/lang/String;", false,
-                )
+                if (t is TList) {
+                    mv.visitMethodInsn(INVOKESTATIC, LISTS_CLASS, "concat", "(L$JLIST;L$JLIST;)L$JLIST;", false)
+                } else {
+                    mv.visitMethodInsn(
+                        INVOKEVIRTUAL, "java/lang/String", "concat",
+                        "(Ljava/lang/String;)Ljava/lang/String;", false,
+                    )
+                }
             BinOp.EQ, BinOp.NEQ -> genEquality(t, e.op)
             BinOp.LT, BinOp.LE, BinOp.GT, BinOp.GE -> genOrdering(t, e.op)
             else -> {}
@@ -618,8 +813,8 @@ class CodeGen(private val module: Module, private val className: String) {
 
     private fun genEquality(t: Type, op: BinOp) {
         when {
-            t == TString || t is TAdt -> {
-                // ADT subclasses override equals structurally; singletons keep identity
+            isRef(t) -> {
+                // structural equals: String, List, ADT subclasses (generics compare boxed)
                 mv.visitMethodInsn(INVOKEVIRTUAL, OBJ, "equals", "(L$OBJ;)Z", false)
                 if (op == BinOp.NEQ) { mv.visitInsn(ICONST_1); mv.visitInsn(IXOR) }
             }
@@ -774,14 +969,16 @@ class CodeGen(private val module: Module, private val className: String) {
                 mv.visitJumpInsn(IFEQ, failTo)
                 for ((i, fp) in p.fieldPats!!.withIndex()) {
                     if (fp == null || fp is WildPat) continue
-                    val ft = ci.fields[i].type
+                    val declared = ci.fields[i].type
+                    val concrete = p.fieldTypes!![i]
                     mv.visitVarInsn(ALOAD, slot)
                     mv.visitTypeInsn(CHECKCAST, sub)
-                    mv.visitFieldInsn(GETFIELD, sub, ci.fields[i].name, descOf(ft))
+                    mv.visitFieldInsn(GETFIELD, sub, ci.fields[i].name, descOf(declared))
+                    adaptFrom(declared, concrete)
                     val fSlot = nextSlot
-                    nextSlot += slotsOf(ft)
-                    storeSlot(mv, ft, fSlot)
-                    genPatternTest(fp, fSlot, ft, failTo)
+                    nextSlot += slotsOf(concrete)
+                    storeSlot(mv, concrete, fSlot)
+                    genPatternTest(fp, fSlot, concrete, failTo)
                 }
             }
         }

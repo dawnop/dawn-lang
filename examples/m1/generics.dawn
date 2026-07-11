@@ -1,0 +1,52 @@
+# M1 generics demo: type parameters, Option/Result, List builtins.
+# Run: dawn run examples/m1/generics.dawn
+
+type Tree[T] =
+  | Leaf
+  | Node(left: Tree[T], value: T, right: Tree[T])
+
+fn insert(t: Tree[Int], v: Int) -> Tree[Int] =
+  match t {
+    Leaf -> Node(Leaf, v, Leaf)
+    Node(l, x, r) ->
+      if v < x { Node(insert(l, v), x, r) }
+      else { Node(l, x, insert(r, v)) }
+  }
+
+fn total(t: Tree[Int]) -> Int =
+  match t {
+    Leaf -> 0
+    Node(l, v, r) -> total(l) + v + total(r)
+  }
+
+fn or_default[T](o: Option[T], d: T) -> T =
+  match o {
+    Some(v) -> v
+    None    -> d
+  }
+
+fn safe_div(a: Int, b: Int) -> Result[Int, String] =
+  if b == 0 { Err("division by zero") } else { Ok(a / b) }
+
+pub fn main() -> Unit !io = {
+  # generic tree
+  let e: Tree[Int] = Leaf
+  let t = insert(insert(insert(e, 5), 2), 8)
+  println("tree total: {total(t)}")
+
+  # Option + inference across arguments
+  println("or_default(None, 7) = {or_default(None, 7)}")
+  println(or_default(Some("hello"), "fallback"))
+
+  # Result
+  match safe_div(10, 0) {
+    Ok(v)  -> println("ok {v}")
+    Err(m) -> println("err: {m}")
+  }
+
+  # lists
+  let xs = range(1, 5) ++ [10, 20]
+  println("len = {len(xs)}")
+  println("get(xs, 4) = {or_default(get(xs, 4), -1)}")
+  println("lists equal: {[1, 2] ++ [3] == [1, 2, 3]}")
+}

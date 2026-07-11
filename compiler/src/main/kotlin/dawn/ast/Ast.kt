@@ -27,11 +27,13 @@ class Param(val name: String, val typeName: TypeRef, val span: Span) {
     var symbol: Symbol? = null
 }
 
-class TypeRef(val name: String, val span: Span)
+class TypeRef(val name: String, val args: List<TypeRef>, val span: Span)
 
 class FnDecl(
     pub: Boolean,
     name: String,
+    /** type parameter names: fn map[T, U](...) */
+    val typeParams: List<String>,
     val params: List<Param>,
     val retType: TypeRef,
     /** signature declares !io */
@@ -52,6 +54,8 @@ class FnDecl(
 class TypeDecl(
     pub: Boolean,
     name: String,
+    /** type parameter names: type Tree[T] = ... */
+    val typeParams: List<String>,
     val ctors: List<CtorDecl>,
     val isRecord: Boolean,
     span: Span,
@@ -121,6 +125,9 @@ class FieldAccess(val target: Expr, val fieldName: String, val fieldSpan: Span, 
     var field: FieldInfo? = null
 }
 
+/** List literal: [1, 2, 3]. */
+class ListLit(val elems: List<Expr>, span: Span) : Expr(span)
+
 class CtorArg(val name: String?, val expr: Expr, val span: Span)
 
 enum class BinOp { ADD, SUB, MUL, DIV, MOD, CONCAT, EQ, NEQ, LT, LE, GT, GE, AND, OR }
@@ -155,6 +162,8 @@ class CtorPat(
     var ctor: CtorInfo? = null
     /** subpatterns by field index (null = not matched, via ..), filled by the checker */
     var fieldPats: List<Pattern?>? = null
+    /** field types with the scrutinee's type arguments substituted in, filled by the checker */
+    var fieldTypes: List<Type>? = null
 }
 
 class PatArg(val name: String?, val pattern: Pattern)
