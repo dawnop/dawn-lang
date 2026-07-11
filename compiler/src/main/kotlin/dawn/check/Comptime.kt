@@ -304,6 +304,15 @@ class ComptimeInterp(
     private fun callBuiltin(name: String, args: List<CValue>, span: Span): CValue = when (name) {
         "panic" -> err("panicked: ${(args[0] as CValue.VString).v}", span)
         "todo" -> err("panicked: not yet implemented", span)
+        "expect" -> {
+            val o = args[0] as CValue.VAdt
+            if (o.ctor.name == "Some") o.fields[0]
+            else err("panicked: ${(args[1] as CValue.VString).v}", span)
+        }
+        "unwrap_or" -> {
+            val o = args[0] as CValue.VAdt
+            if (o.ctor.name == "Some") o.fields[0] else args[1]
+        }
         "to_float" -> CValue.VFloat((args[0] as CValue.VInt).v.toDouble())
         "to_int" -> CValue.VInt((args[0] as CValue.VFloat).v.toLong())
         "to_string" -> CValue.VString(stringify(args[0]))

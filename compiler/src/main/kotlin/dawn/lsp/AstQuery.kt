@@ -50,6 +50,7 @@ private class TargetQuery(private val analysis: Analyzed, private val offset: In
                 d.constType?.let { offer(d.nameSpan, "const ${d.name}: $it", d.nameSpan) }
                 visitExpr(d.init)
             }
+            is UseJavaDecl -> offer(d.nameSpan, "use java \"${d.fqcn}\"", d.nameSpan)
             is TypeDecl -> {
                 val info = analysis.types[d.name]
                 val summary = info?.ctors?.joinToString(" | ") { it.name } ?: ""

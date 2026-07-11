@@ -65,6 +65,13 @@ sealed class Type(val display: String) {
         override fun hashCode(): Int = elem.hashCode() + 7
     }
 
+    /** An opaque imported Java class (spec §9). Identity is the fully-qualified name. */
+    class TJava(val fqcn: String, val cls: Class<*>) : Type(fqcn.substringAfterLast('.')) {
+        override fun equals(other: Any?): Boolean = other is TJava && other.fqcn == fqcn
+        override fun hashCode(): Int = fqcn.hashCode()
+        val internalName: String get() = fqcn.replace('.', '/')
+    }
+
     /** A tuple: (A, B) — 2 to 8 elements, invariant, elements stored boxed. */
     class TTuple(val elems: List<Type>) :
         Type("(${elems.joinToString(", ")})") {
@@ -226,6 +233,11 @@ val BUILTINS: Map<String, FnSig> = run {
             Type.TList(t), e, isBuiltin = true, typeParams = listOf(t)),
         FnSig("fold", listOf(Type.TList(t), a, Type.TFn(listOf(a, t), a, e)), listOf("xs", "init", "f"),
             a, e, isBuiltin = true, typeParams = listOf(t, a)),
+        // core/option (spec §11)
+        FnSig("expect", listOf(Type.TAdt(OPTION_ADT, listOf(t)), Type.TString), listOf("o", "msg"),
+            t, Eff.Pure, isBuiltin = true, typeParams = listOf(t)),
+        FnSig("unwrap_or", listOf(Type.TAdt(OPTION_ADT, listOf(t)), t), listOf("o", "fallback"),
+            t, Eff.Pure, isBuiltin = true, typeParams = listOf(t)),
         // core/string (spec §11); to_string's T is checked printable at the use site
         FnSig("to_string", listOf(t), listOf("x"), Type.TString,
             Eff.Pure, isBuiltin = true, typeParams = listOf(t)),

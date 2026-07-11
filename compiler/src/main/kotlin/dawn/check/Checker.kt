@@ -27,6 +27,8 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
     /** constants visible so far — filled in declaration order (evaluation order) */
     private val consts = LinkedHashMap<String, ConstDecl>()
     private var allConstNames: Set<String> = emptySet()
+    /** imported Java classes by simple name (spec §9) */
+    private val javaClasses = HashMap<String, Class<*>>()
     private val scopes = ArrayDeque<HashMap<String, Symbol>>()
 
     /** user-defined functions by name (first definition wins on duplicates) */
@@ -69,8 +71,27 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
             adts[info.name] = info
             for (c in info.ctors) ctors[c.name] = c
         }
+        // 0.5. java imports (spec §9): resolved by reflection on the compiler's JVM
+        for (d in module.javaUses) {
+            val cls = try {
+                Class.forName(d.fqcn, false, javaClass.classLoader)
+            } catch (e: Throwable) {
+                sink.error("Java class not found: ${d.fqcn}", d.nameSpan,
+                    "v0.1 resolves against the JDK; third-party jars are not on the compile classpath")
+                continue
+            }
+            when {
+                javaClasses.containsKey(d.name) ->
+                    sink.error("`${d.name}` is already imported", d.nameSpan)
+                else -> javaClasses[d.name] = cls
+            }
+        }
         // 1. type headers first (shells only), so recursive types resolve
         for (d in module.types) {
+            if (javaClasses.containsKey(d.name)) {
+                sink.error("`${d.name}` collides with an imported Java class", d.nameSpan)
+                continue
+            }
             if (Type.named(d.name) != null || d.name == "List") {
                 sink.error("`${d.name}` is a builtin type and cannot be redefined", d.nameSpan)
                 continue
@@ -316,6 +337,13 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
             }
             return it
         }
+        javaClasses[ref.name]?.let { cls ->
+            if (ref.args.isNotEmpty()) {
+                sink.error("Java types take no type arguments (generics are erased)", ref.span)
+                return TError
+            }
+            return TJava(cls.name, cls)
+        }
         val info = adts[ref.name] ?: run {
             sink.error("unknown type: ${ref.name}", ref.span,
                 "builtin types: Int, Float, Bool, String, Unit, List — or declare `type ${ref.name} = ...`")
@@ -522,12 +550,7 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
                 else error("undefined variable: ${e.name}", e.span)
             }
         }
-        is MethodCall -> {
-            // UFCS: x.f(a) is f(x, a) (spec §4.3); Java receivers come in §9
-            val call = Call(e.name, listOf(e.target) + e.args, e.nameSpan, e.span)
-            e.desugared = call
-            checkExpr(call, expected)
-        }
+        is MethodCall -> checkMethodCall(e, expected)
         is Lambda -> checkLambda(e, expected)
         is Apply -> checkApply(e)
         is Propagate -> checkPropagate(e)
@@ -577,6 +600,137 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
         else -> false
     }
 
+    /** x.f(a): Java static (Class.m), Java instance (value.m), or UFCS f(x, a). */
+    private fun checkMethodCall(e: MethodCall, expected: Type?): Type {
+        val recv = e.target
+        // static namespace / constructor: System.exit(1), StringBuilder.new()
+        if (recv is CtorCall && !recv.hasParens && recv.args.isEmpty() && recv.spread == null &&
+            ctors[recv.ctorName] == null && consts[recv.ctorName] == null
+        ) {
+            javaClasses[recv.ctorName]?.let { cls ->
+                recv.type = TUnit // a namespace, not a value; nothing is generated for it
+                return checkJavaCall(e, cls, static = true)
+            }
+        }
+        val tt = checkExpr(recv)
+        if (tt is TJava) return checkJavaCall(e, tt.cls, static = false)
+        if (tt.isErrorish) {
+            for (a in e.args) checkExpr(a)
+            return TError
+        }
+        // UFCS: x.f(a) is f(x, a) (spec §4.3); the receiver is already checked
+        val call = Call(e.name, listOf(e.target) + e.args, e.nameSpan, e.span)
+        e.desugared = call
+        val t = checkCall(call, expected, preTyped = recv to tt)
+        call.type = t
+        return t
+    }
+
+    /** Overload resolution + type mapping for one Java call (spec §9). */
+    private fun checkJavaCall(e: MethodCall, cls: Class<*>, static: Boolean): Type {
+        recordEffect(Eff.Io, e.nameSpan, "${cls.simpleName}.${e.name}")
+        val argTypes = e.args.map { checkExpr(it) }
+        if (argTypes.any { it.isErrorish }) return TError
+
+        fun paramScore(p: Class<*>, a: Type): Int? = when (a) {
+            TInt -> when (p) {
+                java.lang.Long.TYPE -> 2
+                Integer.TYPE -> 1
+                else -> null
+            }
+            TFloat -> when (p) {
+                java.lang.Double.TYPE -> 2
+                java.lang.Float.TYPE -> 1
+                else -> null
+            }
+            TBool -> if (p == java.lang.Boolean.TYPE) 2 else null
+            TString -> when {
+                p == String::class.java -> 2
+                p.isAssignableFrom(String::class.java) -> 1
+                else -> null
+            }
+            is TJava -> when {
+                p == a.cls -> 2
+                p.isAssignableFrom(a.cls) -> 1
+                else -> null
+            }
+            else -> null
+        }
+
+        // varargs: only the "no variable part" form is supported (an empty array
+        // is supplied); exact-arity candidates outrank it via a small penalty
+        fun score(params: Array<Class<*>>, isVarArgs: Boolean): Int? {
+            val fixed = if (isVarArgs && e.args.size == params.size - 1) params.dropLast(1)
+            else if (params.size == e.args.size) params.toList()
+            else return null
+            var total = if (fixed.size < params.size) -1 else 0
+            for ((p, a) in fixed.zip(argTypes)) {
+                total += paramScore(p, a) ?: return null
+            }
+            return total
+        }
+
+        if (e.name == "new") {
+            if (!static)
+                return error("`.new` is called on the class, not on an instance", e.nameSpan)
+            val candidates = cls.constructors.filter { !it.isSynthetic }
+            val scored = candidates.mapNotNull { c -> score(c.parameterTypes, c.isVarArgs)?.let { c to it } }
+            val bestScore = scored.maxOfOrNull { it.second }
+            val best = scored.filter { it.second == bestScore }
+            return when {
+                best.isEmpty() -> error(
+                    "no constructor of `${cls.name}` matches (${argTypes.joinToString(", ")})",
+                    e.span, "candidates:\n" + candidates.joinToString("\n") { "  $it" })
+                best.size > 1 -> error("ambiguous constructor call on `${cls.name}`", e.span,
+                    "candidates:\n" + best.joinToString("\n") { "  ${it.first}" })
+                else -> {
+                    e.javaCtorRef = best.single().first
+                    TJava(cls.name, cls) // .new returns T — a constructor never returns null
+                }
+            }
+        }
+
+        val sameName = cls.methods.filter {
+            it.name == e.name && !it.isBridge && !it.isSynthetic &&
+                java.lang.reflect.Modifier.isStatic(it.modifiers) == static
+        }.distinctBy { m -> m.parameterTypes.joinToString(",") { it.name } }
+        val scored = sameName.mapNotNull { m -> score(m.parameterTypes, m.isVarArgs)?.let { m to it } }
+        val bestScore = scored.maxOfOrNull { it.second }
+        val best = scored.filter { it.second == bestScore }
+        return when {
+            sameName.isEmpty() -> error(
+                "`${cls.name}` has no ${if (static) "static " else ""}method `${e.name}`", e.nameSpan,
+                "Java calls are ${if (static) "Class.method(...) for statics" else "value.method(...) for instance methods"}; fields are not supported in v0.1")
+            best.isEmpty() -> error(
+                "no overload of `${cls.simpleName}.${e.name}` matches (${argTypes.joinToString(", ")})",
+                e.span, "candidates:\n" + sameName.joinToString("\n") { "  $it" })
+            best.size > 1 -> error("ambiguous call to `${cls.simpleName}.${e.name}`", e.span,
+                "candidates:\n" + best.joinToString("\n") { "  ${it.first}" })
+            else -> {
+                val m = best.single().first
+                e.javaMethod = m
+                mapJavaReturn(m.returnType, e)
+            }
+        }
+    }
+
+    /** Java return types → Dawn (spec §9.2): references land wrapped in Option. */
+    private fun mapJavaReturn(rt: Class<*>, e: MethodCall): Type = when (rt) {
+        java.lang.Void.TYPE -> TUnit
+        java.lang.Long.TYPE, Integer.TYPE, java.lang.Short.TYPE, java.lang.Byte.TYPE -> TInt
+        java.lang.Double.TYPE, java.lang.Float.TYPE -> TFloat
+        java.lang.Boolean.TYPE -> TBool
+        java.lang.Character.TYPE ->
+            error("`char` returns are not supported in v0.1", e.nameSpan,
+                "there is no char type; wrap the call in the standard library instead")
+        String::class.java -> TAdt(OPTION_ADT, listOf(TString))
+        else ->
+            if (rt.isArray) error("array returns are not supported in v0.1", e.nameSpan)
+            // not-imported classes are still usable as opaque values; importing
+            // them is only needed to write the type name in a signature
+            else TAdt(OPTION_ADT, listOf(TJava(rt.name, rt)))
+    }
+
     /** A top-level function or builtin used as a value; generics need the expected type. */
     private fun checkFnValue(e: VarRef, f: FnSig, expected: Type?): Type {
         e.fnValue = f
@@ -609,28 +763,32 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
                 "derive Show is not implemented yet")
     }
 
-    private fun checkCall(e: Call, expected: Type?): Type {
+    private fun checkCall(e: Call, expected: Type?, preTyped: Pair<Expr, Type>? = null): Type {
+        // UFCS receivers are checked once by checkMethodCall; don't re-check them
+        fun typeArg(arg: Expr, exp: Type? = null): Type =
+            if (preTyped != null && arg === preTyped.first) preTyped.second
+            else checkExpr(arg, expected = exp)
         // a local function value shadows top-level functions
         val local = resolveLocal(e.callee, e.calleeSpan)
         if (local != null) {
             val lt = local.type
             if (lt.isErrorish) {
-                for (arg in e.args) checkExpr(arg)
+                for (arg in e.args) typeArg(arg)
                 return TError
             }
             if (lt !is TFn) {
-                for (arg in e.args) checkExpr(arg)
+                for (arg in e.args) typeArg(arg)
                 return error("`${e.callee}` is not a function (it is $lt)", e.calleeSpan)
             }
             e.dynamicTarget = local
             if (e.args.size != lt.params.size) {
-                for (arg in e.args) checkExpr(arg)
+                for (arg in e.args) typeArg(arg)
                 sink.error("`${e.callee}` takes ${lt.params.size} argument(s), got ${e.args.size}",
                     e.span, "type: $lt")
                 return lt.ret
             }
             for ((arg, pt) in e.args.zip(lt.params)) {
-                val at = checkExpr(arg, expected = pt)
+                val at = typeArg(arg, pt)
                 if (!assignable(at, pt))
                     sink.error("argument type mismatch: expected $pt, got $at", arg.span)
             }
@@ -640,12 +798,12 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
         val sig = fns[e.callee] ?: BUILTINS[e.callee]
         if (sig == null) {
             // still check the arguments so their subtrees get types/symbols
-            for (arg in e.args) checkExpr(arg)
+            for (arg in e.args) typeArg(arg)
             return error("undefined function: ${e.callee}", e.calleeSpan)
         }
         e.sig = sig
         if (e.args.size != sig.paramTypes.size) {
-            for (arg in e.args) checkExpr(arg)
+            for (arg in e.args) typeArg(arg)
             sink.error("`${e.callee}` takes ${sig.paramTypes.size} argument(s), got ${e.args.size}",
                 e.span, "signature: ${sig.render()}")
             return if (sig.typeParams.isEmpty()) sig.ret else TError
@@ -666,7 +824,7 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
                 // lambdas only need their parameter types, and function values
                 // unify piecewise — a partially concrete expected type still helps
                 val exp = substd.takeIf { isConcrete(it) || arg is Lambda || arg is VarRef }
-                val at = checkExpr(arg, expected = exp)
+                val at = typeArg(arg, exp)
                 argTypes[i] = at
                 if (!unifyInto(sig.paramTypes[i], at, map, effMap))
                     sink.error("argument type mismatch: expected ${subst(sig.paramTypes[i], map)}, got $at",
@@ -1210,7 +1368,10 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
     private fun checkBlock(e: Block, expected: Type?): Type = scoped {
         for (s in e.stmts) checkStmt(s)
         val t = e.tail?.let { checkExpr(it, expected) } ?: TUnit
-        t
+        // a Java call in tail position of a Unit block is a discard, like in
+        // statement position (spec §9) — codegen pops the leftover value
+        if (expected == TUnit && t != TUnit && e.tail is MethodCall && (e.tail as MethodCall).isJava) TUnit
+        else t
     }
 
     private fun checkStmt(s: Stmt) {
@@ -1258,7 +1419,10 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
             }
             is ExprStmt -> {
                 val t = checkExpr(s.expr)
-                if (t != TUnit && !t.isErrorish)
+                // Java results may be dropped freely — Java APIs return `this`
+                // and status codes that Dawn code rarely wants (spec §9)
+                val javaCall = s.expr is MethodCall && (s.expr as MethodCall).isJava
+                if (t != TUnit && !t.isErrorish && !javaCall)
                     sink.error("this $t value is discarded", s.span,
                         "write let _ = ... to discard it, or move it to the block's tail/return position")
             }
@@ -1273,7 +1437,7 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
             is WhileStmt -> {
                 val ct = checkExpr(s.cond)
                 if (ct != TBool && !ct.isErrorish) sink.error("while condition must be Bool, got $ct", s.cond.span)
-                val bt = checkExpr(s.body)
+                val bt = checkExpr(s.body, expected = TUnit)
                 if (bt != TUnit && !bt.isErrorish)
                     sink.error("the loop body's value is discarded ($bt)", s.body.span,
                         "the last statement of a loop body must not be a non-Unit expression")
@@ -1296,7 +1460,7 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
                 }
                 scoped {
                     s.symbol = declare(s.name, loopVarType, mutable = false, s.span)
-                    val bt = checkExpr(s.body)
+                    val bt = checkExpr(s.body, expected = TUnit)
                     if (bt != TUnit && !bt.isErrorish)
                         sink.error("the loop body's value is discarded ($bt)", s.body.span)
                 }

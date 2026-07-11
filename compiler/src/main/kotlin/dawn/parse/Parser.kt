@@ -107,11 +107,28 @@ class Parser(
                 if (pub) throw err("test blocks cannot be pub")
                 testDecl()
             }
-            USE ->
-                throw err("`use` declarations are not implemented yet",
-                    "see the milestones in docs/design.md")
+            USE -> {
+                if (pub) throw err("use declarations cannot be pub")
+                useDecl()
+            }
             else -> throw err("only declarations (fn, type, const, test) are allowed at module top level")
         }
+    }
+
+    /** use java "java.lang.StringBuilder" (spec §9); module imports arrive with M4 */
+    private fun useDecl(): Decl {
+        val kw = advance() // use
+        if (!at(JAVA))
+            throw err("module imports (use foo/bar) are not implemented yet",
+                "only `use java \"fully.qualified.Name\"` is available (spec §9)")
+        advance() // java
+        val s = expect(STRING, "a quoted fully-qualified class name")
+        if (s.segments.any { it is StrSegment.Code })
+            throw DawnError("a class name cannot contain interpolation", s.span)
+        val fqcn = s.segments.joinToString("") { (it as StrSegment.Text).value }
+        if (fqcn.isBlank() || fqcn.substringAfterLast('.').firstOrNull()?.isUpperCase() != true)
+            throw DawnError("expected a fully-qualified class name like \"java.lang.StringBuilder\"", s.span)
+        return UseJavaDecl(fqcn, Span(kw.span.start, s.span.end), s.span)
     }
 
     /** const NAME: Type = expr — the initializer is implicitly comptime (spec §3.2) */

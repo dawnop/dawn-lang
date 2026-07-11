@@ -16,6 +16,7 @@ class Module(
     val types: List<TypeDecl> by lazy { decls.filterIsInstance<TypeDecl>() }
     val tests: List<TestDecl> by lazy { decls.filterIsInstance<TestDecl>() }
     val consts: List<ConstDecl> by lazy { decls.filterIsInstance<ConstDecl>() }
+    val javaUses: List<UseJavaDecl> by lazy { decls.filterIsInstance<UseJavaDecl>() }
 }
 
 sealed class Decl(
@@ -97,6 +98,13 @@ class ConstDecl(
     var value: dawn.check.CValue? = null
 }
 
+/** use java "java.lang.StringBuilder" (spec §9): an opaque type + a static namespace */
+class UseJavaDecl(
+    val fqcn: String,
+    span: Span,
+    nameSpan: Span,
+) : Decl(pub = false, name = fqcn.substringAfterLast('.'), span = span, nameSpan = nameSpan)
+
 /** test "name" { ... } — compiled and run only by `dawn test` (spec §3.4) */
 class TestDecl(
     val testName: String,
@@ -160,6 +168,10 @@ class MethodCall(
     span: Span,
 ) : Expr(span) {
     var desugared: Call? = null
+    /** resolved Java target, filled by the checker (spec §9) */
+    var javaMethod: java.lang.reflect.Method? = null
+    var javaCtorRef: java.lang.reflect.Constructor<*>? = null
+    val isJava: Boolean get() = javaMethod != null || javaCtorRef != null
 }
 
 /** fn(x, y) => body */

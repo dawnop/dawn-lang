@@ -232,6 +232,7 @@ class CodeGen(
         is TAdt -> "L${t.info.jvmName};"
         is TList -> "L$JLIST;"
         is TTuple -> "L${tupleClass(t.elems.size)};"
+        is TJava -> "L${t.internalName};"
         is TFn -> "L${fnIface(t.params.size)};"
     }
 
@@ -245,7 +246,8 @@ class CodeGen(
         else -> 1 // all references
     }
 
-    private fun isRef(t: Type) = t == TString || t is TAdt || t is TList || t is TVar || t is TFn || t is TTuple
+    private fun isRef(t: Type) =
+        t == TString || t is TAdt || t is TList || t is TVar || t is TFn || t is TTuple || t is TJava
 
     // ---- erasure coercions ----
 
@@ -278,6 +280,7 @@ class CodeGen(
             is TAdt -> mv.visitTypeInsn(CHECKCAST, t.info.jvmName)
             is TList -> mv.visitTypeInsn(CHECKCAST, JLIST)
             is TTuple -> mv.visitTypeInsn(CHECKCAST, tupleClass(t.elems.size))
+            is TJava -> mv.visitTypeInsn(CHECKCAST, t.internalName)
             is TFn -> mv.visitTypeInsn(CHECKCAST, fnIface(t.params.size))
             else -> {} // TVar stays erased; Unit/Never carry no value
         }
@@ -1203,7 +1206,12 @@ class CodeGen(
             }
             falls
         }
-        is ExprStmt -> genExpr(s.expr, tail = false) // type is Unit/Never, nothing left on the stack
+        is ExprStmt -> {
+            // usually Unit/Never; discarded Java results leave a value to pop (spec §9)
+            val falls = genExpr(s.expr, tail = false)
+            if (falls) popValue(s.expr.type!!)
+            falls
+        }
         is AssertStmt -> genAssert(s)
         is WhileStmt -> {
             val loop = Label()
@@ -1297,7 +1305,11 @@ class CodeGen(
             if (fv != null) genFnValue(e, fv) else loadVar(e.symbol!!)
             true
         }
-        is MethodCall -> genCall(e.desugared!!, tail)
+        is MethodCall -> when {
+            e.javaCtorRef != null -> genJavaNew(e)
+            e.javaMethod != null -> genJavaCall(e)
+            else -> genCall(e.desugared!!, tail)
+        }
         is Lambda -> genLambdaValue(e)
         is Propagate -> genPropagate(e)
         is Apply -> {
@@ -1433,7 +1445,11 @@ class CodeGen(
         for (s in e.stmts) {
             if (!genStmt(s)) return false // unreachable from here on; stop emitting
         }
-        return if (e.tail != null) genExpr(e.tail!!, tail) else true
+        if (e.tail == null) return true
+        val falls = genExpr(e.tail!!, tail)
+        // discarded Java tail (spec §9): the block is Unit, the call is not
+        if (falls && e.type == TUnit && e.tail!!.type != TUnit) popValue(e.tail!!.type!!)
+        return falls
     }
 
     private fun genStrLit(e: StrLit): Boolean {
@@ -1628,6 +1644,35 @@ class CodeGen(
                 m.visitMethodInsn(INVOKESTATIC, LISTS_CLASS, "fromArray", "([Ljava/lang/String;)L$JLIST;", false)
                 m.visitInsn(ARETURN)
             }
+            "expect" -> {
+                m.visitVarInsn(ALOAD, 0)
+                m.visitTypeInsn(INSTANCEOF, "Option\$Some")
+                val ok = Label()
+                m.visitJumpInsn(IFNE, ok)
+                m.visitTypeInsn(NEW, PANIC_CLASS)
+                m.visitInsn(DUP)
+                m.visitVarInsn(ALOAD, 1)
+                m.visitMethodInsn(INVOKESPECIAL, PANIC_CLASS, "<init>", "(Ljava/lang/String;)V", false)
+                m.visitInsn(ATHROW)
+                m.visitLabel(ok)
+                m.visitVarInsn(ALOAD, 0)
+                m.visitTypeInsn(CHECKCAST, "Option\$Some")
+                m.visitFieldInsn(GETFIELD, "Option\$Some", "value", "L$OBJ;")
+                m.visitInsn(ARETURN)
+            }
+            "unwrap_or" -> {
+                m.visitVarInsn(ALOAD, 0)
+                m.visitTypeInsn(INSTANCEOF, "Option\$Some")
+                val some = Label()
+                m.visitJumpInsn(IFNE, some)
+                m.visitVarInsn(ALOAD, 1)
+                m.visitInsn(ARETURN)
+                m.visitLabel(some)
+                m.visitVarInsn(ALOAD, 0)
+                m.visitTypeInsn(CHECKCAST, "Option\$Some")
+                m.visitFieldInsn(GETFIELD, "Option\$Some", "value", "L$OBJ;")
+                m.visitInsn(ARETURN)
+            }
             else -> throw IllegalStateException("no value bridge for builtin `${sig.name}`")
         }
         m.visitMaxs(0, 0)
@@ -1727,6 +1772,102 @@ class CodeGen(
         mv.visitMethodInsn(INVOKEINTERFACE, fnIface(n), "apply", erasedApplyDesc(n), true)
         if (slotsOf(retStatic) == 0) mv.visitInsn(POP) else unerase(retStatic)
         return true
+    }
+
+    // ---- Java interop (spec §9) ----
+
+    /** Dawn value on the stack → the Java parameter's type (only Int/Float may narrow) */
+    private fun adaptJavaArg(dawnType: Type, javaParam: Class<*>) {
+        when {
+            dawnType == TInt && javaParam == Integer.TYPE -> mv.visitInsn(L2I)
+            dawnType == TFloat && javaParam == java.lang.Float.TYPE -> mv.visitInsn(D2F)
+            else -> {}
+        }
+    }
+
+    /** varargs calls carry no variable part in v0.1: supply the empty array */
+    private fun pushEmptyVarargs(component: Class<*>) {
+        mv.visitInsn(ICONST_0)
+        if (component.isPrimitive) {
+            val t = when (component) {
+                java.lang.Long.TYPE -> T_LONG
+                Integer.TYPE -> T_INT
+                java.lang.Double.TYPE -> T_DOUBLE
+                java.lang.Float.TYPE -> T_FLOAT
+                java.lang.Boolean.TYPE -> T_BOOLEAN
+                java.lang.Short.TYPE -> T_SHORT
+                java.lang.Byte.TYPE -> T_BYTE
+                else -> T_CHAR
+            }
+            mv.visitIntInsn(NEWARRAY, t)
+        } else {
+            mv.visitTypeInsn(ANEWARRAY, AsmType.getInternalName(component))
+        }
+    }
+
+    /** Type.new(args): direct construction — never null, so no Option wrap */
+    private fun genJavaNew(e: MethodCall): Boolean {
+        val ctor = e.javaCtorRef!!
+        val owner = AsmType.getInternalName(ctor.declaringClass)
+        mv.visitTypeInsn(NEW, owner)
+        mv.visitInsn(DUP)
+        for ((arg, p) in e.args.zip(ctor.parameterTypes)) {
+            if (!genExpr(arg, tail = false)) return false
+            adaptJavaArg(arg.type!!, p)
+        }
+        if (ctor.isVarArgs && e.args.size == ctor.parameterCount - 1)
+            pushEmptyVarargs(ctor.parameterTypes.last().componentType)
+        mv.visitMethodInsn(INVOKESPECIAL, owner, "<init>", AsmType.getConstructorDescriptor(ctor), false)
+        return true
+    }
+
+    private fun genJavaCall(e: MethodCall): Boolean {
+        val m = e.javaMethod!!
+        val static = java.lang.reflect.Modifier.isStatic(m.modifiers)
+        val owner = AsmType.getInternalName(m.declaringClass)
+        val itf = m.declaringClass.isInterface
+        if (!static) {
+            if (!genExpr(e.target, tail = false)) return false
+        }
+        for ((arg, p) in e.args.zip(m.parameterTypes)) {
+            if (!genExpr(arg, tail = false)) return false
+            adaptJavaArg(arg.type!!, p)
+        }
+        if (m.isVarArgs && e.args.size == m.parameterCount - 1)
+            pushEmptyVarargs(m.parameterTypes.last().componentType)
+        mv.visitMethodInsn(
+            if (static) INVOKESTATIC else if (itf) INVOKEINTERFACE else INVOKEVIRTUAL,
+            owner, m.name, AsmType.getMethodDescriptor(m), itf,
+        )
+        // returns (spec §9.2): small ints widen, floats widen, references wrap in Option
+        when (m.returnType) {
+            Integer.TYPE, java.lang.Short.TYPE, java.lang.Byte.TYPE -> mv.visitInsn(I2L)
+            java.lang.Float.TYPE -> mv.visitInsn(F2D)
+            java.lang.Void.TYPE, java.lang.Long.TYPE, java.lang.Double.TYPE, java.lang.Boolean.TYPE -> {}
+            else -> wrapNullableInOption()
+        }
+        return true
+    }
+
+    /** reference on the stack → Some(ref) / None (null is caught at the boundary, spec §9.2) */
+    private fun wrapNullableInOption() {
+        val tmp = nextSlot
+        nextSlot += 1
+        mv.visitVarInsn(ASTORE, tmp)
+        val nonNull = Label()
+        val end = Label()
+        mv.visitVarInsn(ALOAD, tmp)
+        mv.visitJumpInsn(IFNONNULL, nonNull)
+        mv.visitFieldInsn(GETSTATIC, "Option\$None", "INSTANCE", "LOption\$None;")
+        mv.visitTypeInsn(CHECKCAST, "Option")
+        mv.visitJumpInsn(GOTO, end)
+        mv.visitLabel(nonNull)
+        mv.visitTypeInsn(NEW, "Option\$Some")
+        mv.visitInsn(DUP)
+        mv.visitVarInsn(ALOAD, tmp)
+        mv.visitMethodInsn(INVOKESPECIAL, "Option\$Some", "<init>", "(L$OBJ;)V", false)
+        mv.visitTypeInsn(CHECKCAST, "Option")
+        mv.visitLabel(end)
     }
 
     private fun genCall(e: Call, tail: Boolean): Boolean {
@@ -1905,6 +2046,49 @@ class CodeGen(
             mv.visitMethodInsn(INVOKESTATIC, LISTS_CLASS, "fold",
                 "(L$JLIST;L$OBJ;L${fnIface(2)};)L$OBJ;", false)
             if (slotsOf(e.type!!) == 0) mv.visitInsn(POP) else unerase(e.type!!)
+            true
+        }
+        "expect" -> {
+            genExpr(e.args[0], tail = false) // Option
+            genExpr(e.args[1], tail = false) // message
+            val msgSlot = nextSlot
+            nextSlot += 1
+            mv.visitVarInsn(ASTORE, msgSlot)
+            mv.visitInsn(DUP)
+            mv.visitTypeInsn(INSTANCEOF, "Option\$Some")
+            val ok = Label()
+            mv.visitJumpInsn(IFNE, ok)
+            mv.visitTypeInsn(NEW, PANIC_CLASS)
+            mv.visitInsn(DUP)
+            mv.visitVarInsn(ALOAD, msgSlot)
+            mv.visitMethodInsn(INVOKESPECIAL, PANIC_CLASS, "<init>", "(Ljava/lang/String;)V", false)
+            mv.visitInsn(ATHROW)
+            mv.visitLabel(ok)
+            mv.visitTypeInsn(CHECKCAST, "Option\$Some")
+            mv.visitFieldInsn(GETFIELD, "Option\$Some", "value", "L$OBJ;")
+            if (slotsOf(e.type!!) == 0) mv.visitInsn(POP) else unerase(e.type!!)
+            true
+        }
+        "unwrap_or" -> {
+            genExpr(e.args[0], tail = false) // Option
+            genExpr(e.args[1], tail = false) // fallback (strict: always evaluated)
+            val fbType = e.type!!
+            val fbSlot = nextSlot
+            nextSlot += slotsOf(fbType)
+            storeSlot(mv, fbType, fbSlot)
+            mv.visitInsn(DUP)
+            mv.visitTypeInsn(INSTANCEOF, "Option\$Some")
+            val someL = Label()
+            val end = Label()
+            mv.visitJumpInsn(IFNE, someL)
+            mv.visitInsn(POP)
+            loadSlot(mv, fbType, fbSlot)
+            mv.visitJumpInsn(GOTO, end)
+            mv.visitLabel(someL)
+            mv.visitTypeInsn(CHECKCAST, "Option\$Some")
+            mv.visitFieldInsn(GETFIELD, "Option\$Some", "value", "L$OBJ;")
+            unerase(fbType)
+            mv.visitLabel(end)
             true
         }
         "to_string" -> {

@@ -420,10 +420,11 @@ fn parse_config(path: String) -> Result[Config, String] !io = {
 
 ```dawn
 use java "java.nio.file.Files"
+use java "java.nio.file.Path"
 use java "java.lang.StringBuilder"
 
 fn slurp(p: String) -> Option[String] !io =
-  Files.readString(Path.of(p))
+  Files.readString(Path.of(p).expect("valid path"))
 
 fn build() -> String !io = {
   let sb = StringBuilder.new()      # 构造器统一拼写为 .new
@@ -434,8 +435,14 @@ fn build() -> String !io = {
 ```
 
 - `use java "全限定名"` 把类引入为：一个不透明类型 + 一个静态方法命名空间。
-- 构造器统一为 `Type.new(args)`；实例方法用 `.method(args)`。
+  静态字段（如 `System.out`）v0.1 不支持——只有方法。
+- 构造器统一为 `Type.new(args)`，**返回 `T` 本身**（构造器不会返回 null，不包 Option）；
+  实例方法用 `.method(args)`。
 - **所有 Java 调用的效果都是 `!io`**，无例外（理由见 design.md D5）。
+- **Java 调用的返回值允许直接丢弃**（语句位置或 Unit 块的尾位置）——Java API 常返回
+  `this` 或状态码；「不得悄悄丢弃」规则只保护 Dawn 值。
+- 返回值里出现**未导入的引用类**（如 `Path.of` 的 `Path`）时，值仍可用（自动成为
+  不透明类型、可继续链式调用）；只有要在签名里**写出类型名**才需要 `use java` 导入。
 
 ### 9.2 类型映射
 
@@ -447,15 +454,18 @@ fn build() -> String !io = {
 | `String` | `java.lang.String` | 双向 |
 | `Unit` | `void` | 返回 |
 | 引入的类 `T` | 该类引用 | 双向 |
-| `Option[T]`（实参） | `T` 或 null | Dawn → Java |
 
 **Java 返回引用类型一律为 `Option[T]`**——null 在边界处被拦下。
-基本类型返回值不包 Option。
+基本类型返回值不包 Option；`short`/`byte`/`int` 返回自动加宽为 `Int`，`float` 加宽为
+`Float`。`char` 与数组的出入参 v0.1 不支持。**Option 实参传 null** 同样推迟
+（v0.1 无法从 Dawn 侧传 null 给 Java）。
 
 ### 9.3 重载消解
 
-按"实参个数 + 静态类型"选唯一候选；有歧义或无候选都是编译错误
-（错误信息列出候选签名）。不支持调用变长参数方法（v0.1）。
+按"实参个数 + 静态类型"打分选唯一候选（精确匹配 `long`/`double` 优于收窄到
+`int`/`float`，`String` 优于 `CharSequence`/`Object`）；并列最高分或无候选都是
+编译错误（错误信息列出候选签名）。变长参数方法只支持**不传可变部分**的调用
+（自动补一个空数组，如 `Path.of(p)`）；传可变实参 v0.1 不支持。
 
 ### 9.4 限制
 
