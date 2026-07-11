@@ -1,24 +1,37 @@
 package dawn
 
-import dawn.check.Checker
+import dawn.check.analyze
 import dawn.codegen.CodeGen
-import dawn.diag.DawnError
-import dawn.parse.Parser
+import dawn.diag.Diagnostic
 import java.io.ByteArrayOutputStream
 import java.io.PrintStream
 import java.lang.reflect.InvocationTargetException
 import kotlin.test.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
 /** End to end: source → bytecode → in-process execution, asserting on stdout. */
 class E2eTest {
 
     private fun compileClasses(source: String): Map<String, ByteArray> {
-        val module = Parser.parseModule(source)
-        Checker(module).check()
-        return CodeGen(module, "testmod").generate()
+        val analysis = analyze(source)
+        check(!analysis.hasErrors) {
+            "unexpected compile errors:\n" + analysis.diagnostics.joinToString("\n") { it.message }
+        }
+        return CodeGen(analysis.module, "testmod").generate()
+    }
+
+    private fun errorsOf(source: String): List<Diagnostic> {
+        val analysis = analyze(source)
+        assertTrue(analysis.hasErrors, "expected compile errors, got none")
+        return analysis.diagnostics
+    }
+
+    private fun assertHasError(diags: List<Diagnostic>, substring: String) {
+        assertTrue(
+            diags.any { it.message.contains(substring) },
+            "no diagnostic contains \"$substring\"; got:\n" + diags.joinToString("\n") { it.message },
+        )
     }
 
     /** Invokes dawn's main()V directly (not the JVM entry wrapper, whose System.exit would kill the test JVM). */
@@ -227,65 +240,55 @@ class E2eTest {
 
     @Test
     fun missingIoDeclarationIsError() {
-        val e = assertFailsWith<DawnError> {
-            compileClasses("""
-                fn sneaky() -> Unit = println("hi")
-                pub fn main() -> Unit !io = sneaky()
-            """.trimIndent())
-        }
-        assertTrue(e.message!!.contains("not declared !io"), e.message)
+        val diags = errorsOf("""
+            fn sneaky() -> Unit = println("hi")
+            pub fn main() -> Unit !io = sneaky()
+        """.trimIndent())
+        assertHasError(diags, "not declared !io")
     }
 
     @Test
     fun ioPropagatesThroughSignatures() {
         // greet declares !io, so a pure function calling it must be an error
-        val e = assertFailsWith<DawnError> {
-            compileClasses("""
-                fn greet(name: String) -> Unit !io = println(name)
-                fn caller() -> Unit = greet("x")
-                pub fn main() -> Unit !io = caller()
-            """.trimIndent())
-        }
-        assertTrue(e.message!!.contains("not declared !io"), e.message)
+        val diags = errorsOf("""
+            fn greet(name: String) -> Unit !io = println(name)
+            fn caller() -> Unit = greet("x")
+            pub fn main() -> Unit !io = caller()
+        """.trimIndent())
+        assertHasError(diags, "not declared !io")
     }
 
     @Test
     fun discardingValueIsError() {
-        val e = assertFailsWith<DawnError> {
-            compileClasses("""
-                fn f() -> Int = 1
-                pub fn main() -> Unit !io = {
-                  f()
-                  println("done")
-                }
-            """.trimIndent())
-        }
-        assertTrue(e.message!!.contains("discarded"), e.message)
+        val diags = errorsOf("""
+            fn f() -> Int = 1
+            pub fn main() -> Unit !io = {
+              f()
+              println("done")
+            }
+        """.trimIndent())
+        assertHasError(diags, "discarded")
     }
 
     @Test
     fun assigningToLetIsError() {
-        val e = assertFailsWith<DawnError> {
-            compileClasses("""
-                pub fn main() -> Unit !io = {
-                  let x = 1
-                  x = 2
-                  println("{x}")
-                }
-            """.trimIndent())
-        }
-        assertTrue(e.message!!.contains("cannot be assigned"), e.message)
+        val diags = errorsOf("""
+            pub fn main() -> Unit !io = {
+              let x = 1
+              x = 2
+              println("{x}")
+            }
+        """.trimIndent())
+        assertHasError(diags, "cannot be assigned")
     }
 
     @Test
     fun nonExhaustiveMatchIsError() {
-        val e = assertFailsWith<DawnError> {
-            compileClasses("""
-                fn f(n: Int) -> String = match n { 0 -> "zero" }
-                pub fn main() -> Unit !io = println(f(1))
-            """.trimIndent())
-        }
-        assertTrue(e.message!!.contains("non-exhaustive"), e.message)
+        val diags = errorsOf("""
+            fn f(n: Int) -> String = match n { 0 -> "zero" }
+            pub fn main() -> Unit !io = println(f(1))
+        """.trimIndent())
+        assertHasError(diags, "non-exhaustive")
     }
 
     @Test
@@ -299,23 +302,19 @@ class E2eTest {
 
     @Test
     fun noImplicitConversion() {
-        val e = assertFailsWith<DawnError> {
-            compileClasses("""
-                pub fn main() -> Unit !io = println("{1 + 2.0}")
-            """.trimIndent())
-        }
-        assertTrue(e.message!!.contains("same type"), e.message)
+        val diags = errorsOf("""
+            pub fn main() -> Unit !io = println("{1 + 2.0}")
+        """.trimIndent())
+        assertHasError(diags, "same type")
     }
 
     @Test
     fun mixedGuardsNeedFallback() {
         // arms that all carry guards do not count as exhaustive
-        val e = assertFailsWith<DawnError> {
-            compileClasses("""
-                fn f(n: Int) -> Int = match n { x if x > 0 -> x }
-                pub fn main() -> Unit !io = println("{f(1)}")
-            """.trimIndent())
-        }
-        assertTrue(e.message!!.contains("non-exhaustive"), e.message)
+        val diags = errorsOf("""
+            fn f(n: Int) -> Int = match n { x if x > 0 -> x }
+            pub fn main() -> Unit !io = println("{f(1)}")
+        """.trimIndent())
+        assertHasError(diags, "non-exhaustive")
     }
 }

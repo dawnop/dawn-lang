@@ -51,7 +51,14 @@ gradle :compiler:fatJar
 ./bin/dawn run examples/m0/fizzbuzz.dawn      # 编译并运行（JVM）
 ./bin/dawn build foo.dawn -o app.jar          # 产出可执行 jar
 ./bin/dawn build foo.dawn --native -o app     # 产出独立 native 二进制
+./bin/dawn lsp                                # LSP 服务器（stdio，编辑器用）
 ```
+
+## 编辑器支持
+
+内置 LSP 服务器（`dawn lsp`）：实时诊断、悬停（类型/签名）、跳转定义、文档大纲。
+编译器前端做了完整的错误恢复——文件残缺时其余部分照常分析，一次报出全部错误。
+VS Code 扩展与 Neovim / Helix 配置见 [editors/](editors/)。
 
 状态：**M0 已实现**（Int/Float/Bool/String、函数、match、`!io` 效果检查、
 自递归尾调用消除、字符串插值、`dawn run` / `dawn build --native`），

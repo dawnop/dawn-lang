@@ -2,6 +2,7 @@ package dawn.parse
 
 import dawn.ast.*
 import dawn.diag.DawnError
+import dawn.diag.DiagnosticSink
 import dawn.diag.Span
 import dawn.lex.Lexer
 import dawn.lex.StrSegment
@@ -13,18 +14,15 @@ import dawn.lex.TokenType.*
  * Recursive descent. M0 subset: fn declarations + statements + expressions.
  * Top-level declarations beyond M0 (type/const/use/test) get explicit
  * "not implemented" errors.
+ *
+ * Error recovery: parse failures throw DawnError internally; recovery points
+ * (statement and declaration boundaries) catch it, report to the sink, and
+ * resynchronize — so one broken statement never hides the rest of the file.
  */
-class Parser(tokens: List<Token>) {
+class Parser(tokens: List<Token>, private val sink: DiagnosticSink = DiagnosticSink()) {
 
     private val toks = tokens
     private var pos = 0
-
-    companion object {
-        fun parseModule(source: String): Module {
-            val p = Parser(Lexer(source).lex())
-            return p.module()
-        }
-    }
 
     // ---- token cursor ----
 
@@ -57,10 +55,21 @@ class Parser(tokens: List<Token>) {
         val decls = ArrayList<FnDecl>()
         skipNewlines()
         while (!at(EOF)) {
-            decls.add(topDecl())
+            try {
+                decls.add(topDecl())
+            } catch (e: DawnError) {
+                sink.add(e)
+                syncToNextDecl()
+            }
             skipNewlines()
         }
         return Module(decls)
+    }
+
+    /** After a broken declaration: skip forward to the next plausible declaration start. */
+    private fun syncToNextDecl() {
+        if (!at(EOF)) advance() // always make progress
+        while (!at(EOF) && !at(FN) && !at(PUB)) advance()
     }
 
     private fun topDecl(): FnDecl {
@@ -323,7 +332,7 @@ class Parser(tokens: List<Token>) {
             when (seg) {
                 is StrSegment.Text -> parts.add(StrPart.Text(seg.value))
                 is StrSegment.Code -> {
-                    val sub = Parser(Lexer(seg.source, seg.offset).lex())
+                    val sub = Parser(Lexer(seg.source, seg.offset, sink).lex(), sink)
                     val e = sub.expression()
                     sub.skipNewlines()
                     if (!sub.at(EOF)) throw DawnError("trailing content in interpolation", sub.peek().span)
@@ -371,10 +380,25 @@ class Parser(tokens: List<Token>) {
         skipNewlines()
         val stmts = ArrayList<Stmt>()
         while (!at(RBRACE) && !at(EOF)) {
-            stmts.add(statement())
-            expectSeparator()
+            try {
+                stmts.add(statement())
+                expectSeparator()
+            } catch (e: DawnError) {
+                sink.add(e)
+                syncToNextStmt()
+            }
         }
         val close = expect(RBRACE, "`}`")
+        return finishBlock(open, close, stmts)
+    }
+
+    /** After a broken statement: skip to the next line (or block end) and continue. */
+    private fun syncToNextStmt() {
+        while (!at(NEWLINE) && !at(RBRACE) && !at(EOF)) advance()
+        skipNewlines()
+    }
+
+    private fun finishBlock(open: Token, close: Token, stmts: ArrayList<Stmt>): Block {
         // trailing expression rule: a final plain expression statement is the block's value
         var tail: Expr? = null
         if (stmts.isNotEmpty() && stmts.last() is ExprStmt) {

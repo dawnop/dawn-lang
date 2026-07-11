@@ -35,21 +35,44 @@ class SourceFile(val path: String, val text: String) {
         val end = text.indexOf('\n', start).let { if (it < 0) text.length else it }
         return text.substring(start, end)
     }
+
+    // ---- LSP position mapping ----
+    // Our offsets index Kotlin String chars, which are UTF-16 code units — exactly
+    // LSP's default position encoding, so the conversion is pure arithmetic.
+
+    /** offset → (0-based line, 0-based UTF-16 column) */
+    fun lspPosition(offset: Int): Pair<Int, Int> {
+        val clamped = offset.coerceIn(0, text.length)
+        val line = lineOf(clamped)
+        return Pair(line - 1, clamped - lineStarts[line - 1])
+    }
+
+    /** (0-based line, 0-based UTF-16 column) → offset, clamped to valid range */
+    fun lspOffset(line0: Int, character: Int): Int {
+        if (line0 < 0) return 0
+        if (line0 >= lineStarts.size) return text.length
+        val lineStart = lineStarts[line0]
+        val lineEnd = text.indexOf('\n', lineStart).let { if (it < 0) text.length else it }
+        return (lineStart + character).coerceIn(lineStart, lineEnd)
+    }
 }
 
-/** A compile error: message + location + optional fix hint. Renders with a source snippet. */
-class DawnError(
-    message: String,
+enum class Severity { ERROR, WARNING }
+
+/** A single diagnostic: message + location + optional fix hint. */
+class Diagnostic(
+    val message: String,
     val span: Span,
     val hint: String? = null,
-) : Exception(message) {
-
+    val severity: Severity = Severity.ERROR,
+) {
     fun render(file: SourceFile): String {
         val line = file.lineOf(span.start)
         val col = file.colOf(span.start)
         val src = file.lineText(line)
         val sb = StringBuilder()
-        sb.append("error: ").append(message).append('\n')
+        val label = if (severity == Severity.ERROR) "error" else "warning"
+        sb.append(label).append(": ").append(message).append('\n')
         sb.append("  --> ").append(file.path).append(':').append(line).append(':').append(col).append('\n')
         val lineNo = line.toString()
         sb.append(" ".repeat(lineNo.length + 1)).append("|\n")
@@ -62,3 +85,33 @@ class DawnError(
         return sb.toString()
     }
 }
+
+/** Collects diagnostics across all compile phases. */
+class DiagnosticSink {
+    private val list = ArrayList<Diagnostic>()
+
+    val all: List<Diagnostic> get() = list
+    val hasErrors: Boolean get() = list.any { it.severity == Severity.ERROR }
+
+    fun error(message: String, span: Span, hint: String? = null) {
+        list.add(Diagnostic(message, span, hint, Severity.ERROR))
+    }
+
+    fun add(d: Diagnostic) {
+        list.add(d)
+    }
+
+    fun add(e: DawnError) {
+        list.add(Diagnostic(e.message ?: "syntax error", e.span, e.hint))
+    }
+}
+
+/**
+ * Internal abort exception used by the parser for control flow; recovery points
+ * catch it, convert it into a Diagnostic, and resynchronize.
+ */
+class DawnError(
+    message: String,
+    val span: Span,
+    val hint: String? = null,
+) : Exception(message)

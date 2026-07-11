@@ -1,6 +1,7 @@
 package dawn.lex
 
 import dawn.diag.DawnError
+import dawn.diag.DiagnosticSink
 import dawn.diag.Span
 
 /**
@@ -11,8 +12,15 @@ import dawn.diag.Span
  * opening bracket, ->, =>, =, |>, ...), in which case the newline is swallowed
  * (automatic continuation). Consecutive NEWLINEs collapse into one. The parser
  * additionally skips insignificant NEWLINEs (block start/end etc.) itself.
+ *
+ * Error recovery: bad tokens are reported to the sink and skipped (a broken
+ * string skips to the end of its line), so a lex error never kills the file.
  */
-class Lexer(private val src: String, private val baseOffset: Int = 0) {
+class Lexer(
+    private val src: String,
+    private val baseOffset: Int = 0,
+    private val sink: DiagnosticSink = DiagnosticSink(),
+) {
 
     private var pos = 0
     private val tokens = ArrayList<Token>()
@@ -20,15 +28,21 @@ class Lexer(private val src: String, private val baseOffset: Int = 0) {
     fun lex(): List<Token> {
         while (pos < src.length) {
             val c = src[pos]
-            when {
-                c == '\n' -> { emitNewline(); pos++ }
-                c == ' ' || c == '\t' || c == '\r' -> pos++
-                c == '#' -> skipComment()
-                c == '"' -> lexString()
-                c.isDigit() -> lexNumber()
-                c == '_' && !isIdentPart(peek(1)) -> { add(TokenType.UNDERSCORE, "_", 1) }
-                c.isLetter() || c == '_' -> lexWord()
-                else -> lexSymbol()
+            try {
+                when {
+                    c == '\n' -> { emitNewline(); pos++ }
+                    c == ' ' || c == '\t' || c == '\r' -> pos++
+                    c == '#' -> skipComment()
+                    c == '"' -> lexString()
+                    c.isDigit() -> lexNumber()
+                    c == '_' && !isIdentPart(peek(1)) -> { add(TokenType.UNDERSCORE, "_", 1) }
+                    c.isLetter() || c == '_' -> lexWord()
+                    else -> lexSymbol()
+                }
+            } catch (e: DawnError) {
+                // string-level failures: report, then resynchronize at end of line
+                sink.add(e)
+                while (pos < src.length && src[pos] != '\n') pos++
             }
         }
         // end of file: guarantee a separator after the last declaration
@@ -107,7 +121,8 @@ class Lexer(private val src: String, private val baseOffset: Int = 0) {
             val value = try {
                 digits.toString().toLong(radix)
             } catch (e: NumberFormatException) {
-                throw DawnError("invalid integer literal: ${src.substring(start, pos)}", span)
+                sink.error("invalid integer literal: ${src.substring(start, pos)}", span)
+                0L
             }
             tokens.add(Token(TokenType.INT, src.substring(start, pos), span, intValue = value))
             return
@@ -143,7 +158,8 @@ class Lexer(private val src: String, private val baseOffset: Int = 0) {
             val value = try {
                 digits.toString().toLong()
             } catch (e: NumberFormatException) {
-                throw DawnError("integer literal out of 64-bit range: $text", span)
+                sink.error("integer literal out of 64-bit range: $text", span)
+                0L
             }
             tokens.add(Token(TokenType.INT, text, span, intValue = value))
         }
@@ -276,7 +292,10 @@ class Lexer(private val src: String, private val baseOffset: Int = 0) {
             '|' -> add(TokenType.PIPE, "|", 1)
             '!' -> add(TokenType.BANG, "!", 1)
             '@' -> add(TokenType.AT, "@", 1)
-            else -> throw DawnError("unrecognized character: $c", spanAt(pos))
+            else -> {
+                sink.error("unrecognized character: $c", spanAt(pos))
+                pos++
+            }
         }
     }
 }

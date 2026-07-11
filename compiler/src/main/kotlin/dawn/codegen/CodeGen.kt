@@ -68,6 +68,7 @@ class CodeGen(private val module: Module, private val className: String) {
         TString -> "Ljava/lang/String;"
         TUnit -> "V"
         TNever -> "V" // only in return position in theory; Never expressions end in athrow
+        TError -> "V" // unreachable: codegen only runs when there are no errors
     }
 
     private fun methodDesc(params: List<Type>, ret: Type): String =
@@ -77,7 +78,7 @@ class CodeGen(private val module: Module, private val className: String) {
         TInt, TFloat -> 2
         TBool -> 1
         TString -> 1
-        TUnit, TNever -> 0
+        TUnit, TNever, TError -> 0
     }
 
     // ---- functions ----

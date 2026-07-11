@@ -1,10 +1,8 @@
 package dawn.cli
 
-import dawn.check.Checker
+import dawn.check.analyze
 import dawn.codegen.CodeGen
-import dawn.diag.DawnError
 import dawn.diag.SourceFile
-import dawn.parse.Parser
 import java.io.File
 import java.util.jar.Attributes
 import java.util.jar.JarEntry
@@ -30,6 +28,7 @@ fun main(args: Array<String>) {
         when (args[0]) {
             "run" -> cmdRun(args.drop(1))
             "build" -> cmdBuild(args.drop(1))
+            "lsp" -> dawn.lsp.runLspServer()
             "--help", "-h", "help" -> print(USAGE)
             else -> {
                 System.err.println("unknown command: ${args[0]}\n")
@@ -52,14 +51,14 @@ fun compile(path: String): Pair<String, Map<String, ByteArray>> {
     if (!path.endsWith(".dawn")) throw CliError("source files must end in .dawn: $path")
     val source = SourceFile(path, file.readText())
     val className = sanitizeClassName(file.nameWithoutExtension)
-    try {
-        val module = Parser.parseModule(source.text)
-        Checker(module).check()
-        return className to CodeGen(module, className).generate()
-    } catch (e: DawnError) {
-        System.err.print(e.render(source))
+    val analysis = analyze(source.text)
+    if (analysis.hasErrors) {
+        for (d in analysis.diagnostics) System.err.print(d.render(source))
+        val n = analysis.diagnostics.size
+        System.err.println(if (n == 1) "1 error" else "$n errors")
         exitProcess(1)
     }
+    return className to CodeGen(analysis.module, className).generate()
 }
 
 fun sanitizeClassName(stem: String): String {
