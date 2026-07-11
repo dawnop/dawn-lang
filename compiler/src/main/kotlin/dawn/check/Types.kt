@@ -18,16 +18,54 @@ sealed class Eff {
         override fun toString() = name
     }
 
-    /** render as a signature suffix: "", " !io", " !e" */
+    /**
+     * A union of two or more distinct effect variables: `!(e1|e2)`. Built only
+     * through [union], which normalizes (io absorbs, pure is dropped, a single
+     * variable collapses), so a Union always holds ≥2 variables and no io.
+     * Equality is by the set of variables (each Var by identity).
+     */
+    class Union(val vars: Set<Var>) : Eff() {
+        override fun toString() = vars.map { it.name }.sorted().joinToString("|", "(", ")")
+        override fun equals(other: Any?) = other is Union && other.vars == vars
+        override fun hashCode() = vars.hashCode()
+    }
+
+    /** render as a signature suffix: "", " !io", " !e", " !(e1|e2)" */
     val suffix: String get() = if (this == Pure) "" else " !$this"
+
+    companion object {
+        /** Combine effects into their normalized least upper bound. */
+        fun union(effs: List<Eff>): Eff {
+            if (effs.any { it == Io }) return Io
+            val vars = LinkedHashSet<Var>()
+            for (e in effs) when (e) {
+                is Var -> vars.add(e)
+                is Union -> vars.addAll(e.vars)
+                else -> {} // Pure contributes nothing; Io handled above
+            }
+            return when (vars.size) {
+                0 -> Pure
+                1 -> vars.first()
+                else -> Union(vars)
+            }
+        }
+    }
 }
 
-/** least upper bound in the effect lattice (two distinct variables conservatively join to io) */
-fun lubEff(a: Eff, b: Eff): Eff = when {
-    a == b -> a
-    a == Eff.Pure -> b
-    b == Eff.Pure -> a
-    else -> Eff.Io
+/** least upper bound in the effect lattice (distinct variables join into a union) */
+fun lubEff(a: Eff, b: Eff): Eff = Eff.union(listOf(a, b))
+
+/** does [outer] permit every effect in [inner]? io covers all; pure is bottom. */
+fun effSubsumes(outer: Eff, inner: Eff): Boolean = when {
+    outer == Eff.Io -> true
+    inner == Eff.Pure -> true
+    outer == inner -> true
+    outer is Eff.Union -> when (inner) {
+        is Eff.Var -> inner in outer.vars
+        is Eff.Union -> outer.vars.containsAll(inner.vars)
+        else -> false // inner == Io is not covered by a variable union
+    }
+    else -> false
 }
 
 /** The complete set of types. */
@@ -118,7 +156,11 @@ fun subst(t: Type, map: Map<Type.TVar, Type>, effMap: Map<Eff.Var, Eff> = emptyM
     else -> t
 }
 
-fun substEff(e: Eff, effMap: Map<Eff.Var, Eff>): Eff = if (e is Eff.Var) effMap[e] ?: e else e
+fun substEff(e: Eff, effMap: Map<Eff.Var, Eff>): Eff = when (e) {
+    is Eff.Var -> effMap[e] ?: e
+    is Eff.Union -> Eff.union(e.vars.map { effMap[it] ?: it })
+    else -> e
+}
 
 /**
  * A user-defined ADT. Built by the checker in two passes: the shell (name +

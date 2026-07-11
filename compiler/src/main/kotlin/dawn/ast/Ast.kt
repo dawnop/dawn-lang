@@ -37,11 +37,14 @@ class NamedTypeRef(val name: String, val args: List<TypeRef>, span: Span) : Type
 /** (A, B, ...) — 2 to 8 elements (spec §1.5) */
 class TupleTypeRef(val elems: List<TypeRef>, span: Span) : TypeRef(span)
 
-/** fn(A, B) -> C !e — effName is null (pure), "io", or an effect variable name */
+/**
+ * fn(A, B) -> C !e — effAtoms is the parsed effect: empty (pure), ["io"], ["e"],
+ * or ["e1", "e2"] for a union !(e1|e2). Each atom is "io" or an effect variable name.
+ */
 class FnTypeRef(
     val params: List<TypeRef>,
     val ret: TypeRef,
-    val effName: String?,
+    val effAtoms: List<String>,
     span: Span,
 ) : TypeRef(span)
 
@@ -52,8 +55,8 @@ class FnDecl(
     val typeParams: List<String>,
     val params: List<Param>,
     val retType: TypeRef,
-    /** declared effect: null (pure), "io", or an effect variable name */
-    val declaredEff: String?,
+    /** declared effect atoms: empty (pure), ["io"], ["e"], or ["e1","e2"] for !(e1|e2) */
+    val declaredEff: List<String>,
     val body: Expr,
     span: Span,
     nameSpan: Span,

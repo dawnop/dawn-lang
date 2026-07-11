@@ -259,11 +259,7 @@ class Parser(
         expect(RPAREN, "`)`")
         expect(ARROW, "`->` (top-level functions must declare a return type)")
         val ret = typeRef()
-        var declaredEff: String? = null
-        if (at(BANG)) {
-            advance()
-            declaredEff = expect(IDENT, "an effect name (io or an effect variable)").text
-        }
+        val declaredEff = parseEffect()
         expect(EQ, "`=` (function body)")
         skipNewlines()
         val body = expression()
@@ -316,16 +312,30 @@ class Parser(
         expect(RPAREN, "`)`")
         expect(ARROW, "`->`")
         val ret = typeRef()
-        var effName: String? = null
-        var end = ret.span.end
-        if (at(BANG)) {
-            advance()
-            if (at(LPAREN)) throw err("effect unions !(e1 | e2) are not implemented yet")
-            val eff = expect(IDENT, "an effect name (io or an effect variable)")
-            effName = eff.text
-            end = eff.span.end
+        val effAtoms = parseEffect()
+        val end = peek(-1).span.end // last token consumed (the ret type or the effect)
+        return FnTypeRef(params, ret, effAtoms, Span(kw.span.start, end))
+    }
+
+    /**
+     * Parse an optional effect annotation after a return type: nothing (pure),
+     * `!io`, `!e`, or a union `!(e1 | e2 | ...)`. Returns the atom names.
+     */
+    private fun parseEffect(): List<String> {
+        if (!at(BANG)) return emptyList()
+        advance()
+        if (!at(LPAREN)) {
+            return listOf(expect(IDENT, "an effect name (io or an effect variable)").text)
         }
-        return FnTypeRef(params, ret, effName, Span(kw.span.start, end))
+        advance() // (
+        val atoms = ArrayList<String>()
+        atoms.add(expect(IDENT, "an effect name (io or an effect variable)").text)
+        while (at(PIPE)) {
+            advance()
+            atoms.add(expect(IDENT, "an effect name (io or an effect variable)").text)
+        }
+        expect(RPAREN, "`)` to close the effect union")
+        return atoms
     }
 
     // ---- statements ----

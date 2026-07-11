@@ -157,11 +157,7 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
             val tvars = d.typeParams.map { TVar(it) }
             val tp = tvars.associateBy { it.name }
             val ev = HashMap<String, Eff.Var>()
-            val eff = when (d.declaredEff) {
-                null -> Eff.Pure
-                "io" -> Eff.Io
-                else -> ev.getOrPut(d.declaredEff) { Eff.Var(d.declaredEff) }
-            }
+            val eff = resolveEff(d.declaredEff, ev)
             val sig = FnSig(
                 d.name,
                 d.params.map { resolveType(it.typeName, tp, ev) },
@@ -299,6 +295,10 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
         // test blocks may use io freely (spec §3.4): no effect verification
     }
 
+    /** Resolve parsed effect atoms into a normalized Eff, interning variables per signature. */
+    private fun resolveEff(atoms: List<String>, effVars: MutableMap<String, Eff.Var>): Eff =
+        Eff.union(atoms.map { if (it == "io") Eff.Io else effVars.getOrPut(it) { Eff.Var(it) } })
+
     private fun resolveType(
         ref: TypeRef,
         tparams: Map<String, TVar> = currentTParams,
@@ -311,11 +311,7 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
             return TTuple(elems.map { if (it == TUnit) TError else it })
         }
         if (ref is FnTypeRef) {
-            val eff = when (ref.effName) {
-                null -> Eff.Pure
-                "io" -> Eff.Io
-                else -> effVars.getOrPut(ref.effName) { Eff.Var(ref.effName) }
-            }
+            val eff = resolveEff(ref.effAtoms, effVars)
             return TFn(ref.params.map { resolveType(it, tparams, effVars) },
                 resolveType(ref.ret, tparams, effVars), eff)
         }
@@ -404,6 +400,9 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
             effMap[declared] = lubEff(effMap[declared] ?: Eff.Pure, actual)
             true
         }
+        // a union in a declared parameter position is not inferred into (which variable would bind?);
+        // accept when the actual is already subsumed. Unions normally appear only in return position.
+        is Eff.Union -> effSubsumes(substEff(declared, effMap), actual)
     }
 
     /** does this expression need an expected type to check at all? */
@@ -442,16 +441,14 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
         if (!assignable(bodyType, sig.ret))
             sink.error("function `${d.name}` declares return type ${sig.ret} but its body is $bodyType", d.body.span)
         // the signature is the promise: every used effect must be ⊑ the declared one
-        if (sig.eff != Eff.Io) {
-            for (used in usedEffects) {
-                if (used == sig.eff) continue // declared !e, used e
-                val (span, name) = effWitness[used] ?: (d.nameSpan to "?")
-                sink.error(
-                    "function `${d.name}` is not declared !$used but calls `$name` (!$used)",
-                    span,
-                    "add !$used to the end of the signature, or remove the call",
-                )
-            }
+        for (used in usedEffects) {
+            if (effSubsumes(sig.eff, used)) continue
+            val (span, name) = effWitness[used] ?: (d.nameSpan to "?")
+            sink.error(
+                "function `${d.name}` is not declared !$used but calls `$name` (!$used)",
+                span,
+                "add !$used to the end of the signature, or remove the call",
+            )
         }
         scopes.removeLast()
     }
@@ -1018,7 +1015,9 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
             sink.error("this lambda takes ${e.params.size} parameter(s), but $exp is expected", e.span)
         val paramTypes = e.params.mapIndexed { i, p ->
             var t = p.typeAnn?.let { resolveType(it) }
-                ?: exp?.params?.getOrNull(i)?.takeIf { isConcrete(it) }
+                // take the parameter type from the expected fn type; an enclosing function's
+                // type parameter (a TVar) is a legitimate opaque parameter type here
+                ?: exp?.params?.getOrNull(i)?.takeIf { isConcrete(it) || it is TVar }
                 ?: run {
                     sink.error("cannot infer the type of `${p.name}`", p.span,
                         "annotate it: fn(${p.name}: Int) => ...")
