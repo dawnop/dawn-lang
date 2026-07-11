@@ -45,6 +45,7 @@ private class TargetQuery(private val analysis: Analyzed, private val offset: In
                 }
                 visitExpr(d.body)
             }
+            is TestDecl -> visitExpr(d.body)
             is TypeDecl -> {
                 val info = analysis.types[d.name]
                 val summary = info?.ctors?.joinToString(" | ") { it.name } ?: ""
@@ -146,8 +147,9 @@ private class TargetQuery(private val analysis: Analyzed, private val offset: In
                 visitExpr(s.value)
             }
             is ExprStmt -> visitExpr(s.expr)
+            is AssertStmt -> visitExpr(s.cond)
             is WhileStmt -> { visitExpr(s.cond); visitExpr(s.body) }
-            is ForStmt -> { visitExpr(s.from); visitExpr(s.to); visitExpr(s.body) }
+            is ForStmt -> { visitExpr(s.from); s.to?.let { visitExpr(it) }; visitExpr(s.body) }
         }
     }
 }

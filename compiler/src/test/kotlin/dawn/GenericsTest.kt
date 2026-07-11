@@ -250,6 +250,29 @@ class GenericsTest {
     }
 
     @Test
+    fun forOverLists() {
+        val out = run("""
+            type Color = | Red | Green | Blue
+
+            fn name(c: Color) -> String =
+              match c { Red -> "r", Green -> "g", Blue -> "b" }
+
+            pub fn main() -> Unit !io = {
+              var sum = 0
+              for x in [10, 20, 30] {
+                sum = sum + x
+              }
+              println("{sum}")
+              for c in [Red, Blue] {
+                print(name(c))
+              }
+              println("")
+            }
+        """.trimIndent())
+        assertEquals("60\nrb\n", out)
+    }
+
+    @Test
     fun sumViaRangeAndGet() {
         val out = run("""
             fn sum_to(n: Int) -> Int = {

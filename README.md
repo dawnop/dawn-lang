@@ -60,16 +60,18 @@ gradle :compiler:fatJar
 编译器前端做了完整的错误恢复——文件残缺时其余部分照常分析，一次报出全部错误。
 VS Code 扩展与 Neovim / Helix 配置见 [editors/](editors/)。
 
-状态：**M0 已实现，M1 进行中**。M0：Int/Float/Bool/String、函数、match、
-`!io` 效果检查、自递归尾调用消除、字符串插值、`dawn run` / `dawn build --native`。
-M1 已落地：**ADT（和类型）**——构造器按位置/按名传参、构造器模式（含嵌套与 `..`）、
-结构相等、基于 usefulness 算法（Maranget）的**模式穷尽性检查**（缺分支精确列出缺失构造器）；
-**record**——字面量、同名简写、函数式更新 `Point { ..p, x: 3.0 }`、字段访问、记录模式；
-**泛型**——`fn`/`type` 类型参数、调用点自动推导（含 `or_default(None, 5)` 这类跨实参推导）、
-擦除 + 装箱实现；prelude 自带 `Option`/`Result`；内建 `List`（字面量、`++`、`len`/`get`/`range`）；
-**lambda 与效果多态**——`fn(x) => x * 2`、按值捕获、函数类型 `fn(A) -> B !e`、
-效果变量随调用点实例化（`map`/`filter`/`fold` 传纯函数则整体保持纯），
-底层走 LambdaMetafactory（native-image 免配置已实测）。
+状态：**M0、M1 已实现**——验收样例 [examples/shapes.dawn](examples/shapes.dawn)
+原样通过 `dawn run` 与 `dawn test`，JVM 与 native 输出逐字节一致。
+
+- M0：Int/Float/Bool/String、函数、match、`!io` 效果检查、自递归尾调用消除、
+  字符串插值、`dawn run` / `dawn build --native`。
+- M1：**ADT** + 嵌套构造器模式 + 基于 usefulness 算法（Maranget）的**穷尽性检查**
+  （缺分支精确列出缺失构造器）；**record**（字面量/简写/函数式更新 `{ ..p, x: 3.0 }`/字段访问/模式）；
+  **泛型**（调用点自动推导、擦除 + 装箱）+ prelude `Option`/`Result` + 内建 `List`
+  （字面量、`++`、`len`/`get`/`range`、for-in）；**lambda 与效果多态**
+  （按值捕获、函数类型 `fn(A) -> B !e`、效果变量随调用点实例化，
+  LambdaMetafactory 在 native-image 下免配置已实测）；**`?` 传播**；
+  **test 块**（`assert` 失败报两侧值，`dawn test` 执行、构建剥除）。
+
 详见 [docs/design.md](docs/design.md) 里程碑。编译器 Kotlin + ASM，
-测试 103 项（`gradle :compiler:test`）。native 二进制启动约 7ms，
-JVM 与 native 输出逐字节一致。
+测试 114 项（`gradle :compiler:test`）。native 二进制启动约 7ms。

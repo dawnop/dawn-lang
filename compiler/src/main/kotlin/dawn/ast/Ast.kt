@@ -14,6 +14,7 @@ class Module(
 ) {
     val fns: List<FnDecl> by lazy { decls.filterIsInstance<FnDecl>() }
     val types: List<TypeDecl> by lazy { decls.filterIsInstance<TypeDecl>() }
+    val tests: List<TestDecl> by lazy { decls.filterIsInstance<TestDecl>() }
 }
 
 sealed class Decl(
@@ -73,6 +74,14 @@ class TypeDecl(
     span: Span,
     nameSpan: Span,
 ) : Decl(pub, name, span, nameSpan)
+
+/** test "name" { ... } — compiled and run only by `dawn test` (spec §3.4) */
+class TestDecl(
+    val testName: String,
+    val body: Block,
+    span: Span,
+    nameSpan: Span,
+) : Decl(pub = false, name = testName, span = span, nameSpan = nameSpan)
 
 class CtorDecl(val name: String, val fields: List<FieldDecl>, val span: Span, val nameSpan: Span) {
     /** resolved constructor, filled by the checker */
@@ -159,6 +168,9 @@ class FieldAccess(val target: Expr, val fieldName: String, val fieldSpan: Span, 
 /** List literal: [1, 2, 3]. */
 class ListLit(val elems: List<Expr>, span: Span) : Expr(span)
 
+/** expr? — unwrap Ok/Some, or return the Err/None from the enclosing function (spec §8.1) */
+class Propagate(val operand: Expr, span: Span) : Expr(span)
+
 class CtorArg(val name: String?, val expr: Expr, val span: Span)
 
 enum class BinOp { ADD, SUB, MUL, DIV, MOD, CONCAT, EQ, NEQ, LT, LE, GT, GE, AND, OR }
@@ -216,9 +228,15 @@ class AssignStmt(val name: String, val value: Expr, val nameSpan: Span, span: Sp
 
 class ExprStmt(val expr: Expr, span: Span) : Stmt(span)
 
+/** assert expr — only inside test blocks */
+class AssertStmt(val cond: Expr, span: Span) : Stmt(span) {
+    /** the asserted expression's source text, for the failure message */
+    var sourceText: String? = null
+}
+
 class WhileStmt(val cond: Expr, val body: Block, span: Span) : Stmt(span)
 
-/** for name in from..to { body } (M0: integer ranges are the only iterable) */
-class ForStmt(val name: String, val from: Expr, val to: Expr, val body: Block, span: Span) : Stmt(span) {
+/** for name in from..to { body }, or for name in list { body } (to == null) */
+class ForStmt(val name: String, val from: Expr, val to: Expr?, val body: Block, span: Span) : Stmt(span) {
     var symbol: Symbol? = null
 }

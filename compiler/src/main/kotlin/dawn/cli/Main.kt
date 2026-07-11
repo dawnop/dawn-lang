@@ -10,11 +10,12 @@ import java.util.jar.JarOutputStream
 import java.util.jar.Manifest
 import kotlin.system.exitProcess
 
-const val USAGE = """dawn — the Dawn language toolchain (M0)
+const val USAGE = """dawn — the Dawn language toolchain
 
 usage:
   dawn run <file.dawn>                 compile and run (in-process JVM)
-  dawn build <file.dawn> [-o out.jar]  produce an executable jar
+  dawn test <file.dawn>                compile with test blocks and run them
+  dawn build <file.dawn> [-o out.jar]  produce an executable jar (tests stripped)
   dawn build <file.dawn> --native [-o out]
                                        produce a standalone native binary (needs native-image)
 """
@@ -27,6 +28,7 @@ fun main(args: Array<String>) {
     try {
         when (args[0]) {
             "run" -> cmdRun(args.drop(1))
+            "test" -> cmdTest(args.drop(1))
             "build" -> cmdBuild(args.drop(1))
             "lsp" -> dawn.lsp.runLspServer()
             "--help", "-h", "help" -> print(USAGE)
@@ -85,6 +87,46 @@ fun cmdRun(rest: List<String>) {
         throw CliError("$path has no pub fn main() -> Unit !io, nothing to run")
     }
     main.invoke(null, rest.drop(1).toTypedArray())
+}
+
+// ---- test: compile with test blocks, run each, report ----
+
+fun cmdTest(rest: List<String>) {
+    val path = rest.firstOrNull() ?: throw CliError("usage: dawn test <file.dawn>")
+    val file = File(path)
+    if (!file.exists()) throw CliError("no such file: $path")
+    val source = SourceFile(path, file.readText())
+    val className = sanitizeClassName(file.nameWithoutExtension)
+    val analysis = analyze(source.text)
+    if (analysis.hasErrors) {
+        for (d in analysis.diagnostics) System.err.print(d.render(source))
+        exitProcess(1)
+    }
+    val tests = analysis.module.tests
+    if (tests.isEmpty()) throw CliError("$path has no test blocks")
+    val classes = CodeGen(analysis.module, className, includeTests = true).generate()
+    val loader = object : ClassLoader(ClassLoader.getSystemClassLoader()) {
+        override fun findClass(name: String): Class<*> {
+            val internal = name.replace('.', '/')
+            val bytes = classes[internal] ?: throw ClassNotFoundException(name)
+            return defineClass(name, bytes, 0, bytes.size)
+        }
+    }
+    val cls = Class.forName(className, false, loader)
+    var failed = 0
+    for ((i, t) in tests.withIndex()) {
+        val m = cls.getDeclaredMethod("dawn\$test\$$i")
+        try {
+            m.invoke(null)
+            println("PASS  ${t.testName}")
+        } catch (e: java.lang.reflect.InvocationTargetException) {
+            failed++
+            println("FAIL  ${t.testName}")
+            e.cause?.message?.lines()?.forEach { println("      $it") }
+        }
+    }
+    println(if (failed == 0) "${tests.size} test(s) passed" else "$failed of ${tests.size} test(s) failed")
+    if (failed > 0) exitProcess(1)
 }
 
 // ---- build: write a jar, optionally hand it to native-image ----

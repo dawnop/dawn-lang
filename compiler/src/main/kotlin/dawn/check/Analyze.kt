@@ -30,7 +30,7 @@ class Analyzed(
 fun analyze(source: String): Analyzed {
     val sink = DiagnosticSink()
     val tokens = Lexer(source, 0, sink).lex()
-    val module = Parser(tokens, sink).module()
+    val module = Parser(tokens, sink, source).module()
     val checker = Checker(module, sink)
     checker.check()
     return Analyzed(module, sink.all, checker.functions, checker.types)

@@ -54,6 +54,12 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
     /** type parameters of the declaration currently being checked (for annotations in bodies) */
     private var currentTParams: Map<String, TVar> = emptyMap()
 
+    /** the signature of the function being checked (null inside test blocks) */
+    private var currentFnSig: FnSig? = null
+
+    /** inside a test block (assert is allowed, io is implicit) */
+    private var inTest = false
+
     fun check() {
         // 0. prelude: Option/Result and their constructors
         for (info in PRELUDE_ADTS) {
@@ -156,8 +162,28 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
             if (!main.pub)
                 sink.error("main must be pub", main.nameSpan, "write pub fn main() -> Unit !io")
         }
-        // 5. check each function body
+        // 5. check each function body, then each test block
         for (d in module.fns) checkFn(d)
+        for (t in module.tests) checkTest(t)
+    }
+
+    private fun checkTest(t: TestDecl) {
+        currentTParams = emptyMap()
+        currentEffVars = HashMap()
+        currentFnSig = null
+        usedEffects = HashSet()
+        effWitness = HashMap()
+        lambdaStack.clear()
+        scopes.clear()
+        scopes.addLast(HashMap())
+        inTest = true
+        val bt = checkExpr(t.body, expected = TUnit)
+        if (!assignable(bt, TUnit))
+            sink.error("a test block's trailing value is discarded ($bt)", t.body.span,
+                "assert on it instead of leaving it as the last expression")
+        inTest = false
+        scopes.removeLast()
+        // test blocks may use io freely (spec §3.4): no effect verification
     }
 
     private fun resolveType(
@@ -265,6 +291,7 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
         val sig = d.sig!!
         currentTParams = sig.typeParams.associateBy { it.name }
         currentEffVars = HashMap(d.effVars)
+        currentFnSig = sig
         usedEffects = HashSet()
         effWitness = HashMap()
         lambdaStack.clear()
@@ -409,6 +436,7 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
         }
         is Lambda -> checkLambda(e, expected)
         is Apply -> checkApply(e)
+        is Propagate -> checkPropagate(e)
         is Call -> checkCall(e, expected)
         is CtorCall -> checkCtorCall(e, expected)
         is FieldAccess -> checkFieldAccess(e)
@@ -702,6 +730,35 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
         return ft.ret
     }
 
+    /** expr? — spec §8.1: unwrap Ok/Some, or return the Err/None from the enclosing fn */
+    private fun checkPropagate(e: Propagate): Type {
+        val ot = checkExpr(e.operand)
+        if (ot.isErrorish) return TError
+        if (lambdaStack.isNotEmpty())
+            return error("`?` cannot be used inside a lambda (it returns from the enclosing function)", e.span,
+                "handle the Option/Result with match inside the lambda")
+        val sigRet = currentFnSig?.ret
+            ?: return error("`?` can only be used inside a function that returns Option or Result", e.span)
+        return when {
+            ot is TAdt && ot.info === OPTION_ADT -> {
+                if (sigRet !is TAdt || sigRet.info !== OPTION_ADT)
+                    error("`?` on an Option requires the function to return Option[...], but it returns $sigRet",
+                        e.span)
+                else ot.args[0]
+            }
+            ot is TAdt && ot.info === RESULT_ADT -> {
+                if (sigRet !is TAdt || sigRet.info !== RESULT_ADT)
+                    error("`?` on a Result requires the function to return Result[...], but it returns $sigRet",
+                        e.span)
+                else if (sigRet.args[1] != ot.args[1])
+                    error("`?` error types differ: $ot vs $sigRet", e.span,
+                        "v0.1 has no automatic error conversion; match and rewrap the error")
+                else ot.args[0]
+            }
+            else -> error("`?` needs an Option or Result, got $ot", e.span)
+        }
+    }
+
     private fun checkFieldAccess(e: FieldAccess): Type {
         val tt = checkExpr(e.target)
         if (tt.isErrorish) return TError
@@ -978,6 +1035,14 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
                     sink.error("this $t value is discarded", s.span,
                         "write let _ = ... to discard it, or move it to the block's tail/return position")
             }
+            is AssertStmt -> {
+                if (!inTest)
+                    sink.error("`assert` is only allowed inside test blocks", s.span,
+                        "use panic(...) for runtime invariants in regular code")
+                val ct = checkExpr(s.cond)
+                if (ct != TBool && !ct.isErrorish)
+                    sink.error("assert expects Bool, got $ct", s.cond.span)
+            }
             is WhileStmt -> {
                 val ct = checkExpr(s.cond)
                 if (ct != TBool && !ct.isErrorish) sink.error("while condition must be Bool, got $ct", s.cond.span)
@@ -988,11 +1053,22 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
             }
             is ForStmt -> {
                 val ft = checkExpr(s.from)
-                val tt = checkExpr(s.to)
-                if ((ft != TInt && !ft.isErrorish) || (tt != TInt && !tt.isErrorish))
-                    sink.error("range bounds a..b must be Int (got $ft..$tt)", s.span)
+                val loopVarType: Type
+                if (s.to == null) {
+                    // for x in list
+                    loopVarType = if (ft is TList) ft.elem else {
+                        if (!ft.isErrorish)
+                            sink.error("for..in iterates a List or an integer range a..b, got $ft", s.from.span)
+                        TError
+                    }
+                } else {
+                    val tt = checkExpr(s.to!!)
+                    if ((ft != TInt && !ft.isErrorish) || (tt != TInt && !tt.isErrorish))
+                        sink.error("range bounds a..b must be Int (got $ft..$tt)", s.span)
+                    loopVarType = TInt
+                }
                 scoped {
-                    s.symbol = declare(s.name, TInt, mutable = false, s.span)
+                    s.symbol = declare(s.name, loopVarType, mutable = false, s.span)
                     val bt = checkExpr(s.body)
                     if (bt != TUnit && !bt.isErrorish)
                         sink.error("the loop body's value is discarded ($bt)", s.body.span)

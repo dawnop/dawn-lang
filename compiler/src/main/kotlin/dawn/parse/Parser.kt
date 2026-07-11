@@ -19,7 +19,12 @@ import dawn.lex.TokenType.*
  * (statement and declaration boundaries) catch it, report to the sink, and
  * resynchronize — so one broken statement never hides the rest of the file.
  */
-class Parser(tokens: List<Token>, private val sink: DiagnosticSink = DiagnosticSink()) {
+class Parser(
+    tokens: List<Token>,
+    private val sink: DiagnosticSink = DiagnosticSink(),
+    /** original source text, for slicing assert messages; null in sub-parsers */
+    private val source: String? = null,
+) {
 
     private val toks = tokens
     private var pos = 0
@@ -97,11 +102,26 @@ class Parser(tokens: List<Token>, private val sink: DiagnosticSink = DiagnosticS
         return when (peek().type) {
             FN -> fnDecl(pub)
             TYPE -> typeDecl(pub)
-            CONST, USE, TEST ->
+            TEST -> {
+                if (pub) throw err("test blocks cannot be pub")
+                testDecl()
+            }
+            CONST, USE ->
                 throw err("`${peek().text}` declarations are not implemented yet",
                     "see the milestones in docs/design.md")
-            else -> throw err("only declarations (fn, type) are allowed at module top level")
+            else -> throw err("only declarations (fn, type, test) are allowed at module top level")
         }
+    }
+
+    /** test "name" { ... } */
+    private fun testDecl(): TestDecl {
+        val kw = advance() // test
+        val nameTok = expect(STRING, "a test name string")
+        if (nameTok.segments.any { it is StrSegment.Code })
+            throw DawnError("test names cannot contain interpolation", nameTok.span)
+        val name = nameTok.segments.joinToString("") { (it as StrSegment.Text).value }
+        val body = block()
+        return TestDecl(name, body, Span(kw.span.start, body.span.end), nameTok.span)
     }
 
     // ---- type declarations ----
@@ -265,7 +285,7 @@ class Parser(tokens: List<Token>, private val sink: DiagnosticSink = DiagnosticS
             VAR -> letStmt(mutable = true)
             WHILE -> whileStmt()
             FOR -> forStmt()
-            ASSERT -> throw err("`assert` is only allowed inside test blocks (tests are not implemented in M0)")
+            ASSERT -> assertStmt()
             IDENT -> {
                 // assignment: IDENT = ... (as opposed to == comparison)
                 if (peek(1).type == EQ) assignStmt() else exprStmt()
@@ -311,10 +331,11 @@ class Parser(tokens: List<Token>, private val sink: DiagnosticSink = DiagnosticS
         val name = expect(IDENT, "a loop variable name")
         expect(IN, "`in`")
         val from = headerExpr { expression() }
-        if (!at(DOTDOT)) throw err("for loops support integer ranges only: for i in a..b",
-            "list iteration arrives later in M1")
-        advance()
-        val to = headerExpr { expression() }
+        var to: Expr? = null
+        if (at(DOTDOT)) {
+            advance()
+            to = headerExpr { expression() }
+        }
         val body = block()
         return ForStmt(name.text, from, to, body, Span(kw.span.start, body.span.end))
     }
@@ -322,6 +343,14 @@ class Parser(tokens: List<Token>, private val sink: DiagnosticSink = DiagnosticS
     private fun exprStmt(): Stmt {
         val e = expression()
         return ExprStmt(e, e.span)
+    }
+
+    private fun assertStmt(): Stmt {
+        val kw = advance() // assert
+        val cond = expression()
+        val stmt = AssertStmt(cond, Span(kw.span.start, cond.span.end))
+        stmt.sourceText = source?.substring(cond.span.start, cond.span.end.coerceAtMost(source.length))
+        return stmt
     }
 
     // ---- expressions (by precedence) ----
@@ -417,7 +446,10 @@ class Parser(tokens: List<Token>, private val sink: DiagnosticSink = DiagnosticS
         var e = primaryExpr()
         while (true) {
             when (peek().type) {
-                QUESTION -> throw err("`?` needs Result/Option, which are not implemented yet")
+                QUESTION -> {
+                    val q = advance()
+                    e = Propagate(e, Span(e.span.start, q.span.end))
+                }
                 DOT -> {
                     advance()
                     val f = expect(IDENT, "a field name after `.`")

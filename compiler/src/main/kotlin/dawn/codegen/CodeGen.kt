@@ -27,7 +27,12 @@ import org.objectweb.asm.Type as AsmType
  * invokedynamic (until lambdas), which keeps native-image configuration-free
  * (spec §12.3).
  */
-class CodeGen(private val module: Module, private val className: String) {
+class CodeGen(
+    private val module: Module,
+    private val className: String,
+    /** compile test blocks too (`dawn test`); builds strip them (spec §3.4) */
+    private val includeTests: Boolean = false,
+) {
 
     companion object {
         const val PANIC_CLASS = "dawn/rt/PanicError"
@@ -115,6 +120,12 @@ class CodeGen(private val module: Module, private val className: String) {
         for (d in module.fns) {
             genFn(cw, d)
             drainLambdas(cw)
+        }
+        if (includeTests) {
+            for ((i, t) in module.tests.withIndex()) {
+                genTest(cw, t, i)
+                drainLambdas(cw)
+            }
         }
         if (module.fns.any { it.name == "main" }) genJvmMain(cw)
         cw.visitEnd()
@@ -361,6 +372,18 @@ class CodeGen(private val module: Module, private val className: String) {
                 else -> mv.visitInsn(RETURN)
             }
         }
+        mv.visitMaxs(0, 0)
+        mv.visitEnd()
+    }
+
+    /** one test block → one public static method dawn$test$i()V */
+    private fun genTest(cw: ClassWriter, t: TestDecl, idx: Int) {
+        mv = cw.visitMethod(ACC_PUBLIC or ACC_STATIC, "dawn\$test\$$idx", "()V", null, null)
+        mv.visitCode()
+        currentFn = null
+        fnStart = null
+        nextSlot = 0
+        if (genExpr(t.body, tail = false)) mv.visitInsn(RETURN)
         mv.visitMaxs(0, 0)
         mv.visitEnd()
     }
@@ -636,6 +659,67 @@ class CodeGen(private val module: Module, private val className: String) {
     private fun storeVar(sym: Symbol) = storeSlot(mv, sym.type, sym.slot)
     private fun loadVar(sym: Symbol) = loadSlot(mv, sym.type, sym.slot)
 
+    /**
+     * assert expr: on failure, panic with the source text. For == over printable
+     * types, both sides are kept in temps so the message can show their values.
+     */
+    private fun genAssert(s: AssertStmt): Boolean {
+        val cond = s.cond
+        val src = s.sourceText ?: "<assert>"
+        val printable = listOf(TInt, TFloat, TBool, TString)
+        val deconstruct = cond is Binary && cond.op == BinOp.EQ && cond.left.type in printable
+        var leftSlot = -1
+        var rightSlot = -1
+        var sideType: Type = TUnit
+        if (deconstruct) {
+            cond as Binary
+            sideType = cond.left.type!!
+            if (!genExpr(cond.left, tail = false)) return false
+            leftSlot = nextSlot
+            nextSlot += slotsOf(sideType)
+            storeSlot(mv, sideType, leftSlot)
+            if (!genExpr(cond.right, tail = false)) return false
+            rightSlot = nextSlot
+            nextSlot += slotsOf(sideType)
+            storeSlot(mv, sideType, rightSlot)
+            loadSlot(mv, sideType, leftSlot)
+            loadSlot(mv, sideType, rightSlot)
+            genEquality(sideType, BinOp.EQ)
+        } else {
+            if (!genExpr(cond, tail = false)) return false
+        }
+        val ok = Label()
+        mv.visitJumpInsn(IFNE, ok)
+        mv.visitTypeInsn(NEW, PANIC_CLASS)
+        mv.visitInsn(DUP)
+        if (deconstruct) {
+            val appendDesc = when (sideType) {
+                TInt -> "(J)L$SB;"
+                TFloat -> "(D)L$SB;"
+                TBool -> "(Z)L$SB;"
+                else -> "(Ljava/lang/String;)L$SB;"
+            }
+            mv.visitTypeInsn(NEW, SB)
+            mv.visitInsn(DUP)
+            mv.visitMethodInsn(INVOKESPECIAL, SB, "<init>", "()V", false)
+            mv.visitLdcInsn("assertion failed: $src\n  left  = ")
+            mv.visitMethodInsn(INVOKEVIRTUAL, SB, "append", "(Ljava/lang/String;)L$SB;", false)
+            loadSlot(mv, sideType, leftSlot)
+            mv.visitMethodInsn(INVOKEVIRTUAL, SB, "append", appendDesc, false)
+            mv.visitLdcInsn("\n  right = ")
+            mv.visitMethodInsn(INVOKEVIRTUAL, SB, "append", "(Ljava/lang/String;)L$SB;", false)
+            loadSlot(mv, sideType, rightSlot)
+            mv.visitMethodInsn(INVOKEVIRTUAL, SB, "append", appendDesc, false)
+            mv.visitMethodInsn(INVOKEVIRTUAL, SB, "toString", "()Ljava/lang/String;", false)
+        } else {
+            mv.visitLdcInsn("assertion failed: $src")
+        }
+        mv.visitMethodInsn(INVOKESPECIAL, PANIC_CLASS, "<init>", "(Ljava/lang/String;)V", false)
+        mv.visitInsn(ATHROW)
+        mv.visitLabel(ok)
+        return true
+    }
+
     private fun popValue(t: Type) {
         when (slotsOf(t)) {
             2 -> mv.visitInsn(POP2)
@@ -675,6 +759,7 @@ class CodeGen(private val module: Module, private val className: String) {
             falls
         }
         is ExprStmt -> genExpr(s.expr, tail = false) // type is Unit/Never, nothing left on the stack
+        is AssertStmt -> genAssert(s)
         is WhileStmt -> {
             val loop = Label()
             val end = Label()
@@ -685,34 +770,70 @@ class CodeGen(private val module: Module, private val className: String) {
             mv.visitLabel(end)
             true
         }
-        is ForStmt -> {
-            genExpr(s.from, tail = false)
-            val sym = s.symbol!!
-            sym.slot = nextSlot
-            nextSlot += 2
-            mv.visitVarInsn(LSTORE, sym.slot)
-            genExpr(s.to, tail = false)
-            val endSlot = nextSlot
-            nextSlot += 2
-            mv.visitVarInsn(LSTORE, endSlot)
-            val loop = Label()
-            val end = Label()
-            mv.visitLabel(loop)
+        is ForStmt -> if (s.to == null) genForList(s) else genForRange(s)
+    }
+
+    private fun genForRange(s: ForStmt): Boolean {
+        genExpr(s.from, tail = false)
+        val sym = s.symbol!!
+        sym.slot = nextSlot
+        nextSlot += 2
+        mv.visitVarInsn(LSTORE, sym.slot)
+        genExpr(s.to!!, tail = false)
+        val endSlot = nextSlot
+        nextSlot += 2
+        mv.visitVarInsn(LSTORE, endSlot)
+        val loop = Label()
+        val end = Label()
+        mv.visitLabel(loop)
+        mv.visitVarInsn(LLOAD, sym.slot)
+        mv.visitVarInsn(LLOAD, endSlot)
+        mv.visitInsn(LCMP)
+        mv.visitJumpInsn(IFGE, end)
+        val bodyFalls = genExpr(s.body, tail = false)
+        if (bodyFalls) {
             mv.visitVarInsn(LLOAD, sym.slot)
-            mv.visitVarInsn(LLOAD, endSlot)
-            mv.visitInsn(LCMP)
-            mv.visitJumpInsn(IFGE, end)
-            val bodyFalls = genExpr(s.body, tail = false)
-            if (bodyFalls) {
-                mv.visitVarInsn(LLOAD, sym.slot)
-                mv.visitInsn(LCONST_1)
-                mv.visitInsn(LADD)
-                mv.visitVarInsn(LSTORE, sym.slot)
-                mv.visitJumpInsn(GOTO, loop)
-            }
-            mv.visitLabel(end)
-            true
+            mv.visitInsn(LCONST_1)
+            mv.visitInsn(LADD)
+            mv.visitVarInsn(LSTORE, sym.slot)
+            mv.visitJumpInsn(GOTO, loop)
         }
+        mv.visitLabel(end)
+        return true
+    }
+
+    /** for x in list: an int-indexed loop over the (erased) elements */
+    private fun genForList(s: ForStmt): Boolean {
+        if (!genExpr(s.from, tail = false)) return false
+        val listSlot = nextSlot
+        nextSlot += 1
+        mv.visitVarInsn(ASTORE, listSlot)
+        val idxSlot = nextSlot
+        nextSlot += 1
+        mv.visitInsn(ICONST_0)
+        mv.visitVarInsn(ISTORE, idxSlot)
+        val sym = s.symbol!!
+        sym.slot = nextSlot
+        nextSlot += slotsOf(sym.type)
+        val loop = Label()
+        val end = Label()
+        mv.visitLabel(loop)
+        mv.visitVarInsn(ILOAD, idxSlot)
+        mv.visitVarInsn(ALOAD, listSlot)
+        mv.visitMethodInsn(INVOKEINTERFACE, JLIST, "size", "()I", true)
+        mv.visitJumpInsn(IF_ICMPGE, end)
+        mv.visitVarInsn(ALOAD, listSlot)
+        mv.visitVarInsn(ILOAD, idxSlot)
+        mv.visitMethodInsn(INVOKEINTERFACE, JLIST, "get", "(I)L$OBJ;", true)
+        unerase(sym.type)
+        storeVar(sym)
+        val bodyFalls = genExpr(s.body, tail = false)
+        if (bodyFalls) {
+            mv.visitIincInsn(idxSlot, 1)
+            mv.visitJumpInsn(GOTO, loop)
+        }
+        mv.visitLabel(end)
+        return true
     }
 
     // ---- expressions ----
@@ -755,6 +876,7 @@ class CodeGen(private val module: Module, private val className: String) {
             true
         }
         is Lambda -> genLambdaValue(e)
+        is Propagate -> genPropagate(e)
         is Apply -> {
             if (!genExpr(e.target, tail = false)) false
             else genDynamicInvoke(e.args, e.target.type as TFn, e.type!!)
@@ -915,6 +1037,28 @@ class CodeGen(private val module: Module, private val className: String) {
         m.visitInsn(ARETURN)
         m.visitMaxs(0, 0)
         m.visitEnd()
+    }
+
+    /**
+     * expr? (spec §8.1): if the value is Ok/Some, unwrap it; otherwise return it
+     * directly from the enclosing function — the Err/None instance is already of
+     * the (erased) declared return type.
+     */
+    private fun genPropagate(e: Propagate): Boolean {
+        if (!genExpr(e.operand, tail = false)) return false
+        val ot = e.operand.type as TAdt
+        val okCtor = ot.info.ctors.first { it.name == "Some" || it.name == "Ok" }
+        val okL = Label()
+        mv.visitInsn(DUP)
+        mv.visitTypeInsn(INSTANCEOF, okCtor.jvmName)
+        mv.visitJumpInsn(IFNE, okL)
+        mv.visitInsn(ARETURN) // early return of the None/Err value itself
+        mv.visitLabel(okL)
+        mv.visitTypeInsn(CHECKCAST, okCtor.jvmName)
+        val field = okCtor.fields.first()
+        mv.visitFieldInsn(GETFIELD, okCtor.jvmName, field.name, descOf(field.type))
+        adaptFrom(field.type, e.type!!)
+        return true
     }
 
     /** call a function value already on the stack: box args, apply, recover the result type */
