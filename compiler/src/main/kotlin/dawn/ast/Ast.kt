@@ -129,6 +129,20 @@ class Call(val callee: String, val args: List<Expr>, val calleeSpan: Span, span:
 /** A call of a non-name callee (currently: piping into a lambda). */
 class Apply(val target: Expr, val args: List<Expr>, span: Span) : Expr(span)
 
+/**
+ * Dot call: x.f(a, b). For Dawn values this is UFCS sugar for f(x, a, b);
+ * the checker fills [desugared]. (Java receivers resolve differently — §9.)
+ */
+class MethodCall(
+    val target: Expr,
+    val name: String,
+    val args: List<Expr>,
+    val nameSpan: Span,
+    span: Span,
+) : Expr(span) {
+    var desugared: Call? = null
+}
+
 /** fn(x, y) => body */
 class Lambda(val params: List<LambdaParam>, val body: Expr, span: Span) : Expr(span) {
     /** the lambda's own function type, filled by the checker */

@@ -289,6 +289,9 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
     private fun needsExpected(e: Expr): Boolean = when (e) {
         is ListLit -> e.elems.isEmpty() || e.elems.all { needsExpected(it) }
         is TupleLit -> e.elems.any { needsExpected(it) }
+        // a generic function used as a value is instantiated from the expected type
+        is VarRef -> lookup(e.name) == null &&
+            (fns[e.name] ?: BUILTINS[e.name])?.typeParams?.isNotEmpty() == true
         is CtorCall -> {
             val ci = ctors[e.ctorName]
             ci != null && ci.fields.isEmpty() && ci.adt.typeParams.isNotEmpty()
@@ -427,22 +430,16 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
                 e.symbol = sym
                 sym.type
             } else {
-                val f = fns[e.name]
-                when {
-                    f != null && f.typeParams.isNotEmpty() ->
-                        error("generic functions cannot be used as values yet", e.span,
-                            "wrap it in a lambda: fn(x) => ${e.name}(x)")
-                    f != null -> {
-                        // a top-level function used as a value
-                        e.fnValue = f
-                        TFn(f.paramTypes, f.ret, f.eff)
-                    }
-                    BUILTINS.containsKey(e.name) ->
-                        error("builtin functions cannot be used as values yet", e.span,
-                            "wrap it in a lambda: fn(x) => ${e.name}(x)")
-                    else -> error("undefined variable: ${e.name}", e.span)
-                }
+                val f = fns[e.name] ?: BUILTINS[e.name]
+                if (f != null) checkFnValue(e, f, expected)
+                else error("undefined variable: ${e.name}", e.span)
             }
+        }
+        is MethodCall -> {
+            // UFCS: x.f(a) is f(x, a) (spec §4.3); Java receivers come in §9
+            val call = Call(e.name, listOf(e.target) + e.args, e.nameSpan, e.span)
+            e.desugared = call
+            checkExpr(call, expected)
         }
         is Lambda -> checkLambda(e, expected)
         is Apply -> checkApply(e)
@@ -484,6 +481,38 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
         is TTuple -> t.elems.any { containsFn(it) }
         is TList -> containsFn(t.elem)
         else -> false
+    }
+
+    /** A top-level function or builtin used as a value; generics need the expected type. */
+    private fun checkFnValue(e: VarRef, f: FnSig, expected: Type?): Type {
+        e.fnValue = f
+        val declared = TFn(f.paramTypes, f.ret, f.eff)
+        if (f.typeParams.isEmpty() && f.eff !is Eff.Var) return declared
+        val exp = expected as? TFn
+        if (exp == null || exp.params.size != f.paramTypes.size) {
+            return error("cannot infer the type parameter(s) of `${e.name}` used as a value here", e.span,
+                "wrap it in a lambda with annotated parameters: fn(x: Int) => ${e.name}(x)")
+        }
+        val map = HashMap<TVar, Type>()
+        val effMap = HashMap<Eff.Var, Eff>()
+        for ((d, a) in f.paramTypes.zip(exp.params)) if (isConcrete(a)) unifyInto(d, a, map, effMap)
+        if (isConcrete(exp.ret)) unifyInto(f.ret, exp.ret, map, effMap)
+        val unbound = f.typeParams.filter { it !in map }
+        if (unbound.isNotEmpty()) {
+            return error("cannot infer type parameter(s) ${unbound.joinToString(", ")} for `${e.name}` used as a value",
+                e.span, "wrap it in a lambda with annotated parameters")
+        }
+        (f.eff as? Eff.Var)?.let { if (it !in effMap) effMap[it] = exp.eff }
+        if (f.isBuiltin && f.name == "to_string")
+            checkPrintable(map[f.typeParams[0]] ?: TError, e.span)
+        return subst(declared, map, effMap)
+    }
+
+    /** to_string / interpolation accept the printable types only (derive Show is later) */
+    private fun checkPrintable(t: Type, span: Span) {
+        if (t !in listOf(TInt, TFloat, TBool, TString) && !t.isErrorish)
+            sink.error("to_string supports Int, Float, Bool, String, got $t", span,
+                "derive Show is not implemented yet")
     }
 
     private fun checkCall(e: Call, expected: Type?): Type {
@@ -540,9 +569,9 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
                 if (argTypes[i] != null) continue
                 if (round == 0 && needsExpected(arg)) continue
                 val substd = subst(sig.paramTypes[i], map)
-                // lambdas only need their parameter types, so a partially
-                // concrete expected type is still useful to them
-                val exp = substd.takeIf { isConcrete(it) || arg is Lambda }
+                // lambdas only need their parameter types, and function values
+                // unify piecewise — a partially concrete expected type still helps
+                val exp = substd.takeIf { isConcrete(it) || arg is Lambda || arg is VarRef }
                 val at = checkExpr(arg, expected = exp)
                 argTypes[i] = at
                 if (!unifyInto(sig.paramTypes[i], at, map, effMap))
@@ -557,6 +586,8 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
             return error("cannot infer type parameter(s) ${unbound.joinToString(", ")} for `${e.callee}`",
                 e.span, "add a type annotation at the use site")
         }
+        if (sig.isBuiltin && sig.name == "to_string")
+            checkPrintable(subst(sig.paramTypes[0], map), e.args[0].span)
         // instantiate the callee's effect: an unbound effect variable means pure
         val calleeEff = when (val ce = sig.eff) {
             is Eff.Var -> effMap[ce] ?: Eff.Pure

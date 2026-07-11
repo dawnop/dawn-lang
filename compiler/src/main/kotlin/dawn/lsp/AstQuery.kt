@@ -84,6 +84,11 @@ private class TargetQuery(private val analysis: Analyzed, private val offset: In
                 visitExpr(e.target)
                 e.args.forEach { visitExpr(it) }
             }
+            is MethodCall -> {
+                sigOf(e.name)?.let { offer(e.nameSpan, it.render(), it.nameSpan) }
+                visitExpr(e.target)
+                e.args.forEach { visitExpr(it) }
+            }
             is ListLit -> e.elems.forEach { visitExpr(it) }
             is TupleLit -> e.elems.forEach { visitExpr(it) }
             is Call -> {

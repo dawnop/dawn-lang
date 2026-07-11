@@ -37,6 +37,9 @@ class CodeGen(
     companion object {
         const val PANIC_CLASS = "dawn/rt/PanicError"
         const val LISTS_CLASS = "dawn/rt/Lists"
+        const val STRINGS_CLASS = "dawn/rt/Strings"
+        const val IO_CLASS = "dawn/rt/Io"
+        private const val ARGS_FIELD = "dawn\$args"
         private const val SB = "java/lang/StringBuilder"
         private const val OBJ = "java/lang/Object"
         private const val JLIST = "java/util/List"
@@ -112,6 +115,8 @@ class CodeGen(
     private var lambdaCounter = 0
     /** Unit-returning fns used as values; each needs one bridge method */
     private val pendingBridges = LinkedHashSet<FnSig>()
+    /** builtins used as values without a real static method behind them */
+    private val pendingBuiltinBridges = LinkedHashSet<FnSig>()
 
     fun generate(): Map<String, ByteArray> {
         val out = HashMap<String, ByteArray>()
@@ -119,6 +124,8 @@ class CodeGen(
 
         val cw = DawnClassWriter()
         cw.visit(V17, ACC_PUBLIC or ACC_FINAL, className, null, OBJ, null)
+        // CLI arguments, set by the JVM entry wrapper; null when absent (tests) → args() gives []
+        cw.visitField(ACC_PUBLIC or ACC_STATIC, ARGS_FIELD, "[Ljava/lang/String;", null, null).visitEnd()
         for (d in module.fns) {
             genFn(cw, d)
             drainLambdas(cw)
@@ -135,6 +142,8 @@ class CodeGen(
         out[className] = cw.toByteArray()
         out[PANIC_CLASS] = genPanicClass()
         out[LISTS_CLASS] = genListsClass()
+        out[STRINGS_CLASS] = genStringsClass()
+        out[IO_CLASS] = genIoClass()
         for (n in 0..8) out[fnIface(n)] = genFnInterface(n)
         for (n in 2..8) out[tupleClass(n)] = genTupleClass(n)
         return out
@@ -456,6 +465,8 @@ class CodeGen(
         val tryEnd = Label()
         val handler = Label()
         m.visitTryCatchBlock(tryStart, tryEnd, handler, PANIC_CLASS)
+        m.visitVarInsn(ALOAD, 0)
+        m.visitFieldInsn(PUTSTATIC, className, ARGS_FIELD, "[Ljava/lang/String;")
         m.visitLabel(tryStart)
         m.visitMethodInsn(INVOKESTATIC, className, "main", "()V", false)
         m.visitLabel(tryEnd)
@@ -547,6 +558,26 @@ class CodeGen(
         rng.visitInsn(ARETURN)
         rng.visitMaxs(0, 0)
         rng.visitEnd()
+
+        // fromArray(String[]) -> List — CLI args; null (no JVM wrapper ran) → []
+        val fa = cw.visitMethod(ACC_PUBLIC or ACC_STATIC, "fromArray", "([Ljava/lang/String;)L$JLIST;", null, null)
+        fa.visitCode()
+        val faNull = Label()
+        fa.visitVarInsn(ALOAD, 0)
+        fa.visitJumpInsn(IFNULL, faNull)
+        fa.visitTypeInsn(NEW, ARRAYLIST)
+        fa.visitInsn(DUP)
+        fa.visitVarInsn(ALOAD, 0)
+        fa.visitMethodInsn(INVOKESTATIC, "java/util/Arrays", "asList", "([L$OBJ;)L$JLIST;", false)
+        fa.visitMethodInsn(INVOKESPECIAL, ARRAYLIST, "<init>", "(Ljava/util/Collection;)V", false)
+        fa.visitInsn(ARETURN)
+        fa.visitLabel(faNull)
+        fa.visitTypeInsn(NEW, ARRAYLIST)
+        fa.visitInsn(DUP)
+        fa.visitMethodInsn(INVOKESPECIAL, ARRAYLIST, "<init>", "()V", false)
+        fa.visitInsn(ARETURN)
+        fa.visitMaxs(0, 0)
+        fa.visitEnd()
 
         // slice(List, int from, int to) -> List — the `..rest` middle of a list pattern
         val sl = cw.visitMethod(ACC_PUBLIC or ACC_STATIC, "slice", "(L$JLIST;II)L$JLIST;", null, null)
@@ -690,6 +721,329 @@ class CodeGen(
             m.visitMaxs(0, 0)
             m.visitEnd()
         }
+    }
+
+    /**
+     * dawn/rt/Strings: string builtins that need loops or Option results.
+     *   chars(String) -> List        (code points as length-1..2 strings)
+     *   join(List, String) -> String
+     *   split(String, String) -> List (literal separator; "" splits to chars)
+     *   parseInt(String) -> Option / parseFloat(String) -> Option
+     */
+    private fun genStringsClass(): ByteArray {
+        val cw = DawnClassWriter()
+        cw.visit(V17, ACC_PUBLIC or ACC_FINAL, STRINGS_CLASS, null, OBJ, null)
+        val STR = "java/lang/String"
+
+        // chars: iterate by code point so surrogate pairs stay whole
+        run {
+            val m = cw.visitMethod(ACC_PUBLIC or ACC_STATIC, "chars", "(L$STR;)L$JLIST;", null, null)
+            m.visitCode()
+            m.visitTypeInsn(NEW, ARRAYLIST)
+            m.visitInsn(DUP)
+            m.visitMethodInsn(INVOKESPECIAL, ARRAYLIST, "<init>", "()V", false)
+            m.visitVarInsn(ASTORE, 1)
+            m.visitInsn(ICONST_0)
+            m.visitVarInsn(ISTORE, 2)
+            val loop = Label()
+            val done = Label()
+            m.visitLabel(loop)
+            m.visitVarInsn(ILOAD, 2)
+            m.visitVarInsn(ALOAD, 0)
+            m.visitMethodInsn(INVOKEVIRTUAL, STR, "length", "()I", false)
+            m.visitJumpInsn(IF_ICMPGE, done)
+            m.visitVarInsn(ALOAD, 0)
+            m.visitVarInsn(ILOAD, 2)
+            m.visitMethodInsn(INVOKEVIRTUAL, STR, "codePointAt", "(I)I", false)
+            m.visitMethodInsn(INVOKESTATIC, "java/lang/Character", "charCount", "(I)I", false)
+            m.visitVarInsn(ISTORE, 3)
+            m.visitVarInsn(ALOAD, 1)
+            m.visitVarInsn(ALOAD, 0)
+            m.visitVarInsn(ILOAD, 2)
+            m.visitVarInsn(ILOAD, 2)
+            m.visitVarInsn(ILOAD, 3)
+            m.visitInsn(IADD)
+            m.visitMethodInsn(INVOKEVIRTUAL, STR, "substring", "(II)L$STR;", false)
+            m.visitMethodInsn(INVOKEVIRTUAL, ARRAYLIST, "add", "(L$OBJ;)Z", false)
+            m.visitInsn(POP)
+            m.visitVarInsn(ILOAD, 2)
+            m.visitVarInsn(ILOAD, 3)
+            m.visitInsn(IADD)
+            m.visitVarInsn(ISTORE, 2)
+            m.visitJumpInsn(GOTO, loop)
+            m.visitLabel(done)
+            m.visitVarInsn(ALOAD, 1)
+            m.visitInsn(ARETURN)
+            m.visitMaxs(0, 0)
+            m.visitEnd()
+        }
+
+        run {
+            val m = cw.visitMethod(ACC_PUBLIC or ACC_STATIC, "join", "(L$JLIST;L$STR;)L$STR;", null, null)
+            m.visitCode()
+            m.visitTypeInsn(NEW, SB)
+            m.visitInsn(DUP)
+            m.visitMethodInsn(INVOKESPECIAL, SB, "<init>", "()V", false)
+            m.visitVarInsn(ASTORE, 2)
+            m.visitInsn(ICONST_0)
+            m.visitVarInsn(ISTORE, 3)
+            val loop = Label()
+            val done = Label()
+            val noSep = Label()
+            m.visitLabel(loop)
+            m.visitVarInsn(ILOAD, 3)
+            m.visitVarInsn(ALOAD, 0)
+            m.visitMethodInsn(INVOKEINTERFACE, JLIST, "size", "()I", true)
+            m.visitJumpInsn(IF_ICMPGE, done)
+            m.visitVarInsn(ILOAD, 3)
+            m.visitJumpInsn(IFEQ, noSep)
+            m.visitVarInsn(ALOAD, 2)
+            m.visitVarInsn(ALOAD, 1)
+            m.visitMethodInsn(INVOKEVIRTUAL, SB, "append", "(L$STR;)L$SB;", false)
+            m.visitInsn(POP)
+            m.visitLabel(noSep)
+            m.visitVarInsn(ALOAD, 2)
+            m.visitVarInsn(ALOAD, 0)
+            m.visitVarInsn(ILOAD, 3)
+            m.visitMethodInsn(INVOKEINTERFACE, JLIST, "get", "(I)L$OBJ;", true)
+            m.visitTypeInsn(CHECKCAST, STR)
+            m.visitMethodInsn(INVOKEVIRTUAL, SB, "append", "(L$STR;)L$SB;", false)
+            m.visitInsn(POP)
+            m.visitIincInsn(3, 1)
+            m.visitJumpInsn(GOTO, loop)
+            m.visitLabel(done)
+            m.visitVarInsn(ALOAD, 2)
+            m.visitMethodInsn(INVOKEVIRTUAL, SB, "toString", "()L$STR;", false)
+            m.visitInsn(ARETURN)
+            m.visitMaxs(0, 0)
+            m.visitEnd()
+        }
+
+        run {
+            val m = cw.visitMethod(ACC_PUBLIC or ACC_STATIC, "split", "(L$STR;L$STR;)L$JLIST;", null, null)
+            m.visitCode()
+            val nonEmpty = Label()
+            m.visitVarInsn(ALOAD, 1)
+            m.visitMethodInsn(INVOKEVIRTUAL, STR, "isEmpty", "()Z", false)
+            m.visitJumpInsn(IFEQ, nonEmpty)
+            m.visitVarInsn(ALOAD, 0)
+            m.visitMethodInsn(INVOKESTATIC, STRINGS_CLASS, "chars", "(L$STR;)L$JLIST;", false)
+            m.visitInsn(ARETURN)
+            m.visitLabel(nonEmpty)
+            m.visitTypeInsn(NEW, ARRAYLIST)
+            m.visitInsn(DUP)
+            m.visitMethodInsn(INVOKESPECIAL, ARRAYLIST, "<init>", "()V", false)
+            m.visitVarInsn(ASTORE, 2)
+            m.visitInsn(ICONST_0)
+            m.visitVarInsn(ISTORE, 3)
+            val loop = Label()
+            val tail = Label()
+            m.visitLabel(loop)
+            m.visitVarInsn(ALOAD, 0)
+            m.visitVarInsn(ALOAD, 1)
+            m.visitVarInsn(ILOAD, 3)
+            m.visitMethodInsn(INVOKEVIRTUAL, STR, "indexOf", "(L$STR;I)I", false)
+            m.visitVarInsn(ISTORE, 4)
+            m.visitVarInsn(ILOAD, 4)
+            m.visitJumpInsn(IFLT, tail)
+            m.visitVarInsn(ALOAD, 2)
+            m.visitVarInsn(ALOAD, 0)
+            m.visitVarInsn(ILOAD, 3)
+            m.visitVarInsn(ILOAD, 4)
+            m.visitMethodInsn(INVOKEVIRTUAL, STR, "substring", "(II)L$STR;", false)
+            m.visitMethodInsn(INVOKEVIRTUAL, ARRAYLIST, "add", "(L$OBJ;)Z", false)
+            m.visitInsn(POP)
+            m.visitVarInsn(ILOAD, 4)
+            m.visitVarInsn(ALOAD, 1)
+            m.visitMethodInsn(INVOKEVIRTUAL, STR, "length", "()I", false)
+            m.visitInsn(IADD)
+            m.visitVarInsn(ISTORE, 3)
+            m.visitJumpInsn(GOTO, loop)
+            m.visitLabel(tail)
+            m.visitVarInsn(ALOAD, 2)
+            m.visitVarInsn(ALOAD, 0)
+            m.visitVarInsn(ILOAD, 3)
+            m.visitMethodInsn(INVOKEVIRTUAL, STR, "substring", "(I)L$STR;", false)
+            m.visitMethodInsn(INVOKEVIRTUAL, ARRAYLIST, "add", "(L$OBJ;)Z", false)
+            m.visitInsn(POP)
+            m.visitVarInsn(ALOAD, 2)
+            m.visitInsn(ARETURN)
+            m.visitMaxs(0, 0)
+            m.visitEnd()
+        }
+
+        // parseInt / parseFloat: NumberFormatException → None
+        for ((name, box, parse, parseDesc, valueOfDesc) in listOf(
+            listOf("parseInt", "java/lang/Long", "parseLong", "(L$STR;)J", "(J)Ljava/lang/Long;"),
+            listOf("parseFloat", "java/lang/Double", "parseDouble", "(L$STR;)D", "(D)Ljava/lang/Double;"),
+        )) {
+            val m = cw.visitMethod(ACC_PUBLIC or ACC_STATIC, name, "(L$STR;)LOption;", null, null)
+            m.visitCode()
+            val tryStart = Label()
+            val tryEnd = Label()
+            val handler = Label()
+            m.visitTryCatchBlock(tryStart, tryEnd, handler, "java/lang/NumberFormatException")
+            m.visitLabel(tryStart)
+            m.visitTypeInsn(NEW, "Option\$Some")
+            m.visitInsn(DUP)
+            m.visitVarInsn(ALOAD, 0)
+            m.visitMethodInsn(INVOKEVIRTUAL, STR, "strip", "()L$STR;", false)
+            m.visitMethodInsn(INVOKESTATIC, box, parse, parseDesc, false)
+            m.visitMethodInsn(INVOKESTATIC, box, "valueOf", valueOfDesc, false)
+            m.visitMethodInsn(INVOKESPECIAL, "Option\$Some", "<init>", "(L$OBJ;)V", false)
+            m.visitLabel(tryEnd)
+            m.visitInsn(ARETURN)
+            m.visitLabel(handler)
+            m.visitInsn(POP)
+            m.visitFieldInsn(GETSTATIC, "Option\$None", "INSTANCE", "LOption\$None;")
+            m.visitInsn(ARETURN)
+            m.visitMaxs(0, 0)
+            m.visitEnd()
+        }
+
+        cw.visitEnd()
+        return cw.toByteArray()
+    }
+
+    /**
+     * dawn/rt/Io: file and console builtins.
+     *   readFile(String) -> Result   (Ok(text) / Err(message))
+     *   writeFile(String, String) -> Result   (Ok(chars written) / Err(message))
+     *   readLine() -> Option         (None on EOF or console error)
+     */
+    private fun genIoClass(): ByteArray {
+        val cw = DawnClassWriter()
+        cw.visit(V17, ACC_PUBLIC or ACC_FINAL, IO_CLASS, null, OBJ, null)
+        val STR = "java/lang/String"
+        val PATH = "java/nio/file/Path"
+        val FILES = "java/nio/file/Files"
+
+        run {
+            val m = cw.visitMethod(ACC_PUBLIC or ACC_STATIC, "readFile", "(L$STR;)LResult;", null, null)
+            m.visitCode()
+            val tryStart = Label()
+            val tryEnd = Label()
+            val handler = Label()
+            m.visitTryCatchBlock(tryStart, tryEnd, handler, "java/lang/Exception")
+            m.visitLabel(tryStart)
+            m.visitTypeInsn(NEW, "Result\$Ok")
+            m.visitInsn(DUP)
+            m.visitVarInsn(ALOAD, 0)
+            m.visitInsn(ICONST_0)
+            m.visitTypeInsn(ANEWARRAY, STR)
+            m.visitMethodInsn(INVOKESTATIC, PATH, "of", "(L$STR;[L$STR;)L$PATH;", true)
+            m.visitMethodInsn(INVOKESTATIC, FILES, "readString", "(L$PATH;)L$STR;", false)
+            m.visitMethodInsn(INVOKESPECIAL, "Result\$Ok", "<init>", "(L$OBJ;)V", false)
+            m.visitLabel(tryEnd)
+            m.visitInsn(ARETURN)
+            m.visitLabel(handler)
+            m.visitMethodInsn(INVOKEVIRTUAL, "java/lang/Throwable", "toString", "()L$STR;", false)
+            m.visitVarInsn(ASTORE, 1)
+            m.visitTypeInsn(NEW, "Result\$Err")
+            m.visitInsn(DUP)
+            m.visitVarInsn(ALOAD, 1)
+            m.visitMethodInsn(INVOKESPECIAL, "Result\$Err", "<init>", "(L$OBJ;)V", false)
+            m.visitInsn(ARETURN)
+            m.visitMaxs(0, 0)
+            m.visitEnd()
+        }
+
+        run {
+            val m = cw.visitMethod(ACC_PUBLIC or ACC_STATIC, "writeFile", "(L$STR;L$STR;)LResult;", null, null)
+            m.visitCode()
+            val tryStart = Label()
+            val tryEnd = Label()
+            val handler = Label()
+            m.visitTryCatchBlock(tryStart, tryEnd, handler, "java/lang/Exception")
+            m.visitLabel(tryStart)
+            m.visitVarInsn(ALOAD, 0)
+            m.visitInsn(ICONST_0)
+            m.visitTypeInsn(ANEWARRAY, STR)
+            m.visitMethodInsn(INVOKESTATIC, PATH, "of", "(L$STR;[L$STR;)L$PATH;", true)
+            m.visitVarInsn(ALOAD, 1)
+            m.visitInsn(ICONST_0)
+            m.visitTypeInsn(ANEWARRAY, "java/nio/file/OpenOption")
+            m.visitMethodInsn(INVOKESTATIC, FILES, "writeString",
+                "(L$PATH;Ljava/lang/CharSequence;[Ljava/nio/file/OpenOption;)L$PATH;", false)
+            m.visitInsn(POP)
+            m.visitTypeInsn(NEW, "Result\$Ok")
+            m.visitInsn(DUP)
+            m.visitVarInsn(ALOAD, 1)
+            m.visitMethodInsn(INVOKEVIRTUAL, STR, "length", "()I", false)
+            m.visitInsn(I2L)
+            m.visitMethodInsn(INVOKESTATIC, "java/lang/Long", "valueOf", "(J)Ljava/lang/Long;", false)
+            m.visitMethodInsn(INVOKESPECIAL, "Result\$Ok", "<init>", "(L$OBJ;)V", false)
+            m.visitLabel(tryEnd)
+            m.visitInsn(ARETURN)
+            m.visitLabel(handler)
+            m.visitMethodInsn(INVOKEVIRTUAL, "java/lang/Throwable", "toString", "()L$STR;", false)
+            m.visitVarInsn(ASTORE, 2)
+            m.visitTypeInsn(NEW, "Result\$Err")
+            m.visitInsn(DUP)
+            m.visitVarInsn(ALOAD, 2)
+            m.visitMethodInsn(INVOKESPECIAL, "Result\$Err", "<init>", "(L$OBJ;)V", false)
+            m.visitInsn(ARETURN)
+            m.visitMaxs(0, 0)
+            m.visitEnd()
+        }
+
+        // shared stdin reader (line-oriented; UTF-8)
+        cw.visitField(ACC_PRIVATE or ACC_STATIC or ACC_FINAL, "IN", "Ljava/io/BufferedReader;", null, null)
+            .visitEnd()
+        run {
+            val m = cw.visitMethod(ACC_STATIC, "<clinit>", "()V", null, null)
+            m.visitCode()
+            m.visitTypeInsn(NEW, "java/io/BufferedReader")
+            m.visitInsn(DUP)
+            m.visitTypeInsn(NEW, "java/io/InputStreamReader")
+            m.visitInsn(DUP)
+            m.visitFieldInsn(GETSTATIC, "java/lang/System", "in", "Ljava/io/InputStream;")
+            m.visitFieldInsn(GETSTATIC, "java/nio/charset/StandardCharsets", "UTF_8",
+                "Ljava/nio/charset/Charset;")
+            m.visitMethodInsn(INVOKESPECIAL, "java/io/InputStreamReader", "<init>",
+                "(Ljava/io/InputStream;Ljava/nio/charset/Charset;)V", false)
+            m.visitMethodInsn(INVOKESPECIAL, "java/io/BufferedReader", "<init>", "(Ljava/io/Reader;)V", false)
+            m.visitFieldInsn(PUTSTATIC, IO_CLASS, "IN", "Ljava/io/BufferedReader;")
+            m.visitInsn(RETURN)
+            m.visitMaxs(0, 0)
+            m.visitEnd()
+        }
+        run {
+            val m = cw.visitMethod(ACC_PUBLIC or ACC_STATIC, "readLine", "()LOption;", null, null)
+            m.visitCode()
+            val tryStart = Label()
+            val tryEnd = Label()
+            val handler = Label()
+            val decide = Label()
+            val none = Label()
+            m.visitTryCatchBlock(tryStart, tryEnd, handler, "java/io/IOException")
+            m.visitLabel(tryStart)
+            m.visitFieldInsn(GETSTATIC, IO_CLASS, "IN", "Ljava/io/BufferedReader;")
+            m.visitMethodInsn(INVOKEVIRTUAL, "java/io/BufferedReader", "readLine", "()L$STR;", false)
+            m.visitVarInsn(ASTORE, 0)
+            m.visitLabel(tryEnd)
+            m.visitJumpInsn(GOTO, decide)
+            m.visitLabel(handler)
+            m.visitInsn(POP)
+            m.visitInsn(ACONST_NULL)
+            m.visitVarInsn(ASTORE, 0)
+            m.visitLabel(decide)
+            m.visitVarInsn(ALOAD, 0)
+            m.visitJumpInsn(IFNULL, none)
+            m.visitTypeInsn(NEW, "Option\$Some")
+            m.visitInsn(DUP)
+            m.visitVarInsn(ALOAD, 0)
+            m.visitMethodInsn(INVOKESPECIAL, "Option\$Some", "<init>", "(L$OBJ;)V", false)
+            m.visitInsn(ARETURN)
+            m.visitLabel(none)
+            m.visitFieldInsn(GETSTATIC, "Option\$None", "INSTANCE", "LOption\$None;")
+            m.visitInsn(ARETURN)
+            m.visitMaxs(0, 0)
+            m.visitEnd()
+        }
+
+        cw.visitEnd()
+        return cw.toByteArray()
     }
 
     /** dawn/rt/PanicError extends Error */
@@ -934,32 +1288,10 @@ class CodeGen(
         is StrLit -> genStrLit(e)
         is VarRef -> {
             val fv = e.fnValue
-            if (fv != null) {
-                // a top-level function as a value: a zero-capture lambda over it.
-                // Unit-returning functions need a bridge (LMF cannot adapt void).
-                val n = fv.paramTypes.size
-                val needBridge = slotsOf(fv.ret) == 0
-                val implName: String
-                val implDesc: String
-                if (needBridge) {
-                    pendingBridges.add(fv)
-                    implName = "dawn\$fnval\$${fv.name}"
-                    implDesc = fv.paramTypes.joinToString("", "(", ")") { descOf(it) } + "L$OBJ;"
-                } else {
-                    implName = fv.name
-                    implDesc = methodDesc(fv.paramTypes, fv.ret)
-                }
-                mv.visitInvokeDynamicInsn(
-                    "apply", "()L${fnIface(n)};", LMF_BSM,
-                    AsmType.getMethodType(erasedApplyDesc(n)),
-                    Handle(H_INVOKESTATIC, className, implName, implDesc, false),
-                    instantiatedType(fv.paramTypes, fv.ret),
-                )
-            } else {
-                loadVar(e.symbol!!)
-            }
+            if (fv != null) genFnValue(e, fv) else loadVar(e.symbol!!)
             true
         }
+        is MethodCall -> genCall(e.desugared!!, tail)
         is Lambda -> genLambdaValue(e)
         is Propagate -> genPropagate(e)
         is Apply -> {
@@ -1055,13 +1387,147 @@ class CodeGen(
     }
 
     private fun drainLambdas(cw: ClassWriter) {
-        while (pendingLambdas.isNotEmpty() || pendingBridges.isNotEmpty()) {
-            if (pendingLambdas.isNotEmpty()) {
-                genLambdaImpl(cw, pendingLambdas.removeFirst())
-            } else {
-                genFnValueBridge(cw, pendingBridges.first().also { pendingBridges.remove(it) })
+        while (pendingLambdas.isNotEmpty() || pendingBridges.isNotEmpty() || pendingBuiltinBridges.isNotEmpty()) {
+            when {
+                pendingLambdas.isNotEmpty() -> genLambdaImpl(cw, pendingLambdas.removeFirst())
+                pendingBridges.isNotEmpty() ->
+                    genFnValueBridge(cw, pendingBridges.first().also { pendingBridges.remove(it) })
+                else ->
+                    genBuiltinBridge(cw, pendingBuiltinBridges.first().also { pendingBuiltinBridges.remove(it) })
             }
         }
+    }
+
+    /**
+     * A top-level function or builtin used as a value: a zero-capture lambda
+     * over its static method (or a bridge). The instantiated type comes from
+     * the checker's annotation, so generic values adapt Object↔boxed correctly.
+     */
+    private fun genFnValue(e: VarRef, fv: FnSig) {
+        val ft = e.type as TFn
+        val n = fv.paramTypes.size
+        val handle = if (fv.isBuiltin) builtinValueHandle(fv) else {
+            if (slotsOf(fv.ret) == 0) {
+                // Unit-returning functions need a bridge (LMF cannot adapt void)
+                pendingBridges.add(fv)
+                Handle(H_INVOKESTATIC, className, "dawn\$fnval\$${fv.name}",
+                    implDescOf(fv.paramTypes, fv.ret), false)
+            } else {
+                Handle(H_INVOKESTATIC, className, fv.name, methodDesc(fv.paramTypes, fv.ret), false)
+            }
+        }
+        mv.visitInvokeDynamicInsn(
+            "apply", "()L${fnIface(n)};", LMF_BSM,
+            AsmType.getMethodType(erasedApplyDesc(n)),
+            handle,
+            instantiatedType(ft.params, ft.ret),
+        )
+    }
+
+    /** builtins with a real runtime method get a direct handle; the rest get a bridge */
+    private fun builtinValueHandle(fv: FnSig): Handle = when (fv.name) {
+        "get" -> Handle(H_INVOKESTATIC, LISTS_CLASS, "get", "(L$JLIST;J)LOption;", false)
+        "range" -> Handle(H_INVOKESTATIC, LISTS_CLASS, "range", "(JJ)L$JLIST;", false)
+        "map", "filter" ->
+            Handle(H_INVOKESTATIC, LISTS_CLASS, fv.name, "(L$JLIST;L${fnIface(1)};)L$JLIST;", false)
+        "fold" -> Handle(H_INVOKESTATIC, LISTS_CLASS, "fold", "(L$JLIST;L$OBJ;L${fnIface(2)};)L$OBJ;", false)
+        "chars" -> Handle(H_INVOKESTATIC, STRINGS_CLASS, "chars", "(Ljava/lang/String;)L$JLIST;", false)
+        "join" -> Handle(H_INVOKESTATIC, STRINGS_CLASS, "join", "(L$JLIST;Ljava/lang/String;)Ljava/lang/String;", false)
+        "split" -> Handle(H_INVOKESTATIC, STRINGS_CLASS, "split",
+            "(Ljava/lang/String;Ljava/lang/String;)L$JLIST;", false)
+        "parse_int" -> Handle(H_INVOKESTATIC, STRINGS_CLASS, "parseInt", "(Ljava/lang/String;)LOption;", false)
+        "parse_float" -> Handle(H_INVOKESTATIC, STRINGS_CLASS, "parseFloat", "(Ljava/lang/String;)LOption;", false)
+        "read_file" -> Handle(H_INVOKESTATIC, IO_CLASS, "readFile", "(Ljava/lang/String;)LResult;", false)
+        "write_file" -> Handle(H_INVOKESTATIC, IO_CLASS, "writeFile",
+            "(Ljava/lang/String;Ljava/lang/String;)LResult;", false)
+        "read_line" -> Handle(H_INVOKESTATIC, IO_CLASS, "readLine", "()LOption;", false)
+        else -> {
+            pendingBuiltinBridges.add(fv)
+            Handle(H_INVOKESTATIC, className, "dawn\$bi\$${fv.name}", implDescOf(fv.paramTypes, fv.ret), false)
+        }
+    }
+
+    private val emittedBuiltinBridges = HashSet<String>()
+
+    /** small static bodies for builtins that are inlined at call sites */
+    private fun genBuiltinBridge(cw: ClassWriter, sig: FnSig) {
+        if (!emittedBuiltinBridges.add(sig.name)) return
+        val m = cw.visitMethod(
+            ACC_PRIVATE or ACC_STATIC or ACC_SYNTHETIC, "dawn\$bi\$${sig.name}",
+            implDescOf(sig.paramTypes, sig.ret), null, null,
+        )
+        m.visitCode()
+        when (sig.name) {
+            "println", "print" -> {
+                m.visitFieldInsn(GETSTATIC, "java/lang/System", "out", "Ljava/io/PrintStream;")
+                m.visitVarInsn(ALOAD, 0)
+                m.visitMethodInsn(INVOKEVIRTUAL, "java/io/PrintStream", sig.name, "(Ljava/lang/String;)V", false)
+                m.visitInsn(ACONST_NULL)
+                m.visitInsn(ARETURN)
+            }
+            "panic" -> {
+                m.visitTypeInsn(NEW, PANIC_CLASS)
+                m.visitInsn(DUP)
+                m.visitVarInsn(ALOAD, 0)
+                m.visitMethodInsn(INVOKESPECIAL, PANIC_CLASS, "<init>", "(Ljava/lang/String;)V", false)
+                m.visitInsn(ATHROW)
+            }
+            "todo" -> {
+                m.visitTypeInsn(NEW, PANIC_CLASS)
+                m.visitInsn(DUP)
+                m.visitLdcInsn("not yet implemented")
+                m.visitMethodInsn(INVOKESPECIAL, PANIC_CLASS, "<init>", "(Ljava/lang/String;)V", false)
+                m.visitInsn(ATHROW)
+            }
+            "to_string" -> {
+                m.visitVarInsn(ALOAD, 0)
+                m.visitMethodInsn(INVOKESTATIC, "java/lang/String", "valueOf", "(L$OBJ;)Ljava/lang/String;", false)
+                m.visitInsn(ARETURN)
+            }
+            "to_float" -> {
+                m.visitVarInsn(LLOAD, 0)
+                m.visitInsn(L2D)
+                m.visitInsn(DRETURN)
+            }
+            "to_int" -> {
+                m.visitVarInsn(DLOAD, 0)
+                m.visitInsn(D2L)
+                m.visitInsn(LRETURN)
+            }
+            "len" -> {
+                m.visitVarInsn(ALOAD, 0)
+                m.visitMethodInsn(INVOKEINTERFACE, JLIST, "size", "()I", true)
+                m.visitInsn(I2L)
+                m.visitInsn(LRETURN)
+            }
+            "trim" -> {
+                m.visitVarInsn(ALOAD, 0)
+                m.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "strip", "()Ljava/lang/String;", false)
+                m.visitInsn(ARETURN)
+            }
+            "contains" -> {
+                m.visitVarInsn(ALOAD, 0)
+                m.visitVarInsn(ALOAD, 1)
+                m.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "contains",
+                    "(Ljava/lang/CharSequence;)Z", false)
+                m.visitInsn(IRETURN)
+            }
+            "starts_with", "ends_with" -> {
+                m.visitVarInsn(ALOAD, 0)
+                m.visitVarInsn(ALOAD, 1)
+                m.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String",
+                    if (sig.name == "starts_with") "startsWith" else "endsWith", "(Ljava/lang/String;)Z", false)
+                m.visitInsn(IRETURN)
+            }
+            "args" -> {
+                m.visitFieldInsn(GETSTATIC, className, ARGS_FIELD, "[Ljava/lang/String;")
+                m.visitMethodInsn(INVOKESTATIC, LISTS_CLASS, "fromArray", "([Ljava/lang/String;)L$JLIST;", false)
+                m.visitInsn(ARETURN)
+            }
+            else -> throw IllegalStateException("no value bridge for builtin `${sig.name}`")
+        }
+        m.visitMaxs(0, 0)
+        m.visitEnd()
     }
 
     private fun genLambdaImpl(cw: ClassWriter, p: PendingLambda) {
@@ -1331,6 +1797,83 @@ class CodeGen(
             mv.visitMethodInsn(INVOKESTATIC, LISTS_CLASS, "fold",
                 "(L$JLIST;L$OBJ;L${fnIface(2)};)L$OBJ;", false)
             if (slotsOf(e.type!!) == 0) mv.visitInsn(POP) else unerase(e.type!!)
+            true
+        }
+        "to_string" -> {
+            genExpr(e.args[0], tail = false)
+            when (e.args[0].type!!) {
+                TInt -> mv.visitMethodInsn(INVOKESTATIC, "java/lang/String", "valueOf",
+                    "(J)Ljava/lang/String;", false)
+                TFloat -> mv.visitMethodInsn(INVOKESTATIC, "java/lang/String", "valueOf",
+                    "(D)Ljava/lang/String;", false)
+                TBool -> mv.visitMethodInsn(INVOKESTATIC, "java/lang/String", "valueOf",
+                    "(Z)Ljava/lang/String;", false)
+                else -> {} // String stays as is (printability checked)
+            }
+            true
+        }
+        "chars" -> {
+            genExpr(e.args[0], tail = false)
+            mv.visitMethodInsn(INVOKESTATIC, STRINGS_CLASS, "chars", "(Ljava/lang/String;)L$JLIST;", false)
+            true
+        }
+        "join" -> {
+            genExpr(e.args[0], tail = false)
+            genExpr(e.args[1], tail = false)
+            mv.visitMethodInsn(INVOKESTATIC, STRINGS_CLASS, "join",
+                "(L$JLIST;Ljava/lang/String;)Ljava/lang/String;", false)
+            true
+        }
+        "split" -> {
+            genExpr(e.args[0], tail = false)
+            genExpr(e.args[1], tail = false)
+            mv.visitMethodInsn(INVOKESTATIC, STRINGS_CLASS, "split",
+                "(Ljava/lang/String;Ljava/lang/String;)L$JLIST;", false)
+            true
+        }
+        "trim" -> {
+            genExpr(e.args[0], tail = false)
+            mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "strip", "()Ljava/lang/String;", false)
+            true
+        }
+        "contains" -> {
+            genExpr(e.args[0], tail = false)
+            genExpr(e.args[1], tail = false)
+            mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "contains", "(Ljava/lang/CharSequence;)Z", false)
+            true
+        }
+        "starts_with", "ends_with" -> {
+            genExpr(e.args[0], tail = false)
+            genExpr(e.args[1], tail = false)
+            mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String",
+                if (e.callee == "starts_with") "startsWith" else "endsWith", "(Ljava/lang/String;)Z", false)
+            true
+        }
+        "parse_int", "parse_float" -> {
+            genExpr(e.args[0], tail = false)
+            mv.visitMethodInsn(INVOKESTATIC, STRINGS_CLASS,
+                if (e.callee == "parse_int") "parseInt" else "parseFloat", "(Ljava/lang/String;)LOption;", false)
+            true
+        }
+        "read_file" -> {
+            genExpr(e.args[0], tail = false)
+            mv.visitMethodInsn(INVOKESTATIC, IO_CLASS, "readFile", "(Ljava/lang/String;)LResult;", false)
+            true
+        }
+        "write_file" -> {
+            genExpr(e.args[0], tail = false)
+            genExpr(e.args[1], tail = false)
+            mv.visitMethodInsn(INVOKESTATIC, IO_CLASS, "writeFile",
+                "(Ljava/lang/String;Ljava/lang/String;)LResult;", false)
+            true
+        }
+        "read_line" -> {
+            mv.visitMethodInsn(INVOKESTATIC, IO_CLASS, "readLine", "()LOption;", false)
+            true
+        }
+        "args" -> {
+            mv.visitFieldInsn(GETSTATIC, className, ARGS_FIELD, "[Ljava/lang/String;")
+            mv.visitMethodInsn(INVOKESTATIC, LISTS_CLASS, "fromArray", "([Ljava/lang/String;)L$JLIST;", false)
             true
         }
         else -> error("unknown builtin: ${e.callee}")

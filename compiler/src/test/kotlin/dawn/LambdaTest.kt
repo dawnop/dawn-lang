@@ -319,13 +319,14 @@ class LambdaTest {
     }
 
     @Test
-    fun builtinAsValueRejected() {
-        val diags = errorsOf("""
+    fun builtinAsValue() {
+        // M2: builtins are first-class; non-generic ones need no expected type
+        val out = run("""
             pub fn main() -> Unit !io = {
               let p = println
-              println("ok")
+              p("via value")
             }
         """.trimIndent())
-        assertHasError(diags, "builtin functions cannot be used as values yet")
+        assertEquals("via value\n", out)
     }
 }

@@ -481,8 +481,23 @@ class Parser(
                 }
                 DOT -> {
                     advance()
-                    val f = expect(IDENT, "a field name after `.`")
-                    e = FieldAccess(e, f.text, f.span, Span(e.span.start, f.span.end))
+                    val f = expect(IDENT, "a field or function name after `.`")
+                    if (at(LPAREN)) {
+                        e = bracketed {
+                            advance()
+                            skipNewlines()
+                            val args = ArrayList<Expr>()
+                            while (!at(RPAREN)) {
+                                args.add(expression())
+                                skipNewlines()
+                                if (at(COMMA)) { advance(); skipNewlines() } else break
+                            }
+                            val close = expect(RPAREN, "`)`")
+                            MethodCall(e, f.text, args, f.span, Span(e.span.start, close.span.end))
+                        }
+                    } else {
+                        e = FieldAccess(e, f.text, f.span, Span(e.span.start, f.span.end))
+                    }
                 }
                 else -> return e
             }
