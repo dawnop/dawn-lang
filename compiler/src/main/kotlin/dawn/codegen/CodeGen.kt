@@ -548,6 +548,20 @@ class CodeGen(
         rng.visitMaxs(0, 0)
         rng.visitEnd()
 
+        // slice(List, int from, int to) -> List — the `..rest` middle of a list pattern
+        val sl = cw.visitMethod(ACC_PUBLIC or ACC_STATIC, "slice", "(L$JLIST;II)L$JLIST;", null, null)
+        sl.visitCode()
+        sl.visitTypeInsn(NEW, ARRAYLIST)
+        sl.visitInsn(DUP)
+        sl.visitVarInsn(ALOAD, 0)
+        sl.visitVarInsn(ILOAD, 1)
+        sl.visitVarInsn(ILOAD, 2)
+        sl.visitMethodInsn(INVOKEINTERFACE, JLIST, "subList", "(II)L$JLIST;", true)
+        sl.visitMethodInsn(INVOKESPECIAL, ARRAYLIST, "<init>", "(Ljava/util/Collection;)V", false)
+        sl.visitInsn(ARETURN)
+        sl.visitMaxs(0, 0)
+        sl.visitEnd()
+
         genListHof(cw)
 
         val cat = cw.visitMethod(ACC_PUBLIC or ACC_STATIC, "concat", "(L$JLIST;L$JLIST;)L$JLIST;", null, null)
@@ -1469,6 +1483,54 @@ class CodeGen(
         return anyFalls
     }
 
+    /** [pre.., ..rest, post..]: length check, fixed elements from both ends, slice the middle */
+    private fun genListPatternTest(p: ListPat, slot: Int, failTo: Label) {
+        val fixed = p.pre.size + p.post.size
+        mv.visitVarInsn(ALOAD, slot)
+        mv.visitMethodInsn(INVOKEINTERFACE, JLIST, "size", "()I", true)
+        val sizeSlot = nextSlot
+        nextSlot += 1
+        mv.visitVarInsn(ISTORE, sizeSlot)
+        mv.visitVarInsn(ILOAD, sizeSlot)
+        mv.visitLdcInsn(fixed)
+        mv.visitJumpInsn(if (p.hasRest) IF_ICMPLT else IF_ICMPNE, failTo)
+        val elem = p.elemType!!
+        fun testElemAt(sub: Pattern, loadIndex: () -> Unit) {
+            mv.visitVarInsn(ALOAD, slot)
+            loadIndex()
+            mv.visitMethodInsn(INVOKEINTERFACE, JLIST, "get", "(I)L$OBJ;", true)
+            unerase(elem)
+            val eSlot = nextSlot
+            nextSlot += slotsOf(elem)
+            storeSlot(mv, elem, eSlot)
+            genPatternTest(sub, eSlot, elem, failTo)
+        }
+        for ((i, sub) in p.pre.withIndex()) {
+            if (sub is WildPat) continue
+            testElemAt(sub) { mv.visitLdcInsn(i) }
+        }
+        for ((j, sub) in p.post.withIndex()) {
+            if (sub is WildPat) continue
+            testElemAt(sub) {
+                mv.visitVarInsn(ILOAD, sizeSlot)
+                mv.visitLdcInsn(p.post.size - j)
+                mv.visitInsn(ISUB)
+            }
+        }
+        val rest = p.restSymbol
+        if (rest != null) {
+            mv.visitVarInsn(ALOAD, slot)
+            mv.visitLdcInsn(p.pre.size)
+            mv.visitVarInsn(ILOAD, sizeSlot)
+            mv.visitLdcInsn(p.post.size)
+            mv.visitInsn(ISUB)
+            mv.visitMethodInsn(INVOKESTATIC, LISTS_CLASS, "slice", "(L$JLIST;II)L$JLIST;", false)
+            rest.slot = nextSlot
+            nextSlot += 1
+            mv.visitVarInsn(ASTORE, rest.slot)
+        }
+    }
+
     /**
      * Destructuring bind (irrefutable, checker-verified): extract fields into
      * fresh slots, alias bindings. No tests, no fail path.
@@ -1506,6 +1568,10 @@ class CodeGen(
                     storeSlot(mv, concrete, fSlot)
                     genBind(fp, fSlot)
                 }
+            }
+            is ListPat -> {
+                // irrefutable ⟺ [..rest]: the rest is the whole list
+                p.restSymbol?.let { it.slot = slot }
             }
             is LitPat -> throw IllegalStateException("refutable pattern in let (checker bug)")
         }
@@ -1561,6 +1627,7 @@ class CodeGen(
                     genPatternTest(sub, eSlot, et, failTo)
                 }
             }
+            is ListPat -> genListPatternTest(p, slot, failTo)
             is CtorPat -> {
                 val ci = p.ctor!!
                 val sub = ci.jvmName

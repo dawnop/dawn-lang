@@ -314,8 +314,8 @@ class Parser(
 
     private fun letStmt(mutable: Boolean): Stmt {
         val kw = advance() // let / var
-        // destructuring: let (a, b) = pair / let Point { x, y } = p
-        if (at(LPAREN) || at(TYPEIDENT)) {
+        // destructuring: let (a, b) = pair / let Point { x, y } = p / let [..all] = xs
+        if (at(LPAREN) || at(TYPEIDENT) || at(LBRACKET)) {
             val pat = pattern()
             if (at(COLON))
                 throw err("destructuring lets cannot take a type annotation",
@@ -782,8 +782,41 @@ class Parser(
             IDENT -> { advance(); BindPat(t.text, t.span) }
             TYPEIDENT -> ctorPat()
             LPAREN -> tuplePat()
+            LBRACKET -> listPat()
             else -> throw err("expected a pattern")
         }
+    }
+
+    /** [], [x, ..rest], [..init, last] — at most one `..`/`..name` rest */
+    private fun listPat(): Pattern {
+        val open = advance() // [
+        skipNewlines()
+        val pre = ArrayList<Pattern>()
+        val post = ArrayList<Pattern>()
+        var hasRest = false
+        var restName: String? = null
+        var restSpan: Span? = null
+        while (!at(RBRACKET)) {
+            if (at(DOTDOT)) {
+                val d = advance()
+                if (hasRest)
+                    throw DawnError("a list pattern can have at most one `..` rest", d.span)
+                hasRest = true
+                if (at(IDENT)) {
+                    val n = advance()
+                    restName = n.text
+                    restSpan = Span(d.span.start, n.span.end)
+                } else {
+                    restSpan = d.span
+                }
+            } else {
+                (if (hasRest) post else pre).add(pattern())
+            }
+            skipNewlines()
+            if (at(COMMA)) { advance(); skipNewlines() } else break
+        }
+        val close = expect(RBRACKET, "`]`")
+        return ListPat(pre, hasRest, restName, restSpan, post, Span(open.span.start, close.span.end))
     }
 
     /** (a, b) — tuple pattern, 2 to 8 elements */

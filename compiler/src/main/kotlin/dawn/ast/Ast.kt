@@ -220,6 +220,23 @@ class TuplePat(val elems: List<Pattern>, span: Span) : Pattern(span) {
     var elemTypes: List<Type>? = null
 }
 
+/**
+ * List pattern: [], [x, ..rest], [..init, last] — fixed elements around at
+ * most one `..`/`..name` rest (spec §5.1).
+ */
+class ListPat(
+    val pre: List<Pattern>,
+    val hasRest: Boolean,
+    /** `..name` binds the middle as a list; bare `..` ignores it */
+    val restName: String?,
+    val restSpan: Span?,
+    val post: List<Pattern>,
+    span: Span,
+) : Pattern(span) {
+    var elemType: Type? = null
+    var restSymbol: Symbol? = null
+}
+
 class PatArg(val name: String?, val pattern: Pattern)
 
 class Block(val stmts: List<Stmt>, val tail: Expr?, span: Span) : Expr(span)

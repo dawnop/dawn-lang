@@ -887,9 +887,9 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
 
     private fun checkMatch(e: Match, expected: Type?): Type {
         val st = checkExpr(e.scrutinee)
-        val scrutOk = st in listOf(TInt, TFloat, TString, TBool) || st is TAdt || st is TTuple
+        val scrutOk = st in listOf(TInt, TFloat, TString, TBool) || st is TAdt || st is TTuple || st is TList
         if (!scrutOk && !st.isErrorish)
-            sink.error("match supports Int/Float/String/Bool, tuples and user-defined types, got $st",
+            sink.error("match supports Int/Float/String/Bool, tuples, lists and user-defined types, got $st",
                 e.scrutinee.span)
 
         var result: Type = TNever
@@ -924,6 +924,7 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
                     st == TBool -> listOf(true, false)
                         .filter { v -> useful(rows, listOf(SLit(v)), tys) }
                         .joinToString(", ")
+                    st is TList -> missingListPatterns(rows, st).joinToString(", ")
                     else -> "_ ($st has too many values to enumerate)"
                 }
                 sink.error("non-exhaustive match, missing: $missing", e.span,
@@ -939,6 +940,7 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
         is BindPat -> true
         is CtorPat -> p.args.any { bindsAnything(it.pattern) }
         is TuplePat -> p.elems.any { bindsAnything(it) }
+        is ListPat -> p.restName != null || (p.pre + p.post).any { bindsAnything(it) }
         else -> false
     }
 
@@ -947,6 +949,9 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
         is WildPat, is BindPat -> null
         is LitPat -> p
         is TuplePat -> p.elems.firstNotNullOfOrNull { refutablePart(it) }
+        is ListPat ->
+            // only [..rest] matches every list; any fixed element constrains the length
+            if (p.hasRest && p.pre.isEmpty() && p.post.isEmpty()) null else p
         is CtorPat -> {
             val ci = ctors[p.ctorName]
             if (ci != null && ci.adt.ctors.size > 1) p
@@ -979,6 +984,18 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
                     p.elemTypes = List(p.elems.size) { TError }
                     for (sub in p.elems) checkPattern(sub, TError, mutable)
                 }
+            }
+            is ListPat -> {
+                val elem: Type = if (scrutType is TList) scrutType.elem else {
+                    if (!scrutType.isErrorish)
+                        sink.error("list pattern does not match scrutinee type $scrutType", p.span)
+                    TError
+                }
+                p.elemType = elem
+                for (sub in p.pre) checkPattern(sub, elem, mutable)
+                for (sub in p.post) checkPattern(sub, elem, mutable)
+                if (p.restName != null)
+                    p.restSymbol = declare(p.restName, TList(elem), mutable, p.restSpan!!)
             }
             is CtorPat -> checkCtorPat(p, scrutType, mutable)
         }

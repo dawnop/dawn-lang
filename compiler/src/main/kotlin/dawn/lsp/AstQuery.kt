@@ -134,6 +134,13 @@ private class TargetQuery(private val analysis: Analyzed, private val offset: In
                 p.args.forEach { visitPattern(it.pattern) }
             }
             is TuplePat -> p.elems.forEach { visitPattern(it) }
+            is ListPat -> {
+                p.pre.forEach { visitPattern(it) }
+                p.post.forEach { visitPattern(it) }
+                val rest = p.restSymbol
+                if (rest != null && p.restSpan != null)
+                    offer(p.restSpan!!, "${rest.name}: ${rest.type}", p.restSpan)
+            }
             else -> {}
         }
     }

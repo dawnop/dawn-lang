@@ -14,6 +14,9 @@ internal object SWild : SPat()
 internal class SCtor(val ctor: CtorInfo, val subs: List<SPat>) : SPat()
 internal class SLit(val value: Any) : SPat()
 internal class STuple(val subs: List<SPat>) : SPat()
+internal class SList(val pre: List<SPat>, val hasRest: Boolean, val post: List<SPat>) : SPat() {
+    val arity get() = pre.size + post.size
+}
 
 /** Lower an AST pattern; broken patterns become wildcards (errors were already reported). */
 internal fun toSPat(p: Pattern): SPat = when (p) {
@@ -32,6 +35,7 @@ internal fun toSPat(p: Pattern): SPat = when (p) {
         else SCtor(ci, fps.map { if (it == null) SWild else toSPat(it) })
     }
     is TuplePat -> STuple(p.elems.map { toSPat(it) })
+    is ListPat -> SList(p.pre.map { toSPat(it) }, p.hasRest, p.post.map { toSPat(it) })
 }
 
 /** Constructor field types with the column's type arguments substituted in. */
@@ -56,7 +60,35 @@ internal fun useful(matrix: List<List<SPat>>, q: List<SPat>, types: List<Type>):
             head.subs + q.drop(1),
             (t as? Type.TTuple)?.elems.orEmpty().ifEmpty { List(head.subs.size) { Type.TError } } + types.drop(1),
         )
+        is SList -> {
+            val elem = (t as? Type.TList)?.elem ?: Type.TError
+            if (!head.hasRest) {
+                val n = head.pre.size
+                useful(specializeList(matrix, n), head.pre + q.drop(1), List(n) { elem } + types.drop(1))
+            } else {
+                // a rest pattern covers every length ≥ its arity; behaviour is
+                // uniform beyond the longest pattern in play, so a finite probe suffices
+                (head.arity..listLenBound(matrix, head)).any { len ->
+                    useful(
+                        specializeList(matrix, len),
+                        head.pre + List(len - head.arity) { SWild } + head.post + q.drop(1),
+                        List(len) { elem } + types.drop(1),
+                    )
+                }
+            }
+        }
         is SWild -> {
+            // lists: probe every relevant length (same uniformity argument as above)
+            if (t is Type.TList) {
+                val bound = listLenBound(matrix, null)
+                return (0..bound).any { len ->
+                    useful(
+                        specializeList(matrix, len),
+                        List(len) { SWild } + q.drop(1),
+                        List(len) { t.elem } + types.drop(1),
+                    )
+                }
+            }
             // a tuple is its own single complete constructor
             if (t is Type.TTuple) {
                 return useful(
@@ -119,3 +151,43 @@ private fun specializeTuple(matrix: List<List<SPat>>, n: Int): List<List<SPat>> 
             else -> null
         }
     }
+
+/** Specialize a list column to exactly [len] elements (a rest expands to wildcards). */
+private fun specializeList(matrix: List<List<SPat>>, len: Int): List<List<SPat>> =
+    matrix.mapNotNull { row ->
+        when (val h = row.first()) {
+            is SWild -> List(len) { SWild } + row.drop(1)
+            is SList ->
+                if (!h.hasRest) {
+                    if (h.pre.size == len) h.pre + row.drop(1) else null
+                } else if (h.arity <= len) {
+                    h.pre + List(len - h.arity) { SWild } + h.post + row.drop(1)
+                } else null
+            else -> null
+        }
+    }
+
+/** One past the longest list pattern in play: lengths beyond behave uniformly. */
+private fun listLenBound(matrix: List<List<SPat>>, q: SPat?): Int {
+    var m = 0
+    for (row in matrix) {
+        val h = row.firstOrNull() as? SList ?: continue
+        m = maxOf(m, if (h.hasRest) h.arity else h.pre.size)
+    }
+    (q as? SList)?.let { m = maxOf(m, if (it.hasRest) it.arity else it.pre.size) }
+    return m + 1
+}
+
+/** Witnesses for a non-exhaustive match over a list: [], [_], [_, _, ..] ... */
+internal fun missingListPatterns(rows: List<List<SPat>>, t: Type.TList): List<String> {
+    val bound = listLenBound(rows, null)
+    val missing = ArrayList<String>()
+    for (len in 0..bound) {
+        val q = SList(List(len) { SWild }, hasRest = false, post = emptyList())
+        if (useful(rows, listOf(q), listOf(t))) {
+            val elems = List(len) { "_" } + if (len == bound) listOf("..") else emptyList()
+            missing.add("[" + elems.joinToString(", ") + "]")
+        }
+    }
+    return missing
+}
