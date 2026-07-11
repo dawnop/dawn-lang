@@ -24,6 +24,8 @@ application {
 tasks.test {
     useJUnitPlatform()
     testLogging { events("failed", "skipped") }
+    // Forward -DupdateGolden=true to the test JVM so golden files can be regenerated.
+    System.getProperty("updateGolden")?.let { systemProperty("updateGolden", it) }
 }
 
 // Self-contained jar: the dawn CLI itself (bundling Kotlin stdlib and ASM), used by bin/dawn
