@@ -1,0 +1,44 @@
+# Intro example: ADTs, pattern matching, pipes, effect annotations.
+# NOTE: uses M1 features (ADTs, lambdas, lists) — not yet compilable in M0.
+# Run: dawn run examples/shapes.dawn
+
+type Shape =
+  | Circle(r: Float)
+  | Rect(w: Float, h: Float)
+  | Point
+
+fn area(s: Shape) -> Float =
+  match s {
+    Circle(r)  -> 3.14159 * r * r
+    Rect(w, h) -> w * h
+    Point      -> 0.0
+  }
+
+fn describe(s: Shape) -> String =
+  match s {
+    Circle(r) if r > 100.0 -> "a huge circle"
+    Circle(r)              -> "circle with r = {r}"
+    Rect(w, h)             -> "rect {w} x {h}"
+    Point                  -> "a point"
+  }
+
+pub fn main() -> Unit !io = {
+  let shapes = [Circle(1.0), Rect(2.0, 3.0), Point, Circle(200.0)]
+
+  for s in shapes {
+    println(describe(s))
+  }
+
+  shapes
+    |> map(area)
+    |> fold(0.0, fn(acc, a) => acc + a)
+    |> fn(total) => println("total area: {total}")
+}
+
+test "area of unit circle" {
+  assert area(Circle(1.0)) == 3.14159
+}
+
+test "point has no area" {
+  assert area(Point) == 0.0
+}

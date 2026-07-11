@@ -1,0 +1,105 @@
+(* Dawn v0.1 语法, EBNF。
+   约定: 终结符加引号; NEWLINE 为语句分隔; 行尾是二元运算符/逗号/开括号时续行。
+   词法: IDENT=[a-z][a-z0-9_]*  TYPEIDENT=[A-Z][A-Za-z0-9]*  EFFVAR=[a-z][a-z0-9_]*
+         INT FLOAT STRING 见 spec §1.5 *)
+
+module          = { top_decl } ;
+
+top_decl        = use_decl | type_decl | const_decl | fn_decl | test_decl ;
+
+(* ---- use ---- *)
+use_decl        = "use" ( java_use | module_use ) ;
+java_use        = "java" STRING ;
+module_use      = module_path [ "." "{" import_list "}" ] ;
+module_path     = IDENT { "/" IDENT } ;
+import_list     = import_item { "," import_item } [ "," ] ;
+import_item     = IDENT | TYPEIDENT ;
+
+(* ---- type ---- *)
+type_decl       = [ "pub" ] "type" TYPEIDENT [ type_params ]
+                  "=" ( sum_type | record_type | type_expr ) [ "derive" TYPEIDENT ] ;
+type_params     = "[" TYPEIDENT { "," TYPEIDENT } "]" ;
+sum_type        = [ "|" ] variant { "|" variant } ;
+variant         = TYPEIDENT [ "(" field_list ")" ] ;
+record_type     = "{" field_list "}" ;
+field_list      = field { "," field } [ "," ] ;
+field           = IDENT ":" type_expr ;
+
+type_expr       = fn_type | tuple_type | applied_type ;
+applied_type    = TYPEIDENT [ "[" type_expr { "," type_expr } "]" ] ;
+tuple_type      = "(" type_expr "," type_expr { "," type_expr } ")" ;
+fn_type         = "fn" "(" [ type_expr { "," type_expr } ] ")" "->" type_expr [ effect ] ;
+
+effect          = "!" effect_atom
+                | "!" "(" effect_atom { "|" effect_atom } ")" ;
+effect_atom     = "io" | EFFVAR ;
+
+(* ---- const / fn / test ---- *)
+const_decl      = [ "pub" ] "const" UPPER_IDENT ":" type_expr "=" expr ;
+                  (* UPPER_IDENT: 惯例全大写, 词法上同 IDENT/TYPEIDENT 均可 *)
+
+fn_decl         = [ "pub" ] "fn" IDENT [ type_params ]
+                  "(" [ param_list ] ")" "->" type_expr [ effect ] "=" expr ;
+param_list      = param { "," param } [ "," ] ;
+param           = IDENT ":" type_expr ;
+
+test_decl       = "test" STRING block ;
+
+(* ---- 语句与块 ---- *)
+block           = "{" { stmt NEWLINE } [ expr ] "}" ;
+stmt            = let_stmt | var_stmt | assign_stmt | for_stmt | while_stmt
+                | assert_stmt | expr ;
+let_stmt        = "let" pattern [ ":" type_expr ] "=" expr ;
+var_stmt        = "var" IDENT [ ":" type_expr ] "=" expr ;
+assign_stmt     = IDENT "=" expr ;
+for_stmt        = "for" IDENT "in" expr block ;
+while_stmt      = "while" expr block ;
+assert_stmt     = "assert" expr ;
+
+(* ---- 表达式, 按优先级 ---- *)
+expr            = pipe_expr ;
+pipe_expr       = or_expr { "|>" or_expr } ;
+or_expr         = and_expr { "||" and_expr } ;
+and_expr        = cmp_expr { "&&" cmp_expr } ;
+cmp_expr        = concat_expr [ ( "==" | "!=" | "<" | "<=" | ">" | ">=" ) concat_expr ] ;
+concat_expr     = add_expr { "++" add_expr } ;               (* 右结合 *)
+add_expr        = mul_expr { ( "+" | "-" ) mul_expr } ;
+mul_expr        = unary_expr { ( "*" | "/" | "%" ) unary_expr } ;
+unary_expr      = [ "not" | "-" ] postfix_expr ;
+postfix_expr    = primary_expr { postfix } ;
+postfix         = "?"                                        (* Result/Option 传播 *)
+                | "." IDENT [ call_args ]                    (* 字段/方法 *)
+                | call_args ;
+call_args       = "(" [ arg { "," arg } [ "," ] ] ")" ;
+arg             = [ IDENT ":" ] expr ;                       (* 可按名传参 *)
+
+primary_expr    = literal | IDENT | ctor_expr | record_expr
+                | lambda | if_expr | match_expr
+                | comptime_expr | block | paren_or_tuple | list_lit ;
+
+literal         = INT | FLOAT | STRING | "true" | "false" | "(" ")" ;
+list_lit        = "[" [ expr { "," expr } [ "," ] ] "]" ;
+paren_or_tuple  = "(" expr { "," expr } ")" ;
+ctor_expr       = TYPEIDENT [ call_args ] ;
+record_expr     = TYPEIDENT "{" [ ".." expr "," ] rec_field { "," rec_field } [ "," ] "}" ;
+rec_field       = IDENT [ ":" expr ] ;                       (* 同名简写 { x } *)
+lambda          = "fn" "(" [ lambda_params ] ")" "=>" expr ;
+lambda_params   = lambda_param { "," lambda_param } ;
+lambda_param    = IDENT [ ":" type_expr ] ;
+if_expr         = "if" expr block { "else" "if" expr block } [ "else" block ] ;
+comptime_expr   = "comptime" block ;
+
+match_expr      = "match" expr "{" match_arm { NEWLINE match_arm } "}" ;
+match_arm       = pattern_or [ "if" expr ] "->" expr ;
+pattern_or      = pattern { "|" pattern } ;
+
+(* ---- 模式 ---- *)
+pattern         = "_" | literal | IDENT
+                | TYPEIDENT [ "(" pat_args ")" ]             (* 构造器 *)
+                | TYPEIDENT "{" pat_fields "}"               (* 记录 *)
+                | "(" pattern "," pattern { "," pattern } ")"
+                | "[" [ pat_list_items ] "]" ;
+pat_args        = pat_arg { "," pat_arg } [ "," [ ".." ] ] ;
+pat_arg         = [ IDENT ":" ] pattern ;
+pat_fields      = IDENT [ ":" pattern ] { "," IDENT [ ":" pattern ] } [ "," ".." ] ;
+pat_list_items  = pattern { "," pattern } [ "," ".." IDENT ] ;

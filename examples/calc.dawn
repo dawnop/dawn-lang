@@ -1,0 +1,134 @@
+# Full-feature example: Result + `?` propagation, comptime, Java interop,
+# and a precedence-climbing evaluator.
+# NOTE: uses M1/M2 features — not yet compilable in M0.
+# A four-function calculator: dawn run examples/calc.dawn "2+3*4"
+
+use java "java.lang.System"
+
+type Token =
+  | Num(v: Int)
+  | Plus
+  | Minus
+  | Star
+  | Slash
+  | LParen
+  | RParen
+
+type Parser = { tokens: List[Token], pos: Int }
+
+# ---- lexing ----
+
+fn tokenize(src: String) -> Result[List[Token], String] =
+  src
+    |> chars
+    |> filter(fn(c) => c != " ")
+    |> fold(Ok([]), fn(acc, c) => {
+        let toks = acc?
+        match c {
+          "+" -> Ok(toks ++ [Plus])
+          "-" -> Ok(toks ++ [Minus])
+          "*" -> Ok(toks ++ [Star])
+          "/" -> Ok(toks ++ [Slash])
+          "(" -> Ok(toks ++ [LParen])
+          ")" -> Ok(toks ++ [RParen])
+          d   -> match to_int(d) {
+            Some(n) -> Ok(push_digit(toks, n))
+            None    -> Err("unexpected char: {d}")
+          }
+        }
+      })
+
+# merge consecutive digits into the previous Num
+fn push_digit(toks: List[Token], d: Int) -> List[Token] =
+  match toks {
+    []               -> [Num(d)]
+    [..init, Num(v)] -> init ++ [Num(v * 10 + d)]
+    _                -> toks ++ [Num(d)]
+  }
+
+# ---- evaluation (precedence climbing) ----
+
+fn eval(src: String) -> Result[Int, String] = {
+  let tokens = tokenize(src)?
+  let (value, rest) = expr(Parser { tokens: tokens, pos: 0 })?
+  if rest.pos == len(rest.tokens) { Ok(value) }
+  else { Err("trailing tokens at {rest.pos}") }
+}
+
+fn expr(p: Parser) -> Result[(Int, Parser), String] = {
+  var (acc, cur) = term(p)?
+  while peek(cur) == Some(Plus) || peek(cur) == Some(Minus) {
+    let op = peek(cur)
+    let (rhs, next) = term(advance(cur))?
+    acc = match op { Some(Minus) -> acc - rhs, _ -> acc + rhs }
+    cur = next
+  }
+  Ok((acc, cur))
+}
+
+fn term(p: Parser) -> Result[(Int, Parser), String] = {
+  var (acc, cur) = atom(p)?
+  while peek(cur) == Some(Star) || peek(cur) == Some(Slash) {
+    let op = peek(cur)
+    let (rhs, next) = atom(advance(cur))?
+    acc = match op {
+      Some(Slash) -> if rhs == 0 { 0 } else { acc / rhs }
+      _           -> acc * rhs
+    }
+    cur = next
+  }
+  Ok((acc, cur))
+}
+
+fn atom(p: Parser) -> Result[(Int, Parser), String] =
+  match peek(p) {
+    Some(Num(v))  -> Ok((v, advance(p)))
+    Some(LParen)  -> {
+      let (v, cur) = expr(advance(p))?
+      match peek(cur) {
+        Some(RParen) -> Ok((v, advance(cur)))
+        _            -> Err("expected )")
+      }
+    }
+    _ -> Err("expected number or ( at {p.pos}")
+  }
+
+fn peek(p: Parser) -> Option[Token] = p.tokens.get(p.pos)
+fn advance(p: Parser) -> Parser = Parser { ..p, pos: p.pos + 1 }
+
+# ---- entry point ----
+
+const BANNER: String = comptime {
+  "dawn-calc (" ++ join(map(range(0, 3), to_string), ".") ++ ")"
+}
+
+pub fn main() -> Unit !io = {
+  println(BANNER)
+  match args().get(0) {
+    None -> {
+      println("usage: calc <expr>")
+      System.exit(1)
+    }
+    Some(src) -> match eval(src) {
+      Ok(v)  -> println("{src} = {v}")
+      Err(e) -> {
+        println("error: {e}")
+        System.exit(1)
+      }
+    }
+  }
+}
+
+# ---- tests ----
+
+test "precedence" {
+  assert eval("2+3*4") == Ok(14)
+}
+
+test "parens" {
+  assert eval("(2+3)*4") == Ok(20)
+}
+
+test "bad input is a value, not an exception" {
+  assert eval("2+%") == Err("unexpected char: %")
+}

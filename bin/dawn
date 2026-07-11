@@ -1,0 +1,28 @@
+#!/bin/sh
+# dawn CLI launcher: locate a JDK and the compiler fat jar, then delegate.
+set -e
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+JAR="$ROOT/compiler/build/libs/dawn.jar"
+
+if [ ! -f "$JAR" ]; then
+  echo "error: $JAR not found" >&2
+  echo "build it first: cd $ROOT && gradle :compiler:fatJar" >&2
+  exit 2
+fi
+
+# if JAVA_HOME is unset, try GraalVM under ~/tools
+if [ -z "$JAVA_HOME" ]; then
+  for d in "$HOME"/tools/graalvm-*/Contents/Home; do
+    if [ -x "$d/bin/java" ]; then
+      JAVA_HOME="$d"
+      export JAVA_HOME
+      break
+    fi
+  done
+fi
+
+if [ -n "$JAVA_HOME" ] && [ -x "$JAVA_HOME/bin/java" ]; then
+  exec "$JAVA_HOME/bin/java" -jar "$JAR" "$@"
+fi
+exec java -jar "$JAR" "$@"
