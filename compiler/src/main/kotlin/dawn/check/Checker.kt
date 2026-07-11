@@ -311,7 +311,7 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
                 sink.error(
                     "function `${d.name}` is not declared !$used but calls `$name` (!$used)",
                     span,
-                    "add !$used (or !io) to the end of the signature, or remove the call",
+                    "add !$used to the end of the signature, or remove the call",
                 )
             }
         }
