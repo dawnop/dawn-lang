@@ -48,7 +48,7 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
                 sink.error("type `${d.name}` is defined twice", d.nameSpan)
                 continue
             }
-            val info = AdtInfo(d.name, d.nameSpan)
+            val info = AdtInfo(d.name, d.nameSpan, d.isRecord)
             adts[d.name] = info
             for (c in d.ctors) {
                 val ci = CtorInfo(info, c.name, c.nameSpan)
@@ -81,7 +81,7 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
                             "a no-payload case is just a bare constructor")
                         ft = TError
                     }
-                    ci.fields.add(FieldInfo(f.name, ft))
+                    ci.fields.add(FieldInfo(f.name, ft, f.span))
                 }
             }
         }
@@ -227,6 +227,7 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
         }
         is Call -> checkCall(e)
         is CtorCall -> checkCtorCall(e)
+        is FieldAccess -> checkFieldAccess(e)
         is Binary -> checkBinary(e)
         is Unary -> when (e.op) {
             UnOp.NOT -> {
@@ -279,6 +280,7 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
     private fun checkCtorCall(e: CtorCall): Type {
         val ci = ctors[e.ctorName]
         if (ci == null) {
+            e.spread?.let { checkExpr(it) }
             for (a in e.args) checkExpr(a.expr)
             return error("undefined constructor: ${e.ctorName}", e.calleeSpan,
                 if (adts.containsKey(e.ctorName))
@@ -289,8 +291,18 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
         e.ctor = ci
         val n = ci.fields.size
         if (!e.hasParens && n > 0) {
-            return error("constructor `${ci.name}` has $n field(s) and cannot be used bare", e.span,
-                "constructor: ${ci.render()}")
+            return error(
+                if (ci.adt.isRecord)
+                    "record `${ci.name}` must be built with braces: ${ci.name} { ... }"
+                else "constructor `${ci.name}` has $n field(s) and cannot be used bare",
+                e.span, "constructor: ${ci.render()}")
+        }
+        if (e.spread != null) {
+            if (!ci.adt.isRecord)
+                sink.error("`..base` functional update only works on records", e.spread!!.span)
+            val bt = checkExpr(e.spread!!, expected = ci.adt.type)
+            if (!assignable(bt, ci.adt.type))
+                sink.error("`..base` must be a ${ci.adt.name}, got $bt", e.spread!!.span)
         }
         // map arguments (positional prefix, then named) onto fields
         val slots = arrayOfNulls<Expr>(n)
@@ -335,12 +347,28 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
             if (e.args.size > n)
                 sink.error("`${ci.name}` takes $n field(s), got ${e.args.size}", e.span,
                     "constructor: ${ci.render()}")
-            else if (missing.isNotEmpty())
+            else if (missing.isNotEmpty() && e.spread == null)
                 sink.error("missing field(s) in `${ci.name}`: ${missing.joinToString(", ") { it.name }}",
                     e.span, "constructor: ${ci.render()}")
         }
-        if (slots.all { it != null }) e.ordered = slots.map { it!! }
+        // with a spread, unspecified fields come from the base
+        if (slots.all { it != null } || e.spread != null) e.fieldExprs = slots.toList()
         return ci.adt.type
+    }
+
+    private fun checkFieldAccess(e: FieldAccess): Type {
+        val tt = checkExpr(e.target)
+        if (tt.isErrorish) return TError
+        if (tt !is TAdt || !tt.info.isRecord)
+            return error("`.` field access needs a record value, got $tt", e.fieldSpan,
+                if (tt is TAdt) "`${tt.info.name}` is a sum type; destructure it with match" else null)
+        val ci = tt.info.ctors.first()
+        val field = ci.fields.find { it.name == e.fieldName }
+            ?: return error("`${tt.info.name}` has no field `${e.fieldName}`", e.fieldSpan,
+                "fields: ${ci.fields.joinToString(", ") { it.name }}")
+        e.owner = ci
+        e.field = field
+        return field.type
     }
 
     private fun checkBinary(e: Binary): Type {
@@ -403,9 +431,9 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
 
     private fun checkMatch(e: Match, expected: Type?): Type {
         val st = checkExpr(e.scrutinee)
-        val scrutOk = st in listOf(TInt, TString, TBool) || st is TAdt
+        val scrutOk = st in listOf(TInt, TFloat, TString, TBool) || st is TAdt
         if (!scrutOk && !st.isErrorish)
-            sink.error("match supports Int/String/Bool and user-defined types, got $st", e.scrutinee.span)
+            sink.error("match supports Int/Float/String/Bool and user-defined types, got $st", e.scrutinee.span)
 
         var result: Type = TNever
 

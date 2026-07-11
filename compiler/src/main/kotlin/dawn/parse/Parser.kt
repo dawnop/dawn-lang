@@ -24,6 +24,26 @@ class Parser(tokens: List<Token>, private val sink: DiagnosticSink = DiagnosticS
     private val toks = tokens
     private var pos = 0
 
+    /**
+     * In header positions (match scrutinee, if/while conditions, for bounds) a
+     * top-level `Type { ... }` record literal would be ambiguous with the block
+     * that follows — so it is banned there (same rule as Rust). Any inner
+     * bracket/brace re-allows it.
+     */
+    private var noStructLit = false
+
+    private fun <T> headerExpr(body: () -> T): T {
+        val old = noStructLit
+        noStructLit = true
+        try { return body() } finally { noStructLit = old }
+    }
+
+    private fun <T> bracketed(body: () -> T): T {
+        val old = noStructLit
+        noStructLit = false
+        try { return body() } finally { noStructLit = old }
+    }
+
     // ---- token cursor ----
 
     private fun peek(ahead: Int = 0): Token = toks[(pos + ahead).coerceAtMost(toks.size - 1)]
@@ -91,8 +111,7 @@ class Parser(tokens: List<Token>, private val sink: DiagnosticSink = DiagnosticS
         val name = expect(TYPEIDENT, "a type name (uppercase)")
         if (at(LBRACKET)) throw err("generic type parameters are not implemented yet")
         expect(EQ, "`=`")
-        if (at(LBRACE)) throw err("record types are not implemented yet",
-            "sum types are: type ${name.text} = | A | B(x: Int)")
+        if (at(LBRACE)) return recordDecl(pub, kw, name)
         val ctors = ArrayList<CtorDecl>()
         if (at(PIPE)) advance() // leading | is optional
         skipNewlines()
@@ -106,7 +125,29 @@ class Parser(tokens: List<Token>, private val sink: DiagnosticSink = DiagnosticS
             skipNewlines()
             ctors.add(ctorDecl())
         }
-        return TypeDecl(pub, name.text, ctors, Span(kw.span.start, ctors.last().span.end), name.span)
+        return TypeDecl(pub, name.text, ctors, isRecord = false,
+            Span(kw.span.start, ctors.last().span.end), name.span)
+    }
+
+    /** type Point = { x: Float, y: Float } — a single-constructor product type */
+    private fun recordDecl(pub: Boolean, kw: Token, name: Token): TypeDecl {
+        advance() // {
+        skipNewlines()
+        val fields = ArrayList<FieldDecl>()
+        while (!at(RBRACE)) {
+            val f = expect(IDENT, "a field name")
+            expect(COLON, "`:` (record fields must be typed)")
+            val t = typeRef()
+            fields.add(FieldDecl(f.text, t, Span(f.span.start, t.span.end)))
+            skipNewlines()
+            if (at(COMMA)) { advance(); skipNewlines() } else break
+        }
+        val close = expect(RBRACE, "`}`")
+        if (fields.isEmpty())
+            throw DawnError("a record must declare at least one field", Span(kw.span.start, close.span.end))
+        val ctor = CtorDecl(name.text, fields, Span(name.span.start, close.span.end), name.span)
+        return TypeDecl(pub, name.text, listOf(ctor), isRecord = true,
+            Span(kw.span.start, close.span.end), name.span)
     }
 
     private fun ctorDecl(): CtorDecl {
@@ -215,7 +256,7 @@ class Parser(tokens: List<Token>, private val sink: DiagnosticSink = DiagnosticS
 
     private fun whileStmt(): Stmt {
         val kw = advance()
-        val cond = expression()
+        val cond = headerExpr { expression() }
         val body = block()
         return WhileStmt(cond, body, Span(kw.span.start, body.span.end))
     }
@@ -224,11 +265,11 @@ class Parser(tokens: List<Token>, private val sink: DiagnosticSink = DiagnosticS
         val kw = advance()
         val name = expect(IDENT, "a loop variable name")
         expect(IN, "`in`")
-        val from = expression()
-        if (!at(DOTDOT)) throw err("M0 for loops support integer ranges only: for i in a..b",
-            "list iteration arrives in M1")
+        val from = headerExpr { expression() }
+        if (!at(DOTDOT)) throw err("for loops support integer ranges only: for i in a..b",
+            "list iteration arrives later in M1")
         advance()
-        val to = expression()
+        val to = headerExpr { expression() }
         val body = block()
         return ForStmt(name.text, from, to, body, Span(kw.span.start, body.span.end))
     }
@@ -330,8 +371,12 @@ class Parser(tokens: List<Token>, private val sink: DiagnosticSink = DiagnosticS
         var e = primaryExpr()
         while (true) {
             when (peek().type) {
-                QUESTION -> throw err("`?` needs Result/Option, which are not implemented in M0")
-                DOT -> throw err("`.` field/method access is not implemented in M0")
+                QUESTION -> throw err("`?` needs Result/Option, which are not implemented yet")
+                DOT -> {
+                    advance()
+                    val f = expect(IDENT, "a field name after `.`")
+                    e = FieldAccess(e, f.text, f.span, Span(e.span.start, f.span.end))
+                }
                 else -> return e
             }
         }
@@ -359,11 +404,16 @@ class Parser(tokens: List<Token>, private val sink: DiagnosticSink = DiagnosticS
         }
     }
 
-    /** Circle(1.0) / Rect(2.0, h: 3.0) / bare nullary Point */
+    /** Circle(1.0) / Rect(2.0, h: 3.0) / bare nullary Point / Point { x: 1.0 } / Point { ..p, x: 3.0 } */
     private fun ctorExpr(): Expr {
         val name = advance()
-        if (!at(LPAREN)) return CtorCall(name.text, emptyList(), hasParens = false, name.span, name.span)
-        advance()
+        if (at(LPAREN)) return bracketed { ctorParenArgs(name) }
+        if (at(LBRACE) && !noStructLit) return bracketed { recordLit(name) }
+        return CtorCall(name.text, emptyList(), spread = null, hasParens = false, name.span, name.span)
+    }
+
+    private fun ctorParenArgs(name: Token): Expr {
+        advance() // (
         skipNewlines()
         val args = ArrayList<CtorArg>()
         while (!at(RPAREN)) {
@@ -381,22 +431,57 @@ class Parser(tokens: List<Token>, private val sink: DiagnosticSink = DiagnosticS
             if (at(COMMA)) { advance(); skipNewlines() } else break
         }
         val close = expect(RPAREN, "`)`")
-        return CtorCall(name.text, args, hasParens = true, name.span, Span(name.span.start, close.span.end))
+        return CtorCall(name.text, args, spread = null, hasParens = true, name.span,
+            Span(name.span.start, close.span.end))
+    }
+
+    private fun recordLit(name: Token): Expr {
+        advance() // {
+        skipNewlines()
+        var spread: Expr? = null
+        if (at(DOTDOT)) {
+            advance()
+            spread = expression()
+            skipNewlines()
+            if (at(COMMA)) { advance(); skipNewlines() }
+            else if (!at(RBRACE)) throw err("expected `,` or `}` after the `..base` spread")
+        }
+        val args = ArrayList<CtorArg>()
+        while (!at(RBRACE)) {
+            if (at(DOTDOT)) throw err("`..base` must come first in a record literal")
+            val f = expect(IDENT, "a field name")
+            val value: Expr
+            if (at(COLON)) {
+                advance()
+                skipNewlines()
+                value = expression()
+            } else {
+                value = VarRef(f.text, f.span) // shorthand { x } means { x: x }
+            }
+            args.add(CtorArg(f.text, value, Span(f.span.start, value.span.end)))
+            skipNewlines()
+            if (at(COMMA)) { advance(); skipNewlines() } else break
+        }
+        val close = expect(RBRACE, "`}`")
+        return CtorCall(name.text, args, spread, hasParens = true, name.span,
+            Span(name.span.start, close.span.end))
     }
 
     private fun identOrCall(): Expr {
         val name = advance()
         if (at(LPAREN)) {
-            advance()
-            skipNewlines()
-            val args = ArrayList<Expr>()
-            while (!at(RPAREN)) {
-                args.add(expression())
+            return bracketed {
+                advance()
                 skipNewlines()
-                if (at(COMMA)) { advance(); skipNewlines() } else break
+                val args = ArrayList<Expr>()
+                while (!at(RPAREN)) {
+                    args.add(expression())
+                    skipNewlines()
+                    if (at(COMMA)) { advance(); skipNewlines() } else break
+                }
+                val close = expect(RPAREN, "`)`")
+                Call(name.text, args, name.span, Span(name.span.start, close.span.end))
             }
-            val close = expect(RPAREN, "`)`")
-            return Call(name.text, args, name.span, Span(name.span.start, close.span.end))
         }
         return VarRef(name.text, name.span)
     }
@@ -424,17 +509,19 @@ class Parser(tokens: List<Token>, private val sink: DiagnosticSink = DiagnosticS
             val close = advance()
             return UnitLit(Span(open.span.start, close.span.end))
         }
-        skipNewlines()
-        val e = expression()
-        skipNewlines()
-        if (at(COMMA)) throw err("tuples are not implemented in M0")
-        expect(RPAREN, "`)`")
-        return e
+        return bracketed {
+            skipNewlines()
+            val e = expression()
+            skipNewlines()
+            if (at(COMMA)) throw err("tuples are not implemented yet")
+            expect(RPAREN, "`)`")
+            e
+        }
     }
 
     private fun ifExpr(): Expr {
         val kw = advance()
-        val cond = expression()
+        val cond = headerExpr { expression() }
         val thenB = block()
         var elseB: Expr? = null
         // else may sit on the line after }
@@ -450,7 +537,7 @@ class Parser(tokens: List<Token>, private val sink: DiagnosticSink = DiagnosticS
         return If(cond, thenB, elseB, Span(kw.span.start, end))
     }
 
-    private fun block(): Block {
+    private fun block(): Block = bracketed {
         val open = expect(LBRACE, "`{`")
         skipNewlines()
         val stmts = ArrayList<Stmt>()
@@ -464,7 +551,7 @@ class Parser(tokens: List<Token>, private val sink: DiagnosticSink = DiagnosticS
             }
         }
         val close = expect(RBRACE, "`}`")
-        return finishBlock(open, close, stmts)
+        finishBlock(open, close, stmts)
     }
 
     /** After a broken statement: skip to the next line (or block end) and continue. */
@@ -484,18 +571,20 @@ class Parser(tokens: List<Token>, private val sink: DiagnosticSink = DiagnosticS
 
     private fun matchExpr(): Expr {
         val kw = advance()
-        val scrut = expression()
+        val scrut = headerExpr { expression() }
         expect(LBRACE, "`{`")
-        skipNewlines()
-        val arms = ArrayList<MatchArm>()
-        while (!at(RBRACE) && !at(EOF)) {
-            arms.add(matchArm())
-            // arms are separated by newlines or commas
-            if (at(COMMA)) { advance(); skipNewlines() } else skipNewlines()
+        return bracketed {
+            skipNewlines()
+            val arms = ArrayList<MatchArm>()
+            while (!at(RBRACE) && !at(EOF)) {
+                arms.add(matchArm())
+                // arms are separated by newlines or commas
+                if (at(COMMA)) { advance(); skipNewlines() } else skipNewlines()
+            }
+            val close = expect(RBRACE, "`}`")
+            if (arms.isEmpty()) throw DawnError("match needs at least one arm", Span(kw.span.start, close.span.end))
+            Match(scrut, arms, Span(kw.span.start, close.span.end))
         }
-        val close = expect(RBRACE, "`}`")
-        if (arms.isEmpty()) throw DawnError("match needs at least one arm", Span(kw.span.start, close.span.end))
-        return Match(scrut, arms, Span(kw.span.start, close.span.end))
     }
 
     private fun matchArm(): MatchArm {
@@ -515,10 +604,15 @@ class Parser(tokens: List<Token>, private val sink: DiagnosticSink = DiagnosticS
         return when (t.type) {
             UNDERSCORE -> { advance(); WildPat(t.span) }
             INT -> { advance(); LitPat(IntLit(t.intValue, t.span), t.span) }
+            FLOAT -> { advance(); LitPat(FloatLit(t.floatValue, t.span), t.span) }
             MINUS -> {
                 advance()
-                val n = expect(INT, "a number")
-                LitPat(IntLit(-n.intValue, n.span), Span(t.span.start, n.span.end))
+                val span = Span(t.span.start, peek().span.end)
+                when {
+                    at(INT) -> LitPat(IntLit(-advance().intValue, span), span)
+                    at(FLOAT) -> LitPat(FloatLit(-advance().floatValue, span), span)
+                    else -> throw err("expected a number after `-` in a pattern")
+                }
             }
             TRUE -> { advance(); LitPat(BoolLit(true, t.span), t.span) }
             FALSE -> { advance(); LitPat(BoolLit(false, t.span), t.span) }
@@ -535,9 +629,10 @@ class Parser(tokens: List<Token>, private val sink: DiagnosticSink = DiagnosticS
         }
     }
 
-    /** Circle(r) / Rect(w: w, ..) / bare nullary Point */
+    /** Circle(r) / Rect(w: w, ..) / bare nullary Point / record Point { x, y: 0, .. } */
     private fun ctorPat(): Pattern {
         val name = advance()
+        if (at(LBRACE)) return recordPat(name)
         if (!at(LPAREN)) {
             return CtorPat(name.text, emptyList(), hasRest = false, hasParens = false, name.span, name.span)
         }
@@ -565,6 +660,37 @@ class Parser(tokens: List<Token>, private val sink: DiagnosticSink = DiagnosticS
             if (at(COMMA)) { advance(); skipNewlines() } else break
         }
         val close = expect(RPAREN, "`)`")
+        return CtorPat(name.text, args, rest, hasParens = true, name.span, Span(name.span.start, close.span.end))
+    }
+
+    /** Point { x, y: 0, .. } — field shorthand `x` binds the field to `x` */
+    private fun recordPat(name: Token): Pattern {
+        advance() // {
+        skipNewlines()
+        val args = ArrayList<PatArg>()
+        var rest = false
+        while (!at(RBRACE)) {
+            if (at(DOTDOT)) {
+                advance()
+                rest = true
+                skipNewlines()
+                if (!at(RBRACE)) throw err("`..` must be the last thing in a record pattern")
+                break
+            }
+            val f = expect(IDENT, "a field name")
+            val sub: Pattern
+            if (at(COLON)) {
+                advance()
+                skipNewlines()
+                sub = pattern()
+            } else {
+                sub = BindPat(f.text, f.span) // shorthand { x } binds field x to x
+            }
+            args.add(PatArg(f.text, sub))
+            skipNewlines()
+            if (at(COMMA)) { advance(); skipNewlines() } else break
+        }
+        val close = expect(RBRACE, "`}`")
         return CtorPat(name.text, args, rest, hasParens = true, name.span, Span(name.span.start, close.span.end))
     }
 }

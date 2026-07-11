@@ -34,7 +34,7 @@ class CodeGen(private val module: Module, private val className: String) {
     private val adtSupers: Map<String, String> = buildMap {
         for (t in module.types) {
             put(t.name, OBJ)
-            for (c in t.ctors) put("${t.name}$${c.name}", t.name)
+            if (!t.isRecord) for (c in t.ctors) put("${t.name}$${c.name}", t.name)
         }
     }
 
@@ -120,6 +120,12 @@ class CodeGen(private val module: Module, private val className: String) {
 
     private fun genAdt(d: TypeDecl, out: MutableMap<String, ByteArray>) {
         val base = d.name
+        if (d.isRecord) {
+            // a record is one final class, no abstract base (spec §12.2)
+            val ci = d.ctors.single().info!!
+            out[ci.jvmName] = genCtorClass(OBJ, ci)
+            return
+        }
         val bw = DawnClassWriter()
         bw.visit(V17, ACC_PUBLIC or ACC_ABSTRACT, base, null, OBJ, null)
         val bc = bw.visitMethod(ACC_PROTECTED, "<init>", "()V", null, null)
@@ -422,6 +428,14 @@ class CodeGen(private val module: Module, private val className: String) {
         is VarRef -> { loadVar(e.symbol!!); true }
         is Call -> genCall(e, tail)
         is CtorCall -> genCtorCall(e)
+        is FieldAccess -> {
+            if (!genExpr(e.target, tail = false)) false
+            else {
+                val f = e.field!!
+                mv.visitFieldInsn(GETFIELD, e.owner!!.jvmName, f.name, descOf(f.type))
+                true
+            }
+        }
         is Binary -> genBinary(e)
         is Unary -> {
             genExpr(e.operand, tail = false)
@@ -502,8 +516,16 @@ class CodeGen(private val module: Module, private val className: String) {
             mv.visitFieldInsn(GETSTATIC, sub, "INSTANCE", "L$sub;")
             return true
         }
-        // evaluate arguments in written order into temps (named arguments may be
-        // out of field order, but effects must run as written), then construct
+        // evaluate the spread base and arguments in written order into temps
+        // (named arguments may be out of field order, but effects must run as
+        // written), then construct
+        var spreadSlot = -1
+        if (e.spread != null) {
+            if (!genExpr(e.spread!!, tail = false)) return false
+            spreadSlot = nextSlot
+            nextSlot += 1
+            mv.visitVarInsn(ASTORE, spreadSlot)
+        }
         val tempOf = HashMap<Expr, Int>()
         for (a in e.args) {
             if (!genExpr(a.expr, tail = false)) return false
@@ -514,7 +536,16 @@ class CodeGen(private val module: Module, private val className: String) {
         }
         mv.visitTypeInsn(NEW, sub)
         mv.visitInsn(DUP)
-        for (arg in e.ordered!!) loadSlot(mv, arg.type!!, tempOf[arg]!!)
+        for ((i, arg) in e.fieldExprs!!.withIndex()) {
+            if (arg != null) {
+                loadSlot(mv, arg.type!!, tempOf[arg]!!)
+            } else {
+                // field not given: take it from the spread base
+                val f = ci.fields[i]
+                mv.visitVarInsn(ALOAD, spreadSlot)
+                mv.visitFieldInsn(GETFIELD, sub, f.name, descOf(f.type))
+            }
+        }
         val desc = "(" + ci.fields.joinToString("") { descOf(it.type) } + ")V"
         mv.visitMethodInsn(INVOKESPECIAL, sub, "<init>", desc, false)
         return true
@@ -707,6 +738,12 @@ class CodeGen(private val module: Module, private val className: String) {
                     mv.visitVarInsn(LLOAD, slot)
                     mv.visitLdcInsn((p.lit as IntLit).value)
                     mv.visitInsn(LCMP)
+                    mv.visitJumpInsn(IFNE, failTo)
+                }
+                TFloat -> {
+                    mv.visitVarInsn(DLOAD, slot)
+                    mv.visitLdcInsn((p.lit as FloatLit).value)
+                    mv.visitInsn(DCMPL) // NaN never matches, same as ==
                     mv.visitJumpInsn(IFNE, failTo)
                 }
                 TString -> {

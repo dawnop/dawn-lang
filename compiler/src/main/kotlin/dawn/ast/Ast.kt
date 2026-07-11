@@ -1,6 +1,7 @@
 package dawn.ast
 
 import dawn.check.CtorInfo
+import dawn.check.FieldInfo
 import dawn.check.FnSig
 import dawn.check.Symbol
 import dawn.check.Type
@@ -43,11 +44,16 @@ class FnDecl(
     var sig: FnSig? = null
 }
 
-/** type Name = | Ctor(field: T) | ... */
+/**
+ * type Name = | Ctor(field: T) | ...
+ * A record (type Name = { field: T }) is sugar: a single constructor named
+ * after the type, with isRecord set.
+ */
 class TypeDecl(
     pub: Boolean,
     name: String,
     val ctors: List<CtorDecl>,
+    val isRecord: Boolean,
     span: Span,
     nameSpan: Span,
 ) : Decl(pub, name, span, nameSpan)
@@ -88,10 +94,15 @@ class Call(val callee: String, val args: List<Expr>, val calleeSpan: Span, span:
     var sig: FnSig? = null
 }
 
-/** Constructor call/reference: Circle(1.0), Rect(2.0, h: 3.0), or a bare nullary Point. */
+/**
+ * Constructor call/reference: Circle(1.0), Rect(2.0, h: 3.0), a bare nullary
+ * Point, or a record literal Point { x: 1.0, y: 2.0 } / Point { ..p, x: 3.0 }.
+ */
 class CtorCall(
     val ctorName: String,
     val args: List<CtorArg>,
+    /** functional-update base (record literals only): the expr in { ..base, ... } */
+    val spread: Expr?,
     /** false for a bare nullary constructor reference */
     val hasParens: Boolean,
     val calleeSpan: Span,
@@ -99,8 +110,15 @@ class CtorCall(
 ) : Expr(span) {
     /** resolved constructor, filled by the checker */
     var ctor: CtorInfo? = null
-    /** argument expressions reordered to field order, filled by the checker */
-    var ordered: List<Expr>? = null
+    /** per-field argument expression (null = take the field from spread), filled by the checker */
+    var fieldExprs: List<Expr?>? = null
+}
+
+/** Record field access: p.x (also chains: p.a.b). */
+class FieldAccess(val target: Expr, val fieldName: String, val fieldSpan: Span, span: Span) : Expr(span) {
+    /** resolved owner constructor + field, filled by the checker */
+    var owner: CtorInfo? = null
+    var field: FieldInfo? = null
 }
 
 class CtorArg(val name: String?, val expr: Expr, val span: Span)

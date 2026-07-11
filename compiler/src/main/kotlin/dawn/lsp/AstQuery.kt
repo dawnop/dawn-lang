@@ -77,7 +77,12 @@ private class TargetQuery(private val analysis: Analyzed, private val offset: In
             }
             is CtorCall -> {
                 e.ctor?.let { offer(e.calleeSpan, it.render(), it.nameSpan) }
+                e.spread?.let { visitExpr(it) }
                 e.args.forEach { visitExpr(it.expr) }
+            }
+            is FieldAccess -> {
+                visitExpr(e.target)
+                e.field?.let { offer(e.fieldSpan, "${it.name}: ${it.type}", it.defSpan) }
             }
             is StrLit -> e.parts.forEach { if (it is StrPart.Interp) visitExpr(it.expr) }
             is Binary -> { visitExpr(e.left); visitExpr(e.right) }

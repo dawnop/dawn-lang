@@ -19,6 +19,7 @@ internal fun toSPat(p: Pattern): SPat = when (p) {
     is WildPat, is BindPat -> SWild
     is LitPat -> when (val l = p.lit) {
         is IntLit -> SLit(l.value)
+        is FloatLit -> SLit(l.value)
         is BoolLit -> SLit(l.value)
         is StrLit -> SLit(l.parts.joinToString("") { (it as StrPart.Text).value })
         else -> SWild

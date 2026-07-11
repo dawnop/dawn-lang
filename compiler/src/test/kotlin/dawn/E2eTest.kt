@@ -119,6 +119,25 @@ class E2eTest {
     }
 
     @Test
+    fun matchOnFloatLiterals() {
+        val out = run("""
+            fn kind(x: Float) -> String =
+              match x {
+                0.0  -> "zero"
+                -1.5 -> "negative three halves"
+                _    -> "other"
+              }
+
+            pub fn main() -> Unit !io = {
+              println(kind(0.0))
+              println(kind(-1.5))
+              println(kind(2.0))
+            }
+        """.trimIndent())
+        assertEquals("zero\nnegative three halves\nother\n", out)
+    }
+
+    @Test
     fun tailRecursionDoesNotGrowStack() {
         // ten million frames: guaranteed StackOverflow without tail-call elimination
         val out = run("""

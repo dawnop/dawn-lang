@@ -48,26 +48,28 @@ sealed class Type(val display: String) {
  * then constructor field types — so recursive types (Expr = Add(l: Expr, ...))
  * resolve naturally.
  */
-class AdtInfo(val name: String, val nameSpan: Span?) {
+class AdtInfo(val name: String, val nameSpan: Span?, val isRecord: Boolean = false) {
     val ctors = ArrayList<CtorInfo>()
     val type: Type.TAdt = Type.TAdt(this)
 
-    /** JVM internal name of the abstract base class */
+    /** JVM internal name: abstract base class (sum type) or the single final class (record) */
     val jvmName: String get() = name
 }
 
 class CtorInfo(val adt: AdtInfo, val name: String, val nameSpan: Span?) {
     val fields = ArrayList<FieldInfo>()
 
-    /** JVM internal name of this constructor's final subclass */
-    val jvmName: String get() = "${adt.name}$$name"
+    /** JVM internal name: a final subclass, or the record class itself */
+    val jvmName: String get() = if (adt.isRecord) adt.name else "${adt.name}$$name"
 
-    fun render(): String =
-        if (fields.isEmpty()) "$name: ${adt.name}"
-        else "$name(${fields.joinToString(", ") { "${it.name}: ${it.type}" }}): ${adt.name}"
+    fun render(): String = when {
+        adt.isRecord -> "$name { ${fields.joinToString(", ") { "${it.name}: ${it.type}" }} }"
+        fields.isEmpty() -> "$name: ${adt.name}"
+        else -> "$name(${fields.joinToString(", ") { "${it.name}: ${it.type}" }}): ${adt.name}"
+    }
 }
 
-class FieldInfo(val name: String, val type: Type)
+class FieldInfo(val name: String, val type: Type, val defSpan: Span? = null)
 
 /** Resolved local variable/parameter; the checker fills this into the AST, codegen consumes it. */
 class Symbol(val name: String, val type: Type, val mutable: Boolean, val defSpan: Span) {
