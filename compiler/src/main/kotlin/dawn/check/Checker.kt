@@ -45,7 +45,11 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
     private var currentEffVars: MutableMap<String, Eff.Var> = HashMap()
 
     /** an active lambda: locals declared outside its boundary are captures */
-    private class LambdaCtx(val boundaryDepth: Int) {
+    private class LambdaCtx(
+        val boundaryDepth: Int,
+        /** the lambda's return type when known from context — lets `?` work inside (spec §8.1) */
+        val expectedRet: Type?,
+    ) {
         val captures = LinkedHashSet<Symbol>()
     }
     private val lambdaStack = ArrayDeque<LambdaCtx>()
@@ -988,7 +992,7 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
         val savedWitness = effWitness
         usedEffects = HashSet()
         effWitness = HashMap()
-        val ctx = LambdaCtx(scopes.size)
+        val ctx = LambdaCtx(scopes.size, exp?.ret?.takeIf { isConcrete(it) })
         lambdaStack.addLast(ctx)
         val bodyType = scoped {
             e.params.forEachIndexed { i, p -> p.symbol = declare(p.name, paramTypes[i], mutable = false, p.span) }
@@ -1049,11 +1053,15 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
     private fun checkPropagate(e: Propagate): Type {
         val ot = checkExpr(e.operand)
         if (ot.isErrorish) return TError
-        if (lambdaStack.isNotEmpty())
-            return error("`?` cannot be used inside a lambda (it returns from the enclosing function)", e.span,
-                "handle the Option/Result with match inside the lambda")
-        val sigRet = currentFnSig?.ret
-            ?: return error("`?` can only be used inside a function that returns Option or Result", e.span)
+        // inside a lambda, ? returns from the lambda — its return type must be known
+        val sigRet = if (lambdaStack.isNotEmpty()) {
+            lambdaStack.last().expectedRet
+                ?: return error("`?` inside a lambda needs the lambda's return type to be known from context",
+                    e.span, "handle the Option/Result with match, or make the expected function type explicit")
+        } else {
+            currentFnSig?.ret
+                ?: return error("`?` can only be used inside a function that returns Option or Result", e.span)
+        }
         return when {
             ot is TAdt && ot.info === OPTION_ADT -> {
                 if (sigRet !is TAdt || sigRet.info !== OPTION_ADT)
@@ -1120,7 +1128,10 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
 
     private fun checkBinary(e: Binary): Type {
         val lt = checkExpr(e.left)
-        val rt = checkExpr(e.right)
+        // == seeds the right side with the left side's type (Ok(14) infers its E
+        // from the other operand)
+        val eqLike = e.op == BinOp.EQ || e.op == BinOp.NEQ
+        val rt = checkExpr(e.right, expected = lt.takeIf { eqLike && isConcrete(it) })
         // one side already failed: pick a plausible result type, stay silent
         if (lt.isErrorish || rt.isErrorish) return when (e.op) {
             BinOp.ADD, BinOp.SUB, BinOp.MUL, BinOp.DIV, BinOp.MOD ->

@@ -60,8 +60,9 @@ gradle :compiler:fatJar
 编译器前端做了完整的错误恢复——文件残缺时其余部分照常分析，一次报出全部错误。
 VS Code 扩展与 Neovim / Helix 配置见 [editors/](editors/)。
 
-状态：**M0、M1 已实现**——验收样例 [examples/shapes.dawn](examples/shapes.dawn)
-原样通过 `dawn run` 与 `dawn test`，JVM 与 native 输出逐字节一致。
+状态：**M0、M1、M2 已实现**——验收样例 [examples/shapes.dawn](examples/shapes.dawn) 与
+[examples/calc.dawn](examples/calc.dawn) 原样通过 `dawn run` 与 `dawn test`，
+JVM 与 native 输出一致。
 
 - M0：Int/Float/Bool/String、函数、match、`!io` 效果检查、自递归尾调用消除、
   字符串插值、`dawn run` / `dawn build --native`。
@@ -72,6 +73,12 @@ VS Code 扩展与 Neovim / Helix 配置见 [editors/](editors/)。
   （按值捕获、函数类型 `fn(A) -> B !e`、效果变量随调用点实例化，
   LambdaMetafactory 在 native-image 下免配置已实测）；**`?` 传播**；
   **test 块**（`assert` 失败报两侧值，`dawn test` 执行、构建剥除）。
+- M2：**comptime**（编译期求值纯 Dawn 代码，fuel 预算，结果嵌入常量池/静态字段）
+  与顶层 **const**；**`use java` 互操作**（编译期反射读签名、重载打分消解、
+  null 在边界包成 `Option`、全部 `!io`）；**stdlib core**（字符串函数、
+  `read_file`/`write_file`/`args`、`expect`/`unwrap_or`）；**元组** + let/var
+  模式解构；**列表模式** `[x, ..rest]`/`[..init, last]`（穷尽性按长度精确检查）；
+  三引号多行字符串；点调用糖 `x.f(a)`；函数/内建作一等值（泛型按期望类型实例化）。
 
 详见 [docs/design.md](docs/design.md) 里程碑。编译器 Kotlin + ASM，
-测试 114 项（`gradle :compiler:test`）。native 二进制启动约 7ms。
+测试 176 项（`gradle :compiler:test`）。native 二进制启动约 7ms。

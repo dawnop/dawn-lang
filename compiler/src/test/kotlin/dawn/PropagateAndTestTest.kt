@@ -135,7 +135,8 @@ class PropagateAndTestTest {
     }
 
     @Test
-    fun propagateRejectedInLambda() {
+    fun propagateInLambdaNeedsKnownReturnType() {
+        // map's U is unbound here, so the lambda's return type is unknown
         val diags = errorsOf("""
             fn f(xs: List[Option[Int]]) -> Option[Int] = {
               let ys = map(xs, fn(o) => o? + 1)
@@ -144,7 +145,32 @@ class PropagateAndTestTest {
 
             pub fn main() -> Unit !io = println("ok")
         """.trimIndent())
-        assertHasError(diags, "`?` cannot be used inside a lambda")
+        assertHasError(diags, "needs the lambda's return type to be known")
+    }
+
+    @Test
+    fun propagateInLambdaWithKnownReturnType() {
+        // M2: ? returns from the lambda when its return type is known (fold idiom)
+        val out = run("""
+            fn sum_all(xs: List[Result[Int, String]]) -> Result[Int, String] =
+              fold(xs, Ok(0), fn(acc, x) => {
+                let a = acc?
+                let v = x?
+                Ok(a + v)
+              })
+
+            pub fn main() -> Unit !io = {
+              match sum_all([Ok(1), Ok(2), Ok(3)]) {
+                Ok(n) -> println("sum {n}")
+                Err(e) -> println("err {e}")
+              }
+              match sum_all([Ok(1), Err("boom"), Ok(3)]) {
+                Ok(n) -> println("sum {n}")
+                Err(e) -> println("err {e}")
+              }
+            }
+        """.trimIndent())
+        assertEquals("sum 6\nerr boom\n", out)
     }
 
     @Test
