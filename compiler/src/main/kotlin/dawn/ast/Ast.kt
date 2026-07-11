@@ -15,6 +15,7 @@ class Module(
     val fns: List<FnDecl> by lazy { decls.filterIsInstance<FnDecl>() }
     val types: List<TypeDecl> by lazy { decls.filterIsInstance<TypeDecl>() }
     val tests: List<TestDecl> by lazy { decls.filterIsInstance<TestDecl>() }
+    val consts: List<ConstDecl> by lazy { decls.filterIsInstance<ConstDecl>() }
 }
 
 sealed class Decl(
@@ -77,6 +78,24 @@ class TypeDecl(
     span: Span,
     nameSpan: Span,
 ) : Decl(pub, name, span, nameSpan)
+
+/**
+ * const NAME: Type = expr (spec §3.2). The initializer is implicitly comptime:
+ * pure, evaluated at compile time, embedded as a constant.
+ */
+class ConstDecl(
+    pub: Boolean,
+    name: String,
+    val typeAnn: TypeRef,
+    val init: Expr,
+    span: Span,
+    nameSpan: Span,
+) : Decl(pub, name, span, nameSpan) {
+    /** resolved declared type, filled by the checker */
+    var constType: Type? = null
+    /** the evaluated constant, filled by comptime evaluation */
+    var value: dawn.check.CValue? = null
+}
 
 /** test "name" { ... } — compiled and run only by `dawn test` (spec §3.4) */
 class TestDecl(
@@ -173,6 +192,8 @@ class CtorCall(
     var ctor: CtorInfo? = null
     /** per-field argument expression (null = take the field from spread), filled by the checker */
     var fieldExprs: List<Expr?>? = null
+    /** a bare SCREAMING_SNAKE name may resolve to a constant instead (filled by the checker) */
+    var constDecl: ConstDecl? = null
 }
 
 /** Record field access: p.x (also chains: p.a.b). */
@@ -190,6 +211,12 @@ class TupleLit(val elems: List<Expr>, span: Span) : Expr(span)
 
 /** expr? — unwrap Ok/Some, or return the Err/None from the enclosing function (spec §8.1) */
 class Propagate(val operand: Expr, span: Span) : Expr(span)
+
+/** comptime { ... } — evaluated at compile time, embedded as a constant (spec §7) */
+class ComptimeExpr(val body: Expr, span: Span) : Expr(span) {
+    /** the evaluated constant, filled by comptime evaluation */
+    var value: dawn.check.CValue? = null
+}
 
 class CtorArg(val name: String?, val expr: Expr, val span: Span)
 

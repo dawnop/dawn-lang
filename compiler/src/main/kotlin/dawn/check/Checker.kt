@@ -24,6 +24,9 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
     private val fns = HashMap<String, FnSig>()
     private val adts = HashMap<String, AdtInfo>()
     private val ctors = HashMap<String, CtorInfo>()
+    /** constants visible so far — filled in declaration order (evaluation order) */
+    private val consts = LinkedHashMap<String, ConstDecl>()
+    private var allConstNames: Set<String> = emptySet()
     private val scopes = ArrayDeque<HashMap<String, Symbol>>()
 
     /** user-defined functions by name (first definition wins on duplicates) */
@@ -153,6 +156,10 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
                 else -> fns[d.name] = sig
             }
         }
+        // 3.5. constants, in declaration order (a const sees only earlier consts;
+        // that order is also the evaluation order, so cycles cannot form)
+        allConstNames = module.consts.map { it.name }.toSet()
+        for (d in module.consts) checkConst(d)
         // 4. entry point check
         val main = module.fns.find { it.name == "main" }
         if (main != null) {
@@ -165,6 +172,86 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
         // 5. check each function body, then each test block
         for (d in module.fns) checkFn(d)
         for (t in module.tests) checkTest(t)
+    }
+
+    /** const NAME: Type = expr — declared type must be constant-serializable, body pure */
+    private fun checkConst(d: ConstDecl) {
+        currentTParams = emptyMap()
+        currentEffVars = HashMap()
+        val declared = resolveType(d.typeAnn)
+        d.constType = declared
+        if (!isConstSerializable(declared) && declared != TError) {
+            sink.error("`$declared` is not a constant-serializable type", d.typeAnn.span,
+                "constants hold Int/Float/Bool/String and List/tuple/record/ADT values built from them (spec §7.2)")
+            d.constType = TError
+        }
+        when {
+            ctors.containsKey(d.name) || adts.containsKey(d.name) ->
+                sink.error("`${d.name}` collides with a type or constructor name", d.nameSpan)
+            consts.containsKey(d.name) ->
+                sink.error("constant `${d.name}` is defined twice", d.nameSpan)
+        }
+        checkComptimeBody(d.init, expected = declared, what = "const initializers")?.let { bt ->
+            if (!assignable(bt, declared))
+                sink.error("`${d.name}` declares type $declared but its initializer is $bt", d.init.span)
+        }
+        if (!consts.containsKey(d.name) && !ctors.containsKey(d.name) && !adts.containsKey(d.name))
+            consts[d.name] = d
+    }
+
+    /**
+     * Check an implicitly-comptime body: fresh scope (no enclosing locals),
+     * no enclosing function (`?` is rejected), and the result must be pure.
+     * Returns the body type.
+     */
+    private fun checkComptimeBody(body: Expr, expected: Type?, what: String): Type? {
+        val savedUsed = usedEffects
+        val savedWitness = effWitness
+        val savedSig = currentFnSig
+        val savedScopes = ArrayList(scopes)
+        val savedLambdas = ArrayList(lambdaStack)
+        usedEffects = HashSet()
+        effWitness = HashMap()
+        currentFnSig = null
+        scopes.clear()
+        scopes.addLast(HashMap())
+        lambdaStack.clear()
+        val t = try {
+            checkExpr(body, expected)
+        } finally {
+            for (used in usedEffects) {
+                val (span, name) = effWitness[used] ?: (body.span to "?")
+                sink.error("$what must be pure, but `$name` is !$used", span,
+                    "compile-time evaluation cannot perform io (spec §7.2)")
+            }
+            usedEffects = savedUsed
+            effWitness = savedWitness
+            currentFnSig = savedSig
+            scopes.clear()
+            scopes.addAll(savedScopes)
+            lambdaStack.clear()
+            lambdaStack.addAll(savedLambdas)
+        }
+        return t
+    }
+
+    /** Int/Float/Bool/String and List/tuple/record/ADT built from them (spec §7.2). */
+    private fun isConstSerializable(t: Type, visited: MutableSet<AdtInfo> = HashSet()): Boolean = when (t) {
+        TInt, TFloat, TBool, TString -> true
+        is TList -> isConstSerializable(t.elem, visited)
+        is TTuple -> t.elems.all { isConstSerializable(it, visited) }
+        is TAdt -> {
+            if (!visited.add(t.info)) true // recursive types terminate here
+            else {
+                val instMap = t.info.typeParams.zip(t.args).toMap()
+                t.args.all { isConstSerializable(it, visited) } &&
+                    t.info.ctors.all { c ->
+                        c.fields.all { isConstSerializable(subst(it.type, instMap), visited) }
+                    }
+            }
+        }
+        is TVar -> false // a comptime result must be a concrete value
+        else -> false // functions, Unit, Never
     }
 
     private fun checkTest(t: TestDecl) {
@@ -444,6 +531,13 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
         is Lambda -> checkLambda(e, expected)
         is Apply -> checkApply(e)
         is Propagate -> checkPropagate(e)
+        is ComptimeExpr -> {
+            val t = checkComptimeBody(e.body, expected, what = "comptime blocks") ?: TError
+            if (!isConstSerializable(t) && !t.isErrorish)
+                error("a comptime result must be constant-serializable, got $t", e.span,
+                    "Int/Float/Bool/String and List/tuple/record/ADT values of them (spec §7.2)")
+            else t
+        }
         is Call -> checkCall(e, expected)
         is CtorCall -> checkCtorCall(e, expected)
         is FieldAccess -> checkFieldAccess(e)
@@ -600,13 +694,25 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
     private fun checkCtorCall(e: CtorCall, expected: Type?): Type {
         val ci = ctors[e.ctorName]
         if (ci == null) {
+            // a bare SCREAMING_SNAKE name may be a constant reference
+            val cd = consts[e.ctorName]
+            if (cd != null) {
+                if (e.hasParens || e.args.isNotEmpty() || e.spread != null)
+                    return error("`${e.ctorName}` is a constant, not a constructor", e.calleeSpan)
+                e.constDecl = cd
+                return cd.constType ?: TError
+            }
             e.spread?.let { checkExpr(it) }
             for (a in e.args) checkExpr(a.expr)
             return error("undefined constructor: ${e.ctorName}", e.calleeSpan,
-                if (adts.containsKey(e.ctorName))
-                    "`${e.ctorName}` is a type; build a value with one of its constructors: " +
-                        adts[e.ctorName]!!.ctors.joinToString(", ") { it.name }
-                else null)
+                when {
+                    adts.containsKey(e.ctorName) ->
+                        "`${e.ctorName}` is a type; build a value with one of its constructors: " +
+                            adts[e.ctorName]!!.ctors.joinToString(", ") { it.name }
+                    e.ctorName in allConstNames ->
+                        "const `${e.ctorName}` is declared later in the file; constants are evaluated top to bottom"
+                    else -> null
+                })
         }
         e.ctor = ci
         val adt = ci.adt

@@ -118,6 +118,11 @@ class CodeGen(
     /** builtins used as values without a real static method behind them */
     private val pendingBuiltinBridges = LinkedHashSet<FnSig>()
 
+    /** non-scalar comptime results become static fields built in <clinit> */
+    private class ConstField(val name: String, val value: dawn.check.CValue, val type: Type)
+    private val constFields = ArrayList<ConstField>()
+    private val constFieldByKey = HashMap<Any, String>()
+
     fun generate(): Map<String, ByteArray> {
         val out = HashMap<String, ByteArray>()
         for (a in allAdts) genAdt(a, out)
@@ -137,6 +142,7 @@ class CodeGen(
             }
         }
         if (module.fns.any { it.name == "main" }) genJvmMain(cw)
+        genConstFields(cw)
         cw.visitEnd()
 
         out[className] = cw.toByteArray()
@@ -1323,6 +1329,104 @@ class CodeGen(
         is If -> genIf(e, tail)
         is Match -> genMatch(e, tail)
         is Block -> genBlock(e, tail)
+        is ComptimeExpr -> {
+            genLoadConst(e.value!!, e.type!!, key = e)
+            true
+        }
+    }
+
+    // ---- comptime constants (spec §7): scalars inline, structures via static fields ----
+
+    private fun genLoadConst(v: dawn.check.CValue, t: Type, key: Any) {
+        when (v) {
+            is dawn.check.CValue.VInt -> mv.visitLdcInsn(v.v)
+            is dawn.check.CValue.VFloat -> mv.visitLdcInsn(v.v)
+            is dawn.check.CValue.VBool -> mv.visitInsn(if (v.v) ICONST_1 else ICONST_0)
+            is dawn.check.CValue.VString -> mv.visitLdcInsn(v.v)
+            dawn.check.CValue.VUnit -> {}
+            else -> {
+                val fname = constFieldByKey.getOrPut(key) {
+                    val f = "dawn\$const\$${constFields.size}"
+                    constFields.add(ConstField(f, v, t))
+                    f
+                }
+                mv.visitFieldInsn(GETSTATIC, className, fname, descOf(t))
+            }
+        }
+    }
+
+    private fun genConstFields(cw: ClassWriter) {
+        if (constFields.isEmpty()) return
+        for (f in constFields) {
+            cw.visitField(ACC_PUBLIC or ACC_STATIC or ACC_FINAL, f.name, descOf(f.type), null, null)
+                .visitEnd()
+        }
+        val cl = cw.visitMethod(ACC_STATIC, "<clinit>", "()V", null, null)
+        cl.visitCode()
+        for (f in constFields) {
+            constructValue(cl, f.value, boxed = false)
+            cl.visitFieldInsn(PUTSTATIC, className, f.name, descOf(f.type))
+        }
+        cl.visitInsn(RETURN)
+        cl.visitMaxs(0, 0)
+        cl.visitEnd()
+    }
+
+    /** emit bytecode that rebuilds a comptime value ([boxed] = target position is erased) */
+    private fun constructValue(m: MethodVisitor, v: dawn.check.CValue, boxed: Boolean) {
+        when (v) {
+            is dawn.check.CValue.VInt -> {
+                m.visitLdcInsn(v.v)
+                if (boxed) m.visitMethodInsn(INVOKESTATIC, "java/lang/Long", "valueOf",
+                    "(J)Ljava/lang/Long;", false)
+            }
+            is dawn.check.CValue.VFloat -> {
+                m.visitLdcInsn(v.v)
+                if (boxed) m.visitMethodInsn(INVOKESTATIC, "java/lang/Double", "valueOf",
+                    "(D)Ljava/lang/Double;", false)
+            }
+            is dawn.check.CValue.VBool -> {
+                m.visitInsn(if (v.v) ICONST_1 else ICONST_0)
+                if (boxed) m.visitMethodInsn(INVOKESTATIC, "java/lang/Boolean", "valueOf",
+                    "(Z)Ljava/lang/Boolean;", false)
+            }
+            is dawn.check.CValue.VString -> m.visitLdcInsn(v.v)
+            dawn.check.CValue.VUnit -> if (boxed) m.visitInsn(ACONST_NULL)
+            is dawn.check.CValue.VList -> {
+                m.visitTypeInsn(NEW, ARRAYLIST)
+                m.visitInsn(DUP)
+                m.visitMethodInsn(INVOKESPECIAL, ARRAYLIST, "<init>", "()V", false)
+                for (el in v.elems) {
+                    m.visitInsn(DUP)
+                    constructValue(m, el, boxed = true)
+                    m.visitMethodInsn(INVOKEVIRTUAL, ARRAYLIST, "add", "(L$OBJ;)Z", false)
+                    m.visitInsn(POP)
+                }
+            }
+            is dawn.check.CValue.VTuple -> {
+                val cls = tupleClass(v.elems.size)
+                m.visitTypeInsn(NEW, cls)
+                m.visitInsn(DUP)
+                for (el in v.elems) constructValue(m, el, boxed = true)
+                m.visitMethodInsn(INVOKESPECIAL, cls, "<init>",
+                    "(" + "L$OBJ;".repeat(v.elems.size) + ")V", false)
+            }
+            is dawn.check.CValue.VAdt -> {
+                val ci = v.ctor
+                if (ci.fields.isEmpty()) {
+                    m.visitFieldInsn(GETSTATIC, ci.jvmName, "INSTANCE", "L${ci.jvmName};")
+                } else {
+                    m.visitTypeInsn(NEW, ci.jvmName)
+                    m.visitInsn(DUP)
+                    for ((i, f) in v.fields.withIndex()) {
+                        constructValue(m, f, boxed = ci.fields[i].type is TVar)
+                    }
+                    val desc = "(" + ci.fields.joinToString("") { descOf(it.type) } + ")V"
+                    m.visitMethodInsn(INVOKESPECIAL, ci.jvmName, "<init>", desc, false)
+                }
+            }
+            else -> throw IllegalStateException("a function value cannot be a constant (checker bug)")
+        }
     }
 
     private fun genBlock(e: Block, tail: Boolean): Boolean {
@@ -1659,6 +1763,10 @@ class CodeGen(
     }
 
     private fun genCtorCall(e: CtorCall): Boolean {
+        e.constDecl?.let { cd ->
+            genLoadConst(cd.value!!, e.type!!, key = cd)
+            return true
+        }
         val ci = e.ctor!!
         val sub = ci.jvmName
         if (ci.fields.isEmpty()) {

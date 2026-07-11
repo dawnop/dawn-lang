@@ -46,14 +46,37 @@ fun main(args: Array<String>) {
 
 class CliError(message: String) : Exception(message)
 
+/** --comptime-fuel N / --comptime-fuel=N; returns (fuel, args without the flag) */
+fun extractFuel(rest: List<String>): Pair<Long, List<String>> {
+    var fuel = 100_000_000L
+    val out = ArrayList<String>()
+    var i = 0
+    while (i < rest.size) {
+        val a = rest[i]
+        when {
+            a == "--comptime-fuel" && i + 1 < rest.size -> {
+                fuel = rest[i + 1].toLongOrNull() ?: throw CliError("--comptime-fuel needs a number")
+                i += 2
+            }
+            a.startsWith("--comptime-fuel=") -> {
+                fuel = a.removePrefix("--comptime-fuel=").toLongOrNull()
+                    ?: throw CliError("--comptime-fuel needs a number")
+                i++
+            }
+            else -> { out.add(a); i++ }
+        }
+    }
+    return fuel to out
+}
+
 /** Compile one .dawn file → (class name, bytecode per class). Compile errors are rendered here and exit. */
-fun compile(path: String): Pair<String, Map<String, ByteArray>> {
+fun compile(path: String, comptimeFuel: Long = 100_000_000L): Pair<String, Map<String, ByteArray>> {
     val file = File(path)
     if (!file.exists()) throw CliError("no such file: $path")
     if (!path.endsWith(".dawn")) throw CliError("source files must end in .dawn: $path")
     val source = SourceFile(path, file.readText())
     val className = sanitizeClassName(file.nameWithoutExtension)
-    val analysis = analyze(source.text)
+    val analysis = analyze(source.text, comptimeFuel)
     if (analysis.hasErrors) {
         for (d in analysis.diagnostics) System.err.print(d.render(source))
         val n = analysis.diagnostics.size
@@ -70,9 +93,10 @@ fun sanitizeClassName(stem: String): String {
 
 // ---- run: execute in-process via a class loader ----
 
-fun cmdRun(rest: List<String>) {
+fun cmdRun(restIn: List<String>) {
+    val (fuel, rest) = extractFuel(restIn)
     val path = rest.firstOrNull() ?: throw CliError("usage: dawn run <file.dawn>")
-    val (className, classes) = compile(path)
+    val (className, classes) = compile(path, fuel)
     val loader = object : ClassLoader(ClassLoader.getSystemClassLoader()) {
         override fun findClass(name: String): Class<*> {
             val internal = name.replace('.', '/')
@@ -91,13 +115,14 @@ fun cmdRun(rest: List<String>) {
 
 // ---- test: compile with test blocks, run each, report ----
 
-fun cmdTest(rest: List<String>) {
+fun cmdTest(restIn: List<String>) {
+    val (fuel, rest) = extractFuel(restIn)
     val path = rest.firstOrNull() ?: throw CliError("usage: dawn test <file.dawn>")
     val file = File(path)
     if (!file.exists()) throw CliError("no such file: $path")
     val source = SourceFile(path, file.readText())
     val className = sanitizeClassName(file.nameWithoutExtension)
-    val analysis = analyze(source.text)
+    val analysis = analyze(source.text, fuel)
     if (analysis.hasErrors) {
         for (d in analysis.diagnostics) System.err.print(d.render(source))
         exitProcess(1)
@@ -131,14 +156,15 @@ fun cmdTest(rest: List<String>) {
 
 // ---- build: write a jar, optionally hand it to native-image ----
 
-fun cmdBuild(rest: List<String>) {
+fun cmdBuild(restIn: List<String>) {
+    val (fuel, rest) = extractFuel(restIn)
     val path = rest.firstOrNull { !it.startsWith("-") }
         ?: throw CliError("usage: dawn build <file.dawn> [-o out] [--native]")
     val native = rest.contains("--native")
     val oIdx = rest.indexOf("-o")
     val out = if (oIdx >= 0 && oIdx + 1 < rest.size) rest[oIdx + 1] else null
 
-    val (className, classes) = compile(path)
+    val (className, classes) = compile(path, fuel)
     val jarPath = when {
         native -> File.createTempFile("dawn-build-", ".jar").absolutePath
         out != null -> out

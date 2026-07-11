@@ -27,11 +27,15 @@ class Analyzed(
  * lex → parse (with recovery) → type/effect check (with recovery).
  * Never throws on bad input; all problems land in [Analyzed.diagnostics].
  */
-fun analyze(source: String): Analyzed {
+fun analyze(source: String, comptimeFuel: Long = 100_000_000L): Analyzed {
     val sink = DiagnosticSink()
     val tokens = Lexer(source, 0, sink).lex()
     val module = Parser(tokens, sink, source).module()
     val checker = Checker(module, sink)
     checker.check()
+    // comptime evaluation only makes sense on a well-typed module
+    if (sink.all.none { it.severity == dawn.diag.Severity.ERROR }) {
+        evalComptime(module, sink, comptimeFuel)
+    }
     return Analyzed(module, sink.all, checker.functions, checker.types)
 }

@@ -94,7 +94,7 @@ class Parser(
     /** After a broken declaration: skip forward to the next plausible declaration start. */
     private fun syncToNextDecl() {
         if (!at(EOF)) advance() // always make progress
-        while (!at(EOF) && !at(FN) && !at(PUB) && !at(TYPE)) advance()
+        while (!at(EOF) && !at(FN) && !at(PUB) && !at(TYPE) && !at(CONST)) advance()
     }
 
     private fun topDecl(): Decl {
@@ -102,15 +102,31 @@ class Parser(
         return when (peek().type) {
             FN -> fnDecl(pub)
             TYPE -> typeDecl(pub)
+            CONST -> constDecl(pub)
             TEST -> {
                 if (pub) throw err("test blocks cannot be pub")
                 testDecl()
             }
-            CONST, USE ->
-                throw err("`${peek().text}` declarations are not implemented yet",
+            USE ->
+                throw err("`use` declarations are not implemented yet",
                     "see the milestones in docs/design.md")
-            else -> throw err("only declarations (fn, type, test) are allowed at module top level")
+            else -> throw err("only declarations (fn, type, const, test) are allowed at module top level")
         }
+    }
+
+    /** const NAME: Type = expr — the initializer is implicitly comptime (spec §3.2) */
+    private fun constDecl(pub: Boolean): ConstDecl {
+        val kw = expect(CONST, "`const`")
+        val name = expect(TYPEIDENT, "a constant name (SCREAMING_SNAKE_CASE)")
+        if (name.text.any { it.isLowerCase() })
+            throw DawnError("constant names are SCREAMING_SNAKE_CASE", name.span,
+                "lowercase names are values, UpperCamelCase names are types/constructors (spec §1.3)")
+        expect(COLON, "`:` (constants must declare their type)")
+        val t = typeRef()
+        expect(EQ, "`=`")
+        skipNewlines()
+        val init = expression()
+        return ConstDecl(pub, name.text, t, init, Span(kw.span.start, init.span.end), name.span)
     }
 
     /** test "name" { ... } */
@@ -519,7 +535,11 @@ class Parser(
             LPAREN -> parenExpr()
             LBRACKET -> listLit()
             FN -> lambda()
-            COMPTIME -> throw err("comptime is not implemented in M0")
+            COMPTIME -> {
+                val kw = advance()
+                val body = block()
+                ComptimeExpr(body, Span(kw.span.start, body.span.end))
+            }
             TYPEIDENT -> ctorExpr()
             else -> throw err("expected an expression, found `${t.text}`")
         }

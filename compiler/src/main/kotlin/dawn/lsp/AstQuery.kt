@@ -46,6 +46,10 @@ private class TargetQuery(private val analysis: Analyzed, private val offset: In
                 visitExpr(d.body)
             }
             is TestDecl -> visitExpr(d.body)
+            is ConstDecl -> {
+                d.constType?.let { offer(d.nameSpan, "const ${d.name}: $it", d.nameSpan) }
+                visitExpr(d.init)
+            }
             is TypeDecl -> {
                 val info = analysis.types[d.name]
                 val summary = info?.ctors?.joinToString(" | ") { it.name } ?: ""
@@ -105,6 +109,8 @@ private class TargetQuery(private val analysis: Analyzed, private val offset: In
                 e.field?.let { offer(e.fieldSpan, "${it.name}: ${it.type}", it.defSpan) }
             }
             is StrLit -> e.parts.forEach { if (it is StrPart.Interp) visitExpr(it.expr) }
+            is ComptimeExpr -> visitExpr(e.body)
+            is Propagate -> visitExpr(e.operand)
             is Binary -> { visitExpr(e.left); visitExpr(e.right) }
             is Unary -> visitExpr(e.operand)
             is If -> {
