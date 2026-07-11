@@ -52,7 +52,7 @@ class Parser(tokens: List<Token>, private val sink: DiagnosticSink = DiagnosticS
     // ---- module ----
 
     fun module(): Module {
-        val decls = ArrayList<FnDecl>()
+        val decls = ArrayList<Decl>()
         skipNewlines()
         while (!at(EOF)) {
             try {
@@ -69,18 +69,68 @@ class Parser(tokens: List<Token>, private val sink: DiagnosticSink = DiagnosticS
     /** After a broken declaration: skip forward to the next plausible declaration start. */
     private fun syncToNextDecl() {
         if (!at(EOF)) advance() // always make progress
-        while (!at(EOF) && !at(FN) && !at(PUB)) advance()
+        while (!at(EOF) && !at(FN) && !at(PUB) && !at(TYPE)) advance()
     }
 
-    private fun topDecl(): FnDecl {
+    private fun topDecl(): Decl {
         val pub = if (at(PUB)) { advance(); true } else false
         return when (peek().type) {
             FN -> fnDecl(pub)
-            TYPE, CONST, USE, TEST ->
-                throw err("`${peek().text}` declarations are not implemented in M0",
-                    "M0 supports fn only; see the milestones in docs/design.md")
-            else -> throw err("only declarations (fn) are allowed at module top level")
+            TYPE -> typeDecl(pub)
+            CONST, USE, TEST ->
+                throw err("`${peek().text}` declarations are not implemented yet",
+                    "see the milestones in docs/design.md")
+            else -> throw err("only declarations (fn, type) are allowed at module top level")
         }
+    }
+
+    // ---- type declarations ----
+
+    private fun typeDecl(pub: Boolean): TypeDecl {
+        val kw = expect(TYPE, "`type`")
+        val name = expect(TYPEIDENT, "a type name (uppercase)")
+        if (at(LBRACKET)) throw err("generic type parameters are not implemented yet")
+        expect(EQ, "`=`")
+        if (at(LBRACE)) throw err("record types are not implemented yet",
+            "sum types are: type ${name.text} = | A | B(x: Int)")
+        val ctors = ArrayList<CtorDecl>()
+        if (at(PIPE)) advance() // leading | is optional
+        skipNewlines()
+        ctors.add(ctorDecl())
+        while (true) {
+            // constructors usually sit one per line, | first (like vertical pipes)
+            var look = pos
+            while (toks[look].type == NEWLINE) look++
+            if (toks[look].type != PIPE) break
+            pos = look + 1
+            skipNewlines()
+            ctors.add(ctorDecl())
+        }
+        return TypeDecl(pub, name.text, ctors, Span(kw.span.start, ctors.last().span.end), name.span)
+    }
+
+    private fun ctorDecl(): CtorDecl {
+        val name = expect(TYPEIDENT, "a constructor name (uppercase)")
+        val fields = ArrayList<FieldDecl>()
+        var end = name.span.end
+        if (at(LPAREN)) {
+            advance()
+            skipNewlines()
+            while (!at(RPAREN)) {
+                val f = expect(IDENT, "a field name (constructor fields must be named)")
+                expect(COLON, "`:` (constructor fields must be typed)")
+                val t = typeRef()
+                fields.add(FieldDecl(f.text, t, Span(f.span.start, t.span.end)))
+                skipNewlines()
+                if (at(COMMA)) { advance(); skipNewlines() } else break
+            }
+            val close = expect(RPAREN, "`)`")
+            end = close.span.end
+            if (fields.isEmpty())
+                throw DawnError("a constructor with `()` must declare at least one field",
+                    Span(name.span.start, end), "drop the parentheses for a no-payload constructor: ${name.text}")
+        }
+        return CtorDecl(name.text, fields, Span(name.span.start, end), name.span)
     }
 
     private fun fnDecl(pub: Boolean): FnDecl {
@@ -304,9 +354,34 @@ class Parser(tokens: List<Token>, private val sink: DiagnosticSink = DiagnosticS
             FN -> throw err("lambdas are not implemented in M0",
                 "use a top-level function name on the right side of |>")
             COMPTIME -> throw err("comptime is not implemented in M0")
-            TYPEIDENT -> throw err("constructor/type expressions are not implemented in M0 (no ADTs yet)")
+            TYPEIDENT -> ctorExpr()
             else -> throw err("expected an expression, found `${t.text}`")
         }
+    }
+
+    /** Circle(1.0) / Rect(2.0, h: 3.0) / bare nullary Point */
+    private fun ctorExpr(): Expr {
+        val name = advance()
+        if (!at(LPAREN)) return CtorCall(name.text, emptyList(), hasParens = false, name.span, name.span)
+        advance()
+        skipNewlines()
+        val args = ArrayList<CtorArg>()
+        while (!at(RPAREN)) {
+            if (at(IDENT) && peek(1).type == COLON) {
+                val argName = advance()
+                advance() // :
+                skipNewlines()
+                val value = expression()
+                args.add(CtorArg(argName.text, value, Span(argName.span.start, value.span.end)))
+            } else {
+                val value = expression()
+                args.add(CtorArg(null, value, value.span))
+            }
+            skipNewlines()
+            if (at(COMMA)) { advance(); skipNewlines() } else break
+        }
+        val close = expect(RPAREN, "`)`")
+        return CtorCall(name.text, args, hasParens = true, name.span, Span(name.span.start, close.span.end))
     }
 
     private fun identOrCall(): Expr {
@@ -455,8 +530,41 @@ class Parser(tokens: List<Token>, private val sink: DiagnosticSink = DiagnosticS
                 LitPat(lit, t.span)
             }
             IDENT -> { advance(); BindPat(t.text, t.span) }
-            TYPEIDENT -> throw err("constructor patterns are not implemented in M0 (no ADTs yet)")
+            TYPEIDENT -> ctorPat()
             else -> throw err("expected a pattern")
         }
+    }
+
+    /** Circle(r) / Rect(w: w, ..) / bare nullary Point */
+    private fun ctorPat(): Pattern {
+        val name = advance()
+        if (!at(LPAREN)) {
+            return CtorPat(name.text, emptyList(), hasRest = false, hasParens = false, name.span, name.span)
+        }
+        advance()
+        skipNewlines()
+        val args = ArrayList<PatArg>()
+        var rest = false
+        while (!at(RPAREN)) {
+            if (at(DOTDOT)) {
+                advance()
+                rest = true
+                skipNewlines()
+                if (!at(RPAREN)) throw err("`..` must be the last thing in a constructor pattern")
+                break
+            }
+            if (at(IDENT) && peek(1).type == COLON) {
+                val argName = advance()
+                advance() // :
+                skipNewlines()
+                args.add(PatArg(argName.text, pattern()))
+            } else {
+                args.add(PatArg(null, pattern()))
+            }
+            skipNewlines()
+            if (at(COMMA)) { advance(); skipNewlines() } else break
+        }
+        val close = expect(RPAREN, "`)`")
+        return CtorPat(name.text, args, rest, hasParens = true, name.span, Span(name.span.start, close.span.end))
     }
 }

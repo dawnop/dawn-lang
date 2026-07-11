@@ -35,13 +35,29 @@ private class TargetQuery(private val analysis: Analyzed, private val offset: In
 
     private fun sigOf(name: String) = analysis.functions[name] ?: BUILTINS[name]
 
-    fun visitDecl(d: FnDecl) {
-        sigOf(d.name)?.let { offer(d.nameSpan, it.render(), d.nameSpan) }
-        for (p in d.params) {
-            val t = p.symbol?.type ?: continue
-            offer(p.span, "${p.name}: $t", p.span)
+    fun visitDecl(d: Decl) {
+        when (d) {
+            is FnDecl -> {
+                sigOf(d.name)?.let { offer(d.nameSpan, it.render(), d.nameSpan) }
+                for (p in d.params) {
+                    val t = p.symbol?.type ?: continue
+                    offer(p.span, "${p.name}: $t", p.span)
+                }
+                visitExpr(d.body)
+            }
+            is TypeDecl -> {
+                val info = analysis.types[d.name]
+                val summary = info?.ctors?.joinToString(" | ") { it.name } ?: ""
+                offer(d.nameSpan, "type ${d.name} = $summary", d.nameSpan)
+                for (c in d.ctors) {
+                    c.info?.let { offer(c.nameSpan, it.render(), c.nameSpan) }
+                    for ((i, f) in c.fields.withIndex()) {
+                        val t = c.info?.fields?.getOrNull(i)?.type ?: continue
+                        offer(f.span, "${f.name}: $t", f.span)
+                    }
+                }
+            }
         }
-        visitExpr(d.body)
     }
 
     fun visitExpr(e: Expr) {
@@ -58,6 +74,10 @@ private class TargetQuery(private val analysis: Analyzed, private val offset: In
             is Call -> {
                 sigOf(e.callee)?.let { offer(e.calleeSpan, it.render(), it.nameSpan) }
                 e.args.forEach { visitExpr(it) }
+            }
+            is CtorCall -> {
+                e.ctor?.let { offer(e.calleeSpan, it.render(), it.nameSpan) }
+                e.args.forEach { visitExpr(it.expr) }
             }
             is StrLit -> e.parts.forEach { if (it is StrPart.Interp) visitExpr(it.expr) }
             is Binary -> { visitExpr(e.left); visitExpr(e.right) }
@@ -84,9 +104,16 @@ private class TargetQuery(private val analysis: Analyzed, private val offset: In
     }
 
     fun visitPattern(p: Pattern) {
-        if (p is BindPat) {
-            val sym = p.symbol ?: return
-            offer(p.span, "${sym.name}: ${sym.type}", p.span)
+        when (p) {
+            is BindPat -> {
+                val sym = p.symbol ?: return
+                offer(p.span, "${sym.name}: ${sym.type}", p.span)
+            }
+            is CtorPat -> {
+                p.ctor?.let { offer(p.nameSpan, it.render(), it.nameSpan) }
+                p.args.forEach { visitPattern(it.pattern) }
+            }
+            else -> {}
         }
     }
 

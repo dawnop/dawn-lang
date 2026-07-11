@@ -117,13 +117,14 @@ private class DawnTextDocumentService(private val server: DawnLanguageServer) : 
     ): CompletableFuture<List<Either<SymbolInformation, DocumentSymbol>>> {
         val st = docs[params.textDocument.uri] ?: return completedFuture(emptyList())
         val symbols = st.analysis.module.decls.map { d ->
-            val sig = st.analysis.functions[d.name]
+            val isFn = d is dawn.ast.FnDecl
+            val detail = if (isFn) st.analysis.functions[d.name]?.render() else null
             val sym = DocumentSymbol(
                 d.name,
-                SymbolKind.Function,
+                if (isFn) SymbolKind.Function else SymbolKind.Class,
                 rangeOf(st.source, d.span),
                 rangeOf(st.source, d.nameSpan),
-                sig?.render(),
+                detail,
             )
             Either.forRight<SymbolInformation, DocumentSymbol>(sym)
         }

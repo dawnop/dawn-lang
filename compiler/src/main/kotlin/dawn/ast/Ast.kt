@@ -1,5 +1,7 @@
 package dawn.ast
 
+import dawn.check.CtorInfo
+import dawn.check.FnSig
 import dawn.check.Symbol
 import dawn.check.Type
 import dawn.diag.Span
@@ -7,7 +9,17 @@ import dawn.diag.Span
 // ---- module and declarations ----
 
 class Module(
-    val decls: List<FnDecl>,
+    val decls: List<Decl>,
+) {
+    val fns: List<FnDecl> by lazy { decls.filterIsInstance<FnDecl>() }
+    val types: List<TypeDecl> by lazy { decls.filterIsInstance<TypeDecl>() }
+}
+
+sealed class Decl(
+    val pub: Boolean,
+    val name: String,
+    val span: Span,
+    val nameSpan: Span,
 )
 
 class Param(val name: String, val typeName: TypeRef, val span: Span) {
@@ -17,16 +29,35 @@ class Param(val name: String, val typeName: TypeRef, val span: Span) {
 class TypeRef(val name: String, val span: Span)
 
 class FnDecl(
-    val pub: Boolean,
-    val name: String,
+    pub: Boolean,
+    name: String,
     val params: List<Param>,
     val retType: TypeRef,
     /** signature declares !io */
     val declaredIo: Boolean,
     val body: Expr,
-    val span: Span,
-    val nameSpan: Span,
-)
+    span: Span,
+    nameSpan: Span,
+) : Decl(pub, name, span, nameSpan) {
+    /** resolved signature, filled by the checker (codegen consumes it) */
+    var sig: FnSig? = null
+}
+
+/** type Name = | Ctor(field: T) | ... */
+class TypeDecl(
+    pub: Boolean,
+    name: String,
+    val ctors: List<CtorDecl>,
+    span: Span,
+    nameSpan: Span,
+) : Decl(pub, name, span, nameSpan)
+
+class CtorDecl(val name: String, val fields: List<FieldDecl>, val span: Span, val nameSpan: Span) {
+    /** resolved constructor, filled by the checker */
+    var info: CtorInfo? = null
+}
+
+class FieldDecl(val name: String, val typeRef: TypeRef, val span: Span)
 
 // ---- expressions ----
 
@@ -52,7 +83,27 @@ class VarRef(val name: String, span: Span) : Expr(span) {
 }
 
 /** M0: calls are by name only (no function values) */
-class Call(val callee: String, val args: List<Expr>, val calleeSpan: Span, span: Span) : Expr(span)
+class Call(val callee: String, val args: List<Expr>, val calleeSpan: Span, span: Span) : Expr(span) {
+    /** resolved callee signature, filled by the checker */
+    var sig: FnSig? = null
+}
+
+/** Constructor call/reference: Circle(1.0), Rect(2.0, h: 3.0), or a bare nullary Point. */
+class CtorCall(
+    val ctorName: String,
+    val args: List<CtorArg>,
+    /** false for a bare nullary constructor reference */
+    val hasParens: Boolean,
+    val calleeSpan: Span,
+    span: Span,
+) : Expr(span) {
+    /** resolved constructor, filled by the checker */
+    var ctor: CtorInfo? = null
+    /** argument expressions reordered to field order, filled by the checker */
+    var ordered: List<Expr>? = null
+}
+
+class CtorArg(val name: String?, val expr: Expr, val span: Span)
 
 enum class BinOp { ADD, SUB, MUL, DIV, MOD, CONCAT, EQ, NEQ, LT, LE, GT, GE, AND, OR }
 class Binary(val op: BinOp, val left: Expr, val right: Expr, val opSpan: Span, span: Span) : Expr(span)
@@ -71,6 +122,24 @@ class BindPat(val name: String, span: Span) : Pattern(span) {
     var symbol: Symbol? = null
 }
 class WildPat(span: Span) : Pattern(span)
+
+/** Constructor pattern: Circle(r), Rect(w: w, ..), or a bare nullary Point. */
+class CtorPat(
+    val ctorName: String,
+    val args: List<PatArg>,
+    /** pattern ends with `..` (ignore remaining fields) */
+    val hasRest: Boolean,
+    val hasParens: Boolean,
+    val nameSpan: Span,
+    span: Span,
+) : Pattern(span) {
+    /** resolved constructor, filled by the checker */
+    var ctor: CtorInfo? = null
+    /** subpatterns by field index (null = not matched, via ..), filled by the checker */
+    var fieldPats: List<Pattern?>? = null
+}
+
+class PatArg(val name: String?, val pattern: Pattern)
 
 class Block(val stmts: List<Stmt>, val tail: Expr?, span: Span) : Expr(span)
 

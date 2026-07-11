@@ -2,6 +2,7 @@ package dawn.codegen
 
 import dawn.ast.*
 import dawn.check.BUILTINS
+import dawn.check.CtorInfo
 import dawn.check.Symbol
 import dawn.check.Type
 import dawn.check.Type.*
@@ -14,29 +15,58 @@ import org.objectweb.asm.Opcodes.*
  * AST (annotated with types/symbols by the Checker) → JVM bytecode. spec §12.2.
  *
  * Mapping: module → class (static methods); Int → long, Float → double,
- * Bool → boolean, String → java.lang.String, Unit → void. match → comparison
- * chains. Self-recursive tail calls → goto loops. panic → dawn.rt.PanicError
- * (an Error subclass). No invokedynamic (until lambdas), which keeps
- * native-image configuration-free (spec §12.3).
+ * Bool → boolean, String → java.lang.String, Unit → void. ADT → abstract base
+ * class + one final subclass per constructor (no-payload constructors are
+ * singletons). match → instanceof chains + field reads. Self-recursive tail
+ * calls → goto loops. panic → dawn.rt.PanicError (an Error subclass). No
+ * invokedynamic (until lambdas), which keeps native-image configuration-free
+ * (spec §12.3).
  */
 class CodeGen(private val module: Module, private val className: String) {
 
     companion object {
         const val PANIC_CLASS = "dawn/rt/PanicError"
         private const val SB = "java/lang/StringBuilder"
+        private const val OBJ = "java/lang/Object"
+    }
+
+    /** super of every class we generate, so frames can be computed without loading them */
+    private val adtSupers: Map<String, String> = buildMap {
+        for (t in module.types) {
+            put(t.name, OBJ)
+            for (c in t.ctors) put("${t.name}$${c.name}", t.name)
+        }
     }
 
     /**
-     * COMPUTE_FRAMES needs common superclasses; our generated classes are not on
-     * the compiler's classpath, so fall back to Object.
+     * COMPUTE_FRAMES needs common superclasses. Generated classes are not on the
+     * compiler's classpath, so walk our own synthetic hierarchy (adtSupers); for
+     * anything else fall back to Object.
      */
-    private class DawnClassWriter : ClassWriter(COMPUTE_FRAMES) {
-        override fun getCommonSuperClass(type1: String, type2: String): String =
-            try {
+    private inner class DawnClassWriter : ClassWriter(COMPUTE_FRAMES) {
+        private fun chain(t: String): List<String> {
+            val c = ArrayList<String>()
+            var cur: String? = t
+            while (cur != null) {
+                c.add(cur)
+                cur = adtSupers[cur]
+            }
+            if (c.last() != OBJ) c.add(OBJ)
+            return c
+        }
+
+        override fun getCommonSuperClass(type1: String, type2: String): String {
+            if (type1 == type2) return type1
+            if (adtSupers.containsKey(type1) || adtSupers.containsKey(type2)) {
+                val above2 = chain(type2).toSet()
+                return chain(type1).firstOrNull { it in above2 } ?: OBJ
+            }
+            return try {
                 super.getCommonSuperClass(type1, type2)
             } catch (e: Throwable) {
-                "java/lang/Object"
+                OBJ
             }
+        }
     }
 
     // ---- current function context ----
@@ -46,17 +76,18 @@ class CodeGen(private val module: Module, private val className: String) {
     private var nextSlot = 0
 
     fun generate(): Map<String, ByteArray> {
+        val out = HashMap<String, ByteArray>()
+        for (t in module.types) genAdt(t, out)
+
         val cw = DawnClassWriter()
-        cw.visit(V17, ACC_PUBLIC or ACC_FINAL, className, null, "java/lang/Object", null)
-
-        for (d in module.decls) genFn(cw, d)
-        if (module.decls.any { it.name == "main" }) genJvmMain(cw)
-
+        cw.visit(V17, ACC_PUBLIC or ACC_FINAL, className, null, OBJ, null)
+        for (d in module.fns) genFn(cw, d)
+        if (module.fns.any { it.name == "main" }) genJvmMain(cw)
         cw.visitEnd()
-        return mapOf(
-            className to cw.toByteArray(),
-            PANIC_CLASS to genPanicClass(),
-        )
+
+        out[className] = cw.toByteArray()
+        out[PANIC_CLASS] = genPanicClass()
+        return out
     }
 
     // ---- type mapping ----
@@ -69,6 +100,7 @@ class CodeGen(private val module: Module, private val className: String) {
         TUnit -> "V"
         TNever -> "V" // only in return position in theory; Never expressions end in athrow
         TError -> "V" // unreachable: codegen only runs when there are no errors
+        is TAdt -> "L${t.info.jvmName};"
     }
 
     private fun methodDesc(params: List<Type>, ret: Type): String =
@@ -78,17 +110,126 @@ class CodeGen(private val module: Module, private val className: String) {
         TInt, TFloat -> 2
         TBool -> 1
         TString -> 1
+        is TAdt -> 1
         TUnit, TNever, TError -> 0
+    }
+
+    private fun isRef(t: Type) = t == TString || t is TAdt
+
+    // ---- ADT classes (spec §12.2) ----
+
+    private fun genAdt(d: TypeDecl, out: MutableMap<String, ByteArray>) {
+        val base = d.name
+        val bw = DawnClassWriter()
+        bw.visit(V17, ACC_PUBLIC or ACC_ABSTRACT, base, null, OBJ, null)
+        val bc = bw.visitMethod(ACC_PROTECTED, "<init>", "()V", null, null)
+        bc.visitCode()
+        bc.visitVarInsn(ALOAD, 0)
+        bc.visitMethodInsn(INVOKESPECIAL, OBJ, "<init>", "()V", false)
+        bc.visitInsn(RETURN)
+        bc.visitMaxs(1, 1)
+        bc.visitEnd()
+        bw.visitEnd()
+        out[base] = bw.toByteArray()
+
+        for (c in d.ctors) {
+            val ci = c.info!! // codegen only runs on error-free modules
+            out[ci.jvmName] = genCtorClass(base, ci)
+        }
+    }
+
+    private fun genCtorClass(base: String, ci: CtorInfo): ByteArray {
+        val sub = ci.jvmName
+        val cw = DawnClassWriter()
+        cw.visit(V17, ACC_PUBLIC or ACC_FINAL, sub, null, base, null)
+        val singleton = ci.fields.isEmpty()
+
+        for (f in ci.fields) {
+            cw.visitField(ACC_PUBLIC or ACC_FINAL, f.name, descOf(f.type), null, null).visitEnd()
+        }
+        if (singleton) {
+            cw.visitField(ACC_PUBLIC or ACC_STATIC or ACC_FINAL, "INSTANCE", "L$sub;", null, null).visitEnd()
+            val cl = cw.visitMethod(ACC_STATIC, "<clinit>", "()V", null, null)
+            cl.visitCode()
+            cl.visitTypeInsn(NEW, sub)
+            cl.visitInsn(DUP)
+            cl.visitMethodInsn(INVOKESPECIAL, sub, "<init>", "()V", false)
+            cl.visitFieldInsn(PUTSTATIC, sub, "INSTANCE", "L$sub;")
+            cl.visitInsn(RETURN)
+            cl.visitMaxs(2, 0)
+            cl.visitEnd()
+        }
+
+        // constructor: store each field
+        val ctorDesc = "(" + ci.fields.joinToString("") { descOf(it.type) } + ")V"
+        val init = cw.visitMethod(if (singleton) ACC_PRIVATE else ACC_PUBLIC, "<init>", ctorDesc, null, null)
+        init.visitCode()
+        init.visitVarInsn(ALOAD, 0)
+        init.visitMethodInsn(INVOKESPECIAL, base, "<init>", "()V", false)
+        var slot = 1
+        for (f in ci.fields) {
+            init.visitVarInsn(ALOAD, 0)
+            loadSlot(init, f.type, slot)
+            init.visitFieldInsn(PUTFIELD, sub, f.name, descOf(f.type))
+            slot += slotsOf(f.type)
+        }
+        init.visitInsn(RETURN)
+        init.visitMaxs(0, 0)
+        init.visitEnd()
+
+        // structural equality (== in Dawn, spec §4.3); singletons keep identity equals
+        if (!singleton) genEqualsMethod(cw, sub, ci)
+
+        cw.visitEnd()
+        return cw.toByteArray()
+    }
+
+    private fun genEqualsMethod(cw: ClassWriter, sub: String, ci: CtorInfo) {
+        val m = cw.visitMethod(ACC_PUBLIC, "equals", "(L$OBJ;)Z", null, null)
+        m.visitCode()
+        val yes = Label()
+        val no = Label()
+        m.visitVarInsn(ALOAD, 0)
+        m.visitVarInsn(ALOAD, 1)
+        m.visitJumpInsn(IF_ACMPEQ, yes)
+        m.visitVarInsn(ALOAD, 1)
+        m.visitTypeInsn(INSTANCEOF, sub)
+        m.visitJumpInsn(IFEQ, no)
+        m.visitVarInsn(ALOAD, 1)
+        m.visitTypeInsn(CHECKCAST, sub)
+        m.visitVarInsn(ASTORE, 2)
+        for (f in ci.fields) {
+            m.visitVarInsn(ALOAD, 0)
+            m.visitFieldInsn(GETFIELD, sub, f.name, descOf(f.type))
+            m.visitVarInsn(ALOAD, 2)
+            m.visitFieldInsn(GETFIELD, sub, f.name, descOf(f.type))
+            when (f.type) {
+                TInt -> { m.visitInsn(LCMP); m.visitJumpInsn(IFNE, no) }
+                TFloat -> { m.visitInsn(DCMPL); m.visitJumpInsn(IFNE, no) }
+                TBool -> m.visitJumpInsn(IF_ICMPNE, no)
+                else -> {
+                    m.visitMethodInsn(INVOKEVIRTUAL, OBJ, "equals", "(L$OBJ;)Z", false)
+                    m.visitJumpInsn(IFEQ, no)
+                }
+            }
+        }
+        m.visitLabel(yes)
+        m.visitInsn(ICONST_1)
+        m.visitInsn(IRETURN)
+        m.visitLabel(no)
+        m.visitInsn(ICONST_0)
+        m.visitInsn(IRETURN)
+        m.visitMaxs(0, 0)
+        m.visitEnd()
     }
 
     // ---- functions ----
 
     private fun genFn(cw: ClassWriter, d: FnDecl) {
-        val paramTypes = d.params.map { it.symbol!!.type }
-        val retType = returnTypeOf(d)
+        val sig = d.sig!!
         mv = cw.visitMethod(
             ACC_PUBLIC or ACC_STATIC, d.name,
-            methodDesc(paramTypes, retType), null, null,
+            methodDesc(sig.paramTypes, sig.ret), null, null,
         )
         mv.visitCode()
         currentFn = d
@@ -103,20 +244,17 @@ class CodeGen(private val module: Module, private val className: String) {
         mv.visitLabel(start)
         val falls = genExpr(d.body, tail = true)
         if (falls) {
-            when (retType) {
+            when (sig.ret) {
                 TInt -> mv.visitInsn(LRETURN)
                 TFloat -> mv.visitInsn(DRETURN)
                 TBool -> mv.visitInsn(IRETURN)
-                TString -> mv.visitInsn(ARETURN)
+                TString, is TAdt -> mv.visitInsn(ARETURN)
                 else -> mv.visitInsn(RETURN)
             }
         }
         mv.visitMaxs(0, 0)
         mv.visitEnd()
     }
-
-    private fun returnTypeOf(d: FnDecl): Type =
-        Type.named(d.retType.name) ?: TUnit
 
     /** JVM entry wrapper: catch PanicError → stderr + exit 1 (spec §8.2) */
     private fun genJvmMain(cw: ClassWriter) {
@@ -164,6 +302,39 @@ class CodeGen(private val module: Module, private val className: String) {
         ctor.visitEnd()
         cw.visitEnd()
         return cw.toByteArray()
+    }
+
+    // ---- slot load/store ----
+
+    private fun loadSlot(m: MethodVisitor, t: Type, slot: Int) {
+        when {
+            t == TInt -> m.visitVarInsn(LLOAD, slot)
+            t == TFloat -> m.visitVarInsn(DLOAD, slot)
+            t == TBool -> m.visitVarInsn(ILOAD, slot)
+            isRef(t) -> m.visitVarInsn(ALOAD, slot)
+            else -> {}
+        }
+    }
+
+    private fun storeSlot(m: MethodVisitor, t: Type, slot: Int) {
+        when {
+            t == TInt -> m.visitVarInsn(LSTORE, slot)
+            t == TFloat -> m.visitVarInsn(DSTORE, slot)
+            t == TBool -> m.visitVarInsn(ISTORE, slot)
+            isRef(t) -> m.visitVarInsn(ASTORE, slot)
+            else -> {}
+        }
+    }
+
+    private fun storeVar(sym: Symbol) = storeSlot(mv, sym.type, sym.slot)
+    private fun loadVar(sym: Symbol) = loadSlot(mv, sym.type, sym.slot)
+
+    private fun popValue(t: Type) {
+        when (slotsOf(t)) {
+            2 -> mv.visitInsn(POP2)
+            1 -> mv.visitInsn(POP)
+            else -> {}
+        }
     }
 
     // ---- statements ----
@@ -237,34 +408,6 @@ class CodeGen(private val module: Module, private val className: String) {
         }
     }
 
-    private fun popValue(t: Type) {
-        when (slotsOf(t)) {
-            2 -> mv.visitInsn(POP2)
-            1 -> mv.visitInsn(POP)
-            else -> {}
-        }
-    }
-
-    private fun storeVar(sym: Symbol) {
-        when (sym.type) {
-            TInt -> mv.visitVarInsn(LSTORE, sym.slot)
-            TFloat -> mv.visitVarInsn(DSTORE, sym.slot)
-            TBool -> mv.visitVarInsn(ISTORE, sym.slot)
-            TString -> mv.visitVarInsn(ASTORE, sym.slot)
-            else -> {}
-        }
-    }
-
-    private fun loadVar(sym: Symbol) {
-        when (sym.type) {
-            TInt -> mv.visitVarInsn(LLOAD, sym.slot)
-            TFloat -> mv.visitVarInsn(DLOAD, sym.slot)
-            TBool -> mv.visitVarInsn(ILOAD, sym.slot)
-            TString -> mv.visitVarInsn(ALOAD, sym.slot)
-            else -> {}
-        }
-    }
-
     // ---- expressions ----
     // Return value: whether control falls past the expression, leaving its value
     // on the stack (Unit leaves nothing). false = control was transferred
@@ -278,6 +421,7 @@ class CodeGen(private val module: Module, private val className: String) {
         is StrLit -> genStrLit(e)
         is VarRef -> { loadVar(e.symbol!!); true }
         is Call -> genCall(e, tail)
+        is CtorCall -> genCtorCall(e)
         is Binary -> genBinary(e)
         is Unary -> {
             genExpr(e.operand, tail = false)
@@ -346,10 +490,33 @@ class CodeGen(private val module: Module, private val className: String) {
             return false
         }
         for (a in e.args) genExpr(a, tail = false)
-        val target = module.decls.first { it.name == e.callee }
-        val paramTypes = target.params.map { Type.named(it.typeName.name)!! }
-        val ret = returnTypeOf(target)
-        mv.visitMethodInsn(INVOKESTATIC, className, e.callee, methodDesc(paramTypes, ret), false)
+        val sig = e.sig!!
+        mv.visitMethodInsn(INVOKESTATIC, className, e.callee, methodDesc(sig.paramTypes, sig.ret), false)
+        return true
+    }
+
+    private fun genCtorCall(e: CtorCall): Boolean {
+        val ci = e.ctor!!
+        val sub = ci.jvmName
+        if (ci.fields.isEmpty()) {
+            mv.visitFieldInsn(GETSTATIC, sub, "INSTANCE", "L$sub;")
+            return true
+        }
+        // evaluate arguments in written order into temps (named arguments may be
+        // out of field order, but effects must run as written), then construct
+        val tempOf = HashMap<Expr, Int>()
+        for (a in e.args) {
+            if (!genExpr(a.expr, tail = false)) return false
+            val t = a.expr.type!!
+            tempOf[a.expr] = nextSlot
+            storeSlot(mv, t, nextSlot)
+            nextSlot += slotsOf(t)
+        }
+        mv.visitTypeInsn(NEW, sub)
+        mv.visitInsn(DUP)
+        for (arg in e.ordered!!) loadSlot(mv, arg.type!!, tempOf[arg]!!)
+        val desc = "(" + ci.fields.joinToString("") { descOf(it.type) } + ")V"
+        mv.visitMethodInsn(INVOKESPECIAL, sub, "<init>", desc, false)
         return true
     }
 
@@ -419,12 +586,13 @@ class CodeGen(private val module: Module, private val className: String) {
     }
 
     private fun genEquality(t: Type, op: BinOp) {
-        when (t) {
-            TString -> {
-                mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "equals", "(Ljava/lang/Object;)Z", false)
+        when {
+            t == TString || t is TAdt -> {
+                // ADT subclasses override equals structurally; singletons keep identity
+                mv.visitMethodInsn(INVOKEVIRTUAL, OBJ, "equals", "(L$OBJ;)Z", false)
                 if (op == BinOp.NEQ) { mv.visitInsn(ICONST_1); mv.visitInsn(IXOR) }
             }
-            TBool -> {
+            t == TBool -> {
                 mv.visitInsn(IXOR) // 1 = different
                 if (op == BinOp.EQ) { mv.visitInsn(ICONST_1); mv.visitInsn(IXOR) }
             }
@@ -484,11 +652,7 @@ class CodeGen(private val module: Module, private val className: String) {
         genExpr(e.scrutinee, tail = false)
         val scrutSlot = nextSlot
         nextSlot += slotsOf(scrutType)
-        when (scrutType) {
-            TInt -> mv.visitVarInsn(LSTORE, scrutSlot)
-            TString -> mv.visitVarInsn(ASTORE, scrutSlot)
-            else -> mv.visitVarInsn(ISTORE, scrutSlot)
-        }
+        storeSlot(mv, scrutType, scrutSlot)
         val end = Label()
         var anyFalls = false
 
@@ -528,31 +692,59 @@ class CodeGen(private val module: Module, private val className: String) {
         return anyFalls
     }
 
-    /** Emit a pattern test: fall through on success, jump to failTo on failure. Bind patterns also bind. */
-    private fun genPatternTest(p: Pattern, scrutSlot: Int, scrutType: Type, failTo: Label) {
+    /**
+     * Emit a pattern test against the value in [slot] (of type [type]): fall
+     * through on success, jump to failTo on failure. Bind patterns also bind.
+     */
+    private fun genPatternTest(p: Pattern, slot: Int, type: Type, failTo: Label) {
         when (p) {
             is WildPat -> {}
             is BindPat -> {
-                p.symbol!!.slot = scrutSlot // a binding is an alias, not a copy
+                p.symbol!!.slot = slot // a binding is an alias, not a copy
             }
-            is LitPat -> when (scrutType) {
+            is LitPat -> when (type) {
                 TInt -> {
-                    mv.visitVarInsn(LLOAD, scrutSlot)
+                    mv.visitVarInsn(LLOAD, slot)
                     mv.visitLdcInsn((p.lit as IntLit).value)
                     mv.visitInsn(LCMP)
                     mv.visitJumpInsn(IFNE, failTo)
                 }
                 TString -> {
-                    mv.visitVarInsn(ALOAD, scrutSlot)
+                    mv.visitVarInsn(ALOAD, slot)
                     val lit = (p.lit as StrLit).parts.joinToString("") { (it as StrPart.Text).value }
                     mv.visitLdcInsn(lit)
-                    mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "equals", "(Ljava/lang/Object;)Z", false)
+                    mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "equals", "(L$OBJ;)Z", false)
                     mv.visitJumpInsn(IFEQ, failTo)
                 }
                 else -> {
-                    mv.visitVarInsn(ILOAD, scrutSlot)
+                    mv.visitVarInsn(ILOAD, slot)
                     val want = (p.lit as BoolLit).value
                     mv.visitJumpInsn(if (want) IFEQ else IFNE, failTo)
+                }
+            }
+            is CtorPat -> {
+                val ci = p.ctor!!
+                val sub = ci.jvmName
+                if (ci.fields.isEmpty()) {
+                    // no-payload constructors are singletons: identity test
+                    mv.visitVarInsn(ALOAD, slot)
+                    mv.visitFieldInsn(GETSTATIC, sub, "INSTANCE", "L$sub;")
+                    mv.visitJumpInsn(IF_ACMPNE, failTo)
+                    return
+                }
+                mv.visitVarInsn(ALOAD, slot)
+                mv.visitTypeInsn(INSTANCEOF, sub)
+                mv.visitJumpInsn(IFEQ, failTo)
+                for ((i, fp) in p.fieldPats!!.withIndex()) {
+                    if (fp == null || fp is WildPat) continue
+                    val ft = ci.fields[i].type
+                    mv.visitVarInsn(ALOAD, slot)
+                    mv.visitTypeInsn(CHECKCAST, sub)
+                    mv.visitFieldInsn(GETFIELD, sub, ci.fields[i].name, descOf(ft))
+                    val fSlot = nextSlot
+                    nextSlot += slotsOf(ft)
+                    storeSlot(mv, ft, fSlot)
+                    genPatternTest(fp, fSlot, ft, failTo)
                 }
             }
         }

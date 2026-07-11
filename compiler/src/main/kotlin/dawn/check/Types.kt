@@ -20,6 +20,9 @@ sealed class Type(val display: String) {
      */
     object TError : Type("?")
 
+    /** A user-defined sum type. One instance per declaration, so == is identity. */
+    class TAdt(val info: AdtInfo) : Type(info.name)
+
     override fun toString() = display
 
     val isNumeric get() = this == TInt || this == TFloat
@@ -39,6 +42,32 @@ sealed class Type(val display: String) {
         }
     }
 }
+
+/**
+ * A user-defined ADT. Built by the checker in two passes: the shell (name) first,
+ * then constructor field types — so recursive types (Expr = Add(l: Expr, ...))
+ * resolve naturally.
+ */
+class AdtInfo(val name: String, val nameSpan: Span?) {
+    val ctors = ArrayList<CtorInfo>()
+    val type: Type.TAdt = Type.TAdt(this)
+
+    /** JVM internal name of the abstract base class */
+    val jvmName: String get() = name
+}
+
+class CtorInfo(val adt: AdtInfo, val name: String, val nameSpan: Span?) {
+    val fields = ArrayList<FieldInfo>()
+
+    /** JVM internal name of this constructor's final subclass */
+    val jvmName: String get() = "${adt.name}$$name"
+
+    fun render(): String =
+        if (fields.isEmpty()) "$name: ${adt.name}"
+        else "$name(${fields.joinToString(", ") { "${it.name}: ${it.type}" }}): ${adt.name}"
+}
+
+class FieldInfo(val name: String, val type: Type)
 
 /** Resolved local variable/parameter; the checker fills this into the AST, codegen consumes it. */
 class Symbol(val name: String, val type: Type, val mutable: Boolean, val defSpan: Span) {

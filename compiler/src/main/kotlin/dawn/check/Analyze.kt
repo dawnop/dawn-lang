@@ -16,6 +16,8 @@ class Analyzed(
     val diagnostics: List<Diagnostic>,
     /** user-defined functions by name */
     val functions: Map<String, FnSig>,
+    /** user-defined types by name */
+    val types: Map<String, AdtInfo>,
 ) {
     val hasErrors: Boolean get() = diagnostics.any { it.severity == dawn.diag.Severity.ERROR }
 }
@@ -31,5 +33,5 @@ fun analyze(source: String): Analyzed {
     val module = Parser(tokens, sink).module()
     val checker = Checker(module, sink)
     checker.check()
-    return Analyzed(module, sink.all, checker.functions)
+    return Analyzed(module, sink.all, checker.functions, checker.types)
 }

@@ -22,11 +22,14 @@ import dawn.diag.Span
 class Checker(private val module: Module, private val sink: DiagnosticSink) {
 
     private val fns = HashMap<String, FnSig>()
-    private val sigsByDecl = HashMap<FnDecl, FnSig>()
+    private val adts = HashMap<String, AdtInfo>()
+    private val ctors = HashMap<String, CtorInfo>()
     private val scopes = ArrayDeque<HashMap<String, Symbol>>()
 
     /** user-defined functions by name (first definition wins on duplicates) */
     val functions: Map<String, FnSig> get() = fns
+    /** user-defined types by name */
+    val types: Map<String, AdtInfo> get() = adts
 
     /** whether the current function body uses io */
     private var usesIo = false
@@ -35,8 +38,55 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
     private var ioWitnessName: String? = null
 
     fun check() {
-        // 1. collect signatures
-        for (d in module.decls) {
+        // 1. type headers first (shells only), so recursive types resolve
+        for (d in module.types) {
+            if (Type.named(d.name) != null) {
+                sink.error("`${d.name}` is a builtin type and cannot be redefined", d.nameSpan)
+                continue
+            }
+            if (adts.containsKey(d.name)) {
+                sink.error("type `${d.name}` is defined twice", d.nameSpan)
+                continue
+            }
+            val info = AdtInfo(d.name, d.nameSpan)
+            adts[d.name] = info
+            for (c in d.ctors) {
+                val ci = CtorInfo(info, c.name, c.nameSpan)
+                when {
+                    Type.named(c.name) != null ->
+                        sink.error("constructor `${c.name}` collides with a builtin type name", c.nameSpan)
+                    ctors.containsKey(c.name) ->
+                        sink.error("constructor `${c.name}` is already defined (constructors share one module-wide namespace)",
+                            c.nameSpan)
+                    else -> {
+                        c.info = ci
+                        ctors[c.name] = ci
+                        info.ctors.add(ci)
+                    }
+                }
+            }
+        }
+        // 2. constructor field types (may reference any type declared above)
+        for (d in module.types) {
+            for (c in d.ctors) {
+                val ci = c.info ?: continue
+                for (f in c.fields) {
+                    if (ci.fields.any { it.name == f.name }) {
+                        sink.error("field `${f.name}` is declared twice in `${c.name}`", f.span)
+                        continue
+                    }
+                    var ft = resolveType(f.typeRef)
+                    if (ft == TUnit) {
+                        sink.error("constructor fields cannot be Unit", f.span,
+                            "a no-payload case is just a bare constructor")
+                        ft = TError
+                    }
+                    ci.fields.add(FieldInfo(f.name, ft))
+                }
+            }
+        }
+        // 3. function signatures
+        for (d in module.fns) {
             val sig = FnSig(
                 d.name,
                 d.params.map { resolveType(it.typeName) },
@@ -46,7 +96,7 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
                 isBuiltin = false,
                 nameSpan = d.nameSpan,
             )
-            sigsByDecl[d] = sig
+            d.sig = sig
             when {
                 BUILTINS.containsKey(d.name) ->
                     sink.error("`${d.name}` is a builtin function and cannot be redefined", d.nameSpan)
@@ -55,27 +105,28 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
                 else -> fns[d.name] = sig
             }
         }
-        // 2. entry point check
-        val main = module.decls.find { it.name == "main" }
+        // 4. entry point check
+        val main = module.fns.find { it.name == "main" }
         if (main != null) {
-            val sig = sigsByDecl[main]!!
+            val sig = main.sig!!
             if (sig.paramTypes.isNotEmpty() || sig.ret != TUnit)
                 sink.error("main must have the signature fn main() -> Unit !io", main.nameSpan)
             if (!main.pub)
                 sink.error("main must be pub", main.nameSpan, "write pub fn main() -> Unit !io")
         }
-        // 3. check each function body
-        for (d in module.decls) checkFn(d)
+        // 5. check each function body
+        for (d in module.fns) checkFn(d)
     }
 
     private fun resolveType(ref: TypeRef): Type =
-        Type.named(ref.name) ?: run {
-            sink.error("unknown type: ${ref.name}", ref.span, "M0 types: Int, Float, Bool, String, Unit")
+        Type.named(ref.name) ?: adts[ref.name]?.type ?: run {
+            sink.error("unknown type: ${ref.name}", ref.span,
+                "builtin types: Int, Float, Bool, String, Unit — or declare `type ${ref.name} = ...`")
             TError
         }
 
     private fun checkFn(d: FnDecl) {
-        val sig = sigsByDecl[d]!!
+        val sig = d.sig!!
         usesIo = false
         ioWitness = null
         ioWitnessName = null
@@ -159,7 +210,7 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
                 val t = checkExpr(p.expr)
                 if (t !in listOf(TInt, TFloat, TBool, TString) && !t.isErrorish)
                     error("cannot interpolate a value of type $t", p.expr.span,
-                        "M0 interpolation supports Int, Float, Bool, String")
+                        "interpolation supports Int, Float, Bool, String (derive Show is not implemented yet)")
             }
             TString
         }
@@ -175,6 +226,7 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
             }
         }
         is Call -> checkCall(e)
+        is CtorCall -> checkCtorCall(e)
         is Binary -> checkBinary(e)
         is Unary -> when (e.op) {
             UnOp.NOT -> {
@@ -201,6 +253,7 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
             return error("undefined function: ${e.callee}", e.calleeSpan,
                 if (lookup(e.callee) != null) "`${e.callee}` is a variable, not a function (M0 has no function values)" else null)
         }
+        e.sig = sig
         if (e.args.size != sig.paramTypes.size) {
             for (arg in e.args) checkExpr(arg)
             sink.error("`${e.callee}` takes ${sig.paramTypes.size} argument(s), got ${e.args.size}",
@@ -221,6 +274,73 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
             usesIo = true
         }
         return sig.ret
+    }
+
+    private fun checkCtorCall(e: CtorCall): Type {
+        val ci = ctors[e.ctorName]
+        if (ci == null) {
+            for (a in e.args) checkExpr(a.expr)
+            return error("undefined constructor: ${e.ctorName}", e.calleeSpan,
+                if (adts.containsKey(e.ctorName))
+                    "`${e.ctorName}` is a type; build a value with one of its constructors: " +
+                        adts[e.ctorName]!!.ctors.joinToString(", ") { it.name }
+                else null)
+        }
+        e.ctor = ci
+        val n = ci.fields.size
+        if (!e.hasParens && n > 0) {
+            return error("constructor `${ci.name}` has $n field(s) and cannot be used bare", e.span,
+                "constructor: ${ci.render()}")
+        }
+        // map arguments (positional prefix, then named) onto fields
+        val slots = arrayOfNulls<Expr>(n)
+        var sawNamed = false
+        var argsBroken = false
+        for ((i, a) in e.args.withIndex()) {
+            val idx: Int
+            if (a.name != null) {
+                sawNamed = true
+                idx = ci.fields.indexOfFirst { it.name == a.name }
+                if (idx < 0) {
+                    sink.error("`${ci.name}` has no field `${a.name}`", a.span, "constructor: ${ci.render()}")
+                    argsBroken = true
+                    checkExpr(a.expr)
+                    continue
+                }
+            } else {
+                if (sawNamed) {
+                    sink.error("positional arguments cannot follow named arguments", a.span)
+                    argsBroken = true
+                    checkExpr(a.expr)
+                    continue
+                }
+                idx = i
+                if (idx >= n) { checkExpr(a.expr); continue } // counted below
+            }
+            if (slots[idx] != null) {
+                sink.error("field `${ci.fields[idx].name}` is given twice", a.span)
+                argsBroken = true
+                checkExpr(a.expr)
+                continue
+            }
+            val ft = ci.fields[idx].type
+            val at = checkExpr(a.expr, expected = ft)
+            if (!assignable(at, ft))
+                sink.error("field `${ci.fields[idx].name}` of `${ci.name}` is $ft, got $at", a.expr.span,
+                    "constructor: ${ci.render()}")
+            slots[idx] = a.expr
+        }
+        if (!argsBroken) {
+            val missing = ci.fields.filterIndexed { i, _ -> slots[i] == null }
+            if (e.args.size > n)
+                sink.error("`${ci.name}` takes $n field(s), got ${e.args.size}", e.span,
+                    "constructor: ${ci.render()}")
+            else if (missing.isNotEmpty())
+                sink.error("missing field(s) in `${ci.name}`: ${missing.joinToString(", ") { it.name }}",
+                    e.span, "constructor: ${ci.render()}")
+        }
+        if (slots.all { it != null }) e.ordered = slots.map { it!! }
+        return ci.adt.type
     }
 
     private fun checkBinary(e: Binary): Type {
@@ -283,18 +403,20 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
 
     private fun checkMatch(e: Match, expected: Type?): Type {
         val st = checkExpr(e.scrutinee)
-        val scrutOk = st in listOf(TInt, TString, TBool)
+        val scrutOk = st in listOf(TInt, TString, TBool) || st is TAdt
         if (!scrutOk && !st.isErrorish)
-            sink.error("M0 match supports Int/String/Bool only (ADTs arrive in M1)", e.scrutinee.span)
+            sink.error("match supports Int/String/Bool and user-defined types, got $st", e.scrutinee.span)
 
         var result: Type = TNever
-        var hasFallback = false          // unguarded catch-all arm (binding/wildcard)
-        var sawTrue = false
-        var sawFalse = false
 
         for (arm in e.arms) {
             scoped {
-                for (p in arm.patterns) checkPattern(p, st, arm)
+                if (arm.patterns.size > 1) {
+                    // or-patterns must not bind: each alternative would need identical bindings
+                    for (p in arm.patterns) if (bindsAnything(p))
+                        sink.error("or-pattern alternatives cannot introduce bindings", p.span)
+                }
+                for (p in arm.patterns) checkPattern(p, st)
                 if (arm.guard != null) {
                     val gt = checkExpr(arm.guard)
                     if (gt != TBool && !gt.isErrorish) sink.error("guard must be Bool, got $gt", arm.guard.span)
@@ -302,36 +424,42 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
                 val bt = checkExpr(arm.body, expected)
                 result = unify(result, bt, arm.body.span, "the match arms")
             }
-            if (arm.guard == null) {
-                for (p in arm.patterns) {
-                    when (p) {
-                        is BindPat, is WildPat -> hasFallback = true
-                        is LitPat -> {
-                            val lit = p.lit
-                            if (lit is BoolLit) { if (lit.value) sawTrue = true else sawFalse = true }
-                        }
-                    }
-                }
-            }
         }
-        val exhaustive = hasFallback || (st == TBool && sawTrue && sawFalse)
-        if (scrutOk && !exhaustive) {
-            val missing = when (st) {
-                TBool -> if (sawTrue) "false" else "true"
-                else -> "_ ($st has too many values to enumerate)"
+
+        // exhaustiveness (guarded arms can fail their guard, so they don't count)
+        if (scrutOk) {
+            val rows = e.arms.filter { it.guard == null }
+                .flatMap { arm -> arm.patterns.map { listOf(toSPat(it)) } }
+            val tys = listOf(st)
+            if (useful(rows, listOf(SWild), tys)) {
+                val missing = when {
+                    st is TAdt -> st.info.ctors
+                        .filter { c -> useful(rows, listOf(SCtor(c, List(c.fields.size) { SWild })), tys) }
+                        .joinToString(", ") { it.name }
+                    st == TBool -> listOf(true, false)
+                        .filter { v -> useful(rows, listOf(SLit(v)), tys) }
+                        .joinToString(", ")
+                    else -> "_ ($st has too many values to enumerate)"
+                }
+                sink.error("non-exhaustive match, missing: $missing", e.span,
+                    if (st is TAdt) "add arms for the missing constructors, or a catch-all _"
+                    else "add an unguarded catch-all arm (a binding or _)")
             }
-            sink.error("non-exhaustive match, missing: $missing", e.span,
-                "add an unguarded catch-all arm (a binding or _)")
         }
         return result
     }
 
-    private fun checkPattern(p: Pattern, scrutType: Type, arm: MatchArm) {
+    /** does the pattern introduce any binding (recursively)? */
+    private fun bindsAnything(p: Pattern): Boolean = when (p) {
+        is BindPat -> true
+        is CtorPat -> p.args.any { bindsAnything(it.pattern) }
+        else -> false
+    }
+
+    private fun checkPattern(p: Pattern, scrutType: Type) {
         when (p) {
             is WildPat -> {}
             is BindPat -> {
-                if (arm.patterns.size > 1)
-                    sink.error("or-pattern alternatives cannot introduce bindings (M0)", p.span)
                 p.symbol = declare(p.name, scrutType, mutable = false, p.span)
             }
             is LitPat -> {
@@ -339,7 +467,71 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
                 if (lt != scrutType && !scrutType.isErrorish && !lt.isErrorish)
                     sink.error("pattern type $lt does not match scrutinee type $scrutType", p.span)
             }
+            is CtorPat -> checkCtorPat(p, scrutType)
         }
+    }
+
+    private fun checkCtorPat(p: CtorPat, scrutType: Type) {
+        val ci = ctors[p.ctorName]
+        if (ci == null) {
+            sink.error("undefined constructor in pattern: ${p.ctorName}", p.nameSpan)
+            // still check subpatterns so their bindings exist (as TError)
+            for (a in p.args) checkPattern(a.pattern, TError)
+            return
+        }
+        p.ctor = ci
+        if (scrutType !is TAdt || scrutType.info != ci.adt) {
+            if (!scrutType.isErrorish)
+                sink.error("`${p.ctorName}` is a ${ci.adt.name} constructor, but the scrutinee is $scrutType",
+                    p.nameSpan)
+        }
+        val n = ci.fields.size
+        if (!p.hasParens && n > 0) {
+            sink.error("constructor `${ci.name}` has $n field(s); a bare name does not match it", p.span,
+                "write ${ci.name}(..) to ignore the fields, or destructure them")
+            for (a in p.args) checkPattern(a.pattern, TError)
+            return
+        }
+        val slots = arrayOfNulls<Pattern>(n)
+        var sawNamed = false
+        for ((i, a) in p.args.withIndex()) {
+            val idx: Int
+            if (a.name != null) {
+                sawNamed = true
+                idx = ci.fields.indexOfFirst { it.name == a.name }
+                if (idx < 0) {
+                    sink.error("`${ci.name}` has no field `${a.name}`", a.pattern.span,
+                        "constructor: ${ci.render()}")
+                    checkPattern(a.pattern, TError)
+                    continue
+                }
+            } else {
+                if (sawNamed) {
+                    sink.error("positional patterns cannot follow named patterns", a.pattern.span)
+                    checkPattern(a.pattern, TError)
+                    continue
+                }
+                idx = i
+                if (idx >= n) { checkPattern(a.pattern, TError); continue } // counted below
+            }
+            if (slots[idx] != null) {
+                sink.error("field `${ci.fields[idx].name}` is matched twice", a.pattern.span)
+                checkPattern(a.pattern, TError)
+                continue
+            }
+            slots[idx] = a.pattern
+            checkPattern(a.pattern, ci.fields[idx].type)
+        }
+        if (p.args.size > n) {
+            sink.error("`${ci.name}` has $n field(s), the pattern names ${p.args.size}", p.span,
+                "constructor: ${ci.render()}")
+        } else if (!p.hasRest) {
+            val missing = ci.fields.filterIndexed { i, _ -> slots[i] == null }
+            if (missing.isNotEmpty())
+                sink.error("pattern for `${ci.name}` does not mention: ${missing.joinToString(", ") { it.name }}",
+                    p.span, "add `..` to ignore the remaining fields")
+        }
+        p.fieldPats = slots.toList()
     }
 
     private fun checkBlock(e: Block, expected: Type?): Type = scoped {

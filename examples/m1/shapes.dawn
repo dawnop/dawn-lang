@@ -1,0 +1,47 @@
+# M1 ADT demo: sum types, constructor patterns, guards, structural equality.
+# Run: dawn run examples/m1/shapes.dawn
+
+type Shape =
+  | Circle(r: Float)
+  | Rect(w: Float, h: Float)
+  | Point
+
+fn area(s: Shape) -> Float =
+  match s {
+    Circle(r)  -> 3.14159 * r * r
+    Rect(w, h) -> w * h
+    Point      -> 0.0
+  }
+
+fn describe(s: Shape) -> String =
+  match s {
+    Circle(r) if r > 100.0 -> "a huge circle"
+    Circle(r)              -> "circle with r = {r}"
+    Rect(w, h)             -> "rect {w} x {h}"
+    Point                  -> "a point"
+  }
+
+type Expr =
+  | Num(v: Int)
+  | Add(l: Expr, r: Expr)
+  | Mul(l: Expr, r: Expr)
+
+fn eval(e: Expr) -> Int =
+  match e {
+    Num(v)    -> v
+    Add(l, r) -> eval(l) + eval(r)
+    Mul(l, r) -> eval(l) * eval(r)
+  }
+
+pub fn main() -> Unit !io = {
+  println(describe(Circle(1.0)))
+  println(describe(Rect(h: 3.0, w: 2.0)))   # named arguments, any order
+  println(describe(Point))
+  println(describe(Circle(200.0)))
+
+  println("total: {area(Circle(1.0)) + area(Rect(2.0, 3.0))}")
+  println("equal: {Circle(1.0) == Circle(1.0)}")
+
+  # (2 + 3) * 4
+  println("eval: {eval(Mul(Add(Num(2), Num(3)), Num(4)))}")
+}
