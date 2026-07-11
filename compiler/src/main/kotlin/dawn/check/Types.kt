@@ -175,6 +175,9 @@ class AdtInfo(
 ) {
     val ctors = ArrayList<CtorInfo>()
 
+    /** `derive Show` requested: the type gets a generated to_string / toString (spec §4.3) */
+    var derivesShow: Boolean = false
+
     /** the declared "self type": Tree[T] inside its own declaration */
     val type: Type.TAdt = Type.TAdt(this, typeParams)
 
@@ -234,6 +237,7 @@ class FnSig(
 private fun preludeAdt(name: String, params: List<String>, build: (AdtInfo, List<Type.TVar>) -> Unit): AdtInfo {
     val tvars = params.map { Type.TVar(it) }
     val info = AdtInfo(name, nameSpan = null, isRecord = false, typeParams = tvars)
+    info.derivesShow = true // Option/Result print when their payloads do (spec §4.3)
     build(info, tvars)
     return info
 }

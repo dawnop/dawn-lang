@@ -54,7 +54,8 @@ private class TargetQuery(private val analysis: Analyzed, private val offset: In
             is TypeDecl -> {
                 val info = analysis.types[d.name]
                 val summary = info?.ctors?.joinToString(" | ") { it.name } ?: ""
-                offer(d.nameSpan, "type ${d.name} = $summary", d.nameSpan)
+                val derives = if (d.derives.isNotEmpty()) " derive " + d.derives.joinToString(", ") { it.first } else ""
+                offer(d.nameSpan, "type ${d.name} = $summary$derives", d.nameSpan)
                 for (c in d.ctors) {
                     c.info?.let { offer(c.nameSpan, it.render(), c.nameSpan) }
                     for ((i, f) in c.fields.withIndex()) {

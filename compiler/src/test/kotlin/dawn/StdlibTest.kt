@@ -238,7 +238,7 @@ class StdlibTest {
             fn f() -> String = to_string(P { x: 1 })
             """.trimIndent(),
         )
-        assertHasError(diags, "to_string supports Int, Float, Bool, String")
+        assertHasError(diags, "cannot print a value of type P")
     }
 
     @Test

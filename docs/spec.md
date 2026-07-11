@@ -243,8 +243,14 @@ let area = {
 
 - `==`/`!=` 是结构相等，对任意类型可用（函数类型除外——比较函数是编译错误）。
 - 排序比较 `< <=` 等仅 `Int`/`Float`/`String`。
-- 用户类型的打印：`type` 声明后加 `derive Show` 获得 `to_string`
-  （v0.1 仅有 `Show` 这一个 derive）。
+- 用户类型的打印：`type` 声明后加 `derive Show` 获得 `to_string` 与字符串插值支持
+  （v0.1 仅有 `Show` 这一个 derive）。渲染形如合法 Dawn 源码：
+  - 无载荷构造器 → `Red`；带位置字段的构造器 → `Circle(1.5)`；
+  - 记录 → `Point { x: 0.0, y: 2.5 }`（带字段名）；
+  - `String` 字段带双引号并转义（`"a\nb"`）；`Int`/`Float`/`Bool` 同各自 `to_string`；
+  - 容器递归渲染：`List` → `[a, b]`、元组 → `(a, b)`、`Option`/`Result` 随载荷（`Some(Red)`）。
+  - 每个字段类型必须可打印（函数字段、未 `derive Show` 的嵌套用户类型 → 声明处报错）；
+    泛型类型可打印 **当且仅当** 其类型实参都可打印（`Box[Int]` 可，`Box[fn(...)→...]` 不可）。
 
 ### 4.4 管道
 

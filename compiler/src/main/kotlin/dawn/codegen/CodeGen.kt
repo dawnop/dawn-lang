@@ -39,6 +39,7 @@ class CodeGen(
         const val LISTS_CLASS = "dawn/rt/Lists"
         const val STRINGS_CLASS = "dawn/rt/Strings"
         const val IO_CLASS = "dawn/rt/Io"
+        const val SHOW_CLASS = "dawn/rt/Show"
         private const val ARGS_FIELD = "dawn\$args"
         private const val SB = "java/lang/StringBuilder"
         private const val OBJ = "java/lang/Object"
@@ -152,6 +153,7 @@ class CodeGen(
         out[LISTS_CLASS] = genListsClass()
         out[STRINGS_CLASS] = genStringsClass()
         out[IO_CLASS] = genIoClass()
+        out[SHOW_CLASS] = genShowClass()
         for (n in 0..8) out[fnIface(n)] = genFnInterface(n)
         for (n in 2..8) out[tupleClass(n)] = genTupleClass(n)
         return out
@@ -208,6 +210,27 @@ class CodeGen(
         eq.visitInsn(IRETURN)
         eq.visitMaxs(0, 0)
         eq.visitEnd()
+
+        // toString for `derive Show`: (v0, v1, ...) with elements rendered via dawn/rt/Show
+        val ts = cw.visitMethod(ACC_PUBLIC, "toString", "()Ljava/lang/String;", null, null)
+        ts.visitCode()
+        ts.visitTypeInsn(NEW, SB)
+        ts.visitInsn(DUP)
+        ts.visitMethodInsn(INVOKESPECIAL, SB, "<init>", "()V", false)
+        appendConst(ts, "(")
+        for (i in 0 until n) {
+            if (i > 0) appendConst(ts, ", ")
+            ts.visitVarInsn(ALOAD, 0)
+            ts.visitFieldInsn(GETFIELD, cls, "_$i", "L$OBJ;")
+            ts.visitMethodInsn(INVOKESTATIC, SHOW_CLASS, "show", "(L$OBJ;)Ljava/lang/String;", false)
+            ts.visitMethodInsn(INVOKEVIRTUAL, SB, "append", "(Ljava/lang/String;)L$SB;", false)
+        }
+        appendConst(ts, ")")
+        ts.visitMethodInsn(INVOKEVIRTUAL, SB, "toString", "()Ljava/lang/String;", false)
+        ts.visitInsn(ARETURN)
+        ts.visitMaxs(0, 0)
+        ts.visitEnd()
+
         cw.visitEnd()
         return cw.toByteArray()
     }
@@ -379,9 +402,46 @@ class CodeGen(
 
         // structural equality (== in Dawn, spec §4.3); singletons keep identity equals
         if (!singleton) genEqualsMethod(cw, sub, ci)
+        // toString for `derive Show`: always generated so nested/generic fields render
+        // uniformly via dawn/rt/Show; the type checker gates whether it may be called
+        genToStringMethod(cw, sub, ci)
 
         cw.visitEnd()
         return cw.toByteArray()
+    }
+
+    /** `derive Show` rendering: Name, Name(v0, v1), or Name { f0: v0, f1: v1 } for records */
+    private fun genToStringMethod(cw: ClassWriter, sub: String, ci: CtorInfo) {
+        val STR = "java/lang/String"
+        val m = cw.visitMethod(ACC_PUBLIC, "toString", "()L$STR;", null, null)
+        m.visitCode()
+        m.visitTypeInsn(NEW, SB)
+        m.visitInsn(DUP)
+        m.visitMethodInsn(INVOKESPECIAL, SB, "<init>", "()V", false)
+        appendConst(m, ci.name)
+        if (ci.fields.isNotEmpty()) {
+            val isRecord = ci.adt.isRecord
+            appendConst(m, if (isRecord) " { " else "(")
+            for ((i, f) in ci.fields.withIndex()) {
+                if (i > 0) appendConst(m, ", ")
+                if (isRecord) appendConst(m, "${f.name}: ")
+                m.visitVarInsn(ALOAD, 0)
+                m.visitFieldInsn(GETFIELD, sub, f.name, descOf(f.type))
+                when (f.type) {
+                    TInt -> m.visitMethodInsn(INVOKESTATIC, "java/lang/Long", "valueOf", "(J)Ljava/lang/Long;", false)
+                    TFloat -> m.visitMethodInsn(INVOKESTATIC, "java/lang/Double", "valueOf", "(D)Ljava/lang/Double;", false)
+                    TBool -> m.visitMethodInsn(INVOKESTATIC, "java/lang/Boolean", "valueOf", "(Z)Ljava/lang/Boolean;", false)
+                    else -> {}
+                }
+                m.visitMethodInsn(INVOKESTATIC, SHOW_CLASS, "show", "(L$OBJ;)L$STR;", false)
+                m.visitMethodInsn(INVOKEVIRTUAL, SB, "append", "(L$STR;)L$SB;", false)
+            }
+            appendConst(m, if (isRecord) " }" else ")")
+        }
+        m.visitMethodInsn(INVOKEVIRTUAL, SB, "toString", "()L$STR;", false)
+        m.visitInsn(ARETURN)
+        m.visitMaxs(0, 0)
+        m.visitEnd()
     }
 
     private fun genEqualsMethod(cw: ClassWriter, sub: String, ci: CtorInfo) {
@@ -1057,6 +1117,136 @@ class CodeGen(
         return cw.toByteArray()
     }
 
+    /**
+     * dawn/rt/Show: the runtime side of `derive Show`. show(Object) renders any
+     * erased Dawn value — Strings are quoted, Lists are bracketed with their
+     * elements shown recursively, and everything else (numbers, booleans, and
+     * ADT/tuple instances whose generated toString does the work) is delegated
+     * to String.valueOf. This references only java.*, so it needs no generated
+     * types and is native-image safe.
+     */
+    private fun genShowClass(): ByteArray {
+        val cw = DawnClassWriter()
+        cw.visit(V17, ACC_PUBLIC or ACC_FINAL, SHOW_CLASS, null, OBJ, null)
+        val STR = "java/lang/String"
+
+        // static String show(Object o)
+        run {
+            val m = cw.visitMethod(ACC_PUBLIC or ACC_STATIC, "show", "(L$OBJ;)L$STR;", null, null)
+            m.visitCode()
+            val notString = Label()
+            val notList = Label()
+            // if (o instanceof String) return quote((String) o);
+            m.visitVarInsn(ALOAD, 0)
+            m.visitTypeInsn(INSTANCEOF, STR)
+            m.visitJumpInsn(IFEQ, notString)
+            m.visitVarInsn(ALOAD, 0)
+            m.visitTypeInsn(CHECKCAST, STR)
+            m.visitMethodInsn(INVOKESTATIC, SHOW_CLASS, "quote", "(L$STR;)L$STR;", false)
+            m.visitInsn(ARETURN)
+            m.visitLabel(notString)
+            // if (o instanceof java.util.List) return showList((List) o);
+            m.visitVarInsn(ALOAD, 0)
+            m.visitTypeInsn(INSTANCEOF, JLIST)
+            m.visitJumpInsn(IFEQ, notList)
+            m.visitVarInsn(ALOAD, 0)
+            m.visitTypeInsn(CHECKCAST, JLIST)
+            m.visitMethodInsn(INVOKESTATIC, SHOW_CLASS, "showList", "(L$JLIST;)L$STR;", false)
+            m.visitInsn(ARETURN)
+            m.visitLabel(notList)
+            // return String.valueOf(o);
+            m.visitVarInsn(ALOAD, 0)
+            m.visitMethodInsn(INVOKESTATIC, STR, "valueOf", "(L$OBJ;)L$STR;", false)
+            m.visitInsn(ARETURN)
+            m.visitMaxs(0, 0)
+            m.visitEnd()
+        }
+
+        // static String quote(String s): "\"" + escaped + "\"" (source-literal style)
+        run {
+            val m = cw.visitMethod(ACC_PUBLIC or ACC_STATIC, "quote", "(L$STR;)L$STR;", null, null)
+            m.visitCode()
+            m.visitTypeInsn(NEW, SB)
+            m.visitInsn(DUP)
+            m.visitMethodInsn(INVOKESPECIAL, SB, "<init>", "()V", false)
+            appendConst(m, "\"")
+            // escape in order: backslash first, then quote, newline, tab, carriage return
+            m.visitVarInsn(ALOAD, 0)
+            val esc = listOf("\\" to "\\\\", "\"" to "\\\"", "\n" to "\\n", "\t" to "\\t", "\r" to "\\r")
+            for ((from, to) in esc) {
+                m.visitLdcInsn(from)
+                m.visitLdcInsn(to)
+                m.visitMethodInsn(INVOKEVIRTUAL, STR, "replace",
+                    "(Ljava/lang/CharSequence;Ljava/lang/CharSequence;)L$STR;", false)
+            }
+            m.visitMethodInsn(INVOKEVIRTUAL, SB, "append", "(L$STR;)L$SB;", false)
+            appendConst(m, "\"")
+            m.visitMethodInsn(INVOKEVIRTUAL, SB, "toString", "()L$STR;", false)
+            m.visitInsn(ARETURN)
+            m.visitMaxs(0, 0)
+            m.visitEnd()
+        }
+
+        // static String showList(List xs): "[" + show(e0) + ", " + ... + "]"
+        run {
+            val m = cw.visitMethod(ACC_PUBLIC or ACC_STATIC, "showList", "(L$JLIST;)L$STR;", null, null)
+            m.visitCode()
+            // slot 1 = StringBuilder, slot 2 = i, slot 3 = size
+            m.visitTypeInsn(NEW, SB)
+            m.visitInsn(DUP)
+            m.visitMethodInsn(INVOKESPECIAL, SB, "<init>", "()V", false)
+            m.visitVarInsn(ASTORE, 1)
+            m.visitVarInsn(ALOAD, 1)
+            appendConst(m, "[")
+            m.visitInsn(POP)
+            m.visitInsn(ICONST_0)
+            m.visitVarInsn(ISTORE, 2)
+            m.visitVarInsn(ALOAD, 0)
+            m.visitMethodInsn(INVOKEINTERFACE, JLIST, "size", "()I", true)
+            m.visitVarInsn(ISTORE, 3)
+            val loop = Label()
+            val done = Label()
+            m.visitLabel(loop)
+            m.visitVarInsn(ILOAD, 2)
+            m.visitVarInsn(ILOAD, 3)
+            m.visitJumpInsn(IF_ICMPGE, done)
+            // if (i > 0) sb.append(", ")
+            val noComma = Label()
+            m.visitVarInsn(ILOAD, 2)
+            m.visitJumpInsn(IFEQ, noComma)
+            m.visitVarInsn(ALOAD, 1)
+            appendConst(m, ", ")
+            m.visitInsn(POP)
+            m.visitLabel(noComma)
+            // sb.append(show(xs.get(i)))
+            m.visitVarInsn(ALOAD, 1)
+            m.visitVarInsn(ALOAD, 0)
+            m.visitVarInsn(ILOAD, 2)
+            m.visitMethodInsn(INVOKEINTERFACE, JLIST, "get", "(I)L$OBJ;", true)
+            m.visitMethodInsn(INVOKESTATIC, SHOW_CLASS, "show", "(L$OBJ;)L$STR;", false)
+            m.visitMethodInsn(INVOKEVIRTUAL, SB, "append", "(L$STR;)L$SB;", false)
+            m.visitInsn(POP)
+            m.visitIincInsn(2, 1)
+            m.visitJumpInsn(GOTO, loop)
+            m.visitLabel(done)
+            m.visitVarInsn(ALOAD, 1)
+            appendConst(m, "]")
+            m.visitMethodInsn(INVOKEVIRTUAL, SB, "toString", "()L$STR;", false)
+            m.visitInsn(ARETURN)
+            m.visitMaxs(0, 0)
+            m.visitEnd()
+        }
+
+        cw.visitEnd()
+        return cw.toByteArray()
+    }
+
+    /** append a constant string to the StringBuilder already on the stack, leaving the SB on the stack */
+    private fun appendConst(m: org.objectweb.asm.MethodVisitor, s: String) {
+        m.visitLdcInsn(s)
+        m.visitMethodInsn(INVOKEVIRTUAL, SB, "append", "(Ljava/lang/String;)L$SB;", false)
+    }
+
     /** dawn/rt/PanicError extends Error */
     private fun genPanicClass(): ByteArray {
         val cw = ClassWriter(0)
@@ -1471,13 +1661,18 @@ class CodeGen(
                 }
                 is StrPart.Interp -> {
                     genExpr(p.expr, tail = false)
-                    val d = when (p.expr.type!!) {
-                        TInt -> "(J)L$SB;"
-                        TFloat -> "(D)L$SB;"
-                        TBool -> "(Z)L$SB;"
-                        else -> "(Ljava/lang/String;)L$SB;"
+                    when (val at = p.expr.type!!) {
+                        TInt -> mv.visitMethodInsn(INVOKEVIRTUAL, SB, "append", "(J)L$SB;", false)
+                        TFloat -> mv.visitMethodInsn(INVOKEVIRTUAL, SB, "append", "(D)L$SB;", false)
+                        TBool -> mv.visitMethodInsn(INVOKEVIRTUAL, SB, "append", "(Z)L$SB;", false)
+                        TString -> mv.visitMethodInsn(INVOKEVIRTUAL, SB, "append", "(Ljava/lang/String;)L$SB;", false)
+                        else -> {
+                            // a derive Show value: render via the runtime, then append the string
+                            box(at)
+                            mv.visitMethodInsn(INVOKESTATIC, SHOW_CLASS, "show", "(L$OBJ;)Ljava/lang/String;", false)
+                            mv.visitMethodInsn(INVOKEVIRTUAL, SB, "append", "(Ljava/lang/String;)L$SB;", false)
+                        }
                     }
-                    mv.visitMethodInsn(INVOKEVIRTUAL, SB, "append", d, false)
                 }
             }
         }
@@ -1605,8 +1800,17 @@ class CodeGen(
                 m.visitInsn(ATHROW)
             }
             "to_string" -> {
+                // a top-level String renders unquoted; everything else goes through Show
+                val str = Label()
                 m.visitVarInsn(ALOAD, 0)
-                m.visitMethodInsn(INVOKESTATIC, "java/lang/String", "valueOf", "(L$OBJ;)Ljava/lang/String;", false)
+                m.visitTypeInsn(INSTANCEOF, "java/lang/String")
+                m.visitJumpInsn(IFNE, str)
+                m.visitVarInsn(ALOAD, 0)
+                m.visitMethodInsn(INVOKESTATIC, SHOW_CLASS, "show", "(L$OBJ;)Ljava/lang/String;", false)
+                m.visitInsn(ARETURN)
+                m.visitLabel(str)
+                m.visitVarInsn(ALOAD, 0)
+                m.visitTypeInsn(CHECKCAST, "java/lang/String")
                 m.visitInsn(ARETURN)
             }
             "to_float" -> {
@@ -2138,14 +2342,19 @@ class CodeGen(
         }
         "to_string" -> {
             genExpr(e.args[0], tail = false)
-            when (e.args[0].type!!) {
+            when (val at = e.args[0].type!!) {
                 TInt -> mv.visitMethodInsn(INVOKESTATIC, "java/lang/String", "valueOf",
                     "(J)Ljava/lang/String;", false)
                 TFloat -> mv.visitMethodInsn(INVOKESTATIC, "java/lang/String", "valueOf",
                     "(D)Ljava/lang/String;", false)
                 TBool -> mv.visitMethodInsn(INVOKESTATIC, "java/lang/String", "valueOf",
                     "(Z)Ljava/lang/String;", false)
-                else -> {} // String stays as is (printability checked)
+                TString -> {} // stays as is
+                else -> {
+                    // derive Show value (ADT / tuple / list / Option): render via the runtime
+                    box(at)
+                    mv.visitMethodInsn(INVOKESTATIC, SHOW_CLASS, "show", "(L$OBJ;)Ljava/lang/String;", false)
+                }
             }
             true
         }

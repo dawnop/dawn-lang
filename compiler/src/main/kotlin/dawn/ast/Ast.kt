@@ -81,6 +81,8 @@ class TypeDecl(
     val isRecord: Boolean,
     span: Span,
     nameSpan: Span,
+    /** trait names after `derive` (v0.1: only "Show"); paired with each name's span for diagnostics */
+    val derives: List<Pair<String, Span>> = emptyList(),
 ) : Decl(pub, name, span, nameSpan)
 
 /**

@@ -112,6 +112,10 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
             if (d.typeParams.toSet().size != d.typeParams.size)
                 sink.error("duplicate type parameter names", d.nameSpan)
             val info = AdtInfo(d.name, d.nameSpan, d.isRecord, d.typeParams.map { TVar(it) })
+            for ((trait, span) in d.derives) {
+                if (trait == "Show") info.derivesShow = true
+                else sink.error("unknown derivable trait `$trait`", span, "v0.1 can only derive Show")
+            }
             adts[d.name] = info
             for (c in d.ctors) {
                 val ci = CtorInfo(info, c.name, c.nameSpan)
@@ -148,6 +152,18 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
                     }
                     ci.fields.add(FieldInfo(f.name, ft, f.span))
                 }
+            }
+        }
+        // 2.5 derive Show: every field must be renderable (type parameters allowed, resolved at use)
+        for (d in module.types) {
+            val info = d.ctors.firstOrNull()?.info?.adt ?: continue
+            if (!info.derivesShow) continue
+            for (ci in info.ctors) for (f in ci.fields) {
+                if (!isShowableField(f.type))
+                    sink.error(
+                        "cannot derive Show for `${info.name}`: field `${f.name}` of type ${f.type} is not printable",
+                        f.defSpan ?: d.nameSpan, showHint(f.type),
+                    )
             }
         }
         // 3. function signatures
@@ -545,9 +561,8 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
         is StrLit -> {
             for (p in e.parts) if (p is StrPart.Interp) {
                 val t = checkExpr(p.expr)
-                if (t !in listOf(TInt, TFloat, TBool, TString) && !t.isErrorish)
-                    error("cannot interpolate a value of type $t", p.expr.span,
-                        "interpolation supports Int, Float, Bool, String (derive Show is not implemented yet)")
+                if (!isShowable(t) && !t.isErrorish)
+                    error("cannot interpolate a value of type $t", p.expr.span, showHint(t))
             }
             TString
         }
@@ -791,11 +806,37 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
         return TFn(params.map { subst(it, map) }, subst(ret, map), Eff.Pure)
     }
 
-    /** to_string / interpolation accept the printable types only (derive Show is later) */
+    /** to_string / interpolation accept printable types: primitives, and `derive Show` values. */
     private fun checkPrintable(t: Type, span: Span) {
-        if (t !in listOf(TInt, TFloat, TBool, TString) && !t.isErrorish)
-            sink.error("to_string supports Int, Float, Bool, String, got $t", span,
-                "derive Show is not implemented yet")
+        if (!isShowable(t) && !t.isErrorish)
+            sink.error("cannot print a value of type $t", span, showHint(t))
+    }
+
+    /** A concrete type is printable now: primitives, or containers/ADTs of printable types. */
+    private fun isShowable(t: Type): Boolean = when (t) {
+        TInt, TFloat, TBool, TString -> true
+        is TList -> isShowable(t.elem)
+        is TTuple -> t.elems.all { isShowable(it) }
+        is TAdt -> t.info.derivesShow && t.args.all { isShowable(it) }
+        else -> false // TVar (opaque), TFn, TJava, Unit
+    }
+
+    /** A field type may derive Show: like [isShowable] but type parameters are allowed (resolved at use). */
+    private fun isShowableField(t: Type): Boolean = when (t) {
+        TInt, TFloat, TBool, TString, is TVar -> true
+        is TList -> isShowableField(t.elem)
+        is TTuple -> t.elems.all { isShowableField(it) }
+        is TAdt -> t.info.derivesShow && t.args.all { isShowableField(it) }
+        else -> false
+    }
+
+    /** A targeted hint for why [t] is not printable. */
+    private fun showHint(t: Type): String = when {
+        t is TAdt && !t.info.derivesShow -> "add `derive Show` to `type ${t.info.name}`"
+        t is TAdt -> "one of its type arguments is not printable"
+        t is TVar -> "a type parameter is not printable; require a concrete printable type"
+        t is TFn -> "functions cannot be printed"
+        else -> "printable types are Int, Float, Bool, String, and `derive Show` values"
     }
 
     private fun checkCall(e: Call, expected: Type?, preTyped: Pair<Expr, Type>? = null): Type {

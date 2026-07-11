@@ -192,8 +192,30 @@ class Parser(
             skipNewlines()
             ctors.add(ctorDecl())
         }
+        val derives = parseDerives()
+        val end = derives.lastOrNull()?.second?.end ?: ctors.last().span.end
         return TypeDecl(pub, name.text, tparams, ctors, isRecord = false,
-            Span(kw.span.start, ctors.last().span.end), name.span)
+            Span(kw.span.start, end), name.span, derives)
+    }
+
+    /**
+     * Optional trailing `derive Name (, Name)*` on a type declaration. `derive` is a
+     * soft keyword (a plain identifier), so this peeks without consuming when absent.
+     */
+    private fun parseDerives(): List<Pair<String, Span>> {
+        var look = pos
+        while (toks[look].type == NEWLINE) look++
+        if (!(toks[look].type == IDENT && toks[look].text == "derive")) return emptyList()
+        pos = look + 1
+        val out = ArrayList<Pair<String, Span>>()
+        val first = expect(TYPEIDENT, "a trait name to derive (only Show in v0.1)")
+        out.add(first.text to first.span)
+        while (at(COMMA)) {
+            advance()
+            val n = expect(TYPEIDENT, "a trait name to derive")
+            out.add(n.text to n.span)
+        }
+        return out
     }
 
     /** type Point = { x: Float, y: Float } — a single-constructor product type */
@@ -213,8 +235,10 @@ class Parser(
         if (fields.isEmpty())
             throw DawnError("a record must declare at least one field", Span(kw.span.start, close.span.end))
         val ctor = CtorDecl(name.text, fields, Span(name.span.start, close.span.end), name.span)
+        val derives = parseDerives()
+        val end = derives.lastOrNull()?.second?.end ?: close.span.end
         return TypeDecl(pub, name.text, tparams, listOf(ctor), isRecord = true,
-            Span(kw.span.start, close.span.end), name.span)
+            Span(kw.span.start, end), name.span, derives)
     }
 
     private fun ctorDecl(): CtorDecl {
