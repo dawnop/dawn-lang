@@ -4,6 +4,7 @@ import dawn.ast.*
 import dawn.check.Type.*
 import dawn.diag.DiagnosticSink
 import dawn.diag.Span
+import dawn.diag.Suggest
 
 /**
  * Type and effect checking (the M0 subset of spec §2/§4/§5/§6).
@@ -350,7 +351,8 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
         }
         val info = adts[ref.name] ?: run {
             sink.error("unknown type: ${ref.name}", ref.span,
-                "builtin types: Int, Float, Bool, String, Unit, List — or declare `type ${ref.name} = ...`")
+                Suggest.hint(ref.name, adts.keys + javaClasses.keys + builtinTypeNames)
+                    ?: "builtin types: Int, Float, Bool, String, Unit, List — or declare `type ${ref.name} = ...`")
             return TError
         }
         if (ref.args.size != info.typeParams.size) {
@@ -466,6 +468,11 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
         return null
     }
 
+    /** Every name currently in scope — the candidate pool for "did you mean" on a variable. */
+    private fun localNames(): List<String> = scopes.flatMap { it.keys }
+
+    private val builtinTypeNames = listOf("Int", "Float", "Bool", "String", "Unit", "List")
+
     /**
      * Resolve a local name, doing lambda-capture bookkeeping: a symbol declared
      * outside an enclosing lambda's boundary is a capture (by value — vars are
@@ -551,7 +558,8 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
             } else {
                 val f = fns[e.name] ?: BUILTINS[e.name]
                 if (f != null) checkFnValue(e, f, expected)
-                else error("undefined variable: ${e.name}", e.span)
+                else error("undefined variable: ${e.name}", e.span,
+                    Suggest.hint(e.name, localNames() + fns.keys + BUILTINS.keys))
             }
         }
         is MethodCall -> checkMethodCall(e, expected)
@@ -803,7 +811,8 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
         if (sig == null) {
             // still check the arguments so their subtrees get types/symbols
             for (arg in e.args) typeArg(arg)
-            return error("undefined function: ${e.callee}", e.calleeSpan)
+            return error("undefined function: ${e.callee}", e.calleeSpan,
+                Suggest.hint(e.callee, fns.keys + BUILTINS.keys))
         }
         e.sig = sig
         if (e.args.size != sig.paramTypes.size) {
@@ -873,7 +882,7 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
                             adts[e.ctorName]!!.ctors.joinToString(", ") { it.name }
                     e.ctorName in allConstNames ->
                         "const `${e.ctorName}` is declared later in the file; constants are evaluated top to bottom"
-                    else -> null
+                    else -> Suggest.hint(e.ctorName, ctors.keys + consts.keys)
                 })
         }
         e.ctor = ci
@@ -908,7 +917,8 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
                 sawNamed = true
                 idx = ci.fields.indexOfFirst { it.name == a.name }
                 if (idx < 0) {
-                    sink.error("`${ci.name}` has no field `${a.name}`", a.span, "constructor: ${ci.render()}")
+                    sink.error("`${ci.name}` has no field `${a.name}`", a.span,
+                        Suggest.hint(a.name!!, ci.fields.map { it.name }) ?: "constructor: ${ci.render()}")
                     argsBroken = true
                     checkExpr(a.expr)
                     continue
@@ -1078,7 +1088,8 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
                         "v0.1 has no automatic error conversion; match and rewrap the error")
                 else ot.args[0]
             }
-            else -> error("`?` needs an Option or Result, got $ot", e.span)
+            else -> error("`?` needs an Option or Result, got $ot", e.span,
+                "`?` unwraps an Option or Result and early-returns on None/Err; this value is neither")
         }
     }
 
@@ -1091,7 +1102,8 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
         val ci = tt.info.ctors.first()
         val field = ci.fields.find { it.name == e.fieldName }
             ?: return error("`${tt.info.name}` has no field `${e.fieldName}`", e.fieldSpan,
-                "fields: ${ci.fields.joinToString(", ") { it.name }}")
+                Suggest.hint(e.fieldName, ci.fields.map { it.name })
+                    ?: "fields: ${ci.fields.joinToString(", ") { it.name }}")
         e.owner = ci
         e.field = field
         return subst(field.type, tt.info.typeParams.zip(tt.args).toMap())
@@ -1157,7 +1169,8 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
             }
             BinOp.EQ, BinOp.NEQ -> {
                 if (containsFn(lt) || containsFn(rt))
-                    error("functions cannot be compared", e.opSpan)
+                    error("functions cannot be compared", e.opSpan,
+                        "compare the values they produce, not the functions themselves")
                 else if (lt != rt) error("== requires both sides to have the same type: $lt vs $rt", e.opSpan)
                 else TBool
             }
@@ -1286,7 +1299,10 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
                             if (scrutType is TTuple)
                                 "this pattern has ${p.elems.size} elements but the scrutinee is $scrutType"
                             else "tuple pattern does not match scrutinee type $scrutType",
-                            p.span)
+                            p.span,
+                            if (scrutType is TTuple)
+                                "a tuple pattern must bind exactly ${scrutType.elems.size} element(s)"
+                            else "match a tuple pattern only against a tuple value")
                     p.elemTypes = List(p.elems.size) { TError }
                     for (sub in p.elems) checkPattern(sub, TError, mutable)
                 }
@@ -1310,7 +1326,8 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
     private fun checkCtorPat(p: CtorPat, scrutType: Type, mutable: Boolean = false) {
         val ci = ctors[p.ctorName]
         if (ci == null) {
-            sink.error("undefined constructor in pattern: ${p.ctorName}", p.nameSpan)
+            sink.error("undefined constructor in pattern: ${p.ctorName}", p.nameSpan,
+                Suggest.hint(p.ctorName, ctors.keys))
             // still check subpatterns so their bindings exist (as TError)
             for (a in p.args) checkPattern(a.pattern, TError, mutable)
             return
@@ -1343,7 +1360,7 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
                 idx = ci.fields.indexOfFirst { it.name == a.name }
                 if (idx < 0) {
                     sink.error("`${ci.name}` has no field `${a.name}`", a.pattern.span,
-                        "constructor: ${ci.render()}")
+                        Suggest.hint(a.name!!, ci.fields.map { it.name }) ?: "constructor: ${ci.render()}")
                     checkPattern(a.pattern, TError, mutable)
                     continue
                 }
@@ -1416,7 +1433,8 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
             is AssignStmt -> {
                 val sym = resolveLocal(s.name, s.nameSpan, forAssign = true)
                 if (sym == null) {
-                    sink.error("undefined variable: ${s.name}", s.nameSpan)
+                    sink.error("undefined variable: ${s.name}", s.nameSpan,
+                        Suggest.hint(s.name, localNames() + fns.keys + BUILTINS.keys))
                     checkExpr(s.value)
                     return
                 }

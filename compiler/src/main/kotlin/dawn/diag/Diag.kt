@@ -57,6 +57,12 @@ class SourceFile(val path: String, val text: String) {
     }
 }
 
+// Diagnostic style guide (keep every `sink.error(...)` consistent with this):
+//   - message: lowercase start, one clause, no trailing period; wrap code in backticks;
+//     show types in Dawn syntax (`List[Int]`, `fn(Int) -> Int`), never internal names.
+//   - hint (optional): how to FIX it, not a restatement of what's wrong; imperative mood.
+//     Omit it only when there is no concrete action the user can take.
+//   - Use dawn.diag.Suggest for "did you mean ...?" on names that failed to resolve.
 enum class Severity { ERROR, WARNING }
 
 /** A single diagnostic: message + location + optional fix hint. */
