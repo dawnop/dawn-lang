@@ -52,6 +52,7 @@ gradle :compiler:fatJar
 ./bin/dawn run examples/m0/fizzbuzz.dawn      # 编译并运行（JVM）
 ./bin/dawn build foo.dawn -o app.jar          # 产出可执行 jar
 ./bin/dawn build foo.dawn --native -o app     # 产出独立 native 二进制
+./bin/dawn fmt foo.dawn                       # 就地格式化（--check 供 CI 校验）
 ./bin/dawn lsp                                # LSP 服务器（stdio，编辑器用）
 ```
 
@@ -61,7 +62,7 @@ gradle :compiler:fatJar
 编译器前端做了完整的错误恢复——文件残缺时其余部分照常分析，一次报出全部错误。
 VS Code 扩展与 Neovim / Helix 配置见 [editors/](editors/)。
 
-状态：**M0、M1、M2 已实现**——验收样例 [examples/shapes.dawn](examples/shapes.dawn) 与
+状态：**M0、M1、M2、M3 已实现**——验收样例 [examples/shapes.dawn](examples/shapes.dawn) 与
 [examples/calc.dawn](examples/calc.dawn) 原样通过 `dawn run` 与 `dawn test`，
 JVM 与 native 输出一致。
 
@@ -80,6 +81,11 @@ JVM 与 native 输出一致。
   `read_file`/`write_file`/`args`、`expect`/`unwrap_or`）；**元组** + let/var
   模式解构；**列表模式** `[x, ..rest]`/`[..init, last]`（穷尽性按长度精确检查）；
   三引号多行字符串；点调用糖 `x.f(a)`；函数/内建作一等值（泛型按期望类型实例化）。
+- M3：**报错打磨**（did-you-mean 建议 + 可执行 hint，golden 测试锁住每条消息）；
+  **`dawn fmt`**（token 流重排器，保 token/保注释/幂等，含 `--check` 与 LSP 格式化）；
+  **构造器作函数值** `map(xs, Some)`；**效果并 `!(e1|e2)`**（规范化，`compose` 可表达）；
+  **`derive Show`**（用户类型 `to_string`/插值，渲染成合法 Dawn 源码形状）；
+  **教程** [docs/tutorial.md](docs/tutorial.md)（代码块经编译校验）。
 
 详见 [docs/design.md](docs/design.md) 里程碑。编译器 Kotlin + ASM，
-测试 176 项（`gradle :compiler:test`）。native 二进制启动约 7ms。
+测试 366 项（`gradle :compiler:test`）。native 二进制启动约 7ms。
