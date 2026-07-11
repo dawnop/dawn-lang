@@ -85,6 +85,7 @@ private class TargetQuery(private val analysis: Analyzed, private val offset: In
                 e.args.forEach { visitExpr(it) }
             }
             is ListLit -> e.elems.forEach { visitExpr(it) }
+            is TupleLit -> e.elems.forEach { visitExpr(it) }
             is Call -> {
                 sigOf(e.callee)?.let { offer(e.calleeSpan, it.render(), it.nameSpan) }
                 e.args.forEach { visitExpr(it) }
@@ -132,6 +133,7 @@ private class TargetQuery(private val analysis: Analyzed, private val offset: In
                 p.ctor?.let { offer(p.nameSpan, it.render(), it.nameSpan) }
                 p.args.forEach { visitPattern(it.pattern) }
             }
+            is TuplePat -> p.elems.forEach { visitPattern(it) }
             else -> {}
         }
     }
@@ -139,6 +141,10 @@ private class TargetQuery(private val analysis: Analyzed, private val offset: In
     fun visitStmt(s: Stmt) {
         when (s) {
             is LetStmt -> visitExpr(s.init)
+            is LetPatStmt -> {
+                visitPattern(s.pattern)
+                visitExpr(s.init)
+            }
             is AssignStmt -> {
                 s.symbol?.let { sym ->
                     val kw = if (sym.mutable) "var" else "let"

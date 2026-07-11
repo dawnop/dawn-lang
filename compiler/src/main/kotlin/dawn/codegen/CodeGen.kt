@@ -44,6 +44,7 @@ class CodeGen(
 
         private fun fnIface(arity: Int) = "dawn/rt/Fn$arity"
         private fun erasedApplyDesc(arity: Int) = "(" + "L$OBJ;".repeat(arity) + ")L$OBJ;"
+        private fun tupleClass(arity: Int) = "dawn/rt/Tuple$arity"
 
         /** LambdaMetafactory bootstrap (on native-image's supported list, spec §12.3) */
         private val LMF_BSM = Handle(
@@ -65,6 +66,7 @@ class CodeGen(
             put(a.jvmName, OBJ)
             if (!a.isRecord) for (c in a.ctors) put(c.jvmName, a.jvmName)
         }
+        for (n in 2..8) put(tupleClass(n), OBJ)
     }
 
     /**
@@ -134,7 +136,63 @@ class CodeGen(
         out[PANIC_CLASS] = genPanicClass()
         out[LISTS_CLASS] = genListsClass()
         for (n in 0..8) out[fnIface(n)] = genFnInterface(n)
+        for (n in 2..8) out[tupleClass(n)] = genTupleClass(n)
         return out
+    }
+
+    /** dawn/rt/TupleN: N public final Object fields _0.._N-1 + structural equals (spec §1.5) */
+    private fun genTupleClass(n: Int): ByteArray {
+        val cls = tupleClass(n)
+        val cw = DawnClassWriter()
+        cw.visit(V17, ACC_PUBLIC or ACC_FINAL, cls, null, OBJ, null)
+        for (i in 0 until n) {
+            cw.visitField(ACC_PUBLIC or ACC_FINAL, "_$i", "L$OBJ;", null, null).visitEnd()
+        }
+        val ctorDesc = "(" + "L$OBJ;".repeat(n) + ")V"
+        val init = cw.visitMethod(ACC_PUBLIC, "<init>", ctorDesc, null, null)
+        init.visitCode()
+        init.visitVarInsn(ALOAD, 0)
+        init.visitMethodInsn(INVOKESPECIAL, OBJ, "<init>", "()V", false)
+        for (i in 0 until n) {
+            init.visitVarInsn(ALOAD, 0)
+            init.visitVarInsn(ALOAD, i + 1)
+            init.visitFieldInsn(PUTFIELD, cls, "_$i", "L$OBJ;")
+        }
+        init.visitInsn(RETURN)
+        init.visitMaxs(0, 0)
+        init.visitEnd()
+
+        val eq = cw.visitMethod(ACC_PUBLIC, "equals", "(L$OBJ;)Z", null, null)
+        eq.visitCode()
+        val yes = Label()
+        val no = Label()
+        eq.visitVarInsn(ALOAD, 0)
+        eq.visitVarInsn(ALOAD, 1)
+        eq.visitJumpInsn(IF_ACMPEQ, yes)
+        eq.visitVarInsn(ALOAD, 1)
+        eq.visitTypeInsn(INSTANCEOF, cls)
+        eq.visitJumpInsn(IFEQ, no)
+        eq.visitVarInsn(ALOAD, 1)
+        eq.visitTypeInsn(CHECKCAST, cls)
+        eq.visitVarInsn(ASTORE, 2)
+        for (i in 0 until n) {
+            eq.visitVarInsn(ALOAD, 0)
+            eq.visitFieldInsn(GETFIELD, cls, "_$i", "L$OBJ;")
+            eq.visitVarInsn(ALOAD, 2)
+            eq.visitFieldInsn(GETFIELD, cls, "_$i", "L$OBJ;")
+            eq.visitMethodInsn(INVOKEVIRTUAL, OBJ, "equals", "(L$OBJ;)Z", false)
+            eq.visitJumpInsn(IFEQ, no)
+        }
+        eq.visitLabel(yes)
+        eq.visitInsn(ICONST_1)
+        eq.visitInsn(IRETURN)
+        eq.visitLabel(no)
+        eq.visitInsn(ICONST_0)
+        eq.visitInsn(IRETURN)
+        eq.visitMaxs(0, 0)
+        eq.visitEnd()
+        cw.visitEnd()
+        return cw.toByteArray()
     }
 
     private fun genFnInterface(arity: Int): ByteArray {
@@ -158,6 +216,7 @@ class CodeGen(
         is TVar -> "L$OBJ;" // erasure: type parameters are Object (spec §12.2)
         is TAdt -> "L${t.info.jvmName};"
         is TList -> "L$JLIST;"
+        is TTuple -> "L${tupleClass(t.elems.size)};"
         is TFn -> "L${fnIface(t.params.size)};"
     }
 
@@ -171,7 +230,7 @@ class CodeGen(
         else -> 1 // all references
     }
 
-    private fun isRef(t: Type) = t == TString || t is TAdt || t is TList || t is TVar || t is TFn
+    private fun isRef(t: Type) = t == TString || t is TAdt || t is TList || t is TVar || t is TFn || t is TTuple
 
     // ---- erasure coercions ----
 
@@ -203,6 +262,7 @@ class CodeGen(
             TString -> mv.visitTypeInsn(CHECKCAST, "java/lang/String")
             is TAdt -> mv.visitTypeInsn(CHECKCAST, t.info.jvmName)
             is TList -> mv.visitTypeInsn(CHECKCAST, JLIST)
+            is TTuple -> mv.visitTypeInsn(CHECKCAST, tupleClass(t.elems.size))
             is TFn -> mv.visitTypeInsn(CHECKCAST, fnIface(t.params.size))
             else -> {} // TVar stays erased; Unit/Never carry no value
         }
@@ -758,6 +818,17 @@ class CodeGen(
             }
             falls
         }
+        is LetPatStmt -> {
+            val t = s.init.type!!
+            val falls = genExpr(s.init, tail = false)
+            if (falls) {
+                val slot = nextSlot
+                nextSlot += slotsOf(t)
+                storeSlot(mv, t, slot)
+                genBind(s.pattern, slot)
+            }
+            falls
+        }
         is ExprStmt -> genExpr(s.expr, tail = false) // type is Unit/Never, nothing left on the stack
         is AssertStmt -> genAssert(s)
         is WhileStmt -> {
@@ -893,6 +964,7 @@ class CodeGen(
             }
         }
         is ListLit -> genListLit(e)
+        is TupleLit -> genTupleLit(e)
         is Binary -> genBinary(e)
         is Unary -> {
             genExpr(e.operand, tail = false)
@@ -1149,6 +1221,19 @@ class CodeGen(
         return true
     }
 
+    private fun genTupleLit(e: TupleLit): Boolean {
+        val cls = tupleClass(e.elems.size)
+        mv.visitTypeInsn(NEW, cls)
+        mv.visitInsn(DUP)
+        for (el in e.elems) {
+            if (!genExpr(el, tail = false)) return false
+            box(el.type!!) // tuple elements are stored erased
+        }
+        mv.visitMethodInsn(INVOKESPECIAL, cls, "<init>",
+            "(" + "L$OBJ;".repeat(e.elems.size) + ")V", false)
+        return true
+    }
+
     private fun genListLit(e: ListLit): Boolean {
         mv.visitTypeInsn(NEW, ARRAYLIST)
         mv.visitInsn(DUP)
@@ -1385,6 +1470,48 @@ class CodeGen(
     }
 
     /**
+     * Destructuring bind (irrefutable, checker-verified): extract fields into
+     * fresh slots, alias bindings. No tests, no fail path.
+     */
+    private fun genBind(p: Pattern, slot: Int) {
+        when (p) {
+            is WildPat -> {}
+            is BindPat -> { p.symbol!!.slot = slot }
+            is TuplePat -> {
+                val cls = tupleClass(p.elems.size)
+                for ((i, sub) in p.elems.withIndex()) {
+                    if (sub is WildPat) continue
+                    val et = p.elemTypes!![i]
+                    mv.visitVarInsn(ALOAD, slot)
+                    mv.visitFieldInsn(GETFIELD, cls, "_$i", "L$OBJ;")
+                    unerase(et)
+                    val eSlot = nextSlot
+                    nextSlot += slotsOf(et)
+                    storeSlot(mv, et, eSlot)
+                    genBind(sub, eSlot)
+                }
+            }
+            is CtorPat -> {
+                val ci = p.ctor!!
+                for ((i, fp) in p.fieldPats!!.withIndex()) {
+                    if (fp == null || fp is WildPat) continue
+                    val declared = ci.fields[i].type
+                    val concrete = p.fieldTypes!![i]
+                    mv.visitVarInsn(ALOAD, slot)
+                    mv.visitTypeInsn(CHECKCAST, ci.jvmName) // static type may be the ADT base
+                    mv.visitFieldInsn(GETFIELD, ci.jvmName, ci.fields[i].name, descOf(declared))
+                    adaptFrom(declared, concrete)
+                    val fSlot = nextSlot
+                    nextSlot += slotsOf(concrete)
+                    storeSlot(mv, concrete, fSlot)
+                    genBind(fp, fSlot)
+                }
+            }
+            is LitPat -> throw IllegalStateException("refutable pattern in let (checker bug)")
+        }
+    }
+
+    /**
      * Emit a pattern test against the value in [slot] (of type [type]): fall
      * through on success, jump to failTo on failure. Bind patterns also bind.
      */
@@ -1418,6 +1545,20 @@ class CodeGen(
                     mv.visitVarInsn(ILOAD, slot)
                     val want = (p.lit as BoolLit).value
                     mv.visitJumpInsn(if (want) IFEQ else IFNE, failTo)
+                }
+            }
+            is TuplePat -> {
+                val cls = tupleClass(p.elems.size)
+                for ((i, sub) in p.elems.withIndex()) {
+                    if (sub is WildPat) continue
+                    val et = p.elemTypes!![i]
+                    mv.visitVarInsn(ALOAD, slot)
+                    mv.visitFieldInsn(GETFIELD, cls, "_$i", "L$OBJ;")
+                    unerase(et)
+                    val eSlot = nextSlot
+                    nextSlot += slotsOf(et)
+                    storeSlot(mv, et, eSlot)
+                    genPatternTest(sub, eSlot, et, failTo)
                 }
             }
             is CtorPat -> {

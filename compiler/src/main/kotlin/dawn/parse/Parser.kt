@@ -240,6 +240,7 @@ class Parser(
 
     private fun typeRef(): TypeRef {
         if (at(FN)) return fnTypeRef()
+        if (at(LPAREN)) return tupleTypeRef()
         val t = expect(TYPEIDENT, "a type name (uppercase)")
         if (!at(LBRACKET)) return NamedTypeRef(t.text, emptyList(), t.span)
         advance()
@@ -251,6 +252,23 @@ class Parser(
         val close = expect(RBRACKET, "`]`")
         if (args.isEmpty()) throw err("type argument list cannot be empty")
         return NamedTypeRef(t.text, args, Span(t.span.start, close.span.end))
+    }
+
+    /** (A, B) — tuple type, 2 to 8 elements */
+    private fun tupleTypeRef(): TypeRef {
+        val open = advance() // (
+        val elems = ArrayList<TypeRef>()
+        while (!at(RPAREN)) {
+            elems.add(typeRef())
+            if (at(COMMA)) advance() else break
+        }
+        val close = expect(RPAREN, "`)`")
+        val span = Span(open.span.start, close.span.end)
+        if (elems.size < 2)
+            throw DawnError("a tuple type needs at least 2 elements", span,
+                "for a single type, drop the parentheses")
+        if (elems.size > 8) throw DawnError("tuples have at most 8 elements", span)
+        return TupleTypeRef(elems, span)
     }
 
     /** fn(A, B) -> C !e */
@@ -296,6 +314,17 @@ class Parser(
 
     private fun letStmt(mutable: Boolean): Stmt {
         val kw = advance() // let / var
+        // destructuring: let (a, b) = pair / let Point { x, y } = p
+        if (at(LPAREN) || at(TYPEIDENT)) {
+            val pat = pattern()
+            if (at(COLON))
+                throw err("destructuring lets cannot take a type annotation",
+                    "annotate inside the pattern's source instead")
+            expect(EQ, "`=`")
+            skipNewlines()
+            val init = expression()
+            return LetPatStmt(pat, mutable, init, Span(kw.span.start, init.span.end))
+        }
         val name = when {
             at(IDENT) -> advance()
             at(UNDERSCORE) -> {
@@ -623,11 +652,26 @@ class Parser(
         }
         return bracketed {
             skipNewlines()
-            val e = expression()
+            val first = expression()
             skipNewlines()
-            if (at(COMMA)) throw err("tuples are not implemented yet")
-            expect(RPAREN, "`)`")
-            e
+            if (!at(COMMA)) {
+                expect(RPAREN, "`)`")
+                return@bracketed first
+            }
+            val elems = arrayListOf(first)
+            while (at(COMMA)) {
+                advance()
+                skipNewlines()
+                if (at(RPAREN)) break // allow a trailing comma
+                elems.add(expression())
+                skipNewlines()
+            }
+            val close = expect(RPAREN, "`)`")
+            val span = Span(open.span.start, close.span.end)
+            if (elems.size < 2)
+                throw DawnError("a tuple needs at least 2 elements", span, "(x,) is not a tuple; write x")
+            if (elems.size > 8) throw DawnError("tuples have at most 8 elements", span)
+            TupleLit(elems, span)
         }
     }
 
@@ -737,8 +781,27 @@ class Parser(
             }
             IDENT -> { advance(); BindPat(t.text, t.span) }
             TYPEIDENT -> ctorPat()
+            LPAREN -> tuplePat()
             else -> throw err("expected a pattern")
         }
+    }
+
+    /** (a, b) — tuple pattern, 2 to 8 elements */
+    private fun tuplePat(): Pattern {
+        val open = advance() // (
+        skipNewlines()
+        val elems = ArrayList<Pattern>()
+        while (!at(RPAREN)) {
+            elems.add(pattern())
+            skipNewlines()
+            if (at(COMMA)) { advance(); skipNewlines() } else break
+        }
+        val close = expect(RPAREN, "`)`")
+        val span = Span(open.span.start, close.span.end)
+        if (elems.size < 2)
+            throw DawnError("a tuple pattern needs at least 2 elements", span)
+        if (elems.size > 8) throw DawnError("tuples have at most 8 elements", span)
+        return TuplePat(elems, span)
     }
 
     /** Circle(r) / Rect(w: w, ..) / bare nullary Point / record Point { x, y: 0, .. } */

@@ -32,6 +32,9 @@ sealed class TypeRef(val span: Span)
 
 class NamedTypeRef(val name: String, val args: List<TypeRef>, span: Span) : TypeRef(span)
 
+/** (A, B, ...) — 2 to 8 elements (spec §1.5) */
+class TupleTypeRef(val elems: List<TypeRef>, span: Span) : TypeRef(span)
+
 /** fn(A, B) -> C !e — effName is null (pure), "io", or an effect variable name */
 class FnTypeRef(
     val params: List<TypeRef>,
@@ -168,6 +171,9 @@ class FieldAccess(val target: Expr, val fieldName: String, val fieldSpan: Span, 
 /** List literal: [1, 2, 3]. */
 class ListLit(val elems: List<Expr>, span: Span) : Expr(span)
 
+/** Tuple literal: (1, "a") — 2 to 8 elements. */
+class TupleLit(val elems: List<Expr>, span: Span) : Expr(span)
+
 /** expr? — unwrap Ok/Some, or return the Err/None from the enclosing function (spec §8.1) */
 class Propagate(val operand: Expr, span: Span) : Expr(span)
 
@@ -209,6 +215,11 @@ class CtorPat(
     var fieldTypes: List<Type>? = null
 }
 
+/** Tuple pattern: (a, b). Element types filled by the checker. */
+class TuplePat(val elems: List<Pattern>, span: Span) : Pattern(span) {
+    var elemTypes: List<Type>? = null
+}
+
 class PatArg(val name: String?, val pattern: Pattern)
 
 class Block(val stmts: List<Stmt>, val tail: Expr?, span: Span) : Expr(span)
@@ -221,6 +232,12 @@ class LetStmt(val name: String, val mutable: Boolean, val typeAnn: TypeRef?, val
     var symbol: Symbol? = null
     val isDiscard get() = name == "_"
 }
+
+/**
+ * let (a, b) = pair / let Point { x, y } = p — destructuring bind (spec §5.2).
+ * The pattern must be irrefutable; with var every binding is mutable.
+ */
+class LetPatStmt(val pattern: Pattern, val mutable: Boolean, val init: Expr, span: Span) : Stmt(span)
 
 class AssignStmt(val name: String, val value: Expr, val nameSpan: Span, span: Span) : Stmt(span) {
     var symbol: Symbol? = null

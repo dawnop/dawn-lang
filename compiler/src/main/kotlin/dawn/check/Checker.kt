@@ -191,6 +191,12 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
         tparams: Map<String, TVar> = currentTParams,
         effVars: MutableMap<String, Eff.Var> = currentEffVars,
     ): Type {
+        if (ref is TupleTypeRef) {
+            val elems = ref.elems.map { resolveType(it, tparams, effVars) }
+            for ((i, t) in elems.withIndex()) if (t == TUnit)
+                sink.error("tuple elements cannot be Unit", ref.elems[i].span)
+            return TTuple(elems.map { if (it == TUnit) TError else it })
+        }
         if (ref is FnTypeRef) {
             val eff = when (ref.effName) {
                 null -> Eff.Pure
@@ -258,6 +264,9 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
             declared.info === actual.info &&
                 declared.args.zip(actual.args).all { (d, a) -> unifyInto(d, a, map, effMap) }
         declared is TList && actual is TList -> unifyInto(declared.elem, actual.elem, map, effMap)
+        declared is TTuple && actual is TTuple ->
+            declared.elems.size == actual.elems.size &&
+                declared.elems.zip(actual.elems).all { (d, a) -> unifyInto(d, a, map, effMap) }
         declared is TFn && actual is TFn ->
             declared.params.size == actual.params.size &&
                 declared.params.zip(actual.params).all { (d, a) -> unifyInto(d, a, map, effMap) } &&
@@ -279,6 +288,7 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
     /** does this expression need an expected type to check at all? */
     private fun needsExpected(e: Expr): Boolean = when (e) {
         is ListLit -> e.elems.isEmpty() || e.elems.all { needsExpected(it) }
+        is TupleLit -> e.elems.any { needsExpected(it) }
         is CtorCall -> {
             val ci = ctors[e.ctorName]
             ci != null && ci.fields.isEmpty() && ci.adt.typeParams.isNotEmpty()
@@ -441,6 +451,7 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
         is CtorCall -> checkCtorCall(e, expected)
         is FieldAccess -> checkFieldAccess(e)
         is ListLit -> checkListLit(e, expected)
+        is TupleLit -> checkTupleLit(e, expected)
         is Binary -> checkBinary(e)
         is Unary -> when (e.op) {
             UnOp.NOT -> {
@@ -463,7 +474,16 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
         is TVar -> false
         is TAdt -> t.args.all { isConcrete(it) }
         is TList -> isConcrete(t.elem)
+        is TTuple -> t.elems.all { isConcrete(it) }
         else -> true
+    }
+
+    /** does the type contain a function anywhere? (functions cannot be compared, spec §4.3) */
+    private fun containsFn(t: Type): Boolean = when (t) {
+        is TFn -> true
+        is TTuple -> t.elems.any { containsFn(it) }
+        is TList -> containsFn(t.elem)
+        else -> false
     }
 
     private fun checkCall(e: Call, expected: Type?): Type {
@@ -774,6 +794,18 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
         return subst(field.type, tt.info.typeParams.zip(tt.args).toMap())
     }
 
+    private fun checkTupleLit(e: TupleLit, expected: Type?): Type {
+        val exp = expected as? TTuple
+        val types = e.elems.mapIndexed { i, el ->
+            val t = checkExpr(el, expected = exp?.elems?.getOrNull(i)?.takeIf { isConcrete(it) })
+            if (t == TUnit) {
+                sink.error("tuple elements cannot be Unit", el.span)
+                TError
+            } else t
+        }
+        return TTuple(types)
+    }
+
     private fun checkListLit(e: ListLit, expected: Type?): Type {
         val expectedElem = (expected as? TList)?.elem?.takeIf { isConcrete(it) }
         if (e.elems.isEmpty()) {
@@ -818,7 +850,7 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
                     "use + for numbers; interpolation \"{x}{y}\" also builds strings")
             }
             BinOp.EQ, BinOp.NEQ -> {
-                if (lt is TFn || rt is TFn)
+                if (containsFn(lt) || containsFn(rt))
                     error("functions cannot be compared", e.opSpan)
                 else if (lt != rt) error("== requires both sides to have the same type: $lt vs $rt", e.opSpan)
                 else TBool
@@ -855,9 +887,10 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
 
     private fun checkMatch(e: Match, expected: Type?): Type {
         val st = checkExpr(e.scrutinee)
-        val scrutOk = st in listOf(TInt, TFloat, TString, TBool) || st is TAdt
+        val scrutOk = st in listOf(TInt, TFloat, TString, TBool) || st is TAdt || st is TTuple
         if (!scrutOk && !st.isErrorish)
-            sink.error("match supports Int/Float/String/Bool and user-defined types, got $st", e.scrutinee.span)
+            sink.error("match supports Int/Float/String/Bool, tuples and user-defined types, got $st",
+                e.scrutinee.span)
 
         var result: Type = TNever
 
@@ -905,30 +938,58 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
     private fun bindsAnything(p: Pattern): Boolean = when (p) {
         is BindPat -> true
         is CtorPat -> p.args.any { bindsAnything(it.pattern) }
+        is TuplePat -> p.elems.any { bindsAnything(it) }
         else -> false
     }
 
-    private fun checkPattern(p: Pattern, scrutType: Type) {
+    /** first refutable subpattern, or null if [p] always matches (let destructuring, spec §5.2) */
+    private fun refutablePart(p: Pattern): Pattern? = when (p) {
+        is WildPat, is BindPat -> null
+        is LitPat -> p
+        is TuplePat -> p.elems.firstNotNullOfOrNull { refutablePart(it) }
+        is CtorPat -> {
+            val ci = ctors[p.ctorName]
+            if (ci != null && ci.adt.ctors.size > 1) p
+            else p.args.firstNotNullOfOrNull { refutablePart(it.pattern) }
+        }
+    }
+
+    private fun checkPattern(p: Pattern, scrutType: Type, mutable: Boolean = false) {
         when (p) {
             is WildPat -> {}
             is BindPat -> {
-                p.symbol = declare(p.name, scrutType, mutable = false, p.span)
+                p.symbol = declare(p.name, scrutType, mutable, p.span)
             }
             is LitPat -> {
                 val lt = checkExpr(p.lit)
                 if (lt != scrutType && !scrutType.isErrorish && !lt.isErrorish)
                     sink.error("pattern type $lt does not match scrutinee type $scrutType", p.span)
             }
-            is CtorPat -> checkCtorPat(p, scrutType)
+            is TuplePat -> {
+                if (scrutType is TTuple && scrutType.elems.size == p.elems.size) {
+                    p.elemTypes = scrutType.elems
+                    for ((sub, t) in p.elems.zip(scrutType.elems)) checkPattern(sub, t, mutable)
+                } else {
+                    if (!scrutType.isErrorish)
+                        sink.error(
+                            if (scrutType is TTuple)
+                                "this pattern has ${p.elems.size} elements but the scrutinee is $scrutType"
+                            else "tuple pattern does not match scrutinee type $scrutType",
+                            p.span)
+                    p.elemTypes = List(p.elems.size) { TError }
+                    for (sub in p.elems) checkPattern(sub, TError, mutable)
+                }
+            }
+            is CtorPat -> checkCtorPat(p, scrutType, mutable)
         }
     }
 
-    private fun checkCtorPat(p: CtorPat, scrutType: Type) {
+    private fun checkCtorPat(p: CtorPat, scrutType: Type, mutable: Boolean = false) {
         val ci = ctors[p.ctorName]
         if (ci == null) {
             sink.error("undefined constructor in pattern: ${p.ctorName}", p.nameSpan)
             // still check subpatterns so their bindings exist (as TError)
-            for (a in p.args) checkPattern(a.pattern, TError)
+            for (a in p.args) checkPattern(a.pattern, TError, mutable)
             return
         }
         p.ctor = ci
@@ -947,7 +1008,7 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
         if (!p.hasParens && n > 0) {
             sink.error("constructor `${ci.name}` has $n field(s); a bare name does not match it", p.span,
                 "write ${ci.name}(..) to ignore the fields, or destructure them")
-            for (a in p.args) checkPattern(a.pattern, TError)
+            for (a in p.args) checkPattern(a.pattern, TError, mutable)
             return
         }
         val slots = arrayOfNulls<Pattern>(n)
@@ -960,25 +1021,25 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
                 if (idx < 0) {
                     sink.error("`${ci.name}` has no field `${a.name}`", a.pattern.span,
                         "constructor: ${ci.render()}")
-                    checkPattern(a.pattern, TError)
+                    checkPattern(a.pattern, TError, mutable)
                     continue
                 }
             } else {
                 if (sawNamed) {
                     sink.error("positional patterns cannot follow named patterns", a.pattern.span)
-                    checkPattern(a.pattern, TError)
+                    checkPattern(a.pattern, TError, mutable)
                     continue
                 }
                 idx = i
-                if (idx >= n) { checkPattern(a.pattern, TError); continue } // counted below
+                if (idx >= n) { checkPattern(a.pattern, TError, mutable); continue } // counted below
             }
             if (slots[idx] != null) {
                 sink.error("field `${ci.fields[idx].name}` is matched twice", a.pattern.span)
-                checkPattern(a.pattern, TError)
+                checkPattern(a.pattern, TError, mutable)
                 continue
             }
             slots[idx] = a.pattern
-            checkPattern(a.pattern, fieldTypes[idx])
+            checkPattern(a.pattern, fieldTypes[idx], mutable)
         }
         if (p.args.size > n) {
             sink.error("`${ci.name}` has $n field(s), the pattern names ${p.args.size}", p.span,
@@ -1013,6 +1074,18 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
                     t = TError
                 }
                 s.symbol = declare(s.name, t, s.mutable, s.span)
+            }
+            is LetPatStmt -> {
+                var it = checkExpr(s.init)
+                if (it == TNever) {
+                    sink.error("cannot bind Never (this expression does not return)", s.init.span)
+                    it = TError
+                }
+                refutablePart(s.pattern)?.let { part ->
+                    sink.error("this pattern does not always match, so it cannot be used in a let",
+                        part.span, "use match to handle the other cases")
+                }
+                checkPattern(s.pattern, it, mutable = s.mutable)
             }
             is AssignStmt -> {
                 val sym = resolveLocal(s.name, s.nameSpan, forAssign = true)

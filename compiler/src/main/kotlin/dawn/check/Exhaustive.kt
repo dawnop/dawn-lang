@@ -13,6 +13,7 @@ internal sealed class SPat
 internal object SWild : SPat()
 internal class SCtor(val ctor: CtorInfo, val subs: List<SPat>) : SPat()
 internal class SLit(val value: Any) : SPat()
+internal class STuple(val subs: List<SPat>) : SPat()
 
 /** Lower an AST pattern; broken patterns become wildcards (errors were already reported). */
 internal fun toSPat(p: Pattern): SPat = when (p) {
@@ -30,6 +31,7 @@ internal fun toSPat(p: Pattern): SPat = when (p) {
         if (ci == null || fps == null) SWild
         else SCtor(ci, fps.map { if (it == null) SWild else toSPat(it) })
     }
+    is TuplePat -> STuple(p.elems.map { toSPat(it) })
 }
 
 /** Constructor field types with the column's type arguments substituted in. */
@@ -49,7 +51,20 @@ internal fun useful(matrix: List<List<SPat>>, q: List<SPat>, types: List<Type>):
             instFields(head.ctor, t) + types.drop(1),
         )
         is SLit -> useful(specializeLit(matrix, head.value), q.drop(1), types.drop(1))
+        is STuple -> useful(
+            specializeTuple(matrix, head.subs.size),
+            head.subs + q.drop(1),
+            (t as? Type.TTuple)?.elems.orEmpty().ifEmpty { List(head.subs.size) { Type.TError } } + types.drop(1),
+        )
         is SWild -> {
+            // a tuple is its own single complete constructor
+            if (t is Type.TTuple) {
+                return useful(
+                    specializeTuple(matrix, t.elems.size),
+                    List(t.elems.size) { SWild } + q.drop(1),
+                    t.elems + types.drop(1),
+                )
+            }
             // if the matrix heads form a complete signature, a wildcard is useful
             // iff it is useful under some constructor; otherwise take the default matrix
             if (t is Type.TAdt) {
@@ -83,7 +98,7 @@ private fun specializeCtor(matrix: List<List<SPat>>, c: CtorInfo): List<List<SPa
         when (val h = row.first()) {
             is SWild -> List(c.fields.size) { SWild } + row.drop(1)
             is SCtor -> if (h.ctor == c) h.subs + row.drop(1) else null
-            is SLit -> null
+            else -> null
         }
     }
 
@@ -92,6 +107,15 @@ private fun specializeLit(matrix: List<List<SPat>>, v: Any): List<List<SPat>> =
         when (val h = row.first()) {
             is SWild -> row.drop(1)
             is SLit -> if (h.value == v) row.drop(1) else null
-            is SCtor -> null
+            else -> null
+        }
+    }
+
+private fun specializeTuple(matrix: List<List<SPat>>, n: Int): List<List<SPat>> =
+    matrix.mapNotNull { row ->
+        when (val h = row.first()) {
+            is SWild -> List(n) { SWild } + row.drop(1)
+            is STuple -> h.subs + row.drop(1)
+            else -> null
         }
     }

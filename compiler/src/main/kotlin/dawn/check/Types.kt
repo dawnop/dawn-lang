@@ -65,6 +65,13 @@ sealed class Type(val display: String) {
         override fun hashCode(): Int = elem.hashCode() + 7
     }
 
+    /** A tuple: (A, B) — 2 to 8 elements, invariant, elements stored boxed. */
+    class TTuple(val elems: List<Type>) :
+        Type("(${elems.joinToString(", ")})") {
+        override fun equals(other: Any?): Boolean = other is TTuple && other.elems == elems
+        override fun hashCode(): Int = elems.hashCode() + 13
+    }
+
     /** A function type: fn(A, B) -> C !e. */
     class TFn(val params: List<Type>, val ret: Type, val eff: Eff) :
         Type("fn(${params.joinToString(", ")}) -> $ret${eff.suffix}") {
@@ -98,6 +105,7 @@ fun subst(t: Type, map: Map<Type.TVar, Type>, effMap: Map<Eff.Var, Eff> = emptyM
     is Type.TVar -> map[t] ?: t
     is Type.TAdt -> if (t.args.isEmpty()) t else Type.TAdt(t.info, t.args.map { subst(it, map, effMap) })
     is Type.TList -> Type.TList(subst(t.elem, map, effMap))
+    is Type.TTuple -> Type.TTuple(t.elems.map { subst(it, map, effMap) })
     is Type.TFn -> Type.TFn(t.params.map { subst(it, map, effMap) }, subst(t.ret, map, effMap),
         substEff(t.eff, effMap))
     else -> t
