@@ -206,24 +206,22 @@ class Parser(tokens: List<Token>, private val sink: DiagnosticSink = DiagnosticS
         expect(RPAREN, "`)`")
         expect(ARROW, "`->` (top-level functions must declare a return type)")
         val ret = typeRef()
-        var declaredIo = false
+        var declaredEff: String? = null
         if (at(BANG)) {
             advance()
-            val eff = expect(IDENT, "an effect name")
-            if (eff.text != "io") throw DawnError("unknown effect: ${eff.text}", eff.span,
-                "io is the only effect in v0.1")
-            declaredIo = true
+            declaredEff = expect(IDENT, "an effect name (io or an effect variable)").text
         }
         expect(EQ, "`=` (function body)")
         skipNewlines()
         val body = expression()
-        return FnDecl(pub, nameTok.text, tparams, params, ret, declaredIo, body,
+        return FnDecl(pub, nameTok.text, tparams, params, ret, declaredEff, body,
             Span(fnTok.span.start, body.span.end), nameTok.span)
     }
 
     private fun typeRef(): TypeRef {
+        if (at(FN)) return fnTypeRef()
         val t = expect(TYPEIDENT, "a type name (uppercase)")
-        if (!at(LBRACKET)) return TypeRef(t.text, emptyList(), t.span)
+        if (!at(LBRACKET)) return NamedTypeRef(t.text, emptyList(), t.span)
         advance()
         val args = ArrayList<TypeRef>()
         while (!at(RBRACKET)) {
@@ -232,7 +230,31 @@ class Parser(tokens: List<Token>, private val sink: DiagnosticSink = DiagnosticS
         }
         val close = expect(RBRACKET, "`]`")
         if (args.isEmpty()) throw err("type argument list cannot be empty")
-        return TypeRef(t.text, args, Span(t.span.start, close.span.end))
+        return NamedTypeRef(t.text, args, Span(t.span.start, close.span.end))
+    }
+
+    /** fn(A, B) -> C !e */
+    private fun fnTypeRef(): TypeRef {
+        val kw = advance() // fn
+        expect(LPAREN, "`(`")
+        val params = ArrayList<TypeRef>()
+        while (!at(RPAREN)) {
+            params.add(typeRef())
+            if (at(COMMA)) advance() else break
+        }
+        expect(RPAREN, "`)`")
+        expect(ARROW, "`->`")
+        val ret = typeRef()
+        var effName: String? = null
+        var end = ret.span.end
+        if (at(BANG)) {
+            advance()
+            if (at(LPAREN)) throw err("effect unions !(e1 | e2) are not implemented yet")
+            val eff = expect(IDENT, "an effect name (io or an effect variable)")
+            effName = eff.text
+            end = eff.span.end
+        }
+        return FnTypeRef(params, ret, effName, Span(kw.span.start, end))
     }
 
     // ---- statements ----
@@ -321,8 +343,9 @@ class Parser(tokens: List<Token>, private val sink: DiagnosticSink = DiagnosticS
                     Span(left.span.start, rhs.span.end))
                 is VarRef -> Call(rhs.name, listOf(left), rhs.span,
                     Span(left.span.start, rhs.span.end))
-                else -> throw DawnError("the right side of `|>` must be a call or a function name", rhs.span,
-                    "x |> f(a) is equivalent to f(x, a)")
+                is Lambda -> Apply(rhs, listOf(left), Span(left.span.start, rhs.span.end))
+                else -> throw DawnError("the right side of `|>` must be a call, a function name, or a lambda",
+                    rhs.span, "x |> f(a) is equivalent to f(x, a)")
             }
         }
         return left
@@ -419,8 +442,7 @@ class Parser(tokens: List<Token>, private val sink: DiagnosticSink = DiagnosticS
             LBRACE -> block()
             LPAREN -> parenExpr()
             LBRACKET -> listLit()
-            FN -> throw err("lambdas are not implemented in M0",
-                "use a top-level function name on the right side of |>")
+            FN -> lambda()
             COMPTIME -> throw err("comptime is not implemented in M0")
             TYPEIDENT -> ctorExpr()
             else -> throw err("expected an expression, found `${t.text}`")
@@ -524,6 +546,28 @@ class Parser(tokens: List<Token>, private val sink: DiagnosticSink = DiagnosticS
             }
         }
         return StrLit(parts, t.span)
+    }
+
+    /** fn(x, y: Int) => expr */
+    private fun lambda(): Expr {
+        val kw = advance() // fn
+        expect(LPAREN, "`(`")
+        val params = ArrayList<LambdaParam>()
+        bracketed {
+            skipNewlines()
+            while (!at(RPAREN)) {
+                val name = expect(IDENT, "a parameter name")
+                val ann = if (at(COLON)) { advance(); typeRef() } else null
+                params.add(LambdaParam(name.text, ann, name.span))
+                skipNewlines()
+                if (at(COMMA)) { advance(); skipNewlines() } else break
+            }
+        }
+        expect(RPAREN, "`)`")
+        expect(FATARROW, "`=>` (lambda body)")
+        skipNewlines()
+        val body = expression()
+        return Lambda(params, body, Span(kw.span.start, body.span.end))
     }
 
     private fun listLit(): Expr = bracketed {

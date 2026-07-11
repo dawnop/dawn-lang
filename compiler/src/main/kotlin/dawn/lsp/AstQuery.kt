@@ -70,7 +70,20 @@ private class TargetQuery(private val analysis: Analyzed, private val offset: In
                     val kw = if (sym.mutable) "var" else "let"
                     offer(e.span, "$kw ${sym.name}: ${sym.type}", sym.defSpan)
                 }
+                e.fnValue?.let { offer(e.span, it.render(), it.nameSpan) }
             }
+            is Lambda -> {
+                for (p in e.params) {
+                    val sym = p.symbol ?: continue
+                    offer(p.span, "${sym.name}: ${sym.type}", p.span)
+                }
+                visitExpr(e.body)
+            }
+            is Apply -> {
+                visitExpr(e.target)
+                e.args.forEach { visitExpr(it) }
+            }
+            is ListLit -> e.elems.forEach { visitExpr(it) }
             is Call -> {
                 sigOf(e.callee)?.let { offer(e.calleeSpan, it.render(), it.nameSpan) }
                 e.args.forEach { visitExpr(it) }

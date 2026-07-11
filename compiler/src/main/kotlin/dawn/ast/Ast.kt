@@ -27,7 +27,17 @@ class Param(val name: String, val typeName: TypeRef, val span: Span) {
     var symbol: Symbol? = null
 }
 
-class TypeRef(val name: String, val args: List<TypeRef>, val span: Span)
+sealed class TypeRef(val span: Span)
+
+class NamedTypeRef(val name: String, val args: List<TypeRef>, span: Span) : TypeRef(span)
+
+/** fn(A, B) -> C !e — effName is null (pure), "io", or an effect variable name */
+class FnTypeRef(
+    val params: List<TypeRef>,
+    val ret: TypeRef,
+    val effName: String?,
+    span: Span,
+) : TypeRef(span)
 
 class FnDecl(
     pub: Boolean,
@@ -36,14 +46,16 @@ class FnDecl(
     val typeParams: List<String>,
     val params: List<Param>,
     val retType: TypeRef,
-    /** signature declares !io */
-    val declaredIo: Boolean,
+    /** declared effect: null (pure), "io", or an effect variable name */
+    val declaredEff: String?,
     val body: Expr,
     span: Span,
     nameSpan: Span,
 ) : Decl(pub, name, span, nameSpan) {
     /** resolved signature, filled by the checker (codegen consumes it) */
     var sig: FnSig? = null
+    /** effect variables of this signature by name, filled by the checker */
+    var effVars: Map<String, dawn.check.Eff.Var> = emptyMap()
 }
 
 /**
@@ -90,12 +102,31 @@ sealed class StrPart {
 
 class VarRef(val name: String, span: Span) : Expr(span) {
     var symbol: Symbol? = null
+    /** set when the name resolves to a top-level function used as a value */
+    var fnValue: FnSig? = null
 }
 
-/** M0: calls are by name only (no function values) */
+/** A call by name: a top-level fn / builtin, or a local function value. */
 class Call(val callee: String, val args: List<Expr>, val calleeSpan: Span, span: Span) : Expr(span) {
-    /** resolved callee signature, filled by the checker */
+    /** resolved callee signature, filled by the checker (null for dynamic calls) */
     var sig: FnSig? = null
+    /** when the callee is a local function value, its symbol (filled by the checker) */
+    var dynamicTarget: Symbol? = null
+}
+
+/** A call of a non-name callee (currently: piping into a lambda). */
+class Apply(val target: Expr, val args: List<Expr>, span: Span) : Expr(span)
+
+/** fn(x, y) => body */
+class Lambda(val params: List<LambdaParam>, val body: Expr, span: Span) : Expr(span) {
+    /** the lambda's own function type, filled by the checker */
+    var fnType: Type.TFn? = null
+    /** enclosing locals referenced by the body, filled by the checker */
+    var captures: List<Symbol>? = null
+}
+
+class LambdaParam(val name: String, val typeAnn: TypeRef?, val span: Span) {
+    var symbol: Symbol? = null
 }
 
 /**

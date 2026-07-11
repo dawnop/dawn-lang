@@ -1,0 +1,32 @@
+# M1 lambda demo: function values, captures, higher-order functions, effect variables.
+# Run: dawn run examples/m1/lambdas.dawn
+
+fn double(x: Int) -> Int = x * 2
+
+# effect-polymorphic user HOF: pure in, pure out; io in, io out
+fn apply_twice(f: fn(Int) -> Int !e, x: Int) -> Int !e = f(f(x))
+
+pub fn main() -> Unit !io = {
+  # lambdas and captures
+  let offset = 100
+  let shift = fn(x: Int) => x + offset
+  println("shift(1) = {shift(1)}")
+
+  # top-level functions are values
+  println("{map([1, 2, 3], double) == [2, 4, 6]}")
+
+  # pipes + higher-order builtins
+  range(1, 11)
+    |> filter(fn(x) => x % 2 == 1)
+    |> map(fn(x) => x * x)
+    |> fold(0, fn(a, b) => a + b)
+    |> fn(total) => println("sum of odd squares: {total}")
+
+  # effect polymorphism
+  println("{apply_twice(fn(n) => n + 1, 40)}")
+  let noisy = apply_twice(fn(n) => {
+    println("step {n}")
+    n * 2
+  }, 3)
+  println("noisy = {noisy}")
+}

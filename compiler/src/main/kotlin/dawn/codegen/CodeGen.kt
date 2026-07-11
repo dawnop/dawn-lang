@@ -4,14 +4,17 @@ import dawn.ast.*
 import dawn.check.AdtInfo
 import dawn.check.BUILTINS
 import dawn.check.CtorInfo
+import dawn.check.FnSig
 import dawn.check.PRELUDE_ADTS
 import dawn.check.Symbol
 import dawn.check.Type
 import dawn.check.Type.*
 import org.objectweb.asm.ClassWriter
+import org.objectweb.asm.Handle
 import org.objectweb.asm.Label
 import org.objectweb.asm.MethodVisitor
 import org.objectweb.asm.Opcodes.*
+import org.objectweb.asm.Type as AsmType
 
 /**
  * AST (annotated with types/symbols by the Checker) → JVM bytecode. spec §12.2.
@@ -33,6 +36,18 @@ class CodeGen(private val module: Module, private val className: String) {
         private const val OBJ = "java/lang/Object"
         private const val JLIST = "java/util/List"
         private const val ARRAYLIST = "java/util/ArrayList"
+
+        private fun fnIface(arity: Int) = "dawn/rt/Fn$arity"
+        private fun erasedApplyDesc(arity: Int) = "(" + "L$OBJ;".repeat(arity) + ")L$OBJ;"
+
+        /** LambdaMetafactory bootstrap (on native-image's supported list, spec §12.3) */
+        private val LMF_BSM = Handle(
+            H_INVOKESTATIC, "java/lang/invoke/LambdaMetafactory", "metafactory",
+            "(Ljava/lang/invoke/MethodHandles\$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;" +
+                "Ljava/lang/invoke/MethodType;Ljava/lang/invoke/MethodHandle;Ljava/lang/invoke/MethodType;)" +
+                "Ljava/lang/invoke/CallSite;",
+            false,
+        )
     }
 
     /** every ADT we emit classes for: prelude (Option/Result) + this module's */
@@ -84,20 +99,39 @@ class CodeGen(private val module: Module, private val className: String) {
     private var fnStart: Label? = null
     private var nextSlot = 0
 
+    /** lambdas found while generating a method; their impl methods are emitted after it */
+    private class PendingLambda(val lambda: Lambda, val name: String)
+    private val pendingLambdas = ArrayList<PendingLambda>()
+    private var lambdaCounter = 0
+    /** Unit-returning fns used as values; each needs one bridge method */
+    private val pendingBridges = LinkedHashSet<FnSig>()
+
     fun generate(): Map<String, ByteArray> {
         val out = HashMap<String, ByteArray>()
         for (a in allAdts) genAdt(a, out)
 
         val cw = DawnClassWriter()
         cw.visit(V17, ACC_PUBLIC or ACC_FINAL, className, null, OBJ, null)
-        for (d in module.fns) genFn(cw, d)
+        for (d in module.fns) {
+            genFn(cw, d)
+            drainLambdas(cw)
+        }
         if (module.fns.any { it.name == "main" }) genJvmMain(cw)
         cw.visitEnd()
 
         out[className] = cw.toByteArray()
         out[PANIC_CLASS] = genPanicClass()
         out[LISTS_CLASS] = genListsClass()
+        for (n in 0..8) out[fnIface(n)] = genFnInterface(n)
         return out
+    }
+
+    private fun genFnInterface(arity: Int): ByteArray {
+        val cw = ClassWriter(0)
+        cw.visit(V17, ACC_PUBLIC or ACC_ABSTRACT or ACC_INTERFACE, fnIface(arity), null, OBJ, null)
+        cw.visitMethod(ACC_PUBLIC or ACC_ABSTRACT, "apply", erasedApplyDesc(arity), null, null).visitEnd()
+        cw.visitEnd()
+        return cw.toByteArray()
     }
 
     // ---- type mapping ----
@@ -113,6 +147,7 @@ class CodeGen(private val module: Module, private val className: String) {
         is TVar -> "L$OBJ;" // erasure: type parameters are Object (spec §12.2)
         is TAdt -> "L${t.info.jvmName};"
         is TList -> "L$JLIST;"
+        is TFn -> "L${fnIface(t.params.size)};"
     }
 
     private fun methodDesc(params: List<Type>, ret: Type): String =
@@ -125,7 +160,7 @@ class CodeGen(private val module: Module, private val className: String) {
         else -> 1 // all references
     }
 
-    private fun isRef(t: Type) = t == TString || t is TAdt || t is TList || t is TVar
+    private fun isRef(t: Type) = t == TString || t is TAdt || t is TList || t is TVar || t is TFn
 
     // ---- erasure coercions ----
 
@@ -157,6 +192,7 @@ class CodeGen(private val module: Module, private val className: String) {
             TString -> mv.visitTypeInsn(CHECKCAST, "java/lang/String")
             is TAdt -> mv.visitTypeInsn(CHECKCAST, t.info.jvmName)
             is TList -> mv.visitTypeInsn(CHECKCAST, JLIST)
+            is TFn -> mv.visitTypeInsn(CHECKCAST, fnIface(t.params.size))
             else -> {} // TVar stays erased; Unit/Never carry no value
         }
     }
@@ -170,6 +206,22 @@ class CodeGen(private val module: Module, private val className: String) {
     private fun adaptFrom(declared: Type, actual: Type) {
         if (declared is TVar) unerase(actual)
     }
+
+    /**
+     * The boxed JVM type of a concrete Dawn type — what LambdaMetafactory's
+     * instantiatedMethodType needs (Object→long is not an LMF adaptation, but
+     * Object→Long→long is; Unit-returning impls return a null Object).
+     */
+    private fun boxedDescOf(t: Type): String = when (t) {
+        TInt -> "Ljava/lang/Long;"
+        TFloat -> "Ljava/lang/Double;"
+        TBool -> "Ljava/lang/Boolean;"
+        TUnit, TNever, TError -> "L$OBJ;"
+        else -> descOf(t)
+    }
+
+    private fun instantiatedType(params: List<Type>, ret: Type): AsmType =
+        AsmType.getMethodType(params.joinToString("", "(", ")") { boxedDescOf(it) } + boxedDescOf(ret))
 
     // ---- ADT classes (spec §12.2) ----
 
@@ -413,6 +465,8 @@ class CodeGen(private val module: Module, private val className: String) {
         rng.visitMaxs(0, 0)
         rng.visitEnd()
 
+        genListHof(cw)
+
         val cat = cw.visitMethod(ACC_PUBLIC or ACC_STATIC, "concat", "(L$JLIST;L$JLIST;)L$JLIST;", null, null)
         cat.visitCode()
         cat.visitTypeInsn(NEW, ARRAYLIST)
@@ -431,6 +485,114 @@ class CodeGen(private val module: Module, private val className: String) {
 
         cw.visitEnd()
         return cw.toByteArray()
+    }
+
+    /** map / filter / fold loops for dawn/rt/Lists */
+    private fun genListHof(cw: ClassWriter) {
+        // map(List xs, Fn1 f) -> List
+        run {
+            val m = cw.visitMethod(ACC_PUBLIC or ACC_STATIC, "map", "(L$JLIST;L${fnIface(1)};)L$JLIST;", null, null)
+            m.visitCode()
+            m.visitTypeInsn(NEW, ARRAYLIST)
+            m.visitInsn(DUP)
+            m.visitMethodInsn(INVOKESPECIAL, ARRAYLIST, "<init>", "()V", false)
+            m.visitVarInsn(ASTORE, 2)
+            m.visitInsn(ICONST_0)
+            m.visitVarInsn(ISTORE, 3)
+            val loop = Label()
+            val done = Label()
+            m.visitLabel(loop)
+            m.visitVarInsn(ILOAD, 3)
+            m.visitVarInsn(ALOAD, 0)
+            m.visitMethodInsn(INVOKEINTERFACE, JLIST, "size", "()I", true)
+            m.visitJumpInsn(IF_ICMPGE, done)
+            m.visitVarInsn(ALOAD, 2)
+            m.visitVarInsn(ALOAD, 1)
+            m.visitVarInsn(ALOAD, 0)
+            m.visitVarInsn(ILOAD, 3)
+            m.visitMethodInsn(INVOKEINTERFACE, JLIST, "get", "(I)L$OBJ;", true)
+            m.visitMethodInsn(INVOKEINTERFACE, fnIface(1), "apply", erasedApplyDesc(1), true)
+            m.visitMethodInsn(INVOKEVIRTUAL, ARRAYLIST, "add", "(L$OBJ;)Z", false)
+            m.visitInsn(POP)
+            m.visitIincInsn(3, 1)
+            m.visitJumpInsn(GOTO, loop)
+            m.visitLabel(done)
+            m.visitVarInsn(ALOAD, 2)
+            m.visitInsn(ARETURN)
+            m.visitMaxs(0, 0)
+            m.visitEnd()
+        }
+        // filter(List xs, Fn1 f) -> List
+        run {
+            val m = cw.visitMethod(ACC_PUBLIC or ACC_STATIC, "filter", "(L$JLIST;L${fnIface(1)};)L$JLIST;", null, null)
+            m.visitCode()
+            m.visitTypeInsn(NEW, ARRAYLIST)
+            m.visitInsn(DUP)
+            m.visitMethodInsn(INVOKESPECIAL, ARRAYLIST, "<init>", "()V", false)
+            m.visitVarInsn(ASTORE, 2)
+            m.visitInsn(ICONST_0)
+            m.visitVarInsn(ISTORE, 3)
+            val loop = Label()
+            val done = Label()
+            val skip = Label()
+            m.visitLabel(loop)
+            m.visitVarInsn(ILOAD, 3)
+            m.visitVarInsn(ALOAD, 0)
+            m.visitMethodInsn(INVOKEINTERFACE, JLIST, "size", "()I", true)
+            m.visitJumpInsn(IF_ICMPGE, done)
+            m.visitVarInsn(ALOAD, 0)
+            m.visitVarInsn(ILOAD, 3)
+            m.visitMethodInsn(INVOKEINTERFACE, JLIST, "get", "(I)L$OBJ;", true)
+            m.visitVarInsn(ASTORE, 4)
+            m.visitVarInsn(ALOAD, 1)
+            m.visitVarInsn(ALOAD, 4)
+            m.visitMethodInsn(INVOKEINTERFACE, fnIface(1), "apply", erasedApplyDesc(1), true)
+            m.visitTypeInsn(CHECKCAST, "java/lang/Boolean")
+            m.visitMethodInsn(INVOKEVIRTUAL, "java/lang/Boolean", "booleanValue", "()Z", false)
+            m.visitJumpInsn(IFEQ, skip)
+            m.visitVarInsn(ALOAD, 2)
+            m.visitVarInsn(ALOAD, 4)
+            m.visitMethodInsn(INVOKEVIRTUAL, ARRAYLIST, "add", "(L$OBJ;)Z", false)
+            m.visitInsn(POP)
+            m.visitLabel(skip)
+            m.visitIincInsn(3, 1)
+            m.visitJumpInsn(GOTO, loop)
+            m.visitLabel(done)
+            m.visitVarInsn(ALOAD, 2)
+            m.visitInsn(ARETURN)
+            m.visitMaxs(0, 0)
+            m.visitEnd()
+        }
+        // fold(List xs, Object init, Fn2 f) -> Object
+        run {
+            val m = cw.visitMethod(ACC_PUBLIC or ACC_STATIC, "fold", "(L$JLIST;L$OBJ;L${fnIface(2)};)L$OBJ;", null, null)
+            m.visitCode()
+            m.visitVarInsn(ALOAD, 1)
+            m.visitVarInsn(ASTORE, 3)
+            m.visitInsn(ICONST_0)
+            m.visitVarInsn(ISTORE, 4)
+            val loop = Label()
+            val done = Label()
+            m.visitLabel(loop)
+            m.visitVarInsn(ILOAD, 4)
+            m.visitVarInsn(ALOAD, 0)
+            m.visitMethodInsn(INVOKEINTERFACE, JLIST, "size", "()I", true)
+            m.visitJumpInsn(IF_ICMPGE, done)
+            m.visitVarInsn(ALOAD, 2)
+            m.visitVarInsn(ALOAD, 3)
+            m.visitVarInsn(ALOAD, 0)
+            m.visitVarInsn(ILOAD, 4)
+            m.visitMethodInsn(INVOKEINTERFACE, JLIST, "get", "(I)L$OBJ;", true)
+            m.visitMethodInsn(INVOKEINTERFACE, fnIface(2), "apply", erasedApplyDesc(2), true)
+            m.visitVarInsn(ASTORE, 3)
+            m.visitIincInsn(4, 1)
+            m.visitJumpInsn(GOTO, loop)
+            m.visitLabel(done)
+            m.visitVarInsn(ALOAD, 3)
+            m.visitInsn(ARETURN)
+            m.visitMaxs(0, 0)
+            m.visitEnd()
+        }
     }
 
     /** dawn/rt/PanicError extends Error */
@@ -564,7 +726,39 @@ class CodeGen(private val module: Module, private val className: String) {
         is BoolLit -> { mv.visitInsn(if (e.value) ICONST_1 else ICONST_0); true }
         is UnitLit -> true
         is StrLit -> genStrLit(e)
-        is VarRef -> { loadVar(e.symbol!!); true }
+        is VarRef -> {
+            val fv = e.fnValue
+            if (fv != null) {
+                // a top-level function as a value: a zero-capture lambda over it.
+                // Unit-returning functions need a bridge (LMF cannot adapt void).
+                val n = fv.paramTypes.size
+                val needBridge = slotsOf(fv.ret) == 0
+                val implName: String
+                val implDesc: String
+                if (needBridge) {
+                    pendingBridges.add(fv)
+                    implName = "dawn\$fnval\$${fv.name}"
+                    implDesc = fv.paramTypes.joinToString("", "(", ")") { descOf(it) } + "L$OBJ;"
+                } else {
+                    implName = fv.name
+                    implDesc = methodDesc(fv.paramTypes, fv.ret)
+                }
+                mv.visitInvokeDynamicInsn(
+                    "apply", "()L${fnIface(n)};", LMF_BSM,
+                    AsmType.getMethodType(erasedApplyDesc(n)),
+                    Handle(H_INVOKESTATIC, className, implName, implDesc, false),
+                    instantiatedType(fv.paramTypes, fv.ret),
+                )
+            } else {
+                loadVar(e.symbol!!)
+            }
+            true
+        }
+        is Lambda -> genLambdaValue(e)
+        is Apply -> {
+            if (!genExpr(e.target, tail = false)) false
+            else genDynamicInvoke(e.args, e.target.type as TFn, e.type!!)
+        }
         is Call -> genCall(e, tail)
         is CtorCall -> genCtorCall(e)
         is FieldAccess -> {
@@ -629,7 +823,118 @@ class CodeGen(private val module: Module, private val className: String) {
         return true
     }
 
+    /** desc of a lambda/bridge impl method: concrete types, but Unit/Never return Object (for LMF) */
+    private fun implDescOf(params: List<Type>, ret: Type): String =
+        params.joinToString("", "(", ")") { descOf(it) } +
+            (if (slotsOf(ret) == 0) "L$OBJ;" else descOf(ret))
+
+    /** the lambda expression site: load captures + invokedynamic; the impl method is emitted later */
+    private fun genLambdaValue(e: Lambda): Boolean {
+        val name = "dawn\$lambda\$${lambdaCounter++}"
+        pendingLambdas.add(PendingLambda(e, name))
+        val caps = e.captures!!
+        for (c in caps) loadVar(c)
+        val ft = e.fnType!!
+        val implDesc = implDescOf(caps.map { it.type } + ft.params, ft.ret)
+        val indyDesc = "(" + caps.joinToString("") { descOf(it.type) } + ")L${fnIface(ft.params.size)};"
+        mv.visitInvokeDynamicInsn(
+            "apply", indyDesc, LMF_BSM,
+            AsmType.getMethodType(erasedApplyDesc(ft.params.size)),
+            Handle(H_INVOKESTATIC, className, name, implDesc, false),
+            instantiatedType(ft.params, ft.ret),
+        )
+        return true
+    }
+
+    private fun drainLambdas(cw: ClassWriter) {
+        while (pendingLambdas.isNotEmpty() || pendingBridges.isNotEmpty()) {
+            if (pendingLambdas.isNotEmpty()) {
+                genLambdaImpl(cw, pendingLambdas.removeFirst())
+            } else {
+                genFnValueBridge(cw, pendingBridges.first().also { pendingBridges.remove(it) })
+            }
+        }
+    }
+
+    private fun genLambdaImpl(cw: ClassWriter, p: PendingLambda) {
+        val l = p.lambda
+        val ft = l.fnType!!
+        val caps = l.captures!!
+        mv = cw.visitMethod(
+            ACC_PRIVATE or ACC_STATIC or ACC_SYNTHETIC, p.name,
+            implDescOf(caps.map { it.type } + ft.params, ft.ret), null, null,
+        )
+        mv.visitCode()
+        currentFn = null // no self-name inside a lambda, so no tail-call rewrite
+        fnStart = null
+        nextSlot = 0
+        for (sym in caps) {
+            sym.slot = nextSlot
+            nextSlot += slotsOf(sym.type)
+        }
+        for (lp in l.params) {
+            val sym = lp.symbol!!
+            sym.slot = nextSlot
+            nextSlot += slotsOf(sym.type)
+        }
+        val falls = genExpr(l.body, tail = false)
+        if (falls) {
+            when {
+                ft.ret == TInt -> mv.visitInsn(LRETURN)
+                ft.ret == TFloat -> mv.visitInsn(DRETURN)
+                ft.ret == TBool -> mv.visitInsn(IRETURN)
+                isRef(ft.ret) -> mv.visitInsn(ARETURN)
+                else -> {
+                    // Unit body, Object-returning impl: return null
+                    mv.visitInsn(ACONST_NULL)
+                    mv.visitInsn(ARETURN)
+                }
+            }
+        }
+        mv.visitMaxs(0, 0)
+        mv.visitEnd()
+    }
+
+    private val emittedBridges = HashSet<String>()
+
+    /** bridge for a Unit-returning top-level function used as a value: call it, return null */
+    private fun genFnValueBridge(cw: ClassWriter, sig: FnSig) {
+        if (!emittedBridges.add(sig.name)) return
+        val m = cw.visitMethod(
+            ACC_PRIVATE or ACC_STATIC or ACC_SYNTHETIC, "dawn\$fnval\$${sig.name}",
+            implDescOf(sig.paramTypes, sig.ret), null, null,
+        )
+        m.visitCode()
+        var slot = 0
+        for (pt in sig.paramTypes) {
+            loadSlot(m, pt, slot)
+            slot += slotsOf(pt)
+        }
+        m.visitMethodInsn(INVOKESTATIC, className, sig.name, methodDesc(sig.paramTypes, sig.ret), false)
+        m.visitInsn(ACONST_NULL)
+        m.visitInsn(ARETURN)
+        m.visitMaxs(0, 0)
+        m.visitEnd()
+    }
+
+    /** call a function value already on the stack: box args, apply, recover the result type */
+    private fun genDynamicInvoke(args: List<Expr>, ft: TFn, retStatic: Type): Boolean {
+        for (a in args) {
+            if (!genExpr(a, tail = false)) return false
+            box(a.type!!)
+        }
+        val n = ft.params.size
+        mv.visitMethodInsn(INVOKEINTERFACE, fnIface(n), "apply", erasedApplyDesc(n), true)
+        if (slotsOf(retStatic) == 0) mv.visitInsn(POP) else unerase(retStatic)
+        return true
+    }
+
     private fun genCall(e: Call, tail: Boolean): Boolean {
+        val dyn = e.dynamicTarget
+        if (dyn != null) {
+            loadVar(dyn)
+            return genDynamicInvoke(e.args, dyn.type as TFn, e.type!!)
+        }
         val builtin = BUILTINS[e.callee]
         if (builtin != null) return genBuiltinCall(e)
 
@@ -766,6 +1071,23 @@ class CodeGen(private val module: Module, private val className: String) {
             genExpr(e.args[0], tail = false)
             genExpr(e.args[1], tail = false)
             mv.visitMethodInsn(INVOKESTATIC, LISTS_CLASS, "range", "(JJ)L$JLIST;", false)
+            true
+        }
+        "map", "filter" -> {
+            genExpr(e.args[0], tail = false)
+            genExpr(e.args[1], tail = false)
+            mv.visitMethodInsn(INVOKESTATIC, LISTS_CLASS, e.callee,
+                "(L$JLIST;L${fnIface(1)};)L$JLIST;", false)
+            true
+        }
+        "fold" -> {
+            genExpr(e.args[0], tail = false)
+            genExpr(e.args[1], tail = false)
+            box(e.args[1].type!!) // the accumulator travels erased
+            genExpr(e.args[2], tail = false)
+            mv.visitMethodInsn(INVOKESTATIC, LISTS_CLASS, "fold",
+                "(L$JLIST;L$OBJ;L${fnIface(2)};)L$OBJ;", false)
+            if (slotsOf(e.type!!) == 0) mv.visitInsn(POP) else unerase(e.type!!)
             true
         }
         else -> error("unknown builtin: ${e.callee}")

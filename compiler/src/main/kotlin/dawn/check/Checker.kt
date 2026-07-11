@@ -31,11 +31,25 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
     /** user-defined types by name */
     val types: Map<String, AdtInfo> get() = adts
 
-    /** whether the current function body uses io */
-    private var usesIo = false
-    /** location of the first io use (for the error message) */
-    private var ioWitness: Span? = null
-    private var ioWitnessName: String? = null
+    /** effects used by the body currently being checked (Io and/or effect variables) */
+    private var usedEffects = HashSet<Eff>()
+    /** location of the first use of each effect (for error messages) */
+    private var effWitness = HashMap<Eff, Pair<Span, String>>()
+
+    /** effect variables of the signature currently being checked (for annotations in bodies) */
+    private var currentEffVars: MutableMap<String, Eff.Var> = HashMap()
+
+    /** an active lambda: locals declared outside its boundary are captures */
+    private class LambdaCtx(val boundaryDepth: Int) {
+        val captures = LinkedHashSet<Symbol>()
+    }
+    private val lambdaStack = ArrayDeque<LambdaCtx>()
+
+    private fun recordEffect(eff: Eff, span: Span, name: String) {
+        if (eff == Eff.Pure) return
+        if (eff !in usedEffects) effWitness[eff] = span to name
+        usedEffects.add(eff)
+    }
 
     /** type parameters of the declaration currently being checked (for annotations in bodies) */
     private var currentTParams: Map<String, TVar> = emptyMap()
@@ -107,17 +121,24 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
                 sink.error("duplicate type parameter names", d.nameSpan)
             val tvars = d.typeParams.map { TVar(it) }
             val tp = tvars.associateBy { it.name }
+            val ev = HashMap<String, Eff.Var>()
+            val eff = when (d.declaredEff) {
+                null -> Eff.Pure
+                "io" -> Eff.Io
+                else -> ev.getOrPut(d.declaredEff) { Eff.Var(d.declaredEff) }
+            }
             val sig = FnSig(
                 d.name,
-                d.params.map { resolveType(it.typeName, tp) },
+                d.params.map { resolveType(it.typeName, tp, ev) },
                 d.params.map { it.name },
-                resolveType(d.retType, tp),
-                d.declaredIo,
+                resolveType(d.retType, tp, ev),
+                eff,
                 isBuiltin = false,
                 typeParams = tvars,
                 nameSpan = d.nameSpan,
             )
             d.sig = sig
+            d.effVars = ev
             when {
                 BUILTINS.containsKey(d.name) ->
                     sink.error("`${d.name}` is a builtin function and cannot be redefined", d.nameSpan)
@@ -139,7 +160,21 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
         for (d in module.fns) checkFn(d)
     }
 
-    private fun resolveType(ref: TypeRef, tparams: Map<String, TVar> = currentTParams): Type {
+    private fun resolveType(
+        ref: TypeRef,
+        tparams: Map<String, TVar> = currentTParams,
+        effVars: MutableMap<String, Eff.Var> = currentEffVars,
+    ): Type {
+        if (ref is FnTypeRef) {
+            val eff = when (ref.effName) {
+                null -> Eff.Pure
+                "io" -> Eff.Io
+                else -> effVars.getOrPut(ref.effName) { Eff.Var(ref.effName) }
+            }
+            return TFn(ref.params.map { resolveType(it, tparams, effVars) },
+                resolveType(ref.ret, tparams, effVars), eff)
+        }
+        ref as NamedTypeRef
         // type parameters shadow everything
         tparams[ref.name]?.let {
             if (ref.args.isNotEmpty()) {
@@ -153,7 +188,7 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
                 sink.error("List takes exactly one type argument: List[T]", ref.span)
                 return TError
             }
-            return TList(resolveType(ref.args[0], tparams))
+            return TList(resolveType(ref.args[0], tparams, effVars))
         }
         Type.named(ref.name)?.let {
             if (ref.args.isNotEmpty()) {
@@ -172,24 +207,47 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
                 ref.span)
             return TError
         }
-        return TAdt(info, ref.args.map { resolveType(it, tparams) })
+        return TAdt(info, ref.args.map { resolveType(it, tparams, effVars) })
     }
 
     /**
      * Structural unification of a declared type (may contain the callee's type
-     * variables) against an actual argument type, accumulating bindings.
+     * and effect variables) against an actual argument type, accumulating bindings.
      */
-    private fun unifyInto(declared: Type, actual: Type, map: HashMap<TVar, Type>): Boolean = when {
+    private fun unifyInto(
+        declared: Type,
+        actual: Type,
+        map: HashMap<TVar, Type>,
+        effMap: HashMap<Eff.Var, Eff> = HashMap(),
+    ): Boolean = when {
         actual.isErrorish -> true
         declared is TVar -> {
-            val bound = map[declared]
-            if (bound == null) { map[declared] = actual; true } else bound == actual
+            if (actual == TUnit) false // Unit cannot instantiate a type parameter (erasure carries no value)
+            else {
+                val bound = map[declared]
+                if (bound == null) { map[declared] = actual; true } else bound == actual
+            }
         }
         declared is TAdt && actual is TAdt ->
             declared.info === actual.info &&
-                declared.args.zip(actual.args).all { (d, a) -> unifyInto(d, a, map) }
-        declared is TList && actual is TList -> unifyInto(declared.elem, actual.elem, map)
+                declared.args.zip(actual.args).all { (d, a) -> unifyInto(d, a, map, effMap) }
+        declared is TList && actual is TList -> unifyInto(declared.elem, actual.elem, map, effMap)
+        declared is TFn && actual is TFn ->
+            declared.params.size == actual.params.size &&
+                declared.params.zip(actual.params).all { (d, a) -> unifyInto(d, a, map, effMap) } &&
+                unifyInto(declared.ret, actual.ret, map, effMap) &&
+                unifyEff(declared.eff, actual.eff, effMap)
         else -> declared == actual
+    }
+
+    /** effect side of unification: pure ⊑ io; declared variables accumulate a lub */
+    private fun unifyEff(declared: Eff, actual: Eff, effMap: HashMap<Eff.Var, Eff>): Boolean = when (declared) {
+        Eff.Pure -> actual == Eff.Pure
+        Eff.Io -> true
+        is Eff.Var -> {
+            effMap[declared] = lubEff(effMap[declared] ?: Eff.Pure, actual)
+            true
+        }
     }
 
     /** does this expression need an expected type to check at all? */
@@ -199,15 +257,17 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
             val ci = ctors[e.ctorName]
             ci != null && ci.fields.isEmpty() && ci.adt.typeParams.isNotEmpty()
         }
+        is Lambda -> e.params.any { it.typeAnn == null }
         else -> false
     }
 
     private fun checkFn(d: FnDecl) {
         val sig = d.sig!!
         currentTParams = sig.typeParams.associateBy { it.name }
-        usesIo = false
-        ioWitness = null
-        ioWitnessName = null
+        currentEffVars = HashMap(d.effVars)
+        usedEffects = HashSet()
+        effWitness = HashMap()
+        lambdaStack.clear()
         scopes.clear()
         scopes.addLast(HashMap())
         for ((p, t) in d.params.zip(sig.paramTypes)) {
@@ -216,12 +276,17 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
         val bodyType = checkExpr(d.body, expected = sig.ret)
         if (!assignable(bodyType, sig.ret))
             sink.error("function `${d.name}` declares return type ${sig.ret} but its body is $bodyType", d.body.span)
-        if (usesIo && !sig.io) {
-            sink.error(
-                "function `${d.name}` is not declared !io but calls `${ioWitnessName}` (io)",
-                ioWitness ?: d.nameSpan,
-                "add !io to the end of the signature, or remove the call",
-            )
+        // the signature is the promise: every used effect must be ⊑ the declared one
+        if (sig.eff != Eff.Io) {
+            for (used in usedEffects) {
+                if (used == sig.eff) continue // declared !e, used e
+                val (span, name) = effWitness[used] ?: (d.nameSpan to "?")
+                sink.error(
+                    "function `${d.name}` is not declared !$used but calls `$name` (!$used)",
+                    span,
+                    "add !$used (or !io) to the end of the signature, or remove the call",
+                )
+            }
         }
         scopes.removeLast()
     }
@@ -242,6 +307,30 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
         return null
     }
 
+    /**
+     * Resolve a local name, doing lambda-capture bookkeeping: a symbol declared
+     * outside an enclosing lambda's boundary is a capture (by value — vars are
+     * rejected, spec §4.5).
+     */
+    private fun resolveLocal(name: String, span: Span, forAssign: Boolean = false): Symbol? {
+        for (i in scopes.indices.reversed()) {
+            val sym = scopes[i][name] ?: continue
+            for (ctx in lambdaStack) {
+                if (i < ctx.boundaryDepth) {
+                    when {
+                        forAssign -> sink.error("cannot assign to `$name` from inside a lambda", span,
+                            "lambdas capture by value; use the result of the lambda instead")
+                        sym.mutable -> sink.error("lambdas cannot capture `var` bindings (capture is by value)",
+                            span, "bind it to a let before the lambda, or pass it as a parameter")
+                        else -> ctx.captures.add(sym)
+                    }
+                }
+            }
+            return sym
+        }
+        return null
+    }
+
     private fun <T> scoped(body: () -> T): T {
         scopes.addLast(HashMap())
         try {
@@ -258,9 +347,12 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
         return TError
     }
 
-    /** can t be used where target is expected (Never/TError usable as anything) */
-    private fun assignable(t: Type, target: Type) =
-        t == target || t.isErrorish || target == TError
+    /** can t be used where target is expected (Never/TError usable as anything; pure fn ⊑ io fn) */
+    private fun assignable(t: Type, target: Type): Boolean =
+        t == target || t.isErrorish || target == TError ||
+            (t is TFn && target is TFn &&
+                t.params == target.params && assignable(t.ret, target.ret) &&
+                (target.eff == Eff.Io || t.eff == Eff.Pure || t.eff == target.eff))
 
     /** unify branch types (Never and TError are absorbed) */
     private fun unify(a: Type, b: Type, span: Span, what: String): Type = when {
@@ -293,16 +385,30 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
             TString
         }
         is VarRef -> {
-            val sym = lookup(e.name)
-            if (sym == null) {
-                error("undefined variable: ${e.name}", e.span,
-                    if (fns.containsKey(e.name) || BUILTINS.containsKey(e.name))
-                        "`${e.name}` is a function; M0 has no function values, call it as ${e.name}(...)" else null)
-            } else {
+            val sym = resolveLocal(e.name, e.span)
+            if (sym != null) {
                 e.symbol = sym
                 sym.type
+            } else {
+                val f = fns[e.name]
+                when {
+                    f != null && f.typeParams.isNotEmpty() ->
+                        error("generic functions cannot be used as values yet", e.span,
+                            "wrap it in a lambda: fn(x) => ${e.name}(x)")
+                    f != null -> {
+                        // a top-level function used as a value
+                        e.fnValue = f
+                        TFn(f.paramTypes, f.ret, f.eff)
+                    }
+                    BUILTINS.containsKey(e.name) ->
+                        error("builtin functions cannot be used as values yet", e.span,
+                            "wrap it in a lambda: fn(x) => ${e.name}(x)")
+                    else -> error("undefined variable: ${e.name}", e.span)
+                }
             }
         }
+        is Lambda -> checkLambda(e, expected)
+        is Apply -> checkApply(e)
         is Call -> checkCall(e, expected)
         is CtorCall -> checkCtorCall(e, expected)
         is FieldAccess -> checkFieldAccess(e)
@@ -333,12 +439,38 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
     }
 
     private fun checkCall(e: Call, expected: Type?): Type {
+        // a local function value shadows top-level functions
+        val local = resolveLocal(e.callee, e.calleeSpan)
+        if (local != null) {
+            val lt = local.type
+            if (lt.isErrorish) {
+                for (arg in e.args) checkExpr(arg)
+                return TError
+            }
+            if (lt !is TFn) {
+                for (arg in e.args) checkExpr(arg)
+                return error("`${e.callee}` is not a function (it is $lt)", e.calleeSpan)
+            }
+            e.dynamicTarget = local
+            if (e.args.size != lt.params.size) {
+                for (arg in e.args) checkExpr(arg)
+                sink.error("`${e.callee}` takes ${lt.params.size} argument(s), got ${e.args.size}",
+                    e.span, "type: $lt")
+                return lt.ret
+            }
+            for ((arg, pt) in e.args.zip(lt.params)) {
+                val at = checkExpr(arg, expected = pt)
+                if (!assignable(at, pt))
+                    sink.error("argument type mismatch: expected $pt, got $at", arg.span)
+            }
+            recordEffect(lt.eff, e.calleeSpan, e.callee)
+            return lt.ret
+        }
         val sig = fns[e.callee] ?: BUILTINS[e.callee]
         if (sig == null) {
             // still check the arguments so their subtrees get types/symbols
             for (arg in e.args) checkExpr(arg)
-            return error("undefined function: ${e.callee}", e.calleeSpan,
-                if (lookup(e.callee) != null) "`${e.callee}` is a variable, not a function (function values are not implemented yet)" else null)
+            return error("undefined function: ${e.callee}", e.calleeSpan)
         }
         e.sig = sig
         if (e.args.size != sig.paramTypes.size) {
@@ -348,9 +480,10 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
             return if (sig.typeParams.isEmpty()) sig.ret else TError
         }
         val map = HashMap<TVar, Type>()
+        val effMap = HashMap<Eff.Var, Eff>()
         // seed inference from the expected result type (helps nested cases like Some(None))
         if (sig.typeParams.isNotEmpty() && expected != null && isConcrete(expected))
-            unifyInto(sig.ret, expected, map)
+            unifyInto(sig.ret, expected, map, effMap)
         // two rounds: self-sufficient arguments first (they bind type variables),
         // then inference-needing ones (bare None, []) with what was learned
         val argTypes = arrayOfNulls<Type>(e.args.size)
@@ -358,29 +491,31 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
             for ((i, arg) in e.args.withIndex()) {
                 if (argTypes[i] != null) continue
                 if (round == 0 && needsExpected(arg)) continue
-                val exp = subst(sig.paramTypes[i], map).takeIf { isConcrete(it) }
+                val substd = subst(sig.paramTypes[i], map)
+                // lambdas only need their parameter types, so a partially
+                // concrete expected type is still useful to them
+                val exp = substd.takeIf { isConcrete(it) || arg is Lambda }
                 val at = checkExpr(arg, expected = exp)
                 argTypes[i] = at
-                if (!unifyInto(sig.paramTypes[i], at, map))
+                if (!unifyInto(sig.paramTypes[i], at, map, effMap))
                     sink.error("argument type mismatch: expected ${subst(sig.paramTypes[i], map)}, got $at",
                         arg.span, "signature: ${sig.render()}")
             }
         }
         // return-position inference: let x: Option[Int] = ...
-        if (sig.typeParams.any { it !in map } && expected != null) unifyInto(sig.ret, expected, map)
+        if (sig.typeParams.any { it !in map } && expected != null) unifyInto(sig.ret, expected, map, effMap)
         val unbound = sig.typeParams.filter { it !in map }
         if (unbound.isNotEmpty()) {
             return error("cannot infer type parameter(s) ${unbound.joinToString(", ")} for `${e.callee}`",
                 e.span, "add a type annotation at the use site")
         }
-        if (sig.io && !usesIo) {
-            usesIo = true
-            ioWitness = e.calleeSpan
-            ioWitnessName = e.callee
-        } else if (sig.io) {
-            usesIo = true
+        // instantiate the callee's effect: an unbound effect variable means pure
+        val calleeEff = when (val ce = sig.eff) {
+            is Eff.Var -> effMap[ce] ?: Eff.Pure
+            else -> ce
         }
-        return subst(sig.ret, map)
+        recordEffect(calleeEff, e.calleeSpan, e.callee)
+        return subst(sig.ret, map, effMap)
     }
 
     private fun checkCtorCall(e: CtorCall, expected: Type?): Type {
@@ -487,6 +622,86 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
         return subst(adt.type, map)
     }
 
+    private fun checkLambda(e: Lambda, expected: Type?): Type {
+        val exp = expected as? TFn
+        if (exp != null && exp.params.size != e.params.size)
+            sink.error("this lambda takes ${e.params.size} parameter(s), but $exp is expected", e.span)
+        val paramTypes = e.params.mapIndexed { i, p ->
+            var t = p.typeAnn?.let { resolveType(it) }
+                ?: exp?.params?.getOrNull(i)?.takeIf { isConcrete(it) }
+                ?: run {
+                    sink.error("cannot infer the type of `${p.name}`", p.span,
+                        "annotate it: fn(${p.name}: Int) => ...")
+                    TError
+                }
+            if (t == TUnit) {
+                sink.error("lambda parameters cannot be Unit", p.span)
+                t = TError
+            }
+            t
+        }
+        // the lambda's effects are its own — they happen when it is called
+        val savedUsed = usedEffects
+        val savedWitness = effWitness
+        usedEffects = HashSet()
+        effWitness = HashMap()
+        val ctx = LambdaCtx(scopes.size)
+        lambdaStack.addLast(ctx)
+        val bodyType = scoped {
+            e.params.forEachIndexed { i, p -> p.symbol = declare(p.name, paramTypes[i], mutable = false, p.span) }
+            checkExpr(e.body, expected = exp?.ret?.takeIf { isConcrete(it) })
+        }
+        lambdaStack.removeLast()
+        val lambdaEff = usedEffects.fold(Eff.Pure as Eff) { acc, x -> lubEff(acc, x) }
+        usedEffects = savedUsed
+        effWitness = savedWitness
+        e.captures = ctx.captures.toList()
+        val t = TFn(paramTypes, bodyType, lambdaEff)
+        e.fnType = t
+        return t
+    }
+
+    private fun checkApply(e: Apply): Type {
+        val target = e.target
+        var preArgTypes: List<Type>? = null
+        val ft: Type
+        if (target is Lambda && target.params.any { it.typeAnn == null }) {
+            // piping into a lambda: the arguments determine its parameter types
+            preArgTypes = e.args.map { checkExpr(it) }
+            ft = checkExpr(target, expected = TFn(preArgTypes, TNever, Eff.Io))
+        } else {
+            ft = checkExpr(target)
+        }
+        if (ft.isErrorish) {
+            if (preArgTypes == null) for (arg in e.args) checkExpr(arg)
+            return TError
+        }
+        if (ft !is TFn) {
+            if (preArgTypes == null) for (arg in e.args) checkExpr(arg)
+            return error("cannot call a value of type $ft", e.target.span)
+        }
+        if (e.args.size != ft.params.size) {
+            if (preArgTypes == null) for (arg in e.args) checkExpr(arg)
+            sink.error("this function takes ${ft.params.size} argument(s), got ${e.args.size}", e.span,
+                "type: $ft")
+            return ft.ret
+        }
+        if (preArgTypes == null) {
+            for ((arg, pt) in e.args.zip(ft.params)) {
+                val at = checkExpr(arg, expected = pt)
+                if (!assignable(at, pt))
+                    sink.error("argument type mismatch: expected $pt, got $at", arg.span)
+            }
+        } else {
+            for ((i, at) in preArgTypes.withIndex()) {
+                if (!assignable(at, ft.params[i]))
+                    sink.error("argument type mismatch: expected ${ft.params[i]}, got $at", e.args[i].span)
+            }
+        }
+        recordEffect(ft.eff, e.target.span, "the applied function")
+        return ft.ret
+    }
+
     private fun checkFieldAccess(e: FieldAccess): Type {
         val tt = checkExpr(e.target)
         if (tt.isErrorish) return TError
@@ -503,7 +718,7 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
     }
 
     private fun checkListLit(e: ListLit, expected: Type?): Type {
-        val expectedElem = (expected as? TList)?.elem
+        val expectedElem = (expected as? TList)?.elem?.takeIf { isConcrete(it) }
         if (e.elems.isEmpty()) {
             return TList(expectedElem
                 ?: return error("cannot infer the element type of an empty list", e.span,
@@ -546,7 +761,9 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
                     "use + for numbers; interpolation \"{x}{y}\" also builds strings")
             }
             BinOp.EQ, BinOp.NEQ -> {
-                if (lt != rt) error("== requires both sides to have the same type: $lt vs $rt", e.opSpan)
+                if (lt is TFn || rt is TFn)
+                    error("functions cannot be compared", e.opSpan)
+                else if (lt != rt) error("== requires both sides to have the same type: $lt vs $rt", e.opSpan)
                 else TBool
             }
             BinOp.LT, BinOp.LE, BinOp.GT, BinOp.GE -> {
@@ -741,7 +958,7 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
                 s.symbol = declare(s.name, t, s.mutable, s.span)
             }
             is AssignStmt -> {
-                val sym = lookup(s.name)
+                val sym = resolveLocal(s.name, s.nameSpan, forAssign = true)
                 if (sym == null) {
                     sink.error("undefined variable: ${s.name}", s.nameSpan)
                     checkExpr(s.value)

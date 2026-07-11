@@ -2,6 +2,34 @@ package dawn.check
 
 import dawn.diag.Span
 
+/**
+ * An effect (spec §6): the two-point lattice pure < io, plus effect variables
+ * (introduced by appearing in a signature; identity equality, one instance per
+ * name per signature).
+ */
+sealed class Eff {
+    object Pure : Eff() {
+        override fun toString() = ""
+    }
+    object Io : Eff() {
+        override fun toString() = "io"
+    }
+    class Var(val name: String) : Eff() {
+        override fun toString() = name
+    }
+
+    /** render as a signature suffix: "", " !io", " !e" */
+    val suffix: String get() = if (this == Pure) "" else " !$this"
+}
+
+/** least upper bound in the effect lattice (two distinct variables conservatively join to io) */
+fun lubEff(a: Eff, b: Eff): Eff = when {
+    a == b -> a
+    a == Eff.Pure -> b
+    b == Eff.Pure -> a
+    else -> Eff.Io
+}
+
 /** The complete set of types. */
 sealed class Type(val display: String) {
     object TInt : Type("Int")
@@ -37,6 +65,14 @@ sealed class Type(val display: String) {
         override fun hashCode(): Int = elem.hashCode() + 7
     }
 
+    /** A function type: fn(A, B) -> C !e. */
+    class TFn(val params: List<Type>, val ret: Type, val eff: Eff) :
+        Type("fn(${params.joinToString(", ")}) -> $ret${eff.suffix}") {
+        override fun equals(other: Any?): Boolean =
+            other is TFn && other.params == params && other.ret == ret && other.eff == eff
+        override fun hashCode(): Int = params.hashCode() * 31 + ret.hashCode()
+    }
+
     override fun toString() = display
 
     val isNumeric get() = this == TInt || this == TFloat
@@ -57,13 +93,17 @@ sealed class Type(val display: String) {
     }
 }
 
-/** Replace type variables according to [map] (identity lookups). */
-fun subst(t: Type, map: Map<Type.TVar, Type>): Type = when (t) {
+/** Replace type variables (and effect variables) according to the maps (identity lookups). */
+fun subst(t: Type, map: Map<Type.TVar, Type>, effMap: Map<Eff.Var, Eff> = emptyMap()): Type = when (t) {
     is Type.TVar -> map[t] ?: t
-    is Type.TAdt -> if (t.args.isEmpty()) t else Type.TAdt(t.info, t.args.map { subst(it, map) })
-    is Type.TList -> Type.TList(subst(t.elem, map))
+    is Type.TAdt -> if (t.args.isEmpty()) t else Type.TAdt(t.info, t.args.map { subst(it, map, effMap) })
+    is Type.TList -> Type.TList(subst(t.elem, map, effMap))
+    is Type.TFn -> Type.TFn(t.params.map { subst(it, map, effMap) }, subst(t.ret, map, effMap),
+        substEff(t.eff, effMap))
     else -> t
 }
+
+fun substEff(e: Eff, effMap: Map<Eff.Var, Eff>): Eff = if (e is Eff.Var) effMap[e] ?: e else e
 
 /**
  * A user-defined ADT. Built by the checker in two passes: the shell (name +
@@ -115,17 +155,18 @@ class FnSig(
     val paramTypes: List<Type>,
     val paramNames: List<String>,
     val ret: Type,
-    val io: Boolean,
+    val eff: Eff,
     val isBuiltin: Boolean,
     val typeParams: List<Type.TVar> = emptyList(),
     /** span of the name in the declaration (go-to-definition); null for builtins */
     val nameSpan: Span? = null,
 ) {
+    val io: Boolean get() = eff == Eff.Io
+
     fun render(): String {
         val tp = if (typeParams.isEmpty()) "" else "[${typeParams.joinToString(", ")}]"
         val params = paramNames.zip(paramTypes).joinToString(", ") { "${it.first}: ${it.second}" }
-        val eff = if (io) " !io" else ""
-        return "fn $name$tp($params) -> $ret$eff"
+        return "fn $name$tp($params) -> $ret${eff.suffix}"
     }
 }
 
@@ -155,18 +196,27 @@ val PRELUDE_ADTS: List<AdtInfo> = listOf(OPTION_ADT, RESULT_ADT)
 /** Builtin functions (a growing subset of spec §11). */
 val BUILTINS: Map<String, FnSig> = run {
     val t = Type.TVar("T")
+    val u = Type.TVar("U")
+    val a = Type.TVar("A")
+    val e = Eff.Var("e")
     listOf(
-        FnSig("println", listOf(Type.TString), listOf("s"), Type.TUnit, io = true, isBuiltin = true),
-        FnSig("print", listOf(Type.TString), listOf("s"), Type.TUnit, io = true, isBuiltin = true),
-        FnSig("panic", listOf(Type.TString), listOf("msg"), Type.TNever, io = false, isBuiltin = true),
-        FnSig("todo", listOf(), listOf(), Type.TNever, io = false, isBuiltin = true),
-        FnSig("to_float", listOf(Type.TInt), listOf("n"), Type.TFloat, io = false, isBuiltin = true),
-        FnSig("to_int", listOf(Type.TFloat), listOf("x"), Type.TInt, io = false, isBuiltin = true),
+        FnSig("println", listOf(Type.TString), listOf("s"), Type.TUnit, Eff.Io, isBuiltin = true),
+        FnSig("print", listOf(Type.TString), listOf("s"), Type.TUnit, Eff.Io, isBuiltin = true),
+        FnSig("panic", listOf(Type.TString), listOf("msg"), Type.TNever, Eff.Pure, isBuiltin = true),
+        FnSig("todo", listOf(), listOf(), Type.TNever, Eff.Pure, isBuiltin = true),
+        FnSig("to_float", listOf(Type.TInt), listOf("n"), Type.TFloat, Eff.Pure, isBuiltin = true),
+        FnSig("to_int", listOf(Type.TFloat), listOf("x"), Type.TInt, Eff.Pure, isBuiltin = true),
         FnSig("len", listOf(Type.TList(t)), listOf("xs"), Type.TInt,
-            io = false, isBuiltin = true, typeParams = listOf(t)),
+            Eff.Pure, isBuiltin = true, typeParams = listOf(t)),
         FnSig("get", listOf(Type.TList(t), Type.TInt), listOf("xs", "i"),
-            Type.TAdt(OPTION_ADT, listOf(t)), io = false, isBuiltin = true, typeParams = listOf(t)),
+            Type.TAdt(OPTION_ADT, listOf(t)), Eff.Pure, isBuiltin = true, typeParams = listOf(t)),
         FnSig("range", listOf(Type.TInt, Type.TInt), listOf("from", "to"),
-            Type.TList(Type.TInt), io = false, isBuiltin = true),
+            Type.TList(Type.TInt), Eff.Pure, isBuiltin = true),
+        FnSig("map", listOf(Type.TList(t), Type.TFn(listOf(t), u, e)), listOf("xs", "f"),
+            Type.TList(u), e, isBuiltin = true, typeParams = listOf(t, u)),
+        FnSig("filter", listOf(Type.TList(t), Type.TFn(listOf(t), Type.TBool, e)), listOf("xs", "f"),
+            Type.TList(t), e, isBuiltin = true, typeParams = listOf(t)),
+        FnSig("fold", listOf(Type.TList(t), a, Type.TFn(listOf(a, t), a, e)), listOf("xs", "init", "f"),
+            a, e, isBuiltin = true, typeParams = listOf(t, a)),
     ).associateBy { it.name }
 }
