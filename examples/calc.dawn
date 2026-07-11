@@ -20,30 +20,30 @@ type Parser = { tokens: List[Token], pos: Int }
 
 fn tokenize(src: String) -> Result[List[Token], String] =
   src
-    |> chars
-    |> filter(fn(c) => c != " ")
-    |> fold(Ok([]), fn(acc, c) => {
-        let toks = acc?
-        match c {
-          "+" -> Ok(toks ++ [Plus])
-          "-" -> Ok(toks ++ [Minus])
-          "*" -> Ok(toks ++ [Star])
-          "/" -> Ok(toks ++ [Slash])
-          "(" -> Ok(toks ++ [LParen])
-          ")" -> Ok(toks ++ [RParen])
-          d   -> match parse_int(d) {
-            Some(n) -> Ok(push_digit(toks, n))
-            None    -> Err("unexpected char: {d}")
-          }
-        }
-      })
+  |> chars
+  |> filter(fn(c) => c != " ")
+  |> fold(Ok([]), fn(acc, c) => {
+    let toks = acc?
+    match c {
+      "+" -> Ok(toks ++ [Plus])
+      "-" -> Ok(toks ++ [Minus])
+      "*" -> Ok(toks ++ [Star])
+      "/" -> Ok(toks ++ [Slash])
+      "(" -> Ok(toks ++ [LParen])
+      ")" -> Ok(toks ++ [RParen])
+      d -> match parse_int(d) {
+        Some(n) -> Ok(push_digit(toks, n))
+        None -> Err("unexpected char: {d}")
+      }
+    }
+  })
 
 # merge consecutive digits into the previous Num
 fn push_digit(toks: List[Token], d: Int) -> List[Token] =
   match toks {
-    []               -> [Num(d)]
+    [] -> [Num(d)]
     [..init, Num(v)] -> init ++ [Num(v * 10 + d)]
-    _                -> toks ++ [Num(d)]
+    _ -> toks ++ [Num(d)]
   }
 
 # ---- evaluation (precedence climbing) ----
@@ -73,7 +73,7 @@ fn term(p: Parser) -> Result[(Int, Parser), String] = {
     let (rhs, next) = atom(advance(cur))?
     acc = match op {
       Some(Slash) -> if rhs == 0 { 0 } else { acc / rhs }
-      _           -> acc * rhs
+      _ -> acc * rhs
     }
     cur = next
   }
@@ -82,12 +82,12 @@ fn term(p: Parser) -> Result[(Int, Parser), String] = {
 
 fn atom(p: Parser) -> Result[(Int, Parser), String] =
   match peek(p) {
-    Some(Num(v))  -> Ok((v, advance(p)))
-    Some(LParen)  -> {
+    Some(Num(v)) -> Ok((v, advance(p)))
+    Some(LParen) -> {
       let (v, cur) = expr(advance(p))?
       match peek(cur) {
         Some(RParen) -> Ok((v, advance(cur)))
-        _            -> Err("expected )")
+        _ -> Err("expected )")
       }
     }
     _ -> Err("expected number or ( at {p.pos}")
@@ -110,7 +110,7 @@ pub fn main() -> Unit !io = {
       System.exit(1)
     }
     Some(src) -> match eval(src) {
-      Ok(v)  -> println("{src} = {v}")
+      Ok(v) -> println("{src} = {v}")
       Err(e) -> {
         println("error: {e}")
         System.exit(1)

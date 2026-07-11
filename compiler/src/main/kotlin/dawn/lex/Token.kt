@@ -25,6 +25,7 @@ enum class TokenType {
     BANG,       // !
     AT,         // @
     NEWLINE, EOF,
+    COMMENT,    // # ... (collected only for `dawn fmt`; never enters the parser's stream)
 }
 
 /** A piece of a string literal: literal text, or an interpolation (code + its offset in the file). */

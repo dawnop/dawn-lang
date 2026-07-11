@@ -20,6 +20,8 @@ class Lexer(
     private val src: String,
     private val baseOffset: Int = 0,
     private val sink: DiagnosticSink = DiagnosticSink(),
+    /** when non-null, comments are recorded here (for `dawn fmt`) instead of being dropped */
+    private val commentSink: MutableList<Token>? = null,
 ) {
 
     private var pos = 0
@@ -86,7 +88,13 @@ class Lexer(
     }
 
     private fun skipComment() {
+        val start = pos
         while (pos < src.length && src[pos] != '\n') pos++
+        if (commentSink != null) {
+            var end = pos // exclude trailing whitespace before the newline
+            while (end > start && (src[end - 1] == ' ' || src[end - 1] == '\t' || src[end - 1] == '\r')) end--
+            commentSink.add(Token(TokenType.COMMENT, src.substring(start, end), spanAt(start, end - start)))
+        }
     }
 
     // ---- words: keywords / identifiers / type identifiers ----

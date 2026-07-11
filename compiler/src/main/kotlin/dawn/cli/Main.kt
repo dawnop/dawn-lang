@@ -18,6 +18,8 @@ usage:
   dawn build <file.dawn> [-o out.jar]  produce an executable jar (tests stripped)
   dawn build <file.dawn> --native [-o out]
                                        produce a standalone native binary (needs native-image)
+  dawn fmt <file.dawn>...              format files in place
+  dawn fmt --check <file.dawn>...      report files that are not formatted (exit 1 if any)
 """
 
 fun main(args: Array<String>) {
@@ -30,6 +32,7 @@ fun main(args: Array<String>) {
             "run" -> cmdRun(args.drop(1))
             "test" -> cmdTest(args.drop(1))
             "build" -> cmdBuild(args.drop(1))
+            "fmt" -> cmdFmt(args.drop(1))
             "lsp" -> dawn.lsp.runLspServer()
             "--help", "-h", "help" -> print(USAGE)
             else -> {
@@ -152,6 +155,30 @@ fun cmdTest(restIn: List<String>) {
     }
     println(if (failed == 0) "${tests.size} test(s) passed" else "$failed of ${tests.size} test(s) failed")
     if (failed > 0) exitProcess(1)
+}
+
+// ---- fmt: reformat sources in place, or --check for CI ----
+
+fun cmdFmt(rest: List<String>) {
+    val check = rest.contains("--check")
+    val paths = rest.filter { !it.startsWith("-") }
+    if (paths.isEmpty()) throw CliError("usage: dawn fmt [--check] <file.dawn>...")
+    var unformatted = 0
+    for (p in paths) {
+        val file = File(p)
+        if (!file.exists()) throw CliError("no such file: $p")
+        val original = file.readText()
+        val formatted = dawn.fmt.Formatter.format(original)
+        if (formatted == original) continue
+        if (check) {
+            println(p)
+            unformatted++
+        } else {
+            file.writeText(formatted)
+            println("formatted $p")
+        }
+    }
+    if (check && unformatted > 0) exitProcess(1)
 }
 
 // ---- build: write a jar, optionally hand it to native-image ----

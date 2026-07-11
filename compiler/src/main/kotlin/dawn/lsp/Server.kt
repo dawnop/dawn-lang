@@ -38,6 +38,7 @@ class DawnLanguageServer : LanguageServer, LanguageClientAware {
         caps.setHoverProvider(true)
         caps.setDefinitionProvider(true)
         caps.setDocumentSymbolProvider(true)
+        caps.setDocumentFormattingProvider(true)
         return completedFuture(InitializeResult(caps))
     }
 
@@ -129,6 +130,17 @@ private class DawnTextDocumentService(private val server: DawnLanguageServer) : 
             Either.forRight<SymbolInformation, DocumentSymbol>(sym)
         }
         return completedFuture(symbols)
+    }
+
+    override fun formatting(params: DocumentFormattingParams): CompletableFuture<List<TextEdit>> {
+        val st = docs[params.textDocument.uri] ?: return completedFuture(emptyList())
+        val text = st.source.text
+        val formatted = dawn.fmt.Formatter.format(text)
+        if (formatted == text) return completedFuture(emptyList())
+        // replace the whole document (fmt only needs a successful lex, so this works on broken files too)
+        val lines = text.split("\n")
+        val end = Position(lines.size - 1, lines.last().length)
+        return completedFuture(listOf(TextEdit(Range(Position(0, 0), end), formatted)))
     }
 
     // ---- position mapping ----
