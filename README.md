@@ -37,6 +37,7 @@ pub fn main() -> Unit !io =
 
 ## 文档
 
+- [docs/tutorial.md](docs/tutorial.md) — 上手教程（从第一个程序到调 Java，代码块均经编译校验）
 - [docs/design.md](docs/design.md) — 设计目标、决策记录（为什么是这样而不是那样）
 - [docs/spec.md](docs/spec.md) — 语言规范（词法、语法、类型、效果、comptime、互操作、编译模型）
 - [docs/grammar.ebnf](docs/grammar.ebnf) — EBNF 语法
