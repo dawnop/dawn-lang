@@ -117,6 +117,8 @@ class CodeGen(
     private val pendingBridges = LinkedHashSet<FnSig>()
     /** builtins used as values without a real static method behind them */
     private val pendingBuiltinBridges = LinkedHashSet<FnSig>()
+    private val pendingCtorBridges = LinkedHashSet<CtorInfo>()
+    private val emittedCtorBridges = HashSet<String>()
 
     /** non-scalar comptime results become static fields built in <clinit> */
     private class ConstField(val name: String, val value: dawn.check.CValue, val type: Type)
@@ -1507,13 +1509,16 @@ class CodeGen(
     }
 
     private fun drainLambdas(cw: ClassWriter) {
-        while (pendingLambdas.isNotEmpty() || pendingBridges.isNotEmpty() || pendingBuiltinBridges.isNotEmpty()) {
+        while (pendingLambdas.isNotEmpty() || pendingBridges.isNotEmpty() ||
+            pendingBuiltinBridges.isNotEmpty() || pendingCtorBridges.isNotEmpty()) {
             when {
                 pendingLambdas.isNotEmpty() -> genLambdaImpl(cw, pendingLambdas.removeFirst())
                 pendingBridges.isNotEmpty() ->
                     genFnValueBridge(cw, pendingBridges.first().also { pendingBridges.remove(it) })
-                else ->
+                pendingBuiltinBridges.isNotEmpty() ->
                     genBuiltinBridge(cw, pendingBuiltinBridges.first().also { pendingBuiltinBridges.remove(it) })
+                else ->
+                    genCtorValueBridge(cw, pendingCtorBridges.first().also { pendingCtorBridges.remove(it) })
             }
         }
     }
@@ -1904,6 +1909,7 @@ class CodeGen(
     }
 
     private fun genCtorCall(e: CtorCall): Boolean {
+        e.ctorValue?.let { return genCtorValue(e, it) }
         e.constDecl?.let { cd ->
             genLoadConst(cd.value!!, e.type!!, key = cd)
             return true
@@ -1948,6 +1954,45 @@ class CodeGen(
         val desc = "(" + ci.fields.joinToString("") { descOf(it.type) } + ")V"
         mv.visitMethodInsn(INVOKESPECIAL, sub, "<init>", desc, false)
         return true
+    }
+
+    /** a bare constructor used as a function value: an LMF over a synthetic construction bridge */
+    private fun genCtorValue(e: CtorCall, ci: CtorInfo): Boolean {
+        val ft = e.type as TFn
+        pendingCtorBridges.add(ci)
+        val handle = Handle(H_INVOKESTATIC, className, "dawn\$ctor\$${ci.jvmName}",
+            implDescOf(ci.fields.map { it.type }, ci.adt.type), false)
+        mv.visitInvokeDynamicInsn(
+            "apply", "()L${fnIface(ft.params.size)};", LMF_BSM,
+            AsmType.getMethodType(erasedApplyDesc(ft.params.size)),
+            handle,
+            instantiatedType(ft.params, ft.ret),
+        )
+        return true
+    }
+
+    /** static body `dawn$ctor$X(fields...) -> Adt` = new + init, target of a constructor value's LMF */
+    private fun genCtorValueBridge(cw: ClassWriter, ci: CtorInfo) {
+        val sub = ci.jvmName
+        if (!emittedCtorBridges.add(sub)) return
+        val fieldTypes = ci.fields.map { it.type }
+        val m = cw.visitMethod(
+            ACC_PRIVATE or ACC_STATIC or ACC_SYNTHETIC, "dawn\$ctor\$$sub",
+            implDescOf(fieldTypes, ci.adt.type), null, null,
+        )
+        m.visitCode()
+        m.visitTypeInsn(NEW, sub)
+        m.visitInsn(DUP)
+        var slot = 0
+        for (ft in fieldTypes) {
+            loadSlot(m, ft, slot)
+            slot += slotsOf(ft)
+        }
+        m.visitMethodInsn(INVOKESPECIAL, sub, "<init>",
+            "(" + fieldTypes.joinToString("") { descOf(it) } + ")V", false)
+        m.visitInsn(ARETURN)
+        m.visitMaxs(0, 0)
+        m.visitEnd()
     }
 
     private fun genTupleLit(e: TupleLit): Boolean {

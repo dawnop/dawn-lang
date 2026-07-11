@@ -415,7 +415,11 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
             (fns[e.name] ?: BUILTINS[e.name])?.typeParams?.isNotEmpty() == true
         is CtorCall -> {
             val ci = ctors[e.ctorName]
-            ci != null && ci.fields.isEmpty() && ci.adt.typeParams.isNotEmpty()
+            ci != null && (
+                // bare nullary generic constructor (e.g. None): element type comes from expected
+                (ci.fields.isEmpty() && ci.adt.typeParams.isNotEmpty()) ||
+                // bare constructor-with-fields as a function value (e.g. Some): needs the expected fn type
+                (!e.hasParens && ci.fields.isNotEmpty() && !ci.adt.isRecord))
         }
         is Lambda -> e.params.any { it.typeAnn == null }
         else -> false
@@ -768,6 +772,28 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
         return subst(declared, map, effMap)
     }
 
+    /** A constructor used bare as a function value: `map(xs, Some)`. Generics come from [expected]. */
+    private fun checkCtorValue(e: CtorCall, ci: CtorInfo, expected: TFn): Type {
+        e.ctorValue = ci
+        val adt = ci.adt
+        val params = ci.fields.map { it.type }
+        val ret = adt.type
+        if (expected.params.size != params.size) {
+            return error("`${ci.name}` takes ${params.size} field(s), but $expected is expected", e.span,
+                "constructor: ${ci.render()}")
+        }
+        if (adt.typeParams.isEmpty()) return TFn(params, ret, Eff.Pure)
+        val map = HashMap<TVar, Type>()
+        for ((d, a) in params.zip(expected.params)) if (isConcrete(a)) unifyInto(d, a, map)
+        if (isConcrete(expected.ret)) unifyInto(ret, expected.ret, map)
+        val unbound = adt.typeParams.filter { it !in map }
+        if (unbound.isNotEmpty()) {
+            return error("cannot infer type parameter(s) ${unbound.joinToString(", ")} for `${ci.name}` used as a value",
+                e.span, "annotate the surrounding context, or wrap it in a lambda")
+        }
+        return TFn(params.map { subst(it, map) }, subst(ret, map), Eff.Pure)
+    }
+
     /** to_string / interpolation accept the printable types only (derive Show is later) */
     private fun checkPrintable(t: Type, span: Span) {
         if (t !in listOf(TInt, TFloat, TBool, TString) && !t.isErrorish)
@@ -889,11 +915,18 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
         val adt = ci.adt
         val n = ci.fields.size
         if (!e.hasParens && n > 0) {
+            // a bare constructor with fields, in a function-typed position, is a function value
+            if (!adt.isRecord && expected is TFn) return checkCtorValue(e, ci, expected)
             return error(
                 if (adt.isRecord)
                     "record `${ci.name}` must be built with braces: ${ci.name} { ... }"
                 else "constructor `${ci.name}` has $n field(s) and cannot be used bare",
                 e.span, "constructor: ${ci.render()}")
+        }
+        // a bare nullary constructor where a function is expected: a value, not a function
+        if (!e.hasParens && n == 0 && expected is TFn) {
+            return error("`${ci.name}` is a value, not a function (it takes no fields)", e.span,
+                "use it directly; only constructors with fields can be passed as functions")
         }
         val map = HashMap<TVar, Type>()
         // seed inference from the expected result type (helps nested cases like Some(None))

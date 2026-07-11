@@ -206,6 +206,8 @@ class CtorCall(
     var fieldExprs: List<Expr?>? = null
     /** a bare SCREAMING_SNAKE name may resolve to a constant instead (filled by the checker) */
     var constDecl: ConstDecl? = null
+    /** a bare constructor used as a function value: `map(xs, Some)` (filled by the checker) */
+    var ctorValue: CtorInfo? = null
 }
 
 /** Record field access: p.x (also chains: p.a.b). */
