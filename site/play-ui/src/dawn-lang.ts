@@ -274,15 +274,24 @@ function docDecls(doc: string, skipFrom: number) {
 // right after `.` (Java members) or `!` (effect rows).
 export function dawnCompletions(context: CompletionContext): CompletionResult | null {
   const word = context.matchBefore(/[A-Za-z_][A-Za-z0-9_]*/)
-  if (!word && !context.explicit) return null
   const inside = lexContext(context.state.sliceDoc(0, context.pos), context.pos)
   if (inside === 'string' || inside === 'comment') return null
   const from = word ? word.from : context.pos
   const line = context.state.doc.lineAt(context.pos)
   const before = context.state.sliceDoc(line.from, from)
+  // an effect row: `!` admits exactly one builtin effect. Pops as soon as the
+  // `!` is typed (no word required), like an IDE trigger character.
+  if (before.endsWith('!')) {
+    return {
+      from,
+      options: [{ label: 'io', type: 'keyword', info: 'the IO effect — this function may perform input/output' }],
+      validFor: /^\w*$/,
+    }
+  }
+  if (!word && !context.explicit) return null
   if (/(?:^|[^\w])(?:fn|let|var|const|type|for|derive)\s+$/.test(before)) return null
   if (/^\s*(?:pub\s+)?use\b/.test(before)) return null
-  if (before.endsWith('.') || before.endsWith('!')) return null
+  if (before.endsWith('.')) return null
 
   const locals = docDecls(context.state.doc.toString(), from)
   const options = [
