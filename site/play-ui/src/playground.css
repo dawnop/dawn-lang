@@ -1,33 +1,76 @@
-/* Editor + run controls. The window frame (.code-window) and output badge
-   (pre.output) come from the site's style.css; this styles the pieces the JS
-   builds inside them. Variables (--mono, --accent, …) resolve from :root there;
+/* Full-page IDE frame: the whole playground is one big code-window —
+   toolbar (title bar), line-numbered editor, console panel underneath.
+   Variables (--mono, --accent, …) resolve from the site's :root in style.css;
    fallbacks keep the dev harness usable standalone. */
 
-.dp-window {
-  margin: 1.5rem 0 0;
+/* the page container emitted by the generator (gen_playground) */
+.dp-page {
+  width: 100%;
+  max-width: 82rem;
+  margin: 1.1rem auto 2rem;
+  padding: 0 1.25rem;
+  box-sizing: border-box;
 }
 
-.dp-tools {
+.dp-ide {
+  display: flex;
+  flex-direction: column;
+  /* fill the viewport under the site header; the footer sits below the fold */
+  height: max(26rem, calc(100dvh - 8.5rem));
+  border: 1px solid var(--border, #d0d7de);
+  border-radius: 10px;
+  background: var(--code-bg-soft, #fafbfc);
+  overflow: hidden;
+  box-shadow: 0 1px 3px rgb(31 35 40 / 0.04);
+}
+
+/* ---- toolbar ---- */
+.dp-bar {
   display: flex;
   align-items: center;
   gap: 0.6rem;
+  padding: 0.5rem 0.85rem;
+  border-bottom: 1px solid var(--border-soft, #e9ecf1);
+  background: var(--code-bg, #f6f8fa);
+  flex: none;
 }
+
+.dp-fname {
+  font-family: var(--mono, ui-monospace, Menlo, monospace);
+  font-size: 0.78rem;
+  color: var(--muted, #57606a);
+}
+
+.dp-spacer { flex: 1; }
 
 .dp-samples {
   font-family: var(--mono, ui-monospace, Menlo, monospace);
   font-size: 0.78rem;
   padding: 0.2rem 0.4rem;
-  border: 1px solid var(--border, #e5e7eb);
+  border: 1px solid var(--border, #d0d7de);
   border-radius: 6px;
-  background: var(--code-bg, #fff);
-  color: var(--muted, #475569);
+  background: #fff;
+  color: var(--muted, #57606a);
   cursor: pointer;
 }
+
+.dp-share {
+  font-family: var(--mono, ui-monospace, Menlo, monospace);
+  font-size: 0.78rem;
+  padding: 0.26rem 0.7rem;
+  border: 1px solid var(--border, #d0d7de);
+  border-radius: 6px;
+  background: #fff;
+  color: var(--muted, #57606a);
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+.dp-share:hover { color: var(--text, #1f2328); border-color: var(--muted, #57606a); }
 
 .dp-run {
   font-family: var(--mono, ui-monospace, Menlo, monospace);
   font-size: 0.78rem;
-  padding: 0.28rem 0.7rem;
+  padding: 0.28rem 0.75rem;
   border: 0;
   border-radius: 6px;
   background: var(--accent, #7c3aed);
@@ -43,10 +86,16 @@
   margin-left: 0.15rem;
 }
 
+/* ---- editor ---- */
 .dp-editor {
-  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  background: #fff;
 }
 .dp-editor .cm-editor {
+  flex: 1;
+  min-width: 0;
   font-size: 0.9rem;
 }
 .dp-editor .cm-editor.cm-focused {
@@ -54,32 +103,100 @@
 }
 .dp-editor .cm-scroller {
   font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
-  max-height: 60vh;
 }
 .dp-editor .cm-content {
-  padding: 0.9rem 0;
+  padding: 0.75rem 0;
 }
 .dp-editor .cm-gutters {
-  background: transparent;
-  border: 0;
+  background: var(--code-bg-soft, #fafbfc);
+  border-right: 1px solid var(--border-soft, #e9ecf1);
+  color: var(--faint, #8b949e);
+}
+.dp-editor .cm-lineNumbers .cm-gutterElement {
+  min-width: 2.6em;
+  padding: 0 0.6em 0 0.9em;
+}
+.dp-editor .cm-activeLine {
+  background: rgb(124 58 237 / 0.045);
+}
+.dp-editor .cm-activeLineGutter {
+  background: rgb(124 58 237 / 0.07);
+  color: var(--muted, #57606a);
 }
 
-/* Output: reuse pre.output, tint by phase. */
-.dp-output {
-  margin-top: 0.9rem;
-  min-height: 3rem;
+/* ---- console panel ---- */
+.dp-outpanel[hidden] { display: none; } /* display:flex would beat [hidden] */
+.dp-outpanel {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  max-height: 38%;
+  border-top: 1px solid var(--border, #d0d7de);
+  background: var(--output-bg, #fbfcfd);
+}
+
+.dp-outhead {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  padding: 0.35rem 0.85rem;
+  border-bottom: 1px solid var(--border-soft, #e9ecf1);
+  flex: none;
+}
+
+.dp-outtitle {
+  font-family: var(--mono, ui-monospace, Menlo, monospace);
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted, #57606a);
+}
+
+.dp-outmeta {
+  font-family: var(--mono, ui-monospace, Menlo, monospace);
+  font-size: 0.72rem;
+  color: var(--faint, #8b949e);
+  flex: 1;
+}
+
+.dp-outclose {
+  border: 0;
+  background: none;
+  font-size: 1rem;
+  line-height: 1;
+  color: var(--faint, #8b949e);
+  cursor: pointer;
+  padding: 0 0.15rem;
+}
+.dp-outclose:hover { color: var(--text, #1f2328); }
+
+.dp-console {
+  margin: 0;
+  padding: 0.6rem 0.9rem 0.75rem;
+  overflow: auto;
+  font-family: var(--mono, ui-monospace, Menlo, monospace);
+  font-size: 0.82rem;
+  line-height: 1.55;
   white-space: pre-wrap;
   word-break: break-word;
 }
-.dp-output[data-phase='pending'] { opacity: 0.7; }
-.dp-output[data-phase='compile'],
-.dp-output[data-phase='timeout'],
-.dp-output[data-phase='error'] {
+
+.dp-outpanel[data-phase='pending'] .dp-console { opacity: 0.7; }
+.dp-outpanel[data-phase='compile'] .dp-console,
+.dp-outpanel[data-phase='timeout'] .dp-console,
+.dp-outpanel[data-phase='error'] .dp-console {
   color: #b42318;
-  border-color: #f3b0a8;
+}
+.dp-outpanel[data-phase='compile'] .dp-outmeta,
+.dp-outpanel[data-phase='timeout'] .dp-outmeta,
+.dp-outpanel[data-phase='error'] .dp-outmeta {
+  color: #b42318;
 }
 
 @media (max-width: 40rem) {
-  .dp-tools { gap: 0.4rem; }
-  .dp-samples { max-width: 8rem; }
+  .dp-ide { height: max(24rem, calc(100dvh - 7rem)); }
+  .dp-bar { gap: 0.4rem; flex-wrap: wrap; }
+  .dp-fname { display: none; }
+  .dp-samples { max-width: 9rem; }
 }

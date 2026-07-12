@@ -1,11 +1,13 @@
-// Entry: build the Playground UI inside #dawn-playground — a code-window frame
-// (reusing the site's .code-window / pre.output styles) with a toolbar, the
-// CodeMirror editor, and an output panel wired to the runner's /run endpoint.
-import { EditorView, keymap } from '@codemirror/view'
+// Entry: build the Playground UI inside #dawn-playground — a full-page IDE
+// frame (one big code-window): toolbar (file name, samples, share, run), a
+// line-numbered CodeMirror editor filling the viewport, and a console panel
+// that slides in under the editor after a run, play.kotlinlang.org-style.
+import { EditorView, keymap, lineNumbers, highlightActiveLine, highlightActiveLineGutter } from '@codemirror/view'
 import { EditorState } from '@codemirror/state'
 import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands'
 import { closeBrackets, completionKeymap, acceptCompletion } from '@codemirror/autocomplete'
 import { bracketMatching, indentOnInput } from '@codemirror/language'
+import { lintGutter } from '@codemirror/lint'
 import { dawn } from './dawn-lang'
 import { dawnLint } from './lint'
 import { SAMPLES } from './samples'
@@ -46,12 +48,11 @@ interface RunResponse {
 function mount(root: HTMLElement) {
   const endpoint = root.dataset.endpoint || '/api/run'
 
-  // ---- frame + toolbar ----
-  const win = el('figure', 'code-window dp-window')
-  const bar = el('figcaption', 'code-window__bar')
-  bar.appendChild(el('span', 'fname', 'playground.dawn'))
+  // ---- frame: one big code-window ----
+  const ide = el('div', 'dp-ide')
 
-  const tools = el('div', 'dp-tools')
+  const bar = el('div', 'dp-bar')
+  const fname = el('span', 'dp-fname', 'playground.dawn')
   const picker = el('select', 'dp-samples')
   SAMPLES.forEach((s, i) => {
     const opt = el('option')
@@ -59,22 +60,31 @@ function mount(root: HTMLElement) {
     opt.textContent = s.label
     picker.appendChild(opt)
   })
+  const spacer = el('div', 'dp-spacer')
+  const shareBtn = el('button', 'dp-share', 'Share')
+  shareBtn.type = 'button'
   const runBtn = el('button', 'dp-run')
   runBtn.type = 'button'
   runBtn.innerHTML = 'Run <kbd>⌘⏎</kbd>'
-  tools.appendChild(picker)
-  tools.appendChild(runBtn)
-  bar.appendChild(tools)
-  win.appendChild(bar)
+  bar.append(fname, picker, spacer, shareBtn, runBtn)
 
   const editorHost = el('div', 'dp-editor')
-  win.appendChild(editorHost)
-  root.appendChild(win)
 
-  // Output panel stays hidden until the first run — no empty placeholder box.
-  const output = el('pre', 'output dp-output')
-  output.hidden = true
-  root.appendChild(output)
+  // ---- console panel, hidden until the first run ----
+  const outPanel = el('div', 'dp-outpanel')
+  outPanel.hidden = true
+  const outHead = el('div', 'dp-outhead')
+  const outTitle = el('span', 'dp-outtitle', 'Output')
+  const outMeta = el('span', 'dp-outmeta')
+  const outClose = el('button', 'dp-outclose', '×')
+  outClose.type = 'button'
+  outClose.title = 'Close output'
+  outHead.append(outTitle, outMeta, outClose)
+  const output = el('pre', 'dp-console')
+  outPanel.append(outHead, output)
+
+  ide.append(bar, editorHost, outPanel)
+  root.appendChild(ide)
 
   // ---- editor ----
   const initial = location.hash.length > 1
@@ -86,8 +96,12 @@ function mount(root: HTMLElement) {
       doc: initial,
       extensions: [
         history(),
+        lineNumbers(),
+        highlightActiveLineGutter(),
+        highlightActiveLine(),
         dawn(),
         dawnLint(endpoint.replace(/\/run$/, '/check')),
+        lintGutter(),
         bracketMatching(),
         closeBrackets(),
         indentOnInput(),
@@ -114,8 +128,9 @@ function mount(root: HTMLElement) {
     if (running) return
     running = true
     runBtn.disabled = true
-    output.hidden = false
-    output.dataset.phase = 'pending'
+    outPanel.hidden = false
+    outPanel.dataset.phase = 'pending'
+    outMeta.textContent = ''
     output.textContent = 'Running…'
     location.replace('#' + encodeShare(currentCode()))
     try {
@@ -140,29 +155,42 @@ function mount(root: HTMLElement) {
   }
 
   function render(r: RunResponse) {
-    output.dataset.phase = r.phase
-    const body = r.output || '(no output)'
+    outPanel.dataset.phase = r.phase
+    output.textContent = r.output || '(no output)'
     if (r.phase === 'run') {
-      const ms = r.ms != null ? ` · ${r.ms}ms` : ''
-      const code = r.exit != null ? ` · exit ${r.exit}` : ''
-      output.textContent = body + `\n\n— done${code}${ms}` +
-        (r.truncated ? ' (output truncated)' : '')
+      const parts = [`exit ${r.exit ?? 0}`]
+      if (r.ms != null) parts.push(`${r.ms} ms`)
+      if (r.truncated) parts.push('output truncated')
+      outMeta.textContent = parts.join(' · ')
     } else if (r.phase === 'compile') {
-      output.textContent = body
+      outMeta.textContent = 'compile error'
     } else if (r.phase === 'timeout') {
-      output.textContent = body + '\n\n— timed out'
+      outMeta.textContent = 'timed out'
     } else {
-      output.textContent = body
+      outMeta.textContent = 'error'
     }
   }
 
   runBtn.addEventListener('click', run)
+  outClose.addEventListener('click', () => {
+    outPanel.hidden = true
+  })
+  shareBtn.addEventListener('click', async () => {
+    location.replace('#' + encodeShare(currentCode()))
+    try {
+      await navigator.clipboard.writeText(location.href)
+      shareBtn.textContent = 'Copied!'
+    } catch {
+      shareBtn.textContent = 'Copy the URL'
+    }
+    setTimeout(() => (shareBtn.textContent = 'Share'), 1500)
+  })
   picker.addEventListener('change', () => {
     const s = SAMPLES[Number(picker.value)]
     if (s) {
       view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: s.code } })
-      output.hidden = true
-      output.dataset.phase = ''
+      outPanel.hidden = true
+      outPanel.dataset.phase = ''
     }
   })
 }
