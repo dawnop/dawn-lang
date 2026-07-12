@@ -25,6 +25,8 @@ usage:
                                        produce a standalone native binary (needs native-image)
   dawn fmt <file.dawn | dir>...        format files in place (a dir formats all .dawn under it)
   dawn fmt --check <target>...         report files that are not formatted (exit 1 if any)
+  dawn doc <target>                    emit the pub API (## doc comments) as JSON on stdout
+  dawn doc --builtins                  emit the builtin function reference as JSON
 """
 
 fun main(args: Array<String>) {
@@ -38,6 +40,7 @@ fun main(args: Array<String>) {
             "test" -> cmdTest(args.drop(1))
             "build" -> cmdBuild(args.drop(1))
             "fmt" -> cmdFmt(args.drop(1))
+            "doc" -> cmdDoc(args.drop(1))
             "lsp" -> dawn.lsp.runLspServer()
             "--help", "-h", "help" -> print(USAGE)
             else -> {

@@ -60,7 +60,7 @@ site/
 
 - [x] 刀 0：验收样张（`sample/tutorial-04.html`、`sample/spec-excerpt.html`）+ 本 README
 - [x] 刀 1：stdlib IO 补齐（`list_dir` / `is_dir`；`write_file` 自动建父目录）
-- [ ] 刀 2：`dawn doc`（`##` 文档注释提取 + `--builtins` JSON）
+- [x] 刀 2：`dawn doc`（`##` 文档注释提取 + `--builtins` JSON）
 - [ ] 刀 3：Markdown 子集解析器（Dawn）
 - [ ] 刀 4：Dawn 语法高亮器（Dawn）
 - [ ] 刀 5：HTML 渲染 + 模板 + CSS（Dawn）
