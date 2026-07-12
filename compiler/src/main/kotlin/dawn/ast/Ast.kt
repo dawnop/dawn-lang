@@ -204,6 +204,8 @@ class MethodCall(
     val isJava: Boolean get() = javaMethod != null || javaCtorRef != null
     /** argument positions SAM-converted to functional interfaces (spec §9.4), by the checker */
     var samConvs: Map<Int, SamConv>? = null
+    /** argument positions where a Dawn List bridges to a Java collection (spec §9.6) */
+    var listBridges: Set<Int>? = null
 }
 
 /** One SAM conversion: the target functional interface and its single abstract method. */

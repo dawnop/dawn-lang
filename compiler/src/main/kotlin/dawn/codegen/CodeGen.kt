@@ -2592,8 +2592,11 @@ class CodeGen(
         for ((i, arg) in e.args.withIndex()) {
             if (!genExpr(arg, tail = false)) return false
             val conv = e.samConvs?.get(i)
-            if (conv != null) emitSamConversion(conv, arg.type as TFn)
-            else adaptJavaArg(arg.type!!, ctor.parameterTypes[i])
+            when {
+                conv != null -> emitSamConversion(conv, arg.type as TFn)
+                e.listBridges?.contains(i) == true -> emitListBridge()
+                else -> adaptJavaArg(arg.type!!, ctor.parameterTypes[i])
+            }
         }
         if (ctor.isVarArgs && e.args.size == ctor.parameterCount - 1)
             pushEmptyVarargs(ctor.parameterTypes.last().componentType)
@@ -2612,8 +2615,11 @@ class CodeGen(
         for ((i, arg) in e.args.withIndex()) {
             if (!genExpr(arg, tail = false)) return false
             val conv = e.samConvs?.get(i)
-            if (conv != null) emitSamConversion(conv, arg.type as TFn)
-            else adaptJavaArg(arg.type!!, m.parameterTypes[i])
+            when {
+                conv != null -> emitSamConversion(conv, arg.type as TFn)
+                e.listBridges?.contains(i) == true -> emitListBridge()
+                else -> adaptJavaArg(arg.type!!, m.parameterTypes[i])
+            }
         }
         if (m.isVarArgs && e.args.size == m.parameterCount - 1)
             pushEmptyVarargs(m.parameterTypes.last().componentType)
@@ -2629,6 +2635,16 @@ class CodeGen(
             else -> wrapNullableInOption()
         }
         return true
+    }
+
+    /**
+     * A Dawn List on the stack (already a java.util.List at runtime) → the
+     * zero-copy unmodifiable view handed to Java (spec §9.6): mutators throw,
+     * the Dawn value stays a value.
+     */
+    private fun emitListBridge() {
+        mv.visitMethodInsn(INVOKESTATIC, "java/util/Collections", "unmodifiableList",
+            "(Ljava/util/List;)Ljava/util/List;", false)
     }
 
     /** A Dawn fn value on the stack → an instance of the target functional interface (spec §9.4). */

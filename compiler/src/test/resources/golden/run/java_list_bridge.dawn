@@ -1,0 +1,15 @@
+# List bridge (spec §9.6): a Dawn List crosses as a zero-copy unmodifiable
+# java.util.List — String.join takes it as Iterable, ProcessBuilder as List.
+# The subprocess output comes back through the opaque byte[] path (spec §9.5).
+use java "java.lang.ProcessBuilder"
+use java "java.lang.String"
+
+pub fn main() -> Unit !io = {
+  let parts = ["dawn", "bridges", "lists"]
+  println(String.join(" ", parts).expect("joined"))
+  let p = ProcessBuilder.new(["echo", "bridged argv"]).start().expect("process")
+  let out = p.getInputStream().expect("stdout").readAllBytes().expect("bytes")
+  let code = p.waitFor()
+  println(trim(String.new(out, "UTF-8")))
+  println(to_string(code))
+}

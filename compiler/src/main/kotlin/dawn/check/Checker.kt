@@ -853,6 +853,13 @@ class Checker(
                 if (exp != null && a.params == exp.params && samRetCompatible(a.ret, sam.returnType)) 2
                 else null
             }
+            // a Dawn List bridges to the three collection interfaces only (spec §9.6) —
+            // never to Object, so the unmodifiable-view wrap is guaranteed
+            is TList -> when (p) {
+                java.util.List::class.java -> 2
+                java.util.Collection::class.java, java.lang.Iterable::class.java -> 1
+                else -> null
+            }
             else -> null
         }
 
@@ -869,10 +876,12 @@ class Checker(
             return total
         }
 
-        // the winner is known: type deferred arguments against their SAM's shape
-        // and record every fn-typed position for the codegen bridge (spec §9.4)
+        // the winner is known: type deferred arguments against their SAM's shape,
+        // record fn-typed positions for the codegen bridge (spec §9.4), and
+        // validate + record List-bridged positions (spec §9.6)
         fun finalizeSams(params: Array<Class<*>>) {
             val convs = HashMap<Int, SamConv>()
+            val lists = HashSet<Int>()
             for ((i, arg) in e.args.withIndex()) {
                 if (i >= params.size) break // varargs call without the variable part
                 val p = params[i]
@@ -888,10 +897,21 @@ class Checker(
                                 "expected shape: $exp\n  single abstract method: $sam")
                     }
                     is TFn -> convs[i] = SamConv(p, samMethodOf(p)!!)
+                    is TList -> {
+                        // zero-copy bridge: elements cross as their boxed reps, so only
+                        // scalars, String and Java references may cross (spec §9.6)
+                        if (bridgeableElem(at.elem)) lists.add(i)
+                        else sink.error(
+                            "cannot bridge $at to `${p.simpleName}`: element type ${at.elem} does not cross",
+                            arg.span,
+                            "bridgeable elements: Int, Float, Bool, String, and Java classes; " +
+                                "nested containers, ADTs, tuples and functions stay on the Dawn side (spec §9.6)")
+                    }
                     else -> {}
                 }
             }
             if (convs.isNotEmpty()) e.samConvs = convs
+            if (lists.isNotEmpty()) e.listBridges = lists
         }
 
         if (e.name == "new") {
@@ -1016,6 +1036,10 @@ class Checker(
         String::class.java -> TString
         else -> TJava(p.name, p)
     }
+
+    /** Elements that may cross the List bridge as-is (spec §9.6): boxed scalars, String, Java refs. */
+    private fun bridgeableElem(t: Type): Boolean =
+        t == TInt || t == TFloat || t == TBool || t == TString || t is TJava
 
     /** May a Dawn return land where the SAM asks for [j]? (the boxed rep must be assignable) */
     private fun samRetCompatible(r: Type, j: Class<*>): Boolean = when (j) {

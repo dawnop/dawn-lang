@@ -183,8 +183,9 @@ M6 前置，先用 playground runner 验收。四个语义决策全部对照过 
   - Web 地基全走 `use java`，语言不加 async：HTTP 用 `com.sun.net.httpserver` +
     JVM 21 虚拟线程（每请求一线程，语言层零着色）；JSON 用 M4 的纯 Dawn 库；
     SQLite 走 JDBC 薄包装；JWT/bcrypt/七牛用现成 Java 库；
-  - 前置「互操作三件套」（SAM 转换 / 不透明 `byte[]` 直通 / `List` 桥接或 stdlib 帮手），
-    先用最小真实服务 **playground runner**（M5 二期后台）验收，再动博客重写。
+  - 前置「互操作三件套」**已落地**（2026-07-12，三刀 39507df/fdd44c2/后继，测试 892 项，
+    spec §9.4–§9.6，决策记录见 D8）：SAM 转换、数组不透明直通、List 零拷贝桥。
+    验收样例 = **playground runner**（M5 二期后台，Dawn 写），跑通后再动博客重写。
     spec 原 §9.4（现 §9.7）挡 SAM 的理由（native-image 免配置）已由 spike 排除
     （`scripts/spike-sam/`，2026-07-12）：ASM 生成的 invokedynamic + LambdaMetafactory
     适配 `Runnable` / 捕获型 `Supplier` / `HttpHandler` 三形态，接 `jdk.httpserver` +
