@@ -1,0 +1,15 @@
+# A global concurrency gate. Each /run acquires a permit before compiling and
+# releases it after; excess requests get 429 rather than piling compilers onto a
+# 4-core box. The Semaphore is a plain Java object shared across request threads.
+use java "java.util.concurrent.Semaphore"
+use java "java.util.concurrent.TimeUnit"
+
+# One shared instance for the process. `fair=true` keeps queued requests in order.
+pub fn new_gate(permits: Int) -> Semaphore !io = Semaphore.new(permits, true)
+
+# Try to take a permit, waiting up to `wait_secs`. False means the server is
+# saturated — the caller should answer 429.
+pub fn try_enter(gate: Semaphore, wait_secs: Int) -> Bool !io =
+  gate.tryAcquire(wait_secs, TimeUnit.valueOf("SECONDS").expect("seconds"))
+
+pub fn leave(gate: Semaphore) -> Unit !io = gate.release()

@@ -1,0 +1,84 @@
+# The execution pipeline: compile with `dawn build`, then run the jar with
+# `java`. Two phases keep the compile diagnostics clean and separate from the
+# program's own output. Each child's combined stdout+stderr is redirected to a
+# file (no pipe-buffer deadlock on large output), then read back.
+use java "java.lang.ProcessBuilder"
+use java "java.io.File"
+use java "java.util.concurrent.TimeUnit"
+use java "java.util.UUID"
+use java "java.lang.System"
+use play/contract.{Outcome, Compiled, CompileError, Timeout}
+use play/config.{dawn_bin, java_bin, timeout_secs}
+
+const OUTPUT_LIMIT: Int = 65536
+
+# java.io.tmpdir carries a trailing slash on some platforms (macOS); drop it so
+# the path we build matches what the compiler prints in diagnostics.
+fn temp_root() -> String !io = {
+  let d = match System.getProperty("java.io.tmpdir") {
+    Some(v) -> v
+    None -> "/tmp"
+  }
+  if ends_with(d, "/") { substring(d, 0, str_len(d) - 1) } else { d }
+}
+
+fn truncate(s: String) -> (String, Bool) =
+  if str_len(s) > OUTPUT_LIMIT {
+    (substring(s, 0, OUTPUT_LIMIT) ++ "\n…（输出截断）", true)
+  } else {
+    (s, false)
+  }
+
+fn slurp(path: String) -> String !io =
+  match read_file(path) {
+    Ok(s) -> s
+    Err(_) -> ""
+  }
+
+# Strip the throwaway temp directory out of diagnostics so users see a clean
+# "prog.dawn:line:col" instead of /var/folders/.../dawn-play-<uuid>/prog.dawn.
+fn strip_dir(text: String, dir: String) -> String =
+  join(split(text, "$dir/"), "")
+
+pub fn execute(code: String) -> Outcome !io = {
+  let id = UUID.randomUUID().expect("uuid").toString().expect("uuid string")
+  let dir = "${temp_root()}/dawn-play-$id"
+  let src = "$dir/prog.dawn"
+  let jar = "$dir/prog.jar"
+  # write_file creates parent directories as needed
+  match write_file(src, code) {
+    Err(e) -> CompileError("cannot stage source: $e")
+    Ok(_) -> {
+      let secs = TimeUnit.valueOf("SECONDS").expect("seconds")
+      # phase 1: compile only
+      let build_out = "$dir/build.txt"
+      let bp = ProcessBuilder.new([dawn_bin(), "build", src, "-o", jar])
+      bp.redirectErrorStream(true)
+      bp.redirectOutput(File.new(build_out))
+      let build = bp.start().expect("failed to start compiler")
+      build.waitFor()
+      if build.exitValue() != 0 {
+        CompileError(strip_dir(trim(slurp(build_out)), dir))
+      } else {
+        # phase 2: run the compiled jar under a wall-clock limit
+        let run_out = "$dir/run.txt"
+        let rp = ProcessBuilder.new([java_bin(), "-jar", jar])
+        rp.redirectErrorStream(true)
+        rp.redirectOutput(File.new(run_out))
+        let started = System.nanoTime()
+        let proc = rp.start().expect("failed to start program")
+        let finished = proc.waitFor(timeout_secs(), secs)
+        if finished {
+          let ms = (System.nanoTime() - started) / 1000000
+          let (out, cut) = truncate(slurp(run_out))
+          Compiled(out, proc.exitValue(), cut, ms)
+        } else {
+          proc.destroyForcibly()
+          proc.waitFor()
+          let (out, _) = truncate(slurp(run_out))
+          Timeout(out)
+        }
+      }
+    }
+  }
+}

@@ -2,16 +2,22 @@
 # runs it inside a throwaway sandbox, streams back the output. This is the first
 # real server written in Dawn (spec §9 interop dogfood, M6 warm-up).
 use java "com.sun.net.httpserver.HttpExchange"
+use java "java.util.concurrent.Semaphore"
 use http/server.{serve, respond, read_body, request_method}
-use play/contract.{parse_request, render_outcome, render_error, Compiled}
+use play/contract.{parse_request, render_outcome, render_error}
+use play/exec.{execute}
+use play/gate.{new_gate, try_enter, leave}
+use play/config.{port}
 
 const MAX_BODY: Int = 65536
 const JSON_CT: String = "application/json; charset=utf-8"
+const MAX_CONCURRENT: Int = 2
+const QUEUE_WAIT_SECS: Int = 15
 
 fn handle_health(ex: HttpExchange) -> Unit !io =
   respond(ex, 200, "text/plain; charset=utf-8", "ok")
 
-fn handle_run(ex: HttpExchange) -> Unit !io =
+fn handle_run(ex: HttpExchange, gate: Semaphore) -> Unit !io =
   if request_method(ex) != "POST" {
     respond(ex, 405, JSON_CT, render_error("POST only"))
   } else {
@@ -22,16 +28,27 @@ fn handle_run(ex: HttpExchange) -> Unit !io =
       match parse_request(body) {
         Err(msg) -> respond(ex, 400, JSON_CT, render_error(msg))
         Ok(code) ->
-          # Stage 4b: the pipeline is stubbed — echo the source length back as a
-        # successful run. Stage 4c replaces this with real sandboxed execution.
-        respond(ex, 200, JSON_CT,
-          render_outcome(Compiled("received ${str_len(code)} chars", 0, false, 0)))
+          if try_enter(gate, QUEUE_WAIT_SECS) {
+            let out = run_guarded(gate, code)
+            respond(ex, 200, JSON_CT, out)
+          } else {
+            respond(ex, 429, JSON_CT, render_error("server busy, try again shortly"))
+          }
       }
     }
   }
 
-pub fn main() -> Unit !io =
-  serve(8087, [
+# Hold the permit only across execution, then release before writing the reply.
+fn run_guarded(gate: Semaphore, code: String) -> String !io = {
+  let outcome = execute(code)
+  leave(gate)
+  render_outcome(outcome)
+}
+
+pub fn main() -> Unit !io = {
+  let gate = new_gate(MAX_CONCURRENT)
+  serve(port(), [
     ("/health", handle_health),
-    ("/run", handle_run),
+    ("/run", fn(ex) => handle_run(ex, gate)),
   ])
+}

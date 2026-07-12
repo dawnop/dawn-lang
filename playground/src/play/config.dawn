@@ -1,0 +1,32 @@
+# Runtime configuration, read from the environment so the same binary runs both
+# locally (direct) and on the server (sandboxed). Sensible defaults everywhere.
+use java "java.lang.System"
+
+fn env_or(name: String, fallback: String) -> String !io =
+  match System.getenv(name) {
+    Some(v) -> v
+    None -> fallback
+  }
+
+# The `dawn` CLI used to compile user code. Server sets DAWN_BIN=/opt/dawn/bin/dawn.
+pub fn dawn_bin() -> String !io = env_or("DAWN_BIN", "dawn")
+
+# The `java` used to run the compiled jar. Server puts the JDK on PATH.
+pub fn java_bin() -> String !io = env_or("PLAY_JAVA", "java")
+
+# Wall-clock seconds a user program may run before it is force-killed.
+pub fn timeout_secs() -> Int !io =
+  match parse_int(env_or("PLAY_TIMEOUT", "10")) {
+    Some(n) -> n
+    None -> 10
+  }
+
+# Whether to wrap execution in a systemd-run sandbox (stage 4d). Off locally.
+pub fn sandbox_enabled() -> Bool !io = env_or("PLAY_SANDBOX", "0") == "1"
+
+# TCP port to listen on (127.0.0.1 only; nginx proxies to it).
+pub fn port() -> Int !io =
+  match parse_int(env_or("PLAY_PORT", "8087")) {
+    Some(n) -> n
+    None -> 8087
+  }
