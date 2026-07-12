@@ -5,6 +5,14 @@ import { defineConfig } from 'vite'
 // <script type="module"> onto the Playground page. No hashing (the generator
 // controls cache headers), no code-splitting (one page, one bundle).
 export default defineConfig({
+  // Dev only: proxy /api/run to the local runner, mirroring the production nginx
+  // setup so the dev harness stays same-origin (no CORS on the runner needed).
+  server: {
+    proxy: {
+      '/api/run': { target: 'http://127.0.0.1:8087', rewrite: (p) => p.replace(/^\/api\/run/, '/run') },
+      '/api/health': { target: 'http://127.0.0.1:8087', rewrite: (p) => p.replace(/^\/api\/health/, '/health') },
+    },
+  },
   build: {
     outDir: 'dist',
     emptyOutDir: true,
