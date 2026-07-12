@@ -1,0 +1,36 @@
+# systemd unit for the dawn-play runner. Install to /etc/systemd/system/,
+# then: systemctl daemon-reload && systemctl enable --now dawn-play
+#
+# Runs as the unprivileged dawn-play user. The runner itself does NOT need the
+# hardening the sandbox has — it only shells out to `sudo run-sandboxed.sh`,
+# which is where untrusted code actually executes. Keep this user minimal and
+# distinct from the blog backend's user.
+[Unit]
+Description=dawn-play — Dawn Playground runner
+After=network.target
+
+[Service]
+Type=simple
+User=dawn-play
+Group=dawn-play
+WorkingDirectory=/opt/dawn
+
+# /opt/dawn/bin/dawn is the launcher; it finds the JDK under /opt/dawn or JAVA_HOME.
+Environment=JAVA_HOME=/opt/dawn/jdk
+Environment=DAWN_BIN=/opt/dawn/bin/dawn
+Environment=PLAY_JAVA=/opt/dawn/jdk/bin/java
+Environment=PLAY_PORT=8087
+Environment=PLAY_TIMEOUT=10
+Environment=PLAY_SANDBOX=1
+Environment=PLAY_SANDBOX_SCRIPT=/opt/dawn/playground/sandbox/run-sandboxed.sh
+ExecStart=/opt/dawn/bin/dawn run /opt/dawn/playground
+
+Restart=on-failure
+RestartSec=2
+# the runner brokers requests but the real isolation is the per-request sandbox;
+# still, give the broker itself a sane ceiling
+MemoryMax=1G
+TasksMax=256
+
+[Install]
+WantedBy=multi-user.target
