@@ -1,0 +1,45 @@
+# A pure-Dawn JSON validator. Reads the file named by the first argument and
+# prints "valid" or "invalid" — the shape the JSONTestSuite harness checks.
+use json/parser.{parse}
+use json/render.{render}
+
+fn check(text: String) -> String =
+  match parse(text) {
+    Ok(_) -> "valid"
+    Err(_) -> "invalid"
+  }
+
+fn round_trip(text: String) -> String =
+  match parse(text) {
+    Ok(v) -> render(v)
+    Err(e) -> "ERR: " ++ e
+  }
+
+pub fn main() -> Unit !io =
+  match get(args(), 0) {
+    None -> println("invalid")
+    Some(path) ->
+      match read_file(path) {
+        Ok(text) -> println(check(text))
+        Err(_) -> println("invalid")
+      }
+  }
+
+test "parses scalars, arrays, and objects" {
+  assert check("123") == "valid"
+  assert check("[1, 2, 3]") == "valid"
+  assert check("\{\"a\": 1, \"b\": [true, null]}") == "valid"
+  assert check("\"hi\"") == "valid"
+}
+
+test "rejects malformed input without panicking" {
+  assert check("") == "invalid"
+  assert check("[1, 2,]") == "invalid"
+  assert check("\{\"a\": }") == "invalid"
+  assert check("01") == "invalid"
+  assert check("truex") == "invalid"
+}
+
+test "round-trips through render" {
+  assert round_trip("\{\"n\": 1.5, \"xs\": [true, false, null]}") == "\{\"n\":1.5,\"xs\":[true,false,null]}"
+}
