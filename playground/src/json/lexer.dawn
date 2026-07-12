@@ -1,0 +1,191 @@
+# Vendored from examples/m4/json/src/json/lexer.dawn (M4 acceptance library) —
+# keep in sync until Dawn grows a package story.
+# Low-level scanning over a list of code points: whitespace, string literals, and
+# number literals. Everything returns the next index (or a Result), so the parser
+# stays purely functional. No panics — malformed input becomes an Err.
+
+pub fn peek(src: List[Int], i: Int) -> Int = unwrap_or(get(src, i), -1)
+
+pub fn is_digit(c: Int) -> Bool = c >= '0' && c <= '9'
+
+pub fn skip_ws(src: List[Int], i: Int) -> Int = {
+  let c = peek(src, i)
+  if c == ' ' || c == '\t' || c == '\n' || c == 13 {
+    skip_ws(src, i + 1)
+  } else {
+    i
+  }
+}
+
+# ---- strings ----
+
+fn hex_digit(c: Int) -> Int =
+  if c >= '0' && c <= '9' {
+    c - '0'
+  } else if c >= 'a' && c <= 'f' {
+    c - 'a' + 10
+  } else if c >= 'A' && c <= 'F' {
+    c - 'A' + 10
+  } else {
+      -1
+  }
+
+fn read_hex4(src: List[Int], i: Int) -> Option[Int] = {
+  let a = hex_digit(peek(src, i))
+  let b = hex_digit(peek(src, i + 1))
+  let c = hex_digit(peek(src, i + 2))
+  let d = hex_digit(peek(src, i + 3))
+  if a < 0 || b < 0 || c < 0 || d < 0 {
+    None
+  } else {
+    Some(a * 4096 + b * 256 + c * 16 + d)
+  }
+}
+
+fn simple_escape(e: Int) -> Option[Int] =
+  match e {
+    '"' -> Some('"')
+    '\\' -> Some('\\')
+    '/' -> Some('/')
+    'b' -> Some(8)
+    'f' -> Some(12)
+    'n' -> Some('\n')
+    'r' -> Some(13)
+    't' -> Some('\t')
+    _ -> None
+  }
+
+# src[start] is the opening quote; returns (decoded string, index past closing quote).
+pub fn scan_string(src: List[Int], start: Int) -> Result[(String, Int), String] = {
+  var i = start + 1
+  var acc: List[Int] = []
+  var status = 0
+  var errmsg = ""
+  while status == 0 {
+    let c = peek(src, i)
+    if c == -1 {
+      status = 2
+      errmsg = "unterminated string"
+    } else if c == '"' {
+      i = i + 1
+      status = 1
+    } else if c == '\\' {
+      let e = peek(src, i + 1)
+      if e == 'u' {
+        match read_hex4(src, i + 2) {
+          None -> {
+            status = 2
+            errmsg = "invalid \\u escape"
+          }
+          Some(code) -> {
+            if code >= 55296 && code <= 56319 {
+              if peek(src, i + 6) == '\\' && peek(src, i + 7) == 'u' {
+                match read_hex4(src, i + 8) {
+                  None -> {
+                    status = 2
+                    errmsg = "invalid \\u escape"
+                  }
+                  Some(low) -> {
+                    if low >= 56320 && low <= 57343 {
+                      acc = acc ++ [65536 + (code - 55296) * 1024 + (low - 56320)]
+                      i = i + 12
+                    } else {
+                      acc = acc ++ [65533]
+                      i = i + 6
+                    }
+                  }
+                }
+              } else {
+                acc = acc ++ [65533]
+                i = i + 6
+              }
+            } else if code >= 56320 && code <= 57343 {
+              acc = acc ++ [65533]
+              i = i + 6
+            } else {
+              acc = acc ++ [code]
+              i = i + 6
+            }
+          }
+        }
+      } else {
+        match simple_escape(e) {
+          Some(cp) -> {
+            acc = acc ++ [cp]
+            i = i + 2
+          }
+          None -> {
+            status = 2
+            errmsg = "invalid escape"
+          }
+        }
+      }
+    } else if c < 32 {
+      status = 2
+      errmsg = "control character in string"
+    } else {
+      acc = acc ++ [c]
+      i = i + 1
+    }
+  }
+  if status == 1 {
+    Ok((from_code_points(acc), i))
+  } else {
+    Err(errmsg)
+  }
+}
+
+# ---- numbers ----
+
+fn skip_digits(src: List[Int], i: Int) -> Int =
+  if is_digit(peek(src, i)) { skip_digits(src, i + 1) } else { i }
+
+fn scan_int_part(src: List[Int], i: Int) -> Result[Int, String] =
+  if peek(src, i) == '0' {
+    Ok(i + 1)
+  } else if peek(src, i) >= '1' && peek(src, i) <= '9' {
+    Ok(skip_digits(src, i + 1))
+  } else {
+    Err("invalid number: expected a digit")
+  }
+
+fn scan_frac(src: List[Int], i: Int) -> Result[Int, String] =
+  if peek(src, i) == '.' {
+    let j = skip_digits(src, i + 1)
+    if j == i + 1 { Err("invalid number: digits expected after '.'") } else { Ok(j) }
+  } else {
+    Ok(i)
+  }
+
+fn scan_exp(src: List[Int], i: Int) -> Result[Int, String] =
+  if peek(src, i) == 'e' || peek(src, i) == 'E' {
+    let i1 = i + 1
+    let i2 = if peek(src, i1) == '+' || peek(src, i1) == '-' { i1 + 1 } else { i1 }
+    let j = skip_digits(src, i2)
+    if j == i2 { Err("invalid number: digits expected in exponent") } else { Ok(j) }
+  } else {
+    Ok(i)
+  }
+
+fn take_range(src: List[Int], from: Int, to: Int) -> List[Int] = {
+  var out: List[Int] = []
+  var i = from
+  while i < to {
+    out = out ++ [unwrap_or(get(src, i), 0)]
+    i = i + 1
+  }
+  out
+}
+
+# src[start] begins a number; returns (value, index past the number).
+pub fn scan_number(src: List[Int], start: Int) -> Result[(Float, Int), String] = {
+  let i0 = if peek(src, start) == '-' { start + 1 } else { start }
+  let i1 = scan_int_part(src, i0)?
+  let i2 = scan_frac(src, i1)?
+  let i3 = scan_exp(src, i2)?
+  let text = from_code_points(take_range(src, start, i3))
+  match parse_float(text) {
+    Some(f) -> Ok((f, i3))
+    None -> Err("invalid number")
+  }
+}

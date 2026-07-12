@@ -3,18 +3,31 @@
 # real server written in Dawn (spec §9 interop dogfood, M6 warm-up).
 use java "com.sun.net.httpserver.HttpExchange"
 use http/server.{serve, respond, read_body, request_method}
+use play/contract.{parse_request, render_outcome, render_error, Compiled}
+
+const MAX_BODY: Int = 65536
+const JSON_CT: String = "application/json; charset=utf-8"
 
 fn handle_health(ex: HttpExchange) -> Unit !io =
   respond(ex, 200, "text/plain; charset=utf-8", "ok")
 
-# Stage 4a: echo the byte length back. The JSON contract and the run pipeline
-# land in 4b/4c.
 fn handle_run(ex: HttpExchange) -> Unit !io =
-  if request_method(ex) == "POST" {
-    let body = read_body(ex)
-    respond(ex, 200, "text/plain; charset=utf-8", "received ${str_len(body)} chars")
+  if request_method(ex) != "POST" {
+    respond(ex, 405, JSON_CT, render_error("POST only"))
   } else {
-    respond(ex, 405, "text/plain; charset=utf-8", "POST only")
+    let body = read_body(ex)
+    if str_len(body) > MAX_BODY {
+      respond(ex, 413, JSON_CT, render_error("source exceeds ${MAX_BODY} bytes"))
+    } else {
+      match parse_request(body) {
+        Err(msg) -> respond(ex, 400, JSON_CT, render_error(msg))
+        Ok(code) ->
+          # Stage 4b: the pipeline is stubbed — echo the source length back as a
+        # successful run. Stage 4c replaces this with real sandboxed execution.
+        respond(ex, 200, JSON_CT,
+          render_outcome(Compiled("received ${str_len(code)} chars", 0, false, 0)))
+      }
+    }
   }
 
 pub fn main() -> Unit !io =

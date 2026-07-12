@@ -1,0 +1,44 @@
+# Vendored from examples/m4/json/src/json/render.dawn (M4 acceptance library) —
+# keep in sync until Dawn grows a package story.
+# Serialize a Json value back to compact JSON text (used for round-trip tests).
+use json/value.{Json, JNull, JBool, JNum, JStr, JArr, JObj}
+
+fn escape_cps(cs: List[Int]) -> List[Int] = {
+  var out: List[Int] = []
+  var i = 0
+  while i < len(cs) {
+    let c = unwrap_or(get(cs, i), 0)
+    if c == '"' {
+      out = out ++ ['\\', '"']
+    } else if c == '\\' {
+      out = out ++ ['\\', '\\']
+    } else if c == '\n' {
+      out = out ++ ['\\', 'n']
+    } else if c == '\t' {
+      out = out ++ ['\\', 't']
+    } else if c == 13 {
+      out = out ++ ['\\', 'r']
+    } else {
+      out = out ++ [c]
+    }
+    i = i + 1
+  }
+  out
+}
+
+fn quote(s: String) -> String = "\"" ++ from_code_points(escape_cps(code_points(s))) ++ "\""
+
+fn render_entry(e: (String, Json)) -> String = {
+  let (k, v) = e
+  quote(k) ++ ":" ++ render(v)
+}
+
+pub fn render(j: Json) -> String =
+  match j {
+    JNull -> "null"
+    JBool(b) -> if b { "true" } else { "false" }
+    JNum(n) -> to_string(n)
+    JStr(s) -> quote(s)
+    JArr(xs) -> "[" ++ join(map(xs, render), ",") ++ "]"
+    JObj(m) -> "{" ++ join(map(map_entries(m), render_entry), ",") ++ "}"
+  }

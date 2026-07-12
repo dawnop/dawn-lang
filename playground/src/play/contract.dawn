@@ -1,0 +1,55 @@
+# The /run wire contract. Request: {"code": "<source>"}. Response, one of:
+#   {"ok": true,  "phase": "run",     "exit": 0, "output": "...", "truncated": false, "ms": 620}
+#   {"ok": false, "phase": "compile", "output": "<Dawn diagnostics>"}
+#   {"ok": false, "phase": "timeout", "output": "<partial output>"}
+# Everything is a JSON object built from the vendored M4 json library and
+# rendered with its RFC-8259 string escaping — no hand-rolled quoting.
+use json/value.{Json, JNull, JBool, JNum, JStr, JArr, JObj}
+use json/parser.{parse}
+use json/render.{render}
+
+# The outcome of one run, produced by the executor (stage 4c).
+pub type Outcome =
+  | Compiled(output: String, exit: Int, truncated: Bool, ms: Int)
+  | CompileError(output: String)
+  | Timeout(output: String)
+derive Show
+
+# Pull the "code" field out of a request body. Errors are the client's fault
+# (400): malformed JSON, not an object, or no string "code".
+pub fn parse_request(body: String) -> Result[String, String] =
+  match parse(body) {
+    Err(e) -> Err("invalid JSON: $e")
+    Ok(j) ->
+      match j {
+        JObj(entries) ->
+          match map_get(entries, "code") {
+            Some(JStr(code)) -> Ok(code)
+            Some(_) -> Err("field \"code\" must be a string")
+            None -> Err("missing field \"code\"")
+          }
+        _ -> Err("request must be a JSON object")
+      }
+  }
+
+fn obj(entries: List[(String, Json)]) -> String = render(JObj(map_from(entries)))
+
+pub fn render_outcome(o: Outcome) -> String =
+  match o {
+    Compiled(output, exit, truncated, ms) ->
+      obj([
+        ("ok", JBool(true)),
+        ("phase", JStr("run")),
+        ("exit", JNum(to_float(exit))),
+        ("output", JStr(output)),
+        ("truncated", JBool(truncated)),
+        ("ms", JNum(to_float(ms))),
+      ])
+    CompileError(output) ->
+      obj([("ok", JBool(false)), ("phase", JStr("compile")), ("output", JStr(output))])
+    Timeout(output) ->
+      obj([("ok", JBool(false)), ("phase", JStr("timeout")), ("output", JStr(output))])
+  }
+
+pub fn render_error(message: String) -> String =
+  render(JObj(map_from([("ok", JBool(false)), ("phase", JStr("error")), ("output", JStr(message))])))
