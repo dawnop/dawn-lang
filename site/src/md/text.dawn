@@ -1,0 +1,37 @@
+# Shared code-point level text helpers for the Markdown parser.
+
+## The code point at i, or -1 past the end.
+pub fn cp_at(cs: List[Int], i: Int) -> Int = unwrap_or(get(cs, i), -1)
+
+## The substring [from, to) of a code point list.
+pub fn seg(cs: List[Int], from: Int, to: Int) -> String = {
+  var out: List[Int] = []
+  var i = from
+  while i < to {
+    out = out ++ [cp_at(cs, i)]
+    i = i + 1
+  }
+  from_code_points(out)
+}
+
+## Number of leading spaces.
+pub fn indent_of(s: String) -> Int = {
+  let cs = code_points(s)
+  var i = 0
+  while i < len(cs) && cp_at(cs, i) == ' ' {
+    i = i + 1
+  }
+  i
+}
+
+## Drop the first n code points (clamped to the length).
+pub fn drop_cps(s: String, n: Int) -> String = {
+  let l = str_len(s)
+  if n >= l { "" } else { substring(s, n, l) }
+}
+
+## Strip up to n leading spaces.
+pub fn strip_indent(s: String, n: Int) -> String = {
+  let k = indent_of(s)
+  if k < n { drop_cps(s, k) } else { drop_cps(s, n) }
+}

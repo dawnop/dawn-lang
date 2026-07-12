@@ -1,0 +1,132 @@
+# Inline markup: `code`, **bold**, *em*, [label](url), backslash escapes.
+# Unclosed markers degrade to literal text, so inline parsing never fails.
+
+use md/ast.{Inline, Text, Code, Bold, Em, Link}
+use md/text.{cp_at, seg}
+
+fn find_cp(cs: List[Int], from: Int, c: Int) -> Int = {
+  var i = from
+  var found = -1
+  while found < 0 && i < len(cs) {
+    if cp_at(cs, i) == c {
+      found = i
+    } else {
+      i = i + 1
+    }
+  }
+  found
+}
+
+fn find_pair(cs: List[Int], from: Int, a: Int, b: Int) -> Int = {
+  var i = from
+  var found = -1
+  while found < 0 && i + 1 < len(cs) {
+    if cp_at(cs, i) == a && cp_at(cs, i + 1) == b {
+      found = i
+    } else {
+      i = i + 1
+    }
+  }
+  found
+}
+
+## Parse a run of inline markup (newlines inside s stay literal text).
+pub fn parse_inlines(s: String) -> List[Inline] = {
+  let cs = code_points(s)
+  let n = len(cs)
+  var out: List[Inline] = []
+  var run: List[Int] = []
+  var i = 0
+  while i < n {
+    let c = cp_at(cs, i)
+    if c == '\\' && i + 1 < n {
+      run = run ++ [cp_at(cs, i + 1)]
+      i = i + 2
+    } else if c == '`' {
+      let close = find_cp(cs, i + 1, '`')
+      if close < 0 {
+        run = run ++ [c]
+        i = i + 1
+      } else {
+        if len(run) > 0 {
+          out = out ++ [Text(from_code_points(run))]
+          run = []
+        }
+        out = out ++ [Code(seg(cs, i + 1, close))]
+        i = close + 1
+      }
+    } else if c == '*' && cp_at(cs, i + 1) == '*' {
+      let close = find_pair(cs, i + 2, '*', '*')
+      if close < 0 {
+        run = run ++ [c]
+        i = i + 1
+      } else {
+        if len(run) > 0 {
+          out = out ++ [Text(from_code_points(run))]
+          run = []
+        }
+        out = out ++ [Bold(parse_inlines(seg(cs, i + 2, close)))]
+        i = close + 2
+      }
+    } else if c == '*' {
+      let close = find_cp(cs, i + 1, '*')
+      if close < 0 {
+        run = run ++ [c]
+        i = i + 1
+      } else {
+        if len(run) > 0 {
+          out = out ++ [Text(from_code_points(run))]
+          run = []
+        }
+        out = out ++ [Em(parse_inlines(seg(cs, i + 1, close)))]
+        i = close + 1
+      }
+    } else if c == '[' {
+      let rb = find_cp(cs, i + 1, ']')
+      let ok = rb > 0 && cp_at(cs, rb + 1) == '('
+      let rp = if ok { find_cp(cs, rb + 2, ')') } else { -1 }
+      if ok && rp > 0 {
+        if len(run) > 0 {
+          out = out ++ [Text(from_code_points(run))]
+          run = []
+        }
+        out = out ++ [Link(seg(cs, i + 1, rb), seg(cs, rb + 2, rp))]
+        i = rp + 1
+      } else {
+        run = run ++ [c]
+        i = i + 1
+      }
+    } else {
+      run = run ++ [c]
+      i = i + 1
+    }
+  }
+  if len(run) > 0 {
+    out = out ++ [Text(from_code_points(run))]
+  }
+  out
+}
+
+test "plain text and inline code" {
+  assert parse_inlines("hi") == [Text("hi")]
+  assert parse_inlines("a `b` c") == [Text("a "), Code("b"), Text(" c")]
+  assert parse_inlines("`x | y`") == [Code("x | y")]
+}
+
+test "bold, em, and unclosed markers stay literal" {
+  assert parse_inlines("**加粗** x") == [Bold([Text("加粗")]), Text(" x")]
+  assert parse_inlines("*em*") == [Em([Text("em")])]
+  assert parse_inlines("2 ** 3") == [Text("2 ** 3")]
+  assert parse_inlines("a * b") == [Text("a * b")]
+}
+
+test "links and escapes" {
+  assert parse_inlines("see [spec](spec.md).") ==
+    [Text("see "), Link("spec", "spec.md"), Text(".")]
+  assert parse_inlines("just [brackets]") == [Text("just [brackets]")]
+  assert parse_inlines("\\*literal\\*") == [Text("*literal*")]
+}
+
+test "bold containing code" {
+  assert parse_inlines("**a `b` c**") == [Bold([Text("a "), Code("b"), Text(" c")])]
+}
