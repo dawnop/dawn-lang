@@ -166,18 +166,38 @@ let d = p.x                        # 字段访问
 
 记录是单构造器积类型的糖，同样支持模式匹配。字段不可变——"修改"即函数式更新。
 
+**fn 类型的字段可以直接调用**：`r.f(x)` 调用字段里存的函数值，等价于
+`let g = r.f` 后 `g(x)`；字段的效果照常并入调用方。仅当作用域里**不存在**
+名为 `f` 的函数时才按字段调用解释——同名函数存在时维持 UFCS 语义（§4.4），
+该规则纯增量。
+
 ### 2.5 泛型
 
 - 类型参数用 `[T, U]` 声明在名字后：`fn map[T, U](xs: List[T], f: fn(T) -> U !e) -> List[U] !e`
 - 单态性：类型参数在每个调用点必须能完全推导，不支持高阶类型（HKT）。
 - 实现为擦除 + 装箱（v0.1）；单态化留作后续优化，不影响语义。
 - **没有子类型、没有继承、没有变型（variance）**。类型要么相等要么不同。
+- 函数体内的局部标注可以引用签名的类型参数（`let acc: List[T] = []`）——
+  刚性类型参数在推断里视同已知的具体类型。
 
 ### 2.6 类型别名
 
 ```dawn
-type Meters = Float          # 透明别名（v0.1 只有透明别名，不是 newtype）
+type Meters = Float                                  # 内建标量
+type Pair = (Int, String)                            # 元组
+type Names = List[String]                            # 泛型应用
+type Handler = fn(Request) -> Result[Response, HttpError] !io   # 函数类型
+type Lookup[T] = fn(String) -> Option[T]             # 可带类型参数
 ```
+
+别名是**透明**的（不是 newtype）：解析期展开，与被指的类型完全互换。
+
+**与单构造器 ADT 的区分**（`type Color = Red` 仍是 ADT）：`=` 右侧是
+`fn` 类型、元组、带参的 `Name[...]`、或裸内建标量（`Int/Float/Bool/String/Unit`，
+它们永远不可能是构造器名）时按别名解析；其余裸大写名维持 ADT 语义。
+
+限制：别名不可递归（环报错）；不可携带效果变量（只能 `!io` 或纯）；
+`pub` 后可跨模块导入（`use m.{Handler}`）。
 
 ---
 

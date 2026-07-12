@@ -48,6 +48,7 @@ class DawnLanguageServer : LanguageServer, LanguageClientAware {
         val caps = ServerCapabilities()
         caps.setTextDocumentSync(TextDocumentSyncKind.Full)
         caps.setHoverProvider(true)
+        caps.setCompletionProvider(CompletionOptions(false, listOf("!")))
         caps.setDefinitionProvider(true)
         caps.setDocumentSymbolProvider(true)
         caps.setDocumentFormattingProvider(true)
@@ -105,6 +106,16 @@ private class DawnTextDocumentService(private val server: DawnLanguageServer) : 
     }
 
     // ---- language features ----
+
+    override fun completion(
+        params: CompletionParams,
+    ): CompletableFuture<Either<MutableList<CompletionItem>, CompletionList>> {
+        val st = docs[params.textDocument.uri]
+            ?: return completedFuture(Either.forLeft(mutableListOf()))
+        val offset = st.source.lspOffset(params.position.line, params.position.character)
+        val items = completionsAt(st.analysis, st.source.text, offset)
+        return completedFuture(Either.forLeft(items.toMutableList()))
+    }
 
     override fun hover(params: HoverParams): CompletableFuture<Hover> {
         val st = docs[params.textDocument.uri] ?: return completedFuture(null)

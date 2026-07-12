@@ -111,7 +111,7 @@ private class TargetQuery(private val analysis: Analyzed, private val offset: In
             }
             is MethodCall -> {
                 // module-qualified (alias.fn) and UFCS calls carry the resolved sig on the desugared Call
-                (e.desugared?.sig ?: sigOf(e.name))?.let { offer(e.nameSpan, it.render(), it.nameSpan, it.srcPath) }
+                ((e.desugared as? Call)?.sig ?: sigOf(e.name))?.let { offer(e.nameSpan, it.render(), it.nameSpan, it.srcPath) }
                 visitExpr(e.target)
                 e.args.forEach { visitExpr(it) }
             }

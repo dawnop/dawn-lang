@@ -84,6 +84,8 @@ class TypeDecl(
     nameSpan: Span,
     /** trait names after `derive` (v0.1: only "Show"); paired with each name's span for diagnostics */
     val derives: List<Pair<String, Span>> = emptyList(),
+    /** when non-null this is a type alias: `type H = fn(Int) -> Int`; ctors is empty */
+    val aliasTarget: TypeRef? = null,
 ) : Decl(pub, name, span, nameSpan)
 
 /**
@@ -197,7 +199,8 @@ class MethodCall(
     val nameSpan: Span,
     span: Span,
 ) : Expr(span) {
-    var desugared: Call? = null
+    /** the checker's rewrite: a UFCS Call, or an Apply for a fn-typed record field */
+    var desugared: Expr? = null
     /** resolved Java target, filled by the checker (spec §9) */
     var javaMethod: java.lang.reflect.Method? = null
     var javaCtorRef: java.lang.reflect.Constructor<*>? = null

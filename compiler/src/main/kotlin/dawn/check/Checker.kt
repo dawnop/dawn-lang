@@ -33,6 +33,7 @@ class Checker(
 
     private val fns = HashMap<String, FnSig>()
     private val adts = HashMap<String, AdtInfo>()
+    private val typeAliases = HashMap<String, AliasInfo>()
     private val ctors = HashMap<String, CtorInfo>()
 
     /** whole-module imports: alias (last path segment) → that module's exports (spec §10.2) */
@@ -50,6 +51,7 @@ class Checker(
     val functions: Map<String, FnSig> get() = fns
     /** user-defined types by name */
     val types: Map<String, AdtInfo> get() = adts
+    val aliases: Map<String, AliasInfo> get() = typeAliases
 
     /** effects used by the body currently being checked (Io and/or effect variables) */
     private var usedEffects = HashSet<Eff>()
@@ -118,7 +120,7 @@ class Checker(
                 sink.error("`${d.name}` is a builtin type and cannot be redefined", d.nameSpan)
                 continue
             }
-            if (adts.containsKey(d.name)) {
+            if (adts.containsKey(d.name) || typeAliases.containsKey(d.name)) {
                 sink.error(
                     if (PRELUDE_ADTS.any { it.name == d.name })
                         "`${d.name}` is a prelude type and cannot be redefined"
@@ -128,6 +130,15 @@ class Checker(
             }
             if (d.typeParams.toSet().size != d.typeParams.size)
                 sink.error("duplicate type parameter names", d.nameSpan)
+            if (d.aliasTarget != null) {
+                aliasEffVarSpan(d.aliasTarget!!)?.let {
+                    sink.error("a type alias cannot carry effect variables", it,
+                        "write !io, or leave the function type pure")
+                }
+                typeAliases[d.name] = AliasInfo(d.name, d.typeParams.map { TVar(it) },
+                    d.aliasTarget, d.nameSpan)
+                continue
+            }
             val info = AdtInfo(d.name, d.nameSpan, d.isRecord, d.typeParams.map { TVar(it) })
             info.owner = ownerClass
             info.srcPath = srcPath
@@ -173,6 +184,9 @@ class Checker(
                 }
             }
         }
+        // 2.25 aliases: resolve every target now, so cycles and unknown names are
+        // reported at the declaration even if the alias is never used
+        for (al in typeAliases.values) resolveAliasTarget(al, al.nameSpan)
         // 2.5 derive Show: every field must be renderable (type parameters allowed, resolved at use)
         for (d in module.types) {
             val info = d.ctors.firstOrNull()?.info?.adt ?: continue
@@ -258,7 +272,8 @@ class Checker(
 
     private fun injectSelective(fromPath: String, exp: ModuleExports, name: String, span: Span) {
         val fn = exp.fns[name]; val ty = exp.types[name]; val cn = exp.consts[name]; val ct = exp.ctors[name]
-        if (fn == null && ty == null && cn == null && ct == null) {
+        val al = exp.aliases[name]
+        if (fn == null && ty == null && cn == null && ct == null && al == null) {
             if (name in exp.allNames)
                 sink.error("`$name` is private to module `$fromPath`", span,
                     "add `pub` to its declaration in $fromPath")
@@ -275,6 +290,7 @@ class Checker(
         if (fn != null) fns[name] = fn
         // a type brings its constructors (spec §10.3); a constructor may also be named directly
         if (ty != null) { adts[name] = ty; for (c in ty.ctors) ctors[c.name] = c }
+        if (al != null) typeAliases[name] = al
         if (ct != null) ctors[name] = ct
         if (cn != null) consts[name] = cn
     }
@@ -401,6 +417,33 @@ class Checker(
     private fun resolveEff(atoms: List<String>, effVars: MutableMap<String, Eff.Var>): Eff =
         Eff.union(atoms.map { if (it == "io") Eff.Io else effVars.getOrPut(it) { Eff.Var(it) } })
 
+    /** Resolve an alias target once, memoized; null (and an error) on a cycle. */
+    private fun resolveAliasTarget(al: AliasInfo, useSpan: Span): Type? {
+        al.resolved?.let { return if (it == TError) null else it }
+        val ref = al.targetRef ?: return TError.also { al.resolved = it } // imported: always resolved
+        if (al.resolving) {
+            sink.error("type alias `${al.name}` refers to itself", useSpan,
+                "aliases are transparent and cannot be recursive")
+            al.resolved = TError
+            return null
+        }
+        al.resolving = true
+        val t = resolveType(ref, tparams = al.typeParams.associateBy { it.name }, effVars = HashMap())
+        al.resolving = false
+        al.resolved = t
+        return if (t == TError) null else t
+    }
+
+    /** The span of the first effect variable inside an alias target, if any. */
+    private fun aliasEffVarSpan(ref: TypeRef): Span? = when (ref) {
+        is FnTypeRef ->
+            if (ref.effAtoms.any { it != "io" }) ref.span
+            else (ref.params + ref.ret).firstNotNullOfOrNull { aliasEffVarSpan(it) }
+        is TupleTypeRef -> ref.elems.firstNotNullOfOrNull { aliasEffVarSpan(it) }
+        is NamedTypeRef -> ref.args.firstNotNullOfOrNull { aliasEffVarSpan(it) }
+        else -> null
+    }
+
     private fun resolveType(
         ref: TypeRef,
         tparams: Map<String, TVar> = currentTParams,
@@ -425,6 +468,17 @@ class Checker(
                 return TError
             }
             return it
+        }
+        typeAliases[ref.name]?.let { al ->
+            if (ref.args.size != al.typeParams.size) {
+                sink.error("`${al.name}` takes ${al.typeParams.size} type parameter(s), got ${ref.args.size}",
+                    ref.span)
+                return TError
+            }
+            val target = resolveAliasTarget(al, ref.span) ?: return TError
+            if (al.typeParams.isEmpty()) return target
+            return subst(target,
+                al.typeParams.zip(ref.args.map { resolveType(it, tparams, effVars) }).toMap())
         }
         if (ref.name == "List") {
             if (ref.args.size != 1) {
@@ -463,7 +517,7 @@ class Checker(
         }
         val info = adts[ref.name] ?: run {
             sink.error("unknown type: ${ref.name}", ref.span,
-                Suggest.hint(ref.name, adts.keys + javaClasses.keys + builtinTypeNames)
+                Suggest.hint(ref.name, adts.keys + typeAliases.keys + javaClasses.keys + builtinTypeNames)
                     ?: "builtin types: Int, Float, Bool, String, Unit, List — or declare `type ${ref.name} = ...`")
             return TError
         }
@@ -722,7 +776,9 @@ class Checker(
     }
 
     private fun isConcrete(t: Type): Boolean = when (t) {
-        is TVar -> false
+        // a rigid type parameter of the enclosing declaration is a known type;
+        // only a callee's still-unbound inference variables are not
+        is TVar -> t in currentTParams.values
         is TAdt -> t.args.all { isConcrete(it) }
         is TList -> isConcrete(t.elem)
         is TMap -> isConcrete(t.key) && isConcrete(t.value)
@@ -762,6 +818,42 @@ class Checker(
         if (tt.isErrorish) {
             for (a in e.args) checkExpr(a)
             return TError
+        }
+        // a record field holding a function: r.f(a) calls the field value — but
+        // only when no function `f` is in scope, so UFCS keeps precedence and
+        // the rule stays purely additive (spec §4.3)
+        if (tt is TAdt && tt.info.isRecord &&
+            lookup(e.name) == null && fns[e.name] == null && !BUILTINS.containsKey(e.name)
+        ) {
+            val ci = tt.info.ctors.first()
+            val field = ci.fields.find { it.name == e.name }
+            if (field != null) {
+                val ftype = subst(field.type, tt.info.typeParams.zip(tt.args).toMap())
+                if (ftype is TFn) {
+                    val fa = FieldAccess(e.target, e.name, e.nameSpan,
+                        Span(e.target.span.start, e.nameSpan.end))
+                    fa.owner = ci
+                    fa.field = field
+                    fa.type = ftype
+                    val ap = Apply(fa, e.args, e.span)
+                    e.desugared = ap
+                    if (e.args.size != ftype.params.size) {
+                        for (a in e.args) checkExpr(a)
+                        sink.error("`${e.name}` takes ${ftype.params.size} argument(s), got ${e.args.size}",
+                            e.span, "field type: $ftype")
+                        ap.type = ftype.ret
+                        return ftype.ret
+                    }
+                    for ((arg, pt) in e.args.zip(ftype.params)) {
+                        val at = checkExpr(arg, expected = pt)
+                        if (!assignable(at, pt))
+                            sink.error("argument type mismatch: expected $pt, got $at", arg.span)
+                    }
+                    recordEffect(ftype.eff, e.nameSpan, e.name)
+                    ap.type = ftype.ret
+                    return ftype.ret
+                }
+            }
         }
         // UFCS: x.f(a) is f(x, a) (spec §4.3); the receiver is already checked
         val call = Call(e.name, listOf(e.target) + e.args, e.nameSpan, e.span)

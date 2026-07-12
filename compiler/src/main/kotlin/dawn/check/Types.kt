@@ -3,6 +3,22 @@ package dawn.check
 import dawn.diag.Span
 
 /**
+ * A type alias: transparent, expanded during type resolution (never a distinct
+ * type). Declared as `type Name[T] = <fn type | tuple | Name[args]>`; a bare
+ * uppercase RHS still declares a single-constructor ADT (back-compat).
+ */
+class AliasInfo(
+    val name: String,
+    val typeParams: List<Type.TVar>,
+    /** the unresolved target in the declaring module; null on imported (pre-resolved) aliases */
+    val targetRef: dawn.ast.TypeRef?,
+    val nameSpan: Span,
+) {
+    var resolved: Type? = null
+    var resolving = false
+}
+
+/**
  * An effect (spec §6): the two-point lattice pure < io, plus effect variables
  * (introduced by appearing in a signature; identity equality, one instance per
  * name per signature).

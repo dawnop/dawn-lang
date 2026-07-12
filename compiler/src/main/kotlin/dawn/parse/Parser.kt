@@ -19,6 +19,8 @@ import dawn.lex.TokenType.*
  * (statement and declaration boundaries) catch it, report to the sink, and
  * resynchronize — so one broken statement never hides the rest of the file.
  */
+private val BUILTIN_SCALARS = setOf("Int", "Float", "Bool", "String", "Unit")
+
 class Parser(
     tokens: List<Token>,
     private val sink: DiagnosticSink = DiagnosticSink(),
@@ -220,6 +222,17 @@ class Parser(
         val tparams = typeParams()
         expect(EQ, "`=`")
         if (at(LBRACE)) return recordDecl(pub, kw, name, tparams)
+        // a type alias: an RHS that cannot begin a constructor list — a fn type,
+        // a tuple, a generic application Name[...], or a bare builtin scalar
+        // (`type Meters = Float`; those names can never be constructors). Any
+        // other bare uppercase name stays a single-constructor ADT (back-compat).
+        val builtinScalar = at(TYPEIDENT) && toks[pos].text in BUILTIN_SCALARS &&
+            toks[pos + 1].type != LPAREN
+        if (at(FN) || at(LPAREN) || (at(TYPEIDENT) && toks[pos + 1].type == LBRACKET) || builtinScalar) {
+            val target = typeRef()
+            return TypeDecl(pub, name.text, tparams, emptyList(), isRecord = false,
+                Span(kw.span.start, target.span.end), name.span, aliasTarget = target)
+        }
         val ctors = ArrayList<CtorDecl>()
         if (at(PIPE)) advance() // leading | is optional
         skipNewlines()

@@ -2059,7 +2059,7 @@ class CodeGen(
         is MethodCall -> when {
             e.javaCtorRef != null -> genJavaNew(e)
             e.javaMethod != null -> genJavaCall(e)
-            else -> genCall(e.desugared!!, tail)
+            else -> genExpr(e.desugared!!, tail)
         }
         is Lambda -> genLambdaValue(e)
         is Propagate -> genPropagate(e)

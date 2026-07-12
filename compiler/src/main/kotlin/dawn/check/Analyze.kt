@@ -51,6 +51,7 @@ class CheckedModule(
     val module: Module,
     val functions: Map<String, FnSig>,
     val types: Map<String, AdtInfo>,
+    val aliases: Map<String, AliasInfo> = emptyMap(),
     /** absolute path of the module's file (cross-file navigation); null in tests without files */
     val srcPath: String? = null,
 )
@@ -64,6 +65,7 @@ class ModuleExports(
     val className: String,
     val fns: Map<String, FnSig>,
     val types: Map<String, AdtInfo>,
+    val aliases: Map<String, AliasInfo>,
     val ctors: Map<String, CtorInfo>,
     val consts: Map<String, dawn.ast.ConstDecl>,
     val allNames: Set<String>,
@@ -88,11 +90,12 @@ class ImportEnv(
 private fun exportsOf(cm: CheckedModule): ModuleExports {
     val m = cm.module
     val pubTypes = m.types.filter { it.pub }.mapNotNull { cm.types[it.name] }.associateBy { it.name }
+    val pubAliases = m.types.filter { it.pub }.mapNotNull { cm.aliases[it.name] }.associateBy { it.name }
     val pubCtors = pubTypes.values.flatMap { it.ctors }.associateBy { it.name }
     val pubFns = m.fns.filter { it.pub }.mapNotNull { cm.functions[it.name] }.associateBy { it.name }
     val pubConsts = m.consts.filter { it.pub }.associateBy { it.name }
     val allNames = (m.fns.map { it.name } + m.types.map { it.name } + m.consts.map { it.name }).toSet()
-    return ModuleExports(cm.modPath, cm.className, pubFns, pubTypes, pubCtors, pubConsts, allNames, cm.srcPath)
+    return ModuleExports(cm.modPath, cm.className, pubFns, pubTypes, pubAliases, pubCtors, pubConsts, allNames, cm.srcPath)
 }
 
 /**
@@ -138,7 +141,7 @@ fun analyzeProgram(loaded: ModuleLoadResult, comptimeFuel: Long = 100_000_000L):
         }
         for (d in sink.all) diags.add(LocatedDiag(mf.source, d))
         val cm = CheckedModule(mf.modPath, mf.className, mf.source, mf.module,
-            checker.functions, checker.types, srcPath)
+            checker.functions, checker.types, checker.aliases, srcPath)
         checked.add(cm)
         exportsByPath[mf.modPath] = exportsOf(cm)
     }
