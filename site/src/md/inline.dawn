@@ -30,6 +30,50 @@ fn find_pair(cs: List[Int], from: Int, a: Int, b: Int) -> Int = {
   found
 }
 
+## Length of the run of backticks starting at i.
+fn bt_run(cs: List[Int], i: Int) -> Int = {
+  var j = i
+  while j < len(cs) && cp_at(cs, j) == '`' {
+    j = j + 1
+  }
+  j - i
+}
+
+## Start of the first backtick run of exactly length n at or after `from`, else -1.
+## A run longer than n cannot close the span, so it is skipped whole (CommonMark).
+fn find_bt_close(cs: List[Int], from: Int, n: Int) -> Int = {
+  var i = from
+  var found = -1
+  while found < 0 && i < len(cs) {
+    if cp_at(cs, i) == '`' {
+      let r = bt_run(cs, i)
+      if r == n { found = i } else { i = i + r }
+    } else {
+      i = i + 1
+    }
+  }
+  found
+}
+
+fn all_spaces(cs: List[Int], from: Int, to: Int) -> Bool = {
+  var i = from
+  var ok = true
+  while ok && i < to {
+    if cp_at(cs, i) != ' ' { ok = false } else { i = i + 1 }
+  }
+  ok
+}
+
+## Code span content [from, to): strip one surrounding space when both ends are
+## spaces but the content is not all spaces, so `` `...` `` yields a literal backtick.
+fn code_span(cs: List[Int], from: Int, to: Int) -> String = {
+  let strip = to - from >= 2 &&
+    cp_at(cs, from) == ' ' &&
+    cp_at(cs, to - 1) == ' ' &&
+    not all_spaces(cs, from, to)
+  if strip { seg(cs, from + 1, to - 1) } else { seg(cs, from, to) }
+}
+
 ## Parse a run of inline markup (newlines inside s stay literal text).
 pub fn parse_inlines(s: String) -> List[Inline] = {
   let cs = code_points(s)
@@ -43,17 +87,18 @@ pub fn parse_inlines(s: String) -> List[Inline] = {
       run = run ++ [cp_at(cs, i + 1)]
       i = i + 2
     } else if c == '`' {
-      let close = find_cp(cs, i + 1, '`')
+      let open = bt_run(cs, i)
+      let close = find_bt_close(cs, i + open, open)
       if close < 0 {
-        run = run ++ [c]
-        i = i + 1
+        run = run ++ code_points(seg(cs, i, i + open))
+        i = i + open
       } else {
         if len(run) > 0 {
           out = out ++ [Text(from_code_points(run))]
           run = []
         }
-        out = out ++ [Code(seg(cs, i + 1, close))]
-        i = close + 1
+        out = out ++ [Code(code_span(cs, i + open, close))]
+        i = close + open
       }
     } else if c == '*' && cp_at(cs, i + 1) == '*' {
       let close = find_pair(cs, i + 2, '*', '*')
@@ -129,4 +174,11 @@ test "links and escapes" {
 
 test "bold containing code" {
   assert parse_inlines("**a `b` c**") == [Bold([Text("a "), Code("b"), Text(" c")])]
+}
+
+test "multi-backtick spans hold literal backticks" {
+  assert parse_inlines("`` `...` ``") == [Code("`...`")]
+  assert parse_inlines("x `` a`b `` y") == [Text("x "), Code("a`b"), Text(" y")]
+  assert parse_inlines("``no close") == [Text("``no close")]
+  assert parse_inlines("`` ` ``") == [Code("`")]
 }
