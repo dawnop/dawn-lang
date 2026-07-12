@@ -67,7 +67,7 @@ class StdlibTest {
             pub fn main() -> Unit !io = {
               let p = Parser { tokens: [10, 20], pos: 1 }
               match p.peek() {
-                Some(v) -> println("{v}")
+                Some(v) -> println("${'$'}v")
                 None -> println("eof")
               }
             }
@@ -83,7 +83,7 @@ class StdlibTest {
             pub fn main() -> Unit !io = {
               let s = "  a-b-c  "
               println(s.trim().split("-").join("+"))
-              println("{[1, 2, 3].len()}")
+              println("${'$'}{[1, 2, 3].len()}")
             }
             """.trimIndent(),
         )
@@ -98,7 +98,7 @@ class StdlibTest {
             """
             pub fn main() -> Unit !io = {
               println(chars("héllo").join("."))
-              println("{len(chars("\u{1F600}x"))}")
+              println("${'$'}{len(chars("\u{1F600}x"))}")
             }
             """.trimIndent(),
         )
@@ -123,7 +123,7 @@ class StdlibTest {
         val out = run(
             """
             pub fn main() -> Unit !io = {
-              println("{contains("hello", "ell")} {starts_with("hello", "he")} {ends_with("hello", "lo")}")
+              println("${'$'}{contains("hello", "ell")} ${'$'}{starts_with("hello", "he")} ${'$'}{ends_with("hello", "lo")}")
               println(to_string(42) ++ to_string(true) ++ to_string(1.5))
             }
             """.trimIndent(),
@@ -135,13 +135,13 @@ class StdlibTest {
     fun `parse_int and parse_float return Options`() {
         val out = run(
             """
-            fn show(o: Option[Int]) -> String = match o { Some(n) -> "{n}", None -> "none" }
+            fn show(o: Option[Int]) -> String = match o { Some(n) -> "${'$'}n", None -> "none" }
 
             pub fn main() -> Unit !io = {
               println(show(parse_int("42")))
               println(show(parse_int("4x")))
               match parse_float("2.5") {
-                Some(f) -> println("{f}")
+                Some(f) -> println("${'$'}f")
                 None -> println("none")
               }
             }
@@ -159,12 +159,12 @@ class StdlibTest {
             """
             pub fn main() -> Unit !io = {
               match write_file("$path", "hello\nfile") {
-                Ok(n) -> println("wrote {n}")
-                Err(e) -> println("err {e}")
+                Ok(n) -> println("wrote ${'$'}n")
+                Err(e) -> println("err ${'$'}e")
               }
               match read_file("$path") {
                 Ok(text) -> println(text)
-                Err(e) -> println("err {e}")
+                Err(e) -> println("err ${'$'}e")
               }
             }
             """.trimIndent(),
@@ -180,7 +180,7 @@ class StdlibTest {
             pub fn main() -> Unit !io = {
               match read_file("/definitely/not/here.txt") {
                 Ok(_) -> println("ok?!")
-                Err(e) -> println("failed: {contains(e, "here.txt")}")
+                Err(e) -> println("failed: ${'$'}{contains(e, "here.txt")}")
               }
             }
             """.trimIndent(),
@@ -192,7 +192,7 @@ class StdlibTest {
     fun `args is empty without the JVM wrapper`() {
         val out = run(
             """
-            pub fn main() -> Unit !io = println("{len(args())}")
+            pub fn main() -> Unit !io = println("${'$'}{len(args())}")
             """.trimIndent(),
         )
         assertEquals("0\n", out)
@@ -223,7 +223,7 @@ class StdlibTest {
 
             pub fn main() -> Unit !io = {
               let firsts = map([(1, 2), (3, 4)], first)
-              println("{nth(firsts, 0)} {nth(firsts, 1)}")
+              println("${'$'}{nth(firsts, 0)} ${'$'}{nth(firsts, 1)}")
             }
             """.trimIndent(),
         )

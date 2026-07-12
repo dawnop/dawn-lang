@@ -77,8 +77,8 @@ class PropagateAndTestTest {
 
             fn show(r: Result[Int, String]) -> String =
               match r {
-                Ok(v)  -> "ok {v}"
-                Err(m) -> "err: {m}"
+                Ok(v)  -> "ok ${'$'}v"
+                Err(m) -> "err: ${'$'}m"
               }
 
             pub fn main() -> Unit !io = {
@@ -100,7 +100,7 @@ class PropagateAndTestTest {
 
             fn show(o: Option[Int]) -> String =
               match o {
-                Some(v) -> "{v}"
+                Some(v) -> "${'$'}v"
                 None    -> "none"
               }
 
@@ -117,7 +117,7 @@ class PropagateAndTestTest {
         val diags = errorsOf("""
             fn f(o: Option[Int]) -> Int = o? + 1
 
-            pub fn main() -> Unit !io = println("{f(Some(1))}")
+            pub fn main() -> Unit !io = println("${'$'}{f(Some(1))}")
         """.trimIndent())
         assertHasError(diags, "`?` on an Option requires the function to return Option")
     }
@@ -161,12 +161,12 @@ class PropagateAndTestTest {
 
             pub fn main() -> Unit !io = {
               match sum_all([Ok(1), Ok(2), Ok(3)]) {
-                Ok(n) -> println("sum {n}")
-                Err(e) -> println("err {e}")
+                Ok(n) -> println("sum ${'$'}n")
+                Err(e) -> println("err ${'$'}e")
               }
               match sum_all([Ok(1), Err("boom"), Ok(3)]) {
-                Ok(n) -> println("sum {n}")
-                Err(e) -> println("err {e}")
+                Ok(n) -> println("sum ${'$'}n")
+                Err(e) -> println("err ${'$'}e")
               }
             }
         """.trimIndent())

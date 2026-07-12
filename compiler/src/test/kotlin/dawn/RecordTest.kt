@@ -67,7 +67,7 @@ class RecordTest {
 
             pub fn main() -> Unit !io = {
               let p = Point { x: 1.0, y: 2.0 }
-              println("{p.x} {p.y}")
+              println("${'$'}{p.x} ${'$'}{p.y}")
             }
         """.trimIndent())
         assertEquals("1.0 2.0\n", out)
@@ -81,7 +81,7 @@ class RecordTest {
             pub fn main() -> Unit !io = {
               let p = Point { x: 1.0, y: 2.0 }
               let q = Point { ..p, x: 3.0 }
-              println("{q.x} {q.y} {p.x}")
+              println("${'$'}{q.x} ${'$'}{q.y} ${'$'}{p.x}")
             }
         """.trimIndent())
         assertEquals("3.0 2.0 1.0\n", out)
@@ -96,7 +96,7 @@ class RecordTest {
               let x = 5.0
               let y = 6.0
               let p = Point { x, y }
-              println("{p.x} {p.y}")
+              println("${'$'}{p.x} ${'$'}{p.y}")
             }
         """.trimIndent())
         assertEquals("5.0 6.0\n", out)
@@ -110,7 +110,7 @@ class RecordTest {
             fn describe(p: Point) -> String =
               match p {
                 Point { x: 0.0, y: 0.0 } -> "origin"
-                Point { x, .. }          -> "x = {x}"
+                Point { x, .. }          -> "x = ${'$'}x"
               }
 
             pub fn main() -> Unit !io = {
@@ -129,9 +129,9 @@ class RecordTest {
 
             pub fn main() -> Unit !io = {
               let l = Line { a: Point { x: 1.0, y: 2.0 }, b: Point { x: 3.0, y: 4.0 } }
-              println("{l.a.x} {l.b.y}")
+              println("${'$'}{l.a.x} ${'$'}{l.b.y}")
               let moved = Line { ..l, b: Point { ..l.b, x: 9.0 } }
-              println("{moved.a.x} {moved.b.x} {moved.b.y}")
+              println("${'$'}{moved.a.x} ${'$'}{moved.b.x} ${'$'}{moved.b.y}")
             }
         """.trimIndent())
         assertEquals("1.0 4.0\n1.0 9.0 4.0\n", out)
@@ -144,8 +144,8 @@ class RecordTest {
 
             pub fn main() -> Unit !io = {
               let p = Point { x: 1.0, y: 2.0 }
-              println("{p == Point { x: 1.0, y: 2.0 }}")
-              println("{p == Point { ..p, x: 0.0 }}")
+              println("${'$'}{p == Point { x: 1.0, y: 2.0 }}")
+              println("${'$'}{p == Point { ..p, x: 0.0 }}")
             }
         """.trimIndent())
         assertEquals("true\nfalse\n", out)
@@ -166,8 +166,8 @@ class RecordTest {
               }
 
             pub fn main() -> Unit !io = {
-              println("{cx(Circle(Point { x: 1.5, y: 0.0 }, 2.0))}")
-              println("{cx(Dot(Point { x: 4.5, y: 0.0 }))}")
+              println("${'$'}{cx(Circle(Point { x: 1.5, y: 0.0 }, 2.0))}")
+              println("${'$'}{cx(Dot(Point { x: 4.5, y: 0.0 }))}")
             }
         """.trimIndent())
         assertEquals("1.5\n4.5\n", out)
@@ -186,7 +186,7 @@ class RecordTest {
             pub fn main() -> Unit !io = {
               let base = P { a: trace("base-a", 1), b: trace("base-b", 2) }
               let q = P { ..base, b: trace("override-b", 9) }
-              println("{q.a} {q.b}")
+              println("${'$'}{q.a} ${'$'}{q.b}")
             }
         """.trimIndent())
         assertEquals("base-a\nbase-b\noverride-b\n1 9\n", out)
@@ -230,7 +230,7 @@ class RecordTest {
             pub fn main() -> Unit !io = {
               let p = Point { x: 1.0, y: 2.0, z: 3.0 }
               let q = Point { x: 1.0, y: 2.0 }
-              println("{q.z}")
+              println("${'$'}{q.z}")
             }
         """.trimIndent())
         assertHasError(diags, "`Point` has no field `z`")
@@ -243,7 +243,7 @@ class RecordTest {
 
             fn f(c: Color) -> Int = c.x
 
-            pub fn main() -> Unit !io = println("{f(Red)}")
+            pub fn main() -> Unit !io = println("${'$'}{f(Red)}")
         """.trimIndent())
         assertHasError(diags, "field access needs a record value")
     }

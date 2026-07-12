@@ -189,16 +189,38 @@ class Lexer(
             when (val c = src[pos]) {
                 '"' -> { pos++; break }
                 '\\' -> lexEscapeInto(text)
-                '{' -> {
-                    if (text.isNotEmpty()) { segments.add(StrSegment.Text(text.toString())); text.clear() }
-                    segments.add(lexInterpolation())
-                }
+                '$' -> lexDollar(segments, text)
                 else -> { text.append(c); pos++ }
             }
         }
         if (text.isNotEmpty()) segments.add(StrSegment.Text(text.toString()))
         val span = Span(baseOffset + start, baseOffset + pos)
         tokens.add(Token(TokenType.STRING, src.substring(start, pos), span, segments = segments))
+    }
+
+    /**
+     * Interpolation is $-led (spec §1.6): `$name` splices a simple identifier and
+     * `${expr}` splices an expression. A bare `{` or `}` is a literal character, so
+     * brace-heavy strings (JSON, code) need no escaping. A `$` not followed by an
+     * identifier or `{` is a literal `$`; `\$` forces a literal `$`.
+     */
+    private fun lexDollar(segments: MutableList<StrSegment>, text: StringBuilder) {
+        val next = peek(1)
+        val seg: StrSegment.Code? = when {
+            next == '{' -> { val dollar = pos; pos += 2; lexBraceInterp(dollar) }
+            next.isLetter() || next == '_' -> {
+                pos++ // skip '$'
+                val nameStart = pos
+                while (pos < src.length && isIdentPart(src[pos])) pos++
+                StrSegment.Code(src.substring(nameStart, pos), baseOffset + nameStart)
+            }
+            else -> null
+        }
+        if (seg == null) { text.append('$'); pos++ }
+        else {
+            if (text.isNotEmpty()) { segments.add(StrSegment.Text(text.toString())); text.clear() }
+            segments.add(seg)
+        }
     }
 
     /** on entry pos points at '\\'; consumes the escape and appends the character(s) */
@@ -210,6 +232,7 @@ class Lexer(
             '\\' -> text.append('\\')
             '"' -> text.append('"')
             '\'' -> text.append('\'')
+            '$' -> text.append('$')
             '{' -> text.append('{')
             'u' -> text.append(lexUnicodeEscape())
             else -> throw DawnError("unknown escape: \\$e", spanAt(pos - 1, 2))
@@ -267,10 +290,7 @@ class Lexer(
             if (src[pos] == '"' && peek(1) == '"' && peek(2) == '"') { pos += 3; break }
             when (src[pos]) {
                 '\\' -> lexEscapeInto(text)
-                '{' -> {
-                    if (text.isNotEmpty()) { segments.add(StrSegment.Text(text.toString())); text.clear() }
-                    segments.add(lexInterpolation())
-                }
+                '$' -> lexDollar(segments, text)
                 else -> { text.append(src[pos]); pos++ }
             }
         }
@@ -361,10 +381,8 @@ class Lexer(
         return String(Character.toChars(code))
     }
 
-    /** On entry pos points at '{'; scans to the matching '}'. Nested strings are skipped over. */
-    private fun lexInterpolation(): StrSegment.Code {
-        val open = pos
-        pos++ // '{'
+    /** On entry pos is just past '${'; scans to the matching '}'. Nested strings are skipped over. */
+    private fun lexBraceInterp(open: Int): StrSegment.Code {
         val codeStart = pos
         var depth = 1
         while (pos < src.length) {
@@ -376,7 +394,7 @@ class Lexer(
             }
             pos++
         }
-        if (depth != 0) throw DawnError("unmatched { in interpolation", spanAt(open))
+        if (depth != 0) throw DawnError("unmatched ${'$'}{ in interpolation", spanAt(open))
         val code = src.substring(codeStart, pos)
         if (code.isBlank()) throw DawnError("empty interpolation", Span(baseOffset + open, baseOffset + pos + 1))
         pos++ // '}'

@@ -64,7 +64,7 @@ class ListPatternTest {
                 [x, ..rest] -> x + sum(rest)
               }
 
-            pub fn main() -> Unit !io = println("{sum([1, 2, 3, 4])}")
+            pub fn main() -> Unit !io = println("${'$'}{sum([1, 2, 3, 4])}")
             """.trimIndent(),
         )
         assertEquals("10\n", out)
@@ -77,8 +77,8 @@ class ListPatternTest {
             fn shape(xs: List[Int]) -> String =
               match xs {
                 []              -> "empty"
-                [..init, 9]     -> "ends in nine, init len {len(init)}"
-                [..init, last]  -> "last {last} after {len(init)}"
+                [..init, 9]     -> "ends in nine, init len ${'$'}{len(init)}"
+                [..init, last]  -> "last ${'$'}last after ${'$'}{len(init)}"
               }
 
             pub fn main() -> Unit !io = {
@@ -97,8 +97,8 @@ class ListPatternTest {
             """
             fn f(xs: List[String]) -> String =
               match xs {
-                [a, b]      -> "pair {a}{b}"
-                [a, .., z]  -> "{a}..{z}"
+                [a, b]      -> "pair ${'$'}a${'$'}b"
+                [a, .., z]  -> "${'$'}a..${'$'}z"
                 [..]        -> "other"
               }
 
@@ -126,8 +126,8 @@ class ListPatternTest {
               }
 
             pub fn main() -> Unit !io = {
-              println("{last_num([Num(1), Plus, Num(7)])}")
-              println("{last_num([Num(1), Plus])}")
+              println("${'$'}{last_num([Num(1), Plus, Num(7)])}")
+              println("${'$'}{last_num([Num(1), Plus])}")
             }
             """.trimIndent(),
         )
@@ -141,7 +141,7 @@ class ListPatternTest {
             fn describe(xs: List[Int]) -> String =
               match xs {
                 [] -> "none"
-                [_, ..rest] -> "some, {len(rest)} more"
+                [_, ..rest] -> "some, ${'$'}{len(rest)} more"
               }
 
             pub fn main() -> Unit !io = println(describe([5, 6, 7]))

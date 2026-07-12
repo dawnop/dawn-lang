@@ -83,7 +83,7 @@ class MultilineStringTest {
             "pub fn main() -> Unit !io = {\n" +
                 "  let n = 7\n" +
                 "  let s = \"\"\"\n" +
-                "    value: {n * 2}\n" +
+                "    value: ${'$'}{n * 2}\n" +
                 "    quote: \"quoted\"\n" +
                 "    \"\"\"\n" +
                 "  println(s)\n" +
@@ -99,7 +99,7 @@ class MultilineStringTest {
                 "  let x = 1\n" +
                 "  let s = \"\"\"\n" +
                 "      deep\n" +
-                "    {x} shallow\n" +
+                "    ${'$'}{x} shallow\n" +
                 "    \"\"\"\n" +
                 "  println(s)\n" +
                 "}\n",

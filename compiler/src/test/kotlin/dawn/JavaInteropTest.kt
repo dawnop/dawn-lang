@@ -80,9 +80,9 @@ class JavaInteropTest {
             use java "java.lang.Math"
 
             pub fn main() -> Unit !io = {
-              println("{Math.abs(0 - 7)}")
-              println("{Math.max(3, 9)}")
-              println("{Math.floor(2.7)}")
+              println("${'$'}{Math.abs(0 - 7)}")
+              println("${'$'}{Math.max(3, 9)}")
+              println("${'$'}{Math.floor(2.7)}")
             }
             """.trimIndent(),
         )
@@ -98,7 +98,7 @@ class JavaInteropTest {
 
             pub fn main() -> Unit !io = {
               match System.getProperty("java.version") {
-                Some(v) -> println("has version: {len(chars(v)) > 0}")
+                Some(v) -> println("has version: ${'$'}{len(chars(v)) > 0}")
                 None -> println("none")
               }
               match System.getProperty("definitely.not.set.dawn") {
@@ -120,7 +120,7 @@ class JavaInteropTest {
 
             pub fn main() -> Unit !io = {
               let p = Path.of("no/such/dawn-file.txt").expect("path")
-              println("{Files.exists(p)}")
+              println("${'$'}{Files.exists(p)}")
             }
             """.trimIndent(),
         )
@@ -183,8 +183,8 @@ class JavaInteropTest {
         val out = run(
             """
             pub fn main() -> Unit !io = {
-              println("{[10, 20].get(1).expect("index 1")}")
-              println("{[10, 20].get(9).unwrap_or(-1)}")
+              println("${'$'}{[10, 20].get(1).expect("index 1")}")
+              println("${'$'}{[10, 20].get(9).unwrap_or(-1)}")
             }
             """.trimIndent(),
         )

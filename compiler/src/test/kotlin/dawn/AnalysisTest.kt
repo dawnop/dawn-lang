@@ -42,7 +42,7 @@ class AnalysisTest {
         val a = analyze("""
             pub fn main() -> Unit !io = {
               let x = )
-              println("still checked {undefined_one}")
+              println("still checked ${'$'}undefined_one")
             }
         """.trimIndent())
         assertTrue(a.diagnostics.any { it.message.contains("expected") })
@@ -57,7 +57,7 @@ class AnalysisTest {
               let x = missing()
               x + 1
             }
-            pub fn main() -> Unit !io = println("{f()}")
+            pub fn main() -> Unit !io = println("${'$'}{f()}")
         """.trimIndent())
         assertEquals(1, a.diagnostics.size, a.diagnostics.joinToString("\n") { it.message })
         assertTrue(a.diagnostics[0].message.contains("undefined function"))
@@ -83,7 +83,7 @@ class AnalysisTest {
 
         pub fn main() -> Unit !io = {
           let count = 21
-          println("{double(count)}")
+          println("${'$'}{double(count)}")
         }
     """.trimIndent()
 

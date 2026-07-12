@@ -62,7 +62,7 @@ class TupleTest {
 
             pub fn main() -> Unit !io = {
               let (q, r) = divmod(17, 5)
-              println("{q} rem {r}")
+              println("${'$'}q rem ${'$'}r")
             }
             """.trimIndent(),
         )
@@ -85,7 +85,7 @@ class TupleTest {
                 x = nx
                 y = ny
               }
-              println("{x} {y}")
+              println("${'$'}x ${'$'}y")
             }
             """.trimIndent(),
         )
@@ -100,7 +100,7 @@ class TupleTest {
               let a = (1, "x", true)
               let b = (1, "x", true)
               let c = (2, "x", true)
-              println("{a == b} {a == c}")
+              println("${'$'}{a == b} ${'$'}{a == c}")
             }
             """.trimIndent(),
         )
@@ -115,7 +115,7 @@ class TupleTest {
               match p {
                 (0, true)  -> "origin on"
                 (0, false) -> "origin off"
-                (n, _)     -> "at {n}"
+                (n, _)     -> "at ${'$'}n"
               }
 
             pub fn main() -> Unit !io = {
@@ -139,11 +139,11 @@ class TupleTest {
 
             pub fn main() -> Unit !io = {
               match find(1) {
-                Some((n, s)) -> println("{n}={s}")
+                Some((n, s)) -> println("${'$'}n=${'$'}s")
                 None -> println("missing")
               }
               let Pair { fst, snd } = Pair { fst: 5, snd: "five" }
-              println("{fst} {snd}")
+              println("${'$'}fst ${'$'}snd")
             }
             """.trimIndent(),
         )
@@ -158,7 +158,7 @@ class TupleTest {
               let pairs = map(range(0, 3), fn(i) => (i, i * i))
               for p in pairs {
                 let (a, b) = p
-                println("{a}:{b}")
+                println("${'$'}a:${'$'}b")
               }
             }
             """.trimIndent(),

@@ -71,8 +71,8 @@ class AdtTest {
             fn describe(s: Shape) -> String =
               match s {
                 Circle(r) if r > 100.0 -> "a huge circle"
-                Circle(r)              -> "circle with r = {r}"
-                Rect(w, h)             -> "rect {w} x {h}"
+                Circle(r)              -> "circle with r = ${'$'}r"
+                Rect(w, h)             -> "rect ${'$'}w x ${'$'}h"
                 Point                  -> "a point"
               }
 
@@ -100,7 +100,7 @@ class AdtTest {
 
             pub fn main() -> Unit !io = {
               let total = area(Circle(1.0)) + area(Rect(2.0, 3.0)) + area(Point)
-              println("{total}")
+              println("${'$'}total")
             }
         """.trimIndent())
         assertEquals("9.14159\n", out)
@@ -114,7 +114,7 @@ class AdtTest {
             pub fn main() -> Unit !io = {
               let r = Rect(h: 3.0, w: 2.0)
               match r {
-                Rect(w, h) -> println("w={w} h={h}")
+                Rect(w, h) -> println("w=${'$'}w h=${'$'}h")
                 _ -> println("no")
               }
             }
@@ -135,7 +135,7 @@ class AdtTest {
             pub fn main() -> Unit !io = {
               let p = Mk(b: trace("first", 2), a: trace("second", 1))
               match p {
-                Mk(a, b) -> println("a={a} b={b}")
+                Mk(a, b) -> println("a=${'$'}a b=${'$'}b")
               }
             }
         """.trimIndent())
@@ -160,7 +160,7 @@ class AdtTest {
             pub fn main() -> Unit !io = {
               # (2 + 3) * 4
               let e = Mul(Add(Num(2), Num(3)), Num(4))
-              println("{eval(e)}")
+              println("${'$'}{eval(e)}")
             }
         """.trimIndent())
         assertEquals("20\n", out)
@@ -175,8 +175,8 @@ class AdtTest {
             fn peek(b: Box) -> String =
               match b {
                 Box(Got(0), ..)   -> "zero"
-                Box(Got(v), ..)   -> "got {v}"
-                Box(Nothing, lab) -> "empty {lab}"
+                Box(Got(v), ..)   -> "got ${'$'}v"
+                Box(Nothing, lab) -> "empty ${'$'}lab"
               }
 
             pub fn main() -> Unit !io = {
@@ -196,7 +196,7 @@ class AdtTest {
             pub fn main() -> Unit !io = {
               let s = Rect(2.0, 3.0)
               match s {
-                Rect(h: hh, ..) -> println("h={hh}")
+                Rect(h: hh, ..) -> println("h=${'$'}hh")
                 _ -> println("no")
               }
             }
@@ -210,10 +210,10 @@ class AdtTest {
             $shapePrelude
 
             pub fn main() -> Unit !io = {
-              println("{Circle(1.0) == Circle(1.0)}")
-              println("{Circle(1.0) == Circle(2.0)}")
-              println("{Circle(1.0) != Rect(1.0, 1.0)}")
-              println("{Point == Point}")
+              println("${'$'}{Circle(1.0) == Circle(1.0)}")
+              println("${'$'}{Circle(1.0) == Circle(2.0)}")
+              println("${'$'}{Circle(1.0) != Rect(1.0, 1.0)}")
+              println("${'$'}{Point == Point}")
             }
         """.trimIndent())
         assertEquals("true\nfalse\ntrue\ntrue\n", out)
@@ -231,7 +231,7 @@ class AdtTest {
               }
 
             pub fn main() -> Unit !io = {
-              println("{warm(Red)} {warm(Green)} {warm(Blue)}")
+              println("${'$'}{warm(Red)} ${'$'}{warm(Green)} ${'$'}{warm(Blue)}")
             }
         """.trimIndent())
         assertEquals("true true false\n", out)
@@ -247,7 +247,7 @@ class AdtTest {
                 P(x, y) -> x + y
               }
 
-            pub fn main() -> Unit !io = println("{sum(P(3, 4))}")
+            pub fn main() -> Unit !io = println("${'$'}{sum(P(3, 4))}")
         """.trimIndent())
         assertEquals("7\n", out)
     }
@@ -264,7 +264,7 @@ class AdtTest {
                 Circle(r) -> 1
               }
 
-            pub fn main() -> Unit !io = println("{f(Point)}")
+            pub fn main() -> Unit !io = println("${'$'}{f(Point)}")
         """.trimIndent())
         assertHasError(diags, "non-exhaustive match, missing: Rect, Point")
     }
@@ -280,7 +280,7 @@ class AdtTest {
                 Blue        -> 2
               }
 
-            pub fn main() -> Unit !io = println("{f(Red)}")
+            pub fn main() -> Unit !io = println("${'$'}{f(Red)}")
         """.trimIndent())
         assertHasError(diags, "non-exhaustive match, missing: Red")
     }
@@ -352,7 +352,7 @@ class AdtTest {
                 _       -> 0.0
               }
 
-            pub fn main() -> Unit !io = println("{f(Point)}")
+            pub fn main() -> Unit !io = println("${'$'}{f(Point)}")
         """.trimIndent())
         assertHasError(diags, "pattern for `Rect` does not mention: h")
     }
@@ -369,7 +369,7 @@ class AdtTest {
                 _   -> 0
               }
 
-            pub fn main() -> Unit !io = println("{f(Point)}")
+            pub fn main() -> Unit !io = println("${'$'}{f(Point)}")
         """.trimIndent())
         assertHasError(diags, "`Red` is a Color constructor, but the scrutinee is Shape")
     }
@@ -385,7 +385,7 @@ class AdtTest {
                 _ -> 0.0
               }
 
-            pub fn main() -> Unit !io = println("{f(Point)}")
+            pub fn main() -> Unit !io = println("${'$'}{f(Point)}")
         """.trimIndent())
         assertHasError(diags, "or-pattern alternatives cannot introduce bindings")
     }
@@ -408,7 +408,7 @@ class AdtTest {
         val diags = errorsOf("""
             $shapePrelude
 
-            pub fn main() -> Unit !io = println("{Point}")
+            pub fn main() -> Unit !io = println("${'$'}{Point}")
         """.trimIndent())
         assertHasError(diags, "cannot interpolate a value of type Shape")
     }

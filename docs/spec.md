@@ -63,19 +63,22 @@ true false not
 
 ### 1.6 字符串与插值
 
-双引号字符串，支持转义 `\n \t \\ \" \{` 与 Unicode `\u{1F600}`。
+双引号字符串，支持转义 `\n \t \\ \" \$` 与 Unicode `\u{1F600}`。
+**花括号 `{` `}` 是普通字符，无需转义**——写 JSON、CSS、代码生成很方便。
 
-`{expr}` 为插值，`expr` 是任意表达式，其类型必须实现 `to_string`
-（v0.1：所有内建类型与派生了 `Show` 的用户类型，见 §4.3）：
+插值由 `$` 引导（同 Kotlin/Swift）：`$name` 插入一个简单标识符，`${expr}` 插入
+任意表达式；被插值的类型必须实现 `to_string`（v0.1：所有内建类型与派生了 `Show`
+的用户类型，见 §4.3）：
 
 ```dawn
 let n = 3
-println("got {n} items, first = {list.get(0)}")
+println("got $n items, first = ${list.get(0)}")
 ```
 
+`$` 后不接标识符或 `{` 时就是字面美元号（`"$5"` 无需转义）；要强制字面 `$` 用 `\$`。
 插值内的表达式效果并入整个字符串表达式的效果。
 
-多行字符串用三引号 `"""`，首尾换行与公共缩进被剥除。
+多行字符串用三引号 `"""`，首尾换行与公共缩进被剥除；插值规则相同。
 
 ### 1.7 换行与分号
 
@@ -183,7 +186,7 @@ type Meters = Float          # 透明别名（v0.1 只有透明别名，不是 n
 fn add(a: Int, b: Int) -> Int = a + b
 
 fn greet(name: String) -> Unit !io = {
-  println("hi, {name}")
+  println("hi, $name")
 }
 ```
 
@@ -309,7 +312,7 @@ let sign = if x > 0 { 1 } else if x < 0 { -1 } else { 0 }
 ### 4.7 循环
 
 ```dawn
-for x in [1, 2, 3] { println("{x}") }
+for x in [1, 2, 3] { println("$x") }
 while queue.non_empty() { ... }
 ```
 
@@ -326,8 +329,8 @@ while queue.non_empty() { ... }
 ```dawn
 match shape {
   Circle(r) if r > 100.0 -> "big circle"
-  Circle(r)              -> "circle {r}"
-  Rect(w, h)             -> "rect {w}x{h}"
+  Circle(r)              -> "circle $r"
+  Rect(w, h)             -> "rect $wx$h"
   Point                  -> "point"
 }
 ```

@@ -62,7 +62,7 @@ class ComptimeTest {
             const GREETING: String = "hi " ++ "there"
             const RATIO: Float = 1.0 / 4.0
 
-            pub fn main() -> Unit !io = println("{MAX_DEPTH} {GREETING} {RATIO}")
+            pub fn main() -> Unit !io = println("${'$'}{MAX_DEPTH} ${'$'}{GREETING} ${'$'}{RATIO}")
             """.trimIndent(),
         )
         assertEquals("64 hi there 0.25\n", out)
@@ -77,7 +77,7 @@ class ComptimeTest {
             const BASE: Int = 7
             const AREA: Int = square(BASE)
 
-            pub fn main() -> Unit !io = println("{AREA}")
+            pub fn main() -> Unit !io = println("${'$'}{AREA}")
             """.trimIndent(),
         )
         assertEquals("49\n", out)
@@ -93,10 +93,10 @@ class ComptimeTest {
 
             pub fn main() -> Unit !io = {
               match TABLE.get(4) {
-                Some(v) -> println("{v}")
+                Some(v) -> println("${'$'}v")
                 None -> println("?")
               }
-              println("{len(TABLE)}")
+              println("${'$'}{len(TABLE)}")
             }
             """.trimIndent(),
         )
@@ -118,7 +118,7 @@ class ComptimeTest {
               a
             }
 
-            pub fn main() -> Unit !io = println("{comptime { fib(30) }}")
+            pub fn main() -> Unit !io = println("${'$'}{comptime { fib(30) }}")
             """.trimIndent(),
         )
         assertEquals("832040\n", out)
@@ -139,9 +139,9 @@ class ComptimeTest {
             pub fn main() -> Unit !io = {
               println(BANNER)
               let (n, s) = PAIR
-              println("{n} {s}")
+              println("${'$'}n ${'$'}s")
               match FOUND {
-                Some(v) -> println("even: {v}")
+                Some(v) -> println("even: ${'$'}v")
                 None -> println("none")
               }
             }

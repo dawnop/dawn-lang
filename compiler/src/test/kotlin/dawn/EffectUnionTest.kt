@@ -20,8 +20,8 @@ class EffectUnionTest {
         fn inc(x: Int) -> Int = x + 1
         fn dbl(x: Int) -> Int = x * 2
         fn tag(x: Int) -> String !io = {
-          println("tag {x}")
-          "n{x}"
+          println("tag ${'$'}x")
+          "n${'$'}x"
         }
         """.trimIndent()
 
@@ -116,12 +116,12 @@ class EffectUnionTest {
               fn(a) => g(f(a))
 
             fn readTag(x: Int) -> Int !io = {
-              println("read {x}")
+              println("read ${'$'}x")
               x
             }
             fn writeTag(x: Int) -> String !io = {
-              println("write {x}")
-              "ok{x}"
+              println("write ${'$'}x")
+              "ok${'$'}x"
             }
 
             pub fn main() -> Unit !io = {

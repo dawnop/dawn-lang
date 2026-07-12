@@ -66,9 +66,9 @@ class GenericsTest {
               }
 
             pub fn main() -> Unit !io = {
-              println("{or_zero(Some(41)) + 1}")
+              println("${'$'}{or_zero(Some(41)) + 1}")
               let n: Option[Int] = None
-              println("{or_zero(n)}")
+              println("${'$'}{or_zero(n)}")
             }
         """.trimIndent())
         assertEquals("42\n0\n", out)
@@ -84,7 +84,7 @@ class GenericsTest {
               }
 
             pub fn main() -> Unit !io = {
-              println("{or_default(None, 5)}")
+              println("${'$'}{or_default(None, 5)}")
               println(or_default(Some("hi"), "bye"))
             }
         """.trimIndent())
@@ -99,8 +99,8 @@ class GenericsTest {
 
             fn show(r: Result[Int, String]) -> String =
               match r {
-                Ok(v)  -> "ok {v}"
-                Err(m) -> "err: {m}"
+                Ok(v)  -> "ok ${'$'}v"
+                Err(m) -> "err: ${'$'}m"
               }
 
             pub fn main() -> Unit !io = {
@@ -122,7 +122,7 @@ class GenericsTest {
               }
 
             pub fn main() -> Unit !io = {
-              println("{f(Some(Some(7)))} {f(Some(None))} {f(None)}")
+              println("${'$'}{f(Some(Some(7)))} ${'$'}{f(Some(None))} ${'$'}{f(None)}")
             }
         """.trimIndent())
         assertEquals("7 -1 -2\n", out)
@@ -154,7 +154,7 @@ class GenericsTest {
             pub fn main() -> Unit !io = {
               let e: Tree[Int] = Leaf
               let t = insert(insert(insert(e, 5), 2), 8)
-              println("{total(t)}")
+              println("${'$'}{total(t)}")
             }
         """.trimIndent())
         assertEquals("15\n", out)
@@ -171,8 +171,8 @@ class GenericsTest {
             pub fn main() -> Unit !io = {
               let p = Pair { first: 1, second: "one" }
               let q = swap(p)
-              println("{p.first} {p.second}")
-              println("{q.first} {q.second}")
+              println("${'$'}{p.first} ${'$'}{p.second}")
+              println("${'$'}{q.first} ${'$'}{q.second}")
             }
         """.trimIndent())
         assertEquals("1 one\none 1\n", out)
@@ -184,9 +184,9 @@ class GenericsTest {
             fn id[T](x: T) -> T = x
 
             pub fn main() -> Unit !io = {
-              println("{id(42)}")
+              println("${'$'}{id(42)}")
               println(id("str"))
-              println("{id(true)}")
+              println("${'$'}{id(true)}")
             }
         """.trimIndent())
         assertEquals("42\nstr\ntrue\n", out)
@@ -199,13 +199,13 @@ class GenericsTest {
         val out = run("""
             pub fn main() -> Unit !io = {
               let xs = [10, 20, 30]
-              println("{len(xs)}")
+              println("${'$'}{len(xs)}")
               match get(xs, 1) {
-                Some(v) -> println("{v}")
+                Some(v) -> println("${'$'}v")
                 None    -> println("missing")
               }
               match get(xs, 99) {
-                Some(v) -> println("{v}")
+                Some(v) -> println("${'$'}v")
                 None    -> println("missing")
               }
             }
@@ -218,10 +218,10 @@ class GenericsTest {
         val out = run("""
             pub fn main() -> Unit !io = {
               let a = [1, 2] ++ [3]
-              println("{a == [1, 2, 3]}")
-              println("{range(1, 4) == a}")
+              println("${'$'}{a == [1, 2, 3]}")
+              println("${'$'}{range(1, 4) == a}")
               let empty: List[Int] = []
-              println("{len(empty ++ a)}")
+              println("${'$'}{len(empty ++ a)}")
             }
         """.trimIndent())
         assertEquals("true\ntrue\n3\n", out)
@@ -241,9 +241,9 @@ class GenericsTest {
                 Some(c) -> println(name(c))
                 None    -> println("?")
               }
-              println("{[Red] == [Red]}")
+              println("${'$'}{[Red] == [Red]}")
               let words = ["a", "b"] ++ ["c"]
-              println("{len(words)}")
+              println("${'$'}{len(words)}")
             }
         """.trimIndent())
         assertEquals("b\ntrue\n3\n", out)
@@ -262,7 +262,7 @@ class GenericsTest {
               for x in [10, 20, 30] {
                 sum = sum + x
               }
-              println("{sum}")
+              println("${'$'}sum")
               for c in [Red, Blue] {
                 print(name(c))
               }
@@ -284,7 +284,7 @@ class GenericsTest {
               acc
             }
 
-            pub fn main() -> Unit !io = println("{sum_to(101)}")
+            pub fn main() -> Unit !io = println("${'$'}{sum_to(101)}")
         """.trimIndent())
         assertEquals("5050\n", out)
     }
@@ -320,7 +320,7 @@ class GenericsTest {
 
             fn f(a: Box, b: List[Int, Int], c: Int[Float]) -> Int = 0
 
-            pub fn main() -> Unit !io = println("{f(Empty, [1], 2)}")
+            pub fn main() -> Unit !io = println("${'$'}{f(Empty, [1], 2)}")
         """.trimIndent())
         assertHasError(diags, "`Box` takes 1 type parameter(s), got 0")
         assertHasError(diags, "List takes exactly one type argument")
@@ -332,7 +332,7 @@ class GenericsTest {
         val diags = errorsOf("""
             fn want_str(o: Option[String]) -> Int = 0
 
-            pub fn main() -> Unit !io = println("{want_str(Some(1))}")
+            pub fn main() -> Unit !io = println("${'$'}{want_str(Some(1))}")
         """.trimIndent())
         // expected-type seeding pins T = String, so the error lands on Some's field
         assertHasError(diags, "field `value` of `Some` is String, got Int")
@@ -367,7 +367,7 @@ class GenericsTest {
                 Some(v) -> v
               }
 
-            pub fn main() -> Unit !io = println("{f(None)}")
+            pub fn main() -> Unit !io = println("${'$'}{f(None)}")
         """.trimIndent())
         assertHasError(diags, "non-exhaustive match, missing: None")
     }

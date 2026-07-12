@@ -83,7 +83,7 @@ class E2eTest {
             fn fib(n: Int) -> Int =
               if n < 2 { n } else { fib(n - 1) + fib(n - 2) }
 
-            pub fn main() -> Unit !io = println("fib(20) = {fib(20)}")
+            pub fn main() -> Unit !io = println("fib(20) = ${'$'}{fib(20)}")
         """.trimIndent())
         assertEquals("fib(20) = 6765\n", out)
     }
@@ -144,7 +144,7 @@ class E2eTest {
             fn countdown(n: Int, acc: Int) -> Int =
               if n == 0 { acc } else { countdown(n - 1, acc + 1) }
 
-            pub fn main() -> Unit !io = println("{countdown(10000000, 0)}")
+            pub fn main() -> Unit !io = println("${'$'}{countdown(10000000, 0)}")
         """.trimIndent())
         assertEquals("10000000\n", out)
     }
@@ -161,7 +161,7 @@ class E2eTest {
               while n > 0 {
                 n = n - 1
               }
-              println("sum={sum} n={n}")
+              println("sum=${'$'}sum n=${'$'}n")
             }
         """.trimIndent())
         assertEquals("sum=5050 n=0\n", out)
@@ -177,7 +177,7 @@ class E2eTest {
                 let a = abs(-7)
                 a * 2
               }
-              println("{x}")
+              println("${'$'}x")
             }
         """.trimIndent())
         assertEquals("14\n", out)
@@ -189,8 +189,8 @@ class E2eTest {
             pub fn main() -> Unit !io = {
               let pi = 3.14
               let tau = pi * 2.0
-              println("{tau}")
-              println("{1.5 < 2.5} {"a" < "b"} {3 >= 3}")
+              println("${'$'}tau")
+              println("${'$'}{1.5 < 2.5} ${'$'}{"a" < "b"} ${'$'}{3 >= 3}")
             }
         """.trimIndent())
         assertEquals("6.28\ntrue true true\n", out)
@@ -201,7 +201,7 @@ class E2eTest {
         val out = run("""
             pub fn main() -> Unit !io = {
               let s = "foo" ++ "bar"
-              println("{s == "foobar"} {s != "x"} {not (s == "x")}")
+              println("${'$'}{s == "foobar"} ${'$'}{s != "x"} ${'$'}{not (s == "x")}")
             }
         """.trimIndent())
         assertEquals("true true true\n", out)
@@ -215,7 +215,7 @@ class E2eTest {
 
             pub fn main() -> Unit !io = {
               let r = 5 |> double |> plus(3)
-              println("{r}")
+              println("${'$'}r")
             }
         """.trimIndent())
         assertEquals("13\n", out)
@@ -230,7 +230,7 @@ class E2eTest {
               let r = 5
                 |> double
                 |> double
-              println("{r}")
+              println("${'$'}r")
             }
         """.trimIndent())
         assertEquals("20\n", out)
@@ -239,7 +239,7 @@ class E2eTest {
     @Test
     fun panicMessage() {
         val msg = runExpectPanic("""
-            pub fn main() -> Unit !io = panic("boom: {1 + 1}")
+            pub fn main() -> Unit !io = panic("boom: ${'$'}{1 + 1}")
         """.trimIndent())
         assertEquals("boom: 2", msg)
     }
@@ -250,7 +250,7 @@ class E2eTest {
             fn safe_div(a: Int, b: Int) -> Int =
               if b == 0 { panic("div by zero") } else { a / b }
 
-            pub fn main() -> Unit !io = println("{safe_div(10, 2)}")
+            pub fn main() -> Unit !io = println("${'$'}{safe_div(10, 2)}")
         """.trimIndent())
         assertEquals("5\n", out)
     }
@@ -295,7 +295,7 @@ class E2eTest {
             pub fn main() -> Unit !io = {
               let x = 1
               x = 2
-              println("{x}")
+              println("${'$'}x")
             }
         """.trimIndent())
         assertHasError(diags, "cannot be assigned")
@@ -322,7 +322,7 @@ class E2eTest {
     @Test
     fun noImplicitConversion() {
         val diags = errorsOf("""
-            pub fn main() -> Unit !io = println("{1 + 2.0}")
+            pub fn main() -> Unit !io = println("${'$'}{1 + 2.0}")
         """.trimIndent())
         assertHasError(diags, "same type")
     }
@@ -332,7 +332,7 @@ class E2eTest {
         // arms that all carry guards do not count as exhaustive
         val diags = errorsOf("""
             fn f(n: Int) -> Int = match n { x if x > 0 -> x }
-            pub fn main() -> Unit !io = println("{f(1)}")
+            pub fn main() -> Unit !io = println("${'$'}{f(1)}")
         """.trimIndent())
         assertHasError(diags, "non-exhaustive")
     }

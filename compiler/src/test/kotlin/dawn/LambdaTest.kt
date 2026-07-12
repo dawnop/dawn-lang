@@ -62,7 +62,7 @@ class LambdaTest {
             pub fn main() -> Unit !io = {
               let double = fn(x: Int) => x * 2
               let add = fn(a: Int, b: Int) => a + b
-              println("{double(21)} {add(1, 2)}")
+              println("${'$'}{double(21)} ${'$'}{add(1, 2)}")
             }
         """.trimIndent())
         assertEquals("42 3\n", out)
@@ -73,7 +73,7 @@ class LambdaTest {
         val out = run("""
             pub fn main() -> Unit !io = {
               let inc: fn(Int) -> Int = fn(x) => x + 1
-              println("{inc(41)}")
+              println("${'$'}{inc(41)}")
             }
         """.trimIndent())
         assertEquals("42\n", out)
@@ -85,11 +85,11 @@ class LambdaTest {
             pub fn main() -> Unit !io = {
               let xs = range(1, 6)
               let squares = map(xs, fn(x) => x * x)
-              println("{squares == [1, 4, 9, 16, 25]}")
+              println("${'$'}{squares == [1, 4, 9, 16, 25]}")
               let evens = filter(xs, fn(x) => x % 2 == 0)
-              println("{evens == [2, 4]}")
+              println("${'$'}{evens == [2, 4]}")
               let sum = fold(xs, 0, fn(acc, x) => acc + x)
-              println("{sum}")
+              println("${'$'}sum")
             }
         """.trimIndent())
         assertEquals("true\ntrue\n15\n", out)
@@ -102,9 +102,9 @@ class LambdaTest {
 
             pub fn main() -> Unit !io = {
               let xs = map([1, 2, 3], double)
-              println("{xs == [2, 4, 6]}")
+              println("${'$'}{xs == [2, 4, 6]}")
               let d = double
-              println("{d(10)}")
+              println("${'$'}{d(10)}")
             }
         """.trimIndent())
         assertEquals("true\n20\n", out)
@@ -116,10 +116,10 @@ class LambdaTest {
             fn scale(xs: List[Int], k: Int) -> List[Int] = map(xs, fn(x) => x * k)
 
             pub fn main() -> Unit !io = {
-              println("{scale([1, 2, 3], 10) == [10, 20, 30]}")
+              println("${'$'}{scale([1, 2, 3], 10) == [10, 20, 30]}")
               let offset = 100
               let f = fn(x: Int) => x + offset
-              println("{f(1)}")
+              println("${'$'}{f(1)}")
             }
         """.trimIndent())
         assertEquals("true\n101\n", out)
@@ -134,7 +134,7 @@ class LambdaTest {
                 let inner = fn(c: Int) => a + b + c
                 inner(10)
               }
-              println("{outer(100)}")
+              println("${'$'}{outer(100)}")
             }
         """.trimIndent())
         assertEquals("111\n", out)
@@ -148,7 +148,7 @@ class LambdaTest {
                 |> filter(fn(x) => x % 2 == 1)
                 |> map(fn(x) => x * x)
                 |> fold(0, fn(a, b) => a + b)
-                |> fn(total) => println("sum of odd squares: {total}")
+                |> fn(total) => println("sum of odd squares: ${'$'}total")
             }
         """.trimIndent())
         assertEquals("sum of odd squares: 165\n", out)
@@ -162,12 +162,12 @@ class LambdaTest {
             fn pure_use(x: Int) -> Int = apply_twice(fn(n) => n + 1, x)
 
             pub fn main() -> Unit !io = {
-              println("{pure_use(40)}")
+              println("${'$'}{pure_use(40)}")
               let r = apply_twice(fn(n) => {
                 println("step")
                 n * 2
               }, 3)
-              println("{r}")
+              println("${'$'}r")
             }
         """.trimIndent())
         assertEquals("42\nstep\nstep\n12\n", out)
@@ -178,7 +178,7 @@ class LambdaTest {
         val out = run("""
             pub fn main() -> Unit !io = {
               let _ = map([1, 2], fn(x) => {
-                println("saw {x}")
+                println("saw ${'$'}x")
                 x
               })
               println("done")
@@ -205,8 +205,8 @@ class LambdaTest {
             fn describe(s: Shape) -> String =
               match s {
                 Circle(r) if r > 100.0 -> "a huge circle"
-                Circle(r)              -> "circle with r = {r}"
-                Rect(w, h)             -> "rect {w} x {h}"
+                Circle(r)              -> "circle with r = ${'$'}r"
+                Rect(w, h)             -> "rect ${'$'}w x ${'$'}h"
                 Point                  -> "a point"
               }
 
@@ -221,7 +221,7 @@ class LambdaTest {
               shapes
                 |> map(area)
                 |> fold(0.0, fn(acc, a) => acc + a)
-                |> fn(total) => println("total area: {total}")
+                |> fn(total) => println("total area: ${'$'}total")
             }
         """.trimIndent())
         assertTrue(out.startsWith("circle with r = 1.0\nrect 2.0 x 3.0\na point\na huge circle\ntotal area: "))
@@ -235,7 +235,7 @@ class LambdaTest {
         val diags = errorsOf("""
             fn bad(f: fn(Int) -> Int !io) -> Int = f(1)
 
-            pub fn main() -> Unit !io = println("{bad(fn(x) => x)}")
+            pub fn main() -> Unit !io = println("${'$'}{bad(fn(x) => x)}")
         """.trimIndent())
         assertHasError(diags, "`bad` is not declared !io but calls `f` (!io)")
     }
@@ -245,7 +245,7 @@ class LambdaTest {
         val diags = errorsOf("""
             fn h(f: fn(Int) -> Int !e) -> Int = f(1)
 
-            pub fn main() -> Unit !io = println("{h(fn(x) => x)}")
+            pub fn main() -> Unit !io = println("${'$'}{h(fn(x) => x)}")
         """.trimIndent())
         assertHasError(diags, "`h` is not declared !e but calls `f` (!e)")
     }
@@ -257,11 +257,11 @@ class LambdaTest {
 
             fn pure_caller(x: Int) -> Int =
               twice(fn(n) => {
-                println("{n}")
+                println("${'$'}n")
                 n
               }, x)
 
-            pub fn main() -> Unit !io = println("{pure_caller(1)}")
+            pub fn main() -> Unit !io = println("${'$'}{pure_caller(1)}")
         """.trimIndent())
         assertHasError(diags, "`pure_caller` is not declared !io but calls `twice` (!io)")
     }
@@ -272,7 +272,7 @@ class LambdaTest {
             pub fn main() -> Unit !io = {
               var acc = 0
               let f = fn(x: Int) => x + acc
-              println("{f(1)}")
+              println("${'$'}{f(1)}")
             }
         """.trimIndent())
         assertHasError(diags, "lambdas cannot capture `var` bindings")
@@ -287,7 +287,7 @@ class LambdaTest {
                 acc = acc + x
               }
               f(1)
-              println("{acc}")
+              println("${'$'}acc")
             }
         """.trimIndent())
         assertHasError(diags, "cannot assign to `acc` from inside a lambda")
@@ -312,7 +312,7 @@ class LambdaTest {
             pub fn main() -> Unit !io = {
               let f = a
               let g = a
-              println("{f == g}")
+              println("${'$'}{f == g}")
             }
         """.trimIndent())
         assertHasError(diags, "functions cannot be compared")

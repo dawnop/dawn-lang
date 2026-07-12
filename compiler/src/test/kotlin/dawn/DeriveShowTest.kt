@@ -136,7 +136,7 @@ class DeriveShowTest {
             type Color = | Red | Green | Blue derive Show
 
             pub fn main() -> Unit !io = {
-              println("first is {Red}")
+              println("first is ${'$'}{Red}")
               println(to_string([Red, Green, Blue]))
             }
             """.trimIndent(),
@@ -174,7 +174,7 @@ class DeriveShowTest {
             """
             type Color = | Red | Green
 
-            pub fn main() -> Unit !io = println("c = {Red}")
+            pub fn main() -> Unit !io = println("c = ${'$'}{Red}")
             """.trimIndent(),
             "add `derive Show`",
         )
