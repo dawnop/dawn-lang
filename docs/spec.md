@@ -616,7 +616,10 @@ use java "java.lang.Math"      # Java 互操作（§9），形式不变
 
 - `core/math`：`abs min max sin cos sqrt pow to_float to_int ...`（纯——
   内部以 `@trusted_pure` 包装 `java.lang.Math`）
-- `io`：`println read_line read_file write_file args env ...`（全部 `!io`）
+- `io`：`println read_line read_file write_file list_dir is_dir args env ...`（全部 `!io`）
+  - `write_file(path, content) -> Result[Int, String]` — **自动创建缺失的父目录**
+  - `list_dir(path) -> Result[List[String], String]` — 排序后的条目名；path 不是目录时 `Err`
+  - `is_dir(path) -> Bool` — 不存在或出错都视为 `false`
 
 实现策略：能薄包 Java 就薄包（`String` 直接是 `java.lang.String`），持久 `List`/`Map`/`Set`
 自实现（v0.1 以 `LinkedHashMap`/`LinkedHashSet` copy-on-write 兜底，保插入序确定；

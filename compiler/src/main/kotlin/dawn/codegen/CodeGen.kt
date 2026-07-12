@@ -1392,6 +1392,22 @@ class CodeGen(
             m.visitInsn(ICONST_0)
             m.visitTypeInsn(ANEWARRAY, STR)
             m.visitMethodInsn(INVOKESTATIC, PATH, "of", "(L$STR;[L$STR;)L$PATH;", true)
+            // write_file creates missing parent directories (spec §11)
+            m.visitVarInsn(ASTORE, 3)
+            m.visitVarInsn(ALOAD, 3)
+            m.visitMethodInsn(INVOKEINTERFACE, PATH, "getParent", "()L$PATH;", true)
+            m.visitVarInsn(ASTORE, 4)
+            val noParent = Label()
+            m.visitVarInsn(ALOAD, 4)
+            m.visitJumpInsn(IFNULL, noParent)
+            m.visitVarInsn(ALOAD, 4)
+            m.visitInsn(ICONST_0)
+            m.visitTypeInsn(ANEWARRAY, "java/nio/file/attribute/FileAttribute")
+            m.visitMethodInsn(INVOKESTATIC, FILES, "createDirectories",
+                "(L$PATH;[Ljava/nio/file/attribute/FileAttribute;)L$PATH;", false)
+            m.visitInsn(POP)
+            m.visitLabel(noParent)
+            m.visitVarInsn(ALOAD, 3)
             m.visitVarInsn(ALOAD, 1)
             m.visitInsn(ICONST_0)
             m.visitTypeInsn(ANEWARRAY, "java/nio/file/OpenOption")
@@ -1415,6 +1431,84 @@ class CodeGen(
             m.visitVarInsn(ALOAD, 2)
             m.visitMethodInsn(INVOKESPECIAL, "Result\$Err", "<init>", "(L$OBJ;)V", false)
             m.visitInsn(ARETURN)
+            m.visitMaxs(0, 0)
+            m.visitEnd()
+        }
+
+        // listDir: sorted entry names, Err when the path is not a directory
+        run {
+            val m = cw.visitMethod(ACC_PUBLIC or ACC_STATIC, "listDir", "(L$STR;)LResult;", null, null)
+            m.visitCode()
+            val tryStart = Label()
+            val tryEnd = Label()
+            val handler = Label()
+            val haveNames = Label()
+            m.visitTryCatchBlock(tryStart, tryEnd, handler, "java/lang/Exception")
+            m.visitLabel(tryStart)
+            m.visitTypeInsn(NEW, "java/io/File")
+            m.visitInsn(DUP)
+            m.visitVarInsn(ALOAD, 0)
+            m.visitMethodInsn(INVOKESPECIAL, "java/io/File", "<init>", "(L$STR;)V", false)
+            m.visitMethodInsn(INVOKEVIRTUAL, "java/io/File", "list", "()[L$STR;", false)
+            m.visitVarInsn(ASTORE, 1)
+            m.visitVarInsn(ALOAD, 1)
+            m.visitJumpInsn(IFNONNULL, haveNames)
+            m.visitTypeInsn(NEW, "Result\$Err")
+            m.visitInsn(DUP)
+            m.visitLdcInsn("not a directory: ")
+            m.visitVarInsn(ALOAD, 0)
+            m.visitMethodInsn(INVOKEVIRTUAL, STR, "concat", "(L$STR;)L$STR;", false)
+            m.visitMethodInsn(INVOKESPECIAL, "Result\$Err", "<init>", "(L$OBJ;)V", false)
+            m.visitInsn(ARETURN)
+            m.visitLabel(haveNames)
+            m.visitVarInsn(ALOAD, 1)
+            m.visitMethodInsn(INVOKESTATIC, "java/util/Arrays", "sort", "([L$OBJ;)V", false)
+            m.visitTypeInsn(NEW, "Result\$Ok")
+            m.visitInsn(DUP)
+            m.visitTypeInsn(NEW, ARRAYLIST)
+            m.visitInsn(DUP)
+            m.visitVarInsn(ALOAD, 1)
+            m.visitMethodInsn(INVOKESTATIC, "java/util/Arrays", "asList",
+                "([L$OBJ;)Ljava/util/List;", false)
+            m.visitMethodInsn(INVOKESPECIAL, ARRAYLIST, "<init>", "(Ljava/util/Collection;)V", false)
+            m.visitMethodInsn(INVOKESPECIAL, "Result\$Ok", "<init>", "(L$OBJ;)V", false)
+            m.visitLabel(tryEnd)
+            m.visitInsn(ARETURN)
+            m.visitLabel(handler)
+            m.visitMethodInsn(INVOKEVIRTUAL, "java/lang/Throwable", "toString", "()L$STR;", false)
+            m.visitVarInsn(ASTORE, 2)
+            m.visitTypeInsn(NEW, "Result\$Err")
+            m.visitInsn(DUP)
+            m.visitVarInsn(ALOAD, 2)
+            m.visitMethodInsn(INVOKESPECIAL, "Result\$Err", "<init>", "(L$OBJ;)V", false)
+            m.visitInsn(ARETURN)
+            m.visitMaxs(0, 0)
+            m.visitEnd()
+        }
+
+        // isDir: false for missing paths and on any path error
+        run {
+            val m = cw.visitMethod(ACC_PUBLIC or ACC_STATIC, "isDir", "(L$STR;)Z", null, null)
+            m.visitCode()
+            val tryStart = Label()
+            val tryEnd = Label()
+            val handler = Label()
+            m.visitTryCatchBlock(tryStart, tryEnd, handler, "java/lang/Exception")
+            m.visitLabel(tryStart)
+            m.visitVarInsn(ALOAD, 0)
+            m.visitInsn(ICONST_0)
+            m.visitTypeInsn(ANEWARRAY, STR)
+            m.visitMethodInsn(INVOKESTATIC, PATH, "of", "(L$STR;[L$STR;)L$PATH;", true)
+            m.visitInsn(ICONST_0)
+            m.visitTypeInsn(ANEWARRAY, "java/nio/file/LinkOption")
+            m.visitMethodInsn(INVOKESTATIC, FILES, "isDirectory",
+                "(L$PATH;[Ljava/nio/file/LinkOption;)Z", false)
+            m.visitLabel(tryEnd)
+            m.visitInsn(IRETURN)
+            m.visitLabel(handler)
+            m.visitInsn(POP)
+            m.visitInsn(ICONST_0)
+            m.visitInsn(IRETURN)
             m.visitMaxs(0, 0)
             m.visitEnd()
         }
@@ -2222,6 +2316,8 @@ class CodeGen(
         "write_file" -> Handle(H_INVOKESTATIC, IO_CLASS, "writeFile",
             "(Ljava/lang/String;Ljava/lang/String;)LResult;", false)
         "read_line" -> Handle(H_INVOKESTATIC, IO_CLASS, "readLine", "()LOption;", false)
+        "list_dir" -> Handle(H_INVOKESTATIC, IO_CLASS, "listDir", "(Ljava/lang/String;)LResult;", false)
+        "is_dir" -> Handle(H_INVOKESTATIC, IO_CLASS, "isDir", "(Ljava/lang/String;)Z", false)
         else -> {
             pendingBuiltinBridges.add(fv)
             Handle(H_INVOKESTATIC, className, "dawn\$bi\$${fv.name}", implDescOf(fv.paramTypes, fv.ret), false)
@@ -2886,6 +2982,16 @@ class CodeGen(
         }
         "read_line" -> {
             mv.visitMethodInsn(INVOKESTATIC, IO_CLASS, "readLine", "()LOption;", false)
+            true
+        }
+        "list_dir" -> {
+            genExpr(e.args[0], tail = false)
+            mv.visitMethodInsn(INVOKESTATIC, IO_CLASS, "listDir", "(Ljava/lang/String;)LResult;", false)
+            true
+        }
+        "is_dir" -> {
+            genExpr(e.args[0], tail = false)
+            mv.visitMethodInsn(INVOKESTATIC, IO_CLASS, "isDir", "(Ljava/lang/String;)Z", false)
             true
         }
         "args" -> {
