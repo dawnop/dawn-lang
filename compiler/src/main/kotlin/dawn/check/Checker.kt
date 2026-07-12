@@ -27,6 +27,8 @@ class Checker(
     private val imports: ImportEnv = ImportEnv.EMPTY,
     /** JVM class of this module, tagged onto its fns/types for multi-module codegen */
     private val ownerClass: String? = null,
+    /** source file of this module, tagged onto its fns/types/consts for cross-file navigation */
+    private val srcPath: String? = null,
 ) {
 
     private val fns = HashMap<String, FnSig>()
@@ -128,6 +130,7 @@ class Checker(
                 sink.error("duplicate type parameter names", d.nameSpan)
             val info = AdtInfo(d.name, d.nameSpan, d.isRecord, d.typeParams.map { TVar(it) })
             info.owner = ownerClass
+            info.srcPath = srcPath
             for ((trait, span) in d.derives) {
                 if (trait == "Show") info.derivesShow = true
                 else sink.error("unknown derivable trait `$trait`", span, "v0.1 can only derive Show")
@@ -166,7 +169,7 @@ class Checker(
                             "a no-payload case is just a bare constructor")
                         ft = TError
                     }
-                    ci.fields.add(FieldInfo(f.name, ft, f.span))
+                    ci.fields.add(FieldInfo(f.name, ft, f.span, srcPath))
                 }
             }
         }
@@ -201,6 +204,7 @@ class Checker(
                 nameSpan = d.nameSpan,
             )
             sig.owner = ownerClass
+            sig.srcPath = srcPath
             d.sig = sig
             d.effVars = ev
             when {
@@ -239,6 +243,7 @@ class Checker(
     private fun processImports() {
         for (u in module.moduleUses) {
             val exp = imports.available[u.path] ?: continue
+            u.exports = exp
             if (u.selective == null) {
                 val prev = moduleAliases.put(u.name, exp)
                 if (prev != null && prev.modPath != exp.modPath)
@@ -312,8 +317,10 @@ class Checker(
             if (!assignable(bt, declared))
                 sink.error("`${d.name}` declares type $declared but its initializer is $bt", d.init.span)
         }
-        if (!consts.containsKey(d.name) && !ctors.containsKey(d.name) && !adts.containsKey(d.name))
+        if (!consts.containsKey(d.name) && !ctors.containsKey(d.name) && !adts.containsKey(d.name)) {
+            d.srcPath = srcPath
             consts[d.name] = d
+        }
     }
 
     /**

@@ -14,6 +14,8 @@ class Target(
     val span: Span,
     val hover: String,
     val defSpan: Span? = null,
+    /** file containing [defSpan]; null = the analyzed document itself */
+    val defPath: String? = null,
 )
 
 fun findTarget(analysis: Analyzed, offset: Int): Target? {
@@ -25,11 +27,11 @@ fun findTarget(analysis: Analyzed, offset: Int): Target? {
 private class TargetQuery(private val analysis: Analyzed, private val offset: Int) {
     var best: Target? = null
 
-    private fun offer(span: Span, hover: String, defSpan: Span? = null) {
+    private fun offer(span: Span, hover: String, defSpan: Span? = null, defPath: String? = null) {
         if (offset < span.start || offset >= span.end) return
         val cur = best
         if (cur == null || span.end - span.start <= cur.span.end - cur.span.start) {
-            best = Target(span, hover, defSpan)
+            best = Target(span, hover, defSpan, defPath)
         }
     }
 
@@ -51,7 +53,23 @@ private class TargetQuery(private val analysis: Analyzed, private val offset: In
                 visitExpr(d.init)
             }
             is UseJavaDecl -> offer(d.nameSpan, "use java \"${d.fqcn}\"", d.nameSpan)
-            is UseModuleDecl -> offer(d.nameSpan, "use ${d.path}", d.nameSpan)
+            is UseModuleDecl -> {
+                val exp = d.exports
+                // the module path itself jumps to the top of the module's file
+                offer(d.nameSpan, "use ${d.path}",
+                    if (exp?.srcPath != null) Span(0, 0) else null, exp?.srcPath)
+                if (exp != null) for (imp in d.selective.orEmpty()) {
+                    exp.fns[imp.name]?.let { offer(imp.span, it.render(), it.nameSpan, it.srcPath) }
+                    exp.types[imp.name]?.let {
+                        val summary = it.ctors.joinToString(" | ") { c -> c.name }
+                        offer(imp.span, "type ${it.name} = $summary", it.nameSpan, it.srcPath)
+                    }
+                    exp.ctors[imp.name]?.let { offer(imp.span, it.render(), it.nameSpan, it.adt.srcPath) }
+                    exp.consts[imp.name]?.let {
+                        offer(imp.span, "const ${it.name}: ${it.constType}", it.nameSpan, it.srcPath)
+                    }
+                }
+            }
             is TypeDecl -> {
                 val info = analysis.types[d.name]
                 val summary = info?.ctors?.joinToString(" | ") { it.name } ?: ""
@@ -78,7 +96,7 @@ private class TargetQuery(private val analysis: Analyzed, private val offset: In
                     val kw = if (sym.mutable) "var" else "let"
                     offer(e.span, "$kw ${sym.name}: ${sym.type}", sym.defSpan)
                 }
-                e.fnValue?.let { offer(e.span, it.render(), it.nameSpan) }
+                e.fnValue?.let { offer(e.span, it.render(), it.nameSpan, it.srcPath) }
             }
             is Lambda -> {
                 for (p in e.params) {
@@ -92,24 +110,26 @@ private class TargetQuery(private val analysis: Analyzed, private val offset: In
                 e.args.forEach { visitExpr(it) }
             }
             is MethodCall -> {
-                sigOf(e.name)?.let { offer(e.nameSpan, it.render(), it.nameSpan) }
+                // module-qualified (alias.fn) and UFCS calls carry the resolved sig on the desugared Call
+                (e.desugared?.sig ?: sigOf(e.name))?.let { offer(e.nameSpan, it.render(), it.nameSpan, it.srcPath) }
                 visitExpr(e.target)
                 e.args.forEach { visitExpr(it) }
             }
             is ListLit -> e.elems.forEach { visitExpr(it) }
             is TupleLit -> e.elems.forEach { visitExpr(it) }
             is Call -> {
-                sigOf(e.callee)?.let { offer(e.calleeSpan, it.render(), it.nameSpan) }
+                (e.sig ?: sigOf(e.callee))?.let { offer(e.calleeSpan, it.render(), it.nameSpan, it.srcPath) }
                 e.args.forEach { visitExpr(it) }
             }
             is CtorCall -> {
-                e.ctor?.let { offer(e.calleeSpan, it.render(), it.nameSpan) }
+                e.ctor?.let { offer(e.calleeSpan, it.render(), it.nameSpan, it.adt.srcPath) }
+                e.constDecl?.let { offer(e.calleeSpan, "const ${it.name}: ${it.constType}", it.nameSpan, it.srcPath) }
                 e.spread?.let { visitExpr(it) }
                 e.args.forEach { visitExpr(it.expr) }
             }
             is FieldAccess -> {
                 visitExpr(e.target)
-                e.field?.let { offer(e.fieldSpan, "${it.name}: ${it.type}", it.defSpan) }
+                e.field?.let { offer(e.fieldSpan, "${it.name}: ${it.type}", it.defSpan, it.srcPath) }
             }
             is StrLit -> e.parts.forEach { if (it is StrPart.Interp) visitExpr(it.expr) }
             is ComptimeExpr -> visitExpr(e.body)
@@ -144,7 +164,7 @@ private class TargetQuery(private val analysis: Analyzed, private val offset: In
                 offer(p.span, "${sym.name}: ${sym.type}", p.span)
             }
             is CtorPat -> {
-                p.ctor?.let { offer(p.nameSpan, it.render(), it.nameSpan) }
+                p.ctor?.let { offer(p.nameSpan, it.render(), it.nameSpan, it.adt.srcPath) }
                 p.args.forEach { visitPattern(it.pattern) }
             }
             is TuplePat -> p.elems.forEach { visitPattern(it) }

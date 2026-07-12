@@ -51,6 +51,8 @@ class CheckedModule(
     val module: Module,
     val functions: Map<String, FnSig>,
     val types: Map<String, AdtInfo>,
+    /** absolute path of the module's file (cross-file navigation); null in tests without files */
+    val srcPath: String? = null,
 )
 
 /**
@@ -65,6 +67,8 @@ class ModuleExports(
     val ctors: Map<String, CtorInfo>,
     val consts: Map<String, dawn.ast.ConstDecl>,
     val allNames: Set<String>,
+    /** absolute path of the module's file (cross-file navigation); null in tests without files */
+    val srcPath: String? = null,
 )
 
 /**
@@ -88,7 +92,7 @@ private fun exportsOf(cm: CheckedModule): ModuleExports {
     val pubFns = m.fns.filter { it.pub }.mapNotNull { cm.functions[it.name] }.associateBy { it.name }
     val pubConsts = m.consts.filter { it.pub }.associateBy { it.name }
     val allNames = (m.fns.map { it.name } + m.types.map { it.name } + m.consts.map { it.name }).toSet()
-    return ModuleExports(cm.modPath, cm.className, pubFns, pubTypes, pubCtors, pubConsts, allNames)
+    return ModuleExports(cm.modPath, cm.className, pubFns, pubTypes, pubCtors, pubConsts, allNames, cm.srcPath)
 }
 
 /**
@@ -124,7 +128,8 @@ fun analyzeProgram(loaded: ModuleLoadResult, comptimeFuel: Long = 100_000_000L):
         for (d in mf.diagnostics) diags.add(LocatedDiag(mf.source, d))
         val parseFailed = mf.diagnostics.any { it.severity == Severity.ERROR }
         val sink = DiagnosticSink()
-        val checker = Checker(mf.module, sink, ImportEnv(exportsByPath.toMap()), mf.className)
+        val srcPath = mf.file.absoluteFile.path
+        val checker = Checker(mf.module, sink, ImportEnv(exportsByPath.toMap()), mf.className, srcPath)
         if (!parseFailed) {
             checker.check()
             if (sink.all.none { it.severity == Severity.ERROR }) {
@@ -133,7 +138,7 @@ fun analyzeProgram(loaded: ModuleLoadResult, comptimeFuel: Long = 100_000_000L):
         }
         for (d in sink.all) diags.add(LocatedDiag(mf.source, d))
         val cm = CheckedModule(mf.modPath, mf.className, mf.source, mf.module,
-            checker.functions, checker.types)
+            checker.functions, checker.types, srcPath)
         checked.add(cm)
         exportsByPath[mf.modPath] = exportsOf(cm)
     }

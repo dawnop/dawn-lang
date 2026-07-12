@@ -102,6 +102,8 @@ class ConstDecl(
     var constType: Type? = null
     /** the evaluated constant, filled by comptime evaluation */
     var value: dawn.check.CValue? = null
+    /** source file of the declaring module (go-to-definition); null = current file */
+    var srcPath: String? = null
 }
 
 /** use java "java.lang.StringBuilder" (spec §9): an opaque type + a static namespace */
@@ -128,6 +130,9 @@ class UseModuleDecl(
 ) : Decl(pub = false, name = segments.last(), span = span, nameSpan = nameSpan) {
     /** module path as used in diagnostics and as the resolved key: "json/lexer" */
     val path: String get() = segments.joinToString("/")
+
+    /** the imported module's surface, filled by the checker (LSP navigation) */
+    var exports: dawn.check.ModuleExports? = null
 }
 
 /** test "name" { ... } — compiled and run only by `dawn test` (spec §3.4) */

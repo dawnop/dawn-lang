@@ -119,10 +119,32 @@ private class DawnTextDocumentService(private val server: DawnLanguageServer) : 
     ): CompletableFuture<Either<List<Location>, List<LocationLink>>> {
         val st = docs[params.textDocument.uri] ?: return completedFuture(Either.forLeft(emptyList()))
         val offset = st.source.lspOffset(params.position.line, params.position.character)
-        val def = findTarget(st.analysis, offset)?.defSpan
+        val target = findTarget(st.analysis, offset)
+        val def = target?.defSpan ?: return completedFuture(Either.forLeft(emptyList()))
+        val loc = locationOf(params.textDocument.uri, st, target.defPath, def)
             ?: return completedFuture(Either.forLeft(emptyList()))
-        val loc = Location(params.textDocument.uri, rangeOf(st.source, def))
         return completedFuture(Either.forLeft(listOf(loc)))
+    }
+
+    /**
+     * Resolve a definition site to a Location. A null [defPath] (or one naming the
+     * requesting document) maps through the live buffer; another file maps through
+     * its open buffer if the client has it open, else through the text on disk.
+     */
+    private fun locationOf(uri: String, st: DocState, defPath: String?, def: Span): Location? {
+        val cur = uriToFile(uri)
+        val defFile = defPath?.let { java.io.File(it) }
+        if (defFile == null || (cur != null && defFile.canonicalPath == cur.canonicalPath)) {
+            return Location(uri, rangeOf(st.source, def))
+        }
+        val open = docs.entries.firstOrNull { uriToFile(it.key)?.canonicalPath == defFile.canonicalPath }
+        if (open != null) return Location(open.key, rangeOf(open.value.source, def))
+        val text = try {
+            defFile.readText()
+        } catch (e: Exception) {
+            return null
+        }
+        return Location(defFile.toPath().toUri().toString(), rangeOf(SourceFile(defPath, text), def))
     }
 
     override fun documentSymbol(

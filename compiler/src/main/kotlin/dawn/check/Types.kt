@@ -199,6 +199,9 @@ class AdtInfo(
      */
     var owner: String? = null
 
+    /** source file of the defining module (go-to-definition); null = prelude/current file */
+    var srcPath: String? = null
+
     /** the declared "self type": Tree[T] inside its own declaration */
     val type: Type.TAdt = Type.TAdt(this, typeParams)
 
@@ -222,7 +225,7 @@ class CtorInfo(val adt: AdtInfo, val name: String, val nameSpan: Span?) {
     }
 }
 
-class FieldInfo(val name: String, val type: Type, val defSpan: Span? = null)
+class FieldInfo(val name: String, val type: Type, val defSpan: Span? = null, val srcPath: String? = null)
 
 /** Resolved local variable/parameter; the checker fills this into the AST, codegen consumes it. */
 class Symbol(val name: String, val type: Type, val mutable: Boolean, val defSpan: Span) {
@@ -244,6 +247,9 @@ class FnSig(
 ) {
     /** JVM class of the defining module (spec §12.2); null = builtin/single-file */
     var owner: String? = null
+
+    /** source file of the defining module (go-to-definition); null = builtin/current file */
+    var srcPath: String? = null
 
     val io: Boolean get() = eff == Eff.Io
 
