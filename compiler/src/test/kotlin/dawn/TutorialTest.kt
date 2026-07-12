@@ -79,7 +79,8 @@ class TutorialTest {
         check(tutorial.exists()) { "missing docs/tutorial.md" }
         val bs = blocks()
         check(bs.isNotEmpty()) { "no dawn code blocks found in tutorial" }
-        check(bs.count { it.info.contains("skip-check") } <= 3) { "too many skip-check blocks" }
+        // module examples span multiple files, so they can't compile as standalone blocks
+        check(bs.count { it.info.contains("skip-check") } <= 6) { "too many skip-check blocks" }
         return bs.mapIndexed { idx, b ->
             DynamicTest.dynamicTest("block ${idx + 1}${if (b.info.contains("skip-check")) " (skip-check)" else ""}") {
                 if (b.info.contains("skip-check")) return@dynamicTest

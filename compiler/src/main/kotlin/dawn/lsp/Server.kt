@@ -2,6 +2,7 @@ package dawn.lsp
 
 import dawn.check.Analyzed
 import dawn.check.analyze
+import dawn.check.analyzeDocument
 import dawn.diag.Severity
 import dawn.diag.SourceFile
 import dawn.diag.Span
@@ -23,9 +24,20 @@ fun runLspServer() {
 }
 
 /** One open document: text + line index + fresh analysis. Rebuilt on every change (M0 files are tiny). */
-private class DocState(text: String) {
+private class DocState(uri: String, text: String) {
     val source = SourceFile("<lsp>", text)
-    val analysis: Analyzed = analyze(text)
+    // resolve imports from the file's project when the URI is a real path (spec §10)
+    val analysis: Analyzed = run {
+        val file = uriToFile(uri)
+        if (file != null) analyzeDocument(file, text) else analyze(text)
+    }
+}
+
+/** file:// URI → File, or null if the URI isn't a local path (unsaved/untitled buffers). */
+private fun uriToFile(uri: String): java.io.File? = try {
+    if (uri.startsWith("file:")) java.io.File(java.net.URI(uri)) else null
+} catch (e: Exception) {
+    null
 }
 
 class DawnLanguageServer : LanguageServer, LanguageClientAware {
@@ -79,7 +91,7 @@ private class DawnTextDocumentService(private val server: DawnLanguageServer) : 
     override fun didSave(params: DidSaveTextDocumentParams) {}
 
     private fun update(uri: String, text: String) {
-        val st = DocState(text)
+        val st = DocState(uri, text)
         docs[uri] = st
         val diags = st.analysis.diagnostics.map { d ->
             Diagnostic(

@@ -72,10 +72,11 @@ object ModuleLoader {
     /**
      * File mode: root = nearest `src` ancestor of the file, else the file's own
      * directory (spec §10.1). Loads the entry file plus its transitive use-closure.
+     * [overrides] (abs path → text) lets an editor supply unsaved buffer content.
      */
-    fun loadFile(file: File): ModuleLoadResult {
+    fun loadFile(file: File, overrides: Map<String, String> = emptyMap()): ModuleLoadResult {
         val root = nearestSrcRoot(file)
-        return resolve(root, listOf(file), ArrayList(), followUsesOnly = true)
+        return resolve(root, listOf(file), ArrayList(), followUsesOnly = true, overrides = overrides)
     }
 
     private fun nearestSrcRoot(file: File): File {
@@ -92,6 +93,7 @@ object ModuleLoader {
         seedFiles: List<File>,
         diags: ArrayList<LocatedDiag>,
         followUsesOnly: Boolean = false,
+        overrides: Map<String, String> = emptyMap(),
     ): ModuleLoadResult {
         val byPath = LinkedHashMap<String, ModuleFile>()
         val byFile = HashMap<String, ModuleFile>()
@@ -99,8 +101,9 @@ object ModuleLoader {
         fun load(file: File): ModuleFile? {
             val canon = file.absoluteFile.path
             byFile[canon]?.let { return it }
-            if (!file.isFile) return null
-            val text = file.readText()
+            val override = overrides[canon]
+            if (override == null && !file.isFile) return null
+            val text = override ?: file.readText()
             val source = SourceFile(file.path, text)
             val sink = DiagnosticSink()
             val comments = ArrayList<dawn.lex.Token>()

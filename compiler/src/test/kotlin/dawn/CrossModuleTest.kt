@@ -1,5 +1,6 @@
 package dawn
 
+import dawn.check.analyzeDocument
 import dawn.check.analyzeProject
 import org.junit.jupiter.api.io.TempDir
 import java.io.File
@@ -199,6 +200,33 @@ class CrossModuleTest {
             "util.dawn" to "pub fn double(x: Int) -> Int = x * 2\n",
         ))
         assertError(dir, "conflicts with a name imported from `util`")
+    }
+
+    // ---- LSP document analysis (spec §10): imports resolve from disk ----
+
+    @Test
+    fun `analyzeDocument resolves imports for an in-editor buffer`(@TempDir dir: File) {
+        project(dir, mapOf(
+            "main.dawn" to "use util\npub fn main() -> Unit !io = println(\"old\")\n",
+            "util.dawn" to "pub fn double(x: Int) -> Int = x * 2\n",
+        ))
+        // an unsaved buffer that now calls the imported function
+        val buffer = "use util\npub fn main() -> Unit !io = println(to_string(util.double(21)))\n"
+        val analysis = analyzeDocument(File(dir, "src/main.dawn"), buffer)
+        assertFalse(analysis.hasErrors,
+            "cross-module names should resolve in the LSP:\n" +
+                analysis.diagnostics.joinToString("\n") { it.message })
+    }
+
+    @Test
+    fun `analyzeDocument still reports genuine cross-module errors`(@TempDir dir: File) {
+        project(dir, mapOf(
+            "main.dawn" to "use util\npub fn main() -> Unit !io = println(\"x\")\n",
+            "util.dawn" to "pub fn double(x: Int) -> Int = x * 2\n",
+        ))
+        val buffer = "use util\npub fn main() -> Unit !io = println(to_string(util.nope(1)))\n"
+        val analysis = analyzeDocument(File(dir, "src/main.dawn"), buffer)
+        assertTrue(analysis.diagnostics.any { it.message.contains("no exported function `nope`") })
     }
 
     @Test

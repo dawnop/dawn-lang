@@ -145,3 +145,22 @@ fun analyzeProject(path: File, comptimeFuel: Long = 100_000_000L): AnalyzedProgr
     val loaded = if (path.isDirectory) ModuleLoader.loadDirectory(path) else ModuleLoader.loadFile(path)
     return analyzeProgram(loaded, comptimeFuel)
 }
+
+/**
+ * Analyze one open editor document (spec §10) with its imports resolved from disk,
+ * using [text] as the buffer for [path] itself. Falls back to single-file analysis
+ * when the file has no module imports. Returns an [Analyzed] for just this file, so
+ * the language server's hover/definition/diagnostics keep working across modules.
+ */
+fun analyzeDocument(path: File, text: String, comptimeFuel: Long = 100_000_000L): Analyzed {
+    // fast path: a file that imports no modules needs no project context
+    if (!Regex("(?m)^\\s*use\\s+[a-z]").containsMatchIn(text)) return analyze(text, comptimeFuel)
+    val abs = path.absoluteFile.path
+    val loaded = ModuleLoader.loadFile(path, overrides = mapOf(abs to text))
+    val program = analyzeProgram(loaded, comptimeFuel)
+    val entryModPath = loaded.modules.firstOrNull { it.file.absoluteFile.path == abs }?.modPath
+        ?: return analyze(text, comptimeFuel)
+    val me = program.modules.firstOrNull { it.modPath == entryModPath } ?: return analyze(text, comptimeFuel)
+    val myDiags = program.diagnostics.filter { it.source === me.source }.map { it.diag }
+    return Analyzed(me.module, myDiags, me.functions, me.types)
+}

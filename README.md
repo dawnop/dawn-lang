@@ -45,14 +45,17 @@ pub fn main() -> Unit !io =
 
 ## 工具链
 
+`<target>` 可以是单个 `.dawn` 文件，也可以是项目目录（`src/main.dawn` 为入口）。
+
 ```bash
 # 构建编译器（需要 JDK 21；native 编译需要 GraalVM）
 gradle :compiler:fatJar
 
-./bin/dawn run examples/m0/fizzbuzz.dawn      # 编译并运行（JVM）
-./bin/dawn build foo.dawn -o app.jar          # 产出可执行 jar
-./bin/dawn build foo.dawn --native -o app     # 产出独立 native 二进制
-./bin/dawn fmt foo.dawn                       # 就地格式化（--check 供 CI 校验）
+./bin/dawn run examples/m0/fizzbuzz.dawn      # 编译并运行单文件（JVM）
+./bin/dawn run examples/m4/hello_mod          # 编译并运行多模块项目
+./bin/dawn build <target> -o app.jar          # 产出可执行 jar
+./bin/dawn build <target> --native -o app     # 产出独立 native 二进制
+./bin/dawn fmt <target>                       # 就地格式化（--check 供 CI 校验）
 ./bin/dawn lsp                                # LSP 服务器（stdio，编辑器用）
 ```
 
@@ -62,9 +65,9 @@ gradle :compiler:fatJar
 编译器前端做了完整的错误恢复——文件残缺时其余部分照常分析，一次报出全部错误。
 VS Code 扩展与 Neovim / Helix 配置见 [editors/](editors/)。
 
-状态：**M0、M1、M2、M3 已实现**——验收样例 [examples/shapes.dawn](examples/shapes.dawn) 与
-[examples/calc.dawn](examples/calc.dawn) 原样通过 `dawn run` 与 `dawn test`，
-JVM 与 native 输出一致。
+状态：**M0、M1、M2、M3、M4 已实现**——验收样例 [examples/shapes.dawn](examples/shapes.dawn)、
+[examples/calc.dawn](examples/calc.dawn) 与多模块 [examples/m4/json](examples/m4/json)
+原样通过 `dawn run` 与 `dawn test`，JVM 与 native 输出一致。
 
 - M0：Int/Float/Bool/String、函数、match、`!io` 效果检查、自递归尾调用消除、
   字符串插值、`dawn run` / `dawn build --native`。
@@ -86,6 +89,11 @@ JVM 与 native 输出一致。
   **构造器作函数值** `map(xs, Some)`；**效果并 `!(e1|e2)`**（规范化，`compose` 可表达）；
   **`derive Show`**（用户类型 `to_string`/插值，渲染成合法 Dawn 源码形状）；
   **教程** [docs/tutorial.md](docs/tutorial.md)（代码块经编译校验）。
+- M4：**模块系统**（多文件项目、`src/` 根约定、整模块 / 选择性 `use`、`pub` 可见性、
+  禁环、拓扑序，`dawn run/test/build/fmt` 吃项目目录）；**`Map`/`Set`**（内建持久容器，
+  保插入序）；**char**（`'a'` 即码点 `Int`，配 `code_points`/`substring` 等码点 API）；
+  验收物 [examples/m4/json](examples/m4/json)——纯 Dawn 多模块 JSON 库，过 JSONTestSuite
+  全部 318 例（JVM 与 native 一致）。
 
 详见 [docs/design.md](docs/design.md) 里程碑。编译器 Kotlin + ASM，
-测试 366 项（`gradle :compiler:test`）。native 二进制启动约 7ms。
+测试 748 项（`gradle :compiler:test`）。native 二进制启动约 7ms。

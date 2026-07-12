@@ -373,5 +373,110 @@ ok
 
 ---
 
+## 12. 模块与项目
+
+超过一个文件就是一个项目。目录约定：模块放在 `src/` 下，入口是 `src/main.dawn`。
+一个 `.dawn` 文件 = 一个模块，模块路径就是它相对 `src/` 的路径。
+
+```
+myapp/
+└── src/
+    ├── main.dawn
+    └── util/
+        └── math.dawn      # 模块 util/math
+```
+
+默认所有声明模块私有，`pub` 才导出。引入有两种：`use util/math` 整模块引入
+（限定访问 `math.double(x)`，别名取路径末段），或 `use util/math.{double}` 选择性
+引入（直接用 `double`）。类型、构造器、常量跨模块只能走选择性引入。
+
+`src/util/math.dawn`：
+
+```dawn skip-check
+pub fn double(x: Int) -> Int = x * 2
+
+pub type Shape =
+  | Circle(r: Float)
+  | Square(side: Float)
+  derive Show
+```
+
+`src/main.dawn`：
+
+```dawn skip-check
+use util/math
+use util/math.{Shape, Circle, Square}
+
+pub fn main() -> Unit !io = {
+  println(to_string(math.double(21)))
+  println(to_string(Circle(2.0)))
+}
+```
+
+用 `dawn run myapp`（传目录）编译并运行整个项目；`dawn test myapp` 跑所有模块的
+test 块，`dawn build myapp` 打成一个 jar。单文件的 `dawn run foo.dawn` 依然可用。
+循环 `use` 是编译错误；一个名字与被引入模块的别名相同也会报错——它们共享一个命名空间。
+
+---
+
+## 13. Map 与 Set
+
+`Map[K, V]` 和 `Set[T]` 是内建的**持久**容器：每次「修改」都返回新容器，原值不变。
+没有字面量语法，全部通过内建函数操作。迭代顺序 = 插入顺序（JVM 与 native 一致）。
+
+```dawn
+pub fn main() -> Unit !io = {
+  let m = map_insert(map_insert(map_empty(), "a", 1), "b", 2)
+  println(to_string(map_get(m, "a")))
+  println(to_string(map_get(m, "z")))
+  println(to_string(map_keys(m)))
+
+  let s = set_from([3, 1, 2, 1, 3])
+  println(to_string(set_size(s)))
+  println(to_string(set_has(s, 2)))
+}
+```
+
+```output
+Some(1)
+None
+["a", "b"]
+3
+true
+```
+
+键可以是任何具结构相等的类型（`Int`/`String`/元组/ADT/record）。`map_get` 返回
+`Option[V]`——查不到是 `None`，不是异常。相等与顺序无关：键值相同的两个 `Map` 相等。
+
+---
+
+## 14. 字符与码点
+
+Dawn 没有独立的字符类型，走 Go 的 rune 路线：字符字面量 `'a'` 就是等于它**码点**的
+`Int`（`'a' == 97`）。于是它在 `match` 里就是普通整数模式，字符串按码点处理。
+
+```dawn
+fn is_digit(c: Int) -> Bool = c >= '0' && c <= '9'
+
+pub fn main() -> Unit !io = {
+  println(to_string(is_digit('7')))
+  println(to_string(str_len("héllo 🙂")))
+  println(substring("世界你好", 0, 2))
+  println(from_code_points([104, 105]))
+}
+```
+
+```output
+true
+7
+世界
+hi
+```
+
+`code_points`/`from_code_points` 在字符串与码点列表间往返（含增补平面的 emoji），
+`str_len` 数码点，`substring` 按码点下标切片，`char_to_string` 把一个码点变成字符串。
+
+---
+
 至此你已见过 Dawn 的全部核心特性。更深的规范见
 [spec.md](spec.md)，设计取舍见 [design.md](design.md)。
