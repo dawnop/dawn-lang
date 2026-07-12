@@ -1,0 +1,24 @@
+# dawn-play: the Dawn Playground runner. Receives source over HTTP, compiles and
+# runs it inside a throwaway sandbox, streams back the output. This is the first
+# real server written in Dawn (spec §9 interop dogfood, M6 warm-up).
+use java "com.sun.net.httpserver.HttpExchange"
+use http/server.{serve, respond, read_body, request_method}
+
+fn handle_health(ex: HttpExchange) -> Unit !io =
+  respond(ex, 200, "text/plain; charset=utf-8", "ok")
+
+# Stage 4a: echo the byte length back. The JSON contract and the run pipeline
+# land in 4b/4c.
+fn handle_run(ex: HttpExchange) -> Unit !io =
+  if request_method(ex) == "POST" {
+    let body = read_body(ex)
+    respond(ex, 200, "text/plain; charset=utf-8", "received ${str_len(body)} chars")
+  } else {
+    respond(ex, 405, "text/plain; charset=utf-8", "POST only")
+  }
+
+pub fn main() -> Unit !io =
+  serve(8087, [
+    ("/health", handle_health),
+    ("/run", handle_run),
+  ])
