@@ -1,35 +1,102 @@
-/* Full-page IDE frame: the whole playground is one big code-window —
-   toolbar (title bar), line-numbered editor, console panel underneath.
+/* VS Code-style full-viewport IDE: explorer sidebar (samples as files) +
+   editor column (toolbar, line-numbered editor, console panel).
    Variables (--mono, --accent, …) resolve from the site's :root in style.css;
    fallbacks keep the dev harness usable standalone. */
 
-/* the page container emitted by the generator (gen_playground) */
+/* This stylesheet only loads on the playground page: turn the page into an
+   app shell — the body becomes a flex column, the IDE takes every pixel under
+   the site header, and the footer goes away. */
+body {
+  display: flex;
+  flex-direction: column;
+  height: 100dvh;
+  box-sizing: border-box; /* the site's gradient border-top counts into 100dvh */
+  margin: 0;
+  overflow: hidden;
+}
+body > .site-header { flex: none; }
+body > .site-footer { display: none; }
+
 .dp-page {
+  flex: 1;
+  min-height: 0;
+  display: flex;
   width: 100%;
-  max-width: 82rem;
-  margin: 1.1rem auto 2rem;
-  padding: 0 1.25rem;
-  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+#dawn-playground {
+  flex: 1;
+  display: flex;
+  min-width: 0;
+  min-height: 0;
 }
 
 .dp-ide {
+  flex: 1;
   display: flex;
-  flex-direction: column;
-  /* fill the viewport under the site header; the footer sits below the fold */
-  height: max(26rem, calc(100dvh - 8.5rem));
-  border: 1px solid var(--border, #d0d7de);
-  border-radius: 10px;
-  background: var(--code-bg-soft, #fafbfc);
-  overflow: hidden;
-  box-shadow: 0 1px 3px rgb(31 35 40 / 0.04);
+  min-width: 0;
+  min-height: 0;
+  background: #fff;
 }
 
-/* ---- toolbar ---- */
+/* ---- explorer sidebar ---- */
+.dp-side {
+  flex: none;
+  width: 13rem;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--border-soft, #e9ecf1);
+  background: var(--code-bg-soft, #fafbfc);
+  overflow-y: auto;
+  padding: 0.6rem 0 1rem;
+}
+
+.dp-sidetitle {
+  font-family: var(--mono, ui-monospace, Menlo, monospace);
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--faint, #8b949e);
+  padding: 0.3rem 1rem 0.5rem;
+}
+
+.dp-file {
+  font-family: var(--mono, ui-monospace, Menlo, monospace);
+  font-size: 0.8rem;
+  text-align: left;
+  padding: 0.34rem 1rem;
+  border: 0;
+  background: none;
+  color: var(--muted, #57606a);
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.dp-file:hover { background: rgb(31 35 40 / 0.04); color: var(--text, #1f2328); }
+.dp-file.active {
+  background: rgb(124 58 237 / 0.08);
+  color: var(--accent, #7c3aed);
+  box-shadow: inset 2px 0 0 var(--accent, #7c3aed);
+}
+
+/* ---- editor column ---- */
+.dp-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
 .dp-bar {
   display: flex;
   align-items: center;
   gap: 0.6rem;
-  padding: 0.5rem 0.85rem;
+  padding: 0.45rem 1rem;
   border-bottom: 1px solid var(--border-soft, #e9ecf1);
   background: var(--code-bg, #f6f8fa);
   flex: none;
@@ -42,17 +109,6 @@
 }
 
 .dp-spacer { flex: 1; }
-
-.dp-samples {
-  font-family: var(--mono, ui-monospace, Menlo, monospace);
-  font-size: 0.78rem;
-  padding: 0.2rem 0.4rem;
-  border: 1px solid var(--border, #d0d7de);
-  border-radius: 6px;
-  background: #fff;
-  color: var(--muted, #57606a);
-  cursor: pointer;
-}
 
 .dp-share {
   font-family: var(--mono, ui-monospace, Menlo, monospace);
@@ -124,6 +180,25 @@
   color: var(--muted, #57606a);
 }
 
+/* error-lens inline messages, after the code on the diagnostic's line */
+.dp-lens {
+  margin-left: 1.6em;
+  padding: 0 0.5em;
+  border-radius: 4px;
+  font-size: 0.82em;
+  font-style: italic;
+  white-space: pre;
+  pointer-events: none;
+}
+.dp-lens-error {
+  color: #b42318;
+  background: rgb(180 35 24 / 0.07);
+}
+.dp-lens-warning {
+  color: #9a6700;
+  background: rgb(154 103 0 / 0.08);
+}
+
 /* ---- console panel ---- */
 .dp-outpanel[hidden] { display: none; } /* display:flex would beat [hidden] */
 .dp-outpanel {
@@ -139,7 +214,7 @@
   display: flex;
   align-items: center;
   gap: 0.7rem;
-  padding: 0.35rem 0.85rem;
+  padding: 0.35rem 1rem;
   border-bottom: 1px solid var(--border-soft, #e9ecf1);
   flex: none;
 }
@@ -173,7 +248,7 @@
 
 .dp-console {
   margin: 0;
-  padding: 0.6rem 0.9rem 0.75rem;
+  padding: 0.6rem 1rem 0.75rem;
   overflow: auto;
   font-family: var(--mono, ui-monospace, Menlo, monospace);
   font-size: 0.82rem;
@@ -194,9 +269,21 @@
   color: #b42318;
 }
 
-@media (max-width: 40rem) {
-  .dp-ide { height: max(24rem, calc(100dvh - 7rem)); }
-  .dp-bar { gap: 0.4rem; flex-wrap: wrap; }
+/* ---- narrow screens: sidebar becomes a horizontal file strip ---- */
+@media (max-width: 44rem) {
+  .dp-ide { flex-direction: column; }
+  .dp-side {
+    width: 100%;
+    flex-direction: row;
+    align-items: center;
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding: 0.25rem 0.5rem;
+    border-right: 0;
+    border-bottom: 1px solid var(--border-soft, #e9ecf1);
+  }
+  .dp-sidetitle { display: none; }
+  .dp-file { flex: none; padding: 0.3rem 0.6rem; border-radius: 6px; }
+  .dp-file.active { box-shadow: none; }
   .dp-fname { display: none; }
-  .dp-samples { max-width: 9rem; }
 }

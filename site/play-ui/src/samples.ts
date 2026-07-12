@@ -1,13 +1,15 @@
-// Curated starter programs for the sample picker. Each must compile and run
-// as-is under `dawn run`.
+// Curated starter programs, shown as "files" in the explorer sidebar. Each
+// must compile and run as-is under `dawn run`.
 export interface Sample {
   label: string
+  file: string
   code: string
 }
 
 export const SAMPLES: Sample[] = [
   {
     label: 'Hello',
+    file: 'hello.dawn',
     code: `pub fn main() -> Unit !io = {
   let name = "Dawn"
   println("hello from $name")
@@ -16,6 +18,7 @@ export const SAMPLES: Sample[] = [
   },
   {
     label: 'ADT + match',
+    file: 'shapes.dawn',
     code: `type Shape =
   | Circle(r: Float)
   | Rect(w: Float, h: Float)
@@ -34,6 +37,7 @@ pub fn main() -> Unit !io = {
   },
   {
     label: 'comptime',
+    file: 'comptime.dawn',
     code: `fn fib(n: Int) -> Int =
   if n < 2 { n } else { fib(n - 1) + fib(n - 2) }
 
@@ -45,6 +49,7 @@ pub fn main() -> Unit !io = println(to_string(FIB10))
   },
   {
     label: 'effects',
+    file: 'effects.dawn',
     code: `# pure: no !io in the signature
 fn double(n: Int) -> Int = n * 2
 

@@ -2,8 +2,16 @@
 // compile-only endpoint (/api/check) and turn the compiler's own report into
 // editor squiggles. Transient failures — busy server (429), rate limiting,
 // network — keep the previous diagnostics instead of flashing them away.
-import { linter, type Diagnostic } from '@codemirror/lint'
+import { linter, forEachDiagnostic, type Diagnostic } from '@codemirror/lint'
 import type { Text } from '@codemirror/state'
+import {
+  Decoration,
+  EditorView,
+  ViewPlugin,
+  WidgetType,
+  type DecorationSet,
+  type ViewUpdate,
+} from '@codemirror/view'
 
 // Parse the compiler's report format:
 //   error: <message>
@@ -56,6 +64,61 @@ export function parseDawnDiagnostics(report: string, doc: Text): Diagnostic[] {
   }
   return out
 }
+
+// Error-lens style inline messages: each diagnostic's first line, rendered
+// after the code on its line (VS Code's Error Lens look). The full message —
+// hints included — stays in the hover tooltip.
+class LensWidget extends WidgetType {
+  constructor(
+    readonly message: string,
+    readonly severity: string,
+  ) {
+    super()
+  }
+  eq(other: LensWidget) {
+    return other.message === this.message && other.severity === this.severity
+  }
+  toDOM() {
+    const span = document.createElement('span')
+    span.className = `dp-lens dp-lens-${this.severity}`
+    span.textContent = this.message
+    return span
+  }
+}
+
+function lensDecorations(view: EditorView): DecorationSet {
+  // one lens per line: collect the first message of each diagnostic line
+  const byLine = new Map<number, { message: string; severity: string }>()
+  forEachDiagnostic(view.state, (d, from) => {
+    const line = view.state.doc.lineAt(from)
+    if (!byLine.has(line.number)) {
+      byLine.set(line.number, { message: d.message.split('\n')[0], severity: d.severity })
+    }
+  })
+  const widgets = [...byLine.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([n, { message, severity }]) =>
+      Decoration.widget({ widget: new LensWidget(message, severity), side: 1 }).range(
+        view.state.doc.line(n).to,
+      ),
+    )
+  return Decoration.set(widgets)
+}
+
+export const errorLens = ViewPlugin.fromClass(
+  class {
+    decorations: DecorationSet
+    constructor(view: EditorView) {
+      this.decorations = lensDecorations(view)
+    }
+    update(u: ViewUpdate) {
+      // diagnostics arrive via state effects and shift with edits; recomputing
+      // on every update is cheap (a handful of diagnostics at most)
+      this.decorations = lensDecorations(u.view)
+    }
+  },
+  { decorations: (v) => v.decorations },
+)
 
 export function dawnLint(endpoint: string) {
   let last: Diagnostic[] = []

@@ -1,7 +1,7 @@
-// Entry: build the Playground UI inside #dawn-playground — a full-page IDE
-// frame (one big code-window): toolbar (file name, samples, share, run), a
-// line-numbered CodeMirror editor filling the viewport, and a console panel
-// that slides in under the editor after a run, play.kotlinlang.org-style.
+// Entry: build the Playground UI inside #dawn-playground — a VS Code-style
+// full-viewport IDE: an explorer sidebar listing the sample programs as files,
+// and an editor column (toolbar, line-numbered CodeMirror, console panel that
+// slides in under the editor after a run).
 import { EditorView, keymap, lineNumbers, highlightActiveLine, highlightActiveLineGutter } from '@codemirror/view'
 import { EditorState } from '@codemirror/state'
 import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands'
@@ -9,7 +9,7 @@ import { closeBrackets, completionKeymap, acceptCompletion } from '@codemirror/a
 import { bracketMatching, indentOnInput } from '@codemirror/language'
 import { lintGutter } from '@codemirror/lint'
 import { dawn } from './dawn-lang'
-import { dawnLint } from './lint'
+import { dawnLint, errorLens } from './lint'
 import { SAMPLES } from './samples'
 import './playground.css'
 
@@ -48,29 +48,36 @@ interface RunResponse {
 function mount(root: HTMLElement) {
   const endpoint = root.dataset.endpoint || '/api/run'
 
-  // ---- frame: one big code-window ----
   const ide = el('div', 'dp-ide')
 
-  const bar = el('div', 'dp-bar')
-  const fname = el('span', 'dp-fname', 'playground.dawn')
-  const picker = el('select', 'dp-samples')
+  // ---- explorer sidebar: the samples as files ----
+  const side = el('aside', 'dp-side')
+  side.appendChild(el('div', 'dp-sidetitle', 'Samples'))
+  const fileBtns: HTMLButtonElement[] = []
   SAMPLES.forEach((s, i) => {
-    const opt = el('option')
-    opt.value = String(i)
-    opt.textContent = s.label
-    picker.appendChild(opt)
+    const b = el('button', 'dp-file', s.file)
+    b.type = 'button'
+    b.title = s.label
+    b.addEventListener('click', () => openSample(i))
+    fileBtns.push(b)
+    side.appendChild(b)
   })
+
+  // ---- editor column ----
+  const main = el('div', 'dp-main')
+
+  const bar = el('div', 'dp-bar')
+  const fname = el('span', 'dp-fname')
   const spacer = el('div', 'dp-spacer')
   const shareBtn = el('button', 'dp-share', 'Share')
   shareBtn.type = 'button'
   const runBtn = el('button', 'dp-run')
   runBtn.type = 'button'
   runBtn.innerHTML = 'Run <kbd>⌘⏎</kbd>'
-  bar.append(fname, picker, spacer, shareBtn, runBtn)
+  bar.append(fname, spacer, shareBtn, runBtn)
 
   const editorHost = el('div', 'dp-editor')
 
-  // ---- console panel, hidden until the first run ----
   const outPanel = el('div', 'dp-outpanel')
   outPanel.hidden = true
   const outHead = el('div', 'dp-outhead')
@@ -83,17 +90,35 @@ function mount(root: HTMLElement) {
   const output = el('pre', 'dp-console')
   outPanel.append(outHead, output)
 
-  ide.append(bar, editorHost, outPanel)
+  main.append(bar, editorHost, outPanel)
+  ide.append(side, main)
   root.appendChild(ide)
 
-  // ---- editor ----
-  const initial = location.hash.length > 1
-    ? decodeShare(location.hash.slice(1)) ?? SAMPLES[0].code
-    : SAMPLES[0].code
+  // ---- current "file" state ----
+  // A shared link opens as its own scratch file; otherwise the first sample.
+  const fromHash = location.hash.length > 1 ? decodeShare(location.hash.slice(1)) : null
+  let current = fromHash != null ? -1 : 0
+  const baseline = () => (current >= 0 ? SAMPLES[current].code : fromHash ?? '')
 
+  function refreshChrome() {
+    const name = current >= 0 ? SAMPLES[current].file : 'shared.dawn'
+    const dirty = view && view.state.doc.toString() !== baseline()
+    fname.textContent = dirty ? `${name} •` : name
+    fileBtns.forEach((b, i) => b.classList.toggle('active', i === current))
+  }
+
+  function openSample(i: number) {
+    current = i
+    view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: SAMPLES[i].code } })
+    outPanel.hidden = true
+    outPanel.dataset.phase = ''
+    refreshChrome()
+  }
+
+  // ---- editor ----
   const view = new EditorView({
     state: EditorState.create({
-      doc: initial,
+      doc: fromHash ?? SAMPLES[0].code,
       extensions: [
         history(),
         lineNumbers(),
@@ -101,6 +126,7 @@ function mount(root: HTMLElement) {
         highlightActiveLine(),
         dawn(),
         dawnLint(endpoint.replace(/\/run$/, '/check')),
+        errorLens,
         lintGutter(),
         bracketMatching(),
         closeBrackets(),
@@ -115,10 +141,14 @@ function mount(root: HTMLElement) {
           indentWithTab,
         ]),
         EditorView.lineWrapping,
+        EditorView.updateListener.of((u) => {
+          if (u.docChanged) refreshChrome()
+        }),
       ],
     }),
     parent: editorHost,
   })
+  refreshChrome()
 
   const currentCode = () => view.state.doc.toString()
 
@@ -184,14 +214,6 @@ function mount(root: HTMLElement) {
       shareBtn.textContent = 'Copy the URL'
     }
     setTimeout(() => (shareBtn.textContent = 'Share'), 1500)
-  })
-  picker.addEventListener('change', () => {
-    const s = SAMPLES[Number(picker.value)]
-    if (s) {
-      view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: s.code } })
-      outPanel.hidden = true
-      outPanel.dataset.phase = ''
-    }
   })
 }
 
