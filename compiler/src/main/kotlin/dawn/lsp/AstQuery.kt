@@ -51,6 +51,7 @@ private class TargetQuery(private val analysis: Analyzed, private val offset: In
                 visitExpr(d.init)
             }
             is UseJavaDecl -> offer(d.nameSpan, "use java \"${d.fqcn}\"", d.nameSpan)
+            is UseModuleDecl -> offer(d.nameSpan, "use ${d.path}", d.nameSpan)
             is TypeDecl -> {
                 val info = analysis.types[d.name]
                 val summary = info?.ctors?.joinToString(" | ") { it.name } ?: ""

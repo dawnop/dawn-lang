@@ -17,6 +17,7 @@ class Module(
     val tests: List<TestDecl> by lazy { decls.filterIsInstance<TestDecl>() }
     val consts: List<ConstDecl> by lazy { decls.filterIsInstance<ConstDecl>() }
     val javaUses: List<UseJavaDecl> by lazy { decls.filterIsInstance<UseJavaDecl>() }
+    val moduleUses: List<UseModuleDecl> by lazy { decls.filterIsInstance<UseModuleDecl>() }
 }
 
 sealed class Decl(
@@ -109,6 +110,25 @@ class UseJavaDecl(
     span: Span,
     nameSpan: Span,
 ) : Decl(pub = false, name = fqcn.substringAfterLast('.'), span = span, nameSpan = nameSpan)
+
+/** one imported name in a selective use: `use m.{Json, render}` (spec §10.2) */
+class ImportName(val name: String, val span: Span)
+
+/**
+ * use json/lexer  — whole-module import; alias = last path segment (`lexer`).
+ * use json/value.{Json, render} — selective import; `selective` non-null.
+ * (spec §10) The module path segments are lowercase identifiers.
+ */
+class UseModuleDecl(
+    val segments: List<String>,
+    /** null = whole-module import; non-null (possibly empty is a parse error) = selective */
+    val selective: List<ImportName>?,
+    span: Span,
+    nameSpan: Span,
+) : Decl(pub = false, name = segments.last(), span = span, nameSpan = nameSpan) {
+    /** module path as used in diagnostics and as the resolved key: "json/lexer" */
+    val path: String get() = segments.joinToString("/")
+}
 
 /** test "name" { ... } — compiled and run only by `dawn test` (spec §3.4) */
 class TestDecl(

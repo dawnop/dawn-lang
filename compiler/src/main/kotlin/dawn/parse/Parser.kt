@@ -115,12 +115,14 @@ class Parser(
         }
     }
 
-    /** use java "java.lang.StringBuilder" (spec §9); module imports arrive with M4 */
+    /** use java "..." (spec §9) or use path/to/module[.{A, b}] (spec §10) */
     private fun useDecl(): Decl {
         val kw = advance() // use
-        if (!at(JAVA))
-            throw err("module imports (use foo/bar) are not implemented yet",
-                "only `use java \"fully.qualified.Name\"` is available (spec §9)")
+        if (at(JAVA)) return javaUse(kw)
+        return moduleUse(kw)
+    }
+
+    private fun javaUse(kw: Token): Decl {
         advance() // java
         val s = expect(STRING, "a quoted fully-qualified class name")
         if (s.segments.any { it is StrSegment.Code })
@@ -129,6 +131,45 @@ class Parser(
         if (fqcn.isBlank() || fqcn.substringAfterLast('.').firstOrNull()?.isUpperCase() != true)
             throw DawnError("expected a fully-qualified class name like \"java.lang.StringBuilder\"", s.span)
         return UseJavaDecl(fqcn, Span(kw.span.start, s.span.end), s.span)
+    }
+
+    /** use json/lexer  or  use json/value.{Json, render} (spec §10.2) */
+    private fun moduleUse(kw: Token): Decl {
+        val segs = ArrayList<String>()
+        val first = expect(IDENT, "a module path (like json/lexer) or `java`")
+        segs.add(first.text)
+        var endSpan = first.span
+        while (at(SLASH)) {
+            advance()
+            val seg = expect(IDENT, "a module path segment (lowercase)")
+            segs.add(seg.text)
+            endSpan = seg.span
+        }
+        val nameSpan = Span(first.span.start, endSpan.end)
+        var selective: List<ImportName>? = null
+        if (at(DOT)) {
+            advance()
+            expect(LBRACE, "`{` to open a selective import list")
+            val names = ArrayList<ImportName>()
+            skipNewlines()
+            while (!at(RBRACE)) {
+                val n = when {
+                    at(IDENT) -> advance()
+                    at(TYPEIDENT) -> advance()
+                    else -> throw err("expected an imported name (a function, type, or constant)")
+                }
+                names.add(ImportName(n.text, n.span))
+                skipNewlines()
+                if (at(COMMA)) { advance(); skipNewlines() } else break
+            }
+            val close = expect(RBRACE, "`}`")
+            if (names.isEmpty())
+                throw DawnError("a selective import needs at least one name", Span(nameSpan.start, close.span.end),
+                    "use `use ${segs.joinToString("/")}` to import the whole module")
+            selective = names
+            endSpan = close.span
+        }
+        return UseModuleDecl(segs, selective, Span(kw.span.start, endSpan.end), nameSpan)
     }
 
     /** const NAME: Type = expr — the initializer is implicitly comptime (spec §3.2) */
