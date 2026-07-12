@@ -1,0 +1,68 @@
+# Shared helpers for the generator: fail-fast IO, doc-link mapping, small
+# list utilities the stdlib doesn't have yet.
+
+use md/ast.{Block, Rule}
+
+## read_file or die — the generator is fail-fast lint for its inputs.
+pub fn must_read(path: String) -> String !io =
+  match read_file(path) {
+    Ok(t) -> t
+    Err(e) -> panic("cannot read $path: $e")
+  }
+
+pub fn must_list(path: String) -> List[String] !io =
+  match list_dir(path) {
+    Ok(names) -> names
+    Err(e) -> panic("cannot list $path: $e")
+  }
+
+pub fn write_page(path: String, content: String) -> Unit !io =
+  match write_file(path, content ++ "\n") {
+    Ok(_) -> println("  wrote $path")
+    Err(e) -> panic("cannot write $path: $e")
+  }
+
+## The first n elements. (Built via map/range: an empty-list literal cannot
+## be annotated with a bare type variable yet.)
+pub fn take_n[T](xs: List[T], n: Int) -> List[T] =
+  map(range(0, n), fn(i) => expect(get(xs, i), "take_n out of range"))
+
+## Chapters end with a --- separator in the source; the page doesn't want it.
+pub fn drop_trailing_rule(bs: List[Block]) -> List[Block] =
+  if get(bs, len(bs) - 1) == Some(Rule) { take_n(bs, len(bs) - 1) } else { bs }
+
+## Map a docs/-relative Markdown link onto the site. Unknown targets are a
+## lint error, not a silent passthrough.
+pub fn map_doc_url(root: String, u: String) -> String =
+  if starts_with(u, "http://") || starts_with(u, "https://") || starts_with(u, "#") {
+    u
+  } else if u == "spec.md" || u == "docs/spec.md" {
+    "$root/spec.html"
+  } else if u == "design.md" || u == "docs/design.md" {
+    "$root/design.html"
+  } else if u == "tutorial.md" || u == "docs/tutorial.md" {
+    "$root/tutorial/index.html"
+  } else if u == "grammar.ebnf" {
+    "https://github.com/dawnop/dawn-lang/blob/main/docs/grammar.ebnf"
+  } else if ends_with(u, ".html") || contains(u, ".html#") {
+    "$root/$u"
+  } else {
+    panic("unmapped doc link: $u")
+  }
+
+## 01, 02, ... for chapter file names.
+pub fn pad2(i: Int) -> String = if i < 10 { "0$i" } else { "$i" }
+
+test "doc links map onto the site" {
+  assert map_doc_url("..", "spec.md") == "../spec.html"
+  assert map_doc_url(".", "design.md") == "./design.html"
+  assert map_doc_url(".", "tutorial/index.html") == "./tutorial/index.html"
+  assert map_doc_url(".", "#s2") == "#s2"
+  assert map_doc_url(".", "https://x.y/z") == "https://x.y/z"
+}
+
+test "take_n and drop_trailing_rule" {
+  assert take_n([1, 2, 3], 2) == [1, 2]
+  assert drop_trailing_rule([Rule, Rule]) == [Rule]
+  assert drop_trailing_rule([]) == []
+}

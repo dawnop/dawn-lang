@@ -1,0 +1,65 @@
+# site/build/builtins.json (from `dawn doc --builtins`) -> api.html.
+# The compiler emits JSON; this program reads it with Dawn's own JSON library.
+
+use json/parser.{parse}
+use json/value.{Json, JNull, JStr, JArr, JObj}
+use html/escape.{escape_html}
+use html/page.{page}
+use gen/common.{must_read, write_page}
+
+fn jget(j: Json, key: String) -> Json =
+  match j {
+    JObj(entries) -> unwrap_or(map_get(entries, key), JNull)
+    _ -> JNull
+  }
+
+fn jstr(j: Json) -> String =
+  match j {
+    JStr(s) -> s
+    _ -> ""
+  }
+
+fn jarr(j: Json) -> List[Json] =
+  match j {
+    JArr(items) -> items
+    _ -> []
+  }
+
+fn fn_row(f: Json) -> String = {
+  let name = jstr(jget(f, "name"))
+  let sig = jstr(jget(f, "sig"))
+  let doc = jstr(jget(f, "doc"))
+  "<tr><td><code>" ++ escape_html(sig) ++ "</code></td><td>" ++ escape_html(doc) ++ "</td></tr>"
+}
+
+fn group_html(g: Json) -> String = {
+  let name = jstr(jget(g, "name"))
+  var rows = ""
+  for f in jarr(jget(g, "fns")) {
+    rows = rows ++ "\n" ++ fn_row(f)
+  }
+  "<h2>" ++ escape_html(name) ++ "</h2>\n<table>\n" ++
+    "<thead>\n<tr><th>签名</th><th>说明</th></tr>\n</thead>\n<tbody>" ++
+    rows ++ "\n</tbody>\n</table>"
+}
+
+pub fn gen_api(out: String) -> Unit !io = {
+  let text =
+    match read_file("site/build/builtins.json") {
+      Ok(t) -> t
+      Err(_) -> panic("site/build/builtins.json missing — run site/build.sh (it runs dawn doc --builtins first)")
+    }
+  let root =
+    match parse(text) {
+      Ok(v) -> v
+      Err(e) -> panic("builtins.json: $e")
+    }
+  var groups = ""
+  for g in jarr(jget(root, "groups")) {
+    groups = groups ++ "\n" ++ group_html(g)
+  }
+  let body = "<h1>标准库参考</h1>\n" ++
+    "<p>v0.1 的内建函数（<code>dawn doc --builtins</code> 生成）。字符串按码点处理；容器持久不可变。</p>" ++
+    groups
+  write_page("$out/api.html", page("标准库参考 — Dawn", ".", "api", body))
+}

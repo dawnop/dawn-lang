@@ -1,0 +1,37 @@
+# The single-document pages: index, spec, design, playground, plus assets.
+
+use md/ast.{Block}
+use md/parser.{parse}
+use html/render.{render_doc}
+use html/page.{page, page_with_toc}
+use gen/common.{must_read, write_page, map_doc_url}
+
+fn parsed(path: String) -> List[Block] !io =
+  match parse(must_read(path)) {
+    Ok(bs) -> bs
+    Err(e) -> panic("$path: $e")
+  }
+
+pub fn gen_assets(out: String) -> Unit !io =
+  write_page("$out/assets/style.css", trim(must_read("site/assets/style.css")))
+
+pub fn gen_index(out: String) -> Unit !io = {
+  let doc = render_doc(parsed("site/pages/index.md"), fn(u) => map_doc_url(".", u))
+  write_page("$out/index.html", page("Dawn 语言", ".", "", doc.html))
+}
+
+pub fn gen_spec(out: String) -> Unit !io = {
+  let doc = render_doc(parsed("docs/spec.md"), fn(u) => map_doc_url(".", u))
+  write_page("$out/spec.html", page_with_toc("${doc.title} — Dawn", ".", "spec", doc.toc, doc.html))
+}
+
+pub fn gen_design(out: String) -> Unit !io = {
+  let doc = render_doc(parsed("docs/design.md"), fn(u) => map_doc_url(".", u))
+  write_page("$out/design.html", page_with_toc("${doc.title} — Dawn", ".", "design", doc.toc, doc.html))
+}
+
+pub fn gen_playground(out: String) -> Unit !io = {
+  let body = "<h1>Playground</h1>\n" ++
+    `<p>在线运行 Dawn 代码的沙箱在二期路线图上。现在可以把<a href="examples/index.html">示例</a>克隆下来，用 <code>dawn run</code> 直接跑。</p>`
+  write_page("$out/playground.html", page("Playground — Dawn", ".", "playground", body))
+}

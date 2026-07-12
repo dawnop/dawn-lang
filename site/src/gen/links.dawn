@@ -1,0 +1,133 @@
+# Post-generation link check: every internal href must resolve to a file we
+# actually wrote. Broken links fail the build.
+
+use md/text.{cp_at, seg}
+use gen/common.{must_read, must_list, take_n}
+
+fn files_under(base: String, rel: String) -> List[String] !io = {
+  let path = if rel == "" { base } else { "$base/$rel" }
+  if is_dir(path) {
+    var out: List[String] = []
+    for name in must_list(path) {
+      let child = if rel == "" { name } else { "$rel/$name" }
+      out = out ++ files_under(base, child)
+    }
+    out
+  } else {
+    [rel]
+  }
+}
+
+## Index of pattern pat in cs at or after from, or -1.
+fn find_sub(cs: List[Int], from: Int, pat: List[Int]) -> Int = {
+  var i = from
+  var found = -1
+  while found < 0 && i + len(pat) <= len(cs) {
+    var k = 0
+    var ok = true
+    while ok && k < len(pat) {
+      if cp_at(cs, i + k) != cp_at(pat, k) {
+        ok = false
+      }
+      k = k + 1
+    }
+    if ok {
+      found = i
+    } else {
+      i = i + 1
+    }
+  }
+  found
+}
+
+## All href="..." values in an HTML page.
+fn hrefs_of(html: String) -> List[String] = {
+  let cs = code_points(html)
+  let pat = code_points("href=\"")
+  var out: List[String] = []
+  var i = 0
+  var going = true
+  while going {
+    let at = find_sub(cs, i, pat)
+    if at < 0 {
+      going = false
+    } else {
+      let start = at + len(pat)
+      var e = start
+      while e < len(cs) && cp_at(cs, e) != '"' {
+        e = e + 1
+      }
+      out = out ++ [seg(cs, start, e)]
+      i = e
+    }
+  }
+  out
+}
+
+fn is_external(u: String) -> Bool =
+  starts_with(u, "http://") || starts_with(u, "https://") || starts_with(u, "mailto:") ||
+  starts_with(u, "#")
+
+## Resolve href against the page's directory and normalize . / .. segments.
+fn resolve(dir: String, href: String) -> String = {
+  let no_anchor =
+    match split(href, "#") {
+      [path] -> path
+      [path, _] -> path
+      _ -> href
+    }
+  let raw = if dir == "" { no_anchor } else { "$dir/$no_anchor" }
+  var stack: List[String] = []
+  for part in split(raw, "/") {
+    if part == ".." {
+      stack = take_n(stack, len(stack) - 1)
+    } else if part != "" && part != "." {
+      stack = stack ++ [part]
+    }
+  }
+  join(stack, "/")
+}
+
+fn dir_of(rel: String) -> String = {
+  let parts = split(rel, "/")
+  join(take_n(parts, len(parts) - 1), "/")
+}
+
+pub fn check_links(out: String) -> Unit !io = {
+  let files = set_from(files_under(out, ""))
+  var broken: List[String] = []
+  var pages = 0
+  var checked = 0
+  for f in set_to_list(files) {
+    if ends_with(f, ".html") {
+      pages = pages + 1
+      for href in hrefs_of(must_read("$out/$f")) {
+        if not is_external(href) {
+          checked = checked + 1
+          let target = resolve(dir_of(f), href)
+          if not set_has(files, target) {
+            broken = broken ++ ["$f -> $href (resolved: $target)"]
+          }
+        }
+      }
+    }
+  }
+  if len(broken) > 0 {
+    for b in broken {
+      println("BROKEN LINK: $b")
+    }
+    panic("${len(broken)} broken links")
+  }
+  println("  link check: $checked internal hrefs across $pages pages, all resolve")
+}
+
+test "resolution normalizes relative segments" {
+  assert resolve("tutorial", "../spec.html") == "spec.html"
+  assert resolve("tutorial", "02.html") == "tutorial/02.html"
+  assert resolve("", "./assets/style.css") == "assets/style.css"
+  assert resolve("examples", "../tutorial/index.html#s2") == "tutorial/index.html"
+}
+
+test "href extraction" {
+  assert hrefs_of(`<a href="a.html">x</a> <link href="b.css">`) == ["a.html", "b.css"]
+}

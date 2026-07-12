@@ -1,0 +1,119 @@
+# Vendored from examples/m4/json/src/json/parser.dawn (M4 acceptance library) —
+# keep in sync until Dawn grows a package story.
+# Recursive-descent JSON parser (RFC 8259). Threads the position through Result,
+# never panics, and caps nesting depth so pathological input can't blow the stack.
+use json/lexer.{peek, skip_ws, is_digit, scan_string, scan_number}
+use json/value.{Json, JNull, JBool, JNum, JStr, JArr, JObj}
+
+pub const MAX_DEPTH: Int = 512
+
+fn matches_at(src: List[Int], i: Int, word: List[Int]) -> Bool = {
+  var ok = true
+  var k = 0
+  while k < len(word) {
+    if peek(src, i + k) != unwrap_or(get(word, k), -1) { ok = false }
+    k = k + 1
+  }
+  ok
+}
+
+fn parse_lit(src: List[Int], i: Int, word: String, val: Json) -> Result[(Json, Int), String] = {
+  let cps = code_points(word)
+  if matches_at(src, i, cps) { Ok((val, i + len(cps))) } else { Err("invalid literal") }
+}
+
+fn parse_array_items(src: List[Int], i: Int, depth: Int, acc: List[Json]) -> Result[(Json, Int), String] = {
+  let (v, j) = parse_value(src, i, depth + 1)?
+  let acc2 = acc ++ [v]
+  let k = skip_ws(src, j)
+  let c = peek(src, k)
+  if c == ',' {
+    parse_array_items(src, k + 1, depth, acc2)
+  } else if c == ']' {
+    Ok((JArr(acc2), k + 1))
+  } else {
+    Err("expected ',' or ']' in array")
+  }
+}
+
+fn parse_array(src: List[Int], i0: Int, depth: Int) -> Result[(Json, Int), String] = {
+  let i1 = skip_ws(src, i0 + 1)
+  if peek(src, i1) == ']' {
+    Ok((JArr([]), i1 + 1))
+  } else {
+    parse_array_items(src, i1, depth, [])
+  }
+}
+
+fn parse_object_members(src: List[Int], i: Int, depth: Int, acc: Map[String, Json]) -> Result[(Json, Int), String] = {
+  let ks = skip_ws(src, i)
+  if peek(src, ks) != '"' {
+    Err("expected a string key in object")
+  } else {
+    let (key, j) = scan_string(src, ks)?
+    let jc = skip_ws(src, j)
+    if peek(src, jc) != ':' {
+      Err("expected ':' in object")
+    } else {
+      let (v, k) = parse_value(src, jc + 1, depth + 1)?
+      let acc2 = map_insert(acc, key, v)
+      let kc = skip_ws(src, k)
+      let c = peek(src, kc)
+      if c == ',' {
+        parse_object_members(src, kc + 1, depth, acc2)
+      } else if c == '}' {
+        Ok((JObj(acc2), kc + 1))
+      } else {
+        Err("expected ',' or '}' in object")
+      }
+    }
+  }
+}
+
+fn parse_object(src: List[Int], i0: Int, depth: Int) -> Result[(Json, Int), String] = {
+  let i1 = skip_ws(src, i0 + 1)
+  if peek(src, i1) == '}' {
+    Ok((JObj(map_empty()), i1 + 1))
+  } else {
+    parse_object_members(src, i1, depth, map_empty())
+  }
+}
+
+fn parse_value(src: List[Int], i0: Int, depth: Int) -> Result[(Json, Int), String] = {
+  if depth > MAX_DEPTH {
+    Err("maximum nesting depth exceeded")
+  } else {
+    let i = skip_ws(src, i0)
+    let c = peek(src, i)
+    if c == '"' {
+      let (s, j) = scan_string(src, i)?
+      Ok((JStr(s), j))
+    } else if c == '{' {
+      parse_object(src, i, depth)
+    } else if c == '[' {
+      parse_array(src, i, depth)
+    } else if c == 't' {
+      parse_lit(src, i, "true", JBool(true))
+    } else if c == 'f' {
+      parse_lit(src, i, "false", JBool(false))
+    } else if c == 'n' {
+      parse_lit(src, i, "null", JNull)
+    } else if c == '-' || is_digit(c) {
+      let (f, j) = scan_number(src, i)?
+      Ok((JNum(f), j))
+    } else {
+      Err("unexpected character")
+    }
+  }
+}
+
+pub fn parse(input: String) -> Result[Json, String] = {
+  let src = code_points(input)
+  let (v, j) = parse_value(src, 0, 0)?
+  let k = skip_ws(src, j)
+  if k < len(src) {
+    Err("trailing content after the JSON value")
+  } else {
+    Ok(v)
+  }
+}

@@ -1,0 +1,95 @@
+# examples/ -> examples/index.html + one page per example (multi-file projects
+# show every module). Discovery walks the real tree with list_dir/is_dir.
+
+use html/escape.{escape_html}
+use hl/dawn.{highlight_dawn}
+use html/page.{page}
+use gen/common.{must_read, must_list, write_page}
+
+type Example = { slug: String, files: List[String] }
+
+fn stem(name: String) -> String = substring(name, 0, str_len(name) - 5)
+
+fn dawn_files_under(path: String) -> List[String] !io =
+  if is_dir(path) {
+    var out: List[String] = []
+    for name in must_list(path) {
+      out = out ++ dawn_files_under("$path/$name")
+    }
+    out
+  } else if ends_with(path, ".dawn") {
+    [path]
+  } else {
+    []
+  }
+
+fn collect_examples() -> List[Example] !io = {
+  var units: List[Example] = []
+  for name in must_list("examples") {
+    let path = "examples/$name"
+    if is_dir(path) {
+      if name == "m4" {
+        # project examples: one unit per subdirectory, sources under src/
+        for sub in must_list(path) {
+          units = units ++ [Example { slug: "m4-$sub", files: dawn_files_under("$path/$sub/src") }]
+        }
+      } else {
+        for f in must_list(path) {
+          if ends_with(f, ".dawn") {
+            units = units ++ [Example { slug: "$name-${stem(f)}", files: ["$path/$f"] }]
+          }
+        }
+      }
+    } else if ends_with(name, ".dawn") {
+      units = units ++ [Example { slug: stem(name), files: [path] }]
+    }
+  }
+  units
+}
+
+## The leading # comment block of a source file, as a one-line description.
+fn description(text: String) -> String = {
+  var out: List[String] = []
+  var stop = false
+  for line in split(text, "\n") {
+    if not stop && starts_with(line, "#") {
+      out = out ++ [trim(substring(line, 1, str_len(line)))]
+    } else {
+      stop = true
+    }
+  }
+  join(out, " ")
+}
+
+fn file_section(path: String) -> String !io = {
+  let src = trim(must_read(path))
+  "<h2><code>" ++ escape_html(path) ++ "</code></h2>\n" ++
+    `<pre class="dawn"><code>` ++ highlight_dawn(src) ++ "</code></pre>"
+}
+
+fn example_page(ex: Example) -> String !io = {
+  let first = expect(get(ex.files, 0), "example without files: ${ex.slug}")
+  let desc = description(must_read(first))
+  var sections = ""
+  for f in ex.files {
+    sections = sections ++ "\n" ++ file_section(f)
+  }
+  "<h1><code>${ex.slug}</code></h1>\n<p>" ++ escape_html(desc) ++ "</p>" ++ sections
+}
+
+pub fn gen_examples(out: String) -> Unit !io = {
+  let units = collect_examples()
+  var items = ""
+  for ex in units {
+    let first = expect(get(ex.files, 0), "example without files: ${ex.slug}")
+    let desc = description(must_read(first))
+    write_page("$out/examples/${ex.slug}.html",
+      page("${ex.slug} — Dawn 示例", "..", "examples", example_page(ex)))
+    items = items ++ "\n" ++
+      """<li><a href="${ex.slug}.html"><code>${ex.slug}</code></a> — """ ++ escape_html(desc) ++ "</li>"
+  }
+  let body = "<h1>示例</h1>\n" ++
+    "<p>每个示例都能直接跑：<code>dawn run examples/…</code>；多模块项目给目录。</p>\n" ++
+    "<ul class=\"example-list\">" ++ items ++ "\n</ul>"
+  write_page("$out/examples/index.html", page("示例 — Dawn", "..", "examples", body))
+}

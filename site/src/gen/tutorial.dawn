@@ -1,0 +1,106 @@
+# docs/tutorial.md -> tutorial/index.html + one page per ## chapter.
+
+use md/ast.{Inline, Block, Heading}
+use md/parser.{parse}
+use html/render.{render_doc, inline_text}
+use html/page.{page}
+use gen/common.{must_read, write_page, map_doc_url, pad2, drop_trailing_rule}
+
+type Chapter = { title: List[Inline], body: List[Block] }
+
+fn split_chapters(blocks: List[Block]) -> (List[Block], List[Chapter]) = {
+  var intro: List[Block] = []
+  var chapters: List[Chapter] = []
+  var cur: List[Block] = []
+  var cur_title: List[Inline] = []
+  var started = false
+  for b in blocks {
+    var is_h2 = false
+    match b {
+      Heading(lvl, items) -> {
+        if lvl == 2 {
+          is_h2 = true
+          if started {
+            chapters = chapters ++ [Chapter { title: cur_title, body: drop_trailing_rule(cur) }]
+          }
+          started = true
+          cur_title = items
+          cur = []
+        }
+      }
+      _ -> {
+        is_h2 = false
+      }
+    }
+    if not is_h2 {
+      if started {
+        cur = cur ++ [b]
+      } else {
+        intro = intro ++ [b]
+      }
+    }
+  }
+  if started {
+    chapters = chapters ++ [Chapter { title: cur_title, body: drop_trailing_rule(cur) }]
+  }
+  (intro, chapters)
+}
+
+fn chapter_title(chapters: List[Chapter], i: Int) -> String =
+  match get(chapters, i) {
+    Some(c) -> inline_text(c.title)
+    None -> ""
+  }
+
+fn chapter_nav(chapters: List[Chapter], i: Int) -> String = {
+  let n = len(chapters)
+  let prev =
+    if i > 0 {
+      """<a class="prev" href="${pad2(i)}.html">← ${chapter_title(chapters, i - 1)}</a>"""
+    } else {
+      """<a class="prev" href="index.html">← 目录</a>"""
+    }
+  let next =
+    if i + 1 < n {
+      """<a class="next" href="${pad2(i + 2)}.html">${chapter_title(chapters, i + 1)} →</a>"""
+    } else {
+      ""
+    }
+  `<nav class="chapter-nav">` ++ "\n" ++ prev ++ "\n" ++ next ++ "\n</nav>"
+}
+
+pub fn gen_tutorial(out: String) -> Unit !io = {
+  let blocks =
+    match parse(must_read("docs/tutorial.md")) {
+      Ok(bs) -> bs
+      Err(e) -> panic("docs/tutorial.md: $e")
+    }
+  let (intro, chapters) = split_chapters(blocks)
+  let n = len(chapters)
+
+  # chapter pages
+  for i in range(0, n) {
+    match get(chapters, i) {
+      Some(c) -> {
+        let doc = render_doc([Heading(1, c.title)] ++ c.body, fn(u) => map_doc_url("..", u))
+        let html = doc.html ++ chapter_nav(chapters, i)
+        let title = inline_text(c.title)
+        write_page("$out/tutorial/${pad2(i + 1)}.html", page("$title — Dawn 教程", "..", "tutorial", html))
+      }
+      None -> {
+        panic("unreachable chapter index")
+      }
+    }
+  }
+
+  # index: the intro plus a chapter list
+  let intro_doc = render_doc(intro, fn(u) => map_doc_url("..", u))
+  var items = ""
+  for i in range(0, n) {
+    items = items ++ "\n" ++
+      """<li><a href="${pad2(i + 1)}.html">${chapter_title(chapters, i)}</a></li>"""
+  }
+  let listing = "<ol class=\"chapter-list\">" ++ items ++ "\n</ol>"
+  write_page("$out/tutorial/index.html",
+    page("Dawn 教程", "..", "tutorial", intro_doc.html ++ listing))
+}

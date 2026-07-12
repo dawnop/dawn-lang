@@ -1,22 +1,23 @@
-# Site generator entry point. For now (slice 3) it only smoke-tests the
-# Markdown parser against the real docs; assembly arrives in slice 6.
-# Run from the repo root: dawn run site
+# dawn-lang.dawnop.com static site generator — written in Dawn (M5).
+# Run via site/build.sh (which feeds it dawn doc --builtins output), or
+# directly from the repo root: dawn run site
 
-use md/parser.{parse}
-
-fn report(path: String) -> Unit !io =
-  match read_file(path) {
-    Ok(text) ->
-      match parse(text) {
-        Ok(blocks) -> println("$path: ${len(blocks)} blocks")
-        Err(e) -> println("$path: PARSE ERROR: $e")
-      }
-    Err(e) -> println("$path: $e")
-  }
+use gen/pages.{gen_assets, gen_index, gen_spec, gen_design, gen_playground}
+use gen/tutorial.{gen_tutorial}
+use gen/examples.{gen_examples}
+use gen/api.{gen_api}
+use gen/links.{check_links}
 
 pub fn main() -> Unit !io = {
-  report("docs/tutorial.md")
-  report("docs/spec.md")
-  report("docs/design.md")
-  report("README.md")
+  let out = "site/dist"
+  gen_assets(out)
+  gen_index(out)
+  gen_spec(out)
+  gen_design(out)
+  gen_tutorial(out)
+  gen_examples(out)
+  gen_api(out)
+  gen_playground(out)
+  check_links(out)
+  println("site generated into $out")
 }
