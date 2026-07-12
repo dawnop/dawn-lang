@@ -1,0 +1,32 @@
+# HTML escaping shared by the whole generator. Splices around the rare
+# special characters instead of appending per code point.
+
+use md/text.{cp_at}
+
+fn entity(c: Int) -> String =
+  if c == '&' { "&amp;" } else if c == '<' { "&lt;" } else { "&gt;" }
+
+## Escape &, <, > for HTML text and attribute positions.
+pub fn escape_html(s: String) -> String = {
+  let cs = code_points(s)
+  let n = len(cs)
+  var out = ""
+  var start = 0
+  var any = false
+  var i = 0
+  while i < n {
+    let c = cp_at(cs, i)
+    if c == '&' || c == '<' || c == '>' {
+      out = out ++ substring(s, start, i) ++ entity(c)
+      start = i + 1
+      any = true
+    }
+    i = i + 1
+  }
+  if any { out ++ substring(s, start, n) } else { s }
+}
+
+test "escapes only what html needs" {
+  assert escape_html("a < b && c > d") == "a &lt; b &amp;&amp; c &gt; d"
+  assert escape_html("plain 中文") == "plain 中文"
+}

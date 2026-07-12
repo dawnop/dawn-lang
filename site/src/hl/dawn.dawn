@@ -1,0 +1,256 @@
+# Build-time syntax highlighting for Dawn code blocks — the site ships zero JS.
+# Classes (site/README.md): k keyword, t type/ctor, f definition name after fn,
+# s string, i $-interpolation inside a string, n number/bool/char, c comment.
+
+use html/escape.{escape_html}
+use md/text.{cp_at, seg}
+
+fn is_digit(c: Int) -> Bool = c >= '0' && c <= '9'
+
+fn is_upper(c: Int) -> Bool = c >= 'A' && c <= 'Z'
+
+fn is_ident_start(c: Int) -> Bool =
+  (c >= 'a' && c <= 'z') || is_upper(c) || c == '_'
+
+fn is_ident_cp(c: Int) -> Bool = is_ident_start(c) || is_digit(c)
+
+fn is_keyword(w: String) -> Bool =
+  w == "fn" || w == "let" || w == "var" || w == "type" || w == "const" ||
+  w == "use" || w == "java" || w == "pub" || w == "match" || w == "if" ||
+  w == "else" || w == "for" || w == "in" || w == "while" || w == "comptime" ||
+  w == "test" || w == "assert" || w == "not" || w == "derive"
+
+fn span(cls: String, text: String) -> String =
+  "<span class=\"$cls\">" ++ escape_html(text) ++ "</span>"
+
+fn line_end(cs: List[Int], from: Int) -> Int = {
+  var i = from
+  while i < len(cs) && cp_at(cs, i) != '\n' {
+    i = i + 1
+  }
+  i
+}
+
+fn ident_end(cs: List[Int], from: Int) -> Int = {
+  var i = from
+  while i < len(cs) && is_ident_cp(cp_at(cs, i)) {
+    i = i + 1
+  }
+  i
+}
+
+fn number_end(cs: List[Int], from: Int) -> Int = {
+  var i = from
+  if cp_at(cs, from) == '0' && (cp_at(cs, from + 1) == 'x' || cp_at(cs, from + 1) == 'b') {
+    i = from + 2
+    while i < len(cs) && (is_ident_cp(cp_at(cs, i))) {
+      i = i + 1
+    }
+  } else {
+    while i < len(cs) && (is_digit(cp_at(cs, i)) || cp_at(cs, i) == '_') {
+      i = i + 1
+    }
+    if cp_at(cs, i) == '.' && is_digit(cp_at(cs, i + 1)) {
+      i = i + 1
+      while i < len(cs) && is_digit(cp_at(cs, i)) {
+        i = i + 1
+      }
+    }
+    if cp_at(cs, i) == 'e' || cp_at(cs, i) == 'E' {
+      let j = if cp_at(cs, i + 1) == '+' || cp_at(cs, i + 1) == '-' { i + 2 } else { i + 1 }
+      if is_digit(cp_at(cs, j)) {
+        i = j
+        while i < len(cs) && is_digit(cp_at(cs, i)) {
+          i = i + 1
+        }
+      }
+    }
+  }
+  i
+}
+
+## Index just past a char literal starting at the ' in from.
+fn char_end(cs: List[Int], from: Int) -> Int = {
+  var i = from + 1
+  var done = false
+  while not done && i < len(cs) {
+    let c = cp_at(cs, i)
+    if c == '\\' {
+      i = i + 2
+    } else if c == '\'' {
+      i = i + 1
+      done = true
+    } else if c == '\n' {
+      done = true
+    } else {
+      i = i + 1
+    }
+  }
+  i
+}
+
+## Index just past a string starting at the " in from ("..." or """...""").
+fn string_end(cs: List[Int], from: Int) -> Int = {
+  let triple = cp_at(cs, from + 1) == '"' && cp_at(cs, from + 2) == '"'
+  var i = if triple { from + 3 } else { from + 1 }
+  var done = false
+  while not done && i < len(cs) {
+    let c = cp_at(cs, i)
+    if c == '\\' && not triple {
+      i = i + 2
+    } else if c == '"' && not triple {
+      i = i + 1
+      done = true
+    } else if triple && c == '"' && cp_at(cs, i + 1) == '"' && cp_at(cs, i + 2) == '"' {
+      i = i + 3
+      done = true
+    } else if c == '\n' && not triple {
+      done = true
+    } else {
+      i = i + 1
+    }
+  }
+  i
+}
+
+## A string token [from, to) rendered with $name / ${expr} marked as class i.
+fn string_html(cs: List[Int], from: Int, to: Int) -> String = {
+  var out = ""
+  var start = from
+  var i = from
+  while i < to {
+    let c = cp_at(cs, i)
+    if c == '\\' {
+      i = i + 2
+    } else if c == '$' && is_ident_start(cp_at(cs, i + 1)) {
+      let e = ident_end(cs, i + 1)
+      out = out ++ span("s", seg(cs, start, i)) ++ span("i", seg(cs, i, e))
+      start = e
+      i = e
+    } else if c == '$' && cp_at(cs, i + 1) == '{' {
+      var e = i + 2
+      while e < to && cp_at(cs, e) != '}' {
+        e = e + 1
+      }
+      let e2 = if e < to { e + 1 } else { e }
+      out = out ++ span("s", seg(cs, start, i)) ++ span("i", seg(cs, i, e2))
+      start = e2
+      i = e2
+    } else {
+      i = i + 1
+    }
+  }
+  if start < to {
+    out ++ span("s", seg(cs, start, to))
+  } else {
+    out
+  }
+}
+
+## Highlight one Dawn code block as HTML (no surrounding <pre><code>).
+pub fn highlight_dawn(code: String) -> String = {
+  let cs = code_points(code)
+  let n = len(cs)
+  var out = ""
+  var start = 0
+  var prev_word = ""
+  var i = 0
+  while i < n {
+    let c = cp_at(cs, i)
+    if c == '#' {
+      let e = line_end(cs, i)
+      out = out ++ escape_html(seg(cs, start, i)) ++ span("c", seg(cs, i, e))
+      start = e
+      i = e
+    } else if c == '"' {
+      let e = string_end(cs, i)
+      out = out ++ escape_html(seg(cs, start, i)) ++ string_html(cs, i, e)
+      start = e
+      i = e
+    } else if c == '`' {
+      # raw string: literal through the closing backtick, no interpolation
+      var e = i + 1
+      while e < n && cp_at(cs, e) != '`' {
+        e = e + 1
+      }
+      let e2 = if e < n { e + 1 } else { e }
+      out = out ++ escape_html(seg(cs, start, i)) ++ span("s", seg(cs, i, e2))
+      start = e2
+      i = e2
+    } else if c == '\'' {
+      let e = char_end(cs, i)
+      out = out ++ escape_html(seg(cs, start, i)) ++ span("n", seg(cs, i, e))
+      start = e
+      i = e
+    } else if is_digit(c) {
+      let e = number_end(cs, i)
+      out = out ++ escape_html(seg(cs, start, i)) ++ span("n", seg(cs, i, e))
+      start = e
+      i = e
+    } else if is_ident_start(c) {
+      let e = ident_end(cs, i)
+      let w = seg(cs, i, e)
+      let after = cp_at(cs, e)
+      let cls =
+        if is_keyword(w) {
+          "k"
+        } else if w == "true" || w == "false" {
+          "n"
+        } else if is_upper(c) {
+          "t"
+        } else if prev_word == "fn" && (after == '(' || after == '[') {
+          "f"
+        } else {
+          ""
+        }
+      if cls == "" {
+        i = e
+      } else {
+        out = out ++ escape_html(seg(cs, start, i)) ++ span(cls, w)
+        start = e
+        i = e
+      }
+      prev_word = w
+    } else if c == '!' && (is_ident_start(cp_at(cs, i + 1)) || cp_at(cs, i + 1) == '(') {
+      let e = if cp_at(cs, i + 1) == '(' { i + 1 } else { ident_end(cs, i + 1) }
+      out = out ++ escape_html(seg(cs, start, i)) ++ span("k", seg(cs, i, e))
+      start = e
+      i = e
+    } else {
+      i = i + 1
+    }
+  }
+  if start < n {
+    out ++ escape_html(seg(cs, start, n))
+  } else {
+    out
+  }
+}
+
+test "keywords, types, defs, numbers" {
+  assert highlight_dawn("fn add(x: Int) -> Int = x + 1") ==
+    `<span class="k">fn</span> <span class="f">add</span>(x: ` ++
+    `<span class="t">Int</span>) -&gt; <span class="t">Int</span> = x + <span class="n">1</span>`
+}
+
+test "strings with interpolation, comments, effects" {
+  assert highlight_dawn("# note\n") == `<span class="c"># note</span>` ++ "\n"
+  assert highlight_dawn(`"a $x b"`) ==
+    `<span class="s">"a </span><span class="i">$x</span><span class="s"> b"</span>`
+  assert highlight_dawn("!io") == `<span class="k">!io</span>`
+}
+
+test "raw strings highlight as one literal" {
+  assert highlight_dawn("let s = `a \$x`") ==
+    `<span class="k">let</span> s = <span class="s">` ++ "`a \$x`" ++ `</span>`
+}
+
+test "lambda params are not definition names" {
+  assert highlight_dawn("fn(c) => c") ==
+    `<span class="k">fn</span>(c) =&gt; c`
+}
+
+test "char literals and bools" {
+  assert highlight_dawn("'a'") == `<span class="n">'a'</span>`
+  assert highlight_dawn("true") == `<span class="n">true</span>`
+}
