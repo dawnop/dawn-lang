@@ -36,6 +36,7 @@ class Lexer(
                     c == ' ' || c == '\t' || c == '\r' -> pos++
                     c == '#' -> skipComment()
                     c == '"' -> lexString()
+                    c == '\'' -> lexChar()
                     c.isDigit() -> lexNumber()
                     c == '_' && !isIdentPart(peek(1)) -> { add(TokenType.UNDERSCORE, "_", 1) }
                     c.isLetter() || c == '_' -> lexWord()
@@ -208,11 +209,44 @@ class Lexer(
             't' -> text.append('\t')
             '\\' -> text.append('\\')
             '"' -> text.append('"')
+            '\'' -> text.append('\'')
             '{' -> text.append('{')
             'u' -> text.append(lexUnicodeEscape())
             else -> throw DawnError("unknown escape: \\$e", spanAt(pos - 1, 2))
         }
         pos++
+    }
+
+    /**
+     * Character literal 'x' (spec §1.5): a single code point, lexed as an INT whose
+     * value is the code point (Go's rune model — no separate char type). Escapes are
+     * as in strings, plus \'. Empty or multi-code-point literals are errors.
+     */
+    private fun lexChar() {
+        val start = pos
+        pos++ // opening quote
+        val sb = StringBuilder()
+        when {
+            pos >= src.length || src[pos] == '\n' ->
+                throw DawnError("unterminated character literal", spanAt(start, (pos - start).coerceAtLeast(1)))
+            src[pos] == '\'' ->
+                throw DawnError("empty character literal", Span(baseOffset + start, baseOffset + pos + 1),
+                    "a character literal holds exactly one code point, like 'a' or '\\n'")
+            src[pos] == '\\' -> lexEscapeInto(sb)
+            else -> {
+                val cp = src.codePointAt(pos)
+                sb.appendCodePoint(cp)
+                pos += Character.charCount(cp)
+            }
+        }
+        if (pos >= src.length || src[pos] != '\'')
+            throw DawnError("character literal must contain exactly one code point",
+                spanAt(start, (pos - start).coerceAtLeast(1)),
+                "use a \"...\" string for more than one code point")
+        pos++ // closing quote
+        val value = sb.toString().codePointAt(0).toLong()
+        tokens.add(Token(TokenType.INT, src.substring(start, pos),
+            Span(baseOffset + start, baseOffset + pos), intValue = value))
     }
 
     /**

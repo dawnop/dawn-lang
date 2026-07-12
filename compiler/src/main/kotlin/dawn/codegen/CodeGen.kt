@@ -1212,6 +1212,127 @@ class CodeGen(
             m.visitEnd()
         }
 
+        // ---- code points / characters (spec §1.5, §11) ----
+
+        // code_points(String) -> List[Int]: one Long-boxed code point per element
+        run {
+            val m = cw.visitMethod(ACC_PUBLIC or ACC_STATIC, "code_points", "(L$STR;)L$JLIST;", null, null)
+            m.visitCode()
+            m.visitTypeInsn(NEW, ARRAYLIST); m.visitInsn(DUP)
+            m.visitMethodInsn(INVOKESPECIAL, ARRAYLIST, "<init>", "()V", false)
+            m.visitVarInsn(ASTORE, 1)
+            m.visitInsn(ICONST_0); m.visitVarInsn(ISTORE, 2)
+            val loop = Label(); val done = Label()
+            m.visitLabel(loop)
+            m.visitVarInsn(ILOAD, 2)
+            m.visitVarInsn(ALOAD, 0); m.visitMethodInsn(INVOKEVIRTUAL, STR, "length", "()I", false)
+            m.visitJumpInsn(IF_ICMPGE, done)
+            m.visitVarInsn(ALOAD, 0); m.visitVarInsn(ILOAD, 2)
+            m.visitMethodInsn(INVOKEVIRTUAL, STR, "codePointAt", "(I)I", false)
+            m.visitVarInsn(ISTORE, 3)
+            m.visitVarInsn(ALOAD, 1)
+            m.visitVarInsn(ILOAD, 3); m.visitInsn(I2L)
+            m.visitMethodInsn(INVOKESTATIC, "java/lang/Long", "valueOf", "(J)Ljava/lang/Long;", false)
+            m.visitMethodInsn(INVOKEVIRTUAL, ARRAYLIST, "add", "(L$OBJ;)Z", false); m.visitInsn(POP)
+            m.visitVarInsn(ILOAD, 2)
+            m.visitVarInsn(ILOAD, 3); m.visitMethodInsn(INVOKESTATIC, "java/lang/Character", "charCount", "(I)I", false)
+            m.visitInsn(IADD); m.visitVarInsn(ISTORE, 2)
+            m.visitJumpInsn(GOTO, loop)
+            m.visitLabel(done)
+            m.visitVarInsn(ALOAD, 1); m.visitInsn(ARETURN)
+            m.visitMaxs(0, 0); m.visitEnd()
+        }
+
+        // from_code_points(List[Int]) -> String
+        run {
+            val m = cw.visitMethod(ACC_PUBLIC or ACC_STATIC, "from_code_points", "(L$JLIST;)L$STR;", null, null)
+            m.visitCode()
+            m.visitTypeInsn(NEW, SB); m.visitInsn(DUP)
+            m.visitMethodInsn(INVOKESPECIAL, SB, "<init>", "()V", false)
+            m.visitVarInsn(ASTORE, 1)
+            m.visitInsn(ICONST_0); m.visitVarInsn(ISTORE, 2)
+            val loop = Label(); val done = Label()
+            m.visitLabel(loop)
+            m.visitVarInsn(ILOAD, 2)
+            m.visitVarInsn(ALOAD, 0); m.visitMethodInsn(INVOKEINTERFACE, JLIST, "size", "()I", true)
+            m.visitJumpInsn(IF_ICMPGE, done)
+            m.visitVarInsn(ALOAD, 1)
+            m.visitVarInsn(ALOAD, 0); m.visitVarInsn(ILOAD, 2)
+            m.visitMethodInsn(INVOKEINTERFACE, JLIST, "get", "(I)L$OBJ;", true)
+            m.visitTypeInsn(CHECKCAST, "java/lang/Long")
+            m.visitMethodInsn(INVOKEVIRTUAL, "java/lang/Long", "intValue", "()I", false)
+            m.visitMethodInsn(INVOKEVIRTUAL, SB, "appendCodePoint", "(I)L$SB;", false); m.visitInsn(POP)
+            m.visitIincInsn(2, 1)
+            m.visitJumpInsn(GOTO, loop)
+            m.visitLabel(done)
+            m.visitVarInsn(ALOAD, 1); m.visitMethodInsn(INVOKEVIRTUAL, SB, "toString", "()L$STR;", false)
+            m.visitInsn(ARETURN)
+            m.visitMaxs(0, 0); m.visitEnd()
+        }
+
+        // char_to_string(Int) -> String: a single code point; invalid ones panic
+        run {
+            val m = cw.visitMethod(ACC_PUBLIC or ACC_STATIC, "char_to_string", "(J)L$STR;", null, null)
+            m.visitCode()
+            m.visitVarInsn(LLOAD, 0); m.visitInsn(L2I); m.visitVarInsn(ISTORE, 2)
+            val ok = Label()
+            m.visitVarInsn(ILOAD, 2)
+            m.visitMethodInsn(INVOKESTATIC, "java/lang/Character", "isValidCodePoint", "(I)Z", false)
+            m.visitJumpInsn(IFNE, ok)
+            m.visitTypeInsn(NEW, PANIC_CLASS); m.visitInsn(DUP)
+            m.visitLdcInsn("char_to_string: not a valid code point")
+            m.visitMethodInsn(INVOKESPECIAL, PANIC_CLASS, "<init>", "(Ljava/lang/String;)V", false)
+            m.visitInsn(ATHROW)
+            m.visitLabel(ok)
+            m.visitVarInsn(ILOAD, 2)
+            m.visitMethodInsn(INVOKESTATIC, "java/lang/Character", "toChars", "(I)[C", false)
+            m.visitMethodInsn(INVOKESTATIC, STR, "valueOf", "([C)L$STR;", false)
+            m.visitInsn(ARETURN)
+            m.visitMaxs(0, 0); m.visitEnd()
+        }
+
+        // str_len(String) -> Int: number of code points
+        run {
+            val m = cw.visitMethod(ACC_PUBLIC or ACC_STATIC, "str_len", "(L$STR;)J", null, null)
+            m.visitCode()
+            m.visitVarInsn(ALOAD, 0); m.visitInsn(ICONST_0)
+            m.visitVarInsn(ALOAD, 0); m.visitMethodInsn(INVOKEVIRTUAL, STR, "length", "()I", false)
+            m.visitMethodInsn(INVOKEVIRTUAL, STR, "codePointCount", "(II)I", false)
+            m.visitInsn(I2L); m.visitInsn(LRETURN)
+            m.visitMaxs(0, 0); m.visitEnd()
+        }
+
+        // substring(String, Int from, Int to) -> String: code-point indices; out of range panics
+        run {
+            val m = cw.visitMethod(ACC_PUBLIC or ACC_STATIC, "substring", "(L$STR;JJ)L$STR;", null, null)
+            m.visitCode()
+            // n = codePointCount; slot 5 (int)
+            m.visitVarInsn(ALOAD, 0); m.visitInsn(ICONST_0)
+            m.visitVarInsn(ALOAD, 0); m.visitMethodInsn(INVOKEVIRTUAL, STR, "length", "()I", false)
+            m.visitMethodInsn(INVOKEVIRTUAL, STR, "codePointCount", "(II)I", false)
+            m.visitVarInsn(ISTORE, 5)
+            val ok = Label(); val bad = Label()
+            // if (from < 0 || from > to || to > n) panic
+            m.visitVarInsn(LLOAD, 1); m.visitInsn(LCONST_0); m.visitInsn(LCMP); m.visitJumpInsn(IFLT, bad)
+            m.visitVarInsn(LLOAD, 1); m.visitVarInsn(LLOAD, 3); m.visitInsn(LCMP); m.visitJumpInsn(IFGT, bad)
+            m.visitVarInsn(LLOAD, 3); m.visitVarInsn(ILOAD, 5); m.visitInsn(I2L); m.visitInsn(LCMP); m.visitJumpInsn(IFGT, bad)
+            m.visitJumpInsn(GOTO, ok)
+            m.visitLabel(bad)
+            m.visitTypeInsn(NEW, PANIC_CLASS); m.visitInsn(DUP)
+            m.visitLdcInsn("substring: index out of range")
+            m.visitMethodInsn(INVOKESPECIAL, PANIC_CLASS, "<init>", "(Ljava/lang/String;)V", false)
+            m.visitInsn(ATHROW)
+            m.visitLabel(ok)
+            m.visitVarInsn(ALOAD, 0)
+            m.visitVarInsn(ALOAD, 0); m.visitInsn(ICONST_0); m.visitVarInsn(LLOAD, 1); m.visitInsn(L2I)
+            m.visitMethodInsn(INVOKEVIRTUAL, STR, "offsetByCodePoints", "(II)I", false)
+            m.visitVarInsn(ALOAD, 0); m.visitInsn(ICONST_0); m.visitVarInsn(LLOAD, 3); m.visitInsn(L2I)
+            m.visitMethodInsn(INVOKEVIRTUAL, STR, "offsetByCodePoints", "(II)I", false)
+            m.visitMethodInsn(INVOKEVIRTUAL, STR, "substring", "(II)L$STR;", false)
+            m.visitInsn(ARETURN)
+            m.visitMaxs(0, 0); m.visitEnd()
+        }
+
         cw.visitEnd()
         return cw.toByteArray()
     }
@@ -2770,6 +2891,12 @@ class CodeGen(
         "args" -> {
             mv.visitFieldInsn(GETSTATIC, className, ARGS_FIELD, "[Ljava/lang/String;")
             mv.visitMethodInsn(INVOKESTATIC, LISTS_CLASS, "fromArray", "([Ljava/lang/String;)L$JLIST;", false)
+            true
+        }
+        "code_points", "from_code_points", "char_to_string", "str_len", "substring" -> {
+            for (a in e.args) genExpr(a, tail = false)
+            val sig = BUILTINS.getValue(e.callee)
+            mv.visitMethodInsn(INVOKESTATIC, STRINGS_CLASS, e.callee, methodDesc(sig.paramTypes, sig.ret), false)
             true
         }
         in MAP_BUILTINS -> genMapCall(e)
