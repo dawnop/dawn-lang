@@ -798,10 +798,35 @@ class Checker(
     /** Overload resolution + type mapping for one Java call (spec §9). */
     private fun checkJavaCall(e: MethodCall, cls: Class<*>, static: Boolean): Type {
         recordEffect(Eff.Io, e.nameSpan, "${cls.simpleName}.${e.name}")
-        val argTypes = e.args.map { checkExpr(it) }
-        if (argTypes.any { it.isErrorish }) return TError
+        // function-shaped arguments that need the target SAM to be typed (spec §9.4)
+        // are deferred: scored by arity now, checked once the winner is known
+        fun samDeferred(a: Expr): Boolean = when (a) {
+            is Lambda -> a.params.any { it.typeAnn == null }
+            is CtorCall -> !a.hasParens && a.spread == null && a.args.isEmpty() &&
+                ctors[a.ctorName]?.fields?.isNotEmpty() == true
+            else -> false
+        }
+        fun deferredArity(a: Expr): Int = when (a) {
+            is Lambda -> a.params.size
+            is CtorCall -> ctors[a.ctorName]!!.fields.size
+            else -> 0
+        }
+        val argTypes: List<Type?> = e.args.map { if (samDeferred(it)) null else checkExpr(it) }
+        fun checkDeferredBare() {
+            for ((i, a) in e.args.withIndex()) if (argTypes[i] == null) checkExpr(a)
+        }
+        if (argTypes.any { it != null && it.isErrorish }) {
+            checkDeferredBare()
+            return TError
+        }
+        fun showArgs() = e.args.indices.joinToString(", ") { i ->
+            argTypes[i]?.toString() ?: "fn/${deferredArity(e.args[i])}"
+        }
 
-        fun paramScore(p: Class<*>, a: Type): Int? = when (a) {
+        fun paramScore(p: Class<*>, i: Int): Int? = when (val a = argTypes[i]) {
+            null -> // deferred lambda / bare constructor: match a convertible SAM by arity
+                if (samMethodOf(p)?.let { samFnType(it)?.params?.size } == deferredArity(e.args[i])) 2
+                else null
             TInt -> when (p) {
                 java.lang.Long.TYPE -> 2
                 Integer.TYPE -> 1
@@ -823,6 +848,11 @@ class Checker(
                 p.isAssignableFrom(a.cls) -> 1
                 else -> null
             }
+            is TFn -> samMethodOf(p)?.let { sam ->
+                val exp = samFnType(sam)
+                if (exp != null && a.params == exp.params && samRetCompatible(a.ret, sam.returnType)) 2
+                else null
+            }
             else -> null
         }
 
@@ -833,10 +863,35 @@ class Checker(
             else if (params.size == e.args.size) params.toList()
             else return null
             var total = if (fixed.size < params.size) -1 else 0
-            for ((p, a) in fixed.zip(argTypes)) {
-                total += paramScore(p, a) ?: return null
+            for ((i, p) in fixed.withIndex()) {
+                total += paramScore(p, i) ?: return null
             }
             return total
+        }
+
+        // the winner is known: type deferred arguments against their SAM's shape
+        // and record every fn-typed position for the codegen bridge (spec §9.4)
+        fun finalizeSams(params: Array<Class<*>>) {
+            val convs = HashMap<Int, SamConv>()
+            for ((i, arg) in e.args.withIndex()) {
+                if (i >= params.size) break // varargs call without the variable part
+                val p = params[i]
+                when (val at = argTypes[i]) {
+                    null -> {
+                        val sam = samMethodOf(p)!!
+                        val exp = samFnType(sam)!!
+                        val t = checkExpr(arg, exp)
+                        if (t is TFn && t.params == exp.params && samRetCompatible(t.ret, sam.returnType))
+                            convs[i] = SamConv(p, sam)
+                        else if (!t.isErrorish)
+                            sink.error("this function does not fit `${p.simpleName}`", arg.span,
+                                "expected shape: $exp\n  single abstract method: $sam")
+                    }
+                    is TFn -> convs[i] = SamConv(p, samMethodOf(p)!!)
+                    else -> {}
+                }
+            }
+            if (convs.isNotEmpty()) e.samConvs = convs
         }
 
         if (e.name == "new") {
@@ -847,13 +902,21 @@ class Checker(
             val bestScore = scored.maxOfOrNull { it.second }
             val best = scored.filter { it.second == bestScore }
             return when {
-                best.isEmpty() -> error(
-                    "no constructor of `${cls.name}` matches (${argTypes.joinToString(", ")})",
-                    e.span, "candidates:\n" + candidates.joinToString("\n") { "  $it" })
-                best.size > 1 -> error("ambiguous constructor call on `${cls.name}`", e.span,
-                    "candidates:\n" + best.joinToString("\n") { "  ${it.first}" })
+                best.isEmpty() -> {
+                    checkDeferredBare()
+                    error(
+                        "no constructor of `${cls.name}` matches (${showArgs()})",
+                        e.span, "candidates:\n" + candidates.joinToString("\n") { "  $it" })
+                }
+                best.size > 1 -> {
+                    checkDeferredBare()
+                    error("ambiguous constructor call on `${cls.name}`", e.span,
+                        "candidates:\n" + best.joinToString("\n") { "  ${it.first}" })
+                }
                 else -> {
-                    e.javaCtorRef = best.single().first
+                    val c = best.single().first
+                    e.javaCtorRef = c
+                    finalizeSams(c.parameterTypes)
                     TJava(cls.name, cls) // .new returns T — a constructor never returns null
                 }
             }
@@ -867,17 +930,27 @@ class Checker(
         val bestScore = scored.maxOfOrNull { it.second }
         val best = scored.filter { it.second == bestScore }
         return when {
-            sameName.isEmpty() -> error(
-                "`${cls.name}` has no ${if (static) "static " else ""}method `${e.name}`", e.nameSpan,
-                "Java calls are ${if (static) "Class.method(...) for statics" else "value.method(...) for instance methods"}; fields are not supported in v0.1")
-            best.isEmpty() -> error(
-                "no overload of `${cls.simpleName}.${e.name}` matches (${argTypes.joinToString(", ")})",
-                e.span, "candidates:\n" + sameName.joinToString("\n") { "  $it" })
-            best.size > 1 -> error("ambiguous call to `${cls.simpleName}.${e.name}`", e.span,
-                "candidates:\n" + best.joinToString("\n") { "  ${it.first}" })
+            sameName.isEmpty() -> {
+                checkDeferredBare()
+                error(
+                    "`${cls.name}` has no ${if (static) "static " else ""}method `${e.name}`", e.nameSpan,
+                    "Java calls are ${if (static) "Class.method(...) for statics" else "value.method(...) for instance methods"}; fields are not supported in v0.1")
+            }
+            best.isEmpty() -> {
+                checkDeferredBare()
+                error(
+                    "no overload of `${cls.simpleName}.${e.name}` matches (${showArgs()})",
+                    e.span, "candidates:\n" + sameName.joinToString("\n") { "  $it" })
+            }
+            best.size > 1 -> {
+                checkDeferredBare()
+                error("ambiguous call to `${cls.simpleName}.${e.name}`", e.span,
+                    "candidates:\n" + best.joinToString("\n") { "  ${it.first}" })
+            }
             else -> {
                 val m = best.single().first
                 e.javaMethod = m
+                finalizeSams(m.parameterTypes)
                 mapJavaReturn(m.returnType, e)
             }
         }
@@ -898,6 +971,68 @@ class Checker(
             // not-imported classes are still usable as opaque values; importing
             // them is only needed to write the type name in a signature
             else TAdt(OPTION_ADT, listOf(TJava(rt.name, rt)))
+    }
+
+    /** The single abstract method of a functional interface, or null (spec §9.4). */
+    private fun samMethodOf(p: Class<*>): java.lang.reflect.Method? {
+        if (!p.isInterface) return null
+        return p.methods
+            .filter { java.lang.reflect.Modifier.isAbstract(it.modifiers) && !isObjectMethod(it) }
+            .distinctBy { m -> m.name + m.parameterTypes.joinToString(",") { it.name } }
+            .singleOrNull()
+    }
+
+    /** equals(Object)/hashCode()/toString() redeclared abstract on an interface don't count. */
+    private fun isObjectMethod(m: java.lang.reflect.Method): Boolean = try {
+        Any::class.java.getMethod(m.name, *m.parameterTypes); true
+    } catch (_: NoSuchMethodException) {
+        false
+    }
+
+    /**
+     * SAM signature → the Dawn function type a converted argument must have
+     * (spec §9.4). Callback parameters arrive unwrapped (null is a boundary
+     * panic, not an Option); null when the SAM is not convertible (char).
+     */
+    private fun samFnType(sam: java.lang.reflect.Method): TFn? {
+        val params = sam.parameterTypes.map { samParamType(it) ?: return null }
+        val ret = when (sam.returnType) {
+            java.lang.Void.TYPE -> TUnit
+            java.lang.Long.TYPE, Integer.TYPE, java.lang.Short.TYPE, java.lang.Byte.TYPE -> TInt
+            java.lang.Double.TYPE, java.lang.Float.TYPE -> TFloat
+            java.lang.Boolean.TYPE -> TBool
+            java.lang.Character.TYPE -> return null
+            String::class.java -> TString
+            else -> TJava(sam.returnType.name, sam.returnType)
+        }
+        return TFn(params, ret, Eff.Io)
+    }
+
+    private fun samParamType(p: Class<*>): Type? = when (p) {
+        java.lang.Long.TYPE, Integer.TYPE, java.lang.Short.TYPE, java.lang.Byte.TYPE -> TInt
+        java.lang.Double.TYPE, java.lang.Float.TYPE -> TFloat
+        java.lang.Boolean.TYPE -> TBool
+        java.lang.Character.TYPE -> null
+        String::class.java -> TString
+        else -> TJava(p.name, p)
+    }
+
+    /** May a Dawn return land where the SAM asks for [j]? (the boxed rep must be assignable) */
+    private fun samRetCompatible(r: Type, j: Class<*>): Boolean = when (j) {
+        java.lang.Void.TYPE -> r == TUnit || r == TNever
+        java.lang.Long.TYPE, Integer.TYPE, java.lang.Short.TYPE, java.lang.Byte.TYPE -> r == TInt
+        java.lang.Double.TYPE, java.lang.Float.TYPE -> r == TFloat
+        java.lang.Boolean.TYPE -> r == TBool
+        java.lang.Character.TYPE -> false
+        else -> when (r) {
+            TString -> j.isAssignableFrom(String::class.java)
+            TInt -> j.isAssignableFrom(java.lang.Long::class.java)
+            TFloat -> j.isAssignableFrom(java.lang.Double::class.java)
+            TBool -> j.isAssignableFrom(java.lang.Boolean::class.java)
+            is TJava -> j.isAssignableFrom(r.cls)
+            TNever -> true
+            else -> false
+        }
     }
 
     /** A top-level function or builtin used as a value; generics need the expected type. */

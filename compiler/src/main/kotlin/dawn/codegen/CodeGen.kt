@@ -147,6 +147,11 @@ class CodeGen(
     /** lambdas found while generating a method; their impl methods are emitted after it */
     private class PendingLambda(val lambda: Lambda, val name: String)
     private val pendingLambdas = ArrayList<PendingLambda>()
+
+    /** SAM-conversion bridges to emit (spec §9.4): Dawn fn value → functional interface. */
+    private class SamBridge(val name: String, val conv: SamConv)
+    private val pendingSamBridges = ArrayList<SamBridge>()
+    private var samBridgeCounter = 0
     private var lambdaCounter = 0
     /** Unit-returning fns used as values; each needs one bridge method */
     private val pendingBridges = LinkedHashSet<FnSig>()
@@ -2259,15 +2264,17 @@ class CodeGen(
 
     private fun drainLambdas(cw: ClassWriter) {
         while (pendingLambdas.isNotEmpty() || pendingBridges.isNotEmpty() ||
-            pendingBuiltinBridges.isNotEmpty() || pendingCtorBridges.isNotEmpty()) {
+            pendingBuiltinBridges.isNotEmpty() || pendingCtorBridges.isNotEmpty() ||
+            pendingSamBridges.isNotEmpty()) {
             when {
                 pendingLambdas.isNotEmpty() -> genLambdaImpl(cw, pendingLambdas.removeFirst())
                 pendingBridges.isNotEmpty() ->
                     genFnValueBridge(cw, pendingBridges.first().also { pendingBridges.remove(it) })
                 pendingBuiltinBridges.isNotEmpty() ->
                     genBuiltinBridge(cw, pendingBuiltinBridges.first().also { pendingBuiltinBridges.remove(it) })
-                else ->
+                pendingCtorBridges.isNotEmpty() ->
                     genCtorValueBridge(cw, pendingCtorBridges.first().also { pendingCtorBridges.remove(it) })
+                else -> genSamBridge(cw, pendingSamBridges.removeFirst())
             }
         }
     }
@@ -2582,9 +2589,11 @@ class CodeGen(
         val owner = AsmType.getInternalName(ctor.declaringClass)
         mv.visitTypeInsn(NEW, owner)
         mv.visitInsn(DUP)
-        for ((arg, p) in e.args.zip(ctor.parameterTypes)) {
+        for ((i, arg) in e.args.withIndex()) {
             if (!genExpr(arg, tail = false)) return false
-            adaptJavaArg(arg.type!!, p)
+            val conv = e.samConvs?.get(i)
+            if (conv != null) emitSamConversion(conv, arg.type as TFn)
+            else adaptJavaArg(arg.type!!, ctor.parameterTypes[i])
         }
         if (ctor.isVarArgs && e.args.size == ctor.parameterCount - 1)
             pushEmptyVarargs(ctor.parameterTypes.last().componentType)
@@ -2600,9 +2609,11 @@ class CodeGen(
         if (!static) {
             if (!genExpr(e.target, tail = false)) return false
         }
-        for ((arg, p) in e.args.zip(m.parameterTypes)) {
+        for ((i, arg) in e.args.withIndex()) {
             if (!genExpr(arg, tail = false)) return false
-            adaptJavaArg(arg.type!!, p)
+            val conv = e.samConvs?.get(i)
+            if (conv != null) emitSamConversion(conv, arg.type as TFn)
+            else adaptJavaArg(arg.type!!, m.parameterTypes[i])
         }
         if (m.isVarArgs && e.args.size == m.parameterCount - 1)
             pushEmptyVarargs(m.parameterTypes.last().componentType)
@@ -2618,6 +2629,135 @@ class CodeGen(
             else -> wrapNullableInOption()
         }
         return true
+    }
+
+    /** A Dawn fn value on the stack → an instance of the target functional interface (spec §9.4). */
+    private fun emitSamConversion(conv: SamConv, ft: TFn) {
+        val n = ft.params.size
+        val bridge = "dawn\$sam\$${samBridgeCounter++}"
+        pendingSamBridges.add(SamBridge(bridge, conv))
+        val samType = AsmType.getMethodType(AsmType.getMethodDescriptor(conv.sam))
+        val bridgeDesc = "(L${fnIface(n)};" +
+            conv.sam.parameterTypes.joinToString("") { AsmType.getDescriptor(it) } +
+            ")" + AsmType.getDescriptor(conv.sam.returnType)
+        mv.visitInvokeDynamicInsn(
+            conv.sam.name, "(L${fnIface(n)};)${AsmType.getDescriptor(conv.iface)}", LMF_BSM,
+            samType,
+            Handle(H_INVOKESTATIC, className, bridge, bridgeDesc, false),
+            samType,
+        )
+    }
+
+    /**
+     * static <samRet> dawn$sam$N(FnN f, <sam params>): the body behind a SAM
+     * conversion (spec §9.4). Null-checks reference parameters (Java must not
+     * pass null into Dawn), boxes to the erased Fn calling convention, invokes,
+     * and adapts the result (checked narrowing when the SAM wants an int).
+     */
+    private fun genSamBridge(cw: ClassWriter, b: SamBridge) {
+        val sam = b.conv.sam
+        val params = sam.parameterTypes
+        val n = params.size
+        val desc = "(L${fnIface(n)};" + params.joinToString("") { AsmType.getDescriptor(it) } +
+            ")" + AsmType.getDescriptor(sam.returnType)
+        val m = cw.visitMethod(ACC_PRIVATE or ACC_STATIC or ACC_SYNTHETIC, b.name, desc, null, null)
+        fun panic(msg: String) {
+            m.visitTypeInsn(NEW, PANIC_CLASS)
+            m.visitInsn(DUP)
+            m.visitLdcInsn(msg)
+            m.visitMethodInsn(INVOKESPECIAL, PANIC_CLASS, "<init>", "(Ljava/lang/String;)V", false)
+            m.visitInsn(ATHROW)
+        }
+        m.visitCode()
+        m.visitVarInsn(ALOAD, 0)
+        var slot = 1
+        for ((i, p) in params.withIndex()) {
+            when (p) {
+                java.lang.Long.TYPE -> {
+                    m.visitVarInsn(LLOAD, slot); slot += 2
+                    m.visitMethodInsn(INVOKESTATIC, "java/lang/Long", "valueOf", "(J)Ljava/lang/Long;", false)
+                }
+                Integer.TYPE, java.lang.Short.TYPE, java.lang.Byte.TYPE -> {
+                    m.visitVarInsn(ILOAD, slot); slot += 1
+                    m.visitInsn(I2L)
+                    m.visitMethodInsn(INVOKESTATIC, "java/lang/Long", "valueOf", "(J)Ljava/lang/Long;", false)
+                }
+                java.lang.Double.TYPE -> {
+                    m.visitVarInsn(DLOAD, slot); slot += 2
+                    m.visitMethodInsn(INVOKESTATIC, "java/lang/Double", "valueOf", "(D)Ljava/lang/Double;", false)
+                }
+                java.lang.Float.TYPE -> {
+                    m.visitVarInsn(FLOAD, slot); slot += 1
+                    m.visitInsn(F2D)
+                    m.visitMethodInsn(INVOKESTATIC, "java/lang/Double", "valueOf", "(D)Ljava/lang/Double;", false)
+                }
+                java.lang.Boolean.TYPE -> {
+                    m.visitVarInsn(ILOAD, slot); slot += 1
+                    m.visitMethodInsn(INVOKESTATIC, "java/lang/Boolean", "valueOf", "(Z)Ljava/lang/Boolean;", false)
+                }
+                else -> { // reference: null must not enter Dawn — panic at the boundary
+                    m.visitVarInsn(ALOAD, slot); slot += 1
+                    val ok = Label()
+                    m.visitInsn(DUP)
+                    m.visitJumpInsn(IFNONNULL, ok)
+                    panic("Java passed null to parameter ${i + 1} of a Dawn callback (${b.conv.iface.name})")
+                    m.visitLabel(ok)
+                }
+            }
+        }
+        m.visitMethodInsn(INVOKEINTERFACE, fnIface(n), "apply", erasedApplyDesc(n), true)
+        when (sam.returnType) {
+            java.lang.Void.TYPE -> {
+                m.visitInsn(POP)
+                m.visitInsn(RETURN)
+            }
+            java.lang.Long.TYPE -> {
+                m.visitTypeInsn(CHECKCAST, "java/lang/Long")
+                m.visitMethodInsn(INVOKEVIRTUAL, "java/lang/Long", "longValue", "()J", false)
+                m.visitInsn(LRETURN)
+            }
+            Integer.TYPE, java.lang.Short.TYPE, java.lang.Byte.TYPE -> {
+                m.visitTypeInsn(CHECKCAST, "java/lang/Long")
+                m.visitMethodInsn(INVOKEVIRTUAL, "java/lang/Long", "longValue", "()J", false)
+                // checked narrowing (spec §9.4): the l2i;i2l roundtrip must be identity
+                val tmp = slot
+                m.visitVarInsn(LSTORE, tmp)
+                val ok = Label()
+                m.visitVarInsn(LLOAD, tmp)
+                m.visitInsn(L2I)
+                m.visitInsn(I2L)
+                m.visitVarInsn(LLOAD, tmp)
+                m.visitInsn(LCMP)
+                m.visitJumpInsn(IFEQ, ok)
+                panic("Dawn callback returned an Int outside Java int range")
+                m.visitLabel(ok)
+                m.visitVarInsn(LLOAD, tmp)
+                m.visitInsn(L2I)
+                m.visitInsn(IRETURN)
+            }
+            java.lang.Boolean.TYPE -> {
+                m.visitTypeInsn(CHECKCAST, "java/lang/Boolean")
+                m.visitMethodInsn(INVOKEVIRTUAL, "java/lang/Boolean", "booleanValue", "()Z", false)
+                m.visitInsn(IRETURN)
+            }
+            java.lang.Double.TYPE -> {
+                m.visitTypeInsn(CHECKCAST, "java/lang/Double")
+                m.visitMethodInsn(INVOKEVIRTUAL, "java/lang/Double", "doubleValue", "()D", false)
+                m.visitInsn(DRETURN)
+            }
+            java.lang.Float.TYPE -> {
+                m.visitTypeInsn(CHECKCAST, "java/lang/Double")
+                m.visitMethodInsn(INVOKEVIRTUAL, "java/lang/Double", "doubleValue", "()D", false)
+                m.visitInsn(D2F)
+                m.visitInsn(FRETURN)
+            }
+            else -> {
+                m.visitTypeInsn(CHECKCAST, AsmType.getInternalName(sam.returnType))
+                m.visitInsn(ARETURN)
+            }
+        }
+        m.visitMaxs(0, 0)
+        m.visitEnd()
     }
 
     /** reference on the stack → Some(ref) / None (null is caught at the boundary, spec §9.2) */

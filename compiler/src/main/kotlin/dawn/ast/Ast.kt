@@ -202,7 +202,12 @@ class MethodCall(
     var javaMethod: java.lang.reflect.Method? = null
     var javaCtorRef: java.lang.reflect.Constructor<*>? = null
     val isJava: Boolean get() = javaMethod != null || javaCtorRef != null
+    /** argument positions SAM-converted to functional interfaces (spec §9.4), by the checker */
+    var samConvs: Map<Int, SamConv>? = null
 }
+
+/** One SAM conversion: the target functional interface and its single abstract method. */
+class SamConv(val iface: Class<*>, val sam: java.lang.reflect.Method)
 
 /** fn(x, y) => body */
 class Lambda(val params: List<LambdaParam>, val body: Expr, span: Span) : Expr(span) {
