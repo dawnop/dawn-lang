@@ -40,21 +40,30 @@ dawn-play (unprivileged service user)
 The runner's `PLAY_TIMEOUT` (default 10s) kills the child first for a clean
 "timeout" response; `RuntimeMaxSec` is the belt-and-braces kill if that fails.
 
-## Open question to settle on first deploy — cross-uid temp dir
+## Cross-uid work dir — resolved on first deploy (2026-07-12)
 
 `DynamicUser=yes` gives each invocation a *different* transient uid, so phase 1
 (compile) and phase 2 (run) do not share a uid, and neither shares the runner's.
-The per-request dir is therefore `chmod 0777` by the runner before the phases
-(`make_world_writable`, gated on `PLAY_SANDBOX`); the dir name is an unguessable
-uuid under `/tmp`, so world-writable is acceptable. Default `DynamicUser` umask
-(0022) leaves `prog.dawn` / `prog.jar` world-readable, which is what the next
-phase needs.
+Three things make this work, learned the hard way on the server:
 
-**Validate this actually holds on the server.** If systemd's `ReadWritePaths`
-interacts badly with `DynamicUser` (e.g. the compile can't write the jar, or the
-JVM can't read it), the fallback is a single sandbox invocation running
-`sh -c 'dawn build … && java -jar …'` — one uid for both phases, no sharing — at
-the cost of folding the two phases together on the Dawn side.
+1. **Work dir must NOT be under `/tmp`.** `DynamicUser=yes` *implies*
+   `PrivateTmp=yes`, so the sandbox gets a private `/tmp`; a `/tmp/…` work dir
+   can't be bind-mounted in (systemd fails NAMESPACE setup, exit 226). The
+   runner uses `PLAY_WORK_ROOT=/var/lib/dawn-play/work` instead. Bonus: the
+   private `/tmp` is a writable scratch for the JVM (hsperfdata etc.), so no
+   `/tmp`-write failures.
+2. **Parent dirs need `o+x`.** `/var/lib/dawn-play` and `…/work` are `0711`
+   (owner dawn-play rwx, others traverse-only) so the DynamicUser can `chdir`
+   into its work dir. `0700` → exit 200/CHDIR "permission denied".
+3. **Work dir is `chmod 0777`** by the runner before the phases
+   (`make_world_writable`, gated on `PLAY_SANDBOX`). The name is an unguessable
+   uuid and the parents are `0711` (unlistable), so world-writable is fine.
+   Default `DynamicUser` umask (0022) leaves `prog.jar` world-readable, which is
+   what the next phase's different uid needs.
+
+The runner `rm -rf`s each work dir after the run (it owns the `0777` dir, so it
+can unlink the DynamicUser-owned files inside). Verified: no accumulation across
+runs, including timeouts.
 
 ## Malicious-sample checklist (run on the server after wiring)
 
@@ -80,3 +89,19 @@ hang or a host-level effect:
 Confirm too that after a storm of requests the concurrency gate hasn't leaked
 permits (the runner stays responsive) — see the known panic-leak note in the
 runner's `run_guarded`.
+
+### Results — first production validation (2026-07-12, all contained)
+
+1. Infinite loop → `phase:"timeout"` ✓
+2. Fork bomb (threads) → `pthread_create failed (EAGAIN)` at `TasksMax=64`, then
+   timeout; host unaffected ✓
+3. Memory bomb → capped by `MemoryMax=512M`, timed out before host pressure ✓
+4. Network (`java.net.Socket`) → `SocketException: Network is unreachable` ✓
+5. Read `/etc/shadow` (0640) and `/opt/dawnop/.env` (InaccessiblePaths) → both
+   denied ✓
+6. Write `/opt/pwned.txt` → denied (`ProtectSystem=strict`); no file created ✓
+7. Read `/etc/passwd` → **readable** (world-readable, usernames only, no
+   secrets). Accepted: `ProtectSystem=strict` is read-only, not hidden. Verified
+   `.env` / `shadow` / other services' data are not world-readable, and the app
+   data dirs are hidden via `InaccessiblePaths`.
+8. Huge output → truncated at 64 KB ✓

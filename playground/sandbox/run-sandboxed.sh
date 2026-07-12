@@ -13,10 +13,13 @@ set -eu
 WORKDIR="$1"
 shift
 
-# Refuse anything but an absolute path under the playground temp root, so a
+# Refuse anything but an absolute path under a playground work root, so a
 # compromised runner can't point the sandbox's writable path at, say, /etc.
+# The server uses /var/lib/dawn-play/work (NOT /tmp: DynamicUser implies a
+# private /tmp that ReadWritePaths can't bind into); /tmp/dawn-play-* stays
+# allowed for ad-hoc local testing.
 case "$WORKDIR" in
-  /tmp/dawn-play-* | /var/tmp/dawn-play-*) : ;;
+  /var/lib/dawn-play/work/* | /tmp/dawn-play-*) : ;;
   *) echo "run-sandboxed: refusing workdir $WORKDIR" >&2; exit 3 ;;
 esac
 
@@ -27,6 +30,8 @@ exec systemd-run \
   --property=PrivateDevices=yes \
   --property=ProtectSystem=strict \
   --property=ProtectHome=yes \
+  --property=ProtectProc=invisible \
+  --property="InaccessiblePaths=-/opt/dawnop -/opt/vaultwarden -/var/www -/etc/letsencrypt -/etc/nginx" \
   --property=ProtectKernelTunables=yes \
   --property=ProtectKernelModules=yes \
   --property=ProtectControlGroups=yes \

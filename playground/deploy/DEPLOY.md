@@ -11,42 +11,58 @@ by hand, with the server reachable.
    useradd --system --no-create-home --shell /usr/sbin/nologin dawn-play
    ```
 
-2. **Layout** under `/opt/dawn` (owned by your deploy user, readable by dawn-play):
+2. **JRE 21** — a headless JRE is enough (the compiler is a fat jar; no javac
+   needed). On Ubuntu 22.04 it's in apt:
+   ```sh
+   sudo apt-get install -y openjdk-21-jre-headless
+   # lands at /usr/lib/jvm/java-21-openjdk-amd64, java at /usr/bin/java
+   ```
+
+3. **Layout** under `/opt/dawn` (owned by your deploy user, readable by dawn-play):
    ```
    /opt/dawn/bin/dawn                      # launcher (rsynced)
    /opt/dawn/compiler/build/libs/dawn.jar  # compiler (rsynced)
-   /opt/dawn/jdk/                           # a JDK 21 (Temurin), installed once
    /opt/dawn/playground/src                 # runner sources (rsynced)
    /opt/dawn/playground/sandbox/            # sandbox scripts (rsynced)
    ```
-   Install the JDK once (the server can't reach GitHub reliably; use a mirror):
+
+4. **Work root** — per-request dirs live here, NOT under /tmp (DynamicUser
+   implies a private /tmp that can't bind a /tmp work dir). Parents are `0711`
+   so the sandbox's DynamicUser can traverse in:
    ```sh
-   # e.g. Temurin 21 from a TUNA/Adoptium mirror, unpacked to /opt/dawn/jdk
+   sudo mkdir -p /var/lib/dawn-play/work
+   sudo chown -R dawn-play:dawn-play /var/lib/dawn-play
+   sudo chmod 0711 /var/lib/dawn-play /var/lib/dawn-play/work
    ```
 
-3. **Sandbox wrapper + sudoers**:
+5. **Sandbox wrapper + sudoers** (the wrapper hardcodes every limit; sudoers
+   whitelists only it, with any args — do NOT add a trailing `""`, that means
+   "zero args only" and denies every real call):
    ```sh
-   install -m 755 /opt/dawn/playground/sandbox/run-sandboxed.sh \
-     /opt/dawn/playground/sandbox/run-sandboxed.sh
+   chmod 755 /opt/dawn/playground/sandbox/run-sandboxed.sh
    visudo -cf /opt/dawn/playground/sandbox/sudoers.dawn-play   # validate first
-   install -m 440 /opt/dawn/playground/sandbox/sudoers.dawn-play \
+   install -m 440 -o root -g root /opt/dawn/playground/sandbox/sudoers.dawn-play \
      /etc/sudoers.d/dawn-play
    ```
 
-4. **systemd unit**:
+6. **systemd unit** — the shipped `dawn-play.service` points at the apt JRE
+   (`/usr/lib/jvm/java-21-openjdk-amd64`, `/usr/bin/java`) and sets
+   `PLAY_WORK_ROOT=/var/lib/dawn-play/work`:
    ```sh
    install -m 644 /opt/dawn/playground/deploy/dawn-play.service \
      /etc/systemd/system/dawn-play.service
    systemctl daemon-reload && systemctl enable --now dawn-play
+   curl -s http://127.0.0.1:8087/health   # -> ok
    ```
 
-5. **nginx**: add `nginx-play.conf`'s two `location` blocks into the existing
+7. **Validate the sandbox** — run every item in `sandbox/SANDBOX.md`'s
+   malicious-sample checklist against `http://127.0.0.1:8087/run` **before**
+   exposing `/api/run` publicly (results from the first deploy are recorded
+   there).
+
+8. **nginx**: add `nginx-play.conf`'s two `location` blocks into the existing
    `server { server_name dawn-lang.dawnop.com; … }`, and the `limit_req_zone`
    line into `http { … }`. Then `nginx -t && systemctl reload nginx`.
-
-6. **Validate the sandbox** — run every item in `sandbox/SANDBOX.md`'s
-   malicious-sample checklist against `http://127.0.0.1:8087/run` before exposing
-   `/api/run` publicly. Settle the DynamicUser cross-uid temp-dir question there.
 
 ## Repeatable deploys
 

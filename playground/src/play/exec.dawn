@@ -8,16 +8,22 @@ use java "java.util.concurrent.TimeUnit"
 use java "java.util.UUID"
 use java "java.lang.System"
 use play/contract.{Outcome, Compiled, CompileError, Timeout}
-use play/config.{dawn_bin, java_bin, timeout_secs, sandbox_enabled, sandbox_script}
+use play/config.{dawn_bin, java_bin, timeout_secs, sandbox_enabled, sandbox_script, work_root}
 
 const OUTPUT_LIMIT: Int = 65536
 
-# java.io.tmpdir carries a trailing slash on some platforms (macOS); drop it so
-# the path we build matches what the compiler prints in diagnostics.
+# Where per-request work dirs live: PLAY_WORK_ROOT if set (the sandbox needs a
+# non-/tmp path, see config.work_root), else java.io.tmpdir. Trailing slash is
+# dropped (java.io.tmpdir carries one on macOS) so paths match diagnostics.
 fn temp_root() -> String !io = {
-  let d = match System.getProperty("java.io.tmpdir") {
-    Some(v) -> v
-    None -> "/tmp"
+  let configured = work_root()
+  let d = if configured != "" {
+    configured
+  } else {
+    match System.getProperty("java.io.tmpdir") {
+      Some(v) -> v
+      None -> "/tmp"
+    }
   }
   if ends_with(d, "/") { substring(d, 0, str_len(d) - 1) } else { d }
 }
@@ -59,13 +65,21 @@ fn make_world_writable(dir: String) -> Unit !io = {
   ()
 }
 
+# Remove a per-request work dir. The runner owns the 0777 dir, so it can unlink
+# files inside it even though the sandbox's DynamicUser wrote them.
+fn cleanup(dir: String) -> Unit !io = {
+  let p = ProcessBuilder.new(["rm", "-rf", dir])
+  p.start().expect("rm").waitFor()
+  ()
+}
+
 pub fn execute(code: String) -> Outcome !io = {
   let id = UUID.randomUUID().expect("uuid").toString().expect("uuid string")
   let dir = "${temp_root()}/dawn-play-$id"
   let src = "$dir/prog.dawn"
   let jar = "$dir/prog.jar"
   # write_file creates parent directories as needed
-  match write_file(src, code) {
+  let outcome = match write_file(src, code) {
     Err(e) -> CompileError("cannot stage source: $e")
     Ok(_) -> {
       # Under the sandbox each phase runs as a fresh DynamicUser (a different
@@ -105,4 +119,6 @@ pub fn execute(code: String) -> Outcome !io = {
       }
     }
   }
+  cleanup(dir)
+  outcome
 }
