@@ -4,6 +4,9 @@
 import { EditorView, keymap } from '@codemirror/view'
 import { EditorState } from '@codemirror/state'
 import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands'
+import { closeBrackets, completionKeymap } from '@codemirror/autocomplete'
+import { bracketMatching, indentOnInput } from '@codemirror/language'
+import { dawn } from './dawn-lang'
 import './playground.css'
 
 const SAMPLE = `pub fn main() -> Unit !io = {
@@ -22,7 +25,11 @@ function mount(root: HTMLElement) {
       doc: SAMPLE,
       extensions: [
         history(),
-        keymap.of([...defaultKeymap, ...historyKeymap, indentWithTab]),
+        dawn(),
+        bracketMatching(),
+        closeBrackets(),
+        indentOnInput(),
+        keymap.of([...completionKeymap, ...defaultKeymap, ...historyKeymap, indentWithTab]),
         EditorView.lineWrapping,
       ],
     }),
