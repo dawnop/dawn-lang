@@ -112,7 +112,7 @@ class Checker(
                 continue
             }
             if (aliasShadow(d.name, d.nameSpan) || importClash(d.name, d.nameSpan, "type")) continue
-            if (Type.named(d.name) != null || d.name == "List") {
+            if (Type.named(d.name) != null || d.name in setOf("List", "Map", "Set")) {
                 sink.error("`${d.name}` is a builtin type and cannot be redefined", d.nameSpan)
                 continue
             }
@@ -426,6 +426,20 @@ class Checker(
             }
             return TList(resolveType(ref.args[0], tparams, effVars))
         }
+        if (ref.name == "Map") {
+            if (ref.args.size != 2) {
+                sink.error("Map takes exactly two type arguments: Map[K, V]", ref.span)
+                return TError
+            }
+            return TMap(resolveType(ref.args[0], tparams, effVars), resolveType(ref.args[1], tparams, effVars))
+        }
+        if (ref.name == "Set") {
+            if (ref.args.size != 1) {
+                sink.error("Set takes exactly one type argument: Set[T]", ref.span)
+                return TError
+            }
+            return TSet(resolveType(ref.args[0], tparams, effVars))
+        }
         Type.named(ref.name)?.let {
             if (ref.args.isNotEmpty()) {
                 sink.error("`${ref.name}` is not generic", ref.span)
@@ -476,6 +490,9 @@ class Checker(
             declared.info === actual.info &&
                 declared.args.zip(actual.args).all { (d, a) -> unifyInto(d, a, map, effMap) }
         declared is TList && actual is TList -> unifyInto(declared.elem, actual.elem, map, effMap)
+        declared is TMap && actual is TMap ->
+            unifyInto(declared.key, actual.key, map, effMap) && unifyInto(declared.value, actual.value, map, effMap)
+        declared is TSet && actual is TSet -> unifyInto(declared.elem, actual.elem, map, effMap)
         declared is TTuple && actual is TTuple ->
             declared.elems.size == actual.elems.size &&
                 declared.elems.zip(actual.elems).all { (d, a) -> unifyInto(d, a, map, effMap) }
@@ -516,6 +533,11 @@ class Checker(
                 (!e.hasParens && ci.fields.isNotEmpty() && !ci.adt.isRecord))
         }
         is Lambda -> e.params.any { it.typeAnn == null }
+        // a zero-arg generic call (map_empty(), set_empty()) can only be typed from context
+        is Call -> {
+            val sig = if (lookup(e.callee) != null) null else (fns[e.callee] ?: BUILTINS[e.callee])
+            sig != null && sig.typeParams.isNotEmpty() && e.args.isEmpty()
+        }
         else -> false
     }
 
@@ -568,7 +590,7 @@ class Checker(
     /** Every name currently in scope — the candidate pool for "did you mean" on a variable. */
     private fun localNames(): List<String> = scopes.flatMap { it.keys }
 
-    private val builtinTypeNames = listOf("Int", "Float", "Bool", "String", "Unit", "List")
+    private val builtinTypeNames = listOf("Int", "Float", "Bool", "String", "Unit", "List", "Map", "Set")
 
     /**
      * Resolve a local name, doing lambda-capture bookkeeping: a symbol declared
@@ -696,6 +718,8 @@ class Checker(
         is TVar -> false
         is TAdt -> t.args.all { isConcrete(it) }
         is TList -> isConcrete(t.elem)
+        is TMap -> isConcrete(t.key) && isConcrete(t.value)
+        is TSet -> isConcrete(t.elem)
         is TTuple -> t.elems.all { isConcrete(it) }
         else -> true
     }
@@ -705,6 +729,8 @@ class Checker(
         is TFn -> true
         is TTuple -> t.elems.any { containsFn(it) }
         is TList -> containsFn(t.elem)
+        is TMap -> containsFn(t.key) || containsFn(t.value)
+        is TSet -> containsFn(t.elem)
         else -> false
     }
 
@@ -924,6 +950,8 @@ class Checker(
     private fun isShowable(t: Type): Boolean = when (t) {
         TInt, TFloat, TBool, TString -> true
         is TList -> isShowable(t.elem)
+        is TMap -> isShowable(t.key) && isShowable(t.value)
+        is TSet -> isShowable(t.elem)
         is TTuple -> t.elems.all { isShowable(it) }
         is TAdt -> t.info.derivesShow && t.args.all { isShowable(it) }
         else -> false // TVar (opaque), TFn, TJava, Unit
@@ -933,6 +961,8 @@ class Checker(
     private fun isShowableField(t: Type): Boolean = when (t) {
         TInt, TFloat, TBool, TString, is TVar -> true
         is TList -> isShowableField(t.elem)
+        is TMap -> isShowableField(t.key) && isShowableField(t.value)
+        is TSet -> isShowableField(t.elem)
         is TTuple -> t.elems.all { isShowableField(it) }
         is TAdt -> t.info.derivesShow && t.args.all { isShowableField(it) }
         else -> false

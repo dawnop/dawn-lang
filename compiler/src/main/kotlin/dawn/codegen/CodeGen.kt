@@ -62,10 +62,13 @@ class CodeGen(
         const val STRINGS_CLASS = "dawn/rt/Strings"
         const val IO_CLASS = "dawn/rt/Io"
         const val SHOW_CLASS = "dawn/rt/Show"
+        const val MAPS_CLASS = "dawn/rt/Maps"
         private const val ARGS_FIELD = "dawn\$args"
         private const val SB = "java/lang/StringBuilder"
         private const val OBJ = "java/lang/Object"
         private const val JLIST = "java/util/List"
+        private const val JMAP = "java/util/Map"
+        private const val JSET = "java/util/Set"
         private const val ARRAYLIST = "java/util/ArrayList"
 
         private fun fnIface(arity: Int) = "dawn/rt/Fn$arity"
@@ -81,6 +84,13 @@ class CodeGen(
             false,
         )
     }
+
+    /** builtin names backed by dawn/rt/Maps (spec §2.2) */
+    private val MAP_BUILTINS = setOf(
+        "map_empty", "set_empty", "map_from", "set_from", "map_insert", "set_insert",
+        "map_remove", "set_remove", "map_get", "map_has", "set_has", "map_size", "set_size",
+        "map_keys", "map_values", "map_entries", "set_to_list",
+    )
 
     /** ADTs defined by this module (its own classes to emit) */
     private val ownAdts: List<AdtInfo> = module.types.mapNotNull { it.ctors.firstOrNull()?.info?.adt }
@@ -166,8 +176,152 @@ class CodeGen(
         out[STRINGS_CLASS] = genStringsClass()
         out[IO_CLASS] = genIoClass()
         out[SHOW_CLASS] = genShowClass()
+        out[MAPS_CLASS] = genMapsClass()
         for (n in 0..8) out[fnIface(n)] = genFnInterface(n)
         for (n in 2..8) out[tupleClass(n)] = genTupleClass(n)
+    }
+
+    /**
+     * dawn/rt/Maps: the runtime for the builtin persistent Map/Set (spec §2.2).
+     * Backed by LinkedHashMap/LinkedHashSet with copy-on-write, so iteration order
+     * is insertion order and identical on JVM and native. Keys/values travel erased.
+     */
+    private fun genMapsClass(): ByteArray {
+        val LHM = "java/util/LinkedHashMap"
+        val LHS = "java/util/LinkedHashSet"
+        val COLL = "java/util/Collection"
+        val ITER = "java/util/Iterator"
+        val ENTRY = "java/util/Map\$Entry"
+        val T2 = tupleClass(2)
+        val cw = DawnClassWriter()
+        cw.visit(V17, ACC_PUBLIC or ACC_FINAL, MAPS_CLASS, null, OBJ, null)
+
+        fun method(name: String, desc: String, body: MethodVisitor.() -> kotlin.Unit) {
+            val m = cw.visitMethod(ACC_PUBLIC or ACC_STATIC, name, desc, null, null)
+            m.visitCode(); m.body(); m.visitMaxs(0, 0); m.visitEnd()
+        }
+        fun MethodVisitor.newEmpty(cls: String) {
+            visitTypeInsn(NEW, cls); visitInsn(DUP); visitMethodInsn(INVOKESPECIAL, cls, "<init>", "()V", false)
+        }
+        fun MethodVisitor.copyFrom(cls: String, argDesc: String, arg: Int) {
+            visitTypeInsn(NEW, cls); visitInsn(DUP); visitVarInsn(ALOAD, arg)
+            visitMethodInsn(INVOKESPECIAL, cls, "<init>", "($argDesc)V", false)
+        }
+
+        method("map_empty", "()L$JMAP;") { newEmpty(LHM); visitInsn(ARETURN) }
+        method("set_empty", "()L$JSET;") { newEmpty(LHS); visitInsn(ARETURN) }
+
+        method("map_insert", "(L$JMAP;L$OBJ;L$OBJ;)L$JMAP;") {
+            copyFrom(LHM, "Ljava/util/Map;", 0); visitVarInsn(ASTORE, 3)
+            visitVarInsn(ALOAD, 3); visitVarInsn(ALOAD, 1); visitVarInsn(ALOAD, 2)
+            visitMethodInsn(INVOKEVIRTUAL, LHM, "put", "(L$OBJ;L$OBJ;)L$OBJ;", false); visitInsn(POP)
+            visitVarInsn(ALOAD, 3); visitInsn(ARETURN)
+        }
+        method("set_insert", "(L$JSET;L$OBJ;)L$JSET;") {
+            copyFrom(LHS, "L$COLL;", 0); visitVarInsn(ASTORE, 2)
+            visitVarInsn(ALOAD, 2); visitVarInsn(ALOAD, 1)
+            visitMethodInsn(INVOKEVIRTUAL, LHS, "add", "(L$OBJ;)Z", false); visitInsn(POP)
+            visitVarInsn(ALOAD, 2); visitInsn(ARETURN)
+        }
+        method("map_remove", "(L$JMAP;L$OBJ;)L$JMAP;") {
+            copyFrom(LHM, "Ljava/util/Map;", 0); visitVarInsn(ASTORE, 2)
+            visitVarInsn(ALOAD, 2); visitVarInsn(ALOAD, 1)
+            visitMethodInsn(INVOKEVIRTUAL, LHM, "remove", "(L$OBJ;)L$OBJ;", false); visitInsn(POP)
+            visitVarInsn(ALOAD, 2); visitInsn(ARETURN)
+        }
+        method("set_remove", "(L$JSET;L$OBJ;)L$JSET;") {
+            copyFrom(LHS, "L$COLL;", 0); visitVarInsn(ASTORE, 2)
+            visitVarInsn(ALOAD, 2); visitVarInsn(ALOAD, 1)
+            visitMethodInsn(INVOKEVIRTUAL, LHS, "remove", "(L$OBJ;)Z", false); visitInsn(POP)
+            visitVarInsn(ALOAD, 2); visitInsn(ARETURN)
+        }
+        method("map_get", "(L$JMAP;L$OBJ;)LOption;") {
+            val none = Label()
+            visitVarInsn(ALOAD, 0); visitVarInsn(ALOAD, 1)
+            visitMethodInsn(INVOKEINTERFACE, JMAP, "containsKey", "(L$OBJ;)Z", true)
+            visitJumpInsn(IFEQ, none)
+            visitTypeInsn(NEW, "Option\$Some"); visitInsn(DUP)
+            visitVarInsn(ALOAD, 0); visitVarInsn(ALOAD, 1)
+            visitMethodInsn(INVOKEINTERFACE, JMAP, "get", "(L$OBJ;)L$OBJ;", true)
+            visitMethodInsn(INVOKESPECIAL, "Option\$Some", "<init>", "(L$OBJ;)V", false)
+            visitInsn(ARETURN)
+            visitLabel(none)
+            visitFieldInsn(GETSTATIC, "Option\$None", "INSTANCE", "LOption\$None;")
+            visitInsn(ARETURN)
+        }
+        method("map_has", "(L$JMAP;L$OBJ;)Z") {
+            visitVarInsn(ALOAD, 0); visitVarInsn(ALOAD, 1)
+            visitMethodInsn(INVOKEINTERFACE, JMAP, "containsKey", "(L$OBJ;)Z", true); visitInsn(IRETURN)
+        }
+        method("set_has", "(L$JSET;L$OBJ;)Z") {
+            visitVarInsn(ALOAD, 0); visitVarInsn(ALOAD, 1)
+            visitMethodInsn(INVOKEINTERFACE, JSET, "contains", "(L$OBJ;)Z", true); visitInsn(IRETURN)
+        }
+        method("map_size", "(L$JMAP;)J") {
+            visitVarInsn(ALOAD, 0); visitMethodInsn(INVOKEINTERFACE, JMAP, "size", "()I", true)
+            visitInsn(I2L); visitInsn(LRETURN)
+        }
+        method("set_size", "(L$JSET;)J") {
+            visitVarInsn(ALOAD, 0); visitMethodInsn(INVOKEINTERFACE, JSET, "size", "()I", true)
+            visitInsn(I2L); visitInsn(LRETURN)
+        }
+        method("map_keys", "(L$JMAP;)L$JLIST;") {
+            visitTypeInsn(NEW, ARRAYLIST); visitInsn(DUP)
+            visitVarInsn(ALOAD, 0); visitMethodInsn(INVOKEINTERFACE, JMAP, "keySet", "()L$JSET;", true)
+            visitMethodInsn(INVOKESPECIAL, ARRAYLIST, "<init>", "(L$COLL;)V", false); visitInsn(ARETURN)
+        }
+        method("map_values", "(L$JMAP;)L$JLIST;") {
+            visitTypeInsn(NEW, ARRAYLIST); visitInsn(DUP)
+            visitVarInsn(ALOAD, 0); visitMethodInsn(INVOKEINTERFACE, JMAP, "values", "()L$COLL;", true)
+            visitMethodInsn(INVOKESPECIAL, ARRAYLIST, "<init>", "(L$COLL;)V", false); visitInsn(ARETURN)
+        }
+        method("set_to_list", "(L$JSET;)L$JLIST;") {
+            copyFrom(ARRAYLIST, "L$COLL;", 0); visitInsn(ARETURN)
+        }
+        method("set_from", "(L$JLIST;)L$JSET;") {
+            copyFrom(LHS, "L$COLL;", 0); visitInsn(ARETURN)
+        }
+        method("map_from", "(L$JLIST;)L$JMAP;") {
+            newEmpty(LHM); visitVarInsn(ASTORE, 1)
+            visitVarInsn(ALOAD, 0); visitMethodInsn(INVOKEINTERFACE, JLIST, "iterator", "()L$ITER;", true)
+            visitVarInsn(ASTORE, 2)
+            val loop = Label(); val done = Label()
+            visitLabel(loop)
+            visitVarInsn(ALOAD, 2); visitMethodInsn(INVOKEINTERFACE, ITER, "hasNext", "()Z", true)
+            visitJumpInsn(IFEQ, done)
+            visitVarInsn(ALOAD, 2); visitMethodInsn(INVOKEINTERFACE, ITER, "next", "()L$OBJ;", true)
+            visitTypeInsn(CHECKCAST, T2); visitVarInsn(ASTORE, 3)
+            visitVarInsn(ALOAD, 1)
+            visitVarInsn(ALOAD, 3); visitFieldInsn(GETFIELD, T2, "_0", "L$OBJ;")
+            visitVarInsn(ALOAD, 3); visitFieldInsn(GETFIELD, T2, "_1", "L$OBJ;")
+            visitMethodInsn(INVOKEVIRTUAL, LHM, "put", "(L$OBJ;L$OBJ;)L$OBJ;", false); visitInsn(POP)
+            visitJumpInsn(GOTO, loop)
+            visitLabel(done)
+            visitVarInsn(ALOAD, 1); visitInsn(ARETURN)
+        }
+        method("map_entries", "(L$JMAP;)L$JLIST;") {
+            visitTypeInsn(NEW, ARRAYLIST); visitInsn(DUP)
+            visitMethodInsn(INVOKESPECIAL, ARRAYLIST, "<init>", "()V", false); visitVarInsn(ASTORE, 1)
+            visitVarInsn(ALOAD, 0); visitMethodInsn(INVOKEINTERFACE, JMAP, "entrySet", "()L$JSET;", true)
+            visitMethodInsn(INVOKEINTERFACE, JSET, "iterator", "()L$ITER;", true); visitVarInsn(ASTORE, 2)
+            val loop = Label(); val done = Label()
+            visitLabel(loop)
+            visitVarInsn(ALOAD, 2); visitMethodInsn(INVOKEINTERFACE, ITER, "hasNext", "()Z", true)
+            visitJumpInsn(IFEQ, done)
+            visitVarInsn(ALOAD, 2); visitMethodInsn(INVOKEINTERFACE, ITER, "next", "()L$OBJ;", true)
+            visitTypeInsn(CHECKCAST, ENTRY); visitVarInsn(ASTORE, 3)
+            visitVarInsn(ALOAD, 1)
+            visitTypeInsn(NEW, T2); visitInsn(DUP)
+            visitVarInsn(ALOAD, 3); visitMethodInsn(INVOKEINTERFACE, ENTRY, "getKey", "()L$OBJ;", true)
+            visitVarInsn(ALOAD, 3); visitMethodInsn(INVOKEINTERFACE, ENTRY, "getValue", "()L$OBJ;", true)
+            visitMethodInsn(INVOKESPECIAL, T2, "<init>", "(L$OBJ;L$OBJ;)V", false)
+            visitMethodInsn(INVOKEVIRTUAL, ARRAYLIST, "add", "(L$OBJ;)Z", false); visitInsn(POP)
+            visitJumpInsn(GOTO, loop)
+            visitLabel(done)
+            visitVarInsn(ALOAD, 1); visitInsn(ARETURN)
+        }
+        cw.visitEnd()
+        return cw.toByteArray()
     }
 
     /** this module's ADT classes + its class of static methods */
@@ -247,6 +401,22 @@ class CodeGen(
         eq.visitMaxs(0, 0)
         eq.visitEnd()
 
+        // hashCode consistent with equals, so tuples work as Map/Set keys (spec §12.2)
+        val hc = cw.visitMethod(ACC_PUBLIC, "hashCode", "()I", null, null)
+        hc.visitCode()
+        hc.visitInsn(ICONST_1)
+        for (i in 0 until n) {
+            hc.visitIntInsn(BIPUSH, 31)
+            hc.visitInsn(IMUL)
+            hc.visitVarInsn(ALOAD, 0)
+            hc.visitFieldInsn(GETFIELD, cls, "_$i", "L$OBJ;")
+            hc.visitMethodInsn(INVOKEVIRTUAL, OBJ, "hashCode", "()I", false)
+            hc.visitInsn(IADD)
+        }
+        hc.visitInsn(IRETURN)
+        hc.visitMaxs(0, 0)
+        hc.visitEnd()
+
         // toString for `derive Show`: (v0, v1, ...) with elements rendered via dawn/rt/Show
         val ts = cw.visitMethod(ACC_PUBLIC, "toString", "()Ljava/lang/String;", null, null)
         ts.visitCode()
@@ -292,6 +462,8 @@ class CodeGen(
         is TVar -> "L$OBJ;" // erasure: type parameters are Object (spec §12.2)
         is TAdt -> "L${t.info.jvmName};"
         is TList -> "L$JLIST;"
+        is TMap -> "L$JMAP;"
+        is TSet -> "L$JSET;"
         is TTuple -> "L${tupleClass(t.elems.size)};"
         is TJava -> "L${t.internalName};"
         is TFn -> "L${fnIface(t.params.size)};"
@@ -308,7 +480,8 @@ class CodeGen(
     }
 
     private fun isRef(t: Type) =
-        t == TString || t is TAdt || t is TList || t is TVar || t is TFn || t is TTuple || t is TJava
+        t == TString || t is TAdt || t is TList || t is TMap || t is TSet ||
+            t is TVar || t is TFn || t is TTuple || t is TJava
 
     // ---- erasure coercions ----
 
@@ -340,6 +513,8 @@ class CodeGen(
             TString -> mv.visitTypeInsn(CHECKCAST, "java/lang/String")
             is TAdt -> mv.visitTypeInsn(CHECKCAST, t.info.jvmName)
             is TList -> mv.visitTypeInsn(CHECKCAST, JLIST)
+            is TMap -> mv.visitTypeInsn(CHECKCAST, JMAP)
+            is TSet -> mv.visitTypeInsn(CHECKCAST, JSET)
             is TTuple -> mv.visitTypeInsn(CHECKCAST, tupleClass(t.elems.size))
             is TJava -> mv.visitTypeInsn(CHECKCAST, t.internalName)
             is TFn -> mv.visitTypeInsn(CHECKCAST, fnIface(t.params.size))
@@ -436,8 +611,9 @@ class CodeGen(
         init.visitMaxs(0, 0)
         init.visitEnd()
 
-        // structural equality (== in Dawn, spec §4.3); singletons keep identity equals
-        if (!singleton) genEqualsMethod(cw, sub, ci)
+        // structural equality (== in Dawn, spec §4.3); singletons keep identity equals.
+        // A matching hashCode lets these values serve as Map/Set keys (spec §12.2).
+        if (!singleton) { genEqualsMethod(cw, sub, ci); genHashCodeMethod(cw, sub, ci) }
         // toString for `derive Show`: always generated so nested/generic fields render
         // uniformly via dawn/rt/Show; the type checker gates whether it may be called
         genToStringMethod(cw, sub, ci)
@@ -517,6 +693,34 @@ class CodeGen(
         m.visitInsn(IRETURN)
         m.visitMaxs(0, 0)
         m.visitEnd()
+    }
+
+    /** hashCode consistent with the structural equals: h = 31*h + field.hash, seeded 1. */
+    private fun genHashCodeMethod(cw: ClassWriter, sub: String, ci: CtorInfo) {
+        val m = cw.visitMethod(ACC_PUBLIC, "hashCode", "()I", null, null)
+        m.visitCode()
+        m.visitInsn(ICONST_1)
+        for (f in ci.fields) {
+            m.visitIntInsn(BIPUSH, 31)
+            m.visitInsn(IMUL)
+            m.visitVarInsn(ALOAD, 0)
+            m.visitFieldInsn(GETFIELD, sub, f.name, descOf(f.type))
+            hashOf(m, f.type)
+            m.visitInsn(IADD)
+        }
+        m.visitInsn(IRETURN)
+        m.visitMaxs(0, 0)
+        m.visitEnd()
+    }
+
+    /** consume a value of [t] on the stack, leave its int hash (Dawn values are never null) */
+    private fun hashOf(m: MethodVisitor, t: Type) {
+        when (t) {
+            TInt -> m.visitMethodInsn(INVOKESTATIC, "java/lang/Long", "hashCode", "(J)I", false)
+            TFloat -> m.visitMethodInsn(INVOKESTATIC, "java/lang/Double", "hashCode", "(D)I", false)
+            TBool -> m.visitMethodInsn(INVOKESTATIC, "java/lang/Boolean", "hashCode", "(Z)I", false)
+            else -> m.visitMethodInsn(INVOKEVIRTUAL, OBJ, "hashCode", "()I", false)
+        }
     }
 
     // ---- functions ----
@@ -1190,6 +1394,26 @@ class CodeGen(
             m.visitMethodInsn(INVOKESTATIC, SHOW_CLASS, "showList", "(L$JLIST;)L$STR;", false)
             m.visitInsn(ARETURN)
             m.visitLabel(notList)
+            // if (o instanceof java.util.Map) return showMap((Map) o);
+            val notMap = Label()
+            m.visitVarInsn(ALOAD, 0)
+            m.visitTypeInsn(INSTANCEOF, JMAP)
+            m.visitJumpInsn(IFEQ, notMap)
+            m.visitVarInsn(ALOAD, 0)
+            m.visitTypeInsn(CHECKCAST, JMAP)
+            m.visitMethodInsn(INVOKESTATIC, SHOW_CLASS, "showMap", "(L$JMAP;)L$STR;", false)
+            m.visitInsn(ARETURN)
+            m.visitLabel(notMap)
+            // if (o instanceof java.util.Set) return showSet((Set) o);
+            val notSet = Label()
+            m.visitVarInsn(ALOAD, 0)
+            m.visitTypeInsn(INSTANCEOF, JSET)
+            m.visitJumpInsn(IFEQ, notSet)
+            m.visitVarInsn(ALOAD, 0)
+            m.visitTypeInsn(CHECKCAST, JSET)
+            m.visitMethodInsn(INVOKESTATIC, SHOW_CLASS, "showSet", "(L$JSET;)L$STR;", false)
+            m.visitInsn(ARETURN)
+            m.visitLabel(notSet)
             // return String.valueOf(o);
             m.visitVarInsn(ALOAD, 0)
             m.visitMethodInsn(INVOKESTATIC, STR, "valueOf", "(L$OBJ;)L$STR;", false)
@@ -1271,6 +1495,85 @@ class CodeGen(
             m.visitInsn(ARETURN)
             m.visitMaxs(0, 0)
             m.visitEnd()
+        }
+
+        // static String showMap(Map m): "map_from([(k, v), ...])" (spec §2.2 Show shape)
+        run {
+            val ITER = "java/util/Iterator"
+            val ENTRY = "java/util/Map\$Entry"
+            val m = cw.visitMethod(ACC_PUBLIC or ACC_STATIC, "showMap", "(L$JMAP;)L$STR;", null, null)
+            m.visitCode()
+            m.visitTypeInsn(NEW, SB); m.visitInsn(DUP)
+            m.visitMethodInsn(INVOKESPECIAL, SB, "<init>", "()V", false)
+            m.visitVarInsn(ASTORE, 1)
+            m.visitVarInsn(ALOAD, 1); appendConst(m, "map_from(["); m.visitInsn(POP)
+            m.visitVarInsn(ALOAD, 0)
+            m.visitMethodInsn(INVOKEINTERFACE, JMAP, "entrySet", "()L$JSET;", true)
+            m.visitMethodInsn(INVOKEINTERFACE, JSET, "iterator", "()L$ITER;", true)
+            m.visitVarInsn(ASTORE, 2)
+            m.visitInsn(ICONST_0); m.visitVarInsn(ISTORE, 3)
+            val loop = Label(); val done = Label(); val noComma = Label()
+            m.visitLabel(loop)
+            m.visitVarInsn(ALOAD, 2); m.visitMethodInsn(INVOKEINTERFACE, ITER, "hasNext", "()Z", true)
+            m.visitJumpInsn(IFEQ, done)
+            m.visitVarInsn(ALOAD, 2); m.visitMethodInsn(INVOKEINTERFACE, ITER, "next", "()L$OBJ;", true)
+            m.visitTypeInsn(CHECKCAST, ENTRY); m.visitVarInsn(ASTORE, 4)
+            m.visitVarInsn(ILOAD, 3); m.visitJumpInsn(IFEQ, noComma)
+            m.visitVarInsn(ALOAD, 1); appendConst(m, ", "); m.visitInsn(POP)
+            m.visitLabel(noComma)
+            m.visitVarInsn(ALOAD, 1); appendConst(m, "("); m.visitInsn(POP)
+            m.visitVarInsn(ALOAD, 1)
+            m.visitVarInsn(ALOAD, 4); m.visitMethodInsn(INVOKEINTERFACE, ENTRY, "getKey", "()L$OBJ;", true)
+            m.visitMethodInsn(INVOKESTATIC, SHOW_CLASS, "show", "(L$OBJ;)L$STR;", false)
+            m.visitMethodInsn(INVOKEVIRTUAL, SB, "append", "(L$STR;)L$SB;", false); m.visitInsn(POP)
+            m.visitVarInsn(ALOAD, 1); appendConst(m, ", "); m.visitInsn(POP)
+            m.visitVarInsn(ALOAD, 1)
+            m.visitVarInsn(ALOAD, 4); m.visitMethodInsn(INVOKEINTERFACE, ENTRY, "getValue", "()L$OBJ;", true)
+            m.visitMethodInsn(INVOKESTATIC, SHOW_CLASS, "show", "(L$OBJ;)L$STR;", false)
+            m.visitMethodInsn(INVOKEVIRTUAL, SB, "append", "(L$STR;)L$SB;", false); m.visitInsn(POP)
+            m.visitVarInsn(ALOAD, 1); appendConst(m, ")"); m.visitInsn(POP)
+            m.visitIincInsn(3, 1)
+            m.visitJumpInsn(GOTO, loop)
+            m.visitLabel(done)
+            m.visitVarInsn(ALOAD, 1); appendConst(m, "])")
+            m.visitMethodInsn(INVOKEVIRTUAL, SB, "toString", "()L$STR;", false)
+            m.visitInsn(ARETURN)
+            m.visitMaxs(0, 0); m.visitEnd()
+        }
+
+        // static String showSet(Set s): "set_from([e0, e1, ...])"
+        run {
+            val ITER = "java/util/Iterator"
+            val m = cw.visitMethod(ACC_PUBLIC or ACC_STATIC, "showSet", "(L$JSET;)L$STR;", null, null)
+            m.visitCode()
+            m.visitTypeInsn(NEW, SB); m.visitInsn(DUP)
+            m.visitMethodInsn(INVOKESPECIAL, SB, "<init>", "()V", false)
+            m.visitVarInsn(ASTORE, 1)
+            m.visitVarInsn(ALOAD, 1); appendConst(m, "set_from(["); m.visitInsn(POP)
+            m.visitVarInsn(ALOAD, 0)
+            m.visitMethodInsn(INVOKEINTERFACE, JSET, "iterator", "()L$ITER;", true)
+            m.visitVarInsn(ASTORE, 2)
+            m.visitInsn(ICONST_0); m.visitVarInsn(ISTORE, 3)
+            val loop = Label(); val done = Label(); val noComma = Label()
+            m.visitLabel(loop)
+            m.visitVarInsn(ALOAD, 2); m.visitMethodInsn(INVOKEINTERFACE, ITER, "hasNext", "()Z", true)
+            m.visitJumpInsn(IFEQ, done)
+            m.visitVarInsn(ALOAD, 2); m.visitMethodInsn(INVOKEINTERFACE, ITER, "next", "()L$OBJ;", true)
+            m.visitVarInsn(ASTORE, 4)
+            m.visitVarInsn(ILOAD, 3); m.visitJumpInsn(IFEQ, noComma)
+            m.visitVarInsn(ALOAD, 1); appendConst(m, ", "); m.visitInsn(POP)
+            m.visitLabel(noComma)
+            m.visitVarInsn(ALOAD, 1)
+            m.visitVarInsn(ALOAD, 4)
+            m.visitMethodInsn(INVOKESTATIC, SHOW_CLASS, "show", "(L$OBJ;)L$STR;", false)
+            m.visitMethodInsn(INVOKEVIRTUAL, SB, "append", "(L$STR;)L$SB;", false); m.visitInsn(POP)
+            m.visitIincInsn(3, 1)
+            m.visitJumpInsn(GOTO, loop)
+            m.visitLabel(done)
+            m.visitVarInsn(ALOAD, 1); appendConst(m, "])")
+            m.visitMethodInsn(INVOKEVIRTUAL, SB, "toString", "()L$STR;", false)
+            m.visitInsn(ARETURN)
+            m.visitMaxs(0, 0); m.visitEnd()
         }
 
         cw.visitEnd()
@@ -2469,7 +2772,19 @@ class CodeGen(
             mv.visitMethodInsn(INVOKESTATIC, LISTS_CLASS, "fromArray", "([Ljava/lang/String;)L$JLIST;", false)
             true
         }
+        in MAP_BUILTINS -> genMapCall(e)
         else -> error("unknown builtin: ${e.callee}")
+    }
+
+    /** the Map/Set builtins all live in dawn/rt/Maps; keys/values travel erased (boxed). */
+    private fun genMapCall(e: Call): Boolean {
+        val sig = BUILTINS.getValue(e.callee)
+        for (a in e.args) {
+            genExpr(a, tail = false)
+            box(a.type!!) // scalars box to Object; containers are already references (no-op)
+        }
+        mv.visitMethodInsn(INVOKESTATIC, MAPS_CLASS, e.callee, methodDesc(sig.paramTypes, sig.ret), false)
+        return true
     }
 
     private fun genBinary(e: Binary): Boolean {

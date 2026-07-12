@@ -103,6 +103,18 @@ sealed class Type(val display: String) {
         override fun hashCode(): Int = elem.hashCode() + 7
     }
 
+    /** The builtin persistent map: Map[K, V] (spec §2.2). */
+    class TMap(val key: Type, val value: Type) : Type("Map[$key, $value]") {
+        override fun equals(other: Any?): Boolean = other is TMap && other.key == key && other.value == value
+        override fun hashCode(): Int = key.hashCode() * 31 + value.hashCode() + 11
+    }
+
+    /** The builtin persistent set: Set[T] (spec §2.2). */
+    class TSet(val elem: Type) : Type("Set[$elem]") {
+        override fun equals(other: Any?): Boolean = other is TSet && other.elem == elem
+        override fun hashCode(): Int = elem.hashCode() + 17
+    }
+
     /** An opaque imported Java class (spec §9). Identity is the fully-qualified name. */
     class TJava(val fqcn: String, val cls: Class<*>) : Type(fqcn.substringAfterLast('.')) {
         override fun equals(other: Any?): Boolean = other is TJava && other.fqcn == fqcn
@@ -150,6 +162,8 @@ fun subst(t: Type, map: Map<Type.TVar, Type>, effMap: Map<Eff.Var, Eff> = emptyM
     is Type.TVar -> map[t] ?: t
     is Type.TAdt -> if (t.args.isEmpty()) t else Type.TAdt(t.info, t.args.map { subst(it, map, effMap) })
     is Type.TList -> Type.TList(subst(t.elem, map, effMap))
+    is Type.TMap -> Type.TMap(subst(t.key, map, effMap), subst(t.value, map, effMap))
+    is Type.TSet -> Type.TSet(subst(t.elem, map, effMap))
     is Type.TTuple -> Type.TTuple(t.elems.map { subst(it, map, effMap) })
     is Type.TFn -> Type.TFn(t.params.map { subst(it, map, effMap) }, subst(t.ret, map, effMap),
         substEff(t.eff, effMap))
@@ -269,7 +283,14 @@ val BUILTINS: Map<String, FnSig> = run {
     val t = Type.TVar("T")
     val u = Type.TVar("U")
     val a = Type.TVar("A")
+    val k = Type.TVar("K")
+    val v = Type.TVar("V")
     val e = Eff.Var("e")
+    fun map(kk: Type, vv: Type) = Type.TMap(kk, vv)
+    fun set(tt: Type) = Type.TSet(tt)
+    fun list(tt: Type) = Type.TList(tt)
+    fun pair(aa: Type, bb: Type) = Type.TTuple(listOf(aa, bb))
+    fun opt(tt: Type) = Type.TAdt(OPTION_ADT, listOf(tt))
     listOf(
         FnSig("println", listOf(Type.TString), listOf("s"), Type.TUnit, Eff.Io, isBuiltin = true),
         FnSig("print", listOf(Type.TString), listOf("s"), Type.TUnit, Eff.Io, isBuiltin = true),
@@ -322,5 +343,37 @@ val BUILTINS: Map<String, FnSig> = run {
         FnSig("read_line", listOf(), listOf(),
             Type.TAdt(OPTION_ADT, listOf(Type.TString)), Eff.Io, isBuiltin = true),
         FnSig("args", listOf(), listOf(), Type.TList(Type.TString), Eff.Io, isBuiltin = true),
+        // core/map + core/set: builtin persistent containers (spec §2.2, §11)
+        FnSig("map_empty", listOf(), listOf(), map(k, v), Eff.Pure, isBuiltin = true, typeParams = listOf(k, v)),
+        FnSig("set_empty", listOf(), listOf(), set(t), Eff.Pure, isBuiltin = true, typeParams = listOf(t)),
+        FnSig("map_from", listOf(list(pair(k, v))), listOf("entries"), map(k, v),
+            Eff.Pure, isBuiltin = true, typeParams = listOf(k, v)),
+        FnSig("set_from", listOf(list(t)), listOf("xs"), set(t), Eff.Pure, isBuiltin = true, typeParams = listOf(t)),
+        FnSig("map_insert", listOf(map(k, v), k, v), listOf("m", "key", "value"), map(k, v),
+            Eff.Pure, isBuiltin = true, typeParams = listOf(k, v)),
+        FnSig("set_insert", listOf(set(t), t), listOf("s", "x"), set(t),
+            Eff.Pure, isBuiltin = true, typeParams = listOf(t)),
+        FnSig("map_remove", listOf(map(k, v), k), listOf("m", "key"), map(k, v),
+            Eff.Pure, isBuiltin = true, typeParams = listOf(k, v)),
+        FnSig("set_remove", listOf(set(t), t), listOf("s", "x"), set(t),
+            Eff.Pure, isBuiltin = true, typeParams = listOf(t)),
+        FnSig("map_get", listOf(map(k, v), k), listOf("m", "key"), opt(v),
+            Eff.Pure, isBuiltin = true, typeParams = listOf(k, v)),
+        FnSig("map_has", listOf(map(k, v), k), listOf("m", "key"), Type.TBool,
+            Eff.Pure, isBuiltin = true, typeParams = listOf(k, v)),
+        FnSig("set_has", listOf(set(t), t), listOf("s", "x"), Type.TBool,
+            Eff.Pure, isBuiltin = true, typeParams = listOf(t)),
+        FnSig("map_size", listOf(map(k, v)), listOf("m"), Type.TInt,
+            Eff.Pure, isBuiltin = true, typeParams = listOf(k, v)),
+        FnSig("set_size", listOf(set(t)), listOf("s"), Type.TInt,
+            Eff.Pure, isBuiltin = true, typeParams = listOf(t)),
+        FnSig("map_keys", listOf(map(k, v)), listOf("m"), list(k),
+            Eff.Pure, isBuiltin = true, typeParams = listOf(k, v)),
+        FnSig("map_values", listOf(map(k, v)), listOf("m"), list(v),
+            Eff.Pure, isBuiltin = true, typeParams = listOf(k, v)),
+        FnSig("map_entries", listOf(map(k, v)), listOf("m"), list(pair(k, v)),
+            Eff.Pure, isBuiltin = true, typeParams = listOf(k, v)),
+        FnSig("set_to_list", listOf(set(t)), listOf("s"), list(t),
+            Eff.Pure, isBuiltin = true, typeParams = listOf(t)),
     ).associateBy { it.name }
 }
