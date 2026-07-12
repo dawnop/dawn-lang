@@ -20,11 +20,23 @@ import dawn.diag.Suggest
  * declared effect; the effect inferred from a function body must be ⊑ the
  * declared one.
  */
-class Checker(private val module: Module, private val sink: DiagnosticSink) {
+class Checker(
+    private val module: Module,
+    private val sink: DiagnosticSink,
+    /** exports of already-checked modules (spec §10); empty for single-file analysis */
+    private val imports: ImportEnv = ImportEnv.EMPTY,
+    /** JVM class of this module, tagged onto its fns/types for multi-module codegen */
+    private val ownerClass: String? = null,
+) {
 
     private val fns = HashMap<String, FnSig>()
     private val adts = HashMap<String, AdtInfo>()
     private val ctors = HashMap<String, CtorInfo>()
+
+    /** whole-module imports: alias (last path segment) → that module's exports (spec §10.2) */
+    private val moduleAliases = HashMap<String, ModuleExports>()
+    /** selectively-imported names → the module path they came from (for conflict messages) */
+    private val importedNames = HashMap<String, String>()
     /** constants visible so far — filled in declaration order (evaluation order) */
     private val consts = LinkedHashMap<String, ConstDecl>()
     private var allConstNames: Set<String> = emptySet()
@@ -91,12 +103,15 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
                 else -> javaClasses[d.name] = cls
             }
         }
+        // 0.75. module imports (spec §10): whole-module aliases + selective injections
+        processImports()
         // 1. type headers first (shells only), so recursive types resolve
         for (d in module.types) {
             if (javaClasses.containsKey(d.name)) {
                 sink.error("`${d.name}` collides with an imported Java class", d.nameSpan)
                 continue
             }
+            if (aliasShadow(d.name, d.nameSpan) || importClash(d.name, d.nameSpan, "type")) continue
             if (Type.named(d.name) != null || d.name == "List") {
                 sink.error("`${d.name}` is a builtin type and cannot be redefined", d.nameSpan)
                 continue
@@ -112,6 +127,7 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
             if (d.typeParams.toSet().size != d.typeParams.size)
                 sink.error("duplicate type parameter names", d.nameSpan)
             val info = AdtInfo(d.name, d.nameSpan, d.isRecord, d.typeParams.map { TVar(it) })
+            info.owner = ownerClass
             for ((trait, span) in d.derives) {
                 if (trait == "Show") info.derivesShow = true
                 else sink.error("unknown derivable trait `$trait`", span, "v0.1 can only derive Show")
@@ -184,9 +200,12 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
                 typeParams = tvars,
                 nameSpan = d.nameSpan,
             )
+            sig.owner = ownerClass
             d.sig = sig
             d.effVars = ev
             when {
+                moduleAliases.containsKey(d.name) -> aliasShadow(d.name, d.nameSpan)
+                importedNames.containsKey(d.name) -> importClash(d.name, d.nameSpan, "function")
                 BUILTINS.containsKey(d.name) ->
                     sink.error("`${d.name}` is a builtin function and cannot be redefined", d.nameSpan)
                 fns.containsKey(d.name) ->
@@ -212,8 +231,68 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
         for (t in module.tests) checkTest(t)
     }
 
+    /**
+     * Resolve module imports (spec §10): whole-module `use` decls become aliases;
+     * selective `use m.{...}` decls inject the named pub members into this module's
+     * namespace. Modules the loader could not find are skipped (already reported).
+     */
+    private fun processImports() {
+        for (u in module.moduleUses) {
+            val exp = imports.available[u.path] ?: continue
+            if (u.selective == null) {
+                val prev = moduleAliases.put(u.name, exp)
+                if (prev != null && prev.modPath != exp.modPath)
+                    sink.error("module alias `${u.name}` is imported from two modules " +
+                        "(`${prev.modPath}` and `${exp.modPath}`)", u.nameSpan,
+                        "rename with selective imports, or reorganize the modules")
+            } else {
+                for (imp in u.selective) injectSelective(u.path, exp, imp.name, imp.span)
+            }
+        }
+    }
+
+    private fun injectSelective(fromPath: String, exp: ModuleExports, name: String, span: Span) {
+        val fn = exp.fns[name]; val ty = exp.types[name]; val cn = exp.consts[name]; val ct = exp.ctors[name]
+        if (fn == null && ty == null && cn == null && ct == null) {
+            if (name in exp.allNames)
+                sink.error("`$name` is private to module `$fromPath`", span,
+                    "add `pub` to its declaration in $fromPath")
+            else
+                sink.error("module `$fromPath` has no exported name `$name`", span,
+                    Suggest.hint(name, exp.fns.keys + exp.types.keys + exp.consts.keys + exp.ctors.keys))
+            return
+        }
+        importedNames[name]?.let { prev ->
+            sink.error("`$name` is imported more than once (from `$prev` and `$fromPath`)", span)
+            return
+        }
+        importedNames[name] = fromPath
+        if (fn != null) fns[name] = fn
+        // a type brings its constructors (spec §10.3); a constructor may also be named directly
+        if (ty != null) { adts[name] = ty; for (c in ty.ctors) ctors[c.name] = c }
+        if (ct != null) ctors[name] = ct
+        if (cn != null) consts[name] = cn
+    }
+
+    /** A local declaration or binding may not shadow a whole-module alias (spec §10.3). */
+    private fun aliasShadow(name: String, span: Span): Boolean {
+        val exp = moduleAliases[name] ?: return false
+        sink.error("`$name` shadows the imported module `${exp.modPath}`", span,
+            "an imported module's alias and your names share one namespace; rename one")
+        return true
+    }
+
+    /** A local top-level name may not collide with a selectively-imported name. */
+    private fun importClash(name: String, span: Span, kind: String): Boolean {
+        val from = importedNames[name] ?: return false
+        sink.error("$kind `$name` conflicts with a name imported from `$from`", span,
+            "drop the import or rename this $kind")
+        return true
+    }
+
     /** const NAME: Type = expr — declared type must be constant-serializable, body pure */
     private fun checkConst(d: ConstDecl) {
+        if (aliasShadow(d.name, d.nameSpan) || importClash(d.name, d.nameSpan, "constant")) return
         currentTParams = emptyMap()
         currentEffVars = HashMap()
         val declared = resolveType(d.typeAnn)
@@ -475,6 +554,7 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
         if (name != "_" && scopes.last().containsKey(name))
             sink.error("`$name` is already bound in this scope", span,
                 "let does not shadow; only nested blocks may reuse a name")
+        aliasShadow(name, span)
         val sym = Symbol(name, type, mutable, span)
         if (name != "_") scopes.last()[name] = sym
         return sym
@@ -628,9 +708,13 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
         else -> false
     }
 
-    /** x.f(a): Java static (Class.m), Java instance (value.m), or UFCS f(x, a). */
+    /** x.f(a): module-qualified (alias.f), Java static (Class.m), Java instance (value.m), or UFCS f(x, a). */
     private fun checkMethodCall(e: MethodCall, expected: Type?): Type {
         val recv = e.target
+        // module-qualified call: alias.fn(args), where alias is a whole-module import (spec §10.3)
+        if (recv is VarRef && lookup(recv.name) == null && moduleAliases.containsKey(recv.name)) {
+            return checkModuleCall(e, recv.name, moduleAliases.getValue(recv.name), expected)
+        }
         // static namespace / constructor: System.exit(1), StringBuilder.new()
         if (recv is CtorCall && !recv.hasParens && recv.args.isEmpty() && recv.spread == null &&
             ctors[recv.ctorName] == null && consts[recv.ctorName] == null
@@ -650,6 +734,30 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
         val call = Call(e.name, listOf(e.target) + e.args, e.nameSpan, e.span)
         e.desugared = call
         val t = checkCall(call, expected, preTyped = recv to tt)
+        call.type = t
+        return t
+    }
+
+    /** alias.fn(args): a call to a pub function of an imported module (spec §10.3). */
+    private fun checkModuleCall(e: MethodCall, alias: String, exp: ModuleExports, expected: Type?): Type {
+        (e.target as VarRef).type = TUnit // the alias is a namespace, not a value
+        val sig = exp.fns[e.name]
+        if (sig == null) {
+            for (a in e.args) checkExpr(a)
+            return if (e.name in exp.allNames)
+                error("`${e.name}` is private to module `${exp.modPath}`", e.nameSpan,
+                    "add `pub` to its declaration in ${exp.modPath}")
+            else if (exp.types.containsKey(e.name) || exp.consts.containsKey(e.name))
+                error("`${e.name}` is not a function; import it with `use ${exp.modPath}.{${e.name}}`",
+                    e.nameSpan)
+            else
+                error("module `${exp.modPath}` has no exported function `${e.name}`", e.nameSpan,
+                    Suggest.hint(e.name, exp.fns.keys))
+        }
+        // reuse the ordinary call machinery with the resolved (imported) signature
+        val call = Call(e.name, e.args, e.nameSpan, e.span)
+        e.desugared = call
+        val t = checkCall(call, expected, resolvedSig = sig)
         call.type = t
         return t
     }
@@ -839,13 +947,14 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
         else -> "printable types are Int, Float, Bool, String, and `derive Show` values"
     }
 
-    private fun checkCall(e: Call, expected: Type?, preTyped: Pair<Expr, Type>? = null): Type {
+    private fun checkCall(e: Call, expected: Type?, preTyped: Pair<Expr, Type>? = null,
+                          resolvedSig: FnSig? = null): Type {
         // UFCS receivers are checked once by checkMethodCall; don't re-check them
         fun typeArg(arg: Expr, exp: Type? = null): Type =
             if (preTyped != null && arg === preTyped.first) preTyped.second
             else checkExpr(arg, expected = exp)
-        // a local function value shadows top-level functions
-        val local = resolveLocal(e.callee, e.calleeSpan)
+        // a qualified module call (module.fn) resolves to a fixed signature, bypassing locals
+        val local = if (resolvedSig != null) null else resolveLocal(e.callee, e.calleeSpan)
         if (local != null) {
             val lt = local.type
             if (lt.isErrorish) {
@@ -871,7 +980,7 @@ class Checker(private val module: Module, private val sink: DiagnosticSink) {
             recordEffect(lt.eff, e.calleeSpan, e.callee)
             return lt.ret
         }
-        val sig = fns[e.callee] ?: BUILTINS[e.callee]
+        val sig = resolvedSig ?: fns[e.callee] ?: BUILTINS[e.callee]
         if (sig == null) {
             // still check the arguments so their subtrees get types/symbols
             for (arg in e.args) typeArg(arg)

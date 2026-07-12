@@ -54,6 +54,44 @@ class CheckedModule(
 )
 
 /**
+ * The pub surface of a module, consumed by importers (spec §10.4). Also carries
+ * every top-level name so an importer can tell "private" apart from "unknown".
+ */
+class ModuleExports(
+    val modPath: String,
+    val className: String,
+    val fns: Map<String, FnSig>,
+    val types: Map<String, AdtInfo>,
+    val ctors: Map<String, CtorInfo>,
+    val consts: Map<String, dawn.ast.ConstDecl>,
+    val allNames: Set<String>,
+)
+
+/**
+ * Everything an importer sees: whole-module aliases (spec §10.2) resolve to a
+ * module's exports; the raw exports map lets the checker resolve selective imports
+ * and report missing modules.
+ */
+class ImportEnv(
+    /** modPath → exports, for every module checked before this one */
+    val available: Map<String, ModuleExports>,
+) {
+    companion object {
+        val EMPTY = ImportEnv(emptyMap())
+    }
+}
+
+private fun exportsOf(cm: CheckedModule): ModuleExports {
+    val m = cm.module
+    val pubTypes = m.types.filter { it.pub }.mapNotNull { cm.types[it.name] }.associateBy { it.name }
+    val pubCtors = pubTypes.values.flatMap { it.ctors }.associateBy { it.name }
+    val pubFns = m.fns.filter { it.pub }.mapNotNull { cm.functions[it.name] }.associateBy { it.name }
+    val pubConsts = m.consts.filter { it.pub }.associateBy { it.name }
+    val allNames = (m.fns.map { it.name } + m.types.map { it.name } + m.consts.map { it.name }).toSet()
+    return ModuleExports(cm.modPath, cm.className, pubFns, pubTypes, pubCtors, pubConsts, allNames)
+}
+
+/**
  * A whole program: modules in dependency order, each already type/effect checked,
  * plus every diagnostic paired with the file it belongs to.
  */
@@ -80,11 +118,13 @@ class AnalyzedProgram(
 fun analyzeProgram(loaded: ModuleLoadResult, comptimeFuel: Long = 100_000_000L): AnalyzedProgram {
     val diags = ArrayList(loaded.loadDiagnostics)
     val checked = ArrayList<CheckedModule>()
+    // modules arrive in dependency order, so a module's imports are already checked
+    val exportsByPath = HashMap<String, ModuleExports>()
     for (mf in loaded.modules) {
         for (d in mf.diagnostics) diags.add(LocatedDiag(mf.source, d))
         val parseFailed = mf.diagnostics.any { it.severity == Severity.ERROR }
         val sink = DiagnosticSink()
-        val checker = Checker(mf.module, sink)
+        val checker = Checker(mf.module, sink, ImportEnv(exportsByPath.toMap()), mf.className)
         if (!parseFailed) {
             checker.check()
             if (sink.all.none { it.severity == Severity.ERROR }) {
@@ -92,8 +132,10 @@ fun analyzeProgram(loaded: ModuleLoadResult, comptimeFuel: Long = 100_000_000L):
             }
         }
         for (d in sink.all) diags.add(LocatedDiag(mf.source, d))
-        checked.add(CheckedModule(mf.modPath, mf.className, mf.source, mf.module,
-            checker.functions, checker.types))
+        val cm = CheckedModule(mf.modPath, mf.className, mf.source, mf.module,
+            checker.functions, checker.types)
+        checked.add(cm)
+        exportsByPath[mf.modPath] = exportsOf(cm)
     }
     return AnalyzedProgram(checked, diags)
 }

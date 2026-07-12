@@ -178,18 +178,25 @@ class AdtInfo(
     /** `derive Show` requested: the type gets a generated to_string / toString (spec §4.3) */
     var derivesShow: Boolean = false
 
+    /**
+     * JVM class of the module that defines this type (spec §12.2), used to prefix
+     * its class name in a multi-module program. Null = prelude or single-file
+     * (no prefix), so existing single-file bytecode is unchanged.
+     */
+    var owner: String? = null
+
     /** the declared "self type": Tree[T] inside its own declaration */
     val type: Type.TAdt = Type.TAdt(this, typeParams)
 
     /** JVM internal name (erased): abstract base class (sum type) or the single final class (record) */
-    val jvmName: String get() = name
+    val jvmName: String get() = owner?.let { "$it\$$name" } ?: name
 }
 
 class CtorInfo(val adt: AdtInfo, val name: String, val nameSpan: Span?) {
     val fields = ArrayList<FieldInfo>()
 
     /** JVM internal name: a final subclass, or the record class itself */
-    val jvmName: String get() = if (adt.isRecord) adt.name else "${adt.name}$$name"
+    val jvmName: String get() = if (adt.isRecord) adt.jvmName else "${adt.jvmName}$$name"
 
     fun render(): String {
         val ret = adt.type.display
@@ -221,6 +228,9 @@ class FnSig(
     /** span of the name in the declaration (go-to-definition); null for builtins */
     val nameSpan: Span? = null,
 ) {
+    /** JVM class of the defining module (spec §12.2); null = builtin/single-file */
+    var owner: String? = null
+
     val io: Boolean get() = eff == Eff.Io
 
     fun render(): String {
