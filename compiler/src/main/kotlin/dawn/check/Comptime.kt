@@ -62,6 +62,8 @@ fun evalComptime(module: Module, sink: DiagnosticSink, fuel: Long) {
                 is Apply -> { walkExpr(e.target); e.args.forEach(::walkExpr) }
                 is MethodCall -> { walkExpr(e.target); e.args.forEach(::walkExpr) }
                 is Propagate -> walkExpr(e.operand)
+                is Return -> e.value?.let(::walkExpr)
+                is Index -> { walkExpr(e.target); walkExpr(e.index) }
                 is Call -> e.args.forEach(::walkExpr)
                 is CtorCall -> { e.spread?.let(::walkExpr); e.args.forEach { walkExpr(it.expr) } }
                 is FieldAccess -> walkExpr(e.target)
@@ -83,6 +85,7 @@ fun evalComptime(module: Module, sink: DiagnosticSink, fuel: Long) {
             when (s) {
                 is LetStmt -> walkExpr(s.init)
                 is LetPatStmt -> walkExpr(s.init)
+                is LocalFnStmt -> walkExpr(s.lambda.body)
                 is AssignStmt -> walkExpr(s.value)
                 is ExprStmt -> walkExpr(s.expr)
                 is AssertStmt -> walkExpr(s.cond)
@@ -149,6 +152,16 @@ class ComptimeInterp(
                 }
             }
             is MethodCall -> eval(e.desugared!!, env)
+            is Return -> throw EarlyReturn(if (e.value != null) eval(e.value, env) else CValue.VUnit)
+            is Index -> {
+                val target = eval(e.target, env)
+                val i = eval(e.index, env)
+                if (target is CValue.VList && i is CValue.VInt) {
+                    if (i.v < 0 || i.v >= target.elems.size)
+                        err("index ${i.v} out of bounds for length ${target.elems.size}", e.span)
+                    else target.elems[i.v.toInt()]
+                } else err("`[]` in comptime indexes List only", e.span)
+            }
             is Call -> evalCall(e, env)
             is Apply -> {
                 val f = eval(e.target, env)
@@ -214,6 +227,13 @@ class ComptimeInterp(
             is LetStmt -> {
                 val v = eval(s.init, env)
                 s.symbol?.let { env[it] = v }
+            }
+            is LocalFnStmt -> {
+                // the captured env holds the lambda itself, so it can recurse
+                val capEnv = HashMap(env)
+                val v = CValue.VLambda(s.lambda.params.map { it.symbol!! }, s.lambda.body, capEnv)
+                capEnv[s.symbol!!] = v
+                env[s.symbol!!] = v
             }
             is LetPatStmt -> {
                 val v = eval(s.init, env)

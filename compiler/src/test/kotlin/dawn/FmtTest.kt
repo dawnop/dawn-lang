@@ -84,4 +84,12 @@ class FmtTest {
         assertEquals("", Formatter.format(""))
         assertEquals("", Formatter.format("   \n  \n"))
     }
+
+    @Test
+    fun `index brackets hug the value`() {
+        val src = "pub fn main() -> Unit !io = println(to_string(xs [0] [1] + m [\"k\"]))\n"
+        val out = Formatter.format(src)
+        assertEquals("pub fn main() -> Unit !io = println(to_string(xs[0][1] + m[\"k\"]))\n", out)
+        assertFidelity(src)
+    }
 }

@@ -55,7 +55,8 @@ class FnDecl(
     /** type parameter names: fn map[T, U](...) */
     val typeParams: List<String>,
     val params: List<Param>,
-    val retType: TypeRef,
+    /** null = inferred from the body (private functions only, spec §3.1) */
+    val retType: TypeRef?,
     /** declared effect atoms: empty (pure), ["io"], ["e"], or ["e1","e2"] for !(e1|e2) */
     val declaredEff: List<String>,
     val body: Expr,
@@ -102,6 +103,8 @@ class ConstDecl(
 ) : Decl(pub, name, span, nameSpan) {
     /** resolved declared type, filled by the checker */
     var constType: Type? = null
+    /** the annotation as resolved (kept even when constType is poisoned to TError) */
+    var resolvedAnn: Type? = null
     /** the evaluated constant, filled by comptime evaluation */
     var value: dawn.check.CValue? = null
     /** source file of the declaring module (go-to-definition); null = current file */
@@ -266,6 +269,18 @@ class TupleLit(val elems: List<Expr>, span: Span) : Expr(span)
 /** expr? — unwrap Ok/Some, or return the Err/None from the enclosing function (spec §8.1) */
 class Propagate(val operand: Expr, span: Span) : Expr(span)
 
+/**
+ * Index expression: xs[i] on a List (panics when out of bounds) or m[k] on a
+ * Map (panics when the key is absent). The asking variants stay `get`/`map_get`.
+ */
+class Index(val target: Expr, val index: Expr, span: Span) : Expr(span)
+
+/**
+ * return / return expr — early return from the enclosing function (or lambda,
+ * when inside one). Typed Never, so it can sit anywhere an expression can.
+ */
+class Return(val value: Expr?, span: Span) : Expr(span)
+
 /** comptime { ... } — evaluated at compile time, embedded as a constant (spec §7) */
 class ComptimeExpr(val body: Expr, span: Span) : Expr(span) {
     /** the evaluated constant, filled by comptime evaluation */
@@ -350,6 +365,22 @@ class LetStmt(val name: String, val mutable: Boolean, val typeAnn: TypeRef?, val
  * The pattern must be irrefutable; with var every binding is mutable.
  */
 class LetPatStmt(val pattern: Pattern, val mutable: Boolean, val init: Expr, span: Span) : Stmt(span)
+
+/**
+ * A local named function: `fn name(params) -> T [!io] = body`. Sugar for a
+ * let-bound lambda whose name is visible inside its own body — a recursive
+ * call compiles to a direct call of the impl method (a loop in tail position).
+ */
+class LocalFnStmt(
+    val name: String,
+    val lambda: Lambda,
+    val retRef: TypeRef,
+    val effNames: List<String>,
+    val nameSpan: Span,
+    span: Span,
+) : Stmt(span) {
+    var symbol: Symbol? = null
+}
 
 class AssignStmt(val name: String, val value: Expr, val nameSpan: Span, span: Span) : Stmt(span) {
     var symbol: Symbol? = null

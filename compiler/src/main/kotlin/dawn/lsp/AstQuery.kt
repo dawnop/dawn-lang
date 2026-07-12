@@ -109,6 +109,11 @@ private class TargetQuery(private val analysis: Analyzed, private val offset: In
                 visitExpr(e.target)
                 e.args.forEach { visitExpr(it) }
             }
+            is Index -> {
+                visitExpr(e.target)
+                visitExpr(e.index)
+            }
+            is Return -> e.value?.let { visitExpr(it) }
             is MethodCall -> {
                 // module-qualified (alias.fn) and UFCS calls carry the resolved sig on the desugared Call
                 ((e.desugared as? Call)?.sig ?: sigOf(e.name))?.let { offer(e.nameSpan, it.render(), it.nameSpan, it.srcPath) }
@@ -182,6 +187,10 @@ private class TargetQuery(private val analysis: Analyzed, private val offset: In
     fun visitStmt(s: Stmt) {
         when (s) {
             is LetStmt -> visitExpr(s.init)
+            is LocalFnStmt -> {
+                s.symbol?.let { offer(s.nameSpan, "fn ${s.name}: ${it.type}", s.nameSpan) }
+                visitExpr(s.lambda)
+            }
             is LetPatStmt -> {
                 visitPattern(s.pattern)
                 visitExpr(s.init)

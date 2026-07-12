@@ -207,15 +207,18 @@ class Checker(
             val tp = tvars.associateBy { it.name }
             val ev = HashMap<String, Eff.Var>()
             val eff = resolveEff(d.declaredEff, ev)
+            val inferring = d.retType == null
             val sig = FnSig(
                 d.name,
                 d.params.map { resolveType(it.typeName, tp, ev) },
                 d.params.map { it.name },
-                resolveType(d.retType, tp, ev),
-                eff,
+                d.retType?.let { resolveType(it, tp, ev) } ?: TError,
+                // until the body is checked, assume the worst effect for safety
+                if (inferring && d.declaredEff.isEmpty()) Eff.Io else eff,
                 isBuiltin = false,
                 typeParams = tvars,
                 nameSpan = d.nameSpan,
+                inferring = inferring,
             )
             sig.owner = ownerClass
             sig.srcPath = srcPath
@@ -231,10 +234,10 @@ class Checker(
                 else -> fns[d.name] = sig
             }
         }
-        // 3.5. constants, in declaration order (a const sees only earlier consts;
-        // that order is also the evaluation order, so cycles cannot form)
+        // 3.5. constant declarations — types only. Initializers are checked in
+        // pass 5, after signature inference, so they can call inferred functions.
         allConstNames = module.consts.map { it.name }.toSet()
-        for (d in module.consts) checkConst(d)
+        for (d in module.consts) declareConst(d)
         // 4. entry point check
         val main = module.fns.find { it.name == "main" }
         if (main != null) {
@@ -244,9 +247,124 @@ class Checker(
             if (!main.pub)
                 sink.error("main must be pub", main.nameSpan, "write pub fn main() -> Unit !io")
         }
-        // 5. check each function body, then each test block
-        for (d in module.fns) checkFn(d)
+        // 5. check each function body, then each test block. Functions whose
+        // return type is inferred go first, in call-dependency order — every
+        // callee's signature is final before any caller is checked. A cycle
+        // (direct or mutual recursion) cannot be inferred and must annotate.
+        val inferredDecls = module.fns.filter { it.sig?.inferring == true }.toSet()
+        val pending = inferredDecls.toMutableList()
+        if (pending.isNotEmpty()) {
+            val pendingNames = pending.map { it.name }.toSet()
+            val deps = pending.associateWith { d -> nameRefs(d.body).intersect(pendingNames) }
+            val done = HashSet<String>()
+            var progress = true
+            while (progress) {
+                progress = false
+                val it = pending.iterator()
+                while (it.hasNext()) {
+                    val d = it.next()
+                    if (deps[d]!!.all { n -> n in done }) {
+                        checkFnInferred(d)
+                        done.add(d.name)
+                        it.remove()
+                        progress = true
+                    }
+                }
+            }
+            for (d in pending) // what remains is a dependency cycle
+                sink.error("cannot infer the return type of `${d.name}`: it is recursive (directly or mutually)",
+                    d.nameSpan, "declare it: fn ${d.name}(...) -> T = ...")
+        }
+        // 5.5. constant initializers, in declaration order (a const sees only
+        // earlier consts; that order is also the evaluation order)
+        val visibleConsts = HashSet<String>()
+        for (d in module.consts) {
+            checkConstInit(d, visibleConsts)
+            visibleConsts.add(d.name)
+        }
+        for (d in module.fns) if (d !in inferredDecls) checkFn(d)
         for (t in module.tests) checkTest(t)
+    }
+
+    /** every lowercase name mentioned in call/value position — the call-graph over-approximation */
+    private fun nameRefs(e: Expr, out: MutableSet<String> = HashSet()): Set<String> {
+        when (e) {
+            is VarRef -> out.add(e.name)
+            is Call -> { out.add(e.callee); e.args.forEach { nameRefs(it, out) } }
+            is MethodCall -> { out.add(e.name); nameRefs(e.target, out); e.args.forEach { nameRefs(it, out) } }
+            is Apply -> { nameRefs(e.target, out); e.args.forEach { nameRefs(it, out) } }
+            is Lambda -> nameRefs(e.body, out)
+            is Block -> { e.stmts.forEach { nameRefs(it, out) }; e.tail?.let { nameRefs(it, out) } }
+            is If -> { nameRefs(e.cond, out); nameRefs(e.thenBranch, out); e.elseBranch?.let { nameRefs(it, out) } }
+            is Match -> { nameRefs(e.scrutinee, out); e.arms.forEach { a -> a.guard?.let { nameRefs(it, out) }; nameRefs(a.body, out) } }
+            is CtorCall -> { e.spread?.let { nameRefs(it, out) }; e.args.forEach { nameRefs(it.expr, out) } }
+            is FieldAccess -> nameRefs(e.target, out)
+            is ListLit -> e.elems.forEach { nameRefs(it, out) }
+            is TupleLit -> e.elems.forEach { nameRefs(it, out) }
+            is Binary -> { nameRefs(e.left, out); nameRefs(e.right, out) }
+            is Unary -> nameRefs(e.operand, out)
+            is Propagate -> nameRefs(e.operand, out)
+            is Index -> { nameRefs(e.target, out); nameRefs(e.index, out) }
+            is Return -> e.value?.let { nameRefs(it, out) }
+            is StrLit -> e.parts.forEach { p -> if (p is StrPart.Interp) nameRefs(p.expr, out) }
+            is ComptimeExpr -> nameRefs(e.body, out)
+            else -> {}
+        }
+        return out
+    }
+
+    private fun nameRefs(s: Stmt, out: MutableSet<String>) {
+        when (s) {
+            is LetStmt -> nameRefs(s.init, out)
+            is LetPatStmt -> nameRefs(s.init, out)
+            is LocalFnStmt -> nameRefs(s.lambda.body, out)
+            is AssignStmt -> nameRefs(s.value, out)
+            is ExprStmt -> nameRefs(s.expr, out)
+            is AssertStmt -> nameRefs(s.cond, out)
+            is WhileStmt -> { nameRefs(s.cond, out); nameRefs(s.body, out) }
+            is ForStmt -> { nameRefs(s.from, out); s.to?.let { nameRefs(it, out) }; nameRefs(s.body, out) }
+        }
+    }
+
+    /**
+     * Check the body of a signature-inferred function and seal its signature:
+     * ret = the body's type, eff = the body's effects (or the declared one,
+     * which is then enforced as usual).
+     */
+    private fun checkFnInferred(d: FnDecl) {
+        val old = d.sig!!
+        currentTParams = old.typeParams.associateBy { it.name }
+        currentEffVars = HashMap(d.effVars)
+        currentFnSig = old
+        usedEffects = HashSet()
+        effWitness = HashMap()
+        lambdaStack.clear()
+        scopes.clear()
+        scopes.addLast(HashMap())
+        for ((p, t) in d.params.zip(old.paramTypes)) {
+            p.symbol = declare(p.name, t, mutable = false, p.span)
+        }
+        val bodyType = checkExpr(d.body, expected = null)
+        val finalEff: Eff
+        if (d.declaredEff.isEmpty()) {
+            finalEff = usedEffects.fold(Eff.Pure as Eff) { acc, x -> lubEff(acc, x) }
+        } else {
+            val declared = old.eff // registration resolved it (declaredEff was non-empty)
+            for (used in usedEffects) {
+                if (effSubsumes(declared, used)) continue
+                val (span, name) = effWitness[used] ?: (d.nameSpan to "?")
+                sink.error("function `${d.name}` is not declared !$used but calls `$name` (!$used)",
+                    span, "add !$used to the end of the signature, or remove the call")
+            }
+            finalEff = declared
+        }
+        val sealed = FnSig(old.name, old.paramTypes, old.paramNames, bodyType, finalEff,
+            isBuiltin = false, typeParams = old.typeParams, nameSpan = old.nameSpan)
+        sealed.owner = old.owner
+        sealed.srcPath = old.srcPath
+        d.sig = sealed
+        if (fns[d.name] === old) fns[d.name] = sealed
+        scopes.removeLast()
     }
 
     /**
@@ -311,13 +429,17 @@ class Checker(
         return true
     }
 
-    /** const NAME: Type = expr — declared type must be constant-serializable, body pure */
-    private fun checkConst(d: ConstDecl) {
+    /** while checking a const initializer: only constants declared earlier are visible */
+    private var constCutoff: Set<String>? = null
+
+    /** const NAME: Type = expr — resolve and register the declared type (initializers come later) */
+    private fun declareConst(d: ConstDecl) {
         if (aliasShadow(d.name, d.nameSpan) || importClash(d.name, d.nameSpan, "constant")) return
         currentTParams = emptyMap()
         currentEffVars = HashMap()
         val declared = resolveType(d.typeAnn)
         d.constType = declared
+        d.resolvedAnn = declared
         if (!isConstSerializable(declared) && declared != TError) {
             sink.error("`$declared` is not a constant-serializable type", d.typeAnn.span,
                 "constants hold Int/Float/Bool/String and List/tuple/record/ADT values built from them (spec §7.2)")
@@ -328,15 +450,24 @@ class Checker(
                 sink.error("`${d.name}` collides with a type or constructor name", d.nameSpan)
             consts.containsKey(d.name) ->
                 sink.error("constant `${d.name}` is defined twice", d.nameSpan)
+            else -> {
+                d.srcPath = srcPath
+                consts[d.name] = d
+            }
         }
+    }
+
+    /** the initializer must be pure, comptime-evaluable, and match the declared type */
+    private fun checkConstInit(d: ConstDecl, visible: Set<String>) {
+        val declared = d.resolvedAnn ?: return
+        currentTParams = emptyMap()
+        currentEffVars = HashMap()
+        constCutoff = visible
         checkComptimeBody(d.init, expected = declared, what = "const initializers")?.let { bt ->
             if (!assignable(bt, declared))
                 sink.error("`${d.name}` declares type $declared but its initializer is $bt", d.init.span)
         }
-        if (!consts.containsKey(d.name) && !ctors.containsKey(d.name) && !adts.containsKey(d.name)) {
-            d.srcPath = srcPath
-            consts[d.name] = d
-        }
+        constCutoff = null
     }
 
     /**
@@ -745,6 +876,8 @@ class Checker(
         is Lambda -> checkLambda(e, expected)
         is Apply -> checkApply(e)
         is Propagate -> checkPropagate(e)
+        is Index -> checkIndex(e)
+        is Return -> checkReturn(e)
         is ComptimeExpr -> {
             val t = checkComptimeBody(e.body, expected, what = "comptime blocks") ?: TError
             if (!isConstSerializable(t) && !t.isErrorish)
@@ -1326,8 +1459,9 @@ class Checker(
     private fun checkCtorCall(e: CtorCall, expected: Type?): Type {
         val ci = ctors[e.ctorName]
         if (ci == null) {
-            // a bare SCREAMING_SNAKE name may be a constant reference
-            val cd = consts[e.ctorName]
+            // a bare SCREAMING_SNAKE name may be a constant reference; inside a
+            // const initializer only earlier constants are visible (spec §3.2)
+            val cd = consts[e.ctorName]?.takeIf { constCutoff?.contains(e.ctorName) != false }
             if (cd != null) {
                 if (e.hasParens || e.args.isNotEmpty() || e.spread != null)
                     return error("`${e.ctorName}` is a constant, not a constructor", e.calleeSpan)
@@ -1447,6 +1581,47 @@ class Checker(
         return subst(adt.type, map)
     }
 
+    /**
+     * fn name(params) -> T [!io] = body, statement form. The name is declared
+     * before the body is checked, so the body can call it (recursion); the
+     * self-capture is then dropped — codegen calls the impl method directly.
+     */
+    private fun checkLocalFn(s: LocalFnStmt) {
+        val paramTypes = s.lambda.params.map { p ->
+            var t = resolveType(p.typeAnn!!)
+            if (t == TUnit) {
+                sink.error("function parameters cannot be Unit", p.span)
+                t = TError
+            }
+            t
+        }
+        val ret = resolveType(s.retRef)
+        val eff = when {
+            s.effNames.isEmpty() -> Eff.Pure
+            s.effNames == listOf("io") -> Eff.Io
+            else -> {
+                sink.error("local functions cannot declare effect variables", s.nameSpan,
+                    "a local function is `!io` or pure; lift it to the top level for effect polymorphism")
+                Eff.Io
+            }
+        }
+        val ft = TFn(paramTypes, ret, eff)
+        val sym = declare(s.name, ft, mutable = false, s.nameSpan)
+        s.symbol = sym
+        val actual = checkLambda(s.lambda, expected = ft)
+        if (actual is TFn) {
+            if (!assignable(actual.ret, ret))
+                sink.error("the body of `${s.name}` has type ${actual.ret} but the declared return type is $ret",
+                    s.lambda.body.span)
+            if (actual.eff == Eff.Io && eff == Eff.Pure)
+                sink.error("the body of `${s.name}` performs io", s.nameSpan,
+                    "declare it: fn ${s.name}(...) -> $ret !io = ...")
+        }
+        // the declared signature is canonical (the body type may be narrower, e.g. Never)
+        s.lambda.fnType = ft
+        s.lambda.captures = s.lambda.captures!!.filterNot { it === sym }
+    }
+
     private fun checkLambda(e: Lambda, expected: Type?): Type {
         val exp = expected as? TFn
         if (exp != null && exp.params.size != e.params.size)
@@ -1529,6 +1704,52 @@ class Checker(
         return ft.ret
     }
 
+    /** xs[i] / m[k] — the asserting variants: absence is a bug, so they panic (spec §4.8) */
+    private fun checkIndex(e: Index): Type {
+        val tt = checkExpr(e.target)
+        return when (tt) {
+            is Type.TList -> {
+                val it = checkExpr(e.index, TInt)
+                if (it != TInt && !it.isErrorish)
+                    error("a List index must be Int, got $it", e.index.span)
+                else tt.elem
+            }
+            is Type.TMap -> {
+                val kt = checkExpr(e.index, tt.key)
+                if (kt != tt.key && !kt.isErrorish)
+                    error("this Map has keys of type ${tt.key}, got $kt", e.index.span)
+                else tt.value
+            }
+            else -> {
+                if (tt.isErrorish) TError
+                else error("`[]` indexes a List or Map, got $tt", e.span,
+                    "when absence is a normal case, use get(xs, i) / map_get(m, k) instead")
+            }
+        }
+    }
+
+    /** return / return expr — early return from the enclosing fn (or lambda, inside one) */
+    private fun checkReturn(e: Return): Type {
+        // inside a lambda, return exits the lambda — its return type must be known
+        val target = if (lambdaStack.isNotEmpty()) {
+            lambdaStack.last().expectedRet
+                ?: return error("`return` inside a lambda needs the lambda's return type to be known from context",
+                    e.span, "make the expected function type explicit, or drop the return")
+        } else {
+            val fs = currentFnSig
+                ?: return error("`return` can only be used inside a function", e.span)
+            if (fs.inferring)
+                return error("`return` needs the function's return type to be declared", e.span,
+                    "add `-> T` to fn ${fs.name}(...)")
+            fs.ret
+        }
+        val vt = if (e.value != null) checkExpr(e.value, target) else TUnit
+        if (!assignable(vt, target))
+            error("`return` type mismatch: this function returns $target, got $vt",
+                e.value?.span ?: e.span)
+        return TNever
+    }
+
     /** expr? — spec §8.1: unwrap Ok/Some, or return the Err/None from the enclosing fn */
     private fun checkPropagate(e: Propagate): Type {
         val ot = checkExpr(e.operand)
@@ -1539,8 +1760,12 @@ class Checker(
                 ?: return error("`?` inside a lambda needs the lambda's return type to be known from context",
                     e.span, "handle the Option/Result with match, or make the expected function type explicit")
         } else {
-            currentFnSig?.ret
+            val fs = currentFnSig
                 ?: return error("`?` can only be used inside a function that returns Option or Result", e.span)
+            if (fs.inferring)
+                return error("`?` needs the function's return type to be declared", e.span,
+                    "add `-> Option[...]` / `-> Result[...]` to fn ${fs.name}(...)")
+            fs.ret
         }
         return when {
             ot is TAdt && ot.info === OPTION_ADT -> {
@@ -1888,6 +2113,7 @@ class Checker(
                 }
                 s.symbol = declare(s.name, t, s.mutable, s.span)
             }
+            is LocalFnStmt -> checkLocalFn(s)
             is LetPatStmt -> {
                 var it = checkExpr(s.init)
                 if (it == TNever) {

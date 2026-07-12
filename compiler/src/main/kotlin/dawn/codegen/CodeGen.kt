@@ -144,8 +144,15 @@ class CodeGen(
     private var fnStart: Label? = null
     private var nextSlot = 0
 
+    /** return type of the method being generated (for `return` expressions) */
+    private var methodRet: Type = TUnit
+    /** lambda impls return Object — a Unit return must yield null, not a bare RETURN */
+    private var methodRetsNull = false
+    /** set while generating a local function's impl: self-calls go straight to the impl */
+    private var selfPending: PendingLambda? = null
+
     /** lambdas found while generating a method; their impl methods are emitted after it */
-    private class PendingLambda(val lambda: Lambda, val name: String)
+    private class PendingLambda(val lambda: Lambda, val name: String, val selfSym: Symbol? = null)
     private val pendingLambdas = ArrayList<PendingLambda>()
 
     /** SAM-conversion bridges to emit (spec §9.4): Dawn fn value → functional interface. */
@@ -253,6 +260,28 @@ class CodeGen(
             visitLabel(none)
             visitFieldInsn(GETSTATIC, "Option\$None", "INSTANCE", "LOption\$None;")
             visitInsn(ARETURN)
+        }
+        // index(Map, Object) -> Object: the `m[k]` operator — panics when the key is absent
+        method("index", "(L$JMAP;L$OBJ;)L$OBJ;") {
+            val absent = Label()
+            visitVarInsn(ALOAD, 0); visitVarInsn(ALOAD, 1)
+            visitMethodInsn(INVOKEINTERFACE, JMAP, "containsKey", "(L$OBJ;)Z", true)
+            visitJumpInsn(IFEQ, absent)
+            visitVarInsn(ALOAD, 0); visitVarInsn(ALOAD, 1)
+            visitMethodInsn(INVOKEINTERFACE, JMAP, "get", "(L$OBJ;)L$OBJ;", true)
+            visitInsn(ARETURN)
+            visitLabel(absent)
+            visitTypeInsn(NEW, PANIC_CLASS); visitInsn(DUP)
+            visitTypeInsn(NEW, SB); visitInsn(DUP)
+            visitMethodInsn(INVOKESPECIAL, SB, "<init>", "()V", false)
+            visitLdcInsn("key not found: ")
+            visitMethodInsn(INVOKEVIRTUAL, SB, "append", "(Ljava/lang/String;)L$SB;", false)
+            visitVarInsn(ALOAD, 1)
+            visitMethodInsn(INVOKESTATIC, SHOW_CLASS, "show", "(L$OBJ;)Ljava/lang/String;", false)
+            visitMethodInsn(INVOKEVIRTUAL, SB, "append", "(Ljava/lang/String;)L$SB;", false)
+            visitMethodInsn(INVOKEVIRTUAL, SB, "toString", "()Ljava/lang/String;", false)
+            visitMethodInsn(INVOKESPECIAL, PANIC_CLASS, "<init>", "(Ljava/lang/String;)V", false)
+            visitInsn(ATHROW)
         }
         method("map_has", "(L$JMAP;L$OBJ;)Z") {
             visitVarInsn(ALOAD, 0); visitVarInsn(ALOAD, 1)
@@ -739,6 +768,9 @@ class CodeGen(
         mv.visitCode()
         currentFn = d
         nextSlot = 0
+        methodRet = sig.ret
+        methodRetsNull = false
+        selfPending = null
         for (p in d.params) {
             val sym = p.symbol!!
             sym.slot = nextSlot
@@ -748,17 +780,24 @@ class CodeGen(
         fnStart = start
         mv.visitLabel(start)
         val falls = genExpr(d.body, tail = true)
-        if (falls) {
-            when {
-                sig.ret == TInt -> mv.visitInsn(LRETURN)
-                sig.ret == TFloat -> mv.visitInsn(DRETURN)
-                sig.ret == TBool -> mv.visitInsn(IRETURN)
-                isRef(sig.ret) -> mv.visitInsn(ARETURN)
-                else -> mv.visitInsn(RETURN)
-            }
-        }
+        if (falls) emitMethodReturn()
         mv.visitMaxs(0, 0)
         mv.visitEnd()
+    }
+
+    /** the return instruction matching the method under generation */
+    private fun emitMethodReturn() {
+        when {
+            methodRet == TInt -> mv.visitInsn(LRETURN)
+            methodRet == TFloat -> mv.visitInsn(DRETURN)
+            methodRet == TBool -> mv.visitInsn(IRETURN)
+            isRef(methodRet) -> mv.visitInsn(ARETURN)
+            methodRetsNull -> { // Unit body, Object-returning impl: return null
+                mv.visitInsn(ACONST_NULL)
+                mv.visitInsn(ARETURN)
+            }
+            else -> mv.visitInsn(RETURN)
+        }
     }
 
     /** one test block → one public static method dawn$test$i()V */
@@ -768,6 +807,9 @@ class CodeGen(
         currentFn = null
         fnStart = null
         nextSlot = 0
+        methodRet = TUnit
+        methodRetsNull = false
+        selfPending = null
         if (genExpr(t.body, tail = false)) mv.visitInsn(RETURN)
         mv.visitMaxs(0, 0)
         mv.visitEnd()
@@ -843,6 +885,46 @@ class CodeGen(
         get.visitInsn(ARETURN)
         get.visitMaxs(0, 0)
         get.visitEnd()
+
+        // index(List, long) -> Object: the `xs[i]` operator — panics when out of bounds
+        val idx = cw.visitMethod(ACC_PUBLIC or ACC_STATIC, "index", "(L$JLIST;J)L$OBJ;", null, null)
+        idx.visitCode()
+        val bad = Label()
+        idx.visitVarInsn(LLOAD, 1)
+        idx.visitInsn(LCONST_0)
+        idx.visitInsn(LCMP)
+        idx.visitJumpInsn(IFLT, bad)
+        idx.visitVarInsn(LLOAD, 1)
+        idx.visitVarInsn(ALOAD, 0)
+        idx.visitMethodInsn(INVOKEINTERFACE, JLIST, "size", "()I", true)
+        idx.visitInsn(I2L)
+        idx.visitInsn(LCMP)
+        idx.visitJumpInsn(IFGE, bad)
+        idx.visitVarInsn(ALOAD, 0)
+        idx.visitVarInsn(LLOAD, 1)
+        idx.visitInsn(L2I)
+        idx.visitMethodInsn(INVOKEINTERFACE, JLIST, "get", "(I)L$OBJ;", true)
+        idx.visitInsn(ARETURN)
+        idx.visitLabel(bad)
+        idx.visitTypeInsn(NEW, PANIC_CLASS)
+        idx.visitInsn(DUP)
+        idx.visitTypeInsn(NEW, SB)
+        idx.visitInsn(DUP)
+        idx.visitMethodInsn(INVOKESPECIAL, SB, "<init>", "()V", false)
+        idx.visitLdcInsn("index ")
+        idx.visitMethodInsn(INVOKEVIRTUAL, SB, "append", "(Ljava/lang/String;)L$SB;", false)
+        idx.visitVarInsn(LLOAD, 1)
+        idx.visitMethodInsn(INVOKEVIRTUAL, SB, "append", "(J)L$SB;", false)
+        idx.visitLdcInsn(" out of bounds for length ")
+        idx.visitMethodInsn(INVOKEVIRTUAL, SB, "append", "(Ljava/lang/String;)L$SB;", false)
+        idx.visitVarInsn(ALOAD, 0)
+        idx.visitMethodInsn(INVOKEINTERFACE, JLIST, "size", "()I", true)
+        idx.visitMethodInsn(INVOKEVIRTUAL, SB, "append", "(I)L$SB;", false)
+        idx.visitMethodInsn(INVOKEVIRTUAL, SB, "toString", "()Ljava/lang/String;", false)
+        idx.visitMethodInsn(INVOKESPECIAL, PANIC_CLASS, "<init>", "(Ljava/lang/String;)V", false)
+        idx.visitInsn(ATHROW)
+        idx.visitMaxs(0, 0)
+        idx.visitEnd()
 
         val rng = cw.visitMethod(ACC_PUBLIC or ACC_STATIC, "range", "(JJ)L$JLIST;", null, null)
         rng.visitCode()
@@ -1921,6 +2003,14 @@ class CodeGen(
     // (false = the statement always throws/jumps; what follows is unreachable).
 
     private fun genStmt(s: Stmt): Boolean = when (s) {
+        is LocalFnStmt -> {
+            genLambdaValue(s.lambda, selfSym = s.symbol)
+            val sym = s.symbol!!
+            sym.slot = nextSlot
+            nextSlot += slotsOf(sym.type)
+            storeVar(sym)
+            true
+        }
         is LetStmt -> {
             val initType = s.init.type!!
             val falls = genExpr(s.init, tail = false)
@@ -2053,7 +2143,11 @@ class CodeGen(
         is StrLit -> genStrLit(e)
         is VarRef -> {
             val fv = e.fnValue
-            if (fv != null) genFnValue(e, fv) else loadVar(e.symbol!!)
+            when {
+                fv != null -> genFnValue(e, fv)
+                e.symbol === selfPending?.selfSym -> emitSelfClosure()
+                else -> loadVar(e.symbol!!)
+            }
             true
         }
         is MethodCall -> when {
@@ -2063,6 +2157,26 @@ class CodeGen(
         }
         is Lambda -> genLambdaValue(e)
         is Propagate -> genPropagate(e)
+        is Return -> {
+            val v = e.value
+            if (v == null || genExpr(v, tail = false)) {
+                if (v != null) adaptTo(v.type!!, methodRet)
+                emitMethodReturn()
+            }
+            false
+        }
+        is Index -> {
+            genExpr(e.target, tail = false)
+            genExpr(e.index, tail = false)
+            if (e.target.type is TList) {
+                mv.visitMethodInsn(INVOKESTATIC, LISTS_CLASS, "index", "(L$JLIST;J)L$OBJ;", false)
+            } else {
+                box(e.index.type!!) // map keys travel erased
+                mv.visitMethodInsn(INVOKESTATIC, MAPS_CLASS, "index", "(L$JMAP;L$OBJ;)L$OBJ;", false)
+            }
+            if (slotsOf(e.type!!) == 0) mv.visitInsn(POP) else unerase(e.type!!)
+            true
+        }
         is Apply -> {
             if (!genExpr(e.target, tail = false)) false
             else genDynamicInvoke(e.args, e.target.type as TFn, e.type!!)
@@ -2245,11 +2359,19 @@ class CodeGen(
             (if (slotsOf(ret) == 0) "L$OBJ;" else descOf(ret))
 
     /** the lambda expression site: load captures + invokedynamic; the impl method is emitted later */
-    private fun genLambdaValue(e: Lambda): Boolean {
+    private fun genLambdaValue(e: Lambda, selfSym: Symbol? = null): Boolean {
         val name = "dawn\$lambda\$${lambdaCounter++}"
-        pendingLambdas.add(PendingLambda(e, name))
+        pendingLambdas.add(PendingLambda(e, name, selfSym))
+        emitClosure(e, name)
+        return true
+    }
+
+    /** the invokedynamic that captures the environment and yields the closure object */
+    private fun emitClosure(e: Lambda, name: String) {
         val caps = e.captures!!
-        for (c in caps) loadVar(c)
+        // a capture of the local function being generated cannot be loaded (no slot
+        // holds it inside its own impl) — rebuild an identical closure instead
+        for (c in caps) if (c === selfPending?.selfSym) emitSelfClosure() else loadVar(c)
         val ft = e.fnType!!
         val implDesc = implDescOf(caps.map { it.type } + ft.params, ft.ret)
         val indyDesc = "(" + caps.joinToString("") { descOf(it.type) } + ")L${fnIface(ft.params.size)};"
@@ -2259,7 +2381,12 @@ class CodeGen(
             Handle(H_INVOKESTATIC, className, name, implDesc, false),
             instantiatedType(ft.params, ft.ret),
         )
-        return true
+    }
+
+    /** a local function used as a value inside its own body: rebuild the closure */
+    private fun emitSelfClosure() {
+        val p = selfPending!!
+        emitClosure(p.lambda, p.name)
     }
 
     private fun drainLambdas(cw: ClassWriter) {
@@ -2461,9 +2588,11 @@ class CodeGen(
             implDescOf(caps.map { it.type } + ft.params, ft.ret), null, null,
         )
         mv.visitCode()
-        currentFn = null // no self-name inside a lambda, so no tail-call rewrite
-        fnStart = null
+        currentFn = null // no self-name inside a lambda, so no top-level tail-call rewrite
         nextSlot = 0
+        methodRet = ft.ret
+        methodRetsNull = true
+        selfPending = if (p.selfSym != null) p else null
         for (sym in caps) {
             sym.slot = nextSlot
             nextSlot += slotsOf(sym.type)
@@ -2473,20 +2602,10 @@ class CodeGen(
             sym.slot = nextSlot
             nextSlot += slotsOf(sym.type)
         }
-        val falls = genExpr(l.body, tail = false)
-        if (falls) {
-            when {
-                ft.ret == TInt -> mv.visitInsn(LRETURN)
-                ft.ret == TFloat -> mv.visitInsn(DRETURN)
-                ft.ret == TBool -> mv.visitInsn(IRETURN)
-                isRef(ft.ret) -> mv.visitInsn(ARETURN)
-                else -> {
-                    // Unit body, Object-returning impl: return null
-                    mv.visitInsn(ACONST_NULL)
-                    mv.visitInsn(ARETURN)
-                }
-            }
-        }
+        // a local function's impl is a named function: self tail calls become a loop
+        fnStart = if (p.selfSym != null) Label().also { mv.visitLabel(it) } else null
+        val falls = genExpr(l.body, tail = p.selfSym != null)
+        if (falls) emitMethodReturn()
         mv.visitMaxs(0, 0)
         mv.visitEnd()
     }
@@ -2800,6 +2919,33 @@ class CodeGen(
     private fun genCall(e: Call, tail: Boolean): Boolean {
         val dyn = e.dynamicTarget
         if (dyn != null) {
+            val p = selfPending
+            if (p != null && dyn === p.selfSym) {
+                // a local function calling itself: skip the closure object entirely
+                val ft = p.lambda.fnType!!
+                if (tail) { // spec §12.4: self tail call → write back + goto entry
+                    for ((a, pt) in e.args.zip(ft.params)) {
+                        genExpr(a, tail = false)
+                        adaptTo(a.type!!, pt)
+                    }
+                    for (lp in p.lambda.params.reversed()) {
+                        val sym = lp.symbol!!
+                        if (slotsOf(sym.type) > 0) storeVar(sym)
+                    }
+                    mv.visitJumpInsn(GOTO, fnStart!!)
+                    return false
+                }
+                val caps = p.lambda.captures!!
+                for (c in caps) loadVar(c) // impl params, forwarded unchanged
+                for ((a, pt) in e.args.zip(ft.params)) {
+                    genExpr(a, tail = false)
+                    adaptTo(a.type!!, pt)
+                }
+                mv.visitMethodInsn(INVOKESTATIC, className, p.name,
+                    implDescOf(caps.map { it.type } + ft.params, ft.ret), false)
+                adaptFrom(ft.ret, e.type!!)
+                return true
+            }
             loadVar(dyn)
             return genDynamicInvoke(e.args, dyn.type as TFn, e.type!!)
         }

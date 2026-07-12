@@ -19,7 +19,7 @@ import { BUILTINS } from './builtins.generated'
 
 const KEYWORDS = new Set([
   'fn', 'let', 'var', 'type', 'const', 'use', 'java', 'pub', 'match', 'if',
-  'else', 'for', 'in', 'while', 'comptime', 'test', 'assert', 'not', 'derive',
+  'else', 'for', 'in', 'while', 'return', 'comptime', 'test', 'assert', 'not', 'derive',
 ])
 
 // Custom tags for the two classes the standard set doesn't cover cleanly: the

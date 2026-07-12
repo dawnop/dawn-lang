@@ -265,6 +265,8 @@ class FnSig(
     val typeParams: List<Type.TVar> = emptyList(),
     /** span of the name in the declaration (go-to-definition); null for builtins */
     val nameSpan: Span? = null,
+    /** the return type (and effect) is still being inferred; ret is a placeholder */
+    val inferring: Boolean = false,
 ) {
     /** JVM class of the defining module (spec §12.2); null = builtin/single-file */
     var owner: String? = null

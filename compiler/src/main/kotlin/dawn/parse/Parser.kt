@@ -335,8 +335,13 @@ class Parser(
             if (at(COMMA)) { advance(); skipNewlines() } else break
         }
         expect(RPAREN, "`)`")
-        expect(ARROW, "`->` (top-level functions must declare a return type)")
-        val ret = typeRef()
+        // pub functions are API: their full signature is the contract. Private
+        // functions may leave the return type (and effect) to inference.
+        val ret: TypeRef? = when {
+            at(ARROW) -> { advance(); typeRef() }
+            pub -> { expect(ARROW, "`->` (pub functions must declare a return type)"); null }
+            else -> null
+        }
         val declaredEff = parseEffect()
         expect(EQ, "`=` (function body)")
         skipNewlines()
@@ -429,8 +434,38 @@ class Parser(
                 // assignment: IDENT = ... (as opposed to == comparison)
                 if (peek(1).type == EQ) assignStmt() else exprStmt()
             }
+            // `fn name(...)` is a local function; a bare `fn(...)` stays a lambda expression
+            FN -> if (peek(1).type == IDENT) localFnStmt() else exprStmt()
             else -> exprStmt()
         }
+    }
+
+    private fun localFnStmt(): Stmt {
+        val fnTok = advance() // fn
+        val nameTok = expect(IDENT, "a function name (lowercase)")
+        if (at(LBRACKET))
+            throw err("local functions cannot declare type parameters",
+                "the enclosing function's type parameters are in scope; or lift it to the top level")
+        expect(LPAREN, "`(`")
+        val params = ArrayList<LambdaParam>()
+        skipNewlines()
+        while (!at(RPAREN)) {
+            val pName = expect(IDENT, "a parameter name")
+            expect(COLON, "`:` (local function parameters must be typed)")
+            val pType = typeRef()
+            params.add(LambdaParam(pName.text, pType, pName.span))
+            skipNewlines()
+            if (at(COMMA)) { advance(); skipNewlines() } else break
+        }
+        expect(RPAREN, "`)`")
+        expect(ARROW, "`->` (local functions must declare a return type)")
+        val ret = typeRef()
+        val effNames = parseEffect()
+        expect(EQ, "`=` (function body)")
+        skipNewlines()
+        val body = expression()
+        val span = Span(fnTok.span.start, body.span.end)
+        return LocalFnStmt(nameTok.text, Lambda(params, body, span), ret, effNames, nameTok.span, span)
     }
 
     private fun letStmt(mutable: Boolean): Stmt {
@@ -600,6 +635,16 @@ class Parser(
                     val q = advance()
                     e = Propagate(e, Span(e.span.start, q.span.end))
                 }
+                LBRACKET -> {
+                    e = bracketed {
+                        advance()
+                        skipNewlines()
+                        val idx = expression()
+                        skipNewlines()
+                        val close = expect(RBRACKET, "`]`")
+                        Index(e, idx, Span(e.span.start, close.span.end))
+                    }
+                }
                 DOT -> {
                     advance()
                     val f = expect(IDENT, "a field or function name after `.`")
@@ -636,6 +681,12 @@ class Parser(
             IDENT -> identOrCall()
             IF -> ifExpr()
             MATCH -> matchExpr()
+            RETURN -> {
+                advance()
+                val v = if (at(NEWLINE) || at(RBRACE) || at(RPAREN) || at(COMMA) || at(EOF)) null
+                        else expression()
+                Return(v, Span(t.span.start, v?.span?.end ?: t.span.end))
+            }
             LBRACE -> block()
             LPAREN -> parenExpr()
             LBRACKET -> listLit()

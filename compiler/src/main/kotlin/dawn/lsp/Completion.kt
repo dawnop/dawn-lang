@@ -165,6 +165,11 @@ private fun collectBinders(e: Expr, before: Int, add: (String, String?) -> Unit)
         }
         is Unary -> collectBinders(e.operand, before, add)
         is Propagate -> collectBinders(e.operand, before, add)
+        is Index -> {
+            collectBinders(e.target, before, add)
+            collectBinders(e.index, before, add)
+        }
+        is Return -> e.value?.let { collectBinders(it, before, add) }
         else -> {}
     }
 }
@@ -174,6 +179,10 @@ private fun collectBinders(s: Stmt, before: Int, add: (String, String?) -> Unit)
         is LetStmt -> {
             if (s.span.start < before) add(s.name, s.symbol?.type?.toString())
             collectBinders(s.init, before, add)
+        }
+        is LocalFnStmt -> {
+            if (s.span.start < before) add(s.name, s.symbol?.type?.toString())
+            collectBinders(s.lambda, before, add)
         }
         is LetPatStmt -> collectBinders(s.init, before, add)
         is ForStmt -> {
