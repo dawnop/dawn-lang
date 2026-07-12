@@ -49,6 +49,10 @@ function completeAt(doc: string, marker = '‸') {
   return dawnCompletions(new CompletionContext(state, pos, false))
 }
 expect('inside string: none', completeAt('fn f() -> Unit = println("pri‸")'), null)
+expect('unterminated string: none', completeAt('fn f() -> Unit = println("pri‸'), null)
+expect('triple string: none', completeAt('fn f() -> String = \"\"\"\n  multi li‸'), null)
+expect('raw string: none', completeAt('fn f() -> String = `raw te‸'), null)
+expect('after closed string: completes', completeAt('pub fn main() -> Unit !io = { println("x") ++ pri‸ }') !== null, true)
 expect('inside comment: none', completeAt('# comment pri‸'), null)
 expect('after fn: none', completeAt('fn ma‸'), null)
 expect('after let: none', completeAt('fn f() -> Unit = { let co‸'), null)
@@ -64,6 +68,12 @@ expect('ADT ctor completes', ctor!.options.some((o) => o.label === 'Circle'), tr
 expect('uppercase filters lowercase', ctor!.options.every((o) => /^[A-Z]/.test(o.label)), true)
 const interp = completeAt('pub fn main() -> Unit !io = { let name = "x"\n  println("hi $na‸") }')
 expect('interp still completes', interp !== null, true)
+const interpBrace = completeAt('pub fn main() -> Unit !io = println("v=${to_st‸")')
+expect('brace interp completes', interpBrace!.options.some((o) => o.label === 'to_string'), true)
+const ty = completeAt('fn f(s: Str‸')
+expect('builtin type String completes', ty!.options.some((o) => o.label === 'String' && o.type === 'type'), true)
+const un = completeAt('pub fn main() -> Uni‸')
+expect('builtin type Unit completes', un!.options.some((o) => o.label === 'Unit'), true)
 const self = completeAt('fn solo() -> Int = so‸')
 expect('recursive self-reference completes', self!.options.some((o) => o.label === 'solo'), true)
 

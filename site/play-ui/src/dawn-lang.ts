@@ -8,7 +8,6 @@ import {
   LanguageSupport,
   HighlightStyle,
   syntaxHighlighting,
-  syntaxTree,
 } from '@codemirror/language'
 import { Tag, tags } from '@lezer/highlight'
 import {
@@ -183,6 +182,70 @@ const dawnHighlight = HighlightStyle.define([
 
 // Constructors of the prelude ADTs — completable like builtins.
 const CTORS = ['Some', 'None', 'Ok', 'Err', 'True', 'False']
+// Builtin type names (compiler's Types.named + the builtin containers/ADTs).
+const TYPES = ['Int', 'Float', 'Bool', 'String', 'Unit', 'List', 'Map', 'Set', 'Option', 'Result']
+
+// Where the cursor sits lexically. The editor's syntax tree can lag a few
+// keystrokes behind fast typing, so this re-scans the buffer up to the cursor
+// with the same string/comment rules as the tokenizer — cheap at playground
+// sizes and always current.
+export function lexContext(text: string, pos: number): 'code' | 'comment' | 'string' | 'interp' {
+  let kind: 'code' | 'comment' | 'dq' | 'triple' | 'raw' = 'code'
+  let i = 0
+  while (i < pos) {
+    const ch = text[i]
+    if (kind === 'code') {
+      if (text.startsWith('"""', i)) {
+        kind = 'triple'
+        i += 3
+      } else if (ch === '#') {
+        kind = 'comment'
+        i++
+      } else if (ch === '"') {
+        kind = 'dq'
+        i++
+      } else if (ch === '`') {
+        kind = 'raw'
+        i++
+      } else if (ch === "'") {
+        // char literal: 'a' or '\n'
+        i++
+        if (text[i] === '\\') i++
+        i++
+        if (text[i] === "'") i++
+      } else {
+        i++
+      }
+    } else if (kind === 'comment') {
+      if (ch === '\n') kind = 'code'
+      i++
+    } else if (kind === 'dq') {
+      if (ch === '\\') i += 2
+      else {
+        if (ch === '"' || ch === '\n') kind = 'code' // double-quote strings don't span lines
+        i++
+      }
+    } else if (kind === 'triple') {
+      if (ch === '\\') i += 2
+      else if (text.startsWith('"""', i)) {
+        kind = 'code'
+        i += 3
+      } else i++
+    } else {
+      // raw backtick: no escapes, no interpolation
+      if (ch === '`') kind = 'code'
+      i++
+    }
+  }
+  if (kind === 'comment') return 'comment'
+  if (kind === 'raw') return 'string'
+  if (kind === 'dq' || kind === 'triple') {
+    // a `$name` or `${expr}` being typed completes like code
+    if (/\$[A-Za-z_]\w*$|\$\{[^}"]*$/.test(text.slice(Math.max(0, pos - 200), pos))) return 'interp'
+    return 'string'
+  }
+  return 'code'
+}
 
 // Names declared in the buffer itself (the user's own functions, bindings,
 // types, and ADT constructors), so completion isn't limited to builtins.
@@ -212,7 +275,7 @@ function docDecls(doc: string, skipFrom: number) {
 export function dawnCompletions(context: CompletionContext): CompletionResult | null {
   const word = context.matchBefore(/[A-Za-z_][A-Za-z0-9_]*/)
   if (!word && !context.explicit) return null
-  const inside = syntaxTree(context.state).resolveInner(context.pos, -1).name
+  const inside = lexContext(context.state.sliceDoc(0, context.pos), context.pos)
   if (inside === 'string' || inside === 'comment') return null
   const from = word ? word.from : context.pos
   const line = context.state.doc.lineAt(context.pos)
@@ -231,6 +294,7 @@ export function dawnCompletions(context: CompletionContext): CompletionResult | 
       info: b.doc,
       boost: 1,
     })),
+    ...TYPES.map((t) => ({ label: t, type: 'type' })),
     ...CTORS.map((c) => ({ label: c, type: 'type' })),
     ...[...KEYWORDS].map((k) => ({ label: k, type: 'keyword' })),
   ]
