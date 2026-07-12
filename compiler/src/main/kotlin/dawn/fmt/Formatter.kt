@@ -43,6 +43,7 @@ object Formatter {
         val sb = StringBuilder()
         val openers = ArrayDeque<Int>() // indent (in levels) of the line each still-open bracket sits on
         var lineIndent = 0              // indent of the line currently being emitted
+        var lineFirst: Token = toks[0]  // first token of the current line (for use-path spacing)
         var prev: Token? = null
         for (t in toks) {
             if (prev == null) {
@@ -50,9 +51,11 @@ object Formatter {
             } else {
                 val nl = countNewlines(src, prev.span.end, t.span.start)
                 if (nl == 0) {
-                    if (t.type == COMMENT || space(prev, t, unary)) sb.append(' ')
+                    val onUseLine = lineFirst.type == USE
+                    if (t.type == COMMENT || space(prev, t, unary, onUseLine)) sb.append(' ')
                     sb.append(text(src, t))
                 } else {
+                    lineFirst = t
                     repeat(1 + minOf(nl - 1, 1)) { sb.append('\n') } // collapse ≥2 blank lines to 1
                     lineIndent = indentOf(t, openers, prev)
                     sb.append("  ".repeat(lineIndent.coerceAtLeast(0)))
@@ -85,9 +88,11 @@ object Formatter {
 
     // ---- spacing between two tokens already known to be on the same line ----
 
-    private fun space(prev: Token, cur: Token, unary: Set<Token>): Boolean {
+    private fun space(prev: Token, cur: Token, unary: Set<Token>, onUseLine: Boolean = false): Boolean {
         val p = prev.type
         val c = cur.type
+        // a module path prints tight: use greet/words.{Lang, greet} (spec §10.2)
+        if (onUseLine && (p == SLASH || c == SLASH || p == LBRACE || c == RBRACE)) return false
         return when {
             // openers hug what follows; closers/commas/colons/? hug what precedes
             p == LPAREN || p == LBRACKET -> false

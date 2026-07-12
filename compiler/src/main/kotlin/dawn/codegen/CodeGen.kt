@@ -32,9 +32,31 @@ class CodeGen(
     private val className: String,
     /** compile test blocks too (`dawn test`); builds strip them (spec §3.4) */
     private val includeTests: Boolean = false,
+    /**
+     * Every ADT in the whole program (spec §10), so cross-module frames resolve.
+     * Null = single-file: prelude + this module's own types.
+     */
+    programAdts: List<AdtInfo>? = null,
 ) {
 
     companion object {
+        /** One module to generate: its checked AST and its JVM class name (spec §10). */
+        class ModuleUnit(val module: Module, val className: String)
+
+        /**
+         * Compile a whole multi-module program: shared runtime + prelude ADT classes
+         * once, then each module's class and its own ADT classes, with a program-wide
+         * ADT set so cross-module frames resolve (spec §10, §12.2).
+         */
+        fun generateProgram(units: List<ModuleUnit>, includeTests: Boolean = false): Map<String, ByteArray> {
+            val programAdts = PRELUDE_ADTS +
+                units.flatMap { u -> u.module.types.mapNotNull { it.ctors.firstOrNull()?.info?.adt } }
+            val out = HashMap<String, ByteArray>()
+            CodeGen(Module(emptyList()), "", programAdts = programAdts).emitShared(out)
+            for (u in units) CodeGen(u.module, u.className, includeTests, programAdts).emitModule(out)
+            return out
+        }
+
         const val PANIC_CLASS = "dawn/rt/PanicError"
         const val LISTS_CLASS = "dawn/rt/Lists"
         const val STRINGS_CLASS = "dawn/rt/Strings"
@@ -60,9 +82,11 @@ class CodeGen(
         )
     }
 
-    /** every ADT we emit classes for: prelude (Option/Result) + this module's */
-    private val allAdts: List<AdtInfo> =
-        PRELUDE_ADTS + module.types.mapNotNull { it.ctors.firstOrNull()?.info?.adt }
+    /** ADTs defined by this module (its own classes to emit) */
+    private val ownAdts: List<AdtInfo> = module.types.mapNotNull { it.ctors.firstOrNull()?.info?.adt }
+
+    /** every ADT known for frame computation: the whole program, or (single-file) prelude + own */
+    private val allAdts: List<AdtInfo> = programAdts ?: (PRELUDE_ADTS + ownAdts)
 
     /** super of every class we generate, so frames can be computed without loading them */
     private val adtSupers: Map<String, String> = buildMap {
@@ -126,9 +150,29 @@ class CodeGen(
     private val constFields = ArrayList<ConstField>()
     private val constFieldByKey = HashMap<Any, String>()
 
+    /** Single-file (or single-module) generation: shared runtime + this module. */
     fun generate(): Map<String, ByteArray> {
         val out = HashMap<String, ByteArray>()
-        for (a in allAdts) genAdt(a, out)
+        emitShared(out)
+        emitModule(out)
+        return out
+    }
+
+    /** prelude ADT classes + the runtime support classes, emitted once per program */
+    private fun emitShared(out: MutableMap<String, ByteArray>) {
+        for (a in PRELUDE_ADTS) genAdt(a, out)
+        out[PANIC_CLASS] = genPanicClass()
+        out[LISTS_CLASS] = genListsClass()
+        out[STRINGS_CLASS] = genStringsClass()
+        out[IO_CLASS] = genIoClass()
+        out[SHOW_CLASS] = genShowClass()
+        for (n in 0..8) out[fnIface(n)] = genFnInterface(n)
+        for (n in 2..8) out[tupleClass(n)] = genTupleClass(n)
+    }
+
+    /** this module's ADT classes + its class of static methods */
+    private fun emitModule(out: MutableMap<String, ByteArray>) {
+        for (a in ownAdts) genAdt(a, out)
 
         val cw = DawnClassWriter()
         cw.visit(V17, ACC_PUBLIC or ACC_FINAL, className, null, OBJ, null)
@@ -147,17 +191,9 @@ class CodeGen(
         if (module.fns.any { it.name == "main" }) genJvmMain(cw)
         genConstFields(cw)
         cw.visitEnd()
-
         out[className] = cw.toByteArray()
-        out[PANIC_CLASS] = genPanicClass()
-        out[LISTS_CLASS] = genListsClass()
-        out[STRINGS_CLASS] = genStringsClass()
-        out[IO_CLASS] = genIoClass()
-        out[SHOW_CLASS] = genShowClass()
-        for (n in 0..8) out[fnIface(n)] = genFnInterface(n)
-        for (n in 2..8) out[tupleClass(n)] = genTupleClass(n)
-        return out
     }
+
 
     /** dawn/rt/TupleN: N public final Object fields _0.._N-1 + structural equals (spec §1.5) */
     private fun genTupleClass(n: Int): ByteArray {
@@ -1730,10 +1766,11 @@ class CodeGen(
             if (slotsOf(fv.ret) == 0) {
                 // Unit-returning functions need a bridge (LMF cannot adapt void)
                 pendingBridges.add(fv)
-                Handle(H_INVOKESTATIC, className, "dawn\$fnval\$${fv.name}",
+                Handle(H_INVOKESTATIC, className, "dawn\$fnval\$${fnValBridgeName(fv)}",
                     implDescOf(fv.paramTypes, fv.ret), false)
             } else {
-                Handle(H_INVOKESTATIC, className, fv.name, methodDesc(fv.paramTypes, fv.ret), false)
+                Handle(H_INVOKESTATIC, fv.owner ?: className, fv.name,
+                    methodDesc(fv.paramTypes, fv.ret), false)
             }
         }
         mv.visitInvokeDynamicInsn(
@@ -1930,10 +1967,15 @@ class CodeGen(
     private val emittedBridges = HashSet<String>()
 
     /** bridge for a Unit-returning top-level function used as a value: call it, return null */
+    /** bridge name for a Unit-returning fn value; namespaced by owner so imports don't collide */
+    private fun fnValBridgeName(sig: FnSig) =
+        if (sig.owner == null || sig.owner == className) sig.name else "${sig.owner!!.replace('/', '$')}\$${sig.name}"
+
     private fun genFnValueBridge(cw: ClassWriter, sig: FnSig) {
-        if (!emittedBridges.add(sig.name)) return
+        val bridge = fnValBridgeName(sig)
+        if (!emittedBridges.add(bridge)) return
         val m = cw.visitMethod(
-            ACC_PRIVATE or ACC_STATIC or ACC_SYNTHETIC, "dawn\$fnval\$${sig.name}",
+            ACC_PRIVATE or ACC_STATIC or ACC_SYNTHETIC, "dawn\$fnval\$$bridge",
             implDescOf(sig.paramTypes, sig.ret), null, null,
         )
         m.visitCode()
@@ -1942,7 +1984,7 @@ class CodeGen(
             loadSlot(m, pt, slot)
             slot += slotsOf(pt)
         }
-        m.visitMethodInsn(INVOKESTATIC, className, sig.name, methodDesc(sig.paramTypes, sig.ret), false)
+        m.visitMethodInsn(INVOKESTATIC, sig.owner ?: className, sig.name, methodDesc(sig.paramTypes, sig.ret), false)
         m.visitInsn(ACONST_NULL)
         m.visitInsn(ARETURN)
         m.visitMaxs(0, 0)
@@ -2090,8 +2132,10 @@ class CodeGen(
 
         val self = currentFn
         val sig = e.sig!!
-        // self-recursive tail call → write args back to param slots + goto entry (spec §12.4)
-        if (tail && self != null && e.callee == self.name) {
+        // self-recursive tail call → write args back to param slots + goto entry (spec §12.4);
+        // an imported function of the same name (different owner) is not self-recursion
+        val ownerClass = sig.owner ?: className
+        if (tail && self != null && e.callee == self.name && ownerClass == className) {
             for ((a, pt) in e.args.zip(sig.paramTypes)) {
                 genExpr(a, tail = false)
                 adaptTo(a.type!!, pt)
@@ -2107,7 +2151,7 @@ class CodeGen(
             genExpr(a, tail = false)
             adaptTo(a.type!!, pt)
         }
-        mv.visitMethodInsn(INVOKESTATIC, className, e.callee, methodDesc(sig.paramTypes, sig.ret), false)
+        mv.visitMethodInsn(INVOKESTATIC, ownerClass, e.callee, methodDesc(sig.paramTypes, sig.ret), false)
         adaptFrom(sig.ret, e.type!!)
         return true
     }
@@ -2164,7 +2208,7 @@ class CodeGen(
     private fun genCtorValue(e: CtorCall, ci: CtorInfo): Boolean {
         val ft = e.type as TFn
         pendingCtorBridges.add(ci)
-        val handle = Handle(H_INVOKESTATIC, className, "dawn\$ctor\$${ci.jvmName}",
+        val handle = Handle(H_INVOKESTATIC, className, ctorBridgeName(ci),
             implDescOf(ci.fields.map { it.type }, ci.adt.type), false)
         mv.visitInvokeDynamicInsn(
             "apply", "()L${fnIface(ft.params.size)};", LMF_BSM,
@@ -2175,13 +2219,16 @@ class CodeGen(
         return true
     }
 
+    /** the bridge method name for a constructor value; '/' from a module prefix is not legal in method names */
+    private fun ctorBridgeName(ci: CtorInfo) = "dawn\$ctor\$" + ci.jvmName.replace('/', '$')
+
     /** static body `dawn$ctor$X(fields...) -> Adt` = new + init, target of a constructor value's LMF */
     private fun genCtorValueBridge(cw: ClassWriter, ci: CtorInfo) {
         val sub = ci.jvmName
-        if (!emittedCtorBridges.add(sub)) return
+        if (!emittedCtorBridges.add(ctorBridgeName(ci))) return
         val fieldTypes = ci.fields.map { it.type }
         val m = cw.visitMethod(
-            ACC_PRIVATE or ACC_STATIC or ACC_SYNTHETIC, "dawn\$ctor\$$sub",
+            ACC_PRIVATE or ACC_STATIC or ACC_SYNTHETIC, ctorBridgeName(ci),
             implDescOf(fieldTypes, ci.adt.type), null, null,
         )
         m.visitCode()

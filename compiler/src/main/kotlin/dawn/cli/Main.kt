@@ -1,7 +1,10 @@
 package dawn.cli
 
+import dawn.check.CheckedModule
 import dawn.check.analyze
+import dawn.check.analyzeProject
 import dawn.codegen.CodeGen
+import dawn.diag.Severity
 import dawn.diag.SourceFile
 import java.io.File
 import java.util.jar.Attributes
@@ -12,14 +15,16 @@ import kotlin.system.exitProcess
 
 const val USAGE = """dawn — the Dawn language toolchain
 
+A <target> is a single .dawn file or a project directory (src/main.dawn entry).
+
 usage:
-  dawn run <file.dawn>                 compile and run (in-process JVM)
-  dawn test <file.dawn>                compile with test blocks and run them
-  dawn build <file.dawn> [-o out.jar]  produce an executable jar (tests stripped)
-  dawn build <file.dawn> --native [-o out]
+  dawn run <target>                    compile and run (in-process JVM)
+  dawn test <target>                   compile with test blocks and run them
+  dawn build <target> [-o out.jar]     produce an executable jar (tests stripped)
+  dawn build <target> --native [-o out]
                                        produce a standalone native binary (needs native-image)
-  dawn fmt <file.dawn>...              format files in place
-  dawn fmt --check <file.dawn>...      report files that are not formatted (exit 1 if any)
+  dawn fmt <file.dawn | dir>...        format files in place (a dir formats all .dawn under it)
+  dawn fmt --check <target>...         report files that are not formatted (exit 1 if any)
 """
 
 fun main(args: Array<String>) {
@@ -72,88 +77,87 @@ fun extractFuel(rest: List<String>): Pair<Long, List<String>> {
     return fuel to out
 }
 
-/** Compile one .dawn file → (class name, bytecode per class). Compile errors are rendered here and exit. */
-fun compile(path: String, comptimeFuel: Long = 100_000_000L): Pair<String, Map<String, ByteArray>> {
-    val file = File(path)
-    if (!file.exists()) throw CliError("no such file: $path")
-    if (!path.endsWith(".dawn")) throw CliError("source files must end in .dawn: $path")
-    val source = SourceFile(path, file.readText())
-    val className = sanitizeClassName(file.nameWithoutExtension)
-    val analysis = analyze(source.text, comptimeFuel)
-    if (analysis.hasErrors) {
-        for (d in analysis.diagnostics) System.err.print(d.render(source))
-        val n = analysis.diagnostics.size
-        System.err.println(if (n == 1) "1 error" else "$n errors")
-        exitProcess(1)
-    }
-    return className to CodeGen(analysis.module, className).generate()
-}
-
 fun sanitizeClassName(stem: String): String {
     val cleaned = stem.map { if (it.isLetterOrDigit() || it == '_') it else '_' }.joinToString("")
     return if (cleaned.isEmpty() || cleaned[0].isDigit()) "dawn_$cleaned" else cleaned
 }
 
+/** A compiled program: its entry module (the one with `main`) and every class file. */
+class CompiledProgram(val entry: CheckedModule?, val classes: Map<String, ByteArray>)
+
+/**
+ * Compile a project directory or a single .dawn file (spec §10.1) → all classes.
+ * Compile errors are rendered here and exit. `includeTests` keeps test blocks.
+ */
+fun compileProject(path: String, comptimeFuel: Long, includeTests: Boolean = false): CompiledProgram {
+    val file = File(path)
+    if (!file.exists()) throw CliError("no such file or directory: $path")
+    if (file.isFile && !path.endsWith(".dawn")) throw CliError("source files must end in .dawn: $path")
+    val program = analyzeProject(file, comptimeFuel)
+    if (program.hasErrors) {
+        System.err.print(program.render())
+        val n = program.diagnostics.count { it.diag.severity == Severity.ERROR }
+        System.err.println(if (n == 1) "1 error" else "$n errors")
+        exitProcess(1)
+    }
+    val units = program.modules.map { CodeGen.Companion.ModuleUnit(it.module, it.className) }
+    val classes = CodeGen.generateProgram(units, includeTests)
+    val entry = program.modules.firstOrNull { m -> m.module.fns.any { it.name == "main" } }
+    return CompiledProgram(entry, classes)
+}
+
+/** A class loader backed by an in-memory class table. */
+private fun loaderFor(classes: Map<String, ByteArray>): ClassLoader =
+    object : ClassLoader(ClassLoader.getSystemClassLoader()) {
+        override fun findClass(name: String): Class<*> {
+            val bytes = classes[name.replace('.', '/')] ?: throw ClassNotFoundException(name)
+            return defineClass(name, bytes, 0, bytes.size)
+        }
+    }
+
 // ---- run: execute in-process via a class loader ----
 
 fun cmdRun(restIn: List<String>) {
     val (fuel, rest) = extractFuel(restIn)
-    val path = rest.firstOrNull() ?: throw CliError("usage: dawn run <file.dawn>")
-    val (className, classes) = compile(path, fuel)
-    val loader = object : ClassLoader(ClassLoader.getSystemClassLoader()) {
-        override fun findClass(name: String): Class<*> {
-            val internal = name.replace('.', '/')
-            val bytes = classes[internal] ?: throw ClassNotFoundException(name)
-            return defineClass(name, bytes, 0, bytes.size)
-        }
-    }
-    val cls = Class.forName(className, false, loader)
-    val main = try {
-        cls.getDeclaredMethod("main", Array<String>::class.java)
-    } catch (e: NoSuchMethodException) {
-        throw CliError("$path has no pub fn main() -> Unit !io, nothing to run")
-    }
+    val path = rest.firstOrNull() ?: throw CliError("usage: dawn run <file.dawn | project-dir>")
+    val program = compileProject(path, fuel)
+    val entry = program.entry ?: throw CliError("$path has no pub fn main() -> Unit !io, nothing to run")
+    val cls = Class.forName(entry.className.replace('/', '.'), false, loaderFor(program.classes))
+    val main = cls.getDeclaredMethod("main", Array<String>::class.java)
     main.invoke(null, rest.drop(1).toTypedArray())
 }
 
-// ---- test: compile with test blocks, run each, report ----
+// ---- test: compile with test blocks, run each across all modules, report ----
 
 fun cmdTest(restIn: List<String>) {
     val (fuel, rest) = extractFuel(restIn)
-    val path = rest.firstOrNull() ?: throw CliError("usage: dawn test <file.dawn>")
-    val file = File(path)
-    if (!file.exists()) throw CliError("no such file: $path")
-    val source = SourceFile(path, file.readText())
-    val className = sanitizeClassName(file.nameWithoutExtension)
-    val analysis = analyze(source.text, fuel)
-    if (analysis.hasErrors) {
-        for (d in analysis.diagnostics) System.err.print(d.render(source))
-        exitProcess(1)
-    }
-    val tests = analysis.module.tests
-    if (tests.isEmpty()) throw CliError("$path has no test blocks")
-    val classes = CodeGen(analysis.module, className, includeTests = true).generate()
-    val loader = object : ClassLoader(ClassLoader.getSystemClassLoader()) {
-        override fun findClass(name: String): Class<*> {
-            val internal = name.replace('.', '/')
-            val bytes = classes[internal] ?: throw ClassNotFoundException(name)
-            return defineClass(name, bytes, 0, bytes.size)
-        }
-    }
-    val cls = Class.forName(className, false, loader)
+    val path = rest.firstOrNull() ?: throw CliError("usage: dawn test <file.dawn | project-dir>")
+    val program = compileProject(path, fuel, includeTests = true)
+    // recover per-module test blocks (a module class holds dawn$test$i methods)
+    val analyzed = analyzeProject(File(path), fuel)
+    val loader = loaderFor(program.classes)
+    var total = 0
     var failed = 0
-    for ((i, t) in tests.withIndex()) {
-        val m = cls.getDeclaredMethod("dawn\$test\$$i")
-        try {
-            m.invoke(null)
-            println("PASS  ${t.testName}")
-        } catch (e: java.lang.reflect.InvocationTargetException) {
-            failed++
-            println("FAIL  ${t.testName}")
-            e.cause?.message?.lines()?.forEach { println("      $it") }
+    for (m in analyzed.modules) {
+        val tests = m.module.tests
+        if (tests.isEmpty()) continue
+        val cls = Class.forName(m.className.replace('/', '.'), false, loader)
+        for ((i, t) in tests.withIndex()) {
+            total++
+            val label = if (analyzed.modules.count { it.module.tests.isNotEmpty() } > 1)
+                "${m.modPath} :: ${t.testName}" else t.testName
+            try {
+                cls.getDeclaredMethod("dawn\$test\$$i").invoke(null)
+                println("PASS  $label")
+            } catch (e: java.lang.reflect.InvocationTargetException) {
+                failed++
+                println("FAIL  $label")
+                e.cause?.message?.lines()?.forEach { println("      $it") }
+            }
         }
     }
-    println(if (failed == 0) "${tests.size} test(s) passed" else "$failed of ${tests.size} test(s) failed")
+    if (total == 0) throw CliError("$path has no test blocks")
+    println(if (failed == 0) "$total test(s) passed" else "$failed of $total test(s) failed")
     if (failed > 0) exitProcess(1)
 }
 
@@ -162,20 +166,27 @@ fun cmdTest(restIn: List<String>) {
 fun cmdFmt(rest: List<String>) {
     val check = rest.contains("--check")
     val paths = rest.filter { !it.startsWith("-") }
-    if (paths.isEmpty()) throw CliError("usage: dawn fmt [--check] <file.dawn>...")
+    if (paths.isEmpty()) throw CliError("usage: dawn fmt [--check] <file.dawn | dir>...")
+    // a directory argument formats every .dawn under it (spec §12.1)
+    val files = paths.flatMap { p ->
+        val f = File(p)
+        when {
+            !f.exists() -> throw CliError("no such file or directory: $p")
+            f.isDirectory -> f.walkTopDown().filter { it.isFile && it.extension == "dawn" }.sortedBy { it.path }.toList()
+            else -> listOf(f)
+        }
+    }
     var unformatted = 0
-    for (p in paths) {
-        val file = File(p)
-        if (!file.exists()) throw CliError("no such file: $p")
+    for (file in files) {
         val original = file.readText()
         val formatted = dawn.fmt.Formatter.format(original)
         if (formatted == original) continue
         if (check) {
-            println(p)
+            println(file.path)
             unformatted++
         } else {
             file.writeText(formatted)
-            println("formatted $p")
+            println("formatted ${file.path}")
         }
     }
     if (check && unformatted > 0) exitProcess(1)
@@ -186,25 +197,27 @@ fun cmdFmt(rest: List<String>) {
 fun cmdBuild(restIn: List<String>) {
     val (fuel, rest) = extractFuel(restIn)
     val path = rest.firstOrNull { !it.startsWith("-") }
-        ?: throw CliError("usage: dawn build <file.dawn> [-o out] [--native]")
+        ?: throw CliError("usage: dawn build <file.dawn | project-dir> [-o out] [--native]")
     val native = rest.contains("--native")
     val oIdx = rest.indexOf("-o")
     val out = if (oIdx >= 0 && oIdx + 1 < rest.size) rest[oIdx + 1] else null
 
-    val (className, classes) = compile(path, fuel)
+    val program = compileProject(path, fuel)
+    val entry = program.entry ?: throw CliError("$path has no pub fn main() -> Unit !io to use as an entry point")
+    val stem = File(path).let { if (it.isDirectory) it.name else it.nameWithoutExtension }
     val jarPath = when {
         native -> File.createTempFile("dawn-build-", ".jar").absolutePath
         out != null -> out
-        else -> File(path).nameWithoutExtension + ".jar"
+        else -> "$stem.jar"
     }
-    writeJar(jarPath, className, classes)
+    writeJar(jarPath, entry.className, program.classes)
 
     if (!native) {
         println("wrote $jarPath (run it with: java -jar $jarPath)")
         return
     }
 
-    val binOut = out ?: File(path).nameWithoutExtension
+    val binOut = out ?: stem
     val nativeImage = findNativeImage() ?: throw CliError(
         "native-image not found. Install GraalVM and add it to PATH, or set GRAALVM_HOME",
     )
