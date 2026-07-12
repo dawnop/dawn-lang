@@ -3,7 +3,8 @@
 use md/ast.{Block}
 use md/parser.{parse}
 use html/render.{render_doc}
-use html/page.{page, page_with_toc}
+use html/page.{page, page_with_toc, shell}
+use hl/dawn.{highlight_dawn}
 use gen/common.{must_read, write_page, map_doc_url}
 
 fn parsed(path: String) -> List[Block] !io =
@@ -15,9 +16,32 @@ fn parsed(path: String) -> List[Block] !io =
 pub fn gen_assets(out: String) -> Unit !io =
   write_page("$out/assets/style.css", trim(must_read("site/assets/style.css")))
 
+fn hero_html() -> String !io = {
+  let hl = highlight_dawn(trim(must_read("site/pages/hero.dawn")))
+  """
+<section class="hero">
+<div class="hero-copy">
+<p class="eyebrow">type · match · derive · !io</p>
+<h1 class="wordmark">Dawn</h1>
+<p class="lede">一门刻意小的静态类型函数式语言。编译到 JVM 字节码，同一份源码经 GraalVM native-image 产出独立原生二进制——JVM 与 native 逐字节一致。</p>
+<div class="cta-row">
+<a class="btn btn-primary" href="tutorial/index.html">开始教程 →</a>
+<a class="btn btn-ghost" href="examples/index.html">看示例</a>
+</div>
+</div>
+<figure class="code-window">
+<figcaption class="code-window__bar"><span class="fname">main.dawn</span><span class="run">dawn run</span></figcaption>
+<pre class="dawn"><code>$hl</code></pre>
+</figure>
+</section>
+"""
+}
+
 pub fn gen_index(out: String) -> Unit !io = {
   let doc = render_doc(parsed("site/pages/index.md"), fn(u) => map_doc_url(".", u))
-  write_page("$out/index.html", page("Dawn 语言", ".", "", doc.html))
+  let body = `<main class="home">` ++ "\n" ++ hero_html() ++ "\n</main>\n" ++
+    `<section class="features">` ++ "\n" ++ doc.html ++ "\n</section>"
+  write_page("$out/index.html", shell("Dawn 语言", ".", "", body))
 }
 
 pub fn gen_spec(out: String) -> Unit !io = {
