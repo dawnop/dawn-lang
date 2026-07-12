@@ -4,7 +4,7 @@
 import { EditorView, keymap } from '@codemirror/view'
 import { EditorState } from '@codemirror/state'
 import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands'
-import { closeBrackets, completionKeymap } from '@codemirror/autocomplete'
+import { closeBrackets, completionKeymap, acceptCompletion } from '@codemirror/autocomplete'
 import { bracketMatching, indentOnInput } from '@codemirror/language'
 import { dawn } from './dawn-lang'
 import { SAMPLES } from './samples'
@@ -70,8 +70,9 @@ function mount(root: HTMLElement) {
   win.appendChild(editorHost)
   root.appendChild(win)
 
+  // Output panel stays hidden until the first run — no empty placeholder box.
   const output = el('pre', 'output dp-output')
-  output.textContent = '// 点「运行」或按 ⌘⏎ 执行'
+  output.hidden = true
   root.appendChild(output)
 
   // ---- editor ----
@@ -90,6 +91,8 @@ function mount(root: HTMLElement) {
         indentOnInput(),
         keymap.of([
           { key: 'Mod-Enter', run: () => (run(), true) },
+          // Monaco-style: Tab accepts the open completion, else indents.
+          { key: 'Tab', run: acceptCompletion },
           ...completionKeymap,
           ...defaultKeymap,
           ...historyKeymap,
@@ -109,8 +112,9 @@ function mount(root: HTMLElement) {
     if (running) return
     running = true
     runBtn.disabled = true
+    output.hidden = false
     output.dataset.phase = 'pending'
-    output.textContent = '// 运行中…'
+    output.textContent = '运行中…'
     location.replace('#' + encodeShare(currentCode()))
     try {
       const res = await fetch(endpoint, {
@@ -155,8 +159,8 @@ function mount(root: HTMLElement) {
     const s = SAMPLES[Number(picker.value)]
     if (s) {
       view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: s.code } })
+      output.hidden = true
       output.dataset.phase = ''
-      output.textContent = '// 点「运行」或按 ⌘⏎ 执行'
     }
   })
 }
