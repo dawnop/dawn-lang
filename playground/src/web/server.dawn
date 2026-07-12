@@ -9,7 +9,7 @@ use java "java.util.concurrent.Executors"
 use java "java.util.concurrent.CountDownLatch"
 use java "java.io.OutputStreamWriter"
 use java "java.lang.String"
-use web/types.{Request, Response, HttpError, http_error, error_response}
+use web/types.{Request, Response, HttpError, Handler, Middleware, http_error, error_response}
 use web/router.{Route, Dispatch, Found, NoPath, WrongMethod, dispatch}
 
 # Read the whole request body as a UTF-8 string. The byte[] is opaque and cannot
@@ -77,8 +77,7 @@ fn route_request(routes: List[Route], req: Request) -> Result[Response, HttpErro
     NoPath -> Err(http_error(404, "not found"))
     WrongMethod -> Err(http_error(405, "method not allowed"))
     Found(handler, params) -> {
-      let h = handler
-      h(Request {
+      handler(Request {
         method: req.method,
         path: req.path,
         params: params,
@@ -88,11 +87,7 @@ fn route_request(routes: List[Route], req: Request) -> Result[Response, HttpErro
     }
   }
 
-fn handle(
-  routes: List[Route],
-  middleware: List[fn(fn(Request) -> Result[Response, HttpError] !io) -> fn(Request) -> Result[Response, HttpError] !io],
-  ex: HttpExchange,
-) -> Unit !io = {
+fn handle(routes: List[Route], middleware: List[Middleware], ex: HttpExchange) -> Unit !io = {
   # first middleware in the list is outermost: [a, b] runs a(b(routing))
   let app = fold(rev(middleware), fn(req: Request) => route_request(routes, req), fn(h, m) => m(h))
   let response = match app(build_request(ex)) {
@@ -104,11 +99,7 @@ fn handle(
 
 # Start on 127.0.0.1:port and block forever (main() returning would let the
 # JVM exit out from under the request threads).
-pub fn serve_app(
-  port: Int,
-  routes: List[Route],
-  middleware: List[fn(fn(Request) -> Result[Response, HttpError] !io) -> fn(Request) -> Result[Response, HttpError] !io],
-) -> Unit !io = {
+pub fn serve_app(port: Int, routes: List[Route], middleware: List[Middleware]) -> Unit !io = {
   let addr = InetSocketAddress.new("127.0.0.1", port)
   let server = HttpServer.create(addr, 0).expect("server")
   server.createContext("/", fn(ex) => handle(routes, middleware, ex))

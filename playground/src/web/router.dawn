@@ -2,13 +2,13 @@
 # (Constructors double as the route DSL because builtin names like `get` are
 # reserved and cannot be redefined as functions.) Patterns are literal segments
 # plus `{name}` captures; matching is segment-exact.
-use web/types.{Request, Response, HttpError}
+use web/types.{Request, Response, HttpError, Handler}
 
 pub type Route =
-  | Get(pattern: String, handler: fn(Request) -> Result[Response, HttpError] !io)
-  | Post(pattern: String, handler: fn(Request) -> Result[Response, HttpError] !io)
-  | Put(pattern: String, handler: fn(Request) -> Result[Response, HttpError] !io)
-  | Delete(pattern: String, handler: fn(Request) -> Result[Response, HttpError] !io)
+  | Get(pattern: String, handler: Handler)
+  | Post(pattern: String, handler: Handler)
+  | Put(pattern: String, handler: Handler)
+  | Delete(pattern: String, handler: Handler)
 
 fn route_method(r: Route) -> String =
   match r {
@@ -26,7 +26,7 @@ fn route_pattern(r: Route) -> String =
     Delete(p, _) -> p
   }
 
-fn route_handler(r: Route) -> fn(Request) -> Result[Response, HttpError] !io =
+fn route_handler(r: Route) -> Handler =
   match r {
     Get(_, h) -> h
     Post(_, h) -> h
@@ -37,7 +37,7 @@ fn route_handler(r: Route) -> fn(Request) -> Result[Response, HttpError] !io =
 # The dispatch decision: a handler plus captured params, no path match at all,
 # or a path that exists but not under this method (404 vs 405).
 pub type Dispatch =
-  | Found(handler: fn(Request) -> Result[Response, HttpError] !io, params: Map[String, String])
+  | Found(handler: Handler, params: Map[String, String])
   | NoPath
   | WrongMethod
 
