@@ -3,7 +3,7 @@
 一门刻意小的静态类型语言：编译到 JVM 字节码，native 可执行文件由 GraalVM
 native-image 直接得到。本教程带你从第一个程序走到调 Java。
 
-> 本文所有 ```dawn 代码块都由测试机械保证能编译（`TutorialTest`）；带 `output`
+> 本文所有 `dawn` 围栏代码块都由测试机械保证能编译（`TutorialTest`）；带 `output`
 > 的块还会真的运行并核对输出。放心照抄。
 
 ---

@@ -23,6 +23,12 @@ fn dawn_files_under(path: String) -> List[String] !io =
     []
   }
 
+## main.dawn first — its header comment describes the project, and the entry
+## point is what a reader wants to see on top.
+fn main_first(files: List[String]) -> List[String] =
+  filter(files, fn(f) => ends_with(f, "/main.dawn")) ++
+  filter(files, fn(f) => not ends_with(f, "/main.dawn"))
+
 fn collect_examples() -> List[Example] !io = {
   var units: List[Example] = []
   for name in must_list("examples") {
@@ -31,7 +37,7 @@ fn collect_examples() -> List[Example] !io = {
       if name == "m4" {
         # project examples: one unit per subdirectory, sources under src/
         for sub in must_list(path) {
-          units = units ++ [Example { slug: "m4-$sub", files: dawn_files_under("$path/$sub/src") }]
+          units = units ++ [Example { slug: "m4-$sub", files: main_first(dawn_files_under("$path/$sub/src")) }]
         }
       } else {
         for f in must_list(path) {

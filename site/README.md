@@ -61,16 +61,19 @@ site/
 - [x] 刀 0：验收样张（`sample/tutorial-04.html`、`sample/spec-excerpt.html`）+ 本 README
 - [x] 刀 1：stdlib IO 补齐（`list_dir` / `is_dir`；`write_file` 自动建父目录）
 - [x] 刀 2：`dawn doc`（`##` 文档注释提取 + `--builtins` JSON）
-- [ ] 刀 3：Markdown 子集解析器（Dawn）
-- [ ] 刀 4：Dawn 语法高亮器（Dawn）
-- [ ] 刀 5：HTML 渲染 + 模板 + CSS（Dawn）
-- [ ] 刀 6：main 组装 + 全量生成 + 断链自检
-- [ ] 刀 7：验证（`dawn test` / `fmt --check` / JVM=native 逐字节）
+- [x] 刀 3：Markdown 子集解析器（Dawn）
+- [x] 刀 4：Dawn 语法高亮器（Dawn）——中途顺手给语言加了反引号 raw string（0ae0a75）
+- [x] 刀 5：HTML 渲染 + 模板 + CSS（Dawn）
+- [x] 刀 6：main 组装 + 全量生成 + 断链自检（32 页 / 318 内链）
+- [x] 刀 7：验证（31 个 test 块绿；`fmt --check` 干净；**JVM 与 native 产物逐字节一致**）
 - [ ] 刀 8：部署 `dawn-lang.dawnop.com`（nginx + 通配符证书 + redeploy.sh）
 
-## 构建与部署（占位，刀 6/8 补全）
+## 构建
 
 ```bash
-dawn run site          # 生成 site/dist/
-site/redeploy.sh       # 本地生成 + rsync 上服务器（刀 8）
+site/build.sh          # dawn doc --builtins → 清空 dist → dawn run site
+# 或手动：
+./bin/dawn doc --builtins > site/build/builtins.json
+./bin/dawn run site    # 生成 site/dist/（从仓库根运行）
+./bin/dawn test site   # 生成器测试
 ```
