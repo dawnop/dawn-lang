@@ -36,6 +36,7 @@ class Lexer(
                     c == ' ' || c == '\t' || c == '\r' -> pos++
                     c == '#' -> skipComment()
                     c == '"' -> lexString()
+                    c == '`' -> lexRawString()
                     c == '\'' -> lexChar()
                     c.isDigit() -> lexNumber()
                     c == '_' && !isIdentPart(peek(1)) -> { add(TokenType.UNDERSCORE, "_", 1) }
@@ -298,6 +299,28 @@ class Lexer(
         val span = Span(baseOffset + start, baseOffset + pos)
         tokens.add(Token(TokenType.STRING, src.substring(start, pos), span,
             segments = stripTripleIndent(segments)))
+    }
+
+    /**
+     * Raw string: `...` (spec §1.6). Everything between the backticks is
+     * literal — no escapes, no interpolation, newlines allowed, nothing
+     * stripped. A raw string cannot contain a backtick (use "..." for that);
+     * there is deliberately no escape hatch, so what you see is the value.
+     */
+    private fun lexRawString() {
+        val start = pos
+        pos++ // opening backtick
+        val textStart = pos
+        while (pos < src.length && src[pos] != '`') pos++
+        if (pos >= src.length) {
+            throw DawnError("unterminated raw string", spanAt(start, 1),
+                "raw strings run to the next backtick; they cannot contain one")
+        }
+        val content = src.substring(textStart, pos)
+        pos++ // closing backtick
+        val span = Span(baseOffset + start, baseOffset + pos)
+        val segments = if (content.isEmpty()) emptyList() else listOf(StrSegment.Text(content))
+        tokens.add(Token(TokenType.STRING, src.substring(start, pos), span, segments = segments))
     }
 
     /** Strip the leading/trailing newlines and the common indentation (spec §1.6). */

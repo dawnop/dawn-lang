@@ -286,6 +286,20 @@ pub fn main() -> Unit !io = {
 a - b - c
 ```
 
+字符串有三种写法，死角互补：双引号 `"..."` 支持转义与 `$` 插值；三引号 `"""` 跨行、
+剥公共缩进、引号免转义（插值照常）；**反引号 `` `...` `` 是 raw string**——无转义、
+无插值、可跨行，写正则、代码样本、HTML 片段所见即值（唯一限制：内容不能含反引号）：
+
+```dawn
+pub fn main() -> Unit !io = {
+  println(`"quotes" and $dollar and \n stay literal`)
+}
+```
+
+```output
+"quotes" and $dollar and \n stay literal
+```
+
 `parse_int` 把字符串转成 `Option[Int]`（失败是 `None`，不是异常）：
 
 ```dawn
