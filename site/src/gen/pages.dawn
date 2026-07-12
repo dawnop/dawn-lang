@@ -3,7 +3,7 @@
 use md/ast.{Block}
 use md/parser.{parse}
 use html/render.{render_doc}
-use html/page.{page, page_with_toc, shell}
+use html/page.{page, page_with_toc, shell, shell_ext}
 use hl/dawn.{highlight_dawn}
 use gen/common.{must_read, write_page, map_doc_url}
 
@@ -13,8 +13,25 @@ fn parsed(path: String) -> List[Block] !io =
     Err(e) -> panic("$path: $e")
   }
 
-pub fn gen_assets(out: String) -> Unit !io =
+pub fn gen_assets(out: String) -> Unit !io = {
   write_page("$out/assets/style.css", trim(must_read("site/assets/style.css")))
+  # Vendor the Playground editor bundle (built from site/play-ui). Copy it if
+  # present; otherwise write placeholders so the link checker still passes and
+  # the rest of the site builds — the Playground page just won't have an editor.
+  copy_or_stub("site/play-ui/dist/playground.js", "$out/assets/playground.js",
+    "console.warn('dawn-play: editor bundle missing; run site/play-ui build')")
+  copy_or_stub("site/play-ui/dist/playground.css", "$out/assets/playground.css",
+    "/* dawn-play: editor bundle missing */")
+}
+
+fn copy_or_stub(src: String, dst: String, stub: String) -> Unit !io =
+  match read_file(src) {
+    Ok(bytes) -> write_page(dst, bytes)
+    Err(_) -> {
+      println("  warning: $src missing — writing placeholder $dst")
+      write_page(dst, stub)
+    }
+  }
 
 fn hero_html() -> String !io = {
   let hl = highlight_dawn(trim(must_read("site/pages/hero.dawn")))
@@ -84,7 +101,13 @@ pub fn gen_design(out: String) -> Unit !io = {
 }
 
 pub fn gen_playground(out: String) -> Unit !io = {
-  let body = "<h1>Playground</h1>\n" ++
-    `<p>在线运行 Dawn 代码的沙箱在二期路线图上。现在可以把<a href="examples/index.html">示例</a>克隆下来，用 <code>dawn run</code> 直接跑。</p>`
-  write_page("$out/playground.html", page("Playground — Dawn", ".", "playground", body))
+  let intro = `<h1>Playground</h1>` ++ "\n" ++
+    `<p>直接在浏览器里写 Dawn，点<b>运行</b>（或按 <kbd>⌘⏎</kbd>）在服务器上编译执行，输出即时回显。每次运行都在一次性沙箱里跑，断网、限时、限内存。</p>`
+  let mount = `<div id="dawn-playground" data-endpoint="/api/run"></div>`
+  let body = `<main class="content">` ++ "\n" ++ intro ++ "\n" ++ mount ++ "\n</main>"
+  # the editor bundle (built from site/play-ui, copied into assets by build.sh)
+  let head = `<link rel="stylesheet" href="./assets/playground.css">` ++ "\n" ++
+    `<script type="module" src="./assets/playground.js"></script>`
+  write_page("$out/playground.html",
+    shell_ext("Playground — Dawn", ".", "playground", head, body))
 }
