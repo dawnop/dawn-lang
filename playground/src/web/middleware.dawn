@@ -1,0 +1,34 @@
+# Middleware are plain handler transformers:
+#   fn(handler) -> handler
+# composed by serve_app with the first element outermost. No registry, no
+# annotations — wrapping a function is the whole mechanism.
+use java "java.lang.System"
+use web/types.{Request, Response, HttpError}
+
+# One access-log line per request: method, path, status, wall time.
+pub fn with_logging(
+  next: fn(Request) -> Result[Response, HttpError] !io,
+) -> fn(Request) -> Result[Response, HttpError] !io =
+  fn(req) => {
+    let started = System.nanoTime()
+    let out = next(req)
+    let ms = (System.nanoTime() - started) / 1000000
+    let status = match out {
+      Ok(r) -> r.status
+      Err(e) -> e.status
+    }
+    println("${req.method} ${req.path} -> $status (${ms}ms)")
+    out
+  }
+
+# Reject bodies over a byte budget before the handler sees them.
+pub fn with_body_limit(
+  limit: Int,
+  next: fn(Request) -> Result[Response, HttpError] !io,
+) -> fn(Request) -> Result[Response, HttpError] !io =
+  fn(req) =>
+    if str_len(req.body) > limit {
+      Err(HttpError { status: 413, message: "request body exceeds $limit bytes" })
+    } else {
+      next(req)
+    }

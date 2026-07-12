@@ -1,0 +1,134 @@
+# Routes are data — literally an ADT: `Get("/api/articles/{slug}", handler)`.
+# (Constructors double as the route DSL because builtin names like `get` are
+# reserved and cannot be redefined as functions.) Patterns are literal segments
+# plus `{name}` captures; matching is segment-exact.
+use web/types.{Request, Response, HttpError}
+
+pub type Route =
+  | Get(pattern: String, handler: fn(Request) -> Result[Response, HttpError] !io)
+  | Post(pattern: String, handler: fn(Request) -> Result[Response, HttpError] !io)
+  | Put(pattern: String, handler: fn(Request) -> Result[Response, HttpError] !io)
+  | Delete(pattern: String, handler: fn(Request) -> Result[Response, HttpError] !io)
+
+fn route_method(r: Route) -> String =
+  match r {
+    Get(_, _) -> "GET"
+    Post(_, _) -> "POST"
+    Put(_, _) -> "PUT"
+    Delete(_, _) -> "DELETE"
+  }
+
+fn route_pattern(r: Route) -> String =
+  match r {
+    Get(p, _) -> p
+    Post(p, _) -> p
+    Put(p, _) -> p
+    Delete(p, _) -> p
+  }
+
+fn route_handler(r: Route) -> fn(Request) -> Result[Response, HttpError] !io =
+  match r {
+    Get(_, h) -> h
+    Post(_, h) -> h
+    Put(_, h) -> h
+    Delete(_, h) -> h
+  }
+
+# The dispatch decision: a handler plus captured params, no path match at all,
+# or a path that exists but not under this method (404 vs 405).
+pub type Dispatch =
+  | Found(handler: fn(Request) -> Result[Response, HttpError] !io, params: Map[String, String])
+  | NoPath
+  | WrongMethod
+
+fn segs(p: String) -> List[String] = filter(split(p, "/"), fn(s) => s != "")
+
+fn is_capture(seg: String) -> Bool =
+  starts_with(seg, "{") && ends_with(seg, "}") && str_len(seg) > 2
+
+fn capture_name(seg: String) -> String = substring(seg, 1, str_len(seg) - 1)
+
+# Match one pattern against one path; Some(captures) on success.
+pub fn match_path(pattern: String, path: String) -> Option[List[(String, String)]] = {
+  let ps = segs(pattern)
+  let xs = segs(path)
+  if len(ps) != len(xs) { None } else { match_from(ps, xs, 0, []) }
+}
+
+fn match_from(
+  ps: List[String],
+  xs: List[String],
+  i: Int,
+  acc: List[(String, String)],
+) -> Option[List[(String, String)]] =
+  if i == len(ps) {
+    Some(acc)
+  } else {
+    let p = expect(get(ps, i), "pattern segment")
+    let x = expect(get(xs, i), "path segment")
+    if is_capture(p) {
+      match_from(ps, xs, i + 1, acc ++ [(capture_name(p), x)])
+    } else if p == x {
+      match_from(ps, xs, i + 1, acc)
+    } else {
+      None
+    }
+  }
+
+# Pick the route for (method, path). First match in table order wins.
+pub fn dispatch(routes: List[Route], method: String, path: String) -> Dispatch =
+  dispatch_from(routes, method, path, 0, false)
+
+fn dispatch_from(routes: List[Route], method: String, path: String, i: Int, path_seen: Bool) -> Dispatch =
+  if i == len(routes) {
+    if path_seen { WrongMethod } else { NoPath }
+  } else {
+    let r = expect(get(routes, i), "route")
+    match match_path(route_pattern(r), path) {
+      None -> dispatch_from(routes, method, path, i + 1, path_seen)
+      Some(caps) ->
+        if route_method(r) == method {
+          Found(route_handler(r), map_from(caps))
+        } else {
+          dispatch_from(routes, method, path, i + 1, true)
+        }
+    }
+  }
+
+test "literal and capture segments match" {
+  assert match_path("/health", "/health") == Some([])
+  assert match_path("/api/articles/{slug}", "/api/articles/dawn-lang") ==
+    Some([("slug", "dawn-lang")])
+  assert match_path("/a/{x}/b/{y}", "/a/1/b/2") == Some([("x", "1"), ("y", "2")])
+}
+
+test "mismatches: wrong literal, wrong depth, empty capture name" {
+  assert match_path("/health", "/nope") == None
+  assert match_path("/a/{x}", "/a") == None
+  assert match_path("/a", "/a/b") == None
+  # `{}` is not a capture, it is a literal segment
+  assert match_path("/a/{}", "/a/zzz") == None
+}
+
+test "trailing slash is tolerated" {
+  assert match_path("/health", "/health/") == Some([])
+}
+
+fn dummy(req: Request) -> Result[Response, HttpError] !io =
+  Ok(Response { status: 200, content_type: "text/plain", body: "" })
+
+test "dispatch: found, 404, and 405 are distinguished" {
+  let routes = [Get("/a/{id}", dummy), Post("/run", dummy)]
+  match dispatch(routes, "GET", "/a/7") {
+    Found(_, params) -> { assert map_get(params, "id") == Some("7") }
+    _ -> { assert false }
+  }
+  match dispatch(routes, "GET", "/nope") {
+    NoPath -> { assert true }
+    _ -> { assert false }
+  }
+  match dispatch(routes, "GET", "/run") {
+    WrongMethod -> { assert true }
+    _ -> { assert false }
+  }
+}

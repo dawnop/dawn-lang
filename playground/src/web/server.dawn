@@ -1,0 +1,127 @@
+# The server: jdk.httpserver underneath (spec §9 interop), one virtual thread
+# per request, a single root context that parses the exchange into a Request,
+# routes it, and writes the Response back. nginx terminates TLS and everything
+# hard in front — this only speaks HTTP/1.1.
+use java "com.sun.net.httpserver.HttpServer"
+use java "com.sun.net.httpserver.HttpExchange"
+use java "java.net.InetSocketAddress"
+use java "java.util.concurrent.Executors"
+use java "java.util.concurrent.CountDownLatch"
+use java "java.io.OutputStreamWriter"
+use java "java.lang.String"
+use web/types.{Request, Response, HttpError, http_error, error_response}
+use web/router.{Route, Dispatch, Found, NoPath, WrongMethod, dispatch}
+
+# Read the whole request body as a UTF-8 string. The byte[] is opaque and cannot
+# cross a Dawn function boundary (spec §9.5 — arrays are not nameable), so it is
+# consumed inline: read it, hand it straight to String.new.
+fn read_body(ex: HttpExchange) -> String !io = {
+  let stream = ex.getRequestBody().expect("request body")
+  let bytes = stream.readAllBytes().expect("request bytes")
+  String.new(bytes, "UTF-8")
+}
+
+# Write a response. Length 0 selects chunked transfer encoding, so we never
+# need the byte count up front; the Writer handles UTF-8.
+fn write_response(ex: HttpExchange, r: Response) -> Unit !io = {
+  let headers = ex.getResponseHeaders().expect("response headers")
+  headers.set("Content-Type", r.content_type)
+  ex.sendResponseHeaders(r.status, 0)
+  let out = ex.getResponseBody().expect("response body")
+  let writer = OutputStreamWriter.new(out, "UTF-8")
+  writer.write(r.body)
+  writer.flush()
+  writer.close()
+  ex.close()
+}
+
+# "a=1&b=x" -> [("a","1"),("b","x")]. URI.getQuery() hands us the string
+# already percent-decoded; a value may itself contain '=', so only the first
+# one splits.
+pub fn parse_query(q: String) -> List[(String, String)] =
+  map(filter(split(q, "&"), fn(pair) => pair != ""), fn(pair) => {
+    let parts = split(pair, "=")
+    let key = expect(get(parts, 0), "key")
+    (key, join(tail(parts), "="))
+  })
+
+fn tail(xs: List[String]) -> List[String] =
+  map(range(1, len(xs)), fn(i) => expect(get(xs, i), "tail"))
+
+# reversed copy by index (an empty-list fold seed cannot name T in a local
+# annotation yet — language gap G3, see docs/design.md)
+fn rev[T](xs: List[T]) -> List[T] =
+  map(range(0, len(xs)), fn(i) => expect(get(xs, len(xs) - 1 - i), "rev"))
+
+fn build_request(ex: HttpExchange) -> Request !io = {
+  let uri = ex.getRequestURI().expect("uri")
+  let no_query: Map[String, String] = map_from([])
+  let q = match uri.getQuery() {
+    Some(s) -> map_from(parse_query(s))
+    None -> no_query
+  }
+  Request {
+    method: ex.getRequestMethod().expect("method"),
+    path: uri.getPath().expect("path"),
+    params: no_query,
+    query: q,
+    body: read_body(ex),
+  }
+}
+
+# The routing core, itself shaped like a handler so middleware can wrap it —
+# a logging middleware sees 404s and 405s too. The matched route's captures
+# are injected as a fresh Request (records are immutable).
+fn route_request(routes: List[Route], req: Request) -> Result[Response, HttpError] !io =
+  match dispatch(routes, req.method, req.path) {
+    NoPath -> Err(http_error(404, "not found"))
+    WrongMethod -> Err(http_error(405, "method not allowed"))
+    Found(handler, params) -> {
+      let h = handler
+      h(Request {
+        method: req.method,
+        path: req.path,
+        params: params,
+        query: req.query,
+        body: req.body,
+      })
+    }
+  }
+
+fn handle(
+  routes: List[Route],
+  middleware: List[fn(fn(Request) -> Result[Response, HttpError] !io) -> fn(Request) -> Result[Response, HttpError] !io],
+  ex: HttpExchange,
+) -> Unit !io = {
+  # first middleware in the list is outermost: [a, b] runs a(b(routing))
+  let app = fold(rev(middleware), fn(req: Request) => route_request(routes, req), fn(h, m) => m(h))
+  let response = match app(build_request(ex)) {
+    Ok(r) -> r
+    Err(e) -> error_response(e)
+  }
+  write_response(ex, response)
+}
+
+# Start on 127.0.0.1:port and block forever (main() returning would let the
+# JVM exit out from under the request threads).
+pub fn serve_app(
+  port: Int,
+  routes: List[Route],
+  middleware: List[fn(fn(Request) -> Result[Response, HttpError] !io) -> fn(Request) -> Result[Response, HttpError] !io],
+) -> Unit !io = {
+  let addr = InetSocketAddress.new("127.0.0.1", port)
+  let server = HttpServer.create(addr, 0).expect("server")
+  server.createContext("/", fn(ex) => handle(routes, middleware, ex))
+  server.setExecutor(Executors.newVirtualThreadPerTaskExecutor().expect("executor"))
+  server.start()
+  println("listening on http://127.0.0.1:$port")
+  let latch = CountDownLatch.new(1)
+  latch.await()
+}
+
+test "query strings parse, including empty and embedded =" {
+  assert parse_query("a=1&b=x") == [("a", "1"), ("b", "x")]
+  assert parse_query("") == []
+  assert parse_query("k=a=b") == [("k", "a=b")]
+  assert parse_query("flag") == [("flag", "")]
+}

@@ -1,9 +1,12 @@
 # dawn-play: the Dawn Playground runner. Receives source over HTTP, compiles and
-# runs it inside a throwaway sandbox, streams back the output. This is the first
-# real server written in Dawn (spec §9 interop dogfood, M6 warm-up).
-use java "com.sun.net.httpserver.HttpExchange"
+# runs it inside a throwaway sandbox, streams back the output. The first real
+# server written in Dawn (spec §9 interop dogfood, M6 warm-up) — and the first
+# service on the `web` framework, which it doubles as the acceptance test for.
 use java "java.util.concurrent.Semaphore"
-use http/server.{serve, respond, read_body, request_method}
+use web/types.{Request, Response, HttpError, text, raw}
+use web/router.{Route, Get, Post}
+use web/server.{serve_app}
+use web/middleware.{with_logging}
 use play/contract.{parse_request, render_outcome, render_check, render_error}
 use play/exec.{execute, check}
 use play/gate.{new_gate, try_enter, leave}
@@ -17,29 +20,24 @@ const QUEUE_WAIT_SECS: Int = 15
 # client just keeps its previous squiggles and retries on the next pause.
 const CHECK_WAIT_SECS: Int = 2
 
-fn handle_health(ex: HttpExchange) -> Unit !io =
-  respond(ex, 200, "text/plain; charset=utf-8", "ok")
+fn health(req: Request) -> Result[Response, HttpError] !io = Ok(text(200, "ok"))
 
-# Shared shell for /run and /check: same body parsing and gate, different
-# executor and queue patience.
-fn handle_rpc(ex: HttpExchange, gate: Semaphore, check_only: Bool) -> Unit !io =
-  if request_method(ex) != "POST" {
-    respond(ex, 405, JSON_CT, render_error("POST only"))
+# Shared core of /run and /check: same body parsing and gate, different
+# executor and queue patience. The wire format predates the framework, so
+# errors are rendered into the contract's own JSON shapes (via raw), not the
+# framework's Err branch.
+fn rpc(req: Request, gate: Semaphore, check_only: Bool) -> Result[Response, HttpError] !io =
+  if str_len(req.body) > MAX_BODY {
+    Ok(raw(413, JSON_CT, render_error("source exceeds ${MAX_BODY} bytes")))
   } else {
-    let body = read_body(ex)
-    if str_len(body) > MAX_BODY {
-      respond(ex, 413, JSON_CT, render_error("source exceeds ${MAX_BODY} bytes"))
-    } else {
-      match parse_request(body) {
-        Err(msg) -> respond(ex, 400, JSON_CT, render_error(msg))
-        Ok(code) -> {
-          let wait = if check_only { CHECK_WAIT_SECS } else { QUEUE_WAIT_SECS }
-          if try_enter(gate, wait) {
-            let out = run_guarded(gate, code, check_only)
-            respond(ex, 200, JSON_CT, out)
-          } else {
-            respond(ex, 429, JSON_CT, render_error("server busy, try again shortly"))
-          }
+    match parse_request(req.body) {
+      Err(msg) -> Ok(raw(400, JSON_CT, render_error(msg)))
+      Ok(code) -> {
+        let wait = if check_only { CHECK_WAIT_SECS } else { QUEUE_WAIT_SECS }
+        if try_enter(gate, wait) {
+          Ok(raw(200, JSON_CT, run_guarded(gate, code, check_only)))
+        } else {
+          Ok(raw(429, JSON_CT, render_error("server busy, try again shortly")))
         }
       }
     }
@@ -54,9 +52,9 @@ fn run_guarded(gate: Semaphore, code: String, check_only: Bool) -> String !io = 
 
 pub fn main() -> Unit !io = {
   let gate = new_gate(MAX_CONCURRENT)
-  serve(port(), [
-    ("/health", handle_health),
-    ("/run", fn(ex) => handle_rpc(ex, gate, false)),
-    ("/check", fn(ex) => handle_rpc(ex, gate, true)),
-  ])
+  serve_app(port(), [
+    Get("/health", health),
+    Post("/run", fn(req) => rpc(req, gate, false)),
+    Post("/check", fn(req) => rpc(req, gate, true)),
+  ], [with_logging])
 }

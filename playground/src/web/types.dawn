@@ -1,0 +1,91 @@
+# The web framework's wire types. A handler is
+#   fn(Request) -> Result[Response, HttpError] !io
+# — the Ok branch is a rendered response, the Err branch is mapped to an HTTP
+# status by the server (JSON body {"error": message}). No exceptions anywhere:
+# panics are bugs, expected failures travel in Result.
+use json/value.{Json, JStr, JObj}
+use json/render.{render}
+
+pub type Request = {
+  method: String,
+  path: String,
+  params: Map[String, String],
+  query: Map[String, String],
+  body: String,
+} derive Show
+
+pub type Response = {
+  status: Int,
+  content_type: String,
+  body: String,
+} derive Show
+
+pub type HttpError = { status: Int, message: String } derive Show
+
+pub fn http_error(status: Int, message: String) -> HttpError =
+  HttpError { status: status, message: message }
+
+# ---- response constructors ----
+
+pub fn text(status: Int, body: String) -> Response =
+  Response { status: status, content_type: "text/plain; charset=utf-8", body: body }
+
+pub fn json_response(status: Int, j: Json) -> Response =
+  Response { status: status, content_type: "application/json; charset=utf-8", body: render(j) }
+
+pub fn json_ok(j: Json) -> Response = json_response(200, j)
+
+# A raw pre-rendered body (any content type) — escape hatch for services with
+# their own wire format.
+pub fn raw(status: Int, content_type: String, body: String) -> Response =
+  Response { status: status, content_type: content_type, body: body }
+
+# The server's rendering of the Err branch and of its own 404/405.
+pub fn error_response(e: HttpError) -> Response =
+  json_response(e.status, JObj(map_from([("error", JStr(e.message))])))
+
+# ---- request accessors ----
+
+# A path parameter captured by a `{name}` pattern segment. Missing means the
+# route table and the handler disagree — a programming error, hence 500.
+pub fn param(req: Request, name: String) -> Result[String, HttpError] =
+  match map_get(req.params, name) {
+    Some(v) -> Ok(v)
+    None -> Err(http_error(500, "missing path parameter: $name"))
+  }
+
+pub fn param_int(req: Request, name: String) -> Result[Int, HttpError] = {
+  let raw = param(req, name)?
+  match parse_int(raw) {
+    Some(n) -> Ok(n)
+    None -> Err(http_error(400, "path parameter $name must be an integer"))
+  }
+}
+
+pub fn query(req: Request, name: String) -> Option[String] = map_get(req.query, name)
+
+test "param reads captures and flags missing ones" {
+  let q: Map[String, String] = map_empty()
+  let req = Request {
+    method: "GET", path: "/a/42",
+    params: map_from([("id", "42")]), query: q, body: "",
+  }
+  assert param(req, "id") == Ok("42")
+  assert param_int(req, "id") == Ok(42)
+  match param(req, "nope") {
+    Err(e) -> { assert e.status == 500 }
+    Ok(_) -> { assert false }
+  }
+}
+
+test "param_int rejects non-numbers as a client error" {
+  let q: Map[String, String] = map_empty()
+  let req = Request {
+    method: "GET", path: "/a/x",
+    params: map_from([("id", "x")]), query: q, body: "",
+  }
+  match param_int(req, "id") {
+    Err(e) -> { assert e.status == 400 }
+    Ok(_) -> { assert false }
+  }
+}
