@@ -60,7 +60,7 @@ function mount(root: HTMLElement) {
   })
   const runBtn = el('button', 'dp-run')
   runBtn.type = 'button'
-  runBtn.innerHTML = '运行 <kbd>⌘⏎</kbd>'
+  runBtn.innerHTML = 'Run <kbd>⌘⏎</kbd>'
   tools.appendChild(picker)
   tools.appendChild(runBtn)
   bar.appendChild(tools)
@@ -114,7 +114,7 @@ function mount(root: HTMLElement) {
     runBtn.disabled = true
     output.hidden = false
     output.dataset.phase = 'pending'
-    output.textContent = '运行中…'
+    output.textContent = 'Running…'
     location.replace('#' + encodeShare(currentCode()))
     try {
       const res = await fetch(endpoint, {
@@ -123,14 +123,14 @@ function mount(root: HTMLElement) {
         body: JSON.stringify({ code: currentCode() }),
       })
       if (res.status === 429) {
-        render({ ok: false, phase: 'error', output: '服务器繁忙，请稍后重试' })
+        render({ ok: false, phase: 'error', output: 'Server busy — try again shortly' })
       } else if (res.status === 413) {
-        render({ ok: false, phase: 'error', output: '代码过长' })
+        render({ ok: false, phase: 'error', output: 'Source too long' })
       } else {
         render((await res.json()) as RunResponse)
       }
     } catch {
-      render({ ok: false, phase: 'error', output: '无法连接到运行服务' })
+      render({ ok: false, phase: 'error', output: 'Could not reach the run service' })
     } finally {
       running = false
       runBtn.disabled = false
@@ -139,16 +139,16 @@ function mount(root: HTMLElement) {
 
   function render(r: RunResponse) {
     output.dataset.phase = r.phase
-    const body = r.output || '(无输出)'
+    const body = r.output || '(no output)'
     if (r.phase === 'run') {
       const ms = r.ms != null ? ` · ${r.ms}ms` : ''
       const code = r.exit != null ? ` · exit ${r.exit}` : ''
-      output.textContent = body + `\n\n— 运行结束${code}${ms}` +
-        (r.truncated ? '（输出已截断）' : '')
+      output.textContent = body + `\n\n— done${code}${ms}` +
+        (r.truncated ? ' (output truncated)' : '')
     } else if (r.phase === 'compile') {
       output.textContent = body
     } else if (r.phase === 'timeout') {
-      output.textContent = body + '\n\n— 超时终止'
+      output.textContent = body + '\n\n— timed out'
     } else {
       output.textContent = body
     }
