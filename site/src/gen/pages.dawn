@@ -1,5 +1,7 @@
 # The single-document pages: index, spec, design, playground, plus assets.
 
+use java "java.io.FileInputStream"
+use java "java.io.FileOutputStream"
 use md/ast.{Block}
 use md/parser.{parse}
 use html/render.{render_doc}
@@ -13,8 +15,24 @@ fn parsed(path: String) -> List[Block] !io =
     Err(e) -> panic("$path: $e")
   }
 
+# Byte-for-byte copy for binary assets (icons). read_file/write_file are
+# UTF-8 string APIs and would corrupt PNG/ICO bytes.
+fn copy_bin(src: String, dst: String) -> Unit !io = {
+  let i = FileInputStream.new(src)
+  let o = FileOutputStream.new(dst)
+  i.transferTo(o)
+  i.close()
+  o.close()
+  ()
+}
+
 pub fn gen_assets(out: String) -> Unit !io = {
   write_page("$out/assets/style.css", trim(must_read("site/assets/style.css")))
+  # the dawn-sunrise mark: favicon + touch icon (doubles as the nav brand
+  # mark) + og:image (links emitted by html/page)
+  for f in ["favicon.ico", "apple-touch-icon.png", "logo-512.png"] {
+    copy_bin("site/assets/$f", "$out/assets/$f")
+  }
   # Vendor the Playground editor bundle (built from site/play-ui). Copy it if
   # present; otherwise write placeholders so the link checker still passes and
   # the rest of the site builds — the Playground page just won't have an editor.
