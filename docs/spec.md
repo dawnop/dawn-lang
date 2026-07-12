@@ -508,21 +508,88 @@ fn build() -> String !io = {
 
 **Java 返回引用类型一律为 `Option[T]`**——null 在边界处被拦下。
 基本类型返回值不包 Option；`short`/`byte`/`int` 返回自动加宽为 `Int`，`float` 加宽为
-`Float`。`char` 与数组的出入参 v0.1 不支持。**Option 实参传 null** 同样推迟
-（v0.1 无法从 Dawn 侧传 null 给 Java）。
+`Float`。`char` 出入参 v0.1 不支持；数组走不透明直通（§9.5）。**Option 实参传 null**
+同样推迟（v0.1 无法从 Dawn 侧传 null 给 Java）。
 
 ### 9.3 重载消解
 
 按"实参个数 + 静态类型"打分选唯一候选（精确匹配 `long`/`double` 优于收窄到
 `int`/`float`，`String` 优于 `CharSequence`/`Object`）；并列最高分或无候选都是
-编译错误（错误信息列出候选签名）。变长参数方法只支持**不传可变部分**的调用
+编译错误（错误信息列出候选签名）。函数值实参只匹配函数式接口形参（§9.4）；
+Dawn `List` 实参可匹配 `List`/`Collection`/`Iterable` 形参（§9.6）；数组实参精确匹配
+优于宽化到 `Object`（§9.5）。变长参数方法只支持**不传可变部分**的调用
 （自动补一个空数组，如 `Path.of(p)`）；传可变实参 v0.1 不支持。
 
-### 9.4 限制
+### 9.4 SAM 转换：函数值跨边界
 
-不能继承 Java 类、不能实现 Java 接口、不能把 Dawn 函数作为
-lambda 传给 Java（v0.1；这是为 native-image 免配置保留的边界）。
-需要回调的场景请在 Dawn 侧轮询或用标准库封装。
+```dawn
+use java "java.util.ArrayList"
+
+fn drop_empty() -> Unit !io = {
+  let xs = ArrayList.new()
+  xs.add("a")
+  xs.add("")
+  xs.removeIf(fn(s) => str_len(s) == 0)   # Dawn lambda → java.util.function.Predicate
+  ()
+}
+```
+
+- Java 形参是**函数式接口**（interface 且恰有一个抽象方法，`Object` 的公共方法不计）时，
+  实参可传 Dawn 函数值——lambda、命名函数、构造器值均可。仅限接口；单抽象方法的
+  **抽象类**不支持（实现经 LambdaMetafactory，构建期展开，native-image 零配置）。
+- **匹配**：SAM 方法签名按 §9.2 映射成 Dawn 函数类型后做常规匹配；lambda 的参数类型
+  可从形参播种（与泛型实参推导同一机制）。重载打分时函数值只匹配函数式接口形参。
+- **效果不设限**：纯函数、`!io` 函数、效果变量函数都可传出。效果系统不追踪 Java 侧
+  何时调用——Java 可能在任意线程、任意时刻（包括本次调用返回之后）调用该函数值。
+  这不破坏纯度契约：Java 代码只可能在 Dawn 的 `!io` 调用之下、或无 Dawn 栈的
+  Java 线程上运行，任何纯函数的签名承诺都未被违反。
+- **参数的 null 边界**：回调的引用类型参数**不包 `Option`**，以 `T` 直达；桥接层逐参
+  检查，Java 传入 null 立即 panic（消息指明回调边界）。与返回值包 `Option`（§9.2）
+  互补：返回位置的 null 是常态故进类型，回调参数的 null 属病态故 fail-fast。
+- **返回值收窄**：SAM 方法要 `int`/`float` 而 Dawn 函数返回 `Int`/`Float` 时做**检查性
+  收窄**，超出范围 panic，不静默截断。
+- Dawn 函数在回调中 panic，按 `RuntimeException` 传给 Java 调用方，不捕获不包装。
+
+### 9.5 数组：不透明直通
+
+数组值与未导入的引用类同待遇（§9.1）：可**接收、持有、传参**——重载打分按数组类型
+精确匹配，或宽化到 `Object`；返回位置照 §9.2 包 `Option`。但数组**不可命名**（签名里
+写不出该类型）、**不可创建、不可索引**；要长度用 `use java "java.lang.reflect.Array"`
+的 `Array.getLength(a)`。
+
+```dawn
+use java "java.lang.String"
+use java "java.nio.file.Files"
+use java "java.nio.file.Path"
+
+fn slurp(p: String) -> String !io = {
+  let bytes = Files.readAllBytes(Path.of(p)).expect("readable")   # byte[]，不透明
+  String.new(bytes, "UTF-8")
+}
+```
+
+### 9.6 List 桥接：Dawn `List` 直达集合形参
+
+Java 形参声明为 `java.util.List` / `java.util.Collection` / `java.lang.Iterable` 时，
+实参可传 Dawn `List[T]`。**零拷贝**：桥接处套一层不可变视图
+（`Collections.unmodifiableList`），Java 侧的变异方法抛
+`UnsupportedOperationException`——同 Scala `asJava` / Clojure 持久集合的约定。
+
+- 元素类型 `T` 限：`Int` / `Float` / `Bool` / `String` / 已导入或不透明的引用类。
+  元素是 `List`/`Map`/`Set`/ADT/元组/record/函数值时拒绝（编译错误）——嵌套容器
+  零拷贝会泄漏内层可变性，v0.1 不做深包装。
+- 元素按 §9.2 的装箱表示直达（`Int` → `java.lang.Long`）。泛型擦除意味着期待
+  `List<Integer>` 的 API 会在取用时 `ClassCastException`，v0.1 不救，选 API 时留意。
+- 方向仅 Dawn → Java；Java 返回的集合仍是不透明引用 + `Option`（§9.2），可链式调用。
+  `Map`/`Set` 桥接 v0.1 未提供。
+
+### 9.7 限制
+
+不能继承 Java 类；不能以**命名类**形式实现 Java 接口——函数值经 SAM 转换（§9.4）
+传出是唯一路径。静态字段 v0.1 不支持（枚举与常量走 `TimeUnit.valueOf("SECONDS")`、
+`Charset.forName("UTF-8")` 这类静态方法绕行）。数组不可创建/索引/命名（§9.5）；
+`Map`/`Set` 不桥接、Java 集合不反向转换为 Dawn 值（§9.6）。变长参数只支持不传
+可变部分（§9.3）；`Option` 实参传 null 不支持（§9.2）。
 
 ---
 
