@@ -36,6 +36,15 @@ class Checker(
     private val typeAliases = HashMap<String, AliasInfo>()
     private val ctors = HashMap<String, CtorInfo>()
 
+    /** traits visible here: prelude + selectively imported + locally declared */
+    private val traitsByName = HashMap<String, TraitInfo>()
+    /** traits declared in this module (the exportable subset) */
+    private val localTraits = LinkedHashMap<String, TraitInfo>()
+    /** impls declared in this module */
+    private val localImpls = ArrayList<ImplInfo>()
+    /** the program-wide impl view: prelude + every previously-checked module + local */
+    private val implTable = HashMap<Pair<TraitInfo, Type>, ImplInfo>()
+
     /** whole-module imports: alias (last path segment) → that module's exports (spec §10.2) */
     private val moduleAliases = HashMap<String, ModuleExports>()
     /** selectively-imported names → the module path they came from (for conflict messages) */
@@ -52,6 +61,10 @@ class Checker(
     /** user-defined types by name */
     val types: Map<String, AdtInfo> get() = adts
     val aliases: Map<String, AliasInfo> get() = typeAliases
+    /** traits declared in this module */
+    val declaredTraits: Map<String, TraitInfo> get() = localTraits
+    /** impls declared in this module */
+    val declaredImpls: List<ImplInfo> get() = localImpls
 
     /** effects used by the body currently being checked (Io and/or effect variables) */
     private var usedEffects = HashSet<Eff>()
@@ -87,11 +100,16 @@ class Checker(
     private var inTest = false
 
     fun check() {
-        // 0. prelude: Option/Result and their constructors
+        // 0. prelude: Option/Result and their constructors; prelude traits/impls
         for (info in PRELUDE_ADTS) {
             adts[info.name] = info
             for (c in info.ctors) ctors[c.name] = c
         }
+        for (t in PRELUDE_TRAITS) {
+            traitsByName[t.name] = t
+            for (m in t.methods.values) fns[m.sig.name] = m.sig
+        }
+        for (i in PRELUDE_IMPLS) implTable[i.trait to i.subject] = i
         // 0.5. java imports (spec §9): resolved by reflection on the compiler's JVM
         for (d in module.javaUses) {
             val cls = try {
@@ -199,6 +217,9 @@ class Checker(
                     )
             }
         }
+        // 2.75. traits and impls: headers + method signatures + coherence/orphan checks
+        registerTraits()
+        registerImpls()
         // 3. function signatures
         for (d in module.fns) {
             if (d.typeParams.map { it.name }.toSet().size != d.typeParams.size)
@@ -219,6 +240,7 @@ class Checker(
                 typeParams = tvars,
                 nameSpan = d.nameSpan,
                 inferring = inferring,
+                constraints = resolveBounds(d.typeParams),
             )
             sig.owner = ownerClass
             sig.srcPath = srcPath
@@ -229,8 +251,14 @@ class Checker(
                 importedNames.containsKey(d.name) -> importClash(d.name, d.nameSpan, "function")
                 BUILTINS.containsKey(d.name) ->
                     sink.error("`${d.name}` is a builtin function and cannot be redefined", d.nameSpan)
-                fns.containsKey(d.name) ->
-                    sink.error("function `${d.name}` is defined twice", d.nameSpan)
+                fns.containsKey(d.name) -> {
+                    val prev = fns[d.name]!!.trait
+                    if (prev != null)
+                        sink.error("`${d.name}` is already a method of trait `${prev.name}` " +
+                            "(trait methods share the function namespace)", d.nameSpan)
+                    else
+                        sink.error("function `${d.name}` is defined twice", d.nameSpan)
+                }
                 else -> fns[d.name] = sig
             }
         }
@@ -283,6 +311,10 @@ class Checker(
             visibleConsts.add(d.name)
         }
         for (d in module.fns) if (d !in inferredDecls) checkFn(d)
+        // 5.75. impl method bodies and trait default bodies (full signatures, so
+        // they check like ordinary annotated functions)
+        for (i in module.impls) for (m in i.methods) if (m.sig != null) checkFn(m)
+        for (t in module.traits) for (m in t.methods) if (m.body != null && m.sig != null) checkTraitDefault(m)
         for (t in module.tests) checkTest(t)
     }
 
@@ -359,11 +391,237 @@ class Checker(
             finalEff = declared
         }
         val sealed = FnSig(old.name, old.paramTypes, old.paramNames, bodyType, finalEff,
-            isBuiltin = false, typeParams = old.typeParams, nameSpan = old.nameSpan)
+            isBuiltin = false, typeParams = old.typeParams, nameSpan = old.nameSpan,
+            constraints = old.constraints)
         sealed.owner = old.owner
         sealed.srcPath = old.srcPath
         d.sig = sealed
         if (fns[d.name] === old) fns[d.name] = sealed
+        scopes.removeLast()
+    }
+
+    // ---- traits and impls (docs/trait.md; knife 2: registration + coherence) ----
+
+    /** Register trait headers and method signatures; methods enter the fn namespace. */
+    private fun registerTraits() {
+        for (d in module.traits) {
+            if (aliasShadow(d.name, d.nameSpan) || importClash(d.name, d.nameSpan, "trait")) continue
+            if (Type.named(d.name) != null || d.name in setOf("List", "Map", "Set")) {
+                sink.error("`${d.name}` is a builtin type and cannot be a trait name", d.nameSpan)
+                continue
+            }
+            if (adts.containsKey(d.name) || typeAliases.containsKey(d.name) || javaClasses.containsKey(d.name)) {
+                sink.error("trait `${d.name}` collides with a type of the same name", d.nameSpan,
+                    "traits and types share one namespace; rename one")
+                continue
+            }
+            if (traitsByName.containsKey(d.name)) {
+                sink.error(
+                    if (PRELUDE_TRAITS.any { it.name == d.name })
+                        "`${d.name}` is a prelude trait and cannot be redefined"
+                    else "trait `${d.name}` is defined twice",
+                    d.nameSpan)
+                continue
+            }
+            val info = TraitInfo(d.name, TVar(d.typeParam), d.nameSpan, d.pub)
+            info.owner = ownerClass
+            info.srcPath = srcPath
+            traitsByName[d.name] = info
+            localTraits[d.name] = info
+            val tp = mapOf(d.typeParam to info.tvar)
+            for (m in d.methods) {
+                if (m.declaredEff.any { it != "io" }) {
+                    sink.error("trait methods cannot declare effect variables", m.nameSpan,
+                        "a trait method is pure or !io")
+                    continue
+                }
+                val ev = HashMap<String, Eff.Var>()
+                val paramTypes = m.params.map { resolveType(it.typeName, tp, ev) }
+                val ret = resolveType(m.retType, tp, ev)
+                if (ev.isNotEmpty()) {
+                    sink.error("trait method signatures cannot carry effect variables", m.nameSpan,
+                        "write !io on the function type, or leave it pure")
+                    continue
+                }
+                val eff = if (m.declaredEff.isEmpty()) Eff.Pure else Eff.Io
+                val sig = FnSig(m.name, paramTypes, m.params.map { it.name }, ret, eff,
+                    isBuiltin = false, typeParams = listOf(info.tvar), nameSpan = m.nameSpan,
+                    constraints = listOf(listOf(info)))
+                sig.trait = info
+                sig.owner = ownerClass
+                sig.srcPath = srcPath
+                m.sig = sig
+                when {
+                    moduleAliases.containsKey(m.name) -> aliasShadow(m.name, m.nameSpan)
+                    importedNames.containsKey(m.name) -> importClash(m.name, m.nameSpan, "trait method")
+                    BUILTINS.containsKey(m.name) ->
+                        sink.error("`${m.name}` is a builtin function and cannot be a trait method", m.nameSpan)
+                    fns.containsKey(m.name) -> {
+                        val prev = fns[m.name]!!.trait
+                        sink.error(
+                            if (prev != null)
+                                "`${m.name}` is already a method of trait `${prev.name}` " +
+                                    "(trait methods share the function namespace)"
+                            else "trait method `${m.name}` collides with a function of the same name",
+                            m.nameSpan)
+                    }
+                    else -> {
+                        fns[m.name] = sig
+                        info.methods[m.name] = TraitMethodSig(sig, m)
+                    }
+                }
+            }
+        }
+    }
+
+    /** Register impls: subject rules, orphan rule, program-wide coherence, method matching. */
+    private fun registerImpls() {
+        // the global impl view: every module checked before this one contributes,
+        // import edges or not (impls are program-global; coherence makes that safe)
+        for (exp in imports.available.values) {
+            for (i in exp.impls) implTable.putIfAbsent(i.trait to i.subject, i)
+        }
+        val localAdts = module.types.mapNotNull { adts[it.name] }.toHashSet()
+        for (d in module.impls) {
+            val tr = traitsByName[d.traitName]
+            if (tr == null) {
+                sink.error("unknown trait: ${d.traitName}", d.traitSpan,
+                    Suggest.hint(d.traitName, traitsByName.keys)
+                        ?: "declare `trait ${d.traitName}[T] { ... }` or import it first")
+                continue
+            }
+            currentTParams = emptyMap()
+            currentEffVars = HashMap()
+            val subject = resolveType(d.subject)
+            if (subject == TError) continue
+            val subjectOk = when (subject) {
+                TInt, TFloat, TBool, TString -> true
+                is TAdt -> subject.info.typeParams.isEmpty()
+                else -> false
+            }
+            if (!subjectOk) {
+                sink.error("`$subject` cannot be an impl subject", d.subject.span,
+                    "v1 impls cover named non-generic types and Int/Float/Bool/String; " +
+                        "generic subjects (List, Map, tuples, instantiated generics) need conditional impls (v2)")
+                continue
+            }
+            // orphan rule: the impl lives with the trait or with the subject type
+            val traitLocal = localTraits[d.traitName] === tr
+            val subjectLocal = subject is TAdt && subject.info in localAdts
+            if (!traitLocal && !subjectLocal) {
+                sink.error("orphan impl: `${tr.name}[$subject]` may not live here", d.traitSpan,
+                    "an impl belongs to the module that declares `${tr.name}` " +
+                        "or the one that declares `$subject`")
+                continue
+            }
+            // coherence: at most one impl per (trait, type) in the whole program
+            val key = tr to subject
+            val prev = implTable[key]
+            if (prev != null) {
+                val where = prev.srcPath?.takeIf { it != srcPath }?.let { " (previous impl in $it)" } ?: ""
+                sink.error("duplicate impl: `${tr.name}[$subject]` is already implemented$where", d.traitSpan,
+                    "the program allows one impl per trait and type")
+                continue
+            }
+            val info = ImplInfo(tr, subject, d.span, srcPath)
+            info.owner = ownerClass
+            val instMap = mapOf(tr.tvar to subject)
+            for (m in d.methods) {
+                val ms = tr.methods[m.name]
+                if (ms == null) {
+                    sink.error("trait `${tr.name}` has no method `${m.name}`", m.nameSpan,
+                        Suggest.hint(m.name, tr.methods.keys))
+                    continue
+                }
+                if (info.provided.containsKey(m.name)) {
+                    sink.error("method `${m.name}` is implemented twice in this impl", m.nameSpan)
+                    continue
+                }
+                if (m.declaredEff.any { it != "io" }) {
+                    sink.error("impl methods cannot declare effect variables", m.nameSpan,
+                        "an impl method is pure or !io")
+                    continue
+                }
+                val ev = HashMap<String, Eff.Var>()
+                val paramTypes = m.params.map { resolveType(it.typeName, emptyMap(), ev) }
+                val ret = m.retType?.let { resolveType(it, emptyMap(), ev) } ?: TError
+                val eff = if (m.declaredEff.isEmpty()) Eff.Pure else Eff.Io
+                if (ev.isNotEmpty()) {
+                    sink.error("impl method signatures cannot carry effect variables", m.nameSpan)
+                    continue
+                }
+                val want = ms.sig.paramTypes.map { subst(it, instMap) }
+                val wantRet = subst(ms.sig.ret, instMap)
+                val wantRender = "fn ${m.name}(${want.joinToString(", ")}) -> $wantRet${ms.sig.eff.suffix}"
+                if (paramTypes != want || ret != wantRet)
+                    sink.error("`${m.name}` does not match the trait's signature", m.nameSpan,
+                        "trait `${tr.name}` declares it as $wantRender")
+                else if (!effSubsumes(ms.sig.eff, eff))
+                    sink.error("`${m.name}` is declared !$eff but trait `${tr.name}` declares it pure",
+                        m.nameSpan, "drop !$eff here, or declare the trait method !$eff")
+                val sig = FnSig(m.name, paramTypes, m.params.map { it.name }, ret, eff,
+                    isBuiltin = false, nameSpan = m.nameSpan)
+                sig.owner = ownerClass
+                sig.srcPath = srcPath
+                m.sig = sig
+                info.provided[m.name] = m
+            }
+            val missing = tr.methods.values.filter { !it.hasDefault && it.sig.name !in info.provided }
+            if (missing.isNotEmpty())
+                sink.error("impl `${tr.name}[$subject]` is missing " +
+                    missing.joinToString(", ") { "`${it.sig.name}`" }, d.traitSpan,
+                    "provide: " + missing.joinToString("; ") { ms ->
+                        val ps = ms.sig.paramNames.zip(ms.sig.paramTypes)
+                            .joinToString(", ") { "${it.first}: ${subst(it.second, instMap)}" }
+                        "fn ${ms.sig.name}($ps) -> ${subst(ms.sig.ret, instMap)}${ms.sig.eff.suffix}"
+                    })
+            implTable[key] = info
+            localImpls.add(info)
+        }
+    }
+
+    /** Resolve `[T: Ord + Show]` bounds against the visible traits, aligned per parameter. */
+    private fun resolveBounds(tparams: List<TypeParamDecl>): List<List<TraitInfo>> {
+        if (tparams.all { it.bounds.isEmpty() }) return emptyList()
+        return tparams.map { tp ->
+            if (tp.bounds.map { it.first }.toSet().size != tp.bounds.size)
+                sink.error("duplicate trait bound on `${tp.name}`", tp.span)
+            tp.bounds.mapNotNull { (bname, bspan) ->
+                val tr = traitsByName[bname]
+                if (tr == null) {
+                    sink.error("unknown trait: $bname", bspan,
+                        Suggest.hint(bname, traitsByName.keys)
+                            ?: "declare `trait $bname[T] { ... }` or import it first")
+                    null
+                } else tr
+            }.distinct()
+        }
+    }
+
+    /** Check a trait's default method body against its own signature (T stays rigid). */
+    private fun checkTraitDefault(m: TraitMethod) {
+        val sig = m.sig!!
+        currentTParams = sig.typeParams.associateBy { it.name }
+        currentEffVars = HashMap()
+        currentFnSig = sig
+        usedEffects = HashSet()
+        effWitness = HashMap()
+        lambdaStack.clear()
+        scopes.clear()
+        scopes.addLast(HashMap())
+        for ((p, t) in m.params.zip(sig.paramTypes)) {
+            p.symbol = declare(p.name, t, mutable = false, p.span)
+        }
+        val bodyType = checkExpr(m.body!!, expected = sig.ret)
+        if (!assignable(bodyType, sig.ret))
+            sink.error("method `${m.name}` declares return type ${sig.ret} but its default body is $bodyType",
+                m.body!!.span)
+        for (used in usedEffects) {
+            if (effSubsumes(sig.eff, used)) continue
+            val (span, name) = effWitness[used] ?: (m.nameSpan to "?")
+            sink.error("method `${m.name}` is not declared !$used but calls `$name` (!$used)", span,
+                "add !$used to the trait method, or remove the call")
+        }
         scopes.removeLast()
     }
 
@@ -390,14 +648,15 @@ class Checker(
 
     private fun injectSelective(fromPath: String, exp: ModuleExports, name: String, span: Span) {
         val fn = exp.fns[name]; val ty = exp.types[name]; val cn = exp.consts[name]; val ct = exp.ctors[name]
-        val al = exp.aliases[name]
-        if (fn == null && ty == null && cn == null && ct == null && al == null) {
+        val al = exp.aliases[name]; val tr = exp.traits[name]
+        if (fn == null && ty == null && cn == null && ct == null && al == null && tr == null) {
             if (name in exp.allNames)
                 sink.error("`$name` is private to module `$fromPath`", span,
                     "add `pub` to its declaration in $fromPath")
             else
                 sink.error("module `$fromPath` has no exported name `$name`", span,
-                    Suggest.hint(name, exp.fns.keys + exp.types.keys + exp.consts.keys + exp.ctors.keys))
+                    Suggest.hint(name, exp.fns.keys + exp.types.keys + exp.consts.keys +
+                        exp.ctors.keys + exp.traits.keys))
             return
         }
         importedNames[name]?.let { prev ->
@@ -411,6 +670,7 @@ class Checker(
         if (al != null) typeAliases[name] = al
         if (ct != null) ctors[name] = ct
         if (cn != null) consts[name] = cn
+        if (tr != null) traitsByName[name] = tr
     }
 
     /** A local declaration or binding may not shadow a whole-module alias (spec §10.3). */
@@ -446,8 +706,8 @@ class Checker(
             d.constType = TError
         }
         when {
-            ctors.containsKey(d.name) || adts.containsKey(d.name) ->
-                sink.error("`${d.name}` collides with a type or constructor name", d.nameSpan)
+            ctors.containsKey(d.name) || adts.containsKey(d.name) || traitsByName.containsKey(d.name) ->
+                sink.error("`${d.name}` collides with a type, trait, or constructor name", d.nameSpan)
             consts.containsKey(d.name) ->
                 sink.error("constant `${d.name}` is defined twice", d.nameSpan)
             else -> {

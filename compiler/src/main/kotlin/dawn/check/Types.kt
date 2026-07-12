@@ -267,6 +267,8 @@ class FnSig(
     val nameSpan: Span? = null,
     /** the return type (and effect) is still being inferred; ret is a placeholder */
     val inferring: Boolean = false,
+    /** trait bounds per type parameter, aligned with [typeParams]; empty = unconstrained */
+    val constraints: List<List<TraitInfo>> = emptyList(),
 ) {
     /** JVM class of the defining module (spec §12.2); null = builtin/single-file */
     var owner: String? = null
@@ -274,10 +276,19 @@ class FnSig(
     /** source file of the defining module (go-to-definition); null = builtin/current file */
     var srcPath: String? = null
 
+    /** non-null when this signature is a trait method (resolved through witnesses) */
+    var trait: TraitInfo? = null
+
     val io: Boolean get() = eff == Eff.Io
 
+    /** the bounds of typeParams[i], or none */
+    fun boundsOf(i: Int): List<TraitInfo> = constraints.getOrNull(i).orEmpty()
+
     fun render(): String {
-        val tp = if (typeParams.isEmpty()) "" else "[${typeParams.joinToString(", ")}]"
+        val tp = if (typeParams.isEmpty()) "" else "[" + typeParams.mapIndexed { i, v ->
+            val bs = boundsOf(i)
+            if (bs.isEmpty()) v.name else v.name + ": " + bs.joinToString(" + ") { it.name }
+        }.joinToString(", ") + "]"
         val params = paramNames.zip(paramTypes).joinToString(", ") { "${it.first}: ${it.second}" }
         return "fn $name$tp($params) -> $ret${eff.suffix}"
     }

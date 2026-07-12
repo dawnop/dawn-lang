@@ -54,6 +54,10 @@ class CheckedModule(
     val aliases: Map<String, AliasInfo> = emptyMap(),
     /** absolute path of the module's file (cross-file navigation); null in tests without files */
     val srcPath: String? = null,
+    /** traits declared in this module */
+    val traits: Map<String, TraitInfo> = emptyMap(),
+    /** impls declared in this module (program-global, never private) */
+    val impls: List<ImplInfo> = emptyList(),
 )
 
 /**
@@ -71,6 +75,10 @@ class ModuleExports(
     val allNames: Set<String>,
     /** absolute path of the module's file (cross-file navigation); null in tests without files */
     val srcPath: String? = null,
+    /** pub traits (their methods also appear in [fns]) */
+    val traits: Map<String, TraitInfo> = emptyMap(),
+    /** every impl of this module — impls are program-global, import edges or not */
+    val impls: List<ImplInfo> = emptyList(),
 )
 
 /**
@@ -92,10 +100,15 @@ private fun exportsOf(cm: CheckedModule): ModuleExports {
     val pubTypes = m.types.filter { it.pub }.mapNotNull { cm.types[it.name] }.associateBy { it.name }
     val pubAliases = m.types.filter { it.pub }.mapNotNull { cm.aliases[it.name] }.associateBy { it.name }
     val pubCtors = pubTypes.values.flatMap { it.ctors }.associateBy { it.name }
-    val pubFns = m.fns.filter { it.pub }.mapNotNull { cm.functions[it.name] }.associateBy { it.name }
+    val pubTraits = m.traits.filter { it.pub }.mapNotNull { cm.traits[it.name] }.associateBy { it.name }
+    // a pub trait's methods are importable like pub fns (they share the namespace)
+    val methodFns = pubTraits.values.flatMap { it.methods.values }.associate { it.sig.name to it.sig }
+    val pubFns = m.fns.filter { it.pub }.mapNotNull { cm.functions[it.name] }.associateBy { it.name } + methodFns
     val pubConsts = m.consts.filter { it.pub }.associateBy { it.name }
-    val allNames = (m.fns.map { it.name } + m.types.map { it.name } + m.consts.map { it.name }).toSet()
-    return ModuleExports(cm.modPath, cm.className, pubFns, pubTypes, pubAliases, pubCtors, pubConsts, allNames, cm.srcPath)
+    val allNames = (m.fns.map { it.name } + m.types.map { it.name } + m.consts.map { it.name } +
+        m.traits.map { it.name } + m.traits.flatMap { t -> t.methods.map { it.name } }).toSet()
+    return ModuleExports(cm.modPath, cm.className, pubFns, pubTypes, pubAliases, pubCtors, pubConsts,
+        allNames, cm.srcPath, pubTraits, cm.impls)
 }
 
 /**
@@ -141,7 +154,8 @@ fun analyzeProgram(loaded: ModuleLoadResult, comptimeFuel: Long = 100_000_000L):
         }
         for (d in sink.all) diags.add(LocatedDiag(mf.source, d))
         val cm = CheckedModule(mf.modPath, mf.className, mf.source, mf.module,
-            checker.functions, checker.types, checker.aliases, srcPath)
+            checker.functions, checker.types, checker.aliases, srcPath,
+            checker.declaredTraits, checker.declaredImpls)
         checked.add(cm)
         exportsByPath[mf.modPath] = exportsOf(cm)
     }
