@@ -1,0 +1,124 @@
+# Page shells: <head>, top navigation, footer. Triple-quoted templates keep
+# the attribute quotes unescaped; $-interpolation fills the holes.
+
+use html/render.{TocEntry}
+use html/escape.{escape_html}
+
+## site navigation: (key, label, path-from-root)
+fn nav_items() -> List[(String, String, String)] = [
+  ("tutorial", "教程", "tutorial/index.html"),
+  ("spec", "规范", "spec.html"),
+  ("examples", "示例", "examples/index.html"),
+  ("api", "标准库", "api.html"),
+  ("design", "设计", "design.html"),
+  ("playground", "Playground", "playground.html"),
+]
+
+fn nav_link(root: String, active: String, item: (String, String, String)) -> String = {
+  let (key, label, path) = item
+  let cls = if key == active { ` class="active"` } else { "" }
+  """<a$cls href="$root/$path">$label</a>"""
+}
+
+fn nav_html(root: String, active: String) -> String =
+  join(map(nav_items(), fn(it) => nav_link(root, active, it)), "\n")
+
+## The full page around an already-rendered <main>/<div> body.
+pub fn shell(title: String, root: String, active: String, body: String) -> String = {
+  let esc_title = escape_html(title)
+  let nav = nav_html(root, active)
+  """
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>$esc_title</title>
+<link rel="stylesheet" href="$root/assets/style.css">
+</head>
+<body>
+<header class="site-header">
+<nav>
+<a class="brand" href="$root/index.html">Dawn</a>
+$nav
+<a class="gh" href="https://github.com/dawnop/dawn-lang">GitHub</a>
+</nav>
+</header>
+$body
+<footer class="site-footer">
+<div class="inner">Dawn — 编译到 JVM 字节码与 native 的静态类型语言 · <a href="https://github.com/dawnop/dawn-lang">GitHub</a> · 本站由 Dawn 写的生成器构建</div>
+</footer>
+</body>
+</html>
+"""
+}
+
+## A plain content page.
+pub fn page(title: String, root: String, active: String, inner: String) -> String =
+  shell(title, root, active, `<main class="content">` ++ "\n" ++ inner ++ "\n</main>")
+
+## A page with the sticky TOC sidebar (the spec and design pages).
+pub fn page_with_toc(
+  title: String,
+  root: String,
+  active: String,
+  toc: List[TocEntry],
+  article: String,
+) -> String = {
+  let side = "<aside class=\"toc\">\n<nav>\n<div class=\"toc-title\">目录</div>\n" ++
+    toc_list(toc) ++ "\n</nav>\n</aside>"
+  let body = `<div class="with-toc">` ++ "\n" ++ side ++ "\n" ++
+    `<article class="doc">` ++ "\n" ++ article ++ "\n</article>\n</div>"
+  shell(title, root, active, body)
+}
+
+## Nested <ul> for h2/h3 toc entries.
+pub fn toc_list(entries: List[TocEntry]) -> String = {
+  var out = "<ul>"
+  var open3 = false
+  for e in entries {
+    if e.level == 2 {
+      if open3 {
+        out = out ++ "</ul></li>"
+        open3 = false
+      }
+      out = out ++ "\n" ++ """<li><a href="#${e.id}">""" ++ escape_html(e.text) ++ "</a>"
+    } else {
+      if not open3 {
+        out = out ++ "\n<ul>"
+        open3 = true
+      }
+      out = out ++ "\n" ++ """<li><a href="#${e.id}">""" ++ escape_html(e.text) ++ "</a></li>"
+    }
+  }
+  if open3 {
+    out = out ++ "</ul></li>"
+  } else if len(entries) > 0 {
+    out = out ++ "</li>"
+  }
+  out ++ "\n</ul>"
+}
+
+test "nav marks the active page and roots the links" {
+  let n = nav_html("..", "spec")
+  assert contains(n, `<a class="active" href="../spec.html">规范</a>`)
+  assert contains(n, `<a href="../tutorial/index.html">教程</a>`)
+}
+
+test "shell carries title, css root, body" {
+  let p = page("测试页 — Dawn", ".", "api", "<p>x</p>")
+  assert contains(p, "<title>测试页 — Dawn</title>")
+  assert contains(p, `href="./assets/style.css"`)
+  assert contains(p, `<main class="content">`)
+  assert contains(p, "本站由 Dawn 写的生成器构建")
+}
+
+test "toc nests h3 under its h2" {
+  let t = toc_list([
+    TocEntry { level: 2, id: "s1", text: "一" },
+    TocEntry { level: 3, id: "s1-1", text: "一点一" },
+    TocEntry { level: 2, id: "s2", text: "二" },
+  ])
+  assert contains(t, `<li><a href="#s1">一</a>` ++ "\n<ul>\n" ++ `<li><a href="#s1-1">一点一</a></li>` ++ "</ul></li>")
+  assert contains(t, `<li><a href="#s2">二</a></li>`)
+}

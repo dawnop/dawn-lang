@@ -1,0 +1,172 @@
+# Markdown AST -> HTML. Top-level headings get numbered anchors (#s2, #s2-3)
+# and feed the TOC; link URLs go through a caller-supplied mapper so this
+# module knows nothing about the site's layout.
+
+use md/ast.{Inline, Text, Code, Bold, Em, Link, Block, Heading, Para, CodeBlock, UList, OList, Table, Quote, Rule}
+use html/escape.{escape_html}
+use hl/dawn.{highlight_dawn}
+
+## One rendered document: body HTML, its TOC, and the first h1's plain text.
+pub type Doc = { html: String, toc: List[TocEntry], title: String } derive Show
+
+pub type TocEntry = { level: Int, id: String, text: String } derive Show
+
+## The plain text of an inline run (for titles and TOC labels).
+pub fn inline_text(items: List[Inline]) -> String =
+  join(map(items, fn(it) =>
+      match it {
+        Text(s) -> s
+        Code(s) -> s
+        Bold(xs) -> inline_text(xs)
+        Em(xs) -> inline_text(xs)
+        Link(label, _) -> label
+      }), "")
+
+fn inline_html(it: Inline, map_url: fn(String) -> String) -> String =
+  match it {
+    Text(s) -> escape_html(s)
+    Code(s) -> "<code>" ++ escape_html(s) ++ "</code>"
+    Bold(xs) -> "<strong>" ++ inlines_html(xs, map_url) ++ "</strong>"
+    Em(xs) -> "<em>" ++ inlines_html(xs, map_url) ++ "</em>"
+    Link(label, url) ->
+      `<a href="` ++ escape_html(map_url(url)) ++ `">` ++ escape_html(label) ++ "</a>"
+  }
+
+fn inlines_html(items: List[Inline], map_url: fn(String) -> String) -> String =
+  join(map(items, fn(it) => inline_html(it, map_url)), "")
+
+fn code_html(lang: String, body: String) -> String =
+  if lang == "dawn" {
+    `<pre class="dawn"><code>` ++ highlight_dawn(body) ++ "</code></pre>"
+  } else if lang == "output" {
+    `<pre class="output"><code>` ++ escape_html(body) ++ "</code></pre>"
+  } else {
+    "<pre><code>" ++ escape_html(body) ++ "</code></pre>"
+  }
+
+## A list item body: a lone paragraph renders tight (no <p>).
+fn item_body(bs: List[Block], map_url: fn(String) -> String) -> String =
+  match bs {
+    [Para(items)] -> inlines_html(items, map_url)
+    _ -> blocks_html(bs, map_url)
+  }
+
+fn items_html(items: List[List[Block]], map_url: fn(String) -> String) -> String =
+  join(map(items, fn(bs) => "<li>" ++ item_body(bs, map_url) ++ "</li>"), "\n")
+
+fn cell_html(tag: String, cells: List[List[Inline]], map_url: fn(String) -> String) -> String =
+  join(map(cells, fn(c) => "<$tag>" ++ inlines_html(c, map_url) ++ "</$tag>"), "")
+
+fn table_html(
+  header: List[List[Inline]],
+  rows: List[List[List[Inline]]],
+  map_url: fn(String) -> String,
+) -> String = {
+  let head = "<thead>\n<tr>" ++ cell_html("th", header, map_url) ++ "</tr>\n</thead>"
+  let body = join(map(rows, fn(r) => "<tr>" ++ cell_html("td", r, map_url) ++ "</tr>"), "\n")
+  "<table>\n" ++ head ++ "\n<tbody>\n" ++ body ++ "\n</tbody>\n</table>"
+}
+
+fn heading_html(lvl: Int, id: String, items: List[Inline], map_url: fn(String) -> String) -> String = {
+  let attr = if id == "" { "" } else { ` id="` ++ id ++ `"` }
+  "<h$lvl$attr>" ++ inlines_html(items, map_url) ++ "</h$lvl>"
+}
+
+## One block outside the numbered top level (list items, quotes): no anchors.
+fn block_html(b: Block, map_url: fn(String) -> String) -> String =
+  match b {
+    Heading(lvl, items) -> heading_html(lvl, "", items, map_url)
+    Para(items) -> "<p>" ++ inlines_html(items, map_url) ++ "</p>"
+    CodeBlock(lang, body) -> code_html(lang, body)
+    UList(items) -> "<ul>\n" ++ items_html(items, map_url) ++ "\n</ul>"
+    OList(items) -> "<ol>\n" ++ items_html(items, map_url) ++ "\n</ol>"
+    Table(header, rows) -> table_html(header, rows, map_url)
+    Quote(bs) -> "<blockquote>\n" ++ blocks_html(bs, map_url) ++ "\n</blockquote>"
+    Rule -> "<hr>"
+  }
+
+fn blocks_html(bs: List[Block], map_url: fn(String) -> String) -> String =
+  join(map(bs, fn(b) => block_html(b, map_url)), "\n")
+
+## Render a whole document: h2/h3 get numbered ids and TOC entries; the first
+## h1 becomes the title.
+pub fn render_doc(blocks: List[Block], map_url: fn(String) -> String) -> Doc = {
+  var html = ""
+  var toc: List[TocEntry] = []
+  var title = ""
+  var h2 = 0
+  var h3 = 0
+  for b in blocks {
+    match b {
+      Heading(lvl, items) -> {
+        if lvl == 1 {
+          if title == "" {
+            title = inline_text(items)
+          }
+          html = html ++ heading_html(1, "", items, map_url) ++ "\n"
+        } else if lvl == 2 {
+          h2 = h2 + 1
+          h3 = 0
+          let id = "s$h2"
+          toc = toc ++ [TocEntry { level: 2, id: id, text: inline_text(items) }]
+          html = html ++ heading_html(2, id, items, map_url) ++ "\n"
+        } else {
+          h3 = h3 + 1
+          let id = "s$h2-$h3"
+          toc = toc ++ [TocEntry { level: 3, id: id, text: inline_text(items) }]
+          html = html ++ heading_html(3, id, items, map_url) ++ "\n"
+        }
+      }
+      _ -> {
+        html = html ++ block_html(b, map_url) ++ "\n"
+      }
+    }
+  }
+  Doc { html: html, toc: toc, title: title }
+}
+
+fn keep_url(u: String) -> String = u
+
+test "inline rendering escapes and maps links" {
+  assert inlines_html([Text("a < b "), Code("x>y")], keep_url) ==
+    "a &lt; b <code>x&gt;y</code>"
+  assert inline_html(Link("规范", "spec.md"), fn(u) => "mapped/" ++ u) ==
+    `<a href="mapped/spec.md">规范</a>`
+}
+
+test "headings number their anchors and fill the toc" {
+  let doc = render_doc([
+    Heading(1, [Text("题")]),
+    Heading(2, [Text("一")]),
+    Heading(3, [Text("一点一")]),
+    Heading(2, [Text("二")]),
+  ], keep_url)
+  assert doc.title == "题"
+  assert doc.toc == [
+    TocEntry { level: 2, id: "s1", text: "一" },
+    TocEntry { level: 3, id: "s1-1", text: "一点一" },
+    TocEntry { level: 2, id: "s2", text: "二" },
+  ]
+  assert contains(doc.html, `<h2 id="s1">一</h2>`)
+  assert contains(doc.html, `<h3 id="s1-1">一点一</h3>`)
+}
+
+test "tight and loose list items" {
+  let tight = render_doc([UList([[Para([Text("甲")])], [Para([Text("乙")])]])], keep_url)
+  assert contains(tight.html, "<li>甲</li>")
+  let loose = render_doc([UList([[Para([Text("甲")]), CodeBlock("", "x")]])], keep_url)
+  assert contains(loose.html, "<li><p>甲</p>\n<pre><code>x</code></pre></li>")
+}
+
+test "dawn code blocks come out highlighted" {
+  let doc = render_doc([CodeBlock("dawn", "let x = 1")], keep_url)
+  assert contains(doc.html, `<span class="k">let</span>`)
+  let out = render_doc([CodeBlock("output", "1 < 2")], keep_url)
+  assert contains(out.html, `<pre class="output"><code>1 &lt; 2</code></pre>`)
+}
+
+test "tables render thead and tbody" {
+  let doc = render_doc([Table([[Text("列")]], [[[Code("v")]]])], keep_url)
+  assert contains(doc.html, "<thead>\n<tr><th>列</th></tr>\n</thead>")
+  assert contains(doc.html, "<tbody>\n<tr><td><code>v</code></td></tr>\n</tbody>")
+}
