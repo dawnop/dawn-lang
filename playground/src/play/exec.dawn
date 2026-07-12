@@ -8,7 +8,7 @@ use java "java.util.concurrent.TimeUnit"
 use java "java.util.UUID"
 use java "java.lang.System"
 use play/contract.{Outcome, Compiled, CompileError, Timeout}
-use play/config.{dawn_bin, java_bin, timeout_secs}
+use play/config.{dawn_bin, java_bin, timeout_secs, sandbox_enabled, sandbox_script}
 
 const OUTPUT_LIMIT: Int = 65536
 
@@ -40,6 +40,25 @@ fn slurp(path: String) -> String !io =
 fn strip_dir(text: String, dir: String) -> String =
   join(split(text, "$dir/"), "")
 
+# Prepend the sudo-whitelisted sandbox wrapper when PLAY_SANDBOX=1. The wrapper
+# takes the working directory as its first argument, then the command to run
+# inside a throwaway systemd unit (stage 4d). Off locally, argv is unchanged.
+fn sandboxed(dir: String, argv: List[String]) -> List[String] !io =
+  if sandbox_enabled() {
+    ["sudo", "-n", sandbox_script(), dir] ++ argv
+  } else {
+    argv
+  }
+
+# chmod 0777 the per-request dir so cross-uid DynamicUser phases can share it.
+fn make_world_writable(dir: String) -> Unit !io = {
+  let p = ProcessBuilder.new(["chmod", "0777", dir])
+  p.redirectErrorStream(true)
+  p.redirectOutput(File.new("$dir/.chmod.log"))
+  p.start().expect("chmod").waitFor()
+  ()
+}
+
 pub fn execute(code: String) -> Outcome !io = {
   let id = UUID.randomUUID().expect("uuid").toString().expect("uuid string")
   let dir = "${temp_root()}/dawn-play-$id"
@@ -49,10 +68,15 @@ pub fn execute(code: String) -> Outcome !io = {
   match write_file(src, code) {
     Err(e) -> CompileError("cannot stage source: $e")
     Ok(_) -> {
+      # Under the sandbox each phase runs as a fresh DynamicUser (a different
+      # transient uid), so the per-request temp dir must be world-accessible for
+      # the compiler to write the jar and the JVM to read it back. The dir name
+      # is an unguessable uuid, so 0777 here is safe. No-op effect locally.
+      if sandbox_enabled() { make_world_writable(dir) } else { () }
       let secs = TimeUnit.valueOf("SECONDS").expect("seconds")
       # phase 1: compile only
       let build_out = "$dir/build.txt"
-      let bp = ProcessBuilder.new([dawn_bin(), "build", src, "-o", jar])
+      let bp = ProcessBuilder.new(sandboxed(dir, [dawn_bin(), "build", src, "-o", jar]))
       bp.redirectErrorStream(true)
       bp.redirectOutput(File.new(build_out))
       let build = bp.start().expect("failed to start compiler")
@@ -62,7 +86,7 @@ pub fn execute(code: String) -> Outcome !io = {
       } else {
         # phase 2: run the compiled jar under a wall-clock limit
         let run_out = "$dir/run.txt"
-        let rp = ProcessBuilder.new([java_bin(), "-jar", jar])
+        let rp = ProcessBuilder.new(sandboxed(dir, [java_bin(), "-jar", jar]))
         rp.redirectErrorStream(true)
         rp.redirectOutput(File.new(run_out))
         let started = System.nanoTime()
