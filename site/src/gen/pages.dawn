@@ -37,10 +37,39 @@ fn hero_html() -> String !io = {
 """
 }
 
+fn feature_block(title: String, desc: String, path: String) -> String !io = {
+  let hl = highlight_dawn(trim(must_read(path)))
+  """
+<article class="feature">
+<div class="feature-text">
+<h3>$title</h3>
+<p>$desc</p>
+</div>
+<div class="feature-code"><pre class="dawn"><code>$hl</code></pre></div>
+</article>
+"""
+}
+
+fn feature_section() -> String !io = {
+  let f1 = feature_block(
+    "纯度是类型系统的一部分",
+    `函数默认是纯的；碰 IO 必须在签名标 <code>!io</code>。纯是可检查的承诺而非注释——纯函数不会偷偷打日志或发网络请求，测试也无需 mock。`,
+    "site/pages/feat-effects.dawn")
+  let f2 = feature_block(
+    "编译期求值：comptime",
+    `<code>comptime { ... }</code> 在编译期由解释器执行，结果直接烧进常量池。没有宏系统，也不需要——普通函数就能在编译期跑。`,
+    "site/pages/feat-comptime.dawn")
+  let f3 = feature_block(
+    "无缝调用 Java",
+    `<code>use java</code> 直接调用整个 JVM 生态。引用类型返回值自动包成 <code>Option</code>，null 进不了 Dawn；同一份代码仍可编到 native。`,
+    "site/pages/feat-java.dawn")
+  "<h2>核心特性</h2>\n" ++ `<div class="feature-list">` ++ "\n" ++ f1 ++ f2 ++ f3 ++ "</div>"
+}
+
 pub fn gen_index(out: String) -> Unit !io = {
-  let doc = render_doc(parsed("site/pages/index.md"), fn(u) => map_doc_url(".", u))
+  let closing = render_doc(parsed("site/pages/index.md"), fn(u) => map_doc_url(".", u))
   let body = `<main class="home">` ++ "\n" ++ hero_html() ++ "\n</main>\n" ++
-    `<section class="features">` ++ "\n" ++ doc.html ++ "\n</section>"
+    `<section class="features">` ++ "\n" ++ feature_section() ++ "\n" ++ closing.html ++ "\n</section>"
   write_page("$out/index.html", shell("Dawn 语言", ".", "", body))
 }
 
