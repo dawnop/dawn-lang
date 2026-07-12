@@ -73,6 +73,46 @@ fn cleanup(dir: String) -> Unit !io = {
   ()
 }
 
+# Stage the source into a fresh world-writable (when sandboxed) work dir and
+# run `dawn build` on it. Ok(ms) with cleaned diagnostics stripped, or
+# Err(diagnostics) on a compile failure. Shared by execute (/run) and check.
+fn compile_phase(dir: String, src: String, jar: String) -> Result[Int, String] !io = {
+  let build_out = "$dir/build.txt"
+  let bp = ProcessBuilder.new(sandboxed(dir, [dawn_bin(), "build", src, "-o", jar]))
+  bp.redirectErrorStream(true)
+  bp.redirectOutput(File.new(build_out))
+  let started = System.nanoTime()
+  let build = bp.start().expect("failed to start compiler")
+  build.waitFor()
+  if build.exitValue() != 0 {
+    Err(strip_dir(trim(slurp(build_out)), dir))
+  } else {
+    Ok((System.nanoTime() - started) / 1000000)
+  }
+}
+
+# Compile-only entry for /check (editor diagnostics): stage and compile, never
+# run. Success carries no output — the client only cares whether diagnostics
+# exist. Same sandbox as /run: comptime executes user code at compile time.
+pub fn check(code: String) -> Outcome !io = {
+  let id = UUID.randomUUID().expect("uuid").toString().expect("uuid string")
+  let dir = "${temp_root()}/dawn-play-$id"
+  let src = "$dir/prog.dawn"
+  let jar = "$dir/prog.jar"
+  let outcome = match write_file(src, code) {
+    Err(e) -> CompileError("cannot stage source: $e")
+    Ok(_) -> {
+      if sandbox_enabled() { make_world_writable(dir) } else { () }
+      match compile_phase(dir, src, jar) {
+        Err(diags) -> CompileError(diags)
+        Ok(ms) -> Compiled("", 0, false, ms)
+      }
+    }
+  }
+  cleanup(dir)
+  outcome
+}
+
 pub fn execute(code: String) -> Outcome !io = {
   let id = UUID.randomUUID().expect("uuid").toString().expect("uuid string")
   let dir = "${temp_root()}/dawn-play-$id"
@@ -88,33 +128,27 @@ pub fn execute(code: String) -> Outcome !io = {
       # is an unguessable uuid, so 0777 here is safe. No-op effect locally.
       if sandbox_enabled() { make_world_writable(dir) } else { () }
       let secs = TimeUnit.valueOf("SECONDS").expect("seconds")
-      # phase 1: compile only
-      let build_out = "$dir/build.txt"
-      let bp = ProcessBuilder.new(sandboxed(dir, [dawn_bin(), "build", src, "-o", jar]))
-      bp.redirectErrorStream(true)
-      bp.redirectOutput(File.new(build_out))
-      let build = bp.start().expect("failed to start compiler")
-      build.waitFor()
-      if build.exitValue() != 0 {
-        CompileError(strip_dir(trim(slurp(build_out)), dir))
-      } else {
-        # phase 2: run the compiled jar under a wall-clock limit
-        let run_out = "$dir/run.txt"
-        let rp = ProcessBuilder.new(sandboxed(dir, [java_bin(), "-jar", jar]))
-        rp.redirectErrorStream(true)
-        rp.redirectOutput(File.new(run_out))
-        let started = System.nanoTime()
-        let proc = rp.start().expect("failed to start program")
-        let finished = proc.waitFor(timeout_secs(), secs)
-        if finished {
-          let ms = (System.nanoTime() - started) / 1000000
-          let (out, cut) = truncate(slurp(run_out))
-          Compiled(out, proc.exitValue(), cut, ms)
-        } else {
-          proc.destroyForcibly()
-          proc.waitFor()
-          let (out, _) = truncate(slurp(run_out))
-          Timeout(out)
+      match compile_phase(dir, src, jar) {
+        Err(diags) -> CompileError(diags)
+        Ok(_) -> {
+          # phase 2: run the compiled jar under a wall-clock limit
+          let run_out = "$dir/run.txt"
+          let rp = ProcessBuilder.new(sandboxed(dir, [java_bin(), "-jar", jar]))
+          rp.redirectErrorStream(true)
+          rp.redirectOutput(File.new(run_out))
+          let started = System.nanoTime()
+          let proc = rp.start().expect("failed to start program")
+          let finished = proc.waitFor(timeout_secs(), secs)
+          if finished {
+            let ms = (System.nanoTime() - started) / 1000000
+            let (out, cut) = truncate(slurp(run_out))
+            Compiled(out, proc.exitValue(), cut, ms)
+          } else {
+            proc.destroyForcibly()
+            proc.waitFor()
+            let (out, _) = truncate(slurp(run_out))
+            Timeout(out)
+          }
         }
       }
     }

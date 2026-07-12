@@ -4,8 +4,8 @@
 use java "com.sun.net.httpserver.HttpExchange"
 use java "java.util.concurrent.Semaphore"
 use http/server.{serve, respond, read_body, request_method}
-use play/contract.{parse_request, render_outcome, render_error}
-use play/exec.{execute}
+use play/contract.{parse_request, render_outcome, render_check, render_error}
+use play/exec.{execute, check}
 use play/gate.{new_gate, try_enter, leave}
 use play/config.{port}
 
@@ -13,11 +13,16 @@ const MAX_BODY: Int = 65536
 const JSON_CT: String = "application/json; charset=utf-8"
 const MAX_CONCURRENT: Int = 2
 const QUEUE_WAIT_SECS: Int = 15
+# Editor diagnostics are advisory: don't queue behind runs, fail fast so the
+# client just keeps its previous squiggles and retries on the next pause.
+const CHECK_WAIT_SECS: Int = 2
 
 fn handle_health(ex: HttpExchange) -> Unit !io =
   respond(ex, 200, "text/plain; charset=utf-8", "ok")
 
-fn handle_run(ex: HttpExchange, gate: Semaphore) -> Unit !io =
+# Shared shell for /run and /check: same body parsing and gate, different
+# executor and queue patience.
+fn handle_rpc(ex: HttpExchange, gate: Semaphore, check_only: Bool) -> Unit !io =
   if request_method(ex) != "POST" {
     respond(ex, 405, JSON_CT, render_error("POST only"))
   } else {
@@ -27,28 +32,31 @@ fn handle_run(ex: HttpExchange, gate: Semaphore) -> Unit !io =
     } else {
       match parse_request(body) {
         Err(msg) -> respond(ex, 400, JSON_CT, render_error(msg))
-        Ok(code) ->
-          if try_enter(gate, QUEUE_WAIT_SECS) {
-            let out = run_guarded(gate, code)
+        Ok(code) -> {
+          let wait = if check_only { CHECK_WAIT_SECS } else { QUEUE_WAIT_SECS }
+          if try_enter(gate, wait) {
+            let out = run_guarded(gate, code, check_only)
             respond(ex, 200, JSON_CT, out)
           } else {
             respond(ex, 429, JSON_CT, render_error("server busy, try again shortly"))
           }
+        }
       }
     }
   }
 
 # Hold the permit only across execution, then release before writing the reply.
-fn run_guarded(gate: Semaphore, code: String) -> String !io = {
-  let outcome = execute(code)
+fn run_guarded(gate: Semaphore, code: String, check_only: Bool) -> String !io = {
+  let outcome = if check_only { check(code) } else { execute(code) }
   leave(gate)
-  render_outcome(outcome)
+  if check_only { render_check(outcome) } else { render_outcome(outcome) }
 }
 
 pub fn main() -> Unit !io = {
   let gate = new_gate(MAX_CONCURRENT)
   serve(port(), [
     ("/health", handle_health),
-    ("/run", fn(ex) => handle_run(ex, gate)),
+    ("/run", fn(ex) => handle_rpc(ex, gate, false)),
+    ("/check", fn(ex) => handle_rpc(ex, gate, true)),
   ])
 }

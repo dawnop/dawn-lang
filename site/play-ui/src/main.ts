@@ -7,6 +7,7 @@ import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirro
 import { closeBrackets, completionKeymap, acceptCompletion } from '@codemirror/autocomplete'
 import { bracketMatching, indentOnInput } from '@codemirror/language'
 import { dawn } from './dawn-lang'
+import { dawnLint } from './lint'
 import { SAMPLES } from './samples'
 import './playground.css'
 
@@ -86,6 +87,7 @@ function mount(root: HTMLElement) {
       extensions: [
         history(),
         dawn(),
+        dawnLint(endpoint.replace(/\/run$/, '/check')),
         bracketMatching(),
         closeBrackets(),
         indentOnInput(),

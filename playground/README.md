@@ -19,6 +19,10 @@ Zero async in the language: HTTP is `jdk.httpserver` on JVM 21 virtual threads
 
 ```sh
 dawn run playground          # listens on 127.0.0.1:8087
-curl --noproxy '*' -X POST --data 'pub fn main() -> Unit !io = println("hi")' \
+curl --noproxy '*' -X POST --data '{"code":"pub fn main() -> Unit !io = println(\"hi\")"}' \
   http://127.0.0.1:8087/run
 ```
+
+`POST /check` takes the same request but only compiles (no run) — the editor's
+live diagnostics endpoint. `{"ok":true,"phase":"check","ms":N}` when clean,
+otherwise the same `phase:"compile"` shape as `/run`.

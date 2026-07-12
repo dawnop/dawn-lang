@@ -8,6 +8,7 @@ import {
   LanguageSupport,
   HighlightStyle,
   syntaxHighlighting,
+  syntaxTree,
 } from '@codemirror/language'
 import { Tag, tags } from '@lezer/highlight'
 import {
@@ -180,11 +181,49 @@ const dawnHighlight = HighlightStyle.define([
   { tag: tags.variableName, color: 'inherit' },
 ])
 
-// Completion: builtins (with signature + doc), keywords, and a few snippets.
-function dawnCompletions(context: CompletionContext): CompletionResult | null {
+// Constructors of the prelude ADTs — completable like builtins.
+const CTORS = ['Some', 'None', 'Ok', 'Err', 'True', 'False']
+
+// Names declared in the buffer itself (the user's own functions, bindings,
+// types, and ADT constructors), so completion isn't limited to builtins.
+// `skipFrom` is the start of the word being typed, which would otherwise
+// offer itself as its own completion.
+function docDecls(doc: string, skipFrom: number) {
+  const re = /\b(?:fn|let|var|const|type)\s+([A-Za-z_]\w*)|\|\s*([A-Z]\w*)/g
+  const seen = new Set<string>()
+  const out: { label: string; type: string; boost: number }[] = []
+  let m: RegExpExecArray | null
+  while ((m = re.exec(doc))) {
+    const name = m[1] ?? m[2]
+    if (m.index + m[0].lastIndexOf(name) === skipFrom) continue
+    if (seen.has(name) || KEYWORDS.has(name)) continue
+    seen.add(name)
+    const type = m[2] || /^[A-Z]/.test(name) ? 'type' : m[0].startsWith('fn') ? 'function' : 'variable'
+    out.push({ label: name, type, boost: 2 })
+  }
+  return out
+}
+
+// Completion: builtins (with signature + doc), keywords, prelude constructors,
+// and declarations scanned from the buffer. Suppressed where a suggestion can
+// only be noise: inside strings and comments, while naming a fresh binding
+// (after fn/let/var/const/type/for/derive), on `use` lines (module paths), and
+// right after `.` (Java members) or `!` (effect rows).
+export function dawnCompletions(context: CompletionContext): CompletionResult | null {
   const word = context.matchBefore(/[A-Za-z_][A-Za-z0-9_]*/)
-  if (!word || (word.from === word.to && !context.explicit)) return null
+  if (!word && !context.explicit) return null
+  const inside = syntaxTree(context.state).resolveInner(context.pos, -1).name
+  if (inside === 'string' || inside === 'comment') return null
+  const from = word ? word.from : context.pos
+  const line = context.state.doc.lineAt(context.pos)
+  const before = context.state.sliceDoc(line.from, from)
+  if (/(?:^|[^\w])(?:fn|let|var|const|type|for|derive)\s+$/.test(before)) return null
+  if (/^\s*(?:pub\s+)?use\b/.test(before)) return null
+  if (before.endsWith('.') || before.endsWith('!')) return null
+
+  const locals = docDecls(context.state.doc.toString(), from)
   const options = [
+    ...locals,
     ...BUILTINS.map((b) => ({
       label: b.name,
       type: 'function',
@@ -192,9 +231,16 @@ function dawnCompletions(context: CompletionContext): CompletionResult | null {
       info: b.doc,
       boost: 1,
     })),
+    ...CTORS.map((c) => ({ label: c, type: 'type' })),
     ...[...KEYWORDS].map((k) => ({ label: k, type: 'keyword' })),
   ]
-  return { from: word.from, options, validFor: /^[A-Za-z0-9_]*$/ }
+  // An uppercase prefix means a type or constructor — lowercase suggestions
+  // would just bury the real matches.
+  const typed = word?.text ?? ''
+  const filtered = /^[A-Z]/.test(typed)
+    ? options.filter((o) => /^[A-Z]/.test(o.label))
+    : options
+  return { from, options: filtered, validFor: /^[A-Za-z0-9_]*$/ }
 }
 
 export function dawn(): LanguageSupport {

@@ -51,5 +51,18 @@ pub fn render_outcome(o: Outcome) -> String =
       obj([("ok", JBool(false)), ("phase", JStr("timeout")), ("output", JStr(output))])
   }
 
+# /check responses: a compile failure uses the exact same shape as /run's, so
+# the client parses one diagnostics format; success is a bare all-clear (the
+# program never ran, so there is no exit code or output to report).
+pub fn render_check(o: Outcome) -> String =
+  match o {
+    Compiled(_, _, _, ms) ->
+      obj([("ok", JBool(true)), ("phase", JStr("check")), ("ms", JNum(to_float(ms)))])
+    CompileError(output) ->
+      obj([("ok", JBool(false)), ("phase", JStr("compile")), ("output", JStr(output))])
+    Timeout(output) ->
+      obj([("ok", JBool(false)), ("phase", JStr("timeout")), ("output", JStr(output))])
+  }
+
 pub fn render_error(message: String) -> String =
   render(JObj(map_from([("ok", JBool(false)), ("phase", JStr("error")), ("output", JStr(message))])))
