@@ -917,7 +917,9 @@ class Checker(
                     val c = best.single().first
                     e.javaCtorRef = c
                     finalizeSams(c.parameterTypes)
-                    TJava(cls.name, cls) // .new returns T — a constructor never returns null
+                    // .new returns T — a constructor never returns null; a constructed
+                    // java.lang.String is an ordinary Dawn String
+                    if (cls == String::class.java) TString else TJava(cls.name, cls)
                 }
             }
         }
@@ -966,11 +968,9 @@ class Checker(
             error("`char` returns are not supported in v0.1", e.nameSpan,
                 "there is no char type; wrap the call in the standard library instead")
         String::class.java -> TAdt(OPTION_ADT, listOf(TString))
-        else ->
-            if (rt.isArray) error("array returns are not supported in v0.1", e.nameSpan)
-            // not-imported classes are still usable as opaque values; importing
-            // them is only needed to write the type name in a signature
-            else TAdt(OPTION_ADT, listOf(TJava(rt.name, rt)))
+        // not-imported classes and arrays (spec §9.5) are still usable as opaque
+        // values; importing is only needed to write the type name in a signature
+        else -> TAdt(OPTION_ADT, listOf(TJava(rt.name, rt)))
     }
 
     /** The single abstract method of a functional interface, or null (spec §9.4). */

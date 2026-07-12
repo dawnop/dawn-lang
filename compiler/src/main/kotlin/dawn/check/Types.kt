@@ -115,8 +115,13 @@ sealed class Type(val display: String) {
         override fun hashCode(): Int = elem.hashCode() + 17
     }
 
-    /** An opaque imported Java class (spec §9). Identity is the fully-qualified name. */
-    class TJava(val fqcn: String, val cls: Class<*>) : Type(fqcn.substringAfterLast('.')) {
+    /** An opaque imported Java class (spec §9). Identity is the fully-qualified name.
+     *  Arrays ride along as opaque values (spec §9.5): fqcn is the JVM name ("[B"),
+     *  the display is readable ("byte[]", "String[]"). */
+    class TJava(val fqcn: String, val cls: Class<*>) : Type(
+        if (cls.isArray) (cls.canonicalName ?: fqcn).substringAfterLast('.')
+        else fqcn.substringAfterLast('.'),
+    ) {
         override fun equals(other: Any?): Boolean = other is TJava && other.fqcn == fqcn
         override fun hashCode(): Int = fqcn.hashCode()
         val internalName: String get() = fqcn.replace('.', '/')

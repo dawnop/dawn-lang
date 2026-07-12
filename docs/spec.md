@@ -566,7 +566,7 @@ use java "java.nio.file.Files"
 use java "java.nio.file.Path"
 
 fn slurp(p: String) -> String !io = {
-  let bytes = Files.readAllBytes(Path.of(p)).expect("readable")   # byte[]，不透明
+  let bytes = Files.readAllBytes(Path.of(p).expect("path")).expect("readable")   # byte[]，不透明
   String.new(bytes, "UTF-8")
 }
 ```

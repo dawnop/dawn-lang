@@ -470,7 +470,7 @@ class CodeGen(
         is TMap -> "L$JMAP;"
         is TSet -> "L$JSET;"
         is TTuple -> "L${tupleClass(t.elems.size)};"
-        is TJava -> "L${t.internalName};"
+        is TJava -> if (t.cls.isArray) t.internalName else "L${t.internalName};" // "[B" is its own descriptor
         is TFn -> "L${fnIface(t.params.size)};"
     }
 

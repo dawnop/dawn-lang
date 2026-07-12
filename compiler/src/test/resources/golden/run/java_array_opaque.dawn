@@ -1,0 +1,15 @@
+# Opaque array pass-through (spec §9.5): byte[] flows out of Base64.decode,
+# through Array.getLength (widened to Object), into String.new(byte[], String)
+# and back through encodeToString(byte[]).
+use java "java.util.Base64"
+use java "java.lang.String"
+use java "java.lang.reflect.Array"
+
+pub fn main() -> Unit !io = {
+  let dec = Base64.getDecoder().expect("decoder")
+  let bytes = dec.decode("aGVsbG8sIGRhd24=").expect("bytes")
+  println(to_string(Array.getLength(bytes)))
+  println(String.new(bytes, "UTF-8"))
+  let enc = Base64.getEncoder().expect("encoder")
+  println(enc.encodeToString(bytes).expect("b64"))
+}
