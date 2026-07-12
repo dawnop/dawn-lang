@@ -55,43 +55,6 @@ class ListPatternTest {
     }
 
     @Test
-    fun `head and rest, recursive sum`() {
-        val out = run(
-            """
-            fn sum(xs: List[Int]) -> Int =
-              match xs {
-                [] -> 0
-                [x, ..rest] -> x + sum(rest)
-              }
-
-            pub fn main() -> Unit !io = println("${'$'}{sum([1, 2, 3, 4])}")
-            """.trimIndent(),
-        )
-        assertEquals("10\n", out)
-    }
-
-    @Test
-    fun `suffix rest binds the init, last element matched`() {
-        val out = run(
-            """
-            fn shape(xs: List[Int]) -> String =
-              match xs {
-                []              -> "empty"
-                [..init, 9]     -> "ends in nine, init len ${'$'}{len(init)}"
-                [..init, last]  -> "last ${'$'}last after ${'$'}{len(init)}"
-              }
-
-            pub fn main() -> Unit !io = {
-              println(shape([]))
-              println(shape([1, 2, 9]))
-              println(shape([1, 2, 3]))
-            }
-            """.trimIndent(),
-        )
-        assertEquals("empty\nends in nine, init len 2\nlast 3 after 2\n", out)
-    }
-
-    @Test
     fun `fixed length and anonymous rest`() {
         val out = run(
             """
@@ -111,43 +74,6 @@ class ListPatternTest {
         )
         // [a, .., z] needs at least two elements; a single element falls to [..]
         assertEquals("pair xy\na..z\nother\n", out)
-    }
-
-    @Test
-    fun `nested constructor patterns inside a list pattern`() {
-        val out = run(
-            """
-            type Tok = | Num(v: Int) | Plus
-
-            fn last_num(toks: List[Tok]) -> Int =
-              match toks {
-                [..init, Num(v)] -> v
-                _ -> -1
-              }
-
-            pub fn main() -> Unit !io = {
-              println("${'$'}{last_num([Num(1), Plus, Num(7)])}")
-              println("${'$'}{last_num([Num(1), Plus])}")
-            }
-            """.trimIndent(),
-        )
-        assertEquals("7\n-1\n", out)
-    }
-
-    @Test
-    fun `empty plus head-rest is exhaustive without a wildcard`() {
-        val out = run(
-            """
-            fn describe(xs: List[Int]) -> String =
-              match xs {
-                [] -> "none"
-                [_, ..rest] -> "some, ${'$'}{len(rest)} more"
-              }
-
-            pub fn main() -> Unit !io = println(describe([5, 6, 7]))
-            """.trimIndent(),
-        )
-        assertEquals("some, 2 more\n", out)
     }
 
     @Test

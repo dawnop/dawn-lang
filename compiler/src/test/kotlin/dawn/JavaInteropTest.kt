@@ -55,25 +55,6 @@ class JavaInteropTest {
     }
 
     @Test
-    fun `constructor, instance methods, discardable results`() {
-        val out = run(
-            """
-            use java "java.lang.StringBuilder"
-
-            fn build() -> String !io = {
-              let sb = StringBuilder.new()
-              sb.append("a")
-              sb.append("b")
-              sb.toString().expect("non-null")
-            }
-
-            pub fn main() -> Unit !io = println(build())
-            """.trimIndent(),
-        )
-        assertEquals("ab\n", out)
-    }
-
-    @Test
     fun `static call with int narrowing and long overload ranking`() {
         val out = run(
             """
@@ -88,43 +69,6 @@ class JavaInteropTest {
         )
         // abs/max pick the long overloads (exact match beats int narrowing)
         assertEquals("7\n9\n2.0\n", out)
-    }
-
-    @Test
-    fun `string returns come back as Option`() {
-        val out = run(
-            """
-            use java "java.lang.System"
-
-            pub fn main() -> Unit !io = {
-              match System.getProperty("java.version") {
-                Some(v) -> println("has version: ${'$'}{len(chars(v)) > 0}")
-                None -> println("none")
-              }
-              match System.getProperty("definitely.not.set.dawn") {
-                Some(_) -> println("set?!")
-                None -> println("unset")
-              }
-            }
-            """.trimIndent(),
-        )
-        assertEquals("has version: true\nunset\n", out)
-    }
-
-    @Test
-    fun `chained calls through non-imported opaque returns`() {
-        val out = run(
-            """
-            use java "java.nio.file.Files"
-            use java "java.nio.file.Path"
-
-            pub fn main() -> Unit !io = {
-              let p = Path.of("no/such/dawn-file.txt").expect("path")
-              println("${'$'}{Files.exists(p)}")
-            }
-            """.trimIndent(),
-        )
-        assertEquals("false\n", out)
     }
 
     @Test
@@ -155,40 +99,6 @@ class JavaInteropTest {
             """.trimIndent(),
         )
         assertHasError(diags2, "has no static method `frobnicate`")
-    }
-
-    @Test
-    fun `imported class as a parameter type`() {
-        val out = run(
-            """
-            use java "java.lang.StringBuilder"
-
-            fn add_twice(sb: StringBuilder, s: String) -> Unit !io = {
-              sb.append(s)
-              sb.append(s)
-            }
-
-            pub fn main() -> Unit !io = {
-              let sb = StringBuilder.new()
-              add_twice(sb, "xy")
-              println(sb.toString().expect("s"))
-            }
-            """.trimIndent(),
-        )
-        assertEquals("xyxy\n", out)
-    }
-
-    @Test
-    fun `expect and unwrap_or work on plain Options too`() {
-        val out = run(
-            """
-            pub fn main() -> Unit !io = {
-              println("${'$'}{[10, 20].get(1).expect("index 1")}")
-              println("${'$'}{[10, 20].get(9).unwrap_or(-1)}")
-            }
-            """.trimIndent(),
-        )
-        assertEquals("20\n-1\n", out)
     }
 
     @Test

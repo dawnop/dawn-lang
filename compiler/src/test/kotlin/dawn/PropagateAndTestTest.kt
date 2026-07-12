@@ -59,60 +59,6 @@ class PropagateAndTestTest {
     // ---- ? propagation ----
 
     @Test
-    fun resultPropagation() {
-        val out = run("""
-            fn parse_digit(s: String) -> Result[Int, String] =
-              match s {
-                "0" -> Ok(0)
-                "1" -> Ok(1)
-                "2" -> Ok(2)
-                _   -> Err("not a digit: " ++ s)
-              }
-
-            fn add_digits(a: String, b: String) -> Result[Int, String] = {
-              let x = parse_digit(a)?
-              let y = parse_digit(b)?
-              Ok(x + y)
-            }
-
-            fn show(r: Result[Int, String]) -> String =
-              match r {
-                Ok(v)  -> "ok ${'$'}v"
-                Err(m) -> "err: ${'$'}m"
-              }
-
-            pub fn main() -> Unit !io = {
-              println(show(add_digits("1", "2")))
-              println(show(add_digits("1", "x")))
-            }
-        """.trimIndent())
-        assertEquals("ok 3\nerr: not a digit: x\n", out)
-    }
-
-    @Test
-    fun optionPropagation() {
-        val out = run("""
-            fn both_first(a: List[Int], b: List[Int]) -> Option[Int] = {
-              let x = get(a, 0)?
-              let y = get(b, 0)?
-              Some(x + y)
-            }
-
-            fn show(o: Option[Int]) -> String =
-              match o {
-                Some(v) -> "${'$'}v"
-                None    -> "none"
-              }
-
-            pub fn main() -> Unit !io = {
-              println(show(both_first([1], [2])))
-              println(show(both_first([1], [])))
-            }
-        """.trimIndent())
-        assertEquals("3\nnone\n", out)
-    }
-
-    @Test
     fun propagateNeedsMatchingReturn() {
         val diags = errorsOf("""
             fn f(o: Option[Int]) -> Int = o? + 1

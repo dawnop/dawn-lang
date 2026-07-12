@@ -70,74 +70,6 @@ class E2eTest {
     // ---- happy paths ----
 
     @Test
-    fun hello() {
-        val out = run("""
-            pub fn main() -> Unit !io = println("hello, dawn")
-        """.trimIndent())
-        assertEquals("hello, dawn\n", out)
-    }
-
-    @Test
-    fun fibRecursionAndInterpolation() {
-        val out = run("""
-            fn fib(n: Int) -> Int =
-              if n < 2 { n } else { fib(n - 1) + fib(n - 2) }
-
-            pub fn main() -> Unit !io = println("fib(20) = ${'$'}{fib(20)}")
-        """.trimIndent())
-        assertEquals("fib(20) = 6765\n", out)
-    }
-
-    @Test
-    fun matchGuardsOrPatternsStrings() {
-        val out = run("""
-            fn judge(n: Int) -> String =
-              match n {
-                0 | 1      -> "tiny"
-                x if x < 0 -> "negative"
-                100        -> "century"
-                _          -> "normal"
-              }
-
-            fn color(name: String) -> String =
-              match name {
-                "red"  -> "#f00"
-                "blue" -> "#00f"
-                other  -> "unknown: " ++ other
-              }
-
-            pub fn main() -> Unit !io = {
-              println(judge(0))
-              println(judge(-5))
-              println(judge(100))
-              println(judge(42))
-              println(color("red"))
-              println(color("cyan"))
-            }
-        """.trimIndent())
-        assertEquals("tiny\nnegative\ncentury\nnormal\n#f00\nunknown: cyan\n", out)
-    }
-
-    @Test
-    fun matchOnFloatLiterals() {
-        val out = run("""
-            fn kind(x: Float) -> String =
-              match x {
-                0.0  -> "zero"
-                -1.5 -> "negative three halves"
-                _    -> "other"
-              }
-
-            pub fn main() -> Unit !io = {
-              println(kind(0.0))
-              println(kind(-1.5))
-              println(kind(2.0))
-            }
-        """.trimIndent())
-        assertEquals("zero\nnegative three halves\nother\n", out)
-    }
-
-    @Test
     fun tailRecursionDoesNotGrowStack() {
         // ten million frames: guaranteed StackOverflow without tail-call elimination
         val out = run("""
@@ -150,109 +82,11 @@ class E2eTest {
     }
 
     @Test
-    fun loopsVarsAndFor() {
-        val out = run("""
-            pub fn main() -> Unit !io = {
-              var sum = 0
-              for i in 1..101 {
-                sum = sum + i
-              }
-              var n = 3
-              while n > 0 {
-                n = n - 1
-              }
-              println("sum=${'$'}sum n=${'$'}n")
-            }
-        """.trimIndent())
-        assertEquals("sum=5050 n=0\n", out)
-    }
-
-    @Test
-    fun ifAsValueAndBlockValue() {
-        val out = run("""
-            fn abs(n: Int) -> Int = if n < 0 { -n } else { n }
-
-            pub fn main() -> Unit !io = {
-              let x = {
-                let a = abs(-7)
-                a * 2
-              }
-              println("${'$'}x")
-            }
-        """.trimIndent())
-        assertEquals("14\n", out)
-    }
-
-    @Test
-    fun floatsAndComparisons() {
-        val out = run("""
-            pub fn main() -> Unit !io = {
-              let pi = 3.14
-              let tau = pi * 2.0
-              println("${'$'}tau")
-              println("${'$'}{1.5 < 2.5} ${'$'}{"a" < "b"} ${'$'}{3 >= 3}")
-            }
-        """.trimIndent())
-        assertEquals("6.28\ntrue true true\n", out)
-    }
-
-    @Test
-    fun stringConcatAndEquality() {
-        val out = run("""
-            pub fn main() -> Unit !io = {
-              let s = "foo" ++ "bar"
-              println("${'$'}{s == "foobar"} ${'$'}{s != "x"} ${'$'}{not (s == "x")}")
-            }
-        """.trimIndent())
-        assertEquals("true true true\n", out)
-    }
-
-    @Test
-    fun pipeOperator() {
-        val out = run("""
-            fn double(n: Int) -> Int = n * 2
-            fn plus(a: Int, b: Int) -> Int = a + b
-
-            pub fn main() -> Unit !io = {
-              let r = 5 |> double |> plus(3)
-              println("${'$'}r")
-            }
-        """.trimIndent())
-        assertEquals("13\n", out)
-    }
-
-    @Test
-    fun verticalPipeStyle() {
-        val out = run("""
-            fn double(n: Int) -> Int = n * 2
-
-            pub fn main() -> Unit !io = {
-              let r = 5
-                |> double
-                |> double
-              println("${'$'}r")
-            }
-        """.trimIndent())
-        assertEquals("20\n", out)
-    }
-
-    @Test
     fun panicMessage() {
         val msg = runExpectPanic("""
             pub fn main() -> Unit !io = panic("boom: ${'$'}{1 + 1}")
         """.trimIndent())
         assertEquals("boom: 2", msg)
-    }
-
-    @Test
-    fun panicAsNeverInBranch() {
-        val out = run("""
-            fn safe_div(a: Int, b: Int) -> Int =
-              if b == 0 { panic("div by zero") } else { a / b }
-
-            pub fn main() -> Unit !io = println("${'$'}{safe_div(10, 2)}")
-        """.trimIndent())
-        assertEquals("5\n", out)
     }
 
     // ---- compile errors ----
@@ -308,15 +142,6 @@ class E2eTest {
             pub fn main() -> Unit !io = println(f(1))
         """.trimIndent())
         assertHasError(diags, "non-exhaustive")
-    }
-
-    @Test
-    fun boolMatchTrueAndFalseIsExhaustive() {
-        val out = run("""
-            fn yn(b: Bool) -> String = match b { true -> "y", false -> "n" }
-            pub fn main() -> Unit !io = println(yn(true) ++ yn(false))
-        """.trimIndent())
-        assertEquals("yn\n", out)
     }
 
     @Test

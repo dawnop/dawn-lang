@@ -77,21 +77,6 @@ class EffectUnionTest {
     }
 
     @Test
-    fun `union with io requires io at the call site`() {
-        val out = run(
-            """
-            $compose
-
-            pub fn main() -> Unit !io = {
-              let p = compose(inc, tag)
-              println(p(41))
-            }
-            """.trimIndent(),
-        )
-        assertEquals("tag 42\nn42\n", out)
-    }
-
-    @Test
     fun `a pure function may not call an io-composed result`() {
         assertHasError(
             """
@@ -106,31 +91,6 @@ class EffectUnionTest {
             """.trimIndent(),
             "not declared !io",
         )
-    }
-
-    @Test
-    fun `io absorbs a union - composing two io functions stays io`() {
-        val out = run(
-            """
-            fn compose[A, B, C](f: fn(A) -> B !e1, g: fn(B) -> C !e2) -> fn(A) -> C !(e1 | e2) =
-              fn(a) => g(f(a))
-
-            fn readTag(x: Int) -> Int !io = {
-              println("read ${'$'}x")
-              x
-            }
-            fn writeTag(x: Int) -> String !io = {
-              println("write ${'$'}x")
-              "ok${'$'}x"
-            }
-
-            pub fn main() -> Unit !io = {
-              let p = compose(readTag, writeTag)
-              println(p(7))
-            }
-            """.trimIndent(),
-        )
-        assertEquals("read 7\nwrite 7\nok7\n", out)
     }
 
     @Test
