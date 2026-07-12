@@ -96,7 +96,7 @@ class Parser(
     /** After a broken declaration: skip forward to the next plausible declaration start. */
     private fun syncToNextDecl() {
         if (!at(EOF)) advance() // always make progress
-        while (!at(EOF) && !at(FN) && !at(PUB) && !at(TYPE) && !at(CONST)) advance()
+        while (!at(EOF) && !at(FN) && !at(PUB) && !at(TYPE) && !at(CONST) && !at(TRAIT) && !at(IMPL)) advance()
     }
 
     private fun topDecl(): Decl {
@@ -105,6 +105,11 @@ class Parser(
             FN -> fnDecl(pub)
             TYPE -> typeDecl(pub)
             CONST -> constDecl(pub)
+            TRAIT -> traitDecl(pub)
+            IMPL -> {
+                if (pub) throw err("an impl cannot be pub (its visibility follows the trait)")
+                implDecl()
+            }
             TEST -> {
                 if (pub) throw err("test blocks cannot be pub")
                 testDecl()
@@ -113,7 +118,7 @@ class Parser(
                 if (pub) throw err("use declarations cannot be pub")
                 useDecl()
             }
-            else -> throw err("only declarations (fn, type, const, test) are allowed at module top level")
+            else -> throw err("only declarations (fn, type, const, trait, impl, test) are allowed at module top level")
         }
     }
 
@@ -202,24 +207,42 @@ class Parser(
 
     // ---- type declarations ----
 
-    /** [T, U] on fn/type declarations */
-    private fun typeParams(): List<String> {
+    /** [T, U] on fn/type declarations, with optional bounds on fns: [T: Ord + Show] */
+    private fun typeParams(): List<TypeParamDecl> {
         if (!at(LBRACKET)) return emptyList()
         advance()
-        val names = ArrayList<String>()
+        val out = ArrayList<TypeParamDecl>()
         while (!at(RBRACKET)) {
-            names.add(expect(TYPEIDENT, "a type parameter name (uppercase)").text)
+            val n = expect(TYPEIDENT, "a type parameter name (uppercase)")
+            val bounds = ArrayList<Pair<String, Span>>()
+            if (at(COLON)) {
+                advance()
+                val first = expect(TYPEIDENT, "a trait name after `:`")
+                bounds.add(first.text to first.span)
+                while (at(PLUS)) {
+                    advance()
+                    val b = expect(TYPEIDENT, "a trait name after `+`")
+                    bounds.add(b.text to b.span)
+                }
+            }
+            val end = bounds.lastOrNull()?.second?.end ?: n.span.end
+            out.add(TypeParamDecl(n.text, bounds, Span(n.span.start, end)))
             if (at(COMMA)) advance() else break
         }
         expect(RBRACKET, "`]`")
-        if (names.isEmpty()) throw err("type parameter list cannot be empty")
-        return names
+        if (out.isEmpty()) throw err("type parameter list cannot be empty")
+        return out
     }
 
     private fun typeDecl(pub: Boolean): TypeDecl {
         val kw = expect(TYPE, "`type`")
         val name = expect(TYPEIDENT, "a type name (uppercase)")
-        val tparams = typeParams()
+        val tparamDecls = typeParams()
+        tparamDecls.firstOrNull { it.bounds.isNotEmpty() }?.let {
+            throw DawnError("type declarations cannot constrain their type parameters", it.span,
+                "trait bounds go on the functions that use the type: fn f[T: Ord](...)")
+        }
+        val tparams = tparamDecls.map { it.name }
         expect(EQ, "`=`")
         if (at(LBRACE)) return recordDecl(pub, kw, name, tparams)
         // a type alias: an RHS that cannot begin a constructor list — a fn type,
@@ -319,26 +342,21 @@ class Parser(
         return CtorDecl(name.text, fields, Span(name.span.start, end), name.span)
     }
 
-    private fun fnDecl(pub: Boolean): FnDecl {
+    private fun fnDecl(pub: Boolean, inImpl: Boolean = false): FnDecl {
         val fnTok = expect(FN, "`fn`")
         val nameTok = expect(IDENT, "a function name (lowercase)")
         val tparams = typeParams()
+        if (inImpl && tparams.isNotEmpty())
+            throw DawnError("impl methods cannot declare their own type parameters", tparams.first().span)
         expect(LPAREN, "`(`")
-        val params = ArrayList<Param>()
-        skipNewlines()
-        while (!at(RPAREN)) {
-            val pName = expect(IDENT, "a parameter name")
-            expect(COLON, "`:` (top-level function parameters must be typed)")
-            val pType = typeRef()
-            params.add(Param(pName.text, pType, pName.span))
-            skipNewlines()
-            if (at(COMMA)) { advance(); skipNewlines() } else break
-        }
+        val params = typedParams("top-level function")
         expect(RPAREN, "`)`")
         // pub functions are API: their full signature is the contract. Private
-        // functions may leave the return type (and effect) to inference.
+        // functions may leave the return type (and effect) to inference. Impl
+        // methods must repeat the trait's signature in full.
         val ret: TypeRef? = when {
             at(ARROW) -> { advance(); typeRef() }
+            inImpl -> { expect(ARROW, "`->` (impl methods must declare their full signature)"); null }
             pub -> { expect(ARROW, "`->` (pub functions must declare a return type)"); null }
             else -> null
         }
@@ -348,6 +366,95 @@ class Parser(
         val body = expression()
         return FnDecl(pub, nameTok.text, tparams, params, ret, declaredEff, body,
             Span(fnTok.span.start, body.span.end), nameTok.span)
+    }
+
+    /** name: Type, ... — the shared typed parameter list of fn/trait declarations */
+    private fun typedParams(what: String): List<Param> {
+        val params = ArrayList<Param>()
+        skipNewlines()
+        while (!at(RPAREN)) {
+            val pName = expect(IDENT, "a parameter name")
+            expect(COLON, "`:` ($what parameters must be typed)")
+            val pType = typeRef()
+            params.add(Param(pName.text, pType, pName.span))
+            skipNewlines()
+            if (at(COMMA)) { advance(); skipNewlines() } else break
+        }
+        return params
+    }
+
+    // ---- trait and impl declarations ----
+
+    /** trait Ord[T] { fn cmp(a: T, b: T) -> Int ... } — exactly one type parameter */
+    private fun traitDecl(pub: Boolean): TraitDecl {
+        val kw = expect(TRAIT, "`trait`")
+        val name = expect(TYPEIDENT, "a trait name (uppercase)")
+        expect(LBRACKET, "`[` (a trait declares its subject type parameter: trait ${name.text}[T])")
+        val tp = expect(TYPEIDENT, "a type parameter name (uppercase)")
+        if (at(COMMA))
+            throw err("a trait has exactly one type parameter")
+        if (at(COLON))
+            throw err("the trait's own type parameter cannot have bounds",
+                "supertraits are not supported")
+        expect(RBRACKET, "`]`")
+        skipNewlines()
+        expect(LBRACE, "`{` (the trait body)")
+        skipNewlines()
+        val methods = ArrayList<TraitMethod>()
+        while (!at(RBRACE) && !at(EOF)) {
+            methods.add(traitMethod())
+            expectSeparator()
+        }
+        val close = expect(RBRACE, "`}`")
+        if (methods.isEmpty())
+            throw DawnError("a trait must declare at least one method", Span(kw.span.start, close.span.end))
+        return TraitDecl(pub, name.text, tp.text, tp.span, methods,
+            Span(kw.span.start, close.span.end), name.span)
+    }
+
+    /** fn cmp(a: T, b: T) -> Int [!io] [= default-body] */
+    private fun traitMethod(): TraitMethod {
+        val fnTok = expect(FN, "`fn` (a trait body only contains method declarations)")
+        val nameTok = expect(IDENT, "a method name (lowercase)")
+        if (at(LBRACKET))
+            throw err("trait methods cannot declare their own type parameters",
+                "the trait's subject type parameter is already in scope")
+        expect(LPAREN, "`(`")
+        val params = typedParams("trait method")
+        expect(RPAREN, "`)`")
+        expect(ARROW, "`->` (trait methods must declare a return type)")
+        val ret = typeRef()
+        val declaredEff = parseEffect()
+        var body: Expr? = null
+        if (at(EQ)) {
+            advance()
+            skipNewlines()
+            body = expression()
+        }
+        val end = body?.span?.end ?: peek(-1).span.end
+        return TraitMethod(nameTok.text, params, ret, declaredEff, body,
+            Span(fnTok.span.start, end), nameTok.span)
+    }
+
+    /** impl Ord[Point] { fn cmp(a: Point, b: Point) -> Int = ... } */
+    private fun implDecl(): ImplDecl {
+        val kw = expect(IMPL, "`impl`")
+        val trait = expect(TYPEIDENT, "a trait name (uppercase)")
+        expect(LBRACKET, "`[` (an impl names its subject type: impl ${trait.text}[Point])")
+        val subject = typeRef()
+        expect(RBRACKET, "`]`")
+        skipNewlines()
+        expect(LBRACE, "`{` (the impl body)")
+        skipNewlines()
+        val methods = ArrayList<FnDecl>()
+        while (!at(RBRACE) && !at(EOF)) {
+            if (at(PUB))
+                throw err("impl methods cannot be pub (their visibility follows the trait)")
+            methods.add(fnDecl(pub = false, inImpl = true))
+            expectSeparator()
+        }
+        val close = expect(RBRACE, "`}`")
+        return ImplDecl(trait.text, trait.span, subject, methods, Span(kw.span.start, close.span.end))
     }
 
     private fun typeRef(): TypeRef {

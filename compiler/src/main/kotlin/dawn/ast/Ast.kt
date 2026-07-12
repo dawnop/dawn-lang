@@ -16,6 +16,8 @@ class Module(
     val types: List<TypeDecl> by lazy { decls.filterIsInstance<TypeDecl>() }
     val tests: List<TestDecl> by lazy { decls.filterIsInstance<TestDecl>() }
     val consts: List<ConstDecl> by lazy { decls.filterIsInstance<ConstDecl>() }
+    val traits: List<TraitDecl> by lazy { decls.filterIsInstance<TraitDecl>() }
+    val impls: List<ImplDecl> by lazy { decls.filterIsInstance<ImplDecl>() }
     val javaUses: List<UseJavaDecl> by lazy { decls.filterIsInstance<UseJavaDecl>() }
     val moduleUses: List<UseModuleDecl> by lazy { decls.filterIsInstance<UseModuleDecl>() }
 }
@@ -49,11 +51,17 @@ class FnTypeRef(
     span: Span,
 ) : TypeRef(span)
 
+/**
+ * One declared type parameter with optional trait bounds:
+ * `T` or `T: Ord` or `T: Ord + Show` (bounds only on fn declarations).
+ */
+class TypeParamDecl(val name: String, val bounds: List<Pair<String, Span>>, val span: Span)
+
 class FnDecl(
     pub: Boolean,
     name: String,
-    /** type parameter names: fn map[T, U](...) */
-    val typeParams: List<String>,
+    /** type parameters: fn map[T, U](...), possibly bounded: fn sort[T: Ord](...) */
+    val typeParams: List<TypeParamDecl>,
     val params: List<Param>,
     /** null = inferred from the body (private functions only, spec §3.1) */
     val retType: TypeRef?,
@@ -110,6 +118,52 @@ class ConstDecl(
     /** source file of the declaring module (go-to-definition); null = current file */
     var srcPath: String? = null
 }
+
+/**
+ * trait Ord[T] { fn cmp(a: T, b: T) -> Int ... } — a single-parameter typeclass.
+ * Method names live in the module's function namespace (same conflict rules as
+ * top-level fns); a method with a body is a default method.
+ */
+class TraitDecl(
+    pub: Boolean,
+    name: String,
+    /** the subject type parameter (exactly one): the T in trait Ord[T] */
+    val typeParam: String,
+    val typeParamSpan: Span,
+    val methods: List<TraitMethod>,
+    span: Span,
+    nameSpan: Span,
+) : Decl(pub, name, span, nameSpan)
+
+/** One method of a trait: a full signature, plus an optional default body. */
+class TraitMethod(
+    val name: String,
+    val params: List<Param>,
+    val retType: TypeRef,
+    /** declared effect atoms: empty (pure) or ["io"] — effect variables are not allowed */
+    val declaredEff: List<String>,
+    /** non-null = a default method the impl may omit */
+    val body: Expr?,
+    val span: Span,
+    val nameSpan: Span,
+) {
+    /** resolved signature, filled by the checker */
+    var sig: dawn.check.FnSig? = null
+}
+
+/**
+ * impl Ord[Point] { fn cmp(a: Point, b: Point) -> Int = ... } — provides a
+ * trait's methods for one concrete type. Never pub (visibility follows the
+ * trait); methods are full FnDecls with mandatory signatures and no own
+ * type parameters.
+ */
+class ImplDecl(
+    val traitName: String,
+    val traitSpan: Span,
+    val subject: TypeRef,
+    val methods: List<FnDecl>,
+    span: Span,
+) : Decl(pub = false, name = traitName, span = span, nameSpan = traitSpan)
 
 /** use java "java.lang.StringBuilder" (spec §9): an opaque type + a static namespace */
 class UseJavaDecl(

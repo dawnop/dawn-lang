@@ -70,6 +70,17 @@ private class TargetQuery(private val analysis: Analyzed, private val offset: In
                     }
                 }
             }
+            is TraitDecl -> {
+                offer(d.nameSpan, "trait ${d.name}[${d.typeParam}]", d.nameSpan)
+                for (m in d.methods) {
+                    m.sig?.let { offer(m.nameSpan, it.render(), m.nameSpan) }
+                    m.body?.let { visitExpr(it) }
+                }
+            }
+            is ImplDecl -> {
+                offer(d.traitSpan, "impl ${d.traitName}[...]", d.traitSpan)
+                for (m in d.methods) visitDecl(m)
+            }
             is TypeDecl -> {
                 val info = analysis.types[d.name]
                 val summary = info?.ctors?.joinToString(" | ") { it.name } ?: ""

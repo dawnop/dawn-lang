@@ -201,9 +201,9 @@ class Checker(
         }
         // 3. function signatures
         for (d in module.fns) {
-            if (d.typeParams.toSet().size != d.typeParams.size)
+            if (d.typeParams.map { it.name }.toSet().size != d.typeParams.size)
                 sink.error("duplicate type parameter names", d.nameSpan)
-            val tvars = d.typeParams.map { TVar(it) }
+            val tvars = d.typeParams.map { TVar(it.name) }
             val tp = tvars.associateBy { it.name }
             val ev = HashMap<String, Eff.Var>()
             val eff = resolveEff(d.declaredEff, ev)
