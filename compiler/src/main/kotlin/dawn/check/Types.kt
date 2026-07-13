@@ -213,6 +213,12 @@ class AdtInfo(
     /** `derive Show` requested: the type gets a generated to_string / toString (spec §4.3) */
     var derivesShow: Boolean = false
 
+    /** `derive Ord` requested: the checker registers a field-lexicographic Ord impl */
+    var derivesOrd: Boolean = false
+
+    /** the program's unique Ord impl for this type, if any (derived or explicit) */
+    var ordImpl: ImplInfo? = null
+
     /**
      * JVM class of the module that defines this type (spec §12.2), used to prefix
      * its class name in a multi-module program. Null = prelude or single-file
@@ -360,6 +366,21 @@ val BUILTINS: Map<String, FnSig> = run {
             Type.TList(t), e, isBuiltin = true, typeParams = listOf(t)),
         FnSig("fold", listOf(Type.TList(t), a, Type.TFn(listOf(a, t), a, e)), listOf("xs", "init", "f"),
             a, e, isBuiltin = true, typeParams = listOf(t, a)),
+        // core/list ordering (docs/trait.md): Ord-bounded builtins take witnesses like any call
+        FnSig("sort", listOf(list(t)), listOf("xs"), list(t), Eff.Pure, isBuiltin = true,
+            typeParams = listOf(t), constraints = listOf(listOf(ORD_TRAIT))),
+        FnSig("sort_by", listOf(list(t), Type.TFn(listOf(t, t), Type.TInt, e)), listOf("xs", "cmp"),
+            list(t), e, isBuiltin = true, typeParams = listOf(t)),
+        FnSig("max", listOf(list(t)), listOf("xs"), opt(t), Eff.Pure, isBuiltin = true,
+            typeParams = listOf(t), constraints = listOf(listOf(ORD_TRAIT))),
+        FnSig("min", listOf(list(t)), listOf("xs"), opt(t), Eff.Pure, isBuiltin = true,
+            typeParams = listOf(t), constraints = listOf(listOf(ORD_TRAIT))),
+        FnSig("max_by", listOf(list(t), Type.TFn(listOf(t), k, e)), listOf("xs", "key"),
+            opt(t), e, isBuiltin = true, typeParams = listOf(t, k),
+            constraints = listOf(emptyList(), listOf(ORD_TRAIT))),
+        FnSig("min_by", listOf(list(t), Type.TFn(listOf(t), k, e)), listOf("xs", "key"),
+            opt(t), e, isBuiltin = true, typeParams = listOf(t, k),
+            constraints = listOf(emptyList(), listOf(ORD_TRAIT))),
         // core/option (spec §11)
         FnSig("expect", listOf(Type.TAdt(OPTION_ADT, listOf(t)), Type.TString), listOf("o", "msg"),
             t, Eff.Pure, isBuiltin = true, typeParams = listOf(t)),

@@ -146,6 +146,12 @@ val BUILTIN_GROUPS: List<Pair<String, List<Pair<String, String>>>> = listOf(
         "map" to "transform every element",
         "filter" to "keep the elements satisfying a predicate",
         "fold" to "reduce from the left with an accumulator",
+        "sort" to "ascending stable sort (elements need Ord)",
+        "sort_by" to "stable sort with a two-argument cmp function",
+        "max" to "the first greatest element; None when empty (elements need Ord)",
+        "min" to "the first least element; None when empty (elements need Ord)",
+        "max_by" to "the first element whose key is greatest; None when empty (keys need Ord)",
+        "min_by" to "the first element whose key is least; None when empty (keys need Ord)",
     ),
     "string" to listOf(
         "to_string" to "render any printable value (numbers, strings, derive Show data)",

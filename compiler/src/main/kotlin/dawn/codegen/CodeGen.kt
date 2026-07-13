@@ -65,6 +65,8 @@ class CodeGen(
 
         const val PANIC_CLASS = "dawn/rt/PanicError"
         const val LISTS_CLASS = "dawn/rt/Lists"
+        const val DICT_CMP_CLASS = "dawn/rt/DictComparator"
+        const val FN_CMP_CLASS = "dawn/rt/FnComparator"
         const val STRINGS_CLASS = "dawn/rt/Strings"
         const val IO_CLASS = "dawn/rt/Io"
         const val SHOW_CLASS = "dawn/rt/Show"
@@ -191,6 +193,14 @@ class CodeGen(
         for (a in PRELUDE_ADTS) genAdt(a, out)
         for (t in PRELUDE_TRAITS) out[trIface(t)] = genTraitInterface(t)
         for (i in PRELUDE_IMPLS) out[implClass(i)] = genPreludeOrdImpl(i)
+        out[DICT_CMP_CLASS] = genComparatorClass(DICT_CMP_CLASS, "L${trIface(ORD_TRAIT)};") { m ->
+            m.visitMethodInsn(INVOKEINTERFACE, trIface(ORD_TRAIT), "cmp", "(L$OBJ;L$OBJ;)J", true)
+        }
+        out[FN_CMP_CLASS] = genComparatorClass(FN_CMP_CLASS, "L${fnIface(2)};") { m ->
+            m.visitMethodInsn(INVOKEINTERFACE, fnIface(2), "apply", erasedApplyDesc(2), true)
+            m.visitTypeInsn(CHECKCAST, "java/lang/Long")
+            m.visitMethodInsn(INVOKEVIRTUAL, "java/lang/Long", "longValue", "()J", false)
+        }
         out[PANIC_CLASS] = genPanicClass()
         out[LISTS_CLASS] = genListsClass()
         out[STRINGS_CLASS] = genStringsClass()
@@ -371,6 +381,10 @@ class CodeGen(
         for (a in ownAdts) genAdt(a, out)
         for (t in module.traits) t.info?.let { out[trIface(it)] = genTraitInterface(it) }
         for (d in module.impls) d.info?.let { out[implClass(it)] = genImplClass(it) }
+        for (a in ownAdts) { // derive Ord singletons
+            val ii = a.ordImpl ?: continue
+            if (ii.derived) out[implClass(ii)] = genImplClass(ii)
+        }
 
         val cw = DawnClassWriter()
         cw.visit(V17, ACC_PUBLIC or ACC_FINAL, className, null, OBJ, null)
@@ -395,6 +409,10 @@ class CodeGen(
                 genTraitDefault(cw, info, m)
                 drainLambdas(cw)
             }
+        }
+        for (a in ownAdts) { // derive Ord cmp statics
+            val ii = a.ordImpl ?: continue
+            if (ii.derived) genDerivedOrdCmp(cw, ii, a)
         }
         if (includeTests) {
             for ((i, t) in module.tests.withIndex()) {
@@ -555,6 +573,9 @@ class CodeGen(
 
     /** a trait default body compiled as a static (erased params + one dict) on the trait's module */
     private fun defaultMethodName(t: TraitInfo, m: String) = "dawn\$default\$${t.name}\$$m"
+
+    /** the concrete descriptor of a derived Ord cmp static */
+    private fun derivedCmpDesc(i: ImplInfo) = "(${descOf(i.subject)}${descOf(i.subject)})J"
 
     /** a fn descriptor with the hidden dictionary params appended (dicts travel as Object) */
     private fun fnDescWithDicts(sig: FnSig): String {
@@ -906,7 +927,15 @@ class CodeGen(
             mv = cw.visitMethod(ACC_PUBLIC, mname, traitMethodDesc(ms.sig), null, null)
             mv.visitCode()
             val provided = i.provided[mname]
-            if (provided != null) {
+            if (i.derived) {
+                // derive Ord: unwrap and call the generated field-lexicographic cmp
+                mv.visitVarInsn(ALOAD, 1)
+                unerase(i.subject)
+                mv.visitVarInsn(ALOAD, 2)
+                unerase(i.subject)
+                mv.visitMethodInsn(INVOKESTATIC, i.owner ?: className, implMethodName(i, "cmp"),
+                    derivedCmpDesc(i), false)
+            } else if (provided != null) {
                 val psig = provided.sig!!
                 var slot = 1 // 0 = this
                 for ((declared, concrete) in ms.sig.paramTypes.zip(psig.paramTypes)) {
@@ -966,6 +995,120 @@ class CodeGen(
                 "(Ljava/lang/String;)I", false)
         }
         mv.visitInsn(I2L)
+    }
+
+    /** small-int push */
+    private fun pushInt(v: Int) {
+        when (v) {
+            in -1..5 -> mv.visitInsn(ICONST_0 + v)
+            in Byte.MIN_VALUE..Byte.MAX_VALUE -> mv.visitIntInsn(BIPUSH, v)
+            else -> mv.visitLdcInsn(v)
+        }
+    }
+
+    /** two same-typed orderable values on the stack → their long cmp result */
+    private fun emitFieldCmp(t: Type) {
+        when {
+            t == TInt || t == TFloat || t == TString -> emitNativeCmp(t)
+            t is TAdt -> {
+                val fi = t.info.ordImpl!! // derive validation guaranteed it
+                val provided = fi.provided["cmp"]
+                when {
+                    fi.derived -> mv.visitMethodInsn(INVOKESTATIC, fi.owner ?: className,
+                        implMethodName(fi, "cmp"), derivedCmpDesc(fi), false)
+                    else -> {
+                        val psig = provided!!.sig!!
+                        mv.visitMethodInsn(INVOKESTATIC, psig.owner ?: className,
+                            implMethodName(fi, "cmp"), methodDesc(psig.paramTypes, psig.ret), false)
+                    }
+                }
+            }
+            else -> throw IllegalStateException("unorderable derived field: $t")
+        }
+    }
+
+    /**
+     * derive Ord: cmp(a, b) compares constructor order first (sum types), then
+     * fields lexicographically. Emitted as a concrete static on the module class.
+     */
+    private fun genDerivedOrdCmp(cw: ClassWriter, i: ImplInfo, info: AdtInfo) {
+        val cls = info.jvmName
+        mv = cw.visitMethod(ACC_PUBLIC or ACC_STATIC, implMethodName(i, "cmp"),
+            derivedCmpDesc(i), null, null)
+        mv.visitCode()
+
+        fun compareFields(sub: String, fields: List<dawn.check.FieldInfo>, aSlot: Int, bSlot: Int) {
+            for (f in fields) {
+                mv.visitVarInsn(ALOAD, aSlot)
+                mv.visitFieldInsn(GETFIELD, sub, f.name, descOf(f.type))
+                mv.visitVarInsn(ALOAD, bSlot)
+                mv.visitFieldInsn(GETFIELD, sub, f.name, descOf(f.type))
+                emitFieldCmp(f.type)
+                val next = Label()
+                mv.visitInsn(DUP2)
+                mv.visitInsn(LCONST_0)
+                mv.visitInsn(LCMP)
+                mv.visitJumpInsn(IFEQ, next)
+                mv.visitInsn(LRETURN)
+                mv.visitLabel(next)
+                mv.visitInsn(POP2)
+            }
+            mv.visitInsn(LCONST_0)
+            mv.visitInsn(LRETURN)
+        }
+
+        if (info.isRecord) {
+            compareFields(cls, info.ctors[0].fields, 0, 1)
+        } else {
+            // constructor tags in declaration order
+            fun emitTagOf(argSlot: Int, store: Int) {
+                val doneTag = Label()
+                for ((idx, c) in info.ctors.withIndex()) {
+                    val next = Label()
+                    mv.visitVarInsn(ALOAD, argSlot)
+                    mv.visitTypeInsn(INSTANCEOF, c.jvmName)
+                    mv.visitJumpInsn(IFEQ, next)
+                    pushInt(idx)
+                    mv.visitVarInsn(ISTORE, store)
+                    mv.visitJumpInsn(GOTO, doneTag)
+                    mv.visitLabel(next)
+                }
+                pushInt(-1) // unreachable: every value is one of the ctors
+                mv.visitVarInsn(ISTORE, store)
+                mv.visitLabel(doneTag)
+            }
+            emitTagOf(0, 2)
+            emitTagOf(1, 3)
+            val sameTag = Label()
+            mv.visitVarInsn(ILOAD, 2)
+            mv.visitVarInsn(ILOAD, 3)
+            mv.visitJumpInsn(IF_ICMPEQ, sameTag)
+            mv.visitVarInsn(ILOAD, 2)
+            mv.visitVarInsn(ILOAD, 3)
+            mv.visitInsn(ISUB)
+            mv.visitInsn(I2L)
+            mv.visitInsn(LRETURN)
+            mv.visitLabel(sameTag)
+            for (c in info.ctors) {
+                if (c.fields.isEmpty()) continue // same no-payload ctor: equal, falls through
+                val next = Label()
+                mv.visitVarInsn(ALOAD, 0)
+                mv.visitTypeInsn(INSTANCEOF, c.jvmName)
+                mv.visitJumpInsn(IFEQ, next)
+                mv.visitVarInsn(ALOAD, 0)
+                mv.visitTypeInsn(CHECKCAST, c.jvmName)
+                mv.visitVarInsn(ASTORE, 4)
+                mv.visitVarInsn(ALOAD, 1)
+                mv.visitTypeInsn(CHECKCAST, c.jvmName)
+                mv.visitVarInsn(ASTORE, 5)
+                compareFields(c.jvmName, c.fields, 4, 5)
+                mv.visitLabel(next)
+            }
+            mv.visitInsn(LCONST_0)
+            mv.visitInsn(LRETURN)
+        }
+        mv.visitMaxs(0, 0)
+        mv.visitEnd()
     }
 
     /** a trait default body: a static with erased params plus the trailing dictionary */
@@ -1201,6 +1344,7 @@ class CodeGen(
         sl.visitEnd()
 
         genListHof(cw)
+        genListOrdering(cw)
 
         val cat = cw.visitMethod(ACC_PUBLIC or ACC_STATIC, "concat", "(L$JLIST;L$JLIST;)L$JLIST;", null, null)
         cat.visitCode()
@@ -1220,6 +1364,200 @@ class CodeGen(
 
         cw.visitEnd()
         return cw.toByteArray()
+    }
+
+    /**
+     * A java.util.Comparator over a Dawn ordering source: an Ord dictionary or a
+     * two-argument cmp function. [emitCmp] receives (source, a, b) on the stack
+     * and must leave the long comparison result.
+     */
+    private fun genComparatorClass(cls: String, srcDesc: String, emitCmp: (MethodVisitor) -> kotlin.Unit): ByteArray {
+        val cw = DawnClassWriter()
+        cw.visit(V17, ACC_PUBLIC or ACC_FINAL, cls, null, OBJ, arrayOf("java/util/Comparator"))
+        cw.visitField(ACC_PRIVATE or ACC_FINAL, "src", srcDesc, null, null).visitEnd()
+        var m = cw.visitMethod(ACC_PUBLIC, "<init>", "($srcDesc)V", null, null)
+        m.visitCode()
+        m.visitVarInsn(ALOAD, 0)
+        m.visitMethodInsn(INVOKESPECIAL, OBJ, "<init>", "()V", false)
+        m.visitVarInsn(ALOAD, 0)
+        m.visitVarInsn(ALOAD, 1)
+        m.visitFieldInsn(PUTFIELD, cls, "src", srcDesc)
+        m.visitInsn(RETURN)
+        m.visitMaxs(0, 0)
+        m.visitEnd()
+        m = cw.visitMethod(ACC_PUBLIC, "compare", "(L$OBJ;L$OBJ;)I", null, null)
+        m.visitCode()
+        m.visitVarInsn(ALOAD, 0)
+        m.visitFieldInsn(GETFIELD, cls, "src", srcDesc)
+        m.visitVarInsn(ALOAD, 1)
+        m.visitVarInsn(ALOAD, 2)
+        emitCmp(m)
+        m.visitMethodInsn(INVOKESTATIC, "java/lang/Long", "signum", "(J)I", false)
+        m.visitInsn(IRETURN)
+        m.visitMaxs(0, 0)
+        m.visitEnd()
+        cw.visitEnd()
+        return cw.toByteArray()
+    }
+
+    /** sort / sort_by / max / min / max_by / min_by for dawn/rt/Lists (docs/trait.md) */
+    private fun genListOrdering(cw: ClassWriter) {
+        // sort(List xs, Object ordDict) -> List — stable (TimSort under the hood)
+        run {
+            val m = cw.visitMethod(ACC_PUBLIC or ACC_STATIC, "sort", "(L$JLIST;L$OBJ;)L$JLIST;", null, null)
+            m.visitCode()
+            m.visitTypeInsn(NEW, ARRAYLIST)
+            m.visitInsn(DUP)
+            m.visitVarInsn(ALOAD, 0)
+            m.visitMethodInsn(INVOKESPECIAL, ARRAYLIST, "<init>", "(Ljava/util/Collection;)V", false)
+            m.visitVarInsn(ASTORE, 2)
+            m.visitVarInsn(ALOAD, 2)
+            m.visitTypeInsn(NEW, DICT_CMP_CLASS)
+            m.visitInsn(DUP)
+            m.visitVarInsn(ALOAD, 1)
+            m.visitTypeInsn(CHECKCAST, trIface(ORD_TRAIT))
+            m.visitMethodInsn(INVOKESPECIAL, DICT_CMP_CLASS, "<init>", "(L${trIface(ORD_TRAIT)};)V", false)
+            m.visitMethodInsn(INVOKEVIRTUAL, ARRAYLIST, "sort", "(Ljava/util/Comparator;)V", false)
+            m.visitVarInsn(ALOAD, 2)
+            m.visitInsn(ARETURN)
+            m.visitMaxs(0, 0)
+            m.visitEnd()
+        }
+        // sortBy(List xs, Fn2 cmp) -> List
+        run {
+            val m = cw.visitMethod(ACC_PUBLIC or ACC_STATIC, "sortBy", "(L$JLIST;L${fnIface(2)};)L$JLIST;", null, null)
+            m.visitCode()
+            m.visitTypeInsn(NEW, ARRAYLIST)
+            m.visitInsn(DUP)
+            m.visitVarInsn(ALOAD, 0)
+            m.visitMethodInsn(INVOKESPECIAL, ARRAYLIST, "<init>", "(Ljava/util/Collection;)V", false)
+            m.visitVarInsn(ASTORE, 2)
+            m.visitVarInsn(ALOAD, 2)
+            m.visitTypeInsn(NEW, FN_CMP_CLASS)
+            m.visitInsn(DUP)
+            m.visitVarInsn(ALOAD, 1)
+            m.visitMethodInsn(INVOKESPECIAL, FN_CMP_CLASS, "<init>", "(L${fnIface(2)};)V", false)
+            m.visitMethodInsn(INVOKEVIRTUAL, ARRAYLIST, "sort", "(Ljava/util/Comparator;)V", false)
+            m.visitVarInsn(ALOAD, 2)
+            m.visitInsn(ARETURN)
+            m.visitMaxs(0, 0)
+            m.visitEnd()
+        }
+        // best(List xs, Object ordDict, int sign) -> Option — the first extreme element
+        run {
+            val m = cw.visitMethod(ACC_PUBLIC or ACC_STATIC, "best", "(L$JLIST;L$OBJ;I)LOption;", null, null)
+            m.visitCode()
+            val none = Label()
+            m.visitVarInsn(ALOAD, 0)
+            m.visitMethodInsn(INVOKEINTERFACE, JLIST, "isEmpty", "()Z", true)
+            m.visitJumpInsn(IFNE, none)
+            m.visitVarInsn(ALOAD, 0)
+            m.visitInsn(ICONST_0)
+            m.visitMethodInsn(INVOKEINTERFACE, JLIST, "get", "(I)L$OBJ;", true)
+            m.visitVarInsn(ASTORE, 3) // best
+            m.visitInsn(ICONST_1)
+            m.visitVarInsn(ISTORE, 4) // i
+            val loop = Label()
+            val done = Label()
+            val keep = Label()
+            m.visitLabel(loop)
+            m.visitVarInsn(ILOAD, 4)
+            m.visitVarInsn(ALOAD, 0)
+            m.visitMethodInsn(INVOKEINTERFACE, JLIST, "size", "()I", true)
+            m.visitJumpInsn(IF_ICMPGE, done)
+            m.visitVarInsn(ALOAD, 0)
+            m.visitVarInsn(ILOAD, 4)
+            m.visitMethodInsn(INVOKEINTERFACE, JLIST, "get", "(I)L$OBJ;", true)
+            m.visitVarInsn(ASTORE, 5) // x
+            m.visitVarInsn(ALOAD, 1)
+            m.visitTypeInsn(CHECKCAST, trIface(ORD_TRAIT))
+            m.visitVarInsn(ALOAD, 5)
+            m.visitVarInsn(ALOAD, 3)
+            m.visitMethodInsn(INVOKEINTERFACE, trIface(ORD_TRAIT), "cmp", "(L$OBJ;L$OBJ;)J", true)
+            m.visitMethodInsn(INVOKESTATIC, "java/lang/Long", "signum", "(J)I", false)
+            m.visitVarInsn(ILOAD, 2)
+            m.visitInsn(IMUL)
+            m.visitJumpInsn(IFLE, keep)
+            m.visitVarInsn(ALOAD, 5)
+            m.visitVarInsn(ASTORE, 3)
+            m.visitLabel(keep)
+            m.visitIincInsn(4, 1)
+            m.visitJumpInsn(GOTO, loop)
+            m.visitLabel(done)
+            m.visitTypeInsn(NEW, "Option\$Some")
+            m.visitInsn(DUP)
+            m.visitVarInsn(ALOAD, 3)
+            m.visitMethodInsn(INVOKESPECIAL, "Option\$Some", "<init>", "(L$OBJ;)V", false)
+            m.visitInsn(ARETURN)
+            m.visitLabel(none)
+            m.visitFieldInsn(GETSTATIC, "Option\$None", "INSTANCE", "LOption\$None;")
+            m.visitInsn(ARETURN)
+            m.visitMaxs(0, 0)
+            m.visitEnd()
+        }
+        // bestBy(List xs, Fn1 key, Object ordDict, int sign) -> Option — keys cached
+        run {
+            val m = cw.visitMethod(ACC_PUBLIC or ACC_STATIC, "bestBy",
+                "(L$JLIST;L${fnIface(1)};L$OBJ;I)LOption;", null, null)
+            m.visitCode()
+            val none = Label()
+            m.visitVarInsn(ALOAD, 0)
+            m.visitMethodInsn(INVOKEINTERFACE, JLIST, "isEmpty", "()Z", true)
+            m.visitJumpInsn(IFNE, none)
+            m.visitVarInsn(ALOAD, 0)
+            m.visitInsn(ICONST_0)
+            m.visitMethodInsn(INVOKEINTERFACE, JLIST, "get", "(I)L$OBJ;", true)
+            m.visitVarInsn(ASTORE, 4) // best
+            m.visitVarInsn(ALOAD, 1)
+            m.visitVarInsn(ALOAD, 4)
+            m.visitMethodInsn(INVOKEINTERFACE, fnIface(1), "apply", erasedApplyDesc(1), true)
+            m.visitVarInsn(ASTORE, 5) // bestKey
+            m.visitInsn(ICONST_1)
+            m.visitVarInsn(ISTORE, 6) // i
+            val loop = Label()
+            val done = Label()
+            val keep = Label()
+            m.visitLabel(loop)
+            m.visitVarInsn(ILOAD, 6)
+            m.visitVarInsn(ALOAD, 0)
+            m.visitMethodInsn(INVOKEINTERFACE, JLIST, "size", "()I", true)
+            m.visitJumpInsn(IF_ICMPGE, done)
+            m.visitVarInsn(ALOAD, 0)
+            m.visitVarInsn(ILOAD, 6)
+            m.visitMethodInsn(INVOKEINTERFACE, JLIST, "get", "(I)L$OBJ;", true)
+            m.visitVarInsn(ASTORE, 7) // x
+            m.visitVarInsn(ALOAD, 1)
+            m.visitVarInsn(ALOAD, 7)
+            m.visitMethodInsn(INVOKEINTERFACE, fnIface(1), "apply", erasedApplyDesc(1), true)
+            m.visitVarInsn(ASTORE, 8) // xKey
+            m.visitVarInsn(ALOAD, 2)
+            m.visitTypeInsn(CHECKCAST, trIface(ORD_TRAIT))
+            m.visitVarInsn(ALOAD, 8)
+            m.visitVarInsn(ALOAD, 5)
+            m.visitMethodInsn(INVOKEINTERFACE, trIface(ORD_TRAIT), "cmp", "(L$OBJ;L$OBJ;)J", true)
+            m.visitMethodInsn(INVOKESTATIC, "java/lang/Long", "signum", "(J)I", false)
+            m.visitVarInsn(ILOAD, 3)
+            m.visitInsn(IMUL)
+            m.visitJumpInsn(IFLE, keep)
+            m.visitVarInsn(ALOAD, 7)
+            m.visitVarInsn(ASTORE, 4)
+            m.visitVarInsn(ALOAD, 8)
+            m.visitVarInsn(ASTORE, 5)
+            m.visitLabel(keep)
+            m.visitIincInsn(6, 1)
+            m.visitJumpInsn(GOTO, loop)
+            m.visitLabel(done)
+            m.visitTypeInsn(NEW, "Option\$Some")
+            m.visitInsn(DUP)
+            m.visitVarInsn(ALOAD, 4)
+            m.visitMethodInsn(INVOKESPECIAL, "Option\$Some", "<init>", "(L$OBJ;)V", false)
+            m.visitInsn(ARETURN)
+            m.visitLabel(none)
+            m.visitFieldInsn(GETSTATIC, "Option\$None", "INSTANCE", "LOption\$None;")
+            m.visitInsn(ARETURN)
+            m.visitMaxs(0, 0)
+            m.visitEnd()
+        }
     }
 
     /** map / filter / fold loops for dawn/rt/Lists */
@@ -2648,6 +2986,7 @@ class CodeGen(
         "range" -> Handle(H_INVOKESTATIC, LISTS_CLASS, "range", "(JJ)L$JLIST;", false)
         "map", "filter" ->
             Handle(H_INVOKESTATIC, LISTS_CLASS, fv.name, "(L$JLIST;L${fnIface(1)};)L$JLIST;", false)
+        "sort_by" -> Handle(H_INVOKESTATIC, LISTS_CLASS, "sortBy", "(L$JLIST;L${fnIface(2)};)L$JLIST;", false)
         "fold" -> Handle(H_INVOKESTATIC, LISTS_CLASS, "fold", "(L$JLIST;L$OBJ;L${fnIface(2)};)L$OBJ;", false)
         "chars" -> Handle(H_INVOKESTATIC, STRINGS_CLASS, "chars", "(Ljava/lang/String;)L$JLIST;", false)
         "join" -> Handle(H_INVOKESTATIC, STRINGS_CLASS, "join", "(L$JLIST;Ljava/lang/String;)Ljava/lang/String;", false)
@@ -3210,6 +3549,11 @@ class CodeGen(
                 val impl = w.impl
                 val provided = impl.provided[e.callee]
                 when {
+                    impl.derived -> {
+                        for (a in e.args) genExpr(a, tail = false) // concrete subject args
+                        mv.visitMethodInsn(INVOKESTATIC, impl.owner ?: className,
+                            implMethodName(impl, e.callee), derivedCmpDesc(impl), false)
+                    }
                     provided != null -> {
                         val psig = provided.sig!!
                         for ((a, pt) in e.args.zip(psig.paramTypes)) {
@@ -3438,6 +3782,35 @@ class CodeGen(
             mv.visitMethodInsn(INVOKESTATIC, LISTS_CLASS, "fold",
                 "(L$JLIST;L$OBJ;L${fnIface(2)};)L$OBJ;", false)
             if (slotsOf(e.type!!) == 0) mv.visitInsn(POP) else unerase(e.type!!)
+            true
+        }
+        "sort" -> {
+            genExpr(e.args[0], tail = false)
+            pushWitness(e.witnesses!!.single())
+            mv.visitMethodInsn(INVOKESTATIC, LISTS_CLASS, "sort", "(L$JLIST;L$OBJ;)L$JLIST;", false)
+            true
+        }
+        "sort_by" -> {
+            genExpr(e.args[0], tail = false)
+            genExpr(e.args[1], tail = false)
+            mv.visitMethodInsn(INVOKESTATIC, LISTS_CLASS, "sortBy",
+                "(L$JLIST;L${fnIface(2)};)L$JLIST;", false)
+            true
+        }
+        "max", "min" -> {
+            genExpr(e.args[0], tail = false)
+            pushWitness(e.witnesses!!.single())
+            mv.visitInsn(if (e.callee == "max") ICONST_1 else ICONST_M1)
+            mv.visitMethodInsn(INVOKESTATIC, LISTS_CLASS, "best", "(L$JLIST;L$OBJ;I)LOption;", false)
+            true
+        }
+        "max_by", "min_by" -> {
+            genExpr(e.args[0], tail = false)
+            genExpr(e.args[1], tail = false)
+            pushWitness(e.witnesses!!.single())
+            mv.visitInsn(if (e.callee == "max_by") ICONST_1 else ICONST_M1)
+            mv.visitMethodInsn(INVOKESTATIC, LISTS_CLASS, "bestBy",
+                "(L$JLIST;L${fnIface(1)};L$OBJ;I)LOption;", false)
             true
         }
         "expect" -> {
@@ -3676,7 +4049,12 @@ class CodeGen(
         when (val w = e.ordWitness!!) {
             is WitnessRef.Concrete -> {
                 val provided = w.impl.provided["cmp"]
-                if (provided != null) {
+                if (w.impl.derived) {
+                    genExpr(e.left, tail = false)
+                    genExpr(e.right, tail = false)
+                    mv.visitMethodInsn(INVOKESTATIC, w.impl.owner ?: className,
+                        implMethodName(w.impl, "cmp"), derivedCmpDesc(w.impl), false)
+                } else if (provided != null) {
                     genExpr(e.left, tail = false)
                     genExpr(e.right, tail = false)
                     val psig = provided.sig!!

@@ -67,14 +67,14 @@ class DeriveShowTest {
     }
 
     @Test
-    fun `only Show can be derived in v0_1`() {
+    fun `only Show and Ord can be derived`() {
         assertHasError(
             """
             type Color = | Red | Green derive Eq
 
             pub fn main() -> Unit !io = println("x")
             """.trimIndent(),
-            "can only derive Show",
+            "Show and Ord can be derived",
         )
     }
 }

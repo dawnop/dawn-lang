@@ -355,6 +355,12 @@ class ComptimeInterp(
             val xs = (args[0] as CValue.VList).elems
             CValue.VList(xs.map { applyFn(args[1], listOf(it), span) })
         }
+        "sort_by" -> {
+            val xs = (args[0] as CValue.VList).elems
+            CValue.VList(xs.sortedWith { a, b ->
+                (applyFn(args[1], listOf(a, b), span) as CValue.VInt).v.coerceIn(-1L, 1L).toInt()
+            })
+        }
         "filter" -> {
             val xs = (args[0] as CValue.VList).elems
             CValue.VList(xs.filter { (applyFn(args[1], listOf(it), span) as CValue.VBool).v })

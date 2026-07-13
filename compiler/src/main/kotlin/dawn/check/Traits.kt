@@ -46,6 +46,9 @@ class ImplInfo(
     /** provided method decls by name (sigs filled during registration) */
     val provided = LinkedHashMap<String, FnDecl>()
 
+    /** a `derive Ord` impl: no source methods; codegen emits the field-lexicographic cmp */
+    var derived: Boolean = false
+
     /** JVM class of the declaring module; null = prelude/single-file */
     var owner: String? = null
 

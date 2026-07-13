@@ -182,8 +182,12 @@ class Checker(
             info.owner = ownerClass
             info.srcPath = srcPath
             for ((trait, span) in d.derives) {
-                if (trait == "Show") info.derivesShow = true
-                else sink.error("unknown derivable trait `$trait`", span, "v0.1 can only derive Show")
+                when (trait) {
+                    "Show" -> info.derivesShow = true
+                    "Ord" -> info.derivesOrd = true
+                    else -> sink.error("unknown derivable trait `$trait`", span,
+                        "Show and Ord can be derived")
+                }
             }
             adts[d.name] = info
             for (c in d.ctors) {
@@ -506,6 +510,23 @@ class Checker(
             for (i in exp.impls) implTable.putIfAbsent(i.trait to i.subject, i)
         }
         val localAdts = module.types.mapNotNull { adts[it.name] }.toHashSet()
+        // derive Ord first, so an explicit impl of the same pair reports as the duplicate
+        for (d in module.types) {
+            val info = d.ctors.firstOrNull()?.info?.adt ?: continue
+            if (!info.derivesOrd) continue
+            val span = d.derives.first { it.first == "Ord" }.second
+            if (info.typeParams.isNotEmpty()) {
+                sink.error("cannot derive Ord for the generic type `${info.name}`", span,
+                    "v1 Ord subjects are non-generic; order concrete values instead")
+                continue
+            }
+            val ii = ImplInfo(ORD_TRAIT, info.type, span, srcPath)
+            ii.owner = ownerClass
+            ii.derived = true
+            implTable[ORD_TRAIT to info.type] = ii
+            localImpls.add(ii)
+            info.ordImpl = ii
+        }
         for (d in module.impls) {
             val tr = traitsByName[d.traitName]
             if (tr == null) {
@@ -544,7 +565,8 @@ class Checker(
             if (prev != null) {
                 val where = prev.srcPath?.takeIf { it != srcPath }?.let { " (previous impl in $it)" } ?: ""
                 sink.error("duplicate impl: `${tr.name}[$subject]` is already implemented$where", d.traitSpan,
-                    "the program allows one impl per trait and type")
+                    if (prev.derived) "`$subject` already derives ${tr.name}; drop the derive or this impl"
+                    else "the program allows one impl per trait and type")
                 continue
             }
             val info = ImplInfo(tr, subject, d.span, srcPath)
@@ -602,6 +624,21 @@ class Checker(
                     })
             implTable[key] = info
             localImpls.add(info)
+            if (tr === ORD_TRAIT && subject is TAdt) subject.info.ordImpl = info
+        }
+        // derive Ord field check, after every impl (derived and explicit) is known
+        for (d in module.types) {
+            val info = d.ctors.firstOrNull()?.info?.adt ?: continue
+            if (!info.derivesOrd || info.ordImpl?.derived != true) continue
+            val span = d.derives.first { it.first == "Ord" }.second
+            for (ci in info.ctors) for (f in ci.fields) {
+                val ok = f.type in listOf(TInt, TFloat, TString) ||
+                    (f.type is TAdt && implTable.containsKey(ORD_TRAIT to f.type))
+                if (!ok)
+                    sink.error("cannot derive Ord for `${info.name}`: field `${f.name}` of type " +
+                        "${f.type} is not orderable", f.defSpan ?: span,
+                        "orderable fields are Int, Float, String, and types with an Ord impl")
+            }
         }
     }
 
