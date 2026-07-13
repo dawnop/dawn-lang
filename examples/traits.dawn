@@ -1,0 +1,72 @@
+# traits acceptance sample (docs/trait.md §6): a trait with a default method,
+# impls for a record and the prelude Ord, bounded generics, operator bridging,
+# derive Ord, and the Ord-bounded list builtins.
+
+trait Describe[T] {
+  fn describe(x: T) -> String
+  fn shout(x: T) -> String = describe(x) ++ "!"
+}
+
+type Card = { rank: Int, name: String } derive Show, Ord
+
+impl Describe[Card] {
+  fn describe(c: Card) -> String = "${c.name} (rank ${c.rank})"
+}
+
+impl Describe[Int] {
+  fn describe(n: Int) -> String = "the number $n"
+}
+
+## The greatest element, described — Ord orders it, Describe renders it.
+fn best_of[T: Ord + Describe](xs: List[T]) -> Option[String] =
+  match max(xs) {
+    Some(x) -> Some(shout(x))
+    None -> None
+  }
+
+fn hand() -> List[Card] = [
+  Card { rank: 3, name: "queen" },
+  Card { rank: 1, name: "pawn" },
+  Card { rank: 2, name: "rook" },
+]
+
+pub fn main() -> Unit !io = {
+  # derive Ord: rank first (field order), so sorting works out of the box
+  let sorted = sort(hand())
+  println("${map(sorted, fn(c) => c.name)}")
+
+  # operators bridge to the derived cmp
+  let pawn = Card { rank: 1, name: "pawn" }
+  let queen = Card { rank: 3, name: "queen" }
+  println("${pawn < queen} ${queen <= pawn}")
+
+  match best_of(hand()) {
+    Some(s) -> println(s)
+    None -> println("empty hand")
+  }
+  match best_of([4, 8, 6]) {
+    Some(s) -> println(s)
+    None -> println("empty")
+  }
+}
+
+test "default methods and UFCS" {
+  let c = Card { rank: 9, name: "king" }
+  assert c.describe() == "king (rank 9)"
+  assert c.shout() == "king (rank 9)!"
+  assert shout(7) == "the number 7!"
+}
+
+test "sorting and extremes" {
+  let ranks = map(sort(hand()), fn(c) => c.rank)
+  assert ranks == [1, 2, 3]
+  assert sort_by([3, 1, 2], fn(a, b) => b - a) == [3, 2, 1]
+  assert min([9, 2, 5]) == Some(2)
+  assert max_by(hand(), fn(c) => c.rank) == Some(Card { rank: 3, name: "queen" })
+}
+
+test "prelude cmp on scalars" {
+  assert cmp(1, 2) < 0
+  assert cmp("b", "a") > 0
+  assert cmp(1.5, 1.5) == 0
+}

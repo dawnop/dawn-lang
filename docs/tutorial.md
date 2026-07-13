@@ -493,5 +493,84 @@ hi
 
 ---
 
+## 15. trait：约束泛型与运算符重载
+
+到目前为止，泛型函数对 `T` 一无所知——不能比较、不能打印、不能调方法。
+**trait** 给类型参数加上能力约束。声明一个 trait，为具体类型写 `impl`，
+然后用 `[T: Trait]` 约束泛型：
+
+```dawn
+trait Area[T] {
+  fn area(s: T) -> Float
+  fn bigger_than(s: T, limit: Float) -> Bool = area(s) > limit
+}
+
+type Rect = { w: Float, h: Float }
+
+impl Area[Rect] {
+  fn area(s: Rect) -> Float = s.w * s.h
+}
+
+fn total_area[T: Area](xs: List[T]) -> Float =
+  fold(xs, 0.0, fn(acc, x) => acc + area(x))
+
+pub fn main() -> Unit !io = {
+  let rooms = [Rect { w: 3.0, h: 4.0 }, Rect { w: 2.0, h: 2.0 }]
+  println(to_string(total_area(rooms)))
+  # trait 方法就是普通函数名，UFCS 点号调用也行
+  println(to_string(rooms[0].bigger_than(10.0)))
+}
+```
+
+```output
+16.0
+true
+```
+
+规则很少：trait 恰有一个类型参数；每个「trait × 类型」全程序**只允许一个 impl**；
+impl 必须写在 trait 或者主体类型所在的模块里（孤儿规则）。带默认体的方法
+（上面的 `bigger_than`）impl 可以不写，写了就是覆盖。
+
+### 排序：`Ord` 与比较运算符
+
+预置 trait `Ord[T]`（唯一方法 `cmp(a: T, b: T) -> Int`，负/零/正表示小于/等于/大于）
+桥接了 `< <= > >=`：`Int`/`Float`/`String` 天生有序，自定义类型给一个 `Ord` impl
+（或直接 `derive Ord`）就能用比较运算符、当 `[T: Ord]` 的实参、喂给排序函数：
+
+```dawn
+type Card = { rank: Int, name: String } derive Show, Ord
+
+fn max2[T: Ord](a: T, b: T) -> T = if a < b { b } else { a }
+
+pub fn main() -> Unit !io = {
+  let hand = [Card { rank: 3, name: "queen" }, Card { rank: 1, name: "pawn" }]
+  # derive Ord 按字段声明顺序逐个比较（和类型先比构造器顺序）
+  println(to_string(hand[1] < hand[0]))
+  println(max2("pear", "apple"))
+  println(to_string(sort([3, 1, 2])))
+  println(to_string(map(sort(hand), fn(c) => c.name)))
+  println(to_string(max_by(hand, fn(c) => c.rank)))
+}
+```
+
+```output
+true
+pear
+[1, 2, 3]
+["pawn", "queen"]
+Some(Card { rank: 3, name: "queen" })
+```
+
+配套的列表函数都是稳定排序、平局取第一个：`sort`/`max`/`min` 要求元素有 `Ord`，
+`sort_by(xs, cmp)` 接自定义比较函数，`max_by`/`min_by(xs, key)` 按键取极值
+（键类型要有 `Ord`）。
+
+v1 的边界：impl 的主体只能是**非泛型**具名类型或 `Int`/`Float`/`Bool`/`String`
+（没有条件 impl，`List[T]` 不能做主体）；trait 方法不能当函数值传递（包一层
+lambda 即可）；comptime 里不能用 trait 约束的调用。完整设计见
+[trait.md](trait.md)。
+
+---
+
 至此你已见过 Dawn 的全部核心特性。更深的规范见
 [spec.md](spec.md)，设计取舍见 [design.md](design.md)。

@@ -69,4 +69,21 @@ class ExamplesTest {
             cls.getDeclaredMethod("dawn\$test\$$i").invoke(null)
         }
     }
+
+    @Test
+    fun `traits dot dawn runs and its test blocks pass`() {
+        val (cls, testCount) = load(examplePath("traits.dawn"))
+        val out = captureOut { cls.getDeclaredMethod("main").invoke(null) }
+        assertEquals(
+            "[\"pawn\", \"rook\", \"queen\"]\n" +
+                "true false\n" +
+                "queen (rank 3)!\n" +
+                "the number 8!\n",
+            out,
+        )
+        assertTrue(testCount > 0, "traits.dawn should have test blocks")
+        for (i in 0 until testCount) {
+            cls.getDeclaredMethod("dawn\$test\$$i").invoke(null)
+        }
+    }
 }

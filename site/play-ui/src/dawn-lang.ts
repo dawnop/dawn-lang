@@ -20,6 +20,7 @@ import { BUILTINS } from './builtins.generated'
 const KEYWORDS = new Set([
   'fn', 'let', 'var', 'type', 'const', 'use', 'java', 'pub', 'match', 'if',
   'else', 'for', 'in', 'while', 'return', 'comptime', 'test', 'assert', 'not', 'derive',
+  'trait', 'impl',
 ])
 
 // Custom tags for the two classes the standard set doesn't cover cleanly: the
@@ -289,7 +290,7 @@ export function dawnCompletions(context: CompletionContext): CompletionResult | 
     }
   }
   if (!word && !context.explicit) return null
-  if (/(?:^|[^\w])(?:fn|let|var|const|type|for|derive)\s+$/.test(before)) return null
+  if (/(?:^|[^\w])(?:fn|let|var|const|type|for|derive|trait)\s+$/.test(before)) return null
   if (/^\s*(?:pub\s+)?use\b/.test(before)) return null
   if (before.endsWith('.')) return null
 

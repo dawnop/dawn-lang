@@ -61,4 +61,38 @@ pub fn main() -> Unit !io = {
 }
 `,
   },
+  {
+    label: 'traits',
+    file: 'traits.dawn',
+    code: `# traits: constrained generics + operator bridging (docs/trait.md)
+type Card = { rank: Int, name: String } derive Show, Ord
+
+trait Describe[T] {
+  fn describe(x: T) -> String
+  fn loud(x: T) -> String = describe(x) ++ "!"  # default method
+}
+
+impl Describe[Card] {
+  fn describe(c: Card) -> String = "\${c.name} (rank \${c.rank})"
+}
+
+fn best[T: Ord + Describe](xs: List[T]) -> String =
+  match max(xs) {
+    Some(x) -> x.loud()
+    None -> "nothing"
+  }
+
+pub fn main() -> Unit !io = {
+  let hand = [
+    Card { rank: 3, name: "queen" },
+    Card { rank: 1, name: "pawn" },
+    Card { rank: 2, name: "rook" },
+  ]
+  # derive Ord compares fields in order, so < and sort just work
+  println(to_string(hand[1] < hand[0]))
+  println(to_string(map(sort(hand), fn(c) => c.name)))
+  println(best(hand))
+}
+`,
+  },
 ]

@@ -1,7 +1,7 @@
-# Trait 方案设计（草案，待定稿）
+# Trait 方案设计（已定稿，2026-07-13 落地）
 
-> 状态：**设计稿**。定稿后本文档的「语言设计」部分并入 `spec.md` 新章节，
-> 决策摘要并入 `design.md`（D9），本文件保留为实现设计与刀法记录。
+> 状态：**已实现**（六刀全部合入 main）。语言规则的规范化摘要在 `spec.md` §3.5，
+> 决策摘要在 `design.md` D9；本文件保留完整的设计推演、实现设计与实现定稿记录（§9）。
 
 ## 0. 一句话
 
@@ -202,10 +202,41 @@ pub fn main() -> Unit !io = {
 
 预计新增测试 ~80-100 项（对齐 M4 的量级）。
 
-## 8. 开放问题（附推荐）
+## 8. 开放问题（已全部按推荐定稿）
 
-1. **`cmp` 返回类型**：`Int`（推荐，够用、无新类型）还是引入 `Ordering` ADT
-   （更表意但多一个 prelude 类型 + match 噪音）？→ 推荐 Int，文档写清负/零/正。
-2. **关键字**：`impl`（推荐，Rust 惯例、搜索友好）还是 `instance`（Haskell 味）？
-3. **约束语法**：`[T: Ord]`（推荐，Rust/Swift 惯例）还是 `[T is Ord]`？
-4. **derive 多 trait 语法**：`derive Show, Ord`（推荐，逗号并列）还是两行 derive？
+1. **`cmp` 返回类型**：`Int` ✅（负/零/正 = 小于/等于/大于）。
+2. **关键字**：`impl` ✅（硬关键字，`trait` 同）。
+3. **约束语法**：`[T: Ord]`，多约束 `[T: Ord + Show]` ✅。
+4. **derive 多 trait 语法**：`derive Show, Ord` 逗号并列 ✅。
+
+## 9. 实现定稿记录（2026-07-13）
+
+六刀提交：`001c971`（语法）→ `e6925d0`（注册/一致性）→ `3849fea`（消解/桥接）→
+`d878b02`（codegen 字典）→ `897e750`（stdlib + derive Ord）→ 本刀（收尾）。
+实现与设计稿的偏差与补充判定，按发现顺序：
+
+- **跨模块重复 impl 结构性不可能**：模块 DAG + 孤儿规则意味着一个 (trait, 类型)
+  的两个合法归属模块互相需要对方的名字（成环）。第三方模块的「重复」在到达
+  一致性检查前就被孤儿规则拦截。一致性表仍保留——拦同模块重复、支撑消解。
+- **prelude 交互**：`Ord` 是 prelude trait，`Int`/`Float`/`String` 的 impl 随语言
+  提供；`impl Ord[Bool]` 无处可写（trait 与主体都在 prelude）——Bool 保持不可
+  排序，这是有意的。用户 trait 以标量为主体的 impl 必须写在该 trait 的模块。
+- **字典即隐藏局部**：受约束函数的每个（类型参数 × 约束）生成一个合成 Symbol
+  （`dictOf` 标记、类型记作该 tvar、擦除后一槽），lambda 捕获走既有机制——
+  `fold(xs, first, fn(acc, x) => ...acc < x...)` 里字典随捕获进闭包，零特判。
+- **去虚化**：具体见证点直接 `invokestatic` 到 impl 静态方法；prelude 标量的
+  `cmp` 内联为 `LCMP`/`DCMPL`/`String.compareTo`。仅 Forward（约束转发）走
+  `invokeinterface`。
+- **Float 的 cmp 与 NaN**：`cmp(NaN, x)` 采用 JVM `DCMPL` 语义（含 NaN 的比较
+  偏负）。运算符路径维持既有语义：标量走原生指令，NaN 的每个有序比较均为 false。
+- **v1 限制落地**：trait 方法/受约束函数不可作函数值（报错建议包 lambda）；
+  comptime 拒绝带 witness 的调用与 impl 排序（字典是运行时构造）；`sort_by`
+  无约束，comptime 可用。
+- **derive Ord**：先于显式 impl 注册（撞车时报 duplicate impl 并提示来自 derive）；
+  字段须为 Int/Float/String 或具 Ord impl 的类型（含跨模块、含其他 derive）；
+  和类型先比构造器声明序（instanceof 标签），再逐字段；泛型主体拒绝。
+- **stdlib**：`sort`/`max`/`min`（要求 `Ord`）、`sort_by`（自定义比较）、
+  `max_by`/`min_by`（键要求 `Ord`，键缓存）；排序 = ArrayList 拷贝 + TimSort
+  （稳定），极值平局取第一个。
+- **测试规模**：六刀新增 ~120 项（parse 22 / check 35 / resolve 27+golden /
+  run 11 / stdlib+derive 16 / 收尾若干），JVM 与 native-image 双跑验证。

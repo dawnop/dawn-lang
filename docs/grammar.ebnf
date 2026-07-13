@@ -6,7 +6,8 @@
 
 module          = { top_decl } ;
 
-top_decl        = use_decl | type_decl | const_decl | fn_decl | test_decl ;
+top_decl        = use_decl | type_decl | const_decl | fn_decl | test_decl
+                | trait_decl | impl_decl ;
 
 (* ---- use ---- *)
 use_decl        = "use" ( java_use | module_use ) ;
@@ -18,8 +19,11 @@ import_item     = IDENT | TYPEIDENT ;
 
 (* ---- type ---- *)
 type_decl       = [ "pub" ] "type" TYPEIDENT [ type_params ]
-                  "=" ( sum_type | record_type | type_expr ) [ "derive" TYPEIDENT ] ;
-type_params     = "[" TYPEIDENT { "," TYPEIDENT } "]" ;
+                  "=" ( sum_type | record_type | type_expr )
+                  [ "derive" TYPEIDENT { "," TYPEIDENT } ] ;      (* Show / Ord *)
+type_params     = "[" type_param { "," type_param } "]" ;
+type_param      = TYPEIDENT [ ":" TYPEIDENT { "+" TYPEIDENT } ] ;
+                  (* 约束 [T: Trait + Trait] 仅 fn 允许; type 声明的参数不带约束 *)
 sum_type        = [ "|" ] variant { "|" variant } ;
 variant         = TYPEIDENT [ "(" field_list ")" ] ;
 record_type     = "{" field_list "}" ;
@@ -45,6 +49,14 @@ param_list      = param { "," param } [ "," ] ;
 param           = IDENT ":" type_expr ;
 
 test_decl       = "test" STRING block ;
+
+(* ---- trait / impl (docs/trait.md) ---- *)
+trait_decl      = [ "pub" ] "trait" TYPEIDENT "[" TYPEIDENT "]"
+                  "{" trait_method { NEWLINE trait_method } "}" ;
+trait_method    = "fn" IDENT "(" [ param_list ] ")" "->" type_expr [ effect ]
+                  [ "=" expr ] ;                                  (* 带 = 即默认体 *)
+impl_decl       = "impl" TYPEIDENT "[" type_expr "]"
+                  "{" { fn_decl } "}" ;                           (* 方法不写 pub/类型参数 *)
 
 (* ---- 语句与块 ---- *)
 block           = "{" { stmt NEWLINE } [ expr ] "}" ;

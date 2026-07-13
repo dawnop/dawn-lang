@@ -63,7 +63,7 @@ private fun lexContext(text: String, pos: Int): Ctx {
     }
 }
 
-private val FRESH_NAME = Regex("(?:^|[^\\w])(?:fn|let|var|const|type|for|derive)\\s+$")
+private val FRESH_NAME = Regex("(?:^|[^\\w])(?:fn|let|var|const|type|for|derive|trait)\\s+$")
 private val USE_LINE = Regex("^\\s*(?:pub\\s+)?use\\b")
 
 internal fun completionsAt(analysis: Analyzed, text: String, offset: Int): List<CompletionItem> {
@@ -97,11 +97,22 @@ internal fun completionsAt(analysis: Analyzed, text: String, offset: Int): List<
         items[name] = item
     }
 
-    // locals of the enclosing function: parameters + binders before the cursor
-    analysis.module.fns.firstOrNull { pos >= it.span.start && pos <= it.span.end }?.let { fn ->
+    // locals of the enclosing function (top-level, impl method, or trait default):
+    // parameters + binders before the cursor
+    val enclosingFns = analysis.module.fns + analysis.module.impls.flatMap { it.methods }
+    enclosingFns.firstOrNull { pos >= it.span.start && pos <= it.span.end }?.let { fn ->
         for (p in fn.params) add(p.name, CompletionItemKind.Variable, p.symbol?.type?.toString(), "0")
         collectBinders(fn.body, pos) { name, detail ->
             add(name, CompletionItemKind.Variable, detail, "0")
+        }
+    }
+    for (t in analysis.module.traits) {
+        for (m in t.methods) {
+            if (m.body == null || pos < m.span.start || pos > m.span.end) continue
+            for (p in m.params) add(p.name, CompletionItemKind.Variable, p.symbol?.type?.toString(), "0")
+            collectBinders(m.body!!, pos) { name, detail ->
+                add(name, CompletionItemKind.Variable, detail, "0")
+            }
         }
     }
     for (sig in analysis.functions.values)
@@ -115,6 +126,10 @@ internal fun completionsAt(analysis: Analyzed, text: String, offset: Int): List<
             add(c.name, CompletionItemKind.EnumMember, detail, "1")
         }
     }
+    for (d in analysis.module.traits)
+        add(d.name, CompletionItemKind.Interface, "trait ${d.name}[${d.typeParam}]", "1")
+    for (t in dawn.check.PRELUDE_TRAITS)
+        add(t.name, CompletionItemKind.Interface, "trait ${t.name}[${t.tvar.name}]", "2")
     for (sig in BUILTINS.values) add(sig.name, CompletionItemKind.Function, sig.render(), "2")
     for (t in listOf("Int", "Float", "Bool", "String", "Unit", "List", "Map", "Set"))
         add(t, CompletionItemKind.Class, "builtin type", "2")

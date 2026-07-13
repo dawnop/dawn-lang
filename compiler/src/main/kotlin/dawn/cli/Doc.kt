@@ -3,6 +3,7 @@ package dawn.cli
 import dawn.ast.ConstDecl
 import dawn.ast.Decl
 import dawn.ast.FnDecl
+import dawn.ast.TraitDecl
 import dawn.ast.TypeDecl
 import dawn.check.AdtInfo
 import dawn.check.AnalyzedProgram
@@ -96,6 +97,24 @@ private fun projectJson(program: AnalyzedProgram): String {
                         w.fieldOrNull("doc", doc(d))
                     }
                 }
+                w.key("traits")
+                w.arr(m.module.decls.filterIsInstance<TraitDecl>().filter { it.pub }) { d ->
+                    w.obj {
+                        w.field("name", d.name)
+                        w.field("typeParam", d.typeParam)
+                        w.key("methods")
+                        w.arr(d.info?.methods?.values?.toList() ?: emptyList()) { ms ->
+                            w.obj {
+                                w.field("name", ms.sig.name)
+                                w.field("sig", ms.sig.render())
+                                w.field("hasDefault", ms.hasDefault)
+                            }
+                        }
+                        w.fieldOrNull("doc", doc(d))
+                    }
+                }
+                w.key("impls")
+                w.arr(m.impls) { i -> w.str(i.display) }
             }
         }
     }
