@@ -698,6 +698,26 @@ Java 形参声明为 `java.util.List` / `java.util.Collection` / `java.lang.Iter
 `Map`/`Set` 不桥接、Java 集合不反向转换为 Dawn 值（§9.6）。变长参数只支持不传
 可变部分（§9.3）；`Option` 实参传 null 不支持（§9.2）。
 
+### 9.8 异常屏障：`java_try`
+
+Dawn 无异常：Java 调用抛出的异常默认原样穿透并终止程序（等同 panic 语义）。
+但**预期中的外部失败**（网络断开、SQL 约束冲突、解析失败）在 Java 世界以异常表达，
+它们不是 bug，应进 `Result`。内建 `java_try` 是唯一的转换点：
+
+```dawn
+use java "java.lang.Long"
+
+fn parse(s: String) -> Result[Int, String] !io =
+  java_try(fn() => Long.parseLong(s))       # 异常 → Err("java.lang.NumberFormatException: ...")
+```
+
+- 签名 `java_try[T](f: fn() -> T !io) -> Result[T, String] !io`；闭包可为纯函数。
+- 只拦 `java.lang.Exception` 及其子类；`Error` 不拦——**Dawn 的 panic
+  （`dawn.rt.PanicError` 是 `Error` 子类）原样穿透**，panic 仍然是 bug、不可恢复。
+- `Err` 载荷是 `Throwable.toString()`（异常类名 + 消息），供日志与上抛；
+  需要区分异常种类时按前缀匹配字符串，v0.1 不提供结构化异常对象。
+- 边界之内失败照常传播：`java_try` 包住整段复合调用即可，无需逐调用包裹。
+
 ---
 
 ## 10. 模块系统
@@ -800,7 +820,7 @@ use java "java.lang.Math"      # Java 互操作（§9），形式不变
 
 - `core/math`：`abs min max sin cos sqrt pow to_float to_int ...`（纯——
   内部以 `@trusted_pure` 包装 `java.lang.Math`）
-- `io`：`println read_line read_file write_file list_dir is_dir args env ...`（全部 `!io`）
+- `io`：`println read_line read_file write_file list_dir is_dir args env java_try ...`（全部 `!io`）
   - `write_file(path, content) -> Result[Int, String]` — **自动创建缺失的父目录**
   - `list_dir(path) -> Result[List[String], String]` — 排序后的条目名；path 不是目录时 `Err`
   - `is_dir(path) -> Bool` — 不存在或出错都视为 `false`

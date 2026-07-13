@@ -171,8 +171,11 @@ fun cmdRun(restIn: List<String>) {
     val program = compileProject(path, fuel, javaLoader = javaLoader)
     val entry = program.entry ?: throw CliError("$path has no pub fn main() -> Unit !io, nothing to run")
     val parent = javaLoader ?: ClassLoader.getSystemClassLoader()
-    val cls = Class.forName(entry.className.replace('/', '.'), false, loaderFor(program.classes, parent))
+    val loader = loaderFor(program.classes, parent)
+    val cls = Class.forName(entry.className.replace('/', '.'), false, loader)
     val main = cls.getDeclaredMethod("main", Array<String>::class.java)
+    // libraries discover services (e.g. JDBC drivers) via the context class loader
+    Thread.currentThread().contextClassLoader = loader
     main.invoke(null, rest.drop(1).toTypedArray())
 }
 
@@ -187,6 +190,8 @@ fun cmdTest(restIn: List<String>) {
     // recover per-module test blocks (a module class holds dawn$test$i methods)
     val analyzed = analyzeProject(File(path), fuel, javaLoader)
     val loader = loaderFor(program.classes, javaLoader ?: ClassLoader.getSystemClassLoader())
+    // libraries discover services (e.g. JDBC drivers) via the context class loader
+    Thread.currentThread().contextClassLoader = loader
     var total = 0
     var failed = 0
     for (m in analyzed.modules) {

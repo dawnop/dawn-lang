@@ -157,6 +157,7 @@ val BUILTIN_GROUPS: List<Pair<String, List<Pair<String, String>>>> = listOf(
         "list_dir" to "sorted entry names of a directory; Err when the path is not a directory",
         "is_dir" to "whether the path names a directory (false when missing)",
         "args" to "command line arguments",
+        "java_try" to "run a closure, catching Java exceptions into Err (panics pass through)",
     ),
     "list" to listOf(
         "len" to "number of elements",

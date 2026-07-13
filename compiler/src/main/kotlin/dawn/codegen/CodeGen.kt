@@ -2014,6 +2014,35 @@ class CodeGen(
             m.visitEnd()
         }
 
+        // javaTry(Fn0) -> Result: the interop exception barrier (spec §9.8). Catches
+        // java.lang.Exception only — dawn.rt.PanicError extends Error and stays fatal.
+        run {
+            val m = cw.visitMethod(ACC_PUBLIC or ACC_STATIC, "javaTry", "(L${fnIface(0)};)LResult;", null, null)
+            m.visitCode()
+            val tryStart = Label()
+            val tryEnd = Label()
+            val handler = Label()
+            m.visitTryCatchBlock(tryStart, tryEnd, handler, "java/lang/Exception")
+            m.visitLabel(tryStart)
+            m.visitTypeInsn(NEW, "Result\$Ok")
+            m.visitInsn(DUP)
+            m.visitVarInsn(ALOAD, 0)
+            m.visitMethodInsn(INVOKEINTERFACE, fnIface(0), "apply", erasedApplyDesc(0), true)
+            m.visitMethodInsn(INVOKESPECIAL, "Result\$Ok", "<init>", "(L$OBJ;)V", false)
+            m.visitLabel(tryEnd)
+            m.visitInsn(ARETURN)
+            m.visitLabel(handler)
+            m.visitMethodInsn(INVOKEVIRTUAL, "java/lang/Throwable", "toString", "()L$STR;", false)
+            m.visitVarInsn(ASTORE, 1)
+            m.visitTypeInsn(NEW, "Result\$Err")
+            m.visitInsn(DUP)
+            m.visitVarInsn(ALOAD, 1)
+            m.visitMethodInsn(INVOKESPECIAL, "Result\$Err", "<init>", "(L$OBJ;)V", false)
+            m.visitInsn(ARETURN)
+            m.visitMaxs(0, 0)
+            m.visitEnd()
+        }
+
         run {
             val m = cw.visitMethod(ACC_PUBLIC or ACC_STATIC, "writeFile", "(L$STR;L$STR;)LResult;", null, null)
             m.visitCode()
@@ -2994,6 +3023,7 @@ class CodeGen(
             "(Ljava/lang/String;Ljava/lang/String;)L$JLIST;", false)
         "parse_int" -> Handle(H_INVOKESTATIC, STRINGS_CLASS, "parseInt", "(Ljava/lang/String;)LOption;", false)
         "parse_float" -> Handle(H_INVOKESTATIC, STRINGS_CLASS, "parseFloat", "(Ljava/lang/String;)LOption;", false)
+        "java_try" -> Handle(H_INVOKESTATIC, IO_CLASS, "javaTry", "(L${fnIface(0)};)LResult;", false)
         "read_file" -> Handle(H_INVOKESTATIC, IO_CLASS, "readFile", "(Ljava/lang/String;)LResult;", false)
         "write_file" -> Handle(H_INVOKESTATIC, IO_CLASS, "writeFile",
             "(Ljava/lang/String;Ljava/lang/String;)LResult;", false)
@@ -3915,6 +3945,11 @@ class CodeGen(
             genExpr(e.args[0], tail = false)
             mv.visitMethodInsn(INVOKESTATIC, STRINGS_CLASS,
                 if (e.callee == "parse_int") "parseInt" else "parseFloat", "(Ljava/lang/String;)LOption;", false)
+            true
+        }
+        "java_try" -> {
+            genExpr(e.args[0], tail = false)
+            mv.visitMethodInsn(INVOKESTATIC, IO_CLASS, "javaTry", "(L${fnIface(0)};)LResult;", false)
             true
         }
         "read_file" -> {

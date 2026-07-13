@@ -415,6 +415,11 @@ val BUILTINS: Map<String, FnSig> = run {
             Type.TAdt(OPTION_ADT, listOf(Type.TInt)), Eff.Pure, isBuiltin = true),
         FnSig("parse_float", listOf(Type.TString), listOf("s"),
             Type.TAdt(OPTION_ADT, listOf(Type.TFloat)), Eff.Pure, isBuiltin = true),
+        // java interop exception barrier (spec §9.8): expected Java failures become Err;
+        // panics (dawn.rt.PanicError extends Error) pass through untouched
+        FnSig("java_try", listOf(Type.TFn(emptyList(), t, Eff.Io)), listOf("f"),
+            Type.TAdt(RESULT_ADT, listOf(t, Type.TString)), Eff.Io, isBuiltin = true,
+            typeParams = listOf(t)),
         // io (spec §11)
         FnSig("read_file", listOf(Type.TString), listOf("path"),
             Type.TAdt(RESULT_ADT, listOf(Type.TString, Type.TString)), Eff.Io, isBuiltin = true),
