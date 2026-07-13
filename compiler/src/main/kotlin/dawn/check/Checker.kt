@@ -1453,6 +1453,11 @@ class Checker(
             is TJava -> when {
                 p == a.cls -> 2
                 p.isAssignableFrom(a.cls) -> 1
+                // opaque value (erased generic → Object, spec §9.5) down-cast to a
+                // specific reference param with a runtime CHECKCAST — the interop
+                // escape for e.g. HttpResponse.body() (Object at compile time, byte[]
+                // at runtime) flowing to OutputStream.write(byte[]).
+                a.cls == Any::class.java && !p.isPrimitive -> 1
                 else -> null
             }
             is TFn -> samMethodOf(p)?.let { sam ->

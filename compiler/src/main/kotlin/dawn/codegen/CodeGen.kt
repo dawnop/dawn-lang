@@ -3267,6 +3267,10 @@ class CodeGen(
         when {
             dawnType == TInt && javaParam == Integer.TYPE -> mv.visitInsn(L2I)
             dawnType == TFloat && javaParam == java.lang.Float.TYPE -> mv.visitInsn(D2F)
+            // opaque value down-cast to a specific reference param (spec §9.5 interop
+            // escape): CHECKCAST so e.g. an Object holding a byte[] passes to write(byte[])
+            dawnType is TJava && !javaParam.isPrimitive && !javaParam.isAssignableFrom(dawnType.cls) ->
+                mv.visitTypeInsn(CHECKCAST, AsmType.getInternalName(javaParam))
             else -> {}
         }
     }

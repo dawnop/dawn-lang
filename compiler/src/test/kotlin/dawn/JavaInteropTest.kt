@@ -85,6 +85,28 @@ class JavaInteropTest {
     }
 
     @Test
+    fun `an opaque object down-casts to a specific reference param (G6)`() {
+        // Optional.get() returns Object (erased T); at runtime it is a byte[]. It
+        // must pass to ByteArrayOutputStream.write(byte[]) via a runtime CHECKCAST.
+        val out = run(
+            """
+            use java "java.util.Optional"
+            use java "java.io.ByteArrayOutputStream"
+            use java "java.lang.String"
+
+            pub fn main() -> Unit !io = {
+              let bytes = utf8_bytes("héllo")
+              let boxed = Optional.of(bytes).expect("opt").get().expect("obj")
+              let baos = ByteArrayOutputStream.new()
+              baos.write(boxed)
+              println(String.new(baos.toByteArray().expect("arr"), "UTF-8"))
+            }
+            """.trimIndent(),
+        )
+        assertEquals("héllo\n", out)
+    }
+
+    @Test
     fun `static call with int narrowing and long overload ranking`() {
         val out = run(
             """
