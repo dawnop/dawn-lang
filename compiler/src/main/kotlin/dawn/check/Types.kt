@@ -249,7 +249,14 @@ class CtorInfo(val adt: AdtInfo, val name: String, val nameSpan: Span?) {
 class FieldInfo(val name: String, val type: Type, val defSpan: Span? = null, val srcPath: String? = null)
 
 /** Resolved local variable/parameter; the checker fills this into the AST, codegen consumes it. */
-class Symbol(val name: String, val type: Type, val mutable: Boolean, val defSpan: Span) {
+class Symbol(
+    val name: String,
+    val type: Type,
+    val mutable: Boolean,
+    val defSpan: Span,
+    /** non-null for a hidden trait-dictionary binding: the (bound, type parameter) it carries */
+    val dictOf: Pair<TraitInfo, Type.TVar>? = null,
+) {
     /** JVM local slot assigned by codegen */
     var slot: Int = -1
 }
@@ -278,6 +285,9 @@ class FnSig(
 
     /** non-null when this signature is a trait method (resolved through witnesses) */
     var trait: TraitInfo? = null
+
+    /** hidden dictionary parameters, one per (type parameter, bound) in flattened order */
+    var dictSyms: List<Symbol> = emptyList()
 
     val io: Boolean get() = eff == Eff.Io
 

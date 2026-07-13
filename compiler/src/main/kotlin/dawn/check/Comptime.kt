@@ -273,6 +273,9 @@ class ComptimeInterp(
     // ---- calls ----
 
     private fun evalCall(e: Call, env: MutableMap<Symbol, CValue>): CValue {
+        if (!e.witnesses.isNullOrEmpty())
+            err("`${e.callee}` uses trait bounds, which comptime cannot evaluate yet", e.span,
+                "trait dictionaries are a runtime construct in v1")
         e.dynamicTarget?.let { sym ->
             val f = env[sym] ?: err("`${e.callee}` is not bound (interpreter bug)", e.span)
             return applyFn(f, e.args.map { eval(it, env) }, e.span)
@@ -432,6 +435,9 @@ class ComptimeInterp(
             BinOp.EQ -> CValue.VBool(valueEq(l, r))
             BinOp.NEQ -> CValue.VBool(!valueEq(l, r))
             BinOp.LT, BinOp.LE, BinOp.GT, BinOp.GE -> {
+                if (e.ordWitness != null)
+                    err("ordering through a trait impl is not supported in comptime yet", e.opSpan,
+                        "trait dictionaries are a runtime construct in v1")
                 val c = when {
                     l is CValue.VInt && r is CValue.VInt -> l.v.compareTo(r.v)
                     l is CValue.VString && r is CValue.VString -> l.v.compareTo(r.v)

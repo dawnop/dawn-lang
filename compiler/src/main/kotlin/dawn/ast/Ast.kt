@@ -240,6 +240,8 @@ class Call(val callee: String, val args: List<Expr>, val calleeSpan: Span, span:
     var sig: FnSig? = null
     /** when the callee is a local function value, its symbol (filled by the checker) */
     var dynamicTarget: Symbol? = null
+    /** dictionaries satisfying the callee's trait bounds, in flattened bound order (checker) */
+    var witnesses: List<dawn.check.WitnessRef>? = null
 }
 
 /** A call of a non-name callee (currently: piping into a lambda). */
@@ -344,7 +346,10 @@ class ComptimeExpr(val body: Expr, span: Span) : Expr(span) {
 class CtorArg(val name: String?, val expr: Expr, val span: Span)
 
 enum class BinOp { ADD, SUB, MUL, DIV, MOD, CONCAT, EQ, NEQ, LT, LE, GT, GE, AND, OR }
-class Binary(val op: BinOp, val left: Expr, val right: Expr, val opSpan: Span, span: Span) : Expr(span)
+class Binary(val op: BinOp, val left: Expr, val right: Expr, val opSpan: Span, span: Span) : Expr(span) {
+    /** when `< <= > >=` order through an Ord impl (not a native scalar): the dictionary (checker) */
+    var ordWitness: dawn.check.WitnessRef? = null
+}
 
 enum class UnOp { NEG, NOT }
 class Unary(val op: UnOp, val operand: Expr, span: Span) : Expr(span)

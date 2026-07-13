@@ -96,6 +96,26 @@ class Checker(
     /** the signature of the function being checked (null inside test blocks) */
     private var currentFnSig: FnSig? = null
 
+    /** hidden dictionary bindings of the function being checked: (type param, bound) → symbol */
+    private var dictSyms: Map<Pair<TVar, TraitInfo>, Symbol> = emptyMap()
+
+    /** Materialize [sig]'s trait bounds as hidden dictionary symbols (codegen params). */
+    private fun bindDicts(sig: FnSig) {
+        if (sig.constraints.isEmpty()) {
+            dictSyms = emptyMap()
+            return
+        }
+        val m = LinkedHashMap<Pair<TVar, TraitInfo>, Symbol>()
+        for ((i, tp) in sig.typeParams.withIndex()) {
+            for (tr in sig.boundsOf(i)) {
+                m[tp to tr] = Symbol("${tr.name}\$${tp.name}", TError, mutable = false,
+                    defSpan = sig.nameSpan ?: Span(0, 0), dictOf = tr to tp)
+            }
+        }
+        dictSyms = m
+        sig.dictSyms = m.values.toList()
+    }
+
     /** inside a test block (assert is allowed, io is implicit) */
     private var inTest = false
 
@@ -368,6 +388,7 @@ class Checker(
         currentTParams = old.typeParams.associateBy { it.name }
         currentEffVars = HashMap(d.effVars)
         currentFnSig = old
+        bindDicts(old)
         usedEffects = HashSet()
         effWitness = HashMap()
         lambdaStack.clear()
@@ -580,6 +601,59 @@ class Checker(
         }
     }
 
+    /**
+     * Satisfy one trait requirement at a use site. A concrete subject resolves
+     * to its unique impl (coherence); the caller's own rigid type parameter
+     * forwards the caller's dictionary — which behaves like a hidden fn-scope
+     * local, so every enclosing lambda captures it.
+     */
+    private fun resolveWitness(trait: TraitInfo, t: Type, span: Span, requirer: String): WitnessRef? {
+        if (t.isErrorish) return null
+        if (t is TVar) {
+            val sym = dictSyms[t to trait]
+            if (sym == null) {
+                sink.error("$requirer requires `${trait.name}[$t]`, but `$t` has no such bound", span,
+                    "add the bound: [$t: ${trait.name}]")
+                return null
+            }
+            for (ctx in lambdaStack) ctx.captures.add(sym)
+            return WitnessRef.Forward(trait, t, sym)
+        }
+        implTable[trait to t]?.let { return WitnessRef.Concrete(it) }
+        sink.error("no impl of `${trait.name}` for `$t`", span, implHint(trait, t))
+        return null
+    }
+
+    private fun implHint(trait: TraitInfo, t: Type): String = when {
+        trait === ORD_TRAIT && t !is TAdt ->
+            "only Int, Float, String and types with an `impl Ord` can be ordered"
+        t is TAdt && t.info.typeParams.isEmpty() ->
+            "define `impl ${trait.name}[$t] { ... }` in the module declaring `$t` or `${trait.name}`"
+        t in listOf(TInt, TFloat, TBool, TString) ->
+            "define `impl ${trait.name}[$t] { ... }` in the module declaring `${trait.name}`"
+        else -> "v1 impl subjects are named non-generic types and Int/Float/Bool/String"
+    }
+
+    /** `< <= > >=` beyond the native scalars order through Ord (docs/trait.md). */
+    private fun resolveOrdWitness(t: Type, span: Span): WitnessRef? {
+        if (t.isErrorish) return null
+        if (t is TVar) {
+            val sym = dictSyms[t to ORD_TRAIT]
+            if (sym == null) {
+                sink.error("values of type $t cannot be ordered", span, "add the bound: [$t: Ord]")
+                return null
+            }
+            for (ctx in lambdaStack) ctx.captures.add(sym)
+            return WitnessRef.Forward(ORD_TRAIT, t, sym)
+        }
+        implTable[ORD_TRAIT to t]?.let { return WitnessRef.Concrete(it) }
+        sink.error("values of type $t cannot be ordered", span,
+            if (t is TAdt && t.info.typeParams.isEmpty())
+                "implement it: impl Ord[$t] { fn cmp(a: $t, b: $t) -> Int = ... }"
+            else null)
+        return null
+    }
+
     /** Resolve `[T: Ord + Show]` bounds against the visible traits, aligned per parameter. */
     private fun resolveBounds(tparams: List<TypeParamDecl>): List<List<TraitInfo>> {
         if (tparams.all { it.bounds.isEmpty() }) return emptyList()
@@ -604,6 +678,7 @@ class Checker(
         currentTParams = sig.typeParams.associateBy { it.name }
         currentEffVars = HashMap()
         currentFnSig = sig
+        bindDicts(sig)
         usedEffects = HashSet()
         effWitness = HashMap()
         lambdaStack.clear()
@@ -739,11 +814,13 @@ class Checker(
         val savedUsed = usedEffects
         val savedWitness = effWitness
         val savedSig = currentFnSig
+        val savedDicts = dictSyms
         val savedScopes = ArrayList(scopes)
         val savedLambdas = ArrayList(lambdaStack)
         usedEffects = HashSet()
         effWitness = HashMap()
         currentFnSig = null
+        dictSyms = emptyMap()
         scopes.clear()
         scopes.addLast(HashMap())
         lambdaStack.clear()
@@ -758,6 +835,7 @@ class Checker(
             usedEffects = savedUsed
             effWitness = savedWitness
             currentFnSig = savedSig
+            dictSyms = savedDicts
             scopes.clear()
             scopes.addAll(savedScopes)
             lambdaStack.clear()
@@ -789,6 +867,7 @@ class Checker(
         currentTParams = emptyMap()
         currentEffVars = HashMap()
         currentFnSig = null
+        dictSyms = emptyMap()
         usedEffects = HashSet()
         effWitness = HashMap()
         lambdaStack.clear()
@@ -998,6 +1077,7 @@ class Checker(
         currentTParams = sig.typeParams.associateBy { it.name }
         currentEffVars = HashMap(d.effVars)
         currentFnSig = sig
+        bindDicts(sig)
         usedEffects = HashSet()
         effWitness = HashMap()
         lambdaStack.clear()
@@ -1546,6 +1626,13 @@ class Checker(
 
     /** A top-level function or builtin used as a value; generics need the expected type. */
     private fun checkFnValue(e: VarRef, f: FnSig, expected: Type?): Type {
+        if (f.constraints.isNotEmpty()) {
+            val ps = f.paramNames.joinToString(", ")
+            return error(
+                if (f.trait != null) "trait method `${e.name}` cannot be used as a value"
+                else "`${e.name}` has trait bounds and cannot be used as a value",
+                e.span, "wrap it in a lambda: fn($ps) => ${e.name}($ps)")
+        }
         e.fnValue = f
         val declared = TFn(f.paramTypes, f.ret, f.eff)
         if (f.typeParams.isEmpty() && f.eff !is Eff.Var) return declared
@@ -1704,6 +1791,18 @@ class Checker(
         if (unbound.isNotEmpty()) {
             return error("cannot infer type parameter(s) ${unbound.joinToString(", ")} for `${e.callee}`",
                 e.span, "add a type annotation at the use site")
+        }
+        // trait bounds: each (type parameter, bound) pair needs a dictionary
+        if (sig.constraints.isNotEmpty()) {
+            val ws = ArrayList<WitnessRef>()
+            var ok = true
+            for ((i, tp) in sig.typeParams.withIndex()) {
+                for (tr in sig.boundsOf(i)) {
+                    val w = resolveWitness(tr, subst(tp, map), e.calleeSpan, "`${e.callee}`")
+                    if (w == null) ok = false else ws.add(w)
+                }
+            }
+            if (ok) e.witnesses = ws
         }
         if (sig.isBuiltin && sig.name == "to_string")
             checkPrintable(subst(sig.paramTypes[0], map), e.args[0].span)
@@ -2131,9 +2230,11 @@ class Checker(
             }
             BinOp.LT, BinOp.LE, BinOp.GT, BinOp.GE -> {
                 if (lt != rt) error("comparison requires both sides to have the same type: $lt vs $rt", e.opSpan)
-                else if (lt !in listOf(TInt, TFloat, TString))
-                    error("values of type $lt cannot be ordered", e.opSpan)
-                else TBool
+                else if (lt == TInt || lt == TFloat || lt == TString) TBool // native fast path
+                else {
+                    e.ordWitness = resolveOrdWitness(lt, e.opSpan)
+                    TBool
+                }
             }
             BinOp.AND, BinOp.OR -> {
                 if (lt != TBool) error("logical operators expect Bool, left side is $lt", e.left.span)

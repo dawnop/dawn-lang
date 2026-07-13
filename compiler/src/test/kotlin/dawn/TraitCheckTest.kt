@@ -36,14 +36,14 @@ class TraitCheckTest {
         assertClean(
             """
             trait MyOrd[T] {
-              fn cmp(a: T, b: T) -> Int
-              fn max_of(a: T, b: T) -> T = if cmp(a, b) >= 0 { a } else { b }
+              fn compare_to(a: T, b: T) -> Int
+              fn max_of(a: T, b: T) -> T = if compare_to(a, b) >= 0 { a } else { b }
             }
 
             type Point = { x: Int, y: Int }
 
             impl MyOrd[Point] {
-              fn cmp(a: Point, b: Point) -> Int =
+              fn compare_to(a: Point, b: Point) -> Int =
                 if a.x != b.x { a.x - b.x } else { a.y - b.y }
             }
             """.trimIndent(),

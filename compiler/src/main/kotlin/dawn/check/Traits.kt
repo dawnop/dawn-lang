@@ -52,8 +52,32 @@ class ImplInfo(
     val display: String get() = "${trait.name}[${subject.display}]"
 }
 
-/** Traits every module sees without imports (Ord arrives with the stdlib knife). */
-val PRELUDE_TRAITS: List<TraitInfo> = emptyList()
+/**
+ * How a call site satisfies one trait requirement. Filled by the checker,
+ * consumed by codegen (dictionary passing).
+ */
+sealed class WitnessRef {
+    /** the subject is concrete: coherence gives a unique impl (devirtualizable) */
+    class Concrete(val impl: ImplInfo) : WitnessRef()
 
-/** Prelude impls (Ord[Int/Float/String] arrive with the stdlib knife). */
-val PRELUDE_IMPLS: List<ImplInfo> = emptyList()
+    /** the subject is the caller's own type parameter: forward the caller's dictionary */
+    class Forward(val trait: TraitInfo, val tvar: Type.TVar, val sym: Symbol) : WitnessRef()
+}
+
+/** The prelude ordering trait: `< <= > >=` bridge to `cmp` beyond the native scalars. */
+val ORD_TRAIT: TraitInfo = run {
+    val info = TraitInfo("Ord", Type.TVar("T"), nameSpan = null, pub = true)
+    val sig = FnSig("cmp", listOf(info.tvar, info.tvar), listOf("a", "b"), Type.TInt, Eff.Pure,
+        isBuiltin = false, typeParams = listOf(info.tvar), constraints = listOf(listOf(info)))
+    sig.trait = info
+    info.methods["cmp"] = TraitMethodSig(sig, decl = null)
+    info
+}
+
+/** Traits every module sees without imports. */
+val PRELUDE_TRAITS: List<TraitInfo> = listOf(ORD_TRAIT)
+
+/** Ord over the natively ordered scalars ships with the language (codegen knows them). */
+val PRELUDE_IMPLS: List<ImplInfo> = listOf(Type.TInt, Type.TFloat, Type.TString).map {
+    ImplInfo(ORD_TRAIT, it, Span(0, 0), srcPath = null)
+}
