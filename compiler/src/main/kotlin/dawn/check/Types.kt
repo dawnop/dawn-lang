@@ -396,6 +396,8 @@ val BUILTINS: Map<String, FnSig> = run {
         FnSig("split", listOf(Type.TString, Type.TString), listOf("s", "sep"),
             Type.TList(Type.TString), Eff.Pure, isBuiltin = true),
         FnSig("trim", listOf(Type.TString), listOf("s"), Type.TString, Eff.Pure, isBuiltin = true),
+        FnSig("to_lower", listOf(Type.TString), listOf("s"), Type.TString, Eff.Pure, isBuiltin = true),
+        FnSig("to_upper", listOf(Type.TString), listOf("s"), Type.TString, Eff.Pure, isBuiltin = true),
         // code points / characters (spec §1.5, §11): a character is its Int code point
         FnSig("code_points", listOf(Type.TString), listOf("s"), Type.TList(Type.TInt),
             Eff.Pure, isBuiltin = true),

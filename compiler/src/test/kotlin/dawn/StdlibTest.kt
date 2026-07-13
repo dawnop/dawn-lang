@@ -58,6 +58,20 @@ class StdlibTest {
 
     // ---- strings ----
 
+    @Test
+    fun `to_lower and to_upper, inline and as values`() {
+        val out = run(
+            """
+            pub fn main() -> Unit !io = {
+              println(to_lower("HeLLo Wörld"))
+              println(to_upper("HeLLo"))
+              println(join(map(["Ab", "cD"], to_lower), ","))
+            }
+            """.trimIndent(),
+        )
+        assertEquals("hello wörld\nHELLO\nab,cd\n", out)
+    }
+
     // ---- io ----
 
     @Test

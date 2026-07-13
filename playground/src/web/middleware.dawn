@@ -3,7 +3,7 @@
 # composed by serve_app with the first element outermost. No registry, no
 # annotations — wrapping a function is the whole mechanism.
 use java "java.lang.System"
-use web/types.{Request, Response, HttpError, Handler}
+use web/types.{Request, Response, HttpError, Handler, with_header, text}
 
 # One access-log line per request: method, path, status, wall time.
 pub fn with_logging(next: Handler) -> Handler =
@@ -22,8 +22,29 @@ pub fn with_logging(next: Handler) -> Handler =
 # Reject bodies over a byte budget before the handler sees them.
 pub fn with_body_limit(limit: Int, next: Handler) -> Handler =
   fn(req) =>
-    if str_len(req.body) > limit {
-      Err(HttpError { status: 413, message: "request body exceeds $limit bytes" })
-    } else {
-      next(req)
+  if str_len(req.body) > limit {
+    Err(HttpError { status: 413, message: "request body exceeds $limit bytes" })
+  } else {
+    next(req)
+  }
+
+# CORS: answer preflight OPTIONS directly, and stamp Access-Control-* on every
+# response. `origin` is the single allowed origin (browsers require an exact
+# echo, not "*", when credentials are involved).
+pub fn with_cors(origin: String, next: Handler) -> Handler =
+  fn(req) =>
+  if req.method == "OPTIONS" {
+    Ok(cors_headers(origin, text(204, "")))
+  } else {
+    match next(req) {
+      Ok(r) -> Ok(cors_headers(origin, r))
+      Err(e) -> Err(e)
     }
+  }
+
+fn cors_headers(origin: String, r: Response) -> Response =
+  with_header(
+    with_header(
+      with_header(r, "Access-Control-Allow-Origin", origin),
+      "Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS"),
+    "Access-Control-Allow-Headers", "Authorization, Content-Type")

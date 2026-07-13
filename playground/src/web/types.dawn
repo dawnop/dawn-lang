@@ -11,12 +11,16 @@ pub type Request = {
   path: String,
   params: Map[String, String],
   query: Map[String, String],
+  # request headers, keys lowercased for case-insensitive lookup (use `header`)
+  headers: Map[String, String],
   body: String,
 } derive Show
 
 pub type Response = {
   status: Int,
   content_type: String,
+  # extra response headers in emission order (Location, Content-Disposition, ...)
+  headers: List[(String, String)],
   body: String,
 } derive Show
 
@@ -33,17 +37,29 @@ pub fn http_error(status: Int, message: String) -> HttpError =
 # ---- response constructors ----
 
 pub fn text(status: Int, body: String) -> Response =
-  Response { status: status, content_type: "text/plain; charset=utf-8", body: body }
+  Response { status: status, content_type: "text/plain; charset=utf-8", headers: [], body: body }
 
 pub fn json_response(status: Int, j: Json) -> Response =
-  Response { status: status, content_type: "application/json; charset=utf-8", body: render(j) }
+  Response { status: status, content_type: "application/json; charset=utf-8", headers: [], body: render(j) }
 
 pub fn json_ok(j: Json) -> Response = json_response(200, j)
 
 # A raw pre-rendered body (any content type) — escape hatch for services with
 # their own wire format.
 pub fn raw(status: Int, content_type: String, body: String) -> Response =
-  Response { status: status, content_type: content_type, body: body }
+  Response { status: status, content_type: content_type, headers: [], body: body }
+
+# Append one response header (records are immutable — returns a new Response).
+pub fn with_header(r: Response, name: String, value: String) -> Response =
+  Response { ..r, headers: r.headers ++ [(name, value)] }
+
+# A redirect: status (301/302/303/307) plus a Location header, empty body.
+pub fn redirect(status: Int, location: String) -> Response =
+  with_header(raw(status, "text/plain; charset=utf-8", ""), "Location", location)
+
+# Force a download with a given filename via Content-Disposition.
+pub fn attachment(content_type: String, filename: String, body: String) -> Response =
+  with_header(raw(200, content_type, body), "Content-Disposition", "attachment; filename=\"$filename\"")
 
 # The server's rendering of the Err branch and of its own 404/405.
 pub fn error_response(e: HttpError) -> Response =
@@ -69,11 +85,17 @@ pub fn param_int(req: Request, name: String) -> Result[Int, HttpError] = {
 
 pub fn query(req: Request, name: String) -> Option[String] = map_get(req.query, name)
 
+# A request header, looked up case-insensitively (the name is lowercased here;
+# the server lowercases keys when building the map).
+pub fn header(req: Request, name: String) -> Option[String] =
+  map_get(req.headers, to_lower(name))
+
 test "param reads captures and flags missing ones" {
+  let h: Map[String, String] = map_empty()
   let q: Map[String, String] = map_empty()
   let req = Request {
     method: "GET", path: "/a/42",
-    params: map_from([("id", "42")]), query: q, body: "",
+    params: map_from([("id", "42")]), query: q, headers: h, body: "",
   }
   assert param(req, "id") == Ok("42")
   assert param_int(req, "id") == Ok(42)
@@ -84,13 +106,35 @@ test "param reads captures and flags missing ones" {
 }
 
 test "param_int rejects non-numbers as a client error" {
+  let h: Map[String, String] = map_empty()
   let q: Map[String, String] = map_empty()
   let req = Request {
     method: "GET", path: "/a/x",
-    params: map_from([("id", "x")]), query: q, body: "",
+    params: map_from([("id", "x")]), query: q, headers: h, body: "",
   }
   match param_int(req, "id") {
     Err(e) -> { assert e.status == 400 }
     Ok(_) -> { assert false }
   }
+}
+
+test "header lookup is case-insensitive" {
+  let req = Request {
+    method: "GET", path: "/", params: map_empty(), query: map_empty(),
+    headers: map_from([("authorization", "Bearer xyz"), ("content-type", "application/json")]),
+    body: "",
+  }
+  assert header(req, "Authorization") == Some("Bearer xyz")
+  assert header(req, "CONTENT-TYPE") == Some("application/json")
+  assert header(req, "missing") == None
+}
+
+test "response header helpers" {
+  let r = with_header(json_ok(JStr("hi")), "X-A", "1")
+  assert r.headers == [("X-A", "1")]
+  let rd = redirect(302, "/here")
+  assert rd.status == 302
+  assert rd.headers == [("Location", "/here")]
+  let at = attachment("text/markdown", "post.md", "# hi")
+  assert at.headers == [("Content-Disposition", "attachment; filename=\"post.md\"")]
 }

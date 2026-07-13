@@ -4,11 +4,13 @@
 # hard in front — this only speaks HTTP/1.1.
 use java "com.sun.net.httpserver.HttpServer"
 use java "com.sun.net.httpserver.HttpExchange"
+use java "com.sun.net.httpserver.Headers"
 use java "java.net.InetSocketAddress"
 use java "java.util.concurrent.Executors"
 use java "java.util.concurrent.CountDownLatch"
 use java "java.io.OutputStreamWriter"
 use java "java.lang.String"
+use java "java.util.Iterator"
 use web/types.{Request, Response, HttpError, Handler, Middleware, http_error, error_response}
 use web/router.{Route, Dispatch, Found, NoPath, WrongMethod, dispatch}
 
@@ -26,6 +28,7 @@ fn read_body(ex: HttpExchange) -> String !io = {
 fn write_response(ex: HttpExchange, r: Response) -> Unit !io = {
   let headers = ex.getResponseHeaders().expect("response headers")
   headers.set("Content-Type", r.content_type)
+  set_extra_headers(headers, r.headers)
   ex.sendResponseHeaders(r.status, 0)
   let out = ex.getResponseBody().expect("response body")
   let writer = OutputStreamWriter.new(out, "UTF-8")
@@ -35,6 +38,31 @@ fn write_response(ex: HttpExchange, r: Response) -> Unit !io = {
   ex.close()
 }
 
+fn set_extra_headers(headers: Headers, hs: List[(String, String)]) -> Unit !io = {
+  for i in range(0, len(hs)) {
+    let (k, v) = hs[i]
+    headers.add(k, v)
+  }
+}
+
+# Collect request headers into a lowercase-keyed map (first value per name;
+# multi-valued request headers are rare in this API and the first wins). The
+# key set is a Java collection, so it is walked with an iterator.
+fn read_headers(ex: HttpExchange) -> Map[String, String] !io = {
+  let headers = ex.getRequestHeaders().expect("request headers")
+  let it = headers.keySet().expect("names").iterator().expect("iter")
+  collect_headers(headers, it, map_empty())
+}
+
+fn collect_headers(headers: Headers, it: Iterator, acc: Map[String, String]) -> Map[String, String] !io =
+  if it.hasNext() {
+    let name = String.valueOf(it.next().expect("name")).expect("name-str")
+    let v = headers.getFirst(name).expect("value")
+    collect_headers(headers, it, map_insert(acc, to_lower(name), v))
+  } else {
+    acc
+  }
+
 # "a=1&b=x" -> [("a","1"),("b","x")]. URI.getQuery() hands us the string
 # already percent-decoded; a value may itself contain '=', so only the first
 # one splits.
@@ -43,6 +71,17 @@ pub fn parse_query(q: String) -> List[(String, String)] =
     let parts = split(pair, "=")
     (parts[0], join(tail(parts), "="))
   })
+
+# Parse an application/x-www-form-urlencoded body into a map. Same grammar as a
+# query string but '+' also means space; percent-decoding is the caller's if
+# needed (login/form fields here are ASCII).
+pub fn parse_form(body: String) -> Map[String, String] =
+  map_from(map(parse_query(body), fn(kv) => {
+    let (k, v) = kv
+    (k, replace_plus(v))
+  }))
+
+fn replace_plus(s: String) -> String = join(split(s, "+"), " ")
 
 fn tail(xs: List[String]) -> List[String] =
   map(range(1, len(xs)), fn(i) => xs[i])
@@ -62,6 +101,7 @@ fn build_request(ex: HttpExchange) -> Request !io = {
     path: uri.getPath().expect("path"),
     params: no_query,
     query: q,
+    headers: read_headers(ex),
     body: read_body(ex),
   }
 }
@@ -74,22 +114,26 @@ fn route_request(routes: List[Route], req: Request) -> Result[Response, HttpErro
     NoPath -> Err(http_error(404, "not found"))
     WrongMethod -> Err(http_error(405, "method not allowed"))
     Found(handler, params) -> {
-      handler(Request {
-        method: req.method,
-        path: req.path,
-        params: params,
-        query: req.query,
-        body: req.body,
-      })
+      handler(Request { ..req, params: params })
     }
   }
 
 fn handle(routes: List[Route], middleware: List[Middleware], ex: HttpExchange) -> Unit !io = {
   # first middleware in the list is outermost: [a, b] runs a(b(routing))
   let app = fold(rev(middleware), fn(req: Request) => route_request(routes, req), fn(h, m) => m(h))
-  let response = match app(build_request(ex)) {
+  # a handler panic is isolated to this request: catch_panic turns it into a 500
+  # instead of resetting the connection or leaking the virtual thread (spec §9.8).
+  let outcome = catch_panic(fn() =>
+      match app(build_request(ex)) {
+        Ok(r) -> r
+        Err(e) -> error_response(e)
+      })
+  let response = match outcome {
     Ok(r) -> r
-    Err(e) -> error_response(e)
+    Err(m) -> {
+      println("request panicked: $m")
+      error_response(http_error(500, "internal server error"))
+    }
   }
   write_response(ex, response)
 }
@@ -112,4 +156,10 @@ test "query strings parse, including empty and embedded =" {
   assert parse_query("") == []
   assert parse_query("k=a=b") == [("k", "a=b")]
   assert parse_query("flag") == [("flag", "")]
+}
+
+test "form bodies parse, with + as space" {
+  let f = parse_form("username=admin&password=a+b+c")
+  assert map_get(f, "username") == Some("admin")
+  assert map_get(f, "password") == Some("a b c")
 }

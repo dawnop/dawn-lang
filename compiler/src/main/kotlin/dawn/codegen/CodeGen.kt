@@ -3106,6 +3106,14 @@ class CodeGen(
                 m.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "strip", "()Ljava/lang/String;", false)
                 m.visitInsn(ARETURN)
             }
+            "to_lower", "to_upper" -> {
+                m.visitVarInsn(ALOAD, 0)
+                m.visitFieldInsn(GETSTATIC, "java/util/Locale", "ROOT", "Ljava/util/Locale;")
+                m.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String",
+                    if (sig.name == "to_lower") "toLowerCase" else "toUpperCase",
+                    "(Ljava/util/Locale;)Ljava/lang/String;", false)
+                m.visitInsn(ARETURN)
+            }
             "contains" -> {
                 m.visitVarInsn(ALOAD, 0)
                 m.visitVarInsn(ALOAD, 1)
@@ -3929,6 +3937,14 @@ class CodeGen(
         "trim" -> {
             genExpr(e.args[0], tail = false)
             mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "strip", "()Ljava/lang/String;", false)
+            true
+        }
+        "to_lower", "to_upper" -> {
+            genExpr(e.args[0], tail = false)
+            mv.visitFieldInsn(GETSTATIC, "java/util/Locale", "ROOT", "Ljava/util/Locale;")
+            mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String",
+                if (e.callee == "to_lower") "toLowerCase" else "toUpperCase",
+                "(Ljava/util/Locale;)Ljava/lang/String;", false)
             true
         }
         "contains" -> {

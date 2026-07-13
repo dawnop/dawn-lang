@@ -180,6 +180,8 @@ val BUILTIN_GROUPS: List<Pair<String, List<Pair<String, String>>>> = listOf(
         "join" to "concatenate with a separator",
         "split" to "split around a literal separator (not a regex)",
         "trim" to "strip leading and trailing whitespace",
+        "to_lower" to "lowercase (Locale.ROOT)",
+        "to_upper" to "uppercase (Locale.ROOT)",
         "contains" to "whether a substring occurs",
         "starts_with" to "whether the string starts with a prefix",
         "ends_with" to "whether the string ends with a suffix",
