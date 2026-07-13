@@ -5,10 +5,16 @@ import dawn.check.AdtInfo
 import dawn.check.BUILTINS
 import dawn.check.CtorInfo
 import dawn.check.FnSig
+import dawn.check.ImplInfo
+import dawn.check.ORD_TRAIT
 import dawn.check.PRELUDE_ADTS
+import dawn.check.PRELUDE_IMPLS
+import dawn.check.PRELUDE_TRAITS
 import dawn.check.Symbol
+import dawn.check.TraitInfo
 import dawn.check.Type
 import dawn.check.Type.*
+import dawn.check.WitnessRef
 import org.objectweb.asm.ClassWriter
 import org.objectweb.asm.Handle
 import org.objectweb.asm.Label
@@ -183,6 +189,8 @@ class CodeGen(
     /** prelude ADT classes + the runtime support classes, emitted once per program */
     private fun emitShared(out: MutableMap<String, ByteArray>) {
         for (a in PRELUDE_ADTS) genAdt(a, out)
+        for (t in PRELUDE_TRAITS) out[trIface(t)] = genTraitInterface(t)
+        for (i in PRELUDE_IMPLS) out[implClass(i)] = genPreludeOrdImpl(i)
         out[PANIC_CLASS] = genPanicClass()
         out[LISTS_CLASS] = genListsClass()
         out[STRINGS_CLASS] = genStringsClass()
@@ -361,6 +369,8 @@ class CodeGen(
     /** this module's ADT classes + its class of static methods */
     private fun emitModule(out: MutableMap<String, ByteArray>) {
         for (a in ownAdts) genAdt(a, out)
+        for (t in module.traits) t.info?.let { out[trIface(it)] = genTraitInterface(it) }
+        for (d in module.impls) d.info?.let { out[implClass(it)] = genImplClass(it) }
 
         val cw = DawnClassWriter()
         cw.visit(V17, ACC_PUBLIC or ACC_FINAL, className, null, OBJ, null)
@@ -369,6 +379,22 @@ class CodeGen(
         for (d in module.fns) {
             genFn(cw, d)
             drainLambdas(cw)
+        }
+        for (d in module.impls) {
+            val info = d.info ?: continue
+            for (m in d.methods) {
+                if (m.sig == null) continue
+                genFn(cw, m, name = implMethodName(info, m.name))
+                drainLambdas(cw)
+            }
+        }
+        for (t in module.traits) {
+            val info = t.info ?: continue
+            for (m in t.methods) {
+                if (m.body == null || m.sig == null) continue
+                genTraitDefault(cw, info, m)
+                drainLambdas(cw)
+            }
         }
         if (includeTests) {
             for ((i, t) in module.tests.withIndex()) {
@@ -505,6 +531,40 @@ class CodeGen(
 
     private fun methodDesc(params: List<Type>, ret: Type): String =
         params.joinToString("", "(", ")") { descOf(it) } + descOf(ret)
+
+    // ---- traits: dictionary passing (docs/trait.md §6) ----
+
+    private fun ownerPrefix(owner: String?) = owner?.replace('/', '$')?.plus("$") ?: ""
+
+    /** the per-trait dictionary interface: one erased method per trait method */
+    private fun trIface(t: TraitInfo) = "dawn/tr/" + ownerPrefix(t.owner) + t.name
+
+    private fun subjectName(t: Type): String = when (t) {
+        TInt -> "Int"; TFloat -> "Float"; TBool -> "Bool"; TString -> "String"
+        is TAdt -> t.info.name
+        else -> throw IllegalStateException("invalid impl subject: $t")
+    }
+
+    /** the impl's singleton dictionary class */
+    private fun implClass(i: ImplInfo) =
+        "dawn/impl/" + ownerPrefix(i.owner) + "${i.trait.name}\$${subjectName(i.subject)}"
+
+    /** an impl method compiled as a static on its declaring module's class */
+    private fun implMethodName(i: ImplInfo, m: String) =
+        "dawn\$impl\$${i.trait.name}\$${subjectName(i.subject)}\$$m"
+
+    /** a trait default body compiled as a static (erased params + one dict) on the trait's module */
+    private fun defaultMethodName(t: TraitInfo, m: String) = "dawn\$default\$${t.name}\$$m"
+
+    /** a fn descriptor with the hidden dictionary params appended (dicts travel as Object) */
+    private fun fnDescWithDicts(sig: FnSig): String {
+        val dicts = sig.constraints.sumOf { it.size }
+        return "(" + sig.paramTypes.joinToString("") { descOf(it) } + "L$OBJ;".repeat(dicts) + ")" +
+            descOf(sig.ret)
+    }
+
+    /** the erased interface descriptor of a trait method (its own tvar params erase to Object) */
+    private fun traitMethodDesc(sig: FnSig) = methodDesc(sig.paramTypes, sig.ret)
 
     private fun slotsOf(t: Type): Int = when (t) {
         TInt, TFloat -> 2
@@ -759,11 +819,11 @@ class CodeGen(
 
     // ---- functions ----
 
-    private fun genFn(cw: ClassWriter, d: FnDecl) {
+    private fun genFn(cw: ClassWriter, d: FnDecl, name: String = d.name) {
         val sig = d.sig!!
         mv = cw.visitMethod(
-            ACC_PUBLIC or ACC_STATIC, d.name,
-            methodDesc(sig.paramTypes, sig.ret), null, null,
+            ACC_PUBLIC or ACC_STATIC, name,
+            fnDescWithDicts(sig), null, null,
         )
         mv.visitCode()
         currentFn = d
@@ -776,11 +836,160 @@ class CodeGen(
             sym.slot = nextSlot
             nextSlot += slotsOf(sym.type)
         }
+        for (sym in sig.dictSyms) { // hidden dictionaries ride behind the declared params
+            sym.slot = nextSlot
+            nextSlot += slotsOf(sym.type)
+        }
         val start = Label()
         fnStart = start
         mv.visitLabel(start)
         val falls = genExpr(d.body, tail = true)
         if (falls) emitMethodReturn()
+        mv.visitMaxs(0, 0)
+        mv.visitEnd()
+    }
+
+    /** the return instruction for a value of declared type [t] on the stack */
+    private fun emitReturnOf(t: Type) {
+        when {
+            t == TInt -> mv.visitInsn(LRETURN)
+            t == TFloat -> mv.visitInsn(DRETURN)
+            t == TBool -> mv.visitInsn(IRETURN)
+            isRef(t) -> mv.visitInsn(ARETURN)
+            else -> mv.visitInsn(RETURN)
+        }
+    }
+
+    /** the per-trait dictionary interface: erased abstract method per trait method */
+    private fun genTraitInterface(t: TraitInfo): ByteArray {
+        val cw = DawnClassWriter()
+        cw.visit(V17, ACC_PUBLIC or ACC_ABSTRACT or ACC_INTERFACE, trIface(t), null, OBJ, null)
+        for ((name, ms) in t.methods)
+            cw.visitMethod(ACC_PUBLIC or ACC_ABSTRACT, name, traitMethodDesc(ms.sig), null, null).visitEnd()
+        cw.visitEnd()
+        return cw.toByteArray()
+    }
+
+    /** the shared singleton plumbing of a dictionary class: INSTANCE + <init> + <clinit> */
+    private fun singletonScaffold(cw: ClassWriter, cls: String, iface: String) {
+        cw.visitField(ACC_PUBLIC or ACC_STATIC or ACC_FINAL, "INSTANCE", "L$iface;", null, null).visitEnd()
+        var m = cw.visitMethod(ACC_PRIVATE, "<init>", "()V", null, null)
+        m.visitCode()
+        m.visitVarInsn(ALOAD, 0)
+        m.visitMethodInsn(INVOKESPECIAL, OBJ, "<init>", "()V", false)
+        m.visitInsn(RETURN)
+        m.visitMaxs(0, 0)
+        m.visitEnd()
+        m = cw.visitMethod(ACC_STATIC, "<clinit>", "()V", null, null)
+        m.visitCode()
+        m.visitTypeInsn(NEW, cls)
+        m.visitInsn(DUP)
+        m.visitMethodInsn(INVOKESPECIAL, cls, "<init>", "()V", false)
+        m.visitFieldInsn(PUTSTATIC, cls, "INSTANCE", "L$iface;")
+        m.visitInsn(RETURN)
+        m.visitMaxs(0, 0)
+        m.visitEnd()
+    }
+
+    /**
+     * An impl's dictionary: a singleton implementing the trait interface. Each
+     * erased interface method unwraps to the concrete static (provided) or
+     * delegates to the trait's default static with itself as the dictionary.
+     */
+    private fun genImplClass(i: ImplInfo): ByteArray {
+        val cls = implClass(i)
+        val iface = trIface(i.trait)
+        val cw = DawnClassWriter()
+        cw.visit(V17, ACC_PUBLIC or ACC_FINAL, cls, null, OBJ, arrayOf(iface))
+        singletonScaffold(cw, cls, iface)
+        for ((mname, ms) in i.trait.methods) {
+            mv = cw.visitMethod(ACC_PUBLIC, mname, traitMethodDesc(ms.sig), null, null)
+            mv.visitCode()
+            val provided = i.provided[mname]
+            if (provided != null) {
+                val psig = provided.sig!!
+                var slot = 1 // 0 = this
+                for ((declared, concrete) in ms.sig.paramTypes.zip(psig.paramTypes)) {
+                    loadSlot(mv, declared, slot)
+                    if (declared is TVar) unerase(concrete)
+                    slot += slotsOf(declared)
+                }
+                mv.visitMethodInsn(INVOKESTATIC, psig.owner ?: className, implMethodName(i, mname),
+                    methodDesc(psig.paramTypes, psig.ret), false)
+                if (ms.sig.ret is TVar) box(psig.ret)
+            } else {
+                // the trait's default body, with this very dictionary
+                var slot = 1
+                for (declared in ms.sig.paramTypes) {
+                    loadSlot(mv, declared, slot)
+                    slot += slotsOf(declared)
+                }
+                mv.visitVarInsn(ALOAD, 0)
+                mv.visitMethodInsn(INVOKESTATIC, i.trait.owner ?: className,
+                    defaultMethodName(i.trait, mname), fnDescWithDicts(ms.sig), false)
+            }
+            emitReturnOf(ms.sig.ret)
+            mv.visitMaxs(0, 0)
+            mv.visitEnd()
+        }
+        cw.visitEnd()
+        return cw.toByteArray()
+    }
+
+    /** the prelude Ord[Int/Float/String] dictionaries: cmp is the native comparison */
+    private fun genPreludeOrdImpl(i: ImplInfo): ByteArray {
+        val cls = implClass(i)
+        val iface = trIface(ORD_TRAIT)
+        val cw = DawnClassWriter()
+        cw.visit(V17, ACC_PUBLIC or ACC_FINAL, cls, null, OBJ, arrayOf(iface))
+        singletonScaffold(cw, cls, iface)
+        mv = cw.visitMethod(ACC_PUBLIC, "cmp", "(L$OBJ;L$OBJ;)J", null, null)
+        mv.visitCode()
+        mv.visitVarInsn(ALOAD, 1)
+        unerase(i.subject)
+        mv.visitVarInsn(ALOAD, 2)
+        unerase(i.subject)
+        emitNativeCmp(i.subject)
+        mv.visitInsn(LRETURN)
+        mv.visitMaxs(0, 0)
+        mv.visitEnd()
+        cw.visitEnd()
+        return cw.toByteArray()
+    }
+
+    /** two scalars on the stack → their long cmp result (NaN compares below everything here) */
+    private fun emitNativeCmp(t: Type) {
+        when (t) {
+            TInt -> mv.visitInsn(LCMP)
+            TFloat -> mv.visitInsn(DCMPL)
+            else -> mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "compareTo",
+                "(Ljava/lang/String;)I", false)
+        }
+        mv.visitInsn(I2L)
+    }
+
+    /** a trait default body: a static with erased params plus the trailing dictionary */
+    private fun genTraitDefault(cw: ClassWriter, t: TraitInfo, m: TraitMethod) {
+        val sig = m.sig!!
+        mv = cw.visitMethod(ACC_PUBLIC or ACC_STATIC, defaultMethodName(t, m.name),
+            fnDescWithDicts(sig), null, null)
+        mv.visitCode()
+        currentFn = null // self-calls resolve as trait-method calls, never a tail rewrite by name
+        nextSlot = 0
+        methodRet = sig.ret
+        methodRetsNull = false
+        selfPending = null
+        fnStart = null
+        for (p in m.params) {
+            val sym = p.symbol!!
+            sym.slot = nextSlot
+            nextSlot += slotsOf(sym.type)
+        }
+        for (sym in sig.dictSyms) {
+            sym.slot = nextSlot
+            nextSlot += slotsOf(sym.type)
+        }
+        if (genExpr(m.body!!, tail = false)) emitMethodReturn()
         mv.visitMaxs(0, 0)
         mv.visitEnd()
     }
@@ -2954,6 +3163,7 @@ class CodeGen(
 
         val self = currentFn
         val sig = e.sig!!
+        if (sig.trait != null) return genTraitMethodCall(e, sig)
         // self-recursive tail call → write args back to param slots + goto entry (spec §12.4);
         // an imported function of the same name (different owner) is not self-recursion
         val ownerClass = sig.owner ?: className
@@ -2973,8 +3183,72 @@ class CodeGen(
             genExpr(a, tail = false)
             adaptTo(a.type!!, pt)
         }
-        mv.visitMethodInsn(INVOKESTATIC, ownerClass, e.callee, methodDesc(sig.paramTypes, sig.ret), false)
+        e.witnesses?.forEach { pushWitness(it) }
+        mv.visitMethodInsn(INVOKESTATIC, ownerClass, e.callee, fnDescWithDicts(sig), false)
         adaptFrom(sig.ret, e.type!!)
+        return true
+    }
+
+    /** push one dictionary: the impl singleton, or the caller's own dict local/capture */
+    private fun pushWitness(w: WitnessRef) {
+        when (w) {
+            is WitnessRef.Concrete ->
+                mv.visitFieldInsn(GETSTATIC, implClass(w.impl), "INSTANCE", "L${trIface(w.impl.trait)};")
+            is WitnessRef.Forward -> loadVar(w.sym)
+        }
+    }
+
+    /**
+     * A trait method call. Concrete witness → devirtualize: the impl's static
+     * (or the prelude comparison, or the trait's default static with the impl's
+     * dictionary). Forward witness → invokeinterface on the caller's dictionary.
+     */
+    private fun genTraitMethodCall(e: Call, sig: FnSig): Boolean {
+        val trait = sig.trait!!
+        when (val w = e.witnesses!!.single()) {
+            is WitnessRef.Concrete -> {
+                val impl = w.impl
+                val provided = impl.provided[e.callee]
+                when {
+                    provided != null -> {
+                        val psig = provided.sig!!
+                        for ((a, pt) in e.args.zip(psig.paramTypes)) {
+                            genExpr(a, tail = false)
+                            adaptTo(a.type!!, pt)
+                        }
+                        mv.visitMethodInsn(INVOKESTATIC, psig.owner ?: className,
+                            implMethodName(impl, e.callee), methodDesc(psig.paramTypes, psig.ret), false)
+                        adaptFrom(psig.ret, e.type!!)
+                    }
+                    trait === ORD_TRAIT && impl.subject !is TAdt -> {
+                        // prelude scalar cmp, inlined
+                        for (a in e.args) genExpr(a, tail = false)
+                        emitNativeCmp(impl.subject)
+                    }
+                    else -> {
+                        // only a default body exists: its static, with the impl's dictionary
+                        for ((a, pt) in e.args.zip(sig.paramTypes)) {
+                            genExpr(a, tail = false)
+                            adaptTo(a.type!!, pt)
+                        }
+                        mv.visitFieldInsn(GETSTATIC, implClass(impl), "INSTANCE", "L${trIface(trait)};")
+                        mv.visitMethodInsn(INVOKESTATIC, trait.owner ?: className,
+                            defaultMethodName(trait, e.callee), fnDescWithDicts(sig), false)
+                        adaptFrom(sig.ret, e.type!!)
+                    }
+                }
+            }
+            is WitnessRef.Forward -> {
+                loadVar(w.sym)
+                mv.visitTypeInsn(CHECKCAST, trIface(trait))
+                for ((a, pt) in e.args.zip(sig.paramTypes)) {
+                    genExpr(a, tail = false)
+                    adaptTo(a.type!!, pt)
+                }
+                mv.visitMethodInsn(INVOKEINTERFACE, trIface(trait), e.callee, traitMethodDesc(sig), true)
+                adaptFrom(sig.ret, e.type!!)
+            }
+        }
         return true
     }
 
@@ -3336,6 +3610,7 @@ class CodeGen(
             mv.visitLabel(end)
             return true
         }
+        if (e.ordWitness != null) return genTraitOrdering(e)
 
         genExpr(e.left, tail = false)
         genExpr(e.right, tail = false)
@@ -3393,6 +3668,44 @@ class CodeGen(
             BinOp.LT -> IFLT; BinOp.LE -> IFLE; BinOp.GT -> IFGT; else -> IFGE
         }
         pushCmpResult(jump)
+    }
+
+    /** `< <= > >=` through an Ord impl: cmp(l, r), then compare the long result to 0. */
+    private fun genTraitOrdering(e: Binary): Boolean {
+        val ordCmp = ORD_TRAIT.methods.getValue("cmp").sig
+        when (val w = e.ordWitness!!) {
+            is WitnessRef.Concrete -> {
+                val provided = w.impl.provided["cmp"]
+                if (provided != null) {
+                    genExpr(e.left, tail = false)
+                    genExpr(e.right, tail = false)
+                    val psig = provided.sig!!
+                    mv.visitMethodInsn(INVOKESTATIC, psig.owner ?: className,
+                        implMethodName(w.impl, "cmp"), methodDesc(psig.paramTypes, psig.ret), false)
+                } else {
+                    // cmp came from a default body (future-proof: Ord has none today)
+                    genExpr(e.left, tail = false)
+                    genExpr(e.right, tail = false)
+                    mv.visitFieldInsn(GETSTATIC, implClass(w.impl), "INSTANCE", "L${trIface(ORD_TRAIT)};")
+                    mv.visitMethodInsn(INVOKESTATIC, ORD_TRAIT.owner ?: className,
+                        defaultMethodName(ORD_TRAIT, "cmp"), fnDescWithDicts(ordCmp), false)
+                }
+            }
+            is WitnessRef.Forward -> {
+                loadVar(w.sym)
+                mv.visitTypeInsn(CHECKCAST, trIface(ORD_TRAIT))
+                genExpr(e.left, tail = false) // rigid tvar operands are already erased refs
+                genExpr(e.right, tail = false)
+                mv.visitMethodInsn(INVOKEINTERFACE, trIface(ORD_TRAIT), "cmp",
+                    traitMethodDesc(ordCmp), true)
+            }
+        }
+        mv.visitInsn(LCONST_0)
+        mv.visitInsn(LCMP)
+        pushCmpResult(when (e.op) {
+            BinOp.LT -> IFLT; BinOp.LE -> IFLE; BinOp.GT -> IFGT; else -> IFGE
+        })
+        return true
     }
 
     /** Stack top is an int cmp result; convert to boolean 0/1 by the given jump condition. */

@@ -108,7 +108,8 @@ class Checker(
         val m = LinkedHashMap<Pair<TVar, TraitInfo>, Symbol>()
         for ((i, tp) in sig.typeParams.withIndex()) {
             for (tr in sig.boundsOf(i)) {
-                m[tp to tr] = Symbol("${tr.name}\$${tp.name}", TError, mutable = false,
+                // typed as the tvar: erases to Object (one slot), like any generic value
+                m[tp to tr] = Symbol("${tr.name}\$${tp.name}", tp, mutable = false,
                     defSpan = sig.nameSpan ?: Span(0, 0), dictOf = tr to tp)
             }
         }
@@ -416,6 +417,7 @@ class Checker(
             constraints = old.constraints)
         sealed.owner = old.owner
         sealed.srcPath = old.srcPath
+        sealed.dictSyms = old.dictSyms // witnesses in the body reference these very symbols
         d.sig = sealed
         if (fns[d.name] === old) fns[d.name] = sealed
         scopes.removeLast()
@@ -447,6 +449,7 @@ class Checker(
             val info = TraitInfo(d.name, TVar(d.typeParam), d.nameSpan, d.pub)
             info.owner = ownerClass
             info.srcPath = srcPath
+            d.info = info
             traitsByName[d.name] = info
             localTraits[d.name] = info
             val tp = mapOf(d.typeParam to info.tvar)
@@ -546,6 +549,7 @@ class Checker(
             }
             val info = ImplInfo(tr, subject, d.span, srcPath)
             info.owner = ownerClass
+            d.info = info
             val instMap = mapOf(tr.tvar to subject)
             for (m in d.methods) {
                 val ms = tr.methods[m.name]

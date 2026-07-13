@@ -133,7 +133,10 @@ class TraitDecl(
     val methods: List<TraitMethod>,
     span: Span,
     nameSpan: Span,
-) : Decl(pub, name, span, nameSpan)
+) : Decl(pub, name, span, nameSpan) {
+    /** resolved trait, filled by the checker (codegen emits its interface + defaults) */
+    var info: dawn.check.TraitInfo? = null
+}
 
 /** One method of a trait: a full signature, plus an optional default body. */
 class TraitMethod(
@@ -163,7 +166,10 @@ class ImplDecl(
     val subject: TypeRef,
     val methods: List<FnDecl>,
     span: Span,
-) : Decl(pub = false, name = traitName, span = span, nameSpan = traitSpan)
+) : Decl(pub = false, name = traitName, span = span, nameSpan = traitSpan) {
+    /** resolved impl, filled by the checker (codegen emits its singleton + statics) */
+    var info: dawn.check.ImplInfo? = null
+}
 
 /** use java "java.lang.StringBuilder" (spec §9): an opaque type + a static namespace */
 class UseJavaDecl(
