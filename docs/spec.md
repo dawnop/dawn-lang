@@ -598,6 +598,11 @@ fn build() -> String !io = {
 - 类解析发生在**编译期反射**：JDK 类恒可见；第三方类须以 `--cp <jars>` 提供
   （`dawn run/test/build` 通用，§12.1），编译与运行共用同一份 classpath。
   LSP v0.1 仅解析 JDK 类，第三方类在编辑器里报未找到但命令行可编译。
+- **嵌套类用点号写**：`use java "java.net.http.HttpResponse.BodyHandlers"`
+  （不是 `$`——`$` 在字符串里会被当插值）。解析时先整体反射，失败则从右往左把
+  `.` 逐个换成 `$` 重试，故任意嵌套深度都能用点号书写；绑定名取最后一段
+  （`BodyHandlers`）。嵌套类的**泛型方法**仍按擦除返回不透明 `Object`（§9.2）——
+  如 `HttpResponse.body()` 返回 `Object`，取字符串体用 `String.valueOf(...)` 桥回。
 
 ### 9.2 类型映射
 

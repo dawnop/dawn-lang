@@ -55,6 +55,36 @@ class JavaInteropTest {
     }
 
     @Test
+    fun `a nested class imports with a dotted name`() {
+        // Base64.Encoder is java.util.Base64$Encoder; the dotted form resolves via
+        // the $ fallback, and the bound name types a Dawn signature.
+        val out = run(
+            """
+            use java "java.util.Base64"
+            use java "java.util.Base64.Encoder"
+
+            fn enc(e: Encoder, s: String) -> String !io = e.encodeToString(utf8_bytes(s)).expect("s")
+
+            pub fn main() -> Unit !io =
+              println(enc(Base64.getEncoder().expect("e"), "ab"))
+            """.trimIndent(),
+        )
+        assertEquals("YWI=\n", out)
+    }
+
+    @Test
+    fun `an unresolvable nested name still errors`() {
+        val diags = errorsOf(
+            """
+            use java "java.util.Map.Nope"
+
+            pub fn main() -> Unit !io = {}
+            """.trimIndent(),
+        )
+        assertHasError(diags, "Java class not found")
+    }
+
+    @Test
     fun `static call with int narrowing and long overload ranking`() {
         val out = run(
             """

@@ -135,13 +135,12 @@ class Checker(
         for (i in PRELUDE_IMPLS) implTable[i.trait to i.subject] = i
         // 0.5. java imports (spec §9): resolved by reflection on the compiler's JVM
         for (d in module.javaUses) {
-            val cls = try {
-                Class.forName(d.fqcn, false, javaLoader ?: javaClass.classLoader)
-            } catch (e: Throwable) {
+            val cls = resolveJavaClass(d.fqcn, javaLoader ?: javaClass.classLoader) ?: run {
                 sink.error("Java class not found: ${d.fqcn}", d.nameSpan,
                     "the JDK is always visible; third-party jars must be passed with --cp <jars>")
-                continue
+                null
             }
+            if (cls == null) continue
             when {
                 javaClasses.containsKey(d.name) ->
                     sink.error("`${d.name}` is already imported", d.nameSpan)
@@ -2596,4 +2595,26 @@ class Checker(
             }
         }
     }
+}
+
+/**
+ * Resolve a `use java` name (spec §9.1). Tries the fqcn as written, then walks
+ * trailing dots into `$` so nested classes read naturally
+ * (`java.net.http.HttpResponse.BodyHandlers`, no `$` in source — `$` would lex
+ * as interpolation anyway). Returns null when nothing resolves.
+ */
+fun resolveJavaClass(fqcn: String, loader: ClassLoader): Class<*>? {
+    try {
+        return Class.forName(fqcn, false, loader)
+    } catch (_: Throwable) {
+    }
+    var name = fqcn
+    while (name.contains('.')) {
+        name = name.substringBeforeLast('.') + '$' + name.substringAfterLast('.')
+        try {
+            return Class.forName(name, false, loader)
+        } catch (_: Throwable) {
+        }
+    }
+    return null
 }
