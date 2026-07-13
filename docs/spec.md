@@ -723,6 +723,13 @@ fn parse(s: String) -> Result[Int, String] !io =
   需要区分异常种类时按前缀匹配字符串，v0.1 不提供结构化异常对象。
 - 边界之内失败照常传播：`java_try` 包住整段复合调用即可，无需逐调用包裹。
 
+配套的 `catch_panic[T](f: fn() -> T !io) -> Result[T, String] !io` 拦的是
+**任意 `Throwable`（含 Dawn panic `PanicError`）**，用于**监督边界**——服务器的
+单个请求、任务 runner 的单次执行：一个请求 panic 应变成 500 并记录，而非掀翻整条
+连接或进程。它与 `java_try` 分工明确：`java_try` 处理**预期外部失败**、放 panic 穿透；
+`catch_panic` 是**隔离点**、兜住一切。普通业务失败仍走 `Result`，别拿 `catch_panic`
+当常规错误处理。
+
 ---
 
 ## 10. 模块系统

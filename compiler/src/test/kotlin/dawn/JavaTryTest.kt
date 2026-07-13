@@ -98,6 +98,36 @@ class JavaTryTest {
     }
 
     @Test
+    fun `catch_panic turns a panic into Err`() {
+        val out = run(
+            """
+            fn boom() -> Int = panic("kaboom")
+
+            pub fn main() -> Unit !io =
+              match catch_panic(fn() => boom()) {
+                Ok(n) -> println(to_string(n))
+                Err(m) -> println("caught: " ++ m)
+              }
+            """.trimIndent(),
+        )
+        assertTrue(out.startsWith("caught: ") && out.contains("kaboom"), "got: $out")
+    }
+
+    @Test
+    fun `catch_panic passes Ok through`() {
+        val out = run(
+            """
+            pub fn main() -> Unit !io =
+              match catch_panic(fn() => 5) {
+                Ok(n) -> println(to_string(n))
+                Err(m) -> println(m)
+              }
+            """.trimIndent(),
+        )
+        assertEquals("5\n", out)
+    }
+
+    @Test
     fun `java_try itself is io`() {
         val analysis = analyze(
             """

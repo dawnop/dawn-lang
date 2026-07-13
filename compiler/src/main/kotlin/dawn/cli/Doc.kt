@@ -158,6 +158,7 @@ val BUILTIN_GROUPS: List<Pair<String, List<Pair<String, String>>>> = listOf(
         "is_dir" to "whether the path names a directory (false when missing)",
         "args" to "command line arguments",
         "java_try" to "run a closure, catching Java exceptions into Err (panics pass through)",
+        "catch_panic" to "run a closure at an isolation boundary, catching any Throwable including a panic into Err",
     ),
     "list" to listOf(
         "len" to "number of elements",
