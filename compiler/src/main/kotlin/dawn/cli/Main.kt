@@ -27,6 +27,11 @@ usage:
   dawn fmt --check <target>...         report files that are not formatted (exit 1 if any)
   dawn doc <target>                    emit the pub API (## doc comments) as JSON on stdout
   dawn doc --builtins                  emit the builtin function reference as JSON
+
+options (run/test/build):
+  --cp <jars>                          third-party jars for `use java`, separated by the
+                                       platform path separator; repeatable. `build` records
+                                       them in the jar manifest's Class-Path.
 """
 
 fun main(args: Array<String>) {
@@ -80,6 +85,36 @@ fun extractFuel(rest: List<String>): Pair<Long, List<String>> {
     return fuel to out
 }
 
+/** --cp <jars> / --cp=jars; repeatable, path-separator separated; returns (jars, args without the flag) */
+fun extractCp(rest: List<String>): Pair<List<File>, List<String>> {
+    val jars = ArrayList<File>()
+    val out = ArrayList<String>()
+    fun add(spec: String) {
+        for (p in spec.split(File.pathSeparator)) {
+            if (p.isEmpty()) continue
+            val f = File(p)
+            if (!f.exists()) throw CliError("--cp entry not found: $p")
+            jars.add(f)
+        }
+    }
+    var i = 0
+    while (i < rest.size) {
+        val a = rest[i]
+        when {
+            a == "--cp" && i + 1 < rest.size -> { add(rest[i + 1]); i += 2 }
+            a == "--cp" -> throw CliError("--cp needs a path")
+            a.startsWith("--cp=") -> { add(a.removePrefix("--cp=")); i++ }
+            else -> { out.add(a); i++ }
+        }
+    }
+    return jars to out
+}
+
+/** interop loader over --cp jars; null when the flag is absent (JDK only) */
+fun cpLoader(jars: List<File>): ClassLoader? =
+    if (jars.isEmpty()) null
+    else java.net.URLClassLoader(jars.map { it.toURI().toURL() }.toTypedArray(), ClassLoader.getSystemClassLoader())
+
 fun sanitizeClassName(stem: String): String {
     val cleaned = stem.map { if (it.isLetterOrDigit() || it == '_') it else '_' }.joinToString("")
     return if (cleaned.isEmpty() || cleaned[0].isDigit()) "dawn_$cleaned" else cleaned
@@ -92,11 +127,16 @@ class CompiledProgram(val entry: CheckedModule?, val classes: Map<String, ByteAr
  * Compile a project directory or a single .dawn file (spec §10.1) → all classes.
  * Compile errors are rendered here and exit. `includeTests` keeps test blocks.
  */
-fun compileProject(path: String, comptimeFuel: Long, includeTests: Boolean = false): CompiledProgram {
+fun compileProject(
+    path: String,
+    comptimeFuel: Long,
+    includeTests: Boolean = false,
+    javaLoader: ClassLoader? = null,
+): CompiledProgram {
     val file = File(path)
     if (!file.exists()) throw CliError("no such file or directory: $path")
     if (file.isFile && !path.endsWith(".dawn")) throw CliError("source files must end in .dawn: $path")
-    val program = analyzeProject(file, comptimeFuel)
+    val program = analyzeProject(file, comptimeFuel, javaLoader)
     if (program.hasErrors) {
         System.err.print(program.render())
         val n = program.diagnostics.count { it.diag.severity == Severity.ERROR }
@@ -109,9 +149,12 @@ fun compileProject(path: String, comptimeFuel: Long, includeTests: Boolean = fal
     return CompiledProgram(entry, classes)
 }
 
-/** A class loader backed by an in-memory class table. */
-private fun loaderFor(classes: Map<String, ByteArray>): ClassLoader =
-    object : ClassLoader(ClassLoader.getSystemClassLoader()) {
+/** A class loader backed by an in-memory class table; [parent] carries any --cp jars. */
+private fun loaderFor(
+    classes: Map<String, ByteArray>,
+    parent: ClassLoader = ClassLoader.getSystemClassLoader(),
+): ClassLoader =
+    object : ClassLoader(parent) {
         override fun findClass(name: String): Class<*> {
             val bytes = classes[name.replace('.', '/')] ?: throw ClassNotFoundException(name)
             return defineClass(name, bytes, 0, bytes.size)
@@ -121,11 +164,14 @@ private fun loaderFor(classes: Map<String, ByteArray>): ClassLoader =
 // ---- run: execute in-process via a class loader ----
 
 fun cmdRun(restIn: List<String>) {
-    val (fuel, rest) = extractFuel(restIn)
-    val path = rest.firstOrNull() ?: throw CliError("usage: dawn run <file.dawn | project-dir>")
-    val program = compileProject(path, fuel)
+    val (fuel, rest0) = extractFuel(restIn)
+    val (cp, rest) = extractCp(rest0)
+    val path = rest.firstOrNull() ?: throw CliError("usage: dawn run [--cp jars] <file.dawn | project-dir>")
+    val javaLoader = cpLoader(cp)
+    val program = compileProject(path, fuel, javaLoader = javaLoader)
     val entry = program.entry ?: throw CliError("$path has no pub fn main() -> Unit !io, nothing to run")
-    val cls = Class.forName(entry.className.replace('/', '.'), false, loaderFor(program.classes))
+    val parent = javaLoader ?: ClassLoader.getSystemClassLoader()
+    val cls = Class.forName(entry.className.replace('/', '.'), false, loaderFor(program.classes, parent))
     val main = cls.getDeclaredMethod("main", Array<String>::class.java)
     main.invoke(null, rest.drop(1).toTypedArray())
 }
@@ -133,12 +179,14 @@ fun cmdRun(restIn: List<String>) {
 // ---- test: compile with test blocks, run each across all modules, report ----
 
 fun cmdTest(restIn: List<String>) {
-    val (fuel, rest) = extractFuel(restIn)
-    val path = rest.firstOrNull() ?: throw CliError("usage: dawn test <file.dawn | project-dir>")
-    val program = compileProject(path, fuel, includeTests = true)
+    val (fuel, rest0) = extractFuel(restIn)
+    val (cp, rest) = extractCp(rest0)
+    val path = rest.firstOrNull() ?: throw CliError("usage: dawn test [--cp jars] <file.dawn | project-dir>")
+    val javaLoader = cpLoader(cp)
+    val program = compileProject(path, fuel, includeTests = true, javaLoader = javaLoader)
     // recover per-module test blocks (a module class holds dawn$test$i methods)
-    val analyzed = analyzeProject(File(path), fuel)
-    val loader = loaderFor(program.classes)
+    val analyzed = analyzeProject(File(path), fuel, javaLoader)
+    val loader = loaderFor(program.classes, javaLoader ?: ClassLoader.getSystemClassLoader())
     var total = 0
     var failed = 0
     for (m in analyzed.modules) {
@@ -198,14 +246,15 @@ fun cmdFmt(rest: List<String>) {
 // ---- build: write a jar, optionally hand it to native-image ----
 
 fun cmdBuild(restIn: List<String>) {
-    val (fuel, rest) = extractFuel(restIn)
+    val (fuel, rest0) = extractFuel(restIn)
+    val (cp, rest) = extractCp(rest0)
     val path = rest.firstOrNull { !it.startsWith("-") }
-        ?: throw CliError("usage: dawn build <file.dawn | project-dir> [-o out] [--native]")
+        ?: throw CliError("usage: dawn build [--cp jars] <file.dawn | project-dir> [-o out] [--native]")
     val native = rest.contains("--native")
     val oIdx = rest.indexOf("-o")
     val out = if (oIdx >= 0 && oIdx + 1 < rest.size) rest[oIdx + 1] else null
 
-    val program = compileProject(path, fuel)
+    val program = compileProject(path, fuel, javaLoader = cpLoader(cp))
     val entry = program.entry ?: throw CliError("$path has no pub fn main() -> Unit !io to use as an entry point")
     val stem = File(path).let { if (it.isDirectory) it.name else it.nameWithoutExtension }
     val jarPath = when {
@@ -213,10 +262,11 @@ fun cmdBuild(restIn: List<String>) {
         out != null -> out
         else -> "$stem.jar"
     }
-    writeJar(jarPath, entry.className, program.classes)
+    writeJar(jarPath, entry.className, program.classes, classPath = cp)
 
     if (!native) {
-        println("wrote $jarPath (run it with: java -jar $jarPath)")
+        if (cp.isEmpty()) println("wrote $jarPath (run it with: java -jar $jarPath)")
+        else println("wrote $jarPath (run it with: java -jar $jarPath; manifest Class-Path points at the --cp jars, keep them in place)")
         return
     }
 
@@ -225,7 +275,14 @@ fun cmdBuild(restIn: List<String>) {
         "native-image not found. Install GraalVM and add it to PATH, or set GRAALVM_HOME",
     )
     println("invoking native-image (takes a minute or two the first time)...")
-    val proc = ProcessBuilder(nativeImage, "-jar", jarPath, "-o", binOut, "--no-fallback")
+    // with --cp jars the -jar form would ignore them; pass an explicit class path + main class
+    val cmd = if (cp.isEmpty())
+        listOf(nativeImage, "-jar", jarPath, "-o", binOut, "--no-fallback")
+    else
+        listOf(nativeImage, "-cp",
+            (listOf(jarPath) + cp.map { it.absolutePath }).joinToString(File.pathSeparator),
+            entry.className.replace('/', '.'), "-o", binOut, "--no-fallback")
+    val proc = ProcessBuilder(cmd)
         .redirectErrorStream(true)
         .start()
     proc.inputStream.bufferedReader().forEachLine { println("  $it") }
@@ -235,10 +292,22 @@ fun cmdBuild(restIn: List<String>) {
     println("wrote $binOut (standalone binary, run it directly: ./$binOut)")
 }
 
-fun writeJar(jarPath: String, mainClass: String, classes: Map<String, ByteArray>) {
+fun writeJar(
+    jarPath: String,
+    mainClass: String,
+    classes: Map<String, ByteArray>,
+    classPath: List<File> = emptyList(),
+) {
     val manifest = Manifest()
     manifest.mainAttributes[Attributes.Name.MANIFEST_VERSION] = "1.0"
     manifest.mainAttributes[Attributes.Name.MAIN_CLASS] = mainClass
+    if (classPath.isNotEmpty()) {
+        // manifest Class-Path entries are URLs relative to the jar's own directory;
+        // URI.relativize keeps entries under that directory relative, others absolute
+        val base = File(jarPath).absoluteFile.parentFile.toURI()
+        val entries = classPath.map { base.relativize(it.absoluteFile.toURI()).toString() }
+        manifest.mainAttributes[Attributes.Name.CLASS_PATH] = entries.joinToString(" ")
+    }
     JarOutputStream(File(jarPath).outputStream(), manifest).use { jar ->
         for ((name, bytes) in classes) {
             jar.putNextEntry(JarEntry("$name.class"))

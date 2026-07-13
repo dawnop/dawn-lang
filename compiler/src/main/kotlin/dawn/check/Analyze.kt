@@ -30,11 +30,11 @@ class Analyzed(
  * lex → parse (with recovery) → type/effect check (with recovery).
  * Never throws on bad input; all problems land in [Analyzed.diagnostics].
  */
-fun analyze(source: String, comptimeFuel: Long = 100_000_000L): Analyzed {
+fun analyze(source: String, comptimeFuel: Long = 100_000_000L, javaLoader: ClassLoader? = null): Analyzed {
     val sink = DiagnosticSink()
     val tokens = Lexer(source, 0, sink).lex()
     val module = Parser(tokens, sink, source).module()
-    val checker = Checker(module, sink)
+    val checker = Checker(module, sink, javaLoader = javaLoader)
     checker.check()
     // comptime evaluation only makes sense on a well-typed module
     if (sink.all.none { it.severity == dawn.diag.Severity.ERROR }) {
@@ -135,7 +135,11 @@ class AnalyzedProgram(
  * is layered on top of this in a later step; here each module is checked in
  * isolation once the graph is known.
  */
-fun analyzeProgram(loaded: ModuleLoadResult, comptimeFuel: Long = 100_000_000L): AnalyzedProgram {
+fun analyzeProgram(
+    loaded: ModuleLoadResult,
+    comptimeFuel: Long = 100_000_000L,
+    javaLoader: ClassLoader? = null,
+): AnalyzedProgram {
     val diags = ArrayList(loaded.loadDiagnostics)
     val checked = ArrayList<CheckedModule>()
     // modules arrive in dependency order, so a module's imports are already checked
@@ -145,7 +149,7 @@ fun analyzeProgram(loaded: ModuleLoadResult, comptimeFuel: Long = 100_000_000L):
         val parseFailed = mf.diagnostics.any { it.severity == Severity.ERROR }
         val sink = DiagnosticSink()
         val srcPath = mf.file.absoluteFile.path
-        val checker = Checker(mf.module, sink, ImportEnv(exportsByPath.toMap()), mf.className, srcPath)
+        val checker = Checker(mf.module, sink, ImportEnv(exportsByPath.toMap()), mf.className, srcPath, javaLoader)
         if (!parseFailed) {
             checker.check()
             if (sink.all.none { it.severity == Severity.ERROR }) {
@@ -163,9 +167,13 @@ fun analyzeProgram(loaded: ModuleLoadResult, comptimeFuel: Long = 100_000_000L):
 }
 
 /** Convenience: load a project directory (or single file) and check it (spec §10.1). */
-fun analyzeProject(path: File, comptimeFuel: Long = 100_000_000L): AnalyzedProgram {
+fun analyzeProject(
+    path: File,
+    comptimeFuel: Long = 100_000_000L,
+    javaLoader: ClassLoader? = null,
+): AnalyzedProgram {
     val loaded = if (path.isDirectory) ModuleLoader.loadDirectory(path) else ModuleLoader.loadFile(path)
-    return analyzeProgram(loaded, comptimeFuel)
+    return analyzeProgram(loaded, comptimeFuel, javaLoader)
 }
 
 /**

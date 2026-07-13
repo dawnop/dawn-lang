@@ -29,6 +29,8 @@ class Checker(
     private val ownerClass: String? = null,
     /** source file of this module, tagged onto its fns/types/consts for cross-file navigation */
     private val srcPath: String? = null,
+    /** resolves `use java` classes; null = the compiler's own class path (JDK only) */
+    private val javaLoader: ClassLoader? = null,
 ) {
 
     private val fns = HashMap<String, FnSig>()
@@ -134,10 +136,10 @@ class Checker(
         // 0.5. java imports (spec §9): resolved by reflection on the compiler's JVM
         for (d in module.javaUses) {
             val cls = try {
-                Class.forName(d.fqcn, false, javaClass.classLoader)
+                Class.forName(d.fqcn, false, javaLoader ?: javaClass.classLoader)
             } catch (e: Throwable) {
                 sink.error("Java class not found: ${d.fqcn}", d.nameSpan,
-                    "v0.1 resolves against the JDK; third-party jars are not on the compile classpath")
+                    "the JDK is always visible; third-party jars must be passed with --cp <jars>")
                 continue
             }
             when {

@@ -595,6 +595,9 @@ fn build() -> String !io = {
   `this` 或状态码；「不得悄悄丢弃」规则只保护 Dawn 值。
 - 返回值里出现**未导入的引用类**（如 `Path.of` 的 `Path`）时，值仍可用（自动成为
   不透明类型、可继续链式调用）；只有要在签名里**写出类型名**才需要 `use java` 导入。
+- 类解析发生在**编译期反射**：JDK 类恒可见；第三方类须以 `--cp <jars>` 提供
+  （`dawn run/test/build` 通用，§12.1），编译与运行共用同一份 classpath。
+  LSP v0.1 仅解析 JDK 类，第三方类在编辑器里报未找到但命令行可编译。
 
 ### 9.2 类型映射
 
@@ -823,6 +826,13 @@ use java "java.lang.Math"      # Java 互操作（§9），形式不变
 **参数可为单文件或工程目录**（§10.1）：目录模式加载 `src/` 全部模块，入口
 `src/main.dawn`；单文件模式向上找 `src` 祖先为根。jar 收全部模块类，`Main-Class` = 入口
 模块类 `main`。
+
+**第三方 jar：`--cp <jars>`**（run/test/build 通用；路径分隔符分隔、可重复）。
+编译期 `use java` 解析与运行期加载共用这份 classpath。`build` 把各 jar 记入 manifest
+的 `Class-Path`（相对产物目录，jar 挪走要一起挪），产物仍 `java -jar` 直接跑；
+`build --native` 改以 `-cp` 形式调 native-image（第三方库的反射/JNI 是否过
+native-image，责任在库，见 §12.3）。Dawn 无依赖解析——只接受**单 jar、零传递依赖**
+的库，需要依赖树的库不适配。
 
 **保证**：同一程序在 JVM 与 native 下行为一致（除启动时间与内存占用）。
 
