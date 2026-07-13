@@ -3952,6 +3952,14 @@ class CodeGen(
             mv.visitMethodInsn(INVOKESTATIC, IO_CLASS, "javaTry", "(L${fnIface(0)};)LResult;", false)
             true
         }
+        "utf8_bytes" -> {
+            genExpr(e.args[0], tail = false)
+            mv.visitFieldInsn(GETSTATIC, "java/nio/charset/StandardCharsets", "UTF_8",
+                "Ljava/nio/charset/Charset;")
+            mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "getBytes",
+                "(Ljava/nio/charset/Charset;)[B", false)
+            true
+        }
         "read_file" -> {
             genExpr(e.args[0], tail = false)
             mv.visitMethodInsn(INVOKESTATIC, IO_CLASS, "readFile", "(Ljava/lang/String;)LResult;", false)

@@ -420,6 +420,11 @@ val BUILTINS: Map<String, FnSig> = run {
         FnSig("java_try", listOf(Type.TFn(emptyList(), t, Eff.Io)), listOf("f"),
             Type.TAdt(RESULT_ADT, listOf(t, Type.TString)), Eff.Io, isBuiltin = true,
             typeParams = listOf(t)),
+        // UTF-8 bytes of a string as an opaque byte[] (spec §9.5): the one bridge a
+        // Dawn String cannot cross on its own (getBytes is a java.lang.String method,
+        // and Dawn strings are TString, not the opaque class). Feeds crypto/IO interop.
+        FnSig("utf8_bytes", listOf(Type.TString), listOf("s"),
+            Type.TJava("[B", ByteArray::class.java), Eff.Pure, isBuiltin = true),
         // io (spec §11)
         FnSig("read_file", listOf(Type.TString), listOf("path"),
             Type.TAdt(RESULT_ADT, listOf(Type.TString, Type.TString)), Eff.Io, isBuiltin = true),
