@@ -680,6 +680,16 @@ fn slurp(p: String) -> String !io = {
 }
 ```
 
+**不透明值收窄回具体引用形参**：擦除泛型的返回（§9.2）落成不透明 `Object`，但业务
+常需把它**原样喂回**某个要具体引用类型的 Java 形参——例如 `HttpResponse.body()`
+以 `BodyHandlers.ofByteArray()` 取到的 `Object` 实为 `byte[]`，要写进
+`OutputStream.write(byte[])`。此时重载消解允许不透明 `Object` 实参匹配具体引用形参，
+桥接处插一次运行期 `CHECKCAST`（失败即 `ClassCastException` 穿透，非静默）。方向与
+§9.3 的「宽化到 `Object`」相反、成对：宽化是丢类型信息传出，收窄是运行期认领回来。
+不透明值仍**不可命名、不可索引**——收窄只发生在跨边界传参的隐式适配处，Dawn 代码
+拿不到该类型的名字。这让「取二进制体 → 透传出去」这类管道无需把字节读进 Dawn 值
+（省一次全量拷贝，大文件不顶爆内存）。
+
 ### 9.6 List 桥接：Dawn `List` 直达集合形参
 
 Java 形参声明为 `java.util.List` / `java.util.Collection` / `java.lang.Iterable` 时，
@@ -805,7 +815,8 @@ use java "java.lang.Math"      # Java 互操作（§9），形式不变
   - `max/min[T: Ord](xs) -> Option[T]` — 极值；空列表 `None`
   - `max_by/min_by[T, K: Ord](xs, key: fn(T) -> K) -> Option[T]` — 按键取极值
 - `core/string`：`chars split join trim starts_with ends_with contains
-  parse_int parse_float to_string utf8_bytes ...`（字符串转数字是 `parse_int(s) -> Option[Int]`——
+  to_lower to_upper parse_int parse_float to_string utf8_bytes ...`（`to_lower`/`to_upper`
+  按 Unicode 大小写折叠；字符串转数字是 `parse_int(s) -> Option[Int]`——
   没有重载，`to_int`/`to_float` 只做 Int↔Float 转换）。`utf8_bytes(s) -> byte[]` 取字符串的
   UTF-8 字节为不透明数组（§9.5）——Dawn 字符串是 `TString`、不是不透明 `java.lang.String`，
   无法直接调 `getBytes`，此内建是唯一的桥；配 `String.new(bytes, "UTF-8")` 反向解字节。

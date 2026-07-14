@@ -197,8 +197,22 @@ M6 前置，先用 playground runner 验收。四个语义决策全部对照过 
   - 静态生成器用 Dawn 写（dogfood M4），产物 nginx 托管、零后端；
   - playground 在线试玩做二期（编译服务 + 沙箱限时）。
   - 验收：站点上线，且生成它的程序是 Dawn 写的。
-- **M6 博客后端重写**：真实生产 dogfood，故意排在自举前——真实项目会把 stdlib
-  与报错的痛点全逼出来，趁语言未冻结修起来便宜。
+- **M6 博客后端重写**（代码实现完成，2026-07-14；十三刀，backend-dawn ~4000 行 Dawn、
+  46 单测全绿；仅剩生产切流的运维执行 + 7 天观察，见 dawnop-site 仓库 `backend-dawn/`）：
+  真实生产 dogfood，故意排在自举前——真实项目会把 stdlib 与报错的痛点全逼出来，
+  趁语言未冻结修起来便宜。**验收结论：整个博客后端（公开站 + 全套后台内容管理 + 搜索 +
+  认证 + 文件管理 + 监控）在 Dawn 上跑通，与 FastAPI 参照实现逐字段对拍一致，路由表
+  100% 覆盖（唯一缺口 `POST /api/fm/upload` 与 WebDAV 一并进 M6.5，同缺"二进制请求体"）。**
+  - **痛点逼出的语言补强**（全部落进 spec，未加语法负担）：`--cp` 第三方 classpath
+    （§9.1/§12.1）、`java_try` 异常屏障 + `catch_panic` 监督边界（§9.8）、`utf8_bytes`
+    与不透明值收窄回具体引用形参（§9.5，让「取二进制体→透传」零拷贝）、嵌套类点式
+    导入（§9.1）、`to_lower`/`to_upper`（§11）。**D8「互操作三件套」被真实项目验证够用**：
+    sql/crypto/http/web/json 五套地基库全用 `use java` + 纯 Dawn 写成、留在应用层（未进
+    语言 stdlib，印证「语言不加 async/web，靠互操作借 JVM 生态」的判断）。
+  - **契约保真手法**：两端同一 SQLite 库副本 + 同 `SECRET_KEY`，逐端点 diff JSON；
+    改七牛/发信等副作用端点用官方 SDK 造隔离前缀对象对拍再清理，生产数据不进测试库。
+    JWT 与 PyJWT 双向互认（旧会话零失效）、jBCrypt 认 Python 的 `$2b$` 哈希（归一 `$2a$`）、
+    三类七牛签名 + 腾讯 TC3 均对拍官方 SDK 逐字节。
   - Web 地基全走 `use java`，语言不加 async：HTTP 用 `com.sun.net.httpserver` +
     JVM 21 虚拟线程（每请求一线程，语言层零着色）；JSON 用 M4 的纯 Dawn 库；
     SQLite 走 JDBC 薄包装；JWT/bcrypt/七牛用现成 Java 库；
