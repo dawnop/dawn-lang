@@ -815,11 +815,15 @@ use java "java.lang.Math"      # Java 互操作（§9），形式不变
   - `max/min[T: Ord](xs) -> Option[T]` — 极值；空列表 `None`
   - `max_by/min_by[T, K: Ord](xs, key: fn(T) -> K) -> Option[T]` — 按键取极值
 - `core/string`：`chars split join trim starts_with ends_with contains
-  to_lower to_upper parse_int parse_float to_string utf8_bytes ...`（`to_lower`/`to_upper`
+  to_lower to_upper parse_int parse_float to_string utf8_bytes latin1_bytes ...`（`to_lower`/`to_upper`
   按 Unicode 大小写折叠；字符串转数字是 `parse_int(s) -> Option[Int]`——
   没有重载，`to_int`/`to_float` 只做 Int↔Float 转换）。`utf8_bytes(s) -> byte[]` 取字符串的
   UTF-8 字节为不透明数组（§9.5）——Dawn 字符串是 `TString`、不是不透明 `java.lang.String`，
   无法直接调 `getBytes`，此内建是唯一的桥；配 `String.new(bytes, "UTF-8")` 反向解字节。
+  `latin1_bytes(s) -> byte[]` 同理取 ISO-8859-1（latin-1）字节：latin-1 把字符 0..255 一一映射到
+  字节 0..255，故 `String.new(bytes, "ISO-8859-1")` 解出的串再经 `latin1_bytes` 编回即**无损还原**
+  原始字节。这是在没有原生 multipart 解析器时，于「字符串世界」里解析二进制请求体（multipart
+  上传、WebDAV PUT）并字节精确复原文件内容的手段。
 - **码点 / 字符**（§1.5、§2.1 的补充；字符即码点 `Int`）：
   - `code_points(s: String) -> List[Int]` — 拆成码点（增补平面的代理对合并为一个码点）
   - `from_code_points(cs: List[Int]) -> String` — 由码点组装（接受增补码点）

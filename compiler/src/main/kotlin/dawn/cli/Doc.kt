@@ -188,6 +188,7 @@ val BUILTIN_GROUPS: List<Pair<String, List<Pair<String, String>>>> = listOf(
         "parse_int" to "parse a decimal integer; None on malformed input",
         "parse_float" to "parse a floating point number; None on malformed input",
         "utf8_bytes" to "the UTF-8 bytes of a string as an opaque byte[] (for java interop)",
+        "latin1_bytes" to "the ISO-8859-1 (latin-1) bytes of a string as an opaque byte[]; round-trips byte[]<->String losslessly for binary bodies",
     ),
     "char" to listOf(
         "code_points" to "split into Unicode code points (a character is its code point Int)",

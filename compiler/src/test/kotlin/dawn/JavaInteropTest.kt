@@ -107,6 +107,26 @@ class JavaInteropTest {
     }
 
     @Test
+    fun `latin1_bytes round-trips high bytes where utf8 would not`() {
+        // U+00FF is one latin-1 byte (0xFF) but two UTF-8 bytes (0xC3 0xBF). A byte[]
+        // decoded via ISO-8859-1 and re-encoded through latin1_bytes must reproduce
+        // the original 1 byte — the lossless property binary body parsing relies on.
+        val out = run(
+            """
+            use java "java.lang.String"
+
+            pub fn main() -> Unit !io = {
+              let s = String.new(latin1_bytes("ÿ"), "ISO-8859-1")
+              println("${'$'}{s == "ÿ"}")
+              println("${'$'}{str_len(String.new(utf8_bytes("ÿ"), "ISO-8859-1"))}")
+            }
+            """.trimIndent(),
+        )
+        // latin-1 round-trips (true); utf-8 of ÿ is 2 bytes -> a 2-char latin-1 string
+        assertEquals("true\n2\n", out)
+    }
+
+    @Test
     fun `static call with int narrowing and long overload ranking`() {
         val out = run(
             """

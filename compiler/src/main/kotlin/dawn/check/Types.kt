@@ -427,6 +427,13 @@ val BUILTINS: Map<String, FnSig> = run {
         // and Dawn strings are TString, not the opaque class). Feeds crypto/IO interop.
         FnSig("utf8_bytes", listOf(Type.TString), listOf("s"),
             Type.TJava("[B", ByteArray::class.java), Eff.Pure, isBuiltin = true),
+        // ISO-8859-1 (latin-1) bytes of a string as an opaque byte[]. Latin-1 maps
+        // chars 0..255 to bytes 0..255 one-to-one, so a byte[] decoded via
+        // String.new(bytes, "ISO-8859-1") and re-encoded here round-trips losslessly.
+        // This is how binary request bodies (multipart uploads, WebDAV PUT) are parsed
+        // in string-land and recovered byte-exact without a native multipart parser.
+        FnSig("latin1_bytes", listOf(Type.TString), listOf("s"),
+            Type.TJava("[B", ByteArray::class.java), Eff.Pure, isBuiltin = true),
         // supervision boundary (spec §9.8): run f, turning *any* Throwable — including a
         // Dawn panic — into Err. For isolation points only (a server request, a job
         // runner); ordinary failures still travel in Result. Contrast java_try, which
