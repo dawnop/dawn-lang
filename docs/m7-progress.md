@@ -10,7 +10,7 @@
 |---|---|---|---|---|
 | 1 | 补齐 `find/take/drop/reverse` + 字符串 `index_of/last_index_of` | 库 | ✅ 完成 | dawn-lang `1784358`、backend `82664a8` |
 | 2 | SQL 命名列取值 `row.col_int("x")` | 库 | ✅ 完成 | backend `862c79c` |
-| 3 | Route 开放结构 + 中间件路由感知 | 框架 | 🚧 进行中（已定方案，未落码） | — |
+| 3 | Route 开放结构 + 中间件路由感知 | 框架 | ✅ 完成 | backend `3cfe1b4` |
 
 ---
 
@@ -53,12 +53,20 @@
 **验证**：新增 sql 测试覆盖乱序列名、别名 `count(*) as n`、表限定列 `x.id` 取 bare 名
 （`tags_json` 的 `select t.id,...` 依赖此）。backend **53 测试**全绿。
 
-## 序 3 — Route 开放结构 + 中间件路由感知（🚧）
+## 序 3 — Route 开放结构 + 中间件路由感知（✅）
 
 复盘两个框架结构性问题：① Route 是封闭 ADT，加动词就改核心（加 `Method` 构造子 + 改三个访问器）；
 ② 中间件对路由零感知，body-limit/CORS 只能硬编码路径字符串（`starts_with(path,"/dav")` 等）。
 
-**已完成的调研 + 定下的方案**（未落码）：
+**落地结果**（backend-dawn，纯框架改造，dawn-lang 语言本体无改动）：全部按下述方案实现，
+`build.sh` **54 测试全绿**（新增 1 条 router 用例 `tags ride along on the matched route and reach RouteMeta`），
+并对改动最大的 `handle()` 路径做了运行期冒烟（jar 起在本地，无 DB 的静态端点 + 中间件）：
+`GET /api/health`→200 且 CORS 头贴上（匹配路由、无 no-cors tag）、`OPTIONS /api/articles`→204 预检、
+`GET /nope`→404、`DELETE /api/health`→405、`OPTIONS /dav`→200 `Dav: 1,2` **且不贴 Access-Control-\***
+（no-cors tag 生效、绕过 CORS 直达 DAV handler）——tag 驱动与旧硬编码路径行为逐一对齐。
+契约三套（read/edge/webdav）对拍留部署时在生产库环境复核（需真 DB + 并存 FastAPI 比对）。
+
+**方案（已实现）**：
 
 - **Route 改开放记录**：`type Route = { method: String, pattern: String, tags: List[String], handler: Handler }`。
   method 就是字符串，`route_method/route_pattern/route_handler` 三个 pattern-match 访问器全删（改字段访问）。
@@ -74,11 +82,26 @@
   preflight（OPTIONS）与日志对**未匹配**请求（404/405）也生效——所以是「dispatch 求元数据 + 复用同一
   dispatch 结果执行」，而非把中间件搬到路由之后。
 
-**待办步骤**：① 改 `web/router.dawn`（Route 记录 + 构造器 + 访问器改字段访问 + 更新路由单测）；
-② 改 `web/types.dawn`（Request 加 `route` 字段、新增 `RouteMeta`）；③ 改 `web/server.dawn`
-（dispatch 一次 + 注入 RouteMeta）；④ 改 `web/middleware.dawn`（读 tags 取代路径判断）；
-⑤ 给需要豁免的路由打 tag（上传/WebDAV 路由标 `raw-body`/`no-cors`）；⑥ 扫 7 个文件改构造器调用；
-⑦ `build.sh` 全绿 + 三套 contract 对拍复核（部署时）。
+**落地步骤（全部完成）**：① `web/router.dawn`：`Route` 改开放记录，`route_get/route_post/route_put/
+route_delete/route_method_of` 构造器 + `tagged(r, tags)` 组合子 + `route_meta(r)`；`Found` 由携带
+`handler` 改为携带整个 `Route`（这样 server 一次 dispatch 既能取 handler 执行又能取 meta），三个
+pattern-match 访问器删除改字段访问；② `web/types.dawn`：新增 `RouteMeta {method,pattern,tags} derive Show`、
+`Request` 加 `route: Option[RouteMeta]`（4 处测试字面量补 `route: None`）；③ `web/server.dawn`：`handle`
+改为 catch_panic 内 build_request→**dispatch 一次**→`meta_of` 注入 `Request.route`→中间件链包住复用同一
+`Dispatch` 的 `run_dispatch`（中间件仍最外层，故 CORS 预检/日志对 404/405 也生效）；④ `web/middleware.dawn`：
+新增 `route_has_tag`（`match req.route`），`with_body_limit` 看 `raw-body`、`with_cors` 看 `no-cors`，删
+`is_upload_path`/`starts_with(path,"/dav")`；⑤ dav 全部路由 `tagged(..., ["raw-body","no-cors"])`、
+`/api/fm/upload` `tagged(..., ["raw-body"])`；⑥ 7 文件 54 处构造器调用 sed 迁移 + 各自 import 改名。
+
+**踩坑/记录**：
+- **WrongMethod 不携带路由 → 405 请求 `route=None`**：`Dispatch::WrongMethod` 只知「路径命中过」不知具体
+  Route，故 405 请求拿不到 tags。影响面仅「/dav 上一个不在 verbs 列表里的未知动词且 body>2MB」这一极端角
+  （标准 DAV 动词全在列表里、均 Found），可忽略；标准 404/405 行为与旧版一致（旧版 CORS/body-limit 也只在
+  Ok 分支或按路径豁免）。
+- **CORS 只贴 Ok 响应**（`Err(e)->Err(e)` 原样穿透，由 server 层 error_response 渲染）——404/405 不带
+  Access-Control-*，此为**旧有行为**，序 3 未改动、非回归。
+- 运行期本地起服务在 **WSL2** 上 `127.0.0.1` 低端口 bind 常报 `Address already in use`（Windows WinNAT
+  保留端口段，Linux `ss` 看不到），换高端口（实测 18080）可绑；冒烟测试用高端口即可。
 
 ---
 
