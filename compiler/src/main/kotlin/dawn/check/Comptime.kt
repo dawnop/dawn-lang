@@ -406,6 +406,28 @@ class ComptimeInterp(
         } catch (e: NumberFormatException) {
             none()
         }
+        "find" -> {
+            val xs = (args[0] as CValue.VList).elems
+            val hit = xs.firstOrNull { (applyFn(args[1], listOf(it), span) as CValue.VBool).v }
+            if (hit == null) none() else some(hit)
+        }
+        "take" -> {
+            val xs = (args[0] as CValue.VList).elems
+            val n = (args[1] as CValue.VInt).v.coerceIn(0L, xs.size.toLong()).toInt()
+            CValue.VList(xs.take(n))
+        }
+        "drop" -> {
+            val xs = (args[0] as CValue.VList).elems
+            val n = (args[1] as CValue.VInt).v.coerceIn(0L, xs.size.toLong()).toInt()
+            CValue.VList(xs.drop(n))
+        }
+        "reverse" -> CValue.VList((args[0] as CValue.VList).elems.reversed())
+        "index_of", "last_index_of" -> {
+            val s = (args[0] as CValue.VString).v
+            val sub = (args[1] as CValue.VString).v
+            val u = if (name == "index_of") s.indexOf(sub) else s.lastIndexOf(sub)
+            if (u < 0) none() else some(CValue.VInt(s.codePointCount(0, u).toLong()))
+        }
         else -> err("builtin `$name` is not available at comptime", span)
     }
 

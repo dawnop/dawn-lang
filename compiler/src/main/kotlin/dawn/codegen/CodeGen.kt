@@ -1362,8 +1362,138 @@ class CodeGen(
         cat.visitMaxs(0, 0)
         cat.visitEnd()
 
+        genListExtras(cw)
+
         cw.visitEnd()
         return cw.toByteArray()
+    }
+
+    /** find / take / drop / reverse for dawn/rt/Lists (common combinators). */
+    private fun genListExtras(cw: ClassWriter) {
+        // find(List xs, Fn1 pred) -> Option: first element satisfying pred, else None
+        run {
+            val m = cw.visitMethod(ACC_PUBLIC or ACC_STATIC, "find", "(L$JLIST;L${fnIface(1)};)LOption;", null, null)
+            m.visitCode()
+            m.visitInsn(ICONST_0)
+            m.visitVarInsn(ISTORE, 2)
+            val loop = Label()
+            val done = Label()
+            val next = Label()
+            m.visitLabel(loop)
+            m.visitVarInsn(ILOAD, 2)
+            m.visitVarInsn(ALOAD, 0)
+            m.visitMethodInsn(INVOKEINTERFACE, JLIST, "size", "()I", true)
+            m.visitJumpInsn(IF_ICMPGE, done)
+            m.visitVarInsn(ALOAD, 0)
+            m.visitVarInsn(ILOAD, 2)
+            m.visitMethodInsn(INVOKEINTERFACE, JLIST, "get", "(I)L$OBJ;", true)
+            m.visitVarInsn(ASTORE, 3)
+            m.visitVarInsn(ALOAD, 1)
+            m.visitVarInsn(ALOAD, 3)
+            m.visitMethodInsn(INVOKEINTERFACE, fnIface(1), "apply", erasedApplyDesc(1), true)
+            m.visitTypeInsn(CHECKCAST, "java/lang/Boolean")
+            m.visitMethodInsn(INVOKEVIRTUAL, "java/lang/Boolean", "booleanValue", "()Z", false)
+            m.visitJumpInsn(IFEQ, next)
+            m.visitTypeInsn(NEW, "Option\$Some")
+            m.visitInsn(DUP)
+            m.visitVarInsn(ALOAD, 3)
+            m.visitMethodInsn(INVOKESPECIAL, "Option\$Some", "<init>", "(L$OBJ;)V", false)
+            m.visitInsn(ARETURN)
+            m.visitLabel(next)
+            m.visitIincInsn(2, 1)
+            m.visitJumpInsn(GOTO, loop)
+            m.visitLabel(done)
+            m.visitFieldInsn(GETSTATIC, "Option\$None", "INSTANCE", "LOption\$None;")
+            m.visitInsn(ARETURN)
+            m.visitMaxs(0, 0)
+            m.visitEnd()
+        }
+        // clampedCount(List xs, long n) -> int: n clamped to [0, size]; shared by take/drop
+        run {
+            val m = cw.visitMethod(ACC_PRIVATE or ACC_STATIC, "clampedCount", "(L$JLIST;J)I", null, null)
+            m.visitCode()
+            m.visitVarInsn(ALOAD, 0)
+            m.visitMethodInsn(INVOKEINTERFACE, JLIST, "size", "()I", true)
+            m.visitVarInsn(ISTORE, 3) // size (int)
+            val neg = Label()
+            val ge = Label()
+            val ret = Label()
+            // if (n <= 0) return 0
+            m.visitVarInsn(LLOAD, 1)
+            m.visitInsn(LCONST_0)
+            m.visitInsn(LCMP)
+            m.visitJumpInsn(IFLE, neg)
+            // if (n >= size) return size
+            m.visitVarInsn(LLOAD, 1)
+            m.visitVarInsn(ILOAD, 3)
+            m.visitInsn(I2L)
+            m.visitInsn(LCMP)
+            m.visitJumpInsn(IFGE, ge)
+            // else return (int) n
+            m.visitVarInsn(LLOAD, 1)
+            m.visitInsn(L2I)
+            m.visitJumpInsn(GOTO, ret)
+            m.visitLabel(neg)
+            m.visitInsn(ICONST_0)
+            m.visitJumpInsn(GOTO, ret)
+            m.visitLabel(ge)
+            m.visitVarInsn(ILOAD, 3)
+            m.visitLabel(ret)
+            m.visitInsn(IRETURN)
+            m.visitMaxs(0, 0)
+            m.visitEnd()
+        }
+        // take(List xs, long n) -> List: a copy of the first clamp(n) elements
+        run {
+            val m = cw.visitMethod(ACC_PUBLIC or ACC_STATIC, "take", "(L$JLIST;J)L$JLIST;", null, null)
+            m.visitCode()
+            m.visitTypeInsn(NEW, ARRAYLIST)
+            m.visitInsn(DUP)
+            m.visitVarInsn(ALOAD, 0)
+            m.visitInsn(ICONST_0)
+            m.visitVarInsn(ALOAD, 0)
+            m.visitVarInsn(LLOAD, 1)
+            m.visitMethodInsn(INVOKESTATIC, LISTS_CLASS, "clampedCount", "(L$JLIST;J)I", false)
+            m.visitMethodInsn(INVOKEINTERFACE, JLIST, "subList", "(II)L$JLIST;", true)
+            m.visitMethodInsn(INVOKESPECIAL, ARRAYLIST, "<init>", "(Ljava/util/Collection;)V", false)
+            m.visitInsn(ARETURN)
+            m.visitMaxs(0, 0)
+            m.visitEnd()
+        }
+        // drop(List xs, long n) -> List: a copy of all but the first clamp(n) elements
+        run {
+            val m = cw.visitMethod(ACC_PUBLIC or ACC_STATIC, "drop", "(L$JLIST;J)L$JLIST;", null, null)
+            m.visitCode()
+            m.visitTypeInsn(NEW, ARRAYLIST)
+            m.visitInsn(DUP)
+            m.visitVarInsn(ALOAD, 0)
+            m.visitVarInsn(ALOAD, 0)
+            m.visitVarInsn(LLOAD, 1)
+            m.visitMethodInsn(INVOKESTATIC, LISTS_CLASS, "clampedCount", "(L$JLIST;J)I", false)
+            m.visitVarInsn(ALOAD, 0)
+            m.visitMethodInsn(INVOKEINTERFACE, JLIST, "size", "()I", true)
+            m.visitMethodInsn(INVOKEINTERFACE, JLIST, "subList", "(II)L$JLIST;", true)
+            m.visitMethodInsn(INVOKESPECIAL, ARRAYLIST, "<init>", "(Ljava/util/Collection;)V", false)
+            m.visitInsn(ARETURN)
+            m.visitMaxs(0, 0)
+            m.visitEnd()
+        }
+        // reverse(List xs) -> List: a reversed copy (xs is not mutated)
+        run {
+            val m = cw.visitMethod(ACC_PUBLIC or ACC_STATIC, "reverse", "(L$JLIST;)L$JLIST;", null, null)
+            m.visitCode()
+            m.visitTypeInsn(NEW, ARRAYLIST)
+            m.visitInsn(DUP)
+            m.visitVarInsn(ALOAD, 0)
+            m.visitMethodInsn(INVOKESPECIAL, ARRAYLIST, "<init>", "(Ljava/util/Collection;)V", false)
+            m.visitVarInsn(ASTORE, 1)
+            m.visitVarInsn(ALOAD, 1)
+            m.visitMethodInsn(INVOKESTATIC, "java/util/Collections", "reverse", "(L$JLIST;)V", false)
+            m.visitVarInsn(ALOAD, 1)
+            m.visitInsn(ARETURN)
+            m.visitMaxs(0, 0)
+            m.visitEnd()
+        }
     }
 
     /**
@@ -1963,6 +2093,36 @@ class CodeGen(
             m.visitVarInsn(ALOAD, 0); m.visitInsn(ICONST_0); m.visitVarInsn(LLOAD, 3); m.visitInsn(L2I)
             m.visitMethodInsn(INVOKEVIRTUAL, STR, "offsetByCodePoints", "(II)I", false)
             m.visitMethodInsn(INVOKEVIRTUAL, STR, "substring", "(II)L$STR;", false)
+            m.visitInsn(ARETURN)
+            m.visitMaxs(0, 0); m.visitEnd()
+        }
+
+        // indexOf(String s, String sub) -> Option: first code-point index, else None.
+        // lastIndexOf(String s, String sub): same, last occurrence. Both take Java's
+        // UTF-16 index and convert to a code-point index so results line up with
+        // substring/code_points (which are code-point-based).
+        for (name in listOf("indexOf", "lastIndexOf")) {
+            val m = cw.visitMethod(ACC_PUBLIC or ACC_STATIC, name, "(L$STR;L$STR;)LOption;", null, null)
+            m.visitCode()
+            m.visitVarInsn(ALOAD, 0)
+            m.visitVarInsn(ALOAD, 1)
+            m.visitMethodInsn(INVOKEVIRTUAL, STR, name, "(L$STR;)I", false)
+            m.visitVarInsn(ISTORE, 2) // u: UTF-16 index or -1
+            val none = Label()
+            m.visitVarInsn(ILOAD, 2)
+            m.visitJumpInsn(IFLT, none)
+            m.visitTypeInsn(NEW, "Option\$Some")
+            m.visitInsn(DUP)
+            m.visitVarInsn(ALOAD, 0)
+            m.visitInsn(ICONST_0)
+            m.visitVarInsn(ILOAD, 2)
+            m.visitMethodInsn(INVOKEVIRTUAL, STR, "codePointCount", "(II)I", false)
+            m.visitInsn(I2L)
+            m.visitMethodInsn(INVOKESTATIC, "java/lang/Long", "valueOf", "(J)Ljava/lang/Long;", false)
+            m.visitMethodInsn(INVOKESPECIAL, "Option\$Some", "<init>", "(L$OBJ;)V", false)
+            m.visitInsn(ARETURN)
+            m.visitLabel(none)
+            m.visitFieldInsn(GETSTATIC, "Option\$None", "INSTANCE", "LOption\$None;")
             m.visitInsn(ARETURN)
             m.visitMaxs(0, 0); m.visitEnd()
         }
@@ -3019,6 +3179,13 @@ class CodeGen(
             Handle(H_INVOKESTATIC, LISTS_CLASS, fv.name, "(L$JLIST;L${fnIface(1)};)L$JLIST;", false)
         "sort_by" -> Handle(H_INVOKESTATIC, LISTS_CLASS, "sortBy", "(L$JLIST;L${fnIface(2)};)L$JLIST;", false)
         "fold" -> Handle(H_INVOKESTATIC, LISTS_CLASS, "fold", "(L$JLIST;L$OBJ;L${fnIface(2)};)L$OBJ;", false)
+        "find" -> Handle(H_INVOKESTATIC, LISTS_CLASS, "find", "(L$JLIST;L${fnIface(1)};)LOption;", false)
+        "take", "drop" -> Handle(H_INVOKESTATIC, LISTS_CLASS, fv.name, "(L$JLIST;J)L$JLIST;", false)
+        "reverse" -> Handle(H_INVOKESTATIC, LISTS_CLASS, "reverse", "(L$JLIST;)L$JLIST;", false)
+        "index_of" -> Handle(H_INVOKESTATIC, STRINGS_CLASS, "indexOf",
+            "(Ljava/lang/String;Ljava/lang/String;)LOption;", false)
+        "last_index_of" -> Handle(H_INVOKESTATIC, STRINGS_CLASS, "lastIndexOf",
+            "(Ljava/lang/String;Ljava/lang/String;)LOption;", false)
         "chars" -> Handle(H_INVOKESTATIC, STRINGS_CLASS, "chars", "(Ljava/lang/String;)L$JLIST;", false)
         "join" -> Handle(H_INVOKESTATIC, STRINGS_CLASS, "join", "(L$JLIST;Ljava/lang/String;)Ljava/lang/String;", false)
         "split" -> Handle(H_INVOKESTATIC, STRINGS_CLASS, "split",
@@ -3856,6 +4023,32 @@ class CodeGen(
             mv.visitInsn(if (e.callee == "max_by") ICONST_1 else ICONST_M1)
             mv.visitMethodInsn(INVOKESTATIC, LISTS_CLASS, "bestBy",
                 "(L$JLIST;L${fnIface(1)};L$OBJ;I)LOption;", false)
+            true
+        }
+        "find" -> {
+            genExpr(e.args[0], tail = false)
+            genExpr(e.args[1], tail = false)
+            mv.visitMethodInsn(INVOKESTATIC, LISTS_CLASS, "find",
+                "(L$JLIST;L${fnIface(1)};)LOption;", false)
+            true
+        }
+        "take", "drop" -> {
+            genExpr(e.args[0], tail = false)
+            genExpr(e.args[1], tail = false)
+            mv.visitMethodInsn(INVOKESTATIC, LISTS_CLASS, e.callee, "(L$JLIST;J)L$JLIST;", false)
+            true
+        }
+        "reverse" -> {
+            genExpr(e.args[0], tail = false)
+            mv.visitMethodInsn(INVOKESTATIC, LISTS_CLASS, "reverse", "(L$JLIST;)L$JLIST;", false)
+            true
+        }
+        "index_of", "last_index_of" -> {
+            genExpr(e.args[0], tail = false)
+            genExpr(e.args[1], tail = false)
+            val method = if (e.callee == "index_of") "indexOf" else "lastIndexOf"
+            mv.visitMethodInsn(INVOKESTATIC, STRINGS_CLASS, method,
+                "(Ljava/lang/String;Ljava/lang/String;)LOption;", false)
             true
         }
         "expect" -> {

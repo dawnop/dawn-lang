@@ -381,6 +381,15 @@ val BUILTINS: Map<String, FnSig> = run {
         FnSig("min_by", listOf(list(t), Type.TFn(listOf(t), k, e)), listOf("xs", "key"),
             opt(t), e, isBuiltin = true, typeParams = listOf(t, k),
             constraints = listOf(emptyList(), listOf(ORD_TRAIT))),
+        // core/list, cont. (common combinators): first match, prefix/suffix, reversal
+        FnSig("find", listOf(list(t), Type.TFn(listOf(t), Type.TBool, e)), listOf("xs", "pred"),
+            opt(t), e, isBuiltin = true, typeParams = listOf(t)),
+        FnSig("take", listOf(list(t), Type.TInt), listOf("xs", "n"),
+            list(t), Eff.Pure, isBuiltin = true, typeParams = listOf(t)),
+        FnSig("drop", listOf(list(t), Type.TInt), listOf("xs", "n"),
+            list(t), Eff.Pure, isBuiltin = true, typeParams = listOf(t)),
+        FnSig("reverse", listOf(list(t)), listOf("xs"),
+            list(t), Eff.Pure, isBuiltin = true, typeParams = listOf(t)),
         // core/option (spec §11)
         FnSig("expect", listOf(Type.TAdt(OPTION_ADT, listOf(t)), Type.TString), listOf("o", "msg"),
             t, Eff.Pure, isBuiltin = true, typeParams = listOf(t)),
@@ -413,6 +422,12 @@ val BUILTINS: Map<String, FnSig> = run {
             Type.TBool, Eff.Pure, isBuiltin = true),
         FnSig("ends_with", listOf(Type.TString, Type.TString), listOf("s", "suffix"),
             Type.TBool, Eff.Pure, isBuiltin = true),
+        // substring search; result is a code-point index (consistent with substring),
+        // None when not found. Mirrors Java indexOf/lastIndexOf but code-point-based.
+        FnSig("index_of", listOf(Type.TString, Type.TString), listOf("s", "sub"),
+            Type.TAdt(OPTION_ADT, listOf(Type.TInt)), Eff.Pure, isBuiltin = true),
+        FnSig("last_index_of", listOf(Type.TString, Type.TString), listOf("s", "sub"),
+            Type.TAdt(OPTION_ADT, listOf(Type.TInt)), Eff.Pure, isBuiltin = true),
         FnSig("parse_int", listOf(Type.TString), listOf("s"),
             Type.TAdt(OPTION_ADT, listOf(Type.TInt)), Eff.Pure, isBuiltin = true),
         FnSig("parse_float", listOf(Type.TString), listOf("s"),
