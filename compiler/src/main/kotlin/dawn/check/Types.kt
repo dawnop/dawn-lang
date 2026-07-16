@@ -90,6 +90,14 @@ sealed class Type(val display: String) {
     object TFloat : Type("Float")
     object TBool : Type("Bool")
     object TString : Type("String")
+
+    /** A first-class immutable byte sequence (spec §9.5). Runtime rep is a raw
+     *  JVM byte[] ("[B"), so it is the same representation as the opaque array
+     *  values Java interop yields — but nameable, storable, sliceable, and
+     *  compared by content. Bytes are a payload (I/O bodies, crypto, multipart),
+     *  not a Map/Set key (byte[] hashCode is identity). */
+    object TBytes : Type("Bytes")
+
     object TUnit : Type("Unit")
 
     /** Bottom type: the "return type" of panic/todo; usable as any type */
@@ -172,6 +180,7 @@ sealed class Type(val display: String) {
             "Float" -> TFloat
             "Bool" -> TBool
             "String" -> TString
+            "Bytes" -> TBytes
             "Unit" -> TUnit
             else -> null
         }
@@ -437,18 +446,30 @@ val BUILTINS: Map<String, FnSig> = run {
         FnSig("java_try", listOf(Type.TFn(emptyList(), t, Eff.Io)), listOf("f"),
             Type.TAdt(RESULT_ADT, listOf(t, Type.TString)), Eff.Io, isBuiltin = true,
             typeParams = listOf(t)),
-        // UTF-8 bytes of a string as an opaque byte[] (spec §9.5): the one bridge a
-        // Dawn String cannot cross on its own (getBytes is a java.lang.String method,
-        // and Dawn strings are TString, not the opaque class). Feeds crypto/IO interop.
-        FnSig("utf8_bytes", listOf(Type.TString), listOf("s"),
-            Type.TJava("[B", ByteArray::class.java), Eff.Pure, isBuiltin = true),
-        // ISO-8859-1 (latin-1) bytes of a string as an opaque byte[]. Latin-1 maps
-        // chars 0..255 to bytes 0..255 one-to-one, so a byte[] decoded via
-        // String.new(bytes, "ISO-8859-1") and re-encoded here round-trips losslessly.
-        // This is how binary request bodies (multipart uploads, WebDAV PUT) are parsed
-        // in string-land and recovered byte-exact without a native multipart parser.
-        FnSig("latin1_bytes", listOf(Type.TString), listOf("s"),
-            Type.TJava("[B", ByteArray::class.java), Eff.Pure, isBuiltin = true),
+        // core/bytes (spec §9.5): first-class immutable byte sequence. `utf8`/`decode`
+        // are the String<->Bytes bridge (utf8 replaces the old utf8_bytes; decode
+        // replaces String.new(bytes, charset)). len/at/slice/index_of make Bytes a
+        // usable payload for binary bodies, crypto input, and multipart parsing.
+        // Concatenation is `++` and equality is `==` (structural), handled in codegen.
+        FnSig("utf8", listOf(Type.TString), listOf("s"), Type.TBytes, Eff.Pure, isBuiltin = true),
+        FnSig("decode", listOf(Type.TBytes, Type.TString), listOf("b", "charset"),
+            Type.TString, Eff.Pure, isBuiltin = true),
+        FnSig("byte_len", listOf(Type.TBytes), listOf("b"), Type.TInt, Eff.Pure, isBuiltin = true),
+        // 0..255; out of range panics (a programming error, like list indexing)
+        FnSig("byte_at", listOf(Type.TBytes, Type.TInt), listOf("b", "i"), Type.TInt,
+            Eff.Pure, isBuiltin = true),
+        // [start, end); start/end are clamped into [0, len], start > end yields empty
+        FnSig("byte_slice", listOf(Type.TBytes, Type.TInt, Type.TInt), listOf("b", "start", "end"),
+            Type.TBytes, Eff.Pure, isBuiltin = true),
+        // first occurrence of needle at or after byte index `from`; None if absent.
+        // An empty needle matches at min(from, len). Mirrors string index_of.
+        FnSig("byte_index_of", listOf(Type.TBytes, Type.TBytes, Type.TInt), listOf("b", "needle", "from"),
+            Type.TAdt(OPTION_ADT, listOf(Type.TInt)), Eff.Pure, isBuiltin = true),
+        // interop escape (spec §9.5): reinterpret an opaque Java value that is a byte[]
+        // at runtime (e.g. an erased-generic HttpResponse.body()) as Bytes. A runtime
+        // CHECKCAST guards it — a non-byte[] fails loud, like any opaque narrowing.
+        FnSig("as_bytes", listOf(Type.TJava("java.lang.Object", Any::class.java)), listOf("x"),
+            Type.TBytes, Eff.Pure, isBuiltin = true),
         // supervision boundary (spec §9.8): run f, turning *any* Throwable — including a
         // Dawn panic — into Err. For isolation points only (a server request, a job
         // runner); ordinary failures still travel in Result. Contrast java_try, which

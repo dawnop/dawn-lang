@@ -662,23 +662,38 @@ fn spawn_hello(msg: String) -> Unit !io = {
 - Dawn 函数在回调中 panic，以 `dawn.rt.PanicError`（`Error` 的子类）传给 Java
   调用方，不捕获不包装。
 
-### 9.5 数组：不透明直通
+### 9.5 数组：不透明直通；`byte[]` = 一等 `Bytes`
 
 数组值与未导入的引用类同待遇（§9.1）：可**接收、持有、传参**——重载打分按数组类型
-精确匹配，或宽化到 `Object`；返回位置照 §9.2 包 `Option`。但数组**不可命名**（签名里
-写不出该类型）、**不可创建、不可索引**；要长度用 `use java "java.lang.reflect.Array"`
-的 `Array.getLength(a)`。
+精确匹配，或宽化到 `Object`；返回位置照 §9.2 包 `Option`。但数组（除 `byte[]`，见下）
+**不可命名**（签名里写不出该类型）、**不可创建、不可索引**；要长度用
+`use java "java.lang.reflect.Array"` 的 `Array.getLength(a)`。
+
+**`byte[]` 是唯一例外：它就是一等类型 `Bytes`**（§9.5.1）。Java 方法返回的具体 `byte[]`
+（如 `readAllBytes`/`toByteArray`/`Base64.decode`/`MessageDigest.digest`）照 §9.2 落成
+`Option[Bytes]`；`Bytes` 可写进签名、存进 record、切片/索引/拼接/按内容比较；反向传给
+Java `byte[]` 形参（`OutputStream.write`、`MessageDigest.isEqual` 等）直接匹配。
 
 ```dawn
-use java "java.lang.String"
 use java "java.nio.file.Files"
 use java "java.nio.file.Path"
 
 fn slurp(p: String) -> String !io = {
-  let bytes = Files.readAllBytes(Path.of(p).expect("path")).expect("readable")   # byte[]，不透明
-  String.new(bytes, "UTF-8")
+  let bytes: Bytes = Files.readAllBytes(Path.of(p).expect("path")).expect("readable")
+  decode(bytes, "UTF-8")
 }
 ```
+
+#### 9.5.1 `Bytes`：一等不可变字节序列
+
+`Bytes` 是不可变的字节序列，运行期就是裸 `byte[]`。库函数（§11「bytes」组）：
+`utf8(s) -> Bytes`（字符串的 UTF-8 字节）、`decode(b, charset) -> String`（按字符集解码）、
+`byte_len`、`byte_at(b, i) -> Int`（0..255，越界 panic）、`byte_slice(b, start, end)`
+（`[start,end)`，下标 clamp 进范围）、`byte_index_of(b, needle, from) -> Option[Int]`。
+`Bytes ++ Bytes` 拼接、`==`/`!=` 按**内容**比较（`Show` 渲染为 `<N bytes>` 摘要）。
+`byte[]` 的 JVM `hashCode` 是引用同一性，故 **`Bytes` 不宜作 Map/Set 键**（用 `decode` 出的
+String 或十六进制键代替）。`Bytes` 不参与 comptime 常量折叠，也不能作 bare 一等函数值
+（用 lambda 包一层）。
 
 **不透明值收窄回具体引用形参**：擦除泛型的返回（§9.2）落成不透明 `Object`，但业务
 常需把它**原样喂回**某个要具体引用类型的 Java 形参——例如 `HttpResponse.body()`
@@ -689,6 +704,10 @@ fn slurp(p: String) -> String !io = {
 不透明值仍**不可命名、不可索引**——收窄只发生在跨边界传参的隐式适配处，Dawn 代码
 拿不到该类型的名字。这让「取二进制体 → 透传出去」这类管道无需把字节读进 Dawn 值
 （省一次全量拷贝，大文件不顶爆内存）。
+
+若确知某个擦除泛型的不透明 `Object` 运行期是 `byte[]`（如 `HttpResponse.body()` 配
+`BodyHandlers.ofByteArray()`），用内建 `as_bytes(x) -> Bytes` 把它**认领**成一等 `Bytes`
+（§9.5.1）——桥接处同样插一次运行期 `CHECKCAST`，非 `byte[]` 即 `ClassCastException` 穿透。
 
 ### 9.6 List 桥接：Dawn `List` 直达集合形参
 
@@ -815,15 +834,17 @@ use java "java.lang.Math"      # Java 互操作（§9），形式不变
   - `max/min[T: Ord](xs) -> Option[T]` — 极值；空列表 `None`
   - `max_by/min_by[T, K: Ord](xs, key: fn(T) -> K) -> Option[T]` — 按键取极值
 - `core/string`：`chars split join trim starts_with ends_with contains
-  to_lower to_upper parse_int parse_float to_string utf8_bytes latin1_bytes ...`（`to_lower`/`to_upper`
+  to_lower to_upper parse_int parse_float to_string index_of last_index_of ...`（`to_lower`/`to_upper`
   按 Unicode 大小写折叠；字符串转数字是 `parse_int(s) -> Option[Int]`——
-  没有重载，`to_int`/`to_float` 只做 Int↔Float 转换）。`utf8_bytes(s) -> byte[]` 取字符串的
-  UTF-8 字节为不透明数组（§9.5）——Dawn 字符串是 `TString`、不是不透明 `java.lang.String`，
-  无法直接调 `getBytes`，此内建是唯一的桥；配 `String.new(bytes, "UTF-8")` 反向解字节。
-  `latin1_bytes(s) -> byte[]` 同理取 ISO-8859-1（latin-1）字节：latin-1 把字符 0..255 一一映射到
-  字节 0..255，故 `String.new(bytes, "ISO-8859-1")` 解出的串再经 `latin1_bytes` 编回即**无损还原**
-  原始字节。这是在没有原生 multipart 解析器时，于「字符串世界」里解析二进制请求体（multipart
-  上传、WebDAV PUT）并字节精确复原文件内容的手段。
+  没有重载，`to_int`/`to_float` 只做 Int↔Float 转换）。
+- `core/bytes`（一等 `Bytes`，§9.5.1）：`utf8(s: String) -> Bytes`（字符串的 UTF-8 字节）、
+  `decode(b: Bytes, charset: String) -> String`（按字符集解码，替代旧
+  `String.new(bytes, charset)`）、`byte_len(b) -> Int`、`byte_at(b, i) -> Int`（0..255，越界 panic）、
+  `byte_slice(b, start, end) -> Bytes`（`[start,end)`，下标 clamp）、
+  `byte_index_of(b, needle, from) -> Option[Int]`（字节下标首次出现）、
+  `as_bytes(x) -> Bytes`（把运行期确为 `byte[]` 的不透明 `Object` 认领为 `Bytes`，§9.5）。
+  另有操作符 `Bytes ++ Bytes` 与按内容的 `==`/`!=`。二进制请求体（multipart 上传、WebDAV PUT）、
+  crypto/签名、HTTP 收发都直接走 `Bytes`，不再借道 latin-1 字符串。
 - **码点 / 字符**（§1.5、§2.1 的补充；字符即码点 `Int`）：
   - `code_points(s: String) -> List[Int]` — 拆成码点（增补平面的代理对合并为一个码点）
   - `from_code_points(cs: List[Int]) -> String` — 由码点组装（接受增补码点）

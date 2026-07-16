@@ -226,6 +226,15 @@ M6 前置，先用 playground runner 验收。四个语义决策全部对照过 
     native-image 构建期展开，边界可以放开；
   - 迁移策略：逐端点替换，nginx 按路由切流量；WebDAV 量大且走独立子域名，最后迁或留 Python。
   - 验收：Vue 前端不改一行指向 Dawn 后端，现有契约测试 + 端到端全绿。
+- **M6 复盘 → 修复批次**（[`m6-retro.md`](m6-retro.md) 排优先级，进展见 [`m7-progress.md`](m7-progress.md)）：
+  用真实生产后端的编码摩擦反推语言/库/框架补强。序 1（补 `find/take/drop/reverse` +
+  字符串 `index_of`）、序 2（SQL 命名列取值）、序 3（web 框架 Route 开放记录 + 中间件路由
+  tag 感知）已落地。**序 4「一等 `Bytes`」（2026-07-16，根因 1）**：设计定稿见
+  [`bytes-design.md`](bytes-design.md)。决策——`Bytes` 运行期就是裸 `byte[]`（与不透明数组同
+  表示、零间接），新增 `TBytes` 类型 + `utf8/decode/byte_len/byte_at/byte_slice/byte_index_of/
+  as_bytes` 内建 + `++`/`==`/`Show`，`byte[]` 的 Java 返回落成 `Bytes`；**退役 `utf8_bytes`/
+  `latin1_bytes`**，消灭全栈的 latin-1 字符串滥用与 `Request.raw`/`Response.bin` bolt-on
+  （spec §9.5/§9.5.1/§11）。UFCS 让 `s.utf8()`/`b.decode(cs)` 免方法机制白得。1124 测试全绿。
 - **M7 自举**：Dawn 编译 Dawn，压轴——自举后语言每改一处要同时伺候两个编译器，
   故放在语言基本冻结之后。
   - 分四刀（Lexer → Parser → Checker → CodeGen，ASM 走 `use java`），

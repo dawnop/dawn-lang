@@ -63,7 +63,7 @@ class JavaInteropTest {
             use java "java.util.Base64"
             use java "java.util.Base64.Encoder"
 
-            fn enc(e: Encoder, s: String) -> String !io = e.encodeToString(utf8_bytes(s)).expect("s")
+            fn enc(e: Encoder, s: String) -> String !io = e.encodeToString(utf8(s)).expect("s")
 
             pub fn main() -> Unit !io =
               println(enc(Base64.getEncoder().expect("e"), "ab"))
@@ -95,35 +95,15 @@ class JavaInteropTest {
             use java "java.lang.String"
 
             pub fn main() -> Unit !io = {
-              let bytes = utf8_bytes("héllo")
+              let bytes = utf8("héllo")
               let boxed = Optional.of(bytes).expect("opt").get().expect("obj")
               let baos = ByteArrayOutputStream.new()
               baos.write(boxed)
-              println(String.new(baos.toByteArray().expect("arr"), "UTF-8"))
+              println(decode(baos.toByteArray().expect("arr"), "UTF-8"))
             }
             """.trimIndent(),
         )
         assertEquals("héllo\n", out)
-    }
-
-    @Test
-    fun `latin1_bytes round-trips high bytes where utf8 would not`() {
-        // U+00FF is one latin-1 byte (0xFF) but two UTF-8 bytes (0xC3 0xBF). A byte[]
-        // decoded via ISO-8859-1 and re-encoded through latin1_bytes must reproduce
-        // the original 1 byte — the lossless property binary body parsing relies on.
-        val out = run(
-            """
-            use java "java.lang.String"
-
-            pub fn main() -> Unit !io = {
-              let s = String.new(latin1_bytes("ÿ"), "ISO-8859-1")
-              println("${'$'}{s == "ÿ"}")
-              println("${'$'}{str_len(String.new(utf8_bytes("ÿ"), "ISO-8859-1"))}")
-            }
-            """.trimIndent(),
-        )
-        // latin-1 round-trips (true); utf-8 of ÿ is 2 bytes -> a 2-char latin-1 string
-        assertEquals("true\n2\n", out)
     }
 
     @Test

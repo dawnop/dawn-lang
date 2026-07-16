@@ -68,6 +68,7 @@ class CodeGen(
         const val DICT_CMP_CLASS = "dawn/rt/DictComparator"
         const val FN_CMP_CLASS = "dawn/rt/FnComparator"
         const val STRINGS_CLASS = "dawn/rt/Strings"
+        const val BYTES_CLASS = "dawn/rt/Bytes"
         const val IO_CLASS = "dawn/rt/Io"
         const val SHOW_CLASS = "dawn/rt/Show"
         const val MAPS_CLASS = "dawn/rt/Maps"
@@ -204,6 +205,7 @@ class CodeGen(
         out[PANIC_CLASS] = genPanicClass()
         out[LISTS_CLASS] = genListsClass()
         out[STRINGS_CLASS] = genStringsClass()
+        out[BYTES_CLASS] = genBytesClass()
         out[IO_CLASS] = genIoClass()
         out[SHOW_CLASS] = genShowClass()
         out[MAPS_CLASS] = genMapsClass()
@@ -534,6 +536,7 @@ class CodeGen(
         TFloat -> "D"
         TBool -> "Z"
         TString -> "Ljava/lang/String;"
+        Type.TBytes -> "[B" // a raw byte[]; "[B" is its own descriptor
         TUnit -> "V"
         TNever -> "V" // only in return position in theory; Never expressions end in athrow
         TError -> "V" // unreachable: codegen only runs when there are no errors
@@ -595,7 +598,7 @@ class CodeGen(
     }
 
     private fun isRef(t: Type) =
-        t == TString || t is TAdt || t is TList || t is TMap || t is TSet ||
+        t == TString || t == Type.TBytes || t is TAdt || t is TList || t is TMap || t is TSet ||
             t is TVar || t is TFn || t is TTuple || t is TJava
 
     // ---- erasure coercions ----
@@ -626,6 +629,7 @@ class CodeGen(
                 mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/Boolean", "booleanValue", "()Z", false)
             }
             TString -> mv.visitTypeInsn(CHECKCAST, "java/lang/String")
+            Type.TBytes -> mv.visitTypeInsn(CHECKCAST, "[B") // recover a raw byte[] from an erased Object
             is TAdt -> mv.visitTypeInsn(CHECKCAST, t.info.jvmName)
             is TList -> mv.visitTypeInsn(CHECKCAST, JLIST)
             is TMap -> mv.visitTypeInsn(CHECKCAST, JMAP)
@@ -2132,6 +2136,147 @@ class CodeGen(
     }
 
     /**
+     * dawn/rt/Bytes: the runtime for the first-class Bytes type (spec §9.5), a raw
+     * immutable byte[]. utf8/decode/byte_len are inlined at the call site; concat,
+     * slice (clamped), at (bounds-panicking) and indexOf live here.
+     */
+    private fun genBytesClass(): ByteArray {
+        val cw = DawnClassWriter()
+        cw.visit(V17, ACC_PUBLIC or ACC_FINAL, BYTES_CLASS, null, OBJ, null)
+        val ARRAYS = "java/util/Arrays"
+        val MATH = "java/lang/Math"
+
+        // concat(byte[] a, byte[] b) -> byte[]
+        run {
+            val m = cw.visitMethod(ACC_PUBLIC or ACC_STATIC, "concat", "([B[B)[B", null, null)
+            m.visitCode()
+            m.visitVarInsn(ALOAD, 0); m.visitInsn(ARRAYLENGTH); m.visitVarInsn(ISTORE, 2) // la
+            m.visitVarInsn(ALOAD, 1); m.visitInsn(ARRAYLENGTH); m.visitVarInsn(ISTORE, 3) // lb
+            // r = Arrays.copyOf(a, la + lb)  (zero-padded tail we then overwrite)
+            m.visitVarInsn(ALOAD, 0)
+            m.visitVarInsn(ILOAD, 2); m.visitVarInsn(ILOAD, 3); m.visitInsn(IADD)
+            m.visitMethodInsn(INVOKESTATIC, ARRAYS, "copyOf", "([BI)[B", false)
+            m.visitVarInsn(ASTORE, 4)
+            // System.arraycopy(b, 0, r, la, lb)
+            m.visitVarInsn(ALOAD, 1); m.visitInsn(ICONST_0)
+            m.visitVarInsn(ALOAD, 4); m.visitVarInsn(ILOAD, 2); m.visitVarInsn(ILOAD, 3)
+            m.visitMethodInsn(INVOKESTATIC, "java/lang/System", "arraycopy",
+                "(Ljava/lang/Object;ILjava/lang/Object;II)V", false)
+            m.visitVarInsn(ALOAD, 4); m.visitInsn(ARETURN)
+            m.visitMaxs(0, 0); m.visitEnd()
+        }
+
+        // slice(byte[] b, long start, long end) -> byte[]: [start, end), start/end
+        // clamped into [0, len]; start > end yields empty.
+        run {
+            val m = cw.visitMethod(ACC_PUBLIC or ACC_STATIC, "slice", "([BJJ)[B", null, null)
+            m.visitCode()
+            m.visitVarInsn(ALOAD, 0); m.visitInsn(ARRAYLENGTH); m.visitVarInsn(ISTORE, 5) // len
+            // s = (int) max(0, min(start, len))
+            m.visitInsn(LCONST_0)
+            m.visitVarInsn(LLOAD, 1); m.visitVarInsn(ILOAD, 5); m.visitInsn(I2L)
+            m.visitMethodInsn(INVOKESTATIC, MATH, "min", "(JJ)J", false)
+            m.visitMethodInsn(INVOKESTATIC, MATH, "max", "(JJ)J", false)
+            m.visitInsn(L2I); m.visitVarInsn(ISTORE, 6) // s
+            // e = (int) max(0, min(end, len))
+            m.visitInsn(LCONST_0)
+            m.visitVarInsn(LLOAD, 3); m.visitVarInsn(ILOAD, 5); m.visitInsn(I2L)
+            m.visitMethodInsn(INVOKESTATIC, MATH, "min", "(JJ)J", false)
+            m.visitMethodInsn(INVOKESTATIC, MATH, "max", "(JJ)J", false)
+            m.visitInsn(L2I); m.visitVarInsn(ISTORE, 7) // e
+            // if (s > e) e = s
+            val okE = Label()
+            m.visitVarInsn(ILOAD, 6); m.visitVarInsn(ILOAD, 7); m.visitJumpInsn(IF_ICMPLE, okE)
+            m.visitVarInsn(ILOAD, 6); m.visitVarInsn(ISTORE, 7)
+            m.visitLabel(okE)
+            m.visitVarInsn(ALOAD, 0); m.visitVarInsn(ILOAD, 6); m.visitVarInsn(ILOAD, 7)
+            m.visitMethodInsn(INVOKESTATIC, ARRAYS, "copyOfRange", "([BII)[B", false)
+            m.visitInsn(ARETURN)
+            m.visitMaxs(0, 0); m.visitEnd()
+        }
+
+        // at(byte[] b, long i) -> long (0..255); out of range panics
+        run {
+            val m = cw.visitMethod(ACC_PUBLIC or ACC_STATIC, "at", "([BJ)J", null, null)
+            m.visitCode()
+            m.visitVarInsn(ALOAD, 0); m.visitInsn(ARRAYLENGTH); m.visitVarInsn(ISTORE, 3) // len
+            val bad = Label(); val ok = Label()
+            m.visitVarInsn(LLOAD, 1); m.visitInsn(LCONST_0); m.visitInsn(LCMP); m.visitJumpInsn(IFLT, bad)
+            m.visitVarInsn(LLOAD, 1); m.visitVarInsn(ILOAD, 3); m.visitInsn(I2L); m.visitInsn(LCMP)
+            m.visitJumpInsn(IFGE, bad)
+            m.visitJumpInsn(GOTO, ok)
+            m.visitLabel(bad)
+            m.visitTypeInsn(NEW, PANIC_CLASS); m.visitInsn(DUP)
+            m.visitLdcInsn("byte_at: index out of range")
+            m.visitMethodInsn(INVOKESPECIAL, PANIC_CLASS, "<init>", "(Ljava/lang/String;)V", false)
+            m.visitInsn(ATHROW)
+            m.visitLabel(ok)
+            m.visitVarInsn(ALOAD, 0); m.visitVarInsn(LLOAD, 1); m.visitInsn(L2I); m.visitInsn(BALOAD)
+            m.visitIntInsn(SIPUSH, 255); m.visitInsn(IAND); m.visitInsn(I2L)
+            m.visitInsn(LRETURN)
+            m.visitMaxs(0, 0); m.visitEnd()
+        }
+
+        // indexOf(byte[] b, byte[] needle, long from) -> Option: first byte index of
+        // needle at or after clamped `from`, else None. Empty needle matches at from.
+        run {
+            val m = cw.visitMethod(ACC_PUBLIC or ACC_STATIC, "indexOf", "([B[BJ)LOption;", null, null)
+            m.visitCode()
+            m.visitVarInsn(ALOAD, 0); m.visitInsn(ARRAYLENGTH); m.visitVarInsn(ISTORE, 4) // len
+            m.visitVarInsn(ALOAD, 1); m.visitInsn(ARRAYLENGTH); m.visitVarInsn(ISTORE, 5) // nl
+            // f = (int) max(0, min(from, len))
+            m.visitInsn(LCONST_0)
+            m.visitVarInsn(LLOAD, 2); m.visitVarInsn(ILOAD, 4); m.visitInsn(I2L)
+            m.visitMethodInsn(INVOKESTATIC, MATH, "min", "(JJ)J", false)
+            m.visitMethodInsn(INVOKESTATIC, MATH, "max", "(JJ)J", false)
+            m.visitInsn(L2I); m.visitVarInsn(ISTORE, 6) // f
+            val haveNeedle = Label()
+            m.visitVarInsn(ILOAD, 5); m.visitJumpInsn(IFNE, haveNeedle)
+            // empty needle -> Some(f)
+            emitSomeLong(m, 6)
+            m.visitInsn(ARETURN)
+            m.visitLabel(haveNeedle)
+            m.visitVarInsn(ILOAD, 6); m.visitVarInsn(ISTORE, 7) // i = f
+            val loop = Label(); val none = Label(); val matched = Label(); val nextI = Label()
+            m.visitLabel(loop)
+            // if (i > len - nl) -> none
+            m.visitVarInsn(ILOAD, 7)
+            m.visitVarInsn(ILOAD, 4); m.visitVarInsn(ILOAD, 5); m.visitInsn(ISUB)
+            m.visitJumpInsn(IF_ICMPGT, none)
+            m.visitInsn(ICONST_0); m.visitVarInsn(ISTORE, 8) // j
+            val inner = Label()
+            m.visitLabel(inner)
+            m.visitVarInsn(ILOAD, 8); m.visitVarInsn(ILOAD, 5); m.visitJumpInsn(IF_ICMPGE, matched)
+            // if (b[i+j] != needle[j]) -> nextI
+            m.visitVarInsn(ALOAD, 0); m.visitVarInsn(ILOAD, 7); m.visitVarInsn(ILOAD, 8); m.visitInsn(IADD)
+            m.visitInsn(BALOAD)
+            m.visitVarInsn(ALOAD, 1); m.visitVarInsn(ILOAD, 8); m.visitInsn(BALOAD)
+            m.visitJumpInsn(IF_ICMPNE, nextI)
+            m.visitIincInsn(8, 1); m.visitJumpInsn(GOTO, inner)
+            m.visitLabel(matched)
+            emitSomeLong(m, 7)
+            m.visitInsn(ARETURN)
+            m.visitLabel(nextI)
+            m.visitIincInsn(7, 1); m.visitJumpInsn(GOTO, loop)
+            m.visitLabel(none)
+            m.visitFieldInsn(GETSTATIC, "Option\$None", "INSTANCE", "LOption\$None;")
+            m.visitInsn(ARETURN)
+            m.visitMaxs(0, 0); m.visitEnd()
+        }
+
+        cw.visitEnd()
+        return cw.toByteArray()
+    }
+
+    /** emit `Some((long) intLocal)` (an Option$Some wrapping a boxed Long) onto the stack */
+    private fun emitSomeLong(m: org.objectweb.asm.MethodVisitor, intLocal: Int) {
+        m.visitTypeInsn(NEW, "Option\$Some"); m.visitInsn(DUP)
+        m.visitVarInsn(ILOAD, intLocal); m.visitInsn(I2L)
+        m.visitMethodInsn(INVOKESTATIC, "java/lang/Long", "valueOf", "(J)Ljava/lang/Long;", false)
+        m.visitMethodInsn(INVOKESPECIAL, "Option\$Some", "<init>", "(L$OBJ;)V", false)
+    }
+
+    /**
      * dawn/rt/Io: file and console builtins.
      *   readFile(String) -> Result   (Ok(text) / Err(message))
      *   writeFile(String, String) -> Result   (Ok(chars written) / Err(message))
@@ -2454,6 +2599,26 @@ class CodeGen(
             m.visitMethodInsn(INVOKESTATIC, SHOW_CLASS, "showSet", "(L$JSET;)L$STR;", false)
             m.visitInsn(ARETURN)
             m.visitLabel(notSet)
+            // if (o instanceof byte[]) return "<" + ((byte[]) o).length + " bytes>";
+            // (Bytes renders as a summary; dumping raw bytes is rarely what you want)
+            val notBytes = Label()
+            m.visitVarInsn(ALOAD, 0)
+            m.visitTypeInsn(INSTANCEOF, "[B")
+            m.visitJumpInsn(IFEQ, notBytes)
+            m.visitTypeInsn(NEW, SB)
+            m.visitInsn(DUP)
+            m.visitMethodInsn(INVOKESPECIAL, SB, "<init>", "()V", false)
+            m.visitLdcInsn("<")
+            m.visitMethodInsn(INVOKEVIRTUAL, SB, "append", "(L$STR;)L$SB;", false)
+            m.visitVarInsn(ALOAD, 0)
+            m.visitTypeInsn(CHECKCAST, "[B")
+            m.visitInsn(ARRAYLENGTH)
+            m.visitMethodInsn(INVOKEVIRTUAL, SB, "append", "(I)L$SB;", false)
+            m.visitLdcInsn(" bytes>")
+            m.visitMethodInsn(INVOKEVIRTUAL, SB, "append", "(L$STR;)L$SB;", false)
+            m.visitMethodInsn(INVOKEVIRTUAL, SB, "toString", "()L$STR;", false)
+            m.visitInsn(ARETURN)
+            m.visitLabel(notBytes)
             // return String.valueOf(o);
             m.visitVarInsn(ALOAD, 0)
             m.visitMethodInsn(INVOKESTATIC, STR, "valueOf", "(L$OBJ;)L$STR;", false)
@@ -4173,7 +4338,7 @@ class CodeGen(
             mv.visitMethodInsn(INVOKESTATIC, IO_CLASS, "catchPanic", "(L${fnIface(0)};)LResult;", false)
             true
         }
-        "utf8_bytes" -> {
+        "utf8" -> {
             genExpr(e.args[0], tail = false)
             mv.visitFieldInsn(GETSTATIC, "java/nio/charset/StandardCharsets", "UTF_8",
                 "Ljava/nio/charset/Charset;")
@@ -4181,12 +4346,41 @@ class CodeGen(
                 "(Ljava/nio/charset/Charset;)[B", false)
             true
         }
-        "latin1_bytes" -> {
+        "decode" -> {
+            // new String(bytes, charsetName)
+            mv.visitTypeInsn(NEW, "java/lang/String")
+            mv.visitInsn(DUP)
+            genExpr(e.args[0], tail = false) // byte[]
+            genExpr(e.args[1], tail = false) // charset name
+            mv.visitMethodInsn(INVOKESPECIAL, "java/lang/String", "<init>",
+                "([BLjava/lang/String;)V", false)
+            true
+        }
+        "byte_len" -> {
             genExpr(e.args[0], tail = false)
-            mv.visitFieldInsn(GETSTATIC, "java/nio/charset/StandardCharsets", "ISO_8859_1",
-                "Ljava/nio/charset/Charset;")
-            mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "getBytes",
-                "(Ljava/nio/charset/Charset;)[B", false)
+            mv.visitInsn(ARRAYLENGTH)
+            mv.visitInsn(I2L)
+            true
+        }
+        "byte_at" -> {
+            genExpr(e.args[0], tail = false)
+            genExpr(e.args[1], tail = false)
+            mv.visitMethodInsn(INVOKESTATIC, BYTES_CLASS, "at", "([BJ)J", false)
+            true
+        }
+        "byte_slice" -> {
+            for (a in e.args) genExpr(a, tail = false)
+            mv.visitMethodInsn(INVOKESTATIC, BYTES_CLASS, "slice", "([BJJ)[B", false)
+            true
+        }
+        "byte_index_of" -> {
+            for (a in e.args) genExpr(a, tail = false)
+            mv.visitMethodInsn(INVOKESTATIC, BYTES_CLASS, "indexOf", "([B[BJ)LOption;", false)
+            true
+        }
+        "as_bytes" -> {
+            genExpr(e.args[0], tail = false) // an opaque Object that is a byte[] at runtime
+            mv.visitTypeInsn(CHECKCAST, "[B")
             true
         }
         "read_file" -> {
@@ -4269,6 +4463,8 @@ class CodeGen(
             BinOp.CONCAT ->
                 if (t is TList) {
                     mv.visitMethodInsn(INVOKESTATIC, LISTS_CLASS, "concat", "(L$JLIST;L$JLIST;)L$JLIST;", false)
+                } else if (t == Type.TBytes) {
+                    mv.visitMethodInsn(INVOKESTATIC, BYTES_CLASS, "concat", "([B[B)[B", false)
                 } else {
                     mv.visitMethodInsn(
                         INVOKEVIRTUAL, "java/lang/String", "concat",
@@ -4284,6 +4480,11 @@ class CodeGen(
 
     private fun genEquality(t: Type, op: BinOp) {
         when {
+            t == Type.TBytes -> {
+                // byte[] has identity equals; compare by content instead
+                mv.visitMethodInsn(INVOKESTATIC, "java/util/Arrays", "equals", "([B[B)Z", false)
+                if (op == BinOp.NEQ) { mv.visitInsn(ICONST_1); mv.visitInsn(IXOR) }
+            }
             isRef(t) -> {
                 // structural equals: String, List, ADT subclasses (generics compare boxed)
                 mv.visitMethodInsn(INVOKEVIRTUAL, OBJ, "equals", "(L$OBJ;)Z", false)

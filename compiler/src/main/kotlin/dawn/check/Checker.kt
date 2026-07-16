@@ -1164,7 +1164,7 @@ class Checker(
     /** Every name currently in scope — the candidate pool for "did you mean" on a variable. */
     private fun localNames(): List<String> = scopes.flatMap { it.keys }
 
-    private val builtinTypeNames = listOf("Int", "Float", "Bool", "String", "Unit", "List", "Map", "Set")
+    private val builtinTypeNames = listOf("Int", "Float", "Bool", "String", "Bytes", "Unit", "List", "Map", "Set")
 
     /**
      * Resolve a local name, doing lambda-capture bookkeeping: a symbol declared
@@ -1450,6 +1450,13 @@ class Checker(
                 p.isAssignableFrom(String::class.java) -> 1
                 else -> null
             }
+            // Bytes is a raw byte[] at runtime, so it passes to Java byte[] params
+            // (crypto digests, OutputStream.write, MessageDigest.isEqual) directly.
+            Type.TBytes -> when {
+                p == ByteArray::class.java -> 2
+                !p.isPrimitive && p.isAssignableFrom(ByteArray::class.java) -> 1
+                else -> null
+            }
             is TJava -> when {
                 p == a.cls -> 2
                 p.isAssignableFrom(a.cls) -> 1
@@ -1600,8 +1607,11 @@ class Checker(
             error("`char` returns are not supported in v0.1", e.nameSpan,
                 "there is no char type; wrap the call in the standard library instead")
         String::class.java -> TAdt(OPTION_ADT, listOf(TString))
-        // not-imported classes and arrays (spec §9.5) are still usable as opaque
-        // values; importing is only needed to write the type name in a signature
+        // a Java byte[] return is a first-class Bytes now (spec §9.5): readAllBytes,
+        // toByteArray, Base64.decode, etc. land as Option[Bytes], not opaque.
+        ByteArray::class.java -> TAdt(OPTION_ADT, listOf(Type.TBytes))
+        // other not-imported classes and arrays (spec §9.5) are still usable as
+        // opaque values; importing is only needed to write the type name in a signature
         else -> TAdt(OPTION_ADT, listOf(TJava(rt.name, rt)))
     }
 
@@ -1733,7 +1743,7 @@ class Checker(
 
     /** A concrete type is printable now: primitives, or containers/ADTs of printable types. */
     private fun isShowable(t: Type): Boolean = when (t) {
-        TInt, TFloat, TBool, TString -> true
+        TInt, TFloat, TBool, TString, Type.TBytes -> true
         is TList -> isShowable(t.elem)
         is TMap -> isShowable(t.key) && isShowable(t.value)
         is TSet -> isShowable(t.elem)
@@ -1744,7 +1754,7 @@ class Checker(
 
     /** A field type may derive Show: like [isShowable] but type parameters are allowed (resolved at use). */
     private fun isShowableField(t: Type): Boolean = when (t) {
-        TInt, TFloat, TBool, TString, is TVar -> true
+        TInt, TFloat, TBool, TString, Type.TBytes, is TVar -> true
         is TList -> isShowableField(t.elem)
         is TMap -> isShowableField(t.key) && isShowableField(t.value)
         is TSet -> isShowableField(t.elem)
@@ -2262,10 +2272,11 @@ class Checker(
             BinOp.ADD, BinOp.SUB, BinOp.MUL, BinOp.DIV, BinOp.MOD -> bothNumericSame()
             BinOp.CONCAT -> when {
                 lt == TString && rt == TString -> TString
+                lt == Type.TBytes && rt == Type.TBytes -> Type.TBytes
                 lt is TList && rt is TList ->
                     if (lt != rt) error("`++` needs lists of the same element type: $lt vs $rt", e.opSpan)
                     else lt
-                else -> error("`++` concatenates Strings or Lists, got $lt ++ $rt", e.opSpan,
+                else -> error("`++` concatenates Strings, Bytes or Lists, got $lt ++ $rt", e.opSpan,
                     "use + for numbers; interpolation \"{x}{y}\" also builds strings")
             }
             BinOp.EQ, BinOp.NEQ -> {
