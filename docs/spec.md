@@ -824,7 +824,24 @@ fn parse(s: String) -> Result[Int, String] !io =
   `src` 的祖先目录**作为根；找不到则根 = 文件所在目录。LSP 用同一条启发式，故单独打开
   一个子模块文件也能解析它相对根的 `use`。
 
-没有清单文件（`dawn.toml` 之类）；目录约定即工程定义。
+**目录约定即工程定义**：模块根、入口、模块路径全部由目录结构决定，不需要清单文件。
+
+项目**可选**带一个 `dawn.toml`，只承载目录约定表达不了的东西——工程身份与依赖。
+没有它的项目按上述规则照常工作。schema 1 的内容：
+
+```toml
+schema = 1                                      # 必须是第一个 key
+name = "backend_dawn"                           # 工程身份（[a-z_][a-z0-9_]*）
+
+[java-deps]                                     # Maven 依赖，`use java` 用得到
+sqlite = "org.xerial:sqlite-jdbc:3.36.0.3"      # 精确坐标；禁 SNAPSHOT、禁版本区间
+```
+
+`dawn run|test|build` 会拉取 `[java-deps]` 并挂上 classpath（与 `--cp` 合并）；
+`dawn build` 另把它们复制进 jar 同级的 `lib/`。仓库地址走 `$DAWN_MAVEN_MIRROR`，不进 manifest。
+
+**manifest 永远是数据，不是代码**——不存在可执行的 `build.dawn`。理由与完整设计见
+[`package-design.md`](package-design.md)。
 
 ### 10.2 引入
 

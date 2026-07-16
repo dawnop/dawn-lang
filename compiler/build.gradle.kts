@@ -10,6 +10,14 @@ repositories {
 dependencies {
     implementation("org.ow2.asm:asm:9.7.1")
     implementation("org.eclipse.lsp4j:org.eclipse.lsp4j:0.21.1")
+    // Maven dependency resolution for dawn.toml's [java-deps] (docs/package-design.md §A.1).
+    // `interface` is the pure-Java, fully shaded artifact — NOT `io.get-coursier::coursier`,
+    // which is a Scala API needing a Scala runtime. The shading is why this one is safe:
+    // maven-resolver and MIMA would each put their own asm on the classpath, colliding with
+    // the asm we generate bytecode with. slf4j-api is coursier's one unshaded dependency;
+    // bind it to a no-op so resolution stays quiet.
+    implementation("io.get-coursier:interface:1.0.28")
+    runtimeOnly("org.slf4j:slf4j-nop:2.0.16")
     testImplementation(kotlin("test"))
 }
 

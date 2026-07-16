@@ -16,6 +16,8 @@ import kotlin.system.exitProcess
 const val USAGE = """dawn — the Dawn language toolchain
 
 A <target> is a single .dawn file or a project directory (src/main.dawn entry).
+A project directory may carry a dawn.toml declaring [java-deps]; run/test/build fetch
+those from Maven and put them on the class path automatically.
 
 usage:
   dawn run <target>                    compile and run (in-process JVM)
@@ -31,7 +33,12 @@ usage:
 options (run/test/build):
   --cp <jars>                          third-party jars for `use java`, separated by the
                                        platform path separator; repeatable. `build` records
-                                       them in the jar manifest's Class-Path.
+                                       them in the jar manifest's Class-Path. Merged with
+                                       anything dawn.toml's [java-deps] resolves to.
+
+environment:
+  DAWN_MAVEN_MIRROR                    Maven repository to fetch [java-deps] from
+                                       (default: Maven Central)
 """
 
 fun main(args: Array<String>) {
@@ -115,6 +122,42 @@ fun cpLoader(jars: List<File>): ClassLoader? =
     if (jars.isEmpty()) null
     else java.net.URLClassLoader(jars.map { it.toURI().toURL() }.toTypedArray(), ClassLoader.getSystemClassLoader())
 
+/**
+ * A target's third-party jars: [fetched] from dawn.toml's [java-deps], [cp] from --cp.
+ * They are kept apart because `build` vendors the fetched ones next to the jar it writes
+ * but leaves --cp jars where the user put them.
+ */
+class Deps(val fetched: List<File>, val cp: List<File>) {
+    val all: List<File> get() = fetched + cp
+}
+
+/**
+ * Resolve a target's dependencies: dawn.toml's [java-deps] (when the target is a project
+ * directory with a manifest) merged with any --cp jars. Manifest errors are rendered and
+ * exit, like compile errors.
+ */
+fun resolveDeps(path: String, cp: List<File>): Deps {
+    val dir = File(path)
+    if (!dir.isDirectory) return Deps(emptyList(), cp)
+    val file = dawn.manifest.Manifest.locate(dir) ?: return Deps(emptyList(), cp)
+    val source = SourceFile(file.path, file.readText())
+    val sink = dawn.diag.DiagnosticSink()
+    val manifest = dawn.manifest.Manifest.parse(file, source, sink)
+    if (manifest == null || sink.hasErrors) {
+        System.err.print(dawn.manifest.renderManifestDiagnostics(source, sink.all))
+        exitProcess(1)
+    }
+    if (manifest.javaDeps.isEmpty()) return Deps(emptyList(), cp)
+    // a cold fetch downloads and can take a while; say so rather than hang silently
+    System.err.println("resolving ${manifest.javaDeps.size} java-deps from ${file.path}...")
+    val fetched = try {
+        dawn.manifest.Maven.fetch(manifest.javaDeps)
+    } catch (e: dawn.manifest.Maven.ResolveError) {
+        throw CliError(e.message ?: "dependency resolution failed")
+    }
+    return Deps(fetched, cp)
+}
+
 fun sanitizeClassName(stem: String): String {
     val cleaned = stem.map { if (it.isLetterOrDigit() || it == '_') it else '_' }.joinToString("")
     return if (cleaned.isEmpty() || cleaned[0].isDigit()) "dawn_$cleaned" else cleaned
@@ -167,7 +210,7 @@ fun cmdRun(restIn: List<String>) {
     val (fuel, rest0) = extractFuel(restIn)
     val (cp, rest) = extractCp(rest0)
     val path = rest.firstOrNull() ?: throw CliError("usage: dawn run [--cp jars] <file.dawn | project-dir>")
-    val javaLoader = cpLoader(cp)
+    val javaLoader = cpLoader(resolveDeps(path, cp).all)
     val program = compileProject(path, fuel, javaLoader = javaLoader)
     val entry = program.entry ?: throw CliError("$path has no pub fn main() -> Unit !io, nothing to run")
     val parent = javaLoader ?: ClassLoader.getSystemClassLoader()
@@ -185,7 +228,7 @@ fun cmdTest(restIn: List<String>) {
     val (fuel, rest0) = extractFuel(restIn)
     val (cp, rest) = extractCp(rest0)
     val path = rest.firstOrNull() ?: throw CliError("usage: dawn test [--cp jars] <file.dawn | project-dir>")
-    val javaLoader = cpLoader(cp)
+    val javaLoader = cpLoader(resolveDeps(path, cp).all)
     val program = compileProject(path, fuel, includeTests = true, javaLoader = javaLoader)
     // recover per-module test blocks (a module class holds dawn$test$i methods)
     val analyzed = analyzeProject(File(path), fuel, javaLoader)
@@ -259,7 +302,8 @@ fun cmdBuild(restIn: List<String>) {
     val oIdx = rest.indexOf("-o")
     val out = if (oIdx >= 0 && oIdx + 1 < rest.size) rest[oIdx + 1] else null
 
-    val program = compileProject(path, fuel, javaLoader = cpLoader(cp))
+    val deps = resolveDeps(path, cp)
+    val program = compileProject(path, fuel, javaLoader = cpLoader(deps.all))
     val entry = program.entry ?: throw CliError("$path has no pub fn main() -> Unit !io to use as an entry point")
     val stem = File(path).let { if (it.isDirectory) it.name else it.nameWithoutExtension }
     val jarPath = when {
@@ -267,11 +311,23 @@ fun cmdBuild(restIn: List<String>) {
         out != null -> out
         else -> "$stem.jar"
     }
-    writeJar(jarPath, entry.className, program.classes, classPath = cp)
+
+    // native-image inlines everything, so it reads the jars where they already live;
+    // a plain jar needs them at a stable path next to itself, since the manifest
+    // Class-Path is relative to the jar's own directory
+    val classPath = if (native) deps.all else vendorJars(deps.fetched, jarPath) + deps.cp
+    writeJar(jarPath, entry.className, program.classes, classPath = classPath)
 
     if (!native) {
-        if (cp.isEmpty()) println("wrote $jarPath (run it with: java -jar $jarPath)")
-        else println("wrote $jarPath (run it with: java -jar $jarPath; manifest Class-Path points at the --cp jars, keep them in place)")
+        val libDir = File(jarPath).absoluteFile.parentFile
+        when {
+            classPath.isEmpty() -> println("wrote $jarPath (run it with: java -jar $jarPath)")
+            deps.fetched.isEmpty() ->
+                println("wrote $jarPath (run it with: java -jar $jarPath; manifest Class-Path points at the --cp jars, keep them in place)")
+            else ->
+                println("wrote $jarPath and ${deps.fetched.size} jar(s) into ${File(libDir, LIB_DIR).path} " +
+                    "(run it with: java -jar $jarPath; keep lib/ next to the jar)")
+        }
         return
     }
 
@@ -295,6 +351,28 @@ fun cmdBuild(restIn: List<String>) {
     File(jarPath).delete()
     if (code != 0) throw CliError("native-image failed (exit code $code)")
     println("wrote $binOut (standalone binary, run it directly: ./$binOut)")
+}
+
+/** Where `build` puts jars fetched from dawn.toml, relative to the jar it writes. */
+const val LIB_DIR = "lib"
+
+/**
+ * Copy resolved jars next to the output jar, under lib/, and return their new paths.
+ *
+ * They come out of coursier's cache, which is a content-addressed path in the user's home
+ * — fine to compile against, useless to a deployed jar. Copying them to a fixed spot beside
+ * the artifact keeps the manifest Class-Path relative, so `jar + lib/` stays movable.
+ */
+fun vendorJars(jars: List<File>, jarPath: String): List<File> {
+    if (jars.isEmpty()) return emptyList()
+    val libDir = File(File(jarPath).absoluteFile.parentFile, LIB_DIR)
+    if (!libDir.isDirectory && !libDir.mkdirs()) throw CliError("could not create ${libDir.path}")
+    return jars.map { src ->
+        val dst = File(libDir, src.name)
+        // the cache is immutable, so same name + same size means same bytes; skip the copy
+        if (!dst.isFile || dst.length() != src.length()) src.copyTo(dst, overwrite = true)
+        dst
+    }
 }
 
 fun writeJar(
