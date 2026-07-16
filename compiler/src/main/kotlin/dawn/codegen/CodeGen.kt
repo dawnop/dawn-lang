@@ -3634,9 +3634,8 @@ class CodeGen(
         }
     }
 
-    /** varargs calls carry no variable part in v0.1: supply the empty array */
-    private fun pushEmptyVarargs(component: Class<*>) {
-        mv.visitInsn(ICONST_0)
+    /** `new C[n]` for a component type — n is already on the stack */
+    private fun newArray(component: Class<*>) {
         if (component.isPrimitive) {
             val t = when (component) {
                 java.lang.Long.TYPE -> T_LONG
@@ -3654,23 +3653,65 @@ class CodeGen(
         }
     }
 
+    private fun arrayStoreOp(component: Class<*>): Int = when (component) {
+        java.lang.Long.TYPE -> LASTORE
+        Integer.TYPE -> IASTORE
+        java.lang.Double.TYPE -> DASTORE
+        java.lang.Float.TYPE -> FASTORE
+        java.lang.Boolean.TYPE, java.lang.Byte.TYPE -> BASTORE
+        java.lang.Short.TYPE -> SASTORE
+        java.lang.Character.TYPE -> CASTORE
+        else -> AASTORE
+    }
+
+    /**
+     * The arguments of one Java call (spec §9.3): the fixed part pushed one by one,
+     * then — when the winner is variadic — the rest packed into the trailing array.
+     * A call that omits the variable part packs zero arguments, i.e. an empty array;
+     * that is the same path, not a special case.
+     */
+    private fun genJavaArgs(e: MethodCall, params: Array<Class<*>>): Boolean {
+        val pack = e.varargsPack
+        val fixed = pack ?: e.args.size
+        for (i in 0 until fixed) {
+            val arg = e.args[i]
+            if (!genExpr(arg, tail = false)) return false
+            if (!adaptOneJavaArg(e, i, arg, params[i])) return false
+        }
+        if (pack == null) return true
+        val component = params.last().componentType
+        pushInt(e.args.size - pack)
+        newArray(component)
+        val store = arrayStoreOp(component)
+        for (i in pack until e.args.size) {
+            val arg = e.args[i]
+            mv.visitInsn(DUP)
+            pushInt(i - pack)
+            if (!genExpr(arg, tail = false)) return false
+            if (!adaptOneJavaArg(e, i, arg, component)) return false
+            mv.visitInsn(store)
+        }
+        return true
+    }
+
+    /** the per-argument crossing: SAM conversion, List bridge, or a primitive/cast adapt */
+    private fun adaptOneJavaArg(e: MethodCall, i: Int, arg: Expr, param: Class<*>): Boolean {
+        val conv = e.samConvs?.get(i)
+        when {
+            conv != null -> emitSamConversion(conv, arg.type as TFn)
+            e.listBridges?.contains(i) == true -> emitListBridge()
+            else -> adaptJavaArg(arg.type!!, param)
+        }
+        return true
+    }
+
     /** Type.new(args): direct construction — never null, so no Option wrap */
     private fun genJavaNew(e: MethodCall): Boolean {
         val ctor = e.javaCtorRef!!
         val owner = AsmType.getInternalName(ctor.declaringClass)
         mv.visitTypeInsn(NEW, owner)
         mv.visitInsn(DUP)
-        for ((i, arg) in e.args.withIndex()) {
-            if (!genExpr(arg, tail = false)) return false
-            val conv = e.samConvs?.get(i)
-            when {
-                conv != null -> emitSamConversion(conv, arg.type as TFn)
-                e.listBridges?.contains(i) == true -> emitListBridge()
-                else -> adaptJavaArg(arg.type!!, ctor.parameterTypes[i])
-            }
-        }
-        if (ctor.isVarArgs && e.args.size == ctor.parameterCount - 1)
-            pushEmptyVarargs(ctor.parameterTypes.last().componentType)
+        if (!genJavaArgs(e, ctor.parameterTypes)) return false
         mv.visitMethodInsn(INVOKESPECIAL, owner, "<init>", AsmType.getConstructorDescriptor(ctor), false)
         return true
     }
@@ -3683,17 +3724,7 @@ class CodeGen(
         if (!static) {
             if (!genExpr(e.target, tail = false)) return false
         }
-        for ((i, arg) in e.args.withIndex()) {
-            if (!genExpr(arg, tail = false)) return false
-            val conv = e.samConvs?.get(i)
-            when {
-                conv != null -> emitSamConversion(conv, arg.type as TFn)
-                e.listBridges?.contains(i) == true -> emitListBridge()
-                else -> adaptJavaArg(arg.type!!, m.parameterTypes[i])
-            }
-        }
-        if (m.isVarArgs && e.args.size == m.parameterCount - 1)
-            pushEmptyVarargs(m.parameterTypes.last().componentType)
+        if (!genJavaArgs(e, m.parameterTypes)) return false
         mv.visitMethodInsn(
             if (static) INVOKESTATIC else if (itf) INVOKEINTERFACE else INVOKEVIRTUAL,
             owner, m.name, AsmType.getMethodDescriptor(m), itf,

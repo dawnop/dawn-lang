@@ -1407,6 +1407,16 @@ class Checker(
         return t
     }
 
+    /**
+     * How well one Java candidate fits a call site (spec §9.3). Ordered by [phase]
+     * first — a candidate that needs no varargs packing always beats one that does,
+     * whatever the scores say — then by [score].
+     */
+    private data class Fit(val phase: Int, val score: Int) : Comparable<Fit> {
+        override fun compareTo(other: Fit): Int =
+            compareValuesBy(this, other, Fit::phase, Fit::score)
+    }
+
     /** Overload resolution + type mapping for one Java call (spec §9). */
     private fun checkJavaCall(e: MethodCall, cls: Class<*>, static: Boolean): Type {
         recordEffect(Eff.Io, e.nameSpan, "${cls.simpleName}.${e.name}")
@@ -1487,28 +1497,42 @@ class Checker(
             else -> null
         }
 
-        // varargs: only the "no variable part" form is supported (an empty array
-        // is supplied); exact-arity candidates outrank it via a small penalty
-        fun score(params: Array<Class<*>>, isVarArgs: Boolean): Int? {
-            val fixed = if (isVarArgs && e.args.size == params.size - 1) params.dropLast(1)
-            else if (params.size == e.args.size) params.toList()
-            else return null
-            var total = if (fixed.size < params.size) -1 else 0
-            for ((i, p) in fixed.withIndex()) {
-                total += paramScore(p, i) ?: return null
-            }
+        // The i-th parameter as the argument at i sees it: inside a packed variadic
+        // part that is the array's component type, not the array.
+        fun paramAt(params: Array<Class<*>>, packs: Boolean, i: Int): Class<*> =
+            if (packs && i >= params.size - 1) params.last().componentType else params[i]
+
+        fun scoreWith(params: Array<Class<*>>, packs: Boolean): Int? {
+            if (packs) { if (e.args.size < params.size - 1) return null }
+            else if (params.size != e.args.size) return null
+            var total = 0
+            for (i in e.args.indices) total += paramScore(paramAt(params, packs, i), i) ?: return null
             return total
+        }
+
+        // Two-phase resolution (spec §9.3, after JLS): phase 1 tries every candidate
+        // without varargs packing; only if that fails does phase 2 pack the trailing
+        // arguments into the array. Equal arity does not settle it — `concat(p)` is a
+        // phase-1 miss (a BodyPublisher is not a BodyPublisher[]) and a phase-2 hit.
+        // The phase, not the score, decides first: scores are per-argument sums that
+        // grow with arity, so a packing candidate can outscore an exact-arity one.
+        fun score(params: Array<Class<*>>, isVarArgs: Boolean): Fit? {
+            scoreWith(params, packs = false)?.let { return Fit(phase = 1, score = it) }
+            if (isVarArgs) scoreWith(params, packs = true)?.let { return Fit(phase = 0, score = it) }
+            return null
         }
 
         // the winner is known: type deferred arguments against their SAM's shape,
         // record fn-typed positions for the codegen bridge (spec §9.4), and
-        // validate + record List-bridged positions (spec §9.6)
-        fun finalizeSams(params: Array<Class<*>>) {
+        // validate + record List-bridged positions (spec §9.6). Positions in a packed
+        // variadic part resolve to the component type, so SAM conversion and the List
+        // bridge work there too.
+        fun finalizeSams(params: Array<Class<*>>, packs: Boolean) {
             val convs = HashMap<Int, SamConv>()
             val lists = HashSet<Int>()
+            if (packs) e.varargsPack = params.size - 1
             for ((i, arg) in e.args.withIndex()) {
-                if (i >= params.size) break // varargs call without the variable part
-                val p = params[i]
+                val p = paramAt(params, packs, i)
                 when (val at = argTypes[i]) {
                     null -> {
                         val sam = samMethodOf(p)!!
@@ -1558,9 +1582,9 @@ class Checker(
                         "candidates:\n" + best.joinToString("\n") { "  ${it.first}" })
                 }
                 else -> {
-                    val c = best.single().first
+                    val (c, m) = best.single()
                     e.javaCtorRef = c
-                    finalizeSams(c.parameterTypes)
+                    finalizeSams(c.parameterTypes, packs = m.phase == 0)
                     // .new returns T — a constructor never returns null; a constructed
                     // java.lang.String is an ordinary Dawn String
                     if (cls == String::class.java) TString else TJava(cls.name, cls)
@@ -1594,9 +1618,9 @@ class Checker(
                     "candidates:\n" + best.joinToString("\n") { "  ${it.first}" })
             }
             else -> {
-                val m = best.single().first
+                val (m, match) = best.single()
                 e.javaMethod = m
-                finalizeSams(m.parameterTypes)
+                finalizeSams(m.parameterTypes, packs = match.phase == 0)
                 mapJavaReturn(m.returnType, e)
             }
         }

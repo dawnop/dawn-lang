@@ -274,6 +274,13 @@ class MethodCall(
     var samConvs: Map<Int, SamConv>? = null
     /** argument positions where a Dawn List bridges to a Java collection (spec §9.6) */
     var listBridges: Set<Int>? = null
+    /**
+     * Set by the checker when the winning candidate is variadic and the call packs
+     * (spec §9.3): the index where packing starts, i.e. the fixed parameter count.
+     * Arguments from here on go into the trailing array — none of them when the call
+     * omits the variable part, which is just the empty-array case.
+     */
+    var varargsPack: Int? = null
 }
 
 /** One SAM conversion: the target functional interface and its single abstract method. */
