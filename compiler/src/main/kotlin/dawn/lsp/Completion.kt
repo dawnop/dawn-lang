@@ -180,6 +180,7 @@ private fun collectBinders(e: Expr, before: Int, add: (String, String?) -> Unit)
         }
         is Unary -> collectBinders(e.operand, before, add)
         is Propagate -> collectBinders(e.operand, before, add)
+        is Unwrap -> collectBinders(e.operand, before, add)
         is Index -> {
             collectBinders(e.target, before, add)
             collectBinders(e.index, before, add)

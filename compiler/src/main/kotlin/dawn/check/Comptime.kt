@@ -62,6 +62,7 @@ fun evalComptime(module: Module, sink: DiagnosticSink, fuel: Long) {
                 is Apply -> { walkExpr(e.target); e.args.forEach(::walkExpr) }
                 is MethodCall -> { walkExpr(e.target); e.args.forEach(::walkExpr) }
                 is Propagate -> walkExpr(e.operand)
+                is Unwrap -> walkExpr(e.operand)
                 is Return -> e.value?.let(::walkExpr)
                 is Index -> { walkExpr(e.target); walkExpr(e.index) }
                 is Call -> e.args.forEach(::walkExpr)
@@ -150,6 +151,12 @@ class ComptimeInterp(
                     "Some", "Ok" -> v.fields[0]
                     else -> throw EarlyReturn(v)
                 }
+            }
+            // same semantics as the `expect` builtin above, minus the hand-written message
+            is Unwrap -> {
+                val v = eval(e.operand, env) as CValue.VAdt
+                if (v.ctor.name == "Some") v.fields[0]
+                else err("panicked: ${e.panicMsg ?: "unwrapped None"}", e.span)
             }
             is MethodCall -> eval(e.desugared!!, env)
             is Return -> throw EarlyReturn(if (e.value != null) eval(e.value, env) else CValue.VUnit)

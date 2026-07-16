@@ -3,6 +3,7 @@ package dawn.check
 import dawn.ast.*
 import dawn.check.Type.*
 import dawn.diag.DiagnosticSink
+import dawn.diag.SourceFile
 import dawn.diag.Span
 import dawn.diag.Suggest
 
@@ -31,6 +32,8 @@ class Checker(
     private val srcPath: String? = null,
     /** resolves `use java` classes; null = the compiler's own class path (JDK only) */
     private val javaLoader: ClassLoader? = null,
+    /** source text of this module; only used to put a line number in `!` panic messages */
+    private val srcText: String? = null,
 ) {
 
     private val fns = HashMap<String, FnSig>()
@@ -362,6 +365,7 @@ class Checker(
             is Binary -> { nameRefs(e.left, out); nameRefs(e.right, out) }
             is Unary -> nameRefs(e.operand, out)
             is Propagate -> nameRefs(e.operand, out)
+            is Unwrap -> nameRefs(e.operand, out)
             is Index -> { nameRefs(e.target, out); nameRefs(e.index, out) }
             is Return -> e.value?.let { nameRefs(it, out) }
             is StrLit -> e.parts.forEach { p -> if (p is StrPart.Interp) nameRefs(p.expr, out) }
@@ -1258,6 +1262,7 @@ class Checker(
         is Lambda -> checkLambda(e, expected)
         is Apply -> checkApply(e)
         is Propagate -> checkPropagate(e)
+        is Unwrap -> checkUnwrap(e)
         is Index -> checkIndex(e)
         is Return -> checkReturn(e)
         is ComptimeExpr -> {
@@ -2203,6 +2208,53 @@ class Checker(
                 "`?` unwraps an Option or Result and early-returns on None/Err; this value is neither")
         }
     }
+
+    /** expr! — Option[T] -> T, panicking on None (spec §8.2). */
+    private fun checkUnwrap(e: Unwrap): Type {
+        val ot = checkExpr(e.operand)
+        if (ot.isErrorish) return TError
+        if (ot !is TAdt || ot.info !== OPTION_ADT) {
+            val hint = if (ot is TAdt && ot.info === RESULT_ADT)
+                "`!` unwraps an Option; on a Result use `?` to propagate, or match the Ok/Err"
+            else
+                "`!` unwraps an Option and panics on None; this value is not an Option"
+            return error("`!` needs an Option, got $ot", e.span, hint)
+        }
+        e.panicMsg = unwrapMsg(e)
+        return ot.args[0]
+    }
+
+    /**
+     * The panic message for `expr!`, written here because codegen has neither the source
+     * text nor a line-number table. Naming the call that produced the None, and where it
+     * sits, is the whole point of `!` over a hand-written `.expect("b-uri")`.
+     */
+    private fun unwrapMsg(e: Unwrap): String {
+        val sb = StringBuilder("unwrapped None")
+        describeUnwrapped(e.operand)?.let { sb.append(" from ").append(it) }
+        unwrapSite(e.span)?.let { sb.append(" at ").append(it) }
+        return sb.toString()
+    }
+
+    /** Best-effort "what produced this Option" for the message; null when it is not a call. */
+    private fun describeUnwrapped(op: Expr): String? = when (op) {
+        is MethodCall -> when (val recv = op.target) {
+            is CtorCall -> "${recv.ctorName}.${op.name}()"
+            is VarRef -> "${recv.name}.${op.name}()"
+            else -> "${op.name}()"
+        }
+        is Call -> "${op.callee}()"
+        else -> null
+    }
+
+    /** "path:line" when the source text was handed in, else the path alone, else nothing. */
+    private fun unwrapSite(span: Span): String? {
+        val f = srcFile ?: return srcPath
+        return "${f.path}:${f.lineOf(span.start)}"
+    }
+
+    private val srcFile: SourceFile? =
+        srcText?.let { SourceFile(srcPath ?: "<input>", it) }
 
     private fun checkFieldAccess(e: FieldAccess): Type {
         val tt = checkExpr(e.target)

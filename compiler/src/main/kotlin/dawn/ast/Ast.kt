@@ -332,6 +332,17 @@ class TupleLit(val elems: List<Expr>, span: Span) : Expr(span)
 class Propagate(val operand: Expr, span: Span) : Expr(span)
 
 /**
+ * expr! — unwrap Some, or panic (spec §8.2). Sugar for `expect` with a message the
+ * compiler writes, which is what makes it worth having: Java interop wraps every
+ * reference return in Option (spec §9.2), and hand-written placeholders like
+ * `.expect("b-uri")` carry no information.
+ */
+class Unwrap(val operand: Expr, span: Span) : Expr(span) {
+    /** panic message, filled by the checker — codegen has no source text to build one from */
+    var panicMsg: String? = null
+}
+
+/**
  * Index expression: xs[i] on a List (panics when out of bounds) or m[k] on a
  * Map (panics when the key is absent). The asking variants stay `get`/`map_get`.
  */

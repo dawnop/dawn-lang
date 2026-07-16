@@ -21,11 +21,11 @@ object Formatter {
 
     fun format(source: String): String {
         val comments = ArrayList<Token>()
-        val code = Lexer(source, 0, DiagnosticSink(), comments).lex()
-            .filter { it.type != NEWLINE && it.type != EOF }
+        val raw = Lexer(source, 0, DiagnosticSink(), comments).lex()
+        val code = raw.filter { it.type != NEWLINE && it.type != EOF }
         val stream = (code + comments).sortedBy { it.span.start }
         if (stream.isEmpty()) return ""
-        return reflow(source, stream, unaryMinus(code))
+        return reflow(source, stream, unaryMinus(code), postfixBang(raw))
     }
 
     /** Set of MINUS tokens that are unary (prefix), so they hug the following operand. */
@@ -39,7 +39,29 @@ object Formatter {
         return out
     }
 
-    private fun reflow(src: String, toks: List<Token>, unary: Set<Token>): String {
+    /**
+     * Set of BANG tokens that are the postfix unwrap (`x!`) rather than an effect marker
+     * (`-> T !io`). The two want opposite spacing, and prev/cur alone cannot tell them
+     * apart (`Result[..] !io` and `xs[0]!` both follow a `]`). What does tell them apart is
+     * what comes next: an effect marker names an effect (`!io`) or unions them (`!(e1 | e2)`),
+     * while postfix `!` can be followed by neither — two expressions may not sit side by
+     * side, and `(` cannot open a call on an arbitrary expression (only an identifier can
+     * be called, so there is no `x!(y)` to confuse with `!(e1 | e2)`). Classified over the
+     * raw token list because NEWLINE is the separator that proves `foo()!` ends a line
+     * rather than naming an effect.
+     */
+    private fun postfixBang(raw: List<Token>): Set<Token> {
+        val out = HashSet<Token>()
+        for ((i, t) in raw.withIndex()) {
+            if (t.type != BANG) continue
+            if (raw.getOrNull(i + 1)?.type !in effectStart) out.add(t)
+        }
+        return out
+    }
+
+    private val effectStart = setOf(IDENT, LPAREN)
+
+    private fun reflow(src: String, toks: List<Token>, unary: Set<Token>, postfix: Set<Token>): String {
         val sb = StringBuilder()
         val openers = ArrayDeque<Int>() // indent (in levels) of the line each still-open bracket sits on
         var lineIndent = 0              // indent of the line currently being emitted
@@ -52,7 +74,7 @@ object Formatter {
                 val nl = countNewlines(src, prev.span.end, t.span.start)
                 if (nl == 0) {
                     val onUseLine = lineFirst.type == USE
-                    if (t.type == COMMENT || space(prev, t, unary, onUseLine)) sb.append(' ')
+                    if (t.type == COMMENT || space(prev, t, unary, postfix, onUseLine)) sb.append(' ')
                     sb.append(text(src, t))
                 } else {
                     lineFirst = t
@@ -88,7 +110,8 @@ object Formatter {
 
     // ---- spacing between two tokens already known to be on the same line ----
 
-    private fun space(prev: Token, cur: Token, unary: Set<Token>, onUseLine: Boolean = false): Boolean {
+    private fun space(prev: Token, cur: Token, unary: Set<Token>, postfix: Set<Token>,
+                      onUseLine: Boolean = false): Boolean {
         val p = prev.type
         val c = cur.type
         // a module path prints tight: use greet/words.{Lang, greet} (spec §10.2)
@@ -99,10 +122,13 @@ object Formatter {
             c == RPAREN || c == RBRACKET -> false
             c == COMMA || c == COLON -> false
             c == QUESTION -> false
+            // postfix unwrap hugs its operand (`x!`); what follows it takes the normal
+            // rules (`x! != y`, `x!.b()`), unlike the effect marker's tight `!io`
+            cur in postfix -> false
             // member access and effect/attribute markers
             p == DOT || c == DOT -> false
             p == DOTDOT -> false
-            p == BANG -> false
+            p == BANG && prev !in postfix -> false
             p == AT -> false
             // calls / indexing / generics: name(..), name[..], no space before the bracket
             c == LPAREN && p in callableBeforeParen -> false
@@ -127,15 +153,21 @@ object Formatter {
 
     private val closers = setOf(RPAREN, RBRACKET, RBRACE)
 
+    // BANG ends a value the same way QUESTION does (`x!` unwraps): it keeps `x![0]` tight
+    // and makes the `-` in `x! - 1` binary. The effect marker never precedes `[` or `-`.
     private val valueEnd = setOf(
-        IDENT, TYPEIDENT, INT, FLOAT, STRING, RPAREN, RBRACKET, TRUE, FALSE, QUESTION, UNDERSCORE,
+        IDENT, TYPEIDENT, INT, FLOAT, STRING, RPAREN, RBRACKET, TRUE, FALSE, QUESTION, BANG, UNDERSCORE,
     )
 
+    // BANG is deliberately absent: only an identifier can be called, so `x!(y)` is not a
+    // thing — a `(` after `!` is always the effect union `!(e1 | e2)`.
     private val callableBeforeParen = setOf(IDENT, TYPEIDENT, RPAREN, RBRACKET, QUESTION, FN)
 
+    // BANG is absent for the same reason as in Lexer.continuesLine: a line ending in `!`
+    // is a postfix unwrap, and the next line starts a new statement, not a continuation.
     private val continuationEnders = setOf(
         PLUS, MINUS, STAR, SLASH, PERCENT, PLUSPLUS, PIPEGT, AMPAMP, PIPEPIPE,
-        EQEQ, NEQ, LT, LE, GT, GE, ARROW, FATARROW, EQ, DOT, NOT, BANG,
+        EQEQ, NEQ, LT, LE, GT, GE, ARROW, FATARROW, EQ, DOT, NOT,
     )
 
     private val continuationStarters = setOf(

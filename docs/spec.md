@@ -561,6 +561,24 @@ fn parse_config(path: String) -> Result[Config, String] !io = {
 `todo()` 等价于 `panic("not yet implemented")` 且能通过任意类型检查
 （返回类型为底类型 `Never`）。
 
+**后缀 `!`**：`o!` 把 `Option[T]` 解成 `T`，`None` 则 panic。语义同
+`expect(o, msg)`，唯一区别是**消息由编译器生成**——含产生 `None` 的调用与源位置
+（`unwrapped None from URI.create() at src/http.dawn:23`），故不必为它编造占位串。
+
+```dawn
+let uri = URI.create(url)!                      # 而不是 .expect("uri")
+let base = HttpRequest.newBuilder()!.uri(uri)!  # 而不是 .expect("b") / .expect("b-uri")
+```
+
+`!` 存在的理由就是 §9.2：Java 把**引用返回一律包成 `Option`**，而绝大多数 JDK 方法
+其实永不返回 null，于是解包是常态。
+
+- 只作用于 `Option`。`Result` 用 `?` 传播（§8.1）或 `match`。
+- 与 `.`/`[]` 同级、左结合：`a()!.b()!` 即 `((a()!).b())!`。
+- 行尾可以是 `!`——它不是二元运算符，故不触发续行（§1.7）。
+  `x! != v` 中 `!=` 仍是一个 token（先按最长匹配切分），比较的是解包后的值。
+- **确有话要说**时仍用 `expect(o, "原因")`——它就是为此存在。
+
 `get`/`map_get` 返回 `Option`（问询）；下标 `xs[i]`/`m[k]` 越界/缺键 panic（断言，§4.8）；
 `Int` 除零 panic。
 
@@ -615,7 +633,21 @@ fn build() -> String !io = {
 | `Unit` | `void` | 返回 |
 | 引入的类 `T` | 该类引用 | 双向 |
 
-**Java 返回引用类型一律为 `Option[T]`**——null 在边界处被拦下。
+**Java 方法返回引用类型一律为 `Option[T]`**——null 在边界处被拦下。用 `!` 解包（§8.2）
+或 `match` 处理：
+
+```dawn
+let uri = URI.create(url)!          # 方法：包 Option，解包
+let sb = StringBuilder.new()        # 构造子：不包，直接是对象
+```
+
+**为什么方法包、构造子不包**——这不是两套随意的规则，而是各有依据：
+
+- **构造子不包**：JLS 保证 `new` 表达式**永不**返回 null，包成 `Option` 是纯噪音。
+- **方法包**：方法**可以**返回 null，且编译器**无从静态区分**。JDK 类不携带运行期可见的
+  可空性注解——`URI.create`（永不 null）与 `Map.get`（真可空）反射出来的注解**都是空**。
+  既然分不出，就只能一律包：宁可让 `!` 显式承担风险，也不把 null 放进 Dawn。
+
 基本类型返回值不包 Option；`short`/`byte`/`int` 返回自动加宽为 `Int`，`float` 加宽为
 `Float`。`char` 出入参 v0.1 不支持；数组走不透明直通（§9.5）。**Option 实参传 null**
 同样推迟（v0.1 无法从 Dawn 侧传 null 给 Java）。

@@ -3060,6 +3060,7 @@ class CodeGen(
         }
         is Lambda -> genLambdaValue(e)
         is Propagate -> genPropagate(e)
+        is Unwrap -> genUnwrap(e)
         is Return -> {
             val v = e.value
             if (v == null || genExpr(v, tail = false)) {
@@ -3576,6 +3577,32 @@ class CodeGen(
         mv.visitTypeInsn(CHECKCAST, okCtor.jvmName)
         val field = okCtor.fields.first()
         mv.visitFieldInsn(GETFIELD, okCtor.jvmName, field.name, descOf(field.type))
+        adaptFrom(field.type, e.type!!)
+        return true
+    }
+
+    /**
+     * expr! — unwrap Some, or panic with the message the checker wrote (spec §8.2).
+     * Same shape as the `expect` builtin, except the message is a compile-time constant,
+     * so it needs no argument slot.
+     */
+    private fun genUnwrap(e: Unwrap): Boolean {
+        if (!genExpr(e.operand, tail = false)) return false
+        val ot = e.operand.type as TAdt
+        val someCtor = ot.info.ctors.first { it.name == "Some" }
+        val someL = Label()
+        mv.visitInsn(DUP)
+        mv.visitTypeInsn(INSTANCEOF, someCtor.jvmName)
+        mv.visitJumpInsn(IFNE, someL)
+        mv.visitTypeInsn(NEW, PANIC_CLASS)
+        mv.visitInsn(DUP)
+        mv.visitLdcInsn(e.panicMsg ?: "unwrapped None")
+        mv.visitMethodInsn(INVOKESPECIAL, PANIC_CLASS, "<init>", "(Ljava/lang/String;)V", false)
+        mv.visitInsn(ATHROW)
+        mv.visitLabel(someL)
+        mv.visitTypeInsn(CHECKCAST, someCtor.jvmName)
+        val field = someCtor.fields.first()
+        mv.visitFieldInsn(GETFIELD, someCtor.jvmName, field.name, descOf(field.type))
         adaptFrom(field.type, e.type!!)
         return true
     }

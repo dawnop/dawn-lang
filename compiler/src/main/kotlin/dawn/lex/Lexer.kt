@@ -71,14 +71,21 @@ class Lexer(
 
     private fun isIdentPart(c: Char) = c.isLetterOrDigit() || c == '_'
 
-    /** Lines ending in these tokens continue onto the next line (spec §1.7). */
+    /**
+     * Lines ending in these tokens continue onto the next line (spec §1.7).
+     *
+     * BANG is deliberately absent: postfix `!` (spec §8.2) ends a line all the time
+     * (`let u = URI.create(s)!`), and swallowing the newline would run the statement
+     * into the next one. The effect marker never ends a line — its name is adjacent
+     * (`!io`, `!(e1 | e2)`).
+     */
     private fun continuesLine(t: TokenType): Boolean = when (t) {
         TokenType.PLUS, TokenType.MINUS, TokenType.STAR, TokenType.SLASH, TokenType.PERCENT,
         TokenType.PLUSPLUS, TokenType.PIPEGT, TokenType.PIPE, TokenType.AMPAMP, TokenType.PIPEPIPE,
         TokenType.EQEQ, TokenType.NEQ, TokenType.LT, TokenType.LE, TokenType.GT, TokenType.GE,
         TokenType.COMMA, TokenType.LPAREN, TokenType.LBRACKET, TokenType.LBRACE,
         TokenType.ARROW, TokenType.FATARROW, TokenType.EQ, TokenType.COLON, TokenType.DOT,
-        TokenType.NOT, TokenType.BANG, TokenType.AT, TokenType.NEWLINE,
+        TokenType.NOT, TokenType.AT, TokenType.NEWLINE,
         -> true
         else -> false
     }

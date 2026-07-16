@@ -742,6 +742,13 @@ class Parser(
                     val q = advance()
                     e = Propagate(e, Span(e.span.start, q.span.end))
                 }
+                // postfix `!` unwraps an Option (spec §8.2). No ambiguity with the effect
+                // marker (`-> T !io`): that `!` is signature syntax, this one expression
+                // syntax. `!=` never gets here — the lexer's two-char munch wins first.
+                BANG -> {
+                    val b = advance()
+                    e = Unwrap(e, Span(e.span.start, b.span.end))
+                }
                 LBRACKET -> {
                     e = bracketed {
                         advance()
