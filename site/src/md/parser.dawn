@@ -151,8 +151,8 @@ fn heading(line: String) -> Result[Block, String] = {
   while cp_at(cs, lvl) == '#' {
     lvl = lvl + 1
   }
-  if lvl > 3 {
-    Err("heading deeper than ### is outside the subset: $line")
+  if lvl > 4 {
+    Err("heading deeper than #### is outside the subset: $line")
   } else if cp_at(cs, lvl) == ' ' {
     Ok(Heading(lvl, parse_inlines(trim(drop_cps(line, lvl + 1)))))
   } else {
@@ -360,7 +360,9 @@ test "quotes reparse their body" {
 }
 
 test "subset violations are loud" {
-  match parse("#### 太深了\n") {
+  # #### is in the subset (spec §9.5.1 uses one); ##### is where it stops
+  assert parse("#### 四级\n") == Ok([Heading(4, [Text("四级")])])
+  match parse("##### 太深了\n") {
     Ok(_) -> {
       assert false
     }

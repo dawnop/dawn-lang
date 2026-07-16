@@ -4,7 +4,7 @@ use md/ast.{Inline, Block, Heading}
 use md/parser.{parse}
 use html/render.{render_doc, inline_text}
 use html/page.{page}
-use gen/common.{must_read, write_page, map_doc_url, pad2, drop_trailing_rule}
+use gen/common.{must_read, write_page, map_doc_url, doc_files, pad2, drop_trailing_rule}
 
 type Chapter = { title: List[Inline], body: List[Block] }
 
@@ -77,12 +77,13 @@ pub fn gen_tutorial(out: String) -> Unit !io = {
     }
   let (intro, chapters) = split_chapters(blocks)
   let n = len(chapters)
+  let docs = doc_files()
 
   # chapter pages
   for i in range(0, n) {
     match get(chapters, i) {
       Some(c) -> {
-        let doc = render_doc([Heading(1, c.title)] ++ c.body, fn(u) => map_doc_url("..", u))
+        let doc = render_doc([Heading(1, c.title)] ++ c.body, fn(u) => map_doc_url("..", docs, u))
         let html = doc.html ++ chapter_nav(chapters, i)
         let title = inline_text(c.title)
         write_page("$out/tutorial/${pad2(i + 1)}.html", page("$title — Dawn 教程", "..", "tutorial", html))
@@ -94,7 +95,7 @@ pub fn gen_tutorial(out: String) -> Unit !io = {
   }
 
   # index: the intro plus a chapter list
-  let intro_doc = render_doc(intro, fn(u) => map_doc_url("..", u))
+  let intro_doc = render_doc(intro, fn(u) => map_doc_url("..", docs, u))
   var items = ""
   for i in range(0, n) {
     items = items ++ "\n" ++

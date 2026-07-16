@@ -89,13 +89,15 @@ fn blocks_html(bs: List[Block], map_url: fn(String) -> String) -> String =
   join(map(bs, fn(b) => block_html(b, map_url)), "\n")
 
 ## Render a whole document: h2/h3 get numbered ids and TOC entries; the first
-## h1 becomes the title.
+## h1 becomes the title. h4 gets a numbered id too but stays OUT of the TOC —
+## the sidebar is a two-level map, and spec §9.5.1-style leaves would bury it.
 pub fn render_doc(blocks: List[Block], map_url: fn(String) -> String) -> Doc = {
   var html = ""
   var toc: List[TocEntry] = []
   var title = ""
   var h2 = 0
   var h3 = 0
+  var h4 = 0
   for b in blocks {
     match b {
       Heading(lvl, items) -> {
@@ -107,14 +109,20 @@ pub fn render_doc(blocks: List[Block], map_url: fn(String) -> String) -> Doc = {
         } else if lvl == 2 {
           h2 = h2 + 1
           h3 = 0
+          h4 = 0
           let id = "s$h2"
           toc = toc ++ [TocEntry { level: 2, id: id, text: inline_text(items) }]
           html = html ++ heading_html(2, id, items, map_url) ++ "\n"
-        } else {
+        } else if lvl == 3 {
           h3 = h3 + 1
+          h4 = 0
           let id = "s$h2-$h3"
           toc = toc ++ [TocEntry { level: 3, id: id, text: inline_text(items) }]
           html = html ++ heading_html(3, id, items, map_url) ++ "\n"
+        } else {
+          h4 = h4 + 1
+          let id = "s$h2-$h3-$h4"
+          html = html ++ heading_html(4, id, items, map_url) ++ "\n"
         }
       }
       _ -> {

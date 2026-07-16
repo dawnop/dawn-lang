@@ -7,7 +7,7 @@ use md/parser.{parse}
 use html/render.{render_doc}
 use html/page.{page, page_with_toc, shell, shell_ext}
 use hl/dawn.{highlight_dawn}
-use gen/common.{must_read, write_page, map_doc_url}
+use gen/common.{must_read, write_page, map_doc_url, doc_files}
 
 fn parsed(path: String) -> List[Block] !io =
   match parse(must_read(path)) {
@@ -102,19 +102,22 @@ fn feature_section() -> String !io = {
 }
 
 pub fn gen_index(out: String) -> Unit !io = {
-  let closing = render_doc(parsed("site/pages/index.md"), fn(u) => map_doc_url(".", u))
+  let docs = doc_files()
+  let closing = render_doc(parsed("site/pages/index.md"), fn(u) => map_doc_url(".", docs, u))
   let body = `<main class="home">` ++ "\n" ++ hero_html() ++ "\n</main>\n" ++
     `<section class="features">` ++ "\n" ++ feature_section() ++ "\n" ++ closing.html ++ "\n</section>"
   write_page("$out/index.html", shell("Dawn 语言", ".", "", body))
 }
 
 pub fn gen_spec(out: String) -> Unit !io = {
-  let doc = render_doc(parsed("docs/spec.md"), fn(u) => map_doc_url(".", u))
+  let docs = doc_files()
+  let doc = render_doc(parsed("docs/spec.md"), fn(u) => map_doc_url(".", docs, u))
   write_page("$out/spec.html", page_with_toc("${doc.title} — Dawn", ".", "spec", doc.toc, doc.html))
 }
 
 pub fn gen_design(out: String) -> Unit !io = {
-  let doc = render_doc(parsed("docs/design.md"), fn(u) => map_doc_url(".", u))
+  let docs = doc_files()
+  let doc = render_doc(parsed("docs/design.md"), fn(u) => map_doc_url(".", docs, u))
   write_page("$out/design.html", page_with_toc("${doc.title} — Dawn", ".", "design", doc.toc, doc.html))
 }
 

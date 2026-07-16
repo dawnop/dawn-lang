@@ -1,0 +1,48 @@
+name: ci
+
+# Why this exists: the site generator was broken for a whole milestone without
+# anyone noticing — docs drifted past a hardcoded lint and nothing ever built the
+# site on push. The compiler suite runs in ~2s, so there is no reason not to.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: graalvm/setup-graalvm@v1
+        with:
+          java-version: '21'
+          distribution: 'graalvm-community'
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      # site/build.sh builds the Playground editor bundle when npm is present.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: site/play-ui/package-lock.json
+
+      - name: compiler tests
+        run: gradle :compiler:test
+
+      # The site is Dawn code with its own tests, and building it end-to-end is
+      # what would have caught the rot: docs/*.md are inputs to a lint that
+      # panics on drift. Needs the fat jar that bin/dawn runs.
+      - name: build the dawn CLI
+        run: gradle :compiler:fatJar
+
+      - name: site tests
+        run: ./bin/dawn test site
+
+      - name: site builds (npm absent -> editor bundle skipped, rest must build)
+        run: ./site/build.sh
+
+      - name: formatting
+        run: ./bin/dawn fmt site --check

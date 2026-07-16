@@ -31,37 +31,66 @@ pub fn take_n[T](xs: List[T], n: Int) -> List[T] =
 pub fn drop_trailing_rule(bs: List[Block]) -> List[Block] =
   if get(bs, len(bs) - 1) == Some(Rule) { take_n(bs, len(bs) - 1) } else { bs }
 
-## Map a docs/-relative Markdown link onto the site. Unknown targets are a
-## lint error, not a silent passthrough.
-pub fn map_doc_url(root: String, u: String) -> String =
+## Everything under docs/, for map_doc_url's existence check. Read once by the
+## caller: map_doc_url must stay pure (render_doc takes a pure fn(String)->String).
+pub fn doc_files() -> List[String] !io =
+  match list_dir("docs") {
+    Ok(fs) -> fs
+    Err(e) -> panic("cannot list docs/: $e")
+  }
+
+## Map a docs/-relative Markdown link onto the site. The three rendered docs get
+## site pages; any other file that REALLY EXISTS under docs/ goes to its source on
+## GitHub; a link to a file that does not exist is a lint error.
+##
+## `docs` is a list rather than a hardcoded whitelist on purpose: the whitelist
+## version silently rotted the moment a doc was added (design.md gained a link to
+## m6-retro.md and the whole site build died, unnoticed, for a milestone). An
+## existence check keeps the only part of the lint that was ever worth having —
+## catching a link to nothing — without a list to forget to update.
+pub fn map_doc_url(root: String, docs: List[String], u: String) -> String = {
+  let f = if starts_with(u, "docs/") { drop_cps(u, 5) } else { u }
   if starts_with(u, "http://") || starts_with(u, "https://") || starts_with(u, "#") {
     u
-  } else if u == "spec.md" || u == "docs/spec.md" {
+  } else if f == "spec.md" {
     "$root/spec.html"
-  } else if u == "design.md" || u == "docs/design.md" {
+  } else if f == "design.md" {
     "$root/design.html"
-  } else if u == "tutorial.md" || u == "docs/tutorial.md" {
+  } else if f == "tutorial.md" {
     "$root/tutorial/index.html"
-  } else if u == "grammar.ebnf" {
-    "https://github.com/dawnop/dawn-lang/blob/main/docs/grammar.ebnf"
-  } else if u == "trait.md" || u == "docs/trait.md" {
-    "https://github.com/dawnop/dawn-lang/blob/main/docs/trait.md"
   } else if ends_with(u, ".html") || contains(u, ".html#") {
     "$root/$u"
+  } else if contains_str(docs, f) {
+    "https://github.com/dawnop/dawn-lang/blob/main/docs/$f"
   } else {
-    panic("unmapped doc link: $u")
+    panic("unmapped doc link: $u — docs/$f does not exist")
   }
+}
+
+fn contains_str(xs: List[String], x: String) -> Bool =
+  match find(xs, fn(y) => y == x) {
+    Some(_) -> true
+    None -> false
+  }
+
+fn drop_cps(s: String, n: Int) -> String = substring(s, n, str_len(s))
 
 ## 01, 02, ... for chapter file names.
 pub fn pad2(i: Int) -> String = if i < 10 { "0$i" } else { "$i" }
 
 test "doc links map onto the site" {
-  assert map_doc_url("..", "spec.md") == "../spec.html"
-  assert map_doc_url(".", "design.md") == "./design.html"
-  assert map_doc_url(".", "tutorial/index.html") == "./tutorial/index.html"
-  assert map_doc_url(".", "#s2") == "#s2"
-  assert contains(map_doc_url(".", "trait.md"), "docs/trait.md")
-  assert map_doc_url(".", "https://x.y/z") == "https://x.y/z"
+  let docs = ["spec.md", "design.md", "tutorial.md", "trait.md", "grammar.ebnf", "m6-retro.md"]
+  assert map_doc_url("..", docs, "spec.md") == "../spec.html"
+  assert map_doc_url(".", docs, "design.md") == "./design.html"
+  # the docs/ prefix is equivalent — design.md writes it both ways
+  assert map_doc_url(".", docs, "docs/spec.md") == "./spec.html"
+  assert map_doc_url(".", docs, "tutorial/index.html") == "./tutorial/index.html"
+  assert map_doc_url(".", docs, "#s2") == "#s2"
+  assert map_doc_url(".", docs, "https://x.y/z") == "https://x.y/z"
+  # unrendered docs go to their source; this is the branch the whitelist kept forgetting
+  assert contains(map_doc_url(".", docs, "trait.md"), "docs/trait.md")
+  assert contains(map_doc_url(".", docs, "m6-retro.md"), "docs/m6-retro.md")
+  assert contains(map_doc_url(".", docs, "grammar.ebnf"), "docs/grammar.ebnf")
 }
 
 test "take_n and drop_trailing_rule" {
