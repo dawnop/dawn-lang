@@ -12,9 +12,10 @@
 | 2 | SQL 命名列取值 `row.col_int("x")` | 库 | ✅ 完成 | backend `862c79c` |
 | 3 | Route 开放结构 + 中间件路由感知 | 框架 | ✅ 完成 | backend `3cfe1b4` |
 | 4 | 一等 `Bytes` 类型（根因 1） | 语言+库+框架 | ✅ 完成 | 草案 `c42f88c`、lang `fe128b3`、backend `f9c339e` |
+| 5 | 互操作 Option 解包：后缀 `!`（根因 3） | 语言+框架 | ✅ 完成 | 草案 `05071e3`、lang `a44e461`、backend `f1b869e` |
 
-第一批（序 1/2/3）+ 序 4 均完成。序 4 虽在优先级表里列「第二批」（成本高、需设计草案），
-本轮一并做掉了。
+第一批（序 1/2/3）+ 序 4 + 序 5 均完成。序 4/5 虽在优先级表里列「第二批」（成本高、需设计草案），
+均已做掉。**剩余**：序 6（`Int`/`char` 值类型特化，根因 2）+ 流式请求/响应。
 
 ---
 
@@ -136,9 +137,59 @@ upload/PUT 往返对拍留部署时（同 M6.5，需 qiniu 钥 + 网络）。
 
 ---
 
+## 序 5 — 互操作 Option 解包：后缀 `!`（✅ 根因 3）
+
+设计定稿见 [`unwrap-design.md`](unwrap-design.md)（动码前先出草案，`05071e3`）。
+
+**推翻了复盘的两条前提**（这是本轮最有价值的产出，记下来免得再走一遍）：
+
+1. **复盘建议的「识别 `@NonNull`（多数 JDK API 有注解）」是错的**——实测（GraalVM 21 反射）
+   `URI.create` / `HttpRequest.newBuilder` / `Base64.getEncoder` / `String.trim`（皆永不 null）
+   与 `Map.get`（**真可空**）的 `getAnnotations()` 和 `getAnnotatedReturnType().getAnnotations()`
+   **全是 `[]`**。JDK 不带运行期可见的可空性注解，编译器无从区分；而痛点 100% 在 JDK API 上，
+   注解方案与痛点不相交。故取复盘的另一条路：`!` 后缀糖。
+2. **「构造子不包 Option、方法包」不是缺陷，是有原则的区分**——JLS 保证 `new` 永不返回 null，
+   故构造子不包是**有依据的**；方法可以返回 null 且分不出，只能包。规则其实一句话可教，
+   本轮只把「为什么」写进 spec §9.2，不改行为。
+
+**保留 Option 包装**（没顺手取消）：无注解则不包 = 把 null 放进 Dawn，违背「无运行期崩溃」
+内核，也违背复盘自己第七节的结论——**「Dawn 的问题不是"管得太多"，而是几个地方"省得太狠"。
+M7 的方向应是补齐被省掉的基础能力，而非放松已被证明有效的严格性。」** 留住安全，只砍噪音。
+
+**语言侧**（`a44e461`）：`Unwrap` AST 节点（+ `panicMsg`，checker 填——codegen **没有**源文本
+或行号表，`Diagnostic.render(file)` 是渲染时才拿 `SourceFile`）；Parser 后缀循环加 `BANG` 分支
+（与既有 `QUESTION`/`Propagate` 平行）；Checker `Option[T]->T`、非 Option 报错（Result 的 hint
+指向 `?`）、新增**可选** `srcText` 参数（仅为消息里的行号，构造点只有 `Analyze.kt` 两处，
+缺省 `null` 降级为不带行号、不破坏任何测试）；CodeGen 复用 `genPropagate` 的 ADT 惯用法
+（消息是编译期常量，无需实参槽）；Comptime `eval` 也支持（否则 `comptime` 里 `expect` 能跑而
+`!` 不能，行为不一）。**1135 测试全绿**（新增 `UnwrapTest` 7 例 + golden `unwrap_postfix`/
+`unwrap_not_option`）。
+
+**两处非显然的修正**（都不在草案预料内）：
+- **`Lexer.continuesLine` 必须移除 `BANG`**：行尾 `!` 是后缀解包的常态（`let u = URI.create(s)!`），
+  而该表会**吞掉行尾 token 之后的换行**做续行 → 语句黏到下一行，报「expected a newline after
+  this statement」。最小复现 `let n = Some(1)!` + 下一行任意语句。spec §1.7 原文只说「二元运算符/
+  `|>`/逗号/开括号」续行，**BANG 本就不该在表里**——此修正是把实现拉回 spec。
+- **Formatter 要区分后缀 `!` 与效果标注 `!io`**（两者空格**相反**，而 prev/cur 判不出：
+  `Result[..] !io` 与 `xs[0]!` 前面都是 `]`）。判据取**后面跟什么**：效果标注后面是效果名
+  或 `!(e1 | e2)` 的括号，后缀 `!` 两者皆不可能（表达式不能并排；且**只有标识符可被调用**，
+  故不存在 `x!(y)` 与效果联合相混）。分类要在**含 NEWLINE 的原始 token 表**上做，否则
+  `foo()!` 换行后接语句会被误判成效果。`!(e1 | e2)` 这一支是 `FmtTest/effect_union` 抓出来的。
+
+**后端落地**（`f1b869e`）：134 处占位 `.expect` → `!`，**保留 3 处**——判据不是「是不是 Java
+互操作」，而是**消息里有没有编译器复现不了的运行期信息**：`"db connect failed: $url"` ×2、
+`"mac $algo"` ×1 告诉你哪个 url / 哪个算法失败，这正是 `expect` 存在的理由；而
+`"b-uri"`/`"request body"`/`"result set"` 都只是在给值起名，自动消息
+（`unwrapped None from ex.getRequestBody() at src/web/server.dawn:22`）严格更强。
+重灾区 `http.dawn` 从 13 处占位串降到 0。58 测试全绿 + jar 起服务冒烟（health/404/401）。
+
+---
+
 ## 不进本轮（回指 [`m6-retro.md`](m6-retro.md) 第六节）
 
-- 序 5 互操作 Option 收敛（消满屏 `.expect`）——序 4 本可搭它一起做，但为控制范围本轮只做了
-  `as_bytes` 这一处显式收窄，通用的 `@NonNull`/`!` 解包留后续。
 - 序 6 `Int`/`char` 值类型特化（根因 2，编译器大改，需性能基准护栏）。
-- 流式请求/响应（依赖序 4 的 `Bytes` 落地后再做更顺）。
+- 流式请求/响应（依赖序 4 的 `Bytes` 落地后再做更顺；现 WebDAV `PUT` 仍整包入内存，
+  靠 `-Xmx512m` + `client_max_body_size 64m` 兜着）。
+- `Result[T,E]` 的 `!`（序 5 只解 Option；Result 有 `?` 传播，痛点不在那儿）。
+- `@NonNull` 第三方 jar 识别（反射对象现成、接线成本低，但与痛点不相交，收益低）。
+- 瑕疵 4：上下文关键字 / `module.Type{}` / 限定调用一致性（纯人体工学，可择机）。
