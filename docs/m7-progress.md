@@ -1,8 +1,8 @@
-# M7 进展：执行 M6 复盘的修复优先级（第一批）
+# M7 进展：执行 M6 复盘的修复优先级（序 1–4）
 
-> 背景：[`m6-retro.md`](m6-retro.md) 第六节排了一张修复优先级表。**第一批 = 序 1 + 序 2 + 序 3**
-> （互相独立、不破坏现有测试、低风险，且为序 4「一等 Bytes」争取设计时间）。本文件记录第一批
-> 的落地状态，供中断后接续。工作跨两仓：语言本体 `dawn-lang/`，后端 `dawnop-site/backend-dawn/`。
+> 背景：[`m6-retro.md`](m6-retro.md) 第六节排了一张修复优先级表。第一批 = 序 1 + 序 2 + 序 3
+> （互相独立、不破坏现有测试、低风险，且为序 4「一等 Bytes」争取设计时间），随后**序 4 也一并落地**。
+> 本文件记录落地状态，供中断后接续。工作跨两仓：语言本体 `dawn-lang/`，后端 `dawnop-site/backend-dawn/`。
 
 ## 状态总览
 
@@ -11,6 +11,10 @@
 | 1 | 补齐 `find/take/drop/reverse` + 字符串 `index_of/last_index_of` | 库 | ✅ 完成 | dawn-lang `1784358`、backend `82664a8` |
 | 2 | SQL 命名列取值 `row.col_int("x")` | 库 | ✅ 完成 | backend `862c79c` |
 | 3 | Route 开放结构 + 中间件路由感知 | 框架 | ✅ 完成 | backend `3cfe1b4` |
+| 4 | 一等 `Bytes` 类型（根因 1） | 语言+库+框架 | ✅ 完成 | 草案 `c42f88c`、lang `fe128b3`、backend `f9c339e` |
+
+第一批（序 1/2/3）+ 序 4 均完成。序 4 虽在优先级表里列「第二批」（成本高、需设计草案），
+本轮一并做掉了。
 
 ---
 
@@ -105,8 +109,36 @@ pattern-match 访问器删除改字段访问；② `web/types.dawn`：新增 `Ro
 
 ---
 
-## 不进第一批（回指 [`m6-retro.md`](m6-retro.md) 第六节）
+## 序 4 — 一等 `Bytes` 类型（✅ 根因 1）
 
-- 序 4 一等 `Bytes` 类型（根因 1，影响极高、成本高，需先出设计草案）。
-- 序 5 互操作 Option 收敛（消满屏 `.expect`，可搭序 4 一起做）。
+设计定稿见 [`bytes-design.md`](bytes-design.md)（动码前先出草案，`c42f88c`）。
+
+**语言本体**（dawn-lang `fe128b3`）：新增 `Type.TBytes`（运行期就是裸 `byte[]`，与不透明数组
+同表示、零间接），内建 `utf8/decode/byte_len/byte_at/byte_slice/byte_index_of/as_bytes`，
+操作符 `++`（`dawn/rt/Bytes.concat`）与按内容的 `==`（`Arrays.equals`），`Show` 渲染 `<N bytes>`；
+Java `byte[]` 返回落成 `Option[Bytes]`、`Bytes` 反向传 Java `byte[]` 形参（`paramScore`）。
+退役 `utf8_bytes`/`latin1_bytes`。四处注册（Types 签名 / CodeGen 运行期+dispatch / Doc 分组；
+comptime 折叠与 value-handle **有意跳过**，同旧 byte 内建）。UFCS 让 `s.utf8()`/`b.decode(cs)`
+免方法机制。**1124 测试全绿**（新增 `BytesTest` 8 例，改 `JavaInteropTest` 用新 API）。
+
+**关键设计点**：`as_bytes(x)` 是唯一新增的「显式」互操作收窄——把擦除泛型的不透明 `Object`
+（如 `HttpResponse.body()`）认领为 `Bytes`。先前试过让 `assignable` 隐式放行 `Object→Bytes`，
+但**泛型内的 `expect[T]` 会把期望类型 `Bytes` 灌进 `T` → `Option[Object]` vs `Option[Bytes]` 不合**，
+且 codegen 无处插 `CHECKCAST`；改为显式内建（运行期 CHECKCAST，非 `byte[]` 即 CCE 穿透，spec §9.5）。
+
+**后端迁移**（backend-dawn `f9c339e`，有界路线）：`Request.raw` latin-1 String→`Bytes`、
+`Response.bin` `Option[Object]`→`Option[Bytes]`（Response 重获 `derive Show`）、`read_body` 单次解码、
+`fetch_bytes→Result[Bytes]`、`post_latin1→post_bytes`、multipart 改 over Bytes（结构用
+`byte_index_of/byte_slice` 定位、内容留 Bytes、仅 ASCII 头 `decode` 取字段）、qiniu multipart 组 Bytes、
+crypto/tencent `utf8_bytes→utf8`。`body: String` 保留（不动几十个文本 handler）。**build.sh 54 测试全绿**
+（crypto 向量、multipart、qiniu/tencent 签名逐字节不变），jar 起服务 health/dav/404 正常。字节精确的
+upload/PUT 往返对拍留部署时（同 M6.5，需 qiniu 钥 + 网络）。
+
+---
+
+## 不进本轮（回指 [`m6-retro.md`](m6-retro.md) 第六节）
+
+- 序 5 互操作 Option 收敛（消满屏 `.expect`）——序 4 本可搭它一起做，但为控制范围本轮只做了
+  `as_bytes` 这一处显式收窄，通用的 `@NonNull`/`!` 解包留后续。
 - 序 6 `Int`/`char` 值类型特化（根因 2，编译器大改，需性能基准护栏）。
+- 流式请求/响应（依赖序 4 的 `Bytes` 落地后再做更顺）。
