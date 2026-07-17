@@ -465,11 +465,12 @@ val BUILTINS: Map<String, FnSig> = run {
         // An empty needle matches at min(from, len). Mirrors string index_of.
         FnSig("byte_index_of", listOf(Type.TBytes, Type.TBytes, Type.TInt), listOf("b", "needle", "from"),
             Type.TAdt(OPTION_ADT, listOf(Type.TInt)), Eff.Pure, isBuiltin = true),
-        // interop escape (spec §9.5): reinterpret an opaque Java value that is a byte[]
-        // at runtime (e.g. an erased-generic HttpResponse.body()) as Bytes. A runtime
-        // CHECKCAST guards it — a non-byte[] fails loud, like any opaque narrowing.
-        FnSig("as_bytes", listOf(Type.TJava("java.lang.Object", Any::class.java)), listOf("x"),
-            Type.TBytes, Eff.Pure, isBuiltin = true),
+        // interop escape (spec §9.5): reclaim an opaque Java value (e.g. an erased-generic
+        // HttpResponse.body()) as a concrete reference type T, taken from the expected type at
+        // the call site. Emits CHECKCAST erasure(T); a mismatch fails loud like any opaque
+        // narrowing. T must be a reference type (the checker rejects primitive/unbound targets).
+        FnSig("cast", listOf(Type.TJava("java.lang.Object", Any::class.java)), listOf("x"),
+            t, Eff.Pure, isBuiltin = true, typeParams = listOf(t)),
         // supervision boundary (spec §9.8): run f, turning *any* Throwable — including a
         // Dawn panic — into Err. For isolation points only (a server request, a job
         // runner); ordinary failures still travel in Result. Contrast java_try, which

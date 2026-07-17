@@ -200,7 +200,7 @@ val BUILTIN_GROUPS: List<Pair<String, List<Pair<String, String>>>> = listOf(
         "byte_at" to "the byte at an index as an Int 0..255 (out of bounds panics)",
         "byte_slice" to "the bytes in [start, end); indices are clamped into range",
         "byte_index_of" to "the byte index of the first occurrence of a needle at or after `from`; None when absent",
-        "as_bytes" to "reinterpret an opaque Java value that is a byte[] at runtime as Bytes (interop escape; a runtime cast guards it)",
+        "cast" to "reclaim an erased Java Object as a concrete reference type T, taken from the expected type at the call site (interop escape; a runtime CHECKCAST guards it)",
     ),
     "char" to listOf(
         "code_points" to "split into Unicode code points (a character is its code point Int)",

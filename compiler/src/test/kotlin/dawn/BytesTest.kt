@@ -145,13 +145,13 @@ class BytesTest {
     }
 
     @Test
-    fun `as_bytes reinterprets an erased-generic Object as Bytes`() {
+    fun `cast reclaims an erased-generic Object as Bytes`() {
         val out = run(
             """
             use java "java.util.Optional"
             pub fn main() -> Unit !io = {
               let o = Optional.of(utf8("hi")).expect("o")
-              let b: Bytes = as_bytes(o.get().expect("g"))
+              let b: Bytes = cast(o.get().expect("g"))
               println("${'$'}{byte_len(b)}")
             }
             """.trimIndent(),

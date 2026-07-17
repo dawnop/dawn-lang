@@ -1893,6 +1893,14 @@ class Checker(
         }
         if (sig.isBuiltin && sig.name == "to_string")
             checkPrintable(subst(sig.paramTypes[0], map), e.args[0].span)
+        if (sig.isBuiltin && sig.name == "cast") {
+            // T is bound here (an unbound type param already errored above). It must be a
+            // reference type: CHECKCAST cannot target a primitive. See docs/cast-interop.md §三.
+            val target = subst(sig.ret, map)
+            if (target == TInt || target == TFloat || target == TBool)
+                sink.error("`cast` target must be a reference type, not $target", e.span,
+                    "cast reclaims an erased Java Object via CHECKCAST; primitive targets aren't supported")
+        }
         // instantiate the callee's effect: an unbound effect variable means pure
         val calleeEff = when (val ce = sig.eff) {
             is Eff.Var -> effMap[ce] ?: Eff.Pure

@@ -4435,9 +4435,9 @@ class CodeGen(
             mv.visitMethodInsn(INVOKESTATIC, BYTES_CLASS, "indexOf", "([B[BJ)LOption;", false)
             true
         }
-        "as_bytes" -> {
-            genExpr(e.args[0], tail = false) // an opaque Object that is a byte[] at runtime
-            mv.visitTypeInsn(CHECKCAST, "[B")
+        "cast" -> {
+            genExpr(e.args[0], tail = false) // an opaque Object; reclaim the concrete type T
+            unerase(e.type!!)                // e.type = checker-resolved target (from expected type)
             true
         }
         "read_file" -> {
