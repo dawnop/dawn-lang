@@ -141,6 +141,20 @@ to_string          # → Show trait（已有 derive Show）
 - `len` / `==` / 排序 → `Len` / `Eq` / `Ord` trait。对齐 Rust `Add::add` 模型。
 - 收益直观、风险小，可作为「builtin 能被 trait 取代」的单点验证。
 
+> **调用形态已就位，缺的是重名派发**：Dawn **已同时具备 UFCS 与 `|>`**，且二者脱糖一致——
+> `f(x, a)`、`x.f(a)`（UFCS，`Checker.kt:1320` / spec §4.3，优先于 Java 实例方法与记录字段函数）、
+> `x |> f(a)`（`Parser.kt:652`）**是同一个 `f(x, a)` 的三种写法**。所以 `map.get(k)` 这种「方法式」
+> 写法**语法层今天就支持**，无需新语法。分工上：**`.` 管单点调用**（`m.get(k)`、`s.trim()`），
+> **`|>` 管数据流水线**（`xs |> filter(p) |> map(f) |> sort_by(key)`，避免反着读的嵌套）；
+> 注意 `|>` 穿的是**左侧数据**，故 `m |> get(k)` 对、`k |> map` 方向反了。
+>
+> 但 UFCS **按名字**解析自由函数、Dawn builtin 表名字唯一（无 ad-hoc 重载），所以 `get`（List 已占）
+> 与 Map 的取值**不能同名共存为自由函数**——今天只能写 `m.map_get(k)`（丑）。要让 `m.get(k)` 与
+> `xs.get(i)` **同名共存**，就得把 `get` 做成**按接收者派发的 trait 方法**（一个 `Index`/`Get` trait，
+> List/Map 各自 impl）。**即：漂亮的 `m.get(k)` 与「stdlib trait 化」是同一件事**，归本杠杆一起做；
+> 在此之前保留 `map_get`/`map_has`/`map_insert` 前缀名。**stdlib 约定**：函数一律「接收者/集合当第一参」，
+> 三形态（前缀 / `.` / `|>`）自动都通。
+
 **杠杆 2 — 给编译器加「bundle std 源 + 隐式 import」（一个小特性）**
 - Dawn **已支持项目内多文件源模块**（`backend-dawn` 用 `use web/…`、`use http` 组织）。
   所以 `std/strings.dawn` 里 `use java "java.lang.String"` 再导出 `substring`/`split`，
