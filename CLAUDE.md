@@ -21,6 +21,19 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 写代码时别把 docs 的语言带进去，反之亦然。
 
+## 文件头注释：讲**为什么**
+
+每个文件在顶层声明之前有一段注释，说明这个文件为何存在、以及它做了哪些不显然的取舍
+（Kotlin 21/23、`.dawn` 31/31）。不是「这个文件定义了 Parser」那种复述，是
+`build.gradle.kts` 里「为什么选 `io.get-coursier:interface` 而不是 coursier 本体」那种。
+新增文件请照做。
+
+## 命名是**语义**，不是风格
+
+`lower_snake_case` = 值/函数/模块，`PascalCase` = 类型/构造器。**这是强制的**：
+parser 靠首字母大小写消歧（`TYPEIDENT` 是独立 token），所以改大小写是改语义、不是改风格。
+权威表述在 [`docs/spec.md`](docs/spec.md) §1（「命名约定是强制的」那条）。
+
 ## 常用命令
 
 ```bash
@@ -60,9 +73,17 @@ examples/          示例，ExamplesTest 保证全部可编译
 
 ## 测试
 
+**测试的工作目录是 `compiler/`，不是仓库根。** 所以它们用 `../examples`、`../docs/tutorial.md`
+这样的相对路径回退一级（见 `ExamplesTest`/`TutorialTest`/`JsonSuiteTest`）。加会读仓库文件的
+测试时记住这条，否则路径在 `./gradlew` 下能过、换个跑法就找不到。
+
 黄金文件是主力。改动编译器输出（格式化结果、报错文案、运行输出）会让 golden 测试变红——
 **先确认新输出是对的，再** `-DupdateGolden=true` 重新生成，不要反过来。
 `TutorialTest` 会编译 `docs/tutorial.md` 里的代码块，`JsonSuiteTest` 跑 JSONTestSuite。
+
+`playground/test/contract.sh` 是端到端合约测试（起 runner、驱 `/run` 与 `/check`，10 项）。
+本机跑要换端口：`PLAY_TEST_PORT=18097 ./playground/test/contract.sh`——WSL2 下
+Windows 的 WinNAT 保留了大片低端口，8097 bind 会报 "Address already in use"，而 `ss` 看着是空的。
 
 ## 怎么加特性
 
