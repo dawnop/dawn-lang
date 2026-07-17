@@ -6,8 +6,10 @@ set -e
 cd "$(dirname "$0")/.."
 ROOT=$(cd .. && pwd)
 
+# Both layouts: macOS bundles the JDK under Contents/Home, Linux tarballs put
+# bin/ at the top level. Same probe as bin/dawn.
 if [ -z "$JAVA_HOME" ]; then
-  for d in "$HOME"/tools/graalvm-*/Contents/Home; do
+  for d in "$HOME"/tools/graalvm-*/Contents/Home "$HOME"/tools/graalvm-*; do
     [ -x "$d/bin/java" ] && JAVA_HOME="$d" && break
   done
 fi
@@ -16,7 +18,11 @@ export PATH="$JAVA_HOME/bin:$PATH"
 export DAWN_BIN="$ROOT/bin/dawn"
 export PLAY_JAVA="$JAVA_HOME/bin/java"
 export PLAY_TIMEOUT=3
-PORT=8097
+# Overridable because WSL2 cannot bind large swathes of the low port range —
+# Windows' WinNAT reserves them, and the bind fails with "Address already in use"
+# against a port that `ss` shows as free. 8097 is inside one such range on some
+# machines: PLAY_TEST_PORT=18097 ./playground/test/contract.sh
+PORT=${PLAY_TEST_PORT:-8097}
 export PLAY_PORT=$PORT
 
 "$DAWN_BIN" run "$ROOT/playground" >/tmp/dawn-play-test.log 2>&1 &
