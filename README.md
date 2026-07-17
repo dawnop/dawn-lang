@@ -49,7 +49,7 @@ pub fn main() -> Unit !io =
 
 ```bash
 # 构建编译器（需要 JDK 21；native 编译需要 GraalVM）
-gradle :compiler:fatJar
+./gradlew :compiler:fatJar
 
 ./bin/dawn run examples/m0/fizzbuzz.dawn      # 编译并运行单文件（JVM）
 ./bin/dawn run examples/m4/hello_mod          # 编译并运行多模块项目
@@ -96,7 +96,8 @@ VS Code 扩展与 Neovim / Helix 配置见 [editors/](editors/)。
   全部 318 例（JVM 与 native 一致）。
 
 详见 [docs/design.md](docs/design.md) 里程碑。编译器 Kotlin + ASM，
-测试 748 项（`gradle :compiler:test`）。native 二进制启动约 7ms。
+测试 1170 项（`./gradlew :compiler:test`，行覆盖率 88%）。
+`dawn build --native` 经 GraalVM 产出独立二进制，启动无 JVM 开销。
 
 ## 许可证
 

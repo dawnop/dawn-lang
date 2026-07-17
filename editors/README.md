@@ -5,7 +5,7 @@ The language server ships inside the dawn CLI: any LSP client just needs to run
 signatures), go to definition, document outline.
 
 Make sure `bin/dawn` is on your PATH (or use an absolute path below), and build
-the CLI first: `gradle :compiler:fatJar`.
+the CLI first: `./gradlew :compiler:fatJar`.
 
 ## VS Code
 

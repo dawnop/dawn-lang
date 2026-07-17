@@ -13,7 +13,7 @@ native-image 直接得到。本教程带你从第一个程序走到调 Java。
 构建编译器需要 JDK 21（native 编译另需 GraalVM）：
 
 ```bash
-gradle :compiler:fatJar          # 产出 dawn 工具
+./gradlew :compiler:fatJar       # 产出 dawn 工具
 ./bin/dawn run  hello.dawn        # 编译并运行（JVM 内）
 ./bin/dawn test hello.dawn        # 运行文件里的 test 块
 ./bin/dawn build hello.dawn --native -o hello   # 产出独立二进制
