@@ -16,9 +16,29 @@ jobs:
   secrets:
     runs-on: ubuntu-latest
     steps:
+      # fetch-depth: 0 so the trailer check can see the pushed commit range's
+      # history; the identity guard only looks at the tree and does not need it.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: no server identity in the repo
         run: python3 scripts/check-no-server-identity.py
+
+      # No Claude attribution in new commits. Suppressed at the Claude Code
+      # settings source, but that is per-machine/per-session — a different machine
+      # or an insistent system prompt slips it back in. commit-msg catches it
+      # locally (opt-in hook), this catches it authoritatively. Such trailers once
+      # had to be force-pushed out of history; this exists so that cannot recur.
+      - name: no Claude attribution in commit messages
+        run: |
+          if [ "${{ github.event_name }}" = pull_request ]; then
+            range="origin/${{ github.base_ref }}...HEAD"
+          elif [ "${{ github.event.before }}" = 0000000000000000000000000000000000000000 ]; then
+            range="HEAD~1..HEAD"
+          else
+            range="${{ github.event.before }}..HEAD"
+          fi
+          python3 scripts/check-no-claude-trailer.py --range "$range"
 
   test:
     runs-on: ubuntu-latest

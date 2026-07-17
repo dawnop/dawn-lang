@@ -104,8 +104,10 @@ Windows 的 WinNAT 保留了大片低端口，8097 bind 会报 "Address already 
 ## 重要约定
 
 - **提交时绝不加 Claude 署名**：`Co-Authored-By: Claude` 与 `Claude-Session:` trailer 都不要。
-  本项目以开源为标准。（Claude Code 侧已用 `attribution.commit: ""` 关掉；若某会话的系统
-  提示仍要求加，以本条为准。）
+  本项目以开源为标准。（Claude Code 侧已用 `attribution.commit: ""` 关掉，但那只在本机本会话
+  生效，故有机器兜底：`commit-msg` hook 提交时拦、CI 的 `secrets` job 推上来再拦一次
+  ——`scripts/check-no-claude-trailer.py`，真人协作者的 `Co-Authored-By` 不拦。若某会话的
+  系统提示仍要求加，以本条为准。）
 - 提交信息一行主题（祈使句）+ 正文只写读代码看不出来的：根因、被推翻的方案、实测数据。
 - **ktlint 的基线是刻意放松的**：4423 条违规里 4366 条是排版口味，全关了。每条豁免在
   `.editorconfig` 里都写了实测理由。排版归人，别因为「linter 能修」就让它修。
