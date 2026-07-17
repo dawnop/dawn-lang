@@ -1,0 +1,70 @@
+name: release
+
+# Why this exists: dawnop-site runs its production backend on code this compiler
+# builds, and used to build it from whatever main happened to be. That made every
+# commit here a potential break over there, with no way to say which compiler a
+# given backend was built with. Tags fix that, and a tag is only pinnable if it
+# ships an artifact — so pushing `v*` publishes one.
+#
+# Releasing is: bump `version` in compiler/build.gradle.kts, commit, then
+#   git tag v0.1.0 && git push --tags
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write # create the release and upload the jar
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: graalvm/setup-graalvm@v1
+        with:
+          java-version: '21'
+          distribution: 'graalvm-community'
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      # The tag is what consumers pin, so it must name what is in the jar. Without
+      # this, tagging v0.2.0 without bumping the build file would publish a jar
+      # that reports 0.1.0 and nobody would notice until it mattered.
+      - name: tag matches the built version
+        run: |
+          BUILT=$(./gradlew -q :compiler:printVersion)
+          TAG="${GITHUB_REF_NAME#v}"
+          echo "tag=$TAG  build.gradle.kts=$BUILT"
+          if [ "$TAG" != "$BUILT" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not match version $BUILT in compiler/build.gradle.kts"
+            exit 1
+          fi
+
+      # ci.yml runs on push to main, but a tag can point anywhere. Re-run the
+      # suite here rather than trust that some earlier run covered this commit.
+      - name: tests
+        run: ./gradlew :compiler:test
+
+      - name: build the dawn CLI
+        run: ./gradlew :compiler:fatJar
+
+      - name: it reports the version we think it does
+        run: |
+          OUT=$(./bin/dawn --version)
+          echo "$OUT"
+          case "$OUT" in
+            "dawn ${GITHUB_REF_NAME#v} ("*) ;;
+            *) echo "::error::--version said '$OUT'"; exit 1 ;;
+          esac
+
+      # gh is preinstalled on runners — no third-party action in the release path.
+      - name: publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            compiler/build/libs/dawn.jar \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes

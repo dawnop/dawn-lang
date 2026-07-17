@@ -39,6 +39,12 @@ sourceSets.main {
     resources.srcDir(generateBuildInfo)
 }
 
+// For release.yml to check the tag against what is actually being built.
+tasks.register("printVersion") {
+    val v = project.version.toString()
+    doLast { println(v) }
+}
+
 dependencies {
     implementation("org.ow2.asm:asm:9.7.1")
     implementation("org.eclipse.lsp4j:org.eclipse.lsp4j:0.21.1")
