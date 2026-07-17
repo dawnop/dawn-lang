@@ -173,7 +173,44 @@ to_string          # → Show trait（已有 derive Show）
 - 只有当想让 stdlib **可分发、带版本、脱离编译器发版节奏**时，才需要「项目B」。
 - 「移出编译器」不等于「做成包」——前三步不依赖项目B。
 
-## 六、权衡与不做
+## 六、实施计划（已选定：杠杆2 优先）
+
+> 方向已定：**认真做杠杆2**（bundle std 源 + 隐式 `use std`）——它是把 63 个搬出编译器的**唯一前提**，
+> 单靠 trait 化（杠杆1）只搬得掉个位数。本节是照着做的可执行步骤，与 `cast[T]`/流式响应那条线**独立、不阻塞**。
+
+### 6.1 已核实的地基（决定方案，勿再凭印象）
+
+- **Ord 已是一等 prelude trait**（`check/Traits.kt:70`，`sort`/`min`/`max` 已用 `ORD_TRAIT` 约束，`< <= > >=` 已桥到 `cmp`）——杠杆1 的 Ord 侧**已完成**。
+- **Show 仍只是 `derivesShow` 标志 + 编译器生成 `to_string`**（`check/Checker.kt:190`，可 derive 的只有 Show/Ord），**不是可 `impl` 的 trait**。故「`to_string` → Show trait」需**先把 Show 升成一等 prelude trait**（照 Ord 的样，让用户能 `impl Show[MyType]`）——这本身是有独立价值的特性。
+- **无「Dawn 源写的 std + 隐式导入」机制**：prelude（Option/Result ADT、Ord trait、泛型 builtin）全在 Kotlin（`check/Types.kt`）硬编码，模块靠显式 `use` 装载。故**杠杆2 是从零的新特性**。
+- **算术分账**：`75 → 4` 的主体 63 个**必须先有杠杆2**；trait 化只搬 `to_string` 等极少数。
+
+### 6.2 杠杆2 使能特性拆解（四件）
+
+- **A — std 源打进 jar 资源**：一组 `std/*.dawn` 随编译器分发，照 `cli/Main.kt:48` 装载 `dawn-build.properties` 的 `getResourceAsStream` 那条路读出来。
+- **B — 隐式 `use std`**：编译用户代码前先解析 + 检查 std，把它合入 Checker 的「prelude + 已检查模块 + local」impl/类型/fn 视图（`check/Checker.kt:50`），无需用户手写 `use std`（像现在 Option/Result 那样天然可见）。
+- **C — 复用现有多模块机制**：`backend-dawn` 已用 `use web/…` 多模块，module-class 命名沿用现状。**与「项目B」的硬阻塞 `className = modPath` 无关**——「移出编译器」不等于「做成包」，故本步不碰项目B（杠杆4 才需要）。
+- **D — FFI 转发绕开自举循环**：std 的 `map` 写成 `use java "dawn.rt.Lists"` + `pub fn map(xs, f) = Lists.map(xs, f)`，**直接打运行时类、不依赖正被删的 builtin**，无鸡生蛋。运行时类（`dawn/rt/Lists` 等）本就在编译产物链接的运行时里。
+
+### 6.3 迁移协议（一函数一原子）
+
+- **删 builtin FnSig（`Types.kt`）⟺ 加 std 定义**，一函数一迁，避免「builtin + std 双定义同名」冲突。
+- 每迁一批：编译器 builtin 表 + `codegen` 对应名字特判分支**同步瘦一圈**；跑全测 + `backend-dawn` 三套契约对拍守回归。
+
+### 6.4 建议路径
+
+1. **先落使能特性 A/B**（std 装载 + 隐式可见），此时 std 可空。
+2. **单函数端到端打通**（取 `map`）：加 `std/list.dawn` FFI 转发 → 删 `map` builtin → 验证隐式可见、编译产物 `INVOKESTATIC std → dawn/rt/Lists.map`、测试绿。**打通即证使能特性成立**，再批量。
+3. **首个成规模批次取 ② String 组**（`str_len`/`substring`/`split`… → `std/strings.dawn`，`use java`）：无 trait 依赖、最直白。
+4. 再迁 ③ 集合、近核（`to_int`/`args`/`print`…）。
+5. **杠杆1 trait 化**（Show 升一等 + `to_string`/`len`/`Index`）可与上述批次**并行**推进（互不依赖）。
+
+### 6.5 性能与止损
+
+- 集合迁出后多一层 `INVOKESTATIC` 间接（std → runtime），先以「正确 + 变薄」为目标，真有热点再个别标 `@inline` 或回收成 intrinsic（Rust intrinsic-behind-wrapper 模式，见 §七）。
+- 全程**可分批、可回滚**：任一批出问题就停在上一批，编译器仍自洽。
+
+## 七、权衡与不做
 
 - **`print`/`println`/`read_line`/`args` 已划出核**：作为 `std/io.dawn` 的
   `use java "java.lang.System"` 包装（`args` 走 runtime 访问器）。它们的效果边界靠 prelude 函数

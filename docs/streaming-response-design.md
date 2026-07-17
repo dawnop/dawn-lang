@@ -27,7 +27,7 @@ fetch_bytes(range_url, hdrs) -> binary(206, mime, r.bytes)
 外加 **Range 透传**让分段读每次只取一段。所以本轮是把最后这条内存路径也堵上，**影响面窄**
 （仅上述不跟随 302 的客户端 + fm `content` 兜底端点）。
 
-## 二、地基几乎就位——语言侧靠**通用 `cast[T]`** 认领擦除泛型
+## 二、地基几乎就位——语言侧靠**通用 `cast`** 认领擦除泛型
 
 请求侧那轮已经把响应侧要用的 Java API 一并实测过了
 （[`streaming-design.md`](streaming-design.md) §二表格），响应侧要用的两个当时就标了「本轮不用」：
@@ -41,29 +41,29 @@ fetch_bytes(range_url, hdrs) -> binary(206, mime, r.bytes)
 故「先判上游状态、非 2xx 就报错、不流」这套现有逻辑原样保留，甚至比现在更顺
 （现在是先把错误体也 buffer 下来再判）。
 
-**语言缺口 = 擦除泛型的认领，由通用 `cast[T]` 一并解决**：`HttpResponse.body()` 是**擦除泛型**，
-Dawn 视之为 `java.lang.Object`（这正是 `fetch_bytes` 用 `as_bytes` 把它认领成 `Bytes` 的原因，
-`http.dawn:27`）。`ofInputStream` 的 body 同样擦除成 `Object`，认领成 `InputStream` 就用同一把工具——
-**单个泛型内建 `cast[T]`**（设计见 [`cast-interop.md`](cast-interop.md)）：
+**语言缺口 = 擦除泛型的认领，由通用 `cast` 一并解决**：`HttpResponse.body()` 是**擦除泛型**，
+Dawn 视之为 `java.lang.Object`（这正是 `fetch_bytes` 需把它认领成 `Bytes` 的原因，`http.dawn:27`，
+迁移后 `as_bytes` 折进 `cast`）。`ofInputStream` 的 body 同样擦除成 `Object`，认领成 `InputStream`
+就用同一把工具——**单个泛型内建 `cast`**（v1 surface = 期望类型驱动，设计见 [`cast-interop.md`](cast-interop.md)）：
 
 ```dawn
-let s: InputStream = cast[InputStream](resp.body()!)   # 认领擦除泛型 body 为具体流
-let b = cast[Bytes](resp.body()!)                      # as_bytes 的位置，同一把工具
+let s: InputStream = cast(resp.body()!)   # T=InputStream 来自注解；认领擦除泛型 body 为具体流
+let b: Bytes = cast(resp.body()!)         # 旧 as_bytes 的位置（as_bytes 已删，折进 cast）
 ```
 
 > **修正一处早先的错判**：本草案初稿曾说「泛型认领做不到，T 运行期被擦、发不出 `CHECKCAST`」，
 > 于是要补一个**与 `as_bytes` 逐行同构的**单态内建 `as_input_stream`。这个推理**错了**：擦除只挡得住
-> 「T 是外层函数自己的类型参数」的 cast；而 `cast[InputStream](...)` 里 T 在**调用点被字面实例化成
-> 具体类**，编译器当场就能发 `CHECKCAST java/io/InputStream`——`as_bytes` 能 work 正是同理。故不必
-> 一类型一内建，`cast[T]` 一个就够，且它**顺带消灭整个 `as_XXX` 家族**（见 [`builtins-to-stdlib.md`](builtins-to-stdlib.md)）。
+> 「T 是外层函数自己的类型参数」的 cast；而 `cast(resp.body()!)` 里 T 由**期望类型**（这里 `let s: InputStream`
+> 注解）解析成具体类，编译器当场就能发 `CHECKCAST java/io/InputStream`——`as_bytes` 能 work 正是同理。
+> 故不必一类型一内建，`cast` 一个就够，且它**顺带消灭整个 `as_XXX` 家族**（见 [`builtins-to-stdlib.md`](builtins-to-stdlib.md)）。
 
 **设计沿革**（记录，免得后人重走）：`as_input_stream` 单态内建（初稿）→ 因「每开一个洞都改编译器」
 被否 → 一版 `URLConnection.getInputStream()`（返回具体 `InputStream`、零编译器改动）作**过渡**验证了
-特性可行 → **终稿取 `cast[T]`**：让现代 `HttpClient` 路径与 `fetch_bytes` 保持一致，且不再按类型累积内建。
+特性可行 → **终稿取 `cast`**（期望类型驱动）：让现代 `HttpClient` 路径与 `fetch_bytes` 保持一致，且不再按类型累积内建。
 
-**跨仓代价**：`cast[T]` 落地 dawn-lang 后发一个新 tag，dawnop-site 再 bump `.dawn-version`
-（开发期走逃生阀 `echo main > .dawn-version`）。`cast[T]` 不是为本特性一次性加的——它是 `as_bytes`
-的泛化、服务所有 interop 认领点，本特性只是它的**头号使用者**。
+**跨仓代价**：`cast` 落地 dawn-lang 后发一个新 tag，dawnop-site 再 bump `.dawn-version`
+（开发期走逃生阀 `echo main > .dawn-version`）。`cast` 不是为本特性一次性加的——它是 `as_bytes`
+的泛化（并顺带删掉 `as_bytes`）、服务所有 interop 认领点，本特性只是它的**头号使用者**。
 
 ## 三、真正的设计题：`Response` 怎么持有这条流
 
@@ -119,8 +119,9 @@ pub type StreamResp = { status: Int, stream: InputStream }
 pub fn fetch_stream(url, headers) -> Result[StreamResp, String] !io =
   java_try(fn() => {
     ... let resp = shared_client().send(req, BodyHandlers.ofInputStream()!)!
-    # statusCode() 先读（判 2xx/206）；body() 是擦除 Object，cast[InputStream] 认领成流，尚未消费
-    StreamResp { status: resp.statusCode(), stream: cast[InputStream](resp.body()!) }
+    # statusCode() 先读（判 2xx/206）；body() 是擦除 Object，cast 认领成流，尚未消费
+    # stream 字段类型是 InputStream，作 cast 的期望类型（字段位期望类型传播，与删 as_bytes 同路验证）
+    StreamResp { status: resp.statusCode(), stream: cast(resp.body()!) }
   })
 ```
 
@@ -189,17 +190,19 @@ match r.stream {
 
 ## 五、落地点
 
-0. **dawn-lang**（前置）：落地泛型内建 `cast[T]`（`as_bytes` 的泛化，设计见 [`cast-interop.md`](cast-interop.md)：
-   Types.kt/CodeGen.kt/Doc.kt + 测试）；spec §9.5 补一句；发 tag。dawnop-site bump `.dawn-version`。
+0. **dawn-lang**（前置）：落地泛型内建 `cast`（期望类型驱动，`as_bytes` 的泛化，设计见 [`cast-interop.md`](cast-interop.md)：
+   Types.kt 加 FnSig / CodeGen.kt 新 `"cast"` 分支读 `Expr.type` / Checker 校验 / Doc.kt + 测试）；
+   **删掉 `as_bytes`**（折进 cast，迁 2 处调用点）；spec §9.5 补一句；发 tag。dawnop-site bump `.dawn-version`。
    —— 这一步**不专为本特性**，服务所有 interop 认领点、消灭 `as_XXX` 家族。
 1. `http.dawn`：`fetch_stream(url, headers) -> Result[StreamResp, String]`（`ofInputStream`，
-   body 用 `cast[InputStream]` 认领；`StreamResp = { status, stream }`，Content-Range 由 handler 自算故不带）。
+   body 用 `cast` 认领；`StreamResp = { status, stream }`，Content-Range 由 handler 自算故不带）。
+   顺带把现有 `fetch_bytes` 的 `as_bytes(resp.body()!)` 改成 `cast(...)`（as_bytes 已删）。
 2. `web/types.dawn`：`Response` 加 `stream: Option[InputStream]`、**去 `derive Show`**、加 `streaming(...)` 构造器、既有构造器补 `stream: None`。
 3. `web/server.dawn`：`write_response` 加流分支（chunked + `catch_panic` 当 finally 关闭上游流）。
 4. `api_fm.dawn` / `webdav.dawn`：`content`、`serve_file` 改 `fetch_stream + streaming`，保留状态判断与错误映射。
 5. 中间件核对：确认无逐字段重建 `Response`（都走 `{..r}` 展开）。
 6. 测试：字节精确往返（含 >8KB 多块）、206 分段字节与 `Content-Range` 正确、上游非 2xx 走 `Err` 不流、恒定内存证据。
-7. `docs/spec.md`：§9.5 把 `as_bytes` 记为 `cast[Bytes]` 的便捷别名、补 `cast[T]`（互操作认领）；`Response` 去 Show 记进 backend README。
+7. `docs/spec.md`：§9.5 **删 `as_bytes`**、补 `cast`（期望类型驱动的互操作认领，`Bytes` 只是它的一个目标）；`Response` 去 Show 记进 backend README。
 8. 回填 [`m7-progress.md`](m7-progress.md)：把「响应流式」从「不进本轮」移入已完成，记提交哈希。
 
 ## 六、不做（记录理由）
