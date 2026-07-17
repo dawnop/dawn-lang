@@ -2,6 +2,10 @@ plugins {
     kotlin("jvm") version "2.0.21"
     application
     id("org.jlleitschuh.gradle.ktlint") version "14.2.0"
+    // Report only, no verification rule: a coverage threshold gets defended, and
+    // tests written to defend a number are worse than no number. What is useful
+    // is seeing which parts of a compiler 1170 tests never reach.
+    id("org.jetbrains.kotlinx.kover") version "0.9.8"
 }
 
 version = "0.1.0"
