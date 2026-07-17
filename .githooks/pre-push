@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Run the server-identity guard before pushing: ssh login name, the site's real
+# IP, and bypass-service identity must not enter this public repo. CI's `secrets`
+# job runs the same script — this hook just moves the red light earlier, before
+# a push→CI-red→fix→re-push round trip.
+#
+# Install (once per machine):  git config core.hooksPath .githooks
+# Bypass (only if you know why): git push --no-verify
+set -euo pipefail
+root=$(git rev-parse --show-toplevel)
+if ! python3 "$root/scripts/check-no-server-identity.py"; then
+  echo "" >&2
+  echo "pre-push blocked: server identity in the public repo (see above). Fix, then push." >&2
+  exit 1
+fi
