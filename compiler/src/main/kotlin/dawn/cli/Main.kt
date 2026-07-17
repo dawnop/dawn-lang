@@ -1,7 +1,6 @@
 package dawn.cli
 
 import dawn.check.CheckedModule
-import dawn.check.analyze
 import dawn.check.analyzeProject
 import dawn.codegen.CodeGen
 import dawn.diag.Severity

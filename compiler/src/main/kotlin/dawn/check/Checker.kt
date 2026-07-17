@@ -1602,9 +1602,10 @@ class Checker(
         return when {
             sameName.isEmpty() -> {
                 checkDeferredBare()
+                val shape = if (static) "Class.method(...) for statics" else "value.method(...) for instance methods"
                 error(
                     "`${cls.name}` has no ${if (static) "static " else ""}method `${e.name}`", e.nameSpan,
-                    "Java calls are ${if (static) "Class.method(...) for statics" else "value.method(...) for instance methods"}; fields are not supported in v0.1")
+                    "Java calls are $shape; fields are not supported in v0.1")
             }
             best.isEmpty() -> {
                 checkDeferredBare()

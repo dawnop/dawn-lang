@@ -10,7 +10,6 @@ import dawn.check.AnalyzedProgram
 import dawn.check.BUILTINS
 import dawn.check.analyzeProject
 import dawn.diag.DiagnosticSink
-import dawn.diag.Severity
 import dawn.diag.SourceFile
 import dawn.lex.Lexer
 import dawn.lex.Token

@@ -3,7 +3,6 @@ package dawn.fmt
 import dawn.diag.DiagnosticSink
 import dawn.lex.Lexer
 import dawn.lex.Token
-import dawn.lex.TokenType
 import dawn.lex.TokenType.*
 
 /**

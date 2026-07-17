@@ -90,5 +90,4 @@ class CtorValueTest {
             "takes 2 field(s)",
         )
     }
-
 }

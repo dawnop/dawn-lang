@@ -46,7 +46,7 @@ class Token(
     /** segments of a STRING token */
     val segments: List<StrSegment> = emptyList(),
 ) {
-    override fun toString() = "${type}(${text})"
+    override fun toString() = "$type($text)"
 }
 
 val KEYWORDS: Map<String, TokenType> = mapOf(

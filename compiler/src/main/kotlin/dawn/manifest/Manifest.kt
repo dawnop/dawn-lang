@@ -56,17 +56,17 @@ class Manifest(
             val schema = root.firstOrNull { it.key == "schema" }
             if (schema == null) {
                 sink.error("dawn.toml has no `schema` key", Span(0, 1),
-                    "start the file with `schema = ${SCHEMA}`")
+                    "start the file with `schema = $SCHEMA`")
                 return null
             }
             if (root.first() !== schema) {
                 sink.error("`schema` must be the first key in dawn.toml", schema.keySpan,
-                    "move `schema = ${SCHEMA}` to the top so tools can read the format version first")
+                    "move `schema = $SCHEMA` to the top so tools can read the format version first")
                 return null
             }
             val schemaVal = schema.value
             if (schemaVal !is TomlInt) {
-                sink.error("`schema` must be an integer", schemaVal.span, "write `schema = ${SCHEMA}`")
+                sink.error("`schema` must be an integer", schemaVal.span, "write `schema = $SCHEMA`")
                 return null
             }
             if (schemaVal.value != SCHEMA) {

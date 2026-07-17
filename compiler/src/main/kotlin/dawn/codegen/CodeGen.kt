@@ -428,7 +428,6 @@ class CodeGen(
         out[className] = cw.toByteArray()
     }
 
-
     /** dawn/rt/TupleN: N public final Object fields _0.._N-1 + structural equals (spec §1.5) */
     private fun genTupleClass(n: Int): ByteArray {
         val cls = tupleClass(n)

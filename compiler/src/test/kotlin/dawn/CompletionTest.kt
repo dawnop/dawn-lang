@@ -5,8 +5,8 @@ import dawn.lsp.completionsAt
 import org.eclipse.lsp4j.CompletionItem
 import kotlin.test.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertTrue
 import kotlin.test.assertFalse
+import kotlin.test.assertTrue
 
 /** LSP completion: scope collection and context suppression. The cursor is `‸`. */
 class CompletionTest {

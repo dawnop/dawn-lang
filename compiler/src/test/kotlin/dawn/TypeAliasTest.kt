@@ -9,8 +9,8 @@ import java.io.PrintStream
 import java.nio.file.Files
 import kotlin.test.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertTrue
 import kotlin.test.assertFalse
+import kotlin.test.assertTrue
 
 /**
  * Type aliases: `type Name[T] = <fn type | tuple | Name[args]>`, transparent
