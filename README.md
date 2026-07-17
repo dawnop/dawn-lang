@@ -97,3 +97,7 @@ VS Code 扩展与 Neovim / Helix 配置见 [editors/](editors/)。
 
 详见 [docs/design.md](docs/design.md) 里程碑。编译器 Kotlin + ASM，
 测试 748 项（`gradle :compiler:test`）。native 二进制启动约 7ms。
+
+## 许可证
+
+[Apache-2.0](LICENSE)。`dawn` fat jar 打包的第三方代码及其各自的许可证见 [NOTICE](NOTICE)。
