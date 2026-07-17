@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Run the server-identity guard before committing -- earlier than pre-push: a
+# leak never even enters local history. Mainly guards against an AI agent
+# slipping the ssh login name / real IP / bypass-service identity into this
+# public repo while writing code. --allow-offline skips the IP check (needs the
+# network) when committing offline, still running the username + bypass-term
+# checks; a leaked IP is caught by pre-push (strict, online) and CI anyway.
+#
+# Install (once per machine, shared with pre-push):  git config core.hooksPath .githooks
+# Bypass (only if you know why):                     git commit --no-verify
+set -euo pipefail
+root=$(git rev-parse --show-toplevel)
+if ! python3 "$root/scripts/check-no-server-identity.py" --allow-offline; then
+  echo "" >&2
+  echo "pre-commit blocked: server identity in the public repo (see above). Fix, then commit." >&2
+  exit 1
+fi

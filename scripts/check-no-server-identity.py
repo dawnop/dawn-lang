@@ -85,9 +85,16 @@ TEXT_SUFFIXES = (
 SELF = "check-no-server-identity"
 
 
-def own_ips() -> set[str]:
-    """Resolve the site's domains. Abort if none resolve — silently skipping
-    would turn the check off without anyone noticing."""
+def own_ips(*, require_network: bool) -> set[str]:
+    """Resolve the site's domains to their IPs.
+
+    On failure: strict mode (CI / pre-push, already online) aborts — silently
+    skipping would turn the check off without anyone noticing. Lenient mode
+    (pre-commit, possibly offline) warns and skips only the IP check, returning
+    an empty set so the username + bypass-term checks still run. The IP is
+    DNS-discoverable and pre-push catches it anyway, so missing it offline is
+    fine."""
+    socket.setdefaulttimeout(3)  # commit-time hook: don't let a flaky net hang commits
     found: set[str] = set()
     errors: list[str] = []
     for d in OWN_DOMAINS:
@@ -99,12 +106,14 @@ def own_ips() -> set[str]:
         except OSError as e:
             errors.append(f"{d}: {e}")
     if not found:
+        msg = "none of the site's domains resolved, IP check cannot run:\n  " + "\n  ".join(errors)
+        if require_network:
+            print("error: " + msg, file=sys.stderr)
+            sys.exit(2)
         print(
-            "error: none of the site's domains resolved, IP check cannot run:\n  "
-            + "\n  ".join(errors),
+            "warning: " + msg + "\n  -- offline mode, skipping IP check; username + bypass terms still run.",
             file=sys.stderr,
         )
-        sys.exit(2)
     return found
 
 
@@ -116,7 +125,11 @@ def tracked_text_files() -> list[str]:
 
 
 def main() -> int:
-    ips = own_ips()
+    # pre-commit passes --allow-offline: skip the IP check when offline instead
+    # of blocking the commit. Default is strict (CI / pre-push / manual runs):
+    # abort if resolution fails.
+    require_network = "--allow-offline" not in sys.argv
+    ips = own_ips(require_network=require_network)
     hits: list[str] = []
 
     for path in tracked_text_files():
