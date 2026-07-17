@@ -8,7 +8,8 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."   # repo root
 
-HOST=<user>@dawnop.com
+# Server login name is not committed (public repo); set DEPLOY_USER in your env.
+HOST="${DEPLOY_USER:?set DEPLOY_USER to the server login name}@dawnop.com"
 REMOTE=/opt/dawn
 
 if [ -z "${JAVA_HOME:-}" ]; then
