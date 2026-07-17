@@ -4,8 +4,39 @@ plugins {
     id("org.jlleitschuh.gradle.ktlint") version "14.2.0"
 }
 
+version = "0.1.0"
+
 repositories {
     mavenCentral()
+}
+
+// The commit is half of what `dawn --version` needs to be useful: between tags,
+// "0.1.0" names a range of builds, and the one a bug report means is the commit.
+// ignoreExitValue + orElse so a source tarball with no .git still builds.
+val gitCommit: Provider<String> =
+    providers.exec {
+        commandLine("git", "rev-parse", "--short", "HEAD")
+        isIgnoreExitValue = true
+    }.standardOutput.asText.map { it.trim() }.map { it.ifEmpty { "unknown" } }.orElse("unknown")
+
+// Written as a resource rather than read back off the jar manifest: the fat jar
+// merges in every dependency's manifest, so "read our own" is a guessing game.
+// A resource we generate is unambiguous, and works the same under `gradle run`.
+val generateBuildInfo by tasks.registering {
+    val outDir = layout.buildDirectory.dir("generated/buildinfo")
+    val versionValue = providers.provider { project.version.toString() }
+    inputs.property("version", versionValue)
+    inputs.property("commit", gitCommit)
+    outputs.dir(outDir)
+    doLast {
+        val f = outDir.get().file("dawn-build.properties").asFile
+        f.parentFile.mkdirs()
+        f.writeText("version=${versionValue.get()}\ncommit=${gitCommit.get()}\n")
+    }
+}
+
+sourceSets.main {
+    resources.srcDir(generateBuildInfo)
 }
 
 dependencies {
@@ -40,7 +71,14 @@ tasks.test {
 // Self-contained jar: the dawn CLI itself (bundling Kotlin stdlib and ASM), used by bin/dawn
 tasks.register<Jar>("fatJar") {
     archiveBaseName.set("dawn")
-    manifest { attributes["Main-Class"] = "dawn.cli.MainKt" }
+    // Stay dawn.jar once `version` is set, or Gradle would name it dawn-0.1.0.jar.
+    // The filename is an interface: bin/dawn, site/build.sh and the dawnop-site
+    // build all reach for it by name. The version belongs in --version, not here.
+    archiveVersion.set("")
+    manifest {
+        attributes["Main-Class"] = "dawn.cli.MainKt"
+        attributes["Implementation-Version"] = project.version.toString()
+    }
     duplicatesStrategy = DuplicatesStrategy.EXCLUDE
     // signed dependency jars (gson): merged signature files would fail verification
     exclude("META-INF/*.SF", "META-INF/*.DSA", "META-INF/*.RSA")
