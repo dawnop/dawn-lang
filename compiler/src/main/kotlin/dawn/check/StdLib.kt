@@ -52,11 +52,16 @@ object StdLib {
      * The std function *declarations*, for the compile-time interpreter: a const
      * initializer may call std, so [dawn.check.ComptimeInterp] needs the bodies,
      * not just the signatures [fns] carries.
+     *
+     * Private helpers are included, unlike [fns]: visibility is a checking
+     * concern and has already been enforced by the time anything runs here, but
+     * a `pub` function whose body calls a private helper still needs that helper
+     * to be callable. A user module's own definitions shadow these.
      */
     val fnDecls: Map<String, FnDecl> by lazy {
         val out = LinkedHashMap<String, FnDecl>()
         for (m in modules) {
-            for (d in m.module.fns) if (d.pub) out[d.name] = d
+            for (d in m.module.fns) out[d.name] = d
         }
         out
     }

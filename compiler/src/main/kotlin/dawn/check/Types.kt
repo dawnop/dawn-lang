@@ -369,12 +369,6 @@ val BUILTINS: Map<String, FnSig> = run {
             Type.TAdt(OPTION_ADT, listOf(t)), Eff.Pure, isBuiltin = true, typeParams = listOf(t)),
         FnSig("range", listOf(Type.TInt, Type.TInt), listOf("from", "to"),
             Type.TList(Type.TInt), Eff.Pure, isBuiltin = true),
-        FnSig("map", listOf(Type.TList(t), Type.TFn(listOf(t), u, e)), listOf("xs", "f"),
-            Type.TList(u), e, isBuiltin = true, typeParams = listOf(t, u)),
-        FnSig("filter", listOf(Type.TList(t), Type.TFn(listOf(t), Type.TBool, e)), listOf("xs", "f"),
-            Type.TList(t), e, isBuiltin = true, typeParams = listOf(t)),
-        FnSig("fold", listOf(Type.TList(t), a, Type.TFn(listOf(a, t), a, e)), listOf("xs", "init", "f"),
-            a, e, isBuiltin = true, typeParams = listOf(t, a)),
         // core/list ordering (docs/trait.md): Ord-bounded builtins take witnesses like any call
         FnSig("sort", listOf(list(t)), listOf("xs"), list(t), Eff.Pure, isBuiltin = true,
             typeParams = listOf(t), constraints = listOf(listOf(ORD_TRAIT))),
@@ -391,14 +385,6 @@ val BUILTINS: Map<String, FnSig> = run {
             opt(t), e, isBuiltin = true, typeParams = listOf(t, k),
             constraints = listOf(emptyList(), listOf(ORD_TRAIT))),
         // core/list, cont. (common combinators): first match, prefix/suffix, reversal
-        FnSig("find", listOf(list(t), Type.TFn(listOf(t), Type.TBool, e)), listOf("xs", "pred"),
-            opt(t), e, isBuiltin = true, typeParams = listOf(t)),
-        FnSig("take", listOf(list(t), Type.TInt), listOf("xs", "n"),
-            list(t), Eff.Pure, isBuiltin = true, typeParams = listOf(t)),
-        FnSig("drop", listOf(list(t), Type.TInt), listOf("xs", "n"),
-            list(t), Eff.Pure, isBuiltin = true, typeParams = listOf(t)),
-        FnSig("reverse", listOf(list(t)), listOf("xs"),
-            list(t), Eff.Pure, isBuiltin = true, typeParams = listOf(t)),
         // core/option (spec §11)
         FnSig("expect", listOf(Type.TAdt(OPTION_ADT, listOf(t)), Type.TString), listOf("o", "msg"),
             t, Eff.Pure, isBuiltin = true, typeParams = listOf(t)),

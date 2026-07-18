@@ -37,6 +37,38 @@ sealed class CValue {
  * ordinary diagnostics on the sink.
  */
 fun evalComptime(module: Module, sink: DiagnosticSink, fuel: Long, stdFns: Map<String, FnDecl> = emptyMap()) {
+    // The interpreter is a tree walker, so one Dawn call costs a dozen JVM frames.
+    // Since std's list functions are now ordinary Dawn recursion, folding a const
+    // over a few thousand elements would exhaust the default stack and crash the
+    // compiler outright. Give the evaluation a stack of its own; `fuel` remains the
+    // real bound on runaway evaluation, and a StackOverflowError past even this
+    // becomes a diagnostic rather than a crash.
+    var failure: Throwable? = null
+    val worker = Thread(null, { runComptime(module, sink, fuel, stdFns) }, "dawn-comptime", COMPTIME_STACK_BYTES)
+    worker.setUncaughtExceptionHandler { _, t -> failure = t }
+    worker.start()
+    worker.join()
+    failure?.let { throw it }
+}
+
+private fun tooDeep(span: dawn.diag.Span) = DawnError(
+    "comptime: evaluation nested too deeply", span,
+    "the compile-time interpreter recurses per Dawn call, so a very deep recursion " +
+        "runs out of stack; rewrite it as a fold or shrink the input")
+
+/**
+ * Deep enough that folding a const over a realistic list still works — std's list
+ * functions are Dawn recursion now, so the depth is the input length, where the
+ * old Kotlin builtins looped. `fuel` is what actually bounds runaway evaluation;
+ * this cap only turns a stack overflow into a decent message. (The principled fix
+ * is tail calls in the interpreter, which codegen already does — see the design doc.)
+ */
+private const val MAX_CALL_DEPTH = 100_000
+
+/** 64 MB: room for deep interpreted recursion without pretending the depth is unbounded. */
+private const val COMPTIME_STACK_BYTES = 64L * 1024 * 1024
+
+private fun runComptime(module: Module, sink: DiagnosticSink, fuel: Long, stdFns: Map<String, FnDecl>) {
     // std is implicitly visible to user code, so it must be callable from a const
     // too; a local definition still shadows it, matching the checker's
     // local → std → builtin order. Empty while std itself is being checked, which
@@ -47,6 +79,8 @@ fun evalComptime(module: Module, sink: DiagnosticSink, fuel: Long, stdFns: Map<S
             c.value = ComptimeInterp(fnsByName, fuel, stdFns.keys).eval(c.init, HashMap())
         } catch (e: DawnError) {
             sink.add(e)
+        } catch (e: StackOverflowError) {
+            sink.add(tooDeep(c.init.span))
         }
     }
     val walker = object {
@@ -58,6 +92,8 @@ fun evalComptime(module: Module, sink: DiagnosticSink, fuel: Long, stdFns: Map<S
                             e.value = ComptimeInterp(fnsByName, fuel, stdFns.keys).eval(e.body, HashMap())
                         } catch (err: DawnError) {
                             sink.add(err)
+                        } catch (err: StackOverflowError) {
+                            sink.add(tooDeep(e.body.span))
                         }
                     }
                 }
@@ -397,9 +433,9 @@ class ComptimeInterp(
     }
 
     private fun callFn(decl: FnDecl, args: List<CValue>, span: Span): CValue {
-        if (++depth > 2000) {
+        if (++depth > MAX_CALL_DEPTH) {
             depth--
-            err("call depth limit (2000) exceeded", span,
+            err("call depth limit ($MAX_CALL_DEPTH) exceeded", span,
                 "deep recursion does not fit comptime; use a loop or fold")
         }
         try {
@@ -417,7 +453,7 @@ class ComptimeInterp(
 
     private fun applyFn(f: CValue, args: List<CValue>, span: Span): CValue = when (f) {
         is CValue.VLambda -> {
-            if (++depth > 2000) { depth--; err("call depth limit (2000) exceeded", span) }
+            if (++depth > MAX_CALL_DEPTH) { depth--; err("call depth limit ($MAX_CALL_DEPTH) exceeded", span) }
             try {
                 val env = HashMap(f.env)
                 for ((p, v) in f.params.zip(args)) env[p] = v
@@ -460,24 +496,11 @@ class ComptimeInterp(
             burnN(to - from, span)
             CValue.VList((from until to).map { CValue.VInt(it) })
         }
-        "map" -> {
-            val xs = (args[0] as CValue.VList).elems
-            CValue.VList(xs.map { applyFn(args[1], listOf(it), span) })
-        }
         "sort_by" -> {
             val xs = (args[0] as CValue.VList).elems
             CValue.VList(xs.sortedWith { a, b ->
                 (applyFn(args[1], listOf(a, b), span) as CValue.VInt).v.coerceIn(-1L, 1L).toInt()
             })
-        }
-        "filter" -> {
-            val xs = (args[0] as CValue.VList).elems
-            CValue.VList(xs.filter { (applyFn(args[1], listOf(it), span) as CValue.VBool).v })
-        }
-        "fold" -> {
-            var acc = args[1]
-            for (x in (args[0] as CValue.VList).elems) acc = applyFn(args[2], listOf(acc, x), span)
-            acc
         }
         "chars" -> {
             val s = (args[0] as CValue.VString).v
@@ -511,22 +534,6 @@ class ComptimeInterp(
         } catch (e: NumberFormatException) {
             none()
         }
-        "find" -> {
-            val xs = (args[0] as CValue.VList).elems
-            val hit = xs.firstOrNull { (applyFn(args[1], listOf(it), span) as CValue.VBool).v }
-            if (hit == null) none() else some(hit)
-        }
-        "take" -> {
-            val xs = (args[0] as CValue.VList).elems
-            val n = (args[1] as CValue.VInt).v.coerceIn(0L, xs.size.toLong()).toInt()
-            CValue.VList(xs.take(n))
-        }
-        "drop" -> {
-            val xs = (args[0] as CValue.VList).elems
-            val n = (args[1] as CValue.VInt).v.coerceIn(0L, xs.size.toLong()).toInt()
-            CValue.VList(xs.drop(n))
-        }
-        "reverse" -> CValue.VList((args[0] as CValue.VList).elems.reversed())
         else -> err("builtin `$name` is not available at comptime", span)
     }
 

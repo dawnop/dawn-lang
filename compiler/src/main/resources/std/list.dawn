@@ -1,0 +1,82 @@
+# Dawn's standard library: list operations.
+#
+# These are the "layer 2" of docs/pure-ffi-design.md section 3.3: ordinary Dawn
+# recursion over the primitives that must stay in the compiler (`len` and `get`,
+# which touch the representation). Nothing here needs `unsafe_pure` — and it
+# could not use it anyway, since these functions are effect-polymorphic and the
+# stamp deliberately refuses to mask an effect variable. That refusal is what
+# pushed the higher-order functions onto this path in the first place.
+#
+# The accumulator helpers are module-level rather than local functions because a
+# local function may not declare an effect variable (spec section 3.1). Each is
+# self-tail-recursive, which the compiler turns into a loop, and appends with
+# `++`, which is O(1) amortized on the list representation (spec section 2.2) —
+# without that, every one of these would be quadratic.
+
+fn map_go[T, U](xs: List[T], f: fn(T) -> U !e, i: Int, acc: List[U]) -> List[U] !e =
+  if i == len(xs) { acc }
+  else { map_go(xs, f, i + 1, acc ++ [f(get(xs, i).expect("index below length"))]) }
+
+## `f` applied to every element, in order.
+pub fn map[T, U](xs: List[T], f: fn(T) -> U !e) -> List[U] !e = {
+  let empty: List[U] = []
+  map_go(xs, f, 0, empty)
+}
+
+fn filter_go[T](xs: List[T], f: fn(T) -> Bool !e, i: Int, acc: List[T]) -> List[T] !e =
+  if i == len(xs) { acc }
+  else {
+    let x = get(xs, i).expect("index below length")
+    filter_go(xs, f, i + 1, if f(x) { acc ++ [x] } else { acc })
+  }
+
+## The elements satisfying `f`, in order.
+pub fn filter[T](xs: List[T], f: fn(T) -> Bool !e) -> List[T] !e = {
+  let empty: List[T] = []
+  filter_go(xs, f, 0, empty)
+}
+
+fn fold_go[T, A](xs: List[T], f: fn(A, T) -> A !e, i: Int, acc: A) -> A !e =
+  if i == len(xs) { acc }
+  else { fold_go(xs, f, i + 1, f(acc, get(xs, i).expect("index below length"))) }
+
+## Reduce from the left: `f(f(f(init, x0), x1), ...)`.
+pub fn fold[T, A](xs: List[T], init: A, f: fn(A, T) -> A !e) -> A !e = fold_go(xs, f, 0, init)
+
+fn find_go[T](xs: List[T], pred: fn(T) -> Bool !e, i: Int) -> Option[T] !e =
+  if i == len(xs) { None }
+  else {
+    let x = get(xs, i).expect("index below length")
+    if pred(x) { Some(x) } else { find_go(xs, pred, i + 1) }
+  }
+
+## The first element satisfying `pred`, or `None`.
+pub fn find[T](xs: List[T], pred: fn(T) -> Bool !e) -> Option[T] !e = find_go(xs, pred, 0)
+
+fn slice_go[T](xs: List[T], i: Int, stop: Int, acc: List[T]) -> List[T] =
+  if i >= stop { acc }
+  else { slice_go(xs, i + 1, stop, acc ++ [get(xs, i).expect("index below length")]) }
+
+fn clamp(n: Int, hi: Int) -> Int = if n < 0 { 0 } else { if n > hi { hi } else { n } }
+
+## The first `n` elements; `n` is clamped into range, so this never panics.
+pub fn take[T](xs: List[T], n: Int) -> List[T] = {
+  let empty: List[T] = []
+  slice_go(xs, 0, clamp(n, len(xs)), empty)
+}
+
+## Everything after the first `n` elements; `n` is clamped into range.
+pub fn drop[T](xs: List[T], n: Int) -> List[T] = {
+  let empty: List[T] = []
+  slice_go(xs, clamp(n, len(xs)), len(xs), empty)
+}
+
+fn reverse_go[T](xs: List[T], i: Int, acc: List[T]) -> List[T] =
+  if i < 0 { acc }
+  else { reverse_go(xs, i - 1, acc ++ [get(xs, i).expect("index below length")]) }
+
+## A reversed copy; the input is not changed.
+pub fn reverse[T](xs: List[T]) -> List[T] = {
+  let empty: List[T] = []
+  reverse_go(xs, len(xs) - 1, empty)
+}
