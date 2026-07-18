@@ -52,6 +52,25 @@ public final class StdStrings {
         return fill.toString() + s;
     }
 
+    /**
+     * The code points of {@code s} in {@code [from, to)}, or {@code null} when
+     * that range is not valid.
+     *
+     * <p>Out-of-range is reported as {@code null} — which the checker hands to
+     * Dawn as {@code None} — rather than thrown, because {@code dawn.rt.PanicError}
+     * is ASM-generated and so cannot be referenced from source. The std wrapper
+     * turns the {@code None} back into the same panic via {@code expect}.
+     */
+    public static String substring(String s, long from, long to) {
+        long n = s.codePointCount(0, s.length());
+        if (from < 0 || from > to || to > n) {
+            return null;
+        }
+        int start = s.offsetByCodePoints(0, (int) from);
+        int end = s.offsetByCodePoints(0, (int) to);
+        return s.substring(start, end);
+    }
+
     /** {@code s} with its code points reversed (surrogate pairs stay intact). */
     public static String reverse(String s) {
         int[] cps = codePoints(s);

@@ -1,6 +1,7 @@
 package dawn
 
 import dawn.check.BUILTINS
+import dawn.check.StdLib
 import dawn.cli.cmdDoc
 import org.junit.jupiter.api.io.TempDir
 import java.io.ByteArrayOutputStream
@@ -112,5 +113,18 @@ class DocCmdTest {
         // and each carries a rendered signature and a description
         assertTrue(out.contains("\"sig\": \"fn list_dir(path: String) -> Result[List[String], String] !io\""), out)
         assertTrue(Regex("\"doc\": \"[^\"]+\"").containsMatchIn(out), out)
+    }
+
+    @Test
+    fun `the reference also covers the bundled std, so migrating a builtin does not drop it`() {
+        val out = doc("--builtins")
+        for (name in StdLib.fns.keys) {
+            assertTrue(out.contains("\"name\": \"$name\""), "std function $name missing from dawn doc --builtins")
+        }
+        // substring migrated out of the builtin table into std (pure-ffi-design.md §十);
+        // it must still read as an ordinary reference entry, signature and all.
+        assertFalse(BUILTINS.containsKey("substring"), "substring should no longer be a builtin")
+        assertTrue(out.contains("\"sig\": \"fn substring(s: String, from: Int, to: Int) -> String\""), out)
+        assertTrue(out.contains("\"name\": \"std/strings\""), out)
     }
 }

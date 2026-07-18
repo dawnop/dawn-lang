@@ -508,8 +508,18 @@ fn compose[A, B, C](f: fn(A) -> B !e1, g: fn(B) -> C !e2) -> fn(A) -> C !(e1 | e
 
 `unsafe_pure { <表达式> }` 是**纯 FFI** 的表达式块：作者担保被包裹的表达式为纯，
 类型系统据此把它的效果由 `!io` **屏蔽为 pure**，于是一个 Java 互操作调用可以支撑一个
-纯函数（`fn substring(s, a, b) = unsafe_pure { s.substring(a, b) }`）。设计见
-[`docs/pure-ffi-design.md`](pure-ffi-design.md)。
+纯函数。设计见 [`docs/pure-ffi-design.md`](pure-ffi-design.md)。捆绑 std 里 `substring`
+的真实写法（Java 侧越界回 `null`，检查器交给 Dawn 就是 `None`）：
+
+```dawn
+use java "dawn.rt.StdStrings"
+
+pub fn substring(s: String, from: Int, to: Int) -> String =
+  unsafe_pure { StdStrings.substring(s, from, to).expect("substring: index out of range") }
+```
+
+被包裹的必须是**静态方法调用**：Dawn 原生类型（String/List/Bytes/Map/Set）不是 Java 类型，
+`s.substring(…)` 这种实例调用今天走不通（`pure-ffi-design.md` §九）。
 
 - **只改效果，不放松类型**：块内类型检查、重载消解一律照常；被盖的只有「效果」这一维。
 - **拒绝屏蔽效果变量**：块内若出现效果多态调用（`!e`，如高阶 `map`/`fold`），报错——
@@ -910,6 +920,11 @@ use java "java.lang.Math"      # Java 互操作（§9），形式不变
 
 ## 11. 标准库草案（v0.1 范围）
 
+> **实现位置对使用者不可见。** 本节的名字有两个来源：编译器内建表，以及**随编译器捆绑的
+> `std/`（Dawn 源码）**。两者都隐式可见、无需 `use`，签名与语义相同；名字正按
+> [`docs/builtins-to-stdlib.md`](builtins-to-stdlib.md) 从前者迁往后者，迁移不改变调用方。
+> 下文用 **`[std]`** 标出已经迁走的。`dawn doc --builtins` 输出两边的全集。
+
 - `core/list`：`map filter fold len get range ...`；排序与极值（元素/键类型须具
   `Ord`，见 §3.5；全部稳定、平局取第一个）：
   - `sort[T: Ord](xs) -> List[T]` — 升序稳定排序
@@ -933,7 +948,7 @@ use java "java.lang.Math"      # Java 互操作（§9），形式不变
   - `from_code_points(cs: List[Int]) -> String` — 由码点组装（接受增补码点）
   - `char_to_string(c: Int) -> String` — 单码点转字符串（非法码点 panic）
   - `str_len(s: String) -> Int` — 码点数（区别于 `chars` 返回的 `List[String]`）
-  - `substring(s: String, from: Int, to: Int) -> String` — 按**码点下标**切片，越界 panic
+  - `substring(s: String, from: Int, to: Int) -> String` **`[std]`** — 按**码点下标**切片，越界 panic
 - `core/option` / `core/result`：`map unwrap_or expect and_then ...`
 - **`Map` / `Set`**（§2.2 的内建持久容器，v0.1 以平铺内建函数提供；未来再收进 `core/map`
   等模块化组织）：

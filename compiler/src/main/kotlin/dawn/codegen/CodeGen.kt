@@ -2118,37 +2118,6 @@ class CodeGen(
             m.visitMaxs(0, 0); m.visitEnd()
         }
 
-        // substring(String, Int from, Int to) -> String: code-point indices; out of range panics
-        run {
-            val m = cw.visitMethod(ACC_PUBLIC or ACC_STATIC, "substring", "(L$STR;JJ)L$STR;", null, null)
-            m.visitCode()
-            // n = codePointCount; slot 5 (int)
-            m.visitVarInsn(ALOAD, 0); m.visitInsn(ICONST_0)
-            m.visitVarInsn(ALOAD, 0); m.visitMethodInsn(INVOKEVIRTUAL, STR, "length", "()I", false)
-            m.visitMethodInsn(INVOKEVIRTUAL, STR, "codePointCount", "(II)I", false)
-            m.visitVarInsn(ISTORE, 5)
-            val ok = Label(); val bad = Label()
-            // if (from < 0 || from > to || to > n) panic
-            m.visitVarInsn(LLOAD, 1); m.visitInsn(LCONST_0); m.visitInsn(LCMP); m.visitJumpInsn(IFLT, bad)
-            m.visitVarInsn(LLOAD, 1); m.visitVarInsn(LLOAD, 3); m.visitInsn(LCMP); m.visitJumpInsn(IFGT, bad)
-            m.visitVarInsn(LLOAD, 3); m.visitVarInsn(ILOAD, 5); m.visitInsn(I2L); m.visitInsn(LCMP); m.visitJumpInsn(IFGT, bad)
-            m.visitJumpInsn(GOTO, ok)
-            m.visitLabel(bad)
-            m.visitTypeInsn(NEW, PANIC_CLASS); m.visitInsn(DUP)
-            m.visitLdcInsn("substring: index out of range")
-            m.visitMethodInsn(INVOKESPECIAL, PANIC_CLASS, "<init>", "(Ljava/lang/String;)V", false)
-            m.visitInsn(ATHROW)
-            m.visitLabel(ok)
-            m.visitVarInsn(ALOAD, 0)
-            m.visitVarInsn(ALOAD, 0); m.visitInsn(ICONST_0); m.visitVarInsn(LLOAD, 1); m.visitInsn(L2I)
-            m.visitMethodInsn(INVOKEVIRTUAL, STR, "offsetByCodePoints", "(II)I", false)
-            m.visitVarInsn(ALOAD, 0); m.visitInsn(ICONST_0); m.visitVarInsn(LLOAD, 3); m.visitInsn(L2I)
-            m.visitMethodInsn(INVOKEVIRTUAL, STR, "offsetByCodePoints", "(II)I", false)
-            m.visitMethodInsn(INVOKEVIRTUAL, STR, "substring", "(II)L$STR;", false)
-            m.visitInsn(ARETURN)
-            m.visitMaxs(0, 0); m.visitEnd()
-        }
-
         // indexOf(String s, String sub) -> Option: first code-point index, else None.
         // lastIndexOf(String s, String sub): same, last occurrence. Both take Java's
         // UTF-16 index and convert to a code-point index so results line up with
@@ -4556,7 +4525,7 @@ class CodeGen(
             mv.visitMethodInsn(INVOKESTATIC, LISTS_CLASS, "fromArray", "([Ljava/lang/String;)L$JLIST;", false)
             true
         }
-        "code_points", "from_code_points", "char_to_string", "str_len", "substring" -> {
+        "code_points", "from_code_points", "char_to_string", "str_len" -> {
             for (a in e.args) genExpr(a, tail = false)
             val sig = BUILTINS.getValue(e.callee)
             mv.visitMethodInsn(INVOKESTATIC, STRINGS_CLASS, e.callee, methodDesc(sig.paramTypes, sig.ret), false)

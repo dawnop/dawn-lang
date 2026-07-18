@@ -8,6 +8,7 @@ import dawn.ast.TypeDecl
 import dawn.check.AdtInfo
 import dawn.check.AnalyzedProgram
 import dawn.check.BUILTINS
+import dawn.check.StdLib
 import dawn.check.analyzeProject
 import dawn.diag.DiagnosticSink
 import dawn.diag.SourceFile
@@ -208,7 +209,6 @@ val BUILTIN_GROUPS: List<Pair<String, List<Pair<String, String>>>> = listOf(
         "from_code_points" to "assemble a string from code points",
         "char_to_string" to "one code point as a string (invalid code points panic)",
         "str_len" to "length in code points",
-        "substring" to "slice by code point indices (out of bounds panics)",
     ),
     "map & set" to listOf(
         "map_empty" to "the empty map",
@@ -243,16 +243,25 @@ val BUILTIN_GROUPS: List<Pair<String, List<Pair<String, String>>>> = listOf(
     ),
 )
 
+/**
+ * The reference covers the builtin table *and* the bundled std, as one list of
+ * groups. Callers should not have to care which side of that line a function
+ * happens to sit on today — functions migrate from the table into std
+ * (docs/builtins-to-stdlib.md), and a reference keyed on the implementation
+ * would lose an entry every time one moved. std groups are named after their
+ * module (`std/strings`) and take their prose from the `##` doc comments.
+ */
 private fun builtinsJson(): String {
     val w = JsonWriter()
     w.obj {
         w.key("groups")
-        w.arr(BUILTIN_GROUPS) { (group, fns) ->
+        w.arr(BUILTIN_GROUPS.map { (g, fns) -> g to fns } + stdGroups()) { (group, fns) ->
             w.obj {
                 w.field("name", group)
                 w.key("fns")
                 w.arr(fns) { (name, doc) ->
-                    val sig = BUILTINS[name] ?: throw CliError("BUILTIN_GROUPS names unknown builtin: $name")
+                    val sig = BUILTINS[name] ?: StdLib.fns[name]
+                        ?: throw CliError("the builtin reference names an unknown function: $name")
                     w.obj {
                         w.field("name", name)
                         w.field("sig", sig.render())
@@ -264,6 +273,15 @@ private fun builtinsJson(): String {
     }
     return w.done()
 }
+
+/** one group per bundled std module, in index order */
+private fun stdGroups(): List<Pair<String, List<Pair<String, String>>>> =
+    StdLib.modules.map { m ->
+        val byLine = commentsByLine(m.source)
+        m.modPath to m.module.decls.filterIsInstance<FnDecl>().filter { it.pub }.map { d ->
+            d.name to (docOf(m.source, byLine, d) ?: "")
+        }
+    }
 
 // ---- a tiny JSON writer (pretty, 2-space indent, deterministic) ----
 

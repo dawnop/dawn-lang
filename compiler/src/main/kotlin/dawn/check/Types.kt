@@ -423,8 +423,6 @@ val BUILTINS: Map<String, FnSig> = run {
             Eff.Pure, isBuiltin = true),
         FnSig("char_to_string", listOf(Type.TInt), listOf("c"), Type.TString, Eff.Pure, isBuiltin = true),
         FnSig("str_len", listOf(Type.TString), listOf("s"), Type.TInt, Eff.Pure, isBuiltin = true),
-        FnSig("substring", listOf(Type.TString, Type.TInt, Type.TInt), listOf("s", "from", "to"),
-            Type.TString, Eff.Pure, isBuiltin = true),
         FnSig("contains", listOf(Type.TString, Type.TString), listOf("s", "sub"),
             Type.TBool, Eff.Pure, isBuiltin = true),
         FnSig("starts_with", listOf(Type.TString, Type.TString), listOf("s", "prefix"),
