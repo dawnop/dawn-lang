@@ -68,10 +68,11 @@ class CodeGen(
          * so `use java` can reflect on them from std. They ship in the compiler jar
          * and are copied into every built program (see [vendorRuntimeClasses]).
          */
-        val VENDORED_RT_CLASSES = listOf("dawn/rt/StdStrings")
+        val VENDORED_RT_CLASSES = listOf("dawn/rt/StdStrings", "dawn/rt/DawnList")
 
         const val PANIC_CLASS = "dawn/rt/PanicError"
         const val LISTS_CLASS = "dawn/rt/Lists"
+        const val DAWNLIST_CLASS = "dawn/rt/DawnList"
         const val DICT_CMP_CLASS = "dawn/rt/DictComparator"
         const val FN_CMP_CLASS = "dawn/rt/FnComparator"
         const val STRINGS_CLASS = "dawn/rt/Strings"
@@ -1399,17 +1400,14 @@ class CodeGen(
         genListOrdering(cw)
 
         val cat = cw.visitMethod(ACC_PUBLIC or ACC_STATIC, "concat", "(L$JLIST;L$JLIST;)L$JLIST;", null, null)
+        // Delegates to DawnList, which appends in place when the left side is the
+        // sole owner of its tail — that is what keeps `acc = acc ++ [x]` linear
+        // instead of copying the whole list every step.
         cat.visitCode()
-        cat.visitTypeInsn(NEW, ARRAYLIST)
-        cat.visitInsn(DUP)
         cat.visitVarInsn(ALOAD, 0)
-        cat.visitMethodInsn(INVOKESPECIAL, ARRAYLIST, "<init>", "(Ljava/util/Collection;)V", false)
-        cat.visitVarInsn(ASTORE, 2)
-        cat.visitVarInsn(ALOAD, 2)
         cat.visitVarInsn(ALOAD, 1)
-        cat.visitMethodInsn(INVOKEVIRTUAL, ARRAYLIST, "addAll", "(Ljava/util/Collection;)Z", false)
-        cat.visitInsn(POP)
-        cat.visitVarInsn(ALOAD, 2)
+        cat.visitMethodInsn(INVOKESTATIC, DAWNLIST_CLASS, "concat",
+            "(L$JLIST;L$JLIST;)L$JLIST;", false)
         cat.visitInsn(ARETURN)
         cat.visitMaxs(0, 0)
         cat.visitEnd()
