@@ -135,39 +135,6 @@ class StdlibTest {
         assertEquals("log: boom\nwrapped: boom\n", out)
     }
 
-    /** `ok` is the bridge back to the Option combinators, which reject a Result. */
-    @Test
-    fun `ok converts a Result into an Option`() {
-        val out = run(
-            """
-            fn bad() -> Result[Int, String] = Err("boom")
-            fn good() -> Result[Int, String] = Ok(7)
-            pub fn main() -> Unit !io = {
-              println(to_string(unwrap_or(ok(bad()), -1)))
-              println(to_string(unwrap_or(ok(good()), -1)))
-            }
-            """.trimIndent(),
-        )
-        assertEquals("-1\n7\n", out)
-    }
-
-    /**
-     * `ok` is a common binding name, so adding it to the implicitly-visible std
-     * surface is only safe because a local shadows it. Pinning that.
-     */
-    @Test
-    fun `a local named ok shadows the std function`() {
-        val out = run(
-            """
-            pub fn main() -> Unit !io = {
-              let ok = 5
-              println(to_string(ok + 1))
-            }
-            """.trimIndent(),
-        )
-        assertEquals("6\n", out)
-    }
-
     // ---- io ----
 
     @Test

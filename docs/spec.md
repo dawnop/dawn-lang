@@ -592,17 +592,15 @@ fn parse_config(path: String) -> Result[Config, String] !io = {
 - 这是 v0.1 中唯一的非局部控制流。
 
 **跨错误类型用 `map_err`**。`?` 要求 `E` 一致，所以返回 `Result[_, HttpError]`
-的函数不能直接 `?` 一个 `Result[_, String]`。std 提供两个纯 Dawn 组合子：
+的函数不能直接 `?` 一个 `Result[_, String]`。std 提供一个纯 Dawn 组合子：
 
 ```dawn
 pub fn map_err[T, E, F](r: Result[T, E], f: fn(E) -> F !e) -> Result[T, F] !e
-pub fn ok[T, E](r: Result[T, E]) -> Option[T]
 ```
 
-`map_err` 换错误类型让 `?` 能接管；`ok` 丢掉错误、接回 `Option` 的组合子
-（`expect`/`unwrap_or` 只收 `Option`）。没有它们时，跨层只能手写一个 `Ok` 分支
-什么都不做的 `match`——dawnop-site 曾有 90 处这种块。
-`ok` 是常见变量名，但**局部绑定会遮蔽它**，故加入隐式可见面是安全的。
+没有它时，跨层只能手写一个 `Ok` 分支什么都不做的 `match`——dawnop-site 有 102 处
+这种块（27 处纯直通、43 处还多包一层缩进、32 处另需解构 `Option`）。
+`?` 在 lambda 内从该 lambda 返回，故闭包里的桥同样可以塌。
 
 ### 8.2 不可恢复：panic
 
@@ -965,8 +963,10 @@ use java "java.lang.Math"      # Java 互操作（§9），形式不变
   另有操作符 `Bytes ++ Bytes` 与按内容的 `==`/`!=`。二进制请求体（multipart 上传、WebDAV PUT）、
   crypto/签名、HTTP 收发都直接走 `Bytes`，不再借道 latin-1 字符串。
 - `core/result`（**整组 std**，纯 Dawn，§8.1）：
-  `map_err(r, f) -> Result[T, F]` **`[std]`** — 换错误类型，让 `?` 能跨层传播；
-  `ok(r) -> Option[T]` **`[std]`** — 丢弃错误，接回 `Option` 的组合子
+  `map_err(r, f) -> Result[T, F]` **`[std]`** — 换错误类型，让 `?` 能跨层传播。
+  刻意**不提供** Rust 那个 `ok(r) -> Option[T]`：4 万行 Dawn 里没有一处把
+  `Result` 转成 `Option`（32 个 `-> None` 臂无一对着 `Err`），且丢错误与本语言
+  的错误处理取向相反
 - **码点 / 字符**（§1.5、§2.1 的补充；字符即码点 `Int`）：
   - `code_points(s: String) -> List[Int]` — 拆成码点（增补平面的代理对合并为一个码点）
   - `from_code_points(cs: List[Int]) -> String` — 由码点组装（接受增补码点）

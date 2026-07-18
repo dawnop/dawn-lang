@@ -32,13 +32,12 @@ pub fn map_err[T, E, F](r: Result[T, E], f: fn(E) -> F !e) -> Result[T, F] !e =
     Err(err) -> Err(f(err))
   }
 
-## Discard the error, keeping success as an `Option`.
-## The bridge back to the `Option` combinators (`expect`, `unwrap_or`), which do
-## not accept a `Result`. Naming follows Rust's `Result::ok`; a local named `ok`
-## shadows it, which is why this is safe to add despite `ok` being a common
-## binding name.
-pub fn ok[T, E](r: Result[T, E]) -> Option[T] =
-  match r {
-    Ok(v) -> Some(v)
-    Err(_) -> None
-  }
+#
+# There is deliberately no `ok(r) -> Option[T]` here, though Rust has one. Across
+# ~40k lines of Dawn in dawnop-site, dawn-lang/site and the examples, not one
+# match converts a `Result` into an `Option`: of 32 `-> None` arms, zero sit
+# opposite an `Err`. The absence is not an unmet need — discarding the error is
+# the opposite of what this code does, and giving that a short std name would
+# make the easy thing the lossy one. `ok` also stays free as a trait method name,
+# which a std function would have taken program-wide (a std name cannot be a
+# trait method).
