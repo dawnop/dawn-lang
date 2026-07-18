@@ -72,6 +72,9 @@ class CodeGen(
         const val IO_CLASS = "dawn/rt/Io"
         const val SHOW_CLASS = "dawn/rt/Show"
         const val MAPS_CLASS = "dawn/rt/Maps"
+        // The Unit value's runtime representation: a singleton object, so a Unit value can
+        // occupy an erased Object slot (T = Unit), just like None and every nullary ctor.
+        const val UNIT_CLASS = "dawn/rt/Unit"
         private const val ARGS_FIELD = "dawn\$args"
         private const val SB = "java/lang/StringBuilder"
         private const val OBJ = "java/lang/Object"
@@ -203,6 +206,7 @@ class CodeGen(
             m.visitMethodInsn(INVOKEVIRTUAL, "java/lang/Long", "longValue", "()J", false)
         }
         out[PANIC_CLASS] = genPanicClass()
+        out[UNIT_CLASS] = genUnitClass()
         out[LISTS_CLASS] = genListsClass()
         out[STRINGS_CLASS] = genStringsClass()
         out[BYTES_CLASS] = genBytesClass()
@@ -608,6 +612,7 @@ class CodeGen(
             TInt -> mv.visitMethodInsn(INVOKESTATIC, "java/lang/Long", "valueOf", "(J)Ljava/lang/Long;", false)
             TFloat -> mv.visitMethodInsn(INVOKESTATIC, "java/lang/Double", "valueOf", "(D)Ljava/lang/Double;", false)
             TBool -> mv.visitMethodInsn(INVOKESTATIC, "java/lang/Boolean", "valueOf", "(Z)Ljava/lang/Boolean;", false)
+            TUnit -> pushUnit(mv) // Unit is void natively (nothing on the stack); materialize the singleton
             else -> {}
         }
     }
@@ -636,7 +641,8 @@ class CodeGen(
             is TTuple -> mv.visitTypeInsn(CHECKCAST, tupleClass(t.elems.size))
             is TJava -> mv.visitTypeInsn(CHECKCAST, t.internalName)
             is TFn -> mv.visitTypeInsn(CHECKCAST, fnIface(t.params.size))
-            else -> {} // TVar stays erased; Unit/Never carry no value
+            TUnit -> mv.visitInsn(POP) // discard the singleton; Unit is 0-slot (void) natively
+            else -> {} // TVar stays erased; Never carries no value (its expressions athrow)
         }
     }
 
@@ -1147,8 +1153,8 @@ class CodeGen(
             methodRet == TFloat -> mv.visitInsn(DRETURN)
             methodRet == TBool -> mv.visitInsn(IRETURN)
             isRef(methodRet) -> mv.visitInsn(ARETURN)
-            methodRetsNull -> { // Unit body, Object-returning impl: return null
-                mv.visitInsn(ACONST_NULL)
+            methodRetsNull -> { // Unit body, Object-returning impl: return the Unit singleton
+                pushUnit(mv)
                 mv.visitInsn(ARETURN)
             }
             else -> mv.visitInsn(RETURN)
@@ -2806,6 +2812,39 @@ class CodeGen(
         return cw.toByteArray()
     }
 
+    /**
+     * The Unit value as a singleton object (like Option$None). Unit is void natively (0 slots),
+     * but when it occupies an erased Object slot (T = Unit) it is materialized as this INSTANCE,
+     * keeping every "one valueless value" in the language on the same representation.
+     */
+    private fun genUnitClass(): ByteArray {
+        val cw = ClassWriter(0)
+        cw.visit(V17, ACC_PUBLIC or ACC_FINAL, UNIT_CLASS, null, OBJ, null)
+        cw.visitField(ACC_PUBLIC or ACC_STATIC or ACC_FINAL, "INSTANCE", "L$UNIT_CLASS;", null, null).visitEnd()
+        val ctor = cw.visitMethod(ACC_PRIVATE, "<init>", "()V", null, null)
+        ctor.visitCode()
+        ctor.visitVarInsn(ALOAD, 0)
+        ctor.visitMethodInsn(INVOKESPECIAL, OBJ, "<init>", "()V", false)
+        ctor.visitInsn(RETURN)
+        ctor.visitMaxs(1, 1)
+        ctor.visitEnd()
+        val cl = cw.visitMethod(ACC_STATIC, "<clinit>", "()V", null, null)
+        cl.visitCode()
+        cl.visitTypeInsn(NEW, UNIT_CLASS)
+        cl.visitInsn(DUP)
+        cl.visitMethodInsn(INVOKESPECIAL, UNIT_CLASS, "<init>", "()V", false)
+        cl.visitFieldInsn(PUTSTATIC, UNIT_CLASS, "INSTANCE", "L$UNIT_CLASS;")
+        cl.visitInsn(RETURN)
+        cl.visitMaxs(2, 0)
+        cl.visitEnd()
+        cw.visitEnd()
+        return cw.toByteArray()
+    }
+
+    /** push the Unit singleton onto the stack (materialize Unit for an erased Object slot) */
+    private fun pushUnit(m: MethodVisitor) =
+        m.visitFieldInsn(GETSTATIC, UNIT_CLASS, "INSTANCE", "L$UNIT_CLASS;")
+
     // ---- slot load/store ----
 
     private fun loadSlot(m: MethodVisitor, t: Type, slot: Int) {
@@ -3171,7 +3210,7 @@ class CodeGen(
                     "(Z)Ljava/lang/Boolean;", false)
             }
             is dawn.check.CValue.VString -> m.visitLdcInsn(v.v)
-            dawn.check.CValue.VUnit -> if (boxed) m.visitInsn(ACONST_NULL)
+            dawn.check.CValue.VUnit -> if (boxed) pushUnit(m)
             is dawn.check.CValue.VList -> {
                 m.visitTypeInsn(NEW, ARRAYLIST)
                 m.visitInsn(DUP)
@@ -3386,7 +3425,7 @@ class CodeGen(
                 m.visitFieldInsn(GETSTATIC, "java/lang/System", "out", "Ljava/io/PrintStream;")
                 m.visitVarInsn(ALOAD, 0)
                 m.visitMethodInsn(INVOKEVIRTUAL, "java/io/PrintStream", sig.name, "(Ljava/lang/String;)V", false)
-                m.visitInsn(ACONST_NULL)
+                pushUnit(m)
                 m.visitInsn(ARETURN)
             }
             "panic" -> {
@@ -3552,7 +3591,7 @@ class CodeGen(
             slot += slotsOf(pt)
         }
         m.visitMethodInsn(INVOKESTATIC, sig.owner ?: className, sig.name, methodDesc(sig.paramTypes, sig.ret), false)
-        m.visitInsn(ACONST_NULL)
+        pushUnit(m)
         m.visitInsn(ARETURN)
         m.visitMaxs(0, 0)
         m.visitEnd()

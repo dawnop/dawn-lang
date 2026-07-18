@@ -1057,11 +1057,10 @@ class Checker(
     ): Boolean = when {
         actual.isErrorish -> true
         declared is TVar -> {
-            if (actual == TUnit) false // Unit cannot instantiate a type parameter (erasure carries no value)
-            else {
-                val bound = map[declared]
-                if (bound == null) { map[declared] = actual; true } else bound == actual
-            }
+            // Unit may instantiate a type parameter: it occupies the erased Object slot as the
+            // dawn/rt/Unit singleton (like None), so T = Unit round-trips (box/unerase in codegen).
+            val bound = map[declared]
+            if (bound == null) { map[declared] = actual; true } else bound == actual
         }
         declared is TAdt && actual is TAdt ->
             declared.info === actual.info &&
