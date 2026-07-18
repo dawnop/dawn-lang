@@ -3,6 +3,7 @@ package dawn.lsp
 import dawn.ast.*
 import dawn.check.Analyzed
 import dawn.check.BUILTINS
+import dawn.check.StdLib
 import org.eclipse.lsp4j.CompletionItem
 import org.eclipse.lsp4j.CompletionItemKind
 
@@ -130,7 +131,12 @@ internal fun completionsAt(analysis: Analyzed, text: String, offset: Int): List<
         add(d.name, CompletionItemKind.Interface, "trait ${d.name}[${d.typeParam}]", "1")
     for (t in dawn.check.PRELUDE_TRAITS)
         add(t.name, CompletionItemKind.Interface, "trait ${t.name}[${t.tvar.name}]", "2")
+    // Both tables: a migrated function (`println`, `split`, ...) is still part of
+    // the implicitly-visible surface, and users cannot tell which side it lives
+    // on. Reading only BUILTINS would make every migration silently delete
+    // completions -- the same trap `dawn doc --builtins` fell into.
     for (sig in BUILTINS.values) add(sig.name, CompletionItemKind.Function, sig.render(), "2")
+    for (sig in StdLib.fns.values) add(sig.name, CompletionItemKind.Function, sig.render(), "2")
     for (t in listOf("Int", "Float", "Bool", "String", "Unit", "List", "Map", "Set"))
         add(t, CompletionItemKind.Class, "builtin type", "2")
     for (kw in dawn.lex.KEYWORDS.keys) add(kw, CompletionItemKind.Keyword, null, "3")

@@ -357,8 +357,6 @@ val BUILTINS: Map<String, FnSig> = run {
     fun pair(aa: Type, bb: Type) = Type.TTuple(listOf(aa, bb))
     fun opt(tt: Type) = Type.TAdt(OPTION_ADT, listOf(tt))
     listOf(
-        FnSig("println", listOf(Type.TString), listOf("s"), Type.TUnit, Eff.Io, isBuiltin = true),
-        FnSig("print", listOf(Type.TString), listOf("s"), Type.TUnit, Eff.Io, isBuiltin = true),
         FnSig("panic", listOf(Type.TString), listOf("msg"), Type.TNever, Eff.Pure, isBuiltin = true),
         FnSig("todo", listOf(), listOf(), Type.TNever, Eff.Pure, isBuiltin = true),
         FnSig("to_float", listOf(Type.TInt), listOf("n"), Type.TFloat, Eff.Pure, isBuiltin = true),
@@ -408,6 +406,9 @@ val BUILTINS: Map<String, FnSig> = run {
             Type.TAdt(OPTION_ADT, listOf(Type.TFloat)), Eff.Pure, isBuiltin = true),
         // java interop exception barrier (spec §9.8): expected Java failures become Err;
         // panics (dawn.rt.PanicError extends Error) pass through untouched
+        // argv reaches the program through a static field on its own entry class, which a
+        // std function — compiled to a different class — cannot name. See pure-ffi-design §十七.
+        FnSig("args", listOf(), listOf(), Type.TList(Type.TString), Eff.Io, isBuiltin = true),
         FnSig("java_try", listOf(Type.TFn(emptyList(), t, Eff.Io)), listOf("f"),
             Type.TAdt(RESULT_ADT, listOf(t, Type.TString)), Eff.Io, isBuiltin = true,
             typeParams = listOf(t)),
@@ -430,16 +431,6 @@ val BUILTINS: Map<String, FnSig> = run {
             Type.TAdt(RESULT_ADT, listOf(t, Type.TString)), Eff.Io, isBuiltin = true,
             typeParams = listOf(t)),
         // io (spec §11)
-        FnSig("read_file", listOf(Type.TString), listOf("path"),
-            Type.TAdt(RESULT_ADT, listOf(Type.TString, Type.TString)), Eff.Io, isBuiltin = true),
-        FnSig("write_file", listOf(Type.TString, Type.TString), listOf("path", "content"),
-            Type.TAdt(RESULT_ADT, listOf(Type.TInt, Type.TString)), Eff.Io, isBuiltin = true),
-        FnSig("list_dir", listOf(Type.TString), listOf("path"),
-            Type.TAdt(RESULT_ADT, listOf(Type.TList(Type.TString), Type.TString)), Eff.Io, isBuiltin = true),
-        FnSig("is_dir", listOf(Type.TString), listOf("path"), Type.TBool, Eff.Io, isBuiltin = true),
-        FnSig("read_line", listOf(), listOf(),
-            Type.TAdt(OPTION_ADT, listOf(Type.TString)), Eff.Io, isBuiltin = true),
-        FnSig("args", listOf(), listOf(), Type.TList(Type.TString), Eff.Io, isBuiltin = true),
         // core/map + core/set: builtin persistent containers (spec §2.2, §11)
         FnSig("map_empty", listOf(), listOf(), map(k, v), Eff.Pure, isBuiltin = true, typeParams = listOf(k, v)),
         FnSig("set_empty", listOf(), listOf(), set(t), Eff.Pure, isBuiltin = true, typeParams = listOf(t)),

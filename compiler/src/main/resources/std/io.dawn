@@ -1,0 +1,56 @@
+# Dawn's standard library: console, files, and process arguments.
+#
+# Batch C's io half (docs/pure-ffi-design.md §四). These need no `unsafe_pure`:
+# they are honestly effectful, so their signatures just say `!io` and the Java
+# call keeps the effect it already has. `unsafe_pure` is for the opposite case —
+# something the JVM types as effectful that really is pure.
+#
+# `args` is deliberately NOT here: argv arrives on a static field of the program's
+# own entry class, and a std function compiles to a different class, so it cannot
+# name that field. Parking argv on a vendored runtime class instead would make it
+# shared by every program in one JVM — see pure-ffi-design.md §十七.
+#
+# The failing ones compose with `java_try`, which is an intrinsic and stays in
+# the compiler. That is not a workaround: `Result` is a Dawn ADT and cannot be a
+# Java return type, and `java_try` is precisely the built-in bridge from "Java
+# threw" to `Err(message)` — it produces `throwable.toString()`, byte for byte
+# the string these builtins used to return.
+use java "dawn.rt.StdIo"
+
+## Print a string followed by a newline.
+pub fn println(s: String) -> Unit !io = StdIo.println(s)
+
+## Print a string without a newline.
+pub fn print(s: String) -> Unit !io = StdIo.print(s)
+
+## Read one line from stdin; `None` at end of input.
+## Java's `null`-or-value maps straight onto `Option`, so no sentinel is needed.
+pub fn read_line() -> Option[String] !io = StdIo.readLine()
+
+## Whether `path` names a directory.
+pub fn is_dir(path: String) -> Bool !io = StdIo.isDir(path)
+
+## Read a whole file as a UTF-8 string.
+pub fn read_file(path: String) -> Result[String, String] !io =
+  java_try(fn() => StdIo.readFile(path).expect("readFile returns null only on failure, which throws"))
+
+## Write a string to a file, yielding the number of UTF-16 units written.
+pub fn write_file(path: String, content: String) -> Result[Int, String] !io =
+  java_try(fn() => StdIo.writeFile(path, content))
+
+## The entry names directly under `path`.
+## A non-directory is reported as an `Err`, not a panic, and — matching the
+## builtin — is checked before anything is read, so a missing path and a plain
+## file give the same message.
+pub fn list_dir(path: String) -> Result[List[String], String] !io =
+  if is_dir(path) {
+    # `listNames` is a java.util.List<String>, and the JVM erases that to a bare
+    # List — `cast` is the sanctioned way to reclaim the element type (spec §9.5).
+    java_try(fn() => {
+      let names = StdIo.listNames(path).expect("null only on failure, which throws")
+      let out: List[String] = cast(names)
+      out
+    })
+  } else {
+    Err("not a directory: " ++ path)
+  }

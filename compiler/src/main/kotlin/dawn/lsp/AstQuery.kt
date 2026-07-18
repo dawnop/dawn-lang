@@ -3,6 +3,7 @@ package dawn.lsp
 import dawn.ast.*
 import dawn.check.Analyzed
 import dawn.check.BUILTINS
+import dawn.check.StdLib
 import dawn.diag.Span
 
 /**
@@ -35,7 +36,8 @@ private class TargetQuery(private val analysis: Analyzed, private val offset: In
         }
     }
 
-    private fun sigOf(name: String) = analysis.functions[name] ?: BUILTINS[name]
+    // local -> std -> builtin, the same order the checker resolves names in
+    private fun sigOf(name: String) = analysis.functions[name] ?: StdLib.fns[name] ?: BUILTINS[name]
 
     fun visitDecl(d: Decl) {
         when (d) {

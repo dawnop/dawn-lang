@@ -68,7 +68,7 @@ class CodeGen(
          * so `use java` can reflect on them from std. They ship in the compiler jar
          * and are copied into every built program (see [vendorRuntimeClasses]).
          */
-        val VENDORED_RT_CLASSES = listOf("dawn/rt/StdStrings", "dawn/rt/StdBytes", "dawn/rt/DawnList")
+        val VENDORED_RT_CLASSES = listOf("dawn/rt/StdStrings", "dawn/rt/StdBytes", "dawn/rt/StdIo", "dawn/rt/DawnList")
 
         const val PANIC_CLASS = "dawn/rt/PanicError"
         const val LISTS_CLASS = "dawn/rt/Lists"
@@ -1808,36 +1808,6 @@ class CodeGen(
         val PATH = "java/nio/file/Path"
         val FILES = "java/nio/file/Files"
 
-        run {
-            val m = cw.visitMethod(ACC_PUBLIC or ACC_STATIC, "readFile", "(L$STR;)LResult;", null, null)
-            m.visitCode()
-            val tryStart = Label()
-            val tryEnd = Label()
-            val handler = Label()
-            m.visitTryCatchBlock(tryStart, tryEnd, handler, "java/lang/Exception")
-            m.visitLabel(tryStart)
-            m.visitTypeInsn(NEW, "Result\$Ok")
-            m.visitInsn(DUP)
-            m.visitVarInsn(ALOAD, 0)
-            m.visitInsn(ICONST_0)
-            m.visitTypeInsn(ANEWARRAY, STR)
-            m.visitMethodInsn(INVOKESTATIC, PATH, "of", "(L$STR;[L$STR;)L$PATH;", true)
-            m.visitMethodInsn(INVOKESTATIC, FILES, "readString", "(L$PATH;)L$STR;", false)
-            m.visitMethodInsn(INVOKESPECIAL, "Result\$Ok", "<init>", "(L$OBJ;)V", false)
-            m.visitLabel(tryEnd)
-            m.visitInsn(ARETURN)
-            m.visitLabel(handler)
-            m.visitMethodInsn(INVOKEVIRTUAL, "java/lang/Throwable", "toString", "()L$STR;", false)
-            m.visitVarInsn(ASTORE, 1)
-            m.visitTypeInsn(NEW, "Result\$Err")
-            m.visitInsn(DUP)
-            m.visitVarInsn(ALOAD, 1)
-            m.visitMethodInsn(INVOKESPECIAL, "Result\$Err", "<init>", "(L$OBJ;)V", false)
-            m.visitInsn(ARETURN)
-            m.visitMaxs(0, 0)
-            m.visitEnd()
-        }
-
         // javaTry catches java.lang.Exception (interop barrier, panics stay fatal);
         // catchPanic catches java.lang.Throwable (supervision boundary). Same shape.
         fun tryClosure(name: String, caught: String) {
@@ -1868,194 +1838,6 @@ class CodeGen(
         }
         tryClosure("javaTry", "java/lang/Exception")
         tryClosure("catchPanic", "java/lang/Throwable")
-
-        run {
-            val m = cw.visitMethod(ACC_PUBLIC or ACC_STATIC, "writeFile", "(L$STR;L$STR;)LResult;", null, null)
-            m.visitCode()
-            val tryStart = Label()
-            val tryEnd = Label()
-            val handler = Label()
-            m.visitTryCatchBlock(tryStart, tryEnd, handler, "java/lang/Exception")
-            m.visitLabel(tryStart)
-            m.visitVarInsn(ALOAD, 0)
-            m.visitInsn(ICONST_0)
-            m.visitTypeInsn(ANEWARRAY, STR)
-            m.visitMethodInsn(INVOKESTATIC, PATH, "of", "(L$STR;[L$STR;)L$PATH;", true)
-            // write_file creates missing parent directories (spec §11)
-            m.visitVarInsn(ASTORE, 3)
-            m.visitVarInsn(ALOAD, 3)
-            m.visitMethodInsn(INVOKEINTERFACE, PATH, "getParent", "()L$PATH;", true)
-            m.visitVarInsn(ASTORE, 4)
-            val noParent = Label()
-            m.visitVarInsn(ALOAD, 4)
-            m.visitJumpInsn(IFNULL, noParent)
-            m.visitVarInsn(ALOAD, 4)
-            m.visitInsn(ICONST_0)
-            m.visitTypeInsn(ANEWARRAY, "java/nio/file/attribute/FileAttribute")
-            m.visitMethodInsn(INVOKESTATIC, FILES, "createDirectories",
-                "(L$PATH;[Ljava/nio/file/attribute/FileAttribute;)L$PATH;", false)
-            m.visitInsn(POP)
-            m.visitLabel(noParent)
-            m.visitVarInsn(ALOAD, 3)
-            m.visitVarInsn(ALOAD, 1)
-            m.visitInsn(ICONST_0)
-            m.visitTypeInsn(ANEWARRAY, "java/nio/file/OpenOption")
-            m.visitMethodInsn(INVOKESTATIC, FILES, "writeString",
-                "(L$PATH;Ljava/lang/CharSequence;[Ljava/nio/file/OpenOption;)L$PATH;", false)
-            m.visitInsn(POP)
-            m.visitTypeInsn(NEW, "Result\$Ok")
-            m.visitInsn(DUP)
-            m.visitVarInsn(ALOAD, 1)
-            m.visitMethodInsn(INVOKEVIRTUAL, STR, "length", "()I", false)
-            m.visitInsn(I2L)
-            m.visitMethodInsn(INVOKESTATIC, "java/lang/Long", "valueOf", "(J)Ljava/lang/Long;", false)
-            m.visitMethodInsn(INVOKESPECIAL, "Result\$Ok", "<init>", "(L$OBJ;)V", false)
-            m.visitLabel(tryEnd)
-            m.visitInsn(ARETURN)
-            m.visitLabel(handler)
-            m.visitMethodInsn(INVOKEVIRTUAL, "java/lang/Throwable", "toString", "()L$STR;", false)
-            m.visitVarInsn(ASTORE, 2)
-            m.visitTypeInsn(NEW, "Result\$Err")
-            m.visitInsn(DUP)
-            m.visitVarInsn(ALOAD, 2)
-            m.visitMethodInsn(INVOKESPECIAL, "Result\$Err", "<init>", "(L$OBJ;)V", false)
-            m.visitInsn(ARETURN)
-            m.visitMaxs(0, 0)
-            m.visitEnd()
-        }
-
-        // listDir: sorted entry names, Err when the path is not a directory
-        run {
-            val m = cw.visitMethod(ACC_PUBLIC or ACC_STATIC, "listDir", "(L$STR;)LResult;", null, null)
-            m.visitCode()
-            val tryStart = Label()
-            val tryEnd = Label()
-            val handler = Label()
-            val haveNames = Label()
-            m.visitTryCatchBlock(tryStart, tryEnd, handler, "java/lang/Exception")
-            m.visitLabel(tryStart)
-            m.visitTypeInsn(NEW, "java/io/File")
-            m.visitInsn(DUP)
-            m.visitVarInsn(ALOAD, 0)
-            m.visitMethodInsn(INVOKESPECIAL, "java/io/File", "<init>", "(L$STR;)V", false)
-            m.visitMethodInsn(INVOKEVIRTUAL, "java/io/File", "list", "()[L$STR;", false)
-            m.visitVarInsn(ASTORE, 1)
-            m.visitVarInsn(ALOAD, 1)
-            m.visitJumpInsn(IFNONNULL, haveNames)
-            m.visitTypeInsn(NEW, "Result\$Err")
-            m.visitInsn(DUP)
-            m.visitLdcInsn("not a directory: ")
-            m.visitVarInsn(ALOAD, 0)
-            m.visitMethodInsn(INVOKEVIRTUAL, STR, "concat", "(L$STR;)L$STR;", false)
-            m.visitMethodInsn(INVOKESPECIAL, "Result\$Err", "<init>", "(L$OBJ;)V", false)
-            m.visitInsn(ARETURN)
-            m.visitLabel(haveNames)
-            m.visitVarInsn(ALOAD, 1)
-            m.visitMethodInsn(INVOKESTATIC, "java/util/Arrays", "sort", "([L$OBJ;)V", false)
-            m.visitTypeInsn(NEW, "Result\$Ok")
-            m.visitInsn(DUP)
-            m.visitTypeInsn(NEW, ARRAYLIST)
-            m.visitInsn(DUP)
-            m.visitVarInsn(ALOAD, 1)
-            m.visitMethodInsn(INVOKESTATIC, "java/util/Arrays", "asList",
-                "([L$OBJ;)Ljava/util/List;", false)
-            m.visitMethodInsn(INVOKESPECIAL, ARRAYLIST, "<init>", "(Ljava/util/Collection;)V", false)
-            m.visitMethodInsn(INVOKESPECIAL, "Result\$Ok", "<init>", "(L$OBJ;)V", false)
-            m.visitLabel(tryEnd)
-            m.visitInsn(ARETURN)
-            m.visitLabel(handler)
-            m.visitMethodInsn(INVOKEVIRTUAL, "java/lang/Throwable", "toString", "()L$STR;", false)
-            m.visitVarInsn(ASTORE, 2)
-            m.visitTypeInsn(NEW, "Result\$Err")
-            m.visitInsn(DUP)
-            m.visitVarInsn(ALOAD, 2)
-            m.visitMethodInsn(INVOKESPECIAL, "Result\$Err", "<init>", "(L$OBJ;)V", false)
-            m.visitInsn(ARETURN)
-            m.visitMaxs(0, 0)
-            m.visitEnd()
-        }
-
-        // isDir: false for missing paths and on any path error
-        run {
-            val m = cw.visitMethod(ACC_PUBLIC or ACC_STATIC, "isDir", "(L$STR;)Z", null, null)
-            m.visitCode()
-            val tryStart = Label()
-            val tryEnd = Label()
-            val handler = Label()
-            m.visitTryCatchBlock(tryStart, tryEnd, handler, "java/lang/Exception")
-            m.visitLabel(tryStart)
-            m.visitVarInsn(ALOAD, 0)
-            m.visitInsn(ICONST_0)
-            m.visitTypeInsn(ANEWARRAY, STR)
-            m.visitMethodInsn(INVOKESTATIC, PATH, "of", "(L$STR;[L$STR;)L$PATH;", true)
-            m.visitInsn(ICONST_0)
-            m.visitTypeInsn(ANEWARRAY, "java/nio/file/LinkOption")
-            m.visitMethodInsn(INVOKESTATIC, FILES, "isDirectory",
-                "(L$PATH;[Ljava/nio/file/LinkOption;)Z", false)
-            m.visitLabel(tryEnd)
-            m.visitInsn(IRETURN)
-            m.visitLabel(handler)
-            m.visitInsn(POP)
-            m.visitInsn(ICONST_0)
-            m.visitInsn(IRETURN)
-            m.visitMaxs(0, 0)
-            m.visitEnd()
-        }
-
-        // shared stdin reader (line-oriented; UTF-8)
-        cw.visitField(ACC_PRIVATE or ACC_STATIC or ACC_FINAL, "IN", "Ljava/io/BufferedReader;", null, null)
-            .visitEnd()
-        run {
-            val m = cw.visitMethod(ACC_STATIC, "<clinit>", "()V", null, null)
-            m.visitCode()
-            m.visitTypeInsn(NEW, "java/io/BufferedReader")
-            m.visitInsn(DUP)
-            m.visitTypeInsn(NEW, "java/io/InputStreamReader")
-            m.visitInsn(DUP)
-            m.visitFieldInsn(GETSTATIC, "java/lang/System", "in", "Ljava/io/InputStream;")
-            m.visitFieldInsn(GETSTATIC, "java/nio/charset/StandardCharsets", "UTF_8",
-                "Ljava/nio/charset/Charset;")
-            m.visitMethodInsn(INVOKESPECIAL, "java/io/InputStreamReader", "<init>",
-                "(Ljava/io/InputStream;Ljava/nio/charset/Charset;)V", false)
-            m.visitMethodInsn(INVOKESPECIAL, "java/io/BufferedReader", "<init>", "(Ljava/io/Reader;)V", false)
-            m.visitFieldInsn(PUTSTATIC, IO_CLASS, "IN", "Ljava/io/BufferedReader;")
-            m.visitInsn(RETURN)
-            m.visitMaxs(0, 0)
-            m.visitEnd()
-        }
-        run {
-            val m = cw.visitMethod(ACC_PUBLIC or ACC_STATIC, "readLine", "()LOption;", null, null)
-            m.visitCode()
-            val tryStart = Label()
-            val tryEnd = Label()
-            val handler = Label()
-            val decide = Label()
-            val none = Label()
-            m.visitTryCatchBlock(tryStart, tryEnd, handler, "java/io/IOException")
-            m.visitLabel(tryStart)
-            m.visitFieldInsn(GETSTATIC, IO_CLASS, "IN", "Ljava/io/BufferedReader;")
-            m.visitMethodInsn(INVOKEVIRTUAL, "java/io/BufferedReader", "readLine", "()L$STR;", false)
-            m.visitVarInsn(ASTORE, 0)
-            m.visitLabel(tryEnd)
-            m.visitJumpInsn(GOTO, decide)
-            m.visitLabel(handler)
-            m.visitInsn(POP)
-            m.visitInsn(ACONST_NULL)
-            m.visitVarInsn(ASTORE, 0)
-            m.visitLabel(decide)
-            m.visitVarInsn(ALOAD, 0)
-            m.visitJumpInsn(IFNULL, none)
-            m.visitTypeInsn(NEW, "Option\$Some")
-            m.visitInsn(DUP)
-            m.visitVarInsn(ALOAD, 0)
-            m.visitMethodInsn(INVOKESPECIAL, "Option\$Some", "<init>", "(L$OBJ;)V", false)
-            m.visitInsn(ARETURN)
-            m.visitLabel(none)
-            m.visitFieldInsn(GETSTATIC, "Option\$None", "INSTANCE", "LOption\$None;")
-            m.visitInsn(ARETURN)
-            m.visitMaxs(0, 0)
-            m.visitEnd()
-        }
 
         cw.visitEnd()
         return cw.toByteArray()
@@ -2902,12 +2684,6 @@ class CodeGen(
         "parse_float" -> Handle(H_INVOKESTATIC, STRINGS_CLASS, "parseFloat", "(Ljava/lang/String;)LOption;", false)
         "java_try" -> Handle(H_INVOKESTATIC, IO_CLASS, "javaTry", "(L${fnIface(0)};)LResult;", false)
         "catch_panic" -> Handle(H_INVOKESTATIC, IO_CLASS, "catchPanic", "(L${fnIface(0)};)LResult;", false)
-        "read_file" -> Handle(H_INVOKESTATIC, IO_CLASS, "readFile", "(Ljava/lang/String;)LResult;", false)
-        "write_file" -> Handle(H_INVOKESTATIC, IO_CLASS, "writeFile",
-            "(Ljava/lang/String;Ljava/lang/String;)LResult;", false)
-        "read_line" -> Handle(H_INVOKESTATIC, IO_CLASS, "readLine", "()LOption;", false)
-        "list_dir" -> Handle(H_INVOKESTATIC, IO_CLASS, "listDir", "(Ljava/lang/String;)LResult;", false)
-        "is_dir" -> Handle(H_INVOKESTATIC, IO_CLASS, "isDir", "(Ljava/lang/String;)Z", false)
         else -> {
             pendingBuiltinBridges.add(fv)
             Handle(H_INVOKESTATIC, className, "dawn\$bi\$${fv.name}", implDescOf(fv.paramTypes, fv.ret), false)
@@ -2925,13 +2701,6 @@ class CodeGen(
         )
         m.visitCode()
         when (sig.name) {
-            "println", "print" -> {
-                m.visitFieldInsn(GETSTATIC, "java/lang/System", "out", "Ljava/io/PrintStream;")
-                m.visitVarInsn(ALOAD, 0)
-                m.visitMethodInsn(INVOKEVIRTUAL, "java/io/PrintStream", sig.name, "(Ljava/lang/String;)V", false)
-                pushUnit(m)
-                m.visitInsn(ARETURN)
-            }
             "panic" -> {
                 m.visitTypeInsn(NEW, PANIC_CLASS)
                 m.visitInsn(DUP)
@@ -3671,15 +3440,6 @@ class CodeGen(
     }
 
     private fun genBuiltinCall(e: Call): Boolean = when (e.callee) {
-        "println", "print" -> {
-            mv.visitFieldInsn(GETSTATIC, "java/lang/System", "out", "Ljava/io/PrintStream;")
-            genExpr(e.args[0], tail = false)
-            mv.visitMethodInsn(
-                INVOKEVIRTUAL, "java/io/PrintStream", e.callee,
-                "(Ljava/lang/String;)V", false,
-            )
-            true
-        }
         "panic" -> {
             mv.visitTypeInsn(NEW, PANIC_CLASS)
             mv.visitInsn(DUP)
@@ -3847,32 +3607,6 @@ class CodeGen(
         "cast" -> {
             genExpr(e.args[0], tail = false) // an opaque Object; reclaim the concrete type T
             unerase(e.type!!)                // e.type = checker-resolved target (from expected type)
-            true
-        }
-        "read_file" -> {
-            genExpr(e.args[0], tail = false)
-            mv.visitMethodInsn(INVOKESTATIC, IO_CLASS, "readFile", "(Ljava/lang/String;)LResult;", false)
-            true
-        }
-        "write_file" -> {
-            genExpr(e.args[0], tail = false)
-            genExpr(e.args[1], tail = false)
-            mv.visitMethodInsn(INVOKESTATIC, IO_CLASS, "writeFile",
-                "(Ljava/lang/String;Ljava/lang/String;)LResult;", false)
-            true
-        }
-        "read_line" -> {
-            mv.visitMethodInsn(INVOKESTATIC, IO_CLASS, "readLine", "()LOption;", false)
-            true
-        }
-        "list_dir" -> {
-            genExpr(e.args[0], tail = false)
-            mv.visitMethodInsn(INVOKESTATIC, IO_CLASS, "listDir", "(Ljava/lang/String;)LResult;", false)
-            true
-        }
-        "is_dir" -> {
-            genExpr(e.args[0], tail = false)
-            mv.visitMethodInsn(INVOKESTATIC, IO_CLASS, "isDir", "(Ljava/lang/String;)Z", false)
             true
         }
         "args" -> {
