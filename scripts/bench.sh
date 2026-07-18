@@ -1,17 +1,22 @@
 #!/usr/bin/env bash
 # Performance guardrail for the JSON example (docs/seq6-research.md §五, step 0).
 #
-# Reports the *median peak RSS* of parsing a generated corpus. Memory rather
-# than wall clock because the signal-to-noise ratio is not close: across runs
-# wall varies by tens of percent while peak RSS is stable to a few megabytes,
-# and the thing seq6 is about — materializing a whole file as List[Int] — shows
-# up as hundreds of megabytes.
+# Reports the *smallest heap the program completes in*, found by bisection.
 #
-# Measures a built jar, not `dawn run`: running in-process would fold the
-# compiler's own footprint into the number being watched.
+# Not peak RSS, which is what this script measured until 2026-07-18 and which is
+# the wrong number: given a large -Xmx (the default is a quarter of RAM) a JVM
+# fills the heap and collects lazily, so peak RSS says how much room the GC was
+# given, not how much the program needs. On the 2719 KB corpus that read as
+# 259 MB while the program in fact runs in 39 MB — a 6.6x overstatement that made
+# an ordinary object graph look like a crisis. See §五之补 for what it cost.
 #
-#   scripts/bench.sh            # default corpus, 5 runs
-#   scripts/bench.sh 2000 9     # ~2000 KB corpus, 9 runs
+# Minimum heap is not a perfect live-set measure either: a program that allocates
+# hard but keeps little will sit somewhat above its live set, because the
+# collector needs headroom to work in. It is, however, monotone in the thing we
+# care about and it cannot be inflated by an idle collector.
+#
+#   scripts/bench.sh            # default corpus
+#   scripts/bench.sh 2000       # ~2000 KB corpus
 #
 # The baseline lives in docs/seq6-research.md. Re-record it there when a change
 # is meant to move the number, so a regression stays distinguishable from a win.
@@ -20,7 +25,6 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 KB="${1:-1000}"
-RUNS="${2:-5}"
 OUT="build/bench"
 CORPUS="$OUT/corpus.json"
 JAR="$OUT/json.jar"
@@ -58,26 +62,20 @@ PY
 echo "building examples/m4/json ..."
 ./bin/dawn build examples/m4/json -o "$JAR" >/dev/null
 
-# /usr/bin/time reports "Maximum resident set size" in KB on Linux. Guard the
-# result: a crashed run prints no such line, and silently treating that as 0
-# would read as a spectacular improvement.
-rss=()
-for _ in $(seq "$RUNS"); do
-  log="$OUT/time.txt"
-  /usr/bin/time -v java -jar "$JAR" "$CORPUS" >/dev/null 2>"$log" || {
-    echo "run failed:" >&2
-    tail -20 "$log" >&2
-    exit 1
-  }
-  kb_used=$(awk '/Maximum resident set size/ {print $NF}' "$log")
-  [ -n "$kb_used" ] || { echo "no RSS line in $log" >&2; exit 1; }
-  rss+=("$kb_used")
+# Bisect -Xmx. `ok` demands the expected output, not just a zero exit: a JVM that
+# dies of OutOfMemoryError inside a caught region could otherwise "succeed" while
+# printing nothing, and the search would converge on a heap that does not work.
+ok() {
+  [ "$(java "-Xmx${1}m" -jar "$JAR" "$CORPUS" 2>/dev/null)" = "valid" ]
+}
+
+lo=4
+hi=2048
+ok "$hi" || { echo "does not run even in ${hi}m" >&2; exit 1; }
+while [ $((hi - lo)) -gt 2 ]; do
+  mid=$(((lo + hi) / 2))
+  if ok "$mid"; then hi=$mid; else lo=$mid; fi
 done
 
-printf '%s\n' "${rss[@]}" | sort -n | awk -v n="$RUNS" '
-  { v[NR] = $1 }
-  END {
-    med = (n % 2) ? v[(n + 1) / 2] : (v[n / 2] + v[n / 2 + 1]) / 2
-    printf "peak RSS: median %.0f MB  (min %.0f, max %.0f, n=%d)\n",
-      med / 1024, v[1] / 1024, v[n] / 1024, n
-  }'
+corpus_kb=$(($(stat -c%s "$CORPUS") / 1024))
+echo "minimum heap: ${hi} MB   (corpus ${corpus_kb} KB, ratio $((hi * 1024 / corpus_kb))x)"
