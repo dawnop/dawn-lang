@@ -91,7 +91,7 @@ class IoBuiltinsTest {
             """
             pub fn main() -> Unit !io = {
               match write_file("$root/deep/nested/out.txt", "hello") {
-                Ok(n) -> println("wrote ${'$'}n")
+                Ok(_) -> println("wrote")
                 Err(e) -> println("err: ${'$'}e")
               }
               match read_file("$root/deep/nested/out.txt") {
@@ -101,7 +101,7 @@ class IoBuiltinsTest {
             }
             """.trimIndent(),
         )
-        assertEquals("wrote 5\nhello\n", out)
+        assertEquals("wrote\nhello\n", out)
         assertTrue(File(dir, "deep/nested/out.txt").isFile)
     }
 

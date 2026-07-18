@@ -81,7 +81,7 @@ class StdlibTest {
             """
             pub fn main() -> Unit !io = {
               match write_file("$path", "hello\nfile") {
-                Ok(n) -> println("wrote ${'$'}n")
+                Ok(_) -> println("wrote")
                 Err(e) -> println("err ${'$'}e")
               }
               match read_file("$path") {
@@ -91,7 +91,7 @@ class StdlibTest {
             }
             """.trimIndent(),
         )
-        assertEquals("wrote 10\nhello\nfile\n", out)
+        assertEquals("wrote\nhello\nfile\n", out)
         java.io.File(path).delete()
     }
 

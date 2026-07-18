@@ -153,7 +153,7 @@ val BUILTIN_GROUPS: List<Pair<String, List<Pair<String, String>>>> = listOf(
         "print" to "print a string without a newline",
         "read_line" to "read one line from stdin; None at end of input",
         "read_file" to "read a whole file as a UTF-8 string",
-        "write_file" to "write a string to a file, creating missing parent directories; Ok carries the character count",
+        "write_file" to "write a string to a file, creating missing parent directories",
         "list_dir" to "sorted entry names of a directory; Err when the path is not a directory",
         "is_dir" to "whether the path names a directory (false when missing)",
         "args" to "command line arguments",

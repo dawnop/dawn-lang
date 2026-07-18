@@ -54,13 +54,15 @@ public final class StdIo {
     }
 
     /**
-     * Write {@code content} to {@code path}, returning its length.
+     * Write {@code content} to {@code path}.
      *
-     * <p>The count is {@code String.length()} — UTF-16 units, which is neither
-     * characters nor bytes. That is what the builtin returned, and a migration
-     * is not the place to change it.
+     * <p>Returns nothing. Until 2026-07-19 this handed back {@code String.length()}
+     * — UTF-16 units, which is neither characters nor bytes, so the one number a
+     * caller might have wanted (how many bytes landed on disk) was not the number
+     * it got. No call site in either repo read it; both tests that did only
+     * printed it. A wrong answer nobody asked for is worse than no answer.
      */
-    public static long writeFile(String path, String content) throws java.io.IOException {
+    public static void writeFile(String path, String content) throws java.io.IOException {
         java.nio.file.Path p = java.nio.file.Path.of(path);
         java.nio.file.Path parent = p.getParent();
         if (parent != null) {
@@ -68,7 +70,6 @@ public final class StdIo {
             java.nio.file.Files.createDirectories(parent);
         }
         java.nio.file.Files.writeString(p, content);
-        return content.length();
     }
 
     /** The entry names directly under {@code path}. See {@link #args} on the return type. */
