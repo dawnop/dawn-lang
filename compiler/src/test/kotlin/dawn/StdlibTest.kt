@@ -72,6 +72,102 @@ class StdlibTest {
         assertEquals("hello wörld\nHELLO\nab,cd\n", out)
     }
 
+    // ---- result ----
+
+    /**
+     * The reason `map_err` exists: `?` demands identical error types, so without
+     * it a handler returning `Result[_, Wrapped]` cannot propagate a repository's
+     * `Result[_, String]` and has to hand-write a match whose Ok arm is a no-op.
+     */
+    @Test
+    fun `map_err lets ? cross an error-type boundary`() {
+        val out = run(
+            """
+            type Wrapped = { code: Int, text: String }
+
+            fn repo() -> Result[Int, String] = Err("db is down")
+
+            fn handler() -> Result[Int, Wrapped] = {
+              let n = map_err(repo(), fn(m) => Wrapped { code: 500, text: m })?
+              Ok(n + 1)
+            }
+
+            pub fn main() -> Unit !io =
+              match handler() {
+                Ok(n) -> println("ok ${'$'}n")
+                Err(e) -> println("err ${'$'}{e.code} ${'$'}{e.text}")
+              }
+            """.trimIndent(),
+        )
+        assertEquals("err 500 db is down\n", out)
+    }
+
+    @Test
+    fun `map_err leaves Ok untouched`() {
+        val out = run(
+            """
+            pub fn main() -> Unit !io = {
+              let r: Result[Int, String] = Ok(7)
+              match map_err(r, fn(msg) => 500) {
+                Ok(n) -> println("ok ${'$'}n")
+                Err(_) -> println("err")
+              }
+            }
+            """.trimIndent(),
+        )
+        assertEquals("ok 7\n", out)
+    }
+
+    /** Effect-polymorphic like `list.map`: an `!io` callback is allowed. */
+    @Test
+    fun `map_err accepts an effectful callback`() {
+        val out = run(
+            """
+            fn bad() -> Result[Int, String] = Err("boom")
+            pub fn main() -> Unit !io =
+              match map_err(bad(), fn(m) => { println("log: ${'$'}m")
+                                              "wrapped: ${'$'}m" }) {
+                Ok(_) -> println("unreachable")
+                Err(e) -> println(e)
+              }
+            """.trimIndent(),
+        )
+        assertEquals("log: boom\nwrapped: boom\n", out)
+    }
+
+    /** `ok` is the bridge back to the Option combinators, which reject a Result. */
+    @Test
+    fun `ok converts a Result into an Option`() {
+        val out = run(
+            """
+            fn bad() -> Result[Int, String] = Err("boom")
+            fn good() -> Result[Int, String] = Ok(7)
+            pub fn main() -> Unit !io = {
+              println(to_string(unwrap_or(ok(bad()), -1)))
+              println(to_string(unwrap_or(ok(good()), -1)))
+            }
+            """.trimIndent(),
+        )
+        assertEquals("-1\n7\n", out)
+    }
+
+    /**
+     * `ok` is a common binding name, so adding it to the implicitly-visible std
+     * surface is only safe because a local shadows it. Pinning that.
+     */
+    @Test
+    fun `a local named ok shadows the std function`() {
+        val out = run(
+            """
+            pub fn main() -> Unit !io = {
+              let ok = 5
+              println(to_string(ok + 1))
+            }
+            """.trimIndent(),
+        )
+        assertEquals("6\n", out)
+    }
+
     // ---- io ----
 
     @Test

@@ -1,0 +1,44 @@
+# Dawn's standard library: working with `Result`.
+#
+# `Result[T, E]` is an ordinary prelude ADT, and `match` plus `?` already cover
+# most of it. These two fill the gap `?` leaves at an *error-type boundary*:
+# `?` requires the error types to be identical, so a function returning
+# `Result[_, HttpError]` cannot `?` a call returning `Result[_, String]`.
+#
+# Without `map_err` the only way across is a hand-written `match` whose Ok arm
+# does nothing:
+#
+#   match repo_read(c) {              #   Ok(json_ok(repo_read(c)
+#     Ok(j) -> Ok(json_ok(j))         #     .map_err(fn(m) => http_error(500, m))?))
+#     Err(m) -> Err(http_error(500, m))
+#   }
+#
+# dawnop-site had 90 such blocks when these were written (api_fm 27, api_admin2
+# 23, webdav 19, api_public 9, api_admin 9, auth 3). Not all collapse — some
+# choose the status from the message and are real branching — but the ones that
+# only re-wrap were paying four lines to change a type.
+#
+# Both are plain Dawn: no `use java`, nothing to migrate, no runtime support.
+# They are effect-polymorphic in the same way `list.map` is, so an `!io` callback
+# is allowed and a pure one stays pure.
+
+## Replace the error of a `Result`, leaving `Ok` untouched.
+## The `Ok` arm rebuilds rather than returns `r`: the input is `Result[T, E]`
+## and the output `Result[T, F]`, so they are different types even though the
+## payload is the same value.
+pub fn map_err[T, E, F](r: Result[T, E], f: fn(E) -> F !e) -> Result[T, F] !e =
+  match r {
+    Ok(v) -> Ok(v)
+    Err(err) -> Err(f(err))
+  }
+
+## Discard the error, keeping success as an `Option`.
+## The bridge back to the `Option` combinators (`expect`, `unwrap_or`), which do
+## not accept a `Result`. Naming follows Rust's `Result::ok`; a local named `ok`
+## shadows it, which is why this is safe to add despite `ok` being a common
+## binding name.
+pub fn ok[T, E](r: Result[T, E]) -> Option[T] =
+  match r {
+    Ok(v) -> Some(v)
+    Err(_) -> None
+  }
