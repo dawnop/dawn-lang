@@ -38,7 +38,7 @@ fun analyze(source: String, comptimeFuel: Long = 100_000_000L, javaLoader: Class
     checker.check()
     // comptime evaluation only makes sense on a well-typed module
     if (sink.all.none { it.severity == dawn.diag.Severity.ERROR }) {
-        evalComptime(module, sink, comptimeFuel)
+        evalComptime(module, sink, comptimeFuel, StdLib.fnDecls)
     }
     return Analyzed(module, sink.all, checker.functions, checker.types)
 }
@@ -154,7 +154,7 @@ fun analyzeProgram(
         if (!parseFailed) {
             checker.check()
             if (sink.all.none { it.severity == Severity.ERROR }) {
-                evalComptime(mf.module, sink, comptimeFuel)
+                evalComptime(mf.module, sink, comptimeFuel, StdLib.fnDecls)
             }
         }
         for (d in sink.all) diags.add(LocatedDiag(mf.source, d))

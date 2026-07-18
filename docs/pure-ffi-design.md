@@ -7,9 +7,9 @@
 > **状态（2026-07-18）**：**阶段1 + 阶段2 已实现并全绿（1197 测试，含 §9.2 spike）**。
 > 阶段1 = `unsafe_pure` 表达式块（效果屏蔽 / 拒效果变量 / 多余 lint / codegen 透明），spec §6.4 已改写；
 > 阶段2 = std 打进 jar 资源 + 隐式可见 + 类随 shared 一起出（`dawn run`/`dawn build` 实测链得上）。
-> **阶段4 已开工**：批 A 首枪 `substring` 完成迁移（§十），编译器 1197 测试 + backend-dawn 63 测试全绿。
-> **阶段3（comptime route C）仍未动工，并已成为下一批的硬阻塞**——`trim`/`split`/`parse_int` 等
-> 在 comptime 里可用，迁走会让 `const` 折叠失效。
+> **阶段3 已实现**（route C = 反射执行被担保的 Java 调用 + Comptime 接上 std），**阶段4 已开工**
+> （批 A 首枪 `substring`，§十）。于是「纯 ⟺ 可 comptime 折叠」在迁移中得以保持，String 组余下的
+> 不再被 comptime 阻塞。
 
 ## 一、结论（TL;DR）
 
@@ -134,10 +134,13 @@ pub fn map(xs: List[T], f: fn(T) -> U !e) -> List[U] !e =
         B: 隐式可见（Checker 新增 std 层：local → std → builtin；std 名字不可重定义）✅
         codegen: std 类随 emitShared 一起出，故单文件/多模块/dawn build 都自动链上 ✅
         实测: dawn run、dawn build 产物 jar 内含 std/strings.class 且可运行 ✅
-阶段3  comptime route C  ⬜           节点挂 Method + eval 反射分支 + VJavaOpaque 兜底
-        （现状：unsafe_pure 块在 const/comptime 里报「route C 未实现」，不静默误折叠）
+阶段3  comptime route C ✅ ——— 已实现全绿（1202 测试）
+        eval 的 MethodCall 分支反射 invoke 被 unsafe_pure 担保的调用（仅静态方法、
+        仅 Int/Float/Bool/String/Unit 边界；越界即报错，不静默误折叠）✅
+        Comptime 接上 std（此前 std 函数对解释器完全不可见，纯 Dawn 的也不行）✅
+        std 体内的报错重定位到调用点（否则 caret 渲染到用户文件的错位置）✅
 阶段4  迁移（一函数一原子：删 builtin FnSig ⟺ 加 std 定义）🔶  ← 批 A 首枪 substring 已落地（§十）；
-        余下 String 组分两拨：不依赖 comptime 的可立刻做，comptime 可用的那批须等阶段3
+        阶段3 落地后，String 组余下的不再分两拨
         批A  String/Bytes 一阶包装 → std/strings·bytes.dawn   【零 comptime 暴露，先搬】
         批B  list 原语 pure-vouch + map/filter/fold 纯 Dawn 递归 → std/list.dawn 【6 个 comptime 函数在此，需阶段3】
         批C  Map/Set + io 包装(print/read_file/args, !io) + 近核；杠杆1 to_string→Show trait 可并行
@@ -146,7 +149,7 @@ pub fn map(xs: List[T], f: fn(T) -> U !e) -> List[U] !e =
 ```
 
 - **阶段1 与阶段2 都是阶段4 的前提**，彼此独立可并行。
-- **阶段3 需在批 B 之前**（批 A 零 comptime 暴露，可先于 route C）。
+- **阶段3 已完成**：批 B 不再被它阻塞，String 组余下的也不必再分两拨。
 - 每阶段落地即绿、可回滚；任一批出问题停在上一批，编译器仍自洽。
 
 ## 五、迁移分类（71 个按机制分三类）
@@ -276,9 +279,30 @@ site 链接检查 408 条、`fmt --check`、ktlint 均绿。
 `const` 折叠失效,故这批必须**等阶段3(route C)先落地**。不受此限的下一批:`to_lower`/`to_upper`/
 `index_of`/`last_index_of`/`code_points`/`from_code_points`/`char_to_string`/`str_len`。
 
-> 另有一处阶段2 遗留缺口(与 route C 无关,单独修):**std 函数对 Comptime 完全不可见**——
-> `const Y = is_empty("")` 报 `comptime: missing function is_empty`,即便 `is_empty` 是纯 Dawn。
-> Comptime 只在用户模块里找函数,没接 `StdLib`。route C 只解决 `unsafe_pure` 块,这条得单独接。
+## 十一、阶段3:route C 与 Comptime 接 std(2026-07-18,已落地)
+
+做这一步的动机不是「route C 本身」,而是**不做就没法继续迁移**:`trim`/`split`/`parse_int` 这批在
+comptime 里可用,迁走会让调用方的 `const` 折叠失效——那是实打实的功能倒退。做完之后
+「纯 ⟺ 可 comptime 折叠」在迁移中得以保持,**调用方不必知道一个函数今天住在表里还是 std 里**。
+
+实际动了**三处**,而不是计划里以为的一处:
+
+1. **route C 本体**:`eval` 的 `MethodCall` 分支在 `isJava` 时反射 `invoke` 已挂在
+   `MethodCall.javaMethod` 上的 `Method`。**故意做窄**——只在 `unsafe_pure` 内可达(块外的 Java 调用
+   是 `!io`,本来就到不了 const)、只允许**静态方法**(comptime 造不出 Java 对象)、只跨
+   `Int/Float/Bool/String/Unit` 边界,其余一律报错。`fromJava` 必须与 `Checker.mapJavaReturn` 一致
+   (引用返回包 `Option`、`null` 即 `None`),否则折叠结果会和运行期不一样——这是本步最容易写错的地方。
+2. **Comptime 接上 std**(阶段2 的遗留缺口,与 route C 无关):此前 `const Y = is_empty("")` 报
+   `missing function is_empty`,**即便 `is_empty` 是纯 Dawn**——解释器只在用户模块里找函数。
+   现在 `evalComptime` 多收一份 std 的 `FnDecl`,顺序同检查器(local 覆盖 std);std 自身受检时传空,
+   bootstrap 仍不递归。顺带补了 `str_len` 的 comptime 实现(std 的 `is_empty` 建在它上面)。
+3. **std 体内报错的定位**(接通 std 后才暴露):std 的 span 指向 `<std>/strings.dawn`,却被拿去
+   渲染**用户的文件**,caret 落在第 9 行第 647 列这种不存在的位置。现在跨 std 调用的报错**重定位到
+   调用点**,并加 hint 说明来自哪个 std 函数。于是 `const X = substring("abc", 0, 9)` 在**编译期**
+   就报 `panicked: substring: index out of range`,文本与运行期 panic 逐字相同、caret 落在用户的表达式上。
+
+> **附带责任没变**:`unsafe_pure` 只担保「纯」。要它在编译期跑,等于额外担保**确定性 + 终止**。
+> 反射 invoke 一旦进去就打断不了,故按固定成本扣 fuel;别 vouch `currentTimeMillis` 再烧进常量池。
 
 ## 参考
 

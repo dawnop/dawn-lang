@@ -1,5 +1,6 @@
 package dawn.check
 
+import dawn.ast.FnDecl
 import dawn.ast.Module
 import dawn.diag.DiagnosticSink
 import dawn.diag.Severity
@@ -46,6 +47,19 @@ object StdLib {
 
     /** the checked std modules, in dependency order; parsed and checked once */
     val modules: List<StdModule> by lazy { loadAndCheck() }
+
+    /**
+     * The std function *declarations*, for the compile-time interpreter: a const
+     * initializer may call std, so [dawn.check.ComptimeInterp] needs the bodies,
+     * not just the signatures [fns] carries.
+     */
+    val fnDecls: Map<String, FnDecl> by lazy {
+        val out = LinkedHashMap<String, FnDecl>()
+        for (m in modules) {
+            for (d in m.module.fns) if (d.pub) out[d.name] = d
+        }
+        out
+    }
 
     /**
      * The implicitly-visible function surface: every `pub fn` of every std module.

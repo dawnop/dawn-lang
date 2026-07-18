@@ -36,11 +36,15 @@ sealed class CValue {
  * order, then comptime blocks inside function and test bodies. Failures become
  * ordinary diagnostics on the sink.
  */
-fun evalComptime(module: Module, sink: DiagnosticSink, fuel: Long) {
-    val fnsByName = module.fns.associateBy { it.name }
+fun evalComptime(module: Module, sink: DiagnosticSink, fuel: Long, stdFns: Map<String, FnDecl> = emptyMap()) {
+    // std is implicitly visible to user code, so it must be callable from a const
+    // too; a local definition still shadows it, matching the checker's
+    // local → std → builtin order. Empty while std itself is being checked, which
+    // is what keeps the bootstrap acyclic.
+    val fnsByName = stdFns + module.fns.associateBy { it.name }
     for (c in module.consts) {
         try {
-            c.value = ComptimeInterp(fnsByName, fuel).eval(c.init, HashMap())
+            c.value = ComptimeInterp(fnsByName, fuel, stdFns.keys).eval(c.init, HashMap())
         } catch (e: DawnError) {
             sink.add(e)
         }
@@ -51,7 +55,7 @@ fun evalComptime(module: Module, sink: DiagnosticSink, fuel: Long) {
                 is ComptimeExpr -> {
                     if (e.value == null) {
                         try {
-                            e.value = ComptimeInterp(fnsByName, fuel).eval(e.body, HashMap())
+                            e.value = ComptimeInterp(fnsByName, fuel, stdFns.keys).eval(e.body, HashMap())
                         } catch (err: DawnError) {
                             sink.add(err)
                         }
@@ -102,8 +106,13 @@ fun evalComptime(module: Module, sink: DiagnosticSink, fuel: Long) {
 class ComptimeInterp(
     private val fns: Map<String, FnDecl>,
     private var fuel: Long,
+    /** which of [fns] came from the bundled std, for diagnostics that must not point into it */
+    private val stdFnNames: Set<String> = emptySet(),
 ) {
     private var depth = 0
+
+    /** inside an `unsafe_pure` block, where route C is allowed to invoke Java */
+    private var inUnsafePure = false
 
     private fun err(msg: String, span: Span, hint: String? = null): Nothing =
         throw DawnError("comptime: $msg", span, hint)
@@ -159,7 +168,7 @@ class ComptimeInterp(
                 if (v.ctor.name == "Some") v.fields[0]
                 else err("panicked: ${e.panicMsg ?: "unwrapped None"}", e.span)
             }
-            is MethodCall -> eval(e.desugared!!, env)
+            is MethodCall -> if (e.isJava) evalJavaCall(e, env) else eval(e.desugared!!, env)
             is Return -> throw EarlyReturn(if (e.value != null) eval(e.value, env) else CValue.VUnit)
             is Index -> {
                 val target = eval(e.target, env)
@@ -236,10 +245,79 @@ class ComptimeInterp(
      * Java call reflectively (docs/pure-ffi-design.md route C), which is not yet
      * implemented. Until then, refuse rather than silently mis-fold.
      */
-    private fun evalUnsafePure(e: UnsafePureExpr, env: MutableMap<Symbol, CValue>): CValue =
-        err("unsafe_pure blocks cannot be evaluated at compile time yet", e.span,
-            "route C (reflective invoke of the vouched Java call) is unimplemented; " +
-                "keep unsafe_pure out of const initializers and comptime blocks for now")
+    private fun evalUnsafePure(e: UnsafePureExpr, env: MutableMap<Symbol, CValue>): CValue {
+        val saved = inUnsafePure
+        inUnsafePure = true
+        try {
+            return eval(e.body, env)
+        } finally {
+            inUnsafePure = saved
+        }
+    }
+
+    /**
+     * Route C (docs/pure-ffi-design.md): fold a vouched Java call by invoking it
+     * reflectively. This runs real Java inside the compiler, so it is deliberately
+     * narrow — only reachable through [evalUnsafePure], only static methods, and
+     * only across the scalar/String boundary the std wrappers actually use. The
+     * reward is that "pure ⟺ comptime-foldable" survives the builtin migration:
+     * `const` keeps folding after a function moves from the builtin table to std.
+     */
+    private fun evalJavaCall(e: MethodCall, env: MutableMap<Symbol, CValue>): CValue {
+        val m = e.javaMethod
+            ?: err("Java constructors are not available at compile time", e.span)
+        if (!inUnsafePure) {
+            err("a Java call can only be folded inside `unsafe_pure`", e.span,
+                "the block is where purity is vouched for; without it the call is !io and " +
+                    "cannot reach a const in the first place")
+        }
+        if (!java.lang.reflect.Modifier.isStatic(m.modifiers)) {
+            err("only static Java methods can be folded", e.nameSpan,
+                "`${m.declaringClass.simpleName}.${m.name}` needs a receiver, and comptime " +
+                    "has no way to build a Java object")
+        }
+        val args = e.args.map { eval(it, env) }
+        val marshalled = m.parameterTypes.zip(args).map { (p, a) -> toJava(p, a, e.span) }
+        // a Java call is opaque to the fuel counter, so charge a flat cost: it
+        // cannot be interrupted once entered, but it also cannot be free
+        burnN(100, e.span)
+        val result = try {
+            m.invoke(null, *marshalled.toTypedArray())
+        } catch (t: java.lang.reflect.InvocationTargetException) {
+            err("`${m.declaringClass.simpleName}.${m.name}` threw " +
+                "${t.targetException}", e.span,
+                "the unsafe_pure around this call vouches that it is pure and total; " +
+                    "a throw means that promise does not hold for these arguments")
+        } catch (t: IllegalAccessException) {
+            err("`${m.declaringClass.simpleName}.${m.name}` is not accessible", e.span)
+        }
+        return fromJava(m.returnType, result, e.span)
+    }
+
+    /** Dawn value → Java argument; mirrors the codegen marshalling (spec §9.2). */
+    private fun toJava(p: Class<*>, v: CValue, span: Span): Any? = when {
+        p == java.lang.Long.TYPE && v is CValue.VInt -> v.v
+        p == Integer.TYPE && v is CValue.VInt -> v.v.toInt()
+        p == java.lang.Double.TYPE && v is CValue.VFloat -> v.v
+        p == java.lang.Boolean.TYPE && v is CValue.VBool -> v.v
+        p == String::class.java && v is CValue.VString -> v.v
+        else -> err("cannot pass this argument to Java at compile time", span,
+            "route C marshals Int/Float/Bool/String only; got a ${v.javaClass.simpleName} " +
+                "for a ${p.simpleName} parameter")
+    }
+
+    /** Java result → Dawn value; must agree with `Checker.mapJavaReturn` or folding would lie. */
+    private fun fromJava(rt: Class<*>, r: Any?, span: Span): CValue = when (rt) {
+        java.lang.Void.TYPE -> CValue.VUnit
+        java.lang.Long.TYPE, Integer.TYPE, java.lang.Short.TYPE, java.lang.Byte.TYPE ->
+            CValue.VInt((r as Number).toLong())
+        java.lang.Double.TYPE, java.lang.Float.TYPE -> CValue.VFloat((r as Number).toDouble())
+        java.lang.Boolean.TYPE -> CValue.VBool(r as Boolean)
+        // reference returns arrive wrapped in Option, null being None
+        String::class.java -> if (r == null) none() else some(CValue.VString(r as String))
+        else -> err("cannot bring this Java result back at compile time", span,
+            "route C returns Int/Float/Bool/String (and Unit) only; got ${rt.simpleName}")
+    }
 
     private fun execStmt(s: Stmt, env: MutableMap<Symbol, CValue>) {
         burn(s.span)
@@ -304,6 +382,17 @@ class ComptimeInterp(
         val args = e.args.map { eval(it, env) }
         if (sig.isBuiltin) return callBuiltin(sig.name, args, e.span)
         val decl = fns[e.callee] ?: err("missing function `${e.callee}`", e.span)
+        // A failure inside std carries a span into the std source, which the caller
+        // would render against the *user's* file — garbage carets. Re-point it at
+        // the call site, which is the part of the program the user can act on.
+        if (stdFnNames.contains(e.callee)) {
+            try {
+                return callFn(decl, args, e.span)
+            } catch (err: DawnError) {
+                throw DawnError(err.message ?: "std call failed", e.span,
+                    "raised inside the standard library function `${e.callee}`")
+            }
+        }
         return callFn(decl, args, e.span)
     }
 
@@ -389,6 +478,11 @@ class ComptimeInterp(
             var acc = args[1]
             for (x in (args[0] as CValue.VList).elems) acc = applyFn(args[2], listOf(acc, x), span)
             acc
+        }
+        // std's is_empty is written on str_len, so a const calling into std needs it
+        "str_len" -> {
+            val s = (args[0] as CValue.VString).v
+            CValue.VInt(s.codePointCount(0, s.length).toLong())
         }
         "chars" -> {
             val s = (args[0] as CValue.VString).v

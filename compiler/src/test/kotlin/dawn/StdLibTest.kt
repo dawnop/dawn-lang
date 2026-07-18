@@ -143,6 +143,34 @@ class StdLibTest {
     }
 
     @Test
+    fun `std is callable from a const, through pure Dawn and through a forward alike`() {
+        // std is implicitly visible, so it must also be visible to the compile-time
+        // interpreter — otherwise migrating a builtin would silently cost callers
+        // their const folding (pure-ffi-design.md 阶段3).
+        val out = run(
+            """
+            const A: Bool = is_empty("")
+            const B: String = substring("hello", 1, 3)
+            const C: String = pad_start("7", 4, "0")
+            pub fn main() -> Unit !io = println("${'$'}{A} ${'$'}{B} ${'$'}{C}")
+            """.trimIndent(),
+        )
+        assertEquals("true el 0007\n", out)
+    }
+
+    @Test
+    fun `a std panic during folding is reported at the call site, not inside std`() {
+        val analysis = analyze("const X: String = substring(\"abc\", 0, 9)")
+        assertTrue(analysis.hasErrors, "expected the out-of-range panic to surface at compile time")
+        val d = analysis.diagnostics.first { it.message.contains("index out of range") }
+        // same text as the runtime panic, and pointing at the user's call rather
+        // than into the std source, whose spans would render against the wrong file
+        assertTrue(d.message.contains("substring: index out of range"), d.message)
+        assertTrue(d.hint.orEmpty().contains("standard library function `substring`"),
+            "the diagnostic should name the std function it came from; hint was: ${d.hint}")
+    }
+
+    @Test
     fun `a std function cannot be redefined`() {
         val errs = errorsOf(
             """

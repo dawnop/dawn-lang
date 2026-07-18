@@ -122,15 +122,44 @@ class UnsafePureTest {
             "expected the redundant-stamp lint; got:\n" + errs.joinToString("\n"))
     }
 
+    /**
+     * Route C (docs/pure-ffi-design.md 阶段3): a vouched Java call folds at
+     * compile time by reflective invoke. This is what keeps "pure ⟺
+     * comptime-foldable" true as builtins migrate into std — a const does not
+     * care which side of that line its callee sits on.
+     */
     @Test
-    fun `unsafe_pure is not yet foldable at compile time`() {
-        val errs = errorsOf(
+    fun `a vouched java call folds at compile time`() {
+        val out = run(
             """
             use java "java.lang.Math"
             const BIG: Int = unsafe_pure { Math.max(1, 2) }
+            pub fn main() -> Unit !io = println("${'$'}{BIG}")
             """.trimIndent(),
         )
-        assertTrue(errs.any { it.contains("cannot be evaluated at compile time") },
-            "expected the route-C-pending error; got:\n" + errs.joinToString("\n"))
+        assertEquals("2\n", out)
+    }
+
+    @Test
+    fun `route C marshals strings and honours null as None`() {
+        val out = run(
+            """
+            use java "java.lang.String"
+            const S: String = unsafe_pure { String.valueOf(true) }.expect("never null")
+            pub fn main() -> Unit !io = println(S)
+            """.trimIndent(),
+        )
+        assertEquals("true\n", out)
+    }
+
+    @Test
+    fun `folding refuses arguments route C cannot marshal`() {
+        val errs = errorsOf(
+            """
+            use java "java.util.List"
+            const N: Int = unsafe_pure { List.of(1, 2) }.expect("x") == 0
+            """.trimIndent(),
+        )
+        assertTrue(errs.isNotEmpty(), "expected the marshalling refusal, got none")
     }
 }
