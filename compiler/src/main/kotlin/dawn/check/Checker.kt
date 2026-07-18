@@ -34,6 +34,13 @@ class Checker(
     private val javaLoader: ClassLoader? = null,
     /** source text of this module; only used to put a line number in `!` panic messages */
     private val srcText: String? = null,
+    /**
+     * The bundled standard library's function surface (spec §10.6), implicitly in
+     * scope here without a `use`. Sits between local functions and the builtin
+     * table in name resolution, and — like a builtin — cannot be redefined.
+     * Empty when checking std itself, so the bootstrap stays acyclic.
+     */
+    private val stdFns: Map<String, FnSig> = emptyMap(),
 ) {
 
     private val fns = HashMap<String, FnSig>()
@@ -280,6 +287,8 @@ class Checker(
                 importedNames.containsKey(d.name) -> importClash(d.name, d.nameSpan, "function")
                 BUILTINS.containsKey(d.name) ->
                     sink.error("`${d.name}` is a builtin function and cannot be redefined", d.nameSpan)
+                stdFns.containsKey(d.name) ->
+                    sink.error("`${d.name}` is a standard-library function and cannot be redefined", d.nameSpan)
                 fns.containsKey(d.name) -> {
                     val prev = fns[d.name]!!.trait
                     if (prev != null)
@@ -490,6 +499,9 @@ class Checker(
                     importedNames.containsKey(m.name) -> importClash(m.name, m.nameSpan, "trait method")
                     BUILTINS.containsKey(m.name) ->
                         sink.error("`${m.name}` is a builtin function and cannot be a trait method", m.nameSpan)
+                    stdFns.containsKey(m.name) ->
+                        sink.error("`${m.name}` is a standard-library function and cannot be a trait method",
+                            m.nameSpan)
                     fns.containsKey(m.name) -> {
                         val prev = fns[m.name]!!.trait
                         sink.error(
@@ -1145,7 +1157,7 @@ class Checker(
         is TupleLit -> e.elems.any { needsExpected(it) }
         // a generic function used as a value is instantiated from the expected type
         is VarRef -> lookup(e.name) == null &&
-            (fns[e.name] ?: BUILTINS[e.name])?.typeParams?.isNotEmpty() == true
+            (fns[e.name] ?: stdFns[e.name] ?: BUILTINS[e.name])?.typeParams?.isNotEmpty() == true
         is CtorCall -> {
             val ci = ctors[e.ctorName]
             ci != null && (
@@ -1157,7 +1169,7 @@ class Checker(
         is Lambda -> e.params.any { it.typeAnn == null }
         // a zero-arg generic call (map_empty(), set_empty()) can only be typed from context
         is Call -> {
-            val sig = if (lookup(e.callee) != null) null else (fns[e.callee] ?: BUILTINS[e.callee])
+            val sig = if (lookup(e.callee) != null) null else (fns[e.callee] ?: stdFns[e.callee] ?: BUILTINS[e.callee])
             sig != null && sig.typeParams.isNotEmpty() && e.args.isEmpty()
         }
         else -> false
@@ -1297,10 +1309,10 @@ class Checker(
                 e.symbol = sym
                 sym.type
             } else {
-                val f = fns[e.name] ?: BUILTINS[e.name]
+                val f = fns[e.name] ?: stdFns[e.name] ?: BUILTINS[e.name]
                 if (f != null) checkFnValue(e, f, expected)
                 else error("undefined variable: ${e.name}", e.span,
-                    Suggest.hint(e.name, localNames() + fns.keys + BUILTINS.keys))
+                    Suggest.hint(e.name, localNames() + fns.keys + stdFns.keys + BUILTINS.keys))
             }
         }
         is MethodCall -> checkMethodCall(e, expected)
@@ -1389,7 +1401,7 @@ class Checker(
         // only when no function `f` is in scope, so UFCS keeps precedence and
         // the rule stays purely additive (spec §4.3)
         if (tt is TAdt && tt.info.isRecord &&
-            lookup(e.name) == null && fns[e.name] == null && !BUILTINS.containsKey(e.name)
+            lookup(e.name) == null && fns[e.name] == null && !stdFns.containsKey(e.name) && !BUILTINS.containsKey(e.name)
         ) {
             val ci = tt.info.ctors.first()
             val field = ci.fields.find { it.name == e.name }
@@ -1881,12 +1893,12 @@ class Checker(
             recordEffect(lt.eff, e.calleeSpan, e.callee)
             return lt.ret
         }
-        val sig = resolvedSig ?: fns[e.callee] ?: BUILTINS[e.callee]
+        val sig = resolvedSig ?: fns[e.callee] ?: stdFns[e.callee] ?: BUILTINS[e.callee]
         if (sig == null) {
             // still check the arguments so their subtrees get types/symbols
             for (arg in e.args) typeArg(arg)
             return error("undefined function: ${e.callee}", e.calleeSpan,
-                Suggest.hint(e.callee, fns.keys + BUILTINS.keys))
+                Suggest.hint(e.callee, fns.keys + stdFns.keys + BUILTINS.keys))
         }
         e.sig = sig
         if (e.args.size != sig.paramTypes.size) {
@@ -2680,7 +2692,7 @@ class Checker(
                 val sym = resolveLocal(s.name, s.nameSpan, forAssign = true)
                 if (sym == null) {
                     sink.error("undefined variable: ${s.name}", s.nameSpan,
-                        Suggest.hint(s.name, localNames() + fns.keys + BUILTINS.keys))
+                        Suggest.hint(s.name, localNames() + fns.keys + stdFns.keys + BUILTINS.keys))
                     checkExpr(s.value)
                     return
                 }

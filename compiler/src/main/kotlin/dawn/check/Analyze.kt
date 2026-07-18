@@ -34,7 +34,7 @@ fun analyze(source: String, comptimeFuel: Long = 100_000_000L, javaLoader: Class
     val sink = DiagnosticSink()
     val tokens = Lexer(source, 0, sink).lex()
     val module = Parser(tokens, sink, source).module()
-    val checker = Checker(module, sink, javaLoader = javaLoader, srcText = source)
+    val checker = Checker(module, sink, javaLoader = javaLoader, srcText = source, stdFns = StdLib.fns)
     checker.check()
     // comptime evaluation only makes sense on a well-typed module
     if (sink.all.none { it.severity == dawn.diag.Severity.ERROR }) {
@@ -95,7 +95,7 @@ class ImportEnv(
     }
 }
 
-private fun exportsOf(cm: CheckedModule): ModuleExports {
+internal fun exportsOf(cm: CheckedModule): ModuleExports {
     val m = cm.module
     val pubTypes = m.types.filter { it.pub }.mapNotNull { cm.types[it.name] }.associateBy { it.name }
     val pubAliases = m.types.filter { it.pub }.mapNotNull { cm.aliases[it.name] }.associateBy { it.name }
@@ -150,7 +150,7 @@ fun analyzeProgram(
         val sink = DiagnosticSink()
         val srcPath = mf.file.absoluteFile.path
         val checker = Checker(mf.module, sink, ImportEnv(exportsByPath.toMap()), mf.className, srcPath,
-            javaLoader, mf.source.text)
+            javaLoader, mf.source.text, StdLib.fns)
         if (!parseFailed) {
             checker.check()
             if (sink.all.none { it.severity == Severity.ERROR }) {

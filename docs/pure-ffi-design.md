@@ -4,10 +4,11 @@
 > 但实测发现它的前提错了——**在现有效果系统下，写不出一个纯的 FFI 包装函数**。本文补上那个
 > 缺失的地基（纯 FFI），并给出 `unsafe_pure` 的设计与整条迁移的实施计划。
 >
-> **状态（2026-07-18）**：**阶段1 已实现并全绿**——`unsafe_pure` 表达式块落地（lexer/AST/parser/
-> checker 效果屏蔽 + 拒效果变量 + 多余 lint / codegen 透明 / formatter / 补 7 测），全量
-> 1187 测试通过，spec §6.4 已改写。**阶段2（std 打包）、阶段3（comptime route C）、阶段4（71
-> builtin 迁移）未动工**——见 §四实施计划的勾选状态。
+> **状态（2026-07-18）**：**阶段1 + 阶段2 已实现并全绿（1195 测试）**。
+> 阶段1 = `unsafe_pure` 表达式块（效果屏蔽 / 拒效果变量 / 多余 lint / codegen 透明），spec §6.4 已改写；
+> 阶段2 = std 打进 jar 资源 + 隐式可见 + 类随 shared 一起出（`dawn run`/`dawn build` 实测链得上）。
+> **阶段3（comptime route C）未动工；阶段4（71 builtin 迁移）被 §九 实测卡住**——`std` 目前
+> 够不着 Java，迁移惯用法编不过,下一步应先做 §九「甲」的调研，而不是直接开批 A。
 
 ## 一、结论（TL;DR）
 
@@ -127,10 +128,14 @@ pub fn map(xs: List[T], f: fn(T) -> U !e) -> List[U] !e =
         Formatter: token 级自然支持（补 fmt 测锁定）✅
         测试: 掩 io / 拒效果变量 / 纯函数 over vouched java 通过 / redundant / comptime 拒 ✅
         spec §6.4 改写（把计划中的 @trusted_pure 换成落地的 unsafe_pure）✅
-阶段2  杠杆2 A/B  ⬜                   std 打进 jar 资源 + 隐式 use std（迁移函数的落脚处）
+阶段2  杠杆2 A/B ✅ ——— 已实现全绿（1195 测试）
+        A: std/*.dawn 打进 jar 资源 + StdLib 一次性解析/检查（bootstrap 不递归）✅
+        B: 隐式可见（Checker 新增 std 层：local → std → builtin；std 名字不可重定义）✅
+        codegen: std 类随 emitShared 一起出，故单文件/多模块/dawn build 都自动链上 ✅
+        实测: dawn run、dawn build 产物 jar 内含 std/strings.class 且可运行 ✅
 阶段3  comptime route C  ⬜           节点挂 Method + eval 反射分支 + VJavaOpaque 兜底
         （现状：unsafe_pure 块在 const/comptime 里报「route C 未实现」，不静默误折叠）
-阶段4  迁移（一函数一原子：删 builtin FnSig ⟺ 加 std 定义）⬜
+阶段4  迁移（一函数一原子：删 builtin FnSig ⟺ 加 std 定义）⬜  ← 被 §九 卡住，先做「甲」调研
         批A  String/Bytes 一阶包装 → std/strings·bytes.dawn   【零 comptime 暴露，先搬】
         批B  list 原语 pure-vouch + map/filter/fold 纯 Dawn 递归 → std/list.dawn 【6 个 comptime 函数在此，需阶段3】
         批C  Map/Set + io 包装(print/read_file/args, !io) + 近核；杠杆1 to_string→Show trait 可并行
@@ -175,6 +180,37 @@ pub fn map(xs: List[T], f: fn(T) -> U !e) -> List[U] !e =
 lexer 是纯热路径，会被传染。故序6 的字符访问**必须纯**：本地基落地前它只能是 builtin；落地后 =
 往 `std/strings.dawn` 加 `char_at = unsafe_pure { s.codePointAt(cur) }` 三行，顺带白拿 comptime 折叠。
 **序6 挂起，等批 A。**
+
+## 九、实测推翻的迁移前提：std 够不着 Java（2026-07-18）
+
+阶段2 落地后实测两条探针,**把 §三/§五 的迁移惯用法和 `builtins-to-stdlib.md` §6.2 D 一起推翻了**
+——这是继「FFI 转发写不出纯函数」之后的**第二个错误前提**,同样是凭印象没验证。
+
+| 探针 | 结果 | 含义 |
+|---|---|---|
+| `let s = "hello"` 后 `s.isEmpty()` | `error: undefined function: isEmpty` | Dawn 原生类型(String/List/Bytes/Map/Set)**不是 `TJava`**,收不了 Java 实例调用;`x.m()` 落回 UFCS |
+| `use java "dawn.rt.Strings"` | `error: Java class not found` | `dawn/rt/*` 是 codegen 期 **ASM 现生成**的,不是检查期可反射的真类 |
+
+**后果**:
+- `pub fn substring(s, a, b) -> String = unsafe_pure { s.substring(a, b) }`(本文 §三/§五 的
+  一阶包装惯用法)**今天根本编不过**——`s.substring` 解析不成 Java 调用。
+- `builtins-to-stdlib.md` §6.2 D 说的「std 写 `use java "dawn.rt.Lists"` 转发运行时类、无鸡生蛋」
+  **不成立**——那些运行时类检查期不存在。
+- 故**批 A/B 按现设计写不出来**。`unsafe_pure` 本身没问题(阶段1 全绿),缺的是让它**够得着**
+  Java 的那一步。
+
+**三条出路**:
+
+- **甲(建议) —— 让 Dawn 原生类型能收 Java 实例调用**。`TString` 运行期**就是** `java.lang.String`、
+  `List` 就是 `java.util.List`,让 `x.m()` 在无 Dawn 函数匹配时回落成 Java 实例调用即可。最贴合既
+  有设计:`unsafe_pure { s.substring(a, b) }` **原样成立**,批 A 立刻可写。需先定清楚:UFCS 与
+  Java 实例调用的优先级次序、引用返回的 `Option` 包装如何与 §五 的签名对齐。
+- **乙 —— 把 `dawn/rt/*` 从 ASM 生成改写成真 Kotlin 源类**,随编译器 jar 分发、检查期可反射,std
+  即可 `use java` 转发。代价大:产物 jar 不再自包含(要么引入运行时依赖 jar,要么把这些类复制进产物)。
+- **丙 —— 只迁「纯 Dawn 可表达」的**(本次 `std/strings.dawn` 的 `is_empty`/`repeat` 就是),其余留在
+  builtin。能立刻做,但搬不动 String/集合主体,离「75→4」很远。
+
+**下一步应先做甲的调研**(优先级规则 + Option 包装),而不是直接开批 A。
 
 ## 参考
 

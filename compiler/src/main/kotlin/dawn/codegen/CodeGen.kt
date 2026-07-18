@@ -215,6 +215,21 @@ class CodeGen(
         out[MAPS_CLASS] = genMapsClass()
         for (n in 0..8) out[fnIface(n)] = genFnInterface(n)
         for (n in 2..8) out[tupleClass(n)] = genTupleClass(n)
+        emitStd(out)
+    }
+
+    /**
+     * The bundled standard library's classes (docs/builtins-to-stdlib.md). They
+     * ride along with the shared runtime rather than with the module units, so a
+     * call into std links the same way in a single-file build and a multi-module
+     * one — no caller has to remember to add std to its unit list.
+     */
+    private fun emitStd(out: MutableMap<String, ByteArray>) {
+        val stdAdts = dawn.check.StdLib.modules
+            .flatMap { m -> m.module.types.mapNotNull { it.ctors.firstOrNull()?.info?.adt } }
+        for (m in dawn.check.StdLib.modules) {
+            CodeGen(m.module, m.className, programAdts = allAdts + stdAdts).emitModule(out)
+        }
     }
 
     /**
