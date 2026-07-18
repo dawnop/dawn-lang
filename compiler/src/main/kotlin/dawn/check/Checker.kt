@@ -370,6 +370,7 @@ class Checker(
             is Return -> e.value?.let { nameRefs(it, out) }
             is StrLit -> e.parts.forEach { p -> if (p is StrPart.Interp) nameRefs(p.expr, out) }
             is ComptimeExpr -> nameRefs(e.body, out)
+            is UnsafePureExpr -> nameRefs(e.body, out)
             else -> {}
         }
         return out
@@ -890,6 +891,51 @@ class Checker(
         return t
     }
 
+    /**
+     * unsafe_pure { body } (docs/pure-ffi-design.md §3.2). Type-check the body
+     * exactly as usual — locals stay in scope, `?` still works — but capture its
+     * effects in isolation so we can decide what the stamp is allowed to hide:
+     *
+     *  - a concrete !io is masked to Pure (the whole point: a Java call can back
+     *    a pure function);
+     *  - an effect *variable* (!e from an effect-polymorphic callee like a
+     *    higher-order `map`) is REJECTED — masking it would be a lie the value
+     *    couldn't even honor when e = io, and it's the guard that forces
+     *    higher-order code down the pure-Dawn-recursion path (§3.3);
+     *  - a body that did no io at all makes the stamp a no-op → flagged, so every
+     *    surviving `unsafe_pure` is load-bearing and `grep` yields the real trust
+     *    list.
+     */
+    private fun checkUnsafePure(e: UnsafePureExpr, expected: Type?): Type {
+        val savedUsed = usedEffects
+        val savedWitness = effWitness
+        usedEffects = HashSet()
+        effWitness = HashMap()
+        var inner: Set<Eff> = emptySet()
+        val t = try {
+            checkExpr(e.body, expected)
+        } finally {
+            inner = usedEffects
+            usedEffects = savedUsed
+            effWitness = savedWitness
+        }
+        val poly = inner.firstOrNull { it is Eff.Var || it is Eff.Union }
+        when {
+            poly != null -> error(
+                "unsafe_pure cannot mask the effect variable !$poly — it only vouches that a concrete io effect is absent",
+                e.span,
+                "the block calls an effect-polymorphic function (e.g. a higher-order `map`/`fold`); " +
+                    "rewrite it as pure Dawn recursion over first-order pure primitives (docs/pure-ffi-design.md §3.3)")
+            Eff.Io !in inner && !t.isErrorish -> error(
+                "redundant unsafe_pure: the block is already pure", e.span,
+                "drop `unsafe_pure { … }` and keep the inner expression — the stamp is only for vouching " +
+                    "a Java interop call the effect checker would otherwise flag !io")
+        }
+        // masked: the block's own !io is deliberately not folded back into savedUsed,
+        // so the enclosing function sees this expression as Pure.
+        return t
+    }
+
     /** Int/Float/Bool/String and List/tuple/record/ADT built from them (spec §7.2). */
     private fun isConstSerializable(t: Type, visited: MutableSet<AdtInfo> = HashSet()): Boolean = when (t) {
         TInt, TFloat, TBool, TString -> true
@@ -1271,6 +1317,7 @@ class Checker(
                     "Int/Float/Bool/String and List/tuple/record/ADT values of them (spec §7.2)")
             else t
         }
+        is UnsafePureExpr -> checkUnsafePure(e, expected)
         is Call -> checkCall(e, expected)
         is CtorCall -> checkCtorCall(e, expected)
         is FieldAccess -> checkFieldAccess(e)

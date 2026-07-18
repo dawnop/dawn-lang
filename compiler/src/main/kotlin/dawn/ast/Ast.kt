@@ -367,6 +367,16 @@ class ComptimeExpr(val body: Expr, span: Span) : Expr(span) {
     var value: dawn.check.CValue? = null
 }
 
+/**
+ * unsafe_pure { expr } — the author vouches that the wrapped expression is pure
+ * (docs/pure-ffi-design.md). Type-checked as usual, but its effect is masked
+ * from !io down to Pure, so a Java interop call the checker would otherwise flag
+ * !io can back a pure function. An escape hatch: unsound if the vouch is wrong.
+ * The block is transparent at runtime (codegen emits the inner expression); it
+ * also licenses that Java call to run at compile time (comptime route C).
+ */
+class UnsafePureExpr(val body: Expr, span: Span) : Expr(span)
+
 class CtorArg(val name: String?, val expr: Expr, val span: Span)
 
 enum class BinOp { ADD, SUB, MUL, DIV, MOD, CONCAT, EQ, NEQ, LT, LE, GT, GE, AND, OR }

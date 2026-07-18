@@ -145,6 +145,7 @@ class ComptimeInterp(
                 CValue.VLambda(e.params.map { it.symbol!! }, e.body, caps)
             }
             is ComptimeExpr -> eval(e.body, HashMap<Symbol, CValue>()).also { e.value = it }
+            is UnsafePureExpr -> evalUnsafePure(e, env)
             is Propagate -> {
                 val v = eval(e.operand, env) as CValue.VAdt
                 when (v.ctor.name) {
@@ -225,8 +226,20 @@ class ComptimeInterp(
                 for (s in e.stmts) execStmt(s, env)
                 e.tail?.let { eval(it, env) } ?: CValue.VUnit
             }
+            is UnsafePureExpr -> evalUnsafePure(e, env)
         }
     }
+
+    /**
+     * unsafe_pure at compile time. The block type-checks as Pure, so it may sit
+     * in a const/comptime position — but folding it means running the vouched
+     * Java call reflectively (docs/pure-ffi-design.md route C), which is not yet
+     * implemented. Until then, refuse rather than silently mis-fold.
+     */
+    private fun evalUnsafePure(e: UnsafePureExpr, env: MutableMap<Symbol, CValue>): CValue =
+        err("unsafe_pure blocks cannot be evaluated at compile time yet", e.span,
+            "route C (reflective invoke of the vouched Java call) is unimplemented; " +
+                "keep unsafe_pure out of const initializers and comptime blocks for now")
 
     private fun execStmt(s: Stmt, env: MutableMap<Symbol, CValue>) {
         burn(s.span)

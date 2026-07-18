@@ -149,6 +149,7 @@ private class TargetQuery(private val analysis: Analyzed, private val offset: In
             }
             is StrLit -> e.parts.forEach { if (it is StrPart.Interp) visitExpr(it.expr) }
             is ComptimeExpr -> visitExpr(e.body)
+            is UnsafePureExpr -> visitExpr(e.body)
             is Propagate -> visitExpr(e.operand)
             is Unwrap -> visitExpr(e.operand)
             is Binary -> { visitExpr(e.left); visitExpr(e.right) }

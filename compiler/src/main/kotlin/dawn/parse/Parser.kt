@@ -810,6 +810,11 @@ class Parser(
                 val body = block()
                 ComptimeExpr(body, Span(kw.span.start, body.span.end))
             }
+            UNSAFE_PURE -> {
+                val kw = advance()
+                val body = block()
+                UnsafePureExpr(body, Span(kw.span.start, body.span.end))
+            }
             TYPEIDENT -> ctorExpr()
             else -> throw err("expected an expression, found `${t.text}`")
         }

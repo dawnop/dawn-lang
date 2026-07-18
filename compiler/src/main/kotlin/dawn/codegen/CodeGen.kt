@@ -3152,6 +3152,9 @@ class CodeGen(
             genLoadConst(e.value!!, e.type!!, key = e)
             true
         }
+        // unsafe_pure only masks the effect at check time; at runtime the wrapped
+        // expression runs exactly as written (docs/pure-ffi-design.md §3.5).
+        is UnsafePureExpr -> genExpr(e.body, tail)
     }
 
     // ---- comptime constants (spec §7): scalars inline, structures via static fields ----

@@ -92,4 +92,12 @@ class FmtTest {
         assertEquals("pub fn main() -> Unit !io = println(to_string(xs[0][1] + m[\"k\"]))\n", out)
         assertFidelity(src)
     }
+
+    @Test
+    fun `unsafe_pure block formats like comptime`() {
+        val src = "pub fn maxi(a: Int, b: Int) -> Int = unsafe_pure{Math.max( a,b )}\n"
+        val out = Formatter.format(src)
+        assertEquals("pub fn maxi(a: Int, b: Int) -> Int = unsafe_pure { Math.max(a, b) }\n", out)
+        assertFidelity(src)
+    }
 }
