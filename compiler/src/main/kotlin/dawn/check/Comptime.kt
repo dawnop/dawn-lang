@@ -479,11 +479,6 @@ class ComptimeInterp(
             for (x in (args[0] as CValue.VList).elems) acc = applyFn(args[2], listOf(acc, x), span)
             acc
         }
-        // std's is_empty is written on str_len, so a const calling into std needs it
-        "str_len" -> {
-            val s = (args[0] as CValue.VString).v
-            CValue.VInt(s.codePointCount(0, s.length).toLong())
-        }
         "chars" -> {
             val s = (args[0] as CValue.VString).v
             burnN(s.length.toLong(), span)
@@ -506,10 +501,6 @@ class ComptimeInterp(
             if (sep.isEmpty()) callBuiltin("chars", listOf(args[0]), span)
             else CValue.VList(s.split(sep).map { CValue.VString(it) })
         }
-        "trim" -> CValue.VString((args[0] as CValue.VString).v.trim())
-        "contains" -> CValue.VBool((args[0] as CValue.VString).v.contains((args[1] as CValue.VString).v))
-        "starts_with" -> CValue.VBool((args[0] as CValue.VString).v.startsWith((args[1] as CValue.VString).v))
-        "ends_with" -> CValue.VBool((args[0] as CValue.VString).v.endsWith((args[1] as CValue.VString).v))
         "parse_int" -> try {
             some(CValue.VInt((args[0] as CValue.VString).v.trim().toLong()))
         } catch (e: NumberFormatException) {
@@ -536,12 +527,6 @@ class ComptimeInterp(
             CValue.VList(xs.drop(n))
         }
         "reverse" -> CValue.VList((args[0] as CValue.VList).elems.reversed())
-        "index_of", "last_index_of" -> {
-            val s = (args[0] as CValue.VString).v
-            val sub = (args[1] as CValue.VString).v
-            val u = if (name == "index_of") s.indexOf(sub) else s.lastIndexOf(sub)
-            if (u < 0) none() else some(CValue.VInt(s.codePointCount(0, u).toLong()))
-        }
         else -> err("builtin `$name` is not available at comptime", span)
     }
 

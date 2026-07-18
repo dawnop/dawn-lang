@@ -13,8 +13,51 @@
 #     real class, unlike the ASM-generated dawn/rt/* helpers.
 use java "dawn.rt.StdStrings"
 
+## Number of Unicode code points in `s` (not UTF-16 units, and not `chars`' list length).
+pub fn str_len(s: String) -> Int = unsafe_pure { StdStrings.len(s) }
+
 ## True when the string has no characters.
 pub fn is_empty(s: String) -> Bool = str_len(s) == 0
+
+## `s` without leading or trailing whitespace.
+pub fn trim(s: String) -> String =
+  unsafe_pure { StdStrings.trim(s).expect("trim never returns null") }
+
+## `s` lowercased, independently of the machine's locale.
+pub fn to_lower(s: String) -> String =
+  unsafe_pure { StdStrings.toLower(s).expect("toLower never returns null") }
+
+## `s` uppercased, independently of the machine's locale.
+pub fn to_upper(s: String) -> String =
+  unsafe_pure { StdStrings.toUpper(s).expect("toUpper never returns null") }
+
+## Whether `sub` occurs anywhere in `s`.
+pub fn contains(s: String, sub: String) -> Bool = unsafe_pure { StdStrings.contains(s, sub) }
+
+## Whether `s` begins with `prefix`.
+pub fn starts_with(s: String, prefix: String) -> Bool =
+  unsafe_pure { StdStrings.startsWith(s, prefix) }
+
+## Whether `s` ends with `suffix`.
+pub fn ends_with(s: String, suffix: String) -> Bool =
+  unsafe_pure { StdStrings.endsWith(s, suffix) }
+
+## The code-point index of the first occurrence of `sub`, or `None`.
+## The forward reports "absent" as -1, since a Dawn ADT cannot cross the FFI boundary.
+pub fn index_of(s: String, sub: String) -> Option[Int] = {
+  let i = unsafe_pure { StdStrings.indexOf(s, sub) }
+  if i < 0 { None } else { Some(i) }
+}
+
+## The code-point index of the last occurrence of `sub`, or `None`.
+pub fn last_index_of(s: String, sub: String) -> Option[Int] = {
+  let i = unsafe_pure { StdStrings.lastIndexOf(s, sub) }
+  if i < 0 { None } else { Some(i) }
+}
+
+## The single-code-point string for `c`. Panics when `c` is not a valid code point.
+pub fn char_to_string(c: Int) -> String =
+  unsafe_pure { StdStrings.charToString(c).expect("char_to_string: not a valid code point") }
 
 ## `s` repeated `n` times; n <= 0 yields the empty string.
 pub fn repeat(s: String, n: Int) -> String = if n <= 0 { "" } else { s ++ repeat(s, n - 1) }

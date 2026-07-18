@@ -931,8 +931,8 @@ use java "java.lang.Math"      # Java 互操作（§9），形式不变
   - `sort_by(xs, cmp: fn(T, T) -> Int) -> List[T]` — 自定义比较函数
   - `max/min[T: Ord](xs) -> Option[T]` — 极值；空列表 `None`
   - `max_by/min_by[T, K: Ord](xs, key: fn(T) -> K) -> Option[T]` — 按键取极值
-- `core/string`：`chars split join trim starts_with ends_with contains
-  to_lower to_upper parse_int parse_float to_string index_of last_index_of ...`（`to_lower`/`to_upper`
+- `core/string`：`chars split join parse_int parse_float to_string ...`，以及**已迁入 std** 的
+  `trim starts_with ends_with contains to_lower to_upper index_of last_index_of` **`[std]`**（`to_lower`/`to_upper`
   按 Unicode 大小写折叠；字符串转数字是 `parse_int(s) -> Option[Int]`——
   没有重载，`to_int`/`to_float` 只做 Int↔Float 转换）。
 - `core/bytes`（一等 `Bytes`，§9.5.1）：`utf8(s: String) -> Bytes`（字符串的 UTF-8 字节）、
@@ -946,8 +946,8 @@ use java "java.lang.Math"      # Java 互操作（§9），形式不变
 - **码点 / 字符**（§1.5、§2.1 的补充；字符即码点 `Int`）：
   - `code_points(s: String) -> List[Int]` — 拆成码点（增补平面的代理对合并为一个码点）
   - `from_code_points(cs: List[Int]) -> String` — 由码点组装（接受增补码点）
-  - `char_to_string(c: Int) -> String` — 单码点转字符串（非法码点 panic）
-  - `str_len(s: String) -> Int` — 码点数（区别于 `chars` 返回的 `List[String]`）
+  - `char_to_string(c: Int) -> String` **`[std]`** — 单码点转字符串（非法码点 panic）
+  - `str_len(s: String) -> Int` **`[std]`** — 码点数（区别于 `chars` 返回的 `List[String]`）
   - `substring(s: String, from: Int, to: Int) -> String` **`[std]`** — 按**码点下标**切片，越界 panic
 - `core/option` / `core/result`：`map unwrap_or expect and_then ...`
 - **`Map` / `Set`**（§2.2 的内建持久容器，v0.1 以平铺内建函数提供；未来再收进 `core/map`

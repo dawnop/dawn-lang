@@ -71,6 +71,75 @@ public final class StdStrings {
         return s.substring(start, end);
     }
 
+    /** Number of Unicode code points in {@code s}. */
+    public static long len(String s) {
+        return s.codePointCount(0, s.length());
+    }
+
+    /** {@code s} with surrounding whitespace removed. */
+    public static String trim(String s) {
+        return s.strip();
+    }
+
+    /** {@code s} lowercased, locale-independently. */
+    public static String toLower(String s) {
+        return s.toLowerCase(java.util.Locale.ROOT);
+    }
+
+    /** {@code s} uppercased, locale-independently. */
+    public static String toUpper(String s) {
+        return s.toUpperCase(java.util.Locale.ROOT);
+    }
+
+    /** Whether {@code sub} occurs anywhere in {@code s}. */
+    public static boolean contains(String s, String sub) {
+        return s.contains(sub);
+    }
+
+    /** Whether {@code s} begins with {@code prefix}. */
+    public static boolean startsWith(String s, String prefix) {
+        return s.startsWith(prefix);
+    }
+
+    /** Whether {@code s} ends with {@code suffix}. */
+    public static boolean endsWith(String s, String suffix) {
+        return s.endsWith(suffix);
+    }
+
+    /**
+     * Code-point index of the first occurrence of {@code sub}, or {@code -1}.
+     *
+     * <p>The sentinel, rather than an {@code Option}, is what crosses the FFI
+     * boundary: Dawn ADTs are not expressible as a Java return type. The std
+     * wrapper turns {@code -1} back into {@code None}.
+     */
+    public static long indexOf(String s, String sub) {
+        int u = s.indexOf(sub);
+        return u < 0 ? -1 : s.codePointCount(0, u);
+    }
+
+    /** Code-point index of the last occurrence of {@code sub}, or {@code -1}. */
+    public static long lastIndexOf(String s, String sub) {
+        int u = s.lastIndexOf(sub);
+        return u < 0 ? -1 : s.codePointCount(0, u);
+    }
+
+    /**
+     * The one-code-point string for {@code c}, or {@code null} when {@code c} is
+     * not a valid code point (the std wrapper turns that into the panic).
+     *
+     * <p>The narrowing to {@code int} happens before the validity check, matching
+     * what the builtin's bytecode did — widening it would be a silent semantic
+     * change riding along with a migration.
+     */
+    public static String charToString(long c) {
+        int cp = (int) c;
+        if (!Character.isValidCodePoint(cp)) {
+            return null;
+        }
+        return String.valueOf(Character.toChars(cp));
+    }
+
     /** {@code s} with its code points reversed (surrogate pairs stay intact). */
     public static String reverse(String s) {
         int[] cps = codePoints(s);

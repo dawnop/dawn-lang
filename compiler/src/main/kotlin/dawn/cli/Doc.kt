@@ -183,14 +183,6 @@ val BUILTIN_GROUPS: List<Pair<String, List<Pair<String, String>>>> = listOf(
         "chars" to "split into single-character strings (code point aware)",
         "join" to "concatenate with a separator",
         "split" to "split around a literal separator (not a regex)",
-        "trim" to "strip leading and trailing whitespace",
-        "to_lower" to "lowercase (Locale.ROOT)",
-        "to_upper" to "uppercase (Locale.ROOT)",
-        "contains" to "whether a substring occurs",
-        "starts_with" to "whether the string starts with a prefix",
-        "ends_with" to "whether the string ends with a suffix",
-        "index_of" to "the code-point index of the first occurrence of a substring; None when absent",
-        "last_index_of" to "the code-point index of the last occurrence of a substring; None when absent",
         "parse_int" to "parse a decimal integer; None on malformed input",
         "parse_float" to "parse a floating point number; None on malformed input",
     ),
@@ -207,8 +199,6 @@ val BUILTIN_GROUPS: List<Pair<String, List<Pair<String, String>>>> = listOf(
     "char" to listOf(
         "code_points" to "split into Unicode code points (a character is its code point Int)",
         "from_code_points" to "assemble a string from code points",
-        "char_to_string" to "one code point as a string (invalid code points panic)",
-        "str_len" to "length in code points",
     ),
     "map & set" to listOf(
         "map_empty" to "the empty map",

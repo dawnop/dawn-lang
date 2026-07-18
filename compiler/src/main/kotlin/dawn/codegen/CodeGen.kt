@@ -2086,68 +2086,6 @@ class CodeGen(
             m.visitMaxs(0, 0); m.visitEnd()
         }
 
-        // char_to_string(Int) -> String: a single code point; invalid ones panic
-        run {
-            val m = cw.visitMethod(ACC_PUBLIC or ACC_STATIC, "char_to_string", "(J)L$STR;", null, null)
-            m.visitCode()
-            m.visitVarInsn(LLOAD, 0); m.visitInsn(L2I); m.visitVarInsn(ISTORE, 2)
-            val ok = Label()
-            m.visitVarInsn(ILOAD, 2)
-            m.visitMethodInsn(INVOKESTATIC, "java/lang/Character", "isValidCodePoint", "(I)Z", false)
-            m.visitJumpInsn(IFNE, ok)
-            m.visitTypeInsn(NEW, PANIC_CLASS); m.visitInsn(DUP)
-            m.visitLdcInsn("char_to_string: not a valid code point")
-            m.visitMethodInsn(INVOKESPECIAL, PANIC_CLASS, "<init>", "(Ljava/lang/String;)V", false)
-            m.visitInsn(ATHROW)
-            m.visitLabel(ok)
-            m.visitVarInsn(ILOAD, 2)
-            m.visitMethodInsn(INVOKESTATIC, "java/lang/Character", "toChars", "(I)[C", false)
-            m.visitMethodInsn(INVOKESTATIC, STR, "valueOf", "([C)L$STR;", false)
-            m.visitInsn(ARETURN)
-            m.visitMaxs(0, 0); m.visitEnd()
-        }
-
-        // str_len(String) -> Int: number of code points
-        run {
-            val m = cw.visitMethod(ACC_PUBLIC or ACC_STATIC, "str_len", "(L$STR;)J", null, null)
-            m.visitCode()
-            m.visitVarInsn(ALOAD, 0); m.visitInsn(ICONST_0)
-            m.visitVarInsn(ALOAD, 0); m.visitMethodInsn(INVOKEVIRTUAL, STR, "length", "()I", false)
-            m.visitMethodInsn(INVOKEVIRTUAL, STR, "codePointCount", "(II)I", false)
-            m.visitInsn(I2L); m.visitInsn(LRETURN)
-            m.visitMaxs(0, 0); m.visitEnd()
-        }
-
-        // indexOf(String s, String sub) -> Option: first code-point index, else None.
-        // lastIndexOf(String s, String sub): same, last occurrence. Both take Java's
-        // UTF-16 index and convert to a code-point index so results line up with
-        // substring/code_points (which are code-point-based).
-        for (name in listOf("indexOf", "lastIndexOf")) {
-            val m = cw.visitMethod(ACC_PUBLIC or ACC_STATIC, name, "(L$STR;L$STR;)LOption;", null, null)
-            m.visitCode()
-            m.visitVarInsn(ALOAD, 0)
-            m.visitVarInsn(ALOAD, 1)
-            m.visitMethodInsn(INVOKEVIRTUAL, STR, name, "(L$STR;)I", false)
-            m.visitVarInsn(ISTORE, 2) // u: UTF-16 index or -1
-            val none = Label()
-            m.visitVarInsn(ILOAD, 2)
-            m.visitJumpInsn(IFLT, none)
-            m.visitTypeInsn(NEW, "Option\$Some")
-            m.visitInsn(DUP)
-            m.visitVarInsn(ALOAD, 0)
-            m.visitInsn(ICONST_0)
-            m.visitVarInsn(ILOAD, 2)
-            m.visitMethodInsn(INVOKEVIRTUAL, STR, "codePointCount", "(II)I", false)
-            m.visitInsn(I2L)
-            m.visitMethodInsn(INVOKESTATIC, "java/lang/Long", "valueOf", "(J)Ljava/lang/Long;", false)
-            m.visitMethodInsn(INVOKESPECIAL, "Option\$Some", "<init>", "(L$OBJ;)V", false)
-            m.visitInsn(ARETURN)
-            m.visitLabel(none)
-            m.visitFieldInsn(GETSTATIC, "Option\$None", "INSTANCE", "LOption\$None;")
-            m.visitInsn(ARETURN)
-            m.visitMaxs(0, 0); m.visitEnd()
-        }
-
         cw.visitEnd()
         return cw.toByteArray()
     }
@@ -3401,10 +3339,6 @@ class CodeGen(
         "find" -> Handle(H_INVOKESTATIC, LISTS_CLASS, "find", "(L$JLIST;L${fnIface(1)};)LOption;", false)
         "take", "drop" -> Handle(H_INVOKESTATIC, LISTS_CLASS, fv.name, "(L$JLIST;J)L$JLIST;", false)
         "reverse" -> Handle(H_INVOKESTATIC, LISTS_CLASS, "reverse", "(L$JLIST;)L$JLIST;", false)
-        "index_of" -> Handle(H_INVOKESTATIC, STRINGS_CLASS, "indexOf",
-            "(Ljava/lang/String;Ljava/lang/String;)LOption;", false)
-        "last_index_of" -> Handle(H_INVOKESTATIC, STRINGS_CLASS, "lastIndexOf",
-            "(Ljava/lang/String;Ljava/lang/String;)LOption;", false)
         "chars" -> Handle(H_INVOKESTATIC, STRINGS_CLASS, "chars", "(Ljava/lang/String;)L$JLIST;", false)
         "join" -> Handle(H_INVOKESTATIC, STRINGS_CLASS, "join", "(L$JLIST;Ljava/lang/String;)Ljava/lang/String;", false)
         "split" -> Handle(H_INVOKESTATIC, STRINGS_CLASS, "split",
@@ -3486,26 +3420,6 @@ class CodeGen(
                 m.visitMethodInsn(INVOKEINTERFACE, JLIST, "size", "()I", true)
                 m.visitInsn(I2L)
                 m.visitInsn(LRETURN)
-            }
-            "trim" -> {
-                m.visitVarInsn(ALOAD, 0)
-                m.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "strip", "()Ljava/lang/String;", false)
-                m.visitInsn(ARETURN)
-            }
-            "to_lower", "to_upper" -> {
-                m.visitVarInsn(ALOAD, 0)
-                m.visitFieldInsn(GETSTATIC, "java/util/Locale", "ROOT", "Ljava/util/Locale;")
-                m.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String",
-                    if (sig.name == "to_lower") "toLowerCase" else "toUpperCase",
-                    "(Ljava/util/Locale;)Ljava/lang/String;", false)
-                m.visitInsn(ARETURN)
-            }
-            "contains" -> {
-                m.visitVarInsn(ALOAD, 0)
-                m.visitVarInsn(ALOAD, 1)
-                m.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "contains",
-                    "(Ljava/lang/CharSequence;)Z", false)
-                m.visitInsn(IRETURN)
             }
             "starts_with", "ends_with" -> {
                 m.visitVarInsn(ALOAD, 0)
@@ -4319,14 +4233,6 @@ class CodeGen(
             mv.visitMethodInsn(INVOKESTATIC, LISTS_CLASS, "reverse", "(L$JLIST;)L$JLIST;", false)
             true
         }
-        "index_of", "last_index_of" -> {
-            genExpr(e.args[0], tail = false)
-            genExpr(e.args[1], tail = false)
-            val method = if (e.callee == "index_of") "indexOf" else "lastIndexOf"
-            mv.visitMethodInsn(INVOKESTATIC, STRINGS_CLASS, method,
-                "(Ljava/lang/String;Ljava/lang/String;)LOption;", false)
-            true
-        }
         "expect" -> {
             genExpr(e.args[0], tail = false) // Option
             genExpr(e.args[1], tail = false) // message
@@ -4405,25 +4311,6 @@ class CodeGen(
             genExpr(e.args[1], tail = false)
             mv.visitMethodInsn(INVOKESTATIC, STRINGS_CLASS, "split",
                 "(Ljava/lang/String;Ljava/lang/String;)L$JLIST;", false)
-            true
-        }
-        "trim" -> {
-            genExpr(e.args[0], tail = false)
-            mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "strip", "()Ljava/lang/String;", false)
-            true
-        }
-        "to_lower", "to_upper" -> {
-            genExpr(e.args[0], tail = false)
-            mv.visitFieldInsn(GETSTATIC, "java/util/Locale", "ROOT", "Ljava/util/Locale;")
-            mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String",
-                if (e.callee == "to_lower") "toLowerCase" else "toUpperCase",
-                "(Ljava/util/Locale;)Ljava/lang/String;", false)
-            true
-        }
-        "contains" -> {
-            genExpr(e.args[0], tail = false)
-            genExpr(e.args[1], tail = false)
-            mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "contains", "(Ljava/lang/CharSequence;)Z", false)
             true
         }
         "starts_with", "ends_with" -> {
@@ -4525,7 +4412,7 @@ class CodeGen(
             mv.visitMethodInsn(INVOKESTATIC, LISTS_CLASS, "fromArray", "([Ljava/lang/String;)L$JLIST;", false)
             true
         }
-        "code_points", "from_code_points", "char_to_string", "str_len" -> {
+        "code_points", "from_code_points" -> {
             for (a in e.args) genExpr(a, tail = false)
             val sig = BUILTINS.getValue(e.callee)
             mv.visitMethodInsn(INVOKESTATIC, STRINGS_CLASS, e.callee, methodDesc(sig.paramTypes, sig.ret), false)

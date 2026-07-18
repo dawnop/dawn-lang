@@ -171,6 +171,29 @@ class StdLibTest {
     }
 
     @Test
+    fun `the migrated string group keeps its code-point semantics and its folding`() {
+        // The migration must be behaviour-preserving on both axes that are easy to
+        // lose: code points (not UTF-16 units) and compile-time folding.
+        val out = run(
+            """
+            const T: String = trim("  hi  ")
+            const C: Bool = contains("hello", "ell")
+            const N: Int = str_len("héllo🎈")
+            pub fn main() -> Unit !io = {
+              println("[${'$'}{T}] ${'$'}{C} ${'$'}{N}")
+              println(to_upper("héllo"))
+              match index_of("héllo🎈x", "x") {
+                Some(i) -> println("${'$'}{i}")
+                None -> println("none")
+              }
+            }
+            """.trimIndent(),
+        )
+        // index 6, not 7: the astral code point counts once
+        assertEquals("[hi] true 6\nHÉLLO\n6\n", out)
+    }
+
+    @Test
     fun `a std function cannot be redefined`() {
         val errs = errorsOf(
             """
