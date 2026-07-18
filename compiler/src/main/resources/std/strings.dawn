@@ -114,6 +114,40 @@ pub fn cursor_prev(s: String, c: Int) -> Int = unsafe_pure { StdStrings.cursorPr
 pub fn cursor_slice(s: String, from: Int, to: Int) -> String =
   unsafe_pure { StdStrings.cursorSlice(s, from, to).expect("cursor_slice: invalid cursor range") }
 
+## The characters of `s`, each as a one-character string.
+## A surrogate pair stays one element — this splits by character, not by unit.
+pub fn chars(s: String) -> List[String] = {
+  let empty: List[String] = []
+  chars_go(s, cursor_start(s), empty)
+}
+
+fn chars_go(s: String, c: Int, acc: List[String]) -> List[String] =
+  if cursor_done(s, c) {
+    acc
+  } else {
+    let n = cursor_next(s, c)
+    chars_go(s, n, acc ++ [cursor_slice(s, c, n)])
+  }
+
+## `s` cut at each occurrence of `sep`, left to right. Adjacent separators yield
+## empty pieces, and the result always has one more piece than there were
+## separators. An empty `sep` yields the characters, as `chars` does.
+pub fn split(s: String, sep: String) -> List[String] =
+  if sep == "" {
+    chars(s)
+  } else {
+    let empty: List[String] = []
+    split_go(s, sep, cursor_start(s), empty)
+  }
+
+fn split_go(s: String, sep: String, at: Int, acc: List[String]) -> List[String] =
+  match index_of_from(s, sep, at) {
+    None -> acc ++ [cursor_slice(s, at, cursor_end(s))]
+    # `at + cursor_end(sep)` is the cursor past this match: an occurrence of `sep`
+    # is exactly `sep` wide. Cursor arithmetic is otherwise not allowed.
+    Some(i) -> split_go(s, sep, i + cursor_end(sep), acc ++ [cursor_slice(s, at, i)])
+  }
+
 ## The cursor of the first occurrence of `sub` at or after `from`, or `None`.
 ## Unlike `index_of`, this both takes and returns a cursor, so repeated searching
 ## down a string stays linear overall.

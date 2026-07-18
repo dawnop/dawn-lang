@@ -68,7 +68,7 @@ class CodeGen(
          * so `use java` can reflect on them from std. They ship in the compiler jar
          * and are copied into every built program (see [vendorRuntimeClasses]).
          */
-        val VENDORED_RT_CLASSES = listOf("dawn/rt/StdStrings", "dawn/rt/DawnList")
+        val VENDORED_RT_CLASSES = listOf("dawn/rt/StdStrings", "dawn/rt/StdBytes", "dawn/rt/DawnList")
 
         const val PANIC_CLASS = "dawn/rt/PanicError"
         const val LISTS_CLASS = "dawn/rt/Lists"
@@ -1621,49 +1621,6 @@ class CodeGen(
         cw.visit(V17, ACC_PUBLIC or ACC_FINAL, STRINGS_CLASS, null, OBJ, null)
         val STR = "java/lang/String"
 
-        // chars: iterate by code point so surrogate pairs stay whole
-        run {
-            val m = cw.visitMethod(ACC_PUBLIC or ACC_STATIC, "chars", "(L$STR;)L$JLIST;", null, null)
-            m.visitCode()
-            m.visitTypeInsn(NEW, ARRAYLIST)
-            m.visitInsn(DUP)
-            m.visitMethodInsn(INVOKESPECIAL, ARRAYLIST, "<init>", "()V", false)
-            m.visitVarInsn(ASTORE, 1)
-            m.visitInsn(ICONST_0)
-            m.visitVarInsn(ISTORE, 2)
-            val loop = Label()
-            val done = Label()
-            m.visitLabel(loop)
-            m.visitVarInsn(ILOAD, 2)
-            m.visitVarInsn(ALOAD, 0)
-            m.visitMethodInsn(INVOKEVIRTUAL, STR, "length", "()I", false)
-            m.visitJumpInsn(IF_ICMPGE, done)
-            m.visitVarInsn(ALOAD, 0)
-            m.visitVarInsn(ILOAD, 2)
-            m.visitMethodInsn(INVOKEVIRTUAL, STR, "codePointAt", "(I)I", false)
-            m.visitMethodInsn(INVOKESTATIC, "java/lang/Character", "charCount", "(I)I", false)
-            m.visitVarInsn(ISTORE, 3)
-            m.visitVarInsn(ALOAD, 1)
-            m.visitVarInsn(ALOAD, 0)
-            m.visitVarInsn(ILOAD, 2)
-            m.visitVarInsn(ILOAD, 2)
-            m.visitVarInsn(ILOAD, 3)
-            m.visitInsn(IADD)
-            m.visitMethodInsn(INVOKEVIRTUAL, STR, "substring", "(II)L$STR;", false)
-            m.visitMethodInsn(INVOKEVIRTUAL, ARRAYLIST, "add", "(L$OBJ;)Z", false)
-            m.visitInsn(POP)
-            m.visitVarInsn(ILOAD, 2)
-            m.visitVarInsn(ILOAD, 3)
-            m.visitInsn(IADD)
-            m.visitVarInsn(ISTORE, 2)
-            m.visitJumpInsn(GOTO, loop)
-            m.visitLabel(done)
-            m.visitVarInsn(ALOAD, 1)
-            m.visitInsn(ARETURN)
-            m.visitMaxs(0, 0)
-            m.visitEnd()
-        }
-
         run {
             val m = cw.visitMethod(ACC_PUBLIC or ACC_STATIC, "join", "(L$JLIST;L$STR;)L$STR;", null, null)
             m.visitCode()
@@ -1700,59 +1657,6 @@ class CodeGen(
             m.visitLabel(done)
             m.visitVarInsn(ALOAD, 2)
             m.visitMethodInsn(INVOKEVIRTUAL, SB, "toString", "()L$STR;", false)
-            m.visitInsn(ARETURN)
-            m.visitMaxs(0, 0)
-            m.visitEnd()
-        }
-
-        run {
-            val m = cw.visitMethod(ACC_PUBLIC or ACC_STATIC, "split", "(L$STR;L$STR;)L$JLIST;", null, null)
-            m.visitCode()
-            val nonEmpty = Label()
-            m.visitVarInsn(ALOAD, 1)
-            m.visitMethodInsn(INVOKEVIRTUAL, STR, "isEmpty", "()Z", false)
-            m.visitJumpInsn(IFEQ, nonEmpty)
-            m.visitVarInsn(ALOAD, 0)
-            m.visitMethodInsn(INVOKESTATIC, STRINGS_CLASS, "chars", "(L$STR;)L$JLIST;", false)
-            m.visitInsn(ARETURN)
-            m.visitLabel(nonEmpty)
-            m.visitTypeInsn(NEW, ARRAYLIST)
-            m.visitInsn(DUP)
-            m.visitMethodInsn(INVOKESPECIAL, ARRAYLIST, "<init>", "()V", false)
-            m.visitVarInsn(ASTORE, 2)
-            m.visitInsn(ICONST_0)
-            m.visitVarInsn(ISTORE, 3)
-            val loop = Label()
-            val tail = Label()
-            m.visitLabel(loop)
-            m.visitVarInsn(ALOAD, 0)
-            m.visitVarInsn(ALOAD, 1)
-            m.visitVarInsn(ILOAD, 3)
-            m.visitMethodInsn(INVOKEVIRTUAL, STR, "indexOf", "(L$STR;I)I", false)
-            m.visitVarInsn(ISTORE, 4)
-            m.visitVarInsn(ILOAD, 4)
-            m.visitJumpInsn(IFLT, tail)
-            m.visitVarInsn(ALOAD, 2)
-            m.visitVarInsn(ALOAD, 0)
-            m.visitVarInsn(ILOAD, 3)
-            m.visitVarInsn(ILOAD, 4)
-            m.visitMethodInsn(INVOKEVIRTUAL, STR, "substring", "(II)L$STR;", false)
-            m.visitMethodInsn(INVOKEVIRTUAL, ARRAYLIST, "add", "(L$OBJ;)Z", false)
-            m.visitInsn(POP)
-            m.visitVarInsn(ILOAD, 4)
-            m.visitVarInsn(ALOAD, 1)
-            m.visitMethodInsn(INVOKEVIRTUAL, STR, "length", "()I", false)
-            m.visitInsn(IADD)
-            m.visitVarInsn(ISTORE, 3)
-            m.visitJumpInsn(GOTO, loop)
-            m.visitLabel(tail)
-            m.visitVarInsn(ALOAD, 2)
-            m.visitVarInsn(ALOAD, 0)
-            m.visitVarInsn(ILOAD, 3)
-            m.visitMethodInsn(INVOKEVIRTUAL, STR, "substring", "(I)L$STR;", false)
-            m.visitMethodInsn(INVOKEVIRTUAL, ARRAYLIST, "add", "(L$OBJ;)Z", false)
-            m.visitInsn(POP)
-            m.visitVarInsn(ALOAD, 2)
             m.visitInsn(ARETURN)
             m.visitMaxs(0, 0)
             m.visitEnd()
@@ -1858,7 +1762,6 @@ class CodeGen(
         val cw = DawnClassWriter()
         cw.visit(V17, ACC_PUBLIC or ACC_FINAL, BYTES_CLASS, null, OBJ, null)
         val ARRAYS = "java/util/Arrays"
-        val MATH = "java/lang/Math"
 
         // concat(byte[] a, byte[] b) -> byte[]
         run {
@@ -1877,104 +1780,6 @@ class CodeGen(
             m.visitMethodInsn(INVOKESTATIC, "java/lang/System", "arraycopy",
                 "(Ljava/lang/Object;ILjava/lang/Object;II)V", false)
             m.visitVarInsn(ALOAD, 4); m.visitInsn(ARETURN)
-            m.visitMaxs(0, 0); m.visitEnd()
-        }
-
-        // slice(byte[] b, long start, long end) -> byte[]: [start, end), start/end
-        // clamped into [0, len]; start > end yields empty.
-        run {
-            val m = cw.visitMethod(ACC_PUBLIC or ACC_STATIC, "slice", "([BJJ)[B", null, null)
-            m.visitCode()
-            m.visitVarInsn(ALOAD, 0); m.visitInsn(ARRAYLENGTH); m.visitVarInsn(ISTORE, 5) // len
-            // s = (int) max(0, min(start, len))
-            m.visitInsn(LCONST_0)
-            m.visitVarInsn(LLOAD, 1); m.visitVarInsn(ILOAD, 5); m.visitInsn(I2L)
-            m.visitMethodInsn(INVOKESTATIC, MATH, "min", "(JJ)J", false)
-            m.visitMethodInsn(INVOKESTATIC, MATH, "max", "(JJ)J", false)
-            m.visitInsn(L2I); m.visitVarInsn(ISTORE, 6) // s
-            // e = (int) max(0, min(end, len))
-            m.visitInsn(LCONST_0)
-            m.visitVarInsn(LLOAD, 3); m.visitVarInsn(ILOAD, 5); m.visitInsn(I2L)
-            m.visitMethodInsn(INVOKESTATIC, MATH, "min", "(JJ)J", false)
-            m.visitMethodInsn(INVOKESTATIC, MATH, "max", "(JJ)J", false)
-            m.visitInsn(L2I); m.visitVarInsn(ISTORE, 7) // e
-            // if (s > e) e = s
-            val okE = Label()
-            m.visitVarInsn(ILOAD, 6); m.visitVarInsn(ILOAD, 7); m.visitJumpInsn(IF_ICMPLE, okE)
-            m.visitVarInsn(ILOAD, 6); m.visitVarInsn(ISTORE, 7)
-            m.visitLabel(okE)
-            m.visitVarInsn(ALOAD, 0); m.visitVarInsn(ILOAD, 6); m.visitVarInsn(ILOAD, 7)
-            m.visitMethodInsn(INVOKESTATIC, ARRAYS, "copyOfRange", "([BII)[B", false)
-            m.visitInsn(ARETURN)
-            m.visitMaxs(0, 0); m.visitEnd()
-        }
-
-        // at(byte[] b, long i) -> long (0..255); out of range panics
-        run {
-            val m = cw.visitMethod(ACC_PUBLIC or ACC_STATIC, "at", "([BJ)J", null, null)
-            m.visitCode()
-            m.visitVarInsn(ALOAD, 0); m.visitInsn(ARRAYLENGTH); m.visitVarInsn(ISTORE, 3) // len
-            val bad = Label(); val ok = Label()
-            m.visitVarInsn(LLOAD, 1); m.visitInsn(LCONST_0); m.visitInsn(LCMP); m.visitJumpInsn(IFLT, bad)
-            m.visitVarInsn(LLOAD, 1); m.visitVarInsn(ILOAD, 3); m.visitInsn(I2L); m.visitInsn(LCMP)
-            m.visitJumpInsn(IFGE, bad)
-            m.visitJumpInsn(GOTO, ok)
-            m.visitLabel(bad)
-            m.visitTypeInsn(NEW, PANIC_CLASS); m.visitInsn(DUP)
-            m.visitLdcInsn("byte_at: index out of range")
-            m.visitMethodInsn(INVOKESPECIAL, PANIC_CLASS, "<init>", "(Ljava/lang/String;)V", false)
-            m.visitInsn(ATHROW)
-            m.visitLabel(ok)
-            m.visitVarInsn(ALOAD, 0); m.visitVarInsn(LLOAD, 1); m.visitInsn(L2I); m.visitInsn(BALOAD)
-            m.visitIntInsn(SIPUSH, 255); m.visitInsn(IAND); m.visitInsn(I2L)
-            m.visitInsn(LRETURN)
-            m.visitMaxs(0, 0); m.visitEnd()
-        }
-
-        // indexOf(byte[] b, byte[] needle, long from) -> Option: first byte index of
-        // needle at or after clamped `from`, else None. Empty needle matches at from.
-        run {
-            val m = cw.visitMethod(ACC_PUBLIC or ACC_STATIC, "indexOf", "([B[BJ)LOption;", null, null)
-            m.visitCode()
-            m.visitVarInsn(ALOAD, 0); m.visitInsn(ARRAYLENGTH); m.visitVarInsn(ISTORE, 4) // len
-            m.visitVarInsn(ALOAD, 1); m.visitInsn(ARRAYLENGTH); m.visitVarInsn(ISTORE, 5) // nl
-            // f = (int) max(0, min(from, len))
-            m.visitInsn(LCONST_0)
-            m.visitVarInsn(LLOAD, 2); m.visitVarInsn(ILOAD, 4); m.visitInsn(I2L)
-            m.visitMethodInsn(INVOKESTATIC, MATH, "min", "(JJ)J", false)
-            m.visitMethodInsn(INVOKESTATIC, MATH, "max", "(JJ)J", false)
-            m.visitInsn(L2I); m.visitVarInsn(ISTORE, 6) // f
-            val haveNeedle = Label()
-            m.visitVarInsn(ILOAD, 5); m.visitJumpInsn(IFNE, haveNeedle)
-            // empty needle -> Some(f)
-            emitSomeLong(m, 6)
-            m.visitInsn(ARETURN)
-            m.visitLabel(haveNeedle)
-            m.visitVarInsn(ILOAD, 6); m.visitVarInsn(ISTORE, 7) // i = f
-            val loop = Label(); val none = Label(); val matched = Label(); val nextI = Label()
-            m.visitLabel(loop)
-            // if (i > len - nl) -> none
-            m.visitVarInsn(ILOAD, 7)
-            m.visitVarInsn(ILOAD, 4); m.visitVarInsn(ILOAD, 5); m.visitInsn(ISUB)
-            m.visitJumpInsn(IF_ICMPGT, none)
-            m.visitInsn(ICONST_0); m.visitVarInsn(ISTORE, 8) // j
-            val inner = Label()
-            m.visitLabel(inner)
-            m.visitVarInsn(ILOAD, 8); m.visitVarInsn(ILOAD, 5); m.visitJumpInsn(IF_ICMPGE, matched)
-            // if (b[i+j] != needle[j]) -> nextI
-            m.visitVarInsn(ALOAD, 0); m.visitVarInsn(ILOAD, 7); m.visitVarInsn(ILOAD, 8); m.visitInsn(IADD)
-            m.visitInsn(BALOAD)
-            m.visitVarInsn(ALOAD, 1); m.visitVarInsn(ILOAD, 8); m.visitInsn(BALOAD)
-            m.visitJumpInsn(IF_ICMPNE, nextI)
-            m.visitIincInsn(8, 1); m.visitJumpInsn(GOTO, inner)
-            m.visitLabel(matched)
-            emitSomeLong(m, 7)
-            m.visitInsn(ARETURN)
-            m.visitLabel(nextI)
-            m.visitIincInsn(7, 1); m.visitJumpInsn(GOTO, loop)
-            m.visitLabel(none)
-            m.visitFieldInsn(GETSTATIC, "Option\$None", "INSTANCE", "LOption\$None;")
-            m.visitInsn(ARETURN)
             m.visitMaxs(0, 0); m.visitEnd()
         }
 
@@ -3092,10 +2897,7 @@ class CodeGen(
         "get" -> Handle(H_INVOKESTATIC, LISTS_CLASS, "get", "(L$JLIST;J)LOption;", false)
         "range" -> Handle(H_INVOKESTATIC, LISTS_CLASS, "range", "(JJ)L$JLIST;", false)
         "sort_by" -> Handle(H_INVOKESTATIC, LISTS_CLASS, "sortBy", "(L$JLIST;L${fnIface(2)};)L$JLIST;", false)
-        "chars" -> Handle(H_INVOKESTATIC, STRINGS_CLASS, "chars", "(Ljava/lang/String;)L$JLIST;", false)
         "join" -> Handle(H_INVOKESTATIC, STRINGS_CLASS, "join", "(L$JLIST;Ljava/lang/String;)Ljava/lang/String;", false)
-        "split" -> Handle(H_INVOKESTATIC, STRINGS_CLASS, "split",
-            "(Ljava/lang/String;Ljava/lang/String;)L$JLIST;", false)
         "parse_int" -> Handle(H_INVOKESTATIC, STRINGS_CLASS, "parseInt", "(Ljava/lang/String;)LOption;", false)
         "parse_float" -> Handle(H_INVOKESTATIC, STRINGS_CLASS, "parseFloat", "(Ljava/lang/String;)LOption;", false)
         "java_try" -> Handle(H_INVOKESTATIC, IO_CLASS, "javaTry", "(L${fnIface(0)};)LResult;", false)
@@ -4012,23 +3814,11 @@ class CodeGen(
             }
             true
         }
-        "chars" -> {
-            genExpr(e.args[0], tail = false)
-            mv.visitMethodInsn(INVOKESTATIC, STRINGS_CLASS, "chars", "(Ljava/lang/String;)L$JLIST;", false)
-            true
-        }
         "join" -> {
             genExpr(e.args[0], tail = false)
             genExpr(e.args[1], tail = false)
             mv.visitMethodInsn(INVOKESTATIC, STRINGS_CLASS, "join",
                 "(L$JLIST;Ljava/lang/String;)Ljava/lang/String;", false)
-            true
-        }
-        "split" -> {
-            genExpr(e.args[0], tail = false)
-            genExpr(e.args[1], tail = false)
-            mv.visitMethodInsn(INVOKESTATIC, STRINGS_CLASS, "split",
-                "(Ljava/lang/String;Ljava/lang/String;)L$JLIST;", false)
             true
         }
         "starts_with", "ends_with" -> {
@@ -4052,46 +3842,6 @@ class CodeGen(
         "catch_panic" -> {
             genExpr(e.args[0], tail = false)
             mv.visitMethodInsn(INVOKESTATIC, IO_CLASS, "catchPanic", "(L${fnIface(0)};)LResult;", false)
-            true
-        }
-        "utf8" -> {
-            genExpr(e.args[0], tail = false)
-            mv.visitFieldInsn(GETSTATIC, "java/nio/charset/StandardCharsets", "UTF_8",
-                "Ljava/nio/charset/Charset;")
-            mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "getBytes",
-                "(Ljava/nio/charset/Charset;)[B", false)
-            true
-        }
-        "decode" -> {
-            // new String(bytes, charsetName)
-            mv.visitTypeInsn(NEW, "java/lang/String")
-            mv.visitInsn(DUP)
-            genExpr(e.args[0], tail = false) // byte[]
-            genExpr(e.args[1], tail = false) // charset name
-            mv.visitMethodInsn(INVOKESPECIAL, "java/lang/String", "<init>",
-                "([BLjava/lang/String;)V", false)
-            true
-        }
-        "byte_len" -> {
-            genExpr(e.args[0], tail = false)
-            mv.visitInsn(ARRAYLENGTH)
-            mv.visitInsn(I2L)
-            true
-        }
-        "byte_at" -> {
-            genExpr(e.args[0], tail = false)
-            genExpr(e.args[1], tail = false)
-            mv.visitMethodInsn(INVOKESTATIC, BYTES_CLASS, "at", "([BJ)J", false)
-            true
-        }
-        "byte_slice" -> {
-            for (a in e.args) genExpr(a, tail = false)
-            mv.visitMethodInsn(INVOKESTATIC, BYTES_CLASS, "slice", "([BJJ)[B", false)
-            true
-        }
-        "byte_index_of" -> {
-            for (a in e.args) genExpr(a, tail = false)
-            mv.visitMethodInsn(INVOKESTATIC, BYTES_CLASS, "indexOf", "([B[BJ)LOption;", false)
             true
         }
         "cast" -> {

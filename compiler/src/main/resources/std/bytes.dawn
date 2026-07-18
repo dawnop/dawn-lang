@@ -1,0 +1,45 @@
+# Dawn's standard library: byte-string operations (spec §9.5.1).
+#
+# The Bytes half of "batch A" (docs/pure-ffi-design.md §四) — the same shape as
+# std/strings.dawn: a forward to `dawn.rt.StdBytes`, a source-compiled class the
+# checker can reflect on, wrapped in `unsafe_pure` because every Java call reads
+# as !io.
+#
+# `Bytes` crosses the FFI boundary in both directions already (it is a JVM
+# `byte[]`), so unlike the String group nothing here needs a workaround for the
+# argument or return type. What does need one is the *result* shapes: a Dawn ADT
+# cannot be a Java return type, so absence and out-of-range come back as
+# sentinels and are turned into `Option`/panic on this side.
+#
+# `Bytes ++ Bytes` is an operator, not a function, and stays in the compiler.
+use java "dawn.rt.StdBytes"
+
+## The UTF-8 bytes of `s`.
+pub fn utf8(s: String) -> Bytes =
+  unsafe_pure { StdBytes.utf8(s).expect("utf8 never returns null") }
+
+## `b` decoded with the named charset. Panics when no such charset exists.
+pub fn decode(b: Bytes, charset: String) -> String =
+  unsafe_pure { StdBytes.decode(b, charset).expect("decode: unsupported charset") }
+
+## Number of bytes in `b`.
+pub fn byte_len(b: Bytes) -> Int = unsafe_pure { StdBytes.len(b) }
+
+## The byte at `i` as 0..255. Panics when `i` is out of range — a programming
+## error, like indexing a list past its end. The -1 the forward returns is that
+## signal, and cannot collide with a real byte value.
+pub fn byte_at(b: Bytes, i: Int) -> Int = {
+  let v = unsafe_pure { StdBytes.at(b, i) }
+  if v < 0 { panic("byte_at: index out of range") } else { v }
+}
+
+## The bytes in `[start, end)`. Both ends are clamped into range and
+## `start > end` yields empty, so this never panics.
+pub fn byte_slice(b: Bytes, start: Int, end: Int) -> Bytes =
+  unsafe_pure { StdBytes.slice(b, start, end).expect("slice never returns null") }
+
+## Byte index of the first occurrence of `needle` at or after `from`, or `None`.
+pub fn byte_index_of(b: Bytes, needle: Bytes, from: Int) -> Option[Int] = {
+  let i = unsafe_pure { StdBytes.indexOf(b, needle, from) }
+  if i < 0 { None } else { Some(i) }
+}

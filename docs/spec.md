@@ -939,11 +939,11 @@ use java "java.lang.Math"      # Java 互操作（§9），形式不变
   - `sort_by(xs, cmp: fn(T, T) -> Int) -> List[T]` — 自定义比较函数
   - `max/min[T: Ord](xs) -> Option[T]` — 极值；空列表 `None`
   - `max_by/min_by[T, K: Ord](xs, key: fn(T) -> K) -> Option[T]` — 按键取极值
-- `core/string`：`chars split join parse_int parse_float to_string ...`，以及**已迁入 std** 的
+- `core/string`：`join parse_int parse_float to_string ...`（`chars`/`split` **`[std]`**），以及**已迁入 std** 的
   `trim starts_with ends_with contains to_lower to_upper index_of last_index_of` **`[std]`**（`to_lower`/`to_upper`
   按 Unicode 大小写折叠；字符串转数字是 `parse_int(s) -> Option[Int]`——
   没有重载，`to_int`/`to_float` 只做 Int↔Float 转换）。
-- `core/bytes`（一等 `Bytes`，§9.5.1）：`utf8(s: String) -> Bytes`（字符串的 UTF-8 字节）、
+- `core/bytes`（一等 `Bytes`，§9.5.1；除 `cast` 外**整组已迁入 std** **`[std]`**）：`utf8(s: String) -> Bytes`（字符串的 UTF-8 字节）、
   `decode(b: Bytes, charset: String) -> String`（按字符集解码，替代旧
   `String.new(bytes, charset)`）、`byte_len(b) -> Int`、`byte_at(b, i) -> Int`（0..255，越界 panic）、
   `byte_slice(b, start, end) -> Bytes`（`[start,end)`，下标 clamp）、

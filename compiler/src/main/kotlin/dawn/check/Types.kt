@@ -393,12 +393,8 @@ val BUILTINS: Map<String, FnSig> = run {
         // core/string (spec §11); to_string's T is checked printable at the use site
         FnSig("to_string", listOf(t), listOf("x"), Type.TString,
             Eff.Pure, isBuiltin = true, typeParams = listOf(t)),
-        FnSig("chars", listOf(Type.TString), listOf("s"),
-            Type.TList(Type.TString), Eff.Pure, isBuiltin = true),
         FnSig("join", listOf(Type.TList(Type.TString), Type.TString), listOf("xs", "sep"),
             Type.TString, Eff.Pure, isBuiltin = true),
-        FnSig("split", listOf(Type.TString, Type.TString), listOf("s", "sep"),
-            Type.TList(Type.TString), Eff.Pure, isBuiltin = true),
         // code points / characters (spec §1.5, §11): a character is its Int code point
         FnSig("code_points", listOf(Type.TString), listOf("s"), Type.TList(Type.TInt),
             Eff.Pure, isBuiltin = true),
@@ -420,20 +416,6 @@ val BUILTINS: Map<String, FnSig> = run {
         // replaces String.new(bytes, charset)). len/at/slice/index_of make Bytes a
         // usable payload for binary bodies, crypto input, and multipart parsing.
         // Concatenation is `++` and equality is `==` (structural), handled in codegen.
-        FnSig("utf8", listOf(Type.TString), listOf("s"), Type.TBytes, Eff.Pure, isBuiltin = true),
-        FnSig("decode", listOf(Type.TBytes, Type.TString), listOf("b", "charset"),
-            Type.TString, Eff.Pure, isBuiltin = true),
-        FnSig("byte_len", listOf(Type.TBytes), listOf("b"), Type.TInt, Eff.Pure, isBuiltin = true),
-        // 0..255; out of range panics (a programming error, like list indexing)
-        FnSig("byte_at", listOf(Type.TBytes, Type.TInt), listOf("b", "i"), Type.TInt,
-            Eff.Pure, isBuiltin = true),
-        // [start, end); start/end are clamped into [0, len], start > end yields empty
-        FnSig("byte_slice", listOf(Type.TBytes, Type.TInt, Type.TInt), listOf("b", "start", "end"),
-            Type.TBytes, Eff.Pure, isBuiltin = true),
-        // first occurrence of needle at or after byte index `from`; None if absent.
-        // An empty needle matches at min(from, len). Mirrors string index_of.
-        FnSig("byte_index_of", listOf(Type.TBytes, Type.TBytes, Type.TInt), listOf("b", "needle", "from"),
-            Type.TAdt(OPTION_ADT, listOf(Type.TInt)), Eff.Pure, isBuiltin = true),
         // interop escape (spec §9.5): reclaim an opaque Java value (e.g. an erased-generic
         // HttpResponse.body()) as a concrete reference type T, taken from the expected type at
         // the call site. Emits CHECKCAST erasure(T); a mismatch fails loud like any opaque
