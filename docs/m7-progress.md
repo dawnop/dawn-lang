@@ -16,7 +16,7 @@
 
 第一批（序 1/2/3）+ 序 4 + 序 5 均完成。序 4/5 虽在优先级表里列「第二批」（成本高、需设计草案），
 均已做掉。其后又落地**流式请求体**与**传可变实参**（后者是流式那轮撞出来的语言缺口）。
-**剩余**：序 6（`Int`/`char` 值类型特化，根因 2）+ 流式响应。
+**剩余**：序 6（`Int`/`char` 值类型特化，根因 2）。**流式响应已于 v0.2.0 落地**（见下节）。
 
 ---
 
@@ -127,6 +127,8 @@ comptime 折叠与 value-handle **有意跳过**，同旧 byte 内建）。UFCS 
 （如 `HttpResponse.body()`）认领为 `Bytes`。先前试过让 `assignable` 隐式放行 `Object→Bytes`，
 但**泛型内的 `expect[T]` 会把期望类型 `Bytes` 灌进 `T` → `Option[Object]` vs `Option[Bytes]` 不合**，
 且 codegen 无处插 `CHECKCAST`；改为显式内建（运行期 CHECKCAST，非 `byte[]` 即 CCE 穿透，spec §9.5）。
+（**v0.2.0 起 `as_bytes` 已泛化为通用的 `cast(x) -> T`**、`as_bytes` 删除——一个内建认领任意具体
+引用类型，T 由期望类型定，见 [`cast-interop.md`](cast-interop.md)。响应流式那轮撞出的语言缺口。）
 
 **后端迁移**（backend-dawn `f9c339e`，有界路线）：`Request.raw` latin-1 String→`Bytes`、
 `Response.bin` `Option[Object]`→`Option[Bytes]`（Response 重获 `derive Show`）、`read_body` 单次解码、
@@ -247,10 +249,35 @@ List 桥在可变部分内自动可用；AST 记 `varargsPack`（开始打包的
 
 ---
 
+## 响应流式（GET 代理，✅ v0.2.0，lang `c2af8d2`/`6a32a5d` + backend streaming）
+
+复盘 §4 的响应侧、[`streaming-design.md`](streaming-design.md) §六留的尾巴。设计定稿见
+[`streaming-response-design.md`](streaming-response-design.md)（方案 A：`Response` 去 `derive Show`、
+直接持 `Option[InputStream]`——实测那个 Show 无人消费）。
+
+**撞出两个语言改动**（都进 v0.2.0）：
+- **`cast(x) -> T`**（`c2af8d2`）：`ofInputStream` 的 body 是擦除泛型 `Object`，认领成 `InputStream`
+  用通用 `cast`（期望类型驱动）——顺带泛化并删掉 `as_bytes`，见 [`cast-interop.md`](cast-interop.md)。
+- **Unit 可实例化类型参数**（`6a32a5d`）：`close_stream` 要 `java_try(fn() => s.close())` 包 void 调用，
+  撞上「T 不能是 Unit」的旧禁令。改为 Unit 走单例 `dawn/rt/Unit`（对齐 `None`），`java_try[Unit]`/
+  `Result[Unit]`/`List[Unit]` 全解锁，见 [`builtins-to-stdlib.md`](builtins-to-stdlib.md) 的 Unit 一等讨论。
+
+**后端**：`http.fetch_stream`（`ofInputStream` + `cast`，`StreamResp = {status, stream}`）与并存的
+`fetch_bytes`；`web/server.write_response` 加流分支（`transferTo` 泵到 socket、`catch_panic` 当 finally
+关上游流防连接泄漏）；`api_fm.content`/`webdav.serve_file` 改 `fetch_stream + streaming`，206-vs-200 改看
+**上游状态**（流式拿不到长度）。单次代理下载瞬时内存从 ≈1× 对象大小降到**恒定 ~8KB**、且边收边回。
+
+**验证**：backend 63 绿。其中**端到端泵测试**（`web/server` 内，两回环服务器）走完整真实路径——
+上游 HTTP → `fetch_stream` → `streaming()` → `write_response` 流分支 → `transferTo` 泵到 socket，
+断言 12000 字节（>8KB，强制 transferTo 多块）字节精确;另有 2 个 `fetch_stream` 回环测试（可读流 /
+非 2xx 状态）。恒定内存是**结构性**保证（泵用 `transferTo` 8KB 缓冲而非 `readAllBytes`，端到端测试已证走此路）；
+量化数字（大对象 + 小堆不 OOM）与真七牛 206 全周期留 `contract_webdav`（需两后端 + 七牛）。lang 1180 绿
+（cast 5 例 + Unit 5 例）。
+
+---
+
 ## 不进本轮（回指 [`m6-retro.md`](m6-retro.md) 第六节）
 
-- **响应流式（GET 代理）**：撞同一个 `Show` 约束（`Response` 持流），是独立设计题；且已被
-  「会跟随 302 的客户端直连七牛」+「Range 透传」两层缓解。
 - 序 6 `Int`/`char` 值类型特化（根因 2，编译器大改，需性能基准护栏）。
 - `/api/fm/upload`（multipart 代理上传）：请求体本身是 multipart，流式化需流式 multipart 解析器；
   且前端主流程走直传七牛，此端点是备用。

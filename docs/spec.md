@@ -111,6 +111,10 @@ println("got $n items, first = ${list.get(0)}")
 
 `Int`（64 位）、`Float`（double）、`Bool`、`String`、`Unit`。
 
+`Unit` 是一等值（唯一值 `()`），可像任何类型一样**实例化类型参数**（`Result[Unit, E]`、
+`List[Unit]`、`java_try(fn() => <void 调用>)` 皆可）。运行期它有真实表示——一个单例对象
+（`dawn/rt/Unit`，与 `None` 及无字段构造子同一表示），故在擦除的泛型槽位里也占位得住。
+
 **没有 null。** 所有类型的值都必然有效；可缺失用 `Option[T]` 表达。
 **没有隐式转换。** `Int` → `Float` 必须显式 `to_float(n)`。
 
