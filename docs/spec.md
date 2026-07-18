@@ -61,6 +61,8 @@ true false not
 字面量（`'a' == 97`）。因此 match 里它就是普通 `Int` 模式，类型系统零改动。单引号内是
 单个码点：转义与字符串相同（`\n \t \\ \u{...}`）另加 `\'`；空字面量或含多个码点 → 词法错误。
 按码点处理字符串的内建见 §11（`code_points`/`from_code_points`/`str_len`/`substring`）。
+**注意**：运行期存储是 `java.lang.String`（UTF-16 码元下标），故「按码点下标随机访问」需要
+O(n) 换算——实测与设计取舍见 [`seq6-research.md`](seq6-research.md) 附录。
 没有独立字符类型（Go/Rune 模型使其无必要）。
 
 ### 1.6 字符串与插值
