@@ -66,6 +66,13 @@ object Formatter {
         var lineIndent = 0              // indent of the line currently being emitted
         var lineFirst: Token = toks[0]  // first token of the current line (for use-path spacing)
         var prev: Token? = null
+        // Last *code* token seen, which is what decides whether a new line continues
+        // the previous one. Tracked apart from [prev] so that a comment on its own
+        // line is transparent: a comment cannot end an expression, so the line after
+        // it continues whatever the line before it did. Using [prev] here dedented
+        // the body of `Some(v) ->` back to the arm level as soon as a comment sat
+        // between the arrow and the body.
+        var prevCode: Token? = null
         for (t in toks) {
             if (prev == null) {
                 sb.append(text(src, t))
@@ -78,11 +85,12 @@ object Formatter {
                 } else {
                     lineFirst = t
                     repeat(1 + minOf(nl - 1, 1)) { sb.append('\n') } // collapse ≥2 blank lines to 1
-                    lineIndent = indentOf(t, openers, prev)
+                    lineIndent = indentOf(t, openers, prevCode ?: prev, lineIndent)
                     sb.append("  ".repeat(lineIndent.coerceAtLeast(0)))
                     sb.append(text(src, t))
                 }
             }
+            if (t.type != COMMENT) prevCode = t
             when (t.type) {
                 LPAREN, LBRACKET, LBRACE -> openers.addLast(lineIndent)
                 RPAREN, RBRACKET, RBRACE -> if (openers.isNotEmpty()) openers.removeLast()
@@ -94,11 +102,19 @@ object Formatter {
         return sb.toString()
     }
 
-    /** Indent (2-space levels) for a line whose first token is [t]; [prevLineLast] ended the previous line. */
-    private fun indentOf(t: Token, openers: ArrayDeque<Int>, prevLineLast: Token): Int {
+    /**
+     * Indent (2-space levels) for a line whose first token is [t]; [prevLineLast]
+     * ended the previous line, which sat at [prevIndent].
+     */
+    private fun indentOf(t: Token, openers: ArrayDeque<Int>, prevLineLast: Token, prevIndent: Int): Int {
         val content = (openers.lastOrNull() ?: -1) + 1
         return when {
             t.type in closers -> openers.lastOrNull() ?: 0 // align a leading closer with its opener line
+            // A leading `else` lines up with its `if` rather than nesting under it.
+            // The previous line is either that `if` or the `}` closing its branch,
+            // and a leading closer already aligns with its opener's line — so in
+            // both shapes the previous line's own indent is the `if`'s.
+            t.type == ELSE -> prevIndent
             isContinuation(prevLineLast, t) -> content + 1
             else -> content
         }

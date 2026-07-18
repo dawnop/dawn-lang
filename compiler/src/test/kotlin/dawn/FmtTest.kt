@@ -94,6 +94,56 @@ class FmtTest {
     }
 
     @Test
+    fun `a comment does not break the indent of the line after it`() {
+        // The line after a comment continues whatever the line before it did: a
+        // comment cannot end an expression. Before the fix, the comment itself was
+        // indented as a continuation but the real body was not, so a body after
+        // `->` dedented to the arm level and a body after `=` went to column 0.
+        val src = """
+            fn f(x: Option[Int]) -> Int =
+              match x {
+                Some(v) ->
+                  # between the arrow and the body
+                  if v > 0 { v } else { 0 }
+                None -> 0
+              }
+
+            fn g() -> Int =
+              # between `=` and the body
+              1
+        """.trimIndent() + "\n"
+        assertEquals(src, Formatter.format(src))
+        assertFidelity(src)
+    }
+
+    @Test
+    fun `a leading else keeps the indent of its if`() {
+        // `}` ends a value, so it is not a continuationEnder, and the formatter used
+        // to pull a leading `else` back to column 0. Both shapes below must hold, and
+        // they disagree about what "one more level" would mean — which is why `else`
+        // copies the previous line's indent instead of being treated as a
+        // continuation: in `pick` the `if` is itself a continuation of `=`, in `guard`
+        // it is not, yet in both the `else` belongs at the `if`'s own column.
+        val src = """
+            fn pick(i: Int, n: Int) -> Int =
+              if i == n { 0 }
+              else if i > n { 1 }
+              else {
+                let d = n - i
+                d
+              }
+
+            fn guard(i: Int) -> Int = {
+              let n = 3
+              if i == n { 0 }
+              else { 1 }
+            }
+        """.trimIndent() + "\n"
+        assertEquals(src, Formatter.format(src))
+        assertFidelity(src)
+    }
+
+    @Test
     fun `unsafe_pure block formats like comptime`() {
         val src = "pub fn maxi(a: Int, b: Int) -> Int = unsafe_pure{Math.max( a,b )}\n"
         val out = Formatter.format(src)
