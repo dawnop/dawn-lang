@@ -1,8 +1,17 @@
+
 # 从 builtin 到 stdlib：把编译器里的库搬出去
 
 > 语言层议题，**先文档、不动代码**。触发点是 `cast[T]`（interop cast 统一）的讨论：
 > 「为什么有这么多 builtin，能不能避免」。本文回答现状、根因、别的语言怎么做、以及
 > Dawn 的迁移路线。`cast[T]` 的设计见 [`cast-interop.md`](cast-interop.md)；本文是它之后的下一个议题。
+
+> **状态（2026-07-18）：这条路线已经在走，本文是它的「为什么」，不再是待办清单。**
+> 杠杆 2 已实现并上线，§6.4 的第 1–3 步都已完成，builtin 表 **75 → 57**、std 30 个。
+> **落地进度、每批的实测与踩到的坑，权威记录在 [`pure-ffi-design.md`](pure-ffi-design.md)**
+> （§十起是逐批的施工日志）——本文只在结论被推翻时才更新。
+>
+> 已被实测推翻的有一条，就在 §6.2 的 D 项，见那里的批注。分层分析（① 4 个不可约核 /
+> ② JDK 薄包装 / ③ 可自举）与「杠杆 2 是搬走 63 个的唯一前提」这两条主判断都站住了。
 
 ## 一、结论（TL;DR）
 
@@ -190,7 +199,13 @@ to_string          # → Show trait（已有 derive Show）
 - **A — std 源打进 jar 资源**：一组 `std/*.dawn` 随编译器分发，照 `cli/Main.kt:48` 装载 `dawn-build.properties` 的 `getResourceAsStream` 那条路读出来。
 - **B — 隐式 `use std`**：编译用户代码前先解析 + 检查 std，把它合入 Checker 的「prelude + 已检查模块 + local」impl/类型/fn 视图（`check/Checker.kt:50`），无需用户手写 `use std`（像现在 Option/Result 那样天然可见）。
 - **C — 复用现有多模块机制**：`backend-dawn` 已用 `use web/…` 多模块，module-class 命名沿用现状。**与「项目B」的硬阻塞 `className = modPath` 无关**——「移出编译器」不等于「做成包」，故本步不碰项目B（杠杆4 才需要）。
-- **D — FFI 转发绕开自举循环**：std 的 `map` 写成 `use java "dawn.rt.Lists"` + `pub fn map(xs, f) = Lists.map(xs, f)`，**直接打运行时类、不依赖正被删的 builtin**，无鸡生蛋。运行时类（`dawn/rt/Lists` 等）本就在编译产物链接的运行时里。
+- ~~**D — FFI 转发绕开自举循环**：std 的 `map` 写成 `use java "dawn.rt.Lists"` + `pub fn map(xs, f) = Lists.map(xs, f)`，**直接打运行时类、不依赖正被删的 builtin**，无鸡生蛋。~~
+  **✗ 实测推翻（`pure-ffi-design.md` §九）**：`dawn.rt.*` 是编译器**用 ASM 生成**的，checker
+  反射不到，std 根本 `use java` 不了它——本项预设「运行时类是普通 JVM 类」，而它们不是。
+  **实际的两条出路**：① 一阶包装转发到 **`dawn.rt.StdStrings`**，一个真·Java 源码编译的类
+  （可反射、且被 vendored 进每个产物）；② 高阶函数（`map`/`filter`/`fold`）根本不转发，
+  写成**纯 Dawn 递归**——它们效果多态，而 `unsafe_pure` 拒绝屏蔽效果变量，转发这条路本就走不通。
+  连带地，§6.4 第 2 步「单函数端到端打通**取 `map`**」也不成立：首枪只能取一阶的 `substring`。
 
 ### 6.3 迁移协议（一函数一原子）
 
