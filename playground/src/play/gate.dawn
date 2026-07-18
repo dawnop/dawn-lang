@@ -13,3 +13,42 @@ pub fn try_enter(gate: Semaphore, wait_secs: Int) -> Bool !io =
   gate.tryAcquire(wait_secs, TimeUnit.valueOf("SECONDS").expect("seconds"))
 
 pub fn leave(gate: Semaphore) -> Unit !io = gate.release()
+
+# Run `body` while holding a permit, waiting up to `wait_secs` to acquire one.
+# None means the gate was saturated and the caller should answer 429. The permit
+# is released even if `body` panics: execute() can panic on a compiler-internal
+# bug, and without this finally that permit leaks — after `permits` such panics
+# the gate wedges shut and every later request 429s. catch_panic makes leave()
+# unconditional; a caught panic is re-raised after release so the caller still
+# sees the framework's 500 path (spec §9.8) unchanged. The permit spans `body`
+# only — callers render the reply after with_gate returns.
+pub fn with_gate[T](gate: Semaphore, wait_secs: Int, body: fn() -> T !io) -> Option[T] !io =
+  if try_enter(gate, wait_secs) {
+    let caught = catch_panic(body)
+    leave(gate)
+    match caught {
+      Ok(v) -> Some(v)
+      Err(m) -> panic(m)
+    }
+  } else {
+    None
+  }
+
+test "with_gate releases the permit even when body panics" {
+  let gate = new_gate(1)
+  # with_gate re-raises the body's panic after releasing; catch it so the test
+  # survives, then prove the single permit came back by acquiring it again.
+  # body is Never (panic), so T can't be inferred from it — pin it via the annotation
+  let first: Result[Option[Int], String] = catch_panic(fn() => with_gate(gate, 0, fn() => panic("boom")))
+  assert match first { Ok(_) -> false, Err(_) -> true }
+  let second: Result[Option[Int], String] = catch_panic(fn() => with_gate(gate, 0, fn() => panic("boom")))
+  assert match second { Ok(_) -> false, Err(_) -> true }
+  # permit returned each time: a fresh non-panicking body still gets in
+  assert match with_gate(gate, 0, fn() => 42) { Some(v) -> v == 42, None -> false }
+}
+
+test "with_gate returns None when no permit is available" {
+  let gate = new_gate(1)
+  assert try_enter(gate, 0)
+  assert match with_gate(gate, 0, fn() => 1) { Some(_) -> false, None -> true }
+}

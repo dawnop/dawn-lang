@@ -9,7 +9,7 @@ use web/server.{serve_app}
 use web/middleware.{with_logging}
 use play/contract.{parse_request, render_outcome, render_check, render_error}
 use play/exec.{execute, check}
-use play/gate.{new_gate, try_enter, leave}
+use play/gate.{new_gate, with_gate}
 use play/config.{port}
 
 const MAX_BODY: Int = 65536
@@ -34,21 +34,16 @@ fn rpc(req: Request, gate: Semaphore, check_only: Bool) -> Result[Response, Http
       Err(msg) -> Ok(raw(400, JSON_CT, render_error(msg)))
       Ok(code) -> {
         let wait = if check_only { CHECK_WAIT_SECS } else { QUEUE_WAIT_SECS }
-        if try_enter(gate, wait) {
-          Ok(raw(200, JSON_CT, run_guarded(gate, code, check_only)))
-        } else {
-          Ok(raw(429, JSON_CT, render_error("server busy, try again shortly")))
+        # Hold a permit across execution only; with_gate releases it even if the
+        # compiler panics, then we render outside the permit. None = saturated.
+        match with_gate(gate, wait, fn() => if check_only { check(code) } else { execute(code) }) {
+          Some(outcome) ->
+            Ok(raw(200, JSON_CT, if check_only { render_check(outcome) } else { render_outcome(outcome) }))
+          None -> Ok(raw(429, JSON_CT, render_error("server busy, try again shortly")))
         }
       }
     }
   }
-
-# Hold the permit only across execution, then release before writing the reply.
-fn run_guarded(gate: Semaphore, code: String, check_only: Bool) -> String !io = {
-  let outcome = if check_only { check(code) } else { execute(code) }
-  leave(gate)
-  if check_only { render_check(outcome) } else { render_outcome(outcome) }
-}
 
 pub fn main() -> Unit !io = {
   let gate = new_gate(MAX_CONCURRENT)
