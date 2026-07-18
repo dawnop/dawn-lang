@@ -140,6 +140,119 @@ public final class StdStrings {
         return String.valueOf(Character.toChars(cp));
     }
 
+    // ---- cursors ----
+    //
+    // A cursor is a UTF-16 offset into `s`, handed to Dawn as an opaque Int. The
+    // opacity is the point: every code-point-indexed accessor above pays an
+    // O(n) `offsetByCodePoints` to find its starting byte, so a loop built on
+    // them is O(n^2) (docs/seq6-research.md, section three). A cursor already
+    // *is* the position, so each step below is O(1) — on ASCII and on astral
+    // text alike, with no scan to decide which.
+    //
+    // Deliberately no tuple and no Option in these signatures. Returning
+    // (codePoint, nextCursor) together would allocate a Tuple2 per character,
+    // whose fields are `Object` and so box both longs — which is why
+    // seq6-research listed tuple specialization as a prerequisite for the
+    // cursor API. Splitting the read from the advance removes the allocation
+    // instead of specializing it, and with it the prerequisite. The cost is a
+    // second call per character; both are small static methods the JIT inlines.
+
+    /** The cursor at the start of {@code s}. */
+    public static long cursorStart(String s) {
+        return 0;
+    }
+
+    /** The cursor one past the last character of {@code s}. */
+    public static long cursorEnd(String s) {
+        return s.length();
+    }
+
+    /** Whether {@code c} has reached the end of {@code s}. */
+    public static boolean cursorDone(String s, long c) {
+        return c < 0 || c >= s.length();
+    }
+
+    /** The code point at {@code c}, or {@code -1} at (or past) the end. */
+    public static long cursorChar(String s, long c) {
+        if (c < 0 || c >= s.length()) {
+            return -1;
+        }
+        return s.codePointAt((int) c);
+    }
+
+    /**
+     * The cursor after the character at {@code c}, clamped into range.
+     *
+     * <p>Advancing by {@link Character#charCount} rather than by one is what
+     * keeps a surrogate pair a single Dawn character.
+     */
+    public static long cursorNext(String s, long c) {
+        if (c < 0) {
+            return 0;
+        }
+        if (c >= s.length()) {
+            return s.length();
+        }
+        return c + Character.charCount(s.codePointAt((int) c));
+    }
+
+    /**
+     * The cursor before the character preceding {@code c}, clamped into range.
+     *
+     * <p>Subtraction cannot do this: a step is one or two UTF-16 units depending
+     * on the character. Walking backwards is what a lexer does to un-read a
+     * token and what a text window does to start some distance before a match.
+     */
+    public static long cursorPrev(String s, long c) {
+        if (c <= 0) {
+            return 0;
+        }
+        int at = c > s.length() ? s.length() : (int) c;
+        return s.offsetByCodePoints(at, -1);
+    }
+
+    /**
+     * The text between two cursors, or {@code null} when they are not a valid
+     * range of character boundaries.
+     *
+     * <p>Unlike {@link #substring}, this converts no indices, so it costs the
+     * length of the result rather than the length of {@code s} — the difference
+     * between a lexer that emits tokens in linear total time and one that is
+     * quadratic.
+     *
+     * <p>The boundary check rejects a cursor that lands inside a surrogate pair.
+     * Cursors obtained from this API never do; one a caller invented might, and
+     * failing loudly beats returning half a character.
+     */
+    public static String cursorSlice(String s, long from, long to) {
+        if (from < 0 || from > to || to > s.length()) {
+            return null;
+        }
+        if (splitsPair(s, from) || splitsPair(s, to)) {
+            return null;
+        }
+        return s.substring((int) from, (int) to);
+    }
+
+    private static boolean splitsPair(String s, long at) {
+        return at > 0 && at < s.length() && Character.isLowSurrogate(s.charAt((int) at));
+    }
+
+    /**
+     * The cursor of the first occurrence of {@code sub} at or after {@code from},
+     * or {@code -1}.
+     *
+     * <p>Cursor in, cursor out: the code-point conversion that {@link #indexOf}
+     * performs on its result is exactly what makes repeated searching quadratic,
+     * so a scanning loop wants this one.
+     */
+    public static long indexOfFrom(String s, String sub, long from) {
+        if (from > s.length()) {
+            return -1;
+        }
+        return s.indexOf(sub, from < 0 ? 0 : (int) from);
+    }
+
     /** {@code s} with its code points reversed (surrogate pairs stay intact). */
     public static String reverse(String s) {
         int[] cps = codePoints(s);

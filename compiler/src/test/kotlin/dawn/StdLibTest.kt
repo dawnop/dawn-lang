@@ -130,6 +130,92 @@ class StdLibTest {
     }
 
     @Test
+    fun `a cursor walk visits every code point, astral ones included`() {
+        // The property that matters: one cursor step is one Dawn character, so a
+        // surrogate pair is never split into two. `str_len` counts code points,
+        // so the two must agree — on ASCII and on astral text alike.
+        val out = run(
+            """
+            fn walk(s: String, c: Int, acc: Int) -> Int =
+              if cursor_done(s, c) { acc } else { walk(s, cursor_next(s, c), acc + 1) }
+
+            pub fn main() -> Unit !io = {
+              println("${'$'}{walk("abc", cursor_start("abc"), 0)} ${'$'}{str_len("abc")}")
+              println("${'$'}{walk("héllo", cursor_start("héllo"), 0)} ${'$'}{str_len("héllo")}")
+              println("${'$'}{walk("a🎈b", cursor_start("a🎈b"), 0)} ${'$'}{str_len("a🎈b")}")
+              println("${'$'}{walk("", cursor_start(""), 0)} ${'$'}{str_len("")}")
+            }
+            """.trimIndent(),
+        )
+        assertEquals("3 3\n5 5\n3 3\n0 0\n", out)
+    }
+
+    @Test
+    fun `cursor_char reads whole code points and reports the end with -1`() {
+        val out = run(
+            """
+            pub fn main() -> Unit !io = {
+              let s = "a🎈"
+              let c0 = cursor_start(s)
+              let c1 = cursor_next(s, c0)
+              let c2 = cursor_next(s, c1)
+              println("${'$'}{cursor_char(s, c0)}")
+              println("${'$'}{cursor_char(s, c1)}")
+              println("${'$'}{cursor_char(s, c2)}")
+              println("${'$'}{cursor_done(s, c2)}")
+            }
+            """.trimIndent(),
+        )
+        // 127880 is U+1F388 itself, not either half of its surrogate pair
+        assertEquals("97\n127880\n-1\ntrue\n", out)
+    }
+
+    @Test
+    fun `cursor_prev undoes cursor_next over variable-width characters`() {
+        // The reason this is a function and not `c - 1`: over "a🎈b" the steps
+        // are 1, 2, 1 units wide, so arithmetic would land inside the pair.
+        val out = run(
+            """
+            fn back(s: String, c: Int, n: Int) -> Int =
+              if n == 0 { c } else { back(s, cursor_prev(s, c), n - 1) }
+
+            pub fn main() -> Unit !io = {
+              let s = "a🎈b"
+              let e = cursor_end(s)
+              println(cursor_slice(s, back(s, e, 1), e))
+              println(cursor_slice(s, back(s, e, 2), e))
+              println(cursor_slice(s, back(s, e, 3), e))
+              println("${'$'}{back(s, e, 9) == cursor_start(s)}")
+            }
+            """.trimIndent(),
+        )
+        assertEquals("b\n🎈b\na🎈b\ntrue\n", out)
+    }
+
+    @Test
+    fun `cursor_slice cuts between cursors and index_of_from resumes from one`() {
+        val out = run(
+            """
+            fn all_from(s: String, sub: String, c: Int, acc: Int) -> Int =
+              match index_of_from(s, sub, c) {
+                None -> acc
+                Some(i) -> all_from(s, sub, cursor_next(s, i), acc + 1)
+              }
+
+            pub fn main() -> Unit !io = {
+              let s = "a🎈bc🎈d"
+              let c0 = cursor_start(s)
+              let c1 = cursor_next(s, c0)
+              println(cursor_slice(s, c0, c1))
+              println(cursor_slice(s, c1, cursor_end(s)))
+              println("${'$'}{all_from(s, "🎈", cursor_start(s), 0)}")
+            }
+            """.trimIndent(),
+        )
+        assertEquals("a\n🎈bc🎈d\n2\n", out)
+    }
+
+    @Test
     fun `the forwarded runtime class is vendored into every built program`() {
         // Regression guard for the bug this spike hit: the class lives in the
         // compiler jar, so `dawn run` worked while `java -jar` died with

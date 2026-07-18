@@ -75,3 +75,49 @@ pub fn pad_start(s: String, width: Int, pad: String) -> String =
 ## `s` with its code points in reverse order.
 pub fn reverse_str(s: String) -> String =
   unsafe_pure { StdStrings.reverse(s).expect("reverse never returns null") }
+
+# ---- cursors ----
+#
+# The functions above take *code-point indices*, and each one pays a scan from
+# the start of the string to find where that index lands. That is fine for a
+# single call and a trap inside a loop, where it turns O(n) work into O(n^2)
+# (docs/seq6-research.md §三). A cursor is a position rather than a count, so
+# walking with these costs the same per character whatever the text contains.
+#
+# A cursor is an opaque `Int`. The only things to do with one are: get it from
+# `cursor_start`, pass it back in, and — since it is an ordinary value — keep a
+# copy to return to later, which is all backtracking needs. Do not do arithmetic
+# on it; `cursor_next` exists because the step size is not always one.
+
+## A cursor positioned at the first character of `s`.
+pub fn cursor_start(s: String) -> Int = unsafe_pure { StdStrings.cursorStart(s) }
+
+## A cursor positioned one past the last character of `s`.
+pub fn cursor_end(s: String) -> Int = unsafe_pure { StdStrings.cursorEnd(s) }
+
+## Whether `c` has walked off the end of `s`.
+pub fn cursor_done(s: String, c: Int) -> Bool = unsafe_pure { StdStrings.cursorDone(s, c) }
+
+## The code point at `c`, or -1 once `c` is done. The sentinel keeps the hot
+## path allocation-free: an `Option` here would box on every character.
+pub fn cursor_char(s: String, c: Int) -> Int = unsafe_pure { StdStrings.cursorChar(s, c) }
+
+## The cursor after the character at `c`. Stops at the end rather than running past it.
+pub fn cursor_next(s: String, c: Int) -> Int = unsafe_pure { StdStrings.cursorNext(s, c) }
+
+## The cursor before the character preceding `c`. Stops at the start.
+## Subtraction cannot replace this: a character is not always one unit wide.
+pub fn cursor_prev(s: String, c: Int) -> Int = unsafe_pure { StdStrings.cursorPrev(s, c) }
+
+## The text between two cursors. Panics when they are not a valid range — which
+## for cursors this API produced means only `from > to` or one of them past the end.
+pub fn cursor_slice(s: String, from: Int, to: Int) -> String =
+  unsafe_pure { StdStrings.cursorSlice(s, from, to).expect("cursor_slice: invalid cursor range") }
+
+## The cursor of the first occurrence of `sub` at or after `from`, or `None`.
+## Unlike `index_of`, this both takes and returns a cursor, so repeated searching
+## down a string stays linear overall.
+pub fn index_of_from(s: String, sub: String, from: Int) -> Option[Int] = {
+  let i = unsafe_pure { StdStrings.indexOfFrom(s, sub, from) }
+  if i < 0 { None } else { Some(i) }
+}
