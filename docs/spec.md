@@ -537,7 +537,9 @@ pub fn substring(s: String, from: Int, to: Int) -> String =
   两层结构把担保收敛到极少数一阶原语；编译器不验证 Java 纯度（做不到）。
 - **运行期透明**：codegen 直接生成内层表达式，无任何运行期标记。
 - **编译期折叠（route C）**：`unsafe_pure` 亦是「此 Java 调用允许在 comptime 反射执行」的
-  许可证；该路径尚未实现，故当前 `unsafe_pure` 块出现在 `const`/`comptime` 上下文会报错。
+  许可证。**已实现**：`const A: Int = unsafe_pure { Math.max(3, 7) }` 折叠为 7，捆绑 std 的
+  转发（`substring` 等）在 `const` 里同样可折。限制：只反射**静态**方法，边界类型限
+  `Int/Float/Bool/String/Unit`——这两条正是 `unsafe_pure` 之外的第二道闸。
 
 ---
 
