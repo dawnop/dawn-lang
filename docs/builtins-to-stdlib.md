@@ -160,9 +160,23 @@ to_string          # → Show trait（已有 derive Show）
 > 但 UFCS **按名字**解析自由函数、Dawn builtin 表名字唯一（无 ad-hoc 重载），所以 `get`（List 已占）
 > 与 Map 的取值**不能同名共存为自由函数**——今天只能写 `m.map_get(k)`（丑）。要让 `m.get(k)` 与
 > `xs.get(i)` **同名共存**，就得把 `get` 做成**按接收者派发的 trait 方法**（一个 `Index`/`Get` trait，
-> List/Map 各自 impl）。**即：漂亮的 `m.get(k)` 与「stdlib trait 化」是同一件事**，归本杠杆一起做；
-> 在此之前保留 `map_get`/`map_has`/`map_insert` 前缀名。**stdlib 约定**：函数一律「接收者/集合当第一参」，
-> 三形态（前缀 / `.` / `|>`）自动都通。
+> List/Map 各自 impl）。
+>
+> **⚠ 更正（2026-07-19，实测）：这条今天做不到，而且不是「顺手一起做」的量级。** `Get` 需要两个
+> Dawn 尚未提供的 trait 特性，两条都当场报错：
+>
+> - `trait Get[C, K]` → `error: a trait has exactly one type parameter`。容器的键/值类型无处安放，
+>   要么多参数 trait、要么关联类型——**trait.md 的未做清单里并列着这两个**。
+> - `impl Get[Map[String, Int]]` → `error: `Map[String, Int]` cannot be an impl subject`。
+>   spec §3.5 写明 v1 的 impl 主体只能是**非泛型具名类型**与四个原始类型，
+>   所以连具体实例化的 `Map[String, Int]` 都不行，`List[T]` 同理。
+>
+> 也就是说 `.get()` 的前置是 **trait v2**（泛型 impl 主体 + 关联类型/多参数 trait），
+> 那是 trait.md 路线图上的一整格，不是 stdlib 迁移的副产品。**在此之前保留 `map_get`/`map_has`/
+> `map_insert` 前缀名。** 顺带记一个容易被忽略的现状：**`m["k"]` 与 `xs[i]` today 就能用**
+> （缺键/越界 panic），所以「键一定在」的场合已经不必写 `map_get`。
+>
+> **stdlib 约定**：函数一律「接收者/集合当第一参」，三形态（前缀 / `.` / `|>`）自动都通。
 
 **杠杆 2 — 给编译器加「bundle std 源 + 隐式 import」（一个小特性）**
 - Dawn **已支持项目内多文件源模块**（`backend-dawn` 用 `use web/…`、`use http` 组织）。
