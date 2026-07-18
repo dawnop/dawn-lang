@@ -63,6 +63,13 @@ class CodeGen(
             return out
         }
 
+        /**
+         * Runtime classes compiled from Kotlin source rather than emitted by ASM,
+         * so `use java` can reflect on them from std. They ship in the compiler jar
+         * and are copied into every built program (see [vendorRuntimeClasses]).
+         */
+        val VENDORED_RT_CLASSES = listOf("dawn/rt/StdStrings")
+
         const val PANIC_CLASS = "dawn/rt/PanicError"
         const val LISTS_CLASS = "dawn/rt/Lists"
         const val DICT_CMP_CLASS = "dawn/rt/DictComparator"
@@ -225,10 +232,31 @@ class CodeGen(
      * one — no caller has to remember to add std to its unit list.
      */
     private fun emitStd(out: MutableMap<String, ByteArray>) {
+        vendorRuntimeClasses(out)
         val stdAdts = dawn.check.StdLib.modules
             .flatMap { m -> m.module.types.mapNotNull { it.ctors.firstOrNull()?.info?.adt } }
         for (m in dawn.check.StdLib.modules) {
             CodeGen(m.module, m.className, programAdts = allAdts + stdAdts).emitModule(out)
+        }
+    }
+
+    /**
+     * Copy the source-compiled runtime classes out of the compiler jar and into
+     * the program's own class table.
+     *
+     * Most of `dawn.rt` is emitted by ASM right here, so it lands in the output
+     * for free. The classes std forwards to are different: they are compiled from
+     * Kotlin source so the *checker* can reflect on them (docs/pure-ffi-design.md
+     * §九), which means they live in the compiler jar and would otherwise be
+     * missing at run time — `dawn run` would work (compiler on the class path)
+     * while `java -jar` died with NoClassDefFoundError. Vendoring keeps a built
+     * jar self-contained, which is the property that makes this approach viable.
+     */
+    private fun vendorRuntimeClasses(out: MutableMap<String, ByteArray>) {
+        for (name in VENDORED_RT_CLASSES) {
+            val bytes = CodeGen::class.java.getResourceAsStream("/$name.class")?.use { it.readBytes() }
+                ?: error("runtime class `$name` is missing from the compiler jar")
+            out[name] = bytes
         }
     }
 

@@ -5,11 +5,24 @@
 # module — no `use` needed (spec §10.6). This is the landing place for functions
 # moving out of the compiler's builtin table (docs/builtins-to-stdlib.md).
 #
-# Everything here is pure Dawn for now. Forwarding to a Java implementation is
-# blocked until interop can reach these types — see docs/pure-ffi-design.md §九.
+# Two implementation styles live here, on purpose (docs/pure-ffi-design.md §九):
+#   - plain Dawn, when the function is expressible without help;
+#   - a forward to `dawn.rt.StdStrings`, a source-compiled class in the compiler
+#     jar, wrapped in `unsafe_pure` because every Java call reads as !io. That is
+#     the route the builtin table migrates along: the checker can reflect on a
+#     real class, unlike the ASM-generated dawn/rt/* helpers.
+use java "dawn.rt.StdStrings"
 
 ## True when the string has no characters.
 pub fn is_empty(s: String) -> Bool = str_len(s) == 0
 
 ## `s` repeated `n` times; n <= 0 yields the empty string.
 pub fn repeat(s: String, n: Int) -> String = if n <= 0 { "" } else { s ++ repeat(s, n - 1) }
+
+## `s` left-padded with `pad` until it is `width` code points wide.
+pub fn pad_start(s: String, width: Int, pad: String) -> String =
+  unsafe_pure { StdStrings.padStart(s, width, pad).expect("padStart never returns null") }
+
+## `s` with its code points in reverse order.
+pub fn reverse_str(s: String) -> String =
+  unsafe_pure { StdStrings.reverse(s).expect("reverse never returns null") }

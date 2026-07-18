@@ -114,6 +114,35 @@ class StdLibTest {
     }
 
     @Test
+    fun `std forwards to a source-compiled runtime class through unsafe_pure`() {
+        // pad_start/reverse_str are implemented in dawn.rt.StdStrings (real Java,
+        // reflectable by the checker) and vouched pure on the Dawn side.
+        val out = run(
+            """
+            pub fn main() -> Unit !io = {
+              println(pad_start("7", 4, "0"))
+              println(reverse_str("abc"))
+              println(pad_start("héllo", 7, "·"))
+            }
+            """.trimIndent(),
+        )
+        assertEquals("0007\ncba\n··héllo\n", out)
+    }
+
+    @Test
+    fun `the forwarded runtime class is vendored into every built program`() {
+        // Regression guard for the bug this spike hit: the class lives in the
+        // compiler jar, so `dawn run` worked while `java -jar` died with
+        // NoClassDefFoundError. A built program must carry it itself.
+        val analysis = analyze("pub fn main() -> Unit !io = println(reverse_str(\"ab\"))")
+        assertFalse(analysis.hasErrors)
+        val classes = CodeGen(analysis.module, "testmod").generate()
+        for (name in CodeGen.Companion.VENDORED_RT_CLASSES) {
+            assertTrue(classes.containsKey(name), "built program is missing $name; got ${classes.keys.sorted()}")
+        }
+    }
+
+    @Test
     fun `a std function cannot be redefined`() {
         val errs = errorsOf(
             """
