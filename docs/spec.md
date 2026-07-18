@@ -62,7 +62,8 @@ true false not
 单个码点：转义与字符串相同（`\n \t \\ \u{...}`）另加 `\'`；空字面量或含多个码点 → 词法错误。
 按码点处理字符串的内建见 §11（`code_points`/`from_code_points`/`str_len`/`substring`）。
 **注意**：运行期存储是 `java.lang.String`（UTF-16 码元下标），故「按码点下标随机访问」需要
-O(n) 换算——实测与设计取舍见 [`seq6-research.md`](seq6-research.md) 附录。
+O(n) 换算——实测与设计取舍见 [`seq6-research.md`](seq6-research.md) 附录。**逐字符遍历请用
+§11 的游标（`cursor_*`）**，它每步恒定开销；下标版留给单次调用。
 没有独立字符类型（Go/Rune 模型使其无必要）。
 
 ### 1.6 字符串与插值
@@ -954,6 +955,17 @@ use java "java.lang.Math"      # Java 互操作（§9），形式不变
   - `char_to_string(c: Int) -> String` **`[std]`** — 单码点转字符串（非法码点 panic）
   - `str_len(s: String) -> Int` **`[std]`** — 码点数（区别于 `chars` 返回的 `List[String]`）
   - `substring(s: String, from: Int, to: Int) -> String` **`[std]`** — 按**码点下标**切片，越界 panic
+- **游标**（同上，`[std]`）——上面这些**按码点下标**的函数，每次调用都要从串首数到那个下标，
+  即单次 O(n)、放进循环就是 O(n²)。游标是**位置**而非计数，故每步恒定开销：
+  - `cursor_start(s) / cursor_end(s) -> Int` — 串首 / 串尾游标
+  - `cursor_done(s, c) -> Bool`、`cursor_char(s, c) -> Int`（到尾返回 -1）
+  - `cursor_next(s, c) / cursor_prev(s, c) -> Int` — 进 / 退一个字符（宽度非恒定，故不能用加减）
+  - `cursor_slice(s, from, to) -> String` — 按游标切，不做下标换算
+  - `index_of_from(s, sub, from) -> Option[Int]` — 游标进、游标出，故沿串反复查找整体仍线性
+
+  游标**不透明**：只能从 `cursor_start`/`cursor_end` 取得、传回这些函数、或存起来供回溯
+  （它是普通值，回溯不需要额外机制）。不要对它做算术。
+  单串一次调用用下标版没问题，**循环里必须用游标版**——`docs/seq6-research.md` §五之补有实测。
 - `core/option` / `core/result`：`map unwrap_or expect and_then ...`
 - **`Map` / `Set`**（§2.2 的内建持久容器，v0.1 以平铺内建函数提供；未来再收进 `core/map`
   等模块化组织）：
