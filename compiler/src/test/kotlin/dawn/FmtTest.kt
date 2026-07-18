@@ -144,6 +144,26 @@ class FmtTest {
     }
 
     @Test
+    fun `a leading minus indents by whether it is unary`() {
+        // `-1` opens the else branch's body; `- b` continues the subtraction on the
+        // line above. Same token, opposite indents.
+        val src = """
+            fn sign(c: Int) -> Int =
+              if c >= 0 {
+                1
+              } else {
+                -1
+              }
+
+            fn diff(a: Int, b: Int) -> Int =
+              a
+              - b
+        """.trimIndent() + "\n"
+        assertEquals(src, Formatter.format(src))
+        assertFidelity(src)
+    }
+
+    @Test
     fun `unsafe_pure block formats like comptime`() {
         val src = "pub fn maxi(a: Int, b: Int) -> Int = unsafe_pure{Math.max( a,b )}\n"
         val out = Formatter.format(src)

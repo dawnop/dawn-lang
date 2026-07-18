@@ -85,7 +85,7 @@ object Formatter {
                 } else {
                     lineFirst = t
                     repeat(1 + minOf(nl - 1, 1)) { sb.append('\n') } // collapse ≥2 blank lines to 1
-                    lineIndent = indentOf(t, openers, prevCode ?: prev, lineIndent)
+                    lineIndent = indentOf(t, openers, prevCode ?: prev, lineIndent, unary)
                     sb.append("  ".repeat(lineIndent.coerceAtLeast(0)))
                     sb.append(text(src, t))
                 }
@@ -106,7 +106,9 @@ object Formatter {
      * Indent (2-space levels) for a line whose first token is [t]; [prevLineLast]
      * ended the previous line, which sat at [prevIndent].
      */
-    private fun indentOf(t: Token, openers: ArrayDeque<Int>, prevLineLast: Token, prevIndent: Int): Int {
+    private fun indentOf(
+        t: Token, openers: ArrayDeque<Int>, prevLineLast: Token, prevIndent: Int, unary: Set<Token>,
+    ): Int {
         val content = (openers.lastOrNull() ?: -1) + 1
         return when {
             t.type in closers -> openers.lastOrNull() ?: 0 // align a leading closer with its opener line
@@ -115,13 +117,21 @@ object Formatter {
             // and a leading closer already aligns with its opener's line — so in
             // both shapes the previous line's own indent is the `if`'s.
             t.type == ELSE -> prevIndent
-            isContinuation(prevLineLast, t) -> content + 1
+            isContinuation(prevLineLast, t, unary) -> content + 1
             else -> content
         }
     }
 
-    private fun isContinuation(prevLineLast: Token, lineStart: Token): Boolean =
-        prevLineLast.type in continuationEnders || lineStart.type in continuationStarters
+    /**
+     * A leading `-` means two different things: `a\n  - b` wraps a subtraction, so
+     * the second line is a continuation, while `{\n  -1\n}` opens an expression and
+     * is not. [unary] already tells them apart for spacing; without consulting it
+     * here, a lone `-1` as a branch body was indented as if it continued the branch
+     * head. MINUS is the only token that can be in both sets.
+     */
+    private fun isContinuation(prevLineLast: Token, lineStart: Token, unary: Set<Token>): Boolean =
+        prevLineLast.type in continuationEnders ||
+            (lineStart.type in continuationStarters && lineStart !in unary)
 
     // ---- spacing between two tokens already known to be on the same line ----
 
