@@ -1,0 +1,115 @@
+# Map insertion scaling benchmark — the evidence behind docs/selfhost-gaps.md §二.
+#
+# Run: ./bin/dawn run scripts/bench-map.dawn
+#
+# The builtin Map is persistent in interface but copy-on-write in implementation
+# (CodeGen.kt:265), so a single insert is O(n). Whether that matters depends
+# entirely on the SHAPE of the usage, which is what the three cases below measure:
+#
+#   A many small scopes  — each map stays tiny and is discarded. Cheap.
+#   B one module table   — grows to a few thousand. Tolerable.
+#   C one node-keyed table — grows with every AST node. Fatal.
+#
+# A and C perform the SAME number of inserts. That is the point.
+use java "java.lang.System"
+use java "java.util.LinkedHashMap"
+
+pub fn main() -> Unit !io = {
+  # Warm the JIT so the first row is not measuring interpretation.
+  let _w1 = grow_map(2000)
+  let _w2 = grow_list(2000)
+  let _w3 = scoped_maps(1000, 20)
+  let _w4 = java_map(2000)
+
+  println("== 1. one growing map vs the (already linear) list ==")
+  println("n\tmap_ms\tlist_ms")
+  for k in 0..5 {
+    let n = 5000 * pow2(k)
+    println("${n}\t${grow_map(n)}\t${grow_list(n)}")
+  }
+
+  println("")
+  println("== 2. same workload, Dawn Map vs mutable java LinkedHashMap ==")
+  println("n\tdawn_ms\tjava_ms")
+  for k in 0..5 {
+    let n = 5000 * pow2(k)
+    println("${n}\t${grow_map_str(n)}\t${java_map(n)}")
+  }
+
+  println("")
+  println("== 3. the shapes a compiler actually builds ==")
+  println("shape\tinserts\tms")
+  println("A small-scopes\t100000\t${scoped_maps(5000, 20)}")
+  println("B module-table\t4000\t${grow_map_str(4000)}")
+  println("C node-table\t100000\t${grow_map_str(100000)}")
+}
+
+# ---- one map that keeps growing: O(n) per insert => O(n^2) total ----
+
+fn grow_map(n: Int) -> Int !io = {
+  let t0 = System.nanoTime()
+  var m: Map[Int, Int] = map_empty()
+  for i in 0..n {
+    m = map_insert(m, i, i)
+  }
+  let t1 = System.nanoTime()
+  let _g = map_size(m)
+  (t1 - t0) / 1000000
+}
+
+# String-keyed, so it is comparable with java_map below: Int cannot be passed to
+# an `Object` parameter (spec 9.2), so a java Map can only be measured on Strings.
+fn grow_map_str(n: Int) -> Int !io = {
+  let t0 = System.nanoTime()
+  var m: Map[String, Int] = map_empty()
+  for i in 0..n {
+    m = map_insert(m, to_string(i), i)
+  }
+  let t1 = System.nanoTime()
+  let _g = map_size(m)
+  (t1 - t0) / 1000000
+}
+
+# Control: list accumulation, linear since DawnList became a shared-array window.
+fn grow_list(n: Int) -> Int !io = {
+  let t0 = System.nanoTime()
+  var xs: List[Int] = []
+  for i in 0..n {
+    xs = xs ++ [i]
+  }
+  let t1 = System.nanoTime()
+  let _g = len(xs)
+  (t1 - t0) / 1000000
+}
+
+# ---- many small maps, each discarded: copying stays cheap ----
+
+fn scoped_maps(scopes: Int, each: Int) -> Int !io = {
+  let t0 = System.nanoTime()
+  var sink = 0
+  for s in 0..scopes {
+    var m: Map[String, Int] = map_empty()
+    for i in 0..each {
+      m = map_insert(m, to_string(i), i)
+    }
+    sink = sink + map_size(m)
+  }
+  let t1 = System.nanoTime()
+  let _g = sink
+  (t1 - t0) / 1000000
+}
+
+# ---- lower bound: in-place mutation ----
+
+fn java_map(n: Int) -> Int !io = {
+  let t0 = System.nanoTime()
+  let m = LinkedHashMap.new()
+  for i in 0..n {
+    let _p = m.put(to_string(i), to_string(i))
+  }
+  let t1 = System.nanoTime()
+  let _g = m.size()
+  (t1 - t0) / 1000000
+}
+
+fn pow2(k: Int) -> Int = if k == 0 { 1 } else { 2 * pow2(k - 1) }
