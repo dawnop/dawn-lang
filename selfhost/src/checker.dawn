@@ -3564,3 +3564,174 @@ test "name refs walk every call position" {
 }
 
 fn no_lparams() -> List[LambdaParam] = []
+
+# ---- module exports and imports (spec §10) ----
+
+## The pub surface of one checked module (the Kotlin ModuleExports): carried by
+## value, with the ADT/trait table fragments an importer grafts into its own
+## id tables. `all_names` lets an importer tell "private" apart from "unknown".
+pub type ModExports = {
+  mod_path: String,
+  class_name: String,
+  fns: Map[String, Sig],
+  types_by_name: Map[String, Int],
+  aliases: Map[String, AliasE],
+  ctors: Map[String, (Int, Int)],
+  consts: Map[String, Ty],
+  all_names: List[String],
+  src_path: Option[String],
+  traits_by_name: Map[String, Int],
+  impls: List[ImplI],
+  adt_infos: Map[Int, AdtI],
+  trait_infos: Map[Int, TraitI]
+}
+
+## Resolve module imports: whole-module `use` decls become aliases; selective
+## `use m.{...}` decls inject the named pub members (the Kotlin processImports).
+## `env` maps modPath → exports for every module checked before this one.
+pub fn pass_imports(cx: Cx, m: Module, env: Map[String, ModExports]) -> Cx = {
+  var cx1 = cx
+  for u in module_uses(m) {
+    let exp = match map.get(env, u.path) {
+      None -> {
+        # std paths never reach the module loader, so unknown ones report here
+        if len(u.segs) > 0 && u.segs[0] == "std" {
+          var std_names: List[String] = []
+          for k in map.keys(env) {
+            if str.starts_with(k, "std/") { std_names = std_names ++ [k] }
+          }
+          cx1 = cerr_h(cx1, "no bundled std module `" ++ u.path ++ "`", u.nlo, u.nhi,
+            "bundled modules: " ++ join(sort(std_names), ", "))
+        }
+        continue
+      }
+      Some(e) -> e
+    }
+    # graft the exporter's table fragments into this checker's id tables
+    var adts2 = cx1.adts
+    for k in map.keys(exp.adt_infos) {
+      match map.get(exp.adt_infos, k) {
+        Some(v) -> { adts2 = map.insert(adts2, k, v) }
+        None -> ()
+      }
+    }
+    var traits2 = cx1.traits
+    for k in map.keys(exp.trait_infos) {
+      match map.get(exp.trait_infos, k) {
+        Some(v) -> { traits2 = map.insert(traits2, k, v) }
+        None -> ()
+      }
+    }
+    cx1 = Cx { ..cx1, adts: adts2, traits: traits2 }
+    match u.selective {
+      None -> {
+        match map.get(cx1.module_aliases, u.alias_name) {
+          Some(prev_path) ->
+            if prev_path != exp.mod_path {
+              cx1 = cerr_h(cx1, "module alias `" ++ u.alias_name ++
+                  "` is imported from two modules (`" ++ prev_path ++ "` and `" ++
+                  exp.mod_path ++ "`)", u.nlo, u.nhi,
+                "rename with selective imports, or reorganize the modules")
+            }
+          None -> ()
+        }
+        cx1 = Cx {
+          ..cx1,
+          module_aliases: map.insert(cx1.module_aliases, u.alias_name, exp.mod_path)
+        }
+      }
+      Some(names) -> {
+        for imp in names {
+          cx1 = inject_selective(cx1, u.path, exp, imp.name, imp.lo, imp.hi)
+        }
+      }
+    }
+  }
+  cx1
+}
+
+fn inject_selective(
+  cx: Cx,
+  from_path: String,
+  exp: ModExports,
+  name: String,
+  lo: Int,
+  hi: Int
+) -> Cx = {
+  var cx1 = cx
+  let f = map.get(exp.fns, name)
+  let ty = map.get(exp.types_by_name, name)
+  let cn = map.get(exp.consts, name)
+  let ct = map.get(exp.ctors, name)
+  let al = map.get(exp.aliases, name)
+  let tr = map.get(exp.traits_by_name, name)
+  let nothing = f == None && ty == None && cn == None && ct == None && al == None && tr == None
+  if nothing {
+    var known = false
+    for n in exp.all_names {
+      if n == name { known = true }
+    }
+    if known {
+      return cerr_h(cx1, "`" ++ name ++ "` is private to module `" ++ from_path ++ "`",
+        lo, hi, "add `pub` to its declaration in " ++ from_path)
+    }
+    let pool = map.keys(exp.fns) ++ map.keys(exp.types_by_name) ++ map.keys(exp.consts) ++
+      map.keys(exp.ctors) ++ map.keys(exp.traits_by_name)
+    return cerr_o(cx1, "module `" ++ from_path ++ "` has no exported name `" ++ name ++ "`",
+      lo, hi, suggest.hint(name, pool))
+  }
+  match map.get(cx1.imported_names, name) {
+    Some(prev) ->
+      return cerr(cx1, "`" ++ name ++ "` is imported more than once (from `" ++ prev ++
+          "` and `" ++ from_path ++ "`)", lo, hi)
+    None -> ()
+  }
+  cx1 = Cx { ..cx1, imported_names: map.insert(cx1.imported_names, name, from_path) }
+  match f {
+    Some(sig) -> { cx1 = Cx { ..cx1, fns: map.insert(cx1.fns, name, sig) } }
+    None -> ()
+  }
+  # a type brings its constructors (spec §10.3); a ctor may also be named directly
+  match ty {
+    Some(aid) -> {
+      var cbn = cx1.ctors_by_name
+      let a = adt_of(cx1.adts, aid)
+      var i = 0
+      for c in a.ctors {
+        cbn = map.insert(cbn, c.name, (aid, i))
+        i = i + 1
+      }
+      cx1 = Cx {
+        ..cx1,
+        adts_by_name: map.insert(cx1.adts_by_name, name, aid),
+        ctors_by_name: cbn
+      }
+    }
+    None -> ()
+  }
+  match al {
+    Some(ae) -> {
+      cx1 = Cx { ..cx1, aliases: map.insert(cx1.aliases, name, ae) }
+    }
+    None -> ()
+  }
+  match ct {
+    Some(k) -> { cx1 = Cx { ..cx1, ctors_by_name: map.insert(cx1.ctors_by_name, name, k) } }
+    None -> ()
+  }
+  match cn {
+    Some(t) -> {
+      cx1 = Cx {
+        ..cx1,
+        consts: map.insert(cx1.consts, name, t),
+        const_order: cx1.const_order ++ [name]
+      }
+    }
+    None -> ()
+  }
+  match tr {
+    Some(tid) -> { cx1 = Cx { ..cx1, traits_by_name: map.insert(cx1.traits_by_name, name, tid) } }
+    None -> ()
+  }
+  cx1
+}
