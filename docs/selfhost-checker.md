@@ -70,10 +70,11 @@ Dawn 侧集中到 `selfhost/src/jreflect.dawn`：
 
 ## 五点五、通读 Checker.kt 后的移植笔记（2026-07-22，全文已读）
 
-**P3b 范围裁剪（重要决定）**：`__check` 金标准只需要「诊断 + fn 签名渲染 + const 求值」，
-都不需要 Typed 树——**P3b 不产出 TAST**，checker 内部算类型、发诊断即可；
-Typed 树（选甲的第二棵）推迟到 P4 开头（codegen 消费者出现时）再定形。
-Comptime 解释器不依赖节点注解：求值时按 checker 同款规则重解析被调名（共享 resolve 帮助函数）。
+**P3b 产出 TAST（改判，2026-07-22 通读 Comptime.kt 后）**：解释器重度消费 checker
+注解（e.sig/e.symbol/e.desugared/e.ctor/e.fieldExprs/p.fieldPats/e.captures…），
+重解析方案的重复与发散风险高于建树成本——**checker 即刻产出 Typed 树**（选甲第二棵，
+`tast.dawn`），comptime 与 P4 codegen 共同消费。Symbol 发唯一 Int id，comptime env =
+`Map[Int, CValue]`。TExpr 节点形态跟随消费者需要增量收敛（先覆盖 Comptime 所需的槽）。
 
 **Cx 状态记录**（Kotlin Checker 的全部可变成员，`(Cx, Ty)` 线程传递，无异常控制流）：
 diags、next_id（TyVar/EffVar/adt/trait 计数）、fns/adts_by_name/aliases/ctors_by_name、
@@ -113,6 +114,34 @@ isInterface/isPrimitive/isArray/componentType/canonicalName、Modifier.isStatic/
 isAssignableFrom、getParameterTypes/getReturnType、Object 方法剔除（getMethod 探测）、
 方法/构造器 toString（错误信息里逐字打印 candidates）。resolveJavaClass 的嵌套类
 `.`→`$` 回退循环照抄。
+
+## 五点七五、Comptime/StdLib/Loader/Analyze 通读笔记（全部源码已读毕）
+
+- **Comptime 控制流**：Kotlin 用异常（EarlyReturn/Break/Continue/DawnError）——Dawn 版
+  `alias ER = Result[(ESt, CValue), (ESt, Ctl)]`，`Ctl = CErr(Diag) | CReturn(CValue) |
+  CBreak | CContinue`，`?` 即 throw；callFn/applyFn 捕 CReturn，循环捕 CBreak/CContinue。
+  ESt = { fuel: Int, depth: Int }（burn/burnN/MAX_CALL_DEPTH=100_000 照抄）。
+- **comptime 内建子集**（callBuiltin 白名单）：panic/todo/expect/unwrap_or/to_float/
+  to_int/to_string/len/get/range/sort_by/chars/join/split/cursor 家族(经 StdStrings，
+  Dawn 版 use java "dawn.rt.StdStrings" 同源调用)/parse_int/parse_float；其余报
+  "not available at comptime"。VAdt 相等按 ctor 同一性 → (adt id, ctor idx)。
+  Float == 用原生 `==`（NaN != NaN，DCMPL 语义——注意与 Dawn 源码层 == 的全序不同，
+  解释器里要走 Java 语义：经 unsafe_pure { Double 比较 } 或存 bits 比对，落地时验证）。
+- **Route C**（unsafe_pure 折叠 Java 调用）：只允许静态方法、Int/Float/Bool/String 边界；
+  Dawn 版经 jreflect 的 Method.invoke（Object[] 用 reflect.Array 组装）。
+- **栈深**：Kotlin 给解释器 64MB 独立线程；Dawn 版不开线程，改由脚本给 selfhost JVM
+  `-Xss512m`（记入 diff 脚本与 CI）。
+- **StdLib**：names 按 modules.txt 依赖序；每模块 lex+parse+check（ImportEnv=已查 std，
+  无 stdFns 保持自举无环）+ evalComptime；坏 std = 直接 panic。PRELUDE={println,print,
+  map,filter,fold}；INTERNAL_BUILTINS/MOVED 表照抄。selfhost 读 std 源：CLI `--std <dir>`
+  （默认 compiler/src/main/resources/std），P5 再考虑打包内嵌。
+- **ModuleLoader**：目录模式 root=<dir>/src 全量收文件（排序 by path）；文件模式沿 use
+  闭包；SEGMENT 正则 `^[a-z_][a-z0-9_]*$`；std/ 磁盘保留报错；重复 use 检测；DFS 拓扑
+  + 首个环报错（cycleReported 单发）。modPath=相对路径去 .dawn；className=段清洗
+  （非字母数字→_，数字开头前缀 m_）。
+- **Analyze**：analyze()（单文件）与 analyzeProgram()（依赖序逐模块，exports 滚动累积，
+  parse 失败跳过 check）；exportsOf 的 pub 面（含 trait 方法并入 fns）；hasErrors 只数
+  ERROR。__check 的 dump 按此层组织：每目标 = 诊断行 + pub fn 签名渲染行 + const 值行。
 
 ## 六、已知硬点（提前记录）
 
