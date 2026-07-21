@@ -3837,7 +3837,7 @@ class CodeGen(
 
     private fun genOrdering(t: Type, op: BinOp) {
         when (t) {
-            TInt -> mv.visitInsn(LCMP)
+            TInt, Type.TCursor -> mv.visitInsn(LCMP)
             TString -> mv.visitMethodInsn(
                 INVOKEVIRTUAL, "java/lang/String", "compareTo", "(Ljava/lang/String;)I", false,
             )

@@ -2542,7 +2542,9 @@ class Checker(
             }
             BinOp.LT, BinOp.LE, BinOp.GT, BinOp.GE -> {
                 if (lt != rt) error("comparison requires both sides to have the same type: $lt vs $rt", e.opSpan)
-                else if (lt == TInt || lt == TFloat || lt == TString) TBool // native fast path
+                // native fast path; Cursor orders too — position before/after is legitimate,
+                // it is only arithmetic that can manufacture an invalid position (spec §11)
+                else if (lt == TInt || lt == TFloat || lt == TString || lt == Type.TCursor) TBool
                 else {
                     e.ordWitness = resolveOrdWitness(lt, e.opSpan)
                     TBool
