@@ -1,0 +1,379 @@
+# The parsed AST (P3 of self-hosting; architecture per docs/selfhost-ast.md,
+# 选甲): this tree carries exactly what the parser saw — none of the Kotlin
+# Ast.kt `var` slots the checker fills in. Spans are inline UTF-16 offset pairs
+# (`lo`/`hi`); secondary spans keep short prefixes (`nlo`/`nhi` for names,
+# `clo`/`chi` for callees, and so on).
+
+# ---- type references ----
+
+pub type TypeRef =
+  | TNamed(name: String, args: List[TypeRef], lo: Int, hi: Int)
+  | TTuple(elems: List[TypeRef], lo: Int, hi: Int)
+  | TFn(params: List[TypeRef], ret: TypeRef, effs: List[String], lo: Int, hi: Int)
+
+## One trait bound (or derive) with its span: the Ord in `[T: Ord]`.
+pub type Bound = { name: String, lo: Int, hi: Int }
+
+pub type TypeParamDecl = { name: String, bounds: List[Bound], lo: Int, hi: Int }
+
+pub type Param = { name: String, tref: TypeRef, lo: Int, hi: Int }
+
+pub type LambdaParam = { name: String, ann: Option[TypeRef], lo: Int, hi: Int }
+
+pub type FieldDecl = { name: String, tref: TypeRef, lo: Int, hi: Int }
+
+pub type CtorDecl = {
+  name: String,
+  fields: List[FieldDecl],
+  lo: Int,
+  hi: Int,
+  nlo: Int,
+  nhi: Int
+}
+
+pub type ImportName = { name: String, lo: Int, hi: Int }
+
+# ---- expressions ----
+
+pub type StrPart =
+  | SPText(v: String)
+  | SPInterp(e: Expr)
+
+pub type BinOp =
+  | OpAdd
+  | OpSub
+  | OpMul
+  | OpDiv
+  | OpMod
+  | OpConcat
+  | OpEq
+  | OpNeq
+  | OpLt
+  | OpLe
+  | OpGt
+  | OpGe
+  | OpAnd
+  | OpOr
+  | OpBand
+  | OpBor
+  | OpBxor
+  | OpShl
+  | OpShr
+  | OpUshr
+
+pub type UnOp =
+  | OpNeg
+  | OpNot
+  | OpBnot
+
+## The Kotlin BinOp enum spelling, the vocabulary of the golden AST dump.
+pub fn bin_op_name(op: BinOp) -> String =
+  match op {
+    OpAdd -> "ADD"
+    OpSub -> "SUB"
+    OpMul -> "MUL"
+    OpDiv -> "DIV"
+    OpMod -> "MOD"
+    OpConcat -> "CONCAT"
+    OpEq -> "EQ"
+    OpNeq -> "NEQ"
+    OpLt -> "LT"
+    OpLe -> "LE"
+    OpGt -> "GT"
+    OpGe -> "GE"
+    OpAnd -> "AND"
+    OpOr -> "OR"
+    OpBand -> "BAND"
+    OpBor -> "BOR"
+    OpBxor -> "BXOR"
+    OpShl -> "SHL"
+    OpShr -> "SHR"
+    OpUshr -> "USHR"
+  }
+
+pub fn un_op_name(op: UnOp) -> String =
+  match op {
+    OpNeg -> "NEG"
+    OpNot -> "NOT"
+    OpBnot -> "BNOT"
+  }
+
+pub type CtorArg = { name: Option[String], e: Expr, lo: Int, hi: Int }
+
+pub type MatchArm = { pats: List[Pattern], guard: Option[Expr], body: Expr, lo: Int, hi: Int }
+
+pub type Expr =
+  | EInt(v: Int, lo: Int, hi: Int)
+  | EFloat(v: Float, lo: Int, hi: Int)
+  | EBool(v: Bool, lo: Int, hi: Int)
+  | EUnit(lo: Int, hi: Int)
+  | EStr(parts: List[StrPart], lo: Int, hi: Int)
+  | EVar(name: String, lo: Int, hi: Int)
+  | ECall(callee: String, args: List[Expr], clo: Int, chi: Int, lo: Int, hi: Int)
+  | EApply(target: Expr, args: List[Expr], lo: Int, hi: Int)
+  | EMethod(target: Expr, name: String, args: List[Expr], nlo: Int, nhi: Int, lo: Int, hi: Int)
+  | ELambda(params: List[LambdaParam], body: Expr, lo: Int, hi: Int)
+  | ECtor(
+    name: String,
+    args: List[CtorArg],
+    spread: Option[Expr],
+    has_parens: Bool,
+    clo: Int,
+    chi: Int,
+    lo: Int,
+    hi: Int
+  )
+  | EFieldAcc(target: Expr, field: String, flo: Int, fhi: Int, lo: Int, hi: Int)
+  | EListLit(elems: List[Expr], lo: Int, hi: Int)
+  | ETupleLit(elems: List[Expr], lo: Int, hi: Int)
+  | EPropagate(operand: Expr, lo: Int, hi: Int)
+  | EUnwrap(operand: Expr, lo: Int, hi: Int)
+  | EIndex(target: Expr, index: Expr, lo: Int, hi: Int)
+  | EReturn(v: Option[Expr], lo: Int, hi: Int)
+  | EBreak(lo: Int, hi: Int)
+  | EContinue(lo: Int, hi: Int)
+  | EComptime(body: Expr, lo: Int, hi: Int)
+  | EUnsafePure(body: Expr, lo: Int, hi: Int)
+  | EBinary(op: BinOp, left: Expr, right: Expr, olo: Int, ohi: Int, lo: Int, hi: Int)
+  | EUnary(op: UnOp, operand: Expr, lo: Int, hi: Int)
+  | EIf(cond: Expr, thn: Expr, els: Option[Expr], lo: Int, hi: Int)
+  | EMatch(scrut: Expr, arms: List[MatchArm], lo: Int, hi: Int)
+  | EBlock(stmts: List[Stmt], tail: Option[Expr], lo: Int, hi: Int)
+
+# ---- patterns ----
+
+pub type PatArg = { name: Option[String], pat: Pattern }
+
+pub type Pattern =
+  | PLit(lit: Expr, lo: Int, hi: Int)
+  | PBind(name: String, lo: Int, hi: Int)
+  | PWild(lo: Int, hi: Int)
+  | PCtor(
+    name: String,
+    args: List[PatArg],
+    has_rest: Bool,
+    has_parens: Bool,
+    nlo: Int,
+    nhi: Int,
+    lo: Int,
+    hi: Int
+  )
+  | PTuple(elems: List[Pattern], lo: Int, hi: Int)
+  | PList(
+    pre: List[Pattern],
+    has_rest: Bool,
+    rest_name: Option[String],
+    rest_span: Option[(Int, Int)],
+    post: List[Pattern],
+    lo: Int,
+    hi: Int
+  )
+
+# ---- statements ----
+
+pub type Stmt =
+  | SLet(name: String, mutable: Bool, ann: Option[TypeRef], init: Expr, lo: Int, hi: Int)
+  | SLetPat(pat: Pattern, mutable: Bool, init: Expr, lo: Int, hi: Int)
+  | SLocalFn(
+    name: String,
+    params: List[LambdaParam],
+    ret: TypeRef,
+    effs: List[String],
+    body: Expr,
+    nlo: Int,
+    nhi: Int,
+    lo: Int,
+    hi: Int
+  )
+  | SAssign(name: String, value: Expr, nlo: Int, nhi: Int, lo: Int, hi: Int)
+  | SExpr(e: Expr, lo: Int, hi: Int)
+  | SAssert(cond: Expr, src: Option[String], lo: Int, hi: Int)
+  | SWhile(cond: Expr, body: Expr, lo: Int, hi: Int)
+  | SFor(name: String, from: Expr, to: Option[Expr], body: Expr, lo: Int, hi: Int)
+
+# ---- declarations ----
+
+pub type TraitMethod = {
+  name: String,
+  params: List[Param],
+  ret: TypeRef,
+  effs: List[String],
+  body: Option[Expr],
+  lo: Int,
+  hi: Int,
+  nlo: Int,
+  nhi: Int
+}
+
+pub type FnDecl = {
+  is_pub: Bool,
+  name: String,
+  tparams: List[TypeParamDecl],
+  params: List[Param],
+  ret: Option[TypeRef],
+  effs: List[String],
+  body: Expr,
+  lo: Int,
+  hi: Int,
+  nlo: Int,
+  nhi: Int
+}
+
+pub type TypeDeclR = {
+  is_pub: Bool,
+  name: String,
+  tparams: List[String],
+  ctors: List[CtorDecl],
+  is_record: Bool,
+  derives: List[Bound],
+  alias_target: Option[TypeRef],
+  lo: Int,
+  hi: Int,
+  nlo: Int,
+  nhi: Int
+}
+
+pub type Decl =
+  | DFn(f: FnDecl)
+  | DType(t: TypeDeclR)
+  | DConst(
+    name: String,
+    is_pub: Bool,
+    ann: TypeRef,
+    init: Expr,
+    lo: Int,
+    hi: Int,
+    nlo: Int,
+    nhi: Int
+  )
+  | DTrait(
+    name: String,
+    tp: String,
+    tplo: Int,
+    tphi: Int,
+    methods: List[TraitMethod],
+    is_pub: Bool,
+    lo: Int,
+    hi: Int,
+    nlo: Int,
+    nhi: Int
+  )
+  | DImpl(
+    trait_name: String,
+    tlo: Int,
+    thi: Int,
+    subject: TypeRef,
+    methods: List[FnDecl],
+    lo: Int,
+    hi: Int
+  )
+  | DUseJava(fqcn: String, lo: Int, hi: Int, nlo: Int, nhi: Int)
+  | DUseModule(
+    segs: List[String],
+    selective: Option[List[ImportName]],
+    lo: Int,
+    hi: Int,
+    nlo: Int,
+    nhi: Int
+  )
+  | DTest(name: String, body: Expr, lo: Int, hi: Int, nlo: Int, nhi: Int)
+
+pub type Module = { decls: List[Decl] }
+
+# ---- span accessors ----
+
+pub fn e_lo(e: Expr) -> Int =
+  match e {
+    EInt(_, lo, _) -> lo
+    EFloat(_, lo, _) -> lo
+    EBool(_, lo, _) -> lo
+    EUnit(lo, _) -> lo
+    EStr(_, lo, _) -> lo
+    EVar(_, lo, _) -> lo
+    ECall(_, _, _, _, lo, _) -> lo
+    EApply(_, _, lo, _) -> lo
+    EMethod(_, _, _, _, _, lo, _) -> lo
+    ELambda(_, _, lo, _) -> lo
+    ECtor(_, _, _, _, _, _, lo, _) -> lo
+    EFieldAcc(_, _, _, _, lo, _) -> lo
+    EListLit(_, lo, _) -> lo
+    ETupleLit(_, lo, _) -> lo
+    EPropagate(_, lo, _) -> lo
+    EUnwrap(_, lo, _) -> lo
+    EIndex(_, _, lo, _) -> lo
+    EReturn(_, lo, _) -> lo
+    EBreak(lo, _) -> lo
+    EContinue(lo, _) -> lo
+    EComptime(_, lo, _) -> lo
+    EUnsafePure(_, lo, _) -> lo
+    EBinary(_, _, _, _, _, lo, _) -> lo
+    EUnary(_, _, lo, _) -> lo
+    EIf(_, _, _, lo, _) -> lo
+    EMatch(_, _, lo, _) -> lo
+    EBlock(_, _, lo, _) -> lo
+  }
+
+pub fn e_hi(e: Expr) -> Int =
+  match e {
+    EInt(_, _, hi) -> hi
+    EFloat(_, _, hi) -> hi
+    EBool(_, _, hi) -> hi
+    EUnit(_, hi) -> hi
+    EStr(_, _, hi) -> hi
+    EVar(_, _, hi) -> hi
+    ECall(_, _, _, _, _, hi) -> hi
+    EApply(_, _, _, hi) -> hi
+    EMethod(_, _, _, _, _, _, hi) -> hi
+    ELambda(_, _, _, hi) -> hi
+    ECtor(_, _, _, _, _, _, _, hi) -> hi
+    EFieldAcc(_, _, _, _, _, hi) -> hi
+    EListLit(_, _, hi) -> hi
+    ETupleLit(_, _, hi) -> hi
+    EPropagate(_, _, hi) -> hi
+    EUnwrap(_, _, hi) -> hi
+    EIndex(_, _, _, hi) -> hi
+    EReturn(_, _, hi) -> hi
+    EBreak(_, hi) -> hi
+    EContinue(_, hi) -> hi
+    EComptime(_, _, hi) -> hi
+    EUnsafePure(_, _, hi) -> hi
+    EBinary(_, _, _, _, _, _, hi) -> hi
+    EUnary(_, _, _, hi) -> hi
+    EIf(_, _, _, _, hi) -> hi
+    EMatch(_, _, _, hi) -> hi
+    EBlock(_, _, _, hi) -> hi
+  }
+
+pub fn t_lo(t: TypeRef) -> Int =
+  match t {
+    TNamed(_, _, lo, _) -> lo
+    TTuple(_, lo, _) -> lo
+    TFn(_, _, _, lo, _) -> lo
+  }
+
+pub fn t_hi(t: TypeRef) -> Int =
+  match t {
+    TNamed(_, _, _, hi) -> hi
+    TTuple(_, _, hi) -> hi
+    TFn(_, _, _, _, hi) -> hi
+  }
+
+pub fn pat_lo(p: Pattern) -> Int =
+  match p {
+    PLit(_, lo, _) -> lo
+    PBind(_, lo, _) -> lo
+    PWild(lo, _) -> lo
+    PCtor(_, _, _, _, _, _, lo, _) -> lo
+    PTuple(_, lo, _) -> lo
+    PList(_, _, _, _, _, lo, _) -> lo
+  }
+
+pub fn pat_hi(p: Pattern) -> Int =
+  match p {
+    PLit(_, _, hi) -> hi
+    PBind(_, _, hi) -> hi
+    PWild(_, hi) -> hi
+    PCtor(_, _, _, _, _, _, _, hi) -> hi
+    PTuple(_, _, hi) -> hi
+    PList(_, _, _, _, _, _, hi) -> hi
+  }

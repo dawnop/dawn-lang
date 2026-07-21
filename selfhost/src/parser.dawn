@@ -1,0 +1,1812 @@
+# The Dawn parser, in Dawn (P3 first half; port of parse/Parser.kt).
+# Same tree, same spans, same diagnostics — verified byte for byte against
+# `dawn __parse` by scripts/selfhost-parse-diff.sh.
+#
+# The Kotlin original holds a mutable token position plus a diagnostic sink and
+# throws for parse failures; here both travel in an explicit state record `St`,
+# every parse function returns `PR[T] = Result[(St, T), (St, Diag)]`, and `?`
+# plays the role of the exception. The Err side carries the state at the point
+# of failure (with all diagnostics accumulated so far) — recovery points
+# (declaration and statement boundaries) append the fatal diagnostic and
+# resynchronize from that position, exactly like the Kotlin catch blocks.
+# The Kotlin `noStructLit` member becomes the threaded `ns` flag: true inside
+# if/while/for/match headers, reset by any bracket.
+
+use std/str
+use std/list
+use token.{
+  Token, TokKind, Seg, SText, SCode, Diag,
+  INT, FLOAT, STRING, IDENT, TYPEIDENT, UNDERSCORE, NEWLINE, EOF,
+  FN, LET, VAR, TYPE, ALIAS, CONST, USE, JAVA, PUB, TRAIT, IMPL,
+  MATCH, IF, ELSE, FOR, IN, WHILE, RETURN, BREAK, CONTINUE,
+  COMPTIME, UNSAFE_PURE, TEST, ASSERT, TRUE, FALSE, NOT,
+  LPAREN, RPAREN, LBRACE, RBRACE, LBRACKET, RBRACKET,
+  COMMA, COLON, DOT, DOTDOT, QUESTION, ARROW, FATARROW,
+  EQ, EQEQ, NEQ, LT, LE, GT, GE,
+  PLUS, MINUS, STAR, SLASH, PERCENT, PLUSPLUS, PIPEGT, PIPE,
+  AMPAMP, PIPEPIPE, AMP, CARET, TILDE, SHL, SHR, USHR, BANG, AT
+}
+use ast.{
+  TypeRef, TNamed, TTuple, TFn, Bound, TypeParamDecl, Param, LambdaParam,
+  FieldDecl, CtorDecl, ImportName, StrPart, SPText, SPInterp,
+  BinOp, OpAdd, OpSub, OpMul, OpDiv, OpMod, OpConcat, OpEq, OpNeq, OpLt, OpLe,
+  OpGt, OpGe, OpAnd, OpOr, OpBand, OpBor, OpBxor, OpShl, OpShr, OpUshr,
+  UnOp, OpNeg, OpNot, OpBnot,
+  CtorArg, MatchArm, Expr, EInt, EFloat, EBool, EUnit, EStr, EVar, ECall,
+  EApply, EMethod, ELambda, ECtor, EFieldAcc, EListLit, ETupleLit, EPropagate,
+  EUnwrap, EIndex, EReturn, EBreak, EContinue, EComptime, EUnsafePure,
+  EBinary, EUnary, EIf, EMatch, EBlock,
+  PatArg, Pattern, PLit, PBind, PWild, PCtor, PTuple, PList,
+  Stmt, SLet, SLetPat, SLocalFn, SAssign, SExpr, SAssert, SWhile, SFor,
+  TraitMethod, FnDecl, TypeDeclR, Decl, DFn, DType, DConst, DTrait, DImpl,
+  DUseJava, DUseModule, DTest, Module,
+  e_lo, e_hi, t_lo, t_hi, pat_lo, pat_hi
+}
+use lexer.{lex, lex_at, utf16_slice}
+use java "java.lang.Character"
+
+# ---- parser state ----
+
+type P = { toks: List[Token], src: Option[String] }
+
+## Scan position plus the diagnostics accumulated so far (the Kotlin sink).
+type St = { pos: Int, diags: List[Diag] }
+
+alias PR[T] = Result[(St, T), (St, Diag)]
+
+fn cur(p: P, st: St) -> Token = tok_at(p, st.pos, 0)
+
+fn tok_at(p: P, pos: Int, ahead: Int) -> Token = {
+  let i = pos + ahead
+  let last = len(p.toks) - 1
+  p.toks[if i > last { last } else { i }]
+}
+
+fn kind_of(p: P, st: St) -> TokKind = cur(p, st).kind
+
+fn kind_ahead(p: P, st: St, ahead: Int) -> TokKind = tok_at(p, st.pos, ahead).kind
+
+fn at_kind(p: P, st: St, k: TokKind) -> Bool = kind_of(p, st) == k
+
+fn adv(p: P, st: St) -> (St, Token) = {
+  let t = p.toks[st.pos]
+  if st.pos < len(p.toks) - 1 {
+    (St { ..st, pos: st.pos + 1 }, t)
+  } else {
+    (st, t)
+  }
+}
+
+fn adv1(p: P, st: St) -> St = {
+  let (st2, t) = adv(p, st)
+  st2
+}
+
+fn skip_nl(p: P, st: St) -> St = {
+  var s = st
+  while at_kind(p, s, NEWLINE) { s = adv1(p, s) }
+  s
+}
+
+fn pd(msg: String, lo: Int, hi: Int) -> Diag = Diag { msg: msg, lo: lo, hi: hi, hint: "" }
+
+fn pd_h(msg: String, lo: Int, hi: Int, hint: String) -> Diag =
+  Diag { msg: msg, lo: lo, hi: hi, hint: hint }
+
+## A diagnostic at the current token (the Kotlin `err(msg)`).
+fn perr(p: P, st: St, msg: String) -> Diag = {
+  let t = cur(p, st)
+  pd(msg, t.lo, t.hi)
+}
+
+fn perr_h(p: P, st: St, msg: String, hint: String) -> Diag = {
+  let t = cur(p, st)
+  pd_h(msg, t.lo, t.hi, hint)
+}
+
+fn want(p: P, st: St, k: TokKind, what: String) -> PR[Token] =
+  if at_kind(p, st, k) {
+    Ok(adv(p, st))
+  } else {
+    Err((st, perr(p, st, "expected " ++ what ++ ", found `" ++ cur(p, st).text ++ "`")))
+  }
+
+## Separator between statements/declarations: at least one NEWLINE (or block end / EOF).
+fn want_sep(p: P, st: St) -> Result[St, (St, Diag)] =
+  if at_kind(p, st, NEWLINE) {
+    Ok(skip_nl(p, st))
+  } else if at_kind(p, st, RBRACE) || at_kind(p, st, EOF) {
+    Ok(st)
+  } else {
+    Err((st, perr_h(p, st, "expected a newline after this statement",
+      "one statement per line; check whether the previous statement is complete")))
+  }
+
+fn is_lower_cp(c: Int) -> Bool = unsafe_pure { Character.isLowerCase(c) }
+
+fn is_upper_cp(c: Int) -> Bool = unsafe_pure { Character.isUpperCase(c) }
+
+fn is_ws_cp(c: Int) -> Bool = unsafe_pure { Character.isWhitespace(c) }
+
+fn is_blank_str(v: String) -> Bool = {
+  for c in code_points(v) {
+    if not is_ws_cp(c) { return false }
+  }
+  true
+}
+
+fn no_diags2() -> List[Diag] = []
+
+# ---- module ----
+
+## Parse a whole file: lex, then descend. Never fails — broken declarations are
+## reported and skipped, like the Kotlin recovery points.
+pub fn parse_module(text: String) -> (Module, List[Diag]) = {
+  let (toks, lexds) = lex(text)
+  let p = P { toks: toks, src: Some(text) }
+  var st = St { pos: 0, diags: lexds }
+  var decls: List[Decl] = []
+  st = skip_nl(p, st)
+  while not at_kind(p, st, EOF) {
+    match top_decl(p, st) {
+      Ok(r) -> {
+        let (st2, d) = r
+        decls = decls ++ [d]
+        st = st2
+      }
+      Err(fe) -> {
+        let (st2, d) = fe
+        st = sync_decl(p, St { ..st2, diags: st2.diags ++ [d] })
+      }
+    }
+    st = skip_nl(p, st)
+  }
+  (Module { decls: decls }, st.diags)
+}
+
+## After a broken declaration: skip forward to the next plausible declaration start.
+fn sync_decl(p: P, st: St) -> St = {
+  var s = st
+  if not at_kind(p, s, EOF) { s = adv1(p, s) }
+  while not at_kind(p, s, EOF) && not at_kind(p, s, FN) && not at_kind(p, s, PUB) &&
+    not at_kind(p, s, TYPE) && not at_kind(p, s, ALIAS) && not at_kind(p, s, CONST) &&
+    not at_kind(p, s, TRAIT) && not at_kind(p, s, IMPL) {
+      s = adv1(p, s)
+    }
+  s
+}
+
+fn top_decl(p: P, st: St) -> PR[Decl] = {
+  var st0 = st
+  var is_pub = false
+  if at_kind(p, st0, PUB) {
+    st0 = adv1(p, st0)
+    is_pub = true
+  }
+  let k = kind_of(p, st0)
+  if k == FN {
+    let (st1, f) = fn_decl(p, st0, is_pub, false)?
+    Ok((st1, DFn(f)))
+  } else if k == TYPE {
+    type_decl(p, st0, is_pub)
+  } else if k == ALIAS {
+    alias_decl(p, st0, is_pub)
+  } else if k == CONST {
+    const_decl(p, st0, is_pub)
+  } else if k == TRAIT {
+    trait_decl(p, st0, is_pub)
+  } else if k == IMPL {
+    if is_pub {
+      Err((st0, perr(p, st0, "an impl cannot be pub (its visibility follows the trait)")))
+    } else {
+      impl_decl(p, st0)
+    }
+  } else if k == TEST {
+    if is_pub {
+      Err((st0, perr(p, st0, "test blocks cannot be pub")))
+    } else {
+      test_decl(p, st0)
+    }
+  } else if k == USE {
+    if is_pub {
+      Err((st0, perr(p, st0, "use declarations cannot be pub")))
+    } else {
+      use_decl(p, st0)
+    }
+  } else {
+    Err((st0, perr(p, st0,
+      "only declarations (fn, type, alias, const, trait, impl, test) are allowed at module top level")))
+  }
+}
+
+# ---- use declarations ----
+
+fn use_decl(p: P, st: St) -> PR[Decl] = {
+  let (st1, kw) = adv(p, st)
+  if at_kind(p, st1, JAVA) { java_use(p, st1, kw) } else { module_use(p, st1, kw) }
+}
+
+fn java_use(p: P, st: St, kw: Token) -> PR[Decl] = {
+  let st1 = adv1(p, st)
+  let (st2, s) = want(p, st1, STRING, "a quoted fully-qualified class name")?
+  if has_code_seg(s.segs) {
+    return Err((st2, pd("a class name cannot contain interpolation", s.lo, s.hi)))
+  }
+  let fqcn = seg_text(s.segs)
+  let tail = match str.last_index_of(fqcn, ".") {
+    Some(i) -> str.substring(fqcn, i + 1, str.len(fqcn))
+    None -> fqcn
+  }
+  let ok = not is_blank_str(fqcn) && str.len(tail) > 0 && is_upper_cp(code_points(tail)[0])
+  if not ok {
+    return Err((st2, pd("expected a fully-qualified class name like \"java.lang.StringBuilder\"",
+      s.lo, s.hi)))
+  }
+  Ok((st2, DUseJava(fqcn, kw.lo, s.hi, s.lo, s.hi)))
+}
+
+fn has_code_seg(segs: List[Seg]) -> Bool = {
+  for sg in segs {
+    match sg {
+      SCode(c, o) -> return true
+      SText(v) -> ()
+    }
+  }
+  false
+}
+
+fn seg_text(segs: List[Seg]) -> String = {
+  var out = ""
+  for sg in segs {
+    match sg {
+      SText(v) -> { out = out ++ v }
+      SCode(c, o) -> ()
+    }
+  }
+  out
+}
+
+fn module_use(p: P, st: St, kw: Token) -> PR[Decl] = {
+  let (st1, first) = want(p, st, IDENT, "a module path (like json/lexer) or `java`")?
+  var segs = [first.text]
+  var end_lo = first.lo
+  var end_hi = first.hi
+  var st2 = st1
+  while at_kind(p, st2, SLASH) {
+    let st3 = adv1(p, st2)
+    let (st4, seg) = want(p, st3, IDENT, "a module path segment (lowercase)")?
+    segs = segs ++ [seg.text]
+    end_lo = seg.lo
+    end_hi = seg.hi
+    st2 = st4
+  }
+  let nlo = first.lo
+  let nhi = end_hi
+  if not at_kind(p, st2, DOT) {
+    return Ok((st2, DUseModule(segs, None, kw.lo, nhi, nlo, nhi)))
+  }
+  let st5 = adv1(p, st2)
+  let (st6, o) = want(p, st5, LBRACE, "`{` to open a selective import list")?
+  var names: List[ImportName] = []
+  var st7 = skip_nl(p, st6)
+  while not at_kind(p, st7, RBRACE) {
+    let k = kind_of(p, st7)
+    if k != IDENT && k != TYPEIDENT {
+      return Err((st7, perr(p, st7, "expected an imported name (a function, type, or constant)")))
+    }
+    let (st8, n) = adv(p, st7)
+    names = names ++ [ImportName { name: n.text, lo: n.lo, hi: n.hi }]
+    st7 = skip_nl(p, st8)
+    if at_kind(p, st7, COMMA) { st7 = skip_nl(p, adv1(p, st7)) } else { break }
+  }
+  let (st9, close) = want(p, st7, RBRACE, "`}`")?
+  if len(names) == 0 {
+    return Err((st9, pd_h("a selective import needs at least one name", nlo, close.hi,
+      "use `use " ++ join(segs, "/") ++ "` to import the whole module")))
+  }
+  Ok((st9, DUseModule(segs, Some(names), kw.lo, close.hi, nlo, nhi)))
+}
+
+# ---- const and test declarations ----
+
+fn const_decl(p: P, st: St, is_pub: Bool) -> PR[Decl] = {
+  let (st1, kw) = want(p, st, CONST, "`const`")?
+  let (st2, name) = want(p, st1, TYPEIDENT, "a constant name (SCREAMING_SNAKE_CASE)")?
+  if has_lower(name.text) {
+    return Err((st2, pd_h("constant names are SCREAMING_SNAKE_CASE", name.lo, name.hi,
+      "lowercase names are values, UpperCamelCase names are types/constructors (spec §1.3)")))
+  }
+  let (st3, _) = want(p, st2, COLON, "`:` (constants must declare their type)")?
+  let (st4, t) = type_ref(p, st3)?
+  let (st5, _) = want(p, st4, EQ, "`=`")?
+  let st6 = skip_nl(p, st5)
+  let (st7, init) = expression(p, st6, false)?
+  Ok((st7, DConst(name.text, is_pub, t, init, kw.lo, e_hi(init), name.lo, name.hi)))
+}
+
+fn has_lower(v: String) -> Bool = {
+  for c in code_points(v) {
+    if is_lower_cp(c) { return true }
+  }
+  false
+}
+
+fn test_decl(p: P, st: St) -> PR[Decl] = {
+  let (st1, kw) = adv(p, st)
+  let (st2, name_tok) = want(p, st1, STRING, "a test name string")?
+  if has_code_seg(name_tok.segs) {
+    return Err((st2, pd("test names cannot contain interpolation", name_tok.lo, name_tok.hi)))
+  }
+  let name = seg_text(name_tok.segs)
+  let (st3, body) = block_expr(p, st2)?
+  Ok((st3, DTest(name, body, kw.lo, e_hi(body), name_tok.lo, name_tok.hi)))
+}
+
+# ---- type declarations ----
+
+## [T, U] on fn/type declarations, with optional bounds on fns: [T: Ord + Show]
+fn type_params(p: P, st: St) -> PR[List[TypeParamDecl]] = {
+  if not at_kind(p, st, LBRACKET) {
+    let none: List[TypeParamDecl] = []
+    return Ok((st, none))
+  }
+  var st1 = adv1(p, st)
+  var out: List[TypeParamDecl] = []
+  while not at_kind(p, st1, RBRACKET) {
+    let (st2, n) = want(p, st1, TYPEIDENT, "a type parameter name (uppercase)")?
+    var bounds: List[Bound] = []
+    var st3 = st2
+    if at_kind(p, st3, COLON) {
+      let st4 = adv1(p, st3)
+      let (st5, first) = want(p, st4, TYPEIDENT, "a trait name after `:`")?
+      bounds = [Bound { name: first.text, lo: first.lo, hi: first.hi }]
+      st3 = st5
+      while at_kind(p, st3, PLUS) {
+        let st6 = adv1(p, st3)
+        let (st7, b) = want(p, st6, TYPEIDENT, "a trait name after `+`")?
+        bounds = bounds ++ [Bound { name: b.text, lo: b.lo, hi: b.hi }]
+        st3 = st7
+      }
+    }
+    let end = if len(bounds) > 0 { bounds[len(bounds) - 1].hi } else { n.hi }
+    out = out ++ [TypeParamDecl { name: n.text, bounds: bounds, lo: n.lo, hi: end }]
+    if at_kind(p, st3, COMMA) { st1 = adv1(p, st3) } else {
+      st1 = st3
+      break
+    }
+  }
+  let (st8, _) = want(p, st1, RBRACKET, "`]`")?
+  if len(out) == 0 {
+    return Err((st8, perr(p, st8, "type parameter list cannot be empty")))
+  }
+  Ok((st8, out))
+}
+
+## `alias Name[T] = TypeRef` — a transparent type alias (spec §2.6).
+fn alias_decl(p: P, st: St, is_pub: Bool) -> PR[Decl] = {
+  let (st1, kw) = want(p, st, ALIAS, "`alias`")?
+  let (st2, name) = want(p, st1, TYPEIDENT, "a type name (uppercase)")?
+  let (st3, tparam_decls) = type_params(p, st2)?
+  for tp in tparam_decls {
+    if len(tp.bounds) > 0 {
+      return Err((st3, pd_h("alias declarations cannot constrain their type parameters",
+        tp.lo, tp.hi, "trait bounds go on the functions that use the type: fn f[T: Ord](...)")))
+    }
+  }
+  let (st4, _) = want(p, st3, EQ, "`=`")?
+  let (st5, target) = type_ref(p, st4)?
+  let names = map(tparam_decls, fn(t) => t.name)
+  Ok((st5, DType(TypeDeclR {
+    is_pub: is_pub,
+    name: name.text,
+    tparams: names,
+    ctors: [],
+    is_record: false,
+    derives: [],
+    alias_target: Some(target),
+    lo: kw.lo,
+    hi: t_hi(target),
+    nlo: name.lo,
+    nhi: name.hi
+  })))
+}
+
+fn is_builtin_scalar(name: String) -> Bool =
+  match name {
+    "Int" | "Float" | "Bool" | "String" | "Unit" -> true
+    _ -> false
+  }
+
+fn type_decl(p: P, st: St, is_pub: Bool) -> PR[Decl] = {
+  let (st1, kw) = want(p, st, TYPE, "`type`")?
+  let (st2, name) = want(p, st1, TYPEIDENT, "a type name (uppercase)")?
+  let (st3, tparam_decls) = type_params(p, st2)?
+  for tp in tparam_decls {
+    if len(tp.bounds) > 0 {
+      return Err((st3, pd_h("type declarations cannot constrain their type parameters",
+        tp.lo, tp.hi, "trait bounds go on the functions that use the type: fn f[T: Ord](...)")))
+    }
+  }
+  let tparams = map(tparam_decls, fn(t) => t.name)
+  let (st4, _) = want(p, st3, EQ, "`=`")?
+  if at_kind(p, st4, LBRACE) {
+    return record_decl(p, st4, is_pub, kw, name, tparams)
+  }
+  # `type` declares a nominal type only; an RHS that cannot begin a constructor
+  # list is an alias, and aliases have their own keyword (spec §2.6)
+  let builtin_scalar = at_kind(p, st4, TYPEIDENT) && is_builtin_scalar(cur(p, st4).text) &&
+    kind_ahead(p, st4, 1) != LPAREN
+  let aliasish = at_kind(p, st4, FN) || at_kind(p, st4, LPAREN) ||
+    (at_kind(p, st4, TYPEIDENT) && kind_ahead(p, st4, 1) == LBRACKET) || builtin_scalar
+  if aliasish {
+    let (st5, target) = type_ref(p, st4)?
+    let brackets = if len(tparams) == 0 { "" } else { "[" ++ join(tparams, ", ") ++ "]" }
+    return Err((st5, pd_h(
+      "`type` declares a nominal type (constructors or a record); this is an alias",
+      kw.lo, t_hi(target),
+      "write `alias " ++ name.text ++ brackets ++ " = ...` instead")))
+  }
+  var st6 = st4
+  if at_kind(p, st6, PIPE) { st6 = adv1(p, st6) }
+  st6 = skip_nl(p, st6)
+  let (st7, first_ctor) = ctor_decl(p, st6)?
+  var ctors = [first_ctor]
+  var st8 = st7
+  while true {
+    # constructors usually sit one per line, | first (like vertical pipes)
+    var look = st8.pos
+    while p.toks[look].kind == NEWLINE { look = look + 1 }
+    if p.toks[look].kind != PIPE { break }
+    var st9 = St { ..st8, pos: look + 1 }
+    st9 = skip_nl(p, st9)
+    let (st10, c) = ctor_decl(p, st9)?
+    ctors = ctors ++ [c]
+    st8 = st10
+  }
+  let (st11, derives) = parse_derives(p, st8)?
+  let end = if len(derives) > 0 { derives[len(derives) - 1].hi } else {
+    ctors[len(ctors) - 1].hi
+  }
+  Ok((st11, DType(TypeDeclR {
+    is_pub: is_pub,
+    name: name.text,
+    tparams: tparams,
+    ctors: ctors,
+    is_record: false,
+    derives: derives,
+    alias_target: None,
+    lo: kw.lo,
+    hi: end,
+    nlo: name.lo,
+    nhi: name.hi
+  })))
+}
+
+## Optional trailing `derive Name (, Name)*`. `derive` is a soft keyword, so
+## this peeks without consuming when absent.
+fn parse_derives(p: P, st: St) -> PR[List[Bound]] = {
+  var look = st.pos
+  while p.toks[look].kind == NEWLINE { look = look + 1 }
+  let lt = p.toks[look]
+  if not (lt.kind == IDENT && lt.text == "derive") {
+    let none: List[Bound] = []
+    return Ok((st, none))
+  }
+  var st1 = St { ..st, pos: look + 1 }
+  let (st2, first) = want(p, st1, TYPEIDENT, "a trait name to derive (only Show in v0.1)")?
+  var out = [Bound { name: first.text, lo: first.lo, hi: first.hi }]
+  var st3 = st2
+  while at_kind(p, st3, COMMA) {
+    let st4 = adv1(p, st3)
+    let (st5, n) = want(p, st4, TYPEIDENT, "a trait name to derive")?
+    out = out ++ [Bound { name: n.text, lo: n.lo, hi: n.hi }]
+    st3 = st5
+  }
+  Ok((st3, out))
+}
+
+## type Point = { x: Float, y: Float } — a single-constructor product type
+fn record_decl(
+  p: P,
+  st: St,
+  is_pub: Bool,
+  kw: Token,
+  name: Token,
+  tparams: List[String]
+) -> PR[Decl] = {
+  var st1 = skip_nl(p, adv1(p, st))
+  var fields: List[FieldDecl] = []
+  while not at_kind(p, st1, RBRACE) {
+    let (st2, f) = want(p, st1, IDENT, "a field name")?
+    let (st3, _) = want(p, st2, COLON, "`:` (record fields must be typed)")?
+    let (st4, t) = type_ref(p, st3)?
+    fields = fields ++ [FieldDecl { name: f.text, tref: t, lo: f.lo, hi: t_hi(t) }]
+    st1 = skip_nl(p, st4)
+    if at_kind(p, st1, COMMA) { st1 = skip_nl(p, adv1(p, st1)) } else { break }
+  }
+  let (st5, close) = want(p, st1, RBRACE, "`}`")?
+  if len(fields) == 0 {
+    return Err((st5, pd("a record must declare at least one field", kw.lo, close.hi)))
+  }
+  let ctor = CtorDecl {
+    name: name.text,
+    fields: fields,
+    lo: name.lo,
+    hi: close.hi,
+    nlo: name.lo,
+    nhi: name.hi
+  }
+  let (st6, derives) = parse_derives(p, st5)?
+  let end = if len(derives) > 0 { derives[len(derives) - 1].hi } else { close.hi }
+  Ok((st6, DType(TypeDeclR {
+    is_pub: is_pub,
+    name: name.text,
+    tparams: tparams,
+    ctors: [ctor],
+    is_record: true,
+    derives: derives,
+    alias_target: None,
+    lo: kw.lo,
+    hi: end,
+    nlo: name.lo,
+    nhi: name.hi
+  })))
+}
+
+fn ctor_decl(p: P, st: St) -> PR[CtorDecl] = {
+  let (st1, name) = want(p, st, TYPEIDENT, "a constructor name (uppercase)")?
+  if not at_kind(p, st1, LPAREN) {
+    return Ok((st1, CtorDecl {
+      name: name.text,
+      fields: [],
+      lo: name.lo,
+      hi: name.hi,
+      nlo: name.lo,
+      nhi: name.hi
+    }))
+  }
+  var st2 = skip_nl(p, adv1(p, st1))
+  var fields: List[FieldDecl] = []
+  while not at_kind(p, st2, RPAREN) {
+    let (st3, f) = want(p, st2, IDENT, "a field name (constructor fields must be named)")?
+    let (st4, _) = want(p, st3, COLON, "`:` (constructor fields must be typed)")?
+    let (st5, t) = type_ref(p, st4)?
+    fields = fields ++ [FieldDecl { name: f.text, tref: t, lo: f.lo, hi: t_hi(t) }]
+    st2 = skip_nl(p, st5)
+    if at_kind(p, st2, COMMA) { st2 = skip_nl(p, adv1(p, st2)) } else { break }
+  }
+  let (st6, close) = want(p, st2, RPAREN, "`)`")?
+  if len(fields) == 0 {
+    return Err((st6, pd_h("a constructor with `()` must declare at least one field",
+      name.lo, close.hi,
+      "drop the parentheses for a no-payload constructor: " ++ name.text)))
+  }
+  Ok((st6, CtorDecl {
+    name: name.text,
+    fields: fields,
+    lo: name.lo,
+    hi: close.hi,
+    nlo: name.lo,
+    nhi: name.hi
+  }))
+}
+
+# ---- fn declarations ----
+
+fn fn_decl(p: P, st: St, is_pub: Bool, in_impl: Bool) -> PR[FnDecl] = {
+  let (st1, fn_tok) = want(p, st, FN, "`fn`")?
+  let (st2, name_tok) = want(p, st1, IDENT, "a function name (lowercase)")?
+  let (st3, tparams) = type_params(p, st2)?
+  if in_impl && len(tparams) > 0 {
+    let tp = tparams[0]
+    return Err((st3, pd("impl methods cannot declare their own type parameters", tp.lo, tp.hi)))
+  }
+  let (st4, _) = want(p, st3, LPAREN, "`(`")?
+  let (st5, params) = typed_params(p, st4, "top-level function")?
+  let (st6, _) = want(p, st5, RPAREN, "`)`")?
+  # pub functions are API: their full signature is the contract; private
+  # functions may leave the return type (and effect) to inference
+  var st7 = st6
+  var ret: Option[TypeRef] = None
+  if at_kind(p, st7, ARROW) {
+    let st8 = adv1(p, st7)
+    let (st9, t) = type_ref(p, st8)?
+    ret = Some(t)
+    st7 = st9
+  } else if in_impl {
+    let (st8, _) = want(p, st7, ARROW, "`->` (impl methods must declare their full signature)")?
+    st7 = st8
+  } else if is_pub {
+    let (st8, _) = want(p, st7, ARROW, "`->` (pub functions must declare a return type)")?
+    st7 = st8
+  }
+  let (st10, effs) = parse_effect(p, st7)?
+  let (st11, _) = want(p, st10, EQ, "`=` (function body)")?
+  let st12 = skip_nl(p, st11)
+  let (st13, body) = expression(p, st12, false)?
+  Ok((st13, FnDecl {
+    is_pub: is_pub,
+    name: name_tok.text,
+    tparams: tparams,
+    params: params,
+    ret: ret,
+    effs: effs,
+    body: body,
+    lo: fn_tok.lo,
+    hi: e_hi(body),
+    nlo: name_tok.lo,
+    nhi: name_tok.hi
+  }))
+}
+
+## name: Type, ... — the shared typed parameter list of fn/trait declarations
+fn typed_params(p: P, st: St, what: String) -> PR[List[Param]] = {
+  var params: List[Param] = []
+  var st1 = skip_nl(p, st)
+  while not at_kind(p, st1, RPAREN) {
+    let (st2, n) = want(p, st1, IDENT, "a parameter name")?
+    let (st3, _) = want(p, st2, COLON, "`:` (" ++ what ++ " parameters must be typed)")?
+    let (st4, t) = type_ref(p, st3)?
+    params = params ++ [Param { name: n.text, tref: t, lo: n.lo, hi: n.hi }]
+    st1 = skip_nl(p, st4)
+    if at_kind(p, st1, COMMA) { st1 = skip_nl(p, adv1(p, st1)) } else { break }
+  }
+  Ok((st1, params))
+}
+
+# ---- trait and impl declarations ----
+
+fn trait_decl(p: P, st: St, is_pub: Bool) -> PR[Decl] = {
+  let (st1, kw) = want(p, st, TRAIT, "`trait`")?
+  let (st2, name) = want(p, st1, TYPEIDENT, "a trait name (uppercase)")?
+  let (st3, _) = want(p, st2, LBRACKET,
+    "`[` (a trait declares its subject type parameter: trait " ++ name.text ++ "[T])")?
+  let (st4, tp) = want(p, st3, TYPEIDENT, "a type parameter name (uppercase)")?
+  if at_kind(p, st4, COMMA) {
+    return Err((st4, perr(p, st4, "a trait has exactly one type parameter")))
+  }
+  if at_kind(p, st4, COLON) {
+    return Err((st4, perr_h(p, st4, "the trait's own type parameter cannot have bounds",
+      "supertraits are not supported")))
+  }
+  let (st5, _) = want(p, st4, RBRACKET, "`]`")?
+  let st6 = skip_nl(p, st5)
+  let (st7, _) = want(p, st6, LBRACE, "`{` (the trait body)")?
+  var st8 = skip_nl(p, st7)
+  var methods: List[TraitMethod] = []
+  while not at_kind(p, st8, RBRACE) && not at_kind(p, st8, EOF) {
+    let (st9, m) = trait_method(p, st8)?
+    methods = methods ++ [m]
+    st8 = want_sep(p, st9)?
+  }
+  let (st10, close) = want(p, st8, RBRACE, "`}`")?
+  if len(methods) == 0 {
+    return Err((st10, pd("a trait must declare at least one method", kw.lo, close.hi)))
+  }
+  Ok((st10, DTrait(name.text, tp.text, tp.lo, tp.hi, methods, is_pub,
+    kw.lo, close.hi, name.lo, name.hi)))
+}
+
+## fn cmp(a: T, b: T) -> Int [!io] [= default-body]
+fn trait_method(p: P, st: St) -> PR[TraitMethod] = {
+  let (st1, fn_tok) = want(p, st, FN, "`fn` (a trait body only contains method declarations)")?
+  let (st2, name_tok) = want(p, st1, IDENT, "a method name (lowercase)")?
+  if at_kind(p, st2, LBRACKET) {
+    return Err((st2, perr_h(p, st2, "trait methods cannot declare their own type parameters",
+      "the trait's subject type parameter is already in scope")))
+  }
+  let (st3, _) = want(p, st2, LPAREN, "`(`")?
+  let (st4, params) = typed_params(p, st3, "trait method")?
+  let (st5, _) = want(p, st4, RPAREN, "`)`")?
+  let (st6, _) = want(p, st5, ARROW, "`->` (trait methods must declare a return type)")?
+  let (st7, ret) = type_ref(p, st6)?
+  let (st8, effs) = parse_effect(p, st7)?
+  var body: Option[Expr] = None
+  var st9 = st8
+  if at_kind(p, st9, EQ) {
+    let st10 = skip_nl(p, adv1(p, st9))
+    let (st11, b) = expression(p, st10, false)?
+    body = Some(b)
+    st9 = st11
+  }
+  let end = match body {
+    Some(b) -> e_hi(b)
+    None -> tok_at(p, st9.pos, -1).hi
+  }
+  Ok((st9, TraitMethod {
+    name: name_tok.text,
+    params: params,
+    ret: ret,
+    effs: effs,
+    body: body,
+    lo: fn_tok.lo,
+    hi: end,
+    nlo: name_tok.lo,
+    nhi: name_tok.hi
+  }))
+}
+
+## impl Ord[Point] { fn cmp(a: Point, b: Point) -> Int = ... }
+fn impl_decl(p: P, st: St) -> PR[Decl] = {
+  let (st1, kw) = want(p, st, IMPL, "`impl`")?
+  let (st2, trait_tok) = want(p, st1, TYPEIDENT, "a trait name (uppercase)")?
+  let (st3, _) = want(p, st2, LBRACKET,
+    "`[` (an impl names its subject type: impl " ++ trait_tok.text ++ "[Point])")?
+  let (st4, subject) = type_ref(p, st3)?
+  let (st5, _) = want(p, st4, RBRACKET, "`]`")?
+  let st6 = skip_nl(p, st5)
+  let (st7, _) = want(p, st6, LBRACE, "`{` (the impl body)")?
+  var st8 = skip_nl(p, st7)
+  var methods: List[FnDecl] = []
+  while not at_kind(p, st8, RBRACE) && not at_kind(p, st8, EOF) {
+    if at_kind(p, st8, PUB) {
+      return Err((st8, perr(p, st8, "impl methods cannot be pub (their visibility follows the trait)")))
+    }
+    let (st9, m) = fn_decl(p, st8, false, true)?
+    methods = methods ++ [m]
+    st8 = want_sep(p, st9)?
+  }
+  let (st10, close) = want(p, st8, RBRACE, "`}`")?
+  Ok((st10, DImpl(trait_tok.text, trait_tok.lo, trait_tok.hi, subject, methods,
+    kw.lo, close.hi)))
+}
+
+# ---- type references ----
+
+fn type_ref(p: P, st: St) -> PR[TypeRef] = {
+  if at_kind(p, st, FN) { return fn_type_ref(p, st) }
+  if at_kind(p, st, LPAREN) { return tuple_type_ref(p, st) }
+  let (st1, t) = want(p, st, TYPEIDENT, "a type name (uppercase)")?
+  if not at_kind(p, st1, LBRACKET) {
+    let none: List[TypeRef] = []
+    return Ok((st1, TNamed(t.text, none, t.lo, t.hi)))
+  }
+  var st2 = adv1(p, st1)
+  var args: List[TypeRef] = []
+  while not at_kind(p, st2, RBRACKET) {
+    let (st3, a) = type_ref(p, st2)?
+    args = args ++ [a]
+    if at_kind(p, st3, COMMA) { st2 = adv1(p, st3) } else {
+      st2 = st3
+      break
+    }
+  }
+  let (st4, close) = want(p, st2, RBRACKET, "`]`")?
+  if len(args) == 0 {
+    return Err((st4, perr(p, st4, "type argument list cannot be empty")))
+  }
+  Ok((st4, TNamed(t.text, args, t.lo, close.hi)))
+}
+
+## (A, B) — tuple type, 2 to 8 elements
+fn tuple_type_ref(p: P, st: St) -> PR[TypeRef] = {
+  let (st1, open) = adv(p, st)
+  var st2 = st1
+  var elems: List[TypeRef] = []
+  while not at_kind(p, st2, RPAREN) {
+    let (st3, t) = type_ref(p, st2)?
+    elems = elems ++ [t]
+    if at_kind(p, st3, COMMA) { st2 = adv1(p, st3) } else {
+      st2 = st3
+      break
+    }
+  }
+  let (st4, close) = want(p, st2, RPAREN, "`)`")?
+  if len(elems) < 2 {
+    return Err((st4, pd_h("a tuple type needs at least 2 elements", open.lo, close.hi,
+      "for a single type, drop the parentheses")))
+  }
+  if len(elems) > 8 {
+    return Err((st4, pd("tuples have at most 8 elements", open.lo, close.hi)))
+  }
+  Ok((st4, TTuple(elems, open.lo, close.hi)))
+}
+
+## fn(A, B) -> C !e
+fn fn_type_ref(p: P, st: St) -> PR[TypeRef] = {
+  let (st1, kw) = adv(p, st)
+  let (st2, _) = want(p, st1, LPAREN, "`(`")?
+  var st3 = st2
+  var params: List[TypeRef] = []
+  while not at_kind(p, st3, RPAREN) {
+    let (st4, t) = type_ref(p, st3)?
+    params = params ++ [t]
+    if at_kind(p, st4, COMMA) { st3 = adv1(p, st4) } else {
+      st3 = st4
+      break
+    }
+  }
+  let (st5, _) = want(p, st3, RPAREN, "`)`")?
+  let (st6, _) = want(p, st5, ARROW, "`->`")?
+  let (st7, ret) = type_ref(p, st6)?
+  let (st8, effs) = parse_effect(p, st7)?
+  # the last token consumed (the ret type or the effect) ends the span
+  let end = tok_at(p, st8.pos, -1).hi
+  Ok((st8, TFn(params, ret, effs, kw.lo, end)))
+}
+
+## Optional effect annotation after a return type: nothing (pure), `!io`, `!e`,
+## or a union `!(e1 | e2 | ...)`. Returns the atom names.
+fn parse_effect(p: P, st: St) -> PR[List[String]] = {
+  if not at_kind(p, st, BANG) {
+    let none: List[String] = []
+    return Ok((st, none))
+  }
+  let st1 = adv1(p, st)
+  if not at_kind(p, st1, LPAREN) {
+    let (st2, n) = want(p, st1, IDENT, "an effect name (io or an effect variable)")?
+    return Ok((st2, [n.text]))
+  }
+  let st2 = adv1(p, st1)
+  let (st3, first) = want(p, st2, IDENT, "an effect name (io or an effect variable)")?
+  var atoms = [first.text]
+  var st4 = st3
+  while at_kind(p, st4, PIPE) {
+    let st5 = adv1(p, st4)
+    let (st6, n) = want(p, st5, IDENT, "an effect name (io or an effect variable)")?
+    atoms = atoms ++ [n.text]
+    st4 = st6
+  }
+  let (st7, _) = want(p, st4, RPAREN, "`)` to close the effect union")?
+  Ok((st7, atoms))
+}
+
+# ---- statements ----
+
+fn statement(p: P, st: St) -> PR[Stmt] = {
+  let k = kind_of(p, st)
+  if k == LET {
+    let_stmt(p, st, false)
+  } else if k == VAR {
+    let_stmt(p, st, true)
+  } else if k == WHILE {
+    while_stmt(p, st)
+  } else if k == FOR {
+    for_stmt(p, st)
+  } else if k == ASSERT {
+    assert_stmt(p, st)
+  } else if k == IDENT {
+    # assignment: IDENT = ... (as opposed to == comparison)
+    if kind_ahead(p, st, 1) == EQ { assign_stmt(p, st) } else { expr_stmt(p, st) }
+  } else if k == FN {
+    # `fn name(...)` is a local function; a bare `fn(...)` stays a lambda expression
+    if kind_ahead(p, st, 1) == IDENT { local_fn_stmt(p, st) } else { expr_stmt(p, st) }
+  } else {
+    expr_stmt(p, st)
+  }
+}
+
+fn local_fn_stmt(p: P, st: St) -> PR[Stmt] = {
+  let (st1, fn_tok) = adv(p, st)
+  let (st2, name_tok) = want(p, st1, IDENT, "a function name (lowercase)")?
+  if at_kind(p, st2, LBRACKET) {
+    return Err((st2, perr_h(p, st2, "local functions cannot declare type parameters",
+      "the enclosing function's type parameters are in scope; or lift it to the top level")))
+  }
+  let (st3, _) = want(p, st2, LPAREN, "`(`")?
+  var st4 = skip_nl(p, st3)
+  var params: List[LambdaParam] = []
+  while not at_kind(p, st4, RPAREN) {
+    let (st5, n) = want(p, st4, IDENT, "a parameter name")?
+    let (st6, _) = want(p, st5, COLON, "`:` (local function parameters must be typed)")?
+    let (st7, t) = type_ref(p, st6)?
+    params = params ++ [LambdaParam { name: n.text, ann: Some(t), lo: n.lo, hi: n.hi }]
+    st4 = skip_nl(p, st7)
+    if at_kind(p, st4, COMMA) { st4 = skip_nl(p, adv1(p, st4)) } else { break }
+  }
+  let (st8, _) = want(p, st4, RPAREN, "`)`")?
+  let (st9, _) = want(p, st8, ARROW, "`->` (local functions must declare a return type)")?
+  let (st10, ret) = type_ref(p, st9)?
+  let (st11, effs) = parse_effect(p, st10)?
+  let (st12, _) = want(p, st11, EQ, "`=` (function body)")?
+  let st13 = skip_nl(p, st12)
+  let (st14, body) = expression(p, st13, false)?
+  Ok((st14, SLocalFn(name_tok.text, params, ret, effs, body,
+    name_tok.lo, name_tok.hi, fn_tok.lo, e_hi(body))))
+}
+
+fn let_stmt(p: P, st: St, mutable: Bool) -> PR[Stmt] = {
+  let (st1, kw) = adv(p, st)
+  # destructuring: let (a, b) = pair / let Point { x, y } = p / let [..all] = xs
+  let k = kind_of(p, st1)
+  if k == LPAREN || k == TYPEIDENT || k == LBRACKET {
+    let (st2, pat) = pattern_p(p, st1)?
+    if at_kind(p, st2, COLON) {
+      return Err((st2, perr_h(p, st2, "destructuring lets cannot take a type annotation",
+        "annotate inside the pattern's source instead")))
+    }
+    let (st3, _) = want(p, st2, EQ, "`=`")?
+    let st4 = skip_nl(p, st3)
+    let (st5, init) = expression(p, st4, false)?
+    return Ok((st5, SLetPat(pat, mutable, init, kw.lo, e_hi(init))))
+  }
+  var st6 = st1
+  var name = ""
+  if at_kind(p, st6, IDENT) {
+    let (st7, n) = adv(p, st6)
+    name = n.text
+    st6 = st7
+  } else if at_kind(p, st6, UNDERSCORE) {
+    if mutable {
+      return Err((st6, perr(p, st6, "`var _` is meaningless")))
+    }
+    let (st7, n) = adv(p, st6)
+    name = n.text
+    st6 = st7
+  } else {
+    return Err((st6, perr(p, st6, "expected a variable name")))
+  }
+  var ann: Option[TypeRef] = None
+  if at_kind(p, st6, COLON) {
+    let st8 = adv1(p, st6)
+    let (st9, t) = type_ref(p, st8)?
+    ann = Some(t)
+    st6 = st9
+  }
+  let (st10, _) = want(p, st6, EQ, "`=`")?
+  let st11 = skip_nl(p, st10)
+  let (st12, init) = expression(p, st11, false)?
+  Ok((st12, SLet(name, mutable, ann, init, kw.lo, e_hi(init))))
+}
+
+fn assign_stmt(p: P, st: St) -> PR[Stmt] = {
+  let (st1, name) = adv(p, st)
+  let st2 = skip_nl(p, adv1(p, st1))
+  let (st3, value) = expression(p, st2, false)?
+  Ok((st3, SAssign(name.text, value, name.lo, name.hi, name.lo, e_hi(value))))
+}
+
+fn while_stmt(p: P, st: St) -> PR[Stmt] = {
+  let (st1, kw) = adv(p, st)
+  let (st2, cond) = expression(p, st1, true)?
+  let (st3, body) = block_expr(p, st2)?
+  Ok((st3, SWhile(cond, body, kw.lo, e_hi(body))))
+}
+
+fn for_stmt(p: P, st: St) -> PR[Stmt] = {
+  let (st1, kw) = adv(p, st)
+  let (st2, name) = want(p, st1, IDENT, "a loop variable name")?
+  let (st3, _) = want(p, st2, IN, "`in`")?
+  let (st4, from) = expression(p, st3, true)?
+  var to: Option[Expr] = None
+  var st5 = st4
+  if at_kind(p, st5, DOTDOT) {
+    let st6 = adv1(p, st5)
+    let (st7, t) = expression(p, st6, true)?
+    to = Some(t)
+    st5 = st7
+  }
+  let (st8, body) = block_expr(p, st5)?
+  Ok((st8, SFor(name.text, from, to, body, kw.lo, e_hi(body))))
+}
+
+fn expr_stmt(p: P, st: St) -> PR[Stmt] = {
+  let (st1, e) = expression(p, st, false)?
+  Ok((st1, SExpr(e, e_lo(e), e_hi(e))))
+}
+
+fn assert_stmt(p: P, st: St) -> PR[Stmt] = {
+  let (st1, kw) = adv(p, st)
+  let (st2, cond) = expression(p, st1, false)?
+  let src: Option[String] = match p.src {
+    None -> None
+    Some(text) -> Some(utf16_slice(text, e_lo(cond), e_hi(cond)))
+  }
+  Ok((st2, SAssert(cond, src, kw.lo, e_hi(cond))))
+}
+
+# ---- expressions (by precedence) ----
+
+fn expression(p: P, st: St, ns: Bool) -> PR[Expr] = pipe_expr(p, st, ns)
+
+fn pipe_expr(p: P, st: St, ns: Bool) -> PR[Expr] = {
+  var (st1, left) = or_expr(p, st, ns)?
+  while true {
+    # vertical pipes: |> may start the next line
+    var look = st1.pos
+    while p.toks[look].kind == NEWLINE { look = look + 1 }
+    if p.toks[look].kind != PIPEGT { break }
+    let st2 = skip_nl(p, St { ..st1, pos: look + 1 })
+    let (st3, rhs) = or_expr(p, st2, ns)?
+    left = match rhs {
+      ECall(callee, args, clo, chi, _, rhi) ->
+        ECall(callee, [left] ++ args, clo, chi, e_lo(left), rhi)
+      EVar(name, vlo, vhi) -> ECall(name, [left], vlo, vhi, e_lo(left), vhi)
+      ELambda(ps, b, llo, lhi) -> EApply(ELambda(ps, b, llo, lhi), [left], e_lo(left), lhi)
+      other -> return Err((st3, pd_h(
+        "the right side of `|>` must be a call, a function name, or a lambda",
+        e_lo(other), e_hi(other), "x |> f(a) is equivalent to f(x, a)")))
+    }
+    st1 = st3
+  }
+  Ok((st1, left))
+}
+
+fn or_expr(p: P, st: St, ns: Bool) -> PR[Expr] = {
+  var (st1, left) = and_expr(p, st, ns)?
+  while at_kind(p, st1, PIPEPIPE) {
+    let (st2, op) = adv(p, st1)
+    let st3 = skip_nl(p, st2)
+    let (st4, right) = and_expr(p, st3, ns)?
+    left = EBinary(OpOr, left, right, op.lo, op.hi, e_lo(left), e_hi(right))
+    st1 = st4
+  }
+  Ok((st1, left))
+}
+
+fn and_expr(p: P, st: St, ns: Bool) -> PR[Expr] = {
+  var (st1, left) = cmp_expr(p, st, ns)?
+  while at_kind(p, st1, AMPAMP) {
+    let (st2, op) = adv(p, st1)
+    let st3 = skip_nl(p, st2)
+    let (st4, right) = cmp_expr(p, st3, ns)?
+    left = EBinary(OpAnd, left, right, op.lo, op.hi, e_lo(left), e_hi(right))
+    st1 = st4
+  }
+  Ok((st1, left))
+}
+
+fn cmp_op(k: TokKind) -> Option[BinOp] =
+  if k == EQEQ { Some(OpEq) }
+  else if k == NEQ { Some(OpNeq) }
+  else if k == LT { Some(OpLt) }
+  else if k == LE { Some(OpLe) }
+  else if k == GT { Some(OpGt) }
+  else if k == GE { Some(OpGe) }
+  else { None }
+
+fn cmp_expr(p: P, st: St, ns: Bool) -> PR[Expr] = {
+  let (st1, left) = bor_expr(p, st, ns)?
+  match cmp_op(kind_of(p, st1)) {
+    None -> Ok((st1, left))
+    Some(o) -> {
+      let (st2, op) = adv(p, st1)
+      let st3 = skip_nl(p, st2)
+      let (st4, right) = bor_expr(p, st3, ns)?
+      let result = EBinary(o, left, right, op.lo, op.hi, e_lo(left), e_hi(right))
+      # comparisons are non-associative: a < b < c is an error
+      match cmp_op(kind_of(p, st4)) {
+        Some(o2) -> Err((st4, perr_h(p, st4, "comparison operators cannot be chained",
+          "write a < b && b < c")))
+        None -> Ok((st4, result))
+      }
+    }
+  }
+}
+
+# Bitwise sits between comparison and concat (Rust order, spec §4.3).
+fn bor_expr(p: P, st: St, ns: Bool) -> PR[Expr] = {
+  var (st1, left) = bxor_expr(p, st, ns)?
+  while at_kind(p, st1, PIPE) {
+    let (st2, op) = adv(p, st1)
+    let st3 = skip_nl(p, st2)
+    let (st4, right) = bxor_expr(p, st3, ns)?
+    left = EBinary(OpBor, left, right, op.lo, op.hi, e_lo(left), e_hi(right))
+    st1 = st4
+  }
+  Ok((st1, left))
+}
+
+fn bxor_expr(p: P, st: St, ns: Bool) -> PR[Expr] = {
+  var (st1, left) = band_expr(p, st, ns)?
+  while at_kind(p, st1, CARET) {
+    let (st2, op) = adv(p, st1)
+    let st3 = skip_nl(p, st2)
+    let (st4, right) = band_expr(p, st3, ns)?
+    left = EBinary(OpBxor, left, right, op.lo, op.hi, e_lo(left), e_hi(right))
+    st1 = st4
+  }
+  Ok((st1, left))
+}
+
+fn band_expr(p: P, st: St, ns: Bool) -> PR[Expr] = {
+  var (st1, left) = shift_expr(p, st, ns)?
+  while at_kind(p, st1, AMP) {
+    let (st2, op) = adv(p, st1)
+    let st3 = skip_nl(p, st2)
+    let (st4, right) = shift_expr(p, st3, ns)?
+    left = EBinary(OpBand, left, right, op.lo, op.hi, e_lo(left), e_hi(right))
+    st1 = st4
+  }
+  Ok((st1, left))
+}
+
+fn shift_op(k: TokKind) -> Option[BinOp] =
+  if k == SHL { Some(OpShl) }
+  else if k == SHR { Some(OpShr) }
+  else if k == USHR { Some(OpUshr) }
+  else { None }
+
+fn shift_expr(p: P, st: St, ns: Bool) -> PR[Expr] = {
+  var (st1, left) = concat_expr(p, st, ns)?
+  while true {
+    match shift_op(kind_of(p, st1)) {
+      None -> break
+      Some(o) -> {
+        let (st2, op) = adv(p, st1)
+        let st3 = skip_nl(p, st2)
+        let (st4, right) = concat_expr(p, st3, ns)?
+        left = EBinary(o, left, right, op.lo, op.hi, e_lo(left), e_hi(right))
+        st1 = st4
+      }
+    }
+  }
+  Ok((st1, left))
+}
+
+fn concat_expr(p: P, st: St, ns: Bool) -> PR[Expr] = {
+  # right-associative
+  let (st1, left) = add_expr(p, st, ns)?
+  if not at_kind(p, st1, PLUSPLUS) { return Ok((st1, left)) }
+  let (st2, op) = adv(p, st1)
+  let st3 = skip_nl(p, st2)
+  let (st4, right) = concat_expr(p, st3, ns)?
+  Ok((st4, EBinary(OpConcat, left, right, op.lo, op.hi, e_lo(left), e_hi(right))))
+}
+
+fn add_op(k: TokKind) -> Option[BinOp] =
+  if k == PLUS { Some(OpAdd) }
+  else if k == MINUS { Some(OpSub) }
+  else { None }
+
+fn add_expr(p: P, st: St, ns: Bool) -> PR[Expr] = {
+  var (st1, left) = mul_expr(p, st, ns)?
+  while true {
+    match add_op(kind_of(p, st1)) {
+      None -> break
+      Some(o) -> {
+        let (st2, op) = adv(p, st1)
+        let st3 = skip_nl(p, st2)
+        let (st4, right) = mul_expr(p, st3, ns)?
+        left = EBinary(o, left, right, op.lo, op.hi, e_lo(left), e_hi(right))
+        st1 = st4
+      }
+    }
+  }
+  Ok((st1, left))
+}
+
+fn mul_op(k: TokKind) -> Option[BinOp] =
+  if k == STAR { Some(OpMul) }
+  else if k == SLASH { Some(OpDiv) }
+  else if k == PERCENT { Some(OpMod) }
+  else { None }
+
+fn mul_expr(p: P, st: St, ns: Bool) -> PR[Expr] = {
+  var (st1, left) = unary_expr(p, st, ns)?
+  while true {
+    match mul_op(kind_of(p, st1)) {
+      None -> break
+      Some(o) -> {
+        let (st2, op) = adv(p, st1)
+        let st3 = skip_nl(p, st2)
+        let (st4, right) = unary_expr(p, st3, ns)?
+        left = EBinary(o, left, right, op.lo, op.hi, e_lo(left), e_hi(right))
+        st1 = st4
+      }
+    }
+  }
+  Ok((st1, left))
+}
+
+fn unary_expr(p: P, st: St, ns: Bool) -> PR[Expr] = {
+  let k = kind_of(p, st)
+  if k == NOT {
+    let (st1, t) = adv(p, st)
+    let (st2, operand) = unary_expr(p, st1, ns)?
+    Ok((st2, EUnary(OpNot, operand, t.lo, e_hi(operand))))
+  } else if k == MINUS {
+    let (st1, t) = adv(p, st)
+    let (st2, operand) = unary_expr(p, st1, ns)?
+    Ok((st2, EUnary(OpNeg, operand, t.lo, e_hi(operand))))
+  } else if k == TILDE {
+    let (st1, t) = adv(p, st)
+    let (st2, operand) = unary_expr(p, st1, ns)?
+    Ok((st2, EUnary(OpBnot, operand, t.lo, e_hi(operand))))
+  } else {
+    postfix_expr(p, st, ns)
+  }
+}
+
+fn postfix_expr(p: P, st: St, ns: Bool) -> PR[Expr] = {
+  var (st1, e) = primary_expr(p, st, ns)?
+  while true {
+    let k = kind_of(p, st1)
+    if k == QUESTION {
+      let (st2, q) = adv(p, st1)
+      e = EPropagate(e, e_lo(e), q.hi)
+      st1 = st2
+    } else if k == BANG {
+      # postfix `!` unwraps an Option (spec §8.2); `!=` never gets here — the
+      # lexer's two-char munch wins first
+      let (st2, b) = adv(p, st1)
+      e = EUnwrap(e, e_lo(e), b.hi)
+      st1 = st2
+    } else if k == LBRACKET {
+      var st2 = skip_nl(p, adv1(p, st1))
+      let (st3, idx) = expression(p, st2, false)?
+      let st4 = skip_nl(p, st3)
+      let (st5, close) = want(p, st4, RBRACKET, "`]`")?
+      e = EIndex(e, idx, e_lo(e), close.hi)
+      st1 = st5
+    } else if k == DOT {
+      let st2 = adv1(p, st1)
+      let (st3, f) = want(p, st2, IDENT, "a field or function name after `.`")?
+      if at_kind(p, st3, LPAREN) {
+        var st4 = skip_nl(p, adv1(p, st3))
+        var args: List[Expr] = []
+        while not at_kind(p, st4, RPAREN) {
+          let (st5, a) = expression(p, st4, false)?
+          args = args ++ [a]
+          st4 = skip_nl(p, st5)
+          if at_kind(p, st4, COMMA) { st4 = skip_nl(p, adv1(p, st4)) } else { break }
+        }
+        let (st6, close) = want(p, st4, RPAREN, "`)`")?
+        e = EMethod(e, f.text, args, f.lo, f.hi, e_lo(e), close.hi)
+        st1 = st6
+      } else {
+        e = EFieldAcc(e, f.text, f.lo, f.hi, e_lo(e), f.hi)
+        st1 = st3
+      }
+    } else if k == NEWLINE {
+      # vertical method chains: `.` may start the next line (spec §1.7)
+      var look = st1.pos
+      while p.toks[look].kind == NEWLINE { look = look + 1 }
+      if p.toks[look].kind != DOT { return Ok((st1, e)) }
+      st1 = St { ..st1, pos: look }
+    } else {
+      return Ok((st1, e))
+    }
+  }
+  Ok((st1, e))
+}
+
+fn primary_expr(p: P, st: St, ns: Bool) -> PR[Expr] = {
+  let t = cur(p, st)
+  let k = t.kind
+  if k == INT {
+    Ok((adv1(p, st), EInt(t.ival, t.lo, t.hi)))
+  } else if k == FLOAT {
+    Ok((adv1(p, st), EFloat(t.fval, t.lo, t.hi)))
+  } else if k == TRUE {
+    Ok((adv1(p, st), EBool(true, t.lo, t.hi)))
+  } else if k == FALSE {
+    Ok((adv1(p, st), EBool(false, t.lo, t.hi)))
+  } else if k == STRING {
+    str_lit(p, adv1(p, st), t)
+  } else if k == IDENT {
+    ident_or_call(p, st)
+  } else if k == IF {
+    if_expr(p, st)
+  } else if k == MATCH {
+    match_expr(p, st)
+  } else if k == RETURN {
+    let st1 = adv1(p, st)
+    let k1 = kind_of(p, st1)
+    if k1 == NEWLINE || k1 == RBRACE || k1 == RPAREN || k1 == COMMA || k1 == EOF {
+      Ok((st1, EReturn(None, t.lo, t.hi)))
+    } else {
+      let (st2, v) = expression(p, st1, ns)?
+      Ok((st2, EReturn(Some(v), t.lo, e_hi(v))))
+    }
+  } else if k == BREAK {
+    Ok((adv1(p, st), EBreak(t.lo, t.hi)))
+  } else if k == CONTINUE {
+    Ok((adv1(p, st), EContinue(t.lo, t.hi)))
+  } else if k == LBRACE {
+    block_expr(p, st)
+  } else if k == LPAREN {
+    paren_expr(p, st)
+  } else if k == LBRACKET {
+    list_lit(p, st)
+  } else if k == FN {
+    lambda_expr(p, st, ns)
+  } else if k == COMPTIME {
+    let st1 = adv1(p, st)
+    let (st2, b) = block_expr(p, st1)?
+    Ok((st2, EComptime(b, t.lo, e_hi(b))))
+  } else if k == UNSAFE_PURE {
+    let st1 = adv1(p, st)
+    let (st2, b) = block_expr(p, st1)?
+    Ok((st2, EUnsafePure(b, t.lo, e_hi(b))))
+  } else if k == TYPEIDENT {
+    ctor_expr(p, st, ns)
+  } else {
+    Err((st, perr(p, st, "expected an expression, found `" ++ t.text ++ "`")))
+  }
+}
+
+## Circle(1.0) / Rect(2.0, h: 3.0) / bare nullary Point / Point { x: 1.0 } / Point { ..p, x: 3.0 }
+fn ctor_expr(p: P, st: St, ns: Bool) -> PR[Expr] = {
+  let (st1, name) = adv(p, st)
+  if at_kind(p, st1, LPAREN) { return ctor_paren_args(p, st1, name) }
+  if at_kind(p, st1, LBRACE) && not ns { return record_lit(p, st1, name) }
+  let none: List[CtorArg] = []
+  Ok((st1, ECtor(name.text, none, None, false, name.lo, name.hi, name.lo, name.hi)))
+}
+
+fn ctor_paren_args(p: P, st: St, name: Token) -> PR[Expr] = {
+  var st1 = skip_nl(p, adv1(p, st))
+  var args: List[CtorArg] = []
+  while not at_kind(p, st1, RPAREN) {
+    if at_kind(p, st1, IDENT) && kind_ahead(p, st1, 1) == COLON {
+      let (st2, arg_name) = adv(p, st1)
+      let st3 = skip_nl(p, adv1(p, st2))
+      let (st4, value) = expression(p, st3, false)?
+      args = args ++ [CtorArg { name: Some(arg_name.text), e: value, lo: arg_name.lo, hi: e_hi(value) }]
+      st1 = st4
+    } else {
+      let (st2, value) = expression(p, st1, false)?
+      args = args ++ [CtorArg { name: None, e: value, lo: e_lo(value), hi: e_hi(value) }]
+      st1 = st2
+    }
+    st1 = skip_nl(p, st1)
+    if at_kind(p, st1, COMMA) { st1 = skip_nl(p, adv1(p, st1)) } else { break }
+  }
+  let (st5, close) = want(p, st1, RPAREN, "`)`")?
+  Ok((st5, ECtor(name.text, args, None, true, name.lo, name.hi, name.lo, close.hi)))
+}
+
+fn record_lit(p: P, st: St, name: Token) -> PR[Expr] = {
+  var st1 = skip_nl(p, adv1(p, st))
+  var spread: Option[Expr] = None
+  if at_kind(p, st1, DOTDOT) {
+    let st2 = adv1(p, st1)
+    let (st3, s) = expression(p, st2, false)?
+    spread = Some(s)
+    st1 = skip_nl(p, st3)
+    if at_kind(p, st1, COMMA) {
+      st1 = skip_nl(p, adv1(p, st1))
+    } else if not at_kind(p, st1, RBRACE) {
+      return Err((st1, perr(p, st1, "expected `,` or `}` after the `..base` spread")))
+    }
+  }
+  var args: List[CtorArg] = []
+  while not at_kind(p, st1, RBRACE) {
+    if at_kind(p, st1, DOTDOT) {
+      return Err((st1, perr(p, st1, "`..base` must come first in a record literal")))
+    }
+    let (st2, f) = want(p, st1, IDENT, "a field name")?
+    if at_kind(p, st2, COLON) {
+      let st3 = skip_nl(p, adv1(p, st2))
+      let (st4, value) = expression(p, st3, false)?
+      args = args ++ [CtorArg { name: Some(f.text), e: value, lo: f.lo, hi: e_hi(value) }]
+      st1 = st4
+    } else {
+      # shorthand { x } means { x: x }
+      let value = EVar(f.text, f.lo, f.hi)
+      args = args ++ [CtorArg { name: Some(f.text), e: value, lo: f.lo, hi: f.hi }]
+      st1 = st2
+    }
+    st1 = skip_nl(p, st1)
+    if at_kind(p, st1, COMMA) { st1 = skip_nl(p, adv1(p, st1)) } else { break }
+  }
+  let (st5, close) = want(p, st1, RBRACE, "`}`")?
+  Ok((st5, ECtor(name.text, args, spread, true, name.lo, name.hi, name.lo, close.hi)))
+}
+
+fn ident_or_call(p: P, st: St) -> PR[Expr] = {
+  let (st1, name) = adv(p, st)
+  if not at_kind(p, st1, LPAREN) {
+    return Ok((st1, EVar(name.text, name.lo, name.hi)))
+  }
+  var st2 = skip_nl(p, adv1(p, st1))
+  var args: List[Expr] = []
+  while not at_kind(p, st2, RPAREN) {
+    let (st3, a) = expression(p, st2, false)?
+    args = args ++ [a]
+    st2 = skip_nl(p, st3)
+    if at_kind(p, st2, COMMA) { st2 = skip_nl(p, adv1(p, st2)) } else { break }
+  }
+  let (st4, close) = want(p, st2, RPAREN, "`)`")?
+  Ok((st4, ECall(name.text, args, name.lo, name.hi, name.lo, close.hi)))
+}
+
+## Parse the segments of a STRING token: text stays text, each interpolation is
+## re-lexed at its own offset and parsed as one expression (the Kotlin
+## sub-Parser). `st` is the state just past the STRING token.
+fn str_lit(p: P, st: St, t: Token) -> PR[Expr] = {
+  var parts: List[StrPart] = []
+  var diags = st.diags
+  for sg in t.segs {
+    match sg {
+      SText(v) -> { parts = parts ++ [SPText(v)] }
+      SCode(src, o) -> {
+        let (subtoks, lexds) = lex_at(src, o)
+        diags = diags ++ lexds
+        let subp = P { toks: subtoks, src: None }
+        let sst = St { pos: 0, diags: diags }
+        match expression(subp, sst, false) {
+          Err(fe) -> {
+            let (fst, d) = fe
+            return Err((St { ..st, diags: fst.diags }, d))
+          }
+          Ok(r) -> {
+            let (sst2, e) = r
+            let sst3 = skip_nl(subp, sst2)
+            if not at_kind(subp, sst3, EOF) {
+              return Err((St { ..st, diags: sst3.diags },
+                perr(subp, sst3, "trailing content in interpolation")))
+            }
+            diags = sst3.diags
+            parts = parts ++ [SPInterp(e)]
+          }
+        }
+      }
+    }
+  }
+  Ok((St { ..st, diags: diags }, EStr(parts, t.lo, t.hi)))
+}
+
+## fn(x, y: Int) => expr
+fn lambda_expr(p: P, st: St, ns: Bool) -> PR[Expr] = {
+  let (st1, kw) = adv(p, st)
+  let (st2, _) = want(p, st1, LPAREN, "`(`")?
+  var st3 = skip_nl(p, st2)
+  var params: List[LambdaParam] = []
+  while not at_kind(p, st3, RPAREN) {
+    let (st4, name) = want(p, st3, IDENT, "a parameter name")?
+    var ann: Option[TypeRef] = None
+    var st5 = st4
+    if at_kind(p, st5, COLON) {
+      let st6 = adv1(p, st5)
+      let (st7, t) = type_ref(p, st6)?
+      ann = Some(t)
+      st5 = st7
+    }
+    params = params ++ [LambdaParam { name: name.text, ann: ann, lo: name.lo, hi: name.hi }]
+    st3 = skip_nl(p, st5)
+    if at_kind(p, st3, COMMA) { st3 = skip_nl(p, adv1(p, st3)) } else { break }
+  }
+  let (st8, _) = want(p, st3, RPAREN, "`)`")?
+  let (st9, _) = want(p, st8, FATARROW, "`=>` (lambda body)")?
+  let st10 = skip_nl(p, st9)
+  let (st11, body) = expression(p, st10, ns)?
+  Ok((st11, ELambda(params, body, kw.lo, e_hi(body))))
+}
+
+fn list_lit(p: P, st: St) -> PR[Expr] = {
+  let (st1, open) = adv(p, st)
+  var st2 = skip_nl(p, st1)
+  var elems: List[Expr] = []
+  while not at_kind(p, st2, RBRACKET) {
+    let (st3, e) = expression(p, st2, false)?
+    elems = elems ++ [e]
+    st2 = skip_nl(p, st3)
+    if at_kind(p, st2, COMMA) { st2 = skip_nl(p, adv1(p, st2)) } else { break }
+  }
+  let (st4, close) = want(p, st2, RBRACKET, "`]`")?
+  Ok((st4, EListLit(elems, open.lo, close.hi)))
+}
+
+fn paren_expr(p: P, st: St) -> PR[Expr] = {
+  let (st1, open) = adv(p, st)
+  if at_kind(p, st1, RPAREN) {
+    let (st2, close) = adv(p, st1)
+    return Ok((st2, EUnit(open.lo, close.hi)))
+  }
+  let st3 = skip_nl(p, st1)
+  let (st4, first) = expression(p, st3, false)?
+  let st5 = skip_nl(p, st4)
+  if not at_kind(p, st5, COMMA) {
+    let (st6, _) = want(p, st5, RPAREN, "`)`")?
+    return Ok((st6, first))
+  }
+  var elems = [first]
+  var st7 = st5
+  while at_kind(p, st7, COMMA) {
+    let st8 = skip_nl(p, adv1(p, st7))
+    if at_kind(p, st8, RPAREN) {
+      # allow a trailing comma
+      st7 = st8
+      break
+    }
+    let (st9, e) = expression(p, st8, false)?
+    elems = elems ++ [e]
+    st7 = skip_nl(p, st9)
+  }
+  let (st10, close) = want(p, st7, RPAREN, "`)`")?
+  if len(elems) < 2 {
+    return Err((st10, pd_h("a tuple needs at least 2 elements", open.lo, close.hi,
+      "(x,) is not a tuple; write x")))
+  }
+  if len(elems) > 8 {
+    return Err((st10, pd("tuples have at most 8 elements", open.lo, close.hi)))
+  }
+  Ok((st10, ETupleLit(elems, open.lo, close.hi)))
+}
+
+fn if_expr(p: P, st: St) -> PR[Expr] = {
+  let (st1, kw) = adv(p, st)
+  let (st2, cond) = expression(p, st1, true)?
+  let (st3, thn) = block_expr(p, st2)?
+  # else may sit on the line after }
+  let st4 = skip_nl(p, st3)
+  if at_kind(p, st4, ELSE) {
+    let st5 = adv1(p, st4)
+    let (st6, els) = if at_kind(p, st5, IF) { if_expr(p, st5)? } else { block_expr(p, st5)? }
+    Ok((st6, EIf(cond, thn, Some(els), kw.lo, e_hi(els))))
+  } else {
+    Ok((st3, EIf(cond, thn, None, kw.lo, e_hi(thn))))
+  }
+}
+
+fn block_expr(p: P, st: St) -> PR[Expr] = {
+  let (st0, open) = want(p, st, LBRACE, "`{`")?
+  var st1 = skip_nl(p, st0)
+  var stmts: List[Stmt] = []
+  while not at_kind(p, st1, RBRACE) && not at_kind(p, st1, EOF) {
+    match stmt_and_sep(p, st1) {
+      Ok(r) -> {
+        let (st2, s) = r
+        stmts = stmts ++ [s]
+        st1 = st2
+      }
+      Err(fe) -> {
+        let (st2, d) = fe
+        st1 = sync_stmt(p, St { ..st2, diags: st2.diags ++ [d] })
+      }
+    }
+  }
+  let (st3, close) = want(p, st1, RBRACE, "`}`")?
+  # trailing expression rule: a final plain expression statement is the block's value
+  var tail: Option[Expr] = None
+  if len(stmts) > 0 {
+    match stmts[len(stmts) - 1] {
+      SExpr(e, slo, shi) -> {
+        tail = Some(e)
+        stmts = list.take(stmts, len(stmts) - 1)
+      }
+      other -> ()
+    }
+  }
+  Ok((st3, EBlock(stmts, tail, open.lo, close.hi)))
+}
+
+fn stmt_and_sep(p: P, st: St) -> PR[Stmt] = {
+  let (st1, s) = statement(p, st)?
+  let st2 = want_sep(p, st1)?
+  Ok((st2, s))
+}
+
+## After a broken statement: skip to the next line (or block end) and continue.
+fn sync_stmt(p: P, st: St) -> St = {
+  var s = st
+  while not at_kind(p, s, NEWLINE) && not at_kind(p, s, RBRACE) && not at_kind(p, s, EOF) {
+    s = adv1(p, s)
+  }
+  skip_nl(p, s)
+}
+
+fn match_expr(p: P, st: St) -> PR[Expr] = {
+  let (st1, kw) = adv(p, st)
+  let (st2, scrut) = expression(p, st1, true)?
+  let (st3, _) = want(p, st2, LBRACE, "`{`")?
+  var st4 = skip_nl(p, st3)
+  var arms: List[MatchArm] = []
+  while not at_kind(p, st4, RBRACE) && not at_kind(p, st4, EOF) {
+    let (st5, arm) = match_arm(p, st4)?
+    arms = arms ++ [arm]
+    # arms are separated by newlines or commas
+    if at_kind(p, st5, COMMA) { st4 = skip_nl(p, adv1(p, st5)) } else { st4 = skip_nl(p, st5) }
+  }
+  let (st6, close) = want(p, st4, RBRACE, "`}`")?
+  if len(arms) == 0 {
+    return Err((st6, pd("match needs at least one arm", kw.lo, close.hi)))
+  }
+  Ok((st6, EMatch(scrut, arms, kw.lo, close.hi)))
+}
+
+fn match_arm(p: P, st: St) -> PR[MatchArm] = {
+  let (st1, first) = pattern_p(p, st)?
+  var pats = [first]
+  var st2 = st1
+  while at_kind(p, st2, PIPE) {
+    let st3 = skip_nl(p, adv1(p, st2))
+    let (st4, pt) = pattern_p(p, st3)?
+    pats = pats ++ [pt]
+    st2 = st4
+  }
+  var guard: Option[Expr] = None
+  if at_kind(p, st2, IF) {
+    let st5 = adv1(p, st2)
+    let (st6, g) = expression(p, st5, false)?
+    guard = Some(g)
+    st2 = st6
+  }
+  let (st7, _) = want(p, st2, ARROW, "`->`")?
+  let st8 = skip_nl(p, st7)
+  let (st9, body) = expression(p, st8, false)?
+  Ok((st9, MatchArm { pats: pats, guard: guard, body: body, lo: pat_lo(first), hi: e_hi(body) }))
+}
+
+# ---- patterns ----
+
+fn pattern_p(p: P, st: St) -> PR[Pattern] = {
+  let t = cur(p, st)
+  let k = t.kind
+  if k == UNDERSCORE {
+    Ok((adv1(p, st), PWild(t.lo, t.hi)))
+  } else if k == INT {
+    Ok((adv1(p, st), PLit(EInt(t.ival, t.lo, t.hi), t.lo, t.hi)))
+  } else if k == FLOAT {
+    Ok((adv1(p, st), PLit(EFloat(t.fval, t.lo, t.hi), t.lo, t.hi)))
+  } else if k == MINUS {
+    let st1 = adv1(p, st)
+    let nt = cur(p, st1)
+    let plo = t.lo
+    let phi = nt.hi
+    if nt.kind == INT {
+      Ok((adv1(p, st1), PLit(EInt(-nt.ival, plo, phi), plo, phi)))
+    } else if nt.kind == FLOAT {
+      Ok((adv1(p, st1), PLit(EFloat(-nt.fval, plo, phi), plo, phi)))
+    } else {
+      Err((st1, perr(p, st1, "expected a number after `-` in a pattern")))
+    }
+  } else if k == TRUE {
+    Ok((adv1(p, st), PLit(EBool(true, t.lo, t.hi), t.lo, t.hi)))
+  } else if k == FALSE {
+    Ok((adv1(p, st), PLit(EBool(false, t.lo, t.hi), t.lo, t.hi)))
+  } else if k == STRING {
+    let st1 = adv1(p, st)
+    let (st2, lit) = str_lit(p, st1, t)?
+    if str_has_interp(lit) {
+      return Err((st2, pd("string patterns cannot contain interpolation", t.lo, t.hi)))
+    }
+    Ok((st2, PLit(lit, t.lo, t.hi)))
+  } else if k == IDENT {
+    Ok((adv1(p, st), PBind(t.text, t.lo, t.hi)))
+  } else if k == TYPEIDENT {
+    ctor_pat(p, st)
+  } else if k == LPAREN {
+    tuple_pat(p, st)
+  } else if k == LBRACKET {
+    list_pat(p, st)
+  } else {
+    Err((st, perr(p, st, "expected a pattern")))
+  }
+}
+
+fn str_has_interp(e: Expr) -> Bool =
+  match e {
+    EStr(parts, _, _) -> {
+      for pt in parts {
+        match pt {
+          SPInterp(x) -> return true
+          SPText(v) -> ()
+        }
+      }
+      false
+    }
+    _ -> false
+  }
+
+## [], [x, ..rest], [..init, last] — at most one `..`/`..name` rest
+fn list_pat(p: P, st: St) -> PR[Pattern] = {
+  let (st1, open) = adv(p, st)
+  var st2 = skip_nl(p, st1)
+  var pre: List[Pattern] = []
+  var post: List[Pattern] = []
+  var has_rest = false
+  var rest_name: Option[String] = None
+  var rest_span: Option[(Int, Int)] = None
+  while not at_kind(p, st2, RBRACKET) {
+    if at_kind(p, st2, DOTDOT) {
+      let (st3, d) = adv(p, st2)
+      if has_rest {
+        return Err((st3, pd("a list pattern can have at most one `..` rest", d.lo, d.hi)))
+      }
+      has_rest = true
+      if at_kind(p, st3, IDENT) {
+        let (st4, n) = adv(p, st3)
+        rest_name = Some(n.text)
+        rest_span = Some((d.lo, n.hi))
+        st2 = st4
+      } else {
+        rest_span = Some((d.lo, d.hi))
+        st2 = st3
+      }
+    } else {
+      let (st5, pt) = pattern_p(p, st2)?
+      if has_rest { post = post ++ [pt] } else { pre = pre ++ [pt] }
+      st2 = st5
+    }
+    st2 = skip_nl(p, st2)
+    if at_kind(p, st2, COMMA) { st2 = skip_nl(p, adv1(p, st2)) } else { break }
+  }
+  let (st6, close) = want(p, st2, RBRACKET, "`]`")?
+  Ok((st6, PList(pre, has_rest, rest_name, rest_span, post, open.lo, close.hi)))
+}
+
+## (a, b) — tuple pattern, 2 to 8 elements
+fn tuple_pat(p: P, st: St) -> PR[Pattern] = {
+  let (st1, open) = adv(p, st)
+  var st2 = skip_nl(p, st1)
+  var elems: List[Pattern] = []
+  while not at_kind(p, st2, RPAREN) {
+    let (st3, pt) = pattern_p(p, st2)?
+    elems = elems ++ [pt]
+    st2 = skip_nl(p, st3)
+    if at_kind(p, st2, COMMA) { st2 = skip_nl(p, adv1(p, st2)) } else { break }
+  }
+  let (st4, close) = want(p, st2, RPAREN, "`)`")?
+  if len(elems) < 2 {
+    return Err((st4, pd("a tuple pattern needs at least 2 elements", open.lo, close.hi)))
+  }
+  if len(elems) > 8 {
+    return Err((st4, pd("tuples have at most 8 elements", open.lo, close.hi)))
+  }
+  Ok((st4, PTuple(elems, open.lo, close.hi)))
+}
+
+## Circle(r) / Rect(w: w, ..) / bare nullary Point / record Point { x, y: 0, .. }
+fn ctor_pat(p: P, st: St) -> PR[Pattern] = {
+  let (st1, name) = adv(p, st)
+  if at_kind(p, st1, LBRACE) { return record_pat(p, st1, name) }
+  if not at_kind(p, st1, LPAREN) {
+    let none: List[PatArg] = []
+    return Ok((st1, PCtor(name.text, none, false, false, name.lo, name.hi, name.lo, name.hi)))
+  }
+  var st2 = skip_nl(p, adv1(p, st1))
+  var args: List[PatArg] = []
+  var rest = false
+  while not at_kind(p, st2, RPAREN) {
+    if at_kind(p, st2, DOTDOT) {
+      let st3 = skip_nl(p, adv1(p, st2))
+      rest = true
+      if not at_kind(p, st3, RPAREN) {
+        return Err((st3, perr(p, st3, "`..` must be the last thing in a constructor pattern")))
+      }
+      st2 = st3
+      break
+    }
+    if at_kind(p, st2, IDENT) && kind_ahead(p, st2, 1) == COLON {
+      let (st4, arg_name) = adv(p, st2)
+      let st5 = skip_nl(p, adv1(p, st4))
+      let (st6, pt) = pattern_p(p, st5)?
+      args = args ++ [PatArg { name: Some(arg_name.text), pat: pt }]
+      st2 = st6
+    } else {
+      let (st7, pt) = pattern_p(p, st2)?
+      args = args ++ [PatArg { name: None, pat: pt }]
+      st2 = st7
+    }
+    st2 = skip_nl(p, st2)
+    if at_kind(p, st2, COMMA) { st2 = skip_nl(p, adv1(p, st2)) } else { break }
+  }
+  let (st8, close) = want(p, st2, RPAREN, "`)`")?
+  Ok((st8, PCtor(name.text, args, rest, true, name.lo, name.hi, name.lo, close.hi)))
+}
+
+## Point { x, y: 0, .. } — field shorthand `x` binds the field to `x`
+fn record_pat(p: P, st: St, name: Token) -> PR[Pattern] = {
+  var st1 = skip_nl(p, adv1(p, st))
+  var args: List[PatArg] = []
+  var rest = false
+  while not at_kind(p, st1, RBRACE) {
+    if at_kind(p, st1, DOTDOT) {
+      let st2 = skip_nl(p, adv1(p, st1))
+      rest = true
+      if not at_kind(p, st2, RBRACE) {
+        return Err((st2, perr(p, st2, "`..` must be the last thing in a record pattern")))
+      }
+      st1 = st2
+      break
+    }
+    let (st3, f) = want(p, st1, IDENT, "a field name")?
+    if at_kind(p, st3, COLON) {
+      let st4 = skip_nl(p, adv1(p, st3))
+      let (st5, sub) = pattern_p(p, st4)?
+      args = args ++ [PatArg { name: Some(f.text), pat: sub }]
+      st1 = st5
+    } else {
+      # shorthand { x } binds field x to x
+      args = args ++ [PatArg { name: Some(f.text), pat: PBind(f.text, f.lo, f.hi) }]
+      st1 = st3
+    }
+    st1 = skip_nl(p, st1)
+    if at_kind(p, st1, COMMA) { st1 = skip_nl(p, adv1(p, st1)) } else { break }
+  }
+  let (st6, close) = want(p, st1, RBRACE, "`}`")?
+  Ok((st6, PCtor(name.text, args, rest, true, name.lo, name.hi, name.lo, close.hi)))
+}

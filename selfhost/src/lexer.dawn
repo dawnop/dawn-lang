@@ -32,9 +32,9 @@ use java "java.lang.Long"
 # the last is the text's UTF-16 length). Spans read from that table, which keeps
 # them identical to the Kotlin compiler's.
 
-type Src = { cps: List[Int], offs: List[Int], n: Int }
+type Src = { cps: List[Int], offs: List[Int], n: Int, base: Int }
 
-fn src_of(text: String) -> Src = {
+fn src_of(text: String, base: Int) -> Src = {
   let cps = code_points(text)
   var offs: List[Int] = []
   var o = 0
@@ -43,10 +43,10 @@ fn src_of(text: String) -> Src = {
     o = o + (if c >= 65536 { 2 } else { 1 })
   }
   offs = offs ++ [o]
-  Src { cps: cps, offs: offs, n: len(cps) }
+  Src { cps: cps, offs: offs, n: len(cps), base: base }
 }
 
-fn off(s: Src, i: Int) -> Int = s.offs[i]
+fn off(s: Src, i: Int) -> Int = s.base + s.offs[i]
 
 ## The code point at `i`, or a space past the end (the Kotlin `peek` default).
 fn cp_at(s: Src, i: Int) -> Int = if i < s.n { s.cps[i] } else { ' ' }
@@ -141,8 +141,12 @@ fn continues_line(k: TokKind) -> Bool =
 
 ## Lex `text` into tokens plus diagnostics. Errors never kill the scan: an
 ## aborting failure (broken string) skips to the end of its line and goes on.
-pub fn lex(text: String) -> (List[Token], List[Diag]) = {
-  let s = src_of(text)
+pub fn lex(text: String) -> (List[Token], List[Diag]) = lex_at(text, 0)
+
+## Lex with a base offset added to every span — for re-lexing an interpolation
+## segment in place (the Kotlin Lexer's baseOffset).
+pub fn lex_at(text: String, base: Int) -> (List[Token], List[Diag]) = {
+  let s = src_of(text, base)
   var i = 0
   var toks: List[Token] = []
   var diags: List[Diag] = []
@@ -204,6 +208,19 @@ pub fn lex(text: String) -> (List[Token], List[Diag]) = {
   }
   toks = toks ++ [tok(EOF, "<eof>", l, l + 1)]
   (toks, diags)
+}
+
+## The characters of `text` whose UTF-16 offsets fall inside [lo, hi) — the
+## Kotlin `substring(lo, hi)` over UTF-16 indices (used for assert source text).
+pub fn utf16_slice(text: String, lo: Int, hi: Int) -> String = {
+  var out: List[Int] = []
+  var o = 0
+  for c in code_points(text) {
+    let w = if c >= 65536 { 2 } else { 1 }
+    if o >= lo && o + w <= hi { out = out ++ [c] }
+    o = o + w
+  }
+  from_code_points(out)
 }
 
 # ---- words: keywords / identifiers / type identifiers ----

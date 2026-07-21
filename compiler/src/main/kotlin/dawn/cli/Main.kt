@@ -67,8 +67,9 @@ fun main(args: Array<String>) {
             "fmt" -> cmdFmt(args.drop(1))
             "doc" -> cmdDoc(args.drop(1))
             "lsp" -> dawn.lsp.runLspServer()
-            // hidden: canonical token dump for the selfhost lexer's golden diff
+            // hidden: canonical token/AST dumps for the selfhost golden diffs
             "__lex" -> cmdLexDump(args.drop(1))
+            "__parse" -> cmdParseDump(args.drop(1))
             "--version", "-V", "version" -> println(BuildInfo)
             "--help", "-h", "help" -> print(USAGE)
             else -> {

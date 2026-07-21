@@ -21,7 +21,7 @@ echo "corpus: ${#files[@]} files"
 "$DAWN" __lex "${files[@]}" > "$OUT/kotlin.dump"
 
 "$DAWN" build selfhost -o "$OUT/selfhost.jar" > /dev/null
-java -jar "$OUT/selfhost.jar" "${files[@]}" > "$OUT/dawn.dump"
+java -jar "$OUT/selfhost.jar" lex "${files[@]}" > "$OUT/dawn.dump"
 
 if diff -u "$OUT/kotlin.dump" "$OUT/dawn.dump" > "$OUT/diff.txt"; then
   echo "OK: token streams are byte-identical"

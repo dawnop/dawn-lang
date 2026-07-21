@@ -1,0 +1,469 @@
+# Canonical AST dump, matching `dawn __parse` (cli/AstDump.kt) byte for byte.
+# One node per line, two-space indentation for children:
+#   Kind [fields...] @lo..hi
+# then diagnostics as in the lex dump: !<TAB>start<TAB>end<TAB>message<TAB>hint.
+
+use std/str
+use token.{Diag}
+use dump.{esc}
+use ast.{
+  TypeRef, TNamed, TTuple, TFn, Bound, TypeParamDecl, Param, LambdaParam,
+  FieldDecl, CtorDecl, ImportName, StrPart, SPText, SPInterp,
+  BinOp, UnOp, bin_op_name, un_op_name,
+  CtorArg, MatchArm, Expr, EInt, EFloat, EBool, EUnit, EStr, EVar, ECall,
+  EApply, EMethod, ELambda, ECtor, EFieldAcc, EListLit, ETupleLit, EPropagate,
+  EUnwrap, EIndex, EReturn, EBreak, EContinue, EComptime, EUnsafePure,
+  EBinary, EUnary, EIf, EMatch, EBlock,
+  PatArg, Pattern, PLit, PBind, PWild, PCtor, PTuple, PList,
+  Stmt, SLet, SLetPat, SLocalFn, SAssign, SExpr, SAssert, SWhile, SFor,
+  TraitMethod, FnDecl, TypeDeclR, Decl, DFn, DType, DConst, DTrait, DImpl,
+  DUseJava, DUseModule, DTest, Module
+}
+
+fn sp(lo: Int, hi: Int) -> String = "@${lo}..${hi}"
+
+fn ind(d: Int) -> String = str.repeat("  ", d)
+
+fn atoms(a: List[String]) -> String = if len(a) == 0 { "_" } else { join(a, ",") }
+
+fn opt_name(n: Option[String]) -> String =
+  match n {
+    Some(v) -> v
+    None -> "_"
+  }
+
+fn bstr(b: Bool) -> String = if b { "true" } else { "false" }
+
+## Render one file's dump: the tree, then diagnostics. Ends without a newline;
+## the caller adds the final one (println).
+pub fn render_module(m: Module, diags: List[Diag]) -> String = {
+  var lines = ["Module"]
+  for d in m.decls { lines = dump_decl(lines, 1, d) }
+  for dg in diags {
+    lines = lines ++ [
+      "!\t" ++ to_string(dg.lo) ++ "\t" ++ to_string(dg.hi) ++ "\t" ++ esc(dg.msg) ++ "\t" ++
+        esc(dg.hint)
+    ]
+  }
+  join(lines, "\n")
+}
+
+fn bounds_str(bs: List[Bound]) -> String = {
+  if len(bs) == 0 { return "_" }
+  var parts: List[String] = []
+  for b in bs { parts = parts ++ [b.name ++ sp(b.lo, b.hi)] }
+  join(parts, "+")
+}
+
+fn dump_decl(out: List[String], d: Int, decl: Decl) -> List[String] =
+  match decl {
+    DFn(f) -> dump_fn(out, d, f)
+    DType(t) -> dump_type(out, d, t)
+    DConst(name, is_pub, ann, init, lo, hi, nlo, nhi) -> {
+      var o = out ++ [ind(d) ++ "Const " ++ name ++ " pub=" ++ bstr(is_pub) ++ " name" ++
+          sp(nlo, nhi) ++ " " ++ sp(lo, hi)]
+      o = dump_tref(o, d + 1, ann)
+      dump_expr(o, d + 1, init)
+    }
+    DTrait(name, tp, tplo, tphi, methods, is_pub, lo, hi, nlo, nhi) -> {
+      var o = out ++ [ind(d) ++ "Trait " ++ name ++ " tp=" ++ tp ++ " tp" ++ sp(tplo, tphi) ++
+          " pub=" ++ bstr(is_pub) ++ " name" ++ sp(nlo, nhi) ++ " " ++ sp(lo, hi)]
+      for m in methods { o = dump_trait_method(o, d + 1, m) }
+      o
+    }
+    DImpl(trait_name, tlo, thi, subject, methods, lo, hi) -> {
+      var o = out ++ [ind(d) ++ "Impl " ++ trait_name ++ " trait" ++ sp(tlo, thi) ++ " " ++
+          sp(lo, hi)]
+      o = dump_tref(o, d + 1, subject)
+      for m in methods { o = dump_fn(o, d + 1, m) }
+      o
+    }
+    DUseJava(fqcn, lo, hi, nlo, nhi) ->
+      out ++ [ind(d) ++ "UseJava " ++ esc(fqcn) ++ " name" ++ sp(nlo, nhi) ++ " " ++ sp(lo, hi)]
+    DUseModule(segs, selective, lo, hi, nlo, nhi) -> {
+      var o = out ++ [ind(d) ++ "UseModule " ++ join(segs, "/") ++ " name" ++ sp(nlo, nhi) ++
+          " " ++ sp(lo, hi)]
+      match selective {
+        None -> o
+        Some(names) -> {
+          for n in names {
+            o = o ++ [ind(d + 1) ++ "ImportName " ++ n.name ++ " " ++ sp(n.lo, n.hi)]
+          }
+          o
+        }
+      }
+    }
+    DTest(name, body, lo, hi, nlo, nhi) -> {
+      let o = out ++ [ind(d) ++ "Test " ++ esc(name) ++ " name" ++ sp(nlo, nhi) ++ " " ++
+          sp(lo, hi)]
+      dump_expr(o, d + 1, body)
+    }
+  }
+
+fn dump_fn(out: List[String], d: Int, f: FnDecl) -> List[String] = {
+  var o = out ++ [ind(d) ++ "Fn " ++ f.name ++ " pub=" ++ bstr(f.is_pub) ++ " eff=" ++
+      atoms(f.effs) ++ " name" ++ sp(f.nlo, f.nhi) ++ " " ++ sp(f.lo, f.hi)]
+  for tp in f.tparams {
+    o = o ++ [ind(d + 1) ++ "TypeParam " ++ tp.name ++ " bounds=" ++ bounds_str(tp.bounds) ++
+        " " ++ sp(tp.lo, tp.hi)]
+  }
+  for pm in f.params {
+    o = o ++ [ind(d + 1) ++ "Param " ++ pm.name ++ " " ++ sp(pm.lo, pm.hi)]
+    o = dump_tref(o, d + 2, pm.tref)
+  }
+  match f.ret {
+    Some(t) -> {
+      o = o ++ [ind(d + 1) ++ "Ret"]
+      o = dump_tref(o, d + 2, t)
+    }
+    None -> ()
+  }
+  dump_expr(o, d + 1, f.body)
+}
+
+fn dump_type(out: List[String], d: Int, t: TypeDeclR) -> List[String] = {
+  let tparams = if len(t.tparams) == 0 { "_" } else { join(t.tparams, ",") }
+  let is_alias = match t.alias_target {
+    Some(x) -> true
+    None -> false
+  }
+  var o = out ++ [ind(d) ++ "Type " ++ t.name ++ " tparams=" ++ tparams ++ " record=" ++
+      bstr(t.is_record) ++ " alias=" ++ bstr(is_alias) ++ " derives=" ++ bounds_str(t.derives) ++
+      " pub=" ++ bstr(t.is_pub) ++ " name" ++ sp(t.nlo, t.nhi) ++ " " ++ sp(t.lo, t.hi)]
+  match t.alias_target {
+    Some(x) -> { o = dump_tref(o, d + 1, x) }
+    None -> ()
+  }
+  for c in t.ctors {
+    o = o ++ [ind(d + 1) ++ "Ctor " ++ c.name ++ " name" ++ sp(c.nlo, c.nhi) ++ " " ++
+        sp(c.lo, c.hi)]
+    for f in c.fields {
+      o = o ++ [ind(d + 2) ++ "Field " ++ f.name ++ " " ++ sp(f.lo, f.hi)]
+      o = dump_tref(o, d + 3, f.tref)
+    }
+  }
+  o
+}
+
+fn dump_trait_method(out: List[String], d: Int, m: TraitMethod) -> List[String] = {
+  let has_default = match m.body {
+    Some(b) -> true
+    None -> false
+  }
+  var o = out ++ [ind(d) ++ "TraitMethod " ++ m.name ++ " eff=" ++ atoms(m.effs) ++
+      " default=" ++ bstr(has_default) ++ " name" ++ sp(m.nlo, m.nhi) ++ " " ++ sp(m.lo, m.hi)]
+  for pm in m.params {
+    o = o ++ [ind(d + 1) ++ "Param " ++ pm.name ++ " " ++ sp(pm.lo, pm.hi)]
+    o = dump_tref(o, d + 2, pm.tref)
+  }
+  o = o ++ [ind(d + 1) ++ "Ret"]
+  o = dump_tref(o, d + 2, m.ret)
+  match m.body {
+    Some(b) -> dump_expr(o, d + 1, b)
+    None -> o
+  }
+}
+
+fn dump_tref(out: List[String], d: Int, t: TypeRef) -> List[String] =
+  match t {
+    TNamed(name, targs, lo, hi) -> {
+      var o = out ++ [ind(d) ++ "TNamed " ++ name ++ " " ++ sp(lo, hi)]
+      for a in targs { o = dump_tref(o, d + 1, a) }
+      o
+    }
+    TTuple(elems, lo, hi) -> {
+      var o = out ++ [ind(d) ++ "TTuple " ++ sp(lo, hi)]
+      for e in elems { o = dump_tref(o, d + 1, e) }
+      o
+    }
+    TFn(params, ret, effs, lo, hi) -> {
+      var o = out ++ [ind(d) ++ "TFn nparams=" ++ to_string(len(params)) ++ " eff=" ++
+          atoms(effs) ++ " " ++ sp(lo, hi)]
+      for pm in params { o = dump_tref(o, d + 1, pm) }
+      dump_tref(o, d + 1, ret)
+    }
+  }
+
+fn dump_lparam(out: List[String], d: Int, pm: LambdaParam) -> List[String] = {
+  let has_ann = match pm.ann {
+    Some(a) -> true
+    None -> false
+  }
+  let o = out ++ [ind(d) ++ "LParam " ++ pm.name ++ " ann=" ++ bstr(has_ann) ++ " " ++
+      sp(pm.lo, pm.hi)]
+  match pm.ann {
+    Some(a) -> dump_tref(o, d + 1, a)
+    None -> o
+  }
+}
+
+fn dump_stmt(out: List[String], d: Int, s: Stmt) -> List[String] =
+  match s {
+    SLet(name, mutable, ann, init, lo, hi) -> {
+      let has_ann = match ann {
+        Some(a) -> true
+        None -> false
+      }
+      var o = out ++ [ind(d) ++ "Let " ++ name ++ " mut=" ++ bstr(mutable) ++ " ann=" ++
+          bstr(has_ann) ++ " " ++ sp(lo, hi)]
+      match ann {
+        Some(a) -> { o = dump_tref(o, d + 1, a) }
+        None -> ()
+      }
+      dump_expr(o, d + 1, init)
+    }
+    SLetPat(pat, mutable, init, lo, hi) -> {
+      var o = out ++ [ind(d) ++ "LetPat mut=" ++ bstr(mutable) ++ " " ++ sp(lo, hi)]
+      o = dump_pat(o, d + 1, pat)
+      dump_expr(o, d + 1, init)
+    }
+    SLocalFn(name, params, ret, effs, body, nlo, nhi, lo, hi) -> {
+      var o = out ++ [ind(d) ++ "LocalFn " ++ name ++ " eff=" ++ atoms(effs) ++ " name" ++
+          sp(nlo, nhi) ++ " " ++ sp(lo, hi)]
+      for pm in params { o = dump_lparam(o, d + 1, pm) }
+      o = o ++ [ind(d + 1) ++ "Ret"]
+      o = dump_tref(o, d + 2, ret)
+      dump_expr(o, d + 1, body)
+    }
+    SAssign(name, value, nlo, nhi, lo, hi) -> {
+      let o = out ++ [ind(d) ++ "Assign " ++ name ++ " name" ++ sp(nlo, nhi) ++ " " ++
+          sp(lo, hi)]
+      dump_expr(o, d + 1, value)
+    }
+    SExpr(e, lo, hi) -> {
+      let o = out ++ [ind(d) ++ "ExprStmt " ++ sp(lo, hi)]
+      dump_expr(o, d + 1, e)
+    }
+    SAssert(cond, src, lo, hi) -> {
+      let srcs = match src {
+        Some(v) -> esc(v)
+        None -> "_"
+      }
+      let o = out ++ [ind(d) ++ "Assert src=" ++ srcs ++ " " ++ sp(lo, hi)]
+      dump_expr(o, d + 1, cond)
+    }
+    SWhile(cond, body, lo, hi) -> {
+      var o = out ++ [ind(d) ++ "While " ++ sp(lo, hi)]
+      o = dump_expr(o, d + 1, cond)
+      dump_expr(o, d + 1, body)
+    }
+    SFor(name, from, to, body, lo, hi) -> {
+      let ranged = match to {
+        Some(t) -> true
+        None -> false
+      }
+      var o = out ++ [ind(d) ++ "For " ++ name ++ " ranged=" ++ bstr(ranged) ++ " " ++
+          sp(lo, hi)]
+      o = dump_expr(o, d + 1, from)
+      match to {
+        Some(t) -> { o = dump_expr(o, d + 1, t) }
+        None -> ()
+      }
+      dump_expr(o, d + 1, body)
+    }
+  }
+
+fn dump_expr(out: List[String], d: Int, e: Expr) -> List[String] =
+  match e {
+    EInt(v, lo, hi) -> out ++ [ind(d) ++ "Int " ++ to_string(v) ++ " " ++ sp(lo, hi)]
+    EFloat(v, lo, hi) -> out ++ [ind(d) ++ "Float " ++ to_string(v) ++ " " ++ sp(lo, hi)]
+    EBool(v, lo, hi) -> out ++ [ind(d) ++ "Bool " ++ bstr(v) ++ " " ++ sp(lo, hi)]
+    EUnit(lo, hi) -> out ++ [ind(d) ++ "Unit " ++ sp(lo, hi)]
+    EStr(parts, lo, hi) -> {
+      var o = out ++ [ind(d) ++ "Str " ++ sp(lo, hi)]
+      for pt in parts {
+        match pt {
+          SPText(v) -> { o = o ++ [ind(d + 1) ++ "SText " ++ esc(v)] }
+          SPInterp(x) -> {
+            o = o ++ [ind(d + 1) ++ "SInterp"]
+            o = dump_expr(o, d + 2, x)
+          }
+        }
+      }
+      o
+    }
+    EVar(name, lo, hi) -> out ++ [ind(d) ++ "Var " ++ name ++ " " ++ sp(lo, hi)]
+    ECall(callee, cargs, clo, chi, lo, hi) -> {
+      var o = out ++ [ind(d) ++ "Call " ++ callee ++ " callee" ++ sp(clo, chi) ++ " " ++
+          sp(lo, hi)]
+      for a in cargs { o = dump_expr(o, d + 1, a) }
+      o
+    }
+    EApply(target, aargs, lo, hi) -> {
+      var o = out ++ [ind(d) ++ "Apply nargs=" ++ to_string(len(aargs)) ++ " " ++ sp(lo, hi)]
+      o = dump_expr(o, d + 1, target)
+      for a in aargs { o = dump_expr(o, d + 1, a) }
+      o
+    }
+    EMethod(target, name, margs, nlo, nhi, lo, hi) -> {
+      var o = out ++ [ind(d) ++ "MethodCall " ++ name ++ " nargs=" ++ to_string(len(margs)) ++
+          " name" ++ sp(nlo, nhi) ++ " " ++ sp(lo, hi)]
+      o = dump_expr(o, d + 1, target)
+      for a in margs { o = dump_expr(o, d + 1, a) }
+      o
+    }
+    ELambda(params, body, lo, hi) -> {
+      var o = out ++ [ind(d) ++ "Lambda " ++ sp(lo, hi)]
+      for pm in params { o = dump_lparam(o, d + 1, pm) }
+      dump_expr(o, d + 1, body)
+    }
+    ECtor(name, cargs, spread, has_parens, clo, chi, lo, hi) -> {
+      let has_spread = match spread {
+        Some(s) -> true
+        None -> false
+      }
+      var o = out ++ [ind(d) ++ "CtorCall " ++ name ++ " parens=" ++ bstr(has_parens) ++
+          " spread=" ++ bstr(has_spread) ++ " callee" ++ sp(clo, chi) ++ " " ++ sp(lo, hi)]
+      match spread {
+        Some(s) -> { o = dump_expr(o, d + 1, s) }
+        None -> ()
+      }
+      for a in cargs {
+        o = o ++ [ind(d + 1) ++ "CtorArg name=" ++ opt_name(a.name) ++ " " ++ sp(a.lo, a.hi)]
+        o = dump_expr(o, d + 2, a.e)
+      }
+      o
+    }
+    EFieldAcc(target, field, flo, fhi, lo, hi) -> {
+      let o = out ++ [ind(d) ++ "FieldAccess " ++ field ++ " field" ++ sp(flo, fhi) ++ " " ++
+          sp(lo, hi)]
+      dump_expr(o, d + 1, target)
+    }
+    EListLit(elems, lo, hi) -> {
+      var o = out ++ [ind(d) ++ "ListLit " ++ sp(lo, hi)]
+      for x in elems { o = dump_expr(o, d + 1, x) }
+      o
+    }
+    ETupleLit(elems, lo, hi) -> {
+      var o = out ++ [ind(d) ++ "TupleLit " ++ sp(lo, hi)]
+      for x in elems { o = dump_expr(o, d + 1, x) }
+      o
+    }
+    EPropagate(operand, lo, hi) -> {
+      let o = out ++ [ind(d) ++ "Propagate " ++ sp(lo, hi)]
+      dump_expr(o, d + 1, operand)
+    }
+    EUnwrap(operand, lo, hi) -> {
+      let o = out ++ [ind(d) ++ "Unwrap " ++ sp(lo, hi)]
+      dump_expr(o, d + 1, operand)
+    }
+    EIndex(target, index, lo, hi) -> {
+      var o = out ++ [ind(d) ++ "Index " ++ sp(lo, hi)]
+      o = dump_expr(o, d + 1, target)
+      dump_expr(o, d + 1, index)
+    }
+    EReturn(v, lo, hi) -> {
+      let has = match v {
+        Some(x) -> true
+        None -> false
+      }
+      let o = out ++ [ind(d) ++ "Return has=" ++ bstr(has) ++ " " ++ sp(lo, hi)]
+      match v {
+        Some(x) -> dump_expr(o, d + 1, x)
+        None -> o
+      }
+    }
+    EBreak(lo, hi) -> out ++ [ind(d) ++ "Break " ++ sp(lo, hi)]
+    EContinue(lo, hi) -> out ++ [ind(d) ++ "Continue " ++ sp(lo, hi)]
+    EComptime(body, lo, hi) -> {
+      let o = out ++ [ind(d) ++ "Comptime " ++ sp(lo, hi)]
+      dump_expr(o, d + 1, body)
+    }
+    EUnsafePure(body, lo, hi) -> {
+      let o = out ++ [ind(d) ++ "UnsafePure " ++ sp(lo, hi)]
+      dump_expr(o, d + 1, body)
+    }
+    EBinary(op, left, right, olo, ohi, lo, hi) -> {
+      var o = out ++ [ind(d) ++ "Binary " ++ bin_op_name(op) ++ " op" ++ sp(olo, ohi) ++ " " ++
+          sp(lo, hi)]
+      o = dump_expr(o, d + 1, left)
+      dump_expr(o, d + 1, right)
+    }
+    EUnary(op, operand, lo, hi) -> {
+      let o = out ++ [ind(d) ++ "Unary " ++ un_op_name(op) ++ " " ++ sp(lo, hi)]
+      dump_expr(o, d + 1, operand)
+    }
+    EIf(cond, thn, els, lo, hi) -> {
+      let has_else = match els {
+        Some(x) -> true
+        None -> false
+      }
+      var o = out ++ [ind(d) ++ "If else=" ++ bstr(has_else) ++ " " ++ sp(lo, hi)]
+      o = dump_expr(o, d + 1, cond)
+      o = dump_expr(o, d + 1, thn)
+      match els {
+        Some(x) -> dump_expr(o, d + 1, x)
+        None -> o
+      }
+    }
+    EMatch(scrut, arms, lo, hi) -> {
+      var o = out ++ [ind(d) ++ "Match narms=" ++ to_string(len(arms)) ++ " " ++ sp(lo, hi)]
+      o = dump_expr(o, d + 1, scrut)
+      for a in arms {
+        let has_guard = match a.guard {
+          Some(g) -> true
+          None -> false
+        }
+        o = o ++ [ind(d + 1) ++ "Arm npats=" ++ to_string(len(a.pats)) ++ " guard=" ++
+            bstr(has_guard) ++ " " ++ sp(a.lo, a.hi)]
+        for pt in a.pats { o = dump_pat(o, d + 2, pt) }
+        match a.guard {
+          Some(g) -> { o = dump_expr(o, d + 2, g) }
+          None -> ()
+        }
+        o = dump_expr(o, d + 2, a.body)
+      }
+      o
+    }
+    EBlock(stmts, tail, lo, hi) -> {
+      let has_tail = match tail {
+        Some(t) -> true
+        None -> false
+      }
+      var o = out ++ [ind(d) ++ "Block tail=" ++ bstr(has_tail) ++ " " ++ sp(lo, hi)]
+      for s in stmts { o = dump_stmt(o, d + 1, s) }
+      match tail {
+        Some(t) -> dump_expr(o, d + 1, t)
+        None -> o
+      }
+    }
+  }
+
+fn dump_pat(out: List[String], d: Int, pt: Pattern) -> List[String] =
+  match pt {
+    PLit(lit, lo, hi) -> {
+      let o = out ++ [ind(d) ++ "PLit " ++ sp(lo, hi)]
+      dump_expr(o, d + 1, lit)
+    }
+    PBind(name, lo, hi) -> out ++ [ind(d) ++ "PBind " ++ name ++ " " ++ sp(lo, hi)]
+    PWild(lo, hi) -> out ++ [ind(d) ++ "PWild " ++ sp(lo, hi)]
+    PCtor(name, pargs, has_rest, has_parens, nlo, nhi, lo, hi) -> {
+      var o = out ++ [ind(d) ++ "PCtor " ++ name ++ " rest=" ++ bstr(has_rest) ++ " parens=" ++
+          bstr(has_parens) ++ " name" ++ sp(nlo, nhi) ++ " " ++ sp(lo, hi)]
+      for a in pargs {
+        o = o ++ [ind(d + 1) ++ "PArg name=" ++ opt_name(a.name)]
+        o = dump_pat(o, d + 2, a.pat)
+      }
+      o
+    }
+    PTuple(elems, lo, hi) -> {
+      var o = out ++ [ind(d) ++ "PTuple " ++ sp(lo, hi)]
+      for x in elems { o = dump_pat(o, d + 1, x) }
+      o
+    }
+    PList(pre, has_rest, rest_name, rest_span, post, lo, hi) -> {
+      let rs = match rest_span {
+        Some(s2) -> {
+          let (rlo, rhi) = s2
+          sp(rlo, rhi)
+        }
+        None -> "@_"
+      }
+      var o = out ++ [ind(d) ++ "PList npre=" ++ to_string(len(pre)) ++ " rest=" ++
+          bstr(has_rest) ++ " restname=" ++ opt_name(rest_name) ++ " rest" ++ rs ++ " " ++
+          sp(lo, hi)]
+      for x in pre { o = dump_pat(o, d + 1, x) }
+      for x in post { o = dump_pat(o, d + 1, x) }
+      o
+    }
+  }

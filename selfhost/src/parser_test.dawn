@@ -1,0 +1,145 @@
+# Unit tests for the self-hosted parser. The exhaustive acceptance test is the
+# golden diff (scripts/selfhost-parse-diff.sh, byte-identical to `dawn __parse`
+# over the whole repo corpus); these are fast structural checks for the shapes
+# that carry the most parser logic — rewrites, recovery, precedence.
+
+use std/str
+use parser.{parse_module}
+use astdump.{render_module}
+use ast.{
+  Expr, EInt, EVar, ECall, EBinary, ECtor, EBlock,
+  BinOp, OpAdd, OpMul,
+  Stmt, SWhile,
+  Decl, DFn, DConst, DUseModule, Module
+}
+
+fn rendered(src: String) -> String = {
+  let (m, ds) = parse_module(src)
+  render_module(m, ds)
+}
+
+test "a function declaration parses to one decl" {
+  let (m, ds) = parse_module("fn f(x: Int) -> Int = x")
+  assert len(ds) == 0
+  assert len(m.decls) == 1
+  match m.decls[0] {
+    DFn(f) -> {
+      assert f.name == "f"
+      assert len(f.params) == 1
+      assert f.params[0].name == "x"
+    }
+    _ -> { assert false }
+  }
+}
+
+test "multiplication binds tighter than addition" {
+  let (m, ds) = parse_module("const A: Int = 1 + 2 * 3")
+  match m.decls[0] {
+    DConst(name, is_pub, ann, init, lo, hi, nlo, nhi) ->
+      match init {
+        EBinary(op, left, right, olo, ohi, xlo, xhi) -> {
+          assert op == OpAdd
+          match right {
+            EBinary(op2, l2, r2, a, b, c, d) -> { assert op2 == OpMul }
+            _ -> { assert false }
+          }
+        }
+        _ -> { assert false }
+      }
+    _ -> { assert false }
+  }
+}
+
+test "pipe rewrites into a call with the left side first" {
+  let (m, ds) = parse_module("fn f() = x |> g(y)")
+  match m.decls[0] {
+    DFn(f) ->
+      match f.body {
+        ECall(callee, args, a, b, c, d) -> {
+          assert callee == "g"
+          assert len(args) == 2
+          match args[0] {
+            EVar(n, e2, f2) -> { assert n == "x" }
+            _ -> { assert false }
+          }
+        }
+        _ -> { assert false }
+      }
+    _ -> { assert false }
+  }
+}
+
+test "a broken declaration is reported and the next one still parses" {
+  let (m, ds) = parse_module("fn f( = 1\n\nfn g() = 2")
+  assert len(ds) > 0
+  match m.decls[len(m.decls) - 1] {
+    DFn(f) -> { assert f.name == "g" }
+    _ -> { assert false }
+  }
+}
+
+test "chained comparisons are an error" {
+  let (m, ds) = parse_module("fn f() = a < b < c")
+  assert len(ds) > 0
+  assert ds[0].msg == "comparison operators cannot be chained"
+  assert ds[0].hint == "write a < b && b < c"
+}
+
+test "interpolation holds a parsed expression" {
+  let out = rendered("const A: String = \"x=\${1 + 2}\"")
+  assert str.contains(out, "SInterp")
+  assert str.contains(out, "Binary ADD")
+}
+
+test "a header expression refuses a record literal" {
+  # `while C { g() }` — C stays a bare constructor and the brace opens the body
+  let (m, ds) = parse_module("fn f() -> Unit = { while C { g() } }")
+  assert len(ds) == 0
+  match m.decls[0] {
+    DFn(f) ->
+      match f.body {
+        EBlock(stmts, tail, a, b) ->
+          match stmts[0] {
+            SWhile(cond, body, c, d) ->
+              match cond {
+                ECtor(name, args, spread, has_parens, e2, f2, g2, h2) -> {
+                  assert name == "C"
+                  assert has_parens == false
+                }
+                _ -> { assert false }
+              }
+            _ -> { assert false }
+          }
+        _ -> { assert false }
+      }
+    _ -> { assert false }
+  }
+}
+
+test "selective use keeps its import names" {
+  let (m, ds) = parse_module("use json/value.{Json, render}\n\nfn f() = 1")
+  match m.decls[0] {
+    DUseModule(segs, selective, a, b, c, d) -> {
+      assert segs == ["json", "value"]
+      match selective {
+        Some(names) -> {
+          assert len(names) == 2
+          assert names[0].name == "Json"
+        }
+        None -> { assert false }
+      }
+    }
+    _ -> { assert false }
+  }
+}
+
+test "assert statements capture their source text" {
+  let out = rendered("test \"t\" {\n  assert 1 + 1 == 2\n}")
+  assert str.contains(out, "Assert src=1 + 1 == 2 ")
+}
+
+test "unterminated string in an interpolation-free file recovers" {
+  let (m, ds) = parse_module("fn f() = \"abc")
+  assert len(ds) > 0
+  assert ds[0].msg == "unterminated string"
+}

@@ -345,6 +345,20 @@ lowering 一刀、四刀与树的对应一页图，并穷举核对 `ast/Ast.kt` 
 golden：AST dump **加诊断文本**逐字节对拍——编译器的错误信息是它一半的价值，
 回归了不会有别的测试告诉你。
 
+**Parser 半刀 ✅ 完成（2026-07-22）**：
+
+- 金标准 `dawn __parse`（`cli/AstDump.kt`，规范行格式：每节点一行 + 缩进 + span），
+  `scripts/selfhost-parse-diff.sh` 全语料（327 文件，含全部错误恢复 golden）逐字节
+  对拍全绿，已进 CI。
+- 落点 `selfhost/src/{ast,parser,astdump,parser_test}.dawn`。AST 按 P0.5 选甲：
+  **纯解析树**，Kotlin `Ast.kt` 的 44 个 checker `var` 槽一个不带。
+- 移植法：可变 pos + sink + 异常 → `St { pos, diags }` 状态线程 +
+  `PR[T] = Result[(St, T), (St, Diag)]` + `?` 当 throw 用；`Err` 携带失败点状态
+  （P1 的教训直接复用，对拍一次通过）；`noStructLit` 成员改 `ns` 参数线程。
+- Dawn 语言笔记（写 1,900 行编译器代码的实感）：match 臂体只收表达式——赋值 /
+  `for` / `assert` 语句都要包 `{ }`；`alias` 等关键字不可作变量名；跨模块 `use` +
+  74 个构造器的选择性引入完全够用。仍无新语言缺口。
+
 ### P4 · 第四刀：CodeGen
 
 4,010 行，最大的一刀，也是唯一大量 `use java`（ASM）的一刀。位运算（A1）在此兑现，

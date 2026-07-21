@@ -1,20 +1,34 @@
-# Entry point of the self-hosted toolchain (P1: lexer only). For each file
-# argument, prints the canonical lex dump — the same output as `dawn __lex`,
-# which scripts/selfhost-lex-diff.sh diffs over the repo corpus.
+# Entry point of the self-hosted toolchain. Modes mirror the Kotlin compiler's
+# hidden golden-dump commands, and the outputs must match them byte for byte:
+#   selfhost lex <file>...     the token stream (dawn __lex)
+#   selfhost parse <file>...   the parsed AST   (dawn __parse)
 
 use std/io
-use lexer.{lex}
-use dump.{render}
+use lexer
+use parser
+use dump
+use astdump
 
 pub fn main() -> Unit !io = {
-  for p in args() {
-    println("== " ++ p ++ " ==")
-    match io.read_file(p) {
-      Ok(text) -> {
-        let (toks, diags) = lex(text)
-        println(render(toks, diags))
+  match args() {
+    [] -> panic("usage: selfhost (lex|parse) <file>...")
+    [mode, ..files] -> {
+      for pth in files {
+        println("== " ++ pth ++ " ==")
+        match io.read_file(pth) {
+          Ok(text) ->
+            if mode == "lex" {
+              let (toks, diags) = lexer.lex(text)
+              println(dump.render(toks, diags))
+            } else if mode == "parse" {
+              let (m, diags) = parser.parse_module(text)
+              println(astdump.render_module(m, diags))
+            } else {
+              panic("unknown mode: " ++ mode)
+            }
+          Err(e) -> panic("cannot read " ++ pth ++ ": " ++ e)
+        }
       }
-      Err(e) -> panic("cannot read " ++ p ++ ": " ++ e)
     }
   }
 }
