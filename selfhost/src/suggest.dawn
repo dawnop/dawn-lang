@@ -1,0 +1,80 @@
+# "Did you mean ...?" suggestions (port of diag/Suggest.kt). A candidate is
+# offered only within Levenshtein distance min(2, len/2) of the typo; the
+# nearest qualifying candidate wins, and a distance-1 hit stops the search.
+
+use std/list
+
+## Closest candidate within threshold, or None if nothing is close enough.
+pub fn closest(name: String, candidates: List[String]) -> Option[String] = {
+  let cps = code_points(name)
+  let threshold = min2(2, len(cps) / 2)
+  if threshold == 0 { return None }
+  var best: Option[String] = None
+  var best_dist = threshold + 1
+  for c in candidates {
+    if c != name {
+      let d = distance(cps, code_points(c), best_dist - 1)
+      if d < best_dist {
+        best_dist = d
+        best = Some(c)
+        # can't do better than an edit distance of 1
+        if d == 1 { break }
+      }
+    }
+  }
+  best
+}
+
+## A ready-to-use hint line, or None when nothing is close.
+pub fn hint(name: String, candidates: List[String]) -> Option[String] =
+  match closest(name, candidates) {
+    Some(c) -> Some("did you mean `" ++ c ++ "`?")
+    None -> None
+  }
+
+fn min2(a: Int, b: Int) -> Int = if a < b { a } else { b }
+
+fn min3(a: Int, b: Int, c: Int) -> Int = min2(a, min2(b, c))
+
+fn abs2(a: Int) -> Int = if a < 0 { -a } else { a }
+
+## Levenshtein distance, abandoning early once it provably exceeds `limit`.
+fn distance(a: List[Int], b: List[Int], limit: Int) -> Int = {
+  if abs2(len(a) - len(b)) > limit { return limit + 1 }
+  var prev: List[Int] = []
+  for j in 0 ..len(b) + 1 { prev = prev ++ [j] }
+  var i = 1
+  while i <= len(a) {
+    var curr = [i]
+    var row_min = i
+    var j = 1
+    while j <= len(b) {
+      let cost = if a[i - 1] == b[j - 1] { 0 } else { 1 }
+      let d = min3(prev[j] + 1, curr[j - 1] + 1, prev[j - 1] + cost)
+      curr = curr ++ [d]
+      if d < row_min { row_min = d }
+      j = j + 1
+    }
+    if row_min > limit { return limit + 1 }
+    prev = curr
+    i = i + 1
+  }
+  prev[len(b)]
+}
+
+test "close names are suggested, far ones are not" {
+  assert hint("lenght", ["length", "width"]) == Some("did you mean `length`?")
+  assert hint("x", ["y", "z"]) == None
+  assert hint("map", ["mop", "fold"]) == Some("did you mean `mop`?")
+  assert hint("wildly_off", ["a", "b"]) == None
+}
+
+test "the nearest candidate wins and distance one stops the search" {
+  assert closest("sort", ["sqrt", "sort_by", "sorta"]) == Some("sqrt")
+  # threshold for a 3-letter name is 1, so "the" (distance 2) is out of reach
+  assert closest("teh", ["the", "ten"]) == Some("ten")
+}
+
+test "identical names are never suggested" {
+  assert closest("abc", ["abc"]) == None
+}

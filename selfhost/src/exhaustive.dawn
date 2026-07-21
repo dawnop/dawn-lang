@@ -1,0 +1,351 @@
+# Pattern exhaustiveness via the usefulness algorithm (Maranget 2007; port of
+# check/Exhaustive.kt). A match is exhaustive iff a wildcard row is NOT useful
+# after all its unguarded rows. The checker lowers its (resolved) AST patterns
+# to SPat rows — Kotlin's `SLit(value: Any)` becomes the LitV sum here, and a
+# constructor is identified by (adt id, ctor index) against the ADT table.
+
+use std/list
+use std/map
+use types.{
+  Ty, TyVar, TyAdt, TyTuple, TyList, TyBool, TyInt, TyString, TyError,
+  Adts, AdtI, CtorI, adt_of, subst, Eff, prelude_adts, OPTION_ID, opt_ty
+}
+
+pub type LitV =
+  | LInt(v: Int)
+  | LFloat(v: Float)
+  | LBool(v: Bool)
+  | LStr(v: String)
+
+pub type SPat =
+  | SWild
+  | SCtor(adt: Int, ci: Int, subs: List[SPat])
+  | SLit(v: LitV)
+  | STuple(subs: List[SPat])
+  | SList(pre: List[SPat], has_rest: Bool, post: List[SPat])
+
+fn slist_arity(pre: List[SPat], post: List[SPat]) -> Int = len(pre) + len(post)
+
+fn wilds(n: Int) -> List[SPat] = {
+  var out: List[SPat] = []
+  for i in 0 ..n { out = out ++ [SWild] }
+  out
+}
+
+fn ctor_at(adts: Adts, adt: Int, ci: Int) -> CtorI = adt_of(adts, adt).ctors[ci]
+
+## Constructor field types with the column's type arguments substituted in.
+fn inst_fields(adts: Adts, adt: Int, ci: Int, column: Ty) -> List[Ty] = {
+  let a = adt_of(adts, adt)
+  let c = a.ctors[ci]
+  let field_tys = map(c.fields, fn(f) => f.ty)
+  match column {
+    TyAdt(_, targs) ->
+      if len(a.tparams) == 0 {
+        field_tys
+      } else {
+        var m: Map[Int, Ty] = map.empty()
+        var i = 0
+        for tp in a.tparams {
+          match tp {
+            TyVar(_, id) ->
+              match get(targs, i) {
+                Some(arg) -> { m = map.insert(m, id, arg) }
+                None -> ()
+              }
+            _ -> ()
+          }
+          i = i + 1
+        }
+        let m2 = m
+        let em: Map[Int, Eff] = map.empty()
+        map(field_tys, fn(ft) => subst(ft, m2, em))
+      }
+    _ -> field_tys
+  }
+}
+
+## Would a value matching `q` slip through every row of `matrix`?
+pub fn useful(adts: Adts, matrix: List[List[SPat]], q: List[SPat], types_: List[Ty]) -> Bool = {
+  if len(q) == 0 { return len(matrix) == 0 }
+  let t = types_[0]
+  let rest_q = list.drop(q, 1)
+  let rest_t = list.drop(types_, 1)
+  match q[0] {
+    SCtor(adt, ci, subs) ->
+      useful(adts, spec_ctor(adts, matrix, adt, ci), subs ++ rest_q,
+        inst_fields(adts, adt, ci, t) ++ rest_t)
+    SLit(v) -> useful(adts, spec_lit(matrix, v), rest_q, rest_t)
+    STuple(subs) -> {
+      let elem_tys = match t {
+        TyTuple(elems) -> if len(elems) == 0 { err_tys(len(subs)) } else { elems }
+        _ -> err_tys(len(subs))
+      }
+      useful(adts, spec_tuple(matrix, len(subs)), subs ++ rest_q, elem_tys ++ rest_t)
+    }
+    SList(pre, has_rest, post) -> {
+      let elem = match t {
+        TyList(e) -> e
+        _ -> TyError
+      }
+      if not has_rest {
+        let n = len(pre)
+        useful(adts, spec_list(matrix, n), pre ++ rest_q, elem_tys_of(elem, n) ++ rest_t)
+      } else {
+        # a rest pattern covers every length >= its arity; behaviour is uniform
+        # beyond the longest pattern in play, so a finite probe suffices
+        let arity = slist_arity(pre, post)
+        let bound = list_len_bound(matrix, Some(q[0]))
+        var found = false
+        var l = arity
+        while l <= bound {
+          if useful(adts, spec_list(matrix, l),
+            pre ++ wilds(l - arity) ++ post ++ rest_q, elem_tys_of(elem, l) ++ rest_t) {
+              found = true
+              break
+            }
+          l = l + 1
+        }
+        found
+      }
+    }
+    SWild -> {
+      # lists: probe every relevant length (same uniformity argument as above)
+      match t {
+        TyList(elem) -> {
+          let bound = list_len_bound(matrix, None)
+          var found = false
+          var l = 0
+          while l <= bound {
+            if useful(adts, spec_list(matrix, l), wilds(l) ++ rest_q,
+              elem_tys_of(elem, l) ++ rest_t) {
+                found = true
+                break
+              }
+            l = l + 1
+          }
+          return found
+        }
+        # a tuple is its own single complete constructor
+        TyTuple(elems) ->
+          return useful(adts, spec_tuple(matrix, len(elems)), wilds(len(elems)) ++ rest_q,
+            elems ++ rest_t)
+        TyAdt(aid, _) -> {
+          # if the matrix heads form a complete signature, a wildcard is useful
+          # iff it is useful under some constructor; otherwise take the default matrix
+          let a = adt_of(adts, aid)
+          if heads_complete(matrix, aid, len(a.ctors)) {
+            var i = 0
+            var found = false
+            for c in a.ctors {
+              if useful(adts, spec_ctor(adts, matrix, aid, i),
+                wilds(len(c.fields)) ++ rest_q, inst_fields(adts, aid, i, t) ++ rest_t) {
+                  found = true
+                  break
+                }
+              i = i + 1
+            }
+            return found
+          }
+        }
+        _ ->
+          if t == TyBool {
+            if lit_has(matrix, LBool(true)) && lit_has(matrix, LBool(false)) {
+              return useful(adts, spec_lit(matrix, LBool(true)), rest_q, rest_t) ||
+                useful(adts, spec_lit(matrix, LBool(false)), rest_q, rest_t)
+            }
+          }
+      }
+      # Int/String literals can never be complete
+      var defaulted: List[List[SPat]] = []
+      for row in matrix {
+        match row[0] {
+          SWild -> { defaulted = defaulted ++ [list.drop(row, 1)] }
+          _ -> ()
+        }
+      }
+      useful(adts, defaulted, rest_q, rest_t)
+    }
+  }
+}
+
+fn err_tys(n: Int) -> List[Ty] = {
+  var out: List[Ty] = []
+  for i in 0 ..n { out = out ++ [TyError] }
+  out
+}
+
+fn elem_tys_of(elem: Ty, n: Int) -> List[Ty] = {
+  var out: List[Ty] = []
+  for i in 0 ..n { out = out ++ [elem] }
+  out
+}
+
+fn heads_complete(matrix: List[List[SPat]], adt: Int, nctors: Int) -> Bool = {
+  var seen: List[Int] = []
+  for row in matrix {
+    match row[0] {
+      SCtor(a, ci, _) ->
+        if a == adt && not has_int(seen, ci) { seen = seen ++ [ci] }
+      _ -> ()
+    }
+  }
+  len(seen) == nctors
+}
+
+fn has_int(xs: List[Int], x: Int) -> Bool = {
+  for y in xs {
+    if y == x { return true }
+  }
+  false
+}
+
+fn lit_has(matrix: List[List[SPat]], v: LitV) -> Bool = {
+  for row in matrix {
+    match row[0] {
+      SLit(w) -> if w == v { return true }
+      _ -> ()
+    }
+  }
+  false
+}
+
+fn spec_ctor(adts: Adts, matrix: List[List[SPat]], adt: Int, ci: Int) -> List[List[SPat]] = {
+  let nfields = len(ctor_at(adts, adt, ci).fields)
+  var out: List[List[SPat]] = []
+  for row in matrix {
+    match row[0] {
+      SWild -> { out = out ++ [wilds(nfields) ++ list.drop(row, 1)] }
+      SCtor(a, c, subs) ->
+        if a == adt && c == ci { out = out ++ [subs ++ list.drop(row, 1)] }
+      _ -> ()
+    }
+  }
+  out
+}
+
+fn spec_lit(matrix: List[List[SPat]], v: LitV) -> List[List[SPat]] = {
+  var out: List[List[SPat]] = []
+  for row in matrix {
+    match row[0] {
+      SWild -> { out = out ++ [list.drop(row, 1)] }
+      SLit(w) -> if w == v { out = out ++ [list.drop(row, 1)] }
+      _ -> ()
+    }
+  }
+  out
+}
+
+fn spec_tuple(matrix: List[List[SPat]], n: Int) -> List[List[SPat]] = {
+  var out: List[List[SPat]] = []
+  for row in matrix {
+    match row[0] {
+      SWild -> { out = out ++ [wilds(n) ++ list.drop(row, 1)] }
+      STuple(subs) -> { out = out ++ [subs ++ list.drop(row, 1)] }
+      _ -> ()
+    }
+  }
+  out
+}
+
+## Specialize a list column to exactly `n` elements (a rest expands to wildcards).
+fn spec_list(matrix: List[List[SPat]], n: Int) -> List[List[SPat]] = {
+  var out: List[List[SPat]] = []
+  for row in matrix {
+    match row[0] {
+      SWild -> { out = out ++ [wilds(n) ++ list.drop(row, 1)] }
+      SList(pre, has_rest, post) ->
+        if not has_rest {
+          if len(pre) == n { out = out ++ [pre ++ list.drop(row, 1)] }
+        } else if slist_arity(pre, post) <= n {
+          out = out ++ [pre ++ wilds(n - slist_arity(pre, post)) ++ post ++ list.drop(row, 1)]
+        }
+      _ -> ()
+    }
+  }
+  out
+}
+
+## One past the longest list pattern in play: lengths beyond behave uniformly.
+fn list_len_bound(matrix: List[List[SPat]], q: Option[SPat]) -> Int = {
+  var m = 0
+  for row in matrix {
+    if len(row) > 0 {
+      match row[0] {
+        SList(pre, has_rest, post) -> {
+          let x = if has_rest { slist_arity(pre, post) } else { len(pre) }
+          if x > m { m = x }
+        }
+        _ -> ()
+      }
+    }
+  }
+  match q {
+    Some(SList(pre, has_rest, post)) -> {
+      let x = if has_rest { slist_arity(pre, post) } else { len(pre) }
+      if x > m { m = x }
+    }
+    _ -> ()
+  }
+  m + 1
+}
+
+## Witnesses for a non-exhaustive match over a list: [], [_], [_, _, ..] ...
+pub fn missing_list_patterns(adts: Adts, rows: List[List[SPat]], t: Ty) -> List[String] = {
+  let bound = list_len_bound(rows, None)
+  var missing: List[String] = []
+  var l = 0
+  while l <= bound {
+    let q = SList(wilds(l), false, [])
+    if useful(adts, rows, [q], [t]) {
+      var elems: List[String] = []
+      for i in 0 ..l { elems = elems ++ ["_"] }
+      if l == bound { elems = elems ++ [".."] }
+      missing = missing ++ ["[" ++ join(elems, ", ") ++ "]"]
+    }
+    l = l + 1
+  }
+  missing
+}
+
+# ---- tests ----
+
+test "an option match missing None is caught" {
+  let adts = prelude_adts()
+  # match on Option[Int] with only Some(_) covered
+  let rows = [[SCtor(OPTION_ID, 0, [SWild])]]
+  assert useful(adts, rows, [SWild], [opt_ty(TyInt)])
+  # adding None makes it exhaustive
+  let rows2 = rows ++ [[SCtor(OPTION_ID, 1, [])]]
+  assert not useful(adts, rows2, [SWild], [opt_ty(TyInt)])
+}
+
+test "bool literals complete a match" {
+  let adts = prelude_adts()
+  let rows = [[SLit(LBool(true))], [SLit(LBool(false))]]
+  assert not useful(adts, rows, [SWild], [TyBool])
+  assert useful(adts, [[SLit(LBool(true))]], [SWild], [TyBool])
+}
+
+test "int literals are never complete" {
+  let adts = prelude_adts()
+  let rows = [[SLit(LInt(1))], [SLit(LInt(2))]]
+  assert useful(adts, rows, [SWild], [TyInt])
+}
+
+test "list patterns probe lengths" {
+  let adts = prelude_adts()
+  # [] and [x, ..rest] together are exhaustive
+  let rows = [[SList([], false, [])], [SList([SWild], true, [])]]
+  assert not useful(adts, rows, [SWild], [TyList(TyInt)])
+  # [] and [x] leave two-element lists uncovered
+  let rows2 = [[SList([], false, [])], [SList([SWild], false, [])]]
+  assert useful(adts, rows2, [SWild], [TyList(TyInt)])
+  assert missing_list_patterns(adts, rows2, TyList(TyInt)) == ["[_, _, ..]"]
+}
+
+test "tuples decompose into their elements" {
+  let adts = prelude_adts()
+  let rows = [[STuple([SLit(LBool(true)), SWild])], [STuple([SLit(LBool(false)), SWild])]]
+  assert not useful(adts, rows, [SWild], [TyTuple([TyBool, TyString])])
+}
