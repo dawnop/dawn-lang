@@ -811,6 +811,15 @@ class Parser(
                         e = FieldAccess(e, f.text, f.span, Span(e.span.start, f.span.end))
                     }
                 }
+                NEWLINE -> {
+                    // vertical method chains: `.` may start the next line (spec §1.7),
+                    // same privilege |> has. Nothing else can begin with `.`, so the
+                    // lookahead is unambiguous.
+                    var look = pos
+                    while (toks[look].type == NEWLINE) look++
+                    if (toks[look].type != DOT) return e
+                    pos = look
+                }
                 else -> return e
             }
         }
