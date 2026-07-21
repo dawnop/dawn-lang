@@ -2,15 +2,21 @@
 #
 # Run: ./bin/dawn run scripts/bench-map.dawn
 #
-# The builtin Map is persistent in interface but copy-on-write in implementation
-# (CodeGen.kt:265), so a single insert is O(n). Whether that matters depends
-# entirely on the SHAPE of the usage, which is what the three cases below measure:
+# Map used to be copy-on-write (a LinkedHashMap cloned whole per insert), so a
+# single insert was O(n) and a growing map O(n^2). It is now a persistent HAMT
+# (dawn/rt/DawnMap, O(log32 n) insert). This benchmark measures three usage
+# SHAPES, which is what mattered under copy-on-write:
 #
-#   A many small scopes  — each map stays tiny and is discarded. Cheap.
-#   B one module table   — grows to a few thousand. Tolerable.
-#   C one node-keyed table — grows with every AST node. Fatal.
+#   A many small scopes  — each map stays tiny and is discarded.
+#   B one module table   — grows to a few thousand.
+#   C one node-keyed table — grows with every AST node.
 #
-# A and C perform the SAME number of inserts. That is the point.
+# A and C perform the SAME number of inserts. Under copy-on-write only C was
+# fatal (100k inserts: A 10ms, C 48742ms). After the HAMT the gap is gone
+# (A ~4ms, C ~10ms), and the growing map (case 1) fell 21118ms -> ~8ms at 80k,
+# on par with the already-linear List. That fix is what unblocks self-hosting.
+use java "java.lang.System"
+use java "java.util.LinkedHashMap"
 use java "java.lang.System"
 use java "java.util.LinkedHashMap"
 

@@ -10,14 +10,16 @@
 
 ## 一、结论先行
 
-一句话：**阻塞项本有两个——位运算符（已落地，见 §四）和「不可变性把编译器逼向 Map
-最慢的那个形状」。** 剩下这个不是「Map 慢」那么简单，它牵出一个架构决定（§三），
-必须在写第一行 lexer 之前定下来。
+一句话：**两个阻塞项都已落地——位运算符（§四）和 Map 复制写入（§二，换成持久 HAMT，
+形状 C 48742ms→10ms）。** Map 那个曾牵出一个架构决定（§三，AST 不可变→选甲），那决定仍成立，
+但如今是「type 分两棵树更干净」的设计理由，不再是「否则 O(n²)」的性能生死——HAMT 已让形状 C
+不再致命（见 §二末的复盘）。**语言层面的自举前置到此清零，剩下是自举本身的实现活。**
 
 | 类 | 缺口 | 判定 |
 |---|---|---|
 | A1 | 位运算符 | ✅ 已落地（2026-07-21，见 §四）。曾是唯一零逃生口 |
-| A2 | Map 复制写入 + AST 不可变 | 🔴 阻塞。见 §二、§三 |
+| A2 | Map 复制写入 | ✅ 已落地（2026-07-21，HAMT，见 §二）。形状 C 48742ms→10ms |
+| A2′ | AST 不可变 | 🟢 已定架构（选甲，§三），属自举实现，非语言缺口 |
 | B1 | 序 6 值类型特化 | 🟠 疼 |
 | B2 | trait v2 | 🟠 疼 |
 | B3 | 无 `break`/`continue` | 🟠 疼（每日税，非墙） |
@@ -64,6 +66,27 @@
 
 **那 A2 为什么还是阻塞？** 见下一节。
 
+### ✅ 已落地（2026-07-21）：换成持久 HAMT
+
+Map/Set 从 copy-on-write 换成 [`DawnMap`](../compiler/src/main/java/dawn/rt/DawnMap.java)/
+[`DawnSet`](../compiler/src/main/java/dawn/rt/DawnSet.java)——32 路分支的 hash array
+mapped trie，`assoc` 只复制根到叶那条路（约 `log32 n` 个小节点），O(n) 复制没了。
+二者 `implements java.util.Map/Set`，故 `genMapsClass` 里所有读路径（get/keys/values/
+entries/size/index/show）**一字未改**；只有 empty/insert/remove/from 六个写路径改成走
+持久原语。插入序靠每个活键的 `seq` 保留（更新复用旧 `seq`→保位），相等继承 `AbstractMap`
+的顺序无关语义（spec §2.2 全项对齐）。
+
+同一支 `bench-map.dawn`，换实现后：
+
+| 项 | copy-on-write | HAMT |
+|---|---|---|
+| ① 增长 map @80k | 21,118 ms | **8 ms**（与 List 同量级） |
+| ② vs 就地 LinkedHashMap @80k | 28,246 ms | 24 ms（持久开销，可接受） |
+| ③ 形状 C @100k | 48,742 ms | **10 ms** |
+
+验证：`DawnMapTest`（含 6 万次随机 assoc/without 对拍 `LinkedHashMap`、全 hash 碰撞链压测）+
+golden `run/map_persistence`。
+
 ## 三、真正的坎：不可变性强制选择形状 C
 
 `ast/Ast.kt` 有 **49 个 `var` 字段**。Kotlin 版的架构是——parser 建出带空槽的 AST，
@@ -100,6 +123,11 @@ Comptime.kt:79    c.value = ComptimeInterp(...).eval(c.init, HashMap())
 物化开销）直接相干——若 P1 试水刀显示分配是瓶颈，序 6 的优先级要提前。
 [`seq6-research.md`](seq6-research.md) 自己的教训是「两次预测都被实测推翻」，故此处
 **不预判**，留给 P1 的数据。
+
+> **HAMT 落地后的复盘（2026-07-21）**：理由一（解耦风险）已兑现——Map 重写完成，
+> 自举不再被它卡。同时它**抽掉了「选甲否则 O(n²)」的性能论据**：形状 C 现在 10ms，
+> 乙（节点键侧表）不再是性能陷阱。**但选甲的裁决不变**——理由二（类型系统保证分刀，
+> 而非靠约定）是设计质量论据，与性能无关，独立成立。即：甲仍赢，只是现在赢在干净，不再赢在快。
 
 ## 四、A1 位运算符：唯一零逃生口
 
@@ -224,8 +252,8 @@ error: no overload of `LinkedHashMap.put` matches (Int, Int)
 
 1. ~~量 Map~~ ✅ 已完成，见 §二。结论改写了 P0 本身。
 2. ~~位运算符~~ ✅ 已落地（2026-07-21，见 §四）。四刀一趟过，零逃生口这项就此消解。
-3. **持久 Map（HAMT 或共享桶）**。理由已换成 §三——为了让形状 C 可用。选甲之后它是
-   **优化项而非阻塞项**，可与 P1 并行。
+3. ~~持久 Map（HAMT）~~ ✅ 已落地（2026-07-21，见 §二末）。形状 C 48742ms→10ms，
+   O(n²) 消解。P0 地基三项到此清零。
 
 ### P0.5 · 定 AST 架构 —— **选甲（多棵 AST）**
 

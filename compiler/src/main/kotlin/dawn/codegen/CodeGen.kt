@@ -263,12 +263,14 @@ class CodeGen(
 
     /**
      * dawn/rt/Maps: the runtime for the builtin persistent Map/Set (spec §2.2).
-     * Backed by LinkedHashMap/LinkedHashSet with copy-on-write, so iteration order
-     * is insertion order and identical on JVM and native. Keys/values travel erased.
+     * Backed by the HAMTs dawn/rt/DawnMap and dawn/rt/DawnSet (O(log32 n) insert,
+     * no whole-structure copy), which implement java.util.Map/Set so the read
+     * builtins here speak the interface unchanged. Iteration is insertion order
+     * and identical on JVM and native. Keys/values travel erased.
      */
     private fun genMapsClass(): ByteArray {
-        val LHM = "java/util/LinkedHashMap"
-        val LHS = "java/util/LinkedHashSet"
+        val DMAP = "dawn/rt/DawnMap"
+        val DSET = "dawn/rt/DawnSet"
         val COLL = "java/util/Collection"
         val ITER = "java/util/Iterator"
         val ENTRY = "java/util/Map\$Entry"
@@ -280,40 +282,43 @@ class CodeGen(
             val m = cw.visitMethod(ACC_PUBLIC or ACC_STATIC, name, desc, null, null)
             m.visitCode(); m.body(); m.visitMaxs(0, 0); m.visitEnd()
         }
-        fun MethodVisitor.newEmpty(cls: String) {
-            visitTypeInsn(NEW, cls); visitInsn(DUP); visitMethodInsn(INVOKESPECIAL, cls, "<init>", "()V", false)
-        }
         fun MethodVisitor.copyFrom(cls: String, argDesc: String, arg: Int) {
             visitTypeInsn(NEW, cls); visitInsn(DUP); visitVarInsn(ALOAD, arg)
             visitMethodInsn(INVOKESPECIAL, cls, "<init>", "($argDesc)V", false)
         }
 
-        method("map_empty", "()L$JMAP;") { newEmpty(LHM); visitInsn(ARETURN) }
-        method("set_empty", "()L$JSET;") { newEmpty(LHS); visitInsn(ARETURN) }
+        // Map/Set are persistent HAMTs (dawn/rt/DawnMap, dawn/rt/DawnSet); both
+        // implement java.util.Map/Set, so the read builtins below are untouched.
+        method("map_empty", "()L$JMAP;") {
+            visitFieldInsn(GETSTATIC, DMAP, "EMPTY", "L$DMAP;"); visitInsn(ARETURN)
+        }
+        method("set_empty", "()L$JSET;") {
+            visitFieldInsn(GETSTATIC, DSET, "EMPTY", "L$DSET;"); visitInsn(ARETURN)
+        }
 
         method("map_insert", "(L$JMAP;L$OBJ;L$OBJ;)L$JMAP;") {
-            copyFrom(LHM, "Ljava/util/Map;", 0); visitVarInsn(ASTORE, 3)
-            visitVarInsn(ALOAD, 3); visitVarInsn(ALOAD, 1); visitVarInsn(ALOAD, 2)
-            visitMethodInsn(INVOKEVIRTUAL, LHM, "put", "(L$OBJ;L$OBJ;)L$OBJ;", false); visitInsn(POP)
-            visitVarInsn(ALOAD, 3); visitInsn(ARETURN)
+            visitVarInsn(ALOAD, 0); visitTypeInsn(CHECKCAST, DMAP)
+            visitVarInsn(ALOAD, 1); visitVarInsn(ALOAD, 2)
+            visitMethodInsn(INVOKEVIRTUAL, DMAP, "assoc", "(L$OBJ;L$OBJ;)L$DMAP;", false)
+            visitInsn(ARETURN)
         }
         method("set_insert", "(L$JSET;L$OBJ;)L$JSET;") {
-            copyFrom(LHS, "L$COLL;", 0); visitVarInsn(ASTORE, 2)
-            visitVarInsn(ALOAD, 2); visitVarInsn(ALOAD, 1)
-            visitMethodInsn(INVOKEVIRTUAL, LHS, "add", "(L$OBJ;)Z", false); visitInsn(POP)
-            visitVarInsn(ALOAD, 2); visitInsn(ARETURN)
+            visitVarInsn(ALOAD, 0); visitTypeInsn(CHECKCAST, DSET)
+            visitVarInsn(ALOAD, 1)
+            visitMethodInsn(INVOKEVIRTUAL, DSET, "conj", "(L$OBJ;)L$DSET;", false)
+            visitInsn(ARETURN)
         }
         method("map_remove", "(L$JMAP;L$OBJ;)L$JMAP;") {
-            copyFrom(LHM, "Ljava/util/Map;", 0); visitVarInsn(ASTORE, 2)
-            visitVarInsn(ALOAD, 2); visitVarInsn(ALOAD, 1)
-            visitMethodInsn(INVOKEVIRTUAL, LHM, "remove", "(L$OBJ;)L$OBJ;", false); visitInsn(POP)
-            visitVarInsn(ALOAD, 2); visitInsn(ARETURN)
+            visitVarInsn(ALOAD, 0); visitTypeInsn(CHECKCAST, DMAP)
+            visitVarInsn(ALOAD, 1)
+            visitMethodInsn(INVOKEVIRTUAL, DMAP, "without", "(L$OBJ;)L$DMAP;", false)
+            visitInsn(ARETURN)
         }
         method("set_remove", "(L$JSET;L$OBJ;)L$JSET;") {
-            copyFrom(LHS, "L$COLL;", 0); visitVarInsn(ASTORE, 2)
-            visitVarInsn(ALOAD, 2); visitVarInsn(ALOAD, 1)
-            visitMethodInsn(INVOKEVIRTUAL, LHS, "remove", "(L$OBJ;)Z", false); visitInsn(POP)
-            visitVarInsn(ALOAD, 2); visitInsn(ARETURN)
+            visitVarInsn(ALOAD, 0); visitTypeInsn(CHECKCAST, DSET)
+            visitVarInsn(ALOAD, 1)
+            visitMethodInsn(INVOKEVIRTUAL, DSET, "disj", "(L$OBJ;)L$DSET;", false)
+            visitInsn(ARETURN)
         }
         method("map_get", "(L$JMAP;L$OBJ;)LOption;") {
             val none = Label()
@@ -381,10 +386,23 @@ class CodeGen(
             copyFrom(ARRAYLIST, "L$COLL;", 0); visitInsn(ARETURN)
         }
         method("set_from", "(L$JLIST;)L$JSET;") {
-            copyFrom(LHS, "L$COLL;", 0); visitInsn(ARETURN)
+            visitFieldInsn(GETSTATIC, DSET, "EMPTY", "L$DSET;"); visitVarInsn(ASTORE, 1)
+            visitVarInsn(ALOAD, 0); visitMethodInsn(INVOKEINTERFACE, JLIST, "iterator", "()L$ITER;", true)
+            visitVarInsn(ASTORE, 2)
+            val loop = Label(); val done = Label()
+            visitLabel(loop)
+            visitVarInsn(ALOAD, 2); visitMethodInsn(INVOKEINTERFACE, ITER, "hasNext", "()Z", true)
+            visitJumpInsn(IFEQ, done)
+            visitVarInsn(ALOAD, 1)  // acc
+            visitVarInsn(ALOAD, 2); visitMethodInsn(INVOKEINTERFACE, ITER, "next", "()L$OBJ;", true)
+            visitMethodInsn(INVOKEVIRTUAL, DSET, "conj", "(L$OBJ;)L$DSET;", false)
+            visitVarInsn(ASTORE, 1)
+            visitJumpInsn(GOTO, loop)
+            visitLabel(done)
+            visitVarInsn(ALOAD, 1); visitInsn(ARETURN)
         }
         method("map_from", "(L$JLIST;)L$JMAP;") {
-            newEmpty(LHM); visitVarInsn(ASTORE, 1)
+            visitFieldInsn(GETSTATIC, DMAP, "EMPTY", "L$DMAP;"); visitVarInsn(ASTORE, 1)
             visitVarInsn(ALOAD, 0); visitMethodInsn(INVOKEINTERFACE, JLIST, "iterator", "()L$ITER;", true)
             visitVarInsn(ASTORE, 2)
             val loop = Label(); val done = Label()
@@ -393,10 +411,11 @@ class CodeGen(
             visitJumpInsn(IFEQ, done)
             visitVarInsn(ALOAD, 2); visitMethodInsn(INVOKEINTERFACE, ITER, "next", "()L$OBJ;", true)
             visitTypeInsn(CHECKCAST, T2); visitVarInsn(ASTORE, 3)
-            visitVarInsn(ALOAD, 1)
+            visitVarInsn(ALOAD, 1)  // acc
             visitVarInsn(ALOAD, 3); visitFieldInsn(GETFIELD, T2, "_0", "L$OBJ;")
             visitVarInsn(ALOAD, 3); visitFieldInsn(GETFIELD, T2, "_1", "L$OBJ;")
-            visitMethodInsn(INVOKEVIRTUAL, LHM, "put", "(L$OBJ;L$OBJ;)L$OBJ;", false); visitInsn(POP)
+            visitMethodInsn(INVOKEVIRTUAL, DMAP, "assoc", "(L$OBJ;L$OBJ;)L$DMAP;", false)
+            visitVarInsn(ASTORE, 1)
             visitJumpInsn(GOTO, loop)
             visitLabel(done)
             visitVarInsn(ALOAD, 1); visitInsn(ARETURN)
