@@ -1419,3 +1419,138 @@ test "duplicate constructors and prelude clashes are caught" {
   assert cx1.diags[0].msg == "`Option` is a prelude type and cannot be redefined"
   assert cx1.diags[1].msg == "type `A` is defined twice"
 }
+
+## Pass 2.25: resolve every alias target now, so cycles and unknown names are
+## reported at the declaration even if the alias is never used.
+pub fn pass_resolve_aliases(cx: Cx) -> Cx = {
+  var cx1 = cx
+  for name in map.keys(cx.aliases) {
+    let al = map.get(cx1.aliases, name).expect("alias listed")
+    let (cx2, _) = resolve_alias_target(cx1, al, al.nlo, al.nhi)
+    cx1 = cx2
+  }
+  cx1
+}
+
+## Pass 2.5: derive Show — every field must be renderable (type parameters
+## allowed, resolved at use).
+pub fn pass_derive_show(cx: Cx, m: Module, shells: List[Option[Shell]]) -> Cx = {
+  var cx1 = cx
+  var di = 0
+  for d in module_types(m) {
+    let sh = match shells[di] {
+      None -> {
+        di = di + 1
+        continue
+      }
+      Some(s) -> s
+    }
+    let info = adt_of(cx1.adts, sh.adt)
+    if not info.derives_show {
+      di = di + 1
+      continue
+    }
+    var pi = 0
+    for c in d.ctors {
+      let slot = match accepted_slot(sh, pi) {
+        None -> {
+          pi = pi + 1
+          continue
+        }
+        Some(s2) -> s2
+      }
+      let ci = info.ctors[slot]
+      var fi = 0
+      for f in ci.fields {
+        if not is_showable_field(cx1, f.ty) {
+          # the field's declaration span: find the parsed field by name
+          var flo = d.nlo
+          var fhi = d.nhi
+          for pf in c.fields {
+            if pf.name == f.name {
+              flo = pf.lo
+              fhi = pf.hi
+            }
+          }
+          cx1 = cerr_h(cx1, "cannot derive Show for `" ++ info.name ++ "`: field `" ++
+              f.name ++ "` of type " ++ ty_show(cx1.adts, f.ty) ++ " is not printable",
+            flo, fhi, show_hint(cx1, f.ty))
+        }
+        fi = fi + 1
+      }
+      pi = pi + 1
+    }
+    di = di + 1
+  }
+  cx1
+}
+
+test "alias cycles and derive Show violations are reported at the declaration" {
+  # alias A = B, alias B = A  → cycle; type P = { f: fn() -> Unit } derive Show → not printable
+  let m = Module { decls: [
+    DType(TypeDeclR {
+      is_pub: false,
+      name: "A",
+      tparams: [],
+      ctors: [],
+      is_record: false,
+      derives: [],
+      alias_target: Some(TNamed("B", [], 10, 11)),
+      lo: 0,
+      hi: 11,
+      nlo: 6,
+      nhi: 7
+    }),
+    DType(TypeDeclR {
+      is_pub: false,
+      name: "B",
+      tparams: [],
+      ctors: [],
+      is_record: false,
+      derives: [],
+      alias_target: Some(TNamed("A", [], 22, 23)),
+      lo: 12,
+      hi: 23,
+      nlo: 18,
+      nhi: 19
+    }),
+    DType(TypeDeclR {
+      is_pub: false,
+      name: "P",
+      tparams: [],
+      ctors: [CtorDecl {
+        name: "P",
+        fields: [FieldDecl {
+          name: "f",
+          tref: TFn([], TNamed("Unit", [], 40, 44), [], 33, 44),
+          lo: 30,
+          hi: 44
+        }],
+        lo: 24,
+        hi: 46,
+        nlo: 29,
+        nhi: 30
+      }],
+      is_record: true,
+      derives: [Bound { name: "Show", lo: 50, hi: 54 }],
+      alias_target: None,
+      lo: 24,
+      hi: 54,
+      nlo: 29,
+      nhi: 30
+    })
+  ] }
+  var cx = seed_prelude(test_cx())
+  let (cx1, shells) = pass_type_shells(cx, m)
+  var cx2 = pass_ctor_fields(cx1, m, shells)
+  cx2 = pass_resolve_aliases(cx2)
+  cx2 = pass_derive_show(cx2, m, shells)
+  var saw_cycle = false
+  var saw_show = false
+  for dg in cx2.diags {
+    if str.contains(dg.msg, "refers to itself") { saw_cycle = true }
+    if str.contains(dg.msg, "cannot derive Show for `P`") { saw_show = true }
+  }
+  assert saw_cycle
+  assert saw_show
+}
