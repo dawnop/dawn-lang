@@ -1,0 +1,60 @@
+# Canonical lex dump, matching `dawn __lex` (compiler/src/main/kotlin/dawn/cli/
+# LexDump.kt) byte for byte. One line per token:
+#   TYPE<TAB>start<TAB>end<TAB>escaped-text[<TAB>extra...]
+# then one line per diagnostic: !<TAB>start<TAB>end<TAB>message<TAB>hint.
+
+use token.{Token, Seg, SText, SCode, Diag, TokKind, INT, FLOAT, STRING, kind_name}
+
+fn esc(v: String) -> String = {
+  var out: List[Int] = []
+  for c in code_points(v) {
+    if c == '\\' {
+      out = out ++ ['\\', '\\']
+    } else if c == '\n' {
+      out = out ++ ['\\', 'n']
+    } else if c == '\t' {
+      out = out ++ ['\\', 't']
+    } else if c == 13 {
+      out = out ++ ['\\', 'r']
+    } else {
+      out = out ++ [c]
+    }
+  }
+  from_code_points(out)
+}
+
+fn seg_field(sg: Seg) -> String =
+  match sg {
+    SText(v) -> "\tT:" ++ esc(v)
+    SCode(c, o) -> "\tC:" ++ to_string(o) ++ ":" ++ esc(c)
+  }
+
+## Render one file's dump: tokens, then diagnostics. Ends without a newline;
+## the caller adds the final one (println).
+pub fn render(toks: List[Token], diags: List[Diag]) -> String = {
+  var lines: List[String] = []
+  for t in toks {
+    var line = kind_name(t.kind) ++ "\t" ++ to_string(t.lo) ++ "\t" ++ to_string(t.hi) ++
+      "\t" ++ esc(t.text)
+    if t.kind == INT {
+      line = line ++ "\t" ++ to_string(t.ival)
+    } else if t.kind == FLOAT {
+      line = line ++ "\t" ++ to_string(t.fval)
+    } else if t.kind == STRING {
+      for sg in t.segs { line = line ++ seg_field(sg) }
+    }
+    lines = lines ++ [line]
+  }
+  for d in diags {
+    lines = lines ++ [
+      "!\t" ++ to_string(d.lo) ++ "\t" ++ to_string(d.hi) ++ "\t" ++ esc(d.msg) ++ "\t" ++ esc(d.hint)
+    ]
+  }
+  join(lines, "\n")
+}
+
+test "dump escapes and extras" {
+  let t = Token { kind: INT, text: "'a'", lo: 0, hi: 3, ival: 97, fval: 0.0, segs: [] }
+  let d = Diag { msg: "bad\tthing", lo: 1, hi: 2, hint: "" }
+  assert render([t], [d]) == "INT\t0\t3\t'a'\t97\n!\t1\t2\tbad\\tthing\t"
+}

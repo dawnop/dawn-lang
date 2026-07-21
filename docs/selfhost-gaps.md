@@ -304,12 +304,35 @@ lowering 一刀、四刀与树的对应一页图，并穷举核对 `ast/Ast.kt` 
 
 自举编译器直接用新拼写书写。
 
-### P1 · 第一刀：Lexer（试水）
+### P1 · 第一刀：Lexer（试水）✅ 完成（2026-07-22）
 
 488 行。选它因为它**不依赖 P0 之外的任何东西**：游标已有（v0.2.1）、不吃 Map 性能、
 不碰数组。验收：golden 对拍——同一批 `.dawn` 源，Kotlin 版与 Dawn 版 token 流逐字节比。
 
 > **这一刀的真正产出不是 lexer，是缺口清单。** 切完回头修订 B1/B2/B3 的优先级。
+
+**实施记录**：
+
+- 落点 `selfhost/`（`src/token.dawn` 74 个 TokKind + 关键字表；`src/lexer.dawn` 词法器
+  主体 + 26 个内联测试；`src/dump.dawn` 规范 dump；`src/main.dawn` 入口）。
+- 金标准是新增的隐藏命令 **`dawn __lex`**（`cli/LexDump.kt`）：token 流 + 诊断的规范行格式。
+  `scripts/selfhost-lex-diff.sh` 对全仓 323 个 `.dawn` 文件（std 源、examples、site、
+  playground、golden 全部 + 可选外部语料 backend-dawn）双跑逐字节 diff，已进 CI。
+- **表示**：Kotlin 版直接按 UTF-16 下标；`Cursor` 刻意不透明拿不到整数，Dawn 版改为
+  开头一次 `code_points` + 平行的 UTF-16 偏移表（`offs[i]`），span 从表里读，与 Kotlin
+  逐字节一致。字符分类走 `Character.isLetter/isDigit/...`（`unsafe_pure` 包裹）保证
+  Unicode 语义精确对齐。
+- **控制流移植**：Kotlin 用可变 pos + 异常做中止恢复；Dawn 版每个 helper 返回新位置，
+  中止型失败返回 `Err((失败位置, Diag))`——**失败位置必须随错误返回**，否则 EOL 重同步
+  从 token 起点开始，三引号/反引号扫到 EOF 的用例会把后面的行重新词法化（golden 对拍
+  抓出来的唯一分歧，两处）。
+- **顺手修掉 Kotlin 版两个崩溃**（移植即审计）：`\u{}` 码点越界/负值 → 未捕获
+  IllegalArgumentException；`1e`/`2.5e+` 裸指数 → 未捕获 NumberFormatException。
+  均改为正常诊断，`LexRecoveryTest` 锁定。
+- **缺口清单（本刀实测）**：语言层面零新缺口——tuple 返回值 + `?` 传播 + `break`/
+  `continue`/`return` + char 字面量足以直译;唯一别扭处是限定名不能当函数值(`filter`
+  的谓词得包 lambda)。B1(值类型特化)的判断材料:词法整仓 323 文件 ~2s,分配无感,
+  **lexer 一侧不构成推动序 6 的证据**,决定权移交 P3/P4 的实测。
 
 ### P2 · 表示层
 

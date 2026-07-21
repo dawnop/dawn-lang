@@ -1,0 +1,871 @@
+# The Dawn lexer, in Dawn (P1 of self-hosting, docs/selfhost-gaps.md §七).
+# A faithful port of compiler/src/main/kotlin/dawn/lex/Lexer.kt: same tokens,
+# same spans (UTF-16 offsets), same diagnostics, byte for byte — verified by
+# scripts/selfhost-lex-diff.sh against `dawn __lex` over the repo corpus.
+#
+# Structure: the Kotlin original mutates a position and throws for string-level
+# failures; here every helper takes the scan position (an index into the code
+# point list) and returns the next one, and aborting failures come back as
+# `Err(Diag)` — the main loop resynchronizes at end of line. Inline failures
+# (bad numeric literals, stray characters) ride beside the token, as diagnostics.
+
+use std/str
+use std/list
+use token.{
+  TokKind, Token, Seg, SText, SCode, Diag, keyword, kind_name,
+  INT, FLOAT, STRING, IDENT, TYPEIDENT, UNDERSCORE, NEWLINE, EOF,
+  LPAREN, RPAREN, LBRACE, RBRACE, LBRACKET, RBRACKET,
+  COMMA, COLON, DOT, DOTDOT, QUESTION, ARROW, FATARROW,
+  EQ, EQEQ, NEQ, LT, LE, GT, GE,
+  PLUS, MINUS, STAR, SLASH, PERCENT, PLUSPLUS, PIPEGT, PIPE,
+  AMPAMP, PIPEPIPE, AMP, CARET, TILDE, SHL, SHR, USHR,
+  BANG, AT, NOT
+}
+use java "java.lang.Character"
+use java "java.lang.Long"
+
+# ---- source representation ----
+#
+# The Kotlin lexer indexes UTF-16 units directly. Dawn's `Cursor` is opaque on
+# purpose, so instead the source becomes a code point list up front, with a
+# parallel table giving each code point's UTF-16 offset (offs has n+1 entries;
+# the last is the text's UTF-16 length). Spans read from that table, which keeps
+# them identical to the Kotlin compiler's.
+
+type Src = { cps: List[Int], offs: List[Int], n: Int }
+
+fn src_of(text: String) -> Src = {
+  let cps = code_points(text)
+  var offs: List[Int] = []
+  var o = 0
+  for c in cps {
+    offs = offs ++ [o]
+    o = o + (if c >= 65536 { 2 } else { 1 })
+  }
+  offs = offs ++ [o]
+  Src { cps: cps, offs: offs, n: len(cps) }
+}
+
+fn off(s: Src, i: Int) -> Int = s.offs[i]
+
+## The code point at `i`, or a space past the end (the Kotlin `peek` default).
+fn cp_at(s: Src, i: Int) -> Int = if i < s.n { s.cps[i] } else { ' ' }
+
+fn text_of(s: Src, a: Int, b: Int) -> String = {
+  var out: List[Int] = []
+  var i = a
+  while i < b {
+    out = out ++ [s.cps[i]]
+    i = i + 1
+  }
+  from_code_points(out)
+}
+
+# ---- small helpers ----
+
+fn is_letter(c: Int) -> Bool = unsafe_pure { Character.isLetter(c) }
+
+fn is_digit(c: Int) -> Bool = unsafe_pure { Character.isDigit(c) }
+
+fn is_letter_or_digit(c: Int) -> Bool = unsafe_pure { Character.isLetterOrDigit(c) }
+
+fn is_upper(c: Int) -> Bool = unsafe_pure { Character.isUpperCase(c) }
+
+fn is_ws(c: Int) -> Bool = unsafe_pure { Character.isWhitespace(c) }
+
+fn is_ident_part(c: Int) -> Bool = is_letter_or_digit(c) || c == '_'
+
+fn is_blank(v: String) -> Bool = {
+  for c in code_points(v) {
+    if not is_ws(c) { return false }
+  }
+  true
+}
+
+fn parse_radix(digits: String, radix: Int) -> Option[Int] =
+  match unsafe_pure { java_try(fn() => Long.parseLong(digits, radix)) } {
+    Ok(v) -> Some(v)
+    Err(e) -> None
+  }
+
+fn max2(a: Int, b: Int) -> Int = if a > b { a } else { b }
+
+fn min_or(a: Int, b: Int) -> Int = if a == -1 || b < a { b } else { a }
+
+fn mk_diag(msg: String, lo: Int, hi: Int) -> Diag =
+  Diag { msg: msg, lo: lo, hi: hi, hint: "" }
+
+fn diag_h(msg: String, lo: Int, hi: Int, hint: String) -> Diag =
+  Diag { msg: msg, lo: lo, hi: hi, hint: hint }
+
+fn no_diags() -> List[Diag] = []
+
+fn no_toks() -> List[Token] = []
+
+fn no_segs() -> List[Seg] = []
+
+fn no_cps() -> List[Int] = []
+
+fn tok(k: TokKind, text: String, lo: Int, hi: Int) -> Token =
+  Token { kind: k, text: text, lo: lo, hi: hi, ival: 0, fval: 0.0, segs: no_segs() }
+
+fn int_tok(text: String, lo: Int, hi: Int, v: Int) -> Token =
+  Token { kind: INT, text: text, lo: lo, hi: hi, ival: v, fval: 0.0, segs: no_segs() }
+
+fn float_tok(text: String, lo: Int, hi: Int, v: Float) -> Token =
+  Token { kind: FLOAT, text: text, lo: lo, hi: hi, ival: 0, fval: v, segs: no_segs() }
+
+fn str_tok(s: Src, a: Int, b: Int, segs: List[Seg]) -> Token =
+  Token {
+    kind: STRING,
+    text: text_of(s, a, b),
+    lo: off(s, a),
+    hi: off(s, b),
+    ival: 0,
+    fval: 0.0,
+    segs: segs
+  }
+
+## Lines ending in these tokens continue onto the next line (spec §1.7).
+## BANG is deliberately absent — postfix `!` ends a line all the time.
+fn continues_line(k: TokKind) -> Bool =
+  match k {
+    PLUS | MINUS | STAR | SLASH | PERCENT | PLUSPLUS | PIPEGT | PIPE | AMPAMP |
+    PIPEPIPE | AMP | CARET | SHL | SHR | USHR | EQEQ | NEQ | LT | LE | GT |
+    GE | COMMA | LPAREN | LBRACKET | LBRACE | ARROW | FATARROW | EQ | COLON |
+    DOT | NOT | AT | NEWLINE -> true
+    _ -> false
+  }
+
+# ---- the lexer ----
+
+## Lex `text` into tokens plus diagnostics. Errors never kill the scan: an
+## aborting failure (broken string) skips to the end of its line and goes on.
+pub fn lex(text: String) -> (List[Token], List[Diag]) = {
+  let s = src_of(text)
+  var i = 0
+  var toks: List[Token] = []
+  var diags: List[Diag] = []
+  while i < s.n {
+    let c = s.cps[i]
+    if c == '\n' {
+      if len(toks) > 0 && not continues_line(toks[len(toks) - 1].kind) {
+        toks = toks ++ [tok(NEWLINE, "\\n", off(s, i), off(s, i) + 1)]
+      }
+      i = i + 1
+    } else if c == ' ' || c == '\t' || c == 13 {
+      i = i + 1
+    } else if c == '#' {
+      while i < s.n && s.cps[i] != '\n' { i = i + 1 }
+    } else if c == '"' || c == '`' || c == '\'' {
+      let r = if c == '"' {
+        lex_string(s, i)
+      } else if c == '`' {
+        lex_raw(s, i)
+      } else {
+        lex_char(s, i)
+      }
+      match r {
+        Ok(jt) -> {
+          let (j, t) = jt
+          toks = toks ++ [t]
+          i = j
+        }
+        Err(fd) -> {
+          let (fi, d) = fd
+          diags = diags ++ [d]
+          i = fi
+          while i < s.n && s.cps[i] != '\n' { i = i + 1 }
+        }
+      }
+    } else if is_digit(c) {
+      let (j, t, ds) = lex_number(s, i)
+      toks = toks ++ [t]
+      diags = diags ++ ds
+      i = j
+    } else if c == '_' && not is_ident_part(cp_at(s, i + 1)) {
+      toks = toks ++ [tok(UNDERSCORE, "_", off(s, i), off(s, i) + 1)]
+      i = i + 1
+    } else if is_letter(c) || c == '_' {
+      let (j, t) = lex_word(s, i)
+      toks = toks ++ [t]
+      i = j
+    } else {
+      let (j, ts, ds) = lex_symbol(s, i)
+      toks = toks ++ ts
+      diags = diags ++ ds
+      i = j
+    }
+  }
+  # end of file: guarantee a separator after the last declaration
+  let l = off(s, s.n)
+  if len(toks) > 0 && toks[len(toks) - 1].kind != NEWLINE {
+    toks = toks ++ [tok(NEWLINE, "\\n", l, l + 1)]
+  }
+  toks = toks ++ [tok(EOF, "<eof>", l, l + 1)]
+  (toks, diags)
+}
+
+# ---- words: keywords / identifiers / type identifiers ----
+
+fn lex_word(s: Src, start: Int) -> (Int, Token) = {
+  var i = start
+  while i < s.n && is_ident_part(s.cps[i]) { i = i + 1 }
+  let text = text_of(s, start, i)
+  let k = match keyword(text) {
+    Some(kw) -> kw
+    None -> if is_upper(s.cps[start]) { TYPEIDENT } else { IDENT }
+  }
+  (i, tok(k, text, off(s, start), off(s, i)))
+}
+
+# ---- numbers ----
+
+fn lex_number(s: Src, start: Int) -> (Int, Token, List[Diag]) =
+  if s.cps[start] == '0' && (cp_at(s, start + 1) == 'x' || cp_at(s, start + 1) == 'b') {
+    let radix = if cp_at(s, start + 1) == 'x' { 16 } else { 2 }
+    var i = start + 2
+    var ds: List[Int] = []
+    while i < s.n && (is_letter_or_digit(s.cps[i]) || s.cps[i] == '_') {
+      if s.cps[i] != '_' { ds = ds ++ [s.cps[i]] }
+      i = i + 1
+    }
+    let text = text_of(s, start, i)
+    match parse_radix(from_code_points(ds), radix) {
+      Some(v) -> (i, int_tok(text, off(s, start), off(s, i), v), no_diags())
+      None -> (
+        i,
+        int_tok(text, off(s, start), off(s, i), 0),
+        [mk_diag("invalid integer literal: " ++ text, off(s, start), off(s, i))]
+      )
+    }
+  } else {
+    var i = start
+    var ds: List[Int] = []
+    while i < s.n && (is_digit(s.cps[i]) || s.cps[i] == '_') {
+      if s.cps[i] != '_' { ds = ds ++ [s.cps[i]] }
+      i = i + 1
+    }
+    var is_float = false
+    # the 1 in `1..3` is an Int; `1.5` is a Float
+    if cp_at(s, i) == '.' && is_digit(cp_at(s, i + 1)) {
+      is_float = true
+      ds = ds ++ ['.']
+      i = i + 1
+      while i < s.n && (is_digit(s.cps[i]) || s.cps[i] == '_') {
+        if s.cps[i] != '_' { ds = ds ++ [s.cps[i]] }
+        i = i + 1
+      }
+    }
+    if cp_at(s, i) == 'e' || cp_at(s, i) == 'E' {
+      is_float = true
+      ds = ds ++ ['e']
+      i = i + 1
+      if cp_at(s, i) == '+' || cp_at(s, i) == '-' {
+        ds = ds ++ [s.cps[i]]
+        i = i + 1
+      }
+      while i < s.n && is_digit(s.cps[i]) {
+        ds = ds ++ [s.cps[i]]
+        i = i + 1
+      }
+    }
+    let text = text_of(s, start, i)
+    let digits = from_code_points(ds)
+    if is_float {
+      match parse_float(digits) {
+        Some(v) -> (i, float_tok(text, off(s, start), off(s, i), v), no_diags())
+        None -> (
+          i,
+          float_tok(text, off(s, start), off(s, i), 0.0),
+          [mk_diag("invalid float literal: " ++ text, off(s, start), off(s, i))]
+        )
+      }
+    } else {
+      match parse_int(digits) {
+        Some(v) -> (i, int_tok(text, off(s, start), off(s, i), v), no_diags())
+        None -> (
+          i,
+          int_tok(text, off(s, start), off(s, i), 0),
+          [mk_diag("integer literal out of 64-bit range: " ++ text, off(s, start), off(s, i))]
+        )
+      }
+    }
+  }
+
+# ---- strings (with interpolation segmentation) ----
+
+fn lex_string(s: Src, start: Int) -> Result[(Int, Token), (Int, Diag)] =
+  if cp_at(s, start + 1) == '"' && cp_at(s, start + 2) == '"' {
+    lex_triple(s, start)
+  } else {
+    var i = start + 1
+    var segs: List[Seg] = []
+    var buf: List[Int] = []
+    while true {
+      if i >= s.n || s.cps[i] == '\n' {
+        return Err((i, mk_diag("unterminated string", off(s, start), off(s, i))))
+      }
+      let c = s.cps[i]
+      if c == '"' {
+        i = i + 1
+        break
+      } else if c == '\\' {
+        let (j, cp) = lex_escape(s, i)?
+        buf = buf ++ [cp]
+        i = j
+      } else if c == '$' {
+        let (j, sg, bf) = lex_dollar(s, i, segs, buf)?
+        i = j
+        segs = sg
+        buf = bf
+      } else {
+        buf = buf ++ [c]
+        i = i + 1
+      }
+    }
+    Ok((i, str_tok(s, start, i, flush(segs, buf))))
+  }
+
+## Interpolation is $-led (spec §1.6): `$name` splices a simple identifier and
+## `${expr}` splices an expression. A `$` not followed by an identifier or `{`
+## is a literal `$`.
+fn lex_dollar(
+  s: Src,
+  at: Int,
+  segs: List[Seg],
+  buf: List[Int]
+) -> Result[(Int, List[Seg], List[Int]), (Int, Diag)] = {
+  let next = cp_at(s, at + 1)
+  if next == '{' {
+    let (j, sg) = lex_brace_interp(s, at)?
+    Ok((j, flush(segs, buf) ++ [sg], no_cps()))
+  } else if is_letter(next) || next == '_' {
+    var i = at + 1
+    let name_start = i
+    while i < s.n && is_ident_part(s.cps[i]) { i = i + 1 }
+    Ok((i, flush(segs, buf) ++ [SCode(text_of(s, name_start, i), off(s, name_start))], no_cps()))
+  } else {
+    Ok((at + 1, segs, buf ++ ['$']))
+  }
+}
+
+fn flush(segs: List[Seg], buf: List[Int]) -> List[Seg] =
+  if len(buf) == 0 { segs } else { segs ++ [SText(from_code_points(buf))] }
+
+## On entry `at` is the `$` of `${`; scans to the matching `}`. Nested strings
+## are skipped over. Returns the position just past the `}` and the code segment.
+fn lex_brace_interp(s: Src, dollar: Int) -> Result[(Int, Seg), (Int, Diag)] = {
+  let code_start = dollar + 2
+  var i = code_start
+  var depth = 1
+  while i < s.n {
+    let c = s.cps[i]
+    if c == '{' {
+      depth = depth + 1
+    } else if c == '}' {
+      depth = depth - 1
+      if depth == 0 { break }
+    } else if c == '"' {
+      i = skip_inner(s, i)
+    } else if c == '\n' {
+      return Err((i, mk_diag("interpolation cannot span lines", off(s, dollar), off(s, dollar) + 1)))
+    }
+    i = i + 1
+  }
+  if depth != 0 {
+    return Err((i, mk_diag("unmatched \${ in interpolation", off(s, dollar), off(s, dollar) + 1)))
+  }
+  let code = text_of(s, code_start, i)
+  if is_blank(code) {
+    return Err((i, mk_diag("empty interpolation", off(s, dollar), off(s, i) + 1)))
+  }
+  Ok((i + 1, SCode(code, off(s, code_start))))
+}
+
+## Enters on a `"`; returns the position of the closing quote (or the end).
+fn skip_inner(s: Src, at: Int) -> Int = {
+  var i = at + 1
+  while i < s.n && s.cps[i] != '"' {
+    if s.cps[i] == '\\' { i = i + 1 }
+    i = i + 1
+  }
+  i
+}
+
+## On entry `at` is the backslash; returns (position after the escape, code point).
+fn lex_escape(s: Src, at: Int) -> Result[(Int, Int), (Int, Diag)] = {
+  let i = at + 1
+  let e = cp_at(s, i)
+  if e == 'n' {
+    Ok((i + 1, '\n'))
+  } else if e == 't' {
+    Ok((i + 1, '\t'))
+  } else if e == '\\' {
+    Ok((i + 1, '\\'))
+  } else if e == '"' {
+    Ok((i + 1, '"'))
+  } else if e == '\'' {
+    Ok((i + 1, '\''))
+  } else if e == '$' {
+    Ok((i + 1, '$'))
+  } else if e == '{' {
+    Ok((i + 1, '{'))
+  } else if e == 'u' {
+    lex_unicode(s, i)
+  } else {
+    Err((i, mk_diag("unknown escape: \\" ++ str.from_char(e), off(s, at), off(s, at) + 2)))
+  }
+}
+
+## On entry `u` is the `u` of `\u{...}`; returns (position past the `}`, code point).
+fn lex_unicode(s: Src, u: Int) -> Result[(Int, Int), (Int, Diag)] = {
+  if cp_at(s, u + 1) != '{' {
+    return Err((u, mk_diag("\\u must be followed by {codepoint}", off(s, u), off(s, u) + 2)))
+  }
+  var i = u + 2
+  let hex_start = i
+  while i < s.n && s.cps[i] != '}' { i = i + 1 }
+  if i >= s.n {
+    return Err((i, mk_diag("unterminated \\u{...}", off(s, i), off(s, i) + 1)))
+  }
+  let hex = text_of(s, hex_start, i)
+  let hlen = off(s, i) - off(s, hex_start)
+  let bad = mk_diag("invalid unicode codepoint: " ++ hex, off(s, i) - hlen, off(s, i))
+  match parse_radix(hex, 16) {
+    None -> Err((i, bad))
+    Some(code) ->
+      if code < 0 || code > 1114111 {
+        # out of Unicode range; the Kotlin side rejects these the same way
+        Err((i, bad))
+      } else {
+        Ok((i + 1, code))
+      }
+  }
+}
+
+## Character literal 'x' (spec §1.5): a single code point, lexed as an INT whose
+## value is the code point.
+fn lex_char(s: Src, start: Int) -> Result[(Int, Token), (Int, Diag)] = {
+  var i = start + 1
+  var cp = 0
+  if i >= s.n || s.cps[i] == '\n' {
+    return Err((i, mk_diag(
+      "unterminated character literal",
+      off(s, start),
+      off(s, start) + max2(off(s, i) - off(s, start), 1)
+    )))
+  } else if s.cps[i] == '\'' {
+    return Err((i, diag_h(
+      "empty character literal",
+      off(s, start),
+      off(s, i) + 1,
+      "a character literal holds exactly one code point, like 'a' or '\\n'"
+    )))
+  } else if s.cps[i] == '\\' {
+    let (j, c2) = lex_escape(s, i)?
+    cp = c2
+    i = j
+  } else {
+    cp = s.cps[i]
+    i = i + 1
+  }
+  if i >= s.n || s.cps[i] != '\'' {
+    return Err((i, diag_h(
+      "character literal must contain exactly one code point",
+      off(s, start),
+      off(s, start) + max2(off(s, i) - off(s, start), 1),
+      "use a \"...\" string for more than one code point"
+    )))
+  }
+  i = i + 1
+  Ok((i, Token {
+    kind: INT,
+    text: text_of(s, start, i),
+    lo: off(s, start),
+    hi: off(s, i),
+    ival: cp,
+    fval: 0.0,
+    segs: no_segs()
+  }))
+}
+
+## Multiline string: """ ... """ (spec §1.6). The newline right after the
+## opening quotes and the one before the closing quotes are stripped, as is
+## the common indentation of the non-blank lines.
+fn lex_triple(s: Src, start: Int) -> Result[(Int, Token), (Int, Diag)] = {
+  var i = start + 3
+  var segs: List[Seg] = []
+  var buf: List[Int] = []
+  while true {
+    if i >= s.n {
+      return Err((i, mk_diag("unterminated \"\"\" string", off(s, start), off(s, start) + 3)))
+    }
+    if s.cps[i] == '"' && cp_at(s, i + 1) == '"' && cp_at(s, i + 2) == '"' {
+      i = i + 3
+      break
+    }
+    let c = s.cps[i]
+    if c == '\\' {
+      let (j, cp) = lex_escape(s, i)?
+      buf = buf ++ [cp]
+      i = j
+    } else if c == '$' {
+      let (j, sg, bf) = lex_dollar(s, i, segs, buf)?
+      i = j
+      segs = sg
+      buf = bf
+    } else {
+      buf = buf ++ [c]
+      i = i + 1
+    }
+  }
+  Ok((i, str_tok(s, start, i, strip_triple_indent(flush(segs, buf)))))
+}
+
+## Raw string: `...` (spec §1.6). Everything between the backticks is literal.
+fn lex_raw(s: Src, start: Int) -> Result[(Int, Token), (Int, Diag)] = {
+  var i = start + 1
+  let content_start = i
+  while i < s.n && s.cps[i] != '`' { i = i + 1 }
+  if i >= s.n {
+    return Err((i, diag_h(
+      "unterminated raw string",
+      off(s, start),
+      off(s, start) + 1,
+      "raw strings run to the next backtick; they cannot contain one"
+    )))
+  }
+  let content = text_of(s, content_start, i)
+  i = i + 1
+  let segs = if content == "" { no_segs() } else { [SText(content)] }
+  Ok((i, str_tok(s, start, i, segs)))
+}
+
+# ---- triple-string indent stripping ----
+
+fn drop_lead_nl(p: Seg) -> Seg =
+  match p {
+    SCode(c, o) -> p
+    SText(v) ->
+      if str.starts_with(v, "\n") { SText(str.substring(v, 1, str.len(v))) } else { p }
+  }
+
+fn drop_trail_blank(p: Seg) -> Seg =
+  match p {
+    SCode(c, o) -> p
+    SText(v) ->
+      match str.last_index_of(v, "\n") {
+        None -> p
+        Some(i) ->
+          if is_blank(str.substring(v, i + 1, str.len(v))) {
+            SText(str.substring(v, 0, i))
+          } else {
+            p
+          }
+      }
+  }
+
+fn keep_seg(p: Seg) -> Bool =
+  match p {
+    SText(v) -> v != ""
+    SCode(c, o) -> true
+  }
+
+## Strip the leading/trailing newlines and the common indentation (spec §1.6).
+fn strip_triple_indent(segs_in: List[Seg]) -> List[Seg] = {
+  if len(segs_in) == 0 { return segs_in }
+  var parts = [drop_lead_nl(segs_in[0])] ++ list.drop(segs_in, 1)
+  parts = list.take(parts, len(parts) - 1) ++ [drop_trail_blank(parts[len(parts) - 1])]
+  # measure: whitespace run at each line start (may end at an interpolation);
+  # lines that are pure whitespace don't count. -1 means "no line measured yet".
+  var min_indent = -1
+  var at_start = true
+  var run_ws = 0
+  for p in parts {
+    match p {
+      SCode(c, o) ->
+        if at_start {
+          min_indent = min_or(min_indent, run_ws)
+          at_start = false
+          run_ws = 0
+        }
+      SText(v) -> {
+        let cs = code_points(v)
+        var j = 0
+        while j < len(cs) {
+          if at_start {
+            while j < len(cs) && (cs[j] == ' ' || cs[j] == '\t') {
+              run_ws = run_ws + 1
+              j = j + 1
+            }
+            if j >= len(cs) { break }
+            if cs[j] == '\n' {
+              # a blank line
+              at_start = true
+              run_ws = 0
+              j = j + 1
+            } else {
+              min_indent = min_or(min_indent, run_ws)
+              at_start = false
+              run_ws = 0
+            }
+          } else {
+            if cs[j] == '\n' {
+              at_start = true
+              run_ws = 0
+            }
+            j = j + 1
+          }
+        }
+      }
+    }
+  }
+  if min_indent == -1 || min_indent == 0 { return filter(parts, keep_seg) }
+  # strip: drop up to min_indent whitespace chars after every line start
+  var out: List[Seg] = []
+  var at2 = true
+  var drop_n = min_indent
+  for p in parts {
+    match p {
+      SCode(c, o) -> {
+        at2 = false
+        drop_n = 0
+        out = out ++ [p]
+      }
+      SText(v) -> {
+        var sb: List[Int] = []
+        for ch in code_points(v) {
+          if at2 && drop_n > 0 && (ch == ' ' || ch == '\t') {
+            drop_n = drop_n - 1
+          } else if ch == '\n' {
+            at2 = true
+            drop_n = min_indent
+            sb = sb ++ [ch]
+          } else {
+            at2 = false
+            drop_n = 0
+            sb = sb ++ [ch]
+          }
+        }
+        if len(sb) > 0 { out = out ++ [SText(from_code_points(sb))] }
+      }
+    }
+  }
+  out
+}
+
+# ---- symbols ----
+
+fn two_kind(c: Int, c1: Int) -> Option[TokKind] =
+  if c == '<' && c1 == '<' { Some(SHL) }
+  else if c == '>' && c1 == '>' { Some(SHR) }
+  else if c == '-' && c1 == '>' { Some(ARROW) }
+  else if c == '=' && c1 == '>' { Some(FATARROW) }
+  else if c == '=' && c1 == '=' { Some(EQEQ) }
+  else if c == '!' && c1 == '=' { Some(NEQ) }
+  else if c == '<' && c1 == '=' { Some(LE) }
+  else if c == '>' && c1 == '=' { Some(GE) }
+  else if c == '+' && c1 == '+' { Some(PLUSPLUS) }
+  else if c == '|' && c1 == '>' { Some(PIPEGT) }
+  else if c == '&' && c1 == '&' { Some(AMPAMP) }
+  else if c == '|' && c1 == '|' { Some(PIPEPIPE) }
+  else if c == '.' && c1 == '.' { Some(DOTDOT) }
+  else { None }
+
+fn one_kind(c: Int) -> Option[TokKind] =
+  match c {
+    '(' -> Some(LPAREN)
+    ')' -> Some(RPAREN)
+    '{' -> Some(LBRACE)
+    '}' -> Some(RBRACE)
+    '[' -> Some(LBRACKET)
+    ']' -> Some(RBRACKET)
+    ',' -> Some(COMMA)
+    ':' -> Some(COLON)
+    '.' -> Some(DOT)
+    '?' -> Some(QUESTION)
+    '=' -> Some(EQ)
+    '<' -> Some(LT)
+    '>' -> Some(GT)
+    '+' -> Some(PLUS)
+    '-' -> Some(MINUS)
+    '*' -> Some(STAR)
+    '/' -> Some(SLASH)
+    '%' -> Some(PERCENT)
+    '|' -> Some(PIPE)
+    '&' -> Some(AMP)
+    '^' -> Some(CARET)
+    '~' -> Some(TILDE)
+    '!' -> Some(BANG)
+    '@' -> Some(AT)
+    _ -> None
+  }
+
+fn lex_symbol(s: Src, at: Int) -> (Int, List[Token], List[Diag]) = {
+  let c = s.cps[at]
+  # `>>>` must be probed before the two-char pairs (the only three-char operator)
+  if at + 2 < s.n && c == '>' && s.cps[at + 1] == '>' && s.cps[at + 2] == '>' {
+    return (at + 3, [tok(USHR, ">>>", off(s, at), off(s, at) + 3)], no_diags())
+  }
+  let paired: Option[TokKind] = if at + 1 < s.n { two_kind(c, s.cps[at + 1]) } else { None }
+  match paired {
+    Some(k) -> (at + 2, [tok(k, text_of(s, at, at + 2), off(s, at), off(s, at + 2))], no_diags())
+    None ->
+      match one_kind(c) {
+        Some(k) -> (at + 1, [tok(k, text_of(s, at, at + 1), off(s, at), off(s, at + 1))], no_diags())
+        None -> (
+          at + 1,
+          no_toks(),
+          [mk_diag("unrecognized character: " ++ str.from_char(c), off(s, at), off(s, at) + 1)]
+        )
+      }
+  }
+}
+
+# ---- tests ----
+
+fn kinds(text: String) -> List[String] = {
+  let (toks, ds) = lex(text)
+  map(toks, fn(t) => kind_name(t.kind))
+}
+
+test "keywords, idents, and type idents" {
+  assert kinds("let x = Foo") == ["LET", "IDENT", "EQ", "TYPEIDENT", "NEWLINE", "EOF"]
+}
+
+test "newline after an operator is swallowed" {
+  assert kinds("a +\nb") == ["IDENT", "PLUS", "IDENT", "NEWLINE", "EOF"]
+}
+
+test "consecutive newlines collapse" {
+  assert kinds("a\n\n\nb") == ["IDENT", "NEWLINE", "IDENT", "NEWLINE", "EOF"]
+}
+
+test "leading newlines produce nothing" {
+  assert kinds("\n\na") == ["IDENT", "NEWLINE", "EOF"]
+}
+
+test "comments are skipped" {
+  assert kinds("a # comment\nb") == ["IDENT", "NEWLINE", "IDENT", "NEWLINE", "EOF"]
+}
+
+test "eof newline is guaranteed" {
+  assert kinds("a") == ["IDENT", "NEWLINE", "EOF"]
+  assert kinds("") == ["EOF"]
+}
+
+test "int literal forms" {
+  let (toks, ds) = lex("255 0xff 0b1010 1_000_000")
+  assert toks[0].ival == 255
+  assert toks[1].ival == 255
+  assert toks[2].ival == 10
+  assert toks[3].ival == 1000000
+  assert toks[3].text == "1_000_000"
+  assert len(ds) == 0
+}
+
+test "float literal forms" {
+  let (toks, ds) = lex("1.5 2e3 1_0.2_5e+1")
+  assert toks[0].fval == 1.5
+  assert toks[1].fval == 2000.0
+  assert toks[2].fval == 102.5
+  assert len(ds) == 0
+}
+
+test "an int before a range stays an int" {
+  assert kinds("1..3") == ["INT", "DOTDOT", "INT", "NEWLINE", "EOF"]
+}
+
+test "char literals are ints" {
+  let (toks, ds) = lex("'a' '\\n' '🎈'")
+  assert toks[0].ival == 97
+  assert toks[1].ival == 10
+  assert toks[2].ival == 127880
+  # a surrogate pair is two UTF-16 units wide
+  assert toks[2].hi - toks[2].lo == 4
+}
+
+test "string with interpolation segments" {
+  let (toks, ds) = lex("\"a\$x \${y + 1}\"")
+  assert toks[0].segs == [SText("a"), SCode("x", 3), SText(" "), SCode("y + 1", 7)]
+}
+
+test "escapes in strings" {
+  let (toks, ds) = lex("\"a\\tb\\u{1F388}\"")
+  assert toks[0].segs == [SText("a\tb🎈")]
+}
+
+test "a bare dollar is literal" {
+  let (toks, ds) = lex("\"$5 \\\$x\"")
+  assert toks[0].segs == [SText("$5 \$x")]
+}
+
+test "raw strings take everything literally" {
+  let (toks, ds) = lex("`a\\n\$x`")
+  assert toks[0].segs == [SText("a\\n\$x")]
+}
+
+test "triple strings strip common indent" {
+  let (toks, ds) = lex("\"\"\"\n  a\n    b\n  \"\"\"")
+  assert toks[0].segs == [SText("a\n  b")]
+}
+
+test "interpolation skips nested strings" {
+  let (toks, ds) = lex("\"\${f(\"x}\")}\"")
+  assert toks[0].segs == [SCode("f(\"x}\")", 3)]
+}
+
+test "unterminated string recovers at end of line" {
+  let (toks, ds) = lex("\"abc\nx")
+  assert ds[0].msg == "unterminated string"
+  assert kinds("\"abc\nx") == ["IDENT", "NEWLINE", "EOF"]
+}
+
+test "unknown escape" {
+  let (toks, ds) = lex("\"a\\qb\"")
+  assert ds[0].msg == "unknown escape: \\q"
+}
+
+test "empty char literal" {
+  let (toks, ds) = lex("''")
+  assert ds[0].msg == "empty character literal"
+  assert ds[0].hint == "a character literal holds exactly one code point, like 'a' or '\\n'"
+}
+
+test "multi code point char literal" {
+  let (toks, ds) = lex("'ab'")
+  assert ds[0].msg == "character literal must contain exactly one code point"
+}
+
+test "invalid numeric literals are diagnostics" {
+  let (t1, d1) = lex("0x")
+  assert d1[0].msg == "invalid integer literal: 0x"
+  let (t2, d2) = lex("1e")
+  assert d2[0].msg == "invalid float literal: 1e"
+  let (t3, d3) = lex("99999999999999999999")
+  assert d3[0].msg == "integer literal out of 64-bit range: 99999999999999999999"
+  let (t4, d4) = lex("\"\\u{FFFFFF}\"")
+  assert d4[0].msg == "invalid unicode codepoint: FFFFFF"
+}
+
+test "unrecognized character" {
+  let (toks, ds) = lex("a ; b")
+  assert ds[0].msg == "unrecognized character: ;"
+  assert kinds("a ; b") == ["IDENT", "IDENT", "NEWLINE", "EOF"]
+}
+
+test "three char and two char operators" {
+  assert kinds(">>> >> << |> ++ .. && ||") ==
+    ["USHR", "SHR", "SHL", "PIPEGT", "PLUSPLUS", "DOTDOT", "AMPAMP", "PIPEPIPE", "NEWLINE", "EOF"]
+}
+
+test "underscore alone vs in identifiers" {
+  assert kinds("_ _x x_1") == ["UNDERSCORE", "IDENT", "IDENT", "NEWLINE", "EOF"]
+}
+
+test "spans are utf-16 offsets" {
+  let (toks, ds) = lex("🎈 x")
+  assert toks[0].lo == 3
+  assert toks[0].hi == 4
+}

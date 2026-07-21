@@ -171,7 +171,12 @@ class Lexer(
         val text = src.substring(start, pos)
         val span = Span(baseOffset + start, baseOffset + pos)
         if (isFloat) {
-            tokens.add(Token(TokenType.FLOAT, text, span, floatValue = digits.toString().toDouble()))
+            // "1e" / "1e+" reach here: digits ate the exponent marker but no digits followed
+            val value = digits.toString().toDoubleOrNull() ?: run {
+                sink.error("invalid float literal: $text", span)
+                0.0
+            }
+            tokens.add(Token(TokenType.FLOAT, text, span, floatValue = value))
         } else {
             val value = try {
                 digits.toString().toLong()
@@ -406,6 +411,10 @@ class Lexer(
         val code = try {
             hex.toString().toInt(16)
         } catch (e: NumberFormatException) {
+            throw DawnError("invalid unicode codepoint: $hex", spanAt(pos - hex.length, hex.length))
+        }
+        // out-of-range values would make toChars throw an uncaught IllegalArgumentException
+        if (!Character.isValidCodePoint(code)) {
             throw DawnError("invalid unicode codepoint: $hex", spanAt(pos - hex.length, hex.length))
         }
         // pos rests on '}'; the caller advances past it

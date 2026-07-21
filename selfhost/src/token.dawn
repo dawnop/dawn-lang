@@ -1,0 +1,212 @@
+# Token stream types for the self-hosted compiler (P1, docs/selfhost-gaps.md §七).
+# TokKind mirrors dawn.lex.TokenType one for one; kind_name returns the Kotlin
+# enum spelling, which the golden lex dump format (`dawn __lex`) is keyed on.
+
+pub type TokKind =
+  | INT
+  | FLOAT
+  | STRING
+  | IDENT
+  | TYPEIDENT
+  | FN
+  | LET
+  | VAR
+  | TYPE
+  | ALIAS
+  | CONST
+  | USE
+  | JAVA
+  | PUB
+  | TRAIT
+  | IMPL
+  | MATCH
+  | IF
+  | ELSE
+  | FOR
+  | IN
+  | WHILE
+  | RETURN
+  | BREAK
+  | CONTINUE
+  | COMPTIME
+  | UNSAFE_PURE
+  | TEST
+  | ASSERT
+  | TRUE
+  | FALSE
+  | NOT
+  | LPAREN
+  | RPAREN
+  | LBRACE
+  | RBRACE
+  | LBRACKET
+  | RBRACKET
+  | COMMA
+  | COLON
+  | DOT
+  | DOTDOT
+  | QUESTION
+  | UNDERSCORE
+  | ARROW
+  | FATARROW
+  | EQ
+  | EQEQ
+  | NEQ
+  | LT
+  | LE
+  | GT
+  | GE
+  | PLUS
+  | MINUS
+  | STAR
+  | SLASH
+  | PERCENT
+  | PLUSPLUS
+  | PIPEGT
+  | PIPE
+  | AMPAMP
+  | PIPEPIPE
+  | AMP
+  | CARET
+  | TILDE
+  | SHL
+  | SHR
+  | USHR
+  | BANG
+  | AT
+  | NEWLINE
+  | EOF
+  | COMMENT
+
+## A piece of a string literal: literal text, or an interpolation
+## (code plus its UTF-16 offset in the file).
+pub type Seg =
+  | SText(v: String)
+  | SCode(code: String, off: Int)
+
+## One token. `lo`/`hi` are UTF-16 offsets (the compiler's Span convention);
+## `ival` carries an INT's value, `fval` a FLOAT's, `segs` a STRING's pieces.
+pub type Token = {
+  kind: TokKind,
+  text: String,
+  lo: Int,
+  hi: Int,
+  ival: Int,
+  fval: Float,
+  segs: List[Seg]
+}
+
+## One diagnostic. `hint` is empty when there is none.
+pub type Diag = { msg: String, lo: Int, hi: Int, hint: String }
+
+## The Kotlin TokenType enum spelling, the vocabulary of the golden lex dump.
+pub fn kind_name(k: TokKind) -> String =
+  match k {
+    INT -> "INT"
+    FLOAT -> "FLOAT"
+    STRING -> "STRING"
+    IDENT -> "IDENT"
+    TYPEIDENT -> "TYPEIDENT"
+    FN -> "FN"
+    LET -> "LET"
+    VAR -> "VAR"
+    TYPE -> "TYPE"
+    ALIAS -> "ALIAS"
+    CONST -> "CONST"
+    USE -> "USE"
+    JAVA -> "JAVA"
+    PUB -> "PUB"
+    TRAIT -> "TRAIT"
+    IMPL -> "IMPL"
+    MATCH -> "MATCH"
+    IF -> "IF"
+    ELSE -> "ELSE"
+    FOR -> "FOR"
+    IN -> "IN"
+    WHILE -> "WHILE"
+    RETURN -> "RETURN"
+    BREAK -> "BREAK"
+    CONTINUE -> "CONTINUE"
+    COMPTIME -> "COMPTIME"
+    UNSAFE_PURE -> "UNSAFE_PURE"
+    TEST -> "TEST"
+    ASSERT -> "ASSERT"
+    TRUE -> "TRUE"
+    FALSE -> "FALSE"
+    NOT -> "NOT"
+    LPAREN -> "LPAREN"
+    RPAREN -> "RPAREN"
+    LBRACE -> "LBRACE"
+    RBRACE -> "RBRACE"
+    LBRACKET -> "LBRACKET"
+    RBRACKET -> "RBRACKET"
+    COMMA -> "COMMA"
+    COLON -> "COLON"
+    DOT -> "DOT"
+    DOTDOT -> "DOTDOT"
+    QUESTION -> "QUESTION"
+    UNDERSCORE -> "UNDERSCORE"
+    ARROW -> "ARROW"
+    FATARROW -> "FATARROW"
+    EQ -> "EQ"
+    EQEQ -> "EQEQ"
+    NEQ -> "NEQ"
+    LT -> "LT"
+    LE -> "LE"
+    GT -> "GT"
+    GE -> "GE"
+    PLUS -> "PLUS"
+    MINUS -> "MINUS"
+    STAR -> "STAR"
+    SLASH -> "SLASH"
+    PERCENT -> "PERCENT"
+    PLUSPLUS -> "PLUSPLUS"
+    PIPEGT -> "PIPEGT"
+    PIPE -> "PIPE"
+    AMPAMP -> "AMPAMP"
+    PIPEPIPE -> "PIPEPIPE"
+    AMP -> "AMP"
+    CARET -> "CARET"
+    TILDE -> "TILDE"
+    SHL -> "SHL"
+    SHR -> "SHR"
+    USHR -> "USHR"
+    BANG -> "BANG"
+    AT -> "AT"
+    NEWLINE -> "NEWLINE"
+    EOF -> "EOF"
+    COMMENT -> "COMMENT"
+  }
+
+## The keyword table (dawn.lex.KEYWORDS).
+pub fn keyword(text: String) -> Option[TokKind] =
+  match text {
+    "fn" -> Some(FN)
+    "let" -> Some(LET)
+    "var" -> Some(VAR)
+    "type" -> Some(TYPE)
+    "alias" -> Some(ALIAS)
+    "const" -> Some(CONST)
+    "use" -> Some(USE)
+    "java" -> Some(JAVA)
+    "pub" -> Some(PUB)
+    "trait" -> Some(TRAIT)
+    "impl" -> Some(IMPL)
+    "match" -> Some(MATCH)
+    "if" -> Some(IF)
+    "else" -> Some(ELSE)
+    "for" -> Some(FOR)
+    "in" -> Some(IN)
+    "while" -> Some(WHILE)
+    "return" -> Some(RETURN)
+    "break" -> Some(BREAK)
+    "continue" -> Some(CONTINUE)
+    "comptime" -> Some(COMPTIME)
+    "unsafe_pure" -> Some(UNSAFE_PURE)
+    "test" -> Some(TEST)
+    "assert" -> Some(ASSERT)
+    "true" -> Some(TRUE)
+    "false" -> Some(FALSE)
+    "not" -> Some(NOT)
+    _ -> None
+  }
