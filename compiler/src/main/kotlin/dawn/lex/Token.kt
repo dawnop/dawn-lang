@@ -23,6 +23,12 @@ enum class TokenType {
     PIPE,       // |
     AMPAMP,     // &&
     PIPEPIPE,   // ||
+    AMP,        // &   bitwise and
+    CARET,      // ^   bitwise xor
+    TILDE,      // ~   bitwise not (prefix)
+    SHL,        // <<
+    SHR,        // >>  arithmetic (sign-extending) shift right
+    USHR,       // >>> logical shift right
     BANG,       // !
     AT,         // @
     NEWLINE, EOF,

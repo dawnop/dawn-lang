@@ -154,6 +154,8 @@ object Formatter {
             p == DOT || c == DOT -> false
             p == DOTDOT -> false
             p == BANG && prev !in postfix -> false
+            // `~` is always prefix bitwise-not; it hugs its operand like unary `-`
+            p == TILDE -> false
             p == AT -> false
             // calls / indexing / generics: name(..), name[..], no space before the bracket
             c == LPAREN && p in callableBeforeParen -> false
@@ -192,11 +194,13 @@ object Formatter {
     // is a postfix unwrap, and the next line starts a new statement, not a continuation.
     private val continuationEnders = setOf(
         PLUS, MINUS, STAR, SLASH, PERCENT, PLUSPLUS, PIPEGT, AMPAMP, PIPEPIPE,
+        AMP, CARET, SHL, SHR, USHR,
         EQEQ, NEQ, LT, LE, GT, GE, ARROW, FATARROW, EQ, DOT, NOT,
     )
 
     private val continuationStarters = setOf(
         PIPEGT, DOT, PIPE, PLUS, MINUS, STAR, SLASH, PERCENT, PLUSPLUS, AMPAMP, PIPEPIPE,
+        AMP, CARET, SHL, SHR, USHR,
         EQEQ, NEQ, LT, LE, GT, GE,
     )
 }

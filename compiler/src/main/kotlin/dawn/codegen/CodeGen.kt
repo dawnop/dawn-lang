@@ -2438,6 +2438,8 @@ class CodeGen(
             when (e.op) {
                 UnOp.NOT -> { mv.visitInsn(ICONST_1); mv.visitInsn(IXOR) }
                 UnOp.NEG -> mv.visitInsn(if (e.operand.type == TInt) LNEG else DNEG)
+                // ~x == x ^ -1L; the JVM has no bitwise-not opcode
+                UnOp.BNOT -> { mv.visitLdcInsn(-1L); mv.visitInsn(LXOR) }
             }
             true
         }
@@ -3673,6 +3675,14 @@ class CodeGen(
                 }
             BinOp.EQ, BinOp.NEQ -> genEquality(t, e.op)
             BinOp.LT, BinOp.LE, BinOp.GT, BinOp.GE -> genOrdering(t, e.op)
+            BinOp.BAND -> mv.visitInsn(LAND)
+            BinOp.BOR -> mv.visitInsn(LOR)
+            BinOp.BXOR -> mv.visitInsn(LXOR)
+            // LSHL/LSHR/LUSHR take a long value and an *int* count; the count is an
+            // Int (long) here, so narrow it. Only the low 6 bits are used by the JVM.
+            BinOp.SHL -> { mv.visitInsn(L2I); mv.visitInsn(LSHL) }
+            BinOp.SHR -> { mv.visitInsn(L2I); mv.visitInsn(LSHR) }
+            BinOp.USHR -> { mv.visitInsn(L2I); mv.visitInsn(LUSHR) }
             else -> {}
         }
         return true

@@ -1347,6 +1347,11 @@ class Checker(
                 if (!t.isNumeric && !t.isErrorish) error("negation expects a number, got $t", e.operand.span)
                 else t
             }
+            UnOp.BNOT -> {
+                val t = checkExpr(e.operand)
+                if (t != TInt && !t.isErrorish) error("`~` expects Int, got $t", e.operand.span)
+                else TInt
+            }
         }
         is If -> checkIf(e, expected)
         is Match -> checkMatch(e, expected)
@@ -2402,6 +2407,7 @@ class Checker(
         if (lt.isErrorish || rt.isErrorish) return when (e.op) {
             BinOp.ADD, BinOp.SUB, BinOp.MUL, BinOp.DIV, BinOp.MOD ->
                 if (lt.isNumeric) lt else if (rt.isNumeric) rt else TError
+            BinOp.BAND, BinOp.BOR, BinOp.BXOR, BinOp.SHL, BinOp.SHR, BinOp.USHR -> TInt
             BinOp.CONCAT -> if (lt is TList) lt else if (rt is TList) rt else TString
             else -> TBool
         }
@@ -2411,8 +2417,15 @@ class Checker(
                 if (rt.isNumeric) "there are no implicit conversions; use to_float() (M1) or unify the literal types" else null)
             return lt
         }
+        // bitwise operators are Int-only (no Float bit pattern in the surface language)
+        fun bothInt(): Type {
+            if (lt != TInt) return error("bitwise operators expect Int, left side is $lt", e.left.span)
+            if (rt != TInt) return error("bitwise operators expect Int, right side is $rt", e.right.span)
+            return TInt
+        }
         return when (e.op) {
             BinOp.ADD, BinOp.SUB, BinOp.MUL, BinOp.DIV, BinOp.MOD -> bothNumericSame()
+            BinOp.BAND, BinOp.BOR, BinOp.BXOR, BinOp.SHL, BinOp.SHR, BinOp.USHR -> bothInt()
             BinOp.CONCAT -> when {
                 lt == TString && rt == TString -> TString
                 lt == Type.TBytes && rt == Type.TBytes -> Type.TBytes

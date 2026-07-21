@@ -676,7 +676,7 @@ class Parser(
     private fun andExpr(): Expr = leftAssoc({ cmpExpr() }, mapOf(AMPAMP to BinOp.AND))
 
     private fun cmpExpr(): Expr {
-        val left = concatExpr()
+        val left = borExpr()
         val op = when (peek().type) {
             EQEQ -> BinOp.EQ; NEQ -> BinOp.NEQ
             LT -> BinOp.LT; LE -> BinOp.LE; GT -> BinOp.GT; GE -> BinOp.GE
@@ -684,7 +684,7 @@ class Parser(
         }
         val opTok = advance()
         skipNewlines()
-        val right = concatExpr()
+        val right = borExpr()
         val result = Binary(op, left, right, opTok.span, Span(left.span.start, right.span.end))
         // comparisons are non-associative: a < b < c is an error
         when (peek().type) {
@@ -694,6 +694,15 @@ class Parser(
         }
         return result
     }
+
+    // Bitwise sits between comparison and concat: tighter than `== < ...` (so
+    // `a & b == c` is `(a & b) == c`, no C footgun) and looser than `++`/arithmetic.
+    // Within the cluster, tight→loose is `<< >> >>>`, `&`, `^`, `|` (Rust order).
+    private fun borExpr(): Expr = leftAssoc({ bxorExpr() }, mapOf(PIPE to BinOp.BOR))
+    private fun bxorExpr(): Expr = leftAssoc({ bandExpr() }, mapOf(CARET to BinOp.BXOR))
+    private fun bandExpr(): Expr = leftAssoc({ shiftExpr() }, mapOf(AMP to BinOp.BAND))
+    private fun shiftExpr(): Expr =
+        leftAssoc({ concatExpr() }, mapOf(SHL to BinOp.SHL, SHR to BinOp.SHR, USHR to BinOp.USHR))
 
     private fun concatExpr(): Expr {
         // right-associative
@@ -730,6 +739,11 @@ class Parser(
             val tok = advance()
             val operand = unaryExpr()
             return Unary(UnOp.NEG, operand, Span(tok.span.start, operand.span.end))
+        }
+        if (at(TILDE)) {
+            val tok = advance()
+            val operand = unaryExpr()
+            return Unary(UnOp.BNOT, operand, Span(tok.span.start, operand.span.end))
         }
         return postfixExpr()
     }

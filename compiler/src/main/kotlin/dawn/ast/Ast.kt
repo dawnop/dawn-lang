@@ -379,13 +379,15 @@ class UnsafePureExpr(val body: Expr, span: Span) : Expr(span)
 
 class CtorArg(val name: String?, val expr: Expr, val span: Span)
 
-enum class BinOp { ADD, SUB, MUL, DIV, MOD, CONCAT, EQ, NEQ, LT, LE, GT, GE, AND, OR }
+enum class BinOp { ADD, SUB, MUL, DIV, MOD, CONCAT, EQ, NEQ, LT, LE, GT, GE, AND, OR,
+    // bitwise, Int only; SHR is arithmetic (sign-extending), USHR is logical
+    BAND, BOR, BXOR, SHL, SHR, USHR }
 class Binary(val op: BinOp, val left: Expr, val right: Expr, val opSpan: Span, span: Span) : Expr(span) {
     /** when `< <= > >=` order through an Ord impl (not a native scalar): the dictionary (checker) */
     var ordWitness: dawn.check.WitnessRef? = null
 }
 
-enum class UnOp { NEG, NOT }
+enum class UnOp { NEG, NOT, BNOT }
 class Unary(val op: UnOp, val operand: Expr, span: Span) : Expr(span)
 
 class If(val cond: Expr, val thenBranch: Block, val elseBranch: Expr?, span: Span) : Expr(span)

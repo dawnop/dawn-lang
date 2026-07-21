@@ -250,6 +250,10 @@ class ComptimeInterp(
                     is CValue.VFloat -> CValue.VFloat(-v.v)
                     else -> err("negation needs a number", e.span)
                 }
+                UnOp.BNOT -> when (val v = eval(e.operand, env)) {
+                    is CValue.VInt -> CValue.VInt(v.v.inv())
+                    else -> err("`~` needs an Int", e.span)
+                }
             }
             is If -> {
                 if ((eval(e.cond, env) as CValue.VBool).v) eval(e.thenBranch, env)
@@ -561,6 +565,7 @@ class ComptimeInterp(
         val r = eval(e.right, env)
         return when (e.op) {
             BinOp.ADD, BinOp.SUB, BinOp.MUL, BinOp.DIV, BinOp.MOD -> arith(e, l, r)
+            BinOp.BAND, BinOp.BOR, BinOp.BXOR, BinOp.SHL, BinOp.SHR, BinOp.USHR -> bitwise(e, l, r)
             BinOp.CONCAT -> when {
                 l is CValue.VString && r is CValue.VString -> CValue.VString(l.v + r.v)
                 l is CValue.VList && r is CValue.VList -> CValue.VList(l.elems + r.elems)
@@ -613,6 +618,20 @@ class ComptimeInterp(
             })
         }
         else -> err("arithmetic needs two numbers of the same type", e.opSpan)
+    }
+
+    private fun bitwise(e: Binary, l: CValue, r: CValue): CValue {
+        if (l !is CValue.VInt || r !is CValue.VInt) err("bitwise operators need two Ints", e.opSpan)
+        val a = l.v
+        val b = r.v
+        return CValue.VInt(when (e.op) {
+            BinOp.BAND -> a and b
+            BinOp.BOR -> a or b
+            BinOp.BXOR -> a xor b
+            BinOp.SHL -> a shl b.toInt()
+            BinOp.SHR -> a shr b.toInt()
+            else -> a ushr b.toInt()
+        })
     }
 
     private fun valueEq(a: CValue, b: CValue): Boolean = when {

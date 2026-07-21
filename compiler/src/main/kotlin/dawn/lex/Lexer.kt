@@ -82,6 +82,7 @@ class Lexer(
     private fun continuesLine(t: TokenType): Boolean = when (t) {
         TokenType.PLUS, TokenType.MINUS, TokenType.STAR, TokenType.SLASH, TokenType.PERCENT,
         TokenType.PLUSPLUS, TokenType.PIPEGT, TokenType.PIPE, TokenType.AMPAMP, TokenType.PIPEPIPE,
+        TokenType.AMP, TokenType.CARET, TokenType.SHL, TokenType.SHR, TokenType.USHR,
         TokenType.EQEQ, TokenType.NEQ, TokenType.LT, TokenType.LE, TokenType.GT, TokenType.GE,
         TokenType.COMMA, TokenType.LPAREN, TokenType.LBRACKET, TokenType.LBRACE,
         TokenType.ARROW, TokenType.FATARROW, TokenType.EQ, TokenType.COLON, TokenType.DOT,
@@ -443,8 +444,15 @@ class Lexer(
     // ---- symbols ----
 
     private fun lexSymbol() {
+        // `>>>` must be probed before the two-char table, else it splits into `>>` `>`.
+        // It is the only three-char operator; nothing else needs a three-char munch.
+        if (pos + 2 < src.length && src[pos] == '>' && src[pos + 1] == '>' && src[pos + 2] == '>') {
+            return add(TokenType.USHR, ">>>", 3)
+        }
         val two = if (pos + 1 < src.length) src.substring(pos, pos + 2) else ""
         when (two) {
+            "<<" -> return add(TokenType.SHL, two, 2)
+            ">>" -> return add(TokenType.SHR, two, 2)
             "->" -> return add(TokenType.ARROW, two, 2)
             "=>" -> return add(TokenType.FATARROW, two, 2)
             "==" -> return add(TokenType.EQEQ, two, 2)
@@ -477,6 +485,9 @@ class Lexer(
             '/' -> add(TokenType.SLASH, "/", 1)
             '%' -> add(TokenType.PERCENT, "%", 1)
             '|' -> add(TokenType.PIPE, "|", 1)
+            '&' -> add(TokenType.AMP, "&", 1)
+            '^' -> add(TokenType.CARET, "^", 1)
+            '~' -> add(TokenType.TILDE, "~", 1)
             '!' -> add(TokenType.BANG, "!", 1)
             '@' -> add(TokenType.AT, "@", 1)
             else -> {
