@@ -72,8 +72,9 @@ class TraitCheckTest {
     }
 
     @Test
-    fun methodCollidesWithBuiltinFn() {
-        assertError("trait A[T] { fn len(x: T) -> Int }", "builtin function and cannot be a trait method")
+    fun methodMayShadowABuiltinFn() {
+        // spec §10.6: a trait method, like a top-level fn, shadows a builtin name
+        assertClean("trait A[T] { fn len(x: T) -> Int }")
     }
 
     @Test

@@ -292,13 +292,11 @@ class Checker(
             sig.srcPath = srcPath
             d.sig = sig
             d.effVars = ev
+            // a top-level fn may shadow a builtin or std name (spec §10.6): resolution
+            // is local decls → std → builtins, so the shadowing is total in this module
             when {
                 moduleAliases.containsKey(d.name) -> aliasShadow(d.name, d.nameSpan)
                 importedNames.containsKey(d.name) -> importClash(d.name, d.nameSpan, "function")
-                BUILTINS.containsKey(d.name) ->
-                    sink.error("`${d.name}` is a builtin function and cannot be redefined", d.nameSpan)
-                stdFns.containsKey(d.name) ->
-                    sink.error("`${d.name}` is a standard-library function and cannot be redefined", d.nameSpan)
                 fns.containsKey(d.name) -> {
                     val prev = fns[d.name]!!.trait
                     if (prev != null)
@@ -505,14 +503,10 @@ class Checker(
                 sig.owner = ownerClass
                 sig.srcPath = srcPath
                 m.sig = sig
+                // like top-level fns, a trait method may shadow a builtin/std name (spec §10.6)
                 when {
                     moduleAliases.containsKey(m.name) -> aliasShadow(m.name, m.nameSpan)
                     importedNames.containsKey(m.name) -> importClash(m.name, m.nameSpan, "trait method")
-                    BUILTINS.containsKey(m.name) ->
-                        sink.error("`${m.name}` is a builtin function and cannot be a trait method", m.nameSpan)
-                    stdFns.containsKey(m.name) ->
-                        sink.error("`${m.name}` is a standard-library function and cannot be a trait method",
-                            m.nameSpan)
                     fns.containsKey(m.name) -> {
                         val prev = fns[m.name]!!.trait
                         sink.error(

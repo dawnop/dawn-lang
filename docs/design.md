@@ -140,10 +140,11 @@ M6 前置，先用 playground runner 验收。四个语义决策全部对照过 
 - **`..` 三用**（for 头范围 / 模式余项 `..rest` / record 展开 `..base`）：三处上下文
   互斥、无一处可同现，parser 不需前瞻即可区分；合并或改拼写无收益。维持。
 
-另：审查曾疑「顶层声明静默遮蔽 prelude」——实况是顶层重定义 builtin/std 名**本就
-报错**，静默遮蔽只存在于选择性引入（显式要名，意图明确），spec §10.3 已把误导性
-表述纠正。（注：P0.7 的 stdlib 破坏性重组将把顶层遮蔽内建改为 Rust 式合法——
-见 [`stdlib-naming.md`](stdlib-naming.md)，届时本段与 §10.3 随之修订。）
+另：审查曾疑「顶层声明静默遮蔽 prelude」——P0.6 时的实况是顶层重定义 builtin/std 名
+报错。**P0.7 已按 [`stdlib-naming.md`](stdlib-naming.md) 把顶层 fn / trait 方法遮蔽
+builtin/std 函数名改为 Rust 式合法**（解析序本就是本模块声明 → std → 内建，只删了
+注册期报错；std 模块自身的 `pub fn len` 是第一批受益者）。内建/prelude **类型与 trait**
+名（`Map`/`Option`/`Ord`…）仍不可重定义；spec §10.3 是权威表述。
 
 ## 4. 特性来源致谢
 

@@ -280,13 +280,26 @@ class StdLibTest {
     }
 
     @Test
-    fun `a std function cannot be redefined`() {
-        val errs = errorsOf(
+    fun `a local definition shadows a std function`() {
+        val out = run(
             """
-            pub fn is_empty(s: String) -> Bool = false
+            fn is_empty(s: String) -> Bool = false
+
+            pub fn main() -> Unit !io = println("${'$'}{is_empty("")}")
             """.trimIndent(),
         )
-        assertTrue(errs.any { it.contains("standard-library function and cannot be redefined") },
-            "expected the std redefinition guard; got:\n" + errs.joinToString("\n"))
+        assertEquals("false\n", out)
+    }
+
+    @Test
+    fun `a local definition shadows a builtin`() {
+        val out = run(
+            """
+            fn len(s: String) -> Int = 42
+
+            pub fn main() -> Unit !io = println("${'$'}{len("abc")}")
+            """.trimIndent(),
+        )
+        assertEquals("42\n", out)
     }
 }

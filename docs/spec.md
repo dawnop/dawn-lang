@@ -958,9 +958,10 @@ use java "java.lang.Math"      # Java 互操作（§9），形式不变
   `m.Shape`、限定构造器模式、限定常量 `m.NAME` v0.1 都不做（常量名是大写，本就不走点取）。
 - 选择性引入一个 `type` 同时引入其**全部构造器**（与 `pub type` 导出构造器+字段的规则一致）。
 - 选择性引入的名字与本模块顶层声明或其他引入冲突 → 错误。**与 prelude 名冲突**：
-  选择性引入**可以**遮蔽 prelude（你逐字要来的名字，意图明确）；但**顶层声明**重用
-  builtin/std/prelude 类型名一律是编译错误（`` `map` is a builtin function and cannot
-  be redefined ``）——遮蔽只给显式请求，不给巧合同名。
+  选择性引入**可以**遮蔽 prelude（你逐字要来的名字，意图明确）；**顶层 fn / trait 方法**
+  也可以遮蔽 builtin/std 的**函数**名（Rust 式）——解析序是本模块声明 → std → 内建，
+  故遮蔽在本模块内是全量的：被遮蔽的拼写在该模块不可达，这是声明者自己的选择。
+  但内建与 prelude 的**类型 / trait** 名（`Map`/`Option`/`Ord`…）仍不可重定义。
 
 ### 10.4 可见性
 
