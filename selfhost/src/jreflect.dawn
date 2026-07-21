@@ -1,0 +1,288 @@
+# Java reflection for the checker (docs/selfhost-checker.md §四): every query
+# the Kotlin checker makes against Class<*> objects, wrapped into plain-data
+# records here so the checker proper never touches a Java object. Arrays from
+# getMethods()/getParameterTypes() are walked with java.lang.reflect.Array —
+# the sanctioned detour around Dawn's no-array-indexing rule (spec §9.5).
+#
+# Everything here is honestly !io (reflection reads the world's class path),
+# which makes the checker itself !io — that is the true story.
+
+use std/str
+use std/list
+use java "java.lang.Object"
+use java "java.lang.Class"
+use java "java.lang.ClassLoader"
+use java "java.lang.reflect.Array"
+use java "java.lang.reflect.Method"
+use java "java.lang.reflect.Constructor"
+use java "java.lang.reflect.Modifier"
+use java "java.util.Objects"
+
+## One method, as plain data. `desc` is Method.toString(), printed verbatim in
+## overload-resolution error candidates.
+pub type JMethod = {
+  name: String,
+  param_cls: List[String],
+  ret_cls: String,
+  is_static: Bool,
+  is_varargs: Bool,
+  is_abstract: Bool,
+  desc: String
+}
+
+pub type JCtor = { param_cls: List[String], is_varargs: Bool, desc: String }
+
+## One class, as plain data. `display` is the TyJava display name (readable
+## array names); `simple` is Class.getSimpleName() for error messages.
+pub type JClass = {
+  fqcn: String,
+  simple: String,
+  display: String,
+  is_interface: Bool,
+  is_primitive: Bool,
+  is_array: Bool
+}
+
+fn sys_loader() -> ClassLoader !io = ClassLoader.getSystemClassLoader().expect("system loader")
+
+fn try_forname(name: String) -> Option[Class] !io =
+  match java_try(fn() => Class.forName(name, false, sys_loader()).expect("forName")) {
+    Ok(c) -> Some(c)
+    Err(e) -> None
+  }
+
+## Resolve a `use java` name (spec §9.1): the fqcn as written, then trailing
+## dots walked into `$` so nested classes read naturally.
+pub fn find_class_raw(fqcn: String) -> Option[Class] !io = {
+  match try_forname(fqcn) {
+    Some(c) -> return Some(c)
+    None -> ()
+  }
+  var name = fqcn
+  while str.contains(name, ".") {
+    let i = str.last_index_of(name, ".").expect("contains dot")
+    name = str.substring(name, 0, i) ++ "$" ++ str.substring(name, i + 1, str.len(name))
+    match try_forname(name) {
+      Some(c) -> return Some(c)
+      None -> ()
+    }
+  }
+  None
+}
+
+## The display name for a TyJava: readable array names ("byte[]"), else the
+## fqcn's simple tail (Kotlin: canonicalName ?: fqcn, substringAfterLast('.')).
+fn display_of(c: Class) -> String !io = {
+  let fqcn = c.getName().expect("class name")
+  if c.isArray() {
+    let canon = match c.getCanonicalName() {
+      Some(cn) -> cn
+      None -> fqcn
+    }
+    tail_after_dot(canon)
+  } else {
+    tail_after_dot(fqcn)
+  }
+}
+
+fn tail_after_dot(s: String) -> String =
+  match str.last_index_of(s, ".") {
+    Some(i) -> str.substring(s, i + 1, str.len(s))
+    None -> s
+  }
+
+fn jclass_of(c: Class) -> JClass !io =
+  JClass {
+    fqcn: c.getName().expect("class name"),
+    simple: c.getSimpleName().expect("simple name"),
+    display: display_of(c),
+    is_interface: c.isInterface(),
+    is_primitive: c.isPrimitive(),
+    is_array: c.isArray()
+  }
+
+## Resolve a class name to plain data; None when nothing on the class path matches.
+pub fn find_class(fqcn: String) -> Option[JClass] !io =
+  match find_class_raw(fqcn) {
+    Some(c) -> Some(jclass_of(c))
+    None -> None
+  }
+
+## Class data for a name that is known to resolve (e.g. came from a Method).
+pub fn class_info(fqcn: String) -> JClass !io =
+  match find_class(fqcn) {
+    Some(j) -> j
+    None -> panic("class vanished between queries: " ++ fqcn)
+  }
+
+fn class_names(arr: Object) -> List[String] !io = {
+  var out: List[String] = []
+  let n = Array.getLength(arr)
+  var i = 0
+  while i < n {
+    let c: Class = cast(Array.get(arr, i).expect("class array element"))
+    out = out ++ [c.getName().expect("class name")]
+    i = i + 1
+  }
+  out
+}
+
+fn method_of(m: Method) -> JMethod !io = {
+  let mods = m.getModifiers()
+  JMethod {
+    name: m.getName().expect("method name"),
+    param_cls: class_names(Objects.requireNonNull(m.getParameterTypes().expect("param types")).expect("non-null")),
+    ret_cls: m.getReturnType().expect("return type").getName().expect("class name"),
+    is_static: Modifier.isStatic(mods),
+    is_varargs: m.isVarArgs(),
+    is_abstract: Modifier.isAbstract(mods),
+    desc: m.toString().expect("method toString")
+  }
+}
+
+## Every public method of `fqcn`, bridges and synthetics already dropped
+## (the Kotlin checker filters them at every use site).
+pub fn methods_of(fqcn: String) -> List[JMethod] !io = {
+  let c = find_class_raw(fqcn).expect("methods_of on unresolved class")
+  let arr = c.getMethods().expect("methods")
+  var out: List[JMethod] = []
+  let n = Array.getLength(arr)
+  var i = 0
+  while i < n {
+    let m: Method = cast(Array.get(arr, i).expect("method array element"))
+    if not m.isBridge() && not m.isSynthetic() { out = out ++ [method_of(m)] }
+    i = i + 1
+  }
+  out
+}
+
+## Every public constructor of `fqcn`, synthetics dropped.
+pub fn ctors_of(fqcn: String) -> List[JCtor] !io = {
+  let c = find_class_raw(fqcn).expect("ctors_of on unresolved class")
+  let arr = c.getConstructors().expect("constructors")
+  var out: List[JCtor] = []
+  let n = Array.getLength(arr)
+  var i = 0
+  while i < n {
+    let k: Constructor = cast(Array.get(arr, i).expect("ctor array element"))
+    if not k.isSynthetic() {
+      out = out ++ [JCtor {
+        param_cls: class_names(Objects.requireNonNull(k.getParameterTypes().expect("param types")).expect("non-null")),
+        is_varargs: k.isVarArgs(),
+        desc: k.toString().expect("ctor toString")
+      }]
+    }
+    i = i + 1
+  }
+  out
+}
+
+## Class.isAssignableFrom over names: may `sub` stand where `sup` is expected?
+pub fn is_assignable(sup: String, sub: String) -> Bool !io =
+  match find_class_raw(sup) {
+    None -> false
+    Some(s) ->
+      match find_class_raw(sub) {
+        None -> false
+        Some(b) -> s.isAssignableFrom(b)
+      }
+  }
+
+## equals/hashCode/toString redeclared abstract on an interface don't count as
+## the SAM (the Kotlin isObjectMethod probe via Object.getMethod).
+fn is_object_method(m: JMethod) -> Bool !io = {
+  let obj = find_class_raw("java.lang.Object").expect("Object")
+  let all = methods_of("java.lang.Object")
+  for om in all {
+    if om.name == m.name && om.param_cls == m.param_cls { return true }
+  }
+  false
+}
+
+## The single abstract method of a functional interface, or None (spec §9.4).
+pub fn sam_of(fqcn: String) -> Option[JMethod] !io = {
+  let j = class_info(fqcn)
+  if not j.is_interface { return None }
+  var found: List[JMethod] = []
+  var seen: List[String] = []
+  for m in methods_of(fqcn) {
+    if m.is_abstract && not is_object_method(m) {
+      let key = m.name ++ "(" ++ join(m.param_cls, ",") ++ ")"
+      var dup = false
+      for s in seen {
+        if s == key { dup = true }
+      }
+      if not dup {
+        seen = seen ++ [key]
+        found = found ++ [m]
+      }
+    }
+  }
+  if len(found) == 1 { Some(found[0]) } else { None }
+}
+
+## The component type name of an array class, or None.
+pub fn component_of(fqcn: String) -> Option[String] !io =
+  match find_class_raw(fqcn) {
+    None -> None
+    Some(c) ->
+      match c.getComponentType() {
+        Some(comp) -> Some(comp.getName().expect("class name"))
+        None -> None
+      }
+  }
+
+# ---- tests ----
+
+test "classes resolve, including nested ones via the dollar walk" {
+  assert class_info("java.lang.StringBuilder").simple == "StringBuilder"
+  match find_class("java.util.Map.Entry") {
+    Some(j) -> { assert j.fqcn == "java.util.Map\$Entry" }
+    None -> { assert false }
+  }
+  assert find_class("no.such.Klass") == None
+}
+
+test "methods carry their shapes" {
+  let ms = methods_of("java.lang.Long")
+  var found = false
+  for m in ms {
+    if m.name == "parseLong" && m.param_cls == ["java.lang.String", "int"] {
+      found = true
+      assert m.is_static
+      assert m.ret_cls == "long"
+    }
+  }
+  assert found
+}
+
+test "sam detection accepts runnable and comparator, rejects plain classes" {
+  match sam_of("java.lang.Runnable") {
+    Some(m) -> { assert m.name == "run" }
+    None -> { assert false }
+  }
+  # Comparator has default methods and Object-shaped abstracts; the SAM is compare
+  match sam_of("java.util.Comparator") {
+    Some(m) -> { assert m.name == "compare" }
+    None -> { assert false }
+  }
+  assert sam_of("java.lang.StringBuilder") == None
+}
+
+test "assignability over names" {
+  assert is_assignable("java.lang.CharSequence", "java.lang.String")
+  assert not is_assignable("java.lang.String", "java.lang.CharSequence")
+}
+
+test "array classes display readably" {
+  let ms = methods_of("java.lang.String")
+  var found = false
+  for m in ms {
+    if m.name == "getBytes" && m.param_cls == [] {
+      found = true
+      assert m.ret_cls == "[B"
+    }
+  }
+  assert found
+  assert class_info("[B").display == "byte[]"
+}

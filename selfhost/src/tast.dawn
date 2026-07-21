@@ -1,0 +1,177 @@
+# The typed tree (选甲's second tree, docs/selfhost-ast.md): what the checker
+# lowers the parsed AST into. Where Kotlin writes resolutions back onto mutable
+# AST slots (e.sig, e.symbol, e.desugared, p.fieldPats, ...), these nodes carry
+# them as fields. Consumers: the comptime interpreter now, codegen at P4.
+#
+# Conventions: symbols are unique Int ids minted by the checker (the comptime
+# environment is Map[sym, CValue]); constructors are (adt id, ctor index)
+# against the ADT table; spans stay UTF-16 lo/hi pairs for diagnostics.
+
+use types.{Ty, Sig, Eff}
+use exhaustive.{LitV}
+
+pub type TStrPart =
+  | TSPText(v: String)
+  | TSPInterp(e: TExpr)
+
+pub type TArm = { pats: List[TPat], guard: Option[TExpr], body: TExpr }
+
+## One Java call, resolved: enough for comptime route C (static, scalar
+## marshalling) and for codegen later. Parameter/return types are JVM class
+## names; `target` is None for statics.
+pub type TJavaCall = {
+  fqcn: String,
+  method: String,
+  param_cls: List[String],
+  ret_cls: String,
+  is_static: Bool,
+  is_ctor: Bool,
+  target: Option[TExpr],
+  args: List[TExpr],
+  varargs_pack: Option[Int],
+  nlo: Int,
+  nhi: Int
+}
+
+pub type TExpr =
+  | XInt(v: Int, lo: Int, hi: Int)
+  | XFloat(v: Float, lo: Int, hi: Int)
+  | XBool(v: Bool, lo: Int, hi: Int)
+  | XUnit(lo: Int, hi: Int)
+  | XStr(parts: List[TStrPart], lo: Int, hi: Int)
+# a local variable / parameter read
+  | XLocal(sym: Int, name: String, lo: Int, hi: Int)
+# a top-level fn / builtin used as a value (type already instantiated)
+  | XFnValue(owner: Option[String], name: String, is_builtin: Bool, ty: Ty, lo: Int, hi: Int)
+# a call of a local function value (dynamic target)
+  | XCallDyn(sym: Int, name: String, args: List[TExpr], lo: Int, hi: Int)
+# a builtin call
+  | XCallBuiltin(name: String, args: List[TExpr], lo: Int, hi: Int)
+# a call of a user/std function, resolved to its defining module
+  | XCallFn(
+    owner: Option[String],
+    name: String,
+    args: List[TExpr],
+    has_witnesses: Bool,
+    lo: Int,
+    hi: Int
+  )
+# applying a non-name callee (pipe into lambda, fn-typed field)
+  | XApply(target: TExpr, args: List[TExpr], lo: Int, hi: Int)
+  | XJava(call: TJavaCall, lo: Int, hi: Int)
+  | XLambda(params: List[Int], pnames: List[String], body: TExpr, captures: List[Int], lo: Int, hi: Int)
+# a constructor build: written args in source order, slots map field index →
+# written-arg index (None = take the field from the spread base)
+  | XCtor(
+    adt: Int,
+    ci: Int,
+    written: List[TExpr],
+    slots: List[Option[Int]],
+    spread: Option[TExpr],
+    lo: Int,
+    hi: Int
+  )
+# a reference to a (comptime-evaluated) constant
+  | XConstRef(name: String, lo: Int, hi: Int)
+  | XField(target: TExpr, field_idx: Int, lo: Int, hi: Int)
+  | XListLit(elems: List[TExpr], lo: Int, hi: Int)
+  | XTupleLit(elems: List[TExpr], lo: Int, hi: Int)
+  | XPropagate(operand: TExpr, lo: Int, hi: Int)
+  | XUnwrap(operand: TExpr, msg: String, lo: Int, hi: Int)
+  | XIndex(target: TExpr, index: TExpr, on_map: Bool, lo: Int, hi: Int)
+  | XReturn(v: Option[TExpr], lo: Int, hi: Int)
+  | XBreak(lo: Int, hi: Int)
+  | XContinue(lo: Int, hi: Int)
+  | XComptime(body: TExpr, lo: Int, hi: Int)
+  | XUnsafePure(body: TExpr, lo: Int, hi: Int)
+  | XBinary(op: TBinOp, left: TExpr, right: TExpr, has_ord: Bool, olo: Int, ohi: Int, lo: Int, hi: Int)
+  | XUnary(op: TUnOp, operand: TExpr, lo: Int, hi: Int)
+  | XIf(cond: TExpr, thn: TExpr, els: Option[TExpr], lo: Int, hi: Int)
+  | XMatch(scrut: TExpr, arms: List[TArm], lo: Int, hi: Int)
+  | XBlock(stmts: List[TStmt], tail: Option[TExpr], lo: Int, hi: Int)
+# checking failed here; comptime refuses to evaluate it (a diagnostic exists)
+  | XError(lo: Int, hi: Int)
+
+# The typed operator enums repeat ast's spellings so the two trees stay
+# independently importable (ast.BinOp names OpAdd... would collide on import).
+pub type TBinOp =
+  | BAdd
+  | BSub
+  | BMul
+  | BDiv
+  | BMod
+  | BConcat
+  | BEq
+  | BNeq
+  | BLt
+  | BLe
+  | BGt
+  | BGe
+  | BAnd
+  | BOr
+  | BBand
+  | BBor
+  | BBxor
+  | BShl
+  | BShr
+  | BUshr
+
+pub type TUnOp =
+  | UNeg
+  | UNot
+  | UBnot
+
+pub type TPat =
+  | TPWild
+  | TPBind(sym: Int, name: String)
+  | TPLit(v: LitV)
+  | TPTuple(elems: List[TPat])
+  | TPList(pre: List[TPat], has_rest: Bool, rest_sym: Option[Int], post: List[TPat])
+  | TPCtor(adt: Int, ci: Int, field_pats: List[Option[TPat]])
+
+pub type TStmt =
+  | TSLet(sym: Option[Int], name: String, init: TExpr, lo: Int, hi: Int)
+  | TSLetPat(pat: TPat, init: TExpr, lo: Int, hi: Int)
+  | TSLocalFn(
+    sym: Int,
+    name: String,
+    params: List[Int],
+    pnames: List[String],
+    body: TExpr,
+    captures: List[Int],
+    lo: Int,
+    hi: Int
+  )
+  | TSAssign(sym: Int, name: String, value: TExpr, lo: Int, hi: Int)
+  | TSExpr(e: TExpr, lo: Int, hi: Int)
+  | TSAssert(cond: TExpr, src: Option[String], lo: Int, hi: Int)
+  | TSWhile(cond: TExpr, body: TExpr, has_jumps: Bool, lo: Int, hi: Int)
+  | TSFor(
+    sym: Int,
+    name: String,
+    from: TExpr,
+    to: Option[TExpr],
+    body: TExpr,
+    has_jumps: Bool,
+    lo: Int,
+    hi: Int
+  )
+
+## One checked function: its final signature, parameter symbol ids, typed body.
+pub type TFun = {
+  name: String,
+  sig: Sig,
+  param_syms: List[Int],
+  body: TExpr,
+  is_test: Bool
+}
+
+pub type TConst = { name: String, ty: Ty, init: TExpr, lo: Int, hi: Int }
+
+## The checker's product for one module: enough for comptime now and the
+## `__check` golden; codegen slots (impl tables etc.) join at P4.
+pub type TModule = {
+  fns: List[TFun],
+  consts: List[TConst],
+  tests: List[TFun]
+}
