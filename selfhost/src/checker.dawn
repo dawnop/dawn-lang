@@ -22,7 +22,11 @@ use ast.{
   OpLe, OpGt, OpGe, OpAnd, OpOr, OpBand, OpBor, OpBxor, OpShl, OpShr, OpUshr,
   OpNeg, OpNot, OpBnot,
   Pattern, PLit, PBind, PWild, PCtor, PTuple, PList, PatArg,
-  SPText, SPInterp, EFloat, EStr, pat_lo, pat_hi
+  SPText, SPInterp, EFloat, EStr, pat_lo, pat_hi,
+  ECall, EMethod, EApply, ELambda, EBlock, EIf, EMatch, ECtor, EFieldAcc,
+  EListLit, ETupleLit, EBinary, EUnary, EPropagate, EUnwrap, EIndex, EReturn,
+  EComptime, EUnsafePure, Stmt, SLet, SLetPat, SLocalFn, SAssign, SExpr,
+  SAssert, SWhile, SFor, LambdaParam
 }
 use tast.{
   TExpr, XInt, XFloat, XBool, XUnit, XStr, XLocal, XFnValue, XCallDyn,
@@ -3432,3 +3436,131 @@ test "ctor pattern field discipline" {
 }
 
 fn no_pargs() -> List[PatArg] = []
+
+## Every lowercase name mentioned in call/value position — the call-graph
+## over-approximation for return-type inference ordering (Kotlin nameRefs).
+pub fn name_refs(e: Expr, out: Set[String]) -> Set[String] =
+  match e {
+    EVar(name, _, _) -> set.insert(out, name)
+    ECall(callee, args, _, _, _, _) -> {
+      var o = set.insert(out, callee)
+      for a in args { o = name_refs(a, o) }
+      o
+    }
+    EMethod(target, name, args, _, _, _, _) -> {
+      var o = name_refs(target, set.insert(out, name))
+      for a in args { o = name_refs(a, o) }
+      o
+    }
+    EApply(target, args, _, _) -> {
+      var o = name_refs(target, out)
+      for a in args { o = name_refs(a, o) }
+      o
+    }
+    ELambda(_, body, _, _) -> name_refs(body, out)
+    EBlock(stmts, tail, _, _) -> {
+      var o = out
+      for s in stmts { o = stmt_name_refs(s, o) }
+      match tail {
+        Some(t) -> name_refs(t, o)
+        None -> o
+      }
+    }
+    EIf(cond, thn, els, _, _) -> {
+      var o = name_refs(thn, name_refs(cond, out))
+      match els {
+        Some(x) -> name_refs(x, o)
+        None -> o
+      }
+    }
+    EMatch(scrut, arms, _, _) -> {
+      var o = name_refs(scrut, out)
+      for arm in arms {
+        match arm.guard {
+          Some(g) -> { o = name_refs(g, o) }
+          None -> ()
+        }
+        o = name_refs(arm.body, o)
+      }
+      o
+    }
+    ECtor(_, cargs, spread, _, _, _, _, _) -> {
+      var o = out
+      match spread {
+        Some(sp) -> { o = name_refs(sp, o) }
+        None -> ()
+      }
+      for a in cargs { o = name_refs(a.e, o) }
+      o
+    }
+    EFieldAcc(target, _, _, _, _, _) -> name_refs(target, out)
+    EListLit(elems, _, _) -> {
+      var o = out
+      for x in elems { o = name_refs(x, o) }
+      o
+    }
+    ETupleLit(elems, _, _) -> {
+      var o = out
+      for x in elems { o = name_refs(x, o) }
+      o
+    }
+    EBinary(_, l, r, _, _, _, _) -> name_refs(r, name_refs(l, out))
+    EUnary(_, operand, _, _) -> name_refs(operand, out)
+    EPropagate(operand, _, _) -> name_refs(operand, out)
+    EUnwrap(operand, _, _) -> name_refs(operand, out)
+    EIndex(target, index, _, _) -> name_refs(index, name_refs(target, out))
+    EReturn(v, _, _) ->
+      match v {
+        Some(x) -> name_refs(x, out)
+        None -> out
+      }
+    EStr(parts, _, _) -> {
+      var o = out
+      for pt in parts {
+        match pt {
+          SPInterp(x) -> { o = name_refs(x, o) }
+          _ -> ()
+        }
+      }
+      o
+    }
+    EComptime(body, _, _) -> name_refs(body, out)
+    EUnsafePure(body, _, _) -> name_refs(body, out)
+    _ -> out
+  }
+
+fn stmt_name_refs(s: Stmt, out: Set[String]) -> Set[String] =
+  match s {
+    SLet(_, _, _, init, _, _) -> name_refs(init, out)
+    SLetPat(_, _, init, _, _) -> name_refs(init, out)
+    SLocalFn(_, _, _, _, body, _, _, _, _) -> name_refs(body, out)
+    SAssign(_, value, _, _, _, _) -> name_refs(value, out)
+    SExpr(e, _, _) -> name_refs(e, out)
+    SAssert(cond, _, _, _) -> name_refs(cond, out)
+    SWhile(cond, body, _, _) -> name_refs(body, name_refs(cond, out))
+    SFor(_, from, to, body, _, _) -> {
+      var o = name_refs(from, out)
+      match to {
+        Some(t) -> { o = name_refs(t, o) }
+        None -> ()
+      }
+      name_refs(body, o)
+    }
+  }
+
+test "name refs walk every call position" {
+  let e = EBlock(
+    [SLet("x", false, None, ECall("g", [EVar("y", 0, 1)], 0, 1, 0, 4), 0, 5)],
+    Some(EMethod(EVar("m", 6, 7), "h", [ELambda(no_lparams(), EVar("z", 10, 11), 8, 12)],
+      8, 9, 6, 13)),
+    0,
+    14
+  )
+  let refs = name_refs(e, set.empty())
+  for n in ["g", "y", "m", "h", "z"] {
+    assert set.has(refs, n)
+  }
+  assert not set.has(refs, "x")
+}
+
+fn no_lparams() -> List[LambdaParam] = []
