@@ -377,3 +377,218 @@ pub fn pat_hi(p: Pattern) -> Int =
     PTuple(_, _, hi) -> hi
     PList(_, _, _, _, _, _, hi) -> hi
   }
+
+# ---- module views (the Kotlin Module's filtered lazy lists) ----
+
+pub fn module_fns(m: Module) -> List[FnDecl] = {
+  var out: List[FnDecl] = []
+  for d in m.decls {
+    match d {
+      DFn(f) -> { out = out ++ [f] }
+      _ -> ()
+    }
+  }
+  out
+}
+
+pub fn module_types(m: Module) -> List[TypeDeclR] = {
+  var out: List[TypeDeclR] = []
+  for d in m.decls {
+    match d {
+      DType(t) -> { out = out ++ [t] }
+      _ -> ()
+    }
+  }
+  out
+}
+
+pub type ConstView = {
+  name: String,
+  is_pub: Bool,
+  ann: TypeRef,
+  init: Expr,
+  lo: Int,
+  hi: Int,
+  nlo: Int,
+  nhi: Int
+}
+
+pub fn module_consts(m: Module) -> List[ConstView] = {
+  var out: List[ConstView] = []
+  for d in m.decls {
+    match d {
+      DConst(name, is_pub, ann, init, lo, hi, nlo, nhi) -> {
+        out = out ++ [ConstView {
+          name: name,
+          is_pub: is_pub,
+          ann: ann,
+          init: init,
+          lo: lo,
+          hi: hi,
+          nlo: nlo,
+          nhi: nhi
+        }]
+      }
+      _ -> ()
+    }
+  }
+  out
+}
+
+pub type TraitView = {
+  name: String,
+  tp: String,
+  tplo: Int,
+  tphi: Int,
+  methods: List[TraitMethod],
+  is_pub: Bool,
+  lo: Int,
+  hi: Int,
+  nlo: Int,
+  nhi: Int
+}
+
+pub fn module_traits(m: Module) -> List[TraitView] = {
+  var out: List[TraitView] = []
+  for d in m.decls {
+    match d {
+      DTrait(name, tp, tplo, tphi, methods, is_pub, lo, hi, nlo, nhi) -> {
+        out = out ++ [TraitView {
+          name: name,
+          tp: tp,
+          tplo: tplo,
+          tphi: tphi,
+          methods: methods,
+          is_pub: is_pub,
+          lo: lo,
+          hi: hi,
+          nlo: nlo,
+          nhi: nhi
+        }]
+      }
+      _ -> ()
+    }
+  }
+  out
+}
+
+pub type ImplView = {
+  trait_name: String,
+  tlo: Int,
+  thi: Int,
+  subject: TypeRef,
+  methods: List[FnDecl],
+  lo: Int,
+  hi: Int
+}
+
+pub fn module_impls(m: Module) -> List[ImplView] = {
+  var out: List[ImplView] = []
+  for d in m.decls {
+    match d {
+      DImpl(trait_name, tlo, thi, subject, methods, lo, hi) -> {
+        out = out ++ [ImplView {
+          trait_name: trait_name,
+          tlo: tlo,
+          thi: thi,
+          subject: subject,
+          methods: methods,
+          lo: lo,
+          hi: hi
+        }]
+      }
+      _ -> ()
+    }
+  }
+  out
+}
+
+pub type TestView = { name: String, body: Expr, lo: Int, hi: Int, nlo: Int, nhi: Int }
+
+pub fn module_tests(m: Module) -> List[TestView] = {
+  var out: List[TestView] = []
+  for d in m.decls {
+    match d {
+      DTest(name, body, lo, hi, nlo, nhi) -> {
+        out = out ++ [TestView { name: name, body: body, lo: lo, hi: hi, nlo: nlo, nhi: nhi }]
+      }
+      _ -> ()
+    }
+  }
+  out
+}
+
+pub type JavaUseView = { fqcn: String, simple: String, lo: Int, hi: Int, nlo: Int, nhi: Int }
+
+fn simple_of(fqcn: String) -> String = {
+  var cut = 0
+  var i = 0
+  for c in code_points(fqcn) {
+    if c == '.' { cut = i + 1 }
+    i = i + 1
+  }
+  from_code_points(list_from2(code_points(fqcn), cut))
+}
+
+fn list_from2(xs: List[Int], from: Int) -> List[Int] = {
+  var out: List[Int] = []
+  var i = from
+  while i < len(xs) {
+    out = out ++ [xs[i]]
+    i = i + 1
+  }
+  out
+}
+
+pub fn module_java_uses(m: Module) -> List[JavaUseView] = {
+  var out: List[JavaUseView] = []
+  for d in m.decls {
+    match d {
+      DUseJava(fqcn, lo, hi, nlo, nhi) -> {
+        out = out ++ [JavaUseView {
+          fqcn: fqcn,
+          simple: simple_of(fqcn),
+          lo: lo,
+          hi: hi,
+          nlo: nlo,
+          nhi: nhi
+        }]
+      }
+      _ -> ()
+    }
+  }
+  out
+}
+
+pub type UseView = {
+  segs: List[String],
+  path: String,
+  alias_name: String,
+  selective: Option[List[ImportName]],
+  lo: Int,
+  hi: Int,
+  nlo: Int,
+  nhi: Int
+}
+
+pub fn module_uses(m: Module) -> List[UseView] = {
+  var out: List[UseView] = []
+  for d in m.decls {
+    match d {
+      DUseModule(segs, selective, lo, hi, nlo, nhi) -> {
+        out = out ++ [UseView {
+          segs: segs,
+          path: join(segs, "/"),
+          alias_name: segs[len(segs) - 1],
+          selective: selective,
+          lo: lo,
+          hi: hi,
+          nlo: nlo,
+          nhi: nhi
+        }]
+      }
+      _ -> ()
+    }
+  }
+  out
+}
