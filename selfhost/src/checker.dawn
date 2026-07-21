@@ -20,7 +20,9 @@ use ast.{
   Decl, DImpl, FnDecl, EBool, DFn, EVar, DConst, EInt,
   BinOp, UnOp, OpAdd, OpSub, OpMul, OpDiv, OpMod, OpConcat, OpEq, OpNeq, OpLt,
   OpLe, OpGt, OpGe, OpAnd, OpOr, OpBand, OpBor, OpBxor, OpShl, OpShr, OpUshr,
-  OpNeg, OpNot, OpBnot
+  OpNeg, OpNot, OpBnot,
+  Pattern, PLit, PBind, PWild, PCtor, PTuple, PList, PatArg,
+  SPText, SPInterp, EFloat, EStr, pat_lo, pat_hi
 }
 use tast.{
   TExpr, XInt, XFloat, XBool, XUnit, XStr, XLocal, XFnValue, XCallDyn,
@@ -44,6 +46,7 @@ use types.{
   builtins, opt_ty, result_ty, OPTION_ID, RESULT_ID, ORD_ID
 }
 use jreflect.{JClass, find_class, class_info}
+use exhaustive.{LitV, LInt, LFloat, LBool, LStr, SPat}
 use suggest
 
 ## An alias entry: the Kotlin AliasInfo without its mutable resolution slots
@@ -3029,3 +3032,403 @@ test "field access follows record shape with substitution" {
   let (cx4, t3, _) = check_field_access_typed(cx, opt_ty(TyInt), XError(0, 1), "v", 2, 3, 0, 3)
   assert str.contains(cx4.diags[0].hint, "sum type; destructure it with match")
 }
+
+# ---- pattern checking ----
+
+## Does the pattern introduce any binding (recursively)?
+pub fn binds_anything(p: Pattern) -> Bool =
+  match p {
+    PBind(_, _, _) -> true
+    PCtor(_, pargs, _, _, _, _, _, _) -> {
+      for a in pargs {
+        if binds_anything(a.pat) { return true }
+      }
+      false
+    }
+    PTuple(elems, _, _) -> {
+      for e in elems {
+        if binds_anything(e) { return true }
+      }
+      false
+    }
+    PList(pre, _, rest_name, _, post, _, _) -> {
+      match rest_name {
+        Some(_) -> return true
+        None -> ()
+      }
+      for e in pre ++ post {
+        if binds_anything(e) { return true }
+      }
+      false
+    }
+    _ -> false
+  }
+
+## First refutable subpattern's span, or None if `p` always matches (spec §5.2).
+pub fn refutable_part(cx: Cx, p: Pattern) -> Option[(Int, Int)] =
+  match p {
+    PWild(_, _) -> None
+    PBind(_, _, _) -> None
+    PLit(_, lo, hi) -> Some((lo, hi))
+    PTuple(elems, _, _) -> {
+      for e in elems {
+        match refutable_part(cx, e) {
+          Some(s) -> return Some(s)
+          None -> ()
+        }
+      }
+      None
+    }
+    PList(pre, has_rest, _, _, post, lo, hi) ->
+      # only [..rest] matches every list; any fixed element constrains the length
+      if has_rest && len(pre) == 0 && len(post) == 0 { None } else { Some((lo, hi)) }
+    PCtor(cname, pargs, _, _, _, _, lo, hi) -> {
+      match map.get(cx.ctors_by_name, cname) {
+        Some(key) -> {
+          let (aid, _) = key
+          if len(adt_of(cx.adts, aid).ctors) > 1 { return Some((lo, hi)) }
+        }
+        None -> ()
+      }
+      for a in pargs {
+        match refutable_part(cx, a.pat) {
+          Some(s) -> return Some(s)
+          None -> ()
+        }
+      }
+      None
+    }
+  }
+
+## Check one pattern against the scrutinee type, declaring its bindings and
+## producing the typed pattern (the Kotlin checkPattern).
+pub fn check_pattern(cx: Cx, p: Pattern, scrut: Ty, mutable: Bool) -> (Cx, TPat) =
+  match p {
+    PWild(_, _) -> (cx, TPWild)
+    PBind(name, lo, hi) -> {
+      let (cx1, sym) = declare(cx, name, scrut, mutable, lo, hi)
+      (cx1, TPBind(sym, name))
+    }
+    PLit(lit, lo, hi) -> check_lit_pattern(cx, lit, scrut, lo, hi)
+    PTuple(elems, lo, hi) -> {
+      let matches2 = match scrut {
+        TyTuple(stys) -> len(stys) == len(elems)
+        _ -> false
+      }
+      if matches2 {
+        match scrut {
+          TyTuple(stys) -> {
+            var cx1 = cx
+            var subs: List[TPat] = []
+            var i = 0
+            for sub in elems {
+              let (cx2, tp) = check_pattern(cx1, sub, stys[i], mutable)
+              cx1 = cx2
+              subs = subs ++ [tp]
+              i = i + 1
+            }
+            (cx1, TPTuple(subs))
+          }
+          _ -> (cx, TPWild)
+        }
+      } else {
+        var cx1 = cx
+        if not is_errorish(scrut) {
+          let is_tuple = match scrut {
+            TyTuple(_) -> true
+            _ -> false
+          }
+          let msg = match scrut {
+            TyTuple(stys) -> "this pattern has " ++ to_string(len(elems)) ++
+              " elements but the scrutinee is " ++ ty_show(cx1.adts, scrut)
+            _ -> "tuple pattern does not match scrutinee type " ++ ty_show(cx1.adts, scrut)
+          }
+          let hint = match scrut {
+            TyTuple(stys) -> "a tuple pattern must bind exactly " ++ to_string(len(stys)) ++
+              " element(s)"
+            _ -> "match a tuple pattern only against a tuple value"
+          }
+          cx1 = cerr_h(cx1, msg, lo, hi, hint)
+        }
+        var subs: List[TPat] = []
+        for sub in elems {
+          let (cx2, tp) = check_pattern(cx1, sub, TyError, mutable)
+          cx1 = cx2
+          subs = subs ++ [tp]
+        }
+        (cx1, TPTuple(subs))
+      }
+    }
+    PList(pre, has_rest, rest_name, rest_span, post, lo, hi) -> {
+      var cx1 = cx
+      let elem = match scrut {
+        TyList(e) -> e
+        _ -> {
+          if not is_errorish(scrut) {
+            cx1 = cerr(cx1, "list pattern does not match scrutinee type " ++
+                ty_show(cx1.adts, scrut), lo, hi)
+          }
+          TyError
+        }
+      }
+      var pres: List[TPat] = []
+      for sub in pre {
+        let (cx2, tp) = check_pattern(cx1, sub, elem, mutable)
+        cx1 = cx2
+        pres = pres ++ [tp]
+      }
+      var posts: List[TPat] = []
+      for sub in post {
+        let (cx2, tp) = check_pattern(cx1, sub, elem, mutable)
+        cx1 = cx2
+        posts = posts ++ [tp]
+      }
+      var rest_sym: Option[Int] = None
+      match rest_name {
+        Some(rn) -> {
+          let (rlo, rhi) = match rest_span {
+            Some(s) -> s
+            None -> (lo, hi)
+          }
+          let (cx3, sym) = declare(cx1, rn, TyList(elem), mutable, rlo, rhi)
+          cx1 = cx3
+          rest_sym = Some(sym)
+        }
+        None -> ()
+      }
+      (cx1, TPList(pres, has_rest, rest_sym, posts))
+    }
+    PCtor(cname, pargs, has_rest, has_parens, nlo, nhi, lo, hi) ->
+      check_ctor_pattern(cx, cname, pargs, has_rest, has_parens, nlo, nhi, lo, hi, scrut, mutable)
+  }
+
+fn check_lit_pattern(cx: Cx, lit: Expr, scrut: Ty, lo: Int, hi: Int) -> (Cx, TPat) = {
+  # the literal's own type; string patterns are interpolation-free (parser ensured)
+  let (lt, lv) = match lit {
+    EInt(v, _, _) -> (TyInt, LInt(v))
+    EFloat(v, _, _) -> (TyFloat, LFloat(v))
+    EBool(v, _, _) -> (TyBool, LBool(v))
+    EStr(parts, _, _) -> {
+      var s = ""
+      for pt in parts {
+        match pt {
+          SPText(v) -> { s = s ++ v }
+          _ -> ()
+        }
+      }
+      (TyString, LStr(s))
+    }
+    _ -> (TyError, LInt(0))
+  }
+  var cx1 = cx
+  if lt != scrut && not is_errorish(scrut) && not is_errorish(lt) {
+    cx1 = cerr(cx1, "pattern type " ++ ty_show(cx1.adts, lt) ++
+        " does not match scrutinee type " ++ ty_show(cx1.adts, scrut), lo, hi)
+  }
+  (cx1, TPLit(lv))
+}
+
+fn check_ctor_pattern(
+  cx: Cx,
+  cname: String,
+  pargs: List[PatArg],
+  has_rest: Bool,
+  has_parens: Bool,
+  nlo: Int,
+  nhi: Int,
+  lo: Int,
+  hi: Int,
+  scrut: Ty,
+  mutable: Bool
+) -> (Cx, TPat) = {
+  var cx1 = cx
+  let key = match map.get(cx1.ctors_by_name, cname) {
+    None -> {
+      cx1 = cerr_o(cx1, "undefined constructor in pattern: " ++ cname, nlo, nhi,
+        suggest.hint(cname, map.keys(cx1.ctors_by_name)))
+      # still check subpatterns so their bindings exist (as TyError)
+      for a in pargs {
+        let (cx2, _) = check_pattern(cx1, a.pat, TyError, mutable)
+        cx1 = cx2
+      }
+      return (cx1, TPWild)
+    }
+    Some(k) -> k
+  }
+  let (aid, cslot) = key
+  let a2 = adt_of(cx1.adts, aid)
+  let ci = a2.ctors[cslot]
+  let scrut_matches = match scrut {
+    TyAdt(said, _) -> said == aid
+    _ -> false
+  }
+  if not scrut_matches {
+    if not is_errorish(scrut) {
+      cx1 = cerr(cx1, "`" ++ cname ++ "` is a " ++ a2.name ++
+          " constructor, but the scrutinee is " ++ ty_show(cx1.adts, scrut), nlo, nhi)
+    }
+  }
+  # instantiate field types with the scrutinee's type arguments
+  var inst: Map[Int, Ty] = map.empty()
+  if scrut_matches {
+    match scrut {
+      TyAdt(_, sargs) -> {
+        var i = 0
+        for tp in a2.tparams {
+          match tp {
+            TyVar(_, vid) ->
+              match get(sargs, i) {
+                Some(arg) -> { inst = map.insert(inst, vid, arg) }
+                None -> ()
+              }
+            _ -> ()
+          }
+          i = i + 1
+        }
+      }
+      _ -> ()
+    }
+  }
+  let em: Map[Int, Eff] = map.empty()
+  var field_tys: List[Ty] = []
+  for f in ci.fields { field_tys = field_tys ++ [subst(f.ty, inst, em)] }
+  let n = len(ci.fields)
+  if not has_parens && n > 0 {
+    cx1 = cerr_h(cx1, "constructor `" ++ ci.name ++ "` has " ++ to_string(n) ++
+        " field(s); a bare name does not match it", lo, hi,
+      "write " ++ ci.name ++ "(..) to ignore the fields, or destructure them")
+    for a in pargs {
+      let (cx2, _) = check_pattern(cx1, a.pat, TyError, mutable)
+      cx1 = cx2
+    }
+    return (cx1, TPWild)
+  }
+  var slots: List[Option[TPat]] = []
+  for _i in 0 ..n { slots = slots ++ [no_tpat()] }
+  var saw_named = false
+  var i = 0
+  for a in pargs {
+    var idx = -1
+    match a.name {
+      Some(an) -> {
+        saw_named = true
+        var j = 0
+        for f in ci.fields {
+          if f.name == an { idx = j }
+          j = j + 1
+        }
+        if idx < 0 {
+          var fnames: List[String] = []
+          for f in ci.fields { fnames = fnames ++ [f.name] }
+          let hint = match suggest.hint(an, fnames) {
+            Some(h) -> h
+            None -> "constructor: " ++ ctor_render(cx1.adts, ci)
+          }
+          cx1 = cerr_h(cx1, "`" ++ ci.name ++ "` has no field `" ++ an ++ "`",
+            pat_lo(a.pat), pat_hi(a.pat), hint)
+          let (cx2, _) = check_pattern(cx1, a.pat, TyError, mutable)
+          cx1 = cx2
+          i = i + 1
+          continue
+        }
+      }
+      None -> {
+        if saw_named {
+          cx1 = cerr(cx1, "positional patterns cannot follow named patterns",
+            pat_lo(a.pat), pat_hi(a.pat))
+          let (cx2, _) = check_pattern(cx1, a.pat, TyError, mutable)
+          cx1 = cx2
+          i = i + 1
+          continue
+        }
+        idx = i
+        if idx >= n {
+          let (cx2, _) = check_pattern(cx1, a.pat, TyError, mutable)
+          cx1 = cx2
+          i = i + 1
+          continue
+        }
+      }
+    }
+    let already = match slots[idx] {
+      Some(_) -> true
+      None -> false
+    }
+    if already {
+      cx1 = cerr(cx1, "field `" ++ ci.fields[idx].name ++ "` is matched twice",
+        pat_lo(a.pat), pat_hi(a.pat))
+      let (cx2, _) = check_pattern(cx1, a.pat, TyError, mutable)
+      cx1 = cx2
+      i = i + 1
+      continue
+    }
+    let (cx3, tp) = check_pattern(cx1, a.pat, field_tys[idx], mutable)
+    cx1 = cx3
+    slots = list.take(slots, idx) ++ [Some(tp)] ++ list.drop(slots, idx + 1)
+    i = i + 1
+  }
+  if len(pargs) > n {
+    cx1 = cerr_h(cx1, "`" ++ ci.name ++ "` has " ++ to_string(n) ++ " field(s), the pattern names " ++
+        to_string(len(pargs)), lo, hi, "constructor: " ++ ctor_render(cx1.adts, ci))
+  } else if not has_rest {
+    var missing: List[String] = []
+    var k = 0
+    for f in ci.fields {
+      match slots[k] {
+        None -> { missing = missing ++ [f.name] }
+        Some(_) -> ()
+      }
+      k = k + 1
+    }
+    if len(missing) > 0 {
+      cx1 = cerr_h(cx1, "pattern for `" ++ ci.name ++ "` does not mention: " ++
+          join(missing, ", "), lo, hi, "add `..` to ignore the remaining fields")
+    }
+  }
+  (cx1, TPCtor(aid, cslot, slots))
+}
+
+fn no_tpat() -> Option[TPat] = None
+
+test "patterns bind, refute, and lower" {
+  var cx = seed_prelude(push_scope(test_cx()))
+  # Some(x) against Option[Int] binds x: Int
+  let p = PCtor("Some", [PatArg { name: None, pat: PBind("x", 5, 6) }], false, true, 0, 4, 0, 7)
+  let (cx1, tp) = check_pattern(cx, p, opt_ty(TyInt), false)
+  assert len(cx1.diags) == 0
+  assert sym_of(cx1, lookup(cx1, "x").expect("bound")).ty == TyInt
+  match tp {
+    TPCtor(aid, ci, slots) -> {
+      assert aid == OPTION_ID
+      assert ci == 0
+      assert len(slots) == 1
+    }
+    _ -> { assert false }
+  }
+  # refutability: Some(x) is refutable, (a, b) is not, [x] is
+  assert refutable_part(cx, p) != None
+  let tup = PTuple([PBind("a", 0, 1), PBind("b", 3, 4)], 0, 5)
+  assert refutable_part(cx, tup) == None
+  assert refutable_part(cx, PList([PWild(1, 2)], false, None, None, [], 0, 3)) != None
+  assert binds_anything(p)
+  assert not binds_anything(PWild(0, 1))
+}
+
+test "ctor pattern field discipline" {
+  var cx = seed_prelude(push_scope(test_cx()))
+  # Ok(v: x, ..) on Result[Int, String]; then a missing-field case
+  let good = PCtor("Ok", [PatArg { name: Some("value"), pat: PBind("x", 5, 6) }],
+    false, true, 0, 2, 0, 7)
+  let (cx1, _) = check_pattern(cx, good, result_ty(TyInt, TyString), false)
+  assert len(cx1.diags) == 0
+  let bare = PCtor("Ok", no_pargs(), false, false, 0, 2, 0, 2)
+  let (cx2, _) = check_pattern(cx, bare, result_ty(TyInt, TyString), false)
+  assert str.contains(cx2.diags[0].msg, "a bare name does not match it")
+  let wrong = PCtor("Ok", [PatArg { name: Some("nope"), pat: PWild(5, 6) }],
+    false, true, 0, 2, 0, 7)
+  let (cx3, _) = check_pattern(cx, wrong, result_ty(TyInt, TyString), false)
+  assert cx3.diags[0].msg == "`Ok` has no field `nope`"
+  assert str.contains(cx3.diags[1].msg, "does not mention: value")
+}
+
+fn no_pargs() -> List[PatArg] = []
