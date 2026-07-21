@@ -13,11 +13,11 @@
 # already used, so end-of-input handling did not have to change at all.
 # No panics — malformed input becomes an Err.
 
-pub fn peek(src: String, i: Int) -> Int = cursor_char(src, i)
+pub fn peek(src: String, i: Cursor) -> Int = cursor_char(src, i)
 
 pub fn is_digit(c: Int) -> Bool = c >= '0' && c <= '9'
 
-pub fn skip_ws(src: String, i: Int) -> Int = {
+pub fn skip_ws(src: String, i: Cursor) -> Cursor = {
   let c = peek(src, i)
   if c == ' ' || c == '\t' || c == '\n' || c == 13 {
     skip_ws(src, cursor_next(src, i))
@@ -43,7 +43,7 @@ fn hex_digit(c: Int) -> Int =
 # `cursor_next` rather than `i + 1` matters even though hex digits are ASCII:
 # on malformed input the character sitting there may not be, and arithmetic
 # would land inside a surrogate pair instead of on the next character.
-fn read_hex4(src: String, i: Int) -> Option[(Int, Int)] = {
+fn read_hex4(src: String, i: Cursor) -> Option[(Int, Cursor)] = {
   let i1 = cursor_next(src, i)
   let i2 = cursor_next(src, i1)
   let i3 = cursor_next(src, i2)
@@ -75,7 +75,7 @@ fn simple_escape(e: Int) -> Option[Int] =
 # quote). The accumulator stays a List[Int] on purpose: it holds the *decoded*
 # characters of one string, which escapes make genuinely different from any span
 # of the source, and its size is that string's, not the document's.
-pub fn scan_string(src: String, start: Int) -> Result[(String, Int), String] = {
+pub fn scan_string(src: String, start: Cursor) -> Result[(String, Cursor), String] = {
   var i = cursor_next(src, start)
   var acc: List[Int] = []
   var status = 0
@@ -158,10 +158,10 @@ pub fn scan_string(src: String, start: Int) -> Result[(String, Int), String] = {
 
 # ---- numbers ----
 
-fn skip_digits(src: String, i: Int) -> Int =
+fn skip_digits(src: String, i: Cursor) -> Cursor =
   if is_digit(peek(src, i)) { skip_digits(src, cursor_next(src, i)) } else { i }
 
-fn scan_int_part(src: String, i: Int) -> Result[Int, String] =
+fn scan_int_part(src: String, i: Cursor) -> Result[Cursor, String] =
   if peek(src, i) == '0' {
     Ok(cursor_next(src, i))
   } else if peek(src, i) >= '1' && peek(src, i) <= '9' {
@@ -170,7 +170,7 @@ fn scan_int_part(src: String, i: Int) -> Result[Int, String] =
     Err("invalid number: expected a digit")
   }
 
-fn scan_frac(src: String, i: Int) -> Result[Int, String] =
+fn scan_frac(src: String, i: Cursor) -> Result[Cursor, String] =
   if peek(src, i) == '.' {
     let i1 = cursor_next(src, i)
     let j = skip_digits(src, i1)
@@ -179,7 +179,7 @@ fn scan_frac(src: String, i: Int) -> Result[Int, String] =
     Ok(i)
   }
 
-fn scan_exp(src: String, i: Int) -> Result[Int, String] =
+fn scan_exp(src: String, i: Cursor) -> Result[Cursor, String] =
   if peek(src, i) == 'e' || peek(src, i) == 'E' {
     let i1 = cursor_next(src, i)
     let i2 = if peek(src, i1) == '+' || peek(src, i1) == '-' { cursor_next(src, i1) } else { i1 }
@@ -192,7 +192,7 @@ fn scan_exp(src: String, i: Int) -> Result[Int, String] =
 # `start` begins a number; returns (value, cursor past the number). The literal's
 # text comes out with one `cursor_slice`, where the List[Int] version had to copy
 # the span element by element and rebuild a string from it.
-pub fn scan_number(src: String, start: Int) -> Result[(Float, Int), String] = {
+pub fn scan_number(src: String, start: Cursor) -> Result[(Float, Cursor), String] = {
   let i0 = if peek(src, start) == '-' { cursor_next(src, start) } else { start }
   let i1 = scan_int_part(src, i0)?
   let i2 = scan_frac(src, i1)?
