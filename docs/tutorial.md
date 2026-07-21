@@ -158,6 +158,28 @@ pub fn main() -> Unit !io = {
 Point { x: 11.0, y: 2.0 }
 ```
 
+
+`type` 声明的永远是新类型；给已有类型起**别名**用 `alias`——两边可以互换使用，
+常用来给元组或函数类型一个说话用的名字：
+
+```dawn
+alias Point = (Int, Int)
+
+fn shift(p: Point, dx: Int) -> Point = {
+  let (x, y) = p
+  (x + dx, y)
+}
+
+pub fn main() -> Unit !io = {
+  let p: Point = (1, 2)
+  println(to_string(shift(p, 3)))
+}
+```
+
+```output
+(4, 2)
+```
+
 ---
 
 ## 5. 列表、元组与模式解构
@@ -202,7 +224,38 @@ pub fn main() -> Unit !io = {
 
 ---
 
-## 6. 错误处理：Result 与 `?`
+## 6. 循环：while、for、break 与 continue
+
+递归和 `map`/`fold` 之外，Dawn 也有普通循环：`while` 条件循环、`for x in 列表`、
+`for i in a..b`（含 a 不含 b）。`break` 提前退出**最内层**循环，`continue` 跳到下一轮；
+它们是 `Never` 类型的表达式，不能穿过 lambda 边界。
+
+```dawn
+pub fn main() -> Unit !io = {
+  var sum = 0
+  for i in 0..5 {
+    if i == 3 { continue }
+    sum = sum + i
+  }
+  println("$sum")
+
+  var n = 0
+  while true {
+    n = n + 1
+    if n * n > 30 { break }
+  }
+  println("$n")
+}
+```
+
+```output
+7
+6
+```
+
+---
+
+## 7. 错误处理：Result 与 `?`
 
 Dawn 没有异常。可恢复的错误走 `Result[T, E]`；`?` 在 `Ok`/`Some` 时取值、
 在 `Err`/`None` 时提前返回。不可恢复的用 `panic`（它不返回，故不需要 `!io`）。
@@ -229,7 +282,7 @@ pub fn main() -> Unit !io =
 
 ---
 
-## 7. lambda 与效果系统
+## 8. lambda 与效果系统
 
 匿名函数用 `fn(参数) => 表达式`；类型可推导时参数注解可省。函数类型写作
 `fn(A) -> B !e`，其中 `!e` 是效果。纯函数看签名即知没有副作用，测试无需 mock。
@@ -269,13 +322,20 @@ pub fn main() -> Unit !io = {
 
 ---
 
-## 8. 字符串与标准库
+## 9. 字符串与标准库
 
-字符串函数按码点处理。`split` 是**字面量**分隔（不是正则）；`join` 是它的逆：
+标准库分两层：少数高频名（`println`、`map`/`filter`/`fold`、`len`、`to_string`…）
+在 **prelude** 里，随处直接可用；其余都住在**模块**里，`use std/x` 引入后用
+`x.fn(...)` 限定调用——字符串在 `std/str`，还有 `std/list`、`std/map`、`std/set`、
+`std/bytes`、`std/io`、`std/cursor`。热名可以选择性引入（`use std/str.{trim}`）。
+
+字符串函数按码点处理。`str.split` 是**字面量**分隔（不是正则）；`join` 是它的逆：
 
 ```dawn
+use std/str
+
 pub fn main() -> Unit !io = {
-  let parts = split("a,b,c", ",")
+  let parts = str.split("a,b,c", ",")
   println(to_string(len(parts)))
   println(join(parts, " - "))
 }
@@ -322,7 +382,7 @@ pub fn main() -> Unit !io = {
 
 ---
 
-## 9. comptime 与 const
+## 10. comptime 与 const
 
 `comptime { ... }` 在编译期由解释器执行，结果烧进常量池——没有宏。
 顶层 `const` 名字用全大写，其初始化隐式是 comptime：
@@ -343,7 +403,7 @@ pub fn main() -> Unit !io =
 
 ---
 
-## 10. 调用 Java
+## 11. 调用 Java
 
 `use java "..."` 直接调 Java 类。所有 Java 调用自动视为 `!io`；引用类型返回值
 自动包成 `Option[T]`——null 进不了 Dawn。构造用 `.new`，静态方法用类名。
@@ -363,7 +423,7 @@ pub fn main() -> Unit !io = {
 
 ---
 
-## 11. test 块与 dawn fmt
+## 12. test 块与 dawn fmt
 
 `test "名字" { ... }` 里用 `assert` 写断言；`dawn test` 执行它们，`dawn build`
 会把它们剥除。纯函数测试不需要任何 mock：
@@ -388,7 +448,7 @@ ok
 
 ---
 
-## 12. 模块与项目
+## 13. 模块与项目
 
 超过一个文件就是一个项目。目录约定：模块放在 `src/` 下，入口是 `src/main.dawn`。
 一个 `.dawn` 文件 = 一个模块，模块路径就是它相对 `src/` 的路径。
@@ -434,21 +494,25 @@ test 块，`dawn build myapp` 打成一个 jar。单文件的 `dawn run foo.dawn
 
 ---
 
-## 13. Map 与 Set
+## 14. Map 与 Set
 
 `Map[K, V]` 和 `Set[T]` 是内建的**持久**容器：每次「修改」都返回新容器，原值不变。
-没有字面量语法，全部通过内建函数操作。迭代顺序 = 插入顺序（JVM 与 native 一致）。
+没有字面量语法，操作都在 `std/map` 与 `std/set` 模块里。迭代顺序 = 插入顺序
+（JVM 与 native 一致）。
 
 ```dawn
-pub fn main() -> Unit !io = {
-  let m = map_insert(map_insert(map_empty(), "a", 1), "b", 2)
-  println(to_string(map_get(m, "a")))
-  println(to_string(map_get(m, "z")))
-  println(to_string(map_keys(m)))
+use std/map
+use std/set
 
-  let s = set_from([3, 1, 2, 1, 3])
-  println(to_string(set_size(s)))
-  println(to_string(set_has(s, 2)))
+pub fn main() -> Unit !io = {
+  let m = map.insert(map.insert(map.empty(), "a", 1), "b", 2)
+  println(to_string(map.get(m, "a")))
+  println(to_string(map.get(m, "z")))
+  println(to_string(map.keys(m)))
+
+  let s = set.from([3, 1, 2, 1, 3])
+  println(to_string(set.size(s)))
+  println(to_string(set.has(s, 2)))
 }
 ```
 
@@ -460,23 +524,25 @@ None
 true
 ```
 
-键可以是任何具结构相等的类型（`Int`/`String`/元组/ADT/record）。`map_get` 返回
+键可以是任何具结构相等的类型（`Int`/`String`/元组/ADT/record）。`map.get` 返回
 `Option[V]`——查不到是 `None`，不是异常。相等与顺序无关：键值相同的两个 `Map` 相等。
 
 ---
 
-## 14. 字符与码点
+## 15. 字符与码点
 
 Dawn 没有独立的字符类型，走 Go 的 rune 路线：字符字面量 `'a'` 就是等于它**码点**的
 `Int`（`'a' == 97`）。于是它在 `match` 里就是普通整数模式，字符串按码点处理。
 
 ```dawn
+use std/str
+
 fn is_digit(c: Int) -> Bool = c >= '0' && c <= '9'
 
 pub fn main() -> Unit !io = {
   println(to_string(is_digit('7')))
-  println(to_string(str_len("héllo 🙂")))
-  println(substring("世界你好", 0, 2))
+  println(to_string(str.len("héllo 🙂")))
+  println(str.substring("世界你好", 0, 2))
   println(from_code_points([104, 105]))
 }
 ```
@@ -489,11 +555,34 @@ hi
 ```
 
 `code_points`/`from_code_points` 在字符串与码点列表间往返（含增补平面的 emoji），
-`str_len` 数码点，`substring` 按码点下标切片，`char_to_string` 把一个码点变成字符串。
+`str.len` 数码点，`str.substring` 按码点下标切片，`str.from_char` 把一个码点变成字符串。
+
+按码点**下标**的函数每次都要从串首数起（单次 O(n)，循环里就是 O(n²)）。扫描字符串
+用 `std/cursor`：**游标**是不透明的位置，每步恒定开销；对它做算术是编译错误，
+比较先后（`==`、`<`）是允许的。
+
+```dawn
+use std/cursor
+
+pub fn main() -> Unit !io = {
+  let s = "a🎈b"
+  let c = cursor.next(s, cursor.start(s))
+  println("${cursor.char(s, c)}")
+  println(cursor.slice(s, c, cursor.end(s)))
+}
+```
+
+```output
+127880
+🎈b
+```
+
+一步就是一个字符：emoji 的代理对不会被拆开。`cursor.find(s, sub, from)` 返回
+`Option[Cursor]`，`cursor.skip(s, c, sub)` 跳过一段已知出现的字面量。
 
 ---
 
-## 15. trait：约束泛型与运算符重载
+## 16. trait：约束泛型与运算符重载
 
 到目前为止，泛型函数对 `T` 一无所知——不能比较、不能打印、不能调方法。
 **trait** 给类型参数加上能力约束。声明一个 trait，为具体类型写 `impl`，

@@ -60,10 +60,10 @@ true false not
 **字符字面量走 Go 的 rune 路线**：`'x'` 不是独立类型，而是等于该字符**码点**的 `Int`
 字面量（`'a' == 97`）。因此 match 里它就是普通 `Int` 模式，类型系统零改动。单引号内是
 单个码点：转义与字符串相同（`\n \t \\ \u{...}`）另加 `\'`；空字面量或含多个码点 → 词法错误。
-按码点处理字符串的内建见 §11（`code_points`/`from_code_points`/`str_len`/`substring`）。
+按码点处理字符串的函数见 §11（`code_points`/`from_code_points`/`str.len`/`str.substring`）。
 **注意**：运行期存储是 `java.lang.String`（UTF-16 码元下标），故「按码点下标随机访问」需要
 O(n) 换算——实测与设计取舍见 [`seq6-research.md`](seq6-research.md) 附录。**逐字符遍历请用
-§11 的游标（`cursor_*`）**，它每步恒定开销；下标版留给单次调用。
+§11 的游标（`std/cursor`）**，它每步恒定开销；下标版留给单次调用。
 没有独立字符类型（Go/Rune 模型使其无必要）。
 
 ### 1.6 字符串与插值
@@ -141,7 +141,7 @@ Java builder 链 `x\n  .uri(u)!\n  .build()!` 从此可以断行）。
 **`Map[K, V]` / `Set[T]`** 是与 `List` 同级的内建持久容器，无字面量语法，全部经
 内建函数操作（清单见 §11）。语义要点：
 
-- **持久（不可变）接口**：`map_insert`/`map_remove` 返回新映射，原值不变。
+- **持久（不可变）接口**：`map.insert`/`map.remove` 返回新映射，原值不变。
 - **键类型**可以是任何具**结构相等**的类型（`Int`/`String`/`Bool`/元组/ADT/record）——
   不再限于 `Int`/`String`。实现要求这些类型有与结构相等一致的哈希（编译器为 ADT/元组/
   record 自动生成 `hashCode`）。**`Float` 与 `Bytes` 不得出现在键类型的任何位置**
@@ -149,10 +149,10 @@ Java builder 链 `x\n  .uri(u)!\n  .build()!` 从此可以断行）。
   `Float` 因 NaN/`-0.0` 有两套相等（§4.3），`Bytes` 的哈希是引用同一性；两者都给不出
   与 `==` 一致的哈希。检查**按类型**落点：类型标注（`resolveType` 出 `Map`/`Set` 处）
   与泛型调用的实例化点（推断首次拼出具体键类型处）——不点名创建函数，包装/转发天然穿透。
-- **迭代顺序 = 插入顺序**，确定且 JVM/native 一致（`map_keys`/`map_entries`/`set_to_list`
-  按插入序）。`map_insert` 遇已存在的键**替换值、保留原插入位置**。
+- **迭代顺序 = 插入顺序**，确定且 JVM/native 一致（`map.keys`/`map.entries`/`set.to_list`
+  按插入序）。`map.insert` 遇已存在的键**替换值、保留原插入位置**。
 - **相等与顺序无关**：两个键值对相同的 `Map` 相等，无论插入次序。
-- 实现是**持久 HAMT**（`dawn/rt/DawnMap`/`DawnSet`）：`map_insert`/`map_remove`
+- 实现是**持久 HAMT**（`dawn/rt/DawnMap`/`DawnSet`）：`map.insert`/`map.remove`
   O(log32 n)，只复制根到叶的路径，其余结构与原映射共享（插入序由逐键序号维持）。
 
 ### 2.3 和类型（ADT）
@@ -454,7 +454,7 @@ let c = rows[1][0]   # 可链式、可与 ?/./() 组合
 ```
 
 - **`[]` 是断言，get 家族是问询**：`xs[i]` 用于「下标必然合法，越界是 bug」的场合
-  （panic 语义，同 Rust）；越界/缺键是正常分支时用 `get(xs, i)` / `map_get(m, k)`（返回 `Option`）。
+  （panic 语义，同 Rust）；越界/缺键是正常分支时用 `get(xs, i)` / `map.get(m, k)`（返回 `Option`）。
 - 下标只作用于 `List`（下标为 `Int`）与 `Map`（下标为键类型），其余类型是编译错误。
 - comptime 中支持 `List` 下标（越界为编译错误）。
 - 只读——列表与映射是不可变的，没有 `xs[i] = v`。
@@ -671,7 +671,7 @@ let base = HttpRequest.newBuilder()!.uri(uri)!  # 而不是 .expect("b") / .expe
   `x! != v` 中 `!=` 仍是一个 token（先按最长匹配切分），比较的是解包后的值。
 - **确有话要说**时仍用 `expect(o, "原因")`——它就是为此存在。
 
-`get`/`map_get` 返回 `Option`（问询）；下标 `xs[i]`/`m[k]` 越界/缺键 panic（断言，§4.8）；
+`get`/`map.get` 返回 `Option`（问询）；下标 `xs[i]`/`m[k]` 越界/缺键 panic（断言，§4.8）；
 `Int` 除零（`/` 与 `%`）panic——是 panic 故 `java_try` 不拦（§4.3 数值边缘语义）。
 
 ---
@@ -827,8 +827,8 @@ fn slurp(p: String) -> String !io = {
 
 `Bytes` 是不可变的字节序列，运行期就是裸 `byte[]`。库函数（§11「bytes」组）：
 `utf8(s) -> Bytes`（字符串的 UTF-8 字节）、`decode(b, charset) -> String`（按字符集解码）、
-`byte_len`、`byte_at(b, i) -> Int`（0..255，越界 panic）、`byte_slice(b, start, end)`
-（`[start,end)`，下标 clamp 进范围）、`byte_index_of(b, needle, from) -> Option[Int]`。
+`bytes.len`、`bytes.at(b, i) -> Int`（0..255，越界 panic）、`bytes.slice(b, start, end)`
+（`[start,end)`，下标 clamp 进范围）、`bytes.index_of(b, needle, from) -> Option[Int]`。
 `Bytes ++ Bytes` 拼接、`==`/`!=` 按**内容**比较（`Show` 渲染为 `<N bytes>` 摘要）。
 `byte[]` 的 JVM `hashCode` 是引用同一性，与内容 `==` 不一致，故 **`Bytes` 作 Map/Set 键
 （或出现在键类型内部）是编译错误**（§2.2；用 `decode` 出的 String 或十六进制键代替）。`Bytes` 不参与 comptime 常量折叠，也不能作 bare 一等函数值
@@ -978,19 +978,35 @@ use java "java.lang.Math"      # Java 互操作（§9），形式不变
 - 类型同一性：同一 `type` 声明在整个程序中是同一个类型（每个文件只解析/检查一次）。
 - 入口：main 模块的 `pub fn main() -> Unit !io`。
 
-### 10.6 prelude
+### 10.6 捆绑标准库与 prelude
 
-标准库中隐式可用、无需 `use` 的部分：`List`/`Option`/`Result` 的构造器、
-`map`/`filter`/`fold`/`range`/`println`、`Map`/`Set` 操作等约数十个常用名（§11）。
+标准库以 **Dawn 源码随编译器捆绑**，组织为真模块（[`stdlib-naming.md`](stdlib-naming.md)）：
+`std/str`、`std/bytes`、`std/io`、`std/list`、`std/map`、`std/set`、`std/cursor`。
+`use std/x` 命中编译器 jar 内的资源而非磁盘（磁盘上 `src/std/` 路径**保留**，落文件报错）；
+之后与普通模块引入完全一致——限定访问 `map.insert(m, k, v)`、选择性引入
+`use std/list.{find}`（§10.2/§10.3）。同名短名跨模块共存（`str.len` / `bytes.len`），
+由限定或选择性引入消歧。
+
+**prelude** 是其中隐式可用、无需 `use` 的高频核：`List`/`Option`/`Result` 的构造器、
+`println`/`print`、`map`/`filter`/`fold`、内建的 `len`/`get`/`range`/`sort` 族/
+`to_string`/`join`/`parse_*`/`panic`/`todo`/`expect`/`unwrap_or`/`cast`/
+`java_try`/`catch_panic`/`args` 等一屏以内（全集见 `dawn doc --builtins`）。
+
+**顶层声明可以遮蔽 builtin/std 函数名**（§10.3，Rust 式）：解析序是本模块声明 →
+std → 内建，std 模块自己的 `pub fn len` 正是靠这一条合法。
+
+> **过渡（v0.4.0 → v0.5.0）**：模块化之前的平铺拼写（`map_insert`、`str_len`、
+> `trim` 的隐式可见等）在 v0.4.0 仍可用但**每处警告**；v0.5.0 起从公开命名空间
+> 移除，只剩 prelude 与模块限定两条路。
 
 ---
 
 ## 11. 标准库草案（v0.1 范围）
 
 > **实现位置对使用者不可见。** 本节的名字有两个来源：编译器内建表，以及**随编译器捆绑的
-> `std/`（Dawn 源码）**。两者都隐式可见、无需 `use`，签名与语义相同；名字正按
-> [`docs/builtins-to-stdlib.md`](builtins-to-stdlib.md) 从前者迁往后者，迁移不改变调用方。
-> 下文用 **`[std]`** 标出已经迁走的。`dawn doc --builtins` 输出两边的全集。
+> `std/` 模块（Dawn 源码，§10.6）**。prelude 名隐式可见；其余以 `use std/x` 引入、
+> `x.fn(...)` 限定调用。哪边实现（内建 or std 包装）不影响拼写与语义
+> （[`docs/builtins-to-stdlib.md`](builtins-to-stdlib.md)）。`dawn doc --builtins` 输出全集。
 
 - `core/list`：`map filter fold len get range ...`；排序与极值（元素/键类型须具
   `Ord`，见 §3.5；全部稳定、平局取第一个）：
@@ -998,16 +1014,19 @@ use java "java.lang.Math"      # Java 互操作（§9），形式不变
   - `sort_by(xs, cmp: fn(T, T) -> Int) -> List[T]` — 自定义比较函数
   - `max/min[T: Ord](xs) -> Option[T]` — 极值；空列表 `None`
   - `max_by/min_by[T, K: Ord](xs, key: fn(T) -> K) -> Option[T]` — 按键取极值
-- `core/string`：`join parse_int parse_float to_string ...`（`chars`/`split` **`[std]`**），以及**已迁入 std** 的
-  `trim starts_with ends_with contains to_lower to_upper index_of last_index_of` **`[std]`**（`to_lower`/`to_upper`
-  按 Unicode 大小写折叠；字符串转数字是 `parse_int(s) -> Option[Int]`——
-  没有重载，`to_int`/`to_float` 只做 Int↔Float 转换）。
-- `core/bytes`（一等 `Bytes`，§9.5.1；除 `cast` 外**整组已迁入 std** **`[std]`**）：`utf8(s: String) -> Bytes`（字符串的 UTF-8 字节）、
-  `decode(b: Bytes, charset: String) -> String`（按字符集解码，替代旧
-  `String.new(bytes, charset)`）、`byte_len(b) -> Int`、`byte_at(b, i) -> Int`（0..255，越界 panic）、
-  `byte_slice(b, start, end) -> Bytes`（`[start,end)`，下标 clamp）、
-  `byte_index_of(b, needle, from) -> Option[Int]`（字节下标首次出现）、
-  `cast(x) -> T`（把擦除泛型的不透明 `Object` 认领为具体引用类型 T，T 取自期望类型，§9.5）。
+- **字符串**：prelude 里有 `join parse_int parse_float to_string`（字符串转数字是
+  `parse_int(s) -> Option[Int]`——没有重载，`to_int`/`to_float` 只做 Int↔Float 转换）；
+  其余在 **`std/str`**：`str.len str.is_empty str.trim str.to_lower str.to_upper
+  str.contains str.starts_with str.ends_with str.index_of str.last_index_of
+  str.repeat str.substring str.pad_start str.reverse str.chars str.split
+  str.from_char`（`to_lower`/`to_upper` 按 Unicode 大小写折叠）。
+- **`std/bytes`**（一等 `Bytes`，§9.5.1）：`bytes.utf8(s) -> Bytes`（字符串的 UTF-8 字节）、
+  `bytes.decode(b, charset) -> String`（按字符集解码，替代旧 `String.new(bytes, charset)`）、
+  `bytes.len(b) -> Int`、`bytes.at(b, i) -> Int`（0..255，越界 panic）、
+  `bytes.slice(b, start, end) -> Bytes`（`[start,end)`，下标 clamp）、
+  `bytes.index_of(b, needle, from) -> Option[Int]`（字节下标首次出现）。
+  prelude 里另有 `cast(x) -> T`（把擦除泛型的不透明 `Object` 认领为具体引用类型 T，
+  T 取自期望类型，§9.5）。
   另有操作符 `Bytes ++ Bytes` 与按内容的 `==`/`!=`。二进制请求体（multipart 上传、WebDAV PUT）、
   crypto/签名、HTTP 收发都直接走 `Bytes`，不再借道 latin-1 字符串。
 - `Result` **没有**配套的库函数（无 `map_err`、无 `ok`）。`match` 和 `?` 够用，
@@ -1016,51 +1035,52 @@ use java "java.lang.Math"      # Java 互操作（§9），形式不变
 - **码点 / 字符**（§1.5、§2.1 的补充；字符即码点 `Int`）：
   - `code_points(s: String) -> List[Int]` — 拆成码点（增补平面的代理对合并为一个码点）
   - `from_code_points(cs: List[Int]) -> String` — 由码点组装（接受增补码点）
-  - `char_to_string(c: Int) -> String` **`[std]`** — 单码点转字符串（非法码点 panic）
-  - `str_len(s: String) -> Int` **`[std]`** — 码点数（区别于 `chars` 返回的 `List[String]`）
-  - `substring(s: String, from: Int, to: Int) -> String` **`[std]`** — 按**码点下标**切片，越界 panic
-- **游标**（内建）——上面这些**按码点下标**的函数，每次调用都要从串首数到那个下标，
+  - `str.from_char(c: Int) -> String` — 单码点转字符串（非法码点 panic）
+  - `str.len(s: String) -> Int` — 码点数（区别于 `str.chars` 返回的 `List[String]`）
+  - `str.substring(s: String, from: Int, to: Int) -> String` — 按**码点下标**切片，越界 panic
+- **`std/cursor`**——上面这些**按码点下标**的函数，每次调用都要从串首数到那个下标，
   即单次 O(n)、放进循环就是 O(n²)。游标是**位置**而非计数，故每步恒定开销：
-  - `cursor_start(s) / cursor_end(s) -> Cursor` — 串首 / 串尾游标
-  - `cursor_done(s, c) -> Bool`、`cursor_char(s, c) -> Int`（到尾返回 -1）
-  - `cursor_next(s, c) / cursor_prev(s, c) -> Cursor` — 进 / 退一个字符（宽度非恒定，故不能用加减）
-  - `cursor_slice(s, from, to) -> String` — 按游标切，不做下标换算；非法区间 panic
-  - `cursor_skip(s, c, sub) -> Cursor` — 越过一处已知出现的 `sub`（它恰是 `sub` 宽）——
+  - `cursor.start(s) / cursor.end(s) -> Cursor` — 串首 / 串尾游标
+  - `cursor.done(s, c) -> Bool`、`cursor.char(s, c) -> Int`（到尾返回 -1）
+  - `cursor.next(s, c) / cursor.prev(s, c) -> Cursor` — 进 / 退一个字符（宽度非恒定，故不能用加减）
+  - `cursor.slice(s, from, to) -> String` — 按游标切，不做下标换算；非法区间 panic
+  - `cursor.skip(s, c, sub) -> Cursor` — 越过一处已知出现的 `sub`（它恰是 `sub` 宽）——
     **唯一被认可的「游标前进已知宽度」**，替代 `i + len` 式算术
-  - `index_of_from(s, sub, from) -> Option[Cursor]` — 游标进、游标出，故沿串反复查找整体仍线性
+  - `cursor.find(s, sub, from) -> Option[Cursor]` — 游标进、游标出，故沿串反复查找整体仍线性
 
   游标是**不透明类型 `Cursor`**（运行期就是裸 `long`，零开销）：只能从这些函数取得、
   传回、比较（`==` 与 `< <= > >=`——**同一字符串内**位置的先后是位置类型的合法操作）、
   存进容器/record 供回溯（它是普通值，回溯不需要额外机制）。
   **算术、打印、传给 Java 都是编译错误**——只有算术能凭空造出落在代理对中间的非法
-  位置，「不要对它做算术」由类型系统执行，不再靠注释。这组函数因签名需要 `Cursor` 类型而**留在内建表**（std 源码无法从 Int
-  铸造不透明标量——不透明正是其意义所在），是 builtins→std 迁移的有据例外。
+  位置，「不要对它做算术」由类型系统执行，不再靠注释。底层操作因签名需要 `Cursor`
+  类型而**留在内建表**（std 源码无法从 Int 铸造不透明标量——不透明正是其意义所在），
+  是 builtins→std 迁移的有据例外；`std/cursor` 的包装给它们公开的限定拼写。
   单串一次调用用下标版没问题，**循环里必须用游标版**——`docs/seq6-research.md` §五之补有实测。
 - `core/option` / `core/result`：`map unwrap_or expect and_then ...`
-- **`Map` / `Set`**（§2.2 的内建持久容器，v0.1 以平铺内建函数提供；未来再收进 `core/map`
-  等模块化组织）：
+- **`Map` / `Set`**（§2.2 的内建持久容器）——操作在 **`std/map`** 与 **`std/set`**：
 
   ```
-  map_empty[K, V]() -> Map[K, V]              set_empty[T]() -> Set[T]
-  map_from(entries: List[(K, V)]) -> Map[K, V]   set_from(xs: List[T]) -> Set[T]
-  map_insert(m, k, v) -> Map[K, V]            set_insert(s, x) -> Set[T]
-  map_remove(m, k) -> Map[K, V]               set_remove(s, x) -> Set[T]
-  map_get(m, k) -> Option[V]                  set_has(s, x) -> Bool
-  map_has(m, k) -> Bool                        set_size(s) -> Int
-  map_size(m) -> Int                           set_to_list(s) -> List[T]
-  map_keys(m) -> List[K]
-  map_values(m) -> List[V]
-  map_entries(m) -> List[(K, V)]
+  map.empty[K, V]() -> Map[K, V]              set.empty[T]() -> Set[T]
+  map.from(entries: List[(K, V)]) -> Map[K, V]   set.from(xs: List[T]) -> Set[T]
+  map.insert(m, k, v) -> Map[K, V]            set.insert(s, x) -> Set[T]
+  map.remove(m, k) -> Map[K, V]               set.remove(s, x) -> Set[T]
+  map.get(m, k) -> Option[V]                  set.has(s, x) -> Bool
+  map.has(m, k) -> Bool                        set.size(s) -> Int
+  map.size(m) -> Int                           set.to_list(s) -> List[T]
+  map.keys(m) -> List[K]
+  map.values(m) -> List[V]
+  map.entries(m) -> List[(K, V)]
   ```
 
 - `core/math`：`abs min max sin cos sqrt pow to_float to_int ...`（纯——
   内部以 `@trusted_pure` 包装 `java.lang.Math`）
-- `io`：`println read_line read_file write_file list_dir is_dir args env java_try ...`（全部 `!io`）
-  - `write_file(path, content) -> Result[Unit, String]` — **自动创建缺失的父目录**。
+- **`std/io`**：`io.read_line io.read_file io.write_file io.list_dir io.is_dir`（全部 `!io`；
+  `println`/`print` 同住此模块但由 prelude 直呼，`args`/`java_try` 是内建）
+  - `io.write_file(path, content) -> Result[Unit, String]` — **自动创建缺失的父目录**。
     `Ok` 不带值:曾返回 `String.length()`(UTF-16 码元,既不是字符数也不是字节数),
     2026-07-19 去掉——没有调用点读它
-  - `list_dir(path) -> Result[List[String], String]` — 排序后的条目名；path 不是目录时 `Err`
-  - `is_dir(path) -> Bool` — 不存在或出错都视为 `false`
+  - `io.list_dir(path) -> Result[List[String], String]` — 排序后的条目名；path 不是目录时 `Err`
+  - `io.is_dir(path) -> Bool` — 不存在或出错都视为 `false`
 
 实现策略：能薄包 Java 就薄包（`String` 直接是 `java.lang.String`），持久 `List`/`Map`/`Set`
 自实现（`DawnList` 共享数组窗口、`DawnMap`/`DawnSet` 持久 HAMT，均保插入序确定；

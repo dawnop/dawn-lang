@@ -264,3 +264,12 @@ cursor_start/end/done/char/next/prev/slice/skip 与 index_of_from 从 `std/strin
 铸造不透明标量——不透明恰是该类型的全部意义。判据由此明确：**凡签名需要 std 表达不了的
 类型的函数属于内建；其余照旧向 std 迁**。`chars`/`split` 仍是纯 Dawn std 代码（cursor
 家族的第一批消费者）；split 原先那次「唯一被默许的游标算术」由新原语 `cursor_skip` 取代。
+
+## 补记（P0.7，stdlib 模块化落地后）：intrinsic-behind-wrapper 成为常态
+
+[`stdlib-naming.md`](stdlib-naming.md) 的破坏性重组落地后，本文的方向被推到端态：
+std 收进真模块（`use std/map` → `map.insert`），**平铺内建拼写退出公开命名空间**
+（v0.4.0 弃用警告 → v0.5.0 移除）。map/set/cursor 家族的 intrinsic 仍在编译器里
+（表示层所有权不变），但公开拼写只剩 `std/map`/`std/set`/`std/cursor` 的一行包装——
+正是上文引用的 Rust「intrinsic 藏在库函数背后」模式。上一条补记的判据不变：
+签名需要 std 表达不了的类型的函数留在内建**表**里，只是不再直接见客。

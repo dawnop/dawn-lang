@@ -285,11 +285,24 @@ lowering 一刀、四刀与树的对应一页图，并穷举核对 `ast/Ast.kt` 
 10. 发版 v0.3.0（破坏性：`alias`/`break`/`continue` 成关键字、cursor 家族签名换
     `Cursor`），backend-dawn 同步迁移。
 
-### P0.7 · stdlib 破坏性重组为模块限定式（设计已定稿，待实施）
+### P0.7 · stdlib 破坏性重组为模块限定式（已完成）
 
-设计与实施清单见 [`stdlib-naming.md`](stdlib-naming.md)：捆绑 std 可 `use`、顶层遮蔽
-内建改合法（Rust 式）、键类型检查改挂类型实例化处；v0.4.0 双拼写弃用过渡 →
-v0.5.0 删平铺名，两仓一次迁清。自举编译器直接用新拼写书写，故必须在 P1 之前。
+设计见 [`stdlib-naming.md`](stdlib-naming.md)，实施记录：
+
+1. **捆绑 std 可 `use`**：`use std/x` 命中 jar 资源（loader 跳过磁盘、checker 唯一
+   报错点；`src/std/` 磁盘路径保留）；限定/选择性引入走既有 §10.3 机制。comptime
+   的函数查找改按 owner（跨模块短名重名 `map.insert`/`set.insert` 必需）。
+2. **顶层遮蔽内建/std 函数名合法**（Rust 式）：注册期两处报错删除；codegen 的
+   builtin 分派从按名改为按 checker 解析结果（`e.sig.isBuiltin`）。
+3. **键类型检查改挂实例化**：`KEYED_CREATORS` 点名删除，改为「泛型调用实例化出的
+   结果类型里每个 Map/Set 都查」——用户包装函数首次也被抓（golden 锁定）。
+4. **std 重组**：str/bytes/io/list/map/set/cursor 七模块短名；隐式面钉死 v0.3 平铺
+   拼写（防 `len`/`get` 被短名顶掉），非 prelude 每处警告一次（`DiagnosticSink.warn`
+   首个用户）；改名件走 `std/legacy` 转发。v0.4.0 双拼写 → v0.5.0 删平铺。
+5. 两仓迁移：examples/site/playground（25 文件）与 backend-dawn；教程补
+   循环/alias/Cursor/std 模块章节；spec §10.6 重写、§11 全部改限定拼写。
+
+自举编译器直接用新拼写书写。
 
 ### P1 · 第一刀：Lexer（试水）
 
