@@ -17,7 +17,22 @@ use ast.{
   module_java_uses, module_fns, module_types, module_consts, module_traits,
   module_impls, module_tests, module_uses,
   DType, TypeDeclR, CtorDecl, FieldDecl, DTrait, TraitMethod, Param, Expr,
-  Decl, DImpl, FnDecl, EBool, DFn, EVar, DConst, EInt
+  Decl, DImpl, FnDecl, EBool, DFn, EVar, DConst, EInt,
+  BinOp, UnOp, OpAdd, OpSub, OpMul, OpDiv, OpMod, OpConcat, OpEq, OpNeq, OpLt,
+  OpLe, OpGt, OpGe, OpAnd, OpOr, OpBand, OpBor, OpBxor, OpShl, OpShr, OpUshr,
+  OpNeg, OpNot, OpBnot
+}
+use tast.{
+  TExpr, XInt, XFloat, XBool, XUnit, XStr, XLocal, XFnValue, XCallDyn,
+  XCallBuiltin, XCallFn, XApply, XJava, XLambda, XCtor, XConstRef, XField,
+  XListLit, XTupleLit, XPropagate, XUnwrap, XIndex, XReturn, XBreak, XContinue,
+  XComptime, XUnsafePure, XBinary, XUnary, XIf, XMatch, XBlock, XError,
+  TBinOp, BAdd, BSub, BMul, BDiv, BMod, BConcat, BEq, BNeq, BLt, BLe, BGt, BGe,
+  BAnd, BOr, BBand, BBor, BBxor, BShl, BShr, BUshr,
+  TUnOp, UNeg, UNot, UBnot, TStrPart, TSPText, TSPInterp, TArm, TJavaCall,
+  TPat, TPWild, TPBind, TPLit, TPTuple, TPList, TPCtor,
+  TStmt, TSLet, TSLetPat, TSLocalFn, TSAssign, TSExpr, TSAssert, TSWhile, TSFor,
+  TFun, TConst, TModule
 }
 use types.{
   Ty, TyInt, TyFloat, TyBool, TyString, TyBytes, TyCursor, TyUnit, TyNever,
@@ -2373,4 +2388,83 @@ test "main shape violations are reported" {
   assert len(cx2.diags) == 2
   assert cx2.diags[0].msg == "main must have the signature fn main() -> Unit !io"
   assert cx2.diags[1].msg == "main must be pub"
+}
+
+# ---- expression checking (pass 5 groundwork) ----
+#
+# Each check function returns (Cx, Ty, TExpr): the type for the checker's own
+# reasoning, the typed node for comptime/codegen. Kotlin's checkExpr writes the
+# type onto the AST node; here the TExpr simply carries what it needs.
+
+## Unary operators (the Kotlin inferExpr's Unary arm).
+pub fn check_unary(
+  cx: Cx,
+  op: UnOp,
+  t: Ty,
+  operand: TExpr,
+  olo: Int,
+  ohi: Int,
+  lo: Int,
+  hi: Int
+) -> (Cx, Ty, TExpr) =
+  match op {
+    OpNot -> {
+      if t != TyBool && not is_errorish(t) {
+        let cx1 = cerr(cx, "not expects Bool, got " ++ ty_show(cx.adts, t), olo, ohi)
+        (cx1, TyError, XError(lo, hi))
+      } else {
+        (cx, TyBool, XUnary(UNot, operand, lo, hi))
+      }
+    }
+    OpNeg -> {
+      if not is_numeric(t) && not is_errorish(t) {
+        let cx1 = cerr(cx, "negation expects a number, got " ++ ty_show(cx.adts, t), olo, ohi)
+        (cx1, TyError, XError(lo, hi))
+      } else {
+        (cx, t, XUnary(UNeg, operand, lo, hi))
+      }
+    }
+    OpBnot -> {
+      if t != TyInt && not is_errorish(t) {
+        let cx1 = cerr(cx, "`~` expects Int, got " ++ ty_show(cx.adts, t), olo, ohi)
+        (cx1, TyError, XError(lo, hi))
+      } else {
+        (cx, TyInt, XUnary(UBnot, operand, lo, hi))
+      }
+    }
+  }
+
+## ast.BinOp → tast.TBinOp.
+pub fn tbin_of(op: BinOp) -> TBinOp =
+  match op {
+    OpAdd -> BAdd
+    OpSub -> BSub
+    OpMul -> BMul
+    OpDiv -> BDiv
+    OpMod -> BMod
+    OpConcat -> BConcat
+    OpEq -> BEq
+    OpNeq -> BNeq
+    OpLt -> BLt
+    OpLe -> BLe
+    OpGt -> BGt
+    OpGe -> BGe
+    OpAnd -> BAnd
+    OpOr -> BOr
+    OpBand -> BBand
+    OpBor -> BBor
+    OpBxor -> BBxor
+    OpShl -> BShl
+    OpShr -> BShr
+    OpUshr -> BUshr
+  }
+
+test "unary checking types and poisons" {
+  let cx = test_cx()
+  let (cx1, t1, x1) = check_unary(cx, OpNot, TyBool, XBool(true, 0, 4), 0, 4, 0, 4)
+  assert t1 == TyBool
+  assert len(cx1.diags) == 0
+  let (cx2, t2, x2) = check_unary(cx, OpNeg, TyString, XError(0, 1), 0, 1, 0, 1)
+  assert t2 == TyError
+  assert cx2.diags[0].msg == "negation expects a number, got String"
 }
