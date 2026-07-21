@@ -3735,3 +3735,99 @@ fn inject_selective(
   }
   cx1
 }
+
+# ---- effect isolation frames ----
+
+## Saved effect state around an isolated body (comptime blocks, const
+## initializers, unsafe_pure). The Kotlin originals save/restore the checker's
+## mutable members; here the frame is just the old values.
+pub type EffFrame = {
+  used: List[Eff],
+  witness: Map[Eff, (Int, Int, String)],
+  sig: Option[Sig],
+  dicts: Map[(Int, Int), Int],
+  scopes: List[Map[String, Int]],
+  lambdas: List[LambdaCx],
+  loops: List[Int]
+}
+
+## Enter a comptime-style isolated context: fresh scope, no enclosing function,
+## empty effect record (the Kotlin checkComptimeBody's prologue).
+pub fn enter_isolated(cx: Cx) -> (Cx, EffFrame) = {
+  let frame = EffFrame {
+    used: cx.used_effects,
+    witness: cx.eff_witness,
+    sig: cx.current_sig,
+    dicts: cx.dict_syms,
+    scopes: cx.scopes,
+    lambdas: cx.lambda_stack,
+    loops: cx.loop_stack
+  }
+  let empty_w: Map[Eff, (Int, Int, String)] = map.empty()
+  let empty_d: Map[(Int, Int), Int] = map.empty()
+  let fresh_scope: Map[String, Int] = map.empty()
+  (Cx {
+    ..cx,
+    used_effects: [],
+    eff_witness: empty_w,
+    current_sig: None,
+    dict_syms: empty_d,
+    scopes: [fresh_scope],
+    lambda_stack: [],
+    loop_stack: []
+  }, frame)
+}
+
+## Leave the isolated context: every effect the body used is an error (`what`
+## names the construct), then the frame is restored.
+pub fn leave_isolated(cx: Cx, frame: EffFrame, what: String, blo: Int, bhi: Int) -> Cx = {
+  var cx1 = cx
+  for used in cx.used_effects {
+    let (wlo, whi, name) = match map.get(cx.eff_witness, used) {
+      Some(w) -> w
+      None -> (blo, bhi, "?")
+    }
+    cx1 = cerr_h(cx1, what ++ " must be pure, but `" ++ name ++ "` is !" ++ eff_show(used),
+      wlo, whi, "compile-time evaluation cannot perform io (spec §7.2)")
+  }
+  Cx {
+    ..cx1,
+    used_effects: frame.used,
+    eff_witness: frame.witness,
+    current_sig: frame.sig,
+    dict_syms: frame.dicts,
+    scopes: frame.scopes,
+    lambda_stack: frame.lambdas,
+    loop_stack: frame.loops
+  }
+}
+
+## Render one effect for messages ("io", "e", "(e1|e2)").
+fn eff_show(e: Eff) -> String =
+  match e {
+    EPure -> ""
+    EIo -> "io"
+    EffVar(n, _) -> n
+    EUnion(vs) -> {
+      var names: List[String] = []
+      for v in vs {
+        let (_, n) = v
+        names = names ++ [n]
+      }
+      "(" ++ join(sort(names), "|") ++ ")"
+    }
+  }
+
+test "isolated contexts capture and report their effects" {
+  var cx = test_cx()
+  cx = Cx { ..cx, used_effects: [EIo] }
+  let (cx1, frame) = enter_isolated(cx)
+  assert len(cx1.used_effects) == 0
+  # the body records io
+  let cx2 = record_effect(cx1, EIo, 5, 8, "println")
+  let cx3 = leave_isolated(cx2, frame, "const initializers", 0, 10)
+  assert len(cx3.diags) == 1
+  assert cx3.diags[0].msg == "const initializers must be pure, but `println` is !io"
+  # the outer effect record is restored
+  assert cx3.used_effects == [EIo]
+}
