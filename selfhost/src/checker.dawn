@@ -2668,3 +2668,53 @@ test "binary checking covers the operator families" {
     TyFn([], TyUnit, EPure), TyFn([], TyUnit, EPure), l, r, 0, 1, 4, 5, 2, 3, 0, 5)
   assert cx6.diags[0].msg == "functions cannot be compared"
 }
+
+## Builtins with no public spelling (docs/stdlib-naming.md): the container and
+## cursor families are implementation detail behind std/map, std/set and
+## std/cursor — visible when checking std itself, hidden from user code.
+pub fn internal_builtins() -> Set[String] = {
+  var out: Set[String] = set.empty()
+  for op in ["empty", "from", "insert", "remove", "get", "has", "size", "keys", "values", "entries"] {
+    out = set.insert(out, "map_" ++ op)
+  }
+  for op in ["empty", "from", "insert", "remove", "has", "size", "to_list"] {
+    out = set.insert(out, "set_" ++ op)
+  }
+  for op in ["start", "end", "done", "char", "next", "prev", "slice", "skip"] {
+    out = set.insert(out, "cursor_" ++ op)
+  }
+  set.insert(out, "index_of_from")
+}
+
+## The builtin table as visible from this module: user-code resolution skips
+## the internal intrinsics (the Kotlin `builtin(name)`).
+pub fn builtin_sig(cx: Cx, name: String) -> Option[Sig] = {
+  let sig = match map.get(builtins(), name) {
+    None -> return None
+    Some(s) -> s
+  }
+  if not cx.is_std_module && set.has(internal_builtins(), name) { None } else { Some(sig) }
+}
+
+## The visible builtin names — the "did you mean" pool half.
+pub fn visible_builtin_names(cx: Cx) -> List[String] = {
+  var out: List[String] = []
+  let hidden = internal_builtins()
+  for n in map.keys(builtins()) {
+    if cx.is_std_module || not set.has(hidden, n) { out = out ++ [n] }
+  }
+  out
+}
+
+test "internal builtins hide from user code but not std" {
+  let user = test_cx()
+  assert builtin_sig(user, "map_insert") == None
+  assert builtin_sig(user, "len") != None
+  let std_cx = cx_new(Some("std/map"), None)
+  assert builtin_sig(std_cx, "map_insert") != None
+  var has_map_insert = false
+  for n in visible_builtin_names(user) {
+    if n == "map_insert" { has_map_insert = true }
+  }
+  assert not has_map_insert
+}
