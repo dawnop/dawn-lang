@@ -1409,16 +1409,26 @@ class Checker(
             for (a in e.args) checkExpr(a)
             return TError
         }
-        // a record field holding a function: r.f(a) calls the field value — but
-        // only when no function `f` is in scope, so UFCS keeps precedence and
-        // the rule stays purely additive (spec §4.3)
-        if (tt is TAdt && tt.info.isRecord &&
-            lookup(e.name) == null && fns[e.name] == null && !stdFns.containsKey(e.name) && !BUILTINS.containsKey(e.name)
-        ) {
+        // a record field holding a function: r.f(a) calls the field value. When a
+        // function `f` is ALSO in scope the call is ambiguous and errors out (spec
+        // §2.4) — silent precedence would let a new top-level fn change what
+        // existing field calls mean from a distance, the same hazard §10.3 already
+        // rejects for module aliases.
+        if (tt is TAdt && tt.info.isRecord) {
             val ci = tt.info.ctors.first()
             val field = ci.fields.find { it.name == e.name }
             if (field != null) {
                 val ftype = subst(field.type, tt.info.typeParams.zip(tt.args).toMap())
+                val fnInScope = lookup(e.name) != null || fns[e.name] != null ||
+                    stdFns.containsKey(e.name) || BUILTINS.containsKey(e.name)
+                if (ftype is TFn && fnInScope) {
+                    for (a in e.args) checkExpr(a)
+                    return error(
+                        "`${e.name}` is both a function in scope and a fn-typed field of `${tt.info.name}` — ambiguous call",
+                        e.nameSpan,
+                        "for the field, bind it first: `let g = <recv>.${e.name}` then `g(...)`; " +
+                            "for the function, call it directly: `${e.name}(<recv>, ...)`")
+                }
                 if (ftype is TFn) {
                     val fa = FieldAccess(e.target, e.name, e.nameSpan,
                         Span(e.target.span.start, e.nameSpan.end))

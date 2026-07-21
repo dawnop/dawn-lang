@@ -117,9 +117,10 @@ class FnFieldCallTest {
     // ---- precedence and diagnostics ----
 
     @Test
-    fun ufcsWinsWhenAFunctionOfThatNameExists() {
-        // f(recv, arg) exists, so r.f(1) is UFCS — the field does not shadow it
-        val out = run("""
+    fun conflictWithAFunctionOfThatNameIsAmbiguous() {
+        // both readings exist: silent precedence would let a distant new fn
+        // change what this call means, so it errors instead (spec §2.4)
+        val diags = errorsOf("""
             type R = { f: fn(Int) -> Int }
 
             fn f(r: R, n: Int) -> Int = 100 + n
@@ -129,7 +130,24 @@ class FnFieldCallTest {
               println(to_string(r.f(1)))
             }
         """.trimIndent())
-        assertEquals("101\n", out)
+        assertHasError(diags, "ambiguous call")
+    }
+
+    @Test
+    fun bindingTheFieldFirstDisambiguates() {
+        val out = run("""
+            type R = { f: fn(Int) -> Int }
+
+            fn f(r: R, n: Int) -> Int = 100 + n
+
+            pub fn main() -> Unit !io = {
+              let r = R { f: fn(x) => x }
+              let g = r.f
+              println(to_string(g(1)))      # the field
+              println(to_string(f(r, 1)))   # the function
+            }
+        """.trimIndent())
+        assertEquals("1\n101\n", out)
     }
 
     @Test
