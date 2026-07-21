@@ -98,12 +98,14 @@ class TypeAliasTest {
     @Test
     fun parameterizedAliasSubstitutes() {
         val out = run("""
+            use std/map
+
             alias Lookup[T] = fn(String) -> Option[T]
 
-            fn find_in(m: Map[String, Int]) -> Lookup[Int] = fn(k) => map_get(m, k)
+            fn find_in(m: Map[String, Int]) -> Lookup[Int] = fn(k) => map.get(m, k)
 
             pub fn main() -> Unit !io = {
-              let lk = find_in(map_from([("k", 9)]))
+              let lk = find_in(map.from([("k", 9)]))
               match lk("k") {
                 Some(v) -> println(to_string(v))
                 None -> println("none")

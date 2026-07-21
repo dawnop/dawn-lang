@@ -60,10 +60,12 @@ class JavaInteropTest {
         // the $ fallback, and the bound name types a Dawn signature.
         val out = run(
             """
+            use std/bytes
+
             use java "java.util.Base64"
             use java "java.util.Base64.Encoder"
 
-            fn enc(e: Encoder, s: String) -> String !io = e.encodeToString(utf8(s)).expect("s")
+            fn enc(e: Encoder, s: String) -> String !io = e.encodeToString(bytes.utf8(s)).expect("s")
 
             pub fn main() -> Unit !io =
               println(enc(Base64.getEncoder().expect("e"), "ab"))
@@ -90,16 +92,18 @@ class JavaInteropTest {
         // must pass to ByteArrayOutputStream.write(byte[]) via a runtime CHECKCAST.
         val out = run(
             """
+            use std/bytes
+
             use java "java.util.Optional"
             use java "java.io.ByteArrayOutputStream"
             use java "java.lang.String"
 
             pub fn main() -> Unit !io = {
-              let bytes = utf8("héllo")
-              let boxed = Optional.of(bytes).expect("opt").get().expect("obj")
+              let raw = bytes.utf8("héllo")
+              let boxed = Optional.of(raw).expect("opt").get().expect("obj")
               let baos = ByteArrayOutputStream.new()
               baos.write(boxed)
-              println(decode(baos.toByteArray().expect("arr"), "UTF-8"))
+              println(bytes.decode(baos.toByteArray().expect("arr"), "UTF-8"))
             }
             """.trimIndent(),
         )

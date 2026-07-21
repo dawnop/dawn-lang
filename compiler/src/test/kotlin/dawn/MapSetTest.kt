@@ -47,13 +47,15 @@ class MapSetTest {
             "Some(1)\nNone\ntrue\nfalse\n2\n",
             run(
                 """
+                use std/map
+
                 pub fn main() -> Unit !io = {
-                  let m = map_insert(map_insert(map_empty(), "a", 1), "b", 2)
-                  println(to_string(map_get(m, "a")))
-                  println(to_string(map_get(m, "z")))
-                  println(to_string(map_has(m, "b")))
-                  println(to_string(map_has(m, "z")))
-                  println(to_string(map_size(m)))
+                  let m = map.insert(map.insert(map.empty(), "a", 1), "b", 2)
+                  println(to_string(map.get(m, "a")))
+                  println(to_string(map.get(m, "z")))
+                  println(to_string(map.has(m, "b")))
+                  println(to_string(map.has(m, "z")))
+                  println(to_string(map.size(m)))
                 }
                 """.trimIndent(),
             ),
@@ -66,11 +68,13 @@ class MapSetTest {
             "[\"a\", \"b\", \"c\"]\n[1, 9, 3]\n",
             run(
                 """
+                use std/map
+
                 pub fn main() -> Unit !io = {
-                  let m0 = map_from([("a", 1), ("b", 2), ("c", 3)])
-                  let m = map_insert(m0, "b", 9)
-                  println(to_string(map_keys(m)))
-                  println(to_string(map_values(m)))
+                  let m0 = map.from([("a", 1), ("b", 2), ("c", 3)])
+                  let m = map.insert(m0, "b", 9)
+                  println(to_string(map.keys(m)))
+                  println(to_string(map.values(m)))
                 }
                 """.trimIndent(),
             ),
@@ -83,10 +87,12 @@ class MapSetTest {
             "Some(20)\n1\n",
             run(
                 """
+                use std/map
+
                 pub fn main() -> Unit !io = {
-                  let m = map_from([("x", 10), ("x", 20)])
-                  println(to_string(map_get(m, "x")))
-                  println(to_string(map_size(m)))
+                  let m = map.from([("x", 10), ("x", 20)])
+                  println(to_string(map.get(m, "x")))
+                  println(to_string(map.size(m)))
                 }
                 """.trimIndent(),
             ),
@@ -99,11 +105,13 @@ class MapSetTest {
             "1\n2\n",
             run(
                 """
+                use std/map
+
                 pub fn main() -> Unit !io = {
-                  let m = map_from([("a", 1), ("b", 2)])
-                  let m2 = map_remove(m, "a")
-                  println(to_string(map_size(m2)))
-                  println(to_string(map_size(m)))
+                  let m = map.from([("a", 1), ("b", 2)])
+                  let m2 = map.remove(m, "a")
+                  println(to_string(map.size(m2)))
+                  println(to_string(map.size(m)))
                 }
                 """.trimIndent(),
             ),
@@ -116,8 +124,10 @@ class MapSetTest {
             "[(\"a\", 1), (\"b\", 2)]\n",
             run(
                 """
+                use std/map
+
                 pub fn main() -> Unit !io =
-                  println(to_string(map_entries(map_from([("a", 1), ("b", 2)]))))
+                  println(to_string(map.entries(map.from([("a", 1), ("b", 2)]))))
                 """.trimIndent(),
             ),
         )
@@ -129,12 +139,14 @@ class MapSetTest {
             "true\nfalse\n3\n[1, 2, 3]\n",
             run(
                 """
+                use std/set
+
                 pub fn main() -> Unit !io = {
-                  let s = set_from([1, 2, 2, 3, 1])
-                  println(to_string(set_has(s, 2)))
-                  println(to_string(set_has(s, 9)))
-                  println(to_string(set_size(s)))
-                  println(to_string(set_to_list(s)))
+                  let s = set.from([1, 2, 2, 3, 1])
+                  println(to_string(set.has(s, 2)))
+                  println(to_string(set.has(s, 9)))
+                  println(to_string(set.size(s)))
+                  println(to_string(set.to_list(s)))
                 }
                 """.trimIndent(),
             ),
@@ -147,13 +159,16 @@ class MapSetTest {
             "Some(\"north\")\ntrue\n",
             run(
                 """
+                use std/map
+                use std/set
+
                 type Dir = North | South derive Show
 
                 pub fn main() -> Unit !io = {
-                  let m = map_insert(map_empty(), (1, 2), "north")
-                  println(to_string(map_get(m, (1, 2))))
-                  let s = set_insert(set_empty(), North)
-                  println(to_string(set_has(s, North)))
+                  let m = map.insert(map.empty(), (1, 2), "north")
+                  println(to_string(map.get(m, (1, 2))))
+                  let s = set.insert(set.empty(), North)
+                  println(to_string(set.has(s, North)))
                 }
                 """.trimIndent(),
             ),
@@ -166,12 +181,15 @@ class MapSetTest {
             "true\ntrue\n",
             run(
                 """
+                use std/map
+                use std/set
+
                 pub fn main() -> Unit !io = {
-                  let a = map_from([("x", 1), ("y", 2)])
-                  let b = map_from([("y", 2), ("x", 1)])
+                  let a = map.from([("x", 1), ("y", 2)])
+                  let b = map.from([("y", 2), ("x", 1)])
                   println(to_string(a == b))
-                  let s1 = set_from([1, 2, 3])
-                  let s2 = set_from([3, 2, 1])
+                  let s1 = set.from([1, 2, 3])
+                  let s2 = set.from([3, 2, 1])
                   println(to_string(s1 == s2))
                 }
                 """.trimIndent(),
@@ -185,10 +203,13 @@ class MapSetTest {
             "map_from([(\"a\", 1), (\"b\", 2)])\nset_from([1, 2])\nmap_from([])\n",
             run(
                 """
+                use std/map
+                use std/set
+
                 pub fn main() -> Unit !io = {
-                  println(to_string(map_from([("a", 1), ("b", 2)])))
-                  println(to_string(set_from([1, 2])))
-                  let empty: Map[String, Int] = map_empty()
+                  println(to_string(map.from([("a", 1), ("b", 2)])))
+                  println(to_string(set.from([1, 2])))
+                  let empty: Map[String, Int] = map.empty()
                   println(to_string(empty))
                 }
                 """.trimIndent(),
@@ -202,9 +223,11 @@ class MapSetTest {
             "0\n",
             run(
                 """
+                use std/map
+
                 pub fn main() -> Unit !io = {
-                  let m: Map[String, Int] = map_empty()
-                  println(to_string(map_size(m)))
+                  let m: Map[String, Int] = map.empty()
+                  println(to_string(map.size(m)))
                 }
                 """.trimIndent(),
             ),
@@ -215,10 +238,12 @@ class MapSetTest {
     fun `map with an unshowable value is rejected by to_string`() {
         val errs = errorsOf(
             """
+            use std/map
+
             type Opaque = Mk(f: fn(Int) -> Int)
 
             pub fn main() -> Unit !io = {
-              let m = map_insert(map_empty(), "a", Mk(fn(x) => x))
+              let m = map.insert(map.empty(), "a", Mk(fn(x) => x))
               println(to_string(m))
             }
             """.trimIndent(),

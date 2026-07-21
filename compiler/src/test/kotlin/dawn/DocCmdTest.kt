@@ -107,9 +107,13 @@ class DocCmdTest {
     @Test
     fun `builtins reference covers every builtin exactly`() {
         val out = doc("--builtins")
-        for (name in BUILTINS.keys) {
+        for (name in BUILTINS.keys - StdLib.INTERNAL_BUILTINS) {
             assertTrue(out.contains("\"name\": \"$name\""), "builtin $name missing from dawn doc --builtins")
         }
+        // the internal container/cursor intrinsics have no public spelling and
+        // must NOT headline the reference — their std modules do (std/map, ...)
+        assertTrue(out.contains("\"name\": \"std/map\""), out)
+        assertTrue(!out.contains("\"name\": \"map_insert\""), "internal builtin leaked into dawn doc")
         // and each carries a rendered signature and a description
         assertTrue(out.contains("\"sig\": \"fn list_dir(path: String) -> Result[List[String], String] !io\""), out)
         assertTrue(Regex("\"doc\": \"[^\"]+\"").containsMatchIn(out), out)

@@ -1178,7 +1178,7 @@ class Checker(
         is TupleLit -> e.elems.any { needsExpected(it) }
         // a generic function used as a value is instantiated from the expected type
         is VarRef -> lookup(e.name) == null &&
-            (fns[e.name] ?: stdFns[e.name] ?: BUILTINS[e.name])?.typeParams?.isNotEmpty() == true
+            (fns[e.name] ?: stdFns[e.name] ?: builtin(e.name))?.typeParams?.isNotEmpty() == true
         is CtorCall -> {
             val ci = ctors[e.ctorName]
             ci != null && (
@@ -1190,7 +1190,7 @@ class Checker(
         is Lambda -> e.params.any { it.typeAnn == null }
         // a zero-arg generic call (map_empty(), set_empty()) can only be typed from context
         is Call -> {
-            val sig = if (lookup(e.callee) != null) null else (fns[e.callee] ?: stdFns[e.callee] ?: BUILTINS[e.callee])
+            val sig = if (lookup(e.callee) != null) null else (fns[e.callee] ?: stdFns[e.callee] ?: builtin(e.callee))
             sig != null && sig.typeParams.isNotEmpty() && e.args.isEmpty()
         }
         // same for its module-qualified spelling (map.empty(), spec §10.3)
@@ -1338,12 +1338,10 @@ class Checker(
                 e.symbol = sym
                 sym.type
             } else {
-                val f = fns[e.name]
-                    ?: stdFns[e.name]?.also { warnDeprecatedStd(e.name, e.span) }
-                    ?: BUILTINS[e.name]?.also { warnDeprecatedBuiltin(e.name, e.span) }
+                val f = fns[e.name] ?: stdFns[e.name] ?: builtin(e.name)
                 if (f != null) checkFnValue(e, f, expected)
                 else error("undefined variable: ${e.name}", e.span,
-                    Suggest.hint(e.name, localNames() + fns.keys + stdFns.keys + BUILTINS.keys))
+                    movedOrSuggest(e.name, localNames() + fns.keys + stdFns.keys + visibleBuiltinNames))
             }
         }
         is MethodCall -> checkMethodCall(e, expected)
@@ -1446,7 +1444,7 @@ class Checker(
             if (field != null) {
                 val ftype = subst(field.type, tt.info.typeParams.zip(tt.args).toMap())
                 val fnInScope = lookup(e.name) != null || fns[e.name] != null ||
-                    stdFns.containsKey(e.name) || BUILTINS.containsKey(e.name)
+                    stdFns.containsKey(e.name) || builtin(e.name) != null
                 if (ftype is TFn && fnInScope) {
                     for (a in e.args) checkExpr(a)
                     return error(
@@ -1925,23 +1923,25 @@ class Checker(
     /** one report per offending key type per module — the annotation and every seeded call site would otherwise repeat it */
     private val reportedKeyTypes = HashSet<String>()
 
-    /** the bundled std is exempt from its own deprecation warnings */
+    /** whether this is a bundled std module — std sees the internal builtins, user code does not */
     private val isStdModule = ownerClass == "std" || ownerClass?.startsWith("std/") == true
 
-    /** one deprecation warning per name per module — repeats would drown the build output */
-    private val warnedDeprecated = HashSet<String>()
-
-    /** v0.4.0 transition (docs/stdlib-naming.md): a non-prelude std name resolved implicitly */
-    private fun warnDeprecatedStd(name: String, span: Span) {
-        if (isStdModule || name in StdLib.PRELUDE || !warnedDeprecated.add(name)) return
-        sink.warn("implicit `$name` is deprecated and will be removed in v0.5.0", span, StdLib.MOVED[name])
+    /**
+     * The builtin table as visible from this module (docs/stdlib-naming.md): the
+     * container/cursor intrinsics have no public spelling — std's wrappers are
+     * the way in — so user-code resolution skips them.
+     */
+    private fun builtin(name: String): FnSig? {
+        val sig = BUILTINS[name] ?: return null
+        return if (!isStdModule && name in StdLib.INTERNAL_BUILTINS) null else sig
     }
 
-    /** v0.4.0 transition: a deprecated flat builtin spelling (the map_, set_, cursor_ families) */
-    private fun warnDeprecatedBuiltin(name: String, span: Span) {
-        if (isStdModule || name !in StdLib.DEPRECATED_BUILTINS || !warnedDeprecated.add(name)) return
-        sink.warn("`$name` is deprecated and will be removed in v0.5.0", span, StdLib.MOVED[name])
-    }
+    private val visibleBuiltinNames: Set<String>
+        get() = if (isStdModule) BUILTINS.keys else BUILTINS.keys - StdLib.INTERNAL_BUILTINS
+
+    /** the hint for a name that used to exist: where it moved, else did-you-mean */
+    private fun movedOrSuggest(name: String, pool: Collection<String>): String? =
+        StdLib.MOVED[name]?.let { "`$name` was removed in v0.5.0; $it" } ?: Suggest.hint(name, pool)
 
     private fun checkKeyType(keyT: Type, span: Span) {
         if (keyT.isErrorish) return
@@ -1999,14 +1999,12 @@ class Checker(
             recordEffect(lt.eff, e.calleeSpan, e.callee)
             return lt.ret
         }
-        val sig = resolvedSig ?: fns[e.callee]
-            ?: stdFns[e.callee]?.also { warnDeprecatedStd(e.callee, e.calleeSpan) }
-            ?: BUILTINS[e.callee]?.also { warnDeprecatedBuiltin(e.callee, e.calleeSpan) }
+        val sig = resolvedSig ?: fns[e.callee] ?: stdFns[e.callee] ?: builtin(e.callee)
         if (sig == null) {
             // still check the arguments so their subtrees get types/symbols
             for (arg in e.args) typeArg(arg)
             return error("undefined function: ${e.callee}", e.calleeSpan,
-                Suggest.hint(e.callee, fns.keys + stdFns.keys + BUILTINS.keys))
+                movedOrSuggest(e.callee, fns.keys + stdFns.keys + visibleBuiltinNames))
         }
         e.sig = sig
         if (e.args.size != sig.paramTypes.size) {
@@ -2843,7 +2841,7 @@ class Checker(
                 val sym = resolveLocal(s.name, s.nameSpan, forAssign = true)
                 if (sym == null) {
                     sink.error("undefined variable: ${s.name}", s.nameSpan,
-                        Suggest.hint(s.name, localNames() + fns.keys + stdFns.keys + BUILTINS.keys))
+                        movedOrSuggest(s.name, localNames() + fns.keys + stdFns.keys + visibleBuiltinNames))
                     checkExpr(s.value)
                     return
                 }

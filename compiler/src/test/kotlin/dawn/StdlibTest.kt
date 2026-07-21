@@ -62,6 +62,8 @@ class StdlibTest {
     fun `to_lower and to_upper, inline and as values`() {
         val out = run(
             """
+            use std/str.{to_lower, to_upper}
+
             pub fn main() -> Unit !io = {
               println(to_lower("HeLLo Wörld"))
               println(to_upper("HeLLo"))
@@ -79,12 +81,14 @@ class StdlibTest {
         val path = java.io.File.createTempFile("dawn-io-", ".txt").absolutePath
         val out = run(
             """
+            use std/io
+
             pub fn main() -> Unit !io = {
-              match write_file("$path", "hello\nfile") {
+              match io.write_file("$path", "hello\nfile") {
                 Ok(_) -> println("wrote")
                 Err(e) -> println("err ${'$'}e")
               }
-              match read_file("$path") {
+              match io.read_file("$path") {
                 Ok(text) -> println(text)
                 Err(e) -> println("err ${'$'}e")
               }

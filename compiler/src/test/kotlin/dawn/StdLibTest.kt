@@ -59,18 +59,23 @@ class StdLibTest {
     fun `the bundled std checks cleanly and exports its functions`() {
         // a broken bundled std throws on first touch; reaching here means it checked
         assertTrue(StdLib.modules.isNotEmpty(), "expected at least one bundled std module")
-        assertTrue(StdLib.fns.containsKey("is_empty"), "std should export is_empty; got ${StdLib.fns.keys}")
         assertEquals("std/str", StdLib.modules.first().className)
+        // the implicit surface is the prelude and nothing more (docs/stdlib-naming.md)
+        assertTrue(StdLib.fns.containsKey("map"), "prelude should stay implicit; got ${StdLib.fns.keys}")
+        assertFalse(StdLib.fns.containsKey("is_empty"), "non-prelude std must be module-qualified only")
+        assertTrue(StdLib.exportsByPath.getValue("std/str").fns.containsKey("is_empty"))
     }
 
     @Test
     fun `std functions are visible without a use and link in a single-file build`() {
         val out = run(
             """
+            use std/str
+
             pub fn main() -> Unit !io = {
-              println("${'$'}{is_empty("")}")
-              println("${'$'}{is_empty("x")}")
-              println(repeat("ab", 3))
+              println("${'$'}{str.is_empty("")}")
+              println("${'$'}{str.is_empty("x")}")
+              println(str.repeat("ab", 3))
             }
             """.trimIndent(),
         )
@@ -81,7 +86,9 @@ class StdLibTest {
     fun `a pure function may call std and stay pure`() {
         val analysis = analyze(
             """
-            pub fn shout(s: String) -> String = repeat(s, 2)
+            use std/str
+
+            pub fn shout(s: String) -> String = str.repeat(s, 2)
             """.trimIndent(),
         )
         assertFalse(analysis.hasErrors,
@@ -100,7 +107,9 @@ class StdLibTest {
         File(dir, "src/util").mkdirs()
         File(dir, "src/util/text.dawn").writeText(
             """
-            pub fn banner(s: String) -> String = repeat("-", 3) ++ s ++ repeat("-", 3)
+            use std/str
+
+            pub fn banner(s: String) -> String = str.repeat("-", 3) ++ s ++ str.repeat("-", 3)
             """.trimIndent(),
         )
         val program = analyzeProject(dir)
@@ -119,10 +128,12 @@ class StdLibTest {
         // reflectable by the checker) and vouched pure on the Dawn side.
         val out = run(
             """
+            use std/str
+
             pub fn main() -> Unit !io = {
-              println(pad_start("7", 4, "0"))
-              println(reverse_str("abc"))
-              println(pad_start("héllo", 7, "·"))
+              println(str.pad_start("7", 4, "0"))
+              println(str.reverse("abc"))
+              println(str.pad_start("héllo", 7, "·"))
             }
             """.trimIndent(),
         )
@@ -136,14 +147,17 @@ class StdLibTest {
         // so the two must agree — on ASCII and on astral text alike.
         val out = run(
             """
+            use std/str
+            use std/cursor
+
             fn walk(s: String, c: Cursor, acc: Int) -> Int =
-              if cursor_done(s, c) { acc } else { walk(s, cursor_next(s, c), acc + 1) }
+              if cursor.done(s, c) { acc } else { walk(s, cursor.next(s, c), acc + 1) }
 
             pub fn main() -> Unit !io = {
-              println("${'$'}{walk("abc", cursor_start("abc"), 0)} ${'$'}{str_len("abc")}")
-              println("${'$'}{walk("héllo", cursor_start("héllo"), 0)} ${'$'}{str_len("héllo")}")
-              println("${'$'}{walk("a🎈b", cursor_start("a🎈b"), 0)} ${'$'}{str_len("a🎈b")}")
-              println("${'$'}{walk("", cursor_start(""), 0)} ${'$'}{str_len("")}")
+              println("${'$'}{walk("abc", cursor.start("abc"), 0)} ${'$'}{str.len("abc")}")
+              println("${'$'}{walk("héllo", cursor.start("héllo"), 0)} ${'$'}{str.len("héllo")}")
+              println("${'$'}{walk("a🎈b", cursor.start("a🎈b"), 0)} ${'$'}{str.len("a🎈b")}")
+              println("${'$'}{walk("", cursor.start(""), 0)} ${'$'}{str.len("")}")
             }
             """.trimIndent(),
         )
@@ -154,15 +168,17 @@ class StdLibTest {
     fun `cursor_char reads whole code points and reports the end with -1`() {
         val out = run(
             """
+            use std/cursor
+
             pub fn main() -> Unit !io = {
               let s = "a🎈"
-              let c0 = cursor_start(s)
-              let c1 = cursor_next(s, c0)
-              let c2 = cursor_next(s, c1)
-              println("${'$'}{cursor_char(s, c0)}")
-              println("${'$'}{cursor_char(s, c1)}")
-              println("${'$'}{cursor_char(s, c2)}")
-              println("${'$'}{cursor_done(s, c2)}")
+              let c0 = cursor.start(s)
+              let c1 = cursor.next(s, c0)
+              let c2 = cursor.next(s, c1)
+              println("${'$'}{cursor.char(s, c0)}")
+              println("${'$'}{cursor.char(s, c1)}")
+              println("${'$'}{cursor.char(s, c2)}")
+              println("${'$'}{cursor.done(s, c2)}")
             }
             """.trimIndent(),
         )
@@ -176,16 +192,18 @@ class StdLibTest {
         // are 1, 2, 1 units wide, so arithmetic would land inside the pair.
         val out = run(
             """
+            use std/cursor
+
             fn back(s: String, c: Cursor, n: Int) -> Cursor =
-              if n == 0 { c } else { back(s, cursor_prev(s, c), n - 1) }
+              if n == 0 { c } else { back(s, cursor.prev(s, c), n - 1) }
 
             pub fn main() -> Unit !io = {
               let s = "a🎈b"
-              let e = cursor_end(s)
-              println(cursor_slice(s, back(s, e, 1), e))
-              println(cursor_slice(s, back(s, e, 2), e))
-              println(cursor_slice(s, back(s, e, 3), e))
-              println("${'$'}{back(s, e, 9) == cursor_start(s)}")
+              let e = cursor.end(s)
+              println(cursor.slice(s, back(s, e, 1), e))
+              println(cursor.slice(s, back(s, e, 2), e))
+              println(cursor.slice(s, back(s, e, 3), e))
+              println("${'$'}{back(s, e, 9) == cursor.start(s)}")
             }
             """.trimIndent(),
         )
@@ -196,19 +214,21 @@ class StdLibTest {
     fun `cursor_slice cuts between cursors and index_of_from resumes from one`() {
         val out = run(
             """
+            use std/cursor
+
             fn all_from(s: String, sub: String, c: Cursor, acc: Int) -> Int =
-              match index_of_from(s, sub, c) {
+              match cursor.find(s, sub, c) {
                 None -> acc
-                Some(i) -> all_from(s, sub, cursor_next(s, i), acc + 1)
+                Some(i) -> all_from(s, sub, cursor.next(s, i), acc + 1)
               }
 
             pub fn main() -> Unit !io = {
               let s = "a🎈bc🎈d"
-              let c0 = cursor_start(s)
-              let c1 = cursor_next(s, c0)
-              println(cursor_slice(s, c0, c1))
-              println(cursor_slice(s, c1, cursor_end(s)))
-              println("${'$'}{all_from(s, "🎈", cursor_start(s), 0)}")
+              let c0 = cursor.start(s)
+              let c1 = cursor.next(s, c0)
+              println(cursor.slice(s, c0, c1))
+              println(cursor.slice(s, c1, cursor.end(s)))
+              println("${'$'}{all_from(s, "🎈", cursor.start(s), 0)}")
             }
             """.trimIndent(),
         )
@@ -220,7 +240,7 @@ class StdLibTest {
         // Regression guard for the bug this spike hit: the class lives in the
         // compiler jar, so `dawn run` worked while `java -jar` died with
         // NoClassDefFoundError. A built program must carry it itself.
-        val analysis = analyze("pub fn main() -> Unit !io = println(reverse_str(\"ab\"))")
+        val analysis = analyze("use std/str\npub fn main() -> Unit !io = println(str.reverse(\"ab\"))")
         assertFalse(analysis.hasErrors)
         val classes = CodeGen(analysis.module, "testmod").generate()
         for (name in CodeGen.Companion.VENDORED_RT_CLASSES) {
@@ -235,9 +255,11 @@ class StdLibTest {
         // their const folding (pure-ffi-design.md 阶段3).
         val out = run(
             """
-            const A: Bool = is_empty("")
-            const B: String = substring("hello", 1, 3)
-            const C: String = pad_start("7", 4, "0")
+            use std/str
+
+            const A: Bool = str.is_empty("")
+            const B: String = str.substring("hello", 1, 3)
+            const C: String = str.pad_start("7", 4, "0")
             pub fn main() -> Unit !io = println("${'$'}{A} ${'$'}{B} ${'$'}{C}")
             """.trimIndent(),
         )
@@ -246,7 +268,7 @@ class StdLibTest {
 
     @Test
     fun `a std panic during folding is reported at the call site, not inside std`() {
-        val analysis = analyze("const X: String = substring(\"abc\", 0, 9)")
+        val analysis = analyze("use std/str\nconst X: String = str.substring(\"abc\", 0, 9)")
         assertTrue(analysis.hasErrors, "expected the out-of-range panic to surface at compile time")
         val d = analysis.diagnostics.first { it.message.contains("index out of range") }
         // same text as the runtime panic, and pointing at the user's call rather
@@ -262,13 +284,15 @@ class StdLibTest {
         // lose: code points (not UTF-16 units) and compile-time folding.
         val out = run(
             """
-            const T: String = trim("  hi  ")
-            const C: Bool = contains("hello", "ell")
-            const N: Int = str_len("héllo🎈")
+            use std/str
+
+            const T: String = str.trim("  hi  ")
+            const C: Bool = str.contains("hello", "ell")
+            const N: Int = str.len("héllo🎈")
             pub fn main() -> Unit !io = {
               println("[${'$'}{T}] ${'$'}{C} ${'$'}{N}")
-              println(to_upper("héllo"))
-              match index_of("héllo🎈x", "x") {
+              println(str.to_upper("héllo"))
+              match str.index_of("héllo🎈x", "x") {
                 Some(i) -> println("${'$'}{i}")
                 None -> println("none")
               }
@@ -281,11 +305,12 @@ class StdLibTest {
 
     @Test
     fun `a local definition shadows a std function`() {
+        // fold is in the prelude's std half; a local decl still wins (spec §10.6)
         val out = run(
             """
-            fn is_empty(s: String) -> Bool = false
+            fn fold(s: String) -> Bool = false
 
-            pub fn main() -> Unit !io = println("${'$'}{is_empty("")}")
+            pub fn main() -> Unit !io = println("${'$'}{fold("")}")
             """.trimIndent(),
         )
         assertEquals("false\n", out)

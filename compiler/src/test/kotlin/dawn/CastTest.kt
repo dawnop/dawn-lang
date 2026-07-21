@@ -66,12 +66,14 @@ class CastTest {
         // both rely on field-position expected-type propagation.
         val out = run(
             """
+            use std/bytes
+
             use java "java.util.Optional"
             type Wrap = { b: Bytes }
             pub fn main() -> Unit !io = {
-              let o = Optional.of(utf8("hi")).expect("o")
+              let o = Optional.of(bytes.utf8("hi")).expect("o")
               let w = Wrap { b: cast(o.get().expect("g")) }
-              println("${'$'}{byte_len(w.b)}")
+              println("${'$'}{bytes.len(w.b)}")
             }
             """.trimIndent(),
         )
@@ -82,9 +84,11 @@ class CastTest {
     fun `cast target must be a reference type, not a primitive`() {
         val errs = errorsOf(
             """
+            use std/bytes
+
             use java "java.util.Optional"
             pub fn main() -> Unit !io = {
-              let o = Optional.of(utf8("hi")).expect("o")
+              let o = Optional.of(bytes.utf8("hi")).expect("o")
               let n: Int = cast(o.get().expect("g"))
               println("${'$'}{n}")
             }
@@ -97,11 +101,13 @@ class CastTest {
     fun `cast with no expected type is rejected — annotate the use site`() {
         val errs = errorsOf(
             """
+            use std/bytes
+
             use java "java.util.Optional"
             pub fn main() -> Unit !io = {
-              let o = Optional.of(utf8("hi")).expect("o")
+              let o = Optional.of(bytes.utf8("hi")).expect("o")
               let b = cast(o.get().expect("g"))
-              println("${'$'}{byte_len(b)}")
+              println("${'$'}{bytes.len(b)}")
             }
             """.trimIndent(),
         )
@@ -112,12 +118,15 @@ class CastTest {
     fun `a wrong cast fails loud at runtime and java_try catches it`() {
         val out = run(
             """
+            use std/str
+            use std/bytes
+
             use java "java.util.Optional"
             fn go() -> Result[Int, String] !io =
               java_try(fn() => {
-                let o = Optional.of(utf8("hi")).expect("o")
+                let o = Optional.of(bytes.utf8("hi")).expect("o")
                 let s: String = cast(o.get().expect("g"))   # value is a byte[], not a String
-                str_len(s)
+                str.len(s)
               })
             pub fn main() -> Unit !io =
               match go() {

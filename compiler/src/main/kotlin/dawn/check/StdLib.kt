@@ -68,17 +68,16 @@ object StdLib {
 
     /**
      * The std names that stay implicitly visible without a `use` — the prelude's
-     * std half (docs/stdlib-naming.md). Every other std name is deprecated as an
-     * implicit global in v0.4.0 and needs its module from v0.5.0 on.
+     * std half (docs/stdlib-naming.md). Every other std name is module-qualified.
      */
     val PRELUDE: Set<String> = setOf("println", "print", "map", "filter", "fold")
 
     /**
-     * The builtin table's deprecated flat spellings (v0.4.0 warns, v0.5.0 hides
-     * them from user code): the container and cursor families, whose public
-     * spelling is now module-qualified.
+     * Builtins with no public spelling (docs/stdlib-naming.md): the container and
+     * cursor families are implementation detail behind std/map, std/set and
+     * std/cursor — visible when checking std itself, hidden from user code.
      */
-    val DEPRECATED_BUILTINS: Set<String> = buildSet {
+    val INTERNAL_BUILTINS: Set<String> = buildSet {
         for (op in listOf("empty", "from", "insert", "remove", "get", "has", "size", "keys", "values", "entries"))
             add("map_$op")
         for (op in listOf("empty", "from", "insert", "remove", "has", "size", "to_list")) add("set_$op")
@@ -87,13 +86,12 @@ object StdLib {
     }
 
     /**
-     * Deprecated flat spelling → how to write it now. Fed to the v0.4.0
-     * deprecation warnings and, from v0.5.0, to unknown-name error hints.
+     * Removed flat spelling → how to write it now; feeds the unknown-name
+     * error hints so pre-v0.5.0 code gets told where each name went.
      */
     val MOVED: Map<String, String> by lazy {
         val out = HashMap<String, String>()
         for (m in modules) {
-            if (m.modPath == "std/legacy") continue
             val alias = m.modPath.substringAfterLast('/')
             for (n in m.exports.fns.keys) {
                 if (n !in PRELUDE) out[n] = "use ${m.modPath}, then $alias.$n(...)"
@@ -132,24 +130,14 @@ object StdLib {
     }
 
     /**
-     * The implicitly-visible function surface — pinned to the v0.3 *flat* names
-     * (docs/stdlib-naming.md). The short module-qualified spellings born in the
-     * P0.7 reorganization (str.len, bytes.at, map.insert, ...) are reachable only
-     * through `use std/x`: letting them into this flat view would shadow builtins
-     * (`len`, `get`) and each other. The whole non-prelude half of this surface
-     * is deprecated in v0.4.0 and gone in v0.5.0.
+     * The implicitly-visible function surface: the prelude's std half and nothing
+     * more (docs/stdlib-naming.md). Everything else is module-qualified — letting
+     * short names into a flat view would shadow builtins (`len`, `get`) and each
+     * other. The v0.4.0 flat spellings were removed in v0.5.0.
      */
     val fns: Map<String, FnSig> by lazy {
         val out = LinkedHashMap<String, FnSig>()
-        for (m in modules) {
-            val hidden = when (m.modPath) {
-                "std/map", "std/set", "std/cursor" -> null // qualified-only, born after the flat era
-                "std/str" -> setOf("len", "from_char", "reverse") // renamed; legacy carries the old spellings
-                "std/bytes" -> setOf("len", "at", "slice", "index_of")
-                else -> emptySet()
-            }
-            if (hidden != null) for ((n, s) in m.exports.fns) if (n !in hidden) out[n] = s
-        }
+        for (m in modules) for ((n, sig) in m.exports.fns) if (n in PRELUDE) out[n] = sig
         out
     }
 

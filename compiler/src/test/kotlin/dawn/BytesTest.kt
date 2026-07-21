@@ -40,11 +40,13 @@ class BytesTest {
         // é is two UTF-8 bytes, so byte length exceeds the code-point length.
         val out = run(
             """
+            use std/bytes
+
             pub fn main() -> Unit !io = {
-              let b = utf8("héllo")
-              println("${'$'}{byte_len(b)}")
-              println(decode(b, "UTF-8"))
-              println(utf8("world").decode("UTF-8"))
+              let b = bytes.utf8("héllo")
+              println("${'$'}{bytes.len(b)}")
+              println(bytes.decode(b, "UTF-8"))
+              println(bytes.decode(bytes.utf8("world"), "UTF-8"))
             }
             """.trimIndent(),
         )
@@ -55,14 +57,16 @@ class BytesTest {
     fun `concat, byte_at and structural equality`() {
         val out = run(
             """
+            use std/bytes
+
             pub fn main() -> Unit !io = {
-              let j = utf8("hi") ++ utf8(" ") ++ utf8("world")
-              println(decode(j, "UTF-8"))
-              println("${'$'}{byte_len(j)}")
-              println("${'$'}{byte_at(utf8("A"), 0)}")
-              println("${'$'}{utf8("abc") == utf8("abc")}")
-              println("${'$'}{utf8("abc") == utf8("abd")}")
-              println("${'$'}{utf8("abc") != utf8("abd")}")
+              let j = bytes.utf8("hi") ++ bytes.utf8(" ") ++ bytes.utf8("world")
+              println(bytes.decode(j, "UTF-8"))
+              println("${'$'}{bytes.len(j)}")
+              println("${'$'}{bytes.at(bytes.utf8("A"), 0)}")
+              println("${'$'}{bytes.utf8("abc") == bytes.utf8("abc")}")
+              println("${'$'}{bytes.utf8("abc") == bytes.utf8("abd")}")
+              println("${'$'}{bytes.utf8("abc") != bytes.utf8("abd")}")
             }
             """.trimIndent(),
         )
@@ -73,12 +77,14 @@ class BytesTest {
     fun `byte_slice clamps out-of-range indices`() {
         val out = run(
             """
+            use std/bytes
+
             pub fn main() -> Unit !io = {
-              let j = utf8("hi world")
-              println(decode(byte_slice(j, 0, 2), "UTF-8"))
-              println(decode(byte_slice(j, 3, 999), "UTF-8"))
-              println("${'$'}{byte_len(byte_slice(j, 5, 1))}")
-              println("${'$'}{byte_len(byte_slice(j, 0-4, 2))}")
+              let j = bytes.utf8("hi world")
+              println(bytes.decode(bytes.slice(j, 0, 2), "UTF-8"))
+              println(bytes.decode(bytes.slice(j, 3, 999), "UTF-8"))
+              println("${'$'}{bytes.len(bytes.slice(j, 5, 1))}")
+              println("${'$'}{bytes.len(bytes.slice(j, 0-4, 2))}")
             }
             """.trimIndent(),
         )
@@ -90,12 +96,14 @@ class BytesTest {
     fun `byte_index_of finds, offsets, and reports absence`() {
         val out = run(
             """
+            use std/bytes
+
             pub fn main() -> Unit !io = {
-              let j = utf8("abcabc")
-              print_i(byte_index_of(j, utf8("bc"), 0))
-              print_i(byte_index_of(j, utf8("bc"), 2))
-              print_i(byte_index_of(j, utf8("xyz"), 0))
-              print_i(byte_index_of(j, utf8(""), 3))
+              let j = bytes.utf8("abcabc")
+              print_i(bytes.index_of(j, bytes.utf8("bc"), 0))
+              print_i(bytes.index_of(j, bytes.utf8("bc"), 2))
+              print_i(bytes.index_of(j, bytes.utf8("xyz"), 0))
+              print_i(bytes.index_of(j, bytes.utf8(""), 3))
             }
             fn print_i(o: Option[Int]) -> Unit !io =
               match o {
@@ -114,11 +122,13 @@ class BytesTest {
         // each byte as an unsigned 0..255 Int, proving no sign-extension leak.
         val out = run(
             """
+            use std/bytes
+
             use java "java.util.Base64"
             pub fn main() -> Unit !io = {
               let b = Base64.getDecoder().expect("d").decode("AH+A/w==").expect("x")
-              println("${'$'}{byte_len(b)}")
-              println("${'$'}{byte_at(b, 0)} ${'$'}{byte_at(b, 1)} ${'$'}{byte_at(b, 2)} ${'$'}{byte_at(b, 3)}")
+              println("${'$'}{bytes.len(b)}")
+              println("${'$'}{bytes.at(b, 0)} ${'$'}{bytes.at(b, 1)} ${'$'}{bytes.at(b, 2)} ${'$'}{bytes.at(b, 3)}")
             }
             """.trimIndent(),
         )
@@ -130,14 +140,16 @@ class BytesTest {
         // digest(byte[]) takes a Bytes; toByteArray() returns a Bytes.
         val out = run(
             """
+            use std/bytes
+
             use java "java.security.MessageDigest"
             use java "java.io.ByteArrayOutputStream"
             pub fn main() -> Unit !io = {
               let md = MessageDigest.getInstance("SHA-256").expect("md")
-              println("${'$'}{byte_len(md.digest(utf8("abc")).expect("d"))}")
+              println("${'$'}{bytes.len(md.digest(bytes.utf8("abc")).expect("d"))}")
               let baos = ByteArrayOutputStream.new()
-              baos.write(utf8("hello"))
-              println(decode(baos.toByteArray().expect("o"), "UTF-8"))
+              baos.write(bytes.utf8("hello"))
+              println(bytes.decode(baos.toByteArray().expect("o"), "UTF-8"))
             }
             """.trimIndent(),
         )
@@ -148,11 +160,13 @@ class BytesTest {
     fun `cast reclaims an erased-generic Object as Bytes`() {
         val out = run(
             """
+            use std/bytes
+
             use java "java.util.Optional"
             pub fn main() -> Unit !io = {
-              let o = Optional.of(utf8("hi")).expect("o")
+              let o = Optional.of(bytes.utf8("hi")).expect("o")
               let b: Bytes = cast(o.get().expect("g"))
-              println("${'$'}{byte_len(b)}")
+              println("${'$'}{bytes.len(b)}")
             }
             """.trimIndent(),
         )
@@ -163,10 +177,12 @@ class BytesTest {
     fun `Show renders Bytes as a byte-count summary`() {
         val out = run(
             """
+            use std/bytes
+
             type Blob = { name: String, data: Bytes } derive Show
             pub fn main() -> Unit !io = {
-              println(to_string(utf8("héllo")))
-              println(to_string(Blob { name: "x", data: utf8("hi") }))
+              println(to_string(bytes.utf8("héllo")))
+              println(to_string(Blob { name: "x", data: bytes.utf8("hi") }))
             }
             """.trimIndent(),
         )

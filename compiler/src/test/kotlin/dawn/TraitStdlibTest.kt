@@ -91,13 +91,15 @@ class TraitStdlibTest {
     @Test
     fun maxByMinByWithKeys() {
         val out = run("""
+            use std/str
+
             pub fn main() -> Unit !io = {
               let words = ["fig", "banana", "kiwi"]
-              match max_by(words, fn(w) => str_len(w)) {
+              match max_by(words, fn(w) => str.len(w)) {
                 Some(w) -> println(w)
                 None -> println("none")
               }
-              match min_by(words, fn(w) => str_len(w)) {
+              match min_by(words, fn(w) => str.len(w)) {
                 Some(w) -> println(w)
                 None -> println("none")
               }

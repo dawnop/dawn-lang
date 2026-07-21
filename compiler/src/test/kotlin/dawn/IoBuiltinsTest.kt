@@ -49,14 +49,16 @@ class IoBuiltinsTest {
         val root = dir.absolutePath.replace("\\", "/")
         val out = run(
             """
+            use std/io
+
             pub fn main() -> Unit !io = {
-              match list_dir("$root") {
+              match io.list_dir("$root") {
                 Ok(names) -> { for n in names { println(n) } }
                 Err(e) -> println("err: ${'$'}e")
               }
-              println(to_string(is_dir("$root/sub")))
-              println(to_string(is_dir("$root/a.txt")))
-              println(to_string(is_dir("$root/missing")))
+              println(to_string(io.is_dir("$root/sub")))
+              println(to_string(io.is_dir("$root/a.txt")))
+              println(to_string(io.is_dir("$root/missing")))
             }
             """.trimIndent(),
         )
@@ -69,12 +71,14 @@ class IoBuiltinsTest {
         val root = dir.absolutePath.replace("\\", "/")
         val out = run(
             """
+            use std/io
+
             pub fn main() -> Unit !io = {
-              match list_dir("$root/plain.txt") {
+              match io.list_dir("$root/plain.txt") {
                 Ok(_) -> println("ok")
                 Err(e) -> println(e)
               }
-              match list_dir("$root/nope") {
+              match io.list_dir("$root/nope") {
                 Ok(_) -> println("ok")
                 Err(e) -> println(e)
               }
@@ -89,12 +93,14 @@ class IoBuiltinsTest {
         val root = dir.absolutePath.replace("\\", "/")
         val out = run(
             """
+            use std/io
+
             pub fn main() -> Unit !io = {
-              match write_file("$root/deep/nested/out.txt", "hello") {
+              match io.write_file("$root/deep/nested/out.txt", "hello") {
                 Ok(_) -> println("wrote")
                 Err(e) -> println("err: ${'$'}e")
               }
-              match read_file("$root/deep/nested/out.txt") {
+              match io.read_file("$root/deep/nested/out.txt") {
                 Ok(s) -> println(s)
                 Err(e) -> println("err: ${'$'}e")
               }
@@ -111,6 +117,8 @@ class IoBuiltinsTest {
         val root = dir.absolutePath.replace("\\", "/")
         val out = run(
             """
+            use std/io.{list_dir, is_dir}
+
             fn apply_fs(f: fn(String) -> Result[List[String], String] !io, p: String) -> Int !io =
               match f(p) {
                 Ok(names) -> len(names)

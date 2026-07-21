@@ -95,8 +95,10 @@ class IndexTest {
     @Test
     fun mapIndexReturnsTheValue() {
         val out = run("""
+            use std/map
+
             pub fn main() -> Unit !io = {
-              let m = map_from([("a", 1), ("b", 2)])
+              let m = map.from([("a", 1), ("b", 2)])
               println(to_string(m["b"]))
             }
         """.trimIndent())
@@ -106,8 +108,10 @@ class IndexTest {
     @Test
     fun structuralKeysIndex() {
         val out = run("""
+            use std/map
+
             pub fn main() -> Unit !io = {
-              let m = map_from([((1, "x"), 7)])
+              let m = map.from([((1, "x"), 7)])
               println(to_string(m[(1, "x")]))
             }
         """.trimIndent())
@@ -162,8 +166,10 @@ class IndexTest {
     @Test
     fun absentKeyPanicsShowingTheKey() {
         val msg = runExpectPanic("""
+            use std/map
+
             pub fn main() -> Unit !io = {
-              let m = map_from([("a", 1)])
+              let m = map.from([("a", 1)])
               println(to_string(m["zzz"]))
             }
         """.trimIndent())
@@ -198,8 +204,10 @@ class IndexTest {
     @Test
     fun mapKeyTypeIsChecked() {
         val diags = errorsOf("""
+            use std/map
+
             pub fn main() -> Unit !io = {
-              let m = map_from([("a", 1)])
+              let m = map.from([("a", 1)])
               println(to_string(m[7]))
             }
         """.trimIndent())

@@ -43,9 +43,11 @@ class UnitTest {
     fun `java_try wraps a void-returning call as Result of Unit`() {
         val out = run(
             """
+            use std/bytes
+
             use java "java.io.ByteArrayInputStream"
             pub fn main() -> Unit !io = {
-              let s = ByteArrayInputStream.new(utf8("hi"))
+              let s = ByteArrayInputStream.new(bytes.utf8("hi"))
               match java_try(fn() => s.close()) {
                 Ok(_) -> println("closed")
                 Err(_) -> println("err")

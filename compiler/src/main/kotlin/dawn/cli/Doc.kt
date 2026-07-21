@@ -147,21 +147,24 @@ private fun typeJson(w: JsonWriter, info: AdtInfo?, d: TypeDecl, doc: String?) {
 
 // ---- builtin reference ----
 
-/** spec §11 grouping; every BUILTINS entry must appear in exactly one group (see DocCmdTest) */
+/**
+ * spec §11 grouping of the *public* builtins plus the std prelude names; every
+ * public BUILTINS entry must appear in exactly one group (see DocCmdTest). The
+ * internal container/cursor intrinsics are absent on purpose — their public
+ * spelling is the std/map, std/set and std/cursor groups below.
+ */
 val BUILTIN_GROUPS: List<Pair<String, List<Pair<String, String>>>> = listOf(
     "io" to listOf(
         "println" to "print a string followed by a newline",
         "print" to "print a string without a newline",
-        "read_line" to "read one line from stdin; None at end of input",
-        "read_file" to "read a whole file as a UTF-8 string",
-        "write_file" to "write a string to a file, creating missing parent directories",
-        "list_dir" to "sorted entry names of a directory; Err when the path is not a directory",
-        "is_dir" to "whether the path names a directory (false when missing)",
         "args" to "command line arguments",
         "java_try" to "run a closure, catching Java exceptions into Err (panics pass through)",
         "catch_panic" to "run a closure at an isolation boundary, catching any Throwable including a panic into Err",
     ),
     "list" to listOf(
+        "map" to "a new list with a function applied to every element",
+        "filter" to "the elements satisfying a predicate, in order",
+        "fold" to "reduce from the left with an accumulator",
         "len" to "number of elements",
         "get" to "element at an index; None when out of bounds",
         "range" to "the integers from..to (exclusive)",
@@ -174,55 +177,17 @@ val BUILTIN_GROUPS: List<Pair<String, List<Pair<String, String>>>> = listOf(
     ),
     "string" to listOf(
         "to_string" to "render any printable value (numbers, strings, derive Show data)",
-        "chars" to "split into single-character strings (code point aware)",
         "join" to "concatenate with a separator",
-        "split" to "split around a literal separator (not a regex)",
         "parse_int" to "parse a decimal integer; None on malformed input",
         "parse_float" to "parse a floating point number; None on malformed input",
     ),
-    "bytes" to listOf(
-        "utf8" to "the UTF-8 bytes of a string as Bytes",
-        "decode" to "decode Bytes to a string with the named charset (e.g. \"UTF-8\")",
-        "byte_len" to "number of bytes",
-        "byte_at" to "the byte at an index as an Int 0..255 (out of bounds panics)",
-        "byte_slice" to "the bytes in [start, end); indices are clamped into range",
-        "byte_index_of" to "the byte index of the first occurrence of a needle at or after `from`; None when absent",
+    "interop" to listOf(
         "cast" to "reclaim an erased Java Object as a concrete reference type T, taken from the expected type at the call site " +
             "(interop escape; a runtime CHECKCAST guards it)",
     ),
     "char" to listOf(
         "code_points" to "split into Unicode code points (a character is its code point Int)",
         "from_code_points" to "assemble a string from code points",
-    ),
-    "cursor" to listOf(
-        "cursor_start" to "the cursor at the first character of a string",
-        "cursor_end" to "the cursor one past the last character",
-        "cursor_done" to "whether a cursor has walked off the end",
-        "cursor_char" to "the code point at a cursor, or -1 once done",
-        "cursor_next" to "the cursor after the character at this one (never lands inside a pair)",
-        "cursor_prev" to "the cursor before the preceding character (subtraction cannot do this)",
-        "cursor_slice" to "the text between two cursors (invalid range panics)",
-        "cursor_skip" to "the cursor past an occurrence of a literal starting here — the one sanctioned advance-by-a-known-width",
-        "index_of_from" to "the cursor of the first occurrence of a needle at or after `from`; None when absent",
-    ),
-    "map & set" to listOf(
-        "map_empty" to "the empty map",
-        "map_from" to "a map from a list of key-value pairs (later wins)",
-        "map_insert" to "a new map with one entry added or replaced",
-        "map_remove" to "a new map without a key",
-        "map_get" to "the value for a key; None when absent",
-        "map_has" to "whether a key is present",
-        "map_size" to "number of entries",
-        "map_keys" to "keys in insertion order",
-        "map_values" to "values in insertion order",
-        "map_entries" to "entries in insertion order",
-        "set_empty" to "the empty set",
-        "set_from" to "a set from a list (duplicates collapse)",
-        "set_insert" to "a new set with one element added",
-        "set_remove" to "a new set without an element",
-        "set_has" to "whether an element is present",
-        "set_size" to "number of elements",
-        "set_to_list" to "elements in insertion order",
     ),
     "option" to listOf(
         "expect" to "unwrap a Some or panic with a message",

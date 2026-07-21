@@ -76,9 +76,11 @@ class CharTest {
     fun `code_points and from_code_points round-trip, including supplementary planes`() {
         assertEquals("5\n1\ntrue\ntrue\n", run(
             """
+            use std/str
+
             pub fn main() -> Unit !io = {
-              println(to_string(str_len("hello")))
-              println(to_string(str_len("🙂")))
+              println(to_string(str.len("hello")))
+              println(to_string(str.len("🙂")))
               println(to_string(from_code_points(code_points("héllo 🙂")) == "héllo 🙂"))
               println(to_string(from_code_points([104, 105]) == "hi"))
             }
@@ -90,9 +92,11 @@ class CharTest {
     fun `char_to_string builds a one-character string`() {
         assertEquals("A\n世\n", run(
             """
+            use std/str
+
             pub fn main() -> Unit !io = {
-              println(char_to_string('A'))
-              println(char_to_string(19990))
+              println(str.from_char('A'))
+              println(str.from_char(19990))
             }
             """.trimIndent(),
         ))
@@ -102,9 +106,11 @@ class CharTest {
     fun `substring uses code-point indices across multibyte text`() {
         assertEquals("hél\n界\n", run(
             """
+            use std/str
+
             pub fn main() -> Unit !io = {
-              println(substring("héllo", 0, 3))
-              println(substring("世界", 1, 2))
+              println(str.substring("héllo", 0, 3))
+              println(str.substring("世界", 1, 2))
             }
             """.trimIndent(),
         ))
@@ -115,7 +121,9 @@ class CharTest {
         val out = try {
             run(
                 """
-                pub fn main() -> Unit !io = println(substring("hi", 0, 9))
+                use std/str
+
+                pub fn main() -> Unit !io = println(str.substring("hi", 0, 9))
                 """.trimIndent(),
             )
             "no panic"
