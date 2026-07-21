@@ -16,7 +16,7 @@ use ast.{
   TypeRef, TNamed, TTuple, TFn, Bound, TypeParamDecl, Module,
   module_java_uses, module_fns, module_types, module_consts, module_traits,
   module_impls, module_tests, module_uses,
-  DType, TypeDeclR, CtorDecl, FieldDecl
+  DType, TypeDeclR, CtorDecl, FieldDecl, DTrait, TraitMethod, Param, Expr
 }
 use types.{
   Ty, TyInt, TyFloat, TyBool, TyString, TyBytes, TyCursor, TyUnit, TyNever,
@@ -1117,6 +1117,10 @@ fn no_shell() -> Option[Shell] = None
 
 fn no_fields() -> List[FieldDecl] = []
 
+fn no_params() -> List[Param] = []
+
+fn no_body() -> Option[Expr] = None
+
 fn dup_names(names: List[String]) -> Bool = {
   var seen: Set[String] = set.empty()
   for n in names {
@@ -1553,4 +1557,173 @@ test "alias cycles and derive Show violations are reported at the declaration" {
   }
   assert saw_cycle
   assert saw_show
+}
+
+## Pass 2.75a: register trait headers and method signatures; methods enter the
+## fn namespace (the Kotlin registerTraits).
+pub fn pass_register_traits(cx: Cx, m: Module) -> Cx = {
+  var cx1 = cx
+  for d in module_traits(m) {
+    if alias_shadows(cx1, d.name) {
+      cx1 = alias_shadow(cx1, d.name, d.nlo, d.nhi)
+      continue
+    }
+    if import_clashes(cx1, d.name) {
+      cx1 = import_clash(cx1, d.name, d.nlo, d.nhi, "trait")
+      continue
+    }
+    let is_builtin_name = match ty_named(d.name) {
+      Some(_) -> true
+      None -> d.name == "List" || d.name == "Map" || d.name == "Set"
+    }
+    if is_builtin_name {
+      cx1 = cerr(cx1, "`" ++ d.name ++ "` is a builtin type and cannot be a trait name",
+        d.nlo, d.nhi)
+      continue
+    }
+    if map.has(cx1.adts_by_name, d.name) || map.has(cx1.aliases, d.name) ||
+      map.has(cx1.java_classes, d.name) {
+        cx1 = cerr_h(cx1, "trait `" ++ d.name ++ "` collides with a type of the same name",
+          d.nlo, d.nhi, "traits and types share one namespace; rename one")
+        continue
+      }
+    if map.has(cx1.traits_by_name, d.name) {
+      let msg = if d.name == "Ord" {
+        "`" ++ d.name ++ "` is a prelude trait and cannot be redefined"
+      } else {
+        "trait `" ++ d.name ++ "` is defined twice"
+      }
+      cx1 = cerr(cx1, msg, d.nlo, d.nhi)
+      continue
+    }
+    let (cx2, tvar) = fresh_tvar(cx1, d.tp)
+    let (cx3, tid) = fresh(cx2)
+    cx1 = cx3
+    var methods: List[(String, MethodSig)] = []
+    var tp: Map[String, Ty] = map.empty()
+    tp = map.insert(tp, d.tp, tvar)
+    let saved_tp = cx1.current_tparams
+    for me in d.methods {
+      var non_io = false
+      for a in me.effs {
+        if a != "io" { non_io = true }
+      }
+      if non_io {
+        cx1 = cerr_h(cx1, "trait methods cannot declare effect variables", me.nlo, me.nhi,
+          "a trait method is pure or !io")
+        continue
+      }
+      let saved_ev = cx1.current_eff_vars
+      let empty_ev: Map[String, Eff] = map.empty()
+      cx1 = Cx { ..cx1, current_tparams: tp, current_eff_vars: empty_ev }
+      var ptys: List[Ty] = []
+      for p in me.params {
+        let (cx4, t) = resolve_type(cx1, p.tref)
+        cx1 = cx4
+        ptys = ptys ++ [t]
+      }
+      let (cx5, ret) = resolve_type(cx1, me.ret)
+      cx1 = cx5
+      let leaked = map.size(cx1.current_eff_vars) > 0
+      cx1 = Cx { ..cx1, current_tparams: saved_tp, current_eff_vars: saved_ev }
+      if leaked {
+        cx1 = cerr_h(cx1, "trait method signatures cannot carry effect variables", me.nlo, me.nhi,
+          "write !io on the function type, or leave it pure")
+        continue
+      }
+      let eff = if len(me.effs) == 0 { EPure } else { EIo }
+      let sig = Sig {
+        name: me.name,
+        param_tys: ptys,
+        param_names: map(me.params, fn(p) => p.name),
+        ret: ret,
+        eff: eff,
+        is_builtin: false,
+        tparams: [tvar],
+        constraints: [[tid]],
+        owner: cx1.owner_class,
+        trait_id: Some(tid),
+        inferring: false
+      }
+      # like top-level fns, a trait method may shadow a builtin/std name
+      if alias_shadows(cx1, me.name) {
+        cx1 = alias_shadow(cx1, me.name, me.nlo, me.nhi)
+      } else if import_clashes(cx1, me.name) {
+        cx1 = import_clash(cx1, me.name, me.nlo, me.nhi, "trait method")
+      } else if map.has(cx1.fns, me.name) {
+        let prev = map.get(cx1.fns, me.name).expect("present")
+        let msg = match prev.trait_id {
+          Some(ptid) -> "`" ++ me.name ++ "` is already a method of trait `" ++
+            trait_of(cx1.traits, ptid).name ++ "` (trait methods share the function namespace)"
+          None -> "trait method `" ++ me.name ++ "` collides with a function of the same name"
+        }
+        cx1 = cerr(cx1, msg, me.nlo, me.nhi)
+      } else {
+        cx1 = Cx { ..cx1, fns: map.insert(cx1.fns, me.name, sig) }
+        let has_default = match me.body {
+          Some(_) -> true
+          None -> false
+        }
+        methods = methods ++ [(me.name, MethodSig { sig: sig, has_default: has_default })]
+      }
+    }
+    let info = TraitI {
+      id: tid,
+      name: d.name,
+      tvar: tvar,
+      is_pub: d.is_pub,
+      owner: cx1.owner_class,
+      src_path: cx1.src_path,
+      methods: methods
+    }
+    cx1 = Cx {
+      ..cx1,
+      traits: map.insert(cx1.traits, tid, info),
+      traits_by_name: map.insert(cx1.traits_by_name, d.name, tid),
+      local_traits: cx1.local_traits ++ [d.name]
+    }
+  }
+  cx1
+}
+
+test "trait registration puts methods in the fn namespace" {
+  # trait Eq2[T] { fn eq2(a: T, b: T) -> Bool }
+  let m = Module { decls: [DTrait("Eq2", "T", 10, 11, [TraitMethod {
+    name: "eq2",
+    params: [
+      Param { name: "a", tref: TNamed("T", [], 22, 23), lo: 19, hi: 20 },
+      Param { name: "b", tref: TNamed("T", [], 28, 29), lo: 25, hi: 26 }
+    ],
+    ret: TNamed("Bool", [], 34, 38),
+    effs: [],
+    body: no_body(),
+    lo: 14,
+    hi: 38,
+    nlo: 17,
+    nhi: 20
+  }], false, 0, 40, 6, 9)] }
+  var cx = seed_prelude(test_cx())
+  cx = pass_register_traits(cx, m)
+  assert len(cx.diags) == 0
+  let tid = map.get(cx.traits_by_name, "Eq2").expect("registered")
+  let tr = trait_of(cx.traits, tid)
+  assert len(tr.methods) == 1
+  let s = map.get(cx.fns, "eq2").expect("in fn namespace")
+  assert s.trait_id == Some(tid)
+  assert sig_render(cx.adts, cx.traits, s) == "fn eq2[T: Eq2](a: T, b: T) -> Bool"
+  # a second trait with the same method name collides
+  let m2 = Module { decls: [DTrait("Eq3", "T", 10, 11, [TraitMethod {
+    name: "eq2",
+    params: no_params(),
+    ret: TNamed("Bool", [], 34, 38),
+    effs: [],
+    body: no_body(),
+    lo: 14,
+    hi: 38,
+    nlo: 17,
+    nhi: 20
+  }], false, 0, 40, 6, 9)] }
+  let cx2 = pass_register_traits(cx, m2)
+  assert len(cx2.diags) == 1
+  assert str.contains(cx2.diags[0].msg, "already a method of trait `Eq2`")
 }
