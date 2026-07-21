@@ -6,6 +6,8 @@
 # parsing could start (docs/seq6-research.md). Cursors read the string in place,
 # so the shape below is unchanged apart from `i + 1` becoming `cursor_next`:
 # a character is not always one unit wide, so advancing is a call, not addition.
+use std/map
+use std/cursor
 use json/lexer.{peek, skip_ws, is_digit, scan_string, scan_number}
 use json/value.{Json, JNull, JBool, JNum, JStr, JArr, JObj}
 
@@ -15,16 +17,16 @@ pub const MAX_DEPTH: Int = 512
 # with cursors also gets end-of-input for free: `cursor_char` returns -1 there,
 # which no character of `word` can equal.
 fn match_lit(src: String, i: Cursor, word: String, w: Cursor) -> Option[Cursor] =
-  if cursor_done(word, w) {
+  if cursor.done(word, w) {
     Some(i)
-  } else if cursor_char(src, i) == cursor_char(word, w) {
-    match_lit(src, cursor_next(src, i), word, cursor_next(word, w))
+  } else if cursor.char(src, i) == cursor.char(word, w) {
+    match_lit(src, cursor.next(src, i), word, cursor.next(word, w))
   } else {
     None
   }
 
 fn parse_lit(src: String, i: Cursor, word: String, val: Json) -> Result[(Json, Cursor), String] =
-  match match_lit(src, i, word, cursor_start(word)) {
+  match match_lit(src, i, word, cursor.start(word)) {
     Some(j) -> Ok((val, j))
     None -> Err("invalid literal")
   }
@@ -35,18 +37,18 @@ fn parse_array_items(src: String, i: Cursor, depth: Int, acc: List[Json]) -> Res
   let k = skip_ws(src, j)
   let c = peek(src, k)
   if c == ',' {
-    parse_array_items(src, cursor_next(src, k), depth, acc2)
+    parse_array_items(src, cursor.next(src, k), depth, acc2)
   } else if c == ']' {
-    Ok((JArr(acc2), cursor_next(src, k)))
+    Ok((JArr(acc2), cursor.next(src, k)))
   } else {
     Err("expected ',' or ']' in array")
   }
 }
 
 fn parse_array(src: String, i0: Cursor, depth: Int) -> Result[(Json, Cursor), String] = {
-  let i1 = skip_ws(src, cursor_next(src, i0))
+  let i1 = skip_ws(src, cursor.next(src, i0))
   if peek(src, i1) == ']' {
-    Ok((JArr([]), cursor_next(src, i1)))
+    Ok((JArr([]), cursor.next(src, i1)))
   } else {
     parse_array_items(src, i1, depth, [])
   }
@@ -62,14 +64,14 @@ fn parse_object_members(src: String, i: Cursor, depth: Int, acc: Map[String, Jso
     if peek(src, jc) != ':' {
       Err("expected ':' in object")
     } else {
-      let (v, k) = parse_value(src, cursor_next(src, jc), depth + 1)?
-      let acc2 = map_insert(acc, key, v)
+      let (v, k) = parse_value(src, cursor.next(src, jc), depth + 1)?
+      let acc2 = map.insert(acc, key, v)
       let kc = skip_ws(src, k)
       let c = peek(src, kc)
       if c == ',' {
-        parse_object_members(src, cursor_next(src, kc), depth, acc2)
+        parse_object_members(src, cursor.next(src, kc), depth, acc2)
       } else if c == '}' {
-        Ok((JObj(acc2), cursor_next(src, kc)))
+        Ok((JObj(acc2), cursor.next(src, kc)))
       } else {
         Err("expected ',' or '}' in object")
       }
@@ -78,11 +80,11 @@ fn parse_object_members(src: String, i: Cursor, depth: Int, acc: Map[String, Jso
 }
 
 fn parse_object(src: String, i0: Cursor, depth: Int) -> Result[(Json, Cursor), String] = {
-  let i1 = skip_ws(src, cursor_next(src, i0))
+  let i1 = skip_ws(src, cursor.next(src, i0))
   if peek(src, i1) == '}' {
-    Ok((JObj(map_empty()), cursor_next(src, i1)))
+    Ok((JObj(map.empty()), cursor.next(src, i1)))
   } else {
-    parse_object_members(src, i1, depth, map_empty())
+    parse_object_members(src, i1, depth, map.empty())
   }
 }
 
@@ -115,9 +117,9 @@ fn parse_value(src: String, i0: Cursor, depth: Int) -> Result[(Json, Cursor), St
 }
 
 pub fn parse(input: String) -> Result[Json, String] = {
-  let (v, j) = parse_value(input, cursor_start(input), 0)?
+  let (v, j) = parse_value(input, cursor.start(input), 0)?
   let k = skip_ws(input, j)
-  if cursor_done(input, k) {
+  if cursor.done(input, k) {
     Ok(v)
   } else {
     Err("trailing content after the JSON value")

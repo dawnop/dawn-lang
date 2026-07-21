@@ -1,23 +1,26 @@
 # Shared helpers for the generator: fail-fast IO, doc-link mapping, small
 # list utilities the stdlib doesn't have yet.
 
+use std/str
+use std/io
+use std/list
 use md/ast.{Block, Rule}
 
 ## read_file or die — the generator is fail-fast lint for its inputs.
 pub fn must_read(path: String) -> String !io =
-  match read_file(path) {
+  match io.read_file(path) {
     Ok(t) -> t
     Err(e) -> panic("cannot read $path: $e")
   }
 
 pub fn must_list(path: String) -> List[String] !io =
-  match list_dir(path) {
+  match io.list_dir(path) {
     Ok(names) -> names
     Err(e) -> panic("cannot list $path: $e")
   }
 
 pub fn write_page(path: String, content: String) -> Unit !io =
-  match write_file(path, content ++ "\n") {
+  match io.write_file(path, content ++ "\n") {
     Ok(_) -> println("  wrote $path")
     Err(e) -> panic("cannot write $path: $e")
   }
@@ -34,7 +37,7 @@ pub fn drop_trailing_rule(bs: List[Block]) -> List[Block] =
 ## Everything under docs/, for map_doc_url's existence check. Read once by the
 ## caller: map_doc_url must stay pure (render_doc takes a pure fn(String)->String).
 pub fn doc_files() -> List[String] !io =
-  match list_dir("docs") {
+  match io.list_dir("docs") {
     Ok(fs) -> fs
     Err(e) -> panic("cannot list docs/: $e")
   }
@@ -49,8 +52,8 @@ pub fn doc_files() -> List[String] !io =
 ## existence check keeps the only part of the lint that was ever worth having —
 ## catching a link to nothing — without a list to forget to update.
 pub fn map_doc_url(root: String, docs: List[String], u: String) -> String = {
-  let f = if starts_with(u, "docs/") { drop_cps(u, 5) } else { u }
-  if starts_with(u, "http://") || starts_with(u, "https://") || starts_with(u, "#") {
+  let f = if str.starts_with(u, "docs/") { drop_cps(u, 5) } else { u }
+  if str.starts_with(u, "http://") || str.starts_with(u, "https://") || str.starts_with(u, "#") {
     u
   } else if f == "spec.md" {
     "$root/spec.html"
@@ -58,7 +61,7 @@ pub fn map_doc_url(root: String, docs: List[String], u: String) -> String = {
     "$root/design.html"
   } else if f == "tutorial.md" {
     "$root/tutorial/index.html"
-  } else if ends_with(u, ".html") || contains(u, ".html#") {
+  } else if str.ends_with(u, ".html") || str.contains(u, ".html#") {
     "$root/$u"
   } else if contains_str(docs, f) {
     "https://github.com/dawnop/dawn-lang/blob/main/docs/$f"
@@ -68,12 +71,12 @@ pub fn map_doc_url(root: String, docs: List[String], u: String) -> String = {
 }
 
 fn contains_str(xs: List[String], x: String) -> Bool =
-  match find(xs, fn(y) => y == x) {
+  match list.find(xs, fn(y) => y == x) {
     Some(_) -> true
     None -> false
   }
 
-fn drop_cps(s: String, n: Int) -> String = substring(s, n, str_len(s))
+fn drop_cps(s: String, n: Int) -> String = str.substring(s, n, str.len(s))
 
 ## 01, 02, ... for chapter file names.
 pub fn pad2(i: Int) -> String = if i < 10 { "0$i" } else { "$i" }
@@ -88,9 +91,9 @@ test "doc links map onto the site" {
   assert map_doc_url(".", docs, "#s2") == "#s2"
   assert map_doc_url(".", docs, "https://x.y/z") == "https://x.y/z"
   # unrendered docs go to their source; this is the branch the whitelist kept forgetting
-  assert contains(map_doc_url(".", docs, "trait.md"), "docs/trait.md")
-  assert contains(map_doc_url(".", docs, "m6-retro.md"), "docs/m6-retro.md")
-  assert contains(map_doc_url(".", docs, "grammar.ebnf"), "docs/grammar.ebnf")
+  assert str.contains(map_doc_url(".", docs, "trait.md"), "docs/trait.md")
+  assert str.contains(map_doc_url(".", docs, "m6-retro.md"), "docs/m6-retro.md")
+  assert str.contains(map_doc_url(".", docs, "grammar.ebnf"), "docs/grammar.ebnf")
 }
 
 test "take_n and drop_trailing_rule" {

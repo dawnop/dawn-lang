@@ -1,23 +1,24 @@
 # Block-level parser for the Markdown subset used by docs/. Anything outside
 # the subset is a hard Err, so the site generator doubles as a docs lint.
 
+use std/str
 use md/ast.{Inline, Text, Code, Bold, Block, Heading, Para, CodeBlock, UList, OList, Table, Quote, Rule}
 use md/inline.{parse_inlines}
 use md/text.{cp_at, indent_of, strip_indent, drop_cps}
 
 fn line_at(lines: List[String], i: Int) -> String = unwrap_or(get(lines, i), "")
 
-fn is_blank(s: String) -> Bool = trim(s) == ""
+fn is_blank(s: String) -> Bool = str.trim(s) == ""
 
-fn is_fence(s: String) -> Bool = starts_with(s, "```")
+fn is_fence(s: String) -> Bool = str.starts_with(s, "```")
 
-fn is_hr(s: String) -> Bool = trim(s) == "---"
+fn is_hr(s: String) -> Bool = str.trim(s) == "---"
 
-fn is_quote(s: String) -> Bool = starts_with(s, ">")
+fn is_quote(s: String) -> Bool = str.starts_with(s, ">")
 
-fn is_table_line(s: String) -> Bool = starts_with(s, "|")
+fn is_table_line(s: String) -> Bool = str.starts_with(s, "|")
 
-fn is_marker_ul(s: String) -> Bool = starts_with(s, "- ")
+fn is_marker_ul(s: String) -> Bool = str.starts_with(s, "- ")
 
 ## Width of an ordered list marker ("12. " -> 4), or 0 when there is none.
 fn marker_ol(s: String) -> Int = {
@@ -30,11 +31,11 @@ fn marker_ol(s: String) -> Int = {
 }
 
 fn starts_block(s: String) -> Bool =
-  is_fence(s) || starts_with(s, "#") || is_hr(s) || is_table_line(s) ||
+  is_fence(s) || str.starts_with(s, "#") || is_hr(s) || is_table_line(s) ||
   is_quote(s) || is_marker_ul(s) || marker_ol(s) > 0
 
 ## Parse a whole document.
-pub fn parse(src: String) -> Result[List[Block], String] = parse_blocks(split(src, "\n"))
+pub fn parse(src: String) -> Result[List[Block], String] = parse_blocks(str.split(src, "\n"))
 
 fn parse_blocks(lines: List[String]) -> Result[List[Block], String] = {
   let n = len(lines)
@@ -56,7 +57,7 @@ fn parse_blocks(lines: List[String]) -> Result[List[Block], String] = {
           err = e
         }
       }
-    } else if starts_with(line, "#") {
+    } else if str.starts_with(line, "#") {
       match heading(line) {
         Ok(b) -> {
           out = out ++ [b]
@@ -123,7 +124,7 @@ fn parse_blocks(lines: List[String]) -> Result[List[Block], String] = {
 ## ``` fenced code; "dawn skip-check" (a tutorial test marker) renders as dawn.
 fn scan_fence(lines: List[String], start: Int) -> Result[(Block, Int), String] = {
   let first = line_at(lines, start)
-  let raw = trim(drop_cps(first, 3))
+  let raw = str.trim(drop_cps(first, 3))
   let lang = if raw == "dawn skip-check" { "dawn" } else { raw }
   let n = len(lines)
   var body: List[String] = []
@@ -131,7 +132,7 @@ fn scan_fence(lines: List[String], start: Int) -> Result[(Block, Int), String] =
   var closed = false
   while not closed && i < n {
     let l = line_at(lines, i)
-    if trim(l) == "```" {
+    if str.trim(l) == "```" {
       closed = true
     } else {
       body = body ++ [l]
@@ -154,14 +155,14 @@ fn heading(line: String) -> Result[Block, String] = {
   if lvl > 4 {
     Err("heading deeper than #### is outside the subset: $line")
   } else if cp_at(cs, lvl) == ' ' {
-    Ok(Heading(lvl, parse_inlines(trim(drop_cps(line, lvl + 1)))))
+    Ok(Heading(lvl, parse_inlines(str.trim(drop_cps(line, lvl + 1)))))
   } else {
     Err("malformed heading: $line")
   }
 }
 
 fn quote_body(l: String) -> String =
-  if starts_with(l, "> ") { drop_cps(l, 2) } else { drop_cps(l, 1) }
+  if str.starts_with(l, "> ") { drop_cps(l, 2) } else { drop_cps(l, 1) }
 
 fn scan_quote(lines: List[String], start: Int) -> Result[(Block, Int), String] = {
   let n = len(lines)
@@ -177,7 +178,7 @@ fn scan_quote(lines: List[String], start: Int) -> Result[(Block, Int), String] =
 
 ## Split a table row into trimmed cells; `|` inside inline code does not split.
 fn split_cells(line: String) -> List[String] = {
-  let cs = code_points(trim(line))
+  let cs = code_points(str.trim(line))
   let n = len(cs)
   var cells: List[String] = []
   var run: List[Int] = []
@@ -193,7 +194,7 @@ fn split_cells(line: String) -> List[String] = {
       in_code = not in_code
       run = run ++ [c]
     } else if c == '|' && not in_code {
-      cells = cells ++ [trim(from_code_points(run))]
+      cells = cells ++ [str.trim(from_code_points(run))]
       run = []
     } else {
       run = run ++ [c]
@@ -201,7 +202,7 @@ fn split_cells(line: String) -> List[String] = {
     i = i + 1
   }
   if len(run) > 0 {
-    cells ++ [trim(from_code_points(run))]
+    cells ++ [str.trim(from_code_points(run))]
   } else {
     cells
   }
@@ -313,7 +314,7 @@ test "fenced code keeps its body verbatim" {
       assert false
     }
     Err(e) -> {
-      assert contains(e, "unclosed")
+      assert str.contains(e, "unclosed")
     }
   }
 }
@@ -367,7 +368,7 @@ test "subset violations are loud" {
       assert false
     }
     Err(e) -> {
-      assert contains(e, "outside the subset")
+      assert str.contains(e, "outside the subset")
     }
   }
 }

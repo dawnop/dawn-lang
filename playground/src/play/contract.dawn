@@ -4,6 +4,7 @@
 #   {"ok": false, "phase": "timeout", "output": "<partial output>"}
 # Everything is a JSON object built from the vendored M4 json library and
 # rendered with its RFC-8259 string escaping — no hand-rolled quoting.
+use std/map
 use json/value.{Json, JNull, JBool, JNum, JStr, JArr, JObj}
 use json/parser.{parse}
 use json/render.{render}
@@ -23,7 +24,7 @@ pub fn parse_request(body: String) -> Result[String, String] =
     Ok(j) ->
       match j {
         JObj(entries) ->
-          match map_get(entries, "code") {
+          match map.get(entries, "code") {
             Some(JStr(code)) -> Ok(code)
             Some(_) -> Err("field \"code\" must be a string")
             None -> Err("missing field \"code\"")
@@ -32,7 +33,7 @@ pub fn parse_request(body: String) -> Result[String, String] =
       }
   }
 
-fn obj(entries: List[(String, Json)]) -> String = render(JObj(map_from(entries)))
+fn obj(entries: List[(String, Json)]) -> String = render(JObj(map.from(entries)))
 
 pub fn render_outcome(o: Outcome) -> String =
   match o {
@@ -65,4 +66,4 @@ pub fn render_check(o: Outcome) -> String =
   }
 
 pub fn render_error(message: String) -> String =
-  render(JObj(map_from([("ok", JBool(false)), ("phase", JStr("error")), ("output", JStr(message))])))
+  render(JObj(map.from([("ok", JBool(false)), ("phase", JStr("error")), ("output", JStr(message))])))

@@ -1,6 +1,8 @@
 # examples/ -> examples/index.html + one page per example (multi-file projects
 # show every module). Discovery walks the real tree with list_dir/is_dir.
 
+use std/str
+use std/io
 use html/escape.{escape_html}
 use hl/dawn.{highlight_dawn}
 use html/page.{page}
@@ -8,16 +10,16 @@ use gen/common.{must_read, must_list, write_page}
 
 type Example = { slug: String, files: List[String] }
 
-fn stem(name: String) -> String = substring(name, 0, str_len(name) - 5)
+fn stem(name: String) -> String = str.substring(name, 0, str.len(name) - 5)
 
 fn dawn_files_under(path: String) -> List[String] !io =
-  if is_dir(path) {
+  if io.is_dir(path) {
     var out: List[String] = []
     for name in must_list(path) {
       out = out ++ dawn_files_under("$path/$name")
     }
     out
-  } else if ends_with(path, ".dawn") {
+  } else if str.ends_with(path, ".dawn") {
     [path]
   } else {
     []
@@ -26,14 +28,14 @@ fn dawn_files_under(path: String) -> List[String] !io =
 ## main.dawn first — its header comment describes the project, and the entry
 ## point is what a reader wants to see on top.
 fn main_first(files: List[String]) -> List[String] =
-  filter(files, fn(f) => ends_with(f, "/main.dawn")) ++
-  filter(files, fn(f) => not ends_with(f, "/main.dawn"))
+  filter(files, fn(f) => str.ends_with(f, "/main.dawn")) ++
+  filter(files, fn(f) => not str.ends_with(f, "/main.dawn"))
 
 fn collect_examples() -> List[Example] !io = {
   var units: List[Example] = []
   for name in must_list("examples") {
     let path = "examples/$name"
-    if is_dir(path) {
+    if io.is_dir(path) {
       if name == "m4" {
         # project examples: one unit per subdirectory, sources under src/
         for sub in must_list(path) {
@@ -41,12 +43,12 @@ fn collect_examples() -> List[Example] !io = {
         }
       } else {
         for f in must_list(path) {
-          if ends_with(f, ".dawn") {
+          if str.ends_with(f, ".dawn") {
             units = units ++ [Example { slug: "$name-${stem(f)}", files: ["$path/$f"] }]
           }
         }
       }
-    } else if ends_with(name, ".dawn") {
+    } else if str.ends_with(name, ".dawn") {
       units = units ++ [Example { slug: stem(name), files: [path] }]
     }
   }
@@ -57,9 +59,9 @@ fn collect_examples() -> List[Example] !io = {
 fn description(text: String) -> String = {
   var out: List[String] = []
   var stop = false
-  for line in split(text, "\n") {
-    if not stop && starts_with(line, "#") {
-      out = out ++ [trim(substring(line, 1, str_len(line)))]
+  for line in str.split(text, "\n") {
+    if not stop && str.starts_with(line, "#") {
+      out = out ++ [str.trim(str.substring(line, 1, str.len(line)))]
     } else {
       stop = true
     }
@@ -68,7 +70,7 @@ fn description(text: String) -> String = {
 }
 
 fn file_section(path: String) -> String !io = {
-  let src = trim(must_read(path))
+  let src = str.trim(must_read(path))
   "<h2><code>" ++ escape_html(path) ++ "</code></h2>\n" ++
     `<pre class="dawn"><code>` ++ highlight_dawn(src) ++ "</code></pre>"
 }

@@ -2,6 +2,8 @@
 # `java`. Two phases keep the compile diagnostics clean and separate from the
 # program's own output. Each child's combined stdout+stderr is redirected to a
 # file (no pipe-buffer deadlock on large output), then read back.
+use std/str
+use std/io
 use java "java.lang.ProcessBuilder"
 use java "java.io.File"
 use java "java.util.concurrent.TimeUnit"
@@ -25,18 +27,18 @@ fn temp_root() -> String !io = {
       None -> "/tmp"
     }
   }
-  if ends_with(d, "/") { substring(d, 0, str_len(d) - 1) } else { d }
+  if str.ends_with(d, "/") { str.substring(d, 0, str.len(d) - 1) } else { d }
 }
 
 fn truncate(s: String) -> (String, Bool) =
-  if str_len(s) > OUTPUT_LIMIT {
-    (substring(s, 0, OUTPUT_LIMIT) ++ "\n… (output truncated)", true)
+  if str.len(s) > OUTPUT_LIMIT {
+    (str.substring(s, 0, OUTPUT_LIMIT) ++ "\n… (output truncated)", true)
   } else {
     (s, false)
   }
 
 fn slurp(path: String) -> String !io =
-  match read_file(path) {
+  match io.read_file(path) {
     Ok(s) -> s
     Err(_) -> ""
   }
@@ -44,7 +46,7 @@ fn slurp(path: String) -> String !io =
 # Strip the throwaway temp directory out of diagnostics so users see a clean
 # "prog.dawn:line:col" instead of /var/folders/.../dawn-play-<uuid>/prog.dawn.
 fn strip_dir(text: String, dir: String) -> String =
-  join(split(text, "$dir/"), "")
+  join(str.split(text, "$dir/"), "")
 
 # Prepend the sudo-whitelisted sandbox wrapper when PLAY_SANDBOX=1. The wrapper
 # takes the working directory as its first argument, then the command to run
@@ -85,7 +87,7 @@ fn compile_phase(dir: String, src: String, jar: String) -> Result[Int, String] !
   let build = bp.start().expect("failed to start compiler")
   build.waitFor()
   if build.exitValue() != 0 {
-    Err(strip_dir(trim(slurp(build_out)), dir))
+    Err(strip_dir(str.trim(slurp(build_out)), dir))
   } else {
     Ok((System.nanoTime() - started) / 1000000)
   }
@@ -99,7 +101,7 @@ pub fn check(code: String) -> Outcome !io = {
   let dir = "${temp_root()}/dawn-play-$id"
   let src = "$dir/prog.dawn"
   let jar = "$dir/prog.jar"
-  let outcome = match write_file(src, code) {
+  let outcome = match io.write_file(src, code) {
     Err(e) -> CompileError("cannot stage source: $e")
     Ok(_) -> {
       if sandbox_enabled() { make_world_writable(dir) } else { () }
@@ -119,7 +121,7 @@ pub fn execute(code: String) -> Outcome !io = {
   let src = "$dir/prog.dawn"
   let jar = "$dir/prog.jar"
   # write_file creates parent directories as needed
-  let outcome = match write_file(src, code) {
+  let outcome = match io.write_file(src, code) {
     Err(e) -> CompileError("cannot stage source: $e")
     Ok(_) -> {
       # Under the sandbox each phase runs as a fresh DynamicUser (a different

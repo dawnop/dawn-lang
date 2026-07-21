@@ -1,12 +1,15 @@
 # Post-generation link check: every internal href must resolve to a file we
 # actually wrote. Broken links fail the build.
 
+use std/str
+use std/io
+use std/set
 use md/text.{cp_at, seg}
 use gen/common.{must_read, must_list, take_n}
 
 fn files_under(base: String, rel: String) -> List[String] !io = {
   let path = if rel == "" { base } else { "$base/$rel" }
-  if is_dir(path) {
+  if io.is_dir(path) {
     var out: List[String] = []
     for name in must_list(path) {
       let child = if rel == "" { name } else { "$rel/$name" }
@@ -65,20 +68,20 @@ fn hrefs_of(html: String) -> List[String] = {
 }
 
 fn is_external(u: String) -> Bool =
-  starts_with(u, "http://") || starts_with(u, "https://") || starts_with(u, "mailto:") ||
-  starts_with(u, "#")
+  str.starts_with(u, "http://") || str.starts_with(u, "https://") || str.starts_with(u, "mailto:") ||
+  str.starts_with(u, "#")
 
 ## Resolve href against the page's directory and normalize . / .. segments.
 fn resolve(dir: String, href: String) -> String = {
   let no_anchor =
-    match split(href, "#") {
+    match str.split(href, "#") {
       [path] -> path
       [path, _] -> path
       _ -> href
     }
   let raw = if dir == "" { no_anchor } else { "$dir/$no_anchor" }
   var stack: List[String] = []
-  for part in split(raw, "/") {
+  for part in str.split(raw, "/") {
     if part == ".." {
       stack = take_n(stack, len(stack) - 1)
     } else if part != "" && part != "." {
@@ -89,23 +92,23 @@ fn resolve(dir: String, href: String) -> String = {
 }
 
 fn dir_of(rel: String) -> String = {
-  let parts = split(rel, "/")
+  let parts = str.split(rel, "/")
   join(take_n(parts, len(parts) - 1), "/")
 }
 
 pub fn check_links(out: String) -> Unit !io = {
-  let files = set_from(files_under(out, ""))
+  let files = set.from(files_under(out, ""))
   var broken: List[String] = []
   var pages = 0
   var checked = 0
-  for f in set_to_list(files) {
-    if ends_with(f, ".html") {
+  for f in set.to_list(files) {
+    if str.ends_with(f, ".html") {
       pages = pages + 1
       for href in hrefs_of(must_read("$out/$f")) {
         if not is_external(href) {
           checked = checked + 1
           let target = resolve(dir_of(f), href)
-          if not set_has(files, target) {
+          if not set.has(files, target) {
             broken = broken ++ ["$f -> $href (resolved: $target)"]
           }
         }

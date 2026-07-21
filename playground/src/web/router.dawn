@@ -2,6 +2,8 @@
 # (Constructors double as the route DSL because builtin names like `get` are
 # reserved and cannot be redefined as functions.) Patterns are literal segments
 # plus `{name}` captures; matching is segment-exact.
+use std/str
+use std/map
 use web/types.{Request, Response, HttpError, Handler}
 
 pub type Route =
@@ -41,12 +43,12 @@ pub type Dispatch =
   | NoPath
   | WrongMethod
 
-fn segs(p: String) -> List[String] = filter(split(p, "/"), fn(s) => s != "")
+fn segs(p: String) -> List[String] = filter(str.split(p, "/"), fn(s) => s != "")
 
 fn is_capture(seg: String) -> Bool =
-  starts_with(seg, "{") && ends_with(seg, "}") && str_len(seg) > 2
+  str.starts_with(seg, "{") && str.ends_with(seg, "}") && str.len(seg) > 2
 
-fn capture_name(seg: String) -> String = substring(seg, 1, str_len(seg) - 1)
+fn capture_name(seg: String) -> String = str.substring(seg, 1, str.len(seg) - 1)
 
 # Match one pattern against one path; Some(captures) on success.
 pub fn match_path(pattern: String, path: String) -> Option[List[(String, String)]] = {
@@ -88,7 +90,7 @@ fn dispatch_from(routes: List[Route], method: String, path: String, i: Int, path
       None -> dispatch_from(routes, method, path, i + 1, path_seen)
       Some(caps) ->
         if route_method(r) == method {
-          Found(route_handler(r), map_from(caps))
+          Found(route_handler(r), map.from(caps))
         } else {
           dispatch_from(routes, method, path, i + 1, true)
         }
@@ -120,7 +122,7 @@ fn dummy(req: Request) -> Result[Response, HttpError] !io =
 test "dispatch: found, 404, and 405 are distinguished" {
   let routes = [Get("/a/{id}", dummy), Post("/run", dummy)]
   match dispatch(routes, "GET", "/a/7") {
-    Found(_, params) -> { assert map_get(params, "id") == Some("7") }
+    Found(_, params) -> { assert map.get(params, "id") == Some("7") }
     _ -> { assert false }
   }
   match dispatch(routes, "GET", "/nope") {

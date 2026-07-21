@@ -2,6 +2,8 @@
 # per request, a single root context that parses the exchange into a Request,
 # routes it, and writes the Response back. nginx terminates TLS and everything
 # hard in front — this only speaks HTTP/1.1.
+use std/str
+use std/map
 use java "com.sun.net.httpserver.HttpServer"
 use java "com.sun.net.httpserver.HttpExchange"
 use java "com.sun.net.httpserver.Headers"
@@ -51,14 +53,14 @@ fn set_extra_headers(headers: Headers, hs: List[(String, String)]) -> Unit !io =
 fn read_headers(ex: HttpExchange) -> Map[String, String] !io = {
   let headers = ex.getRequestHeaders().expect("request headers")
   let it = headers.keySet().expect("names").iterator().expect("iter")
-  collect_headers(headers, it, map_empty())
+  collect_headers(headers, it, map.empty())
 }
 
 fn collect_headers(headers: Headers, it: Iterator, acc: Map[String, String]) -> Map[String, String] !io =
   if it.hasNext() {
     let name = String.valueOf(it.next().expect("name")).expect("name-str")
     let v = headers.getFirst(name).expect("value")
-    collect_headers(headers, it, map_insert(acc, to_lower(name), v))
+    collect_headers(headers, it, map.insert(acc, str.to_lower(name), v))
   } else {
     acc
   }
@@ -67,8 +69,8 @@ fn collect_headers(headers: Headers, it: Iterator, acc: Map[String, String]) -> 
 # already percent-decoded; a value may itself contain '=', so only the first
 # one splits.
 pub fn parse_query(q: String) -> List[(String, String)] =
-  map(filter(split(q, "&"), fn(pair) => pair != ""), fn(pair) => {
-    let parts = split(pair, "=")
+  map(filter(str.split(q, "&"), fn(pair) => pair != ""), fn(pair) => {
+    let parts = str.split(pair, "=")
     (parts[0], join(tail(parts), "="))
   })
 
@@ -76,12 +78,12 @@ pub fn parse_query(q: String) -> List[(String, String)] =
 # query string but '+' also means space; percent-decoding is the caller's if
 # needed (login/form fields here are ASCII).
 pub fn parse_form(body: String) -> Map[String, String] =
-  map_from(map(parse_query(body), fn(kv) => {
+  map.from(map(parse_query(body), fn(kv) => {
     let (k, v) = kv
     (k, replace_plus(v))
   }))
 
-fn replace_plus(s: String) -> String = join(split(s, "+"), " ")
+fn replace_plus(s: String) -> String = join(str.split(s, "+"), " ")
 
 fn tail(xs: List[String]) -> List[String] =
   map(range(1, len(xs)), fn(i) => xs[i])
@@ -91,9 +93,9 @@ fn rev[T](xs: List[T]) -> List[T] =
 
 fn build_request(ex: HttpExchange) -> Request !io = {
   let uri = ex.getRequestURI().expect("uri")
-  let no_query: Map[String, String] = map_from([])
+  let no_query: Map[String, String] = map.from([])
   let q = match uri.getQuery() {
-    Some(s) -> map_from(parse_query(s))
+    Some(s) -> map.from(parse_query(s))
     None -> no_query
   }
   Request {
@@ -160,6 +162,6 @@ test "query strings parse, including empty and embedded =" {
 
 test "form bodies parse, with + as space" {
   let f = parse_form("username=admin&password=a+b+c")
-  assert map_get(f, "username") == Some("admin")
-  assert map_get(f, "password") == Some("a b c")
+  assert map.get(f, "username") == Some("admin")
+  assert map.get(f, "password") == Some("a b c")
 }

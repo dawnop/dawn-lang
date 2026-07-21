@@ -2,6 +2,7 @@
 # keep in sync until Dawn grows a package story.
 # Recursive-descent JSON parser (RFC 8259). Threads the position through Result,
 # never panics, and caps nesting depth so pathological input can't blow the stack.
+use std/map
 use json/lexer.{peek, skip_ws, is_digit, scan_string, scan_number}
 use json/value.{Json, JNull, JBool, JNum, JStr, JArr, JObj}
 
@@ -56,7 +57,7 @@ fn parse_object_members(src: List[Int], i: Int, depth: Int, acc: Map[String, Jso
       Err("expected ':' in object")
     } else {
       let (v, k) = parse_value(src, jc + 1, depth + 1)?
-      let acc2 = map_insert(acc, key, v)
+      let acc2 = map.insert(acc, key, v)
       let kc = skip_ws(src, k)
       let c = peek(src, kc)
       if c == ',' {
@@ -73,9 +74,9 @@ fn parse_object_members(src: List[Int], i: Int, depth: Int, acc: Map[String, Jso
 fn parse_object(src: List[Int], i0: Int, depth: Int) -> Result[(Json, Int), String] = {
   let i1 = skip_ws(src, i0 + 1)
   if peek(src, i1) == '}' {
-    Ok((JObj(map_empty()), i1 + 1))
+    Ok((JObj(map.empty()), i1 + 1))
   } else {
-    parse_object_members(src, i1, depth, map_empty())
+    parse_object_members(src, i1, depth, map.empty())
   }
 }
 

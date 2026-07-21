@@ -1,6 +1,8 @@
 # site/build/builtins.json (from `dawn doc --builtins`) -> api.html.
 # The compiler emits JSON; this program reads it with Dawn's own JSON library.
 
+use std/io
+use std/map
 use json/parser.{parse}
 use json/value.{Json, JNull, JStr, JArr, JObj}
 use html/escape.{escape_html}
@@ -9,7 +11,7 @@ use gen/common.{must_read, write_page}
 
 fn jget(j: Json, key: String) -> Json =
   match j {
-    JObj(entries) -> unwrap_or(map_get(entries, key), JNull)
+    JObj(entries) -> unwrap_or(map.get(entries, key), JNull)
     _ -> JNull
   }
 
@@ -45,7 +47,7 @@ fn group_html(g: Json) -> String = {
 
 pub fn gen_api(out: String) -> Unit !io = {
   let text =
-    match read_file("site/build/builtins.json") {
+    match io.read_file("site/build/builtins.json") {
       Ok(t) -> t
       Err(_) -> panic("site/build/builtins.json missing — run site/build.sh (it runs dawn doc --builtins first)")
     }

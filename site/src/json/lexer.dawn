@@ -13,14 +13,16 @@
 # already used, so end-of-input handling did not have to change at all.
 # No panics — malformed input becomes an Err.
 
-pub fn peek(src: String, i: Cursor) -> Int = cursor_char(src, i)
+use std/cursor
+
+pub fn peek(src: String, i: Cursor) -> Int = cursor.char(src, i)
 
 pub fn is_digit(c: Int) -> Bool = c >= '0' && c <= '9'
 
 pub fn skip_ws(src: String, i: Cursor) -> Cursor = {
   let c = peek(src, i)
   if c == ' ' || c == '\t' || c == '\n' || c == 13 {
-    skip_ws(src, cursor_next(src, i))
+    skip_ws(src, cursor.next(src, i))
   } else {
     i
   }
@@ -44,9 +46,9 @@ fn hex_digit(c: Int) -> Int =
 # on malformed input the character sitting there may not be, and arithmetic
 # would land inside a surrogate pair instead of on the next character.
 fn read_hex4(src: String, i: Cursor) -> Option[(Int, Cursor)] = {
-  let i1 = cursor_next(src, i)
-  let i2 = cursor_next(src, i1)
-  let i3 = cursor_next(src, i2)
+  let i1 = cursor.next(src, i)
+  let i2 = cursor.next(src, i1)
+  let i3 = cursor.next(src, i2)
   let a = hex_digit(peek(src, i))
   let b = hex_digit(peek(src, i1))
   let c = hex_digit(peek(src, i2))
@@ -54,7 +56,7 @@ fn read_hex4(src: String, i: Cursor) -> Option[(Int, Cursor)] = {
   if a < 0 || b < 0 || c < 0 || d < 0 {
     None
   } else {
-    Some((a * 4096 + b * 256 + c * 16 + d, cursor_next(src, i3)))
+    Some((a * 4096 + b * 256 + c * 16 + d, cursor.next(src, i3)))
   }
 }
 
@@ -76,7 +78,7 @@ fn simple_escape(e: Int) -> Option[Int] =
 # characters of one string, which escapes make genuinely different from any span
 # of the source, and its size is that string's, not the document's.
 pub fn scan_string(src: String, start: Cursor) -> Result[(String, Cursor), String] = {
-  var i = cursor_next(src, start)
+  var i = cursor.next(src, start)
   var acc: List[Int] = []
   var status = 0
   var errmsg = ""
@@ -86,22 +88,22 @@ pub fn scan_string(src: String, start: Cursor) -> Result[(String, Cursor), Strin
       status = 2
       errmsg = "unterminated string"
     } else if c == '"' {
-      i = cursor_next(src, i)
+      i = cursor.next(src, i)
       status = 1
     } else if c == '\\' {
-      let ie = cursor_next(src, i)
+      let ie = cursor.next(src, i)
       let e = peek(src, ie)
       if e == 'u' {
-        match read_hex4(src, cursor_next(src, ie)) {
+        match read_hex4(src, cursor.next(src, ie)) {
           None -> {
             status = 2
             errmsg = "invalid \\u escape"
           }
           Some((code, after)) -> {
             if code >= 55296 && code <= 56319 {
-              let iu = cursor_next(src, after)
+              let iu = cursor.next(src, after)
               if peek(src, after) == '\\' && peek(src, iu) == 'u' {
-                match read_hex4(src, cursor_next(src, iu)) {
+                match read_hex4(src, cursor.next(src, iu)) {
                   None -> {
                     status = 2
                     errmsg = "invalid \\u escape"
@@ -133,7 +135,7 @@ pub fn scan_string(src: String, start: Cursor) -> Result[(String, Cursor), Strin
         match simple_escape(e) {
           Some(cp) -> {
             acc = acc ++ [cp]
-            i = cursor_next(src, ie)
+            i = cursor.next(src, ie)
           }
           None -> {
             status = 2
@@ -146,7 +148,7 @@ pub fn scan_string(src: String, start: Cursor) -> Result[(String, Cursor), Strin
       errmsg = "control character in string"
     } else {
       acc = acc ++ [c]
-      i = cursor_next(src, i)
+      i = cursor.next(src, i)
     }
   }
   if status == 1 {
@@ -159,20 +161,20 @@ pub fn scan_string(src: String, start: Cursor) -> Result[(String, Cursor), Strin
 # ---- numbers ----
 
 fn skip_digits(src: String, i: Cursor) -> Cursor =
-  if is_digit(peek(src, i)) { skip_digits(src, cursor_next(src, i)) } else { i }
+  if is_digit(peek(src, i)) { skip_digits(src, cursor.next(src, i)) } else { i }
 
 fn scan_int_part(src: String, i: Cursor) -> Result[Cursor, String] =
   if peek(src, i) == '0' {
-    Ok(cursor_next(src, i))
+    Ok(cursor.next(src, i))
   } else if peek(src, i) >= '1' && peek(src, i) <= '9' {
-    Ok(skip_digits(src, cursor_next(src, i)))
+    Ok(skip_digits(src, cursor.next(src, i)))
   } else {
     Err("invalid number: expected a digit")
   }
 
 fn scan_frac(src: String, i: Cursor) -> Result[Cursor, String] =
   if peek(src, i) == '.' {
-    let i1 = cursor_next(src, i)
+    let i1 = cursor.next(src, i)
     let j = skip_digits(src, i1)
     if j == i1 { Err("invalid number: digits expected after '.'") } else { Ok(j) }
   } else {
@@ -181,8 +183,8 @@ fn scan_frac(src: String, i: Cursor) -> Result[Cursor, String] =
 
 fn scan_exp(src: String, i: Cursor) -> Result[Cursor, String] =
   if peek(src, i) == 'e' || peek(src, i) == 'E' {
-    let i1 = cursor_next(src, i)
-    let i2 = if peek(src, i1) == '+' || peek(src, i1) == '-' { cursor_next(src, i1) } else { i1 }
+    let i1 = cursor.next(src, i)
+    let i2 = if peek(src, i1) == '+' || peek(src, i1) == '-' { cursor.next(src, i1) } else { i1 }
     let j = skip_digits(src, i2)
     if j == i2 { Err("invalid number: digits expected in exponent") } else { Ok(j) }
   } else {
@@ -193,11 +195,11 @@ fn scan_exp(src: String, i: Cursor) -> Result[Cursor, String] =
 # text comes out with one `cursor_slice`, where the List[Int] version had to copy
 # the span element by element and rebuild a string from it.
 pub fn scan_number(src: String, start: Cursor) -> Result[(Float, Cursor), String] = {
-  let i0 = if peek(src, start) == '-' { cursor_next(src, start) } else { start }
+  let i0 = if peek(src, start) == '-' { cursor.next(src, start) } else { start }
   let i1 = scan_int_part(src, i0)?
   let i2 = scan_frac(src, i1)?
   let i3 = scan_exp(src, i2)?
-  let text = cursor_slice(src, start, i3)
+  let text = cursor.slice(src, start, i3)
   match parse_float(text) {
     Some(f) -> Ok((f, i3))
     None -> Err("invalid number")

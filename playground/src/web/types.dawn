@@ -3,6 +3,8 @@
 # — the Ok branch is a rendered response, the Err branch is mapped to an HTTP
 # status by the server (JSON body {"error": message}). No exceptions anywhere:
 # panics are bugs, expected failures travel in Result.
+use std/str
+use std/map
 use json/value.{Json, JStr, JObj}
 use json/render.{render}
 
@@ -63,14 +65,14 @@ pub fn attachment(content_type: String, filename: String, body: String) -> Respo
 
 # The server's rendering of the Err branch and of its own 404/405.
 pub fn error_response(e: HttpError) -> Response =
-  json_response(e.status, JObj(map_from([("error", JStr(e.message))])))
+  json_response(e.status, JObj(map.from([("error", JStr(e.message))])))
 
 # ---- request accessors ----
 
 # A path parameter captured by a `{name}` pattern segment. Missing means the
 # route table and the handler disagree — a programming error, hence 500.
 pub fn param(req: Request, name: String) -> Result[String, HttpError] =
-  match map_get(req.params, name) {
+  match map.get(req.params, name) {
     Some(v) -> Ok(v)
     None -> Err(http_error(500, "missing path parameter: $name"))
   }
@@ -83,19 +85,19 @@ pub fn param_int(req: Request, name: String) -> Result[Int, HttpError] = {
   }
 }
 
-pub fn query(req: Request, name: String) -> Option[String] = map_get(req.query, name)
+pub fn query(req: Request, name: String) -> Option[String] = map.get(req.query, name)
 
 # A request header, looked up case-insensitively (the name is lowercased here;
 # the server lowercases keys when building the map).
 pub fn header(req: Request, name: String) -> Option[String] =
-  map_get(req.headers, to_lower(name))
+  map.get(req.headers, str.to_lower(name))
 
 test "param reads captures and flags missing ones" {
-  let h: Map[String, String] = map_empty()
-  let q: Map[String, String] = map_empty()
+  let h: Map[String, String] = map.empty()
+  let q: Map[String, String] = map.empty()
   let req = Request {
     method: "GET", path: "/a/42",
-    params: map_from([("id", "42")]), query: q, headers: h, body: "",
+    params: map.from([("id", "42")]), query: q, headers: h, body: "",
   }
   assert param(req, "id") == Ok("42")
   assert param_int(req, "id") == Ok(42)
@@ -106,11 +108,11 @@ test "param reads captures and flags missing ones" {
 }
 
 test "param_int rejects non-numbers as a client error" {
-  let h: Map[String, String] = map_empty()
-  let q: Map[String, String] = map_empty()
+  let h: Map[String, String] = map.empty()
+  let q: Map[String, String] = map.empty()
   let req = Request {
     method: "GET", path: "/a/x",
-    params: map_from([("id", "x")]), query: q, headers: h, body: "",
+    params: map.from([("id", "x")]), query: q, headers: h, body: "",
   }
   match param_int(req, "id") {
     Err(e) -> { assert e.status == 400 }
@@ -120,8 +122,8 @@ test "param_int rejects non-numbers as a client error" {
 
 test "header lookup is case-insensitive" {
   let req = Request {
-    method: "GET", path: "/", params: map_empty(), query: map_empty(),
-    headers: map_from([("authorization", "Bearer xyz"), ("content-type", "application/json")]),
+    method: "GET", path: "/", params: map.empty(), query: map.empty(),
+    headers: map.from([("authorization", "Bearer xyz"), ("content-type", "application/json")]),
     body: "",
   }
   assert header(req, "Authorization") == Some("Bearer xyz")
