@@ -1058,11 +1058,15 @@ class CodeGen(
         return cw.toByteArray()
     }
 
-    /** two scalars on the stack → their long cmp result (NaN compares below everything here) */
+    /**
+     * Two scalars on the stack → their long cmp result. Float uses Double.compare — the
+     * total order (spec §4.3): NaN above everything, -0.0 < +0.0. A raw DCMPL would
+     * return -1 with NaN on either side, which is not antisymmetric and breaks sort.
+     */
     private fun emitNativeCmp(t: Type) {
         when (t) {
             TInt -> mv.visitInsn(LCMP)
-            TFloat -> mv.visitInsn(DCMPL)
+            TFloat -> mv.visitMethodInsn(INVOKESTATIC, "java/lang/Double", "compare", "(DD)I", false)
             else -> mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "compareTo",
                 "(Ljava/lang/String;)I", false)
         }
@@ -3679,8 +3683,8 @@ class CodeGen(
             BinOp.ADD -> mv.visitInsn(if (t == TInt) LADD else DADD)
             BinOp.SUB -> mv.visitInsn(if (t == TInt) LSUB else DSUB)
             BinOp.MUL -> mv.visitInsn(if (t == TInt) LMUL else DMUL)
-            BinOp.DIV -> mv.visitInsn(if (t == TInt) LDIV else DDIV)
-            BinOp.MOD -> mv.visitInsn(if (t == TInt) LREM else DREM)
+            BinOp.DIV -> if (t == TInt) { emitDivZeroCheck("division"); mv.visitInsn(LDIV) } else mv.visitInsn(DDIV)
+            BinOp.MOD -> if (t == TInt) { emitDivZeroCheck("modulo"); mv.visitInsn(LREM) } else mv.visitInsn(DREM)
             BinOp.CONCAT ->
                 if (t is TList) {
                     mv.visitMethodInsn(INVOKESTATIC, LISTS_CLASS, "concat", "(L$JLIST;L$JLIST;)L$JLIST;", false)
@@ -3798,6 +3802,25 @@ class CodeGen(
         mv.visitLabel(trueL)
         mv.visitInsn(ICONST_1)
         mv.visitLabel(end)
+    }
+
+    /**
+     * Stack: a b (both long). Panics when b == 0 — a raw LDIV/LREM would throw a plain
+     * ArithmeticException, which java_try (Exception-only) would catch; spec §8.2 says
+     * division by zero is a panic, and panics must pass through java_try (§9.8).
+     */
+    private fun emitDivZeroCheck(op: String) {
+        val ok = Label()
+        mv.visitInsn(DUP2)
+        mv.visitInsn(LCONST_0)
+        mv.visitInsn(LCMP)
+        mv.visitJumpInsn(IFNE, ok)
+        mv.visitTypeInsn(NEW, PANIC_CLASS)
+        mv.visitInsn(DUP)
+        mv.visitLdcInsn("Int $op by zero")
+        mv.visitMethodInsn(INVOKESPECIAL, PANIC_CLASS, "<init>", "(Ljava/lang/String;)V", false)
+        mv.visitInsn(ATHROW)
+        mv.visitLabel(ok)
     }
 
     private fun genIf(e: If, tail: Boolean): Boolean {

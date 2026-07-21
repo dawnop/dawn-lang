@@ -1,0 +1,15 @@
+# Division/modulo by zero is a PANIC (spec §8.2), not a plain Java
+# ArithmeticException: java_try must let it fly (§9.8), only catch_panic
+# stops it. The nested pair below proves both at once.
+
+fn div(a: Int, b: Int) -> Int = a / b
+fn rem(a: Int, b: Int) -> Int = a % b
+
+pub fn main() -> Unit !io = {
+  println(to_string(catch_panic(fn() => div(1, 0))))
+  println(to_string(catch_panic(fn() => rem(1, 0))))
+  # java_try does NOT catch it (PanicError is an Error): the panic passes
+  # through the inner java_try and is only stopped by the outer catch_panic.
+  println(to_string(catch_panic(fn() => java_try(fn() => div(7, 0)))))
+  println(to_string(div(7, 2)))    # the guard costs nothing on the happy path
+}

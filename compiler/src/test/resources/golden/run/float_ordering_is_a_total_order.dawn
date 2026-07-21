@@ -1,0 +1,23 @@
+# Float has two deliberate orders (spec §4.3): the IEEE comparisons `< <= > >=`
+# and `==` (every comparison with NaN is false, -0.0 == 0.0), and the TOTAL
+# order behind Ord.cmp / sort / min / max (Double.compare: NaN above
+# everything, -0.0 < 0.0). Sorting a list with NaN must stay antisymmetric.
+
+fn nan() -> Float = 0.0 / 0.0
+
+pub fn main() -> Unit !io = {
+  let n = nan()
+  # IEEE side: NaN poisons every comparison, -0.0 equals 0.0
+  println(to_string(n == n))
+  println(to_string(n < 1.0))
+  println(to_string(1.0 < n))
+  println(to_string(-0.0 == 0.0))
+  # total-order side: sort is antisymmetric with NaN present, NaN lands last
+  println(to_string(sort([1.0, n, -0.0, 0.0, -1.0])))
+  println(to_string(cmp(n, 1.0)))
+  println(to_string(cmp(1.0, n)))
+  println(to_string(cmp(n, n)))
+  println(to_string(cmp(-0.0, 0.0)))
+  println(to_string(max([1.0, n])))
+  println(to_string(min([n, 1.0])))
+}

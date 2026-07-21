@@ -147,7 +147,8 @@ println("got $n items, first = ${list.get(0)}")
 - **迭代顺序 = 插入顺序**，确定且 JVM/native 一致（`map_keys`/`map_entries`/`set_to_list`
   按插入序）。`map_insert` 遇已存在的键**替换值、保留原插入位置**。
 - **相等与顺序无关**：两个键值对相同的 `Map` 相等，无论插入次序。
-- Map/Set v0.1 实现为 copy-on-write（每次写复制底层结构，O(n)）；后续可换持久数据结构而不动接口。
+- 实现是**持久 HAMT**（`dawn/rt/DawnMap`/`DawnSet`）：`map_insert`/`map_remove`
+  O(log32 n)，只复制根到叶的路径，其余结构与原映射共享（插入序由逐键序号维持）。
 
 ### 2.3 和类型（ADT）
 
@@ -361,6 +362,23 @@ let area = {
 
 - 按位 `& ^ \|` 与移位**仅作用于 `Int`**（无 `Float` 位模式）；它们**紧于比较**，
   故 `a & b == c` 是 `(a & b) == c`，无 C 家族那个坑。移位计数取低 6 位（同 JVM `LSHL`）。
+
+**数值边缘语义**（全部为**保证**——自举后两套实现以此对拍，不允许「碰巧一致」）：
+
+- `Int` 溢出**环绕**（二补码，同 JVM）：`MAX + 1 == MIN`。唯一可能溢出的除法
+  `MIN / -1` 同样环绕（结果 `MIN`），`MIN % -1 == 0`。
+- `/` **向零取整**（`-7 / 2 == -3`，不是 floor）；`%` 的**符号随被除数**
+  （`-7 % 2 == -1`、`7 % -2 == 1`），恒满足 `a == (a / b) * b + a % b`。
+- `/` 与 `%` 除零是 **panic**（消息 `Int division by zero` / `Int modulo by zero`）——
+  panic 而非 Java 异常，故 `java_try` 不拦、只有 `catch_panic` 拦（§9.8）。
+- `Float` 算术遵循 IEEE 754：除零不 panic（得 `±Inf`/`NaN`）；`==` 与 `< <= > >=`
+  是 IEEE 比较——NaN 与任何值（含自身）比较均为 false，`-0.0 == 0.0` 为 true。
+- **`Ord.cmp` 对 `Float` 是全序**（Java `Double.compare` 语义）：NaN 大于一切、
+  `-0.0` 排在 `0.0` 之前。`sort`/`max`/`min`/`max_by`/`min_by`/`derive Ord` 走它，
+  与 `<` 的 IEEE 语义在 NaN/`-0.0` 上**刻意不同**（同 Java `compare` 与 Rust
+  `total_cmp` 的取舍：比较要诚实，排序要成序）。
+- `Float` 的 `to_string`/`Show` 渲染 = JVM `Double.toString`（最短往返表示，
+  `NaN`/`Infinity`/`-Infinity` 照字面）。
 
 - `==`/`!=` 是结构相等，对任意类型可用（函数类型除外——比较函数是编译错误）。
 - 排序比较 `< <=` 等：`Int`/`Float`/`String` 原生有序；其他类型桥接到预置
@@ -642,7 +660,7 @@ let base = HttpRequest.newBuilder()!.uri(uri)!  # 而不是 .expect("b") / .expe
 - **确有话要说**时仍用 `expect(o, "原因")`——它就是为此存在。
 
 `get`/`map_get` 返回 `Option`（问询）；下标 `xs[i]`/`m[k]` 越界/缺键 panic（断言，§4.8）；
-`Int` 除零 panic。
+`Int` 除零（`/` 与 `%`）panic——是 panic 故 `java_try` 不拦（§4.3 数值边缘语义）。
 
 ---
 
@@ -1024,8 +1042,8 @@ use java "java.lang.Math"      # Java 互操作（§9），形式不变
   - `is_dir(path) -> Bool` — 不存在或出错都视为 `false`
 
 实现策略：能薄包 Java 就薄包（`String` 直接是 `java.lang.String`），持久 `List`/`Map`/`Set`
-自实现（v0.1 以 `LinkedHashMap`/`LinkedHashSet` copy-on-write 兜底，保插入序确定；
-自举前用 Kotlin 写运行时）。
+自实现（`DawnList` 共享数组窗口、`DawnMap`/`DawnSet` 持久 HAMT，均保插入序确定；
+自举前用 Kotlin/Java 写运行时）。
 
 ---
 

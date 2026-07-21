@@ -604,9 +604,9 @@ class ComptimeInterp(
                 BinOp.SUB -> CValue.VInt(a - b)
                 BinOp.MUL -> CValue.VInt(a * b)
                 BinOp.DIV ->
-                    if (b == 0L) err("panicked: division by zero", e.opSpan) else CValue.VInt(a / b)
+                    if (b == 0L) err("panicked: Int division by zero", e.opSpan) else CValue.VInt(a / b)
                 else ->
-                    if (b == 0L) err("panicked: division by zero", e.opSpan) else CValue.VInt(a % b)
+                    if (b == 0L) err("panicked: Int modulo by zero", e.opSpan) else CValue.VInt(a % b)
             }
         }
         l is CValue.VFloat && r is CValue.VFloat -> {
