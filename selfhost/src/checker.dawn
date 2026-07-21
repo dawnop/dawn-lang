@@ -30,7 +30,7 @@ use ast.{
 }
 use tast.{
   TExpr, XInt, XFloat, XBool, XUnit, XStr, XLocal, XFnValue, XCallDyn,
-  XCallBuiltin, XCallFn, XApply, XJava, XLambda, XCtor, XConstRef, XField,
+  XCallBuiltin, XCallFn, XApply, XJava, XLambda, XCtor, XConstRef, XCtorValue, XField,
   XListLit, XTupleLit, XPropagate, XUnwrap, XIndex, XReturn, XBreak, XContinue,
   XComptime, XUnsafePure, XBinary, XUnary, XIf, XMatch, XBlock, XError,
   TBinOp, BAdd, BSub, BMul, BDiv, BMod, BConcat, BEq, BNeq, BLt, BLe, BGt, BGe,
@@ -41,7 +41,7 @@ use tast.{
   TFun, TConst, TModule
 }
 use types.{
-  Ty, TyInt, TyFloat, TyBool, TyString, TyBytes, TyCursor, TyUnit, TyNever,
+  adt_self_ty, Ty, TyInt, TyFloat, TyBool, TyString, TyBytes, TyCursor, TyUnit, TyNever,
   TyError, TyVar, TyAdt, TyList, TyMap, TySet, TyJava, TyTuple, TyFn,
   Eff, EPure, EIo, EffVar, EUnion, eff_union, lub_eff, eff_subsumes, eff_suffix,
   Adts, AdtI, CtorI, FieldI, Traits, TraitI, ImplI, Sym, Sig, MethodSig,
@@ -4050,4 +4050,152 @@ test "fn values instantiate from the expected type" {
   let join_sig = map.get(bs, "join").expect("join")
   let (cx4, t4, _) = check_fn_value(cx, "join", join_sig, None, 0, 4)
   assert t4 == TyFn([TyList(TyString), TyString], TyString, EPure)
+}
+
+## A constructor used bare as a function value: `map(xs, Some)`. Generics come
+## from the expected fn type (the Kotlin checkCtorValue).
+pub fn check_ctor_value(
+  cx: Cx,
+  aid: Int,
+  cslot: Int,
+  eps: List[Ty],
+  eret: Ty,
+  lo: Int,
+  hi: Int
+) -> (Cx, Ty, TExpr) = {
+  let a = adt_of(cx.adts, aid)
+  let ci = a.ctors[cslot]
+  var params: List[Ty] = []
+  for f in ci.fields { params = params ++ [f.ty] }
+  let ret = adt_self_ty(a)
+  let node = XCtorValue(aid, cslot, lo, hi)
+  if len(eps) != len(params) {
+    return (cerr_h(cx, "`" ++ ci.name ++ "` takes " ++ to_string(len(params)) ++
+        " field(s), but " ++ ty_show(cx.adts, TyFn(eps, eret, EPure)) ++ " is expected", lo, hi,
+      "constructor: " ++ ctor_render(cx.adts, ci)), TyError, XError(lo, hi))
+  }
+  if len(a.tparams) == 0 {
+    return (cx, TyFn(params, ret, EPure), node)
+  }
+  var m: Map[Int, Ty] = map.empty()
+  var em: Map[Int, Eff] = map.empty()
+  var i = 0
+  for d in params {
+    let arg = eps[i]
+    if is_concrete(cx, arg) {
+      let (m2, em2, _) = unify_into(cx, d, arg, m, em)
+      m = m2
+      em = em2
+    }
+    i = i + 1
+  }
+  if is_concrete(cx, eret) {
+    let (m3, em3, _) = unify_into(cx, ret, eret, m, em)
+    m = m3
+    em = em3
+  }
+  var unbound: List[String] = []
+  for tp in a.tparams {
+    match tp {
+      TyVar(n, vid) -> if not map.has(m, vid) { unbound = unbound ++ [n] }
+      _ -> ()
+    }
+  }
+  if len(unbound) > 0 {
+    return (cerr_h(cx, "cannot infer type parameter(s) " ++ join(unbound, ", ") ++ " for `" ++
+        ci.name ++ "` used as a value", lo, hi,
+      "annotate the surrounding context, or wrap it in a lambda"), TyError, XError(lo, hi))
+  }
+  var ips: List[Ty] = []
+  for d in params { ips = ips ++ [subst(d, m, em)] }
+  (cx, TyFn(ips, subst(ret, m, em), EPure), node)
+}
+
+## Satisfy one trait requirement at a use site (the general resolveWitness):
+## rigid type parameter → the caller's dictionary is forwarded (and captured by
+## every enclosing lambda); concrete subject → coherence gives the unique impl.
+pub fn resolve_witness(
+  cx: Cx,
+  trait_id: Int,
+  t: Ty,
+  lo: Int,
+  hi: Int,
+  requirer: String
+) -> (Cx, Bool) = {
+  if is_errorish(t) { return (cx, false) }
+  let tr = trait_of(cx.traits, trait_id)
+  match t {
+    TyVar(_, vid) ->
+      match map.get(cx.dict_syms, (vid, trait_id)) {
+        None -> {
+          let ts = ty_show(cx.adts, t)
+          (cerr_h(cx, requirer ++ " requires `" ++ tr.name ++ "[" ++ ts ++ "]`, but `" ++
+              ts ++ "` has no such bound", lo, hi,
+            "add the bound: [" ++ ts ++ ": " ++ tr.name ++ "]"), false)
+        }
+        Some(sym) -> {
+          var stack: List[LambdaCx] = []
+          for lc in cx.lambda_stack {
+            var caps = lc.captures
+            var have = false
+            for c in caps {
+              if c == sym { have = true }
+            }
+            if not have { caps = caps ++ [sym] }
+            stack = stack ++ [LambdaCx { ..lc, captures: caps }]
+          }
+          (Cx { ..cx, lambda_stack: stack }, true)
+        }
+      }
+    _ ->
+      match map.get(cx.impl_table, (trait_id, t)) {
+        Some(_) -> (cx, true)
+        None -> {
+          let ts = ty_show(cx.adts, t)
+          let hint = if trait_id == ORD_ID && not is_adt(t) {
+            "only Int, Float, String and types with an `impl Ord` can be ordered"
+          } else if is_nongeneric_adt(cx, t) {
+            "define `impl " ++ tr.name ++ "[" ++ ts ++ "] { ... }` in the module declaring `" ++
+              ts ++ "` or `" ++ tr.name ++ "`"
+          } else if t == TyInt || t == TyFloat || t == TyBool || t == TyString {
+            "define `impl " ++ tr.name ++ "[" ++ ts ++ "] { ... }` in the module declaring `" ++
+              tr.name ++ "`"
+          } else {
+            "v1 impl subjects are named non-generic types and Int/Float/Bool/String"
+          }
+          (cerr_h(cx, "no impl of `" ++ tr.name ++ "` for `" ++ ts ++ "`", lo, hi, hint), false)
+        }
+      }
+  }
+}
+
+fn is_adt(t: Ty) -> Bool =
+  match t {
+    TyAdt(_, _) -> true
+    _ -> false
+  }
+
+fn is_nongeneric_adt(cx: Cx, t: Ty) -> Bool =
+  match t {
+    TyAdt(aid, _) -> len(adt_of(cx.adts, aid).tparams) == 0
+    _ -> false
+  }
+
+test "ctor values and witnesses" {
+  var cx = seed_prelude(test_cx())
+  # Some as fn(Int) -> Option[Int]
+  let (cx1, t1, _) = check_ctor_value(cx, OPTION_ID, 0, [TyInt], opt_ty(TyInt), 0, 4)
+  assert len(cx1.diags) == 0
+  assert t1 == TyFn([TyInt], opt_ty(TyInt), EPure)
+  # arity mismatch reports with the ctor render
+  let (cx2, t2, _) = check_ctor_value(cx, OPTION_ID, 0, [TyInt, TyInt], TyUnit, 0, 4)
+  assert str.contains(cx2.diags[0].msg, "`Some` takes 1 field(s)")
+  # witness: Int has a prelude Ord impl, Bool does not
+  let (cx3, ok3) = resolve_witness(cx, ORD_ID, TyInt, 0, 4, "`sort`")
+  assert ok3
+  let (cx4, ok4) = resolve_witness(cx, ORD_ID, TyBool, 0, 4, "`sort`")
+  assert not ok4
+  assert cx4.diags[0].msg == "no impl of `Ord` for `Bool`"
+  # Ord over a non-ADT gets the ordering-specific hint (the Kotlin implHint order)
+  assert cx4.diags[0].hint == "only Int, Float, String and types with an `impl Ord` can be ordered"
 }
