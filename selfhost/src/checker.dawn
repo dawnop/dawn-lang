@@ -17,7 +17,7 @@ use ast.{
   module_java_uses, module_fns, module_types, module_consts, module_traits,
   module_impls, module_tests, module_uses,
   DType, TypeDeclR, CtorDecl, FieldDecl, DTrait, TraitMethod, Param, Expr,
-  Decl, DImpl, FnDecl, EBool
+  Decl, DImpl, FnDecl, EBool, DFn, EVar
 }
 use types.{
   Ty, TyInt, TyFloat, TyBool, TyString, TyBytes, TyCursor, TyUnit, TyNever,
@@ -2099,4 +2099,173 @@ test "impl registration enforces coherence and signature matching" {
   assert len(cx2.diags) == 1
   assert str.contains(cx2.diags[0].msg, "is missing `eq5`")
   assert cx2.diags[0].hint == "provide: fn eq5(a: Int, b: Int) -> Bool"
+}
+
+## Resolve `[T: Ord + Show]` bounds against the visible traits, aligned per
+## parameter (the Kotlin resolveBounds).
+pub fn resolve_bounds(cx: Cx, tparams: List[TypeParamDecl]) -> (Cx, List[List[Int]]) = {
+  var all_empty = true
+  for tp in tparams {
+    if len(tp.bounds) > 0 { all_empty = false }
+  }
+  if all_empty {
+    let none: List[List[Int]] = []
+    return (cx, none)
+  }
+  var cx1 = cx
+  var out: List[List[Int]] = []
+  for tp in tparams {
+    var bnames: List[String] = []
+    for b in tp.bounds { bnames = bnames ++ [b.name] }
+    if dup_names(bnames) {
+      cx1 = cerr(cx1, "duplicate trait bound on `" ++ tp.name ++ "`", tp.lo, tp.hi)
+    }
+    var ids: List[Int] = []
+    for b in tp.bounds {
+      match map.get(cx1.traits_by_name, b.name) {
+        None -> {
+          let hint = match suggest.hint(b.name, map.keys(cx1.traits_by_name)) {
+            Some(h) -> h
+            None -> "declare `trait " ++ b.name ++ "[T] { ... }` or import it first"
+          }
+          cx1 = cerr_h(cx1, "unknown trait: " ++ b.name, b.lo, b.hi, hint)
+        }
+        Some(tid) -> {
+          var have = false
+          for x in ids {
+            if x == tid { have = true }
+          }
+          if not have { ids = ids ++ [tid] }
+        }
+      }
+    }
+    out = out ++ [ids]
+  }
+  (cx1, out)
+}
+
+## Pass 3: function signatures. Returns the per-decl signature list (aligned
+## with module_fns order) plus per-decl effect-variable tables for body checks.
+pub fn pass_fn_signatures(cx: Cx, m: Module) -> (Cx, List[Sig], List[Map[String, Eff]]) = {
+  var cx1 = cx
+  var sigs: List[Sig] = []
+  var evs: List[Map[String, Eff]] = []
+  for d in module_fns(m) {
+    var tpnames: List[String] = []
+    for tp in d.tparams { tpnames = tpnames ++ [tp.name] }
+    if dup_names(tpnames) {
+      cx1 = cerr(cx1, "duplicate type parameter names", d.nlo, d.nhi)
+    }
+    var tvars: List[Ty] = []
+    var tp_scope: Map[String, Ty] = map.empty()
+    for tp in d.tparams {
+      let (cx2, v) = fresh_tvar(cx1, tp.name)
+      cx1 = cx2
+      tvars = tvars ++ [v]
+      tp_scope = map.insert(tp_scope, tp.name, v)
+    }
+    let saved_tp = cx1.current_tparams
+    let saved_ev = cx1.current_eff_vars
+    let empty_ev: Map[String, Eff] = map.empty()
+    cx1 = Cx { ..cx1, current_tparams: tp_scope, current_eff_vars: empty_ev }
+    let (cx3, eff) = resolve_eff(cx1, d.effs)
+    cx1 = cx3
+    let inferring = match d.ret {
+      Some(_) -> false
+      None -> true
+    }
+    var ptys: List[Ty] = []
+    for p in d.params {
+      let (cx4, t) = resolve_type(cx1, p.tref)
+      cx1 = cx4
+      ptys = ptys ++ [t]
+    }
+    let (cx5, ret) = match d.ret {
+      Some(r) -> resolve_type(cx1, r)
+      None -> (cx1, TyError)
+    }
+    cx1 = cx5
+    let (cx6, constraints) = resolve_bounds(cx1, d.tparams)
+    cx1 = cx6
+    let ev = cx1.current_eff_vars
+    cx1 = Cx { ..cx1, current_tparams: saved_tp, current_eff_vars: saved_ev }
+    # until the body is checked, an unannotated fn assumes the worst effect
+    let final_eff = if inferring && len(d.effs) == 0 { EIo } else { eff }
+    let sig = Sig {
+      name: d.name,
+      param_tys: ptys,
+      param_names: map(d.params, fn(p) => p.name),
+      ret: ret,
+      eff: final_eff,
+      is_builtin: false,
+      tparams: tvars,
+      constraints: constraints,
+      owner: cx1.owner_class,
+      trait_id: None,
+      inferring: inferring
+    }
+    sigs = sigs ++ [sig]
+    evs = evs ++ [ev]
+    # a top-level fn may shadow a builtin or std name (spec §10.6)
+    if alias_shadows(cx1, d.name) {
+      cx1 = alias_shadow(cx1, d.name, d.nlo, d.nhi)
+    } else if import_clashes(cx1, d.name) {
+      cx1 = import_clash(cx1, d.name, d.nlo, d.nhi, "function")
+    } else if map.has(cx1.fns, d.name) {
+      let prev = map.get(cx1.fns, d.name).expect("present")
+      let msg = match prev.trait_id {
+        Some(ptid) -> "`" ++ d.name ++ "` is already a method of trait `" ++
+          trait_of(cx1.traits, ptid).name ++ "` (trait methods share the function namespace)"
+        None -> "function `" ++ d.name ++ "` is defined twice"
+      }
+      cx1 = cerr(cx1, msg, d.nlo, d.nhi)
+    } else {
+      cx1 = Cx { ..cx1, fns: map.insert(cx1.fns, d.name, sig) }
+    }
+  }
+  (cx1, sigs, evs)
+}
+
+test "fn signatures resolve with bounds and worst-effect inference" {
+  # fn f[T: Ord](x: T) -> T   and   fn g(x: Int) = x  (inferring → io placeholder)
+  let m = Module { decls: [
+    DFn(FnDecl {
+      is_pub: false,
+      name: "f",
+      tparams: [TypeParamDecl {
+        name: "T",
+        bounds: [Bound { name: "Ord", lo: 9, hi: 12 }],
+        lo: 6,
+        hi: 12
+      }],
+      params: [Param { name: "x", tref: TNamed("T", [], 17, 18), lo: 14, hi: 15 }],
+      ret: Some(TNamed("T", [], 23, 24)),
+      effs: no_effs(),
+      body: EVar("x", 27, 28),
+      lo: 0,
+      hi: 28,
+      nlo: 3,
+      nhi: 4
+    }),
+    DFn(FnDecl {
+      is_pub: false,
+      name: "g",
+      tparams: no_tparams(),
+      params: [Param { name: "x", tref: TNamed("Int", [], 36, 39), lo: 33, hi: 34 }],
+      ret: None,
+      effs: no_effs(),
+      body: EVar("x", 43, 44),
+      lo: 30,
+      hi: 44,
+      nlo: 33,
+      nhi: 34
+    })
+  ] }
+  var cx = seed_prelude(test_cx())
+  let (cx1, sigs, evs) = pass_fn_signatures(cx, m)
+  assert len(cx1.diags) == 0
+  assert sig_render(cx1.adts, cx1.traits, sigs[0]) == "fn f[T: Ord](x: T) -> T"
+  assert sigs[1].inferring
+  assert sigs[1].eff == EIo
+  assert map.get(cx1.fns, "g") == Some(sigs[1])
 }
