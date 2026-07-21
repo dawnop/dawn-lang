@@ -2718,3 +2718,159 @@ test "internal builtins hide from user code but not std" {
   }
   assert not has_map_insert
 }
+
+## return / return expr — early return from the enclosing fn (or lambda).
+## The value is checked by the caller (recursion lives there); this decides the
+## target type or errors. Returns Some(target) when a value should be checked
+## against it, None when the return is malformed (already reported).
+pub fn return_target(cx: Cx, lo: Int, hi: Int) -> (Cx, Option[Ty]) = {
+  if len(cx.lambda_stack) > 0 {
+    let lc = cx.lambda_stack[len(cx.lambda_stack) - 1]
+    match lc.expected_ret {
+      Some(t) -> (cx, Some(t))
+      None -> (cerr_h(cx,
+        "`return` inside a lambda needs the lambda's return type to be known from context",
+        lo, hi, "make the expected function type explicit, or drop the return"), None)
+    }
+  } else {
+    match cx.current_sig {
+      None -> (cerr(cx, "`return` can only be used inside a function", lo, hi), None)
+      Some(fs) ->
+        if fs.inferring {
+          (cerr_h(cx, "`return` needs the function's return type to be declared", lo, hi,
+            "add `-> T` to fn " ++ fs.name ++ "(...)"), None)
+        } else {
+          (cx, Some(fs.ret))
+        }
+    }
+  }
+}
+
+## break/continue — valid only inside a loop of the current function.
+## Returns the loop's marker id (its span-lo works as identity) or -1.
+pub fn check_loop_jump(cx: Cx, kw: String, lo: Int, hi: Int) -> (Cx, Bool) = {
+  if len(cx.loop_stack) == 0 {
+    return (cerr(cx, "`" ++ kw ++ "` can only be used inside a loop body", lo, hi), false)
+  }
+  let depth = cx.loop_stack[len(cx.loop_stack) - 1]
+  if depth != len(cx.lambda_stack) {
+    return (cerr_h(cx, "`" ++ kw ++ "` cannot cross a lambda boundary to reach the loop outside",
+      lo, hi, "a lambda is its own function: use `return` to exit it, or restructure the loop"),
+      false)
+  }
+  (cx, true)
+}
+
+## expr? — unwrap Ok/Some or early-return the Err/None (spec §8.1).
+pub fn check_propagate_typed(cx: Cx, ot: Ty, operand: TExpr, lo: Int, hi: Int) -> (Cx, Ty, TExpr) = {
+  if is_errorish(ot) { return (cx, TyError, XError(lo, hi)) }
+  let node = XPropagate(operand, lo, hi)
+  # inside a lambda, ? returns from the lambda — its return type must be known
+  var sig_ret = TyError
+  if len(cx.lambda_stack) > 0 {
+    let lc = cx.lambda_stack[len(cx.lambda_stack) - 1]
+    sig_ret = match lc.expected_ret {
+      Some(t) -> t
+      None -> return (cerr_h(cx,
+        "`?` inside a lambda needs the lambda's return type to be known from context", lo, hi,
+        "handle the Option/Result with match, or make the expected function type explicit"),
+        TyError, XError(lo, hi))
+    }
+  } else {
+    sig_ret = match cx.current_sig {
+      None -> return (cerr(cx,
+        "`?` can only be used inside a function that returns Option or Result", lo, hi),
+        TyError, XError(lo, hi))
+      Some(fs) ->
+        if fs.inferring {
+          return (cerr_h(cx, "`?` needs the function's return type to be declared", lo, hi,
+            "add `-> Option[...]` / `-> Result[...]` to fn " ++ fs.name ++ "(...)"),
+            TyError, XError(lo, hi))
+        } else {
+          fs.ret
+        }
+    }
+  }
+  match ot {
+    TyAdt(aid, targs) -> {
+      if aid == OPTION_ID {
+        let ret_is_opt = match sig_ret {
+          TyAdt(rid, _) -> rid == OPTION_ID
+          _ -> false
+        }
+        if not ret_is_opt {
+          return (cerr(cx,
+            "`?` on an Option requires the function to return Option[...], but it returns " ++
+              ty_show(cx.adts, sig_ret), lo, hi), TyError, XError(lo, hi))
+        }
+        return (cx, targs[0], node)
+      }
+      if aid == RESULT_ID {
+        match sig_ret {
+          TyAdt(rid, rargs) -> {
+            if rid != RESULT_ID {
+              return (cerr(cx,
+                "`?` on a Result requires the function to return Result[...], but it returns " ++
+                  ty_show(cx.adts, sig_ret), lo, hi), TyError, XError(lo, hi))
+            }
+            if rargs[1] != targs[1] {
+              return (cerr_h(cx, "`?` error types differ: " ++ ty_show(cx.adts, ot) ++ " vs " ++
+                  ty_show(cx.adts, sig_ret), lo, hi,
+                "v0.1 has no automatic error conversion; match and rewrap the error"),
+                TyError, XError(lo, hi))
+            }
+            return (cx, targs[0], node)
+          }
+          _ -> return (cerr(cx,
+            "`?` on a Result requires the function to return Result[...], but it returns " ++
+              ty_show(cx.adts, sig_ret), lo, hi), TyError, XError(lo, hi))
+        }
+      }
+      (cerr_h(cx, "`?` needs an Option or Result, got " ++ ty_show(cx.adts, ot), lo, hi,
+        "`?` unwraps an Option or Result and early-returns on None/Err; this value is neither"),
+        TyError, XError(lo, hi))
+    }
+    _ -> (cerr_h(cx, "`?` needs an Option or Result, got " ++ ty_show(cx.adts, ot), lo, hi,
+      "`?` unwraps an Option or Result and early-returns on None/Err; this value is neither"),
+      TyError, XError(lo, hi))
+  }
+}
+
+test "propagate demands matching option and result shapes" {
+  var cx = test_cx()
+  let ret_sig = Sig {
+    name: "f",
+    param_tys: [],
+    param_names: [],
+    ret: opt_ty(TyInt),
+    eff: EPure,
+    is_builtin: false,
+    tparams: [],
+    constraints: [],
+    owner: None,
+    trait_id: None,
+    inferring: false
+  }
+  cx = Cx { ..cx, current_sig: Some(ret_sig) }
+  let (cx1, t1, _) = check_propagate_typed(cx, opt_ty(TyString), XError(0, 1), 0, 1)
+  assert t1 == TyString
+  assert len(cx1.diags) == 0
+  let (cx2, t2, _) = check_propagate_typed(cx, result_ty(TyInt, TyString), XError(0, 1), 0, 1)
+  assert str.contains(cx2.diags[0].msg, "requires the function to return Result")
+  let (cx3, t3, _) = check_propagate_typed(cx, TyInt, XError(0, 1), 0, 1)
+  assert str.contains(cx3.diags[0].msg, "`?` needs an Option or Result, got Int")
+}
+
+test "loop jumps respect lambda boundaries" {
+  var cx = test_cx()
+  let (cx1, ok1) = check_loop_jump(cx, "break", 0, 5)
+  assert not ok1
+  assert cx1.diags[0].msg == "`break` can only be used inside a loop body"
+  cx = Cx { ..cx, loop_stack: [0] }
+  let (cx2, ok2) = check_loop_jump(cx, "break", 0, 5)
+  assert ok2
+  cx = Cx { ..cx, lambda_stack: [LambdaCx { boundary: 0, expected_ret: None, captures: [] }] }
+  let (cx3, ok3) = check_loop_jump(cx, "continue", 0, 8)
+  assert not ok3
+  assert str.contains(cx3.diags[0].msg, "cannot cross a lambda boundary")
+}
