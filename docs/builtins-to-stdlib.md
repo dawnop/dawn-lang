@@ -256,3 +256,11 @@ to_string          # → Show trait（已有 derive Show）
 - [core::intrinsics (Rust)](https://doc.rust-lang.org/core/intrinsics/index.html) —— intrinsic 藏在库函数背后
 - [Rust Tidbits: What Is a Lang Item?](https://manishearth.github.io/blog/2017/01/11/rust-tidbits-what-is-a-lang-item/) —— 运算符 desugar 成 trait
 - 本仓 `docs/package-design.md`（项目B / 源码包）、`docs/trait.md`（trait 现状）、`docs/spec.md` §11（builtin 清单）
+
+## 补记（2026-07-22）：cursor 家族回迁内建——方向的第一个有据例外
+
+cursor_start/end/done/char/next/prev/slice/skip 与 index_of_from 从 `std/strings.dawn`
+**迁回内建表**：它们的签名需要不透明类型 `Cursor`（spec §11），而 std 源码无法从 `Int`
+铸造不透明标量——不透明恰是该类型的全部意义。判据由此明确：**凡签名需要 std 表达不了的
+类型的函数属于内建；其余照旧向 std 迁**。`chars`/`split` 仍是纯 Dawn std 代码（cursor
+家族的第一批消费者）；split 原先那次「唯一被默许的游标算术」由新原语 `cursor_skip` 取代。

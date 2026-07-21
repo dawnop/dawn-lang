@@ -76,6 +76,7 @@ class CodeGen(
         const val DICT_CMP_CLASS = "dawn/rt/DictComparator"
         const val FN_CMP_CLASS = "dawn/rt/FnComparator"
         const val STRINGS_CLASS = "dawn/rt/Strings"
+        const val STDSTRINGS_CLASS = "dawn/rt/StdStrings"
         const val BYTES_CLASS = "dawn/rt/Bytes"
         const val IO_CLASS = "dawn/rt/Io"
         const val SHOW_CLASS = "dawn/rt/Show"
@@ -602,7 +603,7 @@ class CodeGen(
     // ---- type mapping ----
 
     private fun descOf(t: Type): String = when (t) {
-        TInt -> "J"
+        TInt, Type.TCursor -> "J" // a Cursor is a bare long at runtime (spec §11)
         TFloat -> "D"
         TBool -> "Z"
         TString -> "Ljava/lang/String;"
@@ -661,7 +662,7 @@ class CodeGen(
     private fun traitMethodDesc(sig: FnSig) = methodDesc(sig.paramTypes, sig.ret)
 
     private fun slotsOf(t: Type): Int = when (t) {
-        TInt, TFloat -> 2
+        TInt, Type.TCursor, TFloat -> 2
         TBool -> 1
         TUnit, TNever, TError -> 0
         else -> 1 // all references
@@ -676,7 +677,8 @@ class CodeGen(
     /** box a primitive on the stack (it is about to sit in an erased Object position) */
     private fun box(t: Type) {
         when (t) {
-            TInt -> mv.visitMethodInsn(INVOKESTATIC, "java/lang/Long", "valueOf", "(J)Ljava/lang/Long;", false)
+            TInt, Type.TCursor ->
+                mv.visitMethodInsn(INVOKESTATIC, "java/lang/Long", "valueOf", "(J)Ljava/lang/Long;", false)
             TFloat -> mv.visitMethodInsn(INVOKESTATIC, "java/lang/Double", "valueOf", "(D)Ljava/lang/Double;", false)
             TBool -> mv.visitMethodInsn(INVOKESTATIC, "java/lang/Boolean", "valueOf", "(Z)Ljava/lang/Boolean;", false)
             TUnit -> pushUnit(mv) // Unit is void natively (nothing on the stack); materialize the singleton
@@ -687,7 +689,7 @@ class CodeGen(
     /** the stack holds an erased Object; recover the concrete type [t] */
     private fun unerase(t: Type) {
         when (t) {
-            TInt -> {
+            TInt, Type.TCursor -> {
                 mv.visitTypeInsn(CHECKCAST, "java/lang/Long")
                 mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/Long", "longValue", "()J", false)
             }
@@ -729,7 +731,7 @@ class CodeGen(
      * Object→Long→long is; Unit-returning impls return a null Object).
      */
     private fun boxedDescOf(t: Type): String = when (t) {
-        TInt -> "Ljava/lang/Long;"
+        TInt, Type.TCursor -> "Ljava/lang/Long;"
         TFloat -> "Ljava/lang/Double;"
         TBool -> "Ljava/lang/Boolean;"
         TUnit, TNever, TError -> "L$OBJ;"
@@ -867,7 +869,7 @@ class CodeGen(
             m.visitVarInsn(ALOAD, 2)
             m.visitFieldInsn(GETFIELD, sub, f.name, descOf(f.type))
             when (f.type) {
-                TInt -> { m.visitInsn(LCMP); m.visitJumpInsn(IFNE, no) }
+                TInt, Type.TCursor -> { m.visitInsn(LCMP); m.visitJumpInsn(IFNE, no) }
                 TFloat -> { m.visitInsn(DCMPL); m.visitJumpInsn(IFNE, no) }
                 TBool -> m.visitJumpInsn(IF_ICMPNE, no)
                 else -> {
@@ -907,7 +909,7 @@ class CodeGen(
     /** consume a value of [t] on the stack, leave its int hash (Dawn values are never null) */
     private fun hashOf(m: MethodVisitor, t: Type) {
         when (t) {
-            TInt -> m.visitMethodInsn(INVOKESTATIC, "java/lang/Long", "hashCode", "(J)I", false)
+            TInt, Type.TCursor -> m.visitMethodInsn(INVOKESTATIC, "java/lang/Long", "hashCode", "(J)I", false)
             TFloat -> m.visitMethodInsn(INVOKESTATIC, "java/lang/Double", "hashCode", "(D)I", false)
             TBool -> m.visitMethodInsn(INVOKESTATIC, "java/lang/Boolean", "hashCode", "(Z)I", false)
             else -> m.visitMethodInsn(INVOKEVIRTUAL, OBJ, "hashCode", "()I", false)
@@ -949,7 +951,7 @@ class CodeGen(
     /** the return instruction for a value of declared type [t] on the stack */
     private fun emitReturnOf(t: Type) {
         when {
-            t == TInt -> mv.visitInsn(LRETURN)
+            t == TInt || t == Type.TCursor -> mv.visitInsn(LRETURN)
             t == TFloat -> mv.visitInsn(DRETURN)
             t == TBool -> mv.visitInsn(IRETURN)
             isRef(t) -> mv.visitInsn(ARETURN)
@@ -1220,7 +1222,7 @@ class CodeGen(
     /** the return instruction matching the method under generation */
     private fun emitMethodReturn() {
         when {
-            methodRet == TInt -> mv.visitInsn(LRETURN)
+            methodRet == TInt || methodRet == Type.TCursor -> mv.visitInsn(LRETURN)
             methodRet == TFloat -> mv.visitInsn(DRETURN)
             methodRet == TBool -> mv.visitInsn(IRETURN)
             isRef(methodRet) -> mv.visitInsn(ARETURN)
@@ -1684,6 +1686,34 @@ class CodeGen(
             m.visitLabel(done)
             m.visitVarInsn(ALOAD, 2)
             m.visitMethodInsn(INVOKEVIRTUAL, SB, "toString", "()L$STR;", false)
+            m.visitInsn(ARETURN)
+            m.visitMaxs(0, 0)
+            m.visitEnd()
+        }
+
+        // indexOfFrom(String, String, J) -> Option: negative sentinel from the
+        // vendored StdStrings becomes None, a hit becomes Some(boxed cursor)
+        run {
+            val m = cw.visitMethod(ACC_PUBLIC or ACC_STATIC, "indexOfFrom", "(L$STR;L$STR;J)LOption;", null, null)
+            m.visitCode()
+            m.visitVarInsn(ALOAD, 0)
+            m.visitVarInsn(ALOAD, 1)
+            m.visitVarInsn(LLOAD, 2)
+            m.visitMethodInsn(INVOKESTATIC, STDSTRINGS_CLASS, "indexOfFrom", "(L$STR;L$STR;J)J", false)
+            m.visitVarInsn(LSTORE, 4)
+            val none = Label()
+            m.visitVarInsn(LLOAD, 4)
+            m.visitInsn(LCONST_0)
+            m.visitInsn(LCMP)
+            m.visitJumpInsn(IFLT, none)
+            m.visitTypeInsn(NEW, "Option\$Some")
+            m.visitInsn(DUP)
+            m.visitVarInsn(LLOAD, 4)
+            m.visitMethodInsn(INVOKESTATIC, "java/lang/Long", "valueOf", "(J)Ljava/lang/Long;", false)
+            m.visitMethodInsn(INVOKESPECIAL, "Option\$Some", "<init>", "(L$OBJ;)V", false)
+            m.visitInsn(ARETURN)
+            m.visitLabel(none)
+            m.visitFieldInsn(GETSTATIC, "Option\$None", "INSTANCE", "LOption\$None;")
             m.visitInsn(ARETURN)
             m.visitMaxs(0, 0)
             m.visitEnd()
@@ -2172,7 +2202,7 @@ class CodeGen(
 
     private fun loadSlot(m: MethodVisitor, t: Type, slot: Int) {
         when {
-            t == TInt -> m.visitVarInsn(LLOAD, slot)
+            t == TInt || t == Type.TCursor -> m.visitVarInsn(LLOAD, slot)
             t == TFloat -> m.visitVarInsn(DLOAD, slot)
             t == TBool -> m.visitVarInsn(ILOAD, slot)
             isRef(t) -> m.visitVarInsn(ALOAD, slot)
@@ -2182,7 +2212,7 @@ class CodeGen(
 
     private fun storeSlot(m: MethodVisitor, t: Type, slot: Int) {
         when {
-            t == TInt -> m.visitVarInsn(LSTORE, slot)
+            t == TInt || t == Type.TCursor -> m.visitVarInsn(LSTORE, slot)
             t == TFloat -> m.visitVarInsn(DSTORE, slot)
             t == TBool -> m.visitVarInsn(ISTORE, slot)
             isRef(t) -> m.visitVarInsn(ASTORE, slot)
@@ -3638,6 +3668,57 @@ class CodeGen(
                 if (e.callee == "parse_int") "parseInt" else "parseFloat", "(Ljava/lang/String;)LOption;", false)
             true
         }
+        // cursors (spec §11): straight calls into the vendored dawn/rt/StdStrings;
+        // Cursor is a bare long on the stack, so the arguments line up as-is
+        "cursor_start", "cursor_end" -> {
+            genExpr(e.args[0], tail = false)
+            mv.visitMethodInsn(INVOKESTATIC, STDSTRINGS_CLASS,
+                if (e.callee == "cursor_start") "cursorStart" else "cursorEnd", "(Ljava/lang/String;)J", false)
+            true
+        }
+        "cursor_done", "cursor_char", "cursor_next", "cursor_prev" -> {
+            genExpr(e.args[0], tail = false)
+            genExpr(e.args[1], tail = false)
+            val (m, d) = when (e.callee) {
+                "cursor_done" -> "cursorDone" to "(Ljava/lang/String;J)Z"
+                "cursor_char" -> "cursorChar" to "(Ljava/lang/String;J)J"
+                "cursor_next" -> "cursorNext" to "(Ljava/lang/String;J)J"
+                else -> "cursorPrev" to "(Ljava/lang/String;J)J"
+            }
+            mv.visitMethodInsn(INVOKESTATIC, STDSTRINGS_CLASS, m, d, false)
+            true
+        }
+        "cursor_slice" -> {
+            genExpr(e.args[0], tail = false)
+            genExpr(e.args[1], tail = false)
+            genExpr(e.args[2], tail = false)
+            mv.visitMethodInsn(INVOKESTATIC, STDSTRINGS_CLASS, "cursorSlice", "(Ljava/lang/String;JJ)Ljava/lang/String;", false)
+            // null = invalid range; cursors from this API only produce it on from > to
+            val ok = Label()
+            mv.visitInsn(DUP)
+            mv.visitJumpInsn(IFNONNULL, ok)
+            mv.visitTypeInsn(NEW, PANIC_CLASS)
+            mv.visitInsn(DUP)
+            mv.visitLdcInsn("cursor_slice: invalid cursor range")
+            mv.visitMethodInsn(INVOKESPECIAL, PANIC_CLASS, "<init>", "(Ljava/lang/String;)V", false)
+            mv.visitInsn(ATHROW)
+            mv.visitLabel(ok)
+            true
+        }
+        "cursor_skip" -> {
+            genExpr(e.args[0], tail = false)
+            genExpr(e.args[1], tail = false)
+            genExpr(e.args[2], tail = false)
+            mv.visitMethodInsn(INVOKESTATIC, STDSTRINGS_CLASS, "cursorSkip", "(Ljava/lang/String;JLjava/lang/String;)J", false)
+            true
+        }
+        "index_of_from" -> {
+            genExpr(e.args[0], tail = false)
+            genExpr(e.args[1], tail = false)
+            genExpr(e.args[2], tail = false)
+            mv.visitMethodInsn(INVOKESTATIC, STRINGS_CLASS, "indexOfFrom", "(Ljava/lang/String;Ljava/lang/String;J)LOption;", false)
+            true
+        }
         "java_try" -> {
             genExpr(e.args[0], tail = false)
             mv.visitMethodInsn(INVOKESTATIC, IO_CLASS, "javaTry", "(L${fnIface(0)};)LResult;", false)
@@ -3747,7 +3828,8 @@ class CodeGen(
                 if (op == BinOp.EQ) { mv.visitInsn(ICONST_1); mv.visitInsn(IXOR) }
             }
             else -> {
-                mv.visitInsn(if (t == TInt) LCMP else DCMPL)
+                // Int and Cursor are longs; only Float reaches DCMPL here
+                mv.visitInsn(if (t == TFloat) DCMPL else LCMP)
                 pushCmpResult(if (op == BinOp.EQ) IFEQ else IFNE)
             }
         }

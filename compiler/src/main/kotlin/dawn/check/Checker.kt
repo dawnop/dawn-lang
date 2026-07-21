@@ -1247,7 +1247,7 @@ class Checker(
     /** Every name currently in scope — the candidate pool for "did you mean" on a variable. */
     private fun localNames(): List<String> = scopes.flatMap { it.keys }
 
-    private val builtinTypeNames = listOf("Int", "Float", "Bool", "String", "Bytes", "Unit", "List", "Map", "Set")
+    private val builtinTypeNames = listOf("Int", "Float", "Bool", "String", "Bytes", "Cursor", "Unit", "List", "Map", "Set")
 
     /**
      * Resolve a local name, doing lambda-capture bookkeeping: a symbol declared

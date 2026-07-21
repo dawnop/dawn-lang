@@ -533,6 +533,32 @@ class ComptimeInterp(
             if (sep.isEmpty()) callBuiltin("chars", listOf(args[0]), span)
             else CValue.VList(s.split(sep).map { CValue.VString(it) })
         }
+        // cursors (spec §11): delegate to the same dawn.rt.StdStrings the generated
+        // code calls, so comptime and runtime agree bit for bit. A Cursor is a VInt
+        // here — comptime values are untyped; the checker already policed the types.
+        "cursor_start" -> CValue.VInt(dawn.rt.StdStrings.cursorStart((args[0] as CValue.VString).v))
+        "cursor_end" -> CValue.VInt(dawn.rt.StdStrings.cursorEnd((args[0] as CValue.VString).v))
+        "cursor_done" -> CValue.VBool(
+            dawn.rt.StdStrings.cursorDone((args[0] as CValue.VString).v, (args[1] as CValue.VInt).v))
+        "cursor_char" -> CValue.VInt(
+            dawn.rt.StdStrings.cursorChar((args[0] as CValue.VString).v, (args[1] as CValue.VInt).v))
+        "cursor_next" -> CValue.VInt(
+            dawn.rt.StdStrings.cursorNext((args[0] as CValue.VString).v, (args[1] as CValue.VInt).v))
+        "cursor_prev" -> CValue.VInt(
+            dawn.rt.StdStrings.cursorPrev((args[0] as CValue.VString).v, (args[1] as CValue.VInt).v))
+        "cursor_slice" -> {
+            val cut = dawn.rt.StdStrings.cursorSlice(
+                (args[0] as CValue.VString).v, (args[1] as CValue.VInt).v, (args[2] as CValue.VInt).v)
+            if (cut == null) err("panicked: cursor_slice: invalid cursor range", span)
+            else CValue.VString(cut)
+        }
+        "cursor_skip" -> CValue.VInt(dawn.rt.StdStrings.cursorSkip(
+            (args[0] as CValue.VString).v, (args[1] as CValue.VInt).v, (args[2] as CValue.VString).v))
+        "index_of_from" -> {
+            val i = dawn.rt.StdStrings.indexOfFrom(
+                (args[0] as CValue.VString).v, (args[1] as CValue.VString).v, (args[2] as CValue.VInt).v)
+            if (i < 0) none() else some(CValue.VInt(i))
+        }
         "parse_int" -> try {
             some(CValue.VInt((args[0] as CValue.VString).v.trim().toLong()))
         } catch (e: NumberFormatException) {

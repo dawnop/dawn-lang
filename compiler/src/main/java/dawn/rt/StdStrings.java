@@ -239,6 +239,16 @@ public final class StdStrings {
     }
 
     /**
+     * The cursor just past an occurrence of {@code sub} that starts at {@code c} —
+     * the one sanctioned way to "add" to a cursor: an occurrence of {@code sub}
+     * is exactly {@code sub} wide in UTF-16 units. Clamped into range.
+     */
+    public static long cursorSkip(String s, long c, String sub) {
+        long past = (c < 0 ? 0 : c) + sub.length();
+        return past > s.length() ? s.length() : past;
+    }
+
+    /**
      * The cursor of the first occurrence of {@code sub} at or after {@code from},
      * or {@code -1}.
      *

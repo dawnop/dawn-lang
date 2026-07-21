@@ -98,6 +98,14 @@ sealed class Type(val display: String) {
      *  not a Map/Set key (byte[] hashCode is identity). */
     object TBytes : Type("Bytes")
 
+    /** An opaque position inside a String (spec §11 cursors). Runtime rep is a
+     *  bare long (a UTF-16 offset), so cursor walks stay allocation-free — but
+     *  the type is distinct from Int: arithmetic, ordering, printing, and Java
+     *  interop are all compile errors. The only producers/consumers are the
+     *  cursor_* builtins; the contract "do not do arithmetic on it" is enforced
+     *  by the type instead of a comment. */
+    object TCursor : Type("Cursor")
+
     object TUnit : Type("Unit")
 
     /** Bottom type: the "return type" of panic/todo; usable as any type */
@@ -181,6 +189,7 @@ sealed class Type(val display: String) {
             "Bool" -> TBool
             "String" -> TString
             "Bytes" -> TBytes
+            "Cursor" -> TCursor
             "Unit" -> TUnit
             else -> null
         }
@@ -404,6 +413,30 @@ val BUILTINS: Map<String, FnSig> = run {
             Type.TAdt(OPTION_ADT, listOf(Type.TInt)), Eff.Pure, isBuiltin = true),
         FnSig("parse_float", listOf(Type.TString), listOf("s"),
             Type.TAdt(OPTION_ADT, listOf(Type.TFloat)), Eff.Pure, isBuiltin = true),
+        // cursors (spec §11): opaque positions in a String. These live in the builtin
+        // table rather than std because their signatures need TCursor, a type std
+        // source cannot mint from an Int (that opacity is the whole point). The one
+        // sanctioned "arithmetic" — stepping past a known occurrence of a literal —
+        // is its own primitive, cursor_skip.
+        FnSig("cursor_start", listOf(Type.TString), listOf("s"), Type.TCursor,
+            Eff.Pure, isBuiltin = true),
+        FnSig("cursor_end", listOf(Type.TString), listOf("s"), Type.TCursor,
+            Eff.Pure, isBuiltin = true),
+        FnSig("cursor_done", listOf(Type.TString, Type.TCursor), listOf("s", "c"), Type.TBool,
+            Eff.Pure, isBuiltin = true),
+        FnSig("cursor_char", listOf(Type.TString, Type.TCursor), listOf("s", "c"), Type.TInt,
+            Eff.Pure, isBuiltin = true),
+        FnSig("cursor_next", listOf(Type.TString, Type.TCursor), listOf("s", "c"), Type.TCursor,
+            Eff.Pure, isBuiltin = true),
+        FnSig("cursor_prev", listOf(Type.TString, Type.TCursor), listOf("s", "c"), Type.TCursor,
+            Eff.Pure, isBuiltin = true),
+        FnSig("cursor_slice", listOf(Type.TString, Type.TCursor, Type.TCursor),
+            listOf("s", "from", "to"), Type.TString, Eff.Pure, isBuiltin = true),
+        FnSig("cursor_skip", listOf(Type.TString, Type.TCursor, Type.TString),
+            listOf("s", "c", "sub"), Type.TCursor, Eff.Pure, isBuiltin = true),
+        FnSig("index_of_from", listOf(Type.TString, Type.TString, Type.TCursor),
+            listOf("s", "sub", "from"), Type.TAdt(OPTION_ADT, listOf(Type.TCursor)),
+            Eff.Pure, isBuiltin = true),
         // java interop exception barrier (spec §9.8): expected Java failures become Err;
         // panics (dawn.rt.PanicError extends Error) pass through untouched
         // argv reaches the program through a static field on its own entry class, which a

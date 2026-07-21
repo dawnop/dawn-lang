@@ -193,6 +193,17 @@ val BUILTIN_GROUPS: List<Pair<String, List<Pair<String, String>>>> = listOf(
         "code_points" to "split into Unicode code points (a character is its code point Int)",
         "from_code_points" to "assemble a string from code points",
     ),
+    "cursor" to listOf(
+        "cursor_start" to "the cursor at the first character of a string",
+        "cursor_end" to "the cursor one past the last character",
+        "cursor_done" to "whether a cursor has walked off the end",
+        "cursor_char" to "the code point at a cursor, or -1 once done",
+        "cursor_next" to "the cursor after the character at this one (never lands inside a pair)",
+        "cursor_prev" to "the cursor before the preceding character (subtraction cannot do this)",
+        "cursor_slice" to "the text between two cursors (invalid range panics)",
+        "cursor_skip" to "the cursor past an occurrence of a literal starting here — the one sanctioned advance-by-a-known-width",
+        "index_of_from" to "the cursor of the first occurrence of a needle at or after `from`; None when absent",
+    ),
     "map & set" to listOf(
         "map_empty" to "the empty map",
         "map_from" to "a map from a list of key-value pairs (later wins)",

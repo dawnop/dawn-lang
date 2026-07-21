@@ -136,7 +136,7 @@ class StdLibTest {
         // so the two must agree — on ASCII and on astral text alike.
         val out = run(
             """
-            fn walk(s: String, c: Int, acc: Int) -> Int =
+            fn walk(s: String, c: Cursor, acc: Int) -> Int =
               if cursor_done(s, c) { acc } else { walk(s, cursor_next(s, c), acc + 1) }
 
             pub fn main() -> Unit !io = {
@@ -176,7 +176,7 @@ class StdLibTest {
         // are 1, 2, 1 units wide, so arithmetic would land inside the pair.
         val out = run(
             """
-            fn back(s: String, c: Int, n: Int) -> Int =
+            fn back(s: String, c: Cursor, n: Int) -> Cursor =
               if n == 0 { c } else { back(s, cursor_prev(s, c), n - 1) }
 
             pub fn main() -> Unit !io = {
@@ -196,7 +196,7 @@ class StdLibTest {
     fun `cursor_slice cuts between cursors and index_of_from resumes from one`() {
         val out = run(
             """
-            fn all_from(s: String, sub: String, c: Int, acc: Int) -> Int =
+            fn all_from(s: String, sub: String, c: Cursor, acc: Int) -> Int =
               match index_of_from(s, sub, c) {
                 None -> acc
                 Some(i) -> all_from(s, sub, cursor_next(s, i), acc + 1)

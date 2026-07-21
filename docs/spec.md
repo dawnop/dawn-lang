@@ -1015,16 +1015,21 @@ use java "java.lang.Math"      # Java 互操作（§9），形式不变
   - `char_to_string(c: Int) -> String` **`[std]`** — 单码点转字符串（非法码点 panic）
   - `str_len(s: String) -> Int` **`[std]`** — 码点数（区别于 `chars` 返回的 `List[String]`）
   - `substring(s: String, from: Int, to: Int) -> String` **`[std]`** — 按**码点下标**切片，越界 panic
-- **游标**（同上，`[std]`）——上面这些**按码点下标**的函数，每次调用都要从串首数到那个下标，
+- **游标**（内建）——上面这些**按码点下标**的函数，每次调用都要从串首数到那个下标，
   即单次 O(n)、放进循环就是 O(n²)。游标是**位置**而非计数，故每步恒定开销：
-  - `cursor_start(s) / cursor_end(s) -> Int` — 串首 / 串尾游标
+  - `cursor_start(s) / cursor_end(s) -> Cursor` — 串首 / 串尾游标
   - `cursor_done(s, c) -> Bool`、`cursor_char(s, c) -> Int`（到尾返回 -1）
-  - `cursor_next(s, c) / cursor_prev(s, c) -> Int` — 进 / 退一个字符（宽度非恒定，故不能用加减）
-  - `cursor_slice(s, from, to) -> String` — 按游标切，不做下标换算
-  - `index_of_from(s, sub, from) -> Option[Int]` — 游标进、游标出，故沿串反复查找整体仍线性
+  - `cursor_next(s, c) / cursor_prev(s, c) -> Cursor` — 进 / 退一个字符（宽度非恒定，故不能用加减）
+  - `cursor_slice(s, from, to) -> String` — 按游标切，不做下标换算；非法区间 panic
+  - `cursor_skip(s, c, sub) -> Cursor` — 越过一处已知出现的 `sub`（它恰是 `sub` 宽）——
+    **唯一被认可的「游标前进已知宽度」**，替代 `i + len` 式算术
+  - `index_of_from(s, sub, from) -> Option[Cursor]` — 游标进、游标出，故沿串反复查找整体仍线性
 
-  游标**不透明**：只能从 `cursor_start`/`cursor_end` 取得、传回这些函数、或存起来供回溯
-  （它是普通值，回溯不需要额外机制）。不要对它做算术。
+  游标是**不透明类型 `Cursor`**（运行期就是裸 `long`，零开销）：只能从这些函数取得、
+  传回、比较相等（`==`）、存进容器/record 供回溯（它是普通值，回溯不需要额外机制）。
+  **算术、排序、打印、传给 Java 都是编译错误**——「不要对它做算术」由类型系统执行，
+  不再靠注释。这组函数因签名需要 `Cursor` 类型而**留在内建表**（std 源码无法从 Int
+  铸造不透明标量——不透明正是其意义所在），是 builtins→std 迁移的有据例外。
   单串一次调用用下标版没问题，**循环里必须用游标版**——`docs/seq6-research.md` §五之补有实测。
 - `core/option` / `core/result`：`map unwrap_or expect and_then ...`
 - **`Map` / `Set`**（§2.2 的内建持久容器，v0.1 以平铺内建函数提供；未来再收进 `core/map`

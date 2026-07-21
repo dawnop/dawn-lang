@@ -14,7 +14,7 @@ pub const MAX_DEPTH: Int = 512
 # `word` starting at cursor `i`? Yields the cursor past it. Walking both strings
 # with cursors also gets end-of-input for free: `cursor_char` returns -1 there,
 # which no character of `word` can equal.
-fn match_lit(src: String, i: Int, word: String, w: Int) -> Option[Int] =
+fn match_lit(src: String, i: Cursor, word: String, w: Cursor) -> Option[Cursor] =
   if cursor_done(word, w) {
     Some(i)
   } else if cursor_char(src, i) == cursor_char(word, w) {
@@ -23,13 +23,13 @@ fn match_lit(src: String, i: Int, word: String, w: Int) -> Option[Int] =
     None
   }
 
-fn parse_lit(src: String, i: Int, word: String, val: Json) -> Result[(Json, Int), String] =
+fn parse_lit(src: String, i: Cursor, word: String, val: Json) -> Result[(Json, Cursor), String] =
   match match_lit(src, i, word, cursor_start(word)) {
     Some(j) -> Ok((val, j))
     None -> Err("invalid literal")
   }
 
-fn parse_array_items(src: String, i: Int, depth: Int, acc: List[Json]) -> Result[(Json, Int), String] = {
+fn parse_array_items(src: String, i: Cursor, depth: Int, acc: List[Json]) -> Result[(Json, Cursor), String] = {
   let (v, j) = parse_value(src, i, depth + 1)?
   let acc2 = acc ++ [v]
   let k = skip_ws(src, j)
@@ -43,7 +43,7 @@ fn parse_array_items(src: String, i: Int, depth: Int, acc: List[Json]) -> Result
   }
 }
 
-fn parse_array(src: String, i0: Int, depth: Int) -> Result[(Json, Int), String] = {
+fn parse_array(src: String, i0: Cursor, depth: Int) -> Result[(Json, Cursor), String] = {
   let i1 = skip_ws(src, cursor_next(src, i0))
   if peek(src, i1) == ']' {
     Ok((JArr([]), cursor_next(src, i1)))
@@ -52,7 +52,7 @@ fn parse_array(src: String, i0: Int, depth: Int) -> Result[(Json, Int), String] 
   }
 }
 
-fn parse_object_members(src: String, i: Int, depth: Int, acc: Map[String, Json]) -> Result[(Json, Int), String] = {
+fn parse_object_members(src: String, i: Cursor, depth: Int, acc: Map[String, Json]) -> Result[(Json, Cursor), String] = {
   let ks = skip_ws(src, i)
   if peek(src, ks) != '"' {
     Err("expected a string key in object")
@@ -77,7 +77,7 @@ fn parse_object_members(src: String, i: Int, depth: Int, acc: Map[String, Json])
   }
 }
 
-fn parse_object(src: String, i0: Int, depth: Int) -> Result[(Json, Int), String] = {
+fn parse_object(src: String, i0: Cursor, depth: Int) -> Result[(Json, Cursor), String] = {
   let i1 = skip_ws(src, cursor_next(src, i0))
   if peek(src, i1) == '}' {
     Ok((JObj(map_empty()), cursor_next(src, i1)))
@@ -86,7 +86,7 @@ fn parse_object(src: String, i0: Int, depth: Int) -> Result[(Json, Int), String]
   }
 }
 
-fn parse_value(src: String, i0: Int, depth: Int) -> Result[(Json, Int), String] = {
+fn parse_value(src: String, i0: Cursor, depth: Int) -> Result[(Json, Cursor), String] = {
   if depth > MAX_DEPTH {
     Err("maximum nesting depth exceeded")
   } else {

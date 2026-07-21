@@ -78,41 +78,11 @@ pub fn reverse_str(s: String) -> String =
 
 # ---- cursors ----
 #
-# The functions above take *code-point indices*, and each one pays a scan from
-# the start of the string to find where that index lands. That is fine for a
-# single call and a trap inside a loop, where it turns O(n) work into O(n^2)
-# (docs/seq6-research.md §三). A cursor is a position rather than a count, so
-# walking with these costs the same per character whatever the text contains.
-#
-# A cursor is an opaque `Int`. The only things to do with one are: get it from
-# `cursor_start`, pass it back in, and — since it is an ordinary value — keep a
-# copy to return to later, which is all backtracking needs. Do not do arithmetic
-# on it; `cursor_next` exists because the step size is not always one.
-
-## A cursor positioned at the first character of `s`.
-pub fn cursor_start(s: String) -> Int = unsafe_pure { StdStrings.cursorStart(s) }
-
-## A cursor positioned one past the last character of `s`.
-pub fn cursor_end(s: String) -> Int = unsafe_pure { StdStrings.cursorEnd(s) }
-
-## Whether `c` has walked off the end of `s`.
-pub fn cursor_done(s: String, c: Int) -> Bool = unsafe_pure { StdStrings.cursorDone(s, c) }
-
-## The code point at `c`, or -1 once `c` is done. The sentinel keeps the hot
-## path allocation-free: an `Option` here would box on every character.
-pub fn cursor_char(s: String, c: Int) -> Int = unsafe_pure { StdStrings.cursorChar(s, c) }
-
-## The cursor after the character at `c`. Stops at the end rather than running past it.
-pub fn cursor_next(s: String, c: Int) -> Int = unsafe_pure { StdStrings.cursorNext(s, c) }
-
-## The cursor before the character preceding `c`. Stops at the start.
-## Subtraction cannot replace this: a character is not always one unit wide.
-pub fn cursor_prev(s: String, c: Int) -> Int = unsafe_pure { StdStrings.cursorPrev(s, c) }
-
-## The text between two cursors. Panics when they are not a valid range — which
-## for cursors this API produced means only `from > to` or one of them past the end.
-pub fn cursor_slice(s: String, from: Int, to: Int) -> String =
-  unsafe_pure { StdStrings.cursorSlice(s, from, to).expect("cursor_slice: invalid cursor range") }
+# The cursor_* family (cursor_start/end/done/char/next/prev/slice/skip and
+# index_of_from) lives in the BUILTIN table, not here: their signatures use the
+# opaque `Cursor` type, which std source cannot mint from an Int — that opacity
+# is the whole point (arithmetic on a position is a type error, spec §11).
+# chars/split below are their first consumers.
 
 ## The characters of `s`, each as a one-character string.
 ## A surrogate pair stays one element — this splits by character, not by unit.
@@ -121,7 +91,7 @@ pub fn chars(s: String) -> List[String] = {
   chars_go(s, cursor_start(s), empty)
 }
 
-fn chars_go(s: String, c: Int, acc: List[String]) -> List[String] =
+fn chars_go(s: String, c: Cursor, acc: List[String]) -> List[String] =
   if cursor_done(s, c) {
     acc
   } else {
@@ -140,18 +110,9 @@ pub fn split(s: String, sep: String) -> List[String] =
     split_go(s, sep, cursor_start(s), empty)
   }
 
-fn split_go(s: String, sep: String, at: Int, acc: List[String]) -> List[String] =
+fn split_go(s: String, sep: String, at: Cursor, acc: List[String]) -> List[String] =
   match index_of_from(s, sep, at) {
     None -> acc ++ [cursor_slice(s, at, cursor_end(s))]
-    # `at + cursor_end(sep)` is the cursor past this match: an occurrence of `sep`
-    # is exactly `sep` wide. Cursor arithmetic is otherwise not allowed.
-    Some(i) -> split_go(s, sep, i + cursor_end(sep), acc ++ [cursor_slice(s, at, i)])
+    # cursor_skip is the one sanctioned "advance past a known occurrence"
+    Some(i) -> split_go(s, sep, cursor_skip(s, i, sep), acc ++ [cursor_slice(s, at, i)])
   }
-
-## The cursor of the first occurrence of `sub` at or after `from`, or `None`.
-## Unlike `index_of`, this both takes and returns a cursor, so repeated searching
-## down a string stays linear overall.
-pub fn index_of_from(s: String, sub: String, from: Int) -> Option[Int] = {
-  let i = unsafe_pure { StdStrings.indexOfFrom(s, sub, from) }
-  if i < 0 { None } else { Some(i) }
-}
