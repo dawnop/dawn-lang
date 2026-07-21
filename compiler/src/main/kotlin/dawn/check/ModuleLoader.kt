@@ -135,6 +135,9 @@ object ModuleLoader {
                         "path segments are lowercase identifiers: [a-z_][a-z0-9_]*")))
                     continue
                 }
+                // bundled std modules come from the compiler jar, not the module graph
+                // (spec §10.6); the checker validates the name, in both build modes
+                if (u.segments.first() == "std") continue
                 val depFile = File(root, u.segments.joinToString("/") + ".dawn")
                 val dep = load(depFile)
                 if (dep == null) {
@@ -145,6 +148,14 @@ object ModuleLoader {
                     queue.add(dep)
                 }
             }
+        }
+
+        // 2.5. the std/ path prefix belongs to the bundled standard library (spec §10.6)
+        for (mf in byPath.values) {
+            if (mf.modPath == "std" || mf.modPath.startsWith("std/"))
+                diags.add(LocatedDiag(mf.source, Diagnostic(
+                    "the module path `${mf.modPath}` is reserved for the bundled standard library",
+                    Span(0, 0), "move the file out of src/std")))
         }
 
         // 3. duplicate-import detection (same module used twice in one file, spec §10.2)

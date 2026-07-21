@@ -34,11 +34,12 @@ fun analyze(source: String, comptimeFuel: Long = 100_000_000L, javaLoader: Class
     val sink = DiagnosticSink()
     val tokens = Lexer(source, 0, sink).lex()
     val module = Parser(tokens, sink, source).module()
-    val checker = Checker(module, sink, javaLoader = javaLoader, srcText = source, stdFns = StdLib.fns)
+    val checker = Checker(module, sink, ImportEnv(StdLib.exportsByPath),
+        javaLoader = javaLoader, srcText = source, stdFns = StdLib.fns)
     checker.check()
     // comptime evaluation only makes sense on a well-typed module
     if (sink.all.none { it.severity == dawn.diag.Severity.ERROR }) {
-        evalComptime(module, sink, comptimeFuel, StdLib.fnDecls)
+        evalComptime(module, sink, comptimeFuel, StdLib.fnDecls, StdLib.declsByOwner)
     }
     return Analyzed(module, sink.all, checker.functions, checker.types)
 }
@@ -142,8 +143,9 @@ fun analyzeProgram(
 ): AnalyzedProgram {
     val diags = ArrayList(loaded.loadDiagnostics)
     val checked = ArrayList<CheckedModule>()
-    // modules arrive in dependency order, so a module's imports are already checked
-    val exportsByPath = HashMap<String, ModuleExports>()
+    // modules arrive in dependency order, so a module's imports are already checked;
+    // the bundled std modules are importable everywhere (spec §10.6)
+    val exportsByPath = HashMap(StdLib.exportsByPath)
     for (mf in loaded.modules) {
         for (d in mf.diagnostics) diags.add(LocatedDiag(mf.source, d))
         val parseFailed = mf.diagnostics.any { it.severity == Severity.ERROR }
@@ -154,7 +156,7 @@ fun analyzeProgram(
         if (!parseFailed) {
             checker.check()
             if (sink.all.none { it.severity == Severity.ERROR }) {
-                evalComptime(mf.module, sink, comptimeFuel, StdLib.fnDecls)
+                evalComptime(mf.module, sink, comptimeFuel, StdLib.fnDecls, StdLib.declsByOwner)
             }
         }
         for (d in sink.all) diags.add(LocatedDiag(mf.source, d))

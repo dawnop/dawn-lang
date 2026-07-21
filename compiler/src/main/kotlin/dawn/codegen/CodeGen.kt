@@ -3297,8 +3297,10 @@ class CodeGen(
             loadVar(dyn)
             return genDynamicInvoke(e.args, dyn.type as TFn, e.type!!)
         }
-        val builtin = BUILTINS[e.callee]
-        if (builtin != null) return genBuiltinCall(e)
+        // dispatch on what the checker resolved, not the name: a top-level fn may
+        // shadow a builtin (spec §10.6), and module-qualified std calls resolve
+        // to ordinary owned functions
+        if (e.sig?.isBuiltin == true) return genBuiltinCall(e)
 
         val self = currentFn
         val sig = e.sig!!

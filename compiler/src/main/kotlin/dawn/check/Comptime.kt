@@ -36,7 +36,14 @@ sealed class CValue {
  * order, then comptime blocks inside function and test bodies. Failures become
  * ordinary diagnostics on the sink.
  */
-fun evalComptime(module: Module, sink: DiagnosticSink, fuel: Long, stdFns: Map<String, FnDecl> = emptyMap()) {
+fun evalComptime(
+    module: Module,
+    sink: DiagnosticSink,
+    fuel: Long,
+    stdFns: Map<String, FnDecl> = emptyMap(),
+    /** className → (name → decl): owner-keyed std lookup for module-qualified calls */
+    stdDeclsByOwner: Map<String, Map<String, FnDecl>> = emptyMap(),
+) {
     // The interpreter is a tree walker, so one Dawn call costs a dozen JVM frames.
     // Since std's list functions are now ordinary Dawn recursion, folding a const
     // over a few thousand elements would exhaust the default stack and crash the
@@ -44,7 +51,8 @@ fun evalComptime(module: Module, sink: DiagnosticSink, fuel: Long, stdFns: Map<S
     // real bound on runaway evaluation, and a StackOverflowError past even this
     // becomes a diagnostic rather than a crash.
     var failure: Throwable? = null
-    val worker = Thread(null, { runComptime(module, sink, fuel, stdFns) }, "dawn-comptime", COMPTIME_STACK_BYTES)
+    val worker = Thread(null, { runComptime(module, sink, fuel, stdFns, stdDeclsByOwner) },
+        "dawn-comptime", COMPTIME_STACK_BYTES)
     worker.setUncaughtExceptionHandler { _, t -> failure = t }
     worker.start()
     worker.join()
@@ -68,7 +76,13 @@ private const val MAX_CALL_DEPTH = 100_000
 /** 64 MB: room for deep interpreted recursion without pretending the depth is unbounded. */
 private const val COMPTIME_STACK_BYTES = 64L * 1024 * 1024
 
-private fun runComptime(module: Module, sink: DiagnosticSink, fuel: Long, stdFns: Map<String, FnDecl>) {
+private fun runComptime(
+    module: Module,
+    sink: DiagnosticSink,
+    fuel: Long,
+    stdFns: Map<String, FnDecl>,
+    stdDeclsByOwner: Map<String, Map<String, FnDecl>>,
+) {
     // std is implicitly visible to user code, so it must be callable from a const
     // too; a local definition still shadows it, matching the checker's
     // local → std → builtin order. Empty while std itself is being checked, which
@@ -76,7 +90,7 @@ private fun runComptime(module: Module, sink: DiagnosticSink, fuel: Long, stdFns
     val fnsByName = stdFns + module.fns.associateBy { it.name }
     for (c in module.consts) {
         try {
-            c.value = ComptimeInterp(fnsByName, fuel, stdFns.keys).eval(c.init, HashMap())
+            c.value = ComptimeInterp(fnsByName, fuel, stdFns.keys, stdDeclsByOwner).eval(c.init, HashMap())
         } catch (e: DawnError) {
             sink.add(e)
         } catch (e: StackOverflowError) {
@@ -89,7 +103,8 @@ private fun runComptime(module: Module, sink: DiagnosticSink, fuel: Long, stdFns
                 is ComptimeExpr -> {
                     if (e.value == null) {
                         try {
-                            e.value = ComptimeInterp(fnsByName, fuel, stdFns.keys).eval(e.body, HashMap())
+                            e.value = ComptimeInterp(fnsByName, fuel, stdFns.keys, stdDeclsByOwner)
+                                .eval(e.body, HashMap())
                         } catch (err: DawnError) {
                             sink.add(err)
                         } catch (err: StackOverflowError) {
@@ -145,6 +160,8 @@ class ComptimeInterp(
     private var fuel: Long,
     /** which of [fns] came from the bundled std, for diagnostics that must not point into it */
     private val stdFnNames: Set<String> = emptySet(),
+    /** className → (name → decl): module-qualified std calls resolve by owner, not flat name */
+    private val declsByOwner: Map<String, Map<String, FnDecl>> = emptyMap(),
 ) {
     private var depth = 0
 
@@ -426,11 +443,12 @@ class ComptimeInterp(
         val sig = e.sig!!
         val args = e.args.map { eval(it, env) }
         if (sig.isBuiltin) return callBuiltin(sig.name, args, e.span)
-        val decl = fns[e.callee] ?: err("missing function `${e.callee}`", e.span)
+        val decl = sig.owner?.let { declsByOwner[it]?.get(e.callee) }
+            ?: fns[e.callee] ?: err("missing function `${e.callee}`", e.span)
         // A failure inside std carries a span into the std source, which the caller
         // would render against the *user's* file — garbage carets. Re-point it at
         // the call site, which is the part of the program the user can act on.
-        if (stdFnNames.contains(e.callee)) {
+        if (stdFnNames.contains(e.callee) || sig.owner?.startsWith("std/") == true) {
             try {
                 return callFn(decl, args, e.span)
             } catch (err: DawnError) {

@@ -48,6 +48,24 @@ object StdLib {
     /** the checked std modules, in dependency order; parsed and checked once */
     val modules: List<StdModule> by lazy { loadAndCheck() }
 
+    /** bundled module names, for `use std/x` validation (reads only the index resource) */
+    val moduleNames: Set<String> by lazy { names.toSet() }
+
+    /**
+     * modPath → exports, seeded into every program's import environment so
+     * `use std/x` resolves like any module import (spec §10.6).
+     */
+    val exportsByPath: Map<String, ModuleExports> by lazy { modules.associate { it.modPath to it.exports } }
+
+    /**
+     * className → (name → decl), for the comptime interpreter. Module-qualified
+     * std calls must resolve by owner: short names repeat across std modules
+     * (map.insert / set.insert), so the flat [fnDecls] view cannot tell them apart.
+     */
+    val declsByOwner: Map<String, Map<String, FnDecl>> by lazy {
+        modules.associate { m -> m.className to m.module.fns.associateBy { it.name } }
+    }
+
     /**
      * The std function *declarations*, for the compile-time interpreter: a const
      * initializer may call std, so [dawn.check.ComptimeInterp] needs the bodies,

@@ -778,7 +778,16 @@ class Checker(
      */
     private fun processImports() {
         for (u in module.moduleUses) {
-            val exp = imports.available[u.path] ?: continue
+            val exp = imports.available[u.path]
+            if (exp == null) {
+                // std paths never reach the module loader, so unknown ones are
+                // reported here — exactly once, in single-file and project builds alike
+                if (u.segments.firstOrNull() == "std")
+                    sink.error("no bundled std module `${u.path}`", u.nameSpan,
+                        "bundled modules: " + imports.available.keys
+                            .filter { it.startsWith("std/") }.sorted().joinToString(", "))
+                continue
+            }
             u.exports = exp
             if (u.selective == null) {
                 val prev = moduleAliases.put(u.name, exp)
@@ -1191,6 +1200,13 @@ class Checker(
         // a zero-arg generic call (map_empty(), set_empty()) can only be typed from context
         is Call -> {
             val sig = if (lookup(e.callee) != null) null else (fns[e.callee] ?: stdFns[e.callee] ?: BUILTINS[e.callee])
+            sig != null && sig.typeParams.isNotEmpty() && e.args.isEmpty()
+        }
+        // same for its module-qualified spelling (map.empty(), spec §10.3)
+        is MethodCall -> {
+            val r = e.target
+            val sig = if (r is VarRef && lookup(r.name) == null)
+                moduleAliases[r.name]?.fns?.get(e.name) else null
             sig != null && sig.typeParams.isNotEmpty() && e.args.isEmpty()
         }
         else -> false
