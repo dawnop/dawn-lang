@@ -13,9 +13,9 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /**
- * Type aliases: `type Name[T] = <fn type | tuple | Name[args]>`, transparent
- * and expanded at resolution. A bare uppercase RHS still declares a
- * single-constructor ADT (back-compat).
+ * Type aliases: `alias Name[T] = TypeRef`, transparent and expanded at
+ * resolution. `type` declares nominal types only — an alias-shaped RHS under
+ * `type` is an error pointing at the `alias` keyword (spec §2.6).
  */
 class TypeAliasTest {
 
@@ -62,7 +62,7 @@ class TypeAliasTest {
     @Test
     fun fnTypeAliasInSignaturesAndFields() {
         val out = run("""
-            type Handler = fn(Int) -> Int
+            alias Handler = fn(Int) -> Int
             type Ops = { inc: Handler }
 
             fn apply(h: Handler, n: Int) -> Int = h(n)
@@ -78,8 +78,8 @@ class TypeAliasTest {
     @Test
     fun tupleAndGenericApplicationAliases() {
         val out = run("""
-            type Pair = (Int, String)
-            type Names = List[String]
+            alias Pair = (Int, String)
+            alias Names = List[String]
 
             fn first(p: Pair) -> Int = {
               let (a, _) = p
@@ -98,7 +98,7 @@ class TypeAliasTest {
     @Test
     fun parameterizedAliasSubstitutes() {
         val out = run("""
-            type Lookup[T] = fn(String) -> Option[T]
+            alias Lookup[T] = fn(String) -> Option[T]
 
             fn find_in(m: Map[String, Int]) -> Lookup[Int] = fn(k) => map_get(m, k)
 
@@ -116,8 +116,8 @@ class TypeAliasTest {
     @Test
     fun aliasOfAliasExpands() {
         val out = run("""
-            type Step = fn(Int) -> Int
-            type Pipeline = List[Step]
+            alias Step = fn(Int) -> Int
+            alias Pipeline = List[Step]
 
             fn run_all(ps: Pipeline, n: Int) -> Int = fold(ps, n, fn(acc, f) => f(acc))
 
@@ -144,7 +144,7 @@ class TypeAliasTest {
     @Test
     fun bareBuiltinScalarIsAnAlias() {
         val out = run("""
-            type Meters = Float
+            alias Meters = Float
 
             fn walk(d: Meters) -> Meters = d * 2.0
 
@@ -153,13 +153,38 @@ class TypeAliasTest {
         assertEquals("3.0\n", out)
     }
 
+    @Test
+    fun aliasOfAUserAdtIsTransparent() {
+        // impossible before the alias keyword: a bare uppercase RHS under `type`
+        // always declared a constructor, so user types could not be aliased
+        val out = run("""
+            type Color = Red | Green derive Show
+            alias Paint = Color
+
+            fn flip(p: Paint) -> Paint = match p { Red -> Green, Green -> Red }
+
+            pub fn main() -> Unit !io = println(to_string(flip(Red)))
+        """.trimIndent())
+        assertEquals("Green\n", out)
+    }
+
     // ---- diagnostics ----
+
+    @Test
+    fun aliasShapedRhsUnderTypeIsAnError() {
+        val diags = errorsOf("""
+            type Meters = Float
+
+            pub fn main() -> Unit !io = println("x")
+        """.trimIndent())
+        assertHasError(diags, "this is an alias")
+    }
 
     @Test
     fun aliasCycleIsAnError() {
         val diags = errorsOf("""
-            type A = List[B]
-            type B = List[A]
+            alias A = List[B]
+            alias B = List[A]
 
             pub fn main() -> Unit !io = println("x")
         """.trimIndent())
@@ -169,7 +194,7 @@ class TypeAliasTest {
     @Test
     fun effectVariablesAreRejected() {
         val diags = errorsOf("""
-            type H = fn(Int) -> Int !e
+            alias H = fn(Int) -> Int !e
 
             pub fn main() -> Unit !io = println("x")
         """.trimIndent())
@@ -179,7 +204,7 @@ class TypeAliasTest {
     @Test
     fun aliasArityIsChecked() {
         val diags = errorsOf("""
-            type Lookup[T] = fn(String) -> Option[T]
+            alias Lookup[T] = fn(String) -> Option[T]
 
             fn f(l: Lookup) -> Unit = ()
 
@@ -191,7 +216,7 @@ class TypeAliasTest {
     @Test
     fun duplicateAliasAndAdtNamesCollide() {
         val diags = errorsOf("""
-            type H = fn(Int) -> Int
+            alias H = fn(Int) -> Int
             type H = { n: Int }
 
             pub fn main() -> Unit !io = println("x")
@@ -207,7 +232,7 @@ class TypeAliasTest {
         try {
             val src = java.io.File(dir, "src/lib").apply { mkdirs() }
             java.io.File(src, "h.dawn").writeText("""
-                pub type Handler = fn(Int) -> Int
+                pub alias Handler = fn(Int) -> Int
                 pub fn twice(h: Handler, n: Int) -> Int = h(h(n))
             """.trimIndent())
             java.io.File(dir, "src/main.dawn").writeText("""

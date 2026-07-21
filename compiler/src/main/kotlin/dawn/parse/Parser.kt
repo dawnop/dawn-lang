@@ -96,7 +96,7 @@ class Parser(
     /** After a broken declaration: skip forward to the next plausible declaration start. */
     private fun syncToNextDecl() {
         if (!at(EOF)) advance() // always make progress
-        while (!at(EOF) && !at(FN) && !at(PUB) && !at(TYPE) && !at(CONST) && !at(TRAIT) && !at(IMPL)) advance()
+        while (!at(EOF) && !at(FN) && !at(PUB) && !at(TYPE) && !at(ALIAS) && !at(CONST) && !at(TRAIT) && !at(IMPL)) advance()
     }
 
     private fun topDecl(): Decl {
@@ -104,6 +104,7 @@ class Parser(
         return when (peek().type) {
             FN -> fnDecl(pub)
             TYPE -> typeDecl(pub)
+            ALIAS -> aliasDecl(pub)
             CONST -> constDecl(pub)
             TRAIT -> traitDecl(pub)
             IMPL -> {
@@ -118,7 +119,7 @@ class Parser(
                 if (pub) throw err("use declarations cannot be pub")
                 useDecl()
             }
-            else -> throw err("only declarations (fn, type, const, trait, impl, test) are allowed at module top level")
+            else -> throw err("only declarations (fn, type, alias, const, trait, impl, test) are allowed at module top level")
         }
     }
 
@@ -234,6 +235,21 @@ class Parser(
         return out
     }
 
+    /** `alias Name[T] = TypeRef` — a transparent type alias (spec §2.6). */
+    private fun aliasDecl(pub: Boolean): TypeDecl {
+        val kw = expect(ALIAS, "`alias`")
+        val name = expect(TYPEIDENT, "a type name (uppercase)")
+        val tparamDecls = typeParams()
+        tparamDecls.firstOrNull { it.bounds.isNotEmpty() }?.let {
+            throw DawnError("alias declarations cannot constrain their type parameters", it.span,
+                "trait bounds go on the functions that use the type: fn f[T: Ord](...)")
+        }
+        expect(EQ, "`=`")
+        val target = typeRef()
+        return TypeDecl(pub, name.text, tparamDecls.map { it.name }, emptyList(), isRecord = false,
+            Span(kw.span.start, target.span.end), name.span, aliasTarget = target)
+    }
+
     private fun typeDecl(pub: Boolean): TypeDecl {
         val kw = expect(TYPE, "`type`")
         val name = expect(TYPEIDENT, "a type name (uppercase)")
@@ -245,16 +261,18 @@ class Parser(
         val tparams = tparamDecls.map { it.name }
         expect(EQ, "`=`")
         if (at(LBRACE)) return recordDecl(pub, kw, name, tparams)
-        // a type alias: an RHS that cannot begin a constructor list — a fn type,
-        // a tuple, a generic application Name[...], or a bare builtin scalar
-        // (`type Meters = Float`; those names can never be constructors). Any
-        // other bare uppercase name stays a single-constructor ADT (back-compat).
+        // `type` declares a nominal type only. An RHS that cannot begin a constructor
+        // list — a fn type, a tuple, a generic application Name[...], or a bare builtin
+        // scalar — is an alias, and aliases have their own keyword (spec §2.6): the two
+        // used to share `type` behind a heuristic, so same-looking declarations meant
+        // different things depending on what the RHS name happened to be.
         val builtinScalar = at(TYPEIDENT) && toks[pos].text in BUILTIN_SCALARS &&
             toks[pos + 1].type != LPAREN
         if (at(FN) || at(LPAREN) || (at(TYPEIDENT) && toks[pos + 1].type == LBRACKET) || builtinScalar) {
             val target = typeRef()
-            return TypeDecl(pub, name.text, tparams, emptyList(), isRecord = false,
-                Span(kw.span.start, target.span.end), name.span, aliasTarget = target)
+            throw DawnError("`type` declares a nominal type (constructors or a record); this is an alias",
+                Span(kw.span.start, target.span.end),
+                "write `alias ${name.text}${if (tparams.isEmpty()) "" else "[${tparams.joinToString(", ")}]"} = ...` instead")
         }
         val ctors = ArrayList<CtorDecl>()
         if (at(PIPE)) advance() // leading | is optional
