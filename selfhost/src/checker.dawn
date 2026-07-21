@@ -15,7 +15,8 @@ use token.{Diag}
 use ast.{
   TypeRef, TNamed, TTuple, TFn, Bound, TypeParamDecl, Module,
   module_java_uses, module_fns, module_types, module_consts, module_traits,
-  module_impls, module_tests, module_uses
+  module_impls, module_tests, module_uses,
+  DType, TypeDeclR, CtorDecl, FieldDecl
 }
 use types.{
   Ty, TyInt, TyFloat, TyBool, TyString, TyBytes, TyCursor, TyUnit, TyNever,
@@ -1104,4 +1105,317 @@ test "prelude seeding wires names to ids" {
   assert map.has(cx.fns, "cmp")
   assert map.has(cx.impl_table, (ORD_ID, TyInt))
   assert not map.has(cx.impl_table, (ORD_ID, TyBool))
+}
+
+## What pass 1 learned about one `type` declaration, for pass 2 to finish.
+## `accepted` maps parsed-ctor index → ctor slot in the ADT; `first_ok`
+## reproduces the Kotlin quirk that pass 2's tparam scope comes from the
+## FIRST parsed constructor's acceptance.
+pub type Shell = { adt: Int, accepted: List[(Int, Int)], first_ok: Bool }
+
+fn no_shell() -> Option[Shell] = None
+
+fn no_fields() -> List[FieldDecl] = []
+
+fn dup_names(names: List[String]) -> Bool = {
+  var seen: Set[String] = set.empty()
+  for n in names {
+    if set.has(seen, n) { return true }
+    seen = set.insert(seen, n)
+  }
+  false
+}
+
+## Pass 1: type headers (shells only), so recursive types resolve. Returns one
+## Option[Shell] per module type declaration, aligned by index.
+pub fn pass_type_shells(cx: Cx, m: Module) -> (Cx, List[Option[Shell]]) = {
+  var cx1 = cx
+  var shells: List[Option[Shell]] = []
+  for d in module_types(m) {
+    if map.has(cx1.java_classes, d.name) {
+      cx1 = cerr(cx1, "`" ++ d.name ++ "` collides with an imported Java class", d.nlo, d.nhi)
+      shells = shells ++ [no_shell()]
+      continue
+    }
+    if alias_shadows(cx1, d.name) {
+      cx1 = alias_shadow(cx1, d.name, d.nlo, d.nhi)
+      shells = shells ++ [no_shell()]
+      continue
+    }
+    if import_clashes(cx1, d.name) {
+      cx1 = import_clash(cx1, d.name, d.nlo, d.nhi, "type")
+      shells = shells ++ [no_shell()]
+      continue
+    }
+    let is_builtin_name = match ty_named(d.name) {
+      Some(_) -> true
+      None -> d.name == "List" || d.name == "Map" || d.name == "Set"
+    }
+    if is_builtin_name {
+      cx1 = cerr(cx1, "`" ++ d.name ++ "` is a builtin type and cannot be redefined", d.nlo, d.nhi)
+      shells = shells ++ [no_shell()]
+      continue
+    }
+    if map.has(cx1.adts_by_name, d.name) || map.has(cx1.aliases, d.name) {
+      let msg = if d.name == "Option" || d.name == "Result" {
+        "`" ++ d.name ++ "` is a prelude type and cannot be redefined"
+      } else {
+        "type `" ++ d.name ++ "` is defined twice"
+      }
+      cx1 = cerr(cx1, msg, d.nlo, d.nhi)
+      shells = shells ++ [no_shell()]
+      continue
+    }
+    if dup_names(d.tparams) {
+      cx1 = cerr(cx1, "duplicate type parameter names", d.nlo, d.nhi)
+    }
+    match d.alias_target {
+      Some(target) -> {
+        match alias_effvar_span(target) {
+          Some(sp) -> {
+            let (alo, ahi) = sp
+            cx1 = cerr_h(cx1, "a type alias cannot carry effect variables", alo, ahi,
+              "write !io, or leave the function type pure")
+          }
+          None -> ()
+        }
+        var tvs: List[Ty] = []
+        for tn in d.tparams {
+          let (cx2, v) = fresh_tvar(cx1, tn)
+          cx1 = cx2
+          tvs = tvs ++ [v]
+        }
+        cx1 = Cx {
+          ..cx1,
+          aliases: map.insert(cx1.aliases, d.name, AliasE {
+            name: d.name,
+            tparams: tvs,
+            target: Some(target),
+            nlo: d.nlo,
+            nhi: d.nhi
+          })
+        }
+        shells = shells ++ [no_shell()]
+        continue
+      }
+      None -> ()
+    }
+    var tvs: List[Ty] = []
+    for tn in d.tparams {
+      let (cx2, v) = fresh_tvar(cx1, tn)
+      cx1 = cx2
+      tvs = tvs ++ [v]
+    }
+    var derives_show = false
+    var derives_ord = false
+    for b in d.derives {
+      if b.name == "Show" {
+        derives_show = true
+      } else if b.name == "Ord" {
+        derives_ord = true
+      } else {
+        cx1 = cerr_h(cx1, "unknown derivable trait `" ++ b.name ++ "`", b.lo, b.hi,
+          "Show and Ord can be derived")
+      }
+    }
+    let (cx3, aid) = fresh(cx1)
+    cx1 = cx3
+    var accepted: List[(Int, Int)] = []
+    var first_ok = false
+    var ctor_infos: List[CtorI] = []
+    var slot = 0
+    var pi = 0
+    var cbn = cx1.ctors_by_name
+    for c in d.ctors {
+      let builtin_ctor = match ty_named(c.name) {
+        Some(_) -> true
+        None -> false
+      }
+      if builtin_ctor {
+        cx1 = cerr(cx1, "constructor `" ++ c.name ++ "` collides with a builtin type name",
+          c.nlo, c.nhi)
+      } else if map.has(cbn, c.name) {
+        cx1 = cerr(cx1, "constructor `" ++ c.name ++
+            "` is already defined (constructors share one module-wide namespace)", c.nlo, c.nhi)
+      } else {
+        cbn = map.insert(cbn, c.name, (aid, slot))
+        ctor_infos = ctor_infos ++ [CtorI { adt: aid, name: c.name, fields: [] }]
+        accepted = accepted ++ [(pi, slot)]
+        if pi == 0 { first_ok = true }
+        slot = slot + 1
+      }
+      pi = pi + 1
+    }
+    let info = AdtI {
+      id: aid,
+      name: d.name,
+      is_record: d.is_record,
+      tparams: tvs,
+      ctors: ctor_infos,
+      derives_show: derives_show,
+      derives_ord: derives_ord,
+      owner: cx1.owner_class
+    }
+    cx1 = Cx {
+      ..cx1,
+      ctors_by_name: cbn,
+      adts: map.insert(cx1.adts, aid, info),
+      adts_by_name: map.insert(cx1.adts_by_name, d.name, aid)
+    }
+    shells = shells ++ [Some(Shell { adt: aid, accepted: accepted, first_ok: first_ok })]
+  }
+  (cx1, shells)
+}
+
+fn accepted_slot(sh: Shell, pi: Int) -> Option[Int] = {
+  for a in sh.accepted {
+    let (p, slot) = a
+    if p == pi { return Some(slot) }
+  }
+  None
+}
+
+## Pass 2: constructor field types (may reference any type declared above).
+pub fn pass_ctor_fields(cx: Cx, m: Module, shells: List[Option[Shell]]) -> Cx = {
+  var cx1 = cx
+  var di = 0
+  for d in module_types(m) {
+    let sh = match shells[di] {
+      None -> {
+        di = di + 1
+        continue
+      }
+      Some(s) -> s
+    }
+    let info = adt_of(cx1.adts, sh.adt)
+    # the Kotlin quirk: the tparam scope comes from the FIRST parsed ctor's info
+    var tp: Map[String, Ty] = map.empty()
+    if sh.first_ok {
+      for v in info.tparams {
+        match v {
+          TyVar(n, _) -> { tp = map.insert(tp, n, v) }
+          _ -> ()
+        }
+      }
+    }
+    let saved_tp = cx1.current_tparams
+    cx1 = Cx { ..cx1, current_tparams: tp }
+    var new_ctors = info.ctors
+    var pi = 0
+    for c in d.ctors {
+      let slot = match accepted_slot(sh, pi) {
+        None -> {
+          pi = pi + 1
+          continue
+        }
+        Some(s) -> s
+      }
+      var fields: List[FieldI] = []
+      var fnames: Set[String] = set.empty()
+      for f in c.fields {
+        if set.has(fnames, f.name) {
+          cx1 = cerr(cx1, "field `" ++ f.name ++ "` is declared twice in `" ++ c.name ++ "`",
+            f.lo, f.hi)
+          continue
+        }
+        fnames = set.insert(fnames, f.name)
+        let (cx2, ft0) = resolve_type(cx1, f.tref)
+        cx1 = cx2
+        var ft = ft0
+        if ft == TyUnit {
+          cx1 = cerr_h(cx1, "constructor fields cannot be Unit", f.lo, f.hi,
+            "a no-payload case is just a bare constructor")
+          ft = TyError
+        }
+        fields = fields ++ [FieldI { name: f.name, ty: ft }]
+      }
+      let old = new_ctors[slot]
+      new_ctors = list.take(new_ctors, slot) ++ [CtorI { ..old, fields: fields }] ++
+        list.drop(new_ctors, slot + 1)
+      pi = pi + 1
+    }
+    cx1 = Cx {
+      ..cx1,
+      current_tparams: saved_tp,
+      adts: map.insert(cx1.adts, sh.adt, AdtI { ..info, ctors: new_ctors })
+    }
+    di = di + 1
+  }
+  cx1
+}
+
+test "type shells and fields build recursive types" {
+  # type Tree[T] = | Leaf | Node(v: T, kids: List[Tree[T]])
+  let m = Module { decls: [DType(TypeDeclR {
+    is_pub: false,
+    name: "Tree",
+    tparams: ["T"],
+    ctors: [
+      CtorDecl { name: "Leaf", fields: no_fields(), lo: 0, hi: 4, nlo: 0, nhi: 4 },
+      CtorDecl {
+        name: "Node",
+        fields: [
+          FieldDecl { name: "v", tref: TNamed("T", [], 10, 11), lo: 8, hi: 11 },
+          FieldDecl {
+            name: "kids",
+            tref: TNamed("List", [TNamed("Tree", [TNamed("T", [], 24, 25),], 19, 26)], 13, 27),
+            lo: 13,
+            hi: 27
+          }
+        ],
+        lo: 5,
+        hi: 28,
+        nlo: 5,
+        nhi: 9
+      }
+    ],
+    is_record: false,
+    derives: [],
+    alias_target: None,
+    lo: 0,
+    hi: 28,
+    nlo: 5,
+    nhi: 9
+  })] }
+  var cx = seed_prelude(test_cx())
+  let (cx1, shells) = pass_type_shells(cx, m)
+  let cx2 = pass_ctor_fields(cx1, m, shells)
+  assert len(cx2.diags) == 0
+  let aid = map.get(cx2.adts_by_name, "Tree").expect("registered")
+  let a = adt_of(cx2.adts, aid)
+  assert len(a.ctors) == 2
+  assert a.ctors[1].fields[1].name == "kids"
+  match a.ctors[1].fields[1].ty {
+    TyList(inner) ->
+      match inner {
+        TyAdt(aid2, args) -> {
+          assert aid2 == aid
+          assert args == a.tparams
+        }
+        _ -> { assert false }
+      }
+    _ -> { assert false }
+  }
+}
+
+test "duplicate constructors and prelude clashes are caught" {
+  let mk = fn(name: String) => DType(TypeDeclR {
+    is_pub: false,
+    name: name,
+    tparams: [],
+    ctors: [CtorDecl { name: "C" ++ name, fields: [], lo: 0, hi: 1, nlo: 0, nhi: 1 }],
+    is_record: false,
+    derives: [],
+    alias_target: None,
+    lo: 0,
+    hi: 1,
+    nlo: 0,
+    nhi: 1
+  })
+  let m = Module { decls: [mk("Option"), mk("A"), mk("A")] }
+  var cx = seed_prelude(test_cx())
+  let (cx1, shells) = pass_type_shells(cx, m)
+  assert len(cx1.diags) == 2
+  assert cx1.diags[0].msg == "`Option` is a prelude type and cannot be redefined"
+  assert cx1.diags[1].msg == "type `A` is defined twice"
 }
