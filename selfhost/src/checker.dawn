@@ -83,6 +83,8 @@ pub type Cx = {
   local_impls: List[ImplI],
   impl_table: Map[(Int, Ty), ImplI],
   module_aliases: Map[String, String],
+  # (alias, fn name) → the imported module's signature (for qualified calls)
+  module_fn_sigs: Map[(String, String), Sig],
   imported_names: Map[String, String],
   # constants: declared type by name, in declaration order
   consts: Map[String, Ty],
@@ -136,6 +138,7 @@ pub fn cx_new(owner_class: Option[String], src_path: Option[String]) -> Cx = {
     local_impls: [],
     impl_table: map.empty(),
     module_aliases: map.empty(),
+    module_fn_sigs: map.empty(),
     imported_names: map.empty(),
     consts: map.empty(),
     const_order: [],
@@ -3635,9 +3638,17 @@ pub fn pass_imports(cx: Cx, m: Module, env: Map[String, ModExports]) -> Cx = {
             }
           None -> ()
         }
+        var mfs = cx1.module_fn_sigs
+        for fname in map.keys(exp.fns) {
+          match map.get(exp.fns, fname) {
+            Some(sig) -> { mfs = map.insert(mfs, (u.alias_name, fname), sig) }
+            None -> ()
+          }
+        }
         cx1 = Cx {
           ..cx1,
-          module_aliases: map.insert(cx1.module_aliases, u.alias_name, exp.mod_path)
+          module_aliases: map.insert(cx1.module_aliases, u.alias_name, exp.mod_path),
+          module_fn_sigs: mfs
         }
       }
       Some(names) -> {
@@ -3831,3 +3842,92 @@ test "isolated contexts capture and report their effects" {
   # the outer effect record is restored
   assert cx3.used_effects == [EIo]
 }
+
+## Does this expression need an expected type to check at all? (drives the
+## two-round argument checking; the Kotlin needsExpected.)
+pub fn needs_expected(cx: Cx, e: Expr) -> Bool =
+  match e {
+    EListLit(elems, _, _) -> {
+      if len(elems) == 0 { return true }
+      for x in elems {
+        if not needs_expected(cx, x) { return false }
+      }
+      true
+    }
+    ETupleLit(elems, _, _) -> {
+      for x in elems {
+        if needs_expected(cx, x) { return true }
+      }
+      false
+    }
+    # a generic function used as a value is instantiated from the expected type
+    EVar(name, _, _) -> {
+      match lookup(cx, name) {
+        Some(_) -> return false
+        None -> ()
+      }
+      let sig = match map.get(cx.fns, name) {
+        Some(s) -> Some(s)
+        None -> builtin_sig(cx, name)
+      }
+      match sig {
+        Some(s) -> len(s.tparams) > 0
+        None -> false
+      }
+    }
+    ECtor(cname, cargs, spread, has_parens, _, _, _, _) ->
+      match map.get(cx.ctors_by_name, cname) {
+        None -> false
+        Some(key) -> {
+          let (aid, cslot) = key
+          let a = adt_of(cx.adts, aid)
+          let ci = a.ctors[cslot]
+          # bare nullary generic ctor (None): element type comes from expected;
+          # bare ctor-with-fields as a fn value (Some): needs the expected fn type
+          (len(ci.fields) == 0 && len(a.tparams) > 0) ||
+            (not has_parens && len(ci.fields) > 0 && not a.is_record)
+        }
+      }
+    ELambda(params, _, _, _) -> {
+      for p in params {
+        match p.ann {
+          None -> return true
+          Some(_) -> ()
+        }
+      }
+      false
+    }
+    # a zero-arg generic call (map_empty()) can only be typed from context
+    ECall(callee, args, _, _, _, _) -> {
+      match lookup(cx, callee) {
+        Some(_) -> return false
+        None -> ()
+      }
+      let sig = match map.get(cx.fns, callee) {
+        Some(s) -> Some(s)
+        None -> builtin_sig(cx, callee)
+      }
+      match sig {
+        Some(s) -> len(s.tparams) > 0 && len(args) == 0
+        None -> false
+      }
+    }
+    # same for its module-qualified spelling (map.empty(), spec §10.3) — needs
+    # the import env, resolved by the caller via a pre-filled table; here the
+    # alias fns live in cx via pass_imports' std handling at check time
+    EMethod(target, name, args, _, _, _, _) ->
+      match target {
+        EVar(rname, _, _) -> {
+          match lookup(cx, rname) {
+            Some(_) -> return false
+            None -> ()
+          }
+          match map.get(cx.module_fn_sigs, (rname, name)) {
+            Some(s) -> len(s.tparams) > 0 && len(args) == 0
+            None -> false
+          }
+        }
+        _ -> false
+      }
+    _ -> false
+  }
