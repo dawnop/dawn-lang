@@ -1,0 +1,694 @@
+# The Dawn checker, in Dawn (P3b; port of check/Checker.kt per
+# docs/selfhost-checker.md). This file grows pass by pass; the state record Cx
+# carries every mutable member of the Kotlin Checker, and functions return
+# (Cx, T) tuples — errors mint a diagnostic and poison with TyError, never
+# abort (no exception control flow in the original either).
+#
+# This first slice: state, scopes, effect bookkeeping, and type resolution
+# (resolveType / resolveEff / alias expansion / Map-Set key validity).
+
+use std/str
+use std/list
+use std/map
+use std/set
+use token.{Diag}
+use ast.{
+  TypeRef, TNamed, TTuple, TFn, Bound, TypeParamDecl, Module
+}
+use types.{
+  Ty, TyInt, TyFloat, TyBool, TyString, TyBytes, TyCursor, TyUnit, TyNever,
+  TyError, TyVar, TyAdt, TyList, TyMap, TySet, TyJava, TyTuple, TyFn,
+  Eff, EPure, EIo, EffVar, EUnion, eff_union, lub_eff, eff_subsumes, eff_suffix,
+  Adts, AdtI, CtorI, FieldI, Traits, TraitI, ImplI, Sym, Sig, MethodSig,
+  adt_of, trait_of, ty_show, ctor_render, sig_render, subst, subst_eff,
+  ty_named, is_numeric, is_errorish, prelude_adts, prelude_traits, prelude_impls,
+  builtins, opt_ty, result_ty, OPTION_ID, RESULT_ID, ORD_ID
+}
+use jreflect.{JClass, find_class, class_info}
+use suggest
+
+## An alias entry: the Kotlin AliasInfo without its mutable resolution slots
+## (resolution results live in Cx.alias_resolved, the in-flight set in
+## Cx.alias_resolving).
+pub type AliasE = {
+  name: String,
+  tparams: List[Ty],
+  # the unresolved target in the declaring module; None on imported aliases
+  target: Option[TypeRef],
+  nlo: Int,
+  nhi: Int
+}
+
+## The checker state: every mutable member of the Kotlin Checker class.
+pub type Cx = {
+  diags: List[Diag],
+  next_id: Int,
+  adts: Adts,
+  traits: Traits,
+  # name-keyed views of the current module's scope
+  fns: Map[String, Sig],
+  adts_by_name: Map[String, Int],
+  aliases: Map[String, AliasE],
+  alias_resolved: Map[String, Ty],
+  alias_resolving: Set[String],
+  ctors_by_name: Map[String, (Int, Int)],
+  traits_by_name: Map[String, Int],
+  local_traits: List[String],
+  local_impls: List[ImplI],
+  impl_table: Map[(Int, Ty), ImplI],
+  module_aliases: Map[String, String],
+  imported_names: Map[String, String],
+  # constants: declared type by name, in declaration order
+  consts: Map[String, Ty],
+  const_order: List[String],
+  all_const_names: Set[String],
+  const_cutoff: Option[Set[String]],
+  # `use java` imports: simple name → fqcn
+  java_classes: Map[String, String],
+  # lexical scopes, innermost last; each maps name → symbol id
+  scopes: List[Map[String, Int]],
+  # symbol table: id → symbol
+  syms: Map[Int, Sym],
+  # effect bookkeeping for the body being checked
+  used_effects: List[Eff],
+  eff_witness: Map[Eff, (Int, Int, String)],
+  current_eff_vars: Map[String, Eff],
+  current_tparams: Map[String, Ty],
+  current_sig: Option[Sig],
+  # (tvar id, trait id) → dictionary symbol id
+  dict_syms: Map[(Int, Int), Int],
+  lambda_stack: List[LambdaCx],
+  loop_stack: List[Int],
+  in_test: Bool,
+  reported_key_types: Set[String],
+  is_std_module: Bool,
+  owner_class: Option[String],
+  src_path: Option[String]
+}
+
+pub type LambdaCx = { boundary: Int, expected_ret: Option[Ty], captures: List[Int] }
+
+## A fresh checker state for one module.
+pub fn cx_new(owner_class: Option[String], src_path: Option[String]) -> Cx = {
+  let is_std = match owner_class {
+    Some(o) -> o == "std" || str.starts_with(o, "std/")
+    None -> false
+  }
+  Cx {
+    diags: [],
+    next_id: 1,
+    adts: prelude_adts(),
+    traits: prelude_traits(),
+    fns: map.empty(),
+    adts_by_name: map.empty(),
+    aliases: map.empty(),
+    alias_resolved: map.empty(),
+    alias_resolving: set.empty(),
+    ctors_by_name: map.empty(),
+    traits_by_name: map.empty(),
+    local_traits: [],
+    local_impls: [],
+    impl_table: map.empty(),
+    module_aliases: map.empty(),
+    imported_names: map.empty(),
+    consts: map.empty(),
+    const_order: [],
+    all_const_names: set.empty(),
+    const_cutoff: None,
+    java_classes: map.empty(),
+    scopes: [],
+    syms: map.empty(),
+    used_effects: [],
+    eff_witness: map.empty(),
+    current_eff_vars: map.empty(),
+    current_tparams: map.empty(),
+    current_sig: None,
+    dict_syms: map.empty(),
+    lambda_stack: [],
+    loop_stack: [],
+    in_test: false,
+    reported_key_types: set.empty(),
+    is_std_module: is_std,
+    owner_class: owner_class,
+    src_path: src_path
+  }
+}
+
+# ---- diagnostics ----
+
+pub fn cerr(cx: Cx, msg: String, lo: Int, hi: Int) -> Cx =
+  Cx { ..cx, diags: cx.diags ++ [Diag { msg: msg, lo: lo, hi: hi, hint: "" }] }
+
+pub fn cerr_h(cx: Cx, msg: String, lo: Int, hi: Int, hint: String) -> Cx =
+  Cx { ..cx, diags: cx.diags ++ [Diag { msg: msg, lo: lo, hi: hi, hint: hint }] }
+
+## An error with an optional hint (the Kotlin `sink.error(msg, span, hint?)`).
+pub fn cerr_o(cx: Cx, msg: String, lo: Int, hi: Int, hint: Option[String]) -> Cx =
+  match hint {
+    Some(h) -> cerr_h(cx, msg, lo, hi, h)
+    None -> cerr(cx, msg, lo, hi)
+  }
+
+# ---- fresh ids ----
+
+pub fn fresh(cx: Cx) -> (Cx, Int) = (Cx { ..cx, next_id: cx.next_id + 1 }, cx.next_id)
+
+pub fn fresh_tvar(cx: Cx, name: String) -> (Cx, Ty) = {
+  let (cx1, id) = fresh(cx)
+  (cx1, TyVar(name, id))
+}
+
+pub fn fresh_effvar(cx: Cx, name: String) -> (Cx, Eff) = {
+  let (cx1, id) = fresh(cx)
+  (cx1, EffVar(name, id))
+}
+
+# ---- scopes and symbols ----
+
+pub fn push_scope(cx: Cx) -> Cx = {
+  let empty: Map[String, Int] = map.empty()
+  Cx { ..cx, scopes: cx.scopes ++ [empty] }
+}
+
+pub fn pop_scope(cx: Cx) -> Cx = Cx { ..cx, scopes: list.take(cx.scopes, len(cx.scopes) - 1) }
+
+pub fn sym_of(cx: Cx, id: Int) -> Sym =
+  match map.get(cx.syms, id) {
+    Some(s) -> s
+    None -> panic("unknown symbol id: ${id}")
+  }
+
+## Declare a name in the innermost scope (the Kotlin `declare`): re-binding in
+## the same scope is an error; `_` never binds.
+pub fn declare(cx: Cx, name: String, ty: Ty, mutable: Bool, lo: Int, hi: Int) -> (Cx, Int) = {
+  var cx1 = cx
+  let inner = cx1.scopes[len(cx1.scopes) - 1]
+  if name != "_" && map.has(inner, name) {
+    cx1 = cerr_h(cx1, "`" ++ name ++ "` is already bound in this scope", lo, hi,
+      "let does not shadow; only nested blocks may reuse a name")
+  }
+  cx1 = alias_shadow(cx1, name, lo, hi)
+  let (cx2, id) = fresh(cx1)
+  let sym = Sym { name: name, ty: ty, mutable: mutable, dlo: lo, dhi: hi, dict_of: None }
+  var cx3 = Cx { ..cx2, syms: map.insert(cx2.syms, id, sym) }
+  if name != "_" {
+    let inner2 = map.insert(cx3.scopes[len(cx3.scopes) - 1], name, id)
+    cx3 = Cx { ..cx3, scopes: list.take(cx3.scopes, len(cx3.scopes) - 1) ++ [inner2] }
+  }
+  (cx3, id)
+}
+
+## Find a name in the scope stack, innermost first (no capture bookkeeping).
+pub fn lookup(cx: Cx, name: String) -> Option[Int] = {
+  var i = len(cx.scopes) - 1
+  while i >= 0 {
+    match map.get(cx.scopes[i], name) {
+      Some(id) -> return Some(id)
+      None -> ()
+    }
+    i = i - 1
+  }
+  None
+}
+
+## Every name currently in scope — the "did you mean" candidate pool.
+pub fn local_names(cx: Cx) -> List[String] = {
+  var out: List[String] = []
+  for sc in cx.scopes { out = out ++ map.keys(sc) }
+  out
+}
+
+## A local declaration may not shadow a whole-module alias (spec §10.3).
+pub fn alias_shadow(cx: Cx, name: String, lo: Int, hi: Int) -> Cx =
+  match map.get(cx.module_aliases, name) {
+    None -> cx
+    Some(mod_path) -> cerr_h(cx, "`" ++ name ++ "` shadows the imported module `" ++ mod_path ++ "`",
+      lo, hi, "an imported module's alias and your names share one namespace; rename one")
+  }
+
+## Was a top-level name already shadowing an alias / clashing with an import?
+pub fn alias_shadows(cx: Cx, name: String) -> Bool = map.has(cx.module_aliases, name)
+
+pub fn import_clash(cx: Cx, name: String, lo: Int, hi: Int, kind: String) -> Cx =
+  match map.get(cx.imported_names, name) {
+    None -> cx
+    Some(from) -> cerr_h(cx, kind ++ " `" ++ name ++ "` conflicts with a name imported from `" ++
+        from ++ "`", lo, hi, "drop the import or rename this " ++ kind)
+  }
+
+pub fn import_clashes(cx: Cx, name: String) -> Bool = map.has(cx.imported_names, name)
+
+# ---- effect bookkeeping ----
+
+fn eff_seen(cx: Cx, e: Eff) -> Bool = {
+  for u in cx.used_effects {
+    if u == e { return true }
+  }
+  false
+}
+
+pub fn record_effect(cx: Cx, e: Eff, lo: Int, hi: Int, name: String) -> Cx = {
+  if e == EPure { return cx }
+  if eff_seen(cx, e) { return cx }
+  Cx {
+    ..cx,
+    used_effects: cx.used_effects ++ [e],
+    eff_witness: map.insert(cx.eff_witness, e, (lo, hi, name))
+  }
+}
+
+## Resolve parsed effect atoms into a normalized Eff, interning variables per
+## signature (the Kotlin resolveEff over currentEffVars).
+pub fn resolve_eff(cx: Cx, atoms: List[String]) -> (Cx, Eff) = {
+  var cx1 = cx
+  var effs: List[Eff] = []
+  for a in atoms {
+    if a == "io" {
+      effs = effs ++ [EIo]
+    } else {
+      match map.get(cx1.current_eff_vars, a) {
+        Some(v) -> { effs = effs ++ [v] }
+        None -> {
+          let (cx2, v) = fresh_effvar(cx1, a)
+          cx1 = Cx { ..cx2, current_eff_vars: map.insert(cx2.current_eff_vars, a, v) }
+          effs = effs ++ [v]
+        }
+      }
+    }
+  }
+  (cx1, eff_union(effs))
+}
+
+# ---- Map/Set key validity (spec §2.2) ----
+
+## The first Float/Bytes anywhere inside a would-be key type, or None.
+pub fn invalid_key_part(cx: Cx, t: Ty, seen: Set[String]) -> Option[Ty] =
+  match t {
+    TyFloat -> Some(TyFloat)
+    TyBytes -> Some(TyBytes)
+    TyList(e) -> invalid_key_part(cx, e, seen)
+    TySet(e) -> invalid_key_part(cx, e, seen)
+    TyMap(k, v) ->
+      match invalid_key_part(cx, k, seen) {
+        Some(b) -> Some(b)
+        None -> invalid_key_part(cx, v, seen)
+      }
+    TyTuple(elems) -> {
+      for e in elems {
+        match invalid_key_part(cx, e, seen) {
+          Some(b) -> return Some(b)
+          None -> ()
+        }
+      }
+      None
+    }
+    TyAdt(aid, targs) -> {
+      let a = adt_of(cx.adts, aid)
+      if set.has(seen, a.name) { return None }
+      let seen2 = set.insert(seen, a.name)
+      var m: Map[Int, Ty] = map.empty()
+      var i = 0
+      for tp in a.tparams {
+        match tp {
+          TyVar(_, id) ->
+            match get(targs, i) {
+              Some(arg) -> { m = map.insert(m, id, arg) }
+              None -> ()
+            }
+          _ -> ()
+        }
+        i = i + 1
+      }
+      let em: Map[Int, Eff] = map.empty()
+      for c in a.ctors {
+        for f in c.fields {
+          match invalid_key_part(cx, subst(f.ty, m, em), seen2) {
+            Some(b) -> return Some(b)
+            None -> ()
+          }
+        }
+      }
+      None
+    }
+    _ -> None
+  }
+
+## One report per offending key type per module.
+pub fn check_key_type(cx: Cx, key_t: Ty, lo: Int, hi: Int) -> Cx = {
+  if is_errorish(key_t) { return cx }
+  let bad = match invalid_key_part(cx, key_t, set.empty()) {
+    None -> return cx
+    Some(b) -> b
+  }
+  let key_s = ty_show(cx.adts, key_t)
+  if set.has(cx.reported_key_types, key_s) { return cx }
+  var cx1 = Cx { ..cx, reported_key_types: set.insert(cx.reported_key_types, key_s) }
+  let bad_s = ty_show(cx1.adts, bad)
+  let inside = if bad == key_t { "" } else { " (inside `" ++ key_s ++ "`)" }
+  let why = if bad == TyFloat {
+    "NaN and -0.0 give Float two different equalities, so no hash can agree with `==`"
+  } else {
+    "Bytes hashes by identity, not content"
+  }
+  let hint = if bad == TyFloat {
+    "key by an Int encoding (scaled integer, bits) or a String rendering instead"
+  } else {
+    "key by a String instead: decode(b, \"UTF-8\") or a hex rendering"
+  }
+  cerr_h(cx1, "`" ++ bad_s ++ "` cannot be part of a Map/Set key type" ++ inside ++ ": " ++ why,
+    lo, hi, hint)
+}
+
+## Every Map key / Set element inside an instantiated type must be a valid key.
+pub fn check_key_types_in(cx: Cx, t: Ty, lo: Int, hi: Int) -> Cx =
+  match t {
+    TyMap(k, v) -> check_key_types_in(check_key_type(cx, k, lo, hi), v, lo, hi)
+    TySet(e) -> check_key_type(cx, e, lo, hi)
+    TyList(e) -> check_key_types_in(cx, e, lo, hi)
+    TyTuple(elems) -> {
+      var cx1 = cx
+      for e in elems { cx1 = check_key_types_in(cx1, e, lo, hi) }
+      cx1
+    }
+    TyAdt(_, targs) -> {
+      var cx1 = cx
+      for e in targs { cx1 = check_key_types_in(cx1, e, lo, hi) }
+      cx1
+    }
+    TyFn(params, ret, _) -> {
+      var cx1 = cx
+      for e in params { cx1 = check_key_types_in(cx1, e, lo, hi) }
+      check_key_types_in(cx1, ret, lo, hi)
+    }
+    _ -> cx
+  }
+
+pub fn builtin_type_names() -> List[String] =
+  ["Int", "Float", "Bool", "String", "Bytes", "Cursor", "Unit", "List", "Map", "Set"]
+
+# ---- type resolution ----
+
+## The span of the first effect variable inside an alias target, if any.
+pub fn alias_effvar_span(ref: TypeRef) -> Option[(Int, Int)] =
+  match ref {
+    TFn(params, ret, effs, lo, hi) -> {
+      for a in effs {
+        if a != "io" { return Some((lo, hi)) }
+      }
+      for p in params {
+        match alias_effvar_span(p) {
+          Some(s) -> return Some(s)
+          None -> ()
+        }
+      }
+      alias_effvar_span(ret)
+    }
+    TTuple(elems, _, _) -> {
+      for e in elems {
+        match alias_effvar_span(e) {
+          Some(s) -> return Some(s)
+          None -> ()
+        }
+      }
+      None
+    }
+    TNamed(_, targs, _, _) -> {
+      for e in targs {
+        match alias_effvar_span(e) {
+          Some(s) -> return Some(s)
+          None -> ()
+        }
+      }
+      None
+    }
+  }
+
+## Resolve an alias target once, memoized; TyError (and an error) on a cycle.
+fn resolve_alias_target(cx: Cx, al: AliasE, use_lo: Int, use_hi: Int) -> (Cx, Ty) = {
+  match map.get(cx.alias_resolved, al.name) {
+    Some(t) -> return (cx, t)
+    None -> ()
+  }
+  let ref = match al.target {
+    None -> {
+      let cx1 = Cx { ..cx, alias_resolved: map.insert(cx.alias_resolved, al.name, TyError) }
+      return (cx1, TyError)
+    }
+    Some(r) -> r
+  }
+  if set.has(cx.alias_resolving, al.name) {
+    var cx1 = cerr_h(cx, "type alias `" ++ al.name ++ "` refers to itself", use_lo, use_hi,
+      "aliases are transparent and cannot be recursive")
+    cx1 = Cx { ..cx1, alias_resolved: map.insert(cx1.alias_resolved, al.name, TyError) }
+    return (cx1, TyError)
+  }
+  var tp: Map[String, Ty] = map.empty()
+  for v in al.tparams {
+    match v {
+      TyVar(n, _) -> { tp = map.insert(tp, n, v) }
+      _ -> ()
+    }
+  }
+  var cx1 = Cx { ..cx, alias_resolving: set.insert(cx.alias_resolving, al.name) }
+  # the alias target resolves with its own type parameters and a throwaway
+  # effect-variable table (effect variables are rejected at declaration)
+  let saved_tp = cx1.current_tparams
+  let saved_ev = cx1.current_eff_vars
+  let empty_ev: Map[String, Eff] = map.empty()
+  cx1 = Cx { ..cx1, current_tparams: tp, current_eff_vars: empty_ev }
+  let (cx2, t) = resolve_type(cx1, ref)
+  var cx3 = Cx { ..cx2, current_tparams: saved_tp, current_eff_vars: saved_ev }
+  cx3 = Cx {
+    ..cx3,
+    alias_resolving: set.remove(cx3.alias_resolving, al.name),
+    alias_resolved: map.insert(cx3.alias_resolved, al.name, t)
+  }
+  (cx3, t)
+}
+
+## Resolve a parsed type reference against the current scope (the Kotlin
+## resolveType with tparams/effVars defaulted to the current ones).
+pub fn resolve_type(cx: Cx, ref: TypeRef) -> (Cx, Ty) =
+  match ref {
+    TTuple(elems, lo, hi) -> {
+      var cx1 = cx
+      var out: List[Ty] = []
+      var i = 0
+      for e in elems {
+        let (cx2, t) = resolve_type(cx1, e)
+        cx1 = cx2
+        if t == TyUnit {
+          cx1 = cerr(cx1, "tuple elements cannot be Unit", t_lo2(e), t_hi2(e))
+          out = out ++ [TyError]
+        } else {
+          out = out ++ [t]
+        }
+        i = i + 1
+      }
+      (cx1, TyTuple(out))
+    }
+    TFn(params, ret, effs, lo, hi) -> {
+      let (cx1, eff) = resolve_eff(cx, effs)
+      var cx2 = cx1
+      var ps: List[Ty] = []
+      for p in params {
+        let (cx3, t) = resolve_type(cx2, p)
+        cx2 = cx3
+        ps = ps ++ [t]
+      }
+      let (cx4, rt) = resolve_type(cx2, ret)
+      (cx4, TyFn(ps, rt, eff))
+    }
+    TNamed(name, targs, lo, hi) -> resolve_named(cx, name, targs, lo, hi)
+  }
+
+fn t_lo2(t: TypeRef) -> Int =
+  match t {
+    TNamed(_, _, lo, _) -> lo
+    TTuple(_, lo, _) -> lo
+    TFn(_, _, _, lo, _) -> lo
+  }
+
+fn t_hi2(t: TypeRef) -> Int =
+  match t {
+    TNamed(_, _, _, hi) -> hi
+    TTuple(_, _, hi) -> hi
+    TFn(_, _, _, _, hi) -> hi
+  }
+
+fn resolve_named(cx: Cx, name: String, targs: List[TypeRef], lo: Int, hi: Int) -> (Cx, Ty) = {
+  # type parameters shadow everything
+  match map.get(cx.current_tparams, name) {
+    Some(v) -> {
+      if len(targs) > 0 {
+        return (cerr(cx, "type parameter `" ++ name ++ "` cannot take type arguments", lo, hi),
+          TyError)
+      }
+      return (cx, v)
+    }
+    None -> ()
+  }
+  match map.get(cx.aliases, name) {
+    Some(al) -> {
+      if len(targs) != len(al.tparams) {
+        return (cerr(cx, "`" ++ al.name ++ "` takes " ++ to_string(len(al.tparams)) ++
+            " type parameter(s), got " ++ to_string(len(targs)), lo, hi), TyError)
+      }
+      let (cx1, target) = resolve_alias_target(cx, al, lo, hi)
+      if target == TyError { return (cx1, TyError) }
+      if len(al.tparams) == 0 { return (cx1, target) }
+      var cx2 = cx1
+      var m: Map[Int, Ty] = map.empty()
+      var i = 0
+      for v in al.tparams {
+        match v {
+          TyVar(_, id) -> {
+            let (cx3, at) = resolve_type(cx2, targs[i])
+            cx2 = cx3
+            m = map.insert(m, id, at)
+          }
+          _ -> ()
+        }
+        i = i + 1
+      }
+      let em: Map[Int, Eff] = map.empty()
+      return (cx2, subst(target, m, em))
+    }
+    None -> ()
+  }
+  if name == "List" {
+    if len(targs) != 1 {
+      return (cerr(cx, "List takes exactly one type argument: List[T]", lo, hi), TyError)
+    }
+    let (cx1, e) = resolve_type(cx, targs[0])
+    return (cx1, TyList(e))
+  }
+  if name == "Map" {
+    if len(targs) != 2 {
+      return (cerr(cx, "Map takes exactly two type arguments: Map[K, V]", lo, hi), TyError)
+    }
+    let (cx1, k) = resolve_type(cx, targs[0])
+    let cx2 = check_key_type(cx1, k, t_lo2(targs[0]), t_hi2(targs[0]))
+    let (cx3, v) = resolve_type(cx2, targs[1])
+    return (cx3, TyMap(k, v))
+  }
+  if name == "Set" {
+    if len(targs) != 1 {
+      return (cerr(cx, "Set takes exactly one type argument: Set[T]", lo, hi), TyError)
+    }
+    let (cx1, e) = resolve_type(cx, targs[0])
+    let cx2 = check_key_type(cx1, e, t_lo2(targs[0]), t_hi2(targs[0]))
+    return (cx2, TySet(e))
+  }
+  match ty_named(name) {
+    Some(t) -> {
+      if len(targs) > 0 {
+        return (cerr(cx, "`" ++ name ++ "` is not generic", lo, hi), TyError)
+      }
+      return (cx, t)
+    }
+    None -> ()
+  }
+  match map.get(cx.java_classes, name) {
+    Some(fqcn) -> {
+      if len(targs) > 0 {
+        return (cerr(cx, "Java types take no type arguments (generics are erased)", lo, hi),
+          TyError)
+      }
+      let j = unsafe_pure { class_info(fqcn) }
+      return (cx, TyJava(fqcn, j.display))
+    }
+    None -> ()
+  }
+  match map.get(cx.adts_by_name, name) {
+    None -> {
+      let pool = map.keys(cx.adts_by_name) ++ map.keys(cx.aliases) ++
+        map.keys(cx.java_classes) ++ builtin_type_names()
+      let hint = match suggest.hint(name, pool) {
+        Some(h) -> h
+        None -> "builtin types: Int, Float, Bool, String, Unit, List — or declare `type " ++
+          name ++ " = ...`"
+      }
+      (cerr_h(cx, "unknown type: " ++ name, lo, hi, hint), TyError)
+    }
+    Some(aid) -> {
+      let info = adt_of(cx.adts, aid)
+      if len(targs) != len(info.tparams) {
+        return (cerr(cx, "`" ++ info.name ++ "` takes " ++ to_string(len(info.tparams)) ++
+            " type parameter(s), got " ++ to_string(len(targs)), lo, hi), TyError)
+      }
+      var cx1 = cx
+      var args: List[Ty] = []
+      for a in targs {
+        let (cx2, t) = resolve_type(cx1, a)
+        cx1 = cx2
+        args = args ++ [t]
+      }
+      (cx1, TyAdt(aid, args))
+    }
+  }
+}
+
+# ---- tests ----
+
+fn test_cx() -> Cx = cx_new(None, None)
+
+test "scalar and container types resolve" {
+  let cx = test_cx()
+  let (cx1, t) = resolve_type(cx, TNamed("Int", [], 0, 3))
+  assert t == TyInt
+  let (cx2, t2) = resolve_type(cx1,
+    TNamed("Map", [TNamed("Int", [], 4, 7), TNamed("String", [], 9, 15)], 0, 16))
+  assert t2 == TyMap(TyInt, TyString)
+  assert len(cx2.diags) == 0
+}
+
+test "a float map key is rejected once per type" {
+  let cx = test_cx()
+  let (cx1, t) = resolve_type(cx,
+    TNamed("Map", [TNamed("Float", [], 4, 9), TNamed("Int", [], 11, 14)], 0, 15))
+  assert t == TyMap(TyFloat, TyInt)
+  assert len(cx1.diags) == 1
+  assert str.contains(cx1.diags[0].msg, "cannot be part of a Map/Set key type")
+  # the same offending key type reports only once
+  let (cx2, _) = resolve_type(cx1,
+    TNamed("Map", [TNamed("Float", [], 24, 29), TNamed("Int", [], 31, 34)], 20, 35))
+  assert len(cx2.diags) == 1
+}
+
+test "unknown types get suggestions" {
+  let cx = test_cx()
+  let (cx1, t) = resolve_type(cx, TNamed("Strin", [], 0, 5))
+  assert t == TyError
+  assert cx1.diags[0].msg == "unknown type: Strin"
+  assert cx1.diags[0].hint == "did you mean `String`?"
+}
+
+test "effects intern per signature" {
+  let cx = test_cx()
+  let (cx1, e1) = resolve_eff(cx, ["e"])
+  let (cx2, e2) = resolve_eff(cx1, ["e"])
+  assert e1 == e2
+  let (cx3, e3) = resolve_eff(cx2, ["io"])
+  assert e3 == EIo
+  let (cx4, e4) = resolve_eff(cx3, ["e", "f"])
+  assert eff_suffix(e4) == " !(e|f)"
+}
+
+test "declare and lookup with scope discipline" {
+  var cx = push_scope(test_cx())
+  let (cx1, id) = declare(cx, "x", TyInt, false, 0, 1)
+  assert lookup(cx1, "x") == Some(id)
+  assert sym_of(cx1, id).ty == TyInt
+  # re-binding in the same scope errors
+  let (cx2, id2) = declare(cx1, "x", TyBool, false, 2, 3)
+  assert len(cx2.diags) == 1
+  # a nested block may reuse the name
+  var cx3 = push_scope(cx2)
+  let (cx4, id3) = declare(cx3, "x", TyString, false, 4, 5)
+  assert len(cx4.diags) == 1
+  assert sym_of(cx4, lookup(cx4, "x").expect("bound")).ty == TyString
+  let cx5 = pop_scope(cx4)
+  # the erroring re-declaration still overwrote the outer binding (Kotlin does too)
+  assert sym_of(cx5, lookup(cx5, "x").expect("bound")).ty == TyBool
+}
