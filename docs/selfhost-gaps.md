@@ -278,10 +278,18 @@ lowering 一刀、四刀与树的对应一页图，并穷举核对 `ast/Ast.kt` 
    （builtins→std 的第一个有据例外，判据记入 builtins-to-stdlib.md 补记）；
    新原语 `cursor_skip` 消掉 split 曾默许的那次游标算术。
 8. **定夺记录**（design.md D10）：match 箭头 / 否定三写法 / `..` 三用维持现状并归档。
-9. **stdlib 命名定夺**（[`stdlib-naming.md`](stdlib-naming.md)）：平铺名**永久有效**，
-   改名成本爆炸的风险就地消解；限定式组织是纯增量后续，不阻塞自举。
+9. **stdlib 命名定夺**（[`stdlib-naming.md`](stdlib-naming.md)）：初版「平铺名永久
+   有效」当日被否决——**要优雅，接受破坏性更新**。改定破坏性路线：std 收进真模块
+   （`use std/map` → `map.insert(...)`，热名选择性引入），平铺前缀名分两版退役。
+   实施单列为 **P0.7**（见下），仍在自举 P1 之前。
 10. 发版 v0.3.0（破坏性：`alias`/`break`/`continue` 成关键字、cursor 家族签名换
     `Cursor`），backend-dawn 同步迁移。
+
+### P0.7 · stdlib 破坏性重组为模块限定式（设计已定稿，待实施）
+
+设计与实施清单见 [`stdlib-naming.md`](stdlib-naming.md)：捆绑 std 可 `use`、顶层遮蔽
+内建改合法（Rust 式）、键类型检查改挂类型实例化处；v0.4.0 双拼写弃用过渡 →
+v0.5.0 删平铺名，两仓一次迁清。自举编译器直接用新拼写书写，故必须在 P1 之前。
 
 ### P1 · 第一刀：Lexer（试水）
 
