@@ -8,6 +8,7 @@ import dawn.ast.TypeDecl
 import dawn.check.AdtInfo
 import dawn.check.AnalyzedProgram
 import dawn.check.BUILTINS
+import dawn.check.FnSig
 import dawn.check.StdLib
 import dawn.check.analyzeProject
 import dawn.diag.DiagnosticSink
@@ -243,23 +244,30 @@ val BUILTIN_GROUPS: List<Pair<String, List<Pair<String, String>>>> = listOf(
  * happens to sit on today — functions migrate from the table into std
  * (docs/builtins-to-stdlib.md), and a reference keyed on the implementation
  * would lose an entry every time one moved. std groups are named after their
- * module (`std/strings`) and take their prose from the `##` doc comments.
+ * module (`std/str`) and take their prose from the `##` doc comments.
  */
+private class DocFn(val name: String, val doc: String, val sig: FnSig?)
+
 private fun builtinsJson(): String {
+    val builtinGroups = BUILTIN_GROUPS.map { (g, fns) ->
+        g to fns.map { (name, doc) -> DocFn(name, doc, null) }
+    }
     val w = JsonWriter()
     w.obj {
         w.key("groups")
-        w.arr(BUILTIN_GROUPS.map { (g, fns) -> g to fns } + stdGroups()) { (group, fns) ->
+        w.arr(builtinGroups + stdGroups()) { (group, fns) ->
             w.obj {
                 w.field("name", group)
                 w.key("fns")
-                w.arr(fns) { (name, doc) ->
-                    val sig = BUILTINS[name] ?: StdLib.fns[name]
-                        ?: throw CliError("the builtin reference names an unknown function: $name")
+                w.arr(fns) { f ->
+                    // std entries carry their module's own signature — the flat
+                    // surface cannot resolve short names that repeat across modules
+                    val sig = f.sig ?: BUILTINS[f.name] ?: StdLib.fns[f.name]
+                        ?: throw CliError("the builtin reference names an unknown function: ${f.name}")
                     w.obj {
-                        w.field("name", name)
+                        w.field("name", f.name)
                         w.field("sig", sig.render())
-                        w.field("doc", doc)
+                        w.field("doc", f.doc)
                     }
                 }
             }
@@ -269,11 +277,11 @@ private fun builtinsJson(): String {
 }
 
 /** one group per bundled std module, in index order */
-private fun stdGroups(): List<Pair<String, List<Pair<String, String>>>> =
+private fun stdGroups(): List<Pair<String, List<DocFn>>> =
     StdLib.modules.map { m ->
         val byLine = commentsByLine(m.source)
         m.modPath to m.module.decls.filterIsInstance<FnDecl>().filter { it.pub }.map { d ->
-            d.name to (docOf(m.source, byLine, d) ?: "")
+            DocFn(d.name, docOf(m.source, byLine, d) ?: "", m.exports.fns[d.name])
         }
     }
 

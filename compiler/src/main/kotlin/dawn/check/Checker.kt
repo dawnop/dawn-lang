@@ -1338,7 +1338,9 @@ class Checker(
                 e.symbol = sym
                 sym.type
             } else {
-                val f = fns[e.name] ?: stdFns[e.name] ?: BUILTINS[e.name]
+                val f = fns[e.name]
+                    ?: stdFns[e.name]?.also { warnDeprecatedStd(e.name, e.span) }
+                    ?: BUILTINS[e.name]?.also { warnDeprecatedBuiltin(e.name, e.span) }
                 if (f != null) checkFnValue(e, f, expected)
                 else error("undefined variable: ${e.name}", e.span,
                     Suggest.hint(e.name, localNames() + fns.keys + stdFns.keys + BUILTINS.keys))
@@ -1923,6 +1925,24 @@ class Checker(
     /** one report per offending key type per module — the annotation and every seeded call site would otherwise repeat it */
     private val reportedKeyTypes = HashSet<String>()
 
+    /** the bundled std is exempt from its own deprecation warnings */
+    private val isStdModule = ownerClass == "std" || ownerClass?.startsWith("std/") == true
+
+    /** one deprecation warning per name per module — repeats would drown the build output */
+    private val warnedDeprecated = HashSet<String>()
+
+    /** v0.4.0 transition (docs/stdlib-naming.md): a non-prelude std name resolved implicitly */
+    private fun warnDeprecatedStd(name: String, span: Span) {
+        if (isStdModule || name in StdLib.PRELUDE || !warnedDeprecated.add(name)) return
+        sink.warn("implicit `$name` is deprecated and will be removed in v0.5.0", span, StdLib.MOVED[name])
+    }
+
+    /** v0.4.0 transition: a deprecated flat builtin spelling (the map_, set_, cursor_ families) */
+    private fun warnDeprecatedBuiltin(name: String, span: Span) {
+        if (isStdModule || name !in StdLib.DEPRECATED_BUILTINS || !warnedDeprecated.add(name)) return
+        sink.warn("`$name` is deprecated and will be removed in v0.5.0", span, StdLib.MOVED[name])
+    }
+
     private fun checkKeyType(keyT: Type, span: Span) {
         if (keyT.isErrorish) return
         val bad = invalidKeyPart(keyT) ?: return
@@ -1979,7 +1999,9 @@ class Checker(
             recordEffect(lt.eff, e.calleeSpan, e.callee)
             return lt.ret
         }
-        val sig = resolvedSig ?: fns[e.callee] ?: stdFns[e.callee] ?: BUILTINS[e.callee]
+        val sig = resolvedSig ?: fns[e.callee]
+            ?: stdFns[e.callee]?.also { warnDeprecatedStd(e.callee, e.calleeSpan) }
+            ?: BUILTINS[e.callee]?.also { warnDeprecatedBuiltin(e.callee, e.calleeSpan) }
         if (sig == null) {
             // still check the arguments so their subtrees get types/symbols
             for (arg in e.args) typeArg(arg)

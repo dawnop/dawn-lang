@@ -103,6 +103,11 @@ class DiagnosticSink {
         list.add(Diagnostic(message, span, hint, Severity.ERROR))
     }
 
+    /** Warnings render like errors but never fail a build (the CLI counts only errors). */
+    fun warn(message: String, span: Span, hint: String? = null) {
+        list.add(Diagnostic(message, span, hint, Severity.WARNING))
+    }
+
     fun add(d: Diagnostic) {
         list.add(d)
     }

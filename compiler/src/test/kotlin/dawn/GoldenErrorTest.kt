@@ -50,8 +50,12 @@ class GoldenErrorTest {
         return cases.map { case ->
             DynamicTest.dynamicTest(case.name) {
                 val (actual, hasError) = render(case)
-                check(hasError) {
+                // warning-only cases (name them warn_*) are allowed; anything else must error
+                check(hasError || case.name.startsWith("warn_")) {
                     "${case.name}: a golden error case must produce at least one error, but analysis was clean"
+                }
+                check(actual.isNotEmpty()) {
+                    "${case.name}: a golden case must produce at least one diagnostic, but analysis was clean"
                 }
                 val expected = File(case.parentFile, case.nameWithoutExtension + ".err")
                 if (update) {

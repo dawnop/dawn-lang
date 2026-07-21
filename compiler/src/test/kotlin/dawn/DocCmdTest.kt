@@ -125,6 +125,6 @@ class DocCmdTest {
         // it must still read as an ordinary reference entry, signature and all.
         assertFalse(BUILTINS.containsKey("substring"), "substring should no longer be a builtin")
         assertTrue(out.contains("\"sig\": \"fn substring(s: String, from: Int, to: Int) -> String\""), out)
-        assertTrue(out.contains("\"name\": \"std/strings\""), out)
+        assertTrue(out.contains("\"name\": \"std/str\""), out)
     }
 }

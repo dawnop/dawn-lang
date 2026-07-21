@@ -57,11 +57,11 @@ class StdModuleImportTest {
     fun `a std module can be imported and called qualified`() {
         val out = run(
             """
-            use std/strings
+            use std/str
 
             pub fn main() -> Unit !io = {
-              println(strings.trim("  x  "))
-              println("${'$'}{strings.str_len("héllo")}")
+              println(str.trim("  x  "))
+              println("${'$'}{str.len("héllo")}")
             }
             """.trimIndent(),
         )
@@ -72,7 +72,7 @@ class StdModuleImportTest {
     fun `selective import pulls a std name into scope`() {
         val out = run(
             """
-            use std/strings.{to_upper}
+            use std/str.{to_upper}
 
             pub fn main() -> Unit !io = println(to_upper("ab"))
             """.trimIndent(),
@@ -99,9 +99,9 @@ class StdModuleImportTest {
         File(dir, "src").mkdirs()
         File(dir, "src/main.dawn").writeText(
             """
-            use std/strings
+            use std/str
 
-            pub fn main() -> Unit !io = println(strings.to_upper("ok"))
+            pub fn main() -> Unit !io = println(str.to_upper("ok"))
             """.trimIndent(),
         )
         val program = analyzeProject(dir)
@@ -137,14 +137,30 @@ class StdModuleImportTest {
     }
 
     @Test
+    fun `comptime resolves same-named std fns by owning module`() {
+        val out = run(
+            """
+            use std/str
+            use std/list
+
+            const A: String = str.reverse("abc")
+            const B: List[Int] = list.reverse([1, 2, 3])
+
+            pub fn main() -> Unit !io = println("${'$'}{A} ${'$'}{B}")
+            """.trimIndent(),
+        )
+        assertEquals("cba [3, 2, 1]\n", out)
+    }
+
+    @Test
     fun `a private std helper is not importable`() {
         val errs = errorsOf(
             """
-            use std/strings.{chars_go}
+            use std/str.{chars_go}
 
             pub fn main() -> Unit !io = println("x")
             """.trimIndent(),
         )
-        assertTrue(errs.any { it.contains("private to module `std/strings`") }, "got: $errs")
+        assertTrue(errs.any { it.contains("private to module `std/str`") }, "got: $errs")
     }
 }

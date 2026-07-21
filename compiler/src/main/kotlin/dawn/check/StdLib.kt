@@ -67,6 +67,53 @@ object StdLib {
     }
 
     /**
+     * The std names that stay implicitly visible without a `use` — the prelude's
+     * std half (docs/stdlib-naming.md). Every other std name is deprecated as an
+     * implicit global in v0.4.0 and needs its module from v0.5.0 on.
+     */
+    val PRELUDE: Set<String> = setOf("println", "print", "map", "filter", "fold")
+
+    /**
+     * The builtin table's deprecated flat spellings (v0.4.0 warns, v0.5.0 hides
+     * them from user code): the container and cursor families, whose public
+     * spelling is now module-qualified.
+     */
+    val DEPRECATED_BUILTINS: Set<String> = buildSet {
+        for (op in listOf("empty", "from", "insert", "remove", "get", "has", "size", "keys", "values", "entries"))
+            add("map_$op")
+        for (op in listOf("empty", "from", "insert", "remove", "has", "size", "to_list")) add("set_$op")
+        for (op in listOf("start", "end", "done", "char", "next", "prev", "slice", "skip")) add("cursor_$op")
+        add("index_of_from")
+    }
+
+    /**
+     * Deprecated flat spelling → how to write it now. Fed to the v0.4.0
+     * deprecation warnings and, from v0.5.0, to unknown-name error hints.
+     */
+    val MOVED: Map<String, String> by lazy {
+        val out = HashMap<String, String>()
+        for (m in modules) {
+            if (m.modPath == "std/legacy") continue
+            val alias = m.modPath.substringAfterLast('/')
+            for (n in m.exports.fns.keys) {
+                if (n !in PRELUDE) out[n] = "use ${m.modPath}, then $alias.$n(...)"
+            }
+        }
+        fun ren(old: String, mod: String, new: String) {
+            out[old] = "use std/$mod, then $mod.$new(...)"
+        }
+        ren("str_len", "str", "len"); ren("char_to_string", "str", "from_char"); ren("reverse_str", "str", "reverse")
+        ren("byte_len", "bytes", "len"); ren("byte_at", "bytes", "at")
+        ren("byte_slice", "bytes", "slice"); ren("byte_index_of", "bytes", "index_of")
+        for (op in listOf("empty", "from", "insert", "remove", "get", "has", "size", "keys", "values", "entries"))
+            ren("map_$op", "map", op)
+        for (op in listOf("empty", "from", "insert", "remove", "has", "size", "to_list")) ren("set_$op", "set", op)
+        for (op in listOf("start", "end", "done", "char", "next", "prev", "slice", "skip")) ren("cursor_$op", "cursor", op)
+        ren("index_of_from", "cursor", "find")
+        out
+    }
+
+    /**
      * The std function *declarations*, for the compile-time interpreter: a const
      * initializer may call std, so [dawn.check.ComptimeInterp] needs the bodies,
      * not just the signatures [fns] carries.
@@ -85,12 +132,24 @@ object StdLib {
     }
 
     /**
-     * The implicitly-visible function surface: every `pub fn` of every std module.
-     * A later module wins on a duplicate name, which the index order makes explicit.
+     * The implicitly-visible function surface — pinned to the v0.3 *flat* names
+     * (docs/stdlib-naming.md). The short module-qualified spellings born in the
+     * P0.7 reorganization (str.len, bytes.at, map.insert, ...) are reachable only
+     * through `use std/x`: letting them into this flat view would shadow builtins
+     * (`len`, `get`) and each other. The whole non-prelude half of this surface
+     * is deprecated in v0.4.0 and gone in v0.5.0.
      */
     val fns: Map<String, FnSig> by lazy {
         val out = LinkedHashMap<String, FnSig>()
-        for (m in modules) out.putAll(m.exports.fns)
+        for (m in modules) {
+            val hidden = when (m.modPath) {
+                "std/map", "std/set", "std/cursor" -> null // qualified-only, born after the flat era
+                "std/str" -> setOf("len", "from_char", "reverse") // renamed; legacy carries the old spellings
+                "std/bytes" -> setOf("len", "at", "slice", "index_of")
+                else -> emptySet()
+            }
+            if (hidden != null) for ((n, s) in m.exports.fns) if (n !in hidden) out[n] = s
+        }
         out
     }
 

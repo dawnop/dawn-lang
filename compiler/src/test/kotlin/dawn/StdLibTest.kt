@@ -60,7 +60,7 @@ class StdLibTest {
         // a broken bundled std throws on first touch; reaching here means it checked
         assertTrue(StdLib.modules.isNotEmpty(), "expected at least one bundled std module")
         assertTrue(StdLib.fns.containsKey("is_empty"), "std should export is_empty; got ${StdLib.fns.keys}")
-        assertEquals("std/strings", StdLib.modules.first().className)
+        assertEquals("std/str", StdLib.modules.first().className)
     }
 
     @Test
