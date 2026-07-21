@@ -692,3 +692,342 @@ test "declare and lookup with scope discipline" {
   # the erroring re-declaration still overwrote the outer binding (Kotlin does too)
   assert sym_of(cx5, lookup(cx5, "x").expect("bound")).ty == TyBool
 }
+
+# ---- assignability, unification, printability ----
+
+## Can `t` be used where `target` is expected? (Never/TyError as anything;
+## a pure fn where an io fn is wanted.)
+pub fn assignable(cx: Cx, t: Ty, target: Ty) -> Bool = {
+  if t == target || is_errorish(t) || target == TyError { return true }
+  match t {
+    TyFn(ps, r, e) ->
+      match target {
+        TyFn(tps, tr, te) ->
+          ps == tps && assignable(cx, r, tr) && (te == EIo || e == EPure || e == te)
+        _ -> false
+      }
+    _ -> false
+  }
+}
+
+## Unify branch types (Never and TyError are absorbed); errors mention `what`.
+pub fn unify_branches(cx: Cx, a: Ty, b: Ty, lo: Int, hi: Int, what: String) -> (Cx, Ty) = {
+  if a == TyNever || a == TyError { return (cx, b) }
+  if b == TyNever || b == TyError { return (cx, a) }
+  if a == b { return (cx, a) }
+  (cerr(cx, what ++ " have mismatched types: " ++ ty_show(cx.adts, a) ++ " vs " ++
+      ty_show(cx.adts, b), lo, hi), TyError)
+}
+
+## Structural unification of a declared type against an actual argument type,
+## accumulating bindings (var id → type / effect). Returns the updated maps and
+## whether the shapes agreed.
+pub fn unify_into(
+  cx: Cx,
+  declared: Ty,
+  actual: Ty,
+  m: Map[Int, Ty],
+  em: Map[Int, Eff]
+) -> (Map[Int, Ty], Map[Int, Eff], Bool) = {
+  if is_errorish(actual) { return (m, em, true) }
+  match declared {
+    TyVar(_, id) ->
+      match map.get(m, id) {
+        None -> (map.insert(m, id, actual), em, true)
+        Some(bound) -> (m, em, bound == actual)
+      }
+    TyAdt(aid, dargs) ->
+      match actual {
+        TyAdt(aid2, aargs) -> {
+          if aid != aid2 { return (m, em, false) }
+          var m1 = m
+          var em1 = em
+          var ok = true
+          var i = 0
+          for d in dargs {
+            match get(aargs, i) {
+              Some(a) -> {
+                let (m2, em2, ok2) = unify_into(cx, d, a, m1, em1)
+                m1 = m2
+                em1 = em2
+                if not ok2 { ok = false }
+              }
+              None -> { ok = false }
+            }
+            i = i + 1
+          }
+          (m1, em1, ok)
+        }
+        _ -> (m, em, false)
+      }
+    TyList(d) ->
+      match actual {
+        TyList(a) -> unify_into(cx, d, a, m, em)
+        _ -> (m, em, false)
+      }
+    TyMap(dk, dv) ->
+      match actual {
+        TyMap(ak, av) -> {
+          let (m1, em1, ok1) = unify_into(cx, dk, ak, m, em)
+          let (m2, em2, ok2) = unify_into(cx, dv, av, m1, em1)
+          (m2, em2, ok1 && ok2)
+        }
+        _ -> (m, em, false)
+      }
+    TySet(d) ->
+      match actual {
+        TySet(a) -> unify_into(cx, d, a, m, em)
+        _ -> (m, em, false)
+      }
+    TyTuple(delems) ->
+      match actual {
+        TyTuple(aelems) -> {
+          if len(delems) != len(aelems) { return (m, em, false) }
+          var m1 = m
+          var em1 = em
+          var ok = true
+          var i = 0
+          for d in delems {
+            let (m2, em2, ok2) = unify_into(cx, d, aelems[i], m1, em1)
+            m1 = m2
+            em1 = em2
+            if not ok2 { ok = false }
+            i = i + 1
+          }
+          (m1, em1, ok)
+        }
+        _ -> (m, em, false)
+      }
+    TyFn(dps, dr, de) ->
+      match actual {
+        TyFn(aps, ar, ae) -> {
+          if len(dps) != len(aps) { return (m, em, false) }
+          var m1 = m
+          var em1 = em
+          var ok = true
+          var i = 0
+          for d in dps {
+            let (m2, em2, ok2) = unify_into(cx, d, aps[i], m1, em1)
+            m1 = m2
+            em1 = em2
+            if not ok2 { ok = false }
+            i = i + 1
+          }
+          let (m3, em3, ok3) = unify_into(cx, dr, ar, m1, em1)
+          let (em4, ok4) = unify_eff(de, ae, em3)
+          (m3, em4, ok && ok3 && ok4)
+        }
+        _ -> (m, em, false)
+      }
+    _ -> (m, em, declared == actual)
+  }
+}
+
+## Effect side of unification: pure ⊑ io; declared variables accumulate a lub.
+pub fn unify_eff(declared: Eff, actual: Eff, em: Map[Int, Eff]) -> (Map[Int, Eff], Bool) =
+  match declared {
+    EPure -> (em, actual == EPure)
+    EIo -> (em, true)
+    EffVar(_, id) -> {
+      let prev = match map.get(em, id) {
+        Some(p) -> p
+        None -> EPure
+      }
+      (map.insert(em, id, lub_eff(prev, actual)), true)
+    }
+    # a union in a declared parameter position is not inferred into; accept when
+    # the actual is already subsumed
+    EUnion(_) -> (em, eff_subsumes(subst_eff(declared, em), actual))
+  }
+
+## A rigid type parameter of the enclosing declaration is a known type; only a
+## callee's still-unbound inference variables are not.
+pub fn is_concrete(cx: Cx, t: Ty) -> Bool =
+  match t {
+    TyVar(_, id) -> {
+      for v in map.values(cx.current_tparams) {
+        match v {
+          TyVar(_, id2) -> if id2 == id { return true }
+          _ -> ()
+        }
+      }
+      false
+    }
+    TyAdt(_, targs) -> {
+      for a in targs {
+        if not is_concrete(cx, a) { return false }
+      }
+      true
+    }
+    TyList(e) -> is_concrete(cx, e)
+    TyMap(k, v) -> is_concrete(cx, k) && is_concrete(cx, v)
+    TySet(e) -> is_concrete(cx, e)
+    TyTuple(elems) -> {
+      for a in elems {
+        if not is_concrete(cx, a) { return false }
+      }
+      true
+    }
+    _ -> true
+  }
+
+## Does the type contain a function anywhere? (functions cannot be compared)
+pub fn contains_fn(t: Ty) -> Bool =
+  match t {
+    TyFn(_, _, _) -> true
+    TyTuple(elems) -> {
+      for e in elems {
+        if contains_fn(e) { return true }
+      }
+      false
+    }
+    TyList(e) -> contains_fn(e)
+    TyMap(k, v) -> contains_fn(k) || contains_fn(v)
+    TySet(e) -> contains_fn(e)
+    _ -> false
+  }
+
+## A concrete type is printable now: primitives, containers/ADTs of printable types.
+pub fn is_showable(cx: Cx, t: Ty) -> Bool =
+  match t {
+    TyInt | TyFloat | TyBool | TyString | TyBytes -> true
+    TyList(e) -> is_showable(cx, e)
+    TyMap(k, v) -> is_showable(cx, k) && is_showable(cx, v)
+    TySet(e) -> is_showable(cx, e)
+    TyTuple(elems) -> {
+      for e in elems {
+        if not is_showable(cx, e) { return false }
+      }
+      true
+    }
+    TyAdt(aid, targs) -> {
+      if not adt_of(cx.adts, aid).derives_show { return false }
+      for a in targs {
+        if not is_showable(cx, a) { return false }
+      }
+      true
+    }
+    _ -> false
+  }
+
+## A field type may derive Show: like is_showable but type parameters pass.
+pub fn is_showable_field(cx: Cx, t: Ty) -> Bool =
+  match t {
+    TyInt | TyFloat | TyBool | TyString | TyBytes | TyVar(_, _) -> true
+    TyList(e) -> is_showable_field(cx, e)
+    TyMap(k, v) -> is_showable_field(cx, k) && is_showable_field(cx, v)
+    TySet(e) -> is_showable_field(cx, e)
+    TyTuple(elems) -> {
+      for e in elems {
+        if not is_showable_field(cx, e) { return false }
+      }
+      true
+    }
+    TyAdt(aid, targs) -> {
+      if not adt_of(cx.adts, aid).derives_show { return false }
+      for a in targs {
+        if not is_showable_field(cx, a) { return false }
+      }
+      true
+    }
+    _ -> false
+  }
+
+## A targeted hint for why `t` is not printable.
+pub fn show_hint(cx: Cx, t: Ty) -> String =
+  match t {
+    TyAdt(aid, _) -> {
+      let a = adt_of(cx.adts, aid)
+      if not a.derives_show {
+        "add `derive Show` to `type " ++ a.name ++ "`"
+      } else {
+        "one of its type arguments is not printable"
+      }
+    }
+    TyVar(_, _) -> "a type parameter is not printable; require a concrete printable type"
+    TyFn(_, _, _) -> "functions cannot be printed"
+    _ -> "printable types are Int, Float, Bool, String, and `derive Show` values"
+  }
+
+## Int/Float/Bool/String and List/tuple/record/ADT built from them (spec §7.2).
+pub fn is_const_serializable(cx: Cx, t: Ty, visited: Set[Int]) -> Bool =
+  match t {
+    TyInt | TyFloat | TyBool | TyString -> true
+    TyList(e) -> is_const_serializable(cx, e, visited)
+    TyTuple(elems) -> {
+      for e in elems {
+        if not is_const_serializable(cx, e, visited) { return false }
+      }
+      true
+    }
+    TyAdt(aid, targs) -> {
+      # recursive types terminate here
+      if set.has(visited, aid) { return true }
+      let v2 = set.insert(visited, aid)
+      let a = adt_of(cx.adts, aid)
+      var m: Map[Int, Ty] = map.empty()
+      var i = 0
+      for tp in a.tparams {
+        match tp {
+          TyVar(_, id) ->
+            match get(targs, i) {
+              Some(arg) -> { m = map.insert(m, id, arg) }
+              None -> ()
+            }
+          _ -> ()
+        }
+        i = i + 1
+      }
+      for a2 in targs {
+        if not is_const_serializable(cx, a2, v2) { return false }
+      }
+      let em: Map[Int, Eff] = map.empty()
+      for c in a.ctors {
+        for f in c.fields {
+          if not is_const_serializable(cx, subst(f.ty, m, em), v2) { return false }
+        }
+      }
+      true
+    }
+    _ -> false
+  }
+
+# ---- tests (slice 2) ----
+
+test "assignability admits pure where io is wanted" {
+  let cx = test_cx()
+  assert assignable(cx, TyFn([TyInt], TyInt, EPure), TyFn([TyInt], TyInt, EIo))
+  assert not assignable(cx, TyFn([TyInt], TyInt, EIo), TyFn([TyInt], TyInt, EPure))
+  assert assignable(cx, TyNever, TyInt)
+  assert not assignable(cx, TyInt, TyBool)
+}
+
+test "unification binds and checks variables" {
+  let cx = test_cx()
+  let t = TyVar("T", 100)
+  let m0: Map[Int, Ty] = map.empty()
+  let em0: Map[Int, Eff] = map.empty()
+  let (m1, em1, ok1) = unify_into(cx, TyList(t), TyList(TyInt), m0, em0)
+  assert ok1
+  assert map.get(m1, 100) == Some(TyInt)
+  # a second, conflicting binding fails
+  let (m2, em2, ok2) = unify_into(cx, t, TyBool, m1, em1)
+  assert not ok2
+  # effect variables accumulate a lub
+  let e = EffVar("e", 101)
+  let (m3, em3, ok3) = unify_into(cx, TyFn([t], TyUnit, e), TyFn([TyInt], TyUnit, EIo), m1, em1)
+  assert ok3
+  assert map.get(em3, 101) == Some(EIo)
+}
+
+test "printability and const-serializability" {
+  let cx = test_cx()
+  assert is_showable(cx, TyList(TyInt))
+  assert is_showable(cx, opt_ty(TyString))
+  assert not is_showable(cx, TyFn([], TyUnit, EPure))
+  assert not is_showable(cx, TyUnit)
+  assert is_const_serializable(cx, opt_ty(TyTuple([TyInt, TyString])), set.empty())
+  assert not is_const_serializable(cx, TyMap(TyInt, TyInt), set.empty())
+  assert not is_const_serializable(cx, TyVar("T", 5), set.empty())
+  assert show_hint(cx, TyFn([], TyUnit, EPure)) == "functions cannot be printed"
+}
