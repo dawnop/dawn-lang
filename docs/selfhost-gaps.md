@@ -255,10 +255,11 @@ error: no overload of `LinkedHashMap.put` matches (Int, Int)
 3. ~~持久 Map（HAMT）~~ ✅ 已落地（2026-07-21，见 §二末）。形状 C 48742ms→10ms，
    O(n²) 消解。P0 地基三项到此清零。
 
-### P0.5 · 定 AST 架构 —— **选甲（多棵 AST）**
+### P0.5 · 定 AST 架构 —— **选甲（多棵 AST）** ✅ 草案已出
 
-在写第一行 lexer 之前定死。产出：`ParsedExpr` / `TypedExpr` 的类型定义草案，
-以及「哪一刀消费哪棵树」的一页图。
+定稿在 [`selfhost-ast.md`](selfhost-ast.md)：`Parsed*` → `Typed*` 双树、checker 是
+lowering 一刀、四刀与树的对应一页图，并穷举核对 `ast/Ast.kt` 的 44 个 `var` 槽全部有主。
+完整节点表留待 P3 随真代码收敛。
 
 ### P1 · 第一刀：Lexer（试水）
 
