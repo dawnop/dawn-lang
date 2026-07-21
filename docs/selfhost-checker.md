@@ -68,6 +68,52 @@ Dawn 侧集中到 `selfhost/src/jreflect.dawn`：
 6. Comptime 解释器（751 行；B5 的 TCO 之忧在此实测）。
 7. `__check` 金标准 + 全语料 diff 进 CI。
 
+## 五点五、通读 Checker.kt 后的移植笔记（2026-07-22，全文已读）
+
+**P3b 范围裁剪（重要决定）**：`__check` 金标准只需要「诊断 + fn 签名渲染 + const 求值」，
+都不需要 Typed 树——**P3b 不产出 TAST**，checker 内部算类型、发诊断即可；
+Typed 树（选甲的第二棵）推迟到 P4 开头（codegen 消费者出现时）再定形。
+Comptime 解释器不依赖节点注解：求值时按 checker 同款规则重解析被调名（共享 resolve 帮助函数）。
+
+**Cx 状态记录**（Kotlin Checker 的全部可变成员，`(Cx, Ty)` 线程传递，无异常控制流）：
+diags、next_id（TyVar/EffVar/adt/trait 计数）、fns/adts_by_name/aliases/ctors_by_name、
+traits_by_name/local_traits/local_impls、impl_table `Map[(Int, Ty), ImplI]`（Ty 可作键：
+全 ADT 无 Float/Bytes 字段）、module_aliases/imported_names、consts(有序)/all_const_names/
+const_cutoff、java_classes（简名→fqcn）、scopes `List[Map[String, Sym]]`、
+used_effects `List[Eff]`+eff_witness `Map[Eff, (Int, Int, String)]`（Eff 可作键）、
+current_eff_vars `Map[String, Eff]`、lambda_stack `List[{boundary, expected_ret, captures}]`
+（captures 更新 = 改写栈元素）、loop_stack `List[(Int, Int)]`（loop 标识用序号，
+hasJumps 写回改为 jump 集合：记 loop 节点 span 或索引，P4 供 codegen 查）、
+current_tparams `Map[String, Ty]`、current_fn_sig `Option[Sig]`、
+dict_syms `Map[(Int, Int), Sym]`（tvar_id×trait_id）、in_test、reported_key_types `Set[String]`、
+is_std_module。Symbol 身份=结构相等可行（同一声明位置 span 唯一）。
+
+**check() 的遍序**（诊断顺序的骨架，必须逐字节复刻）：
+prelude → java uses → processImports → 类型壳（冲突/derive 检查）→ 构造器字段类型 →
+alias 全解析 → derive Show 字段检查 → registerTraits → registerImpls（derive Ord 先行 →
+本模块 impls：subject 规则/orphan/coherence/方法匹配 → derive Ord 字段检查）→
+fn 签名（重名/遮蔽规则：本地覆盖 std/builtin 合法）→ 常量声明（类型+serializable）→
+main 检查 → 推断函数按调用依赖序 checkFnInferred（nameRefs 过近似 + 循环报错）→
+const 初始化器按声明序（checkComptimeBody：纯度检查）→ 其余 fn → impl 方法体 →
+trait 默认体 → test 块。
+
+**表达式层要点**：checkExpr=inferExpr（P3b 不写回 e.type）；needsExpected 两轮参数检查
+（含 argTypes 数组与 done 标志）；unifyInto/unifyEff（Var 累积 lub；Union 只查 subsumes）；
+checkCall 的 witness 解析（Concrete/Forward + lambda 捕获字典）；checkFnValue/checkCtorValue
+的期望型实例化；checkJavaCall 两相重载决议（Fit(phase, score)，vararg 打包在 phase 0）+
+SAM 延迟实参 + List 桥接 + mapJavaReturn（引用包 Option、String→Option[String]、
+byte[]→Option[Bytes]、char 报错）；checkUnsafePure 的效果隔离（掩 io、拒效果变量、
+拒冗余）；`!` 的 panicMsg 在 checker 生成（"unwrapped None from X at path:line"，
+需 line 表 = SourceFile.lineOf）；checkMatch 接 Exhaustive（useful/SPat）；
+checkBinary/checkIf/checkBlock/checkStmt 按源逐条。
+
+**jreflect.dawn 所需反射面**：Class.forName(名, false, loader→省略)、getMethods/
+getConstructors（数组走 reflect.Array.get/getLength）、isSynthetic/isBridge/isVarArgs/
+isInterface/isPrimitive/isArray/componentType/canonicalName、Modifier.isStatic/isAbstract、
+isAssignableFrom、getParameterTypes/getReturnType、Object 方法剔除（getMethod 探测）、
+方法/构造器 toString（错误信息里逐字打印 candidates）。resolveJavaClass 的嵌套类
+`.`→`$` 回退循环照抄。
+
 ## 六、已知硬点（提前记录）
 
 - **诊断顺序**必须与 Kotlin 完全一致——检查顺序（声明序、两遍序、表达式遍历序）
