@@ -17,7 +17,7 @@ use ast.{
   module_java_uses, module_fns, module_types, module_consts, module_traits,
   module_impls, module_tests, module_uses,
   DType, TypeDeclR, CtorDecl, FieldDecl, DTrait, TraitMethod, Param, Expr,
-  Decl, DImpl, FnDecl, EBool, DFn, EVar
+  Decl, DImpl, FnDecl, EBool, DFn, EVar, DConst, EInt
 }
 use types.{
   Ty, TyInt, TyFloat, TyBool, TyString, TyBytes, TyCursor, TyUnit, TyNever,
@@ -1125,6 +1125,8 @@ fn no_tparams() -> List[TypeParamDecl] = []
 fn no_effs() -> List[String] = []
 
 fn no_fn_decls() -> List[FnDecl] = []
+
+fn no_params2() -> List[Param] = no_params()
 
 fn no_body() -> Option[Expr] = None
 
@@ -2268,4 +2270,107 @@ test "fn signatures resolve with bounds and worst-effect inference" {
   assert sigs[1].inferring
   assert sigs[1].eff == EIo
   assert map.get(cx1.fns, "g") == Some(sigs[1])
+}
+
+## Pass 3.5: constant declarations — types only (initializers run later, after
+## signature inference). The Kotlin declareConst.
+pub fn pass_const_decls(cx: Cx, m: Module) -> Cx = {
+  var cx1 = cx
+  var all: Set[String] = set.empty()
+  for d in module_consts(m) { all = set.insert(all, d.name) }
+  cx1 = Cx { ..cx1, all_const_names: all }
+  for d in module_consts(m) {
+    if alias_shadows(cx1, d.name) {
+      cx1 = alias_shadow(cx1, d.name, d.nlo, d.nhi)
+      continue
+    }
+    if import_clashes(cx1, d.name) {
+      cx1 = import_clash(cx1, d.name, d.nlo, d.nhi, "constant")
+      continue
+    }
+    let empty_tp: Map[String, Ty] = map.empty()
+    let empty_ev: Map[String, Eff] = map.empty()
+    cx1 = Cx { ..cx1, current_tparams: empty_tp, current_eff_vars: empty_ev }
+    let (cx2, declared0) = resolve_type(cx1, d.ann)
+    cx1 = cx2
+    var declared = declared0
+    if not is_const_serializable(cx1, declared, set.empty()) && declared != TyError {
+      cx1 = cerr_h(cx1, "`" ++ ty_show(cx1.adts, declared) ++
+          "` is not a constant-serializable type", t_lo2(d.ann), t_hi2(d.ann),
+        "constants hold Int/Float/Bool/String and List/tuple/record/ADT values built from them (spec §7.2)")
+      declared = TyError
+    }
+    if map.has(cx1.ctors_by_name, d.name) || map.has(cx1.adts_by_name, d.name) ||
+      map.has(cx1.traits_by_name, d.name) {
+        cx1 = cerr(cx1, "`" ++ d.name ++ "` collides with a type, trait, or constructor name",
+          d.nlo, d.nhi)
+      } else if map.has(cx1.consts, d.name) {
+        cx1 = cerr(cx1, "constant `" ++ d.name ++ "` is defined twice", d.nlo, d.nhi)
+      } else {
+        cx1 = Cx {
+          ..cx1,
+          consts: map.insert(cx1.consts, d.name, declared),
+          const_order: cx1.const_order ++ [d.name]
+        }
+      }
+  }
+  cx1
+}
+
+## Pass 4: the entry point check (main's shape and visibility).
+pub fn pass_main_check(cx: Cx, m: Module, sigs: List[Sig]) -> Cx = {
+  var cx1 = cx
+  var i = 0
+  for d in module_fns(m) {
+    if d.name == "main" {
+      let sig = sigs[i]
+      if len(sig.param_tys) > 0 || sig.ret != TyUnit {
+        cx1 = cerr(cx1, "main must have the signature fn main() -> Unit !io", d.nlo, d.nhi)
+      }
+      if not d.is_pub {
+        cx1 = cerr_h(cx1, "main must be pub", d.nlo, d.nhi, "write pub fn main() -> Unit !io")
+      }
+    }
+    i = i + 1
+  }
+  cx1
+}
+
+test "const declarations register in order with serializability checks" {
+  let m = Module { decls: [
+    DConst("A", false, TNamed("Int", [], 9, 12), EInt(1, 15, 16), 0, 16, 6, 7),
+    DConst("B", false,
+      TNamed("Map", [TNamed("Int", [], 30, 33), TNamed("Int", [], 35, 38)], 26, 39),
+      EInt(0, 42, 43), 20, 43, 26, 27),
+    DConst("A", false, TNamed("Int", [], 55, 58), EInt(2, 61, 62), 46, 62, 52, 53)
+  ] }
+  var cx = seed_prelude(test_cx())
+  cx = pass_const_decls(cx, m)
+  assert cx.const_order == ["A", "B"]
+  assert map.get(cx.consts, "B") == Some(TyError)
+  assert len(cx.diags) == 2
+  assert str.contains(cx.diags[0].msg, "not a constant-serializable type")
+  assert cx.diags[1].msg == "constant `A` is defined twice"
+}
+
+test "main shape violations are reported" {
+  let m = Module { decls: [DFn(FnDecl {
+    is_pub: false,
+    name: "main",
+    tparams: no_tparams(),
+    params: no_params2(),
+    ret: Some(TNamed("Int", [], 20, 23)),
+    effs: ["io"],
+    body: EInt(0, 26, 27),
+    lo: 0,
+    hi: 27,
+    nlo: 3,
+    nhi: 7
+  })] }
+  var cx = seed_prelude(test_cx())
+  let (cx1, sigs, evs) = pass_fn_signatures(cx, m)
+  let cx2 = pass_main_check(cx1, m, sigs)
+  assert len(cx2.diags) == 2
+  assert cx2.diags[0].msg == "main must have the signature fn main() -> Unit !io"
+  assert cx2.diags[1].msg == "main must be pub"
 }
