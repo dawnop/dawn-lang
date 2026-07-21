@@ -99,6 +99,13 @@ class Checker(
     }
     private val lambdaStack = ArrayDeque<LambdaCtx>()
 
+    /**
+     * Loops whose body is being checked, with the lambda depth at entry: a break/
+     * continue is valid only for the innermost loop *of the same function* — a
+     * jump may not cross a lambda/local-fn boundary (spec §4.7).
+     */
+    private val loopStack = ArrayList<Pair<Stmt, Int>>()
+
     private fun recordEffect(eff: Eff, span: Span, name: String) {
         if (eff == Eff.Pure) return
         if (eff !in usedEffects) effWitness[eff] = span to name
@@ -415,6 +422,7 @@ class Checker(
         usedEffects = HashSet()
         effWitness = HashMap()
         lambdaStack.clear()
+        loopStack.clear()
         scopes.clear()
         scopes.addLast(HashMap())
         for ((p, t) in d.params.zip(old.paramTypes)) {
@@ -744,6 +752,7 @@ class Checker(
         usedEffects = HashSet()
         effWitness = HashMap()
         lambdaStack.clear()
+        loopStack.clear()
         scopes.clear()
         scopes.addLast(HashMap())
         for ((p, t) in m.params.zip(sig.paramTypes)) {
@@ -879,6 +888,7 @@ class Checker(
         val savedDicts = dictSyms
         val savedScopes = ArrayList(scopes)
         val savedLambdas = ArrayList(lambdaStack)
+        val savedLoops = ArrayList(loopStack)
         usedEffects = HashSet()
         effWitness = HashMap()
         currentFnSig = null
@@ -886,6 +896,7 @@ class Checker(
         scopes.clear()
         scopes.addLast(HashMap())
         lambdaStack.clear()
+        loopStack.clear()
         val t = try {
             checkExpr(body, expected)
         } finally {
@@ -902,6 +913,8 @@ class Checker(
             scopes.addAll(savedScopes)
             lambdaStack.clear()
             lambdaStack.addAll(savedLambdas)
+            loopStack.clear()
+            loopStack.addAll(savedLoops)
         }
         return t
     }
@@ -978,6 +991,7 @@ class Checker(
         usedEffects = HashSet()
         effWitness = HashMap()
         lambdaStack.clear()
+        loopStack.clear()
         scopes.clear()
         scopes.addLast(HashMap())
         inTest = true
@@ -1191,6 +1205,7 @@ class Checker(
         usedEffects = HashSet()
         effWitness = HashMap()
         lambdaStack.clear()
+        loopStack.clear()
         scopes.clear()
         scopes.addLast(HashMap())
         for ((p, t) in d.params.zip(sig.paramTypes)) {
@@ -1329,6 +1344,8 @@ class Checker(
         is Unwrap -> checkUnwrap(e)
         is Index -> checkIndex(e)
         is Return -> checkReturn(e)
+        is BreakExpr -> checkLoopJump(e, "break")
+        is ContinueExpr -> checkLoopJump(e, "continue")
         is ComptimeExpr -> {
             val t = checkComptimeBody(e.body, expected, what = "comptime blocks") ?: TError
             if (!isConstSerializable(t) && !t.isErrorish)
@@ -2333,6 +2350,21 @@ class Checker(
         return TNever
     }
 
+    /** break/continue — valid only inside a loop of the current function (spec §4.7) */
+    private fun checkLoopJump(e: Expr, kw: String): Type {
+        val (stmt, depth) = loopStack.lastOrNull()
+            ?: return error("`$kw` can only be used inside a loop body", e.span)
+        if (depth != lambdaStack.size)
+            return error("`$kw` cannot cross a lambda boundary to reach the loop outside", e.span,
+                "a lambda is its own function: use `return` to exit it, or restructure the loop")
+        when (stmt) {
+            is WhileStmt -> stmt.hasJumps = true
+            is ForStmt -> stmt.hasJumps = true
+            else -> {}
+        }
+        return TNever
+    }
+
     /** expr? — spec §8.1: unwrap Ok/Some, or return the Err/None from the enclosing fn */
     private fun checkPropagate(e: Propagate): Type {
         val ot = checkExpr(e.operand)
@@ -2803,7 +2835,9 @@ class Checker(
             is WhileStmt -> {
                 val ct = checkExpr(s.cond)
                 if (ct != TBool && !ct.isErrorish) sink.error("while condition must be Bool, got $ct", s.cond.span)
+                loopStack.add(s to lambdaStack.size)
                 val bt = checkExpr(s.body, expected = TUnit)
+                loopStack.removeAt(loopStack.size - 1)
                 if (bt != TUnit && !bt.isErrorish)
                     sink.error("the loop body's value is discarded ($bt)", s.body.span,
                         "the last statement of a loop body must not be a non-Unit expression")
@@ -2826,7 +2860,9 @@ class Checker(
                 }
                 scoped {
                     s.symbol = declare(s.name, loopVarType, mutable = false, s.span)
+                    loopStack.add(s to lambdaStack.size)
                     val bt = checkExpr(s.body, expected = TUnit)
+                    loopStack.removeAt(loopStack.size - 1)
                     if (bt != TUnit && !bt.isErrorish)
                         sink.error("the loop body's value is discarded ($bt)", s.body.span)
                 }

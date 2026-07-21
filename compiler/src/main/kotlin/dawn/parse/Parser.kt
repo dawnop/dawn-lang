@@ -833,6 +833,8 @@ class Parser(
                         else expression()
                 Return(v, Span(t.span.start, v?.span?.end ?: t.span.end))
             }
+            BREAK -> { advance(); BreakExpr(t.span) }
+            CONTINUE -> { advance(); ContinueExpr(t.span) }
             LBRACE -> block()
             LPAREN -> parenExpr()
             LBRACKET -> listLit()

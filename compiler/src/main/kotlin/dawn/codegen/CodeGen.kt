@@ -166,6 +166,10 @@ class CodeGen(
 
     /** return type of the method being generated (for `return` expressions) */
     private var methodRet: Type = TUnit
+    /** enclosing loops of the method being generated: (continue target, break target).
+     *  Balanced per method; pending lambdas are emitted after their enclosing method,
+     *  so the stack is empty when a lambda body starts. */
+    private val loopStack = ArrayList<Pair<Label, Label>>()
     /** lambda impls return Object — a Unit return must yield null, not a bare RETURN */
     private var methodRetsNull = false
     /** set while generating a local function's impl: self-calls go straight to the impl */
@@ -2320,7 +2324,9 @@ class CodeGen(
             mv.visitLabel(loop)
             genExpr(s.cond, tail = false)
             mv.visitJumpInsn(IFEQ, end)
+            loopStack.add(loop to end) // continue re-tests the condition
             if (genExpr(s.body, tail = false)) mv.visitJumpInsn(GOTO, loop)
+            loopStack.removeAt(loopStack.size - 1)
             mv.visitLabel(end)
             true
         }
@@ -2338,14 +2344,19 @@ class CodeGen(
         nextSlot += 2
         mv.visitVarInsn(LSTORE, endSlot)
         val loop = Label()
+        val cont = Label() // continue lands on the increment, not the test
         val end = Label()
         mv.visitLabel(loop)
         mv.visitVarInsn(LLOAD, sym.slot)
         mv.visitVarInsn(LLOAD, endSlot)
         mv.visitInsn(LCMP)
         mv.visitJumpInsn(IFGE, end)
+        loopStack.add(cont to end)
         val bodyFalls = genExpr(s.body, tail = false)
-        if (bodyFalls) {
+        loopStack.removeAt(loopStack.size - 1)
+        // the increment is reachable when the body falls through OR jumps to it
+        if (bodyFalls || s.hasJumps) {
+            mv.visitLabel(cont)
             mv.visitVarInsn(LLOAD, sym.slot)
             mv.visitInsn(LCONST_1)
             mv.visitInsn(LADD)
@@ -2370,6 +2381,7 @@ class CodeGen(
         sym.slot = nextSlot
         nextSlot += slotsOf(sym.type)
         val loop = Label()
+        val cont = Label() // continue lands on the index bump, not the test
         val end = Label()
         mv.visitLabel(loop)
         mv.visitVarInsn(ILOAD, idxSlot)
@@ -2381,8 +2393,12 @@ class CodeGen(
         mv.visitMethodInsn(INVOKEINTERFACE, JLIST, "get", "(I)L$OBJ;", true)
         unerase(sym.type)
         storeVar(sym)
+        loopStack.add(cont to end)
         val bodyFalls = genExpr(s.body, tail = false)
-        if (bodyFalls) {
+        loopStack.removeAt(loopStack.size - 1)
+        // the index bump is reachable when the body falls through OR jumps to it
+        if (bodyFalls || s.hasJumps) {
+            mv.visitLabel(cont)
             mv.visitIincInsn(idxSlot, 1)
             mv.visitJumpInsn(GOTO, loop)
         }
@@ -2426,6 +2442,9 @@ class CodeGen(
             }
             false
         }
+        // the checker guarantees these target the innermost loop of this method
+        is BreakExpr -> { mv.visitJumpInsn(GOTO, loopStack.last().second); false }
+        is ContinueExpr -> { mv.visitJumpInsn(GOTO, loopStack.last().first); false }
         is Index -> {
             genExpr(e.target, tail = false)
             genExpr(e.index, tail = false)

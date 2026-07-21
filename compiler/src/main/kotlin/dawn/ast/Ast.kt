@@ -361,6 +361,12 @@ class Index(val target: Expr, val index: Expr, span: Span) : Expr(span)
  */
 class Return(val value: Expr?, span: Span) : Expr(span)
 
+/** break — exit the innermost enclosing loop (spec §4.7). Typed Never. */
+class BreakExpr(span: Span) : Expr(span)
+
+/** continue — skip to the next iteration of the innermost enclosing loop (spec §4.7). Typed Never. */
+class ContinueExpr(span: Span) : Expr(span)
+
 /** comptime { ... } — evaluated at compile time, embedded as a constant (spec §7) */
 class ComptimeExpr(val body: Expr, span: Span) : Expr(span) {
     /** the evaluated constant, filled by comptime evaluation */
@@ -489,9 +495,14 @@ class AssertStmt(val cond: Expr, span: Span) : Stmt(span) {
     var sourceText: String? = null
 }
 
-class WhileStmt(val cond: Expr, val body: Block, span: Span) : Stmt(span)
+class WhileStmt(val cond: Expr, val body: Block, span: Span) : Stmt(span) {
+    /** the body contains a break/continue targeting this loop (set by the checker) */
+    var hasJumps = false
+}
 
 /** for name in from..to { body }, or for name in list { body } (to == null) */
 class ForStmt(val name: String, val from: Expr, val to: Expr?, val body: Block, span: Span) : Stmt(span) {
     var symbol: Symbol? = null
+    /** the body contains a break/continue targeting this loop (set by the checker) */
+    var hasJumps = false
 }

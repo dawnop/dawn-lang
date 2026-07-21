@@ -435,7 +435,10 @@ while queue.non_empty() { ... }
 ```
 
 - `for`/`while` 是 `Unit` 类型的语句，体内可用 `var` 累积。
-- 没有 `break`/`continue`（v0.1）；复杂控制流请写递归——尾递归保证成环（§12.4）。
+- `break` 退出**最内层**循环，`continue` 跳到其下一轮。二者是类型 `Never` 的表达式
+  （同 `return`，可出现在 match 臂等表达式位置）；只在循环体内合法，且**不可穿越
+  lambda/局部函数边界**去够外面的循环（lambda 是独立函数，想退出它用 `return`）。
+  无标签形式——需要多层跳出请提取函数用 `return`。comptime 循环同样支持。
 - `for x in a..b` 支持右开区间的整数范围。
 
 惯用风格优先 `map`/`filter`/`fold`；循环是给性能敏感处和口味用的。
@@ -1159,6 +1162,7 @@ test "dist is symmetric" {
 ## 14. 未来方向（明确不在 v0.1）
 
 按优先级：trait v2（条件 impl、泛型主体、supertrait、更多 derive）、
-细分效果（`!fs`、`!net`）、互递归尾调用、`break`/`continue`、
+细分效果（`!fs`、`!net`）、互递归尾调用、
 Dawn lambda 传给 Java、newtype、单态化优化、`Rune` 类型。
+（`break`/`continue` 已于 2026-07 落地，见 §4.7。）
 （trait v1——单参数 typeclass + 字典传递——已于 2026-07 落地，见 §3.5 与 trait.md。）

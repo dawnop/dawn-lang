@@ -8,7 +8,7 @@ enum class TokenType {
     // keywords
     FN, LET, VAR, TYPE, ALIAS, CONST, USE, JAVA, PUB,
     TRAIT, IMPL,
-    MATCH, IF, ELSE, FOR, IN, WHILE, RETURN,
+    MATCH, IF, ELSE, FOR, IN, WHILE, RETURN, BREAK, CONTINUE,
     COMPTIME, UNSAFE_PURE, TEST, ASSERT, TRUE, FALSE, NOT,
     // symbols
     LPAREN, RPAREN, LBRACE, RBRACE, LBRACKET, RBRACKET,
@@ -64,6 +64,7 @@ val KEYWORDS: Map<String, TokenType> = mapOf(
     "match" to TokenType.MATCH, "if" to TokenType.IF, "else" to TokenType.ELSE,
     "for" to TokenType.FOR, "in" to TokenType.IN, "while" to TokenType.WHILE,
     "return" to TokenType.RETURN,
+    "break" to TokenType.BREAK, "continue" to TokenType.CONTINUE,
     "comptime" to TokenType.COMPTIME, "unsafe_pure" to TokenType.UNSAFE_PURE,
     "test" to TokenType.TEST, "assert" to TokenType.ASSERT,
     "true" to TokenType.TRUE, "false" to TokenType.FALSE, "not" to TokenType.NOT,

@@ -63,34 +63,44 @@ impl_decl       = "impl" TYPEIDENT "[" type_expr "]"
 (* ---- 语句与块 ---- *)
 block           = "{" { stmt NEWLINE } [ expr ] "}" ;
 stmt            = let_stmt | var_stmt | assign_stmt | for_stmt | while_stmt
-                | assert_stmt | expr ;
+                | local_fn_stmt | assert_stmt | expr ;
 let_stmt        = "let" pattern [ ":" type_expr ] "=" expr ;
 var_stmt        = "var" IDENT [ ":" type_expr ] "=" expr ;
 assign_stmt     = IDENT "=" expr ;
-for_stmt        = "for" IDENT "in" expr block ;
+for_stmt        = "for" IDENT "in" expr [ ".." expr ] block ;    (* a..b 仅在 for 头 *)
 while_stmt      = "while" expr block ;
+local_fn_stmt   = "fn" IDENT "(" [ param_list ] ")" "->" type_expr [ "!" "io" ] "=" expr ;
 assert_stmt     = "assert" expr ;
 
-(* ---- 表达式, 按优先级 ---- *)
+(* ---- 表达式, 按优先级 (spec §4.3 的 13 级) ---- *)
 expr            = pipe_expr ;
 pipe_expr       = or_expr { "|>" or_expr } ;
 or_expr         = and_expr { "||" and_expr } ;
 and_expr        = cmp_expr { "&&" cmp_expr } ;
-cmp_expr        = concat_expr [ ( "==" | "!=" | "<" | "<=" | ">" | ">=" ) concat_expr ] ;
+cmp_expr        = bor_expr [ ( "==" | "!=" | "<" | "<=" | ">" | ">=" ) bor_expr ] ;
+bor_expr        = bxor_expr { "|" bxor_expr } ;              (* 按位或, 仅 Int *)
+bxor_expr       = band_expr { "^" band_expr } ;              (* 按位异或, 仅 Int *)
+band_expr       = shift_expr { "&" shift_expr } ;            (* 按位与, 仅 Int *)
+shift_expr      = concat_expr { ( "<<" | ">>" | ">>>" ) concat_expr } ;
 concat_expr     = add_expr { "++" add_expr } ;               (* 右结合 *)
 add_expr        = mul_expr { ( "+" | "-" ) mul_expr } ;
 mul_expr        = unary_expr { ( "*" | "/" | "%" ) unary_expr } ;
-unary_expr      = [ "not" | "-" ] postfix_expr ;
+unary_expr      = [ "not" | "-" | "~" ] postfix_expr ;
 postfix_expr    = primary_expr { postfix } ;
 postfix         = "?"                                        (* Result/Option 传播 *)
+                | "!"                                        (* Option 解包, None panic *)
                 | "." IDENT [ call_args ]                    (* 字段/方法 *)
+                | "[" expr "]"                               (* List/Map 下标 *)
                 | call_args ;
 call_args       = "(" [ arg { "," arg } [ "," ] ] ")" ;
 arg             = [ IDENT ":" ] expr ;                       (* 可按名传参 *)
 
 primary_expr    = literal | IDENT | ctor_expr | record_expr
                 | lambda | if_expr | match_expr
-                | comptime_expr | block | paren_or_tuple | list_lit ;
+                | return_expr | "break" | "continue"
+                | comptime_expr | unsafe_pure_expr | block | paren_or_tuple | list_lit ;
+return_expr     = "return" [ expr ] ;                        (* 类型 Never; break/continue 同 *)
+unsafe_pure_expr = "unsafe_pure" block ;
 
 literal         = INT | FLOAT | STRING | CHAR | "true" | "false" | "(" ")" ;
                   (* CHAR 是 Int 字面量的语法糖, 值 = 码点; 详见 spec §1.5 *)

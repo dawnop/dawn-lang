@@ -104,6 +104,7 @@ private fun runComptime(module: Module, sink: DiagnosticSink, fuel: Long, stdFns
                 is Propagate -> walkExpr(e.operand)
                 is Unwrap -> walkExpr(e.operand)
                 is Return -> e.value?.let(::walkExpr)
+                is BreakExpr, is ContinueExpr -> {}
                 is Index -> { walkExpr(e.target); walkExpr(e.index) }
                 is Call -> e.args.forEach(::walkExpr)
                 is CtorCall -> { e.spread?.let(::walkExpr); e.args.forEach { walkExpr(it.expr) } }
@@ -155,6 +156,8 @@ class ComptimeInterp(
 
     /** `?` unwinding to the enclosing interpreted function */
     private class EarlyReturn(val value: CValue) : RuntimeException(null, null, false, false)
+    private class BreakSignal : RuntimeException(null, null, false, false)
+    private class ContinueSignal : RuntimeException(null, null, false, false)
 
     private fun burn(span: Span) {
         if (--fuel < 0) {
@@ -206,6 +209,8 @@ class ComptimeInterp(
             }
             is MethodCall -> if (e.isJava) evalJavaCall(e, env) else eval(e.desugared!!, env)
             is Return -> throw EarlyReturn(if (e.value != null) eval(e.value, env) else CValue.VUnit)
+            is BreakExpr -> throw BreakSignal()
+            is ContinueExpr -> throw ContinueSignal()
             is Index -> {
                 val target = eval(e.target, env)
                 val i = eval(e.index, env)
@@ -384,7 +389,7 @@ class ComptimeInterp(
             is WhileStmt -> {
                 while ((eval(s.cond, env) as CValue.VBool).v) {
                     burn(s.span)
-                    eval(s.body, env)
+                    try { eval(s.body, env) } catch (b: BreakSignal) { break } catch (c: ContinueSignal) {}
                 }
             }
             is ForStmt -> {
@@ -393,7 +398,7 @@ class ComptimeInterp(
                     for (v in (eval(s.from, env) as CValue.VList).elems) {
                         burn(s.span)
                         env[sym] = v
-                        eval(s.body, env)
+                        try { eval(s.body, env) } catch (b: BreakSignal) { break } catch (c: ContinueSignal) {}
                     }
                 } else {
                     val from = (eval(s.from, env) as CValue.VInt).v
@@ -401,7 +406,7 @@ class ComptimeInterp(
                     for (i in from until to) {
                         burn(s.span)
                         env[sym] = CValue.VInt(i)
-                        eval(s.body, env)
+                        try { eval(s.body, env) } catch (b: BreakSignal) { break } catch (c: ContinueSignal) {}
                     }
                 }
             }
