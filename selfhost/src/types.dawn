@@ -1,0 +1,691 @@
+# The checker's type representation (P3b step 1; port of check/Types.kt per
+# docs/selfhost-checker.md §二). Kotlin's identity-equality objects become
+# id-carrying records: TyVar/EffVar compare by id, TyAdt points into an ADT
+# table (Map[Int, AdtI]) instead of holding a cyclic object reference, and
+# display strings are rendered on demand (ty_show needs the table for names).
+#
+# Fixed prelude ids (never minted by the checker's counter, which starts at 1):
+#   ADTs:  Option = 0, Result = 1        traits: Ord = 0
+#   type vars: builtin-signature T/U/A/K/V = -1..-5, Ord's T = -10,
+#              Option's T = -11, Result's T/E = -12/-13
+#   effect vars: the builtin signatures' `e` = -1
+
+use std/map
+use std/list
+
+# ---- effects (spec §6) ----
+
+pub type Eff =
+  | EPure
+  | EIo
+  | EffVar(name: String, id: Int)
+# a normalized union: >= 2 distinct variables, no io, sorted by id
+  | EUnion(vars: List[(Int, String)])
+
+fn union_has(vs: List[(Int, String)], id: Int) -> Bool = {
+  for v in vs {
+    let (vid, _) = v
+    if vid == id { return true }
+  }
+  false
+}
+
+## Combine effects into their normalized least upper bound.
+pub fn eff_union(effs: List[Eff]) -> Eff = {
+  for e in effs {
+    if e == EIo { return EIo }
+  }
+  var vars: List[(Int, String)] = []
+  for e in effs {
+    match e {
+      EffVar(n, id) -> if not union_has(vars, id) { vars = vars ++ [(id, n)] }
+      EUnion(vs) -> {
+        for v in vs {
+          let (id, n) = v
+          if not union_has(vars, id) { vars = vars ++ [v] }
+        }
+      }
+      _ -> ()
+    }
+  }
+  if len(vars) == 0 { return EPure }
+  if len(vars) == 1 {
+    let (id, n) = vars[0]
+    return EffVar(n, id)
+  }
+  EUnion(sort_by(vars, fn(a, b) => {
+    let (ia, _) = a
+    let (ib, _) = b
+    ia - ib
+  }))
+}
+
+## Least upper bound in the effect lattice.
+pub fn lub_eff(a: Eff, b: Eff) -> Eff = eff_union([a, b])
+
+## Does `outer` permit every effect in `inner`? io covers all; pure is bottom.
+pub fn eff_subsumes(outer: Eff, inner: Eff) -> Bool =
+  if outer == EIo {
+    true
+  } else if inner == EPure {
+    true
+  } else if outer == inner {
+    true
+  } else {
+    match outer {
+      EUnion(ovs) ->
+        match inner {
+          EffVar(_, id) -> union_has(ovs, id)
+          EUnion(ivs) -> {
+            for v in ivs {
+              let (id, _) = v
+              if not union_has(ovs, id) { return false }
+            }
+            true
+          }
+          _ -> false
+        }
+      _ -> false
+    }
+  }
+
+## Render an effect: "", "io", "e", "(e1|e2)" (union names sorted, like Kotlin).
+pub fn eff_show(e: Eff) -> String =
+  match e {
+    EPure -> ""
+    EIo -> "io"
+    EffVar(n, _) -> n
+    EUnion(vs) -> {
+      var names: List[String] = []
+      for v in vs {
+        let (_, n) = v
+        names = names ++ [n]
+      }
+      "(" ++ join(sort(names), "|") ++ ")"
+    }
+  }
+
+## Render as a signature suffix: "", " !io", " !e", " !(e1|e2)".
+pub fn eff_suffix(e: Eff) -> String = if e == EPure { "" } else { " !" ++ eff_show(e) }
+
+# ---- types ----
+
+pub type Ty =
+  | TyInt
+  | TyFloat
+  | TyBool
+  | TyString
+  | TyBytes
+  | TyCursor
+  | TyUnit
+# bottom type: the "return type" of panic/todo; usable as any type
+  | TyNever
+# error type: produced where checking failed; compatible with everything
+  | TyError
+# a type variable, introduced by [T, U] on a declaration; compares by id
+  | TyVar(name: String, id: Int)
+# a user-defined (or prelude) sum type, possibly instantiated: Option[Int]
+  | TyAdt(adt: Int, args: List[Ty])
+  | TyList(elem: Ty)
+  | TyMap(key: Ty, value: Ty)
+  | TySet(elem: Ty)
+# an opaque imported Java class; the display is precomputed at creation
+# (arrays need Class reflection for their readable name)
+  | TyJava(fqcn: String, display: String)
+  | TyTuple(elems: List[Ty])
+  | TyFn(params: List[Ty], ret: Ty, eff: Eff)
+
+pub fn is_numeric(t: Ty) -> Bool = t == TyInt || t == TyFloat
+
+pub fn is_errorish(t: Ty) -> Bool = t == TyError || t == TyNever
+
+## The builtin scalar for a name, or None.
+pub fn ty_named(name: String) -> Option[Ty] =
+  match name {
+    "Int" -> Some(TyInt)
+    "Float" -> Some(TyFloat)
+    "Bool" -> Some(TyBool)
+    "String" -> Some(TyString)
+    "Bytes" -> Some(TyBytes)
+    "Cursor" -> Some(TyCursor)
+    "Unit" -> Some(TyUnit)
+    _ -> None
+  }
+
+# ---- ADT / ctor / field info (id + table; docs/selfhost-checker.md §二) ----
+
+pub type FieldI = { name: String, ty: Ty }
+
+pub type CtorI = { adt: Int, name: String, fields: List[FieldI] }
+
+pub type AdtI = {
+  id: Int,
+  name: String,
+  is_record: Bool,
+  tparams: List[Ty],
+  ctors: List[CtorI],
+  derives_show: Bool,
+  derives_ord: Bool,
+  owner: Option[String]
+}
+
+alias Adts = Map[Int, AdtI]
+
+pub fn adt_of(adts: Adts, id: Int) -> AdtI =
+  match map.get(adts, id) {
+    Some(a) -> a
+    None -> panic("unknown adt id: ${id}")
+  }
+
+## The declared "self type": Tree[T] inside its own declaration.
+pub fn adt_self_ty(a: AdtI) -> Ty = TyAdt(a.id, a.tparams)
+
+## JVM internal name (erased): abstract base (sum) or the single class (record).
+pub fn adt_jvm_name(a: AdtI) -> String =
+  match a.owner {
+    Some(o) -> o ++ "$" ++ a.name
+    None -> a.name
+  }
+
+pub fn ctor_jvm_name(adts: Adts, c: CtorI) -> String = {
+  let a = adt_of(adts, c.adt)
+  if a.is_record { adt_jvm_name(a) } else { adt_jvm_name(a) ++ "$" ++ c.name }
+}
+
+# ---- rendering ----
+
+pub fn ty_show(adts: Adts, t: Ty) -> String =
+  match t {
+    TyInt -> "Int"
+    TyFloat -> "Float"
+    TyBool -> "Bool"
+    TyString -> "String"
+    TyBytes -> "Bytes"
+    TyCursor -> "Cursor"
+    TyUnit -> "Unit"
+    TyNever -> "Never"
+    TyError -> "?"
+    TyVar(n, _) -> n
+    TyAdt(aid, targs) -> {
+      let name = adt_of(adts, aid).name
+      if len(targs) == 0 {
+        name
+      } else {
+        name ++ "[" ++ join(map(targs, fn(x) => ty_show(adts, x)), ", ") ++ "]"
+      }
+    }
+    TyList(e) -> "List[" ++ ty_show(adts, e) ++ "]"
+    TyMap(k, v) -> "Map[" ++ ty_show(adts, k) ++ ", " ++ ty_show(adts, v) ++ "]"
+    TySet(e) -> "Set[" ++ ty_show(adts, e) ++ "]"
+    TyJava(_, display) -> display
+    TyTuple(elems) -> "(" ++ join(map(elems, fn(x) => ty_show(adts, x)), ", ") ++ ")"
+    TyFn(params, ret, eff) ->
+      "fn(" ++ join(map(params, fn(x) => ty_show(adts, x)), ", ") ++ ") -> " ++
+      ty_show(adts, ret) ++ eff_suffix(eff)
+  }
+
+## Render a constructor like Kotlin CtorInfo.render (used in diagnostics).
+pub fn ctor_render(adts: Adts, c: CtorI) -> String = {
+  let a = adt_of(adts, c.adt)
+  let ret = ty_show(adts, adt_self_ty(a))
+  let fields = join(map(c.fields, fn(f) => f.name ++ ": " ++ ty_show(adts, f.ty)), ", ")
+  if a.is_record {
+    c.name ++ " { " ++ fields ++ " }"
+  } else if len(c.fields) == 0 {
+    c.name ++ ": " ++ ret
+  } else {
+    c.name ++ "(" ++ fields ++ "): " ++ ret
+  }
+}
+
+# ---- substitution ----
+
+## Replace type variables (and effect variables) by id.
+pub fn subst(t: Ty, m: Map[Int, Ty], em: Map[Int, Eff]) -> Ty =
+  match t {
+    TyVar(n, id) ->
+      match map.get(m, id) {
+        Some(r) -> r
+        None -> t
+      }
+    TyAdt(aid, targs) ->
+      if len(targs) == 0 { t } else { TyAdt(aid, map(targs, fn(x) => subst(x, m, em))) }
+    TyList(e) -> TyList(subst(e, m, em))
+    TyMap(k, v) -> TyMap(subst(k, m, em), subst(v, m, em))
+    TySet(e) -> TySet(subst(e, m, em))
+    TyTuple(elems) -> TyTuple(map(elems, fn(x) => subst(x, m, em)))
+    TyFn(params, ret, eff) ->
+      TyFn(map(params, fn(x) => subst(x, m, em)), subst(ret, m, em), subst_eff(eff, em))
+    _ -> t
+  }
+
+pub fn subst_eff(e: Eff, em: Map[Int, Eff]) -> Eff =
+  match e {
+    EffVar(n, id) ->
+      match map.get(em, id) {
+        Some(r) -> r
+        None -> e
+      }
+    EUnion(vs) -> {
+      var effs: List[Eff] = []
+      for v in vs {
+        let (id, n) = v
+        effs = effs ++ [match map.get(em, id) {
+          Some(r) -> r
+          None -> EffVar(n, id)
+        }]
+      }
+      eff_union(effs)
+    }
+    _ -> e
+  }
+
+# ---- symbols and signatures ----
+
+## Resolved local variable/parameter. `dict_of` is (trait id, tvar id) for a
+## hidden trait-dictionary binding.
+pub type Sym = {
+  name: String,
+  ty: Ty,
+  mutable: Bool,
+  dlo: Int,
+  dhi: Int,
+  dict_of: Option[(Int, Int)]
+}
+
+## Function signature (user functions and builtins alike).
+pub type Sig = {
+  name: String,
+  param_tys: List[Ty],
+  param_names: List[String],
+  ret: Ty,
+  eff: Eff,
+  is_builtin: Bool,
+  tparams: List[Ty],
+  # trait ids per type parameter, aligned with tparams; missing tail = unbounded
+  constraints: List[List[Int]],
+  owner: Option[String],
+  trait_id: Option[Int],
+  # the return type (and effect) is still being inferred; ret is a placeholder
+  inferring: Bool
+}
+
+## The bounds of tparams[i], or none.
+pub fn bounds_of(s: Sig, i: Int) -> List[Int] =
+  match get(s.constraints, i) {
+    Some(bs) -> bs
+    None -> []
+  }
+
+# ---- traits ----
+
+pub type MethodSig = { sig: Sig, has_default: Bool }
+
+pub type TraitI = {
+  id: Int,
+  name: String,
+  # the subject type parameter (a TyVar)
+  tvar: Ty,
+  is_pub: Bool,
+  owner: Option[String],
+  src_path: Option[String],
+  # methods by name, in declaration order
+  methods: List[(String, MethodSig)]
+}
+
+pub type ImplI = {
+  trait_id: Int,
+  subject: Ty,
+  lo: Int,
+  hi: Int,
+  derived: Bool,
+  owner: Option[String],
+  src_path: Option[String],
+  provided: List[String]
+}
+
+alias Traits = Map[Int, TraitI]
+
+pub fn trait_of(traits: Traits, id: Int) -> TraitI =
+  match map.get(traits, id) {
+    Some(t) -> t
+    None -> panic("unknown trait id: ${id}")
+  }
+
+pub fn impl_display(adts: Adts, traits: Traits, i: ImplI) -> String =
+  trait_of(traits, i.trait_id).name ++ "[" ++ ty_show(adts, i.subject) ++ "]"
+
+## Render a signature like Kotlin FnSig.render (used in golden dumps and docs).
+pub fn sig_render(adts: Adts, traits: Traits, s: Sig) -> String = {
+  var tp = ""
+  if len(s.tparams) > 0 {
+    var parts: List[String] = []
+    var i = 0
+    for v in s.tparams {
+      let bs = bounds_of(s, i)
+      let vname = ty_show(adts, v)
+      if len(bs) == 0 {
+        parts = parts ++ [vname]
+      } else {
+        let bnames = map(bs, fn(b) => trait_of(traits, b).name)
+        parts = parts ++ [vname ++ ": " ++ join(bnames, " + ")]
+      }
+      i = i + 1
+    }
+    tp = "[" ++ join(parts, ", ") ++ "]"
+  }
+  var ps: List[String] = []
+  var j = 0
+  for pt in s.param_tys {
+    let pn = match get(s.param_names, j) {
+      Some(n) -> n
+      None -> "_"
+    }
+    ps = ps ++ [pn ++ ": " ++ ty_show(adts, pt)]
+    j = j + 1
+  }
+  "fn " ++ s.name ++ tp ++ "(" ++ join(ps, ", ") ++ ") -> " ++ ty_show(adts, s.ret) ++
+    eff_suffix(s.eff)
+}
+
+# ---- prelude: Option / Result, Ord, builtins ----
+
+pub const OPTION_ID: Int = 0
+
+pub const RESULT_ID: Int = 1
+
+pub const ORD_ID: Int = 0
+
+pub fn opt_ty(t: Ty) -> Ty = TyAdt(OPTION_ID, [t])
+
+pub fn result_ty(t: Ty, e: Ty) -> Ty = TyAdt(RESULT_ID, [t, e])
+
+## The two prelude ADTs, keyed by their fixed ids.
+pub fn prelude_adts() -> Adts = {
+  let ot = TyVar("T", -11)
+  let option = AdtI {
+    id: OPTION_ID,
+    name: "Option",
+    is_record: false,
+    tparams: [ot],
+    ctors: [
+      CtorI { adt: OPTION_ID, name: "Some", fields: [FieldI { name: "value", ty: ot }] },
+      CtorI { adt: OPTION_ID, name: "None", fields: [] }
+    ],
+    derives_show: true,
+    derives_ord: false,
+    owner: None
+  }
+  let rt = TyVar("T", -12)
+  let re = TyVar("E", -13)
+  let result = AdtI {
+    id: RESULT_ID,
+    name: "Result",
+    is_record: false,
+    tparams: [rt, re],
+    ctors: [
+      CtorI { adt: RESULT_ID, name: "Ok", fields: [FieldI { name: "value", ty: rt }] },
+      CtorI { adt: RESULT_ID, name: "Err", fields: [FieldI { name: "error", ty: re }] }
+    ],
+    derives_show: true,
+    derives_ord: false,
+    owner: None
+  }
+  map.from([(OPTION_ID, option), (RESULT_ID, result)])
+}
+
+## The prelude Ord trait (id 0): `< <= > >=` bridge to `cmp` beyond scalars.
+pub fn prelude_traits() -> Traits = {
+  let tv = TyVar("T", -10)
+  let cmp_sig = Sig {
+    name: "cmp",
+    param_tys: [tv, tv],
+    param_names: ["a", "b"],
+    ret: TyInt,
+    eff: EPure,
+    is_builtin: false,
+    tparams: [tv],
+    constraints: [[ORD_ID]],
+    owner: None,
+    trait_id: Some(ORD_ID),
+    inferring: false
+  }
+  let ord = TraitI {
+    id: ORD_ID,
+    name: "Ord",
+    tvar: tv,
+    is_pub: true,
+    owner: None,
+    src_path: None,
+    methods: [("cmp", MethodSig { sig: cmp_sig, has_default: false })]
+  }
+  map.from([(ORD_ID, ord)])
+}
+
+## Ord over the natively ordered scalars ships with the language.
+pub fn prelude_impls() -> List[ImplI] =
+  map([TyInt, TyFloat, TyString], fn(t) => ImplI {
+    trait_id: ORD_ID,
+    subject: t,
+    lo: 0,
+    hi: 1,
+    derived: false,
+    owner: None,
+    src_path: None,
+    provided: []
+  })
+
+fn bsig(name: String, ptys: List[Ty], pnames: List[String], ret: Ty) -> Sig =
+  Sig {
+    name: name,
+    param_tys: ptys,
+    param_names: pnames,
+    ret: ret,
+    eff: EPure,
+    is_builtin: true,
+    tparams: [],
+    constraints: [],
+    owner: None,
+    trait_id: None,
+    inferring: false
+  }
+
+fn tp1(s: Sig, v: Ty) -> Sig = Sig { ..s, tparams: [v] }
+
+fn eff1(s: Sig, e: Eff) -> Sig = Sig { ..s, eff: e }
+
+## The builtin function table (port of Types.kt BUILTINS, same order).
+pub fn builtins() -> Map[String, Sig] = {
+  let t = TyVar("T", -1)
+  let u = TyVar("U", -2)
+  let a = TyVar("A", -3)
+  let k = TyVar("K", -4)
+  let v = TyVar("V", -5)
+  let e = EffVar("e", -1)
+  var out: Map[String, Sig] = map.empty()
+  var sigs = [
+    bsig("panic", [TyString], ["msg"], TyNever),
+    bsig("todo", [], [], TyNever),
+    bsig("to_float", [TyInt], ["n"], TyFloat),
+    bsig("to_int", [TyFloat], ["x"], TyInt),
+    tp1(bsig("len", [TyList(t)], ["xs"], TyInt), t),
+    tp1(bsig("get", [TyList(t), TyInt], ["xs", "i"], opt_ty(t)), t),
+    bsig("range", [TyInt, TyInt], ["from", "to"], TyList(TyInt)),
+    Sig { ..tp1(bsig("sort", [TyList(t)], ["xs"], TyList(t)), t), constraints: [[ORD_ID]] },
+    eff1(tp1(bsig("sort_by", [TyList(t), TyFn([t, t], TyInt, e)], ["xs", "cmp"], TyList(t)), t), e),
+    Sig { ..tp1(bsig("max", [TyList(t)], ["xs"], opt_ty(t)), t), constraints: [[ORD_ID]] },
+    Sig { ..tp1(bsig("min", [TyList(t)], ["xs"], opt_ty(t)), t), constraints: [[ORD_ID]] },
+    Sig {
+      ..eff1(bsig("max_by", [TyList(t), TyFn([t], k, e)], ["xs", "key"], opt_ty(t)), e),
+      tparams: [t, k],
+      constraints: [[], [ORD_ID]]
+    },
+    Sig {
+      ..eff1(bsig("min_by", [TyList(t), TyFn([t], k, e)], ["xs", "key"], opt_ty(t)), e),
+      tparams: [t, k],
+      constraints: [[], [ORD_ID]]
+    },
+    tp1(bsig("expect", [opt_ty(t), TyString], ["o", "msg"], t), t),
+    tp1(bsig("unwrap_or", [opt_ty(t), t], ["o", "fallback"], t), t),
+    tp1(bsig("to_string", [t], ["x"], TyString), t),
+    bsig("join", [TyList(TyString), TyString], ["xs", "sep"], TyString),
+    bsig("code_points", [TyString], ["s"], TyList(TyInt)),
+    bsig("from_code_points", [TyList(TyInt)], ["cs"], TyString),
+    bsig("parse_int", [TyString], ["s"], opt_ty(TyInt)),
+    bsig("parse_float", [TyString], ["s"], opt_ty(TyFloat)),
+    bsig("cursor_start", [TyString], ["s"], TyCursor),
+    bsig("cursor_end", [TyString], ["s"], TyCursor),
+    bsig("cursor_done", [TyString, TyCursor], ["s", "c"], TyBool),
+    bsig("cursor_char", [TyString, TyCursor], ["s", "c"], TyInt),
+    bsig("cursor_next", [TyString, TyCursor], ["s", "c"], TyCursor),
+    bsig("cursor_prev", [TyString, TyCursor], ["s", "c"], TyCursor),
+    bsig("cursor_slice", [TyString, TyCursor, TyCursor], ["s", "from", "to"], TyString),
+    bsig("cursor_skip", [TyString, TyCursor, TyString], ["s", "c", "sub"], TyCursor),
+    bsig("index_of_from", [TyString, TyString, TyCursor], ["s", "sub", "from"], opt_ty(TyCursor))
+  ]
+  sigs = sigs ++ [
+    eff1(bsig("args", [], [], TyList(TyString)), EIo),
+    eff1(
+      tp1(bsig("java_try", [TyFn([], t, EIo)], ["f"], result_ty(t, TyString)), t),
+      EIo
+    ),
+    tp1(bsig("cast", [TyJava("java.lang.Object", "Object")], ["x"], t), t),
+    eff1(
+      tp1(bsig("catch_panic", [TyFn([], t, EIo)], ["f"], result_ty(t, TyString)), t),
+      EIo
+    ),
+    Sig { ..bsig("map_empty", [], [], TyMap(k, v)), tparams: [k, v] },
+    tp1(bsig("set_empty", [], [], TySet(t)), t),
+    Sig {
+      ..bsig("map_from", [TyList(TyTuple([k, v]))], ["entries"], TyMap(k, v)),
+      tparams: [k, v]
+    },
+    tp1(bsig("set_from", [TyList(t)], ["xs"], TySet(t)), t),
+    Sig {
+      ..bsig("map_insert", [TyMap(k, v), k, v], ["m", "key", "value"], TyMap(k, v)),
+      tparams: [k, v]
+    },
+    tp1(bsig("set_insert", [TySet(t), t], ["s", "x"], TySet(t)), t),
+    Sig { ..bsig("map_remove", [TyMap(k, v), k], ["m", "key"], TyMap(k, v)), tparams: [k, v] },
+    tp1(bsig("set_remove", [TySet(t), t], ["s", "x"], TySet(t)), t),
+    Sig { ..bsig("map_get", [TyMap(k, v), k], ["m", "key"], opt_ty(v)), tparams: [k, v] },
+    Sig { ..bsig("map_has", [TyMap(k, v), k], ["m", "key"], TyBool), tparams: [k, v] },
+    tp1(bsig("set_has", [TySet(t), t], ["s", "x"], TyBool), t),
+    Sig { ..bsig("map_size", [TyMap(k, v)], ["m"], TyInt), tparams: [k, v] },
+    tp1(bsig("set_size", [TySet(t)], ["s"], TyInt), t),
+    Sig { ..bsig("map_keys", [TyMap(k, v)], ["m"], TyList(k)), tparams: [k, v] },
+    Sig { ..bsig("map_values", [TyMap(k, v)], ["m"], TyList(v)), tparams: [k, v] },
+    Sig {
+      ..bsig("map_entries", [TyMap(k, v)], ["m"], TyList(TyTuple([k, v]))),
+      tparams: [k, v]
+    },
+    tp1(bsig("set_to_list", [TySet(t)], ["s"], TyList(t)), t)
+  ]
+  for s in sigs { out = map.insert(out, s.name, s) }
+  out
+}
+
+# ---- tests ----
+
+test "effect union normalizes" {
+  let e1 = EffVar("e1", 1)
+  let e2 = EffVar("e2", 2)
+  assert eff_union([EPure, EPure]) == EPure
+  assert eff_union([e1, EPure]) == e1
+  assert eff_union([e1, EIo]) == EIo
+  assert eff_union([e2, e1]) == EUnion([(1, "e1"), (2, "e2")])
+  assert eff_union([e1, e1]) == e1
+  assert lub_eff(EPure, EIo) == EIo
+}
+
+test "effect subsumption" {
+  let e1 = EffVar("e1", 1)
+  let e2 = EffVar("e2", 2)
+  let un = eff_union([e1, e2])
+  assert eff_subsumes(EIo, un)
+  assert eff_subsumes(un, e1)
+  assert eff_subsumes(un, EPure)
+  assert not eff_subsumes(e1, EIo)
+  assert not eff_subsumes(e1, e2)
+  assert eff_subsumes(un, un)
+}
+
+test "effect rendering" {
+  assert eff_suffix(EPure) == ""
+  assert eff_suffix(EIo) == " !io"
+  assert eff_suffix(EffVar("e", 7)) == " !e"
+  assert eff_show(EUnion([(2, "b"), (1, "a")])) == "(a|b)"
+}
+
+test "type rendering" {
+  let adts = prelude_adts()
+  assert ty_show(adts, TyMap(TyInt, TyList(TyString))) == "Map[Int, List[String]]"
+  assert ty_show(adts, opt_ty(TyInt)) == "Option[Int]"
+  assert ty_show(adts, TyAdt(RESULT_ID, [])) == "Result"
+  assert ty_show(adts, TyTuple([TyInt, TyBool])) == "(Int, Bool)"
+  assert ty_show(adts, TyFn([TyInt], TyUnit, EIo)) == "fn(Int) -> Unit !io"
+  assert ty_show(adts, TyError) == "?"
+  assert ty_show(adts, TyJava("java.sql.Connection", "Connection")) == "Connection"
+}
+
+test "substitution reaches every position" {
+  let t = TyVar("T", 5)
+  let m: Map[Int, Ty] = map.from([(5, TyInt)])
+  let em: Map[Int, Eff] = map.empty()
+  assert subst(TyList(t), m, em) == TyList(TyInt)
+  assert subst(TyMap(t, TySet(t)), m, em) == TyMap(TyInt, TySet(TyInt))
+  assert subst(opt_ty(t), m, em) == opt_ty(TyInt)
+  assert subst(TyFn([t], t, EPure), m, em) == TyFn([TyInt], TyInt, EPure)
+  assert subst(TyTuple([t, TyBool]), m, em) == TyTuple([TyInt, TyBool])
+}
+
+test "effect substitution collapses unions" {
+  let e1 = EffVar("e1", 1)
+  let e2 = EffVar("e2", 2)
+  let un = eff_union([e1, e2])
+  let em1: Map[Int, Eff] = map.from([(1, EIo)])
+  assert subst_eff(un, em1) == EIo
+  let em2: Map[Int, Eff] = map.from([(1, EPure)])
+  assert subst_eff(un, em2) == e2
+  let em3: Map[Int, Eff] = map.from([(1, e2)])
+  assert subst_eff(un, em3) == e2
+}
+
+test "prelude shapes" {
+  let adts = prelude_adts()
+  let opt = adt_of(adts, OPTION_ID)
+  assert opt.name == "Option"
+  assert len(opt.ctors) == 2
+  assert opt.ctors[1].name == "None"
+  assert ctor_render(adts, opt.ctors[0]) == "Some(value: T): Option[T]"
+  let traits = prelude_traits()
+  assert trait_of(traits, ORD_ID).name == "Ord"
+  assert len(prelude_impls()) == 3
+}
+
+test "builtin table renders signatures" {
+  let adts = prelude_adts()
+  let traits = prelude_traits()
+  let bs = builtins()
+  match map.get(bs, "sort") {
+    Some(s) -> { assert sig_render(adts, traits, s) == "fn sort[T: Ord](xs: List[T]) -> List[T]" }
+    None -> { assert false }
+  }
+  match map.get(bs, "java_try") {
+    Some(s) -> {
+      assert sig_render(adts, traits, s) ==
+        "fn java_try[T](f: fn() -> T !io) -> Result[T, String] !io"
+    }
+    None -> { assert false }
+  }
+  match map.get(bs, "map_entries") {
+    Some(s) -> {
+      assert sig_render(adts, traits, s) ==
+        "fn map_entries[K, V](m: Map[K, V]) -> List[(K, V)]"
+    }
+    None -> { assert false }
+  }
+  assert map_size2(bs) == 51
+}
+
+fn map_size2(m: Map[String, Sig]) -> Int = map.size(m)
