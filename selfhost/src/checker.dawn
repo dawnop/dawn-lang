@@ -13,7 +13,9 @@ use std/map
 use std/set
 use token.{Diag}
 use ast.{
-  TypeRef, TNamed, TTuple, TFn, Bound, TypeParamDecl, Module
+  TypeRef, TNamed, TTuple, TFn, Bound, TypeParamDecl, Module,
+  module_java_uses, module_fns, module_types, module_consts, module_traits,
+  module_impls, module_tests, module_uses
 }
 use types.{
   Ty, TyInt, TyFloat, TyBool, TyString, TyBytes, TyCursor, TyUnit, TyNever,
@@ -1030,4 +1032,76 @@ test "printability and const-serializability" {
   assert not is_const_serializable(cx, TyMap(TyInt, TyInt), set.empty())
   assert not is_const_serializable(cx, TyVar("T", 5), set.empty())
   assert show_hint(cx, TyFn([], TyUnit, EPure)) == "functions cannot be printed"
+}
+
+# ---- declaration passes ----
+
+## Pass 0 (the top of the Kotlin check()): prelude ADTs with their constructors,
+## prelude traits with their methods in the fn namespace, prelude Ord impls.
+pub fn seed_prelude(cx: Cx) -> Cx = {
+  var cx1 = cx
+  # Option/Result and their constructors
+  var abn = cx1.adts_by_name
+  var cbn = cx1.ctors_by_name
+  for aid in [OPTION_ID, RESULT_ID] {
+    let a = adt_of(cx1.adts, aid)
+    abn = map.insert(abn, a.name, aid)
+    var i = 0
+    for c in a.ctors {
+      cbn = map.insert(cbn, c.name, (aid, i))
+      i = i + 1
+    }
+  }
+  # prelude traits: methods enter the fn namespace
+  var tbn = cx1.traits_by_name
+  var fns2 = cx1.fns
+  let ord = trait_of(cx1.traits, ORD_ID)
+  tbn = map.insert(tbn, ord.name, ORD_ID)
+  for entry in ord.methods {
+    let (mname, ms) = entry
+    fns2 = map.insert(fns2, mname, ms.sig)
+  }
+  # prelude Ord impls over the native scalars
+  var it = cx1.impl_table
+  for i in prelude_impls() { it = map.insert(it, (i.trait_id, i.subject), i) }
+  Cx {
+    ..cx1,
+    adts_by_name: abn,
+    ctors_by_name: cbn,
+    traits_by_name: tbn,
+    fns: fns2,
+    impl_table: it
+  }
+}
+
+## Pass 0.5: `use java` imports, resolved by reflection (spec §9).
+pub fn pass_java_uses(cx: Cx, m: Module) -> Cx !io = {
+  var cx1 = cx
+  for d in module_java_uses(m) {
+    match find_class(d.fqcn) {
+      None -> {
+        cx1 = cerr_h(cx1, "Java class not found: " ++ d.fqcn, d.nlo, d.nhi,
+          "the JDK is always visible; third-party jars must be passed with --cp <jars>")
+      }
+      Some(j) -> {
+        if map.has(cx1.java_classes, d.simple) {
+          cx1 = cerr(cx1, "`" ++ d.simple ++ "` is already imported", d.nlo, d.nhi)
+        } else {
+          cx1 = Cx { ..cx1, java_classes: map.insert(cx1.java_classes, d.simple, j.fqcn) }
+        }
+      }
+    }
+  }
+  cx1
+}
+
+test "prelude seeding wires names to ids" {
+  let cx = seed_prelude(test_cx())
+  assert map.get(cx.adts_by_name, "Option") == Some(OPTION_ID)
+  assert map.get(cx.ctors_by_name, "Ok") == Some((RESULT_ID, 0))
+  assert map.get(cx.ctors_by_name, "None") == Some((OPTION_ID, 1))
+  assert map.get(cx.traits_by_name, "Ord") == Some(ORD_ID)
+  assert map.has(cx.fns, "cmp")
+  assert map.has(cx.impl_table, (ORD_ID, TyInt))
+  assert not map.has(cx.impl_table, (ORD_ID, TyBool))
 }
