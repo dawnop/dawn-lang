@@ -261,6 +261,28 @@ error: no overload of `LinkedHashMap.put` matches (Int, Int)
 lowering 一刀、四刀与树的对应一页图，并穷举核对 `ast/Ast.kt` 的 44 个 `var` 槽全部有主。
 完整节点表留待 P3 随真代码收敛。
 
+### P0.6 · 自举前清障批 ✅ 完成（2026-07-22，v0.3.0）
+
+设计审查（对照语言设计文献）翻出的账在 parser 还唯一时一次结清，十刀：
+
+1. **数值边缘语义写死**（spec §4.3）：溢出环绕、`/` 向零取整、`%` 随被除数；
+   除零改真 panic（裸 ArithmeticException 会被 `java_try` 误捕）；Float cmp 换
+   `Double.compare` 全序（DCMPL 在 NaN 两侧同号，排序失反对称）。
+2. **Float/Bytes 禁作 Map/Set 键**（递归含嵌套，spec §2.2）——两套相等/同一性哈希
+   的静默丢键从「不宜」升级为编译错误。
+3. **`alias` 独立关键字**（spec §2.6）：同形不同义的启发式删除；用户类型首次可别名。
+4. **字段调用同名冲突改报错**（spec §2.4）：对齐 §10.3 模块别名的处理。
+5. **`break`/`continue`**（spec §4.7）：Never 表达式，三种循环 + comptime，禁穿 lambda。
+6. **行首 `.` 续行**（spec §1.7）：竖排方法链，Java builder 不再一行到底。
+7. **`Cursor` 不透明类型**（spec §11）：游标契约进类型系统；家族回迁内建
+   （builtins→std 的第一个有据例外，判据记入 builtins-to-stdlib.md 补记）；
+   新原语 `cursor_skip` 消掉 split 曾默许的那次游标算术。
+8. **定夺记录**（design.md D10）：match 箭头 / 否定三写法 / `..` 三用维持现状并归档。
+9. **stdlib 命名定夺**（[`stdlib-naming.md`](stdlib-naming.md)）：平铺名**永久有效**，
+   改名成本爆炸的风险就地消解；限定式组织是纯增量后续，不阻塞自举。
+10. 发版 v0.3.0（破坏性：`alias`/`break`/`continue` 成关键字、cursor 家族签名换
+    `Cursor`），backend-dawn 同步迁移。
+
 ### P1 · 第一刀：Lexer（试水）
 
 488 行。选它因为它**不依赖 P0 之外的任何东西**：游标已有（v0.2.1）、不吃 Map 性能、
