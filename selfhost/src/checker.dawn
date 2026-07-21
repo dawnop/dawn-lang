@@ -2874,3 +2874,158 @@ test "loop jumps respect lambda boundaries" {
   assert not ok3
   assert str.contains(cx3.diags[0].msg, "cannot cross a lambda boundary")
 }
+
+## expr! — Option[T] -> T, panicking on None (spec §8.2). The panic message is
+## assembled by the caller (it needs source/line info); this checks the type.
+pub fn check_unwrap_typed(cx: Cx, ot: Ty, operand: TExpr, msg: String, lo: Int, hi: Int) -> (Cx, Ty, TExpr) = {
+  if is_errorish(ot) { return (cx, TyError, XError(lo, hi)) }
+  match ot {
+    TyAdt(aid, targs) ->
+      if aid == OPTION_ID {
+        (cx, targs[0], XUnwrap(operand, msg, lo, hi))
+      } else {
+        let hint = if aid == RESULT_ID {
+          "`!` unwraps an Option; on a Result use `?` to propagate, or match the Ok/Err"
+        } else {
+          "`!` unwraps an Option and panics on None; this value is not an Option"
+        }
+        (cerr_h(cx, "`!` needs an Option, got " ++ ty_show(cx.adts, ot), lo, hi, hint),
+          TyError, XError(lo, hi))
+      }
+    _ -> (cerr_h(cx, "`!` needs an Option, got " ++ ty_show(cx.adts, ot), lo, hi,
+      "`!` unwraps an Option and panics on None; this value is not an Option"),
+      TyError, XError(lo, hi))
+  }
+}
+
+## xs[i] / m[k] — the asserting variants (spec §4.8). The index expression is
+## checked by the caller against the wanted type this returns.
+pub fn index_wanted(cx: Cx, tt: Ty, lo: Int, hi: Int) -> (Cx, Option[(Ty, Ty, Bool)]) =
+  match tt {
+    TyList(elem) -> (cx, Some((TyInt, elem, false)))
+    TyMap(k, v) -> (cx, Some((k, v, true)))
+    _ ->
+      if is_errorish(tt) {
+        (cx, None)
+      } else {
+        (cerr_h(cx, "`[]` indexes a List or Map, got " ++ ty_show(cx.adts, tt), lo, hi,
+          "when absence is a normal case, use get(xs, i) / map_get(m, k) instead"), None)
+      }
+  }
+
+## Record field access p.x — resolve against the record's single constructor.
+pub fn check_field_access_typed(
+  cx: Cx,
+  tt: Ty,
+  target: TExpr,
+  fname: String,
+  flo: Int,
+  fhi: Int,
+  lo: Int,
+  hi: Int
+) -> (Cx, Ty, TExpr) = {
+  if is_errorish(tt) { return (cx, TyError, XError(lo, hi)) }
+  let bad_hint: Option[String] = match tt {
+    TyAdt(aid, _) ->
+      if adt_of(cx.adts, aid).is_record {
+        None
+      } else {
+        Some("`" ++ adt_of(cx.adts, aid).name ++ "` is a sum type; destructure it with match")
+      }
+    _ -> None
+  }
+  let is_record = match tt {
+    TyAdt(aid, _) -> adt_of(cx.adts, aid).is_record
+    _ -> false
+  }
+  if not is_record {
+    return (cerr_o(cx, "`.` field access needs a record value, got " ++ ty_show(cx.adts, tt),
+      flo, fhi, bad_hint), TyError, XError(lo, hi))
+  }
+  match tt {
+    TyAdt(aid, targs) -> {
+      let a = adt_of(cx.adts, aid)
+      let ci = a.ctors[0]
+      var idx = -1
+      var fty = TyError
+      var i = 0
+      for f in ci.fields {
+        if f.name == fname {
+          idx = i
+          fty = f.ty
+        }
+        i = i + 1
+      }
+      if idx < 0 {
+        var fnames: List[String] = []
+        for f in ci.fields { fnames = fnames ++ [f.name] }
+        let hint = match suggest.hint(fname, fnames) {
+          Some(h) -> h
+          None -> "fields: " ++ join(fnames, ", ")
+        }
+        return (cerr_h(cx, "`" ++ a.name ++ "` has no field `" ++ fname ++ "`", flo, fhi, hint),
+          TyError, XError(lo, hi))
+      }
+      var m: Map[Int, Ty] = map.empty()
+      var j = 0
+      for tp in a.tparams {
+        match tp {
+          TyVar(_, vid) ->
+            match get(targs, j) {
+              Some(arg) -> { m = map.insert(m, vid, arg) }
+              None -> ()
+            }
+          _ -> ()
+        }
+        j = j + 1
+      }
+      let em: Map[Int, Eff] = map.empty()
+      (cx, subst(fty, m, em), XField(target, idx, lo, hi))
+    }
+    _ -> (cx, TyError, XError(lo, hi))
+  }
+}
+
+test "unwrap, index, and field access resolve their shapes" {
+  let cx = test_cx()
+  let (cx1, t1, _) = check_unwrap_typed(cx, opt_ty(TyInt), XError(0, 1), "m", 0, 2)
+  assert t1 == TyInt
+  let (cx2, t2, _) = check_unwrap_typed(cx, result_ty(TyInt, TyString), XError(0, 1), "m", 0, 2)
+  assert str.contains(cx2.diags[0].hint, "on a Result use `?`")
+  let (cx3, w) = index_wanted(cx, TyMap(TyString, TyInt), 0, 4)
+  assert w == Some((TyString, TyInt, true))
+  let (cx4, w2) = index_wanted(cx, TyBool, 0, 4)
+  assert w2 == None
+  assert str.contains(cx4.diags[0].msg, "indexes a List or Map")
+}
+
+test "field access follows record shape with substitution" {
+  # type Box[T] = { v: T } — access .v on Box[Int]
+  var cx = seed_prelude(test_cx())
+  let (cx0, tv) = fresh_tvar(cx, "T")
+  let (cx1, aid) = fresh(cx0)
+  let info = AdtI {
+    id: aid,
+    name: "Box",
+    is_record: true,
+    tparams: [tv],
+    ctors: [CtorI { adt: aid, name: "Box", fields: [FieldI { name: "v", ty: tv }] }],
+    derives_show: false,
+    derives_ord: false,
+    owner: None
+  }
+  cx = Cx {
+    ..cx1,
+    adts: map.insert(cx1.adts, aid, info),
+    adts_by_name: map.insert(cx1.adts_by_name, "Box", aid)
+  }
+  let (cx2, t, x) = check_field_access_typed(cx, TyAdt(aid, [TyInt]), XError(0, 1), "v", 2, 3, 0, 3)
+  assert t == TyInt
+  assert x == XField(XError(0, 1), 0, 0, 3)
+  let (cx3, t2, _) = check_field_access_typed(cx, TyAdt(aid, [TyInt]), XError(0, 1), "w", 2, 3, 0, 3)
+  assert cx3.diags[0].msg == "`Box` has no field `w`"
+  # a single-character name never triggers a guess; the fields list shows instead
+  assert cx3.diags[0].hint == "fields: v"
+  let (cx4, t3, _) = check_field_access_typed(cx, opt_ty(TyInt), XError(0, 1), "v", 2, 3, 0, 3)
+  assert str.contains(cx4.diags[0].hint, "sum type; destructure it with match")
+}
