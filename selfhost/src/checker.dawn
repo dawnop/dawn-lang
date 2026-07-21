@@ -16,7 +16,8 @@ use ast.{
   TypeRef, TNamed, TTuple, TFn, Bound, TypeParamDecl, Module,
   module_java_uses, module_fns, module_types, module_consts, module_traits,
   module_impls, module_tests, module_uses,
-  DType, TypeDeclR, CtorDecl, FieldDecl, DTrait, TraitMethod, Param, Expr
+  DType, TypeDeclR, CtorDecl, FieldDecl, DTrait, TraitMethod, Param, Expr,
+  Decl, DImpl, FnDecl, EBool
 }
 use types.{
   Ty, TyInt, TyFloat, TyBool, TyString, TyBytes, TyCursor, TyUnit, TyNever,
@@ -1119,6 +1120,12 @@ fn no_fields() -> List[FieldDecl] = []
 
 fn no_params() -> List[Param] = []
 
+fn no_tparams() -> List[TypeParamDecl] = []
+
+fn no_effs() -> List[String] = []
+
+fn no_fn_decls() -> List[FnDecl] = []
+
 fn no_body() -> Option[Expr] = None
 
 fn dup_names(names: List[String]) -> Bool = {
@@ -1726,4 +1733,370 @@ test "trait registration puts methods in the fn namespace" {
   let cx2 = pass_register_traits(cx, m2)
   assert len(cx2.diags) == 1
   assert str.contains(cx2.diags[0].msg, "already a method of trait `Eq2`")
+}
+
+## The subject-type restriction for v1 impls (spec/docs trait.md).
+fn impl_subject_ok(cx: Cx, subject: Ty) -> Bool =
+  match subject {
+    TyInt | TyFloat | TyBool | TyString -> true
+    TyAdt(aid, _) -> len(adt_of(cx.adts, aid).tparams) == 0
+    _ -> false
+  }
+
+## Pass 2.75b: register impls — derive Ord first (so an explicit duplicate
+## reports as the duplicate), then subject rules, the orphan rule, program-wide
+## coherence, and method signature matching (the Kotlin registerImpls).
+pub fn pass_register_impls(cx: Cx, m: Module, shells: List[Option[Shell]]) -> Cx = {
+  var cx1 = cx
+  # local ADT ids (for the orphan rule)
+  var local_adts: Set[Int] = set.empty()
+  for sh in shells {
+    match sh {
+      Some(s) -> { local_adts = set.insert(local_adts, s.adt) }
+      None -> ()
+    }
+  }
+  # derive Ord first
+  var di = 0
+  for d in module_types(m) {
+    let sh = match shells[di] {
+      None -> {
+        di = di + 1
+        continue
+      }
+      Some(s) -> s
+    }
+    let info = adt_of(cx1.adts, sh.adt)
+    if not info.derives_ord {
+      di = di + 1
+      continue
+    }
+    var dlo = d.nlo
+    var dhi = d.nhi
+    for b in d.derives {
+      if b.name == "Ord" {
+        dlo = b.lo
+        dhi = b.hi
+      }
+    }
+    if len(info.tparams) > 0 {
+      cx1 = cerr_h(cx1, "cannot derive Ord for the generic type `" ++ info.name ++ "`",
+        dlo, dhi, "v1 Ord subjects are non-generic; order concrete values instead")
+      di = di + 1
+      continue
+    }
+    let subject = TyAdt(sh.adt, [])
+    let ii = ImplI {
+      trait_id: ORD_ID,
+      subject: subject,
+      lo: dlo,
+      hi: dhi,
+      derived: true,
+      owner: cx1.owner_class,
+      src_path: cx1.src_path,
+      provided: []
+    }
+    cx1 = Cx {
+      ..cx1,
+      impl_table: map.insert(cx1.impl_table, (ORD_ID, subject), ii),
+      local_impls: cx1.local_impls ++ [ii]
+    }
+    di = di + 1
+  }
+  # explicit impls
+  for d in module_impls(m) {
+    let tid = match map.get(cx1.traits_by_name, d.trait_name) {
+      None -> {
+        let pool = map.keys(cx1.traits_by_name)
+        let hint = match suggest.hint(d.trait_name, pool) {
+          Some(h) -> h
+          None -> "declare `trait " ++ d.trait_name ++ "[T] { ... }` or import it first"
+        }
+        cx1 = cerr_h(cx1, "unknown trait: " ++ d.trait_name, d.tlo, d.thi, hint)
+        continue
+      }
+      Some(t) -> t
+    }
+    let tr = trait_of(cx1.traits, tid)
+    let empty_tp: Map[String, Ty] = map.empty()
+    let empty_ev: Map[String, Eff] = map.empty()
+    cx1 = Cx { ..cx1, current_tparams: empty_tp, current_eff_vars: empty_ev }
+    let (cx2, subject) = resolve_type(cx1, d.subject)
+    cx1 = cx2
+    if subject == TyError { continue }
+    if not impl_subject_ok(cx1, subject) {
+      cx1 = cerr_h(cx1, "`" ++ ty_show(cx1.adts, subject) ++ "` cannot be an impl subject",
+        t_lo2(d.subject), t_hi2(d.subject),
+        "v1 impls cover named non-generic types and Int/Float/Bool/String; " ++
+          "generic subjects (List, Map, tuples, instantiated generics) need conditional impls (v2)")
+      continue
+    }
+    # orphan rule: the impl lives with the trait or with the subject type
+    var trait_local = false
+    for n in cx1.local_traits {
+      if n == d.trait_name { trait_local = true }
+    }
+    let subject_local = match subject {
+      TyAdt(aid, _) -> set.has(local_adts, aid)
+      _ -> false
+    }
+    if not trait_local && not subject_local {
+      cx1 = cerr_h(cx1, "orphan impl: `" ++ tr.name ++ "[" ++ ty_show(cx1.adts, subject) ++
+          "]` may not live here", d.tlo, d.thi,
+        "an impl belongs to the module that declares `" ++ tr.name ++
+          "` or the one that declares `" ++ ty_show(cx1.adts, subject) ++ "`")
+      continue
+    }
+    # coherence: at most one impl per (trait, type) in the whole program
+    match map.get(cx1.impl_table, (tid, subject)) {
+      Some(prev) -> {
+        let where2 = match prev.src_path {
+          Some(p) -> if cx1.src_path == Some(p) { "" } else { " (previous impl in " ++ p ++ ")" }
+          None -> ""
+        }
+        let hint = if prev.derived {
+          "`" ++ ty_show(cx1.adts, subject) ++ "` already derives " ++ tr.name ++
+            "; drop the derive or this impl"
+        } else {
+          "the program allows one impl per trait and type"
+        }
+        cx1 = cerr_h(cx1, "duplicate impl: `" ++ tr.name ++ "[" ++ ty_show(cx1.adts, subject) ++
+            "]` is already implemented" ++ where2, d.tlo, d.thi, hint)
+        continue
+      }
+      None -> ()
+    }
+    var inst: Map[Int, Ty] = map.empty()
+    match tr.tvar {
+      TyVar(_, vid) -> { inst = map.insert(inst, vid, subject) }
+      _ -> ()
+    }
+    let em0: Map[Int, Eff] = map.empty()
+    var provided: List[String] = []
+    for me in d.methods {
+      var ms: Option[MethodSig] = None
+      for entry in tr.methods {
+        let (mname, msig) = entry
+        if mname == me.name { ms = Some(msig) }
+      }
+      let msv = match ms {
+        None -> {
+          var mnames: List[String] = []
+          for entry in tr.methods {
+            let (mname, _) = entry
+            mnames = mnames ++ [mname]
+          }
+          cx1 = cerr_o(cx1, "trait `" ++ tr.name ++ "` has no method `" ++ me.name ++ "`",
+            me.nlo, me.nhi, suggest.hint(me.name, mnames))
+          continue
+        }
+        Some(v) -> v
+      }
+      var already = false
+      for pn in provided {
+        if pn == me.name { already = true }
+      }
+      if already {
+        cx1 = cerr(cx1, "method `" ++ me.name ++ "` is implemented twice in this impl",
+          me.nlo, me.nhi)
+        continue
+      }
+      var non_io = false
+      for a in me.effs {
+        if a != "io" { non_io = true }
+      }
+      if non_io {
+        cx1 = cerr_h(cx1, "impl methods cannot declare effect variables", me.nlo, me.nhi,
+          "an impl method is pure or !io")
+        continue
+      }
+      let saved_ev = cx1.current_eff_vars
+      let empty_ev2: Map[String, Eff] = map.empty()
+      cx1 = Cx { ..cx1, current_eff_vars: empty_ev2 }
+      var ptys: List[Ty] = []
+      for p in me.params {
+        let (cx3, t) = resolve_type(cx1, p.tref)
+        cx1 = cx3
+        ptys = ptys ++ [t]
+      }
+      let (cx4, ret) = match me.ret {
+        Some(r) -> resolve_type(cx1, r)
+        None -> (cx1, TyError)
+      }
+      cx1 = cx4
+      let eff = if len(me.effs) == 0 { EPure } else { EIo }
+      let leaked = map.size(cx1.current_eff_vars) > 0
+      cx1 = Cx { ..cx1, current_eff_vars: saved_ev }
+      if leaked {
+        cx1 = cerr(cx1, "impl method signatures cannot carry effect variables", me.nlo, me.nhi)
+        continue
+      }
+      let inst2 = inst
+      let adts2 = cx1.adts
+      let want = map(msv.sig.param_tys, fn(t) => subst(t, inst2, em0))
+      let want_ret = subst(msv.sig.ret, inst2, em0)
+      let want_render = "fn " ++ me.name ++ "(" ++
+        join(map(want, fn(t) => ty_show(adts2, t)), ", ") ++ ") -> " ++
+        ty_show(cx1.adts, want_ret) ++ eff_suffix(msv.sig.eff)
+      if ptys != want || ret != want_ret {
+        cx1 = cerr_h(cx1, "`" ++ me.name ++ "` does not match the trait's signature",
+          me.nlo, me.nhi, "trait `" ++ tr.name ++ "` declares it as " ++ want_render)
+      } else if not eff_subsumes(msv.sig.eff, eff) {
+        cx1 = cerr_h(cx1, "`" ++ me.name ++ "` is declared !" ++ eff_show2(eff) ++
+            " but trait `" ++ tr.name ++ "` declares it pure", me.nlo, me.nhi,
+          "drop !" ++ eff_show2(eff) ++ " here, or declare the trait method !" ++ eff_show2(eff))
+      }
+      provided = provided ++ [me.name]
+    }
+    var missing: List[MethodSig] = []
+    for entry in tr.methods {
+      let (mname, msig) = entry
+      var have = false
+      for pn in provided {
+        if pn == mname { have = true }
+      }
+      if not msig.has_default && not have { missing = missing ++ [msig] }
+    }
+    if len(missing) > 0 {
+      var names2: List[String] = []
+      var renders: List[String] = []
+      for msig in missing {
+        names2 = names2 ++ ["`" ++ msig.sig.name ++ "`"]
+        var ps: List[String] = []
+        var i = 0
+        for pt in msig.sig.param_tys {
+          let pn = match get(msig.sig.param_names, i) {
+            Some(n) -> n
+            None -> "_"
+          }
+          ps = ps ++ [pn ++ ": " ++ ty_show(cx1.adts, subst(pt, inst, em0))]
+          i = i + 1
+        }
+        renders = renders ++ ["fn " ++ msig.sig.name ++ "(" ++ join(ps, ", ") ++ ") -> " ++
+            ty_show(cx1.adts, subst(msig.sig.ret, inst, em0)) ++ eff_suffix(msig.sig.eff)]
+      }
+      cx1 = cerr_h(cx1, "impl `" ++ tr.name ++ "[" ++ ty_show(cx1.adts, subject) ++
+          "]` is missing " ++ join(names2, ", "), d.tlo, d.thi,
+        "provide: " ++ join(renders, "; "))
+    }
+    let info = ImplI {
+      trait_id: tid,
+      subject: subject,
+      lo: d.lo,
+      hi: d.hi,
+      derived: false,
+      owner: cx1.owner_class,
+      src_path: cx1.src_path,
+      provided: provided
+    }
+    cx1 = Cx {
+      ..cx1,
+      impl_table: map.insert(cx1.impl_table, (tid, subject), info),
+      local_impls: cx1.local_impls ++ [info]
+    }
+  }
+  # derive Ord field check, after every impl is known
+  di = 0
+  for d in module_types(m) {
+    let sh = match shells[di] {
+      None -> {
+        di = di + 1
+        continue
+      }
+      Some(s) -> s
+    }
+    let info = adt_of(cx1.adts, sh.adt)
+    let derived_ord = match map.get(cx1.impl_table, (ORD_ID, TyAdt(sh.adt, []))) {
+      Some(ii) -> info.derives_ord && ii.derived
+      None -> false
+    }
+    if not derived_ord {
+      di = di + 1
+      continue
+    }
+    var dlo = d.nlo
+    var dhi = d.nhi
+    for b in d.derives {
+      if b.name == "Ord" {
+        dlo = b.lo
+        dhi = b.hi
+      }
+    }
+    for ci in info.ctors {
+      for f in ci.fields {
+        let scalar_ok = f.ty == TyInt || f.ty == TyFloat || f.ty == TyString
+        let adt_ok = match f.ty {
+          TyAdt(_, _) -> map.has(cx1.impl_table, (ORD_ID, f.ty))
+          _ -> false
+        }
+        if not scalar_ok && not adt_ok {
+          cx1 = cerr_h(cx1, "cannot derive Ord for `" ++ info.name ++ "`: field `" ++
+              f.name ++ "` of type " ++ ty_show(cx1.adts, f.ty) ++ " is not orderable",
+            dlo, dhi, "orderable fields are Int, Float, String, and types with an Ord impl")
+        }
+      }
+    }
+    di = di + 1
+  }
+  cx1
+}
+
+## Render a concrete effect for the impl-method error text ("io").
+fn eff_show2(e: Eff) -> String = if e == EIo { "io" } else { "" }
+
+test "impl registration enforces coherence and signature matching" {
+  # trait Eq4[T] { fn eq4(a: T, b: T) -> Bool }  impl Eq4[Int] twice + one bad sig
+  let tm = TraitMethod {
+    name: "eq4",
+    params: [
+      Param { name: "a", tref: TNamed("T", [], 22, 23), lo: 19, hi: 20 },
+      Param { name: "b", tref: TNamed("T", [], 28, 29), lo: 25, hi: 26 }
+    ],
+    ret: TNamed("Bool", [], 34, 38),
+    effs: [],
+    body: no_body(),
+    lo: 14,
+    hi: 38,
+    nlo: 17,
+    nhi: 20
+  }
+  fn good_impl(lo: Int) -> Decl = DImpl("Eq4", lo, lo + 3, TNamed("Int", [], lo + 4, lo + 7), [FnDecl {
+    is_pub: false,
+    name: "eq4",
+    tparams: no_tparams(),
+    params: [
+      Param { name: "a", tref: TNamed("Int", [], 0, 1), lo: 0, hi: 1 },
+      Param { name: "b", tref: TNamed("Int", [], 2, 3), lo: 2, hi: 3 }
+    ],
+    ret: Some(TNamed("Bool", [], 4, 8)),
+    effs: no_effs(),
+    body: EBool(true, 9, 13),
+    lo: 0,
+    hi: 13,
+    nlo: 0,
+    nhi: 3
+  }], lo, lo + 20)
+  let m = Module { decls: [
+    DTrait("Eq4", "T", 10, 11, [tm], false, 0, 40, 6, 9),
+    good_impl(50),
+    good_impl(80)
+  ] }
+  var cx = seed_prelude(test_cx())
+  cx = pass_register_traits(cx, m)
+  let none_shells: List[Option[Shell]] = []
+  cx = pass_register_impls(cx, m, none_shells)
+  assert len(cx.diags) == 1
+  assert str.contains(cx.diags[0].msg, "duplicate impl: `Eq4[Int]`")
+  assert len(cx.local_impls) == 1
+  # a missing method reports with the expected render
+  let m2 = Module { decls: [
+    DTrait("Eq5", "T", 10, 11, [TraitMethod { ..tm, name: "eq5" }], false, 0, 40, 6, 9),
+    DImpl("Eq5", 50, 53, TNamed("Int", [], 54, 57), no_fn_decls(), 50, 70)
+  ] }
+  var cx2 = seed_prelude(test_cx())
+  cx2 = pass_register_traits(cx2, m2)
+  cx2 = pass_register_impls(cx2, m2, none_shells)
+  assert len(cx2.diags) == 1
+  assert str.contains(cx2.diags[0].msg, "is missing `eq5`")
+  assert cx2.diags[0].hint == "provide: fn eq5(a: Int, b: Int) -> Bool"
 }
