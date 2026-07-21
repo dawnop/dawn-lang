@@ -2468,3 +2468,203 @@ test "unary checking types and poisons" {
   assert t2 == TyError
   assert cx2.diags[0].msg == "negation expects a number, got String"
 }
+
+## Satisfy one trait requirement at a use site (the Kotlin resolveWitness,
+## specialized here for Ord over `<' family operators): a concrete subject
+## resolves through the impl table; the caller's own rigid type parameter
+## forwards the caller's dictionary (which every enclosing lambda captures).
+## Returns has_ord for the typed node.
+pub fn resolve_ord_witness(cx: Cx, t: Ty, lo: Int, hi: Int) -> (Cx, Bool) = {
+  if is_errorish(t) { return (cx, false) }
+  match t {
+    TyVar(_, vid) ->
+      match map.get(cx.dict_syms, (vid, ORD_ID)) {
+        None -> {
+          let cx1 = cerr_h(cx, "values of type " ++ ty_show(cx.adts, t) ++
+              " cannot be ordered", lo, hi, "add the bound: [" ++ ty_show(cx.adts, t) ++ ": Ord]")
+          (cx1, false)
+        }
+        Some(sym) -> {
+          var stack: List[LambdaCx] = []
+          for lc in cx.lambda_stack {
+            var caps = lc.captures
+            var have = false
+            for c in caps {
+              if c == sym { have = true }
+            }
+            if not have { caps = caps ++ [sym] }
+            stack = stack ++ [LambdaCx { ..lc, captures: caps }]
+          }
+          (Cx { ..cx, lambda_stack: stack }, true)
+        }
+      }
+    _ ->
+      match map.get(cx.impl_table, (ORD_ID, t)) {
+        Some(_) -> (cx, true)
+        None -> {
+          let hint: Option[String] = match t {
+            TyAdt(aid, _) ->
+              if len(adt_of(cx.adts, aid).tparams) == 0 {
+                let ts = ty_show(cx.adts, t)
+                Some("implement it: impl Ord[" ++ ts ++ "] { fn cmp(a: " ++ ts ++ ", b: " ++
+                    ts ++ ") -> Int = ... }")
+              } else {
+                None
+              }
+            _ -> None
+          }
+          (cerr_o(cx, "values of type " ++ ty_show(cx.adts, t) ++ " cannot be ordered",
+            lo, hi, hint), false)
+        }
+      }
+  }
+}
+
+## Binary operators over already-checked operand types (the Kotlin checkBinary
+## after both sides are typed; short-circuit evaluation order is the caller's
+## job since it must thread Cx through left then right).
+pub fn check_binary_typed(
+  cx: Cx,
+  op: BinOp,
+  lt: Ty,
+  rt: Ty,
+  left: TExpr,
+  right: TExpr,
+  llo: Int,
+  lhi: Int,
+  rlo: Int,
+  rhi: Int,
+  olo: Int,
+  ohi: Int,
+  lo: Int,
+  hi: Int
+) -> (Cx, Ty, TExpr) = {
+  let node = fn(has_ord: Bool) => XBinary(tbin_of(op), left, right, has_ord, olo, ohi, lo, hi)
+  # one side already failed: pick a plausible result type, stay silent
+  if is_errorish(lt) || is_errorish(rt) {
+    let t = match op {
+      OpAdd | OpSub | OpMul | OpDiv | OpMod ->
+        if is_numeric(lt) { lt } else if is_numeric(rt) { rt } else { TyError }
+      OpBand | OpBor | OpBxor | OpShl | OpShr | OpUshr -> TyInt
+      OpConcat ->
+        match lt {
+          TyList(_) -> lt
+          _ ->
+            match rt {
+              TyList(_) -> rt
+              _ -> TyString
+            }
+        }
+      _ -> TyBool
+    }
+    return (cx, t, node(false))
+  }
+  match op {
+    OpAdd | OpSub | OpMul | OpDiv | OpMod -> {
+      if not is_numeric(lt) {
+        return (cerr(cx, "arithmetic expects numbers, left side is " ++ ty_show(cx.adts, lt),
+          llo, lhi), TyError, node(false))
+      }
+      if lt != rt {
+        let hint: Option[String] = if is_numeric(rt) {
+          Some("there are no implicit conversions; use to_float() (M1) or unify the literal types")
+        } else {
+          None
+        }
+        return (cerr_o(cx, "both sides must have the same type: " ++ ty_show(cx.adts, lt) ++
+            " vs " ++ ty_show(cx.adts, rt), olo, ohi, hint), TyError, node(false))
+      }
+      (cx, lt, node(false))
+    }
+    OpBand | OpBor | OpBxor | OpShl | OpShr | OpUshr -> {
+      if lt != TyInt {
+        return (cerr(cx, "bitwise operators expect Int, left side is " ++ ty_show(cx.adts, lt),
+          llo, lhi), TyError, node(false))
+      }
+      if rt != TyInt {
+        return (cerr(cx, "bitwise operators expect Int, right side is " ++ ty_show(cx.adts, rt),
+          rlo, rhi), TyError, node(false))
+      }
+      (cx, TyInt, node(false))
+    }
+    OpConcat -> {
+      if lt == TyString && rt == TyString { return (cx, TyString, node(false)) }
+      if lt == TyBytes && rt == TyBytes { return (cx, TyBytes, node(false)) }
+      let both_lists = match lt {
+        TyList(_) ->
+          match rt {
+            TyList(_) -> true
+            _ -> false
+          }
+        _ -> false
+      }
+      if both_lists {
+        if lt != rt {
+          return (cerr(cx, "`++` needs lists of the same element type: " ++
+              ty_show(cx.adts, lt) ++ " vs " ++ ty_show(cx.adts, rt), olo, ohi),
+            TyError, node(false))
+        }
+        return (cx, lt, node(false))
+      }
+      (cerr_h(cx, "`++` concatenates Strings, Bytes or Lists, got " ++ ty_show(cx.adts, lt) ++
+          " ++ " ++ ty_show(cx.adts, rt), olo, ohi,
+        "use + for numbers; interpolation \"{x}{y}\" also builds strings"), TyError, node(false))
+    }
+    OpEq | OpNeq -> {
+      if contains_fn(lt) || contains_fn(rt) {
+        return (cerr_h(cx, "functions cannot be compared", olo, ohi,
+          "compare the values they produce, not the functions themselves"), TyError, node(false))
+      }
+      if lt != rt {
+        return (cerr(cx, "== requires both sides to have the same type: " ++
+            ty_show(cx.adts, lt) ++ " vs " ++ ty_show(cx.adts, rt), olo, ohi), TyError, node(false))
+      }
+      (cx, TyBool, node(false))
+    }
+    OpLt | OpLe | OpGt | OpGe -> {
+      if lt != rt {
+        return (cerr(cx, "comparison requires both sides to have the same type: " ++
+            ty_show(cx.adts, lt) ++ " vs " ++ ty_show(cx.adts, rt), olo, ohi), TyError, node(false))
+      }
+      # native fast path; Cursor orders too (spec §11)
+      if lt == TyInt || lt == TyFloat || lt == TyString || lt == TyCursor {
+        return (cx, TyBool, node(false))
+      }
+      let (cx1, has_ord) = resolve_ord_witness(cx, lt, olo, ohi)
+      (cx1, TyBool, node(has_ord))
+    }
+    OpAnd | OpOr -> {
+      if lt != TyBool {
+        return (cerr(cx, "logical operators expect Bool, left side is " ++ ty_show(cx.adts, lt),
+          llo, lhi), TyError, node(false))
+      }
+      if rt != TyBool {
+        return (cerr(cx, "logical operators expect Bool, right side is " ++ ty_show(cx.adts, rt),
+          rlo, rhi), TyError, node(false))
+      }
+      (cx, TyBool, node(false))
+    }
+  }
+}
+
+test "binary checking covers the operator families" {
+  let cx = test_cx()
+  let l = XInt(1, 0, 1)
+  let r = XInt(2, 4, 5)
+  let (cx1, t1, _) = check_binary_typed(cx, OpAdd, TyInt, TyInt, l, r, 0, 1, 4, 5, 2, 3, 0, 5)
+  assert t1 == TyInt
+  let (cx2, t2, _) = check_binary_typed(cx, OpAdd, TyInt, TyFloat, l, r, 0, 1, 4, 5, 2, 3, 0, 5)
+  assert t2 == TyError
+  assert str.contains(cx2.diags[0].msg, "both sides must have the same type")
+  let (cx3, t3, _) = check_binary_typed(cx, OpLt, TyInt, TyInt, l, r, 0, 1, 4, 5, 2, 3, 0, 5)
+  assert t3 == TyBool
+  assert len(cx3.diags) == 0
+  # ordering a Bool needs an Ord impl and there is none
+  let (cx4, t4, _) = check_binary_typed(cx, OpLt, TyBool, TyBool, l, r, 0, 1, 4, 5, 2, 3, 0, 5)
+  assert cx4.diags[0].msg == "values of type Bool cannot be ordered"
+  let (cx5, t5, _) = check_binary_typed(cx, OpConcat, TyString, TyString, l, r, 0, 1, 4, 5, 2, 3, 0, 5)
+  assert t5 == TyString
+  let (cx6, t6, _) = check_binary_typed(cx, OpEq,
+    TyFn([], TyUnit, EPure), TyFn([], TyUnit, EPure), l, r, 0, 1, 4, 5, 2, 3, 0, 5)
+  assert cx6.diags[0].msg == "functions cannot be compared"
+}
