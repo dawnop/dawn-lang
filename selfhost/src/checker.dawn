@@ -3931,3 +3931,123 @@ pub fn needs_expected(cx: Cx, e: Expr) -> Bool =
       }
     _ -> false
   }
+
+## A top-level function or builtin used as a value; generics need the expected
+## type (the Kotlin checkFnValue).
+pub fn check_fn_value(
+  cx: Cx,
+  name: String,
+  f: Sig,
+  expected: Option[Ty],
+  lo: Int,
+  hi: Int
+) -> (Cx, Ty, TExpr) = {
+  var has_bounds = false
+  for bs in f.constraints {
+    if len(bs) > 0 { has_bounds = true }
+  }
+  if has_bounds {
+    let ps = join(f.param_names, ", ")
+    let msg = match f.trait_id {
+      Some(_) -> "trait method `" ++ name ++ "` cannot be used as a value"
+      None -> "`" ++ name ++ "` has trait bounds and cannot be used as a value"
+    }
+    return (cerr_h(cx, msg, lo, hi,
+      "wrap it in a lambda: fn(" ++ ps ++ ") => " ++ name ++ "(" ++ ps ++ ")"),
+      TyError, XError(lo, hi))
+  }
+  let declared = TyFn(f.param_tys, f.ret, f.eff)
+  let eff_is_var = match f.eff {
+    EffVar(_, _) -> true
+    _ -> false
+  }
+  let node = fn(t: Ty) => XFnValue(f.owner, name, f.is_builtin, t, lo, hi)
+  if len(f.tparams) == 0 && not eff_is_var {
+    return (cx, declared, node(declared))
+  }
+  let exp: Option[(List[Ty], Ty, Eff)] = match expected {
+    Some(TyFn(eps, eret, eeff)) ->
+      if len(eps) == len(f.param_tys) { Some((eps, eret, eeff)) } else { None }
+    _ -> None
+  }
+  let (eps, eret, eeff) = match exp {
+    None ->
+      return (cerr_h(cx, "cannot infer the type parameter(s) of `" ++ name ++
+          "` used as a value here", lo, hi,
+        "wrap it in a lambda with annotated parameters: fn(x: Int) => " ++ name ++ "(x)"),
+        TyError, XError(lo, hi))
+    Some(v) -> v
+  }
+  var m: Map[Int, Ty] = map.empty()
+  var em: Map[Int, Eff] = map.empty()
+  var i = 0
+  for d in f.param_tys {
+    let a = eps[i]
+    if is_concrete(cx, a) {
+      let (m2, em2, _) = unify_into(cx, d, a, m, em)
+      m = m2
+      em = em2
+    }
+    i = i + 1
+  }
+  if is_concrete(cx, eret) {
+    let (m3, em3, _) = unify_into(cx, f.ret, eret, m, em)
+    m = m3
+    em = em3
+  }
+  var unbound: List[String] = []
+  for tp in f.tparams {
+    match tp {
+      TyVar(n, vid) -> if not map.has(m, vid) { unbound = unbound ++ [n] }
+      _ -> ()
+    }
+  }
+  if len(unbound) > 0 {
+    return (cerr_h(cx, "cannot infer type parameter(s) " ++ join(unbound, ", ") ++ " for `" ++
+        name ++ "` used as a value", lo, hi, "wrap it in a lambda with annotated parameters"),
+      TyError, XError(lo, hi))
+  }
+  match f.eff {
+    EffVar(_, eid) -> if not map.has(em, eid) { em = map.insert(em, eid, eeff) }
+    _ -> ()
+  }
+  var cx1 = cx
+  if f.is_builtin && name == "to_string" {
+    let t0 = match f.tparams[0] {
+      TyVar(_, vid) ->
+        match map.get(m, vid) {
+          Some(t) -> t
+          None -> TyError
+        }
+      _ -> TyError
+    }
+    if not is_showable(cx1, t0) && not is_errorish(t0) {
+      cx1 = cerr_h(cx1, "cannot print a value of type " ++ ty_show(cx1.adts, t0), lo, hi,
+        show_hint(cx1, t0))
+    }
+  }
+  let inst = subst(declared, m, em)
+  (cx1, inst, node(inst))
+}
+
+test "fn values instantiate from the expected type" {
+  let cx = test_cx()
+  let bs = builtins()
+  # len: List[T] -> Int as a value with expected fn(List[Int]) -> Int
+  let len_sig = map.get(bs, "len").expect("len")
+  let (cx1, t1, _) = check_fn_value(cx, "len", len_sig,
+    Some(TyFn([TyList(TyInt)], TyInt, EPure)), 0, 3)
+  assert len(cx1.diags) == 0
+  assert t1 == TyFn([TyList(TyInt)], TyInt, EPure)
+  # without context the generic cannot instantiate
+  let (cx2, t2, _) = check_fn_value(cx, "len", len_sig, None, 0, 3)
+  assert str.contains(cx2.diags[0].msg, "cannot infer the type parameter(s) of `len`")
+  # a bounded builtin refuses to be a value
+  let sort_sig = map.get(bs, "sort").expect("sort")
+  let (cx3, t3, _) = check_fn_value(cx, "sort", sort_sig, None, 0, 4)
+  assert cx3.diags[0].msg == "`sort` has trait bounds and cannot be used as a value"
+  # a non-generic sig passes through untouched
+  let join_sig = map.get(bs, "join").expect("join")
+  let (cx4, t4, _) = check_fn_value(cx, "join", join_sig, None, 0, 4)
+  assert t4 == TyFn([TyList(TyString), TyString], TyString, EPure)
+}
