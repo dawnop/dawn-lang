@@ -7,6 +7,9 @@ import dawn.diag.SourceFile
 import dawn.diag.Span
 import dawn.diag.Suggest
 
+/** The builtins that create Map/Set entries — where key-type validity is enforced (spec §2.2). */
+private val KEYED_CREATORS = setOf("map_empty", "map_from", "map_insert", "set_empty", "set_from", "set_insert")
+
 /**
  * Type and effect checking (the M0 subset of spec §2/§4/§5/§6).
  * Types and resolved symbols are annotated back onto the AST for codegen and
@@ -1066,14 +1069,18 @@ class Checker(
                 sink.error("Map takes exactly two type arguments: Map[K, V]", ref.span)
                 return TError
             }
-            return TMap(resolveType(ref.args[0], tparams, effVars), resolveType(ref.args[1], tparams, effVars))
+            val k = resolveType(ref.args[0], tparams, effVars)
+            checkKeyType(k, ref.args[0].span)
+            return TMap(k, resolveType(ref.args[1], tparams, effVars))
         }
         if (ref.name == "Set") {
             if (ref.args.size != 1) {
                 sink.error("Set takes exactly one type argument: Set[T]", ref.span)
                 return TError
             }
-            return TSet(resolveType(ref.args[0], tparams, effVars))
+            val el = resolveType(ref.args[0], tparams, effVars)
+            checkKeyType(el, ref.args[0].span)
+            return TSet(el)
         }
         Type.named(ref.name)?.let {
             if (ref.args.isNotEmpty()) {
@@ -1856,6 +1863,46 @@ class Checker(
         else -> false
     }
 
+    /**
+     * Map/Set keys need a hash that agrees with structural equality (spec §2.2). Two base
+     * types can never provide one, anywhere inside the key: Float (NaN and -0.0 make `==`
+     * and boxed equals disagree) and Bytes (byte[] hashes by identity, not content).
+     * Values are unrestricted; a Map nested *inside a key* is checked on both sides
+     * because its values join the outer key's equality. TVar passes — the concrete
+     * creation site is where the rule bites.
+     */
+    private fun invalidKeyPart(t: Type, seen: MutableSet<String> = HashSet()): Type? = when (t) {
+        TFloat, Type.TBytes -> t
+        is TList -> invalidKeyPart(t.elem, seen)
+        is TSet -> invalidKeyPart(t.elem, seen)
+        is TMap -> invalidKeyPart(t.key, seen) ?: invalidKeyPart(t.value, seen)
+        is TTuple -> t.elems.firstNotNullOfOrNull { invalidKeyPart(it, seen) }
+        is TAdt -> if (!seen.add(t.info.name)) null else {
+            val m = t.info.typeParams.zip(t.args).toMap()
+            t.info.ctors.asSequence()
+                .flatMap { it.fields.asSequence() }
+                .firstNotNullOfOrNull { invalidKeyPart(subst(it.type, m), seen) }
+        }
+        else -> null
+    }
+
+    /** one report per offending key type per module — the annotation and every seeded call site would otherwise repeat it */
+    private val reportedKeyTypes = HashSet<String>()
+
+    private fun checkKeyType(keyT: Type, span: Span) {
+        if (keyT.isErrorish) return
+        val bad = invalidKeyPart(keyT) ?: return
+        if (!reportedKeyTypes.add(keyT.toString())) return
+        val inside = if (bad == keyT) "" else " (inside `$keyT`)"
+        val why = if (bad == TFloat)
+            "NaN and -0.0 give Float two different equalities, so no hash can agree with `==`"
+        else "Bytes hashes by identity, not content"
+        val hint = if (bad == TFloat)
+            "key by an Int encoding (scaled integer, bits) or a String rendering instead"
+        else "key by a String instead: decode(b, \"UTF-8\") or a hex rendering"
+        sink.error("`$bad` cannot be part of a Map/Set key type$inside: $why", span, hint)
+    }
+
     /** A targeted hint for why [t] is not printable. */
     private fun showHint(t: Type): String = when {
         t is TAdt && !t.info.derivesShow -> "add `derive Show` to `type ${t.info.name}`"
@@ -1963,6 +2010,15 @@ class Checker(
             if (target == TInt || target == TFloat || target == TBool)
                 sink.error("`cast` target must be a reference type, not $target", e.span,
                     "cast reclaims an erased Java Object via CHECKCAST; primitive targets aren't supported")
+        }
+        // entry creators for Map/Set: the instantiated key type must be able to hash
+        // consistently with `==` (spec §2.2) — Float/Bytes anywhere inside are rejected
+        if (sig.isBuiltin && sig.name in KEYED_CREATORS) {
+            when (val ret = subst(sig.ret, map)) {
+                is TMap -> checkKeyType(ret.key, e.span)
+                is TSet -> checkKeyType(ret.elem, e.span)
+                else -> {}
+            }
         }
         // instantiate the callee's effect: an unbound effect variable means pure
         val calleeEff = when (val ce = sig.eff) {

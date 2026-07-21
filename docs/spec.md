@@ -143,7 +143,10 @@ println("got $n items, first = ${list.get(0)}")
 - **持久（不可变）接口**：`map_insert`/`map_remove` 返回新映射，原值不变。
 - **键类型**可以是任何具**结构相等**的类型（`Int`/`String`/`Bool`/元组/ADT/record）——
   不再限于 `Int`/`String`。实现要求这些类型有与结构相等一致的哈希（编译器为 ADT/元组/
-  record 自动生成 `hashCode`）。
+  record 自动生成 `hashCode`）。**`Float` 与 `Bytes` 不得出现在键类型的任何位置**
+  （含嵌套在元组/ADT/record/容器里，作键的内层 `Map` 连值位置也算）——编译错误：
+  `Float` 因 NaN/`-0.0` 有两套相等（§4.3），`Bytes` 的哈希是引用同一性；两者都给不出
+  与 `==` 一致的哈希。检查落在类型标注与 `map_*`/`set_*` 创建函数的实例化点。
 - **迭代顺序 = 插入顺序**，确定且 JVM/native 一致（`map_keys`/`map_entries`/`set_to_list`
   按插入序）。`map_insert` 遇已存在的键**替换值、保留原插入位置**。
 - **相等与顺序无关**：两个键值对相同的 `Map` 相等，无论插入次序。
@@ -818,8 +821,8 @@ fn slurp(p: String) -> String !io = {
 `byte_len`、`byte_at(b, i) -> Int`（0..255，越界 panic）、`byte_slice(b, start, end)`
 （`[start,end)`，下标 clamp 进范围）、`byte_index_of(b, needle, from) -> Option[Int]`。
 `Bytes ++ Bytes` 拼接、`==`/`!=` 按**内容**比较（`Show` 渲染为 `<N bytes>` 摘要）。
-`byte[]` 的 JVM `hashCode` 是引用同一性，故 **`Bytes` 不宜作 Map/Set 键**（用 `decode` 出的
-String 或十六进制键代替）。`Bytes` 不参与 comptime 常量折叠，也不能作 bare 一等函数值
+`byte[]` 的 JVM `hashCode` 是引用同一性，与内容 `==` 不一致，故 **`Bytes` 作 Map/Set 键
+（或出现在键类型内部）是编译错误**（§2.2；用 `decode` 出的 String 或十六进制键代替）。`Bytes` 不参与 comptime 常量折叠，也不能作 bare 一等函数值
 （用 lambda 包一层）。
 
 **不透明值收窄回具体引用形参**：擦除泛型的返回（§9.2）落成不透明 `Object`，但业务
