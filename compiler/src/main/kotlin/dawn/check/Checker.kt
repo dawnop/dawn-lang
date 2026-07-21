@@ -7,9 +7,6 @@ import dawn.diag.SourceFile
 import dawn.diag.Span
 import dawn.diag.Suggest
 
-/** The builtins that create Map/Set entries — where key-type validity is enforced (spec §2.2). */
-private val KEYED_CREATORS = setOf("map_empty", "map_from", "map_insert", "set_empty", "set_from", "set_insert")
-
 /**
  * Type and effect checking (the M0 subset of spec §2/§4/§5/§6).
  * Types and resolved symbols are annotated back onto the AST for codegen and
@@ -2048,22 +2045,31 @@ class Checker(
                 sink.error("`cast` target must be a reference type, not $target", e.span,
                     "cast reclaims an erased Java Object via CHECKCAST; primitive targets aren't supported")
         }
-        // entry creators for Map/Set: the instantiated key type must be able to hash
-        // consistently with `==` (spec §2.2) — Float/Bytes anywhere inside are rejected
-        if (sig.isBuiltin && sig.name in KEYED_CREATORS) {
-            when (val ret = subst(sig.ret, map)) {
-                is TMap -> checkKeyType(ret.key, e.span)
-                is TSet -> checkKeyType(ret.elem, e.span)
-                else -> {}
-            }
-        }
         // instantiate the callee's effect: an unbound effect variable means pure
         val calleeEff = when (val ce = sig.eff) {
             is Eff.Var -> effMap[ce] ?: Eff.Pure
             else -> ce
         }
         recordEffect(calleeEff, e.calleeSpan, e.callee)
-        return subst(sig.ret, map, effMap)
+        val ret = subst(sig.ret, map, effMap)
+        // a generic call is where a concrete Map/Set key type is first formed from
+        // inference (spec §2.2) — check the instantiated result by type, whoever the
+        // callee is (builtin, std wrapper, user fn); annotations go through resolveType
+        if (sig.typeParams.isNotEmpty()) checkKeyTypesIn(ret, e.span)
+        return ret
+    }
+
+    /** Every Map key / Set element inside an instantiated type must be a valid key (spec §2.2). */
+    private fun checkKeyTypesIn(t: Type, span: Span) {
+        when (t) {
+            is TMap -> { checkKeyType(t.key, span); checkKeyTypesIn(t.value, span) }
+            is TSet -> checkKeyType(t.elem, span)
+            is TList -> checkKeyTypesIn(t.elem, span)
+            is TTuple -> t.elems.forEach { checkKeyTypesIn(it, span) }
+            is TAdt -> t.args.forEach { checkKeyTypesIn(it, span) }
+            is TFn -> { t.params.forEach { checkKeyTypesIn(it, span) }; checkKeyTypesIn(t.ret, span) }
+            else -> {}
+        }
     }
 
     private fun checkCtorCall(e: CtorCall, expected: Type?): Type {
