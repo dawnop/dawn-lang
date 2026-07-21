@@ -68,7 +68,51 @@ class CodeGen(
          * so `use java` can reflect on them from std. They ship in the compiler jar
          * and are copied into every built program (see [vendorRuntimeClasses]).
          */
-        val VENDORED_RT_CLASSES = listOf("dawn/rt/StdStrings", "dawn/rt/StdBytes", "dawn/rt/StdIo", "dawn/rt/DawnList")
+        // Every Java-source runtime class must be vendored into built programs:
+        // the ASM-generated rt helpers ride along in [generate], but these exist
+        // only in the compiler artifact, which a standalone `java -jar` cannot
+        // see. Each outer class is bundled together with its nested/anonymous
+        // classes, discovered next to its .class resource — a hand-kept flat
+        // list is how DawnMap (and its $Node family) slipped through: the gap is
+        // invisible to `dawn run`/`dawn test`, which keep the compiler on the
+        // class path, and fails only standalone.
+        val VENDORED_RT_OUTERS = listOf("StdStrings", "StdBytes", "StdIo", "DawnList", "DawnMap", "DawnSet")
+
+        /** the full vendored surface: every outer class plus its nested classes */
+        val VENDORED_RT_CLASSES: List<String> by lazy {
+            VENDORED_RT_OUTERS.flatMap { rtClassFamily(it).keys }
+        }
+
+        /** `dawn/rt/<outer>.class` plus every `dawn/rt/<outer>$*.class` beside it */
+        private fun rtClassFamily(outer: String): Map<String, ByteArray> {
+            val url = CodeGen::class.java.getResource("/dawn/rt/$outer.class")
+                ?: error("runtime class `dawn/rt/$outer` is missing from the compiler artifact")
+            val out = LinkedHashMap<String, ByteArray>()
+            fun put(fileName: String, bytes: ByteArray) {
+                out["dawn/rt/" + fileName.removeSuffix(".class")] = bytes
+            }
+            fun matches(fileName: String) =
+                fileName == "$outer.class" || (fileName.startsWith("$outer\$") && fileName.endsWith(".class"))
+            if (url.protocol == "file") {
+                val dir = java.io.File(url.toURI()).parentFile
+                for (f in (dir.listFiles() ?: emptyArray()).filter { matches(it.name) }.sortedBy { it.name }) {
+                    put(f.name, f.readBytes())
+                }
+            } else {
+                val conn = url.openConnection() as java.net.JarURLConnection
+                conn.useCaches = false // we close the jar below; never close the shared cached one
+                conn.jarFile.use { jar ->
+                    for (e in jar.entries().asSequence().sortedBy { it.name }) {
+                        val name = e.name
+                        if (name.startsWith("dawn/rt/") && matches(name.removePrefix("dawn/rt/"))) {
+                            put(name.removePrefix("dawn/rt/"), jar.getInputStream(e).use { it.readBytes() })
+                        }
+                    }
+                }
+            }
+            check(out.containsKey("dawn/rt/$outer")) { "vendoring found no class file for dawn/rt/$outer" }
+            return out
+        }
 
         const val PANIC_CLASS = "dawn/rt/PanicError"
         const val LISTS_CLASS = "dawn/rt/Lists"
@@ -259,11 +303,7 @@ class CodeGen(
      * jar self-contained, which is the property that makes this approach viable.
      */
     private fun vendorRuntimeClasses(out: MutableMap<String, ByteArray>) {
-        for (name in VENDORED_RT_CLASSES) {
-            val bytes = CodeGen::class.java.getResourceAsStream("/$name.class")?.use { it.readBytes() }
-                ?: error("runtime class `$name` is missing from the compiler jar")
-            out[name] = bytes
-        }
+        for (outer in VENDORED_RT_OUTERS) out.putAll(rtClassFamily(outer))
     }
 
     /**

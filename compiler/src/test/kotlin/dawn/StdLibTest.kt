@@ -249,6 +249,35 @@ class StdLibTest {
     }
 
     @Test
+    fun `a built program carries the map runtime and runs without the compiler`(@TempDir dir: File) {
+        // The regression this guards: dawn/rt/DawnMap (and its nested Node
+        // family) exist only in the compiler artifact, so an unvendored class is
+        // invisible to every in-JVM test and fails only in a standalone run.
+        val analysis = analyze(
+            """
+            use std/map
+
+            pub fn main() -> Unit !io = println("${'$'}{map.size(map.insert(map.empty(), 1, 2))}")
+            """.trimIndent(),
+        )
+        assertFalse(analysis.hasErrors)
+        val classes = CodeGen(analysis.module, "prog").generate()
+        assertTrue(classes.keys.any { it.startsWith("dawn/rt/DawnMap\$") },
+            "nested DawnMap classes must be vendored; got ${classes.keys.filter { it.startsWith("dawn/rt/") }}")
+        for ((name, bytes) in classes) {
+            val f = File(dir, "$name.class")
+            f.parentFile.mkdirs()
+            f.writeBytes(bytes)
+        }
+        val java = File(File(System.getProperty("java.home")), "bin/java")
+        val p = ProcessBuilder(java.absolutePath, "-cp", dir.absolutePath, "prog")
+            .redirectErrorStream(true).start()
+        val out = p.inputStream.readBytes().decodeToString()
+        assertEquals(0, p.waitFor(), "standalone run failed:\n$out")
+        assertEquals("1\n", out)
+    }
+
+    @Test
     fun `std is callable from a const, through pure Dawn and through a forward alike`() {
         // std is implicitly visible, so it must also be visible to the compile-time
         // interpreter — otherwise migrating a builtin would silently cost callers
