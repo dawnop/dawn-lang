@@ -1,9 +1,11 @@
 # M8:淘汰 Kotlin,selfhost 成为唯一编译器
 
-> 状态:**阶段一、二已落地**(2026-07-23)。
+> 状态:**阶段一、二、三已落地**(2026-07-23)。
 > 阶段一:release.yml 双发 + 祝圣门禁、`scripts/replay-bootstrap.sh`、bootstrap.md 立法。
 > 阶段二:CLI 能力移植完成,run-diff 16 项全绿、playground contract 以 selfhost 全栈 10/10,
-> 落地记录与发现的坑见 §2.1。前置调研与实测见 §0;各阶段独立可回退。
+> 落地记录与发现的坑见 §2.1。
+> 阶段三:诊断渲染 + 清单校验权威移交、bin/dawn 切 selfhost、CI 全 job selfhost 驱动、
+> N vs N−1 差分上线,见 §3.1。前置调研与实测见 §0;各阶段独立可回退。
 > 业界对照(Rust/Go/Zig/OCaml/Nim 的做法与出处)见本文 §6。
 
 ## 0. 前置事实(全部实测/点数于 2026-07-23)
@@ -107,6 +109,29 @@ standalone 闭包含 coursierapi vendor(4.9MB),独立解析 Maven 依赖。
    selfhost jar 与 HEAD 编同一语料(corpus 288 文件 + site + playground + backend-dawn),
    产物逐字节 diff;有意变更必须在提交里声明,未声明的差异 = 红灯。
 4. 可选顺手项:checker/codegen 深递归改迭代,摘掉 `-Xss512m`(独立小项,不挡路)。
+
+### 3.1 落地记录(2026-07-23)
+
+先清欠账(§2.1 挂的合并工项):`diag.dawn` 逐字节移植 Kotlin 的人类诊断渲染
+(span/caret/hint/计数行),`manifestv.dawn` 移植 Manifest.kt 全部校验规则,
+toml.dawn 升级为绝对 span 的 Diag 错误通道,loader 按规范目录一次校验
+(ResolveCtx 语义)。run-diff 扩到 36 项:编译错误、清单校验(含 add 把 parser
+诊断渲染两遍的 Kotlin 怪癖也照抄)、CliError 全形态,连退出码逐字节对齐。
+
+切换本体:selfhost CLI 表面对齐 dawn(USAGE/--version/--help/未知命令/
+`__lex` 等隐藏命令/`--cp`/`--comptime-fuel`);std 可嵌入独立 jar
+(`--embed-std` + classpath 资源回退,`--std` 仓库相对默认值的缺口就此关闭,
+出仓库全链路可用);`bin/dawn` 默认 selfhost(源码变更自动重建、`-Xss512m`
+写死、`DAWN_KOTLIN=1` 逃生阀),金样脚本 oracle 侧固定 `bin/dawn-kotlin`;
+CI 所有 `./bin/dawn` step 因此全部改由 selfhost 驱动。
+
+N vs N−1(`scripts/selfhost-prev-diff.sh` + CI `prev-diff` job):种子版本钉在
+`scripts/seed-release.txt`,上一 release jar 与 HEAD 编同一语料(site/
+playground/packages/selfhost/examples 全量 emit + backend-dawn 的 lex/parse/
+fmt 扫描),字节差异须在提交信息里以 `Emit-Change:` 行声明,未声明 = 红灯;
+同一 job 顺带机器强制种子特性纪律(N−1 jar 必须能编 HEAD selfhost/src)。
+实测抓到一处真实历史差异:4803f0f(v0.7.0 之后)把包模块 panic 消息里的
+绝对路径改成仓库相对——正是该 job 该抓的东西,已按机制声明。
 
 ## 4. 阶段四:LSP 移植(~650 行)
 

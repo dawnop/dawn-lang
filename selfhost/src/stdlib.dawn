@@ -1,7 +1,9 @@
 # The bundled standard library (the Kotlin StdLib): std sources are read from a
-# directory (`--std <dir>`, default compiler/src/main/resources/std), each
-# parsed and checked once in modules.txt order, its pub surface handed to every
-# user module. std is checked with no std of its own in scope — only the
+# directory (`--std <dir>`, default compiler/src/main/resources/std), falling
+# back to `std/<name>` class-path resources when the directory is absent — a
+# standalone jar built with `--embed-std` carries them, so the toolchain works
+# outside the repo. Each module is parsed and checked once in modules.txt
+# order, its pub surface handed to every user module. std is checked with no std of its own in scope — only the
 # prelude, the builtins and explicit `use` edges — keeping the bootstrap
 # acyclic. A broken bundled std is a compiler bug: fail loudly.
 
@@ -17,6 +19,8 @@ use checker.{ModExports, check_module, cx_new, exports_of, Cx}
 use interp.{eval_comptime, CtOut}
 use parser
 use lexer
+use std/bytes
+use java "java.lang.ClassLoader"
 
 ## Everything user-module analysis needs from std.
 pub type StdCtx = {
@@ -76,9 +80,37 @@ fn moved_renames(out0: Map[String, String]) -> Map[String, String] = {
   out
 }
 
+## A `std/<name>` class-path resource (the embedded std), or None.
+fn resource_text(name: String) -> Option[String] !io = {
+  match java_try(fn() => ClassLoader.getSystemResourceAsStream("std/" ++ name)) {
+    Ok(opt) ->
+      match opt {
+        Some(ins) ->
+          match java_try(fn() => ins.readAllBytes().expect("resource bytes")) {
+            Ok(bs) -> Some(bytes.decode(bs, "UTF-8"))
+            Err(_) -> None
+          }
+        None -> None
+      }
+    Err(_) -> None
+  }
+}
+
+## A std source file: the directory first (repo development edits win), then
+## the class-path resources a standalone jar embeds.
+fn std_read(dir: String, name: String) -> Result[String, String] !io =
+  match io.read_file(dir ++ "/" ++ name) {
+    Ok(t) -> Ok(t)
+    Err(e) ->
+      match resource_text(name) {
+        Some(t) -> Ok(t)
+        None -> Err(e)
+      }
+  }
+
 ## Read modules.txt: one name per line, `#` comments, blanks skipped.
 pub fn read_index(dir: String) -> Result[List[String], String] !io = {
-  let text = io.read_file(dir ++ "/modules.txt")?
+  let text = std_read(dir, "modules.txt")?
   var names: List[String] = []
   for line in str.split(text, "\n") {
     let cut = match str.index_of(line, "#") {
@@ -106,7 +138,7 @@ pub fn load_std(dir: String) -> Result[StdCtx, String] !io = {
   var srcs: List[(String, String, Module)] = []
   for n in names {
     let mod_path = "std/" ++ n
-    let text = io.read_file(dir ++ "/" ++ n ++ ".dawn")?
+    let text = std_read(dir, n ++ ".dawn")?
     let (m, pdiags) = parser.parse_module(text)
     if len(pdiags) > 0 {
       return Err("bundled std module `" ++ mod_path ++ "` does not parse: " ++ pdiags[0].msg)

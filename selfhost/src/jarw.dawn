@@ -62,6 +62,19 @@ pub fn write_jar_cp(
   classes: List[(String, Bytes)],
   cp_entries: List[String]
 ) -> Unit !io = {
+  let none: List[(String, Bytes)] = []
+  write_jar_full(path, main_class, classes, cp_entries, none)
+}
+
+## Same, plus raw resource entries written under their exact names (after the
+## classes, in list order) — how `--embed-std` packs std sources into the jar.
+pub fn write_jar_full(
+  path: String,
+  main_class: String,
+  classes: List[(String, Bytes)],
+  cp_entries: List[String],
+  resources: List[(String, Bytes)]
+) -> Unit !io = {
   let fos = match java_try(fn() => FileOutputStream.new(path)) {
     Ok(f) -> f
     Err(e) -> panic("cannot write " ++ path ++ ": " ++ e)
@@ -75,6 +88,10 @@ pub fn write_jar_cp(
   for pair in classes {
     let (nm, bs) = pair
     put(zos, nm ++ ".class", bs)
+  }
+  for pair in resources {
+    let (nm, bs) = pair
+    put(zos, nm, bs)
   }
   let _ = zos.close()
   ()

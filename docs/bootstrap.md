@@ -28,6 +28,13 @@
 - CLI 能力层已迁齐（2026-07-23，M8 阶段二）：`selfhost add`/`__pkghash`/
   `build --native`/url 依赖抓取（冷缓存自主下载验证）/Maven 解析（coursier
   interface，FFI）。仍留在 Kotlin 侧的只有 **LSP**（M8 阶段四）。
+- **日常驱动已是 selfhost**（2026-07-23，M8 阶段三）：`bin/dawn` 默认跑
+  selfhost 独立 jar（源码变更自动重建，`DAWN_KOTLIN=1` 逃生阀回 Kotlin）；
+  人类诊断渲染与 dawn.toml 校验权威已移交（`diag.dawn`/`manifestv.dawn`，
+  错误路径逐字节对拍）；std 嵌进独立 jar（`--embed-std`），出仓库可用；
+  金样脚本的 oracle 侧固定为 `bin/dawn-kotlin`；新增 N vs N−1 差分
+  （`scripts/selfhost-prev-diff.sh`，上一 release 与 HEAD 编同一语料 +
+  backend-dawn 前端扫描，未声明差异红灯，同时机器强制种子特性纪律）。
 
 ## 种子推进协议（2026-07-23 立法，M8 阶段一）
 
@@ -70,13 +77,16 @@
 #    再用自己发射的类重跑发射 → 仍逐字节一致（stage3 == stage2，固定点）
 ./scripts/selfhost-fixpoint.sh
 
-# 3) selfhost 自打独立 jar：把 dawn.tool 的 frame-writer shim 和 ASM
-#    按包前缀 vendor 进产物，从此不再需要任何 Kotlin 产物在 class path 上
+# 3) selfhost 自打独立 jar：把 dawn.tool 的 frame-writer shim、ASM 与
+#    coursier interface 按包前缀 vendor 进产物，std 源码嵌为 jar 资源
+#    （--embed-std，出仓库也能编译），从此不再需要任何 Kotlin 产物
 java -Xss512m -cp selfhost.jar:compiler/build/libs/dawn.jar main \
-  build selfhost -o dawn-selfhost.jar --vendor dawn/tool --vendor org/objectweb/asm --vendor coursierapi
+  build selfhost -o dawn-selfhost.jar --embed-std compiler/src/main/resources/std \
+  --vendor dawn/tool --vendor org/objectweb/asm --vendor coursierapi
 
 # 4) 闭包：独立 jar 单独重建自身，两个 jar 逐字节相同
 java -Xss512m -jar dawn-selfhost.jar build selfhost -o rebuilt.jar \
+  --embed-std compiler/src/main/resources/std \
   --vendor dawn/tool --vendor org/objectweb/asm --vendor coursierapi
 cmp dawn-selfhost.jar rebuilt.jar
 ```

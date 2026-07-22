@@ -52,7 +52,7 @@ jobs:
 
       - name: it reports the version we think it does
         run: |
-          OUT=$(./bin/dawn --version)
+          OUT=$(./bin/dawn-kotlin --version)
           echo "$OUT"
           case "$OUT" in
             "dawn ${GITHUB_REF_NAME#v} ("*) ;;
@@ -71,13 +71,26 @@ jobs:
       # uploaded, not on a throwaway copy.
       - name: build the standalone selfhost jar
         run: |
-          ./bin/dawn build selfhost -o selfhost-boot.jar
+          ./bin/dawn-kotlin build selfhost -o selfhost-boot.jar
           java -Xss512m -cp selfhost-boot.jar:compiler/build/libs/dawn.jar main \
-            build selfhost -o dawn-selfhost.jar --vendor dawn/tool --vendor org/objectweb/asm --vendor coursierapi
+            build selfhost -o dawn-selfhost.jar --embed-std compiler/src/main/resources/std \
+            --vendor dawn/tool --vendor org/objectweb/asm --vendor coursierapi
+
+      # the selfhost jar is what consumers run now, so its version string must
+      # name the tag too (version.dawn, the analogue of the gradle check above)
+      - name: the selfhost jar reports the version we think it does
+        run: |
+          OUT=$(java -Xss512m -jar dawn-selfhost.jar --version)
+          echo "$OUT"
+          case "$OUT" in
+            "dawn ${GITHUB_REF_NAME#v} ("*) ;;
+            *) echo "::error::selfhost --version said '$OUT' (bump selfhost/src/version.dawn)"; exit 1 ;;
+          esac
 
       - name: standalone closure — the seed rebuilds itself byte-identically
         run: |
           java -Xss512m -jar dawn-selfhost.jar build selfhost -o rebuilt.jar \
+            --embed-std compiler/src/main/resources/std \
             --vendor dawn/tool --vendor org/objectweb/asm --vendor coursierapi
           cmp dawn-selfhost.jar rebuilt.jar
 

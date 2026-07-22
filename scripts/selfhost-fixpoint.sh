@@ -5,7 +5,8 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-DAWN=${DAWN_BIN:-./bin/dawn}
+# the Kotlin reference CLI (bin/dawn runs selfhost since M8 phase 3)
+DAWN=${DAWN_BIN:-./bin/dawn-kotlin}
 OUT=${TMPDIR:-/tmp}/selfhost-fixpoint.$$
 mkdir -p "$OUT/s1" "$OUT/s2" "$OUT/s3"
 trap 'rm -rf "$OUT"' EXIT

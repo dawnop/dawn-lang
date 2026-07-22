@@ -51,6 +51,7 @@ use java "java.nio.file.Paths"
 use java "java.io.File"
 use java "java.util.Map"
 use errio
+use version.{VERSION}
 use diag
 use manifestv
 use token.{Diag}
@@ -130,7 +131,8 @@ fn write_class(dir: String, name: String, bs: Bytes) -> Unit !io = {
 ## target: the runtime subset only.
 fn collect_program(
   target: String,
-  std_dir: String
+  std_dir: String,
+  fuel: Int
 ) -> (List[(String, Bytes)], String, List[(String, String, List[String])]) !io = {
   var classes: List[(String, Bytes)] = []
   var adts = prelude_adts()
@@ -154,7 +156,7 @@ fn collect_program(
     }
     let loaded =
       if io.is_dir(target) { load_directory(target) } else { load_file(target) }
-    let prog = analyze_program(loaded, std, 100000000)
+    let prog = analyze_program(loaded, std, fuel)
     if len(prog.diags) > 0 { fail_compile(prog.diags) }
     mods = prog.modules
     for cm in mods {
@@ -276,6 +278,103 @@ fn host_classpath() -> String !io =
     None -> ""
   }
 
+## The Kotlin cli/Main.kt USAGE, verbatim.
+fn usage() -> String = join([
+  "dawn — the Dawn language toolchain",
+  "",
+  "A <target> is a single .dawn file or a project directory (src/main.dawn entry).",
+  "A project directory may carry a dawn.toml declaring [java-deps]; run/test/build fetch",
+  "those from Maven and put them on the class path automatically.",
+  "",
+  "usage:",
+  "  dawn run <target>                    compile and run (in-process JVM)",
+  "  dawn test <target>                   compile with test blocks and run them",
+  "  dawn build <target> [-o out.jar]     produce an executable jar (tests stripped)",
+  "  dawn build <target> --native [-o out]",
+  "                                       produce a standalone native binary (needs native-image)",
+  "  dawn fmt <file.dawn | dir>...        format files in place (a dir formats all .dawn under it)",
+  "  dawn fmt --check <target>...         report files that are not formatted (exit 1 if any)",
+  "  dawn doc <target>                    emit the pub API (## doc comments) as JSON on stdout",
+  "  dawn doc --builtins                  emit the builtin function reference as JSON",
+  "  dawn add <spec> [--subdir <p>] [--as <alias>] [--dir <project>]",
+  "                                       add a dependency to dawn.toml, preserving the file's",
+  "                                       formatting: a Maven coordinate (group:artifact:version",
+  "                                       → [java-deps]), an archive url (fetched and hashed",
+  "                                       → [deps.<name>]), or a local package path (→ [deps])",
+  "  dawn --version                       print the toolchain version and commit",
+  "",
+  "options (run/test/build):",
+  "  --cp <jars>                          third-party jars for `use java`, separated by the",
+  "                                       platform path separator; repeatable. `build` records",
+  "                                       them in the jar manifest's Class-Path. Merged with",
+  "                                       anything dawn.toml's [java-deps] resolves to.",
+  "",
+  "environment:",
+  "  DAWN_MAVEN_MIRROR                    Maven repository to fetch [java-deps] from",
+  "                                       (default: Maven Central)"
+], "\n") ++ "\n"
+
+## `--comptime-fuel N` / `--comptime-fuel=N`; (fuel, args without the flag).
+fn extract_fuel(rest: List[String]) -> (Int, List[String]) !io = {
+  var fuel = 100000000
+  var out: List[String] = []
+  var i = 0
+  while i < len(rest) {
+    let a = rest[i]
+    if a == "--comptime-fuel" && i + 1 < len(rest) {
+      match parse_int(rest[i + 1]) {
+        Some(n) -> { fuel = n }
+        None -> { cli_error("--comptime-fuel needs a number") }
+      }
+      i = i + 2
+    } else if str.starts_with(a, "--comptime-fuel=") {
+      match parse_int(str.substring(a, 16, str.len(a))) {
+        Some(n) -> { fuel = n }
+        None -> { cli_error("--comptime-fuel needs a number") }
+      }
+      i = i + 1
+    } else {
+      out = out ++ [a]
+      i = i + 1
+    }
+  }
+  (fuel, out)
+}
+
+## `--cp <jars>` / `--cp=jars`; repeatable, `:`-separated, every entry must
+## exist; (jars, args without the flag).
+fn extract_cp(rest: List[String]) -> (List[String], List[String]) !io = {
+  var jars: List[String] = []
+  var out: List[String] = []
+  var i = 0
+  while i < len(rest) {
+    let a = rest[i]
+    var spec = ""
+    if a == "--cp" && i + 1 < len(rest) {
+      spec = rest[i + 1]
+      i = i + 2
+    } else if a == "--cp" {
+      cli_error("--cp needs a path")
+      i = i + 1
+    } else if str.starts_with(a, "--cp=") {
+      spec = str.substring(a, 5, str.len(a))
+      i = i + 1
+    } else {
+      out = out ++ [a]
+      i = i + 1
+    }
+    if spec != "" {
+      for pth in str.split(spec, ":") {
+        if pth != "" {
+          if not File.new(pth).exists() { cli_error("--cp entry not found: " ++ pth) }
+          jars = jars ++ [pth]
+        }
+      }
+    }
+  }
+  (jars, out)
+}
+
 ## Render compile diagnostics, the count line, and exit 1 (the Kotlin
 ## compileProject failure shape).
 fn fail_compile(diags: List[LocDiag]) -> Unit !io = {
@@ -323,13 +422,14 @@ fn peek_target(rest: List[String]) -> String = {
   var i = 0
   while i < len(rest) {
     let a = rest[i]
-    if a == "--std" || a == "-o" || a == "--vendor" || a == "--comptime-fuel" {
-      i = i + 2
-    } else if a == "--native" || a == "--check" {
-      i = i + 1
-    } else {
-      return a
-    }
+    if a == "--std" || a == "-o" || a == "--vendor" || a == "--comptime-fuel" || a == "--cp" ||
+      a == "--embed-std" {
+        i = i + 2
+      } else if a == "--native" || a == "--check" {
+        i = i + 1
+      } else {
+        return a
+      }
   }
   ""
 }
@@ -379,12 +479,16 @@ fn maybe_with_deps(mode: String, rest: List[String]) -> Unit !io = {
     Some(_) -> return
     None -> ()
   }
-  let target = peek_target(rest)
-  if target == "" { return }
-  let jars = resolve_java_deps(target)
-  if len(jars) == 0 { return }
+  let (cpjars, rest1) = extract_cp(rest)
+  let (_, rest2) = extract_fuel(rest1)
+  let target = peek_target(rest2)
+  if target == "" && len(cpjars) == 0 { return }
+  let no_jars: List[String] = []
+  let jars = if target == "" { no_jars } else { resolve_java_deps(target) }
+  if len(jars) == 0 && len(cpjars) == 0 { return }
   var cp = host_classpath()
   for j in jars { cp = cp ++ ":" ++ j }
+  for j in cpjars { cp = cp ++ ":" ++ j }
   var cmd: List[String] = ["java", "-Xss512m", "-cp", cp, "main", mode]
   cmd = cmd ++ rest
   let pb = ProcessBuilder.new(cmd)
@@ -418,7 +522,9 @@ fn spawn_java(cp: String, cls: String, args: List[String]) -> Int !io = {
 ## `selfhost run [--std <dir>] <target> [args...]` — mirror of `dawn run`,
 ## via a subprocess over freshly emitted classes (the host class path rides
 ## along so `use java` third-party classes stay visible).
-fn run_run(rest: List[String]) -> Unit !io = {
+fn run_run(rest0: List[String]) -> Unit !io = {
+  let (_, rest1) = extract_cp(rest0)
+  let (fuel, rest) = extract_fuel(rest1)
   var target = ""
   var std_dir = "compiler/src/main/resources/std"
   var args2: List[String] = []
@@ -438,7 +544,7 @@ fn run_run(rest: List[String]) -> Unit !io = {
   if target == "" {
     return cli_error("usage: dawn run [--cp jars] <file.dawn | project-dir>")
   }
-  let (classes, entry, _) = collect_program(target, std_dir)
+  let (classes, entry, _) = collect_program(target, std_dir, fuel)
   if entry == "" {
     return cli_error(target ++ " has no pub fn main() -> Unit !io, nothing to run")
   }
@@ -449,7 +555,9 @@ fn run_run(rest: List[String]) -> Unit !io = {
 
 ## `selfhost test [--std <dir>] <target>` — mirror of `dawn test`: emit with
 ## test blocks plus a synthesized dawn$TestMain runner, and run it.
-fn run_test(rest: List[String]) -> Unit !io = {
+fn run_test(rest0: List[String]) -> Unit !io = {
+  let (_, rest1) = extract_cp(rest0)
+  let (fuel, rest) = extract_fuel(rest1)
   var target = ""
   var std_dir = "compiler/src/main/resources/std"
   var i = 0
@@ -465,7 +573,7 @@ fn run_test(rest: List[String]) -> Unit !io = {
   if target == "" {
     return cli_error("usage: dawn test [--cp jars] <file.dawn | project-dir>")
   }
-  let (classes, _, tests_info) = collect_program(target, std_dir)
+  let (classes, _, tests_info) = collect_program(target, std_dir, fuel)
   if len(tests_info) == 0 { return cli_error(target ++ " has no test blocks") }
   var runner_tests: List[(String, Int, String)] = []
   for mi in tests_info {
@@ -505,7 +613,7 @@ fn run_emitrt(rest: List[String]) -> Unit !io = {
   if out == "" {
     return cli_error("usage: dawn __emit <file.dawn | project-dir> -o <dir>")
   }
-  let (classes, _, _) = collect_program(target, std_dir)
+  let (classes, _, _) = collect_program(target, std_dir, 100000000)
   var seen: Set[String] = set.empty()
   var n = 0
   for pair in classes {
@@ -569,6 +677,27 @@ fn vendor_jars(jars: List[String], jar_path: String) -> List[String] !io = {
   entries
 }
 
+## Manifest Class-Path entries for --cp jars: relative when the jar sits
+## under the output jar's directory, else an absolute file: URL (the Kotlin
+## URI.relativize behavior).
+fn rel_entries(jars: List[String], jar_path: String) -> List[String] !io = {
+  var out: List[String] = []
+  let base = abs_parent(jar_path) ++ "/"
+  for j in jars {
+    let abs = match java_try(fn() =>
+        File.new(j).getAbsoluteFile().expect("abs").getPath().expect("path")) {
+          Ok(a) -> a
+          Err(_) -> j
+        }
+    if str.starts_with(abs, base) {
+      out = out ++ [str.substring(abs, str.len(base), str.len(abs))]
+    } else {
+      out = out ++ ["file:" ++ abs]
+    }
+  }
+  out
+}
+
 fn find_native_image() -> Option[String] !io = {
   var candidates: List[String] = []
   match System.getenv("GRAALVM_HOME") {
@@ -597,7 +726,12 @@ fn find_native_image() -> Option[String] !io = {
 
 ## Hand the finished jar to native-image (the Kotlin cmdBuild native branch):
 ## stream its output indented, delete the temp jar, report.
-fn run_native_image(jar_path: String, bin_out: String) -> Unit !io = {
+fn run_native_image(
+  jar_path: String,
+  bin_out: String,
+  user_cp: List[String],
+  entry: String
+) -> Unit !io = {
   let ni = match find_native_image() {
     Some(p) -> p
     None ->
@@ -605,7 +739,17 @@ fn run_native_image(jar_path: String, bin_out: String) -> Unit !io = {
         "native-image not found. Install GraalVM and add it to PATH, or set GRAALVM_HOME")
   }
   println("invoking native-image (takes a minute or two the first time)...")
-  let cmd: List[String] = [ni, "-jar", jar_path, "-o", bin_out, "--no-fallback"]
+  # with --cp jars the -jar form would ignore them: explicit class path + main
+  var cmd: List[String] = [ni, "-jar", jar_path, "-o", bin_out, "--no-fallback"]
+  if len(user_cp) > 0 {
+    var cp = jar_path
+    for j in user_cp { cp = cp ++ ":" ++ j }
+    var dotted = ""
+    for part in str.split(entry, "/") {
+      if dotted == "" { dotted = part } else { dotted = dotted ++ "." ++ part }
+    }
+    cmd = [ni, "-cp", cp, dotted, "-o", bin_out, "--no-fallback"]
+  }
   let pb = ProcessBuilder.new(cmd)
   let _ = pb.redirectErrorStream(true)
   let proc = pb.start().expect("native-image process")
@@ -628,11 +772,14 @@ fn run_native_image(jar_path: String, bin_out: String) -> Unit !io = {
 ## internal package path (e.g. org/objectweb/asm) whose classes are copied in
 ## from java.class.path — building selfhost itself vendors the dawn.tool shim
 ## and ASM, which is what makes the jar standalone.
-fn run_build(rest: List[String]) -> Unit !io = {
+fn run_build(rest0: List[String]) -> Unit !io = {
+  let (user_cp, rest1) = extract_cp(rest0)
+  let (fuel, rest) = extract_fuel(rest1)
   var out = ""
   var target = ""
   var std_dir = "compiler/src/main/resources/std"
   var vendor_pkgs: List[String] = []
+  var embed_std = ""
   var native = false
   var i = 0
   while i < len(rest) {
@@ -644,6 +791,9 @@ fn run_build(rest: List[String]) -> Unit !io = {
       i = i + 2
     } else if rest[i] == "--vendor" && i + 1 < len(rest) {
       vendor_pkgs = vendor_pkgs ++ [rest[i + 1]]
+      i = i + 2
+    } else if rest[i] == "--embed-std" && i + 1 < len(rest) {
+      embed_std = rest[i + 1]
       i = i + 2
     } else if rest[i] == "--native" {
       native = true
@@ -668,7 +818,7 @@ fn run_build(rest: List[String]) -> Unit !io = {
   } else {
     stem ++ ".jar"
   }
-  let (classes, entry, _) = collect_program(target, std_dir)
+  let (classes, entry, _) = collect_program(target, std_dir, fuel)
   if entry == "" {
     return cli_error(target ++ " has no pub fn main() -> Unit !io to use as an entry point")
   }
@@ -693,15 +843,41 @@ fn run_build(rest: List[String]) -> Unit !io = {
   }
   let deps = deps_from_env()
   # native-image inlines everything, so it reads the jars where they already
-  # live; a plain jar needs them at a stable path next to itself
-  let cp_entries = if native { deps } else { vendor_jars(deps, jar_path) }
-  jarw.write_jar_cp(jar_path, entry, all, cp_entries)
+  # live; a plain jar needs them at a stable path next to itself, and --cp
+  # jars stay where the user put them (relative when under the jar's dir)
+  let cp_entries = if native {
+    deps ++ user_cp
+  } else {
+    vendor_jars(deps, jar_path) ++ rel_entries(user_cp, jar_path)
+  }
+  var resources: List[(String, Bytes)] = []
+  if embed_std != "" {
+    match io.list_dir(embed_std) {
+      Ok(names) -> {
+        for nm in sort(names) {
+          let fp = embed_std ++ "/" ++ nm
+          if not io.is_dir(fp) {
+            match java_try(fn() =>
+                Files.readAllBytes(Paths.get(fp).expect("path")).expect("bytes")) {
+                  Ok(bs) -> { resources = resources ++ [("std/" ++ nm, bs)] }
+                  Err(e) -> panic("cannot read " ++ fp ++ ": " ++ e)
+                }
+          }
+        }
+      }
+      Err(e) -> panic("cannot list " ++ embed_std ++ ": " ++ e)
+    }
+  }
+  jarw.write_jar_full(jar_path, entry, all, cp_entries, resources)
   if native {
     let bin_out = if out != "" { out } else { stem }
-    return run_native_image(jar_path, bin_out)
+    return run_native_image(jar_path, bin_out, user_cp, entry)
   }
-  if len(deps) == 0 {
+  if len(cp_entries) == 0 {
     println("wrote " ++ jar_path ++ " (run it with: java -jar " ++ jar_path ++ ")")
+  } else if len(deps) == 0 {
+    println("wrote " ++ jar_path ++ " (run it with: java -jar " ++ jar_path ++
+        "; manifest Class-Path points at the --cp jars, keep them in place)")
   } else {
     println("wrote " ++ jar_path ++ " and " ++ to_string(len(deps)) ++ " jar(s) into " ++
         abs_parent(jar_path) ++ "/lib (run it with: java -jar " ++ jar_path ++
@@ -834,11 +1010,15 @@ fn run_check(rest: List[String]) -> Unit !io = {
 
 pub fn main() -> Unit !io = {
   match args() {
-    [] -> panic("usage: selfhost (lex|parse|check) <file>...")
+    [] -> {
+      print(usage())
+      let _ = System.exit(2)
+      ()
+    }
     [mode, ..rest] ->
-      if mode == "check" {
+      if mode == "check" || mode == "__check" {
         run_check(rest)
-      } else if mode == "emit" || mode == "emitrt" {
+      } else if mode == "emit" || mode == "emitrt" || mode == "__emit" {
         run_emitrt(rest)
       } else if mode == "build" {
         maybe_with_deps(mode, rest)
@@ -860,23 +1040,30 @@ pub fn main() -> Unit !io = {
         }
       } else if mode == "__pkghash" {
         run_pkghash(rest)
-      } else {
+      } else if mode == "lex" || mode == "__lex" || mode == "parse" || mode == "__parse" {
         for pth in rest {
           println("== " ++ pth ++ " ==")
           match io.read_file(pth) {
             Ok(text) ->
-              if mode == "lex" {
+              if mode == "lex" || mode == "__lex" {
                 let (toks, diags) = lexer.lex(text)
                 println(dump.render(toks, diags))
-              } else if mode == "parse" {
+              } else {
                 let (m, diags) = parser.parse_module(text)
                 println(astdump.render_module(m, diags))
-              } else {
-                panic("unknown mode: " ++ mode)
               }
             Err(e) -> panic("cannot read " ++ pth ++ ": " ++ e)
           }
         }
+      } else if mode == "--version" || mode == "-V" || mode == "version" {
+        println("dawn " ++ VERSION ++ " (selfhost)")
+      } else if mode == "--help" || mode == "-h" || mode == "help" {
+        print(usage())
+      } else {
+        errio.eprintln("unknown command: " ++ mode ++ "\n")
+        print(usage())
+        let _ = System.exit(2)
+        ()
       }
   }
 }

@@ -10,14 +10,16 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-DAWN=${DAWN_BIN:-./bin/dawn}
+# the Kotlin reference CLI (bin/dawn runs selfhost since M8 phase 3)
+DAWN=${DAWN_BIN:-./bin/dawn-kotlin}
 OUT=${TMPDIR:-/tmp}/selfhost-standalone.$$
 mkdir -p "$OUT"
 trap 'rm -rf "$OUT"' EXIT
 
 # coursierapi rides along so the standalone jar can resolve [java-deps]
 # (it is fully shaded — coursierapi/ and coursierapi/shaded/ cover all of it)
-VENDOR=(--vendor dawn/tool --vendor org/objectweb/asm --vendor coursierapi)
+VENDOR=(--vendor dawn/tool --vendor org/objectweb/asm --vendor coursierapi
+  --embed-std compiler/src/main/resources/std)
 
 "$DAWN" build selfhost -o "$OUT/selfhost.jar" > /dev/null
 

@@ -1,0 +1,33 @@
+#!/bin/sh
+# Kotlin dawn CLI launcher — the golden-diff reference while the transition
+# runs (M8 phase 3). bin/dawn is the selfhost toolchain now; this stays the
+# oracle side of scripts/selfhost-*-diff.sh until phase 5 archives Kotlin.
+set -e
+
+# resolve symlinks (e.g. ~/.local/bin/dawn) so ROOT is the real repo checkout
+SELF="$(readlink -f "$0")"
+ROOT="$(cd "$(dirname "$SELF")/.." && pwd)"
+JAR="$ROOT/compiler/build/libs/dawn.jar"
+
+if [ ! -f "$JAR" ]; then
+  echo "error: $JAR not found" >&2
+  echo "build it first: cd $ROOT && gradle :compiler:fatJar" >&2
+  exit 2
+fi
+
+# if JAVA_HOME is unset, try GraalVM under ~/tools. Both layouts: macOS bundles
+# the JDK under Contents/Home, Linux tarballs put bin/ at the top level.
+if [ -z "$JAVA_HOME" ]; then
+  for d in "$HOME"/tools/graalvm-*/Contents/Home "$HOME"/tools/graalvm-*; do
+    if [ -x "$d/bin/java" ]; then
+      JAVA_HOME="$d"
+      export JAVA_HOME
+      break
+    fi
+  done
+fi
+
+if [ -n "$JAVA_HOME" ] && [ -x "$JAVA_HOME/bin/java" ]; then
+  exec "$JAVA_HOME/bin/java" -jar "$JAR" "$@"
+fi
+exec java -jar "$JAR" "$@"

@@ -71,6 +71,12 @@ jobs:
       - name: build the dawn CLI
         run: ./gradlew :compiler:fatJar
 
+      # bin/dawn runs the self-hosted toolchain since M8 phase 3 (the Kotlin
+      # jar above seeds it and stays the golden-diff oracle via
+      # bin/dawn-kotlin). Every `./bin/dawn` step below exercises selfhost.
+      - name: build the selfhost toolchain (the daily driver)
+        run: ./bin/dawn --version
+
       - name: site tests
         run: ./bin/dawn test site
 
@@ -127,3 +133,32 @@ jobs:
       # .editorconfig for which rules are off and why.
       - name: kotlin lint
         run: ./gradlew :compiler:ktlintCheck
+
+  # N vs N-1 (scripts/selfhost-prev-diff.sh): the previous release and HEAD
+  # compile the same corpus and any byte difference must be declared in a
+  # commit message. This oracle outlives the Kotlin reference (M8 phase 5),
+  # and doubles as the machine enforcement of the seed feature discipline —
+  # the N-1 jar must still compile HEAD selfhost/src.
+  prev-diff:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # the declared-change scan walks commits since the N-1 tag
+          fetch-depth: 0
+
+      - uses: graalvm/setup-graalvm@v1
+        with:
+          java-version: '21'
+          distribution: 'graalvm-community'
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      # the transition seed for bin/dawn (phase 5 replaces this with the
+      # released dawn-selfhost.jar)
+      - name: build the seed fat jar
+        run: ./gradlew :compiler:fatJar
+
+      - name: N vs N-1 differential
+        run: ./scripts/selfhost-prev-diff.sh
