@@ -113,7 +113,7 @@ class ManifestTest {
         assertContains(errorsOf("a = \"\"\"x\"\"\"").first(), "multi-line strings are not supported")
         assertContains(errorsOf("a = { b = 1 }").first(), "inline tables are not supported")
         assertContains(errorsOf("a.b = 1").first(), "dotted keys are not supported")
-        assertContains(errorsOf("[a.b]").first(), "dotted table names are not supported")
+        assertContains(errorsOf("[a.b.c]").first(), "table names may have at most one dot")
         assertContains(errorsOf("\"a\" = 1").first(), "quoted keys are not supported")
         assertContains(errorsOf("a = 1.5").first(), "floats are not supported")
         assertContains(errorsOf("a = 2026-07-17").first(), "date-time values are not supported")

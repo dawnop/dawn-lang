@@ -1,18 +1,26 @@
-# A minimal dawn.toml reader for the loader's needs: `name`, the `[deps]`
-# aliases (path strings, 项目 B v1), and whether `[java-deps]`/`[deps]` are
-# present at all. Line-oriented over the manifest TOML subset — the Kotlin
-# Manifest/TomlParser stays the validation authority (the CLI runs it before
-# anything here matters); this reader only has to agree on valid input, which
-# is what the golden corpora contain.
+# A minimal dawn.toml reader for the loader's needs: `name`, `version`, the
+# `[deps]` aliases (path strings or `[deps.<alias>]` url tables), and whether
+# `[java-deps]` is present at all. Line-oriented over the manifest TOML subset —
+# the Kotlin Manifest/TomlParser stays the validation authority (the CLI runs
+# it before anything here matters); this reader only has to agree on valid
+# input, which is what the golden corpora contain.
 
 use std/str
 use std/list
 use std/io
 
-pub type SrcDep = { key: String, dir: String }
+## Where a dependency's source lives: a local directory, or a remote archive
+## pinned by url + version + content hash (subdir = package root inside it,
+## "" for the archive root).
+pub type DepSrc =
+  | DPath(dir: String)
+  | DRemote(url: String, version: String, hash: String, subdir: String)
+
+pub type SrcDep = { key: String, src: DepSrc }
 
 pub type ManifestLite = {
   name: String,
+  version: String,
   deps: List[SrcDep],
   has_java_deps: Bool
 }
@@ -34,6 +42,19 @@ fn strip_comment(line: String) -> String =
     None -> line
   }
 
+type RemoteAcc = { key: String, url: String, version: String, hash: String, subdir: String }
+
+fn flush_remote(deps: List[SrcDep], acc: Option[RemoteAcc]) -> List[SrcDep] =
+  match acc {
+    Some(r) ->
+      if r.url != "" && r.version != "" && r.hash != "" {
+        deps ++ [SrcDep { key: r.key, src: DRemote(r.url, r.version, r.hash, r.subdir) }]
+      } else {
+        deps
+      }
+    None -> deps
+  }
+
 ## The manifest beside `dir`'s dawn.toml, or None when the file is absent or
 ## carries no usable `name`.
 pub fn read_manifest(dir: String) -> Option[ManifestLite] !io = {
@@ -42,15 +63,23 @@ pub fn read_manifest(dir: String) -> Option[ManifestLite] !io = {
     Err(_) -> return None
   }
   var name = ""
+  var version = ""
   var deps: List[SrcDep] = []
   var has_java = false
   var table = ""
+  var remote: Option[RemoteAcc] = None
   for raw in str.split(text, "\n") {
     let line = str.trim(strip_comment(raw))
     if line == "" {
       ()
     } else if str.starts_with(line, "[") && str.ends_with(line, "]") {
+      deps = flush_remote(deps, remote)
+      remote = None
       table = str.substring(line, 1, str.len(line) - 1)
+      if str.starts_with(table, "deps.") {
+        let aname = str.substring(table, 5, str.len(table))
+        remote = Some(RemoteAcc { key: aname, url: "", version: "", hash: "", subdir: "" })
+      }
     } else {
       match str.index_of(line, "=") {
         Some(i) -> {
@@ -61,12 +90,32 @@ pub fn read_manifest(dir: String) -> Option[ManifestLite] !io = {
               Some(v) -> { name = v }
               None -> ()
             }
+          } else if table == "" && key == "version" {
+            match unquote(val) {
+              Some(v) -> { version = v }
+              None -> ()
+            }
           } else if table == "deps" {
             match unquote(val) {
               Some(p) -> {
                 let full = if str.starts_with(p, "/") { p } else { dir ++ "/" ++ p }
-                deps = deps ++ [SrcDep { key: key, dir: full }]
+                deps = deps ++ [SrcDep { key: key, src: DPath(full) }]
               }
+              None -> ()
+            }
+          } else if str.starts_with(table, "deps.") {
+            match remote {
+              Some(r) ->
+                match unquote(val) {
+                  Some(v) -> {
+                    remote = Some(if key == "url" { RemoteAcc { ..r, url: v } }
+                    else if key == "version" { RemoteAcc { ..r, version: v } }
+                    else if key == "hash" { RemoteAcc { ..r, hash: v } }
+                    else if key == "subdir" { RemoteAcc { ..r, subdir: v } }
+                    else { r })
+                  }
+                  None -> ()
+                }
               None -> ()
             }
           } else if table == "java-deps" {
@@ -77,8 +126,9 @@ pub fn read_manifest(dir: String) -> Option[ManifestLite] !io = {
       }
     }
   }
+  deps = flush_remote(deps, remote)
   if name == "" { return None }
-  Some(ManifestLite { name: name, deps: deps, has_java_deps: has_java })
+  Some(ManifestLite { name: name, version: version, deps: deps, has_java_deps: has_java })
 }
 
 test "reads name, deps and the java-deps flag" {
@@ -87,4 +137,24 @@ test "reads name, deps and the java-deps flag" {
   assert unquote(" \"../packages/web\" ") == Some("../packages/web")
   assert unquote("42") == None
   assert strip_comment("a = \"b\" # c") == "a = \"b\" "
+}
+
+test "a remote table accumulates its keys and flushes complete" {
+  let acc = Some(RemoteAcc {
+    key: "web", url: "file:///x.zip", version: "1.0.0", hash: "d1:aa", subdir: ""
+  })
+  let out = flush_remote([], acc)
+  assert len(out) == 1
+  match out[0].src {
+    DRemote(u, v, h, s) -> {
+      assert u == "file:///x.zip"
+      assert v == "1.0.0"
+      assert h == "d1:aa"
+      assert s == ""
+    }
+    DPath(_) -> { assert false }
+  }
+  # an incomplete table (missing hash) is dropped — invalid input is Kotlin's department
+  let bad = Some(RemoteAcc { key: "w", url: "u", version: "1.0.0", hash: "", subdir: "" })
+  assert len(flush_remote([], bad)) == 0
 }

@@ -72,6 +72,12 @@ fun main(args: Array<String>) {
             "__parse" -> cmdParseDump(args.drop(1))
             "__check" -> cmdCheckDump(args.drop(1))
             "__emit" -> cmdEmitDump(args.drop(1))
+            // hidden: the d1 canonical tree hash of a directory, for `[deps.<alias>] hash`
+            "__pkghash" -> {
+                val dir = java.io.File(args.getOrNull(1) ?: ".")
+                if (!dir.isDirectory) throw CliError("not a directory: ${dir.path}")
+                println(dawn.manifest.PkgFetch.treeHash(dir))
+            }
             "--version", "-V", "version" -> println(BuildInfo)
             "--help", "-h", "help" -> print(USAGE)
             else -> {

@@ -216,12 +216,14 @@ object TomlParser {
             s.error("table name is empty", nameSpan)
             return TomlComment(raw)
         }
-        if (name.contains('.')) {
-            s.error("dotted table names are not supported in dawn.toml", nameSpan,
-                "use a single-segment name like `[java-deps]`")
+        // one dot level for `[deps.<alias>]` sub-tables; deeper nesting stays out
+        val segments = name.split('.')
+        if (segments.size > 2) {
+            s.error("table names may have at most one dot", nameSpan,
+                "use `[table]` or `[table.sub]`")
             return TomlComment(raw)
         }
-        if (!BARE_KEY.matches(name)) {
+        if (segments.any { !BARE_KEY.matches(it) }) {
             s.error("invalid table name `$name`", nameSpan,
                 "table names are bare keys: letters, digits, `_`, `-`")
             return TomlComment(raw)

@@ -11,7 +11,7 @@ use std/map
 use std/set
 use token.{Diag}
 use ast.{Module, Decl, DUseModule, module_uses, module_fns}
-use manifest
+use manifest.{read_manifest, DPath, DRemote}
 use checker.{
   ModExports, Cx, check_module, cx_new, exports_of, seed_prelude, pass_java_uses,
   pass_imports, pass_type_shells, pass_ctor_fields, pass_resolve_aliases,
@@ -28,6 +28,7 @@ use java "java.nio.file.Paths"
 use java "java.nio.file.Files"
 use java "java.nio.file.Path"
 use java "java.lang.Character"
+use java "java.lang.System"
 
 ## A resolved `[deps]` package: its manifest name, src/ root, and its own
 ## dependencies. Packages reached through different consumers but the same
@@ -158,30 +159,210 @@ pub fn load_directory(dir: String) -> LoadResult !io = {
       "add src/main.dawn with `pub fn main() -> Unit !io`")]
   }
   # load every module under src/ (spec §10.5: unreferenced modules still check)
+  let (url_resolved, sdiags) = select_url_deps(dir)
   let no_cache: Map[String, Option[PkgR]] = map.empty()
-  let (pkgs, mdiags, _) = resolve_src_deps(dir, no_cache, set.empty())
-  diags = diags ++ mdiags
+  let no_names: Map[String, String] = map.empty()
+  let (pkgs, mdiags, _, _) =
+    resolve_src_deps(dir, no_cache, set.empty(), url_resolved, no_names)
+  diags = diags ++ sdiags ++ mdiags
   resolve(root, walk_dawn(root), diags, false, pkgs)
 }
 
+## The content-addressed package cache root (mirrors the Kotlin PkgFetch:
+## `dawn.pkg.cache` property, then $DAWN_PKG_CACHE, then ~/.dawn/pkg).
+fn pkg_cache_root() -> String !io =
+  match System.getProperty("dawn.pkg.cache") {
+    Some(p) -> p
+    None ->
+      match System.getenv("DAWN_PKG_CACHE") {
+        Some(p) -> p
+        None ->
+          match System.getProperty("user.home") {
+            Some(h) -> h ++ "/.dawn/pkg"
+            None -> ".dawn-pkg"
+          }
+      }
+  }
+
+fn ver_parts(v: String) -> (Int, Int, Int) = {
+  let ps = str.split(v, ".")
+  let g = fn(i: Int) => if i < len(ps) { parse_int(ps[i]).unwrap_or(0) } else { 0 }
+  (g(0), g(1), g(2))
+}
+
+fn ver_lt(a: String, b: String) -> Bool = {
+  let (a1, a2, a3) = ver_parts(a)
+  let (b1, b2, b3) = ver_parts(b)
+  if a1 != b1 { a1 < b1 } else if a2 != b2 { a2 < b2 } else { a3 < b3 }
+}
+
+type UrlReq = { url: String, version: String, hash: String, subdir: String, mf_path: String }
+
+## The package root for a url requirement, from the cache only — the selfhost
+## toolchain does not fetch. `failed` de-duplicates the miss report per hash.
+fn url_pkg_root(
+  name: String,
+  r: UrlReq,
+  failed0: Set[String]
+) -> (Option[String], List[LocDiag], Set[String]) !io = {
+  let entry = pkg_cache_root() ++ "/" ++ str.replace(r.hash, ":", "-")
+  let root = if r.subdir == "" { entry } else { entry ++ "/" ++ r.subdir }
+  if io.is_dir(root) { return (Some(root), [], failed0) }
+  let fkey = r.hash ++ ":" ++ r.subdir
+  if set.has(failed0, fkey) { return (None, [], failed0) }
+  let d = [LocDiag { path: r.mf_path, d: Diag {
+    msg: "package `" ++ name ++ "` " ++ r.version ++ " is not in the cache (" ++ entry ++ ")",
+    lo: 0,
+    hi: 0,
+    hint: "the selfhost toolchain does not fetch; run the Kotlin `dawn` once to populate the cache"
+  } }]
+  (None, d, set.insert(failed0, r.hash))
+}
+
+## Minimal Version Selection over `[deps.<alias>]` requirements (the Kotlin
+## selectUrlDeps, package-design.md §4.5): walk the whole requirement graph —
+## every version any reachable manifest mentions — then pick the maximum
+## required version per name. Same version under two hashes is an integrity
+## error. Returns name → chosen package root (None = errored).
+fn select_url_deps(root_dir: String) -> (Map[String, Option[String]], List[LocDiag]) !io = {
+  var reqs: Map[String, List[UrlReq]] = map.empty()
+  var seen: Set[String] = set.empty()
+  var failed: Set[String] = set.empty()
+  var diags: List[LocDiag] = []
+  var queue: List[String] = [root_dir]
+  var qi = 0
+  while qi < len(queue) {
+    let dir = queue[qi]
+    qi = qi + 1
+    let dc = canon(dir)
+    if set.has(seen, dc) { continue }
+    seen = set.insert(seen, dc)
+    match read_manifest(dir) {
+      Some(m) -> {
+        for dep in m.deps {
+          match dep.src {
+            DPath(pdir) -> { if io.is_dir(pdir) { queue = queue ++ [pdir] } }
+            DRemote(url, ver, hash, sub) -> {
+              let r = UrlReq {
+                url: url, version: ver, hash: hash, subdir: sub,
+                mf_path: dir ++ "/dawn.toml"
+              }
+              let prev: List[UrlReq] = match map.get(reqs, dep.key) {
+                Some(l) -> l
+                None -> []
+              }
+              reqs = map.insert(reqs, dep.key, prev ++ [r])
+              let (ro, ds, f1) = url_pkg_root(dep.key, r, failed)
+              diags = diags ++ ds
+              failed = f1
+              match ro {
+                Some(rt) -> { queue = queue ++ [rt] }
+                None -> ()
+              }
+            }
+          }
+        }
+      }
+      None -> ()
+    }
+  }
+  var resolved: Map[String, Option[String]] = map.empty()
+  for name in map.keys(reqs) {
+    let rlist = map.get(reqs, name).expect("reqs")
+    var win = rlist[0]
+    for r in rlist { if ver_lt(win.version, r.version) { win = r } }
+    var conflict = false
+    for r in rlist { if r.version == win.version && r.hash != win.hash { conflict = true } }
+    if conflict {
+      diags = diags ++ [LocDiag { path: win.mf_path, d: Diag {
+        msg: "package `" ++ name ++ "` version " ++ win.version ++
+          " is required under different hashes",
+        lo: 0,
+        hi: 0,
+        hint: "the same version must mean the same content everywhere; align the `hash` values"
+      } }]
+      resolved = map.insert(resolved, name, None)
+      continue
+    }
+    let (ro, ds, f1) = url_pkg_root(name, win, failed)
+    diags = diags ++ ds
+    failed = f1
+    match ro {
+      None -> { resolved = map.insert(resolved, name, None) }
+      Some(rt) -> {
+        let declared = match read_manifest(rt) {
+          Some(m) -> m.version
+          None -> ""
+        }
+        if declared != "" && declared != win.version {
+          diags = diags ++ [LocDiag { path: win.mf_path, d: Diag {
+            msg: "package `" ++ name ++ "` declares version " ++ declared ++
+              " but " ++ win.version ++ " was selected",
+            lo: 0,
+            hi: 0,
+            hint: "the archive's dawn.toml disagrees with the requirement; fix the version or the url"
+          } }]
+          resolved = map.insert(resolved, name, None)
+        } else {
+          resolved = map.insert(resolved, name, Some(rt))
+        }
+      }
+    }
+  }
+  (resolved, diags)
+}
+
 ## `[deps]` → alias → package, recursively (transitive packages resolve their
-## own manifests). Mirrors the Kotlin ModuleLoader.resolveSrcDeps: the alias
-## must equal the package's manifest name; v1 fence: no `[java-deps]` in a
-## dependency. `cache` (canonical dir → resolved package, None = known bad)
-## and `visiting` (cycle guard) are threaded through the recursion.
+## own manifests). Mirrors the Kotlin ModuleLoader.link: the alias must equal
+## the package's manifest name; v1 fence: no `[java-deps]` in a dependency.
+## `cache` (canonical dir → resolved package, None = known bad), `visiting`
+## (cycle guard) and `names` (package name → owning dir, one copy program-wide)
+## are threaded through the recursion; url deps arrive pre-selected.
 fn resolve_src_deps(
   dir: String,
   cache0: Map[String, Option[PkgR]],
-  visiting: Set[String]
-) -> (Map[String, PkgR], List[LocDiag], Map[String, Option[PkgR]]) !io = {
+  visiting: Set[String],
+  url_resolved: Map[String, Option[String]],
+  names0: Map[String, String]
+) -> (Map[String, PkgR], List[LocDiag], Map[String, Option[PkgR]], Map[String, String]) !io = {
   var out: Map[String, PkgR] = map.empty()
   var diags: List[LocDiag] = []
   var cache = cache0
+  var names = names0
   let mf_path = dir ++ "/dawn.toml"
-  match manifest.read_manifest(dir) {
+  match read_manifest(dir) {
     Some(m) -> {
       for dep in m.deps {
-        let dcanon = canon(dep.dir)
+        let ddir_opt: Option[String] = match dep.src {
+          DPath(d) -> Some(d)
+          DRemote(_, _, _, _) ->
+            match map.get(url_resolved, dep.key) {
+              Some(o) -> o
+              None -> None
+            }
+        }
+        let unresolved = match ddir_opt {
+          Some(_) -> false
+          None -> true
+        }
+        if unresolved { continue } # selection already errored
+        let ddir = ddir_opt.expect("dep dir")
+        let dcanon = canon(ddir)
+        let claim_bad = match map.get(names, dep.key) {
+          Some(c) -> c != dcanon
+          None -> false
+        }
+        if claim_bad {
+          let claimed = map.get(names, dep.key).expect("claim")
+          diags = diags ++ [LocDiag { path: mf_path, d: Diag {
+            msg: "package `" ++ dep.key ++ "` is linked from two different directories",
+            lo: 0,
+            hi: 0,
+            hint: "one package name means one copy program-wide (coherence, package-design.md §4.5);\n" ++
+              "  here:      " ++ dcanon ++ "\n  elsewhere: " ++ claimed
+          } }]
+          continue
+        }
         if map.has(cache, dcanon) {
           match map.get(cache, dcanon).expect("cached") {
             Some(hit) ->
@@ -209,7 +390,7 @@ fn resolve_src_deps(
           } }]
           continue
         }
-        match manifest.read_manifest(dep.dir) {
+        match read_manifest(ddir) {
           Some(dm) ->
             if dm.name != dep.key {
               diags = diags ++ [LocDiag { path: mf_path, d: Diag {
@@ -229,28 +410,30 @@ fn resolve_src_deps(
                 hint: "declare the jars in the consuming project's [java-deps] for now"
               } }]
               cache = map.insert(cache, dcanon, None)
-            } else if not io.is_dir(dep.dir ++ "/src") {
+            } else if not io.is_dir(ddir ++ "/src") {
               diags = diags ++ [LocDiag { path: mf_path, d: Diag {
                 msg: "package `" ++ dm.name ++ "` has no src/ folder (expected " ++
-                  dep.dir ++ "/src)",
+                  ddir ++ "/src)",
                 lo: 0,
                 hi: 0,
                 hint: ""
               } }]
               cache = map.insert(cache, dcanon, None)
             } else {
-              let (tdeps, tdiags, cache1) =
-                resolve_src_deps(dep.dir, cache, set.insert(visiting, dcanon))
+              let (tdeps, tdiags, cache1, names1) =
+                resolve_src_deps(ddir, cache, set.insert(visiting, dcanon), url_resolved, names)
               diags = diags ++ tdiags
               cache = cache1
-              let info = PkgR { name: dm.name, root: canon(dep.dir ++ "/src"), deps: tdeps }
+              names = names1
+              let info = PkgR { name: dm.name, root: canon(ddir ++ "/src"), deps: tdeps }
               cache = map.insert(cache, dcanon, Some(info))
+              names = map.insert(names, dep.key, dcanon)
               out = map.insert(out, dep.key, info)
             }
           None -> {
             diags = diags ++ [LocDiag { path: mf_path, d: Diag {
               msg: "dependency `" ++ dep.key ++ "` has no dawn.toml (looked in " ++
-                dep.dir ++ ")",
+                ddir ++ ")",
               lo: 0,
               hi: 0,
               hint: "a Dawn source package is a directory with dawn.toml (name = \"" ++
@@ -263,7 +446,7 @@ fn resolve_src_deps(
     }
     None -> ()
   }
-  (out, diags, cache)
+  (out, diags, cache, names)
 }
 
 ## Canonicalize a package module's `use` paths to the alias-qualified spelling
@@ -320,9 +503,12 @@ pub fn load_file(file: String) -> LoadResult !io = {
     Some(i) -> if str.substring(root, i + 1, str.len(root)) == "src" { str.substring(root, 0, i) } else { root }
     None -> root
   }
+  let (url_resolved, sdiags) = select_url_deps(proj)
   let no_cache: Map[String, Option[PkgR]] = map.empty()
-  let (pkgs, mdiags, _) = resolve_src_deps(proj, no_cache, set.empty())
-  resolve(root, [file], mdiags, true, pkgs)
+  let no_names: Map[String, String] = map.empty()
+  let (pkgs, mdiags, _, _) =
+    resolve_src_deps(proj, no_cache, set.empty(), url_resolved, no_names)
+  resolve(root, [file], sdiags ++ mdiags, true, pkgs)
 }
 
 fn resolve(

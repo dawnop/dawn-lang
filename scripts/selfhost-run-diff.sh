@@ -38,6 +38,55 @@ check "test site" "$k" "$d"
 "${SH[@]}" test playground > "$OUT/d.txt" 2>&1 && d=0 || d=$?
 check "test playground (with [deps])" "$k" "$d"
 
+# test: a `[deps.<alias>]` url dependency from a file:// zip. The Kotlin run
+# fetches and verifies into a fresh content-addressed cache; the selfhost run
+# resolves from that cache (it does not fetch) — outputs must still agree.
+PKG="$OUT/greeter-src"
+mkdir -p "$PKG/src"
+printf 'schema = 1\nname = "greeter"\nversion = "1.0.0"\n' > "$PKG/dawn.toml"
+cat > "$PKG/src/hello.dawn" <<'EOF'
+pub fn greet(who: String) -> String = "hello, " ++ who
+
+test "greets" {
+  assert greet("x") == "hello, x"
+}
+EOF
+HASH=$("$DAWN" __pkghash "$PKG")
+python3 - "$PKG" "$OUT/greeter.zip" <<'EOF'
+import os, sys, zipfile
+src, dst = sys.argv[1], sys.argv[2]
+with zipfile.ZipFile(dst, 'w') as z:
+    for root, _, files in os.walk(src):
+        for f in sorted(files):
+            p = os.path.join(root, f)
+            z.write(p, os.path.relpath(p, src))
+EOF
+APP="$OUT/urlapp"
+mkdir -p "$APP/src"
+cat > "$APP/dawn.toml" <<EOF
+schema = 1
+name = "urlapp"
+
+[deps.greeter]
+url = "file://$OUT/greeter.zip"
+version = "1.0.0"
+hash = "$HASH"
+EOF
+cat > "$APP/src/main.dawn" <<'EOF'
+use greeter/hello
+
+pub fn main() -> Unit !io = println(hello.greet("packages"))
+
+test "the url dependency is linked" {
+  assert hello.greet("a") == "hello, a"
+}
+EOF
+export DAWN_PKG_CACHE="$OUT/pkgcache"
+"$DAWN" test "$APP" > "$OUT/k.txt" 2>&1 && k=0 || k=$?
+"${SH[@]}" test "$APP" > "$OUT/d.txt" 2>&1 && d=0 || d=$?
+unset DAWN_PKG_CACHE
+check "test url dep (fetched cache, selfhost reads it)" "$k" "$d"
+
 # test: the failing path (report shape, message indentation, exit 1)
 cat > "$OUT/failing.dawn" <<'EOF'
 fn double(x: Int) -> Int = x * 2

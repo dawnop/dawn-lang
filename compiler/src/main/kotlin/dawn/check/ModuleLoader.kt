@@ -9,6 +9,10 @@ import dawn.diag.SourceFile
 import dawn.diag.Span
 import dawn.lex.Lexer
 import dawn.manifest.Manifest
+import dawn.manifest.PathDep
+import dawn.manifest.PkgFetch
+import dawn.manifest.PkgFetchError
+import dawn.manifest.UrlDep
 import dawn.parse.Parser
 import java.io.File
 
@@ -84,34 +88,170 @@ object ModuleLoader {
     }
 
     /**
-     * `[deps]` → alias → package, recursively (transitive packages resolve their
-     * own manifests). Each dependency directory must carry a dawn.toml whose
-     * `name` equals the alias; package modules load from its src/ on demand
-     * (a library has no entry module and its unused modules are not checked).
-     * [cache] is keyed by canonical directory, so a diamond shares one PkgInfo.
+     * Shared state of one dependency resolution: manifests parsed (and their
+     * diagnostics emitted) once, linked packages cached by canonical directory,
+     * url packages resolved to one directory per name, and the global
+     * one-name-one-directory claim table the coherence rules lean on.
+     */
+    private class ResolveCtx(val diags: ArrayList<LocatedDiag>) {
+        val manifests = HashMap<String, Manifest?>()
+        val sources = HashMap<String, SourceFile>()
+        val pkgCache = HashMap<String, PkgInfo?>()
+        /** package name → chosen root dir; a key mapped to null errored during selection */
+        val urlResolved = HashMap<String, File?>()
+        /** package name → the canonical dir that owns it (one copy program-wide) */
+        val nameDirs = HashMap<String, String>()
+
+        /** hash+subdir keys that already failed to materialize — reported once */
+        val fetchFailed = HashSet<String>()
+
+        fun manifest(dir: File): Manifest? {
+            val canon = dir.canonicalFile.path
+            if (canon in manifests) return manifests[canon]
+            val mfFile = Manifest.locate(dir)
+            if (mfFile == null) {
+                manifests[canon] = null
+                return null
+            }
+            val source = SourceFile(mfFile.path, mfFile.readText())
+            sources[canon] = source
+            val sink = DiagnosticSink()
+            val m = Manifest.parse(mfFile, source, sink)
+            for (d in sink.all) diags.add(LocatedDiag(source, d))
+            manifests[canon] = m
+            return m
+        }
+
+        fun source(dir: File): SourceFile =
+            sources[dir.canonicalFile.path] ?: SourceFile(File(dir, Manifest.FILENAME).path, "")
+    }
+
+    /** `[deps]` → alias → package: select url versions globally, then link. */
+    private fun resolveSrcDeps(dir: File, diags: ArrayList<LocatedDiag>): Map<String, PkgInfo> {
+        val ctx = ResolveCtx(diags)
+        selectUrlDeps(dir, ctx)
+        return link(dir, ctx, HashSet())
+    }
+
+    /**
+     * Minimal Version Selection (package-design.md §4.5, Cox's algorithm R1):
+     * walk the whole requirement graph — every (name, version) any reachable
+     * manifest mentions, fetching archives as needed to read their manifests —
+     * then pick the maximum required version per name. Requirements are minima
+     * with no upper bounds or excludes, which is what keeps this a walk instead
+     * of a SAT problem. Same version demanded under two different hashes is an
+     * integrity error, not a tie to break.
+     */
+    private fun selectUrlDeps(rootDir: File, ctx: ResolveCtx) {
+        val reqs = LinkedHashMap<String, ArrayList<Pair<UrlDep, SourceFile>>>()
+        val seen = HashSet<String>()
+        val queue = ArrayDeque<File>()
+        queue.add(rootDir)
+        while (queue.isNotEmpty()) {
+            val dir = queue.removeFirst()
+            if (!seen.add(dir.canonicalFile.path)) continue
+            val mf = ctx.manifest(dir) ?: continue
+            for (dep in mf.deps) when (dep) {
+                is PathDep -> if (dep.dir.isDirectory) queue.add(dep.dir)
+                is UrlDep -> {
+                    reqs.getOrPut(dep.alias) { ArrayList() }.add(dep to ctx.source(dir))
+                    materialize(dep, ctx.source(dir), ctx)?.let { queue.add(it) }
+                }
+            }
+        }
+        for ((name, list) in reqs) {
+            val winner = list.maxByOrNull { it.first.version }!!
+            val atMax = list.filter { it.first.version == winner.first.version }
+            if (atMax.map { it.first.hash }.distinct().size > 1) {
+                ctx.diags.add(LocatedDiag(winner.second, Diagnostic(
+                    "package `$name` version ${winner.first.version} is required under different hashes",
+                    winner.first.span,
+                    "the same version must mean the same content everywhere; align the `hash` values")))
+                ctx.urlResolved[name] = null
+                continue
+            }
+            val root = materialize(winner.first, winner.second, ctx)
+            if (root == null) {
+                ctx.urlResolved[name] = null
+                continue
+            }
+            // a fetched manifest that declares its version must agree with the selection
+            val mf = ctx.manifest(root)
+            if (mf?.version != null && mf.version != winner.first.version) {
+                ctx.diags.add(LocatedDiag(winner.second, Diagnostic(
+                    "package `$name` declares version ${mf.version} but ${winner.first.version} was selected",
+                    winner.first.span,
+                    "the archive's dawn.toml disagrees with the requirement; fix the version or the url")))
+                ctx.urlResolved[name] = null
+                continue
+            }
+            ctx.urlResolved[name] = root
+        }
+    }
+
+    /**
+     * The package root for a url dep: its cached archive (fetched on miss) +
+     * subdir. A hash that failed once fails silently afterwards — a package
+     * required from several manifests should report its problem once.
+     */
+    private fun materialize(dep: UrlDep, source: SourceFile, ctx: ResolveCtx): File? {
+        val key = dep.hash + ":" + (dep.subdir ?: "")
+        if (key in ctx.fetchFailed) return null
+        val archive = try {
+            PkgFetch.ensureCached(dep.url, dep.hash)
+        } catch (e: PkgFetchError) {
+            ctx.fetchFailed.add(key)
+            ctx.diags.add(LocatedDiag(source, Diagnostic(e.message!!, dep.span, e.hint)))
+            return null
+        }
+        val root = if (dep.subdir == null) archive else File(archive, dep.subdir)
+        if (!root.isDirectory) {
+            ctx.fetchFailed.add(key)
+            ctx.diags.add(LocatedDiag(source, Diagnostic(
+                "subdir `${dep.subdir}` does not exist in the archive for `${dep.alias}`", dep.span, null)))
+            return null
+        }
+        return root
+    }
+
+    /**
+     * Link `[deps]` recursively (transitive packages resolve their own
+     * manifests). Each dependency directory must carry a dawn.toml whose `name`
+     * equals the alias; package modules load from its src/ on demand (a library
+     * has no entry module and its unused modules are not checked). The
+     * canonical-directory cache gives a diamond one PkgInfo; the name-claim
+     * table rejects two *different* directories under one package name — the
+     * situation MVS exists to prevent, closed off for path deps too.
      * v1 fence: a dependency may not have `[java-deps]` (not merged into the
      * consumer's class path yet).
      */
-    private fun resolveSrcDeps(
+    private fun link(
         dir: File,
-        diags: ArrayList<LocatedDiag>,
-        cache: HashMap<String, PkgInfo?> = HashMap(),
-        visiting: MutableSet<String> = HashSet(),
+        ctx: ResolveCtx,
+        visiting: MutableSet<String>,
     ): Map<String, PkgInfo> {
-        val mfFile = Manifest.locate(dir) ?: return emptyMap()
-        val source = SourceFile(mfFile.path, mfFile.readText())
-        val sink = DiagnosticSink()
-        val manifest = Manifest.parse(mfFile, source, sink)
-        for (d in sink.all) diags.add(LocatedDiag(source, d))
-        if (manifest == null) return emptyMap()
+        val manifest = ctx.manifest(dir) ?: return emptyMap()
+        val source = ctx.source(dir)
         val out = LinkedHashMap<String, PkgInfo>()
         for (dep in manifest.deps) {
-            val canon = dep.dir.canonicalFile.path
-            if (canon in cache) {
-                val hit = cache[canon]
+            val depDir = when (dep) {
+                is PathDep -> dep.dir
+                is UrlDep -> ctx.urlResolved[dep.alias] ?: continue // selection already errored
+            }
+            val canon = depDir.canonicalFile.path
+            val claimed = ctx.nameDirs[dep.alias]
+            if (claimed != null && claimed != canon) {
+                ctx.diags.add(LocatedDiag(source, Diagnostic(
+                    "package `${dep.alias}` is linked from two different directories", dep.span,
+                    "one package name means one copy program-wide (coherence, package-design.md §4.5);\n" +
+                        "  here:      $canon\n  elsewhere: $claimed")))
+                continue
+            }
+            if (canon in ctx.pkgCache) {
+                val hit = ctx.pkgCache[canon]
                 if (hit != null) {
                     if (hit.name != dep.alias) {
-                        diags.add(LocatedDiag(source, Diagnostic(
+                        ctx.diags.add(LocatedDiag(source, Diagnostic(
                             "dependency alias `${dep.alias}` does not match the package's name `${hit.name}`",
                             dep.span, "the alias must equal the package's manifest name; rename one of them")))
                     } else {
@@ -121,50 +261,46 @@ object ModuleLoader {
                 continue
             }
             if (canon in visiting) {
-                diags.add(LocatedDiag(source, Diagnostic(
+                ctx.diags.add(LocatedDiag(source, Diagnostic(
                     "package dependency cycle through `${dep.alias}`", dep.span,
                     "a package cannot depend on itself, directly or through its dependencies")))
                 continue
             }
-            val depMf = Manifest.locate(dep.dir)
-            if (depMf == null) {
-                diags.add(LocatedDiag(source, Diagnostic(
-                    "dependency `${dep.alias}` has no dawn.toml (looked in ${dep.dir.path})", dep.span,
+            val dm = ctx.manifest(depDir)
+            if (dm == null) {
+                ctx.diags.add(LocatedDiag(source, Diagnostic(
+                    "dependency `${dep.alias}` has no dawn.toml (looked in ${depDir.path})", dep.span,
                     "a Dawn source package is a directory with dawn.toml (name = \"${dep.alias}\") and src/")))
-                cache[canon] = null
+                ctx.pkgCache[canon] = null
                 continue
             }
-            val depSource = SourceFile(depMf.path, depMf.readText())
-            val depSink = DiagnosticSink()
-            val dm = Manifest.parse(depMf, depSource, depSink)
-            for (d in depSink.all) diags.add(LocatedDiag(depSource, d))
-            if (dm == null) { cache[canon] = null; continue }
             if (dm.name != dep.alias) {
-                diags.add(LocatedDiag(source, Diagnostic(
+                ctx.diags.add(LocatedDiag(source, Diagnostic(
                     "dependency alias `${dep.alias}` does not match the package's name `${dm.name}`", dep.span,
                     "the alias must equal the package's manifest name; rename one of them")))
-                cache[canon] = null
+                ctx.pkgCache[canon] = null
                 continue
             }
             if (dm.javaDeps.isNotEmpty()) {
-                diags.add(LocatedDiag(source, Diagnostic(
+                ctx.diags.add(LocatedDiag(source, Diagnostic(
                     "package `${dm.name}` has `[java-deps]` — a dependency's jars are not merged yet",
                     dep.span, "declare the jars in the consuming project's [java-deps] for now")))
-                cache[canon] = null
+                ctx.pkgCache[canon] = null
                 continue
             }
-            val srcRoot = File(dep.dir, "src")
+            val srcRoot = File(depDir, "src")
             if (!srcRoot.isDirectory) {
-                diags.add(LocatedDiag(source, Diagnostic(
+                ctx.diags.add(LocatedDiag(source, Diagnostic(
                     "package `${dm.name}` has no src/ folder (expected ${srcRoot.path})", dep.span, null)))
-                cache[canon] = null
+                ctx.pkgCache[canon] = null
                 continue
             }
             visiting.add(canon)
-            val transitive = resolveSrcDeps(dep.dir, diags, cache, visiting)
+            val transitive = link(depDir, ctx, visiting)
             visiting.remove(canon)
             val info = PkgInfo(dm.name, srcRoot, transitive)
-            cache[canon] = info
+            ctx.pkgCache[canon] = info
+            ctx.nameDirs[dep.alias] = canon
             out[dep.alias] = info
         }
         return out
