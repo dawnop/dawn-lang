@@ -26,7 +26,7 @@ use ast.{
   ECall, EMethod, EApply, ELambda, EBlock, EIf, EMatch, ECtor, EFieldAcc,
   EListLit, ETupleLit, EBinary, EUnary, EPropagate, EUnwrap, EIndex, EReturn,
   EComptime, EUnsafePure, Stmt, SLet, SLetPat, SLocalFn, SAssign, SExpr,
-  SAssert, SWhile, SFor, LambdaParam
+  SAssert, SWhile, SFor, LambdaParam, ConstView
 }
 use tast.{
   TExpr, XInt, XFloat, XBool, XUnit, XStr, XLocal, XFnValue, XCallDyn,
@@ -58,6 +58,7 @@ use exhaustive.{
   useful, missing_list_patterns
 }
 use suggest
+use parser
 
 ## An alias entry: the Kotlin AliasInfo without its mutable resolution slots
 ## (resolution results live in Cx.alias_resolved, the in-flight set in
@@ -1791,8 +1792,15 @@ fn impl_subject_ok(cx: Cx, subject: Ty) -> Bool =
 ## Pass 2.75b: register impls — derive Ord first (so an explicit duplicate
 ## reports as the duplicate), then subject rules, the orphan rule, program-wide
 ## coherence, and method signature matching (the Kotlin registerImpls).
-pub fn pass_register_impls(cx: Cx, m: Module, shells: List[Option[Shell]]) -> Cx = {
+## Also returns each impl's resolved method signatures (aligned with
+## module_impls × methods; None where registration failed), for body checking.
+pub fn pass_register_impls(
+  cx: Cx,
+  m: Module,
+  shells: List[Option[Shell]]
+) -> (Cx, List[List[Option[Sig]]]) = {
   var cx1 = cx
+  var impl_sigs: List[List[Option[Sig]]] = []
   # local ADT ids (for the orphan rule)
   var local_adts: Set[Int] = set.empty()
   for sh in shells {
@@ -1858,6 +1866,7 @@ pub fn pass_register_impls(cx: Cx, m: Module, shells: List[Option[Shell]]) -> Cx
           None -> "declare `trait " ++ d.trait_name ++ "[T] { ... }` or import it first"
         }
         cx1 = cerr_h(cx1, "unknown trait: " ++ d.trait_name, d.tlo, d.thi, hint)
+        impl_sigs = impl_sigs ++ [no_msigs(len(d.methods))]
         continue
       }
       Some(t) -> t
@@ -1868,12 +1877,16 @@ pub fn pass_register_impls(cx: Cx, m: Module, shells: List[Option[Shell]]) -> Cx
     cx1 = Cx { ..cx1, current_tparams: empty_tp, current_eff_vars: empty_ev }
     let (cx2, subject) = resolve_type(cx1, d.subject)
     cx1 = cx2
-    if subject == TyError { continue }
+    if subject == TyError {
+      impl_sigs = impl_sigs ++ [no_msigs(len(d.methods))]
+      continue
+    }
     if not impl_subject_ok(cx1, subject) {
       cx1 = cerr_h(cx1, "`" ++ ty_show(cx1.adts, subject) ++ "` cannot be an impl subject",
         t_lo2(d.subject), t_hi2(d.subject),
         "v1 impls cover named non-generic types and Int/Float/Bool/String; " ++
           "generic subjects (List, Map, tuples, instantiated generics) need conditional impls (v2)")
+      impl_sigs = impl_sigs ++ [no_msigs(len(d.methods))]
       continue
     }
     # orphan rule: the impl lives with the trait or with the subject type
@@ -1890,6 +1903,7 @@ pub fn pass_register_impls(cx: Cx, m: Module, shells: List[Option[Shell]]) -> Cx
           "]` may not live here", d.tlo, d.thi,
         "an impl belongs to the module that declares `" ++ tr.name ++
           "` or the one that declares `" ++ ty_show(cx1.adts, subject) ++ "`")
+      impl_sigs = impl_sigs ++ [no_msigs(len(d.methods))]
       continue
     }
     # coherence: at most one impl per (trait, type) in the whole program
@@ -1907,6 +1921,7 @@ pub fn pass_register_impls(cx: Cx, m: Module, shells: List[Option[Shell]]) -> Cx
         }
         cx1 = cerr_h(cx1, "duplicate impl: `" ++ tr.name ++ "[" ++ ty_show(cx1.adts, subject) ++
             "]` is already implemented" ++ where2, d.tlo, d.thi, hint)
+        impl_sigs = impl_sigs ++ [no_msigs(len(d.methods))]
         continue
       }
       None -> ()
@@ -1918,6 +1933,7 @@ pub fn pass_register_impls(cx: Cx, m: Module, shells: List[Option[Shell]]) -> Cx
     }
     let em0: Map[Int, Eff] = map.empty()
     var provided: List[String] = []
+    var msigs: List[Option[Sig]] = []
     for me in d.methods {
       var ms: Option[MethodSig] = None
       for entry in tr.methods {
@@ -1933,6 +1949,7 @@ pub fn pass_register_impls(cx: Cx, m: Module, shells: List[Option[Shell]]) -> Cx
           }
           cx1 = cerr_o(cx1, "trait `" ++ tr.name ++ "` has no method `" ++ me.name ++ "`",
             me.nlo, me.nhi, suggest.hint(me.name, mnames))
+          msigs = msigs ++ [no_sig()]
           continue
         }
         Some(v) -> v
@@ -1944,6 +1961,7 @@ pub fn pass_register_impls(cx: Cx, m: Module, shells: List[Option[Shell]]) -> Cx
       if already {
         cx1 = cerr(cx1, "method `" ++ me.name ++ "` is implemented twice in this impl",
           me.nlo, me.nhi)
+        msigs = msigs ++ [no_sig()]
         continue
       }
       var non_io = false
@@ -1953,6 +1971,7 @@ pub fn pass_register_impls(cx: Cx, m: Module, shells: List[Option[Shell]]) -> Cx
       if non_io {
         cx1 = cerr_h(cx1, "impl methods cannot declare effect variables", me.nlo, me.nhi,
           "an impl method is pure or !io")
+        msigs = msigs ++ [no_sig()]
         continue
       }
       let saved_ev = cx1.current_eff_vars
@@ -1974,6 +1993,7 @@ pub fn pass_register_impls(cx: Cx, m: Module, shells: List[Option[Shell]]) -> Cx
       cx1 = Cx { ..cx1, current_eff_vars: saved_ev }
       if leaked {
         cx1 = cerr(cx1, "impl method signatures cannot carry effect variables", me.nlo, me.nhi)
+        msigs = msigs ++ [no_sig()]
         continue
       }
       let inst2 = inst
@@ -1992,6 +2012,19 @@ pub fn pass_register_impls(cx: Cx, m: Module, shells: List[Option[Shell]]) -> Cx
           "drop !" ++ eff_show2(eff) ++ " here, or declare the trait method !" ++ eff_show2(eff))
       }
       provided = provided ++ [me.name]
+      msigs = msigs ++ [Some(Sig {
+        name: me.name,
+        param_tys: ptys,
+        param_names: map(me.params, fn(p) => p.name),
+        ret: ret,
+        eff: eff,
+        is_builtin: false,
+        tparams: [],
+        constraints: [],
+        owner: cx1.owner_class,
+        trait_id: None,
+        inferring: false
+      })]
     }
     var missing: List[MethodSig] = []
     for entry in tr.methods {
@@ -2039,6 +2072,7 @@ pub fn pass_register_impls(cx: Cx, m: Module, shells: List[Option[Shell]]) -> Cx
       impl_table: map.insert(cx1.impl_table, (tid, subject), info),
       local_impls: cx1.local_impls ++ [info]
     }
+    impl_sigs = impl_sigs ++ [msigs]
   }
   # derive Ord field check, after every impl is known
   di = 0
@@ -2083,7 +2117,7 @@ pub fn pass_register_impls(cx: Cx, m: Module, shells: List[Option[Shell]]) -> Cx
     }
     di = di + 1
   }
-  cx1
+  (cx1, impl_sigs)
 }
 
 ## Render a concrete effect for the impl-method error text ("io").
@@ -2129,7 +2163,8 @@ test "impl registration enforces coherence and signature matching" {
   var cx = seed_prelude(test_cx())
   cx = pass_register_traits(cx, m)
   let none_shells: List[Option[Shell]] = []
-  cx = pass_register_impls(cx, m, none_shells)
+  let (cxri, _) = pass_register_impls(cx, m, none_shells)
+  cx = cxri
   assert len(cx.diags) == 1
   assert str.contains(cx.diags[0].msg, "duplicate impl: `Eq4[Int]`")
   assert len(cx.local_impls) == 1
@@ -2140,7 +2175,8 @@ test "impl registration enforces coherence and signature matching" {
   ] }
   var cx2 = seed_prelude(test_cx())
   cx2 = pass_register_traits(cx2, m2)
-  cx2 = pass_register_impls(cx2, m2, none_shells)
+  let (cxri2, _) = pass_register_impls(cx2, m2, none_shells)
+  cx2 = cxri2
   assert len(cx2.diags) == 1
   assert str.contains(cx2.diags[0].msg, "is missing `eq5`")
   assert cx2.diags[0].hint == "provide: fn eq5(a: Int, b: Int) -> Bool"
@@ -2317,18 +2353,23 @@ test "fn signatures resolve with bounds and worst-effect inference" {
 
 ## Pass 3.5: constant declarations — types only (initializers run later, after
 ## signature inference). The Kotlin declareConst.
-pub fn pass_const_decls(cx: Cx, m: Module) -> Cx = {
+## Also returns each declared type (aligned with module_consts; None where the
+## name was skipped for alias/import clashes), for initializer checking.
+pub fn pass_const_decls(cx: Cx, m: Module) -> (Cx, List[Option[Ty]]) = {
   var cx1 = cx
+  var decl_tys: List[Option[Ty]] = []
   var all: Set[String] = set.empty()
   for d in module_consts(m) { all = set.insert(all, d.name) }
   cx1 = Cx { ..cx1, all_const_names: all }
   for d in module_consts(m) {
     if alias_shadows(cx1, d.name) {
       cx1 = alias_shadow(cx1, d.name, d.nlo, d.nhi)
+      decl_tys = decl_tys ++ [no_ty2()]
       continue
     }
     if import_clashes(cx1, d.name) {
       cx1 = import_clash(cx1, d.name, d.nlo, d.nhi, "constant")
+      decl_tys = decl_tys ++ [no_ty2()]
       continue
     }
     let empty_tp: Map[String, Ty] = map.empty()
@@ -2343,6 +2384,7 @@ pub fn pass_const_decls(cx: Cx, m: Module) -> Cx = {
         "constants hold Int/Float/Bool/String and List/tuple/record/ADT values built from them (spec §7.2)")
       declared = TyError
     }
+    decl_tys = decl_tys ++ [Some(declared)]
     if map.has(cx1.ctors_by_name, d.name) || map.has(cx1.adts_by_name, d.name) ||
       map.has(cx1.traits_by_name, d.name) {
         cx1 = cerr(cx1, "`" ++ d.name ++ "` collides with a type, trait, or constructor name",
@@ -2357,7 +2399,7 @@ pub fn pass_const_decls(cx: Cx, m: Module) -> Cx = {
         }
       }
   }
-  cx1
+  (cx1, decl_tys)
 }
 
 ## Pass 4: the entry point check (main's shape and visibility).
@@ -2388,7 +2430,8 @@ test "const declarations register in order with serializability checks" {
     DConst("A", false, TNamed("Int", [], 55, 58), EInt(2, 61, 62), 46, 62, 52, 53)
   ] }
   var cx = seed_prelude(test_cx())
-  cx = pass_const_decls(cx, m)
+  let (cxcd, _) = pass_const_decls(cx, m)
+  cx = cxcd
   assert cx.const_order == ["A", "B"]
   assert map.get(cx.consts, "B") == Some(TyError)
   assert len(cx.diags) == 2
@@ -4522,6 +4565,14 @@ fn line_of(cx: Cx, off: Int) -> Int = {
 # ---- name resolution with capture bookkeeping ----
 
 fn no_int() -> Option[Int] = None
+
+fn no_ty2() -> Option[Ty] = None
+
+fn no_msigs(n: Int) -> List[Option[Sig]] = {
+  var out: List[Option[Sig]] = []
+  for _i in 0 ..n { out = out ++ [no_sig()] }
+  out
+}
 
 fn is_tyvar(t: Ty) -> Bool =
   match t {
@@ -6949,4 +7000,476 @@ test "ufcs rewrites x.f(a) into f(x, a) with the receiver pre-typed" {
     }
     _ -> { assert false }
   }
+}
+
+# ---- pass 5 driver: function bodies, const initializers, tests ----
+
+## Mint dictionary symbols for a signature's trait bounds (the Kotlin
+## bindDicts): typed as the tvar itself, marked with (trait, tvar).
+fn bind_dicts(cx: Cx, s: Sig, nlo: Int, nhi: Int) -> Cx = {
+  let empty_d: Map[(Int, Int), Int] = map.empty()
+  var any = false
+  for bs in s.constraints {
+    if len(bs) > 0 { any = true }
+  }
+  if not any { return Cx { ..cx, dict_syms: empty_d } }
+  var cx1 = Cx { ..cx, dict_syms: empty_d }
+  var i = 0
+  for tp in s.tparams {
+    for tr_id in bounds_of(s, i) {
+      match tp {
+        TyVar(tn, vid) -> {
+          let tr = trait_of(cx1.traits, tr_id)
+          let (cx2, sid) = fresh(cx1)
+          let sym = Sym {
+            name: tr.name ++ "$" ++ tn,
+            ty: tp,
+            mutable: false,
+            dlo: nlo,
+            dhi: nhi,
+            dict_of: Some((tr_id, vid))
+          }
+          cx1 = Cx {
+            ..cx2,
+            syms: map.insert(cx2.syms, sid, sym),
+            dict_syms: map.insert(cx2.dict_syms, (vid, tr_id), sid)
+          }
+        }
+        _ -> ()
+      }
+    }
+    i = i + 1
+  }
+  cx1
+}
+
+## The shared prologue of checkFn and friends: bind the signature frame and
+## dictionaries, fresh effect record, one root scope.
+fn enter_fn(cx: Cx, s: Sig, ev: Map[String, Eff], nlo: Int, nhi: Int) -> Cx = {
+  var tp: Map[String, Ty] = map.empty()
+  for tv in s.tparams {
+    match tv {
+      TyVar(tn, _) -> { tp = map.insert(tp, tn, tv) }
+      _ -> ()
+    }
+  }
+  var cx1 = Cx { ..cx, current_tparams: tp, current_eff_vars: ev, current_sig: Some(s) }
+  cx1 = bind_dicts(cx1, s, nlo, nhi)
+  let empty_w: Map[Eff, (Int, Int, String)] = map.empty()
+  cx1 = Cx {
+    ..cx1,
+    used_effects: [],
+    eff_witness: empty_w,
+    lambda_stack: [],
+    loop_stack: [],
+    scopes: []
+  }
+  push_scope(cx1)
+}
+
+## The signature is the promise: every used effect must be subsumed by the
+## declared one. `where2` finishes the hint ("the end of the signature" /
+## "the trait method").
+fn verify_effects(
+  cx: Cx,
+  kind: String,
+  name: String,
+  declared: Eff,
+  where2: String,
+  nlo: Int,
+  nhi: Int
+) -> Cx = {
+  var cx1 = cx
+  for used in cx.used_effects {
+    if not eff_subsumes(declared, used) {
+      let (wlo, whi, wname) = match map.get(cx.eff_witness, used) {
+        Some(w) -> w
+        None -> (nlo, nhi, "?")
+      }
+      cx1 = cerr_h(cx1, kind ++ " `" ++ name ++ "` is not declared !" ++ eff_show(used) ++
+          " but calls `" ++ wname ++ "` (!" ++ eff_show(used) ++ ")", wlo, whi,
+        "add !" ++ eff_show(used) ++ " to " ++ where2 ++ ", or remove the call")
+    }
+  }
+  cx1
+}
+
+## Check one annotated function body against its signature (the Kotlin checkFn).
+pub fn check_fn(cx: Cx, d: FnDecl, s: Sig, ev: Map[String, Eff]) -> (Cx, TFun) !io = {
+  var cx1 = enter_fn(cx, s, ev, d.nlo, d.nhi)
+  var psyms: List[Int] = []
+  var i = 0
+  for p in d.params {
+    let (cxa, sid) = declare(cx1, p.name, s.param_tys[i], false, p.lo, p.hi)
+    cx1 = cxa
+    psyms = psyms ++ [sid]
+    i = i + 1
+  }
+  let (cx2, bt, bx) = check_expr(cx1, d.body, Some(s.ret))
+  cx1 = cx2
+  if not assignable(cx1, bt, s.ret) {
+    cx1 = cerr(cx1, "function `" ++ d.name ++ "` declares return type " ++
+        ty_show(cx1.adts, s.ret) ++ " but its body is " ++ ty_show(cx1.adts, bt),
+      e_lo(d.body), e_hi(d.body))
+  }
+  cx1 = verify_effects(cx1, "function", d.name, s.eff, "the end of the signature", d.nlo, d.nhi)
+  cx1 = pop_scope(cx1)
+  (cx1, TFun { name: d.name, sig: s, param_syms: psyms, body: bx, is_test: false })
+}
+
+## Check the body of a signature-inferred function and seal its signature:
+## ret = the body's type, eff = the body's effects (or the declared one, which
+## is then enforced as usual). The Kotlin checkFnInferred.
+pub fn check_fn_inferred(cx: Cx, d: FnDecl, s: Sig, ev: Map[String, Eff]) -> (Cx, Sig, TFun) !io = {
+  var cx1 = enter_fn(cx, s, ev, d.nlo, d.nhi)
+  var psyms: List[Int] = []
+  var i = 0
+  for p in d.params {
+    let (cxa, sid) = declare(cx1, p.name, s.param_tys[i], false, p.lo, p.hi)
+    cx1 = cxa
+    psyms = psyms ++ [sid]
+    i = i + 1
+  }
+  let (cx2, bt, bx) = check_expr(cx1, d.body, no_expected())
+  cx1 = cx2
+  var final_eff = EPure
+  if len(d.effs) == 0 {
+    final_eff = eff_union(cx1.used_effects)
+  } else {
+    # the registration pass resolved the declared effect
+    cx1 = verify_effects(cx1, "function", d.name, s.eff, "the end of the signature", d.nlo, d.nhi)
+    final_eff = s.eff
+  }
+  let sealed = Sig { ..s, ret: bt, eff: final_eff, inferring: false }
+  var cx3 = pop_scope(cx1)
+  if map.get(cx3.fns, d.name) == Some(s) {
+    cx3 = Cx { ..cx3, fns: map.insert(cx3.fns, d.name, sealed) }
+  }
+  (cx3, sealed, TFun { name: d.name, sig: sealed, param_syms: psyms, body: bx, is_test: false })
+}
+
+## Check a trait's default method body against its own signature (T stays
+## rigid). The Kotlin checkTraitDefault.
+pub fn check_trait_default(cx: Cx, m2: TraitMethod, s: Sig, body: Expr) -> (Cx, TFun) !io = {
+  let empty_ev: Map[String, Eff] = map.empty()
+  var cx1 = enter_fn(cx, s, empty_ev, m2.nlo, m2.nhi)
+  var psyms: List[Int] = []
+  var i = 0
+  for p in m2.params {
+    let (cxa, sid) = declare(cx1, p.name, s.param_tys[i], false, p.lo, p.hi)
+    cx1 = cxa
+    psyms = psyms ++ [sid]
+    i = i + 1
+  }
+  let (cx2, bt, bx) = check_expr(cx1, body, Some(s.ret))
+  cx1 = cx2
+  if not assignable(cx1, bt, s.ret) {
+    cx1 = cerr(cx1, "method `" ++ m2.name ++ "` declares return type " ++
+        ty_show(cx1.adts, s.ret) ++ " but its default body is " ++ ty_show(cx1.adts, bt),
+      e_lo(body), e_hi(body))
+  }
+  cx1 = verify_effects(cx1, "method", m2.name, s.eff, "the trait method", m2.nlo, m2.nhi)
+  cx1 = pop_scope(cx1)
+  (cx1, TFun { name: m2.name, sig: s, param_syms: psyms, body: bx, is_test: false })
+}
+
+fn test_sig(name: String) -> Sig =
+  Sig {
+    name: name,
+    param_tys: [],
+    param_names: [],
+    ret: TyUnit,
+    eff: EIo,
+    is_builtin: false,
+    tparams: [],
+    constraints: [],
+    owner: None,
+    trait_id: None,
+    inferring: false
+  }
+
+## Check one test block: fresh frame, assert allowed, io implicit (spec §3.4).
+pub fn check_test(cx: Cx, name: String, body: Expr) -> (Cx, TFun) !io = {
+  let empty_tp: Map[String, Ty] = map.empty()
+  let empty_ev: Map[String, Eff] = map.empty()
+  let empty_d: Map[(Int, Int), Int] = map.empty()
+  let empty_w: Map[Eff, (Int, Int, String)] = map.empty()
+  var cx1 = Cx {
+    ..cx,
+    current_tparams: empty_tp,
+    current_eff_vars: empty_ev,
+    current_sig: None,
+    dict_syms: empty_d,
+    used_effects: [],
+    eff_witness: empty_w,
+    lambda_stack: [],
+    loop_stack: [],
+    scopes: [],
+    in_test: true
+  }
+  cx1 = push_scope(cx1)
+  let (cx2, bt, bx) = check_expr(cx1, body, Some(TyUnit))
+  cx1 = cx2
+  if not assignable(cx1, bt, TyUnit) {
+    cx1 = cerr_h(cx1, "a test block's trailing value is discarded (" ++
+        ty_show(cx1.adts, bt) ++ ")", e_lo(body), e_hi(body),
+      "assert on it instead of leaving it as the last expression")
+  }
+  cx1 = pop_scope(cx1)
+  cx1 = Cx { ..cx1, in_test: false }
+  (cx1, TFun { name: name, sig: test_sig(name), param_syms: [], body: bx, is_test: true })
+}
+
+## The initializer must be pure, comptime-evaluable, and match the declared
+## type; only earlier constants are visible (the Kotlin checkConstInit).
+pub fn check_const_init(
+  cx: Cx,
+  d: ConstView,
+  declared: Ty,
+  visible: Set[String]
+) -> (Cx, TConst) !io = {
+  let empty_tp: Map[String, Ty] = map.empty()
+  let empty_ev: Map[String, Eff] = map.empty()
+  var cx1 = Cx {
+    ..cx,
+    current_tparams: empty_tp,
+    current_eff_vars: empty_ev,
+    const_cutoff: Some(visible)
+  }
+  let (cx2, frame) = enter_isolated(cx1)
+  let (cx3, bt, bx) = check_expr(cx2, d.init, Some(declared))
+  cx1 = leave_isolated(cx3, frame, "const initializers", e_lo(d.init), e_hi(d.init))
+  if not assignable(cx1, bt, declared) {
+    cx1 = cerr(cx1, "`" ++ d.name ++ "` declares type " ++ ty_show(cx1.adts, declared) ++
+        " but its initializer is " ++ ty_show(cx1.adts, bt), e_lo(d.init), e_hi(d.init))
+  }
+  cx1 = Cx { ..cx1, const_cutoff: None }
+  (cx1, TConst { name: d.name, ty: declared, init: bx, lo: d.lo, hi: d.hi })
+}
+
+fn no_tfun() -> Option[TFun] = None
+
+## The whole checking pipeline for one module (the Kotlin Checker.check()):
+## passes 0–4 register declarations, pass 5 checks bodies — inferred functions
+## first in call-dependency order, then consts, annotated fns, impl methods,
+## trait defaults, tests.
+pub fn check_module(cx: Cx, m: Module, env: Map[String, ModExports]) -> (Cx, TModule) !io = {
+  var cx1 = seed_prelude(cx)
+  cx1 = pass_java_uses(cx1, m)
+  cx1 = pass_imports(cx1, m, env)
+  let (cxa, shells) = pass_type_shells(cx1, m)
+  cx1 = cxa
+  cx1 = pass_ctor_fields(cx1, m, shells)
+  cx1 = pass_resolve_aliases(cx1)
+  cx1 = pass_derive_show(cx1, m, shells)
+  cx1 = pass_register_traits(cx1, m)
+  let (cxb, impl_sigs) = pass_register_impls(cx1, m, shells)
+  cx1 = cxb
+  let (cxc, sigs, evs) = pass_fn_signatures(cx1, m)
+  cx1 = cxc
+  let (cxd, const_tys) = pass_const_decls(cx1, m)
+  cx1 = cxd
+  cx1 = pass_main_check(cx1, m, sigs)
+  # 5. inferred functions first, in call-dependency order — every callee's
+  # signature is final before any caller is checked; a cycle must annotate
+  let fnds = module_fns(m)
+  var sealed = sigs
+  var tfuns: List[Option[TFun]] = []
+  for _k in 0 ..len(fnds) { tfuns = tfuns ++ [no_tfun()] }
+  var pending: List[Int] = []
+  var i = 0
+  for d in fnds {
+    if sigs[i].inferring { pending = pending ++ [i] }
+    i = i + 1
+  }
+  if len(pending) > 0 {
+    var pending_names: Set[String] = set.empty()
+    for idx in pending { pending_names = set.insert(pending_names, fnds[idx].name) }
+    var deps: Map[String, List[String]] = map.empty()
+    for idx in pending {
+      let d = fnds[idx]
+      let refs: Set[String] = name_refs(d.body, set.empty())
+      var dlist: List[String] = []
+      for r in set.to_list(refs) {
+        if set.has(pending_names, r) { dlist = dlist ++ [r] }
+      }
+      deps = map.insert(deps, d.name, dlist)
+    }
+    var done: Set[String] = set.empty()
+    var progress = true
+    while progress {
+      progress = false
+      var remaining: List[Int] = []
+      for idx in pending {
+        let d = fnds[idx]
+        let dlist = map.get(deps, d.name).expect("dep")
+        var ready = true
+        for r in dlist {
+          if not set.has(done, r) { ready = false }
+        }
+        if ready {
+          let (cxe, ssig, tf) = check_fn_inferred(cx1, d, sealed[idx], evs[idx])
+          cx1 = cxe
+          sealed = list.take(sealed, idx) ++ [ssig] ++ list.drop(sealed, idx + 1)
+          tfuns = list.take(tfuns, idx) ++ [Some(tf)] ++ list.drop(tfuns, idx + 1)
+          done = set.insert(done, d.name)
+          progress = true
+        } else {
+          remaining = remaining ++ [idx]
+        }
+      }
+      pending = remaining
+    }
+    # what remains is a dependency cycle
+    for idx in pending {
+      let d = fnds[idx]
+      cx1 = cerr_h(cx1, "cannot infer the return type of `" ++ d.name ++
+          "`: it is recursive (directly or mutually)", d.nlo, d.nhi,
+        "declare it: fn " ++ d.name ++ "(...) -> T = ...")
+    }
+  }
+  # 5.5. constant initializers, in declaration order (a const sees only
+  # earlier consts; that order is also the evaluation order)
+  var tconsts: List[TConst] = []
+  var visible: Set[String] = set.empty()
+  var ci = 0
+  for d in module_consts(m) {
+    match const_tys[ci] {
+      Some(declared) -> {
+        let (cxe, tc) = check_const_init(cx1, d, declared, visible)
+        cx1 = cxe
+        tconsts = tconsts ++ [tc]
+      }
+      None -> ()
+    }
+    visible = set.insert(visible, d.name)
+    ci = ci + 1
+  }
+  # annotated function bodies
+  i = 0
+  for d in fnds {
+    if not sigs[i].inferring {
+      let (cxe, tf) = check_fn(cx1, d, sealed[i], evs[i])
+      cx1 = cxe
+      tfuns = list.take(tfuns, i) ++ [Some(tf)] ++ list.drop(tfuns, i + 1)
+    }
+    i = i + 1
+  }
+  # 5.75. impl method bodies and trait default bodies (full signatures, so
+  # they check like ordinary annotated functions)
+  var ii = 0
+  var impl_tfuns: List[TFun] = []
+  for imd in module_impls(m) {
+    let msigs = impl_sigs[ii]
+    var mi = 0
+    for me in imd.methods {
+      match msigs[mi] {
+        Some(ms) -> {
+          let empty_ev: Map[String, Eff] = map.empty()
+          let (cxe, tf) = check_fn(cx1, me, ms, empty_ev)
+          cx1 = cxe
+          impl_tfuns = impl_tfuns ++ [tf]
+        }
+        None -> ()
+      }
+      mi = mi + 1
+    }
+    ii = ii + 1
+  }
+  var default_tfuns: List[TFun] = []
+  for td in module_traits(m) {
+    let tid = map.get(cx1.traits_by_name, td.name)
+    match tid {
+      Some(t) -> {
+        let tr = trait_of(cx1.traits, t)
+        for me in td.methods {
+          match me.body {
+            Some(b) -> {
+              var msig: Option[Sig] = None
+              for entry in tr.methods {
+                let (mname, ms2) = entry
+                if mname == me.name { msig = Some(ms2.sig) }
+              }
+              match msig {
+                Some(s2) -> {
+                  let (cxe, tf) = check_trait_default(cx1, me, s2, b)
+                  cx1 = cxe
+                  default_tfuns = default_tfuns ++ [tf]
+                }
+                None -> ()
+              }
+            }
+            None -> ()
+          }
+        }
+      }
+      None -> ()
+    }
+  }
+  var ttests: List[TFun] = []
+  for t in module_tests(m) {
+    let (cxe, tf) = check_test(cx1, t.name, t.body)
+    cx1 = cxe
+    ttests = ttests ++ [tf]
+  }
+  var fns_out: List[TFun] = []
+  for sl in tfuns {
+    match sl {
+      Some(tf) -> { fns_out = fns_out ++ [tf] }
+      None -> ()
+    }
+  }
+  fns_out = fns_out ++ impl_tfuns ++ default_tfuns
+  (cx1, TModule { fns: fns_out, consts: tconsts, tests: ttests })
+}
+
+test "check_module: a whole module checks end to end" {
+  let src = "fn add(a: Int, b: Int) -> Int = a + b\n" ++
+    "fn twice(x: Int) = add(x, x)\n" ++
+    "const K: Int = 41\n" ++
+    "pub fn main() -> Unit !io = ()\n" ++
+    "test \"k\" {\n  assert twice(K) == 82\n}\n"
+  let (m, pdiags) = parser.parse_module(src)
+  assert len(pdiags) == 0
+  let env: Map[String, ModExports] = map.empty()
+  let (cx1, tm) = check_module(test_cx(), m, env)
+  assert len(cx1.diags) == 0
+  # the inferred signature sealed to Int, pure
+  let tw = map.get(cx1.fns, "twice").expect("twice")
+  assert tw.ret == TyInt
+  assert tw.eff == EPure
+  assert not tw.inferring
+  assert len(tm.fns) == 3
+  assert len(tm.consts) == 1
+  assert len(tm.tests) == 1
+}
+
+test "check_module: an inference cycle must annotate" {
+  let src = "fn a2(x: Int) = b2(x)\nfn b2(x: Int) = a2(x)\n"
+  let (m, pdiags) = parser.parse_module(src)
+  assert len(pdiags) == 0
+  let env: Map[String, ModExports] = map.empty()
+  let (cx1, _) = check_module(test_cx(), m, env)
+  assert len(cx1.diags) == 2
+  assert str.contains(cx1.diags[0].msg, "cannot infer the return type of `a2`")
+  assert str.contains(cx1.diags[0].msg, "recursive")
+}
+
+test "check_module: impl methods and trait defaults check as bodies" {
+  let src = "pub type Coin = { v: Int }\n" ++
+    "trait Waxy[T] {\n  fn wax(x: T) -> Int\n  fn buff(x: T) -> Int = wax(x) + 1\n}\n" ++
+    "impl Waxy[Coin] {\n  fn wax(x: Coin) -> Int = x.v * 2\n}\n"
+  let (m, pdiags) = parser.parse_module(src)
+  assert len(pdiags) == 0
+  let env: Map[String, ModExports] = map.empty()
+  let (cx1, tm) = check_module(test_cx(), m, env)
+  assert len(cx1.diags) == 0
+  # 2 bodies land: the impl's wax and the trait default buff
+  assert len(tm.fns) == 2
+  # an effectful body under a pure signature reports
+  let bad = "fn f() -> Int = g()\nfn g() -> Int !io = 1\n"
+  let (m2, _) = parser.parse_module(bad)
+  let (cx2, _) = check_module(test_cx(), m2, env)
+  assert len(cx2.diags) == 1
+  assert cx2.diags[0].msg == "function `f` is not declared !io but calls `g` (!io)"
 }
