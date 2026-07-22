@@ -14,7 +14,7 @@ trap 'rm -rf "$OUT"' EXIT
 
 "$DAWN" build selfhost -o "$OUT/selfhost.jar" > /dev/null
 # dawn.tool.AdtClassWriter (the shared frame writer) lives in the compiler jar
-java -cp "$OUT/selfhost.jar:compiler/build/libs/dawn.jar" main emitrt -o "$OUT/d" > /dev/null
+java -Xss512m -cp "$OUT/selfhost.jar:compiler/build/libs/dawn.jar" main emitrt examples/calc.dawn -o "$OUT/d" > /dev/null
 
 total=0
 bad=0

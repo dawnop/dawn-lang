@@ -15,8 +15,9 @@ use dump
 use astdump
 use checkdump
 use stdlib
-use analyze
+use analyze.{CheckedMod, load_directory, load_file, analyze_program}
 use vendor
+use std/set
 use codegen.{
   fn_iface, tuple_class, gen_fn_interface, gen_tuple_class, gen_panic_class,
   gen_unit_class, supers_of, PANIC_CLASS, UNIT_CLASS, gen_bytes_class,
@@ -26,7 +27,7 @@ use codegen.{
   gen_lists_class, LISTS_CLASS, gen_strings_class, STRINGS_CLASS,
   gen_maps_class, MAPS_CLASS, gen_adt
 }
-use types.{prelude_adts, adt_of, OPTION_ID, RESULT_ID, TyInt, TyFloat, TyString}
+use types.{prelude_adts, adt_of, adt_jvm_name, OPTION_ID, RESULT_ID, TyInt, TyFloat, TyString}
 use java "java.nio.file.Files"
 use java "java.nio.file.Paths"
 
@@ -41,22 +42,51 @@ fn write_class(dir: String, name: String, bs: Bytes) -> Unit !io = {
   ()
 }
 
-## `selfhost emitrt -o <dir>`: the shared runtime classes ported so far —
-## the incremental byte-diff target while codegen grows toward full emission.
+## `selfhost emitrt [<target>] [--std <dir>] -o <dir>`: the classes ported so
+## far — shared runtime, prelude ADTs, and (with a target) the target's own
+## ADT classes. The incremental byte-diff surface while codegen grows.
 fn run_emitrt(rest: List[String]) -> Unit !io = {
   var out = ""
+  var target = ""
+  var std_dir = "compiler/src/main/resources/std"
   var i = 0
   while i < len(rest) {
     if rest[i] == "-o" && i + 1 < len(rest) {
       out = rest[i + 1]
       i = i + 2
+    } else if rest[i] == "--std" && i + 1 < len(rest) {
+      std_dir = rest[i + 1]
+      i = i + 2
     } else {
+      target = rest[i]
       i = i + 1
     }
   }
-  if out == "" { panic("usage: selfhost emitrt -o <dir>") }
-  let adts = prelude_adts()
-  let sup = supers_of(adts, [OPTION_ID, RESULT_ID])
+  if out == "" { panic("usage: selfhost emitrt [<target>] -o <dir>") }
+  var adts = prelude_adts()
+  var mods: List[CheckedMod] = []
+  if target != "" {
+    let std = match stdlib.load_std(std_dir) {
+      Ok(sc) -> sc
+      Err(e) -> panic("cannot load std from " ++ std_dir ++ ": " ++ e)
+    }
+    for pr in map.entries(std.adts) {
+      let (k, v) = pr
+      adts = map.insert(adts, k, v)
+    }
+    let loaded =
+      if io.is_dir(target) { load_directory(target) } else { load_file(target) }
+    let prog = analyze_program(loaded, std, 100000000)
+    if len(prog.diags) > 0 { panic("emit target does not check cleanly: " ++ target) }
+    mods = prog.modules
+    for cm in mods {
+      for pr in map.entries(cm.cx.adts) {
+        let (k, v) = pr
+        adts = map.insert(adts, k, v)
+      }
+    }
+  }
+  let sup = supers_of(adts, sort(map.keys(adts)))
   var n = 0
   while n <= 8 {
     write_class(out, fn_iface(n), gen_fn_interface(n))
@@ -87,6 +117,23 @@ fn run_emitrt(rest: List[String]) -> Unit !io = {
       write_class(out, nm, bs)
     }
   }
+  var seen: Set[String] = set.empty()
+  for cm in mods {
+    for aid in sort(map.keys(cm.cx.adts)) {
+      let a = adt_of(cm.cx.adts, aid)
+      let is_own = match a.owner {
+        Some(o) -> o == cm.class_name
+        None -> false
+      }
+      if is_own && not set.has(seen, adt_jvm_name(a)) {
+        seen = set.insert(seen, adt_jvm_name(a))
+        for pair in gen_adt(sup, adts, a) {
+          let (nm, bs) = pair
+          write_class(out, nm, bs)
+        }
+      }
+    }
+  }
   for outer in vendor.vendored_outers() {
     for pair in vendor.rt_class_family(outer) {
       let (nm, bs) = pair
@@ -115,8 +162,8 @@ fn run_check(rest: List[String]) -> Unit !io = {
   }
   for t in targets {
     println("== " ++ t ++ " ==")
-    let loaded = if io.is_dir(t) { analyze.load_directory(t) } else { analyze.load_file(t) }
-    let prog = analyze.analyze_program(loaded, std, 100000000)
+    let loaded = if io.is_dir(t) { load_directory(t) } else { load_file(t) }
+    let prog = analyze_program(loaded, std, 100000000)
     print(checkdump.render(prog))
   }
 }
