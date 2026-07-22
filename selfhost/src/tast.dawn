@@ -29,6 +29,8 @@ pub type WitRef =
 ## the arg indices crossing as java.util.List.
 pub type TJavaCall = {
   fqcn: String,
+  # the winner's declaring class — the invoke owner (ctors: the fqcn itself)
+  decl_cls: String,
   method: String,
   param_cls: List[String],
   ret_cls: String,
@@ -56,7 +58,7 @@ pub type TExpr =
 # a call of a local function value (dynamic target)
   | XCallDyn(sym: Int, name: String, args: List[TExpr], lo: Int, hi: Int, ty: Ty)
 # a builtin call
-  | XCallBuiltin(name: String, args: List[TExpr], lo: Int, hi: Int, ty: Ty)
+  | XCallBuiltin(name: String, args: List[TExpr], witnesses: List[WitRef], lo: Int, hi: Int, ty: Ty)
 # a call of a user/std function, resolved to its defining module; a trait
 # method call when trait_id is set (codegen dispatches through the dictionary)
   | XCallFn(
@@ -231,7 +233,7 @@ pub fn x_lo(e: TExpr) -> Int =
     XLocal(_, _, lo, _, _) -> lo
     XFnValue(_, _, _, _, lo, _) -> lo
     XCallDyn(_, _, _, lo, _, _) -> lo
-    XCallBuiltin(_, _, lo, _, _) -> lo
+    XCallBuiltin(_, _, _, lo, _, _) -> lo
     XCallFn(_, _, _, _, _, lo, _, _) -> lo
     XApply(_, _, lo, _, _) -> lo
     XJava(_, lo, _, _) -> lo
@@ -268,7 +270,7 @@ pub fn x_hi(e: TExpr) -> Int =
     XLocal(_, _, _, hi, _) -> hi
     XFnValue(_, _, _, _, _, hi) -> hi
     XCallDyn(_, _, _, _, hi, _) -> hi
-    XCallBuiltin(_, _, _, hi, _) -> hi
+    XCallBuiltin(_, _, _, _, hi, _) -> hi
     XCallFn(_, _, _, _, _, _, hi, _) -> hi
     XApply(_, _, _, hi, _) -> hi
     XJava(_, _, hi, _) -> hi
@@ -306,7 +308,7 @@ pub fn tex_ty(e: TExpr) -> Ty =
     XLocal(_, _, _, _, ty) -> ty
     XFnValue(_, _, _, ty, _, _) -> ty
     XCallDyn(_, _, _, _, _, ty) -> ty
-    XCallBuiltin(_, _, _, _, ty) -> ty
+    XCallBuiltin(_, _, _, _, _, ty) -> ty
     XCallFn(_, _, _, _, _, _, _, ty) -> ty
     XApply(_, _, _, _, ty) -> ty
     XJava(_, _, _, ty) -> ty

@@ -1,0 +1,3556 @@
+# Function-body code generation (the Kotlin CodeGen's statement/expression
+# layer, spec §12.2): checked TAST → JVM bytecode through the shared
+# AdtClassWriter. Kotlin threads mutable fields (mv, nextSlot, loopStack,
+# pending lambda queues, const fields); here they live in the Gen record,
+# threaded exactly like the checker's Cx. Every gen_* returns (Gen, Bool):
+# the Bool is Kotlin's "falls through" (false = control already transferred).
+
+use std/str
+use std/list
+use std/map
+use std/set
+use types.{
+  Ty, TyInt, TyFloat, TyBool, TyString, TyBytes, TyCursor, TyUnit, TyNever,
+  TyError, TyVar, TyAdt, TyList, TyMap, TySet, TyJava, TyTuple, TyFn,
+  Adts, AdtI, CtorI, FieldI, adt_of, adt_jvm_name, ctor_jvm_name,
+  Sym, Sig, Eff, Traits, TraitI, MethodSig, ImplI, trait_of, ORD_ID, builtins
+}
+use tast.{
+  TExpr, TStmt, TPat, TArm, TStrPart, TJavaCall, TFun, TConst, TModule, WitRef,
+  TBinOp, TUnOp, tex_ty, x_lo, x_hi,
+  XInt, XFloat, XBool, XUnit, XStr, XLocal, XFnValue, XCallDyn, XCallBuiltin,
+  XCallFn, XApply, XJava, XLambda, XCtor, XConstRef, XCtorValue, XField,
+  XListLit, XTupleLit, XPropagate, XUnwrap, XIndex, XReturn, XBreak, XContinue,
+  XComptime, XUnsafePure, XBinary, XUnary, XIf, XMatch, XBlock, XError,
+  TSPText, TSPInterp,
+  BAdd, BSub, BMul, BDiv, BMod, BConcat, BEq, BNeq, BLt, BLe, BGt, BGe,
+  BAnd, BOr, BBand, BBor, BBxor, BShl, BShr, BUshr, UNeg, UNot, UBnot,
+  TPWild, TPBind, TPLit, TPTuple, TPList, TPCtor,
+  TSLet, TSLetPat, TSLocalFn, TSAssign, TSExpr, TSAssert, TSWhile, TSFor
+}
+use exhaustive.{LitV, LInt, LFloat, LBool, LStr}
+use interp.{CValue, VInt, VFloat, VBool, VStr, VUnit, VList, VTuple, VAdt, CtOut}
+use codegen.{
+  obj, fn_iface, tuple_class, erased_apply_desc, desc_of, method_desc,
+  slots_of, is_ref, load_slot, supers_of, gen_adt, gen_ctor_class,
+  owner_prefix, tr_iface, impl_class, append_const, singleton_scaffold, emit_unerase,
+  V17, ACC_PUBLIC, ACC_PRIVATE, ACC_PROTECTED, ACC_STATIC, ACC_FINAL,
+  ACC_ABSTRACT, ACC_INTERFACE,
+  OP_ALOAD, OP_ILOAD, OP_LLOAD, OP_DLOAD, OP_ASTORE, OP_ISTORE, OP_LSTORE,
+  OP_DSTORE, OP_RETURN, OP_ARETURN, OP_IRETURN, OP_LRETURN, OP_DRETURN,
+  OP_DUP, OP_DUP2, OP_POP, OP_POP2, OP_NEW, OP_CHECKCAST, OP_INSTANCEOF,
+  OP_INVOKESPECIAL, OP_INVOKESTATIC, OP_INVOKEVIRTUAL, OP_INVOKEINTERFACE,
+  OP_GETFIELD, OP_PUTFIELD, OP_GETSTATIC, OP_PUTSTATIC, OP_ATHROW, OP_GOTO,
+  OP_IFEQ, OP_IFNE, OP_IFLT, OP_IFGE, OP_IFGT, OP_IFLE, OP_IF_ICMPEQ,
+  OP_IF_ICMPNE, OP_IF_ICMPGE, OP_IF_ACMPEQ, OP_IFNULL, OP_ICONST_0,
+  OP_ICONST_1, OP_LCONST_0, OP_LCONST_1, OP_LCMP, OP_DCMPL, OP_I2L, OP_L2I,
+  OP_IADD, OP_LADD, OP_ISUB, OP_IMUL, OP_IXOR, OP_LXOR, OP_LNEG, OP_DNEG,
+  OP_BIPUSH, OP_ARRAYLENGTH,
+  PANIC_CLASS, UNIT_CLASS, SB, SHOW_CLASS, BYTES_CLASS, IO_CLASS,
+  LISTS_CLASS, STRINGS_CLASS, MAPS_CLASS, DICT_CMP_CLASS, FN_CMP_CLASS,
+  STDSTRINGS_CLASS, ARRAYLIST, DAWNLIST_CLASS
+}
+use jreflect
+use java "dawn.tool.AdtClassWriter"
+use java "org.objectweb.asm.MethodVisitor"
+use java "org.objectweb.asm.Label"
+use java "org.objectweb.asm.Handle"
+use java "org.objectweb.asm.Type"
+use java "java.util.Objects"
+use java "java.lang.Long"
+use java "java.lang.Integer"
+use java "java.lang.Double"
+
+# ---- opcodes codegen.dawn does not carry yet ----
+
+pub const OP_ICONST_M1: Int = 2
+
+pub const OP_IF_ACMPNE: Int = 166
+
+pub const OP_LSUB: Int = 101
+
+pub const OP_LMUL: Int = 105
+
+pub const OP_LDIV: Int = 109
+
+pub const OP_LREM: Int = 113
+
+pub const OP_DADD: Int = 99
+
+pub const OP_DSUB: Int = 103
+
+pub const OP_DMUL: Int = 107
+
+pub const OP_DDIV: Int = 111
+
+pub const OP_DREM: Int = 115
+
+pub const OP_LAND: Int = 127
+
+pub const OP_LOR: Int = 129
+
+pub const OP_LSHL: Int = 121
+
+pub const OP_LSHR: Int = 123
+
+pub const OP_LUSHR: Int = 125
+
+pub const OP_DCMPG: Int = 152
+
+pub const OP_IF_ICMPLT: Int = 161
+
+pub const OP_IFNONNULL: Int = 199
+
+pub const OP_L2D: Int = 138
+
+pub const OP_D2L: Int = 143
+
+pub const OP_D2F: Int = 144
+
+pub const OP_F2D: Int = 141
+
+pub const OP_FLOAD: Int = 23
+
+pub const OP_FRETURN: Int = 174
+
+pub const OP_ACC_SYNTHETIC: Int = 4096
+
+pub const OP_H_INVOKESTATIC: Int = 6
+
+pub const OP_NEWARRAY: Int = 188
+
+pub const OP_ANEWARRAY: Int = 189
+
+pub const OP_LASTORE: Int = 80
+
+pub const OP_IASTORE: Int = 79
+
+pub const OP_DASTORE: Int = 82
+
+pub const OP_FASTORE: Int = 81
+
+pub const OP_BASTORE: Int = 84
+
+pub const OP_SASTORE: Int = 86
+
+pub const OP_CASTORE: Int = 85
+
+pub const OP_AASTORE: Int = 83
+
+pub const ARGS_FIELD: String = "dawn\$args"
+
+# ---- Gen: the threaded generation state ----
+
+## A lambda body waiting for its impl method (the Kotlin PendingLambda).
+pub type PendingL = {
+  params: List[Int],
+  body: TExpr,
+  captures: List[Int],
+  ty: Ty,
+  name: String,
+  self_sym: Option[Int]
+}
+
+## A SAM bridge to emit: (arg idx, iface fqcn, sam name, sam params, sam ret).
+pub type SamB = { name: String, iface: String, sam_name: String, sam_params: List[String], sam_ret: String }
+
+pub type ConstF = { fname: String, v: CValue, ty: Ty }
+
+pub type Gen = {
+  mv: MethodVisitor,
+  class_name: String,
+  adts: Adts,
+  traits: Traits,
+  impl_table: Map[(Int, Ty), ImplI],
+  # current module's fn signatures (calls with owner = None)
+  own_fns: Map[String, Sig],
+  # program-wide (class name, fn name) → declared signature
+  prog_fns: Map[(String, String), Sig],
+  syms: Map[Int, Sym],
+  slots: Map[Int, Int],
+  next_slot: Int,
+  method_ret: Ty,
+  rets_null: Bool,
+  fn_start: Option[Label],
+  cur_fn: Option[TFun],
+  self_pending: Option[PendingL],
+  loop_stack: List[(Label, Label)],
+  lambda_ctr: Int,
+  sam_ctr: Int,
+  pending_lambdas: List[PendingL],
+  pending_fnval: List[Sig],
+  pending_bi: List[Sig],
+  pending_ctorb: List[(Int, Int)],
+  pending_sam: List[SamB],
+  emitted_fnval: Set[String],
+  emitted_bi: Set[String],
+  emitted_ctorb: Set[String],
+  consts: Map[String, CValue],
+  blocks: Map[(Int, Int), CValue],
+  const_fields: List[ConstF],
+  const_by_key: Map[String, String]
+}
+
+fn sym_of(g: Gen, id: Int) -> Sym =
+  match map.get(g.syms, id) {
+    Some(s) -> s
+    None -> panic("codegen: unknown symbol id ${id}")
+  }
+
+fn slot_of(g: Gen, id: Int) -> Int =
+  match map.get(g.slots, id) {
+    Some(s) -> s
+    None -> panic("codegen: symbol ${id} has no slot")
+  }
+
+fn bind_slot(g: Gen, id: Int, slot: Int) -> Gen !io =
+  Gen { ..g, slots: map.insert(g.slots, id, slot) }
+
+fn alloc(g: Gen, n: Int) -> (Gen, Int) =
+  (Gen { ..g, next_slot: g.next_slot + n }, g.next_slot)
+
+# ---- small emission helpers (all mirror Kotlin byte for byte) ----
+
+fn ldc_str(m: MethodVisitor, s: String) -> Unit !io = {
+  m.visitLdcInsn(Objects.requireNonNull(s).expect("non-null"))
+  ()
+}
+
+fn ldc_long(m: MethodVisitor, v: Int) -> Unit !io = {
+  m.visitLdcInsn(Long.valueOf(v).expect("boxed"))
+  ()
+}
+
+fn ldc_double(m: MethodVisitor, v: Float) -> Unit !io = {
+  m.visitLdcInsn(Double.valueOf(v).expect("boxed"))
+  ()
+}
+
+fn ldc_jint(m: MethodVisitor, v: Int) -> Unit !io = {
+  m.visitLdcInsn(Integer.valueOf(v).expect("boxed"))
+  ()
+}
+
+## Kotlin pushInt: ICONST for -1..5, BIPUSH for a byte, else an int LDC.
+fn push_int(m: MethodVisitor, v: Int) -> Unit !io = {
+  if v >= 0 - 1 && v <= 5 {
+    m.visitInsn(3 + v)
+  } else if v >= 0 - 128 && v <= 127 {
+    m.visitIntInsn(OP_BIPUSH, v)
+  } else {
+    ldc_jint(m, v)
+  }
+  ()
+}
+
+fn store_slot(m: MethodVisitor, t: Ty, slot: Int) -> Unit !io = {
+  match t {
+    TyInt -> { m.visitVarInsn(OP_LSTORE, slot) }
+    TyCursor -> { m.visitVarInsn(OP_LSTORE, slot) }
+    TyFloat -> { m.visitVarInsn(OP_DSTORE, slot) }
+    TyBool -> { m.visitVarInsn(OP_ISTORE, slot) }
+    _ -> if is_ref(t) { m.visitVarInsn(OP_ASTORE, slot) }
+  }
+  ()
+}
+
+fn load_var(g: Gen, id: Int) -> Unit !io =
+  load_slot(g.mv, sym_of(g, id).ty, slot_of(g, id))
+
+fn store_var(g: Gen, id: Int) -> Unit !io =
+  store_slot(g.mv, sym_of(g, id).ty, slot_of(g, id))
+
+## Push the Unit singleton (an erased Object slot needs a value).
+fn push_unit(m: MethodVisitor) -> Unit !io = {
+  m.visitFieldInsn(OP_GETSTATIC, UNIT_CLASS, "INSTANCE", "L" ++ UNIT_CLASS ++ ";")
+  ()
+}
+
+## Box a primitive about to sit in an erased Object position.
+fn box_ty(m: MethodVisitor, t: Ty) -> Unit !io = {
+  match t {
+    TyInt -> {
+      m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Long", "valueOf", "(J)Ljava/lang/Long;", false)
+    }
+    TyCursor -> {
+      m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Long", "valueOf", "(J)Ljava/lang/Long;", false)
+    }
+    TyFloat -> {
+      m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Double", "valueOf",
+        "(D)Ljava/lang/Double;", false)
+    }
+    TyBool -> {
+      m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Boolean", "valueOf",
+        "(Z)Ljava/lang/Boolean;", false)
+    }
+    TyUnit -> { push_unit(m) }
+    _ -> ()
+  }
+  ()
+}
+
+## The stack holds an erased Object; recover the concrete type.
+fn unerase(g: Gen, t: Ty) -> Unit !io = {
+  let m = g.mv
+  match t {
+    TyInt -> {
+      m.visitTypeInsn(OP_CHECKCAST, "java/lang/Long")
+      m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/Long", "longValue", "()J", false)
+    }
+    TyCursor -> {
+      m.visitTypeInsn(OP_CHECKCAST, "java/lang/Long")
+      m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/Long", "longValue", "()J", false)
+    }
+    TyFloat -> {
+      m.visitTypeInsn(OP_CHECKCAST, "java/lang/Double")
+      m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/Double", "doubleValue", "()D", false)
+    }
+    TyBool -> {
+      m.visitTypeInsn(OP_CHECKCAST, "java/lang/Boolean")
+      m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/Boolean", "booleanValue", "()Z", false)
+    }
+    TyString -> { m.visitTypeInsn(OP_CHECKCAST, "java/lang/String") }
+    TyBytes -> { m.visitTypeInsn(OP_CHECKCAST, "[B") }
+    TyAdt(aid, _) -> { m.visitTypeInsn(OP_CHECKCAST, adt_jvm_name(adt_of(g.adts, aid))) }
+    TyList(_) -> { m.visitTypeInsn(OP_CHECKCAST, "java/util/List") }
+    TyMap(_, _) -> { m.visitTypeInsn(OP_CHECKCAST, "java/util/Map") }
+    TySet(_) -> { m.visitTypeInsn(OP_CHECKCAST, "java/util/Set") }
+    TyTuple(elems) -> { m.visitTypeInsn(OP_CHECKCAST, tuple_class(len(elems))) }
+    TyJava(fqcn, _) -> { m.visitTypeInsn(OP_CHECKCAST, internal_of(fqcn)) }
+    TyFn(params, _, _) -> { m.visitTypeInsn(OP_CHECKCAST, fn_iface(len(params))) }
+    TyUnit -> { m.visitInsn(OP_POP) }
+    _ -> ()
+  }
+  ()
+}
+
+## Value of static type `actual` heading into a position declared `declared`.
+fn adapt_to(g: Gen, actual: Ty, declared: Ty) -> Unit !io = {
+  match declared {
+    TyVar(_, _) -> box_ty(g.mv, actual)
+    _ -> ()
+  }
+  ()
+}
+
+## Value produced from a position declared `declared`, used as `actual`.
+fn adapt_from(g: Gen, declared: Ty, actual: Ty) -> Unit !io = {
+  match declared {
+    TyVar(_, _) -> unerase(g, actual)
+    _ -> ()
+  }
+  ()
+}
+
+fn pop_value(g: Gen, t: Ty) -> Unit !io = {
+  let n = slots_of(t)
+  if n == 2 {
+    g.mv.visitInsn(OP_POP2)
+  } else if n == 1 {
+    g.mv.visitInsn(OP_POP)
+  }
+  ()
+}
+
+# ---- descriptor plumbing over Java class NAMES (Class.getName forms) ----
+
+## Class name → JVM descriptor: primitives map, arrays are already close
+## ("[Ljava.lang.String;" wants '/'), references get L…; .
+pub fn jdesc(cls: String) -> String =
+  if cls == "int" { "I" } else if cls == "long" { "J" } else if cls == "short" { "S" }
+  else if cls == "byte" { "B" } else if cls == "char" { "C" } else if cls == "boolean" { "Z" }
+  else if cls == "float" { "F" } else if cls == "double" { "D" } else if cls == "void" { "V" }
+  else if str.starts_with(cls, "[") { join(str.split(cls, "."), "/") }
+  else { "L" ++ join(str.split(cls, "."), "/") ++ ";" }
+
+## Class name → internal name (arrays keep their descriptor form, like ASM).
+pub fn internal_of(cls: String) -> String =
+  if str.starts_with(cls, "[") { join(str.split(cls, "."), "/") }
+  else { join(str.split(cls, "."), "/") }
+
+fn is_prim_name(cls: String) -> Bool =
+  cls == "int" || cls == "long" || cls == "short" || cls == "byte" || cls == "char" ||
+  cls == "boolean" || cls == "float" || cls == "double" || cls == "void"
+
+fn jmethod_desc(param_cls: List[String], ret_cls: String) -> String = {
+  var ps = ""
+  for p in param_cls { ps = ps ++ jdesc(p) }
+  "(" ++ ps ++ ")" ++ jdesc(ret_cls)
+}
+
+# ---- signature-derived descriptors ----
+
+## fn descriptor with the hidden dictionary params appended (dicts = Object).
+fn sig_desc_with_dicts(adts: Adts, s: Sig) -> String = {
+  var ps = ""
+  for p in s.param_tys { ps = ps ++ desc_of(adts, p) }
+  var dicts = 0
+  for c in s.constraints { dicts = dicts + len(c) }
+  for _i in 0 ..dicts { ps = ps ++ "Ljava/lang/Object;" }
+  "(" ++ ps ++ ")" ++ desc_of(adts, s.ret)
+}
+
+fn fn_desc_with_dicts(g: Gen, s: Sig) -> String = sig_desc_with_dicts(g.adts, s)
+
+fn trait_method_desc(g: Gen, s: Sig) -> String = method_desc(g.adts, s.param_tys, s.ret)
+
+## impl method static name: dawn$impl$<Trait>$<Subject>$<m>.
+fn impl_method_name(g: Gen, trait_name: String, subject: Ty, m: String) -> String =
+  "dawn\$impl\$" ++ trait_name ++ "\$" ++ subject_tag(g, subject) ++ "\$" ++ m
+
+fn subject_tag(g: Gen, t: Ty) -> String =
+  match t {
+    TyInt -> "Int"
+    TyFloat -> "Float"
+    TyBool -> "Bool"
+    TyString -> "String"
+    TyAdt(aid, _) -> adt_of(g.adts, aid).name
+    _ -> panic("invalid impl subject")
+  }
+
+fn default_method_name(trait_name: String, m: String) -> String =
+  "dawn\$default\$" ++ trait_name ++ "\$" ++ m
+
+fn derived_cmp_desc(g: Gen, subject: Ty) -> String =
+  "(" ++ desc_of(g.adts, subject) ++ desc_of(g.adts, subject) ++ ")J"
+
+## The boxed JVM type of a concrete Dawn type (LMF instantiatedMethodType).
+fn boxed_desc_of(g: Gen, t: Ty) -> String =
+  match t {
+    TyInt -> "Ljava/lang/Long;"
+    TyCursor -> "Ljava/lang/Long;"
+    TyFloat -> "Ljava/lang/Double;"
+    TyBool -> "Ljava/lang/Boolean;"
+    TyUnit -> "Ljava/lang/Object;"
+    TyNever -> "Ljava/lang/Object;"
+    TyError -> "Ljava/lang/Object;"
+    _ -> desc_of(g.adts, t)
+  }
+
+fn instantiated_type(g: Gen, params: List[Ty], ret: Ty) -> Type !io = {
+  var ps = ""
+  for p in params { ps = ps ++ boxed_desc_of(g, p) }
+  Type.getMethodType(ps2desc(ps, boxed_desc_of(g, ret))).expect("method type")
+}
+
+fn ps2desc(ps: String, ret: String) -> String = "(" ++ ps ++ ")" ++ ret
+
+## impl-method descriptor for lambdas/bridges: concrete types, but a 0-slot
+## return (Unit/Never) becomes Object so LMF can adapt it.
+fn impl_desc_of(g: Gen, params: List[Ty], ret: Ty) -> String = {
+  var ps = ""
+  for p in params { ps = ps ++ desc_of(g.adts, p) }
+  let r = if slots_of(ret) == 0 { "Ljava/lang/Object;" } else { desc_of(g.adts, ret) }
+  "(" ++ ps ++ ")" ++ r
+}
+
+## The LambdaMetafactory bootstrap handle.
+fn lmf_bsm() -> Handle !io =
+  Handle.new(OP_H_INVOKESTATIC, "java/lang/invoke/LambdaMetafactory", "metafactory",
+    "(Ljava/lang/invoke/MethodHandles\$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;" ++
+      "Ljava/lang/invoke/MethodType;Ljava/lang/invoke/MethodHandle;Ljava/lang/invoke/MethodType;)" ++
+      "Ljava/lang/invoke/CallSite;",
+    false)
+
+# ---- witness / signature lookup ----
+
+fn impl_of(g: Gen, tid: Int, subject: Ty) -> ImplI =
+  match map.get(g.impl_table, (tid, subject)) {
+    Some(i) -> i
+    None -> panic("codegen: no impl for trait ${tid}")
+  }
+
+fn trait_method_sig(tr: TraitI, name: String) -> Sig = {
+  for entry in tr.methods {
+    let (mn, ms) = entry
+    if mn == name { return ms.sig }
+  }
+  panic("codegen: trait `" ++ tr.name ++ "` has no method `" ++ name ++ "`")
+}
+
+## The trait method's signature with the subject substituted for the tvar —
+## the concrete shape of the impl's provided static (checker verified match).
+fn subst_subject(tr: TraitI, s: Sig, subject: Ty) -> Sig = {
+  let vid = match tr.tvar {
+    TyVar(_, v) -> v
+    _ -> panic("trait tvar")
+  }
+  var ps: List[Ty] = []
+  for p in s.param_tys { ps = ps ++ [subst_tvar(p, vid, subject)] }
+  Sig { ..s, param_tys: ps, ret: subst_tvar(s.ret, vid, subject) }
+}
+
+fn subst_tvar(t: Ty, vid: Int, to: Ty) -> Ty =
+  match t {
+    TyVar(_, v) -> if v == vid { to } else { t }
+    TyList(e) -> TyList(subst_tvar(e, vid, to))
+    TyMap(k, v2) -> TyMap(subst_tvar(k, vid, to), subst_tvar(v2, vid, to))
+    TySet(e) -> TySet(subst_tvar(e, vid, to))
+    TyTuple(es) -> {
+      var out: List[Ty] = []
+      for e in es { out = out ++ [subst_tvar(e, vid, to)] }
+      TyTuple(out)
+    }
+    TyAdt(aid, args) -> {
+      var out: List[Ty] = []
+      for a in args { out = out ++ [subst_tvar(a, vid, to)] }
+      TyAdt(aid, out)
+    }
+    TyFn(ps, r, e) -> {
+      var out: List[Ty] = []
+      for p in ps { out = out ++ [subst_tvar(p, vid, to)] }
+      TyFn(out, subst_tvar(r, vid, to), e)
+    }
+    _ -> t
+  }
+
+## The declared signature behind a resolved call: own module or program-wide.
+fn sig_lookup(g: Gen, owner: Option[String], name: String) -> Sig =
+  match owner {
+    None ->
+      match map.get(g.own_fns, name) {
+        Some(s) -> s
+        None -> panic("codegen: unknown local fn `" ++ name ++ "`")
+      }
+    Some(cls) ->
+      match map.get(g.prog_fns, (cls, name)) {
+        Some(s) -> s
+        None -> panic("codegen: unknown fn `" ++ cls ++ "." ++ name ++ "`")
+      }
+  }
+
+## Push one dictionary: the impl singleton, or a forwarded dict local.
+fn push_witness(g: Gen, w: WitRef) -> Unit !io = {
+  match w {
+    WConcrete(tid, subject) -> {
+      let imp = impl_of(g, tid, subject)
+      let tr = trait_of(g.traits, tid)
+      g.mv.visitFieldInsn(OP_GETSTATIC, impl_class(g.adts, imp.owner, tr.name, subject),
+        "INSTANCE", "L" ++ tr_iface(tr.owner, tr.name) ++ ";")
+    }
+    WForward(sym) -> { load_var(g, sym) }
+  }
+  ()
+}
+
+# ---- comptime constants (spec §7): scalars inline, structures via fields ----
+
+## Load a comptime value; non-scalars become static fields keyed by `key`
+## (const name or comptime-block span), named dawn$const$N in first-use order.
+fn gen_load_const(g: Gen, v: CValue, t: Ty, key: String) -> Gen !io = {
+  match v {
+    VInt(x) -> {
+      ldc_long(g.mv, x)
+      g
+    }
+    VFloat(x) -> {
+      ldc_double(g.mv, x)
+      g
+    }
+    VBool(x) -> {
+      g.mv.visitInsn(if x { OP_ICONST_1 } else { OP_ICONST_0 })
+      g
+    }
+    VStr(x) -> {
+      ldc_str(g.mv, x)
+      g
+    }
+    VUnit -> g
+    _ -> {
+      let (g1, fname) = match map.get(g.const_by_key, key) {
+        Some(f) -> (g, f)
+        None -> {
+          let f = "dawn\$const\$" ++ to_string(len(g.const_fields))
+          (Gen {
+            ..g,
+            const_fields: g.const_fields ++ [ConstF { fname: f, v: v, ty: t }],
+            const_by_key: map.insert(g.const_by_key, key, f)
+          }, f)
+        }
+      }
+      g1.mv.visitFieldInsn(OP_GETSTATIC, g1.class_name, fname, desc_of(g1.adts, t))
+      g1
+    }
+  }
+}
+
+## Emit bytecode that rebuilds a comptime value (boxed = erased position).
+fn construct_value(g: Gen, m: MethodVisitor, v: CValue, boxed: Bool) -> Unit !io = {
+  match v {
+    VInt(x) -> {
+      ldc_long(m, x)
+      if boxed {
+        m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Long", "valueOf",
+          "(J)Ljava/lang/Long;", false)
+      }
+    }
+    VFloat(x) -> {
+      ldc_double(m, x)
+      if boxed {
+        m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Double", "valueOf",
+          "(D)Ljava/lang/Double;", false)
+      }
+    }
+    VBool(x) -> {
+      m.visitInsn(if x { OP_ICONST_1 } else { OP_ICONST_0 })
+      if boxed {
+        m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Boolean", "valueOf",
+          "(Z)Ljava/lang/Boolean;", false)
+      }
+    }
+    VStr(x) -> { ldc_str(m, x) }
+    VUnit -> if boxed { push_unit(m) }
+    VList(elems) -> {
+      m.visitTypeInsn(OP_NEW, ARRAYLIST)
+      m.visitInsn(OP_DUP)
+      m.visitMethodInsn(OP_INVOKESPECIAL, ARRAYLIST, "<init>", "()V", false)
+      for el in elems {
+        m.visitInsn(OP_DUP)
+        construct_value(g, m, el, true)
+        m.visitMethodInsn(OP_INVOKEVIRTUAL, ARRAYLIST, "add", "(Ljava/lang/Object;)Z", false)
+        m.visitInsn(OP_POP)
+      }
+    }
+    VTuple(elems) -> {
+      let cls = tuple_class(len(elems))
+      m.visitTypeInsn(OP_NEW, cls)
+      m.visitInsn(OP_DUP)
+      for el in elems { construct_value(g, m, el, true) }
+      var ps = ""
+      for _i in 0 ..len(elems) { ps = ps ++ "Ljava/lang/Object;" }
+      m.visitMethodInsn(OP_INVOKESPECIAL, cls, "<init>", "(" ++ ps ++ ")V", false)
+    }
+    VAdt(aid, cidx, fields) -> {
+      let a = adt_of(g.adts, aid)
+      let ci = a.ctors[cidx]
+      let sub = ctor_jvm_name(g.adts, ci)
+      if len(ci.fields) == 0 {
+        m.visitFieldInsn(OP_GETSTATIC, sub, "INSTANCE", "L" ++ sub ++ ";")
+      } else {
+        m.visitTypeInsn(OP_NEW, sub)
+        m.visitInsn(OP_DUP)
+        var i = 0
+        for f in fields {
+          let boxed2 = match ci.fields[i].ty {
+            TyVar(_, _) -> true
+            _ -> false
+          }
+          construct_value(g, m, f, boxed2)
+          i = i + 1
+        }
+        var ps = ""
+        for fd in ci.fields { ps = ps ++ desc_of(g.adts, fd.ty) }
+        m.visitMethodInsn(OP_INVOKESPECIAL, sub, "<init>", "(" ++ ps ++ ")V", false)
+      }
+    }
+    _ -> panic("a function value cannot be a constant (checker bug)")
+  }
+  ()
+}
+
+fn gen_const_fields(g: Gen, cw: AdtClassWriter) -> Unit !io = {
+  if len(g.const_fields) == 0 { return () }
+  for f in g.const_fields {
+    cw.field(ACC_PUBLIC + ACC_STATIC + ACC_FINAL, f.fname, desc_of(g.adts, f.ty))
+  }
+  let cl = cw.method(ACC_STATIC, "<clinit>", "()V").expect("mv")
+  cl.visitCode()
+  for f in g.const_fields {
+    construct_value(g, cl, f.v, false)
+    cl.visitFieldInsn(OP_PUTSTATIC, g.class_name, f.fname, desc_of(g.adts, f.ty))
+  }
+  cl.visitInsn(OP_RETURN)
+  cl.visitMaxs(0, 0)
+  cl.visitEnd()
+  ()
+}
+
+# ---- patterns ----
+
+## Destructuring bind (irrefutable): extract fields into fresh slots.
+fn gen_bind(g: Gen, p: TPat, slot: Int, t: Ty) -> Gen !io = {
+  match p {
+    TPWild -> g
+    TPBind(sym, _) -> bind_slot(g, sym, slot)
+    TPTuple(elems) -> {
+      let ets = match t {
+        TyTuple(ts) -> ts
+        _ -> panic("tuple pattern on non-tuple")
+      }
+      let cls = tuple_class(len(elems))
+      var g1 = g
+      var i = 0
+      for sub in elems {
+        match sub {
+          TPWild -> ()
+          _ -> {
+            let et = ets[i]
+            g1.mv.visitVarInsn(OP_ALOAD, slot)
+            g1.mv.visitFieldInsn(OP_GETFIELD, cls, "_" ++ to_string(i), "Ljava/lang/Object;")
+            unerase(g1, et)
+            let (g2, es) = alloc(g1, slots_of(et))
+            g1 = g2
+            store_slot(g1.mv, et, es)
+            g1 = gen_bind(g1, sub, es, et)
+          }
+        }
+        i = i + 1
+      }
+      g1
+    }
+    TPCtor(aid, cidx, field_pats) -> {
+      let a = adt_of(g.adts, aid)
+      let ci = a.ctors[cidx]
+      let sub_cls = ctor_jvm_name(g.adts, ci)
+      let no_targs: List[Ty] = []
+      let targs = match t {
+        TyAdt(_, args2) -> args2
+        _ -> no_targs
+      }
+      var g1 = g
+      var i = 0
+      for fpo in field_pats {
+        match fpo {
+          None -> ()
+          Some(TPWild) -> ()
+          Some(fp) -> {
+            let declared = ci.fields[i].ty
+            let concrete = field_concrete_ty(a, ci, i, targs)
+            g1.mv.visitVarInsn(OP_ALOAD, slot)
+            g1.mv.visitTypeInsn(OP_CHECKCAST, sub_cls)
+            g1.mv.visitFieldInsn(OP_GETFIELD, sub_cls, ci.fields[i].name,
+              desc_of(g1.adts, declared))
+            adapt_from(g1, declared, concrete)
+            let (g2, fs) = alloc(g1, slots_of(concrete))
+            g1 = g2
+            store_slot(g1.mv, concrete, fs)
+            g1 = gen_bind(g1, fp, fs, concrete)
+          }
+        }
+        i = i + 1
+      }
+      g1
+    }
+    TPList(_, _, rest_sym, _) ->
+      match rest_sym {
+        Some(rs) -> bind_slot(g, rs, slot)
+        None -> g
+      }
+    TPLit(_) -> panic("refutable pattern in let (checker bug)")
+  }
+}
+
+## The concrete type of ctor field i when the scrutinee is TyAdt(_, targs):
+## the declared field type with the ADT's tparams substituted.
+fn field_concrete_ty(a: AdtI, ci: CtorI, i: Int, targs: List[Ty]) -> Ty = {
+  var t = ci.fields[i].ty
+  var k = 0
+  for tp in a.tparams {
+    match tp {
+      TyVar(_, vid) ->
+        match get(targs, k) {
+          Some(arg) -> { t = subst_tvar(t, vid, arg) }
+          None -> ()
+        }
+      _ -> ()
+    }
+    k = k + 1
+  }
+  t
+}
+
+## Pattern test against the value in `slot`: fall through on success, jump to
+## fail_to on failure. Bind patterns also bind.
+fn gen_pattern_test(g: Gen, p: TPat, slot: Int, t: Ty, fail_to: Label) -> Gen !io = {
+  match p {
+    TPWild -> g
+    TPBind(sym, _) -> bind_slot(g, sym, slot)
+    TPLit(v) -> {
+      match v {
+        LInt(x) -> {
+          g.mv.visitVarInsn(OP_LLOAD, slot)
+          ldc_long(g.mv, x)
+          g.mv.visitInsn(OP_LCMP)
+          g.mv.visitJumpInsn(OP_IFNE, fail_to)
+        }
+        LFloat(x) -> {
+          g.mv.visitVarInsn(OP_DLOAD, slot)
+          ldc_double(g.mv, x)
+          g.mv.visitInsn(OP_DCMPL)
+          g.mv.visitJumpInsn(OP_IFNE, fail_to)
+        }
+        LStr(x) -> {
+          g.mv.visitVarInsn(OP_ALOAD, slot)
+          ldc_str(g.mv, x)
+          g.mv.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/String", "equals",
+            "(Ljava/lang/Object;)Z", false)
+          g.mv.visitJumpInsn(OP_IFEQ, fail_to)
+        }
+        LBool(want) -> {
+          g.mv.visitVarInsn(OP_ILOAD, slot)
+          g.mv.visitJumpInsn(if want { OP_IFEQ } else { OP_IFNE }, fail_to)
+        }
+      }
+      g
+    }
+    TPTuple(elems) -> {
+      let ets = match t {
+        TyTuple(ts) -> ts
+        _ -> panic("tuple pattern on non-tuple")
+      }
+      let cls = tuple_class(len(elems))
+      var g1 = g
+      var i = 0
+      for sub in elems {
+        match sub {
+          TPWild -> ()
+          _ -> {
+            let et = ets[i]
+            g1.mv.visitVarInsn(OP_ALOAD, slot)
+            g1.mv.visitFieldInsn(OP_GETFIELD, cls, "_" ++ to_string(i), "Ljava/lang/Object;")
+            unerase(g1, et)
+            let (g2, es) = alloc(g1, slots_of(et))
+            g1 = g2
+            store_slot(g1.mv, et, es)
+            g1 = gen_pattern_test(g1, sub, es, et, fail_to)
+          }
+        }
+        i = i + 1
+      }
+      g1
+    }
+    TPList(pre, has_rest, rest_sym, post) ->
+      gen_list_pattern_test(g, t, pre, has_rest, rest_sym, post, slot, fail_to)
+    TPCtor(aid, cidx, field_pats) -> {
+      let a = adt_of(g.adts, aid)
+      let ci = a.ctors[cidx]
+      let sub_cls = ctor_jvm_name(g.adts, ci)
+      if len(ci.fields) == 0 {
+        # no-payload constructors are singletons: identity test
+        g.mv.visitVarInsn(OP_ALOAD, slot)
+        g.mv.visitFieldInsn(OP_GETSTATIC, sub_cls, "INSTANCE", "L" ++ sub_cls ++ ";")
+        g.mv.visitJumpInsn(OP_IF_ACMPNE, fail_to)
+        return g
+      }
+      g.mv.visitVarInsn(OP_ALOAD, slot)
+      g.mv.visitTypeInsn(OP_INSTANCEOF, sub_cls)
+      g.mv.visitJumpInsn(OP_IFEQ, fail_to)
+      let no_targs: List[Ty] = []
+      let targs = match t {
+        TyAdt(_, args2) -> args2
+        _ -> no_targs
+      }
+      var g1 = g
+      var i = 0
+      for fpo in field_pats {
+        match fpo {
+          None -> ()
+          Some(TPWild) -> ()
+          Some(fp) -> {
+            let declared = ci.fields[i].ty
+            let concrete = field_concrete_ty(a, ci, i, targs)
+            g1.mv.visitVarInsn(OP_ALOAD, slot)
+            g1.mv.visitTypeInsn(OP_CHECKCAST, sub_cls)
+            g1.mv.visitFieldInsn(OP_GETFIELD, sub_cls, ci.fields[i].name,
+              desc_of(g1.adts, declared))
+            adapt_from(g1, declared, concrete)
+            let (g2, fs) = alloc(g1, slots_of(concrete))
+            g1 = g2
+            store_slot(g1.mv, concrete, fs)
+            g1 = gen_pattern_test(g1, fp, fs, concrete, fail_to)
+          }
+        }
+        i = i + 1
+      }
+      g1
+    }
+  }
+}
+
+## [pre.., ..rest, post..]: length check, both ends, slice the middle.
+fn gen_list_pattern_test(
+  g: Gen,
+  t: Ty,
+  pre: List[TPat],
+  has_rest: Bool,
+  rest_sym: Option[Int],
+  post: List[TPat],
+  slot: Int,
+  fail_to: Label
+) -> Gen !io = {
+  let elem = match t {
+    TyList(e) -> e
+    _ -> panic("list pattern on non-list")
+  }
+  let fixed = len(pre) + len(post)
+  g.mv.visitVarInsn(OP_ALOAD, slot)
+  g.mv.visitMethodInsn(OP_INVOKEINTERFACE, "java/util/List", "size", "()I", true)
+  let (ga, size_slot) = alloc(g, 1)
+  var g1 = ga
+  g1.mv.visitVarInsn(OP_ISTORE, size_slot)
+  g1.mv.visitVarInsn(OP_ILOAD, size_slot)
+  ldc_jint(g1.mv, fixed)
+  g1.mv.visitJumpInsn(if has_rest { OP_IF_ICMPLT } else { OP_IF_ICMPNE }, fail_to)
+  var i = 0
+  for sub in pre {
+    match sub {
+      TPWild -> ()
+      _ -> {
+        g1.mv.visitVarInsn(OP_ALOAD, slot)
+        ldc_jint(g1.mv, i)
+        g1.mv.visitMethodInsn(OP_INVOKEINTERFACE, "java/util/List", "get",
+          "(I)Ljava/lang/Object;", true)
+        unerase(g1, elem)
+        let (g2, es) = alloc(g1, slots_of(elem))
+        g1 = g2
+        store_slot(g1.mv, elem, es)
+        g1 = gen_pattern_test(g1, sub, es, elem, fail_to)
+      }
+    }
+    i = i + 1
+  }
+  var j = 0
+  for sub in post {
+    match sub {
+      TPWild -> ()
+      _ -> {
+        g1.mv.visitVarInsn(OP_ALOAD, slot)
+        g1.mv.visitVarInsn(OP_ILOAD, size_slot)
+        ldc_jint(g1.mv, len(post) - j)
+        g1.mv.visitInsn(OP_ISUB)
+        g1.mv.visitMethodInsn(OP_INVOKEINTERFACE, "java/util/List", "get",
+          "(I)Ljava/lang/Object;", true)
+        unerase(g1, elem)
+        let (g2, es) = alloc(g1, slots_of(elem))
+        g1 = g2
+        store_slot(g1.mv, elem, es)
+        g1 = gen_pattern_test(g1, sub, es, elem, fail_to)
+      }
+    }
+    j = j + 1
+  }
+  match rest_sym {
+    Some(rs) -> {
+      g1.mv.visitVarInsn(OP_ALOAD, slot)
+      ldc_jint(g1.mv, len(pre))
+      g1.mv.visitVarInsn(OP_ILOAD, size_slot)
+      ldc_jint(g1.mv, len(post))
+      g1.mv.visitInsn(OP_ISUB)
+      g1.mv.visitMethodInsn(OP_INVOKESTATIC, LISTS_CLASS, "slice",
+        "(Ljava/util/List;II)Ljava/util/List;", false)
+      let (g2, rslot) = alloc(g1, 1)
+      g1 = g2
+      g1.mv.visitVarInsn(OP_ASTORE, rslot)
+      g1 = bind_slot(g1, rs, rslot)
+    }
+    None -> ()
+  }
+  g1
+}
+
+# ---- statements ----
+# Bool result: whether control falls past the statement.
+
+fn gen_stmt(g: Gen, s: TStmt) -> (Gen, Bool) !io = {
+  match s {
+    TSLocalFn(sym, _, params, _, body, captures, _, _) -> {
+      let ty = sym_of(g, sym).ty
+      var g1 = gen_lambda_value(g, params, body, captures, ty, Some(sym))
+      let (g2, slot) = alloc(g1, slots_of(ty))
+      g1 = bind_slot(g2, sym, slot)
+      store_var(g1, sym)
+      (g1, true)
+    }
+    TSLet(symo, _, init, _, _) -> {
+      let init_ty = tex_ty(init)
+      let (g1, falls) = gen_expr(g, init, false)
+      if not falls { return (g1, false) }
+      match symo {
+        None -> {
+          pop_value(g1, init_ty)
+          (g1, true)
+        }
+        Some(sym) -> {
+          let st = sym_of(g1, sym).ty
+          if slots_of(st) > 0 {
+            let (g2, slot) = alloc(g1, slots_of(st))
+            let g3 = bind_slot(g2, sym, slot)
+            store_var(g3, sym)
+            (g3, true)
+          } else {
+            (g1, true)
+          }
+        }
+      }
+    }
+    TSAssign(sym, _, value, _, _) -> {
+      let (g1, falls) = gen_expr(g, value, false)
+      if falls && slots_of(sym_of(g1, sym).ty) > 0 { store_var(g1, sym) }
+      (g1, falls)
+    }
+    TSLetPat(pat, init, _, _) -> {
+      let t = tex_ty(init)
+      let (g1, falls) = gen_expr(g, init, false)
+      if not falls { return (g1, false) }
+      let (g2, slot) = alloc(g1, slots_of(t))
+      store_slot(g2.mv, t, slot)
+      (gen_bind(g2, pat, slot, t), true)
+    }
+    TSExpr(e, _, _) -> {
+      let (g1, falls) = gen_expr(g, e, false)
+      if falls { pop_value(g1, tex_ty(e)) }
+      (g1, falls)
+    }
+    TSAssert(cond, src, _, _) -> gen_assert(g, cond, src)
+    TSWhile(cond, body, _, _, _) -> {
+      let loop = Label.new()
+      let end = Label.new()
+      g.mv.visitLabel(loop)
+      let (g1, _) = gen_expr(g, cond, false)
+      g1.mv.visitJumpInsn(OP_IFEQ, end)
+      var g2 = Gen { ..g1, loop_stack: g1.loop_stack ++ [(loop, end)] }
+      let (g3, body_falls) = gen_expr(g2, body, false)
+      if body_falls { g3.mv.visitJumpInsn(OP_GOTO, loop) }
+      let g4 = Gen { ..g3, loop_stack: list.take(g3.loop_stack, len(g3.loop_stack) - 1) }
+      g4.mv.visitLabel(end)
+      (g4, true)
+    }
+    TSFor(sym, _, from, too, body, has_jumps, _, _) ->
+      match too {
+        Some(to2) -> gen_for_range(g, sym, from, to2, body, has_jumps)
+        None -> gen_for_list(g, sym, from, body, has_jumps)
+      }
+  }
+}
+
+fn gen_for_range(
+  g: Gen,
+  sym: Int,
+  from: TExpr,
+  to2: TExpr,
+  body: TExpr,
+  has_jumps: Bool
+) -> (Gen, Bool) !io = {
+  let (g0, _) = gen_expr(g, from, false)
+  let (ga, islot) = alloc(g0, 2)
+  var g1 = bind_slot(ga, sym, islot)
+  g1.mv.visitVarInsn(OP_LSTORE, islot)
+  let (g1b, _) = gen_expr(g1, to2, false)
+  let (gb, end_slot) = alloc(g1b, 2)
+  g1 = gb
+  g1.mv.visitVarInsn(OP_LSTORE, end_slot)
+  let loop = Label.new()
+  let cont = Label.new()
+  let end = Label.new()
+  g1.mv.visitLabel(loop)
+  g1.mv.visitVarInsn(OP_LLOAD, islot)
+  g1.mv.visitVarInsn(OP_LLOAD, end_slot)
+  g1.mv.visitInsn(OP_LCMP)
+  g1.mv.visitJumpInsn(OP_IFGE, end)
+  g1 = Gen { ..g1, loop_stack: g1.loop_stack ++ [(cont, end)] }
+  let (g2, body_falls) = gen_expr(g1, body, false)
+  var g3 = Gen { ..g2, loop_stack: list.take(g2.loop_stack, len(g2.loop_stack) - 1) }
+  if body_falls || has_jumps {
+    g3.mv.visitLabel(cont)
+    g3.mv.visitVarInsn(OP_LLOAD, islot)
+    g3.mv.visitInsn(OP_LCONST_1)
+    g3.mv.visitInsn(OP_LADD)
+    g3.mv.visitVarInsn(OP_LSTORE, islot)
+    g3.mv.visitJumpInsn(OP_GOTO, loop)
+  }
+  g3.mv.visitLabel(end)
+  (g3, true)
+}
+
+fn gen_for_list(g: Gen, sym: Int, from: TExpr, body: TExpr, has_jumps: Bool) -> (Gen, Bool) !io = {
+  let (g0, falls0) = gen_expr(g, from, false)
+  if not falls0 { return (g0, false) }
+  let (ga, list_slot) = alloc(g0, 1)
+  var g1 = ga
+  g1.mv.visitVarInsn(OP_ASTORE, list_slot)
+  let (gb, idx_slot) = alloc(g1, 1)
+  g1 = gb
+  g1.mv.visitInsn(OP_ICONST_0)
+  g1.mv.visitVarInsn(OP_ISTORE, idx_slot)
+  let st = sym_of(g1, sym).ty
+  let (gc, vslot) = alloc(g1, slots_of(st))
+  g1 = bind_slot(gc, sym, vslot)
+  let loop = Label.new()
+  let cont = Label.new()
+  let end = Label.new()
+  g1.mv.visitLabel(loop)
+  g1.mv.visitVarInsn(OP_ILOAD, idx_slot)
+  g1.mv.visitVarInsn(OP_ALOAD, list_slot)
+  g1.mv.visitMethodInsn(OP_INVOKEINTERFACE, "java/util/List", "size", "()I", true)
+  g1.mv.visitJumpInsn(OP_IF_ICMPGE, end)
+  g1.mv.visitVarInsn(OP_ALOAD, list_slot)
+  g1.mv.visitVarInsn(OP_ILOAD, idx_slot)
+  g1.mv.visitMethodInsn(OP_INVOKEINTERFACE, "java/util/List", "get",
+    "(I)Ljava/lang/Object;", true)
+  unerase(g1, st)
+  store_var(g1, sym)
+  g1 = Gen { ..g1, loop_stack: g1.loop_stack ++ [(cont, end)] }
+  let (g2, body_falls) = gen_expr(g1, body, false)
+  var g3 = Gen { ..g2, loop_stack: list.take(g2.loop_stack, len(g2.loop_stack) - 1) }
+  if body_falls || has_jumps {
+    g3.mv.visitLabel(cont)
+    g3.mv.visitIincInsn(idx_slot, 1)
+    g3.mv.visitJumpInsn(OP_GOTO, loop)
+  }
+  g3.mv.visitLabel(end)
+  (g3, true)
+}
+
+## assert expr: panic with the source text; == over printable types keeps both
+## sides in temps so the message can show their values.
+fn gen_assert(g: Gen, cond: TExpr, srco: Option[String]) -> (Gen, Bool) !io = {
+  let src = match srco {
+    Some(s) -> s
+    None -> "<assert>"
+  }
+  var deconstruct = false
+  var side_ty: Ty = TyUnit
+  match cond {
+    XBinary(BEq, l, _, _, _, _, _, _, _) -> {
+      let lt = tex_ty(l)
+      if lt == TyInt || lt == TyFloat || lt == TyBool || lt == TyString {
+        deconstruct = true
+        side_ty = lt
+      }
+    }
+    _ -> ()
+  }
+  var g1 = g
+  var left_slot = 0 - 1
+  var right_slot = 0 - 1
+  if deconstruct {
+    match cond {
+      XBinary(_, l, r, _, _, _, _, _, _) -> {
+        let (ga, falls_l) = gen_expr(g1, l, false)
+        g1 = ga
+        if not falls_l { return (g1, false) }
+        let (gb, ls) = alloc(g1, slots_of(side_ty))
+        g1 = gb
+        left_slot = ls
+        store_slot(g1.mv, side_ty, left_slot)
+        let (gc, falls_r) = gen_expr(g1, r, false)
+        g1 = gc
+        if not falls_r { return (g1, false) }
+        let (gd, rs) = alloc(g1, slots_of(side_ty))
+        g1 = gd
+        right_slot = rs
+        store_slot(g1.mv, side_ty, right_slot)
+        load_slot(g1.mv, side_ty, left_slot)
+        load_slot(g1.mv, side_ty, right_slot)
+        gen_equality(g1, side_ty, BEq)
+      }
+      _ -> ()
+    }
+  } else {
+    let (ga, falls) = gen_expr(g1, cond, false)
+    g1 = ga
+    if not falls { return (g1, false) }
+  }
+  let ok = Label.new()
+  g1.mv.visitJumpInsn(OP_IFNE, ok)
+  g1.mv.visitTypeInsn(OP_NEW, PANIC_CLASS)
+  g1.mv.visitInsn(OP_DUP)
+  if deconstruct {
+    let append_desc =
+      if side_ty == TyInt { "(J)L" ++ SB ++ ";" }
+      else if side_ty == TyFloat { "(D)L" ++ SB ++ ";" }
+      else if side_ty == TyBool { "(Z)L" ++ SB ++ ";" }
+      else { "(Ljava/lang/String;)L" ++ SB ++ ";" }
+    g1.mv.visitTypeInsn(OP_NEW, SB)
+    g1.mv.visitInsn(OP_DUP)
+    g1.mv.visitMethodInsn(OP_INVOKESPECIAL, SB, "<init>", "()V", false)
+    ldc_str(g1.mv, "assertion failed: " ++ src ++ "\n  left  = ")
+    g1.mv.visitMethodInsn(OP_INVOKEVIRTUAL, SB, "append", "(Ljava/lang/String;)L" ++ SB ++ ";", false)
+    load_slot(g1.mv, side_ty, left_slot)
+    g1.mv.visitMethodInsn(OP_INVOKEVIRTUAL, SB, "append", append_desc, false)
+    ldc_str(g1.mv, "\n  right = ")
+    g1.mv.visitMethodInsn(OP_INVOKEVIRTUAL, SB, "append", "(Ljava/lang/String;)L" ++ SB ++ ";", false)
+    load_slot(g1.mv, side_ty, right_slot)
+    g1.mv.visitMethodInsn(OP_INVOKEVIRTUAL, SB, "append", append_desc, false)
+    g1.mv.visitMethodInsn(OP_INVOKEVIRTUAL, SB, "toString", "()Ljava/lang/String;", false)
+  } else {
+    ldc_str(g1.mv, "assertion failed: " ++ src)
+  }
+  g1.mv.visitMethodInsn(OP_INVOKESPECIAL, PANIC_CLASS, "<init>", "(Ljava/lang/String;)V", false)
+  g1.mv.visitInsn(OP_ATHROW)
+  g1.mv.visitLabel(ok)
+  (g1, true)
+}
+
+## The return instruction for the method under generation.
+fn emit_method_return(g: Gen) -> Unit !io = {
+  let t = g.method_ret
+  if t == TyInt || t == TyCursor {
+    g.mv.visitInsn(OP_LRETURN)
+  } else if t == TyFloat {
+    g.mv.visitInsn(OP_DRETURN)
+  } else if t == TyBool {
+    g.mv.visitInsn(OP_IRETURN)
+  } else if is_ref(t) {
+    g.mv.visitInsn(OP_ARETURN)
+  } else if g.rets_null {
+    push_unit(g.mv)
+    g.mv.visitInsn(OP_ARETURN)
+  } else {
+    g.mv.visitInsn(OP_RETURN)
+  }
+  ()
+}
+
+# ---- expressions ----
+# Bool result: whether control falls past the expression with its value on
+# the stack (Unit leaves nothing).
+
+fn gen_expr(g: Gen, e: TExpr, tail: Bool) -> (Gen, Bool) !io = {
+  match e {
+    XInt(v, _, _) -> {
+      ldc_long(g.mv, v)
+      (g, true)
+    }
+    XFloat(v, _, _) -> {
+      ldc_double(g.mv, v)
+      (g, true)
+    }
+    XBool(v, _, _) -> {
+      g.mv.visitInsn(if v { OP_ICONST_1 } else { OP_ICONST_0 })
+      (g, true)
+    }
+    XUnit(_, _) -> (g, true)
+    XStr(parts, _, _) -> gen_str_lit(g, parts)
+    XLocal(sym, _, _, _, _) -> {
+      let self_hit = match g.self_pending {
+        Some(p) ->
+          match p.self_sym {
+            Some(ss) -> ss == sym
+            None -> false
+          }
+        None -> false
+      }
+      if self_hit { emit_self_closure(g) } else { load_var(g, sym) }
+      (g, true)
+    }
+    XFnValue(owner, name, is_builtin, ty, _, _) -> gen_fn_value(g, owner, name, is_builtin, ty)
+    XLambda(params, _, body, captures, _, _, ty) ->
+      (gen_lambda_value(g, params, body, captures, ty, None), true)
+    XPropagate(operand, _, _, ty) -> gen_propagate(g, operand, ty)
+    XUnwrap(operand, msg, _, _, ty) -> gen_unwrap(g, operand, msg, ty)
+    XReturn(vo, _, _) -> {
+      match vo {
+        None -> {
+          emit_method_return(g)
+          (g, false)
+        }
+        Some(v) -> {
+          let (g1, falls) = gen_expr(g, v, false)
+          if falls {
+            adapt_to(g1, tex_ty(v), g1.method_ret)
+            emit_method_return(g1)
+          }
+          (g1, false)
+        }
+      }
+    }
+    XBreak(_, _) -> {
+      let (_, brk) = g.loop_stack[len(g.loop_stack) - 1]
+      g.mv.visitJumpInsn(OP_GOTO, brk)
+      (g, false)
+    }
+    XContinue(_, _) -> {
+      let (cont, _) = g.loop_stack[len(g.loop_stack) - 1]
+      g.mv.visitJumpInsn(OP_GOTO, cont)
+      (g, false)
+    }
+    XIndex(target, index, on_map, _, _, ty) -> {
+      let (g1, _) = gen_expr(g, target, false)
+      let (g2, _) = gen_expr(g1, index, false)
+      if not on_map {
+        g2.mv.visitMethodInsn(OP_INVOKESTATIC, LISTS_CLASS, "index",
+          "(Ljava/util/List;J)Ljava/lang/Object;", false)
+      } else {
+        box_ty(g2.mv, tex_ty(index))
+        g2.mv.visitMethodInsn(OP_INVOKESTATIC, MAPS_CLASS, "index",
+          "(Ljava/util/Map;Ljava/lang/Object;)Ljava/lang/Object;", false)
+      }
+      if slots_of(ty) == 0 { g2.mv.visitInsn(OP_POP) } else { unerase(g2, ty) }
+      (g2, true)
+    }
+    XApply(target, args, _, _, ty) -> {
+      let (g1, falls) = gen_expr(g, target, false)
+      if not falls { return (g1, false) }
+      let ft = tex_ty(target)
+      gen_dynamic_invoke(g1, args, ft, ty)
+    }
+    XCallDyn(sym, _, args, _, _, ty) -> gen_call_dyn(g, sym, args, ty, tail)
+    XCallBuiltin(name, args, wits, _, _, ty) -> gen_builtin_call(g, name, args, wits, ty)
+    XCallFn(owner, name, args, witnesses, trait_id, _, _, ty) ->
+      match trait_id {
+        Some(tid) -> gen_trait_method_call(g, tid, name, args, witnesses, ty)
+        None -> gen_call_fn(g, owner, name, args, witnesses, ty, tail)
+      }
+    XCtor(adt, ci, written, slots2, spread, _, _, ty) ->
+      gen_ctor_call(g, adt, ci, written, slots2, spread, ty)
+    XCtorValue(adt, ci, _, _, ty) -> gen_ctor_value(g, adt, ci, ty)
+    XConstRef(name, _, _, ty) -> {
+      let v = match map.get(g.consts, name) {
+        Some(cv) -> cv
+        None -> panic("codegen: no comptime value for const `" ++ name ++ "`")
+      }
+      (gen_load_const(g, v, ty, "c:" ++ name), true)
+    }
+    XComptime(_, lo, hi, ty) -> {
+      let v = match map.get(g.blocks, (lo, hi)) {
+        Some(cv) -> cv
+        None -> panic("codegen: no comptime value for block")
+      }
+      (gen_load_const(g, v, ty, "b:" ++ to_string(lo) ++ ":" ++ to_string(hi)), true)
+    }
+    XField(target, field_idx, _, _, ty) -> {
+      let tt = tex_ty(target)
+      let (g1, falls) = gen_expr(g, target, false)
+      if not falls { return (g1, false) }
+      let aid = match tt {
+        TyAdt(a, _) -> a
+        _ -> panic("field access on non-adt")
+      }
+      let a = adt_of(g1.adts, aid)
+      let ci2 = a.ctors[0]
+      let f = ci2.fields[field_idx]
+      g1.mv.visitFieldInsn(OP_GETFIELD, ctor_jvm_name(g1.adts, ci2), f.name,
+        desc_of(g1.adts, f.ty))
+      adapt_from(g1, f.ty, ty)
+      (g1, true)
+    }
+    XListLit(elems, _, _, _) -> gen_list_lit(g, elems)
+    XTupleLit(elems, _, _, _) -> gen_tuple_lit(g, elems)
+    XBinary(op, l, r, ord, _, _, _, _, ty) -> gen_binary(g, op, l, r, ord, ty)
+    XUnary(op, operand, _, _, _) -> {
+      let (g1, _) = gen_expr(g, operand, false)
+      match op {
+        UNot -> {
+          g1.mv.visitInsn(OP_ICONST_1)
+          g1.mv.visitInsn(OP_IXOR)
+        }
+        UNeg -> {
+          g1.mv.visitInsn(if tex_ty(operand) == TyInt { OP_LNEG } else { OP_DNEG })
+        }
+        UBnot -> {
+          ldc_long(g1.mv, 0 - 1)
+          g1.mv.visitInsn(OP_LXOR)
+        }
+      }
+      (g1, true)
+    }
+    XIf(cond, thn, els, _, _, _) -> gen_if(g, cond, thn, els, tail)
+    XMatch(scrut, arms, _, _, _) -> gen_match(g, scrut, arms, tail)
+    XBlock(stmts, tail_e, _, _, bty) -> gen_block(g, stmts, tail_e, bty, tail)
+    XUnsafePure(body, _, _, _) -> gen_expr(g, body, tail)
+    XJava(call, _, _, ty) ->
+      if call.is_ctor { gen_java_new(g, call) } else { gen_java_call(g, call, ty) }
+    XError(_, _) -> panic("codegen on an unchecked tree")
+  }
+}
+
+fn gen_block(g: Gen, stmts: List[TStmt], tail_e: Option[TExpr], bty: Ty, tail: Bool) -> (Gen, Bool) !io = {
+  var g1 = g
+  for s in stmts {
+    let (g2, falls) = gen_stmt(g1, s)
+    g1 = g2
+    if not falls { return (g1, false) }
+  }
+  match tail_e {
+    None -> (g1, true)
+    Some(te) -> {
+      let (g2, falls) = gen_expr(g1, te, tail)
+      # discarded Java tail (spec §9): the block is Unit, the call is not
+      if falls && bty == TyUnit && tex_ty(te) != TyUnit { pop_value(g2, tex_ty(te)) }
+      (g2, falls)
+    }
+  }
+}
+
+fn gen_str_lit(g: Gen, parts: List[TStrPart]) -> (Gen, Bool) !io = {
+  var pure = true
+  for p in parts {
+    match p {
+      TSPText(_) -> ()
+      _ -> { pure = false }
+    }
+  }
+  if pure {
+    var s = ""
+    for p in parts {
+      match p {
+        TSPText(v) -> { s = s ++ v }
+        _ -> ()
+      }
+    }
+    ldc_str(g.mv, s)
+    return (g, true)
+  }
+  g.mv.visitTypeInsn(OP_NEW, SB)
+  g.mv.visitInsn(OP_DUP)
+  g.mv.visitMethodInsn(OP_INVOKESPECIAL, SB, "<init>", "()V", false)
+  var g1 = g
+  for p in parts {
+    match p {
+      TSPText(v) -> {
+        ldc_str(g1.mv, v)
+        g1.mv.visitMethodInsn(OP_INVOKEVIRTUAL, SB, "append",
+          "(Ljava/lang/String;)L" ++ SB ++ ";", false)
+      }
+      TSPInterp(ie) -> {
+        let (g2, _) = gen_expr(g1, ie, false)
+        g1 = g2
+        let at = tex_ty(ie)
+        if at == TyInt {
+          g1.mv.visitMethodInsn(OP_INVOKEVIRTUAL, SB, "append", "(J)L" ++ SB ++ ";", false)
+        } else if at == TyFloat {
+          g1.mv.visitMethodInsn(OP_INVOKEVIRTUAL, SB, "append", "(D)L" ++ SB ++ ";", false)
+        } else if at == TyBool {
+          g1.mv.visitMethodInsn(OP_INVOKEVIRTUAL, SB, "append", "(Z)L" ++ SB ++ ";", false)
+        } else if at == TyString {
+          g1.mv.visitMethodInsn(OP_INVOKEVIRTUAL, SB, "append",
+            "(Ljava/lang/String;)L" ++ SB ++ ";", false)
+        } else {
+          box_ty(g1.mv, at)
+          g1.mv.visitMethodInsn(OP_INVOKESTATIC, SHOW_CLASS, "show",
+            "(Ljava/lang/Object;)Ljava/lang/String;", false)
+          g1.mv.visitMethodInsn(OP_INVOKEVIRTUAL, SB, "append",
+            "(Ljava/lang/String;)L" ++ SB ++ ";", false)
+        }
+      }
+    }
+  }
+  g1.mv.visitMethodInsn(OP_INVOKEVIRTUAL, SB, "toString", "()Ljava/lang/String;", false)
+  (g1, true)
+}
+
+fn gen_if(g: Gen, cond: TExpr, thn: TExpr, els: Option[TExpr], tail: Bool) -> (Gen, Bool) !io = {
+  let else_l = Label.new()
+  let end = Label.new()
+  let (g1, _) = gen_expr(g, cond, false)
+  g1.mv.visitJumpInsn(OP_IFEQ, else_l)
+  let (g2, then_falls) = gen_expr(g1, thn, tail)
+  match els {
+    None -> {
+      g2.mv.visitLabel(else_l)
+      (g2, true)
+    }
+    Some(eb) -> {
+      if then_falls { g2.mv.visitJumpInsn(OP_GOTO, end) }
+      g2.mv.visitLabel(else_l)
+      let (g3, else_falls) = gen_expr(g2, eb, tail)
+      g3.mv.visitLabel(end)
+      (g3, then_falls || else_falls)
+    }
+  }
+}
+
+fn gen_match(g: Gen, scrut: TExpr, arms: List[TArm], tail: Bool) -> (Gen, Bool) !io = {
+  let st = tex_ty(scrut)
+  let (g0, _) = gen_expr(g, scrut, false)
+  let (ga, sslot) = alloc(g0, slots_of(st))
+  var g1 = ga
+  store_slot(g1.mv, st, sslot)
+  let end = Label.new()
+  var any_falls = false
+  for arm in arms {
+    let next_arm = Label.new()
+    let body = Label.new()
+    var i = 0
+    for p in arm.pats {
+      let is_last = i == len(arm.pats) - 1
+      if is_last {
+        g1 = gen_pattern_test(g1, p, sslot, st, next_arm)
+      } else {
+        let try_next = Label.new()
+        g1 = gen_pattern_test(g1, p, sslot, st, try_next)
+        g1.mv.visitJumpInsn(OP_GOTO, body)
+        g1.mv.visitLabel(try_next)
+      }
+      i = i + 1
+    }
+    g1.mv.visitLabel(body)
+    match arm.guard {
+      Some(gd) -> {
+        let (g2, _) = gen_expr(g1, gd, false)
+        g1 = g2
+        g1.mv.visitJumpInsn(OP_IFEQ, next_arm)
+      }
+      None -> ()
+    }
+    let (g3, falls) = gen_expr(g1, arm.body, tail)
+    g1 = g3
+    if falls {
+      any_falls = true
+      g1.mv.visitJumpInsn(OP_GOTO, end)
+    }
+    g1.mv.visitLabel(next_arm)
+  }
+  g1.mv.visitTypeInsn(OP_NEW, PANIC_CLASS)
+  g1.mv.visitInsn(OP_DUP)
+  ldc_str(g1.mv, "unreachable match")
+  g1.mv.visitMethodInsn(OP_INVOKESPECIAL, PANIC_CLASS, "<init>", "(Ljava/lang/String;)V", false)
+  g1.mv.visitInsn(OP_ATHROW)
+  g1.mv.visitLabel(end)
+  (g1, any_falls)
+}
+
+fn gen_list_lit(g: Gen, elems: List[TExpr]) -> (Gen, Bool) !io = {
+  g.mv.visitTypeInsn(OP_NEW, ARRAYLIST)
+  g.mv.visitInsn(OP_DUP)
+  g.mv.visitMethodInsn(OP_INVOKESPECIAL, ARRAYLIST, "<init>", "()V", false)
+  var g1 = g
+  for el in elems {
+    g1.mv.visitInsn(OP_DUP)
+    let (g2, falls) = gen_expr(g1, el, false)
+    g1 = g2
+    if not falls { return (g1, false) }
+    box_ty(g1.mv, tex_ty(el))
+    g1.mv.visitMethodInsn(OP_INVOKEVIRTUAL, ARRAYLIST, "add", "(Ljava/lang/Object;)Z", false)
+    g1.mv.visitInsn(OP_POP)
+  }
+  (g1, true)
+}
+
+fn gen_tuple_lit(g: Gen, elems: List[TExpr]) -> (Gen, Bool) !io = {
+  let cls = tuple_class(len(elems))
+  g.mv.visitTypeInsn(OP_NEW, cls)
+  g.mv.visitInsn(OP_DUP)
+  var g1 = g
+  for el in elems {
+    let (g2, falls) = gen_expr(g1, el, false)
+    g1 = g2
+    if not falls { return (g1, false) }
+    box_ty(g1.mv, tex_ty(el))
+  }
+  var ps = ""
+  for _i in 0 ..len(elems) { ps = ps ++ "Ljava/lang/Object;" }
+  g1.mv.visitMethodInsn(OP_INVOKESPECIAL, cls, "<init>", "(" ++ ps ++ ")V", false)
+  (g1, true)
+}
+
+## expr? (spec §8.1): unwrap Ok/Some or early-return the Err/None itself.
+fn gen_propagate(g: Gen, operand: TExpr, ty: Ty) -> (Gen, Bool) !io = {
+  let (g1, falls) = gen_expr(g, operand, false)
+  if not falls { return (g1, false) }
+  let aid = match tex_ty(operand) {
+    TyAdt(a, _) -> a
+    _ -> panic("propagate on non-adt")
+  }
+  let a = adt_of(g1.adts, aid)
+  var ok_ci = a.ctors[0]
+  for c in a.ctors {
+    if c.name == "Some" || c.name == "Ok" { ok_ci = c }
+  }
+  let sub = ctor_jvm_name(g1.adts, ok_ci)
+  let ok_l = Label.new()
+  g1.mv.visitInsn(OP_DUP)
+  g1.mv.visitTypeInsn(OP_INSTANCEOF, sub)
+  g1.mv.visitJumpInsn(OP_IFNE, ok_l)
+  g1.mv.visitInsn(OP_ARETURN)
+  g1.mv.visitLabel(ok_l)
+  g1.mv.visitTypeInsn(OP_CHECKCAST, sub)
+  let f = ok_ci.fields[0]
+  g1.mv.visitFieldInsn(OP_GETFIELD, sub, f.name, desc_of(g1.adts, f.ty))
+  adapt_from(g1, f.ty, ty)
+  (g1, true)
+}
+
+## expr! — unwrap Some, or panic with the checker-written message (spec §8.2).
+fn gen_unwrap(g: Gen, operand: TExpr, msg: String, ty: Ty) -> (Gen, Bool) !io = {
+  let (g1, falls) = gen_expr(g, operand, false)
+  if not falls { return (g1, false) }
+  let aid = match tex_ty(operand) {
+    TyAdt(a, _) -> a
+    _ -> panic("unwrap on non-adt")
+  }
+  let a = adt_of(g1.adts, aid)
+  var some_ci = a.ctors[0]
+  for c in a.ctors {
+    if c.name == "Some" { some_ci = c }
+  }
+  let sub = ctor_jvm_name(g1.adts, some_ci)
+  let some_l = Label.new()
+  g1.mv.visitInsn(OP_DUP)
+  g1.mv.visitTypeInsn(OP_INSTANCEOF, sub)
+  g1.mv.visitJumpInsn(OP_IFNE, some_l)
+  g1.mv.visitTypeInsn(OP_NEW, PANIC_CLASS)
+  g1.mv.visitInsn(OP_DUP)
+  ldc_str(g1.mv, msg)
+  g1.mv.visitMethodInsn(OP_INVOKESPECIAL, PANIC_CLASS, "<init>", "(Ljava/lang/String;)V", false)
+  g1.mv.visitInsn(OP_ATHROW)
+  g1.mv.visitLabel(some_l)
+  g1.mv.visitTypeInsn(OP_CHECKCAST, sub)
+  let f = some_ci.fields[0]
+  g1.mv.visitFieldInsn(OP_GETFIELD, sub, f.name, desc_of(g1.adts, f.ty))
+  adapt_from(g1, f.ty, ty)
+  (g1, true)
+}
+
+## Call a function value on the stack: box args, apply, recover the result.
+fn gen_dynamic_invoke(g: Gen, args: List[TExpr], ft: Ty, ret_static: Ty) -> (Gen, Bool) !io = {
+  let n = match ft {
+    TyFn(ps, _, _) -> len(ps)
+    _ -> panic("dynamic invoke on non-fn")
+  }
+  var g1 = g
+  for a in args {
+    let (g2, falls) = gen_expr(g1, a, false)
+    g1 = g2
+    if not falls { return (g1, false) }
+    box_ty(g1.mv, tex_ty(a))
+  }
+  g1.mv.visitMethodInsn(OP_INVOKEINTERFACE, fn_iface(n), "apply", erased_apply_desc(n), true)
+  if slots_of(ret_static) == 0 { g1.mv.visitInsn(OP_POP) } else { unerase(g1, ret_static) }
+  (g1, true)
+}
+
+# ---- calls ----
+
+fn tyfn_parts(t: Ty) -> (List[Ty], Ty) =
+  match t {
+    TyFn(ps, r, _) -> (ps, r)
+    _ -> panic("expected a fn type")
+  }
+
+## A dynamic call of a local function value; a local fn calling itself skips
+## the closure object (and tail-rewrites into a goto, spec §12.4).
+fn gen_call_dyn(g: Gen, sym: Int, args: List[TExpr], ty: Ty, tail: Bool) -> (Gen, Bool) !io = {
+  let self_hit = match g.self_pending {
+    Some(p) ->
+      match p.self_sym {
+        Some(ss) -> ss == sym
+        None -> false
+      }
+    None -> false
+  }
+  if self_hit {
+    let p = g.self_pending.expect("self pending")
+    let (fps, fret) = tyfn_parts(p.ty)
+    if tail {
+      var g1 = g
+      var i = 0
+      for a in args {
+        let (g2, _) = gen_expr(g1, a, false)
+        g1 = g2
+        adapt_to(g1, tex_ty(a), fps[i])
+        i = i + 1
+      }
+      for ps in list.reverse(p.params) {
+        if slots_of(sym_of(g1, ps).ty) > 0 { store_var(g1, ps) }
+      }
+      g1.mv.visitJumpInsn(OP_GOTO, g1.fn_start.expect("fn start"))
+      return (g1, false)
+    }
+    var g1 = g
+    for c in p.captures { load_var(g1, c) }
+    var i = 0
+    for a in args {
+      let (g2, _) = gen_expr(g1, a, false)
+      g1 = g2
+      adapt_to(g1, tex_ty(a), fps[i])
+      i = i + 1
+    }
+    var cap_tys: List[Ty] = []
+    for c in p.captures { cap_tys = cap_tys ++ [sym_of(g1, c).ty] }
+    g1.mv.visitMethodInsn(OP_INVOKESTATIC, g1.class_name, p.name,
+      impl_desc_of(g1, cap_tys ++ fps, fret), false)
+    adapt_from(g1, fret, ty)
+    return (g1, true)
+  }
+  load_var(g, sym)
+  gen_dynamic_invoke(g, args, sym_of(g, sym).ty, ty)
+}
+
+fn gen_call_fn(
+  g: Gen,
+  owner: Option[String],
+  name: String,
+  args: List[TExpr],
+  witnesses: List[WitRef],
+  ty: Ty,
+  tail: Bool
+) -> (Gen, Bool) !io = {
+  let sig = sig_lookup(g, owner, name)
+  let owner_class = match owner {
+    Some(o) -> o
+    None -> g.class_name
+  }
+  # self-recursive tail call → write args back + goto entry (spec §12.4)
+  let is_self = match g.cur_fn {
+    Some(cf) -> name == cf.name && owner_class == g.class_name
+    None -> false
+  }
+  if tail && is_self {
+    let cf = g.cur_fn.expect("current fn")
+    var g1 = g
+    var i = 0
+    for a in args {
+      let (g2, _) = gen_expr(g1, a, false)
+      g1 = g2
+      adapt_to(g1, tex_ty(a), sig.param_tys[i])
+      i = i + 1
+    }
+    for ps in list.reverse(cf.param_syms) {
+      if slots_of(sym_of(g1, ps).ty) > 0 { store_var(g1, ps) }
+    }
+    g1.mv.visitJumpInsn(OP_GOTO, g1.fn_start.expect("fn start"))
+    return (g1, false)
+  }
+  var g1 = g
+  var i = 0
+  for a in args {
+    let (g2, _) = gen_expr(g1, a, false)
+    g1 = g2
+    adapt_to(g1, tex_ty(a), sig.param_tys[i])
+    i = i + 1
+  }
+  for w in witnesses { push_witness(g1, w) }
+  g1.mv.visitMethodInsn(OP_INVOKESTATIC, owner_class, name, fn_desc_with_dicts(g1, sig), false)
+  adapt_from(g1, sig.ret, ty)
+  (g1, true)
+}
+
+## Two scalars on the stack → their long cmp (Float via the total order).
+fn emit_native_cmp2(g: Gen, t: Ty) -> Unit !io = {
+  match t {
+    TyInt -> { g.mv.visitInsn(OP_LCMP) }
+    TyFloat -> {
+      g.mv.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Double", "compare", "(DD)I", false)
+    }
+    _ -> {
+      g.mv.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/String", "compareTo",
+        "(Ljava/lang/String;)I", false)
+    }
+  }
+  g.mv.visitInsn(OP_I2L)
+  ()
+}
+
+fn provided_has(imp: ImplI, name: String) -> Bool = {
+  for p in imp.provided {
+    if p == name { return true }
+  }
+  false
+}
+
+## A trait method call: concrete witness devirtualizes, forward witness goes
+## through the caller's dictionary (invokeinterface).
+fn gen_trait_method_call(
+  g: Gen,
+  tid: Int,
+  name: String,
+  args: List[TExpr],
+  witnesses: List[WitRef],
+  ty: Ty
+) -> (Gen, Bool) !io = {
+  let tr = trait_of(g.traits, tid)
+  let sig = trait_method_sig(tr, name)
+  let w = witnesses[0]
+  var g1 = g
+  match w {
+    WConcrete(_, subject) -> {
+      let imp = impl_of(g1, tid, subject)
+      let imp_owner = match imp.owner {
+        Some(o) -> o
+        None -> g1.class_name
+      }
+      if imp.derived {
+        for a in args {
+          let (g2, _) = gen_expr(g1, a, false)
+          g1 = g2
+        }
+        g1.mv.visitMethodInsn(OP_INVOKESTATIC, imp_owner,
+          impl_method_name(g1, tr.name, subject, name), derived_cmp_desc(g1, subject), false)
+      } else if provided_has(imp, name) {
+        let psig = subst_subject(tr, sig, subject)
+        var i = 0
+        for a in args {
+          let (g2, _) = gen_expr(g1, a, false)
+          g1 = g2
+          adapt_to(g1, tex_ty(a), psig.param_tys[i])
+          i = i + 1
+        }
+        g1.mv.visitMethodInsn(OP_INVOKESTATIC, imp_owner,
+          impl_method_name(g1, tr.name, subject, name),
+          method_desc(g1.adts, psig.param_tys, psig.ret), false)
+        adapt_from(g1, psig.ret, ty)
+      } else if tid == ORD_ID && not is_adt_ty(subject) {
+        for a in args {
+          let (g2, _) = gen_expr(g1, a, false)
+          g1 = g2
+        }
+        emit_native_cmp2(g1, subject)
+      } else {
+        var i = 0
+        for a in args {
+          let (g2, _) = gen_expr(g1, a, false)
+          g1 = g2
+          adapt_to(g1, tex_ty(a), sig.param_tys[i])
+          i = i + 1
+        }
+        let tr_owner = match tr.owner {
+          Some(o) -> o
+          None -> g1.class_name
+        }
+        g1.mv.visitFieldInsn(OP_GETSTATIC, impl_class(g1.adts, imp.owner, tr.name, subject),
+          "INSTANCE", "L" ++ tr_iface(tr.owner, tr.name) ++ ";")
+        g1.mv.visitMethodInsn(OP_INVOKESTATIC, tr_owner,
+          default_method_name(tr.name, name), fn_desc_with_dicts(g1, sig), false)
+        adapt_from(g1, sig.ret, ty)
+      }
+    }
+    WForward(sym) -> {
+      load_var(g1, sym)
+      g1.mv.visitTypeInsn(OP_CHECKCAST, tr_iface(tr.owner, tr.name))
+      var i = 0
+      for a in args {
+        let (g2, _) = gen_expr(g1, a, false)
+        g1 = g2
+        adapt_to(g1, tex_ty(a), sig.param_tys[i])
+        i = i + 1
+      }
+      g1.mv.visitMethodInsn(OP_INVOKEINTERFACE, tr_iface(tr.owner, tr.name), name,
+        trait_method_desc(g1, sig), true)
+      adapt_from(g1, sig.ret, ty)
+    }
+  }
+  (g1, true)
+}
+
+fn is_adt_ty(t: Ty) -> Bool =
+  match t {
+    TyAdt(_, _) -> true
+    _ -> false
+  }
+
+fn gen_ctor_call(
+  g: Gen,
+  aid: Int,
+  cidx: Int,
+  written: List[TExpr],
+  slots2: List[Option[Int]],
+  spread: Option[TExpr],
+  ty: Ty
+) -> (Gen, Bool) !io = {
+  let a = adt_of(g.adts, aid)
+  let ci = a.ctors[cidx]
+  let sub = ctor_jvm_name(g.adts, ci)
+  if len(ci.fields) == 0 {
+    g.mv.visitFieldInsn(OP_GETSTATIC, sub, "INSTANCE", "L" ++ sub ++ ";")
+    return (g, true)
+  }
+  # evaluate the spread base and written arguments in source order into temps
+  var g1 = g
+  var spread_slot = 0 - 1
+  match spread {
+    Some(sp) -> {
+      let (g2, falls) = gen_expr(g1, sp, false)
+      g1 = g2
+      if not falls { return (g1, false) }
+      let (g3, ss) = alloc(g1, 1)
+      g1 = g3
+      spread_slot = ss
+      g1.mv.visitVarInsn(OP_ASTORE, spread_slot)
+    }
+    None -> ()
+  }
+  var temp_slots: List[Int] = []
+  for wa in written {
+    let (g2, falls) = gen_expr(g1, wa, false)
+    g1 = g2
+    if not falls { return (g1, false) }
+    let t = tex_ty(wa)
+    let (g3, ts) = alloc(g1, slots_of(t))
+    g1 = g3
+    store_slot(g1.mv, t, ts)
+    temp_slots = temp_slots ++ [ts]
+  }
+  g1.mv.visitTypeInsn(OP_NEW, sub)
+  g1.mv.visitInsn(OP_DUP)
+  var i = 0
+  for sl in slots2 {
+    match sl {
+      Some(widx) -> {
+        let at = tex_ty(written[widx])
+        load_slot(g1.mv, at, temp_slots[widx])
+        adapt_to(g1, at, ci.fields[i].ty)
+      }
+      None -> {
+        let f = ci.fields[i]
+        g1.mv.visitVarInsn(OP_ALOAD, spread_slot)
+        g1.mv.visitFieldInsn(OP_GETFIELD, sub, f.name, desc_of(g1.adts, f.ty))
+      }
+    }
+    i = i + 1
+  }
+  var ps = ""
+  for f in ci.fields { ps = ps ++ desc_of(g1.adts, f.ty) }
+  g1.mv.visitMethodInsn(OP_INVOKESPECIAL, sub, "<init>", "(" ++ ps ++ ")V", false)
+  (g1, true)
+}
+
+## '/'-free bridge method name for a constructor value.
+fn ctor_bridge_name(g: Gen, aid: Int, cidx: Int) -> String = {
+  let ci = adt_of(g.adts, aid).ctors[cidx]
+  "dawn\$ctor\$" ++ join(str.split(ctor_jvm_name(g.adts, ci), "/"), "\$")
+}
+
+## A bare constructor as a function value: an LMF over a synthetic bridge.
+fn gen_ctor_value(g: Gen, aid: Int, cidx: Int, ty: Ty) -> (Gen, Bool) !io = {
+  let a = adt_of(g.adts, aid)
+  let ci = a.ctors[cidx]
+  let (fps, fret) = tyfn_parts(ty)
+  var field_tys: List[Ty] = []
+  for f in ci.fields { field_tys = field_tys ++ [f.ty] }
+  let g1 = Gen { ..g, pending_ctorb: g.pending_ctorb ++ [(aid, cidx)] }
+  let adt_ty = TyAdt(a.id, a.tparams)
+  let handle = Handle.new(OP_H_INVOKESTATIC, g1.class_name, ctor_bridge_name(g1, aid, cidx),
+    impl_desc_of(g1, field_tys, adt_ty), false)
+  g1.mv.visitInvokeDynamicInsn("apply", "()L" ++ fn_iface(len(fps)) ++ ";", lmf_bsm(),
+    Type.getMethodType(erased_apply_desc(len(fps))).expect("mt"),
+    handle,
+    instantiated_type(g1, fps, fret))
+  (g1, true)
+}
+
+# ---- lambdas (LMF) ----
+
+## The lambda expression site: queue the impl, load captures, invokedynamic.
+fn gen_lambda_value(
+  g: Gen,
+  params: List[Int],
+  body: TExpr,
+  captures: List[Int],
+  ty: Ty,
+  self_sym: Option[Int]
+) -> Gen !io = {
+  let name = "dawn\$lambda\$" ++ to_string(g.lambda_ctr)
+  let p = PendingL {
+    params: params,
+    body: body,
+    captures: captures,
+    ty: ty,
+    name: name,
+    self_sym: self_sym
+  }
+  let g1 = Gen {
+    ..g,
+    lambda_ctr: g.lambda_ctr + 1,
+    pending_lambdas: g.pending_lambdas ++ [p]
+  }
+  emit_closure(g1, p)
+  g1
+}
+
+## The invokedynamic that captures the environment and yields the closure.
+fn emit_closure(g: Gen, p: PendingL) -> Unit !io = {
+  for c in p.captures {
+    let self_hit = match g.self_pending {
+      Some(sp) ->
+        match sp.self_sym {
+          Some(ss) -> ss == c
+          None -> false
+        }
+      None -> false
+    }
+    if self_hit { emit_self_closure(g) } else { load_var(g, c) }
+  }
+  let (fps, fret) = tyfn_parts(p.ty)
+  var cap_tys: List[Ty] = []
+  for c in p.captures { cap_tys = cap_tys ++ [sym_of(g, c).ty] }
+  let impl_desc = impl_desc_of(g, cap_tys ++ fps, fret)
+  var caps_desc = ""
+  for ct in cap_tys { caps_desc = caps_desc ++ desc_of(g.adts, ct) }
+  g.mv.visitInvokeDynamicInsn("apply",
+    "(" ++ caps_desc ++ ")L" ++ fn_iface(len(fps)) ++ ";", lmf_bsm(),
+    Type.getMethodType(erased_apply_desc(len(fps))).expect("mt"),
+    Handle.new(OP_H_INVOKESTATIC, g.class_name, p.name, impl_desc, false),
+    instantiated_type(g, fps, fret))
+  ()
+}
+
+## A local function used as a value inside its own body: rebuild the closure.
+fn emit_self_closure(g: Gen) -> Unit !io = {
+  let p = g.self_pending.expect("self pending")
+  emit_closure(g, p)
+}
+
+# ---- function values and their bridges ----
+
+## Bridge name for a Unit-returning fn value, namespaced by owner.
+fn fnval_bridge_name(g: Gen, s: Sig) -> String =
+  match s.owner {
+    None -> s.name
+    Some(o) -> if o == g.class_name { s.name } else { join(str.split(o, "/"), "\$") ++ "\$" ++ s.name }
+  }
+
+## Builtins with a real runtime method get a direct handle; the rest bridge.
+fn builtin_value_handle(g: Gen, s: Sig) -> (Gen, Handle) !io = {
+  if s.name == "get" {
+    (g, Handle.new(OP_H_INVOKESTATIC, LISTS_CLASS, "get", "(Ljava/util/List;J)LOption;", false))
+  } else if s.name == "range" {
+    (g, Handle.new(OP_H_INVOKESTATIC, LISTS_CLASS, "range", "(JJ)Ljava/util/List;", false))
+  } else if s.name == "sort_by" {
+    (g, Handle.new(OP_H_INVOKESTATIC, LISTS_CLASS, "sortBy",
+      "(Ljava/util/List;L" ++ fn_iface(2) ++ ";)Ljava/util/List;", false))
+  } else if s.name == "join" {
+    (g, Handle.new(OP_H_INVOKESTATIC, STRINGS_CLASS, "join",
+      "(Ljava/util/List;Ljava/lang/String;)Ljava/lang/String;", false))
+  } else if s.name == "parse_int" {
+    (g, Handle.new(OP_H_INVOKESTATIC, STRINGS_CLASS, "parseInt", "(Ljava/lang/String;)LOption;", false))
+  } else if s.name == "parse_float" {
+    (g, Handle.new(OP_H_INVOKESTATIC, STRINGS_CLASS, "parseFloat", "(Ljava/lang/String;)LOption;", false))
+  } else if s.name == "java_try" {
+    (g, Handle.new(OP_H_INVOKESTATIC, IO_CLASS, "javaTry", "(L" ++ fn_iface(0) ++ ";)LResult;", false))
+  } else if s.name == "catch_panic" {
+    (g, Handle.new(OP_H_INVOKESTATIC, IO_CLASS, "catchPanic", "(L" ++ fn_iface(0) ++ ";)LResult;", false))
+  } else {
+    let g1 = Gen { ..g, pending_bi: g.pending_bi ++ [s] }
+    (g1, Handle.new(OP_H_INVOKESTATIC, g1.class_name, "dawn\$bi\$" ++ s.name,
+      impl_desc_of(g1, s.param_tys, s.ret), false))
+  }
+}
+
+fn builtin_decl_sig(name: String) -> Sig =
+  match map.get(builtins(), name) {
+    Some(s) -> s
+    None -> panic("codegen: unknown builtin `" ++ name ++ "`")
+  }
+
+## A top-level function or builtin used as a value: a zero-capture LMF.
+fn gen_fn_value(g: Gen, owner: Option[String], name: String, is_builtin: Bool, ty: Ty) -> (Gen, Bool) !io = {
+  let (fps, fret) = tyfn_parts(ty)
+  let fv = if is_builtin { builtin_decl_sig(name) } else { sig_lookup(g, owner, name) }
+  let fv2 = if is_builtin { fv } else { Sig { ..fv, owner: owner } }
+  let (g1, handle) =
+    if is_builtin {
+      builtin_value_handle(g, fv2)
+    } else if slots_of(fv2.ret) == 0 {
+      let ga = Gen { ..g, pending_fnval: g.pending_fnval ++ [fv2] }
+      (ga, Handle.new(OP_H_INVOKESTATIC, ga.class_name,
+        "dawn\$fnval\$" ++ fnval_bridge_name(ga, fv2),
+        impl_desc_of(ga, fv2.param_tys, fv2.ret), false))
+    } else {
+      let oc = match owner {
+        Some(o) -> o
+        None -> g.class_name
+      }
+      (g, Handle.new(OP_H_INVOKESTATIC, oc, name,
+        method_desc(g.adts, fv2.param_tys, fv2.ret), false))
+    }
+  g1.mv.visitInvokeDynamicInsn("apply", "()L" ++ fn_iface(len(fps)) ++ ";", lmf_bsm(),
+    Type.getMethodType(erased_apply_desc(len(fps))).expect("mt"),
+    handle,
+    instantiated_type(g1, fps, fret))
+  (g1, true)
+}
+
+## Bridge for a Unit-returning top-level fn used as a value: call, return null.
+fn gen_fnval_bridge(g: Gen, cw: AdtClassWriter, s: Sig) -> Gen !io = {
+  let bridge = fnval_bridge_name(g, s)
+  if set.has(g.emitted_fnval, bridge) { return g }
+  let g1 = Gen { ..g, emitted_fnval: set.insert(g.emitted_fnval, bridge) }
+  let m = cw.method(ACC_PRIVATE + ACC_STATIC + OP_ACC_SYNTHETIC, "dawn\$fnval\$" ++ bridge,
+    impl_desc_of(g1, s.param_tys, s.ret)).expect("mv")
+  m.visitCode()
+  var slot = 0
+  for pt in s.param_tys {
+    load_slot(m, pt, slot)
+    slot = slot + slots_of(pt)
+  }
+  let oc = match s.owner {
+    Some(o) -> o
+    None -> g1.class_name
+  }
+  m.visitMethodInsn(OP_INVOKESTATIC, oc, s.name, method_desc(g1.adts, s.param_tys, s.ret), false)
+  push_unit(m)
+  m.visitInsn(OP_ARETURN)
+  m.visitMaxs(0, 0)
+  m.visitEnd()
+  g1
+}
+
+## Small static bodies for builtins that are inlined at call sites.
+fn gen_builtin_bridge(g: Gen, cw: AdtClassWriter, s: Sig) -> Gen !io = {
+  if set.has(g.emitted_bi, s.name) { return g }
+  let g1 = Gen { ..g, emitted_bi: set.insert(g.emitted_bi, s.name) }
+  let m = cw.method(ACC_PRIVATE + ACC_STATIC + OP_ACC_SYNTHETIC, "dawn\$bi\$" ++ s.name,
+    impl_desc_of(g1, s.param_tys, s.ret)).expect("mv")
+  m.visitCode()
+  if s.name == "panic" {
+    m.visitTypeInsn(OP_NEW, PANIC_CLASS)
+    m.visitInsn(OP_DUP)
+    m.visitVarInsn(OP_ALOAD, 0)
+    m.visitMethodInsn(OP_INVOKESPECIAL, PANIC_CLASS, "<init>", "(Ljava/lang/String;)V", false)
+    m.visitInsn(OP_ATHROW)
+  } else if s.name == "todo" {
+    m.visitTypeInsn(OP_NEW, PANIC_CLASS)
+    m.visitInsn(OP_DUP)
+    ldc_str(m, "not yet implemented")
+    m.visitMethodInsn(OP_INVOKESPECIAL, PANIC_CLASS, "<init>", "(Ljava/lang/String;)V", false)
+    m.visitInsn(OP_ATHROW)
+  } else if s.name == "to_string" {
+    let str_l = Label.new()
+    m.visitVarInsn(OP_ALOAD, 0)
+    m.visitTypeInsn(OP_INSTANCEOF, "java/lang/String")
+    m.visitJumpInsn(OP_IFNE, str_l)
+    m.visitVarInsn(OP_ALOAD, 0)
+    m.visitMethodInsn(OP_INVOKESTATIC, SHOW_CLASS, "show",
+      "(Ljava/lang/Object;)Ljava/lang/String;", false)
+    m.visitInsn(OP_ARETURN)
+    m.visitLabel(str_l)
+    m.visitVarInsn(OP_ALOAD, 0)
+    m.visitTypeInsn(OP_CHECKCAST, "java/lang/String")
+    m.visitInsn(OP_ARETURN)
+  } else if s.name == "to_float" {
+    m.visitVarInsn(OP_LLOAD, 0)
+    m.visitInsn(OP_L2D)
+    m.visitInsn(OP_DRETURN)
+  } else if s.name == "to_int" {
+    m.visitVarInsn(OP_DLOAD, 0)
+    m.visitInsn(OP_D2L)
+    m.visitInsn(OP_LRETURN)
+  } else if s.name == "len" {
+    m.visitVarInsn(OP_ALOAD, 0)
+    m.visitMethodInsn(OP_INVOKEINTERFACE, "java/util/List", "size", "()I", true)
+    m.visitInsn(OP_I2L)
+    m.visitInsn(OP_LRETURN)
+  } else if s.name == "starts_with" || s.name == "ends_with" {
+    m.visitVarInsn(OP_ALOAD, 0)
+    m.visitVarInsn(OP_ALOAD, 1)
+    m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/String",
+      if s.name == "starts_with" { "startsWith" } else { "endsWith" },
+      "(Ljava/lang/String;)Z", false)
+    m.visitInsn(OP_IRETURN)
+  } else if s.name == "args" {
+    m.visitFieldInsn(OP_GETSTATIC, g1.class_name, ARGS_FIELD, "[Ljava/lang/String;")
+    m.visitMethodInsn(OP_INVOKESTATIC, LISTS_CLASS, "fromArray",
+      "([Ljava/lang/String;)Ljava/util/List;", false)
+    m.visitInsn(OP_ARETURN)
+  } else if s.name == "expect" {
+    m.visitVarInsn(OP_ALOAD, 0)
+    m.visitTypeInsn(OP_INSTANCEOF, "Option\$Some")
+    let ok = Label.new()
+    m.visitJumpInsn(OP_IFNE, ok)
+    m.visitTypeInsn(OP_NEW, PANIC_CLASS)
+    m.visitInsn(OP_DUP)
+    m.visitVarInsn(OP_ALOAD, 1)
+    m.visitMethodInsn(OP_INVOKESPECIAL, PANIC_CLASS, "<init>", "(Ljava/lang/String;)V", false)
+    m.visitInsn(OP_ATHROW)
+    m.visitLabel(ok)
+    m.visitVarInsn(OP_ALOAD, 0)
+    m.visitTypeInsn(OP_CHECKCAST, "Option\$Some")
+    m.visitFieldInsn(OP_GETFIELD, "Option\$Some", "value", "Ljava/lang/Object;")
+    m.visitInsn(OP_ARETURN)
+  } else if s.name == "unwrap_or" {
+    m.visitVarInsn(OP_ALOAD, 0)
+    m.visitTypeInsn(OP_INSTANCEOF, "Option\$Some")
+    let some_l = Label.new()
+    m.visitJumpInsn(OP_IFNE, some_l)
+    m.visitVarInsn(OP_ALOAD, 1)
+    m.visitInsn(OP_ARETURN)
+    m.visitLabel(some_l)
+    m.visitVarInsn(OP_ALOAD, 0)
+    m.visitTypeInsn(OP_CHECKCAST, "Option\$Some")
+    m.visitFieldInsn(OP_GETFIELD, "Option\$Some", "value", "Ljava/lang/Object;")
+    m.visitInsn(OP_ARETURN)
+  } else {
+    panic("no value bridge for builtin `" ++ s.name ++ "`")
+  }
+  m.visitMaxs(0, 0)
+  m.visitEnd()
+  g1
+}
+
+## Static body dawn$ctor$X(fields...) -> Adt behind a constructor value's LMF.
+fn gen_ctor_value_bridge(g: Gen, cw: AdtClassWriter, aid: Int, cidx: Int) -> Gen !io = {
+  let bridge = ctor_bridge_name(g, aid, cidx)
+  if set.has(g.emitted_ctorb, bridge) { return g }
+  let g1 = Gen { ..g, emitted_ctorb: set.insert(g.emitted_ctorb, bridge) }
+  let a = adt_of(g1.adts, aid)
+  let ci = a.ctors[cidx]
+  let sub = ctor_jvm_name(g1.adts, ci)
+  var field_tys: List[Ty] = []
+  for f in ci.fields { field_tys = field_tys ++ [f.ty] }
+  let m = cw.method(ACC_PRIVATE + ACC_STATIC + OP_ACC_SYNTHETIC, bridge,
+    impl_desc_of(g1, field_tys, TyAdt(a.id, a.tparams))).expect("mv")
+  m.visitCode()
+  m.visitTypeInsn(OP_NEW, sub)
+  m.visitInsn(OP_DUP)
+  var slot = 0
+  for ft in field_tys {
+    load_slot(m, ft, slot)
+    slot = slot + slots_of(ft)
+  }
+  var ps = ""
+  for ft in field_tys { ps = ps ++ desc_of(g1.adts, ft) }
+  m.visitMethodInsn(OP_INVOKESPECIAL, sub, "<init>", "(" ++ ps ++ ")V", false)
+  m.visitInsn(OP_ARETURN)
+  m.visitMaxs(0, 0)
+  m.visitEnd()
+  g1
+}
+
+# ---- builtin calls (inlined at the call site) ----
+
+fn is_map_builtin(name: String) -> Bool =
+  name == "map_empty" || name == "set_empty" || name == "map_from" || name == "set_from" ||
+  name == "map_insert" || name == "set_insert" || name == "map_remove" ||
+  name == "set_remove" || name == "map_get" || name == "map_has" || name == "set_has" ||
+  name == "map_size" || name == "set_size" || name == "map_keys" || name == "map_values" ||
+  name == "map_entries" || name == "set_to_list"
+
+## The Map/Set builtins all live in dawn/rt/Maps; keys/values travel boxed.
+fn gen_map_call(g: Gen, name: String, args: List[TExpr]) -> (Gen, Bool) !io = {
+  let s = builtin_decl_sig(name)
+  var g1 = g
+  for a in args {
+    let (g2, _) = gen_expr(g1, a, false)
+    g1 = g2
+    box_ty(g1.mv, tex_ty(a))
+  }
+  g1.mv.visitMethodInsn(OP_INVOKESTATIC, MAPS_CLASS, name,
+    method_desc(g1.adts, s.param_tys, s.ret), false)
+  (g1, true)
+}
+
+fn gen_args_plain(g: Gen, args: List[TExpr]) -> Gen !io = {
+  var g1 = g
+  for a in args {
+    let (g2, _) = gen_expr(g1, a, false)
+    g1 = g2
+  }
+  g1
+}
+
+fn gen_builtin_call(g: Gen, name: String, args: List[TExpr], wits: List[WitRef], ty: Ty) -> (Gen, Bool) !io = {
+  if name == "panic" {
+    g.mv.visitTypeInsn(OP_NEW, PANIC_CLASS)
+    g.mv.visitInsn(OP_DUP)
+    let (g1, _) = gen_expr(g, args[0], false)
+    g1.mv.visitMethodInsn(OP_INVOKESPECIAL, PANIC_CLASS, "<init>", "(Ljava/lang/String;)V", false)
+    g1.mv.visitInsn(OP_ATHROW)
+    (g1, false)
+  } else if name == "todo" {
+    g.mv.visitTypeInsn(OP_NEW, PANIC_CLASS)
+    g.mv.visitInsn(OP_DUP)
+    ldc_str(g.mv, "not yet implemented")
+    g.mv.visitMethodInsn(OP_INVOKESPECIAL, PANIC_CLASS, "<init>", "(Ljava/lang/String;)V", false)
+    g.mv.visitInsn(OP_ATHROW)
+    (g, false)
+  } else if name == "to_float" {
+    let g1 = gen_args_plain(g, args)
+    g1.mv.visitInsn(OP_L2D)
+    (g1, true)
+  } else if name == "to_int" {
+    let g1 = gen_args_plain(g, args)
+    g1.mv.visitInsn(OP_D2L)
+    (g1, true)
+  } else if name == "len" {
+    let g1 = gen_args_plain(g, args)
+    g1.mv.visitMethodInsn(OP_INVOKEINTERFACE, "java/util/List", "size", "()I", true)
+    g1.mv.visitInsn(OP_I2L)
+    (g1, true)
+  } else if name == "get" {
+    let g1 = gen_args_plain(g, args)
+    g1.mv.visitMethodInsn(OP_INVOKESTATIC, LISTS_CLASS, "get", "(Ljava/util/List;J)LOption;", false)
+    (g1, true)
+  } else if name == "range" {
+    let g1 = gen_args_plain(g, args)
+    g1.mv.visitMethodInsn(OP_INVOKESTATIC, LISTS_CLASS, "range", "(JJ)Ljava/util/List;", false)
+    (g1, true)
+  } else if name == "sort" {
+    let (g1, _) = gen_expr(g, args[0], false)
+    push_witness(g1, wits[0])
+    g1.mv.visitMethodInsn(OP_INVOKESTATIC, LISTS_CLASS, "sort",
+      "(Ljava/util/List;Ljava/lang/Object;)Ljava/util/List;", false)
+    (g1, true)
+  } else if name == "sort_by" {
+    let g1 = gen_args_plain(g, args)
+    g1.mv.visitMethodInsn(OP_INVOKESTATIC, LISTS_CLASS, "sortBy",
+      "(Ljava/util/List;L" ++ fn_iface(2) ++ ";)Ljava/util/List;", false)
+    (g1, true)
+  } else if name == "max" || name == "min" {
+    let (g1, _) = gen_expr(g, args[0], false)
+    push_witness(g1, wits[0])
+    g1.mv.visitInsn(if name == "max" { OP_ICONST_1 } else { OP_ICONST_M1 })
+    g1.mv.visitMethodInsn(OP_INVOKESTATIC, LISTS_CLASS, "best",
+      "(Ljava/util/List;Ljava/lang/Object;I)LOption;", false)
+    (g1, true)
+  } else if name == "max_by" || name == "min_by" {
+    let g1 = gen_args_plain(g, args)
+    push_witness(g1, wits[0])
+    g1.mv.visitInsn(if name == "max_by" { OP_ICONST_1 } else { OP_ICONST_M1 })
+    g1.mv.visitMethodInsn(OP_INVOKESTATIC, LISTS_CLASS, "bestBy",
+      "(Ljava/util/List;L" ++ fn_iface(1) ++ ";Ljava/lang/Object;I)LOption;", false)
+    (g1, true)
+  } else if name == "expect" {
+    var g1 = gen_args_plain(g, args)
+    let (ga, msg_slot) = alloc(g1, 1)
+    g1 = ga
+    g1.mv.visitVarInsn(OP_ASTORE, msg_slot)
+    g1.mv.visitInsn(OP_DUP)
+    g1.mv.visitTypeInsn(OP_INSTANCEOF, "Option\$Some")
+    let ok = Label.new()
+    g1.mv.visitJumpInsn(OP_IFNE, ok)
+    g1.mv.visitTypeInsn(OP_NEW, PANIC_CLASS)
+    g1.mv.visitInsn(OP_DUP)
+    g1.mv.visitVarInsn(OP_ALOAD, msg_slot)
+    g1.mv.visitMethodInsn(OP_INVOKESPECIAL, PANIC_CLASS, "<init>", "(Ljava/lang/String;)V", false)
+    g1.mv.visitInsn(OP_ATHROW)
+    g1.mv.visitLabel(ok)
+    g1.mv.visitTypeInsn(OP_CHECKCAST, "Option\$Some")
+    g1.mv.visitFieldInsn(OP_GETFIELD, "Option\$Some", "value", "Ljava/lang/Object;")
+    if slots_of(ty) == 0 { g1.mv.visitInsn(OP_POP) } else { unerase(g1, ty) }
+    (g1, true)
+  } else if name == "unwrap_or" {
+    var g1 = gen_args_plain(g, args)
+    let (ga, fb_slot) = alloc(g1, slots_of(ty))
+    g1 = ga
+    store_slot(g1.mv, ty, fb_slot)
+    g1.mv.visitInsn(OP_DUP)
+    g1.mv.visitTypeInsn(OP_INSTANCEOF, "Option\$Some")
+    let some_l = Label.new()
+    let end = Label.new()
+    g1.mv.visitJumpInsn(OP_IFNE, some_l)
+    g1.mv.visitInsn(OP_POP)
+    load_slot(g1.mv, ty, fb_slot)
+    g1.mv.visitJumpInsn(OP_GOTO, end)
+    g1.mv.visitLabel(some_l)
+    g1.mv.visitTypeInsn(OP_CHECKCAST, "Option\$Some")
+    g1.mv.visitFieldInsn(OP_GETFIELD, "Option\$Some", "value", "Ljava/lang/Object;")
+    unerase(g1, ty)
+    g1.mv.visitLabel(end)
+    (g1, true)
+  } else if name == "to_string" {
+    let g1 = gen_args_plain(g, args)
+    let at = tex_ty(args[0])
+    if at == TyInt {
+      g1.mv.visitMethodInsn(OP_INVOKESTATIC, "java/lang/String", "valueOf",
+        "(J)Ljava/lang/String;", false)
+    } else if at == TyFloat {
+      g1.mv.visitMethodInsn(OP_INVOKESTATIC, "java/lang/String", "valueOf",
+        "(D)Ljava/lang/String;", false)
+    } else if at == TyBool {
+      g1.mv.visitMethodInsn(OP_INVOKESTATIC, "java/lang/String", "valueOf",
+        "(Z)Ljava/lang/String;", false)
+    } else if at == TyString {
+    } else {
+      box_ty(g1.mv, at)
+      g1.mv.visitMethodInsn(OP_INVOKESTATIC, SHOW_CLASS, "show",
+        "(Ljava/lang/Object;)Ljava/lang/String;", false)
+    }
+    (g1, true)
+  } else if name == "join" {
+    let g1 = gen_args_plain(g, args)
+    g1.mv.visitMethodInsn(OP_INVOKESTATIC, STRINGS_CLASS, "join",
+      "(Ljava/util/List;Ljava/lang/String;)Ljava/lang/String;", false)
+    (g1, true)
+  } else if name == "starts_with" || name == "ends_with" {
+    let g1 = gen_args_plain(g, args)
+    g1.mv.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/String",
+      if name == "starts_with" { "startsWith" } else { "endsWith" },
+      "(Ljava/lang/String;)Z", false)
+    (g1, true)
+  } else if name == "parse_int" || name == "parse_float" {
+    let g1 = gen_args_plain(g, args)
+    g1.mv.visitMethodInsn(OP_INVOKESTATIC, STRINGS_CLASS,
+      if name == "parse_int" { "parseInt" } else { "parseFloat" },
+      "(Ljava/lang/String;)LOption;", false)
+    (g1, true)
+  } else if name == "cursor_start" || name == "cursor_end" {
+    let g1 = gen_args_plain(g, args)
+    g1.mv.visitMethodInsn(OP_INVOKESTATIC, STDSTRINGS_CLASS,
+      if name == "cursor_start" { "cursorStart" } else { "cursorEnd" },
+      "(Ljava/lang/String;)J", false)
+    (g1, true)
+  } else if name == "cursor_done" || name == "cursor_char" || name == "cursor_next" ||
+    name == "cursor_prev" {
+      let g1 = gen_args_plain(g, args)
+      let mname = if name == "cursor_done" { "cursorDone" }
+      else if name == "cursor_char" { "cursorChar" }
+      else if name == "cursor_next" { "cursorNext" }
+      else { "cursorPrev" }
+      let d = if name == "cursor_done" { "(Ljava/lang/String;J)Z" } else { "(Ljava/lang/String;J)J" }
+      g1.mv.visitMethodInsn(OP_INVOKESTATIC, STDSTRINGS_CLASS, mname, d, false)
+      (g1, true)
+    } else if name == "cursor_slice" {
+      let g1 = gen_args_plain(g, args)
+      g1.mv.visitMethodInsn(OP_INVOKESTATIC, STDSTRINGS_CLASS, "cursorSlice",
+        "(Ljava/lang/String;JJ)Ljava/lang/String;", false)
+      let ok = Label.new()
+      g1.mv.visitInsn(OP_DUP)
+      g1.mv.visitJumpInsn(OP_IFNONNULL, ok)
+      g1.mv.visitTypeInsn(OP_NEW, PANIC_CLASS)
+      g1.mv.visitInsn(OP_DUP)
+      ldc_str(g1.mv, "cursor_slice: invalid cursor range")
+      g1.mv.visitMethodInsn(OP_INVOKESPECIAL, PANIC_CLASS, "<init>", "(Ljava/lang/String;)V", false)
+      g1.mv.visitInsn(OP_ATHROW)
+      g1.mv.visitLabel(ok)
+      (g1, true)
+    } else if name == "cursor_skip" {
+      let g1 = gen_args_plain(g, args)
+      g1.mv.visitMethodInsn(OP_INVOKESTATIC, STDSTRINGS_CLASS, "cursorSkip",
+        "(Ljava/lang/String;JLjava/lang/String;)J", false)
+      (g1, true)
+    } else if name == "index_of_from" {
+      let g1 = gen_args_plain(g, args)
+      g1.mv.visitMethodInsn(OP_INVOKESTATIC, STRINGS_CLASS, "indexOfFrom",
+        "(Ljava/lang/String;Ljava/lang/String;J)LOption;", false)
+      (g1, true)
+    } else if name == "java_try" {
+      let g1 = gen_args_plain(g, args)
+      g1.mv.visitMethodInsn(OP_INVOKESTATIC, IO_CLASS, "javaTry",
+        "(L" ++ fn_iface(0) ++ ";)LResult;", false)
+      (g1, true)
+    } else if name == "catch_panic" {
+      let g1 = gen_args_plain(g, args)
+      g1.mv.visitMethodInsn(OP_INVOKESTATIC, IO_CLASS, "catchPanic",
+        "(L" ++ fn_iface(0) ++ ";)LResult;", false)
+      (g1, true)
+    } else if name == "cast" {
+      let g1 = gen_args_plain(g, args)
+      unerase(g1, ty)
+      (g1, true)
+    } else if name == "args" {
+      g.mv.visitFieldInsn(OP_GETSTATIC, g.class_name, ARGS_FIELD, "[Ljava/lang/String;")
+      g.mv.visitMethodInsn(OP_INVOKESTATIC, LISTS_CLASS, "fromArray",
+        "([Ljava/lang/String;)Ljava/util/List;", false)
+      (g, true)
+    } else if name == "code_points" || name == "from_code_points" {
+      let g1 = gen_args_plain(g, args)
+      let s = builtin_decl_sig(name)
+      g1.mv.visitMethodInsn(OP_INVOKESTATIC, STRINGS_CLASS, name,
+        method_desc(g1.adts, s.param_tys, s.ret), false)
+      (g1, true)
+    } else if is_map_builtin(name) {
+      gen_map_call(g, name, args)
+    } else {
+      panic("unknown builtin: " ++ name)
+    }
+}
+
+# ---- binary operators ----
+
+## Stack top is an int cmp result; convert to boolean 0/1 by the jump.
+fn push_cmp_result(g: Gen, jump_if_true: Int) -> Unit !io = {
+  let true_l = Label.new()
+  let end = Label.new()
+  g.mv.visitJumpInsn(jump_if_true, true_l)
+  g.mv.visitInsn(OP_ICONST_0)
+  g.mv.visitJumpInsn(OP_GOTO, end)
+  g.mv.visitLabel(true_l)
+  g.mv.visitInsn(OP_ICONST_1)
+  g.mv.visitLabel(end)
+  ()
+}
+
+## Stack: a b (both long). Panic when b == 0 (spec §8.2 — must pass java_try).
+fn emit_div_zero_check(g: Gen, op: String) -> Unit !io = {
+  let ok = Label.new()
+  g.mv.visitInsn(OP_DUP2)
+  g.mv.visitInsn(OP_LCONST_0)
+  g.mv.visitInsn(OP_LCMP)
+  g.mv.visitJumpInsn(OP_IFNE, ok)
+  g.mv.visitTypeInsn(OP_NEW, PANIC_CLASS)
+  g.mv.visitInsn(OP_DUP)
+  ldc_str(g.mv, "Int " ++ op ++ " by zero")
+  g.mv.visitMethodInsn(OP_INVOKESPECIAL, PANIC_CLASS, "<init>", "(Ljava/lang/String;)V", false)
+  g.mv.visitInsn(OP_ATHROW)
+  g.mv.visitLabel(ok)
+  ()
+}
+
+fn gen_equality(g: Gen, t: Ty, op: TBinOp) -> Unit !io = {
+  if t == TyBytes {
+    g.mv.visitMethodInsn(OP_INVOKESTATIC, "java/util/Arrays", "equals", "([B[B)Z", false)
+    match op {
+      BNeq -> {
+        g.mv.visitInsn(OP_ICONST_1)
+        g.mv.visitInsn(OP_IXOR)
+      }
+      _ -> ()
+    }
+  } else if is_ref(t) {
+    g.mv.visitMethodInsn(OP_INVOKEVIRTUAL, obj(), "equals", "(Ljava/lang/Object;)Z", false)
+    match op {
+      BNeq -> {
+        g.mv.visitInsn(OP_ICONST_1)
+        g.mv.visitInsn(OP_IXOR)
+      }
+      _ -> ()
+    }
+  } else if t == TyBool {
+    g.mv.visitInsn(OP_IXOR)
+    match op {
+      BEq -> {
+        g.mv.visitInsn(OP_ICONST_1)
+        g.mv.visitInsn(OP_IXOR)
+      }
+      _ -> ()
+    }
+  } else {
+    g.mv.visitInsn(if t == TyFloat { OP_DCMPL } else { OP_LCMP })
+    push_cmp_result(g, match op {
+      BEq -> OP_IFEQ
+      _ -> OP_IFNE
+    })
+  }
+  ()
+}
+
+fn gen_ordering(g: Gen, t: Ty, op: TBinOp) -> Unit !io = {
+  if t == TyInt || t == TyCursor {
+    g.mv.visitInsn(OP_LCMP)
+  } else if t == TyString {
+    g.mv.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/String", "compareTo",
+      "(Ljava/lang/String;)I", false)
+  } else {
+    let use_g = match op {
+      BLt -> true
+      BLe -> true
+      _ -> false
+    }
+    g.mv.visitInsn(if use_g { OP_DCMPG } else { OP_DCMPL })
+  }
+  push_cmp_result(g, ord_jump(op))
+  ()
+}
+
+fn ord_jump(op: TBinOp) -> Int =
+  match op {
+    BLt -> OP_IFLT
+    BLe -> OP_IFLE
+    BGt -> OP_IFGT
+    _ -> OP_IFGE
+  }
+
+## `< <= > >=` through an Ord impl: cmp(l, r), then compare the long to 0.
+fn gen_trait_ordering(g: Gen, op: TBinOp, l: TExpr, r: TExpr, w: WitRef) -> (Gen, Bool) !io = {
+  let tr = trait_of(g.traits, ORD_ID)
+  let ord_cmp = trait_method_sig(tr, "cmp")
+  var g1 = g
+  match w {
+    WConcrete(_, subject) -> {
+      let imp = impl_of(g1, ORD_ID, subject)
+      let imp_owner = match imp.owner {
+        Some(o) -> o
+        None -> g1.class_name
+      }
+      if imp.derived {
+        let (ga, _) = gen_expr(g1, l, false)
+        let (gb, _) = gen_expr(ga, r, false)
+        g1 = gb
+        g1.mv.visitMethodInsn(OP_INVOKESTATIC, imp_owner,
+          impl_method_name(g1, "Ord", subject, "cmp"), derived_cmp_desc(g1, subject), false)
+      } else if provided_has(imp, "cmp") {
+        let (ga, _) = gen_expr(g1, l, false)
+        let (gb, _) = gen_expr(ga, r, false)
+        g1 = gb
+        let psig = subst_subject(tr, ord_cmp, subject)
+        g1.mv.visitMethodInsn(OP_INVOKESTATIC, imp_owner,
+          impl_method_name(g1, "Ord", subject, "cmp"),
+          method_desc(g1.adts, psig.param_tys, psig.ret), false)
+      } else {
+        let (ga, _) = gen_expr(g1, l, false)
+        let (gb, _) = gen_expr(ga, r, false)
+        g1 = gb
+        let tr_owner = match tr.owner {
+          Some(o) -> o
+          None -> g1.class_name
+        }
+        g1.mv.visitFieldInsn(OP_GETSTATIC, impl_class(g1.adts, imp.owner, "Ord", subject),
+          "INSTANCE", "L" ++ tr_iface(tr.owner, "Ord") ++ ";")
+        g1.mv.visitMethodInsn(OP_INVOKESTATIC, tr_owner,
+          default_method_name("Ord", "cmp"), fn_desc_with_dicts(g1, ord_cmp), false)
+      }
+    }
+    WForward(sym) -> {
+      load_var(g1, sym)
+      g1.mv.visitTypeInsn(OP_CHECKCAST, tr_iface(tr.owner, "Ord"))
+      let (ga, _) = gen_expr(g1, l, false)
+      let (gb, _) = gen_expr(ga, r, false)
+      g1 = gb
+      g1.mv.visitMethodInsn(OP_INVOKEINTERFACE, tr_iface(tr.owner, "Ord"), "cmp",
+        trait_method_desc(g1, ord_cmp), true)
+    }
+  }
+  g1.mv.visitInsn(OP_LCONST_0)
+  g1.mv.visitInsn(OP_LCMP)
+  push_cmp_result(g1, ord_jump(op))
+  (g1, true)
+}
+
+fn gen_binary(g: Gen, op: TBinOp, l: TExpr, r: TExpr, ord: Option[WitRef], ty: Ty) -> (Gen, Bool) !io = {
+  # short-circuit logic first
+  match op {
+    BAnd -> {
+      let short = Label.new()
+      let end = Label.new()
+      let (g1, _) = gen_expr(g, l, false)
+      g1.mv.visitJumpInsn(OP_IFEQ, short)
+      let (g2, _) = gen_expr(g1, r, false)
+      g2.mv.visitJumpInsn(OP_GOTO, end)
+      g2.mv.visitLabel(short)
+      g2.mv.visitInsn(OP_ICONST_0)
+      g2.mv.visitLabel(end)
+      return (g2, true)
+    }
+    BOr -> {
+      let short = Label.new()
+      let end = Label.new()
+      let (g1, _) = gen_expr(g, l, false)
+      g1.mv.visitJumpInsn(OP_IFNE, short)
+      let (g2, _) = gen_expr(g1, r, false)
+      g2.mv.visitJumpInsn(OP_GOTO, end)
+      g2.mv.visitLabel(short)
+      g2.mv.visitInsn(OP_ICONST_1)
+      g2.mv.visitLabel(end)
+      return (g2, true)
+    }
+    _ -> ()
+  }
+  match ord {
+    Some(w) -> return gen_trait_ordering(g, op, l, r, w)
+    None -> ()
+  }
+  let (ga, _) = gen_expr(g, l, false)
+  let (gb, _) = gen_expr(ga, r, false)
+  var g1 = gb
+  let t = tex_ty(l)
+  match op {
+    BAdd -> { g1.mv.visitInsn(if t == TyInt { OP_LADD } else { OP_DADD }) }
+    BSub -> { g1.mv.visitInsn(if t == TyInt { OP_LSUB } else { OP_DSUB }) }
+    BMul -> { g1.mv.visitInsn(if t == TyInt { OP_LMUL } else { OP_DMUL }) }
+    BDiv ->
+      if t == TyInt {
+        emit_div_zero_check(g1, "division")
+        g1.mv.visitInsn(OP_LDIV)
+      } else {
+        g1.mv.visitInsn(OP_DDIV)
+      }
+    BMod ->
+      if t == TyInt {
+        emit_div_zero_check(g1, "modulo")
+        g1.mv.visitInsn(OP_LREM)
+      } else {
+        g1.mv.visitInsn(OP_DREM)
+      }
+    BConcat ->
+      match t {
+        TyList(_) -> {
+          g1.mv.visitMethodInsn(OP_INVOKESTATIC, LISTS_CLASS, "concat",
+            "(Ljava/util/List;Ljava/util/List;)Ljava/util/List;", false)
+        }
+        TyBytes -> {
+          g1.mv.visitMethodInsn(OP_INVOKESTATIC, BYTES_CLASS, "concat", "([B[B)[B", false)
+        }
+        _ -> {
+          g1.mv.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/String", "concat",
+            "(Ljava/lang/String;)Ljava/lang/String;", false)
+        }
+      }
+    BEq -> { gen_equality(g1, t, op) }
+    BNeq -> { gen_equality(g1, t, op) }
+    BLt -> { gen_ordering(g1, t, op) }
+    BLe -> { gen_ordering(g1, t, op) }
+    BGt -> { gen_ordering(g1, t, op) }
+    BGe -> { gen_ordering(g1, t, op) }
+    BBand -> { g1.mv.visitInsn(OP_LAND) }
+    BBor -> { g1.mv.visitInsn(OP_LOR) }
+    BBxor -> { g1.mv.visitInsn(OP_LXOR) }
+    BShl -> {
+      g1.mv.visitInsn(OP_L2I)
+      g1.mv.visitInsn(OP_LSHL)
+    }
+    BShr -> {
+      g1.mv.visitInsn(OP_L2I)
+      g1.mv.visitInsn(OP_LSHR)
+    }
+    BUshr -> {
+      g1.mv.visitInsn(OP_L2I)
+      g1.mv.visitInsn(OP_LUSHR)
+    }
+    _ -> ()
+  }
+  (g1, true)
+}
+
+# ---- Java interop (spec §9) ----
+
+## Dawn value on the stack → the Java parameter's class (Int/Float may narrow;
+## an opaque TyJava may need a reference down-cast).
+fn adapt_java_arg(g: Gen, dawn_ty: Ty, param_cls: String) -> Unit !io = {
+  if dawn_ty == TyInt && param_cls == "int" {
+    g.mv.visitInsn(OP_L2I)
+  } else if dawn_ty == TyFloat && param_cls == "float" {
+    g.mv.visitInsn(OP_D2F)
+  } else {
+    match dawn_ty {
+      TyJava(fqcn, _) ->
+        if not is_prim_name(param_cls) && not jreflect.is_assignable(param_cls, fqcn) {
+          g.mv.visitTypeInsn(OP_CHECKCAST, internal_of(param_cls))
+        }
+      _ -> ()
+    }
+  }
+  ()
+}
+
+## `new C[n]` for a component class — n is already on the stack.
+fn new_array(g: Gen, component: String) -> Unit !io = {
+  if is_prim_name(component) {
+    let t = if component == "long" { 11 } else if component == "int" { 10 }
+    else if component == "double" { 7 } else if component == "float" { 6 }
+    else if component == "boolean" { 4 } else if component == "short" { 9 }
+    else if component == "byte" { 8 } else { 5 }
+    g.mv.visitIntInsn(OP_NEWARRAY, t)
+  } else {
+    g.mv.visitTypeInsn(OP_ANEWARRAY, internal_of(component))
+  }
+  ()
+}
+
+fn array_store_op(component: String) -> Int =
+  if component == "long" { OP_LASTORE } else if component == "int" { OP_IASTORE }
+  else if component == "double" { OP_DASTORE } else if component == "float" { OP_FASTORE }
+  else if component == "boolean" || component == "byte" { OP_BASTORE }
+  else if component == "short" { OP_SASTORE } else if component == "char" { OP_CASTORE }
+  else { OP_AASTORE }
+
+fn sam_conv_at(call: TJavaCall, i: Int) -> Option[(Int, String, String, List[String], String)] = {
+  for c in call.sam_convs {
+    let (idx, _, _, _, _) = c
+    if idx == i { return Some(c) }
+  }
+  None
+}
+
+fn is_list_bridge(call: TJavaCall, i: Int) -> Bool = {
+  for b in call.list_bridges {
+    if b == i { return true }
+  }
+  false
+}
+
+## Zero-copy unmodifiable view for a Dawn List handed to Java (spec §9.6).
+fn emit_list_bridge(g: Gen) -> Unit !io = {
+  g.mv.visitMethodInsn(OP_INVOKESTATIC, "java/util/Collections", "unmodifiableList",
+    "(Ljava/util/List;)Ljava/util/List;", false)
+  ()
+}
+
+## A Dawn fn value → an instance of the target functional interface (§9.4).
+fn emit_sam_conversion(
+  g: Gen,
+  conv: (Int, String, String, List[String], String),
+  ft: Ty
+) -> Gen !io = {
+  let (_, iface, sam_name, sam_params, sam_ret) = conv
+  let (fps, _) = tyfn_parts(ft)
+  let n = len(fps)
+  let bridge = "dawn\$sam\$" ++ to_string(g.sam_ctr)
+  let g1 = Gen {
+    ..g,
+    sam_ctr: g.sam_ctr + 1,
+    pending_sam: g.pending_sam ++ [SamB {
+      name: bridge,
+      iface: iface,
+      sam_name: sam_name,
+      sam_params: sam_params,
+      sam_ret: sam_ret
+    }]
+  }
+  let sam_type = Type.getMethodType(jmethod_desc(sam_params, sam_ret)).expect("mt")
+  var pdescs = ""
+  for p in sam_params { pdescs = pdescs ++ jdesc(p) }
+  let bridge_desc = "(L" ++ fn_iface(n) ++ ";" ++ pdescs ++ ")" ++ jdesc(sam_ret)
+  g1.mv.visitInvokeDynamicInsn(sam_name, "(L" ++ fn_iface(n) ++ ";)" ++ jdesc(iface),
+    lmf_bsm(), sam_type,
+    Handle.new(OP_H_INVOKESTATIC, g1.class_name, bridge, bridge_desc, false),
+    sam_type)
+  g1
+}
+
+fn adapt_one_java_arg(g: Gen, call: TJavaCall, i: Int, arg: TExpr, param: String) -> Gen !io = {
+  match sam_conv_at(call, i) {
+    Some(conv) -> emit_sam_conversion(g, conv, tex_ty(arg))
+    None -> {
+      if is_list_bridge(call, i) {
+        emit_list_bridge(g)
+      } else {
+        adapt_java_arg(g, tex_ty(arg), param)
+      }
+      g
+    }
+  }
+}
+
+## The arguments of one Java call (§9.3): fixed part, then the variadic pack.
+fn gen_java_args(g: Gen, call: TJavaCall) -> (Gen, Bool) !io = {
+  let fixed = match call.varargs_pack {
+    Some(p) -> p
+    None -> len(call.args)
+  }
+  var g1 = g
+  var i = 0
+  while i < fixed {
+    let arg = call.args[i]
+    let (g2, falls) = gen_expr(g1, arg, false)
+    g1 = g2
+    if not falls { return (g1, false) }
+    g1 = adapt_one_java_arg(g1, call, i, arg, call.param_cls[i])
+    i = i + 1
+  }
+  match call.varargs_pack {
+    None -> (g1, true)
+    Some(pack) -> {
+      let last = call.param_cls[len(call.param_cls) - 1]
+      let component = match jreflect.component_of(last) {
+        Some(c) -> c
+        None -> panic("variadic parameter is not an array")
+      }
+      push_int(g1.mv, len(call.args) - pack)
+      new_array(g1, component)
+      let store = array_store_op(component)
+      var j = pack
+      while j < len(call.args) {
+        let arg = call.args[j]
+        g1.mv.visitInsn(OP_DUP)
+        push_int(g1.mv, j - pack)
+        let (g2, falls) = gen_expr(g1, arg, false)
+        g1 = g2
+        if not falls { return (g1, false) }
+        g1 = adapt_one_java_arg(g1, call, j, arg, component)
+        g1.mv.visitInsn(store)
+        j = j + 1
+      }
+      (g1, true)
+    }
+  }
+}
+
+## Type.new(args): direct construction — never null, no Option wrap.
+fn gen_java_new(g: Gen, call: TJavaCall) -> (Gen, Bool) !io = {
+  let owner = internal_of(call.fqcn)
+  g.mv.visitTypeInsn(OP_NEW, owner)
+  g.mv.visitInsn(OP_DUP)
+  let (g1, falls) = gen_java_args(g, call)
+  if not falls { return (g1, false) }
+  g1.mv.visitMethodInsn(OP_INVOKESPECIAL, owner, "<init>",
+    jmethod_desc(call.param_cls, "void"), false)
+  (g1, true)
+}
+
+## Reference on the stack → Some(ref) / None (§9.2).
+fn wrap_nullable_in_option(g: Gen) -> Gen !io = {
+  let (ga, tmp) = alloc(g, 1)
+  let g1 = ga
+  g1.mv.visitVarInsn(OP_ASTORE, tmp)
+  let non_null = Label.new()
+  let end = Label.new()
+  g1.mv.visitVarInsn(OP_ALOAD, tmp)
+  g1.mv.visitJumpInsn(OP_IFNONNULL, non_null)
+  g1.mv.visitFieldInsn(OP_GETSTATIC, "Option\$None", "INSTANCE", "LOption\$None;")
+  g1.mv.visitTypeInsn(OP_CHECKCAST, "Option")
+  g1.mv.visitJumpInsn(OP_GOTO, end)
+  g1.mv.visitLabel(non_null)
+  g1.mv.visitTypeInsn(OP_NEW, "Option\$Some")
+  g1.mv.visitInsn(OP_DUP)
+  g1.mv.visitVarInsn(OP_ALOAD, tmp)
+  g1.mv.visitMethodInsn(OP_INVOKESPECIAL, "Option\$Some", "<init>", "(Ljava/lang/Object;)V", false)
+  g1.mv.visitTypeInsn(OP_CHECKCAST, "Option")
+  g1.mv.visitLabel(end)
+  g1
+}
+
+fn gen_java_call(g: Gen, call: TJavaCall, ty: Ty) -> (Gen, Bool) !io = {
+  let owner = internal_of(call.decl_cls)
+  let itf = match jreflect.find_class(call.decl_cls) {
+    Some(j) -> j.is_interface
+    None -> false
+  }
+  var g1 = g
+  if not call.is_static {
+    match call.target {
+      Some(t) -> {
+        let (g2, falls) = gen_expr(g1, t, false)
+        g1 = g2
+        if not falls { return (g1, false) }
+      }
+      None -> ()
+    }
+  }
+  let (g3, falls2) = gen_java_args(g1, call)
+  g1 = g3
+  if not falls2 { return (g1, false) }
+  let opcode = if call.is_static { OP_INVOKESTATIC }
+  else if itf { OP_INVOKEINTERFACE } else { OP_INVOKEVIRTUAL }
+  g1.mv.visitMethodInsn(opcode, owner, call.method,
+    jmethod_desc(call.param_cls, call.ret_cls), itf)
+  # returns (§9.2): small ints widen, floats widen, references wrap in Option
+  let rc = call.ret_cls
+  if rc == "int" || rc == "short" || rc == "byte" {
+    g1.mv.visitInsn(OP_I2L)
+  } else if rc == "float" {
+    g1.mv.visitInsn(OP_F2D)
+  } else if rc == "void" || rc == "long" || rc == "double" || rc == "boolean" {
+  } else {
+    g1 = wrap_nullable_in_option(g1)
+  }
+  (g1, true)
+}
+
+## static <samRet> dawn$sam$N(FnN f, <sam params>): null-check references,
+## box to the erased Fn convention, invoke, adapt the result (§9.4).
+fn gen_sam_bridge(g: Gen, cw: AdtClassWriter, b: SamB) -> Gen !io = {
+  let n = len(b.sam_params)
+  var pdescs = ""
+  for p in b.sam_params { pdescs = pdescs ++ jdesc(p) }
+  let desc = "(L" ++ fn_iface(n) ++ ";" ++ pdescs ++ ")" ++ jdesc(b.sam_ret)
+  let m = cw.method(ACC_PRIVATE + ACC_STATIC + OP_ACC_SYNTHETIC, b.name, desc).expect("mv")
+  m.visitCode()
+  m.visitVarInsn(OP_ALOAD, 0)
+  var slot = 1
+  var i = 0
+  for p in b.sam_params {
+    if p == "long" {
+      m.visitVarInsn(OP_LLOAD, slot)
+      slot = slot + 2
+      m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Long", "valueOf", "(J)Ljava/lang/Long;", false)
+    } else if p == "int" || p == "short" || p == "byte" {
+      m.visitVarInsn(OP_ILOAD, slot)
+      slot = slot + 1
+      m.visitInsn(OP_I2L)
+      m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Long", "valueOf", "(J)Ljava/lang/Long;", false)
+    } else if p == "double" {
+      m.visitVarInsn(OP_DLOAD, slot)
+      slot = slot + 2
+      m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Double", "valueOf",
+        "(D)Ljava/lang/Double;", false)
+    } else if p == "float" {
+      m.visitVarInsn(OP_FLOAD, slot)
+      slot = slot + 1
+      m.visitInsn(OP_F2D)
+      m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Double", "valueOf",
+        "(D)Ljava/lang/Double;", false)
+    } else if p == "boolean" {
+      m.visitVarInsn(OP_ILOAD, slot)
+      slot = slot + 1
+      m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Boolean", "valueOf",
+        "(Z)Ljava/lang/Boolean;", false)
+    } else {
+      m.visitVarInsn(OP_ALOAD, slot)
+      slot = slot + 1
+      let ok = Label.new()
+      m.visitInsn(OP_DUP)
+      m.visitJumpInsn(OP_IFNONNULL, ok)
+      m.visitTypeInsn(OP_NEW, PANIC_CLASS)
+      m.visitInsn(OP_DUP)
+      ldc_str(m, "Java passed null to parameter " ++ to_string(i + 1) ++
+          " of a Dawn callback (" ++ b.iface ++ ")")
+      m.visitMethodInsn(OP_INVOKESPECIAL, PANIC_CLASS, "<init>", "(Ljava/lang/String;)V", false)
+      m.visitInsn(OP_ATHROW)
+      m.visitLabel(ok)
+    }
+    i = i + 1
+  }
+  m.visitMethodInsn(OP_INVOKEINTERFACE, fn_iface(n), "apply", erased_apply_desc(n), true)
+  let rc = b.sam_ret
+  if rc == "void" {
+    m.visitInsn(OP_POP)
+    m.visitInsn(OP_RETURN)
+  } else if rc == "long" {
+    m.visitTypeInsn(OP_CHECKCAST, "java/lang/Long")
+    m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/Long", "longValue", "()J", false)
+    m.visitInsn(OP_LRETURN)
+  } else if rc == "int" || rc == "short" || rc == "byte" {
+    m.visitTypeInsn(OP_CHECKCAST, "java/lang/Long")
+    m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/Long", "longValue", "()J", false)
+    let tmp = slot
+    m.visitVarInsn(OP_LSTORE, tmp)
+    let ok = Label.new()
+    m.visitVarInsn(OP_LLOAD, tmp)
+    m.visitInsn(OP_L2I)
+    m.visitInsn(OP_I2L)
+    m.visitVarInsn(OP_LLOAD, tmp)
+    m.visitInsn(OP_LCMP)
+    m.visitJumpInsn(OP_IFEQ, ok)
+    m.visitTypeInsn(OP_NEW, PANIC_CLASS)
+    m.visitInsn(OP_DUP)
+    ldc_str(m, "Dawn callback returned an Int outside Java int range")
+    m.visitMethodInsn(OP_INVOKESPECIAL, PANIC_CLASS, "<init>", "(Ljava/lang/String;)V", false)
+    m.visitInsn(OP_ATHROW)
+    m.visitLabel(ok)
+    m.visitVarInsn(OP_LLOAD, tmp)
+    m.visitInsn(OP_L2I)
+    m.visitInsn(OP_IRETURN)
+  } else if rc == "boolean" {
+    m.visitTypeInsn(OP_CHECKCAST, "java/lang/Boolean")
+    m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/Boolean", "booleanValue", "()Z", false)
+    m.visitInsn(OP_IRETURN)
+  } else if rc == "double" {
+    m.visitTypeInsn(OP_CHECKCAST, "java/lang/Double")
+    m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/Double", "doubleValue", "()D", false)
+    m.visitInsn(OP_DRETURN)
+  } else if rc == "float" {
+    m.visitTypeInsn(OP_CHECKCAST, "java/lang/Double")
+    m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/Double", "doubleValue", "()D", false)
+    m.visitInsn(OP_D2F)
+    m.visitInsn(OP_FRETURN)
+  } else {
+    m.visitTypeInsn(OP_CHECKCAST, internal_of(rc))
+    m.visitInsn(OP_ARETURN)
+  }
+  m.visitMaxs(0, 0)
+  m.visitEnd()
+  g
+}
+
+# ---- functions and the module class ----
+
+## Reset the per-method state and generate one static method for `f`.
+fn gen_fn(g: Gen, cw: AdtClassWriter, f: TFun, name: String, desc: String, self_named: Bool) -> Gen !io = {
+  let m = cw.method(ACC_PUBLIC + ACC_STATIC, name, desc).expect("mv")
+  m.visitCode()
+  var g1 = Gen {
+    ..g,
+    mv: m,
+    cur_fn: if self_named { Some(f) } else { None },
+    next_slot: 0,
+    method_ret: f.sig.ret,
+    rets_null: false,
+    self_pending: None,
+    loop_stack: []
+  }
+  for ps in f.param_syms {
+    let (g2, slot) = alloc(g1, slots_of(sym_of(g1, ps).ty))
+    g1 = bind_slot(g2, ps, slot)
+  }
+  for ds in f.dict_syms {
+    let (g2, slot) = alloc(g1, slots_of(sym_of(g1, ds).ty))
+    g1 = bind_slot(g2, ds, slot)
+  }
+  if self_named {
+    let start = Label.new()
+    m.visitLabel(start)
+    g1 = Gen { ..g1, fn_start: Some(start) }
+  } else {
+    g1 = Gen { ..g1, fn_start: None }
+  }
+  let (g3, falls) = gen_expr(g1, f.body, self_named)
+  if falls { emit_method_return(g3) }
+  m.visitMaxs(0, 0)
+  m.visitEnd()
+  g3
+}
+
+## A queued lambda impl: captures ride ahead of the declared parameters.
+fn gen_lambda_impl(g: Gen, cw: AdtClassWriter, p: PendingL) -> Gen !io = {
+  let (fps, fret) = tyfn_parts(p.ty)
+  var cap_tys: List[Ty] = []
+  for c in p.captures { cap_tys = cap_tys ++ [sym_of(g, c).ty] }
+  let m = cw.method(ACC_PRIVATE + ACC_STATIC + OP_ACC_SYNTHETIC, p.name,
+    impl_desc_of(g, cap_tys ++ fps, fret)).expect("mv")
+  m.visitCode()
+  let has_self = match p.self_sym {
+    Some(_) -> true
+    None -> false
+  }
+  var g1 = Gen {
+    ..g,
+    mv: m,
+    cur_fn: None,
+    next_slot: 0,
+    method_ret: fret,
+    rets_null: true,
+    self_pending: if has_self { Some(p) } else { None },
+    loop_stack: []
+  }
+  for c in p.captures {
+    let (g2, slot) = alloc(g1, slots_of(sym_of(g1, c).ty))
+    g1 = bind_slot(g2, c, slot)
+  }
+  for lp in p.params {
+    let (g2, slot) = alloc(g1, slots_of(sym_of(g1, lp).ty))
+    g1 = bind_slot(g2, lp, slot)
+  }
+  # a local function's impl is named: self tail calls become a loop
+  if has_self {
+    let start = Label.new()
+    m.visitLabel(start)
+    g1 = Gen { ..g1, fn_start: Some(start) }
+  } else {
+    g1 = Gen { ..g1, fn_start: None }
+  }
+  let (g3, falls) = gen_expr(g1, p.body, has_self)
+  if falls { emit_method_return(g3) }
+  m.visitMaxs(0, 0)
+  m.visitEnd()
+  g3
+}
+
+## Drain queued lambda impls and bridges in Kotlin's order: lambdas, fn-value
+## bridges, builtin bridges, ctor bridges, sam bridges — a loop because
+## emitting one may queue more.
+fn drain_lambdas(g: Gen, cw: AdtClassWriter) -> Gen !io = {
+  var g1 = g
+  while len(g1.pending_lambdas) > 0 || len(g1.pending_fnval) > 0 ||
+    len(g1.pending_bi) > 0 || len(g1.pending_ctorb) > 0 || len(g1.pending_sam) > 0 {
+      if len(g1.pending_lambdas) > 0 {
+        let p = g1.pending_lambdas[0]
+        g1 = Gen { ..g1, pending_lambdas: list.drop(g1.pending_lambdas, 1) }
+        g1 = gen_lambda_impl(g1, cw, p)
+      } else if len(g1.pending_fnval) > 0 {
+        let s = g1.pending_fnval[0]
+        g1 = Gen { ..g1, pending_fnval: list.drop(g1.pending_fnval, 1) }
+        g1 = gen_fnval_bridge(g1, cw, s)
+      } else if len(g1.pending_bi) > 0 {
+        let s = g1.pending_bi[0]
+        g1 = Gen { ..g1, pending_bi: list.drop(g1.pending_bi, 1) }
+        g1 = gen_builtin_bridge(g1, cw, s)
+      } else if len(g1.pending_ctorb) > 0 {
+        let (aid, cidx) = g1.pending_ctorb[0]
+        g1 = Gen { ..g1, pending_ctorb: list.drop(g1.pending_ctorb, 1) }
+        g1 = gen_ctor_value_bridge(g1, cw, aid, cidx)
+      } else {
+        let b = g1.pending_sam[0]
+        g1 = Gen { ..g1, pending_sam: list.drop(g1.pending_sam, 1) }
+        g1 = gen_sam_bridge(g1, cw, b)
+      }
+    }
+  g1
+}
+
+## Two same-typed orderable values on the stack → their long cmp.
+fn emit_field_cmp(g: Gen, t: Ty) -> Unit !io = {
+  if t == TyInt || t == TyFloat || t == TyString {
+    emit_native_cmp2(g, t)
+  } else {
+    match t {
+      TyAdt(_, _) -> {
+        let imp = impl_of(g, ORD_ID, t)
+        let imp_owner = match imp.owner {
+          Some(o) -> o
+          None -> g.class_name
+        }
+        if imp.derived {
+          g.mv.visitMethodInsn(OP_INVOKESTATIC, imp_owner,
+            impl_method_name(g, "Ord", t, "cmp"), derived_cmp_desc(g, t), false)
+        } else {
+          let tr = trait_of(g.traits, ORD_ID)
+          let psig = subst_subject(tr, trait_method_sig(tr, "cmp"), t)
+          g.mv.visitMethodInsn(OP_INVOKESTATIC, imp_owner,
+            impl_method_name(g, "Ord", t, "cmp"),
+            method_desc(g.adts, psig.param_tys, psig.ret), false)
+        }
+      }
+      _ -> panic("unorderable derived field")
+    }
+  }
+  ()
+}
+
+## derive Ord: cmp(a, b) — constructor order first, then fields
+## lexicographically, as a concrete static on the module class.
+fn gen_derived_ord_cmp(g: Gen, cw: AdtClassWriter, a: AdtI) -> Gen !io = {
+  let subject = TyAdt(a.id, a.tparams)
+  let m = cw.method(ACC_PUBLIC + ACC_STATIC, impl_method_name(g, "Ord", subject, "cmp"),
+    derived_cmp_desc(g, subject)).expect("mv")
+  m.visitCode()
+  let g1 = Gen { ..g, mv: m }
+  if a.is_record {
+    cmp_fields(g1, ctor_jvm_name(g1.adts, a.ctors[0]), a.ctors[0].fields, 0, 1)
+  } else {
+    emit_tag_of(g1, a, 0, 2)
+    emit_tag_of(g1, a, 1, 3)
+    let same_tag = Label.new()
+    m.visitVarInsn(OP_ILOAD, 2)
+    m.visitVarInsn(OP_ILOAD, 3)
+    m.visitJumpInsn(OP_IF_ICMPEQ, same_tag)
+    m.visitVarInsn(OP_ILOAD, 2)
+    m.visitVarInsn(OP_ILOAD, 3)
+    m.visitInsn(OP_ISUB)
+    m.visitInsn(OP_I2L)
+    m.visitInsn(OP_LRETURN)
+    m.visitLabel(same_tag)
+    for c in a.ctors {
+      if len(c.fields) > 0 {
+        let next = Label.new()
+        let sub = ctor_jvm_name(g1.adts, c)
+        m.visitVarInsn(OP_ALOAD, 0)
+        m.visitTypeInsn(OP_INSTANCEOF, sub)
+        m.visitJumpInsn(OP_IFEQ, next)
+        m.visitVarInsn(OP_ALOAD, 0)
+        m.visitTypeInsn(OP_CHECKCAST, sub)
+        m.visitVarInsn(OP_ASTORE, 4)
+        m.visitVarInsn(OP_ALOAD, 1)
+        m.visitTypeInsn(OP_CHECKCAST, sub)
+        m.visitVarInsn(OP_ASTORE, 5)
+        cmp_fields(g1, sub, c.fields, 4, 5)
+        m.visitLabel(next)
+      }
+    }
+    m.visitInsn(OP_LCONST_0)
+    m.visitInsn(OP_LRETURN)
+  }
+  m.visitMaxs(0, 0)
+  m.visitEnd()
+  g
+}
+
+fn cmp_fields(g: Gen, sub: String, fields: List[FieldI], a_slot: Int, b_slot: Int) -> Unit !io = {
+  for f in fields {
+    g.mv.visitVarInsn(OP_ALOAD, a_slot)
+    g.mv.visitFieldInsn(OP_GETFIELD, sub, f.name, desc_of(g.adts, f.ty))
+    g.mv.visitVarInsn(OP_ALOAD, b_slot)
+    g.mv.visitFieldInsn(OP_GETFIELD, sub, f.name, desc_of(g.adts, f.ty))
+    emit_field_cmp(g, f.ty)
+    let next = Label.new()
+    g.mv.visitInsn(OP_DUP2)
+    g.mv.visitInsn(OP_LCONST_0)
+    g.mv.visitInsn(OP_LCMP)
+    g.mv.visitJumpInsn(OP_IFEQ, next)
+    g.mv.visitInsn(OP_LRETURN)
+    g.mv.visitLabel(next)
+    g.mv.visitInsn(OP_POP2)
+  }
+  g.mv.visitInsn(OP_LCONST_0)
+  g.mv.visitInsn(OP_LRETURN)
+  ()
+}
+
+## Constructor tag of the value in arg_slot, stored as an int in `store`.
+fn emit_tag_of(g: Gen, a: AdtI, arg_slot: Int, store: Int) -> Unit !io = {
+  let done_tag = Label.new()
+  var idx = 0
+  for c in a.ctors {
+    let next = Label.new()
+    g.mv.visitVarInsn(OP_ALOAD, arg_slot)
+    g.mv.visitTypeInsn(OP_INSTANCEOF, ctor_jvm_name(g.adts, c))
+    g.mv.visitJumpInsn(OP_IFEQ, next)
+    push_int(g.mv, idx)
+    g.mv.visitVarInsn(OP_ISTORE, store)
+    g.mv.visitJumpInsn(OP_GOTO, done_tag)
+    g.mv.visitLabel(next)
+    idx = idx + 1
+  }
+  push_int(g.mv, 0 - 1)
+  g.mv.visitVarInsn(OP_ISTORE, store)
+  g.mv.visitLabel(done_tag)
+  ()
+}
+
+## JVM entry wrapper: catch PanicError → stderr + exit 1 (spec §8.2).
+fn gen_jvm_main(g: Gen, cw: AdtClassWriter) -> Unit !io = {
+  let m = cw.method(ACC_PUBLIC + ACC_STATIC, "main", "([Ljava/lang/String;)V").expect("mv")
+  m.visitCode()
+  let try_start = Label.new()
+  let try_end = Label.new()
+  let handler = Label.new()
+  m.visitTryCatchBlock(try_start, try_end, handler, PANIC_CLASS)
+  m.visitVarInsn(OP_ALOAD, 0)
+  m.visitFieldInsn(OP_PUTSTATIC, g.class_name, ARGS_FIELD, "[Ljava/lang/String;")
+  m.visitLabel(try_start)
+  m.visitMethodInsn(OP_INVOKESTATIC, g.class_name, "main", "()V", false)
+  m.visitLabel(try_end)
+  m.visitInsn(OP_RETURN)
+  m.visitLabel(handler)
+  m.visitVarInsn(OP_ASTORE, 1)
+  m.visitFieldInsn(OP_GETSTATIC, "java/lang/System", "err", "Ljava/io/PrintStream;")
+  m.visitTypeInsn(OP_NEW, SB)
+  m.visitInsn(OP_DUP)
+  m.visitMethodInsn(OP_INVOKESPECIAL, SB, "<init>", "()V", false)
+  ldc_str(m, "panic: ")
+  m.visitMethodInsn(OP_INVOKEVIRTUAL, SB, "append", "(Ljava/lang/String;)L" ++ SB ++ ";", false)
+  m.visitVarInsn(OP_ALOAD, 1)
+  m.visitMethodInsn(OP_INVOKEVIRTUAL, PANIC_CLASS, "getMessage", "()Ljava/lang/String;", false)
+  m.visitMethodInsn(OP_INVOKEVIRTUAL, SB, "append", "(Ljava/lang/String;)L" ++ SB ++ ";", false)
+  m.visitMethodInsn(OP_INVOKEVIRTUAL, SB, "toString", "()Ljava/lang/String;", false)
+  m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/io/PrintStream", "println",
+    "(Ljava/lang/String;)V", false)
+  m.visitInsn(OP_ICONST_1)
+  m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/System", "exit", "(I)V", false)
+  m.visitInsn(OP_RETURN)
+  m.visitMaxs(0, 0)
+  m.visitEnd()
+  ()
+}
+
+## The per-trait dictionary interface: one erased method per trait method.
+pub fn gen_trait_interface(supers: List[String], adts: Adts, tr: TraitI) -> Bytes !io = {
+  let cw = AdtClassWriter.new(supers)
+  cw.begin(V17, ACC_PUBLIC + ACC_ABSTRACT + ACC_INTERFACE, tr_iface(tr.owner, tr.name), obj())
+  for entry in tr.methods {
+    let (mn, ms) = entry
+    let m = cw.method(ACC_PUBLIC + ACC_ABSTRACT, mn,
+      method_desc(adts, ms.sig.param_tys, ms.sig.ret)).expect("mv")
+    m.visitEnd()
+  }
+  cw.visitEnd()
+  cw.toByteArray().expect("bytes")
+}
+
+## The return instruction for a value of declared type `t` on the stack.
+fn emit_return_of(m: MethodVisitor, t: Ty) -> Unit !io = {
+  if t == TyInt || t == TyCursor {
+    m.visitInsn(OP_LRETURN)
+  } else if t == TyFloat {
+    m.visitInsn(OP_DRETURN)
+  } else if t == TyBool {
+    m.visitInsn(OP_IRETURN)
+  } else if is_ref(t) {
+    m.visitInsn(OP_ARETURN)
+  } else {
+    m.visitInsn(OP_RETURN)
+  }
+  ()
+}
+
+## An impl's dictionary: a singleton implementing the trait interface; each
+## erased method unwraps to the concrete static or the trait's default.
+pub fn gen_impl_class(
+  supers: List[String],
+  adts: Adts,
+  traits: Traits,
+  class_name: String,
+  imp: ImplI
+) -> Bytes !io = {
+  let tr = trait_of(traits, imp.trait_id)
+  let cls = impl_class(adts, imp.owner, tr.name, imp.subject)
+  let iface = tr_iface(tr.owner, tr.name)
+  let imp_owner = match imp.owner {
+    Some(o) -> o
+    None -> class_name
+  }
+  let cw = AdtClassWriter.new(supers)
+  cw.beginWithInterface(V17, ACC_PUBLIC + ACC_FINAL, cls, obj(), iface)
+  singleton_scaffold(cw, cls, iface)
+  for entry in tr.methods {
+    let (mname, ms) = entry
+    let m = cw.method(ACC_PUBLIC, mname,
+      method_desc(adts, ms.sig.param_tys, ms.sig.ret)).expect("mv")
+    m.visitCode()
+    let subj_name = match imp.subject {
+      TyInt -> "Int"
+      TyFloat -> "Float"
+      TyBool -> "Bool"
+      TyString -> "String"
+      TyAdt(aid, _) -> adt_of(adts, aid).name
+      _ -> panic("invalid impl subject")
+    }
+    let mangled = "dawn\$impl\$" ++ tr.name ++ "\$" ++ subj_name ++ "\$" ++ mname
+    if imp.derived {
+      m.visitVarInsn(OP_ALOAD, 1)
+      emit_unerase(m, adts, imp.subject)
+      m.visitVarInsn(OP_ALOAD, 2)
+      emit_unerase(m, adts, imp.subject)
+      m.visitMethodInsn(OP_INVOKESTATIC, imp_owner, mangled,
+        "(" ++ desc_of(adts, imp.subject) ++ desc_of(adts, imp.subject) ++ ")J", false)
+    } else if provided_has(imp, mname) {
+      let psig = subst_subject(tr, ms.sig, imp.subject)
+      var slot = 1
+      var i = 0
+      for declared in ms.sig.param_tys {
+        load_slot(m, declared, slot)
+        match declared {
+          TyVar(_, _) -> { emit_unerase(m, adts, psig.param_tys[i]) }
+          _ -> ()
+        }
+        slot = slot + slots_of(declared)
+        i = i + 1
+      }
+      m.visitMethodInsn(OP_INVOKESTATIC, imp_owner, mangled,
+        method_desc(adts, psig.param_tys, psig.ret), false)
+      match ms.sig.ret {
+        TyVar(_, _) -> { box_ty(m, psig.ret) }
+        _ -> ()
+      }
+    } else {
+      var slot = 1
+      for declared in ms.sig.param_tys {
+        load_slot(m, declared, slot)
+        slot = slot + slots_of(declared)
+      }
+      m.visitVarInsn(OP_ALOAD, 0)
+      let tr_owner = match tr.owner {
+        Some(o) -> o
+        None -> class_name
+      }
+      m.visitMethodInsn(OP_INVOKESTATIC, tr_owner, default_method_name(tr.name, mname),
+        sig_desc_with_dicts(adts, ms.sig), false)
+    }
+    emit_return_of(m, ms.sig.ret)
+    m.visitMaxs(0, 0)
+    m.visitEnd()
+  }
+  cw.visitEnd()
+  cw.toByteArray().expect("bytes")
+}
+
+## One test block → one public static method dawn$test$i()V.
+fn gen_test(g: Gen, cw: AdtClassWriter, t: TFun, idx: Int) -> Gen !io = {
+  let m = cw.method(ACC_PUBLIC + ACC_STATIC, "dawn\$test\$" ++ to_string(idx), "()V").expect("mv")
+  m.visitCode()
+  var g1 = Gen {
+    ..g,
+    mv: m,
+    cur_fn: None,
+    fn_start: None,
+    next_slot: 0,
+    method_ret: TyUnit,
+    rets_null: false,
+    self_pending: None,
+    loop_stack: []
+  }
+  let (g2, falls) = gen_expr(g1, t.body, false)
+  if falls { g2.mv.visitInsn(OP_RETURN) }
+  m.visitMaxs(0, 0)
+  m.visitEnd()
+  g2
+}
+
+## A throwaway MethodVisitor so Gen can be constructed before the first real
+## method opens (the record field is non-optional by design).
+fn scratch_mv() -> MethodVisitor !io = {
+  let cw = AdtClassWriter.plain(0).expect("writer")
+  AdtClassWriter.beginOn(cw, V17, ACC_PUBLIC, "dawn/tool/Scratch", obj())
+  AdtClassWriter.methodOn(cw, ACC_PUBLIC + ACC_STATIC, "scratch", "()V").expect("mv")
+}
+
+## One checked module → its classes: ADTs, trait interfaces, impl
+## dictionaries, derived Ord singletons, and the class of statics.
+pub fn emit_module(
+  supers: List[String],
+  adts: Adts,
+  traits: Traits,
+  impl_table: Map[(Int, Ty), ImplI],
+  prog_fns: Map[(String, String), Sig],
+  own_fns: Map[String, Sig],
+  class_name: String,
+  own_trait_ids: List[Int],
+  own_impls: List[ImplI],
+  own_adt_ids: List[Int],
+  tm: TModule,
+  ct: CtOut,
+  include_tests: Bool
+) -> List[(String, Bytes)] !io = {
+  var out: List[(String, Bytes)] = []
+  for aid in own_adt_ids {
+    out = out ++ gen_adt(supers, adts, adt_of(adts, aid))
+  }
+  for tid in own_trait_ids {
+    let tr = trait_of(traits, tid)
+    out = out ++ [(tr_iface(tr.owner, tr.name), gen_trait_interface(supers, adts, tr))]
+  }
+  for imp in own_impls {
+    let tr = trait_of(traits, imp.trait_id)
+    out = out ++ [(impl_class(adts, imp.owner, tr.name, imp.subject),
+      gen_impl_class(supers, adts, traits, class_name, imp))]
+  }
+  # derive Ord singletons for own ADTs
+  for aid in own_adt_ids {
+    let a = adt_of(adts, aid)
+    if a.derives_ord {
+      match map.get(impl_table, (ORD_ID, TyAdt(a.id, a.tparams))) {
+        Some(imp) ->
+          if imp.derived {
+            let tr = trait_of(traits, ORD_ID)
+            out = out ++ [(impl_class(adts, imp.owner, tr.name, imp.subject),
+              gen_impl_class(supers, adts, traits, class_name, imp))]
+          }
+        None -> ()
+      }
+    }
+  }
+
+  let cw = AdtClassWriter.new(supers)
+  cw.begin(V17, ACC_PUBLIC + ACC_FINAL, class_name, obj())
+  cw.field(ACC_PUBLIC + ACC_STATIC, ARGS_FIELD, "[Ljava/lang/String;")
+  let no_slots: Map[Int, Int] = map.empty()
+  let no_ckey: Map[String, String] = map.empty()
+  var g = Gen {
+    mv: scratch_mv(),
+    class_name: class_name,
+    adts: adts,
+    traits: traits,
+    impl_table: impl_table,
+    own_fns: own_fns,
+    prog_fns: prog_fns,
+    syms: tm.syms,
+    slots: no_slots,
+    next_slot: 0,
+    method_ret: TyUnit,
+    rets_null: false,
+    fn_start: None,
+    cur_fn: None,
+    self_pending: None,
+    loop_stack: [],
+    lambda_ctr: 0,
+    sam_ctr: 0,
+    pending_lambdas: [],
+    pending_fnval: [],
+    pending_bi: [],
+    pending_ctorb: [],
+    pending_sam: [],
+    emitted_fnval: set.empty(),
+    emitted_bi: set.empty(),
+    emitted_ctorb: set.empty(),
+    consts: ct.consts,
+    blocks: ct.blocks,
+    const_fields: [],
+    const_by_key: no_ckey
+  }
+  var has_main = false
+  for f in tm.fns {
+    match f.impl_of {
+      Some(pair) -> {
+        let (tid, subject) = pair
+        let tr = trait_of(traits, tid)
+        g = gen_fn(g, cw, f, impl_method_name(g, tr.name, subject, f.name),
+          fn_desc_with_dicts(g, f.sig), true)
+      }
+      None ->
+        match f.default_of {
+          Some(tid) -> {
+            let tr = trait_of(traits, tid)
+            g = gen_fn(g, cw, f, default_method_name(tr.name, f.name),
+              fn_desc_with_dicts(g, f.sig), false)
+          }
+          None -> {
+            if f.name == "main" { has_main = true }
+            g = gen_fn(g, cw, f, f.name, fn_desc_with_dicts(g, f.sig), true)
+          }
+        }
+    }
+    g = drain_lambdas(g, cw)
+  }
+  for aid in own_adt_ids {
+    let a = adt_of(adts, aid)
+    if a.derives_ord {
+      match map.get(impl_table, (ORD_ID, TyAdt(a.id, a.tparams))) {
+        Some(imp) -> if imp.derived { g = gen_derived_ord_cmp(g, cw, a) }
+        None -> ()
+      }
+    }
+  }
+  if include_tests {
+    var ti = 0
+    for t in tm.tests {
+      g = gen_test(g, cw, t, ti)
+      g = drain_lambdas(g, cw)
+      ti = ti + 1
+    }
+  }
+  if has_main { gen_jvm_main(g, cw) }
+  gen_const_fields(g, cw)
+  cw.visitEnd()
+  out ++ [(class_name, cw.toByteArray().expect("bytes"))]
+}

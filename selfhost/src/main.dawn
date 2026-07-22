@@ -27,9 +27,43 @@ use codegen.{
   gen_lists_class, LISTS_CLASS, gen_strings_class, STRINGS_CLASS,
   gen_maps_class, MAPS_CLASS, gen_adt
 }
-use types.{prelude_adts, adt_of, adt_jvm_name, OPTION_ID, RESULT_ID, TyInt, TyFloat, TyString}
+use types.{
+  prelude_adts, adt_of, adt_jvm_name, trait_of, OPTION_ID, RESULT_ID,
+  TyInt, TyFloat, TyString, Ty, Sig, Traits, ImplI, Adts
+}
+use emit.{emit_module}
+use tast.{TModule}
+use interp.{CtOut}
+use checker.{Cx}
 use java "java.nio.file.Files"
 use java "java.nio.file.Paths"
+
+## ADT ids declared by `cls` (and not yet emitted), in id order.
+fn own_adts_of(adts: Adts, cls: String, seen: Set[String]) -> List[Int] = {
+  var out: List[Int] = []
+  for aid in sort(map.keys(adts)) {
+    let a = adt_of(adts, aid)
+    let is_own = match a.owner {
+      Some(o) -> o == cls
+      None -> false
+    }
+    if is_own && not set.has(seen, adt_jvm_name(a)) { out = out ++ [aid] }
+  }
+  out
+}
+
+## Trait ids declared by `cls`, in id order.
+fn own_trait_ids(traits: Traits, cls: String) -> List[Int] = {
+  var out: List[Int] = []
+  for tid in sort(map.keys(traits)) {
+    let is_own = match trait_of(traits, tid).owner {
+      Some(o) -> o == cls
+      None -> false
+    }
+    if is_own { out = out ++ [tid] }
+  }
+  out
+}
 
 fn write_class(dir: String, name: String, bs: Bytes) -> Unit !io = {
   let path = dir ++ "/" ++ name ++ ".class"
@@ -65,11 +99,13 @@ fn run_emitrt(rest: List[String]) -> Unit !io = {
   if out == "" { panic("usage: selfhost emitrt [<target>] -o <dir>") }
   var adts = prelude_adts()
   var mods: List[CheckedMod] = []
+  var std_mods: List[(String, Cx, TModule, CtOut)] = []
   if target != "" {
     let std = match stdlib.load_std(std_dir) {
       Ok(sc) -> sc
       Err(e) -> panic("cannot load std from " ++ std_dir ++ ": " ++ e)
     }
+    std_mods = std.mods
     for pr in map.entries(std.adts) {
       let (k, v) = pr
       adts = map.insert(adts, k, v)
@@ -117,21 +153,62 @@ fn run_emitrt(rest: List[String]) -> Unit !io = {
       write_class(out, nm, bs)
     }
   }
-  var seen: Set[String] = set.empty()
+  # program-wide tables for module emission: traits/impls/fn sigs unioned
+  # over std and user modules (ids are unique program-wide)
+  var traits: Traits = map.empty()
+  var impl_table: Map[(Int, Ty), ImplI] = map.empty()
+  var prog_fns: Map[(String, String), Sig] = map.empty()
+  for sm in std_mods {
+    let (cls, cx, _, _) = sm
+    for pr in map.entries(cx.traits) {
+      let (k, v) = pr
+      traits = map.insert(traits, k, v)
+    }
+    for pr in map.entries(cx.impl_table) {
+      let (k, v) = pr
+      impl_table = map.insert(impl_table, k, v)
+    }
+    for pr in map.entries(cx.fns) {
+      let (k, v) = pr
+      prog_fns = map.insert(prog_fns, (cls, k), v)
+    }
+  }
   for cm in mods {
-    for aid in sort(map.keys(cm.cx.adts)) {
-      let a = adt_of(cm.cx.adts, aid)
-      let is_own = match a.owner {
-        Some(o) -> o == cm.class_name
-        None -> false
+    for pr in map.entries(cm.cx.traits) {
+      let (k, v) = pr
+      traits = map.insert(traits, k, v)
+    }
+    for pr in map.entries(cm.cx.impl_table) {
+      let (k, v) = pr
+      impl_table = map.insert(impl_table, k, v)
+    }
+    for pr in map.entries(cm.cx.fns) {
+      let (k, v) = pr
+      prog_fns = map.insert(prog_fns, (cm.class_name, k), v)
+    }
+  }
+  var seen: Set[String] = set.empty()
+  for sm in std_mods {
+    let (cls, cx, tm, ct) = sm
+    for pair in emit_module(sup, adts, traits, impl_table, prog_fns, cx.fns, cls,
+      own_trait_ids(cx.traits, cls), cx.local_impls, own_adts_of(cx.adts, cls, seen),
+      tm, ct, false) {
+        let (nm, bs) = pair
+        write_class(out, nm, bs)
       }
-      if is_own && not set.has(seen, adt_jvm_name(a)) {
-        seen = set.insert(seen, adt_jvm_name(a))
-        for pair in gen_adt(sup, adts, a) {
-          let (nm, bs) = pair
-          write_class(out, nm, bs)
-        }
+    for aid in own_adts_of(cx.adts, cls, seen) {
+      seen = set.insert(seen, adt_jvm_name(adt_of(cx.adts, aid)))
+    }
+  }
+  for cm in mods {
+    for pair in emit_module(sup, adts, traits, impl_table, prog_fns, cm.cx.fns,
+      cm.class_name, own_trait_ids(cm.cx.traits, cm.class_name), cm.cx.local_impls,
+      own_adts_of(cm.cx.adts, cm.class_name, seen), cm.tm, cm.ct, true) {
+        let (nm, bs) = pair
+        write_class(out, nm, bs)
       }
+    for aid in own_adts_of(cm.cx.adts, cm.class_name, seen) {
+      seen = set.insert(seen, adt_jvm_name(adt_of(cm.cx.adts, aid)))
     }
   }
   for outer in vendor.vendored_outers() {
