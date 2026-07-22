@@ -87,3 +87,48 @@ pub fn reverse[T](xs: List[T]) -> List[T] = {
   let empty: List[T] = []
   reverse_go(xs, len(xs) - 1, empty)
 }
+
+## Ascending stable sort; elements need `Ord`. Delegates to `sort_by` with the
+## bound `cmp` — the dictionary crosses as an ordinary captured value, which is
+## what let this leave the builtin table (docs/pure-ffi-design.md section 14).
+pub fn sort[T: Ord](xs: List[T]) -> List[T] = sort_by(xs, fn(a, b) => cmp(a, b))
+
+# One walk serves max_by and min_by. `key` runs exactly once per element and
+# only a strictly better key replaces the champion, so the first extreme wins —
+# both observable (effectful keys, ties), both inherited from the retired
+# builtin. The direction is a Bool rather than a ±1 multiplier because `cmp`
+# contracts sign, not magnitude: scaling its result could overflow.
+fn best_by_go[T, K: Ord](
+  xs: List[T], key: fn(T) -> K !e, i: Int, bx: T, bk: K, greater: Bool
+) -> T !e =
+  if i == len(xs) { bx }
+  else {
+    let x = get(xs, i).expect("index below length")
+    let k = key(x)
+    let c = cmp(k, bk)
+    let better = if greater { c > 0 } else { c < 0 }
+    if better { best_by_go(xs, key, i + 1, x, k, greater) }
+    else { best_by_go(xs, key, i + 1, bx, bk, greater) }
+  }
+
+## The first element whose key is greatest; `None` when empty. Keys need `Ord`;
+## `key` runs once per element.
+pub fn max_by[T, K: Ord](xs: List[T], key: fn(T) -> K !e) -> Option[T] !e =
+  match get(xs, 0) {
+    None -> None
+    Some(x0) -> Some(best_by_go(xs, key, 1, x0, key(x0), true))
+  }
+
+## The first element whose key is least; `None` when empty. Keys need `Ord`;
+## `key` runs once per element.
+pub fn min_by[T, K: Ord](xs: List[T], key: fn(T) -> K !e) -> Option[T] !e =
+  match get(xs, 0) {
+    None -> None
+    Some(x0) -> Some(best_by_go(xs, key, 1, x0, key(x0), false))
+  }
+
+## The first greatest element; `None` when empty. Elements need `Ord`.
+pub fn max[T: Ord](xs: List[T]) -> Option[T] = max_by(xs, fn(x) => x)
+
+## The first least element; `None` when empty. Elements need `Ord`.
+pub fn min[T: Ord](xs: List[T]) -> Option[T] = min_by(xs, fn(x) => x)

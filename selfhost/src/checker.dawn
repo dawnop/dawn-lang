@@ -4135,10 +4135,16 @@ test "fn values instantiate from the expected type" {
   # without context the generic cannot instantiate
   let (cx2, t2, _) = check_fn_value(cx, "len", len_sig, None, 0, 3)
   assert str.contains(cx2.diags[0].msg, "cannot infer the type parameter(s) of `len`")
-  # a bounded builtin refuses to be a value
-  let sort_sig = map.get(bs, "sort").expect("sort")
-  let (cx3, t3, _) = check_fn_value(cx, "sort", sort_sig, None, 0, 4)
-  assert cx3.diags[0].msg == "`sort` has trait bounds and cannot be used as a value"
+  # a bounded sig refuses to be a value (no table builtin carries bounds since
+  # the ordering family moved to std/list, so the exemplar is hand-built)
+  let tv = TyVar("T", 0)
+  let bounded = Sig {
+    name: "sortish", param_tys: [TyList(tv)], param_names: ["xs"], ret: TyList(tv),
+    eff: EPure, is_builtin: true, tparams: [tv], constraints: [[ORD_ID]],
+    owner: None, trait_id: None, inferring: false
+  }
+  let (cx3, t3, _) = check_fn_value(cx, "sortish", bounded, None, 0, 4)
+  assert cx3.diags[0].msg == "`sortish` has trait bounds and cannot be used as a value"
   # a non-generic sig passes through untouched
   let join_sig = map.get(bs, "join").expect("join")
   let (cx4, t4, _) = check_fn_value(cx, "join", join_sig, None, 0, 4)

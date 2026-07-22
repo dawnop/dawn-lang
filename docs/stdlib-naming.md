@@ -22,6 +22,7 @@ xs |> filter(fn(x) => x > 0)    # 选择性引入的短名进管道，零摩擦
 - **平铺前缀名（`map_insert`/`byte_len`/`cursor_next`…）整体退役**：迁移完成后从
   全局命名空间删除。编译器内建保留**内部**实现（intrinsic），但公开拼写只有模块名。
 - prelude 收缩到真正的高频核：`println`、`map/filter/fold/range/len/get`、
+  `sort/max/min/max_by/min_by`（排序族迁 std 后保住裸拼写，pure-ffi-design §十四）、
   `Option`/`Result` 构造器、`to_string`、`panic`/`todo`、`java_try`/`catch_panic` 等
   一屏以内；其余一律 `use`。
 

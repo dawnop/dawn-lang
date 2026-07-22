@@ -735,8 +735,6 @@ pub const STRINGS_CLASS: String = "dawn/rt/Strings"
 
 pub const MAPS_CLASS: String = "dawn/rt/Maps"
 
-pub const DICT_CMP_CLASS: String = "dawn/rt/DictComparator"
-
 pub const FN_CMP_CLASS: String = "dawn/rt/FnComparator"
 
 pub const STDSTRINGS_CLASS: String = "dawn/rt/StdStrings"
@@ -822,31 +820,9 @@ pub const ARRAYLIST: String = "java/util/ArrayList"
 
 pub const DAWNLIST_CLASS: String = "dawn/rt/DawnList"
 
-## sort / sort_by / max / min / max_by / min_by for dawn/rt/Lists (docs/trait.md).
+## sortBy for dawn/rt/Lists — the ordering substrate std/list's sort delegates to.
 fn gen_list_ordering(cw: AdtClassWriter) -> Unit !io = {
-  let jlist = "java/util/List"
-  let ord = tr_iface(None, "Ord")
-  # sort(List xs, Object ordDict) -> List — stable (TimSort under the hood)
-  let so = cw.method(ACC_PUBLIC + ACC_STATIC, "sort",
-    "(Ljava/util/List;Ljava/lang/Object;)Ljava/util/List;").expect("mv")
-  so.visitCode()
-  so.visitTypeInsn(OP_NEW, ARRAYLIST)
-  so.visitInsn(OP_DUP)
-  so.visitVarInsn(OP_ALOAD, 0)
-  so.visitMethodInsn(OP_INVOKESPECIAL, ARRAYLIST, "<init>", "(Ljava/util/Collection;)V", false)
-  so.visitVarInsn(OP_ASTORE, 2)
-  so.visitVarInsn(OP_ALOAD, 2)
-  so.visitTypeInsn(OP_NEW, DICT_CMP_CLASS)
-  so.visitInsn(OP_DUP)
-  so.visitVarInsn(OP_ALOAD, 1)
-  so.visitTypeInsn(OP_CHECKCAST, ord)
-  so.visitMethodInsn(OP_INVOKESPECIAL, DICT_CMP_CLASS, "<init>", "(L" ++ ord ++ ";)V", false)
-  so.visitMethodInsn(OP_INVOKEVIRTUAL, ARRAYLIST, "sort", "(Ljava/util/Comparator;)V", false)
-  so.visitVarInsn(OP_ALOAD, 2)
-  so.visitInsn(OP_ARETURN)
-  so.visitMaxs(0, 0)
-  so.visitEnd()
-  # sortBy(List xs, Fn2 cmp) -> List
+  # sortBy(List xs, Fn2 cmp) -> List — stable (TimSort under the hood)
   let sb2 = cw.method(ACC_PUBLIC + ACC_STATIC, "sortBy",
     "(Ljava/util/List;L" ++ fn_iface(2) ++ ";)Ljava/util/List;").expect("mv")
   sb2.visitCode()
@@ -866,120 +842,6 @@ fn gen_list_ordering(cw: AdtClassWriter) -> Unit !io = {
   sb2.visitInsn(OP_ARETURN)
   sb2.visitMaxs(0, 0)
   sb2.visitEnd()
-  # best(List xs, Object ordDict, int sign) -> Option — the first extreme element
-  let be = cw.method(ACC_PUBLIC + ACC_STATIC, "best",
-    "(Ljava/util/List;Ljava/lang/Object;I)LOption;").expect("mv")
-  be.visitCode()
-  let b_none = Label.new()
-  be.visitVarInsn(OP_ALOAD, 0)
-  be.visitMethodInsn(OP_INVOKEINTERFACE, jlist, "isEmpty", "()Z", true)
-  be.visitJumpInsn(OP_IFNE, b_none)
-  be.visitVarInsn(OP_ALOAD, 0)
-  be.visitInsn(OP_ICONST_0)
-  be.visitMethodInsn(OP_INVOKEINTERFACE, jlist, "get", "(I)Ljava/lang/Object;", true)
-  be.visitVarInsn(OP_ASTORE, 3)
-  be.visitInsn(OP_ICONST_1)
-  be.visitVarInsn(OP_ISTORE, 4)
-  let b_loop = Label.new()
-  let b_done = Label.new()
-  let b_keep = Label.new()
-  be.visitLabel(b_loop)
-  be.visitVarInsn(OP_ILOAD, 4)
-  be.visitVarInsn(OP_ALOAD, 0)
-  be.visitMethodInsn(OP_INVOKEINTERFACE, jlist, "size", "()I", true)
-  be.visitJumpInsn(OP_IF_ICMPGE, b_done)
-  be.visitVarInsn(OP_ALOAD, 0)
-  be.visitVarInsn(OP_ILOAD, 4)
-  be.visitMethodInsn(OP_INVOKEINTERFACE, jlist, "get", "(I)Ljava/lang/Object;", true)
-  be.visitVarInsn(OP_ASTORE, 5)
-  be.visitVarInsn(OP_ALOAD, 1)
-  be.visitTypeInsn(OP_CHECKCAST, ord)
-  be.visitVarInsn(OP_ALOAD, 5)
-  be.visitVarInsn(OP_ALOAD, 3)
-  be.visitMethodInsn(OP_INVOKEINTERFACE, ord, "cmp",
-    "(Ljava/lang/Object;Ljava/lang/Object;)J", true)
-  be.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Long", "signum", "(J)I", false)
-  be.visitVarInsn(OP_ILOAD, 2)
-  be.visitInsn(OP_IMUL)
-  be.visitJumpInsn(OP_IFLE, b_keep)
-  be.visitVarInsn(OP_ALOAD, 5)
-  be.visitVarInsn(OP_ASTORE, 3)
-  be.visitLabel(b_keep)
-  be.visitIincInsn(4, 1)
-  be.visitJumpInsn(OP_GOTO, b_loop)
-  be.visitLabel(b_done)
-  be.visitTypeInsn(OP_NEW, "Option\$Some")
-  be.visitInsn(OP_DUP)
-  be.visitVarInsn(OP_ALOAD, 3)
-  be.visitMethodInsn(OP_INVOKESPECIAL, "Option\$Some", "<init>", "(Ljava/lang/Object;)V", false)
-  be.visitInsn(OP_ARETURN)
-  be.visitLabel(b_none)
-  be.visitFieldInsn(OP_GETSTATIC, "Option\$None", "INSTANCE", "LOption\$None;")
-  be.visitInsn(OP_ARETURN)
-  be.visitMaxs(0, 0)
-  be.visitEnd()
-  # bestBy(List xs, Fn1 key, Object ordDict, int sign) -> Option — keys cached
-  let bb = cw.method(ACC_PUBLIC + ACC_STATIC, "bestBy",
-    "(Ljava/util/List;L" ++ fn_iface(1) ++ ";Ljava/lang/Object;I)LOption;").expect("mv")
-  bb.visitCode()
-  let y_none = Label.new()
-  bb.visitVarInsn(OP_ALOAD, 0)
-  bb.visitMethodInsn(OP_INVOKEINTERFACE, jlist, "isEmpty", "()Z", true)
-  bb.visitJumpInsn(OP_IFNE, y_none)
-  bb.visitVarInsn(OP_ALOAD, 0)
-  bb.visitInsn(OP_ICONST_0)
-  bb.visitMethodInsn(OP_INVOKEINTERFACE, jlist, "get", "(I)Ljava/lang/Object;", true)
-  bb.visitVarInsn(OP_ASTORE, 4)
-  bb.visitVarInsn(OP_ALOAD, 1)
-  bb.visitVarInsn(OP_ALOAD, 4)
-  bb.visitMethodInsn(OP_INVOKEINTERFACE, fn_iface(1), "apply", erased_apply_desc(1), true)
-  bb.visitVarInsn(OP_ASTORE, 5)
-  bb.visitInsn(OP_ICONST_1)
-  bb.visitVarInsn(OP_ISTORE, 6)
-  let y_loop = Label.new()
-  let y_done = Label.new()
-  let y_keep = Label.new()
-  bb.visitLabel(y_loop)
-  bb.visitVarInsn(OP_ILOAD, 6)
-  bb.visitVarInsn(OP_ALOAD, 0)
-  bb.visitMethodInsn(OP_INVOKEINTERFACE, jlist, "size", "()I", true)
-  bb.visitJumpInsn(OP_IF_ICMPGE, y_done)
-  bb.visitVarInsn(OP_ALOAD, 0)
-  bb.visitVarInsn(OP_ILOAD, 6)
-  bb.visitMethodInsn(OP_INVOKEINTERFACE, jlist, "get", "(I)Ljava/lang/Object;", true)
-  bb.visitVarInsn(OP_ASTORE, 7)
-  bb.visitVarInsn(OP_ALOAD, 1)
-  bb.visitVarInsn(OP_ALOAD, 7)
-  bb.visitMethodInsn(OP_INVOKEINTERFACE, fn_iface(1), "apply", erased_apply_desc(1), true)
-  bb.visitVarInsn(OP_ASTORE, 8)
-  bb.visitVarInsn(OP_ALOAD, 2)
-  bb.visitTypeInsn(OP_CHECKCAST, ord)
-  bb.visitVarInsn(OP_ALOAD, 8)
-  bb.visitVarInsn(OP_ALOAD, 5)
-  bb.visitMethodInsn(OP_INVOKEINTERFACE, ord, "cmp",
-    "(Ljava/lang/Object;Ljava/lang/Object;)J", true)
-  bb.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Long", "signum", "(J)I", false)
-  bb.visitVarInsn(OP_ILOAD, 3)
-  bb.visitInsn(OP_IMUL)
-  bb.visitJumpInsn(OP_IFLE, y_keep)
-  bb.visitVarInsn(OP_ALOAD, 7)
-  bb.visitVarInsn(OP_ASTORE, 4)
-  bb.visitVarInsn(OP_ALOAD, 8)
-  bb.visitVarInsn(OP_ASTORE, 5)
-  bb.visitLabel(y_keep)
-  bb.visitIincInsn(6, 1)
-  bb.visitJumpInsn(OP_GOTO, y_loop)
-  bb.visitLabel(y_done)
-  bb.visitTypeInsn(OP_NEW, "Option\$Some")
-  bb.visitInsn(OP_DUP)
-  bb.visitVarInsn(OP_ALOAD, 4)
-  bb.visitMethodInsn(OP_INVOKESPECIAL, "Option\$Some", "<init>", "(Ljava/lang/Object;)V", false)
-  bb.visitInsn(OP_ARETURN)
-  bb.visitLabel(y_none)
-  bb.visitFieldInsn(OP_GETSTATIC, "Option\$None", "INSTANCE", "LOption\$None;")
-  bb.visitInsn(OP_ARETURN)
-  bb.visitMaxs(0, 0)
-  bb.visitEnd()
   ()
 }
 
@@ -1615,8 +1477,8 @@ pub fn owner_prefix(owner: Option[String]) -> String =
 pub fn tr_iface(owner: Option[String], name: String) -> String =
   "dawn/tr/" ++ owner_prefix(owner) ++ name
 
-## A java.util.Comparator over a Dawn ordering source; emit_cmp receives
-## (source, a, b) on the stack and leaves the long comparison result.
+## A java.util.Comparator over a Dawn two-argument cmp function; emit_cmp
+## receives (source, a, b) on the stack and leaves the long comparison result.
 fn gen_comparator_class(
   supers: List[String],
   cls: String,
@@ -1649,15 +1511,6 @@ fn gen_comparator_class(
   m.visitEnd()
   cw.visitEnd()
   cw.toByteArray().expect("bytes")
-}
-
-pub fn gen_dict_comparator(supers: List[String]) -> Bytes !io = {
-  let ord = tr_iface(None, "Ord")
-  gen_comparator_class(supers, DICT_CMP_CLASS, "L" ++ ord ++ ";", fn(m: MethodVisitor) => {
-    m.visitMethodInsn(OP_INVOKEINTERFACE, ord, "cmp",
-      "(Ljava/lang/Object;Ljava/lang/Object;)J", true)
-    ()
-  })
 }
 
 pub fn gen_fn_comparator(supers: List[String]) -> Bytes !io =

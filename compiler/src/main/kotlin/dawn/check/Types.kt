@@ -376,21 +376,11 @@ val BUILTINS: Map<String, FnSig> = run {
             Type.TAdt(OPTION_ADT, listOf(t)), Eff.Pure, isBuiltin = true, typeParams = listOf(t)),
         FnSig("range", listOf(Type.TInt, Type.TInt), listOf("from", "to"),
             Type.TList(Type.TInt), Eff.Pure, isBuiltin = true),
-        // core/list ordering (docs/trait.md): Ord-bounded builtins take witnesses like any call
-        FnSig("sort", listOf(list(t)), listOf("xs"), list(t), Eff.Pure, isBuiltin = true,
-            typeParams = listOf(t), constraints = listOf(listOf(ORD_TRAIT))),
+        // core/list ordering: only the Fn2-taking substrate remains a builtin —
+        // sort/max/min/max_by/min_by live in std/list, handing it the bound `cmp`
+        // as a captured lambda (docs/pure-ffi-design.md section 14)
         FnSig("sort_by", listOf(list(t), Type.TFn(listOf(t, t), Type.TInt, e)), listOf("xs", "cmp"),
             list(t), e, isBuiltin = true, typeParams = listOf(t)),
-        FnSig("max", listOf(list(t)), listOf("xs"), opt(t), Eff.Pure, isBuiltin = true,
-            typeParams = listOf(t), constraints = listOf(listOf(ORD_TRAIT))),
-        FnSig("min", listOf(list(t)), listOf("xs"), opt(t), Eff.Pure, isBuiltin = true,
-            typeParams = listOf(t), constraints = listOf(listOf(ORD_TRAIT))),
-        FnSig("max_by", listOf(list(t), Type.TFn(listOf(t), k, e)), listOf("xs", "key"),
-            opt(t), e, isBuiltin = true, typeParams = listOf(t, k),
-            constraints = listOf(emptyList(), listOf(ORD_TRAIT))),
-        FnSig("min_by", listOf(list(t), Type.TFn(listOf(t), k, e)), listOf("xs", "key"),
-            opt(t), e, isBuiltin = true, typeParams = listOf(t, k),
-            constraints = listOf(emptyList(), listOf(ORD_TRAIT))),
         // core/list, cont. (common combinators): first match, prefix/suffix, reversal
         // core/option (spec §11)
         FnSig("expect", listOf(Type.TAdt(OPTION_ADT, listOf(t)), Type.TString), listOf("o", "msg"),

@@ -70,7 +70,10 @@ object StdLib {
      * The std names that stay implicitly visible without a `use` — the prelude's
      * std half (docs/stdlib-naming.md). Every other std name is module-qualified.
      */
-    val PRELUDE: Set<String> = setOf("println", "print", "map", "filter", "fold")
+    val PRELUDE: Set<String> = setOf(
+        "println", "print", "map", "filter", "fold",
+        "sort", "max", "min", "max_by", "min_by",
+    )
 
     /**
      * Builtins with no public spelling (docs/stdlib-naming.md): the container and

@@ -511,20 +511,7 @@ pub fn builtins() -> Map[String, Sig] = {
     tp1(bsig("len", [TyList(t)], ["xs"], TyInt), t),
     tp1(bsig("get", [TyList(t), TyInt], ["xs", "i"], opt_ty(t)), t),
     bsig("range", [TyInt, TyInt], ["from", "to"], TyList(TyInt)),
-    Sig { ..tp1(bsig("sort", [TyList(t)], ["xs"], TyList(t)), t), constraints: [[ORD_ID]] },
     eff1(tp1(bsig("sort_by", [TyList(t), TyFn([t, t], TyInt, e)], ["xs", "cmp"], TyList(t)), t), e),
-    Sig { ..tp1(bsig("max", [TyList(t)], ["xs"], opt_ty(t)), t), constraints: [[ORD_ID]] },
-    Sig { ..tp1(bsig("min", [TyList(t)], ["xs"], opt_ty(t)), t), constraints: [[ORD_ID]] },
-    Sig {
-      ..eff1(bsig("max_by", [TyList(t), TyFn([t], k, e)], ["xs", "key"], opt_ty(t)), e),
-      tparams: [t, k],
-      constraints: [[], [ORD_ID]]
-    },
-    Sig {
-      ..eff1(bsig("min_by", [TyList(t), TyFn([t], k, e)], ["xs", "key"], opt_ty(t)), e),
-      tparams: [t, k],
-      constraints: [[], [ORD_ID]]
-    },
     tp1(bsig("expect", [opt_ty(t), TyString], ["o", "msg"], t), t),
     tp1(bsig("unwrap_or", [opt_ty(t), t], ["o", "fallback"], t), t),
     tp1(bsig("to_string", [t], ["x"], TyString), t),
@@ -667,8 +654,11 @@ test "builtin table renders signatures" {
   let adts = prelude_adts()
   let traits = prelude_traits()
   let bs = builtins()
-  match map.get(bs, "sort") {
-    Some(s) -> { assert sig_render(adts, traits, s) == "fn sort[T: Ord](xs: List[T]) -> List[T]" }
+  match map.get(bs, "sort_by") {
+    Some(s) -> {
+      assert sig_render(adts, traits, s) ==
+        "fn sort_by[T](xs: List[T], cmp: fn(T, T) -> Int !e) -> List[T] !e"
+    }
     None -> { assert false }
   }
   match map.get(bs, "java_try") {
@@ -685,7 +675,7 @@ test "builtin table renders signatures" {
     }
     None -> { assert false }
   }
-  assert map_size2(bs) == 51
+  assert map_size2(bs) == 46
 }
 
 fn map_size2(m: Map[String, Sig]) -> Int = map.size(m)

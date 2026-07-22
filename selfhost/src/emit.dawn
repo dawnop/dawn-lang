@@ -47,7 +47,7 @@ use codegen.{
   OP_IADD, OP_LADD, OP_ISUB, OP_IMUL, OP_IXOR, OP_LXOR, OP_LNEG, OP_DNEG,
   OP_BIPUSH, OP_ARRAYLENGTH,
   PANIC_CLASS, UNIT_CLASS, SB, SHOW_CLASS, BYTES_CLASS, IO_CLASS,
-  LISTS_CLASS, STRINGS_CLASS, MAPS_CLASS, DICT_CMP_CLASS, FN_CMP_CLASS,
+  LISTS_CLASS, STRINGS_CLASS, MAPS_CLASS, FN_CMP_CLASS,
   STDSTRINGS_CLASS, ARRAYLIST, DAWNLIST_CLASS
 }
 use jreflect
@@ -2266,30 +2266,10 @@ fn gen_builtin_call(g: Gen, name: String, args: List[TExpr], wits: List[WitRef],
     let g1 = gen_args_plain(g, args)
     g1.mv.visitMethodInsn(OP_INVOKESTATIC, LISTS_CLASS, "range", "(JJ)Ljava/util/List;", false)
     (g1, true)
-  } else if name == "sort" {
-    let (g1, _) = gen_expr(g, args[0], false)
-    push_witness(g1, wits[0])
-    g1.mv.visitMethodInsn(OP_INVOKESTATIC, LISTS_CLASS, "sort",
-      "(Ljava/util/List;Ljava/lang/Object;)Ljava/util/List;", false)
-    (g1, true)
   } else if name == "sort_by" {
     let g1 = gen_args_plain(g, args)
     g1.mv.visitMethodInsn(OP_INVOKESTATIC, LISTS_CLASS, "sortBy",
       "(Ljava/util/List;L" ++ fn_iface(2) ++ ";)Ljava/util/List;", false)
-    (g1, true)
-  } else if name == "max" || name == "min" {
-    let (g1, _) = gen_expr(g, args[0], false)
-    push_witness(g1, wits[0])
-    g1.mv.visitInsn(if name == "max" { OP_ICONST_1 } else { OP_ICONST_M1 })
-    g1.mv.visitMethodInsn(OP_INVOKESTATIC, LISTS_CLASS, "best",
-      "(Ljava/util/List;Ljava/lang/Object;I)LOption;", false)
-    (g1, true)
-  } else if name == "max_by" || name == "min_by" {
-    let g1 = gen_args_plain(g, args)
-    push_witness(g1, wits[0])
-    g1.mv.visitInsn(if name == "max_by" { OP_ICONST_1 } else { OP_ICONST_M1 })
-    g1.mv.visitMethodInsn(OP_INVOKESTATIC, LISTS_CLASS, "bestBy",
-      "(Ljava/util/List;L" ++ fn_iface(1) ++ ";Ljava/lang/Object;I)LOption;", false)
     (g1, true)
   } else if name == "expect" {
     var g1 = gen_args_plain(g, args)

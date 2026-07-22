@@ -552,20 +552,49 @@ argv 通过 `PUTSTATIC <程序自己的入口类>.dawn$args` 到达程序,而 st
 `java -jar` 产物自洽(print/read/write/list/args 逐条跑过),错误串与旧实现对拍一致。
 **builtin 表 49 → 42,std 60。**
 
-## 十四、批 C 勘察（2026-07-22）：剩下的不是搬运，是三个设计题
+## 十四、批 C 勘察与排序族迁移（2026-07-22）
 
-对着现表（42 个）核对，可机械迁移的批次已经打完。剩余分三类，每类卡在一个真实的结上：
+> 本节初版把两组 builtin 捏合记错了（写成「容器组是 witnessed builtin」）。对着代码
+> 逐条重核后更正如下，并当场迁掉了真正 witnessed 的那一组。
 
-1. **容器组（`map_*`/`set_*`，16 个）是 witnessed builtin**：调用点由 codegen 注入
-   Ord 字典、`NEW DictComparator` 包成 Comparator（`CodeGen.kt:1505`）。std 源码
-   **没有「把当前 bound 的字典物化成值」的表达手段**——迁移要么给语言加这个能力，
-   要么改 `DawnMap`/`DawnSet` 直接收 `Fn2`（SAM 桥）+ std 侧用 lambda 包 bound 方法。
-   两条都是设计决策 + 运行时类改动，不是一行 `unsafe_pure` 转发。
-2. **`args` 与模块类布线耦合**：读的是**当前模块类**自己的 `dawn$args` 静态字段
-   （`:2842`），字段由 `genJvmMain` 注入。std 层复刻需要一个全局 args 载体
-   （运行时类新增 + 双编译器同步 + vendored 清单扩一格）。
-3. **cursor 家族是有意的核邻**：不透明类型契约靠 builtin 边界撑着（spec §9.5.2），
-   按 P0.6 的裁决留在表里。
+### 事实更正：谁在用 Ord 字典
 
-结论：**批 C 单独成一场**（冻结后所有改动 Kotlin/selfhost 两边同做、金样互拍守护），
-入场券是先定容器组走哪条路。本轮不动。42 → 4 的终局不变，但从这里起每一步都是设计。
+- **容器组（`map_*`/`set_*`，17 个）不带任何约束**：运行时 `DawnMap`/`DawnSet` 是
+  哈希 HAMT，走 Java 侧 `equals/hashCode`，与 Ord 无关。它们的真结在别处：
+  Dawn 的 `Map[K,V]`/`Set[T]` **没有 interop 桥**（spec §9.6 只桥 List，且元素限
+  标量/String/Java 类），`unsafe_pure` 转发根本无法把容器值递给 Java helper。
+  要迁就得扩 §9.6 的 FFI 表面（全体用户代码跟着变宽）；纯 Dawn 重写则要么新增
+  hash 原语（表净增）要么给 key 加 Ord 约束（破坏类型契约）。**裁决：与 cursor
+  同类——「持有表示的 intrinsic」，留在表里**；公开拼写本来就是 std/map、std/set。
+- **真正 witnessed 的是排序族**（`sort/max/min/max_by/min_by`，Ord 约束 +
+  调用点注入字典）。当时设想的两条路：①「字典物化」= 给语言加「把 bound 字典
+  拿到手当值」的内建（新语言表面，spec 承诺 + 双编译器 + comptime 全要动）；
+  ②「lambda 捕获」= std 用 `fn(a, b) => cmp(a, b)` 包住 bound 的 cmp 传给收
+  `Fn2` 的 `sort_by`。实测 ② **今天就能写**——lambda 捕获 enclosing 函数的字典
+  是既有机制，零语言改动、零运行时 API 改动。①的唯一优势（运行时路径逐字节不变）
+  换不回它的代价，弃。
+
+### 排序族迁移（已落地，双编译器同做）
+
+- `sort` = `sort_by(xs, fn(a, b) => cmp(a, b))`（TimSort 与稳定性原样保留）；
+  `max_by/min_by` = 纯 Dawn 单遍 fold，**key 每元素恰好一次、严格更优才换（先者胜）**
+  ——两条都是可观测语义（效应 key/并列），从退役的 `bestBy` 逐条抄来；比较方向用
+  Bool 不用 ±1 乘子（`cmp` 只约定符号不约定幅度，乘会溢出）。`max/min` = 恒等 key
+  的 `*_by`。
+- **拼写零变动**：五个名字进 `StdLib.PRELUDE`（批 B 的 map/filter/fold 同路），
+  裸调用照旧，全仓调用点一处未改。
+- 删掉的东西：5 个表项、两边 codegen 的三条臂、`Lists.sort/best/bestBy`、
+  `DictComparator` 类（emitted 类 442→441）。`sort_by` 留作底座（`Fn2` 版仍是
+  builtin：泛型元素过不了 §9.6 的桥，FFI 化无从谈起）。
+- comptime 行为不变：带 witnesses 的调用在调用点被拒（消息同前），std 体内的
+  `cmp` 走不到。
+- 验收：Kotlin 1289 测试**零测试改动**全绿；selfhost 118；四层金样 + fixpoint
+  （441 类）+ standalone 闭包 + fmt/run-diff 全绿。
+
+### 终局数字修订
+
+现表 **46** = 容器 17 + cursor 族 9 + interop/效应核心 4（`args/java_try/cast/
+catch_panic`）+ 杂项核心 15 + `sort_by`。其中容器与 cursor 是合法的表示持有者
+（26 个不再是债），`args` 仍卡在模块类布线（`dawn$args` 静态字段，`:2842`），
+其余多为表示原语（`len/get/to_string/…`）。**「42→4」的旧目标作废**：批 C 的
+实际残余是「要不要为 `args` 做全局载体」这一个小题，builtin 表的瘦身到此收敛。

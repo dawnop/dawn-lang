@@ -988,7 +988,7 @@ use java "java.lang.Math"      # Java 互操作（§9），形式不变
 由限定或选择性引入消歧。
 
 **prelude** 是其中隐式可用、无需 `use` 的高频核：`List`/`Option`/`Result` 的构造器、
-`println`/`print`、`map`/`filter`/`fold`、内建的 `len`/`get`/`range`/`sort` 族/
+`println`/`print`、`map`/`filter`/`fold`、`sort` 族（std/list）、内建的 `len`/`get`/`range`/
 `to_string`/`join`/`parse_*`/`panic`/`todo`/`expect`/`unwrap_or`/`cast`/
 `java_try`/`catch_panic`/`args` 等一屏以内（全集见 `dawn doc --builtins`）。
 

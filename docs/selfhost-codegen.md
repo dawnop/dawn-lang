@@ -65,7 +65,7 @@ Kotlin CodeGen 从 checked AST 读的注解，逐一映射到 TAST：
 
 - generateProgram：programAdts = prelude + 各单元 types；先 emitShared（一次），
   再逐单元 emitModule。emitShared：prelude ADT 类 + prelude trait 接口 + prelude
-  Ord impls + DictComparator/FnComparator + Panic/Unit/Lists/Strings/Bytes/Io/Show/
+  Ord impls + FnComparator + Panic/Unit/Lists/Strings/Bytes/Io/Show/
   Maps + Fn0..8 + Tuple2..8 + emitStd（vendored rt 家族 + std 模块逐个 emitModule）。
 - 类名：module → className（loader 清洗）；ADT → a.jvmName；ctor → c.jvmName；
   tuple → dawn/rt/TupleN；fn 接口 → dawn/rt/FnN（apply erased Object）。
@@ -152,7 +152,7 @@ Kotlin CodeGen 从 checked AST 读的注解，逐一映射到 TAST：
 - ✅ P4-4 第一批发射器字节级一致：Fn0..8、Tuple2..8、PanicError、Unit（18/65 类，
   scripts/selfhost-emit-diff.sh 子集模式，`selfhost emitrt -o dir`；运行 selfhost
   要把 compiler/build/libs/dawn.jar 挂 classpath——AdtClassWriter 在编译器 jar 里）。
-- ✅ P4-5 Bytes/Io/DictComparator/FnComparator/dawn/tr/Ord/prelude Ord impls
+- ✅ P4-5 Bytes/Io/FnComparator/dawn/tr/Ord/prelude Ord impls
   字节级一致（26/65）。Kotlin genBytesClass/genIoClass 的 doc 注释是旧的——实际
   只有 concat 和 javaTry/catchPanic，以字节对拍为准。
 - ✅ P4-6 Show/Lists/Strings/Maps + vendored rt 字节拷贝（vendor.dawn：从
