@@ -21,6 +21,8 @@ use stdlib
 use analyze.{CheckedMod, load_directory, load_file, analyze_program}
 use vendor
 use jarw
+use fmt
+use java "java.lang.System"
 use std/set
 use codegen.{
   fn_iface, tuple_class, gen_fn_interface, gen_tuple_class, gen_panic_class,
@@ -321,6 +323,65 @@ fn run_build(rest: List[String]) -> Unit !io = {
   println("wrote " ++ out ++ " (" ++ to_string(len(all)) ++ " classes)")
 }
 
+## Every .dawn file under `dir`, recursively; paths are `dir`-prefixed.
+fn dawn_files_under(dir: String) -> List[String] !io = {
+  var out: List[String] = []
+  match io.list_dir(dir) {
+    Ok(files) -> {
+      for f in files {
+        let p = dir ++ "/" ++ f
+        if io.is_dir(p) {
+          out = out ++ dawn_files_under(p)
+        } else if str.ends_with(f, ".dawn") {
+          out = out ++ [p]
+        }
+      }
+    }
+    Err(e) -> panic("cannot list " ++ dir ++ ": " ++ e)
+  }
+  out
+}
+
+## `selfhost fmt [--check] <file.dawn | dir>...` — mirror of `dawn fmt`:
+## reformat in place, or report unformatted files and exit 1.
+fn run_fmt(rest: List[String]) -> Unit !io = {
+  var check = false
+  var paths: List[String] = []
+  for a in rest {
+    if a == "--check" { check = true } else { paths = paths ++ [a] }
+  }
+  if len(paths) == 0 { panic("usage: selfhost fmt [--check] <file.dawn | dir>...") }
+  var files: List[String] = []
+  for p in paths {
+    if io.is_dir(p) {
+      files = files ++ sort(dawn_files_under(p))
+    } else {
+      files = files ++ [p]
+    }
+  }
+  var unformatted = 0
+  for f in files {
+    match io.read_file(f) {
+      Ok(original) -> {
+        let formatted = fmt.format(original)
+        if formatted != original {
+          if check {
+            println(f)
+            unformatted = unformatted + 1
+          } else {
+            match io.write_file(f, formatted) {
+              Ok(_) -> println("formatted " ++ f)
+              Err(e) -> panic("cannot write " ++ f ++ ": " ++ e)
+            }
+          }
+        }
+      }
+      Err(e) -> panic("cannot read " ++ f ++ ": " ++ e)
+    }
+  }
+  if check && unformatted > 0 { let _ = System.exit(1) }
+}
+
 fn run_check(rest: List[String]) -> Unit !io = {
   var std_dir = "compiler/src/main/resources/std"
   var targets: List[String] = []
@@ -356,6 +417,8 @@ pub fn main() -> Unit !io = {
         run_emitrt(rest)
       } else if mode == "build" {
         run_build(rest)
+      } else if mode == "fmt" {
+        run_fmt(rest)
       } else {
         for pth in rest {
           println("== " ++ pth ++ " ==")

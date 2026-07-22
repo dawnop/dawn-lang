@@ -1,0 +1,247 @@
+# The Dawn formatter, in Dawn — a faithful port of dawn.fmt.Formatter
+# (compiler/src/main/kotlin/dawn/fmt/Formatter.kt). A token-stream reformatter:
+# re-lex the source (collecting comments), reprint every token verbatim from
+# its source span, and change only the whitespace between tokens — intra-line
+# spacing, 2-space indentation, blank-line collapsing. The author's physical
+# line breaks are preserved, so formatting is token-preserving and idempotent,
+# and only needs a successful lex.
+#
+# The Kotlin original keys its unary-minus and postfix-bang sets on Token
+# object identity; here a token is identified by its span start (`lo`), which
+# is unique per token in a file.
+
+use std/str
+use std/list
+use std/set
+use lexer
+use token.{
+  Token, TokKind,
+  INT, FLOAT, STRING, IDENT, TYPEIDENT, UNDERSCORE, NEWLINE, EOF, COMMENT,
+  USE, ELSE, FN, TRUE, FALSE, NOT,
+  LPAREN, RPAREN, LBRACE, RBRACE, LBRACKET, RBRACKET,
+  COMMA, COLON, DOT, DOTDOT, QUESTION, ARROW, FATARROW,
+  EQ, EQEQ, NEQ, LT, LE, GT, GE,
+  PLUS, MINUS, STAR, SLASH, PERCENT, PLUSPLUS, PIPEGT, PIPE,
+  AMPAMP, PIPEPIPE, AMP, CARET, TILDE, SHL, SHR, USHR,
+  BANG, AT
+}
+
+pub fn format(source: String) -> String = {
+  let (raw, comments, _) = lexer.lex_with_comments(source)
+  var code: List[Token] = []
+  for t in raw {
+    if t.kind != NEWLINE && t.kind != EOF { code = code ++ [t] }
+  }
+  let stream = sort_by(code ++ comments, fn(a: Token, b: Token) => a.lo - b.lo)
+  if len(stream) == 0 { return "" }
+  reflow(source, stream, unary_minus(code), postfix_bang(raw))
+}
+
+## Span starts of MINUS tokens that are unary (prefix), so they hug the
+## following operand.
+fn unary_minus(code: List[Token]) -> Set[Int] = {
+  var out: Set[Int] = set.empty()
+  var i = 0
+  while i < len(code) {
+    if code[i].kind == MINUS {
+      let after_value = i > 0 && is_value_end(code[i - 1].kind)
+      if not after_value { out = set.insert(out, code[i].lo) }
+    }
+    i = i + 1
+  }
+  out
+}
+
+## Span starts of BANG tokens that are the postfix unwrap (`x!`) rather than an
+## effect marker (`-> T !io`). What tells them apart is what comes next: an
+## effect marker names an effect (`!io`) or unions them (`!(e1 | e2)`), while
+## postfix `!` can be followed by neither. Classified over the raw token list
+## because NEWLINE is the separator that proves `foo()!` ends a line.
+fn postfix_bang(raw: List[Token]) -> Set[Int] = {
+  var out: Set[Int] = set.empty()
+  var i = 0
+  while i < len(raw) {
+    if raw[i].kind == BANG {
+      let names_effect = i + 1 < len(raw) && is_effect_start(raw[i + 1].kind)
+      if not names_effect { out = set.insert(out, raw[i].lo) }
+    }
+    i = i + 1
+  }
+  out
+}
+
+fn is_effect_start(k: TokKind) -> Bool = k == IDENT || k == LPAREN
+
+fn reflow(src: String, toks: List[Token], unary: Set[Int], postfix: Set[Int]) -> String = {
+  var out: List[String] = []
+  # indent (in levels) of the line each still-open bracket sits on
+  var openers: List[Int] = []
+  var line_indent = 0
+  var line_first = toks[0]
+  var prev = toks[0]
+  # Last *code* token seen, which is what decides whether a new line continues
+  # the previous one. Tracked apart from `prev` so a comment on its own line is
+  # transparent: a comment cannot end an expression, so the line after it
+  # continues whatever the line before it did.
+  var prev_code = toks[0]
+  var have_prev_code = false
+  var i = 0
+  while i < len(toks) {
+    let t = toks[i]
+    if i == 0 {
+      out = out ++ [text(src, t)]
+    } else {
+      let nl = count_newlines(src, prev.hi, t.lo)
+      if nl == 0 {
+        let on_use_line = line_first.kind == USE
+        if t.kind == COMMENT || space(prev, t, unary, postfix, on_use_line) {
+          out = out ++ [" "]
+        }
+        out = out ++ [text(src, t)]
+      } else {
+        line_first = t
+        # collapse >=2 blank lines to 1
+        out = out ++ [if nl >= 2 { "\n\n" } else { "\n" }]
+        let pl = if have_prev_code { prev_code } else { prev }
+        line_indent = indent_of(t, openers, pl, line_indent, unary)
+        let lvl = if line_indent < 0 { 0 } else { line_indent }
+        out = out ++ [str.repeat("  ", lvl)]
+        out = out ++ [text(src, t)]
+      }
+    }
+    if t.kind != COMMENT {
+      prev_code = t
+      have_prev_code = true
+    }
+    if t.kind == LPAREN || t.kind == LBRACKET || t.kind == LBRACE {
+      openers = openers ++ [line_indent]
+    } else if t.kind == RPAREN || t.kind == RBRACKET || t.kind == RBRACE {
+      if len(openers) > 0 { openers = list.take(openers, len(openers) - 1) }
+    }
+    prev = t
+    i = i + 1
+  }
+  join(out, "") ++ "\n"
+}
+
+## Indent (2-space levels) for a line whose first token is `t`; `prev_line_last`
+## ended the previous line, which sat at `prev_indent`.
+fn indent_of(
+  t: Token,
+  openers: List[Int],
+  prev_line_last: Token,
+  prev_indent: Int,
+  unary: Set[Int]
+) -> Int = {
+  let top = if len(openers) == 0 { -1 } else { openers[len(openers) - 1] }
+  let content = top + 1
+  if is_closer(t.kind) {
+    # align a leading closer with its opener line
+    if len(openers) == 0 { 0 } else { openers[len(openers) - 1] }
+  } else if t.kind == ELSE {
+    # A leading `else` lines up with its `if` rather than nesting under it.
+    prev_indent
+  } else if is_continuation(prev_line_last, t, unary) {
+    content + 1
+  } else {
+    content
+  }
+}
+
+## A leading `-` means two different things: `a\n  - b` wraps a subtraction, so
+## the second line is a continuation, while `{\n  -1\n}` opens an expression
+## and is not. `unary` already tells them apart for spacing.
+fn is_continuation(prev_line_last: Token, line_start: Token, unary: Set[Int]) -> Bool =
+  is_cont_ender(prev_line_last.kind) ||
+  (is_cont_starter(line_start.kind) && not set.has(unary, line_start.lo))
+
+# ---- spacing between two tokens already known to be on the same line ----
+
+fn space(prev: Token, cur: Token, unary: Set[Int], postfix: Set[Int], on_use_line: Bool) -> Bool = {
+  let p = prev.kind
+  let c = cur.kind
+  # a module path prints tight: use greet/words.{Lang, greet} (spec §10.2)
+  if on_use_line && (p == SLASH || c == SLASH || p == LBRACE || c == RBRACE) { return false }
+  # openers hug what follows; closers/commas/colons/? hug what precedes
+  if p == LPAREN || p == LBRACKET { return false }
+  if c == RPAREN || c == RBRACKET { return false }
+  if c == COMMA || c == COLON { return false }
+  if c == QUESTION { return false }
+  # postfix unwrap hugs its operand (`x!`); what follows it takes the normal
+  # rules (`x! != y`, `x!.b()`), unlike the effect marker's tight `!io`
+  if set.has(postfix, cur.lo) { return false }
+  # member access and effect/attribute markers
+  if p == DOT || c == DOT { return false }
+  if p == DOTDOT { return false }
+  if p == BANG && not set.has(postfix, prev.lo) { return false }
+  # `~` is always prefix bitwise-not; it hugs its operand like unary `-`
+  if p == TILDE { return false }
+  if p == AT { return false }
+  # calls / indexing / generics: name(..), name[..], no space before the bracket
+  if c == LPAREN && is_callable_before_paren(p) { return false }
+  if c == LBRACKET && is_value_end(p) { return false }
+  # unary minus hugs its operand
+  if set.has(unary, prev.lo) { return false }
+  true
+}
+
+# ---- helpers ----
+
+fn text(src: String, t: Token) -> String =
+  if t.kind == COMMENT { t.text } else { lexer.utf16_slice(src, t.lo, t.hi) }
+
+fn count_newlines(src: String, from: Int, to: Int) -> Int =
+  len(str.split(lexer.utf16_slice(src, from, to), "\n")) - 1
+
+fn is_closer(k: TokKind) -> Bool = k == RPAREN || k == RBRACKET || k == RBRACE
+
+# BANG ends a value the same way QUESTION does (`x!` unwraps): it keeps `x![0]`
+# tight and makes the `-` in `x! - 1` binary. The effect marker never precedes
+# `[` or `-`.
+fn is_value_end(k: TokKind) -> Bool =
+  k == IDENT || k == TYPEIDENT || k == INT || k == FLOAT || k == STRING ||
+  k == RPAREN || k == RBRACKET || k == TRUE || k == FALSE || k == QUESTION ||
+  k == BANG || k == UNDERSCORE
+
+# BANG is deliberately absent: only an identifier can be called, so `x!(y)` is
+# not a thing — a `(` after `!` is always the effect union `!(e1 | e2)`.
+fn is_callable_before_paren(k: TokKind) -> Bool =
+  k == IDENT || k == TYPEIDENT || k == RPAREN || k == RBRACKET || k == QUESTION || k == FN
+
+# BANG is absent for the same reason as in the lexer's continues_line: a line
+# ending in `!` is a postfix unwrap, and the next line starts a new statement.
+fn is_cont_ender(k: TokKind) -> Bool =
+  k == PLUS || k == MINUS || k == STAR || k == SLASH || k == PERCENT ||
+  k == PLUSPLUS || k == PIPEGT || k == AMPAMP || k == PIPEPIPE ||
+  k == AMP || k == CARET || k == SHL || k == SHR || k == USHR ||
+  k == EQEQ || k == NEQ || k == LT || k == LE || k == GT || k == GE ||
+  k == ARROW || k == FATARROW || k == EQ || k == DOT || k == NOT
+
+fn is_cont_starter(k: TokKind) -> Bool =
+  k == PIPEGT || k == DOT || k == PIPE || k == PLUS || k == MINUS || k == STAR ||
+  k == SLASH || k == PERCENT || k == PLUSPLUS || k == AMPAMP || k == PIPEPIPE ||
+  k == AMP || k == CARET || k == SHL || k == SHR || k == USHR ||
+  k == EQEQ || k == NEQ || k == LT || k == LE || k == GT || k == GE
+
+test "formatting is idempotent and fixes indentation" {
+  let src = "fn f(x: Int) -> Int =\nmatch x {\n0 -> 1\n_ -> 2\n}\n"
+  let once = format(src)
+  assert once == "fn f(x: Int) -> Int =\n  match x {\n    0 -> 1\n    _ -> 2\n  }\n"
+  assert format(once) == once
+}
+
+test "a comment between the arrow and the body is transparent" {
+  let src = "fn f(x: Int) -> Int =\n  match x {\n    0 -> 1\n    _ ->\n      # why\n      2\n  }\n"
+  assert format(src) == src
+}
+
+test "a leading else aligns with its if" {
+  let src = "fn f(b: Bool) -> Int =\n  if b { 1 }\n  else { 2 }\n"
+  assert format(src) == src
+}
+
+test "use paths print tight and unary minus hugs" {
+  assert format("use std/list.{ take , drop }\n") == "use std/list.{take, drop}\n"
+  let src = "fn f() -> Int = { -1 }\n"
+  assert format(src) == src
+}

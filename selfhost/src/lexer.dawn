@@ -13,7 +13,7 @@ use std/str
 use std/list
 use token.{
   TokKind, Token, Seg, SText, SCode, Diag, keyword, kind_name,
-  INT, FLOAT, STRING, IDENT, TYPEIDENT, UNDERSCORE, NEWLINE, EOF,
+  INT, FLOAT, STRING, IDENT, TYPEIDENT, UNDERSCORE, NEWLINE, EOF, COMMENT,
   LPAREN, RPAREN, LBRACE, RBRACE, LBRACKET, RBRACKET,
   COMMA, COLON, DOT, DOTDOT, QUESTION, ARROW, FATARROW,
   EQ, EQEQ, NEQ, LT, LE, GT, GE,
@@ -146,9 +146,21 @@ pub fn lex(text: String) -> (List[Token], List[Diag]) = lex_at(text, 0)
 ## Lex with a base offset added to every span — for re-lexing an interpolation
 ## segment in place (the Kotlin Lexer's baseOffset).
 pub fn lex_at(text: String, base: Int) -> (List[Token], List[Diag]) = {
+  let (toks, _, diags) = lex_go(text, base, false)
+  (toks, diags)
+}
+
+## Like `lex`, but also returns the comment tokens `lex` drops — the extra
+## channel the formatter needs (the Kotlin Lexer's commentSink). A comment's
+## text and span exclude trailing whitespace before the newline.
+pub fn lex_with_comments(text: String) -> (List[Token], List[Token], List[Diag]) =
+  lex_go(text, 0, true)
+
+fn lex_go(text: String, base: Int, collect: Bool) -> (List[Token], List[Token], List[Diag]) = {
   let s = src_of(text, base)
   var i = 0
   var toks: List[Token] = []
+  var comments: List[Token] = []
   var diags: List[Diag] = []
   while i < s.n {
     let c = s.cps[i]
@@ -160,7 +172,16 @@ pub fn lex_at(text: String, base: Int) -> (List[Token], List[Diag]) = {
     } else if c == ' ' || c == '\t' || c == 13 {
       i = i + 1
     } else if c == '#' {
+      let i0 = i
       while i < s.n && s.cps[i] != '\n' { i = i + 1 }
+      if collect {
+        var e = i
+        while e > i0 && (s.cps[e - 1] == ' ' || s.cps[e - 1] == '\t' || s.cps[e - 1] == 13) {
+          e = e - 1
+        }
+        let ctext = utf16_slice(text, off(s, i0) - s.base, off(s, e) - s.base)
+        comments = comments ++ [tok(COMMENT, ctext, off(s, i0), off(s, e))]
+      }
     } else if c == '"' || c == '`' || c == '\'' {
       let r = if c == '"' {
         lex_string(s, i)
@@ -207,7 +228,7 @@ pub fn lex_at(text: String, base: Int) -> (List[Token], List[Diag]) = {
     toks = toks ++ [tok(NEWLINE, "\\n", l, l + 1)]
   }
   toks = toks ++ [tok(EOF, "<eof>", l, l + 1)]
-  (toks, diags)
+  (toks, comments, diags)
 }
 
 ## The characters of `text` whose UTF-16 offsets fall inside [lo, hi) — the
