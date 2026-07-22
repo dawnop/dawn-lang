@@ -22,6 +22,7 @@ import java.io.File
 class Manifest(
     val name: String,
     val javaDeps: List<MavenCoord>,
+    val deps: List<SrcDep>,
     val file: File,
 ) {
     companion object {
@@ -94,7 +95,7 @@ class Manifest(
                         name = v.value
                     }
                     else -> sink.error("unknown key `${e.key}` in dawn.toml", e.keySpan,
-                        "dawn.toml schema $SCHEMA has `schema`, `name`, and the `[java-deps]` table")
+                        "dawn.toml schema $SCHEMA has `schema`, `name`, and the `[java-deps]`/`[deps]` tables")
                 }
             }
             if (name == null) {
@@ -104,9 +105,32 @@ class Manifest(
             }
 
             for (t in doc.tableNames().distinct()) {
-                if (t != "java-deps")
+                if (t != "java-deps" && t != "deps")
                     sink.error("unknown table `[$t]` in dawn.toml", doc.header(t)!!.nameSpan,
-                        "dawn.toml schema $SCHEMA has only `[java-deps]`")
+                        "dawn.toml schema $SCHEMA has `[java-deps]` and `[deps]`")
+            }
+
+            // [deps]: Dawn source packages (docs/package-design.md 项目 B). v1 takes a
+            // local path string per alias; the url+hash form arrives with versioning.
+            val srcDeps = ArrayList<SrcDep>()
+            for (e in doc.table("deps")) {
+                val v = e.value
+                if (v !is TomlStr) {
+                    sink.error("`${e.key}` must be a path string", v.span,
+                        "write `${e.key} = \"../packages/${e.key}\"` (a directory containing dawn.toml + src/)")
+                    continue
+                }
+                if (!NAME.matches(e.key)) {
+                    sink.error("invalid dependency alias `${e.key}`", e.keySpan,
+                        "aliases are lowercase identifiers: [a-z_][a-z0-9_]*")
+                    continue
+                }
+                if (srcDeps.any { it.alias == e.key }) {
+                    sink.error("dependency `${e.key}` is declared twice", e.keySpan, null)
+                    continue
+                }
+                val dir = File(v.value).let { if (it.isAbsolute) it else File(file.parentFile, v.value) }
+                srcDeps.add(SrcDep(e.key, dir, v.span))
             }
 
             val deps = ArrayList<MavenCoord>()
@@ -128,10 +152,19 @@ class Manifest(
                         "one version per artifact; drop all but one")
             }
 
-            return Manifest(name, deps, file)
+            return Manifest(name, deps, srcDeps, file)
         }
     }
 }
+
+/**
+ * A `[deps]` entry: a Dawn source package at a local directory (its dawn.toml +
+ * src/ tree). The alias must equal the package's own manifest name — the alias
+ * IS the namespace consumers write (`use <alias>/<module>`), and letting it
+ * drift from the package identity would make one package compile under two
+ * names (docs/package-design.md §4.3 keeps aliasing as future local sugar).
+ */
+class SrcDep(val alias: String, val dir: File, val span: Span)
 
 /**
  * An exact Maven coordinate. Ranges and SNAPSHOTs are rejected: with exact versions

@@ -318,7 +318,11 @@ class ManifestTest {
     @Test
     fun `unknown keys and tables are rejected`(@TempDir dir: File) {
         assertContains(manifest(dir, "schema = 1\nname = \"x\"\nnope = 1\n").second.first(), "unknown key `nope`")
-        assertContains(manifest(dir, "schema = 1\nname = \"x\"\n[deps]\na = \"b\"\n").second.first(), "unknown table `[deps]`")
+        assertContains(manifest(dir, "schema = 1\nname = \"x\"\n[nope]\na = \"b\"\n").second.first(), "unknown table `[nope]`")
+        // [deps] is legal since 项目 B v1: a path string per alias
+        val (m, errs) = manifest(dir, "schema = 1\nname = \"x\"\n[deps]\nweb = \"../web\"\n")
+        assertTrue(errs.isEmpty(), errs.joinToString("\n"))
+        assertEquals("web", m!!.deps.single().alias)
     }
 
     // ---- coordinate validation (§A.4): the reproducibility rules ----

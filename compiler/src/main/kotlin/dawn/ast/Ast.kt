@@ -187,7 +187,8 @@ class ImportName(val name: String, val span: Span)
  * (spec §10) The module path segments are lowercase identifiers.
  */
 class UseModuleDecl(
-    val segments: List<String>,
+    /** var: the loader canonicalizes package-internal paths to the alias-qualified spelling */
+    var segments: List<String>,
     /** null = whole-module import; non-null (possibly empty is a parse error) = selective */
     val selective: List<ImportName>?,
     span: Span,

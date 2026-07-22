@@ -8,6 +8,7 @@ import dawn.diag.Severity
 import dawn.diag.SourceFile
 import dawn.diag.Span
 import dawn.lex.Lexer
+import dawn.manifest.Manifest
 import dawn.parse.Parser
 import java.io.File
 
@@ -22,7 +23,12 @@ class ModuleFile(
     val source: SourceFile,
     val module: Module,
     val diagnostics: List<Diagnostic>,
+    /** the source package this module came from via `[deps]`; null = the project's own tree */
+    val pkg: PkgInfo? = null,
 )
+
+/** A resolved `[deps]` package: its manifest name and its src/ root. */
+class PkgInfo(val name: String, val srcRoot: File)
 
 /** A diagnostic paired with the source file it should be rendered against. */
 class LocatedDiag(val source: SourceFile, val diag: Diagnostic)
@@ -66,7 +72,64 @@ object ModuleLoader {
         }
         // load every module under src/ (spec §10.5: unreferenced modules are still checked)
         val allFiles = root.walkTopDown().filter { it.isFile && it.extension == "dawn" }.sortedBy { it.path }
-        return resolve(root, allFiles.toList(), diags)
+        return resolve(root, allFiles.toList(), diags, pkgs = resolveSrcDeps(dir, diags))
+    }
+
+    /**
+     * `[deps]` → alias → package. Each dependency directory must carry a dawn.toml
+     * whose `name` equals the alias; package modules load from its src/ on demand
+     * (a library has no entry module and its unused modules are not checked).
+     * v1 fences: a dependency may not have `[deps]` of its own (no transitive
+     * packages yet) nor `[java-deps]` (not merged into the consumer's class path yet).
+     */
+    private fun resolveSrcDeps(dir: File, diags: ArrayList<LocatedDiag>): Map<String, PkgInfo> {
+        val mfFile = Manifest.locate(dir) ?: return emptyMap()
+        val source = SourceFile(mfFile.path, mfFile.readText())
+        val sink = DiagnosticSink()
+        val manifest = Manifest.parse(mfFile, source, sink)
+        for (d in sink.all) diags.add(LocatedDiag(source, d))
+        if (manifest == null) return emptyMap()
+        val out = LinkedHashMap<String, PkgInfo>()
+        for (dep in manifest.deps) {
+            val depMf = Manifest.locate(dep.dir)
+            if (depMf == null) {
+                diags.add(LocatedDiag(source, Diagnostic(
+                    "dependency `${dep.alias}` has no dawn.toml (looked in ${dep.dir.path})", dep.span,
+                    "a Dawn source package is a directory with dawn.toml (name = \"${dep.alias}\") and src/")))
+                continue
+            }
+            val depSource = SourceFile(depMf.path, depMf.readText())
+            val depSink = DiagnosticSink()
+            val dm = Manifest.parse(depMf, depSource, depSink)
+            for (d in depSink.all) diags.add(LocatedDiag(depSource, d))
+            if (dm == null) continue
+            if (dm.name != dep.alias) {
+                diags.add(LocatedDiag(source, Diagnostic(
+                    "dependency alias `${dep.alias}` does not match the package's name `${dm.name}`", dep.span,
+                    "the alias must equal the package's manifest name; rename one of them")))
+                continue
+            }
+            if (dm.deps.isNotEmpty()) {
+                diags.add(LocatedDiag(source, Diagnostic(
+                    "package `${dm.name}` has `[deps]` of its own — transitive packages are not supported yet",
+                    dep.span, null)))
+                continue
+            }
+            if (dm.javaDeps.isNotEmpty()) {
+                diags.add(LocatedDiag(source, Diagnostic(
+                    "package `${dm.name}` has `[java-deps]` — a dependency's jars are not merged yet",
+                    dep.span, "declare the jars in the consuming project's [java-deps] for now")))
+                continue
+            }
+            val srcRoot = File(dep.dir, "src")
+            if (!srcRoot.isDirectory) {
+                diags.add(LocatedDiag(source, Diagnostic(
+                    "package `${dm.name}` has no src/ folder (expected ${srcRoot.path})", dep.span, null)))
+                continue
+            }
+            out[dep.alias] = PkgInfo(dm.name, srcRoot)
+        }
+        return out
     }
 
     /**
@@ -76,7 +139,10 @@ object ModuleLoader {
      */
     fun loadFile(file: File, overrides: Map<String, String> = emptyMap()): ModuleLoadResult {
         val root = nearestSrcRoot(file)
-        return resolve(root, listOf(file), ArrayList(), followUsesOnly = true, overrides = overrides)
+        val diags = ArrayList<LocatedDiag>()
+        val projDir = if (root.name == "src") root.parentFile ?: root else root
+        return resolve(root, listOf(file), diags, followUsesOnly = true, overrides = overrides,
+            pkgs = resolveSrcDeps(projDir, diags))
     }
 
     private fun nearestSrcRoot(file: File): File {
@@ -94,11 +160,12 @@ object ModuleLoader {
         diags: ArrayList<LocatedDiag>,
         followUsesOnly: Boolean = false,
         overrides: Map<String, String> = emptyMap(),
+        pkgs: Map<String, PkgInfo> = emptyMap(),
     ): ModuleLoadResult {
         val byPath = LinkedHashMap<String, ModuleFile>()
         val byFile = HashMap<String, ModuleFile>()
 
-        fun load(file: File): ModuleFile? {
+        fun load(file: File, pkg: PkgInfo? = null): ModuleFile? {
             val canon = file.absoluteFile.path
             byFile[canon]?.let { return it }
             val override = overrides[canon]
@@ -109,9 +176,22 @@ object ModuleLoader {
             val comments = ArrayList<dawn.lex.Token>()
             val tokens = Lexer(text, 0, sink, comments).lex()
             val module = Parser(tokens, sink, text).module()
-            val modPath = modulePathOf(root, file)
-            val className = modPath.split('/').joinToString("/") { sanitizeSegment(it) }
-            val mf = ModuleFile(modPath, className, file, source, module, sink.all)
+            val internal = modulePathOf(pkg?.srcRoot ?: root, file)
+            val internalCls = internal.split('/').joinToString("/") { sanitizeSegment(it) }
+            // A dependency module: modPath gains the package-name prefix (what consumers
+            // write), the class name gains dawn$pkg$<name>/ — `$` is illegal in module
+            // path segments, so the prefix cannot collide with any user module
+            // (docs/package-design.md §4.4). Package-internal `use` paths are written
+            // bare and canonicalized here to the qualified spelling, so the checker,
+            // duplicate detection and the topological sort all see one spelling.
+            val modPath = if (pkg == null) internal else "${pkg.name}/$internal"
+            val className = if (pkg == null) internalCls else "dawn\$pkg\$${pkg.name}/$internalCls"
+            if (pkg != null) {
+                for (u in module.moduleUses) {
+                    if (u.segments.first() != "std") u.segments = listOf(pkg.name) + u.segments
+                }
+            }
+            val mf = ModuleFile(modPath, className, file, source, module, sink.all, pkg)
             byFile[canon] = mf
             byPath[modPath] = mf
             return mf
@@ -138,8 +218,33 @@ object ModuleLoader {
                 // bundled std modules come from the compiler jar, not the module graph
                 // (spec §10.6); the checker validates the name, in both build modes
                 if (u.segments.first() == "std") continue
-                val depFile = File(root, u.segments.joinToString("/") + ".dawn")
-                val dep = load(depFile)
+                val first = u.segments.first()
+                val (depFile, depPkg) = when {
+                    // a dependency module importing a sibling: paths were canonicalized
+                    // to `<pkgname>/<internal>` at load time, resolve inside the package
+                    mf.pkg != null ->
+                        File(mf.pkg.srcRoot, u.segments.drop(1).joinToString("/") + ".dawn") to mf.pkg
+                    // `use <alias>/...`: the [deps] package, unless a local directory
+                    // claims the same first segment — never shadow silently (§4.3)
+                    first in pkgs -> {
+                        val local = File(root, u.segments.joinToString("/") + ".dawn")
+                        if (local.isFile) {
+                            diags.add(LocatedDiag(mf.source, Diagnostic(
+                                "`${u.path}` is ambiguous: `$first` is both a [deps] package and a local module path",
+                                u.nameSpan, "rename the src/$first/ directory or the dependency alias")))
+                            continue
+                        }
+                        if (u.segments.size == 1) {
+                            diags.add(LocatedDiag(mf.source, Diagnostic(
+                                "cannot import the package `$first` itself", u.nameSpan,
+                                "import one of its modules: `use $first/<module>`")))
+                            continue
+                        }
+                        File(pkgs[first]!!.srcRoot, u.segments.drop(1).joinToString("/") + ".dawn") to pkgs[first]
+                    }
+                    else -> File(root, u.segments.joinToString("/") + ".dawn") to null
+                }
+                val dep = load(depFile, depPkg)
                 if (dep == null) {
                     diags.add(LocatedDiag(mf.source, Diagnostic(
                         "cannot find module `${u.path}`", u.nameSpan,
