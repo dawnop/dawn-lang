@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Golden diff for `selfhost run` / `selfhost test`: stdout+stderr and exit
-# codes must match the Kotlin CLI — including the failing-test report shape.
+# Golden diff for `selfhost run` / `selfhost test` / `selfhost doc`: stdout+
+# stderr and exit codes must match the Kotlin CLI — including the failing-test
+# report shape and the doc JSON byte for byte.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -48,4 +49,17 @@ EOF
 "${SH[@]}" test "$OUT/failing.dawn" > "$OUT/d.txt" 2>&1 && d=0 || d=$?
 check "test failing fixture" "$k" "$d"
 
-echo "OK: selfhost run/test agree with the Kotlin CLI"
+# doc: the builtin reference and a project with types, traits and impls
+"$DAWN" doc --builtins > "$OUT/k.txt" 2>&1 && k=0 || k=$?
+"${SH[@]}" doc --builtins > "$OUT/d.txt" 2>&1 && d=0 || d=$?
+check "doc --builtins" "$k" "$d"
+
+"$DAWN" doc site > "$OUT/k.txt" 2>&1 && k=0 || k=$?
+"${SH[@]}" doc site > "$OUT/d.txt" 2>&1 && d=0 || d=$?
+check "doc site" "$k" "$d"
+
+"$DAWN" doc examples/traits.dawn > "$OUT/k.txt" 2>&1 && k=0 || k=$?
+"${SH[@]}" doc examples/traits.dawn > "$OUT/d.txt" 2>&1 && d=0 || d=$?
+check "doc traits example" "$k" "$d"
+
+echo "OK: selfhost run/test/doc agree with the Kotlin CLI"

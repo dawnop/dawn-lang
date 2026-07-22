@@ -22,6 +22,7 @@ use analyze.{CheckedMod, load_directory, load_file, analyze_program}
 use vendor
 use jarw
 use fmt
+use doc
 use testrun.{TESTMAIN_CLASS, gen_test_main}
 use java "java.lang.System"
 use java "java.lang.ProcessBuilder"
@@ -482,6 +483,39 @@ fn run_fmt(rest: List[String]) -> Unit !io = {
   if check && unformatted > 0 { let _ = System.exit(1) }
 }
 
+## `selfhost doc <target>` / `selfhost doc --builtins` — mirror of `dawn doc`.
+fn run_doc(rest: List[String]) -> Unit !io = {
+  var std_dir = "compiler/src/main/resources/std"
+  var builtins_mode = false
+  var target = ""
+  var i = 0
+  while i < len(rest) {
+    if rest[i] == "--std" && i + 1 < len(rest) {
+      std_dir = rest[i + 1]
+      i = i + 2
+    } else if rest[i] == "--builtins" {
+      builtins_mode = true
+      i = i + 1
+    } else {
+      target = rest[i]
+      i = i + 1
+    }
+  }
+  let std = match stdlib.load_std(std_dir) {
+    Ok(sc) -> sc
+    Err(e) -> panic("cannot load std from " ++ std_dir ++ ": " ++ e)
+  }
+  if builtins_mode {
+    print(doc.builtins_json(std))
+    return
+  }
+  if target == "" { panic("usage: selfhost doc <file.dawn | project-dir> | selfhost doc --builtins") }
+  let loaded = if io.is_dir(target) { load_directory(target) } else { load_file(target) }
+  let prog = analyze_program(loaded, std, 100000000)
+  if len(prog.diags) > 0 { panic("doc target does not check cleanly: " ++ target) }
+  print(doc.project_json(prog))
+}
+
 fn run_check(rest: List[String]) -> Unit !io = {
   var std_dir = "compiler/src/main/resources/std"
   var targets: List[String] = []
@@ -523,6 +557,8 @@ pub fn main() -> Unit !io = {
         run_run(rest)
       } else if mode == "test" {
         run_test(rest)
+      } else if mode == "doc" {
+        run_doc(rest)
       } else {
         for pth in rest {
           println("== " ++ pth ++ " ==")

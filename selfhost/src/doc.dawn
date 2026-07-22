@@ -1,0 +1,455 @@
+# `selfhost doc` — a faithful port of dawn.cli.Doc: emit a project's pub API
+# (with `##` doc comments) or the builtin reference as JSON on stdout, byte
+# for byte what `dawn doc` prints. The JSON writer mirrors JsonWriter (pretty,
+# 2-space indent, key and value on one line, deterministic).
+
+use std/str
+use std/list
+use std/map
+use std/io
+use lexer
+use token.{Token}
+use ast.{
+  Module, module_fns, module_types, module_consts, module_traits
+}
+use analyze.{Program, CheckedMod}
+use checker.{Cx, ModExports}
+use stdlib.{StdCtx}
+use types.{
+  Adts, Traits, AdtI, CtorI, ImplI, Sig, adt_of, trait_of, ty_show, sig_render,
+  prelude_traits, builtins
+}
+
+# ---- the JSON writer (JsonWriter, as a threaded record) ----
+
+type W = { parts: List[String], indent: Int, need_comma: Bool, trailing_key: Bool }
+
+fn w_new() -> W = W { parts: [], indent: 0, need_comma: false, trailing_key: false }
+
+fn pad(w: W) -> W = W { ..w, parts: w.parts ++ [str.repeat("  ", w.indent)] }
+
+fn pre_value(w: W) -> W =
+  if w.trailing_key {
+    W { ..w, parts: w.parts ++ [" "], trailing_key: false, need_comma: false }
+  } else {
+    let w1 = W { ..w, parts: w.parts ++ [if w.need_comma { ",\n" } else { "\n" }] }
+    let w2 = pad(w1)
+    W { ..w2, need_comma: false }
+  }
+
+fn open_obj(w: W) -> W = {
+  let w1 = pre_value(w)
+  W { ..w1, parts: w1.parts ++ ["{"], indent: w1.indent + 1, need_comma: false }
+}
+
+fn close_obj(w: W) -> W = {
+  let w1 = pad(W { ..w, indent: w.indent - 1, parts: w.parts ++ ["\n"] })
+  W { ..w1, parts: w1.parts ++ ["}"], need_comma: true }
+}
+
+fn open_arr(w: W) -> W = {
+  let w1 = pre_value(w)
+  W { ..w1, parts: w1.parts ++ ["["], indent: w1.indent + 1, need_comma: false }
+}
+
+## `any` = whether the array got at least one element (decides the closing
+## bracket's own line, as JsonWriter does).
+fn close_arr(w: W, any: Bool) -> W = {
+  let w1 = W { ..w, indent: w.indent - 1 }
+  let w2 = if any { pad(W { ..w1, parts: w1.parts ++ ["\n"] }) } else { w1 }
+  W { ..w2, parts: w2.parts ++ ["]"], need_comma: true }
+}
+
+fn w_key(w: W, k: String) -> W = {
+  let w1 = pad(W { ..w, parts: w.parts ++ [if w.need_comma { ",\n" } else { "\n" }] })
+  W { ..w1, parts: w1.parts ++ [quote(k) ++ ":"], need_comma: false, trailing_key: true }
+}
+
+fn w_str(w: W, s: String) -> W = {
+  let w1 = pre_value(w)
+  W { ..w1, parts: w1.parts ++ [quote(s)], need_comma: true }
+}
+
+fn w_bool(w: W, b: Bool) -> W = {
+  let w1 = pre_value(w)
+  W { ..w1, parts: w1.parts ++ [if b { "true" } else { "false" }], need_comma: true }
+}
+
+fn w_field(w: W, k: String, v: String) -> W = w_str(w_key(w, k), v)
+
+fn w_field_bool(w: W, k: String, v: Bool) -> W = w_bool(w_key(w, k), v)
+
+fn w_field_opt(w: W, k: String, v: Option[String]) -> W = {
+  let w1 = w_key(w, k)
+  match v {
+    Some(s) -> w_str(w1, s)
+    None -> {
+      let w2 = pre_value(w1)
+      W { ..w2, parts: w2.parts ++ ["null"], need_comma: true }
+    }
+  }
+}
+
+fn w_done(w: W) -> String = {
+  var s = join(w.parts, "")
+  while str.starts_with(s, "\n") { s = str.substring(s, 1, str.len(s)) }
+  s ++ "\n"
+}
+
+fn hex_digit(n: Int) -> String = str.substring("0123456789abcdef", n, n + 1)
+
+fn quote(s: String) -> String = {
+  var out: List[String] = ["\""]
+  for c in code_points(s) {
+    if c == 34 {
+      out = out ++ ["\\\""]
+    } else if c == 92 {
+      out = out ++ ["\\\\"]
+    } else if c == '\n' {
+      out = out ++ ["\\n"]
+    } else if c == 13 {
+      out = out ++ ["\\r"]
+    } else if c == 9 {
+      out = out ++ ["\\t"]
+    } else if c < 32 {
+      out = out ++ ["\\u00" ++ hex_digit(c / 16) ++ hex_digit(c % 16)]
+    } else {
+      out = out ++ [from_code_points([c])]
+    }
+  }
+  join(out, "") ++ "\""
+}
+
+# ---- doc comment extraction (Doc.kt docOf / commentsByLine) ----
+
+## 1-based line number of UTF-16 offset `off` (count of line starts <= off).
+fn line_of(starts: List[Int], off: Int) -> Int = {
+  var n = 0
+  var i = 0
+  while i < len(starts) && starts[i] <= off {
+    n = n + 1
+    i = i + 1
+  }
+  n
+}
+
+type DocSrc = { starts: List[Int], by_line: Map[Int, Token] }
+
+fn doc_src_of(text: String) -> DocSrc = {
+  let (_, comments, _) = lexer.lex_with_comments(text)
+  let starts = lexer.line_starts_of(text)
+  var by_line: Map[Int, Token] = map.empty()
+  for c in comments { by_line = map.insert(by_line, line_of(starts, c.hi), c) }
+  DocSrc { starts: starts, by_line: by_line }
+}
+
+fn strip_doc_prefix(s: String) -> String = {
+  let t = str.substring(s, 2, str.len(s))
+  if str.starts_with(t, " ") { str.substring(t, 1, str.len(t)) } else { t }
+}
+
+## The `##` lines immediately above the declaration starting at `lo`,
+## contiguous, joined by \n. A blank line detaches; plain `#` is never a doc.
+fn doc_of(ds: DocSrc, lo: Int) -> Option[String] = {
+  var line = line_of(ds.starts, lo) - 1
+  var acc: List[String] = []
+  var go = true
+  while go {
+    match map.get(ds.by_line, line) {
+      Some(t) ->
+        if str.starts_with(t.text, "##") {
+          acc = acc ++ [strip_doc_prefix(t.text)]
+          line = line - 1
+        } else {
+          go = false
+        }
+      None -> { go = false }
+    }
+  }
+  if len(acc) == 0 { None } else { Some(join(list.reverse(acc), "\n")) }
+}
+
+# ---- project JSON ----
+
+fn adt_by_name(adts: Adts, owner: String, name: String) -> Option[AdtI] = {
+  for aid in sort(map.keys(adts)) {
+    let a = adt_of(adts, aid)
+    let own = match a.owner {
+      Some(o) -> o == owner
+      None -> false
+    }
+    if own && a.name == name { return Some(a) }
+  }
+  None
+}
+
+fn trait_methods_json(w: W, cx: Cx, owner: String, name: String) -> W = {
+  var w1 = w_key(w, "methods")
+  w1 = open_arr(w1)
+  var any = false
+  for tid in sort(map.keys(cx.traits)) {
+    let t = trait_of(cx.traits, tid)
+    let own = match t.owner {
+      Some(o) -> o == owner
+      None -> false
+    }
+    if own && t.name == name {
+      for pr in t.methods {
+        let (mname, ms) = pr
+        any = true
+        w1 = open_obj(w1)
+        w1 = w_field(w1, "name", mname)
+        w1 = w_field(w1, "sig", sig_render(cx.adts, cx.traits, ms.sig))
+        w1 = w_field_bool(w1, "hasDefault", ms.has_default)
+        w1 = close_obj(w1)
+      }
+    }
+  }
+  close_arr(w1, any)
+}
+
+fn module_json(w: W, cm: CheckedMod, ds: DocSrc) -> W = {
+  var w1 = open_obj(w)
+  w1 = w_field(w1, "path", cm.mod_path)
+  w1 = w_key(w1, "fns")
+  w1 = open_arr(w1)
+  var any = false
+  for fd in module_fns(cm.m) {
+    if fd.is_pub {
+      any = true
+      w1 = open_obj(w1)
+      w1 = w_field(w1, "name", fd.name)
+      let sig = match map.get(cm.cx.fns, fd.name) {
+        Some(s) -> sig_render(cm.cx.adts, cm.cx.traits, s)
+        None -> fd.name
+      }
+      w1 = w_field(w1, "sig", sig)
+      w1 = w_field_opt(w1, "doc", doc_of(ds, fd.lo))
+      w1 = close_obj(w1)
+    }
+  }
+  w1 = close_arr(w1, any)
+  w1 = w_key(w1, "types")
+  w1 = open_arr(w1)
+  any = false
+  for td in module_types(cm.m) {
+    if td.is_pub {
+      any = true
+      w1 = open_obj(w1)
+      w1 = w_field(w1, "name", td.name)
+      w1 = w_field_bool(w1, "record", td.is_record)
+      w1 = w_key(w1, "typeParams")
+      w1 = open_arr(w1)
+      for tp in td.tparams { w1 = w_str(w1, tp) }
+      w1 = close_arr(w1, len(td.tparams) > 0)
+      w1 = w_key(w1, "ctors")
+      w1 = open_arr(w1)
+      var cany = false
+      match adt_by_name(cm.cx.adts, cm.class_name, td.name) {
+        Some(a) -> {
+          for c in a.ctors {
+            cany = true
+            w1 = open_obj(w1)
+            w1 = w_field(w1, "name", c.name)
+            w1 = w_key(w1, "fields")
+            w1 = open_arr(w1)
+            for f in c.fields {
+              w1 = open_obj(w1)
+              w1 = w_field(w1, "name", f.name)
+              w1 = w_field(w1, "type", ty_show(cm.cx.adts, f.ty))
+              w1 = close_obj(w1)
+            }
+            w1 = close_arr(w1, len(c.fields) > 0)
+            w1 = close_obj(w1)
+          }
+        }
+        None -> ()
+      }
+      w1 = close_arr(w1, cany)
+      w1 = w_field_opt(w1, "doc", doc_of(ds, td.lo))
+      w1 = close_obj(w1)
+    }
+  }
+  w1 = close_arr(w1, any)
+  w1 = w_key(w1, "consts")
+  w1 = open_arr(w1)
+  any = false
+  for cd in module_consts(cm.m) {
+    if cd.is_pub {
+      any = true
+      w1 = open_obj(w1)
+      w1 = w_field(w1, "name", cd.name)
+      let ty = match map.get(cm.cx.consts, cd.name) {
+        Some(t) -> ty_show(cm.cx.adts, t)
+        None -> ""
+      }
+      w1 = w_field(w1, "type", ty)
+      w1 = w_field_opt(w1, "doc", doc_of(ds, cd.lo))
+      w1 = close_obj(w1)
+    }
+  }
+  w1 = close_arr(w1, any)
+  w1 = w_key(w1, "traits")
+  w1 = open_arr(w1)
+  any = false
+  for td in module_traits(cm.m) {
+    if td.is_pub {
+      any = true
+      w1 = open_obj(w1)
+      w1 = w_field(w1, "name", td.name)
+      w1 = w_field(w1, "typeParam", td.tp)
+      w1 = trait_methods_json(w1, cm.cx, cm.class_name, td.name)
+      w1 = w_field_opt(w1, "doc", doc_of(ds, td.lo))
+      w1 = close_obj(w1)
+    }
+  }
+  w1 = close_arr(w1, any)
+  w1 = w_key(w1, "impls")
+  w1 = open_arr(w1)
+  for ii in cm.cx.local_impls {
+    let t = trait_of(cm.cx.traits, ii.trait_id)
+    w1 = w_str(w1, t.name ++ "[" ++ ty_show(cm.cx.adts, ii.subject) ++ "]")
+  }
+  w1 = close_arr(w1, len(cm.cx.local_impls) > 0)
+  close_obj(w1)
+}
+
+pub fn project_json(prog: Program) -> String !io = {
+  var w = w_new()
+  w = open_obj(w)
+  w = w_key(w, "modules")
+  w = open_arr(w)
+  for cm in prog.modules {
+    let text = match io.read_file(cm.path) {
+      Ok(t) -> t
+      Err(e) -> panic("cannot re-read " ++ cm.path ++ ": " ++ e)
+    }
+    w = module_json(w, cm, doc_src_of(text))
+  }
+  w = close_arr(w, len(prog.modules) > 0)
+  w = close_obj(w)
+  w_done(w)
+}
+
+# ---- builtin reference (Doc.kt BUILTIN_GROUPS, verbatim) ----
+
+fn builtin_groups() -> List[(String, List[(String, String)])] = [
+  ("io", [
+    ("println", "print a string followed by a newline"),
+    ("print", "print a string without a newline"),
+    ("args", "command line arguments"),
+    ("java_try", "run a closure, catching Java exceptions into Err (panics pass through)"),
+    ("catch_panic", "run a closure at an isolation boundary, catching any Throwable including a panic into Err")
+  ]),
+  ("list", [
+    ("map", "a new list with a function applied to every element"),
+    ("filter", "the elements satisfying a predicate, in order"),
+    ("fold", "reduce from the left with an accumulator"),
+    ("len", "number of elements"),
+    ("get", "element at an index; None when out of bounds"),
+    ("range", "the integers from..to (exclusive)"),
+    ("sort", "ascending stable sort (elements need Ord)"),
+    ("sort_by", "stable sort with a two-argument cmp function"),
+    ("max", "the first greatest element; None when empty (elements need Ord)"),
+    ("min", "the first least element; None when empty (elements need Ord)"),
+    ("max_by", "the first element whose key is greatest; None when empty (keys need Ord)"),
+    ("min_by", "the first element whose key is least; None when empty (keys need Ord)")
+  ]),
+  ("string", [
+    ("to_string", "render any printable value (numbers, strings, derive Show data)"),
+    ("join", "concatenate with a separator"),
+    ("parse_int", "parse a decimal integer; None on malformed input"),
+    ("parse_float", "parse a floating point number; None on malformed input")
+  ]),
+  ("interop", [
+    ("cast",
+      "reclaim an erased Java Object as a concrete reference type T, taken from the expected type at the call site (interop escape; a runtime CHECKCAST guards it)")
+  ]),
+  ("char", [
+    ("code_points", "split into Unicode code points (a character is its code point Int)"),
+    ("from_code_points", "assemble a string from code points")
+  ]),
+  ("option", [
+    ("expect", "unwrap a Some or panic with a message"),
+    ("unwrap_or", "the Some value, or a fallback for None")
+  ]),
+  ("conversion", [
+    ("to_float", "Int to Float"),
+    ("to_int", "Float to Int (truncates)")
+  ]),
+  ("control", [
+    ("panic", "abort with a message (diverges, so usable at any type)"),
+    ("todo", "placeholder that panics when reached")
+  ])
+]
+
+## The reference covers the builtin table and the bundled std as one list of
+## groups: the hand-written groups above resolve their signatures against the
+## builtin table (falling back to the std prelude, where functions migrate),
+## and each std module contributes a group named after itself with prose from
+## its `##` doc comments.
+pub fn builtins_json(std: StdCtx) -> String = {
+  let bi = builtins()
+  let traits = prelude_traits()
+  var w = w_new()
+  w = open_obj(w)
+  w = w_key(w, "groups")
+  w = open_arr(w)
+  for grp in builtin_groups() {
+    let (gname, fns) = grp
+    w = open_obj(w)
+    w = w_field(w, "name", gname)
+    w = w_key(w, "fns")
+    w = open_arr(w)
+    for pr in fns {
+      let (fname, fdoc) = pr
+      let sig = match map.get(bi, fname) {
+        Some(s) -> s
+        None ->
+          match map.get(std.std_fns, fname) {
+            Some(s) -> s
+            None -> panic("the builtin reference names an unknown function: " ++ fname)
+          }
+      }
+      w = open_obj(w)
+      w = w_field(w, "name", fname)
+      w = w_field(w, "sig", sig_render(std.adts, traits, sig))
+      w = w_field(w, "doc", fdoc)
+      w = close_obj(w)
+    }
+    w = close_arr(w, len(fns) > 0)
+    w = close_obj(w)
+  }
+  for sm in std.srcs {
+    let (mod_path, text, m) = sm
+    let ds = doc_src_of(text)
+    let exp = match map.get(std.exports, mod_path) {
+      Some(e) -> e
+      None -> panic("std module without exports: " ++ mod_path)
+    }
+    w = open_obj(w)
+    w = w_field(w, "name", mod_path)
+    w = w_key(w, "fns")
+    w = open_arr(w)
+    var any = false
+    for fd in module_fns(m) {
+      if fd.is_pub {
+        any = true
+        let sig = match map.get(exp.fns, fd.name) {
+          Some(s) -> s
+          None -> panic("std export without a signature: " ++ fd.name)
+        }
+        w = open_obj(w)
+        w = w_field(w, "name", fd.name)
+        w = w_field(w, "sig", sig_render(std.adts, traits, sig))
+        w = w_field(w, "doc", unwrap_or(doc_of(ds, fd.lo), ""))
+        w = close_obj(w)
+      }
+    }
+    w = close_arr(w, any)
+    w = close_obj(w)
+  }
+  w = close_arr(w, true)
+  w = close_obj(w)
+  w_done(w)
+}

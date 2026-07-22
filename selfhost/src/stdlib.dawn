@@ -38,7 +38,10 @@ pub type StdCtx = {
   next_id: Int,
   # per-module (modPath, checker state, typed module, comptime results), in
   # load order — codegen emits each std module's static class from these
-  mods: List[(String, Cx, TModule, CtOut)]
+  mods: List[(String, Cx, TModule, CtOut)],
+  # per-module (modPath, source text, AST), in load order — `selfhost doc
+  # --builtins` reads std doc comments and pub decls from these
+  srcs: List[(String, String, Module)]
 }
 
 pub fn prelude_names() -> List[String] = ["println", "print", "map", "filter", "fold"]
@@ -99,6 +102,7 @@ pub fn load_std(dir: String) -> Result[StdCtx, String] !io = {
   var last_cx: Option[Cx] = None
   var nid = 2
   var mods: List[(String, Cx, TModule, CtOut)] = []
+  var srcs: List[(String, String, Module)] = []
   for n in names {
     let mod_path = "std/" ++ n
     let text = io.read_file(dir ++ "/" ++ n ++ ".dawn")?
@@ -138,6 +142,7 @@ pub fn load_std(dir: String) -> Result[StdCtx, String] !io = {
     last_cx = Some(cx1)
     nid = cx1.next_id
     mods = mods ++ [(mod_path, cx1, tm, ct)]
+    srcs = srcs ++ [(mod_path, text, m)]
   }
   moved = moved_renames(moved)
   var std_names: Set[String] = set.empty()
@@ -151,7 +156,8 @@ pub fn load_std(dir: String) -> Result[StdCtx, String] !io = {
     std_names: std_names,
     adts: adts,
     next_id: nid,
-    mods: mods
+    mods: mods,
+    srcs: srcs
   })
 }
 
