@@ -458,3 +458,278 @@ pub fn supers_of(adts: Adts, all_ids: List[Int]) -> List[String] = {
   }
   out
 }
+
+pub const BYTES_CLASS: String = "dawn/rt/Bytes"
+
+pub const IO_CLASS: String = "dawn/rt/Io"
+
+pub const LISTS_CLASS: String = "dawn/rt/Lists"
+
+pub const STRINGS_CLASS: String = "dawn/rt/Strings"
+
+pub const MAPS_CLASS: String = "dawn/rt/Maps"
+
+pub const DICT_CMP_CLASS: String = "dawn/rt/DictComparator"
+
+pub const FN_CMP_CLASS: String = "dawn/rt/FnComparator"
+
+pub const STDSTRINGS_CLASS: String = "dawn/rt/StdStrings"
+
+pub const OP_ARRAYLENGTH: Int = 190
+
+pub const OP_IINC_UNUSED: Int = 132
+
+## dawn/rt/Bytes: concat only (utf8/decode/len inline at call sites).
+pub fn gen_bytes_class(supers: List[String]) -> Bytes !io = {
+  let cw = AdtClassWriter.new(supers)
+  cw.begin(V17, ACC_PUBLIC + ACC_FINAL, BYTES_CLASS, obj())
+  let m = cw.method(ACC_PUBLIC + ACC_STATIC, "concat", "([B[B)[B").expect("mv")
+  m.visitCode()
+  m.visitVarInsn(OP_ALOAD, 0)
+  m.visitInsn(OP_ARRAYLENGTH)
+  m.visitVarInsn(OP_ISTORE, 2)
+  m.visitVarInsn(OP_ALOAD, 1)
+  m.visitInsn(OP_ARRAYLENGTH)
+  m.visitVarInsn(OP_ISTORE, 3)
+  m.visitVarInsn(OP_ALOAD, 0)
+  m.visitVarInsn(OP_ILOAD, 2)
+  m.visitVarInsn(OP_ILOAD, 3)
+  m.visitInsn(OP_IADD)
+  m.visitMethodInsn(OP_INVOKESTATIC, "java/util/Arrays", "copyOf", "([BI)[B", false)
+  m.visitVarInsn(OP_ASTORE, 4)
+  m.visitVarInsn(OP_ALOAD, 1)
+  m.visitInsn(OP_ICONST_0)
+  m.visitVarInsn(OP_ALOAD, 4)
+  m.visitVarInsn(OP_ILOAD, 2)
+  m.visitVarInsn(OP_ILOAD, 3)
+  m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/System", "arraycopy",
+    "(Ljava/lang/Object;ILjava/lang/Object;II)V", false)
+  m.visitVarInsn(OP_ALOAD, 4)
+  m.visitInsn(OP_ARETURN)
+  m.visitMaxs(0, 0)
+  m.visitEnd()
+  cw.visitEnd()
+  cw.toByteArray().expect("bytes")
+}
+
+fn gen_try_closure(cw: AdtClassWriter, name: String, caught: String) -> Unit !io = {
+  let m = cw.method(ACC_PUBLIC + ACC_STATIC, name, "(L" ++ fn_iface(0) ++ ";)LResult;")
+    .expect("mv")
+  m.visitCode()
+  let try_start = Label.new()
+  let try_end = Label.new()
+  let handler = Label.new()
+  m.visitTryCatchBlock(try_start, try_end, handler, caught)
+  m.visitLabel(try_start)
+  m.visitTypeInsn(OP_NEW, "Result\$Ok")
+  m.visitInsn(OP_DUP)
+  m.visitVarInsn(OP_ALOAD, 0)
+  m.visitMethodInsn(OP_INVOKEINTERFACE, fn_iface(0), "apply", erased_apply_desc(0), true)
+  m.visitMethodInsn(OP_INVOKESPECIAL, "Result\$Ok", "<init>", "(Ljava/lang/Object;)V", false)
+  m.visitLabel(try_end)
+  m.visitInsn(OP_ARETURN)
+  m.visitLabel(handler)
+  m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/Throwable", "toString",
+    "()Ljava/lang/String;", false)
+  m.visitVarInsn(OP_ASTORE, 1)
+  m.visitTypeInsn(OP_NEW, "Result\$Err")
+  m.visitInsn(OP_DUP)
+  m.visitVarInsn(OP_ALOAD, 1)
+  m.visitMethodInsn(OP_INVOKESPECIAL, "Result\$Err", "<init>", "(Ljava/lang/Object;)V", false)
+  m.visitInsn(OP_ARETURN)
+  m.visitMaxs(0, 0)
+  m.visitEnd()
+  ()
+}
+
+## dawn/rt/Io: javaTry (Exception barrier) and catchPanic (Throwable boundary).
+pub fn gen_io_class(supers: List[String]) -> Bytes !io = {
+  let cw = AdtClassWriter.new(supers)
+  cw.begin(V17, ACC_PUBLIC + ACC_FINAL, IO_CLASS, obj())
+  gen_try_closure(cw, "javaTry", "java/lang/Exception")
+  gen_try_closure(cw, "catchPanic", "java/lang/Throwable")
+  cw.visitEnd()
+  cw.toByteArray().expect("bytes")
+}
+
+## The per-trait dictionary interface name: dawn/tr/<owner$…$>Name.
+pub fn owner_prefix(owner: Option[String]) -> String =
+  match owner {
+    Some(o) -> join(str.split(o, "/"), "$") ++ "$"
+    None -> ""
+  }
+
+pub fn tr_iface(owner: Option[String], name: String) -> String =
+  "dawn/tr/" ++ owner_prefix(owner) ++ name
+
+## A java.util.Comparator over a Dawn ordering source; emit_cmp receives
+## (source, a, b) on the stack and leaves the long comparison result.
+fn gen_comparator_class(
+  supers: List[String],
+  cls: String,
+  src_desc: String,
+  emit_cmp: fn(MethodVisitor) -> Unit !io
+) -> Bytes !io = {
+  let cw = AdtClassWriter.new(supers)
+  cw.beginWithInterface(V17, ACC_PUBLIC + ACC_FINAL, cls, obj(), "java/util/Comparator")
+  cw.field(ACC_PRIVATE + ACC_FINAL, "src", src_desc)
+  let init = cw.method(ACC_PUBLIC, "<init>", "(" ++ src_desc ++ ")V").expect("mv")
+  init.visitCode()
+  init.visitVarInsn(OP_ALOAD, 0)
+  init.visitMethodInsn(OP_INVOKESPECIAL, obj(), "<init>", "()V", false)
+  init.visitVarInsn(OP_ALOAD, 0)
+  init.visitVarInsn(OP_ALOAD, 1)
+  init.visitFieldInsn(OP_PUTFIELD, cls, "src", src_desc)
+  init.visitInsn(OP_RETURN)
+  init.visitMaxs(0, 0)
+  init.visitEnd()
+  let m = cw.method(ACC_PUBLIC, "compare", "(Ljava/lang/Object;Ljava/lang/Object;)I").expect("mv")
+  m.visitCode()
+  m.visitVarInsn(OP_ALOAD, 0)
+  m.visitFieldInsn(OP_GETFIELD, cls, "src", src_desc)
+  m.visitVarInsn(OP_ALOAD, 1)
+  m.visitVarInsn(OP_ALOAD, 2)
+  emit_cmp(m)
+  m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Long", "signum", "(J)I", false)
+  m.visitInsn(OP_IRETURN)
+  m.visitMaxs(0, 0)
+  m.visitEnd()
+  cw.visitEnd()
+  cw.toByteArray().expect("bytes")
+}
+
+pub fn gen_dict_comparator(supers: List[String]) -> Bytes !io = {
+  let ord = tr_iface(None, "Ord")
+  gen_comparator_class(supers, DICT_CMP_CLASS, "L" ++ ord ++ ";", fn(m: MethodVisitor) => {
+    m.visitMethodInsn(OP_INVOKEINTERFACE, ord, "cmp",
+      "(Ljava/lang/Object;Ljava/lang/Object;)J", true)
+    ()
+  })
+}
+
+pub fn gen_fn_comparator(supers: List[String]) -> Bytes !io =
+  gen_comparator_class(supers, FN_CMP_CLASS, "L" ++ fn_iface(2) ++ ";", fn(m: MethodVisitor) => {
+    m.visitMethodInsn(OP_INVOKEINTERFACE, fn_iface(2), "apply", erased_apply_desc(2), true)
+    m.visitTypeInsn(OP_CHECKCAST, "java/lang/Long")
+    m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/Long", "longValue", "()J", false)
+    ()
+  })
+
+## The prelude Ord trait interface (one erased cmp method).
+pub fn gen_ord_interface(supers: List[String]) -> Bytes !io = {
+  let cw = AdtClassWriter.new(supers)
+  cw.begin(V17, ACC_PUBLIC + ACC_ABSTRACT + ACC_INTERFACE, tr_iface(None, "Ord"), obj())
+  let m = cw.method(ACC_PUBLIC + ACC_ABSTRACT, "cmp",
+    "(Ljava/lang/Object;Ljava/lang/Object;)J").expect("mv")
+  m.visitEnd()
+  cw.visitEnd()
+  cw.toByteArray().expect("bytes")
+}
+
+## INSTANCE + private <init> + <clinit> (the Kotlin singletonScaffold).
+fn singleton_scaffold(cw: AdtClassWriter, cls: String, iface: String) -> Unit !io = {
+  cw.field(ACC_PUBLIC + ACC_STATIC + ACC_FINAL, "INSTANCE", "L" ++ iface ++ ";")
+  let init = cw.method(ACC_PRIVATE, "<init>", "()V").expect("mv")
+  init.visitCode()
+  init.visitVarInsn(OP_ALOAD, 0)
+  init.visitMethodInsn(OP_INVOKESPECIAL, obj(), "<init>", "()V", false)
+  init.visitInsn(OP_RETURN)
+  init.visitMaxs(0, 0)
+  init.visitEnd()
+  let cl = cw.method(ACC_STATIC, "<clinit>", "()V").expect("mv")
+  cl.visitCode()
+  cl.visitTypeInsn(OP_NEW, cls)
+  cl.visitInsn(OP_DUP)
+  cl.visitMethodInsn(OP_INVOKESPECIAL, cls, "<init>", "()V", false)
+  cl.visitFieldInsn(OP_PUTSTATIC, cls, "INSTANCE", "L" ++ iface ++ ";")
+  cl.visitInsn(OP_RETURN)
+  cl.visitMaxs(0, 0)
+  cl.visitEnd()
+  ()
+}
+
+fn subject_name(adts: Adts, t: Ty) -> String =
+  match t {
+    TyInt -> "Int"
+    TyFloat -> "Float"
+    TyBool -> "Bool"
+    TyString -> "String"
+    TyAdt(aid, _) -> adt_of(adts, aid).name
+    _ -> panic("invalid impl subject")
+  }
+
+## The impl's singleton dictionary class name.
+pub fn impl_class(adts: Adts, owner: Option[String], trait_name: String, subject: Ty) -> String =
+  "dawn/impl/" ++ owner_prefix(owner) ++ trait_name ++ "$" ++ subject_name(adts, subject)
+
+## Recover the concrete type from an erased Object on the stack (unerase).
+fn emit_unerase(m: MethodVisitor, adts: Adts, t: Ty) -> Unit !io = {
+  match t {
+    TyInt -> {
+      m.visitTypeInsn(OP_CHECKCAST, "java/lang/Long")
+      m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/Long", "longValue", "()J", false)
+    }
+    TyCursor -> {
+      m.visitTypeInsn(OP_CHECKCAST, "java/lang/Long")
+      m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/Long", "longValue", "()J", false)
+    }
+    TyFloat -> {
+      m.visitTypeInsn(OP_CHECKCAST, "java/lang/Double")
+      m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/Double", "doubleValue", "()D", false)
+    }
+    TyBool -> {
+      m.visitTypeInsn(OP_CHECKCAST, "java/lang/Boolean")
+      m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/Boolean", "booleanValue", "()Z", false)
+    }
+    TyString -> { m.visitTypeInsn(OP_CHECKCAST, "java/lang/String") }
+    TyBytes -> { m.visitTypeInsn(OP_CHECKCAST, "[B") }
+    TyAdt(aid, _) -> { m.visitTypeInsn(OP_CHECKCAST, adt_jvm_name(adt_of(adts, aid))) }
+    TyList(_) -> { m.visitTypeInsn(OP_CHECKCAST, "java/util/List") }
+    TyMap(_, _) -> { m.visitTypeInsn(OP_CHECKCAST, "java/util/Map") }
+    TySet(_) -> { m.visitTypeInsn(OP_CHECKCAST, "java/util/Set") }
+    TyTuple(elems) -> { m.visitTypeInsn(OP_CHECKCAST, tuple_class(len(elems))) }
+    TyJava(fqcn, _) -> {
+      let internal = join(str.split(fqcn, "."), "/")
+      m.visitTypeInsn(OP_CHECKCAST, internal)
+    }
+    TyFn(params, _, _) -> { m.visitTypeInsn(OP_CHECKCAST, fn_iface(len(params))) }
+    TyUnit -> { m.visitInsn(OP_POP) }
+    _ -> ()
+  }
+  ()
+}
+
+## Two scalars on the stack → their long cmp (Float via the total order).
+fn emit_native_cmp(m: MethodVisitor, t: Ty) -> Unit !io = {
+  match t {
+    TyInt -> { m.visitInsn(OP_LCMP) }
+    TyFloat -> { m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Double", "compare", "(DD)I", false) }
+    _ -> {
+      m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/String", "compareTo",
+        "(Ljava/lang/String;)I", false)
+    }
+  }
+  m.visitInsn(OP_I2L)
+  ()
+}
+
+## The prelude Ord[Int/Float/String] dictionaries: cmp is the native comparison.
+pub fn gen_prelude_ord_impl(supers: List[String], adts: Adts, subject: Ty) -> Bytes !io = {
+  let cls = impl_class(adts, None, "Ord", subject)
+  let iface = tr_iface(None, "Ord")
+  let cw = AdtClassWriter.new(supers)
+  cw.beginWithInterface(V17, ACC_PUBLIC + ACC_FINAL, cls, obj(), iface)
+  singleton_scaffold(cw, cls, iface)
+  let m = cw.method(ACC_PUBLIC, "cmp", "(Ljava/lang/Object;Ljava/lang/Object;)J").expect("mv")
+  m.visitCode()
+  m.visitVarInsn(OP_ALOAD, 1)
+  emit_unerase(m, adts, subject)
+  m.visitVarInsn(OP_ALOAD, 2)
+  emit_unerase(m, adts, subject)
+  emit_native_cmp(m, subject)
+  m.visitInsn(OP_LRETURN)
+  m.visitMaxs(0, 0)
+  m.visitEnd()
+  cw.visitEnd()
+  cw.toByteArray().expect("bytes")
+}
