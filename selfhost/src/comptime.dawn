@@ -1,0 +1,1656 @@
+# Compile-time evaluation (spec §7): a plain tree walker over the typed tree's
+# pure subset — the Kotlin Comptime.kt, with its exceptions turned into a
+# control-flow sum threaded through Results. Top-level const initializers and
+# comptime blocks run here after checking; codegen embeds the results.
+#
+# Control flow: ER = Result[(ESt, Env, CValue), (ESt, Env, Ctl)] — `?` is
+# throw, call_fn catches CReturn, loops catch CBreak/CContinue. The state
+# carries fuel (the real bound on runaway evaluation), the call depth (turns a
+# would-be stack overflow into a decent message), and the unsafe_pure flag
+# (route C: a vouched Java call may be folded reflectively).
+#
+# The Kotlin interpreter runs on a dedicated 64MB thread; this one recurses on
+# the host stack, so the selfhost JVM is launched with -Xss512m instead.
+
+use std/str
+use std/list
+use std/map
+use std/set
+use token.{Diag}
+use tast.{
+  TExpr, XInt, XFloat, XBool, XUnit, XStr, XLocal, XFnValue, XCallDyn,
+  XCallBuiltin, XCallFn, XApply, XJava, XLambda, XCtor, XConstRef, XCtorValue,
+  XField, XListLit, XTupleLit, XPropagate, XUnwrap, XIndex, XReturn, XBreak,
+  XContinue, XComptime, XUnsafePure, XBinary, XUnary, XIf, XMatch, XBlock,
+  XError, TBinOp, BAdd, BSub, BMul, BDiv, BMod, BConcat, BEq, BNeq, BLt, BLe,
+  BGt, BGe, BAnd, BOr, BBand, BBor, BBxor, BShl, BShr, BUshr,
+  TUnOp, UNeg, UNot, UBnot, TStrPart, TSPText, TSPInterp, TArm, TJavaCall,
+  TPat, TPWild, TPBind, TPLit, TPTuple, TPList, TPCtor,
+  TStmt, TSLet, TSLetPat, TSLocalFn, TSAssign, TSExpr, TSAssert, TSWhile,
+  TSFor, TFun, TConst, TModule, x_lo, x_hi, ts_lo, ts_hi
+}
+use types.{Adts, adt_of, OPTION_ID, RESULT_ID}
+use exhaustive.{LitV, LInt, LFloat, LBool, LStr}
+use jreflect
+use parser
+use checker.{ModExports, check_module, cx_new}
+use java "java.lang.Object"
+use java "java.lang.Long"
+use java "java.lang.Integer"
+use java "java.lang.Double"
+use java "java.lang.Boolean"
+use java "java.lang.Number"
+use java "java.util.Objects"
+use java "dawn.rt.StdStrings"
+
+## A comptime value. Function values may exist during evaluation but cannot be
+## a result (the checker enforces constant-serializability).
+pub type CValue =
+  | VInt(v: Int)
+  | VFloat(v: Float)
+  | VBool(v: Bool)
+  | VStr(v: String)
+  | VUnit
+  | VList(elems: List[CValue])
+  | VTuple(elems: List[CValue])
+  | VAdt(adt: Int, ci: Int, fields: List[CValue])
+# a lambda closure; `self` re-binds a local fn into its own env for recursion
+  | VLambda(params: List[Int], body: TExpr, cenv: Map[Int, CValue], self: Option[Int])
+  | VFnRef(f: TFun)
+  | VBuiltinF(name: String)
+# a bare constructor-with-fields used as a function value (map(xs, Some))
+  | VCtorRef(adt: Int, ci: Int)
+
+pub type Ctl =
+  | CErr(d: Diag)
+  | CReturn(v: CValue)
+  | CBreak
+  | CContinue
+
+pub type ESt = { fuel: Int, depth: Int, in_up: Bool }
+
+pub alias Env = Map[Int, CValue]
+
+alias ER = Result[(ESt, Env, CValue), (ESt, Env, Ctl)]
+
+alias SR = Result[(ESt, Env), (ESt, Env, Ctl)]
+
+## The interpreter's static context: resolved function bodies and the ADT
+## table (for ctor names in Propagate/Unwrap), plus already-evaluated consts.
+pub type ICx = {
+  # flat name → typed fn (module fns over std fns; local shadows std)
+  fns: Map[String, TFun],
+  # className → (name → typed fn): module-qualified std calls resolve by owner
+  by_owner: Map[String, Map[String, TFun]],
+  std_names: Set[String],
+  adts: Adts,
+  consts: Map[String, CValue]
+}
+
+pub const MAX_CALL_DEPTH: Int = 100000
+
+fn cerr3(st: ESt, env: Env, msg: String, lo: Int, hi: Int) -> ER =
+  Err((st, env, CErr(Diag { msg: "comptime: " ++ msg, lo: lo, hi: hi, hint: "" })))
+
+fn cerrh3(st: ESt, env: Env, msg: String, lo: Int, hi: Int, hint: String) -> ER =
+  Err((st, env, CErr(Diag { msg: "comptime: " ++ msg, lo: lo, hi: hi, hint: hint })))
+
+fn burn(st: ESt, env: Env, lo: Int, hi: Int) -> ER =
+  if st.fuel - 1 < 0 {
+    cerrh3(st, env, "fuel exhausted — evaluation did not finish within the step budget",
+      lo, hi, "raise it with --comptime-fuel, or simplify the computation")
+  } else {
+    Ok((ESt { ..st, fuel: st.fuel - 1 }, env, VUnit))
+  }
+
+fn burn_n(st: ESt, env: Env, n: Int, lo: Int, hi: Int) -> ER = {
+  let cost = if n > 0 { n } else { 0 }
+  let left = st.fuel - cost
+  if left < 0 {
+    cerrh3(st, env, "fuel exhausted — evaluation did not finish within the step budget",
+      lo, hi, "raise it with --comptime-fuel, or simplify the computation")
+  } else {
+    Ok((ESt { ..st, fuel: left }, env, VUnit))
+  }
+}
+
+fn some_v(v: CValue) -> CValue = VAdt(OPTION_ID, 0, [v])
+
+fn none_v() -> CValue = VAdt(OPTION_ID, 1, [])
+
+# ---- value helpers (a mismatch here is an interpreter bug, not a user error) ----
+
+fn as_int(v: CValue) -> Int =
+  match v {
+    VInt(n) -> n
+    _ -> panic("comptime interpreter bug: expected Int")
+  }
+
+fn as_bool(v: CValue) -> Bool =
+  match v {
+    VBool(b) -> b
+    _ -> panic("comptime interpreter bug: expected Bool")
+  }
+
+fn as_str(v: CValue) -> String =
+  match v {
+    VStr(s) -> s
+    _ -> panic("comptime interpreter bug: expected String")
+  }
+
+fn as_list(v: CValue) -> List[CValue] =
+  match v {
+    VList(xs) -> xs
+    _ -> panic("comptime interpreter bug: expected List")
+  }
+
+fn as_adt(v: CValue) -> (Int, Int, List[CValue]) =
+  match v {
+    VAdt(a, c, fs) -> (a, c, fs)
+    _ -> panic("comptime interpreter bug: expected an ADT value")
+  }
+
+## The Kotlin CValue class names, for route C marshalling errors.
+fn cvalue_kind(v: CValue) -> String =
+  match v {
+    VInt(_) -> "VInt"
+    VFloat(_) -> "VFloat"
+    VBool(_) -> "VBool"
+    VStr(_) -> "VString"
+    VUnit -> "VUnit"
+    VList(_) -> "VList"
+    VTuple(_) -> "VTuple"
+    VAdt(_, _, _) -> "VAdt"
+    VLambda(_, _, _, _) -> "VLambda"
+    VFnRef(_) -> "VFnRef"
+    VBuiltinF(_) -> "VBuiltin"
+    VCtorRef(_, _) -> "VCtorRef"
+  }
+
+fn stringify(v: CValue) -> String =
+  match v {
+    VInt(n) -> to_string(n)
+    VFloat(f) -> to_string(f)
+    VBool(b) -> to_string(b)
+    VStr(s) -> s
+    # unreachable: the checker restricts printable types
+    _ -> "<value>"
+  }
+
+## Java `==` on doubles (DCMPL): NaN is never equal, +0.0 equals -0.0 — unlike
+## Dawn's own total-order `==`, so it goes through java.lang.Double.
+fn float_java_eq(a: Float, b: Float) -> Bool !io = {
+  if Double.isNaN(a) || Double.isNaN(b) { return false }
+  let za = a == 0.0 || a == -0.0
+  let zb = b == 0.0 || b == -0.0
+  if za && zb { return true }
+  Double.compare(a, b) == 0
+}
+
+fn value_eq(a: CValue, b: CValue) -> Bool !io =
+  match a {
+    VInt(x) ->
+      match b {
+        VInt(y) -> x == y
+        _ -> false
+      }
+    VFloat(x) ->
+      match b {
+        VFloat(y) -> float_java_eq(x, y)
+        _ -> false
+      }
+    VBool(x) ->
+      match b {
+        VBool(y) -> x == y
+        _ -> false
+      }
+    VStr(x) ->
+      match b {
+        VStr(y) -> x == y
+        _ -> false
+      }
+    VUnit ->
+      match b {
+        VUnit -> true
+        _ -> false
+      }
+    VList(xs) ->
+      match b {
+        VList(ys) -> list_eq(xs, ys)
+        _ -> false
+      }
+    VTuple(xs) ->
+      match b {
+        VTuple(ys) -> list_eq(xs, ys)
+        _ -> false
+      }
+    VAdt(aid, ci, fs) ->
+      match b {
+        VAdt(bid, bci, gs) -> aid == bid && ci == bci && list_eq(fs, gs)
+        _ -> false
+      }
+    _ -> false
+  }
+
+fn list_eq(xs: List[CValue], ys: List[CValue]) -> Bool !io = {
+  if len(xs) != len(ys) { return false }
+  var i = 0
+  while i < len(xs) {
+    if not value_eq(xs[i], ys[i]) { return false }
+    i = i + 1
+  }
+  true
+}
+
+# ---- patterns ----
+
+## Bindings land in the env even when the pattern ultimately fails; symbols are
+## unique per declaration site, so a failed arm's bindings are never read.
+fn match_pat(icx: ICx, env: Env, p: TPat, v: CValue) -> (Env, Bool) !io =
+  match p {
+    TPWild -> (env, true)
+    TPBind(sym, _) -> (map.insert(env, sym, v), true)
+    TPLit(lit) ->
+      match lit {
+        LInt(n) -> (env, value_eq(v, VInt(n)))
+        LFloat(f) -> (env, value_eq(v, VFloat(f)))
+        LBool(b) -> (env, value_eq(v, VBool(b)))
+        LStr(s) -> (env, value_eq(v, VStr(s)))
+      }
+    TPTuple(elems) -> {
+      let vs = match v {
+        VTuple(xs) -> xs
+        _ -> panic("comptime interpreter bug: tuple pattern on a non-tuple")
+      }
+      var env1 = env
+      var ok = true
+      var i = 0
+      for sub in elems {
+        if ok {
+          let (env2, o) = match_pat(icx, env1, sub, vs[i])
+          env1 = env2
+          ok = o
+        }
+        i = i + 1
+      }
+      (env1, ok)
+    }
+    TPList(pre, has_rest, rest_sym, post) -> {
+      let xs = as_list(v)
+      let fixed = len(pre) + len(post)
+      let len_ok = if has_rest { len(xs) >= fixed } else { len(xs) == fixed }
+      if not len_ok { return (env, false) }
+      var env1 = env
+      var ok = true
+      var i = 0
+      for sub in pre {
+        if ok {
+          let (env2, o) = match_pat(icx, env1, sub, xs[i])
+          env1 = env2
+          ok = o
+        }
+        i = i + 1
+      }
+      var j = 0
+      for sub in post {
+        if ok {
+          let (env2, o) = match_pat(icx, env1, sub, xs[len(xs) - len(post) + j])
+          env1 = env2
+          ok = o
+        }
+        j = j + 1
+      }
+      if ok {
+        match rest_sym {
+          Some(rs) -> {
+            let mid = list.take(list.drop(xs, len(pre)), len(xs) - len(post) - len(pre))
+            env1 = map.insert(env1, rs, VList(mid))
+          }
+          None -> ()
+        }
+      }
+      (env1, ok)
+    }
+    TPCtor(aid, ci, fps) -> {
+      let (vaid, vci, fields) = as_adt(v)
+      if vaid != aid || vci != ci { return (env, false) }
+      var env1 = env
+      var ok = true
+      var i = 0
+      for fp in fps {
+        if ok {
+          match fp {
+            Some(sub) -> {
+              let (env2, o) = match_pat(icx, env1, sub, fields[i])
+              env1 = env2
+              ok = o
+            }
+            None -> ()
+          }
+        }
+        i = i + 1
+      }
+      (env1, ok)
+    }
+  }
+
+# ---- calls ----
+
+fn call_fn(icx: ICx, st: ESt, env: Env, f: TFun, args: List[CValue], lo: Int, hi: Int) -> ER !io = {
+  if st.depth + 1 > MAX_CALL_DEPTH {
+    return cerrh3(st, env, "call depth limit (" ++ to_string(MAX_CALL_DEPTH) ++ ") exceeded",
+      lo, hi, "deep recursion does not fit comptime; use a loop or fold")
+  }
+  var fenv: Env = map.empty()
+  var i = 0
+  for p in f.param_syms {
+    fenv = map.insert(fenv, p, args[i])
+    i = i + 1
+  }
+  match ceval(icx, ESt { ..st, depth: st.depth + 1 }, fenv, f.body) {
+    Ok(t) -> {
+      let (st1, _, v) = t
+      Ok((ESt { ..st1, depth: st1.depth - 1 }, env, v))
+    }
+    Err(t) -> {
+      let (st1, _, ctl) = t
+      match ctl {
+        CReturn(v) -> Ok((ESt { ..st1, depth: st1.depth - 1 }, env, v))
+        _ -> Err((ESt { ..st1, depth: st1.depth - 1 }, env, ctl))
+      }
+    }
+  }
+}
+
+pub fn apply_fn(icx: ICx, st: ESt, env: Env, f: CValue, args: List[CValue], lo: Int, hi: Int) -> ER !io =
+  match f {
+    VLambda(params, body, cenv, self) -> {
+      if st.depth + 1 > MAX_CALL_DEPTH {
+        return cerr3(st, env, "call depth limit (" ++ to_string(MAX_CALL_DEPTH) ++ ") exceeded", lo, hi)
+      }
+      var lenv = cenv
+      match self {
+        Some(sid) -> { lenv = map.insert(lenv, sid, f) }
+        None -> ()
+      }
+      var i = 0
+      for p in params {
+        lenv = map.insert(lenv, p, args[i])
+        i = i + 1
+      }
+      match ceval(icx, ESt { ..st, depth: st.depth + 1 }, lenv, body) {
+        Ok(t) -> {
+          let (st1, _, v) = t
+          Ok((ESt { ..st1, depth: st1.depth - 1 }, env, v))
+        }
+        Err(t) -> {
+          let (st1, _, ctl) = t
+          Err((ESt { ..st1, depth: st1.depth - 1 }, env, ctl))
+        }
+      }
+    }
+    VFnRef(d) -> call_fn(icx, st, env, d, args, lo, hi)
+    VBuiltinF(name) -> call_builtin(icx, st, env, name, args, lo, hi)
+    VCtorRef(aid, ci) -> Ok((st, env, VAdt(aid, ci, args)))
+    _ -> cerr3(st, env, "cannot call a non-function value", lo, hi)
+  }
+
+# ---- builtins (the pure ones; io never reaches the interpreter) ----
+
+fn call_builtin(icx: ICx, st: ESt, env: Env, name: String, args: List[CValue], lo: Int, hi: Int) -> ER !io =
+  if name == "panic" {
+    cerr3(st, env, "panicked: " ++ as_str(args[0]), lo, hi)
+  } else if name == "todo" {
+    cerr3(st, env, "panicked: not yet implemented", lo, hi)
+  } else if name == "expect" {
+    let (aid, ci, fields) = as_adt(args[0])
+    if adt_of(icx.adts, aid).ctors[ci].name == "Some" {
+      Ok((st, env, fields[0]))
+    } else {
+      cerr3(st, env, "panicked: " ++ as_str(args[1]), lo, hi)
+    }
+  } else if name == "unwrap_or" {
+    let (aid, ci, fields) = as_adt(args[0])
+    if adt_of(icx.adts, aid).ctors[ci].name == "Some" {
+      Ok((st, env, fields[0]))
+    } else {
+      Ok((st, env, args[1]))
+    }
+  } else if name == "to_float" {
+    Ok((st, env, VFloat(to_float(as_int(args[0])))))
+  } else if name == "to_int" {
+    let f = match args[0] {
+      VFloat(x) -> x
+      _ -> panic("comptime interpreter bug: to_int expects Float")
+    }
+    Ok((st, env, VInt(to_int(f))))
+  } else if name == "to_string" {
+    Ok((st, env, VStr(stringify(args[0]))))
+  } else if name == "len" {
+    Ok((st, env, VInt(len(as_list(args[0])))))
+  } else if name == "get" {
+    let xs = as_list(args[0])
+    let i = as_int(args[1])
+    if i >= 0 && i < len(xs) {
+      Ok((st, env, some_v(xs[i])))
+    } else {
+      Ok((st, env, none_v()))
+    }
+  } else if name == "range" {
+    let from = as_int(args[0])
+    let to = as_int(args[1])
+    let (st1, _, _) = burn_n(st, env, to - from, lo, hi)?
+    var out: List[CValue] = []
+    var i = from
+    while i < to {
+      out = out ++ [VInt(i)]
+      i = i + 1
+    }
+    Ok((st1, env, VList(out)))
+  } else if name == "sort_by" {
+    let (st1, sorted) = merge_sort(icx, st, env, as_list(args[0]), args[1], lo, hi)?
+    Ok((st1, env, VList(sorted)))
+  } else if name == "chars" {
+    let s = as_str(args[0])
+    let (st1, _, _) = burn_n(st, env, str.len(s), lo, hi)?
+    var out: List[CValue] = []
+    for c in str.chars(s) { out = out ++ [VStr(c)] }
+    Ok((st1, env, VList(out)))
+  } else if name == "join" {
+    var parts: List[String] = []
+    for x in as_list(args[0]) { parts = parts ++ [as_str(x)] }
+    Ok((st, env, VStr(join(parts, as_str(args[1])))))
+  } else if name == "split" {
+    let s = as_str(args[0])
+    let sep = as_str(args[1])
+    if sep == "" {
+      call_builtin(icx, st, env, "chars", [args[0]], lo, hi)
+    } else {
+      var out: List[CValue] = []
+      for part in str.split(s, sep) { out = out ++ [VStr(part)] }
+      Ok((st, env, VList(out)))
+    }
+  } else if name == "cursor_start" {
+    Ok((st, env, VInt(StdStrings.cursorStart(as_str(args[0])))))
+  } else if name == "cursor_end" {
+    Ok((st, env, VInt(StdStrings.cursorEnd(as_str(args[0])))))
+  } else if name == "cursor_done" {
+    Ok((st, env, VBool(StdStrings.cursorDone(as_str(args[0]), as_int(args[1])))))
+  } else if name == "cursor_char" {
+    Ok((st, env, VInt(StdStrings.cursorChar(as_str(args[0]), as_int(args[1])))))
+  } else if name == "cursor_next" {
+    Ok((st, env, VInt(StdStrings.cursorNext(as_str(args[0]), as_int(args[1])))))
+  } else if name == "cursor_prev" {
+    Ok((st, env, VInt(StdStrings.cursorPrev(as_str(args[0]), as_int(args[1])))))
+  } else if name == "cursor_slice" {
+    match StdStrings.cursorSlice(as_str(args[0]), as_int(args[1]), as_int(args[2])) {
+      Some(cut) -> Ok((st, env, VStr(cut)))
+      None -> cerr3(st, env, "panicked: cursor_slice: invalid cursor range", lo, hi)
+    }
+  } else if name == "cursor_skip" {
+    Ok((st, env, VInt(StdStrings.cursorSkip(as_str(args[0]), as_int(args[1]), as_str(args[2])))))
+  } else if name == "index_of_from" {
+    let i = StdStrings.indexOfFrom(as_str(args[0]), as_str(args[1]), as_int(args[2]))
+    if i < 0 {
+      Ok((st, env, none_v()))
+    } else {
+      Ok((st, env, some_v(VInt(i))))
+    }
+  } else if name == "parse_int" {
+    match parse_int(as_str(args[0])) {
+      Some(n) -> Ok((st, env, some_v(VInt(n))))
+      None -> Ok((st, env, none_v()))
+    }
+  } else if name == "parse_float" {
+    match parse_float(as_str(args[0])) {
+      Some(f) -> Ok((st, env, some_v(VFloat(f))))
+      None -> Ok((st, env, none_v()))
+    }
+  } else {
+    cerr3(st, env, "builtin `" ++ name ++ "` is not available at comptime", lo, hi)
+  }
+
+## Stable merge sort with the interpreted comparator (Kotlin sortedWith).
+fn merge_sort(
+  icx: ICx,
+  st: ESt,
+  env: Env,
+  xs: List[CValue],
+  f: CValue,
+  lo: Int,
+  hi: Int
+) -> Result[(ESt, List[CValue]), (ESt, Env, Ctl)] !io = {
+  if len(xs) <= 1 { return Ok((st, xs)) }
+  let mid = len(xs) / 2
+  let (st1, left) = merge_sort(icx, st, env, list.take(xs, mid), f, lo, hi)?
+  let (st2, right) = merge_sort(icx, st1, env, list.drop(xs, mid), f, lo, hi)?
+  var out: List[CValue] = []
+  var i = 0
+  var j = 0
+  var st3 = st2
+  while i < len(left) && j < len(right) {
+    let (st4, _, cv) = apply_fn(icx, st3, env, f, [left[i], right[j]], lo, hi)?
+    st3 = st4
+    if as_int(cv) <= 0 {
+      out = out ++ [left[i]]
+      i = i + 1
+    } else {
+      out = out ++ [right[j]]
+      j = j + 1
+    }
+  }
+  while i < len(left) {
+    out = out ++ [left[i]]
+    i = i + 1
+  }
+  while j < len(right) {
+    out = out ++ [right[j]]
+    j = j + 1
+  }
+  Ok((st3, out))
+}
+
+# ---- route C: fold a vouched Java call reflectively ----
+
+fn to_java_arg(p: String, v: CValue) -> Option[Object] !io =
+  match v {
+    VInt(n) ->
+      if p == "long" {
+        Some(Objects.requireNonNull(Long.valueOf(n).expect("box")).expect("non-null"))
+      } else if p == "int" {
+        Some(Objects.requireNonNull(Integer.valueOf(n).expect("box")).expect("non-null"))
+      } else {
+        None
+      }
+    VFloat(f) ->
+      if p == "double" {
+        Some(Objects.requireNonNull(Double.valueOf(f).expect("box")).expect("non-null"))
+      } else {
+        None
+      }
+    VBool(b) ->
+      if p == "boolean" {
+        Some(Objects.requireNonNull(Boolean.valueOf(b).expect("box")).expect("non-null"))
+      } else {
+        None
+      }
+    VStr(s) ->
+      if p == "java.lang.String" {
+        Some(Objects.requireNonNull(s).expect("non-null"))
+      } else {
+        None
+      }
+    _ -> None
+  }
+
+## Java result → Dawn value; must agree with the checker's map_java_return or
+## folding would lie. Reference returns arrive wrapped in Option.
+fn from_java_ret(st: ESt, env: Env, rc: String, r: Option[Object], lo: Int, hi: Int) -> ER !io =
+  if rc == "void" {
+    Ok((st, env, VUnit))
+  } else if rc == "long" || rc == "int" || rc == "short" || rc == "byte" {
+    let o = r.expect("primitive result")
+    let n2: Number = cast(o)
+    Ok((st, env, VInt(n2.longValue())))
+  } else if rc == "double" || rc == "float" {
+    let o = r.expect("primitive result")
+    let n2: Number = cast(o)
+    Ok((st, env, VFloat(n2.doubleValue())))
+  } else if rc == "boolean" {
+    let o = r.expect("primitive result")
+    let b2: Boolean = cast(o)
+    Ok((st, env, VBool(b2.booleanValue())))
+  } else if rc == "java.lang.String" {
+    match r {
+      None -> Ok((st, env, none_v()))
+      Some(o) -> {
+        let s2: String = cast(o)
+        Ok((st, env, some_v(VStr(s2))))
+      }
+    }
+  } else {
+    cerrh3(st, env, "cannot bring this Java result back at compile time", lo, hi,
+      "route C returns Int/Float/Bool/String (and Unit) only; got " ++
+        jreflect.class_info(rc).simple)
+  }
+
+## Route C (docs/pure-ffi-design.md): only reachable through unsafe_pure, only
+## static methods, only across the scalar/String boundary.
+fn eval_java(icx: ICx, st: ESt, env: Env, jc: TJavaCall, lo: Int, hi: Int) -> ER !io = {
+  if jc.is_ctor {
+    return cerr3(st, env, "Java constructors are not available at compile time", lo, hi)
+  }
+  if not st.in_up {
+    return cerrh3(st, env, "a Java call can only be folded inside `unsafe_pure`", lo, hi,
+      "the block is where purity is vouched for; without it the call is !io and " ++
+        "cannot reach a const in the first place")
+  }
+  let simple = jreflect.class_info(jc.fqcn).simple
+  if not jc.is_static {
+    return cerrh3(st, env, "only static Java methods can be folded", jc.nlo, jc.nhi,
+      "`" ++ simple ++ "." ++ jc.method ++ "` needs a receiver, and comptime " ++
+        "has no way to build a Java object")
+  }
+  var st1 = st
+  var env1 = env
+  var vals: List[CValue] = []
+  for a in jc.args {
+    let (st2, env2, v) = ceval(icx, st1, env1, a)?
+    st1 = st2
+    env1 = env2
+    vals = vals ++ [v]
+  }
+  var jargs: List[Object] = []
+  var i = 0
+  for p in jc.param_cls {
+    let v = vals[i]
+    match to_java_arg(p, v) {
+      Some(o) -> { jargs = jargs ++ [o] }
+      None ->
+        return cerrh3(st1, env1, "cannot pass this argument to Java at compile time", lo, hi,
+          "route C marshals Int/Float/Bool/String only; got a " ++ cvalue_kind(v) ++
+            " for a " ++ jreflect.class_info(p).simple ++ " parameter")
+    }
+    i = i + 1
+  }
+  # a Java call is opaque to the fuel counter, so charge a flat cost
+  let (st3, env3, _) = burn_n(st1, env1, 100, lo, hi)?
+  match jreflect.invoke_static(jc.fqcn, jc.method, jc.param_cls, jargs) {
+    Err(t) ->
+      cerrh3(st3, env3, "`" ++ simple ++ "." ++ jc.method ++ "` threw " ++ t, lo, hi,
+        "the unsafe_pure around this call vouches that it is pure and total; " ++
+          "a throw means that promise does not hold for these arguments")
+    Ok(r) -> from_java_ret(st3, env3, jc.ret_cls, r, lo, hi)
+  }
+}
+
+# ---- the evaluator ----
+
+pub fn ceval(icx: ICx, st0: ESt, env0: Env, e: TExpr) -> ER !io = {
+  let (st, env, _) = burn(st0, env0, x_lo(e), x_hi(e))?
+  match e {
+    XInt(v, _, _) -> Ok((st, env, VInt(v)))
+    XFloat(v, _, _) -> Ok((st, env, VFloat(v)))
+    XBool(v, _, _) -> Ok((st, env, VBool(v)))
+    XUnit(_, _) -> Ok((st, env, VUnit))
+    XStr(parts, _, _) -> {
+      var st1 = st
+      var env1 = env
+      var out = ""
+      for p in parts {
+        match p {
+          TSPText(t) -> { out = out ++ t }
+          TSPInterp(x) -> {
+            let (st2, env2, v) = ceval(icx, st1, env1, x)?
+            st1 = st2
+            env1 = env2
+            out = out ++ stringify(v)
+          }
+        }
+      }
+      Ok((st1, env1, VStr(out)))
+    }
+    XLocal(sym, name, lo, hi) ->
+      match map.get(env, sym) {
+        Some(v) -> Ok((st, env, v))
+        None -> cerr3(st, env, "`" ++ name ++ "` is not bound (interpreter bug)", lo, hi)
+      }
+    XFnValue(_, name, is_builtin, _, lo, hi) ->
+      if is_builtin {
+        Ok((st, env, VBuiltinF(name)))
+      } else {
+        match map.get(icx.fns, name) {
+          Some(f) -> Ok((st, env, VFnRef(f)))
+          None -> cerr3(st, env, "missing function `" ++ name ++ "`", lo, hi)
+        }
+      }
+    XLambda(params, _, body, captures, lo, hi) -> {
+      var caps: Env = map.empty()
+      for c in captures {
+        match map.get(env, c) {
+          Some(v) -> { caps = map.insert(caps, c, v) }
+          None -> ()
+        }
+      }
+      Ok((st, env, VLambda(params, body, caps, None)))
+    }
+    XComptime(body, _, _) -> {
+      let fresh: Env = map.empty()
+      let (st1, _, v) = ceval(icx, st, fresh, body)?
+      Ok((st1, env, v))
+    }
+    XUnsafePure(body, _, _) -> {
+      let saved = st.in_up
+      match ceval(icx, ESt { ..st, in_up: true }, env, body) {
+        Ok(t) -> {
+          let (st1, env1, v) = t
+          Ok((ESt { ..st1, in_up: saved }, env1, v))
+        }
+        Err(t) -> {
+          let (st1, env1, ctl) = t
+          Err((ESt { ..st1, in_up: saved }, env1, ctl))
+        }
+      }
+    }
+    XPropagate(operand, _, _) -> {
+      let (st1, env1, v) = ceval(icx, st, env, operand)?
+      let (aid, ci, fields) = as_adt(v)
+      let cname = adt_of(icx.adts, aid).ctors[ci].name
+      if cname == "Some" || cname == "Ok" {
+        Ok((st1, env1, fields[0]))
+      } else {
+        Err((st1, env1, CReturn(v)))
+      }
+    }
+    XUnwrap(operand, msg, lo, hi) -> {
+      let (st1, env1, v) = ceval(icx, st, env, operand)?
+      let (aid, ci, fields) = as_adt(v)
+      if adt_of(icx.adts, aid).ctors[ci].name == "Some" {
+        Ok((st1, env1, fields[0]))
+      } else {
+        cerr3(st1, env1, "panicked: " ++ msg, lo, hi)
+      }
+    }
+    XJava(jc, lo, hi) -> eval_java(icx, st, env, jc, lo, hi)
+    XReturn(v, _, _) ->
+      match v {
+        Some(x) -> {
+          let (st1, env1, rv) = ceval(icx, st, env, x)?
+          Err((st1, env1, CReturn(rv)))
+        }
+        None -> Err((st, env, CReturn(VUnit)))
+      }
+    XBreak(_, _) -> Err((st, env, CBreak))
+    XContinue(_, _) -> Err((st, env, CContinue))
+    XIndex(target, index, on_map, lo, hi) -> {
+      let (st1, env1, tv) = ceval(icx, st, env, target)?
+      let (st2, env2, iv) = ceval(icx, st1, env1, index)?
+      if on_map { return cerr3(st2, env2, "`[]` in comptime indexes List only", lo, hi) }
+      let xs = as_list(tv)
+      let i = as_int(iv)
+      if i < 0 || i >= len(xs) {
+        cerr3(st2, env2, "index " ++ to_string(i) ++ " out of bounds for length " ++
+            to_string(len(xs)), lo, hi)
+      } else {
+        Ok((st2, env2, xs[i]))
+      }
+    }
+    XCallDyn(sym, name, args, lo, hi) -> {
+      let f = match map.get(env, sym) {
+        Some(v) -> v
+        None -> return cerr3(st, env, "`" ++ name ++ "` is not bound (interpreter bug)", lo, hi)
+      }
+      var st1 = st
+      var env1 = env
+      var vals: List[CValue] = []
+      for a in args {
+        let (st2, env2, v) = ceval(icx, st1, env1, a)?
+        st1 = st2
+        env1 = env2
+        vals = vals ++ [v]
+      }
+      apply_fn(icx, st1, env1, f, vals, lo, hi)
+    }
+    XCallBuiltin(name, args, lo, hi) -> {
+      var st1 = st
+      var env1 = env
+      var vals: List[CValue] = []
+      for a in args {
+        let (st2, env2, v) = ceval(icx, st1, env1, a)?
+        st1 = st2
+        env1 = env2
+        vals = vals ++ [v]
+      }
+      call_builtin(icx, st1, env1, name, vals, lo, hi)
+    }
+    XCallFn(owner, name, args, has_witnesses, lo, hi) -> {
+      if has_witnesses {
+        return cerrh3(st, env, "`" ++ name ++
+            "` uses trait bounds, which comptime cannot evaluate yet", lo, hi,
+          "trait dictionaries are a runtime construct in v1")
+      }
+      var st1 = st
+      var env1 = env
+      var vals: List[CValue] = []
+      for a in args {
+        let (st2, env2, v) = ceval(icx, st1, env1, a)?
+        st1 = st2
+        env1 = env2
+        vals = vals ++ [v]
+      }
+      var decl: Option[TFun] = None
+      match owner {
+        Some(o) ->
+          match map.get(icx.by_owner, o) {
+            Some(tbl) -> { decl = map.get(tbl, name) }
+            None -> ()
+          }
+        None -> ()
+      }
+      if decl == None { decl = map.get(icx.fns, name) }
+      let f = match decl {
+        Some(d) -> d
+        None -> return cerr3(st1, env1, "missing function `" ++ name ++ "`", lo, hi)
+      }
+      # A failure inside std carries a span into the std source; re-point it at
+      # the call site, the part of the program the user can act on.
+      let in_std = set.has(icx.std_names, name) || match owner {
+        Some(o) -> str.starts_with(o, "std/")
+        None -> false
+      }
+      if in_std {
+        match call_fn(icx, st1, env1, f, vals, lo, hi) {
+          Ok(t) -> Ok(t)
+          Err(t) -> {
+            let (st3, env3, ctl) = t
+            match ctl {
+              CErr(d) -> Err((st3, env3, CErr(Diag {
+                msg: d.msg,
+                lo: lo,
+                hi: hi,
+                hint: "raised inside the standard library function `" ++ name ++ "`"
+              })))
+              _ -> Err((st3, env3, ctl))
+            }
+          }
+        }
+      } else {
+        call_fn(icx, st1, env1, f, vals, lo, hi)
+      }
+    }
+    XApply(target, args, lo, hi) -> {
+      let (st1, env1, f) = ceval(icx, st, env, target)?
+      var st2 = st1
+      var env2 = env1
+      var vals: List[CValue] = []
+      for a in args {
+        let (st3, env3, v) = ceval(icx, st2, env2, a)?
+        st2 = st3
+        env2 = env3
+        vals = vals ++ [v]
+      }
+      apply_fn(icx, st2, env2, f, vals, lo, hi)
+    }
+    XCtor(aid, ci, written, slots, spread, lo, hi) -> {
+      let nfields = len(adt_of(icx.adts, aid).ctors[ci].fields)
+      if nfields == 0 { return Ok((st, env, VAdt(aid, ci, []))) }
+      var st1 = st
+      var env1 = env
+      var sv: Option[CValue] = None
+      match spread {
+        Some(sp) -> {
+          let (st2, env2, v) = ceval(icx, st1, env1, sp)?
+          st1 = st2
+          env1 = env2
+          sv = Some(v)
+        }
+        None -> ()
+      }
+      # written order first (effects don't exist here, but keep the semantics)
+      var wvals: List[CValue] = []
+      for w in written {
+        let (st2, env2, v) = ceval(icx, st1, env1, w)?
+        st1 = st2
+        env1 = env2
+        wvals = wvals ++ [v]
+      }
+      var fields: List[CValue] = []
+      var i = 0
+      for sl in slots {
+        match sl {
+          Some(wi) -> { fields = fields ++ [wvals[wi]] }
+          None -> {
+            let (_, _, sfields) = as_adt(sv.expect("spread base"))
+            fields = fields ++ [sfields[i]]
+          }
+        }
+        i = i + 1
+      }
+      Ok((st1, env1, VAdt(aid, ci, fields)))
+    }
+    XConstRef(name, lo, hi) ->
+      match map.get(icx.consts, name) {
+        Some(v) -> Ok((st, env, v))
+        None -> cerr3(st, env, "const `" ++ name ++ "` failed to evaluate", lo, hi)
+      }
+    XCtorValue(aid, ci, _, _) -> Ok((st, env, VCtorRef(aid, ci)))
+    XField(target, field_idx, _, _) -> {
+      let (st1, env1, v) = ceval(icx, st, env, target)?
+      let (_, _, fields) = as_adt(v)
+      Ok((st1, env1, fields[field_idx]))
+    }
+    XListLit(elems, _, _) -> {
+      var st1 = st
+      var env1 = env
+      var vals: List[CValue] = []
+      for x in elems {
+        let (st2, env2, v) = ceval(icx, st1, env1, x)?
+        st1 = st2
+        env1 = env2
+        vals = vals ++ [v]
+      }
+      Ok((st1, env1, VList(vals)))
+    }
+    XTupleLit(elems, _, _) -> {
+      var st1 = st
+      var env1 = env
+      var vals: List[CValue] = []
+      for x in elems {
+        let (st2, env2, v) = ceval(icx, st1, env1, x)?
+        st1 = st2
+        env1 = env2
+        vals = vals ++ [v]
+      }
+      Ok((st1, env1, VTuple(vals)))
+    }
+    XBinary(op, l, r, has_ord, olo, ohi, _, _) ->
+      eval_binary(icx, st, env, op, l, r, has_ord, olo, ohi)
+    XUnary(op, operand, lo, hi) -> {
+      let (st1, env1, v) = ceval(icx, st, env, operand)?
+      match op {
+        UNot -> Ok((st1, env1, VBool(not as_bool(v))))
+        UNeg ->
+          match v {
+            VInt(n) -> Ok((st1, env1, VInt(0 - n)))
+            VFloat(f) -> Ok((st1, env1, VFloat(0.0 - f)))
+            _ -> cerr3(st1, env1, "negation needs a number", lo, hi)
+          }
+        UBnot ->
+          match v {
+            VInt(n) -> Ok((st1, env1, VInt(bnot_int(n))))
+            _ -> cerr3(st1, env1, "`~` needs an Int", lo, hi)
+          }
+      }
+    }
+    XIf(cond, thn, els, _, _) -> {
+      let (st1, env1, cv) = ceval(icx, st, env, cond)?
+      if as_bool(cv) {
+        ceval(icx, st1, env1, thn)
+      } else {
+        match els {
+          Some(eb) -> ceval(icx, st1, env1, eb)
+          None -> Ok((st1, env1, VUnit))
+        }
+      }
+    }
+    XMatch(scrut, arms, lo, hi) -> {
+      let (st1, env1, sv) = ceval(icx, st, env, scrut)?
+      var st2 = st1
+      var env2 = env1
+      for arm in arms {
+        var matched = false
+        for p in arm.pats {
+          if not matched {
+            let (env3, ok) = match_pat(icx, env2, p, sv)
+            env2 = env3
+            if ok { matched = true }
+          }
+        }
+        if matched {
+          var guard_ok = true
+          match arm.guard {
+            Some(g) -> {
+              let (st3, env4, gv) = ceval(icx, st2, env2, g)?
+              st2 = st3
+              env2 = env4
+              guard_ok = as_bool(gv)
+            }
+            None -> ()
+          }
+          if guard_ok { return ceval(icx, st2, env2, arm.body) }
+        }
+      }
+      cerr3(st2, env2, "no match arm matched (checker bug?)", lo, hi)
+    }
+    XBlock(stmts, tail, _, _) -> {
+      var st1 = st
+      var env1 = env
+      for s in stmts {
+        let (st2, env2) = exec_stmt(icx, st1, env1, s)?
+        st1 = st2
+        env1 = env2
+      }
+      match tail {
+        Some(x) -> ceval(icx, st1, env1, x)
+        None -> Ok((st1, env1, VUnit))
+      }
+    }
+    XError(lo, hi) ->
+      cerr3(st, env, "evaluation reached an expression that failed to check", lo, hi)
+  }
+}
+
+## Two's-complement bitwise not, spelled with xor so the interpreter does not
+## depend on its own host `~`.
+fn bnot_int(n: Int) -> Int = -1 ^ n
+
+fn eval_binary(
+  icx: ICx,
+  st: ESt,
+  env: Env,
+  op: TBinOp,
+  l: TExpr,
+  r: TExpr,
+  has_ord: Bool,
+  olo: Int,
+  ohi: Int
+) -> ER !io = {
+  if op == BAnd || op == BOr {
+    let (st1, env1, lv) = ceval(icx, st, env, l)?
+    let lb = as_bool(lv)
+    if op == BAnd && not lb { return Ok((st1, env1, VBool(false))) }
+    if op == BOr && lb { return Ok((st1, env1, VBool(true))) }
+    return ceval(icx, st1, env1, r)
+  }
+  let (st1, env1, lv) = ceval(icx, st, env, l)?
+  let (st2, env2, rv) = ceval(icx, st1, env1, r)?
+  if op == BAdd || op == BSub || op == BMul || op == BDiv || op == BMod {
+    return arith(st2, env2, op, lv, rv, olo, ohi)
+  }
+  if op == BBand || op == BBor || op == BBxor || op == BShl || op == BShr || op == BUshr {
+    return bitwise(st2, env2, op, lv, rv, olo, ohi)
+  }
+  if op == BConcat {
+    match lv {
+      VStr(a) ->
+        match rv {
+          VStr(b) -> return Ok((st2, env2, VStr(a ++ b)))
+          _ -> ()
+        }
+      VList(a) ->
+        match rv {
+          VList(b) -> return Ok((st2, env2, VList(a ++ b)))
+          _ -> ()
+        }
+      _ -> ()
+    }
+    return cerr3(st2, env2, "`++` needs two Strings or two Lists", olo, ohi)
+  }
+  if op == BEq { return Ok((st2, env2, VBool(value_eq(lv, rv)))) }
+  if op == BNeq { return Ok((st2, env2, VBool(not value_eq(lv, rv)))) }
+  # ordered comparisons
+  if has_ord {
+    return cerrh3(st2, env2, "ordering through a trait impl is not supported in comptime yet",
+      olo, ohi, "trait dictionaries are a runtime construct in v1")
+  }
+  var c = 0
+  match lv {
+    VInt(a) -> {
+      let b = as_int(rv)
+      c = if a < b { -1 } else if a > b { 1 } else { 0 }
+    }
+    VStr(a) -> {
+      let b = as_str(rv)
+      c = if a < b { -1 } else if a > b { 1 } else { 0 }
+    }
+    VFloat(a) -> {
+      let b = match rv {
+        VFloat(x) -> x
+        _ -> panic("comptime interpreter bug: mixed comparison")
+      }
+      # NaN: every ordered comparison is false (spec §4.3)
+      if Double.isNaN(a) || Double.isNaN(b) { return Ok((st2, env2, VBool(false))) }
+      c = Double.compare(a, b)
+    }
+    _ -> return cerr3(st2, env2, "cannot order these values", olo, ohi)
+  }
+  let res = if op == BLt {
+    c < 0
+  } else if op == BLe {
+    c <= 0
+  } else if op == BGt {
+    c > 0
+  } else {
+    c >= 0
+  }
+  Ok((st2, env2, VBool(res)))
+}
+
+fn arith(st: ESt, env: Env, op: TBinOp, lv: CValue, rv: CValue, olo: Int, ohi: Int) -> ER =
+  match lv {
+    VInt(a) ->
+      match rv {
+        VInt(b) ->
+          if op == BAdd {
+            Ok((st, env, VInt(a + b)))
+          } else if op == BSub {
+            Ok((st, env, VInt(a - b)))
+          } else if op == BMul {
+            Ok((st, env, VInt(a * b)))
+          } else if op == BDiv {
+            if b == 0 {
+              cerr3(st, env, "panicked: Int division by zero", olo, ohi)
+            } else {
+              Ok((st, env, VInt(a / b)))
+            }
+          } else {
+            if b == 0 {
+              cerr3(st, env, "panicked: Int modulo by zero", olo, ohi)
+            } else {
+              Ok((st, env, VInt(a % b)))
+            }
+          }
+        _ -> cerr3(st, env, "arithmetic needs two numbers of the same type", olo, ohi)
+      }
+    VFloat(a) ->
+      match rv {
+        VFloat(b) ->
+          if op == BAdd {
+            Ok((st, env, VFloat(a + b)))
+          } else if op == BSub {
+            Ok((st, env, VFloat(a - b)))
+          } else if op == BMul {
+            Ok((st, env, VFloat(a * b)))
+          } else if op == BDiv {
+            Ok((st, env, VFloat(a / b)))
+          } else {
+            Ok((st, env, VFloat(a % b)))
+          }
+        _ -> cerr3(st, env, "arithmetic needs two numbers of the same type", olo, ohi)
+      }
+    _ -> cerr3(st, env, "arithmetic needs two numbers of the same type", olo, ohi)
+  }
+
+fn bitwise(st: ESt, env: Env, op: TBinOp, lv: CValue, rv: CValue, olo: Int, ohi: Int) -> ER =
+  match lv {
+    VInt(a) ->
+      match rv {
+        VInt(b) -> {
+          let r = if op == BBand {
+            a & b
+          } else if op == BBor {
+            a | b
+          } else if op == BBxor {
+            a ^ b
+          } else if op == BShl {
+            a << b
+          } else if op == BShr {
+            a >> b
+          } else {
+            a >>> b
+          }
+          Ok((st, env, VInt(r)))
+        }
+        _ -> cerr3(st, env, "bitwise operators need two Ints", olo, ohi)
+      }
+    _ -> cerr3(st, env, "bitwise operators need two Ints", olo, ohi)
+  }
+
+# ---- statements ----
+
+fn exec_stmt(icx: ICx, st0: ESt, env0: Env, s: TStmt) -> SR !io = {
+  let (st, env, _) = burn(st0, env0, ts_lo(s), ts_hi(s))?
+  match s {
+    TSLet(sym, _, init, _, _) -> {
+      let (st1, env1, v) = ceval(icx, st, env, init)?
+      match sym {
+        Some(sid) -> Ok((st1, map.insert(env1, sid, v)))
+        None -> Ok((st1, env1))
+      }
+    }
+    TSLocalFn(sym, _, params, _, body, _, _, _) -> {
+      # the captured env holds the whole scope; `self` re-binds for recursion
+      let v = VLambda(params, body, env, Some(sym))
+      Ok((st, map.insert(env, sym, v)))
+    }
+    TSLetPat(pat, init, lo, hi) -> {
+      let (st1, env1, v) = ceval(icx, st, env, init)?
+      let (env2, ok) = match_pat(icx, env1, pat, v)
+      if ok {
+        Ok((st1, env2))
+      } else {
+        match cerr3(st1, env2, "irrefutable pattern failed to match (checker bug?)", lo, hi) {
+          Err(t) -> Err(t)
+          Ok(_) -> panic("unreachable")
+        }
+      }
+    }
+    TSAssign(sym, _, value, _, _) -> {
+      let (st1, env1, v) = ceval(icx, st, env, value)?
+      Ok((st1, map.insert(env1, sym, v)))
+    }
+    TSExpr(e, _, _) -> {
+      let (st1, env1, _) = ceval(icx, st, env, e)?
+      Ok((st1, env1))
+    }
+    TSAssert(_, _, lo, hi) ->
+      match cerr3(st, env, "assert cannot appear in comptime code", lo, hi) {
+        Err(t) -> Err(t)
+        Ok(_) -> panic("unreachable")
+      }
+    TSWhile(cond, body, _, lo, hi) -> {
+      var st1 = st
+      var env1 = env
+      var go = true
+      while go {
+        let (st2, env2, cv) = ceval(icx, st1, env1, cond)?
+        st1 = st2
+        env1 = env2
+        if as_bool(cv) {
+          let (st3, env3, _) = burn(st1, env1, lo, hi)?
+          st1 = st3
+          env1 = env3
+          match ceval(icx, st1, env1, body) {
+            Ok(t) -> {
+              let (st4, env4, _) = t
+              st1 = st4
+              env1 = env4
+            }
+            Err(t) -> {
+              let (st4, env4, ctl) = t
+              st1 = st4
+              env1 = env4
+              match ctl {
+                CBreak -> { go = false }
+                CContinue -> ()
+                _ -> return Err((st1, env1, ctl))
+              }
+            }
+          }
+        } else {
+          go = false
+        }
+      }
+      Ok((st1, env1))
+    }
+    TSFor(sym, _, from, to_opt, body, _, lo, hi) -> {
+      var st1 = st
+      var env1 = env
+      match to_opt {
+        None -> {
+          let (st2, env2, fv) = ceval(icx, st1, env1, from)?
+          st1 = st2
+          env1 = env2
+          var broke = false
+          for v in as_list(fv) {
+            if not broke {
+              let (st3, env3, _) = burn(st1, env1, lo, hi)?
+              st1 = st3
+              env1 = map.insert(env3, sym, v)
+              match ceval(icx, st1, env1, body) {
+                Ok(t) -> {
+                  let (st4, env4, _) = t
+                  st1 = st4
+                  env1 = env4
+                }
+                Err(t) -> {
+                  let (st4, env4, ctl) = t
+                  st1 = st4
+                  env1 = env4
+                  match ctl {
+                    CBreak -> { broke = true }
+                    CContinue -> ()
+                    _ -> return Err((st1, env1, ctl))
+                  }
+                }
+              }
+            }
+          }
+          Ok((st1, env1))
+        }
+        Some(te) -> {
+          let (st2, env2, fv) = ceval(icx, st1, env1, from)?
+          let (st3, env3, tv) = ceval(icx, st2, env2, te)?
+          st1 = st3
+          env1 = env3
+          var i = as_int(fv)
+          let to = as_int(tv)
+          var broke = false
+          while i < to && not broke {
+            let (st4, env4, _) = burn(st1, env1, lo, hi)?
+            st1 = st4
+            env1 = map.insert(env4, sym, VInt(i))
+            match ceval(icx, st1, env1, body) {
+              Ok(t) -> {
+                let (st5, env5, _) = t
+                st1 = st5
+                env1 = env5
+              }
+              Err(t) -> {
+                let (st5, env5, ctl) = t
+                st1 = st5
+                env1 = env5
+                match ctl {
+                  CBreak -> { broke = true }
+                  CContinue -> ()
+                  _ -> return Err((st1, env1, ctl))
+                }
+              }
+            }
+            i = i + 1
+          }
+          Ok((st1, env1))
+        }
+      }
+    }
+  }
+}
+
+# ---- the module driver ----
+
+## Accumulated results of one module's comptime evaluation: diagnostics,
+## const values by name, comptime-block values by (lo, hi) span.
+pub type CtOut = {
+  diags: List[Diag],
+  consts: Map[String, CValue],
+  blocks: Map[(Int, Int), CValue]
+}
+
+fn eval_block(icx: ICx, fuel: Int, body: TExpr, out: CtOut, lo: Int, hi: Int) -> CtOut !io = {
+  let fresh: Env = map.empty()
+  match ceval(icx, ESt { fuel: fuel, depth: 0, in_up: false }, fresh, body) {
+    Ok(t) -> {
+      let (_, _, v) = t
+      CtOut { ..out, blocks: map.insert(out.blocks, (lo, hi), v) }
+    }
+    Err(t) -> {
+      let (_, _, ctl) = t
+      match ctl {
+        CErr(d) -> CtOut { ..out, diags: out.diags ++ [d] }
+        # return/break escaping a comptime block cannot pass checking
+        _ -> CtOut { ..out, diags: out.diags ++ [Diag {
+          msg: "comptime: control flow escaped a comptime block (interpreter bug)",
+          lo: lo,
+          hi: hi,
+          hint: ""
+        }] }
+      }
+    }
+  }
+}
+
+## Find comptime blocks in a checked body and evaluate each with a fresh fuel
+## budget (the Kotlin walker). Nested blocks inside one are folded during the
+## outer evaluation and never reach codegen separately.
+fn walk_expr(icx: ICx, fuel: Int, e: TExpr, out: CtOut) -> CtOut !io =
+  match e {
+    XComptime(body, lo, hi) -> eval_block(icx, fuel, body, out, lo, hi)
+    XStr(parts, _, _) -> {
+      var out1 = out
+      for p in parts {
+        match p {
+          TSPInterp(x) -> { out1 = walk_expr(icx, fuel, x, out1) }
+          TSPText(_) -> ()
+        }
+      }
+      out1
+    }
+    XLambda(_, _, body, _, _, _) -> walk_expr(icx, fuel, body, out)
+    XApply(target, args, _, _) -> {
+      var out1 = walk_expr(icx, fuel, target, out)
+      for a in args { out1 = walk_expr(icx, fuel, a, out1) }
+      out1
+    }
+    XJava(jc, _, _) -> {
+      var out1 = out
+      match jc.target {
+        Some(t) -> { out1 = walk_expr(icx, fuel, t, out1) }
+        None -> ()
+      }
+      for a in jc.args { out1 = walk_expr(icx, fuel, a, out1) }
+      out1
+    }
+    XPropagate(operand, _, _) -> walk_expr(icx, fuel, operand, out)
+    XUnwrap(operand, _, _, _) -> walk_expr(icx, fuel, operand, out)
+    XReturn(v, _, _) ->
+      match v {
+        Some(x) -> walk_expr(icx, fuel, x, out)
+        None -> out
+      }
+    XIndex(target, index, _, _, _) ->
+      walk_expr(icx, fuel, index, walk_expr(icx, fuel, target, out))
+    XCallDyn(_, _, args, _, _) -> {
+      var out1 = out
+      for a in args { out1 = walk_expr(icx, fuel, a, out1) }
+      out1
+    }
+    XCallBuiltin(_, args, _, _) -> {
+      var out1 = out
+      for a in args { out1 = walk_expr(icx, fuel, a, out1) }
+      out1
+    }
+    XCallFn(_, _, args, _, _, _) -> {
+      var out1 = out
+      for a in args { out1 = walk_expr(icx, fuel, a, out1) }
+      out1
+    }
+    XCtor(_, _, written, _, spread, _, _) -> {
+      var out1 = out
+      match spread {
+        Some(sp) -> { out1 = walk_expr(icx, fuel, sp, out1) }
+        None -> ()
+      }
+      for w in written { out1 = walk_expr(icx, fuel, w, out1) }
+      out1
+    }
+    XField(target, _, _, _) -> walk_expr(icx, fuel, target, out)
+    XListLit(elems, _, _) -> {
+      var out1 = out
+      for x in elems { out1 = walk_expr(icx, fuel, x, out1) }
+      out1
+    }
+    XTupleLit(elems, _, _) -> {
+      var out1 = out
+      for x in elems { out1 = walk_expr(icx, fuel, x, out1) }
+      out1
+    }
+    XBinary(_, l, r, _, _, _, _, _) -> walk_expr(icx, fuel, r, walk_expr(icx, fuel, l, out))
+    XUnary(_, operand, _, _) -> walk_expr(icx, fuel, operand, out)
+    XIf(cond, thn, els, _, _) -> {
+      var out1 = walk_expr(icx, fuel, thn, walk_expr(icx, fuel, cond, out))
+      match els {
+        Some(eb) -> walk_expr(icx, fuel, eb, out1)
+        None -> out1
+      }
+    }
+    XMatch(scrut, arms, _, _) -> {
+      var out1 = walk_expr(icx, fuel, scrut, out)
+      for arm in arms {
+        match arm.guard {
+          Some(g) -> { out1 = walk_expr(icx, fuel, g, out1) }
+          None -> ()
+        }
+        out1 = walk_expr(icx, fuel, arm.body, out1)
+      }
+      out1
+    }
+    XBlock(stmts, tail, _, _) -> {
+      var out1 = out
+      for s in stmts { out1 = walk_stmt(icx, fuel, s, out1) }
+      match tail {
+        Some(x) -> walk_expr(icx, fuel, x, out1)
+        None -> out1
+      }
+    }
+    XUnsafePure(body, _, _) -> walk_expr(icx, fuel, body, out)
+    _ -> out
+  }
+
+fn walk_stmt(icx: ICx, fuel: Int, s: TStmt, out: CtOut) -> CtOut !io =
+  match s {
+    TSLet(_, _, init, _, _) -> walk_expr(icx, fuel, init, out)
+    TSLetPat(_, init, _, _) -> walk_expr(icx, fuel, init, out)
+    TSLocalFn(_, _, _, _, body, _, _, _) -> walk_expr(icx, fuel, body, out)
+    TSAssign(_, _, value, _, _) -> walk_expr(icx, fuel, value, out)
+    TSExpr(e, _, _) -> walk_expr(icx, fuel, e, out)
+    TSAssert(cond, _, _, _) -> walk_expr(icx, fuel, cond, out)
+    TSWhile(cond, body, _, _, _) -> walk_expr(icx, fuel, body, walk_expr(icx, fuel, cond, out))
+    TSFor(_, _, from, to_opt, body, _, _, _) -> {
+      var out1 = walk_expr(icx, fuel, from, out)
+      match to_opt {
+        Some(t) -> { out1 = walk_expr(icx, fuel, t, out1) }
+        None -> ()
+      }
+      walk_expr(icx, fuel, body, out1)
+    }
+  }
+
+## Evaluate all comptime constructs of a checked module: consts in declaration
+## order (each interpreter gets a fresh fuel budget), then comptime blocks in
+## function and test bodies. Failures become ordinary diagnostics.
+pub fn eval_comptime(
+  tm: TModule,
+  std_fns: Map[String, TFun],
+  by_owner: Map[String, Map[String, TFun]],
+  std_names: Set[String],
+  adts: Adts,
+  fuel: Int
+) -> CtOut !io = {
+  # std is implicitly visible, so a const may call it; a local definition
+  # still shadows it, matching the checker's local → std → builtin order
+  var fns = std_fns
+  for f in tm.fns { fns = map.insert(fns, f.name, f) }
+  let empty_c: Map[String, CValue] = map.empty()
+  let empty_b: Map[(Int, Int), CValue] = map.empty()
+  var out = CtOut { diags: [], consts: empty_c, blocks: empty_b }
+  for c in tm.consts {
+    let icx = ICx {
+      fns: fns,
+      by_owner: by_owner,
+      std_names: std_names,
+      adts: adts,
+      consts: out.consts
+    }
+    let fresh: Env = map.empty()
+    match ceval(icx, ESt { fuel: fuel, depth: 0, in_up: false }, fresh, c.init) {
+      Ok(t) -> {
+        let (_, _, v) = t
+        out = CtOut { ..out, consts: map.insert(out.consts, c.name, v) }
+      }
+      Err(t) -> {
+        let (_, _, ctl) = t
+        match ctl {
+          CErr(d) -> { out = CtOut { ..out, diags: out.diags ++ [d] } }
+          _ -> {
+            out = CtOut { ..out, diags: out.diags ++ [Diag {
+              msg: "comptime: control flow escaped a const initializer (interpreter bug)",
+              lo: c.lo,
+              hi: c.hi,
+              hint: ""
+            }] }
+          }
+        }
+      }
+    }
+  }
+  let icx = ICx {
+    fns: fns,
+    by_owner: by_owner,
+    std_names: std_names,
+    adts: adts,
+    consts: out.consts
+  }
+  for f in tm.fns { out = walk_expr(icx, fuel, f.body, out) }
+  for t in tm.tests { out = walk_expr(icx, fuel, t.body, out) }
+  out
+}
+
+# ---- tests ----
+
+test "consts evaluate in declaration order and fold across references" {
+  let src = "const A: Int = 1 + 2\n" ++
+    "const B: List[Int] = [A, 4]\n" ++
+    "const C: String = \"x\" ++ to_string(A)\n"
+  let (m, pdiags) = parser.parse_module(src)
+  assert len(pdiags) == 0
+  let env: Map[String, ModExports] = map.empty()
+  let (cx1, tm) = check_module(cx_new(None, None), m, env)
+  assert len(cx1.diags) == 0
+  let no_fns: Map[String, TFun] = map.empty()
+  let no_owner: Map[String, Map[String, TFun]] = map.empty()
+  let out = eval_comptime(tm, no_fns, no_owner, set.empty(), cx1.adts, 1000000)
+  assert len(out.diags) == 0
+  assert map.get(out.consts, "A") == Some(VInt(3))
+  assert map.get(out.consts, "B") == Some(VList([VInt(3), VInt(4)]))
+  assert map.get(out.consts, "C") == Some(VStr("x3"))
+}
+
+test "const initializers run blocks, local fns, matches and loops" {
+  let src = "const D: Int = {\n" ++
+    "  fn go(n: Int) -> Int = if n == 0 { 0 } else { n + go(n - 1) }\n" ++
+    "  go(10)\n" ++
+    "}\n" ++
+    "const G: Int = match [1, 2, 3] {\n" ++
+    "  [x, ..rest] -> x + len(rest) * 10\n" ++
+    "  [] -> 0\n" ++
+    "}\n" ++
+    "const H: Int = {\n" ++
+    "  var acc = 0\n" ++
+    "  for i in 0 ..5 {\n" ++
+    "    if i == 3 { continue }\n" ++
+    "    acc = acc + i\n" ++
+    "  }\n" ++
+    "  acc\n" ++
+    "}\n"
+  let (m, pdiags) = parser.parse_module(src)
+  assert len(pdiags) == 0
+  let env: Map[String, ModExports] = map.empty()
+  let (cx1, tm) = check_module(cx_new(None, None), m, env)
+  assert len(cx1.diags) == 0
+  let no_fns: Map[String, TFun] = map.empty()
+  let no_owner: Map[String, Map[String, TFun]] = map.empty()
+  let out = eval_comptime(tm, no_fns, no_owner, set.empty(), cx1.adts, 1000000)
+  assert len(out.diags) == 0
+  assert map.get(out.consts, "D") == Some(VInt(55))
+  assert map.get(out.consts, "G") == Some(VInt(21))
+  assert map.get(out.consts, "H") == Some(VInt(7))
+}
+
+test "comptime failures become diagnostics; blocks in bodies fold" {
+  let src = "const E: Int = 1 / 0\n" ++
+    "fn f() -> Int = comptime { 6 * 7 }\n"
+  let (m, pdiags) = parser.parse_module(src)
+  assert len(pdiags) == 0
+  let env: Map[String, ModExports] = map.empty()
+  let (cx1, tm) = check_module(cx_new(None, None), m, env)
+  assert len(cx1.diags) == 0
+  let no_fns: Map[String, TFun] = map.empty()
+  let no_owner: Map[String, Map[String, TFun]] = map.empty()
+  let out = eval_comptime(tm, no_fns, no_owner, set.empty(), cx1.adts, 1000000)
+  assert len(out.diags) == 1
+  assert out.diags[0].msg == "comptime: panicked: Int division by zero"
+  assert map.size(out.blocks) == 1
+  var vals: List[CValue] = []
+  for k in map.keys(out.blocks) {
+    vals = vals ++ [map.get(out.blocks, k).expect("block")]
+  }
+  assert vals == [VInt(42)]
+}
+
+test "route C folds a vouched static Java call" {
+  let src = "use java \"java.lang.Math\"\n" ++
+    "const F: Int = unsafe_pure { Math.abs(-5) }\n" ++
+    "const S: String = unsafe_pure { Long.toHexString(255) }.expect(\"hex\")\n" ++
+    "use java \"java.lang.Long\"\n"
+  let (m, pdiags) = parser.parse_module(src)
+  assert len(pdiags) == 0
+  let env: Map[String, ModExports] = map.empty()
+  let (cx1, tm) = check_module(cx_new(None, None), m, env)
+  assert len(cx1.diags) == 0
+  let no_fns: Map[String, TFun] = map.empty()
+  let no_owner: Map[String, Map[String, TFun]] = map.empty()
+  let out = eval_comptime(tm, no_fns, no_owner, set.empty(), cx1.adts, 1000000)
+  assert len(out.diags) == 0
+  assert map.get(out.consts, "F") == Some(VInt(5))
+  assert map.get(out.consts, "S") == Some(VStr("ff"))
+}
+
+test "fuel exhaustion becomes a diagnostic" {
+  # a loop burns fuel without growing the interpreter's host stack (deep
+  # interpreted recursion needs the -Xss512m the real runner passes)
+  let src = "const L: Int = {\n" ++
+    "  var acc = 0\n" ++
+    "  while true { acc = acc + 1 }\n" ++
+    "  acc\n" ++
+    "}\n"
+  let (m, pdiags) = parser.parse_module(src)
+  assert len(pdiags) == 0
+  let env: Map[String, ModExports] = map.empty()
+  let (cx1, tm) = check_module(cx_new(None, None), m, env)
+  assert len(cx1.diags) == 0
+  let no_fns: Map[String, TFun] = map.empty()
+  let no_owner: Map[String, Map[String, TFun]] = map.empty()
+  let out = eval_comptime(tm, no_fns, no_owner, set.empty(), cx1.adts, 2000)
+  assert len(out.diags) == 1
+  assert str.contains(out.diags[0].msg, "fuel exhausted")
+}

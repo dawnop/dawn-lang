@@ -17,6 +17,8 @@ use java "java.lang.reflect.Method"
 use java "java.lang.reflect.Constructor"
 use java "java.lang.reflect.Modifier"
 use java "java.util.Objects"
+use java "java.lang.invoke.MethodHandles"
+use java "java.lang.invoke.MethodHandle"
 
 ## One method, as plain data. `desc` is Method.toString(), printed verbatim in
 ## overload-resolution error candidates.
@@ -285,4 +287,41 @@ test "array classes display readably" {
   }
   assert found
   assert class_info("[B").display == "byte[]"
+}
+
+## Invoke a public static method reflectively (comptime route C): the Method is
+## found by exact parameter-class names, unreflected into a MethodHandle, and
+## called with pre-boxed arguments. Err carries the thrown exception's rendering.
+pub fn invoke_static(
+  fqcn: String,
+  name: String,
+  param_cls: List[String],
+  args: List[Object]
+) -> Result[Option[Object], String] !io = {
+  let c = match find_class_raw(fqcn) {
+    Some(cc) -> cc
+    None -> return Err("class not found: " ++ fqcn)
+  }
+  let arr = c.getMethods().expect("methods")
+  let n = Array.getLength(arr)
+  var i = 0
+  var found: List[Method] = []
+  while i < n {
+    let m: Method = cast(Array.get(arr, i).expect("method array element"))
+    if len(found) == 0 && m.getName().expect("name") == name {
+      let ps = class_names(Objects.requireNonNull(m.getParameterTypes().expect("param types")).expect("non-null"))
+      if ps == param_cls { found = [m] }
+    }
+    i = i + 1
+  }
+  let m2 = match get(found, 0) {
+    Some(mm) -> mm
+    None -> return Err("no such method: " ++ fqcn ++ "." ++ name)
+  }
+  let lookup = MethodHandles.publicLookup().expect("lookup")
+  let mh = match java_try(fn() => lookup.unreflect(m2).expect("unreflect")) {
+    Ok(h) -> h
+    Err(t) -> return Err(t)
+  }
+  java_try(fn() => mh.invokeWithArguments(args))
 }
