@@ -173,7 +173,7 @@ class CodeGen(
     }
 
     /** the shared frame-aware writer (dawn.tool.AdtClassWriter, also used by selfhost) */
-    private fun DawnClassWriter() = dawn.tool.AdtClassWriter(adtSupers)
+    private fun newClassWriter() = dawn.tool.AdtClassWriter(adtSupers)
 
     // ---- current function context ----
     private lateinit var mv: MethodVisitor
@@ -292,7 +292,7 @@ class CodeGen(
         val ITER = "java/util/Iterator"
         val ENTRY = "java/util/Map\$Entry"
         val T2 = tupleClass(2)
-        val cw = DawnClassWriter()
+        val cw = newClassWriter()
         cw.visit(V17, ACC_PUBLIC or ACC_FINAL, MAPS_CLASS, null, OBJ, null)
 
         fun method(name: String, desc: String, body: MethodVisitor.() -> kotlin.Unit) {
@@ -472,7 +472,7 @@ class CodeGen(
             if (ii.derived) out[implClass(ii)] = genImplClass(ii)
         }
 
-        val cw = DawnClassWriter()
+        val cw = newClassWriter()
         cw.visit(V17, ACC_PUBLIC or ACC_FINAL, className, null, OBJ, null)
         // CLI arguments, set by the JVM entry wrapper; null when absent (tests) → args() gives []
         cw.visitField(ACC_PUBLIC or ACC_STATIC, ARGS_FIELD, "[Ljava/lang/String;", null, null).visitEnd()
@@ -515,7 +515,7 @@ class CodeGen(
     /** dawn/rt/TupleN: N public final Object fields _0.._N-1 + structural equals (spec §1.5) */
     private fun genTupleClass(n: Int): ByteArray {
         val cls = tupleClass(n)
-        val cw = DawnClassWriter()
+        val cw = newClassWriter()
         cw.visit(V17, ACC_PUBLIC or ACC_FINAL, cls, null, OBJ, null)
         for (i in 0 until n) {
             cw.visitField(ACC_PUBLIC or ACC_FINAL, "_$i", "L$OBJ;", null, null).visitEnd()
@@ -762,7 +762,7 @@ class CodeGen(
             out[base] = genCtorClass(OBJ, a.ctors.single())
             return
         }
-        val bw = DawnClassWriter()
+        val bw = newClassWriter()
         bw.visit(V17, ACC_PUBLIC or ACC_ABSTRACT, base, null, OBJ, null)
         val bc = bw.visitMethod(ACC_PROTECTED, "<init>", "()V", null, null)
         bc.visitCode()
@@ -779,7 +779,7 @@ class CodeGen(
 
     private fun genCtorClass(base: String, ci: CtorInfo): ByteArray {
         val sub = ci.jvmName
-        val cw = DawnClassWriter()
+        val cw = newClassWriter()
         cw.visit(V17, ACC_PUBLIC or ACC_FINAL, sub, null, base, null)
         val singleton = ci.fields.isEmpty()
 
@@ -973,7 +973,7 @@ class CodeGen(
 
     /** the per-trait dictionary interface: erased abstract method per trait method */
     private fun genTraitInterface(t: TraitInfo): ByteArray {
-        val cw = DawnClassWriter()
+        val cw = newClassWriter()
         cw.visit(V17, ACC_PUBLIC or ACC_ABSTRACT or ACC_INTERFACE, trIface(t), null, OBJ, null)
         for ((name, ms) in t.methods)
             cw.visitMethod(ACC_PUBLIC or ACC_ABSTRACT, name, traitMethodDesc(ms.sig), null, null).visitEnd()
@@ -1010,7 +1010,7 @@ class CodeGen(
     private fun genImplClass(i: ImplInfo): ByteArray {
         val cls = implClass(i)
         val iface = trIface(i.trait)
-        val cw = DawnClassWriter()
+        val cw = newClassWriter()
         cw.visit(V17, ACC_PUBLIC or ACC_FINAL, cls, null, OBJ, arrayOf(iface))
         singletonScaffold(cw, cls, iface)
         for ((mname, ms) in i.trait.methods) {
@@ -1059,7 +1059,7 @@ class CodeGen(
     private fun genPreludeOrdImpl(i: ImplInfo): ByteArray {
         val cls = implClass(i)
         val iface = trIface(ORD_TRAIT)
-        val cw = DawnClassWriter()
+        val cw = newClassWriter()
         cw.visit(V17, ACC_PUBLIC or ACC_FINAL, cls, null, OBJ, arrayOf(iface))
         singletonScaffold(cw, cls, iface)
         mv = cw.visitMethod(ACC_PUBLIC, "cmp", "(L$OBJ;L$OBJ;)J", null, null)
@@ -1302,7 +1302,7 @@ class CodeGen(
      *   concat(List, List) -> List  (the `++` operator)
      */
     private fun genListsClass(): ByteArray {
-        val cw = DawnClassWriter()
+        val cw = newClassWriter()
         cw.visit(V17, ACC_PUBLIC or ACC_FINAL, LISTS_CLASS, null, OBJ, null)
 
         val get = cw.visitMethod(ACC_PUBLIC or ACC_STATIC, "get", "(L$JLIST;J)LOption;", null, null)
@@ -1462,7 +1462,7 @@ class CodeGen(
      * and must leave the long comparison result.
      */
     private fun genComparatorClass(cls: String, srcDesc: String, emitCmp: (MethodVisitor) -> kotlin.Unit): ByteArray {
-        val cw = DawnClassWriter()
+        val cw = newClassWriter()
         cw.visit(V17, ACC_PUBLIC or ACC_FINAL, cls, null, OBJ, arrayOf("java/util/Comparator"))
         cw.visitField(ACC_PRIVATE or ACC_FINAL, "src", srcDesc, null, null).visitEnd()
         var m = cw.visitMethod(ACC_PUBLIC, "<init>", "($srcDesc)V", null, null)
@@ -1658,7 +1658,7 @@ class CodeGen(
      *   parseInt(String) -> Option / parseFloat(String) -> Option
      */
     private fun genStringsClass(): ByteArray {
-        val cw = DawnClassWriter()
+        val cw = newClassWriter()
         cw.visit(V17, ACC_PUBLIC or ACC_FINAL, STRINGS_CLASS, null, OBJ, null)
         val STR = "java/lang/String"
 
@@ -1828,7 +1828,7 @@ class CodeGen(
      * slice (clamped), at (bounds-panicking) and indexOf live here.
      */
     private fun genBytesClass(): ByteArray {
-        val cw = DawnClassWriter()
+        val cw = newClassWriter()
         cw.visit(V17, ACC_PUBLIC or ACC_FINAL, BYTES_CLASS, null, OBJ, null)
         val ARRAYS = "java/util/Arrays"
 
@@ -1871,7 +1871,7 @@ class CodeGen(
      *   readLine() -> Option         (None on EOF or console error)
      */
     private fun genIoClass(): ByteArray {
-        val cw = DawnClassWriter()
+        val cw = newClassWriter()
         cw.visit(V17, ACC_PUBLIC or ACC_FINAL, IO_CLASS, null, OBJ, null)
         val STR = "java/lang/String"
         val PATH = "java/nio/file/Path"
@@ -1921,7 +1921,7 @@ class CodeGen(
      * types and is native-image safe.
      */
     private fun genShowClass(): ByteArray {
-        val cw = DawnClassWriter()
+        val cw = newClassWriter()
         cw.visit(V17, ACC_PUBLIC or ACC_FINAL, SHOW_CLASS, null, OBJ, null)
         val STR = "java/lang/String"
 
