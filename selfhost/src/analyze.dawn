@@ -159,11 +159,11 @@ pub fn load_directory(dir: String) -> LoadResult !io = {
       "add src/main.dawn with `pub fn main() -> Unit !io`")]
   }
   # load every module under src/ (spec §10.5: unreferenced modules still check)
-  let (url_resolved, sdiags) = select_url_deps(dir)
+  let (url_resolved, url_names, sdiags) = select_url_deps(dir)
   let no_cache: Map[String, Option[PkgR]] = map.empty()
   let no_names: Map[String, String] = map.empty()
   let (pkgs, mdiags, _, _) =
-    resolve_src_deps(dir, no_cache, set.empty(), url_resolved, no_names)
+    resolve_src_deps(dir, no_cache, set.empty(), url_resolved, url_names, no_names)
   diags = diags ++ sdiags ++ mdiags
   resolve(root, walk_dawn(root), diags, false, pkgs)
 }
@@ -222,10 +222,16 @@ fn url_pkg_root(
 ## Minimal Version Selection over `[deps.<alias>]` requirements (the Kotlin
 ## selectUrlDeps, package-design.md §4.5): walk the whole requirement graph —
 ## every version any reachable manifest mentions — then pick the maximum
-## required version per name. Same version under two hashes is an integrity
-## error. Returns name → chosen package root (None = errored).
-fn select_url_deps(root_dir: String) -> (Map[String, Option[String]], List[LocDiag]) !io = {
+## required version per name. The name is the package's own manifest name, not
+## the consumer's alias (§4.3: the alias is local sugar), so two consumers
+## spelling one package differently still share a single selection. Same
+## version under two hashes is an integrity error. Returns name → chosen
+## package root (None = errored) plus hash:subdir → real name for the linker.
+fn select_url_deps(
+  root_dir: String
+) -> (Map[String, Option[String]], Map[String, String], List[LocDiag]) !io = {
   var reqs: Map[String, List[UrlReq]] = map.empty()
+  var url_names: Map[String, String] = map.empty()
   var seen: Set[String] = set.empty()
   var failed: Set[String] = set.empty()
   var diags: List[LocDiag] = []
@@ -247,14 +253,23 @@ fn select_url_deps(root_dir: String) -> (Map[String, Option[String]], List[LocDi
                 url: url, version: ver, hash: hash, subdir: sub,
                 mf_path: dir ++ "/dawn.toml"
               }
-              let prev: List[UrlReq] = match map.get(reqs, dep.key) {
-                Some(l) -> l
-                None -> []
-              }
-              reqs = map.insert(reqs, dep.key, prev ++ [r])
               let (ro, ds, f1) = url_pkg_root(dep.key, r, failed)
               diags = diags ++ ds
               failed = f1
+              let name = match ro {
+                Some(rt) ->
+                  match read_manifest(rt) {
+                    Some(pm) -> if pm.name != "" { pm.name } else { dep.key }
+                    None -> dep.key
+                  }
+                None -> dep.key
+              }
+              url_names = map.insert(url_names, hash ++ ":" ++ sub, name)
+              let prev: List[UrlReq] = match map.get(reqs, name) {
+                Some(l) -> l
+                None -> []
+              }
+              reqs = map.insert(reqs, name, prev ++ [r])
               match ro {
                 Some(rt) -> { queue = queue ++ [rt] }
                 None -> ()
@@ -290,11 +305,23 @@ fn select_url_deps(root_dir: String) -> (Map[String, Option[String]], List[LocDi
     match ro {
       None -> { resolved = map.insert(resolved, name, None) }
       Some(rt) -> {
+        # v2 = new name (§6.3), checked against the real name — the alias may
+        # lawfully differ (e.g. `web2` consumed under the spelling `web`)
+        let (major, _, _) = ver_parts(win.version)
         let declared = match read_manifest(rt) {
           Some(m) -> m.version
           None -> ""
         }
-        if declared != "" && declared != win.version {
+        if major >= 2 && not str.ends_with(name, to_string(major)) {
+          diags = diags ++ [LocDiag { path: win.mf_path, d: Diag {
+            msg: "version " ++ win.version ++ " needs the major in the package name",
+            lo: 0,
+            hi: 0,
+            hint: "v2+ is a new package with a new name (`" ++ name ++ to_string(major) ++
+              "`): otherwise version selection would hand incompatible majors to old consumers"
+          } }]
+          resolved = map.insert(resolved, name, None)
+        } else if declared != "" && declared != win.version {
           diags = diags ++ [LocDiag { path: win.mf_path, d: Diag {
             msg: "package `" ++ name ++ "` declares version " ++ declared ++
               " but " ++ win.version ++ " was selected",
@@ -309,20 +336,22 @@ fn select_url_deps(root_dir: String) -> (Map[String, Option[String]], List[LocDi
       }
     }
   }
-  (resolved, diags)
+  (resolved, url_names, diags)
 }
 
 ## `[deps]` → alias → package, recursively (transitive packages resolve their
-## own manifests). Mirrors the Kotlin ModuleLoader.link: the alias must equal
-## the package's manifest name; v1 fence: no `[java-deps]` in a dependency.
-## `cache` (canonical dir → resolved package, None = known bad), `visiting`
-## (cycle guard) and `names` (package name → owning dir, one copy program-wide)
-## are threaded through the recursion; url deps arrive pre-selected.
+## own manifests). Mirrors the Kotlin ModuleLoader.link: the name a dependency's
+## own dawn.toml declares is its identity, the alias only this consumer's
+## spelling (§4.3). `cache` (canonical dir → resolved package, None = known
+## bad), `visiting` (cycle guard) and `names` (package name → owning dir, one
+## copy program-wide) are threaded through the recursion; url deps arrive
+## pre-selected, looked up through `url_names` (hash:subdir → real name).
 fn resolve_src_deps(
   dir: String,
   cache0: Map[String, Option[PkgR]],
   visiting: Set[String],
   url_resolved: Map[String, Option[String]],
+  url_names: Map[String, String],
   names0: Map[String, String]
 ) -> (Map[String, PkgR], List[LocDiag], Map[String, Option[PkgR]], Map[String, String]) !io = {
   var out: Map[String, PkgR] = map.empty()
@@ -335,11 +364,16 @@ fn resolve_src_deps(
       for dep in m.deps {
         let ddir_opt: Option[String] = match dep.src {
           DPath(d) -> Some(d)
-          DRemote(_, _, _, _) ->
-            match map.get(url_resolved, dep.key) {
+          DRemote(_, _, hash, sub) -> {
+            let nm = match map.get(url_names, hash ++ ":" ++ sub) {
+              Some(n) -> n
+              None -> dep.key
+            }
+            match map.get(url_resolved, nm) {
               Some(o) -> o
               None -> None
             }
+          }
         }
         let unresolved = match ddir_opt {
           Some(_) -> false
@@ -348,35 +382,10 @@ fn resolve_src_deps(
         if unresolved { continue } # selection already errored
         let ddir = ddir_opt.expect("dep dir")
         let dcanon = canon(ddir)
-        let claim_bad = match map.get(names, dep.key) {
-          Some(c) -> c != dcanon
-          None -> false
-        }
-        if claim_bad {
-          let claimed = map.get(names, dep.key).expect("claim")
-          diags = diags ++ [LocDiag { path: mf_path, d: Diag {
-            msg: "package `" ++ dep.key ++ "` is linked from two different directories",
-            lo: 0,
-            hi: 0,
-            hint: "one package name means one copy program-wide (coherence, package-design.md §4.5);\n" ++
-              "  here:      " ++ dcanon ++ "\n  elsewhere: " ++ claimed
-          } }]
-          continue
-        }
         if map.has(cache, dcanon) {
+          # an earlier link of this directory claimed its name; same dir = same claim
           match map.get(cache, dcanon).expect("cached") {
-            Some(hit) ->
-              if hit.name != dep.key {
-                diags = diags ++ [LocDiag { path: mf_path, d: Diag {
-                  msg: "dependency alias `" ++ dep.key ++
-                    "` does not match the package's name `" ++ hit.name ++ "`",
-                  lo: 0,
-                  hi: 0,
-                  hint: "the alias must equal the package's manifest name; rename one of them"
-                } }]
-              } else {
-                out = map.insert(out, dep.key, hit)
-              }
+            Some(hit) -> { out = map.insert(out, dep.key, hit) }
             None -> ()
           }
           continue
@@ -392,24 +401,15 @@ fn resolve_src_deps(
         }
         match read_manifest(ddir) {
           Some(dm) ->
-            if dm.name != dep.key {
+            if map.get(names, dm.name).unwrap_or(dcanon) != dcanon {
+              let claimed = map.get(names, dm.name).expect("claim")
               diags = diags ++ [LocDiag { path: mf_path, d: Diag {
-                msg: "dependency alias `" ++ dep.key ++
-                  "` does not match the package's name `" ++ dm.name ++ "`",
+                msg: "package `" ++ dm.name ++ "` is linked from two different directories",
                 lo: 0,
                 hi: 0,
-                hint: "the alias must equal the package's manifest name; rename one of them"
+                hint: "one package name means one copy program-wide (coherence, package-design.md §4.5);\n" ++
+                  "  here:      " ++ dcanon ++ "\n  elsewhere: " ++ claimed
               } }]
-              cache = map.insert(cache, dcanon, None)
-            } else if dm.has_java_deps {
-              diags = diags ++ [LocDiag { path: mf_path, d: Diag {
-                msg: "package `" ++ dm.name ++
-                  "` has `[java-deps]` — a dependency's jars are not merged yet",
-                lo: 0,
-                hi: 0,
-                hint: "declare the jars in the consuming project's [java-deps] for now"
-              } }]
-              cache = map.insert(cache, dcanon, None)
             } else if not io.is_dir(ddir ++ "/src") {
               diags = diags ++ [LocDiag { path: mf_path, d: Diag {
                 msg: "package `" ++ dm.name ++ "` has no src/ folder (expected " ++
@@ -421,13 +421,14 @@ fn resolve_src_deps(
               cache = map.insert(cache, dcanon, None)
             } else {
               let (tdeps, tdiags, cache1, names1) =
-                resolve_src_deps(ddir, cache, set.insert(visiting, dcanon), url_resolved, names)
+                resolve_src_deps(ddir, cache, set.insert(visiting, dcanon), url_resolved,
+                  url_names, names)
               diags = diags ++ tdiags
               cache = cache1
               names = names1
               let info = PkgR { name: dm.name, root: canon(ddir ++ "/src"), deps: tdeps }
               cache = map.insert(cache, dcanon, Some(info))
-              names = map.insert(names, dep.key, dcanon)
+              names = map.insert(names, dm.name, dcanon)
               out = map.insert(out, dep.key, info)
             }
           None -> {
@@ -449,19 +450,57 @@ fn resolve_src_deps(
   (out, diags, cache, names)
 }
 
-## Canonicalize a package module's `use` paths to the alias-qualified spelling
-## (`use types` → `use web/types`), so the checker, duplicate detection and the
-## topological sort all see one spelling — the Kotlin loader does the same.
-## A first segment naming one of the package's own deps is already canonical.
+## Canonicalize a package module's `use` paths to the name-qualified spelling
+## (`use types` → `use web/types`; an aliased dep gains the dep's real name),
+## so the checker, duplicate detection and the topological sort all see one
+## spelling — the Kotlin loader does the same.
 fn qualify_uses(m: Module, pkg: PkgR) -> Module = {
   var decls: List[Decl] = []
   for d in m.decls {
     match d {
       DUseModule(segs, sel, lo, hi, nlo, nhi) ->
-        if segs[0] == "std" || map.has(pkg.deps, segs[0]) {
+        if segs[0] == "std" {
           decls = decls ++ [d]
         } else {
-          decls = decls ++ [DUseModule([pkg.name] ++ segs, sel, lo, hi, nlo, nhi)]
+          match map.get(pkg.deps, segs[0]) {
+            Some(info) ->
+              if info.name == segs[0] {
+                decls = decls ++ [d]
+              } else {
+                decls = decls ++
+                  [DUseModule([info.name] ++ list.drop(segs, 1), sel, lo, hi, nlo, nhi)]
+              }
+            None -> {
+              decls = decls ++ [DUseModule([pkg.name] ++ segs, sel, lo, hi, nlo, nhi)]
+            }
+          }
+        }
+      _ -> { decls = decls ++ [d] }
+    }
+  }
+  Module { decls: decls }
+}
+
+## A package's dep under its real name — what canonicalized `use` paths carry
+## (the deps map itself is keyed by this package's local aliases).
+fn dep_by_name(p: PkgR, name: String) -> Option[PkgR] = {
+  for k in map.keys(p.deps) {
+    let info = map.get(p.deps, k).expect("dep")
+    if info.name == name { return Some(info) }
+  }
+  None
+}
+
+## Rebuild a module with the collected alias → real-name rewrites applied
+## (keyed by the old use path; everything else is untouched).
+fn apply_rewrites(m: Module, rw: Map[String, List[String]]) -> Module = {
+  var decls: List[Decl] = []
+  for d in m.decls {
+    match d {
+      DUseModule(segs, sel, lo, hi, nlo, nhi) ->
+        match map.get(rw, join(segs, "/")) {
+          Some(ns) -> { decls = decls ++ [DUseModule(ns, sel, lo, hi, nlo, nhi)] }
+          None -> { decls = decls ++ [d] }
         }
       _ -> { decls = decls ++ [d] }
     }
@@ -503,11 +542,11 @@ pub fn load_file(file: String) -> LoadResult !io = {
     Some(i) -> if str.substring(root, i + 1, str.len(root)) == "src" { str.substring(root, 0, i) } else { root }
     None -> root
   }
-  let (url_resolved, sdiags) = select_url_deps(proj)
+  let (url_resolved, url_names, sdiags) = select_url_deps(proj)
   let no_cache: Map[String, Option[PkgR]] = map.empty()
   let no_names: Map[String, String] = map.empty()
   let (pkgs, mdiags, _, _) =
-    resolve_src_deps(proj, no_cache, set.empty(), url_resolved, no_names)
+    resolve_src_deps(proj, no_cache, set.empty(), url_resolved, url_names, no_names)
   resolve(root, [file], sdiags ++ mdiags, true, pkgs)
 }
 
@@ -558,6 +597,8 @@ fn resolve(
     if not set.has(visited, mp) {
       visited = set.insert(visited, mp)
       let mf = map.get(by_path, mp).expect("queued module")
+      # aliased app imports canonicalized while walking edges: old path → new segs
+      var rewrites: Map[String, List[String]] = map.empty()
       for u in module_uses(mf.m) {
         var bad: Option[String] = None
         for s in u.segs {
@@ -578,16 +619,18 @@ fn resolve(
         # bundled std modules come from the compiler, not the module graph
         if u.segs[0] == "std" { continue }
         # where the target file lives and which package it belongs to: a package
-        # module imports its siblings (paths already canonicalized to
-        # `<pkgname>/<internal>`); an app module hitting a [deps] alias resolves
-        # inside that package — unless a local path claims the same first
-        # segment, which is never shadowed silently (package-design.md §4.3)
+        # module imports its siblings and its deps under canonical (real-name)
+        # spellings; an app module hitting a [deps] alias resolves inside that
+        # package — unless a local path claims the same first segment, which is
+        # never shadowed silently (package-design.md §4.3). An aliased app
+        # import is canonicalized to the package's real name (the spelling the
+        # package's own modules load under).
         var dep_file = ""
         var dep_pkg: Option[PkgR] = None
         var edge_ok = true
         match mf.pkg {
           Some(p) ->
-            match map.get(p.deps, u.segs[0]) {
+            match dep_by_name(p, u.segs[0]) {
               Some(info) -> {
                 # a dependency module importing one of its own deps
                 dep_file = info.root ++ "/" ++ join(list.drop(u.segs, 1), "/") ++ ".dawn"
@@ -624,6 +667,9 @@ fn resolve(
                   } }]
                   edge_ok = false
                 } else {
+                  if info.name != u.segs[0] {
+                    rewrites = map.insert(rewrites, u.path, [info.name] ++ list.drop(u.segs, 1))
+                  }
                   dep_file = info.root ++ "/" ++ join(list.drop(u.segs, 1), "/") ++ ".dawn"
                   dep_pkg = Some(info)
                 }
@@ -677,6 +723,10 @@ fn resolve(
             }
           }
         }
+      }
+      if len(map.keys(rewrites)) > 0 {
+        by_path = map.insert(by_path, mp,
+          LoadedModule { ..mf, m: apply_rewrites(mf.m, rewrites) })
       }
     }
   }
@@ -922,4 +972,27 @@ test "loader reports cycles and missing modules" {
     if str.contains(ld.d.msg, "cannot find module `nope`") { missing = true }
   }
   assert missing
+}
+
+test "an aliased path dep canonicalizes to the package's real name" {
+  let base = "/tmp/dawn-selfhost-analyze/proj4"
+  mkdirs(base ++ "/pkg/web/src")
+  mkdirs(base ++ "/app/src")
+  put(base ++ "/pkg/web/dawn.toml", "schema = 1\nname = \"web\"\n")
+  put(base ++ "/pkg/web/src/types.dawn", "pub fn tag() -> String = \"w\"\n")
+  put(base ++ "/app/dawn.toml",
+    "schema = 1\nname = \"app\"\n\n[deps]\nw = \"../pkg/web\"\n")
+  put(base ++ "/app/src/main.dawn",
+    "use w/types\n\npub fn main() -> Unit !io = println(types.tag())\n")
+  let loaded = load_directory(base ++ "/app")
+  assert len(loaded.diags) == 0
+  # the aliased import loads under the real name and namespace (§4.3/§4.4)
+  var found = false
+  for m in loaded.modules {
+    if m.mod_path == "web/types" {
+      found = true
+      assert m.class_name == "dawn\$pkg\$web/types"
+    }
+  }
+  assert found
 }

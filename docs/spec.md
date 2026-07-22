@@ -928,10 +928,25 @@ name = "backend_dawn"                           # 工程身份（[a-z_][a-z0-9_]
 
 [java-deps]                                     # Maven 依赖，`use java` 用得到
 sqlite = "org.xerial:sqlite-jdbc:3.36.0.3"      # 精确坐标；禁 SNAPSHOT、禁版本区间
+
+[deps]                                          # Dawn 源码包：别名 = 本地目录
+web = "../packages/web"
+
+[deps.json]                                     # 或远端归档（zip / tar.gz）
+url = "https://github.com/dawnop/dawn-lang/archive/refs/tags/v0.7.0.zip"
+version = "1.0.0"                               # 严格 x.y.z；版本求解 = MVS
+hash = "d1:<sha256>"                            # 解包文件树的内容哈希，即包身份
+subdir = "packages/json"                        # 归档内的包根（可选）
 ```
 
-`dawn run|test|build` 会拉取 `[java-deps]` 并挂上 classpath（与 `--cp` 合并）；
-`dawn build` 另把它们复制进 jar 同级的 `lib/`。仓库地址走 `$DAWN_MAVEN_MIRROR`，不进 manifest。
+`[deps]` 的别名只是**本方源码的拼写**（`use <别名>/<模块>`）；包的身份是它自己
+manifest 里的 `name`——类名命名空间、版本求解、全程序一名一份都按真名进行，
+别名引入会在装载时规范化为真名。`dawn add <坐标|url|路径>` 可代写这些条目
+（抓取并计算 hash，保留手写格式）。
+
+`dawn run|test|build` 会拉取 `[java-deps]`（含各依赖包声明的，取并集）并挂上
+classpath（与 `--cp` 合并）；`dawn build` 另把它们复制进 jar 同级的 `lib/`。
+仓库地址走 `$DAWN_MAVEN_MIRROR`，不进 manifest。
 
 **manifest 永远是数据，不是代码**——不存在可执行的 `build.dawn`。理由与完整设计见
 [`package-design.md`](package-design.md)。

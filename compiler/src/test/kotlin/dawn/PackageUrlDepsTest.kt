@@ -59,6 +59,44 @@ class PackageUrlDepsTest {
         return "file://${zip.absolutePath}" to hash
     }
 
+    /** the same fixture as [archive], as a hand-rolled gzipped ustar */
+    private fun tarArchive(src: File, dir: File, name: String): Pair<String, String> {
+        val hash = PkgFetch.treeHash(src)
+        val buf = java.io.ByteArrayOutputStream()
+        java.util.zip.GZIPOutputStream(buf).use { gz ->
+            fun header(path: String, size: Int, type: Char): ByteArray {
+                val b = ByteArray(512)
+                path.toByteArray().copyInto(b, 0)
+                "0000644 ".toByteArray().copyInto(b, 100) // mode
+                "0000000 ".toByteArray().copyInto(b, 108) // uid
+                "0000000 ".toByteArray().copyInto(b, 116) // gid
+                "%011o ".format(size).toByteArray().copyInto(b, 124)
+                "00000000000 ".toByteArray().copyInto(b, 136) // mtime
+                for (i in 148 until 156) b[i] = ' '.code.toByte() // checksum-as-spaces
+                b[156] = type.code.toByte()
+                "ustar".toByteArray().copyInto(b, 257)
+                "00".toByteArray().copyInto(b, 263) // version
+                val sum = b.sumOf { it.toInt() and 0xff }
+                "%06o".format(sum).toByteArray().copyInto(b, 148)
+                b[154] = 0
+                b[155] = ' '.code.toByte()
+                return b
+            }
+            gz.write(header("$name-wrapper/", 0, '5'))
+            src.walkTopDown().filter { it.isFile }.sortedBy { it.path }.forEach { f ->
+                val rel = src.toPath().relativize(f.toPath()).joinToString("/")
+                val bytes = f.readBytes()
+                gz.write(header("$name-wrapper/$rel", bytes.size, '0'))
+                gz.write(bytes)
+                gz.write(ByteArray((512 - bytes.size % 512) % 512))
+            }
+            gz.write(ByteArray(1024)) // end-of-archive marker
+        }
+        val tarGz = File(dir, "$name.tar.gz")
+        tarGz.writeBytes(buf.toByteArray())
+        return "file://${tarGz.absolutePath}" to hash
+    }
+
     private fun jsonPkg(dir: File, version: String, extra: String = ""): File = tree(File(dir, "json-src-$version"), mapOf(
         "dawn.toml" to "schema = 1\nname = \"json\"\nversion = \"$version\"\n",
         "src/value.dawn" to "pub fn tag() -> String = \"json $version\"\n$extra",
@@ -234,17 +272,119 @@ class PackageUrlDepsTest {
     }
 
     @Test
-    fun `v2 needs the major in the name`(@TempDir dir: File) {
-        val appDir = app(File(dir, "x").apply { mkdirs() }, """
+    fun `v2 needs the major in the real package name`(@TempDir dir: File) {
+        // the archive's own manifest declares no version, so only the
+        // selection-time check can catch the rename rule — on the real name
+        val pkg = tree(File(dir, "json-src"), mapOf(
+            "dawn.toml" to "schema = 1\nname = \"json\"\n",
+            "src/value.dawn" to "pub fn tag() -> String = \"json\"\n"))
+        val (url, hash) = archive(pkg, dir, "json-2.0.0")
+        val appDir = app(dir, """
             schema = 1
             name = "app"
 
             [deps.json]
-            url = "file:///nowhere.zip"
+            url = "$url"
             version = "2.0.0"
-            hash = "d1:${"a".repeat(64)}"
+            hash = "$hash"
         """.trimIndent(), "pub fn main() -> Unit !io = println(\"x\")\n")
         assertTrue(messages(appDir).any { it.contains("needs the major in the package name") })
+    }
+
+    @Test
+    fun `an alias keeps the old spelling across a v2 rename`(@TempDir dir: File) {
+        val pkg = tree(File(dir, "json2-src"), mapOf(
+            "dawn.toml" to "schema = 1\nname = \"json2\"\nversion = \"2.0.0\"\n",
+            "src/value.dawn" to "pub fn tag() -> String = \"json two\"\n"))
+        val (url, hash) = archive(pkg, dir, "json2-2.0.0")
+        val appDir = app(dir, """
+            schema = 1
+            name = "app"
+
+            [deps.json]
+            url = "$url"
+            version = "2.0.0"
+            hash = "$hash"
+        """.trimIndent(), """
+            use json/value
+
+            pub fn main() -> Unit !io = println(value.tag())
+        """.trimIndent())
+        val program = analyzeProject(appDir)
+        val msgs = program.diagnostics.map { it.diag.message }
+        assertTrue(msgs.isEmpty(), "expected clean, got:\n" + msgs.joinToString("\n"))
+        // the identity is json2; the alias only spells the consumer's imports
+        assertEquals("dawn\$pkg\$json2/value",
+            program.modules.first { it.modPath == "json2/value" }.className)
+    }
+
+    @Test
+    fun `two aliases for one package share a single MVS selection`(@TempDir dir: File) {
+        // web requires json 1.1.0 under the alias `json`; the app requires
+        // 1.0.0 under the alias `j` — one package, one winner: 1.1.0
+        val (jsonOldUrl, jsonOldHash) = archive(jsonPkg(dir, "1.0.0"), dir, "json-1.0.0")
+        val (jsonNewUrl, jsonNewHash) = archive(
+            jsonPkg(dir, "1.1.0", "pub fn pretty() -> String = \"pretty\"\n"), dir, "json-1.1.0")
+        val web = tree(File(dir, "web-src"), mapOf(
+            "dawn.toml" to """
+                schema = 1
+                name = "web"
+                version = "1.0.0"
+
+                [deps.json]
+                url = "$jsonNewUrl"
+                version = "1.1.0"
+                hash = "$jsonNewHash"
+            """.trimIndent(),
+            "src/router.dawn" to "use json/value\n\npub fn info() -> String = value.tag()\n",
+        ))
+        val (webUrl, webHash) = archive(web, dir, "web-1.0.0")
+        val appDir = app(dir, """
+            schema = 1
+            name = "app"
+
+            [deps.web]
+            url = "$webUrl"
+            version = "1.0.0"
+            hash = "$webHash"
+
+            [deps.j]
+            url = "$jsonOldUrl"
+            version = "1.0.0"
+            hash = "$jsonOldHash"
+        """.trimIndent(), """
+            use j/value
+            use web/router
+
+            pub fn main() -> Unit !io = println(router.info() ++ value.pretty())
+        """.trimIndent())
+        // `value.pretty` only exists in 1.1.0: the app compiles iff both
+        // aliases were grouped under the real name and MVS chose the max
+        val msgs = messages(appDir)
+        assertTrue(msgs.isEmpty(), "expected clean, got:\n" + msgs.joinToString("\n"))
+    }
+
+    @Test
+    fun `a tar gz archive fetches like a zip`(@TempDir dir: File) {
+        val (url, hash) = tarArchive(jsonPkg(dir, "1.0.0"), dir, "json-1.0.0")
+        val appDir = app(dir, """
+            schema = 1
+            name = "app"
+
+            [deps.json]
+            url = "$url"
+            version = "1.0.0"
+            hash = "$hash"
+        """.trimIndent(), """
+            use json/value
+
+            pub fn main() -> Unit !io = println(value.tag())
+        """.trimIndent())
+        val program = analyzeProject(appDir)
+        val msgs = program.diagnostics.map { it.diag.message }
+        assertTrue(msgs.isEmpty(), "expected clean, got:\n" + msgs.joinToString("\n"))
+        assertEquals("dawn\$pkg\$json/value",
+            program.modules.first { it.modPath == "json/value" }.className)
     }
 
     @Test

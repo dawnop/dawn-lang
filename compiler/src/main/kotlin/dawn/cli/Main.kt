@@ -28,6 +28,11 @@ usage:
   dawn fmt --check <target>...         report files that are not formatted (exit 1 if any)
   dawn doc <target>                    emit the pub API (## doc comments) as JSON on stdout
   dawn doc --builtins                  emit the builtin function reference as JSON
+  dawn add <spec> [--subdir <p>] [--as <alias>] [--dir <project>]
+                                       add a dependency to dawn.toml, preserving the file's
+                                       formatting: a Maven coordinate (group:artifact:version
+                                       → [java-deps]), an archive url (fetched and hashed
+                                       → [deps.<name>]), or a local package path (→ [deps])
   dawn --version                       print the toolchain version and commit
 
 options (run/test/build):
@@ -66,6 +71,7 @@ fun main(args: Array<String>) {
             "build" -> cmdBuild(args.drop(1))
             "fmt" -> cmdFmt(args.drop(1))
             "doc" -> cmdDoc(args.drop(1))
+            "add" -> cmdAdd(args.drop(1))
             "lsp" -> dawn.lsp.runLspServer()
             // hidden: canonical token/AST dumps for the selfhost golden diffs
             "__lex" -> cmdLexDump(args.drop(1))
@@ -158,8 +164,10 @@ class Deps(val fetched: List<File>, val cp: List<File>) {
 
 /**
  * Resolve a target's dependencies: dawn.toml's [java-deps] (when the target is a project
- * directory with a manifest) merged with any --cp jars. Manifest errors are rendered and
- * exit, like compile errors.
+ * directory with a manifest) plus the [java-deps] of every linked source package, merged
+ * with any --cp jars. Exact duplicates collapse; version conflicts are the Maven
+ * resolver's to settle (highest wins). Manifest errors are rendered and exit, like
+ * compile errors.
  */
 fun resolveDeps(path: String, cp: List<File>): Deps {
     val dir = File(path)
@@ -172,11 +180,14 @@ fun resolveDeps(path: String, cp: List<File>): Deps {
         System.err.print(dawn.manifest.renderManifestDiagnostics(source, sink.all))
         exitProcess(1)
     }
-    if (manifest.javaDeps.isEmpty()) return Deps(emptyList(), cp)
+    val coords = LinkedHashMap<String, dawn.manifest.MavenCoord>()
+    for (c in manifest.javaDeps) coords.putIfAbsent(c.toString(), c)
+    for (c in dawn.check.ModuleLoader.packageJavaDeps(dir)) coords.putIfAbsent(c.toString(), c)
+    if (coords.isEmpty()) return Deps(emptyList(), cp)
     // a cold fetch downloads and can take a while; say so rather than hang silently
-    System.err.println("resolving ${manifest.javaDeps.size} java-deps from ${file.path}...")
+    System.err.println("resolving ${coords.size} java-deps from ${file.path}...")
     val fetched = try {
-        dawn.manifest.Maven.fetch(manifest.javaDeps)
+        dawn.manifest.Maven.fetch(coords.values.toList())
     } catch (e: dawn.manifest.Maven.ResolveError) {
         throw CliError(e.message ?: "dependency resolution failed")
     }

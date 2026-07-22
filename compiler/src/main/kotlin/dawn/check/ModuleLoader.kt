@@ -9,6 +9,7 @@ import dawn.diag.SourceFile
 import dawn.diag.Span
 import dawn.lex.Lexer
 import dawn.manifest.Manifest
+import dawn.manifest.MavenCoord
 import dawn.manifest.PathDep
 import dawn.manifest.PkgFetch
 import dawn.manifest.PkgFetchError
@@ -32,13 +33,23 @@ class ModuleFile(
 )
 
 /**
- * A resolved `[deps]` package: its manifest name, its src/ root, and its own
- * dependencies (alias → package). Packages reached through different consumers
- * but the same directory share one PkgInfo — and one set of loaded modules —
- * so a diamond (app → web → json, app → json) links a single json: exactly the
- * one-version-per-path discipline the coherence rules need (package-design.md §4.5).
+ * A resolved `[deps]` package: its manifest name, its src/ root, its own
+ * dependencies (alias → package), and its `[java-deps]` (merged into the
+ * consumer's class path by the CLI). Packages reached through different
+ * consumers but the same directory share one PkgInfo — and one set of loaded
+ * modules — so a diamond (app → web → json, app → json) links a single json:
+ * exactly the one-version-per-path discipline the coherence rules need
+ * (package-design.md §4.5).
  */
-class PkgInfo(val name: String, val srcRoot: File, val deps: Map<String, PkgInfo>)
+class PkgInfo(
+    val name: String,
+    val srcRoot: File,
+    val deps: Map<String, PkgInfo>,
+    val javaDeps: List<MavenCoord> = emptyList(),
+) {
+    /** deps keyed by their real names — what canonicalized `use` paths carry */
+    val depsByName: Map<String, PkgInfo> by lazy { deps.values.associateBy { it.name } }
+}
 
 /** A diagnostic paired with the source file it should be rendered against. */
 class LocatedDiag(val source: SourceFile, val diag: Diagnostic)
@@ -102,6 +113,10 @@ object ModuleLoader {
         /** package name → the canonical dir that owns it (one copy program-wide) */
         val nameDirs = HashMap<String, String>()
 
+        /** hash+subdir → the real manifest name of that archive's package; url
+         *  deps group and resolve by this, not by the consumer's alias */
+        val urlNames = HashMap<String, String>()
+
         /** hash+subdir keys that already failed to materialize — reported once */
         val fetchFailed = HashSet<String>()
 
@@ -133,14 +148,19 @@ object ModuleLoader {
         return link(dir, ctx, HashSet())
     }
 
+    private fun depKey(dep: UrlDep) = dep.hash + ":" + (dep.subdir ?: "")
+
     /**
      * Minimal Version Selection (package-design.md §4.5, Cox's algorithm R1):
      * walk the whole requirement graph — every (name, version) any reachable
      * manifest mentions, fetching archives as needed to read their manifests —
-     * then pick the maximum required version per name. Requirements are minima
-     * with no upper bounds or excludes, which is what keeps this a walk instead
-     * of a SAT problem. Same version demanded under two different hashes is an
-     * integrity error, not a tie to break.
+     * then pick the maximum required version per name. The name is the
+     * package's *own* manifest name, not the consumer's alias (§4.3: the alias
+     * is local sugar), so two consumers spelling one package differently still
+     * share a single selection. Requirements are minima with no upper bounds
+     * or excludes, which is what keeps this a walk instead of a SAT problem.
+     * Same version demanded under two different hashes is an integrity error,
+     * not a tie to break.
      */
     private fun selectUrlDeps(rootDir: File, ctx: ResolveCtx) {
         val reqs = LinkedHashMap<String, ArrayList<Pair<UrlDep, SourceFile>>>()
@@ -154,8 +174,11 @@ object ModuleLoader {
             for (dep in mf.deps) when (dep) {
                 is PathDep -> if (dep.dir.isDirectory) queue.add(dep.dir)
                 is UrlDep -> {
-                    reqs.getOrPut(dep.alias) { ArrayList() }.add(dep to ctx.source(dir))
-                    materialize(dep, ctx.source(dir), ctx)?.let { queue.add(it) }
+                    val root = materialize(dep, ctx.source(dir), ctx)
+                    val name = root?.let { ctx.manifest(it)?.name } ?: dep.alias
+                    ctx.urlNames[depKey(dep)] = name
+                    reqs.getOrPut(name) { ArrayList() }.add(dep to ctx.source(dir))
+                    root?.let { queue.add(it) }
                 }
             }
         }
@@ -172,6 +195,18 @@ object ModuleLoader {
             }
             val root = materialize(winner.first, winner.second, ctx)
             if (root == null) {
+                ctx.urlResolved[name] = null
+                continue
+            }
+            // v2 = new name (§6.3), checked against the real name — the alias
+            // may lawfully differ (e.g. `web2` consumed under the spelling `web`)
+            val major = winner.first.version.major
+            if (major >= 2 && !name.endsWith(major.toString())) {
+                ctx.diags.add(LocatedDiag(winner.second, Diagnostic(
+                    "version ${winner.first.version} needs the major in the package name",
+                    winner.first.span,
+                    "v2+ is a new package with a new name (`$name$major`): " +
+                        "otherwise version selection would hand incompatible majors to old consumers")))
                 ctx.urlResolved[name] = null
                 continue
             }
@@ -195,7 +230,7 @@ object ModuleLoader {
      * required from several manifests should report its problem once.
      */
     private fun materialize(dep: UrlDep, source: SourceFile, ctx: ResolveCtx): File? {
-        val key = dep.hash + ":" + (dep.subdir ?: "")
+        val key = depKey(dep)
         if (key in ctx.fetchFailed) return null
         val archive = try {
             PkgFetch.ensureCached(dep.url, dep.hash)
@@ -216,14 +251,14 @@ object ModuleLoader {
 
     /**
      * Link `[deps]` recursively (transitive packages resolve their own
-     * manifests). Each dependency directory must carry a dawn.toml whose `name`
-     * equals the alias; package modules load from its src/ on demand (a library
-     * has no entry module and its unused modules are not checked). The
-     * canonical-directory cache gives a diamond one PkgInfo; the name-claim
-     * table rejects two *different* directories under one package name — the
-     * situation MVS exists to prevent, closed off for path deps too.
-     * v1 fence: a dependency may not have `[java-deps]` (not merged into the
-     * consumer's class path yet).
+     * manifests). Each dependency directory must carry a dawn.toml; the name it
+     * declares is the package's identity, while the alias is only what this
+     * consumer writes in `use` paths (§4.3). Package modules load from its
+     * src/ on demand (a library has no entry module and its unused modules are
+     * not checked). The canonical-directory cache gives a diamond one PkgInfo;
+     * the name-claim table rejects two *different* directories under one
+     * package name — the situation MVS exists to prevent, closed off for path
+     * deps too.
      */
     private fun link(
         dir: File,
@@ -236,28 +271,13 @@ object ModuleLoader {
         for (dep in manifest.deps) {
             val depDir = when (dep) {
                 is PathDep -> dep.dir
-                is UrlDep -> ctx.urlResolved[dep.alias] ?: continue // selection already errored
+                // selection already errored when the entry is null or absent
+                is UrlDep -> ctx.urlResolved[ctx.urlNames[depKey(dep)] ?: dep.alias] ?: continue
             }
             val canon = depDir.canonicalFile.path
-            val claimed = ctx.nameDirs[dep.alias]
-            if (claimed != null && claimed != canon) {
-                ctx.diags.add(LocatedDiag(source, Diagnostic(
-                    "package `${dep.alias}` is linked from two different directories", dep.span,
-                    "one package name means one copy program-wide (coherence, package-design.md §4.5);\n" +
-                        "  here:      $canon\n  elsewhere: $claimed")))
-                continue
-            }
             if (canon in ctx.pkgCache) {
-                val hit = ctx.pkgCache[canon]
-                if (hit != null) {
-                    if (hit.name != dep.alias) {
-                        ctx.diags.add(LocatedDiag(source, Diagnostic(
-                            "dependency alias `${dep.alias}` does not match the package's name `${hit.name}`",
-                            dep.span, "the alias must equal the package's manifest name; rename one of them")))
-                    } else {
-                        out[dep.alias] = hit
-                    }
-                }
+                // an earlier link of this directory claimed its name; same dir = same claim
+                ctx.pkgCache[canon]?.let { out[dep.alias] = it }
                 continue
             }
             if (canon in visiting) {
@@ -274,18 +294,12 @@ object ModuleLoader {
                 ctx.pkgCache[canon] = null
                 continue
             }
-            if (dm.name != dep.alias) {
+            val claimed = ctx.nameDirs[dm.name]
+            if (claimed != null && claimed != canon) {
                 ctx.diags.add(LocatedDiag(source, Diagnostic(
-                    "dependency alias `${dep.alias}` does not match the package's name `${dm.name}`", dep.span,
-                    "the alias must equal the package's manifest name; rename one of them")))
-                ctx.pkgCache[canon] = null
-                continue
-            }
-            if (dm.javaDeps.isNotEmpty()) {
-                ctx.diags.add(LocatedDiag(source, Diagnostic(
-                    "package `${dm.name}` has `[java-deps]` — a dependency's jars are not merged yet",
-                    dep.span, "declare the jars in the consuming project's [java-deps] for now")))
-                ctx.pkgCache[canon] = null
+                    "package `${dm.name}` is linked from two different directories", dep.span,
+                    "one package name means one copy program-wide (coherence, package-design.md §4.5);\n" +
+                        "  here:      $canon\n  elsewhere: $claimed")))
                 continue
             }
             // the canonical spelling, so paths embedded in generated code (the `!`
@@ -300,12 +314,35 @@ object ModuleLoader {
             visiting.add(canon)
             val transitive = link(depDir, ctx, visiting)
             visiting.remove(canon)
-            val info = PkgInfo(dm.name, srcRoot, transitive)
+            val info = PkgInfo(dm.name, srcRoot, transitive, dm.javaDeps)
             ctx.pkgCache[canon] = info
-            ctx.nameDirs[dep.alias] = canon
+            ctx.nameDirs[dm.name] = canon
             out[dep.alias] = info
         }
         return out
+    }
+
+    /**
+     * The union of `[java-deps]` across every package linked from [dir],
+     * deduplicated by exact coordinate; the root manifest's own coordinates are
+     * the caller's business. Version conflicts between packages are left to the
+     * Maven resolver (highest wins, the same rule Maven itself applies).
+     * Resolution problems are swallowed here — analyzeProject reports them
+     * against proper manifest spans.
+     */
+    fun packageJavaDeps(dir: File): List<MavenCoord> {
+        val pkgs = resolveSrcDeps(dir, ArrayList())
+        val out = LinkedHashMap<String, MavenCoord>()
+        val seen = HashSet<String>()
+        fun walk(deps: Map<String, PkgInfo>) {
+            for (p in deps.values) {
+                if (!seen.add(p.srcRoot.path)) continue
+                walk(p.deps)
+                for (c in p.javaDeps) out.putIfAbsent(c.toString(), c)
+            }
+        }
+        walk(pkgs)
+        return out.values.toList()
     }
 
     /**
@@ -364,11 +401,17 @@ object ModuleLoader {
             val className = if (pkg == null) internalCls else "dawn\$pkg\$${pkg.name}/$internalCls"
             if (pkg != null) {
                 // a sibling import gains the package's own name; an import whose
-                // first segment names one of the package's own deps is already
-                // canonical (the alias equals that package's name)
+                // first segment names one of the package's own deps gains that
+                // dep's real name (a no-op unless the alias differs, §4.3)
                 for (u in module.moduleUses) {
                     val first = u.segments.first()
-                    if (first != "std" && first !in pkg.deps) u.segments = listOf(pkg.name) + u.segments
+                    val dep = pkg.deps[first]
+                    when {
+                        first == "std" -> {}
+                        dep != null ->
+                            if (dep.name != first) u.segments = listOf(dep.name) + u.segments.drop(1)
+                        else -> u.segments = listOf(pkg.name) + u.segments
+                    }
                 }
             }
             val mf = ModuleFile(modPath, className, file, source, module, sink.all, pkg)
@@ -400,9 +443,10 @@ object ModuleLoader {
                 if (u.segments.first() == "std") continue
                 val first = u.segments.first()
                 val (depFile, depPkg) = when {
-                    // a dependency module importing one of its own deps
-                    mf.pkg != null && first in mf.pkg.deps -> {
-                        val info = mf.pkg.deps[first]!!
+                    // a dependency module importing one of its own deps: paths were
+                    // canonicalized to the dep's real name at load time
+                    mf.pkg != null && first in mf.pkg.depsByName -> {
+                        val info = mf.pkg.depsByName[first]!!
                         File(info.srcRoot, u.segments.drop(1).joinToString("/") + ".dawn") to info
                     }
                     // a dependency module importing a sibling: paths were canonicalized
@@ -410,7 +454,10 @@ object ModuleLoader {
                     mf.pkg != null ->
                         File(mf.pkg.srcRoot, u.segments.drop(1).joinToString("/") + ".dawn") to mf.pkg
                     // `use <alias>/...`: the [deps] package, unless a local directory
-                    // claims the same first segment — never shadow silently (§4.3)
+                    // claims the same first segment — never shadow silently (§4.3).
+                    // The path is canonicalized to the package's real name, so the
+                    // checker, duplicate detection and the topological sort see the
+                    // one spelling the package's modules load under.
                     first in pkgs -> {
                         val local = File(root, u.segments.joinToString("/") + ".dawn")
                         if (local.isFile) {
@@ -425,7 +472,9 @@ object ModuleLoader {
                                 "import one of its modules: `use $first/<module>`")))
                             continue
                         }
-                        File(pkgs[first]!!.srcRoot, u.segments.drop(1).joinToString("/") + ".dawn") to pkgs[first]
+                        val info = pkgs[first]!!
+                        if (info.name != first) u.segments = listOf(info.name) + u.segments.drop(1)
+                        File(info.srcRoot, u.segments.drop(1).joinToString("/") + ".dawn") to info
                     }
                     else -> File(root, u.segments.joinToString("/") + ".dawn") to null
                 }

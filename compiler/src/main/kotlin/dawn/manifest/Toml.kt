@@ -124,6 +124,18 @@ class TomlDoc(val source: SourceFile, val lines: MutableList<TomlLine>, private 
         return true
     }
 
+    /** Remove `[name]` — the header and every entry under it; true if it was there. */
+    fun removeTable(name: String): Boolean {
+        val header = header(name) ?: return false
+        val start = lines.indexOf(header)
+        var end = start + 1
+        while (end < lines.size && lines[end] !is TomlHeader) end++
+        // a trailing blank separates this table from the next; drop it with the table
+        while (end > start + 1 && lines[end - 1] is TomlBlank) end--
+        lines.subList(start, end).clear()
+        return true
+    }
+
     /** Index of the last line belonging to [table] (its last entry, else its header). */
     private fun lastIndexOfTable(table: String?): Int {
         var current: String? = null

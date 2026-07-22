@@ -1,9 +1,9 @@
-# A minimal dawn.toml reader for the loader's needs: `name`, `version`, the
-# `[deps]` aliases (path strings or `[deps.<alias>]` url tables), and whether
-# `[java-deps]` is present at all. Line-oriented over the manifest TOML subset —
-# the Kotlin Manifest/TomlParser stays the validation authority (the CLI runs
-# it before anything here matters); this reader only has to agree on valid
-# input, which is what the golden corpora contain.
+# A minimal dawn.toml reader for the loader's needs: `name`, `version`, and the
+# `[deps]` aliases (path strings or `[deps.<alias>]` url tables). Line-oriented
+# over the manifest TOML subset — the Kotlin Manifest/TomlParser stays the
+# validation authority (the CLI runs it before anything here matters); this
+# reader only has to agree on valid input, which is what the golden corpora
+# contain.
 
 use std/str
 use std/list
@@ -18,12 +18,7 @@ pub type DepSrc =
 
 pub type SrcDep = { key: String, src: DepSrc }
 
-pub type ManifestLite = {
-  name: String,
-  version: String,
-  deps: List[SrcDep],
-  has_java_deps: Bool
-}
+pub type ManifestLite = { name: String, version: String, deps: List[SrcDep] }
 
 fn unquote(v: String) -> Option[String] = {
   let t = str.trim(v)
@@ -65,7 +60,6 @@ pub fn read_manifest(dir: String) -> Option[ManifestLite] !io = {
   var name = ""
   var version = ""
   var deps: List[SrcDep] = []
-  var has_java = false
   var table = ""
   var remote: Option[RemoteAcc] = None
   for raw in str.split(text, "\n") {
@@ -118,8 +112,6 @@ pub fn read_manifest(dir: String) -> Option[ManifestLite] !io = {
                 }
               None -> ()
             }
-          } else if table == "java-deps" {
-            has_java = true
           }
         }
         None -> ()
@@ -128,10 +120,10 @@ pub fn read_manifest(dir: String) -> Option[ManifestLite] !io = {
   }
   deps = flush_remote(deps, remote)
   if name == "" { return None }
-  Some(ManifestLite { name: name, version: version, deps: deps, has_java_deps: has_java })
+  Some(ManifestLite { name: name, version: version, deps: deps })
 }
 
-test "reads name, deps and the java-deps flag" {
+test "reads name, version and deps" {
   # exercised end to end by the loader tests and the golden corpora; the pure
   # helpers are checkable directly
   assert unquote(" \"../packages/web\" ") == Some("../packages/web")

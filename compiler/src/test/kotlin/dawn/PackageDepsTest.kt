@@ -1,5 +1,6 @@
 package dawn
 
+import dawn.check.ModuleLoader
 import dawn.check.analyzeProject
 import org.junit.jupiter.api.io.TempDir
 import java.io.File
@@ -73,7 +74,7 @@ class PackageDepsTest {
     }
 
     @Test
-    fun `the alias must equal the package's manifest name`(@TempDir dir: File) {
+    fun `an alias different from the package name is local sugar`(@TempDir dir: File) {
         webPackage(dir)
         val appDir = app(dir, """
             schema = 1
@@ -82,9 +83,41 @@ class PackageDepsTest {
             [deps]
             w = "../packages/web"
         """.trimIndent(), """
-            pub fn main() -> Unit !io = println("x")
+            use w/router
+            use w/types.{Req}
+
+            pub fn main() -> Unit !io = println(router.describe(Req { path: "/x" }))
         """.trimIndent())
-        assertTrue(messages(appDir).any { it.contains("does not match the package's name") })
+        val program = analyzeProject(appDir)
+        val msgs = program.diagnostics.map { it.diag.message }
+        assertTrue(msgs.isEmpty(), "expected clean, got:\n" + msgs.joinToString("\n"))
+        // the aliased imports were canonicalized to the real name: one spelling,
+        // one namespace, however consumers choose to spell it (§4.3/§4.4)
+        assertEquals("dawn\$pkg\$web/router",
+            program.modules.first { it.modPath == "web/router" }.className)
+    }
+
+    @Test
+    fun `a dependency's java-deps link cleanly and surface for merging`(@TempDir dir: File) {
+        webPackage(dir)
+        File(dir, "packages/web/dawn.toml").appendText(
+            "\n[java-deps]\nsqlite = \"org.xerial:sqlite-jdbc:3.36.0.3\"\n")
+        val appDir = app(dir, """
+            schema = 1
+            name = "app"
+
+            [deps]
+            web = "../packages/web"
+        """.trimIndent(), """
+            use web/router
+            use web/types.{Req}
+
+            pub fn main() -> Unit !io = println(router.describe(Req { path: "/x" }))
+        """.trimIndent())
+        val msgs = messages(appDir)
+        assertTrue(msgs.isEmpty(), "expected clean, got:\n" + msgs.joinToString("\n"))
+        assertEquals(listOf("org.xerial:sqlite-jdbc:3.36.0.3"),
+            ModuleLoader.packageJavaDeps(appDir).map { it.toString() })
     }
 
     @Test

@@ -63,17 +63,19 @@ with zipfile.ZipFile(dst, 'w') as z:
 EOF
 APP="$OUT/urlapp"
 mkdir -p "$APP/src"
+# the dep is consumed under an alias (`g`) that differs from its real name
+# (`greeter`) — both compilers must canonicalize imports to the real name
 cat > "$APP/dawn.toml" <<EOF
 schema = 1
 name = "urlapp"
 
-[deps.greeter]
+[deps.g]
 url = "file://$OUT/greeter.zip"
 version = "1.0.0"
 hash = "$HASH"
 EOF
 cat > "$APP/src/main.dawn" <<'EOF'
-use greeter/hello
+use g/hello
 
 pub fn main() -> Unit !io = println(hello.greet("packages"))
 
@@ -85,7 +87,7 @@ export DAWN_PKG_CACHE="$OUT/pkgcache"
 "$DAWN" test "$APP" > "$OUT/k.txt" 2>&1 && k=0 || k=$?
 "${SH[@]}" test "$APP" > "$OUT/d.txt" 2>&1 && d=0 || d=$?
 unset DAWN_PKG_CACHE
-check "test url dep (fetched cache, selfhost reads it)" "$k" "$d"
+check "test url dep (aliased; fetched cache, selfhost reads it)" "$k" "$d"
 
 # test: the failing path (report shape, message indentation, exit 1)
 cat > "$OUT/failing.dawn" <<'EOF'

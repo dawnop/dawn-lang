@@ -216,7 +216,7 @@ class Manifest(
                     "url" -> {
                         if (listOf("https://", "http://", "file://").none { v.value.startsWith(it) }) {
                             sink.error("unsupported url `${v.value}`", v.span,
-                                "https://, http:// and file:// are supported; the archive must be a .zip")
+                                "https://, http:// and file:// are supported; the archive must be a .zip or .tar.gz")
                             bad = true
                         } else url = v.value
                     }
@@ -259,8 +259,10 @@ class Manifest(
                 }
             }
             if (bad) return null
-            checkV2Name(alias, version!!, span, sink)
-            return UrlDep(alias, version, url!!, hash!!, subdir, span)
+            // no v2-name check against the alias here: the alias is only the
+            // consumer's local spelling — the check runs at selection time
+            // against the package's real manifest name (ModuleLoader)
+            return UrlDep(alias, version!!, url!!, hash!!, subdir, span)
         }
 
         /**
@@ -297,11 +299,12 @@ class SemVer(val major: Int, val minor: Int, val patch: Int) : Comparable<SemVer
 }
 
 /**
- * A `[deps]` entry: a Dawn source package. The alias must equal the package's
- * own manifest name — the alias IS the namespace consumers write
- * (`use <alias>/<module>`), and letting it drift from the package identity
- * would make one package compile under two names (docs/package-design.md §4.3
- * keeps aliasing as future local sugar).
+ * A `[deps]` entry: a Dawn source package. The alias is the consumer's local
+ * spelling (`use <alias>/<module>`); the package's identity — its class-name
+ * namespace, the MVS grouping key, the one-copy-program-wide claim — is the
+ * `name` its own manifest declares (docs/package-design.md §4.3/§4.4: the name
+ * is the identity, the alias is local sugar). The loader canonicalizes aliased
+ * imports to the real name, so one package never compiles under two names.
  */
 sealed class SrcDep(val alias: String, val span: Span)
 
