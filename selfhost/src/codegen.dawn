@@ -1,0 +1,137 @@
+# Checked TAST → JVM bytecode via ASM (the Kotlin CodeGen.kt, spec §12.2):
+# module → class of statics; Int → long, Float → double, Bool → boolean,
+# String → java.lang.String, Unit → void; ADT → abstract base + final ctor
+# subclasses (nullary = singletons); match → instanceof chains; self tail
+# calls → goto. The class writer is the shared dawn.tool.AdtClassWriter, so
+# COMPUTE_FRAMES resolves generated-class hierarchies identically on both
+# compilers — golden = byte-identical .class files (docs/selfhost-codegen.md).
+
+use std/str
+use std/bytes
+use std/list
+use std/map
+use std/set
+use types.{
+  EPure, prelude_adts, opt_ty,
+  Ty, TyInt, TyFloat, TyBool, TyString, TyBytes, TyCursor, TyUnit, TyNever,
+  TyError, TyVar, TyAdt, TyList, TyMap, TySet, TyJava, TyTuple, TyFn,
+  Adts, AdtI, CtorI, adt_of, adt_jvm_name, ctor_jvm_name, Sym, Sig, Eff
+}
+use jreflect
+use java "dawn.tool.AdtClassWriter"
+use java "org.objectweb.asm.MethodVisitor"
+use java "org.objectweb.asm.Label"
+use java "org.objectweb.asm.Opcodes"
+use java "java.util.Objects"
+
+# ---- naming (must match the Kotlin side byte for byte) ----
+
+pub fn obj() -> String = "java/lang/Object"
+
+pub fn fn_iface(arity: Int) -> String = "dawn/rt/Fn" ++ to_string(arity)
+
+pub fn tuple_class(arity: Int) -> String = "dawn/rt/Tuple" ++ to_string(arity)
+
+pub fn erased_apply_desc(arity: Int) -> String = {
+  var ps = ""
+  for _i in 0 ..arity { ps = ps ++ "Ljava/lang/Object;" }
+  "(" ++ ps ++ ")Ljava/lang/Object;"
+}
+
+# ---- type mapping ----
+
+## The JVM descriptor of a Dawn type (the Kotlin descOf).
+pub fn desc_of(adts: Adts, t: Ty) -> String =
+  match t {
+    TyInt -> "J"
+    TyCursor -> "J"
+    TyFloat -> "D"
+    TyBool -> "Z"
+    TyString -> "Ljava/lang/String;"
+    TyBytes -> "[B"
+    TyUnit -> "V"
+    TyNever -> "V"
+    TyError -> "V"
+    TyVar(_, _) -> "Ljava/lang/Object;"
+    TyAdt(aid, _) -> "L" ++ adt_jvm_name(adt_of(adts, aid)) ++ ";"
+    TyList(_) -> "Ljava/util/List;"
+    TyMap(_, _) -> "Ljava/util/Map;"
+    TySet(_) -> "Ljava/util/Set;"
+    TyTuple(elems) -> "L" ++ tuple_class(len(elems)) ++ ";"
+    # arrays are their own descriptor ("[B"); reference classes get L…;
+    TyJava(fqcn, _) -> {
+      let internal = join(str.split(fqcn, "."), "/")
+      if str.starts_with(internal, "[") { internal } else { "L" ++ internal ++ ";" }
+    }
+    TyFn(params, _, _) -> "L" ++ fn_iface(len(params)) ++ ";"
+  }
+
+pub fn method_desc(adts: Adts, params: List[Ty], ret: Ty) -> String = {
+  var ps = ""
+  for p in params { ps = ps ++ desc_of(adts, p) }
+  "(" ++ ps ++ ")" ++ desc_of(adts, ret)
+}
+
+## JVM stack/local slots of a type (J/D = 2, void = 0).
+pub fn slots_of(t: Ty) -> Int =
+  match t {
+    TyInt -> 2
+    TyCursor -> 2
+    TyFloat -> 2
+    TyBool -> 1
+    TyUnit -> 0
+    TyNever -> 0
+    TyError -> 0
+    _ -> 1
+  }
+
+pub fn is_ref(t: Ty) -> Bool =
+  match t {
+    TyString -> true
+    TyBytes -> true
+    TyAdt(_, _) -> true
+    TyList(_) -> true
+    TyMap(_, _) -> true
+    TySet(_) -> true
+    TyVar(_, _) -> true
+    TyFn(_, _, _) -> true
+    TyTuple(_) -> true
+    TyJava(_, _) -> true
+    _ -> false
+  }
+
+# ---- tests ----
+
+test "descriptors and slot sizes mirror the Kotlin mapping" {
+  let adts = prelude_adts()
+  assert desc_of(adts, TyInt) == "J"
+  assert desc_of(adts, TyBool) == "Z"
+  assert desc_of(adts, TyBytes) == "[B"
+  assert desc_of(adts, TyList(TyInt)) == "Ljava/util/List;"
+  assert desc_of(adts, TyTuple([TyInt, TyBool])) == "Ldawn/rt/Tuple2;"
+  assert desc_of(adts, TyFn([TyInt], TyBool, EPure)) == "Ldawn/rt/Fn1;"
+  assert desc_of(adts, opt_ty(TyInt)) == "LOption;"
+  assert method_desc(adts, [TyInt, TyString], TyUnit) == "(JLjava/lang/String;)V"
+  assert erased_apply_desc(2) == "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;"
+  assert slots_of(TyFloat) == 2
+  assert slots_of(TyUnit) == 0
+}
+
+test "the ASM interop spike: a class assembles through the shared writer" {
+  # dawn/rt/Fn interfaces use a plain ClassWriter(0) in Kotlin; the spike just
+  # proves Dawn can drive AdtClassWriter + MethodVisitor end to end
+  let sup: List[String] = []
+  let cw = AdtClassWriter.new(sup)
+  # V17 = 61, ACC_PUBLIC|ACC_FINAL = 0x11
+  cw.begin(61, 17, "spike/Empty", "java/lang/Object")
+  let m = cw.method(9, "id", "(J)J").expect("method visitor")
+  m.visitCode()
+  # LLOAD 0; LRETURN
+  m.visitVarInsn(22, 0)
+  m.visitInsn(173)
+  m.visitMaxs(0, 0)
+  m.visitEnd()
+  cw.visitEnd()
+  let bs = cw.toByteArray().expect("bytes")
+  assert bytes.len(bs) > 0
+}

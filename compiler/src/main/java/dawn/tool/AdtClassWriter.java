@@ -24,6 +24,20 @@ public final class AdtClassWriter extends ClassWriter {
         this.supers = supers;
     }
 
+    /**
+     * The Dawn side: Dawn maps do not cross the interop boundary, lists do.
+     * Each entry is "child super" (one space).
+     */
+    public AdtClassWriter(java.util.List<String> superPairs) {
+        super(COMPUTE_FRAMES);
+        java.util.HashMap<String, String> m = new java.util.HashMap<>();
+        for (String e : superPairs) {
+            int sp = e.indexOf(' ');
+            m.put(e.substring(0, sp), e.substring(sp + 1));
+        }
+        this.supers = m;
+    }
+
     private java.util.List<String> chain(String t) {
         java.util.ArrayList<String> c = new java.util.ArrayList<>();
         String cur = t;
