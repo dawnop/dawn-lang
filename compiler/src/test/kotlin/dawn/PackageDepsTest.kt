@@ -106,25 +106,65 @@ class PackageDepsTest {
     }
 
     @Test
-    fun `transitive package deps are fenced off`(@TempDir dir: File) {
+    fun `a diamond links one copy of the shared package`(@TempDir dir: File) {
         webPackage(dir)
-        tree(dir, mapOf("packages/web/dawn.toml" to """
-            schema = 1
-            name = "web"
+        tree(dir, mapOf(
+            "packages/json/dawn.toml" to "schema = 1\nname = \"json\"",
+            "packages/json/src/value.dawn" to "pub type J = | JStr(s: String)",
+            "packages/web/dawn.toml" to """
+                schema = 1
+                name = "web"
 
-            [deps]
-            json = "../json"
-        """.trimIndent()))
+                [deps]
+                json = "../json"
+            """.trimIndent(),
+            "packages/web/src/render.dawn" to """
+                use json/value.{J, JStr}
+
+                pub fn hello() -> J = JStr("hi")
+            """.trimIndent(),
+        ))
         val appDir = app(dir, """
             schema = 1
             name = "app"
 
             [deps]
             web = "../packages/web"
+            json = "../packages/json"
+        """.trimIndent(), """
+            use web/render
+            use json/value.{J, JStr}
+
+            fn show_j(j: J) -> String = match j { JStr(s) -> s }
+
+            pub fn main() -> Unit !io = println(show_j(render.hello()))
+        """.trimIndent())
+        val program = analyzeProject(appDir)
+        val msgs = program.diagnostics.map { it.diag.message }
+        assertTrue(msgs.isEmpty(), "expected clean, got:\n" + msgs.joinToString("\n"))
+        // json loaded exactly once, under its own name — web's J and the app's J
+        // are the same type, so the value flows across the diamond
+        assertEquals(1, program.modules.count { it.modPath == "json/value" })
+    }
+
+    @Test
+    fun `a package dependency cycle is reported`(@TempDir dir: File) {
+        tree(dir, mapOf(
+            "packages/a/dawn.toml" to "schema = 1\nname = \"a\"\n\n[deps]\nb = \"../b\"",
+            "packages/a/src/x.dawn" to "pub fn one() -> Int = 1",
+            "packages/b/dawn.toml" to "schema = 1\nname = \"b\"\n\n[deps]\na = \"../a\"",
+            "packages/b/src/y.dawn" to "pub fn two() -> Int = 2",
+        ))
+        val appDir = app(dir, """
+            schema = 1
+            name = "app"
+
+            [deps]
+            a = "../packages/a"
         """.trimIndent(), """
             pub fn main() -> Unit !io = println("x")
         """.trimIndent())
-        assertTrue(messages(appDir).any { it.contains("transitive") })
+        assertTrue(messages(appDir).any { it.contains("cycle") })
     }
 
     @Test

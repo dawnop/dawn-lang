@@ -27,8 +27,14 @@ class ModuleFile(
     val pkg: PkgInfo? = null,
 )
 
-/** A resolved `[deps]` package: its manifest name and its src/ root. */
-class PkgInfo(val name: String, val srcRoot: File)
+/**
+ * A resolved `[deps]` package: its manifest name, its src/ root, and its own
+ * dependencies (alias → package). Packages reached through different consumers
+ * but the same directory share one PkgInfo — and one set of loaded modules —
+ * so a diamond (app → web → json, app → json) links a single json: exactly the
+ * one-version-per-path discipline the coherence rules need (package-design.md §4.5).
+ */
+class PkgInfo(val name: String, val srcRoot: File, val deps: Map<String, PkgInfo>)
 
 /** A diagnostic paired with the source file it should be rendered against. */
 class LocatedDiag(val source: SourceFile, val diag: Diagnostic)
@@ -66,7 +72,9 @@ object ModuleLoader {
             return ModuleLoadResult(emptyList(), diags)
         }
         val main = File(root, "main.dawn")
-        if (!main.isFile) {
+        // a directory with a manifest may be a library package (no entry module);
+        // run/build report the missing `fn main` themselves when it matters
+        if (!main.isFile && Manifest.locate(dir) == null) {
             diags.add(synthetic(dir, "project has no entry module (expected ${main.path})",
                 "add src/main.dawn with `pub fn main() -> Unit !io`"))
         }
@@ -76,13 +84,20 @@ object ModuleLoader {
     }
 
     /**
-     * `[deps]` → alias → package. Each dependency directory must carry a dawn.toml
-     * whose `name` equals the alias; package modules load from its src/ on demand
+     * `[deps]` → alias → package, recursively (transitive packages resolve their
+     * own manifests). Each dependency directory must carry a dawn.toml whose
+     * `name` equals the alias; package modules load from its src/ on demand
      * (a library has no entry module and its unused modules are not checked).
-     * v1 fences: a dependency may not have `[deps]` of its own (no transitive
-     * packages yet) nor `[java-deps]` (not merged into the consumer's class path yet).
+     * [cache] is keyed by canonical directory, so a diamond shares one PkgInfo.
+     * v1 fence: a dependency may not have `[java-deps]` (not merged into the
+     * consumer's class path yet).
      */
-    private fun resolveSrcDeps(dir: File, diags: ArrayList<LocatedDiag>): Map<String, PkgInfo> {
+    private fun resolveSrcDeps(
+        dir: File,
+        diags: ArrayList<LocatedDiag>,
+        cache: HashMap<String, PkgInfo?> = HashMap(),
+        visiting: MutableSet<String> = HashSet(),
+    ): Map<String, PkgInfo> {
         val mfFile = Manifest.locate(dir) ?: return emptyMap()
         val source = SourceFile(mfFile.path, mfFile.readText())
         val sink = DiagnosticSink()
@@ -91,43 +106,66 @@ object ModuleLoader {
         if (manifest == null) return emptyMap()
         val out = LinkedHashMap<String, PkgInfo>()
         for (dep in manifest.deps) {
+            val canon = dep.dir.canonicalFile.path
+            if (canon in cache) {
+                val hit = cache[canon]
+                if (hit != null) {
+                    if (hit.name != dep.alias) {
+                        diags.add(LocatedDiag(source, Diagnostic(
+                            "dependency alias `${dep.alias}` does not match the package's name `${hit.name}`",
+                            dep.span, "the alias must equal the package's manifest name; rename one of them")))
+                    } else {
+                        out[dep.alias] = hit
+                    }
+                }
+                continue
+            }
+            if (canon in visiting) {
+                diags.add(LocatedDiag(source, Diagnostic(
+                    "package dependency cycle through `${dep.alias}`", dep.span,
+                    "a package cannot depend on itself, directly or through its dependencies")))
+                continue
+            }
             val depMf = Manifest.locate(dep.dir)
             if (depMf == null) {
                 diags.add(LocatedDiag(source, Diagnostic(
                     "dependency `${dep.alias}` has no dawn.toml (looked in ${dep.dir.path})", dep.span,
                     "a Dawn source package is a directory with dawn.toml (name = \"${dep.alias}\") and src/")))
+                cache[canon] = null
                 continue
             }
             val depSource = SourceFile(depMf.path, depMf.readText())
             val depSink = DiagnosticSink()
             val dm = Manifest.parse(depMf, depSource, depSink)
             for (d in depSink.all) diags.add(LocatedDiag(depSource, d))
-            if (dm == null) continue
+            if (dm == null) { cache[canon] = null; continue }
             if (dm.name != dep.alias) {
                 diags.add(LocatedDiag(source, Diagnostic(
                     "dependency alias `${dep.alias}` does not match the package's name `${dm.name}`", dep.span,
                     "the alias must equal the package's manifest name; rename one of them")))
-                continue
-            }
-            if (dm.deps.isNotEmpty()) {
-                diags.add(LocatedDiag(source, Diagnostic(
-                    "package `${dm.name}` has `[deps]` of its own — transitive packages are not supported yet",
-                    dep.span, null)))
+                cache[canon] = null
                 continue
             }
             if (dm.javaDeps.isNotEmpty()) {
                 diags.add(LocatedDiag(source, Diagnostic(
                     "package `${dm.name}` has `[java-deps]` — a dependency's jars are not merged yet",
                     dep.span, "declare the jars in the consuming project's [java-deps] for now")))
+                cache[canon] = null
                 continue
             }
             val srcRoot = File(dep.dir, "src")
             if (!srcRoot.isDirectory) {
                 diags.add(LocatedDiag(source, Diagnostic(
                     "package `${dm.name}` has no src/ folder (expected ${srcRoot.path})", dep.span, null)))
+                cache[canon] = null
                 continue
             }
-            out[dep.alias] = PkgInfo(dm.name, srcRoot)
+            visiting.add(canon)
+            val transitive = resolveSrcDeps(dep.dir, diags, cache, visiting)
+            visiting.remove(canon)
+            val info = PkgInfo(dm.name, srcRoot, transitive)
+            cache[canon] = info
+            out[dep.alias] = info
         }
         return out
     }
@@ -187,8 +225,12 @@ object ModuleLoader {
             val modPath = if (pkg == null) internal else "${pkg.name}/$internal"
             val className = if (pkg == null) internalCls else "dawn\$pkg\$${pkg.name}/$internalCls"
             if (pkg != null) {
+                // a sibling import gains the package's own name; an import whose
+                // first segment names one of the package's own deps is already
+                // canonical (the alias equals that package's name)
                 for (u in module.moduleUses) {
-                    if (u.segments.first() != "std") u.segments = listOf(pkg.name) + u.segments
+                    val first = u.segments.first()
+                    if (first != "std" && first !in pkg.deps) u.segments = listOf(pkg.name) + u.segments
                 }
             }
             val mf = ModuleFile(modPath, className, file, source, module, sink.all, pkg)
@@ -220,6 +262,11 @@ object ModuleLoader {
                 if (u.segments.first() == "std") continue
                 val first = u.segments.first()
                 val (depFile, depPkg) = when {
+                    // a dependency module importing one of its own deps
+                    mf.pkg != null && first in mf.pkg.deps -> {
+                        val info = mf.pkg.deps[first]!!
+                        File(info.srcRoot, u.segments.drop(1).joinToString("/") + ".dawn") to info
+                    }
                     // a dependency module importing a sibling: paths were canonicalized
                     // to `<pkgname>/<internal>` at load time, resolve inside the package
                     mf.pkg != null ->

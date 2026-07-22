@@ -33,6 +33,11 @@ check "run calc (usage)" "$k" "$d"
 "${SH[@]}" test site > "$OUT/d.txt" 2>&1 && d=0 || d=$?
 check "test site" "$k" "$d"
 
+# test: a project consuming [deps] source packages (the selfhost package loader)
+"$DAWN" test playground > "$OUT/k.txt" 2>&1 && k=0 || k=$?
+"${SH[@]}" test playground > "$OUT/d.txt" 2>&1 && d=0 || d=$?
+check "test playground (with [deps])" "$k" "$d"
+
 # test: the failing path (report shape, message indentation, exit 1)
 cat > "$OUT/failing.dawn" <<'EOF'
 fn double(x: Int) -> Int = x * 2

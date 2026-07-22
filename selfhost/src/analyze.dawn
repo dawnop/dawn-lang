@@ -10,7 +10,8 @@ use std/list
 use std/map
 use std/set
 use token.{Diag}
-use ast.{Module, module_uses, module_fns}
+use ast.{Module, Decl, DUseModule, module_uses, module_fns}
+use manifest
 use checker.{
   ModExports, Cx, check_module, cx_new, exports_of, seed_prelude, pass_java_uses,
   pass_imports, pass_type_shells, pass_ctor_fields, pass_resolve_aliases,
@@ -28,15 +29,24 @@ use java "java.nio.file.Files"
 use java "java.nio.file.Path"
 use java "java.lang.Character"
 
+## A resolved `[deps]` package: its manifest name, src/ root, and its own
+## dependencies. Packages reached through different consumers but the same
+## directory share one entry — one set of loaded modules — so a diamond links
+## a single copy (the one-version-per-path discipline coherence needs).
+pub type PkgR = { name: String, root: String, deps: Map[String, PkgR] }
+
 ## One loaded module: dotted path, JVM class name, display path, source text,
-## parsed AST; lex/parse diagnostics ride along.
+## parsed AST; lex/parse diagnostics ride along. `pkg` = the `[deps]` source
+## package the module came from; None = the project's own tree
+## (docs/package-design.md 项目 B).
 pub type LoadedModule = {
   mod_path: String,
   class_name: String,
   path: String,
   text: String,
   m: Module,
-  pdiags: List[Diag]
+  pdiags: List[Diag],
+  pkg: Option[PkgR]
 }
 
 ## A diagnostic paired with where it should be reported (a module path for
@@ -136,13 +146,144 @@ pub fn load_directory(dir: String) -> LoadResult !io = {
     Ok(_) -> true
     Err(_) -> false
   }
-  if not main_ok {
+  # a directory with a manifest may be a library package (no entry module);
+  # run/build report the missing `fn main` themselves when it matters
+  let has_manifest = match io.read_file(dir ++ "/dawn.toml") {
+    Ok(_) -> true
+    Err(_) -> false
+  }
+  if not main_ok && not has_manifest {
     diags = diags ++ [synthetic(dir,
       "project has no entry module (expected " ++ main_path ++ ")",
       "add src/main.dawn with `pub fn main() -> Unit !io`")]
   }
   # load every module under src/ (spec §10.5: unreferenced modules still check)
-  resolve(root, walk_dawn(root), diags, false)
+  let no_cache: Map[String, Option[PkgR]] = map.empty()
+  let (pkgs, mdiags, _) = resolve_src_deps(dir, no_cache, set.empty())
+  diags = diags ++ mdiags
+  resolve(root, walk_dawn(root), diags, false, pkgs)
+}
+
+## `[deps]` → alias → package, recursively (transitive packages resolve their
+## own manifests). Mirrors the Kotlin ModuleLoader.resolveSrcDeps: the alias
+## must equal the package's manifest name; v1 fence: no `[java-deps]` in a
+## dependency. `cache` (canonical dir → resolved package, None = known bad)
+## and `visiting` (cycle guard) are threaded through the recursion.
+fn resolve_src_deps(
+  dir: String,
+  cache0: Map[String, Option[PkgR]],
+  visiting: Set[String]
+) -> (Map[String, PkgR], List[LocDiag], Map[String, Option[PkgR]]) !io = {
+  var out: Map[String, PkgR] = map.empty()
+  var diags: List[LocDiag] = []
+  var cache = cache0
+  let mf_path = dir ++ "/dawn.toml"
+  match manifest.read_manifest(dir) {
+    Some(m) -> {
+      for dep in m.deps {
+        let dcanon = canon(dep.dir)
+        if map.has(cache, dcanon) {
+          match map.get(cache, dcanon).expect("cached") {
+            Some(hit) ->
+              if hit.name != dep.key {
+                diags = diags ++ [LocDiag { path: mf_path, d: Diag {
+                  msg: "dependency alias `" ++ dep.key ++
+                    "` does not match the package's name `" ++ hit.name ++ "`",
+                  lo: 0,
+                  hi: 0,
+                  hint: "the alias must equal the package's manifest name; rename one of them"
+                } }]
+              } else {
+                out = map.insert(out, dep.key, hit)
+              }
+            None -> ()
+          }
+          continue
+        }
+        if set.has(visiting, dcanon) {
+          diags = diags ++ [LocDiag { path: mf_path, d: Diag {
+            msg: "package dependency cycle through `" ++ dep.key ++ "`",
+            lo: 0,
+            hi: 0,
+            hint: "a package cannot depend on itself, directly or through its dependencies"
+          } }]
+          continue
+        }
+        match manifest.read_manifest(dep.dir) {
+          Some(dm) ->
+            if dm.name != dep.key {
+              diags = diags ++ [LocDiag { path: mf_path, d: Diag {
+                msg: "dependency alias `" ++ dep.key ++
+                  "` does not match the package's name `" ++ dm.name ++ "`",
+                lo: 0,
+                hi: 0,
+                hint: "the alias must equal the package's manifest name; rename one of them"
+              } }]
+              cache = map.insert(cache, dcanon, None)
+            } else if dm.has_java_deps {
+              diags = diags ++ [LocDiag { path: mf_path, d: Diag {
+                msg: "package `" ++ dm.name ++
+                  "` has `[java-deps]` — a dependency's jars are not merged yet",
+                lo: 0,
+                hi: 0,
+                hint: "declare the jars in the consuming project's [java-deps] for now"
+              } }]
+              cache = map.insert(cache, dcanon, None)
+            } else if not io.is_dir(dep.dir ++ "/src") {
+              diags = diags ++ [LocDiag { path: mf_path, d: Diag {
+                msg: "package `" ++ dm.name ++ "` has no src/ folder (expected " ++
+                  dep.dir ++ "/src)",
+                lo: 0,
+                hi: 0,
+                hint: ""
+              } }]
+              cache = map.insert(cache, dcanon, None)
+            } else {
+              let (tdeps, tdiags, cache1) =
+                resolve_src_deps(dep.dir, cache, set.insert(visiting, dcanon))
+              diags = diags ++ tdiags
+              cache = cache1
+              let info = PkgR { name: dm.name, root: canon(dep.dir ++ "/src"), deps: tdeps }
+              cache = map.insert(cache, dcanon, Some(info))
+              out = map.insert(out, dep.key, info)
+            }
+          None -> {
+            diags = diags ++ [LocDiag { path: mf_path, d: Diag {
+              msg: "dependency `" ++ dep.key ++ "` has no dawn.toml (looked in " ++
+                dep.dir ++ ")",
+              lo: 0,
+              hi: 0,
+              hint: "a Dawn source package is a directory with dawn.toml (name = \"" ++
+                dep.key ++ "\") and src/"
+            } }]
+            cache = map.insert(cache, dcanon, None)
+          }
+        }
+      }
+    }
+    None -> ()
+  }
+  (out, diags, cache)
+}
+
+## Canonicalize a package module's `use` paths to the alias-qualified spelling
+## (`use types` → `use web/types`), so the checker, duplicate detection and the
+## topological sort all see one spelling — the Kotlin loader does the same.
+## A first segment naming one of the package's own deps is already canonical.
+fn qualify_uses(m: Module, pkg: PkgR) -> Module = {
+  var decls: List[Decl] = []
+  for d in m.decls {
+    match d {
+      DUseModule(segs, sel, lo, hi, nlo, nhi) ->
+        if segs[0] == "std" || map.has(pkg.deps, segs[0]) {
+          decls = decls ++ [d]
+        } else {
+          decls = decls ++ [DUseModule([pkg.name] ++ segs, sel, lo, hi, nlo, nhi)]
+        }
+      _ -> { decls = decls ++ [d] }
+    }
+  }
+  Module { decls: decls }
 }
 
 fn nearest_src_root(file: String) -> String !io = {
@@ -175,14 +316,21 @@ fn nearest_src_root(file: String) -> String !io = {
 ## loads the entry plus its transitive use-closure.
 pub fn load_file(file: String) -> LoadResult !io = {
   let root = nearest_src_root(file)
-  resolve(root, [file], [], true)
+  let proj = match str.last_index_of(root, "/") {
+    Some(i) -> if str.substring(root, i + 1, str.len(root)) == "src" { str.substring(root, 0, i) } else { root }
+    None -> root
+  }
+  let no_cache: Map[String, Option[PkgR]] = map.empty()
+  let (pkgs, mdiags, _) = resolve_src_deps(proj, no_cache, set.empty())
+  resolve(root, [file], mdiags, true, pkgs)
 }
 
 fn resolve(
   root: String,
   seed_files: List[String],
   diags0: List[LocDiag],
-  follow_only: Bool
+  follow_only: Bool,
+  pkgs: Map[String, PkgR]
 ) -> LoadResult !io = {
   var diags = diags0
   let root_abs = canon(root)
@@ -204,7 +352,8 @@ fn resolve(
             path: f,
             text: text,
             m: m,
-            pdiags: pdiags
+            pdiags: pdiags,
+            pkg: None
           }
           by_canon = map.insert(by_canon, c, mod_path)
           by_path = map.insert(by_path, mod_path, mf)
@@ -242,22 +391,90 @@ fn resolve(
         }
         # bundled std modules come from the compiler, not the module graph
         if u.segs[0] == "std" { continue }
-        let dep_file = root ++ "/" ++ join(u.segs, "/") ++ ".dawn"
+        # where the target file lives and which package it belongs to: a package
+        # module imports its siblings (paths already canonicalized to
+        # `<pkgname>/<internal>`); an app module hitting a [deps] alias resolves
+        # inside that package — unless a local path claims the same first
+        # segment, which is never shadowed silently (package-design.md §4.3)
+        var dep_file = ""
+        var dep_pkg: Option[PkgR] = None
+        var edge_ok = true
+        match mf.pkg {
+          Some(p) ->
+            match map.get(p.deps, u.segs[0]) {
+              Some(info) -> {
+                # a dependency module importing one of its own deps
+                dep_file = info.root ++ "/" ++ join(list.drop(u.segs, 1), "/") ++ ".dawn"
+                dep_pkg = Some(info)
+              }
+              None -> {
+                dep_file = p.root ++ "/" ++ join(list.drop(u.segs, 1), "/") ++ ".dawn"
+                dep_pkg = mf.pkg
+              }
+            }
+          None ->
+            match map.get(pkgs, u.segs[0]) {
+              Some(info) -> {
+                let local = root ++ "/" ++ join(u.segs, "/") ++ ".dawn"
+                let local_hit = match io.read_file(local) {
+                  Ok(_) -> true
+                  Err(_) -> false
+                }
+                if local_hit {
+                  diags = diags ++ [LocDiag { path: mf.path, d: Diag {
+                    msg: "`" ++ u.path ++ "` is ambiguous: `" ++ u.segs[0] ++
+                      "` is both a [deps] package and a local module path",
+                    lo: u.nlo,
+                    hi: u.nhi,
+                    hint: "rename the src/" ++ u.segs[0] ++ "/ directory or the dependency alias"
+                  } }]
+                  edge_ok = false
+                } else if len(u.segs) == 1 {
+                  diags = diags ++ [LocDiag { path: mf.path, d: Diag {
+                    msg: "cannot import the package `" ++ u.segs[0] ++ "` itself",
+                    lo: u.nlo,
+                    hi: u.nhi,
+                    hint: "import one of its modules: `use " ++ u.segs[0] ++ "/<module>`"
+                  } }]
+                  edge_ok = false
+                } else {
+                  dep_file = info.root ++ "/" ++ join(list.drop(u.segs, 1), "/") ++ ".dawn"
+                  dep_pkg = Some(info)
+                }
+              }
+              None -> {
+                dep_file = root ++ "/" ++ join(u.segs, "/") ++ ".dawn"
+              }
+            }
+        }
+        if not edge_ok { continue }
         let dep_canon = canon(dep_file)
         if map.has(by_canon, dep_canon) {
           queue = queue ++ [map.get(by_canon, dep_canon).expect("canon")]
         } else {
           match io.read_file(dep_file) {
             Ok(text) -> {
-              let (m2, pdiags2) = parser.parse_module(text)
-              let mod_path = module_path_of(root_abs, dep_canon)
+              let (m2p, pdiags2) = parser.parse_module(text)
+              let (mod_path, cls, m2) = match dep_pkg {
+                Some(p) -> {
+                  let internal = module_path_of(p.root, dep_canon)
+                  (p.name ++ "/" ++ internal,
+                    "dawn\$pkg\$" ++ p.name ++ "/" ++ class_name_of(internal),
+                    qualify_uses(m2p, p))
+                }
+                None -> {
+                  let mp = module_path_of(root_abs, dep_canon)
+                  (mp, class_name_of(mp), m2p)
+                }
+              }
               let mf2 = LoadedModule {
                 mod_path: mod_path,
-                class_name: class_name_of(mod_path),
+                class_name: cls,
                 path: dep_file,
                 text: text,
                 m: m2,
-                pdiags: pdiags2
+                pdiags: pdiags2,
+                pkg: dep_pkg
               }
               by_canon = map.insert(by_canon, dep_canon, mod_path)
               by_path = map.insert(by_path, mod_path, mf2)

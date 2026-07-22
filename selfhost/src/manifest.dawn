@@ -1,0 +1,90 @@
+# A minimal dawn.toml reader for the loader's needs: `name`, the `[deps]`
+# aliases (path strings, 项目 B v1), and whether `[java-deps]`/`[deps]` are
+# present at all. Line-oriented over the manifest TOML subset — the Kotlin
+# Manifest/TomlParser stays the validation authority (the CLI runs it before
+# anything here matters); this reader only has to agree on valid input, which
+# is what the golden corpora contain.
+
+use std/str
+use std/list
+use std/io
+
+pub type SrcDep = { key: String, dir: String }
+
+pub type ManifestLite = {
+  name: String,
+  deps: List[SrcDep],
+  has_java_deps: Bool
+}
+
+fn unquote(v: String) -> Option[String] = {
+  let t = str.trim(v)
+  if str.len(t) >= 2 && str.starts_with(t, "\"") && str.ends_with(t, "\"") {
+    Some(str.substring(t, 1, str.len(t) - 1))
+  } else {
+    None
+  }
+}
+
+## Strip a trailing comment. Naive on purpose: manifest values in this repo
+## never hold `#` inside strings, and invalid input is Kotlin's department.
+fn strip_comment(line: String) -> String =
+  match str.index_of(line, "#") {
+    Some(i) -> str.substring(line, 0, i)
+    None -> line
+  }
+
+## The manifest beside `dir`'s dawn.toml, or None when the file is absent or
+## carries no usable `name`.
+pub fn read_manifest(dir: String) -> Option[ManifestLite] !io = {
+  let text = match io.read_file(dir ++ "/dawn.toml") {
+    Ok(t) -> t
+    Err(_) -> return None
+  }
+  var name = ""
+  var deps: List[SrcDep] = []
+  var has_java = false
+  var table = ""
+  for raw in str.split(text, "\n") {
+    let line = str.trim(strip_comment(raw))
+    if line == "" {
+      ()
+    } else if str.starts_with(line, "[") && str.ends_with(line, "]") {
+      table = str.substring(line, 1, str.len(line) - 1)
+    } else {
+      match str.index_of(line, "=") {
+        Some(i) -> {
+          let key = str.trim(str.substring(line, 0, i))
+          let val = str.substring(line, i + 1, str.len(line))
+          if table == "" && key == "name" {
+            match unquote(val) {
+              Some(v) -> { name = v }
+              None -> ()
+            }
+          } else if table == "deps" {
+            match unquote(val) {
+              Some(p) -> {
+                let full = if str.starts_with(p, "/") { p } else { dir ++ "/" ++ p }
+                deps = deps ++ [SrcDep { key: key, dir: full }]
+              }
+              None -> ()
+            }
+          } else if table == "java-deps" {
+            has_java = true
+          }
+        }
+        None -> ()
+      }
+    }
+  }
+  if name == "" { return None }
+  Some(ManifestLite { name: name, deps: deps, has_java_deps: has_java })
+}
+
+test "reads name, deps and the java-deps flag" {
+  # exercised end to end by the loader tests and the golden corpora; the pure
+  # helpers are checkable directly
+  assert unquote(" \"../packages/web\" ") == Some("../packages/web")
+  assert unquote("42") == None
+  assert strip_comment("a = \"b\" # c") == "a = \"b\" "
+}
