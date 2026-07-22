@@ -115,8 +115,11 @@ Kotlin CodeGen 从 checked AST 读的注解，逐一映射到 TAST：
   表示丢弃（现端口总是 Some，需改 check_stmt）；ExprStmt 弹栈按 expr.type；
   while/for 用 loopStack (cont,end)，for 的增量段 reachable = bodyFalls || hasJumps ✓
   （TSWhile/TSFor 的 has_jumps 语义与 Kotlin s.hasJumps 完全一致，值必须一样——
-  Kotlin hasJumps 是 checker 填的？【待核对：Kotlin ForStmt.hasJumps 谁填、含义
-  （any break/continue targeting THIS loop）——与 loop_jumps 集合语义对齐】）。
+  已核对（2026-07-22）：Kotlin 的 `hasJumps` 由 **checker** 填（`Checker.kt`
+  `checkLoopJump`——break/continue 命中 loopStack 最近一层、且不跨 lambda 时置
+  true），含义正是 any break/continue targeting THIS loop，与 selfhost
+  checker.dawn 的 loop_jumps 集合语义逐点对齐；全语料 emit 字节一致也从经验上
+  封了口）。
 - genExpr 返回 falls；Break/Continue → GOTO loopStack；Return → adaptTo(v.type,
   methodRet)；ComptimeExpr → genLoadConst(e.value, e.type, key=节点)（标量 LDC、
   结构→静态字段 dawn$const$i + <clinit> constructValue，VAdt 字段 boxed=字段类型是
