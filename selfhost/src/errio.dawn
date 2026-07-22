@@ -1,0 +1,23 @@
+# Stderr for the CLI: `System.err` is a static field, which the interop does
+# not reach (spec §9.1 — methods only), so a static getter method-handle is the
+# door. The Kotlin CLI prints progress ("resolving N java-deps...") and errors
+# ("error: ...") on stderr; byte parity requires the same channel.
+
+use java "java.lang.Class"
+use java "java.io.PrintStream"
+use java "java.lang.invoke.MethodHandles"
+use java "java.lang.Object"
+
+fn stderr_stream() -> PrintStream !io = {
+  let sys = Class.forName("java.lang.System").expect("System")
+  let ps = Class.forName("java.io.PrintStream").expect("PrintStream")
+  let mh = MethodHandles.publicLookup().expect("lookup")
+    .findStaticGetter(sys, "err", ps).expect("System.err getter")
+  let empty: List[Object] = []
+  cast(mh.invokeWithArguments(empty).expect("stream"))
+}
+
+pub fn eprintln(s: String) -> Unit !io = {
+  let _ = stderr_stream().println(s)
+  ()
+}

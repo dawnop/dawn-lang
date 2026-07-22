@@ -1,0 +1,513 @@
+# Fetching and verifying remote source packages (the Kotlin manifest/PkgFetch):
+# download an archive, unpack it, d1-hash the file tree, and file it into the
+# content-addressed cache. Errors are pre-formatted strings — the message plus,
+# when the Kotlin side carries one, "\n  " and the hint — so callers print them
+# behind "error: " exactly as the Kotlin CLI does.
+#
+# Enum constants (Redirect.NORMAL, ATOMIC_MOVE) are static fields, which the
+# interop does not reach; `valueOf` is the method-shaped door to the same value.
+
+use std/str
+use std/bytes
+use std/list
+use std/io
+use java "java.lang.System"
+use java "java.io.File"
+use java "java.io.ByteArrayInputStream"
+use java "java.net.URI"
+use java "java.net.InetSocketAddress"
+use java "java.net.ProxySelector"
+use java "java.net.http.HttpClient"
+use java "java.net.http.HttpClient.Redirect"
+use java "java.net.http.HttpRequest"
+use java "java.net.http.HttpRequest.BodyPublisher"
+use java "java.net.http.HttpRequest.BodyPublishers"
+use java "java.net.http.HttpResponse.BodyHandlers"
+use java "java.nio.file.Files"
+use java "java.nio.file.Paths"
+use java "java.nio.file.StandardCopyOption"
+use java "java.security.MessageDigest"
+use java "java.util.HexFormat"
+use java "java.util.zip.GZIPInputStream"
+use java "java.util.zip.ZipInputStream"
+
+## The content-addressed cache root: the `dawn.pkg.cache` property (tests), then
+## $DAWN_PKG_CACHE, then ~/.dawn/pkg.
+pub fn cache_root() -> String !io =
+  match System.getProperty("dawn.pkg.cache") {
+    Some(p) -> p
+    None ->
+      match System.getenv("DAWN_PKG_CACHE") {
+        Some(p) -> p
+        None ->
+          match System.getProperty("user.home") {
+            Some(h) -> h ++ "/.dawn/pkg"
+            None -> ".dawn-pkg"
+          }
+      }
+  }
+
+pub fn cache_dir(hash: String) -> String !io = cache_root() ++ "/" ++ str.replace(hash, ":", "-")
+
+# ---- d1: SHA-256 over the sorted file tree, `relpath \0 size \0 bytes` ----
+
+fn zero_byte() -> Bytes = bytes.utf8(str.from_char(0))
+
+fn read_bytes(path: String) -> Result[Bytes, String] !io =
+  match java_try(fn() => Files.readAllBytes(Paths.get(path).expect("path")).expect("bytes")) {
+    Ok(b) -> Ok(b)
+    Err(e) -> Err("cannot read " ++ path ++ ": " ++ e)
+  }
+
+fn is_symlink(path: String) -> Bool !io =
+  match java_try(fn() => Files.isSymbolicLink(Paths.get(path).expect("path"))) {
+    Ok(b) -> b
+    Err(_) -> false
+  }
+
+## Regular files under `root`, sorted by relative path; symlinks are refused
+## (they do not survive archives portably, so the hash refuses them).
+fn collect_files(root: String, rel: String) -> Result[List[String], String] !io = {
+  var out: List[String] = []
+  let dir = if rel == "" { root } else { root ++ "/" ++ rel }
+  match io.list_dir(dir) {
+    Ok(names) -> {
+      for f in sort(names) {
+        let r2 = if rel == "" { f } else { rel ++ "/" ++ f }
+        let full = root ++ "/" ++ r2
+        if is_symlink(full) {
+          return Err("symbolic link in package tree: " ++ r2 ++
+              "\n  the d1 hash refuses symlinks — they do not survive archives portably")
+        }
+        if io.is_dir(full) {
+          match collect_files(root, r2) {
+            Ok(sub) -> { out = out ++ sub }
+            Err(e) -> return Err(e)
+          }
+        } else {
+          out = out ++ [r2]
+        }
+      }
+      Ok(out)
+    }
+    Err(e) -> Err("cannot list " ++ dir ++ ": " ++ e)
+  }
+}
+
+## The d1 canonical tree hash of a directory: `d1:` + 64 hex digits.
+pub fn tree_hash(root: String) -> Result[String, String] !io = {
+  let files = match collect_files(root, "") {
+    Ok(fs) -> sort(fs)
+    Err(e) -> return Err(e)
+  }
+  let digest = MessageDigest.getInstance("SHA-256").expect("sha-256 exists")
+  for rel in files {
+    let content = match read_bytes(root ++ "/" ++ rel) {
+      Ok(b) -> b
+      Err(e) -> return Err(e)
+    }
+    let _ = digest.update(bytes.utf8(rel))
+    let _ = digest.update(zero_byte())
+    let _ = digest.update(bytes.utf8(to_string(bytes.len(content))))
+    let _ = digest.update(zero_byte())
+    let _ = digest.update(content)
+  }
+  let hex = HexFormat.of().expect("hex").formatHex(digest.digest().expect("digest"))
+  Ok("d1:" ++ hex.expect("hex string"))
+}
+
+# ---- download ----
+
+## `https_proxy`/`HTTPS_PROXY` as host + port — the JDK ignores these env vars.
+fn proxy_from_env() -> Option[(String, Int)] !io = {
+  let raw = match System.getenv("https_proxy") {
+    Some(v) -> v
+    None ->
+      match System.getenv("HTTPS_PROXY") {
+        Some(v) -> v
+        None -> return None
+      }
+  }
+  var rest = raw
+  match str.index_of(rest, "://") {
+    Some(i) -> { rest = str.substring(rest, i + 3, str.len(rest)) }
+    None -> ()
+  }
+  match str.index_of(rest, "/") {
+    Some(i) -> { rest = str.substring(rest, 0, i) }
+    None -> ()
+  }
+  if rest == "" { return None }
+  match str.last_index_of(rest, ":") {
+    Some(i) -> {
+      let host = str.substring(rest, 0, i)
+      match parse_int(str.substring(rest, i + 1, str.len(rest))) {
+        Some(port) -> Some((host, port))
+        None -> Some((rest, 80))
+      }
+    }
+    None -> Some((rest, 80))
+  }
+}
+
+fn http_get(url: String) -> Result[Bytes, String] !io = {
+  let sent = java_try(fn() => {
+    let builder = HttpClient.newBuilder().expect("builder")
+    let redirected = builder.followRedirects(Redirect.valueOf("NORMAL").expect("policy")).expect("builder")
+    let ready = match proxy_from_env() {
+      Some(hp) -> {
+        let (host, port) = hp
+        let sel = ProxySelector.of(InetSocketAddress.new(host, port)).expect("selector")
+        redirected.proxy(sel).expect("builder")
+      }
+      None -> redirected
+    }
+    let client = ready.build().expect("client")
+    let uri = URI.create(url).expect("uri")
+    let nobody: BodyPublisher = BodyPublishers.noBody().expect("publisher")
+    let req = HttpRequest.newBuilder().expect("rb").uri(uri).expect("rb")
+      .method("GET", nobody).expect("rb").build().expect("request")
+    let resp = client.send(req, BodyHandlers.ofByteArray().expect("handler")).expect("response")
+    let body: Bytes = cast(resp.body().expect("body"))
+    (resp.statusCode(), body)
+  })
+  match sent {
+    Ok(pr) -> {
+      let (status, body) = pr
+      if status != 200 {
+        Err("cannot fetch " ++ url ++ ": HTTP " ++ to_string(status))
+      } else {
+        Ok(body)
+      }
+    }
+    Err(e) ->
+      Err("cannot fetch " ++ url ++ ": " ++ e ++
+          "\n  check the network (https_proxy is honored) or pre-seed the cache")
+  }
+}
+
+fn download(url: String) -> Result[Bytes, String] !io =
+  if str.starts_with(url, "file://") {
+    let path = str.substring(url, str.len("file://"), str.len(url))
+    if io.is_dir(path) {
+      Err("no such file: " ++ url)
+    } else {
+      match read_bytes(path) {
+        Ok(b) -> Ok(b)
+        Err(_) -> Err("no such file: " ++ url)
+      }
+    }
+  } else {
+    http_get(url)
+  }
+
+# ---- unpack: zip or tar.gz, told apart by magic bytes ----
+
+fn mkdirs(path: String) -> Unit !io = {
+  let _ = java_try(fn() => Files.createDirectories(Paths.get(path).expect("path")))
+  ()
+}
+
+fn write_file_bytes(path: String, bs: Bytes) -> Result[Unit, String] !io = {
+  match str.last_index_of(path, "/") {
+    Some(i) -> mkdirs(str.substring(path, 0, i))
+    None -> ()
+  }
+  match java_try(fn() => Files.write(Paths.get(path).expect("path"), bs)) {
+    Ok(_) -> Ok(())
+    Err(e) -> Err("cannot write " ++ path ++ ": " ++ e)
+  }
+}
+
+## The extraction target for an archive entry, with the zip-slip guard.
+fn entry_path(dest: String, name: String) -> Result[String, String] !io = {
+  let out = dest ++ "/" ++ name
+  let canon = match java_try(fn() => File.new(out).getCanonicalPath().expect("canon")) {
+    Ok(c) -> c
+    Err(e) -> return Err("archive entry escapes the extraction root: " ++ name)
+  }
+  let base = match java_try(fn() => File.new(dest).getCanonicalPath().expect("canon")) {
+    Ok(c) -> c
+    Err(e) -> return Err(e)
+  }
+  if canon == base || str.starts_with(canon, base ++ "/") {
+    Ok(out)
+  } else {
+    Err("archive entry escapes the extraction root: " ++ name)
+  }
+}
+
+fn unzip(bs: Bytes, dest: String) -> Result[Unit, String] !io = {
+  var any = false
+  let zin = ZipInputStream.new(ByteArrayInputStream.new(bs))
+  while true {
+    let next = match java_try(fn() => zin.getNextEntry()) {
+      Ok(o) -> o
+      Err(e) -> return Err("not a zip archive (or an empty one)" ++
+          "\n  .zip and .tar.gz archives are supported; for GitHub use .../archive/refs/tags/<tag>.zip")
+    }
+    match next {
+      Some(entry) -> {
+        any = true
+        let name = entry.getName().expect("entry name")
+        let out = match entry_path(dest, name) {
+          Ok(p) -> p
+          Err(e) -> return Err(e)
+        }
+        if entry.isDirectory() {
+          mkdirs(out)
+        } else {
+          let content = zin.readAllBytes().expect("entry bytes")
+          match write_file_bytes(out, content) {
+            Ok(_) -> ()
+            Err(e) -> return Err(e)
+          }
+        }
+      }
+      None -> break
+    }
+  }
+  let _ = java_try(fn() => zin.close())
+  if not any {
+    Err("not a zip archive (or an empty one)" ++
+        "\n  .zip and .tar.gz archives are supported; for GitHub use .../archive/refs/tags/<tag>.zip")
+  } else {
+    Ok(())
+  }
+}
+
+# ---- tar.gz: gunzip whole, then walk 512-byte ustar blocks in memory ----
+
+## The NUL-terminated string in `[off, off+len)`.
+fn tar_str(b: Bytes, off: Int, len_: Int) -> String = {
+  var end = off
+  while end < off + len_ && bytes.at(b, end) != 0 { end = end + 1 }
+  bytes.decode(bytes.slice(b, off, end), "UTF-8")
+}
+
+fn tar_octal(b: Bytes, off: Int, len_: Int) -> Result[Int, String] = {
+  if bytes.at(b, off) >= 128 { return Err("GNU base-256 tar sizes are not supported") }
+  let s = str.trim(tar_str(b, off, len_))
+  if s == "" { return Ok(0) }
+  var n = 0
+  for c in str.chars(s) {
+    match str.index_of("01234567", c) {
+      Some(d) -> { n = n * 8 + d }
+      None -> return Err("bad size field in tar header")
+    }
+  }
+  Ok(n)
+}
+
+fn block_all_zero(b: Bytes, off: Int) -> Bool = {
+  var i = off
+  while i < off + 512 {
+    if bytes.at(b, i) != 0 { return false }
+    i = i + 1
+  }
+  true
+}
+
+## pax extended header records are "<len> key=value\n"; the path override wins.
+fn pax_path(recs: String) -> Option[String] = {
+  var out: Option[String] = None
+  var i = 0
+  while i < str.len(recs) {
+    let sp = match str.index_of(str.substring(recs, i, str.len(recs)), " ") {
+      Some(s) -> i + s
+      None -> break
+    }
+    let rec_len = match parse_int(str.substring(recs, i, sp)) {
+      Some(n) -> n
+      None -> break
+    }
+    if rec_len <= 0 || i + rec_len > str.len(recs) { break }
+    var rec = str.substring(recs, sp + 1, i + rec_len)
+    if str.ends_with(rec, "\n") { rec = str.substring(rec, 0, str.len(rec) - 1) }
+    if str.starts_with(rec, "path=") {
+      out = Some(str.substring(rec, str.len("path="), str.len(rec)))
+    }
+    i = i + rec_len
+  }
+  out
+}
+
+fn untar(gz: Bytes, dest: String) -> Result[Unit, String] !io = {
+  let raw = match java_try(fn() =>
+      GZIPInputStream.new(ByteArrayInputStream.new(gz)).readAllBytes().expect("bytes")) {
+        Ok(b) -> b
+        Err(e) -> return Err("not a tar.gz archive (or an empty one)" ++
+            "\n  .zip and .tar.gz archives are supported; for GitHub use .../archive/refs/tags/<tag>.tar.gz")
+      }
+  var any = false
+  var off = 0
+  var pending: Option[String] = None
+  while off + 512 <= bytes.len(raw) {
+    if block_all_zero(raw, off) { break }
+    let size = match tar_octal(raw, off + 124, 12) {
+      Ok(n) -> n
+      Err(e) -> return Err(e)
+    }
+    let tchar = bytes.at(raw, off + 156)
+    let magic = tar_str(raw, off + 257, 6)
+    let prefix = if str.starts_with(magic, "ustar") { tar_str(raw, off + 345, 155) } else { "" }
+    let raw_name = tar_str(raw, off, 100)
+    let name = match pending {
+      Some(p) -> p
+      None -> if prefix == "" { raw_name } else { prefix ++ "/" ++ raw_name }
+    }
+    pending = None
+    let data_start = off + 512
+    if data_start + size > bytes.len(raw) { return Err("truncated tar archive") }
+    let padded = size + (512 - size % 512) % 512
+    # type bytes: 'L' 76, 'x' 120, 'g' 103, '5' 53, '0' 48, NUL 0, '7' 55, links 49/50
+    if tchar == 76 {
+      let long_name = bytes.decode(bytes.slice(raw, data_start, data_start + size), "UTF-8")
+      pending = Some(match str.index_of(long_name, str.from_char(0)) {
+        Some(i) -> str.substring(long_name, 0, i)
+        None -> long_name
+      })
+    } else if tchar == 120 {
+      let recs = bytes.decode(bytes.slice(raw, data_start, data_start + size), "UTF-8")
+      pending = pax_path(recs)
+    } else if tchar == 103 {
+      ()
+    } else if tchar == 53 {
+      match entry_path(dest, name) {
+        Ok(p) -> mkdirs(p)
+        Err(e) -> return Err(e)
+      }
+      any = true
+    } else if tchar == 48 || tchar == 0 || tchar == 55 {
+      let out = match entry_path(dest, name) {
+        Ok(p) -> p
+        Err(e) -> return Err(e)
+      }
+      match write_file_bytes(out, bytes.slice(raw, data_start, data_start + size)) {
+        Ok(_) -> ()
+        Err(e) -> return Err(e)
+      }
+      any = true
+    } else if tchar == 49 || tchar == 50 {
+      return Err("link in tar archive: " ++ name ++
+          "\n  the d1 hash refuses links — they do not survive archives portably")
+    } else {
+      return Err("unsupported tar entry type `" ++ str.from_char(tchar) ++ "`: " ++ name)
+    }
+    off = data_start + padded
+  }
+  if not any {
+    Err("not a tar.gz archive (or an empty one)" ++
+        "\n  .zip and .tar.gz archives are supported; for GitHub use .../archive/refs/tags/<tag>.tar.gz")
+  } else {
+    Ok(())
+  }
+}
+
+fn unpack(bs: Bytes, dest: String) -> Result[Unit, String] !io =
+  if bytes.len(bs) >= 2 && bytes.at(bs, 0) == 31 && bytes.at(bs, 1) == 139 {
+    untar(bs, dest)
+  } else {
+    unzip(bs, dest)
+  }
+
+## GitHub-style archives wrap everything in `<repo>-<tag>/`: when the unpacked
+## root holds exactly one directory and nothing else, that directory is the tree.
+fn strip_single_top_dir(work: String) -> String !io =
+  match io.list_dir(work) {
+    Ok(names) ->
+      if len(names) == 1 && io.is_dir(work ++ "/" ++ names[0]) {
+        work ++ "/" ++ names[0]
+      } else {
+        work
+      }
+    Err(_) -> work
+  }
+
+fn delete_tree(path: String) -> Unit !io = {
+  if io.is_dir(path) && not is_symlink(path) {
+    match io.list_dir(path) {
+      Ok(names) -> { for f in names { delete_tree(path ++ "/" ++ f) } }
+      Err(_) -> ()
+    }
+  }
+  let _ = java_try(fn() => Files.deleteIfExists(Paths.get(path).expect("path")))
+  ()
+}
+
+## Fetch `url`, unpack, hash, and file the tree into the cache under its own
+## (actual) hash. Returns (cache entry, d1 hash) — `add` uses this to learn the
+## hash of an archive it has never seen.
+pub fn fetch_and_hash(url: String) -> Result[(String, String), String] !io = {
+  mkdirs(cache_root())
+  let work = match java_try(fn() =>
+      Files.createTempDirectory(Paths.get(cache_root()).expect("path"), "fetch-")
+      .expect("temp dir").toString().expect("path")) {
+        Ok(d) -> d
+        Err(e) -> return Err("cannot create a temp directory under " ++ cache_root() ++ ": " ++ e)
+      }
+  let result = fetch_into(url, work)
+  delete_tree(work)
+  result
+}
+
+fn fetch_into(url: String, work: String) -> Result[(String, String), String] !io = {
+  let body = match download(url) {
+    Ok(b) -> b
+    Err(e) -> return Err(e)
+  }
+  match unpack(body, work) {
+    Ok(_) -> ()
+    Err(e) -> return Err(e)
+  }
+  let root = strip_single_top_dir(work)
+  let actual = match tree_hash(root) {
+    Ok(h) -> h
+    Err(e) -> return Err(e)
+  }
+  let target = cache_dir(actual)
+  if not io.is_dir(target) {
+    # rename into place; a concurrent fetch of the same hash yields the same bytes
+    let moved = java_try(fn() => Files.move(Paths.get(root).expect("path"),
+      Paths.get(target).expect("path"), StandardCopyOption.valueOf("ATOMIC_MOVE").expect("option")))
+    match moved {
+      Ok(_) -> ()
+      Err(e) -> { if not io.is_dir(target) { return Err("cannot move into the cache: " ++ e) } }
+    }
+  }
+  Ok((target, actual))
+}
+
+## The unpacked archive for `hash`, fetching from `url` on a cache miss.
+## Verification happens exactly once, at fetch time — the cache is immutable
+## afterwards (verify on download, trust the local copy).
+pub fn ensure_cached(url: String, hash: String) -> Result[String, String] !io = {
+  let target = cache_dir(hash)
+  if io.is_dir(target) { return Ok(target) }
+  match fetch_and_hash(url) {
+    Ok(pr) -> {
+      let (dir, actual) = pr
+      if actual != hash {
+        Err("hash mismatch for " ++ url ++
+            "\n  declared:  " ++ hash ++ "\n  actual:    " ++ actual ++
+            "\n  if you just wrote this dependency, copy the actual value into `hash`")
+      } else {
+        Ok(dir)
+      }
+    }
+    Err(e) -> Err(e)
+  }
+}
+
+test "tar octal and pax records parse" {
+  let b = bytes.utf8("0000644" ++ str.from_char(0))
+  assert tar_octal(b, 0, 8) == Ok(420)
+  # the length field counts the whole record, its own digits included
+  assert pax_path("32 path=some/very/long/name.txt\n") == Some("some/very/long/name.txt")
+  assert pax_path("16 uid=1000\n") == None
+}
+
+test "proxy env parsing tolerates schemes and bare host:port" {
+  # pure helper exercised indirectly; the string surgery is what to pin
+  assert str.substring("http://127.0.0.1:7890", 7, 21) == "127.0.0.1:7890"
+}

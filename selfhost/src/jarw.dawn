@@ -34,9 +34,34 @@ fn put(zos: ZipOutputStream, name: String, bs: Bytes) -> Unit !io = {
   ()
 }
 
+## A manifest Class-Path line, wrapped: physical lines stay under the spec's
+## 72-byte cap, continuations start with one space and re-join on read.
+fn class_path_lines(entries: List[String]) -> String = {
+  if len(entries) == 0 { return "" }
+  var rest = "Class-Path: " ++ join(entries, " ")
+  var out = ""
+  while str.len(rest) > 70 {
+    out = out ++ str.substring(rest, 0, 70) ++ crlf()
+    rest = " " ++ str.substring(rest, 70, str.len(rest))
+  }
+  out ++ rest ++ crlf()
+}
+
 ## Write `classes` (internal name → bytes, no ".class" suffix) as an
 ## executable jar with `Main-Class: <main_class>`.
 pub fn write_jar(path: String, main_class: String, classes: List[(String, Bytes)]) -> Unit !io = {
+  let none: List[String] = []
+  write_jar_cp(path, main_class, classes, none)
+}
+
+## Same, with manifest Class-Path entries (relative to the jar's directory) —
+## how `build` points a jar at the java-deps vendored beside it.
+pub fn write_jar_cp(
+  path: String,
+  main_class: String,
+  classes: List[(String, Bytes)],
+  cp_entries: List[String]
+) -> Unit !io = {
   let fos = match java_try(fn() => FileOutputStream.new(path)) {
     Ok(f) -> f
     Err(e) -> panic("cannot write " ++ path ++ ": " ++ e)
@@ -44,7 +69,8 @@ pub fn write_jar(path: String, main_class: String, classes: List[(String, Bytes)
   let zos = ZipOutputStream.new(fos)
   let manifest =
     "Manifest-Version: 1.0" ++ crlf() ++
-    "Main-Class: " ++ dotted(main_class) ++ crlf() ++ crlf()
+    "Main-Class: " ++ dotted(main_class) ++ crlf() ++
+    class_path_lines(cp_entries) ++ crlf()
   put(zos, "META-INF/MANIFEST.MF", bytes.utf8(manifest))
   for pair in classes {
     let (nm, bs) = pair
@@ -57,4 +83,14 @@ pub fn write_jar(path: String, main_class: String, classes: List[(String, Bytes)
 test "dotted turns an internal name into a binary name" {
   assert dotted("main") == "main"
   assert dotted("a/b/c") == "a.b.c"
+}
+
+test "class-path lines wrap under the 72-byte cap and stay joinable" {
+  let none: List[String] = []
+  assert class_path_lines(none) == ""
+  assert class_path_lines(["lib/a.jar"]) == "Class-Path: lib/a.jar" ++ crlf()
+  let long = class_path_lines([
+    "lib/a-very-long-artifact-name-1.0.0.jar", "lib/another-quite-long-name-2.3.4.jar"
+  ])
+  for line in str.split(long, crlf()) { assert str.len(line) <= 70 }
 }

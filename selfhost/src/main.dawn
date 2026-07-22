@@ -11,6 +11,7 @@
 
 use std/io
 use std/str
+use std/bytes
 use std/map
 use lexer
 use parser
@@ -47,6 +48,12 @@ use interp.{CtOut, CValue}
 use checker.{Cx}
 use java "java.nio.file.Files"
 use java "java.nio.file.Paths"
+use java "java.io.File"
+use java "java.util.Map"
+use errio
+use pkgfetch
+use maven
+use add
 
 ## ADT ids declared by `cls` (and not yet emitted), in id order.
 fn own_adts_of(adts: Adts, cls: String, seen: Set[String]) -> List[Int] = {
@@ -260,6 +267,98 @@ fn host_classpath() -> String !io =
     None -> ""
   }
 
+## Print the Kotlin CLI's error shape and exit 2.
+fn cli_error(msg: String) -> Unit !io = {
+  errio.eprintln("error: " ++ msg)
+  let _ = System.exit(2)
+  ()
+}
+
+## `selfhost __pkghash <dir>` — the d1 canonical tree hash (dawn __pkghash).
+fn run_pkghash(rest: List[String]) -> Unit !io = {
+  let dir = if len(rest) > 0 { rest[0] } else { "." }
+  if not io.is_dir(dir) { return cli_error("not a directory: " ++ dir) }
+  match pkgfetch.tree_hash(dir) {
+    Ok(h) -> println(h)
+    Err(e) -> cli_error(e)
+  }
+}
+
+# ---- [java-deps]: resolve once, then re-exec with the jars on the class path
+# (the checker's `use java` reflection reads the system class path; the Kotlin
+# CLI swaps in a URLClassLoader instead, which reflection here cannot do) ----
+
+## The positional target: the first token no known `--flag value` pair claims.
+fn peek_target(rest: List[String]) -> String = {
+  var i = 0
+  while i < len(rest) {
+    let a = rest[i]
+    if a == "--std" || a == "-o" || a == "--vendor" || a == "--comptime-fuel" {
+      i = i + 2
+    } else if a == "--native" || a == "--check" {
+      i = i + 1
+    } else {
+      return a
+    }
+  }
+  ""
+}
+
+## The target's resolved java-deps jars, with the Kotlin CLI's progress line.
+fn resolve_java_deps(target: String) -> List[String] !io = {
+  let none: List[String] = []
+  if not io.is_dir(target) { return none }
+  match io.read_file(target ++ "/dawn.toml") {
+    Ok(_) -> ()
+    Err(_) -> return none
+  }
+  let coords = maven.collect_java_deps(target)
+  if len(coords) == 0 { return none }
+  errio.eprintln("resolving " ++ to_string(len(coords)) ++ " java-deps from " ++
+      target ++ "/dawn.toml...")
+  match maven.fetch(coords) {
+    Ok(jars) -> jars
+    Err(e) -> {
+      cli_error(e)
+      none
+    }
+  }
+}
+
+## Jar paths the parent invocation resolved, carried across the re-exec.
+fn deps_from_env() -> List[String] !io = {
+  let none: List[String] = []
+  match System.getenv("DAWN_SELFHOST_CP") {
+    Some(s) -> if s == "" { none } else { str.split(s, ":") }
+    None -> none
+  }
+}
+
+## run/test/build with a [java-deps] target: resolve, then re-exec this same
+## invocation with the jars appended to the class path and never return. In
+## the child (env set) this is a no-op.
+fn maybe_with_deps(mode: String, rest: List[String]) -> Unit !io = {
+  match System.getenv("DAWN_SELFHOST_CP") {
+    Some(_) -> return
+    None -> ()
+  }
+  let target = peek_target(rest)
+  if target == "" { return }
+  let jars = resolve_java_deps(target)
+  if len(jars) == 0 { return }
+  var cp = host_classpath()
+  for j in jars { cp = cp ++ ":" ++ j }
+  var cmd: List[String] = ["java", "-Xss512m", "-cp", cp, "main", mode]
+  cmd = cmd ++ rest
+  let pb = ProcessBuilder.new(cmd)
+  let env = pb.environment().expect("env")
+  let _ = env.put("DAWN_SELFHOST_CP", join(jars, ":"))
+  let _ = pb.inheritIO()
+  let code = pb.start().expect("java process").waitFor()
+  let _ = System.exit(code)
+  ()
+}
+
 ## Emit `classes` under a fresh temp directory and return its path.
 fn write_temp_classes(classes: List[(String, Bytes)]) -> String !io = {
   let dir = Files.createTempDirectory("selfhost-run").expect("temp dir").toString().expect("path")
@@ -369,8 +468,112 @@ fn run_emitrt(rest: List[String]) -> Unit !io = {
   println("emitted runtime subset -> " ++ out)
 }
 
-## `selfhost build <target> [--std <dir>] [--vendor <pkg>]... -o <out.jar>`:
-## pack the compiled program as an executable jar. Each `--vendor` names an
+## The target's basename, `.dawn` stripped — what `-o` defaults derive from.
+fn target_stem(target: String) -> String = {
+  var t = target
+  while str.ends_with(t, "/") { t = str.substring(t, 0, str.len(t) - 1) }
+  let base = match str.last_index_of(t, "/") {
+    Some(i) -> str.substring(t, i + 1, str.len(t))
+    None -> t
+  }
+  if str.ends_with(base, ".dawn") { str.substring(base, 0, str.len(base) - 5) } else { base }
+}
+
+## The absolute directory a jar path lands in.
+fn abs_parent(path: String) -> String !io =
+  match java_try(fn() =>
+      File.new(path).getAbsoluteFile().expect("abs").getParent().expect("parent")) {
+        Ok(p) -> p
+        Err(_) -> "."
+      }
+
+## Copy resolved jars next to the output jar, under lib/ — coursier's cache is
+## a content-addressed path in the user's home, fine to compile against and
+## useless to a deployed jar. Returns the manifest Class-Path entries.
+fn vendor_jars(jars: List[String], jar_path: String) -> List[String] !io = {
+  var entries: List[String] = []
+  if len(jars) == 0 { return entries }
+  let lib_dir = abs_parent(jar_path) ++ "/lib"
+  let _ = java_try(fn() => Files.createDirectories(Paths.get(lib_dir).expect("path")))
+  for src in jars {
+    let name = match str.last_index_of(src, "/") {
+      Some(i) -> str.substring(src, i + 1, str.len(src))
+      None -> src
+    }
+    let dst = lib_dir ++ "/" ++ name
+    # the cache is immutable: same name + same size means same bytes
+    let same = File.new(dst).isFile() && File.new(dst).length() == File.new(src).length()
+    if not same {
+      let copied = java_try(fn() => {
+        let bs = Files.readAllBytes(Paths.get(src).expect("path")).expect("bytes")
+        Files.write(Paths.get(dst).expect("path"), bs)
+      })
+      match copied {
+        Ok(_) -> ()
+        Err(e) -> panic("cannot copy " ++ src ++ " to " ++ dst ++ ": " ++ e)
+      }
+    }
+    entries = entries ++ ["lib/" ++ name]
+  }
+  entries
+}
+
+fn find_native_image() -> Option[String] !io = {
+  var candidates: List[String] = []
+  match System.getenv("GRAALVM_HOME") {
+    Some(h) -> { candidates = candidates ++ [h ++ "/bin/native-image"] }
+    None -> ()
+  }
+  match System.getenv("JAVA_HOME") {
+    Some(h) -> { candidates = candidates ++ [h ++ "/bin/native-image"] }
+    None -> ()
+  }
+  match System.getenv("PATH") {
+    Some(p) -> {
+      for dir in str.split(p, ":") { candidates = candidates ++ [dir ++ "/native-image"] }
+    }
+    None -> ()
+  }
+  for c in candidates {
+    let ok = match java_try(fn() => File.new(c).canExecute()) {
+      Ok(b) -> b
+      Err(_) -> false
+    }
+    if ok { return Some(c) }
+  }
+  None
+}
+
+## Hand the finished jar to native-image (the Kotlin cmdBuild native branch):
+## stream its output indented, delete the temp jar, report.
+fn run_native_image(jar_path: String, bin_out: String) -> Unit !io = {
+  let ni = match find_native_image() {
+    Some(p) -> p
+    None ->
+      return cli_error(
+        "native-image not found. Install GraalVM and add it to PATH, or set GRAALVM_HOME")
+  }
+  println("invoking native-image (takes a minute or two the first time)...")
+  let cmd: List[String] = [ni, "-jar", jar_path, "-o", bin_out, "--no-fallback"]
+  let pb = ProcessBuilder.new(cmd)
+  let _ = pb.redirectErrorStream(true)
+  let proc = pb.start().expect("native-image process")
+  let outs = proc.getInputStream().expect("stream")
+  let all = outs.readAllBytes().expect("output")
+  for line in str.split(bytes.decode(all, "UTF-8"), "\n") {
+    if line != "" { println("  " ++ line) }
+  }
+  let code = proc.waitFor()
+  let _ = java_try(fn() => Files.deleteIfExists(Paths.get(jar_path).expect("path")))
+  if code != 0 {
+    return cli_error("native-image failed (exit code " ++ to_string(code) ++ ")")
+  }
+  println("wrote " ++ bin_out ++ " (standalone binary, run it directly: ./" ++ bin_out ++ ")")
+}
+
+## `selfhost build <target> [-o out] [--native] [--std <dir>] [--vendor <pkg>]...`:
+## pack the compiled program as an executable jar (java-deps vendored into
+## lib/ beside it), or hand it to native-image. Each `--vendor` names an
 ## internal package path (e.g. org/objectweb/asm) whose classes are copied in
 ## from java.class.path — building selfhost itself vendors the dawn.tool shim
 ## and ASM, which is what makes the jar standalone.
@@ -379,6 +582,7 @@ fn run_build(rest: List[String]) -> Unit !io = {
   var target = ""
   var std_dir = "compiler/src/main/resources/std"
   var vendor_pkgs: List[String] = []
+  var native = false
   var i = 0
   while i < len(rest) {
     if rest[i] == "-o" && i + 1 < len(rest) {
@@ -390,13 +594,28 @@ fn run_build(rest: List[String]) -> Unit !io = {
     } else if rest[i] == "--vendor" && i + 1 < len(rest) {
       vendor_pkgs = vendor_pkgs ++ [rest[i + 1]]
       i = i + 2
+    } else if rest[i] == "--native" {
+      native = true
+      i = i + 1
     } else {
       target = rest[i]
       i = i + 1
     }
   }
-  if out == "" || target == "" {
-    panic("usage: selfhost build <target> [--std <dir>] [--vendor <pkg>]... -o <out.jar>")
+  if target == "" {
+    panic("usage: selfhost build <target> [-o out] [--native] [--std <dir>] [--vendor <pkg>]...")
+  }
+  let stem = target_stem(target)
+  let jar_path = if native {
+    match java_try(fn() =>
+        Files.createTempFile("dawn-build-", ".jar").expect("temp").toString().expect("path")) {
+          Ok(p) -> p
+          Err(e) -> panic("cannot create a temp jar: " ++ e)
+        }
+  } else if out != "" {
+    out
+  } else {
+    stem ++ ".jar"
   }
   let (classes, entry, _) = collect_program(target, std_dir)
   if entry == "" { panic(target ++ " has no fn main to use as an entry point") }
@@ -419,8 +638,22 @@ fn run_build(rest: List[String]) -> Unit !io = {
       }
     }
   }
-  jarw.write_jar(out, entry, all)
-  println("wrote " ++ out ++ " (" ++ to_string(len(all)) ++ " classes)")
+  let deps = deps_from_env()
+  # native-image inlines everything, so it reads the jars where they already
+  # live; a plain jar needs them at a stable path next to itself
+  let cp_entries = if native { deps } else { vendor_jars(deps, jar_path) }
+  jarw.write_jar_cp(jar_path, entry, all, cp_entries)
+  if native {
+    let bin_out = if out != "" { out } else { stem }
+    return run_native_image(jar_path, bin_out)
+  }
+  if len(deps) == 0 {
+    println("wrote " ++ jar_path ++ " (run it with: java -jar " ++ jar_path ++ ")")
+  } else {
+    println("wrote " ++ jar_path ++ " and " ++ to_string(len(deps)) ++ " jar(s) into " ++
+        abs_parent(jar_path) ++ "/lib (run it with: java -jar " ++ jar_path ++
+        "; keep lib/ next to the jar)")
+  }
 }
 
 ## Every .dawn file under `dir`, recursively; paths are `dir`-prefixed.
@@ -549,15 +782,25 @@ pub fn main() -> Unit !io = {
       } else if mode == "emit" || mode == "emitrt" {
         run_emitrt(rest)
       } else if mode == "build" {
+        maybe_with_deps(mode, rest)
         run_build(rest)
       } else if mode == "fmt" {
         run_fmt(rest)
       } else if mode == "run" {
+        maybe_with_deps(mode, rest)
         run_run(rest)
       } else if mode == "test" {
+        maybe_with_deps(mode, rest)
         run_test(rest)
       } else if mode == "doc" {
         run_doc(rest)
+      } else if mode == "add" {
+        match add.run_add(rest) {
+          Ok(s) -> println(s)
+          Err(e) -> cli_error(e)
+        }
+      } else if mode == "__pkghash" {
+        run_pkghash(rest)
       } else {
         for pth in rest {
           println("== " ++ pth ++ " ==")

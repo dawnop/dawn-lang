@@ -12,6 +12,7 @@ use std/set
 use token.{Diag}
 use ast.{Module, Decl, DUseModule, module_uses, module_fns}
 use manifest.{read_manifest, DPath, DRemote}
+use pkgfetch
 use checker.{
   ModExports, Cx, check_module, cx_new, exports_of, seed_prelude, pass_java_uses,
   pass_imports, pass_type_shells, pass_ctor_fields, pass_resolve_aliases,
@@ -168,21 +169,8 @@ pub fn load_directory(dir: String) -> LoadResult !io = {
   resolve(root, walk_dawn(root), diags, false, pkgs)
 }
 
-## The content-addressed package cache root (mirrors the Kotlin PkgFetch:
-## `dawn.pkg.cache` property, then $DAWN_PKG_CACHE, then ~/.dawn/pkg).
-fn pkg_cache_root() -> String !io =
-  match System.getProperty("dawn.pkg.cache") {
-    Some(p) -> p
-    None ->
-      match System.getenv("DAWN_PKG_CACHE") {
-        Some(p) -> p
-        None ->
-          match System.getProperty("user.home") {
-            Some(h) -> h ++ "/.dawn/pkg"
-            None -> ".dawn-pkg"
-          }
-      }
-  }
+# The content-addressed package cache root lives in pkgfetch (one definition;
+# `dawn.pkg.cache` property, then $DAWN_PKG_CACHE, then ~/.dawn/pkg).
 
 fn ver_parts(v: String) -> (Int, Int, Int) = {
   let ps = str.split(v, ".")
@@ -198,25 +186,40 @@ fn ver_lt(a: String, b: String) -> Bool = {
 
 type UrlReq = { url: String, version: String, hash: String, subdir: String, mf_path: String }
 
-## The package root for a url requirement, from the cache only — the selfhost
-## toolchain does not fetch. `failed` de-duplicates the miss report per hash.
+## The package root for a url requirement: the cache, fetched and verified on
+## a miss (pkgfetch). `failed` de-duplicates the failure report per hash.
 fn url_pkg_root(
   name: String,
   r: UrlReq,
   failed0: Set[String]
 ) -> (Option[String], List[LocDiag], Set[String]) !io = {
-  let entry = pkg_cache_root() ++ "/" ++ str.replace(r.hash, ":", "-")
+  let entry = pkgfetch.cache_dir(r.hash)
   let root = if r.subdir == "" { entry } else { entry ++ "/" ++ r.subdir }
   if io.is_dir(root) { return (Some(root), [], failed0) }
   let fkey = r.hash ++ ":" ++ r.subdir
   if set.has(failed0, fkey) { return (None, [], failed0) }
-  let d = [LocDiag { path: r.mf_path, d: Diag {
-    msg: "package `" ++ name ++ "` " ++ r.version ++ " is not in the cache (" ++ entry ++ ")",
-    lo: 0,
-    hi: 0,
-    hint: "the selfhost toolchain does not fetch; run the Kotlin `dawn` once to populate the cache"
-  } }]
-  (None, d, set.insert(failed0, r.hash))
+  match pkgfetch.ensure_cached(r.url, r.hash) {
+    Ok(_) -> {
+      if io.is_dir(root) { return (Some(root), [], failed0) }
+      let d = [LocDiag { path: r.mf_path, d: Diag {
+        msg: "package `" ++ name ++ "` " ++ r.version ++ ": subdir `" ++ r.subdir ++
+          "` does not exist in the archive",
+        lo: 0,
+        hi: 0,
+        hint: "the archive fetched and verified, but the `subdir` points nowhere inside it"
+      } }]
+      (None, d, set.insert(failed0, r.hash))
+    }
+    Err(e) -> {
+      let d = [LocDiag { path: r.mf_path, d: Diag {
+        msg: "package `" ++ name ++ "` " ++ r.version ++ ": " ++ e,
+        lo: 0,
+        hi: 0,
+        hint: ""
+      } }]
+      (None, d, set.insert(failed0, r.hash))
+    }
+  }
 }
 
 ## Minimal Version Selection over `[deps.<alias>]` requirements (the Kotlin

@@ -38,7 +38,7 @@ case "$SEED_ARG" in
 esac
 
 cd "$(dirname "$0")/.."
-VENDOR=(--vendor dawn/tool --vendor org/objectweb/asm)
+VENDOR=(--vendor dawn/tool --vendor org/objectweb/asm --vendor coursierapi)
 
 # 1) the seed compiles today's selfhost sources
 java -Xss512m -jar "$SEED" build selfhost -o "$OUT/boot.jar" > /dev/null

@@ -1,0 +1,198 @@
+# `[java-deps]` resolution (the Kotlin manifest/Maven + cli resolveDeps): the
+# union of the target's coordinates and every linked source package's, handed
+# to coursier's pure-Java interface. Resolution and caching are coursier's;
+# version conflicts across the transitive graph resolve highest-wins. The
+# mirror override ($DAWN_MAVEN_MIRROR) is an environment fact, never a
+# manifest one — the same manifest must work on both sides of a slow link.
+
+use std/str
+use std/list
+use std/set
+use std/map
+use std/io
+use manifest.{read_manifest, DepSrc, DPath, DRemote}
+use pkgfetch
+use java "java.lang.System"
+use java "coursierapi.Fetch"
+use java "coursierapi.Dependency"
+use java "coursierapi.MavenRepository"
+use java "java.util.List"
+use java "java.io.File"
+
+pub type Coord = { group: String, artifact: String, version: String }
+
+## `group:artifact:version`, or None for anything else — callers report; the
+## Kotlin Manifest is the validation authority for the fine-grained errors.
+pub fn parse_coord(spec: String) -> Option[Coord] = {
+  let parts = str.split(spec, ":")
+  if len(parts) != 3 { return None }
+  if parts[0] == "" || parts[1] == "" || parts[2] == "" { return None }
+  Some(Coord { group: parts[0], artifact: parts[1], version: parts[2] })
+}
+
+fn coord_show(c: Coord) -> String = c.group ++ ":" ++ c.artifact ++ ":" ++ c.version
+
+## The distinct java-deps coordinates of `dir`: its own manifest's first, then
+## every linked source package's (children before their parent, each source
+## root visited once) — the same union the Kotlin CLI resolves.
+pub fn collect_java_deps(dir: String) -> List[Coord] !io = {
+  var seen_coord: Set[String] = set.empty()
+  var out: List[Coord] = []
+  var seen_dir: Set[String] = set.empty()
+  match read_manifest(dir) {
+    Some(m) -> {
+      for jd in m.java_deps {
+        match parse_coord(jd.coord) {
+          Some(c) -> {
+            if not set.has(seen_coord, coord_show(c)) {
+              seen_coord = set.insert(seen_coord, coord_show(c))
+              out = out ++ [c]
+            }
+          }
+          None -> ()
+        }
+      }
+      for dep in m.deps {
+        let (o2, sc2, sd2) = walk_pkg(dep_root(dir, dep.src), out, seen_coord, seen_dir)
+        out = o2
+        seen_coord = sc2
+        seen_dir = sd2
+      }
+    }
+    None -> ()
+  }
+  out
+}
+
+fn dep_root(dir: String, src: DepSrc) -> Option[String] !io =
+  match src {
+    DPath(pdir) -> if io.is_dir(pdir) { Some(pdir) } else { None }
+    DRemote(_, _, hash, sub) -> {
+      let entry = pkgfetch.cache_dir(hash)
+      let root = if sub == "" { entry } else { entry ++ "/" ++ sub }
+      if io.is_dir(root) { Some(root) } else { None }
+    }
+  }
+
+fn walk_pkg(
+  root: Option[String],
+  out0: List[Coord],
+  seen_coord0: Set[String],
+  seen_dir0: Set[String]
+) -> (List[Coord], Set[String], Set[String]) !io = {
+  var out = out0
+  var seen_coord = seen_coord0
+  var seen_dir = seen_dir0
+  let dir = match root {
+    Some(d) -> d
+    None -> return (out, seen_coord, seen_dir)
+  }
+  if set.has(seen_dir, dir) { return (out, seen_coord, seen_dir) }
+  seen_dir = set.insert(seen_dir, dir)
+  match read_manifest(dir) {
+    Some(m) -> {
+      for dep in m.deps {
+        let (o2, sc2, sd2) = walk_pkg(dep_root(dir, dep.src), out, seen_coord, seen_dir)
+        out = o2
+        seen_coord = sc2
+        seen_dir = sd2
+      }
+      for jd in m.java_deps {
+        match parse_coord(jd.coord) {
+          Some(c) -> {
+            if not set.has(seen_coord, coord_show(c)) {
+              seen_coord = set.insert(seen_coord, coord_show(c))
+              out = out ++ [c]
+            }
+          }
+          None -> ()
+        }
+      }
+    }
+    None -> ()
+  }
+  (out, seen_coord, seen_dir)
+}
+
+## Resolve to absolute jar paths, newest-wins across the transitive graph.
+## Empty input returns empty without touching the network.
+pub fn fetch(coords: List[Coord]) -> Result[List[String], String] !io = {
+  if len(coords) == 0 {
+    let empty: List[String] = []
+    return Ok(empty)
+  }
+  let mirror: Option[String] = match System.getenv("DAWN_MAVEN_MIRROR") {
+    Some(v) -> if str.trim(v) == "" { None } else { Some(str.trim(v)) }
+    None -> None
+  }
+  let fetched = java_try(fn() => {
+    let f = Fetch.create().expect("fetch")
+    for c in coords {
+      let d = Dependency.of(c.group, c.artifact, c.version).expect("dependency")
+      let _ = f.addDependencies(d)
+    }
+    match mirror {
+      Some(m) -> { let _ = f.withRepositories(MavenRepository.of(m).expect("repo")) }
+      None -> ()
+    }
+    f.fetch().expect("files")
+  })
+  match fetched {
+    Ok(files) -> {
+      var out: List[String] = []
+      var i = 0
+      while i < files.size() {
+        let jar: File = cast(files.get(i).expect("file"))
+        out = out ++ [jar.getAbsolutePath().expect("path")]
+        i = i + 1
+      }
+      Ok(out)
+    }
+    Err(e) -> Err(explain(e, coords, mirror))
+  }
+}
+
+## Lead with what the user should do; keep coursier's detail (it names the
+## coordinate and the urls tried).
+fn explain(detail: String, coords: List[Coord], mirror: Option[String]) -> String = {
+  let what = if len(coords) == 1 {
+    "dependency " ++ coord_show(coords[0])
+  } else {
+    to_string(len(coords)) ++ " dependencies"
+  }
+  let where_ = match mirror {
+    Some(m) -> " from " ++ m ++ " (\$DAWN_MAVEN_MIRROR)"
+    None -> ""
+  }
+  let hint = if str.contains(str.to_lower(detail), "not found") {
+    "\n  check the coordinate in dawn.toml against the artifact on Maven Central"
+  } else {
+    match mirror {
+      Some(_) -> "\n  the mirror in \$DAWN_MAVEN_MIRROR may not carry it; unset it to try Maven Central"
+      None -> "\n  set \$DAWN_MAVEN_MIRROR to a closer mirror if this is a network timeout"
+    }
+  }
+  "could not resolve " ++ what ++ where_ ++ ":\n" ++ str.trim(detail) ++ hint
+}
+
+test "coordinates parse and render" {
+  match parse_coord("org.xerial:sqlite-jdbc:3.36.0.3") {
+    Some(c) -> {
+      assert c.group == "org.xerial"
+      assert c.artifact == "sqlite-jdbc"
+      assert coord_show(c) == "org.xerial:sqlite-jdbc:3.36.0.3"
+    }
+    None -> { assert false }
+  }
+  assert parse_coord("a:b") == None
+  assert parse_coord("a::c") == None
+}
+
+test "explain names the single coordinate and the mirror" {
+  let c = Coord { group: "g", artifact: "a", version: "1" }
+  let m = explain("boom", [c], Some("https://mirror"))
+  assert str.contains(m, "could not resolve dependency g:a:1 from https://mirror")
+  assert str.contains(m, "the mirror in \$DAWN_MAVEN_MIRROR may not carry it")
+  let m2 = explain("artifact not found: x", [c], None)
+  assert str.contains(m2, "check the coordinate in dawn.toml")
+}

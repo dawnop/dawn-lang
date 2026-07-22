@@ -1,0 +1,639 @@
+# Format-preserving TOML editing for `selfhost add` (the Kotlin manifest/Toml.kt
+# write side). The CST is a plain list of lines — every supported construct fits
+# on one line — so edits replace one line's text and rendering reproduces the
+# input byte for byte when nothing was touched. Offsets are UTF-16 units, the
+# same units str.substring cuts by, so a value span can be spliced textually.
+#
+# Errors collect as plain message strings: this side has no diagnostic renderer
+# (the same accepted gap as compile errors — the Kotlin CLI stays the span
+# authority until M8 retires it).
+
+use std/str
+use std/list
+
+## A value from the supported subset; lo/hi are offsets within the line.
+pub type TVal =
+  | TStr(v: String, lo: Int, hi: Int)
+  | TInt(v: Int, lo: Int, hi: Int)
+  | TBool(v: Bool, lo: Int, hi: Int)
+  | TArr(items: List[String], lo: Int, hi: Int)
+
+## One source line, raw text kept (a trailing CR survives, so CRLF renders back).
+pub type TLine =
+  | LBlank(text: String)
+  | LComment(text: String)
+  | LHeader(name: String, text: String)
+  | LEntry(key: String, value: TVal, text: String)
+
+pub type TomlDoc = { lines: List[TLine], ends_nl: Bool }
+
+fn line_text(l: TLine) -> String =
+  match l {
+    LBlank(t) -> t
+    LComment(t) -> t
+    LHeader(_, t) -> t
+    LEntry(_, _, t) -> t
+  }
+
+fn unit_at(s: String, i: Int) -> String = str.substring(s, i, i + 1)
+
+fn is_bare_key(s: String) -> Bool = {
+  if str.len(s) == 0 { return false }
+  var i = 0
+  while i < str.len(s) {
+    let c = unit_at(s, i)
+    let ok = str.contains("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-", c)
+    if not ok { return false }
+    i = i + 1
+  }
+  true
+}
+
+fn is_digit(c: String) -> Bool = str.contains("0123456789", c)
+
+# ---- per-line scanning ----
+# `end` excludes a trailing CR; `pos` walks UTF-16 units. Errors abandon the
+# line (it parses as a comment, like the Kotlin recovery) and the message is
+# collected by the caller.
+
+type Scan = { line: String, pos: Int, end: Int }
+
+fn scan_of(line: String) -> Scan = {
+  let e = if str.ends_with(line, str.from_char(13)) { str.len(line) - 1 } else { str.len(line) }
+  Scan { line: line, pos: 0, end: e }
+}
+
+fn eol(s: Scan) -> Bool = s.pos >= s.end
+
+fn peek(s: Scan) -> String = unit_at(s.line, s.pos)
+
+fn skip_space(s: Scan) -> Scan = {
+  var p = s.pos
+  while p < s.end && (unit_at(s.line, p) == " " || unit_at(s.line, p) == "\t") { p = p + 1 }
+  Scan { ..s, pos: p }
+}
+
+## Only spaces and a `#` comment may follow a complete value or header.
+fn finish_line(s0: Scan) -> Option[String] = {
+  let s = skip_space(s0)
+  if eol(s) || peek(s) == "#" { None } else { Some("unexpected text after the value") }
+}
+
+type ValR = { val: TVal, s: Scan }
+
+fn parse_string_at(s0: Scan) -> Result[(String, Scan), String] = {
+  let start = s0.pos
+  if str.substring(s0.line, s0.pos, s0.pos + 3) == "\"\"\"" {
+    return Err("multi-line strings are not supported in dawn.toml")
+  }
+  var p = s0.pos + 1
+  var out = ""
+  while true {
+    if p >= s0.end { return Err("unterminated string") }
+    let c = unit_at(s0.line, p)
+    p = p + 1
+    if c == "\"" {
+      return Ok((out, Scan { ..s0, pos: p }))
+    }
+    if c != "\\" {
+      out = out ++ c
+    } else {
+      if p >= s0.end { return Err("unterminated escape") }
+      let e = unit_at(s0.line, p)
+      p = p + 1
+      if e == "\"" {
+        out = out ++ "\""
+      } else if e == "\\" {
+        out = out ++ "\\"
+      } else if e == "n" {
+        out = out ++ "\n"
+      } else if e == "t" {
+        out = out ++ "\t"
+      } else if e == "r" {
+        out = out ++ str.from_char(13)
+      } else if e == "u" {
+        if s0.end - p < 4 { return Err("`\\u` needs four hex digits") }
+        let hex = str.substring(s0.line, p, p + 4)
+        var code = 0
+        var ok = true
+        for ch in str.chars(hex) {
+          match str.index_of("0123456789abcdefABCDEF", ch) {
+            Some(ix) -> { code = code * 16 + (if ix >= 16 { ix - 6 } else { ix }) }
+            None -> { ok = false }
+          }
+        }
+        if not ok { return Err("invalid `\\u` escape `\\u" ++ hex ++ "`") }
+        out = out ++ str.from_char(code)
+        p = p + 4
+      } else {
+        return Err("unsupported escape `\\" ++ e ++ "`")
+      }
+    }
+  }
+  Err("unterminated string")
+}
+
+fn parse_array(s0: Scan) -> Result[ValR, String] = {
+  let start = s0.pos
+  var s = skip_space(Scan { ..s0, pos: s0.pos + 1 })
+  var items: List[String] = []
+  if not eol(s) && peek(s) == "]" {
+    return Ok(ValR { val: TArr(items, start, s.pos + 1), s: Scan { ..s, pos: s.pos + 1 } })
+  }
+  while true {
+    s = skip_space(s)
+    if eol(s) { return Err("unterminated array") }
+    if peek(s) != "\"" { return Err("array elements must be strings in dawn.toml") }
+    match parse_string_at(s) {
+      Ok(pr) -> {
+        let (v, s2) = pr
+        items = items ++ [v]
+        s = skip_space(s2)
+      }
+      Err(e) -> return Err(e)
+    }
+    if eol(s) { return Err("unterminated array") }
+    let c = peek(s)
+    s = Scan { ..s, pos: s.pos + 1 }
+    if c == "," {
+      s = skip_space(s)
+      if not eol(s) && peek(s) == "]" {
+        return Ok(ValR { val: TArr(items, start, s.pos + 1), s: Scan { ..s, pos: s.pos + 1 } })
+      }
+    } else if c == "]" {
+      return Ok(ValR { val: TArr(items, start, s.pos), s: s })
+    } else {
+      return Err("expected `,` or `]` in array")
+    }
+  }
+  Err("unterminated array")
+}
+
+fn parse_number(s0: Scan) -> Result[ValR, String] = {
+  let start = s0.pos
+  var p = s0.pos
+  if p < s0.end && (unit_at(s0.line, p) == "+" || unit_at(s0.line, p) == "-") { p = p + 1 }
+  while p < s0.end && (is_digit(unit_at(s0.line, p)) || unit_at(s0.line, p) == "_") { p = p + 1 }
+  let raw = str.substring(s0.line, start, p)
+  if p < s0.end {
+    let c = unit_at(s0.line, p)
+    if c == "-" || c == ":" { return Err("date-time values are not supported in dawn.toml") }
+    if c == "." || c == "e" || c == "E" { return Err("floats are not supported in dawn.toml") }
+    if c == "x" || c == "o" || c == "b" {
+      return Err("only decimal integers are supported in dawn.toml")
+    }
+  }
+  if raw == "" || raw == "+" || raw == "-" {
+    return Err("invalid value `" ++ raw ++ "`")
+  }
+  let digits = str.replace(str.replace(raw, "_", ""), "+", "")
+  match parse_int(digits) {
+    Some(n) -> Ok(ValR { val: TInt(n, start, p), s: Scan { ..s0, pos: p } })
+    None -> Err("invalid integer `" ++ raw ++ "`")
+  }
+}
+
+fn parse_value(s0: Scan) -> Result[ValR, String] = {
+  if eol(s0) { return Err("expected a value") }
+  let c = peek(s0)
+  if c == "\"" {
+    let start = s0.pos
+    match parse_string_at(s0) {
+      Ok(pr) -> {
+        let (v, s2) = pr
+        Ok(ValR { val: TStr(v, start, s2.pos), s: s2 })
+      }
+      Err(e) -> Err(e)
+    }
+  } else if c == "'" {
+    Err("literal strings are not supported in dawn.toml")
+  } else if c == "[" {
+    parse_array(s0)
+  } else if c == "{" {
+    Err("inline tables are not supported in dawn.toml")
+  } else if str.starts_with(str.substring(s0.line, s0.pos, s0.end), "true") {
+    Ok(ValR { val: TBool(true, s0.pos, s0.pos + 4), s: Scan { ..s0, pos: s0.pos + 4 } })
+  } else if str.starts_with(str.substring(s0.line, s0.pos, s0.end), "false") {
+    Ok(ValR { val: TBool(false, s0.pos, s0.pos + 5), s: Scan { ..s0, pos: s0.pos + 5 } })
+  } else {
+    parse_number(s0)
+  }
+}
+
+fn parse_header(raw: String, s1: Scan) -> Result[TLine, String] = {
+  var s = Scan { ..s1, pos: s1.pos + 1 }
+  if not eol(s) && peek(s) == "[" {
+    return Err("arrays of tables are not supported in dawn.toml")
+  }
+  s = skip_space(s)
+  let name_start = s.pos
+  var p = s.pos
+  while p < s.end {
+    let c = unit_at(s.line, p)
+    if c == "]" || c == " " || c == "\t" { break } else { p = p + 1 }
+  }
+  let name = str.substring(raw, name_start, p)
+  if name == "" { return Err("table name is empty") }
+  let segments = str.split(name, ".")
+  if len(segments) > 2 { return Err("table names may have at most one dot") }
+  for seg in segments {
+    if not is_bare_key(seg) { return Err("invalid table name `" ++ name ++ "`") }
+  }
+  s = skip_space(Scan { ..s, pos: p })
+  if eol(s) || peek(s) != "]" { return Err("expected `]` to close the table header") }
+  s = Scan { ..s, pos: s.pos + 1 }
+  match finish_line(s) {
+    Some(e) -> Err(e)
+    None -> Ok(LHeader(name, raw))
+  }
+}
+
+fn parse_entry(raw: String, s1: Scan) -> Result[TLine, String] = {
+  if peek(s1) == "\"" || peek(s1) == "'" {
+    return Err("quoted keys are not supported in dawn.toml")
+  }
+  let key_start = s1.pos
+  var p = s1.pos
+  while p < s1.end {
+    let c = unit_at(s1.line, p)
+    if c == "=" || c == " " || c == "\t" { break } else { p = p + 1 }
+  }
+  let key = str.substring(raw, key_start, p)
+  if key == "" { return Err("expected a key") }
+  if str.contains(key, ".") { return Err("dotted keys are not supported in dawn.toml") }
+  if not is_bare_key(key) { return Err("invalid key `" ++ key ++ "`") }
+  var s = skip_space(Scan { ..s1, pos: p })
+  if eol(s) || peek(s) != "=" { return Err("expected `=` after key `" ++ key ++ "`") }
+  s = skip_space(Scan { ..s, pos: s.pos + 1 })
+  match parse_value(s) {
+    Ok(vr) ->
+      match finish_line(vr.s) {
+        Some(e) -> Err(e)
+        None -> Ok(LEntry(key, vr.val, raw))
+      }
+    Err(e) -> Err(e)
+  }
+}
+
+fn parse_line(raw: String) -> Result[TLine, String] = {
+  let s = skip_space(scan_of(raw))
+  if eol(s) {
+    Ok(LBlank(raw))
+  } else if peek(s) == "#" {
+    Ok(LComment(raw))
+  } else if peek(s) == "[" {
+    parse_header(raw, s)
+  } else {
+    parse_entry(raw, s)
+  }
+}
+
+## Parse a document. Lines outside the subset surface as error strings and
+## parse as comments (the Kotlin recovery), so one bad line reports once.
+pub fn parse(text: String) -> (TomlDoc, List[String]) = {
+  let ends_nl = str.ends_with(text, "\n")
+  let body = if ends_nl { str.substring(text, 0, str.len(text) - 1) } else { text }
+  var lines: List[TLine] = []
+  var errs: List[String] = []
+  let none: List[String] = []
+  let raws = if body == "" && not ends_nl { none } else { str.split(body, "\n") }
+  for raw in raws {
+    match parse_line(raw) {
+      Ok(l) -> { lines = lines ++ [l] }
+      Err(e) -> {
+        errs = errs ++ [e]
+        lines = lines ++ [LComment(raw)]
+      }
+    }
+  }
+  let doc = TomlDoc { lines: lines, ends_nl: ends_nl }
+  (doc, errs ++ dup_errors(doc))
+}
+
+fn dup_errors(doc: TomlDoc) -> List[String] = {
+  var errs: List[String] = []
+  var tables: List[String] = []
+  for l in doc.lines {
+    match l {
+      LHeader(nm, _) -> {
+        for t in tables {
+          if t == nm { errs = errs ++ ["table `" ++ nm ++ "` is defined more than once"] }
+        }
+        tables = tables ++ [nm]
+      }
+      _ -> ()
+    }
+  }
+  var cur: Option[String] = None
+  var seen: List[String] = []
+  for l in doc.lines {
+    match l {
+      LHeader(nm, _) -> {
+        cur = Some(nm)
+        seen = []
+      }
+      LEntry(k, _, _) -> {
+        let tag = match cur {
+          Some(t) -> t ++ "." ++ k
+          None -> k
+        }
+        for s in seen {
+          if s == tag { errs = errs ++ ["key `" ++ k ++ "` is defined more than once"] }
+        }
+        seen = seen ++ [tag]
+      }
+      _ -> ()
+    }
+  }
+  errs
+}
+
+## Reassemble the document; byte-identical to the input when nothing was edited.
+pub fn render(doc: TomlDoc) -> String = {
+  var parts: List[String] = []
+  for l in doc.lines { parts = parts ++ [line_text(l)] }
+  join(parts, "\n") ++ (if doc.ends_nl { "\n" } else { "" })
+}
+
+## Entries under `[tname]` (None = before any header), as (key, value) pairs.
+pub fn table(doc: TomlDoc, tname: Option[String]) -> List[(String, TVal)] = {
+  var cur: Option[String] = None
+  var out: List[(String, TVal)] = []
+  for l in doc.lines {
+    match l {
+      LHeader(nm, _) -> { cur = Some(nm) }
+      LEntry(k, v, _) -> { if cur == tname { out = out ++ [(k, v)] } }
+      _ -> ()
+    }
+  }
+  out
+}
+
+pub fn entry(doc: TomlDoc, tname: Option[String], key: String) -> Option[TVal] = {
+  for pr in table(doc, tname) {
+    let (k, v) = pr
+    if k == key { return Some(v) }
+  }
+  None
+}
+
+## Every table name, in source order.
+pub fn table_names(doc: TomlDoc) -> List[String] = {
+  var out: List[String] = []
+  for l in doc.lines {
+    match l {
+      LHeader(nm, _) -> { out = out ++ [nm] }
+      _ -> ()
+    }
+  }
+  out
+}
+
+fn quote(s: String) -> String = {
+  var out = "\""
+  for c in str.chars(s) {
+    if c == "\"" {
+      out = out ++ "\\\""
+    } else if c == "\\" {
+      out = out ++ "\\\\"
+    } else if c == "\n" {
+      out = out ++ "\\n"
+    } else if c == "\t" {
+      out = out ++ "\\t"
+    } else if c == str.from_char(13) {
+      out = out ++ "\\r"
+    } else {
+      out = out ++ c
+    }
+  }
+  out ++ "\""
+}
+
+## Line index of `key` under `tname`, or None.
+fn entry_index(doc: TomlDoc, tname: Option[String], key: String) -> Option[Int] = {
+  var cur: Option[String] = None
+  var i = 0
+  for l in doc.lines {
+    match l {
+      LHeader(nm, _) -> { cur = Some(nm) }
+      LEntry(k, _, _) -> { if cur == tname && k == key { return Some(i) } }
+      _ -> ()
+    }
+    i = i + 1
+  }
+  None
+}
+
+## Index of the last line belonging to `tname` (its last entry, else its
+## header); None when the table is absent (for the root: -1 semantics become
+## Some(-1) so the caller can insert at the top).
+fn last_index_of_table(doc: TomlDoc, tname: Option[String]) -> Option[Int] = {
+  var cur: Option[String] = None
+  var last = 0 - 2
+  if tname == None { last = 0 - 1 }
+  var i = 0
+  for l in doc.lines {
+    match l {
+      LHeader(nm, _) -> {
+        cur = Some(nm)
+        if cur == tname { last = i }
+      }
+      LEntry(_, _, _) -> { if cur == tname { last = i } }
+      _ -> ()
+    }
+    i = i + 1
+  }
+  if last == 0 - 2 { None } else { Some(last) }
+}
+
+fn set_line(lines: List[TLine], i: Int, l: TLine) -> List[TLine] = {
+  var out: List[TLine] = []
+  var j = 0
+  for x in lines {
+    if j == i { out = out ++ [l] } else { out = out ++ [x] }
+    j = j + 1
+  }
+  out
+}
+
+fn insert_line(lines: List[TLine], i: Int, l: TLine) -> List[TLine] = {
+  var out: List[TLine] = []
+  var j = 0
+  for x in lines {
+    if j == i { out = out ++ [l] }
+    out = out ++ [x]
+    j = j + 1
+  }
+  if i >= len(lines) { out = out ++ [l] }
+  out
+}
+
+fn val_span(v: TVal) -> (Int, Int) =
+  match v {
+    TStr(_, lo, hi) -> (lo, hi)
+    TInt(_, lo, hi) -> (lo, hi)
+    TBool(_, lo, hi) -> (lo, hi)
+    TArr(_, lo, hi) -> (lo, hi)
+  }
+
+## Set `key = "value"` in `tname`, preserving the rest of the file: an existing
+## entry keeps its indent, spacing and trailing comment (only the value text is
+## replaced); otherwise the entry appends to the table, creating the header if
+## needed.
+pub fn set_string(doc: TomlDoc, tname: Option[String], key: String, value: String) -> TomlDoc = {
+  let quoted = quote(value)
+  match entry_index(doc, tname, key) {
+    Some(i) -> {
+      match doc.lines[i] {
+        LEntry(k, v, text) -> {
+          let (lo, hi) = val_span(v)
+          let ntext = str.substring(text, 0, lo) ++ quoted ++ str.substring(text, hi, str.len(text))
+          let nval = TStr(value, lo, lo + str.len(quoted))
+          return TomlDoc { ..doc, lines: set_line(doc.lines, i, LEntry(k, nval, ntext)) }
+        }
+        _ -> return doc
+      }
+    }
+    None -> ()
+  }
+  let ntext = key ++ " = " ++ quoted
+  let nline = LEntry(key, TStr(value, str.len(key) + 3, str.len(ntext)), ntext)
+  match last_index_of_table(doc, tname) {
+    Some(idx) ->
+      TomlDoc { ..doc, lines: insert_line(doc.lines, idx + 1, nline) }
+    None -> {
+      var lines = doc.lines
+      match tname {
+        Some(t) -> {
+          let blank = if len(lines) == 0 {
+            true
+          } else {
+            match lines[len(lines) - 1] {
+              LBlank(_) -> true
+              _ -> false
+            }
+          }
+          if not blank { lines = lines ++ [LBlank("")] }
+          lines = lines ++ [LHeader(t, "[" ++ t ++ "]")]
+        }
+        None -> ()
+      }
+      TomlDoc { ..doc, lines: lines ++ [nline] }
+    }
+  }
+}
+
+## Remove `key` from `tname`; unchanged when absent.
+pub fn remove(doc: TomlDoc, tname: Option[String], key: String) -> TomlDoc =
+  match entry_index(doc, tname, key) {
+    Some(i) -> {
+      var out: List[TLine] = []
+      var j = 0
+      for x in doc.lines {
+        if j != i { out = out ++ [x] }
+        j = j + 1
+      }
+      TomlDoc { ..doc, lines: out }
+    }
+    None -> doc
+  }
+
+## Remove `[name]` — the header and every line under it (a trailing blank that
+## separated it from the next table goes too); unchanged when absent.
+pub fn remove_table(doc: TomlDoc, name: String) -> TomlDoc = {
+  var start = 0 - 1
+  var i = 0
+  for l in doc.lines {
+    match l {
+      LHeader(nm, _) -> { if nm == name && start < 0 { start = i } }
+      _ -> ()
+    }
+    i = i + 1
+  }
+  if start < 0 { return doc }
+  var end = start + 1
+  while end < len(doc.lines) {
+    let stop = match doc.lines[end] {
+      LHeader(_, _) -> true
+      _ -> false
+    }
+    if stop { break } else { end = end + 1 }
+  }
+  while end > start + 1 {
+    let blank = match doc.lines[end - 1] {
+      LBlank(_) -> true
+      _ -> false
+    }
+    if blank { end = end - 1 } else { break }
+  }
+  var out: List[TLine] = []
+  var j = 0
+  for x in doc.lines {
+    if j < start || j >= end { out = out ++ [x] }
+    j = j + 1
+  }
+  TomlDoc { ..doc, lines: out }
+}
+
+test "parse and render round-trip byte-identically" {
+  let text = "# top\nschema = 1\nname = \"web\" # trailing\n\n[deps]\njson = \"../json\"\n"
+  let (doc, errs) = parse(text)
+  assert len(errs) == 0
+  assert render(doc) == text
+  assert table_names(doc) == ["deps"]
+  match entry(doc, None, "name") {
+    Some(TStr(v, _, _)) -> { assert v == "web" }
+    _ -> { assert false }
+  }
+}
+
+test "set_string replaces just the value and keeps trailing comments" {
+  let text = "schema = 1\nname = \"web\"   # keep me\n"
+  let (doc, _) = parse(text)
+  let doc2 = set_string(doc, None, "name", "json")
+  assert render(doc2) == "schema = 1\nname = \"json\"   # keep me\n"
+}
+
+test "set_string appends to an existing table or creates one" {
+  let text = "schema = 1\n\n[deps]\na = \"x\"\n"
+  let (doc, _) = parse(text)
+  let doc2 = set_string(doc, Some("deps"), "b", "y")
+  assert render(doc2) == "schema = 1\n\n[deps]\na = \"x\"\nb = \"y\"\n"
+  let doc3 = set_string(doc, Some("deps.web"), "url", "file:///z.zip")
+  assert render(doc3) ==
+    "schema = 1\n\n[deps]\na = \"x\"\n\n[deps.web]\nurl = \"file:///z.zip\"\n"
+}
+
+test "remove and remove_table drop their lines" {
+  let text = "schema = 1\n\n[deps]\na = \"x\"\n\n[deps.w]\nurl = \"u\"\n"
+  let (doc, _) = parse(text)
+  assert render(remove(doc, Some("deps"), "a")) == "schema = 1\n\n[deps]\n\n[deps.w]\nurl = \"u\"\n"
+  # the blank before the removed header belongs to the previous table and stays
+  assert render(remove_table(doc, "deps.w")) == "schema = 1\n\n[deps]\na = \"x\"\n\n"
+}
+
+test "subset violations surface as errors, not silent misreads" {
+  let (_, e1) = parse("a = 'lit'\n")
+  assert e1 == ["literal strings are not supported in dawn.toml"]
+  let (_, e2) = parse("a = 1.5\n")
+  assert e2 == ["floats are not supported in dawn.toml"]
+  let (_, e3) = parse("[deps]\nx = \"a\"\nx = \"b\"\n")
+  assert e3 == ["key `x` is defined more than once"]
+  let (doc4, e4) = parse("a = [\"x\", \"y\",]\n")
+  assert len(e4) == 0
+  match entry(doc4, None, "a") {
+    Some(TArr(items, _, _)) -> { assert items == ["x", "y"] }
+    _ -> { assert false }
+  }
+}
+
+test "escapes decode and re-quote" {
+  let (doc, errs) = parse("a = \"x\\n\\t\\\"y\\u00e9\"\n")
+  assert len(errs) == 0
+  match entry(doc, None, "a") {
+    Some(TStr(v, _, _)) -> { assert str.len(v) == 6 }
+    _ -> { assert false }
+  }
+  let d2 = set_string(TomlDoc { lines: [], ends_nl: true }, None, "k", "a\"b\\c")
+  assert render(d2) == "k = \"a\\\"b\\\\c\"\n"
+}

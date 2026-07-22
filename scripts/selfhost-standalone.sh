@@ -15,7 +15,9 @@ OUT=${TMPDIR:-/tmp}/selfhost-standalone.$$
 mkdir -p "$OUT"
 trap 'rm -rf "$OUT"' EXIT
 
-VENDOR=(--vendor dawn/tool --vendor org/objectweb/asm)
+# coursierapi rides along so the standalone jar can resolve [java-deps]
+# (it is fully shaded — coursierapi/ and coursierapi/shaded/ cover all of it)
+VENDOR=(--vendor dawn/tool --vendor org/objectweb/asm --vendor coursierapi)
 
 "$DAWN" build selfhost -o "$OUT/selfhost.jar" > /dev/null
 

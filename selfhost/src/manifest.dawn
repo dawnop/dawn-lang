@@ -18,7 +18,10 @@ pub type DepSrc =
 
 pub type SrcDep = { key: String, src: DepSrc }
 
-pub type ManifestLite = { name: String, version: String, deps: List[SrcDep] }
+## A `[java-deps]` entry, coordinate kept raw (`group:artifact:version`).
+pub type JDep = { key: String, coord: String }
+
+pub type ManifestLite = { name: String, version: String, deps: List[SrcDep], java_deps: List[JDep] }
 
 fn unquote(v: String) -> Option[String] = {
   let t = str.trim(v)
@@ -60,6 +63,7 @@ pub fn read_manifest(dir: String) -> Option[ManifestLite] !io = {
   var name = ""
   var version = ""
   var deps: List[SrcDep] = []
+  var java_deps: List[JDep] = []
   var table = ""
   var remote: Option[RemoteAcc] = None
   for raw in str.split(text, "\n") {
@@ -87,6 +91,11 @@ pub fn read_manifest(dir: String) -> Option[ManifestLite] !io = {
           } else if table == "" && key == "version" {
             match unquote(val) {
               Some(v) -> { version = v }
+              None -> ()
+            }
+          } else if table == "java-deps" {
+            match unquote(val) {
+              Some(c) -> { java_deps = java_deps ++ [JDep { key: key, coord: c }] }
               None -> ()
             }
           } else if table == "deps" {
@@ -120,7 +129,7 @@ pub fn read_manifest(dir: String) -> Option[ManifestLite] !io = {
   }
   deps = flush_remote(deps, remote)
   if name == "" { return None }
-  Some(ManifestLite { name: name, version: version, deps: deps })
+  Some(ManifestLite { name: name, version: version, deps: deps, java_deps: java_deps })
 }
 
 test "reads name, version and deps" {

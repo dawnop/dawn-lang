@@ -24,8 +24,10 @@
   新发射的类）、`selfhost test`（合成 `dawn$TestMain` runner 类，PASS/FAIL 报告
   与退出码同 `dawn test` 逐字节）、`selfhost doc`（pub API 与 builtin 参考的
   JSON 逐字节）——金样 `scripts/selfhost-fmt-diff.sh`、`selfhost-run-diff.sh`
-  均在 CI。仍留在 Kotlin 侧的只有 **LSP** 与 playground 服务端（体量大、
-  非日常路径，明确暂缓）。
+  均在 CI；
+- CLI 能力层已迁齐（2026-07-23，M8 阶段二）：`selfhost add`/`__pkghash`/
+  `build --native`/url 依赖抓取（冷缓存自主下载验证）/Maven 解析（coursier
+  interface，FFI）。仍留在 Kotlin 侧的只有 **LSP**（M8 阶段四）。
 
 ## 种子推进协议（2026-07-23 立法，M8 阶段一）
 
@@ -71,11 +73,11 @@
 # 3) selfhost 自打独立 jar：把 dawn.tool 的 frame-writer shim 和 ASM
 #    按包前缀 vendor 进产物，从此不再需要任何 Kotlin 产物在 class path 上
 java -Xss512m -cp selfhost.jar:compiler/build/libs/dawn.jar main \
-  build selfhost -o dawn-selfhost.jar --vendor dawn/tool --vendor org/objectweb/asm
+  build selfhost -o dawn-selfhost.jar --vendor dawn/tool --vendor org/objectweb/asm --vendor coursierapi
 
 # 4) 闭包：独立 jar 单独重建自身，两个 jar 逐字节相同
 java -Xss512m -jar dawn-selfhost.jar build selfhost -o rebuilt.jar \
-  --vendor dawn/tool --vendor org/objectweb/asm
+  --vendor dawn/tool --vendor org/objectweb/asm --vendor coursierapi
 cmp dawn-selfhost.jar rebuilt.jar
 ```
 
