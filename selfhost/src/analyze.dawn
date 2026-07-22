@@ -1,0 +1,509 @@
+# Module-graph resolution and whole-program analysis (the Kotlin ModuleLoader
+# and Analyze): directory mode roots at <dir>/src and loads every .dawn under
+# it; file mode follows the entry's use-closure. Modules come back in
+# dependency order; each is then checked and comptime-evaluated with the
+# accumulated exports of everything before it (std pre-seeded).
+
+use std/io
+use std/str
+use std/list
+use std/map
+use std/set
+use token.{Diag}
+use ast.{Module, module_uses}
+use checker.{ModExports, Cx, check_module, cx_new, exports_of}
+use interp.{eval_comptime, CtOut, CValue}
+use stdlib.{StdCtx, load_std}
+use tast.{TFun, TModule}
+use parser
+use lexer
+use java "java.nio.file.Paths"
+use java "java.nio.file.Files"
+use java "java.nio.file.Path"
+use java "java.lang.Character"
+
+## One loaded module: dotted path, JVM class name, display path, source text,
+## parsed AST; lex/parse diagnostics ride along.
+pub type LoadedModule = {
+  mod_path: String,
+  class_name: String,
+  path: String,
+  text: String,
+  m: Module,
+  pdiags: List[Diag]
+}
+
+## A diagnostic paired with where it should be reported (a module path for
+## checked modules, a raw file path for loader-level problems).
+pub type LocDiag = { path: String, d: Diag }
+
+pub type LoadResult = { modules: List[LoadedModule], diags: List[LocDiag] }
+
+fn canon(p: String) -> String !io =
+  Paths.get(p).expect("path").toAbsolutePath().expect("abs").normalize().expect("norm")
+  .toString().expect("string")
+
+fn seg_ok(s: String) -> Bool = {
+  if s == "" { return false }
+  var first = true
+  for cp in code_points(s) {
+    let lower = cp >= 'a' && cp <= 'z'
+    let digit = cp >= '0' && cp <= '9'
+    if first {
+      if not (lower || cp == '_') { return false }
+      first = false
+    } else {
+      if not (lower || digit || cp == '_') { return false }
+    }
+  }
+  true
+}
+
+fn sanitize_segment(seg: String) -> String !io = {
+  var cleaned: List[Int] = []
+  for cp in code_points(seg) {
+    if Character.isLetterOrDigit(cp) || cp == '_' {
+      cleaned = cleaned ++ [cp]
+    } else {
+      cleaned = cleaned ++ ['_']
+    }
+  }
+  if len(cleaned) == 0 { return "m_" }
+  let c0 = cleaned[0]
+  let body = from_code_points(cleaned)
+  if c0 >= '0' && c0 <= '9' { "m_" ++ body } else { body }
+}
+
+fn class_name_of(mod_path: String) -> String !io = {
+  var segs: List[String] = []
+  for s in str.split(mod_path, "/") { segs = segs ++ [sanitize_segment(s)] }
+  join(segs, "/")
+}
+
+## module path = file path relative to root, minus extension.
+fn module_path_of(root_abs: String, file_abs: String) -> String = {
+  let rel = if str.starts_with(file_abs, root_abs ++ "/") {
+    str.substring(file_abs, str.len(root_abs) + 1, str.len(file_abs))
+  } else {
+    # not under the root: just the file name
+    match str.last_index_of(file_abs, "/") {
+      Some(i) -> str.substring(file_abs, i + 1, str.len(file_abs))
+      None -> file_abs
+    }
+  }
+  if str.ends_with(rel, ".dawn") { str.substring(rel, 0, str.len(rel) - 5) } else { rel }
+}
+
+## Everything .dawn under `dir`, recursively, full display paths.
+fn walk_dawn(dir: String) -> List[String] !io = {
+  var out: List[String] = []
+  let names = match io.list_dir(dir) {
+    Ok(ns) -> ns
+    Err(_) -> return []
+  }
+  for n in names {
+    let p = dir ++ "/" ++ n
+    if io.is_dir(p) {
+      out = out ++ walk_dawn(p)
+    } else if str.ends_with(n, ".dawn") {
+      out = out ++ [p]
+    }
+  }
+  sort(out)
+}
+
+fn synthetic(path: String, msg: String, hint: String) -> LocDiag =
+  LocDiag { path: path, d: Diag { msg: msg, lo: 0, hi: 0, hint: hint } }
+
+## Directory mode: root = <dir>/src, entry = <dir>/src/main.dawn (spec §10.1).
+pub fn load_directory(dir: String) -> LoadResult !io = {
+  let root = dir ++ "/src"
+  var diags: List[LocDiag] = []
+  if not io.is_dir(root) {
+    diags = diags ++ [synthetic(dir,
+      "project directory has no `src/` folder (expected " ++ root ++ ")",
+      "a Dawn project keeps its modules under src/, with entry src/main.dawn")]
+    return LoadResult { modules: [], diags: diags }
+  }
+  let main_path = root ++ "/main.dawn"
+  let main_ok = match io.read_file(main_path) {
+    Ok(_) -> true
+    Err(_) -> false
+  }
+  if not main_ok {
+    diags = diags ++ [synthetic(dir,
+      "project has no entry module (expected " ++ main_path ++ ")",
+      "add src/main.dawn with `pub fn main() -> Unit !io`")]
+  }
+  # load every module under src/ (spec §10.5: unreferenced modules still check)
+  resolve(root, walk_dawn(root), diags, false)
+}
+
+fn nearest_src_root(file: String) -> String !io = {
+  let abs = canon(file)
+  var dir = match str.last_index_of(abs, "/") {
+    Some(i) -> str.substring(abs, 0, i)
+    None -> abs
+  }
+  var out = dir
+  var found = false
+  while not found && str.contains(dir, "/") {
+    let name = match str.last_index_of(dir, "/") {
+      Some(i) -> str.substring(dir, i + 1, str.len(dir))
+      None -> dir
+    }
+    if name == "src" {
+      out = dir
+      found = true
+    } else {
+      dir = match str.last_index_of(dir, "/") {
+        Some(i) -> str.substring(dir, 0, i)
+        None -> dir
+      }
+    }
+  }
+  out
+}
+
+## File mode: root = nearest `src` ancestor, else the file's own directory;
+## loads the entry plus its transitive use-closure.
+pub fn load_file(file: String) -> LoadResult !io = {
+  let root = nearest_src_root(file)
+  resolve(root, [file], [], true)
+}
+
+fn resolve(
+  root: String,
+  seed_files: List[String],
+  diags0: List[LocDiag],
+  follow_only: Bool
+) -> LoadResult !io = {
+  var diags = diags0
+  let root_abs = canon(root)
+  var by_canon: Map[String, String] = map.empty()
+  var by_path: Map[String, LoadedModule] = map.empty()
+  var order: List[String] = []
+  var queue: List[String] = []
+  # load seeds
+  for f in seed_files {
+    let c = canon(f)
+    if not map.has(by_canon, c) {
+      match io.read_file(f) {
+        Ok(text) -> {
+          let (m, pdiags) = parser.parse_module(text)
+          let mod_path = module_path_of(root_abs, c)
+          let mf = LoadedModule {
+            mod_path: mod_path,
+            class_name: class_name_of(mod_path),
+            path: f,
+            text: text,
+            m: m,
+            pdiags: pdiags
+          }
+          by_canon = map.insert(by_canon, c, mod_path)
+          by_path = map.insert(by_path, mod_path, mf)
+          order = order ++ [mod_path]
+          queue = queue ++ [mod_path]
+        }
+        Err(_) -> ()
+      }
+    }
+  }
+  # follow use edges, loading dependencies on demand
+  var visited: Set[String] = set.empty()
+  while len(queue) > 0 {
+    let mp = queue[0]
+    queue = list.drop(queue, 1)
+    if not set.has(visited, mp) {
+      visited = set.insert(visited, mp)
+      let mf = map.get(by_path, mp).expect("queued module")
+      for u in module_uses(mf.m) {
+        var bad: Option[String] = None
+        for s in u.segs {
+          if bad == None && not seg_ok(s) { bad = Some(s) }
+        }
+        match bad {
+          Some(b) -> {
+            diags = diags ++ [LocDiag { path: mf.path, d: Diag {
+              msg: "invalid module path segment `" ++ b ++ "`",
+              lo: u.nlo,
+              hi: u.nhi,
+              hint: "path segments are lowercase identifiers: [a-z_][a-z0-9_]*"
+            } }]
+            continue
+          }
+          None -> ()
+        }
+        # bundled std modules come from the compiler, not the module graph
+        if u.segs[0] == "std" { continue }
+        let dep_file = root ++ "/" ++ join(u.segs, "/") ++ ".dawn"
+        let dep_canon = canon(dep_file)
+        if map.has(by_canon, dep_canon) {
+          queue = queue ++ [map.get(by_canon, dep_canon).expect("canon")]
+        } else {
+          match io.read_file(dep_file) {
+            Ok(text) -> {
+              let (m2, pdiags2) = parser.parse_module(text)
+              let mod_path = module_path_of(root_abs, dep_canon)
+              let mf2 = LoadedModule {
+                mod_path: mod_path,
+                class_name: class_name_of(mod_path),
+                path: dep_file,
+                text: text,
+                m: m2,
+                pdiags: pdiags2
+              }
+              by_canon = map.insert(by_canon, dep_canon, mod_path)
+              by_path = map.insert(by_path, mod_path, mf2)
+              order = order ++ [mod_path]
+              queue = queue ++ [mod_path]
+            }
+            Err(_) -> {
+              diags = diags ++ [LocDiag { path: mf.path, d: Diag {
+                msg: "cannot find module `" ++ u.path ++ "`",
+                lo: u.nlo,
+                hi: u.nhi,
+                hint: "expected a file at " ++ dep_file
+              } }]
+            }
+          }
+        }
+      }
+    }
+  }
+  # the std/ path prefix is reserved for the bundled standard library
+  for mp in order {
+    if mp == "std" || str.starts_with(mp, "std/") {
+      let mf = map.get(by_path, mp).expect("module")
+      diags = diags ++ [LocDiag { path: mf.path, d: Diag {
+        msg: "the module path `" ++ mp ++ "` is reserved for the bundled standard library",
+        lo: 0,
+        hi: 0,
+        hint: "move the file out of src/std"
+      } }]
+    }
+  }
+  # duplicate-import detection (same module used twice in one file)
+  for mp in order {
+    let mf = map.get(by_path, mp).expect("module")
+    var seen: Set[String] = set.empty()
+    for u in module_uses(mf.m) {
+      var all_ok = true
+      for s in u.segs {
+        if not seg_ok(s) { all_ok = false }
+      }
+      if all_ok {
+        if set.has(seen, u.path) {
+          diags = diags ++ [LocDiag { path: mf.path, d: Diag {
+            msg: "module `" ++ u.path ++ "` is imported more than once",
+            lo: u.nlo,
+            hi: u.nhi,
+            hint: ""
+          } }]
+        }
+        seen = set.insert(seen, u.path)
+      }
+    }
+  }
+  # topological order + cycle detection over the use graph
+  let (ordered, diags2) = topo_sort(order, by_path, diags)
+  LoadResult { modules: ordered, diags: diags2 }
+}
+
+## Depth-first topological sort; on the first back edge, report the cycle path.
+fn topo_sort(
+  order: List[String],
+  by_path: Map[String, LoadedModule],
+  diags0: List[LocDiag]
+) -> (List[LoadedModule], List[LocDiag]) !io = {
+  var diags = diags0
+  var state: Map[String, Int] = map.empty()
+  var out: List[LoadedModule] = []
+  var cycle_reported = false
+  # an explicit work stack: (path, next edge index); edges resolved up front
+  fn edges_of(mf: LoadedModule) -> List[String] = {
+    var es: List[String] = []
+    for u in module_uses(mf.m) {
+      if map.has(by_path, u.path) { es = es ++ [u.path] }
+    }
+    es
+  }
+  for start in order {
+    var stack: List[(String, Int)] = []
+    if not map.has(state, start) {
+      stack = [(start, 0)]
+      state = map.insert(state, start, 0)
+    }
+    while len(stack) > 0 {
+      let (mp, ei) = stack[len(stack) - 1]
+      let mf = map.get(by_path, mp).expect("module")
+      let es = edges_of(mf)
+      if ei >= len(es) {
+        stack = list.take(stack, len(stack) - 1)
+        state = map.insert(state, mp, 1)
+        out = out ++ [mf]
+      } else {
+        stack = list.take(stack, len(stack) - 1) ++ [(mp, ei + 1)]
+        let dep = es[ei]
+        match map.get(state, dep) {
+          Some(1) -> ()
+          Some(_) -> {
+            # a back edge: the cycle is the stack from dep onward
+            if not cycle_reported {
+              cycle_reported = true
+              var names: List[String] = []
+              var take = false
+              for entry in stack {
+                let (p, _) = entry
+                if p == dep { take = true }
+                if take { names = names ++ [p] }
+              }
+              names = names ++ [dep]
+              let head = map.get(by_path, names[0]).expect("module")
+              var ulo = 0
+              var uhi = 0
+              for u in module_uses(head.m) {
+                if u.path == names[1] && ulo == 0 && uhi == 0 {
+                  ulo = u.nlo
+                  uhi = u.nhi
+                }
+              }
+              diags = diags ++ [LocDiag { path: head.path, d: Diag {
+                msg: "circular module dependency: " ++ join(names, " → "),
+                lo: ulo,
+                hi: uhi,
+                hint: "modules must form a directed acyclic graph (spec §10.5)"
+              } }]
+            }
+          }
+          None -> {
+            state = map.insert(state, dep, 0)
+            stack = stack ++ [(dep, 0)]
+          }
+        }
+      }
+    }
+  }
+  (out, diags)
+}
+
+# ---- whole-program analysis ----
+
+pub type CheckedMod = {
+  mod_path: String,
+  class_name: String,
+  path: String,
+  m: Module,
+  cx: Cx,
+  tm: TModule,
+  ct: CtOut
+}
+
+pub type Program = { modules: List[CheckedMod], diags: List[LocDiag] }
+
+fn empty_tmodule() -> TModule = TModule { fns: [], consts: [], tests: [] }
+
+fn empty_ctout() -> CtOut = {
+  let no_c: Map[String, CValue] = map.empty()
+  let no_b: Map[(Int, Int), CValue] = map.empty()
+  CtOut { diags: [], consts: no_c, blocks: no_b }
+}
+
+## Check a loaded program in dependency order: each module sees the exports of
+## everything before it (std pre-seeded); comptime runs on clean modules only.
+pub fn analyze_program(loaded: LoadResult, std: StdCtx, fuel: Int) -> Program !io = {
+  var diags = loaded.diags
+  var exports = std.exports
+  var out: List[CheckedMod] = []
+  for mf in loaded.modules {
+    for d in mf.pdiags { diags = diags ++ [LocDiag { path: mf.path, d: d }] }
+    let parse_failed = len(mf.pdiags) > 0
+    var cx = cx_new(Some(mf.class_name), Some(mf.path))
+    cx = Cx {
+      ..cx,
+      std_fns: std.std_fns,
+      moved: std.moved,
+      line_starts: lexer.line_starts_of(mf.text)
+    }
+    var tm = empty_tmodule()
+    var ct = empty_ctout()
+    if not parse_failed {
+      let (cx1, tm1) = check_module(cx, mf.m, exports)
+      cx = cx1
+      tm = tm1
+      if len(cx.diags) == 0 {
+        ct = eval_comptime(tm, std.fn_decls, std.by_owner, std.std_names, cx.adts, fuel)
+      }
+      for d in cx.diags { diags = diags ++ [LocDiag { path: mf.path, d: d }] }
+      for d in ct.diags { diags = diags ++ [LocDiag { path: mf.path, d: d }] }
+    }
+    exports = map.insert(exports, mf.mod_path, exports_of(cx, mf.m, mf.mod_path, mf.class_name))
+    out = out ++ [CheckedMod {
+      mod_path: mf.mod_path,
+      class_name: mf.class_name,
+      path: mf.path,
+      m: mf.m,
+      cx: cx,
+      tm: tm,
+      ct: ct
+    }]
+  }
+  Program { modules: out, diags: diags }
+}
+
+# ---- tests ----
+
+fn mkdirs(p: String) -> Unit !io = {
+  let _ = java_try(fn() => Files.createDirectories(Paths.get(p).expect("path")))
+  ()
+}
+
+fn put(p: String, text: String) -> Unit !io =
+  match io.write_file(p, text) {
+    Ok(_) -> ()
+    Err(e) -> panic("test setup: " ++ e)
+  }
+
+test "a two-module project analyzes end to end" {
+  let root = "/tmp/dawn-selfhost-analyze/proj1"
+  mkdirs(root ++ "/src")
+  put(root ++ "/src/util.dawn",
+    "use std/str\npub fn greet(n: String) -> String = \"hi \" ++ str.trim(n)\n")
+  put(root ++ "/src/main.dawn",
+    "use util\npub fn main() -> Unit !io = println(util.greet(\" dawn \"))\n")
+  let std = match load_std("compiler/src/main/resources/std") {
+    Ok(sc) -> sc
+    Err(e) -> panic("std: " ++ e)
+  }
+  let loaded = load_directory(root)
+  assert len(loaded.diags) == 0
+  assert len(loaded.modules) == 2
+  # dependency order: util before main
+  assert loaded.modules[0].mod_path == "util"
+  assert loaded.modules[1].mod_path == "main"
+  let prog = analyze_program(loaded, std, 100000000)
+  assert len(prog.diags) == 0
+}
+
+test "loader reports cycles and missing modules" {
+  let root = "/tmp/dawn-selfhost-analyze/proj2"
+  mkdirs(root ++ "/src")
+  put(root ++ "/src/main.dawn", "use a\npub fn main() -> Unit !io = ()\n")
+  put(root ++ "/src/a.dawn", "use b\npub fn fa() -> Int = 1\n")
+  put(root ++ "/src/b.dawn", "use a\npub fn fb() -> Int = 2\n")
+  let loaded = load_directory(root)
+  var cyc = false
+  for ld in loaded.diags {
+    if str.contains(ld.d.msg, "circular module dependency") { cyc = true }
+  }
+  assert cyc
+  let root2 = "/tmp/dawn-selfhost-analyze/proj3"
+  mkdirs(root2 ++ "/src")
+  put(root2 ++ "/src/main.dawn", "use nope\npub fn main() -> Unit !io = ()\n")
+  let loaded2 = load_directory(root2)
+  var missing = false
+  for ld in loaded2.diags {
+    if str.contains(ld.d.msg, "cannot find module `nope`") { missing = true }
+  }
+  assert missing
+}
