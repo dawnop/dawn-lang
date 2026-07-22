@@ -106,3 +106,31 @@ Kotlin CodeGen 从 checked AST 读的注解，逐一映射到 TAST：
 - genDerivedOrdCmp：record 逐字段;sum 先 tag 序（INSTANCEOF 链算 tag）再同 ctor
   逐字段;emitFieldCmp 标量原生、TAdt 经其 ordImpl 的 cmp 静态。
 - genTraitDefault：currentFn=null（自调用不做尾递归改写）。
+
+### 通读进度 1250–2660 + TAST v2 方案定稿
+
+- genTest/genJvmMain（try/catch PanicError→stderr+exit1，visitTryCatchBlock 有 String
+  type 参数——shim 不需要 null）；Lists/Strings 等运行时类照抄即可。
+- genStmt：LetStmt 要 init.type + **isDiscard（name=="_"）**——TSLet.sym 应为 None
+  表示丢弃（现端口总是 Some，需改 check_stmt）；ExprStmt 弹栈按 expr.type；
+  while/for 用 loopStack (cont,end)，for 的增量段 reachable = bodyFalls || hasJumps ✓
+  （TSWhile/TSFor 的 has_jumps 语义与 Kotlin s.hasJumps 完全一致，值必须一样——
+  Kotlin hasJumps 是 checker 填的？【待核对：Kotlin ForStmt.hasJumps 谁填、含义
+  （any break/continue targeting THIS loop）——与 loop_jumps 集合语义对齐】）。
+- genExpr 返回 falls；Break/Continue → GOTO loopStack；Return → adaptTo(v.type,
+  methodRet)；ComptimeExpr → genLoadConst(e.value, e.type, key=节点)（标量 LDC、
+  结构→静态字段 dawn$const$i + <clinit> constructValue，VAdt 字段 boxed=字段类型是
+  TVar）；Index 按 target.type List/Map 分派+unerase(e.type)；FieldAccess GETFIELD
+  + adaptFrom(field.type, e.type)。
+- **TAST v2 注解定稿**（checker 回填）：
+  1. 每个 TExpr 变体加末位 `ty: Ty` 字段（构造处 = check 返回的类型）。
+  2. TSLet.sym: None ⟺ `_`。
+  3. XBinary 换 `ord: Option[WitRef]`；XCallFn 换 `witnesses: List[WitRef]`；
+     `WitRef = WForward(sym: Int) | WConcrete(trait_id: Int, subject: Ty)`。
+  4. TJavaCall 加 `sam_convs: List[(Int, String, JMethod)]`（argIdx, ifaceCls, sam）、
+     `list_bridges: List[Int]`；XLambda 加 `fn_ty: Ty`。
+  5. TFun 加 `dict_syms: List[Int]`（enter_fn 的 bind_dicts 顺序）。
+  6. trait 方法调用：Kotlin genCall 分派 sig.trait != null → genTraitMethodCall
+     （字典虚调用）——XCallFn 需带 `trait_id: Option[Int]`（取自 Sig）✓ Sig 已有。
+  7. UFCS/module 调用已在 TAST 展开为 XCallFn/XApply/XJava ✓ 无需 desugared 引用。
+- 这些字段进 TAST 不进 __check 金样 → P3b 对拍不受影响（对拍只看 diags/签名/常量）。
