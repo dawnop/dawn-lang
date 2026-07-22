@@ -1,7 +1,9 @@
 # Dawn
 
 一门刻意小的静态类型语言：编译到 JVM 字节码，native 可执行文件由 GraalVM
-native-image 直接获得——语言对两个目标零感知。
+native-image 直接获得——语言对两个目标零感知。编译器**已自举**：`selfhost/`
+是用 Dawn 写的编译器，与种子版逐字节对拍、能独立打包并重建自身
+（[docs/bootstrap.md](docs/bootstrap.md)）。
 
 ```dawn
 type Shape =
@@ -41,6 +43,7 @@ pub fn main() -> Unit !io =
 - [docs/design.md](docs/design.md) — 设计目标、决策记录（为什么是这样而不是那样）
 - [docs/spec.md](docs/spec.md) — 语言规范（词法、语法、类型、效果、comptime、互操作、编译模型）
 - [docs/grammar.ebnf](docs/grammar.ebnf) — EBNF 语法
+- [docs/bootstrap.md](docs/bootstrap.md) — 自举链（种子 → 固定点 → 独立 jar 闭包）与冻结政策
 - [examples/](examples/) — 示例程序
 
 ## 工具链

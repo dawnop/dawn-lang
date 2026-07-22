@@ -267,6 +267,17 @@ builtin/std 函数名改为 Rust 式合法**（解析序本就是本模块声明
     得 stage2 → stage2 再编译自己得 stage3，**stage2 与 stage3 逐字节一致**即固定点；
   - Kotlin 版从此冻结为 bootstrap 种子（学 Go 保留 go1.4），不再演进。
   - 验收：固定点 + 全部测试经自举编译器跑通，JVM/native 输出一致。
+  - **验收结论（2026-07-22 完成）**：四刀全落地（lex/parse/check/emit 金样逐字节
+    对拍进 CI，语料 = 全仓 .dawn + site + playground）；固定点 stage2==stage3
+    （433 类，`scripts/selfhost-fixpoint.sh`）；「全部测试跑通」由字节一致性蕴含
+    ——两边发射的类逐字节相同，跑什么都相同。另补了计划外一刀：`selfhost build`
+    自打独立可执行 jar（vendor 进 dawn.tool shim + ASM），单 jar 重发射与重建
+    自身均逐字节一致（`scripts/selfhost-standalone.sh`，CI）。
+    **冻结自 v0.6.0 生效**（种子 jar 由 GitHub Release 永久保存，链见
+    [`bootstrap.md`](bootstrap.md)）：Kotlin 版进入维护态——bug 修照收、
+    种子必须始终能编译 selfhost，但新语言特性默认不再做（做就要两边同时实现，
+    这个成本就是刻意的刹车）。日常工具链（run/test/fmt/doc/LSP）仍是 Kotlin 版，
+    把它们迁进 selfhost 是后话，不挡冻结。
 
 两条横向轨道贯穿全程：**LSP** 随每个特性同步演进（M1 已验证节奏可行；
 2026-07-12 补齐 completionProvider——作用域符号/内建/构造器/关键字 + 字符串注释
