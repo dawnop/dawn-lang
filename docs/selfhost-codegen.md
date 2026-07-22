@@ -134,3 +134,31 @@ Kotlin CodeGen 从 checked AST 读的注解，逐一映射到 TAST：
      （字典虚调用）——XCallFn 需带 `trait_id: Option[Int]`（取自 Sig）✓ Sig 已有。
   7. UFCS/module 调用已在 TAST 展开为 XCallFn/XApply/XJava ✓ 无需 desugared 引用。
 - 这些字段进 TAST 不进 __check 金样 → P3b 对拍不受影响（对拍只看 diags/签名/常量）。
+
+## 五、进度账(随做随记)
+
+- ✅ P4-1 `dawn __emit <target> -o <dir>`（Kotlin 落盘金样，确定性已验）+
+  dawn.tool.AdtClassWriter shim（getCommonSuperClass 共用；Kotlin CodeGen 已改用）。
+- ✅ P4-2 TAST v2：全节点 ty（tex_ty 访问器）、WitRef（XCallFn.witnesses/trait_id、
+  XBinary.ord）、TJavaCall.sam_convs/list_bridges、TFun.dict_syms（bind 序）、
+  TModule.syms、TSLet.sym=None 表 `_` 丢弃。__check 金样 337 文件仍逐字节一致。
+- ✅ P4-3 selfhost/dawn.toml 钉 asm 9.7.1（本地要 DAWN_MAVEN_MIRROR）；codegen.dawn
+  骨架：desc_of/method_desc/slots_of/is_ref + ASM 互操作 spike。shim 加 List
+  版 ctor（"child super" 对）与 plain/beginOn/fieldOn/methodOn 静态（Dawn 传不了
+  null、Map 不过界）。
+- ✅ P4-4 第一批发射器字节级一致：Fn0..8、Tuple2..8、PanicError、Unit（18/65 类，
+  scripts/selfhost-emit-diff.sh 子集模式，`selfhost emitrt -o dir`；运行 selfhost
+  要把 compiler/build/libs/dawn.jar 挂 classpath——AdtClassWriter 在编译器 jar 里）。
+- ⬜ 其余共享运行时类：Lists（含 genListOrdering 的 sort/sortBy/best/bestBy +
+  index/get/range/fromArray/slice/concat）、Strings、Bytes、Io、Show（2159 行前的
+  大块）、Maps、DictComparator/FnComparator（genComparatorClass）、trait 接口
+  （dawn/tr/Ord）、prelude Ord impls（dawn/impl/Ord$Int|Float|String）、vendored rt
+  字节拷贝（StdStrings 家族——selfhost 从编译器 jar 资源读，跑时已在 classpath：
+  Class.getResourceAsStream 经 jreflect 或直接 java 读）。
+- ⬜ ADT/record 类（genAdt/genCtorClass + equals/hashCode/toString——注意 toString
+  是否 derive Show 门控要核对 genCtorClass 全文）、impl 字典类、derived Ord cmp。
+- ⬜ genFn + genExpr/genStmt/patterns/lambda(LMF)/java calls/builtin 大 switch
+  （CodeGen.kt 2660-4205 逐段抄）。
+- ⬜ `selfhost emit <target> -o <dir>`（analyze→generate_program 全流程）→
+  emit-diff 转严格模式逐语料扩大 → CI。
+- ⬜ P5：stage2==stage3、selfhost build 出可执行 jar、文档收尾。
