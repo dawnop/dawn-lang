@@ -16,8 +16,13 @@
 - bug 修照收，种子失去「能编译 selfhost」的能力算 P0；
 - 新语言特性默认不再进 Kotlin 版——要做就得 selfhost 同步实现，双份成本是
   刻意的刹车；
-- 日常工具链（`run`/`test`/`fmt`/`doc`/LSP、playground 服务端）仍由 Kotlin 版
-  提供，迁移进 selfhost 不是冻结的前置条件。
+- 日常工具链已基本迁齐（2026-07-22 补）：`selfhost fmt`（词法级格式化器移植，
+  全仓 298 文件 + 打乱副本与 `dawn fmt` 逐字节一致）、`selfhost run`（子进程跑
+  新发射的类）、`selfhost test`（合成 `dawn$TestMain` runner 类，PASS/FAIL 报告
+  与退出码同 `dawn test` 逐字节）、`selfhost doc`（pub API 与 builtin 参考的
+  JSON 逐字节）——金样 `scripts/selfhost-fmt-diff.sh`、`selfhost-run-diff.sh`
+  均在 CI。仍留在 Kotlin 侧的只有 **LSP** 与 playground 服务端（体量大、
+  非日常路径，明确暂缓）。
 
 ## 链
 
