@@ -5,6 +5,9 @@
 #   selfhost check [--std <dir>] <t>...   diagnostics + pub surface + const
 #                                         values (dawn __check); a target is a
 #                                         file (use-closure) or a project dir
+#   selfhost emit <t> -o <dir>            every class of the program (dawn __emit)
+#   selfhost build <t> -o <out.jar>       executable jar; --vendor <pkg> packs
+#                                         class-path packages in (standalone)
 
 use std/io
 use std/str
@@ -17,6 +20,7 @@ use checkdump
 use stdlib
 use analyze.{CheckedMod, load_directory, load_file, analyze_program}
 use vendor
+use jarw
 use std/set
 use codegen.{
   fn_iface, tuple_class, gen_fn_interface, gen_tuple_class, gen_panic_class,
@@ -103,27 +107,12 @@ fn write_class(dir: String, name: String, bs: Bytes) -> Unit !io = {
   ()
 }
 
-## `selfhost emit [<target>] [--std <dir>] -o <dir>`: full program emission —
-## shared runtime, vendored rt, prelude ADTs, every std and user module class
-## (`emitrt` is the historical alias). Without a target: runtime subset only.
-fn run_emitrt(rest: List[String]) -> Unit !io = {
-  var out = ""
-  var target = ""
-  var std_dir = "compiler/src/main/resources/std"
-  var i = 0
-  while i < len(rest) {
-    if rest[i] == "-o" && i + 1 < len(rest) {
-      out = rest[i + 1]
-      i = i + 2
-    } else if rest[i] == "--std" && i + 1 < len(rest) {
-      std_dir = rest[i + 1]
-      i = i + 2
-    } else {
-      target = rest[i]
-      i = i + 1
-    }
-  }
-  if out == "" { panic("usage: selfhost emitrt [<target>] -o <dir>") }
+## Full program emission — shared runtime, prelude ADTs, every std and user
+## module class, vendored rt — in a stable order, plus the entry class name
+## ("" when no user module declares `fn main`). Without a target: the runtime
+## subset only.
+fn collect_program(target: String, std_dir: String) -> (List[(String, Bytes)], String) !io = {
+  var classes: List[(String, Bytes)] = []
   var adts = prelude_adts()
   var mods: List[CheckedMod] = []
   var std_mods: List[(String, Cx, TModule, CtOut)] = []
@@ -152,33 +141,30 @@ fn run_emitrt(rest: List[String]) -> Unit !io = {
   let sup = supers_of(adts, sort(map.keys(adts)))
   var n = 0
   while n <= 8 {
-    write_class(out, fn_iface(n), gen_fn_interface(n))
+    classes = classes ++ [(fn_iface(n), gen_fn_interface(n))]
     n = n + 1
   }
   n = 2
   while n <= 8 {
-    write_class(out, tuple_class(n), gen_tuple_class(sup, n))
+    classes = classes ++ [(tuple_class(n), gen_tuple_class(sup, n))]
     n = n + 1
   }
-  write_class(out, PANIC_CLASS, gen_panic_class())
-  write_class(out, UNIT_CLASS, gen_unit_class())
-  write_class(out, SHOW_CLASS, gen_show_class(sup))
-  write_class(out, LISTS_CLASS, gen_lists_class(sup))
-  write_class(out, STRINGS_CLASS, gen_strings_class(sup))
-  write_class(out, MAPS_CLASS, gen_maps_class(sup))
-  write_class(out, BYTES_CLASS, gen_bytes_class(sup))
-  write_class(out, IO_CLASS, gen_io_class(sup))
-  write_class(out, tr_iface(None, "Ord"), gen_ord_interface(sup))
-  write_class(out, DICT_CMP_CLASS, gen_dict_comparator(sup))
-  write_class(out, FN_CMP_CLASS, gen_fn_comparator(sup))
+  classes = classes ++ [(PANIC_CLASS, gen_panic_class())]
+  classes = classes ++ [(UNIT_CLASS, gen_unit_class())]
+  classes = classes ++ [(SHOW_CLASS, gen_show_class(sup))]
+  classes = classes ++ [(LISTS_CLASS, gen_lists_class(sup))]
+  classes = classes ++ [(STRINGS_CLASS, gen_strings_class(sup))]
+  classes = classes ++ [(MAPS_CLASS, gen_maps_class(sup))]
+  classes = classes ++ [(BYTES_CLASS, gen_bytes_class(sup))]
+  classes = classes ++ [(IO_CLASS, gen_io_class(sup))]
+  classes = classes ++ [(tr_iface(None, "Ord"), gen_ord_interface(sup))]
+  classes = classes ++ [(DICT_CMP_CLASS, gen_dict_comparator(sup))]
+  classes = classes ++ [(FN_CMP_CLASS, gen_fn_comparator(sup))]
   for subj in [TyInt, TyFloat, TyString] {
-    write_class(out, impl_class(adts, None, "Ord", subj), gen_prelude_ord_impl(sup, adts, subj))
+    classes = classes ++ [(impl_class(adts, None, "Ord", subj), gen_prelude_ord_impl(sup, adts, subj))]
   }
   for aid in [OPTION_ID, RESULT_ID] {
-    for pair in gen_adt(sup, adts, adt_of(adts, aid)) {
-      let (nm, bs) = pair
-      write_class(out, nm, bs)
-    }
+    classes = classes ++ gen_adt(sup, adts, adt_of(adts, aid))
   }
   # program-wide tables for module emission: traits/impls/fn sigs unioned
   # over std and user modules (ids are unique program-wide)
@@ -224,35 +210,115 @@ fn run_emitrt(rest: List[String]) -> Unit !io = {
   var seen: Set[String] = set.empty()
   for sm in std_mods {
     let (cls, cx, tm, ct) = sm
-    for pair in emit_module(sup, adts, traits, impl_table, prog_fns, cx.fns, cls,
+    classes = classes ++ emit_module(sup, adts, traits, impl_table, prog_fns, cx.fns, cls,
       own_trait_ids(cx.traits, cls), cx.local_impls, own_adts_of(cx.adts, cls, seen),
-      tm, ct, merged_consts(cx, ct, const_vals), false) {
-        let (nm, bs) = pair
-        write_class(out, nm, bs)
-      }
+      tm, ct, merged_consts(cx, ct, const_vals), false)
     for aid in own_adts_of(cx.adts, cls, seen) {
       seen = set.insert(seen, adt_jvm_name(adt_of(cx.adts, aid)))
     }
   }
+  var entry = ""
   for cm in mods {
-    for pair in emit_module(sup, adts, traits, impl_table, prog_fns, cm.cx.fns,
+    classes = classes ++ emit_module(sup, adts, traits, impl_table, prog_fns, cm.cx.fns,
       cm.class_name, own_trait_ids(cm.cx.traits, cm.class_name), cm.cx.local_impls,
       own_adts_of(cm.cx.adts, cm.class_name, seen), cm.tm, cm.ct,
-      merged_consts(cm.cx, cm.ct, const_vals), true) {
-        let (nm, bs) = pair
-        write_class(out, nm, bs)
-      }
+      merged_consts(cm.cx, cm.ct, const_vals), true)
     for aid in own_adts_of(cm.cx.adts, cm.class_name, seen) {
       seen = set.insert(seen, adt_jvm_name(adt_of(cm.cx.adts, aid)))
     }
-  }
-  for outer in vendor.vendored_outers() {
-    for pair in vendor.rt_class_family(outer) {
-      let (nm, bs) = pair
-      write_class(out, nm, bs)
+    if entry == "" {
+      for tf in cm.tm.fns {
+        let plain = match tf.impl_of { Some(_) -> false None -> match tf.default_of { Some(_) -> false None -> true } }
+        if plain && tf.name == "main" { entry = cm.class_name }
+      }
     }
   }
+  for outer in vendor.vendored_outers() {
+    classes = classes ++ vendor.rt_class_family(outer)
+  }
+  (classes, entry)
+}
+
+## `selfhost emit [<target>] [--std <dir>] -o <dir>`: write every class of the
+## compiled program under <dir> (`emitrt` is the historical alias).
+fn run_emitrt(rest: List[String]) -> Unit !io = {
+  var out = ""
+  var target = ""
+  var std_dir = "compiler/src/main/resources/std"
+  var i = 0
+  while i < len(rest) {
+    if rest[i] == "-o" && i + 1 < len(rest) {
+      out = rest[i + 1]
+      i = i + 2
+    } else if rest[i] == "--std" && i + 1 < len(rest) {
+      std_dir = rest[i + 1]
+      i = i + 2
+    } else {
+      target = rest[i]
+      i = i + 1
+    }
+  }
+  if out == "" { panic("usage: selfhost emit [<target>] [--std <dir>] -o <dir>") }
+  let (classes, _) = collect_program(target, std_dir)
+  for pair in classes {
+    let (nm, bs) = pair
+    write_class(out, nm, bs)
+  }
   println("emitted runtime subset -> " ++ out)
+}
+
+## `selfhost build <target> [--std <dir>] [--vendor <pkg>]... -o <out.jar>`:
+## pack the compiled program as an executable jar. Each `--vendor` names an
+## internal package path (e.g. org/objectweb/asm) whose classes are copied in
+## from java.class.path — building selfhost itself vendors the dawn.tool shim
+## and ASM, which is what makes the jar standalone.
+fn run_build(rest: List[String]) -> Unit !io = {
+  var out = ""
+  var target = ""
+  var std_dir = "compiler/src/main/resources/std"
+  var vendor_pkgs: List[String] = []
+  var i = 0
+  while i < len(rest) {
+    if rest[i] == "-o" && i + 1 < len(rest) {
+      out = rest[i + 1]
+      i = i + 2
+    } else if rest[i] == "--std" && i + 1 < len(rest) {
+      std_dir = rest[i + 1]
+      i = i + 2
+    } else if rest[i] == "--vendor" && i + 1 < len(rest) {
+      vendor_pkgs = vendor_pkgs ++ [rest[i + 1]]
+      i = i + 2
+    } else {
+      target = rest[i]
+      i = i + 1
+    }
+  }
+  if out == "" || target == "" {
+    panic("usage: selfhost build <target> [--std <dir>] [--vendor <pkg>]... -o <out.jar>")
+  }
+  let (classes, entry) = collect_program(target, std_dir)
+  if entry == "" { panic(target ++ " has no fn main to use as an entry point") }
+  # dedupe defensively: ZipOutputStream throws on a repeated entry name
+  var seen: Set[String] = set.empty()
+  var all: List[(String, Bytes)] = []
+  for pair in classes {
+    let (nm, _) = pair
+    if not set.has(seen, nm) {
+      seen = set.insert(seen, nm)
+      all = all ++ [pair]
+    }
+  }
+  for pkg in vendor_pkgs {
+    for pair in vendor.classpath_package(pkg) {
+      let (nm, _) = pair
+      if not set.has(seen, nm) {
+        seen = set.insert(seen, nm)
+        all = all ++ [pair]
+      }
+    }
+  }
+  jarw.write_jar(out, entry, all)
+  println("wrote " ++ out ++ " (" ++ to_string(len(all)) ++ " classes)")
 }
 
 fn run_check(rest: List[String]) -> Unit !io = {
@@ -288,6 +354,8 @@ pub fn main() -> Unit !io = {
         run_check(rest)
       } else if mode == "emit" || mode == "emitrt" {
         run_emitrt(rest)
+      } else if mode == "build" {
+        run_build(rest)
       } else {
         for pth in rest {
           println("== " ++ pth ++ " ==")

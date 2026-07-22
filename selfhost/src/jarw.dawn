@@ -1,0 +1,60 @@
+# Deterministic executable-jar writer for `selfhost build`: manifest first,
+# then each class entry, with every timestamp pinned — so the same class list
+# always produces the same jar bytes. The standalone closure check relies on
+# that: the jar the self-hosted compiler builds of itself must equal, byte for
+# byte, the jar it was launched from.
+
+use std/str
+use std/bytes
+use java "java.io.FileOutputStream"
+use java "java.util.zip.ZipOutputStream"
+use java "java.util.zip.ZipEntry"
+
+# Fixed entry mtime (2020-01-01T00:00:00Z). ZipEntry converts it to DOS time
+# through the local zone, so the value is deterministic per machine — which is
+# all the closure check needs — not portable across zones.
+const ENTRY_TIME: Int = 1577836800000
+
+fn crlf() -> String = str.from_char(13) ++ "\n"
+
+fn dotted(cls: String) -> String = {
+  var out = ""
+  for part in str.split(cls, "/") {
+    if out == "" { out = part } else { out = out ++ "." ++ part }
+  }
+  out
+}
+
+fn put(zos: ZipOutputStream, name: String, bs: Bytes) -> Unit !io = {
+  let e = ZipEntry.new(name)
+  let _ = e.setTime(ENTRY_TIME)
+  let _ = zos.putNextEntry(e)
+  let _ = zos.write(bs)
+  let _ = zos.closeEntry()
+  ()
+}
+
+## Write `classes` (internal name → bytes, no ".class" suffix) as an
+## executable jar with `Main-Class: <main_class>`.
+pub fn write_jar(path: String, main_class: String, classes: List[(String, Bytes)]) -> Unit !io = {
+  let fos = match java_try(fn() => FileOutputStream.new(path)) {
+    Ok(f) -> f
+    Err(e) -> panic("cannot write " ++ path ++ ": " ++ e)
+  }
+  let zos = ZipOutputStream.new(fos)
+  let manifest =
+    "Manifest-Version: 1.0" ++ crlf() ++
+    "Main-Class: " ++ dotted(main_class) ++ crlf() ++ crlf()
+  put(zos, "META-INF/MANIFEST.MF", bytes.utf8(manifest))
+  for pair in classes {
+    let (nm, bs) = pair
+    put(zos, nm ++ ".class", bs)
+  }
+  let _ = zos.close()
+  ()
+}
+
+test "dotted turns an internal name into a binary name" {
+  assert dotted("main") == "main"
+  assert dotted("a/b/c") == "a.b.c"
+}

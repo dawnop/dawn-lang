@@ -15,6 +15,7 @@ use java "java.util.Enumeration"
 use java "java.io.InputStream"
 use java "java.nio.file.Files"
 use java "java.nio.file.Paths"
+use java "java.lang.System"
 
 pub fn vendored_outers() -> List[String] =
   ["StdStrings", "StdBytes", "StdIo", "DawnList", "DawnMap", "DawnSet"]
@@ -90,5 +91,91 @@ pub fn rt_class_family(outer: String) -> List[(String, Bytes)] !io = {
     out = out ++ [(str.substring(nm, 0, str.len(nm) - str.len(".class")), bs)]
   }
   let _ = jf.close()
+  out
+}
+
+fn has_name(names: List[String], n: String) -> Bool = {
+  for x in names { if x == n { return true } }
+  false
+}
+
+fn lookup_bytes(pairs: List[(String, Bytes)], nm: String) -> Bytes = {
+  for p in pairs {
+    let (n, b) = p
+    if n == nm { return b }
+  }
+  panic("classpath_package: name vanished: " ++ nm)
+}
+
+## Class names (internal, no ".class") under `root`/`rel`, recursive.
+fn dir_classes_under(root: String, rel: String) -> List[String] !io = {
+  var out: List[String] = []
+  match io.list_dir(root ++ "/" ++ rel) {
+    Ok(files) -> {
+      for f in sort(files) {
+        let r2 = rel ++ "/" ++ f
+        if io.is_dir(root ++ "/" ++ r2) {
+          out = out ++ dir_classes_under(root, r2)
+        } else if str.ends_with(f, ".class") {
+          out = out ++ [str.substring(r2, 0, str.len(r2) - str.len(".class"))]
+        }
+      }
+    }
+    Err(_) -> ()
+  }
+  out
+}
+
+## Every .class under package path `prefix` (e.g. "org/objectweb/asm") found
+## on java.class.path, as (class name, bytes) pairs sorted by name. The first
+## class-path entry providing a class wins, like the class loader. This is how
+## `selfhost build` packs the compiler-jar residents (the dawn.tool shim, ASM)
+## into a standalone jar.
+pub fn classpath_package(prefix: String) -> List[(String, Bytes)] !io = {
+  let cp = match System.getProperty("java.class.path") {
+    Some(s) -> s
+    None -> panic("java.class.path is unset")
+  }
+  var names: List[String] = []
+  var found: List[(String, Bytes)] = []
+  for entry in str.split(cp, ":") {
+    if str.ends_with(entry, ".jar") {
+      match java_try(fn() => JarFile.new(entry)) {
+        Ok(jf) -> {
+          let en = jf.entries().expect("entries")
+          while en.hasMoreElements() {
+            let je: JarEntry = cast(en.nextElement().expect("entry"))
+            let nm = je.getName().expect("entry name")
+            if str.starts_with(nm, prefix ++ "/") && str.ends_with(nm, ".class") {
+              let cls = str.substring(nm, 0, str.len(nm) - str.len(".class"))
+              if not has_name(names, cls) {
+                let ins = jf.getInputStream(je).expect("entry stream")
+                let bs = ins.readAllBytes().expect("entry bytes")
+                let _ = ins.close()
+                names = names ++ [cls]
+                found = found ++ [(cls, bs)]
+              }
+            }
+          }
+          let _ = jf.close()
+        }
+        Err(_) -> ()
+      }
+    } else if io.is_dir(entry ++ "/" ++ prefix) {
+      for cls in dir_classes_under(entry, prefix) {
+        if not has_name(names, cls) {
+          let bs = match java_try(fn() =>
+              Files.readAllBytes(Paths.get(entry ++ "/" ++ cls ++ ".class").expect("path")).expect("bytes")) {
+                Ok(b) -> b
+                Err(e) -> panic("cannot read " ++ cls ++ ": " ++ e)
+              }
+          names = names ++ [cls]
+          found = found ++ [(cls, bs)]
+        }
+      }
+    }
+  }
+  var out: List[(String, Bytes)] = []
+  for nm in sort(names) { out = out ++ [(nm, lookup_bytes(found, nm))] }
   out
 }

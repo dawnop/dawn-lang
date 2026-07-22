@@ -206,6 +206,10 @@ Kotlin CodeGen 从 checked AST 读的注解，逐一映射到 TAST：
      selfhost 的 tm.fns 已是 fns++impl++defaults 序，靠 impl_of/default_of 区分。
 - ✅ `selfhost emit <target> -o <dir>` 全流程 + emit-diff 严格模式 + CI（上条）。
 - ✅ P5 不动点：stage2==stage3（`scripts/selfhost-fixpoint.sh`，CI）。
-- ⬜ 尚未做（非阻塞）：selfhost 自打可执行 jar 的 `build` 模式（现在跑自身
-  发射的类要 `-cp classes:asm:dawn.jar`——AdtClassWriter 仍在编译器 jar 里，
-  真正独立需要把 shim 也搬进 selfhost 侧或 vendor 它）。
+- ✅ `selfhost build <t> -o out.jar [--vendor <pkg>]…`：可执行 jar（jarw.dawn，
+  确定性——manifest 在先、时间戳钉死，同类表必出同字节）。`--vendor` 用
+  vendor.classpath_package 从 java.class.path 按包前缀拷类（首个命中的
+  class-path 条目赢，同类加载器语义）；打 selfhost 自身时 vendor 进
+  dawn/tool（AdtClassWriter shim）+ org/objectweb/asm，产物单独可跑。
+  验收 `scripts/selfhost-standalone.sh`（CI）：独立性（只挂 standalone jar
+  重发射 calc 逐字节一致）+ 闭包（standalone jar 重建自身逐字节一致）。
