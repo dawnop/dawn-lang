@@ -16,12 +16,15 @@ use astdump
 use checkdump
 use stdlib
 use analyze
+use vendor
 use codegen.{
   fn_iface, tuple_class, gen_fn_interface, gen_tuple_class, gen_panic_class,
   gen_unit_class, supers_of, PANIC_CLASS, UNIT_CLASS, gen_bytes_class,
   gen_io_class, gen_dict_comparator, gen_fn_comparator, gen_ord_interface,
   gen_prelude_ord_impl, impl_class, tr_iface, BYTES_CLASS, IO_CLASS,
-  DICT_CMP_CLASS, FN_CMP_CLASS
+  DICT_CMP_CLASS, FN_CMP_CLASS, gen_show_class, SHOW_CLASS,
+  gen_lists_class, LISTS_CLASS, gen_strings_class, STRINGS_CLASS,
+  gen_maps_class, MAPS_CLASS
 }
 use types.{prelude_adts, OPTION_ID, RESULT_ID, TyInt, TyFloat, TyString}
 use java "java.nio.file.Files"
@@ -66,6 +69,10 @@ fn run_emitrt(rest: List[String]) -> Unit !io = {
   }
   write_class(out, PANIC_CLASS, gen_panic_class())
   write_class(out, UNIT_CLASS, gen_unit_class())
+  write_class(out, SHOW_CLASS, gen_show_class(sup))
+  write_class(out, LISTS_CLASS, gen_lists_class(sup))
+  write_class(out, STRINGS_CLASS, gen_strings_class(sup))
+  write_class(out, MAPS_CLASS, gen_maps_class(sup))
   write_class(out, BYTES_CLASS, gen_bytes_class(sup))
   write_class(out, IO_CLASS, gen_io_class(sup))
   write_class(out, tr_iface(None, "Ord"), gen_ord_interface(sup))
@@ -73,6 +80,12 @@ fn run_emitrt(rest: List[String]) -> Unit !io = {
   write_class(out, FN_CMP_CLASS, gen_fn_comparator(sup))
   for subj in [TyInt, TyFloat, TyString] {
     write_class(out, impl_class(adts, None, "Ord", subj), gen_prelude_ord_impl(sup, adts, subj))
+  }
+  for outer in vendor.vendored_outers() {
+    for pair in vendor.rt_class_family(outer) {
+      let (nm, bs) = pair
+      write_class(out, nm, bs)
+    }
   }
   println("emitted runtime subset -> " ++ out)
 }

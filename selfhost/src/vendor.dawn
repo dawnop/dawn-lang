@@ -1,0 +1,63 @@
+# Byte-copy the vendored dawn/rt classes out of the compiler jar (the Kotlin
+# vendorRuntimeClasses): the classes std forwards to are compiled from Kotlin
+# source so the checker can reflect on them, which means they live in the
+# compiler artifact and must be copied into a built program's class table —
+# otherwise `java -jar` dies with NoClassDefFoundError while `dawn run` works.
+
+use std/str
+use std/list
+use java "java.lang.ClassLoader"
+use java "java.net.URL"
+use java "java.util.jar.JarFile"
+use java "java.util.jar.JarEntry"
+use java "java.util.Enumeration"
+use java "java.io.InputStream"
+
+pub fn vendored_outers() -> List[String] =
+  ["StdStrings", "StdBytes", "StdIo", "DawnList", "DawnMap", "DawnSet"]
+
+fn matches(file: String, outer: String) -> Bool =
+  file == outer ++ ".class" ||
+  (str.starts_with(file, outer ++ "\$") && str.ends_with(file, ".class"))
+
+## `dawn/rt/<outer>` plus every nested `dawn/rt/<outer>$…` beside it, as
+## (class name, bytes) pairs sorted by name. Requires the compiler jar on the
+## class path (the same condition the checker's reflection already needs).
+pub fn rt_class_family(outer: String) -> List[(String, Bytes)] !io = {
+  let res = "dawn/rt/" ++ outer ++ ".class"
+  let loader = ClassLoader.getSystemClassLoader().expect("system loader")
+  let url = match loader.getResource(res) {
+    Some(u) -> u
+    None -> panic("runtime class `dawn/rt/" ++ outer ++ "` is missing from the class path")
+  }
+  let u = url.toString().expect("url string")
+  if not str.starts_with(u, "jar:file:") {
+    panic("vendored runtime must come from a jar, got: " ++ u)
+  }
+  let bang = str.index_of(u, "!").expect("jar url separator")
+  let jar_path = str.substring(u, str.len("jar:file:"), bang)
+  let jf = JarFile.new(jar_path)
+  var names: List[String] = []
+  let en = jf.entries().expect("entries")
+  while en.hasMoreElements() {
+    let e: JarEntry = cast(en.nextElement().expect("entry"))
+    let nm = e.getName().expect("entry name")
+    if str.starts_with(nm, "dawn/rt/") &&
+      matches(str.substring(nm, str.len("dawn/rt/"), str.len(nm)), outer) {
+        names = names ++ [nm]
+      }
+  }
+  var out: List[(String, Bytes)] = []
+  for nm in sort(names) {
+    let e = match jf.getEntry(nm) {
+      Some(je) -> je
+      None -> panic("jar entry vanished: " ++ nm)
+    }
+    let ins = jf.getInputStream(e).expect("entry stream")
+    let bs = ins.readAllBytes().expect("entry bytes")
+    let _ = ins.close()
+    out = out ++ [(str.substring(nm, 0, str.len(nm) - str.len(".class")), bs)]
+  }
+  let _ = jf.close()
+  out
+}
