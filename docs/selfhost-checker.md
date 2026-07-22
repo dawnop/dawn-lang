@@ -150,3 +150,30 @@ isAssignableFrom、getParameterTypes/getReturnType、Object 方法剔除（getMe
 - Suggest（"did you mean"）的编辑距离与候选排序要逐字节一致（`diag/Suggest.kt` 51 行，照抄）。
 - comptime 求值结果进 golden（const 值），浮点/整数渲染已在 P1/P3a 验证一致。
 - 单文件 vs 项目模式的行为差（P0.7 的 unknown-std-module 报错位置）要按 Kotlin 现状复刻。
+
+## 七、落地记录（2026-07-22，P3b 完成）
+
+`selfhost check` 与 `dawn __check` 在全语料（repo 337 文件，含 backend-dawn 1.35 万行）
+金标准逐字节一致，`scripts/selfhost-check-diff.sh` 入 CI。与预案的偏差与实测教训：
+
+- **ER 带 env**：`ER = Result[(ESt, Env, CValue), (ESt, Env, Ctl)]`——赋值/绑定要跨过
+  break/continue 存活，Err 侧必须携带 env（预案里只有 (ESt, Ctl)）。
+- **模块文件改名 interp.dawn**：`comptime` 是关键字，`use comptime` 不可写。
+- **两处 id 冲突**（Kotlin 用对象同一性，端口用 id+表的代价）：用户 ADT id 曾从 1 起
+  与 RESULT_ID=1 相撞（首个用户类型覆写 Result）；跨模块各自从 2 起，嫁接来的 id 又被
+  本地新类型覆写（playground 全线炸）。修法：cx_new 从 2 起 + id 计数器经 StdCtx.next_id
+  从 std 一路串到每个用户模块。
+- **导入的 alias 带解析结果**：`use types.{Adts}` 的目标 `Map[Int, AdtI]` 在导入方
+  无从解析（AdtI 未导入）——ModExports 增 `alias_resolved`，inject_selective 连
+  解析类型一起搬（Kotlin 靠 AliasInfo 对象自带缓存，端口必须显式携带）。
+- **反射顺序不确定**：getMethods() 顺序跨进程会变，重载候选列表两次运行都不一致。
+  两侧一并改为按 Method.toString() 排序后再去重/评分（顺带修了 Kotlin 侧本身的
+  不确定性，两个 golden .err 随之再生成）。
+- **consts 的 resolvedAnn**：常量类型不可序列化被毒化成 TError 后，初始化器仍按
+  原注解检查（Kotlin resolvedAnn 与 constType 分开存，端口曾只存了毒化后的）。
+- **route C 的调用**：Dawn 无 null，Method.invoke(null, ...) 写不出——改走
+  MethodHandles.publicLookup().unreflect + invokeWithArguments(List)（List 桥直送），
+  装箱经 Objects.requireNonNull 擦成 Object。
+- **栈**：解释器在宿主栈上递归（ceval 帧很大），diff 脚本与 CI 给 selfhost JVM
+  `-Xss512m`；fuel 测试用循环而非深递归。
+- 单测 110 个全绿；`dawn test` 侧曾见"FAIL 无详情"= 空 message 的 StackOverflowError。
