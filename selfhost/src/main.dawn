@@ -24,9 +24,9 @@ use codegen.{
   gen_prelude_ord_impl, impl_class, tr_iface, BYTES_CLASS, IO_CLASS,
   DICT_CMP_CLASS, FN_CMP_CLASS, gen_show_class, SHOW_CLASS,
   gen_lists_class, LISTS_CLASS, gen_strings_class, STRINGS_CLASS,
-  gen_maps_class, MAPS_CLASS
+  gen_maps_class, MAPS_CLASS, gen_adt
 }
-use types.{prelude_adts, OPTION_ID, RESULT_ID, TyInt, TyFloat, TyString}
+use types.{prelude_adts, adt_of, OPTION_ID, RESULT_ID, TyInt, TyFloat, TyString}
 use java "java.nio.file.Files"
 use java "java.nio.file.Paths"
 
@@ -80,6 +80,12 @@ fn run_emitrt(rest: List[String]) -> Unit !io = {
   write_class(out, FN_CMP_CLASS, gen_fn_comparator(sup))
   for subj in [TyInt, TyFloat, TyString] {
     write_class(out, impl_class(adts, None, "Ord", subj), gen_prelude_ord_impl(sup, adts, subj))
+  }
+  for aid in [OPTION_ID, RESULT_ID] {
+    for pair in gen_adt(sup, adts, adt_of(adts, aid)) {
+      let (nm, bs) = pair
+      write_class(out, nm, bs)
+    }
   }
   for outer in vendor.vendored_outers() {
     for pair in vendor.rt_class_family(outer) {

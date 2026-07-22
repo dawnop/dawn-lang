@@ -1679,6 +1679,230 @@ pub fn gen_ord_interface(supers: List[String]) -> Bytes !io = {
   cw.toByteArray().expect("bytes")
 }
 
+# ---- ADT classes (spec §12.2) ----
+
+## Load a value of type `t` from a local slot (nothing for Unit/Never).
+pub fn load_slot(m: MethodVisitor, t: Ty, slot: Int) -> Unit !io = {
+  match t {
+    TyInt -> { m.visitVarInsn(OP_LLOAD, slot) }
+    TyCursor -> { m.visitVarInsn(OP_LLOAD, slot) }
+    TyFloat -> { m.visitVarInsn(OP_DLOAD, slot) }
+    TyBool -> { m.visitVarInsn(OP_ILOAD, slot) }
+    _ -> if is_ref(t) { m.visitVarInsn(OP_ALOAD, slot) }
+  }
+  ()
+}
+
+## Consume a value of `t` on the stack, leave its int hash (values are never null).
+fn hash_of(m: MethodVisitor, t: Ty) -> Unit !io = {
+  match t {
+    TyInt -> { m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Long", "hashCode", "(J)I", false) }
+    TyCursor -> { m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Long", "hashCode", "(J)I", false) }
+    TyFloat -> {
+      m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Double", "hashCode", "(D)I", false)
+    }
+    TyBool -> {
+      m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Boolean", "hashCode", "(Z)I", false)
+    }
+    _ -> { m.visitMethodInsn(OP_INVOKEVIRTUAL, obj(), "hashCode", "()I", false) }
+  }
+  ()
+}
+
+## `derive Show` rendering: Name, Name(v0, v1), or Name { f0: v0, f1: v1 } for records.
+fn gen_to_string_method(cw: AdtClassWriter, adts: Adts, sub: String, ci: CtorI) -> Unit !io = {
+  let m = cw.method(ACC_PUBLIC, "toString", "()Ljava/lang/String;").expect("mv")
+  m.visitCode()
+  m.visitTypeInsn(OP_NEW, SB)
+  m.visitInsn(OP_DUP)
+  m.visitMethodInsn(OP_INVOKESPECIAL, SB, "<init>", "()V", false)
+  append_const(m, ci.name)
+  if len(ci.fields) > 0 {
+    let is_record = adt_of(adts, ci.adt).is_record
+    append_const(m, if is_record { " { " } else { "(" })
+    var i = 0
+    for f in ci.fields {
+      if i > 0 { append_const(m, ", ") }
+      if is_record { append_const(m, f.name ++ ": ") }
+      m.visitVarInsn(OP_ALOAD, 0)
+      m.visitFieldInsn(OP_GETFIELD, sub, f.name, desc_of(adts, f.ty))
+      match f.ty {
+        TyInt -> {
+          m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Long", "valueOf",
+            "(J)Ljava/lang/Long;", false)
+        }
+        TyFloat -> {
+          m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Double", "valueOf",
+            "(D)Ljava/lang/Double;", false)
+        }
+        TyBool -> {
+          m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Boolean", "valueOf",
+            "(Z)Ljava/lang/Boolean;", false)
+        }
+        _ -> ()
+      }
+      m.visitMethodInsn(OP_INVOKESTATIC, SHOW_CLASS, "show",
+        "(Ljava/lang/Object;)Ljava/lang/String;", false)
+      m.visitMethodInsn(OP_INVOKEVIRTUAL, SB, "append",
+        "(Ljava/lang/String;)L" ++ SB ++ ";", false)
+      i = i + 1
+    }
+    append_const(m, if is_record { " }" } else { ")" })
+  }
+  m.visitMethodInsn(OP_INVOKEVIRTUAL, SB, "toString", "()Ljava/lang/String;", false)
+  m.visitInsn(OP_ARETURN)
+  close_mv(m)
+  ()
+}
+
+## Structural equality (== in Dawn, spec §4.3); a matching hashCode follows.
+fn gen_equals_method(cw: AdtClassWriter, adts: Adts, sub: String, ci: CtorI) -> Unit !io = {
+  let m = cw.method(ACC_PUBLIC, "equals", "(Ljava/lang/Object;)Z").expect("mv")
+  m.visitCode()
+  let yes = Label.new()
+  let no = Label.new()
+  m.visitVarInsn(OP_ALOAD, 0)
+  m.visitVarInsn(OP_ALOAD, 1)
+  m.visitJumpInsn(OP_IF_ACMPEQ, yes)
+  m.visitVarInsn(OP_ALOAD, 1)
+  m.visitTypeInsn(OP_INSTANCEOF, sub)
+  m.visitJumpInsn(OP_IFEQ, no)
+  m.visitVarInsn(OP_ALOAD, 1)
+  m.visitTypeInsn(OP_CHECKCAST, sub)
+  m.visitVarInsn(OP_ASTORE, 2)
+  for f in ci.fields {
+    m.visitVarInsn(OP_ALOAD, 0)
+    m.visitFieldInsn(OP_GETFIELD, sub, f.name, desc_of(adts, f.ty))
+    m.visitVarInsn(OP_ALOAD, 2)
+    m.visitFieldInsn(OP_GETFIELD, sub, f.name, desc_of(adts, f.ty))
+    match f.ty {
+      TyInt -> {
+        m.visitInsn(OP_LCMP)
+        m.visitJumpInsn(OP_IFNE, no)
+      }
+      TyCursor -> {
+        m.visitInsn(OP_LCMP)
+        m.visitJumpInsn(OP_IFNE, no)
+      }
+      TyFloat -> {
+        m.visitInsn(OP_DCMPL)
+        m.visitJumpInsn(OP_IFNE, no)
+      }
+      TyBool -> { m.visitJumpInsn(OP_IF_ICMPNE, no) }
+      _ -> {
+        m.visitMethodInsn(OP_INVOKEVIRTUAL, obj(), "equals", "(Ljava/lang/Object;)Z", false)
+        m.visitJumpInsn(OP_IFEQ, no)
+      }
+    }
+  }
+  m.visitLabel(yes)
+  m.visitInsn(OP_ICONST_1)
+  m.visitInsn(OP_IRETURN)
+  m.visitLabel(no)
+  m.visitInsn(OP_ICONST_0)
+  m.visitInsn(OP_IRETURN)
+  close_mv(m)
+  ()
+}
+
+## hashCode consistent with the structural equals: h = 31*h + field.hash, seeded 1.
+fn gen_hash_code_method(cw: AdtClassWriter, adts: Adts, sub: String, ci: CtorI) -> Unit !io = {
+  let m = cw.method(ACC_PUBLIC, "hashCode", "()I").expect("mv")
+  m.visitCode()
+  m.visitInsn(OP_ICONST_1)
+  for f in ci.fields {
+    m.visitIntInsn(OP_BIPUSH, 31)
+    m.visitInsn(OP_IMUL)
+    m.visitVarInsn(OP_ALOAD, 0)
+    m.visitFieldInsn(OP_GETFIELD, sub, f.name, desc_of(adts, f.ty))
+    hash_of(m, f.ty)
+    m.visitInsn(OP_IADD)
+  }
+  m.visitInsn(OP_IRETURN)
+  close_mv(m)
+  ()
+}
+
+## One ctor class: final subclass of `base` (or the record class itself).
+pub fn gen_ctor_class(
+  supers: List[String],
+  adts: Adts,
+  base: String,
+  ci: CtorI
+) -> Bytes !io = {
+  let sub = ctor_jvm_name(adts, ci)
+  let cw = AdtClassWriter.new(supers)
+  cw.begin(V17, ACC_PUBLIC + ACC_FINAL, sub, base)
+  let singleton = len(ci.fields) == 0
+  for f in ci.fields {
+    cw.field(ACC_PUBLIC + ACC_FINAL, f.name, desc_of(adts, f.ty))
+  }
+  if singleton {
+    cw.field(ACC_PUBLIC + ACC_STATIC + ACC_FINAL, "INSTANCE", "L" ++ sub ++ ";")
+    let cl = cw.method(ACC_STATIC, "<clinit>", "()V").expect("mv")
+    cl.visitCode()
+    cl.visitTypeInsn(OP_NEW, sub)
+    cl.visitInsn(OP_DUP)
+    cl.visitMethodInsn(OP_INVOKESPECIAL, sub, "<init>", "()V", false)
+    cl.visitFieldInsn(OP_PUTSTATIC, sub, "INSTANCE", "L" ++ sub ++ ";")
+    cl.visitInsn(OP_RETURN)
+    cl.visitMaxs(2, 0)
+    cl.visitEnd()
+  }
+  var ps = ""
+  for f in ci.fields { ps = ps ++ desc_of(adts, f.ty) }
+  let acc = if singleton { ACC_PRIVATE } else { ACC_PUBLIC }
+  let init = cw.method(acc, "<init>", "(" ++ ps ++ ")V").expect("mv")
+  init.visitCode()
+  init.visitVarInsn(OP_ALOAD, 0)
+  init.visitMethodInsn(OP_INVOKESPECIAL, base, "<init>", "()V", false)
+  var slot = 1
+  for f in ci.fields {
+    init.visitVarInsn(OP_ALOAD, 0)
+    load_slot(init, f.ty, slot)
+    init.visitFieldInsn(OP_PUTFIELD, sub, f.name, desc_of(adts, f.ty))
+    slot = slot + slots_of(f.ty)
+  }
+  init.visitInsn(OP_RETURN)
+  close_mv(init)
+  if not singleton {
+    gen_equals_method(cw, adts, sub, ci)
+    gen_hash_code_method(cw, adts, sub, ci)
+  }
+  # toString is always generated so nested/generic fields render uniformly via
+  # dawn/rt/Show; the type checker gates whether it may be called
+  gen_to_string_method(cw, adts, sub, ci)
+  cw.visitEnd()
+  cw.toByteArray().expect("bytes")
+}
+
+## The classes of one ADT: (name, bytes) for the base (sums) and each ctor.
+pub fn gen_adt(supers: List[String], adts: Adts, a: AdtI) -> List[(String, Bytes)] !io = {
+  let base = adt_jvm_name(a)
+  if a.is_record {
+    let ci = match a.ctors {
+      [only] -> only
+      _ -> panic("record with " ++ to_string(len(a.ctors)) ++ " ctors")
+    }
+    return [(base, gen_ctor_class(supers, adts, obj(), ci))]
+  }
+  let bw = AdtClassWriter.new(supers)
+  bw.begin(V17, ACC_PUBLIC + ACC_ABSTRACT, base, obj())
+  let bc = bw.method(ACC_PROTECTED, "<init>", "()V").expect("mv")
+  bc.visitCode()
+  bc.visitVarInsn(OP_ALOAD, 0)
+  bc.visitMethodInsn(OP_INVOKESPECIAL, obj(), "<init>", "()V", false)
+  bc.visitInsn(OP_RETURN)
+  bc.visitMaxs(1, 1)
+  bc.visitEnd()
+  bw.visitEnd()
+  var out = [(base, bw.toByteArray().expect("bytes"))]
+  for ci in a.ctors {
+    out = out ++ [(ctor_jvm_name(adts, ci), gen_ctor_class(supers, adts, base, ci))]
+  }
+  out
+}
+
 ## INSTANCE + private <init> + <clinit> (the Kotlin singletonScaffold).
 fn singleton_scaffold(cw: AdtClassWriter, cls: String, iface: String) -> Unit !io = {
   cw.field(ACC_PUBLIC + ACC_STATIC + ACC_FINAL, "INSTANCE", "L" ++ iface ++ ";")
