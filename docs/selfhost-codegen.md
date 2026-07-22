@@ -149,16 +149,49 @@ Kotlin CodeGen 从 checked AST 读的注解，逐一映射到 TAST：
 - ✅ P4-4 第一批发射器字节级一致：Fn0..8、Tuple2..8、PanicError、Unit（18/65 类，
   scripts/selfhost-emit-diff.sh 子集模式，`selfhost emitrt -o dir`；运行 selfhost
   要把 compiler/build/libs/dawn.jar 挂 classpath——AdtClassWriter 在编译器 jar 里）。
-- ⬜ 其余共享运行时类：Lists（含 genListOrdering 的 sort/sortBy/best/bestBy +
-  index/get/range/fromArray/slice/concat）、Strings、Bytes、Io、Show（2159 行前的
-  大块）、Maps、DictComparator/FnComparator（genComparatorClass）、trait 接口
-  （dawn/tr/Ord）、prelude Ord impls（dawn/impl/Ord$Int|Float|String）、vendored rt
-  字节拷贝（StdStrings 家族——selfhost 从编译器 jar 资源读，跑时已在 classpath：
-  Class.getResourceAsStream 经 jreflect 或直接 java 读）。
-- ⬜ ADT/record 类（genAdt/genCtorClass + equals/hashCode/toString——注意 toString
-  是否 derive Show 门控要核对 genCtorClass 全文）、impl 字典类、derived Ord cmp。
-- ⬜ genFn + genExpr/genStmt/patterns/lambda(LMF)/java calls/builtin 大 switch
-  （CodeGen.kt 2660-4205 逐段抄）。
-- ⬜ `selfhost emit <target> -o <dir>`（analyze→generate_program 全流程）→
-  emit-diff 转严格模式逐语料扩大 → CI。
+- ✅ P4-5 Bytes/Io/DictComparator/FnComparator/dawn/tr/Ord/prelude Ord impls
+  字节级一致（26/65）。Kotlin genBytesClass/genIoClass 的 doc 注释是旧的——实际
+  只有 concat 和 javaTry/catchPanic，以字节对拍为准。
+- ✅ P4-6 Show/Lists/Strings/Maps + vendored rt 字节拷贝（vendor.dawn：从
+  classpath 上的编译器 jar 枚举 dawn/rt/<outer>[$*].class，JarFile+Enumeration
+  互操作）→ 42/65。Dawn 字面量没有 \r 转义，用 str.from_char(13)。
+- ✅ P4-7 ADT 类发射（gen_adt/gen_ctor_class + equals/hashCode/toString；
+  toString 无条件生成、checker 才是 Show 门控；genToStringMethod 的装箱只对
+  TyInt/TyFloat/TyBool，TyCursor 走 else）→ prelude Option/Result 48/65。
+- ✅ P4-8 emitrt 接受 target：load_std + analyze_program 后按 owner==class_name
+  发射用户 ADT（calc$Token 家族、calc$Parser record）→ 57/65。supers 表用全
+  程序 adts 的并集。
+- ⬜ 剩 8 类 = 模块静态类（calc + std/{bytes,cursor,io,list,map,set,str}），即
+  genFn/genExpr 全套。**已定方案**（Kotlin 全文已通读完：头部状态 1-255、语句
+  2225-2450、表达式 2456-4205、模块胶水 499-513/1128-1296）：
+  1. TFun 加 `impl_of: Option[(Int, Ty)]`、`default_of: Option[Int]`（4 个构造点
+     全传 None，check_module §5.75 调用点用 `..tf` 改写；pass_register_impls 需
+     多返回按 module_impls 序的 (trait_id, subject) 以拿到 subject）。发射名:
+     impl → dawn$impl$<Trait>$<Subject>$<m>，default → dawn$default$<Trait>$<m>。
+  2. StdCtx 加 `mods: List[(String, Cx, TModule, CtOut)]`（load_std 已 check 了每
+     个 std 模块，只是丢了 per-module 三元组；std 的 className = mod_path 即
+     "std/str"，'/'→'$' 只在方法名 mangle 时做）。
+  3. 新模块 selfhost/src/emit.dawn：Gen 记录线程化 Kotlin 的可变字段
+     {mv, class_name, adts, traits, impl_table, fn_sigs, syms, slots: Map[Int,Int],
+     next_slot, method_ret, rets_null, fn_start: Option[Label], self_pending,
+     loop_stack, lambda_ctr, sam_ctr, pending_*(队列), const_fields, cur_fn,
+     consts/blocks(CtOut)}。gen_expr(g, e, tail) -> (Gen, Bool)（falls）。
+  4. 调用点声明签名查找：XCallFn.owner None → 本模块 cx.fns；Some(cls) → 程序级
+     (class_name, name)→Sig 表（从各 CheckedMod.cx.fns + std exports 建）。
+     trait 方法 provided 的具体签名 = trait MethodSig 的 tvar→subject 代换。
+     witnesses: WConcrete(tid, subject) → impl_table 查 ImplI（owner/derived）。
+  5. 关键 Kotlin 细节别忘：LMF_BSM Handle；lambda impl 是 dawn$lambda$N（计数器
+     per-module）；Unit 返回 fn 值要 dawn$fnval$ 桥（LMF 不适配 void）；builtin
+     值桥 dawn$bi$<name>（直连表：get/range/sort_by/join/parse_int/parse_float/
+     java_try/catch_panic）；ctor 值桥 dawn$ctor$<jvm 名 '/'→'$'>；SAM 桥
+     dawn$sam$N；genConstFields 的字段名 dawn$const$N 按首用序、key=const 名或
+     comptime 块 (lo,hi)；ARGS_FIELD="dawn$args"；genJvmMain 仅当有 main；
+     __emit 是 includeTests=true（std 模块不含 tests）；除零 panic 检查；
+     shift 先 L2I；assert 的 == 解构只对 Int/Float/Bool/String。
+  6. 发射序（进 class 的方法序影响字节）：module.fns（每个后 drainLambdas：
+     lambdas→fnval 桥→builtin 桥→ctor 桥→sam 桥的 while 序）→ impl 方法 →
+     trait defaults → derived Ord cmp 静态 → tests → jvm main → const 字段+clinit。
+     selfhost 的 tm.fns 已是 fns++impl++defaults 序，靠 impl_of/default_of 区分。
+- ⬜ `selfhost emit <target> -o <dir>` 全流程（generateProgram 等价）→ emit-diff
+  严格模式（65/65 后把 subset 打印换成 diff -r）→ 扩语料 → CI。
 - ⬜ P5：stage2==stage3、selfhost build 出可执行 jar、文档收尾。

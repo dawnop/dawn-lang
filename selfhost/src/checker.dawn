@@ -7227,7 +7227,16 @@ pub fn check_fn(cx: Cx, d: FnDecl, s: Sig, ev: Map[String, Eff]) -> (Cx, TFun) !
   cx1 = verify_effects(cx1, "function", d.name, s.eff, "the end of the signature", d.nlo, d.nhi)
   let dsyms = dict_sym_list(cx1, s)
   cx1 = pop_scope(cx1)
-  (cx1, TFun { name: d.name, sig: s, param_syms: psyms, dict_syms: dsyms, body: bx, is_test: false })
+  (cx1, TFun {
+    name: d.name,
+    sig: s,
+    param_syms: psyms,
+    dict_syms: dsyms,
+    body: bx,
+    is_test: false,
+    impl_of: None,
+    default_of: None
+  })
 }
 
 ## Check the body of a signature-inferred function and seal its signature:
@@ -7260,7 +7269,16 @@ pub fn check_fn_inferred(cx: Cx, d: FnDecl, s: Sig, ev: Map[String, Eff]) -> (Cx
     cx3 = Cx { ..cx3, fns: map.insert(cx3.fns, d.name, sealed) }
   }
   (cx3, sealed,
-    TFun { name: d.name, sig: sealed, param_syms: psyms, dict_syms: dsyms, body: bx, is_test: false })
+    TFun {
+      name: d.name,
+      sig: sealed,
+      param_syms: psyms,
+      dict_syms: dsyms,
+      body: bx,
+      is_test: false,
+      impl_of: None,
+      default_of: None
+    })
 }
 
 ## Check a trait's default method body against its own signature (T stays
@@ -7286,7 +7304,16 @@ pub fn check_trait_default(cx: Cx, m2: TraitMethod, s: Sig, body: Expr) -> (Cx, 
   cx1 = verify_effects(cx1, "method", m2.name, s.eff, "the trait method", m2.nlo, m2.nhi)
   let dsyms = dict_sym_list(cx1, s)
   cx1 = pop_scope(cx1)
-  (cx1, TFun { name: m2.name, sig: s, param_syms: psyms, dict_syms: dsyms, body: bx, is_test: false })
+  (cx1, TFun {
+    name: m2.name,
+    sig: s,
+    param_syms: psyms,
+    dict_syms: dsyms,
+    body: bx,
+    is_test: false,
+    impl_of: None,
+    default_of: None
+  })
 }
 
 fn test_sig(name: String) -> Sig =
@@ -7339,7 +7366,9 @@ pub fn check_test(cx: Cx, name: String, body: Expr) -> (Cx, TFun) !io = {
     param_syms: [],
     dict_syms: [],
     body: bx,
-    is_test: true
+    is_test: true,
+    impl_of: None,
+    default_of: None
   })
 }
 
@@ -7484,6 +7513,15 @@ pub fn check_module(cx: Cx, m: Module, env: Map[String, ModExports]) -> (Cx, TMo
   var impl_tfuns: List[TFun] = []
   for imd in module_impls(m) {
     let msigs = impl_sigs[ii]
+    # recover (trait id, subject) for codegen's mangled impl-method names;
+    # both lookups re-run what registration already validated, diags discarded
+    let imp_key: Option[(Int, Ty)] = match map.get(cx1.traits_by_name, imd.trait_name) {
+      Some(t) -> {
+        let (_, subj) = resolve_type(cx1, imd.subject)
+        if subj == TyError { None } else { Some((t, subj)) }
+      }
+      None -> None
+    }
     var mi = 0
     for me in imd.methods {
       match msigs[mi] {
@@ -7491,7 +7529,7 @@ pub fn check_module(cx: Cx, m: Module, env: Map[String, ModExports]) -> (Cx, TMo
           let empty_ev: Map[String, Eff] = map.empty()
           let (cxe, tf) = check_fn(cx1, me, ms, empty_ev)
           cx1 = cxe
-          impl_tfuns = impl_tfuns ++ [tf]
+          impl_tfuns = impl_tfuns ++ [TFun { ..tf, impl_of: imp_key }]
         }
         None -> ()
       }
@@ -7517,7 +7555,7 @@ pub fn check_module(cx: Cx, m: Module, env: Map[String, ModExports]) -> (Cx, TMo
                 Some(s2) -> {
                   let (cxe, tf) = check_trait_default(cx1, me, s2, b)
                   cx1 = cxe
-                  default_tfuns = default_tfuns ++ [tf]
+                  default_tfuns = default_tfuns ++ [TFun { ..tf, default_of: Some(t) }]
                 }
                 None -> ()
               }

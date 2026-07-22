@@ -20,7 +20,9 @@ echo "corpus: ${#files[@]} files"
 "$DAWN" __check "${files[@]}" > "$OUT/kotlin.dump"
 
 "$DAWN" build selfhost -o "$OUT/selfhost.jar" > /dev/null
-java -Xss512m -jar "$OUT/selfhost.jar" check "${files[@]}" > "$OUT/dawn.dump"
+# The compiler jar rides along: the corpus includes selfhost's own codegen,
+# whose `use java "dawn.tool.AdtClassWriter"` must reflect for both checkers.
+java -Xss512m -cp "$OUT/selfhost.jar:compiler/build/libs/dawn.jar" main check "${files[@]}" > "$OUT/dawn.dump"
 
 if diff -u "$OUT/kotlin.dump" "$OUT/dawn.dump" > "$OUT/diff.txt"; then
   echo "OK: check dumps are byte-identical"

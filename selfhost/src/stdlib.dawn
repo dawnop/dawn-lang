@@ -35,7 +35,10 @@ pub type StdCtx = {
   adts: Adts,
   # the id counter after all of std: user modules continue from here, so
   # grafted ADT/trait ids never collide across modules
-  next_id: Int
+  next_id: Int,
+  # per-module (modPath, checker state, typed module, comptime results), in
+  # load order — codegen emits each std module's static class from these
+  mods: List[(String, Cx, TModule, CtOut)]
 }
 
 pub fn prelude_names() -> List[String] = ["println", "print", "map", "filter", "fold"]
@@ -95,6 +98,7 @@ pub fn load_std(dir: String) -> Result[StdCtx, String] !io = {
   var adts: Adts = map.empty()
   var last_cx: Option[Cx] = None
   var nid = 2
+  var mods: List[(String, Cx, TModule, CtOut)] = []
   for n in names {
     let mod_path = "std/" ++ n
     let text = io.read_file(dir ++ "/" ++ n ++ ".dawn")?
@@ -133,6 +137,7 @@ pub fn load_std(dir: String) -> Result[StdCtx, String] !io = {
     adts = cx1.adts
     last_cx = Some(cx1)
     nid = cx1.next_id
+    mods = mods ++ [(mod_path, cx1, tm, ct)]
   }
   moved = moved_renames(moved)
   var std_names: Set[String] = set.empty()
@@ -145,7 +150,8 @@ pub fn load_std(dir: String) -> Result[StdCtx, String] !io = {
     by_owner: by_owner,
     std_names: std_names,
     adts: adts,
-    next_id: nid
+    next_id: nid,
+    mods: mods
   })
 }
 
