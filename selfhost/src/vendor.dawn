@@ -6,12 +6,15 @@
 
 use std/str
 use std/list
+use std/io
 use java "java.lang.ClassLoader"
 use java "java.net.URL"
 use java "java.util.jar.JarFile"
 use java "java.util.jar.JarEntry"
 use java "java.util.Enumeration"
 use java "java.io.InputStream"
+use java "java.nio.file.Files"
+use java "java.nio.file.Paths"
 
 pub fn vendored_outers() -> List[String] =
   ["StdStrings", "StdBytes", "StdIo", "DawnList", "DawnMap", "DawnSet"]
@@ -31,6 +34,34 @@ pub fn rt_class_family(outer: String) -> List[(String, Bytes)] !io = {
     None -> panic("runtime class `dawn/rt/" ++ outer ++ "` is missing from the class path")
   }
   let u = url.toString().expect("url string")
+  # a classes directory on the class path (running the self-emitted compiler):
+  # list the sibling .class files instead of walking a jar
+  if str.starts_with(u, "file:") {
+    let fpath = str.substring(u, str.len("file:"), str.len(u))
+    let dir = match str.last_index_of(fpath, "/") {
+      Some(i) -> str.substring(fpath, 0, i)
+      None -> fpath
+    }
+    var names2: List[String] = []
+    match io.list_dir(dir) {
+      Ok(files) -> {
+        for f in files {
+          if matches(f, outer) { names2 = names2 ++ [f] }
+        }
+      }
+      Err(e) -> panic("cannot list " ++ dir ++ ": " ++ e)
+    }
+    var out2: List[(String, Bytes)] = []
+    for f in sort(names2) {
+      let bs = match java_try(fn() =>
+          Files.readAllBytes(Paths.get(dir ++ "/" ++ f).expect("path")).expect("bytes")) {
+            Ok(b) -> b
+            Err(e) -> panic("cannot read " ++ f ++ ": " ++ e)
+          }
+      out2 = out2 ++ [("dawn/rt/" ++ str.substring(f, 0, str.len(f) - str.len(".class")), bs)]
+    }
+    return out2
+  }
   if not str.starts_with(u, "jar:file:") {
     panic("vendored runtime must come from a jar, got: " ++ u)
   }

@@ -161,9 +161,21 @@ Kotlin CodeGen 从 checked AST 读的注解，逐一映射到 TAST：
 - ✅ P4-8 emitrt 接受 target：load_std + analyze_program 后按 owner==class_name
   发射用户 ADT（calc$Token 家族、calc$Parser record）→ 57/65。supers 表用全
   程序 adts 的并集。
-- ⬜ 剩 8 类 = 模块静态类（calc + std/{bytes,cursor,io,list,map,set,str}），即
-  genFn/genExpr 全套。**已定方案**（Kotlin 全文已通读完：头部状态 1-255、语句
-  2225-2450、表达式 2456-4205、模块胶水 499-513/1128-1296）：
+- ✅ P4-9 **全套 genFn/genExpr 落地（emit.dawn，~3600 行）+ P5 不动点达成**：
+  - 语料全部逐字节一致：examples 全部（含 traits/derive Ord）、site（99 类）、
+    playground（91 类）→ `scripts/selfhost-emit-diff.sh` 严格模式，进 CI。
+  - **selfhost 自举**：`selfhost emit selfhost` 432 类与 Kotlin 逐字节一致
+    （stage2==stage1），再用自己发射的类跑一遍仍逐字节一致（stage3==stage2）
+    → `scripts/selfhost-fixpoint.sh`，进 CI。**Dawn 编译器已自举。**
+  - 途中补的 TAST 缺口：XCallBuiltin 加 witnesses（sort/max/min 的 Ord 字典）、
+    TJavaCall/JMethod 加 decl_cls（invoke owner 得用声明类不是接收者类）、
+    TFun 加 impl_of/default_of、StdCtx 加 mods（每个 std 模块的 Cx/TModule/CtOut）。
+  - 跨模块常量：XConstRef 只带名字，值在声明模块的 CtOut 里——main.dawn 的
+    merged_consts 按 cx.imported_names（名字→声明模块）路由。
+  - vendor.dawn 支持 file: 协议（stage3 用类目录跑，资源不在 jar 里）。
+  - Dawn 侧 ldc 注意：visitLdcInsn 传 Dawn Int 会装箱成 Long（长整型常量，对）；
+    要发 int 常量必须 Integer.valueOf（push_int/ldc_jint），否则 LDC 类型错。
+  原方案备忘（已全部落实）：
   1. TFun 加 `impl_of: Option[(Int, Ty)]`、`default_of: Option[Int]`（4 个构造点
      全传 None，check_module §5.75 调用点用 `..tf` 改写；pass_register_impls 需
      多返回按 module_impls 序的 (trait_id, subject) 以拿到 subject）。发射名:
@@ -192,6 +204,8 @@ Kotlin CodeGen 从 checked AST 读的注解，逐一映射到 TAST：
      lambdas→fnval 桥→builtin 桥→ctor 桥→sam 桥的 while 序）→ impl 方法 →
      trait defaults → derived Ord cmp 静态 → tests → jvm main → const 字段+clinit。
      selfhost 的 tm.fns 已是 fns++impl++defaults 序，靠 impl_of/default_of 区分。
-- ⬜ `selfhost emit <target> -o <dir>` 全流程（generateProgram 等价）→ emit-diff
-  严格模式（65/65 后把 subset 打印换成 diff -r）→ 扩语料 → CI。
-- ⬜ P5：stage2==stage3、selfhost build 出可执行 jar、文档收尾。
+- ✅ `selfhost emit <target> -o <dir>` 全流程 + emit-diff 严格模式 + CI（上条）。
+- ✅ P5 不动点：stage2==stage3（`scripts/selfhost-fixpoint.sh`，CI）。
+- ⬜ 尚未做（非阻塞）：selfhost 自打可执行 jar 的 `build` 模式（现在跑自身
+  发射的类要 `-cp classes:asm:dawn.jar`——AdtClassWriter 仍在编译器 jar 里，
+  真正独立需要把 shim 也搬进 selfhost 侧或 vendor 它）。

@@ -33,7 +33,7 @@ use types.{
 }
 use emit.{emit_module}
 use tast.{TModule}
-use interp.{CtOut}
+use interp.{CtOut, CValue}
 use checker.{Cx}
 use java "java.nio.file.Files"
 use java "java.nio.file.Paths"
@@ -65,6 +65,33 @@ fn own_trait_ids(traits: Traits, cls: String) -> List[Int] = {
   out
 }
 
+## This module's const-name → value view: its own comptime results, plus
+## imported consts resolved in their declaring module's results.
+fn merged_consts(
+  cx: Cx,
+  ct: CtOut,
+  by_mod: Map[String, Map[String, CValue]]
+) -> Map[String, CValue] = {
+  var out = ct.consts
+  for name in map.keys(cx.consts) {
+    if not map.has(out, name) {
+      match map.get(cx.imported_names, name) {
+        Some(from) ->
+          match map.get(by_mod, from) {
+            Some(vals) ->
+              match map.get(vals, name) {
+                Some(v) -> { out = map.insert(out, name, v) }
+                None -> ()
+              }
+            None -> ()
+          }
+        None -> ()
+      }
+    }
+  }
+  out
+}
+
 fn write_class(dir: String, name: String, bs: Bytes) -> Unit !io = {
   let path = dir ++ "/" ++ name ++ ".class"
   let parent = match str.last_index_of(path, "/") {
@@ -76,9 +103,9 @@ fn write_class(dir: String, name: String, bs: Bytes) -> Unit !io = {
   ()
 }
 
-## `selfhost emitrt [<target>] [--std <dir>] -o <dir>`: the classes ported so
-## far — shared runtime, prelude ADTs, and (with a target) the target's own
-## ADT classes. The incremental byte-diff surface while codegen grows.
+## `selfhost emit [<target>] [--std <dir>] -o <dir>`: full program emission —
+## shared runtime, vendored rt, prelude ADTs, every std and user module class
+## (`emitrt` is the historical alias). Without a target: runtime subset only.
 fn run_emitrt(rest: List[String]) -> Unit !io = {
   var out = ""
   var target = ""
@@ -187,12 +214,19 @@ fn run_emitrt(rest: List[String]) -> Unit !io = {
       prog_fns = map.insert(prog_fns, (cm.class_name, k), v)
     }
   }
+  # const values by declaring module, so importers can materialize them
+  var const_vals: Map[String, Map[String, CValue]] = map.empty()
+  for sm in std_mods {
+    let (cls, _, _, ct) = sm
+    const_vals = map.insert(const_vals, cls, ct.consts)
+  }
+  for cm in mods { const_vals = map.insert(const_vals, cm.mod_path, cm.ct.consts) }
   var seen: Set[String] = set.empty()
   for sm in std_mods {
     let (cls, cx, tm, ct) = sm
     for pair in emit_module(sup, adts, traits, impl_table, prog_fns, cx.fns, cls,
       own_trait_ids(cx.traits, cls), cx.local_impls, own_adts_of(cx.adts, cls, seen),
-      tm, ct, false) {
+      tm, ct, merged_consts(cx, ct, const_vals), false) {
         let (nm, bs) = pair
         write_class(out, nm, bs)
       }
@@ -203,7 +237,8 @@ fn run_emitrt(rest: List[String]) -> Unit !io = {
   for cm in mods {
     for pair in emit_module(sup, adts, traits, impl_table, prog_fns, cm.cx.fns,
       cm.class_name, own_trait_ids(cm.cx.traits, cm.class_name), cm.cx.local_impls,
-      own_adts_of(cm.cx.adts, cm.class_name, seen), cm.tm, cm.ct, true) {
+      own_adts_of(cm.cx.adts, cm.class_name, seen), cm.tm, cm.ct,
+      merged_consts(cm.cx, cm.ct, const_vals), true) {
         let (nm, bs) = pair
         write_class(out, nm, bs)
       }
@@ -251,7 +286,7 @@ pub fn main() -> Unit !io = {
     [mode, ..rest] ->
       if mode == "check" {
         run_check(rest)
-      } else if mode == "emitrt" {
+      } else if mode == "emit" || mode == "emitrt" {
         run_emitrt(rest)
       } else {
         for pth in rest {
