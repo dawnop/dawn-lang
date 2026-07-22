@@ -1669,7 +1669,7 @@ class Checker(
         if (e.name == "new") {
             if (!static)
                 return error("`.new` is called on the class, not on an instance", e.nameSpan)
-            val candidates = cls.constructors.filter { !it.isSynthetic }
+            val candidates = cls.constructors.filter { !it.isSynthetic }.sortedBy { it.toString() }
             val scored = candidates.mapNotNull { c -> score(c.parameterTypes, c.isVarArgs)?.let { c to it } }
             val bestScore = scored.maxOfOrNull { it.second }
             val best = scored.filter { it.second == bestScore }
@@ -1696,10 +1696,12 @@ class Checker(
             }
         }
 
+        // reflection order is unspecified and varies across processes; sort by
+        // rendering so resolution and candidate lists are deterministic
         val sameName = cls.methods.filter {
             it.name == e.name && !it.isBridge && !it.isSynthetic &&
                 java.lang.reflect.Modifier.isStatic(it.modifiers) == static
-        }.distinctBy { m -> m.parameterTypes.joinToString(",") { it.name } }
+        }.sortedBy { it.toString() }.distinctBy { m -> m.parameterTypes.joinToString(",") { it.name } }
         val scored = sameName.mapNotNull { m -> score(m.parameterTypes, m.isVarArgs)?.let { m to it } }
         val bestScore = scored.maxOfOrNull { it.second }
         val best = scored.filter { it.second == bestScore }

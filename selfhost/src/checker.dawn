@@ -141,7 +141,8 @@ pub fn cx_new(owner_class: Option[String], src_path: Option[String]) -> Cx = {
   }
   Cx {
     diags: [],
-    next_id: 1,
+    # 0 and 1 are the prelude ADT ids (Option/Result); minted ids stay clear
+    next_id: 2,
     adts: prelude_adts(),
     traits: prelude_traits(),
     fns: map.empty(),
@@ -2387,7 +2388,9 @@ pub fn pass_const_decls(cx: Cx, m: Module) -> (Cx, List[Option[Ty]]) = {
         "constants hold Int/Float/Bool/String and List/tuple/record/ADT values built from them (spec §7.2)")
       declared = TyError
     }
-    decl_tys = decl_tys ++ [Some(declared)]
+    # the initializer still checks against the annotation as written (the
+    # Kotlin resolvedAnn survives the constType poisoning)
+    decl_tys = decl_tys ++ [Some(declared0)]
     if map.has(cx1.ctors_by_name, d.name) || map.has(cx1.adts_by_name, d.name) ||
       map.has(cx1.traits_by_name, d.name) {
         cx1 = cerr(cx1, "`" ++ d.name ++ "` collides with a type, trait, or constructor name",
@@ -3659,6 +3662,9 @@ pub type ModExports = {
   fns: Map[String, Sig],
   types_by_name: Map[String, Int],
   aliases: Map[String, AliasE],
+  # pub aliases as resolved in the declaring module (imports consume this;
+  # re-resolving the target against the importer's scope would fail)
+  alias_resolved: Map[String, Ty],
   ctors: Map[String, (Int, Int)],
   consts: Map[String, Ty],
   all_names: List[String],
@@ -3803,7 +3809,13 @@ fn inject_selective(
   }
   match al {
     Some(ae) -> {
-      cx1 = Cx { ..cx1, aliases: map.insert(cx1.aliases, name, ae) }
+      cx1 = Cx { ..cx1, aliases: map.insert(cx1.aliases, name, AliasE { ..ae, target: no_tref() }) }
+      match map.get(exp.alias_resolved, name) {
+        Some(t) -> {
+          cx1 = Cx { ..cx1, alias_resolved: map.insert(cx1.alias_resolved, name, t) }
+        }
+        None -> ()
+      }
     }
     None -> ()
   }
@@ -4133,6 +4145,7 @@ pub fn check_ctor_value(
   cslot: Int,
   eps: List[Ty],
   eret: Ty,
+  eeff: Eff,
   lo: Int,
   hi: Int
 ) -> (Cx, Ty, TExpr) = {
@@ -4144,7 +4157,7 @@ pub fn check_ctor_value(
   let node = XCtorValue(aid, cslot, lo, hi)
   if len(eps) != len(params) {
     return (cerr_h(cx, "`" ++ ci.name ++ "` takes " ++ to_string(len(params)) ++
-        " field(s), but " ++ ty_show(cx.adts, TyFn(eps, eret, EPure)) ++ " is expected", lo, hi,
+        " field(s), but " ++ ty_show(cx.adts, TyFn(eps, eret, eeff)) ++ " is expected", lo, hi,
       "constructor: " ++ ctor_render(cx.adts, ci)), TyError, XError(lo, hi))
   }
   if len(a.tparams) == 0 {
@@ -4257,11 +4270,11 @@ fn is_nongeneric_adt(cx: Cx, t: Ty) -> Bool =
 test "ctor values and witnesses" {
   var cx = seed_prelude(test_cx())
   # Some as fn(Int) -> Option[Int]
-  let (cx1, t1, _) = check_ctor_value(cx, OPTION_ID, 0, [TyInt], opt_ty(TyInt), 0, 4)
+  let (cx1, t1, _) = check_ctor_value(cx, OPTION_ID, 0, [TyInt], opt_ty(TyInt), EPure, 0, 4)
   assert len(cx1.diags) == 0
   assert t1 == TyFn([TyInt], opt_ty(TyInt), EPure)
   # arity mismatch reports with the ctor render
-  let (cx2, t2, _) = check_ctor_value(cx, OPTION_ID, 0, [TyInt, TyInt], TyUnit, 0, 4)
+  let (cx2, t2, _) = check_ctor_value(cx, OPTION_ID, 0, [TyInt, TyInt], TyUnit, EPure, 0, 4)
   assert str.contains(cx2.diags[0].msg, "`Some` takes 1 field(s)")
   # witness: Int has a prelude Ord impl, Bool does not
   let (cx3, ok3) = resolve_witness(cx, ORD_ID, TyInt, 0, 4, "`sort`")
@@ -4576,6 +4589,8 @@ fn line_of(cx: Cx, off: Int) -> Int = {
 # ---- name resolution with capture bookkeeping ----
 
 fn no_int() -> Option[Int] = None
+
+fn no_tref() -> Option[TypeRef] = None
 
 fn no_ty2() -> Option[Ty] = None
 
@@ -5609,18 +5624,20 @@ fn check_ctor_call(
   var exp_is_fn = false
   var exp_fn_ps: List[Ty] = []
   var exp_fn_ret = TyUnit
+  var exp_fn_eff = EPure
   match expected {
-    Some(TyFn(ps2, r2, _)) -> {
+    Some(TyFn(ps2, r2, ef2)) -> {
       exp_is_fn = true
       exp_fn_ps = ps2
       exp_fn_ret = r2
+      exp_fn_eff = ef2
     }
     _ -> ()
   }
   if not has_parens && n > 0 {
     # a bare constructor with fields, in a function-typed position, is a function value
     if not ad.is_record && exp_is_fn {
-      return check_ctor_value(cx1, aid, cslot, exp_fn_ps, exp_fn_ret, lo, hi)
+      return check_ctor_value(cx1, aid, cslot, exp_fn_ps, exp_fn_ret, exp_fn_eff, lo, hi)
     }
     let msg = if ad.is_record {
       "record `" ++ ci.name ++ "` must be built with braces: " ++ ci.name ++ " { ... }"
@@ -6043,6 +6060,45 @@ fn param_score(cx: Cx, p: String, at: Option[Ty], arity: Int) -> Option[Int] !io
       }
   }
 
+## Reflection returns methods in an unspecified, process-varying order; sort
+## by rendering so resolution and candidate lists are deterministic.
+fn sort_methods(ms: List[JMethod]) -> List[JMethod] = {
+  var out: List[JMethod] = []
+  for m2 in ms {
+    var i = 0
+    var placed = false
+    var next: List[JMethod] = []
+    for x in out {
+      if not placed && m2.desc < x.desc {
+        next = next ++ [m2]
+        placed = true
+      }
+      next = next ++ [x]
+    }
+    if not placed { next = next ++ [m2] }
+    out = next
+  }
+  out
+}
+
+fn sort_ctors(cs: List[JCtor]) -> List[JCtor] = {
+  var out: List[JCtor] = []
+  for c in cs {
+    var placed = false
+    var next: List[JCtor] = []
+    for x in out {
+      if not placed && c.desc < x.desc {
+        next = next ++ [c]
+        placed = true
+      }
+      next = next ++ [x]
+    }
+    if not placed { next = next ++ [c] }
+    out = next
+  }
+  out
+}
+
 ## The i-th parameter as the argument at i sees it: inside a packed variadic
 ## part that is the array's component type, not the array.
 fn param_at(params: List[String], packs: Bool, i: Int) -> String !io =
@@ -6255,7 +6311,7 @@ fn check_java_call(
       return (cerr(cx1, "`.new` is called on the class, not on an instance", nlo, nhi),
         TyError, XError(lo, hi))
     }
-    let cands = ctors_of(cls.fqcn)
+    let cands = sort_ctors(ctors_of(cls.fqcn))
     var bph = -1
     var bsc = -1
     var best: List[JCtor] = []
@@ -6318,19 +6374,21 @@ fn check_java_call(
     let rt = if cls.fqcn == "java.lang.String" { TyString } else { TyJava(cls.fqcn, cls.display) }
     return (cx1, rt, XJava(call, lo, hi))
   }
+  var matching: List[JMethod] = []
+  for m0 in methods_of(cls.fqcn) {
+    if m0.name == name && m0.is_static == is_static { matching = matching ++ [m0] }
+  }
   var same_name: List[JMethod] = []
   var seen_sigs: List[String] = []
-  for m2 in methods_of(cls.fqcn) {
-    if m2.name == name && m2.is_static == is_static {
-      let sig_key = join(m2.param_cls, ",")
-      var dup = false
-      for s0 in seen_sigs {
-        if s0 == sig_key { dup = true }
-      }
-      if not dup {
-        seen_sigs = seen_sigs ++ [sig_key]
-        same_name = same_name ++ [m2]
-      }
+  for m2 in sort_methods(matching) {
+    let sig_key = join(m2.param_cls, ",")
+    var dup = false
+    for s0 in seen_sigs {
+      if s0 == sig_key { dup = true }
+    }
+    if not dup {
+      seen_sigs = seen_sigs ++ [sig_key]
+      same_name = same_name ++ [m2]
     }
   }
   if len(same_name) == 0 {
@@ -7481,6 +7539,7 @@ pub fn exports_of(cx: Cx, m: Module, mod_path: String, class_name: String) -> Mo
   var fns2: Map[String, Sig] = map.empty()
   var types2: Map[String, Int] = map.empty()
   var aliases2: Map[String, AliasE] = map.empty()
+  var ares2: Map[String, Ty] = map.empty()
   var ctors2: Map[String, (Int, Int)] = map.empty()
   var consts2: Map[String, Ty] = map.empty()
   var traits2: Map[String, Int] = map.empty()
@@ -7510,7 +7569,13 @@ pub fn exports_of(cx: Cx, m: Module, mod_path: String, class_name: String) -> Mo
         None -> ()
       }
       match map.get(cx.aliases, d.name) {
-        Some(al) -> { aliases2 = map.insert(aliases2, d.name, al) }
+        Some(al) -> {
+          aliases2 = map.insert(aliases2, d.name, al)
+          match map.get(cx.alias_resolved, d.name) {
+            Some(t) -> { ares2 = map.insert(ares2, d.name, t) }
+            None -> ()
+          }
+        }
         None -> ()
       }
     }
@@ -7547,6 +7612,7 @@ pub fn exports_of(cx: Cx, m: Module, mod_path: String, class_name: String) -> Mo
     fns: fns2,
     types_by_name: types2,
     aliases: aliases2,
+    alias_resolved: ares2,
     ctors: ctors2,
     consts: consts2,
     all_names: all,

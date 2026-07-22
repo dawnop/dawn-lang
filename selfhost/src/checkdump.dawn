@@ -1,0 +1,76 @@
+# The `__check` golden format (P3b): one dump per target, byte-identical
+# between `dawn __check` and `selfhost check`. Lines:
+#   D <path> <lo> <hi> <esc msg> <esc hint>   every diagnostic, program order
+#   M <modPath>                               then per module, dependency order
+#   F <esc sig-render>                        each pub fn's checked signature
+#   C <name> <esc value | !failed>            each const's comptime value
+
+use std/map
+use types.{Adts, adt_of, sig_render}
+use interp.{
+  CValue, VInt, VFloat, VBool, VStr, VUnit, VList, VTuple, VAdt, VLambda,
+  VFnRef, VBuiltinF, VCtorRef
+}
+use analyze.{Program}
+use ast.{module_fns, module_consts}
+use dump
+
+## Render one comptime value for the golden (both sides must agree).
+pub fn cv_show(adts: Adts, v: CValue) -> String =
+  match v {
+    VInt(n) -> to_string(n)
+    VFloat(f) -> to_string(f)
+    VBool(b) -> to_string(b)
+    VStr(s) -> "\"" ++ dump.esc(s) ++ "\""
+    VUnit -> "()"
+    VList(elems) -> {
+      var parts: List[String] = []
+      for x in elems { parts = parts ++ [cv_show(adts, x)] }
+      "[" ++ join(parts, ", ") ++ "]"
+    }
+    VTuple(elems) -> {
+      var parts: List[String] = []
+      for x in elems { parts = parts ++ [cv_show(adts, x)] }
+      "(" ++ join(parts, ", ") ++ ")"
+    }
+    VAdt(aid, ci, fields) -> {
+      let name = adt_of(adts, aid).ctors[ci].name
+      if len(fields) == 0 {
+        name
+      } else {
+        var parts: List[String] = []
+        for x in fields { parts = parts ++ [cv_show(adts, x)] }
+        name ++ "(" ++ join(parts, ", ") ++ ")"
+      }
+    }
+    _ -> "<fn>"
+  }
+
+pub fn render(prog: Program) -> String = {
+  var out = ""
+  for ld in prog.diags {
+    out = out ++ "D\t" ++ ld.path ++ "\t" ++ to_string(ld.d.lo) ++ "\t" ++
+      to_string(ld.d.hi) ++ "\t" ++ dump.esc(ld.d.msg) ++ "\t" ++ dump.esc(ld.d.hint) ++ "\n"
+  }
+  for cm in prog.modules {
+    out = out ++ "M\t" ++ cm.mod_path ++ "\n"
+    for fd in module_fns(cm.m) {
+      if fd.is_pub {
+        match map.get(cm.cx.fns, fd.name) {
+          Some(s) -> {
+            out = out ++ "F\t" ++ dump.esc(sig_render(cm.cx.adts, cm.cx.traits, s)) ++ "\n"
+          }
+          None -> ()
+        }
+      }
+    }
+    for cd in module_consts(cm.m) {
+      let val = match map.get(cm.ct.consts, cd.name) {
+        Some(v) -> dump.esc(cv_show(cm.cx.adts, v))
+        None -> "!failed"
+      }
+      out = out ++ "C\t" ++ cd.name ++ "\t" ++ val ++ "\n"
+    }
+  }
+  out
+}

@@ -1,34 +1,70 @@
 # Entry point of the self-hosted toolchain. Modes mirror the Kotlin compiler's
 # hidden golden-dump commands, and the outputs must match them byte for byte:
-#   selfhost lex <file>...     the token stream (dawn __lex)
-#   selfhost parse <file>...   the parsed AST   (dawn __parse)
+#   selfhost lex <file>...                the token stream (dawn __lex)
+#   selfhost parse <file>...              the parsed AST   (dawn __parse)
+#   selfhost check [--std <dir>] <t>...   diagnostics + pub surface + const
+#                                         values (dawn __check); a target is a
+#                                         file (use-closure) or a project dir
 
 use std/io
+use std/str
+use std/map
 use lexer
 use parser
 use dump
 use astdump
+use checkdump
+use stdlib
+use analyze
+
+fn run_check(rest: List[String]) -> Unit !io = {
+  var std_dir = "compiler/src/main/resources/std"
+  var targets: List[String] = []
+  var i = 0
+  while i < len(rest) {
+    if rest[i] == "--std" && i + 1 < len(rest) {
+      std_dir = rest[i + 1]
+      i = i + 2
+    } else {
+      targets = targets ++ [rest[i]]
+      i = i + 1
+    }
+  }
+  let std = match stdlib.load_std(std_dir) {
+    Ok(sc) -> sc
+    Err(e) -> panic("cannot load std from " ++ std_dir ++ ": " ++ e)
+  }
+  for t in targets {
+    println("== " ++ t ++ " ==")
+    let loaded = if io.is_dir(t) { analyze.load_directory(t) } else { analyze.load_file(t) }
+    let prog = analyze.analyze_program(loaded, std, 100000000)
+    print(checkdump.render(prog))
+  }
+}
 
 pub fn main() -> Unit !io = {
   match args() {
-    [] -> panic("usage: selfhost (lex|parse) <file>...")
-    [mode, ..files] -> {
-      for pth in files {
-        println("== " ++ pth ++ " ==")
-        match io.read_file(pth) {
-          Ok(text) ->
-            if mode == "lex" {
-              let (toks, diags) = lexer.lex(text)
-              println(dump.render(toks, diags))
-            } else if mode == "parse" {
-              let (m, diags) = parser.parse_module(text)
-              println(astdump.render_module(m, diags))
-            } else {
-              panic("unknown mode: " ++ mode)
-            }
-          Err(e) -> panic("cannot read " ++ pth ++ ": " ++ e)
+    [] -> panic("usage: selfhost (lex|parse|check) <file>...")
+    [mode, ..rest] ->
+      if mode == "check" {
+        run_check(rest)
+      } else {
+        for pth in rest {
+          println("== " ++ pth ++ " ==")
+          match io.read_file(pth) {
+            Ok(text) ->
+              if mode == "lex" {
+                let (toks, diags) = lexer.lex(text)
+                println(dump.render(toks, diags))
+              } else if mode == "parse" {
+                let (m, diags) = parser.parse_module(text)
+                println(astdump.render_module(m, diags))
+              } else {
+                panic("unknown mode: " ++ mode)
+              }
+            Err(e) -> panic("cannot read " ++ pth ++ ": " ++ e)
+          }
         }
       }
-    }
   }
 }

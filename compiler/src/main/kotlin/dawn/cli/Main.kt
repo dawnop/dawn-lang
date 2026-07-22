@@ -70,6 +70,7 @@ fun main(args: Array<String>) {
             // hidden: canonical token/AST dumps for the selfhost golden diffs
             "__lex" -> cmdLexDump(args.drop(1))
             "__parse" -> cmdParseDump(args.drop(1))
+            "__check" -> cmdCheckDump(args.drop(1))
             "--version", "-V", "version" -> println(BuildInfo)
             "--help", "-h", "help" -> print(USAGE)
             else -> {

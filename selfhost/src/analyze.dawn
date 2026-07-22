@@ -10,8 +10,13 @@ use std/list
 use std/map
 use std/set
 use token.{Diag}
-use ast.{Module, module_uses}
-use checker.{ModExports, Cx, check_module, cx_new, exports_of}
+use ast.{Module, module_uses, module_fns}
+use checker.{
+  ModExports, Cx, check_module, cx_new, exports_of, seed_prelude, pass_java_uses,
+  pass_imports, pass_type_shells, pass_ctor_fields, pass_resolve_aliases,
+  pass_derive_show, pass_register_traits, pass_register_impls, pass_fn_signatures,
+  pass_const_decls, check_fn, check_fn_inferred
+}
 use interp.{eval_comptime, CtOut, CValue}
 use stdlib.{StdCtx, load_std}
 use tast.{TFun, TModule}
@@ -415,6 +420,8 @@ pub fn analyze_program(loaded: LoadResult, std: StdCtx, fuel: Int) -> Program !i
   var diags = loaded.diags
   var exports = std.exports
   var out: List[CheckedMod] = []
+  # ids continue across modules so grafted ADT/trait ids never collide
+  var nid = std.next_id
   for mf in loaded.modules {
     for d in mf.pdiags { diags = diags ++ [LocDiag { path: mf.path, d: d }] }
     let parse_failed = len(mf.pdiags) > 0
@@ -423,7 +430,8 @@ pub fn analyze_program(loaded: LoadResult, std: StdCtx, fuel: Int) -> Program !i
       ..cx,
       std_fns: std.std_fns,
       moved: std.moved,
-      line_starts: lexer.line_starts_of(mf.text)
+      line_starts: lexer.line_starts_of(mf.text),
+      next_id: nid
     }
     var tm = empty_tmodule()
     var ct = empty_ctout()
@@ -437,6 +445,7 @@ pub fn analyze_program(loaded: LoadResult, std: StdCtx, fuel: Int) -> Program !i
       for d in cx.diags { diags = diags ++ [LocDiag { path: mf.path, d: d }] }
       for d in ct.diags { diags = diags ++ [LocDiag { path: mf.path, d: d }] }
     }
+    nid = cx.next_id
     exports = map.insert(exports, mf.mod_path, exports_of(cx, mf.m, mf.mod_path, mf.class_name))
     out = out ++ [CheckedMod {
       mod_path: mf.mod_path,
