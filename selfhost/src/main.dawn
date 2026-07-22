@@ -19,7 +19,7 @@ use dump
 use astdump
 use checkdump
 use stdlib
-use analyze.{CheckedMod, load_directory, load_file, analyze_program}
+use analyze.{CheckedMod, LocDiag, load_directory, load_file, analyze_program}
 use vendor
 use jarw
 use fmt
@@ -51,6 +51,9 @@ use java "java.nio.file.Paths"
 use java "java.io.File"
 use java "java.util.Map"
 use errio
+use diag
+use manifestv
+use token.{Diag}
 use pkgfetch
 use maven
 use add
@@ -134,6 +137,12 @@ fn collect_program(
   var mods: List[CheckedMod] = []
   var std_mods: List[(String, Cx, TModule, CtOut)] = []
   if target != "" {
+    if not File.new(target).exists() {
+      cli_error("no such file or directory: " ++ target)
+    }
+    if File.new(target).isFile() && not str.ends_with(target, ".dawn") {
+      cli_error("source files must end in .dawn: " ++ target)
+    }
     let std = match stdlib.load_std(std_dir) {
       Ok(sc) -> sc
       Err(e) -> panic("cannot load std from " ++ std_dir ++ ": " ++ e)
@@ -146,7 +155,7 @@ fn collect_program(
     let loaded =
       if io.is_dir(target) { load_directory(target) } else { load_file(target) }
     let prog = analyze_program(loaded, std, 100000000)
-    if len(prog.diags) > 0 { panic("emit target does not check cleanly: " ++ target) }
+    if len(prog.diags) > 0 { fail_compile(prog.diags) }
     mods = prog.modules
     for cm in mods {
       for pr in map.entries(cm.cx.adts) {
@@ -267,6 +276,27 @@ fn host_classpath() -> String !io =
     None -> ""
   }
 
+## Render compile diagnostics, the count line, and exit 1 (the Kotlin
+## compileProject failure shape).
+fn fail_compile(diags: List[LocDiag]) -> Unit !io = {
+  var pairs: List[(String, Diag)] = []
+  for ld in diags { pairs = pairs ++ [(ld.path, ld.d)] }
+  errio.eprint(diag.render_all(pairs))
+  errio.eprintln(diag.count_line(len(diags)))
+  let _ = System.exit(1)
+  ()
+}
+
+## Render diagnostics without the count line and exit 1 (the Kotlin cmdDoc
+## failure shape).
+fn fail_doc(diags: List[LocDiag]) -> Unit !io = {
+  var pairs: List[(String, Diag)] = []
+  for ld in diags { pairs = pairs ++ [(ld.path, ld.d)] }
+  errio.eprint(diag.render_all(pairs))
+  let _ = System.exit(1)
+  ()
+}
+
 ## Print the Kotlin CLI's error shape and exit 2.
 fn cli_error(msg: String) -> Unit !io = {
   errio.eprintln("error: " ++ msg)
@@ -308,9 +338,16 @@ fn peek_target(rest: List[String]) -> String = {
 fn resolve_java_deps(target: String) -> List[String] !io = {
   let none: List[String] = []
   if not io.is_dir(target) { return none }
-  match io.read_file(target ++ "/dawn.toml") {
-    Ok(_) -> ()
+  let mftext = match io.read_file(target ++ "/dawn.toml") {
+    Ok(t) -> t
     Err(_) -> return none
+  }
+  match manifestv.validate(target, mftext) {
+    Ok(_) -> ()
+    Err(ds) -> {
+      errio.eprint(diag.render_manifest(target ++ "/dawn.toml", mftext, ds))
+      let _ = System.exit(1)
+    }
   }
   let coords = maven.collect_java_deps(target)
   if len(coords) == 0 { return none }
@@ -398,9 +435,13 @@ fn run_run(rest: List[String]) -> Unit !io = {
       i = i + 1
     }
   }
-  if target == "" { panic("usage: selfhost run [--std <dir>] <file.dawn | project-dir> [args...]") }
+  if target == "" {
+    return cli_error("usage: dawn run [--cp jars] <file.dawn | project-dir>")
+  }
   let (classes, entry, _) = collect_program(target, std_dir)
-  if entry == "" { panic(target ++ " has no pub fn main() -> Unit !io, nothing to run") }
+  if entry == "" {
+    return cli_error(target ++ " has no pub fn main() -> Unit !io, nothing to run")
+  }
   let dir = write_temp_classes(classes)
   let code = spawn_java(dir ++ ":" ++ host_classpath(), entry, args2)
   if code != 0 { let _ = System.exit(code) }
@@ -421,9 +462,11 @@ fn run_test(rest: List[String]) -> Unit !io = {
       i = i + 1
     }
   }
-  if target == "" { panic("usage: selfhost test [--std <dir>] <file.dawn | project-dir>") }
+  if target == "" {
+    return cli_error("usage: dawn test [--cp jars] <file.dawn | project-dir>")
+  }
   let (classes, _, tests_info) = collect_program(target, std_dir)
-  if len(tests_info) == 0 { panic(target ++ " has no test blocks") }
+  if len(tests_info) == 0 { return cli_error(target ++ " has no test blocks") }
   var runner_tests: List[(String, Int, String)] = []
   for mi in tests_info {
     let (cls, mod_path, names) = mi
@@ -459,13 +502,21 @@ fn run_emitrt(rest: List[String]) -> Unit !io = {
       i = i + 1
     }
   }
-  if out == "" { panic("usage: selfhost emit [<target>] [--std <dir>] -o <dir>") }
+  if out == "" {
+    return cli_error("usage: dawn __emit <file.dawn | project-dir> -o <dir>")
+  }
   let (classes, _, _) = collect_program(target, std_dir)
+  var seen: Set[String] = set.empty()
+  var n = 0
   for pair in classes {
     let (nm, bs) = pair
     write_class(out, nm, bs)
+    if not set.has(seen, nm) {
+      seen = set.insert(seen, nm)
+      n = n + 1
+    }
   }
-  println("emitted runtime subset -> " ++ out)
+  println(to_string(n) ++ " classes -> " ++ out)
 }
 
 ## The target's basename, `.dawn` stripped — what `-o` defaults derive from.
@@ -603,7 +654,7 @@ fn run_build(rest: List[String]) -> Unit !io = {
     }
   }
   if target == "" {
-    panic("usage: selfhost build <target> [-o out] [--native] [--std <dir>] [--vendor <pkg>]...")
+    return cli_error("usage: dawn build [--cp jars] <file.dawn | project-dir> [-o out] [--native]")
   }
   let stem = target_stem(target)
   let jar_path = if native {
@@ -618,7 +669,9 @@ fn run_build(rest: List[String]) -> Unit !io = {
     stem ++ ".jar"
   }
   let (classes, entry, _) = collect_program(target, std_dir)
-  if entry == "" { panic(target ++ " has no fn main to use as an entry point") }
+  if entry == "" {
+    return cli_error(target ++ " has no pub fn main() -> Unit !io to use as an entry point")
+  }
   # dedupe defensively: ZipOutputStream throws on a repeated entry name
   var seen: Set[String] = set.empty()
   var all: List[(String, Bytes)] = []
@@ -683,9 +736,10 @@ fn run_fmt(rest: List[String]) -> Unit !io = {
   for a in rest {
     if a == "--check" { check = true } else { paths = paths ++ [a] }
   }
-  if len(paths) == 0 { panic("usage: selfhost fmt [--check] <file.dawn | dir>...") }
+  if len(paths) == 0 { return cli_error("usage: dawn fmt [--check] <file.dawn | dir>...") }
   var files: List[String] = []
   for p in paths {
+    if not File.new(p).exists() { return cli_error("no such file or directory: " ++ p) }
     if io.is_dir(p) {
       files = files ++ sort(dawn_files_under(p))
     } else {
@@ -741,10 +795,15 @@ fn run_doc(rest: List[String]) -> Unit !io = {
     print(doc.builtins_json(std))
     return
   }
-  if target == "" { panic("usage: selfhost doc <file.dawn | project-dir> | selfhost doc --builtins") }
+  if target == "" {
+    return cli_error("usage: dawn doc <file.dawn | project-dir> | dawn doc --builtins")
+  }
+  if not File.new(target).exists() {
+    return cli_error("no such file or directory: " ++ target)
+  }
   let loaded = if io.is_dir(target) { load_directory(target) } else { load_file(target) }
   let prog = analyze_program(loaded, std, 100000000)
-  if len(prog.diags) > 0 { panic("doc target does not check cleanly: " ++ target) }
+  if len(prog.diags) > 0 { fail_doc(prog.diags) }
   print(doc.project_json(prog))
 }
 

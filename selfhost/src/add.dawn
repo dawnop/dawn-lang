@@ -6,55 +6,20 @@
 # Adding a spec whose key already exists updates it in place — this is also
 # how a dependency is bumped.
 #
-# Validation here is the lite reader's (name present, toml subset clean); the
-# Kotlin Manifest stays the fine-grained span-rendering authority until M8
-# retires it. Success paths match the Kotlin CLI byte for byte.
+# Validation is the manifestv authority with span-rendered diagnostics; both
+# success paths and error paths match the Kotlin CLI byte for byte (including
+# its quirk of rendering parser diagnostics twice on an invalid manifest).
 
 use std/str
 use std/list
 use std/io
 use toml.{TomlDoc, parse, render, set_string, remove, remove_table}
-use manifest.{read_manifest, ManifestLite}
+use manifestv.{validate, mcoord_parse, mcoord_show, ManifestV, SemV, semv_show}
+use token.{Diag}
+use diag.{render_manifest}
 use pkgfetch
-use maven.{Coord}
 
 const USAGE: String = "usage: dawn add <spec> [--subdir <p>] [--as <as_name>] [--dir <project>]"
-
-fn seg_ok(s: String) -> Bool = {
-  if s == "" { return false }
-  for c in str.chars(s) {
-    let ok = str.contains(
-      "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-", c)
-    if not ok { return false }
-  }
-  true
-}
-
-## Mirror of MavenCoord.parse: the coordinate, or the Kotlin error message.
-fn parse_maven(spec: String) -> Result[Coord, String] = {
-  let parts = str.split(spec, ":")
-  if len(parts) != 3 {
-    return Err("invalid Maven coordinate `" ++ spec ++ "`")
-  }
-  let g = parts[0]
-  let a = parts[1]
-  let v = parts[2]
-  if g == "" || a == "" || v == "" {
-    return Err("invalid Maven coordinate `" ++ spec ++ "`: empty part")
-  }
-  if not seg_ok(g) { return Err("invalid group `" ++ g ++ "` in `" ++ spec ++ "`") }
-  if not seg_ok(a) { return Err("invalid artifact `" ++ a ++ "` in `" ++ spec ++ "`") }
-  if str.ends_with(v, "-SNAPSHOT") {
-    return Err("SNAPSHOT versions are not allowed: `" ++ spec ++ "`")
-  }
-  for c in str.chars(v) {
-    if str.contains("[](),+", c) {
-      return Err("version ranges are not allowed: `" ++ spec ++ "`")
-    }
-  }
-  if not seg_ok(v) { return Err("invalid version `" ++ v ++ "` in `" ++ spec ++ "`") }
-  Ok(Coord { group: g, artifact: a, version: v })
-}
 
 fn bad_subdir(s: String) -> Bool = {
   if str.starts_with(s, "/") { return true }
@@ -64,16 +29,17 @@ fn bad_subdir(s: String) -> Bool = {
   false
 }
 
-## The added package's manifest, via the lite reader.
-fn read_pkg(dir: String) -> Result[ManifestLite, String] !io = {
+## The added package's manifest, validated with rendered diagnostics.
+fn read_pkg(dir: String) -> Result[ManifestV, String] !io = {
   let path = dir ++ "/dawn.toml"
-  match io.read_file(path) {
-    Ok(_) -> ()
+  let text = match io.read_file(path) {
+    Ok(t) -> t
     Err(_) -> return Err("no dawn.toml in " ++ dir ++ ": not a Dawn package")
   }
-  match read_manifest(dir) {
-    Some(m) -> Ok(m)
-    None -> Err(path ++ " does not validate; fix it first")
+  match validate(dir, text) {
+    Ok(m) -> Ok(m)
+    Err(ds) ->
+      Err(path ++ " does not validate:\n" ++ str.trim(render_manifest(path, text, ds)))
   }
 }
 
@@ -110,15 +76,17 @@ fn edit_url(
     Ok(m) -> m
     Err(e) -> return Err(e)
   }
-  if pm.version == "" {
-    return Err("the package's dawn.toml declares no `version`; " ++
-        "it needs one before it can be added by url")
+  let ver = match pm.version {
+    Some(v) -> semv_show(v)
+    None ->
+      return Err("the package's dawn.toml declares no `version`; " ++
+          "it needs one before it can be added by url")
   }
   let key = as_name.unwrap_or(pm.name)
   # a path entry under the same as_name gives way
   var doc = remove(doc0, Some("deps"), key)
   doc = set_string(doc, Some("deps." ++ key), "url", spec)
-  doc = set_string(doc, Some("deps." ++ key), "version", pm.version)
+  doc = set_string(doc, Some("deps." ++ key), "version", ver)
   doc = set_string(doc, Some("deps." ++ key), "hash", hash)
   match subdir {
     Some(s) -> { doc = set_string(doc, Some("deps." ++ key), "subdir", s) }
@@ -126,19 +94,21 @@ fn edit_url(
   }
   Ok(Edit {
     doc: doc,
-    summary: "added " ++ pm.name ++ " " ++ pm.version ++ " as `" ++ key ++ "` (" ++ hash ++ ")"
+    summary: "added " ++ pm.name ++ " " ++ ver ++ " as `" ++ key ++ "` (" ++ hash ++ ")"
   })
 }
 
 fn edit_maven(doc0: TomlDoc, spec: String, as_name: Option[String]) -> Result[Edit, String] = {
-  let coord = match parse_maven(spec) {
+  # the Kotlin CLI joins just the messages here, no span rendering
+  let coord = match mcoord_parse(spec, "cli", 0, str.len(spec)) {
     Ok(c) -> c
-    Err(e) -> return Err(e)
+    Err(d) -> return Err(d.msg)
   }
   let key = as_name.unwrap_or(str.replace(coord.artifact, ".", "-"))
   let doc = set_string(doc0, Some("java-deps"), key, spec)
-  let shown = coord.group ++ ":" ++ coord.artifact ++ ":" ++ coord.version
-  Ok(Edit { doc: doc, summary: "added " ++ shown ++ " as `" ++ key ++ "` under [java-deps]" })
+  Ok(Edit {
+    doc: doc, summary: "added " ++ mcoord_show(coord) ++ " as `" ++ key ++ "` under [java-deps]"
+  })
 }
 
 fn edit_path(
@@ -176,13 +146,21 @@ pub fn add_dependency(
       return Err("no dawn.toml in " ++ project_dir ++ "; " ++
           "start one with `schema = 1` and `name = \"...\"` first")
   }
-  let (doc, errs) = parse(text)
-  let valid = match read_manifest(project_dir) {
-    Some(_) -> true
-    None -> false
-  }
-  if len(errs) > 0 || not valid {
-    return Err(mf_path ++ " does not validate; fix it first:\n" ++ join(errs, "\n"))
+  let (doc, perrs) = parse(text)
+  # the Kotlin sink sees the parser diagnostics twice (Add parses, then
+  # Manifest.parse parses again into the same sink) — render the same list
+  match validate(project_dir, text) {
+    Ok(_) ->
+      if len(perrs) > 0 {
+        let all = perrs ++ perrs
+        return Err(mf_path ++ " does not validate; fix it first:\n" ++
+            str.trim(render_manifest(mf_path, text, all)))
+      }
+    Err(ds) -> {
+      let all = perrs ++ ds
+      return Err(mf_path ++ " does not validate; fix it first:\n" ++
+          str.trim(render_manifest(mf_path, text, all)))
+    }
   }
   let edit = if str.contains(spec, "://") {
     edit_url(doc, project_dir, spec, subdir, as_name)
@@ -193,11 +171,13 @@ pub fn add_dependency(
   }
   match edit {
     Ok(e) -> {
-      # the edited document must itself parse; anything else is a bug here
+      # the edited document must itself validate; anything else is a bug here
       let rendered = render(e.doc)
-      let (_, errs2) = parse(rendered)
-      if len(errs2) > 0 {
-        return Err("internal: the edited manifest does not validate:\n" ++ join(errs2, "\n"))
+      match validate(project_dir, rendered) {
+        Ok(_) -> ()
+        Err(ds) ->
+          return Err("internal: the edited manifest does not validate:\n" ++
+              str.trim(render_manifest(mf_path, rendered, ds)))
       }
       match io.write_file(mf_path, rendered) {
         Ok(_) -> Ok(e.summary)
@@ -236,13 +216,19 @@ pub fn run_add(rest: List[String]) -> Result[String, String] !io = {
   }
 }
 
+fn coord_err(spec: String) -> String =
+  match mcoord_parse(spec, "cli", 0, str.len(spec)) {
+    Ok(_) -> ""
+    Err(d) -> d.msg
+  }
+
 test "maven coordinate errors mirror the Kotlin messages" {
-  assert parse_maven("a:b") == Err("invalid Maven coordinate `a:b`")
-  assert parse_maven("a::c") == Err("invalid Maven coordinate `a::c`: empty part")
-  assert parse_maven("g!:a:1") == Err("invalid group `g!` in `g!:a:1`")
-  assert parse_maven("g:a:1-SNAPSHOT") == Err("SNAPSHOT versions are not allowed: `g:a:1-SNAPSHOT`")
-  assert parse_maven("g:a:[1,2)") == Err("version ranges are not allowed: `g:a:[1,2)`")
-  match parse_maven("org.ow2.asm:asm:9.7.1") {
+  assert coord_err("a:b") == "invalid Maven coordinate `a:b`"
+  assert coord_err("a::c") == "invalid Maven coordinate `a::c`: empty part"
+  assert coord_err("g!:a:1") == "invalid group `g!` in `g!:a:1`"
+  assert coord_err("g:a:1-SNAPSHOT") == "SNAPSHOT versions are not allowed: `g:a:1-SNAPSHOT`"
+  assert coord_err("g:a:[1,2)") == "version ranges are not allowed: `g:a:[1,2)`"
+  match mcoord_parse("org.ow2.asm:asm:9.7.1", "cli", 0, 22) {
     Ok(c) -> { assert c.artifact == "asm" }
     Err(_) -> { assert false }
   }

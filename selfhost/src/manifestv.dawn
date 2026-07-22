@@ -1,0 +1,661 @@
+# dawn.toml validation — the Kotlin manifest/Manifest.kt port, message for
+# message and span for span (M8: the selfhost toolchain is the validation
+# authority). The toml CST supplies the spans; this module supplies the rules:
+# `schema` first, lowercase names, exact semver, pinned Maven coordinates,
+# `[deps.<aname>]` url tables with url + version + hash.
+
+use std/str
+use std/list
+use toml.{TomlDoc, TVal, TStr, TInt, TBool, TArr, parse, table_full, table_names, header_span}
+use token.{Diag}
+
+## A strict `major.minor.patch` version. No prerelease, no build metadata.
+pub type SemV = { major: Int, minor: Int, patch: Int }
+
+pub fn semv_show(v: SemV) -> String =
+  to_string(v.major) ++ "." ++ to_string(v.minor) ++ "." ++ to_string(v.patch)
+
+pub fn semv_lt(a: SemV, b: SemV) -> Bool =
+  if a.major != b.major {
+    a.major < b.major
+  } else if a.minor != b.minor {
+    a.minor < b.minor
+  } else {
+    a.patch < b.patch
+  }
+
+fn all_digits(s: String) -> Bool = {
+  if s == "" { return false }
+  for c in str.chars(s) {
+    if not str.contains("0123456789", c) { return false }
+  }
+  true
+}
+
+## One `major.minor.patch` segment: decimal, no leading zero (except `0`).
+fn sem_part(s: String) -> Option[Int] = {
+  if not all_digits(s) { return None }
+  if str.len(s) > 1 && str.starts_with(s, "0") { return None }
+  parse_int(s)
+}
+
+pub fn semv_parse(s: String) -> Option[SemV] = {
+  let parts = str.split(s, ".")
+  if len(parts) != 3 { return None }
+  match sem_part(parts[0]) {
+    Some(a) ->
+      match sem_part(parts[1]) {
+        Some(b) ->
+          match sem_part(parts[2]) {
+            Some(c) -> Some(SemV { major: a, minor: b, patch: c })
+            None -> None
+          }
+        None -> None
+      }
+    None -> None
+  }
+}
+
+## An exact Maven coordinate (ranges and SNAPSHOTs rejected at parse).
+pub type MCoord = { group: String, artifact: String, version: String, aname: String }
+
+pub fn mcoord_show(c: MCoord) -> String = c.group ++ ":" ++ c.artifact ++ ":" ++ c.version
+
+## A validated `[deps]` entry. The aname is the consumer's local spelling;
+## spans point at the path value / the `[deps.<aname>]` header name.
+pub type VDep =
+  | VPath(aname: String, dir: String, lo: Int, hi: Int)
+  | VUrl(aname: String, version: SemV, url: String, hash: String, subdir: Option[String],
+    lo: Int, hi: Int)
+
+pub fn vdep_alias(d: VDep) -> String =
+  match d {
+    VPath(a, _, _, _) -> a
+    VUrl(a, _, _, _, _, _, _) -> a
+  }
+
+## A validated manifest: identity plus dependencies.
+pub type ManifestV = {
+  name: String,
+  version: Option[SemV],
+  java_deps: List[MCoord],
+  deps: List[VDep]
+}
+
+## The only schema this toolchain understands.
+const SCHEMA: Int = 1
+
+fn diag(msg: String, lo: Int, hi: Int, hint: String) -> Diag =
+  Diag { msg: msg, lo: lo, hi: hi, hint: hint }
+
+## `[a-z_][a-z0-9_]*` — package names and dependency aliases.
+fn name_ok(s: String) -> Bool = {
+  if s == "" { return false }
+  var first = true
+  for c in str.chars(s) {
+    let lower = str.contains("abcdefghijklmnopqrstuvwxyz_", c)
+    let digit = str.contains("0123456789", c)
+    if first {
+      if not lower { return false }
+      first = false
+    } else {
+      if not (lower || digit) { return false }
+    }
+  }
+  true
+}
+
+## `d1:` + 64 hex digits — the canonical tree hash format.
+fn hash_ok(s: String) -> Bool = {
+  if not str.starts_with(s, "d1:") { return false }
+  let hex = str.substring(s, 3, str.len(s))
+  if str.len(hex) != 64 { return false }
+  for c in str.chars(hex) {
+    if not str.contains("0123456789abcdef", c) { return false }
+  }
+  true
+}
+
+## `[A-Za-z0-9_.-]+` — Maven coordinate segments.
+fn seg_ok(s: String) -> Bool = {
+  if s == "" { return false }
+  for c in str.chars(s) {
+    let ok = str.contains(
+      "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-", c)
+    if not ok { return false }
+  }
+  true
+}
+
+fn val_span(v: TVal) -> (Int, Int) =
+  match v {
+    TStr(_, lo, hi) -> (lo, hi)
+    TInt(_, lo, hi) -> (lo, hi)
+    TBool(_, lo, hi) -> (lo, hi)
+    TArr(_, lo, hi) -> (lo, hi)
+  }
+
+## MavenCoord.parse: the coordinate, or diagnostics against the value span.
+pub fn mcoord_parse(spec: String, aname: String, lo: Int, hi: Int) -> Result[MCoord, Diag] = {
+  let parts = str.split(spec, ":")
+  if len(parts) != 3 {
+    return Err(diag("invalid Maven coordinate `" ++ spec ++ "`", lo, hi,
+      "use exactly three parts: `group:artifact:version`, e.g. `org.xerial:sqlite-jdbc:3.36.0.3`"))
+  }
+  let g = parts[0]
+  let a = parts[1]
+  let v = parts[2]
+  if g == "" || a == "" || v == "" {
+    return Err(diag("invalid Maven coordinate `" ++ spec ++ "`: empty part", lo, hi,
+      "use `group:artifact:version`, e.g. `org.xerial:sqlite-jdbc:3.36.0.3`"))
+  }
+  if not seg_ok(g) {
+    return Err(diag("invalid group `" ++ g ++ "` in `" ++ spec ++ "`", lo, hi,
+      "group may hold letters, digits, `.`, `-`, `_`"))
+  }
+  if not seg_ok(a) {
+    return Err(diag("invalid artifact `" ++ a ++ "` in `" ++ spec ++ "`", lo, hi,
+      "artifact may hold letters, digits, `.`, `-`, `_`"))
+  }
+  if str.ends_with(v, "-SNAPSHOT") {
+    return Err(diag("SNAPSHOT versions are not allowed: `" ++ spec ++ "`", lo, hi,
+      "SNAPSHOTs change under the same coordinate, so builds stop being reproducible; " ++
+        "pin a release version"))
+  }
+  for c in str.chars(v) {
+    if str.contains("[](),+", c) {
+      return Err(diag("version ranges are not allowed: `" ++ spec ++ "`", lo, hi,
+        "dawn.toml takes one exact version so builds are reproducible without a lockfile; " ++
+          "write the version you want, e.g. `3.36.0.3`"))
+    }
+  }
+  if not seg_ok(v) {
+    return Err(diag("invalid version `" ++ v ++ "` in `" ++ spec ++ "`", lo, hi,
+      "versions may hold letters, digits, `.`, `-`, `_`"))
+  }
+  Ok(MCoord { group: g, artifact: a, version: v, aname: aname })
+}
+
+## The last path segment of `dir`, `-` mapped to `_` — the suggested name.
+fn dir_name_hint(dir: String) -> String = {
+  var t = dir
+  while str.ends_with(t, "/") { t = str.substring(t, 0, str.len(t) - 1) }
+  let base = match str.last_index_of(t, "/") {
+    Some(i) -> str.substring(t, i + 1, str.len(t))
+    None -> t
+  }
+  if base == "" { "my_project" } else { str.replace(base, "-", "_") }
+}
+
+## One `[deps.<aname>]` sub-table → a VUrl, or diagnostics.
+fn parse_url_dep(
+  doc: TomlDoc,
+  tname: String,
+  aname: String,
+  hlo: Int,
+  hhi: Int
+) -> Result[VDep, List[Diag]] = {
+  var url: Option[String] = None
+  var version: Option[SemV] = None
+  var hash: Option[String] = None
+  var subdir: Option[String] = None
+  var errs: List[Diag] = []
+  for e in table_full(doc, Some(tname)) {
+    let (key, klo, khi, tv) = e
+    let (vlo, vhi) = val_span(tv)
+    match tv {
+      TStr(v, _, _) ->
+        if key == "url" {
+          let ok = str.starts_with(v, "https://") || str.starts_with(v, "http://") ||
+            str.starts_with(v, "file://")
+          if not ok {
+            errs = errs ++ [diag("unsupported url `" ++ v ++ "`", vlo, vhi,
+              "https://, http:// and file:// are supported; the archive must be a .zip or .tar.gz")]
+          } else {
+            url = Some(v)
+          }
+        } else if key == "version" {
+          match semv_parse(v) {
+            Some(sv) -> { version = Some(sv) }
+            None -> {
+              errs = errs ++ [diag("invalid version `" ++ v ++ "`", vlo, vhi,
+                "versions are exactly `major.minor.patch` decimal numbers, e.g. `1.0.0`")]
+            }
+          }
+        } else if key == "hash" {
+          if not hash_ok(v) {
+            errs = errs ++ [diag("invalid hash `" ++ v ++ "`", vlo, vhi,
+              "hashes are `d1:` + 64 hex digits — the d1 canonical tree hash; " ++
+                "`dawn __pkghash <dir>` prints one, and a mismatch error shows the actual value")]
+          } else {
+            hash = Some(v)
+          }
+        } else if key == "subdir" {
+          var bad = str.starts_with(v, "/")
+          for part in str.split(v, "/") {
+            if part == ".." || part == "" { bad = true }
+          }
+          if bad {
+            errs = errs ++ [diag("invalid subdir `" ++ v ++ "`", vlo, vhi,
+              "a relative path inside the archive, no `..`, e.g. `packages/web`")]
+          } else {
+            subdir = Some(v)
+          }
+        } else {
+          errs = errs ++ [diag("unknown key `" ++ key ++ "` in `[deps." ++ aname ++ "]`",
+            klo, khi, "a remote dependency has `url`, `version`, `hash` and optional `subdir`")]
+        }
+      _ -> { errs = errs ++ [diag("`" ++ key ++ "` must be a string", vlo, vhi, "")] }
+    }
+  }
+  if url == None {
+    errs = errs ++ [diag("`[deps." ++ aname ++ "]` is missing `url`", hlo, hhi,
+      "a remote dependency needs `url`, `version` and `hash`")]
+  }
+  if version == None {
+    errs = errs ++ [diag("`[deps." ++ aname ++ "]` is missing `version`", hlo, hhi,
+      "a remote dependency needs `url`, `version` and `hash`")]
+  }
+  if hash == None {
+    errs = errs ++ [diag("`[deps." ++ aname ++ "]` is missing `hash`", hlo, hhi,
+      "a remote dependency needs `url`, `version` and `hash`")]
+  }
+  if len(errs) > 0 { return Err(errs) }
+  Ok(VUrl(aname, version.expect("version"), url.expect("url"), hash.expect("hash"),
+    subdir, hlo, hhi))
+}
+
+## v2 = new name: a major bump is a new package, spelled into the name so
+## version selection can never hand v2 to a v1 consumer.
+fn check_v2_name(name: String, v: SemV, lo: Int, hi: Int) -> List[Diag] =
+  if v.major >= 2 && not str.ends_with(name, to_string(v.major)) {
+    [diag("version " ++ semv_show(v) ++ " needs the major in the package name", lo, hi,
+      "v2+ is a new package with a new name (`" ++ name ++ to_string(v.major) ++
+        "`): otherwise version selection would hand incompatible majors to old consumers")]
+  } else {
+    []
+  }
+
+fn distinct(names: List[String]) -> List[String] = {
+  var out: List[String] = []
+  for n in names {
+    var have = false
+    for o in out { if o == n { have = true } }
+    if not have { out = out ++ [n] }
+  }
+  out
+}
+
+## Validate a parsed document (the Kotlin Manifest.validate): the manifest, or
+## every rule violation in the Kotlin order. `dir` is the project directory —
+## path deps resolve against it and the name hint derives from it.
+fn validate_doc(doc: TomlDoc, dir: String) -> (Option[ManifestV], List[Diag]) = {
+  var errs: List[Diag] = []
+  let root = table_full(doc, None)
+
+  # `schema` first: the format version must be readable before anything else
+  var schema_i = 0 - 1
+  var i = 0
+  for e in root {
+    let (key, _, _, _) = e
+    if key == "schema" && schema_i < 0 { schema_i = i }
+    i = i + 1
+  }
+  if schema_i < 0 {
+    return (None, [diag("dawn.toml has no `schema` key", 0, 1,
+      "start the file with `schema = " ++ to_string(SCHEMA) ++ "`")])
+  }
+  let (_, sklo, skhi, sval) = root[schema_i]
+  if schema_i != 0 {
+    return (None, [diag("`schema` must be the first key in dawn.toml", sklo, skhi,
+      "move `schema = " ++ to_string(SCHEMA) ++ "` to the top so tools can read the format version first")])
+  }
+  let (svlo, svhi) = val_span(sval)
+  match sval {
+    TInt(n, _, _) ->
+      if n != SCHEMA {
+        let hint = if n > SCHEMA {
+          "this dawn only understands schema " ++ to_string(SCHEMA) ++ "; upgrade dawn"
+        } else {
+          "this dawn only understands schema " ++ to_string(SCHEMA)
+        }
+        return (None, [diag("unsupported dawn.toml schema version " ++ to_string(n),
+          svlo, svhi, hint)])
+      }
+    _ ->
+      return (None, [diag("`schema` must be an integer", svlo, svhi,
+        "write `schema = " ++ to_string(SCHEMA) ++ "`")])
+  }
+
+  var name = ""
+  var version: Option[SemV] = None
+  var version_span = (0, 0)
+  for e in root {
+    let (key, klo, khi, tv) = e
+    let (vlo, vhi) = val_span(tv)
+    if key == "schema" {
+      ()
+    } else if key == "name" {
+      match tv {
+        TStr(v, _, _) ->
+          if not name_ok(v) {
+            errs = errs ++ [diag("invalid package name `" ++ v ++ "`", vlo, vhi,
+              "names are lowercase identifiers: [a-z_][a-z0-9_]*")]
+          } else {
+            name = v
+          }
+        _ -> {
+          errs = errs ++ [diag("`name` must be a string", vlo, vhi,
+            "write `name = \"my_project\"`")]
+        }
+      }
+    } else if key == "version" {
+      match tv {
+        TStr(v, _, _) ->
+          match semv_parse(v) {
+            Some(sv) -> {
+              version = Some(sv)
+              version_span = (vlo, vhi)
+            }
+            None -> {
+              errs = errs ++ [diag("invalid version `" ++ v ++ "`", vlo, vhi,
+                "versions are exactly `major.minor.patch` decimal numbers, e.g. `1.0.0`; " ++
+                  "no prerelease or build suffixes (the same discipline that bans SNAPSHOTs)")]
+            }
+          }
+        _ -> {
+          errs = errs ++ [diag("`version` must be a string", vlo, vhi,
+            "write `version = \"1.0.0\"`")]
+        }
+      }
+    } else {
+      errs = errs ++ [diag("unknown key `" ++ key ++ "` in dawn.toml", klo, khi,
+        "dawn.toml schema " ++ to_string(SCHEMA) ++ " has `schema`, `name`, `version`, " ++
+          "and the `[java-deps]`/`[deps]` tables")]
+    }
+  }
+  if name == "" {
+    # the Kotlin null check is unconditional: an invalid `name` value reports
+    # its own error above and still falls through to this one
+    errs = errs ++ [diag("dawn.toml has no `name` key", 0, 1,
+      "add `name = \"" ++ dir_name_hint(dir) ++ "\"`")]
+    return (None, errs)
+  }
+  match version {
+    Some(v) -> {
+      let (vlo, vhi) = version_span
+      errs = errs ++ check_v2_name(name, v, vlo, vhi)
+    }
+    None -> ()
+  }
+
+  for t in distinct(table_names(doc)) {
+    let known = t == "java-deps" || t == "deps" || str.starts_with(t, "deps.")
+    if not known {
+      let (hlo, hhi) = header_span(doc, t).unwrap_or((0, 1))
+      errs = errs ++ [diag("unknown table `[" ++ t ++ "]` in dawn.toml", hlo, hhi,
+        "dawn.toml schema " ++ to_string(SCHEMA) ++
+          " has `[java-deps]`, `[deps]` and `[deps.<alias>]`")]
+    }
+  }
+
+  # [deps]: local path entries, then [deps.<aname>] url tables
+  var deps: List[VDep] = []
+  for e in table_full(doc, Some("deps")) {
+    let (key, klo, khi, tv) = e
+    let (vlo, vhi) = val_span(tv)
+    match tv {
+      TStr(v, _, _) -> {
+        if not name_ok(key) {
+          errs = errs ++ [diag("invalid dependency alias `" ++ key ++ "`", klo, khi,
+            "aliases are lowercase identifiers: [a-z_][a-z0-9_]*")]
+        } else {
+          var dup = false
+          for d in deps { if vdep_alias(d) == key { dup = true } }
+          if dup {
+            errs = errs ++ [diag("dependency `" ++ key ++ "` is declared twice", klo, khi, "")]
+          } else {
+            let full = if str.starts_with(v, "/") { v } else { dir ++ "/" ++ v }
+            deps = deps ++ [VPath(key, full, vlo, vhi)]
+          }
+        }
+      }
+      _ -> {
+        errs = errs ++ [diag("`" ++ key ++ "` must be a path string", vlo, vhi,
+          "write `" ++ key ++ " = \"../packages/" ++ key ++
+            "\"` (a directory containing dawn.toml + src/), " ++
+            "or use a `[deps." ++ key ++ "]` table for a remote package")]
+      }
+    }
+  }
+  for t in distinct(table_names(doc)) {
+    if str.starts_with(t, "deps.") {
+      let aname = str.substring(t, 5, str.len(t))
+      let (hlo, hhi) = header_span(doc, t).unwrap_or((0, 1))
+      if not name_ok(aname) {
+        errs = errs ++ [diag("invalid dependency alias `" ++ aname ++ "`", hlo, hhi,
+          "aliases are lowercase identifiers: [a-z_][a-z0-9_]*")]
+      } else {
+        var dup = false
+        for d in deps { if vdep_alias(d) == aname { dup = true } }
+        if dup {
+          errs = errs ++ [diag("dependency `" ++ aname ++ "` is declared twice", hlo, hhi,
+            "it already has a path entry under `[deps]`; keep one form")]
+        } else {
+          match parse_url_dep(doc, t, aname, hlo, hhi) {
+            Ok(d) -> { deps = deps ++ [d] }
+            Err(es) -> { errs = errs ++ es }
+          }
+        }
+      }
+    }
+  }
+
+  # [java-deps]: pinned Maven coordinates, one version per artifact
+  var jdeps: List[MCoord] = []
+  for e in table_full(doc, Some("java-deps")) {
+    let (key, _, _, tv) = e
+    let (vlo, vhi) = val_span(tv)
+    match tv {
+      TStr(v, _, _) ->
+        match mcoord_parse(v, key, vlo, vhi) {
+          Ok(c) -> { jdeps = jdeps ++ [c] }
+          Err(d) -> { errs = errs ++ [d] }
+        }
+      _ -> {
+        errs = errs ++ [diag("`" ++ key ++ "` must be a Maven coordinate string", vlo, vhi,
+          "write `" ++ key ++ " = \"group:artifact:version\"`")]
+      }
+    }
+  }
+  var seen_ga: List[String] = []
+  for c in jdeps {
+    let ga = c.group ++ ":" ++ c.artifact
+    var have = false
+    for s in seen_ga { if s == ga { have = true } }
+    if not have {
+      seen_ga = seen_ga ++ [ga]
+      var count = 0
+      var second: Option[MCoord] = None
+      for o in jdeps {
+        if o.group ++ ":" ++ o.artifact == ga {
+          count = count + 1
+          if count == 2 { second = Some(o) }
+        }
+      }
+      if count > 1 {
+        let alias2 = match second {
+          Some(o) -> o.aname
+          None -> c.aname
+        }
+        var span = (0, 1)
+        var found = false
+        for e in table_full(doc, Some("java-deps")) {
+          let (key, _, _, tv) = e
+          if key == alias2 && not found {
+            span = val_span(tv)
+            found = true
+          }
+        }
+        let (dlo, dhi) = span
+        errs = errs ++ [diag("`" ++ ga ++ "` is declared " ++ to_string(count) ++
+            " times with different versions", dlo, dhi, "one version per artifact; drop all but one")]
+      }
+    }
+  }
+
+  (Some(ManifestV { name: name, version: version, java_deps: jdeps, deps: deps }), errs)
+}
+
+## Parse and validate `text` (the dawn.toml beside `dir`): the manifest, or
+## every diagnostic in report order — parser first, then validation, exactly
+## one channel populated (the Kotlin Manifest.parse null-on-any-diag rule).
+pub fn validate(dir: String, text: String) -> Result[ManifestV, List[Diag]] = {
+  let (doc, perrs) = parse(text)
+  let (m, verrs) = validate_doc(doc, dir)
+  let all = perrs ++ verrs
+  if len(all) > 0 { return Err(all) }
+  match m {
+    Some(mf) -> Ok(mf)
+    None -> Err(all)
+  }
+}
+
+test "a clean manifest validates with deps in declaration order" {
+  let text = "schema = 1\nname = \"app\"\nversion = \"1.2.3\"\n\n" ++
+    "[deps]\nweb = \"../packages/web\"\n\n[deps.g]\nurl = \"file:///g.zip\"\n" ++
+    "version = \"1.0.0\"\n" ++
+    "hash = \"d1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n\n" ++
+    "[java-deps]\ngson = \"com.google.code.gson:gson:2.11.0\"\n"
+  match validate("/p", text) {
+    Ok(m) -> {
+      assert m.name == "app"
+      assert m.version == Some(SemV { major: 1, minor: 2, patch: 3 })
+      assert len(m.deps) == 2
+      match m.deps[0] {
+        VPath(a, d, _, _) -> {
+          assert a == "web"
+          assert d == "/p/../packages/web"
+        }
+        _ -> { assert false }
+      }
+      assert len(m.java_deps) == 1
+      assert m.java_deps[0].artifact == "gson"
+    }
+    Err(_) -> { assert false }
+  }
+}
+
+test "schema discipline: missing, misplaced, wrong type, wrong version" {
+  match validate("/p", "name = \"a\"\n") {
+    Err(ds) -> {
+      assert ds[0].msg == "dawn.toml has no `schema` key"
+    }
+    Ok(_) -> { assert false }
+  }
+  match validate("/p", "name = \"a\"\nschema = 1\n") {
+    Err(ds) -> { assert ds[0].msg == "`schema` must be the first key in dawn.toml" }
+    Ok(_) -> { assert false }
+  }
+  match validate("/p", "schema = \"1\"\nname = \"a\"\n") {
+    Err(ds) -> { assert ds[0].msg == "`schema` must be an integer" }
+    Ok(_) -> { assert false }
+  }
+  match validate("/p", "schema = 2\nname = \"a\"\n") {
+    Err(ds) -> { assert ds[0].msg == "unsupported dawn.toml schema version 2" }
+    Ok(_) -> { assert false }
+  }
+}
+
+test "name and version rules" {
+  match validate("/p", "schema = 1\n") {
+    Err(ds) -> { assert ds[0].msg == "dawn.toml has no `name` key" }
+    Ok(_) -> { assert false }
+  }
+  match validate("/p", "schema = 1\nname = \"Bad-Name\"\n") {
+    Err(ds) -> { assert ds[0].msg == "invalid package name `Bad-Name`" }
+    Ok(_) -> { assert false }
+  }
+  match validate("/p", "schema = 1\nname = \"a\"\nversion = \"1.0\"\n") {
+    Err(ds) -> { assert ds[0].msg == "invalid version `1.0`" }
+    Ok(_) -> { assert false }
+  }
+  match validate("/p", "schema = 1\nname = \"web\"\nversion = \"2.0.0\"\n") {
+    Err(ds) -> {
+      assert ds[0].msg == "version 2.0.0 needs the major in the package name"
+    }
+    Ok(_) -> { assert false }
+  }
+  match validate("/p", "schema = 1\nname = \"web2\"\nversion = \"2.0.0\"\n") {
+    Ok(m) -> { assert m.name == "web2" }
+    Err(_) -> { assert false }
+  }
+}
+
+test "unknown keys and tables are rejected" {
+  match validate("/p", "schema = 1\nname = \"a\"\nextra = 1\n") {
+    Err(ds) -> { assert ds[0].msg == "unknown key `extra` in dawn.toml" }
+    Ok(_) -> { assert false }
+  }
+  match validate("/p", "schema = 1\nname = \"a\"\n\n[stuff]\nx = \"y\"\n") {
+    Err(ds) -> { assert ds[0].msg == "unknown table `[stuff]` in dawn.toml" }
+    Ok(_) -> { assert false }
+  }
+}
+
+test "url dep tables need url, version and hash" {
+  let text = "schema = 1\nname = \"a\"\n\n[deps.g]\nurl = \"file:///g.zip\"\n"
+  match validate("/p", text) {
+    Err(ds) -> {
+      assert len(ds) == 2
+      assert ds[0].msg == "`[deps.g]` is missing `version`"
+      assert ds[1].msg == "`[deps.g]` is missing `hash`"
+    }
+    Ok(_) -> { assert false }
+  }
+  match validate("/p", "schema = 1\nname = \"a\"\n\n[deps.g]\nurl = \"ftp://x\"\n" ++
+      "version = \"1.0.0\"\nhash = \"d1:00\"\n") {
+        Err(ds) -> {
+          assert ds[0].msg == "unsupported url `ftp://x`"
+          assert ds[1].msg == "invalid hash `d1:00`"
+        }
+        Ok(_) -> { assert false }
+      }
+}
+
+test "maven coordinates: shape, snapshots, ranges, duplicates" {
+  let base = "schema = 1\nname = \"a\"\n\n[java-deps]\n"
+  match validate("/p", base ++ "x = \"a:b\"\n") {
+    Err(ds) -> { assert ds[0].msg == "invalid Maven coordinate `a:b`" }
+    Ok(_) -> { assert false }
+  }
+  match validate("/p", base ++ "x = \"g:a:1-SNAPSHOT\"\n") {
+    Err(ds) -> { assert ds[0].msg == "SNAPSHOT versions are not allowed: `g:a:1-SNAPSHOT`" }
+    Ok(_) -> { assert false }
+  }
+  match validate("/p", base ++ "x = \"g:a:[1,2)\"\n") {
+    Err(ds) -> { assert ds[0].msg == "version ranges are not allowed: `g:a:[1,2)`" }
+    Ok(_) -> { assert false }
+  }
+  match validate("/p", base ++ "x = \"g:a:1\"\ny = \"g:a:2\"\n") {
+    Err(ds) -> { assert ds[0].msg == "`g:a` is declared 2 times with different versions" }
+    Ok(_) -> { assert false }
+  }
+}
+
+test "dependency aliases: case, duplication across forms" {
+  match validate("/p", "schema = 1\nname = \"a\"\n\n[deps]\nBad = \"../x\"\n") {
+    Err(ds) -> { assert ds[0].msg == "invalid dependency alias `Bad`" }
+    Ok(_) -> { assert false }
+  }
+  let two = "schema = 1\nname = \"a\"\n\n[deps]\ng = \"../g\"\n\n[deps.g]\n" ++
+    "url = \"file:///g.zip\"\nversion = \"1.0.0\"\n" ++
+    "hash = \"d1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n"
+  match validate("/p", two) {
+    Err(ds) -> {
+      assert ds[0].msg == "dependency `g` is declared twice"
+      assert ds[0].hint == "it already has a path entry under `[deps]`; keep one form"
+    }
+    Ok(_) -> { assert false }
+  }
+}

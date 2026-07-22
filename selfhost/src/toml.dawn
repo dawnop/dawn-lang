@@ -1,29 +1,33 @@
-# Format-preserving TOML editing for `selfhost add` (the Kotlin manifest/Toml.kt
-# write side). The CST is a plain list of lines — every supported construct fits
-# on one line — so edits replace one line's text and rendering reproduces the
-# input byte for byte when nothing was touched. Offsets are UTF-16 units, the
-# same units str.substring cuts by, so a value span can be spliced textually.
+# Format-preserving TOML parsing and editing for dawn.toml (the Kotlin
+# manifest/Toml.kt, both sides). The CST is a plain list of lines — every
+# supported construct fits on one line — so edits replace one line's text and
+# rendering reproduces the input byte for byte when nothing was touched.
 #
-# Errors collect as plain message strings: this side has no diagnostic renderer
-# (the same accepted gap as compile errors — the Kotlin CLI stays the span
-# authority until M8 retires it).
+# Errors are Diags with absolute source spans, mirroring the Kotlin
+# TomlParser sink message for message and span for span (M8: the selfhost
+# toolchain is the validation authority). Offsets accumulate in UTF-16 units
+# across lines; within a line the scanner walks code points, which agrees
+# with UTF-16 for everything but astral characters (manifests are ASCII).
 
 use std/str
 use std/list
+use token.{Diag}
 
-## A value from the supported subset; lo/hi are offsets within the line.
+## A value from the supported subset; lo/hi are absolute source offsets.
 pub type TVal =
   | TStr(v: String, lo: Int, hi: Int)
   | TInt(v: Int, lo: Int, hi: Int)
   | TBool(v: Bool, lo: Int, hi: Int)
   | TArr(items: List[String], lo: Int, hi: Int)
 
-## One source line, raw text kept (a trailing CR survives, so CRLF renders back).
+## One source line, raw text kept (a trailing CR survives, so CRLF renders
+## back). Headers carry the name's span; entries carry the key's span and the
+## line's own start offset (value splicing is relative to it).
 pub type TLine =
   | LBlank(text: String)
   | LComment(text: String)
-  | LHeader(name: String, text: String)
-  | LEntry(key: String, value: TVal, text: String)
+  | LHeader(name: String, nlo: Int, nhi: Int, text: String)
+  | LEntry(key: String, klo: Int, khi: Int, value: TVal, text: String, start: Int)
 
 pub type TomlDoc = { lines: List[TLine], ends_nl: Bool }
 
@@ -31,8 +35,8 @@ fn line_text(l: TLine) -> String =
   match l {
     LBlank(t) -> t
     LComment(t) -> t
-    LHeader(_, t) -> t
-    LEntry(_, _, t) -> t
+    LHeader(_, _, _, t) -> t
+    LEntry(_, _, _, _, t, _) -> t
   }
 
 fn unit_at(s: String, i: Int) -> String = str.substring(s, i, i + 1)
@@ -51,21 +55,32 @@ fn is_bare_key(s: String) -> Bool = {
 
 fn is_digit(c: String) -> Bool = str.contains("0123456789", c)
 
+## UTF-16 length of `s` — the offset currency line starts accumulate in.
+fn u16_len(s: String) -> Int = {
+  var n = 0
+  for c in code_points(s) { n = n + if c >= 65536 { 2 } else { 1 } }
+  n
+}
+
+fn diag(msg: String, lo: Int, hi: Int, hint: String) -> Diag =
+  Diag { msg: msg, lo: lo, hi: hi, hint: hint }
+
 # ---- per-line scanning ----
-# `end` excludes a trailing CR; `pos` walks UTF-16 units. Errors abandon the
-# line (it parses as a comment, like the Kotlin recovery) and the message is
-# collected by the caller.
+# `end` excludes a trailing CR; `pos` walks code points; `base` is the line's
+# absolute start offset, so `base + pos` lifts a span to the source.
 
-type Scan = { line: String, pos: Int, end: Int }
+type Scan = { line: String, pos: Int, end: Int, base: Int }
 
-fn scan_of(line: String) -> Scan = {
+fn scan_of(line: String, base: Int) -> Scan = {
   let e = if str.ends_with(line, str.from_char(13)) { str.len(line) - 1 } else { str.len(line) }
-  Scan { line: line, pos: 0, end: e }
+  Scan { line: line, pos: 0, end: e, base: base }
 }
 
 fn eol(s: Scan) -> Bool = s.pos >= s.end
 
 fn peek(s: Scan) -> String = unit_at(s.line, s.pos)
+
+fn abs(s: Scan, p: Int) -> Int = s.base + p
 
 fn skip_space(s: Scan) -> Scan = {
   var p = s.pos
@@ -74,22 +89,30 @@ fn skip_space(s: Scan) -> Scan = {
 }
 
 ## Only spaces and a `#` comment may follow a complete value or header.
-fn finish_line(s0: Scan) -> Option[String] = {
+fn finish_line(s0: Scan) -> Option[Diag] = {
   let s = skip_space(s0)
-  if eol(s) || peek(s) == "#" { None } else { Some("unexpected text after the value") }
+  if eol(s) || peek(s) == "#" { return None }
+  Some(diag("unexpected text after the value", abs(s, s.pos), abs(s, s.end),
+    "one key per line; start a comment with `#`"))
 }
 
 type ValR = { val: TVal, s: Scan }
 
-fn parse_string_at(s0: Scan) -> Result[(String, Scan), String] = {
+fn parse_string_at(s0: Scan) -> Result[(String, Scan), Diag] = {
   let start = s0.pos
-  if str.substring(s0.line, s0.pos, s0.pos + 3) == "\"\"\"" {
-    return Err("multi-line strings are not supported in dawn.toml")
+  let has3 = str.len(s0.line) - s0.pos >= 3 &&
+    str.substring(s0.line, s0.pos, s0.pos + 3) == "\"\"\""
+  if has3 {
+    return Err(diag("multi-line strings are not supported in dawn.toml",
+      abs(s0, start), abs(s0, start) + 3, "put the value on one line with a basic string"))
   }
   var p = s0.pos + 1
   var out = ""
   while true {
-    if p >= s0.end { return Err("unterminated string") }
+    if p >= s0.end {
+      return Err(diag("unterminated string", abs(s0, start), abs(s0, p),
+        "add a closing `\"`; strings may not span lines in dawn.toml"))
+    }
     let c = unit_at(s0.line, p)
     p = p + 1
     if c == "\"" {
@@ -98,7 +121,9 @@ fn parse_string_at(s0: Scan) -> Result[(String, Scan), String] = {
     if c != "\\" {
       out = out ++ c
     } else {
-      if p >= s0.end { return Err("unterminated escape") }
+      if p >= s0.end {
+        return Err(diag("unterminated escape", abs(s0, p - 1), abs(s0, p), ""))
+      }
       let e = unit_at(s0.line, p)
       p = p + 1
       if e == "\"" {
@@ -112,7 +137,9 @@ fn parse_string_at(s0: Scan) -> Result[(String, Scan), String] = {
       } else if e == "r" {
         out = out ++ str.from_char(13)
       } else if e == "u" {
-        if s0.end - p < 4 { return Err("`\\u` needs four hex digits") }
+        if s0.end - p < 4 {
+          return Err(diag("`\\u` needs four hex digits", abs(s0, p - 2), abs(s0, p), ""))
+        }
         let hex = str.substring(s0.line, p, p + 4)
         var code = 0
         var ok = true
@@ -122,28 +149,40 @@ fn parse_string_at(s0: Scan) -> Result[(String, Scan), String] = {
             None -> { ok = false }
           }
         }
-        if not ok { return Err("invalid `\\u` escape `\\u" ++ hex ++ "`") }
+        if not ok {
+          return Err(diag("invalid `\\u` escape `\\u" ++ hex ++ "`",
+            abs(s0, p - 2), abs(s0, p + 4), "use four hex digits, e.g. `\\u00e9`"))
+        }
         out = out ++ str.from_char(code)
         p = p + 4
       } else {
-        return Err("unsupported escape `\\" ++ e ++ "`")
+        return Err(diag("unsupported escape `\\" ++ e ++ "`", abs(s0, p - 2), abs(s0, p),
+          "dawn.toml supports \\\" \\\\ \\n \\t \\r and \\uXXXX"))
       }
     }
   }
-  Err("unterminated string")
+  Err(diag("unterminated string", abs(s0, start), abs(s0, s0.end), ""))
 }
 
-fn parse_array(s0: Scan) -> Result[ValR, String] = {
+fn parse_array(s0: Scan) -> Result[ValR, Diag] = {
   let start = s0.pos
   var s = skip_space(Scan { ..s0, pos: s0.pos + 1 })
   var items: List[String] = []
   if not eol(s) && peek(s) == "]" {
-    return Ok(ValR { val: TArr(items, start, s.pos + 1), s: Scan { ..s, pos: s.pos + 1 } })
+    return Ok(ValR {
+      val: TArr(items, abs(s, start), abs(s, s.pos + 1)), s: Scan { ..s, pos: s.pos + 1 }
+    })
   }
   while true {
     s = skip_space(s)
-    if eol(s) { return Err("unterminated array") }
-    if peek(s) != "\"" { return Err("array elements must be strings in dawn.toml") }
+    if eol(s) {
+      return Err(diag("unterminated array", abs(s, start), abs(s, s.pos),
+        "close it with `]`; arrays may not span lines in dawn.toml"))
+    }
+    if peek(s) != "\"" {
+      return Err(diag("array elements must be strings in dawn.toml",
+        abs(s, s.pos), abs(s, s.pos) + 1, "write elements as basic strings, e.g. `[\"a\", \"b\"]`"))
+    }
     match parse_string_at(s) {
       Ok(pr) -> {
         let (v, s2) = pr
@@ -152,24 +191,40 @@ fn parse_array(s0: Scan) -> Result[ValR, String] = {
       }
       Err(e) -> return Err(e)
     }
-    if eol(s) { return Err("unterminated array") }
+    if eol(s) {
+      return Err(diag("unterminated array", abs(s, start), abs(s, s.pos),
+        "close it with `]`; arrays may not span lines in dawn.toml"))
+    }
     let c = peek(s)
     s = Scan { ..s, pos: s.pos + 1 }
     if c == "," {
       s = skip_space(s)
       if not eol(s) && peek(s) == "]" {
-        return Ok(ValR { val: TArr(items, start, s.pos + 1), s: Scan { ..s, pos: s.pos + 1 } })
+        return Ok(ValR {
+          val: TArr(items, abs(s, start), abs(s, s.pos + 1)), s: Scan { ..s, pos: s.pos + 1 }
+        })
       }
     } else if c == "]" {
-      return Ok(ValR { val: TArr(items, start, s.pos), s: s })
+      return Ok(ValR { val: TArr(items, abs(s, start), abs(s, s.pos)), s: s })
     } else {
-      return Err("expected `,` or `]` in array")
+      return Err(diag("expected `,` or `]` in array", abs(s, s.pos - 1), abs(s, s.pos), ""))
     }
   }
-  Err("unterminated array")
+  Err(diag("unterminated array", abs(s0, start), abs(s0, s0.end), ""))
 }
 
-fn parse_number(s0: Scan) -> Result[ValR, String] = {
+## Consume to whitespace or a comment — the Kotlin error-span extension for
+## out-of-subset values (dates, floats, hex), so the caret covers the value.
+fn extend_to_space(s: Scan, p0: Int) -> Int = {
+  var p = p0
+  while p < s.end {
+    let c = unit_at(s.line, p)
+    if c == " " || c == "\t" || c == "#" { break } else { p = p + 1 }
+  }
+  p
+}
+
+fn parse_number(s0: Scan) -> Result[ValR, Diag] = {
   let start = s0.pos
   var p = s0.pos
   if p < s0.end && (unit_at(s0.line, p) == "+" || unit_at(s0.line, p) == "-") { p = p + 1 }
@@ -177,53 +232,76 @@ fn parse_number(s0: Scan) -> Result[ValR, String] = {
   let raw = str.substring(s0.line, start, p)
   if p < s0.end {
     let c = unit_at(s0.line, p)
-    if c == "-" || c == ":" { return Err("date-time values are not supported in dawn.toml") }
-    if c == "." || c == "e" || c == "E" { return Err("floats are not supported in dawn.toml") }
+    if c == "-" || c == ":" {
+      let e = extend_to_space(s0, p)
+      return Err(diag("date-time values are not supported in dawn.toml",
+        abs(s0, start), abs(s0, e), "quote it if you meant a string"))
+    }
+    if c == "." || c == "e" || c == "E" {
+      let e = extend_to_space(s0, p)
+      return Err(diag("floats are not supported in dawn.toml", abs(s0, start), abs(s0, e),
+        "use an integer, or quote it if you meant a string"))
+    }
     if c == "x" || c == "o" || c == "b" {
-      return Err("only decimal integers are supported in dawn.toml")
+      let e = extend_to_space(s0, p)
+      return Err(diag("only decimal integers are supported in dawn.toml",
+        abs(s0, start), abs(s0, e), ""))
     }
   }
   if raw == "" || raw == "+" || raw == "-" {
-    return Err("invalid value `" ++ raw ++ "`")
+    let e = extend_to_space(s0, p)
+    return Err(diag("invalid value `" ++ str.substring(s0.line, start, e) ++ "`",
+      abs(s0, start), abs(s0, e),
+      "dawn.toml values are strings, integers, booleans, or arrays of strings"))
   }
   let digits = str.replace(str.replace(raw, "_", ""), "+", "")
   match parse_int(digits) {
-    Some(n) -> Ok(ValR { val: TInt(n, start, p), s: Scan { ..s0, pos: p } })
-    None -> Err("invalid integer `" ++ raw ++ "`")
+    Some(n) -> Ok(ValR { val: TInt(n, abs(s0, start), abs(s0, p)), s: Scan { ..s0, pos: p } })
+    None -> Err(diag("invalid integer `" ++ raw ++ "`", abs(s0, start), abs(s0, p), ""))
   }
 }
 
-fn parse_value(s0: Scan) -> Result[ValR, String] = {
-  if eol(s0) { return Err("expected a value") }
+fn parse_value(s0: Scan) -> Result[ValR, Diag] = {
+  if eol(s0) {
+    return Err(diag("expected a value", abs(s0, s0.pos), abs(s0, s0.pos) + 1, ""))
+  }
   let c = peek(s0)
   if c == "\"" {
     let start = s0.pos
     match parse_string_at(s0) {
       Ok(pr) -> {
         let (v, s2) = pr
-        Ok(ValR { val: TStr(v, start, s2.pos), s: s2 })
+        Ok(ValR { val: TStr(v, abs(s0, start), abs(s2, s2.pos)), s: s2 })
       }
       Err(e) -> Err(e)
     }
   } else if c == "'" {
-    Err("literal strings are not supported in dawn.toml")
+    Err(diag("literal strings are not supported in dawn.toml",
+      abs(s0, s0.pos), abs(s0, s0.pos) + 1, "use a basic string with double quotes"))
   } else if c == "[" {
     parse_array(s0)
   } else if c == "{" {
-    Err("inline tables are not supported in dawn.toml")
+    Err(diag("inline tables are not supported in dawn.toml",
+      abs(s0, s0.pos), abs(s0, s0.pos) + 1, "use a `[table]` header with one key per line"))
   } else if str.starts_with(str.substring(s0.line, s0.pos, s0.end), "true") {
-    Ok(ValR { val: TBool(true, s0.pos, s0.pos + 4), s: Scan { ..s0, pos: s0.pos + 4 } })
+    Ok(ValR {
+      val: TBool(true, abs(s0, s0.pos), abs(s0, s0.pos + 4)), s: Scan { ..s0, pos: s0.pos + 4 }
+    })
   } else if str.starts_with(str.substring(s0.line, s0.pos, s0.end), "false") {
-    Ok(ValR { val: TBool(false, s0.pos, s0.pos + 5), s: Scan { ..s0, pos: s0.pos + 5 } })
+    Ok(ValR {
+      val: TBool(false, abs(s0, s0.pos), abs(s0, s0.pos + 5)), s: Scan { ..s0, pos: s0.pos + 5 }
+    })
   } else {
     parse_number(s0)
   }
 }
 
-fn parse_header(raw: String, s1: Scan) -> Result[TLine, String] = {
+fn parse_header(raw: String, s1: Scan) -> Result[TLine, Diag] = {
   var s = Scan { ..s1, pos: s1.pos + 1 }
   if not eol(s) && peek(s) == "[" {
-    return Err("arrays of tables are not supported in dawn.toml")
+    # the Kotlin span here is line-local (its one un-lifted Span) — kept as is
+    return Err(diag("arrays of tables are not supported in dawn.toml",
+      s.pos - 1, s.pos + 1, "use `[table]` with one key per entry"))
   }
   s = skip_space(s)
   let name_start = s.pos
@@ -233,24 +311,36 @@ fn parse_header(raw: String, s1: Scan) -> Result[TLine, String] = {
     if c == "]" || c == " " || c == "\t" { break } else { p = p + 1 }
   }
   let name = str.substring(raw, name_start, p)
-  if name == "" { return Err("table name is empty") }
+  let nlo = abs(s, name_start)
+  let nhi = abs(s, p)
+  if name == "" { return Err(diag("table name is empty", nlo, nhi, "")) }
   let segments = str.split(name, ".")
-  if len(segments) > 2 { return Err("table names may have at most one dot") }
+  if len(segments) > 2 {
+    return Err(diag("table names may have at most one dot", nlo, nhi,
+      "use `[table]` or `[table.sub]`"))
+  }
   for seg in segments {
-    if not is_bare_key(seg) { return Err("invalid table name `" ++ name ++ "`") }
+    if not is_bare_key(seg) {
+      return Err(diag("invalid table name `" ++ name ++ "`", nlo, nhi,
+        "table names are bare keys: letters, digits, `_`, `-`"))
+    }
   }
   s = skip_space(Scan { ..s, pos: p })
-  if eol(s) || peek(s) != "]" { return Err("expected `]` to close the table header") }
+  if eol(s) || peek(s) != "]" {
+    return Err(diag("expected `]` to close the table header",
+      abs(s, s.pos), abs(s, s.pos) + 1, ""))
+  }
   s = Scan { ..s, pos: s.pos + 1 }
   match finish_line(s) {
     Some(e) -> Err(e)
-    None -> Ok(LHeader(name, raw))
+    None -> Ok(LHeader(name, nlo, nhi, raw))
   }
 }
 
-fn parse_entry(raw: String, s1: Scan) -> Result[TLine, String] = {
+fn parse_entry(raw: String, s1: Scan) -> Result[TLine, Diag] = {
   if peek(s1) == "\"" || peek(s1) == "'" {
-    return Err("quoted keys are not supported in dawn.toml")
+    return Err(diag("quoted keys are not supported in dawn.toml",
+      abs(s1, s1.pos), abs(s1, s1.pos) + 1, "use a bare key: letters, digits, `_`, `-`"))
   }
   let key_start = s1.pos
   var p = s1.pos
@@ -259,24 +349,38 @@ fn parse_entry(raw: String, s1: Scan) -> Result[TLine, String] = {
     if c == "=" || c == " " || c == "\t" { break } else { p = p + 1 }
   }
   let key = str.substring(raw, key_start, p)
-  if key == "" { return Err("expected a key") }
-  if str.contains(key, ".") { return Err("dotted keys are not supported in dawn.toml") }
-  if not is_bare_key(key) { return Err("invalid key `" ++ key ++ "`") }
+  let klo = abs(s1, key_start)
+  let khi = abs(s1, p)
+  if key == "" { return Err(diag("expected a key", klo, khi, "")) }
+  if str.contains(key, ".") {
+    return Err(diag("dotted keys are not supported in dawn.toml", klo, khi,
+      "use a `[table]` header instead of `a.b = ...`"))
+  }
+  if not is_bare_key(key) {
+    return Err(diag("invalid key `" ++ key ++ "`", klo, khi,
+      "keys are bare: letters, digits, `_`, `-`"))
+  }
   var s = skip_space(Scan { ..s1, pos: p })
-  if eol(s) || peek(s) != "=" { return Err("expected `=` after key `" ++ key ++ "`") }
+  if eol(s) || peek(s) != "=" {
+    return Err(diag("expected `=` after key `" ++ key ++ "`",
+      abs(s, s.pos), abs(s, s.pos) + 1, ""))
+  }
   s = skip_space(Scan { ..s, pos: s.pos + 1 })
   match parse_value(s) {
     Ok(vr) ->
       match finish_line(vr.s) {
         Some(e) -> Err(e)
-        None -> Ok(LEntry(key, vr.val, raw))
+        None -> Ok(LEntry(key, klo, khi, vr.val, raw, s1.base))
       }
     Err(e) -> Err(e)
   }
 }
 
-fn parse_line(raw: String) -> Result[TLine, String] = {
-  let s = skip_space(scan_of(raw))
+## Parse one line. The Kotlin parity subtlety: `unexpected text after the
+## value` reports a diagnostic but keeps the parsed header/entry, while every
+## other error abandons the line (it becomes a comment).
+fn parse_line(raw: String, base: Int) -> Result[TLine, Diag] = {
+  let s = skip_space(scan_of(raw, base))
   if eol(s) {
     Ok(LBlank(raw))
   } else if peek(s) == "#" {
@@ -288,61 +392,72 @@ fn parse_line(raw: String) -> Result[TLine, String] = {
   }
 }
 
-## Parse a document. Lines outside the subset surface as error strings and
+## Parse a document. Lines outside the subset surface as span diagnostics and
 ## parse as comments (the Kotlin recovery), so one bad line reports once.
-pub fn parse(text: String) -> (TomlDoc, List[String]) = {
+pub fn parse(text: String) -> (TomlDoc, List[Diag]) = {
   let ends_nl = str.ends_with(text, "\n")
   let body = if ends_nl { str.substring(text, 0, str.len(text) - 1) } else { text }
   var lines: List[TLine] = []
-  var errs: List[String] = []
+  var errs: List[Diag] = []
   let none: List[String] = []
   let raws = if body == "" && not ends_nl { none } else { str.split(body, "\n") }
+  var offset = 0
   for raw in raws {
-    match parse_line(raw) {
+    match parse_line(raw, offset) {
       Ok(l) -> { lines = lines ++ [l] }
       Err(e) -> {
         errs = errs ++ [e]
         lines = lines ++ [LComment(raw)]
       }
     }
+    offset = offset + u16_len(raw) + 1
   }
   let doc = TomlDoc { lines: lines, ends_nl: ends_nl }
   (doc, errs ++ dup_errors(doc))
 }
 
-fn dup_errors(doc: TomlDoc) -> List[String] = {
-  var errs: List[String] = []
+## Duplicate tables, then duplicate keys per table — the Kotlin
+## checkDuplicates pass order, so diagnostics come out in the same order.
+fn dup_errors(doc: TomlDoc) -> List[Diag] = {
+  var errs: List[Diag] = []
   var tables: List[String] = []
   for l in doc.lines {
     match l {
-      LHeader(nm, _) -> {
+      LHeader(nm, nlo, nhi, _) -> {
         for t in tables {
-          if t == nm { errs = errs ++ ["table `" ++ nm ++ "` is defined more than once"] }
+          if t == nm {
+            errs = errs ++ [diag("table `" ++ nm ++ "` is defined more than once", nlo, nhi, "")]
+          }
         }
         tables = tables ++ [nm]
       }
       _ -> ()
     }
   }
-  var cur: Option[String] = None
-  var seen: List[String] = []
-  for l in doc.lines {
-    match l {
-      LHeader(nm, _) -> {
-        cur = Some(nm)
-        seen = []
-      }
-      LEntry(k, _, _) -> {
-        let tag = match cur {
-          Some(t) -> t ++ "." ++ k
-          None -> k
+  var scopes: List[Option[String]] = [None]
+  for t in tables {
+    var have = false
+    for s in scopes { if s == Some(t) { have = true } }
+    if not have { scopes = scopes ++ [Some(t)] }
+  }
+  for scope in scopes {
+    var cur: Option[String] = None
+    var seen: List[String] = []
+    for l in doc.lines {
+      match l {
+        LHeader(nm, _, _, _) -> { cur = Some(nm) }
+        LEntry(k, klo, khi, _, _, _) -> {
+          if cur == scope {
+            for sk in seen {
+              if sk == k {
+                errs = errs ++ [diag("key `" ++ k ++ "` is defined more than once", klo, khi, "")]
+              }
+            }
+            seen = seen ++ [k]
+          }
         }
-        for s in seen {
-          if s == tag { errs = errs ++ ["key `" ++ k ++ "` is defined more than once"] }
-        }
-        seen = seen ++ [tag]
+        _ -> ()
       }
-      _ -> ()
     }
   }
   errs
@@ -361,8 +476,22 @@ pub fn table(doc: TomlDoc, tname: Option[String]) -> List[(String, TVal)] = {
   var out: List[(String, TVal)] = []
   for l in doc.lines {
     match l {
-      LHeader(nm, _) -> { cur = Some(nm) }
-      LEntry(k, v, _) -> { if cur == tname { out = out ++ [(k, v)] } }
+      LHeader(nm, _, _, _) -> { cur = Some(nm) }
+      LEntry(k, _, _, v, _, _) -> { if cur == tname { out = out ++ [(k, v)] } }
+      _ -> ()
+    }
+  }
+  out
+}
+
+## Entries under `[tname]` with their key spans, for validation diagnostics.
+pub fn table_full(doc: TomlDoc, tname: Option[String]) -> List[(String, Int, Int, TVal)] = {
+  var cur: Option[String] = None
+  var out: List[(String, Int, Int, TVal)] = []
+  for l in doc.lines {
+    match l {
+      LHeader(nm, _, _, _) -> { cur = Some(nm) }
+      LEntry(k, klo, khi, v, _, _) -> { if cur == tname { out = out ++ [(k, klo, khi, v)] } }
       _ -> ()
     }
   }
@@ -382,11 +511,22 @@ pub fn table_names(doc: TomlDoc) -> List[String] = {
   var out: List[String] = []
   for l in doc.lines {
     match l {
-      LHeader(nm, _) -> { out = out ++ [nm] }
+      LHeader(nm, _, _, _) -> { out = out ++ [nm] }
       _ -> ()
     }
   }
   out
+}
+
+## The name span of the first `[name]` header, for validation diagnostics.
+pub fn header_span(doc: TomlDoc, name: String) -> Option[(Int, Int)] = {
+  for l in doc.lines {
+    match l {
+      LHeader(nm, nlo, nhi, _) -> { if nm == name { return Some((nlo, nhi)) } }
+      _ -> ()
+    }
+  }
+  None
 }
 
 fn quote(s: String) -> String = {
@@ -415,8 +555,8 @@ fn entry_index(doc: TomlDoc, tname: Option[String], key: String) -> Option[Int] 
   var i = 0
   for l in doc.lines {
     match l {
-      LHeader(nm, _) -> { cur = Some(nm) }
-      LEntry(k, _, _) -> { if cur == tname && k == key { return Some(i) } }
+      LHeader(nm, _, _, _) -> { cur = Some(nm) }
+      LEntry(k, _, _, _, _, _) -> { if cur == tname && k == key { return Some(i) } }
       _ -> ()
     }
     i = i + 1
@@ -434,11 +574,11 @@ fn last_index_of_table(doc: TomlDoc, tname: Option[String]) -> Option[Int] = {
   var i = 0
   for l in doc.lines {
     match l {
-      LHeader(nm, _) -> {
+      LHeader(nm, _, _, _) -> {
         cur = Some(nm)
         if cur == tname { last = i }
       }
-      LEntry(_, _, _) -> { if cur == tname { last = i } }
+      LEntry(_, _, _, _, _, _) -> { if cur == tname { last = i } }
       _ -> ()
     }
     i = i + 1
@@ -485,11 +625,16 @@ pub fn set_string(doc: TomlDoc, tname: Option[String], key: String, value: Strin
   match entry_index(doc, tname, key) {
     Some(i) -> {
       match doc.lines[i] {
-        LEntry(k, v, text) -> {
+        LEntry(k, klo, khi, v, text, start) -> {
           let (lo, hi) = val_span(v)
-          let ntext = str.substring(text, 0, lo) ++ quoted ++ str.substring(text, hi, str.len(text))
+          let rlo = lo - start
+          let rhi = hi - start
+          let ntext =
+            str.substring(text, 0, rlo) ++ quoted ++ str.substring(text, rhi, str.len(text))
           let nval = TStr(value, lo, lo + str.len(quoted))
-          return TomlDoc { ..doc, lines: set_line(doc.lines, i, LEntry(k, nval, ntext)) }
+          return TomlDoc {
+            ..doc, lines: set_line(doc.lines, i, LEntry(k, klo, khi, nval, ntext, start))
+          }
         }
         _ -> return doc
       }
@@ -497,7 +642,7 @@ pub fn set_string(doc: TomlDoc, tname: Option[String], key: String, value: Strin
     None -> ()
   }
   let ntext = key ++ " = " ++ quoted
-  let nline = LEntry(key, TStr(value, str.len(key) + 3, str.len(ntext)), ntext)
+  let nline = LEntry(key, 0, 0, TStr(value, str.len(key) + 3, str.len(ntext)), ntext, 0)
   match last_index_of_table(doc, tname) {
     Some(idx) ->
       TomlDoc { ..doc, lines: insert_line(doc.lines, idx + 1, nline) }
@@ -514,7 +659,7 @@ pub fn set_string(doc: TomlDoc, tname: Option[String], key: String, value: Strin
             }
           }
           if not blank { lines = lines ++ [LBlank("")] }
-          lines = lines ++ [LHeader(t, "[" ++ t ++ "]")]
+          lines = lines ++ [LHeader(t, 0, 0, "[" ++ t ++ "]")]
         }
         None -> ()
       }
@@ -545,7 +690,7 @@ pub fn remove_table(doc: TomlDoc, name: String) -> TomlDoc = {
   var i = 0
   for l in doc.lines {
     match l {
-      LHeader(nm, _) -> { if nm == name && start < 0 { start = i } }
+      LHeader(nm, _, _, _) -> { if nm == name && start < 0 { start = i } }
       _ -> ()
     }
     i = i + 1
@@ -554,7 +699,7 @@ pub fn remove_table(doc: TomlDoc, name: String) -> TomlDoc = {
   var end = start + 1
   while end < len(doc.lines) {
     let stop = match doc.lines[end] {
-      LHeader(_, _) -> true
+      LHeader(_, _, _, _) -> true
       _ -> false
     }
     if stop { break } else { end = end + 1 }
@@ -587,6 +732,21 @@ test "parse and render round-trip byte-identically" {
   }
 }
 
+test "spans are absolute source offsets" {
+  let text = "# top\nname = \"web\"\n\n[deps]\n"
+  let (doc, errs) = parse(text)
+  assert len(errs) == 0
+  # `name` starts at offset 6; its value `"web"` spans 13..18
+  match entry(doc, None, "name") {
+    Some(TStr(_, lo, hi)) -> {
+      assert lo == 13
+      assert hi == 18
+    }
+    _ -> { assert false }
+  }
+  assert header_span(doc, "deps") == Some((21, 25))
+}
+
 test "set_string replaces just the value and keeps trailing comments" {
   let text = "schema = 1\nname = \"web\"   # keep me\n"
   let (doc, _) = parse(text)
@@ -612,13 +772,20 @@ test "remove and remove_table drop their lines" {
   assert render(remove_table(doc, "deps.w")) == "schema = 1\n\n[deps]\na = \"x\"\n\n"
 }
 
-test "subset violations surface as errors, not silent misreads" {
+test "subset violations surface as span diagnostics, not silent misreads" {
   let (_, e1) = parse("a = 'lit'\n")
-  assert e1 == ["literal strings are not supported in dawn.toml"]
-  let (_, e2) = parse("a = 1.5\n")
-  assert e2 == ["floats are not supported in dawn.toml"]
+  assert len(e1) == 1
+  assert e1[0].msg == "literal strings are not supported in dawn.toml"
+  assert e1[0].lo == 4
+  assert e1[0].hi == 5
+  let (_, e2) = parse("x = 1\na = 1.5\n")
+  assert e2[0].msg == "floats are not supported in dawn.toml"
+  # the span sits on the second line, extended over the whole value
+  assert e2[0].lo == 10
+  assert e2[0].hi == 13
   let (_, e3) = parse("[deps]\nx = \"a\"\nx = \"b\"\n")
-  assert e3 == ["key `x` is defined more than once"]
+  assert e3[0].msg == "key `x` is defined more than once"
+  assert e3[0].lo == 15
   let (doc4, e4) = parse("a = [\"x\", \"y\",]\n")
   assert len(e4) == 0
   match entry(doc4, None, "a") {

@@ -158,4 +158,85 @@ check "doc site" "$k" "$d"
 "${SH[@]}" doc examples/traits.dawn > "$OUT/d.txt" 2>&1 && d=0 || d=$?
 check "doc traits example" "$k" "$d"
 
-echo "OK: selfhost run/test/doc/add/__pkghash agree with the Kotlin CLI"
+# ---- error paths (M8 phase 3): the selfhost toolchain renders human
+# diagnostics — spans, carets, hints, count lines — byte for byte ----
+
+cat > "$OUT/broken.dawn" <<'EOF'
+fn f(x: Int) -> String = x + 1
+
+pub fn main() -> Unit !io = {
+  let y = undefined_fn(2)
+  println(f(3))
+}
+EOF
+"$DAWN" run "$OUT/broken.dawn" > "$OUT/k.txt" 2>&1 && k=0 || k=$?
+"${SH[@]}" run "$OUT/broken.dawn" > "$OUT/d.txt" 2>&1 && d=0 || d=$?
+check "run (compile errors render)" "$k" "$d"
+
+# doc renders the same diagnostics but no count line
+"$DAWN" doc "$OUT/broken.dawn" > "$OUT/k.txt" 2>&1 && k=0 || k=$?
+"${SH[@]}" doc "$OUT/broken.dawn" > "$OUT/d.txt" 2>&1 && d=0 || d=$?
+check "doc (compile errors, no count line)" "$k" "$d"
+
+# manifest validation is the selfhost authority now (manifestv.dawn)
+BADMF="$OUT/badmf"
+mkdir -p "$BADMF/src"
+printf 'name = "x"\nschema = 1\nweird = true\n\n[stuff]\na = 1.5\n' > "$BADMF/dawn.toml"
+printf 'pub fn main() -> Unit !io = println("hi")\n' > "$BADMF/src/main.dawn"
+"$DAWN" build "$BADMF" -o "$OUT/x.jar" > "$OUT/k.txt" 2>&1 && k=0 || k=$?
+"${SH[@]}" build "$BADMF" -o "$OUT/x.jar" > "$OUT/d.txt" 2>&1 && d=0 || d=$?
+check "build (invalid manifest renders)" "$k" "$d"
+
+"$DAWN" doc "$BADMF" > "$OUT/k.txt" 2>&1 && k=0 || k=$?
+"${SH[@]}" doc "$BADMF" > "$OUT/d.txt" 2>&1 && d=0 || d=$?
+check "doc (loader reports manifest diagnostics)" "$k" "$d"
+
+# toml syntax errors, including the Kotlin quirk of rendering parser
+# diagnostics twice on `add`
+BADTOML="$OUT/badtoml"
+mkdir -p "$BADTOML/src"
+printf 'schema = 1\nname = "x\nver = 1.5.2\n' > "$BADTOML/dawn.toml"
+printf 'pub fn main() -> Unit !io = println("hi")\n' > "$BADTOML/src/main.dawn"
+"$DAWN" run "$BADTOML" > "$OUT/k.txt" 2>&1 && k=0 || k=$?
+"${SH[@]}" run "$BADTOML" > "$OUT/d.txt" 2>&1 && d=0 || d=$?
+check "run (toml syntax errors render)" "$k" "$d"
+
+"$DAWN" add ../nowhere --dir "$BADTOML" > "$OUT/k.txt" 2>&1 && k=0 || k=$?
+"${SH[@]}" add ../nowhere --dir "$BADTOML" > "$OUT/d.txt" 2>&1 && d=0 || d=$?
+check "add (invalid manifest renders twice-parsed diags)" "$k" "$d"
+
+# url dep tables and duplicate coordinates
+BADURL="$OUT/badurl"
+mkdir -p "$BADURL/src"
+printf 'schema = 1\nname = "x"\n\n[deps.g]\nurl = "ftp://z"\nversion = "1.0"\n' > "$BADURL/dawn.toml"
+printf 'pub fn main() -> Unit !io = println("hi")\n' > "$BADURL/src/main.dawn"
+"$DAWN" build "$BADURL" -o "$OUT/x.jar" > "$OUT/k.txt" 2>&1 && k=0 || k=$?
+"${SH[@]}" build "$BADURL" -o "$OUT/x.jar" > "$OUT/d.txt" 2>&1 && d=0 || d=$?
+check "build (url dep validation)" "$k" "$d"
+
+DUPJ="$OUT/dupj"
+mkdir -p "$DUPJ/src"
+printf 'schema = 1\nname = "x"\n\n[java-deps]\na = "g:a:1"\nb = "g:a:2"\nc = "bad::x"\n' > "$DUPJ/dawn.toml"
+printf 'pub fn main() -> Unit !io = println("hi")\n' > "$DUPJ/src/main.dawn"
+"$DAWN" build "$DUPJ" -o "$OUT/x.jar" > "$OUT/k.txt" 2>&1 && k=0 || k=$?
+"${SH[@]}" build "$DUPJ" -o "$OUT/x.jar" > "$OUT/d.txt" 2>&1 && d=0 || d=$?
+check "build (duplicate java-deps coordinates)" "$k" "$d"
+
+# CliError shapes: usage lines, missing targets, missing mains, wrong suffix
+NOMAIN="$OUT/nomain"
+mkdir -p "$NOMAIN/src"
+printf 'schema = 1\nname = "nomain"\n' > "$NOMAIN/dawn.toml"
+printf 'pub fn helper() -> Int = 1\n' > "$NOMAIN/src/main.dawn"
+printf 'fn g() -> Int = 2\n' > "$OUT/notest.dawn"
+printf 'hello\n' > "$OUT/plain.txt"
+for case in "run $NOMAIN" "build $NOMAIN" "test $OUT/notest.dawn" \
+    "run $OUT/nope" "run $OUT/plain.txt" "fmt $OUT/nope" "doc $OUT/nope" \
+    "run" "test" "build" "fmt" "doc"; do
+  # shellcheck disable=SC2086
+  "$DAWN" $case > "$OUT/k.txt" 2>&1 && k=0 || k=$?
+  # shellcheck disable=SC2086
+  "${SH[@]}" $case > "$OUT/d.txt" 2>&1 && d=0 || d=$?
+  check "cli error ($case)" "$k" "$d"
+done
+
+echo "OK: selfhost run/test/doc/add/__pkghash and every error path agree with the Kotlin CLI"

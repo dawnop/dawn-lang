@@ -1,0 +1,129 @@
+# Human diagnostic rendering — the Kotlin Diagnostic.render port, byte for
+# byte: `error: msg`, a `--> path:line:col` arrow, the offending source line
+# with a caret run under the span, and an optional `= hint:` line. All offsets
+# are UTF-16 units (the span currency of the whole front end).
+
+use std/str
+use std/list
+use std/io
+use std/map
+use lexer.{line_starts_of, utf16_slice}
+use token.{Diag}
+
+## UTF-16 length of `s` (surrogate pairs count as two units).
+pub fn utf16_len(s: String) -> Int = {
+  var n = 0
+  for c in code_points(s) { n = n + if c >= 65536 { 2 } else { 1 } }
+  n
+}
+
+## Greatest index i with starts[i] <= offset (starts[0] == 0).
+fn line_index(starts: List[Int], offset: Int) -> Int = {
+  var lo = 0
+  var hi = len(starts) - 1
+  while lo < hi {
+    let mid = (lo + hi + 1) / 2
+    if starts[mid] <= offset { lo = mid } else { hi = mid - 1 }
+  }
+  lo
+}
+
+fn repeat(s: String, n: Int) -> String = {
+  var out = ""
+  var i = 0
+  while i < n {
+    out = out ++ s
+    i = i + 1
+  }
+  out
+}
+
+fn min2(a: Int, b: Int) -> Int = if a < b { a } else { b }
+
+fn max2(a: Int, b: Int) -> Int = if a > b { a } else { b }
+
+## Render one diagnostic against its source text (label is always `error`:
+## the Kotlin sink's warn() has no call sites, so the selfhost Diag carries
+## no severity).
+pub fn render(path: String, text: String, d: Diag) -> String = {
+  let starts = line_starts_of(text)
+  let total = utf16_len(text)
+  let li = line_index(starts, d.lo)
+  let line = li + 1
+  let line_start = starts[li]
+  let col = d.lo - line_start + 1
+  let line_end = if li + 1 < len(starts) { starts[li + 1] - 1 } else { total }
+  let src = utf16_slice(text, line_start, line_end)
+  let src_len = line_end - line_start
+  var out = "error: " ++ d.msg ++ "\n"
+  out = out ++ "  --> " ++ path ++ ":" ++ to_string(line) ++ ":" ++ to_string(col) ++ "\n"
+  let line_no = to_string(line)
+  let gutter = repeat(" ", str.len(line_no) + 1)
+  out = out ++ gutter ++ "|\n"
+  out = out ++ line_no ++ " | " ++ src ++ "\n"
+  let caret_len = min2(max2(d.hi - d.lo, 1), max2(src_len - (col - 1), 1))
+  out = out ++ gutter ++ "| " ++ repeat(" ", col - 1) ++ repeat("^", caret_len) ++ "\n"
+  if d.hint != "" { out = out ++ "  = hint: " ++ d.hint ++ "\n" }
+  out
+}
+
+## `1 error` / `N errors` — the count line compile failures end with.
+pub fn count_line(n: Int) -> String =
+  if n == 1 { "1 error" } else { to_string(n) ++ " errors" }
+
+## Manifest diagnostics render the same way compile errors do, count line
+## included (the Kotlin renderManifestDiagnostics).
+pub fn render_manifest(path: String, text: String, ds: List[Diag]) -> String = {
+  var out = ""
+  for d in ds { out = out ++ render(path, text, d) }
+  out ++ count_line(len(ds)) ++ "\n"
+}
+
+## Render (path, diagnostic) pairs in order, reading each file's text once
+## (the render arithmetic needs the source; diags carry only the path).
+pub fn render_all(diags: List[(String, Diag)]) -> String !io = {
+  var texts: Map[String, String] = map.empty()
+  var out = ""
+  for pr in diags {
+    let (path, d) = pr
+    let text = match map.get(texts, path) {
+      Some(t) -> t
+      None -> {
+        let t = match io.read_file(path) {
+          Ok(s) -> s
+          Err(_) -> ""
+        }
+        texts = map.insert(texts, path, t)
+        t
+      }
+    }
+    out = out ++ render(path, text, d)
+  }
+  out
+}
+
+test "renders the arrow, source line, caret and hint" {
+  let text = "fn f() -> Int = true\n"
+  let d = Diag { msg: "type mismatch", lo: 16, hi: 20, hint: "return an Int" }
+  let r = render("a.dawn", text, d)
+  assert r ==
+    "error: type mismatch\n" ++
+    "  --> a.dawn:1:17\n" ++
+    "  |\n" ++
+    "1 | fn f() -> Int = true\n" ++
+    "  |                 ^^^^\n" ++
+    "  = hint: return an Int\n"
+}
+
+test "caret clamps to the line and to one unit minimum" {
+  let text = "ab\ncd\n"
+  # zero-width span at end of line 2 -> single caret past the text
+  let d = Diag { msg: "m", lo: 5, hi: 5, hint: "" }
+  let r = render("x", text, d)
+  assert r == "error: m\n  --> x:2:3\n  |\n2 | cd\n  |   ^\n"
+}
+
+test "count line pluralizes" {
+  assert count_line(1) == "1 error"
+  assert count_line(2) == "2 errors"
+}
