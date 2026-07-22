@@ -38,7 +38,7 @@ use tast.{
   TUnOp, UNeg, UNot, UBnot, TStrPart, TSPText, TSPInterp, TArm, TJavaCall,
   TPat, TPWild, TPBind, TPLit, TPTuple, TPList, TPCtor,
   TStmt, TSLet, TSLetPat, TSLocalFn, TSAssign, TSExpr, TSAssert, TSWhile, TSFor,
-  TFun, TConst, TModule
+  TFun, TConst, TModule, WitRef, WForward, WConcrete
 }
 use types.{
   adt_self_ty, Ty, TyInt, TyFloat, TyBool, TyString, TyBytes, TyCursor, TyUnit, TyNever,
@@ -2490,7 +2490,7 @@ pub fn check_unary(
         let cx1 = cerr(cx, "not expects Bool, got " ++ ty_show(cx.adts, t), olo, ohi)
         (cx1, TyError, XError(lo, hi))
       } else {
-        (cx, TyBool, XUnary(UNot, operand, lo, hi))
+        (cx, TyBool, XUnary(UNot, operand, lo, hi, TyBool))
       }
     }
     OpNeg -> {
@@ -2498,7 +2498,7 @@ pub fn check_unary(
         let cx1 = cerr(cx, "negation expects a number, got " ++ ty_show(cx.adts, t), olo, ohi)
         (cx1, TyError, XError(lo, hi))
       } else {
-        (cx, t, XUnary(UNeg, operand, lo, hi))
+        (cx, t, XUnary(UNeg, operand, lo, hi, t))
       }
     }
     OpBnot -> {
@@ -2506,7 +2506,7 @@ pub fn check_unary(
         let cx1 = cerr(cx, "`~` expects Int, got " ++ ty_show(cx.adts, t), olo, ohi)
         (cx1, TyError, XError(lo, hi))
       } else {
-        (cx, TyInt, XUnary(UBnot, operand, lo, hi))
+        (cx, TyInt, XUnary(UBnot, operand, lo, hi, TyInt))
       }
     }
   }
@@ -2550,16 +2550,16 @@ test "unary checking types and poisons" {
 ## specialized here for Ord over `<' family operators): a concrete subject
 ## resolves through the impl table; the caller's own rigid type parameter
 ## forwards the caller's dictionary (which every enclosing lambda captures).
-## Returns has_ord for the typed node.
-pub fn resolve_ord_witness(cx: Cx, t: Ty, lo: Int, hi: Int) -> (Cx, Bool) = {
-  if is_errorish(t) { return (cx, false) }
+## Returns the witness for the typed node.
+pub fn resolve_ord_witness(cx: Cx, t: Ty, lo: Int, hi: Int) -> (Cx, Option[WitRef]) = {
+  if is_errorish(t) { return (cx, no_wit()) }
   match t {
     TyVar(_, vid) ->
       match map.get(cx.dict_syms, (vid, ORD_ID)) {
         None -> {
           let cx1 = cerr_h(cx, "values of type " ++ ty_show(cx.adts, t) ++
               " cannot be ordered", lo, hi, "add the bound: [" ++ ty_show(cx.adts, t) ++ ": Ord]")
-          (cx1, false)
+          (cx1, no_wit())
         }
         Some(sym) -> {
           var stack: List[LambdaCx] = []
@@ -2572,12 +2572,12 @@ pub fn resolve_ord_witness(cx: Cx, t: Ty, lo: Int, hi: Int) -> (Cx, Bool) = {
             if not have { caps = caps ++ [sym] }
             stack = stack ++ [LambdaCx { ..lc, captures: caps }]
           }
-          (Cx { ..cx, lambda_stack: stack }, true)
+          (Cx { ..cx, lambda_stack: stack }, Some(WForward(sym)))
         }
       }
     _ ->
       match map.get(cx.impl_table, (ORD_ID, t)) {
-        Some(_) -> (cx, true)
+        Some(_) -> (cx, Some(WConcrete(ORD_ID, t)))
         None -> {
           let hint: Option[String] = match t {
             TyAdt(aid, _) ->
@@ -2591,7 +2591,7 @@ pub fn resolve_ord_witness(cx: Cx, t: Ty, lo: Int, hi: Int) -> (Cx, Bool) = {
             _ -> None
           }
           (cerr_o(cx, "values of type " ++ ty_show(cx.adts, t) ++ " cannot be ordered",
-            lo, hi, hint), false)
+            lo, hi, hint), no_wit())
         }
       }
   }
@@ -2616,7 +2616,7 @@ pub fn check_binary_typed(
   lo: Int,
   hi: Int
 ) -> (Cx, Ty, TExpr) = {
-  let node = fn(has_ord: Bool) => XBinary(tbin_of(op), left, right, has_ord, olo, ohi, lo, hi)
+  let node = fn(ord: Option[WitRef], t: Ty) => XBinary(tbin_of(op), left, right, ord, olo, ohi, lo, hi, t)
   # one side already failed: pick a plausible result type, stay silent
   if is_errorish(lt) || is_errorish(rt) {
     let t = match op {
@@ -2634,13 +2634,13 @@ pub fn check_binary_typed(
         }
       _ -> TyBool
     }
-    return (cx, t, node(false))
+    return (cx, t, node(no_wit(), t))
   }
   match op {
     OpAdd | OpSub | OpMul | OpDiv | OpMod -> {
       if not is_numeric(lt) {
         return (cerr(cx, "arithmetic expects numbers, left side is " ++ ty_show(cx.adts, lt),
-          llo, lhi), TyError, node(false))
+          llo, lhi), TyError, node(no_wit(), TyError))
       }
       if lt != rt {
         let hint: Option[String] = if is_numeric(rt) {
@@ -2649,24 +2649,24 @@ pub fn check_binary_typed(
           None
         }
         return (cerr_o(cx, "both sides must have the same type: " ++ ty_show(cx.adts, lt) ++
-            " vs " ++ ty_show(cx.adts, rt), olo, ohi, hint), TyError, node(false))
+            " vs " ++ ty_show(cx.adts, rt), olo, ohi, hint), TyError, node(no_wit(), TyError))
       }
-      (cx, lt, node(false))
+      (cx, lt, node(no_wit(), lt))
     }
     OpBand | OpBor | OpBxor | OpShl | OpShr | OpUshr -> {
       if lt != TyInt {
         return (cerr(cx, "bitwise operators expect Int, left side is " ++ ty_show(cx.adts, lt),
-          llo, lhi), TyError, node(false))
+          llo, lhi), TyError, node(no_wit(), TyError))
       }
       if rt != TyInt {
         return (cerr(cx, "bitwise operators expect Int, right side is " ++ ty_show(cx.adts, rt),
-          rlo, rhi), TyError, node(false))
+          rlo, rhi), TyError, node(no_wit(), TyError))
       }
-      (cx, TyInt, node(false))
+      (cx, TyInt, node(no_wit(), TyInt))
     }
     OpConcat -> {
-      if lt == TyString && rt == TyString { return (cx, TyString, node(false)) }
-      if lt == TyBytes && rt == TyBytes { return (cx, TyBytes, node(false)) }
+      if lt == TyString && rt == TyString { return (cx, TyString, node(no_wit(), TyString)) }
+      if lt == TyBytes && rt == TyBytes { return (cx, TyBytes, node(no_wit(), TyBytes)) }
       let both_lists = match lt {
         TyList(_) ->
           match rt {
@@ -2679,47 +2679,51 @@ pub fn check_binary_typed(
         if lt != rt {
           return (cerr(cx, "`++` needs lists of the same element type: " ++
               ty_show(cx.adts, lt) ++ " vs " ++ ty_show(cx.adts, rt), olo, ohi),
-            TyError, node(false))
+            TyError, node(no_wit(), TyError))
         }
-        return (cx, lt, node(false))
+        return (cx, lt, node(no_wit(), lt))
       }
       (cerr_h(cx, "`++` concatenates Strings, Bytes or Lists, got " ++ ty_show(cx.adts, lt) ++
           " ++ " ++ ty_show(cx.adts, rt), olo, ohi,
-        "use + for numbers; interpolation \"{x}{y}\" also builds strings"), TyError, node(false))
+        "use + for numbers; interpolation \"{x}{y}\" also builds strings"), TyError,
+        node(no_wit(), TyError))
     }
     OpEq | OpNeq -> {
       if contains_fn(lt) || contains_fn(rt) {
         return (cerr_h(cx, "functions cannot be compared", olo, ohi,
-          "compare the values they produce, not the functions themselves"), TyError, node(false))
+          "compare the values they produce, not the functions themselves"), TyError,
+          node(no_wit(), TyError))
       }
       if lt != rt {
         return (cerr(cx, "== requires both sides to have the same type: " ++
-            ty_show(cx.adts, lt) ++ " vs " ++ ty_show(cx.adts, rt), olo, ohi), TyError, node(false))
+            ty_show(cx.adts, lt) ++ " vs " ++ ty_show(cx.adts, rt), olo, ohi), TyError,
+          node(no_wit(), TyError))
       }
-      (cx, TyBool, node(false))
+      (cx, TyBool, node(no_wit(), TyBool))
     }
     OpLt | OpLe | OpGt | OpGe -> {
       if lt != rt {
         return (cerr(cx, "comparison requires both sides to have the same type: " ++
-            ty_show(cx.adts, lt) ++ " vs " ++ ty_show(cx.adts, rt), olo, ohi), TyError, node(false))
+            ty_show(cx.adts, lt) ++ " vs " ++ ty_show(cx.adts, rt), olo, ohi), TyError,
+          node(no_wit(), TyError))
       }
       # native fast path; Cursor orders too (spec §11)
       if lt == TyInt || lt == TyFloat || lt == TyString || lt == TyCursor {
-        return (cx, TyBool, node(false))
+        return (cx, TyBool, node(no_wit(), TyBool))
       }
-      let (cx1, has_ord) = resolve_ord_witness(cx, lt, olo, ohi)
-      (cx1, TyBool, node(has_ord))
+      let (cx1, w) = resolve_ord_witness(cx, lt, olo, ohi)
+      (cx1, TyBool, node(w, TyBool))
     }
     OpAnd | OpOr -> {
       if lt != TyBool {
         return (cerr(cx, "logical operators expect Bool, left side is " ++ ty_show(cx.adts, lt),
-          llo, lhi), TyError, node(false))
+          llo, lhi), TyError, node(no_wit(), TyError))
       }
       if rt != TyBool {
         return (cerr(cx, "logical operators expect Bool, right side is " ++ ty_show(cx.adts, rt),
-          rlo, rhi), TyError, node(false))
+          rlo, rhi), TyError, node(no_wit(), TyError))
       }
-      (cx, TyBool, node(false))
+      (cx, TyBool, node(no_wit(), TyBool))
     }
   }
 }
@@ -2857,7 +2861,8 @@ pub fn check_loop_jump(cx: Cx, kw: String, lo: Int, hi: Int) -> (Cx, Bool) = {
 ## expr? — unwrap Ok/Some or early-return the Err/None (spec §8.1).
 pub fn check_propagate_typed(cx: Cx, ot: Ty, operand: TExpr, lo: Int, hi: Int) -> (Cx, Ty, TExpr) = {
   if is_errorish(ot) { return (cx, TyError, XError(lo, hi)) }
-  let node = XPropagate(operand, lo, hi)
+  # the node closes over the result type once it is known
+  let node = fn(t: Ty) => XPropagate(operand, lo, hi, t)
   # inside a lambda, ? returns from the lambda — its return type must be known
   var sig_ret = TyError
   if len(cx.lambda_stack) > 0 {
@@ -2896,7 +2901,7 @@ pub fn check_propagate_typed(cx: Cx, ot: Ty, operand: TExpr, lo: Int, hi: Int) -
             "`?` on an Option requires the function to return Option[...], but it returns " ++
               ty_show(cx.adts, sig_ret), lo, hi), TyError, XError(lo, hi))
         }
-        return (cx, targs[0], node)
+        return (cx, targs[0], node(targs[0]))
       }
       if aid == RESULT_ID {
         match sig_ret {
@@ -2912,7 +2917,7 @@ pub fn check_propagate_typed(cx: Cx, ot: Ty, operand: TExpr, lo: Int, hi: Int) -
                 "v0.1 has no automatic error conversion; match and rewrap the error"),
                 TyError, XError(lo, hi))
             }
-            return (cx, targs[0], node)
+            return (cx, targs[0], node(targs[0]))
           }
           _ -> return (cerr(cx,
             "`?` on a Result requires the function to return Result[...], but it returns " ++
@@ -2975,7 +2980,7 @@ pub fn check_unwrap_typed(cx: Cx, ot: Ty, operand: TExpr, msg: String, lo: Int, 
   match ot {
     TyAdt(aid, targs) ->
       if aid == OPTION_ID {
-        (cx, targs[0], XUnwrap(operand, msg, lo, hi))
+        (cx, targs[0], XUnwrap(operand, msg, lo, hi, targs[0]))
       } else {
         let hint = if aid == RESULT_ID {
           "`!` unwraps an Option; on a Result use `?` to propagate, or match the Ok/Err"
@@ -3073,7 +3078,10 @@ pub fn check_field_access_typed(
         j = j + 1
       }
       let em: Map[Int, Eff] = map.empty()
-      (cx, subst(fty, m, em), XField(target, idx, lo, hi))
+      {
+        let rt = subst(fty, m, em)
+        (cx, rt, XField(target, idx, lo, hi, rt))
+      }
     }
     _ -> (cx, TyError, XError(lo, hi))
   }
@@ -3114,7 +3122,7 @@ test "field access follows record shape with substitution" {
   }
   let (cx2, t, x) = check_field_access_typed(cx, TyAdt(aid, [TyInt]), XError(0, 1), "v", 2, 3, 0, 3)
   assert t == TyInt
-  assert x == XField(XError(0, 1), 0, 0, 3)
+  assert x == XField(XError(0, 1), 0, 0, 3, TyInt)
   let (cx3, t2, _) = check_field_access_typed(cx, TyAdt(aid, [TyInt]), XError(0, 1), "w", 2, 3, 0, 3)
   assert cx3.diags[0].msg == "`Box` has no field `w`"
   # a single-character name never triggers a guess; the fields list shows instead
@@ -4154,14 +4162,15 @@ pub fn check_ctor_value(
   var params: List[Ty] = []
   for f in ci.fields { params = params ++ [f.ty] }
   let ret = adt_self_ty(a)
-  let node = XCtorValue(aid, cslot, lo, hi)
+  let node = fn(t: Ty) => XCtorValue(aid, cslot, lo, hi, t)
   if len(eps) != len(params) {
     return (cerr_h(cx, "`" ++ ci.name ++ "` takes " ++ to_string(len(params)) ++
         " field(s), but " ++ ty_show(cx.adts, TyFn(eps, eret, eeff)) ++ " is expected", lo, hi,
       "constructor: " ++ ctor_render(cx.adts, ci)), TyError, XError(lo, hi))
   }
   if len(a.tparams) == 0 {
-    return (cx, TyFn(params, ret, EPure), node)
+    let t0 = TyFn(params, ret, EPure)
+    return (cx, t0, node(t0))
   }
   var m: Map[Int, Ty] = map.empty()
   var em: Map[Int, Eff] = map.empty()
@@ -4194,7 +4203,8 @@ pub fn check_ctor_value(
   }
   var ips: List[Ty] = []
   for d in params { ips = ips ++ [subst(d, m, em)] }
-  (cx, TyFn(ips, subst(ret, m, em), EPure), node)
+  let t1 = TyFn(ips, subst(ret, m, em), EPure)
+  (cx, t1, node(t1))
 }
 
 ## Satisfy one trait requirement at a use site (the general resolveWitness):
@@ -4207,8 +4217,8 @@ pub fn resolve_witness(
   lo: Int,
   hi: Int,
   requirer: String
-) -> (Cx, Bool) = {
-  if is_errorish(t) { return (cx, false) }
+) -> (Cx, Option[WitRef]) = {
+  if is_errorish(t) { return (cx, no_wit()) }
   let tr = trait_of(cx.traits, trait_id)
   match t {
     TyVar(_, vid) ->
@@ -4217,7 +4227,7 @@ pub fn resolve_witness(
           let ts = ty_show(cx.adts, t)
           (cerr_h(cx, requirer ++ " requires `" ++ tr.name ++ "[" ++ ts ++ "]`, but `" ++
               ts ++ "` has no such bound", lo, hi,
-            "add the bound: [" ++ ts ++ ": " ++ tr.name ++ "]"), false)
+            "add the bound: [" ++ ts ++ ": " ++ tr.name ++ "]"), no_wit())
         }
         Some(sym) -> {
           var stack: List[LambdaCx] = []
@@ -4230,12 +4240,12 @@ pub fn resolve_witness(
             if not have { caps = caps ++ [sym] }
             stack = stack ++ [LambdaCx { ..lc, captures: caps }]
           }
-          (Cx { ..cx, lambda_stack: stack }, true)
+          (Cx { ..cx, lambda_stack: stack }, Some(WForward(sym)))
         }
       }
     _ ->
       match map.get(cx.impl_table, (trait_id, t)) {
-        Some(_) -> (cx, true)
+        Some(_) -> (cx, Some(WConcrete(trait_id, t)))
         None -> {
           let ts = ty_show(cx.adts, t)
           let hint = if trait_id == ORD_ID && not is_adt(t) {
@@ -4249,7 +4259,7 @@ pub fn resolve_witness(
           } else {
             "v1 impl subjects are named non-generic types and Int/Float/Bool/String"
           }
-          (cerr_h(cx, "no impl of `" ++ tr.name ++ "` for `" ++ ts ++ "`", lo, hi, hint), false)
+          (cerr_h(cx, "no impl of `" ++ tr.name ++ "` for `" ++ ts ++ "`", lo, hi, hint), no_wit())
         }
       }
   }
@@ -4278,9 +4288,9 @@ test "ctor values and witnesses" {
   assert str.contains(cx2.diags[0].msg, "`Some` takes 1 field(s)")
   # witness: Int has a prelude Ord impl, Bool does not
   let (cx3, ok3) = resolve_witness(cx, ORD_ID, TyInt, 0, 4, "`sort`")
-  assert ok3
+  assert ok3 == Some(WConcrete(ORD_ID, TyInt))
   let (cx4, ok4) = resolve_witness(cx, ORD_ID, TyBool, 0, 4, "`sort`")
-  assert not ok4
+  assert ok4 == None
   assert cx4.diags[0].msg == "no impl of `Ord` for `Bool`"
   # Ord over a non-ADT gets the ordering-specific hint (the Kotlin implHint order)
   assert cx4.diags[0].hint == "only Int, Float, String and types with an `impl Ord` can be ordered"
@@ -4346,12 +4356,12 @@ pub fn check_expr(cx: Cx, e: Expr, expected: Option[Ty]) -> (Cx, Ty, TExpr) !io 
                 ty_show(cx4.adts, tt) ++ ")", e_lo(thn), e_hi(thn),
               "add an else branch to produce a value")
           }
-          (cx4, TyUnit, XIf(cndx, thnx, None, lo, hi))
+          (cx4, TyUnit, XIf(cndx, thnx, None, lo, hi, TyUnit))
         }
         Some(eb) -> {
           let (cx4, et, ex) = check_expr(cx3, eb, expected)
           let (cx5, t) = unify_branches(cx4, tt, et, lo, hi, "the if branches")
-          (cx5, t, XIf(cndx, thnx, Some(ex), lo, hi))
+          (cx5, t, XIf(cndx, thnx, Some(ex), lo, hi, t))
         }
       }
     }
@@ -4362,7 +4372,7 @@ pub fn check_expr(cx: Cx, e: Expr, expected: Option[Ty]) -> (Cx, Ty, TExpr) !io 
       }
       if len(elems) == 0 {
         match expected_elem {
-          Some(el) -> return (cx, TyList(el), XListLit([], lo, hi))
+          Some(el) -> return (cx, TyList(el), XListLit([], lo, hi, TyList(el)))
           None -> return (cerr_h(cx, "cannot infer the element type of an empty list", lo, hi,
             "add a type annotation: let xs: List[Int] = []"), TyError, XError(lo, hi))
         }
@@ -4405,7 +4415,7 @@ pub fn check_expr(cx: Cx, e: Expr, expected: Option[Ty]) -> (Cx, Ty, TExpr) !io 
           None -> { txs = txs ++ [XError(lo, hi)] }
         }
       }
-      (cx1, TyList(elem_t), XListLit(txs, lo, hi))
+      (cx1, TyList(elem_t), XListLit(txs, lo, hi, TyList(elem_t)))
     }
     ETupleLit(elems, lo, hi) -> {
       let exps: Option[List[Ty]] = match expected {
@@ -4436,7 +4446,7 @@ pub fn check_expr(cx: Cx, e: Expr, expected: Option[Ty]) -> (Cx, Ty, TExpr) !io 
         txs = txs ++ [tx]
         i = i + 1
       }
-      (cx1, TyTuple(tys), XTupleLit(txs, lo, hi))
+      (cx1, TyTuple(tys), XTupleLit(txs, lo, hi, TyTuple(tys)))
     }
     EPropagate(operand, lo, hi) -> {
       let (cx1, ot, ox) = check_expr(cx, operand, no_expected())
@@ -4469,7 +4479,7 @@ pub fn check_expr(cx: Cx, e: Expr, expected: Option[Ty]) -> (Cx, Ty, TExpr) !io 
             }
             (cx4, TyError, XError(lo, hi))
           } else {
-            (cx4, result, XIndex(tx, ix, on_map, lo, hi))
+            (cx4, result, XIndex(tx, ix, on_map, lo, hi, result))
           }
         }
       }
@@ -4526,7 +4536,7 @@ pub fn check_expr(cx: Cx, e: Expr, expected: Option[Ty]) -> (Cx, Ty, TExpr) !io 
           "Int/Float/Bool/String and List/tuple/record/ADT values of them (spec §7.2)"),
           TyError, XError(lo, hi))
       } else {
-        (cx3, t, XComptime(bx, lo, hi))
+        (cx3, t, XComptime(bx, lo, hi, t))
       }
     }
     EUnsafePure(body, lo, hi) -> check_unsafe_pure(cx, body, expected, lo, hi)
@@ -4590,6 +4600,8 @@ fn line_of(cx: Cx, off: Int) -> Int = {
 
 fn no_int() -> Option[Int] = None
 
+fn no_wit() -> Option[WitRef] = None
+
 fn no_tref() -> Option[TypeRef] = None
 
 fn no_ty2() -> Option[Ty] = None
@@ -4620,7 +4632,7 @@ fn is_list_ty(t: Ty) -> Bool =
 
 fn is_java_node(x: TExpr) -> Bool =
   match x {
-    XJava(_, _, _) -> true
+    XJava(_, _, _, _) -> true
     _ -> false
   }
 
@@ -4689,7 +4701,7 @@ fn check_var(cx: Cx, name: String, expected: Option[Ty], lo: Int, hi: Int) -> (C
   match found {
     Some(id) -> {
       let sym = sym_of(cx1, id)
-      (cx1, sym.ty, XLocal(id, name, lo, hi))
+      (cx1, sym.ty, XLocal(id, name, lo, hi, sym.ty))
     }
     None -> {
       match lookup_fn_sig(cx1, name) {
@@ -4744,7 +4756,7 @@ fn check_unsafe_pure(cx: Cx, body: Expr, expected: Option[Ty], lo: Int, hi: Int)
     }
   }
   # masked: the body's io is deliberately not folded back into the saved record
-  (cx2, t, XUnsafePure(bx, lo, hi))
+  (cx2, t, XUnsafePure(bx, lo, hi, t))
 }
 
 # ---- lambdas and application ----
@@ -4844,7 +4856,7 @@ fn check_lambda(
   let lam_eff = eff_union(cx3.used_effects)
   cx3 = Cx { ..cx3, used_effects: saved_used, eff_witness: saved_wit }
   let t = TyFn(ptys, bt, lam_eff)
-  (cx3, t, XLambda(psyms, pnames, bx, popped.captures, lo, hi))
+  (cx3, t, XLambda(psyms, pnames, bx, popped.captures, lo, hi, t))
 }
 
 fn check_apply(cx: Cx, target: Expr, args: List[Expr], lo: Int, hi: Int) -> (Cx, Ty, TExpr) !io = {
@@ -4958,7 +4970,7 @@ fn check_apply(cx: Cx, target: Expr, args: List[Expr], lo: Int, hi: Int) -> (Cx,
     }
   }
   cx1 = record_effect(cx1, feff, e_lo(target), e_hi(target), "the applied function")
-  (cx1, fret, XApply(fx, txs, lo, hi))
+  (cx1, fret, XApply(fx, txs, lo, hi, fret))
 }
 
 # ---- blocks and statements ----
@@ -4995,7 +5007,7 @@ fn check_block(
   # a Java call in tail position of a Unit block is a discard, like in
   # statement position (spec §9) — codegen pops the leftover value
   let rt = if expected == Some(TyUnit) && t != TyUnit && tail_java { TyUnit } else { t }
-  (cx1, rt, XBlock(tstmts, ttail, lo, hi))
+  (cx1, rt, XBlock(tstmts, ttail, lo, hi, rt))
 }
 
 fn check_stmt(cx: Cx, s: Stmt) -> (Cx, TStmt) !io =
@@ -5030,7 +5042,9 @@ fn check_stmt(cx: Cx, s: Stmt) -> (Cx, TStmt) !io =
         t = TyError
       }
       let (cxc, sid) = declare(cx1, name, t, mutable, lo, hi)
-      (cxc, TSLet(Some(sid), name, ix, lo, hi))
+      # `_` binds nothing: codegen discards the value (sym None)
+      let bind: Option[Int] = if name == "_" { None } else { Some(sid) }
+      (cxc, TSLet(bind, name, ix, lo, hi))
     }
     SLocalFn(name, params, ret, effs, body, nlo, nhi, lo, hi) ->
       check_local_fn(cx, name, params, ret, effs, body, nlo, nhi, lo, hi)
@@ -5246,7 +5260,7 @@ fn check_local_fn(
     _ -> ()
   }
   match lam {
-    XLambda(psyms, pnames, bx, caps, _, _) -> {
+    XLambda(psyms, pnames, bx, caps, ..) -> {
       var caps2: List[Int] = []
       for c in caps {
         if c != sid { caps2 = caps2 ++ [c] }
@@ -5374,7 +5388,7 @@ fn check_call(
         i = i + 1
       }
       cx1 = record_effect(cx1, leff, clo, chi, callee)
-      return (cx1, lret, XCallDyn(sid, callee, txs, lo, hi))
+      return (cx1, lret, XCallDyn(sid, callee, txs, lo, hi, lret))
     }
     None -> ()
   }
@@ -5482,24 +5496,28 @@ fn check_call(
       TyError, XError(lo, hi))
   }
   # trait bounds: each (type parameter, bound) pair needs a dictionary
-  var has_witnesses = false
+  var wits: List[WitRef] = []
   var any_constraint = false
   for bs in s.constraints {
     if len(bs) > 0 { any_constraint = true }
   }
   if any_constraint {
     var all_ok = true
+    var ws: List[WitRef] = []
     var i2 = 0
     for tp in s.tparams {
       for tr_id in bounds_of(s, i2) {
-        let (cxa, ok) = resolve_witness(cx1, tr_id, subst(tp, m, em), clo, chi,
+        let (cxa, w) = resolve_witness(cx1, tr_id, subst(tp, m, em), clo, chi,
           "`" ++ callee ++ "`")
         cx1 = cxa
-        if not ok { all_ok = false }
+        match w {
+          Some(wr) -> { ws = ws ++ [wr] }
+          None -> { all_ok = false }
+        }
       }
       i2 = i2 + 1
     }
-    has_witnesses = all_ok
+    if all_ok { wits = ws }
   }
   if s.is_builtin && s.name == "to_string" {
     let t0 = subst(s.param_tys[0], m, em)
@@ -5540,9 +5558,9 @@ fn check_call(
     }
   }
   let node = if s.is_builtin {
-    XCallBuiltin(callee, txs2, lo, hi)
+    XCallBuiltin(callee, txs2, lo, hi, ret)
   } else {
-    XCallFn(s.owner, callee, txs2, has_witnesses, lo, hi)
+    XCallFn(s.owner, callee, txs2, wits, s.trait_id, lo, hi, ret)
   }
   (cx1, ret, node)
 }
@@ -5583,7 +5601,7 @@ fn check_ctor_call(
             return (cerr(cx1, "`" ++ cname ++ "` is a constant, not a constructor", cclo, cchi),
               TyError, XError(lo, hi))
           }
-          return (cx1, ct, XConstRef(cname, lo, hi))
+          return (cx1, ct, XConstRef(cname, lo, hi, ct))
         }
         None -> ()
       }
@@ -5851,7 +5869,8 @@ fn check_ctor_call(
       None -> { written = written ++ [XError(lo, hi)] }
     }
   }
-  (cx1, subst(self_ty, m, em), XCtor(aid, cslot, written, slots, spread_tx, lo, hi))
+  let rt = subst(self_ty, m, em)
+  (cx1, rt, XCtor(aid, cslot, written, slots, spread_tx, lo, hi, rt))
 }
 
 # ---- Java interop calls (spec §9) ----
@@ -6183,9 +6202,11 @@ fn finalize_sams(
   args: List[Expr],
   ats: List[Option[Ty]],
   atx: List[Option[TExpr]]
-) -> (Cx, List[Option[TExpr]]) !io = {
+) -> (Cx, List[Option[TExpr]], List[(Int, String, String, List[String], String)], List[Int]) !io = {
   var cx1 = cx
   var atx2 = atx
+  var convs: List[(Int, String, String, List[String], String)] = []
+  var bridges: List[Int] = []
   var i = 0
   for a in args {
     let p = param_at(params, packs, i)
@@ -6203,6 +6224,7 @@ fn finalize_sams(
             if tps == sps && sam_ret_compatible(tret, sm.ret_cls) { fits = true }
           _ -> ()
         }
+        if fits { convs = convs ++ [(i, p, sm.name, sm.param_cls, sm.ret_cls)] }
         if not fits && not is_errorish(t) {
           cx1 = cerr_h(cx1, "this function does not fit `" ++ class_info(p).simple ++ "`",
             e_lo(a), e_hi(a),
@@ -6212,11 +6234,17 @@ fn finalize_sams(
       }
       Some(t) ->
         match t {
+          TyFn(_, _, _) ->
+            match sam_of_nonprim(p) {
+              Some(sm2) -> { convs = convs ++ [(i, p, sm2.name, sm2.param_cls, sm2.ret_cls)] }
+              None -> ()
+            }
           TyList(el) -> {
             # zero-copy bridge: elements cross as their boxed reps, so only
             # scalars, String and Java references may cross (spec §9.6)
             let bridgeable = el == TyInt || el == TyFloat || el == TyBool ||
               el == TyString || is_java_ty(el)
+            if bridgeable { bridges = bridges ++ [i] }
             if not bridgeable {
               cx1 = cerr_h(cx1, "cannot bridge " ++ ty_show(cx1.adts, t) ++ " to `" ++
                   class_info(p).simple ++ "`: element type " ++ ty_show(cx1.adts, el) ++
@@ -6230,7 +6258,7 @@ fn finalize_sams(
     }
     i = i + 1
   }
-  (cx1, atx2)
+  (cx1, atx2, convs, bridges)
 }
 
 ## Java return types → Dawn (spec §9.2): references land wrapped in Option.
@@ -6346,7 +6374,7 @@ fn check_java_call(
     }
     let c = best[0]
     let packs = bph == 0
-    let (cxa, atx2) = finalize_sams(cx1, c.param_cls, packs, args, ats, atx)
+    let (cxa, atx2, convs, bridges) = finalize_sams(cx1, c.param_cls, packs, args, ats, atx)
     cx1 = cxa
     var fin: List[TExpr] = []
     for sl in atx2 {
@@ -6366,13 +6394,15 @@ fn check_java_call(
       target: None,
       args: fin,
       varargs_pack: vp,
+      sam_convs: convs,
+      list_bridges: bridges,
       nlo: nlo,
       nhi: nhi
     }
     # .new returns T — a constructor never returns null; a constructed
     # java.lang.String is an ordinary Dawn String
     let rt = if cls.fqcn == "java.lang.String" { TyString } else { TyJava(cls.fqcn, cls.display) }
-    return (cx1, rt, XJava(call, lo, hi))
+    return (cx1, rt, XJava(call, lo, hi, rt))
   }
   var matching: List[JMethod] = []
   for m0 in methods_of(cls.fqcn) {
@@ -6438,7 +6468,7 @@ fn check_java_call(
   }
   let m3 = best[0]
   let packs = bph == 0
-  let (cxb, atx3) = finalize_sams(cx1, m3.param_cls, packs, args, ats, atx)
+  let (cxb, atx3, convs, bridges) = finalize_sams(cx1, m3.param_cls, packs, args, ats, atx)
   cx1 = cxb
   var fin: List[TExpr] = []
   for sl in atx3 {
@@ -6460,10 +6490,12 @@ fn check_java_call(
     target: target_tx,
     args: fin,
     varargs_pack: vp,
+    sam_convs: convs,
+    list_bridges: bridges,
     nlo: nlo,
     nhi: nhi
   }
-  (cx1, rt, XJava(call, lo, hi))
+  (cx1, rt, XJava(call, lo, hi, rt))
 }
 
 # ---- method calls (x.f(a)) ----
@@ -6613,7 +6645,7 @@ fn check_method_call(
                     "for the function, call it directly: `" ++ name ++ "(<recv>, ...)`"),
                   TyError, XError(lo, hi))
               }
-              let fx = XField(tx, fidx, e_lo(target), nhi)
+              let fx = XField(tx, fidx, e_lo(target), nhi, ftype)
               if len(args) != len(fps) {
                 for a in args {
                   let (cxa, _, _) = check_expr(cx1, a, no_expected())
@@ -6638,7 +6670,7 @@ fn check_method_call(
                 ai = ai + 1
               }
               cx1 = record_effect(cx1, feff, nlo, nhi, name)
-              return (cx1, fret, XApply(fx, txs, lo, hi))
+              return (cx1, fret, XApply(fx, txs, lo, hi, fret))
             }
             _ -> ()
           }
@@ -6792,7 +6824,7 @@ fn check_match(
       cx1 = cerr_h(cx1, "non-exhaustive match, missing: " ++ missing, lo, hi, hint)
     }
   }
-  (cx1, result, XMatch(sx, tarms, lo, hi))
+  (cx1, result, XMatch(sx, tarms, lo, hi, result))
 }
 
 # ---- expression checker tests ----
@@ -6805,7 +6837,7 @@ test "check_expr: literals, locals and undefined variables" {
   assert t == TyInt
   assert len(cx1.diags) == 0
   match node {
-    XLocal(_, n, _, _) -> { assert n == "x" }
+    XLocal(_, n, ..) -> { assert n == "x" }
     _ -> { assert false }
   }
   let (cx2, t2, _) = check_expr(cx0, EVar("nope", 2, 6), no_expected())
@@ -6843,7 +6875,7 @@ test "lambdas infer parameters from expected types and track captures" {
   assert t == TyFn([TyInt], TyInt, EPure)
   assert len(cx1.diags) == 0
   match node {
-    XLambda(_, _, _, caps, _, _) -> { assert len(caps) == 1 }
+    XLambda(_, _, _, caps, ..) -> { assert len(caps) == 1 }
     _ -> { assert false }
   }
   # without context the parameter cannot be inferred
@@ -6885,7 +6917,7 @@ test "calls: builtins, dynamic targets, arity and undefined" {
   let (cx2, t2, node2) = check_expr(cxa, ECall("f", [EInt(1, 2, 3)], 0, 1, 0, 4), no_expected())
   assert t2 == TyBool
   match node2 {
-    XCallDyn(_, n, _, _, _) -> { assert n == "f" }
+    XCallDyn(_, n, ..) -> { assert n == "f" }
     _ -> { assert false }
   }
   # arity mismatch reports the signature
@@ -6918,7 +6950,7 @@ test "ctor calls infer type arguments; constants land as refs" {
   let (cx4, t4, node4) = check_expr(cx, ECtor("LIMIT", [], None, false, 0, 5, 0, 5), no_expected())
   assert t4 == TyInt
   match node4 {
-    XConstRef(n, _, _) -> { assert n == "LIMIT" }
+    XConstRef(n, ..) -> { assert n == "LIMIT" }
     _ -> { assert false }
   }
 }
@@ -6975,7 +7007,7 @@ test "statements: assignment rules and loop jump tracking" {
   assert t == TyUnit
   assert len(cx1.diags) == 0
   match node {
-    XBlock(stmts, _, _, _) ->
+    XBlock(stmts, ..) ->
       match stmts[1] {
         TSWhile(_, _, hj, _, _) -> { assert hj }
         _ -> { assert false }
@@ -7025,7 +7057,7 @@ test "java calls resolve overloads, wrap references and reject unknowns" {
   assert t == TyInt
   assert len(cx1.diags) == 0
   match node {
-    XJava(jc, _, _) -> {
+    XJava(jc, ..) -> {
       assert jc.fqcn == "java.lang.Math"
       assert jc.param_cls == ["long"]
       assert jc.is_static
@@ -7053,7 +7085,7 @@ test "ufcs rewrites x.f(a) into f(x, a) with the receiver pre-typed" {
   assert t == TyInt
   assert len(cx1.diags) == 0
   match node {
-    XCallBuiltin(n, args2, _, _) -> {
+    XCallBuiltin(n, args2, ..) -> {
       assert n == "len"
       assert len(args2) == 1
     }
@@ -7100,6 +7132,27 @@ fn bind_dicts(cx: Cx, s: Sig, nlo: Int, nhi: Int) -> Cx = {
     i = i + 1
   }
   cx1
+}
+
+## The signature's dictionary symbols in bound order (codegen appends them
+## behind the declared parameters in exactly this order).
+fn dict_sym_list(cx: Cx, s: Sig) -> List[Int] = {
+  var out: List[Int] = []
+  var i = 0
+  for tp in s.tparams {
+    for tr_id in bounds_of(s, i) {
+      match tp {
+        TyVar(_, vid) ->
+          match map.get(cx.dict_syms, (vid, tr_id)) {
+            Some(sid) -> { out = out ++ [sid] }
+            None -> ()
+          }
+        _ -> ()
+      }
+    }
+    i = i + 1
+  }
+  out
 }
 
 ## The shared prologue of checkFn and friends: bind the signature frame and
@@ -7172,8 +7225,9 @@ pub fn check_fn(cx: Cx, d: FnDecl, s: Sig, ev: Map[String, Eff]) -> (Cx, TFun) !
       e_lo(d.body), e_hi(d.body))
   }
   cx1 = verify_effects(cx1, "function", d.name, s.eff, "the end of the signature", d.nlo, d.nhi)
+  let dsyms = dict_sym_list(cx1, s)
   cx1 = pop_scope(cx1)
-  (cx1, TFun { name: d.name, sig: s, param_syms: psyms, body: bx, is_test: false })
+  (cx1, TFun { name: d.name, sig: s, param_syms: psyms, dict_syms: dsyms, body: bx, is_test: false })
 }
 
 ## Check the body of a signature-inferred function and seal its signature:
@@ -7200,11 +7254,13 @@ pub fn check_fn_inferred(cx: Cx, d: FnDecl, s: Sig, ev: Map[String, Eff]) -> (Cx
     final_eff = s.eff
   }
   let sealed = Sig { ..s, ret: bt, eff: final_eff, inferring: false }
+  let dsyms = dict_sym_list(cx1, s)
   var cx3 = pop_scope(cx1)
   if map.get(cx3.fns, d.name) == Some(s) {
     cx3 = Cx { ..cx3, fns: map.insert(cx3.fns, d.name, sealed) }
   }
-  (cx3, sealed, TFun { name: d.name, sig: sealed, param_syms: psyms, body: bx, is_test: false })
+  (cx3, sealed,
+    TFun { name: d.name, sig: sealed, param_syms: psyms, dict_syms: dsyms, body: bx, is_test: false })
 }
 
 ## Check a trait's default method body against its own signature (T stays
@@ -7228,8 +7284,9 @@ pub fn check_trait_default(cx: Cx, m2: TraitMethod, s: Sig, body: Expr) -> (Cx, 
       e_lo(body), e_hi(body))
   }
   cx1 = verify_effects(cx1, "method", m2.name, s.eff, "the trait method", m2.nlo, m2.nhi)
+  let dsyms = dict_sym_list(cx1, s)
   cx1 = pop_scope(cx1)
-  (cx1, TFun { name: m2.name, sig: s, param_syms: psyms, body: bx, is_test: false })
+  (cx1, TFun { name: m2.name, sig: s, param_syms: psyms, dict_syms: dsyms, body: bx, is_test: false })
 }
 
 fn test_sig(name: String) -> Sig =
@@ -7276,7 +7333,14 @@ pub fn check_test(cx: Cx, name: String, body: Expr) -> (Cx, TFun) !io = {
   }
   cx1 = pop_scope(cx1)
   cx1 = Cx { ..cx1, in_test: false }
-  (cx1, TFun { name: name, sig: test_sig(name), param_syms: [], body: bx, is_test: true })
+  (cx1, TFun {
+    name: name,
+    sig: test_sig(name),
+    param_syms: [],
+    dict_syms: [],
+    body: bx,
+    is_test: true
+  })
 }
 
 ## The initializer must be pure, comptime-evaluable, and match the declared
@@ -7479,7 +7543,7 @@ pub fn check_module(cx: Cx, m: Module, env: Map[String, ModExports]) -> (Cx, TMo
     }
   }
   fns_out = fns_out ++ impl_tfuns ++ default_tfuns
-  (cx1, TModule { fns: fns_out, consts: tconsts, tests: ttests })
+  (cx1, TModule { fns: fns_out, consts: tconsts, tests: ttests, syms: cx1.syms })
 }
 
 test "check_module: a whole module checks end to end" {

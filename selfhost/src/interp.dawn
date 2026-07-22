@@ -25,7 +25,7 @@ use tast.{
   XError, TBinOp, BAdd, BSub, BMul, BDiv, BMod, BConcat, BEq, BNeq, BLt, BLe,
   BGt, BGe, BAnd, BOr, BBand, BBor, BBxor, BShl, BShr, BUshr,
   TUnOp, UNeg, UNot, UBnot, TStrPart, TSPText, TSPInterp, TArm, TJavaCall,
-  TPat, TPWild, TPBind, TPLit, TPTuple, TPList, TPCtor,
+  TPat, TPWild, TPBind, TPLit, TPTuple, TPList, TPCtor, WitRef, WForward, WConcrete,
   TStmt, TSLet, TSLetPat, TSLocalFn, TSAssign, TSExpr, TSAssert, TSWhile,
   TSFor, TFun, TConst, TModule, x_lo, x_hi, ts_lo, ts_hi
 }
@@ -690,12 +690,12 @@ pub fn ceval(icx: ICx, st0: ESt, env0: Env, e: TExpr) -> ER !io = {
       }
       Ok((st1, env1, VStr(out)))
     }
-    XLocal(sym, name, lo, hi) ->
+    XLocal(sym, name, lo, hi, ..) ->
       match map.get(env, sym) {
         Some(v) -> Ok((st, env, v))
         None -> cerr3(st, env, "`" ++ name ++ "` is not bound (interpreter bug)", lo, hi)
       }
-    XFnValue(_, name, is_builtin, _, lo, hi) ->
+    XFnValue(_, name, is_builtin, _, lo, hi, ..) ->
       if is_builtin {
         Ok((st, env, VBuiltinF(name)))
       } else {
@@ -704,7 +704,7 @@ pub fn ceval(icx: ICx, st0: ESt, env0: Env, e: TExpr) -> ER !io = {
           None -> cerr3(st, env, "missing function `" ++ name ++ "`", lo, hi)
         }
       }
-    XLambda(params, _, body, captures, lo, hi) -> {
+    XLambda(params, _, body, captures, ..) -> {
       var caps: Env = map.empty()
       for c in captures {
         match map.get(env, c) {
@@ -714,12 +714,12 @@ pub fn ceval(icx: ICx, st0: ESt, env0: Env, e: TExpr) -> ER !io = {
       }
       Ok((st, env, VLambda(params, body, caps, None)))
     }
-    XComptime(body, _, _) -> {
+    XComptime(body, ..) -> {
       let fresh: Env = map.empty()
       let (st1, _, v) = ceval(icx, st, fresh, body)?
       Ok((st1, env, v))
     }
-    XUnsafePure(body, _, _) -> {
+    XUnsafePure(body, ..) -> {
       let saved = st.in_up
       match ceval(icx, ESt { ..st, in_up: true }, env, body) {
         Ok(t) -> {
@@ -732,7 +732,7 @@ pub fn ceval(icx: ICx, st0: ESt, env0: Env, e: TExpr) -> ER !io = {
         }
       }
     }
-    XPropagate(operand, _, _) -> {
+    XPropagate(operand, ..) -> {
       let (st1, env1, v) = ceval(icx, st, env, operand)?
       let (aid, ci, fields) = as_adt(v)
       let cname = adt_of(icx.adts, aid).ctors[ci].name
@@ -742,7 +742,7 @@ pub fn ceval(icx: ICx, st0: ESt, env0: Env, e: TExpr) -> ER !io = {
         Err((st1, env1, CReturn(v)))
       }
     }
-    XUnwrap(operand, msg, lo, hi) -> {
+    XUnwrap(operand, msg, lo, hi, ..) -> {
       let (st1, env1, v) = ceval(icx, st, env, operand)?
       let (aid, ci, fields) = as_adt(v)
       if adt_of(icx.adts, aid).ctors[ci].name == "Some" {
@@ -751,7 +751,7 @@ pub fn ceval(icx: ICx, st0: ESt, env0: Env, e: TExpr) -> ER !io = {
         cerr3(st1, env1, "panicked: " ++ msg, lo, hi)
       }
     }
-    XJava(jc, lo, hi) -> eval_java(icx, st, env, jc, lo, hi)
+    XJava(jc, lo, hi, ..) -> eval_java(icx, st, env, jc, lo, hi)
     XReturn(v, _, _) ->
       match v {
         Some(x) -> {
@@ -762,7 +762,7 @@ pub fn ceval(icx: ICx, st0: ESt, env0: Env, e: TExpr) -> ER !io = {
       }
     XBreak(_, _) -> Err((st, env, CBreak))
     XContinue(_, _) -> Err((st, env, CContinue))
-    XIndex(target, index, on_map, lo, hi) -> {
+    XIndex(target, index, on_map, lo, hi, ..) -> {
       let (st1, env1, tv) = ceval(icx, st, env, target)?
       let (st2, env2, iv) = ceval(icx, st1, env1, index)?
       if on_map { return cerr3(st2, env2, "`[]` in comptime indexes List only", lo, hi) }
@@ -775,7 +775,7 @@ pub fn ceval(icx: ICx, st0: ESt, env0: Env, e: TExpr) -> ER !io = {
         Ok((st2, env2, xs[i]))
       }
     }
-    XCallDyn(sym, name, args, lo, hi) -> {
+    XCallDyn(sym, name, args, lo, hi, ..) -> {
       let f = match map.get(env, sym) {
         Some(v) -> v
         None -> return cerr3(st, env, "`" ++ name ++ "` is not bound (interpreter bug)", lo, hi)
@@ -791,7 +791,7 @@ pub fn ceval(icx: ICx, st0: ESt, env0: Env, e: TExpr) -> ER !io = {
       }
       apply_fn(icx, st1, env1, f, vals, lo, hi)
     }
-    XCallBuiltin(name, args, lo, hi) -> {
+    XCallBuiltin(name, args, lo, hi, ..) -> {
       var st1 = st
       var env1 = env
       var vals: List[CValue] = []
@@ -803,8 +803,8 @@ pub fn ceval(icx: ICx, st0: ESt, env0: Env, e: TExpr) -> ER !io = {
       }
       call_builtin(icx, st1, env1, name, vals, lo, hi)
     }
-    XCallFn(owner, name, args, has_witnesses, lo, hi) -> {
-      if has_witnesses {
+    XCallFn(owner, name, args, witnesses, _, lo, hi, ..) -> {
+      if len(witnesses) > 0 {
         return cerrh3(st, env, "`" ++ name ++
             "` uses trait bounds, which comptime cannot evaluate yet", lo, hi,
           "trait dictionaries are a runtime construct in v1")
@@ -858,7 +858,7 @@ pub fn ceval(icx: ICx, st0: ESt, env0: Env, e: TExpr) -> ER !io = {
         call_fn(icx, st1, env1, f, vals, lo, hi)
       }
     }
-    XApply(target, args, lo, hi) -> {
+    XApply(target, args, lo, hi, ..) -> {
       let (st1, env1, f) = ceval(icx, st, env, target)?
       var st2 = st1
       var env2 = env1
@@ -871,7 +871,7 @@ pub fn ceval(icx: ICx, st0: ESt, env0: Env, e: TExpr) -> ER !io = {
       }
       apply_fn(icx, st2, env2, f, vals, lo, hi)
     }
-    XCtor(aid, ci, written, slots, spread, lo, hi) -> {
+    XCtor(aid, ci, written, slots, spread, ..) -> {
       let nfields = len(adt_of(icx.adts, aid).ctors[ci].fields)
       if nfields == 0 { return Ok((st, env, VAdt(aid, ci, []))) }
       var st1 = st
@@ -908,18 +908,18 @@ pub fn ceval(icx: ICx, st0: ESt, env0: Env, e: TExpr) -> ER !io = {
       }
       Ok((st1, env1, VAdt(aid, ci, fields)))
     }
-    XConstRef(name, lo, hi) ->
+    XConstRef(name, lo, hi, ..) ->
       match map.get(icx.consts, name) {
         Some(v) -> Ok((st, env, v))
         None -> cerr3(st, env, "const `" ++ name ++ "` failed to evaluate", lo, hi)
       }
-    XCtorValue(aid, ci, _, _) -> Ok((st, env, VCtorRef(aid, ci)))
-    XField(target, field_idx, _, _) -> {
+    XCtorValue(aid, ci, ..) -> Ok((st, env, VCtorRef(aid, ci)))
+    XField(target, field_idx, ..) -> {
       let (st1, env1, v) = ceval(icx, st, env, target)?
       let (_, _, fields) = as_adt(v)
       Ok((st1, env1, fields[field_idx]))
     }
-    XListLit(elems, _, _) -> {
+    XListLit(elems, ..) -> {
       var st1 = st
       var env1 = env
       var vals: List[CValue] = []
@@ -931,7 +931,7 @@ pub fn ceval(icx: ICx, st0: ESt, env0: Env, e: TExpr) -> ER !io = {
       }
       Ok((st1, env1, VList(vals)))
     }
-    XTupleLit(elems, _, _) -> {
+    XTupleLit(elems, ..) -> {
       var st1 = st
       var env1 = env
       var vals: List[CValue] = []
@@ -943,9 +943,9 @@ pub fn ceval(icx: ICx, st0: ESt, env0: Env, e: TExpr) -> ER !io = {
       }
       Ok((st1, env1, VTuple(vals)))
     }
-    XBinary(op, l, r, has_ord, olo, ohi, _, _) ->
-      eval_binary(icx, st, env, op, l, r, has_ord, olo, ohi)
-    XUnary(op, operand, lo, hi) -> {
+    XBinary(op, l, r, ord, olo, ohi, ..) ->
+      eval_binary(icx, st, env, op, l, r, ord, olo, ohi)
+    XUnary(op, operand, lo, hi, ..) -> {
       let (st1, env1, v) = ceval(icx, st, env, operand)?
       match op {
         UNot -> Ok((st1, env1, VBool(not as_bool(v))))
@@ -962,7 +962,7 @@ pub fn ceval(icx: ICx, st0: ESt, env0: Env, e: TExpr) -> ER !io = {
           }
       }
     }
-    XIf(cond, thn, els, _, _) -> {
+    XIf(cond, thn, els, ..) -> {
       let (st1, env1, cv) = ceval(icx, st, env, cond)?
       if as_bool(cv) {
         ceval(icx, st1, env1, thn)
@@ -973,7 +973,7 @@ pub fn ceval(icx: ICx, st0: ESt, env0: Env, e: TExpr) -> ER !io = {
         }
       }
     }
-    XMatch(scrut, arms, lo, hi) -> {
+    XMatch(scrut, arms, lo, hi, ..) -> {
       let (st1, env1, sv) = ceval(icx, st, env, scrut)?
       var st2 = st1
       var env2 = env1
@@ -1002,7 +1002,7 @@ pub fn ceval(icx: ICx, st0: ESt, env0: Env, e: TExpr) -> ER !io = {
       }
       cerr3(st2, env2, "no match arm matched (checker bug?)", lo, hi)
     }
-    XBlock(stmts, tail, _, _) -> {
+    XBlock(stmts, tail, ..) -> {
       var st1 = st
       var env1 = env
       for s in stmts {
@@ -1031,7 +1031,7 @@ fn eval_binary(
   op: TBinOp,
   l: TExpr,
   r: TExpr,
-  has_ord: Bool,
+  ord: Option[WitRef],
   olo: Int,
   ohi: Int
 ) -> ER !io = {
@@ -1069,7 +1069,7 @@ fn eval_binary(
   if op == BEq { return Ok((st2, env2, VBool(value_eq(lv, rv)))) }
   if op == BNeq { return Ok((st2, env2, VBool(not value_eq(lv, rv)))) }
   # ordered comparisons
-  if has_ord {
+  if ord != None {
     return cerrh3(st2, env2, "ordering through a trait impl is not supported in comptime yet",
       olo, ohi, "trait dictionaries are a runtime construct in v1")
   }
@@ -1364,7 +1364,7 @@ fn eval_block(icx: ICx, fuel: Int, body: TExpr, out: CtOut, lo: Int, hi: Int) ->
 ## outer evaluation and never reach codegen separately.
 fn walk_expr(icx: ICx, fuel: Int, e: TExpr, out: CtOut) -> CtOut !io =
   match e {
-    XComptime(body, lo, hi) -> eval_block(icx, fuel, body, out, lo, hi)
+    XComptime(body, lo, hi, ..) -> eval_block(icx, fuel, body, out, lo, hi)
     XStr(parts, _, _) -> {
       var out1 = out
       for p in parts {
@@ -1375,13 +1375,13 @@ fn walk_expr(icx: ICx, fuel: Int, e: TExpr, out: CtOut) -> CtOut !io =
       }
       out1
     }
-    XLambda(_, _, body, _, _, _) -> walk_expr(icx, fuel, body, out)
-    XApply(target, args, _, _) -> {
+    XLambda(_, _, body, ..) -> walk_expr(icx, fuel, body, out)
+    XApply(target, args, ..) -> {
       var out1 = walk_expr(icx, fuel, target, out)
       for a in args { out1 = walk_expr(icx, fuel, a, out1) }
       out1
     }
-    XJava(jc, _, _) -> {
+    XJava(jc, ..) -> {
       var out1 = out
       match jc.target {
         Some(t) -> { out1 = walk_expr(icx, fuel, t, out1) }
@@ -1390,31 +1390,31 @@ fn walk_expr(icx: ICx, fuel: Int, e: TExpr, out: CtOut) -> CtOut !io =
       for a in jc.args { out1 = walk_expr(icx, fuel, a, out1) }
       out1
     }
-    XPropagate(operand, _, _) -> walk_expr(icx, fuel, operand, out)
-    XUnwrap(operand, _, _, _) -> walk_expr(icx, fuel, operand, out)
+    XPropagate(operand, ..) -> walk_expr(icx, fuel, operand, out)
+    XUnwrap(operand, ..) -> walk_expr(icx, fuel, operand, out)
     XReturn(v, _, _) ->
       match v {
         Some(x) -> walk_expr(icx, fuel, x, out)
         None -> out
       }
-    XIndex(target, index, _, _, _) ->
+    XIndex(target, index, ..) ->
       walk_expr(icx, fuel, index, walk_expr(icx, fuel, target, out))
-    XCallDyn(_, _, args, _, _) -> {
+    XCallDyn(_, _, args, ..) -> {
       var out1 = out
       for a in args { out1 = walk_expr(icx, fuel, a, out1) }
       out1
     }
-    XCallBuiltin(_, args, _, _) -> {
+    XCallBuiltin(_, args, ..) -> {
       var out1 = out
       for a in args { out1 = walk_expr(icx, fuel, a, out1) }
       out1
     }
-    XCallFn(_, _, args, _, _, _) -> {
+    XCallFn(_, _, args, ..) -> {
       var out1 = out
       for a in args { out1 = walk_expr(icx, fuel, a, out1) }
       out1
     }
-    XCtor(_, _, written, _, spread, _, _) -> {
+    XCtor(_, _, written, _, spread, ..) -> {
       var out1 = out
       match spread {
         Some(sp) -> { out1 = walk_expr(icx, fuel, sp, out1) }
@@ -1423,27 +1423,27 @@ fn walk_expr(icx: ICx, fuel: Int, e: TExpr, out: CtOut) -> CtOut !io =
       for w in written { out1 = walk_expr(icx, fuel, w, out1) }
       out1
     }
-    XField(target, _, _, _) -> walk_expr(icx, fuel, target, out)
-    XListLit(elems, _, _) -> {
+    XField(target, ..) -> walk_expr(icx, fuel, target, out)
+    XListLit(elems, ..) -> {
       var out1 = out
       for x in elems { out1 = walk_expr(icx, fuel, x, out1) }
       out1
     }
-    XTupleLit(elems, _, _) -> {
+    XTupleLit(elems, ..) -> {
       var out1 = out
       for x in elems { out1 = walk_expr(icx, fuel, x, out1) }
       out1
     }
-    XBinary(_, l, r, _, _, _, _, _) -> walk_expr(icx, fuel, r, walk_expr(icx, fuel, l, out))
-    XUnary(_, operand, _, _) -> walk_expr(icx, fuel, operand, out)
-    XIf(cond, thn, els, _, _) -> {
+    XBinary(_, l, r, ..) -> walk_expr(icx, fuel, r, walk_expr(icx, fuel, l, out))
+    XUnary(_, operand, ..) -> walk_expr(icx, fuel, operand, out)
+    XIf(cond, thn, els, ..) -> {
       var out1 = walk_expr(icx, fuel, thn, walk_expr(icx, fuel, cond, out))
       match els {
         Some(eb) -> walk_expr(icx, fuel, eb, out1)
         None -> out1
       }
     }
-    XMatch(scrut, arms, _, _) -> {
+    XMatch(scrut, arms, ..) -> {
       var out1 = walk_expr(icx, fuel, scrut, out)
       for arm in arms {
         match arm.guard {
@@ -1454,7 +1454,7 @@ fn walk_expr(icx: ICx, fuel: Int, e: TExpr, out: CtOut) -> CtOut !io =
       }
       out1
     }
-    XBlock(stmts, tail, _, _) -> {
+    XBlock(stmts, tail, ..) -> {
       var out1 = out
       for s in stmts { out1 = walk_stmt(icx, fuel, s, out1) }
       match tail {
@@ -1462,7 +1462,7 @@ fn walk_expr(icx: ICx, fuel: Int, e: TExpr, out: CtOut) -> CtOut !io =
         None -> out1
       }
     }
-    XUnsafePure(body, _, _) -> walk_expr(icx, fuel, body, out)
+    XUnsafePure(body, ..) -> walk_expr(icx, fuel, body, out)
     _ -> out
   }
 

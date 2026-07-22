@@ -7,7 +7,7 @@
 # environment is Map[sym, CValue]); constructors are (adt id, ctor index)
 # against the ADT table; spans stay UTF-16 lo/hi pairs for diagnostics.
 
-use types.{Ty, Sig, Eff}
+use types.{Ty, Sig, Eff, Sym, TyInt, TyFloat, TyBool, TyString, TyUnit, TyNever, TyError}
 use exhaustive.{LitV}
 
 pub type TStrPart =
@@ -16,9 +16,17 @@ pub type TStrPart =
 
 pub type TArm = { pats: List[TPat], guard: Option[TExpr], body: TExpr }
 
+## A trait witness at a use site: the caller's forwarded dictionary symbol, or
+## the unique impl (coherence) identified by (trait, subject).
+pub type WitRef =
+  | WForward(sym: Int)
+  | WConcrete(trait_id: Int, subject: Ty)
+
 ## One Java call, resolved: enough for comptime route C (static, scalar
-## marshalling) and for codegen later. Parameter/return types are JVM class
-## names; `target` is None for statics.
+## marshalling) and for codegen. Parameter/return types are JVM class names;
+## `target` is None for statics. `sam_convs` records (arg index, param class,
+## SAM name, SAM descriptor-ish data) for the codegen bridges; `list_bridges`
+## the arg indices crossing as java.util.List.
 pub type TJavaCall = {
   fqcn: String,
   method: String,
@@ -29,6 +37,8 @@ pub type TJavaCall = {
   target: Option[TExpr],
   args: List[TExpr],
   varargs_pack: Option[Int],
+  sam_convs: List[(Int, String, String, List[String], String)],
+  list_bridges: List[Int],
   nlo: Int,
   nhi: Int
 }
@@ -40,26 +50,37 @@ pub type TExpr =
   | XUnit(lo: Int, hi: Int)
   | XStr(parts: List[TStrPart], lo: Int, hi: Int)
 # a local variable / parameter read
-  | XLocal(sym: Int, name: String, lo: Int, hi: Int)
+  | XLocal(sym: Int, name: String, lo: Int, hi: Int, ty: Ty)
 # a top-level fn / builtin used as a value (type already instantiated)
   | XFnValue(owner: Option[String], name: String, is_builtin: Bool, ty: Ty, lo: Int, hi: Int)
 # a call of a local function value (dynamic target)
-  | XCallDyn(sym: Int, name: String, args: List[TExpr], lo: Int, hi: Int)
+  | XCallDyn(sym: Int, name: String, args: List[TExpr], lo: Int, hi: Int, ty: Ty)
 # a builtin call
-  | XCallBuiltin(name: String, args: List[TExpr], lo: Int, hi: Int)
-# a call of a user/std function, resolved to its defining module
+  | XCallBuiltin(name: String, args: List[TExpr], lo: Int, hi: Int, ty: Ty)
+# a call of a user/std function, resolved to its defining module; a trait
+# method call when trait_id is set (codegen dispatches through the dictionary)
   | XCallFn(
     owner: Option[String],
     name: String,
     args: List[TExpr],
-    has_witnesses: Bool,
+    witnesses: List[WitRef],
+    trait_id: Option[Int],
     lo: Int,
-    hi: Int
+    hi: Int,
+    ty: Ty
   )
 # applying a non-name callee (pipe into lambda, fn-typed field)
-  | XApply(target: TExpr, args: List[TExpr], lo: Int, hi: Int)
-  | XJava(call: TJavaCall, lo: Int, hi: Int)
-  | XLambda(params: List[Int], pnames: List[String], body: TExpr, captures: List[Int], lo: Int, hi: Int)
+  | XApply(target: TExpr, args: List[TExpr], lo: Int, hi: Int, ty: Ty)
+  | XJava(call: TJavaCall, lo: Int, hi: Int, ty: Ty)
+  | XLambda(
+    params: List[Int],
+    pnames: List[String],
+    body: TExpr,
+    captures: List[Int],
+    lo: Int,
+    hi: Int,
+    ty: Ty
+  )
 # a constructor build: written args in source order, slots map field index →
 # written-arg index (None = take the field from the spread base)
   | XCtor(
@@ -69,28 +90,40 @@ pub type TExpr =
     slots: List[Option[Int]],
     spread: Option[TExpr],
     lo: Int,
-    hi: Int
+    hi: Int,
+    ty: Ty
   )
 # a reference to a (comptime-evaluated) constant
-  | XConstRef(name: String, lo: Int, hi: Int)
+  | XConstRef(name: String, lo: Int, hi: Int, ty: Ty)
 # a bare constructor-with-fields used as a function value: map(xs, Some)
-  | XCtorValue(adt: Int, ci: Int, lo: Int, hi: Int)
-  | XField(target: TExpr, field_idx: Int, lo: Int, hi: Int)
-  | XListLit(elems: List[TExpr], lo: Int, hi: Int)
-  | XTupleLit(elems: List[TExpr], lo: Int, hi: Int)
-  | XPropagate(operand: TExpr, lo: Int, hi: Int)
-  | XUnwrap(operand: TExpr, msg: String, lo: Int, hi: Int)
-  | XIndex(target: TExpr, index: TExpr, on_map: Bool, lo: Int, hi: Int)
+  | XCtorValue(adt: Int, ci: Int, lo: Int, hi: Int, ty: Ty)
+  | XField(target: TExpr, field_idx: Int, lo: Int, hi: Int, ty: Ty)
+  | XListLit(elems: List[TExpr], lo: Int, hi: Int, ty: Ty)
+  | XTupleLit(elems: List[TExpr], lo: Int, hi: Int, ty: Ty)
+  | XPropagate(operand: TExpr, lo: Int, hi: Int, ty: Ty)
+  | XUnwrap(operand: TExpr, msg: String, lo: Int, hi: Int, ty: Ty)
+  | XIndex(target: TExpr, index: TExpr, on_map: Bool, lo: Int, hi: Int, ty: Ty)
   | XReturn(v: Option[TExpr], lo: Int, hi: Int)
   | XBreak(lo: Int, hi: Int)
   | XContinue(lo: Int, hi: Int)
-  | XComptime(body: TExpr, lo: Int, hi: Int)
-  | XUnsafePure(body: TExpr, lo: Int, hi: Int)
-  | XBinary(op: TBinOp, left: TExpr, right: TExpr, has_ord: Bool, olo: Int, ohi: Int, lo: Int, hi: Int)
-  | XUnary(op: TUnOp, operand: TExpr, lo: Int, hi: Int)
-  | XIf(cond: TExpr, thn: TExpr, els: Option[TExpr], lo: Int, hi: Int)
-  | XMatch(scrut: TExpr, arms: List[TArm], lo: Int, hi: Int)
-  | XBlock(stmts: List[TStmt], tail: Option[TExpr], lo: Int, hi: Int)
+  | XComptime(body: TExpr, lo: Int, hi: Int, ty: Ty)
+  | XUnsafePure(body: TExpr, lo: Int, hi: Int, ty: Ty)
+# `ord` is the witness behind < <= > >= on non-scalars
+  | XBinary(
+    op: TBinOp,
+    left: TExpr,
+    right: TExpr,
+    ord: Option[WitRef],
+    olo: Int,
+    ohi: Int,
+    lo: Int,
+    hi: Int,
+    ty: Ty
+  )
+  | XUnary(op: TUnOp, operand: TExpr, lo: Int, hi: Int, ty: Ty)
+  | XIf(cond: TExpr, thn: TExpr, els: Option[TExpr], lo: Int, hi: Int, ty: Ty)
+  | XMatch(scrut: TExpr, arms: List[TArm], lo: Int, hi: Int, ty: Ty)
+  | XBlock(stmts: List[TStmt], tail: Option[TExpr], lo: Int, hi: Int, ty: Ty)
 # checking failed here; comptime refuses to evaluate it (a diagnostic exists)
   | XError(lo: Int, hi: Int)
 
@@ -159,11 +192,13 @@ pub type TStmt =
     hi: Int
   )
 
-## One checked function: its final signature, parameter symbol ids, typed body.
+## One checked function: its final signature, parameter symbol ids, the
+## hidden dictionary symbols (bound-order), typed body.
 pub type TFun = {
   name: String,
   sig: Sig,
   param_syms: List[Int],
+  dict_syms: List[Int],
   body: TExpr,
   is_test: Bool
 }
@@ -175,10 +210,12 @@ pub type TConst = { name: String, ty: Ty, init: TExpr, lo: Int, hi: Int }
 pub type TModule = {
   fns: List[TFun],
   consts: List[TConst],
-  tests: List[TFun]
+  tests: List[TFun],
+  # the final symbol table: codegen reads local/dict slot types from here
+  syms: Map[Int, Sym]
 }
 
-# ---- span accessors ----
+# ---- span and type accessors ----
 
 pub fn x_lo(e: TExpr) -> Int =
   match e {
@@ -187,33 +224,33 @@ pub fn x_lo(e: TExpr) -> Int =
     XBool(_, lo, _) -> lo
     XUnit(lo, _) -> lo
     XStr(_, lo, _) -> lo
-    XLocal(_, _, lo, _) -> lo
+    XLocal(_, _, lo, _, _) -> lo
     XFnValue(_, _, _, _, lo, _) -> lo
-    XCallDyn(_, _, _, lo, _) -> lo
-    XCallBuiltin(_, _, lo, _) -> lo
-    XCallFn(_, _, _, _, lo, _) -> lo
-    XApply(_, _, lo, _) -> lo
-    XJava(_, lo, _) -> lo
-    XLambda(_, _, _, _, lo, _) -> lo
-    XCtor(_, _, _, _, _, lo, _) -> lo
-    XConstRef(_, lo, _) -> lo
-    XCtorValue(_, _, lo, _) -> lo
-    XField(_, _, lo, _) -> lo
-    XListLit(_, lo, _) -> lo
-    XTupleLit(_, lo, _) -> lo
-    XPropagate(_, lo, _) -> lo
-    XUnwrap(_, _, lo, _) -> lo
-    XIndex(_, _, _, lo, _) -> lo
+    XCallDyn(_, _, _, lo, _, _) -> lo
+    XCallBuiltin(_, _, lo, _, _) -> lo
+    XCallFn(_, _, _, _, _, lo, _, _) -> lo
+    XApply(_, _, lo, _, _) -> lo
+    XJava(_, lo, _, _) -> lo
+    XLambda(_, _, _, _, lo, _, _) -> lo
+    XCtor(_, _, _, _, _, lo, _, _) -> lo
+    XConstRef(_, lo, _, _) -> lo
+    XCtorValue(_, _, lo, _, _) -> lo
+    XField(_, _, lo, _, _) -> lo
+    XListLit(_, lo, _, _) -> lo
+    XTupleLit(_, lo, _, _) -> lo
+    XPropagate(_, lo, _, _) -> lo
+    XUnwrap(_, _, lo, _, _) -> lo
+    XIndex(_, _, _, lo, _, _) -> lo
     XReturn(_, lo, _) -> lo
     XBreak(lo, _) -> lo
     XContinue(lo, _) -> lo
-    XComptime(_, lo, _) -> lo
-    XUnsafePure(_, lo, _) -> lo
-    XBinary(_, _, _, _, _, _, lo, _) -> lo
-    XUnary(_, _, lo, _) -> lo
-    XIf(_, _, _, lo, _) -> lo
-    XMatch(_, _, lo, _) -> lo
-    XBlock(_, _, lo, _) -> lo
+    XComptime(_, lo, _, _) -> lo
+    XUnsafePure(_, lo, _, _) -> lo
+    XBinary(_, _, _, _, _, _, lo, _, _) -> lo
+    XUnary(_, _, lo, _, _) -> lo
+    XIf(_, _, _, lo, _, _) -> lo
+    XMatch(_, _, lo, _, _) -> lo
+    XBlock(_, _, lo, _, _) -> lo
     XError(lo, _) -> lo
   }
 
@@ -224,34 +261,72 @@ pub fn x_hi(e: TExpr) -> Int =
     XBool(_, _, hi) -> hi
     XUnit(_, hi) -> hi
     XStr(_, _, hi) -> hi
-    XLocal(_, _, _, hi) -> hi
+    XLocal(_, _, _, hi, _) -> hi
     XFnValue(_, _, _, _, _, hi) -> hi
-    XCallDyn(_, _, _, _, hi) -> hi
-    XCallBuiltin(_, _, _, hi) -> hi
-    XCallFn(_, _, _, _, _, hi) -> hi
-    XApply(_, _, _, hi) -> hi
-    XJava(_, _, hi) -> hi
-    XLambda(_, _, _, _, _, hi) -> hi
-    XCtor(_, _, _, _, _, _, hi) -> hi
-    XConstRef(_, _, hi) -> hi
-    XCtorValue(_, _, _, hi) -> hi
-    XField(_, _, _, hi) -> hi
-    XListLit(_, _, hi) -> hi
-    XTupleLit(_, _, hi) -> hi
-    XPropagate(_, _, hi) -> hi
-    XUnwrap(_, _, _, hi) -> hi
-    XIndex(_, _, _, _, hi) -> hi
+    XCallDyn(_, _, _, _, hi, _) -> hi
+    XCallBuiltin(_, _, _, hi, _) -> hi
+    XCallFn(_, _, _, _, _, _, hi, _) -> hi
+    XApply(_, _, _, hi, _) -> hi
+    XJava(_, _, hi, _) -> hi
+    XLambda(_, _, _, _, _, hi, _) -> hi
+    XCtor(_, _, _, _, _, _, hi, _) -> hi
+    XConstRef(_, _, hi, _) -> hi
+    XCtorValue(_, _, _, hi, _) -> hi
+    XField(_, _, _, hi, _) -> hi
+    XListLit(_, _, hi, _) -> hi
+    XTupleLit(_, _, hi, _) -> hi
+    XPropagate(_, _, hi, _) -> hi
+    XUnwrap(_, _, _, hi, _) -> hi
+    XIndex(_, _, _, _, hi, _) -> hi
     XReturn(_, _, hi) -> hi
     XBreak(_, hi) -> hi
     XContinue(_, hi) -> hi
-    XComptime(_, _, hi) -> hi
-    XUnsafePure(_, _, hi) -> hi
-    XBinary(_, _, _, _, _, _, _, hi) -> hi
-    XUnary(_, _, _, hi) -> hi
-    XIf(_, _, _, _, hi) -> hi
-    XMatch(_, _, _, hi) -> hi
-    XBlock(_, _, _, hi) -> hi
+    XComptime(_, _, hi, _) -> hi
+    XUnsafePure(_, _, hi, _) -> hi
+    XBinary(_, _, _, _, _, _, _, hi, _) -> hi
+    XUnary(_, _, _, hi, _) -> hi
+    XIf(_, _, _, _, hi, _) -> hi
+    XMatch(_, _, _, hi, _) -> hi
+    XBlock(_, _, _, hi, _) -> hi
     XError(_, hi) -> hi
+  }
+
+## The checked type of any typed node (fixed for literals and jumps).
+pub fn tex_ty(e: TExpr) -> Ty =
+  match e {
+    XInt(_, _, _) -> TyInt
+    XFloat(_, _, _) -> TyFloat
+    XBool(_, _, _) -> TyBool
+    XUnit(_, _) -> TyUnit
+    XStr(_, _, _) -> TyString
+    XLocal(_, _, _, _, ty) -> ty
+    XFnValue(_, _, _, ty, _, _) -> ty
+    XCallDyn(_, _, _, _, _, ty) -> ty
+    XCallBuiltin(_, _, _, _, ty) -> ty
+    XCallFn(_, _, _, _, _, _, _, ty) -> ty
+    XApply(_, _, _, _, ty) -> ty
+    XJava(_, _, _, ty) -> ty
+    XLambda(_, _, _, _, _, _, ty) -> ty
+    XCtor(_, _, _, _, _, _, _, ty) -> ty
+    XConstRef(_, _, _, ty) -> ty
+    XCtorValue(_, _, _, _, ty) -> ty
+    XField(_, _, _, _, ty) -> ty
+    XListLit(_, _, _, ty) -> ty
+    XTupleLit(_, _, _, ty) -> ty
+    XPropagate(_, _, _, ty) -> ty
+    XUnwrap(_, _, _, _, ty) -> ty
+    XIndex(_, _, _, _, _, ty) -> ty
+    XReturn(_, _, _) -> TyNever
+    XBreak(_, _) -> TyNever
+    XContinue(_, _) -> TyNever
+    XComptime(_, _, _, ty) -> ty
+    XUnsafePure(_, _, _, ty) -> ty
+    XBinary(_, _, _, _, _, _, _, _, ty) -> ty
+    XUnary(_, _, _, _, ty) -> ty
+    XIf(_, _, _, _, _, ty) -> ty
+    XMatch(_, _, _, _, ty) -> ty
+    XBlock(_, _, _, _, ty) -> ty
+    XError(_, _) -> TyError
   }
 
 pub fn ts_lo(s: TStmt) -> Int =
