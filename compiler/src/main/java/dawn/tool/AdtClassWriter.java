@@ -88,4 +88,28 @@ public final class AdtClassWriter extends ClassWriter {
     public MethodVisitor method(int access, String name, String desc) {
         return visitMethod(access, name, desc, null, null);
     }
+
+    // ---- statics for driving a plain (non-frame-computing) writer from Dawn ----
+
+    public static ClassWriter plain(int flags) {
+        return new ClassWriter(flags);
+    }
+
+    public static void beginOn(ClassWriter cw, int version, int access, String name, String superName) {
+        cw.visit(version, access, name, null, superName, null);
+    }
+
+    public static void beginOnWithInterface(
+            ClassWriter cw, int version, int access, String name, String superName, String iface) {
+        cw.visit(version, access, name, null, superName, new String[] { iface });
+    }
+
+    public static void fieldOn(ClassWriter cw, int access, String name, String desc) {
+        FieldVisitor f = cw.visitField(access, name, desc, null, null);
+        f.visitEnd();
+    }
+
+    public static MethodVisitor methodOn(ClassWriter cw, int access, String name, String desc) {
+        return cw.visitMethod(access, name, desc, null, null);
+    }
 }

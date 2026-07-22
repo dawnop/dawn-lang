@@ -16,6 +16,55 @@ use astdump
 use checkdump
 use stdlib
 use analyze
+use codegen.{
+  fn_iface, tuple_class, gen_fn_interface, gen_tuple_class, gen_panic_class,
+  gen_unit_class, supers_of, PANIC_CLASS, UNIT_CLASS
+}
+use types.{prelude_adts, OPTION_ID, RESULT_ID}
+use java "java.nio.file.Files"
+use java "java.nio.file.Paths"
+
+fn write_class(dir: String, name: String, bs: Bytes) -> Unit !io = {
+  let path = dir ++ "/" ++ name ++ ".class"
+  let parent = match str.last_index_of(path, "/") {
+    Some(i) -> str.substring(path, 0, i)
+    None -> dir
+  }
+  let _ = java_try(fn() => Files.createDirectories(Paths.get(parent).expect("path")))
+  let _ = java_try(fn() => Files.write(Paths.get(path).expect("path"), bs))
+  ()
+}
+
+## `selfhost emitrt -o <dir>`: the shared runtime classes ported so far —
+## the incremental byte-diff target while codegen grows toward full emission.
+fn run_emitrt(rest: List[String]) -> Unit !io = {
+  var out = ""
+  var i = 0
+  while i < len(rest) {
+    if rest[i] == "-o" && i + 1 < len(rest) {
+      out = rest[i + 1]
+      i = i + 2
+    } else {
+      i = i + 1
+    }
+  }
+  if out == "" { panic("usage: selfhost emitrt -o <dir>") }
+  let adts = prelude_adts()
+  let sup = supers_of(adts, [OPTION_ID, RESULT_ID])
+  var n = 0
+  while n <= 8 {
+    write_class(out, fn_iface(n), gen_fn_interface(n))
+    n = n + 1
+  }
+  n = 2
+  while n <= 8 {
+    write_class(out, tuple_class(n), gen_tuple_class(sup, n))
+    n = n + 1
+  }
+  write_class(out, PANIC_CLASS, gen_panic_class())
+  write_class(out, UNIT_CLASS, gen_unit_class())
+  println("emitted runtime subset -> " ++ out)
+}
 
 fn run_check(rest: List[String]) -> Unit !io = {
   var std_dir = "compiler/src/main/resources/std"
@@ -48,6 +97,8 @@ pub fn main() -> Unit !io = {
     [mode, ..rest] ->
       if mode == "check" {
         run_check(rest)
+      } else if mode == "emitrt" {
+        run_emitrt(rest)
       } else {
         for pth in rest {
           println("== " ++ pth ++ " ==")

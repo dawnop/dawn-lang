@@ -135,3 +135,326 @@ test "the ASM interop spike: a class assembles through the shared writer" {
   let bs = cw.toByteArray().expect("bytes")
   assert bytes.len(bs) > 0
 }
+
+# ---- JVM opcode constants (org.objectweb.asm.Opcodes; static fields do not
+# cross the interop boundary, so the stable values are spelled here) ----
+
+pub const V17: Int = 61
+
+pub const ACC_PUBLIC: Int = 1
+
+pub const ACC_PRIVATE: Int = 2
+
+pub const ACC_PROTECTED: Int = 4
+
+pub const ACC_STATIC: Int = 8
+
+pub const ACC_FINAL: Int = 16
+
+pub const ACC_ABSTRACT: Int = 1024
+
+pub const ACC_INTERFACE: Int = 512
+
+pub const OP_ALOAD: Int = 25
+
+pub const OP_ILOAD: Int = 21
+
+pub const OP_LLOAD: Int = 22
+
+pub const OP_DLOAD: Int = 24
+
+pub const OP_ASTORE: Int = 58
+
+pub const OP_ISTORE: Int = 54
+
+pub const OP_LSTORE: Int = 55
+
+pub const OP_DSTORE: Int = 57
+
+pub const OP_RETURN: Int = 177
+
+pub const OP_ARETURN: Int = 176
+
+pub const OP_IRETURN: Int = 172
+
+pub const OP_LRETURN: Int = 173
+
+pub const OP_DRETURN: Int = 175
+
+pub const OP_DUP: Int = 89
+
+pub const OP_DUP2: Int = 92
+
+pub const OP_POP: Int = 87
+
+pub const OP_POP2: Int = 88
+
+pub const OP_NEW: Int = 187
+
+pub const OP_CHECKCAST: Int = 192
+
+pub const OP_INSTANCEOF: Int = 193
+
+pub const OP_INVOKESPECIAL: Int = 183
+
+pub const OP_INVOKESTATIC: Int = 184
+
+pub const OP_INVOKEVIRTUAL: Int = 182
+
+pub const OP_INVOKEINTERFACE: Int = 185
+
+pub const OP_GETFIELD: Int = 180
+
+pub const OP_PUTFIELD: Int = 181
+
+pub const OP_GETSTATIC: Int = 178
+
+pub const OP_PUTSTATIC: Int = 179
+
+pub const OP_ATHROW: Int = 191
+
+pub const OP_GOTO: Int = 167
+
+pub const OP_IFEQ: Int = 153
+
+pub const OP_IFNE: Int = 154
+
+pub const OP_IFLT: Int = 155
+
+pub const OP_IFGE: Int = 156
+
+pub const OP_IFGT: Int = 157
+
+pub const OP_IFLE: Int = 158
+
+pub const OP_IF_ICMPEQ: Int = 159
+
+pub const OP_IF_ICMPNE: Int = 160
+
+pub const OP_IF_ICMPGE: Int = 162
+
+pub const OP_IF_ACMPEQ: Int = 165
+
+pub const OP_IFNULL: Int = 198
+
+pub const OP_ICONST_0: Int = 3
+
+pub const OP_ICONST_1: Int = 4
+
+pub const OP_LCONST_0: Int = 9
+
+pub const OP_LCONST_1: Int = 10
+
+pub const OP_LCMP: Int = 148
+
+pub const OP_DCMPL: Int = 151
+
+pub const OP_I2L: Int = 133
+
+pub const OP_L2I: Int = 136
+
+pub const OP_IADD: Int = 96
+
+pub const OP_LADD: Int = 97
+
+pub const OP_ISUB: Int = 100
+
+pub const OP_IMUL: Int = 104
+
+pub const OP_IXOR: Int = 130
+
+pub const OP_LXOR: Int = 131
+
+pub const OP_LNEG: Int = 117
+
+pub const OP_DNEG: Int = 119
+
+pub const OP_BIPUSH: Int = 16
+
+# ---- shared runtime classes (each must byte-match the Kotlin emission) ----
+
+pub const PANIC_CLASS: String = "dawn/rt/PanicError"
+
+pub const UNIT_CLASS: String = "dawn/rt/Unit"
+
+pub const SB: String = "java/lang/StringBuilder"
+
+pub const SHOW_CLASS: String = "dawn/rt/Show"
+
+## dawn/rt/FnN: the erased function interface (ClassWriter(0), like Kotlin).
+pub fn gen_fn_interface(arity: Int) -> Bytes !io = {
+  let cw = AdtClassWriter.plain(0).expect("writer")
+  AdtClassWriter.beginOn(cw, V17, ACC_PUBLIC + ACC_ABSTRACT + ACC_INTERFACE, fn_iface(arity), obj())
+  let m = AdtClassWriter.methodOn(cw, ACC_PUBLIC + ACC_ABSTRACT, "apply", erased_apply_desc(arity))
+    .expect("mv")
+  m.visitEnd()
+  cw.visitEnd()
+  cw.toByteArray().expect("bytes")
+}
+
+## dawn/rt/PanicError: an Error subclass carrying the panic message.
+pub fn gen_panic_class() -> Bytes !io = {
+  let cw = AdtClassWriter.plain(0).expect("writer")
+  AdtClassWriter.beginOn(cw, V17, ACC_PUBLIC + ACC_FINAL, PANIC_CLASS, "java/lang/Error")
+  let ctor = AdtClassWriter.methodOn(cw, ACC_PUBLIC, "<init>", "(Ljava/lang/String;)V").expect("mv")
+  ctor.visitCode()
+  ctor.visitVarInsn(OP_ALOAD, 0)
+  ctor.visitVarInsn(OP_ALOAD, 1)
+  ctor.visitMethodInsn(OP_INVOKESPECIAL, "java/lang/Error", "<init>", "(Ljava/lang/String;)V", false)
+  ctor.visitInsn(OP_RETURN)
+  ctor.visitMaxs(2, 2)
+  ctor.visitEnd()
+  cw.visitEnd()
+  cw.toByteArray().expect("bytes")
+}
+
+## dawn/rt/Unit: the Unit singleton (materialized only in erased Object slots).
+pub fn gen_unit_class() -> Bytes !io = {
+  let cw = AdtClassWriter.plain(0).expect("writer")
+  AdtClassWriter.beginOn(cw, V17, ACC_PUBLIC + ACC_FINAL, UNIT_CLASS, obj())
+  AdtClassWriter.fieldOn(cw, ACC_PUBLIC + ACC_STATIC + ACC_FINAL, "INSTANCE", "L" ++ UNIT_CLASS ++ ";")
+  let ctor = AdtClassWriter.methodOn(cw, ACC_PRIVATE, "<init>", "()V").expect("mv")
+  ctor.visitCode()
+  ctor.visitVarInsn(OP_ALOAD, 0)
+  ctor.visitMethodInsn(OP_INVOKESPECIAL, obj(), "<init>", "()V", false)
+  ctor.visitInsn(OP_RETURN)
+  ctor.visitMaxs(1, 1)
+  ctor.visitEnd()
+  let cl = AdtClassWriter.methodOn(cw, ACC_STATIC, "<clinit>", "()V").expect("mv")
+  cl.visitCode()
+  cl.visitTypeInsn(OP_NEW, UNIT_CLASS)
+  cl.visitInsn(OP_DUP)
+  cl.visitMethodInsn(OP_INVOKESPECIAL, UNIT_CLASS, "<init>", "()V", false)
+  cl.visitFieldInsn(OP_PUTSTATIC, UNIT_CLASS, "INSTANCE", "L" ++ UNIT_CLASS ++ ";")
+  cl.visitInsn(OP_RETURN)
+  cl.visitMaxs(2, 0)
+  cl.visitEnd()
+  cw.visitEnd()
+  cw.toByteArray().expect("bytes")
+}
+
+fn append_const(m: MethodVisitor, s: String) -> Unit !io = {
+  m.visitLdcInsn(Objects.requireNonNull(s).expect("non-null"))
+  m.visitMethodInsn(OP_INVOKEVIRTUAL, SB, "append", "(Ljava/lang/String;)L" ++ SB ++ ";", false)
+  ()
+}
+
+## dawn/rt/TupleN: N public final Object fields + structural equals/hashCode +
+## Show-rendering toString (the Kotlin genTupleClass; frame-computing writer).
+pub fn gen_tuple_class(supers: List[String], n: Int) -> Bytes !io = {
+  let cls = tuple_class(n)
+  let cw = AdtClassWriter.new(supers)
+  cw.begin(V17, ACC_PUBLIC + ACC_FINAL, cls, obj())
+  var i = 0
+  while i < n {
+    cw.field(ACC_PUBLIC + ACC_FINAL, "_" ++ to_string(i), "Ljava/lang/Object;")
+    i = i + 1
+  }
+  var ps = ""
+  for _k in 0 ..n { ps = ps ++ "Ljava/lang/Object;" }
+  let ctor_desc = "(" ++ ps ++ ")V"
+  let init = cw.method(ACC_PUBLIC, "<init>", ctor_desc).expect("mv")
+  init.visitCode()
+  init.visitVarInsn(OP_ALOAD, 0)
+  init.visitMethodInsn(OP_INVOKESPECIAL, obj(), "<init>", "()V", false)
+  i = 0
+  while i < n {
+    init.visitVarInsn(OP_ALOAD, 0)
+    init.visitVarInsn(OP_ALOAD, i + 1)
+    init.visitFieldInsn(OP_PUTFIELD, cls, "_" ++ to_string(i), "Ljava/lang/Object;")
+    i = i + 1
+  }
+  init.visitInsn(OP_RETURN)
+  init.visitMaxs(0, 0)
+  init.visitEnd()
+  let eq = cw.method(ACC_PUBLIC, "equals", "(Ljava/lang/Object;)Z").expect("mv")
+  eq.visitCode()
+  let yes = Label.new()
+  let no = Label.new()
+  eq.visitVarInsn(OP_ALOAD, 0)
+  eq.visitVarInsn(OP_ALOAD, 1)
+  eq.visitJumpInsn(OP_IF_ACMPEQ, yes)
+  eq.visitVarInsn(OP_ALOAD, 1)
+  eq.visitTypeInsn(OP_INSTANCEOF, cls)
+  eq.visitJumpInsn(OP_IFEQ, no)
+  eq.visitVarInsn(OP_ALOAD, 1)
+  eq.visitTypeInsn(OP_CHECKCAST, cls)
+  eq.visitVarInsn(OP_ASTORE, 2)
+  i = 0
+  while i < n {
+    eq.visitVarInsn(OP_ALOAD, 0)
+    eq.visitFieldInsn(OP_GETFIELD, cls, "_" ++ to_string(i), "Ljava/lang/Object;")
+    eq.visitVarInsn(OP_ALOAD, 2)
+    eq.visitFieldInsn(OP_GETFIELD, cls, "_" ++ to_string(i), "Ljava/lang/Object;")
+    eq.visitMethodInsn(OP_INVOKEVIRTUAL, obj(), "equals", "(Ljava/lang/Object;)Z", false)
+    eq.visitJumpInsn(OP_IFEQ, no)
+    i = i + 1
+  }
+  eq.visitLabel(yes)
+  eq.visitInsn(OP_ICONST_1)
+  eq.visitInsn(OP_IRETURN)
+  eq.visitLabel(no)
+  eq.visitInsn(OP_ICONST_0)
+  eq.visitInsn(OP_IRETURN)
+  eq.visitMaxs(0, 0)
+  eq.visitEnd()
+  let hc = cw.method(ACC_PUBLIC, "hashCode", "()I").expect("mv")
+  hc.visitCode()
+  hc.visitInsn(OP_ICONST_1)
+  i = 0
+  while i < n {
+    hc.visitIntInsn(OP_BIPUSH, 31)
+    hc.visitInsn(OP_IMUL)
+    hc.visitVarInsn(OP_ALOAD, 0)
+    hc.visitFieldInsn(OP_GETFIELD, cls, "_" ++ to_string(i), "Ljava/lang/Object;")
+    hc.visitMethodInsn(OP_INVOKEVIRTUAL, obj(), "hashCode", "()I", false)
+    hc.visitInsn(OP_IADD)
+    i = i + 1
+  }
+  hc.visitInsn(OP_IRETURN)
+  hc.visitMaxs(0, 0)
+  hc.visitEnd()
+  let ts = cw.method(ACC_PUBLIC, "toString", "()Ljava/lang/String;").expect("mv")
+  ts.visitCode()
+  ts.visitTypeInsn(OP_NEW, SB)
+  ts.visitInsn(OP_DUP)
+  ts.visitMethodInsn(OP_INVOKESPECIAL, SB, "<init>", "()V", false)
+  append_const(ts, "(")
+  i = 0
+  while i < n {
+    if i > 0 { append_const(ts, ", ") }
+    ts.visitVarInsn(OP_ALOAD, 0)
+    ts.visitFieldInsn(OP_GETFIELD, cls, "_" ++ to_string(i), "Ljava/lang/Object;")
+    ts.visitMethodInsn(OP_INVOKESTATIC, SHOW_CLASS, "show",
+      "(Ljava/lang/Object;)Ljava/lang/String;", false)
+    ts.visitMethodInsn(OP_INVOKEVIRTUAL, SB, "append", "(Ljava/lang/String;)L" ++ SB ++ ";", false)
+    i = i + 1
+  }
+  append_const(ts, ")")
+  ts.visitMethodInsn(OP_INVOKEVIRTUAL, SB, "toString", "()Ljava/lang/String;", false)
+  ts.visitInsn(OP_ARETURN)
+  ts.visitMaxs(0, 0)
+  ts.visitEnd()
+  cw.visitEnd()
+  cw.toByteArray().expect("bytes")
+}
+
+## The synthetic superclass table for COMPUTE_FRAMES (the Kotlin adtSupers),
+## as "child super" pairs for the shared writer.
+pub fn supers_of(adts: Adts, all_ids: List[Int]) -> List[String] = {
+  var out: List[String] = []
+  for aid in all_ids {
+    let a = adt_of(adts, aid)
+    let base = adt_jvm_name(a)
+    out = out ++ [base ++ " " ++ obj()]
+    if not a.is_record {
+      for c in a.ctors { out = out ++ [ctor_jvm_name(adts, c) ++ " " ++ base] }
+    }
+  }
+  var n = 2
+  while n <= 8 {
+    out = out ++ [tuple_class(n) ++ " " ++ obj()]
+    n = n + 1
+  }
+  out
+}
