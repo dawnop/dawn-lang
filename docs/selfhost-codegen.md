@@ -75,3 +75,34 @@ Kotlin CodeGen 从 checked AST 读的注解，逐一映射到 TAST：
 - 帧上下文：mv/currentFn/fnStart/nextSlot/methodRet/loopStack/methodRetsNull/
   selfPending/pendingLambdas/pendingSamBridges/pendingBridges(Unit 值桥)/
   pendingBuiltinBridges/pendingCtorBridges/constFields(<clinit>)。
+
+### 通读进度 500–1250
+
+- emitModule：own ADT 类 → trait 接口 → impl 单例类 → derive Ord 的 impl 类 →
+  模块类（ARGS_FIELD 静态字段 [Ljava/lang/String;）→ 每 fn genFn+drainLambdas →
+  impl 方法（implMethodName 静态）→ trait 默认体（defaultMethodName 静态）→
+  derive Ord cmp 静态 → tests（dawn$test$i）→ 有 main 则 genJvmMain → constFields。
+- TupleN：public final Object _i 字段、ctor、结构 equals（IF_ACMPEQ 快路 + INSTANCEOF
+  + 逐字段 Object.equals）、hashCode 31 链、toString 经 Show.show。FnN 接口：
+  ClassWriter(0)（不是 COMPUTE_FRAMES！）、apply erased。
+- descOf：Int/Cursor=J Float=D Bool=Z String Bytes="[B" Unit/Never/Error=V TVar=Object
+  TAdt=jvmName TList/TMap/TSet=java.util 接口 TTuple=TupleN TJava=internalName TFn=FnN。
+- slotsOf: J/D=2, Z=1, V=0, ref=1。box/unerase/adaptTo(declared TVar→box)/adaptFrom。
+- boxedDescOf + instantiatedType（LMF 用 AsmType.getMethodType）。
+- trIface=dawn/tr/<owner$…$>Name；implClass=dawn/impl/<owner$>Trait$Subject；
+  implMethodName=dawn$impl$Trait$Subject$m（静态落声明模块类）；
+  defaultMethodName=dawn$default$Trait$m；fnDescWithDicts=声明参数+每约束一个 Object。
+- ADT 类：record=单 final 类基 Object；sum=abstract 基类(PROTECTED <init>) + 每 ctor
+  final 子类；无字段 ctor = singleton INSTANCE + <clinit>；ctor 类含字段 public final、
+  <init> PUTFIELD 链、equals/hashCode/toString（derive Show 才有 toString? —— 待核：
+  genCtorClass 里 toString 是否受 derivesShow 门控）。
+- genFn：mv 上下文 + Symbol.slot 顺序分配（声明参数先、dictSyms 后）；fnStart Label
+  （尾递归 goto 目标）；genExpr(body, tail=true) 返回 falls（是否顺落）→ emitMethodReturn。
+  **Symbol.slot 是 checker Symbol 上的可变槽 → 端口在 codegen 里自建 Map[sym id → slot]。**
+- 单例脚手架 singletonScaffold；impl 字典类:各 trait 方法 erased → unerase 参数 →
+  INVOKESTATIC 具体静态 → ret TVar 则 box;derived Ord → 调 derivedCmp;缺省 → 调
+  default 静态 + ALOAD 0 作字典。prelude Ord: cmp = unerase + emitNativeCmp
+  (LCMP / Double.compare / String.compareTo, I2L)。
+- genDerivedOrdCmp：record 逐字段;sum 先 tag 序（INSTANCEOF 链算 tag）再同 ctor
+  逐字段;emitFieldCmp 标量原生、TAdt 经其 ordImpl 的 cmp 静态。
+- genTraitDefault：currentFn=null（自调用不做尾递归改写）。
