@@ -71,6 +71,7 @@ fun main(args: Array<String>) {
             "__lex" -> cmdLexDump(args.drop(1))
             "__parse" -> cmdParseDump(args.drop(1))
             "__check" -> cmdCheckDump(args.drop(1))
+            "__emit" -> cmdEmitDump(args.drop(1))
             "--version", "-V", "version" -> println(BuildInfo)
             "--help", "-h", "help" -> print(USAGE)
             else -> {

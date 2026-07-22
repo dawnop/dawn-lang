@@ -172,36 +172,8 @@ class CodeGen(
         for (n in 2..8) put(tupleClass(n), OBJ)
     }
 
-    /**
-     * COMPUTE_FRAMES needs common superclasses. Generated classes are not on the
-     * compiler's classpath, so walk our own synthetic hierarchy (adtSupers); for
-     * anything else fall back to Object.
-     */
-    private inner class DawnClassWriter : ClassWriter(COMPUTE_FRAMES) {
-        private fun chain(t: String): List<String> {
-            val c = ArrayList<String>()
-            var cur: String? = t
-            while (cur != null) {
-                c.add(cur)
-                cur = adtSupers[cur]
-            }
-            if (c.last() != OBJ) c.add(OBJ)
-            return c
-        }
-
-        override fun getCommonSuperClass(type1: String, type2: String): String {
-            if (type1 == type2) return type1
-            if (adtSupers.containsKey(type1) || adtSupers.containsKey(type2)) {
-                val above2 = chain(type2).toSet()
-                return chain(type1).firstOrNull { it in above2 } ?: OBJ
-            }
-            return try {
-                super.getCommonSuperClass(type1, type2)
-            } catch (e: Throwable) {
-                OBJ
-            }
-        }
-    }
+    /** the shared frame-aware writer (dawn.tool.AdtClassWriter, also used by selfhost) */
+    private fun DawnClassWriter() = dawn.tool.AdtClassWriter(adtSupers)
 
     // ---- current function context ----
     private lateinit var mv: MethodVisitor
