@@ -59,6 +59,28 @@ jobs:
             *) echo "::error::--version said '$OUT'"; exit 1 ;;
           esac
 
+      # Seed consecration (docs/bootstrap.md, 种子推进协议): every release jar
+      # is a bootstrap seed candidate, so the tag itself must pass the
+      # self-hosting gates — ci.yml runs them on main, but a tag can point
+      # anywhere.
+      - name: selfhost fixed point (stage2 == stage3)
+        run: ./scripts/selfhost-fixpoint.sh
+
+      # The published dawn-selfhost.jar is what the next bootstrap generation
+      # runs, so build it here and prove closure on the exact bytes being
+      # uploaded, not on a throwaway copy.
+      - name: build the standalone selfhost jar
+        run: |
+          ./bin/dawn build selfhost -o selfhost-boot.jar
+          java -Xss512m -cp selfhost-boot.jar:compiler/build/libs/dawn.jar main \
+            build selfhost -o dawn-selfhost.jar --vendor dawn/tool --vendor org/objectweb/asm
+
+      - name: standalone closure — the seed rebuilds itself byte-identically
+        run: |
+          java -Xss512m -jar dawn-selfhost.jar build selfhost -o rebuilt.jar \
+            --vendor dawn/tool --vendor org/objectweb/asm
+          cmp dawn-selfhost.jar rebuilt.jar
+
       # gh is preinstalled on runners — no third-party action in the release path.
       - name: publish
         env:
@@ -66,5 +88,6 @@ jobs:
         run: |
           gh release create "$GITHUB_REF_NAME" \
             compiler/build/libs/dawn.jar \
+            dawn-selfhost.jar \
             --title "$GITHUB_REF_NAME" \
             --generate-notes

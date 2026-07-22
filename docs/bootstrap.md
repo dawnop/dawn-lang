@@ -3,6 +3,9 @@
 > 2026-07-22 自举完成（design.md M7、selfhost-gaps.md §七）。本文回答一个问题：
 > **手上只有源码和一个种子 jar 时，如何从零得到一个能编译自己的 Dawn 编译器**，
 > 以及每一步靠什么验收。
+>
+> 后续：**M8 计划淘汰 Kotlin**（[m8-selfhost-only.md](m8-selfhost-only.md)），
+> 种子推进协议见下文——它是 M8 阶段一，2026-07-23 立法生效。
 
 ## 种子（seed）
 
@@ -23,6 +26,34 @@
   JSON 逐字节）——金样 `scripts/selfhost-fmt-diff.sh`、`selfhost-run-diff.sh`
   均在 CI。仍留在 Kotlin 侧的只有 **LSP** 与 playground 服务端（体量大、
   非日常路径，明确暂缓）。
+
+## 种子推进协议（2026-07-23 立法，M8 阶段一）
+
+1. **种子的下一形态**：自下一个 release 起，`release.yml` 双发
+   `dawn.jar`（Kotlin，过渡期）与 **`dawn-selfhost.jar`**（selfhost 自打的独立 jar，
+   vendor 了 `dawn.tool` shim 与 ASM，无 Kotlin 运行时依赖）。M8 完成后
+   `dawn-selfhost.jar` 是唯一种子，Kotlin jar 停止发布；v0.6.0 起的历史 release
+   永久保留，构成可重放的信任链。
+2. **祝圣仪式（机器强制）**：`release.yml` 在 tag 上重跑 fixpoint + standalone
+   闭包，且闭包验证跑在**将要上传的那份字节**上——任一红则 release 不出。
+   push CI（ci.yml）的全金样绿是前置。种子 bump 逐条记进下面的链条表。
+3. **特性纪律**：`selfhost/src` 只准用**当前种子已支持**的语言特性。想用新特性：
+   先在 selfhost 实现 → 发 release（过祝圣）→ bump 种子 → 下一轮才能自用。
+   （Rust stage0 的规矩。过渡期由「Kotlin 同步实现」的旧规则兜着；M8 阶段三
+   CI 改由种子 jar 驱动后，这条变成机器强制。）
+4. **链条可重放**：`scripts/replay-bootstrap.sh <seed-jar | vX.Y.Z>` 从任一环
+   种子重放：种子编 selfhost → 固定点（stage2==stage3）→ standalone 闭包 →
+   （本地有 HEAD 编译器时）验证收敛到与 HEAD 逐字节一致。**一代洗净种子**：
+   stage2 只由 selfhost/src 决定、与谁编译 boot 无关，所以「老种子 + 新源码」
+   也必须对出与 HEAD 相同的字节。发版前手动过一遍，不进 CI。
+
+### 链条表
+
+| release | 种子形态 | 备注 |
+|---|---|---|
+| v0.6.0 | `dawn.jar`（Kotlin） | **信任链根**；Kotlin 冻结为 bootstrap 种子 |
+| v0.7.0 | `dawn.jar`（Kotlin） | 包管理线收官版 |
+| （下一个） | `dawn.jar` + `dawn-selfhost.jar` 双发 | 首个 selfhost 种子候选 |
 
 ## 链
 

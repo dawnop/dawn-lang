@@ -96,7 +96,10 @@ Windows 的 WinNAT 保留了大片低端口，8097 bind 会报 "Address already 
 
 版本在 `compiler/build.gradle.kts` 的 `version`。发布 = 改它 → 提交 →
 `git tag v0.1.0 && git push --tags`；`release.yml` 校验 tag 与 version 一致、跑全量测试、
-把 `dawn.jar` 传上 GitHub Release。
+过自举祝圣（fixpoint + standalone 闭包），把 `dawn.jar` 与 `dawn-selfhost.jar`
+双发上 GitHub Release。**release 即种子候选**：`selfhost/src` 只准用当前种子已支持的
+语言特性——种子推进协议见 [docs/bootstrap.md](docs/bootstrap.md)，M8（淘汰 Kotlin）
+计划见 [docs/m8-selfhost-only.md](docs/m8-selfhost-only.md)。
 
 **dawnop-site 按 `.dawn-version` 钉住某个 release**，不再跟 main。所以破坏性语言改动要
 先发 tag，那边再提一个 bump 的提交。别指望改完这边那边就自动跟上——那正是当初要治的病。
