@@ -80,6 +80,8 @@ pub type Cx = {
   traits: Traits,
   # name-keyed views of the current module's scope
   fns: Map[String, Sig],
+  # the bundled std's implicit surface (PRELUDE names); local decls shadow it
+  std_fns: Map[String, Sig],
   adts_by_name: Map[String, Int],
   aliases: Map[String, AliasE],
   alias_resolved: Map[String, Ty],
@@ -143,6 +145,7 @@ pub fn cx_new(owner_class: Option[String], src_path: Option[String]) -> Cx = {
     adts: prelude_adts(),
     traits: prelude_traits(),
     fns: map.empty(),
+    std_fns: map.empty(),
     adts_by_name: map.empty(),
     aliases: map.empty(),
     alias_resolved: map.empty(),
@@ -2768,6 +2771,22 @@ pub fn builtin_sig(cx: Cx, name: String) -> Option[Sig] = {
 }
 
 ## The visible builtin names — the "did you mean" pool half.
+## Resolution for a called/read function name: local decls → std → builtins
+## (spec §10.6 — the shadowing is total in this module).
+pub fn lookup_fn_sig(cx: Cx, name: String) -> Option[Sig] =
+  match map.get(cx.fns, name) {
+    Some(s) -> Some(s)
+    None ->
+      match map.get(cx.std_fns, name) {
+        Some(s) -> Some(s)
+        None -> builtin_sig(cx, name)
+      }
+  }
+
+## The candidate pool for "did you mean" on a function name.
+pub fn fn_pool(cx: Cx) -> List[String] =
+  map.keys(cx.fns) ++ map.keys(cx.std_fns) ++ visible_builtin_names(cx)
+
 pub fn visible_builtin_names(cx: Cx) -> List[String] = {
   var out: List[String] = []
   let hidden = internal_builtins()
@@ -3928,11 +3947,7 @@ pub fn needs_expected(cx: Cx, e: Expr) -> Bool =
         Some(_) -> return false
         None -> ()
       }
-      let sig = match map.get(cx.fns, name) {
-        Some(s) -> Some(s)
-        None -> builtin_sig(cx, name)
-      }
-      match sig {
+      match lookup_fn_sig(cx, name) {
         Some(s) -> len(s.tparams) > 0
         None -> false
       }
@@ -3965,11 +3980,7 @@ pub fn needs_expected(cx: Cx, e: Expr) -> Bool =
         Some(_) -> return false
         None -> ()
       }
-      let sig = match map.get(cx.fns, callee) {
-        Some(s) -> Some(s)
-        None -> builtin_sig(cx, callee)
-      }
-      match sig {
+      match lookup_fn_sig(cx, callee) {
         Some(s) -> len(s.tparams) > 0 && len(args) == 0
         None -> false
       }
@@ -4666,16 +4677,11 @@ fn check_var(cx: Cx, name: String, expected: Option[Ty], lo: Int, hi: Int) -> (C
       (cx1, sym.ty, XLocal(id, name, lo, hi))
     }
     None -> {
-      let f = match map.get(cx1.fns, name) {
-        Some(s) -> Some(s)
-        None -> builtin_sig(cx1, name)
-      }
-      match f {
+      match lookup_fn_sig(cx1, name) {
         Some(s) -> check_fn_value(cx1, name, s, expected, lo, hi)
         None ->
           (cerr_o(cx1, "undefined variable: " ++ name, lo, hi,
-            moved_or_suggest(cx1, name,
-              local_names(cx1) ++ map.keys(cx1.fns) ++ visible_builtin_names(cx1))),
+            moved_or_suggest(cx1, name, local_names(cx1) ++ fn_pool(cx1))),
             TyError, XError(lo, hi))
       }
     }
@@ -5040,8 +5046,7 @@ fn check_stmt(cx: Cx, s: Stmt) -> (Cx, TStmt) !io =
       match found {
         None -> {
           cx1 = cerr_o(cx1, "undefined variable: " ++ name, nlo, nhi,
-            moved_or_suggest(cx1, name,
-              local_names(cx1) ++ map.keys(cx1.fns) ++ visible_builtin_names(cx1)))
+            moved_or_suggest(cx1, name, local_names(cx1) ++ fn_pool(cx1)))
           let (cxb, _, vx) = check_expr(cx1, value, no_expected())
           (cxb, TSExpr(vx, lo, hi))
         }
@@ -5360,11 +5365,7 @@ fn check_call(
   }
   let sig = match resolved_sig {
     Some(s0) -> Some(s0)
-    None ->
-      match map.get(cx1.fns, callee) {
-        Some(s0) -> Some(s0)
-        None -> builtin_sig(cx1, callee)
-      }
+    None -> lookup_fn_sig(cx1, callee)
   }
   let s = match sig {
     Some(s2) -> s2
@@ -5372,7 +5373,7 @@ fn check_call(
       # still check the arguments so their subtrees get types/symbols
       let (cxa, _) = check_args_plain(cx1, args, pre0)
       return (cerr_o(cxa, "undefined function: " ++ callee, clo, chi,
-        moved_or_suggest(cxa, callee, map.keys(cxa.fns) ++ visible_builtin_names(cxa))),
+        moved_or_suggest(cxa, callee, fn_pool(cxa))),
         TyError, XError(lo, hi))
     }
   }
@@ -6540,8 +6541,8 @@ fn check_method_call(
           let ftype = subst(ci.fields[fidx].ty, im, em0)
           match ftype {
             TyFn(fps, fret, feff) -> {
-              let fn_in_scope = lookup(cx1, name) != None || map.has(cx1.fns, name) ||
-                builtin_sig(cx1, name) != None
+              let fn_in_scope = lookup(cx1, name) != None ||
+                lookup_fn_sig(cx1, name) != None
               if fn_in_scope {
                 for a in args {
                   let (cxa, _, _) = check_expr(cx1, a, no_expected())
@@ -7472,4 +7473,119 @@ test "check_module: impl methods and trait defaults check as bodies" {
   let (cx2, _) = check_module(test_cx(), m2, env)
   assert len(cx2.diags) == 1
   assert cx2.diags[0].msg == "function `f` is not declared !io but calls `g` (!io)"
+}
+
+## The pub surface of a checked module for importers (the Kotlin exportsOf).
+## The whole ADT/trait tables ride along — extra entries graft harmlessly.
+pub fn exports_of(cx: Cx, m: Module, mod_path: String, class_name: String) -> ModExports = {
+  var fns2: Map[String, Sig] = map.empty()
+  var types2: Map[String, Int] = map.empty()
+  var aliases2: Map[String, AliasE] = map.empty()
+  var ctors2: Map[String, (Int, Int)] = map.empty()
+  var consts2: Map[String, Ty] = map.empty()
+  var traits2: Map[String, Int] = map.empty()
+  var all: List[String] = []
+  for d in module_fns(m) {
+    all = all ++ [d.name]
+    if d.is_pub {
+      match map.get(cx.fns, d.name) {
+        Some(s) -> { fns2 = map.insert(fns2, d.name, s) }
+        None -> ()
+      }
+    }
+  }
+  for d in module_types(m) {
+    all = all ++ [d.name]
+    if d.is_pub {
+      match map.get(cx.adts_by_name, d.name) {
+        Some(aid) -> {
+          types2 = map.insert(types2, d.name, aid)
+          # a pub type brings its constructors (spec §10.3)
+          var ci = 0
+          for c in adt_of(cx.adts, aid).ctors {
+            ctors2 = map.insert(ctors2, c.name, (aid, ci))
+            ci = ci + 1
+          }
+        }
+        None -> ()
+      }
+      match map.get(cx.aliases, d.name) {
+        Some(al) -> { aliases2 = map.insert(aliases2, d.name, al) }
+        None -> ()
+      }
+    }
+  }
+  for d in module_consts(m) {
+    all = all ++ [d.name]
+    if d.is_pub {
+      match map.get(cx.consts, d.name) {
+        Some(t) -> { consts2 = map.insert(consts2, d.name, t) }
+        None -> ()
+      }
+    }
+  }
+  for d in module_traits(m) {
+    all = all ++ [d.name]
+    for me in d.methods { all = all ++ [me.name] }
+    if d.is_pub {
+      match map.get(cx.traits_by_name, d.name) {
+        Some(tid) -> {
+          traits2 = map.insert(traits2, d.name, tid)
+          # a pub trait's methods are importable like pub fns
+          for entry in trait_of(cx.traits, tid).methods {
+            let (mname, ms) = entry
+            fns2 = map.insert(fns2, mname, ms.sig)
+          }
+        }
+        None -> ()
+      }
+    }
+  }
+  ModExports {
+    mod_path: mod_path,
+    class_name: class_name,
+    fns: fns2,
+    types_by_name: types2,
+    aliases: aliases2,
+    ctors: ctors2,
+    consts: consts2,
+    all_names: all,
+    src_path: cx.src_path,
+    traits_by_name: traits2,
+    impls: cx.local_impls,
+    adt_infos: cx.adts,
+    trait_infos: cx.traits
+  }
+}
+
+test "exports_of exposes the pub surface, and imports consume it" {
+  let src = "pub type Pt = { x: Int, y: Int }\n" ++
+    "pub fn mk(x: Int, y: Int) -> Pt = Pt { x: x, y: y }\n" ++
+    "fn hidden() -> Int = 1\n" ++
+    "pub const ORIGIN_X: Int = 0\n"
+  let (m, pdiags) = parser.parse_module(src)
+  assert len(pdiags) == 0
+  let env0: Map[String, ModExports] = map.empty()
+  let (cx1, _) = check_module(cx_new(Some("geom"), None), m, env0)
+  assert len(cx1.diags) == 0
+  let exp = exports_of(cx1, m, "geom", "geom")
+  assert map.has(exp.fns, "mk")
+  assert not map.has(exp.fns, "hidden")
+  assert map.has(exp.types_by_name, "Pt")
+  assert map.has(exp.ctors, "Pt")
+  assert map.has(exp.consts, "ORIGIN_X")
+  # a second module imports it, whole-module and selectively
+  let src2 = "use geom\n" ++
+    "pub fn go() -> Int = geom.mk(1, 2).x\n"
+  let (m2, pdiags2) = parser.parse_module(src2)
+  assert len(pdiags2) == 0
+  let env = map.from([("geom", exp)])
+  let (cx2, _) = check_module(cx_new(Some("use_site"), None), m2, env)
+  assert len(cx2.diags) == 0
+  # a private name reports as private
+  let src3 = "use geom\n" ++
+    "pub fn go() -> Int = geom.hidden()\n"
+  let (m3, _) = parser.parse_module(src3)
+  let (cx3, _) = check_module(cx_new(Some("use_site"), None), m3, env)
+  assert cx3.diags[0].msg == "`hidden` is private to module `geom`"
 }
