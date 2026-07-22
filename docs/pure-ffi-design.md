@@ -551,3 +551,21 @@ argv 通过 `PUTSTATIC <程序自己的入口类>.dawn$args` 到达程序,而 st
 **回归证据**:编译器 1215 测试绿、ktlint 绿;backend-dawn 63 测试绿;site 34 页 408 链接全解析;
 `java -jar` 产物自洽(print/read/write/list/args 逐条跑过),错误串与旧实现对拍一致。
 **builtin 表 49 → 42,std 60。**
+
+## 十四、批 C 勘察（2026-07-22）：剩下的不是搬运，是三个设计题
+
+对着现表（42 个）核对，可机械迁移的批次已经打完。剩余分三类，每类卡在一个真实的结上：
+
+1. **容器组（`map_*`/`set_*`，16 个）是 witnessed builtin**：调用点由 codegen 注入
+   Ord 字典、`NEW DictComparator` 包成 Comparator（`CodeGen.kt:1505`）。std 源码
+   **没有「把当前 bound 的字典物化成值」的表达手段**——迁移要么给语言加这个能力，
+   要么改 `DawnMap`/`DawnSet` 直接收 `Fn2`（SAM 桥）+ std 侧用 lambda 包 bound 方法。
+   两条都是设计决策 + 运行时类改动，不是一行 `unsafe_pure` 转发。
+2. **`args` 与模块类布线耦合**：读的是**当前模块类**自己的 `dawn$args` 静态字段
+   （`:2842`），字段由 `genJvmMain` 注入。std 层复刻需要一个全局 args 载体
+   （运行时类新增 + 双编译器同步 + vendored 清单扩一格）。
+3. **cursor 家族是有意的核邻**：不透明类型契约靠 builtin 边界撑着（spec §9.5.2），
+   按 P0.6 的裁决留在表里。
+
+结论：**批 C 单独成一场**（冻结后所有改动 Kotlin/selfhost 两边同做、金样互拍守护），
+入场券是先定容器组走哪条路。本轮不动。42 → 4 的终局不变，但从这里起每一步都是设计。
