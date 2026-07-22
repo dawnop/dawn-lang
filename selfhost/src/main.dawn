@@ -22,7 +22,10 @@ use analyze.{CheckedMod, load_directory, load_file, analyze_program}
 use vendor
 use jarw
 use fmt
+use testrun.{TESTMAIN_CLASS, gen_test_main}
 use java "java.lang.System"
+use java "java.lang.ProcessBuilder"
+use java "java.lang.Process"
 use std/set
 use codegen.{
   fn_iface, tuple_class, gen_fn_interface, gen_tuple_class, gen_panic_class,
@@ -111,9 +114,13 @@ fn write_class(dir: String, name: String, bs: Bytes) -> Unit !io = {
 
 ## Full program emission — shared runtime, prelude ADTs, every std and user
 ## module class, vendored rt — in a stable order, plus the entry class name
-## ("" when no user module declares `fn main`). Without a target: the runtime
-## subset only.
-fn collect_program(target: String, std_dir: String) -> (List[(String, Bytes)], String) !io = {
+## ("" when no user module declares `fn main`) and, per user module with test
+## blocks, (class name, module path, test names) in run order. Without a
+## target: the runtime subset only.
+fn collect_program(
+  target: String,
+  std_dir: String
+) -> (List[(String, Bytes)], String, List[(String, String, List[String])]) !io = {
   var classes: List[(String, Bytes)] = []
   var adts = prelude_adts()
   var mods: List[CheckedMod] = []
@@ -220,6 +227,7 @@ fn collect_program(target: String, std_dir: String) -> (List[(String, Bytes)], S
     }
   }
   var entry = ""
+  var tests_info: List[(String, String, List[String])] = []
   for cm in mods {
     classes = classes ++ emit_module(sup, adts, traits, impl_table, prog_fns, cm.cx.fns,
       cm.class_name, own_trait_ids(cm.cx.traits, cm.class_name), cm.cx.local_impls,
@@ -234,11 +242,103 @@ fn collect_program(target: String, std_dir: String) -> (List[(String, Bytes)], S
         if plain && tf.name == "main" { entry = cm.class_name }
       }
     }
+    if len(cm.tm.tests) > 0 {
+      var names: List[String] = []
+      for tf in cm.tm.tests { names = names ++ [tf.name] }
+      tests_info = tests_info ++ [(cm.class_name, cm.mod_path, names)]
+    }
   }
   for outer in vendor.vendored_outers() {
     classes = classes ++ vendor.rt_class_family(outer)
   }
-  (classes, entry)
+  (classes, entry, tests_info)
+}
+
+fn host_classpath() -> String !io =
+  match System.getProperty("java.class.path") {
+    Some(s) -> s
+    None -> ""
+  }
+
+## Emit `classes` under a fresh temp directory and return its path.
+fn write_temp_classes(classes: List[(String, Bytes)]) -> String !io = {
+  let dir = Files.createTempDirectory("selfhost-run").expect("temp dir").toString().expect("path")
+  for pair in classes {
+    let (nm, bs) = pair
+    write_class(dir, nm, bs)
+  }
+  dir
+}
+
+## Spawn `java -Xss512m -cp <cp> <cls> <args...>` inheriting stdio; the exit code.
+fn spawn_java(cp: String, cls: String, args: List[String]) -> Int !io = {
+  var cmd: List[String] = ["java", "-Xss512m", "-cp", cp, cls]
+  cmd = cmd ++ args
+  let pb = ProcessBuilder.new(cmd)
+  let _ = pb.inheritIO()
+  pb.start().expect("java process").waitFor()
+}
+
+## `selfhost run [--std <dir>] <target> [args...]` — mirror of `dawn run`,
+## via a subprocess over freshly emitted classes (the host class path rides
+## along so `use java` third-party classes stay visible).
+fn run_run(rest: List[String]) -> Unit !io = {
+  var target = ""
+  var std_dir = "compiler/src/main/resources/std"
+  var args2: List[String] = []
+  var i = 0
+  while i < len(rest) {
+    if rest[i] == "--std" && i + 1 < len(rest) && target == "" {
+      std_dir = rest[i + 1]
+      i = i + 2
+    } else if target == "" {
+      target = rest[i]
+      i = i + 1
+    } else {
+      args2 = args2 ++ [rest[i]]
+      i = i + 1
+    }
+  }
+  if target == "" { panic("usage: selfhost run [--std <dir>] <file.dawn | project-dir> [args...]") }
+  let (classes, entry, _) = collect_program(target, std_dir)
+  if entry == "" { panic(target ++ " has no pub fn main() -> Unit !io, nothing to run") }
+  let dir = write_temp_classes(classes)
+  let code = spawn_java(dir ++ ":" ++ host_classpath(), entry, args2)
+  if code != 0 { let _ = System.exit(code) }
+}
+
+## `selfhost test [--std <dir>] <target>` — mirror of `dawn test`: emit with
+## test blocks plus a synthesized dawn$TestMain runner, and run it.
+fn run_test(rest: List[String]) -> Unit !io = {
+  var target = ""
+  var std_dir = "compiler/src/main/resources/std"
+  var i = 0
+  while i < len(rest) {
+    if rest[i] == "--std" && i + 1 < len(rest) {
+      std_dir = rest[i + 1]
+      i = i + 2
+    } else {
+      target = rest[i]
+      i = i + 1
+    }
+  }
+  if target == "" { panic("usage: selfhost test [--std <dir>] <file.dawn | project-dir>") }
+  let (classes, _, tests_info) = collect_program(target, std_dir)
+  if len(tests_info) == 0 { panic(target ++ " has no test blocks") }
+  var runner_tests: List[(String, Int, String)] = []
+  for mi in tests_info {
+    let (cls, mod_path, names) = mi
+    var idx = 0
+    for nm in names {
+      let label = if len(tests_info) > 1 { mod_path ++ " :: " ++ nm } else { nm }
+      runner_tests = runner_tests ++ [(cls, idx, label)]
+      idx = idx + 1
+    }
+  }
+  let all = classes ++ [(TESTMAIN_CLASS, gen_test_main(runner_tests))]
+  let dir = write_temp_classes(all)
+  let code = spawn_java(dir ++ ":" ++ host_classpath(), TESTMAIN_CLASS, [])
+  if code != 0 { let _ = System.exit(code) }
 }
 
 ## `selfhost emit [<target>] [--std <dir>] -o <dir>`: write every class of the
@@ -261,7 +361,7 @@ fn run_emitrt(rest: List[String]) -> Unit !io = {
     }
   }
   if out == "" { panic("usage: selfhost emit [<target>] [--std <dir>] -o <dir>") }
-  let (classes, _) = collect_program(target, std_dir)
+  let (classes, _, _) = collect_program(target, std_dir)
   for pair in classes {
     let (nm, bs) = pair
     write_class(out, nm, bs)
@@ -298,7 +398,7 @@ fn run_build(rest: List[String]) -> Unit !io = {
   if out == "" || target == "" {
     panic("usage: selfhost build <target> [--std <dir>] [--vendor <pkg>]... -o <out.jar>")
   }
-  let (classes, entry) = collect_program(target, std_dir)
+  let (classes, entry, _) = collect_program(target, std_dir)
   if entry == "" { panic(target ++ " has no fn main to use as an entry point") }
   # dedupe defensively: ZipOutputStream throws on a repeated entry name
   var seen: Set[String] = set.empty()
@@ -419,6 +519,10 @@ pub fn main() -> Unit !io = {
         run_build(rest)
       } else if mode == "fmt" {
         run_fmt(rest)
+      } else if mode == "run" {
+        run_run(rest)
+      } else if mode == "test" {
+        run_test(rest)
       } else {
         for pth in rest {
           println("== " ++ pth ++ " ==")

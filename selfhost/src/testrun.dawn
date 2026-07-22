@@ -1,0 +1,160 @@
+# The `selfhost test` runner class: dawn$TestMain, a synthesized main that
+# invokes every emitted dawn$test$i in order and prints the same report
+# `dawn test` prints — PASS/FAIL lines, panic messages indented six spaces,
+# the summary — exiting 1 when anything failed. Generated as bytecode because
+# test blocks are not Dawn-callable functions; each test is a try/catch with
+# the failure counter in a local.
+
+use codegen.{
+  V17, ACC_PUBLIC, ACC_STATIC, ACC_FINAL,
+  OP_ALOAD, OP_ASTORE, OP_ILOAD, OP_ISTORE, OP_RETURN, OP_GOTO,
+  OP_ICONST_0, OP_ICONST_1, OP_IFNULL, OP_IFNE, OP_IF_ICMPGE,
+  OP_GETSTATIC, OP_INVOKESTATIC, OP_INVOKEVIRTUAL, OP_ARRAYLENGTH
+}
+use java "dawn.tool.AdtClassWriter"
+use java "org.objectweb.asm.MethodVisitor"
+use java "org.objectweb.asm.Label"
+
+# opcodes codegen has no use for and does not export
+const OP_AALOAD: Int = 50
+const OP_ICONST_M1: Int = 2
+
+pub const TESTMAIN_CLASS: String = "dawn\$TestMain"
+
+const OUT_DESC: String = "Ljava/io/PrintStream;"
+const CONCAT: String = "(Ljava/lang/String;)Ljava/lang/String;"
+
+fn push_out(mv: MethodVisitor) -> Unit !io =
+  mv.visitFieldInsn(OP_GETSTATIC, "java/lang/System", "out", OUT_DESC)
+
+fn println_top(mv: MethodVisitor) -> Unit !io =
+  mv.visitMethodInsn(OP_INVOKEVIRTUAL, "java/io/PrintStream", "println",
+    "(Ljava/lang/String;)V", false)
+
+## static pass(label): println("PASS  " + label)
+fn gen_pass(cw: AdtClassWriter) -> Unit !io = {
+  let mv = cw.method(ACC_PUBLIC + ACC_STATIC, "pass", "(Ljava/lang/String;)V").expect("mv")
+  mv.visitCode()
+  push_out(mv)
+  mv.visitLdcInsn("PASS  ")
+  mv.visitVarInsn(OP_ALOAD, 0)
+  mv.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/String", "concat", CONCAT, false)
+  println_top(mv)
+  mv.visitInsn(OP_RETURN)
+  mv.visitMaxs(0, 0)
+  mv.visitEnd()
+}
+
+## static fail(label, t): println("FAIL  " + label), then each line of
+## t.getMessage() (when present) indented six spaces — the Kotlin cmdTest shape.
+fn gen_fail(cw: AdtClassWriter) -> Unit !io = {
+  let mv = cw.method(ACC_PUBLIC + ACC_STATIC, "fail",
+    "(Ljava/lang/String;Ljava/lang/Throwable;)V").expect("mv")
+  mv.visitCode()
+  push_out(mv)
+  mv.visitLdcInsn("FAIL  ")
+  mv.visitVarInsn(OP_ALOAD, 0)
+  mv.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/String", "concat", CONCAT, false)
+  println_top(mv)
+  # msg := t.getMessage(); if (msg == null) return
+  let l_end = Label.new()
+  mv.visitVarInsn(OP_ALOAD, 1)
+  mv.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/Throwable", "getMessage",
+    "()Ljava/lang/String;", false)
+  mv.visitVarInsn(OP_ASTORE, 2)
+  mv.visitVarInsn(OP_ALOAD, 2)
+  mv.visitJumpInsn(OP_IFNULL, l_end)
+  # lines := msg.split("\n", -1); for (i in 0 until lines.length) println("      " + lines[i])
+  mv.visitVarInsn(OP_ALOAD, 2)
+  mv.visitLdcInsn("\n")
+  mv.visitInsn(OP_ICONST_M1)
+  mv.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/String", "split",
+    "(Ljava/lang/String;I)[Ljava/lang/String;", false)
+  mv.visitVarInsn(OP_ASTORE, 3)
+  mv.visitInsn(OP_ICONST_0)
+  mv.visitVarInsn(OP_ISTORE, 4)
+  let l_loop = Label.new()
+  mv.visitLabel(l_loop)
+  mv.visitVarInsn(OP_ILOAD, 4)
+  mv.visitVarInsn(OP_ALOAD, 3)
+  mv.visitInsn(OP_ARRAYLENGTH)
+  mv.visitJumpInsn(OP_IF_ICMPGE, l_end)
+  push_out(mv)
+  mv.visitLdcInsn("      ")
+  mv.visitVarInsn(OP_ALOAD, 3)
+  mv.visitVarInsn(OP_ILOAD, 4)
+  mv.visitInsn(OP_AALOAD)
+  mv.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/String", "concat", CONCAT, false)
+  println_top(mv)
+  mv.visitIincInsn(4, 1)
+  mv.visitJumpInsn(OP_GOTO, l_loop)
+  mv.visitLabel(l_end)
+  mv.visitInsn(OP_RETURN)
+  mv.visitMaxs(0, 0)
+  mv.visitEnd()
+}
+
+## main: per-test try/catch, then the summary. `total` is a generation-time
+## constant, so the all-passed line is a single LDC.
+fn gen_runner_main(cw: AdtClassWriter, tests: List[(String, Int, String)]) -> Unit !io = {
+  let mv = cw.method(ACC_PUBLIC + ACC_STATIC, "main", "([Ljava/lang/String;)V").expect("mv")
+  mv.visitCode()
+  mv.visitInsn(OP_ICONST_0)
+  mv.visitVarInsn(OP_ISTORE, 1)
+  for t in tests {
+    let (cls, idx, label) = t
+    let l_start = Label.new()
+    let l_end = Label.new()
+    let l_catch = Label.new()
+    let l_next = Label.new()
+    mv.visitTryCatchBlock(l_start, l_end, l_catch, "java/lang/Throwable")
+    mv.visitLabel(l_start)
+    mv.visitMethodInsn(OP_INVOKESTATIC, cls, "dawn\$test\$" ++ to_string(idx), "()V", false)
+    mv.visitLabel(l_end)
+    mv.visitLdcInsn(label)
+    mv.visitMethodInsn(OP_INVOKESTATIC, TESTMAIN_CLASS, "pass", "(Ljava/lang/String;)V", false)
+    mv.visitJumpInsn(OP_GOTO, l_next)
+    mv.visitLabel(l_catch)
+    mv.visitVarInsn(OP_ASTORE, 2)
+    mv.visitLdcInsn(label)
+    mv.visitVarInsn(OP_ALOAD, 2)
+    mv.visitMethodInsn(OP_INVOKESTATIC, TESTMAIN_CLASS, "fail",
+      "(Ljava/lang/String;Ljava/lang/Throwable;)V", false)
+    mv.visitIincInsn(1, 1)
+    mv.visitLabel(l_next)
+  }
+  let l_failed = Label.new()
+  mv.visitVarInsn(OP_ILOAD, 1)
+  mv.visitJumpInsn(OP_IFNE, l_failed)
+  push_out(mv)
+  mv.visitLdcInsn(to_string(len(tests)) ++ " test(s) passed")
+  println_top(mv)
+  mv.visitInsn(OP_RETURN)
+  mv.visitLabel(l_failed)
+  push_out(mv)
+  mv.visitVarInsn(OP_ILOAD, 1)
+  mv.visitMethodInsn(OP_INVOKESTATIC, "java/lang/String", "valueOf",
+    "(I)Ljava/lang/String;", false)
+  mv.visitLdcInsn(" of " ++ to_string(len(tests)) ++ " test(s) failed")
+  mv.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/String", "concat", CONCAT, false)
+  println_top(mv)
+  mv.visitInsn(OP_ICONST_1)
+  mv.visitMethodInsn(OP_INVOKESTATIC, "java/lang/System", "exit", "(I)V", false)
+  mv.visitInsn(OP_RETURN)
+  mv.visitMaxs(0, 0)
+  mv.visitEnd()
+}
+
+## The runner class bytes. `tests` = (module class, test index, label) in run
+## order; labels are prefixed with the module path by the caller when more
+## than one module has tests, mirroring cmdTest.
+pub fn gen_test_main(tests: List[(String, Int, String)]) -> Bytes !io = {
+  let no_supers: List[String] = []
+  let cw = AdtClassWriter.new(no_supers)
+  cw.begin(V17, ACC_PUBLIC + ACC_FINAL, TESTMAIN_CLASS, "java/lang/Object")
+  gen_pass(cw)
+  gen_fail(cw)
+  gen_runner_main(cw, tests)
+  cw.visitEnd()
+  cw.toByteArray().expect("bytes")
+}
