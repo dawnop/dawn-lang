@@ -1,0 +1,165 @@
+# The bundled standard library (the Kotlin StdLib): std sources are read from a
+# directory (`--std <dir>`, default compiler/src/main/resources/std), each
+# parsed and checked once in modules.txt order, its pub surface handed to every
+# user module. std is checked with no std of its own in scope — only the
+# prelude, the builtins and explicit `use` edges — keeping the bootstrap
+# acyclic. A broken bundled std is a compiler bug: fail loudly.
+
+use std/io
+use std/str
+use std/map
+use std/set
+use token.{Diag}
+use ast.{Module}
+use types.{Sig, Adts}
+use tast.{TFun, TModule}
+use checker.{ModExports, check_module, cx_new, exports_of, Cx}
+use interp.{eval_comptime, CtOut}
+use parser
+use lexer
+
+## Everything user-module analysis needs from std.
+pub type StdCtx = {
+  # modPath → exports, seeded into every program's import environment
+  exports: Map[String, ModExports],
+  # the implicitly-visible surface: the PRELUDE names only
+  std_fns: Map[String, Sig],
+  # removed flat spelling → how to write it now
+  moved: Map[String, String],
+  # flat name → typed fn (last wins), for the comptime interpreter
+  fn_decls: Map[String, TFun],
+  # className → (name → typed fn): module-qualified comptime calls
+  by_owner: Map[String, Map[String, TFun]],
+  std_names: Set[String],
+  # the ADT table after all of std (grafted ids for user comptime)
+  adts: Adts
+}
+
+pub fn prelude_names() -> List[String] = ["println", "print", "map", "filter", "fold"]
+
+fn is_prelude(n: String) -> Bool = {
+  for p in prelude_names() {
+    if p == n { return true }
+  }
+  false
+}
+
+fn moved_renames(out0: Map[String, String]) -> Map[String, String] = {
+  var out = out0
+  out = map.insert(out, "str_len", "use std/str, then str.len(...)")
+  out = map.insert(out, "char_to_string", "use std/str, then str.from_char(...)")
+  out = map.insert(out, "reverse_str", "use std/str, then str.reverse(...)")
+  out = map.insert(out, "byte_len", "use std/bytes, then bytes.len(...)")
+  out = map.insert(out, "byte_at", "use std/bytes, then bytes.at(...)")
+  out = map.insert(out, "byte_slice", "use std/bytes, then bytes.slice(...)")
+  out = map.insert(out, "byte_index_of", "use std/bytes, then bytes.index_of(...)")
+  for op in ["empty", "from", "insert", "remove", "get", "has", "size", "keys", "values", "entries"] {
+    out = map.insert(out, "map_" ++ op, "use std/map, then map." ++ op ++ "(...)")
+  }
+  for op in ["empty", "from", "insert", "remove", "has", "size", "to_list"] {
+    out = map.insert(out, "set_" ++ op, "use std/set, then set." ++ op ++ "(...)")
+  }
+  for op in ["start", "end", "done", "char", "next", "prev", "slice", "skip"] {
+    out = map.insert(out, "cursor_" ++ op, "use std/cursor, then cursor." ++ op ++ "(...)")
+  }
+  out = map.insert(out, "index_of_from", "use std/cursor, then cursor.find(...)")
+  out
+}
+
+## Read modules.txt: one name per line, `#` comments, blanks skipped.
+pub fn read_index(dir: String) -> Result[List[String], String] !io = {
+  let text = io.read_file(dir ++ "/modules.txt")?
+  var names: List[String] = []
+  for line in str.split(text, "\n") {
+    let cut = match str.index_of(line, "#") {
+      Some(i) -> str.substring(line, 0, i)
+      None -> line
+    }
+    let t = str.trim(cut)
+    if t != "" { names = names ++ [t] }
+  }
+  Ok(names)
+}
+
+## Load, check and comptime-evaluate the bundled std from a directory.
+pub fn load_std(dir: String) -> Result[StdCtx, String] !io = {
+  let names = read_index(dir)?
+  var exports: Map[String, ModExports] = map.empty()
+  var std_fns: Map[String, Sig] = map.empty()
+  var moved: Map[String, String] = map.empty()
+  var fn_decls: Map[String, TFun] = map.empty()
+  var by_owner: Map[String, Map[String, TFun]] = map.empty()
+  var adts: Adts = map.empty()
+  var last_cx: Option[Cx] = None
+  for n in names {
+    let mod_path = "std/" ++ n
+    let text = io.read_file(dir ++ "/" ++ n ++ ".dawn")?
+    let (m, pdiags) = parser.parse_module(text)
+    if len(pdiags) > 0 {
+      return Err("bundled std module `" ++ mod_path ++ "` does not parse: " ++ pdiags[0].msg)
+    }
+    var cx = cx_new(Some(mod_path), None)
+    cx = Cx { ..cx, line_starts: lexer.line_starts_of(text) }
+    # no std_fns here: std cannot implicitly import itself
+    let (cx1, tm) = check_module(cx, m, exports)
+    if len(cx1.diags) > 0 {
+      return Err("bundled std module `" ++ mod_path ++ "` does not check: " ++ cx1.diags[0].msg)
+    }
+    let ct = eval_comptime(tm, fn_decls, by_owner, set.empty(), cx1.adts, 100000000)
+    if len(ct.diags) > 0 {
+      return Err("bundled std module `" ++ mod_path ++ "` does not evaluate: " ++ ct.diags[0].msg)
+    }
+    let exp = exports_of(cx1, m, mod_path, mod_path)
+    exports = map.insert(exports, mod_path, exp)
+    var own: Map[String, TFun] = map.empty()
+    for f in tm.fns {
+      fn_decls = map.insert(fn_decls, f.name, f)
+      own = map.insert(own, f.name, f)
+    }
+    by_owner = map.insert(by_owner, mod_path, own)
+    for fname in map.keys(exp.fns) {
+      if is_prelude(fname) {
+        std_fns = map.insert(std_fns, fname,
+          map.get(exp.fns, fname).expect("prelude fn"))
+      } else {
+        moved = map.insert(moved, fname, "use " ++ mod_path ++ ", then " ++ n ++ "." ++
+            fname ++ "(...)")
+      }
+    }
+    adts = cx1.adts
+    last_cx = Some(cx1)
+  }
+  moved = moved_renames(moved)
+  var std_names: Set[String] = set.empty()
+  for k in map.keys(fn_decls) { std_names = set.insert(std_names, k) }
+  Ok(StdCtx {
+    exports: exports,
+    std_fns: std_fns,
+    moved: moved,
+    fn_decls: fn_decls,
+    by_owner: by_owner,
+    std_names: std_names,
+    adts: adts
+  })
+}
+
+test "the bundled std loads, checks and evaluates" {
+  match load_std("compiler/src/main/resources/std") {
+    Ok(std) -> {
+      assert map.has(std.exports, "std/str")
+      assert map.has(std.exports, "std/cursor")
+      # the implicit surface is exactly the prelude names
+      assert map.has(std.std_fns, "println")
+      assert map.has(std.std_fns, "map")
+      assert not map.has(std.std_fns, "trim")
+      # everything else moved behind its module
+      assert map.get(std.moved, "map_insert") == Some("use std/map, then map.insert(...)")
+      assert map.get(std.moved, "trim") == Some("use std/str, then str.trim(...)")
+      assert set.has(std.std_names, "trim")
+    }
+    Err(e) -> {
+      println("STD LOAD FAILED: " ++ e)
+      assert false
+    }
+  }
+}
