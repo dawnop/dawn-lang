@@ -1,45 +1,57 @@
-# Routes are data — literally an ADT: `Get("/api/articles/{slug}", handler)`.
-# (Constructors double as the route DSL because builtin names like `get` are
-# reserved and cannot be redefined as functions.) Patterns are literal segments
-# plus `{name}` captures; matching is segment-exact.
+# Routes are data — an open record `{ method, pattern, tags, handler }` built via
+# the `route_get/route_post/route_put/route_delete` constructors (a lowercase
+# `get` would clash with the builtin, and Dawn forbids capitalised function
+# names, so the verb is baked into the name). `route_method_of(verb, ...)` covers
+# arbitrary verbs (WebDAV). Adding a verb no longer touches this core — it is
+# just a different string. `tags` are opaque labels a route carries for
+# middleware to read (see `tagged`); patterns are literal segments plus `{name}`
+# captures, matched segment-exact.
 use std/str
 use std/map
-use types.{Request, Response, HttpError, Handler}
+use types.{Request, Response, HttpError, Handler, RouteMeta}
 
-pub type Route =
-  | Get(pattern: String, handler: Handler)
-  | Post(pattern: String, handler: Handler)
-  | Put(pattern: String, handler: Handler)
-  | Delete(pattern: String, handler: Handler)
+pub type Route = {
+  method: String,
+  pattern: String,
+  # labels middleware dispatch on instead of hardcoding paths, e.g. "raw-body"
+  # (skip the JSON body limit) or "no-cors" (don't stamp Access-Control-*).
+  tags: List[String],
+  handler: Handler,
+}
 
-fn route_method(r: Route) -> String =
-  match r {
-    Get(_, _) -> "GET"
-    Post(_, _) -> "POST"
-    Put(_, _) -> "PUT"
-    Delete(_, _) -> "DELETE"
-  }
+pub fn route_get(pattern: String, handler: Handler) -> Route =
+  Route { method: "GET", pattern: pattern, tags: [], handler: handler }
 
-fn route_pattern(r: Route) -> String =
-  match r {
-    Get(p, _) -> p
-    Post(p, _) -> p
-    Put(p, _) -> p
-    Delete(p, _) -> p
-  }
+pub fn route_post(pattern: String, handler: Handler) -> Route =
+  Route { method: "POST", pattern: pattern, tags: [], handler: handler }
 
-fn route_handler(r: Route) -> Handler =
-  match r {
-    Get(_, h) -> h
-    Post(_, h) -> h
-    Put(_, h) -> h
-    Delete(_, h) -> h
-  }
+pub fn route_put(pattern: String, handler: Handler) -> Route =
+  Route { method: "PUT", pattern: pattern, tags: [], handler: handler }
 
-# The dispatch decision: a handler plus captured params, no path match at all,
-# or a path that exists but not under this method (404 vs 405).
+pub fn route_delete(pattern: String, handler: Handler) -> Route =
+  Route { method: "DELETE", pattern: pattern, tags: [], handler: handler }
+
+# Any HTTP verb (OPTIONS/PROPFIND/MKCOL/MOVE/COPY/LOCK/... for WebDAV). The verb
+# is compared uppercase-exact, same as the sugar constructors above.
+pub fn route_method_of(verb: String, pattern: String, handler: Handler) -> Route =
+  Route { method: verb, pattern: pattern, tags: [], handler: handler }
+
+# Attach tags to a route (records are immutable — returns a new Route). Tags
+# accumulate, so `tagged(tagged(r, ["a"]), ["b"])` carries both.
+pub fn tagged(r: Route, tags: List[String]) -> Route =
+  Route { ..r, tags: r.tags ++ tags }
+
+# The metadata the server hands middleware for the matched route (no handler,
+# so it can derive Show and travel inside a Request).
+pub fn route_meta(r: Route) -> RouteMeta =
+  RouteMeta { method: r.method, pattern: r.pattern, tags: r.tags }
+
+# The dispatch decision: the matched route plus captured params, no path match at
+# all, or a path that exists but not under this method (404 vs 405). Found carries
+# the whole Route so the server can both execute (route.handler) and expose its
+# metadata to middleware without a second lookup.
 pub type Dispatch =
-  | Found(handler: Handler, params: Map[String, String])
+  | Found(route: Route, params: Map[String, String])
   | NoPath
   | WrongMethod
 
@@ -50,12 +62,59 @@ fn is_capture(seg: String) -> Bool =
 
 fn capture_name(seg: String) -> String = str.substring(seg, 1, str.len(seg) - 1)
 
-# Match one pattern against one path; Some(captures) on success.
+# A tail capture `{name*}` matches the rest of the path (zero or more segments),
+# joined by "/". Only meaningful as the last pattern segment (WebDAV /dav/{rest*}).
+fn is_tail(seg: String) -> Bool =
+  str.starts_with(seg, "{") && str.ends_with(seg, "*}") && str.len(seg) > 3
+
+fn tail_name(seg: String) -> String = str.substring(seg, 1, str.len(seg) - 2)
+
+# Match one pattern against one path; Some(captures) on success. A trailing
+# `{name*}` captures all remaining segments (possibly empty) as one joined value.
 pub fn match_path(pattern: String, path: String) -> Option[List[(String, String)]] = {
   let ps = segs(pattern)
   let xs = segs(path)
-  if len(ps) != len(xs) { None } else { match_from(ps, xs, 0, []) }
+  let n = len(ps)
+  if n > 0 && is_tail(ps[n - 1]) {
+    if len(xs) < n - 1 {
+      None
+    } else {
+      match match_prefix(ps, xs, n - 1, 0, []) {
+        None -> None
+        Some(acc) -> {
+          let rest = join(map(range(n - 1, len(xs)), fn(i) => xs[i]), "/")
+          Some(acc ++ [(tail_name(ps[n - 1]), rest)])
+        }
+      }
+    }
+  } else if n != len(xs) {
+    None
+  } else {
+    match_from(ps, xs, 0, [])
+  }
 }
+
+# Match the first k segments (literals / single {name} captures) of ps against xs.
+fn match_prefix(
+  ps: List[String],
+  xs: List[String],
+  k: Int,
+  i: Int,
+  acc: List[(String, String)],
+) -> Option[List[(String, String)]] =
+  if i == k {
+    Some(acc)
+  } else {
+    let p = ps[i]
+    let x = xs[i]
+    if is_capture(p) {
+      match_prefix(ps, xs, k, i + 1, acc ++ [(capture_name(p), x)])
+    } else if p == x {
+      match_prefix(ps, xs, k, i + 1, acc)
+    } else {
+      None
+    }
+  }
 
 fn match_from(
   ps: List[String],
@@ -86,11 +145,11 @@ fn dispatch_from(routes: List[Route], method: String, path: String, i: Int, path
     if path_seen { WrongMethod } else { NoPath }
   } else {
     let r = routes[i]
-    match match_path(route_pattern(r), path) {
+    match match_path(r.pattern, path) {
       None -> dispatch_from(routes, method, path, i + 1, path_seen)
       Some(caps) ->
-        if route_method(r) == method {
-          Found(route_handler(r), map.from(caps))
+        if r.method == method {
+          Found(r, map.from(caps))
         } else {
           dispatch_from(routes, method, path, i + 1, true)
         }
@@ -116,11 +175,32 @@ test "trailing slash is tolerated" {
   assert match_path("/health", "/health/") == Some([])
 }
 
+test "tail capture matches zero or more remaining segments" {
+  assert match_path("/dav/{rest*}", "/dav") == Some([("rest", "")])
+  assert match_path("/dav/{rest*}", "/dav/") == Some([("rest", "")])
+  assert match_path("/dav/{rest*}", "/dav/a.txt") == Some([("rest", "a.txt")])
+  assert match_path("/dav/{rest*}", "/dav/a/b/c.txt") == Some([("rest", "a/b/c.txt")])
+  # a leading single-capture still works alongside a tail
+  assert match_path("/x/{id}/{rest*}", "/x/7/a/b") == Some([("id", "7"), ("rest", "a/b")])
+}
+
+test "Method route dispatches an arbitrary verb" {
+  let routes = [route_method_of("PROPFIND", "/dav/{rest*}", dummy)]
+  match dispatch(routes, "PROPFIND", "/dav/a/b") {
+    Found(_, params) -> { assert map.get(params, "rest") == Some("a/b") }
+    _ -> { assert false }
+  }
+  match dispatch(routes, "GET", "/dav/a/b") {
+    WrongMethod -> { assert true }
+    _ -> { assert false }
+  }
+}
+
 fn dummy(req: Request) -> Result[Response, HttpError] !io =
-  Ok(Response { status: 200, content_type: "text/plain", headers: [], body: "" })
+  Ok(Response { status: 200, content_type: "text/plain", headers: [], body: "", bin: None, stream: None })
 
 test "dispatch: found, 404, and 405 are distinguished" {
-  let routes = [Get("/a/{id}", dummy), Post("/run", dummy)]
+  let routes = [route_get("/a/{id}", dummy), route_post("/run", dummy)]
   match dispatch(routes, "GET", "/a/7") {
     Found(_, params) -> { assert map.get(params, "id") == Some("7") }
     _ -> { assert false }
@@ -131,6 +211,19 @@ test "dispatch: found, 404, and 405 are distinguished" {
   }
   match dispatch(routes, "GET", "/run") {
     WrongMethod -> { assert true }
+    _ -> { assert false }
+  }
+}
+
+test "tags ride along on the matched route and reach RouteMeta" {
+  let r = tagged(route_post("/api/fm/upload", dummy), ["raw-body"])
+  assert r.tags == ["raw-body"]
+  let m = route_meta(r)
+  assert m.method == "POST"
+  assert m.pattern == "/api/fm/upload"
+  assert m.tags == ["raw-body"]
+  match dispatch([r], "POST", "/api/fm/upload") {
+    Found(route, _) -> { assert route.tags == ["raw-body"] }
     _ -> { assert false }
   }
 }

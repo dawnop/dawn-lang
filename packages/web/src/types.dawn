@@ -4,9 +4,21 @@
 # status by the server (JSON body {"error": message}). No exceptions anywhere:
 # panics are bugs, expected failures travel in Result.
 use std/str
+use std/bytes
 use std/map
 use json/value.{Json, JStr, JObj}
 use json/render.{render}
+use java "java.io.InputStream"
+
+# The matched route's metadata, handed to middleware so they can dispatch on
+# `tags` instead of hardcoding paths. No handler field, so it derives Show and
+# can travel inside a Request. `None` on a Request means no route matched (404/
+# 405) — middleware treats an absent route as "no tags".
+pub type RouteMeta = {
+  method: String,
+  pattern: String,
+  tags: List[String],
+} derive Show
 
 pub type Request = {
   method: String,
@@ -16,15 +28,38 @@ pub type Request = {
   # request headers, keys lowercased for case-insensitive lookup (use `header`)
   headers: Map[String, String],
   body: String,
+  # the request body as raw Bytes: binary handlers (multipart upload) parse
+  # structure and recover exact file bytes from here, no latin-1 detour.
+  # Empty on a "stream-body" route — the body went to `body_file` instead.
+  raw: Bytes,
+  # Where the body landed for routes tagged "stream-body" (WebDAV PUT): the server
+  # streamed the socket to this temp file instead of reading it into memory, so a
+  # PUT costs a fixed buffer rather than a copy of the file. A path, not a stream:
+  # an opaque Java field would cost `derive Show`, and an upload needs a file on
+  # disk anyway (BodyPublishers.ofFile). The server creates and deletes it; it is
+  # alive exactly for the handler's call. None on every other route.
+  body_file: Option[String],
+  # the matched route's metadata (method/pattern/tags), filled by the server
+  # after dispatch so middleware can read `route.tags`; None when nothing matched.
+  route: Option[RouteMeta],
 } derive Show
 
+# Response can carry a binary body — first-class Bytes (spec §9.5.1) for the fm
+# proxy endpoints. `bin` = None means a text body (`body`). `stream` = Some means a
+# live upstream stream pumped to the socket instead (ignores body/bin).
 pub type Response = {
   status: Int,
   content_type: String,
   # extra response headers in emission order (Location, Content-Disposition, ...)
   headers: List[(String, String)],
   body: String,
-} derive Show
+  bin: Option[Bytes],
+  # A live upstream stream pumped straight to the socket: constant memory, first
+  # byte out immediately (fm content proxy / WebDAV serve_file for large media).
+  # Some => body/bin are ignored. An opaque InputStream isn't printable, so Response
+  # drops `derive Show` — nothing consumed it (docs/streaming-response-design.md §三).
+  stream: Option[InputStream],
+}
 
 pub type HttpError = { status: Int, message: String } derive Show
 
@@ -36,20 +71,63 @@ pub alias Middleware = fn(Handler) -> Handler
 pub fn http_error(status: Int, message: String) -> HttpError =
   HttpError { status: status, message: message }
 
+# Lift a repository/infrastructure result into a handler result.
+#
+# The two layers carry different error types — repos report `String`, handlers
+# report `HttpError` — and `?` refuses to cross that boundary (it demands the
+# error types be identical, and Dawn has no automatic conversion). Without this,
+# every call down a layer needs a `match` whose Ok arm does nothing but forward,
+# which wraps the real work in an extra level of nesting:
+#
+#   match with_db(...) {                    #   let rows = as_http(with_db(...), 500)?
+#     Err(m) -> Err(http_error(500, m))     #   ...body at the function's own indent...
+#     Ok(rows) -> { ...body... }            #
+#   }                                       #
+#
+# `status` is a parameter rather than one function per code because the call
+# sites use four (500 x57, 422 x19, 502 x9, 401 x1) and they differ in nothing
+# else.
+pub fn as_http[T](r: Result[T, String], status: Int) -> Result[T, HttpError] =
+  match r {
+    Ok(v) -> Ok(v)
+    Err(m) -> Err(http_error(status, m))
+  }
+
+# Same lift, but the status is chosen from the message. A few repository errors
+# are client errors in disguise (a bad page reference, a duplicate slug) and the
+# only thing that distinguishes them is the text, so those call sites pass a
+# classifier instead of a fixed code.
+pub fn as_http_with[T](r: Result[T, String], f: fn(String) -> HttpError) -> Result[T, HttpError] =
+  match r {
+    Ok(v) -> Ok(v)
+    Err(m) -> Err(f(m))
+  }
+
 # ---- response constructors ----
 
 pub fn text(status: Int, body: String) -> Response =
-  Response { status: status, content_type: "text/plain; charset=utf-8", headers: [], body: body }
+  Response { status: status, content_type: "text/plain; charset=utf-8", headers: [], body: body, bin: None, stream: None }
 
 pub fn json_response(status: Int, j: Json) -> Response =
-  Response { status: status, content_type: "application/json; charset=utf-8", headers: [], body: render(j) }
+  Response { status: status, content_type: "application/json; charset=utf-8", headers: [], body: render(j), bin: None, stream: None }
 
 pub fn json_ok(j: Json) -> Response = json_response(200, j)
 
 # A raw pre-rendered body (any content type) — escape hatch for services with
 # their own wire format.
 pub fn raw(status: Int, content_type: String, body: String) -> Response =
-  Response { status: status, content_type: content_type, headers: [], body: body }
+  Response { status: status, content_type: content_type, headers: [], body: body, bin: None, stream: None }
+
+# A binary body: raw Bytes written verbatim (fm content proxy).
+pub fn binary(status: Int, content_type: String, raw: Bytes) -> Response =
+  Response { status: status, content_type: content_type, headers: [], body: "", bin: Some(raw), stream: None }
+
+# A streaming body: a live InputStream pumped to the socket in constant memory
+# (fm content proxy / WebDAV serve_file for large media). v1 uses chunked framing,
+# like the binary path; Some(stream) makes the server ignore body/bin. The server
+# closes the stream after pumping (see web/server.write_response).
+pub fn streaming(status: Int, content_type: String, stream: InputStream) -> Response =
+  Response { status: status, content_type: content_type, headers: [], body: "", bin: None, stream: Some(stream) }
 
 # Append one response header (records are immutable — returns a new Response).
 pub fn with_header(r: Response, name: String, value: String) -> Response =
@@ -64,8 +142,10 @@ pub fn attachment(content_type: String, filename: String, body: String) -> Respo
   with_header(raw(200, content_type, body), "Content-Disposition", "attachment; filename=\"$filename\"")
 
 # The server's rendering of the Err branch and of its own 404/405.
+# backend-dawn divergence (M6): the key is "detail" to match FastAPI's error
+# body {"detail": ...}, which the frontend reads as error.response.data.detail.
 pub fn error_response(e: HttpError) -> Response =
-  json_response(e.status, JObj(map.from([("error", JStr(e.message))])))
+  json_response(e.status, JObj(map.from([("detail", JStr(e.message))])))
 
 # ---- request accessors ----
 
@@ -85,7 +165,38 @@ pub fn param_int(req: Request, name: String) -> Result[Int, HttpError] = {
   }
 }
 
+# A path parameter as an Option rather than a Result: handlers that word their
+# own 422 ("tag_id must be an integer") need the failure back as data, not as a
+# ready-made HttpError. `param_int` above is the version that picks the message.
+pub fn opt_param_int(req: Request, name: String) -> Option[Int] =
+  match map.get(req.params, name) {
+    Some(v) -> parse_int(v)
+    None -> None
+  }
+
 pub fn query(req: Request, name: String) -> Option[String] = map.get(req.query, name)
+
+# Strict pagination reader matching FastAPI's Query(ge=lo, le=hi): an absent
+# param yields the default; a present one that is non-integer or out of [lo, hi]
+# is a 422 whose {"detail"} reproduces pydantic's message byte-for-byte (the
+# FastAPI error handler joins loc and msg with a fullwidth colon). hi < 0 means
+# no upper bound (FastAPI's `page` is ge=1 with no le).
+pub fn query_int_bounded(req: Request, name: String, default: Int, lo: Int, hi: Int) -> Result[Int, HttpError] =
+  match map.get(req.query, name) {
+    None -> Ok(default)
+    Some(s) ->
+      match parse_int(s) {
+        None -> Err(http_error(422, "${name}：Input should be a valid integer, unable to parse string as an integer"))
+        Some(n) ->
+          if n < lo {
+            Err(http_error(422, "${name}：Input should be greater than or equal to ${to_string(lo)}"))
+          } else if hi >= 0 && n > hi {
+            Err(http_error(422, "${name}：Input should be less than or equal to ${to_string(hi)}"))
+          } else {
+            Ok(n)
+          }
+      }
+  }
 
 # A request header, looked up case-insensitively (the name is lowercased here;
 # the server lowercases keys when building the map).
@@ -97,7 +208,8 @@ test "param reads captures and flags missing ones" {
   let q: Map[String, String] = map.empty()
   let req = Request {
     method: "GET", path: "/a/42",
-    params: map.from([("id", "42")]), query: q, headers: h, body: "",
+    params: map.from([("id", "42")]), query: q, headers: h, body: "", raw: bytes.utf8(""), body_file: None,
+    route: None,
   }
   assert param(req, "id") == Ok("42")
   assert param_int(req, "id") == Ok(42)
@@ -107,12 +219,42 @@ test "param reads captures and flags missing ones" {
   }
 }
 
+test "query_int_bounded: absent uses default, out-of-range and non-int are 422" {
+  let h: Map[String, String] = map.empty()
+  let mk = fn(q: Map[String, String]) => Request {
+    method: "GET", path: "/a", params: map.empty(), query: q, headers: h, body: "", raw: bytes.utf8(""), body_file: None,
+    route: None,
+  }
+  # absent -> default
+  assert query_int_bounded(mk(map.empty()), "page", 1, 1, -1) == Ok(1)
+  # in range
+  assert query_int_bounded(mk(map.from([("size", "20")])), "size", 10, 1, 100) == Ok(20)
+  # below min -> 422
+  match query_int_bounded(mk(map.from([("page", "0")])), "page", 1, 1, -1) {
+    Err(e) -> { assert e.status == 422 }
+    Ok(_) -> { assert false }
+  }
+  # above max -> 422
+  match query_int_bounded(mk(map.from([("size", "999")])), "size", 10, 1, 50) {
+    Err(e) -> { assert e.status == 422 }
+    Ok(_) -> { assert false }
+  }
+  # non-integer -> 422
+  match query_int_bounded(mk(map.from([("page", "abc")])), "page", 1, 1, -1) {
+    Err(e) -> { assert e.status == 422 }
+    Ok(_) -> { assert false }
+  }
+  # no upper bound (hi < 0): a huge page is fine
+  assert query_int_bounded(mk(map.from([("page", "99999")])), "page", 1, 1, -1) == Ok(99999)
+}
+
 test "param_int rejects non-numbers as a client error" {
   let h: Map[String, String] = map.empty()
   let q: Map[String, String] = map.empty()
   let req = Request {
     method: "GET", path: "/a/x",
-    params: map.from([("id", "x")]), query: q, headers: h, body: "",
+    params: map.from([("id", "x")]), query: q, headers: h, body: "", raw: bytes.utf8(""), body_file: None,
+    route: None,
   }
   match param_int(req, "id") {
     Err(e) -> { assert e.status == 400 }
@@ -124,7 +266,8 @@ test "header lookup is case-insensitive" {
   let req = Request {
     method: "GET", path: "/", params: map.empty(), query: map.empty(),
     headers: map.from([("authorization", "Bearer xyz"), ("content-type", "application/json")]),
-    body: "",
+    body: "", raw: bytes.utf8(""), body_file: None,
+    route: None,
   }
   assert header(req, "Authorization") == Some("Bearer xyz")
   assert header(req, "CONTENT-TYPE") == Some("application/json")

@@ -3,6 +3,8 @@
 # routes it, and writes the Response back. nginx terminates TLS and everything
 # hard in front — this only speaks HTTP/1.1.
 use std/str
+use std/bytes
+use std/list
 use std/map
 use java "com.sun.net.httpserver.HttpServer"
 use java "com.sun.net.httpserver.HttpExchange"
@@ -13,30 +15,70 @@ use java "java.util.concurrent.CountDownLatch"
 use java "java.io.OutputStreamWriter"
 use java "java.lang.String"
 use java "java.util.Iterator"
-use types.{Request, Response, HttpError, Handler, Middleware, http_error, error_response}
-use router.{Route, Dispatch, Found, NoPath, WrongMethod, dispatch}
+use java "java.io.File"
+use java "java.io.FileOutputStream"
+use types.{Request, Response, HttpError, Handler, Middleware, RouteMeta, http_error, error_response, streaming}
+use router.{Route, Dispatch, Found, NoPath, WrongMethod, dispatch, route_meta}
+use java "java.io.InputStream"
+use java "java.net.URI"
+use java "java.net.http.HttpClient"
+use java "java.net.http.HttpRequest"
+use java "java.net.http.HttpRequest.BodyPublisher"
+use java "java.net.http.HttpRequest.BodyPublishers"
+use java "java.net.http.HttpResponse.BodyHandlers"
 
-# Read the whole request body as a UTF-8 string. The byte[] is opaque and cannot
-# cross a Dawn function boundary (spec §9.5 — arrays are not nameable), so it is
-# consumed inline: read it, hand it straight to String.new.
-fn read_body(ex: HttpExchange) -> String !io = {
-  let stream = ex.getRequestBody().expect("request body")
-  let bytes = stream.readAllBytes().expect("request bytes")
-  String.new(bytes, "UTF-8")
+## Close an upstream stream, swallowing a close failure (non-fatal — the
+## response is already committed, or was never sent). Called after pumping a
+## streaming body so the client connection frees.
+fn close_stream(s: InputStream) -> Unit !io = {
+  let _ = java_try(fn() => s.close())
+  ()
+}
+
+# Read the whole request body once as Bytes (spec §9.5.1), plus its UTF-8 decode
+# for the common text/JSON/form handlers. Binary handlers (multipart upload,
+# WebDAV PUT) take the raw Bytes and recover exact file bytes with no latin-1
+# detour — a single decode, not two.
+fn read_body(ex: HttpExchange) -> (String, Bytes) !io = {
+  let stream = ex.getRequestBody()!
+  let raw = stream.readAllBytes()!
+  (bytes.decode(raw, "UTF-8"), raw)
 }
 
 # Write a response. Length 0 selects chunked transfer encoding, so we never
 # need the byte count up front; the Writer handles UTF-8.
 fn write_response(ex: HttpExchange, r: Response) -> Unit !io = {
-  let headers = ex.getResponseHeaders().expect("response headers")
+  let headers = ex.getResponseHeaders()!
   headers.set("Content-Type", r.content_type)
   set_extra_headers(headers, r.headers)
   ex.sendResponseHeaders(r.status, 0)
-  let out = ex.getResponseBody().expect("response body")
-  let writer = OutputStreamWriter.new(out, "UTF-8")
-  writer.write(r.body)
-  writer.flush()
-  writer.close()
+  let out = ex.getResponseBody()!
+  match r.stream {
+    # streaming body: pump the upstream InputStream straight to the socket, 8KB at a
+    # time — constant memory, first byte out immediately. transferTo can throw if the
+    # client disconnects mid-download; catch_panic is our finally (Dawn has no
+    # try/finally), so the upstream stream is still closed and the HttpClient
+    # connection frees. close failure is non-fatal (close_stream swallows it).
+    Some(s) -> {
+      let _ = catch_panic(fn() => s.transferTo(out))
+      close_stream(s)
+    }
+    None ->
+      match r.bin {
+        Some(raw) -> {
+          # binary body: write the raw Bytes verbatim (Bytes -> Java byte[] param)
+          out.write(raw)
+          out.flush()
+        }
+        None -> {
+          let writer = OutputStreamWriter.new(out, "UTF-8")
+          writer.write(r.body)
+          writer.flush()
+          writer.close()
+        }
+      }
+  }
+  out.close()
   ex.close()
 }
 
@@ -51,15 +93,15 @@ fn set_extra_headers(headers: Headers, hs: List[(String, String)]) -> Unit !io =
 # multi-valued request headers are rare in this API and the first wins). The
 # key set is a Java collection, so it is walked with an iterator.
 fn read_headers(ex: HttpExchange) -> Map[String, String] !io = {
-  let headers = ex.getRequestHeaders().expect("request headers")
-  let it = headers.keySet().expect("names").iterator().expect("iter")
+  let headers = ex.getRequestHeaders()!
+  let it = headers.keySet()!.iterator()!
   collect_headers(headers, it, map.empty())
 }
 
 fn collect_headers(headers: Headers, it: Iterator, acc: Map[String, String]) -> Map[String, String] !io =
   if it.hasNext() {
-    let name = String.valueOf(it.next().expect("name")).expect("name-str")
-    let v = headers.getFirst(name).expect("value")
+    let name = String.valueOf(it.next()!)!
+    let v = headers.getFirst(name)!
     collect_headers(headers, it, map.insert(acc, str.to_lower(name), v))
   } else {
     acc
@@ -91,50 +133,118 @@ fn tail(xs: List[String]) -> List[String] =
 fn rev[T](xs: List[T]) -> List[T] =
   map(range(0, len(xs)), fn(i) => xs[len(xs) - 1 - i])
 
-fn build_request(ex: HttpExchange) -> Request !io = {
-  let uri = ex.getRequestURI().expect("uri")
+fn build_request(ex: HttpExchange, meta: Option[RouteMeta]) -> Request !io = {
+  let uri = ex.getRequestURI()!
   let no_query: Map[String, String] = map.from([])
+  # Query params follow form-urlencoded semantics ('+' means space), matching
+  # Starlette/FastAPI; URI.getQuery() percent-decodes %XX but leaves '+' literal.
   let q = match uri.getQuery() {
-    Some(s) -> map.from(parse_query(s))
+    Some(s) -> map.from(map(parse_query(s), fn(kv) => {
+      let (k, v) = kv
+      (k, replace_plus(v))
+    }))
     None -> no_query
   }
+  # A "stream-body" route never sees the body in memory: it goes to a temp file
+  # and the handler gets the path. Everything else reads as before.
+  let streaming = meta_has_tag(meta, "stream-body")
+  let (body, raw) = if streaming { ("", bytes.utf8("")) } else { read_body(ex) }
+  let bf: Option[String] = if streaming { Some(spill_body(ex)) } else { None }
   Request {
-    method: ex.getRequestMethod().expect("method"),
-    path: uri.getPath().expect("path"),
+    method: ex.getRequestMethod()!,
+    path: uri.getPath()!,
     params: no_query,
     query: q,
     headers: read_headers(ex),
-    body: read_body(ex),
+    body: body,
+    raw: raw,
+    body_file: bf,
+    route: meta,
   }
 }
 
-# The routing core, itself shaped like a handler so middleware can wrap it —
-# a logging middleware sees 404s and 405s too. The matched route's captures
-# are injected as a fresh Request (records are immutable).
-fn route_request(routes: List[Route], req: Request) -> Result[Response, HttpError] !io =
-  match dispatch(routes, req.method, req.path) {
-    NoPath -> Err(http_error(404, "not found"))
-    WrongMethod -> Err(http_error(405, "method not allowed"))
-    Found(handler, params) -> {
-      handler(Request { ..req, params: params })
+# Stream the request body to a temp file, 8KB at a time (transferTo's buffer), and
+# return its path. Constant memory whatever the file's size — the point of the
+# whole exercise. The caller deletes it once the handler is done.
+fn spill_body(ex: HttpExchange) -> String !io = {
+  let tmp = File.createTempFile("dawn-put-", ".tmp")!
+  let out = FileOutputStream.new(tmp)
+  let stream = ex.getRequestBody()!
+  let _n = stream.transferTo(out)
+  out.close()
+  String.valueOf(tmp.getPath()!)!
+}
+
+fn delete_quietly(path: String) -> Unit !io = {
+  let r: Result[Bool, String] = java_try(fn() => File.new(path).delete())
+  match r {
+    Ok(_) -> ()
+    Err(m) -> println("temp body file not deleted: $m")
+  }
+}
+
+fn meta_has_tag(meta: Option[RouteMeta], tag: String) -> Bool =
+  match meta {
+    Some(m) -> list.find(m.tags, fn(t) => t == tag) != None
+    None -> false
+  }
+
+# Execute an already-computed dispatch decision, itself shaped like a handler so
+# middleware can wrap it — a logging middleware sees 404s and 405s too. The
+# matched route's captures are injected as a fresh Request (records are immutable).
+fn run_dispatch(d: Dispatch, req: Request) -> Result[Response, HttpError] !io =
+  match d {
+    NoPath -> Err(http_error(404, "Not Found"))
+    WrongMethod -> Err(http_error(405, "Method Not Allowed"))
+    Found(route, params) -> {
+      route.handler(Request { ..req, params: params })
     }
   }
 
+# The metadata middleware get for the matched route. Unmatched (404) and
+# wrong-method (405) requests carry no route, hence no tags.
+fn meta_of(d: Dispatch) -> Option[RouteMeta] =
+  match d {
+    Found(route, _) -> Some(route_meta(route))
+    NoPath -> None
+    WrongMethod -> None
+  }
+
 fn handle(routes: List[Route], middleware: List[Middleware], ex: HttpExchange) -> Unit !io = {
-  # first middleware in the list is outermost: [a, b] runs a(b(routing))
-  let app = fold(rev(middleware), fn(req: Request) => route_request(routes, req), fn(h, m) => m(h))
   # a handler panic is isolated to this request: catch_panic turns it into a 500
   # instead of resetting the connection or leaking the virtual thread (spec §9.8).
-  let outcome = catch_panic(fn() =>
-      match app(build_request(ex)) {
-        Ok(r) -> r
-        Err(e) -> error_response(e)
-      })
+  let outcome = catch_panic(fn() => {
+    # Dispatch BEFORE touching the body: method and path come from the request
+    # line, and the matched route's tags decide how the body is read at all
+    # ("stream-body" spills it to disk instead of into memory). The same decision
+    # is executed by run_dispatch below — no second table walk.
+    let d = dispatch(routes, ex.getRequestMethod()!, ex.getRequestURI()!.getPath()!)
+    let req = build_request(ex, meta_of(d))
+    # first middleware in the list is outermost: [a, b] runs a(b(core)). Middleware
+    # still wraps the core, so CORS preflight and logging cover unmatched requests.
+    let app = fold(rev(middleware), fn(rq: Request) => run_dispatch(d, rq), fn(h, m) => m(h))
+    # the temp body file lives exactly as long as the handler call. Dawn has no
+    # try/finally, so catch_panic plays that role (same idiom as with_tx): it
+    # returns rather than unwinding, so the delete below always runs.
+    let served = catch_panic(fn() => app(req))
+    match req.body_file {
+      Some(p) -> delete_quietly(p)
+      None -> ()
+    }
+    match served {
+      Ok(Ok(r)) -> r
+      Ok(Err(e)) -> error_response(e)
+      Err(m) -> {
+        println("request panicked: $m")
+        error_response(http_error(500, "服务器内部错误"))
+      }
+    }
+  })
   let response = match outcome {
     Ok(r) -> r
     Err(m) -> {
       println("request panicked: $m")
-      error_response(http_error(500, "internal server error"))
+      error_response(http_error(500, "服务器内部错误"))
     }
   }
   write_response(ex, response)
@@ -144,9 +254,9 @@ fn handle(routes: List[Route], middleware: List[Middleware], ex: HttpExchange) -
 # JVM exit out from under the request threads).
 pub fn serve_app(port: Int, routes: List[Route], middleware: List[Middleware]) -> Unit !io = {
   let addr = InetSocketAddress.new("127.0.0.1", port)
-  let server = HttpServer.create(addr, 0).expect("server")
+  let server = HttpServer.create(addr, 0)!
   server.createContext("/", fn(ex) => handle(routes, middleware, ex))
-  server.setExecutor(Executors.newVirtualThreadPerTaskExecutor().expect("executor"))
+  server.setExecutor(Executors.newVirtualThreadPerTaskExecutor()!)
   server.start()
   println("listening on http://127.0.0.1:$port")
   let latch = CountDownLatch.new(1)
@@ -164,4 +274,52 @@ test "form bodies parse, with + as space" {
   let f = parse_form("username=admin&password=a+b+c")
   assert map.get(f, "username") == Some("admin")
   assert map.get(f, "password") == Some("a b c")
+}
+
+# ---- test-only HTTP client: the streaming test needs a real client to pump
+# bytes through a socket; the app-side fetch helpers live with the app ----
+
+fn test_get(url: String) -> HttpRequest !io = {
+  let nobody: BodyPublisher = BodyPublishers.noBody()!
+  HttpRequest.newBuilder()!.uri(URI.create(url)!)!.method("GET", nobody)!.build()!
+}
+
+fn test_fetch_stream(url: String) -> (Int, InputStream) !io = {
+  let resp = HttpClient.newHttpClient()!.send(test_get(url), BodyHandlers.ofInputStream()!)!
+  (resp.statusCode(), cast(resp.body()!))
+}
+
+fn test_fetch_bytes(url: String) -> (Int, Bytes) !io = {
+  let resp = HttpClient.newHttpClient()!.send(test_get(url), BodyHandlers.ofByteArray()!)!
+  (resp.statusCode(), cast(resp.body()!))
+}
+
+test "write_response pumps an upstream stream to the client byte-exact (>8KB, multi-chunk)" {
+  # The full realistic path: upstream HTTP -> ofInputStream + cast -> streaming() ->
+  # write_response's stream branch -> transferTo pumps the InputStream to the socket
+  # -> close. 12000 bytes forces transferTo's 8KB buffer across more than one chunk.
+  let payload = bytes.utf8(join(map(range(0, 1200), fn(i) => "0123456789"), ""))
+  # upstream: serves the payload
+  let up = HttpServer.create(InetSocketAddress.new("127.0.0.1", 0), 0)!
+  up.createContext("/", fn(ex) => {
+    ex.sendResponseHeaders(200, bytes.len(payload))
+    let os = ex.getResponseBody()!
+    os.write(payload)
+    os.close()
+  })
+  up.start()
+  let upurl = "http://127.0.0.1:${up.getAddress()!.getPort()}/"
+  # download: proxies upstream as a live stream through write_response's stream branch
+  let dn = HttpServer.create(InetSocketAddress.new("127.0.0.1", 0), 0)!
+  dn.createContext("/", fn(ex) => {
+    let (st, stream) = test_fetch_stream(upurl)
+    write_response(ex, streaming(st, "application/octet-stream", stream))
+  })
+  dn.start()
+  let (st, got) = test_fetch_bytes("http://127.0.0.1:${dn.getAddress()!.getPort()}/")
+  assert st == 200
+  assert bytes.len(got) == 12000
+  assert got == payload
+  up.stop(0)
+  dn.stop(0)
 }

@@ -8,7 +8,7 @@ plugins {
     id("org.jetbrains.kotlinx.kover") version "0.9.8"
 }
 
-version = "0.6.0"
+version = "0.7.0"
 
 repositories {
     mavenCentral()

@@ -6,12 +6,20 @@
 # parsing could start (docs/seq6-research.md). Cursors read the string in place,
 # so the shape below is unchanged apart from `i + 1` becoming `cursor.next`:
 # a character is not always one unit wide, so advancing is a call, not addition.
+use std/str
 use std/map
 use std/cursor
 use lexer.{peek, skip_ws, is_digit, scan_string, scan_number}
-use value.{Json, JNull, JBool, JNum, JStr, JArr, JObj}
+use value.{Json, JNull, JBool, JNum, JInt, JStr, JArr, JObj}
 
 pub const MAX_DEPTH: Int = 512
+
+# true when the number literal between the two cursors is an integer (no
+# fraction, no exponent)
+fn is_int_literal(src: String, i: Cursor, j: Cursor) -> Bool = {
+  let lit = cursor.slice(src, i, j)
+  not (str.contains(lit, ".") || str.contains(lit, "e") || str.contains(lit, "E"))
+}
 
 # `word` starting at cursor `i`? Yields the cursor past it. Walking both strings
 # with cursors also gets end-of-input for free: `cursor.char` returns -1 there,
@@ -109,7 +117,10 @@ fn parse_value(src: String, i0: Cursor, depth: Int) -> Result[(Json, Cursor), St
       parse_lit(src, i, "null", JNull)
     } else if c == '-' || is_digit(c) {
       let (f, j) = scan_number(src, i)?
-      Ok((JNum(f), j))
+      # preserve integer-ness: a literal with no '.'/'e'/'E' round-trips as JInt,
+      # so parse→render doesn't turn 42 into 42.0 (callers that re-render parsed
+      # documents must not corrupt integer-typed fields)
+      if is_int_literal(src, i, j) { Ok((JInt(to_int(f)), j)) } else { Ok((JNum(f), j)) }
     } else {
       Err("unexpected character")
     }
@@ -124,4 +135,11 @@ pub fn parse(input: String) -> Result[Json, String] = {
   } else {
     Err("trailing content after the JSON value")
   }
+}
+
+test "integer literals parse as JInt, decimals and exponents as JNum" {
+  assert parse("42") == Ok(JInt(42))
+  assert parse("-7") == Ok(JInt(-7))
+  assert parse("1.5") == Ok(JNum(1.5))
+  assert parse("1e3") == Ok(JNum(1000.0))
 }

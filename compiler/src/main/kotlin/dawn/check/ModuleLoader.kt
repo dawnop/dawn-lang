@@ -288,7 +288,9 @@ object ModuleLoader {
                 ctx.pkgCache[canon] = null
                 continue
             }
-            val srcRoot = File(depDir, "src")
+            // the canonical spelling, so paths embedded in generated code (the `!`
+            // operator's panic message) are stable however the package was reached
+            val srcRoot = File(canon, "src")
             if (!srcRoot.isDirectory) {
                 ctx.diags.add(LocatedDiag(source, Diagnostic(
                     "package `${dm.name}` has no src/ folder (expected ${srcRoot.path})", dep.span, null)))
