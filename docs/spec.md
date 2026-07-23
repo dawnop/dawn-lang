@@ -746,21 +746,6 @@ let sb = StringBuilder.new()        # 构造子：不包，直接是对象
   可空性注解——`URI.create`（永不 null）与 `Map.get`（真可空）反射出来的注解**都是空**。
   既然分不出，就只能一律包：宁可让 `!` 显式承担风险，也不把 null 放进 Dawn。
 
-**`nonnull` 逃生门**：对确知永不返回 null 的方法，在导入处显式声明，免掉每次 `!`：
-
-```dawn
-use java "java.net.URI" nonnull {create, toString}
-
-let uri = URI.create(url)      # 返回 URI 而非 Option[URI]，无需 !
-let host = uri.getHost()!      # 未列入 nonnull 的方法照旧包 Option
-```
-
-`nonnull {m1, m2}` 按**方法名**声明（覆盖同名的全部重载），只影响该导入的类；`nonnull` 是
-上下文关键字（不保留）。**纯 opt-in，零默认**——不声明就照旧一律包，故既有代码不受影响。
-残留在 nonnull 方法上的 `!` 会得到「不是 Option，删掉 `!`」的错误，正好指引清理。作者担保其
-非空（同 `unsafe_pure` 的信任模型）：声明错了、方法真返回 null，则该 null 会作为普通引用进入
-Dawn，后续解引用时以 Java `NullPointerException` 穿透。
-
 基本类型返回值不包 Option；`short`/`byte`/`int` 返回自动加宽为 `Int`，`float` 加宽为
 `Float`。`char` 出入参 v0.1 不支持；数组走不透明直通（§9.5）。**Option 实参传 null**
 同样推迟（v0.1 无法从 Dawn 侧传 null 给 Java）。

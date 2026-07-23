@@ -102,8 +102,6 @@ pub type Cx = {
   const_cutoff: Option[Set[String]],
   # `use java` imports: simple name → fqcn
   java_classes: Map[String, String],
-  # `nonnull { m }` methods: key `fqcn#method` → return T, not Option[T] (§9.2)
-  java_nonnull: Map[String, Bool],
   # lexical scopes, innermost last; each maps name → symbol id
   scopes: List[Map[String, Int]],
   # symbol table: id → symbol
@@ -166,7 +164,6 @@ pub fn cx_new(owner_class: Option[String], src_path: Option[String]) -> Cx = {
     all_const_names: set.empty(),
     const_cutoff: None,
     java_classes: map.empty(),
-    java_nonnull: map.empty(),
     scopes: [],
     syms: map.empty(),
     used_effects: [],
@@ -1141,10 +1138,6 @@ pub fn pass_java_uses(cx: Cx, m: Module) -> Cx !io = {
           cx1 = cerr(cx1, "`" ++ d.simple ++ "` is already imported", d.nlo, d.nhi)
         } else {
           cx1 = Cx { ..cx1, java_classes: map.insert(cx1.java_classes, d.simple, j.fqcn) }
-          for nm in d.nonnull {
-            cx1 = Cx { ..cx1,
-              java_nonnull: map.insert(cx1.java_nonnull, j.fqcn ++ "#" ++ nm.name, true) }
-          }
         }
       }
     }
@@ -6303,15 +6296,6 @@ fn map_java_return(cx: Cx, rc: String, nlo: Int, nhi: Int) -> (Cx, Ty) !io =
     (cx, opt_ty(TyJava(rc, class_info(rc).display)))
   }
 
-## Option[T] -> T for a `nonnull`-declared method return (§9.2); any other type is
-## returned unchanged (primitives are never wrapped to begin with).
-fn strip_option(t: Ty) -> Ty =
-  match t {
-    TyAdt(aid, targs) ->
-      if aid == OPTION_ID { targs[0] } else { t }
-    _ -> t
-  }
-
 ## Class.m(a) / value.m(a) / Class.new(a) — the Kotlin checkJavaCall.
 fn check_java_call(
   cx: Cx,
@@ -6507,10 +6491,8 @@ fn check_java_call(
       None -> { fin = fin ++ [XError(lo, hi)] }
     }
   }
-  let (cxc, rt0) = map_java_return(cx1, m3.ret_cls, nlo, nhi)
+  let (cxc, rt) = map_java_return(cx1, m3.ret_cls, nlo, nhi)
   cx1 = cxc
-  # a `nonnull { name }`-declared method returns T, not Option[T] (spec §9.2)
-  let rt = if map.has(cx1.java_nonnull, cls.fqcn ++ "#" ++ name) { strip_option(rt0) } else { rt0 }
   let vp: Option[Int] = if packs { Some(len(m3.param_cls) - 1) } else { None }
   let call = TJavaCall {
     fqcn: cls.fqcn,
@@ -7785,31 +7767,6 @@ test "check_module: a bare None arm infers from a concrete sibling arm" {
   let env: Map[String, ModExports] = map.empty()
   let (cx1, _) = check_module(test_cx(), m, env)
   assert len(cx1.diags) == 0
-}
-
-test "check_module: a nonnull java method returns T, not Option[T]" {
-  # with `nonnull { create }`, URI.create returns URI directly — no `!` needed
-  let src =
-    "use java \"java.net.URI\" nonnull { create }\n\n" ++
-    "pub fn ok(s: String) -> Bool !io = {\n" ++
-    "  let u = URI.create(s)\n" ++
-    "  true\n" ++
-    "}\n"
-  let (m, pdiags) = parser.parse_module(src)
-  assert len(pdiags) == 0
-  let env: Map[String, ModExports] = map.empty()
-  let (cx1, _) = check_module(test_cx(), m, env)
-  assert len(cx1.diags) == 0
-  # without the annotation the same code needs `!` (create returns Option[URI])
-  let bad =
-    "use java \"java.net.URI\"\n\n" ++
-    "pub fn bad(s: String) -> Bool !io = {\n" ++
-    "  let u: URI = URI.create(s)\n" ++
-    "  true\n" ++
-    "}\n"
-  let (m2, _) = parser.parse_module(bad)
-  let (cx2, _) = check_module(test_cx(), m2, env)
-  assert len(cx2.diags) > 0
 }
 
 test "check_module: an inference cycle must annotate" {
