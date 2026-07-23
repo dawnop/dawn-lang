@@ -1022,10 +1022,40 @@ fn pipe_expr(p: P, st: St, ns: Bool) -> PR[Expr] = {
   Ok((st1, left))
 }
 
+## A binary operator may lead its continuation line (spec §1.7), like `|>` and
+## `.`. These helpers peek past newlines to such an operator; if the next real
+## token isn't one, they return the state unchanged so a newline still ends the
+## statement — hence existing code (where an operator never legally led a line)
+## parses identically. `+`/`-` are excluded: leading `-` is ambiguous with unary
+## minus, and the arithmetic pair stays together.
+fn lead1(p: P, st: St, op: TokKind) -> St =
+  if at_kind(p, st, op) {
+    st
+  } else {
+    var look = st.pos
+    while p.toks[look].kind == NEWLINE { look = look + 1 }
+    if p.toks[look].kind == op { St { ..st, pos: look } } else { st }
+  }
+
+fn lead_op(p: P, st: St, classify: fn(TokKind) -> Option[BinOp]) -> St =
+  match classify(kind_of(p, st)) {
+    Some(_) -> st
+    None -> {
+      var look = st.pos
+      while p.toks[look].kind == NEWLINE { look = look + 1 }
+      match classify(p.toks[look].kind) {
+        Some(_) -> St { ..st, pos: look }
+        None -> st
+      }
+    }
+  }
+
 fn or_expr(p: P, st: St, ns: Bool) -> PR[Expr] = {
   var (st1, left) = and_expr(p, st, ns)?
-  while at_kind(p, st1, PIPEPIPE) {
-    let (st2, op) = adv(p, st1)
+  while true {
+    let sta = lead1(p, st1, PIPEPIPE)
+    if not at_kind(p, sta, PIPEPIPE) { break }
+    let (st2, op) = adv(p, sta)
     let st3 = skip_nl(p, st2)
     let (st4, right) = and_expr(p, st3, ns)?
     left = EBinary(OpOr, left, right, op.lo, op.hi, e_lo(left), e_hi(right))
@@ -1036,8 +1066,10 @@ fn or_expr(p: P, st: St, ns: Bool) -> PR[Expr] = {
 
 fn and_expr(p: P, st: St, ns: Bool) -> PR[Expr] = {
   var (st1, left) = cmp_expr(p, st, ns)?
-  while at_kind(p, st1, AMPAMP) {
-    let (st2, op) = adv(p, st1)
+  while true {
+    let sta = lead1(p, st1, AMPAMP)
+    if not at_kind(p, sta, AMPAMP) { break }
+    let (st2, op) = adv(p, sta)
     let st3 = skip_nl(p, st2)
     let (st4, right) = cmp_expr(p, st3, ns)?
     left = EBinary(OpAnd, left, right, op.lo, op.hi, e_lo(left), e_hi(right))
@@ -1056,15 +1088,17 @@ fn cmp_op(k: TokKind) -> Option[BinOp] =
   else { None }
 
 fn cmp_expr(p: P, st: St, ns: Bool) -> PR[Expr] = {
-  let (st1, left) = bor_expr(p, st, ns)?
+  let (st0, left) = bor_expr(p, st, ns)?
+  let st1 = lead_op(p, st0, cmp_op)
   match cmp_op(kind_of(p, st1)) {
     None -> Ok((st1, left))
     Some(o) -> {
       let (st2, op) = adv(p, st1)
       let st3 = skip_nl(p, st2)
-      let (st4, right) = bor_expr(p, st3, ns)?
+      let (st4b, right) = bor_expr(p, st3, ns)?
       let result = EBinary(o, left, right, op.lo, op.hi, e_lo(left), e_hi(right))
       # comparisons are non-associative: a < b < c is an error
+      let st4 = lead_op(p, st4b, cmp_op)
       match cmp_op(kind_of(p, st4)) {
         Some(o2) -> Err((st4, perr_h(p, st4, "comparison operators cannot be chained",
           "write a < b && b < c")))
@@ -1077,8 +1111,10 @@ fn cmp_expr(p: P, st: St, ns: Bool) -> PR[Expr] = {
 # Bitwise sits between comparison and concat (Rust order, spec §4.3).
 fn bor_expr(p: P, st: St, ns: Bool) -> PR[Expr] = {
   var (st1, left) = bxor_expr(p, st, ns)?
-  while at_kind(p, st1, PIPE) {
-    let (st2, op) = adv(p, st1)
+  while true {
+    let sta = lead1(p, st1, PIPE)
+    if not at_kind(p, sta, PIPE) { break }
+    let (st2, op) = adv(p, sta)
     let st3 = skip_nl(p, st2)
     let (st4, right) = bxor_expr(p, st3, ns)?
     left = EBinary(OpBor, left, right, op.lo, op.hi, e_lo(left), e_hi(right))
@@ -1089,8 +1125,10 @@ fn bor_expr(p: P, st: St, ns: Bool) -> PR[Expr] = {
 
 fn bxor_expr(p: P, st: St, ns: Bool) -> PR[Expr] = {
   var (st1, left) = band_expr(p, st, ns)?
-  while at_kind(p, st1, CARET) {
-    let (st2, op) = adv(p, st1)
+  while true {
+    let sta = lead1(p, st1, CARET)
+    if not at_kind(p, sta, CARET) { break }
+    let (st2, op) = adv(p, sta)
     let st3 = skip_nl(p, st2)
     let (st4, right) = band_expr(p, st3, ns)?
     left = EBinary(OpBxor, left, right, op.lo, op.hi, e_lo(left), e_hi(right))
@@ -1101,8 +1139,10 @@ fn bxor_expr(p: P, st: St, ns: Bool) -> PR[Expr] = {
 
 fn band_expr(p: P, st: St, ns: Bool) -> PR[Expr] = {
   var (st1, left) = shift_expr(p, st, ns)?
-  while at_kind(p, st1, AMP) {
-    let (st2, op) = adv(p, st1)
+  while true {
+    let sta = lead1(p, st1, AMP)
+    if not at_kind(p, sta, AMP) { break }
+    let (st2, op) = adv(p, sta)
     let st3 = skip_nl(p, st2)
     let (st4, right) = shift_expr(p, st3, ns)?
     left = EBinary(OpBand, left, right, op.lo, op.hi, e_lo(left), e_hi(right))
@@ -1120,10 +1160,11 @@ fn shift_op(k: TokKind) -> Option[BinOp] =
 fn shift_expr(p: P, st: St, ns: Bool) -> PR[Expr] = {
   var (st1, left) = concat_expr(p, st, ns)?
   while true {
-    match shift_op(kind_of(p, st1)) {
+    let sta = lead_op(p, st1, shift_op)
+    match shift_op(kind_of(p, sta)) {
       None -> break
       Some(o) -> {
-        let (st2, op) = adv(p, st1)
+        let (st2, op) = adv(p, sta)
         let st3 = skip_nl(p, st2)
         let (st4, right) = concat_expr(p, st3, ns)?
         left = EBinary(o, left, right, op.lo, op.hi, e_lo(left), e_hi(right))
@@ -1137,8 +1178,9 @@ fn shift_expr(p: P, st: St, ns: Bool) -> PR[Expr] = {
 fn concat_expr(p: P, st: St, ns: Bool) -> PR[Expr] = {
   # right-associative
   let (st1, left) = add_expr(p, st, ns)?
-  if not at_kind(p, st1, PLUSPLUS) { return Ok((st1, left)) }
-  let (st2, op) = adv(p, st1)
+  let st1b = lead1(p, st1, PLUSPLUS)
+  if not at_kind(p, st1b, PLUSPLUS) { return Ok((st1b, left)) }
+  let (st2, op) = adv(p, st1b)
   let st3 = skip_nl(p, st2)
   let (st4, right) = concat_expr(p, st3, ns)?
   Ok((st4, EBinary(OpConcat, left, right, op.lo, op.hi, e_lo(left), e_hi(right))))
@@ -1175,10 +1217,11 @@ fn mul_op(k: TokKind) -> Option[BinOp] =
 fn mul_expr(p: P, st: St, ns: Bool) -> PR[Expr] = {
   var (st1, left) = unary_expr(p, st, ns)?
   while true {
-    match mul_op(kind_of(p, st1)) {
+    let sta = lead_op(p, st1, mul_op)
+    match mul_op(kind_of(p, sta)) {
       None -> break
       Some(o) -> {
-        let (st2, op) = adv(p, st1)
+        let (st2, op) = adv(p, sta)
         let st3 = skip_nl(p, st2)
         let (st4, right) = unary_expr(p, st3, ns)?
         left = EBinary(o, left, right, op.lo, op.hi, e_lo(left), e_hi(right))

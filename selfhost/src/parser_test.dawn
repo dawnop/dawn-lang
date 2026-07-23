@@ -78,6 +78,31 @@ test "a broken declaration is reported and the next one still parses" {
   }
 }
 
+test "a binary operator may lead its continuation line" {
+  # && at the start of the next line continues the expression (spec §1.7)
+  let (m, ds) = parse_module("const A: Bool = x\n  && y")
+  assert len(ds) == 0
+  match m.decls[0] {
+    DConst(name, is_pub, ann, init, lo, hi, nlo, nhi) ->
+      match init {
+        EBinary(op, l, r, a, b, c, d) -> ()
+        _ -> { assert false }
+      }
+    _ -> { assert false }
+  }
+  # comparison and concat lead too
+  let (m2, ds2) = parse_module("const B: Bool = x\n  == y")
+  assert len(ds2) == 0
+  let (m3, ds3) = parse_module("const C: String = x\n  ++ y")
+  assert len(ds3) == 0
+}
+
+test "leading `-` does not continue (ambiguous with unary minus)" {
+  # unlike &&, a `-` at line start starts fresh — here `- y` strands at top level
+  let (m, ds) = parse_module("const A: Int = x\n  - y")
+  assert len(ds) > 0
+}
+
 test "a bare assignment arm is reported and later arms/decls still parse" {
   # `A -> q = 1` has a bare assignment body; the arm resyncs, the `B` arm and the
   # following `g` both still parse — no cascade to end of file.
