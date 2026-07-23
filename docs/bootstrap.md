@@ -1,18 +1,25 @@
 # Bootstrap 链：从种子到自举闭包
 
-> 2026-07-22 自举完成（design.md M7、selfhost-gaps.md §七）。本文回答一个问题：
+> 2026-07-22 自举完成（design.md M7、selfhost-gaps.md §七）；2026-07-23 **M8
+> 收口：Kotlin 实现归档在 `kotlin-final` tag，main 上只剩 selfhost**
+> （[m8-selfhost-only.md](m8-selfhost-only.md)）。本文回答一个问题：
 > **手上只有源码和一个种子 jar 时，如何从零得到一个能编译自己的 Dawn 编译器**，
 > 以及每一步靠什么验收。
->
-> 后续：**M8 计划淘汰 Kotlin**（[m8-selfhost-only.md](m8-selfhost-only.md)），
-> 种子推进协议见下文——它是 M8 阶段一，2026-07-23 立法生效。
 
 ## 种子（seed）
 
-学 Go 保留 go1.4：**Kotlin 版编译器自 v0.6.0 冻结为 bootstrap 种子**。
-种子 jar 由 GitHub Release 永久保存（`release.yml` 对每个 `v*` tag 出
-`dawn.jar`），任何一个 ≥ v0.6.0 的 release jar 都可以当种子——冻结的硬义务
-只有一条：**种子必须始终能编译 selfhost/**。
+**现行形态（M8 后）**：种子 = `scripts/seed-release.txt` 钉住的上一 release 的
+`dawn-selfhost.jar`。`bin/dawn` 首次运行自动下载到 `.dawn/seeds/` 并用它编译
+HEAD 工具链（`DAWN_SEED=<jar>` 指本地 jar 逃生）。种子 jar 自带一切：编译器类、
+`--embed-std` 嵌入的 std 源、vendored 的 `dawn.tool` shim / ASM / coursier
+interface——这三样二进制自 `kotlin-final` 起像 OCaml 的 `boot/` 一样**随种子
+逐代续传**（vendor 从当前运行 jar 的类路径拷出），不再有对应的在库源码
+（`dawn.tool` 的 Kotlin 源在 `kotlin-final` tag 里）。
+
+**信任链根**：学 Go 保留 go1.4，Kotlin 版编译器 v0.6.0 冻结为 bootstrap 根。
+v0.6.0–v0.8.0 的 release jar 永久保存；`kotlin-final` tag 保有 Kotlin 全源，
+从它 `./gradlew :compiler:fatJar` 可现编根种子。硬义务不变：
+**种子必须始终能编译 selfhost/**（现由 CI 机器强制）。
 
 冻结的含义（也记录在 design.md M7 验收结论）：
 
@@ -38,18 +45,17 @@
 
 ## 种子推进协议（2026-07-23 立法，M8 阶段一）
 
-1. **种子的下一形态**：自下一个 release 起，`release.yml` 双发
-   `dawn.jar`（Kotlin，过渡期）与 **`dawn-selfhost.jar`**（selfhost 自打的独立 jar，
-   vendor 了 `dawn.tool` shim 与 ASM，无 Kotlin 运行时依赖）。M8 完成后
-   `dawn-selfhost.jar` 是唯一种子，Kotlin jar 停止发布；v0.6.0 起的历史 release
-   永久保留，构成可重放的信任链。
-2. **祝圣仪式（机器强制）**：`release.yml` 在 tag 上重跑 fixpoint + standalone
-   闭包，且闭包验证跑在**将要上传的那份字节**上——任一红则 release 不出。
-   push CI（ci.yml）的全金样绿是前置。种子 bump 逐条记进下面的链条表。
-3. **特性纪律**：`selfhost/src` 只准用**当前种子已支持**的语言特性。想用新特性：
-   先在 selfhost 实现 → 发 release（过祝圣）→ bump 种子 → 下一轮才能自用。
-   （Rust stage0 的规矩。过渡期由「Kotlin 同步实现」的旧规则兜着；M8 阶段三
-   CI 改由种子 jar 驱动后，这条变成机器强制。）
+1. **种子形态**：v0.8.0 双发 `dawn.jar`（最后一个 Kotlin jar）与
+   **`dawn-selfhost.jar`**（首个 selfhost 种子）；自 v0.9.0 起只发
+   `dawn-selfhost.jar`。v0.6.0 起的历史 release 永久保留，构成可重放的信任链。
+2. **祝圣仪式（机器强制）**：`release.yml` 在 tag 上重建整条链
+   种子→A→B→C（B = HEAD 编 HEAD，即要上传的那份字节），验证 `cmp B C` 闭包
+   与版本一致——任一红则 release 不出。push CI（ci.yml）的全金样绿是前置。
+   种子 bump 逐条记进下面的链条表。
+3. **特性纪律**：`selfhost/src`（连同它引用的 `std/`）只准用**当前种子已支持**
+   的语言特性。想用新特性：先在 selfhost 实现 → 发 release（过祝圣）→ bump
+   `scripts/seed-release.txt` → 下一轮才能自用。（Rust stage0 的规矩，
+   CI 机器强制：种子编不动 HEAD 直接红。）
 4. **链条可重放**：`scripts/replay-bootstrap.sh <seed-jar | vX.Y.Z>` 从任一环
    种子重放：种子编 selfhost → 固定点（stage2==stage3）→ standalone 闭包 →
    （本地有 HEAD 编译器时）验证收敛到与 HEAD 逐字节一致。**一代洗净种子**：
@@ -62,46 +68,41 @@
 |---|---|---|
 | v0.6.0 | `dawn.jar`（Kotlin） | **信任链根**；Kotlin 冻结为 bootstrap 种子 |
 | v0.7.0 | `dawn.jar`（Kotlin） | 包管理线收官版 |
-| （下一个） | `dawn.jar` + `dawn-selfhost.jar` 双发 | 首个 selfhost 种子候选 |
+| v0.8.0 | `dawn.jar` + `dawn-selfhost.jar` 双发 | **首个 selfhost 种子**（LSP 移植完成，Kotlin 最后一发）；随后 `kotlin-final` 归档 Kotlin |
 
 ## 链
 
 ```bash
-# 0) 种子：GitHub Release 的 dawn.jar（bin/dawn 即其包装），或本地
-./gradlew :compiler:fatJar          # 从 Kotlin 源现编种子
+# 0) 种子：seed-release.txt 钉住的 release 的 dawn-selfhost.jar
+#    （bin/dawn 自动下载缓存；信任链根 v0.6.0 的 Kotlin jar 也可作种，
+#    或从 kotlin-final tag 现编：git checkout kotlin-final && ./gradlew :compiler:fatJar）
 
-# 1) 种子编译 selfhost（Dawn 写的编译器，selfhost/src/*.dawn）
-./bin/dawn build selfhost -o selfhost.jar
-
-# 2) selfhost 发射自己 → 与种子发射的逐字节一致（stage2 == stage1）
-#    再用自己发射的类重跑发射 → 仍逐字节一致（stage3 == stage2，固定点）
+# 1) 种子编 HEAD → A；A 编 HEAD → B（HEAD 编 HEAD，规范产物）；
+#    B 编 HEAD → C；cmp B C 逐字节相同 = 固定点 + 闭包一步到位。
+#    每一步都是独立 jar（--embed-std 嵌 std 源，--vendor 续传 shim/ASM/coursier）
 ./scripts/selfhost-fixpoint.sh
 
-# 3) selfhost 自打独立 jar：把 dawn.tool 的 frame-writer shim、ASM 与
-#    coursier interface 按包前缀 vendor 进产物，std 源码嵌为 jar 资源
-#    （--embed-std，出仓库也能编译），从此不再需要任何 Kotlin 产物
-java -Xss512m -cp selfhost.jar:compiler/build/libs/dawn.jar main \
-  build selfhost -o dawn-selfhost.jar --embed-std compiler/src/main/resources/std \
-  --vendor dawn/tool --vendor org/objectweb/asm --vendor coursierapi
-
-# 4) 闭包：独立 jar 单独重建自身，两个 jar 逐字节相同
-java -Xss512m -jar dawn-selfhost.jar build selfhost -o rebuilt.jar \
-  --embed-std compiler/src/main/resources/std \
-  --vendor dawn/tool --vendor org/objectweb/asm --vendor coursierapi
-cmp dawn-selfhost.jar rebuilt.jar
+# 手工展开（release.yml 的祝圣即此链，B 是上传的那份）：
+V="--std std --embed-std std --vendor dawn/tool --vendor org/objectweb/asm --vendor coursierapi"
+java -Xss512m -jar seed.jar build selfhost -o a.jar $V
+java -Xss512m -jar a.jar    build selfhost -o b.jar $V
+java -Xss512m -jar b.jar    build selfhost -o c.jar $V
+cmp b.jar c.jar
 ```
 
-步骤 2 与 3+4 分别由 `scripts/selfhost-fixpoint.sh` 与
-`scripts/selfhost-standalone.sh` 固化，**都在 CI**（ci.yml），每次 push 重验。
+`scripts/selfhost-fixpoint.sh` 固化此链，**在 CI**（ci.yml），每次 push 重验；
+`scripts/replay-bootstrap.sh <seed|vX.Y.Z>` 从任一环重放（发版前手动过）。
 
 ## 为什么字节级一致做得到
 
-两个编译器共享同一个 frame 写入器 `dawn.tool.AdtClassWriter`
-（COMPUTE_FRAMES 的公共超类解析两边必须同一实现），selfhost 侧其余全部
-用 Dawn 重写（词法/语法/检查/comptime 解释器/codegen，账在
-`selfhost-codegen.md`、`selfhost-checker.md`）。金样对拍
-（`dawn __lex/__parse/__check/__emit` vs `selfhost lex/parse/check/emit`）
-覆盖全仓 .dawn 文件 + site + playground。
+codegen 是确定性的：同一份源经同一实现必出同字节；frame 计算走 vendored 的
+`dawn.tool.AdtClassWriter`（COMPUTE_FRAMES 的公共超类解析），随种子逐代续传、
+从不重编。历史上的跨实现验收（Kotlin vs selfhost 的 `__lex/__parse/__check/
+__emit` 全仓逐字节对拍）已随 `kotlin-final` 完成使命；现行 oracle 是
+**N vs N−1**（`selfhost-prev-diff.sh`：上一 release 与 HEAD 编同一语料 +
+backend-dawn 生态扫描，未声明的字节差异红灯）加 CLI/格式化/LSP 三条转写差分
+（`selfhost-run-diff.sh` / `selfhost-fmt-diff.sh` / `selfhost-lsp-diff.sh`）。
+故意改变输出的提交在信息里声明 `Emit-Change: <说明>`。
 
 ## 运行注意
 

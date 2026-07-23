@@ -1,11 +1,10 @@
 # M8:淘汰 Kotlin,selfhost 成为唯一编译器
 
-> 状态:**阶段一、二、三已落地**(2026-07-23)。
-> 阶段一:release.yml 双发 + 祝圣门禁、`scripts/replay-bootstrap.sh`、bootstrap.md 立法。
-> 阶段二:CLI 能力移植完成,run-diff 16 项全绿、playground contract 以 selfhost 全栈 10/10,
-> 落地记录与发现的坑见 §2.1。
-> 阶段三:诊断渲染 + 清单校验权威移交、bin/dawn 切 selfhost、CI 全 job selfhost 驱动、
-> N vs N−1 差分上线,见 §3.1。前置调研与实测见 §0;各阶段独立可回退。
+> 状态:**M8 完成——全部五个阶段已落地**(2026-07-23)。
+> 阶段一:种子推进协议立法(release.yml 双发 + 祝圣门禁、replay 脚本)。
+> 阶段二:CLI 能力移植(§2.1)。阶段三:日常驱动切换 + N vs N−1 差分(§3.1)。
+> 阶段四:LSP 移植(§4.1)。阶段五:v0.8.0 出首个 selfhost 种子后归档 Kotlin
+> (`kotlin-final` tag),main 上只剩 selfhost(§5.1,含并行期压缩的裁决)。
 > 业界对照(Rust/Go/Zig/OCaml/Nim 的做法与出处)见本文 §6。
 
 ## 0. 前置事实(全部实测/点数于 2026-07-23)
@@ -171,6 +170,35 @@ fmt 扫描),字节差异须在提交信息里以 `Emit-Change:` 行声明,未声
 3. 金样脚本改造:`*-diff.sh` 的参照从「Kotlin vs selfhost」改为「HEAD vs 上一 release」;
    check dumps 等入库为静态金样。
 4. README / CLAUDE.md / bootstrap.md / 本文档全面改写,常用命令更新。
+
+### 5.1 落地记录(2026-07-23)
+
+- **并行期压缩的裁决**:计划原文写「selfhost 驱动的 CI 全绿 ≥ 2 个 release」
+  再归档;用户指令(「一次性做完剩下的 selfhost only 的工作」)把这个日历闸
+  压缩为单 release。风险由四层顶住:N vs N−1 差分(未声明字节差异红灯)+
+  release 祝圣(种子→A→B→C 闭包跑在上传字节上)+ 可重放链条
+  (`replay-bootstrap.sh`,v0.6.0 根可现编)+ `kotlin-final` tag 全源归档。
+- v0.8.0(2026-07-23)双发 `dawn.jar` + `dawn-selfhost.jar`,祝圣全绿——
+  **首个 selfhost 种子**;`kotlin-final` tag 打在同一提交,随后 main 删除
+  `compiler/`(1170 项测试、386 金样随 tag 归档)与全部 gradle 件。
+- std 移到仓库根 `std/`(不再寄居 compiler/src/main/resources)。
+- `bin/dawn` 改为种子驱动:`scripts/seed-release.txt` 钉 v0.8.0,
+  `scripts/seedjar.sh` 下载缓存到 `.dawn/seeds/`,一步 `seed build selfhost`
+  出独立 jar;部署形态(playground 服务器)无 scripts/ 时直接跑
+  `build/dawn-selfhost.jar`。`DAWN_KOTLIN` 逃生阀与 `bin/dawn-kotlin` 退役。
+- 金样脚本改造:lex/parse/check/emit 四条 Kotlin 对拍与 standalone 脚本删除
+  (职责并入 prev-diff 的 emit 语料与新 fixpoint);fixpoint 重写为
+  种子→A→B→C、`cmp B C`(固定点 + 闭包 + 独立性一步);run/fmt/lsp 三条
+  差分的参照方换成种子 jar,故意改动用 `Emit-Change:` 声明豁免(与
+  prev-diff 同一机制)。冷启动实测:删掉本地工具链后 `./bin/dawn --version`
+  从 GitHub 拉 v0.8.0 种子重建,全程无 Kotlin。
+- CI:test job 去 gradle(seed 缓存 action + 种子驱动全套);prev-diff job
+  兼跑 run/fmt/lsp 三条转写差分。release.yml 只发 `dawn-selfhost.jar`,
+  版本权威移到 `selfhost/src/version.dawn`。
+- 遗留物处置:`dawn.tool` shim / ASM / coursierapi 三样二进制随种子逐代
+  vendor 续传(OCaml `boot/` 模式,源码在 kotlin-final);playground
+  部署脚本改 rsync `build/dawn-selfhost.jar`(下次手动 redeploy 生效);
+  spike-sam 改用独立 jar 提供 ASM;`.editorconfig` 删 ktlint 段。
 
 ## 6. 业界对照(调研于 2026-07-22,出处见链接)
 

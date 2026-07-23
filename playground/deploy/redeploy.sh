@@ -19,13 +19,14 @@ if [ -z "${JAVA_HOME:-}" ]; then
 fi
 export JAVA_HOME
 
-echo "=== building compiler fat jar ==="
-gradle :compiler:fatJar -q
+echo "=== building the selfhost toolchain ==="
+./bin/dawn --version > /dev/null
 
 echo "=== syncing to $HOST:$REMOTE ==="
-# the launcher + the compiler jar it points at
+# the launcher + the standalone jar it runs (bin/dawn's deployed form needs
+# only build/dawn-selfhost.jar next to it — no seed fetch on the server)
 rsync -avz bin/ "$HOST:$REMOTE/bin/"
-rsync -avz --relative compiler/build/libs/dawn.jar "$HOST:$REMOTE/"
+rsync -avz --relative build/dawn-selfhost.jar "$HOST:$REMOTE/"
 # the runner sources (recompiled on service start) and the sandbox scripts
 rsync -avz --delete playground/src playground/README.md "$HOST:$REMOTE/playground/"
 rsync -avz playground/sandbox/ "$HOST:$REMOTE/playground/sandbox/"

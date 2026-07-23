@@ -18,17 +18,10 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+ROOT=$(pwd)
+. scripts/seedjar.sh
 TAG=$(tr -d ' \n' < scripts/seed-release.txt)
-CACHE=${DAWN_SEED_CACHE:-.dawn/seeds}/$TAG
-mkdir -p "$CACHE"
-if [ ! -f "$CACHE/seed.jar" ]; then
-  base="https://github.com/dawnop/dawn-lang/releases/download/$TAG"
-  echo "fetching $TAG seed jar..."
-  curl -fsSL -o "$CACHE/seed.jar.tmp" "$base/dawn-selfhost.jar" \
-    || curl -fsSL -o "$CACHE/seed.jar.tmp" "$base/dawn.jar"
-  mv "$CACHE/seed.jar.tmp" "$CACHE/seed.jar"
-fi
-PREV=(java -Xss512m -jar "$CACHE/seed.jar")
+PREV=(java -Xss512m -jar "$(seed_jar)")
 
 OUT=${TMPDIR:-/tmp}/selfhost-prev-diff.$$
 mkdir -p "$OUT"

@@ -1,23 +1,49 @@
 #!/usr/bin/env bash
-# Golden diff for `selfhost run/test/doc/add/__pkghash`: stdout+
-# stderr and exit codes must match the Kotlin CLI — including the failing-test
-# report shape and the doc JSON byte for byte.
+# Differential for `selfhost run/test/doc/add/__pkghash` against the previous
+# release (the N-1 oracle since kotlin-final): stdout+stderr and exit codes
+# must match — including the failing-test report shape and the doc JSON byte
+# for byte. An intentional CLI-output change lands with an `Emit-Change:`
+# line in its commit message, which downgrades the mismatch to a note.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+ROOT=$(pwd)
+. scripts/seedjar.sh
 
-# the Kotlin reference CLI (bin/dawn runs selfhost since M8 phase 3)
-DAWN=${DAWN_BIN:-./bin/dawn-kotlin}
 OUT=${TMPDIR:-/tmp}/selfhost-run-diff.$$
 mkdir -p "$OUT"
 trap 'rm -rf "$OUT"' EXIT
 
-"$DAWN" build selfhost -o "$OUT/selfhost.jar" > /dev/null
-SH=(java -Xss512m -cp "$OUT/selfhost.jar:compiler/build/libs/dawn.jar" main)
+# the reference CLI = the previous release's jar, wrapped as one executable
+SEEDJAR="$(seed_jar)"
+printf '#!/bin/sh
+exec java -Xss512m -jar "%s" "$@"
+' "$SEEDJAR" > "$OUT/seed-cli"
+chmod +x "$OUT/seed-cli"
+DAWN=${DAWN_BIN:-"$OUT/seed-cli"}
+SH=(./bin/dawn)
+# build the HEAD toolchain up front so rebuild chatter stays out of transcripts
+./bin/dawn --version > /dev/null
 
-check() { # name kotlin-exit dawn-exit
-  if [ "$2" != "$3" ]; then echo "FAIL: $1 exit codes differ ($2 vs $3)"; exit 1; fi
-  if ! diff "$OUT/k.txt" "$OUT/d.txt"; then echo "FAIL: $1 output differs"; exit 1; fi
-  echo "OK   $1"
+declared() {
+  git log "$(tr -d ' \n' < scripts/seed-release.txt)..HEAD" --format=%B 2>/dev/null \
+    | grep -E '^Emit-Change:' || true
+}
+
+fail=0
+check() { # name ref-exit head-exit
+  if [ "$2" != "$3" ] || ! diff "$OUT/k.txt" "$OUT/d.txt" > "$OUT/check-diff.txt"; then
+    local decls
+    decls=$(declared)
+    if [ -n "$decls" ]; then
+      echo "NOTE $1 differs vs the seed — declared since the tag"
+    else
+      echo "FAIL: $1 differs (exits $2 vs $3)"
+      head -20 "$OUT/check-diff.txt"
+      fail=1
+    fi
+  else
+    echo "OK   $1"
+  fi
 }
 
 # run: with and without args (the no-args calc usage path exits 1)
@@ -39,8 +65,8 @@ check "test site" "$k" "$d"
 "${SH[@]}" test playground > "$OUT/d.txt" 2>&1 && d=0 || d=$?
 check "test playground (with [deps])" "$k" "$d"
 
-# test: a `[deps.<alias>]` url dependency from a file:// zip. The Kotlin run
-# fetches and verifies into a fresh content-addressed cache; the selfhost run
+# test: a `[deps.<alias>]` url dependency from a file:// zip. The reference
+# run fetches and verifies into a fresh content-addressed cache; the HEAD run
 # resolves from that warm cache — outputs must still agree.
 PKG="$OUT/greeter-src"
 mkdir -p "$PKG/src"
@@ -121,7 +147,7 @@ add_pair() { # label spec...
   cp "$PROJ/dawn.toml" "$OUT/k.toml"
   rm -rf "$PROJ"; cp -r "$ADDT" "$PROJ"
   DAWN_PKG_CACHE="$OUT/pkgcache-add-d" "${SH[@]}" add "$@" --dir "$PROJ" > "$OUT/d.txt" 2>&1 && d=0 || d=$?
-  if ! diff "$OUT/k.toml" "$PROJ/dawn.toml"; then echo "FAIL: $label manifests differ"; exit 1; fi
+  if ! diff "$OUT/k.toml" "$PROJ/dawn.toml"; then echo "FAIL: $label manifests differ"; fail=1; fi
   check "$label" "$k" "$d"
 }
 
@@ -240,4 +266,5 @@ for case in "run $NOMAIN" "build $NOMAIN" "test $OUT/notest.dawn" \
   check "cli error ($case)" "$k" "$d"
 done
 
-echo "OK: selfhost run/test/doc/add/__pkghash and every error path agree with the Kotlin CLI"
+[ "$fail" = 0 ] || { echo "FAIL: transcripts differ vs the seed with no declaration"; exit 1; }
+echo "OK: selfhost run/test/doc/add/__pkghash and every error path agree with the previous release"

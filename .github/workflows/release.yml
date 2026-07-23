@@ -1,13 +1,13 @@
 name: release
 
 # Why this exists: dawnop-site runs its production backend on code this compiler
-# builds, and used to build it from whatever main happened to be. That made every
-# commit here a potential break over there, with no way to say which compiler a
-# given backend was built with. Tags fix that, and a tag is only pinnable if it
-# ships an artifact — so pushing `v*` publishes one.
+# builds, and a tag is only pinnable if it ships an artifact — pushing `v*`
+# publishes dawn-selfhost.jar, which is also the next bootstrap seed
+# (docs/bootstrap.md, 种子推进协议). The Kotlin implementation is archived at
+# the kotlin-final tag; releases before v0.8.0 shipped its dawn.jar too.
 #
-# Releasing is: bump `version` in compiler/build.gradle.kts, commit, then
-#   git tag v0.1.0 && git push --tags
+# Releasing is: bump VERSION in selfhost/src/version.dawn, commit, then
+#   git tag v0.9.0 && git push --tags
 on:
   push:
     tags: ['v*']
@@ -27,72 +27,39 @@ jobs:
           distribution: 'graalvm-community'
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: gradle/actions/setup-gradle@v4
-
-      # The tag is what consumers pin, so it must name what is in the jar. Without
-      # this, tagging v0.2.0 without bumping the build file would publish a jar
-      # that reports 0.1.0 and nobody would notice until it mattered.
-      - name: tag matches the built version
+      # Seed consecration: every release jar is the next bootstrap seed, so
+      # the tag itself must pass the self-hosting gates — ci.yml runs them on
+      # main, but a tag can point anywhere. The chain is seed → A → B → C:
+      # the published jar is B (HEAD compiled by HEAD), proven by cmp B C.
+      - name: build the toolchain chain from the seed
         run: |
-          BUILT=$(./gradlew -q :compiler:printVersion)
-          TAG="${GITHUB_REF_NAME#v}"
-          echo "tag=$TAG  build.gradle.kts=$BUILT"
-          if [ "$TAG" != "$BUILT" ]; then
-            echo "::error::tag ${GITHUB_REF_NAME} does not match version $BUILT in compiler/build.gradle.kts"
-            exit 1
-          fi
+          . scripts/seedjar.sh
+          ROOT=$(pwd)
+          SEED="$(seed_jar)"
+          V="--std std --embed-std std --vendor dawn/tool --vendor org/objectweb/asm --vendor coursierapi"
+          java -Xss512m -jar "$SEED" build selfhost -o a.jar $V
+          java -Xss512m -jar a.jar build selfhost -o dawn-selfhost.jar $V
+          java -Xss512m -jar dawn-selfhost.jar build selfhost -o c.jar $V
+          cmp dawn-selfhost.jar c.jar
+          echo "closure OK (B == C)"
 
       # ci.yml runs on push to main, but a tag can point anywhere. Re-run the
       # suite here rather than trust that some earlier run covered this commit.
       - name: tests
-        run: ./gradlew :compiler:test
-
-      - name: build the dawn CLI
-        run: ./gradlew :compiler:fatJar
-
-      - name: it reports the version we think it does
         run: |
-          OUT=$(./bin/dawn-kotlin --version)
-          echo "$OUT"
-          case "$OUT" in
-            "dawn ${GITHUB_REF_NAME#v} ("*) ;;
-            *) echo "::error::--version said '$OUT'"; exit 1 ;;
-          esac
+          java -Xss512m -jar dawn-selfhost.jar test selfhost
+          java -Xss512m -jar dawn-selfhost.jar test site
 
-      # Seed consecration (docs/bootstrap.md, 种子推进协议): every release jar
-      # is a bootstrap seed candidate, so the tag itself must pass the
-      # self-hosting gates — ci.yml runs them on main, but a tag can point
-      # anywhere.
-      - name: selfhost fixed point (stage2 == stage3)
-        run: ./scripts/selfhost-fixpoint.sh
-
-      # The published dawn-selfhost.jar is what the next bootstrap generation
-      # runs, so build it here and prove closure on the exact bytes being
-      # uploaded, not on a throwaway copy.
-      - name: build the standalone selfhost jar
-        run: |
-          ./bin/dawn-kotlin build selfhost -o selfhost-boot.jar
-          java -Xss512m -cp selfhost-boot.jar:compiler/build/libs/dawn.jar main \
-            build selfhost -o dawn-selfhost.jar --embed-std compiler/src/main/resources/std \
-            --vendor dawn/tool --vendor org/objectweb/asm --vendor coursierapi
-
-      # the selfhost jar is what consumers run now, so its version string must
-      # name the tag too (version.dawn, the analogue of the gradle check above)
-      - name: the selfhost jar reports the version we think it does
+      # The tag is what consumers pin, so it must name what is in the jar
+      # (VERSION in selfhost/src/version.dawn).
+      - name: the jar reports the version we think it does
         run: |
           OUT=$(java -Xss512m -jar dawn-selfhost.jar --version)
           echo "$OUT"
           case "$OUT" in
             "dawn ${GITHUB_REF_NAME#v} ("*) ;;
-            *) echo "::error::selfhost --version said '$OUT' (bump selfhost/src/version.dawn)"; exit 1 ;;
+            *) echo "::error::--version said '$OUT' (bump selfhost/src/version.dawn)"; exit 1 ;;
           esac
-
-      - name: standalone closure — the seed rebuilds itself byte-identically
-        run: |
-          java -Xss512m -jar dawn-selfhost.jar build selfhost -o rebuilt.jar \
-            --embed-std compiler/src/main/resources/std \
-            --vendor dawn/tool --vendor org/objectweb/asm --vendor coursierapi
-          cmp dawn-selfhost.jar rebuilt.jar
 
       # gh is preinstalled on runners — no third-party action in the release path.
       - name: publish
@@ -100,7 +67,6 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release create "$GITHUB_REF_NAME" \
-            compiler/build/libs/dawn.jar \
             dawn-selfhost.jar \
             --title "$GITHUB_REF_NAME" \
             --generate-notes

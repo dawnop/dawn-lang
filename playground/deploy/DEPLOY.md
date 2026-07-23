@@ -21,7 +21,7 @@ by hand, with the server reachable.
 3. **Layout** under `/opt/dawn` (owned by your deploy user, readable by dawn-play):
    ```
    /opt/dawn/bin/dawn                      # launcher (rsynced)
-   /opt/dawn/compiler/build/libs/dawn.jar  # compiler (rsynced)
+   /opt/dawn/build/dawn-selfhost.jar       # compiler (rsynced)
    /opt/dawn/playground/src                 # runner sources (rsynced)
    /opt/dawn/playground/sandbox/            # sandbox scripts (rsynced)
    ```

@@ -1,13 +1,14 @@
 #!/bin/sh
 # SAM-conversion spike: generate SpikeSam.class with ASM, run the driver on the
 # JVM and as a native-image binary, diff the outputs. See SamGen.java for what
-# is under test. Requires compiler fat jar (gradle :compiler:fatJar) for ASM.
+# is under test. Uses the selfhost standalone jar (build/dawn-selfhost.jar,
+# built by ./bin/dawn) for ASM — it vendors org.objectweb.asm.
 set -e
 cd "$(dirname "$0")"
 
 ROOT=$(cd ../.. && pwd)
-JAR="$ROOT/compiler/build/libs/dawn.jar"
-[ -f "$JAR" ] || { echo "missing $JAR (run: gradle :compiler:fatJar)"; exit 2; }
+JAR="$ROOT/build/dawn-selfhost.jar"
+[ -f "$JAR" ] || { echo "missing $JAR (run: ./bin/dawn --version)"; exit 2; }
 
 if [ -z "$JAVA_HOME" ]; then
   for d in "$HOME"/tools/graalvm-*/Contents/Home; do

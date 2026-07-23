@@ -1,8 +1,9 @@
 #!/bin/sh
-# dawn CLI launcher: the self-hosted toolchain is the daily driver (M8 phase
-# 3). The standalone jar under build/ is rebuilt whenever selfhost/src or the
-# bundled std changed, seeded from the Kotlin fat jar during the transition.
-# DAWN_KOTLIN=1 is the escape hatch back to the Kotlin jar.
+# dawn CLI launcher: the self-hosted toolchain, seeded from the previous
+# release (M8 phase 5 — the Kotlin implementation is archived at the
+# kotlin-final tag). In a repo checkout the standalone jar under build/ is
+# rebuilt whenever selfhost/src, std/ or the pinned seed changed; outside one
+# (the playground server rsyncs bin/ + build/) it just runs the shipped jar.
 set -e
 
 # resolve symlinks (e.g. ~/.local/bin/dawn) so ROOT is the real repo checkout
@@ -25,40 +26,35 @@ if [ -n "$JAVA_HOME" ] && [ -x "$JAVA_HOME/bin/java" ]; then
   JAVA="$JAVA_HOME/bin/java"
 fi
 
-KJAR="$ROOT/compiler/build/libs/dawn.jar"
+SJAR="$ROOT/build/dawn-selfhost.jar"
+STD="$ROOT/std"
 
-if [ "${DAWN_KOTLIN:-}" = "1" ]; then
-  if [ ! -f "$KJAR" ]; then
-    echo "error: $KJAR not found" >&2
-    echo "build it first: cd $ROOT && ./gradlew :compiler:fatJar" >&2
+# deployed form: no sources, no seed resolver — run the shipped jar as-is
+if [ ! -f "$ROOT/scripts/seedjar.sh" ]; then
+  if [ ! -f "$SJAR" ]; then
+    echo "error: $SJAR not found (deployments must ship build/dawn-selfhost.jar)" >&2
     exit 2
   fi
-  exec "$JAVA" -jar "$KJAR" "$@"
+  exec "$JAVA" -Xss512m -jar "$SJAR" "$@"
 fi
 
-SJAR="$ROOT/build/dawn-selfhost.jar"
-STD="$ROOT/compiler/src/main/resources/std"
+. "$ROOT/scripts/seedjar.sh"
 
 needs_build=0
 if [ ! -f "$SJAR" ]; then
   needs_build=1
-elif [ -n "$(find "$ROOT/selfhost/src" "$STD" "$KJAR" -type f -newer "$SJAR" -print -quit 2>/dev/null)" ]; then
+elif [ -n "$(find "$ROOT/selfhost/src" "$ROOT/selfhost/dawn.toml" "$STD" \
+    "$ROOT/scripts/seed-release.txt" -type f -newer "$SJAR" -print -quit 2>/dev/null)" ]; then
   needs_build=1
 fi
 
 if [ "$needs_build" = 1 ]; then
-  if [ ! -f "$KJAR" ]; then
-    echo "error: no selfhost jar and no seed to build one" >&2
-    echo "build the seed first: cd $ROOT && ./gradlew :compiler:fatJar" >&2
-    exit 2
-  fi
+  SEED="$(seed_jar)"
   echo "dawn: rebuilding the selfhost toolchain (sources changed)..." >&2
   mkdir -p "$ROOT/build"
-  "$JAVA" -jar "$KJAR" build "$ROOT/selfhost" -o "$SJAR.boot" > /dev/null
-  "$JAVA" -Xss512m -cp "$SJAR.boot:$KJAR" main build "$ROOT/selfhost" -o "$SJAR.tmp" \
+  "$JAVA" -Xss512m -jar "$SEED" build "$ROOT/selfhost" -o "$SJAR.tmp" \
     --std "$STD" --embed-std "$STD" \
     --vendor dawn/tool --vendor org/objectweb/asm --vendor coursierapi > /dev/null
-  rm -f "$SJAR.boot"
   mv "$SJAR.tmp" "$SJAR"
 fi
 

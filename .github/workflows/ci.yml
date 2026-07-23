@@ -2,7 +2,7 @@ name: ci
 
 # Why this exists: the site generator was broken for a whole milestone without
 # anyone noticing — docs drifted past a hardcoded lint and nothing ever built the
-# site on push. The compiler suite runs in ~2s, so there is no reason not to.
+# site on push. The compiler suite runs in seconds, so there is no reason not to.
 on:
   push:
     branches: [main]
@@ -51,8 +51,6 @@ jobs:
           distribution: 'graalvm-community'
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: gradle/actions/setup-gradle@v4
-
       # site/build.sh builds the Playground editor bundle, so CI needs npm.
       - uses: actions/setup-node@v4
         with:
@@ -60,21 +58,18 @@ jobs:
           cache: npm
           cache-dependency-path: site/play-ui/package-lock.json
 
-      # koverLog runs the suite and prints one coverage line. No threshold — this
-      # is here to be looked at, not to gate on.
-      - name: compiler tests
-        run: ./gradlew :compiler:test :compiler:koverLog
+      # keep the seed jar across runs — it only changes when
+      # scripts/seed-release.txt bumps
+      - name: cache the bootstrap seed
+        uses: actions/cache@v4
+        with:
+          path: .dawn/seeds
+          key: dawn-seed-${{ hashFiles('scripts/seed-release.txt') }}
 
-      # The site is Dawn code with its own tests, and building it end-to-end is
-      # what would have caught the rot: docs/*.md are inputs to a lint that
-      # panics on drift. Needs the fat jar that bin/dawn runs.
-      - name: build the dawn CLI
-        run: ./gradlew :compiler:fatJar
-
-      # bin/dawn runs the self-hosted toolchain since M8 phase 3 (the Kotlin
-      # jar above seeds it and stays the golden-diff oracle via
-      # bin/dawn-kotlin). Every `./bin/dawn` step below exercises selfhost.
-      - name: build the selfhost toolchain (the daily driver)
+      # bin/dawn fetches the previous release's dawn-selfhost.jar (the
+      # bootstrap seed, scripts/seed-release.txt) and rebuilds the toolchain
+      # from HEAD sources. Every `./bin/dawn` step below exercises selfhost.
+      - name: build the selfhost toolchain
         run: ./bin/dawn --version
 
       - name: site tests
@@ -85,38 +80,13 @@ jobs:
       - name: package tests
         run: ./bin/dawn test packages/web && ./bin/dawn test playground
 
-      # The self-hosted compiler (selfhost/, growing knife by knife toward M7).
-      # Its lexer must reproduce `dawn __lex` byte for byte over every .dawn
-      # file in the repo — the golden diff is the whole acceptance test.
       - name: selfhost tests
         run: ./bin/dawn test selfhost
 
-      - name: selfhost lexer golden diff
-        run: ./scripts/selfhost-lex-diff.sh
-
-      - name: selfhost parser golden diff
-        run: ./scripts/selfhost-parse-diff.sh
-
-      - name: selfhost checker golden diff
-        run: ./scripts/selfhost-check-diff.sh
-
-      - name: selfhost codegen golden diff
-        run: ./scripts/selfhost-emit-diff.sh
-
-      - name: selfhost fixed point (stage2 == stage3)
+      # The self-hosting proof: seed → A → B → C, cmp B C — the compiler
+      # reproduces itself byte-identically from its own output.
+      - name: selfhost fixed point (B == C)
         run: ./scripts/selfhost-fixpoint.sh
-
-      - name: selfhost standalone jar (independence + closure)
-        run: ./scripts/selfhost-standalone.sh
-
-      - name: selfhost formatter golden diff
-        run: ./scripts/selfhost-fmt-diff.sh
-
-      - name: selfhost run/test golden diff
-        run: ./scripts/selfhost-run-diff.sh
-
-      - name: selfhost lsp golden diff
-        run: ./scripts/selfhost-lsp-diff.sh
 
       # The playground runs a public endpoint that compiles and executes code
       # strangers send it, and nothing here ever ran its contract test: the
@@ -131,17 +101,13 @@ jobs:
       - name: formatting
         run: ./bin/dawn fmt site selfhost packages --check
 
-      # The Dawn code above has had `fmt --check` since M3; the Kotlin it is
-      # compiled by had nothing. Baseline is deliberately narrow — see
-      # .editorconfig for which rules are off and why.
-      - name: kotlin lint
-        run: ./gradlew :compiler:ktlintCheck
-
   # N vs N-1 (scripts/selfhost-prev-diff.sh): the previous release and HEAD
   # compile the same corpus and any byte difference must be declared in a
-  # commit message. This oracle outlives the Kotlin reference (M8 phase 5),
-  # and doubles as the machine enforcement of the seed feature discipline —
-  # the N-1 jar must still compile HEAD selfhost/src.
+  # commit message. This is the oracle now that the Kotlin reference is
+  # archived (kotlin-final), and doubles as the machine enforcement of the
+  # seed feature discipline — the N-1 jar must still compile HEAD
+  # selfhost/src. The same job replays the run/fmt/lsp transcripts against
+  # the N-1 toolchain, the successors of the old Kotlin golden diffs.
   prev-diff:
     runs-on: ubuntu-latest
     steps:
@@ -156,12 +122,20 @@ jobs:
           distribution: 'graalvm-community'
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: gradle/actions/setup-gradle@v4
-
-      # the transition seed for bin/dawn (phase 5 replaces this with the
-      # released dawn-selfhost.jar)
-      - name: build the seed fat jar
-        run: ./gradlew :compiler:fatJar
+      - name: cache the bootstrap seed
+        uses: actions/cache@v4
+        with:
+          path: .dawn/seeds
+          key: dawn-seed-${{ hashFiles('scripts/seed-release.txt') }}
 
       - name: N vs N-1 differential
         run: ./scripts/selfhost-prev-diff.sh
+
+      - name: run/test transcript vs N-1
+        run: ./scripts/selfhost-run-diff.sh
+
+      - name: formatter vs N-1
+        run: ./scripts/selfhost-fmt-diff.sh
+
+      - name: lsp transcript vs N-1
+        run: ./scripts/selfhost-lsp-diff.sh

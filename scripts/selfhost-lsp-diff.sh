@@ -1,18 +1,22 @@
 #!/usr/bin/env bash
-# Golden diff for the self-hosted language server: a scripted LSP session
-# (initialize, open/change/close, hover, definition, completion, symbols,
-# formatting over a two-module project + a standalone buffer) runs against
-# both `dawn lsp` implementations and every JSON message must agree after
-# normalization (parsed and re-serialized with sorted keys — key order and
+# Differential for the language server against the previous release (the N-1
+# oracle since kotlin-final): a scripted LSP session (initialize,
+# open/change/close, hover, definition, completion, symbols, formatting over
+# a two-module project + a standalone buffer) runs against both toolchains
+# and every JSON message must agree after normalization (parsed and re-serialized with sorted keys — key order and
 # whitespace are transport detail, values and message order are not).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-# the Kotlin reference CLI (bin/dawn runs selfhost since M8 phase 3)
-KOTLIN=${DAWN_BIN:-./bin/dawn-kotlin}
+ROOT=$(pwd)
+. scripts/seedjar.sh
 SELF=./bin/dawn
 OUT=${TMPDIR:-/tmp}/selfhost-lsp-diff.$$
 mkdir -p "$OUT/proj/src"
+SEEDJAR="$(seed_jar)"
+printf '#!/bin/sh\nexec java -Xss512m -jar "%s" "$@"\n' "$SEEDJAR" > "$OUT/seed-cli"
+chmod +x "$OUT/seed-cli"
+REF=${DAWN_BIN:-"$OUT/seed-cli"}
 if [ -z "${KEEP:-}" ]; then trap 'rm -rf "$OUT"' EXIT; fi
 
 cat > "$OUT/proj/src/util.dawn" <<'EOF'
@@ -225,13 +229,20 @@ for f in frames:
 PYEOF
 }
 
-run_session "$KOTLIN" lsp > "$OUT/kotlin.txt"
+run_session "$REF" lsp > "$OUT/kotlin.txt"
 run_session "$SELF" lsp > "$OUT/self.txt"
 
 if ! diff "$OUT/kotlin.txt" "$OUT/self.txt" > "$OUT/diff.txt" 2>&1; then
-  head -30 "$OUT/diff.txt"
-  echo "FAIL: lsp transcripts differ ($(grep -c '^[<>]' "$OUT/diff.txt") lines)"
-  exit 1
+  decls=$(git log "$(tr -d ' \n' < scripts/seed-release.txt)..HEAD" --format=%B 2>/dev/null \
+    | grep -E '^Emit-Change:' || true)
+  if [ -n "$decls" ]; then
+    echo "NOTE lsp transcripts differ vs the seed — declared since the tag:"
+    echo "$decls" | sed 's/^/       /'
+  else
+    head -30 "$OUT/diff.txt"
+    echo "FAIL: lsp transcripts differ ($(grep -c '^[<>]' "$OUT/diff.txt") lines)"
+    exit 1
+  fi
 fi
 n=$(wc -l < "$OUT/kotlin.txt")
 echo "OK: lsp transcripts agree over $n messages"

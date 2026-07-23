@@ -38,17 +38,20 @@ case "$SEED_ARG" in
 esac
 
 cd "$(dirname "$0")/.."
-VENDOR=(--vendor dawn/tool --vendor org/objectweb/asm --vendor coursierapi)
+# --std std explicitly: an old seed's *default* std is its embedded copy, but
+# the replay must compile today's sources against today's std
+VENDOR=(--std std --embed-std std
+  --vendor dawn/tool --vendor org/objectweb/asm --vendor coursierapi)
 
 # 1) the seed compiles today's selfhost sources
-java -Xss512m -jar "$SEED" build selfhost -o "$OUT/boot.jar" > /dev/null
+java -Xss512m -jar "$SEED" build selfhost -o "$OUT/boot.jar" --std std > /dev/null
 echo "seed compiled selfhost"
 
 # 2) fixed point: boot emits selfhost, that compiler emits selfhost again —
 #    byte-identical (the seed's influence is gone after one generation).
 #    boot.jar comes first on the class path so its `main` wins over the seed's.
-java -Xss512m -cp "$OUT/boot.jar:$SEED" main emit selfhost -o "$OUT/s2" > /dev/null
-java -Xss512m -cp "$OUT/s2:$SEED" main emit selfhost -o "$OUT/s3" > /dev/null
+java -Xss512m -cp "$OUT/boot.jar:$SEED" main emit selfhost -o "$OUT/s2" --std std > /dev/null
+java -Xss512m -cp "$OUT/s2:$SEED" main emit selfhost -o "$OUT/s3" --std std > /dev/null
 diff -r "$OUT/s2" "$OUT/s3" > /dev/null || { echo "FAIL: stage3 != stage2"; exit 1; }
 echo "OK: fixed point — stage2 == stage3"
 
@@ -58,12 +61,10 @@ java -Xss512m -jar "$OUT/a.jar" build selfhost -o "$OUT/b.jar" "${VENDOR[@]}" > 
 cmp "$OUT/a.jar" "$OUT/b.jar"
 echo "OK: standalone closure"
 
-# 4) convergence: if the current toolchain is built, the replayed chain must
-#    land on exactly its bytes
-if [ -f compiler/build/libs/dawn.jar ]; then
-  ./bin/dawn __emit selfhost -o "$OUT/head" > /dev/null
-  diff -r "$OUT/head" "$OUT/s2" > /dev/null || { echo "FAIL: replayed chain != HEAD emit"; exit 1; }
-  echo "OK: converges to the current compiler byte-for-byte"
-fi
+# 4) convergence: the replayed chain must land on exactly the bytes the
+#    current toolchain (bin/dawn, built from the pinned seed) emits
+./bin/dawn __emit selfhost -o "$OUT/head" > /dev/null
+diff -r "$OUT/head" "$OUT/s2" > /dev/null || { echo "FAIL: replayed chain != HEAD emit"; exit 1; }
+echo "OK: converges to the current compiler byte-for-byte"
 
 echo "replay complete: $SEED_ARG is a valid seed for the current sources"

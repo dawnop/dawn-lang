@@ -1,8 +1,9 @@
 # Dawn
 
 一门刻意小的静态类型语言：编译到 JVM 字节码，native 可执行文件由 GraalVM
-native-image 直接获得——语言对两个目标零感知。编译器**已自举**：`selfhost/`
-是用 Dawn 写的编译器，与种子版逐字节对拍、能独立打包并重建自身
+native-image 直接获得——语言对两个目标零感知。编译器**已自举且只此一套**：
+`selfhost/` 是用 Dawn 写的编译器，从上一个 release 的种子 jar 自举、能独立
+打包并逐字节重建自身；最初的 Kotlin 实现已归档在 `kotlin-final` tag
 （[docs/bootstrap.md](docs/bootstrap.md)）。
 
 ```dawn
@@ -51,9 +52,8 @@ pub fn main() -> Unit !io =
 `<target>` 可以是单个 `.dawn` 文件，也可以是项目目录（`src/main.dawn` 为入口）。
 
 ```bash
-# 构建编译器（需要 JDK 21；native 编译需要 GraalVM）
-./gradlew :compiler:fatJar
-
+# 需要 JDK 21（native 编译需要 GraalVM）。首次运行自动下载种子
+# （上一 release 的 dawn-selfhost.jar）并用它编译 HEAD 工具链。
 ./bin/dawn run examples/m0/fizzbuzz.dawn      # 编译并运行单文件（JVM）
 ./bin/dawn run examples/m4/hello_mod          # 编译并运行多模块项目
 ./bin/dawn build <target> -o app.jar          # 产出可执行 jar
@@ -98,9 +98,11 @@ VS Code 扩展与 Neovim / Helix 配置见 [editors/](editors/)。
   验收物 [examples/m4/json](examples/m4/json)——纯 Dawn 多模块 JSON 库，过 JSONTestSuite
   全部 318 例（JVM 与 native 一致）。
 
-详见 [docs/design.md](docs/design.md) 里程碑。编译器 Kotlin + ASM，
-测试 1170 项（`./gradlew :compiler:test`，行覆盖率 88%）。
-`dawn build --native` 经 GraalVM 产出独立二进制，启动无 JVM 开销。
+详见 [docs/design.md](docs/design.md) 里程碑。编译器为 Dawn 自举实现
+（`selfhost/`，词法到 codegen 全部 Dawn，ASM 经 vendored 类驱动帧计算），
+`./bin/dawn test selfhost` 145 项 + 全仓金样在 CI。最初的 Kotlin 实现
+（1170 项测试）随 `kotlin-final` tag 归档，v0.6.0–v0.8.0 的 release jar
+构成可重放的信任链。`dawn build --native` 经 GraalVM 产出独立二进制。
 
 ## 许可证
 

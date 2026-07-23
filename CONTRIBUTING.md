@@ -3,7 +3,7 @@
 这里只写一件事：**特性是怎么从想法走到代码的**。
 
 提交格式、跑测试、代码风格那些，通用模板里都有，而且 CI 会管
-（`./gradlew :compiler:test`、`:compiler:ktlintCheck`、`./bin/dawn fmt site --check`）——
+（`./bin/dawn test selfhost`、`./bin/dawn fmt site selfhost packages --check`、金样差分）——
 文档写不写它们都一样。真正没被机器管住、又值得写下来的，是下面这套流程。它不是理论，
 是 `docs/` 里八篇设计文档跑出来的。
 
@@ -73,5 +73,6 @@
 - 两边一起改的过渡期，那边把 `.dawn-version` 写成 `main` 现编，但**别让它长期留在 main 上**——
   那期间可复现性是没有的。
 
-发布：改 `compiler/build.gradle.kts` 的 `version` → 提交 → `git tag v0.1.0 && git push --tags`。
+发布：改 `selfhost/src/version.dawn` 的 `VERSION` → 提交 → `git tag v0.9.0 && git push --tags`，
+发布后 bump `scripts/seed-release.txt`（种子推进协议见 docs/bootstrap.md）。
 `release.yml` 会校验 tag 与 version 一致、跑全量测试、把 `dawn.jar` 传上 Release。

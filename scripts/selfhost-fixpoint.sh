@@ -1,27 +1,31 @@
 #!/usr/bin/env bash
-# P5 fixed point: stage1 (Kotlin emits selfhost), stage2 (that selfhost emits
-# selfhost), stage3 (the self-emitted compiler emits selfhost). All three must
-# be byte-identical — the self-hosting proof.
+# The self-hosting proof, seed-driven (M8 phase 5): the previous release
+# builds HEAD (jar A), A rebuilds HEAD (jar B — HEAD compiled by HEAD), and B
+# rebuilds HEAD again (jar C). B and C must be byte-identical: the compiler
+# reproduces itself exactly from its own output. A is allowed to differ from
+# B (codegen changes between releases land through exactly this gap; the
+# N vs N-1 differential guards it with declarations). A quick emit smoke
+# proves B works alone with nothing else on the class path.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+ROOT=$(pwd)
+. scripts/seedjar.sh
 
-# the Kotlin reference CLI (bin/dawn runs selfhost since M8 phase 3)
-DAWN=${DAWN_BIN:-./bin/dawn-kotlin}
 OUT=${TMPDIR:-/tmp}/selfhost-fixpoint.$$
-mkdir -p "$OUT/s1" "$OUT/s2" "$OUT/s3"
+mkdir -p "$OUT"
 trap 'rm -rf "$OUT"' EXIT
 
-"$DAWN" __emit selfhost -o "$OUT/s1" > /dev/null
-"$DAWN" build selfhost -o "$OUT/selfhost.jar" > /dev/null
+VENDOR=(--std std --embed-std std
+  --vendor dawn/tool --vendor org/objectweb/asm --vendor coursierapi)
 
-CP_TAIL="compiler/build/libs/dawn.jar"
-java -Xss512m -cp "$OUT/selfhost.jar:$CP_TAIL" main emit selfhost -o "$OUT/s2" > /dev/null
-diff -r "$OUT/s1" "$OUT/s2" > /dev/null || { echo "FAIL: stage2 != stage1"; exit 1; }
-echo "stage2 == stage1 (kotlin)"
+SEED="$(seed_jar)"
+java -Xss512m -jar "$SEED" build selfhost -o "$OUT/a.jar" "${VENDOR[@]}" > /dev/null
+java -Xss512m -jar "$OUT/a.jar" build selfhost -o "$OUT/b.jar" "${VENDOR[@]}" > /dev/null
+java -Xss512m -jar "$OUT/b.jar" build selfhost -o "$OUT/c.jar" "${VENDOR[@]}" > /dev/null
+cmp "$OUT/b.jar" "$OUT/c.jar"
+echo "OK: fixed point — HEAD rebuilt itself byte-identically (B == C)"
 
-# stage3 runs the compiler from its own emitted classes (the compiler jar
-# supplies ASM and dawn.tool.AdtClassWriter)
-java -Xss512m -cp "$OUT/s2:$CP_TAIL" main emit selfhost -o "$OUT/s3" > /dev/null
-diff -r "$OUT/s2" "$OUT/s3" > /dev/null || { echo "FAIL: stage3 != stage2"; exit 1; }
-n=$(find "$OUT/s3" -name '*.class' | wc -l)
-echo "OK: fixed point — stage2 == stage3 ($n classes)"
+mkdir -p "$OUT/e"
+java -Xss512m -jar "$OUT/b.jar" emit examples/calc.dawn -o "$OUT/e" > /dev/null
+n=$(find "$OUT/e" -name '*.class' | wc -l)
+echo "OK: standalone smoke — B emitted calc alone ($n classes)"
