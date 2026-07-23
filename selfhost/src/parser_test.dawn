@@ -115,6 +115,19 @@ test "a bare assignment arm is reported and later arms/decls still parse" {
   }
 }
 
+test "a keyword may be a member name after `.`" {
+  # Java members can be named with Dawn keywords (`System.in`, `x.type`); after
+  # `.` a keyword is unambiguously a member name, not syntax (spec §9.1).
+  let out = rendered("fn f() = x.in")
+  assert str.contains(out, "FieldAccess in")
+  # the method form with a keyword name parses too
+  let out2 = rendered("fn g() = x.type()")
+  assert str.contains(out2, "MethodCall type")
+  # a non-word after `.` is still an error
+  let (m, ds) = parse_module("fn h() = x.42")
+  assert len(ds) > 0
+}
+
 test "chained comparisons are an error" {
   let (m, ds) = parse_module("fn f() = a < b < c")
   assert len(ds) > 0

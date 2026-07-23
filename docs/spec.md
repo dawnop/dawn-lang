@@ -700,10 +700,13 @@ fn build() -> String !io = {
 ```
 
 - `use java "全限定名"` 把类引入为：一个不透明类型 + 一个静态方法命名空间。
-  **只读静态字段可访问**：`Class.FIELD`（字段名照惯例大写，如 `Integer.MAX_VALUE`、
-  `Math.PI`、`System.out`、枚举常量 `TimeUnit.SECONDS`）读取该字段——值按 §9.2 映射
-  （引用类型包 `Option` 需 `!` 解包，`int`/`double` 等基本类型加宽），效果同一切互操作为 `!io`。
-  只读（无 `Class.FIELD = v`）；实例字段与非 `pub` 静态字段不可访问。
+  **只读静态字段可访问**：`Class.FIELD`（常量惯例大写，如 `Integer.MAX_VALUE`、
+  `Math.PI`、枚举常量 `TimeUnit.SECONDS`；小写字段名同样可读，如 `System.out`）读取该字段——
+  值按 §9.2 映射（引用类型包 `Option` 需 `!` 解包，`int`/`double` 等基本类型加宽），
+  效果同一切互操作为 `!io`。只读（无 `Class.FIELD = v`）；实例字段与非 `pub` 静态字段不可访问。
+- **`.` 后的成员名可以是任意「词」**，包括与 Dawn 关键字同形的名字（`in`/`type`/`match` 等）：
+  Java 有名为这些的成员，而 `.` 之后关键字无歧义、一律按成员名收。故 `System.in`（字段名 `in`
+  是关键字）与 `obj.type()`（方法名 `type`）都能直接写，无需反射绕道。
 - 构造器统一为 `Type.new(args)`，**返回 `T` 本身**（构造器不会返回 null，不包 Option）；
   实例方法用 `.method(args)`。
 - **所有 Java 调用的效果都是 `!io`**，无例外（理由见 design.md D5）。

@@ -24,7 +24,8 @@ use token.{
   COMMA, COLON, DOT, DOTDOT, QUESTION, ARROW, FATARROW,
   EQ, EQEQ, NEQ, LT, LE, GT, GE,
   PLUS, MINUS, STAR, SLASH, PERCENT, PLUSPLUS, PIPEGT, PIPE,
-  AMPAMP, PIPEPIPE, AMP, CARET, TILDE, SHL, SHR, USHR, BANG, AT
+  AMPAMP, PIPEPIPE, AMP, CARET, TILDE, SHL, SHR, USHR, BANG, AT,
+  keyword
 }
 use ast.{
   TypeRef, TNamed, TTuple, TFn, Bound, TypeParamDecl, Param, LambdaParam,
@@ -1290,7 +1291,16 @@ fn postfix_expr(p: P, st: St, ns: Bool) -> PR[Expr] = {
         e = EFieldAcc(e, nt.text, nt.lo, nt.hi, e_lo(e), nt.hi)
         st1 = st3
       } else {
-        let (st3, f) = want(p, st2, IDENT, "a field or function name after `.`")?
+        # A member name after `.` may be any word — an identifier or a keyword
+        # like `in`/`type` (Java members can be named that, e.g. `System.in`;
+        # after `.` a keyword is unambiguously a member name, so accept it).
+        let nt2 = cur(p, st2)
+        let (st3, f) = if nt2.kind == IDENT || keyword(nt2.text) != None {
+          adv(p, st2)
+        } else {
+          return Err((st2, perr(p, st2,
+            "expected a field or function name after `.`, found `" ++ nt2.text ++ "`")))
+        }
         if at_kind(p, st3, LPAREN) {
           var st4 = skip_nl(p, adv1(p, st3))
           var args: List[Expr] = []
