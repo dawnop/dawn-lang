@@ -233,17 +233,45 @@ fn lex_go(text: String, base: Int, collect: Bool) -> (List[Token], List[Token], 
   (toks, comments, diags)
 }
 
-## The characters of `text` whose UTF-16 offsets fall inside [lo, hi) — the
-## Kotlin `substring(lo, hi)` over UTF-16 indices (used for assert source text).
-pub fn utf16_slice(text: String, lo: Int, hi: Int) -> String = {
+## A decoded source: the code points, each one's UTF-16 start offset (`offs`
+## has n+1 entries, the last being the total UTF-16 length), and that total.
+## Decode a string once with `view_of`, then slice it by code-point index
+## (`slice_cp`) or by UTF-16 offset (`slice_u16`, binary search) — so callers
+## stop re-scanning the whole string on every slice.
+pub type SourceView = { cps: List[Int], offs: List[Int], u16len: Int }
+
+pub fn view_of(text: String) -> SourceView = {
+  let s = src_of(text, 0)
+  SourceView { cps: s.cps, offs: s.offs, u16len: s.offs[s.n] }
+}
+
+## Slice `[a, b)` by code-point index — O(b - a).
+pub fn slice_cp(v: SourceView, a: Int, b: Int) -> String = {
   var out: List[Int] = []
-  var o = 0
-  for c in code_points(text) {
-    let w = if c >= 65536 { 2 } else { 1 }
-    if o >= lo && o + w <= hi { out = out ++ [c] }
-    o = o + w
+  var i = a
+  while i < b {
+    out = out ++ [v.cps[i]]
+    i = i + 1
   }
   from_code_points(out)
+}
+
+## Slice `[lo, hi)` by UTF-16 offset: binary-search `offs` for the code points
+## whose whole UTF-16 range lies inside the span (a partial surrogate at either
+## edge is dropped, matching the Kotlin `substring`), then take that run.
+## O(log n + len) — replaces the old full-scan utf16_slice / utf16_slice_of.
+pub fn slice_u16(v: SourceView, lo: Int, hi: Int) -> String =
+  slice_cp(v, lower_bound(v.offs, lo), lower_bound(v.offs, hi + 1) - 1)
+
+## First index i with `a[i] >= x` (len(a) if none); `a` is sorted ascending.
+fn lower_bound(a: List[Int], x: Int) -> Int = {
+  var lo = 0
+  var hi = len(a)
+  while lo < hi {
+    let mid = (lo + hi) / 2
+    if a[mid] < x { lo = mid + 1 } else { hi = mid }
+  }
+  lo
 }
 
 # ---- words: keywords / identifiers / type identifiers ----
@@ -942,6 +970,20 @@ test "spans are utf-16 offsets" {
   let (toks, ds) = lex("🎈 x")
   assert toks[0].lo == 3
   assert toks[0].hi == 4
+}
+
+test "slice_u16 honours non-BMP UTF-16 boundaries" {
+  # "a𐐀b": 𐐀 (U+10400) is two UTF-16 units, so offsets run 0,1,3,4.
+  let v = view_of("a𐐀b")
+  assert v.u16len == 4
+  assert slice_u16(v, 0, 4) == "a𐐀b"
+  assert slice_u16(v, 1, 3) == "𐐀"
+  assert slice_u16(v, 0, 1) == "a"
+  assert slice_u16(v, 3, 4) == "b"
+  # a span cutting through the surrogate pair drops the partial code point.
+  assert slice_u16(v, 1, 2) == ""
+  # code-point slicing addresses the same run by index.
+  assert slice_cp(v, 1, 2) == "𐐀"
 }
 
 ## UTF-16 offsets of line starts (offset 0 first, then after every '\n') —

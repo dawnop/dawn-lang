@@ -10,7 +10,7 @@ use std/map
 use std/set
 use types.{ty_show, sig_render, adt_of}
 use lspq.{QCx, locals_at}
-use lexer.{utf16_slice}
+use lexer.{SourceView, view_of, slice_u16}
 use ast.{module_traits}
 use java "java.lang.Character"
 
@@ -26,7 +26,9 @@ pub type CItem = {
 # ---- the lexical spot the cursor sits in (mirrors the tokenizer's rules) ----
 
 # 0 = code, 1 = comment, 2 = string (no completion), 3 = interpolation (code)
-fn lex_ctx(cps: List[Int], offs: List[Int], u16len: Int, pos: Int) -> Int = {
+fn lex_ctx(v: SourceView, pos: Int) -> Int = {
+  let cps = v.cps
+  let offs = v.offs
   var kind = 0
   var i = 0
   let n = len(cps)
@@ -84,7 +86,7 @@ fn lex_ctx(cps: List[Int], offs: List[Int], u16len: Int, pos: Int) -> Int = {
   } else if kind == 2 || kind == 3 {
     # a `$name` or `${expr}` being typed completes like code
     let lo = if pos - 200 > 0 { pos - 200 } else { 0 }
-    if interp_tail(code_points(utf16_slice_of(cps, offs, u16len, lo, pos))) { 3 } else { 2 }
+    if interp_tail(code_points(slice_u16(v, lo, pos))) { 3 } else { 2 }
   } else if kind == 4 {
     2
   } else {
@@ -120,18 +122,6 @@ fn is_word(c: Int) -> Bool =
 
 fn is_space(c: Int) -> Bool =
   c == ' ' || c == '\t' || c == '\n' || c == 11 || c == 12 || c == 13
-
-## utf16_slice over a pre-split code-point list (avoids re-decoding).
-fn utf16_slice_of(cps: List[Int], offs: List[Int], u16len: Int, lo: Int, hi: Int) -> String = {
-  var out: List[Int] = []
-  var i = 0
-  let n = len(cps)
-  while i < n {
-    if offs[i] >= lo && offs[i] < hi { out = out ++ [cps[i]] }
-    i = i + 1
-  }
-  from_code_points(out)
-}
 
 ## `(?:^|[^\w])(?:fn|let|var|const|type|for|derive|trait)\s+$`
 fn fresh_name_tail(before: List[Int]) -> Bool = {
@@ -199,14 +189,10 @@ pub fn keywords() -> List[String] =
     "comptime", "unsafe_pure", "test", "assert", "true", "false", "not"]
 
 pub fn completions_at(qc: QCx, text: String, offset: Int) -> List[CItem] = {
-  let cps = code_points(text)
-  var offs: List[Int] = []
-  var u = 0
-  for c in cps {
-    offs = offs ++ [u]
-    u = u + (if c >= 65536 { 2 } else { 1 })
-  }
-  let u16len = u
+  let v = view_of(text)
+  let cps = v.cps
+  let offs = v.offs
+  let u16len = v.u16len
   let pos = if offset < 0 {
     0
   } else if offset > u16len {
@@ -214,7 +200,7 @@ pub fn completions_at(qc: QCx, text: String, offset: Int) -> List[CItem] = {
   } else {
     offset
   }
-  let ctx = lex_ctx(cps, offs, u16len, pos)
+  let ctx = lex_ctx(v, pos)
   if ctx == 1 || ctx == 2 {
     let none: List[CItem] = []
     return none
