@@ -26,27 +26,20 @@ use java "java.lang.Long"
 
 # ---- source representation ----
 #
-# The Kotlin lexer indexes UTF-16 units directly. Dawn's `Cursor` is opaque on
-# purpose, so instead the source becomes a code point list up front, with a
-# parallel table giving each code point's UTF-16 offset (offs has n+1 entries;
-# the last is the text's UTF-16 length). Spans read from that table, which keeps
-# them identical to the Kotlin compiler's.
+# The Kotlin lexer indexed UTF-16 units directly; the selfhost front end instead
+# uses **code-point indices** as its position currency (spans, line starts, diag
+# columns). The source becomes a code point list up front and a span is just a
+# pair of indices into it. UTF-16 — the LSP wire encoding — is reconstructed only
+# at the LSP boundary (lsp.dawn) from a `SourceView`, so it never leaks inward.
 
-type Src = { cps: List[Int], offs: List[Int], n: Int, base: Int }
+type Src = { cps: List[Int], n: Int, base: Int }
 
 fn src_of(text: String, base: Int) -> Src = {
   let cps = code_points(text)
-  var offs: List[Int] = []
-  var o = 0
-  for c in cps {
-    offs = offs ++ [o]
-    o = o + (if c >= 65536 { 2 } else { 1 })
-  }
-  offs = offs ++ [o]
-  Src { cps: cps, offs: offs, n: len(cps), base: base }
+  Src { cps: cps, n: len(cps), base: base }
 }
 
-fn off(s: Src, i: Int) -> Int = s.base + s.offs[i]
+fn off(s: Src, i: Int) -> Int = s.base + i
 
 ## The code point at `i`, or a space past the end (the Kotlin `peek` default).
 fn cp_at(s: Src, i: Int) -> Int = if i < s.n { s.cps[i] } else { ' ' }
@@ -233,19 +226,27 @@ fn lex_go(text: String, base: Int, collect: Bool) -> (List[Token], List[Token], 
   (toks, comments, diags)
 }
 
-## A decoded source: the code points, each one's UTF-16 start offset (`offs`
-## has n+1 entries, the last being the total UTF-16 length), and that total.
-## Decode a string once with `view_of`, then slice it by code-point index
-## (`slice_cp`) or by UTF-16 offset (`slice_u16`, binary search) — so callers
-## stop re-scanning the whole string on every slice.
+## A decoded source with the UTF-16 bridge the LSP boundary needs: the code
+## points, each one's UTF-16 start offset (`offs` has n+1 entries, the last being
+## the total UTF-16 length), and that total. Spans are code-point indices, so
+## `slice_cp` covers all internal slicing; `offs` exists only to map code-point
+## positions to UTF-16 columns when talking to an editor (lsp.dawn).
 pub type SourceView = { cps: List[Int], offs: List[Int], u16len: Int }
 
 pub fn view_of(text: String) -> SourceView = {
-  let s = src_of(text, 0)
-  SourceView { cps: s.cps, offs: s.offs, u16len: s.offs[s.n] }
+  let cps = code_points(text)
+  var offs: List[Int] = []
+  var o = 0
+  for c in cps {
+    offs = offs ++ [o]
+    o = o + (if c >= 65536 { 2 } else { 1 })
+  }
+  offs = offs ++ [o]
+  SourceView { cps: cps, offs: offs, u16len: o }
 }
 
-## Slice `[a, b)` by code-point index — O(b - a).
+## Slice `[a, b)` by code-point index — O(b - a). The one string-slicing API:
+## every span in the front end is a pair of code-point indices.
 pub fn slice_cp(v: SourceView, a: Int, b: Int) -> String = {
   var out: List[Int] = []
   var i = a
@@ -254,24 +255,6 @@ pub fn slice_cp(v: SourceView, a: Int, b: Int) -> String = {
     i = i + 1
   }
   from_code_points(out)
-}
-
-## Slice `[lo, hi)` by UTF-16 offset: binary-search `offs` for the code points
-## whose whole UTF-16 range lies inside the span (a partial surrogate at either
-## edge is dropped, matching the Kotlin `substring`), then take that run.
-## O(log n + len) — replaces the old full-scan utf16_slice / utf16_slice_of.
-pub fn slice_u16(v: SourceView, lo: Int, hi: Int) -> String =
-  slice_cp(v, lower_bound(v.offs, lo), lower_bound(v.offs, hi + 1) - 1)
-
-## First index i with `a[i] >= x` (len(a) if none); `a` is sorted ascending.
-fn lower_bound(a: List[Int], x: Int) -> Int = {
-  var lo = 0
-  var hi = len(a)
-  while lo < hi {
-    let mid = (lo + hi) / 2
-    if a[mid] < x { lo = mid + 1 } else { hi = mid }
-  }
-  lo
 }
 
 # ---- words: keywords / identifiers / type identifiers ----
@@ -868,8 +851,9 @@ test "char literals are ints" {
   assert toks[0].ival == 97
   assert toks[1].ival == 10
   assert toks[2].ival == 127880
-  # a surrogate pair is two UTF-16 units wide
-  assert toks[2].hi - toks[2].lo == 4
+  # spans are code-point indices: 🎈 is one code point, so '🎈' spans 3 (the two
+  # quotes plus the one code point) — not the 4 its surrogate pair would give.
+  assert toks[2].hi - toks[2].lo == 3
 }
 
 test "string with interpolation segments" {
@@ -966,34 +950,35 @@ test "underscore alone vs in identifiers" {
   assert kinds("_ _x x_1") == ["UNDERSCORE", "IDENT", "IDENT", "NEWLINE", "EOF"]
 }
 
-test "spans are utf-16 offsets" {
+test "spans are code-point indices, not utf-16 units" {
+  # 🎈 (U+1F388) is one code point but two UTF-16 units; the following `x`
+  # sits at code-point index 2, not at UTF-16 offset 3.
   let (toks, ds) = lex("🎈 x")
-  assert toks[0].lo == 3
-  assert toks[0].hi == 4
+  assert toks[0].lo == 2
+  assert toks[0].hi == 3
 }
 
-test "slice_u16 honours non-BMP UTF-16 boundaries" {
-  # "a𐐀b": 𐐀 (U+10400) is two UTF-16 units, so offsets run 0,1,3,4.
+test "slice_cp addresses code points and the view carries the UTF-16 bridge" {
+  # "a𐐀b": 𐐀 (U+10400) is one code point but two UTF-16 units, so the UTF-16
+  # offset table runs 0,1,3,4 while the code points are just indices 0,1,2.
   let v = view_of("a𐐀b")
   assert v.u16len == 4
-  assert slice_u16(v, 0, 4) == "a𐐀b"
-  assert slice_u16(v, 1, 3) == "𐐀"
-  assert slice_u16(v, 0, 1) == "a"
-  assert slice_u16(v, 3, 4) == "b"
-  # a span cutting through the surrogate pair drops the partial code point.
-  assert slice_u16(v, 1, 2) == ""
-  # code-point slicing addresses the same run by index.
+  assert v.offs == [0, 1, 3, 4]
+  assert slice_cp(v, 0, 3) == "a𐐀b"
   assert slice_cp(v, 1, 2) == "𐐀"
+  assert slice_cp(v, 0, 1) == "a"
+  assert slice_cp(v, 2, 3) == "b"
 }
 
-## UTF-16 offsets of line starts (offset 0 first, then after every '\n') —
-## the driver stores these on the checker state for line_of.
+## Code-point indices of line starts (index 0 first, then the index right after
+## every '\n') — the driver stores these on the checker state for line_of, and
+## diag/lsp read them as the same code-point currency as token spans.
 pub fn line_starts_of(text: String) -> List[Int] = {
   let s = src_of(text, 0)
   var out = [0]
   var i = 0
   while i < s.n {
-    if s.cps[i] == '\n' { out = out ++ [s.offs[i + 1]] }
+    if s.cps[i] == '\n' { out = out ++ [i + 1] }
     i = i + 1
   }
   out

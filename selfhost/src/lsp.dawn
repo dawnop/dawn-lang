@@ -17,7 +17,7 @@ use stdlib.{StdCtx, load_std}
 use checker.{ModExports, exports_of}
 use lspq.{QCx, Target, find_target}
 use lspc.{CItem, completions_at}
-use lexer.{line_starts_of}
+use lexer.{line_starts_of, view_of, SourceView}
 use diag.{utf16_len}
 use types.{Sig, builtins, sig_render}
 use ast.{
@@ -57,43 +57,62 @@ fn line_of(ls: List[Int], offset: Int) -> Int = {
   lo
 }
 
-## offset → (0-based line, 0-based UTF-16 column), clamped
-fn lsp_position(ls: List[Int], u16len: Int, offset: Int) -> (Int, Int) = {
-  let clamped = if offset < 0 {
+## code-point offset → (0-based line, 0-based UTF-16 column), clamped. The line
+## comes from the code-point line starts; the column is the UTF-16 distance from
+## the line start (the wire encoding), read off the view's offset table. This is
+## the only place code-point positions cross into UTF-16.
+fn lsp_position(v: SourceView, ls: List[Int], cpoff: Int) -> (Int, Int) = {
+  let n = len(v.cps)
+  let clamped = if cpoff < 0 {
     0
-  } else if offset > u16len {
-    u16len
+  } else if cpoff > n {
+    n
   } else {
-    offset
+    cpoff
   }
   let line = line_of(ls, clamped)
-  (line, clamped - ls[line])
+  (line, v.offs[clamped] - v.offs[ls[line]])
 }
 
-## (0-based line, 0-based UTF-16 column) → offset, clamped to the line
-fn lsp_offset(ls: List[Int], u16len: Int, line0: Int, character: Int) -> Int = {
+## (0-based line, 0-based UTF-16 column) → code-point offset, clamped to the
+## line. The incoming UTF-16 column is resolved back to a code-point index by
+## walking the line's offset table.
+fn lsp_offset(v: SourceView, ls: List[Int], line0: Int, character: Int) -> Int = {
+  let n = len(v.cps)
   if line0 < 0 { return 0 }
-  if line0 >= len(ls) { return u16len }
+  if line0 >= len(ls) { return n }
   let line_start = ls[line0]
-  let line_end = if line0 + 1 < len(ls) { ls[line0 + 1] - 1 } else { u16len }
-  let p = line_start + character
-  if p < line_start {
-    line_start
-  } else if p > line_end {
-    line_end
-  } else {
-    p
-  }
+  let line_end = if line0 + 1 < len(ls) { ls[line0 + 1] - 1 } else { n }
+  let target = v.offs[line_start] + character
+  var cp = line_start
+  while cp < line_end && v.offs[cp] < target { cp = cp + 1 }
+  cp
 }
 
-fn jrange(ls: List[Int], u16len: Int, lo: Int, hi: Int) -> Json = {
-  let (sl, sc) = lsp_position(ls, u16len, lo)
-  let (el, ec) = lsp_position(ls, u16len, hi)
+fn jrange(v: SourceView, ls: List[Int], lo: Int, hi: Int) -> Json = {
+  let (sl, sc) = lsp_position(v, ls, lo)
+  let (el, ec) = lsp_position(v, ls, hi)
   jobj([("start", jpos(sl, sc)), ("end", jpos(el, ec))])
 }
 
 fn jpos(line: Int, ch: Int) -> Json =
   jobj([("line", JInt(line)), ("character", JInt(ch))])
+
+test "positions bridge code-point offsets and utf-16 columns at the boundary" {
+  # "a🎈b\nx": 🎈 is one code point but two UTF-16 units. `b` is code-point
+  # offset 2; on the wire it must be UTF-16 column 3, and the round trip back
+  # must recover the same code-point offset.
+  let text = "a🎈b\nx"
+  let v = view_of(text)
+  let ls = line_starts_of(text)
+  let (l0, c0) = lsp_position(v, ls, 2)
+  assert l0 == 0
+  assert c0 == 3
+  assert lsp_offset(v, ls, 0, 3) == 2
+  let (l1, c1) = lsp_position(v, ls, 4)
+  assert l1 == 1
+  assert c1 == 0
+}
 
 # ---- json helpers ----
 
@@ -246,8 +265,8 @@ type Doc = {
   uri: String,
   path: Option[String],
   text: String,
+  view: SourceView,
   ls: List[Int],
-  u16len: Int,
   prog: Program,
   entry: String
 }
@@ -471,8 +490,8 @@ fn update_doc(st0: LspState, uri: String, text: String) -> LspState !io = {
     uri: uri,
     path: path,
     text: text,
+    view: view_of(text),
     ls: line_starts_of(text),
-    u16len: utf16_len(text),
     prog: prog,
     entry: entry
   }
@@ -481,7 +500,7 @@ fn update_doc(st0: LspState, uri: String, text: String) -> LspState !io = {
   for dg in doc_diags(d) {
     let message = if dg.hint != "" { dg.msg ++ "\nhint: " ++ dg.hint } else { dg.msg }
     diags = diags ++ [jobj([
-      ("range", jrange(d.ls, d.u16len, dg.lo, dg.hi)),
+      ("range", jrange(d.view, d.ls, dg.lo, dg.hi)),
       ("severity", JInt(1)),
       ("source", JStr("dawn")),
       ("message", JStr(message))
@@ -499,7 +518,7 @@ fn doc_of(st: LspState, params: Json) -> Option[Doc] = {
 
 fn pos_offset(d: Doc, params: Json) -> Int = {
   let p = get_or_null(params, "position")
-  lsp_offset(d.ls, d.u16len, oint(p, "line"), oint(p, "character"))
+  lsp_offset(d.view, d.ls, oint(p, "line"), oint(p, "character"))
 }
 
 # ---- language features ----
@@ -542,7 +561,7 @@ fn handle_hover(st: LspState, params: Json) -> Json !io = {
                 ("kind", JStr("markdown")),
                 ("value", JStr("```dawn\n" ++ t.hover ++ "\n```"))
               ])),
-              ("range", jrange(d.ls, d.u16len, t.lo, t.hi))
+              ("range", jrange(d.view, d.ls, t.lo, t.hi))
             ])
             None -> JNull
           }
@@ -590,7 +609,7 @@ fn location_of(st: LspState, d: Doc, def_path: Option[String], lo: Int, hi: Int)
       }
   }
   if same {
-    return Some(jobj([("uri", JStr(d.uri)), ("range", jrange(d.ls, d.u16len, lo, hi))]))
+    return Some(jobj([("uri", JStr(d.uri)), ("range", jrange(d.view, d.ls, lo, hi))]))
   }
   let dp = match def_path {
     Some(p) -> p
@@ -602,17 +621,16 @@ fn location_of(st: LspState, d: Doc, def_path: Option[String], lo: Int, hi: Int)
     match d2.path {
       Some(p2) ->
         if canon(p2) == dc {
-          return Some(jobj([("uri", JStr(u2)), ("range", jrange(d2.ls, d2.u16len, lo, hi))]))
+          return Some(jobj([("uri", JStr(u2)), ("range", jrange(d2.view, d2.ls, lo, hi))]))
         }
       None -> ()
     }
   }
   match io.read_file(dp) {
     Ok(text) -> {
-      let ls = line_starts_of(text)
       Some(jobj([
         ("uri", JStr(path_to_uri(dp))),
-        ("range", jrange(ls, utf16_len(text), lo, hi))
+        ("range", jrange(view_of(text), line_starts_of(text), lo, hi))
       ]))
     }
     Err(_) -> None
@@ -678,8 +696,8 @@ fn decl_symbol(qc: QCx, d: Doc, dc: Decl) -> Option[Json] !io = {
       }
       fields = fields ++ [
         ("kind", JInt(if is_fn { 12 } else { 5 })),
-        ("range", jrange(d.ls, d.u16len, lo, hi)),
-        ("selectionRange", jrange(d.ls, d.u16len, nlo, nhi))
+        ("range", jrange(d.view, d.ls, lo, hi)),
+        ("selectionRange", jrange(d.view, d.ls, nlo, nhi))
       ]
       Some(jobj(fields))
     }

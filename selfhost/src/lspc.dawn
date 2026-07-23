@@ -10,7 +10,7 @@ use std/map
 use std/set
 use types.{ty_show, sig_render, adt_of}
 use lspq.{QCx, locals_at}
-use lexer.{SourceView, view_of, slice_u16}
+use lexer.{SourceView, view_of, slice_cp}
 use ast.{module_traits}
 use java "java.lang.Character"
 
@@ -28,11 +28,10 @@ pub type CItem = {
 # 0 = code, 1 = comment, 2 = string (no completion), 3 = interpolation (code)
 fn lex_ctx(v: SourceView, pos: Int) -> Int = {
   let cps = v.cps
-  let offs = v.offs
   var kind = 0
   var i = 0
   let n = len(cps)
-  while i < n && offs[i] < pos {
+  while i < n && i < pos {
     let ch = cps[i]
     if kind == 0 {
       if ch == '"' && i + 2 < n && cps[i + 1] == '"' && cps[i + 2] == '"' {
@@ -84,9 +83,10 @@ fn lex_ctx(v: SourceView, pos: Int) -> Int = {
   if kind == 1 {
     1
   } else if kind == 2 || kind == 3 {
-    # a `$name` or `${expr}` being typed completes like code
+    # a `$name` or `${expr}` being typed completes like code (a 200-code-point
+    # look-back window is plenty to see the opening `$`/`${`)
     let lo = if pos - 200 > 0 { pos - 200 } else { 0 }
-    if interp_tail(code_points(slice_u16(v, lo, pos))) { 3 } else { 2 }
+    if interp_tail(code_points(slice_cp(v, lo, pos))) { 3 } else { 2 }
   } else if kind == 4 {
     2
   } else {
@@ -191,12 +191,13 @@ pub fn keywords() -> List[String] =
 pub fn completions_at(qc: QCx, text: String, offset: Int) -> List[CItem] = {
   let v = view_of(text)
   let cps = v.cps
-  let offs = v.offs
-  let u16len = v.u16len
+  let n = len(cps)
+  # `offset` is a code-point index (lsp.dawn converts the wire UTF-16 position at
+  # the boundary), so it is the cursor's code-point index directly, clamped.
   let pos = if offset < 0 {
     0
-  } else if offset > u16len {
-    u16len
+  } else if offset > n {
+    n
   } else {
     offset
   }
@@ -205,9 +206,8 @@ pub fn completions_at(qc: QCx, text: String, offset: Int) -> List[CItem] = {
     let none: List[CItem] = []
     return none
   }
-  # cp index at pos, then back over word chars to the word start
-  var k = 0
-  while k < len(cps) && offs[k] < pos { k = k + 1 }
+  # back over word chars from the cursor to the word start
+  var k = pos
   var ws = k
   while ws > 0 && is_word(cps[ws - 1]) { ws = ws - 1 }
   var ls = ws

@@ -310,18 +310,19 @@ fn block_all_zero(b: Bytes, off: Int) -> Bool = {
 
 ## pax extended header records are "<len> key=value\n"; the path override wins.
 fn pax_path(recs: String) -> Option[String] = {
+  let n = str.len(recs)
   var out: Option[String] = None
   var i = 0
-  while i < str.len(recs) {
-    let sp = match str.index_of(str.substring(recs, i, str.len(recs)), " ") {
+  while i < n {
+    let sp = match str.index_of(str.substring(recs, i, n), " ") {
       Some(s) -> i + s
       None -> break
     }
     let rec_len = match parse_int(str.substring(recs, i, sp)) {
-      Some(n) -> n
+      Some(m) -> m
       None -> break
     }
-    if rec_len <= 0 || i + rec_len > str.len(recs) { break }
+    if rec_len <= 0 || i + rec_len > n { break }
     var rec = str.substring(recs, sp + 1, i + rec_len)
     if str.ends_with(rec, "\n") { rec = str.substring(rec, 0, str.len(rec) - 1) }
     if str.starts_with(rec, "path=") {
