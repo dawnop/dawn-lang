@@ -219,7 +219,8 @@ pub fn load_directory(dir: String) -> LoadResult !io = {
   let (pkgs, mdiags, _, _, _) =
     resolve_src_deps(dir, no_cache, set.empty(), url_resolved, url_names, no_names, mfc)
   diags = diags ++ sdiags ++ mdiags
-  resolve(root, walk_dawn(root), diags, false, pkgs)
+  let no_over: Map[String, String] = map.empty()
+  resolve(root, walk_dawn(root), diags, false, pkgs, no_over)
 }
 
 # The content-addressed package cache root lives in pkgfetch (one definition;
@@ -614,9 +615,23 @@ fn nearest_src_root(file: String) -> String !io = {
   out
 }
 
+## A source read that honors editor-buffer overrides (canon path → text) —
+## the Kotlin ModuleLoader.loadFile(overrides) for the language server.
+fn read_over(over: Map[String, String], c: String, f: String) -> Result[String, String] !io =
+  match map.get(over, c) {
+    Some(t) -> Ok(t)
+    None -> io.read_file(f)
+  }
+
 ## File mode: root = nearest `src` ancestor, else the file's own directory;
 ## loads the entry plus its transitive use-closure.
 pub fn load_file(file: String) -> LoadResult !io = {
+  let no_over: Map[String, String] = map.empty()
+  load_file_over(file, no_over)
+}
+
+## `load_file` with editor-buffer overrides.
+pub fn load_file_over(file: String, over: Map[String, String]) -> LoadResult !io = {
   let root = nearest_src_root(file)
   let proj = match str.last_index_of(root, "/") {
     Some(i) -> if str.substring(root, i + 1, str.len(root)) == "src" { str.substring(root, 0, i) } else { root }
@@ -628,7 +643,7 @@ pub fn load_file(file: String) -> LoadResult !io = {
   let no_names: Map[String, String] = map.empty()
   let (pkgs, mdiags, _, _, _) =
     resolve_src_deps(proj, no_cache, set.empty(), url_resolved, url_names, no_names, mfc)
-  resolve(root, [file], sdiags ++ mdiags, true, pkgs)
+  resolve(root, [file], sdiags ++ mdiags, true, pkgs, over)
 }
 
 fn resolve(
@@ -636,7 +651,8 @@ fn resolve(
   seed_files: List[String],
   diags0: List[LocDiag],
   follow_only: Bool,
-  pkgs: Map[String, PkgR]
+  pkgs: Map[String, PkgR],
+  over: Map[String, String]
 ) -> LoadResult !io = {
   var diags = diags0
   let root_abs = canon(root)
@@ -648,7 +664,7 @@ fn resolve(
   for f in seed_files {
     let c = canon(f)
     if not map.has(by_canon, c) {
-      match io.read_file(f) {
+      match read_over(over, c, f) {
         Ok(text) -> {
           let (m, pdiags) = parser.parse_module(text)
           let mod_path = module_path_of(root_abs, c)
@@ -765,7 +781,7 @@ fn resolve(
         if map.has(by_canon, dep_canon) {
           queue = queue ++ [map.get(by_canon, dep_canon).expect("canon")]
         } else {
-          match io.read_file(dep_file) {
+          match read_over(over, dep_canon, dep_file) {
             Ok(text) -> {
               let (m2p, pdiags2) = parser.parse_module(text)
               let (mod_path, cls, m2) = match dep_pkg {
@@ -996,6 +1012,71 @@ pub fn analyze_program(loaded: LoadResult, std: StdCtx, fuel: Int) -> Program !i
     }]
   }
   Program { modules: out, diags: diags }
+}
+
+# ---- single-document analysis (the language server's entry) ----
+
+## The Kotlin fast-path test `(?m)^\s*use\s+[a-z]`: any line whose first token
+## is `use` followed by a lowercase letter. (`pub use` deliberately does not
+## match — the quirk is part of the contract.)
+fn has_module_use(text: String) -> Bool = {
+  for line in str.split(text, "\n") {
+    let cps = code_points(line)
+    let n = len(cps)
+    var i = 0
+    while i < n && is_ws(cps[i]) { i = i + 1 }
+    if i + 3 <= n && cps[i] == 'u' && cps[i + 1] == 's' && cps[i + 2] == 'e' {
+      var j = i + 3
+      if j < n && is_ws(cps[j]) {
+        while j < n && is_ws(cps[j]) { j = j + 1 }
+        if j < n && cps[j] >= 'a' && cps[j] <= 'z' { return true }
+      }
+    }
+  }
+  false
+}
+
+## Java's regex `\s`: space, tab, newline, vertical tab, form feed, return.
+fn is_ws(cp: Int) -> Bool =
+  cp == ' ' || cp == '\t' || cp == '\n' || cp == 11 || cp == 12 || cp == 13
+
+## Analyze one buffer without project context (the Kotlin `analyze(text)`).
+pub fn analyze_standalone(path: String, text: String, std: StdCtx, fuel: Int) -> Program !io = {
+  let (m, pdiags) = parser.parse_module(text)
+  let mf = LoadedModule {
+    mod_path: "main",
+    class_name: "main",
+    path: path,
+    text: text,
+    m: m,
+    pdiags: pdiags,
+    pkg: None
+  }
+  analyze_program(LoadResult { modules: [mf], diags: [] }, std, fuel)
+}
+
+## Analyze the file behind an editor buffer (the Kotlin `analyzeDocument`):
+## no module imports → standalone; otherwise load the project with the buffer
+## text overriding the on-disk file, so unsaved edits see cross-module context.
+## Returns the whole program (cross-file definition targets need the other
+## modules' ASTs) plus the entry's mod_path; the entry's own diagnostics are
+## the prog.diags rows whose path is the entry file.
+pub fn analyze_document(path: String, text: String, std: StdCtx, fuel: Int) -> (Program, String) !io = {
+  if not has_module_use(text) {
+    return (analyze_standalone(path, text, std, fuel), "main")
+  }
+  let abs = canon(path)
+  var over: Map[String, String] = map.empty()
+  over = map.insert(over, abs, text)
+  let loaded = load_file_over(path, over)
+  var entry = ""
+  for mf in loaded.modules {
+    if entry == "" && canon(mf.path) == abs { entry = mf.mod_path }
+  }
+  if entry == "" {
+    return (analyze_standalone(path, text, std, fuel), "main")
+  }
+  (analyze_program(loaded, std, fuel), entry)
 }
 
 # ---- tests ----

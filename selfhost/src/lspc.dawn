@@ -1,0 +1,296 @@
+# Completion (the Kotlin Completion.kt): everything nameable at the cursor —
+# locals of the enclosing function, module + imported functions, types and
+# constructors, builtins, and keywords. Suppressed where a suggestion can only
+# be noise: inside strings and comments, while naming a fresh binding, on
+# `use` lines, and after `.`. `!` completes the one builtin effect. All
+# offsets are UTF-16 code units (the LSP wire encoding).
+
+use std/str
+use std/map
+use std/set
+use types.{ty_show, sig_render, adt_of}
+use lspq.{QCx, locals_at}
+use lexer.{utf16_slice}
+use ast.{module_traits}
+use java "java.lang.Character"
+
+## One completion item, ready to serialize. `kind` is the LSP CompletionItemKind
+## code (Function=3, Variable=6, Class=7, Interface=8, Keyword=14, EnumMember=20).
+pub type CItem = {
+  label: String,
+  kind: Int,
+  detail: Option[String],
+  sort_text: Option[String]
+}
+
+# ---- the lexical spot the cursor sits in (mirrors the tokenizer's rules) ----
+
+# 0 = code, 1 = comment, 2 = string (no completion), 3 = interpolation (code)
+fn lex_ctx(cps: List[Int], offs: List[Int], u16len: Int, pos: Int) -> Int = {
+  var kind = 0
+  var i = 0
+  let n = len(cps)
+  while i < n && offs[i] < pos {
+    let ch = cps[i]
+    if kind == 0 {
+      if ch == '"' && i + 2 < n && cps[i + 1] == '"' && cps[i + 2] == '"' {
+        kind = 3
+        i = i + 3
+      } else if ch == '#' {
+        kind = 1
+        i = i + 1
+      } else if ch == '"' {
+        kind = 2
+        i = i + 1
+      } else if ch == '`' {
+        kind = 4
+        i = i + 1
+      } else if ch == 39 {
+        i = i + 1
+        if i < n && cps[i] == 92 { i = i + 1 }
+        i = i + 1
+        if i < n && cps[i] == 39 { i = i + 1 }
+      } else {
+        i = i + 1
+      }
+    } else if kind == 1 {
+      if ch == '\n' { kind = 0 }
+      i = i + 1
+    } else if kind == 2 {
+      if ch == 92 {
+        i = i + 2
+      } else if ch == '"' || ch == '\n' {
+        kind = 0
+        i = i + 1
+      } else {
+        i = i + 1
+      }
+    } else if kind == 3 {
+      if ch == 92 {
+        i = i + 2
+      } else if ch == '"' && i + 2 < n && cps[i + 1] == '"' && cps[i + 2] == '"' {
+        kind = 0
+        i = i + 3
+      } else {
+        i = i + 1
+      }
+    } else {
+      if ch == '`' { kind = 0 }
+      i = i + 1
+    }
+  }
+  if kind == 1 {
+    1
+  } else if kind == 2 || kind == 3 {
+    # a `$name` or `${expr}` being typed completes like code
+    let lo = if pos - 200 > 0 { pos - 200 } else { 0 }
+    if interp_tail(code_points(utf16_slice_of(cps, offs, u16len, lo, pos))) { 3 } else { 2 }
+  } else if kind == 4 {
+    2
+  } else {
+    0
+  }
+}
+
+## Does the tail end inside a `$name` or `${...}` interpolation being typed?
+fn interp_tail(tail: List[Int]) -> Bool = {
+  let n = len(tail)
+  # `\$[A-Za-z_]\w*$`: a word run at the end, opened by `$` + letter/underscore
+  var i = n
+  while i > 0 && is_word(tail[i - 1]) { i = i - 1 }
+  if i < n && i > 0 && tail[i - 1] == '$' {
+    let c0 = tail[i]
+    if c0 == '_' || (c0 >= 'a' && c0 <= 'z') || (c0 >= 'A' && c0 <= 'Z') { return true }
+  }
+  # `\$\{[^}"]*$`: an unclosed `${` with no `}` or `"` after it
+  var j = n - 1
+  while j >= 0 {
+    let c = tail[j]
+    if c == '}' || c == '"' { return false }
+    if c == '{' {
+      return j > 0 && tail[j - 1] == '$'
+    }
+    j = j - 1
+  }
+  false
+}
+
+fn is_word(c: Int) -> Bool =
+  c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+
+fn is_space(c: Int) -> Bool =
+  c == ' ' || c == '\t' || c == '\n' || c == 11 || c == 12 || c == 13
+
+## utf16_slice over a pre-split code-point list (avoids re-decoding).
+fn utf16_slice_of(cps: List[Int], offs: List[Int], u16len: Int, lo: Int, hi: Int) -> String = {
+  var out: List[Int] = []
+  var i = 0
+  let n = len(cps)
+  while i < n {
+    if offs[i] >= lo && offs[i] < hi { out = out ++ [cps[i]] }
+    i = i + 1
+  }
+  from_code_points(out)
+}
+
+## `(?:^|[^\w])(?:fn|let|var|const|type|for|derive|trait)\s+$`
+fn fresh_name_tail(before: List[Int]) -> Bool = {
+  let n = len(before)
+  var i = n
+  while i > 0 && is_space(before[i - 1]) { i = i - 1 }
+  if i == n { return false }
+  var j = i
+  while j > 0 && is_word(before[j - 1]) { j = j - 1 }
+  if j > 0 && is_word(before[j - 1]) { return false }
+  let w = from_code_points(slice_cps(before, j, i))
+  w == "fn" || w == "let" || w == "var" || w == "const" || w == "type" || w == "for" ||
+    w == "derive" || w == "trait"
+}
+
+## `^\s*(?:pub\s+)?use\b`
+fn use_line(before: List[Int]) -> Bool = {
+  let n = len(before)
+  var i = 0
+  while i < n && is_space(before[i]) { i = i + 1 }
+  if i + 3 <= n && from_code_points(slice_cps(before, i, i + 3)) == "pub" {
+    if i + 3 < n && is_space(before[i + 3]) {
+      var k = i + 3
+      while k < n && is_space(before[k]) { k = k + 1 }
+      i = k
+    }
+  }
+  if i + 3 <= n && from_code_points(slice_cps(before, i, i + 3)) == "use" {
+    i + 3 == n || not is_word(before[i + 3])
+  } else {
+    false
+  }
+}
+
+fn slice_cps(cps: List[Int], lo: Int, hi: Int) -> List[Int] = {
+  var out: List[Int] = []
+  var i = lo
+  while i < hi {
+    out = out ++ [cps[i]]
+    i = i + 1
+  }
+  out
+}
+
+# ---- assembly ----
+
+type Items = { out: List[CItem], seen: Set[String] }
+
+fn add(it: Items, name: String, kind: Int, detail: Option[String], rank: String) -> Items = {
+  if name == "_" || set.has(it.seen, name) { return it }
+  Items {
+    out: it.out ++ [CItem {
+      label: name,
+      kind: kind,
+      detail: detail,
+      sort_text: Some(rank ++ name)
+    }],
+    seen: set.insert(it.seen, name)
+  }
+}
+
+pub fn keywords() -> List[String] =
+  ["fn", "let", "var", "type", "alias", "const", "use", "java", "pub", "trait", "impl",
+    "match", "if", "else", "for", "in", "while", "return", "break", "continue",
+    "comptime", "unsafe_pure", "test", "assert", "true", "false", "not"]
+
+pub fn completions_at(qc: QCx, text: String, offset: Int) -> List[CItem] = {
+  let cps = code_points(text)
+  var offs: List[Int] = []
+  var u = 0
+  for c in cps {
+    offs = offs ++ [u]
+    u = u + (if c >= 65536 { 2 } else { 1 })
+  }
+  let u16len = u
+  let pos = if offset < 0 {
+    0
+  } else if offset > u16len {
+    u16len
+  } else {
+    offset
+  }
+  let ctx = lex_ctx(cps, offs, u16len, pos)
+  if ctx == 1 || ctx == 2 {
+    let none: List[CItem] = []
+    return none
+  }
+  # cp index at pos, then back over word chars to the word start
+  var k = 0
+  while k < len(cps) && offs[k] < pos { k = k + 1 }
+  var ws = k
+  while ws > 0 && is_word(cps[ws - 1]) { ws = ws - 1 }
+  var ls = ws
+  while ls > 0 && cps[ls - 1] != '\n' { ls = ls - 1 }
+  let before = slice_cps(cps, ls, ws)
+  let nb = len(before)
+  # the effect row: `!` admits exactly one builtin effect
+  if nb > 0 && before[nb - 1] == '!' {
+    let d: Option[String] = Some("the IO effect — this function may perform input/output")
+    let st: Option[String] = None
+    return [CItem { label: "io", kind: 14, detail: d, sort_text: st }]
+  }
+  if fresh_name_tail(before) || use_line(before) {
+    let none: List[CItem] = []
+    return none
+  }
+  if nb > 0 && before[nb - 1] == '.' {
+    let none: List[CItem] = []
+    return none
+  }
+
+  var it = Items { out: [], seen: set.empty() }
+  # locals of the enclosing function: parameters + binders before the cursor
+  for pr in locals_at(qc, pos) {
+    let (name, detail) = pr
+    it = add(it, name, 6, detail, "0")
+  }
+  for pr in map.entries(qc.entry.cx.fns) {
+    let (name, sig) = pr
+    it = add(it, name, 3, Some(sig_render(qc.entry.cx.adts, qc.entry.cx.traits, sig)), "1")
+  }
+  for pr in map.entries(qc.entry.cx.adts_by_name) {
+    let (_, aid) = pr
+    let a = adt_of(qc.entry.cx.adts, aid)
+    it = add(it, a.name, 7, Some("type " ++ a.name), "1")
+    for c in a.ctors {
+      let detail =
+        if len(c.fields) == 0 {
+          c.name
+        } else {
+          c.name ++ "(" ++
+            join(map(c.fields, fn(f) => f.name ++ ": " ++ ty_show(qc.entry.cx.adts, f.ty)), ", ") ++
+            ")"
+        }
+      it = add(it, c.name, 20, Some(detail), "1")
+    }
+  }
+  for tv in module_traits(qc.entry.m) {
+    it = add(it, tv.name, 8, Some("trait " ++ tv.name ++ "[" ++ tv.tp ++ "]"), "1")
+  }
+  it = add(it, "Ord", 8, Some("trait Ord[T]"), "2")
+  # Both tables: a migrated function is still part of the implicitly-visible
+  # surface, and users cannot tell which side it lives on.
+  for pr in map.entries(qc.bins) {
+    let (name, sig) = pr
+    it = add(it, name, 3, Some(sig_render(qc.entry.cx.adts, qc.entry.cx.traits, sig)), "2")
+  }
+  for pr in map.entries(qc.std.std_fns) {
+    let (name, sig) = pr
+    it = add(it, name, 3, Some(sig_render(qc.entry.cx.adts, qc.entry.cx.traits, sig)), "2")
+  }
+  for t in ["Int", "Float", "Bool", "String", "Unit", "List", "Map", "Set"] {
+    it = add(it, t, 7, Some("builtin type"), "2")
+  }
+  for kw in keywords() {
+    let nd: Option[String] = None
+    it = add(it, kw, 14, nd, "3")
+  }
+  let nd2: Option[String] = None
+  it = add(it, "derive", 14, nd2, "3")
+  it.out
+}

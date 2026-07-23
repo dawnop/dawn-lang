@@ -1,0 +1,703 @@
+# The language server (the Kotlin Server.kt): LSP over stdio until the client
+# disconnects. lsp4j is replaced by a hand-rolled JSON-RPC layer over
+# packages/json — Content-Length framing (bytes, UTF-8), requests answered in
+# order, publishDiagnostics pushed on every document update. One open document
+# = text + line index + fresh analysis, rebuilt on every change.
+
+use std/io
+use std/str
+use std/map
+use std/list
+use std/bytes
+use json/parser
+use json/value.{Json, JNull, JBool, JNum, JInt, JStr, JArr, JObj}
+use json/render.{render}
+use analyze.{Program, CheckedMod, analyze_document, analyze_standalone}
+use stdlib.{StdCtx, load_std}
+use checker.{ModExports, exports_of}
+use lspq.{QCx, Target, find_target}
+use lspc.{CItem, completions_at}
+use lexer.{line_starts_of, utf16_slice}
+use diag.{utf16_len}
+use types.{Sig, builtins, sig_render}
+use ast.{
+  Decl, DFn, DType, DConst, DTrait, DImpl, DUseJava, DUseModule, DTest, FnDecl
+}
+use token.{Diag}
+use fmt
+use java "java.lang.Class"
+use java "java.lang.System"
+use java "java.io.InputStream"
+use java "java.lang.invoke.MethodHandles"
+use java "java.lang.Object"
+use java "java.nio.file.Paths"
+
+# ---- stdin (a static field, reached via a method-handle getter) ----
+
+fn stdin_stream() -> InputStream !io = {
+  let sys = Class.forName("java.lang.System").expect("System")
+  let ins = Class.forName("java.io.InputStream").expect("InputStream")
+  let mh = MethodHandles.publicLookup().expect("lookup")
+    .findStaticGetter(sys, "in", ins).expect("System.in getter")
+  let empty: List[Object] = []
+  cast(mh.invokeWithArguments(empty).expect("stream"))
+}
+
+fn crlf() -> String = from_code_points([13, 10])
+
+# ---- position mapping (offsets are UTF-16 code units, LSP's encoding) ----
+
+fn line_of(ls: List[Int], offset: Int) -> Int = {
+  var lo = 0
+  var hi = len(ls) - 1
+  while lo < hi {
+    let mid = (lo + hi + 1) / 2
+    if ls[mid] <= offset { lo = mid } else { hi = mid - 1 }
+  }
+  lo
+}
+
+## offset → (0-based line, 0-based UTF-16 column), clamped
+fn lsp_position(ls: List[Int], u16len: Int, offset: Int) -> (Int, Int) = {
+  let clamped = if offset < 0 {
+    0
+  } else if offset > u16len {
+    u16len
+  } else {
+    offset
+  }
+  let line = line_of(ls, clamped)
+  (line, clamped - ls[line])
+}
+
+## (0-based line, 0-based UTF-16 column) → offset, clamped to the line
+fn lsp_offset(ls: List[Int], u16len: Int, line0: Int, character: Int) -> Int = {
+  if line0 < 0 { return 0 }
+  if line0 >= len(ls) { return u16len }
+  let line_start = ls[line0]
+  let line_end = if line0 + 1 < len(ls) { ls[line0 + 1] - 1 } else { u16len }
+  let p = line_start + character
+  if p < line_start {
+    line_start
+  } else if p > line_end {
+    line_end
+  } else {
+    p
+  }
+}
+
+fn jrange(ls: List[Int], u16len: Int, lo: Int, hi: Int) -> Json = {
+  let (sl, sc) = lsp_position(ls, u16len, lo)
+  let (el, ec) = lsp_position(ls, u16len, hi)
+  jobj([("start", jpos(sl, sc)), ("end", jpos(el, ec))])
+}
+
+fn jpos(line: Int, ch: Int) -> Json =
+  jobj([("line", JInt(line)), ("character", JInt(ch))])
+
+# ---- json helpers ----
+
+fn jobj(entries: List[(String, Json)]) -> Json = {
+  var m: Map[String, Json] = map.empty()
+  for e in entries {
+    let (k, v) = e
+    m = map.insert(m, k, v)
+  }
+  JObj(m)
+}
+
+fn oget(j: Json, k: String) -> Option[Json] =
+  match j {
+    JObj(m) -> map.get(m, k)
+    _ -> None
+  }
+
+fn ostr(j: Json, k: String) -> String =
+  match oget(j, k) {
+    Some(JStr(s)) -> s
+    _ -> ""
+  }
+
+fn oint(j: Json, k: String) -> Int =
+  match oget(j, k) {
+    Some(JNum(f)) -> to_int(f)
+    Some(JInt(n)) -> n
+    _ -> 0
+  }
+
+## Echo a request id the way lsp4j does: integral numbers render as integers.
+fn echo_id(id: Json) -> Json =
+  match id {
+    JNum(f) -> {
+      let n = to_int(f)
+      if to_float(n) == f { JInt(n) } else { JNum(f) }
+    }
+    _ -> id
+  }
+
+# ---- uri ↔ path ----
+
+fn hex_val(c: Int) -> Int =
+  if c >= '0' && c <= '9' {
+    c - '0'
+  } else if c >= 'a' && c <= 'f' {
+    c - 'a' + 10
+  } else if c >= 'A' && c <= 'F' {
+    c - 'A' + 10
+  } else {
+    -1
+  }
+
+## file:// URI → filesystem path, or None for non-file URIs.
+pub fn uri_to_path(uri: String) -> Option[String] = {
+  if not str.starts_with(uri, "file://") { return None }
+  let rest = str.substring(uri, 7, str.len(uri))
+  # percent-decode into UTF-8 bytes, then decode
+  var bs: List[Int] = []
+  let cps = code_points(rest)
+  var i = 0
+  let n = len(cps)
+  while i < n {
+    let c = cps[i]
+    if c == '%' && i + 2 < n {
+      let h = hex_val(cps[i + 1])
+      let l = hex_val(cps[i + 2])
+      if h >= 0 && l >= 0 {
+        bs = bs ++ [h * 16 + l]
+        i = i + 3
+      } else {
+        bs = bs ++ utf8_bytes(c)
+        i = i + 1
+      }
+    } else {
+      bs = bs ++ utf8_bytes(c)
+      i = i + 1
+    }
+  }
+  Some(utf8_decode(bs))
+}
+
+## Decode UTF-8 bytes to a string (percent-decoded URI bytes).
+fn utf8_decode(bs: List[Int]) -> String = {
+  var cps: List[Int] = []
+  var i = 0
+  let n = len(bs)
+  while i < n {
+    let b0 = bs[i]
+    if b0 < 128 {
+      cps = cps ++ [b0]
+      i = i + 1
+    } else if b0 >= 240 && i + 3 < n {
+      cps = cps ++ [(b0 - 240) * 262144 + (bs[i + 1] - 128) * 4096 +
+          (bs[i + 2] - 128) * 64 + (bs[i + 3] - 128)]
+      i = i + 4
+    } else if b0 >= 224 && i + 2 < n {
+      cps = cps ++ [(b0 - 224) * 4096 + (bs[i + 1] - 128) * 64 + (bs[i + 2] - 128)]
+      i = i + 3
+    } else if b0 >= 192 && i + 1 < n {
+      cps = cps ++ [(b0 - 192) * 64 + (bs[i + 1] - 128)]
+      i = i + 2
+    } else {
+      i = i + 1
+    }
+  }
+  from_code_points(cps)
+}
+
+fn utf8_bytes(cp: Int) -> List[Int] =
+  if cp < 128 {
+    [cp]
+  } else if cp < 2048 {
+    [192 + cp / 64, 128 + cp % 64]
+  } else if cp < 65536 {
+    [224 + cp / 4096, 128 + cp / 64 % 64, 128 + cp % 64]
+  } else {
+    [240 + cp / 262144, 128 + cp / 4096 % 64, 128 + cp / 64 % 64, 128 + cp % 64]
+  }
+
+fn uri_ok(c: Int) -> Bool =
+  (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+  c == '/' || c == '-' || c == '_' || c == '.' || c == '~'
+
+## filesystem path → file:// URI (the Kotlin Path.toUri().toString()).
+pub fn path_to_uri(path: String) -> String = {
+  var out: List[Int] = []
+  for c in code_points(path) {
+    if uri_ok(c) {
+      out = out ++ [c]
+    } else {
+      for b in utf8_bytes(c) {
+        out = out ++ ['%', hex_digit(b / 16), hex_digit(b % 16)]
+      }
+    }
+  }
+  "file://" ++ from_code_points(out)
+}
+
+fn hex_digit(v: Int) -> Int = if v < 10 { '0' + v } else { 'A' + v - 10 }
+
+fn canon(p: String) -> String !io =
+  Paths.get(p).expect("path").toAbsolutePath().expect("abs").normalize().expect("norm")
+  .toString().expect("string")
+
+# ---- one open document ----
+
+type Doc = {
+  uri: String,
+  path: Option[String],
+  text: String,
+  ls: List[Int],
+  u16len: Int,
+  prog: Program,
+  entry: String
+}
+
+fn doc_qcx(st: LspState, d: Doc) -> Option[QCx] = {
+  var entry: Option[CheckedMod] = None
+  var seen = false
+  for cm in d.prog.modules {
+    if not seen && cm.mod_path == d.entry {
+      seen = true
+      entry = Some(cm)
+    }
+  }
+  match entry {
+    Some(e) -> {
+      var env = st.std.exports
+      for cm in d.prog.modules {
+        env = map.insert(env, cm.mod_path, exports_of(cm.cx, cm.m, cm.mod_path, cm.class_name))
+      }
+      Some(QCx {
+        entry: e,
+        prog: d.prog,
+        std: st.std,
+        exports_env: env,
+        bins: st.bins
+      })
+    }
+    None -> None
+  }
+}
+
+## The document's own diagnostics (the Kotlin Analyzed.diagnostics).
+fn doc_diags(d: Doc) -> List[Diag] = {
+  var out: List[Diag] = []
+  match d.path {
+    Some(p) -> {
+      for ld in d.prog.diags {
+        if ld.path == p { out = out ++ [ld.d] }
+      }
+    }
+    None -> {
+      for ld in d.prog.diags { out = out ++ [ld.d] }
+    }
+  }
+  out
+}
+
+type LspState = { std: StdCtx, bins: Map[String, Sig], docs: Map[String, Doc] }
+
+# ---- the server loop ----
+
+pub fn run_lsp(std_dir: String) -> Unit !io = {
+  let std = match load_std(std_dir) {
+    Ok(sc) -> sc
+    Err(e) -> panic("cannot load std from " ++ std_dir ++ ": " ++ e)
+  }
+  var st = LspState { std: std, bins: builtins(), docs: map.empty() }
+  let ins = stdin_stream()
+  var running = true
+  while running {
+    match read_message(ins) {
+      Some(msg) -> { st = handle(st, msg) }
+      None -> { running = false }
+    }
+  }
+}
+
+## One framed message: headers to CRLFCRLF, then Content-Length bytes of JSON.
+fn read_message(ins: InputStream) -> Option[Json] !io = {
+  var header: List[Int] = []
+  var state = 0
+  var eof = false
+  while state < 4 && not eof {
+    let b = ins.read()
+    if b < 0 {
+      eof = true
+    } else {
+      header = header ++ [b]
+      # CR LF CR LF
+      if state == 0 && b == 13 {
+        state = 1
+      } else if state == 1 && b == 10 {
+        state = 2
+      } else if state == 2 && b == 13 {
+        state = 3
+      } else if state == 3 && b == 10 {
+        state = 4
+      } else {
+        state = if b == 13 { 1 } else { 0 }
+      }
+    }
+  }
+  if eof { return None }
+  # header bytes are ASCII
+  let htext = from_code_points(header)
+  var clen = -1
+  for line in str.split(htext, "\n") {
+    let t = str.trim(line)
+    if str.starts_with(t, "Content-Length:") {
+      match parse_int(str.trim(str.substring(t, 15, str.len(t)))) {
+        Some(n) -> { clen = n }
+        None -> ()
+      }
+    }
+  }
+  if clen < 0 { return None }
+  let body = ins.readNBytes(clen).expect("body")
+  if bytes.len(body) < clen { return None }
+  match parser.parse(bytes.decode(body, "UTF-8")) {
+    Ok(j) -> Some(j)
+    Err(_) -> None
+  }
+}
+
+fn send(j: Json) -> Unit !io = {
+  let payload = render(j)
+  let n = bytes.len(bytes.utf8(payload))
+  print("Content-Length: " ++ to_string(n) ++ crlf() ++ crlf() ++ payload)
+}
+
+fn respond(id: Json, result: Json) -> Unit !io =
+  send(jobj([("jsonrpc", JStr("2.0")), ("id", echo_id(id)), ("result", result)]))
+
+fn notify(method: String, params: Json) -> Unit !io =
+  send(jobj([("jsonrpc", JStr("2.0")), ("method", JStr(method)), ("params", params)]))
+
+fn handle(st0: LspState, msg: Json) -> LspState !io = {
+  var st = st0
+  let method = ostr(msg, "method")
+  let id = match oget(msg, "id") {
+    Some(j) -> j
+    None -> JNull
+  }
+  let params = match oget(msg, "params") {
+    Some(j) -> j
+    None -> JNull
+  }
+  if method == "initialize" {
+    respond(id, jobj([("capabilities", jobj([
+      ("textDocumentSync", JInt(1)),
+      ("hoverProvider", JBool(true)),
+      ("completionProvider", jobj([
+        ("resolveProvider", JBool(false)),
+        ("triggerCharacters", JArr([JStr("!")]))
+      ])),
+      ("definitionProvider", JBool(true)),
+      ("documentSymbolProvider", JBool(true)),
+      ("documentFormattingProvider", JBool(true))
+    ]))]))
+  } else if method == "initialized" {
+    ()
+  } else if method == "textDocument/didOpen" {
+    let td = get_or_null(params, "textDocument")
+    st = update_doc(st, ostr(td, "uri"), ostr(td, "text"))
+  } else if method == "textDocument/didChange" {
+    let td = get_or_null(params, "textDocument")
+    match oget(params, "contentChanges") {
+      Some(JArr(changes)) ->
+        match get(changes, 0) {
+          Some(c) -> { st = update_doc(st, ostr(td, "uri"), ostr(c, "text")) }
+          None -> ()
+        }
+      _ -> ()
+    }
+  } else if method == "textDocument/didClose" {
+    let td = get_or_null(params, "textDocument")
+    let uri = ostr(td, "uri")
+    st = LspState { ..st, docs: map.remove(st.docs, uri) }
+    notify("textDocument/publishDiagnostics",
+      jobj([("uri", JStr(uri)), ("diagnostics", JArr([]))]))
+  } else if method == "textDocument/didSave" {
+    ()
+  } else if method == "textDocument/completion" {
+    respond(id, handle_completion(st, params))
+  } else if method == "textDocument/hover" {
+    respond(id, handle_hover(st, params))
+  } else if method == "textDocument/definition" {
+    respond(id, handle_definition(st, params))
+  } else if method == "textDocument/documentSymbol" {
+    respond(id, handle_symbols(st, params))
+  } else if method == "textDocument/formatting" {
+    respond(id, handle_formatting(st, params))
+  } else if method == "shutdown" {
+    respond(id, JNull)
+  } else if method == "exit" {
+    let _ = System.exit(0)
+    ()
+  } else {
+    # a request we do not implement: MethodNotFound; notifications are ignored
+    let has_id = match oget(msg, "id") {
+      Some(_) -> true
+      None -> false
+    }
+    if has_id {
+      send(jobj([("jsonrpc", JStr("2.0")), ("id", echo_id(id)),
+        ("error", jobj([
+          ("code", JInt(0 - 32601)),
+          ("message", JStr("Unsupported request method: " ++ method))
+        ]))]))
+    }
+  }
+  st
+}
+
+fn get_or_null(j: Json, k: String) -> Json =
+  match oget(j, k) {
+    Some(v) -> v
+    None -> JNull
+  }
+
+# ---- document sync ----
+
+fn update_doc(st0: LspState, uri: String, text: String) -> LspState !io = {
+  var st = st0
+  let path = uri_to_path(uri)
+  let (prog, entry) = match path {
+    Some(p) -> analyze_document(p, text, st.std, 100000000)
+    None -> (analyze_standalone("<lsp>", text, st.std, 100000000), "main")
+  }
+  let d = Doc {
+    uri: uri,
+    path: path,
+    text: text,
+    ls: line_starts_of(text),
+    u16len: utf16_len(text),
+    prog: prog,
+    entry: entry
+  }
+  st = LspState { ..st, docs: map.insert(st.docs, uri, d) }
+  var diags: List[Json] = []
+  for dg in doc_diags(d) {
+    let message = if dg.hint != "" { dg.msg ++ "\nhint: " ++ dg.hint } else { dg.msg }
+    diags = diags ++ [jobj([
+      ("range", jrange(d.ls, d.u16len, dg.lo, dg.hi)),
+      ("severity", JInt(1)),
+      ("source", JStr("dawn")),
+      ("message", JStr(message))
+    ])]
+  }
+  notify("textDocument/publishDiagnostics",
+    jobj([("uri", JStr(uri)), ("diagnostics", JArr(diags))]))
+  st
+}
+
+fn doc_of(st: LspState, params: Json) -> Option[Doc] = {
+  let td = get_or_null(params, "textDocument")
+  map.get(st.docs, ostr(td, "uri"))
+}
+
+fn pos_offset(d: Doc, params: Json) -> Int = {
+  let p = get_or_null(params, "position")
+  lsp_offset(d.ls, d.u16len, oint(p, "line"), oint(p, "character"))
+}
+
+# ---- language features ----
+
+fn handle_completion(st: LspState, params: Json) -> Json !io = {
+  match doc_of(st, params) {
+    Some(d) ->
+      match doc_qcx(st, d) {
+        Some(qc) -> {
+          var items: List[Json] = []
+          for it in completions_at(qc, d.text, pos_offset(d, params)) {
+            var fields: List[(String, Json)] = [("label", JStr(it.label))]
+            fields = fields ++ [("kind", JInt(it.kind))]
+            match it.detail {
+              Some(dt) -> { fields = fields ++ [("detail", JStr(dt))] }
+              None -> ()
+            }
+            match it.sort_text {
+              Some(s2) -> { fields = fields ++ [("sortText", JStr(s2))] }
+              None -> ()
+            }
+            items = items ++ [jobj(fields)]
+          }
+          JArr(items)
+        }
+        None -> JArr([])
+      }
+    None -> JArr([])
+  }
+}
+
+fn handle_hover(st: LspState, params: Json) -> Json !io = {
+  match doc_of(st, params) {
+    Some(d) ->
+      match doc_qcx(st, d) {
+        Some(qc) ->
+          match find_target(qc, pos_offset(d, params)) {
+            Some(t) -> jobj([
+              ("contents", jobj([
+                ("kind", JStr("markdown")),
+                ("value", JStr("```dawn\n" ++ t.hover ++ "\n```"))
+              ])),
+              ("range", jrange(d.ls, d.u16len, t.lo, t.hi))
+            ])
+            None -> JNull
+          }
+        None -> JNull
+      }
+    None -> JNull
+  }
+}
+
+fn handle_definition(st: LspState, params: Json) -> Json !io = {
+  match doc_of(st, params) {
+    Some(d) ->
+      match doc_qcx(st, d) {
+        Some(qc) ->
+          match find_target(qc, pos_offset(d, params)) {
+            Some(t) ->
+              match t.def {
+                Some(sp) -> {
+                  let (dlo, dhi) = sp
+                  match location_of(st, d, t.def_path, dlo, dhi) {
+                    Some(loc) -> JArr([loc])
+                    None -> JArr([])
+                  }
+                }
+                None -> JArr([])
+              }
+            None -> JArr([])
+          }
+        None -> JArr([])
+      }
+    None -> JArr([])
+  }
+}
+
+## Resolve a definition site to a Location: a None def_path (or one naming the
+## requesting document) maps through the live buffer; another file maps
+## through its open buffer if the client has it open, else the text on disk.
+fn location_of(st: LspState, d: Doc, def_path: Option[String], lo: Int, hi: Int) -> Option[Json] !io = {
+  let same = match def_path {
+    None -> true
+    Some(dp) ->
+      match d.path {
+        Some(p) -> canon(dp) == canon(p)
+        None -> false
+      }
+  }
+  if same {
+    return Some(jobj([("uri", JStr(d.uri)), ("range", jrange(d.ls, d.u16len, lo, hi))]))
+  }
+  let dp = match def_path {
+    Some(p) -> p
+    None -> return None
+  }
+  let dc = canon(dp)
+  for pr in map.entries(st.docs) {
+    let (u2, d2) = pr
+    match d2.path {
+      Some(p2) ->
+        if canon(p2) == dc {
+          return Some(jobj([("uri", JStr(u2)), ("range", jrange(d2.ls, d2.u16len, lo, hi))]))
+        }
+      None -> ()
+    }
+  }
+  match io.read_file(dp) {
+    Ok(text) -> {
+      let ls = line_starts_of(text)
+      Some(jobj([
+        ("uri", JStr(path_to_uri(dp))),
+        ("range", jrange(ls, utf16_len(text), lo, hi))
+      ]))
+    }
+    Err(_) -> None
+  }
+}
+
+fn handle_symbols(st: LspState, params: Json) -> Json !io = {
+  match doc_of(st, params) {
+    Some(d) ->
+      match doc_qcx(st, d) {
+        Some(qc) -> {
+          var out: List[Json] = []
+          for dc in qc.entry.m.decls {
+            match decl_symbol(qc, d, dc) {
+              Some(j) -> { out = out ++ [j] }
+              None -> ()
+            }
+          }
+          JArr(out)
+        }
+        None -> JArr([])
+      }
+    None -> JArr([])
+  }
+}
+
+## One top-level declaration as a DocumentSymbol (Function=12, Class=5).
+fn decl_symbol(qc: QCx, d: Doc, dc: Decl) -> Option[Json] !io = {
+  let info: Option[(String, Bool, Int, Int, Int, Int)] = match dc {
+    DFn(f) -> Some((f.name, true, f.lo, f.hi, f.nlo, f.nhi))
+    DType(t) -> Some((t.name, false, t.lo, t.hi, t.nlo, t.nhi))
+    DConst(name, _, _, _, lo, hi, nlo, nhi) -> Some((name, false, lo, hi, nlo, nhi))
+    DTrait(name, _, _, _, _, _, lo, hi, nlo, nhi) -> Some((name, false, lo, hi, nlo, nhi))
+    DImpl(trait_name, tlo, thi, _, _, lo, hi) -> Some((trait_name, false, lo, hi, tlo, thi))
+    DUseJava(fqcn, lo, hi, nlo, nhi) -> {
+      let simple = match str.last_index_of(fqcn, ".") {
+        Some(i) -> str.substring(fqcn, i + 1, str.len(fqcn))
+        None -> fqcn
+      }
+      Some((simple, false, lo, hi, nlo, nhi))
+    }
+    DUseModule(segs, _, lo, hi, nlo, nhi) -> Some((segs[len(segs) - 1], false, lo, hi, nlo, nhi))
+    DTest(name, _, lo, hi, nlo, nhi) -> Some((name, false, lo, hi, nlo, nhi))
+  }
+  match info {
+    Some(k) -> {
+      let (name, is_fn, lo, hi, nlo, nhi) = k
+      var fields: List[(String, Json)] = [("name", JStr(name))]
+      if is_fn {
+        match map.get(qc.entry.cx.fns, name) {
+          Some(sig) -> {
+            fields = fields ++
+              [("detail", JStr(sig_render(qc.entry.cx.adts, qc.entry.cx.traits, sig)))]
+          }
+          None -> ()
+        }
+      }
+      fields = fields ++ [
+        ("kind", JInt(if is_fn { 12 } else { 5 })),
+        ("range", jrange(d.ls, d.u16len, lo, hi)),
+        ("selectionRange", jrange(d.ls, d.u16len, nlo, nhi))
+      ]
+      Some(jobj(fields))
+    }
+    None -> None
+  }
+}
+
+fn handle_formatting(st: LspState, params: Json) -> Json !io = {
+  match doc_of(st, params) {
+    Some(d) -> {
+      let formatted = fmt.format(d.text)
+      if formatted == d.text { return JArr([]) }
+      # replace the whole document (fmt only needs a successful lex, so this
+      # works on broken files too)
+      let lines = str.split(d.text, "\n")
+      let last = lines[len(lines) - 1]
+      JArr([jobj([
+        ("range", jobj([
+          ("start", jpos(0, 0)),
+          ("end", jpos(len(lines) - 1, utf16_len(last)))
+        ])),
+        ("newText", JStr(formatted))
+      ])])
+    }
+    None -> JArr([])
+  }
+}

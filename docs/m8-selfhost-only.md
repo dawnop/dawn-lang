@@ -140,6 +140,28 @@ fmt 扫描),字节差异须在提交信息里以 `Emit-Change:` 行声明,未声
   对拍作金样。
 - playground `/check` 是独立端点不走 LSP,不受影响。
 
+### 4.1 落地记录(2026-07-23)
+
+- 三个新模块:`lspq.dawn`(AstQuery:悬停/跳转目标)、`lspc.dawn`(补全)、
+  `lsp.dawn`(JSON-RPC 框架、文档同步、八个 handler);`analyze.dawn` 增
+  缓冲区覆盖(`load_file_over` 线程化 canon path→text)与 `analyze_document`
+  (Kotlin 语义逐条移植,含「`pub use` 不触发项目加载」的正则 quirk)。
+- 结构差异的处理:Kotlin 把解析结果写回 AST 注解,Dawn 是两棵树——查询层
+  **并行走双树**(parse 树出 span 骨架,typed 树出类型/符号/解析结果,按位置
+  配对;错位处退化为仅 parse 走完,span 仍可命中)。Sig 不带 nameSpan/srcPath,
+  定义点从目标模块的 parse AST 反查(owner class → 模块 → decl 名 span)。
+- JSON 层用 `packages/json`(`selfhost/dawn.toml` 增 `[deps] json` 路径依赖;
+  jsonx/jsonread 是 backend-dawn 的东西,不搬);请求 id 回显走 JInt 保号。
+- 验收 = `scripts/selfhost-lsp-diff.sh`:同一份 50 条消息的脚本会话(hover 20、
+  definition 9、completion 9 含全部抑制场景、documentSymbol、didChange 诊断、
+  无文件 buffer、formatting、didClose)分别驱动 `bin/dawn-kotlin lsp` 与
+  `bin/dawn lsp`,JSON 解析后排键重排序列化逐条比对。补全数组额外按
+  (sortText, label) 排序后比:Kotlin 的 functions/types 表是 HashMap,数组序 =
+  JVM 哈希桶序,语义空白(客户端展示序由 sortText 决定)。首轮 50 条中 47 条
+  直接一致,3 条只差该数组序。
+- `scripts/lsp_smoke.sh` 直接过(bin/dawn 已是 selfhost);vscode 扩展 spawn
+  `dawn lsp`,无需改动。CI test job 增 `selfhost lsp golden diff` step。
+
 ## 5. 阶段五:归档 Kotlin
 
 1. 触发条件:selfhost 驱动的 CI 全绿 ≥ 2 个 release,N vs N−1 job 稳定。

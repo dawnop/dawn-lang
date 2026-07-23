@@ -1,0 +1,1671 @@
+# What sits under the cursor (the Kotlin AstQuery): hover text in dawn
+# pseudo-syntax plus an optional definition site, picked as the innermost
+# (smallest) span containing the offset, later offers winning ties. The Kotlin
+# walker reads annotations the checker wrote back onto the parse AST; here the
+# parse tree (spans) and the typed tree (types, symbols, resolutions) are
+# walked in parallel, pairing children positionally. Where the two trees fall
+# out of step (error nodes, desugarings), the walk continues parse-only so
+# spans still resolve.
+
+use std/str
+use std/map
+use std/list
+use ast.{
+  Module, Decl, Expr, Pattern, Stmt, FnDecl, CtorDecl, FieldDecl, MatchArm,
+  CtorArg, PatArg, LambdaParam, Param, TraitMethod, TypeDeclR, ImportName,
+  StrPart, SPText, SPInterp,
+  EInt, EFloat, EBool, EUnit, EStr, EVar, ECall, EApply, EMethod, ELambda,
+  ECtor, EFieldAcc, EListLit, ETupleLit, EPropagate, EUnwrap, EIndex, EReturn,
+  EBreak, EContinue, EComptime, EUnsafePure, EBinary, EUnary, EIf, EMatch,
+  EBlock,
+  PLit, PBind, PWild, PCtor, PTuple, PList,
+  SLet, SLetPat, SLocalFn, SAssign, SExpr, SAssert, SWhile, SFor,
+  DFn, DType, DConst, DTrait, DImpl, DUseJava, DUseModule, DTest,
+  e_lo, e_hi, module_uses, UseView, module_fns, module_impls, module_traits
+}
+use tast.{
+  TExpr, TPat, TStmt, TStrPart, TArm, TFun, TModule, TConst,
+  TSPText, TSPInterp,
+  XInt, XFloat, XBool, XUnit, XStr, XLocal, XFnValue, XCallDyn, XCallBuiltin,
+  XCallFn, XApply, XJava, XLambda, XCtor, XConstRef, XCtorValue, XField,
+  XListLit, XTupleLit, XPropagate, XUnwrap, XIndex, XReturn, XBreak, XContinue,
+  XComptime, XUnsafePure, XBinary, XUnary, XIf, XMatch, XBlock, XError,
+  TPWild, TPBind, TPLit, TPTuple, TPList, TPCtor,
+  TSLet, TSLetPat, TSLocalFn, TSAssign, TSExpr, TSAssert, TSWhile, TSFor,
+  x_lo, x_hi, tex_ty
+}
+use types.{
+  Ty, TyAdt, Sig, Sym, AdtI, CtorI, Adts, Traits, TraitI, MethodSig,
+  ty_show, sig_render, ctor_render, trait_of, adt_of, builtins
+}
+use checker.{Cx, ModExports}
+use analyze.{Program, CheckedMod}
+use stdlib.{StdCtx}
+
+## The document analysis a query runs against: the entry module's checked
+## state plus everything needed to resolve names defined elsewhere.
+pub type QCx = {
+  entry: CheckedMod,
+  prog: Program,
+  std: StdCtx,
+  # mod_path → exports for every module in scope (std + program)
+  exports_env: Map[String, ModExports],
+  # the builtin table, built once
+  bins: Map[String, Sig]
+}
+
+## What sits under the cursor: hover text plus an optional definition site.
+## `def_path` None = the analyzed document itself.
+pub type Target = {
+  lo: Int,
+  hi: Int,
+  hover: String,
+  def: Option[(Int, Int)],
+  def_path: Option[String]
+}
+
+type Q = { offset: Int, best: Option[Target] }
+
+pub fn find_target(qc: QCx, offset: Int) -> Option[Target] = {
+  var q = Q { offset: offset, best: None }
+  for d in qc.entry.m.decls { q = visit_decl(qc, q, d) }
+  q.best
+}
+
+# ---- the offer rule: innermost span containing the offset, later ties win ----
+
+fn offer(q: Q, lo: Int, hi: Int, hover: String, def: Option[(Int, Int)], dp: Option[String]) -> Q = {
+  if q.offset < lo || q.offset >= hi { return q }
+  let t = Target { lo: lo, hi: hi, hover: hover, def: def, def_path: dp }
+  match q.best {
+    None -> Q { ..q, best: Some(t) }
+    Some(b) -> if hi - lo <= b.hi - b.lo { Q { ..q, best: Some(t) } } else { q }
+  }
+}
+
+fn no_def() -> (Option[(Int, Int)], Option[String]) = (None, None)
+
+# ---- name resolution helpers ----
+
+## local -> std -> builtin, the same order the checker resolves names in.
+fn sig_of(qc: QCx, name: String) -> Option[Sig] =
+  match map.get(qc.entry.cx.fns, name) {
+    Some(s) -> Some(s)
+    None ->
+      match map.get(qc.std.std_fns, name) {
+        Some(s) -> Some(s)
+        None -> map.get(qc.bins, name)
+      }
+  }
+
+## The Sig behind a resolved call: the owning module's surface.
+fn sig_by_owner(qc: QCx, owner: Option[String], name: String, trait_id: Option[Int]) -> Option[Sig] = {
+  match trait_id {
+    Some(tid) -> {
+      let tr = trait_of(qc.entry.cx.traits, tid)
+      for pr in tr.methods {
+        let (mn, ms) = pr
+        if mn == name { return Some(ms.sig) }
+      }
+      return None
+    }
+    None -> ()
+  }
+  match owner {
+    None -> sig_of(qc, name)
+    Some(o) -> {
+      if o == qc.entry.class_name { return map.get(qc.entry.cx.fns, name) }
+      for pr in map.entries(qc.exports_env) {
+        let (_, exp) = pr
+        if exp.class_name == o {
+          return map.get(exp.fns, name)
+        }
+      }
+      sig_of(qc, name)
+    }
+  }
+}
+
+## The parse AST of the module whose JVM class is `owner`, with its file path
+## (None = the entry document or a std module).
+fn module_ast_by_class(qc: QCx, owner: String) -> Option[(Module, Option[String])] = {
+  if owner == qc.entry.class_name { return Some((qc.entry.m, None)) }
+  for cm in qc.prog.modules {
+    if cm.class_name == owner { return Some((cm.m, Some(cm.path))) }
+  }
+  for tr in qc.std.srcs {
+    let (mp, _, m) = tr
+    if mp == owner { return Some((m, None)) }
+  }
+  None
+}
+
+fn fn_decl_span(m: Module, name: String) -> Option[(Int, Int)] = {
+  for d in m.decls {
+    match d {
+      DFn(f) -> if f.name == name { return Some((f.nlo, f.nhi)) }
+      _ -> ()
+    }
+  }
+  None
+}
+
+## Definition site of a signature (the Kotlin sig.nameSpan / sig.srcPath).
+fn def_of_sig(qc: QCx, s: Sig) -> (Option[(Int, Int)], Option[String]) = {
+  match s.trait_id {
+    Some(tid) -> return def_of_trait_method(qc, tid, s.name)
+    None -> ()
+  }
+  if s.is_builtin { return no_def() }
+  let owner = match s.owner {
+    Some(o) -> o
+    None -> qc.entry.class_name
+  }
+  match module_ast_by_class(qc, owner) {
+    Some(pr) -> {
+      let (m, dp) = pr
+      match fn_decl_span(m, s.name) {
+        Some(sp) -> (Some(sp), dp)
+        None -> no_def()
+      }
+    }
+    None -> no_def()
+  }
+}
+
+fn def_of_trait_method(qc: QCx, tid: Int, mname: String) -> (Option[(Int, Int)], Option[String]) = {
+  let tr = trait_of(qc.entry.cx.traits, tid)
+  let owner = match tr.owner {
+    Some(o) -> o
+    None -> qc.entry.class_name
+  }
+  match module_ast_by_class(qc, owner) {
+    Some(pr) -> {
+      let (m, dp) = pr
+      for d in m.decls {
+        match d {
+          DTrait(name, _, _, _, methods, _, _, _, _, _) ->
+            if name == tr.name {
+              for tm in methods {
+                if tm.name == mname { return (Some((tm.nlo, tm.nhi)), dp) }
+              }
+            }
+          _ -> ()
+        }
+      }
+      no_def()
+    }
+    None -> no_def()
+  }
+}
+
+## The DType declaration behind an ADT id, with the defining file.
+fn type_decl_of(qc: QCx, aid: Int) -> Option[(TypeDeclR, Option[String])] = {
+  let a = adt_of(qc.entry.cx.adts, aid)
+  let owner = match a.owner {
+    Some(o) -> o
+    None -> qc.entry.class_name
+  }
+  match module_ast_by_class(qc, owner) {
+    Some(pr) -> {
+      let (m, dp) = pr
+      for d in m.decls {
+        match d {
+          DType(t) -> if t.name == a.name { return Some((t, dp)) }
+          _ -> ()
+        }
+      }
+      None
+    }
+    None -> None
+  }
+}
+
+fn def_of_type(qc: QCx, aid: Int) -> (Option[(Int, Int)], Option[String]) =
+  match type_decl_of(qc, aid) {
+    Some(pr) -> {
+      let (t, dp) = pr
+      (Some((t.nlo, t.nhi)), dp)
+    }
+    None -> no_def()
+  }
+
+fn def_of_ctor(qc: QCx, aid: Int, cname: String) -> (Option[(Int, Int)], Option[String]) =
+  match type_decl_of(qc, aid) {
+    Some(pr) -> {
+      let (t, dp) = pr
+      for c in t.ctors {
+        if c.name == cname { return (Some((c.nlo, c.nhi)), dp) }
+      }
+      no_def()
+    }
+    None -> no_def()
+  }
+
+fn def_of_field(qc: QCx, aid: Int, fi: Int) -> (Option[(Int, Int)], Option[String]) =
+  match type_decl_of(qc, aid) {
+    Some(pr) -> {
+      let (t, dp) = pr
+      if len(t.ctors) > 0 {
+        match get(t.ctors[0].fields, fi) {
+          Some(f) -> return (Some((f.lo, f.hi)), dp)
+          None -> ()
+        }
+      }
+      no_def()
+    }
+    None -> no_def()
+  }
+
+## Definition site of a constant by name, searched where the checker found it.
+fn def_of_const(qc: QCx, name: String) -> (Option[(Int, Int)], Option[String]) = {
+  match const_decl_span(qc.entry.m, name) {
+    Some(sp) -> return (Some(sp), None)
+    None -> ()
+  }
+  match map.get(qc.entry.cx.imported_names, name) {
+    Some(mp) -> def_of_const_in(qc, mp, name)
+    None -> no_def()
+  }
+}
+
+fn def_of_const_in(qc: QCx, mod_path: String, name: String) -> (Option[(Int, Int)], Option[String]) = {
+  for cm in qc.prog.modules {
+    if cm.mod_path == mod_path {
+      match const_decl_span(cm.m, name) {
+        Some(sp) -> return (Some(sp), Some(cm.path))
+        None -> return no_def()
+      }
+    }
+  }
+  for tr in qc.std.srcs {
+    let (mp, _, m) = tr
+    if mp == mod_path {
+      match const_decl_span(m, name) {
+        Some(sp) -> return (Some(sp), None)
+        None -> return no_def()
+      }
+    }
+  }
+  no_def()
+}
+
+fn const_decl_span(m: Module, name: String) -> Option[(Int, Int)] = {
+  for d in m.decls {
+    match d {
+      DConst(n, _, _, _, _, _, nlo, nhi) -> if n == name { return Some((nlo, nhi)) }
+      _ -> ()
+    }
+  }
+  None
+}
+
+# ---- typed-tree pairing ----
+
+fn syms_of(qc: QCx) -> Map[Int, Sym] = qc.entry.tm.syms
+
+fn sym_get(qc: QCx, id: Int) -> Option[Sym] = map.get(qc.entry.tm.syms, id)
+
+## The TFun whose body starts where this parse body starts (fns, tests, impl
+## methods and trait defaults all live in tm.fns/tm.tests).
+fn tfun_by_body(qc: QCx, body: Expr) -> Option[TFun] = {
+  let lo = e_lo(body)
+  let hi = e_hi(body)
+  for tf in qc.entry.tm.fns {
+    if x_lo(tf.body) == lo && x_hi(tf.body) == hi { return Some(tf) }
+  }
+  for tf in qc.entry.tm.tests {
+    if x_lo(tf.body) == lo && x_hi(tf.body) == hi { return Some(tf) }
+  }
+  None
+}
+
+fn show_ty(qc: QCx, t: Ty) -> String = ty_show(qc.entry.cx.adts, t)
+
+fn render_sig(qc: QCx, s: Sig) -> String =
+  sig_render(qc.entry.cx.adts, qc.entry.cx.traits, s)
+
+fn render_ctor(qc: QCx, c: CtorI) -> String = ctor_render(qc.entry.cx.adts, c)
+
+# ---- declarations ----
+
+fn visit_decl(qc: QCx, q0: Q, d: Decl) -> Q = {
+  var q = q0
+  match d {
+    DFn(f) -> {
+      q = visit_fn_decl(qc, q, f)
+    }
+    DTest(name, body, _, _, _, _) -> {
+      let tf = tfun_by_body(qc, body)
+      q = walk_e(qc, q, body, tf_body(tf))
+    }
+    DConst(name, _, _, init, _, _, nlo, nhi) -> {
+      match map.get(qc.entry.cx.consts, name) {
+        Some(t) -> {
+          q = offer(q, nlo, nhi, "const " ++ name ++ ": " ++ show_ty(qc, t),
+            Some((nlo, nhi)), None)
+        }
+        None -> ()
+      }
+      q = walk_e(qc, q, init, tconst_init(qc, name))
+    }
+    DUseJava(fqcn, _, _, nlo, nhi) -> {
+      q = offer(q, nlo, nhi, "use java \"" ++ fqcn ++ "\"", Some((nlo, nhi)), None)
+    }
+    DUseModule(segs, selective, _, _, nlo, nhi) -> {
+      let path = join(segs, "/")
+      let exp = map.get(qc.exports_env, path)
+      let (udef, upath) = match exp {
+        Some(e) ->
+          match e.src_path {
+            Some(sp) -> {
+              let d0: Option[(Int, Int)] = Some((0, 0))
+              (d0, Some(sp))
+            }
+            None -> no_def()
+          }
+        None -> no_def()
+      }
+      q = offer(q, nlo, nhi, "use " ++ path, udef, upath)
+      match exp {
+        Some(e) ->
+          match selective {
+            Some(names) -> {
+              for imp in names { q = visit_selective(qc, q, e, imp) }
+            }
+            None -> ()
+          }
+        None -> ()
+      }
+    }
+    DTrait(name, tp, _, _, methods, _, _, _, nlo, nhi) -> {
+      q = offer(q, nlo, nhi, "trait " ++ name ++ "[" ++ tp ++ "]", Some((nlo, nhi)), None)
+      let tid = map.get(qc.entry.cx.traits_by_name, name)
+      for m in methods {
+        match tid {
+          Some(t) -> {
+            let tr = trait_of(qc.entry.cx.traits, t)
+            for pr in tr.methods {
+              let (mn, ms) = pr
+              if mn == m.name {
+                q = offer(q, m.nlo, m.nhi, render_sig(qc, ms.sig), Some((m.nlo, m.nhi)), None)
+              }
+            }
+          }
+          None -> ()
+        }
+        match m.body {
+          Some(b) -> { q = walk_e(qc, q, b, tf_body(tfun_by_body(qc, b))) }
+          None -> ()
+        }
+      }
+    }
+    DImpl(trait_name, tlo, thi, _, methods, _, _) -> {
+      q = offer(q, tlo, thi, "impl " ++ trait_name ++ "[...]", Some((tlo, thi)), None)
+      for m in methods { q = visit_fn_decl(qc, q, m) }
+    }
+    DType(t) -> {
+      let info = map.get(qc.entry.cx.adts_by_name, t.name)
+      let summary = match info {
+        Some(aid) -> {
+          let a = adt_of(qc.entry.cx.adts, aid)
+          join(map(a.ctors, fn(c) => c.name), " | ")
+        }
+        None -> ""
+      }
+      let derives =
+        if len(t.derives) > 0 {
+          " derive " ++ join(map(t.derives, fn(b) => b.name), ", ")
+        } else {
+          ""
+        }
+      q = offer(q, t.nlo, t.nhi, "type " ++ t.name ++ " = " ++ summary ++ derives,
+        Some((t.nlo, t.nhi)), None)
+      match info {
+        Some(aid) -> {
+          let a = adt_of(qc.entry.cx.adts, aid)
+          var ci = 0
+          for c in t.ctors {
+            match get(a.ctors, ci) {
+              Some(cinfo) -> {
+                q = offer(q, c.nlo, c.nhi, render_ctor(qc, cinfo), Some((c.nlo, c.nhi)), None)
+                var fi = 0
+                for f in c.fields {
+                  match get(cinfo.fields, fi) {
+                    Some(finfo) -> {
+                      q = offer(q, f.lo, f.hi, f.name ++ ": " ++ show_ty(qc, finfo.ty),
+                        Some((f.lo, f.hi)), None)
+                    }
+                    None -> ()
+                  }
+                  fi = fi + 1
+                }
+              }
+              None -> ()
+            }
+            ci = ci + 1
+          }
+        }
+        None -> ()
+      }
+    }
+  }
+  q
+}
+
+fn tf_body(tf: Option[TFun]) -> Option[TExpr] =
+  match tf {
+    Some(f) -> Some(f.body)
+    None -> None
+  }
+
+fn tconst_init(qc: QCx, name: String) -> Option[TExpr] = {
+  for tc in qc.entry.tm.consts {
+    if tc.name == name { return Some(tc.init) }
+  }
+  None
+}
+
+fn visit_fn_decl(qc: QCx, q0: Q, f: FnDecl) -> Q = {
+  var q = q0
+  match sig_of(qc, f.name) {
+    Some(s) -> { q = offer(q, f.nlo, f.nhi, render_sig(qc, s), Some((f.nlo, f.nhi)), None) }
+    None -> ()
+  }
+  let tf = tfun_by_body(qc, f.body)
+  match tf {
+    Some(t) -> {
+      var i = 0
+      for p in f.params {
+        match get(t.param_syms, i) {
+          Some(sid) ->
+            match sym_get(qc, sid) {
+              Some(sym) -> {
+                q = offer(q, p.lo, p.hi, p.name ++ ": " ++ show_ty(qc, sym.ty),
+                  Some((p.lo, p.hi)), None)
+              }
+              None -> ()
+            }
+          None -> ()
+        }
+        i = i + 1
+      }
+    }
+    None -> ()
+  }
+  walk_e(qc, q, f.body, tf_body(tf))
+}
+
+fn visit_selective(qc: QCx, q0: Q, exp: ModExports, imp: ImportName) -> Q = {
+  var q = q0
+  match map.get(exp.fns, imp.name) {
+    Some(s) -> {
+      let (dsp, dp) = def_of_sig(qc, s)
+      q = offer(q, imp.lo, imp.hi, render_sig(qc, s), dsp, dp)
+    }
+    None -> ()
+  }
+  match map.get(exp.types_by_name, imp.name) {
+    Some(aid) -> {
+      let a = adt_of(qc.entry.cx.adts, aid)
+      let summary = join(map(a.ctors, fn(c) => c.name), " | ")
+      let (dsp, dp) = def_of_type(qc, aid)
+      q = offer(q, imp.lo, imp.hi, "type " ++ a.name ++ " = " ++ summary, dsp, dp)
+    }
+    None -> ()
+  }
+  match map.get(exp.ctors, imp.name) {
+    Some(k) -> {
+      let (aid, ci) = k
+      let a = adt_of(qc.entry.cx.adts, aid)
+      match get(a.ctors, ci) {
+        Some(c) -> {
+          let (dsp, dp) = def_of_ctor(qc, aid, c.name)
+          q = offer(q, imp.lo, imp.hi, render_ctor(qc, c), dsp, dp)
+        }
+        None -> ()
+      }
+    }
+    None -> ()
+  }
+  match map.get(exp.consts, imp.name) {
+    Some(t) -> {
+      let (dsp, dp) = def_of_const_in(qc, exp.mod_path, imp.name)
+      q = offer(q, imp.lo, imp.hi, "const " ++ imp.name ++ ": " ++ show_ty(qc, t), dsp, dp)
+    }
+    None -> ()
+  }
+  q
+}
+
+# ---- expressions ----
+
+fn walk_e(qc: QCx, q0: Q, pe: Expr, te: Option[TExpr]) -> Q = {
+  var q = q0
+  # generic fallback: the expression's own type
+  match te {
+    Some(t) -> { q = offer(q, e_lo(pe), e_hi(pe), show_ty(qc, tex_ty(t)), None, None) }
+    None -> ()
+  }
+  match pe {
+    EVar(name, lo, hi) ->
+      match te {
+        Some(XLocal(sid, _, _, _, _)) ->
+          match sym_get(qc, sid) {
+            Some(sym) -> {
+              let kw = if sym.mutable { "var" } else { "let" }
+              q = offer(q, lo, hi, kw ++ " " ++ sym.name ++ ": " ++ show_ty(qc, sym.ty),
+                Some((sym.dlo, sym.dhi)), None)
+            }
+            None -> ()
+          }
+        Some(XFnValue(owner, fname, _, _, _, _)) ->
+          match sig_by_owner(qc, owner, fname, None) {
+            Some(s) -> {
+              let (dsp, dp) = def_of_sig(qc, s)
+              q = offer(q, lo, hi, render_sig(qc, s), dsp, dp)
+            }
+            None -> ()
+          }
+        _ -> ()
+      }
+    ELambda(params, body, _, _) ->
+      match te {
+        Some(XLambda(psyms, _, tbody, _, _, _, _)) -> {
+          var i = 0
+          for p in params {
+            match get(psyms, i) {
+              Some(sid) ->
+                match sym_get(qc, sid) {
+                  Some(sym) -> {
+                    q = offer(q, p.lo, p.hi, sym.name ++ ": " ++ show_ty(qc, sym.ty),
+                      Some((p.lo, p.hi)), None)
+                  }
+                  None -> ()
+                }
+              None -> ()
+            }
+            i = i + 1
+          }
+          q = walk_e(qc, q, body, Some(tbody))
+        }
+        _ -> { q = walk_e(qc, q, body, None) }
+      }
+    EApply(target, args, _, _) ->
+      match te {
+        Some(XApply(tt, targs, _, _, _)) -> {
+          q = walk_e(qc, q, target, Some(tt))
+          q = walk_list(qc, q, args, opt_list(targs))
+        }
+        _ -> {
+          q = walk_e(qc, q, target, None)
+          q = walk_list(qc, q, args, no_texprs(args))
+        }
+      }
+    EIndex(target, index, _, _) ->
+      match te {
+        Some(XIndex(tt, ti, _, _, _, _)) -> {
+          q = walk_e(qc, q, target, Some(tt))
+          q = walk_e(qc, q, index, Some(ti))
+        }
+        _ -> {
+          q = walk_e(qc, q, target, None)
+          q = walk_e(qc, q, index, None)
+        }
+      }
+    EReturn(v, _, _) ->
+      match v {
+        Some(e) ->
+          match te {
+            Some(XReturn(tv, _, _)) -> { q = walk_e(qc, q, e, tv) }
+            _ -> { q = walk_e(qc, q, e, None) }
+          }
+        None -> ()
+      }
+    EMethod(target, name, args, nlo, nhi, _, _) -> {
+      # module-qualified (alias.fn) and UFCS calls carry the resolved sig
+      match te {
+        Some(XCallFn(owner, fname, targs, _, trait_id, _, _, _)) -> {
+          if fname == name {
+            match sig_by_owner(qc, owner, fname, trait_id) {
+              Some(s) -> {
+                let (dsp, dp) = def_of_sig(qc, s)
+                q = offer(q, nlo, nhi, render_sig(qc, s), dsp, dp)
+              }
+              None -> ()
+            }
+          }
+          q = walk_method_children(qc, q, target, args, targs)
+        }
+        Some(XCallBuiltin(bname, targs, _, _, _, _)) -> {
+          if bname == name {
+            match map.get(qc.bins, name) {
+              Some(s) -> { q = offer(q, nlo, nhi, render_sig(qc, s), None, None) }
+              None -> ()
+            }
+          }
+          q = walk_method_children(qc, q, target, args, targs)
+        }
+        Some(XJava(call, _, _, _)) -> {
+          match sig_of(qc, name) {
+            Some(s) -> {
+              let (dsp, dp) = def_of_sig(qc, s)
+              q = offer(q, nlo, nhi, render_sig(qc, s), dsp, dp)
+            }
+            None -> ()
+          }
+          match call.target {
+            Some(tt) -> { q = walk_e(qc, q, target, Some(tt)) }
+            None -> { q = walk_e(qc, q, target, None) }
+          }
+          q = walk_list(qc, q, args, opt_list(call.args))
+        }
+        _ -> {
+          match sig_of(qc, name) {
+            Some(s) -> {
+              let (dsp, dp) = def_of_sig(qc, s)
+              q = offer(q, nlo, nhi, render_sig(qc, s), dsp, dp)
+            }
+            None -> ()
+          }
+          q = walk_e(qc, q, target, None)
+          q = walk_list(qc, q, args, no_texprs(args))
+        }
+      }
+    }
+    EListLit(elems, _, _) ->
+      match te {
+        Some(XListLit(telems, _, _, _)) -> { q = walk_list(qc, q, elems, opt_list(telems)) }
+        _ -> { q = walk_list(qc, q, elems, no_texprs(elems)) }
+      }
+    ETupleLit(elems, _, _) ->
+      match te {
+        Some(XTupleLit(telems, _, _, _)) -> { q = walk_list(qc, q, elems, opt_list(telems)) }
+        _ -> { q = walk_list(qc, q, elems, no_texprs(elems)) }
+      }
+    ECall(callee, args, clo, chi, _, _) -> {
+      match te {
+        Some(XCallFn(owner, fname, targs, _, trait_id, _, _, _)) -> {
+          match sig_by_owner(qc, owner, fname, trait_id) {
+            Some(s) -> {
+              let (dsp, dp) = def_of_sig(qc, s)
+              q = offer(q, clo, chi, render_sig(qc, s), dsp, dp)
+            }
+            None -> ()
+          }
+          q = walk_call_args(qc, q, args, targs)
+        }
+        Some(XCallBuiltin(bname, targs, _, _, _, _)) -> {
+          match map.get(qc.bins, bname) {
+            Some(s) -> { q = offer(q, clo, chi, render_sig(qc, s), None, None) }
+            None -> ()
+          }
+          q = walk_call_args(qc, q, args, targs)
+        }
+        Some(XCallDyn(_, _, targs, _, _, _)) -> {
+          match sig_of(qc, callee) {
+            Some(s) -> {
+              let (dsp, dp) = def_of_sig(qc, s)
+              q = offer(q, clo, chi, render_sig(qc, s), dsp, dp)
+            }
+            None -> ()
+          }
+          q = walk_call_args(qc, q, args, targs)
+        }
+        _ -> {
+          match sig_of(qc, callee) {
+            Some(s) -> {
+              let (dsp, dp) = def_of_sig(qc, s)
+              q = offer(q, clo, chi, render_sig(qc, s), dsp, dp)
+            }
+            None -> ()
+          }
+          q = walk_list(qc, q, args, no_texprs(args))
+        }
+      }
+    }
+    ECtor(name, args, spread, _, clo, chi, _, _) ->
+      match te {
+        Some(XCtor(aid, ci, written, _, tspread, _, _, _)) -> {
+          let a = adt_of(qc.entry.cx.adts, aid)
+          match get(a.ctors, ci) {
+            Some(c) -> {
+              let (dsp, dp) = def_of_ctor(qc, aid, c.name)
+              q = offer(q, clo, chi, render_ctor(qc, c), dsp, dp)
+            }
+            None -> ()
+          }
+          match spread {
+            Some(sp) ->
+              match tspread {
+                Some(tsp) -> { q = walk_e(qc, q, sp, Some(tsp)) }
+                None -> { q = walk_e(qc, q, sp, None) }
+              }
+            None -> ()
+          }
+          var i = 0
+          for a2 in args {
+            q = walk_e(qc, q, a2.e, opt_get(written, i))
+            i = i + 1
+          }
+        }
+        Some(XConstRef(cname, _, _, _)) -> {
+          match map.get(qc.entry.cx.consts, cname) {
+            Some(t) -> {
+              let (dsp, dp) = def_of_const(qc, cname)
+              q = offer(q, clo, chi, "const " ++ cname ++ ": " ++ show_ty(qc, t), dsp, dp)
+            }
+            None -> ()
+          }
+        }
+        Some(XCtorValue(aid, ci, _, _, _)) -> {
+          let a = adt_of(qc.entry.cx.adts, aid)
+          match get(a.ctors, ci) {
+            Some(c) -> {
+              let (dsp, dp) = def_of_ctor(qc, aid, c.name)
+              q = offer(q, clo, chi, render_ctor(qc, c), dsp, dp)
+            }
+            None -> ()
+          }
+        }
+        _ -> {
+          match spread {
+            Some(sp) -> { q = walk_e(qc, q, sp, None) }
+            None -> ()
+          }
+          for a2 in args { q = walk_e(qc, q, a2.e, None) }
+        }
+      }
+    EFieldAcc(target, _, flo, fhi, _, _) ->
+      match te {
+        Some(XField(tt, fi, _, _, _)) -> {
+          q = walk_e(qc, q, target, Some(tt))
+          match tex_ty(tt) {
+            TyAdt(aid, _) -> {
+              let a = adt_of(qc.entry.cx.adts, aid)
+              if a.is_record && len(a.ctors) > 0 {
+                match get(a.ctors[0].fields, fi) {
+                  Some(f) -> {
+                    let (dsp, dp) = def_of_field(qc, aid, fi)
+                    q = offer(q, flo, fhi, f.name ++ ": " ++ show_ty(qc, f.ty), dsp, dp)
+                  }
+                  None -> ()
+                }
+              }
+            }
+            _ -> ()
+          }
+        }
+        _ -> { q = walk_e(qc, q, target, None) }
+      }
+    EStr(parts, _, _) -> {
+      let no_parts: List[Option[TExpr]] = []
+      let tparts = match te {
+        Some(XStr(tp, _, _)) -> interp_texprs(tp)
+        _ -> no_parts
+      }
+      var i = 0
+      for p in parts {
+        match p {
+          SPInterp(e) -> {
+            q = walk_e(qc, q, e, opt_get2(tparts, i))
+            i = i + 1
+          }
+          SPText(_) -> ()
+        }
+      }
+    }
+    EComptime(body, _, _) ->
+      match te {
+        Some(XComptime(tb, _, _, _)) -> { q = walk_e(qc, q, body, Some(tb)) }
+        _ -> { q = walk_e(qc, q, body, None) }
+      }
+    EUnsafePure(body, _, _) ->
+      match te {
+        Some(XUnsafePure(tb, _, _, _)) -> { q = walk_e(qc, q, body, Some(tb)) }
+        _ -> { q = walk_e(qc, q, body, None) }
+      }
+    EPropagate(operand, _, _) ->
+      match te {
+        Some(XPropagate(t, _, _, _)) -> { q = walk_e(qc, q, operand, Some(t)) }
+        _ -> { q = walk_e(qc, q, operand, None) }
+      }
+    EUnwrap(operand, _, _) ->
+      match te {
+        Some(XUnwrap(t, _, _, _, _)) -> { q = walk_e(qc, q, operand, Some(t)) }
+        _ -> { q = walk_e(qc, q, operand, None) }
+      }
+    EBinary(_, left, right, _, _, _, _) ->
+      match te {
+        Some(XBinary(_, tl, tr2, _, _, _, _, _, _)) -> {
+          q = walk_e(qc, q, left, Some(tl))
+          q = walk_e(qc, q, right, Some(tr2))
+        }
+        _ -> {
+          q = walk_e(qc, q, left, None)
+          q = walk_e(qc, q, right, None)
+        }
+      }
+    EUnary(_, operand, _, _) ->
+      match te {
+        Some(XUnary(_, t, _, _, _)) -> { q = walk_e(qc, q, operand, Some(t)) }
+        _ -> { q = walk_e(qc, q, operand, None) }
+      }
+    EIf(cond, thn, els, _, _) ->
+      match te {
+        Some(XIf(tc, tt, tels, _, _, _)) -> {
+          q = walk_e(qc, q, cond, Some(tc))
+          q = walk_e(qc, q, thn, Some(tt))
+          match els {
+            Some(e) -> { q = walk_e(qc, q, e, tels) }
+            None -> ()
+          }
+        }
+        _ -> {
+          q = walk_e(qc, q, cond, None)
+          q = walk_e(qc, q, thn, None)
+          match els {
+            Some(e) -> { q = walk_e(qc, q, e, None) }
+            None -> ()
+          }
+        }
+      }
+    EMatch(scrut, arms, _, _) -> {
+      let tarms = match te {
+        Some(XMatch(ts, ta, _, _, _)) -> {
+          q = walk_e(qc, q, scrut, Some(ts))
+          ta
+        }
+        _ -> {
+          q = walk_e(qc, q, scrut, None)
+          let none: List[TArm] = []
+          none
+        }
+      }
+      var i = 0
+      for arm in arms {
+        let ta = get(tarms, i)
+        var j = 0
+        for p in arm.pats {
+          let tp: Option[TPat] = match ta {
+            Some(a) -> get(a.pats, j)
+            None -> None
+          }
+          q = visit_pat(qc, q, p, tp)
+          j = j + 1
+        }
+        match arm.guard {
+          Some(g) -> {
+            let tg: Option[TExpr] = match ta {
+              Some(a) -> a.guard
+              None -> None
+            }
+            q = walk_e(qc, q, g, tg)
+          }
+          None -> ()
+        }
+        let tb: Option[TExpr] = match ta {
+          Some(a) -> Some(a.body)
+          None -> None
+        }
+        q = walk_e(qc, q, arm.body, tb)
+        i = i + 1
+      }
+    }
+    EBlock(stmts, tail, _, _) -> {
+      let (tstmts, ttail) = match te {
+        Some(XBlock(ts, tt, _, _, _)) -> (opt_stmts(ts), tt)
+        _ -> {
+          let none: List[Option[TStmt]] = []
+          let notail: Option[TExpr] = None
+          (none, notail)
+        }
+      }
+      var i = 0
+      for s in stmts {
+        q = visit_stmt(qc, q, s, opt_get3(tstmts, i))
+        i = i + 1
+      }
+      match tail {
+        Some(e) -> { q = walk_e(qc, q, e, ttail) }
+        None -> ()
+      }
+    }
+    _ -> ()
+  }
+  q
+}
+
+## UFCS/method children: the typed args carry the receiver first when the
+## counts line up; otherwise walk parse-only.
+fn walk_method_children(qc: QCx, q0: Q, target: Expr, args: List[Expr], targs: List[TExpr]) -> Q = {
+  var q = q0
+  if len(targs) == len(args) + 1 {
+    q = walk_e(qc, q, target, get(targs, 0))
+    var i = 0
+    for a in args {
+      q = walk_e(qc, q, a, get(targs, i + 1))
+      i = i + 1
+    }
+  } else {
+    q = walk_e(qc, q, target, None)
+    q = walk_list(qc, q, args, no_texprs(args))
+  }
+  q
+}
+
+fn walk_call_args(qc: QCx, q0: Q, args: List[Expr], targs: List[TExpr]) -> Q = {
+  var q = q0
+  if len(targs) == len(args) {
+    var i = 0
+    for a in args {
+      q = walk_e(qc, q, a, get(targs, i))
+      i = i + 1
+    }
+  } else {
+    q = walk_list(qc, q, args, no_texprs(args))
+  }
+  q
+}
+
+fn walk_list(qc: QCx, q0: Q, es: List[Expr], tes: List[Option[TExpr]]) -> Q = {
+  var q = q0
+  var i = 0
+  for e in es {
+    q = walk_e(qc, q, e, opt_get2(tes, i))
+    i = i + 1
+  }
+  q
+}
+
+fn opt_list(tes: List[TExpr]) -> List[Option[TExpr]] = map(tes, fn(t) => Some(t))
+
+fn no_texprs(es: List[Expr]) -> List[Option[TExpr]] = {
+  var out: List[Option[TExpr]] = []
+  let n: Option[TExpr] = None
+  for _e in es { out = out ++ [n] }
+  out
+}
+
+fn opt_stmts(ts: List[TStmt]) -> List[Option[TStmt]] = map(ts, fn(t) => Some(t))
+
+fn opt_get(xs: List[TExpr], i: Int) -> Option[TExpr] = get(xs, i)
+
+fn opt_get2(xs: List[Option[TExpr]], i: Int) -> Option[TExpr] =
+  match get(xs, i) {
+    Some(o) -> o
+    None -> None
+  }
+
+fn opt_get3(xs: List[Option[TStmt]], i: Int) -> Option[TStmt] =
+  match get(xs, i) {
+    Some(o) -> o
+    None -> None
+  }
+
+fn interp_texprs(parts: List[TStrPart]) -> List[Option[TExpr]] = {
+  var out: List[Option[TExpr]] = []
+  for p in parts {
+    match p {
+      TSPInterp(e) -> { out = out ++ [Some(e)] }
+      TSPText(_) -> ()
+    }
+  }
+  out
+}
+
+# ---- patterns ----
+
+fn visit_pat(qc: QCx, q0: Q, pp: Pattern, tp: Option[TPat]) -> Q = {
+  var q = q0
+  match pp {
+    PBind(name, lo, hi) ->
+      match tp {
+        Some(TPBind(sid, _)) ->
+          match sym_get(qc, sid) {
+            Some(sym) -> {
+              q = offer(q, lo, hi, sym.name ++ ": " ++ show_ty(qc, sym.ty), Some((lo, hi)), None)
+            }
+            None -> ()
+          }
+        _ -> ()
+      }
+    PCtor(name, args, _, _, nlo, nhi, _, _) -> {
+      let resolved: Option[(Int, Int, List[Option[TPat]])] = match tp {
+        Some(TPCtor(aid, ci, fps)) -> Some((aid, ci, fps))
+        _ -> None
+      }
+      match resolved {
+        Some(k) -> {
+          let (aid, ci, fps) = k
+          let a = adt_of(qc.entry.cx.adts, aid)
+          match get(a.ctors, ci) {
+            Some(c) -> {
+              let (dsp, dp) = def_of_ctor(qc, aid, c.name)
+              q = offer(q, nlo, nhi, render_ctor(qc, c), dsp, dp)
+              # pair each written arg with its field's typed sub-pattern
+              var pos = 0
+              for pa in args {
+                let fi = match pa.name {
+                  Some(n) -> field_index(c, n)
+                  None -> Some(pos)
+                }
+                let sub: Option[TPat] = match fi {
+                  Some(ix) ->
+                    match get(fps, ix) {
+                      Some(o) -> o
+                      None -> None
+                    }
+                  None -> None
+                }
+                q = visit_pat(qc, q, pa.pat, sub)
+                pos = pos + 1
+              }
+            }
+            None -> { for pa in args { q = visit_pat(qc, q, pa.pat, None) } }
+          }
+        }
+        None -> { for pa in args { q = visit_pat(qc, q, pa.pat, None) } }
+      }
+    }
+    PTuple(elems, _, _) -> {
+      let telems = match tp {
+        Some(TPTuple(ts)) -> ts
+        _ -> {
+          let none: List[TPat] = []
+          none
+        }
+      }
+      var i = 0
+      for p in elems {
+        q = visit_pat(qc, q, p, get(telems, i))
+        i = i + 1
+      }
+    }
+    PList(pre, _, rest_name, rest_span, post, _, _) -> {
+      let tinfo: Option[(List[TPat], Option[Int], List[TPat])] = match tp {
+        Some(TPList(tpre, _, trest, tpost)) -> Some((tpre, trest, tpost))
+        _ -> None
+      }
+      var i = 0
+      for p in pre {
+        let sub: Option[TPat] = match tinfo {
+          Some(k) -> {
+            let (tpre, _, _) = k
+            get(tpre, i)
+          }
+          None -> None
+        }
+        q = visit_pat(qc, q, p, sub)
+        i = i + 1
+      }
+      var j = 0
+      for p in post {
+        let sub: Option[TPat] = match tinfo {
+          Some(k) -> {
+            let (_, _, tpost) = k
+            get(tpost, j)
+          }
+          None -> None
+        }
+        q = visit_pat(qc, q, p, sub)
+        j = j + 1
+      }
+      match rest_span {
+        Some(rs) -> {
+          let (rlo, rhi) = rs
+          match tinfo {
+            Some(k) -> {
+              let (_, trest, _) = k
+              match trest {
+                Some(sid) ->
+                  match sym_get(qc, sid) {
+                    Some(sym) -> {
+                      q = offer(q, rlo, rhi, sym.name ++ ": " ++ show_ty(qc, sym.ty),
+                        Some((rlo, rhi)), None)
+                    }
+                    None -> ()
+                  }
+                None -> ()
+              }
+            }
+            None -> ()
+          }
+        }
+        None -> ()
+      }
+    }
+    _ -> ()
+  }
+  q
+}
+
+fn field_index(c: CtorI, name: String) -> Option[Int] = {
+  var i = 0
+  for f in c.fields {
+    if f.name == name { return Some(i) }
+    i = i + 1
+  }
+  None
+}
+
+# ---- statements ----
+
+fn visit_stmt(qc: QCx, q0: Q, ps: Stmt, ts: Option[TStmt]) -> Q = {
+  var q = q0
+  match ps {
+    SLet(_, _, _, init, _, _) ->
+      match ts {
+        Some(TSLet(_, _, tinit, _, _)) -> { q = walk_e(qc, q, init, Some(tinit)) }
+        _ -> { q = walk_e(qc, q, init, None) }
+      }
+    SLetPat(pat, _, init, _, _) ->
+      match ts {
+        Some(TSLetPat(tpat, tinit, _, _)) -> {
+          q = visit_pat(qc, q, pat, Some(tpat))
+          q = walk_e(qc, q, init, Some(tinit))
+        }
+        _ -> {
+          q = visit_pat(qc, q, pat, None)
+          q = walk_e(qc, q, init, None)
+        }
+      }
+    SLocalFn(name, params, _, _, body, nlo, nhi, lo, hi) ->
+      match ts {
+        Some(TSLocalFn(sid, _, psyms, _, tbody, _, _, _)) -> {
+          match sym_get(qc, sid) {
+            Some(sym) -> {
+              q = offer(q, nlo, nhi, "fn " ++ name ++ ": " ++ show_ty(qc, sym.ty),
+                Some((nlo, nhi)), None)
+              # the desugared lambda's own type, at the whole-statement span
+              q = offer(q, lo, hi, show_ty(qc, sym.ty), None, None)
+            }
+            None -> ()
+          }
+          var i = 0
+          for p in params {
+            match get(psyms, i) {
+              Some(pid) ->
+                match sym_get(qc, pid) {
+                  Some(sym) -> {
+                    q = offer(q, p.lo, p.hi, sym.name ++ ": " ++ show_ty(qc, sym.ty),
+                      Some((p.lo, p.hi)), None)
+                  }
+                  None -> ()
+                }
+              None -> ()
+            }
+            i = i + 1
+          }
+          q = walk_e(qc, q, body, Some(tbody))
+        }
+        _ -> { q = walk_e(qc, q, body, None) }
+      }
+    SAssign(name, value, nlo, nhi, _, _) ->
+      match ts {
+        Some(TSAssign(sid, _, tvalue, _, _)) -> {
+          match sym_get(qc, sid) {
+            Some(sym) -> {
+              let kw = if sym.mutable { "var" } else { "let" }
+              q = offer(q, nlo, nhi, kw ++ " " ++ sym.name ++ ": " ++ show_ty(qc, sym.ty),
+                Some((sym.dlo, sym.dhi)), None)
+            }
+            None -> ()
+          }
+          q = walk_e(qc, q, value, Some(tvalue))
+        }
+        _ -> { q = walk_e(qc, q, value, None) }
+      }
+    SExpr(e, _, _) ->
+      match ts {
+        Some(TSExpr(t, _, _)) -> { q = walk_e(qc, q, e, Some(t)) }
+        _ -> { q = walk_e(qc, q, e, None) }
+      }
+    SAssert(cond, _, _, _) ->
+      match ts {
+        Some(TSAssert(t, _, _, _)) -> { q = walk_e(qc, q, cond, Some(t)) }
+        _ -> { q = walk_e(qc, q, cond, None) }
+      }
+    SWhile(cond, body, _, _) ->
+      match ts {
+        Some(TSWhile(tc, tb, _, _, _)) -> {
+          q = walk_e(qc, q, cond, Some(tc))
+          q = walk_e(qc, q, body, Some(tb))
+        }
+        _ -> {
+          q = walk_e(qc, q, cond, None)
+          q = walk_e(qc, q, body, None)
+        }
+      }
+    SFor(_, from, to, body, _, _) ->
+      match ts {
+        Some(TSFor(_, _, tfrom, tto, tbody, _, _, _)) -> {
+          q = walk_e(qc, q, from, Some(tfrom))
+          match to {
+            Some(e) -> { q = walk_e(qc, q, e, tto) }
+            None -> ()
+          }
+          q = walk_e(qc, q, body, Some(tbody))
+        }
+        _ -> {
+          q = walk_e(qc, q, from, None)
+          match to {
+            Some(e) -> { q = walk_e(qc, q, e, None) }
+            None -> ()
+          }
+          q = walk_e(qc, q, body, None)
+        }
+      }
+    _ -> ()
+  }
+  q
+}
+
+# ---- completion support: binders in scope (the Kotlin collectBinders) ----
+
+fn param_detail(qc: QCx, tf: Option[TFun], i: Int) -> Option[String] =
+  match tf {
+    Some(t) ->
+      match get(t.param_syms, i) {
+        Some(sid) ->
+          match sym_get(qc, sid) {
+            Some(sym) -> Some(show_ty(qc, sym.ty))
+            None -> None
+          }
+        None -> None
+      }
+    None -> None
+  }
+
+fn sym_detail(qc: QCx, sid: Int) -> Option[String] =
+  match sym_get(qc, sid) {
+    Some(sym) -> Some(show_ty(qc, sym.ty))
+    None -> None
+  }
+
+## Locals visible at `pos`: the enclosing function's parameters plus every
+## binder introduced textually before it, in the Kotlin collection order.
+pub fn locals_at(qc: QCx, pos: Int) -> List[(String, Option[String])] = {
+  var out: List[(String, Option[String])] = []
+  var fns = module_fns(qc.entry.m)
+  for iv in module_impls(qc.entry.m) {
+    for m2 in iv.methods { fns = fns ++ [m2] }
+  }
+  var found = false
+  for f in fns {
+    if not found && pos >= f.lo && pos <= f.hi {
+      found = true
+      let tf = tfun_by_body(qc, f.body)
+      var i = 0
+      for p in f.params {
+        out = out ++ [(p.name, param_detail(qc, tf, i))]
+        i = i + 1
+      }
+      out = collect_e(qc, out, f.body, tf_body(tf), pos)
+    }
+  }
+  for tv in module_traits(qc.entry.m) {
+    for m2 in tv.methods {
+      match m2.body {
+        Some(b) -> {
+          if pos >= m2.lo && pos <= m2.hi {
+            let tf = tfun_by_body(qc, b)
+            var i = 0
+            for p in m2.params {
+              out = out ++ [(p.name, param_detail(qc, tf, i))]
+              i = i + 1
+            }
+            out = collect_e(qc, out, b, tf_body(tf), pos)
+          }
+        }
+        None -> ()
+      }
+    }
+  }
+  out
+}
+
+fn collect_e(
+  qc: QCx,
+  acc0: List[(String, Option[String])],
+  pe: Expr,
+  te: Option[TExpr],
+  before: Int
+) -> List[(String, Option[String])] = {
+  var acc = acc0
+  match pe {
+    EBlock(stmts, tail, _, _) -> {
+      let (tstmts, ttail) = match te {
+        Some(XBlock(ts, tt, _, _, _)) -> (opt_stmts(ts), tt)
+        _ -> {
+          let none: List[Option[TStmt]] = []
+          let notail: Option[TExpr] = None
+          (none, notail)
+        }
+      }
+      var i = 0
+      for s in stmts {
+        acc = collect_s(qc, acc, s, opt_get3(tstmts, i), before)
+        i = i + 1
+      }
+      match tail {
+        Some(e) -> { acc = collect_e(qc, acc, e, ttail, before) }
+        None -> ()
+      }
+    }
+    EIf(cond, thn, els, _, _) -> {
+      let (tc, tt, tels) = match te {
+        Some(XIf(c, t, e, _, _, _)) -> (Some(c), Some(t), e)
+        _ -> {
+          let n1: Option[TExpr] = None
+          let n2: Option[TExpr] = None
+          let n3: Option[TExpr] = None
+          (n1, n2, n3)
+        }
+      }
+      acc = collect_e(qc, acc, cond, tc, before)
+      acc = collect_e(qc, acc, thn, tt, before)
+      match els {
+        Some(e) -> { acc = collect_e(qc, acc, e, tels, before) }
+        None -> ()
+      }
+    }
+    EMatch(scrut, arms, _, _) -> {
+      let tarms = match te {
+        Some(XMatch(ts, ta, _, _, _)) -> {
+          acc = collect_e(qc, acc, scrut, Some(ts), before)
+          ta
+        }
+        _ -> {
+          acc = collect_e(qc, acc, scrut, None, before)
+          let none: List[TArm] = []
+          none
+        }
+      }
+      var i = 0
+      for arm in arms {
+        let tb: Option[TExpr] = match get(tarms, i) {
+          Some(a) -> Some(a.body)
+          None -> None
+        }
+        acc = collect_e(qc, acc, arm.body, tb, before)
+        i = i + 1
+      }
+    }
+    ELambda(params, body, lo, _) -> {
+      if lo < before {
+        for p in params {
+          let nd: Option[String] = None
+          acc = acc ++ [(p.name, nd)]
+        }
+      }
+      let tb: Option[TExpr] = match te {
+        Some(XLambda(_, _, b, _, _, _, _)) -> Some(b)
+        _ -> None
+      }
+      acc = collect_e(qc, acc, body, tb, before)
+    }
+    ECall(_, args, _, _, _, _) -> {
+      let targs = match te {
+        Some(XCallFn(_, _, ts, _, _, _, _, _)) -> ts
+        Some(XCallBuiltin(_, ts, _, _, _, _)) -> ts
+        Some(XCallDyn(_, _, ts, _, _, _)) -> ts
+        _ -> {
+          let none: List[TExpr] = []
+          none
+        }
+      }
+      if len(targs) == len(args) {
+        var i = 0
+        for a in args {
+          acc = collect_e(qc, acc, a, get(targs, i), before)
+          i = i + 1
+        }
+      } else {
+        for a in args { acc = collect_e(qc, acc, a, None, before) }
+      }
+    }
+    EMethod(target, _, args, _, _, _, _) -> {
+      let targs = match te {
+        Some(XCallFn(_, _, ts, _, _, _, _, _)) -> ts
+        Some(XCallBuiltin(_, ts, _, _, _, _)) -> ts
+        _ -> {
+          let none: List[TExpr] = []
+          none
+        }
+      }
+      if len(targs) == len(args) + 1 {
+        acc = collect_e(qc, acc, target, get(targs, 0), before)
+        var i = 0
+        for a in args {
+          acc = collect_e(qc, acc, a, get(targs, i + 1), before)
+          i = i + 1
+        }
+      } else {
+        acc = collect_e(qc, acc, target, None, before)
+        for a in args { acc = collect_e(qc, acc, a, None, before) }
+      }
+    }
+    EApply(target, args, _, _) -> {
+      let (tt, targs) = match te {
+        Some(XApply(t, ts, _, _, _)) -> (Some(t), opt_list(ts))
+        _ -> {
+          let n: Option[TExpr] = None
+          let none: List[Option[TExpr]] = []
+          (n, none)
+        }
+      }
+      acc = collect_e(qc, acc, target, tt, before)
+      var i = 0
+      for a in args {
+        acc = collect_e(qc, acc, a, opt_get2(targs, i), before)
+        i = i + 1
+      }
+    }
+    ECtor(_, args, spread, _, _, _, _, _) -> {
+      let (tspread, written) = match te {
+        Some(XCtor(_, _, w, _, sp, _, _, _)) -> (sp, w)
+        _ -> {
+          let n: Option[TExpr] = None
+          let none: List[TExpr] = []
+          (n, none)
+        }
+      }
+      match spread {
+        Some(sp) -> { acc = collect_e(qc, acc, sp, tspread, before) }
+        None -> ()
+      }
+      var i = 0
+      for a in args {
+        acc = collect_e(qc, acc, a.e, opt_get(written, i), before)
+        i = i + 1
+      }
+    }
+    EListLit(elems, _, _) -> {
+      let telems = match te {
+        Some(XListLit(ts, _, _, _)) -> opt_list(ts)
+        _ -> no_texprs(elems)
+      }
+      var i = 0
+      for e in elems {
+        acc = collect_e(qc, acc, e, opt_get2(telems, i), before)
+        i = i + 1
+      }
+    }
+    ETupleLit(elems, _, _) -> {
+      let telems = match te {
+        Some(XTupleLit(ts, _, _, _)) -> opt_list(ts)
+        _ -> no_texprs(elems)
+      }
+      var i = 0
+      for e in elems {
+        acc = collect_e(qc, acc, e, opt_get2(telems, i), before)
+        i = i + 1
+      }
+    }
+    EBinary(_, left, right, _, _, _, _) -> {
+      let (tl, tr2) = match te {
+        Some(XBinary(_, l, r, _, _, _, _, _, _)) -> (Some(l), Some(r))
+        _ -> {
+          let n1: Option[TExpr] = None
+          let n2: Option[TExpr] = None
+          (n1, n2)
+        }
+      }
+      acc = collect_e(qc, acc, left, tl, before)
+      acc = collect_e(qc, acc, right, tr2, before)
+    }
+    EUnary(_, operand, _, _) -> {
+      let t: Option[TExpr] = match te {
+        Some(XUnary(_, o, _, _, _)) -> Some(o)
+        _ -> None
+      }
+      acc = collect_e(qc, acc, operand, t, before)
+    }
+    EPropagate(operand, _, _) -> {
+      let t: Option[TExpr] = match te {
+        Some(XPropagate(o, _, _, _)) -> Some(o)
+        _ -> None
+      }
+      acc = collect_e(qc, acc, operand, t, before)
+    }
+    EUnwrap(operand, _, _) -> {
+      let t: Option[TExpr] = match te {
+        Some(XUnwrap(o, _, _, _, _)) -> Some(o)
+        _ -> None
+      }
+      acc = collect_e(qc, acc, operand, t, before)
+    }
+    EIndex(target, index, _, _) -> {
+      let (tt, ti) = match te {
+        Some(XIndex(t, ix, _, _, _, _)) -> (Some(t), Some(ix))
+        _ -> {
+          let n1: Option[TExpr] = None
+          let n2: Option[TExpr] = None
+          (n1, n2)
+        }
+      }
+      acc = collect_e(qc, acc, target, tt, before)
+      acc = collect_e(qc, acc, index, ti, before)
+    }
+    EReturn(v, _, _) ->
+      match v {
+        Some(e) -> {
+          let tv: Option[TExpr] = match te {
+            Some(XReturn(t, _, _)) -> t
+            _ -> None
+          }
+          acc = collect_e(qc, acc, e, tv, before)
+        }
+        None -> ()
+      }
+    _ -> ()
+  }
+  acc
+}
+
+fn collect_s(
+  qc: QCx,
+  acc0: List[(String, Option[String])],
+  ps: Stmt,
+  ts: Option[TStmt],
+  before: Int
+) -> List[(String, Option[String])] = {
+  var acc = acc0
+  match ps {
+    SLet(name, _, _, init, lo, _) -> {
+      let (detail, tinit) = match ts {
+        Some(TSLet(sid, _, ti, _, _)) -> {
+          let d = match sid {
+            Some(s) -> sym_detail(qc, s)
+            None -> {
+              let n: Option[String] = None
+              n
+            }
+          }
+          (d, Some(ti))
+        }
+        _ -> {
+          let n1: Option[String] = None
+          let n2: Option[TExpr] = None
+          (n1, n2)
+        }
+      }
+      if lo < before { acc = acc ++ [(name, detail)] }
+      acc = collect_e(qc, acc, init, tinit, before)
+    }
+    SLocalFn(name, params, _, _, body, _, _, lo, _) -> {
+      let (detail, psyms, tbody) = match ts {
+        Some(TSLocalFn(sid, _, ps2, _, tb, _, _, _)) -> (sym_detail(qc, sid), ps2, Some(tb))
+        _ -> {
+          let n1: Option[String] = None
+          let none: List[Int] = []
+          let n2: Option[TExpr] = None
+          (n1, none, n2)
+        }
+      }
+      if lo < before {
+        acc = acc ++ [(name, detail)]
+        for p in params {
+          let nd: Option[String] = None
+          acc = acc ++ [(p.name, nd)]
+        }
+      }
+      acc = collect_e(qc, acc, body, tbody, before)
+    }
+    SLetPat(_, _, init, _, _) -> {
+      let tinit: Option[TExpr] = match ts {
+        Some(TSLetPat(_, ti, _, _)) -> Some(ti)
+        _ -> None
+      }
+      acc = collect_e(qc, acc, init, tinit, before)
+    }
+    SFor(name, from, to, body, lo, _) -> {
+      let (detail, tfrom, tto, tbody) = match ts {
+        Some(TSFor(sid, _, tf, tt, tb, _, _, _)) -> (sym_detail(qc, sid), Some(tf), tt, Some(tb))
+        _ -> {
+          let n1: Option[String] = None
+          let n2: Option[TExpr] = None
+          let n3: Option[TExpr] = None
+          let n4: Option[TExpr] = None
+          (n1, n2, n3, n4)
+        }
+      }
+      if lo < before { acc = acc ++ [(name, detail)] }
+      acc = collect_e(qc, acc, from, tfrom, before)
+      match to {
+        Some(e) -> { acc = collect_e(qc, acc, e, tto, before) }
+        None -> ()
+      }
+      acc = collect_e(qc, acc, body, tbody, before)
+    }
+    SWhile(cond, body, _, _) -> {
+      let (tc, tb) = match ts {
+        Some(TSWhile(c, b, _, _, _)) -> (Some(c), Some(b))
+        _ -> {
+          let n1: Option[TExpr] = None
+          let n2: Option[TExpr] = None
+          (n1, n2)
+        }
+      }
+      acc = collect_e(qc, acc, cond, tc, before)
+      acc = collect_e(qc, acc, body, tb, before)
+    }
+    SAssign(_, value, _, _, _, _) -> {
+      let tv: Option[TExpr] = match ts {
+        Some(TSAssign(_, _, v, _, _)) -> Some(v)
+        _ -> None
+      }
+      acc = collect_e(qc, acc, value, tv, before)
+    }
+    SExpr(e, _, _) -> {
+      let t: Option[TExpr] = match ts {
+        Some(TSExpr(x, _, _)) -> Some(x)
+        _ -> None
+      }
+      acc = collect_e(qc, acc, e, t, before)
+    }
+    _ -> ()
+  }
+  acc
+}
