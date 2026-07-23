@@ -85,19 +85,32 @@ fn reflow(src: String, toks: List[Token], unary: Set[Int], postfix: Set[Int]) ->
   # continues whatever the line before it did.
   var prev_code = toks[0]
   var have_prev_code = false
+  # A single left-to-right cursor over the source's code points. Token spans are
+  # sorted and non-overlapping, so we never rewind: reflow stays O(n) instead of
+  # re-slicing the whole source per token (which made it O(n²), spec §1.8).
+  let cps = code_points(src)
+  var cur_ci = 0
+  var cur_u16 = 0
   var i = 0
   while i < len(toks) {
     let t = toks[i]
+    # Advance to this token's start (capturing the gap since the previous token),
+    # then across the token itself. Comments reprint from their own `.text`.
+    let (gci, gu, gap) = take_to(cps, cur_ci, cur_u16, t.lo)
+    let (tci, tu, raw_text) = take_to(cps, gci, gu, t.hi)
+    cur_ci = tci
+    cur_u16 = tu
+    let ttext = if t.kind == COMMENT { t.text } else { raw_text }
     if i == 0 {
-      out = out ++ [text(src, t)]
+      out = out ++ [ttext]
     } else {
-      let nl = count_newlines(src, prev.hi, t.lo)
+      let nl = count_nl(gap)
       if nl == 0 {
         let on_use_line = line_first.kind == USE
         if t.kind == COMMENT || space(prev, t, unary, postfix, on_use_line) {
           out = out ++ [" "]
         }
-        out = out ++ [text(src, t)]
+        out = out ++ [ttext]
       } else {
         line_first = t
         # collapse >=2 blank lines to 1
@@ -106,7 +119,7 @@ fn reflow(src: String, toks: List[Token], unary: Set[Int], postfix: Set[Int]) ->
         line_indent = indent_of(t, openers, pl, line_indent, unary)
         let lvl = if line_indent < 0 { 0 } else { line_indent }
         out = out ++ [str.repeat("  ", lvl)]
-        out = out ++ [text(src, t)]
+        out = out ++ [ttext]
       }
     }
     if t.kind != COMMENT {
@@ -187,11 +200,24 @@ fn space(prev: Token, cur: Token, unary: Set[Int], postfix: Set[Int], on_use_lin
 
 # ---- helpers ----
 
-fn text(src: String, t: Token) -> String =
-  if t.kind == COMMENT { t.text } else { lexer.utf16_slice(src, t.lo, t.hi) }
+## Advance a cursor over `cps` from (ci, u16) up to UTF-16 offset `target`,
+## returning the new cursor and the code points consumed as a string. Offsets
+## are UTF-16 code units (what token spans use), so a code point past U+FFFF
+## advances the offset by 2. Total work across a reflow is O(source length).
+fn take_to(cps: List[Int], ci: Int, u16: Int, target: Int) -> (Int, Int, String) = {
+  var i = ci
+  var u = u16
+  var out: List[Int] = []
+  while u < target && i < len(cps) {
+    let c = cps[i]
+    out = out ++ [c]
+    u = u + (if c >= 65536 { 2 } else { 1 })
+    i = i + 1
+  }
+  (i, u, from_code_points(out))
+}
 
-fn count_newlines(src: String, from: Int, to: Int) -> Int =
-  len(str.split(lexer.utf16_slice(src, from, to), "\n")) - 1
+fn count_nl(s: String) -> Int = len(str.split(s, "\n")) - 1
 
 fn is_closer(k: TokKind) -> Bool = k == RPAREN || k == RBRACKET || k == RBRACE
 
