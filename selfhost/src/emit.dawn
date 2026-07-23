@@ -1350,7 +1350,9 @@ fn gen_expr(g: Gen, e: TExpr, tail: Bool) -> (Gen, Bool) !io = {
     XBlock(stmts, tail_e, _, _, bty) -> gen_block(g, stmts, tail_e, bty, tail)
     XUnsafePure(body, _, _, _) -> gen_expr(g, body, tail)
     XJava(call, _, _, ty) ->
-      if call.is_ctor { gen_java_new(g, call) } else { gen_java_call(g, call, ty) }
+      if call.is_field { gen_java_field(g, call) }
+      else if call.is_ctor { gen_java_new(g, call) }
+      else { gen_java_call(g, call, ty) }
     XError(_, _) -> panic("codegen on an unchecked tree")
   }
 }
@@ -2849,6 +2851,25 @@ fn wrap_nullable_in_option(g: Gen) -> Gen !io = {
   g1.mv.visitTypeInsn(OP_CHECKCAST, "Option")
   g1.mv.visitLabel(end)
   g1
+}
+
+## Class.FIELD — GETSTATIC then the same value adaptation as a method return
+## (§9.2): small ints/floats widen, references wrap in Option (spec §9.1).
+fn gen_java_field(g: Gen, call: TJavaCall) -> (Gen, Bool) !io = {
+  let owner = internal_of(call.decl_cls)
+  g.mv.visitFieldInsn(OP_GETSTATIC, owner, call.method, jdesc(call.ret_cls))
+  var g1 = g
+  let rc = call.ret_cls
+  if rc == "int" || rc == "short" || rc == "byte" {
+    g1.mv.visitInsn(OP_I2L)
+  } else if rc == "float" {
+    g1.mv.visitInsn(OP_F2D)
+  } else if rc == "long" || rc == "double" || rc == "boolean" {
+    ()
+  } else {
+    g1 = wrap_nullable_in_option(g1)
+  }
+  (g1, true)
 }
 
 fn gen_java_call(g: Gen, call: TJavaCall, ty: Ty) -> (Gen, Bool) !io = {

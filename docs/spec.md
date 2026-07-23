@@ -700,7 +700,10 @@ fn build() -> String !io = {
 ```
 
 - `use java "全限定名"` 把类引入为：一个不透明类型 + 一个静态方法命名空间。
-  静态字段（如 `System.out`）v0.1 不支持——只有方法。
+  **只读静态字段可访问**：`Class.FIELD`（字段名照惯例大写，如 `Integer.MAX_VALUE`、
+  `Math.PI`、`System.out`、枚举常量 `TimeUnit.SECONDS`）读取该字段——值按 §9.2 映射
+  （引用类型包 `Option` 需 `!` 解包，`int`/`double` 等基本类型加宽），效果同一切互操作为 `!io`。
+  只读（无 `Class.FIELD = v`）；实例字段与非 `pub` 静态字段不可访问。
 - 构造器统一为 `Type.new(args)`，**返回 `T` 本身**（构造器不会返回 null，不包 Option）；
   实例方法用 `.method(args)`。
 - **所有 Java 调用的效果都是 `!io`**，无例外（理由见 design.md D5）。
@@ -870,8 +873,8 @@ Java 形参声明为 `java.util.List` / `java.util.Collection` / `java.lang.Iter
 ### 9.7 限制
 
 不能继承 Java 类；不能以**命名类**形式实现 Java 接口——函数值经 SAM 转换（§9.4）
-传出是唯一路径。静态字段 v0.1 不支持（枚举与常量走 `TimeUnit.valueOf("SECONDS")`、
-`Charset.forName("UTF-8")` 这类静态方法绕行）。数组不可创建/索引/命名（§9.5）；
+传出是唯一路径。只读静态字段可访问（`Class.FIELD`，§9.1）——枚举常量与静态常量直接读
+（`TimeUnit.SECONDS`、`Integer.MAX_VALUE`）；写静态字段、实例字段仍不支持。数组不可创建/索引/命名（§9.5）；
 `Map`/`Set` 不桥接、Java 集合不反向转换为 Dawn 值（§9.6）。变长参数只支持不传
 可变部分（§9.3）；`Option` 实参传 null 不支持（§9.2）。
 

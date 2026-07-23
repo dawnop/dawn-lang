@@ -50,8 +50,8 @@ use types.{
   builtins, opt_ty, result_ty, OPTION_ID, RESULT_ID, ORD_ID
 }
 use jreflect.{
-  JClass, JMethod, JCtor, find_class, class_info, methods_of, ctors_of,
-  is_assignable, sam_of, component_of
+  JClass, JMethod, JCtor, JField, find_class, class_info, methods_of, ctors_of,
+  static_fields_of, is_assignable, sam_of, component_of
 }
 use exhaustive.{
   LitV, LInt, LFloat, LBool, LStr, SPat, SWild, SCtor, SLit, STuple, SList,
@@ -4554,10 +4554,16 @@ pub fn check_expr(cx: Cx, e: Expr, expected: Option[Ty]) -> (Cx, Ty, TExpr) !io 
     EApply(target, args, lo, hi) -> check_apply(cx, target, args, lo, hi)
     EMethod(target, name, args, nlo, nhi, lo, hi) ->
       check_method_call(cx, target, name, args, expected, nlo, nhi, lo, hi)
-    EFieldAcc(target, fname, flo, fhi, lo, hi) -> {
-      let (cx1, tt, tx) = check_expr(cx, target, no_expected())
-      check_field_access_typed(cx1, tt, tx, fname, flo, fhi, lo, hi)
-    }
+    EFieldAcc(target, fname, flo, fhi, lo, hi) ->
+      match static_field_target(cx, target) {
+        # Class.FIELD reads a public static field (spec §9.1) — the receiver is a
+        # java class name (a nullary ctor spelling), not an evaluable expression
+        Some(fq) -> check_java_static_field(cx, fq, fname, flo, fhi, lo, hi)
+        None -> {
+          let (cx1, tt, tx) = check_expr(cx, target, no_expected())
+          check_field_access_typed(cx1, tt, tx, fname, flo, fhi, lo, hi)
+        }
+      }
     EMatch(scrut, arms, lo, hi) -> check_match(cx, scrut, arms, expected, lo, hi)
   }
 
@@ -6398,6 +6404,7 @@ fn check_java_call(
       ret_cls: cls.fqcn,
       is_static: true,
       is_ctor: true,
+      is_field: false,
       target: None,
       args: fin,
       varargs_pack: vp,
@@ -6495,6 +6502,7 @@ fn check_java_call(
     ret_cls: m3.ret_cls,
     is_static: is_static,
     is_ctor: false,
+    is_field: false,
     target: target_tx,
     args: fin,
     varargs_pack: vp,
@@ -6504,6 +6512,73 @@ fn check_java_call(
     nhi: nhi
   }
   (cx1, rt, XJava(call, lo, hi, rt))
+}
+
+## Is `target` a bare java class name (a nullary ctor spelling that resolves to a
+## `use java` class and shadows nothing)? Returns its fqcn — the receiver of a
+## `Class.FIELD` static field read. Mirrors the static-call guard in check_method_call.
+fn static_field_target(cx: Cx, target: Expr) -> Option[String] =
+  match target {
+    ECtor(cn, cargs, sp, hp, _, _, _, _) ->
+      if not hp && len(cargs) == 0 && sp == None &&
+      not map.has(cx.ctors_by_name, cn) && not map.has(cx.consts, cn) {
+        map.get(cx.java_classes, cn)
+      } else {
+        None
+      }
+    _ -> None
+  }
+
+## Class.FIELD — a read-only public static field (spec §9.1). The value maps by
+## §9.2 exactly like a method return (references wrap in Option, small ints/floats
+## widen); the read is !io like every Java interop.
+fn check_java_static_field(
+  cx: Cx,
+  fq: String,
+  fname: String,
+  flo: Int,
+  fhi: Int,
+  lo: Int,
+  hi: Int
+) -> (Cx, Ty, TExpr) !io = {
+  var found: Option[JField] = None
+  for f in static_fields_of(fq) {
+    match found {
+      None -> if f.name == fname { found = Some(f) }
+      Some(_) -> ()
+    }
+  }
+  match found {
+    None -> (cerr_h(cx, "`" ++ fq ++ "` has no static field `" ++ fname ++ "`", flo, fhi,
+      "only public static fields are readable; instance fields and methods are not"),
+      TyError, XError(lo, hi))
+    Some(f) -> {
+      let cx1 = record_effect(cx, EIo, flo, fhi, fq ++ "." ++ fname)
+      let (cx2, ty) = map_java_return(cx1, f.type_cls, flo, fhi)
+      let empty_params: List[String] = []
+      let empty_args: List[TExpr] = []
+      let no_convs: List[(Int, String, String, List[String], String)] = []
+      let no_bridges: List[Int] = []
+      let call = TJavaCall {
+        fqcn: fq,
+        decl_cls: f.decl_cls,
+        method: fname,
+        param_cls: empty_params,
+        ret_cls: f.type_cls,
+        is_static: true,
+        is_ctor: false,
+        is_field: true,
+        target: None,
+        args: empty_args,
+        varargs_pack: None,
+        sam_convs: no_convs,
+        list_bridges: no_bridges,
+        nlo: flo,
+        nhi: fhi
+      }
+      (cx2, ty, XJava(call, lo, hi, ty))
+    }
+  }
 }
 
 # ---- method calls (x.f(a)) ----
@@ -7082,6 +7157,36 @@ test "java calls resolve overloads, wrap references and reject unknowns" {
   let call3 = EMethod(recv, "nosuch", [], 5, 11, 0, 13)
   let (cx3, _, _) = check_expr(cx, call3, no_expected())
   assert str.contains(cx3.diags[0].msg, "`java.lang.Math` has no static method `nosuch`")
+}
+
+test "static field access reads Class.FIELD, maps types, rejects unknowns" {
+  var cx = seed_prelude(test_cx())
+  cx = Cx { ..cx, java_classes: map.insert(cx.java_classes, "Math", "java.lang.Math") }
+  cx = Cx { ..cx, java_classes: map.insert(cx.java_classes, "Integer", "java.lang.Integer") }
+  cx = push_scope(cx)
+  # Math.PI is a double -> Float; the node is a field read
+  let recv = ECtor("Math", [], None, false, 0, 4, 0, 4)
+  let f1 = EFieldAcc(recv, "PI", 5, 7, 0, 7)
+  let (cx1, t1, node) = check_expr(cx, f1, no_expected())
+  assert t1 == TyFloat
+  assert len(cx1.diags) == 0
+  match node {
+    XJava(jc, ..) -> {
+      assert jc.is_field
+      assert jc.method == "PI"
+      assert jc.fqcn == "java.lang.Math"
+    }
+    _ -> { assert false }
+  }
+  # Integer.MAX_VALUE is an int -> Int
+  let recv2 = ECtor("Integer", [], None, false, 0, 7, 0, 7)
+  let f2 = EFieldAcc(recv2, "MAX_VALUE", 8, 17, 0, 17)
+  let (cx2, t2, _) = check_expr(cx, f2, no_expected())
+  assert t2 == TyInt
+  # a bogus field name is a clear error
+  let f3 = EFieldAcc(recv, "NOPE", 5, 9, 0, 9)
+  let (cx3, _, _) = check_expr(cx, f3, no_expected())
+  assert str.contains(cx3.diags[0].msg, "has no static field `NOPE`")
 }
 
 test "ufcs rewrites x.f(a) into f(x, a) with the receiver pre-typed" {

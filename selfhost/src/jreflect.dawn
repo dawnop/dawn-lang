@@ -15,6 +15,7 @@ use java "java.lang.ClassLoader"
 use java "java.lang.reflect.Array"
 use java "java.lang.reflect.Method"
 use java "java.lang.reflect.Constructor"
+use java "java.lang.reflect.Field"
 use java "java.lang.reflect.Modifier"
 use java "java.util.Objects"
 use java "java.lang.invoke.MethodHandles"
@@ -35,6 +36,9 @@ pub type JMethod = {
 }
 
 pub type JCtor = { param_cls: List[String], is_varargs: Bool, desc: String }
+
+## One static field, as plain data (spec §9.1 — read-only static field access).
+pub type JField = { name: String, type_cls: String, decl_cls: String }
 
 ## One class, as plain data. `display` is the TyJava display name (readable
 ## array names); `simple` is Class.getSimpleName() for error messages.
@@ -182,6 +186,28 @@ pub fn ctors_of(fqcn: String) -> List[JCtor] !io = {
   out
 }
 
+## Every public static field of `fqcn` (Class.getFields() returns only public
+## members, including inherited ones; we keep the static ones). Spec §9.1.
+pub fn static_fields_of(fqcn: String) -> List[JField] !io = {
+  let c = find_class_raw(fqcn).expect("static_fields_of on unresolved class")
+  let arr = c.getFields().expect("fields")
+  var out: List[JField] = []
+  let n = Array.getLength(arr)
+  var i = 0
+  while i < n {
+    let f: Field = cast(Array.get(arr, i).expect("field array element"))
+    if Modifier.isStatic(f.getModifiers()) {
+      out = out ++ [JField {
+        name: f.getName().expect("field name"),
+        type_cls: f.getType().expect("field type").getName().expect("class name"),
+        decl_cls: f.getDeclaringClass().expect("declaring class").getName().expect("class name")
+      }]
+    }
+    i = i + 1
+  }
+  out
+}
+
 ## Class.isAssignableFrom over names: may `sub` stand where `sup` is expected?
 pub fn is_assignable(sup: String, sub: String) -> Bool !io =
   match find_class_raw(sup) {
@@ -256,6 +282,18 @@ test "methods carry their shapes" {
       found = true
       assert m.is_static
       assert m.ret_cls == "long"
+    }
+  }
+  assert found
+}
+
+test "static fields carry their shapes" {
+  let fs = static_fields_of("java.lang.Integer")
+  var found = false
+  for f in fs {
+    if f.name == "MAX_VALUE" {
+      found = true
+      assert f.type_cls == "int"
     }
   }
   assert found

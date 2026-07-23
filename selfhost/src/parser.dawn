@@ -1282,22 +1282,31 @@ fn postfix_expr(p: P, st: St, ns: Bool) -> PR[Expr] = {
       st1 = st5
     } else if k == DOT {
       let st2 = adv1(p, st1)
-      let (st3, f) = want(p, st2, IDENT, "a field or function name after `.`")?
-      if at_kind(p, st3, LPAREN) {
-        var st4 = skip_nl(p, adv1(p, st3))
-        var args: List[Expr] = []
-        while not at_kind(p, st4, RPAREN) {
-          let (st5, a) = expression(p, st4, false)?
-          args = args ++ [a]
-          st4 = skip_nl(p, st5)
-          if at_kind(p, st4, COMMA) { st4 = skip_nl(p, adv1(p, st4)) } else { break }
-        }
-        let (st6, close) = want(p, st4, RPAREN, "`)`")?
-        e = EMethod(e, f.text, args, f.lo, f.hi, e_lo(e), close.hi)
-        st1 = st6
-      } else {
-        e = EFieldAcc(e, f.text, f.lo, f.hi, e_lo(e), f.hi)
+      let nt = cur(p, st2)
+      if nt.kind == TYPEIDENT {
+        # `Class.FIELD` static field access (spec §9.1) — field names are
+        # UPPERCASE, so an uppercase name after `.` is always a field, not a call
+        let st3 = adv1(p, st2)
+        e = EFieldAcc(e, nt.text, nt.lo, nt.hi, e_lo(e), nt.hi)
         st1 = st3
+      } else {
+        let (st3, f) = want(p, st2, IDENT, "a field or function name after `.`")?
+        if at_kind(p, st3, LPAREN) {
+          var st4 = skip_nl(p, adv1(p, st3))
+          var args: List[Expr] = []
+          while not at_kind(p, st4, RPAREN) {
+            let (st5, a) = expression(p, st4, false)?
+            args = args ++ [a]
+            st4 = skip_nl(p, st5)
+            if at_kind(p, st4, COMMA) { st4 = skip_nl(p, adv1(p, st4)) } else { break }
+          }
+          let (st6, close) = want(p, st4, RPAREN, "`)`")?
+          e = EMethod(e, f.text, args, f.lo, f.hi, e_lo(e), close.hi)
+          st1 = st6
+        } else {
+          e = EFieldAcc(e, f.text, f.lo, f.hi, e_lo(e), f.hi)
+          st1 = st3
+        }
       }
     } else if k == NEWLINE {
       # vertical method chains: `.` may start the next line (spec §1.7)
