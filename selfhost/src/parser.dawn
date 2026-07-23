@@ -242,7 +242,26 @@ fn java_use(p: P, st: St, kw: Token) -> PR[Decl] = {
     return Err((st2, pd("expected a fully-qualified class name like \"java.lang.StringBuilder\"",
       s.lo, s.hi)))
   }
-  Ok((st2, DUseJava(fqcn, kw.lo, s.hi, s.lo, s.hi)))
+  # optional `nonnull { m1, m2 }` — those methods return T, not Option[T] (spec
+  # §9.2); `nonnull` is a contextual keyword, only special right here, not reserved
+  var st3 = st2
+  var nn: List[ImportName] = []
+  var end_hi = s.hi
+  let nk = cur(p, st2)
+  if nk.kind == IDENT && nk.text == "nonnull" {
+    let (stb, _) = want(p, adv1(p, st2), LBRACE, "`{` after `nonnull`")?
+    var stx = skip_nl(p, stb)
+    while not at_kind(p, stx, RBRACE) {
+      let (stn, n) = want(p, stx, IDENT, "a method name in the `nonnull` list")?
+      nn = nn ++ [ImportName { name: n.text, lo: n.lo, hi: n.hi }]
+      stx = skip_nl(p, stn)
+      if at_kind(p, stx, COMMA) { stx = skip_nl(p, adv1(p, stx)) } else { break }
+    }
+    let (stc, close) = want(p, stx, RBRACE, "`}`")?
+    st3 = stc
+    end_hi = close.hi
+  }
+  Ok((st3, DUseJava(fqcn, nn, kw.lo, end_hi, s.lo, s.hi)))
 }
 
 fn has_code_seg(segs: List[Seg]) -> Bool = {

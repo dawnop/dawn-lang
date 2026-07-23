@@ -10,7 +10,7 @@ use ast.{
   Expr, EInt, EVar, ECall, EBinary, ECtor, EBlock,
   BinOp, OpAdd, OpMul,
   Stmt, SWhile,
-  Decl, DFn, DConst, DUseModule, Module
+  Decl, DFn, DConst, DUseModule, DUseJava, Module
 }
 
 fn rendered(src: String) -> String = {
@@ -149,6 +149,20 @@ test "a header expression refuses a record literal" {
           }
         _ -> { assert false }
       }
+    _ -> { assert false }
+  }
+}
+
+test "use java ... nonnull parses the method list" {
+  let (m, ds) = parse_module("use java \"java.net.URI\" nonnull { create, of }\n\nfn f() = 1")
+  assert len(ds) == 0
+  match m.decls[0] {
+    DUseJava(fqcn, nn, a, b, c, d) -> {
+      assert fqcn == "java.net.URI"
+      assert len(nn) == 2
+      assert nn[0].name == "create"
+      assert nn[1].name == "of"
+    }
     _ -> { assert false }
   }
 }

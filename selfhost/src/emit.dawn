@@ -13,7 +13,7 @@ use types.{
   Ty, TyInt, TyFloat, TyBool, TyString, TyBytes, TyCursor, TyUnit, TyNever,
   TyError, TyVar, TyAdt, TyList, TyMap, TySet, TyJava, TyTuple, TyFn,
   Adts, AdtI, CtorI, FieldI, adt_of, adt_jvm_name, ctor_jvm_name,
-  Sym, Sig, Eff, Traits, TraitI, MethodSig, ImplI, trait_of, ORD_ID, builtins
+  Sym, Sig, Eff, Traits, TraitI, MethodSig, ImplI, trait_of, ORD_ID, OPTION_ID, builtins
 }
 use tast.{
   TExpr, TStmt, TPat, TArm, TStrPart, TJavaCall, TFun, TConst, TModule, WitRef,
@@ -2904,10 +2904,19 @@ fn gen_java_call(g: Gen, call: TJavaCall, ty: Ty) -> (Gen, Bool) !io = {
     g1.mv.visitInsn(OP_F2D)
   } else if rc == "void" || rc == "long" || rc == "double" || rc == "boolean" {
   } else {
-    g1 = wrap_nullable_in_option(g1)
+    # references normally land in Option, but a `nonnull`-declared method returns
+    # the bare reference — the checker already typed it T, not Option[T] (§9.2), so
+    # follow the node's type rather than blindly wrapping every reference return
+    if is_option_ty(g1, ty) { g1 = wrap_nullable_in_option(g1) }
   }
   (g1, true)
 }
+
+fn is_option_ty(g: Gen, ty: Ty) -> Bool =
+  match ty {
+    TyAdt(aid, _) -> aid == OPTION_ID
+    _ -> false
+  }
 
 ## static <samRet> dawn$sam$N(FnN f, <sam params>): null-check references,
 ## box to the erased Fn convention, invoke, adapt the result (§9.4).
