@@ -22,9 +22,14 @@ by hand, with the server reachable.
    ```
    /opt/dawn/bin/dawn                      # launcher (rsynced)
    /opt/dawn/build/dawn-selfhost.jar       # compiler (rsynced)
+   /opt/dawn/playground/dawn.toml           # runner manifest — deps web/json (rsynced)
    /opt/dawn/playground/src                 # runner sources (rsynced)
    /opt/dawn/playground/sandbox/            # sandbox scripts (rsynced)
+   /opt/dawn/packages/                       # path-deps the runner imports (rsynced)
    ```
+   The runner's `main.dawn` imports the `web`/`json` packages by path
+   (`playground/dawn.toml` → `../packages`), so `packages/` must sit beside
+   `playground/` — `redeploy.sh` syncs both.
 
 4. **Work root** — per-request dirs live here, NOT under /tmp (DynamicUser
    implies a private /tmp that can't bind a /tmp work dir). Parents are `0711`

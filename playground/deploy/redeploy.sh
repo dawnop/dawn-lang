@@ -27,8 +27,11 @@ echo "=== syncing to $HOST:$REMOTE ==="
 # only build/dawn-selfhost.jar next to it — no seed fetch on the server)
 rsync -avz bin/ "$HOST:$REMOTE/bin/"
 rsync -avz --relative build/dawn-selfhost.jar "$HOST:$REMOTE/"
-# the runner sources (recompiled on service start) and the sandbox scripts
-rsync -avz --delete playground/src playground/README.md "$HOST:$REMOTE/playground/"
+# the runner sources + manifest (recompiled on service start) and the sandbox
+# scripts. main.dawn imports the `web`/`json` deps by path (playground/dawn.toml
+# -> ../packages), so those packages must ship too and resolve at $REMOTE/packages.
+rsync -avz --delete playground/dawn.toml playground/src playground/README.md "$HOST:$REMOTE/playground/"
+rsync -avz --delete packages/ "$HOST:$REMOTE/packages/"
 rsync -avz playground/sandbox/ "$HOST:$REMOTE/playground/sandbox/"
 
 echo "=== restarting service ==="
