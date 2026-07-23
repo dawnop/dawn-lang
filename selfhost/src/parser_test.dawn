@@ -153,10 +153,25 @@ test "a header expression refuses a record literal" {
   }
 }
 
+test "use ... as binds an explicit alias" {
+  let (m, ds) = parse_module("use json/lexer as lex\n\nfn f() = 1")
+  assert len(ds) == 0
+  match m.decls[0] {
+    DUseModule(segs, sel, aname, a, b, c, d) -> {
+      assert segs == ["json", "lexer"]
+      match aname {
+        Some(n) -> { assert n.name == "lex" }
+        None -> { assert false }
+      }
+    }
+    _ -> { assert false }
+  }
+}
+
 test "selective use keeps its import names" {
   let (m, ds) = parse_module("use json/value.{Json, render}\n\nfn f() = 1")
   match m.decls[0] {
-    DUseModule(segs, selective, a, b, c, d) -> {
+    DUseModule(segs, selective, _al, a, b, c, d) -> {
       assert segs == ["json", "value"]
       match selective {
         Some(names) -> {

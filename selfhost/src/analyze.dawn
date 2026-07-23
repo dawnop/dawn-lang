@@ -539,7 +539,7 @@ fn qualify_uses(m: Module, pkg: PkgR) -> Module = {
   var decls: List[Decl] = []
   for d in m.decls {
     match d {
-      DUseModule(segs, sel, lo, hi, nlo, nhi) ->
+      DUseModule(segs, sel, aname, lo, hi, nlo, nhi) ->
         if segs[0] == "std" {
           decls = decls ++ [d]
         } else {
@@ -549,10 +549,10 @@ fn qualify_uses(m: Module, pkg: PkgR) -> Module = {
                 decls = decls ++ [d]
               } else {
                 decls = decls ++
-                  [DUseModule([info.name] ++ list.drop(segs, 1), sel, lo, hi, nlo, nhi)]
+                  [DUseModule([info.name] ++ list.drop(segs, 1), sel, aname, lo, hi, nlo, nhi)]
               }
             None -> {
-              decls = decls ++ [DUseModule([pkg.name] ++ segs, sel, lo, hi, nlo, nhi)]
+              decls = decls ++ [DUseModule([pkg.name] ++ segs, sel, aname, lo, hi, nlo, nhi)]
             }
           }
         }
@@ -578,9 +578,9 @@ fn apply_rewrites(m: Module, rw: Map[String, List[String]]) -> Module = {
   var decls: List[Decl] = []
   for d in m.decls {
     match d {
-      DUseModule(segs, sel, lo, hi, nlo, nhi) ->
+      DUseModule(segs, sel, aname, lo, hi, nlo, nhi) ->
         match map.get(rw, join(segs, "/")) {
-          Some(ns) -> { decls = decls ++ [DUseModule(ns, sel, lo, hi, nlo, nhi)] }
+          Some(ns) -> { decls = decls ++ [DUseModule(ns, sel, aname, lo, hi, nlo, nhi)] }
           None -> { decls = decls ++ [d] }
         }
       _ -> { decls = decls ++ [d] }

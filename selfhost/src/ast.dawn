@@ -271,6 +271,7 @@ pub type Decl =
   | DUseModule(
     segs: List[String],
     selective: Option[List[ImportName]],
+    aname: Option[ImportName],
     lo: Int,
     hi: Int,
     nlo: Int,
@@ -575,11 +576,15 @@ pub fn module_uses(m: Module) -> List[UseView] = {
   var out: List[UseView] = []
   for d in m.decls {
     match d {
-      DUseModule(segs, selective, lo, hi, nlo, nhi) -> {
+      DUseModule(segs, selective, aname, lo, hi, nlo, nhi) -> {
+        let als = match aname {
+          Some(n) -> n.name
+          None -> segs[len(segs) - 1]
+        }
         out = out ++ [UseView {
           segs: segs,
           path: join(segs, "/"),
-          alias_name: segs[len(segs) - 1],
+          alias_name: als,
           selective: selective,
           lo: lo,
           hi: hi,

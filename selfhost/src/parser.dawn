@@ -283,7 +283,15 @@ fn module_use(p: P, st: St, kw: Token) -> PR[Decl] = {
   let nlo = first.lo
   let nhi = end_hi
   if not at_kind(p, st2, DOT) {
-    return Ok((st2, DUseModule(segs, None, kw.lo, nhi, nlo, nhi)))
+    # optional `use a/b/c as name` rename (`as` is a contextual keyword — it is
+    # only special right after a whole-module path, never reserved)
+    let t = cur(p, st2)
+    if t.kind == IDENT && t.text == "as" {
+      let (st_al, an) = want(p, adv1(p, st2), IDENT, "an alias name after `as`")?
+      let als = ImportName { name: an.text, lo: an.lo, hi: an.hi }
+      return Ok((st_al, DUseModule(segs, None, Some(als), kw.lo, an.hi, nlo, nhi)))
+    }
+    return Ok((st2, DUseModule(segs, None, None, kw.lo, nhi, nlo, nhi)))
   }
   let st5 = adv1(p, st2)
   let (st6, o) = want(p, st5, LBRACE, "`{` to open a selective import list")?
@@ -304,7 +312,7 @@ fn module_use(p: P, st: St, kw: Token) -> PR[Decl] = {
     return Err((st9, pd_h("a selective import needs at least one name", nlo, close.hi,
       "use `use " ++ join(segs, "/") ++ "` to import the whole module")))
   }
-  Ok((st9, DUseModule(segs, Some(names), kw.lo, close.hi, nlo, nhi)))
+  Ok((st9, DUseModule(segs, Some(names), None, kw.lo, close.hi, nlo, nhi)))
 }
 
 # ---- const and test declarations ----
@@ -1672,14 +1680,14 @@ fn match_expr(p: P, st: St) -> PR[Expr] = {
         if at_kind(p, st5, COMMA) {
           st4 = skip_nl(p, adv1(p, st5))
         } else if at_kind(p, st5, NEWLINE) || at_kind(p, st5, RBRACE) ||
-            at_kind(p, st5, EOF) || can_start_pattern(cur(p, st5).kind) {
-          # a separator, the match close, or the next arm (arms may be space-separated)
-          st4 = skip_nl(p, st5)
-        } else {
-          let d = perr_h(p, st5, "expected a newline, `,` or `}` after this match arm",
-            "a match arm body is a single expression; wrap statements or assignments in braces: `-> { ... }`")
-          st4 = sync_arm(p, St { ..st5, diags: st5.diags ++ [d] })
-        }
+          at_kind(p, st5, EOF) || can_start_pattern(cur(p, st5).kind) {
+            # a separator, the match close, or the next arm (arms may be space-separated)
+            st4 = skip_nl(p, st5)
+          } else {
+            let d = perr_h(p, st5, "expected a newline, `,` or `}` after this match arm",
+              "a match arm body is a single expression; wrap statements or assignments in braces: `-> { ... }`")
+            st4 = sync_arm(p, St { ..st5, diags: st5.diags ++ [d] })
+          }
       }
     }
   }
