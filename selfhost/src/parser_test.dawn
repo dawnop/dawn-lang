@@ -78,6 +78,18 @@ test "a broken declaration is reported and the next one still parses" {
   }
 }
 
+test "a bare assignment arm is reported and later arms/decls still parse" {
+  # `A -> q = 1` has a bare assignment body; the arm resyncs, the `B` arm and the
+  # following `g` both still parse — no cascade to end of file.
+  let (m, ds) = parse_module("fn f() = match x {\n  A -> q = 1\n  B -> 2\n}\n\nfn g() = 3")
+  assert len(ds) > 0
+  assert str.contains(ds[0].hint, "braces")
+  match m.decls[len(m.decls) - 1] {
+    DFn(f) -> { assert f.name == "g" }
+    _ -> { assert false }
+  }
+}
+
 test "chained comparisons are an error" {
   let (m, ds) = parse_module("fn f() = a < b < c")
   assert len(ds) > 0

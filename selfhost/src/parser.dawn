@@ -1578,6 +1578,36 @@ fn sync_stmt(p: P, st: St) -> St = {
   skip_nl(p, s)
 }
 
+## First tokens that can begin a pattern (mirrors pattern_p's dispatch). Arms may
+## be separated by whitespace alone, so a pattern-start right after a body just
+## begins the next arm; a token that is neither a separator nor a pattern start
+## (e.g. `=`) means the body stopped early.
+fn can_start_pattern(k: TokKind) -> Bool =
+  match k {
+    UNDERSCORE | INT | FLOAT | MINUS | TRUE | FALSE | STRING |
+    IDENT | TYPEIDENT | LPAREN | LBRACKET -> true
+    _ -> false
+  }
+
+## Resync to the next match arm after a broken one: skip to a newline (arm
+## separator) or the match's closing `}`, tracking brace depth so a multi-line
+## braced arm body doesn't stop us early. Consumes the separating newline(s).
+fn sync_arm(p: P, st: St) -> St = {
+  var s = st
+  var depth = 0
+  while not at_kind(p, s, EOF) {
+    let k = cur(p, s).kind
+    if depth == 0 && (k == NEWLINE || k == RBRACE) { break }
+    if k == LBRACE {
+      depth = depth + 1
+    } else if k == RBRACE {
+      depth = depth - 1
+    }
+    s = adv1(p, s)
+  }
+  skip_nl(p, s)
+}
+
 fn match_expr(p: P, st: St) -> PR[Expr] = {
   let (st1, kw) = adv(p, st)
   let (st2, scrut) = expression(p, st1, true)?
@@ -1585,10 +1615,30 @@ fn match_expr(p: P, st: St) -> PR[Expr] = {
   var st4 = skip_nl(p, st3)
   var arms: List[MatchArm] = []
   while not at_kind(p, st4, RBRACE) && not at_kind(p, st4, EOF) {
-    let (st5, arm) = match_arm(p, st4)?
-    arms = arms ++ [arm]
-    # arms are separated by newlines or commas
-    if at_kind(p, st5, COMMA) { st4 = skip_nl(p, adv1(p, st5)) } else { st4 = skip_nl(p, st5) }
+    match match_arm(p, st4) {
+      Err(ed) -> {
+        # a broken arm is reported and skipped; the remaining arms still parse
+        let (ste, d) = ed
+        st4 = sync_arm(p, St { ..ste, diags: ste.diags ++ [d] })
+      }
+      Ok(sa) -> {
+        let (st5, arm) = sa
+        arms = arms ++ [arm]
+        # arms are separated by newlines or commas; anything else means the body
+        # stopped early — most often a bare assignment/statement needing braces
+        if at_kind(p, st5, COMMA) {
+          st4 = skip_nl(p, adv1(p, st5))
+        } else if at_kind(p, st5, NEWLINE) || at_kind(p, st5, RBRACE) ||
+            at_kind(p, st5, EOF) || can_start_pattern(cur(p, st5).kind) {
+          # a separator, the match close, or the next arm (arms may be space-separated)
+          st4 = skip_nl(p, st5)
+        } else {
+          let d = perr_h(p, st5, "expected a newline, `,` or `}` after this match arm",
+            "a match arm body is a single expression; wrap statements or assignments in braces: `-> { ... }`")
+          st4 = sync_arm(p, St { ..st5, diags: st5.diags ++ [d] })
+        }
+      }
+    }
   }
   let (st6, close) = want(p, st4, RBRACE, "`}`")?
   if len(arms) == 0 {
