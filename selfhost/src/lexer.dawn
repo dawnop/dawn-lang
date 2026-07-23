@@ -439,6 +439,9 @@ fn lex_escape(s: Src, at: Int) -> Result[(Int, Int), (Int, Diag)] = {
     Ok((i + 1, '\n'))
   } else if e == 't' {
     Ok((i + 1, '\t'))
+  } else if e == 'r' {
+    # carriage return (code point 13) — no '\r' char literal to spell it with
+    Ok((i + 1, 13))
   } else if e == '\\' {
     Ok((i + 1, '\\'))
   } else if e == '"' {
@@ -742,6 +745,21 @@ fn one_kind(c: Int) -> Option[TokKind] =
 
 fn lex_symbol(s: Src, at: Int) -> (Int, List[Token], List[Diag]) = {
   let c = s.cps[at]
+  # Dawn separates statements by newlines and has no `;` (spec §1.7). Recover a
+  # stray one as a newline so it doesn't cascade into the rest of the file, but
+  # still flag it — the plain "unrecognized character" wouldn't say why.
+  if c == ';' {
+    return (
+      at + 1,
+      [tok(NEWLINE, "\\n", off(s, at), off(s, at) + 1)],
+      [diag_h(
+        "Dawn has no `;` — statements are separated by newlines",
+        off(s, at),
+        off(s, at) + 1,
+        "remove the `;`; write one statement per line"
+      )]
+    )
+  }
   # `>>>` must be probed before the two-char pairs (the only three-char operator)
   if at + 2 < s.n && c == '>' && s.cps[at + 1] == '>' && s.cps[at + 2] == '>' {
     return (at + 3, [tok(USHR, ">>>", off(s, at), off(s, at) + 3)], no_diags())
@@ -834,6 +852,22 @@ test "escapes in strings" {
   assert toks[0].segs == [SText("a\tb🎈")]
 }
 
+test "carriage return escape" {
+  let (toks, ds) = lex("\"a\\rb\"")
+  assert len(ds) == 0
+  assert toks[0].segs == [SText(from_code_points([97, 13, 98]))]
+  let (ct, cds) = lex("'\\r'")
+  assert ct[0].ival == 13
+}
+
+test "semicolons are rejected with a hint" {
+  let (toks, ds) = lex("a = 1; b = 2")
+  assert ds[0].msg == "Dawn has no `;` — statements are separated by newlines"
+  # recovered as a newline, so the second statement still lexes cleanly
+  let ks = kinds("a = 1; b = 2")
+  assert ks == ["IDENT", "EQ", "INT", "NEWLINE", "IDENT", "EQ", "INT", "NEWLINE", "EOF"]
+}
+
 test "a bare dollar is literal" {
   let (toks, ds) = lex("\"$5 \\\$x\"")
   assert toks[0].segs == [SText("$5 \$x")]
@@ -888,9 +922,9 @@ test "invalid numeric literals are diagnostics" {
 }
 
 test "unrecognized character" {
-  let (toks, ds) = lex("a ; b")
-  assert ds[0].msg == "unrecognized character: ;"
-  assert kinds("a ; b") == ["IDENT", "IDENT", "NEWLINE", "EOF"]
+  let (toks, ds) = lex("a \\ b")
+  assert ds[0].msg == "unrecognized character: \\"
+  assert kinds("a \\ b") == ["IDENT", "IDENT", "NEWLINE", "EOF"]
 }
 
 test "three char and two char operators" {
