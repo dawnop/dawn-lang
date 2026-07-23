@@ -25,9 +25,19 @@ export PLAY_TIMEOUT=3
 PORT=${PLAY_TEST_PORT:-8097}
 export PLAY_PORT=$PORT
 
+# A stale server on the port would answer every check while the fresh one
+# dies on bind — fail fast instead of green-lighting an orphan.
+if curl -s --noproxy '*' "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
+  echo "FAIL: something already listens on $PORT (stale server?)"; exit 1
+fi
+
 "$DAWN_BIN" run "$ROOT/playground" >/tmp/dawn-play-test.log 2>&1 &
 SRV=$!
-trap 'kill $SRV 2>/dev/null' EXIT
+# $SRV is the compiler JVM; `dawn run` executes the program in a child JVM,
+# so also kill whoever holds the port (the child outlives its parent
+# otherwise). Guards keep a failed kill from turning into the script's exit
+# status (dash: set -e applies inside an EXIT trap).
+trap 'kill $SRV 2>/dev/null; fuser -k -TERM "$PORT/tcp" 2>/dev/null; true' EXIT
 # the runner prints "listening" once the socket is open
 for _ in $(seq 1 30); do
   curl -s --noproxy '*' "http://127.0.0.1:$PORT/health" >/dev/null 2>&1 && break
