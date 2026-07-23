@@ -179,7 +179,9 @@ fn lex_go(text: String, base: Int, collect: Bool) -> (List[Token], List[Token], 
         while e > i0 && (s.cps[e - 1] == ' ' || s.cps[e - 1] == '\t' || s.cps[e - 1] == 13) {
           e = e - 1
         }
-        let ctext = utf16_slice(text, off(s, i0) - s.base, off(s, e) - s.base)
+        # slice the pre-decoded code-point array (O(len)); utf16_slice would
+        # re-scan from the start of `text`, making comment collection O(n²)
+        let ctext = text_of(s, i0, e)
         comments = comments ++ [tok(COMMENT, ctext, off(s, i0), off(s, e))]
       }
     } else if c == '"' || c == '`' || c == '\'' {
