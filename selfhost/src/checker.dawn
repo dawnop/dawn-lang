@@ -6822,8 +6822,28 @@ fn check_match(
         ty_show(cx1.adts, st), e_lo(scrut), e_hi(scrut))
   }
   var result = TyNever
-  var tarms: List[TArm] = []
+  # concrete-typed arms first so an inference-only arm body (bare `None`, `[]`)
+  # can borrow the result type from its siblings as its expected — the empty-list
+  # two-pass (§EListLit) applied to arm bodies. Typed arms are reassembled in
+  # source order for exhaustiveness + codegen.
+  var order: List[Int] = []
+  var oi = 0
   for arm in arms {
+    if not needs_expected(cx1, arm.body) { order = order ++ [oi] }
+    oi = oi + 1
+  }
+  oi = 0
+  for arm in arms {
+    if needs_expected(cx1, arm.body) { order = order ++ [oi] }
+    oi = oi + 1
+  }
+  var slots: List[Option[TArm]] = []
+  for _s in 0 ..len(arms) {
+    let empty: Option[TArm] = None
+    slots = slots ++ [empty]
+  }
+  for idx in order {
+    let arm = arms[idx]
     cx1 = push_scope(cx1)
     if len(arm.pats) > 1 {
       # or-patterns must not bind: each alternative would need identical bindings
@@ -6851,14 +6871,27 @@ fn check_match(
       }
       None -> ()
     }
-    let (cxb, bt, bx) = check_expr(cx1, arm.body, expected)
+    # prefer the match's own expected; else the result inferred from concrete arms
+    let arm_exp: Option[Ty] = match expected {
+      Some(e) -> Some(e)
+      None -> if result != TyNever && is_concrete(cx1, result) { Some(result) } else { None }
+    }
+    let (cxb, bt, bx) = check_expr(cx1, arm.body, arm_exp)
     cx1 = cxb
     let (cxc, unified) = unify_branches(cx1, result, bt, e_lo(arm.body), e_hi(arm.body),
       "the match arms")
     cx1 = cxc
     result = unified
     cx1 = pop_scope(cx1)
-    tarms = tarms ++ [TArm { pats: tpats, guard: tguard, body: bx }]
+    slots = list.take(slots, idx) ++
+      [Some(TArm { pats: tpats, guard: tguard, body: bx })] ++ list.drop(slots, idx + 1)
+  }
+  var tarms: List[TArm] = []
+  for s in slots {
+    match s {
+      Some(t) -> { tarms = tarms ++ [t] }
+      None -> ()
+    }
   }
   # exhaustiveness (guarded arms can fail their guard, so they don't count)
   if scrut_ok {
@@ -7716,6 +7749,24 @@ test "check_module: a whole module checks end to end" {
   assert len(tm.fns) == 3
   assert len(tm.consts) == 1
   assert len(tm.tests) == 1
+}
+
+test "check_module: a bare None arm infers from a concrete sibling arm" {
+  # `entry` is unannotated and the `[]` arm has no expected type of its own; it
+  # must borrow Option[Int] from the concrete `Some` arm (match sibling inference)
+  let src =
+    "pub fn first(xs: List[Int]) -> Bool = {\n" ++
+    "  let entry = match xs {\n" ++
+    "    [x, ..] -> Some(x)\n" ++
+    "    [] -> None\n" ++
+    "  }\n" ++
+    "  match entry { Some(v) -> true  None -> false }\n" ++
+    "}\n"
+  let (m, pdiags) = parser.parse_module(src)
+  assert len(pdiags) == 0
+  let env: Map[String, ModExports] = map.empty()
+  let (cx1, _) = check_module(test_cx(), m, env)
+  assert len(cx1.diags) == 0
 }
 
 test "check_module: an inference cycle must annotate" {
