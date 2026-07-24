@@ -237,7 +237,36 @@ native 照抄才算"通过"。故语料要配少量**独立的期望输出**(不
 
 **止损点**:Phase 0 出口若无法做到零 Emit-Change，说明 Core IR 的边界画错了，退回重划而不是硬推。
 
-## 7. 明确不在范围内
+## 7. 进度(2026-07-25)
+
+| 阶段 | 状态 |
+|---|---|
+| **Phase −1** 接缝 spike | **完成** |
+| **Phase 0** Core IR | **约六成**——IR 节点集 + `lower.dawn` 完成并由 C 后端验证;**`emit.dawn` 尚未改吃 Core** |
+| Phase 1 D0 | 未动 |
+| Phase 2 D1–D3 | 未动 |
+| Phase 3 C 发射器 | **提前完成一大截**(见下) |
+| Phase 4 Perceus | 未动 |
+| Phase 5 `use c` / Phase A 验收 | 差分 harness 已就位,`use c` 未动 |
+| Phase 6 native 自举 | 未动 |
+
+**已落地的件**:`selfhost/src/core.dawn`(IR)、`selfhost/src/lower.dawn`(TAST → Core)、
+`selfhost/src/emitc.dawn`(Core → C)、`runtime/c/dawn_rt.{h,c}`、`scripts/spike-native/`(差分 harness + 四个语料)。
+入口 `dawn __emitc <file> -o <out.c>`。
+
+**Core 已覆盖并在两个后端对拍验证**:标量、算术/位运算、短路、控制流、字符串与插值、ADT 构造/字段/判别式、
+match(守卫、嵌套模式、字面量模式、元组模式)、`?`/`!`、元组、闭包(lambda 提升 + 捕获环境 + 函数值)、
+trait 字典(去虚化 + 转发 + 默认方法 + 桥接)、类型变量槽的装箱。
+
+**Core 尚未覆盖**:集合(等 D1–D3)、comptime const、derive 出来的 impl、列表模式、解构 let、
+`use java`(native 侧按设计拒绝)。
+
+**为什么先让 C 后端吃 Core,而不是先改 `emit.dawn`**:R1 说的就是「对着唯一一个后端设计中立 IR 会长出
+JVM-ism」。让那个**不可能继承 JVM 假设**的后端先吃,是最直接的对冲。代价是 Phase 0 的出口(emit.dawn 改吃 Core)
+仍未达成;好处是节点集已被真实消费者验过四轮,而且验出来的三条设计缺陷(`CSDiscard`、`CSLoop.step`、
+`CBreak` 点名循环、字典槽统一签名)都是**在写第二个后端之前**发现的。
+
+## 8. 明确不在范围内
 
 - `packages/web` / `packages/json` / `site` / `playground` 在 native 上跑(web 需要 C 写的 HTTP 栈 + socket 层)。
 - Windows。
