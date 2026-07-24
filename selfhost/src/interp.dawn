@@ -41,7 +41,6 @@ use java "java.lang.Double"
 use java "java.lang.Boolean"
 use java "java.lang.Number"
 use java "java.util.Objects"
-use java "dawn.rt.StdStrings"
 
 ## A comptime value. Function values may exist during evaluation but cannot be
 ## a result (the checker enforces constant-serializability).
@@ -397,12 +396,11 @@ pub fn apply_fn(icx: ICx, st: ESt, env: Env, f: CValue, args: List[CValue], lo: 
 
 # ---- builtins (the pure ones; io never reaches the interpreter) ----
 
-# Comptime folding of the str_* intrinsics reaches their one implementation —
-# the ASM-emitted dawn/rt/Strings — by route-C reflection. The checker cannot
-# `use java` an emitted class, but it is on the running compiler's class path,
-# so invoke_static finds it, and there is no second copy of the logic here. (The
-# cursor family still folds through the vendored StdStrings until that class is
-# retired; both classes carry the same bodies in the meantime.)
+# Comptime folding of the cursor and str_* intrinsics reaches their one
+# implementation — the ASM-emitted dawn/rt/Strings — by route-C reflection. The
+# checker cannot `use java` an emitted class, but it is on the running compiler's
+# class path, so invoke_static finds it, and there is no second copy of the logic
+# here. This is what let the cursor/str primitives leave the vendored StdStrings.
 fn rt_raw(method: String, param_cls: List[String], vals: List[CValue]) -> Option[Object] !io = {
   var jargs: List[Object] = []
   var i = 0
@@ -505,26 +503,29 @@ fn call_builtin(icx: ICx, st: ESt, env: Env, name: String, args: List[CValue], l
       Ok((st, env, VList(out)))
     }
   } else if name == "cursor_start" {
-    Ok((st, env, VInt(StdStrings.cursorStart(as_str(args[0])))))
+    Ok((st, env, VInt(rt_long("cursorStart", ["java.lang.String"], args))))
   } else if name == "cursor_end" {
-    Ok((st, env, VInt(StdStrings.cursorEnd(as_str(args[0])))))
+    Ok((st, env, VInt(rt_long("cursorEnd", ["java.lang.String"], args))))
   } else if name == "cursor_done" {
-    Ok((st, env, VBool(StdStrings.cursorDone(as_str(args[0]), as_int(args[1])))))
+    Ok((st, env, VBool(rt_bool("cursorDone", ["java.lang.String", "long"], args))))
   } else if name == "cursor_char" {
-    Ok((st, env, VInt(StdStrings.cursorChar(as_str(args[0]), as_int(args[1])))))
+    Ok((st, env, VInt(rt_long("cursorChar", ["java.lang.String", "long"], args))))
   } else if name == "cursor_next" {
-    Ok((st, env, VInt(StdStrings.cursorNext(as_str(args[0]), as_int(args[1])))))
+    Ok((st, env, VInt(rt_long("cursorNext", ["java.lang.String", "long"], args))))
   } else if name == "cursor_prev" {
-    Ok((st, env, VInt(StdStrings.cursorPrev(as_str(args[0]), as_int(args[1])))))
+    Ok((st, env, VInt(rt_long("cursorPrev", ["java.lang.String", "long"], args))))
   } else if name == "cursor_slice" {
-    match StdStrings.cursorSlice(as_str(args[0]), as_int(args[1]), as_int(args[2])) {
-      Some(cut) -> Ok((st, env, VStr(cut)))
+    match rt_raw("cursorSlice", ["java.lang.String", "long", "long"], args) {
+      Some(o) -> {
+        let cut: String = cast(o)
+        Ok((st, env, VStr(cut)))
+      }
       None -> cerr3(st, env, "panicked: cursor_slice: invalid cursor range", lo, hi)
     }
   } else if name == "cursor_skip" {
-    Ok((st, env, VInt(StdStrings.cursorSkip(as_str(args[0]), as_int(args[1]), as_str(args[2])))))
+    Ok((st, env, VInt(rt_long("cursorSkip", ["java.lang.String", "long", "java.lang.String"], args))))
   } else if name == "index_of_from" {
-    let i = StdStrings.indexOfFrom(as_str(args[0]), as_str(args[1]), as_int(args[2]))
+    let i = rt_long("indexOfFromRaw", ["java.lang.String", "java.lang.String", "long"], args)
     if i < 0 {
       Ok((st, env, none_v()))
     } else {

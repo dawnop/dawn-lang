@@ -10,75 +10,98 @@
 # moving out of the compiler's builtin table (docs/builtins-to-stdlib.md).
 #
 # Two implementation styles live here, on purpose (docs/pure-ffi-design.md §九):
-#   - plain Dawn, when the function is expressible without help;
-#   - a forward to `dawn.rt.StdStrings`, a source-compiled class in the compiler
-#     jar, wrapped in `unsafe_pure` because every Java call reads as !io. That is
-#     the route the builtin table migrates along: the checker can reflect on a
-#     real class, unlike the ASM-generated dawn/rt/* helpers.
-use java "dawn.rt.StdStrings"
+#   - plain Dawn over the string intrinsics (code_points/from_code_points and the
+#     cursor family), when the operation is expressible that way;
+#   - a str_* intrinsic, for the primitives that need Unicode or native search
+#     and so cannot be pure Dawn: len (code points), case folding, whitespace,
+#     contains/starts_with/ends_with, and index_of/last_index_of.
+# Nothing here names a JVM class any more; the backend owns those in
+# dawn/rt/Strings (docs/runtime-intrinsics-design.md). str_index_of and
+# str_last_index_of report "absent" as -1, which the wrappers turn into `None`.
 
 ## Number of Unicode code points in `s` (not UTF-16 units, and not `chars`' list length).
-pub fn len(s: String) -> Int = unsafe_pure { StdStrings.len(s) }
+pub fn len(s: String) -> Int = str_len(s)
 
 ## True when the string has no characters.
 pub fn is_empty(s: String) -> Bool = len(s) == 0
 
 ## `s` without leading or trailing whitespace.
-pub fn trim(s: String) -> String =
-  unsafe_pure { StdStrings.trim(s).expect("trim never returns null") }
+pub fn trim(s: String) -> String = str_trim(s)
 
 ## `s` lowercased, independently of the machine's locale.
-pub fn to_lower(s: String) -> String =
-  unsafe_pure { StdStrings.toLower(s).expect("toLower never returns null") }
+pub fn to_lower(s: String) -> String = str_lower(s)
 
 ## `s` uppercased, independently of the machine's locale.
-pub fn to_upper(s: String) -> String =
-  unsafe_pure { StdStrings.toUpper(s).expect("toUpper never returns null") }
+pub fn to_upper(s: String) -> String = str_upper(s)
 
 ## Whether `sub` occurs anywhere in `s`.
-pub fn contains(s: String, sub: String) -> Bool = unsafe_pure { StdStrings.contains(s, sub) }
+pub fn contains(s: String, sub: String) -> Bool = str_contains(s, sub)
 
 ## Whether `s` begins with `prefix`.
-pub fn starts_with(s: String, prefix: String) -> Bool =
-  unsafe_pure { StdStrings.startsWith(s, prefix) }
+pub fn starts_with(s: String, prefix: String) -> Bool = str_starts_with(s, prefix)
 
 ## Whether `s` ends with `suffix`.
-pub fn ends_with(s: String, suffix: String) -> Bool =
-  unsafe_pure { StdStrings.endsWith(s, suffix) }
+pub fn ends_with(s: String, suffix: String) -> Bool = str_ends_with(s, suffix)
 
 ## The code-point index of the first occurrence of `sub`, or `None`.
-## The forward reports "absent" as -1, since a Dawn ADT cannot cross the FFI boundary.
 pub fn index_of(s: String, sub: String) -> Option[Int] = {
-  let i = unsafe_pure { StdStrings.indexOf(s, sub) }
+  let i = str_index_of(s, sub)
   if i < 0 { None } else { Some(i) }
 }
 
 ## The code-point index of the last occurrence of `sub`, or `None`.
 pub fn last_index_of(s: String, sub: String) -> Option[Int] = {
-  let i = unsafe_pure { StdStrings.lastIndexOf(s, sub) }
+  let i = str_last_index_of(s, sub)
   if i < 0 { None } else { Some(i) }
 }
 
 ## The single-code-point string for `c`. Panics when `c` is not a valid code point.
-pub fn from_char(c: Int) -> String =
-  unsafe_pure { StdStrings.charToString(c).expect("from_char: not a valid code point") }
+pub fn from_char(c: Int) -> String = from_code_points([c])
 
 ## `s` repeated `n` times; n <= 0 yields the empty string.
 pub fn repeat(s: String, n: Int) -> String = if n <= 0 { "" } else { s ++ repeat(s, n - 1) }
 
-## The code points of `s` in `[from, to)`. Panics when the range is out of
-## bounds — the `None` the forward returns *is* that out-of-bounds signal, since
-## a source-compiled class cannot throw the ASM-generated panic itself.
+# The code-point helpers below recurse over `code_points(s)` with an explicit
+# index because `len` here is str.len (String → code points) and so shadows the
+# builtin list length; `str.len(s)` doubles as the code-point count of that list.
+
+## The code points of `s` in `[from, to)`. Panics when the range is out of bounds.
 pub fn substring(s: String, from: Int, to: Int) -> String =
-  unsafe_pure { StdStrings.substring(s, from, to).expect("substring: index out of range") }
+  if from < 0 || from > to || to > len(s) {
+    panic("substring: index out of range")
+  } else {
+    let acc: List[Int] = []
+    from_code_points(slice_cps(code_points(s), from, to, acc))
+  }
 
-## `s` left-padded with `pad` until it is `width` code points wide.
-pub fn pad_start(s: String, width: Int, pad: String) -> String =
-  unsafe_pure { StdStrings.padStart(s, width, pad).expect("padStart never returns null") }
+fn slice_cps(cps: List[Int], i: Int, to: Int, acc: List[Int]) -> List[Int] =
+  if i >= to { acc } else { slice_cps(cps, i + 1, to, acc ++ [get(cps, i).expect("in range")]) }
 
-## `s` with its code points in reverse order.
-pub fn reverse(s: String) -> String =
-  unsafe_pure { StdStrings.reverse(s).expect("reverse never returns null") }
+## `s` left-padded with `pad` until it is `width` code points wide. Returns `s`
+## unchanged when it is already wide enough or `pad` is empty; the filler is
+## truncated to land exactly on width.
+pub fn pad_start(s: String, width: Int, pad: String) -> String = {
+  let have = len(s)
+  if have >= width || pad == "" {
+    s
+  } else {
+    let acc: List[Int] = []
+    from_code_points(pad_fill(code_points(pad), len(pad), width - have, 0, acc)) ++ s
+  }
+}
+
+fn pad_fill(pad: List[Int], plen: Int, need: Int, i: Int, acc: List[Int]) -> List[Int] =
+  if i >= need { acc }
+  else { pad_fill(pad, plen, need, i + 1, acc ++ [get(pad, i % plen).expect("cycle in range")]) }
+
+## `s` with its code points in reverse order (surrogate pairs stay intact).
+pub fn reverse(s: String) -> String = {
+  let acc: List[Int] = []
+  from_code_points(rev_cps(code_points(s), len(s) - 1, acc))
+}
+
+fn rev_cps(cps: List[Int], i: Int, acc: List[Int]) -> List[Int] =
+  if i < 0 { acc } else { rev_cps(cps, i - 1, acc ++ [get(cps, i).expect("in range")]) }
 
 # ---- cursors ----
 #
