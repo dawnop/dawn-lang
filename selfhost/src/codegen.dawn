@@ -741,8 +741,6 @@ pub const MAPS_CLASS: String = "dawn/rt/Maps"
 
 pub const FN_CMP_CLASS: String = "dawn/rt/FnComparator"
 
-pub const STDSTRINGS_CLASS: String = "dawn/rt/StdStrings"
-
 pub const OP_ARRAYLENGTH: Int = 190
 
 pub const OP_IINC_UNUSED: Int = 132
@@ -1044,8 +1042,10 @@ fn gen_parse_method(
   ()
 }
 
-## dawn/rt/Strings: join, indexOfFrom (StdStrings sentinel → Option),
-## parseInt/parseFloat, code_points/from_code_points (spec §1.5, §11).
+## dawn/rt/Strings: the string runtime — join, indexOfFrom (sentinel → Option),
+## parseInt/parseFloat, code_points/from_code_points, the cursor family, and the
+## str_* primitives. Owns every string operation the language names (spec §1.5,
+## §11); nothing is vendored in handwritten Java any more.
 pub fn gen_strings_class(supers: List[String]) -> Bytes !io = {
   let jstr = "java/lang/String"
   let jlist = "java/util/List"
@@ -1458,6 +1458,114 @@ pub fn gen_strings_class(supers: List[String]) -> Bytes !io = {
   iofv.visitInsn(OP_I2L)
   iofv.visitInsn(OP_LRETURN)
   close_mv(iofv)
+
+  # ---- str_* intrinsics (the string primitives std cannot write in pure Dawn) ----
+  # These were vendored on dawn.rt.StdStrings; emitting them here retires that
+  # handwritten class. Bodies are StdStrings' verbatim: code points for lengths
+  # and indices, Locale.ROOT for case, a -1 sentinel for a missing search.
+  let jlocale = "java/util/Locale"
+
+  # str_len(s) = s.codePointCount(0, s.length())
+  let slv = open_static(cw, "str_len", "(Ljava/lang/String;)J")
+  slv.visitVarInsn(OP_ALOAD, 0)
+  slv.visitInsn(OP_ICONST_0)
+  slv.visitVarInsn(OP_ALOAD, 0)
+  slv.visitMethodInsn(OP_INVOKEVIRTUAL, jstr, "length", "()I", false)
+  slv.visitMethodInsn(OP_INVOKEVIRTUAL, jstr, "codePointCount", "(II)I", false)
+  slv.visitInsn(OP_I2L)
+  slv.visitInsn(OP_LRETURN)
+  close_mv(slv)
+
+  # str_trim(s) = s.strip()
+  let stv = open_static(cw, "str_trim", "(Ljava/lang/String;)Ljava/lang/String;")
+  stv.visitVarInsn(OP_ALOAD, 0)
+  stv.visitMethodInsn(OP_INVOKEVIRTUAL, jstr, "strip", "()Ljava/lang/String;", false)
+  stv.visitInsn(OP_ARETURN)
+  close_mv(stv)
+
+  # str_lower(s) = s.toLowerCase(Locale.ROOT)
+  let slov = open_static(cw, "str_lower", "(Ljava/lang/String;)Ljava/lang/String;")
+  slov.visitVarInsn(OP_ALOAD, 0)
+  slov.visitFieldInsn(OP_GETSTATIC, jlocale, "ROOT", "Ljava/util/Locale;")
+  slov.visitMethodInsn(OP_INVOKEVIRTUAL, jstr, "toLowerCase",
+    "(Ljava/util/Locale;)Ljava/lang/String;", false)
+  slov.visitInsn(OP_ARETURN)
+  close_mv(slov)
+
+  # str_upper(s) = s.toUpperCase(Locale.ROOT)
+  let supv = open_static(cw, "str_upper", "(Ljava/lang/String;)Ljava/lang/String;")
+  supv.visitVarInsn(OP_ALOAD, 0)
+  supv.visitFieldInsn(OP_GETSTATIC, jlocale, "ROOT", "Ljava/util/Locale;")
+  supv.visitMethodInsn(OP_INVOKEVIRTUAL, jstr, "toUpperCase",
+    "(Ljava/util/Locale;)Ljava/lang/String;", false)
+  supv.visitInsn(OP_ARETURN)
+  close_mv(supv)
+
+  # str_contains(s, sub) = s.contains(sub)
+  let scv = open_static(cw, "str_contains", "(Ljava/lang/String;Ljava/lang/String;)Z")
+  scv.visitVarInsn(OP_ALOAD, 0)
+  scv.visitVarInsn(OP_ALOAD, 1)
+  scv.visitMethodInsn(OP_INVOKEVIRTUAL, jstr, "contains", "(Ljava/lang/CharSequence;)Z", false)
+  scv.visitInsn(OP_IRETURN)
+  close_mv(scv)
+
+  # str_starts_with(s, prefix) = s.startsWith(prefix)
+  let sswv = open_static(cw, "str_starts_with", "(Ljava/lang/String;Ljava/lang/String;)Z")
+  sswv.visitVarInsn(OP_ALOAD, 0)
+  sswv.visitVarInsn(OP_ALOAD, 1)
+  sswv.visitMethodInsn(OP_INVOKEVIRTUAL, jstr, "startsWith", "(Ljava/lang/String;)Z", false)
+  sswv.visitInsn(OP_IRETURN)
+  close_mv(sswv)
+
+  # str_ends_with(s, suffix) = s.endsWith(suffix)
+  let sewv = open_static(cw, "str_ends_with", "(Ljava/lang/String;Ljava/lang/String;)Z")
+  sewv.visitVarInsn(OP_ALOAD, 0)
+  sewv.visitVarInsn(OP_ALOAD, 1)
+  sewv.visitMethodInsn(OP_INVOKEVIRTUAL, jstr, "endsWith", "(Ljava/lang/String;)Z", false)
+  sewv.visitInsn(OP_IRETURN)
+  close_mv(sewv)
+
+  # str_index_of(s, sub): u = s.indexOf(sub); u<0 ? -1 : s.codePointCount(0, u)
+  let siv = open_static(cw, "str_index_of", "(Ljava/lang/String;Ljava/lang/String;)J")
+  let si_neg = Label.new()
+  siv.visitVarInsn(OP_ALOAD, 0)
+  siv.visitVarInsn(OP_ALOAD, 1)
+  siv.visitMethodInsn(OP_INVOKEVIRTUAL, jstr, "indexOf", "(Ljava/lang/String;)I", false)
+  siv.visitVarInsn(OP_ISTORE, 2)
+  siv.visitVarInsn(OP_ILOAD, 2)
+  siv.visitJumpInsn(OP_IFLT, si_neg)
+  siv.visitVarInsn(OP_ALOAD, 0)
+  siv.visitInsn(OP_ICONST_0)
+  siv.visitVarInsn(OP_ILOAD, 2)
+  siv.visitMethodInsn(OP_INVOKEVIRTUAL, jstr, "codePointCount", "(II)I", false)
+  siv.visitInsn(OP_I2L)
+  siv.visitInsn(OP_LRETURN)
+  siv.visitLabel(si_neg)
+  siv.visitInsn(OP_ICONST_M1)
+  siv.visitInsn(OP_I2L)
+  siv.visitInsn(OP_LRETURN)
+  close_mv(siv)
+
+  # str_last_index_of(s, sub): u = s.lastIndexOf(sub); u<0 ? -1 : s.codePointCount(0, u)
+  let sliv = open_static(cw, "str_last_index_of", "(Ljava/lang/String;Ljava/lang/String;)J")
+  let sli_neg = Label.new()
+  sliv.visitVarInsn(OP_ALOAD, 0)
+  sliv.visitVarInsn(OP_ALOAD, 1)
+  sliv.visitMethodInsn(OP_INVOKEVIRTUAL, jstr, "lastIndexOf", "(Ljava/lang/String;)I", false)
+  sliv.visitVarInsn(OP_ISTORE, 2)
+  sliv.visitVarInsn(OP_ILOAD, 2)
+  sliv.visitJumpInsn(OP_IFLT, sli_neg)
+  sliv.visitVarInsn(OP_ALOAD, 0)
+  sliv.visitInsn(OP_ICONST_0)
+  sliv.visitVarInsn(OP_ILOAD, 2)
+  sliv.visitMethodInsn(OP_INVOKEVIRTUAL, jstr, "codePointCount", "(II)I", false)
+  sliv.visitInsn(OP_I2L)
+  sliv.visitInsn(OP_LRETURN)
+  sliv.visitLabel(sli_neg)
+  sliv.visitInsn(OP_ICONST_M1)
+  sliv.visitInsn(OP_I2L)
+  sliv.visitInsn(OP_LRETURN)
+  close_mv(sliv)
 
   cw.visitEnd()
   cw.toByteArray().expect("bytes")

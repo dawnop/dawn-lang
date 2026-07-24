@@ -397,6 +397,40 @@ pub fn apply_fn(icx: ICx, st: ESt, env: Env, f: CValue, args: List[CValue], lo: 
 
 # ---- builtins (the pure ones; io never reaches the interpreter) ----
 
+# Comptime folding of the str_* intrinsics reaches their one implementation —
+# the ASM-emitted dawn/rt/Strings — by route-C reflection. The checker cannot
+# `use java` an emitted class, but it is on the running compiler's class path,
+# so invoke_static finds it, and there is no second copy of the logic here. (The
+# cursor family still folds through the vendored StdStrings until that class is
+# retired; both classes carry the same bodies in the meantime.)
+fn rt_raw(method: String, param_cls: List[String], vals: List[CValue]) -> Option[Object] !io = {
+  var jargs: List[Object] = []
+  var i = 0
+  for p in param_cls {
+    jargs = jargs ++ [to_java_arg(p, vals[i]).expect("rt-intrinsic argument")]
+    i = i + 1
+  }
+  match jreflect.invoke_static("dawn.rt.Strings", method, param_cls, jargs) {
+    Ok(r) -> r
+    Err(t) -> panic("comptime dawn.rt.Strings." ++ method ++ " threw " ++ t)
+  }
+}
+
+fn rt_long(method: String, param_cls: List[String], vals: List[CValue]) -> Int !io = {
+  let n: Number = cast(rt_raw(method, param_cls, vals).expect("primitive result"))
+  n.longValue()
+}
+
+fn rt_bool(method: String, param_cls: List[String], vals: List[CValue]) -> Bool !io = {
+  let b: Boolean = cast(rt_raw(method, param_cls, vals).expect("primitive result"))
+  b.booleanValue()
+}
+
+fn rt_str(method: String, param_cls: List[String], vals: List[CValue]) -> String !io = {
+  let s: String = cast(rt_raw(method, param_cls, vals).expect("string result"))
+  s
+}
+
 fn call_builtin(icx: ICx, st: ESt, env: Env, name: String, args: List[CValue], lo: Int, hi: Int) -> ER !io =
   if name == "panic" {
     cerr3(st, env, "panicked: " ++ as_str(args[0]), lo, hi)
@@ -496,6 +530,14 @@ fn call_builtin(icx: ICx, st: ESt, env: Env, name: String, args: List[CValue], l
     } else {
       Ok((st, env, some_v(VInt(i))))
     }
+  } else if name == "str_len" {
+    Ok((st, env, VInt(rt_long("str_len", ["java.lang.String"], args))))
+  } else if name == "str_index_of" || name == "str_last_index_of" {
+    Ok((st, env, VInt(rt_long(name, ["java.lang.String", "java.lang.String"], args))))
+  } else if name == "str_contains" || name == "str_starts_with" || name == "str_ends_with" {
+    Ok((st, env, VBool(rt_bool(name, ["java.lang.String", "java.lang.String"], args))))
+  } else if name == "str_trim" || name == "str_lower" || name == "str_upper" {
+    Ok((st, env, VStr(rt_str(name, ["java.lang.String"], args))))
   } else if name == "parse_int" {
     match parse_int(as_str(args[0])) {
       Some(n) -> Ok((st, env, some_v(VInt(n))))

@@ -528,7 +528,21 @@ pub fn builtins() -> Map[String, Sig] = {
     bsig("cursor_prev", [TyString, TyCursor], ["s", "c"], TyCursor),
     bsig("cursor_slice", [TyString, TyCursor, TyCursor], ["s", "from", "to"], TyString),
     bsig("cursor_skip", [TyString, TyCursor, TyString], ["s", "c", "sub"], TyCursor),
-    bsig("index_of_from", [TyString, TyString, TyCursor], ["s", "sub", "from"], opt_ty(TyCursor))
+    bsig("index_of_from", [TyString, TyString, TyCursor], ["s", "sub", "from"], opt_ty(TyCursor)),
+    # str_* intrinsics: the string primitives that need Unicode/JVM support and
+    # so cannot be pure Dawn (case folding, whitespace, native search). The
+    # JVM backend emits them into dawn/rt/Strings; std/str writes the rest over
+    # these plus code_points/cursors. str_index_of/str_last_index_of report a
+    # missing match as -1, which the std wrapper turns into None.
+    bsig("str_len", [TyString], ["s"], TyInt),
+    bsig("str_trim", [TyString], ["s"], TyString),
+    bsig("str_lower", [TyString], ["s"], TyString),
+    bsig("str_upper", [TyString], ["s"], TyString),
+    bsig("str_contains", [TyString, TyString], ["s", "sub"], TyBool),
+    bsig("str_starts_with", [TyString, TyString], ["s", "prefix"], TyBool),
+    bsig("str_ends_with", [TyString, TyString], ["s", "suffix"], TyBool),
+    bsig("str_index_of", [TyString, TyString], ["s", "sub"], TyInt),
+    bsig("str_last_index_of", [TyString, TyString], ["s", "sub"], TyInt)
   ]
   sigs = sigs ++ [
     eff1(bsig("args", [], [], TyList(TyString)), EIo),
@@ -675,7 +689,7 @@ test "builtin table renders signatures" {
     }
     None -> { assert false }
   }
-  assert map_size2(bs) == 46
+  assert map_size2(bs) == 55
 }
 
 fn map_size2(m: Map[String, Sig]) -> Int = map.size(m)

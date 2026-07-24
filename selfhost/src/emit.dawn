@@ -48,7 +48,7 @@ use codegen.{
   OP_BIPUSH, OP_ARRAYLENGTH,
   PANIC_CLASS, UNIT_CLASS, SB, SHOW_CLASS, BYTES_CLASS, IO_CLASS,
   LISTS_CLASS, STRINGS_CLASS, MAPS_CLASS, FN_CMP_CLASS,
-  STDSTRINGS_CLASS, ARRAYLIST, DAWNLIST_CLASS
+  ARRAYLIST, DAWNLIST_CLASS
 }
 use jreflect
 use java "dawn.tool.AdtClassWriter"
@@ -2407,6 +2407,14 @@ fn gen_builtin_call(g: Gen, name: String, args: List[TExpr], wits: List[WitRef],
         "([Ljava/lang/String;)Ljava/util/List;", false)
       (g, true)
     } else if name == "code_points" || name == "from_code_points" {
+      let g1 = gen_args_plain(g, args)
+      let s = builtin_decl_sig(name)
+      g1.mv.visitMethodInsn(OP_INVOKESTATIC, STRINGS_CLASS, name,
+        method_desc(g1.adts, s.param_tys, s.ret), false)
+      (g1, true)
+    } else if str.starts_with(name, "str_") {
+      # every str_* intrinsic invokes the same-named static in dawn/rt/Strings;
+      # the descriptor falls out of the builtin signature (as code_points does)
       let g1 = gen_args_plain(g, args)
       let s = builtin_decl_sig(name)
       g1.mv.visitMethodInsn(OP_INVOKESTATIC, STRINGS_CLASS, name,
