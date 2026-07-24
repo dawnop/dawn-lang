@@ -129,7 +129,7 @@ JVM-锁死。LLVM 后端一看 std 里全是 `java.lang.String.codePointCount`,�
 
   | 泄漏的 lowering | 现状(entanglement) | 后端 #2 的重写代价 |
   |---|---|---|
-  | **intrinsic 语义** | 契约有**三份不一致实现**:`types.dawn` 签名表 / `emit.dawn:2235 gen_builtin_call` 31 条手写字节码臂 / `interp.dawn` 反射调 `dawn.rt.*` | 56 个 builtin 语义要重发一遍;native 自举时 interp 的反射求值**根本没法用** |
+  | **intrinsic 语义** | ~~三份不一致~~ → emit 已收口(Move 1 增量 1):string/list/map/io 的 (class, method) 归入 `emit.dawn` 的 `rt_intrinsic_target` 表、走一条 INVOKESTATIC 臂(descriptor=`method_desc(签名)`、装箱=`adapt_to`);`types.dawn` 签名表由它复用。**残余**:`interp.dawn` 仍反射调 `dawn.rt.*`(unicode 原语)| 56 个 builtin 语义要重发一遍;native 自举时 interp 的反射求值**根本没法用** |
   | **结构化控制流 + 语法糖** | `for`/`while`/`match`/`?`/`!`/字符串插值以 tast 节点存活,到 `emit.dawn:764,1026,1456` 才内联 lower 成字节码 | match 编译(决策树)是皇冠明珠,**不想写两遍** |
   | **装箱 / 擦除** | 泛型擦除到 `Object`;装箱决策 `adapt_to/adapt_from`(`emit.dawn:328`)在每个调用点重算「槽是不是 TyVar → 装箱」,没物化成 IR 节点 | Rank 1 最烂的耦合,散在每个 arg/return 点 |
 
@@ -143,7 +143,10 @@ JVM-锁死。LLVM 后端一看 std 里全是 `java.lang.String.codePointCount`,�
   三步按「单在 JVM 上的独立收益」排:
   1. **Move 1 — intrinsic 语义表(先做)**:消灭 types/emit/interp 三份分歧,给 native 自举需要的
      **非反射权威语义源**,同时**就是本文 §10 步骤 1「契约显式化」**——一份力气推两条接缝。
-     `gen_builtin_call` 从 31 条手写字节码收成「查表 + 少数性能敏感项保留直发」。
+     **增量 1 已落地**(`2532c2b`):`gen_builtin_call` 的 ~15 条手写字节码臂收成 `rt_intrinsic_target`
+     表 + 一条臂,`gen_map_call` 折入;纯 output-preserving(fixpoint B==C、语料逐字节相同、非
+     Emit-Change)。**表 = 契约的 string/list/map/io 半边**。残余(可选):interp 的 `param_cls`
+     从签名派生,消掉最后一处机械重复;真去反射化属后端阶段(native runtime 实现契约)。
   2. **Move 2 — 控制流/match lowering pass**:开始 scope 后端 #2 时做;match 编译单独抽出可独立测。
   3. **Move 3 — 显式 box/unbox 节点**:推迟到后端 #2 逼你面对表示问题时;Perceus RC 正好是
      **只有 native 后端跑**的 core-IR→core-IR pass、需要所有权/装箱显式化,那时 Move 3 自然到位。
