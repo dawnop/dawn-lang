@@ -2209,19 +2209,34 @@ fn is_map_builtin(name: String) -> Bool =
   name == "map_size" || name == "set_size" || name == "map_keys" || name == "map_values" ||
   name == "map_entries" || name == "set_to_list"
 
-## The Map/Set builtins all live in dawn/rt/Maps; keys/values travel boxed.
-fn gen_map_call(g: Gen, name: String, args: List[TExpr]) -> (Gen, Bool) !io = {
-  let s = builtin_decl_sig(name)
-  var g1 = g
-  for a in args {
-    let (g2, _) = gen_expr(g1, a, false)
-    g1 = g2
-    box_ty(g1.mv, tex_ty(a))
-  }
-  g1.mv.visitMethodInsn(OP_INVOKESTATIC, MAPS_CLASS, name,
-    method_desc(g1.adts, s.param_tys, s.ret), false)
-  (g1, true)
-}
+## The string/list/map/io half of the intrinsic contract, as one table.
+## Every entry lowers to a single INVOKESTATIC into a backend runtime class;
+## the descriptor is `method_desc` of the builtin signature and each arg is
+## adapted to its declared slot, so only the (class, method) pair varies here.
+## `None` means the builtin is not a plain runtime call — it has bespoke
+## bytecode in gen_builtin_call (panic, len, expect, cursor_slice, …). A second
+## backend re-implements these same names against its own runtime.
+fn rt_intrinsic_target(name: String) -> Option[(String, String)] =
+  if name == "get" { Some((LISTS_CLASS, "get")) }
+  else if name == "range" { Some((LISTS_CLASS, "range")) }
+  else if name == "sort_by" { Some((LISTS_CLASS, "sortBy")) }
+  else if name == "join" { Some((STRINGS_CLASS, "join")) }
+  else if name == "parse_int" { Some((STRINGS_CLASS, "parseInt")) }
+  else if name == "parse_float" { Some((STRINGS_CLASS, "parseFloat")) }
+  else if name == "cursor_start" { Some((STRINGS_CLASS, "cursorStart")) }
+  else if name == "cursor_end" { Some((STRINGS_CLASS, "cursorEnd")) }
+  else if name == "cursor_done" { Some((STRINGS_CLASS, "cursorDone")) }
+  else if name == "cursor_char" { Some((STRINGS_CLASS, "cursorChar")) }
+  else if name == "cursor_next" { Some((STRINGS_CLASS, "cursorNext")) }
+  else if name == "cursor_prev" { Some((STRINGS_CLASS, "cursorPrev")) }
+  else if name == "cursor_skip" { Some((STRINGS_CLASS, "cursorSkip")) }
+  else if name == "index_of_from" { Some((STRINGS_CLASS, "indexOfFrom")) }
+  else if name == "java_try" { Some((IO_CLASS, "javaTry")) }
+  else if name == "catch_panic" { Some((IO_CLASS, "catchPanic")) }
+  else if name == "code_points" || name == "from_code_points" { Some((STRINGS_CLASS, name)) }
+  else if str.starts_with(name, "str_") { Some((STRINGS_CLASS, name)) }
+  else if is_map_builtin(name) { Some((MAPS_CLASS, name)) }
+  else { None }
 
 fn gen_args_plain(g: Gen, args: List[TExpr]) -> Gen !io = {
   var g1 = g
@@ -2259,19 +2274,6 @@ fn gen_builtin_call(g: Gen, name: String, args: List[TExpr], wits: List[WitRef],
     let g1 = gen_args_plain(g, args)
     g1.mv.visitMethodInsn(OP_INVOKEINTERFACE, "java/util/List", "size", "()I", true)
     g1.mv.visitInsn(OP_I2L)
-    (g1, true)
-  } else if name == "get" {
-    let g1 = gen_args_plain(g, args)
-    g1.mv.visitMethodInsn(OP_INVOKESTATIC, LISTS_CLASS, "get", "(Ljava/util/List;J)LOption;", false)
-    (g1, true)
-  } else if name == "range" {
-    let g1 = gen_args_plain(g, args)
-    g1.mv.visitMethodInsn(OP_INVOKESTATIC, LISTS_CLASS, "range", "(JJ)Ljava/util/List;", false)
-    (g1, true)
-  } else if name == "sort_by" {
-    let g1 = gen_args_plain(g, args)
-    g1.mv.visitMethodInsn(OP_INVOKESTATIC, LISTS_CLASS, "sortBy",
-      "(Ljava/util/List;L" ++ fn_iface(2) ++ ";)Ljava/util/List;", false)
     (g1, true)
   } else if name == "expect" {
     var g1 = gen_args_plain(g, args)
@@ -2330,101 +2332,60 @@ fn gen_builtin_call(g: Gen, name: String, args: List[TExpr], wits: List[WitRef],
         "(Ljava/lang/Object;)Ljava/lang/String;", false)
     }
     (g1, true)
-  } else if name == "join" {
-    let g1 = gen_args_plain(g, args)
-    g1.mv.visitMethodInsn(OP_INVOKESTATIC, STRINGS_CLASS, "join",
-      "(Ljava/util/List;Ljava/lang/String;)Ljava/lang/String;", false)
-    (g1, true)
   } else if name == "starts_with" || name == "ends_with" {
     let g1 = gen_args_plain(g, args)
     g1.mv.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/String",
       if name == "starts_with" { "startsWith" } else { "endsWith" },
       "(Ljava/lang/String;)Z", false)
     (g1, true)
-  } else if name == "parse_int" || name == "parse_float" {
+  } else if name == "cursor_slice" {
     let g1 = gen_args_plain(g, args)
-    g1.mv.visitMethodInsn(OP_INVOKESTATIC, STRINGS_CLASS,
-      if name == "parse_int" { "parseInt" } else { "parseFloat" },
-      "(Ljava/lang/String;)LOption;", false)
+    g1.mv.visitMethodInsn(OP_INVOKESTATIC, STRINGS_CLASS, "cursorSlice",
+      "(Ljava/lang/String;JJ)Ljava/lang/String;", false)
+    let ok = Label.new()
+    g1.mv.visitInsn(OP_DUP)
+    g1.mv.visitJumpInsn(OP_IFNONNULL, ok)
+    g1.mv.visitTypeInsn(OP_NEW, PANIC_CLASS)
+    g1.mv.visitInsn(OP_DUP)
+    ldc_str(g1.mv, "cursor_slice: invalid cursor range")
+    g1.mv.visitMethodInsn(OP_INVOKESPECIAL, PANIC_CLASS, "<init>", "(Ljava/lang/String;)V", false)
+    g1.mv.visitInsn(OP_ATHROW)
+    g1.mv.visitLabel(ok)
     (g1, true)
-  } else if name == "cursor_start" || name == "cursor_end" {
+  } else if name == "cast" {
     let g1 = gen_args_plain(g, args)
-    g1.mv.visitMethodInsn(OP_INVOKESTATIC, STRINGS_CLASS,
-      if name == "cursor_start" { "cursorStart" } else { "cursorEnd" },
-      "(Ljava/lang/String;)J", false)
+    unerase(g1, ty)
     (g1, true)
-  } else if name == "cursor_done" || name == "cursor_char" || name == "cursor_next" ||
-    name == "cursor_prev" {
-      let g1 = gen_args_plain(g, args)
-      let mname = if name == "cursor_done" { "cursorDone" }
-      else if name == "cursor_char" { "cursorChar" }
-      else if name == "cursor_next" { "cursorNext" }
-      else { "cursorPrev" }
-      let d = if name == "cursor_done" { "(Ljava/lang/String;J)Z" } else { "(Ljava/lang/String;J)J" }
-      g1.mv.visitMethodInsn(OP_INVOKESTATIC, STRINGS_CLASS, mname, d, false)
-      (g1, true)
-    } else if name == "cursor_slice" {
-      let g1 = gen_args_plain(g, args)
-      g1.mv.visitMethodInsn(OP_INVOKESTATIC, STRINGS_CLASS, "cursorSlice",
-        "(Ljava/lang/String;JJ)Ljava/lang/String;", false)
-      let ok = Label.new()
-      g1.mv.visitInsn(OP_DUP)
-      g1.mv.visitJumpInsn(OP_IFNONNULL, ok)
-      g1.mv.visitTypeInsn(OP_NEW, PANIC_CLASS)
-      g1.mv.visitInsn(OP_DUP)
-      ldc_str(g1.mv, "cursor_slice: invalid cursor range")
-      g1.mv.visitMethodInsn(OP_INVOKESPECIAL, PANIC_CLASS, "<init>", "(Ljava/lang/String;)V", false)
-      g1.mv.visitInsn(OP_ATHROW)
-      g1.mv.visitLabel(ok)
-      (g1, true)
-    } else if name == "cursor_skip" {
-      let g1 = gen_args_plain(g, args)
-      g1.mv.visitMethodInsn(OP_INVOKESTATIC, STRINGS_CLASS, "cursorSkip",
-        "(Ljava/lang/String;JLjava/lang/String;)J", false)
-      (g1, true)
-    } else if name == "index_of_from" {
-      let g1 = gen_args_plain(g, args)
-      g1.mv.visitMethodInsn(OP_INVOKESTATIC, STRINGS_CLASS, "indexOfFrom",
-        "(Ljava/lang/String;Ljava/lang/String;J)LOption;", false)
-      (g1, true)
-    } else if name == "java_try" {
-      let g1 = gen_args_plain(g, args)
-      g1.mv.visitMethodInsn(OP_INVOKESTATIC, IO_CLASS, "javaTry",
-        "(L" ++ fn_iface(0) ++ ";)LResult;", false)
-      (g1, true)
-    } else if name == "catch_panic" {
-      let g1 = gen_args_plain(g, args)
-      g1.mv.visitMethodInsn(OP_INVOKESTATIC, IO_CLASS, "catchPanic",
-        "(L" ++ fn_iface(0) ++ ";)LResult;", false)
-      (g1, true)
-    } else if name == "cast" {
-      let g1 = gen_args_plain(g, args)
-      unerase(g1, ty)
-      (g1, true)
-    } else if name == "args" {
-      g.mv.visitFieldInsn(OP_GETSTATIC, g.class_name, ARGS_FIELD, "[Ljava/lang/String;")
-      g.mv.visitMethodInsn(OP_INVOKESTATIC, LISTS_CLASS, "fromArray",
-        "([Ljava/lang/String;)Ljava/util/List;", false)
-      (g, true)
-    } else if name == "code_points" || name == "from_code_points" {
-      let g1 = gen_args_plain(g, args)
-      let s = builtin_decl_sig(name)
-      g1.mv.visitMethodInsn(OP_INVOKESTATIC, STRINGS_CLASS, name,
-        method_desc(g1.adts, s.param_tys, s.ret), false)
-      (g1, true)
-    } else if str.starts_with(name, "str_") {
-      # every str_* intrinsic invokes the same-named static in dawn/rt/Strings;
-      # the descriptor falls out of the builtin signature (as code_points does)
-      let g1 = gen_args_plain(g, args)
-      let s = builtin_decl_sig(name)
-      g1.mv.visitMethodInsn(OP_INVOKESTATIC, STRINGS_CLASS, name,
-        method_desc(g1.adts, s.param_tys, s.ret), false)
-      (g1, true)
-    } else if is_map_builtin(name) {
-      gen_map_call(g, name, args)
-    } else {
-      panic("unknown builtin: " ++ name)
+  } else if name == "args" {
+    g.mv.visitFieldInsn(OP_GETSTATIC, g.class_name, ARGS_FIELD, "[Ljava/lang/String;")
+    g.mv.visitMethodInsn(OP_INVOKESTATIC, LISTS_CLASS, "fromArray",
+      "([Ljava/lang/String;)Ljava/util/List;", false)
+    (g, true)
+  } else {
+    # the runtime-backed intrinsics (str/list/map/io) share one lowering:
+    # push each arg adapted to its declared slot, then a single INVOKESTATIC
+    # whose class/method come from rt_intrinsic_target and whose descriptor is
+    # method_desc of the builtin signature. code_points/str_*/cursor_*/map/set
+    # all funnel here — the per-name bytecode is gone.
+    match rt_intrinsic_target(name) {
+      Some(tgt) -> {
+        let (cls, meth) = tgt
+        let s = builtin_decl_sig(name)
+        var g1 = g
+        var i = 0
+        for a in args {
+          let (g2, _) = gen_expr(g1, a, false)
+          g1 = g2
+          adapt_to(g1, tex_ty(a), s.param_tys[i])
+          i = i + 1
+        }
+        g1.mv.visitMethodInsn(OP_INVOKESTATIC, cls, meth,
+          method_desc(g1.adts, s.param_tys, s.ret), false)
+        (g1, true)
+      }
+      None -> panic("unknown builtin: " ++ name)
     }
+  }
 }
 
 # ---- binary operators ----
