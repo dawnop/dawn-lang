@@ -8,7 +8,7 @@
 ```
 
 它起初是 Phase −1 的接缝 spike(TAST 直接发 C,平凡子集),现在 `emitc` 已改吃 **Core IR**,
-语料也压到了 `match`/ADT/`?`/`!`。**当前状态:两个语料全部逐字节一致。**
+语料已压到 `match`/ADT/闭包/trait 字典。**当前状态:四个语料全部逐字节一致。**
 
 ## 组成
 
@@ -20,6 +20,8 @@
 | `runtime/c/dawn_rt.{h,c}` | 运行时:标量、`dawn_str`(UTF-8+字节长度)、`dawn_adt`(tagged union)、装箱槽、stdout、panic |
 | `hello.dawn` | 语料一:递归/循环/break/continue/短路/位运算/字符串/Unicode |
 | `adt.dawn` | 语料二:match 决策树/守卫/嵌套模式/ADT/`?`/`!`/元组/从 match 臂里 break |
+| `closure.dawn` | 语料三:lambda 提升/捕获环境/函数值/组合/命名局部函数 |
+| `trait.dawn` | 语料四:trait 字典/去虚化/转发见证/默认方法/双约束 |
 | `run.sh` | 差分 harness |
 
 入口是隐藏命令 `dawn __emitc <file> -o <out.c>`,与 `__lex`/`__parse`/`__check` 同族。
@@ -31,9 +33,12 @@
 
 **在内**:顶层函数、`Int`/`Float`/`Bool`/`String`/`Unit`、算术与位运算、比较、短路、
 `if`/`while`/`for i in a..b`/`break`/`continue`/`return`、字符串字面量与插值、`panic`、
-**ADT 构造与字段读、match(含守卫、嵌套模式、字面量模式、元组模式)、`?`、`!`、元组**。
+ADT 构造与字段读、match(含守卫、嵌套模式、字面量模式、元组模式)、`?`、`!`、元组、
+**闭包(lambda 提升 + 捕获环境 + 函数值)**、**trait 字典(去虚化/转发/默认方法)**、
+**装箱(在类型变量槽的进出)**。
 
-**在外**(碰到就 `panic` 报节点名):闭包、trait 字典、集合、comptime const、`use java`。
+**在外**(碰到就 `panic` 报节点名):集合(List/Map/Set,等 D1–D3)、comptime const、
+derive 出来的 impl、列表模式、解构 let、`use java`。
 最后一个不是缺口而是设计——`use java` 正是 FFI 里不可移植的那一半,native 后端**应该**拒绝它。
 
 ## 三个结论
@@ -66,6 +71,14 @@
 **`CBreak` 必须点名它要离开哪个循环。** `match` 降级成一个「只走一遍的循环」,而用户写在 match 臂里的
 `break` 要离开的是**外层的源码循环**。两个 break 同时存在,所以 break 不能是「最内层」的意思。
 C 侧因此用 `goto` 而不是 `break` 实现。语料 `adt.dawn:first_shape_over` 专门压这一条。
+
+**字典槽必须只有一种签名,而桥接该由 lowering 生成。** trait 默认方法体自带字典参数,impl 方法不带、
+且吃具体类型——两者填进同一张表就会签名冲突(实测:段错误)。JVM 后端今天是在 impl 单例上生成转发方法
+解决的,也就是**每个后端各生成一遍**。改法是让 lowering 合成一个普通顶层函数当桥接(拆箱→调 impl→装箱),
+槽只指向它。于是两个后端都不知道这件事存在。
+
+**`ty_key` 必须只有一份。** 它同时被 lowering(给字典命名)和两个后端(给 impl 方法命名)使用,
+放在 `core.dawn` 里,不然三个生产者会把同一个 impl 叫成三个名字。
 
 ## 已知的不对等(有意留下)
 

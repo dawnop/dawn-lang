@@ -1,0 +1,105 @@
+# The fourth corpus: trait dictionaries. Dawn passes dictionaries rather
+# than monomorphising, so this is the whole of generic dispatch.
+#
+# It exercises all three call forms Core distinguishes:
+#   * a concrete witness at a call site -> devirtualised direct call
+#   * a forwarded witness inside a generic function -> dispatch through a slot
+#   * a method the impl does not provide -> the trait's default body, which
+#     itself takes the dictionary
+use std/io
+
+pub trait Describe[T] {
+  fn name(x: T) -> String
+  ## A default: impls may leave it out, and then the dictionary slot points
+  ## at this body -- which needs the dictionary itself to call `name`.
+  fn shout(x: T) -> String = "<<" ++ name(x) ++ ">>"
+  fn size(x: T) -> Int = 1
+}
+
+pub type Animal = | Cat | Dog | Fish(n: Int)
+
+pub type Crate = | Crate(w: Int, h: Int)
+
+impl Describe[Animal] {
+  fn name(x: Animal) -> String =
+    match x {
+      Cat -> "cat"
+      Dog -> "dog"
+      Fish(n) -> "fish x${n}"
+    }
+  fn size(x: Animal) -> Int =
+    match x {
+      Cat -> 4
+      Dog -> 9
+      Fish(n) -> n
+    }
+}
+
+## Provides only `name`, so both `shout` and `size` come from the defaults.
+impl Describe[Crate] {
+  fn name(x: Crate) -> String =
+    match x {
+      Crate(w, h) -> "crate ${w}x${h}"
+    }
+}
+
+impl Describe[Int] {
+  fn name(x: Int) -> String = "int ${x}"
+  fn shout(x: Int) -> String = "INT ${x}!"
+}
+
+## Generic: the witness arrives as a hidden trailing dictionary, and every
+## call inside dispatches through it.
+fn label[T: Describe](x: T) -> String = "[" ++ name(x) ++ "]"
+
+fn loud[T: Describe](x: T) -> String = shout(x)
+
+fn weigh[T: Describe](x: T) -> Int = size(x) * 2
+
+## Two levels of forwarding: this one's dictionary is passed straight on.
+fn twice_label[T: Describe](x: T) -> String = label(x) ++ label(x)
+
+fn compare_sizes[A: Describe, B: Describe](a: A, b: B) -> String =
+  if size(a) > size(b) {
+    name(a) ++ " > " ++ name(b)
+  } else if size(a) < size(b) {
+    name(a) ++ " < " ++ name(b)
+  } else {
+    name(a) ++ " = " ++ name(b)
+  }
+
+pub fn main() -> Unit !io = {
+  println("-- concrete witness (devirtualised) --")
+  println(name(Cat))
+  println(name(Dog))
+  println(name(Fish(3)))
+  println(name(Crate(2, 5)))
+  println(name(7))
+
+  println("-- defaults --")
+  println(shout(Cat))
+  println(shout(Crate(2, 5)))
+  println(shout(7))
+  println("size(Crate) = ${size(Crate(2, 5))}")
+  println("size(Dog)   = ${size(Dog)}")
+
+  println("-- forwarded witness --")
+  println(label(Cat))
+  println(label(Crate(1, 1)))
+  println(label(42))
+  println(loud(Dog))
+  println(loud(Crate(3, 3)))
+  println(loud(42))
+  println("weigh(Fish 5) = ${weigh(Fish(5))}")
+  println("weigh(Crate)  = ${weigh(Crate(9, 9))}")
+
+  println("-- forwarding twice --")
+  println(twice_label(Cat))
+  println(twice_label(Crate(4, 4)))
+
+  println("-- two witnesses at once --")
+  println(compare_sizes(Dog, Cat))
+  println(compare_sizes(Cat, Fish(9)))
+  println(compare_sizes(Crate(1, 1), Crate(2, 2)))
+  println(compare_sizes(Dog, 100))
+}

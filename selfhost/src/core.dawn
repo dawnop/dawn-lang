@@ -35,7 +35,8 @@
 # and buy nothing at this stage.
 
 use types.{
-  Ty, TyInt, TyFloat, TyBool, TyString, TyUnit, TyNever, TyError
+  Ty, TyInt, TyFloat, TyBool, TyString, TyUnit, TyNever, TyError, TyAdt,
+  TyVar, TyList, TyMap, TySet, TyTuple, TyFn, TyBytes, TyCursor, TyJava
 }
 
 ## Where a call goes. Dawn is dictionary-passing, not monomorphising, so
@@ -45,8 +46,21 @@ pub type CCallee =
   | CDirect(owner: String, name: String)
 # a function value in a local (closure or fn-typed parameter)
   | CDynamic(target: CExpr)
-# a trait method reached through a dictionary value
-  | CMethod(dict: CExpr, trait_id: Int, method: String)
+# A trait method reached through a dictionary the caller forwarded. `idx` is
+# the method's slot in the trait's declaration order, `method` its name:
+# a table-based backend wants the index, a name-based one (the JVM, whose
+# dictionaries are interfaces) wants the name, and resolving both here means
+# neither backend consults the trait table.
+  | CMethod(dict: CExpr, trait_id: Int, method: String, idx: Int)
+# A devirtualised trait method: the witness was concrete, so the unique impl
+# is known statically and this is an ordinary direct call. Identity stays
+# structural -- (owner, trait, subject, method) -- because how that becomes a
+# symbol is each backend's mangling, not Core's business.
+  | CImpl(owner: String, trait_id: Int, subject: Ty, method: String)
+# The trait's own default body, used when the impl does not provide the
+# method. It takes the dictionary as a trailing argument like any other
+# dictionary-passing call.
+  | CDefault(owner: String, trait_id: Int, method: String)
 
 pub type CExpr =
   | CInt(v: Int)
@@ -71,6 +85,10 @@ pub type CExpr =
 # Allocate a closure: a reference to a lifted top-level function plus the
 # values of its captures, in the order that function declares them.
   | CClosure(fn_name: String, owner: String, captures: List[CExpr], ty: Ty)
+# A reference to a statically built dictionary, by the key its CDictDef
+# carries. Only needed where a dictionary is passed as a value; a concrete
+# witness at a call site devirtualises to CImpl instead.
+  | CDictRef(key: String, ty: Ty)
   | CTuple(elems: List[CExpr], ty: Ty)
   | CTupleGet(target: CExpr, idx: Int, ty: Ty)
 # erasure made explicit: CBox moves a value into a type-variable slot,
@@ -177,7 +195,56 @@ pub type CFun = {
   default_of: Option[Int]
 }
 
-pub type CModule = { owner: String, fns: List[CFun] }
+## One statically built dictionary. `slots` is in the trait's declaration
+## order, already resolved between the impl's own method and the trait's
+## default.
+##
+## Every slot has ONE signature: the trait's generic one, plus the dictionary
+## as a trailing argument. A trait default already has that shape. An impl
+## method does not -- it takes concrete types and no dictionary -- so
+## lowering synthesises an ordinary top-level bridge and the slot names that.
+## The alternative, letting each backend generate the bridge, is how the JVM
+## backend does it today (a forwarding method on the impl singleton), and it
+## is exactly the sort of per-backend work Core exists to remove.
+pub type CDictSlot =
+  | CSlotFn(owner: String, name: String)
+  | CSlotDefault(owner: String, method: String)
+
+pub type CDictDef = {
+  key: String,
+  trait_id: Int,
+  subject: Ty,
+  slots: List[CDictSlot]
+}
+
+pub type CModule = { owner: String, fns: List[CFun], dicts: List[CDictDef] }
+
+# ---- naming ----
+
+## A spelling of a type usable inside a symbol name. It lives here rather
+## than in either backend because lowering names dictionaries with it and
+## both backends name impl methods with it: three producers, one definition,
+## so they cannot drift into naming the same impl two different things.
+pub fn ty_key(t: Ty) -> String =
+  match t {
+    TyInt -> "Int"
+    TyFloat -> "Float"
+    TyBool -> "Bool"
+    TyString -> "String"
+    TyBytes -> "Bytes"
+    TyCursor -> "Cursor"
+    TyUnit -> "Unit"
+    TyNever -> "Never"
+    TyError -> "Error"
+    TyAdt(id, _) -> "Adt" ++ to_string(id)
+    TyVar(_, id) -> "Var" ++ to_string(id)
+    TyList(e) -> "List_" ++ ty_key(e)
+    TyMap(k, v) -> "Map_" ++ ty_key(k) ++ "_" ++ ty_key(v)
+    TySet(e) -> "Set_" ++ ty_key(e)
+    TyTuple(es) -> "Tup" ++ to_string(len(es))
+    TyFn(ps, _, _) -> "Fn" ++ to_string(len(ps))
+    TyJava(_, _) -> "Java"
+  }
 
 # ---- accessors ----
 
@@ -196,6 +263,7 @@ pub fn cex_ty(e: CExpr) -> Ty =
     CField(_, _, _, _, ty) -> ty
     CIsCtor(_, _, _) -> TyBool
     CClosure(_, _, _, ty) -> ty
+    CDictRef(_, ty) -> ty
     CTuple(_, ty) -> ty
     CTupleGet(_, _, ty) -> ty
     CBox(_, _) -> TyError

@@ -16,8 +16,10 @@
 use std/list
 use std/map
 use types.{
+  subst,
   Ty, TyInt, TyFloat, TyBool, TyString, TyUnit, TyNever, TyError, TyVar,
-  TyAdt, TyList, TyTuple, TyFn, Sym, Sig, OPTION_ID, RESULT_ID
+  TyAdt, TyList, TyTuple, TyFn, Sym, Sig, Traits, TraitI, ImplI, MethodSig,
+  Adts, trait_of, OPTION_ID, RESULT_ID
 }
 use tast.{
   TExpr, TStmt, TPat, TArm, TStrPart, TFun, TModule, TBinOp, TUnOp, TJavaCall,
@@ -41,10 +43,11 @@ use core.{
   CCtor, CField, CIsCtor, CClosure, CTuple, CTupleGet, CBox, CUnbox,
   CBinary, CUnary, CIf, CBlock, CListLit, CReturn, CBreak, CContinue, CForeign,
   CSLet, CSAssign, CSDiscard, CSLoop, CSIf, CSDup, CSDrop,
-  CDirect, CDynamic, CMethod,
+  CDirect, CDynamic, CMethod, CImpl, CDefault, CDictRef,
+  CDictDef, CDictSlot, CSlotFn, CSlotDefault,
   CAdd, CSub, CMul, CDiv, CMod, CEq, CNe, CLt, CLe, CGt, CGe, CAnd, COr,
   CBand, CBor, CBxor, CShl, CShr, CUshr, CConcat, CNeg, CNot, CBnot,
-  COwned, CBorrowed, cex_ty
+  COwned, CBorrowed, cex_ty, ty_key
 }
 
 # Prelude constructor indices, fixed by types.prelude_adts.
@@ -71,7 +74,17 @@ pub type LSt = {
   # them. A lifted body keeps its captures' original symbol ids, so it needs
   # no substitution -- see core.CFun.captures.
   lifted: List[CFun],
-  next_lam: Int
+  next_lam: Int,
+  # trait metadata, needed to resolve a witness into a call form. It stops
+  # here: Core carries the resolved answer, so no backend consults it.
+  traits: Traits,
+  impls: Map[(Int, Ty), ImplI],
+  adts: Adts,
+  # every function's declared signature, so a call site can box its
+  # arguments against the DECLARED parameter types rather than leaving each
+  # backend to recompute "is this slot a type variable"
+  prog_fns: Map[(String, String), Sig],
+  dicts: List[CDictDef]
 }
 
 fn fresh_sym(st: LSt) -> (LSt, Int) =
@@ -290,6 +303,259 @@ fn lit_eq(subj: CExpr, v: LitV, t: Ty) -> CExpr =
     LStr(s) -> CBinary(CEq, subj, CStr(s), TyBool)
   }
 
+# ---- trait witnesses ----
+
+## A stable name for the dictionary of (trait, subject). Backends use it as
+## a symbol, so it must be spellable in both C and JVM identifiers.
+fn dict_key(tid: Int, subject: Ty) -> String =
+  "dict$" ++ to_string(tid) ++ "$" ++ ty_key(subject)
+
+## The trait method's signature with the subject substituted in: what the
+## impl's own method actually takes, so a devirtualised call boxes nothing.
+fn subst_subject(tr: TraitI, sg: Sig, subject: Ty) -> Sig = {
+  let vid =
+    match tr.tvar {
+      TyVar(_, v) -> v
+      _ -> panic("lower: trait subject is not a type variable")
+    }
+  var m: Map[Int, Ty] = map.empty()
+  m = map.insert(m, vid, subject)
+  var ps: List[Ty] = []
+  for p in sg.param_tys {
+    ps = ps ++ [subst(p, m, map.empty())]
+  }
+  Sig { ..sg, param_tys: ps, ret: subst(sg.ret, m, map.empty()) }
+}
+
+fn trait_method_sig(tr: TraitI, name: String) -> Sig = {
+  for entry in tr.methods {
+    let (mn, ms) = entry
+    if mn == name { return ms.sig }
+  }
+  panic("lower: trait `" ++ tr.name ++ "` has no method `" ++ name ++ "`")
+}
+
+## Lower arguments and box each against its declared parameter type. This is
+## the boxing materialisation: it happens once, here, instead of at every
+## argument position in every backend.
+fn lower_args_to(st: LSt, args: List[TExpr], decl: List[Ty]) -> (LSt, List[CExpr]) = {
+  var st1 = st
+  var out: List[CExpr] = []
+  var i = 0
+  for a in args {
+    let (st2, v) = lower_expr(st1, a)
+    st1 = st2
+    let d = if i < len(decl) { decl[i] } else { tex_ty(a) }
+    out = out ++ [adapt_in(v, tex_ty(a), d)]
+    i = i + 1
+  }
+  (st1, out)
+}
+
+fn sig_of(st: LSt, owner: String, name: String) -> Option[Sig] =
+  map.get(st.prog_fns, (owner, name))
+
+fn impl_for(st: LSt, tid: Int, subject: Ty) -> ImplI =
+  match map.get(st.impls, (tid, subject)) {
+    Some(i) -> i
+    None -> panic("lower: no impl for trait " ++ to_string(tid))
+  }
+
+fn provides(imp: ImplI, name: String) -> Bool = {
+  for p in imp.provided {
+    if p == name { return true }
+  }
+  false
+}
+
+fn method_index(tr: TraitI, name: String) -> Int = {
+  var i = 0
+  for entry in tr.methods {
+    let (mn, _ms) = entry
+    if mn == name { return i }
+    i = i + 1
+  }
+  panic("lower: trait `" ++ tr.name ++ "` has no method `" ++ name ++ "`")
+}
+
+fn owner_or(o: Option[String], fallback: String) -> String =
+  match o {
+    Some(x) -> x
+    None -> fallback
+  }
+
+## Build (once) the dictionary for a concrete witness and return a reference
+## to it. Each slot is resolved here between the impl's own method and the
+## trait's default, so a backend only has to lay out function pointers.
+fn dict_ref(st: LSt, tid: Int, subject: Ty) -> (LSt, CExpr) = {
+  let key = dict_key(tid, subject)
+  var seen = false
+  for d in st.dicts {
+    if d.key == key { seen = true }
+  }
+  let dty = TyAdt(0 - 1, [])
+  if seen {
+    (st, CDictRef(key, dty))
+  } else {
+    let tr = trait_of(st.traits, tid)
+    let imp = impl_for(st, tid, subject)
+    let iowner = owner_or(imp.owner, st.owner)
+    let towner = owner_or(tr.owner, st.owner)
+    # reserve the key first: a bridge body may itself reference this same
+    # dictionary, and without the reservation that would recurse forever
+    var st1 = LSt {
+      ..st,
+      dicts: st.dicts ++
+        [CDictDef { key: key, trait_id: tid, subject: subject, slots: [] }]
+    }
+    var slots: List[CDictSlot] = []
+    for entry in tr.methods {
+      let (mn, _ms) = entry
+      if provides(imp, mn) {
+        let (st2, bridge) = make_bridge(st1, tr, tid, subject, iowner, mn)
+        st1 = st2
+        slots = slots ++ [CSlotFn(st1.owner, bridge)]
+      } else {
+        slots = slots ++ [CSlotDefault(towner, mn)]
+      }
+    }
+    var out: List[CDictDef] = []
+    for d in st1.dicts {
+      if d.key == key {
+        out = out ++ [CDictDef { ..d, slots: slots }]
+      } else {
+        out = out ++ [d]
+      }
+    }
+    (LSt { ..st1, dicts: out }, CDictRef(key, dty))
+  }
+}
+
+## Synthesise the bridge that lets an impl method sit in a dictionary slot:
+## it takes the trait's generic (erased) parameters plus the dictionary,
+## unboxes them into the impl's concrete signature, and boxes the result
+## back. Ordinary top-level function from here on -- no backend knows it is
+## special.
+fn make_bridge(
+  st: LSt,
+  tr: TraitI,
+  tid: Int,
+  subject: Ty,
+  iowner: String,
+  method: String
+) -> (LSt, String) = {
+  let sg = trait_method_sig(tr, method)
+  let psig = subst_subject(tr, sg, subject)
+  let name = "bridge$" ++ to_string(tid) ++ "$" ++ ty_key(subject) ++ "$" ++ method
+  var seen = false
+  for f in st.lifted {
+    if f.name == name { seen = true }
+  }
+  if seen {
+    (st, name)
+  } else {
+    var st1 = st
+    var ps: List[CParam] = []
+    var args: List[CExpr] = []
+    var i = 0
+    for gt in sg.param_tys {
+      let (st2, sym) = fresh_sym(st1)
+      st1 = st2
+      ps = ps ++ [CParam { sym: sym, ty: gt, mode: COwned }]
+      args = args ++ [adapt_out(CLocal(sym, gt), gt, psig.param_tys[i])]
+      i = i + 1
+    }
+    # the dictionary parameter is unused by the bridge but must be there:
+    # every slot has the same signature
+    let (st3, dsym) = fresh_sym(st1)
+    st1 = st3
+    let call = CCall(CImpl(iowner, tid, subject, method), args, psig.ret)
+    let f = CFun {
+      name: name,
+      owner: st1.owner,
+      captures: [],
+      params: ps,
+      dicts: [CParam { sym: dsym, ty: TyAdt(0 - 1, []), mode: COwned }],
+      ret: sg.ret,
+      body: adapt_in(call, psig.ret, sg.ret),
+      is_test: false,
+      impl_of: None,
+      default_of: None
+    }
+    (LSt { ..st1, lifted: st1.lifted ++ [f] }, name)
+  }
+}
+
+## A witness as a value, for the hidden trailing arguments of a generic call.
+fn witness_value(st: LSt, w: WitRef) -> (LSt, CExpr) =
+  match w {
+    WForward(sym) -> (st, CLocal(sym, TyAdt(0 - 1, [])))
+    WConcrete(tid, subject) -> dict_ref(st, tid, subject)
+  }
+
+fn witness_values(st: LSt, ws: List[WitRef]) -> (LSt, List[CExpr]) = {
+  var st1 = st
+  var out: List[CExpr] = []
+  for w in ws {
+    let (st2, v) = witness_value(st1, w)
+    st1 = st2
+    out = out ++ [v]
+  }
+  (st1, out)
+}
+
+## A trait method call. A concrete witness devirtualises to a direct call --
+## Dawn is dictionary-passing, so this is where the dictionary disappears
+## when it is statically known. A forwarded one dispatches through the slot.
+fn lower_trait_call(
+  st: LSt,
+  tid: Int,
+  name: String,
+  args: List[TExpr],
+  ws: List[WitRef],
+  ty: Ty
+) -> (LSt, CExpr) = {
+  let tr = trait_of(st.traits, tid)
+  let idx = method_index(tr, name)
+  let sg = trait_method_sig(tr, name)
+  if len(ws) == 0 {
+    panic("lower: trait method call without a witness: " ++ name)
+  }
+  match ws[0] {
+    WForward(sym) -> {
+      # the dictionary slot has the trait's generic signature, so the
+      # subject position is erased and the argument is boxed
+      let (st1, vs) = lower_args_to(st, args, sg.param_tys)
+      (st1, adapt_out(
+        CCall(CMethod(CLocal(sym, TyAdt(0 - 1, [])), tid, name, idx), vs, sg.ret),
+        sg.ret, ty))
+    }
+    WConcrete(_, subject) -> {
+      let imp = impl_for(st, tid, subject)
+      if imp.derived {
+        panic("lower: derived impls are not lowered yet (" ++ tr.name ++ ")")
+      }
+      if provides(imp, name) {
+        # devirtualised: the impl's own method takes the concrete type, so
+        # nothing is boxed
+        let psig = subst_subject(tr, sg, subject)
+        let (st1, vs) = lower_args_to(st, args, psig.param_tys)
+        (st1, adapt_out(
+          CCall(CImpl(owner_or(imp.owner, st.owner), tid, subject, name), vs, psig.ret),
+          psig.ret, ty))
+      } else {
+        # the default body is generic and takes the dictionary like any
+        # other dictionary-passing function
+        let (st1, vs) = lower_args_to(st, args, sg.param_tys)
+        let (st2, d) = dict_ref(st1, tid, subject)
+        (st2, adapt_out(
+          CCall(CDefault(owner_or(tr.owner, st2.owner), tid, name), vs ++ [d], sg.ret),
+          sg.ret, ty))
+      }
+    }
+  }
+}
+
 # ---- lambda lifting ----
 
 fn fresh_lam(st: LSt) -> (LSt, String) =
@@ -468,23 +734,30 @@ pub fn lower_expr(st: LSt, e: TExpr) -> (LSt, CExpr) =
     }
     XCallBuiltin(name, args, wits, _, _, ty) -> {
       let (st1, vs) = lower_all(st, args)
-      if len(wits) > 0 {
-        panic("lower: witness-carrying builtin not lowered yet: " ++ name)
-      }
-      (st1, CIntrinsic(name, vs, ty))
+      let (st2, ds) = witness_values(st1, wits)
+      (st2, CIntrinsic(name, vs ++ ds, ty))
     }
-    XCallFn(owner, name, args, wits, trait_id, _, _, ty) -> {
-      let (st1, vs) = lower_all(st, args)
-      if len(wits) > 0 {
-        panic("lower: trait witnesses are not lowered yet: " ++ name)
-      }
+    XCallFn(owner, name, args, wits, trait_id, _, _, ty) ->
       match trait_id {
-        Some(_) -> panic("lower: trait dispatch is not lowered yet: " ++ name)
-        None -> ()
+        Some(tid) -> lower_trait_call(st, tid, name, args, wits, ty)
+        None -> {
+          let o = match owner { Some(x) -> x None -> st.owner }
+          match sig_of(st, o, name) {
+            Some(sg) -> {
+              let (st1, vs) = lower_args_to(st, args, sg.param_tys)
+              # a generic function takes its dictionaries as hidden trailing
+              # arguments, in bound order -- the order the callee declares
+              let (st2, ds) = witness_values(st1, wits)
+              (st2, adapt_out(CCall(CDirect(o, name), vs ++ ds, sg.ret), sg.ret, ty))
+            }
+            None -> {
+              let (st1, vs) = lower_all(st, args)
+              let (st2, ds) = witness_values(st1, wits)
+              (st2, CCall(CDirect(o, name), vs ++ ds, ty))
+            }
+          }
+        }
       }
-      let o = match owner { Some(x) -> x None -> st1.owner }
-      (st1, CCall(CDirect(o, name), vs, ty))
-    }
     XCallDyn(sym, _, args, _, _, ty) -> {
       let (st1, vs) = lower_all(st, args)
       (st1, CCall(CDynamic(CLocal(sym, sym_ty(st1, sym, TyError))), vs, ty))
@@ -814,7 +1087,8 @@ fn lower_fn(st: LSt, owner: String, f: TFun) -> (LSt, CFun) = {
   }
   var dicts: List[CParam] = []
   for d in f.dict_syms {
-    dicts = dicts ++ [CParam { sym: d, ty: TyError, mode: COwned }]
+    # a dictionary is an opaque reference; its shape lives in CDictDef
+    dicts = dicts ++ [CParam { sym: d, ty: TyAdt(0 - 1, []), mode: COwned }]
   }
   let (st1, body) = lower_expr(st, f.body)
   (st1, CFun {
@@ -831,7 +1105,14 @@ fn lower_fn(st: LSt, owner: String, f: TFun) -> (LSt, CFun) = {
   })
 }
 
-pub fn lower_module(owner: String, tm: TModule) -> CModule = {
+pub fn lower_module(
+  owner: String,
+  tm: TModule,
+  traits: Traits,
+  impls: Map[(Int, Ty), ImplI],
+  adts: Adts,
+  prog_fns: Map[(String, String), Sig]
+) -> CModule = {
   # temporaries continue above every checker-minted id in this module
   var top = 0
   for k in map.keys(tm.syms) {
@@ -844,7 +1125,12 @@ pub fn lower_module(owner: String, tm: TModule) -> CModule = {
     cur_loop: -1,
     syms: tm.syms,
     lifted: [],
-    next_lam: 0
+    next_lam: 0,
+    traits: traits,
+    impls: impls,
+    adts: adts,
+    prog_fns: prog_fns,
+    dicts: []
   }
   var fns: List[CFun] = []
   for f in tm.fns {
@@ -854,7 +1140,7 @@ pub fn lower_module(owner: String, tm: TModule) -> CModule = {
   }
   # lifted bodies are appended after the source functions; they are ordinary
   # top-level functions from here on and no backend can tell the difference
-  CModule { owner: owner, fns: fns ++ st.lifted }
+  CModule { owner: owner, fns: fns ++ st.lifted, dicts: st.dicts }
 }
 
 # ---- diagnostics ----

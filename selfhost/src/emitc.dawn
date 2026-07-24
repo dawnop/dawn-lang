@@ -29,11 +29,12 @@ use core.{
   CCtor, CField, CIsCtor, CClosure, CTuple, CTupleGet, CBox, CUnbox,
   CBinary, CUnary, CIf, CBlock, CListLit, CReturn, CBreak, CContinue, CForeign,
   CSLet, CSAssign, CSDiscard, CSLoop, CSIf, CSDup, CSDrop,
-  CDirect, CDynamic, CMethod,
+  CDirect, CDynamic, CMethod, CImpl, CDefault, CDictRef,
+  CDictDef, CDictSlot, CSlotFn, CSlotDefault,
   CBinOp, CUnOp,
   CAdd, CSub, CMul, CDiv, CMod, CEq, CNe, CLt, CLe, CGt, CGe, CAnd, COr,
   CBand, CBor, CBxor, CShl, CShr, CUshr, CConcat, CNeg, CNot, CBnot,
-  cex_ty
+  cex_ty, ty_key
 }
 
 pub type CSt = { out: String, tmp: Int, ind: Int }
@@ -279,6 +280,7 @@ pub fn emit_expr(st: CSt, e: CExpr) -> (CSt, String) =
       # CFnRef reaching here means the lowering missed a case
       panic("emitc: bare CFnRef survived lowering (" ++ name ++ ")")
     CClosure(name, owner, caps, _) -> emit_closure(st, name, owner, caps)
+    CDictRef(key, _) -> (st, "(&" ++ dict_symbol(key) ++ ")")
     CListLit(_, _) ->
       panic("emitc: list literals await the pure-Dawn collections (D1-D3)")
     CForeign(_, _) ->
@@ -436,6 +438,25 @@ fn emit_call(st: CSt, callee: CCallee, args: List[CExpr], ty: Ty) -> (CSt, Strin
         Some(rt) -> (st1, rt ++ "(" ++ join(cargs, ", ") ++ ")")
         None -> (st1, mangle(owner, name) ++ "(" ++ join(cargs, ", ") ++ ")")
       }
+    CImpl(owner, tid, subject, method) ->
+      (st1, impl_symbol(owner, tid, subject, method) ++ "(" ++ join(cargs, ", ") ++ ")")
+    CDefault(owner, tid, method) ->
+      (st1, default_symbol(owner, tid, method) ++ "(" ++ join(cargs, ", ") ++ ")")
+    CMethod(dict, _tid, _m, idx) -> {
+      let (st3, dv) = emit_expr(st1, dict)
+      # a dictionary is a flat table of function pointers; the slot index
+      # was resolved by lowering, so no trait metadata is needed here
+      # every slot has the trait's generic signature plus the dictionary as
+      # a trailing argument, so one cast shape serves every slot
+      var sigp: List[String] = []
+      for a in args {
+        sigp = sigp ++ [c_type(cex_ty(a))]
+      }
+      sigp = sigp ++ ["dawn_dict*"]
+      let cast = "(" ++ c_type(ty) ++ "(*)(" ++ join(sigp, ", ") ++ "))"
+      (st3, "((" ++ cast ++ "(" ++ dv ++ ")->slots[" ++ to_string(idx) ++ "])(" ++
+          join(cargs ++ [dv], ", ") ++ "))")
+    }
     CDynamic(target) -> {
       let (st3, tv) = emit_expr(st1, target)
       # One indirect call whatever the capture count: the environment is
@@ -449,8 +470,35 @@ fn emit_call(st: CSt, callee: CCallee, args: List[CExpr], ty: Ty) -> (CSt, Strin
         "((" ++ cast ++ "(" ++ tv ++ ")->fn)(" ++ join([tv] ++ cargs, ", ") ++ "))"
       (st3, call)
     }
-    CMethod(_, _, m) -> panic("emitc: trait dispatch is not emitted yet (" ++ m ++ ")")
   }
+}
+
+# ---- trait dictionaries ----
+
+fn dict_symbol(key: String) -> String = "dawn_" ++ sanitize(key)
+
+fn impl_symbol(owner: String, tid: Int, subject: Ty, method: String) -> String =
+  mangle(owner, "impl$" ++ to_string(tid) ++ "$" ++ ty_key(subject) ++ "$" ++ method)
+
+fn default_symbol(owner: String, tid: Int, method: String) -> String =
+  mangle(owner, "default$" ++ to_string(tid) ++ "$" ++ method)
+
+## A dictionary is a flat array of function pointers in the trait's
+## declaration order. The JVM backend uses an interface and a singleton
+## instead; that difference stays inside the two emitters because Core
+## already resolved which function fills each slot.
+fn emit_dict(st: CSt, d: CDictDef) -> CSt = {
+  var parts: List[String] = []
+  for slot in d.slots {
+    parts = parts ++ [
+      match slot {
+        CSlotFn(owner, n) -> "(void*)" ++ mangle(owner, n)
+        CSlotDefault(owner, m) -> "(void*)" ++ default_symbol(owner, d.trait_id, m)
+      }
+    ]
+  }
+  line(st, "static dawn_dict " ++ dict_symbol(d.key) ++ " = { " ++
+      to_string(len(parts)) ++ ", { " ++ join(parts, ", ") ++ " } };")
 }
 
 ## The handful of std functions the native backend still borrows from its C
@@ -550,9 +598,6 @@ pub fn emit_stmt(st: CSt, s: CStmt) -> CSt =
 # ---- functions and program ----
 
 fn fn_signature(f: CFun) -> String = {
-  if len(f.dicts) > 0 {
-    panic("emitc: dictionary parameters are not emitted yet (" ++ f.name ++ ")")
-  }
   var ps: List[String] = []
   # captures are ordinary leading parameters of the lifted function; only
   # the adapter knows they came from an environment
@@ -562,9 +607,28 @@ fn fn_signature(f: CFun) -> String = {
   for p in f.params {
     ps = ps ++ [c_type(p.ty) ++ " " ++ local_name(p.sym)]
   }
+  # dictionaries are hidden trailing parameters, in bound order
+  for d in f.dicts {
+    ps = ps ++ ["dawn_dict* " ++ local_name(d.sym)]
+  }
   let plist = if len(ps) == 0 { "void" } else { join(ps, ", ") }
-  c_type(f.ret) ++ " " ++ mangle(f.owner, f.name) ++ "(" ++ plist ++ ")"
+  c_type(f.ret) ++ " " ++ fn_symbol(f) ++ "(" ++ plist ++ ")"
 }
+
+## An impl method body and a trait default body are ordinary functions with
+## a derived name; the same derivation is used by whatever fills a dict slot.
+fn fn_symbol(f: CFun) -> String =
+  match f.impl_of {
+    Some(pair) -> {
+      let (tid, subject) = pair
+      impl_symbol(f.owner, tid, subject, f.name)
+    }
+    None ->
+      match f.default_of {
+        Some(tid) -> default_symbol(f.owner, tid, f.name)
+        None -> mangle(f.owner, f.name)
+      }
+  }
 
 ## Whether a closure can be built over this function. Lowering only ever
 ## names lifted bodies in a CClosure, and it names them `lambda$N`.
@@ -592,7 +656,7 @@ fn emit_adapter(st: CSt, f: CFun) -> CSt = {
   for p in f.params {
     args = args ++ [local_name(p.sym)]
   }
-  let call = mangle(f.owner, f.name) ++ "(" ++ join(args, ", ") ++ ")"
+  let call = fn_symbol(f) ++ "(" ++ join(args, ", ") ++ ")"
   let st2 =
     if len(f.captures) == 0 {
       line(line(st1, "(void)env;"), "return " ++ call ++ ";")
@@ -631,6 +695,13 @@ pub fn emit_program(mods: List[CModule], entry: String) -> String = {
           st = line(st, adapter_signature(f) ++ ";")
         }
       }
+    }
+  }
+  st = line(st, "")
+
+  for m in mods {
+    for d in m.dicts {
+      st = emit_dict(st, d)
     }
   }
   st = line(st, "")

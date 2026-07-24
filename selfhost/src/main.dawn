@@ -1019,10 +1019,53 @@ fn run_emitc(rest: List[String]) -> Unit !io = {
   let loaded = if io.is_dir(t) { load_directory(t) } else { load_file(t) }
   let prog = analyze_program(loaded, std, 100000000)
   if len(prog.diags) > 0 { fail_compile(prog.diags) }
+  # trait/impl/ADT tables unioned over std and user modules, exactly as
+  # collect_program does for the JVM path: ids are unique program-wide
+  var adts = prelude_adts()
+  var traits: Traits = map.empty()
+  var impl_table: Map[(Int, Ty), ImplI] = map.empty()
+  var prog_fns: Map[(String, String), Sig] = map.empty()
+  for pr in map.entries(std.adts) {
+    let (k, v) = pr
+    adts = map.insert(adts, k, v)
+  }
+  for sm in std.mods {
+    let (cls, cx, _tm, _ct) = sm
+    for pr in map.entries(cx.traits) {
+      let (k, v) = pr
+      traits = map.insert(traits, k, v)
+    }
+    for pr in map.entries(cx.impl_table) {
+      let (k, v) = pr
+      impl_table = map.insert(impl_table, k, v)
+    }
+    for pr in map.entries(cx.fns) {
+      let (k, v) = pr
+      prog_fns = map.insert(prog_fns, (cls, k), v)
+    }
+  }
+  for cm in prog.modules {
+    for pr in map.entries(cm.cx.adts) {
+      let (k, v) = pr
+      adts = map.insert(adts, k, v)
+    }
+    for pr in map.entries(cm.cx.traits) {
+      let (k, v) = pr
+      traits = map.insert(traits, k, v)
+    }
+    for pr in map.entries(cm.cx.impl_table) {
+      let (k, v) = pr
+      impl_table = map.insert(impl_table, k, v)
+    }
+    for pr in map.entries(cm.cx.fns) {
+      let (k, v) = pr
+      prog_fns = map.insert(prog_fns, (cm.class_name, k), v)
+    }
+  }
   var mods: List[CModule] = []
   var entry = ""
   for cm in prog.modules {
-    mods = mods ++ [lower.lower_module(cm.class_name, cm.tm)]
+    mods = mods ++ [lower.lower_module(cm.class_name, cm.tm, traits, impl_table, adts, prog_fns)]
     if entry == "" {
       for tf in cm.tm.fns {
         if tf.name == "main" { entry = cm.class_name }

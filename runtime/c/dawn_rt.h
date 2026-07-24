@@ -65,6 +65,20 @@ typedef struct {
 
 dawn_clo *dawn_clo_new(void *fn, int32_t ncap);
 
+/* A trait dictionary: a flat table of function pointers in the trait's
+ * declaration order. Dawn is dictionary-passing rather than monomorphising,
+ * so this is the whole of generic dispatch -- llvm-backend-research.md 3
+ * called it the cleanest part of native codegen, and it is. The JVM backend
+ * uses an interface plus a singleton for the same thing.
+ *
+ * DAWN_DICT_MAX only bounds the static initialiser's shape; a dictionary is
+ * never indexed beyond the slot count its trait declares. */
+#define DAWN_DICT_MAX 16
+typedef struct {
+  int32_t nslots;
+  void *slots[DAWN_DICT_MAX];
+} dawn_dict;
+
 /* boxing: a type-variable slot holds a pointer to one of these */
 dawn_slot *dawn_box_int(int64_t v);
 dawn_slot *dawn_box_float(double v);
