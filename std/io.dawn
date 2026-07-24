@@ -1,58 +1,51 @@
 # Dawn's standard library: console, files, and process arguments.
 #
-# Batch C's io half (docs/pure-ffi-design.md §四). These need no `unsafe_pure`:
-# they are honestly effectful, so their signatures just say `!io` and the Java
-# call keeps the effect it already has. `unsafe_pure` is for the opposite case —
-# something the JVM types as effectful that really is pure.
+# These write over the io_* intrinsics the JVM backend emits into dawn/rt/Io
+# (print/println/read_line/is_dir/read_file/write_file/list_names); the
+# handwritten dawn.rt.StdIo is retired. They need no `unsafe_pure`: they are
+# honestly effectful, so their signatures just say `!io`.
 #
 # `args` is deliberately NOT here: argv arrives on a static field of the program's
 # own entry class, and a std function compiles to a different class, so it cannot
-# name that field. Parking argv on a vendored runtime class instead would make it
-# shared by every program in one JVM — see pure-ffi-design.md §十七.
+# name that field. Parking argv on a runtime class instead would make it shared
+# by every program in one JVM — see pure-ffi-design.md §十七.
 #
 # The failing ones compose with `java_try`, which is an intrinsic and stays in
 # the compiler. That is not a workaround: `Result` is a Dawn ADT and cannot be a
 # Java return type, and `java_try` is precisely the built-in bridge from "Java
 # threw" to `Err(message)` — it produces `throwable.toString()`, byte for byte
-# the string these builtins used to return.
-use java "dawn.rt.StdIo"
+# the string these intrinsics throw with.
 
 ## Print a string followed by a newline.
-pub fn println(s: String) -> Unit !io = StdIo.println(s)
+pub fn println(s: String) -> Unit !io = io_println(s)
 
 ## Print a string without a newline.
-pub fn print(s: String) -> Unit !io = StdIo.print(s)
+pub fn print(s: String) -> Unit !io = io_print(s)
 
 ## Read one line from stdin; `None` at end of input.
-## Java's `null`-or-value maps straight onto `Option`, so no sentinel is needed.
-pub fn read_line() -> Option[String] !io = StdIo.readLine()
+## The intrinsic maps Java's `null`-or-line straight onto `Option`.
+pub fn read_line() -> Option[String] !io = io_read_line()
 
 ## Whether `path` names a directory.
-pub fn is_dir(path: String) -> Bool !io = StdIo.isDir(path)
+pub fn is_dir(path: String) -> Bool !io = io_is_dir(path)
 
 ## Read a whole file as a UTF-8 string.
 pub fn read_file(path: String) -> Result[String, String] !io =
-  java_try(fn() => StdIo.readFile(path).expect("readFile returns null only on failure, which throws"))
+  java_try(fn() => io_read_file(path))
 
 ## Write a string to a file, creating missing parent directories.
 ## `Ok` carries nothing: the only count worth returning would be bytes on disk,
 ## and what this used to return was UTF-16 units. Nobody read it.
 pub fn write_file(path: String, content: String) -> Result[Unit, String] !io =
-  java_try(fn() => StdIo.writeFile(path, content))
+  java_try(fn() => io_write_file(path, content))
 
 ## The entry names directly under `path`.
-## A non-directory is reported as an `Err`, not a panic, and — matching the
-## builtin — is checked before anything is read, so a missing path and a plain
+## A non-directory is reported as an `Err`, not a panic, and — matching the old
+## behaviour — is checked before anything is read, so a missing path and a plain
 ## file give the same message.
 pub fn list_dir(path: String) -> Result[List[String], String] !io =
   if is_dir(path) {
-    # `listNames` is a java.util.List<String>, and the JVM erases that to a bare
-    # List — `cast` is the sanctioned way to reclaim the element type (spec §9.5).
-    java_try(fn() => {
-      let names = StdIo.listNames(path).expect("null only on failure, which throws")
-      let out: List[String] = cast(names)
-      out
-    })
+    java_try(fn() => io_list_names(path))
   } else {
     Err("not a directory: " ++ path)
   }

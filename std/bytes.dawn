@@ -3,46 +3,64 @@
 # Short names, module-qualified at the call site: `use std/bytes`, then
 # `bytes.len(b)` / `bytes.at(b, i)`.
 #
-# The Bytes half of "batch A" (docs/pure-ffi-design.md §四) — the same shape as
-# std/strings.dawn: a forward to `dawn.rt.StdBytes`, a source-compiled class the
-# checker can reflect on, wrapped in `unsafe_pure` because every Java call reads
-# as !io.
+# These write over the bytes_* intrinsics the JVM backend emits into
+# dawn/rt/Bytes (utf8/decode/len/at/slice); the handwritten dawn.rt.StdBytes is
+# retired. No `unsafe_pure` and no `use java` any more — a bytes_* call is a
+# language primitive, not a Java call the checker has to be told is really pure.
 #
 # `Bytes` crosses the FFI boundary in both directions already (it is a JVM
-# `byte[]`), so unlike the String group nothing here needs a workaround for the
-# argument or return type. What does need one is the *result* shapes: a Dawn ADT
-# cannot be a Java return type, so absence and out-of-range come back as
-# sentinels and are turned into `Option`/panic on this side.
+# `byte[]`), so nothing here needs a workaround for the argument or return type.
+# What needs one is the *result* shapes: out-of-range comes back as a -1
+# sentinel and a bad charset as `None`, turned into panic/`Option` on this side.
 #
 # `Bytes ++ Bytes` is an operator, not a function, and stays in the compiler.
-use java "dawn.rt.StdBytes"
 
 ## The UTF-8 bytes of `s`.
-pub fn utf8(s: String) -> Bytes =
-  unsafe_pure { StdBytes.utf8(s).expect("utf8 never returns null") }
+pub fn utf8(s: String) -> Bytes = bytes_utf8(s)
 
 ## `b` decoded with the named charset. Panics when no such charset exists.
 pub fn decode(b: Bytes, charset: String) -> String =
-  unsafe_pure { StdBytes.decode(b, charset).expect("decode: unsupported charset") }
+  bytes_decode(b, charset).expect("decode: unsupported charset")
 
 ## Number of bytes in `b`.
-pub fn len(b: Bytes) -> Int = unsafe_pure { StdBytes.len(b) }
+pub fn len(b: Bytes) -> Int = bytes_len(b)
 
 ## The byte at `i` as 0..255. Panics when `i` is out of range — a programming
-## error, like indexing a list past its end. The -1 the forward returns is that
-## signal, and cannot collide with a real byte value.
+## error, like indexing a list past its end. The -1 the intrinsic returns is
+## that signal, and cannot collide with a real (unsigned) byte value.
 pub fn at(b: Bytes, i: Int) -> Int = {
-  let v = unsafe_pure { StdBytes.at(b, i) }
+  let v = bytes_at(b, i)
   if v < 0 { panic("bytes.at: index out of range") } else { v }
 }
 
 ## The bytes in `[start, end)`. Both ends are clamped into range and
 ## `start > end` yields empty, so this never panics.
-pub fn slice(b: Bytes, start: Int, end: Int) -> Bytes =
-  unsafe_pure { StdBytes.slice(b, start, end).expect("slice never returns null") }
+pub fn slice(b: Bytes, start: Int, end: Int) -> Bytes = bytes_slice(b, start, end)
 
 ## Byte index of the first occurrence of `needle` at or after `from`, or `None`.
+## An empty needle matches at the (non-negative) start. Pure Dawn over
+## bytes_len/bytes_at — the search loop is not an intrinsic.
 pub fn index_of(b: Bytes, needle: Bytes, from: Int) -> Option[Int] = {
-  let i = unsafe_pure { StdBytes.indexOf(b, needle, from) }
-  if i < 0 { None } else { Some(i) }
+  let hlen = bytes_len(b)
+  let nlen = bytes_len(needle)
+  let start = if from < 0 { 0 } else { from }
+  index_scan(b, needle, hlen, nlen, start)
 }
+
+fn index_scan(b: Bytes, needle: Bytes, hlen: Int, nlen: Int, i: Int) -> Option[Int] =
+  if i + nlen > hlen {
+    None
+  } else if matches_at(b, needle, nlen, i, 0) {
+    Some(i)
+  } else {
+    index_scan(b, needle, hlen, nlen, i + 1)
+  }
+
+fn matches_at(b: Bytes, needle: Bytes, nlen: Int, i: Int, k: Int) -> Bool =
+  if k >= nlen {
+    true
+  } else if bytes_at(b, i + k) == bytes_at(needle, k) {
+    matches_at(b, needle, nlen, i, k + 1)
+  } else {
+    false
+  }
