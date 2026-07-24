@@ -25,23 +25,19 @@ v0.6.0–v0.8.0 的 release jar 永久保存；`kotlin-final` tag 保有 Kotlin 
 
 - bug 修照收，种子失去「能编译 selfhost」的能力算 P0；
 - 新语言特性默认不再进 Kotlin 版——要做就得 selfhost 同步实现，双份成本是
-  刻意的刹车；
-- 日常工具链已基本迁齐（2026-07-22 补）：`selfhost fmt`（词法级格式化器移植，
-  全仓 298 文件 + 打乱副本与 `dawn fmt` 逐字节一致）、`selfhost run`（子进程跑
-  新发射的类）、`selfhost test`（合成 `dawn$TestMain` runner 类，PASS/FAIL 报告
-  与退出码同 `dawn test` 逐字节）、`selfhost doc`（pub API 与 builtin 参考的
-  JSON 逐字节）——金样 `scripts/selfhost-fmt-diff.sh`、`selfhost-run-diff.sh`
-  均在 CI；
-- CLI 能力层已迁齐（2026-07-23，M8 阶段二）：`selfhost add`/`__pkghash`/
-  `build --native`/url 依赖抓取（冷缓存自主下载验证）/Maven 解析（coursier
-  interface，FFI）。仍留在 Kotlin 侧的只有 **LSP**（M8 阶段四）。
-- **日常驱动已是 selfhost**（2026-07-23，M8 阶段三）：`bin/dawn` 默认跑
-  selfhost 独立 jar（源码变更自动重建，`DAWN_KOTLIN=1` 逃生阀回 Kotlin）；
-  人类诊断渲染与 dawn.toml 校验权威已移交（`diag.dawn`/`manifestv.dawn`，
-  错误路径逐字节对拍）；std 嵌进独立 jar（`--embed-std`），出仓库可用；
-  金样脚本的 oracle 侧固定为 `bin/dawn-kotlin`；新增 N vs N−1 差分
-  （`scripts/selfhost-prev-diff.sh`，上一 release 与 HEAD 编同一语料 +
-  backend-dawn 前端扫描，未声明差异红灯，同时机器强制种子特性纪律）。
+  刻意的刹车。
+
+> **迁移过程已经结束。** M8 阶段二/三/四的逐阶段快照（哪些能力还在 Kotlin 侧、
+> `DAWN_KOTLIN=1` 逃生阀、`bin/dawn-kotlin` 作为金样 oracle）曾写在这里，读起来
+> 像现状——而它们都不是了：Kotlin 实现在 `kotlin-final` tag，`DAWN_KOTLIN` 与
+> `bin/dawn-kotlin` 都已删除，LSP 也早已是 selfhost 的。过程记录见
+> [m8-selfhost-only.md](m8-selfhost-only.md)，本文只留现行链。
+
+**现行的 oracle**：`scripts/selfhost-prev-diff.sh`——上一 release 与 HEAD 编同一
+语料 + 生态扫描，未声明的字节差异红灯（声明方式：提交信息里的 `Emit-Change:` 行），
+同时机器强制种子特性纪律（N−1 的 jar 必须仍能编 HEAD 的 `selfhost/src`）。
+配套还有 `selfhost-run-diff.sh`（CLI 转写）、`selfhost-fmt-diff.sh`（格式化）、
+`selfhost-lsp-diff.sh`（LSP 会话）。
 
 ## 种子推进协议（2026-07-23 立法，M8 阶段一）
 
@@ -109,5 +105,7 @@ backend-dawn 生态扫描，未声明的字节差异红灯）加 CLI/格式化/L
 - 跑 selfhost 要 `-Xss512m`：comptime 解释器递归吃宿主栈。
 - `selfhost build` 产物的确定性由 `jarw.dawn` 保证（manifest 在先、条目
   时间戳钉死、同类表必出同字节）——闭包验收能 `cmp` 整 jar 靠这个。
-- ZipEntry 的 DOS 时间经本地时区换算：确定性按机器成立（同机重建必同字节），
-  跨时区机器构建的 jar 之间不保证逐字节相同。
+- 条目时间戳走 `ZipEntry.setTimeLocal`（钉死 2020-01-01T00:00:00，无时区参与），
+  故**跨时区、跨机器**重建同一 jar 得同样的字节。此前用的是 `setTime(epoch millis)`，
+  它经默认时区换算成 DOS 时间——确定性只按机器成立，而 release 以字节固定点为核心，
+  「只有在我的时区才同字节」撑不起这个说法。

@@ -1,7 +1,17 @@
 # Dawn 设计文档
 
-本文记录 Dawn 的目标、非目标，以及每个重要决策的理由。语法与语义的权威定义在
-[spec.md](spec.md)，本文只讲"为什么"。
+> 状态：**historical**。本文是 M0–M4 时期的决策记录，逐条保留是为了「当时为什么这么选」
+> 有据可查。**其中若干前提已被后续里程碑推翻**，最要紧的三条：
+>
+> - 「编译器预算 6–8 千行（Kotlin）」「实现语言 = Kotlin」——Kotlin 实现已随
+>   `kotlin-final` tag 归档，main 上只有自举的 `selfhost/`（约 3.5 万行 Dawn），
+>   见 [m8-selfhost-only.md](m8-selfhost-only.md)。
+> - 「unsafe 逃生门不向用户代码开放」——`unsafe_pure` 现在是普通语法，用户可写，
+>   见 spec.md §6.4 与 codebase-audit.md 的 LANG-01。
+> - 「不引入 IR」——论证在小编译器阶段成立，现在 checker + emit 已过一万行，
+>   见 codebase-audit.md 的 ARCH-04。
+>
+> 语法与语义的权威定义在 [spec.md](spec.md)（那篇是 normative）。本文只讲"为什么"。
 
 ## 1. 目标
 

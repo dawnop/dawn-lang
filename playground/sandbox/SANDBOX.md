@@ -19,8 +19,14 @@ dawn-play (unprivileged service user)
 - `run-sandboxed.sh` pins every limit; sudoers lets `dawn-play` call *only* that
   script (see `sudoers.dawn-play`). The runner can pass any argv but cannot relax
   a single sandbox property — they are hardcoded in the script, not passed in.
-- The runner enables all this by setting `PLAY_SANDBOX=1` (off by default, so
-  local dev runs the commands directly). `PLAY_SANDBOX_SCRIPT` overrides the path.
+- The sandbox is **on by default**: `config.sandbox_enabled` only lets a command
+  run directly when `PLAY_UNSAFE_LOCAL=1`. That is fail-closed on purpose — this
+  service's entire job is to compile and run code from strangers, so "nobody set
+  the variable" must not mean "no sandbox". Local development and
+  `playground/test/contract.sh` are the callers that say so explicitly.
+  `PLAY_SANDBOX_SCRIPT` overrides the script path.
+  (It used to be the other way round: `PLAY_SANDBOX=1` opted *in*, and the
+  default was off. That variable is no longer read.)
 
 ## Limits (in `run-sandboxed.sh`)
 
@@ -56,7 +62,7 @@ Three things make this work, learned the hard way on the server:
    (owner dawn-play rwx, others traverse-only) so the DynamicUser can `chdir`
    into its work dir. `0700` → exit 200/CHDIR "permission denied".
 3. **Work dir is `chmod 0777`** by the runner before the phases
-   (`make_world_writable`, gated on `PLAY_SANDBOX`). The name is an unguessable
+   (`make_world_writable`, gated on the sandbox switch). The name is an unguessable
    uuid and the parents are `0711` (unlistable), so world-writable is fine.
    Default `DynamicUser` umask (0022) leaves `prog.jar` world-readable, which is
    what the next phase's different uid needs.
@@ -87,8 +93,10 @@ hang or a host-level effect:
    runner (output goes to a file, not a pipe buffer).
 
 Confirm too that after a storm of requests the concurrency gate hasn't leaked
-permits (the runner stays responsive) — see the known panic-leak note in the
-runner's `run_guarded`.
+permits (the runner stays responsive). The permit leak this used to warn about
+was in the old `run_guarded`; `play/gate.with_gate` replaced it and releases on
+the panic path, with a regression test for exactly that ("with_gate releases the
+permit even when body panics").
 
 ### Results — first production validation (2026-07-12, all contained)
 

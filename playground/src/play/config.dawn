@@ -21,8 +21,26 @@ pub fn timeout_secs() -> Int !io =
     None -> 10
   }
 
-# Whether to wrap execution in a systemd-run sandbox (stage 4d). Off locally.
-pub fn sandbox_enabled() -> Bool !io = env_or("PLAY_SANDBOX", "0") == "1"
+# Wall-clock seconds the *compiler* may take. Its own budget, not the run
+# budget: `comptime` runs user code inside the compiler, so the compile phase is
+# just as attackable as the run phase, but a cold compile is legitimately slower
+# than the program it produces. 30s is generous for a single-file program and
+# still finite.
+pub fn compile_timeout_secs() -> Int !io =
+  match parse_int(env_or("PLAY_COMPILE_TIMEOUT", "30")) {
+    Some(n) -> n
+    None -> 30
+  }
+
+# Whether to wrap execution in a systemd-run sandbox (stage 4d).
+#
+# Fail-closed: the sandbox is ON unless something explicitly turns it off. This
+# service exists to compile and run code sent by strangers, so "sandbox off" is
+# not a default a misconfiguration, a hand-started process or a copied unit file
+# gets to fall into — the production unit setting PLAY_SANDBOX=1 protected only
+# the deployment that remembered to. Running without it is still possible, but
+# it now takes saying so: PLAY_UNSAFE_LOCAL=1.
+pub fn sandbox_enabled() -> Bool !io = env_or("PLAY_UNSAFE_LOCAL", "0") != "1"
 
 # The sudo-whitelisted wrapper that runs one command in a throwaway systemd unit.
 pub fn sandbox_script() -> String !io =

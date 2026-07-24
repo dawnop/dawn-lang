@@ -21,7 +21,7 @@ pub fn main() -> Unit !io =
   [Circle(1.0), Rect(2.0, 3.0)]
     |> map(area)
     |> sum
-    |> fn(t) => println("total: {t}")
+    |> fn(t) => println("total: $t")
 ```
 
 ## 三个立身特性
@@ -35,8 +35,17 @@ pub fn main() -> Unit !io =
 
 ## 同样重要的是没有什么
 
-没有 null、没有异常（只有 `Result` + `?`）、没有继承、没有宏、没有 async、
-没有自定义运算符、没有 trait（v0.1）。理由见 [docs/design.md](docs/design.md)。
+没有 null、没有继承、没有宏、没有 async、没有自定义运算符。
+理由见 [docs/design.md](docs/design.md)。
+
+两处需要说准：
+
+- **trait 有**。`trait`/`impl`/`derive` 与 `Ord` 全部实现（[docs/trait.md](docs/trait.md)）；
+  "没有 trait（v0.1）" 是 M1 之前的话。
+- **"没有异常" 是语法，不是运行时保证**。Dawn 没有 `throw`/`catch`，可恢复失败一律走
+  `Result` + `?`。但 JVM 异常会**穿透** Dawn 栈：`cast` 失败抛 `ClassCastException`，
+  任何 `use java` 方法都可能抛。边界工具是 `java_try`（拦 `Exception`）与 `catch_panic`
+  （拦 panic + `Exception`，不拦 `OutOfMemoryError` 这类不该恢复的 `Error`），见 spec §8.2、§9。
 
 ## 文档
 
@@ -68,9 +77,16 @@ pub fn main() -> Unit !io =
 编译器前端做了完整的错误恢复——文件残缺时其余部分照常分析，一次报出全部错误。
 VS Code 扩展与 Neovim / Helix 配置见 [editors/](editors/)。
 
-状态：**M0、M1、M2、M3、M4 已实现**——验收样例 [examples/shapes.dawn](examples/shapes.dawn)、
-[examples/calc.dawn](examples/calc.dawn) 与多模块 [examples/m4/json](examples/m4/json)
-原样通过 `dawn run` 与 `dawn test`，JVM 与 native 输出一致。
+状态：**M0–M8 已实现**，当前工具链 0.11.0。M5–M8 的短版本：trait/impl/derive
+（[docs/trait.md](docs/trait.md)）、`Bytes` 与流式响应、`Cursor` 与字符串性能
+（[docs/seq6-research.md](docs/seq6-research.md)）、源码包与 Maven 依赖
+（[docs/package-design.md](docs/package-design.md)）、以及 **M8：淘汰 Kotlin 实现，
+编译器只剩自举的一套**（[docs/m8-selfhost-only.md](docs/m8-selfhost-only.md)）。
+下面按里程碑展开的是 M0–M4；M5 之后的落地记录在 `docs/` 各自的设计文档里。
+
+验收样例 [examples/shapes.dawn](examples/shapes.dawn)、[examples/calc.dawn](examples/calc.dawn)
+与多模块 [examples/m4/json](examples/m4/json) 原样通过 `dawn run` 与 `dawn test`，
+JVM 与 native 输出一致。
 
 - M0：Int/Float/Bool/String、函数、match、`!io` 效果检查、自递归尾调用消除、
   字符串插值、`dawn run` / `dawn build --native`。
@@ -95,12 +111,15 @@ VS Code 扩展与 Neovim / Helix 配置见 [editors/](editors/)。
 - M4：**模块系统**（多文件项目、`src/` 根约定、整模块 / 选择性 `use`、`pub` 可见性、
   禁环、拓扑序，`dawn run/test/build/fmt` 吃项目目录）；**`Map`/`Set`**（内建持久容器，
   保插入序）；**char**（`'a'` 即码点 `Int`，配 `code_points`/`substring` 等码点 API）；
-  验收物 [examples/m4/json](examples/m4/json)——纯 Dawn 多模块 JSON 库，过 JSONTestSuite
-  全部 318 例（JVM 与 native 一致）。
+  验收物 [examples/m4/json](examples/m4/json)——纯 Dawn 多模块 JSON 库，跑 JSONTestSuite
+  的 318 个 fixture：283 个强制 `y_`/`n_` 全过，另 35 个 `i_`（实现自定）13 接受 / 22 拒绝。
+  这条由 `scripts/json-suite.sh` 在 CI 每次执行（它还对每个 `y_` 加跑
+  parse→render→parse 往返），不再是一次手工结论。解析器本身是 `packages/json`——
+  示例经 `[deps]` 消费它，不再各留一份。
 
 详见 [docs/design.md](docs/design.md) 里程碑。编译器为 Dawn 自举实现
 （`selfhost/`，词法到 codegen 全部 Dawn，ASM 经 vendored 类驱动帧计算），
-`./bin/dawn test selfhost` 145 项 + 全仓金样在 CI。最初的 Kotlin 实现
+`./bin/dawn test selfhost` 163 项 + 全仓金样在 CI。最初的 Kotlin 实现
 （1170 项测试）随 `kotlin-final` tag 归档，v0.6.0–v0.8.0 的 release jar
 构成可重放的信任链。`dawn build --native` 经 GraalVM 产出独立二进制。
 

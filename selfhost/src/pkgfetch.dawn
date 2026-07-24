@@ -14,6 +14,7 @@ use std/io
 use java "java.lang.System"
 use java "java.io.File"
 use java "java.io.ByteArrayInputStream"
+use java "java.time.Duration"
 use java "java.net.URI"
 use java "java.net.InetSocketAddress"
 use java "java.net.ProxySelector"
@@ -150,9 +151,32 @@ fn proxy_from_env() -> Option[(String, Int)] !io = {
   }
 }
 
+## Resource ceilings for fetching and unpacking a source package.
+##
+## None of these existed. A slow or never-answering host held the compiler
+## forever (no connect or request timeout at all), and a zip or tar.gz bomb —
+## a few hundred KB that expands to gigabytes — was unpacked without a single
+## check on total size, entry count or per-entry size. Both are one hostile
+## `[deps]` URL away, and `dawn build` is the thing that follows it.
+##
+## The numbers are chosen to be far above any real source package (the largest
+## thing this fetches is a GitHub tag archive) and far below anything that
+## endangers the machine.
+const FETCH_CONNECT_TIMEOUT_SECS: Int = 30
+const FETCH_REQUEST_TIMEOUT_SECS: Int = 300
+const MAX_ARCHIVE_BYTES: Int = 268435456
+const MAX_ENTRIES: Int = 65536
+const MAX_ENTRY_BYTES: Int = 67108864
+
+fn too_big(what: String, n: Int, limit: Int) -> String =
+  "archive rejected: " ++ what ++ " (" ++ to_string(n) ++ " exceeds the " ++
+  to_string(limit) ++ " limit)" ++
+  "\n  a source package that legitimately needs this much is not one this fetcher handles"
+
 fn http_get(url: String) -> Result[Bytes, String] !io = {
   let sent = java_try(fn() => {
     let builder = HttpClient.newBuilder().expect("builder")
+      .connectTimeout(Duration.ofSeconds(FETCH_CONNECT_TIMEOUT_SECS).expect("duration")).expect("builder")
     let redirected = builder.followRedirects(Redirect.valueOf("NORMAL").expect("policy")).expect("builder")
     let ready = match proxy_from_env() {
       Some(hp) -> {
@@ -166,6 +190,7 @@ fn http_get(url: String) -> Result[Bytes, String] !io = {
     let uri = URI.create(url).expect("uri")
     let nobody: BodyPublisher = BodyPublishers.noBody().expect("publisher")
     let req = HttpRequest.newBuilder().expect("rb").uri(uri).expect("rb")
+      .timeout(Duration.ofSeconds(FETCH_REQUEST_TIMEOUT_SECS).expect("duration")).expect("rb")
       .method("GET", nobody).expect("rb").build().expect("request")
     let resp = client.send(req, BodyHandlers.ofByteArray().expect("handler")).expect("response")
     let body: Bytes = cast(resp.body().expect("body"))
@@ -176,6 +201,8 @@ fn http_get(url: String) -> Result[Bytes, String] !io = {
       let (status, body) = pr
       if status != 200 {
         Err("cannot fetch " ++ url ++ ": HTTP " ++ to_string(status))
+      } else if bytes.len(body) > MAX_ARCHIVE_BYTES {
+        Err(too_big("downloaded " ++ url, bytes.len(body), MAX_ARCHIVE_BYTES))
       } else {
         Ok(body)
       }
@@ -239,6 +266,9 @@ fn entry_path(dest: String, name: String) -> Result[String, String] !io = {
 
 fn unzip(bs: Bytes, dest: String) -> Result[Unit, String] !io = {
   var any = false
+  # running totals, so a bomb is stopped while it expands rather than after
+  var total = 0
+  var entries = 0
   let zin = ZipInputStream.new(ByteArrayInputStream.new(bs))
   while true {
     let next = match java_try(fn() => zin.getNextEntry()) {
@@ -249,6 +279,10 @@ fn unzip(bs: Bytes, dest: String) -> Result[Unit, String] !io = {
     match next {
       Some(entry) -> {
         any = true
+        entries = entries + 1
+        if entries > MAX_ENTRIES {
+          return Err(too_big("entry count", entries, MAX_ENTRIES))
+        }
         let name = entry.getName().expect("entry name")
         let out = match entry_path(dest, name) {
           Ok(p) -> p
@@ -258,6 +292,13 @@ fn unzip(bs: Bytes, dest: String) -> Result[Unit, String] !io = {
           mkdirs(out)
         } else {
           let content = zin.readAllBytes().expect("entry bytes")
+          if bytes.len(content) > MAX_ENTRY_BYTES {
+            return Err(too_big("entry " ++ name, bytes.len(content), MAX_ENTRY_BYTES))
+          }
+          total = total + bytes.len(content)
+          if total > MAX_ARCHIVE_BYTES {
+            return Err(too_big("expanded size", total, MAX_ARCHIVE_BYTES))
+          }
           match write_file_bytes(out, content) {
             Ok(_) -> ()
             Err(e) -> return Err(e)
@@ -334,12 +375,19 @@ fn pax_path(recs: String) -> Option[String] = {
 }
 
 fn untar(gz: Bytes, dest: String) -> Result[Unit, String] !io = {
+  # readNBytes, not readAllBytes: the whole point of a gzip bomb is that the
+  # expanded size is unbounded, and reading one byte past the ceiling is enough
+  # to know it was exceeded.
   let raw = match java_try(fn() =>
-      GZIPInputStream.new(ByteArrayInputStream.new(gz)).readAllBytes().expect("bytes")) {
+      GZIPInputStream.new(ByteArrayInputStream.new(gz))
+      .readNBytes(MAX_ARCHIVE_BYTES + 1).expect("bytes")) {
         Ok(b) -> b
         Err(e) -> return Err("not a tar.gz archive (or an empty one)" ++
             "\n  .zip and .tar.gz archives are supported; for GitHub use .../archive/refs/tags/<tag>.tar.gz")
       }
+  if bytes.len(raw) > MAX_ARCHIVE_BYTES {
+    return Err(too_big("expanded size", bytes.len(raw), MAX_ARCHIVE_BYTES))
+  }
   var any = false
   var off = 0
   var pending: Option[String] = None

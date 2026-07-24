@@ -10,7 +10,7 @@ use java "java.util.concurrent.TimeUnit"
 use java "java.util.UUID"
 use java "java.lang.System"
 use play/contract.{Outcome, Compiled, CompileError, Timeout}
-use play/config.{dawn_bin, java_bin, timeout_secs, sandbox_enabled, sandbox_script, work_root}
+use play/config.{dawn_bin, java_bin, timeout_secs, compile_timeout_secs, sandbox_enabled, sandbox_script, work_root}
 
 const OUTPUT_LIMIT: Int = 65536
 
@@ -48,9 +48,10 @@ fn slurp(path: String) -> String !io =
 fn strip_dir(text: String, dir: String) -> String =
   join(str.split(text, "$dir/"), "")
 
-# Prepend the sudo-whitelisted sandbox wrapper when PLAY_SANDBOX=1. The wrapper
-# takes the working directory as its first argument, then the command to run
-# inside a throwaway systemd unit (stage 4d). Off locally, argv is unchanged.
+# Prepend the sudo-whitelisted sandbox wrapper. The wrapper takes the working
+# directory as its first argument, then the command to run inside a throwaway
+# systemd unit (stage 4d). Only PLAY_UNSAFE_LOCAL=1 leaves argv unchanged —
+# config.sandbox_enabled is fail-closed.
 fn sandboxed(dir: String, argv: List[String]) -> List[String] !io =
   if sandbox_enabled() {
     ["sudo", "-n", sandbox_script(), dir] ++ argv
@@ -78,6 +79,17 @@ fn cleanup(dir: String) -> Unit !io = {
 # Stage the source into a fresh world-writable (when sandboxed) work dir and
 # run `dawn build` on it. Ok(ms) with cleaned diagnostics stripped, or
 # Err(diagnostics) on a compile failure. Shared by execute (/run) and check.
+#
+# The compiler gets its own wall-clock limit, and it needs one as much as the
+# run phase does: `comptime` executes user code *inside the compiler*, and an
+# `unsafe_pure` Java call can block there for as long as it likes. This used to
+# be a bare waitFor(). Production's systemd RuntimeMaxSec=15 caught it, but only
+# for the deployment that had the sandbox on — locally, and anywhere the sandbox
+# is off, one request could hold a compiler process forever and, with a gate
+# permit in hand, keep the next request out too.
+#
+# The budget is `compile_timeout_secs()` — separate from the run budget, since
+# a cold compiler is legitimately slower than the program it produces.
 fn compile_phase(dir: String, src: String, jar: String) -> Result[Int, String] !io = {
   let build_out = "$dir/build.txt"
   let bp = ProcessBuilder.new(sandboxed(dir, [dawn_bin(), "build", src, "-o", jar]))
@@ -85,8 +97,13 @@ fn compile_phase(dir: String, src: String, jar: String) -> Result[Int, String] !
   bp.redirectOutput(File.new(build_out))
   let started = System.nanoTime()
   let build = bp.start().expect("failed to start compiler")
-  build.waitFor()
-  if build.exitValue() != 0 {
+  let secs = TimeUnit.valueOf("SECONDS").expect("seconds")
+  let finished = build.waitFor(compile_timeout_secs(), secs)
+  if not finished {
+    build.destroyForcibly()
+    build.waitFor()
+    Err("compilation timed out after ${compile_timeout_secs()}s")
+  } else if build.exitValue() != 0 {
     Err(strip_dir(str.trim(slurp(build_out)), dir))
   } else {
     Ok((System.nanoTime() - started) / 1000000)

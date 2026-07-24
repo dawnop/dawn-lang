@@ -1,0 +1,141 @@
+# The JSONTestSuite harness, in Dawn, in-process.
+#
+# Why it exists: the repo has tracked these 318 fixtures since M4 and README
+# claims all of them pass, but nothing ran them. "318/318" was a result someone
+# obtained once by hand, not a gate — and a claim nothing re-checks is how the
+# renderer came to emit raw 0x08 for a parsed `\b` while every test stayed green.
+#
+# Why not a shell loop over `dawn run`: 318 JVM starts is minutes. One process
+# that reads the directory itself is seconds, which is the difference between a
+# check that runs on every push and one that does not.
+#
+# The naming convention is JSONTestSuite's (see suite/README.md):
+#   y_  MUST be accepted      n_  MUST be rejected      i_  implementation-defined
+# Only y_/n_ are pass/fail here. i_ files are counted and their verdict printed,
+# so an intentional change (say, refusing integers wider than 64 bits) shows up
+# in the diff as a number rather than passing unnoticed.
+use std/io
+use std/str
+use std/list
+use json/parser.{parse}
+use json/render.{render}
+
+pub type Tally = { pass: Int, fail: Int, impl_ok: Int, impl_no: Int }
+
+fn add(t: Tally, u: Tally) -> Tally =
+  Tally {
+    pass: t.pass + u.pass,
+    fail: t.fail + u.fail,
+    impl_ok: t.impl_ok + u.impl_ok,
+    impl_no: t.impl_no + u.impl_no,
+  }
+
+# A y_ document must survive parse → render → parse with the same value. This is
+# the property the fixtures alone do not check, and it is what catches a renderer
+# that emits something its own parser will not read back — exactly the JSON-03
+# control-character bug, which no accept/reject verdict could ever have seen.
+fn round_trips(text: String) -> Result[Unit, String] =
+  match parse(text) {
+    Err(e) -> Err("parse: " ++ e)
+    Ok(v) ->
+      match parse(render(v)) {
+        Err(e) -> Err("re-parse of rendered output: " ++ e)
+        Ok(v2) -> if v == v2 { Ok(()) } else { Err("render changed the value") }
+      }
+  }
+
+# A verdict on one document: `Ok(text)` means accepted (and `text` is what was
+# decoded, so the round-trip can run), `Err(why)` means rejected and why.
+#
+# 25 of the fixtures are deliberately not valid UTF-8 — lone continuation bytes,
+# overlong sequences, UTF-16 without a BOM, ISO-8859-1. Dawn's parser takes a
+# String, so those never reach it: `io.read_file` decodes strictly and fails
+# first. That is a rejection at the decode boundary, not a harness defect, and
+# it is the same verdict `main` gives on those files (`Err(_) -> "invalid"`).
+# All of them are n_ or i_; no y_ fixture is invalid UTF-8, which is what makes
+# "decode, then parse" a faithful reading of the suite for a String-based API.
+fn verdict(dir: String, name: String) -> Result[String, String] !io =
+  match io.read_file(dir ++ "/" ++ name) {
+    Err(e) -> Err("not UTF-8: " ++ e)
+    Ok(text) ->
+      match parse(text) {
+        Err(e) -> Err(e)
+        Ok(_) -> Ok(text)
+      }
+  }
+
+fn check_one(dir: String, name: String) -> Tally !io = {
+  let v = verdict(dir, name)
+  if str.starts_with(name, "y_") {
+    match v {
+      Err(e) -> {
+        println("FAIL " ++ name ++ ": must accept, got " ++ e)
+        Tally { pass: 0, fail: 1, impl_ok: 0, impl_no: 0 }
+      }
+      Ok(text) ->
+        match round_trips(text) {
+          Ok(_) -> Tally { pass: 1, fail: 0, impl_ok: 0, impl_no: 0 }
+          Err(e) -> {
+            println("FAIL " ++ name ++ ": accepted but " ++ e)
+            Tally { pass: 0, fail: 1, impl_ok: 0, impl_no: 0 }
+          }
+        }
+    }
+  } else if str.starts_with(name, "n_") {
+    match v {
+      Ok(_) -> {
+        println("FAIL " ++ name ++ ": must reject, was accepted")
+        Tally { pass: 0, fail: 1, impl_ok: 0, impl_no: 0 }
+      }
+      Err(_) -> Tally { pass: 1, fail: 0, impl_ok: 0, impl_no: 0 }
+    }
+  } else {
+    match v {
+      Ok(_) -> Tally { pass: 0, fail: 0, impl_ok: 1, impl_no: 0 }
+      Err(_) -> Tally { pass: 0, fail: 0, impl_ok: 0, impl_no: 1 }
+    }
+  }
+}
+
+# `run` reports rather than returns: a Dawn program has no exit-code builtin, so
+# the gate is the panic at the end of `main` when `fail > 0`.
+pub fn run(dir: String) -> Tally !io =
+  match io.list_dir(dir) {
+    Err(e) -> {
+      println("FAIL: cannot list " ++ dir ++ ": " ++ e)
+      Tally { pass: 0, fail: 1, impl_ok: 0, impl_no: 0 }
+    }
+    Ok(names) -> {
+      var t = Tally { pass: 0, fail: 0, impl_ok: 0, impl_no: 0 }
+      let sorted = list.sort(names)
+      var i = 0
+      while i < len(sorted) {
+        let name = unwrap_or(get(sorted, i), "")
+        if str.ends_with(name, ".json") {
+          t = add(t, check_one(dir, name))
+        }
+        i = i + 1
+      }
+      println("JSONTestSuite: " ++ to_string(t.pass) ++ " mandatory passed, " ++
+        to_string(t.fail) ++ " failed; " ++ to_string(t.impl_ok) ++ " i_ accepted, " ++
+        to_string(t.impl_no) ++ " i_ rejected")
+      t
+    }
+  }
+
+test "the y_/n_ verdict rules are what they say" {
+  # a fixture name decides which of the three rules applies; the rules
+  # themselves are exercised here so a typo in a prefix test is not silent
+  assert str.starts_with("y_array_null.json", "y_")
+  assert str.starts_with("n_object_trailing_comma.json", "n_")
+  assert not str.starts_with("i_number_huge_exp.json", "y_")
+  assert not str.starts_with("i_number_huge_exp.json", "n_")
+}
+
+test "round_trips catches a renderer that breaks its own parser" {
+  assert round_trips("{\"a\":[1,2,3],\"b\":\"x\"}") == Ok(())
+  # a string holding every C0 control: this is the case that used to render as
+  # raw bytes and fail to re-parse
+  assert round_trips("\"\\u0000\\u0001\\b\\f\\n\\r\\t\\u001f\"") == Ok(())
+  assert round_trips("\"\\ud834\\udd1e\"") == Ok(())
+}

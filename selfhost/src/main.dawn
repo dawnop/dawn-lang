@@ -1,5 +1,8 @@
-# Entry point of the self-hosted toolchain. Modes mirror the Kotlin compiler's
-# hidden golden-dump commands, and the outputs must match them byte for byte:
+# Entry point of the self-hosted toolchain. The hidden golden-dump modes below
+# exist for the differential: their output must stay byte-identical against the
+# previous release (scripts/selfhost-prev-diff.sh), which is the oracle now that
+# the Kotlin implementation is archived at kotlin-final. An intentional change
+# is declared with an `Emit-Change:` line in the commit message.
 #   selfhost lex <file>...                the token stream (dawn __lex)
 #   selfhost parse <file>...              the parsed AST   (dawn __parse)
 #   selfhost check [--std <dir>] <t>...   diagnostics + pub surface + const
@@ -114,15 +117,37 @@ fn merged_consts(
   out
 }
 
-fn write_class(dir: String, name: String, bs: Bytes) -> Unit !io = {
+## The platform's class-path separator — ':' on Unix, ';' on Windows.
+##
+## `dawn --help` has said "platform path separator" since the beginning while
+## every split and join in this file hardcoded ':'. On Windows that tears
+## `C:\lib\a.jar` in half at the drive letter, and the halves are then two
+## nonexistent class-path entries. java.io.File already knows the answer, so
+## nothing here has any business guessing it.
+fn path_sep() -> String !io = File.pathSeparator!
+
+## Write one class file, reporting the first I/O failure instead of hiding it.
+##
+## Both java_try results used to be discarded. A full disk, a read-only output
+## directory or a path the filesystem rejects then produced no message at all:
+## the build "succeeded" with classes missing, and the failure resurfaced much
+## later as a NoClassDefFoundError naming something the user never wrote — or
+## did not resurface, and shipped a jar with a hole in it. The path and the real
+## exception are both worth having at the moment they are known.
+fn write_class(dir: String, name: String, bs: Bytes) -> Result[Unit, String] !io = {
   let path = dir ++ "/" ++ name ++ ".class"
   let parent = match str.last_index_of(path, "/") {
     Some(i) -> str.substring(path, 0, i)
     None -> dir
   }
-  let _ = java_try(fn() => Files.createDirectories(Paths.get(parent).expect("path")))
-  let _ = java_try(fn() => Files.write(Paths.get(path).expect("path"), bs))
-  ()
+  match java_try(fn() => Files.createDirectories(Paths.get(parent).expect("path"))) {
+    Err(m) -> Err("cannot create " ++ parent ++ ": " ++ m)
+    Ok(_) ->
+      match java_try(fn() => Files.write(Paths.get(path).expect("path"), bs)) {
+        Err(m) -> Err("cannot write " ++ path ++ ": " ++ m)
+        Ok(_) -> Ok(())
+      }
+  }
 }
 
 ## Full program emission — shared runtime, prelude ADTs, every std and user
@@ -365,7 +390,7 @@ fn extract_cp(rest: List[String]) -> (List[String], List[String]) !io = {
       i = i + 1
     }
     if spec != "" {
-      for pth in str.split(spec, ":") {
+      for pth in str.split(spec, path_sep()) {
         if pth != "" {
           if not File.new(pth).exists() { cli_error("--cp entry not found: " ++ pth) }
           jars = jars ++ [pth]
@@ -467,7 +492,7 @@ fn resolve_java_deps(target: String) -> List[String] !io = {
 fn deps_from_env() -> List[String] !io = {
   let none: List[String] = []
   match System.getenv("DAWN_SELFHOST_CP") {
-    Some(s) -> if s == "" { none } else { str.split(s, ":") }
+    Some(s) -> if s == "" { none } else { str.split(s, path_sep()) }
     None -> none
   }
 }
@@ -488,13 +513,13 @@ fn maybe_with_deps(mode: String, rest: List[String]) -> Unit !io = {
   let jars = if target == "" { no_jars } else { resolve_java_deps(target) }
   if len(jars) == 0 && len(cpjars) == 0 { return }
   var cp = host_classpath()
-  for j in jars { cp = cp ++ ":" ++ j }
-  for j in cpjars { cp = cp ++ ":" ++ j }
+  for j in jars { cp = cp ++ path_sep() ++ j }
+  for j in cpjars { cp = cp ++ path_sep() ++ j }
   var cmd: List[String] = ["java", "-Xss512m", "-cp", cp, "main", mode]
   cmd = cmd ++ rest
   let pb = ProcessBuilder.new(cmd)
   let env = pb.environment().expect("env")
-  let _ = env.put("DAWN_SELFHOST_CP", join(jars, ":"))
+  let _ = env.put("DAWN_SELFHOST_CP", join(jars, path_sep()))
   let _ = pb.inheritIO()
   let code = pb.start().expect("java process").waitFor()
   let _ = System.exit(code)
@@ -506,7 +531,13 @@ fn write_temp_classes(classes: List[(String, Bytes)]) -> String !io = {
   let dir = Files.createTempDirectory("selfhost-run").expect("temp dir").toString().expect("path")
   for pair in classes {
     let (nm, bs) = pair
-    write_class(dir, nm, bs)
+    # nothing sensible to continue with: the classes about to be executed would
+    # be missing one, so stop at the first failure and say which file it was
+    # (cli_error exits the process)
+    match write_class(dir, nm, bs) {
+      Ok(_) -> ()
+      Err(m) -> cli_error(m)
+    }
   }
   dir
 }
@@ -550,7 +581,7 @@ fn run_run(rest0: List[String]) -> Unit !io = {
     return cli_error(target ++ " has no pub fn main() -> Unit !io, nothing to run")
   }
   let dir = write_temp_classes(classes)
-  let code = spawn_java(dir ++ ":" ++ host_classpath(), entry, args2)
+  let code = spawn_java(dir ++ path_sep() ++ host_classpath(), entry, args2)
   if code != 0 { let _ = System.exit(code) }
 }
 
@@ -588,7 +619,7 @@ fn run_test(rest0: List[String]) -> Unit !io = {
   }
   let all = classes ++ [(TESTMAIN_CLASS, gen_test_main(runner_tests))]
   let dir = write_temp_classes(all)
-  let code = spawn_java(dir ++ ":" ++ host_classpath(), TESTMAIN_CLASS, [])
+  let code = spawn_java(dir ++ path_sep() ++ host_classpath(), TESTMAIN_CLASS, [])
   if code != 0 { let _ = System.exit(code) }
 }
 
@@ -619,7 +650,10 @@ fn run_emitrt(rest: List[String]) -> Unit !io = {
   var n = 0
   for pair in classes {
     let (nm, bs) = pair
-    write_class(out, nm, bs)
+    match write_class(out, nm, bs) {
+      Ok(_) -> ()
+      Err(m) -> return cli_error(m)
+    }
     if not set.has(seen, nm) {
       seen = set.insert(seen, nm)
       n = n + 1
@@ -711,7 +745,7 @@ fn find_native_image() -> Option[String] !io = {
   }
   match System.getenv("PATH") {
     Some(p) -> {
-      for dir in str.split(p, ":") { candidates = candidates ++ [dir ++ "/native-image"] }
+      for dir in str.split(p, path_sep()) { candidates = candidates ++ [dir ++ "/native-image"] }
     }
     None -> ()
   }
@@ -744,7 +778,7 @@ fn run_native_image(
   var cmd: List[String] = [ni, "-jar", jar_path, "-o", bin_out, "--no-fallback"]
   if len(user_cp) > 0 {
     var cp = jar_path
-    for j in user_cp { cp = cp ++ ":" ++ j }
+    for j in user_cp { cp = cp ++ path_sep() ++ j }
     var dotted = ""
     for part in str.split(entry, "/") {
       if dotted == "" { dotted = part } else { dotted = dotted ++ "." ++ part }

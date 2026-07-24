@@ -9,11 +9,19 @@ use std/bytes
 use java "java.io.FileOutputStream"
 use java "java.util.zip.ZipOutputStream"
 use java "java.util.zip.ZipEntry"
+use java "java.time.LocalDateTime"
 
-# Fixed entry mtime (2020-01-01T00:00:00Z). ZipEntry converts it to DOS time
-# through the local zone, so the value is deterministic per machine — which is
-# all the closure check needs — not portable across zones.
-const ENTRY_TIME: Int = 1577836800000
+# Fixed entry mtime, 2020-01-01T00:00:00 — as a *local* date-time, written with
+# setTimeLocal.
+#
+# setTime takes an epoch millisecond and converts it to the zip format's DOS
+# time through the default zone, so the same source produced different jar bytes
+# in different zones: reproducible per machine, which is all the B == C closure
+# check needs, but not reproducible at all in the sense the word usually means.
+# A release is a byte-for-byte fixed point, so "same bytes only if you are in my
+# timezone" is too weak a claim to build one on. setTimeLocal (Java 9+) writes
+# the DOS fields directly, with no zone in the path.
+fn entry_time() -> LocalDateTime !io = LocalDateTime.of(2020, 1, 1, 0, 0, 0)!
 
 fn crlf() -> String = str.from_char(13) ++ "\n"
 
@@ -27,7 +35,7 @@ fn dotted(cls: String) -> String = {
 
 fn put(zos: ZipOutputStream, name: String, bs: Bytes) -> Unit !io = {
   let e = ZipEntry.new(name)
-  let _ = e.setTime(ENTRY_TIME)
+  let _ = e.setTimeLocal(entry_time())
   let _ = zos.putNextEntry(e)
   let _ = zos.write(bs)
   let _ = zos.closeEntry()

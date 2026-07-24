@@ -9,17 +9,54 @@
 use std/str
 use std/map
 use std/cursor
-use lexer.{peek, skip_ws, is_digit, scan_string, scan_number}
+use lexer.{peek, skip_ws, is_digit, scan_string, scan_number, err_at}
 use value.{Json, JNull, JBool, JNum, JInt, JStr, JArr, JObj}
 
 pub const MAX_DEPTH: Int = 512
 
-# true when the number literal between the two cursors is an integer (no
-# fraction, no exponent)
-fn is_int_literal(src: String, i: Cursor, j: Cursor) -> Bool = {
-  let lit = cursor.slice(src, i, j)
+# true when the number literal is an integer (no fraction, no exponent)
+fn is_int_literal(lit: String) -> Bool =
   not (str.contains(lit, ".") || str.contains(lit, "e") || str.contains(lit, "E"))
-}
+
+# Whether a Float is neither NaN nor ±Infinity. `f - f` is 0.0 exactly when f is
+# finite and NaN otherwise, and NaN compares false against everything (spec §4.3
+# — `<`/`==` on Float are IEEE, not the total order `Ord.cmp` uses). No builtin
+# predicate exists, and this one needs no magic constants.
+fn is_finite(f: Float) -> Bool = f - f == 0.0
+
+# Turn a number literal into a Json node without losing it on the way.
+#
+# An integer literal becomes an Int by parsing its *digits*, not by rounding a
+# double: `to_int(parse_float("9007199254740993"))` is 9007199254740992, and
+# past 2^63 the same route saturated to Long.MAX_VALUE. Ids, money in minor
+# units, counters and epoch timestamps all live in exactly that range, so the
+# old path could rewrite them with no error anywhere.
+#
+# Out-of-range literals are now an error rather than a rounded answer. RFC 8259
+# §6 explicitly lets an implementation set limits on the range and precision of
+# numbers, and JSONTestSuite files every such case under `i_` (implementation
+# defined) — no `y_` fixture needs an integer wider than 64 bits. Refusing beats
+# answering wrongly; a caller that genuinely wants arbitrary-precision numbers
+# needs a decimal model in `Json`, not a lossier parser.
+fn number_of(src: String, i: Cursor, lit: String) -> Result[Json, String] =
+  if is_int_literal(lit) {
+    match parse_int(lit) {
+      Some(n) -> Ok(JInt(n))
+      None -> Err(err_at(src, i, "integer out of Int range: " ++ lit))
+    }
+  } else {
+    match parse_float(lit) {
+      # 1e400 parses to Infinity, which RFC 8259 has no syntax for. Rejecting it
+      # here is what lets `render` stay total and still only emit legal JSON.
+      Some(f) ->
+        if is_finite(f) {
+          Ok(JNum(f))
+        } else {
+          Err(err_at(src, i, "number out of Float range: " ++ lit))
+        }
+      None -> Err(err_at(src, i, "invalid number: " ++ lit))
+    }
+  }
 
 # `word` starting at cursor `i`? Yields the cursor past it. Walking both strings
 # with cursors also gets end-of-input for free: `cursor.char` returns -1 there,
@@ -36,7 +73,7 @@ fn match_lit(src: String, i: Cursor, word: String, w: Cursor) -> Option[Cursor] 
 fn parse_lit(src: String, i: Cursor, word: String, val: Json) -> Result[(Json, Cursor), String] =
   match match_lit(src, i, word, cursor.start(word)) {
     Some(j) -> Ok((val, j))
-    None -> Err("invalid literal")
+    None -> Err(err_at(src, i, "invalid literal"))
   }
 
 fn parse_array_items(src: String, i: Cursor, depth: Int, acc: List[Json]) -> Result[(Json, Cursor), String] = {
@@ -49,7 +86,7 @@ fn parse_array_items(src: String, i: Cursor, depth: Int, acc: List[Json]) -> Res
   } else if c == ']' {
     Ok((JArr(acc2), cursor.next(src, k)))
   } else {
-    Err("expected ',' or ']' in array")
+    Err(err_at(src, k, "expected ',' or ']' in array"))
   }
 }
 
@@ -65,12 +102,12 @@ fn parse_array(src: String, i0: Cursor, depth: Int) -> Result[(Json, Cursor), St
 fn parse_object_members(src: String, i: Cursor, depth: Int, acc: Map[String, Json]) -> Result[(Json, Cursor), String] = {
   let ks = skip_ws(src, i)
   if peek(src, ks) != '"' {
-    Err("expected a string key in object")
+    Err(err_at(src, ks, "expected a string key in object"))
   } else {
     let (key, j) = scan_string(src, ks)?
     let jc = skip_ws(src, j)
     if peek(src, jc) != ':' {
-      Err("expected ':' in object")
+      Err(err_at(src, jc, "expected ':' in object"))
     } else {
       let (v, k) = parse_value(src, cursor.next(src, jc), depth + 1)?
       let acc2 = map.insert(acc, key, v)
@@ -81,7 +118,7 @@ fn parse_object_members(src: String, i: Cursor, depth: Int, acc: Map[String, Jso
       } else if c == '}' {
         Ok((JObj(acc2), cursor.next(src, kc)))
       } else {
-        Err("expected ',' or '}' in object")
+        Err(err_at(src, kc, "expected ',' or '}' in object"))
       }
     }
   }
@@ -98,7 +135,7 @@ fn parse_object(src: String, i0: Cursor, depth: Int) -> Result[(Json, Cursor), S
 
 fn parse_value(src: String, i0: Cursor, depth: Int) -> Result[(Json, Cursor), String] = {
   if depth > MAX_DEPTH {
-    Err("maximum nesting depth exceeded")
+    Err(err_at(src, i0, "maximum nesting depth exceeded"))
   } else {
     let i = skip_ws(src, i0)
     let c = peek(src, i)
@@ -116,13 +153,14 @@ fn parse_value(src: String, i0: Cursor, depth: Int) -> Result[(Json, Cursor), St
     } else if c == 'n' {
       parse_lit(src, i, "null", JNull)
     } else if c == '-' || is_digit(c) {
-      let (f, j) = scan_number(src, i)?
       # preserve integer-ness: a literal with no '.'/'e'/'E' round-trips as JInt,
       # so parse→render doesn't turn 42 into 42.0 (callers that re-render parsed
       # documents must not corrupt integer-typed fields)
-      if is_int_literal(src, i, j) { Ok((JInt(to_int(f)), j)) } else { Ok((JNum(f), j)) }
+      let (lit, j) = scan_number(src, i)?
+      let v = number_of(src, i, lit)?
+      Ok((v, j))
     } else {
-      Err("unexpected character")
+      Err(err_at(src, i, "unexpected character"))
     }
   }
 }
@@ -133,7 +171,7 @@ pub fn parse(input: String) -> Result[Json, String] = {
   if cursor.done(input, k) {
     Ok(v)
   } else {
-    Err("trailing content after the JSON value")
+    Err(err_at(input, k, "trailing content after the JSON value"))
   }
 }
 
@@ -142,4 +180,33 @@ test "integer literals parse as JInt, decimals and exponents as JNum" {
   assert parse("-7") == Ok(JInt(-7))
   assert parse("1.5") == Ok(JNum(1.5))
   assert parse("1e3") == Ok(JNum(1000.0))
+}
+
+test "integers beyond 2^53 keep every digit" {
+  # the whole point of parsing the lexeme: a double round-trip answers ...992
+  assert parse("9007199254740993") == Ok(JInt(9007199254740993))
+  assert parse("-9007199254740993") == Ok(JInt(-9007199254740993))
+  assert parse("9223372036854775807") == Ok(JInt(9223372036854775807))
+  # Int.MIN spelled the long way: Dawn has no negative literals, so
+  # `-9223372036854775808` is unary minus on a literal that does not fit
+  assert parse("-9223372036854775808") == Ok(JInt(0 - 9223372036854775807 - 1))
+}
+
+test "out-of-range numbers are refused, not rounded" {
+  # used to saturate to Long.MAX_VALUE
+  assert parse("99999999999999999999") ==
+    Err("integer out of Int range: 99999999999999999999 at offset 0")
+  # used to become the JSON-illegal token Infinity
+  assert parse("1e400") == Err("number out of Float range: 1e400 at offset 0")
+  assert parse("-1e400") == Err("number out of Float range: -1e400 at offset 0")
+  # underflow is representable (as 0.0), so it stays accepted
+  assert parse("1e-400") == Ok(JNum(0.0))
+}
+
+test "errors carry a code-point offset" {
+  assert parse("{\"a\": }") == Err("unexpected character at offset 6")
+  assert parse("[1, 2") == Err("expected ',' or ']' in array at offset 5")
+  assert parse("1 2") == Err("trailing content after the JSON value at offset 2")
+  # the offset counts characters, not UTF-16 units or bytes: the emoji is one
+  assert parse("[\"😀\", ?]") == Err("unexpected character at offset 6")
 }

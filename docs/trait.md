@@ -227,8 +227,11 @@ pub fn main() -> Unit !io = {
 - **去虚化**：具体见证点直接 `invokestatic` 到 impl 静态方法；prelude 标量的
   `cmp` 内联为 `LCMP`/`DCMPL`/`String.compareTo`。仅 Forward（约束转发）走
   `invokeinterface`。
-- **Float 的 cmp 与 NaN**：`cmp(NaN, x)` 采用 JVM `DCMPL` 语义（含 NaN 的比较
-  偏负）。运算符路径维持既有语义：标量走原生指令，NaN 的每个有序比较均为 false。
+- **Float 的 cmp 与 NaN**：~~采用 JVM `DCMPL` 语义（含 NaN 的比较偏负）~~。
+  **已被实现取代**：`emit.dawn` 调 `Double.compare`，是**全序**——NaN 大于一切、
+  `-0.0` 排在 `0.0` 之前，与 spec.md §4.3 一致。`DCMPL` 给不出全序（NaN 参与的
+  比较全为 -1，排序会不自洽），这是当初落地时改掉的，本节漏了回填。
+  运算符路径维持既有语义：标量走原生指令，NaN 的每个有序比较均为 false。
 - **v1 限制落地**：trait 方法/受约束函数不可作函数值（报错建议包 lambda）；
   comptime 拒绝带 witness 的调用与 impl 排序（字典是运行时构造）；`sort_by`
   无约束，comptime 可用。

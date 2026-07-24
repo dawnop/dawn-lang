@@ -46,7 +46,7 @@
 | 80,000 | **21,118** | **4.0×** | 1 |
 
 翻倍比收敛到 4.0——O(n²) 的签名。List 那列平在 0–2ms，是
-[`DawnList` 共享数组窗口](../compiler/src/main/java/dawn/rt/DawnList.java)那次修复的成果，正好当对照组。
+[`DawnList` 共享数组窗口](https://github.com/dawnop/dawn-lang/blob/kotlin-final/compiler/src/main/java/dawn/rt/DawnList.java)那次修复的成果，正好当对照组。
 
 **② 同工作量、同键型，唯一差别是复制 vs 就地改写**：80,000 次 → **28,246ms vs 2ms**。
 
@@ -68,8 +68,8 @@
 
 ### ✅ 已落地（2026-07-21）：换成持久 HAMT
 
-Map/Set 从 copy-on-write 换成 [`DawnMap`](../compiler/src/main/java/dawn/rt/DawnMap.java)/
-[`DawnSet`](../compiler/src/main/java/dawn/rt/DawnSet.java)——32 路分支的 hash array
+Map/Set 从 copy-on-write 换成 [`DawnMap`](https://github.com/dawnop/dawn-lang/blob/kotlin-final/compiler/src/main/java/dawn/rt/DawnMap.java)/
+[`DawnSet`](https://github.com/dawnop/dawn-lang/blob/kotlin-final/compiler/src/main/java/dawn/rt/DawnSet.java)——32 路分支的 hash array
 mapped trie，`assoc` 只复制根到叶那条路（约 `log32 n` 个小节点），O(n) 复制没了。
 二者 `implements java.util.Map/Set`，故 `genMapsClass` 里所有读路径（get/keys/values/
 entries/size/index/show）**一字未改**；只有 empty/insert/remove/from 六个写路径改成走
