@@ -41,6 +41,13 @@
 最近的提交 `2a330dc`/`005d63c`/`7177da9` 就是这条线）。
 在那条线落地之前动同一批文件只会制造冲突。剩余项汇总见 §15。
 
+**27 条待办里有 5 条后来让位了**（`ARCH-03` `ARCH-04` `BOOT-01` `TEST-02` `ARCH-05`
+前两条）：去 Java 化那条线在 07-25 晚出了
+[native-backend-plan.md](native-backend-plan.md)，Phase 0（Core IR）与
+Phase 2（集合纯 Dawn 化）就是这几条要的东西。另有 4 条要按它改写或冻结。
+逐条见台账 [`docs/audit/native-plan-overlap.md`](audit/native-plan-overlap.md)——
+**动这批待办之前先读它**。上表的分类是 07-25 白天的定格，不再重新计数。
+
 ### 本次改动的验证
 
 ```
@@ -433,9 +440,13 @@ Playground 的生产 systemd sandbox 能缓解，但语言工具本身没有隔�
 >
 > 不在本次修：`java_try`/`catch_panic` 的返回类型是 **intrinsic 契约**
 > （`Result[T, String]` 直接烧在 `gen_try_closure` 发射的字节码里），
-> 改成 `Result[T, JavaError]` 要同时动 codegen、prelude ADT 表、
-> 全部 `java_try` 调用点，以及每个把 `Err(String)` 往上传的库。
+> 改成结构化错误要同时动 codegen、prelude ADT 表、全部 `java_try` 调用点，
+> 以及每个把 `Err(String)` 往上传的库。
 > 这是一次跨编译器与生态的变更，值得一份设计文档而不是顺手改。
+>
+> 方案见 [error-model](audit/error-model-design.md)。**建议里的 `JavaError` 已改名
+> `ForeignError`**：`class_name` 是 JVM 二进制名，而 native 后端上没有类名——
+> 一个跨 FFI 边界的错误类型不该从第一天就假设有 Java 类（台账 §3.3）。
 
 
 - `java_try`/`catch_panic` 只返回 `Result[T, String]`，丢失类型、cause、stack 和结构化字段。
@@ -606,6 +617,11 @@ type-only cycle。建议把“全仓 lint/test”与“构建当前入口闭包�
 > 顺带说明：仓库里已有 [llvm-backend-research.md](llvm-backend-research.md) 与
 > [collections-dejava-research.md](collections-dejava-research.md)，
 > 第二后端这条线正在**独立进行中**，本次不动它涉及的文件。
+>
+> **后续（07-25 晚）**：那条线已出
+> [native-backend-plan.md](native-backend-plan.md)——Phase 0 就是本条要的
+> backend-neutral IR，Phase 5 就是本条要的 FFI capability。**本条整条让位**，
+> 台账 [§二](audit/native-plan-overlap.md)。
 
 
 `CLAUDE.md:73` 声称接第二后端只需重指向 `rt_intrinsic_target`。实际：
@@ -620,14 +636,19 @@ backend-neutral lowered IR 和 FFI capability；若不打算做，应删除误�
 
 ### ARCH-04（P2）“无 IR”的原始论证已过期
 
-> **【待办 —— 认可，且它是 ARCH-01/02/03/05 的共同前提】**
+> **【已让位 —— 认可，且它确实是 ARCH-01/02/03/05 的共同前提】**
 >
 > 「不是立刻造大而全 SSA，而是增加一个小型 lowered IR」这个分寸是对的。
 > 已做的部分：`design.md` 现在标明「不引入 IR」的论证前提（编译器 6–8 千行）
 > 已被推翻，不再读作现状。
 >
-> IR 本身要一份设计文档：统一 call / 控制流 / match / closure / trait witness / FFI
-> 这六样各自 lower 成什么，是这次工作的全部难度所在。
+> **本条让位给 [native-backend-plan.md](native-backend-plan.md) 的 Phase 0。**
+> 两边独立写出的方案结论一致（一层 IR、不做 SSA、验收是输出逐字节不变），
+> 但那份的节点集更全——本目录列的六样（call / 控制流 / match / closure /
+> trait witness / FFI）漏了**装箱擦除**与**所有权（dup/drop）**两样，后者是
+> Perceus 决策的直接后果，会改 IR 的形状。[audit/lowered-ir-design.md](audit/lowered-ir-design.md)
+> 因此降级为它的补充材料，只保留 ARCH-01/02 的拆分方案——**那部分不在 Phase 0 里**。
+> 台账 [§3.1、§3.2](audit/native-plan-overlap.md)。
 
 
 `docs/design.md:73` 在小编译器阶段拒绝 IR 是合理的，但现在 TAST 同时承担类型树、lowered tree、
@@ -1802,7 +1823,8 @@ README 示例、tutorial、grammar 和 spec 的错误都没有被测试发现。
 ### 第二阶段：收敛对外契约
 
 1. ResponseBody、JavaError、HttpError 改为 ADT。—— **待办**（WEB-06、ERR-02、WEB-09，
-   都是破坏性 API 变更）
+   都是破坏性 API 变更。其中 `JavaError` 已按后端中立改名 `ForeignError`——
+   `class_name` 是 JVM-ism，见台账 §3.3）
 2. LSP 改用标准 URI/UTF-8，并正确处理 JSON-RPC frame 错误。—— **frame 错误已修**
    （LSP-03）；**URI/UTF-8 待办**（LSP-01/02）
 3. classpath/path launcher 做真正跨平台。—— **已修**（CLI-02、CLI-03、CLI-04）
@@ -1811,12 +1833,16 @@ README 示例、tutorial、grammar 和 spec 的错误都没有被测试发现。
 
 ### 第三阶段：重构编译器
 
-1. 拆 checker 的环境和 pass。—— **待办**（ARCH-01）
-2. 引入小型 lowered IR，统一所有 call/control-flow/FFI。—— **待办**（ARCH-04，
-   **是 1、3、5 的共同前提**，应先做）
-3. 拆 emitter 的 method、closure、trait、constant 子系统。—— **待办**（ARCH-02）
-4. 把普通 runtime 逻辑从手写 ASM 移到可测试源码。—— **待办**（ARCH-05，与去 Java 化重叠）
-5. 去掉 512MB host stack 依赖。—— **待办**（ARCH-06）
+1. 拆 checker 的环境和 pass。—— **待办**（ARCH-01，等 Core IR 落地，
+   且要排在 native 计划的 Phase 5 之前）
+2. 引入小型 lowered IR，统一所有 call/control-flow/FFI。—— **已让位**（ARCH-04
+   → [native-backend-plan.md](native-backend-plan.md) 的 Phase 0。这条判断本身是对的
+   ——它确实是 1、3、5 的共同前提——只是那条线的方案更全，见台账 §3.2）
+3. 拆 emitter 的 method、closure、trait、constant 子系统。—— **待办**（ARCH-02，同 1）
+4. 把普通 runtime 逻辑从手写 ASM 移到可测试源码。—— **已让位**（ARCH-05 前两条
+   → Phase 2 集合纯 Dawn 化；建议三「opcode/descriptor 收进一个后端模块」仍待办）
+5. 去掉 512MB host stack 依赖。—— **待办**（ARCH-06，**且只能去掉一半**：
+   native 计划定了「一般尾调不做、大栈代替」，用户程序那半是决策不是债）
 
 ### 第四阶段：重建文档可信度
 
@@ -1863,26 +1889,33 @@ Dawn 当前最大的风险不是“功能少”，而是**项目对自己的承�
 
 ## 15. 剩余项（按建议顺序）
 
-> **28 条待办的方案已经写好**，在 [`docs/audit/`](audit/) 下八份设计文档里，
+> **28 条待办的方案已经写好**，在 [`docs/audit/`](audit/) 下九份设计文档里，
 > 索引与修复顺序见 [`docs/audit/README.md`](audit/README.md)。下表的「设计文档」
 > 一列指向对应的那份。
+>
+> **动手前先读 [`docs/audit/native-plan-overlap.md`](audit/native-plan-overlap.md)。**
+> [`docs/native-backend-plan.md`](native-backend-plan.md) 与本文的待办有九处撞车
+> （其中五条已被那条线吸收，本文让位）。那份台账逐条记了谁冻结、谁要改写，
+> 排期原则是**不重合的先做，重合的冻结**。
 
 **需要先写设计文档**（CONTRIBUTING.md：动码前先写 `docs/<特性>-design.md`）
 
-| 编号 | 题目 | 设计文档 |
-|---|---|---|
-| LANG-01（P0）+ ARCH-06 | `unsafe_pure` 的边界、comptime allowlist、trampoline evaluator | [purity-boundary](audit/purity-boundary-design.md) |
-| ARCH-04 + ARCH-01/02/03 | 小型 lowered IR，及靠它拆 checker/emitter | [lowered-ir](audit/lowered-ir-design.md) —— **共同前提，排第一** |
-| ERR-02 / ERR-03 / LANG-02 | `JavaError`、`bracket` intrinsic、`cast` 返回 Result | [error-model](audit/error-model-design.md) |
-| SYN-02（+SYN-03） | 统一的 application 后缀节点 | [application-syntax](audit/application-syntax-design.md) |
-| LANG-04 / LANG-05 | `Char` 不透明类型、`type X = new T` | [nominal-types](audit/nominal-types-design.md) |
-| LANG-06 / LANG-07 | `m.T`/`m.C`/`m.CONST`、`--closure` | [module-access](audit/module-access-design.md) |
-| LSP-01 / LSP-02 / LSP-04 | URI/UTF-8 交给 JDK、debounce + generation | [lsp-robustness](audit/lsp-robustness-design.md) |
-| PKG-02 / PKG-04 | cache 每次校验、`dawn.lock` | [package-integrity](audit/package-integrity-design.md) |
+| 编号 | 题目 | 设计文档 | 排期 |
+|---|---|---|---|
+| LANG-01（P0）+ ARCH-06 | `unsafe_pure` 的边界、comptime allowlist、trampoline evaluator | [purity-boundary](audit/purity-boundary-design.md) | 步 1–2 做／**步 3 冻结**（等 R6） |
+| ARCH-01/02（+ARCH-03/04） | 小型 lowered IR，及靠它拆 checker/emitter | [lowered-ir](audit/lowered-ir-design.md) —— **已降级为补充材料** | **等 Core IR**，然后拆 `Cx`/`Gen` |
+| ERR-02 / ERR-03 / LANG-02 | `ForeignError`、`bracket`、`cast` 返回 Result | [error-model](audit/error-model-design.md) | A、B 做／**C2 冻结**（等 Core IR） |
+| SYN-02（+SYN-03） | 统一的 application 后缀节点 | [application-syntax](audit/application-syntax-design.md) | **做**（不重合） |
+| LANG-04 / LANG-05 | `Char` 不透明类型、`type X = new T` | [nominal-types](audit/nominal-types-design.md) | 步 1–3 做／**步 4 冻结**（并入 Phase 6） |
+| LANG-06 / LANG-07 | `m.T`/`m.C`/`m.CONST`、`--closure` | [module-access](audit/module-access-design.md) | **做**（不重合） |
+| LSP-01 / LSP-02 / LSP-04 | URI/UTF-8 交给 JDK、debounce + generation | [lsp-robustness](audit/lsp-robustness-design.md) | **做**（不重合） |
+| PKG-02 / PKG-04 | cache 每次校验、`dawn.lock` | [package-integrity](audit/package-integrity-design.md) | **做**，PKG-02 优先 |
 
-**被另一条线覆盖**（去 Java 化 / 第二后端，见 collections-dejava-research.md）
+**已让位给 native 那条线**（[native-backend-plan.md](native-backend-plan.md)，
+见台账 [§二](audit/native-plan-overlap.md)）
 
-BOOT-01（P0）、TEST-02、ARCH-05 的前两条建议。
+ARCH-03、ARCH-04 → Phase 0（Core IR）；BOOT-01（P0）、TEST-02、ARCH-05 前两条
+→ Phase 2（集合纯 Dawn 化）。**不要并行动它们。**
 
 **破坏性 API 变更，走版本流程**
 
@@ -1894,8 +1927,13 @@ WEB-03、WEB-04、WEB-06、WEB-07、WEB-09、WEB-10 —— 一次做完，`packa
 
 | 编号 | 题目 | 为什么现在没做 |
 |---|---|---|
-| TEST-01 | classfile 过 `CheckClassAdapter` | 最便宜的一条，emit 时多包一层 |
+| REL-02 | `Emit-Change` 绑定 target 与 digest | 对差分体系的结构性改动。**现已升为第一优先**——两后端平权之后，不标 target 就说不清改的是谁的输出（台账 §3.8） |
+| TEST-01 | classfile 过 `CheckClassAdapter` | 最便宜的一条，emit 时多包一层。native 计划采纳了它的论证，没采纳这个动作项 |
 | TEST-04 | 文档 CI（fenced block 执行、链接检查、grammar corpus） | 独立一套工作 |
-| DOC-10 | 每篇 front matter、`docs/history/` | 29 个文件的机械改动，会淹掉本次改动 |
-| REL-02 | `Emit-Change` 绑定 target 与 digest | 对差分体系的结构性改动 |
+| DOC-10 | 每篇 front matter、`docs/history/` | 30 余个文件的机械改动，会淹掉本次改动。native 那条线还在加文档，越晚越贵 |
 | ARCH-01/02 | 先把 opcode/descriptor 统一到一个后端模块 | ARCH-05 建议三，可独立于 IR |
+
+**审查漏掉的一条**（登记在台账 §四）：`==` 硬连线 `BEq`、hash 是自动派生的结构
+`hashCode`，于是「任意值能不能比较/哈希」不由 trait 决定。native 计划把它列为
+**全线最高风险**（D0），而本文 76 条里没有任何一条提到它——审查检查了类型系统的
+表面（`unsafe_pure`、alias、Char），没有检查**内建操作与 trait 系统的关系**。

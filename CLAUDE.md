@@ -18,7 +18,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 - `.dawn` 源码（`selfhost/`、`site/`、`playground/`、`packages/`、`std/`）注释全英文；
   报错信息、CLI 输出全英文。
-- `docs/` 41 篇、12000+ 行，全中文（索引与状态分层见 [docs/README.md](docs/README.md)）。
+- `docs/` 43 篇、12000+ 行，全中文（索引与状态分层见 [docs/README.md](docs/README.md)）。
   README 中文。提交信息 `type(scope): 中文摘要`。
 
 写代码时别把 docs 的语言带进去，反之亦然。

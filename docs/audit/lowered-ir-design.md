@@ -3,7 +3,13 @@
 > 动码前的**调研与方案**，不是设计定稿。
 > 覆盖 codebase-audit.md 的 **ARCH-04（P2）**、**ARCH-01（P1）**、**ARCH-02（P1）**、
 > 以及 **ARCH-03（P1）** 的「若真要第二后端」那一半。
-> 状态：proposed。**这是本批待办里排在最前面的一份**——理由见 §1.3。
+>
+> 状态：**降级为补充材料。** 本文与 [`../native-backend-plan.md`](../native-backend-plan.md)
+> 的 **Phase 0（Core IR）** 是独立写出来的两份方案，结论一致（一层 IR、不做 SSA、
+> 验收是零 Emit-Change）。**动手时以那份计划的 Phase 0 为准**——它的节点集更全
+> （见 §三的表），且它知道 native 后端要什么。本文保留的价值在两处：
+> §1.3 的排序论证，和 §3.2/3.3 的 `Cx`/`Gen` 拆分方案——**后者不在那份计划里**。
+> 撞车登记见 [native-plan-overlap.md](native-plan-overlap.md) §3.1、§3.2。
 
 ## 一、问题
 
@@ -74,9 +80,11 @@ Java 反射（`java_classes`）、import/export（`module_aliases`/`module_fn_si
 审查自己也说了这个分寸——「不是立刻造『大而全 SSA』，而是增加一个小型 lowered IR」。
 本文完全采纳。
 
-## 三、方案：一层 `LIR`，六件事
+## 三、方案：一层 `LIR`，八件事
 
-新增 `selfhost/src/lir.dawn`。它**只**统一审查点名的六样东西：
+新增 `selfhost/src/lir.dawn`。下表是**本文原来列的六样**与
+[`../native-backend-plan.md`](../native-backend-plan.md) Phase 0 清单的**并集**——
+两边各有对方没看见的东西，第 7、8 行是本文原来漏掉的，标了出处：
 
 | # | 统一什么 | 现在的样子 | LIR 里的样子 |
 |---|---|---|---|
@@ -86,10 +94,23 @@ Java 反射（`java_classes`）、import/export（`module_aliases`/`module_fn_si
 | 4 | closure | `pending_lambdas`/`PendingL` 在 `Gen` 里排队 | `LClosure(captures, body_ref)`，捕获列表是 LIR 的一部分 |
 | 5 | trait witness | `WitRef`/`WForward`/`WConcrete` 混在表达式里 | `LDict` 显式参数，去虚化是 LIR→LIR 的一次改写 |
 | 6 | FFI | `TJavaCall` 带 fqcn + descriptor + SAM + List bridge | `LForeign(capability_id, args)`，**不带任何 JVM 名字** |
+| 7 | **装箱/擦除**（漏项） | `adapt_to`/`adapt_from`（`emit.dawn:328`）在**每个调用点**重算「槽是不是 TyVar」 | 物化成 `LBox`/`LUnbox` 节点，判定在 lower 时做一次 |
+| 8 | **所有权**（漏项） | 不存在——JVM 有 GC，没人需要它 | dup/drop 节点 + owned/borrowed 参数模式，**JVM 后端当 no-op 忽略** |
 
 第 6 条是 ARCH-03 的答案：JVM 类名与 descriptor 从 IR 里消失，
 挪进后端的一张 capability 表（`emit.dawn` 现有的 `rt_intrinsic_target` 是这张表的雏形，
 见 [runtime-intrinsics-design.md](../runtime-intrinsics-design.md)）。
+`LForeign(capability_id, args)` 正好就是 `use c` 需要的接口形状。
+
+第 7 条是那份计划称作「**Rank 1 最烂的耦合**」的东西，本文原来完全没看见。
+它比其余几条更该进 IR：`adapt_to` 的判定依赖类型信息，而 emit 是所有阶段里
+离类型最远的一个。
+
+**第 8 条不是补一个节点，是改 IR 的形状。** 它来自计划里「直接上 Perceus」这个
+决策：精确 RC 要求每个值的所有权状态在 IR 上可表达，而这个维度**必须从第一天就在**——
+事后往一棵已经定型的树上加所有权，等于重做一遍。这也是「先提取 IR」在那套决策下
+从可选变成必须的原因。JVM 后端把 dup/drop 当 no-op，因此本文的验收（输出逐字节不变）
+仍然成立。
 
 ### 3.1 流水线变成
 
@@ -101,6 +122,11 @@ parse → check（出 TAST）→ lower（出 LIR）→ [opt: LIR→LIR 改写] �
 今天没有任何一个位置可以断言「desugar 的结果应该长这样」。
 
 ### 3.2 拆 checker（ARCH-01）
+
+> **这一节和下一节是本文唯一没有被 native 计划覆盖的部分。** 那份计划的 Phase 0
+> 只做「抽出 Core IR」，46 字段的 `Cx` 与 31 字段的 `Gen` 原样留着；
+> 而它的 Phase 5 还要往 checker 里加 `use c` 的解析面——`Cx` 只会更大。
+> 所以拆 God module 仍然是本目录的事，**排在 Phase 0 之后、Phase 5 之前**。
 
 有了 LIR，checker 的输出边界变窄了（它只需要产出 TAST，不再需要为 emit 准备信息），
 `Cx` 才拆得动。按审查的六分法：
@@ -160,14 +186,15 @@ parse → check（出 TAST）→ lower（出 LIR）→ [opt: LIR→LIR 改写] �
 
 ## 七、落地点
 
-| 阶段 | 文件 | 验收 |
-|---|---|---|
-| A | 新增 `selfhost/src/lir.dawn`（类型定义） | 编译通过 |
-| B | 新增 `lower.dawn`：TAST → LIR，先只覆盖 call 与控制流 | lower 的内联 test |
-| C | `emit.dawn` 改吃 LIR（call/控制流部分） | fixpoint + prev-diff **零差异** |
-| D | 依次搬 match、closure、trait witness、FFI | 每步 fixpoint + prev-diff 零差异 |
-| E | 拆 `Cx` 六组件（ARCH-01），一次一个 | 每步全量 + 差分 |
-| F | 拆 `Gen`（ARCH-02） | 同上 |
+| 阶段 | 文件 | 验收 | 归属 |
+|---|---|---|---|
+| A | 新增 `selfhost/src/lir.dawn`（类型定义） | 编译通过 | native 计划 Phase 0 |
+| B | 新增 `lower.dawn`：TAST → LIR，先只覆盖 call 与控制流 | lower 的内联 test | 同上 |
+| C | `emit.dawn` 改吃 LIR（call/控制流部分） | fixpoint + prev-diff **零差异** | 同上 |
+| D | 依次搬 match、装箱/擦除、closure、trait witness、FFI、所有权 | 每步 fixpoint + prev-diff 零差异 | 同上 |
+| E | 拆 `Cx` 六组件（ARCH-01），一次一个 | 每步全量 + 差分 | **本目录**，Phase 0 后 / Phase 5 前 |
+| F | 拆 `Gen`（ARCH-02） | 同上 | 同上 |
 
-阶段 A–D 是本文的主体；E、F 是它解锁的后续，可以另开 progress 文档记录
+**阶段 A–D 已让位给 native 计划的 Phase 0**，本文不再是它们的方案，只是补充材料
+（§3 表的第 7、8 行是补给它的）。**E、F 归本目录**，另开 progress 文档记录
 （CONTRIBUTING §四：大改动开 `docs/m<N>-progress.md`，回填提交哈希）。

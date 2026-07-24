@@ -2,7 +2,13 @@
 
 > 动码前的**调研与方案**，不是设计定稿。
 > 覆盖 codebase-audit.md 的 **LANG-04（P2）** 与 **LANG-05（P2）**。
-> 状态：proposed。
+>
+> 状态：**步骤 1–3（`type X = new T` 的语言机制）proposed 且可做；
+> 步骤 4（`'a'` 变 `Char`）冻结，与
+> [`../native-backend-plan.md`](../native-backend-plan.md) 的 **Phase 6** 合并做。**
+> 那一阶段要把 `java.lang.Character`/`Long.parseLong` 从 lexer/parser 里纯 Dawn 化，
+> 碰的是同一批码点算术。撞车登记见
+> [native-plan-overlap.md](native-plan-overlap.md) §3.6。
 
 两条放一起，因为解法是同一个机制的两次使用：**一个与底层表示等价、但类型系统上不互换的
 名义类型**。`Char` 是 std 用它做的第一件事，newtype 是把这个能力交给用户。
@@ -105,6 +111,15 @@ pub fn code(c: Char) -> Int
 **过渡**：`code(c)` 拆出 `Int` 之后一切照旧。改动机械，但要一次改完，
 因为半途状态下 `'a'` 到底是什么类型会很难讲。
 
+**与 native 计划 Phase 6 合并做。** 那一阶段要把 `java.lang.Character` /
+`Long.parseLong` 从 lexer/parser 里纯 Dawn 化（已定 ASCII-only），
+碰的是**同一批**码点算术，且同样是「必须一次改完」的机械大改。分两次做，
+第二次要把第一次的成果全部重写一遍。
+
+顺序上 **`Char` 要先落**：纯 Dawn 的 `char_is_digit`/`char_is_alpha` 之类
+写在 `Char` 上才是对的签名。反过来先写在 `Int` 上，等于把同一批函数签名改两遍——
+而那批函数正是这个语言里最不该有类型歧义的地方（lexer 靠它们分辨 token）。
+
 ## 三、语法与冲突分析
 
 ### 3.1 `new` 作为关键字
@@ -165,13 +180,18 @@ pub fn code(c: Char) -> Int
 
 ## 六、落地点
 
-| 步 | 文件 | 测试 |
-|---|---|---|
-| 1 | `selfhost/src/parser.dawn`（`type X = new T`）、`ast.dawn` | parser 内联 test |
-| 2 | `selfhost/src/checker.dawn`（名义等价、自动生成的两个转换、`derive` 转发、Map 键限制穿透） | 「`Meters` 与 `Float` 不互换」「`new Float` 不能作 Map 键」 |
-| 3 | `selfhost/src/emit.dawn`（擦除到底层类型，零开销） | fixpoint；`new Int` 的算术与裸 `Int` 发射同样的字节码 |
-| 4 | `std/char.dawn`；`'a'` 的类型改为 `Char`；`lexer.dawn`/`packages/json`/`fmt.dawn` 全部调用点 | 全量 + JSONTestSuite |
-| 5 | `docs/spec.md` §1.5、§2.6、§11 | — |
+| 步 | 状态 | 文件 | 测试 |
+|---|---|---|---|
+| 1 | **可做** | `selfhost/src/parser.dawn`（`type X = new T`）、`ast.dawn` | parser 内联 test |
+| 2 | **可做** | `selfhost/src/checker.dawn`（名义等价、自动生成的两个转换、`derive` 转发、Map 键限制穿透） | 「`Meters` 与 `Float` 不互换」「`new Float` 不能作 Map 键」 |
+| 3 | **可做** | `selfhost/src/emit.dawn`（擦除到底层类型，零开销） | fixpoint；`new Int` 的算术与裸 `Int` 发射同样的字节码 |
+| 4 | **冻结**，与 Phase 6 合并 | `std/char.dawn`；`'a'` 的类型改为 `Char`；`lexer.dawn`/`packages/json`/`fmt.dawn` 全部调用点 | 全量 + JSONTestSuite |
+| 5 | 随 4 | `docs/spec.md` §1.5、§2.6、§11 | — |
 
-步骤 1–3 是纯**新增**，不破坏任何现有代码，可以先发。
-步骤 4 是破坏性变更 → 先发 tag，dawnop-site 再 bump。
+步骤 1–3 是纯**新增**，不破坏任何现有代码，可以先发；它们也让 LANG-05
+（透明 alias 被当成领域安全的示例）**立刻**有答案可写进 spec §2.6，
+不必等步骤 4。步骤 4 是破坏性变更 → 先发 tag，dawnop-site 再 bump。
+
+> 步骤 3 会动 `emit.dawn`，而 Core IR（native 计划 Phase 0）也在动它。
+> 冲突面很小（新增一条擦除规则 vs 搬走整棵树的遍历），但**排在 Phase 0 之后更省事**——
+> 一条擦除规则写进 `lower.dawn` 比写进两个地方便宜。

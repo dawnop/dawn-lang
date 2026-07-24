@@ -2,7 +2,10 @@
 
 > 动码前的**调研与方案**，不是设计定稿。
 > 覆盖 codebase-audit.md 的 **SYN-02（P1）**，顺带结清 **SYN-03**。
-> 状态：proposed。
+> 状态：**proposed，可做**——与 [`../native-backend-plan.md`](../native-backend-plan.md)
+> 不重合（本文只动 parser 与 checker，不动 emit）。反而是**顺风**：
+> 把五种调用形式收成一个后缀节点，Core IR 那边的 `LCall` 就少一批要 lower 的源形态。
+> 台账见 [native-plan-overlap.md](native-plan-overlap.md)。
 
 ## 一、问题
 

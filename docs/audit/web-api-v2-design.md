@@ -4,7 +4,10 @@
 > 覆盖 codebase-audit.md 的 **WEB-03（P1）**、**WEB-04（P2）**、**WEB-06（P2）**、
 > **WEB-07（P2）**、**WEB-09（P2）**、**WEB-10（P2）**。
 > （WEB-01/02/05/08 的安全与协议 bug 已于 2026-07-25 落地。）
-> 状态：proposed。**这是一次破坏性 API 变更，按 CONTRIBUTING §六先发 tag。**
+> 状态：**proposed，可做**。**这是一次破坏性 API 变更，按 CONTRIBUTING §六先发 tag。**
+> 与 [`../native-backend-plan.md`](../native-backend-plan.md) 不重合——那份的 §7
+> 明确把 `packages/web` 划到 native 范围外（web 需要 C 写的 HTTP 栈 + socket 层）。
+> 台账见 [native-plan-overlap.md](native-plan-overlap.md)。
 
 ## 一、问题
 

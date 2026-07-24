@@ -2,7 +2,12 @@
 
 > 动码前的**调研与方案**，不是设计定稿。
 > 覆盖 codebase-audit.md 的 **LANG-01（P0）** 与 **ARCH-06（P1）**。
-> 状态：proposed。
+>
+> 状态：**步骤 1、2 proposed 且可做；步骤 3 冻结。**
+> 步骤 3（`ceval` trampoline 化）与 [`../native-backend-plan.md`](../native-backend-plan.md)
+> 的 **R6**（「Core IR 落地后，comptime 解释器该吃 Core 还是继续吃 TAST?**此项未决**」）
+> 撞车——interp 若改吃 Core，trampoline 化的工作全部重做。
+> 撞车登记见 [native-plan-overlap.md](native-plan-overlap.md) §3.5。
 
 两条审查条目放在一起，因为它们指向同一个东西：**comptime 求值器是什么，
 它被允许做什么，它跑在哪儿。** LANG-01 问「谁能盖 pure 章、盖了之后编译期能执行什么」，
@@ -135,7 +140,22 @@ const COMPTIME_ALLOWLIST: List[String] = [
 且幂等），`java.lang.Character` 的行为随 Unicode 版本走（同一 JDK 内确定）。
 两者都在「同一 JDK 下同参同值」的意义上是纯的，这正是 `unsafe_pure` 承诺的东西。
 
-### 步骤 3：求值器不再吃宿主栈（对应 ARCH-06 + LANG-01 建议 3）
+### 步骤 3：求值器不再吃宿主栈（对应 ARCH-06 + LANG-01 建议 3）——**冻结**
+
+> **先读这段。** 本步骤要把 `ceval` 的 30 余个 `TExpr` 构造器逐个拆成
+> 「求值子表达式前」与「子表达式回来之后」两半——那是本步骤的全部工作量。
+> 而 `../native-backend-plan.md` 的 R6 把「interp 吃 Core IR 还是吃 TAST」列为**未决**，
+> 并承诺在 Phase 2 之前决定。**若结论是吃 Core，这份逐构造器的拆分全部重做。**
+>
+> 所以：**等 R6 决议再动**。步骤 1、2 不受影响（它们改的是 checker 的一个判定和
+> `eval_java` 的一张表，与 `ceval` 的形状无关），照做。
+>
+> 另有一半是**做不掉**的：那份计划 §1 定了「一般尾调**不做**，大栈代替」，
+> Phase 3 的 `pthread_attr_setstacksize` 就是 `-Xss512m` 在 native 上的延续。
+> 也就是说「用户程序靠大栈跑深递归」在那边是**决策**，不是债。
+> 本步骤能拿掉的只有「编译器的 comptime 求值器吃宿主栈」这一半，
+> 而 `-Xss512m` 之所以泄漏给用户程序，正是因为这一半。两件事要分开讲，
+> 且落地时要写进 spec——别让用户以为深递归以后会变好。
 
 `ceval` 现在是宿主递归。改成显式栈（trampoline）后：
 
@@ -195,13 +215,17 @@ const COMPTIME_ALLOWLIST: List[String] = [
 
 ## 六、落地点
 
-| 步骤 | 文件 | 测试 |
-|---|---|---|
-| 1 | `selfhost/src/checker.dawn`（`check_unsafe_pure` 加 `is_std_module` 判定） | checker 内联 test：用户模块用 `unsafe_pure` 报错；std 模块不报 |
-| 1 | `docs/spec.md` §6.4 改写、`docs/design.md` 回填「原决策现已恢复」 | — |
-| 2 | `selfhost/src/interp.dawn`（`eval_java` 查表） | interp 内联 test：表内类可折叠、表外类报错并给出表 |
-| 3 | `selfhost/src/interp.dawn`（`ceval` trampoline 化） | 现有 comptime test 全绿 + 一个「深度 10 万」的 test 不再依赖宿主栈 |
-| 3 | `bin/dawn`、`selfhost/src/main.dawn`、`scripts/*.sh` 去 `-Xss512m` | `selfhost-fixpoint.sh` + 全仓测试 |
+| 步骤 | 状态 | 文件 | 测试 |
+|---|---|---|---|
+| 1 | **可做** | `selfhost/src/checker.dawn`（`check_unsafe_pure` 加 `is_std_module` 判定） | checker 内联 test：用户模块用 `unsafe_pure` 报错；std 模块不报 |
+| 1 | **可做** | `docs/spec.md` §6.4 改写、`docs/design.md` 回填「原决策现已恢复」 | — |
+| 2 | **可做** | `selfhost/src/interp.dawn`（`eval_java` 查表） | interp 内联 test：表内类可折叠、表外类报错并给出表 |
+| 3 | **冻结**，等 R6 | `selfhost/src/interp.dawn`（`ceval` trampoline 化） | 现有 comptime test 全绿 + 一个「深度 10 万」的 test 不再依赖宿主栈 |
+| 3 | **冻结**，等 R6 | `bin/dawn`、`selfhost/src/main.dawn`、`scripts/*.sh` 去 `-Xss512m` | `selfhost-fixpoint.sh` + 全仓测试 |
+
+> 步骤 2 的 allowlist 在 native 上会**自然消失**——`use c` 没有反射，
+> comptime 折不了任意 static 方法。它是 JVM 后端的措施，不是永久的语言机制。
+> 落地时在表的注释里写明这一点，免得将来有人以为它是 spec 的一部分。
 
 **发布纪律**：步骤 1 是语言收窄 → 先发 tag。步骤 2、3 不改语言表面，
 但步骤 3 会改 `spawn_java` 的 argv → 属工具链输出变化，要 `Emit-Change:`。

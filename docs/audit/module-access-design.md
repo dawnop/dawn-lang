@@ -2,7 +2,9 @@
 
 > 动码前的**调研与方案**，不是设计定稿。
 > 覆盖 codebase-audit.md 的 **LANG-06（P2）** 与 **LANG-07（P2，加载范围那一半）**。
-> 状态：proposed。
+> 状态：**proposed，可做**——与 [`../native-backend-plan.md`](../native-backend-plan.md)
+> 完全不重合（纯 checker 前端的事，不碰 emit、不碰运行时）。
+> 台账见 [native-plan-overlap.md](native-plan-overlap.md)。
 
 两条都在问「模块这个边界到底管什么」：一条是**引用**模块里的东西时能写什么，
 一条是**加载**哪些模块。

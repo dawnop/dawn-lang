@@ -1,6 +1,6 @@
 # docs/ 索引
 
-41 篇文档按时间叠加，混着**规范、调研、设计方案、落地日志、复盘和运维说明**。
+43 篇文档按时间叠加，混着**规范、调研、设计方案、落地日志、复盘和运维说明**。
 读者无从判断哪几段还成立——`design.md` 说实现语言是 Kotlin，`bootstrap.md` 说 LSP
 还在 Kotlin，两者都是当时的事实、现在都不是。这份索引把它们分层，并给每篇标状态。
 
@@ -31,17 +31,21 @@
 | [trait.md](trait.md) | current | trait/impl/derive 与 `Ord`。§落地记录里 Float 比较那段已被实现取代（见文内标注）。 |
 | [tutorial.md](tutorial.md) | current | 上手教程。代码块目前**人工维护**——机械校验随 Kotlin 侧 `TutorialTest` 一起归档了。 |
 | [codebase-audit.md](codebase-audit.md) | current | 2026-07-25 的全仓审查，76 条逐条带处置结论（已修 / 驳回 / 待办）。 |
-| [audit/README.md](audit/README.md) | current | 上面那份审查剩下 28 条待办的**作业计划**：八份设计文档的索引 + 修复顺序。 |
+| [audit/README.md](audit/README.md) | current | 上面那份审查剩下 28 条待办的**作业计划**：九份设计文档的索引 + 修复顺序。 |
+| [audit/native-plan-overlap.md](audit/native-plan-overlap.md) | current | 上面那批待办与 native-backend-plan.md 的**撞车登记**：谁让位、谁冻结、谁要改写。动 `audit/` 里任何一份之前先读它。 |
+| [native-backend-plan.md](native-backend-plan.md) | current | 从今天到 native 自举的分阶段计划（Phase −1 → 6）与决策总表。 |
 
 ## 待办的设计方案（`docs/audit/`，全部 proposed）
 
-审查剩下的待办，动码前的方案。索引与顺序见 [audit/README.md](audit/README.md)。
+审查剩下的待办，动码前的方案。索引与顺序见 [audit/README.md](audit/README.md)，
+**与 native 那条线的撞车见 [audit/native-plan-overlap.md](audit/native-plan-overlap.md)**——
+下面标「冻结」的部分在那份台账里写明了等什么。
 
-[audit/purity-boundary-design.md](audit/purity-boundary-design.md)（LANG-01 P0 + ARCH-06）·
-[audit/lowered-ir-design.md](audit/lowered-ir-design.md)（ARCH-01/02/03/04，**其余架构项的前提**）·
-[audit/error-model-design.md](audit/error-model-design.md)（ERR-02/03 + LANG-02）·
+[audit/purity-boundary-design.md](audit/purity-boundary-design.md)（LANG-01 P0 + ARCH-06，步 3 冻结）·
+[audit/lowered-ir-design.md](audit/lowered-ir-design.md)（ARCH-01/02/03/04，**已降级为 Core IR 的补充材料**）·
+[audit/error-model-design.md](audit/error-model-design.md)（ERR-02/03 + LANG-02，C2 冻结）·
 [audit/application-syntax-design.md](audit/application-syntax-design.md)（SYN-02/03）·
-[audit/nominal-types-design.md](audit/nominal-types-design.md)（LANG-04/05）·
+[audit/nominal-types-design.md](audit/nominal-types-design.md)（LANG-04/05，步 4 冻结）·
 [audit/module-access-design.md](audit/module-access-design.md)（LANG-06/07）·
 [audit/lsp-robustness-design.md](audit/lsp-robustness-design.md)（LSP-01/02/04）·
 [audit/package-integrity-design.md](audit/package-integrity-design.md)（PKG-02/04）·

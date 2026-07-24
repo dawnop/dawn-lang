@@ -3,7 +3,14 @@
 > 动码前的**调研与方案**，不是设计定稿。
 > 覆盖 codebase-audit.md 的 **PKG-02（P1，源码包那一半）** 与 **PKG-04（P2）**。
 > （种子 jar 的 checksum、下载与解压的资源上限已于 2026-07-25 落地。）
-> 状态：proposed。
+> 状态：proposed，两半都可做，但**PKG-02 优先于 PKG-04**——理由见下。
+>
+> [`../native-backend-plan.md`](../native-backend-plan.md) §1 定了 native 上
+> `[java-deps]`/coursier **直接报不支持**，拉包 shell 出去调 `curl`。两个后果：
+> §2.2 的 `dawn.lock` 是**JVM 后端专属**的设施（native 上 `[[java-dep]]` 是死条目），
+> 而 §2.1 的 d1 marker 在 native 上**是唯一的完整性手段**（那边没有 JDK 的 HTTP 栈、
+> 没有 `MessageDigest`、没有 coursier 的校验）。所以先做 §2.1。
+> 撞车登记见 [native-plan-overlap.md](native-plan-overlap.md) §3.9。
 
 ## 一、问题
 

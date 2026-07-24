@@ -3,7 +3,10 @@
 > 动码前的**调研与方案**，不是设计定稿。
 > 覆盖 codebase-audit.md 的 **LSP-01（P1）**、**LSP-02（P1）**、**LSP-04（P2）**。
 > （LSP-03「畸形 frame 让服务器静默退出」已于 2026-07-25 修复。）
-> 状态：proposed。
+> 状态：**proposed，可做**——改法与
+> [`../native-backend-plan.md`](../native-backend-plan.md) 不重合，
+> 但 §四里「不留 fallback」那条的**理由**被它作废了，已改写。
+> 台账见 [native-plan-overlap.md](native-plan-overlap.md) §3.7。
 
 ## 一、问题
 
@@ -80,7 +83,7 @@ URI 解码是**基础设施**，正确性早有定义、JDK 早有实现。
 `packages/web` 的 WEB-02 修复走的就是这条路（改用 `URLDecoder`），本文一致。
 
 **要注意的**：`java_try` 目前返回 `Result[T, String]`，
-[error-model-design.md](error-model-design.md) 会把它改成 `JavaError`。
+[error-model-design.md](error-model-design.md) 会把它改成 `ForeignError`。
 两者不冲突——这里只用了 `Err(_)`，不看内容。
 
 ### 2.2 debounce + generation cancellation（LSP-04 第一步）
@@ -126,8 +129,14 @@ URI 解码是**基础设施**，正确性早有定义、JDK 早有实现。
 
 ## 四、不做的（记录理由）
 
-- **保留手写 decoder 作为 fallback**。留着它就还得维护它，
-  而它的全部价值是「JDK 不在」——JDK 一定在，Dawn 跑在 JVM 上。
+- **保留手写 decoder 作为 fallback**。留着它就还得维护它。
+  初稿这里的理由是「它的全部价值是『JDK 不在』——JDK 一定在，Dawn 跑在 JVM 上」，
+  **那个前提已经被 [`../native-backend-plan.md`](../native-backend-plan.md) 的
+  Phase 6 作废**（要替换 17 个模块的 99 处 `use java`，`lsp.dawn` 在其中；
+  native 上没有 `java.net.URI`）。结论不变，理由换成：**native 上会另起一份**，
+  而不是把这个留着。一个不校验 continuation byte、不拒绝 overlong 与 surrogate
+  的实现，不该因为将来需要一个实现就免于被删——将来需要的是**对的**那个。
+  见 [native-plan-overlap.md](native-plan-overlap.md) §3.7。
 - **自己实现严格 UTF-8 decoder**（审查给的第二个选项）。
   写一个正确的 UTF-8 decoder（拒绝 overlong、surrogate、超范围）是可行的，
   但它要自己的一套 corpus 才可信，而 JDK 的那个已经被全世界测过。

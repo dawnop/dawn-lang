@@ -2,7 +2,13 @@
 
 > 动码前的**调研与方案**，不是设计定稿。
 > 覆盖 codebase-audit.md 的 **ERR-02（P1）**、**ERR-03（P1）**、**LANG-02（P1）**。
-> 状态：proposed。
+>
+> 状态：**A、B 步 proposed 且可做；C2 步冻结。**
+> [`../native-backend-plan.md`](../native-backend-plan.md) §1 定了 native 的 panic 是
+> setjmp/longjmp、捕获点是「`catch_panic` / `java_try` 的**对应物**」。两个后果：
+> 错误类型不能带 JVM 类名（§2.A 已改），`bracket` 不能是 JVM codegen 特例
+> （§2.C 已上移成 IR 节点，等 Phase 0）。撞车登记见
+> [native-plan-overlap.md](native-plan-overlap.md) §3.3、§3.4。
 
 三条放一起，因为它们是同一句话的三个后果：**Dawn 没有异常语法，但 JVM 异常会穿透，
 而语言目前只有一种接住它的方式——变成 `String`。**
@@ -64,36 +70,53 @@ match req.body_file { Some(p) -> delete_quietly(p); None -> () }
 
 三步，依赖关系是 A → B、A → C（B 与 C 互不依赖）。
 
-### A. `JavaError`：一个最小的结构化错误
+### A. `ForeignError`：一个最小的、后端中立的结构化错误
+
+初稿这里写的是 `JavaError { class_name, message, cause }`。**`class_name` 是 JVM
+二进制名，那是个 JVM-ism**——native 后端上没有类名，而 native 计划明说
+`java_try` 会有「对应物」。一个跨 FFI 边界的错误类型如果从第一天就假设有 Java 类，
+第二个后端来的时候要么重做要么长出第二个类型。改成：
 
 ```dawn
 # std/error.dawn（新增）
-## What a Java throwable looks like after it crosses into Dawn.
+## What a foreign failure looks like after it crosses into Dawn.
 ##
-## `class_name` is the binary name, not the toString() prefix: matching on a
-## *name* is a decision the compiler can check for typos one day, matching on a
-## message prefix (spec §9's current advice) is a decision the JDK can silently
-## invalidate.
-pub type JavaError = {
-  class_name: String,
+## `kind` is the backend's own name for the failure class — a JVM binary name on
+## the JVM backend, an errno symbol or a signal name on the native one. It is a
+## *name*, not a rendered message: matching on a name is a decision the compiler
+## can check for typos one day, matching on a message prefix (spec §9's current
+## advice) is a decision the JDK — or libc — can silently invalidate.
+##
+## What it is deliberately not: a Java-shaped record. The JVM backend is one
+## backend, and a type that spells `class_name` would have to be reinvented for
+## the second one.
+pub type ForeignError = {
+  kind: String,
   message: String,
   cause: Option[String],
 }
 ```
 
 `java_try`/`catch_panic` 的返回类型从 `Result[T, String]` 改为
-`Result[T, JavaError]`。
+`Result[T, ForeignError]`。
+
+**`kind` 里放什么由后端定，但它是后端契约的一部分**，要写进
+[runtime-intrinsics-design.md](../runtime-intrinsics-design.md)：JVM 后端放
+`getClass().getName()`，native 后端放 errno 符号名或信号名。
+**跨后端可移植的匹配只有一种**——不匹配 `kind`，只看 `Err`/`Ok`。
+想按 `kind` 分流的代码就是后端相关的代码，这一点要在文档里说明白，
+不要让它看起来可移植。
 
 **这是 intrinsic 契约的变更**：`Result[T, String]` 直接烧在
 `selfhost/src/codegen.dawn` 的 `gen_try_closure` 发射的字节码里
 （handler 现在调 `Throwable.toString()` 存进 `Result$Err`）。要改的是：
 
-1. `gen_try_closure` 改为构造 `JavaError` 记录（读 `getClass().getName()`、
-   `getMessage()`、`getCause()`）；
-2. `JavaError` 要进 prelude ADT 表（跟 `Option`/`Result` 一样由 codegen 生成类）；
+1. `gen_try_closure` 改为构造 `ForeignError` 记录（JVM 后端的 `kind` 取
+   `getClass().getName()`，另两个字段取 `getMessage()`/`getCause()`）；
+2. `ForeignError` 要进 prelude ADT 表（跟 `Option`/`Result` 一样由 codegen 生成类）；
 3. 每个 `java_try`/`catch_panic` 的调用点。
 
-**兼容过渡**：加一个 `pub fn message(e: JavaError) -> String`，
+**兼容过渡**：加一个 `pub fn message(e: ForeignError) -> String`，
 现有 `Err(m) -> ... m ...` 的调用点改成 `Err(e) -> ... error.message(e) ...`。
 机械但量大。
 
@@ -109,7 +132,7 @@ pub type JavaError = {
 pub fn cast[T](o: Object) -> T          # pure，失败抛 ClassCastException
 
 # 之后
-pub fn cast[T](o: Object) -> Result[T, JavaError]   # pure，失败是值
+pub fn cast[T](o: Object) -> Result[T, ForeignError]   # pure，失败是值
 ```
 
 `try_cast` 之类的新名字**不加**——留着旧名字继续做不安全的事，
@@ -136,23 +159,30 @@ pub fn bracket[A, B](
   acquire: fn() -> A !e,
   use_it: fn(A) -> B !e,
   release: fn(A) -> Unit !e,
-) -> Result[B, JavaError] !e
+) -> Result[B, ForeignError] !e
 ```
 
 **「编译器/runtime 保证 release」这半句**是审查的原话，也是这里唯一的难点：
 纯用 Dawn 写 `bracket`，它内部还是靠 `catch_panic`——那就只是把同一个惯用法
-换了个名字。要真保证，`bracket` 得是一个 **intrinsic**，由 codegen 发射
-真正的 JVM `try/finally`（`visitTryCatchBlock` 带 `null` 类型 = finally）。
+换了个名字。要真保证，`bracket` 得由编译器发射真正的「无论怎么退出都执行」结构。
 
 于是 C 有两个版本：
 
 - **C1（便宜）**：纯 Dawn 的 `bracket`，内部 `catch_panic`。收益是消灭三处手写惯用法、
   统一形状。**不解决**「丢原始上下文」。
-- **C2（正确）**：`bracket` 作为 intrinsic，codegen 发 finally 块。原始异常继续
-  向上传播，release 一定执行，栈不变。
+- **C2（正确）**：`bracket` 是**降级阶段的一个 IR 节点**（`LProtect(body, release)`），
+  两个后端各自发射：JVM 发 `visitTryCatchBlock` 带 `null` 类型（= finally），
+  native 发 setjmp/longjmp 的 unwind 保护。原始失败继续向上传播，
+  release 一定执行，栈不变。
 
-**建议直接做 C2**。C1 的收益里最大的一块（统一形状）在 C2 里照样有，
-而 C1 会让第二次改动多一批调用点要动。
+初稿这里写的是「C2 = 一个 codegen intrinsic，发 JVM finally 块」。
+**那是把它绑死在 JVM 上**——native 后端没有 finally，`bracket` 会变成第二份实现。
+上移到 IR 之后依赖关系反而简单了：C2 不再是「等 IR 做完之后的一个后续改动」，
+它**就是** IR 的一部分。
+
+**建议仍然是直接做 C2**（C1 的收益里最大的一块「统一形状」在 C2 里照样有，
+而 C1 会让第二次改动多一批调用点要动），但**它现在冻结**，等 Core IR 落地——
+见 [native-plan-overlap.md](native-plan-overlap.md) §3.4。
 
 ## 三、为什么不顺手把 X 也改了
 
@@ -167,22 +197,28 @@ pub fn bracket[A, B](
 ## 四、不做的（记录理由）
 
 - **让 `java_try` 按异常类型分流**（`java_try_catching[T](cls, ...)`）。
-  有了 `class_name` 之后调用方自己 match 就行，而每加一个分流形式就多一个
-  要在 codegen 里发射的方法。
-- **给 `JavaError` 加 `Show` 之外的渲染**。`derive Show` 够用；
+  有了 `kind` 之后调用方自己 match 就行，而每加一个分流形式就多一个
+  要在后端里发射的方法。
+- **给 `ForeignError` 加 `Show` 之外的渲染**。`derive Show` 够用；
   服务端要什么格式是服务端的事。
 - **保留 `Result[T, String]` 版本作为便利函数**。留着它，所有旧代码就都不会迁移，
   两种错误类型会永久共存——那是这次改动想消灭的东西。
-- **等 lowered IR 做完再动**。C2 要在 codegen 发 finally 块，
-  确实会与 [lowered-ir-design.md](lowered-ir-design.md) 的 emit 改造撞。
-  但 A 与 B 完全不受影响，可以先做；C2 排在 IR 阶段 C 之后。
+- **给 `ForeignError` 的 `kind` 定义一套跨后端的规范化取值**（比如把
+  `java.io.IOException` 和 libc 的 `EIO` 映射到同一个 `io_error`）。
+  听起来可移植，实际是在**猜**两套错误分类的对应关系，而猜错的地方
+  正是调用方会依赖的地方。`kind` 是后端自己的名字，可移植的匹配只有
+  `Ok`/`Err` 这一层——把这条限制写明白比造一层假的可移植性诚实。
+- **等 A/B 也一起冻结**。C2 冻结是因为它要 IR，A 与 B 不要
+  （A 改 `gen_try_closure` 与调用点，B 改 `cast` 签名）。两者都是破坏性变更，
+  越早发窗口越宽。
 
 ## 五、落地点
 
-| 步 | 文件 | 测试 |
-|---|---|---|
-| A | `selfhost/src/codegen.dawn`（`gen_try_closure`）、prelude ADT 表、`std/error.dawn`、全部 `java_try` 调用点 | 现有全量 + 一个「`class_name` 是二进制名而非 toString 前缀」的 test |
-| B | `selfhost/src/types.dawn`（`cast` 签名）、`docs/spec.md` §9、`docs/cast-interop.md`、各调用点 | cast 失败返回 `Err` 而非抛的 test |
-| C2 | `selfhost/src/codegen.dawn`（`bracket` intrinsic，finally 块）、`std/resource.dawn`、三处手写惯用法改写 | 「release 在 panic 路径也执行、且原异常继续传播」的 test |
+| 步 | 状态 | 文件 | 测试 |
+|---|---|---|---|
+| A | **可做** | `selfhost/src/codegen.dawn`（`gen_try_closure`）、prelude ADT 表、`std/error.dawn`、全部 `java_try` 调用点 | 现有全量 + 一个「`kind` 是二进制名而非 toString 前缀」的 test |
+| B | **可做** | `selfhost/src/types.dawn`（`cast` 签名）、`docs/spec.md` §9、`docs/cast-interop.md`、各调用点 | cast 失败返回 `Err` 而非抛的 test |
+| C2 | **冻结**，等 Core IR | 降级阶段的 `LProtect` 节点 + 两个后端的发射、`std/resource.dawn`、三处手写惯用法改写 | 「release 在 panic 路径也执行、且原失败继续传播」的 test |
 
-A 与 B 都是破坏性变更 → 各自先发 tag。A 会改发射的字节码 → `Emit-Change:`。
+A 与 B 都是破坏性变更 → 各自先发 tag。A 会改发射的字节码 → `Emit-Change:`
+（按 REL-02 的新格式，要标 target；见 [native-plan-overlap.md](native-plan-overlap.md) §3.8）。
