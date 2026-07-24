@@ -53,10 +53,12 @@ Java 类。**要做的是把这个模型长全。**
 ① 语言核心(类型/语义)          ← 后端无关(已经是)
 ──────────────────────────────
 ② 运行时 intrinsic 契约          ← 一小组抽象原语,语言命名、后端各自实现
-   str_* / list_* / map_* /        (code_points 已是其一)
-   set_* / bytes_* / io_* / panic
+   Array[T](new/get/len/with)    (集合全靠它:Map/Set=HAMT、List=RRB,皆纯 Dawn)
+   + str 核心(code_points…)
+   + bytes_* + io_* + panic + popcount(可选)
 ──────────────────────────────
 ③ std 库(Dawn 写)              ← 只用 intrinsic + Dawn,不碰 java.*  → 换后端免费
+   集合(list/map/set)在这一层,纯 Dawn ADT over Array;迭代靠语言侧 Iter trait
 ──────────────────────────────
 ④ 后端 codegen + 运行时          ← JVM:intrinsic → java.util/String + dawn/rt 类
                                   LLVM:intrinsic → native 实现
@@ -74,16 +76,25 @@ Java 类。**要做的是把这个模型长全。**
 
 - **str**:`len`(码点)、`slice`(码点索引)、`concat`、`code_points`/`from_code_points`(已有)、
   `contains/starts_with/ends_with/index_of`、大小写、`trim`、cursor 家族(Dawn Cursor 编码)、`reverse`。
-- **bytes**:`utf8`(编码)、`decode`、`len`、`at`、`slice`、`index_of`。
-- **list**:`get`、`size`、`concat`(不可变、O(1) 均摊 append)、`iter`。
-- **map/set**:`empty`、`assoc`/`without`、`get`、`has`、`size`、`keys`、`iter`(HAMT 语义:插入序迭代)。
-- **io**:`print`/`println`、`read_line`、`read_file`/`write_file`、`is_dir`、`list_names`。
+- **bytes**:`utf8`(编码)、`decode`、`len`、`at`、`slice`、`index_of`。≈「字节版 Array」,已接近最小原语。
+- **集合(list/map/set)→ 塌成一个原语 `Array[T]`**。**不再有 `list_*/map_*/set_*` intrinsic**——集合是 `Array` 之上的
+  **纯 Dawn ADT**(Map/Set=HAMT,List=RRB-tree relaxed,见 collections-dejava-research §5.3 与 D 计划)。后端只需实现
+  这一个不可变数组类型:
+  - `array_new(Int, T) -> Array[T]` / `array_get(Array[T], Int) -> T` / `array_len(Array[T]) -> Int`
+  - `array_with(Array[T], Int, T) -> Array[T]`(**返回新数组,语义纯**)
+  - 加一个 `popcount`(HAMT bitmap;可纯 Dawn 循环,故可选)。
+  **所有「可变」藏进后端对 `array_with` 的实现**:JVM=copy;native=**rc==1 原地改、否则 copy**(Perceus)。语言侧全程
+  纯,mutation 不越过契约——DawnList 的「可变数组+CAS 独占检测」由此降级成后端对一个纯原语的私有实现细节。
+- **io**:`print`/`println`、`read_line`、`read_file`/`write_file`、`is_dir`、`list_names`。**不可约的效果边界**,小契约保留。
 - **控制**:`panic`、效果系统的 IO 边界。
 
-> 契约的**边界画在哪**是核心决策(§8):画粗(整个 String API 当一个 intrinsic)则 JVM 后端实现少、
-> 但 LLVM 后端要重写多;画细(只暴露 `code_points`/`from_code_points`,其余用 Dawn 拼)则 std 更可移植、
-> 但 JVM 上可能有性能损失(每次 `str.len` 物化码点数组 vs `codePointCount` 原生)。**倾向:细契约 +
-> 少数性能敏感项保留粗 intrinsic**(如 `str_len` 直给,不走物化)。
+> 契约的**边界画在哪**是核心决策(§8)。**集合已给结论=细到极致**:整族集合在后端边界上只剩 `Array[T]` 一个原语
+> (4 个操作),换后端 = 实现一个数组类型,而非重写 ~20 个集合 intrinsic。**str 是唯一不能塌成一个原语的**——Unicode +
+> native 表示(UTF-8 vs UTF-16,§8 开放决策)使然,故保持画细:`code_points`/`from_code_points` + 少数性能敏感项
+> (如 `str_len` 直给、不走物化)保留粗 intrinsic,其余纯 Dawn 拼。
+>
+> **迭代不进后端契约**:集合成纯 ADT 后,`for-in` 靠一个 **`Iter` trait**(语言侧,像 Rust `IntoIterator`)dispatch 到集合的
+> Dawn 迭代函数,而非后端 `iter` intrinsic。于是「迭代」也从后端接口移到语言 trait + Dawn 源——同样朝「后端接口更小」走。
 
 ## 6. de-Java 的正确方向 vs 错误方向(关键决策记录)
 
@@ -98,24 +109,39 @@ JVM-锁死。LLVM 后端一看 std 里全是 `java.lang.String.codePointCount`,�
 > **这是本文最重要的一条:去 Java 要朝 intrinsic 契约去,不朝内联 java FFI 去。** 前者一份力气两处用,
 > 后者只满足诉求 A、还加深了对 JVM 的耦合。
 
-## 7. 那三个集合:java.util 身份不可约,但可归位
+## 7. 那三个集合:身份不可约的前提可拆——现主推 D(纯 Dawn 化)
 
-在 **JVM 后端 + 要无缝互操作**两个前提下,"一个 `implements java.util.List` 的类"是**不可约**的:
-即便让 Dawn 有自己的 list 类型,它一跨进 `use java` 签名(`String.join`、`Files.readAllLines`……)
-就得要 java.util 身份;边界适配器本身又是个 `implements java.util.List` 的类——继承的坑只是从"到处"
-挪到"边界"。Dawn 语言无继承,所以这个类**没法用纯 Dawn 源写**。
+> **本节结论已更新**。早先判「JVM 上 `implements java.util.*` 不可约、集合只能归位成后端 intrinsic 实现(C)」。
+> 复核前端后发现「不可约」有一个**能拆的隐藏前提——`==`/hash 是编译器硬编码的**。完整推演见
+> [collections-dejava-research.md](collections-dejava-research.md)(A/B/C 调研 → **D 计划**)。以下为修正后的判断。
 
-因此集合的去 Java **不是"翻译成 Dawn ADT"**,而是"把它归位成 **JVM 后端对 list/map/set intrinsic 的
-实现**":
+**Map/Set 的身份不可约,只在 `==`/hash 硬编码时成立。** 今天 `==` 是硬连线 `BEq`、hash 是自动派生结构 hashCode,
+无 override 通道;正因钉死成「结构化」而 HAMT 树形非规范形,才不得不借 `AbstractMap` 的顺序无关 equals。Dawn
+**已有** trait + 字典传递(Ord 的轨:`dict_syms`/`resolve_witness`)和位运算 surface 语法——缺的只是让 **Eq/Hash
+骑上这条轨**。一旦相等下沉到 Dawn 层,Map/Set 就能写成**路径复制的持久 Dawn ADT + `impl Eq/Hash`**,身份真正消除。
 
-- **JVM 后端**:`DawnList/Map/Set`(extends `java.util.Abstract*` + HAMT/CAS)是 JVM 对集合 intrinsic
-  的实现。它**怎么产生**有三条路(见 §8 决策):(A) 加窄 codegen 能力让 Dawn 类型声明 `extends java`、
-  HAMT 节点用 Dawn ADT;(B) codegen 手搓字节码发射(像 Show/Maps);(C) 继续 vendored,只把它**明确
-  记为"JVM 后端 intrinsic 实现"**、留指路牌。
-- **LLVM 后端**:native 持久集合(HAMT/持久向量),实现同一份契约。跟 java.util 无关。
+因此集合去 Java 的正解是 **D:把 Eq/Hash 提升成可 override 的 trait,集合纯 Dawn 化**——而非归位成不可退役的后端
+运行时(C)。分工:
 
-语言核心与 std **永远不点名 java.util**——只用 list/map/set intrinsic。这样集合的 java.util 身份被
-彻底关进 JVM 后端,LLVM 后端换一套 native 实现即可。
+- **Map/Set**:身份是唯一障碍,D 精确解锁(HAMT 用 immutable `List[Node]` 路径复制,位运算/popcount 齐活)。
+- **List**:无身份问题(有序结构相等即 `derive` 所给);唯一难点是均摊 O(1) `++` 的可变数组 + CAS——独立性能取舍
+  (可变数组 intrinsic 或换树结构),与 Eq/Hash 无关。
+- **两个后端一份源**:集合成普通 Dawn ADT 后,现有 ADT/函数/见证 lowering 自动带到 JVM 与 LLVM,native 后端**直接
+  复用同一份 Dawn 集合源**,不必另写 native 集合运行时。
+
+- **过渡态(已落地)**:C——`DawnList/Map/Set`(extends `java.util.Abstract*`)作为 JVM 后端当前实现,`vendor.dawn`
+  已留指路牌。C 保留到 D 的 Map/Set 阶段完成为止。
+- **路线**:见 collections-dejava-research §7 分阶段(D0 Eq/Hash trait 化 → D1 **`Array[T]` 原语**+popcount → D2 Map/Set
+  纯 Dawn 化 + `Iter` trait,4→2 → D3 List→**RRB-tree(relaxed)**,两后端统一一份纯 Dawn 源)。**语言侧新增 Eq/Hash/Iter
+  三 trait,后端侧新增 `Array` 一原语;净效果=集合从后端契约整族搬进语言层(~20 intrinsic → 一个数组类型)。最大
+  风险在 D0:改 `==` dispatch 是巨型 Emit-Change,派生默认须逐字节等价。**
+- **List 的表示已定 RRB-tree(relaxed)**(2026-07-25,collections-dejava-research §5.3):不走「可变数组 primitive」原地
+  路线(那会让 List 永远是 runtime primitive、与纯 Dawn 相悖)。RRB 是纯函数式 ADT、和 HAMT 同族可纯 Dawn 化;快路径
+  native 靠 Perceus RC 节点唯一原地复用(近 O(1) 均摊 append),JVM 吃 O(log₃₂ n)(仍消 O(n²));全操作均匀 O(log n),
+  消掉现 DawnList 的 slice/update/big++big O(n) 悬崖。
+
+语言核心与 std **永远不点名 java.util**——只用 list/map/set intrinsic。D 完成后,这个 intrinsic 契约背后在 JVM 上
+就是**纯 Dawn 集合源**(而非 vendored Java),LLVM 后端复用同一份源。
 
 ## 8. LLVM 后端具体要什么
 
@@ -154,7 +180,7 @@ JVM-锁死。LLVM 后端一看 std 里全是 `java.lang.String.codePointCount`,�
   `TJavaCall` 保持 JVM-only(后端 #2 直接报错,与 `use c` 对称);闭包(indy/LMF,`emit.dawn:1955`)
   只 ~8 个函数、localized,重写便宜,不进这轮。
 - **native 运行时**(JVM 白送、native 要自造):
-  - 持久集合(HAMT/持久向量)、字符串(UTF-8 还是 UTF-16 的 native 表示?决策项)。
+  - 持久集合:Map/Set=HAMT,**List=RRB-tree(relaxed)**(已定,§7);字符串(UTF-8 还是 UTF-16 的 native 表示?决策项)。
   - **内存管理**:JVM 有 GC,native 没有。**Dawn 的纯性是利好**——数据不可变、无可变别名,持久结构是
     无环 DAG → **引用计数就够**(不必防环),或 region/arena 更省。不一定要上完整 tracing GC。
   - `panic`/效果 IO 的 native 实现(unwind 或返回码)。
@@ -187,11 +213,16 @@ JVM-锁死。LLVM 后端一看 std 里全是 `java.lang.String.codePointCount`,�
   intrinsic 语义 / 控制流+match / 装箱这三处漏进 emit 的 lowering 抽成 output-preserving 的 tast→tast
   pass,让真正的 Core IR 边界从残余 emit 里减出来。三步 Move(1 语义表 / 2 控制流 / 3 装箱)见 §8。
 - **契约边界画多细**(§5 blockquote):细契约更可移植 vs 粗 intrinsic 更快;倾向"细 + 少数性能敏感项保粗"。
-- **~~集合怎么产生~~ → 已定:C**(2026-07-25):[collections-dejava-research.md](collections-dejava-research.md)。
-  A(窄 codegen `extends java` 特性)违背无继承+仍需 java 数组;B(手搓字节码)只有扁平的 DawnList 划算、
-  DawnMap 的 HAMT 层级超出 codegen 现有能力;**C** = 把 DawnList/Map/Set 归位成「JVM 后端对 list/map/set 契约的
-  实现」。理由:java.util 身份在 JVM 上不可约(`==`/hash 就是 `Abstract*` 契约),对 native 后端目标 C 已足够。
-  **已落地**:指路牌写进 `selfhost/src/vendor.dawn` 头注释 + `vendored_outers` 文档注释。可选未做:B-for-List(退 1/3)、C+(源回树+javac)。
+- **~~集合怎么产生~~ → C 已落地作过渡态,主推 D**(2026-07-25 修订):[collections-dejava-research.md](collections-dejava-research.md)。
+  A(窄 codegen `extends java`)违背无继承+仍需 java 数组;B(手搓字节码)只有扁平 DawnList 划算、DawnMap 的 HAMT
+  层级超出 codegen 现有能力;**C**(=把 DawnList/Map/Set 归位成「JVM 后端对契约的实现」)**已落地**——指路牌写进
+  `selfhost/src/vendor.dawn`。**但 A/B/C 共同的隐藏前提被拆穿**:「java.util 身份不可约」只在 `==`/hash 硬编码时成立。
+  **改判主推 D**:把 Eq/Hash 提升成可 override 的 trait(骑 Ord 现成的字典轨),集合写成纯 Dawn 持久 ADT,身份真正消除、
+  两 backend 一份源。C 保留到 D 的 Map/Set 阶段完成。路线:D0 Eq/Hash trait 化(最大风险,巨型 Emit-Change)→ D1 popcount
+  intrinsic → D2 Map/Set 纯 Dawn 化(4→2)→ D3 List→RRB-tree(relaxed),两后端一份纯 Dawn 源(4→1)。**List 表示
+  已定 RRB(relaxed),非可变数组原地路线**(§7,collections-dejava-research §5.3)。**接口最小化(2026-07-25)**:集合整族
+  塌成一个后端原语 `Array[T]`(new/get/len/`with`),`list_*/map_*/set_*` intrinsic 全删、集合变纯 Dawn ADT;迭代靠语言
+  侧 `Iter` trait 不进后端契约。换后端 = 实现一个数组类型。
 - **ASM/AdtClassWriter**:算不算这轮范围。ASM 是第三方(可当外部依赖),AdtClassWriter 是我们写的但
   绑死 ASM——彻底零手写 Java 要连它一起换(Dawn 写的字节码+栈帧写入器,`jarw.dawn` 是同类先例)。
 - **LLVM 侧**:字符串 native 表示(UTF-8/16)、内存管理选型(RC/region/GC)。→ 这几项已在

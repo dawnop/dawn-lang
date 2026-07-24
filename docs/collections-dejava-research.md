@@ -1,9 +1,14 @@
-# 集合归位：DawnList/DawnMap/DawnSet 的去 Java 方案调研（A/B/C）
+# 集合归位：DawnList/DawnMap/DawnSet 的去 Java 方案（A/B/C 调研 → D 计划）
 
-> 状态：**调研，未实现**。这是 de-Java 契约的最后一块（[runtime-intrinsics-design.md](runtime-intrinsics-design.md) §7）。
+> 状态：**A/B/C 调研完成；C 已作为过渡态落地（`vendor.dawn` 指路牌）；本文改写计划，主推 D。**
+> 这是 de-Java 契约的最后一块（[runtime-intrinsics-design.md](runtime-intrinsics-design.md) §7）。
 > StdStrings（v0.10.0）、StdBytes/StdIo（v0.11.0）已退役成 emitter 自写的 `dawn/rt/*` 类；手写 Java
 > 只剩三个集合容器 `DawnList`/`DawnMap`/`DawnSet`（源在 `kotlin-final` tag，工作树只有 vendored `.class`）
-> 加 ASM shim `AdtClassWriter`。本文评估这三个容器怎么处理，给出推荐。相关：
+> 加 ASM shim `AdtClassWriter`。
+>
+> **本次改写的由来**：A/B/C 都默认「JVM 上集合的 java.util 身份不可约」（旧 §3）。复核编译器前端后发现，
+> 这个「不可约」有一个**没写出来的前提——`==`/hash 是编译器硬编码的**。这个前提是可以拆的，拆了之后
+> 「纯 Dawn 写集合、且跨 backend 复用」从原则上不可能，变成一个**有界的语言特性项目**（选项 D）。相关：
 > [pure-ffi-design.md](pure-ffi-design.md)、[list-append-quadratic] 的实现背景。
 
 ## 1. 这三个类是什么
@@ -37,106 +42,169 @@ map_insert(builtin) → INVOKESTATIC dawn/rt/Maps.map_insert → INVOKEVIRTUAL d
 Dawn 的 `List` 值平时就是 ArrayList,只有经 `++`/`concat` 才变成 DawnList。所以 DawnList 唯一被用到的
 独门方法就是那个 owned-tail `concat`;其它一切都走 `java.util.List` 接口。
 
-## 3. 关键约束：java.util 身份在 JVM 上不可约
+## 3. 关键约束的重新诊断：不可约的只有「身份」，而身份不可约的前提是 `==`/hash 硬编码
 
-去 Java 的第一直觉是"用纯 Dawn 重写"。对集合**不行**,原因分三层,一层比一层硬:
+旧调研把「去 Java」判死，靠的是三层约束一层比一层硬。复核后，前两层是**可机械改动的 codegen 约定**，
+只有第三层是真障碍——而第三层的「不可约」有一个**能拆掉的隐藏前提**。
 
-1. **类型即接口。** `desc_of` 把 `TyList/TyMap/TySet` 映射成 `Ljava/util/List/Map/Set;`(`codegen.dawn:57`)——
-   在编译器自己的类型系统里,Dawn 集合**就是** JDK 接口,到处如此。
-2. **发射的代码直接在 Dawn 集合上调 JDK 接口方法**:for-in(`List.size/get`)、Show(`Map.entrySet`→`iterator`)。
-   要求这个值**真的** implements 该接口。
-3. **最硬:`==`/hash 就是 `Abstract*` 契约。** `gen_equality` 对引用类型发 `Object.equals`(`emit.dawn:2434`);
-   对 map/set 这会派发到 DawnMap/DawnSet 从 `AbstractMap`/`AbstractSet` **继承**来的**结构化、忽略顺序**的
-   equals/hashCode(spec §2.2 要求)。**Dawn 对 map/set 的相等与哈希语义,本体就是 JDK `Abstract*` 的契约**,
-   不是编译器发射的任何东西。这正是 `extends java.util.Abstract*` 无法绕开的地方。
+1. **类型即接口（codegen 约定，可改）。** `desc_of` 把 `TyList/TyMap/TySet` 映射成 `Ljava/util/List/Map/Set;`
+   （`codegen.dawn:57`）。这是一个描述符选择,不是语言事实——若集合成为 Dawn ADT,`desc_of(TyMap)` 改成
+   `Ldawn/rt/DawnMap;`（一个 Dawn 类）即可。面广但机械。
+2. **发射的代码在集合上调 JDK 接口方法（走契约，可改）。** for-in（`List.size/get`）、Show（`Map.entrySet`→`iterator`）
+   这些点,今天直调 java.util 接口。把它们**路由到集合自己的 Dawn API / intrinsic**——正是我们已经建好的
+   `rt_intrinsic_target` 那套机制。有界的重定向工作。
+3. **`==`/hash 就是 `Abstract*` 契约（旧调研判为「不可约」——**只在一个前提下成立**）。** `gen_equality` 对引用
+   类型发 `Object.equals`（`emit.dawn:2424`）;对 map/set 派发到 DawnMap/DawnSet 从 `AbstractMap`/`AbstractSet`
+   **继承**的**结构化、忽略顺序**的 equals/hashCode（spec §2.2）。旧结论:「Dawn 对 map/set 的相等语义本体就是
+   JDK Abstract\* 契约,Dawn 无继承无法用纯源表达」。
 
-**互操作(`use java`)反而依赖最窄**:只有 Dawn `List` 能跨边界(→`List`/`Collection`/`Iterable`,发射侧用
-`Collections.unmodifiableList` 零拷贝包装,**正因为它已经是 java.util.List**);`maven.dawn` 接收 coursier 的
-`java.util.List` 直接 `.size/.get`。**Map/Set 从不跨 FFI 边界**。
+   **被漏掉的前提:今天 `==` 是硬连线的 `BEq` 运算符、hash 是自动派生的结构 `hashCode`,两者都没有 override 通道。**
+   正因为编译器把相等/哈希钉死成「结构化」,而 HAMT 的树形**不是规范形**(同一逻辑 map、插入删除历史不同→树形不同),
+   才**不得不**借 AbstractMap 那个「迭代 entry 当集合比」的顺序无关 equals。**「不可约」不可约的是「在 `==`/hash
+   硬编码前提下」**——把这个前提拆掉,身份就下沉到 Dawn 层,容器就能用纯 Dawn 表达。
 
-> 结论:集合的 java.util 身份**不是缺陷,是 JVM 平台**——每门 JVM 语言(Kotlin/Scala/Clojure)的集合都活在
-> java.util 里。**在 JVM 后端上,"集合没有 java.*" 原则上不可能**,与 A/B/C 怎么选无关。能选的只是"这个 JVM
-> 实现是 vendored 的 .java,还是 emitter 发的字节码,还是别的"。
+**而拆这个前提的机件,Dawn 已经有了**（复核所得，旧调研未纳入）:
+- **位运算已是 surface 语法**:`OpBand/Bor/Bxor/Shl/Shr/Ushr`（`& | ^ << >> >>>`,`parser.dawn`）。HAMT 索引够用,
+  只差 popcount——正好当一个新 intrinsic 进 `rt_intrinsic_target` 表。
+- **trait + 字典传递机制已在**:`trait Ord[T]`、用户 `impl`（`imp.derived` 区分派生 vs 手写）、`derive`、`[T: Ord]` bound；
+  关键的**字典传递** `dict_syms: Map[(TyVar, TraitId), Sym]` + `resolve_witness(cx, trait_id, ty)` → `WitRef`。
+  `sort` 就是靠它把元素的 Ord 见证 thread 进去。**Eq/Hash 还没上这条轨,但轨已经铺好。**
 
-## 4. 三个选项
+> 修正后的结论:集合的 java.util 身份**不是 JVM 平台的铁律,是「`==`/hash 尚未 trait 化」的当前实现的产物**。
+> 前两层约束机械可改,第三层靠给 Eq/Hash 补 trait 化(骑 Ord 现成的轨)即可解除。**去 Java 对集合从「原则不可能」
+> 变成「一个有界的语言特性项目」。**
 
-### 选项 A — 加"extends java"codegen 特性,用 Dawn 写 HAMT/窗口逻辑
+## 4. 旧选项 A/B/C：都只是「换一种方式产出 JVM 实现」，java.util 身份不动
 
-让 Dawn 的类型声明能 `extends java.util.AbstractMap` 并覆写抽象方法,HAMT 节点写成 Dawn ADT。
+这三个是在「身份不可约」前提下的最优解，现记录为背景。**共同局限:全都保留 java.util 身份,对 native 后端零贡献。**
 
-- **能达成 equals/hash?** 能——发射的类 extends AbstractMap 就**免费继承**结构化 equals/hashCode(§3 第 3 层自然满足)。
-- **代价 1:引入继承。** Dawn **刻意没有继承**(README「没有继承」是立身特性)。即便"窄",extends-java 也是往
-  语言表面加一个违背核心决策的东西。
-- **代价 2:仍然去不掉 java.*。** HAMT 节点要可变数组(`Node[]` 的 clone/arraycopy、CAS 的 AtomicInteger),
-  Dawn 纯不可变模型**没有裸数组**,只能走 `use java` 裸 `Object[]`/`AtomicInteger` FFI。于是 A 把 java 依赖
-  **从「.java 里 extends AbstractMap」搬到「.dawn 里 extends-java 特性 + use java 裸数组」——依赖没消失,只是挪位**,
-  还多欠一套数组变异 FFI。
-- **裁决:否。** 违背"无继承",且纯度收益是幻觉(照样 `use java` 数组)。成本最高、收益最虚。
+- **选项 A — 加「extends java」codegen 特性,用 Dawn 写 HAMT。** 违背 Dawn 立身的「无继承」,且 HAMT 数组变异仍要
+  `use java` 裸 `Object[]`/`AtomicInteger`——java 依赖只是从 .java 挪进 .dawn。**否。**
+- **选项 B — 手搓字节码发射(像 Show/Maps)。** DawnList 可行(一个 flat 类);DawnMap 不可行——需要 codegen 从没有过的
+  「内部/匿名类 + 虚派发层级」基础设施,或把 HAMT 拍平成 ~300 行诡诈 ASM。**仅 List 划算。**
+- **选项 C — 继续 vendored,正式归位成「JVM 后端对集合契约的实现」。** 零代价零风险,**已落地**(`vendor.dawn` 头注释 +
+  `vendored_outers` 文档)。它对**功能目标(解锁 native 后端)已完全足够**,但不兑现「工作树无手写 Java」。
 
-### 选项 B — 手搓字节码发射(像 Show/Maps 那样)
+（A/B/C 的完整评估见本文档 git 历史 `005d63c` 前的版本。）
 
-把三个容器转写进 `codegen.dawn` 的 ASM。注意:B 在**字节码层**发 `extends AbstractMap`(只是 `cw.begin` 的
-一个超类名串,Q4 证明管道已具备),**不碰语言的"无继承"**——这是 B 相对 A 的关键优势。
+## 5. 选项 D（主推）：把 Eq/Hash 提升成 trait，集合纯 Dawn 化，backend 适配自动发生
 
-- **DawnList:可行。** 一个 flat 类:`extends AbstractList`、覆写 `get`/`size`、一个 static `concat`(CAS 循环 +
-  两段 array-copy)。规模约等于「comparator + 一个稍长 static 方法」,和我刚发的 bytes/io 同量级。**退役 1/3。**
-- **DawnMap:不可行(现状下)。** 现在**没有任何 emitter 发射内部类/嵌套类/匿名类,也不用 invokedynamic**——
-  每个 `gen_*_class` 只发一个 flat 类。DawnMap 是**类层级**(`$Node`/`$Bitmap`/`$Leaf`/`$Collision` + 虚派发)
-  **加两个匿名 entrySet 迭代器类**($1/$1$1)。要发它,得先给 codegen 造出「发射内部/匿名类 + 虚派发层级」
-  这套它从没有过的基础设施。**除非把 HAMT 拍平**(节点合成单个带 tag 的类、switch 代替虚派发、entrySet 物化成
-  ArrayList 免掉匿名迭代器)——那是把算法重写成不自然的形状,~300+ 行诡诈 ASM,做到逐字节正确风险很高。
-- **DawnSet:薄,DawnMap 在就容易。**
-- **裁决:仅 List 值得;Map/Set 成本/风险过高。**
+D 不是「换一种产出 JVM 实现的方式」,是**解除第三层约束本身**:一旦相等/哈希下沉到 Dawn 层,集合就是普通的
+Dawn ADT + 函数 + 见证传递,而这三者**现有 lowering 在每个 backend 上都已经会处理**。「适配不同 backend」不再是要
+设计的东西——它是 ADT lowering 的既有能力。
 
-### 选项 C — 继续 vendored,但正式归位成"JVM 后端对集合 intrinsic 的实现"
+### 5.1 三步
 
-不动代码,只把 `DawnList/Map/Set` **明确记为 JVM 后端对 list/map/set 契约的实现**,留指路牌(源在 kotlin-final、
-native 后端实现同一契约的 native 版)。vendoring 机制本身很干净:`vendored_outers` → `rt_class_family` 从
-**运行中编译器自己的 classloader** 读 `.class` 字节、逐字节拷进输出;嵌套/匿名类靠 `$` 前缀名谓词自动带走
-(加个内部类都不用改 vendoring)。
+**第 1 步(真正的工作量)——Eq / Hash 从「运算符/派生」提升成「可 override 的 trait」,骑 Ord 已铺好的轨:**
 
-- **代价:零。** **风险:零。**
-- **不达成"工作树无 .java"**:源仍在 tag 归档。但这重新框定了"完整性"焦虑(见 §5)。
+```
+trait Eq[T]   { fn eq(a: T, b: T) -> Bool }
+trait Hash[T] { fn hash(x: T) -> Int }
+```
 
-## 5. 重新框定:两个目标要分开看
+- 每个类型一个**派生默认 impl**,字节码必须与今天 `gen_equality`/`gen_hash_code_method` 产出**逐字节相同**
+  （这是最关键的约束,见 §7 风险）;
+- `==` 不再直接发 `BEq`,而**dispatch 到 `Eq` 见证**;绝大多数类型命中派生默认,行为不变;
+- 允许**用户 override**:`impl Eq for Map[K,V] { eq(a,b) = entries_equal_as_set(a,b) }`、`impl Hash for Map ...`。
+  顺序无关身份就此从 AbstractMap **搬进 Dawn 源**。
 
-de-Java 这条线其实有两个目标,对集合它们指向不同答案:
+**第 2 步——Map/Set 携带 key 的 Eq+Hash 字典**,和 `sort` 携带 Ord 见证一样:`Map[K,V]` 隐式带 `[K: Eq + Hash]` bound,
+构造/insert/lookup 处 thread K 的见证。机制现成,复用 `resolve_witness`/`dict_syms`。
 
-- **目标 ①:解锁 native 后端。** 集合**早已在 intrinsic 契约后面**(map_*/set_*/list builtin → Maps/Lists
-  助手 → 容器)。JVM 实现是 vendored-Java 还是 emitted-字节码,**对 native 后端零影响**——它无论如何都用 native
-  持久集合实现同一份契约。**对目标 ①,C 已完全足够;A/B 对它零贡献。**
-- **目标 ②:工作树里没有手写 Java(完整性/名副其实)。** 只有 A/B 能把 .java 挪出归档。但 §3 证明 java.util
-  身份在 JVM 上不可约,所以 A/B **都做不到"集合没有 java.\*"**,只能做到"java 逻辑从 .java 换成 .dawn/字节码"。
-  而 A 违背无继承、B 只对 List 划算。
+**第 3 步——集合成为纯 Dawn ADT + 函数 + 见证,backend 适配自动:**
+- **后端接口只剩一个原语 `Array[T]`**(new/get/len/`with`)。集合(HAMT/RRB)全是它之上的纯 Dawn ADT,**后端不再实现
+  任何 `list_*/map_*/set_*` intrinsic**——换后端 = 实现一个数组类型。`with` 返回新数组、语义纯;可变藏进后端实现
+  (JVM copy / native rc==1 原地复用)。详见 [runtime-intrinsics-design.md](runtime-intrinsics-design.md) §5。
+- **迭代靠语言侧 `Iter` trait**(像 Rust `IntoIterator`):`for-in` dispatch 到集合的 Dawn 迭代函数,不走后端 `iter` intrinsic。
+- **JVM**:4 个手写节点类 → 编译器发射的 ADT variant 类(和任何 `enum` 同路径)。**全程零 java.util**,一个 Dawn Map
+  就是一个 Dawn ADT。§3 前两层的 `desc_of` 重定向 + 调用点路由在此一并做掉。
+- **native/LLVM**:**同一份 Dawn 源**,节点 lower 成 tagged struct,`Array[Node]` 走 RC/region buffer。零容器运行时契约。
 
-**核心判断:vendored 的三个容器不是"未完成的 selfhost",是"JVM 后端的运行时",躲在一份显式契约后面——正如
-native 后端将来的 native 集合运行时也不会是「Dawn 语言源码」。**把它们当后端运行时接受,是诚实的,也是
-runtime-intrinsics-design §7 早就给的框架(「归位成 JVM 后端对 intrinsic 的实现」)。
+### 5.2 关键分解：List 和 Map/Set 是两个不同问题
 
-## 6. 推荐
+旧调研把三者绑一起谈,其实**身份不可约只是 Map/Set 的问题**:
 
-**主推 C**:把 DawnList/Map/Set 正式记为 JVM 后端的集合契约实现,写清指路牌,结案。理由:
-1. 对唯一的功能目标(native 后端)C 已足够——契约边界已经在,容器在边界后面。
-2. A 要引入违背核心立身特性的继承,还去不掉 java 数组,纯度收益是假的。
-3. B 只有扁平的 DawnList 划算,而 DawnList 恰恰是最不像"自定义类"的一个(字面量都是 ArrayList,只有 concat
-   用到它);为它把可读的 Java 换成不可读的 ASM,依赖(java.util)一分没少。DawnMap 的 HAMT 层级/内部类远超
-   codegen 现有能力。
+- **Map/Set**:痛点是**顺序无关身份**(§3 第 3 层)。D 正是这一点的解;HAMT 用**路径复制的持久 ADT**表达
+  (immutable `List[Node]` 节点数组,每次 assoc 复制 ≤32 宽的小数组——正是 Clojure 非 transient 路径的做法),
+  纯 Dawn 完全可表达,位运算/popcount 齐活。**这是 D 精确解锁的部分。**
+- **List**:**根本没有身份问题**——它的相等是有序结构化,正是 `derive` 已经给的。List 的唯一难点是**性能**:
+  均摊 O(1) 的 `++` 靠的是可变共享数组 + CAS(见 [list-append-quadratic]),纯 Dawn 无裸可变数组。
+  **已定:换成 RRB-tree(relaxed),两后端共用同一份纯 Dawn 源(见 §5.3)**,不走「可变数组 primitive」那条会把
+  mutation 塞进语言、且逼 List 永远当 runtime primitive 的路。与 Eq/Hash 无关,是纯性能/表示决策。
 
-**可选加做(若「工作树无 .java」这条审美足够值钱)**:
-- **B-for-List**:单独退役 DawnList(可行、有界),手写 Java 4→3。但我判断低价值(理由同上第 3 条)。
-- **C+ 变体**:把三个 `.java` 源**搬回工作树**(如 `runtime/java/`,显式标注 = JVM 后端运行时),build 加一步
-  javac。这不用 A/B 的任何代价就解决了"源码只在 tag 归档"的尴尬,代价是重新引入一个 javac 构建依赖(当前
-  toolchain 只从种子 jar 构建、无 javac)。若在意"在树里可见/可维护"甚于"零 java 源",这比 A/B 都划算。
+### 5.3 List 的实现选型：RRB-tree（relaxed），两后端统一一份纯 Dawn 源
 
-**不推荐 A。**
+**决策(2026-07-25):List 的底层从今天的 flat「共享数组窗口 + CAS」(DawnList)换成 RRB-tree(relaxed radix
+balanced),作为唯一实现,JVM 与 native 后端共用同一份纯 Dawn 源。** 不选「加可变数组 primitive intrinsic」的原地路线。
 
-## 7. 结论
+理由(与前一轮 native 后端讨论一致):
 
-集合是 de-Java 里唯一**结构上打不穿**的一块:JVM + 无缝互操作下,`implements java.util.*` 的身份不可约,而
-Dawn 无继承使其无法用纯 Dawn 源写。三个选项里,A 用违背立身特性的代价换来假纯度,B 只对最不重要的 DawnList
-划算、对 DawnMap 需要 codegen 从没有过的内部类/虚派发基础设施。**正确的动作不是硬去 Java,是承认这三个容器
-就是 JVM 后端的运行时、已经躲在 intrinsic 契约后面(选项 C),并把这一点写清楚。** 完整性的名义由「契约显式、
-后端实现可换」来兑现,而不是由「工作树里一个 .java 都没有」来兑现。
+1. **一份源、每个 backend 复用**——这是纯 Dawn 集合的初衷。原地方案要往语言/运行时塞一个「带唯一性原地更新的可变
+   数组」primitive,那会**让 List 永远是 runtime primitive、去不掉的 Java/native 那一块**,和 D 的方向相悖。RRB 是纯
+   函数式 ADT(节点=持有子节点小数组),和 Map 的 HAMT 同族,**能真正纯 Dawn 化**。
+2. **全操作均匀 O(log n)**——不止 append。今天 DawnList 的 `slice`/按下标更新/prepend/`++`两个大 list 都是 O(n) 复制;
+   RRB(relaxed 节点)把它们全压到 O(log n),`++` 恰是 Dawn list 的核心操作。
+3. **快路径靠后端 RC,不靠语言 mutation**:
+   - **native**:Perceus RC 在节点唯一(rc==1)时原地复用 → 线性 `++` 恢复近 O(1) 均摊,最坏仍 O(log n)。两头都要到。
+   - **JVM**:无 RC,但**尾节点(≤32 宽)吸收每 32 次里的 31 次 append**,每次只 copy 一个 ≤32 小数组=常数,每 32 次
+     才推一次 spine=O(log n)。故 JVM append ≈ **均摊 O(1)(常数因子 ~32)+ 摊薄的 O(log n)/32**,**不是每次 O(log n)**——
+     相对现 DawnList 只是常数因子变化,非 log 级退化,且远好于原来的 O(n²)。换来 List 去 Java + 全操作均匀 + 无 per-backend 分叉。
+4. **消除 copy-on-branch 悬崖**:结构共享让持久/共享使用不再撞 O(n) 复制(原地方案分叉即 O(n))。
 
-> 开放的小决策:C 之下要不要顺手做 **B-for-List**(退 1/3、有界)或 **C+**(源回树 + javac)。二者都不是必须,
-> 取决于对"树内无 java 源"这条审美的估值。`AdtClassWriter`(ASM shim)是并列的另一块(§11),同属"后端依赖"性质。
+**后端接口:只落到 `Array[T]` 一个原语。** HAMT 与 RRB 都是「小数组组成的树」,朝后端要的只是 `Array` 的
+new/get/len/`with`(见 [runtime-intrinsics-design.md](runtime-intrinsics-design.md) §5)。`with` 返回新数组、语义纯,可变藏进
+后端实现(JVM copy / native rc==1 原地)。**这是最小接口:换后端 = 实现一个数组类型,不是 20 个集合 intrinsic。**
+
+**代价(诚实)**:RRB relaxed 平衡实现量大、逻辑微妙(比 flat array 的 ~100 行多得多)。若实测「两个大 list 相 `++`」
+罕见,可先落**朴素 32 叉 PersistentVector**(append/get/iterate/slice 同为 O(log n),实现简单不少,唯 big++big 退 O(n))
+作台阶,再升级到 relaxed。
+
+## 6. 两个目标，D 同时兑现
+
+- **目标 ①:解锁 native 后端。** C 已足够(契约边界在,容器在边界后)。但 C 让 native 后端**必须另写一份 native 集合
+  运行时**;D 让 native 后端**直接复用同一份 Dawn 集合源**——更省、更不易漂移。
+- **目标 ②:工作树里没有手写 Java。** 只有 A/B/D 能把 .java 挪出归档,而 A 违背无继承、B 只对 List 划算、**且 A/B 都
+  保留 java.util 身份**;**唯有 D 真正消除身份**(Map/Set 变纯 Dawn ADT),两个目标一起兑现。
+
+## 7. 推荐与分阶段计划
+
+**主推 D,分阶段,C 作为已落地的过渡态并存到 D 的 Map/Set 阶段完成为止。**
+
+D 是一个**语言特性项目**——语言侧加三个 trait(**Eq / Hash / Iter**)+ 后端加一个原语(**`Array[T]`**),不是集合重写;
+集合退役只是第一个受益者(顺带给用户 `derive Eq` / 自定义 `==` 松绑)。**净效果是把集合从后端契约整族搬进语言层:
+后端接口从 ~20 个集合 intrinsic 缩成一个数组类型。** 建议按依赖顺序:
+
+1. **阶段 D0 —— Eq/Hash trait 化(前置,最大风险在此)。** 加 `Eq`/`Hash` 内建 trait + 派生默认;`==`/hash dispatch
+   到见证。**验收铁律:对所有现有类型,派生默认产出的字节码与今天逐字节相同**——用 `selfhost-fixpoint` +
+   `selfhost-prev-diff` 盯死。这一步不碰集合,先独立发一版稳住。
+2. **阶段 D1 —— `Array[T]` 原语 + popcount。** 后端加不可变数组原语(new/get/len/`with`,§5.3);popcount 进
+   `rt_intrinsic_target`(JVM→`Integer.bitCount`)。两版种子纪律:先 dormant 发版。
+3. **阶段 D2 —— Map/Set 纯 Dawn 化 + `Iter` trait。** HAMT/Set 写成 `Array` 之上的 Dawn ADT + `impl Eq/Hash`;
+   加 `Iter` trait 让 `for-in` dispatch 到 Dawn 迭代函数;`desc_of` 重定向 + 调用点路由;退役 DawnMap/DawnSet 两个
+   vendored 类,**且删掉 `map_*/set_*` intrinsic**。**手写 Java 4→2。**
+4. **阶段 D3(可选)—— List → RRB-tree(relaxed),两后端统一一份纯 Dawn 源**(已定,见 §5.3)。RRB 写在同一个 `Array`
+   原语上;退掉 DawnList vendored 类、删 `list_*` intrinsic;快路径 native 靠 Perceus RC 原地复用、JVM 靠尾节点吸收
+   (均摊 O(1),见 §5.3)。做则手写 Java 4→1(只剩 `AdtClassWriter` ASM shim,属并列的「后端依赖」)。
+
+**风险(诚实清单)**:
+- **D0 的爆炸半径**:改 `==` dispatch 动的是编译器里每一处相等比较,派生默认差一个字节就是巨型 Emit-Change。
+  这是整个项目成败所在,必须靠逐字节 fixpoint 兜住。
+- **性能对等**:字典传递有开销(但 Ord/sort 已在付);持久 HAMT 路径复制比手调 Java 多分配,需基准确认可接受。
+- **FFI 边界**:集合不再是 java.util 后,`use java` 返 `java.util.List` 需**显式转换**(java.util ↔ Dawn)。旧 §2 已证
+  只有 List 跨 FFI 边界,故有界、局限在 `use java` 几处。
+- **List 换 RRB 的 JVM 性能**:见 §5.3,JVM 侧 append 仍是均摊 O(1)(尾节点吸收,常数因子 ~32),非 log 级退化;是 D3
+  的专属取舍,不阻塞 D2。
+
+## 8. 结论
+
+旧调研判「集合是 de-Java 唯一结构上打不穿的一块」,判错了前提:打不穿的不是 JVM 平台,是**「`==`/hash 还没
+trait 化」的当前实现**。前两层约束机械可改,第三层——真正的身份不可约——**只在 `==`/hash 硬编码时成立**。Dawn
+已经有位运算、有 trait + 字典传递(Ord 的轨),缺的只是**让 Eq/Hash 骑上这条轨**。
+
+**正确的动作不是承认集合是不可退役的后端运行时(C 的结论),而是把 Eq/Hash 提升成可 override 的 trait(D),让集合
+的身份下沉到 Dawn 层——于是集合成为普通 Dawn ADT,现有 lowering 自动把它带到每个 backend。** C 是诚实的过渡态、
+已落地;D 是真正兑现「纯 Dawn 集合 + 跨 backend 复用」的路,且第一步(Eq/Hash trait)本身就是一个独立有价值的语言
+特性。完整性的名义,最终由「集合是纯 Dawn 源、每个 backend 自动复用」来兑现。
+
+> 与 D 并列、不受其影响的一块:`AdtClassWriter`(ASM shim,§11 of design doc)——它是 codegen 发字节码的工具,
+> 属「JVM 后端依赖」,native 后端换成 native emitter,与集合归位无关。
