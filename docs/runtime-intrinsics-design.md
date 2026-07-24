@@ -78,13 +78,18 @@ Java 类。**要做的是把这个模型长全。**
   `contains/starts_with/ends_with/index_of`、大小写、`trim`、cursor 家族(Dawn Cursor 编码)、`reverse`。
 - **bytes**:`utf8`(编码)、`decode`、`len`、`at`、`slice`、`index_of`。≈「字节版 Array」,已接近最小原语。
 - **集合(list/map/set)→ 塌成一个原语 `Array[T]`**。**不再有 `list_*/map_*/set_*` intrinsic**——集合是 `Array` 之上的
-  **纯 Dawn ADT**(Map/Set=HAMT,List=RRB-tree relaxed,见 collections-dejava-research §5.3 与 D 计划)。后端只需实现
+  **纯 Dawn ADT**(Map/Set=HAMT,List=严格 RB,relaxed 以后可加;见 collections-dejava-research §5.3/§9.3)。后端只需实现
   这一个不可变数组类型:
   - `array_new(Int, T) -> Array[T]` / `array_get(Array[T], Int) -> T` / `array_len(Array[T]) -> Int`
   - `array_with(Array[T], Int, T) -> Array[T]`(**返回新数组,语义纯**)
   - 加一个 `popcount`(HAMT bitmap;可纯 Dawn 循环,故可选)。
-  **所有「可变」藏进后端对 `array_with` 的实现**:JVM=copy;native=**rc==1 原地改、否则 copy**(Perceus)。语言侧全程
-  纯,mutation 不越过契约——DawnList 的「可变数组+CAS 独占检测」由此降级成后端对一个纯原语的私有实现细节。
+  **所有「可变」藏进后端对 `array_with` 的实现**。语言侧全程纯,mutation 不越过契约——DawnList 的
+  「可变数组+CAS 独占检测」由此降级成后端对一个纯原语的私有实现细节。
+  > ⚠️ **`array_with` 的「唯一时就地写」是契约的一部分,不是可选优化**(实测,collections-dejava-research §9.3):
+  > 后端若每次都复制,纯 Dawn List 慢 ~14× → 自举 +129%;若唯一时就地写,只慢 ~2.1× → 自举 +11%。**差 12 倍,
+  > 直接决定 List 能不能纯 Dawn 化。** 两个后端都做得到:JVM 用 DawnList 已验证的 CAS 水位线(实测快路径命中
+  > 99.1%),native 用 Perceus 的 `rc==1`(单线程,连 CAS 都不需要)。故 `Array` 的语义必须写成
+  > 「**纯值语义 + 唯一时就地实现**」,而不能只写「返回新数组」。
 - **io**:`print`/`println`、`read_line`、`read_file`/`write_file`、`is_dir`、`list_names`。**不可约的效果边界**,小契约保留。
 - **控制**:`panic`、效果系统的 IO 边界。
 
@@ -132,13 +137,15 @@ JVM-锁死。LLVM 后端一看 std 里全是 `java.lang.String.codePointCount`,�
 - **过渡态(已落地)**:C——`DawnList/Map/Set`(extends `java.util.Abstract*`)作为 JVM 后端当前实现,`vendor.dawn`
   已留指路牌。C 保留到 D 的 Map/Set 阶段完成为止。
 - **路线**:见 collections-dejava-research §7 分阶段(D0 Eq/Hash trait 化 → D1 **`Array[T]` 原语**+popcount → D2 Map/Set
-  纯 Dawn 化 + `Iter` trait,4→2 → D3 List→**RRB-tree(relaxed)**,两后端统一一份纯 Dawn 源)。**语言侧新增 Eq/Hash/Iter
+  纯 Dawn 化 + `Iter` trait,4→2 → D3 List→**先严格 RB**(relaxed 以后可加),两后端统一一份纯 Dawn 源)。**语言侧新增 Eq/Hash/Iter
   三 trait,后端侧新增 `Array` 一原语;净效果=集合从后端契约整族搬进语言层(~20 intrinsic → 一个数组类型)。最大
   风险在 D0:改 `==` dispatch 是巨型 Emit-Change,派生默认须逐字节等价。**
-- **List 的表示已定 RRB-tree(relaxed)**(2026-07-25,collections-dejava-research §5.3):不走「可变数组 primitive」原地
-  路线(那会让 List 永远是 runtime primitive、与纯 Dawn 相悖)。RRB 是纯函数式 ADT、和 HAMT 同族可纯 Dawn 化;快路径
-  native 靠 Perceus RC 节点唯一原地复用(近 O(1) 均摊 append),JVM 吃 O(log₃₂ n)(仍消 O(n²));全操作均匀 O(log n),
-  消掉现 DawnList 的 slice/update/big++big O(n) 悬崖。
+- **List 的表示已定:先严格 RB(32 叉 trie + 尾块),relaxed 作以后可加的节点形态**(2026-07-25,collections-dejava-research §5.3/§9.3):不走「可变数组 primitive」原地
+  路线(那会让 List 永远是 runtime primitive、与纯 Dawn 相悖)。RB 是纯函数式 ADT、和 HAMT 同族可纯 Dawn 化。
+  **成败条件已实测**(§5 的 `array_with` 警示框、collections-dejava-research §9.3):纯 Dawn RB 的追加相对今天的
+  DawnList,在 `array_with` 每次复制时慢 ~14×(自举 +129%)、在唯一时就地写时只慢 ~2.1×(自举 +11%)。故
+  **`array_with` 的唯一性是前置条件,必须在 D1 设计 `Array` 时定死**;另 `for-in` 要用叶子游走迭代器实现,
+  不能用 `nth()` 逐个索引(随机索引实测慢 8–18× 且随 n 增长)。
 
 语言核心与 std **永远不点名 java.util**——只用 list/map/set intrinsic。D 完成后,这个 intrinsic 契约背后在 JVM 上
 就是**纯 Dawn 集合源**(而非 vendored Java),LLVM 后端复用同一份源。
@@ -180,7 +187,7 @@ JVM-锁死。LLVM 后端一看 std 里全是 `java.lang.String.codePointCount`,�
   `TJavaCall` 保持 JVM-only(后端 #2 直接报错,与 `use c` 对称);闭包(indy/LMF,`emit.dawn:1955`)
   只 ~8 个函数、localized,重写便宜,不进这轮。
 - **native 运行时**(JVM 白送、native 要自造):
-  - 持久集合:Map/Set=HAMT,**List=RRB-tree(relaxed)**(已定,§7);字符串(UTF-8 还是 UTF-16 的 native 表示?决策项)。
+  - 持久集合:Map/Set=HAMT,**List=严格 RB(relaxed 以后)**(已定,§7);字符串(UTF-8 还是 UTF-16 的 native 表示?决策项)。
   - **内存管理**:JVM 有 GC,native 没有。**Dawn 的纯性是利好**——数据不可变、无可变别名,持久结构是
     无环 DAG → **引用计数就够**(不必防环),或 region/arena 更省。不一定要上完整 tracing GC。
   - `panic`/效果 IO 的 native 实现(unwind 或返回码)。
@@ -219,7 +226,7 @@ JVM-锁死。LLVM 后端一看 std 里全是 `java.lang.String.codePointCount`,�
   `selfhost/src/vendor.dawn`。**但 A/B/C 共同的隐藏前提被拆穿**:「java.util 身份不可约」只在 `==`/hash 硬编码时成立。
   **改判主推 D**:把 Eq/Hash 提升成可 override 的 trait(骑 Ord 现成的字典轨),集合写成纯 Dawn 持久 ADT,身份真正消除、
   两 backend 一份源。C 保留到 D 的 Map/Set 阶段完成。路线:D0 Eq/Hash trait 化(最大风险,巨型 Emit-Change)→ D1 popcount
-  intrinsic → D2 Map/Set 纯 Dawn 化(4→2)→ D3 List→RRB-tree(relaxed),两后端一份纯 Dawn 源(4→1)。**List 表示
+  intrinsic → D2 Map/Set 纯 Dawn 化(4→2)→ D3 List→先严格 RB(relaxed 以后),两后端一份纯 Dawn 源(4→1)。**List 表示
   已定 RRB(relaxed),非可变数组原地路线**(§7,collections-dejava-research §5.3)。**接口最小化(2026-07-25)**:集合整族
   塌成一个后端原语 `Array[T]`(new/get/len/`with`),`list_*/map_*/set_*` intrinsic 全删、集合变纯 Dawn ADT;迭代靠语言
   侧 `Iter` trait 不进后端契约。换后端 = 实现一个数组类型。

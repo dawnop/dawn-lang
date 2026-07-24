@@ -114,7 +114,7 @@ trait Hash[T] { fn hash(x: T) -> Int }
 **第 3 步——集合成为纯 Dawn ADT + 函数 + 见证,backend 适配自动:**
 - **后端接口只剩一个原语 `Array[T]`**(new/get/len/`with`)。集合(HAMT/RRB)全是它之上的纯 Dawn ADT,**后端不再实现
   任何 `list_*/map_*/set_*` intrinsic**——换后端 = 实现一个数组类型。`with` 返回新数组、语义纯;可变藏进后端实现
-  (JVM copy / native rc==1 原地复用)。详见 [runtime-intrinsics-design.md](runtime-intrinsics-design.md) §5。
+  ——**两个后端都要做「唯一时就地写」**(JVM 用 CAS 水位线 / native 用 Perceus rc==1),见 §9.3。详见 [runtime-intrinsics-design.md](runtime-intrinsics-design.md) §5。
 - **迭代靠语言侧 `Iter` trait**(像 Rust `IntoIterator`):`for-in` dispatch 到集合的 Dawn 迭代函数,不走后端 `iter` intrinsic。
 - **JVM**:4 个手写节点类 → 编译器发射的 ADT variant 类(和任何 `enum` 同路径)。**全程零 java.util**,一个 Dawn Map
   就是一个 Dawn ADT。§3 前两层的 `desc_of` 重定向 + 调用点路由在此一并做掉。
@@ -129,13 +129,18 @@ trait Hash[T] { fn hash(x: T) -> Int }
   纯 Dawn 完全可表达,位运算/popcount 齐活。**这是 D 精确解锁的部分。**
 - **List**:**根本没有身份问题**——它的相等是有序结构化,正是 `derive` 已经给的。List 的唯一难点是**性能**:
   均摊 O(1) 的 `++` 靠的是可变共享数组 + CAS(见 [list-append-quadratic]),纯 Dawn 无裸可变数组。
-  **已定:换成 RRB-tree(relaxed),两后端共用同一份纯 Dawn 源(见 §5.3)**,不走「可变数组 primitive」那条会把
+  **已定:换成先严格 RB(relaxed 以后可加),两后端共用同一份纯 Dawn 源(见 §5.3、§9.3)**,不走「可变数组 primitive」那条会把
   mutation 塞进语言、且逼 List 永远当 runtime primitive 的路。与 Eq/Hash 无关,是纯性能/表示决策。
 
-### 5.3 List 的实现选型：RRB-tree（relaxed），两后端统一一份纯 Dawn 源
+### 5.3 List 的实现选型：先严格 RB，两后端统一一份纯 Dawn 源
 
-**决策(2026-07-25):List 的底层从今天的 flat「共享数组窗口 + CAS」(DawnList)换成 RRB-tree(relaxed radix
-balanced),作为唯一实现,JVM 与 native 后端共用同一份纯 Dawn 源。** 不选「加可变数组 primitive intrinsic」的原地路线。
+> **本节已被 §9.3 的实测细化,先读那里。** 要点:决定成败的是后端 `array_with` 做不做「唯一时就地写」
+> (差 12 倍),而不是下面理由 2/4 说的那些渐进复杂度;下面理由 3 对 JVM 的乐观估计也已被实测取代。
+
+**决策(2026-07-25):List 的底层从今天的 flat「共享数组窗口 + CAS」(DawnList)换成 **严格 RB**(32 叉 trie +
+尾块),relaxed 作为以后可加的节点形态;作为唯一实现,JVM 与 native 后端共用同一份纯 Dawn 源。** 不选
+「加可变数组 primitive intrinsic」的原地路线——**但注意 §9.3:`Array.with` 本身必须带唯一性就地写,
+否则这条路不成立。**
 
 理由(与前一轮 native 后端讨论一致):
 
@@ -153,7 +158,9 @@ balanced),作为唯一实现,JVM 与 native 后端共用同一份纯 Dawn 源。
 
 **后端接口:只落到 `Array[T]` 一个原语。** HAMT 与 RRB 都是「小数组组成的树」,朝后端要的只是 `Array` 的
 new/get/len/`with`(见 [runtime-intrinsics-design.md](runtime-intrinsics-design.md) §5)。`with` 返回新数组、语义纯,可变藏进
-后端实现(JVM copy / native rc==1 原地)。**这是最小接口:换后端 = 实现一个数组类型,不是 20 个集合 intrinsic。**
+后端实现——**两个后端都必须做「唯一时就地写」**(JVM 用 DawnList 已验证的 CAS 水位线,native 用 Perceus 的
+`rc==1`);写成「JVM 一律 copy」是错的,实测差 12 倍(§9.3)。**这是最小接口:换后端 = 实现一个数组类型,
+不是 20 个集合 intrinsic。**
 
 **代价(诚实)**:RRB relaxed 平衡实现量大、逻辑微妙(比 flat array 的 ~100 行多得多)。若实测「两个大 list 相 `++`」
 罕见,可先落**朴素 32 叉 PersistentVector**(append/get/iterate/slice 同为 O(log n),实现简单不少,唯 big++big 退 O(n))
@@ -182,7 +189,7 @@ D 是一个**语言特性项目**——语言侧加三个 trait(**Eq / Hash / It
 3. **阶段 D2 —— Map/Set 纯 Dawn 化 + `Iter` trait。** HAMT/Set 写成 `Array` 之上的 Dawn ADT + `impl Eq/Hash`;
    加 `Iter` trait 让 `for-in` dispatch 到 Dawn 迭代函数;`desc_of` 重定向 + 调用点路由;退役 DawnMap/DawnSet 两个
    vendored 类,**且删掉 `map_*/set_*` intrinsic**。**手写 Java 4→2。**
-4. **阶段 D3(可选)—— List → RRB-tree(relaxed),两后端统一一份纯 Dawn 源**(已定,见 §5.3)。RRB 写在同一个 `Array`
+4. **阶段 D3 —— List → 先严格 RB(relaxed 以后),两后端统一一份纯 Dawn 源**(已定,见 §5.3/§9.3)。RB 写在同一个 `Array`
    原语上;退掉 DawnList vendored 类、删 `list_*` intrinsic;快路径 native 靠 Perceus RC 原地复用、JVM 靠尾节点吸收
    (均摊 O(1),见 §5.3)。做则手写 Java 4→1(只剩 `AdtClassWriter` ASM shim,属并列的「后端依赖」)。
 
@@ -208,3 +215,106 @@ trait 化」的当前实现**。前两层约束机械可改,第三层——真�
 
 > 与 D 并列、不受其影响的一块:`AdtClassWriter`(ASM shim,§11 of design doc)——它是 codegen 发字节码的工具,
 > 属「JVM 后端依赖」,native 后端换成 native emitter,与集合归位无关。
+
+## 9. 集合 spike 实测(2026-07-25)：结论与本文前八节的判断相反
+
+按「先测,再决定」跑了两组实验。**结果推翻了 §5.2 的分工判断:Map 是安全的那个,List 才是危险的那个。**
+
+### 9.1 实验一：纯 Dawn HAMT vs 手写 Java HAMT(微基准)
+
+用今天的语言写了一个纯 Dawn HAMT(32 叉、路径复制、`(K,V)` 泛型 ADT,节点孩子放在 ≤32 宽的 List 里当
+`Array` 的替身),对着 builtin Map 量。正确性自检 0 失败。best-of-5,微秒:
+
+| 形态 | 纯 Dawn | builtin | 倍数 |
+|---|---|---|---|
+| 插入(Int 键,隔离出纯遍历+重建) | — | — | **~22–28×** |
+| 插入(String 键,含未缓存哈希) | — | — | **~17–24×** |
+| **查找**(String 键) | — | — | **1.4–1.6×** |
+| A 小作用域 5000×20 | 11588 | 1740 | 6.6× |
+| B 模块表 4000 | 2964 | 154 | 19.2× |
+| C 节点表 100000 | 123579 | 7166 | 17.2× |
+
+**分解**:查找几乎不亏(纯遍历、零分配),**插入慢 ~20× 且全在「重建节点」的分配上**。两个具体原因:
+1. `Array.with` 在纯 Dawn 里只能用 `slice ++ [x] ++ slice`(约 3 次分配)近似,Java 是一次 `arraycopy`;
+2. **纯 Dawn 没有引用相等**。DawnMap 用 `n == m ? this : new DawnMap(n)`(Java 引用比较)判「子树没变」,
+   纯 Dawn 的 `==` 是结构性的(在树上 O(n)),只能改成每层返回一个 `(Node, Bool)` 元组——每层多一次分配。
+   若要消掉,需要一个 `ref_eq` 原语。
+
+另一个实测到的既存事实:**Dawn `String` 与 `use java "java.lang.String"` 是不同类型,纯 Dawn 拿不到
+`String.hashCode` 的缓存值**,只能每次从码点重算。JVM 缓存它,native 也不会自动有——除非 native 的字符串
+表示自己缓存哈希(一个该记下的设计选项)。
+
+### 9.2 实验二：集合变慢 20× 对自举的真实影响(直接模拟,非外推)
+
+把 vendored 的 `DawnMap`/`DawnList` 换成「每次操作内部干 20 遍」的版本(volatile sink 防消除),放在种子 jar
+前面的 classpath 上,量同一条编译命令。**这直接模拟了「集合换成纯 Dawn、慢 20×」的结果**——20× 正是 9.1
+量到的倍数。对照验证:补丁生效,spike 里 builtin 的 map 操作实测慢 11–13×。
+
+| | 基线 | Map 20× | List 20× |
+|---|---|---|---|
+| wall(3 趟中位) | 4.93s | **5.43s(1.10×)** | **14.21s(2.88×)** |
+| user(3 趟中位) | 13.04s | 14.67s(1.12×) | 24.21s(1.86×) |
+| 反推占编译时间 | — | **≈0.5%** | **≈10%** |
+
+> **Map 操作只占编译时间约 0.5%,List 的 `++` 占约 10%——差 19 倍。**
+
+一个副产品发现:第一版 List 扰动(把 `concat` 整个跑 20 遍)让编译**慢到 10 分钟跑不完**,不是 20× 而是灾难性——
+因为重复调用会**自己和自己抢 CAS**,后 19 次落到复制路径,累积重新变成 **O(n²)**。这既是实验设计的坑(已改成不碰
+`used` 的 O(add) 忙等),也**反证了 owned-tail 优化有多吃重**。
+
+### 9.3 实验三：纯 Dawn 持久向量(严格 RB)——决定性变量是 `Array.with` 的唯一性
+
+9.2 只量到「集合慢 K 倍会怎样」,K 要另外测。把 HAMT 的 20× 套到 List 上是错的:HAMT 插入(哈希+popcount+
+逐层路径复制+元组)和 List 追加是完全不同的操作。于是照 9.1 的办法给 List 也写了一个纯 Dawn 版
+(`scripts/spike-hamt/vec.dawn`):Clojure 式 PersistentVector = 32 叉 trie + 尾块,正是「严格 RB」。
+正确性自检 0 失败;`pure_us` 随 n 线性,确认追加确实 **O(1) 均摊**。
+
+关键在于尾块怎么更新——也就是后端原语 `array_with` 的语义:
+
+| `array_with` 的行为 | 纯 Dawn RB 追加 | 代入 9.2 的占比推算自举 |
+|---|---|---|
+| **每次复制**(≤32 槽) | **~14×**(10.6/14.0/16.7/17.1、10.8/15.5) | **+129%** |
+| **唯一时就地写** | **2.0–2.4×**(1.9/1.9/2.1/2.4、2.0/2.1/2.2/2.3) | **+11%** ✅ |
+
+> **决定性的设计变量既不是「RB vs 平坦」,也不是「纯 Dawn vs 手写」,而是后端的 `Array.with` 做不做
+> 「唯一时就地写」。** 差 12 倍,并且直接决定 D3 可不可行。
+
+**而两个后端都做得到**:JVM 上 DawnList 今天就是靠 CAS 水位线做到的(实测该快路径命中 **99.1%**,
+见 9.5);native 上 Perceus RC 的 `rc==1` 天然如此,且单线程连 CAS 都不需要,比 JVM 版更简单。
+
+**尚未测的一项**:随机索引(trie 下降 vs `ArrayList.get`)慢 **8–18×**,且随 n 增长——这部分没有进 9.2 的扰动,
+所以那里的推算是下界。但编译器的 list 访问以**顺序遍历**为主(`for x in xs`),顺序遍历应当用**叶子游走的
+迭代器**(每元素 O(1) 摊还),不能用 `nth()` 逐个索引去实现——**这是 D3 的一条实现约束,不是性能结论**。
+
+### 9.4 结论：难度与风险是反的，但两个都做得成
+
+| | 语义难度 | 性能风险 |
+|---|---|---|
+| **Map/Set** | **难**——身份不可约,要 Eq/Hash trait 化(D0,巨型 Emit-Change) | **低**——20× 也只 +10% wall |
+| **List** | **易**——有序结构相等,`derive` 就给,无身份问题 | **低,但有条件**——`Array.with` 必须唯一时就地写(+11%);否则 +129% |
+
+**§5.2「List 是独立的、可选的小问题」判得不对**:它确实没有身份问题,但它是**性能上唯一带条件的一块**,
+而那个条件落在 `Array` 原语的语义上,必须在 D1 设计 `Array` 时就定死,不能留到 D3。
+
+- **Map/Set(D2)**:性能安全,+10% 自举。难度全在 D0,而 D0 因 native 选了「传字典」已在关键路径上——
+  **两条线在 D0 合流,Map 顺势走完。**
+- **List(D3)**:**严格 RB 仍然是对的选型**,relaxed 留作以后可加的节点形态。**前提是 D1 的 `Array.with`
+  带唯一性就地写**;顺序遍历要用叶子游走迭代器。满足这两条,+11%,可做。
+- **`Array.with` 的唯一性因此从「优化」升级为「契约的一部分」**:它是 List 可不可纯 Dawn 化的开关,
+  必须写进 runtime-intrinsics-design §5 的原语语义里(JVM 用水位线/CAS,native 用 RC)。
+
+### 9.5 副产品：编译器的 list 用法实测
+
+给 `DawnList.concat` 加计数器,量一次完整编译:
+
+```
+fast=76,357,600   copy=705,534   → 复制路径仅 0.92%
+追加元素 77.4M     复制元素 89.2M  → 平均每次复制 126 个元素
+```
+
+**一次编译 7,700 万次 list 追加**(这才是 `++` 占 10% 的原因——不是每次慢,是次数极多),
+**owned-tail 快路径命中 99.1%**。这既解释了为什么 9.3 的「唯一时就地写」这么关键(99% 的追加都能吃到),
+也说明 O(n) 复制悬崖在真实负载里基本不出现(分叉只占 0.9%,平均才 126 个元素)。
+
+> spike 源码:`scripts/spike-hamt/`(`hamt.dawn` 纯 Dawn HAMT、`vec.dawn` 纯 Dawn 持久向量),
+> 扰动与计数实验的补丁 Java 与流程记在同目录 README。

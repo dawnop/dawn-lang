@@ -1,0 +1,285 @@
+# Collection spike, part 2: a pure-Dawn persistent vector measured against the
+# builtin List (dawn/rt/DawnList, the handwritten shared-array window).
+#
+# Part 1 (hamt.dawn) measured a pure-Dawn Map. This measures a pure-Dawn List,
+# which is a different operation and must not inherit the Map's multiplier.
+#
+# The structure is Clojure's PersistentVector: a 32-way trie plus a tail buffer,
+# which is what "strict RB" means. A persistent append copies the tail (<=32
+# slots); every 32nd append also pushes the tail into the trie.
+#
+# Fairness note: the tail lives in a builtin List, so `tail ++ [x]` would inherit
+# DawnList's owned-tail trick and make this look artificially fast -- the very
+# trick pure Dawn cannot express. `copy_push` therefore forces a real copy, which
+# is what `array_with` on a <=32 array costs on a backend without uniqueness
+# tracking (the JVM). On native, Perceus would make it in place instead.
+use std/list
+use java "java.lang.System"
+
+pub type VNode[T] =
+  | VLeaf(items: List[T])
+  | VBranch(kids: List[VNode[T]])
+
+pub type Vec[T] = | V(cnt: Int, shift: Int, root: VNode[T], tail: List[T])
+
+fn empty_vec[T]() -> Vec[T] = V(0, 5, VBranch([]), [])
+
+## A fresh copy of `xs` with `x` appended -- the `array_with` of the real design.
+fn copy_push[T](xs: List[T], x: T) -> List[T] = list.slice(xs, 0, len(xs)) ++ [x]
+
+fn tail_off(cnt: Int) -> Int = {
+  if cnt < 32 {
+    0
+  } else {
+    ((cnt - 1) >>> 5) << 5
+  }
+}
+
+fn new_path[T](shift: Int, node: VNode[T]) -> VNode[T] = {
+  if shift == 0 {
+    node
+  } else {
+    VBranch([new_path(shift - 5, node)])
+  }
+}
+
+## Push the full tail into the trie, copying the spine path.
+fn push_tail[T](cnt: Int, shift: Int, parent: VNode[T], tail: List[T]) -> VNode[T] =
+  match parent {
+    VLeaf(_it) -> VLeaf(tail)
+    VBranch(kids) -> {
+      let sub = ((cnt - 1) >>> shift) & 31
+      if shift == 5 {
+        if sub < len(kids) {
+          VBranch(set_at(kids, sub, VLeaf(tail)))
+        } else {
+          VBranch(copy_push(kids, VLeaf(tail)))
+        }
+      } else if sub < len(kids) {
+        VBranch(set_at(kids, sub, push_tail(cnt, shift - 5, kids[sub], tail)))
+      } else {
+        VBranch(copy_push(kids, new_path(shift - 5, VLeaf(tail))))
+      }
+    }
+  }
+
+fn set_at[T](xs: List[T], i: Int, x: T) -> List[T] =
+  list.slice(xs, 0, i) ++ [x] ++ list.slice(xs, i + 1, len(xs))
+
+pub fn push[T](v: Vec[T], x: T) -> Vec[T] =
+  match v {
+    V(cnt, shift, root, tail) -> {
+      if len(tail) < 32 {
+        V(cnt + 1, shift, root, copy_push(tail, x))
+      } else {
+        # tail is full: fold it into the trie, start a new tail
+        let overflow = (cnt >>> 5) > (1 << shift)
+        if overflow {
+          V(cnt + 1, shift + 5, VBranch([root, new_path(shift, VLeaf(tail))]), [x])
+        } else {
+          V(cnt + 1, shift, push_tail(cnt, shift, root, tail), [x])
+        }
+      }
+    }
+  }
+
+pub fn nth[T](v: Vec[T], i: Int) -> T =
+  match v {
+    V(cnt, shift, root, tail) -> {
+      if i >= tail_off(cnt) {
+        tail[i - tail_off(cnt)]
+      } else {
+        var node = root
+        var level = shift
+        while level > 0 {
+          node = match node {
+            VBranch(kids) -> kids[(i >>> level) & 31]
+            VLeaf(_it) -> node
+          }
+          level = level - 5
+        }
+        match node {
+          VLeaf(items) -> items[i & 31]
+          VBranch(_k) -> panic("vec: bad trie")
+        }
+      }
+    }
+  }
+
+pub fn count[T](v: Vec[T]) -> Int =
+  match v {
+    V(cnt, _s, _r, _t) -> cnt
+  }
+
+# ---- benchmarks ----
+
+fn push_owned[T](v: Vec[T], x: T) -> Vec[T] =
+  match v {
+    V(cnt, shift, root, tail) -> {
+      if len(tail) < 32 {
+        V(cnt + 1, shift, root, tail ++ [x])
+      } else {
+        let overflow = (cnt >>> 5) > (1 << shift)
+        if overflow {
+          V(cnt + 1, shift + 5, VBranch([root, new_path(shift, VLeaf(tail))]), [x])
+        } else {
+          V(cnt + 1, shift, push_tail(cnt, shift, root, tail), [x])
+        }
+      }
+    }
+  }
+
+fn accum_pure_owned(n: Int) -> Int !io = {
+  let t0 = System.nanoTime()
+  var v: Vec[Int] = empty_vec()
+  for i in 0 ..n {
+    v = push_owned(v, i)
+  }
+  let t1 = System.nanoTime()
+  let _g = count(v)
+  (t1 - t0) / 1000
+}
+
+fn accum_pure(n: Int) -> Int !io = {
+  let t0 = System.nanoTime()
+  var v: Vec[Int] = empty_vec()
+  for i in 0 ..n {
+    v = push(v, i)
+  }
+  let t1 = System.nanoTime()
+  let _g = count(v)
+  (t1 - t0) / 1000
+}
+
+fn accum_builtin(n: Int) -> Int !io = {
+  let t0 = System.nanoTime()
+  var xs: List[Int] = []
+  for i in 0 ..n {
+    xs = xs ++ [i]
+  }
+  let t1 = System.nanoTime()
+  let _g = len(xs)
+  (t1 - t0) / 1000
+}
+
+fn index_pure(n: Int, rounds: Int) -> Int !io = {
+  var v: Vec[Int] = empty_vec()
+  for i in 0 ..n {
+    v = push(v, i)
+  }
+  let t0 = System.nanoTime()
+  var sink = 0
+  for _r in 0 ..rounds {
+    for i in 0 ..n {
+      sink = sink + nth(v, i)
+    }
+  }
+  let t1 = System.nanoTime()
+  let _g = sink
+  (t1 - t0) / 1000
+}
+
+fn index_builtin(n: Int, rounds: Int) -> Int !io = {
+  var xs: List[Int] = []
+  for i in 0 ..n {
+    xs = xs ++ [i]
+  }
+  let t0 = System.nanoTime()
+  var sink = 0
+  for _r in 0 ..rounds {
+    for i in 0 ..n {
+      sink = sink + xs[i]
+    }
+  }
+  let t1 = System.nanoTime()
+  let _g = sink
+  (t1 - t0) / 1000
+}
+
+fn best_of(reps: Int, f: fn() -> Int !e) -> Int !e = {
+  var best = 999999999
+  for _r in 0 ..reps {
+    let t = f()
+    if t < best {
+      best = t
+    }
+  }
+  best
+}
+
+fn ratio(p: Int, b: Int) -> String = {
+  if b == 0 {
+    "n/a"
+  } else {
+    let t = (p * 10) / b
+    "${t / 10}.${t % 10}x"
+  }
+}
+
+fn check() -> Unit !io = {
+  var v: Vec[Int] = empty_vec()
+  for i in 0 ..5000 {
+    v = push(v, i * 3)
+  }
+  var bad = 0
+  if count(v) != 5000 {
+    bad = bad + 1
+  }
+  for i in 0 ..5000 {
+    if nth(v, i) != i * 3 {
+      bad = bad + 1
+    }
+  }
+  println("correctness: ${bad} failures (want 0)")
+}
+
+pub fn main() -> Unit !io = {
+  check()
+  for _w in 0 ..4 {
+    let _a = accum_pure(20000)
+    let _b = accum_builtin(20000)
+    let _c = accum_pure_owned(20000)
+    let _d = index_pure(20000, 1)
+    let _e = index_builtin(20000, 1)
+  }
+
+  println("")
+  println("(microseconds, best of 5)")
+  println("")
+  println("== append/accumulate: `v = push(v, i)` vs `xs = xs ++ [i]` ==")
+  println("n\tpure_us\tbuiltin_us\tratio")
+  for k in 0 ..4 {
+    let n = 20000 * pow2(k)
+    let p = best_of(5, fn() => accum_pure(n))
+    let b = best_of(5, fn() => accum_builtin(n))
+    println("${n}\t${p}\t${b}\t${ratio(p, b)}")
+  }
+
+  println("")
+  println("== append, but `array_with` has the owned-tail trick (native/Perceus, or a JVM Array that keeps it) ==")
+  println("n\tpure_us\tbuiltin_us\tratio")
+  for k in 0 ..4 {
+    let n = 20000 * pow2(k)
+    let p = best_of(5, fn() => accum_pure_owned(n))
+    let b = best_of(5, fn() => accum_builtin(n))
+    println("${n}\t${p}\t${b}\t${ratio(p, b)}")
+  }
+
+  println("")
+  println("== indexing: trie descent vs ArrayList.get (3 rounds) ==")
+  println("n\tpure_us\tbuiltin_us\tratio")
+  for k in 0 ..3 {
+    let n = 20000 * pow2(k)
+    let p = best_of(3, fn() => index_pure(n, 3))
+    let b = best_of(3, fn() => index_builtin(n, 3))
+    println("${n}\t${p}\t${b}\t${ratio(p, b)}")
+  }
+}
+
+fn pow2(k: Int) -> Int = {
+  var r = 1
+  for _i in 0 ..k {
+    r = r * 2
+  }
+  r
+}

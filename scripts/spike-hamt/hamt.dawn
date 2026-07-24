@@ -1,0 +1,404 @@
+# Collection spike: a pure-Dawn persistent hash map (HAMT) measured against the
+# builtin Map (dawn/rt/DawnMap, the handwritten Java HAMT).
+#
+# The question this answers: if the D plan turns Map into a pure Dawn ADT, how
+# much slower does it get? Same 32-way trie, same path copying -- the only
+# difference is the language it is written in and the fact that node children
+# live in a Dawn List instead of a Java Object[].
+#
+# Two key shapes are measured because they cost differently:
+#   Int keys    -- hash is the key itself, so this isolates the trie traversal.
+#   String keys -- pure Dawn must recompute the hash from code points on every
+#                  lookup; java.lang.String caches it. That gap is structural,
+#                  not an artifact of the spike (a Dawn String cannot reach
+#                  String.hashCode -- checked).
+use std/list
+use std/cursor
+use std/map
+use java "java.lang.System"
+
+# ---- the HAMT ----
+
+pub type Node[K, V] =
+  | NEmpty
+  | NLeaf(h: Int, k: K, v: V)
+  | NColl(h: Int, kvs: List[(K, V)])
+  | NBranch(bitmap: Int, kids: List[Node[K, V]])
+
+# Kernighan's popcount. The real thing would be an intrinsic (Integer.bitCount);
+# this loop runs at most 32 times and is part of what the spike is measuring.
+fn popcount(x: Int) -> Int = {
+  var c = 0
+  var v = x
+  while v != 0 {
+    v = v & (v - 1)
+    c = c + 1
+  }
+  c
+}
+
+fn idx_at(h: Int, shift: Int) -> Int = (h >>> shift) & 31
+
+# Replace element `i`. Stand-in for the `Array.with` of the real design, which
+# would be one bounded copy of <=32 slots; slice+concat is about three. So the
+# node-update cost here is still somewhat pessimistic, but far closer than
+# building the node one `++ [x]` at a time (which allocates per slot).
+fn set_at[T](xs: List[T], i: Int, x: T) -> List[T] =
+  list.slice(xs, 0, i) ++ [x] ++ list.slice(xs, i + 1, len(xs))
+
+fn insert_at[T](xs: List[T], i: Int, x: T) -> List[T] =
+  list.slice(xs, 0, i) ++ [x] ++ list.slice(xs, i, len(xs))
+
+## Run `f` `reps` times and keep the fastest: the steady-state number, with JIT
+## warmup and GC pauses shaken out.
+fn best_of(reps: Int, f: fn() -> Int !e) -> Int !e = {
+  var best = 999999999
+  for _r in 0 ..reps {
+    let t = f()
+    if t < best {
+      best = t
+    }
+  }
+  best
+}
+
+fn branch_of[K, V](child: Node[K, V], h: Int, shift: Int) -> Node[K, V] =
+  NBranch(1 << idx_at(h, shift), [child])
+
+## Insert, returning the new node and whether the entry count grew.
+fn node_assoc[K, V](n: Node[K, V], shift: Int, h: Int, k: K, v: V) -> (Node[K, V], Bool) =
+  match n {
+    NEmpty -> (NLeaf(h, k, v), true)
+    NLeaf(lh, lk, lv) -> {
+      if lh == h && lk == k {
+        (NLeaf(h, k, v), false)
+      } else if lh == h {
+        (NColl(h, [(lk, lv), (k, v)]), true)
+      } else {
+        node_assoc(branch_of(NLeaf(lh, lk, lv), lh, shift), shift, h, k, v)
+      }
+    }
+    NColl(ch, kvs) -> {
+      if ch != h {
+        node_assoc(branch_of(NColl(ch, kvs), ch, shift), shift, h, k, v)
+      } else {
+        var found = false
+        var out: List[(K, V)] = []
+        for p in kvs {
+          let (pk, _pv) = p
+          if pk == k {
+            found = true
+            out = out ++ [(k, v)]
+          } else {
+            out = out ++ [p]
+          }
+        }
+        if found {
+          (NColl(h, out), false)
+        } else {
+          (NColl(h, kvs ++ [(k, v)]), true)
+        }
+      }
+    }
+    NBranch(bm, kids) -> {
+      let i = idx_at(h, shift)
+      let bit = 1 << i
+      let pos = popcount(bm & (bit - 1))
+      if bm & bit != 0 {
+        let (nk, added) = node_assoc(kids[pos], shift + 5, h, k, v)
+        (NBranch(bm, set_at(kids, pos, nk)), added)
+      } else {
+        (NBranch(bm | bit, insert_at(kids, pos, NLeaf(h, k, v))), true)
+      }
+    }
+  }
+
+fn node_get[K, V](n: Node[K, V], shift: Int, h: Int, k: K) -> Option[V] =
+  match n {
+    NEmpty -> None
+    NLeaf(lh, lk, lv) -> {
+      if lh == h && lk == k {
+        Some(lv)
+      } else {
+        None
+      }
+    }
+    NColl(ch, kvs) -> {
+      var r: Option[V] = None
+      if ch == h {
+        for p in kvs {
+          let (pk, pv) = p
+          if pk == k {
+            r = Some(pv)
+          }
+        }
+      }
+      r
+    }
+    NBranch(bm, kids) -> {
+      let bit = 1 << idx_at(h, shift)
+      if bm & bit == 0 {
+        None
+      } else {
+        node_get(kids[popcount(bm & (bit - 1))], shift + 5, h, k)
+      }
+    }
+  }
+
+# ---- hashing ----
+
+# What java.lang.String.hashCode computes, but over code points and without the
+# cache. A Dawn String cannot reach the Java method (checked: `String` and
+# `use java "java.lang.String"` are different types), so a pure-Dawn map pays
+# this on every insert and every lookup.
+fn str_hash(s: String) -> Int = {
+  var h = 0
+  var c = cursor.start(s)
+  while not cursor.done(s, c) {
+    h = h * 31 + cursor.char(s, c)
+    c = cursor.next(s, c)
+  }
+  h
+}
+
+# ---- benchmarks: one growing map ----
+
+fn grow_pure_int(n: Int) -> Int !io = {
+  let t0 = System.nanoTime()
+  var root: Node[Int, Int] = NEmpty
+  var count = 0
+  for i in 0 ..n {
+    let (r, added) = node_assoc(root, 0, i, i, i)
+    root = r
+    if added {
+      count = count + 1
+    }
+  }
+  let t1 = System.nanoTime()
+  let _g = count
+  (t1 - t0) / 1000
+}
+
+fn grow_builtin_int(n: Int) -> Int !io = {
+  let t0 = System.nanoTime()
+  var m: Map[Int, Int] = map.empty()
+  for i in 0 ..n {
+    m = map.insert(m, i, i)
+  }
+  let t1 = System.nanoTime()
+  let _g = map.size(m)
+  (t1 - t0) / 1000
+}
+
+fn grow_pure_str(n: Int) -> Int !io = {
+  let t0 = System.nanoTime()
+  var root: Node[String, Int] = NEmpty
+  var count = 0
+  for i in 0 ..n {
+    let s = to_string(i)
+    let (r, added) = node_assoc(root, 0, str_hash(s), s, i)
+    root = r
+    if added {
+      count = count + 1
+    }
+  }
+  let t1 = System.nanoTime()
+  let _g = count
+  (t1 - t0) / 1000
+}
+
+fn grow_builtin_str(n: Int) -> Int !io = {
+  let t0 = System.nanoTime()
+  var m: Map[String, Int] = map.empty()
+  for i in 0 ..n {
+    m = map.insert(m, to_string(i), i)
+  }
+  let t1 = System.nanoTime()
+  let _g = map.size(m)
+  (t1 - t0) / 1000
+}
+
+# ---- benchmarks: lookup-heavy (what a checker actually does most) ----
+
+fn lookup_pure_str(n: Int, rounds: Int) -> Int !io = {
+  var root: Node[String, Int] = NEmpty
+  for i in 0 ..n {
+    let s = to_string(i)
+    let (r, _a) = node_assoc(root, 0, str_hash(s), s, i)
+    root = r
+  }
+  let t0 = System.nanoTime()
+  var hits = 0
+  for _r in 0 ..rounds {
+    for i in 0 ..n {
+      let s = to_string(i)
+      match node_get(root, 0, str_hash(s), s) {
+        Some(_v) -> { hits = hits + 1 }
+        None -> ()
+      }
+    }
+  }
+  let t1 = System.nanoTime()
+  let _g = hits
+  (t1 - t0) / 1000
+}
+
+fn lookup_builtin_str(n: Int, rounds: Int) -> Int !io = {
+  var m: Map[String, Int] = map.empty()
+  for i in 0 ..n {
+    m = map.insert(m, to_string(i), i)
+  }
+  let t0 = System.nanoTime()
+  var hits = 0
+  for _r in 0 ..rounds {
+    for i in 0 ..n {
+      match map.get(m, to_string(i)) {
+        Some(_v) -> { hits = hits + 1 }
+        None -> ()
+      }
+    }
+  }
+  let t1 = System.nanoTime()
+  let _g = hits
+  (t1 - t0) / 1000
+}
+
+# ---- benchmarks: many small scopes (shape A from bench-map.dawn) ----
+
+fn scoped_pure(scopes: Int, each: Int) -> Int !io = {
+  let t0 = System.nanoTime()
+  var sink = 0
+  for _s in 0 ..scopes {
+    var root: Node[String, Int] = NEmpty
+    for i in 0 ..each {
+      let s = to_string(i)
+      let (r, _a) = node_assoc(root, 0, str_hash(s), s, i)
+      root = r
+    }
+    sink = sink + 1
+  }
+  let t1 = System.nanoTime()
+  let _g = sink
+  (t1 - t0) / 1000
+}
+
+fn scoped_builtin(scopes: Int, each: Int) -> Int !io = {
+  let t0 = System.nanoTime()
+  var sink = 0
+  for _s in 0 ..scopes {
+    var m: Map[String, Int] = map.empty()
+    for i in 0 ..each {
+      m = map.insert(m, to_string(i), i)
+    }
+    sink = sink + map.size(m)
+  }
+  let t1 = System.nanoTime()
+  let _g = sink
+  (t1 - t0) / 1000
+}
+
+# ---- correctness check, so the numbers mean something ----
+
+fn check() -> Unit !io = {
+  var root: Node[Int, Int] = NEmpty
+  for i in 0 ..2000 {
+    let (r, _a) = node_assoc(root, 0, i, i, i * 7)
+    root = r
+  }
+  var bad = 0
+  for i in 0 ..2000 {
+    match node_get(root, 0, i, i) {
+      Some(v) -> if v != i * 7 { bad = bad + 1 }
+      None -> { bad = bad + 1 }
+    }
+  }
+  match node_get(root, 0, 999999, 999999) {
+    Some(_v) -> { bad = bad + 1 }
+    None -> ()
+  }
+  # overwrite must not grow the map
+  let (r2, added) = node_assoc(root, 0, 5, 5, 42)
+  if added {
+    bad = bad + 1
+  }
+  match node_get(r2, 0, 5, 5) {
+    Some(v) -> if v != 42 { bad = bad + 1 }
+    None -> { bad = bad + 1 }
+  }
+  println("correctness: ${bad} failures (want 0)")
+}
+
+pub fn main() -> Unit !io = {
+  check()
+
+  # warm the JIT on both sides before any measurement
+  for _w in 0 ..3 {
+    let _a = grow_pure_int(20000)
+    let _b = grow_builtin_int(20000)
+    let _c = grow_pure_str(20000)
+    let _d = grow_builtin_str(20000)
+  }
+
+  println("")
+  println("(times are microseconds, best of 5)")
+  println("")
+  println("== 1. one growing map, Int keys (isolates trie traversal) ==")
+  println("n\tpure_us\tbuiltin_us\tratio")
+  for k in 0 ..4 {
+    let n = 20000 * pow2(k)
+    let p = best_of(5, fn() => grow_pure_int(n))
+    let b = best_of(5, fn() => grow_builtin_int(n))
+    println("${n}\t${p}\t${b}\t${ratio(p, b)}")
+  }
+
+  println("")
+  println("== 2. one growing map, String keys (adds uncached hashing) ==")
+  println("n\tpure_us\tbuiltin_us\tratio")
+  for k in 0 ..4 {
+    let n = 20000 * pow2(k)
+    let p = best_of(5, fn() => grow_pure_str(n))
+    let b = best_of(5, fn() => grow_builtin_str(n))
+    println("${n}\t${p}\t${b}\t${ratio(p, b)}")
+  }
+
+  println("")
+  println("== 3. lookup-heavy, String keys (5 rounds over n entries) ==")
+  println("n\tpure_us\tbuiltin_us\tratio")
+  for k in 0 ..3 {
+    let n = 20000 * pow2(k)
+    let p = best_of(3, fn() => lookup_pure_str(n, 5))
+    let b = best_of(3, fn() => lookup_builtin_str(n, 5))
+    println("${n}\t${p}\t${b}\t${ratio(p, b)}")
+  }
+
+  println("")
+  println("== 4. the shapes a compiler builds ==")
+  println("shape\tpure_us\tbuiltin_us\tratio")
+  let ap = best_of(5, fn() => scoped_pure(5000, 20))
+  let ab = best_of(5, fn() => scoped_builtin(5000, 20))
+  println("A small-scopes(5000x20)\t${ap}\t${ab}\t${ratio(ap, ab)}")
+  let bp = best_of(5, fn() => grow_pure_str(4000))
+  let bb = best_of(5, fn() => grow_builtin_str(4000))
+  println("B module-table(4000)\t${bp}\t${bb}\t${ratio(bp, bb)}")
+  let cp = best_of(5, fn() => grow_pure_str(100000))
+  let cb = best_of(5, fn() => grow_builtin_str(100000))
+  println("C node-table(100000)\t${cp}\t${cb}\t${ratio(cp, cb)}")
+}
+
+## Ratio to one decimal place, as a string (there is no float formatting yet).
+fn ratio(p: Int, b: Int) -> String = {
+  if b == 0 {
+    "n/a"
+  } else {
+    let t = (p * 10) / b
+    "${t / 10}.${t % 10}x"
+  }
+}
+
+fn pow2(k: Int) -> Int = {
+  var r = 1
+  for _i in 0 ..k {
+    r = r * 2
+  }
+  r
+}
