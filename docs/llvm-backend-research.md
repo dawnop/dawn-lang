@@ -1,8 +1,8 @@
 # LLVM / native 后端调研
 
-> 状态：**调研,未实现**。本文是 [runtime-intrinsics-design.md](runtime-intrinsics-design.md) §8「LLVM
-> 后端具体要什么」的展开——把「接一个非 JVM 后端」从一句愿景落成对现有代码的量化盘点 + 几个硬决策的
-> 带推荐结论。不是设计定稿;`§4` 三个决策（发 C vs LLVM IR、RC vs region、UTF-8）是本轮重点深挖。
+> 状态：**已从调研转入动工准备(2026-07-25)**。主线目标已定为**开搭 native 后端**,de-Java(集合)降级成它的
+> 子任务。§10 记录了这一轮拍板的全部决策与当前动作。本文其余部分是原调研——对现有代码的量化盘点 + 硬决策
+> 的带推荐结论;`§4` 三个决策（发 C vs LLVM IR、RC vs region、UTF-8）是那一轮的重点深挖。
 > 相关:[runtime-intrinsics-design.md](runtime-intrinsics-design.md)(intrinsic 契约=后端接缝)、
 > [seq6-research.md](seq6-research.md)(装箱/物化实测)、[spec.md](spec.md)(语义)、[bootstrap.md](bootstrap.md)(种子)。
 
@@ -221,8 +221,58 @@ Dawn 是 dict-passing 而非单态化,改成单态化是大手术且与字典表
 ## 9. 仍开放
 
 - Perceus dup/drop 插入 pass 的具体落点(新 pass vs 融进 codegen)。
-- native 运行时用什么写(C / Rust / Zig / Dawn-over-raw)——影响自举纯度。
-- Unicode 表策略(内嵌最小 / ICU / ASCII-first)。
 - 一般尾调用:大栈够用多久,何时值得切 LLVM IR 上 `musttail`。
-- `use c` FFI 的**设计**(机制本身是地基、必做,见 §4.1;开放的是**怎么做**:与 `use java` 对称,但 C 无反射,
-  签名从哪来——头文件解析 / 手写 extern 声明 / 绑定生成器)。这是 native 自举的前置,建议在 Phase A 早期定。
+- 集合 spike 的结果出来前,纯 Dawn 集合(D 计划)是否可行未定——见 §10。
+
+> 原列于此的四项已于 2026-07-25 拍板:**native 运行时用 C**、**Unicode 先 ASCII-only**、**`use c` 用手写
+> extern 声明**、**codegen 发 C**。见 §10。
+
+## 10. 决策与动工计划(2026-07-25 拍板)
+
+**主线目标改为:开搭 native 后端。** de-Java 不再是独立主线,降级成 native 的子任务——因为 L2/L3c(ASM /
+jreflect / jarw / coursier)在 native 上不是「去掉」而是**不适用**,它们只随 native 后端自然消失。
+
+### 10.1 拍板的决策
+
+| 决策项 | 结论 | 备注 |
+|---|---|---|
+| codegen 目标 | **发 C** | 正交轴:以后可把末端换 LLVM IR 而前端/运行时/FFI 全不动(§4.1) |
+| native 运行时语言 | **C** | 与 codegen 同语言、零额外工具链、贴 libc。代价:它是新的「残留手写 C」 |
+| `use c` FFI 签名来源 | **手写 extern 声明** | 零依赖、立刻能开工;代价=手写量 + 签名写错只在运行时炸 |
+| Unicode 表 | **先 ASCII-only,后续补全** | 最快跑通;代价=一段时间内两后端对非 ASCII 行为不一致 |
+| native 如何 hash/比较任意值 | **传 Eq/Hash 字典** | ⚠️ **这把 D0(Eq/Hash trait 化)拉回关键路径最前面**,见 10.2 |
+| `Array[T]` 语言可见性 | **暂不公开** | 需要时先作 std 内部原语引入 |
+| List 表示 | **先严格 RB(32 叉 trie)**,relaxed 作以后可加的节点形态 | 落点=先只在 spike 与 native 的 C 运行时用;**不动现有 Java DawnList**,测过再决定要不要回写 JVM 侧 |
+| 集合纯 Dawn 化(D 计划) | **先测,再决定** | 不预设「先用不纯的当长期答案」 |
+| 集合 spike 的通过标准 | **自举总时长为准** | 量 `selfhost-fixpoint.sh`(种子→A→B→C 三趟全量编译)的回归;先量基线,spike 后量一次,拿数再判 |
+
+### 10.2 一个连带后果:D0 回到关键路径
+
+选「传 Eq/Hash 字典」意味着 native 的 C 集合运行时靠调用方传入的 hash/eq 函数指针工作,于是 `Map[K,V]` 需要
+`[K: Eq + Hash]` bound——**即 [collections-dejava-research.md](collections-dejava-research.md) 的 D0(Eq/Hash
+trait 化)成为 native 集合的前置**,而它是整条线里已知风险最大的一项(改 `==` dispatch = 巨型 Emit-Change,
+派生默认须与今天的结构 equals/hashCode 逐字节等价)。
+
+好的一面:D0 做完后纯 Dawn 集合(D2/D3)所需的字典也就现成了,**native 与 de-Java 两条线在 D0 合流**。
+
+> 被否的替代:「值带类型头 + 编译器生成 hash/eq 函数」(对应 JVM 的 per-class 生成 + 虚派发,不需要 trait)、
+> 「先只支持 Int/String 作 key」(编译器自己就用 `Map[(Int, Ty), …>`,自举必须补上)。
+
+### 10.3 当前动作
+
+**两个 spike 都做,集合先。**
+
+1. **集合 spike(进行中)** — 手写纯 Dawn HAMT + 严格 RB vector 原型(字典穿线用现有特性手工模拟),
+   对着 `selfhost-fixpoint.sh` 的自举总时长量回归。先量基线。结果决定 D 计划成不成立。
+2. **native 接缝 spike** — §8 的「native hello world」:平凡程序(main + println + 算术,无集合/闭包/ADT)
+   发 C + 极小运行时。跑通=证明 codegen 接缝 + 工具链链路。
+
+### 10.4 调研中发现、尚未处理的既存缺口
+
+- **前端并非后端无关(与 §2 的乐观估计有出入)**:`lexer.dawn`/`parser.dawn` 用 `java.lang.Character` 做
+  `isLetter/isDigit/isWhitespace/isUpperCase`、用 `Long.parseLong` 解析数字。native 前端要么补 Unicode 表
+  (已定先 ASCII),要么把这几个判词纯 Dawn 化。
+- **comptime 解释器是「第三实现」**:`interp.dawn` 对 `len/get/range/sort_by/concat` 有原生臂 + `VList`;
+  且 `CValue` **没有 `VMap`/`VSet`**——comptime 今天根本用不了 map/set。任何集合契约变更都要同步这一处,
+  或明确接受三份实现。此项**未决**,不阻塞两个 spike。
+- **str 契约 9→7 精简未做**:`str_contains`/`str_index_of` 可纯 Dawn over `index_of_from`(§7 已推荐)。
