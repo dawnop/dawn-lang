@@ -1,8 +1,26 @@
-# Byte-copy the vendored dawn/rt classes out of the compiler jar (the Kotlin
-# vendorRuntimeClasses): the classes std forwards to are compiled from Kotlin
-# source so the checker can reflect on them, which means they live in the
-# compiler artifact and must be copied into a built program's class table —
-# otherwise `java -jar` dies with NoClassDefFoundError while `dawn run` works.
+# The JVM backend's collection runtime, byte-copied into every built program.
+#
+# DawnList/DawnMap/DawnSet are the one part of the runtime that stays handwritten
+# Java (source archived at the `kotlin-final` tag; the working tree carries only
+# the compiled .class, inside the compiler artifact). They are NOT unfinished
+# selfhost — they are the JVM backend's implementation of the list/map/set
+# intrinsic contract, sitting behind the emitted dawn/rt/Maps and dawn/rt/Lists
+# helpers exactly as StdStrings/StdBytes/StdIo's logic now sits inside the
+# emitted dawn/rt/Strings/Bytes/Io. A native backend implements the same contract
+# with a native persistent-collection runtime; neither is language source.
+#
+# Why these stay Java (docs/collections-dejava-research.md, option C): each
+# `extends java.util.Abstract*`, whose structural, order-independent
+# equals/hashCode IS Dawn's `==`/hash on maps/sets — an identity that is
+# irreducible on the JVM, and that Dawn (no inheritance) cannot express in pure
+# source. Rewriting them as emitted bytecode or Dawn-over-`extends-java` would
+# move the java.util dependency, not remove it, and would not help the native
+# backend (which replaces the container regardless).
+#
+# Mechanism: compiled ahead of time, so they live in the compiler artifact and
+# must be copied into a built program's class table — otherwise `java -jar` dies
+# with NoClassDefFoundError while `dawn run` works. rt_class_family reads them
+# from the running compiler's own class loader.
 
 use std/str
 use std/list
@@ -17,6 +35,10 @@ use java "java.nio.file.Files"
 use java "java.nio.file.Paths"
 use java "java.lang.System"
 
+## The handwritten-Java runtime classes copied verbatim into every program: the
+## three persistent collections that are the JVM backend's list/map/set contract
+## implementation (see the file header for why they stay Java). Each entry brings
+## its nested/anonymous classes along by the `$` name rule in `matches`.
 pub fn vendored_outers() -> List[String] =
   ["DawnList", "DawnMap", "DawnSet"]
 
