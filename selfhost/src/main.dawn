@@ -44,6 +44,7 @@ use types.{
   TyInt, TyFloat, TyString, Ty, Sig, Traits, ImplI, Adts
 }
 use emit.{emit_module}
+use emitc
 use tast.{TModule}
 use interp.{CtOut, CValue}
 use checker.{Cx}
@@ -984,6 +985,60 @@ fn run_doc(rest: List[String]) -> Unit !io = {
   print(doc.project_json(prog))
 }
 
+## The Phase -1 native seam spike (docs/native-backend-plan.md): emit C for
+## the trivial subset instead of class files. Hidden and unsupported --
+## `emitc.dawn` panics on anything outside that subset, and both are
+## superseded once Core IR lands.
+fn run_emitc(rest: List[String]) -> Unit !io = {
+  var std_dir = "std"
+  var out = ""
+  var targets: List[String] = []
+  var i = 0
+  while i < len(rest) {
+    if rest[i] == "--std" && i + 1 < len(rest) {
+      std_dir = rest[i + 1]
+      i = i + 2
+    } else if rest[i] == "-o" && i + 1 < len(rest) {
+      out = rest[i + 1]
+      i = i + 2
+    } else {
+      targets = targets ++ [rest[i]]
+      i = i + 1
+    }
+  }
+  if len(targets) != 1 {
+    cli_error("__emitc takes exactly one target")
+  }
+  let std = match stdlib.load_std(std_dir) {
+    Ok(sc) -> sc
+    Err(e) -> panic("cannot load std from " ++ std_dir ++ ": " ++ e)
+  }
+  let t = targets[0]
+  let loaded = if io.is_dir(t) { load_directory(t) } else { load_file(t) }
+  let prog = analyze_program(loaded, std, 100000000)
+  if len(prog.diags) > 0 { fail_compile(prog.diags) }
+  var mods: List[(String, TModule)] = []
+  var entry = ""
+  for cm in prog.modules {
+    mods = mods ++ [(cm.class_name, cm.tm)]
+    if entry == "" {
+      for tf in cm.tm.fns {
+        if tf.name == "main" { entry = cm.class_name }
+      }
+    }
+  }
+  if entry == "" { cli_error("no main function in " ++ t) }
+  let text = emitc.emit_program(mods, entry)
+  if out == "" {
+    print(text)
+  } else {
+    match io.write_file(out, text) {
+      Ok(_) -> ()
+      Err(e) -> cli_error("cannot write " ++ out ++ ": " ++ e)
+    }
+  }
+}
+
 fn run_check(rest: List[String]) -> Unit !io = {
   var std_dir = "std"
   var targets: List[String] = []
@@ -1021,6 +1076,8 @@ pub fn main() -> Unit !io = {
         run_check(rest)
       } else if mode == "emit" || mode == "emitrt" || mode == "__emit" {
         run_emitrt(rest)
+      } else if mode == "__emitc" {
+        run_emitc(rest)
       } else if mode == "build" {
         maybe_with_deps(mode, rest)
         run_build(rest)

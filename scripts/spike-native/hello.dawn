@@ -1,0 +1,120 @@
+# The Phase -1 seam spike's corpus: exactly the subset emitc.dawn covers --
+# top-level functions, Int/Bool/String scalars, arithmetic, control flow.
+# No collections, closures, ADTs, traits or comptime.
+#
+# Run it under both backends and diff:
+#   ./scripts/spike-native/run.sh
+use std/io
+
+fn fib(n: Int) -> Int =
+  if n < 2 {
+    n
+  } else {
+    fib(n - 1) + fib(n - 2)
+  }
+
+fn gcd(a: Int, b: Int) -> Int = {
+  var x = a
+  var y = b
+  while y != 0 {
+    let t = x % y
+    x = y
+    y = t
+  }
+  x
+}
+
+fn collatz_steps(start: Int) -> Int = {
+  var n = start
+  var steps = 0
+  while n != 1 {
+    if n % 2 == 0 {
+      n = n / 2
+    } else {
+      n = 3 * n + 1
+    }
+    steps = steps + 1
+  }
+  steps
+}
+
+## Exercises break/continue and the short-circuit lowering, which is the one
+## place where C's operators cannot be reused (the right side may need to
+## emit statements, so && becomes an if).
+fn count_odd_below(limit: Int, cap: Int) -> Int = {
+  var found = 0
+  for i in 0..limit {
+    if i % 2 == 0 {
+      continue
+    }
+    if found >= cap {
+      break
+    }
+    found = found + 1
+  }
+  found
+}
+
+fn is_small_prime(n: Int) -> Bool = {
+  if n < 2 {
+    return false
+  }
+  var d = 2
+  while d * d <= n {
+    if n % d == 0 {
+      return false
+    }
+    d = d + 1
+  }
+  true
+}
+
+fn describe(n: Int) -> String =
+  if n < 0 {
+    "negative"
+  } else if n == 0 {
+    "zero"
+  } else if is_small_prime(n) {
+    "prime"
+  } else {
+    "composite"
+  }
+
+pub fn main() -> Unit !io = {
+  println("hello from a dawn program with no JVM under it")
+
+  println("2 + 3 * 4       = ${2 + 3 * 4}")
+  println("(-7) / 2        = ${(0 - 7) / 2}")
+  println("(-7) % 2        = ${(0 - 7) % 2}")
+  println("1 << 40         = ${1 << 40}")
+  println("(0 - 1) >>> 60  = ${(0 - 1) >>> 60}")
+  println("(0 - 1) >> 60   = ${(0 - 1) >> 60}")
+  println("~5              = ${~5}")
+
+  println("fib(20)         = ${fib(20)}")
+  println("gcd(1071, 462)  = ${gcd(1071, 462)}")
+  println("collatz(27)     = ${collatz_steps(27)}")
+  println("odd below 100/7 = ${count_odd_below(100, 7)}")
+
+  var i = 0
+  var acc = ""
+  while i < 8 {
+    acc = acc ++ describe(i) ++ " "
+    i = i + 1
+  }
+  println("0..7            = ${acc}")
+
+  println("true && false   = ${true && false}")
+  println("false || true   = ${false || true}")
+  println("short-circuit   = ${is_small_prime(7) && is_small_prime(11)}")
+
+  println("str compare     = ${describe(7) == "prime"}")
+  println("str length      = ${str_len("héllo, 世界")}")
+  println("unicode passthru= héllo, 世界")
+
+  var total = 0
+  for k in 1..11 {
+    total = total + k * k
+  }
+  println("sum of squares  = ${total}")
+}
