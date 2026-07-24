@@ -70,6 +70,11 @@ docs/              设计文档（中文）
 examples/          示例
 ```
 
+codegen 的**运行时 intrinsic 契约**(string/list/map/io 那半边)集中在 `emit.dawn` 的
+`rt_intrinsic_target` 表——每个 builtin 的 `(class, method)`,descriptor 由 `method_desc(签名)`
+派生、装箱走 `adapt_to`。这是接第二个后端时唯一要重指向的地方；背景与分期见
+[docs/runtime-intrinsics-design.md](docs/runtime-intrinsics-design.md)。
+
 Kotlin 实现（compiler/，1170 项测试、386 个黄金文件）已随 `kotlin-final` tag
 整体归档——考古看那个 tag，别在 main 找。
 
