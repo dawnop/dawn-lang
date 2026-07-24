@@ -97,8 +97,20 @@ Kotlin 编译器当标准答案(`__lex`/`__parse` golden diff → B==C 固定点
    > 再回头接，就是第三次重写。**真实截止点 = 冻结 Core 节点集之前**，不是「Phase 2 之前」。
 
 出口条件:158 项 selfhost 测试 + packages/site/playground 全绿、`selfhost-fixpoint.sh` B==C 成立、
-`fmt --check` 过。这一阶段**不产生任何 Emit-Change**(纯重构，字节码应逐字节不变)——这是它最好的性质，
-也是验收标准:**任何 Emit-Change 都说明搬错了。**
+`fmt --check` 过。
+
+> **修正(2026-07-25,动工后)**:本节原写「这一阶段不产生任何 Emit-Change,任何 Emit-Change 都说明
+> 搬错了」。**那条是错的**,写它的时候还没动手。真相是 Phase 0 的两半性质不同:
+>
+> - **形状保持的一半**(装箱物化、intrinsic 归表、调用形式)——确实应当**零 Emit-Change**,
+>   它们只是把决定提前,不改发射顺序。这半仍按原门禁验。
+> - **形状改变的一半**(match、`for`/`while`、`?`/`!`)——**必然产生 Emit-Change**。今天
+>   `emit.dawn` 的 match 是「标签 + 值留在栈上」,Core 的 match 是「一次性循环 + 结果临时量」。
+>   要它们发出同样的字节码,只能让 Core 长成 JVM 栈机的形状——那正是 R1 说的 JVM-ism。
+>
+> 故门禁改为**分增量**:形状保持的增量零 Emit-Change;形状改变的增量**允许 Emit-Change,但必须
+> 逐条审**,并由全套测试 + 固定点 B==C 兜行为等价。**止损点相应改为:形状保持的增量若出现
+> Emit-Change,说明搬错了。**
 
 ### Phase 1 — D0:Eq/Hash trait 化(风险最高)
 

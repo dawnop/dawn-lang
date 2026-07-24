@@ -17,7 +17,7 @@ use std/list
 use std/map
 use types.{
   Ty, TyInt, TyFloat, TyBool, TyString, TyUnit, TyNever, TyError, TyVar,
-  TyAdt, TyList, TyTuple, Sym, Sig, OPTION_ID, RESULT_ID
+  TyAdt, TyList, TyTuple, TyFn, Sym, Sig, OPTION_ID, RESULT_ID
 }
 use tast.{
   TExpr, TStmt, TPat, TArm, TStrPart, TFun, TModule, TBinOp, TUnOp, TJavaCall,
@@ -66,7 +66,12 @@ pub type LSt = {
   # the checker's symbol table for this module: the authority on what a
   # pattern binding's type is, so lowering never has to consult the ADT
   # table to type a field projection
-  syms: Map[Int, Sym]
+  syms: Map[Int, Sym],
+  # lambda lifting: bodies hoisted to top level, and the counter that names
+  # them. A lifted body keeps its captures' original symbol ids, so it needs
+  # no substitution -- see core.CFun.captures.
+  lifted: List[CFun],
+  next_lam: Int
 }
 
 fn fresh_sym(st: LSt) -> (LSt, Int) =
@@ -285,6 +290,100 @@ fn lit_eq(subj: CExpr, v: LitV, t: Ty) -> CExpr =
     LStr(s) -> CBinary(CEq, subj, CStr(s), TyBool)
   }
 
+# ---- lambda lifting ----
+
+fn fresh_lam(st: LSt) -> (LSt, String) =
+  (LSt { ..st, next_lam: st.next_lam + 1 }, "lambda$" ++ to_string(st.next_lam))
+
+fn params_of_fn_ty(t: Ty) -> List[Ty] =
+  match t {
+    TyFn(ps, _, _) -> ps
+    _ -> []
+  }
+
+fn ret_of_fn_ty(t: Ty) -> Ty =
+  match t {
+    TyFn(_, r, _) -> r
+    _ -> TyError
+  }
+
+## Hoist a lambda body to top level and leave a CClosure behind.
+##
+## The captured variables become leading parameters of the lifted function,
+## keeping their original symbol ids -- so the body, which already refers to
+## them by those ids, is copied across unchanged. That is the whole reason
+## lifting here costs nothing: TAST already recorded the capture set.
+fn lift_lambda(
+  st: LSt,
+  params: List[Int],
+  body: TExpr,
+  captures: List[Int],
+  ty: Ty
+) -> (LSt, CExpr) = {
+  let (st1, name) = fresh_lam(st)
+  var caps: List[CParam] = []
+  var cap_args: List[CExpr] = []
+  for c in captures {
+    let ct = sym_ty(st1, c, TyError)
+    caps = caps ++ [CParam { sym: c, ty: ct, mode: COwned }]
+    cap_args = cap_args ++ [CLocal(c, ct)]
+  }
+  var ps: List[CParam] = []
+  let pts = params_of_fn_ty(ty)
+  var i = 0
+  for p in params {
+    let pt = if i < len(pts) { pts[i] } else { sym_ty(st1, p, TyError) }
+    ps = ps ++ [CParam { sym: p, ty: pt, mode: COwned }]
+    i = i + 1
+  }
+  let (st2, cbody) = lower_expr(st1, body)
+  let f = CFun {
+    name: name,
+    owner: st2.owner,
+    captures: caps,
+    params: ps,
+    dicts: [],
+    ret: ret_of_fn_ty(ty),
+    body: cbody,
+    is_test: false,
+    impl_of: None,
+    default_of: None
+  }
+  (LSt { ..st2, lifted: st2.lifted ++ [f] },
+    CClosure(name, st2.owner, cap_args, ty))
+}
+
+## A top-level function used as a value becomes a closure over a wrapper
+## with no captures, so that every function value has one representation.
+fn lift_fn_value(st: LSt, owner: String, name: String, ty: Ty) -> (LSt, CExpr) = {
+  let (st1, lam) = fresh_lam(st)
+  let pts = params_of_fn_ty(ty)
+  var ps: List[CParam] = []
+  var args: List[CExpr] = []
+  var st2 = st1
+  var i = 0
+  for pt in pts {
+    let (st3, sym) = fresh_sym(st2)
+    st2 = st3
+    ps = ps ++ [CParam { sym: sym, ty: pt, mode: COwned }]
+    args = args ++ [CLocal(sym, pt)]
+    i = i + 1
+  }
+  let f = CFun {
+    name: lam,
+    owner: st2.owner,
+    captures: [],
+    params: ps,
+    dicts: [],
+    ret: ret_of_fn_ty(ty),
+    body: CCall(CDirect(owner, name), args, ret_of_fn_ty(ty)),
+    is_test: false,
+    impl_of: None,
+    default_of: None
+  }
+  (LSt { ..st2, lifted: st2.lifted ++ [f] }, CClosure(lam, st2.owner, [], ty))
+}
+
 # ---- expressions ----
 
 pub fn lower_expr(st: LSt, e: TExpr) -> (LSt, CExpr) =
@@ -388,16 +487,21 @@ pub fn lower_expr(st: LSt, e: TExpr) -> (LSt, CExpr) =
     }
     XCallDyn(sym, _, args, _, _, ty) -> {
       let (st1, vs) = lower_all(st, args)
-      (st1, CCall(CDynamic(CLocal(sym, TyError)), vs, ty))
+      (st1, CCall(CDynamic(CLocal(sym, sym_ty(st1, sym, TyError))), vs, ty))
     }
     XApply(target, args, _, _, ty) -> {
       let (st1, tv) = lower_expr(st, target)
       let (st2, vs) = lower_all(st1, args)
       (st2, CCall(CDynamic(tv), vs, ty))
     }
-    XFnValue(owner, name, _, ty, _, _) -> {
+    XLambda(params, _, body, captures, _, _, ty) ->
+      lift_lambda(st, params, body, captures, ty)
+    XFnValue(owner, name, is_builtin, ty, _, _) -> {
+      if is_builtin {
+        panic("lower: a builtin used as a value is not lowered yet: " ++ name)
+      }
       let o = match owner { Some(x) -> x None -> st.owner }
-      (st, CFnRef(o, name, ty))
+      lift_fn_value(st, o, name, ty)
     }
     XJava(call, _, _, ty) -> {
       let (st1, vs) = lower_all(st, call.args)
@@ -684,7 +788,12 @@ fn lower_stmt(st: LSt, s: TStmt) -> (LSt, List[CStmt]) =
       }
     }
     TSLetPat(_, _, _, _) -> panic("lower: destructuring let is not lowered yet")
-    TSLocalFn(_, _, _, _, _, _, _, _) -> panic("lower: local functions are not lowered yet")
+    TSLocalFn(sym, _, params, _, body, captures, _, _) -> {
+      # a named local function is a lambda that also binds a name
+      let fty = sym_ty(st, sym, TyError)
+      let (st1, clo) = lift_lambda(st, params, body, captures, fty)
+      (st1, [CSLet(sym, fty, clo)])
+    }
   }
 
 # ---- functions and modules ----
@@ -711,6 +820,7 @@ fn lower_fn(st: LSt, owner: String, f: TFun) -> (LSt, CFun) = {
   (st1, CFun {
     name: f.name,
     owner: owner,
+    captures: [],
     params: params,
     dicts: dicts,
     ret: f.sig.ret,
@@ -728,7 +838,13 @@ pub fn lower_module(owner: String, tm: TModule) -> CModule = {
     if k > top { top = k }
   }
   var st = LSt {
-    next_sym: top + 1, next_loop: 0, owner: owner, cur_loop: -1, syms: tm.syms
+    next_sym: top + 1,
+    next_loop: 0,
+    owner: owner,
+    cur_loop: -1,
+    syms: tm.syms,
+    lifted: [],
+    next_lam: 0
   }
   var fns: List[CFun] = []
   for f in tm.fns {
@@ -736,7 +852,9 @@ pub fn lower_module(owner: String, tm: TModule) -> CModule = {
     st = st1
     fns = fns ++ [cf]
   }
-  CModule { owner: owner, fns: fns }
+  # lifted bodies are appended after the source functions; they are ordinary
+  # top-level functions from here on and no backend can tell the difference
+  CModule { owner: owner, fns: fns ++ st.lifted }
 }
 
 # ---- diagnostics ----

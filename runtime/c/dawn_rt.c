@@ -34,6 +34,14 @@ dawn_adt *dawn_adt_new(int32_t tag, int32_t nfields) {
   return a;
 }
 
+dawn_clo *dawn_clo_new(void *fn, int32_t ncap) {
+  dawn_clo *c =
+      (dawn_clo *)dawn_alloc(sizeof(dawn_clo) + (size_t)ncap * sizeof(dawn_slot));
+  c->fn = fn;
+  c->ncap = ncap;
+  return c;
+}
+
 static dawn_slot *dawn_box(void) {
   return (dawn_slot *)dawn_alloc(sizeof(dawn_slot));
 }

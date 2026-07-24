@@ -68,7 +68,8 @@ pub type CExpr =
   | CField(target: CExpr, adt: Int, ci: Int, idx: Int, ty: Ty)
 # discriminant test: is `target` built by constructor `ci`?
   | CIsCtor(target: CExpr, adt: Int, ci: Int)
-# allocate a closure over a lifted top-level body
+# Allocate a closure: a reference to a lifted top-level function plus the
+# values of its captures, in the order that function declares them.
   | CClosure(fn_name: String, owner: String, captures: List[CExpr], ty: Ty)
   | CTuple(elems: List[CExpr], ty: Ty)
   | CTupleGet(target: CExpr, idx: Int, ty: Ty)
@@ -159,6 +160,12 @@ pub type CParam = { sym: Int, ty: Ty, mode: CMode }
 pub type CFun = {
   name: String,
   owner: String,
+  # Captured variables, for a function produced by lambda lifting. They are
+  # ordinary leading parameters as far as the body is concerned -- the body
+  # still refers to them by their original symbol ids, so lifting needs no
+  # substitution pass. Keeping them separate from `params` is what lets a
+  # backend build the adapter that unpacks a closure environment into them.
+  captures: List[CParam],
   params: List[CParam],
   # trait dictionaries, passed as hidden trailing parameters
   dicts: List[CParam],

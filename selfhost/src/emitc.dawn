@@ -20,7 +20,7 @@ use std/list
 use std/map
 use types.{
   Ty, TyInt, TyFloat, TyBool, TyString, TyUnit, TyNever, TyError, TyVar,
-  TyAdt, TyTuple
+  TyAdt, TyTuple, TyFn
 }
 use core.{
   diverges,
@@ -113,6 +113,7 @@ pub fn c_type(t: Ty) -> String =
       TyVar(_, _) -> "void*"
       TyAdt(_, _) -> "dawn_adt*"
       TyTuple(_) -> "dawn_adt*"
+      TyFn(_, _, _) -> "dawn_clo*"
       _ -> "void*"
     }
   }
@@ -274,9 +275,10 @@ pub fn emit_expr(st: CSt, e: CExpr) -> (CSt, String) =
       }
     }
     CFnRef(_, name, _) ->
-      panic("emitc: function values need closure lowering (" ++ name ++ ")")
-    CClosure(name, _, _, _) ->
-      panic("emitc: closures are not emitted yet (" ++ name ++ ")")
+      # lowering turns every function value into a CClosure, so a bare
+      # CFnRef reaching here means the lowering missed a case
+      panic("emitc: bare CFnRef survived lowering (" ++ name ++ ")")
+    CClosure(name, owner, caps, _) -> emit_closure(st, name, owner, caps)
     CListLit(_, _) ->
       panic("emitc: list literals await the pure-Dawn collections (D1-D3)")
     CForeign(_, _) ->
@@ -302,6 +304,30 @@ fn box_call(v: String, from: Ty) -> String =
     # already a pointer
     "((void*)(" ++ v ++ "))"
   }
+
+fn emit_closure(st: CSt, name: String, owner: String, caps: List[CExpr]) -> (CSt, String) = {
+  var st1 = st
+  var parts: List[String] = []
+  for c in caps {
+    let (st2, v) = emit_expr(st1, c)
+    st1 = st2
+    parts = parts ++ [v]
+  }
+  let (st3, tmp) = fresh(st1)
+  var st4 = line(st3,
+    "dawn_clo* " ++ tmp ++ " = dawn_clo_new((void*)" ++ adapter_name(owner, name) ++
+      ", " ++ to_string(len(parts)) ++ ");")
+  var i = 0
+  for p in parts {
+    st4 = line(st4, tmp ++ "->caps[" ++ to_string(i) ++ "]." ++
+        slot_of(cex_ty(caps[i])) ++ " = " ++ p ++ ";")
+    i = i + 1
+  }
+  (st4, tmp)
+}
+
+fn adapter_name(owner: String, name: String) -> String =
+  mangle(owner, name) ++ "__clo"
 
 fn emit_alloc(st: CSt, tag: Int, args: List[CExpr]) -> (CSt, String) = {
   var st1 = st
@@ -410,7 +436,19 @@ fn emit_call(st: CSt, callee: CCallee, args: List[CExpr], ty: Ty) -> (CSt, Strin
         Some(rt) -> (st1, rt ++ "(" ++ join(cargs, ", ") ++ ")")
         None -> (st1, mangle(owner, name) ++ "(" ++ join(cargs, ", ") ++ ")")
       }
-    CDynamic(_) -> panic("emitc: calls through function values need closures")
+    CDynamic(target) -> {
+      let (st3, tv) = emit_expr(st1, target)
+      # One indirect call whatever the capture count: the environment is
+      # always the first argument, and the adapter unpacks it.
+      var sigp: List[String] = ["dawn_clo*"]
+      for a in args {
+        sigp = sigp ++ [c_type(cex_ty(a))]
+      }
+      let cast = "(" ++ c_type(ty) ++ "(*)(" ++ join(sigp, ", ") ++ "))"
+      let call =
+        "((" ++ cast ++ "(" ++ tv ++ ")->fn)(" ++ join([tv] ++ cargs, ", ") ++ "))"
+      (st3, call)
+    }
     CMethod(_, _, m) -> panic("emitc: trait dispatch is not emitted yet (" ++ m ++ ")")
   }
 }
@@ -516,11 +554,52 @@ fn fn_signature(f: CFun) -> String = {
     panic("emitc: dictionary parameters are not emitted yet (" ++ f.name ++ ")")
   }
   var ps: List[String] = []
+  # captures are ordinary leading parameters of the lifted function; only
+  # the adapter knows they came from an environment
+  for p in f.captures {
+    ps = ps ++ [c_type(p.ty) ++ " " ++ local_name(p.sym)]
+  }
   for p in f.params {
     ps = ps ++ [c_type(p.ty) ++ " " ++ local_name(p.sym)]
   }
   let plist = if len(ps) == 0 { "void" } else { join(ps, ", ") }
   c_type(f.ret) ++ " " ++ mangle(f.owner, f.name) ++ "(" ++ plist ++ ")"
+}
+
+## Whether a closure can be built over this function. Lowering only ever
+## names lifted bodies in a CClosure, and it names them `lambda$N`.
+fn is_lifted(f: CFun) -> Bool = str.starts_with(f.name, "lambda$")
+
+## The adapter: uniform `(env, args...)` on the outside, the lifted
+## function's real parameter list on the inside. Generating one per lifted
+## body is what keeps every indirect call site identical.
+fn adapter_signature(f: CFun) -> String = {
+  var ps: List[String] = ["dawn_clo* env"]
+  for p in f.params {
+    ps = ps ++ [c_type(p.ty) ++ " " ++ local_name(p.sym)]
+  }
+  c_type(f.ret) ++ " " ++ adapter_name(f.owner, f.name) ++ "(" ++ join(ps, ", ") ++ ")"
+}
+
+fn emit_adapter(st: CSt, f: CFun) -> CSt = {
+  let st1 = push(line(st, adapter_signature(f) ++ " {"))
+  var args: List[String] = []
+  var i = 0
+  for c in f.captures {
+    args = args ++ ["env->caps[" ++ to_string(i) ++ "]." ++ slot_of(c.ty)]
+    i = i + 1
+  }
+  for p in f.params {
+    args = args ++ [local_name(p.sym)]
+  }
+  let call = mangle(f.owner, f.name) ++ "(" ++ join(args, ", ") ++ ")"
+  let st2 =
+    if len(f.captures) == 0 {
+      line(line(st1, "(void)env;"), "return " ++ call ++ ";")
+    } else {
+      line(st1, "return " ++ call ++ ";")
+    }
+  line(pop(st2), "}")
 }
 
 fn emit_fn(st: CSt, f: CFun) -> CSt = {
@@ -548,6 +627,9 @@ pub fn emit_program(mods: List[CModule], entry: String) -> String = {
     for f in m.fns {
       if not f.is_test {
         st = line(st, fn_signature(f) ++ ";")
+        if is_lifted(f) {
+          st = line(st, adapter_signature(f) ++ ";")
+        }
       }
     }
   }
@@ -558,6 +640,10 @@ pub fn emit_program(mods: List[CModule], entry: String) -> String = {
       if not f.is_test {
         st = emit_fn(st, f)
         st = line(st, "")
+        if is_lifted(f) {
+          st = emit_adapter(st, f)
+          st = line(st, "")
+        }
       }
     }
   }

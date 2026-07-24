@@ -52,6 +52,19 @@ typedef struct {
 
 dawn_adt *dawn_adt_new(int32_t tag, int32_t nfields);
 
+/* A closure: a code pointer plus the captured environment. The JVM backend
+ * gets this shape for free from invokedynamic and LambdaMetafactory; here it
+ * is written out, which llvm-backend-research.md 3 called the biggest single
+ * piece of native codegen. `fn` always points at the generated adapter, so
+ * every call site is one indirect call regardless of capture count. */
+typedef struct {
+  void *fn;
+  int32_t ncap;
+  dawn_slot caps[];
+} dawn_clo;
+
+dawn_clo *dawn_clo_new(void *fn, int32_t ncap);
+
 /* boxing: a type-variable slot holds a pointer to one of these */
 dawn_slot *dawn_box_int(int64_t v);
 dawn_slot *dawn_box_float(double v);
