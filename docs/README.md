@@ -1,6 +1,6 @@
 # docs/ 索引
 
-29 篇文档按时间叠加，混着**规范、调研、设计方案、落地日志、复盘和运维说明**。
+41 篇文档按时间叠加，混着**规范、调研、设计方案、落地日志、复盘和运维说明**。
 读者无从判断哪几段还成立——`design.md` 说实现语言是 Kotlin，`bootstrap.md` 说 LSP
 还在 Kotlin，两者都是当时的事实、现在都不是。这份索引把它们分层，并给每篇标状态。
 
@@ -30,7 +30,22 @@
 | [runtime-intrinsics-design.md](runtime-intrinsics-design.md) | current | `emit.dawn` 的 `rt_intrinsic_target` 契约——运行时 intrinsic 落到哪个类哪个方法。 |
 | [trait.md](trait.md) | current | trait/impl/derive 与 `Ord`。§落地记录里 Float 比较那段已被实现取代（见文内标注）。 |
 | [tutorial.md](tutorial.md) | current | 上手教程。代码块目前**人工维护**——机械校验随 Kotlin 侧 `TutorialTest` 一起归档了。 |
-| [codebase-audit.md](codebase-audit.md) | current | 2026-07-25 的全仓审查，逐条带处置结论（已修 / 驳回 / 待办）。 |
+| [codebase-audit.md](codebase-audit.md) | current | 2026-07-25 的全仓审查，76 条逐条带处置结论（已修 / 驳回 / 待办）。 |
+| [audit/README.md](audit/README.md) | current | 上面那份审查剩下 28 条待办的**作业计划**：八份设计文档的索引 + 修复顺序。 |
+
+## 待办的设计方案（`docs/audit/`，全部 proposed）
+
+审查剩下的待办，动码前的方案。索引与顺序见 [audit/README.md](audit/README.md)。
+
+[audit/purity-boundary-design.md](audit/purity-boundary-design.md)（LANG-01 P0 + ARCH-06）·
+[audit/lowered-ir-design.md](audit/lowered-ir-design.md)（ARCH-01/02/03/04，**其余架构项的前提**）·
+[audit/error-model-design.md](audit/error-model-design.md)（ERR-02/03 + LANG-02）·
+[audit/application-syntax-design.md](audit/application-syntax-design.md)（SYN-02/03）·
+[audit/nominal-types-design.md](audit/nominal-types-design.md)（LANG-04/05）·
+[audit/module-access-design.md](audit/module-access-design.md)（LANG-06/07）·
+[audit/lsp-robustness-design.md](audit/lsp-robustness-design.md)（LSP-01/02/04）·
+[audit/package-integrity-design.md](audit/package-integrity-design.md)（PKG-02/04）·
+[audit/web-api-v2-design.md](audit/web-api-v2-design.md)（WEB-03/04/06/07/09/10）
 
 ## 设计方案（已落地，作为特性的「为什么」）
 
@@ -81,4 +96,4 @@ codebase-audit.md 的 DOC-10 提了三件事，这里只落地了第一件：
 2. ⬜ 每篇加 front matter（状态、适用版本、superseded-by），而不是只在索引里标。
 3. ⬜ 里程碑与提交哈希记录移进 `docs/history/`。
 
-2 和 3 是 29 个文件的机械改动，跟本次审查修复放在一起会淹掉真正的改动，留待单独一提交。
+2 和 3 是 30 余个文件的机械改动，跟本次审查修复放在一起会淹掉真正的改动，留待单独一提交。

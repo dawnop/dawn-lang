@@ -1863,18 +1863,22 @@ Dawn 当前最大的风险不是“功能少”，而是**项目对自己的承�
 
 ## 15. 剩余项（按建议顺序）
 
+> **28 条待办的方案已经写好**，在 [`docs/audit/`](audit/) 下八份设计文档里，
+> 索引与修复顺序见 [`docs/audit/README.md`](audit/README.md)。下表的「设计文档」
+> 一列指向对应的那份。
+
 **需要先写设计文档**（CONTRIBUTING.md：动码前先写 `docs/<特性>-design.md`）
 
-| 编号 | 题目 | 备注 |
+| 编号 | 题目 | 设计文档 |
 |---|---|---|
-| LANG-01 | `unsafe_pure` 的边界与 comptime 隔离 | P0，仍未决 |
-| ARCH-04 | 小型 lowered IR | ARCH-01/02/03/05 的共同前提 |
-| ERR-02 / ERR-03 | `JavaError` 结构化错误 + `bracket`/`defer` | 跨编译器与生态 |
-| SYN-02 | 统一的 application 后缀节点 | 语言变更 |
-| LANG-02 / LANG-04 / LANG-05 / LANG-06 | `cast` 返回 Result、`Char` 不透明类型、newtype、模块限定访问 | 语言变更 |
-| PKG-02 / PKG-04 | 包 cache 校验、Maven lockfile | 各自是小特性 |
-| ARCH-06 | trampoline evaluator（去 512MB stack） | `interp.dawn` 重写 |
-| LSP-04 | debounce + generation cancellation | 引入并发要重新论证竞态 |
+| LANG-01（P0）+ ARCH-06 | `unsafe_pure` 的边界、comptime allowlist、trampoline evaluator | [purity-boundary](audit/purity-boundary-design.md) |
+| ARCH-04 + ARCH-01/02/03 | 小型 lowered IR，及靠它拆 checker/emitter | [lowered-ir](audit/lowered-ir-design.md) —— **共同前提，排第一** |
+| ERR-02 / ERR-03 / LANG-02 | `JavaError`、`bracket` intrinsic、`cast` 返回 Result | [error-model](audit/error-model-design.md) |
+| SYN-02（+SYN-03） | 统一的 application 后缀节点 | [application-syntax](audit/application-syntax-design.md) |
+| LANG-04 / LANG-05 | `Char` 不透明类型、`type X = new T` | [nominal-types](audit/nominal-types-design.md) |
+| LANG-06 / LANG-07 | `m.T`/`m.C`/`m.CONST`、`--closure` | [module-access](audit/module-access-design.md) |
+| LSP-01 / LSP-02 / LSP-04 | URI/UTF-8 交给 JDK、debounce + generation | [lsp-robustness](audit/lsp-robustness-design.md) |
+| PKG-02 / PKG-04 | cache 每次校验、`dawn.lock` | [package-integrity](audit/package-integrity-design.md) |
 
 **被另一条线覆盖**（去 Java 化 / 第二后端，见 collections-dejava-research.md）
 
@@ -1882,8 +1886,9 @@ BOOT-01（P0）、TEST-02、ARCH-05 的前两条建议。
 
 **破坏性 API 变更，走版本流程**
 
-WEB-03、WEB-04、WEB-06、WEB-07、WEB-09。其中 WEB-09 的「启动时校验 RouteTable」
-是唯一不破坏 API 的部分，可以单独做。
+WEB-03、WEB-04、WEB-06、WEB-07、WEB-09、WEB-10 —— 一次做完，`packages/web` 2.0，
+方案见 [web-api-v2](audit/web-api-v2-design.md)。其中 WEB-09 的
+「启动时校验 RouteTable」是唯一不破坏 API 的部分，可以脱离 2.0 单独发。
 
 **可以立刻做，不需要设计文档**
 
