@@ -542,7 +542,17 @@ pub fn builtins() -> Map[String, Sig] = {
     bsig("str_starts_with", [TyString, TyString], ["s", "prefix"], TyBool),
     bsig("str_ends_with", [TyString, TyString], ["s", "suffix"], TyBool),
     bsig("str_index_of", [TyString, TyString], ["s", "sub"], TyInt),
-    bsig("str_last_index_of", [TyString, TyString], ["s", "sub"], TyInt)
+    bsig("str_last_index_of", [TyString, TyString], ["s", "sub"], TyInt),
+    # bytes_* intrinsics: the byte primitives std/bytes writes over. Bytes is a
+    # JVM byte[] (crosses FFI both ways), so the JVM backend emits these into
+    # dawn/rt/Bytes; a missing/out-of-range result comes back as a sentinel
+    # (-1 for bytes_at) or Option (bytes_decode), which std turns into panic/None.
+    # bytes_index_of stays pure Dawn over bytes_len/bytes_at.
+    bsig("bytes_utf8", [TyString], ["s"], TyBytes),
+    bsig("bytes_decode", [TyBytes, TyString], ["b", "charset"], opt_ty(TyString)),
+    bsig("bytes_len", [TyBytes], ["b"], TyInt),
+    bsig("bytes_at", [TyBytes, TyInt], ["b", "i"], TyInt),
+    bsig("bytes_slice", [TyBytes, TyInt, TyInt], ["b", "start", "end"], TyBytes)
   ]
   sigs = sigs ++ [
     eff1(bsig("args", [], [], TyList(TyString)), EIo),
@@ -689,7 +699,7 @@ test "builtin table renders signatures" {
     }
     None -> { assert false }
   }
-  assert map_size2(bs) == 55
+  assert map_size2(bs) == 60
 }
 
 fn map_size2(m: Map[String, Sig]) -> Int = map.size(m)

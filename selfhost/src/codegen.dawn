@@ -257,6 +257,8 @@ pub const OP_I2L: Int = 133
 
 pub const OP_L2I: Int = 136
 
+pub const OP_BALOAD: Int = 51
+
 pub const OP_IADD: Int = 96
 
 pub const OP_LADD: Int = 97
@@ -745,7 +747,11 @@ pub const OP_ARRAYLENGTH: Int = 190
 
 pub const OP_IINC_UNUSED: Int = 132
 
-## dawn/rt/Bytes: concat only (utf8/decode/len inline at call sites).
+## dawn/rt/Bytes: the byte-string runtime — concat (backs `Bytes ++ Bytes`) plus
+## the bytes_* primitives std/bytes writes over (utf8/decode/len/at/slice). These
+## retire the handwritten dawn.rt.StdBytes; index_of stays pure Dawn over len/at.
+## Byte values are unsigned 0..255 on the Dawn side, so -1 is a free out-of-range
+## sentinel for bytes_at (std turns it into a panic).
 pub fn gen_bytes_class(supers: List[String]) -> Bytes !io = {
   let cw = AdtClassWriter.new(supers)
   cw.begin(V17, ACC_PUBLIC + ACC_FINAL, BYTES_CLASS, obj())
@@ -774,6 +780,129 @@ pub fn gen_bytes_class(supers: List[String]) -> Bytes !io = {
   m.visitInsn(OP_ARETURN)
   m.visitMaxs(0, 0)
   m.visitEnd()
+
+  # bytes_utf8(s) = s.getBytes(UTF_8)
+  let uv = open_static(cw, "bytes_utf8", "(Ljava/lang/String;)[B")
+  uv.visitVarInsn(OP_ALOAD, 0)
+  uv.visitFieldInsn(OP_GETSTATIC, "java/nio/charset/StandardCharsets", "UTF_8",
+    "Ljava/nio/charset/Charset;")
+  uv.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/String", "getBytes",
+    "(Ljava/nio/charset/Charset;)[B", false)
+  uv.visitInsn(OP_ARETURN)
+  close_mv(uv)
+
+  # bytes_len(b) = b.length
+  let lv = open_static(cw, "bytes_len", "([B)J")
+  lv.visitVarInsn(OP_ALOAD, 0)
+  lv.visitInsn(OP_ARRAYLENGTH)
+  lv.visitInsn(OP_I2L)
+  lv.visitInsn(OP_LRETURN)
+  close_mv(lv)
+
+  # bytes_at(b, i): (i < 0 || i >= len) ? -1 : (b[i] & 0xFF)
+  let av = open_static(cw, "bytes_at", "([BJ)J")
+  let at_neg = Label.new()
+  av.visitVarInsn(OP_LLOAD, 1)
+  av.visitInsn(OP_LCONST_0)
+  av.visitInsn(OP_LCMP)
+  av.visitJumpInsn(OP_IFLT, at_neg)
+  av.visitVarInsn(OP_LLOAD, 1)
+  av.visitVarInsn(OP_ALOAD, 0)
+  av.visitInsn(OP_ARRAYLENGTH)
+  av.visitInsn(OP_I2L)
+  av.visitInsn(OP_LCMP)
+  av.visitJumpInsn(OP_IFGE, at_neg)
+  av.visitVarInsn(OP_ALOAD, 0)
+  av.visitVarInsn(OP_LLOAD, 1)
+  av.visitInsn(OP_L2I)
+  av.visitInsn(OP_BALOAD)
+  av.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Byte", "toUnsignedInt", "(B)I", false)
+  av.visitInsn(OP_I2L)
+  av.visitInsn(OP_LRETURN)
+  av.visitLabel(at_neg)
+  av.visitInsn(OP_ICONST_M1)
+  av.visitInsn(OP_I2L)
+  av.visitInsn(OP_LRETURN)
+  close_mv(av)
+
+  # bytes_slice(b, start, end) = Arrays.copyOfRange over clamped [s, max(s, e))
+  let sv = open_static(cw, "bytes_slice", "([BJJ)[B")
+  let sl_fix = Label.new()
+  let sl_copy = Label.new()
+  sv.visitVarInsn(OP_ALOAD, 0)
+  sv.visitInsn(OP_ARRAYLENGTH)
+  sv.visitVarInsn(OP_ISTORE, 5)
+  sv.visitVarInsn(OP_LLOAD, 1)
+  sv.visitVarInsn(OP_ILOAD, 5)
+  sv.visitMethodInsn(OP_INVOKESTATIC, BYTES_CLASS, "bytesClamp", "(JI)I", false)
+  sv.visitVarInsn(OP_ISTORE, 6)
+  sv.visitVarInsn(OP_LLOAD, 3)
+  sv.visitVarInsn(OP_ILOAD, 5)
+  sv.visitMethodInsn(OP_INVOKESTATIC, BYTES_CLASS, "bytesClamp", "(JI)I", false)
+  sv.visitVarInsn(OP_ISTORE, 7)
+  sv.visitVarInsn(OP_ILOAD, 6)
+  sv.visitVarInsn(OP_ILOAD, 7)
+  sv.visitJumpInsn(OP_IF_ICMPGE, sl_fix)
+  sv.visitJumpInsn(OP_GOTO, sl_copy)
+  sv.visitLabel(sl_fix)
+  sv.visitVarInsn(OP_ILOAD, 6)
+  sv.visitVarInsn(OP_ISTORE, 7)
+  sv.visitLabel(sl_copy)
+  sv.visitVarInsn(OP_ALOAD, 0)
+  sv.visitVarInsn(OP_ILOAD, 6)
+  sv.visitVarInsn(OP_ILOAD, 7)
+  sv.visitMethodInsn(OP_INVOKESTATIC, "java/util/Arrays", "copyOfRange", "([BII)[B", false)
+  sv.visitInsn(OP_ARETURN)
+  close_mv(sv)
+
+  # bytesClamp(v, hi) = v < 0 ? 0 : (v > hi ? hi : (int) v)
+  let cv = open_static(cw, "bytesClamp", "(JI)I")
+  let cl_pos = Label.new()
+  let cl_ok = Label.new()
+  cv.visitVarInsn(OP_LLOAD, 0)
+  cv.visitInsn(OP_LCONST_0)
+  cv.visitInsn(OP_LCMP)
+  cv.visitJumpInsn(OP_IFGE, cl_pos)
+  cv.visitInsn(OP_ICONST_0)
+  cv.visitInsn(OP_IRETURN)
+  cv.visitLabel(cl_pos)
+  cv.visitVarInsn(OP_LLOAD, 0)
+  cv.visitVarInsn(OP_ILOAD, 2)
+  cv.visitInsn(OP_I2L)
+  cv.visitInsn(OP_LCMP)
+  cv.visitJumpInsn(OP_IFLE, cl_ok)
+  cv.visitVarInsn(OP_ILOAD, 2)
+  cv.visitInsn(OP_IRETURN)
+  cv.visitLabel(cl_ok)
+  cv.visitVarInsn(OP_LLOAD, 0)
+  cv.visitInsn(OP_L2I)
+  cv.visitInsn(OP_IRETURN)
+  close_mv(cv)
+
+  # bytes_decode(b, charset): Some(new String(b, charset)) / None on bad charset
+  let dv = open_static(cw, "bytes_decode", "([BLjava/lang/String;)LOption;")
+  let d_start = Label.new()
+  let d_end = Label.new()
+  let d_handler = Label.new()
+  dv.visitTryCatchBlock(d_start, d_end, d_handler, "java/io/UnsupportedEncodingException")
+  dv.visitLabel(d_start)
+  dv.visitTypeInsn(OP_NEW, "Option\$Some")
+  dv.visitInsn(OP_DUP)
+  dv.visitTypeInsn(OP_NEW, "java/lang/String")
+  dv.visitInsn(OP_DUP)
+  dv.visitVarInsn(OP_ALOAD, 0)
+  dv.visitVarInsn(OP_ALOAD, 1)
+  dv.visitMethodInsn(OP_INVOKESPECIAL, "java/lang/String", "<init>",
+    "([BLjava/lang/String;)V", false)
+  dv.visitMethodInsn(OP_INVOKESPECIAL, "Option\$Some", "<init>", "(Ljava/lang/Object;)V", false)
+  dv.visitLabel(d_end)
+  dv.visitInsn(OP_ARETURN)
+  dv.visitLabel(d_handler)
+  dv.visitInsn(OP_POP)
+  dv.visitFieldInsn(OP_GETSTATIC, "Option\$None", "INSTANCE", "LOption\$None;")
+  dv.visitInsn(OP_ARETURN)
+  close_mv(dv)
+
   cw.visitEnd()
   cw.toByteArray().expect("bytes")
 }
