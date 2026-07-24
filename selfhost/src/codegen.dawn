@@ -259,6 +259,10 @@ pub const OP_L2I: Int = 136
 
 pub const OP_BALOAD: Int = 51
 
+pub const OP_ANEWARRAY: Int = 189
+
+pub const OP_IFNONNULL: Int = 199
+
 pub const OP_IADD: Int = 96
 
 pub const OP_LADD: Int = 97
@@ -937,12 +941,152 @@ fn gen_try_closure(cw: AdtClassWriter, name: String, caught: String) -> Unit !io
   ()
 }
 
-## dawn/rt/Io: javaTry (Exception barrier) and catchPanic (Throwable boundary).
+## dawn/rt/Io: the io runtime — javaTry/catchPanic (the Throwable barriers) plus
+## the io_* primitives std/io writes over (print/println/read_line/is_dir/
+## read_file/write_file/list_names). These retire the handwritten dawn.rt.StdIo.
+## The failing ones (read_file/write_file/list_names) simply throw; std wraps
+## them in java_try, exactly as it wrapped StdIo. read_line maps Java's
+## null-or-line onto Option here rather than relying on use-java null-wrapping.
 pub fn gen_io_class(supers: List[String]) -> Bytes !io = {
   let cw = AdtClassWriter.new(supers)
   cw.begin(V17, ACC_PUBLIC + ACC_FINAL, IO_CLASS, obj())
   gen_try_closure(cw, "javaTry", "java/lang/Exception")
   gen_try_closure(cw, "catchPanic", "java/lang/Throwable")
+
+  # a single shared reader: a fresh BufferedReader per call would let one call's
+  # buffer swallow input the next call should see. Lazily initialised in io_read_line.
+  cw.field(ACC_PRIVATE + ACC_STATIC, "stdin", "Ljava/io/BufferedReader;")
+
+  # io_print(s) = System.out.print(s)
+  let pv = open_static(cw, "io_print", "(Ljava/lang/String;)V")
+  pv.visitFieldInsn(OP_GETSTATIC, "java/lang/System", "out", "Ljava/io/PrintStream;")
+  pv.visitVarInsn(OP_ALOAD, 0)
+  pv.visitMethodInsn(OP_INVOKEVIRTUAL, "java/io/PrintStream", "print",
+    "(Ljava/lang/String;)V", false)
+  pv.visitInsn(OP_RETURN)
+  close_mv(pv)
+
+  # io_println(s) = System.out.println(s)
+  let plv = open_static(cw, "io_println", "(Ljava/lang/String;)V")
+  plv.visitFieldInsn(OP_GETSTATIC, "java/lang/System", "out", "Ljava/io/PrintStream;")
+  plv.visitVarInsn(OP_ALOAD, 0)
+  plv.visitMethodInsn(OP_INVOKEVIRTUAL, "java/io/PrintStream", "println",
+    "(Ljava/lang/String;)V", false)
+  plv.visitInsn(OP_RETURN)
+  close_mv(plv)
+
+  # io_read_line(): lazily open stdin (UTF-8), one line or None at EOF
+  let rlv = open_static(cw, "io_read_line", "()LOption;")
+  let rl_have = Label.new()
+  let rl_none = Label.new()
+  rlv.visitFieldInsn(OP_GETSTATIC, IO_CLASS, "stdin", "Ljava/io/BufferedReader;")
+  rlv.visitJumpInsn(OP_IFNONNULL, rl_have)
+  rlv.visitTypeInsn(OP_NEW, "java/io/BufferedReader")
+  rlv.visitInsn(OP_DUP)
+  rlv.visitTypeInsn(OP_NEW, "java/io/InputStreamReader")
+  rlv.visitInsn(OP_DUP)
+  rlv.visitFieldInsn(OP_GETSTATIC, "java/lang/System", "in", "Ljava/io/InputStream;")
+  rlv.visitFieldInsn(OP_GETSTATIC, "java/nio/charset/StandardCharsets", "UTF_8",
+    "Ljava/nio/charset/Charset;")
+  rlv.visitMethodInsn(OP_INVOKESPECIAL, "java/io/InputStreamReader", "<init>",
+    "(Ljava/io/InputStream;Ljava/nio/charset/Charset;)V", false)
+  rlv.visitMethodInsn(OP_INVOKESPECIAL, "java/io/BufferedReader", "<init>",
+    "(Ljava/io/Reader;)V", false)
+  rlv.visitFieldInsn(OP_PUTSTATIC, IO_CLASS, "stdin", "Ljava/io/BufferedReader;")
+  rlv.visitLabel(rl_have)
+  rlv.visitFieldInsn(OP_GETSTATIC, IO_CLASS, "stdin", "Ljava/io/BufferedReader;")
+  rlv.visitMethodInsn(OP_INVOKEVIRTUAL, "java/io/BufferedReader", "readLine",
+    "()Ljava/lang/String;", false)
+  rlv.visitVarInsn(OP_ASTORE, 0)
+  rlv.visitVarInsn(OP_ALOAD, 0)
+  rlv.visitJumpInsn(OP_IFNULL, rl_none)
+  rlv.visitTypeInsn(OP_NEW, "Option\$Some")
+  rlv.visitInsn(OP_DUP)
+  rlv.visitVarInsn(OP_ALOAD, 0)
+  rlv.visitMethodInsn(OP_INVOKESPECIAL, "Option\$Some", "<init>", "(Ljava/lang/Object;)V", false)
+  rlv.visitInsn(OP_ARETURN)
+  rlv.visitLabel(rl_none)
+  rlv.visitFieldInsn(OP_GETSTATIC, "Option\$None", "INSTANCE", "LOption\$None;")
+  rlv.visitInsn(OP_ARETURN)
+  close_mv(rlv)
+
+  # io_is_dir(path) = new File(path).isDirectory()
+  let idv = open_static(cw, "io_is_dir", "(Ljava/lang/String;)Z")
+  idv.visitTypeInsn(OP_NEW, "java/io/File")
+  idv.visitInsn(OP_DUP)
+  idv.visitVarInsn(OP_ALOAD, 0)
+  idv.visitMethodInsn(OP_INVOKESPECIAL, "java/io/File", "<init>", "(Ljava/lang/String;)V", false)
+  idv.visitMethodInsn(OP_INVOKEVIRTUAL, "java/io/File", "isDirectory", "()Z", false)
+  idv.visitInsn(OP_IRETURN)
+  close_mv(idv)
+
+  # io_read_file(path) = Files.readString(new File(path).toPath()) — throws on failure
+  let rfv = open_static(cw, "io_read_file", "(Ljava/lang/String;)Ljava/lang/String;")
+  rfv.visitTypeInsn(OP_NEW, "java/io/File")
+  rfv.visitInsn(OP_DUP)
+  rfv.visitVarInsn(OP_ALOAD, 0)
+  rfv.visitMethodInsn(OP_INVOKESPECIAL, "java/io/File", "<init>", "(Ljava/lang/String;)V", false)
+  rfv.visitMethodInsn(OP_INVOKEVIRTUAL, "java/io/File", "toPath", "()Ljava/nio/file/Path;", false)
+  rfv.visitMethodInsn(OP_INVOKESTATIC, "java/nio/file/Files", "readString",
+    "(Ljava/nio/file/Path;)Ljava/lang/String;", false)
+  rfv.visitInsn(OP_ARETURN)
+  close_mv(rfv)
+
+  # io_write_file(path, content): mkdirs parents, then Files.writeString — throws on failure
+  let wfv = open_static(cw, "io_write_file", "(Ljava/lang/String;Ljava/lang/String;)V")
+  let wf_skip = Label.new()
+  wfv.visitTypeInsn(OP_NEW, "java/io/File")
+  wfv.visitInsn(OP_DUP)
+  wfv.visitVarInsn(OP_ALOAD, 0)
+  wfv.visitMethodInsn(OP_INVOKESPECIAL, "java/io/File", "<init>", "(Ljava/lang/String;)V", false)
+  wfv.visitVarInsn(OP_ASTORE, 2)
+  wfv.visitVarInsn(OP_ALOAD, 2)
+  wfv.visitMethodInsn(OP_INVOKEVIRTUAL, "java/io/File", "getParentFile", "()Ljava/io/File;", false)
+  wfv.visitVarInsn(OP_ASTORE, 3)
+  wfv.visitVarInsn(OP_ALOAD, 3)
+  wfv.visitJumpInsn(OP_IFNULL, wf_skip)
+  wfv.visitVarInsn(OP_ALOAD, 3)
+  wfv.visitMethodInsn(OP_INVOKEVIRTUAL, "java/io/File", "mkdirs", "()Z", false)
+  wfv.visitInsn(OP_POP)
+  wfv.visitLabel(wf_skip)
+  wfv.visitVarInsn(OP_ALOAD, 2)
+  wfv.visitMethodInsn(OP_INVOKEVIRTUAL, "java/io/File", "toPath", "()Ljava/nio/file/Path;", false)
+  wfv.visitVarInsn(OP_ALOAD, 1)
+  wfv.visitInsn(OP_ICONST_0)
+  wfv.visitTypeInsn(OP_ANEWARRAY, "java/nio/file/OpenOption")
+  wfv.visitMethodInsn(OP_INVOKESTATIC, "java/nio/file/Files", "writeString",
+    "(Ljava/nio/file/Path;Ljava/lang/CharSequence;[Ljava/nio/file/OpenOption;)Ljava/nio/file/Path;",
+    false)
+  wfv.visitInsn(OP_POP)
+  wfv.visitInsn(OP_RETURN)
+  close_mv(wfv)
+
+  # io_list_names(path): sorted entry names, or throw if the dir cannot be listed
+  let lnv = open_static(cw, "io_list_names", "(Ljava/lang/String;)Ljava/util/List;")
+  let ln_ok = Label.new()
+  lnv.visitTypeInsn(OP_NEW, "java/io/File")
+  lnv.visitInsn(OP_DUP)
+  lnv.visitVarInsn(OP_ALOAD, 0)
+  lnv.visitMethodInsn(OP_INVOKESPECIAL, "java/io/File", "<init>", "(Ljava/lang/String;)V", false)
+  lnv.visitMethodInsn(OP_INVOKEVIRTUAL, "java/io/File", "list", "()[Ljava/lang/String;", false)
+  lnv.visitVarInsn(OP_ASTORE, 1)
+  lnv.visitVarInsn(OP_ALOAD, 1)
+  lnv.visitJumpInsn(OP_IFNONNULL, ln_ok)
+  lnv.visitTypeInsn(OP_NEW, "java/io/IOException")
+  lnv.visitInsn(OP_DUP)
+  lnv.visitVarInsn(OP_ALOAD, 0)
+  lnv.visitMethodInsn(OP_INVOKESPECIAL, "java/io/IOException", "<init>",
+    "(Ljava/lang/String;)V", false)
+  lnv.visitInsn(OP_ATHROW)
+  lnv.visitLabel(ln_ok)
+  lnv.visitVarInsn(OP_ALOAD, 1)
+  lnv.visitMethodInsn(OP_INVOKESTATIC, "java/util/Arrays", "sort", "([Ljava/lang/Object;)V", false)
+  lnv.visitVarInsn(OP_ALOAD, 1)
+  lnv.visitMethodInsn(OP_INVOKESTATIC, LISTS_CLASS, "fromArray",
+    "([Ljava/lang/String;)Ljava/util/List;", false)
+  lnv.visitInsn(OP_ARETURN)
+  close_mv(lnv)
+
   cw.visitEnd()
   cw.toByteArray().expect("bytes")
 }

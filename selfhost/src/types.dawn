@@ -565,6 +565,17 @@ pub fn builtins() -> Map[String, Sig] = {
       tp1(bsig("catch_panic", [TyFn([], t, EIo)], ["f"], result_ty(t, TyString)), t),
       EIo
     ),
+    # io_* intrinsics: the console/file primitives std/io writes over. All !io.
+    # The JVM backend emits them into dawn/rt/Io. read_file/write_file/list_names
+    # throw on failure; std wraps them in java_try. read_line returns Option
+    # directly (the intrinsic maps Java's null-or-line onto it).
+    eff1(bsig("io_print", [TyString], ["s"], TyUnit), EIo),
+    eff1(bsig("io_println", [TyString], ["s"], TyUnit), EIo),
+    eff1(bsig("io_read_line", [], [], opt_ty(TyString)), EIo),
+    eff1(bsig("io_is_dir", [TyString], ["path"], TyBool), EIo),
+    eff1(bsig("io_read_file", [TyString], ["path"], TyString), EIo),
+    eff1(bsig("io_write_file", [TyString, TyString], ["path", "content"], TyUnit), EIo),
+    eff1(bsig("io_list_names", [TyString], ["path"], TyList(TyString)), EIo),
     Sig { ..bsig("map_empty", [], [], TyMap(k, v)), tparams: [k, v] },
     tp1(bsig("set_empty", [], [], TySet(t)), t),
     Sig {
@@ -699,7 +710,7 @@ test "builtin table renders signatures" {
     }
     None -> { assert false }
   }
-  assert map_size2(bs) == 60
+  assert map_size2(bs) == 67
 }
 
 fn map_size2(m: Map[String, Sig]) -> Int = map.size(m)
