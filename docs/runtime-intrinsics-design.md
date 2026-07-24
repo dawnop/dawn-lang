@@ -150,7 +150,8 @@ JVM-锁死。LLVM 后端一看 std 里全是 `java.lang.String.codePointCount`,�
 - **集合怎么产生**(§7):A 窄 codegen `extends java` 特性 / B 手搓字节码 / C vendored 归位留指路牌。
 - **ASM/AdtClassWriter**:算不算这轮范围。ASM 是第三方(可当外部依赖),AdtClassWriter 是我们写的但
   绑死 ASM——彻底零手写 Java 要连它一起换(Dawn 写的字节码+栈帧写入器,`jarw.dawn` 是同类先例)。
-- **LLVM 侧**:字符串 native 表示(UTF-8/16)、内存管理选型(RC/region/GC)。
+- **LLVM 侧**:字符串 native 表示(UTF-8/16)、内存管理选型(RC/region/GC)。→ 这几项已在
+  [llvm-backend-research.md](llvm-backend-research.md) §4 深挖并给出推荐(UTF-8 / Perceus 式 RC / 先发 C)。
 
 ## 12. 结论
 
