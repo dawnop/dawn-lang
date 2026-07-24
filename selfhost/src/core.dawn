@@ -1,0 +1,226 @@
+# Core IR: the backend-neutral tree both codegens consume.
+#
+# See docs/native-backend-plan.md Phase 0. The checker already bakes the
+# backend-neutral semantics into TAST (trait dispatch as WitRef + dict_syms,
+# constructor layout as XCtor.slots, types as syms). What it does NOT do is
+# lower the sugar -- `for`/`match`/`?`/`!`/string interpolation survive into
+# emit.dawn and get inlined there, which is precisely the work a second
+# backend would otherwise repeat. Core is where that lowering lands once.
+#
+# What Core removes relative to TAST:
+#
+#   * `match`      -> explicit discriminant tests, field binds and a once-loop
+#                     (the decision tree is the crown jewel; it is written once)
+#   * `for`/`while`-> CSLoop plus explicit induction, break and continue
+#   * `?` / `!`    -> explicit tests against Option/Result constructors
+#   * interpolation-> explicit builder calls
+#   * boxing       -> explicit CBox / CUnbox nodes, decided during lowering
+#                     instead of recomputed at every argument position
+#   * intrinsics   -> one CIntrinsic node; each backend maps the name table
+#
+# What Core adds relative to TAST:
+#
+#   * CSDiscard    -- "evaluate this and drop the value". In TAST a discarded
+#                     value is implicit, which let the Phase -1 spike silently
+#                     drop a trailing println's side effect. Making it a node
+#                     means a backend cannot forget.
+#   * CSDup/CSDrop -- reference-count operations. Phase 0 emits none and the
+#                     JVM backend ignores them; Perceus (Phase 4) fills them
+#                     in. They exist now so the IR shape is settled before
+#                     two backends are written against it.
+#
+# What Core deliberately keeps structured: blocks, `if`, and loops. Both
+# targets are structured (the JVM emitter builds labels anyway, C has native
+# loops), so flattening to a basic-block CFG would cost both backends work
+# and buy nothing at this stage.
+
+use types.{
+  Ty, TyInt, TyFloat, TyBool, TyString, TyUnit, TyNever, TyError
+}
+
+## Where a call goes. Dawn is dictionary-passing, not monomorphising, so
+## these three cover every call form in the language.
+pub type CCallee =
+  # a statically known top-level function; owner is its module class name
+  | CDirect(owner: String, name: String)
+# a function value in a local (closure or fn-typed parameter)
+  | CDynamic(target: CExpr)
+# a trait method reached through a dictionary value
+  | CMethod(dict: CExpr, trait_id: Int, method: String)
+
+pub type CExpr =
+  | CInt(v: Int)
+  | CFloat(v: Float)
+  | CBool(v: Bool)
+  | CStr(v: String)
+  | CUnit
+  | CLocal(sym: Int, ty: Ty)
+# a top-level function used as a value (already instantiated)
+  | CFnRef(owner: String, name: String, ty: Ty)
+  | CCall(callee: CCallee, args: List[CExpr], ty: Ty)
+# a runtime primitive: str_*, io_*, array_*, panic, ... Backends own the
+# name -> implementation table; Core owns only the name and the types.
+  | CIntrinsic(name: String, args: List[CExpr], ty: Ty)
+# build a constructor: args are in field order, already reordered from the
+# source's written order and spread base by lowering
+  | CCtor(adt: Int, ci: Int, args: List[CExpr], ty: Ty)
+# read field `idx` of constructor `ci`; the target is known to be that ctor
+  | CField(target: CExpr, adt: Int, ci: Int, idx: Int, ty: Ty)
+# discriminant test: is `target` built by constructor `ci`?
+  | CIsCtor(target: CExpr, adt: Int, ci: Int)
+# allocate a closure over a lifted top-level body
+  | CClosure(fn_name: String, owner: String, captures: List[CExpr], ty: Ty)
+  | CTuple(elems: List[CExpr], ty: Ty)
+  | CTupleGet(target: CExpr, idx: Int, ty: Ty)
+# erasure made explicit: CBox moves a value into a type-variable slot,
+# CUnbox takes it back out. Lowering decides these once, at the point where
+# the declared type is known, instead of every backend recomputing
+# "is the declared slot a TyVar" at every argument.
+  | CBox(inner: CExpr, from: Ty)
+  | CUnbox(inner: CExpr, to: Ty)
+  | CBinary(op: CBinOp, left: CExpr, right: CExpr, ty: Ty)
+  | CUnary(op: CUnOp, operand: CExpr, ty: Ty)
+  | CIf(cond: CExpr, thn: CExpr, els: Option[CExpr], ty: Ty)
+  | CBlock(stmts: List[CStmt], tail: Option[CExpr], ty: Ty)
+# a literal list/map/set, still a primitive at this stage; D2/D3 turn these
+# into ordinary constructor calls and this node goes away
+  | CListLit(elems: List[CExpr], ty: Ty)
+# jumps. `CBreak`/`CContinue` name their loop so lowering can nest freely.
+  | CReturn(v: Option[CExpr])
+  | CBreak(loop_id: Int)
+  | CContinue(loop_id: Int)
+# a JVM-only escape hatch. Present in Core because the JVM backend must
+# still see it; the native backend rejects it, exactly as `use c` will be
+# rejected by the JVM backend. This is the FFI split, accepted by design.
+  | CForeign(payload: CForeignCall, ty: Ty)
+
+## Opaque to Core: the JVM backend reads it, the native backend refuses it.
+## Kept as a distinct node so that "which parts of the IR are portable" is a
+## question the type checker can answer rather than a convention.
+pub type CForeignCall = { kind: String, data: List[String], args: List[CExpr] }
+
+pub type CStmt =
+  | CSLet(sym: Int, ty: Ty, init: CExpr)
+  | CSAssign(sym: Int, value: CExpr)
+# evaluate for effect, discard the value -- see the header
+  | CSDiscard(e: CExpr)
+# An unconditional loop; exits only through CBreak/CReturn. `for` and
+# `while` both lower to this, with their test made explicit as a break.
+#
+# `step` runs at the end of every iteration AND before a CContinue jumps
+# back -- exactly C's third for-clause. It exists because without it a
+# lowered `for` would have to put its increment at the bottom of the body,
+# where `continue` skips it and the loop never terminates. Making the step
+# a field of the node is what keeps that from being each backend's problem.
+  | CSLoop(loop_id: Int, body: CExpr, step: Option[CExpr])
+  | CSIf(cond: CExpr, thn: CExpr, els: Option[CExpr])
+# reference counting. Unused until Phase 4; the JVM backend ignores both.
+  | CSDup(sym: Int)
+  | CSDrop(sym: Int)
+
+pub type CBinOp =
+  | CAdd
+  | CSub
+  | CMul
+  | CDiv
+  | CMod
+  | CEq
+  | CNe
+  | CLt
+  | CLe
+  | CGt
+  | CGe
+  | CAnd
+  | COr
+  | CBand
+  | CBor
+  | CBxor
+  | CShl
+  | CShr
+  | CUshr
+# string concatenation; distinct from CAdd because the backends implement it
+# with a runtime call rather than an instruction
+  | CConcat
+
+pub type CUnOp =
+  | CNeg
+  | CNot
+  | CBnot
+
+## How a parameter is passed, for Perceus. Phase 0 marks everything Owned
+## (the conservative choice: the callee is responsible for the reference);
+## Phase 4's analysis is what makes Borrowed appear.
+pub type CMode =
+  | COwned
+  | CBorrowed
+
+pub type CParam = { sym: Int, ty: Ty, mode: CMode }
+
+pub type CFun = {
+  name: String,
+  owner: String,
+  params: List[CParam],
+  # trait dictionaries, passed as hidden trailing parameters
+  dicts: List[CParam],
+  ret: Ty,
+  body: CExpr,
+  is_test: Bool,
+  # set for impl method bodies and trait defaults, which the backends mangle
+  impl_of: Option[(Int, Ty)],
+  default_of: Option[Int]
+}
+
+pub type CModule = { owner: String, fns: List[CFun] }
+
+# ---- accessors ----
+
+pub fn cex_ty(e: CExpr) -> Ty =
+  match e {
+    CInt(_) -> TyInt
+    CFloat(_) -> TyFloat
+    CBool(_) -> TyBool
+    CStr(_) -> TyString
+    CUnit -> TyUnit
+    CLocal(_, ty) -> ty
+    CFnRef(_, _, ty) -> ty
+    CCall(_, _, ty) -> ty
+    CIntrinsic(_, _, ty) -> ty
+    CCtor(_, _, _, ty) -> ty
+    CField(_, _, _, _, ty) -> ty
+    CIsCtor(_, _, _) -> TyBool
+    CClosure(_, _, _, ty) -> ty
+    CTuple(_, ty) -> ty
+    CTupleGet(_, _, ty) -> ty
+    CBox(_, _) -> TyError
+    CUnbox(_, to) -> to
+    CBinary(_, _, _, ty) -> ty
+    CUnary(_, _, ty) -> ty
+    CIf(_, _, _, ty) -> ty
+    CBlock(_, _, ty) -> ty
+    CListLit(_, ty) -> ty
+    CReturn(_) -> TyNever
+    CBreak(_) -> TyNever
+    CContinue(_) -> TyNever
+    CForeign(_, ty) -> ty
+  }
+
+## Whether evaluating this expression can transfer control away (return,
+## break, continue, or a panic that both backends implement as a jump).
+## Backends use it to decide whether code after it is reachable.
+pub fn diverges(e: CExpr) -> Bool =
+  match e {
+    CReturn(_) -> true
+    CBreak(_) -> true
+    CContinue(_) -> true
+    CBlock(_, tail, _) ->
+      match tail {
+        Some(t) -> diverges(t)
+        None -> false
+      }
+    CIf(_, thn, els, _) ->
+      match els {
+        Some(e2) -> diverges(thn) && diverges(e2)
+        None -> false
+      }
+    _ -> false
+  }

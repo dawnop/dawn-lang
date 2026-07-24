@@ -1,0 +1,751 @@
+# TAST -> Core IR (docs/native-backend-plan.md, Phase 0).
+#
+# This is where the sugar dies. Everything emit.dawn used to inline at code
+# generation time -- match decision trees, `for`/`while` shape, `?`/`!`,
+# string interpolation, and the boxing decision -- happens exactly once,
+# here, and both backends consume the result.
+#
+# Two rules govern this file:
+#
+#   1. No target may be named. If a decision depends on "the JVM does X",
+#      it belongs in a backend, not here. The one exception is CForeign,
+#      which exists precisely to quarantine the unportable part.
+#   2. Nothing implicit. A discarded value gets a CSDiscard; a boxed value
+#      gets a CBox. If a backend has to re-derive it, it is not lowered.
+
+use std/list
+use std/map
+use types.{
+  Ty, TyInt, TyFloat, TyBool, TyString, TyUnit, TyNever, TyError, TyVar,
+  TyAdt, TyList, TyTuple, Sym, Sig, OPTION_ID, RESULT_ID
+}
+use tast.{
+  TExpr, TStmt, TPat, TArm, TStrPart, TFun, TModule, TBinOp, TUnOp, TJavaCall,
+  tex_ty,
+  XInt, XFloat, XBool, XUnit, XStr, XLocal, XFnValue, XCallDyn, XCallBuiltin,
+  XCallFn, XApply, XJava, XLambda, XCtor, XConstRef, XCtorValue, XField,
+  XListLit, XTupleLit, XPropagate, XUnwrap, XIndex, XReturn, XBreak, XContinue,
+  XComptime, XUnsafePure, XBinary, XUnary, XIf, XMatch, XBlock, XError,
+  TSPText, TSPInterp,
+  BAdd, BSub, BMul, BDiv, BMod, BConcat, BEq, BNeq, BLt, BLe, BGt, BGe,
+  BAnd, BOr, BBand, BBor, BBxor, BShl, BShr, BUshr, UNeg, UNot, UBnot,
+  TPWild, TPBind, TPLit, TPTuple, TPList, TPCtor,
+  TSLet, TSLetPat, TSLocalFn, TSAssign, TSExpr, TSAssert, TSWhile, TSFor,
+  WitRef, WForward, WConcrete
+}
+use exhaustive.{LitV, LInt, LFloat, LBool, LStr}
+use core.{
+  CExpr, CStmt, CCallee, CFun, CModule, CParam, CMode, CBinOp, CUnOp,
+  CForeignCall,
+  CInt, CFloat, CBool, CStr, CUnit, CLocal, CFnRef, CCall, CIntrinsic,
+  CCtor, CField, CIsCtor, CClosure, CTuple, CTupleGet, CBox, CUnbox,
+  CBinary, CUnary, CIf, CBlock, CListLit, CReturn, CBreak, CContinue, CForeign,
+  CSLet, CSAssign, CSDiscard, CSLoop, CSIf, CSDup, CSDrop,
+  CDirect, CDynamic, CMethod,
+  CAdd, CSub, CMul, CDiv, CMod, CEq, CNe, CLt, CLe, CGt, CGe, CAnd, COr,
+  CBand, CBor, CBxor, CShl, CShr, CUshr, CConcat, CNeg, CNot, CBnot,
+  COwned, CBorrowed, cex_ty
+}
+
+# Prelude constructor indices, fixed by types.prelude_adts.
+const SOME_CI: Int = 0
+const NONE_CI: Int = 1
+const OK_CI: Int = 0
+const ERR_CI: Int = 1
+
+## Lowering state: a fresh-symbol counter (match scrutinees, `?` temporaries),
+## a loop-id counter, and the innermost enclosing loop. Symbol ids continue
+## above the checker's, so a lowered temporary can never shadow a source
+## local. `cur_loop` is -1 outside any loop; the checker has already rejected
+## a stray `break`, so lowering may treat that as impossible.
+pub type LSt = {
+  next_sym: Int,
+  next_loop: Int,
+  owner: String,
+  cur_loop: Int,
+  # the checker's symbol table for this module: the authority on what a
+  # pattern binding's type is, so lowering never has to consult the ADT
+  # table to type a field projection
+  syms: Map[Int, Sym]
+}
+
+fn fresh_sym(st: LSt) -> (LSt, Int) =
+  (LSt { ..st, next_sym: st.next_sym + 1 }, st.next_sym)
+
+fn fresh_loop(st: LSt) -> (LSt, Int) =
+  (LSt { ..st, next_loop: st.next_loop + 1 }, st.next_loop)
+
+# ---- boxing ----
+
+## The one erasure rule, materialised. A value heading into a slot whose
+## declared type is a type variable gets boxed; coming back out it gets
+## unboxed. emit.dawn recomputed this at every argument position; Core
+## decides it once, here.
+fn adapt_in(e: CExpr, actual: Ty, declared: Ty) -> CExpr =
+  match declared {
+    TyVar(_, _) ->
+      match actual {
+        TyVar(_, _) -> e
+        _ -> CBox(e, actual)
+      }
+    _ -> e
+  }
+
+fn adapt_out(e: CExpr, declared: Ty, actual: Ty) -> CExpr =
+  match declared {
+    TyVar(_, _) ->
+      match actual {
+        TyVar(_, _) -> e
+        _ -> CUnbox(e, actual)
+      }
+    _ -> e
+  }
+
+# ---- operators ----
+
+fn bin_op(op: TBinOp) -> CBinOp =
+  match op {
+    BAdd -> CAdd
+    BSub -> CSub
+    BMul -> CMul
+    BDiv -> CDiv
+    BMod -> CMod
+    BConcat -> CConcat
+    BEq -> CEq
+    BNeq -> CNe
+    BLt -> CLt
+    BLe -> CLe
+    BGt -> CGt
+    BGe -> CGe
+    BAnd -> CAnd
+    BOr -> COr
+    BBand -> CBand
+    BBor -> CBor
+    BBxor -> CBxor
+    BShl -> CShl
+    BShr -> CShr
+    BUshr -> CUshr
+  }
+
+fn un_op(op: TUnOp) -> CUnOp =
+  match op {
+    UNeg -> CNeg
+    UNot -> CNot
+    UBnot -> CBnot
+  }
+
+# ---- to-string, for interpolation ----
+
+## Interpolation is lowered here rather than left to the backends, which is
+## why the vocabulary is Core's own (`str_of_int`, ...) rather than any
+## backend's. Each backend maps these names to its runtime.
+fn to_str(e: CExpr, t: Ty) -> CExpr =
+  if t == TyString {
+    e
+  } else if t == TyInt {
+    CIntrinsic("str_of_int", [e], TyString)
+  } else if t == TyFloat {
+    CIntrinsic("str_of_float", [e], TyString)
+  } else if t == TyBool {
+    CIntrinsic("str_of_bool", [e], TyString)
+  } else if t == TyUnit {
+    CStr("()")
+  } else {
+    # everything else goes through Show, which is a runtime dispatch on the
+    # value -- so the argument crosses as an erased reference
+    CIntrinsic("show", [adapt_in(e, t, TyVar("T", 0))], TyString)
+  }
+
+# ---- patterns ----
+
+## A pattern compiles to (test, binds): a short-circuiting condition over
+## projections of `subj`, and the bindings to establish once it holds.
+##
+## The test must short-circuit: a nested projection is only valid after the
+## enclosing discriminant test passed, so `CAnd` carries a real obligation
+## on both backends, not just an optimisation.
+fn pat_test(st: LSt, subj: CExpr, p: TPat, t: Ty) -> (LSt, CExpr, List[CStmt]) =
+  match p {
+    TPWild -> (st, CBool(true), [])
+    TPBind(sym, _) -> (st, CBool(true), [CSLet(sym, sym_ty(st, sym, t), subj)])
+    TPLit(v) -> (st, lit_eq(subj, v, t), [])
+    TPTuple(elems) -> {
+      var st1 = st
+      var cond: CExpr = CBool(true)
+      var binds: List[CStmt] = []
+      var i = 0
+      let ets =
+        match t {
+          TyTuple(xs) -> xs
+          _ -> []
+        }
+      for sub in elems {
+        let et = if i < len(ets) { ets[i] } else { pat_ty(st1, sub) }
+        let (st2, c, bs) = pat_test(st1, CTupleGet(subj, i, et), sub, et)
+        st1 = st2
+        cond = and_of(cond, c)
+        binds = binds ++ bs
+        i = i + 1
+      }
+      (st1, cond, binds)
+    }
+    TPCtor(adt, ci, field_pats) -> {
+      var st1 = st
+      var cond: CExpr = CIsCtor(subj, adt, ci)
+      var binds: List[CStmt] = []
+      var i = 0
+      for fp in field_pats {
+        match fp {
+          Some(sub) -> {
+            let ft = pat_ty(st1, sub)
+            let proj = CField(subj, adt, ci, i, ft)
+            let (st2, c, bs) = pat_test(st1, proj, sub, ft)
+            st1 = st2
+            cond = and_of(cond, c)
+            binds = binds ++ bs
+          }
+          None -> ()
+        }
+        i = i + 1
+      }
+      (st1, cond, binds)
+    }
+    TPList(_, _, _, _) ->
+      # List patterns need the collection surface, which D2/D3 turn into
+      # ordinary constructors. Until then they stay a backend concern.
+      panic("lower: list patterns are not lowered yet (D2/D3)")
+  }
+
+## The type a projection should be read at. TPCtor does not carry field
+## types, but the checker already typed every binding, so the sub-pattern
+## tells us: a bind knows its symbol's type, a literal knows its own, and a
+## nested pattern is by construction a reference.
+##
+## Reaching for the ADT table here would work too, but it would put a table
+## in Core's lowering that Core itself does not need.
+fn pat_ty(st: LSt, p: TPat) -> Ty =
+  match p {
+    TPBind(sym, _) -> sym_ty(st, sym, TyError)
+    TPLit(v) ->
+      match v {
+        LInt(_) -> TyInt
+        LFloat(_) -> TyFloat
+        LBool(_) -> TyBool
+        LStr(_) -> TyString
+      }
+    TPCtor(adt, _, _) -> TyAdt(adt, [])
+    TPTuple(elems) -> TyTuple([])
+    TPList(_, _, _, _) -> TyError
+    TPWild -> TyError
+  }
+
+fn sym_ty(st: LSt, sym: Int, fallback: Ty) -> Ty =
+  match map.get(st.syms, sym) {
+    Some(s) -> s.ty
+    None -> fallback
+  }
+
+## Option/Result payload types, needed to rebuild an `Err` when `?`
+## propagates it.
+fn field_ty(t: Ty, adt: Int, ci: Int, idx: Int) -> Ty =
+  if adt == OPTION_ID && ci == SOME_CI {
+    match t {
+      TyAdt(_, args) -> if len(args) > 0 { args[0] } else { TyError }
+      _ -> TyError
+    }
+  } else if adt == RESULT_ID && ci == OK_CI {
+    match t {
+      TyAdt(_, args) -> if len(args) > 0 { args[0] } else { TyError }
+      _ -> TyError
+    }
+  } else if adt == RESULT_ID && ci == ERR_CI {
+    match t {
+      TyAdt(_, args) -> if len(args) > 1 { args[1] } else { TyError }
+      _ -> TyError
+    }
+  } else {
+    TyError
+  }
+
+fn and_of(a: CExpr, b: CExpr) -> CExpr =
+  match a {
+    CBool(true) -> b
+    _ ->
+      match b {
+        CBool(true) -> a
+        _ -> CBinary(CAnd, a, b, TyBool)
+      }
+  }
+
+fn lit_eq(subj: CExpr, v: LitV, t: Ty) -> CExpr =
+  match v {
+    LInt(n) -> CBinary(CEq, subj, CInt(n), TyBool)
+    LFloat(f) -> CBinary(CEq, subj, CFloat(f), TyBool)
+    LBool(b) -> CBinary(CEq, subj, CBool(b), TyBool)
+    LStr(s) -> CBinary(CEq, subj, CStr(s), TyBool)
+  }
+
+# ---- expressions ----
+
+pub fn lower_expr(st: LSt, e: TExpr) -> (LSt, CExpr) =
+  match e {
+    XInt(v, _, _) -> (st, CInt(v))
+    XFloat(v, _, _) -> (st, CFloat(v))
+    XBool(v, _, _) -> (st, CBool(v))
+    XUnit(_, _) -> (st, CUnit)
+    XLocal(sym, _, _, _, ty) -> (st, CLocal(sym, ty))
+    XUnsafePure(body, _, _, _) -> lower_expr(st, body)
+    XComptime(body, _, _, _) -> lower_expr(st, body)
+    XError(_, _) -> panic("lower: XError reached lowering")
+    XStr(parts, _, _) -> lower_str(st, parts)
+    XUnary(op, operand, _, _, ty) -> {
+      let (st1, v) = lower_expr(st, operand)
+      (st1, CUnary(un_op(op), v, ty))
+    }
+    XBinary(op, l, r, _, _, _, _, _, ty) -> {
+      let (st1, lv) = lower_expr(st, l)
+      let (st2, rv) = lower_expr(st1, r)
+      (st2, CBinary(bin_op(op), lv, rv, ty))
+    }
+    XIf(cond, thn, els, _, _, ty) -> {
+      let (st1, c) = lower_expr(st, cond)
+      let (st2, t) = lower_expr(st1, thn)
+      match els {
+        Some(ee) -> {
+          let (st3, f) = lower_expr(st2, ee)
+          (st3, CIf(c, t, Some(f), ty))
+        }
+        None -> (st2, CIf(c, t, None, ty))
+      }
+    }
+    XBlock(stmts, tail, _, _, ty) -> {
+      let (st1, ss) = lower_stmts(st, stmts)
+      match tail {
+        Some(t) -> {
+          let (st2, tv) = lower_expr(st1, t)
+          (st2, CBlock(ss, Some(tv), ty))
+        }
+        None -> (st1, CBlock(ss, None, ty))
+      }
+    }
+    XReturn(v, _, _) ->
+      match v {
+        Some(inner) -> {
+          let (st1, cv) = lower_expr(st, inner)
+          (st1, CReturn(Some(cv)))
+        }
+        None -> (st, CReturn(None))
+      }
+    XBreak(_, _) -> (st, CBreak(st.cur_loop))
+    XContinue(_, _) -> (st, CContinue(st.cur_loop))
+    XMatch(scrut, arms, _, _, ty) -> lower_match(st, scrut, arms, ty)
+    XPropagate(operand, _, _, ty) -> lower_propagate(st, operand, ty)
+    XUnwrap(operand, msg, _, _, ty) -> lower_unwrap(st, operand, msg, ty)
+    XCtor(adt, ci, written, slots, spread, _, _, ty) ->
+      lower_ctor(st, adt, ci, written, slots, spread, ty)
+    XField(target, idx, _, _, ty) -> {
+      let (st1, tv) = lower_expr(st, target)
+      # a record-style read: the ADT has one constructor, so the
+      # discriminant is statically known
+      match tex_ty(target) {
+        TyAdt(adt, _) -> (st1, CField(tv, adt, 0, idx, ty))
+        _ -> panic("lower: field read on a non-ADT")
+      }
+    }
+    XTupleLit(elems, _, _, ty) -> {
+      let (st1, vs) = lower_all(st, elems)
+      (st1, CTuple(vs, ty))
+    }
+    XListLit(elems, _, _, ty) -> {
+      # elements cross into an erased container
+      var st1 = st
+      var vs: List[CExpr] = []
+      for el in elems {
+        let (st2, v) = lower_expr(st1, el)
+        st1 = st2
+        vs = vs ++ [adapt_in(v, tex_ty(el), TyVar("E", 0))]
+      }
+      (st1, CListLit(vs, ty))
+    }
+    XCallBuiltin(name, args, wits, _, _, ty) -> {
+      let (st1, vs) = lower_all(st, args)
+      if len(wits) > 0 {
+        panic("lower: witness-carrying builtin not lowered yet: " ++ name)
+      }
+      (st1, CIntrinsic(name, vs, ty))
+    }
+    XCallFn(owner, name, args, wits, trait_id, _, _, ty) -> {
+      let (st1, vs) = lower_all(st, args)
+      if len(wits) > 0 {
+        panic("lower: trait witnesses are not lowered yet: " ++ name)
+      }
+      match trait_id {
+        Some(_) -> panic("lower: trait dispatch is not lowered yet: " ++ name)
+        None -> ()
+      }
+      let o = match owner { Some(x) -> x None -> st1.owner }
+      (st1, CCall(CDirect(o, name), vs, ty))
+    }
+    XCallDyn(sym, _, args, _, _, ty) -> {
+      let (st1, vs) = lower_all(st, args)
+      (st1, CCall(CDynamic(CLocal(sym, TyError)), vs, ty))
+    }
+    XApply(target, args, _, _, ty) -> {
+      let (st1, tv) = lower_expr(st, target)
+      let (st2, vs) = lower_all(st1, args)
+      (st2, CCall(CDynamic(tv), vs, ty))
+    }
+    XFnValue(owner, name, _, ty, _, _) -> {
+      let o = match owner { Some(x) -> x None -> st.owner }
+      (st, CFnRef(o, name, ty))
+    }
+    XJava(call, _, _, ty) -> {
+      let (st1, vs) = lower_all(st, call.args)
+      (st1, CForeign(
+        CForeignCall {
+          kind: "java",
+          data: [call.fqcn, call.decl_cls, call.method, call.ret_cls],
+          args: vs
+        }, ty))
+    }
+    _ -> panic("lower: expression not lowered yet: " ++ node_name(e))
+  }
+
+fn lower_all(st: LSt, es: List[TExpr]) -> (LSt, List[CExpr]) = {
+  var st1 = st
+  var vs: List[CExpr] = []
+  for e in es {
+    let (st2, v) = lower_expr(st1, e)
+    st1 = st2
+    vs = vs ++ [v]
+  }
+  (st1, vs)
+}
+
+fn lower_str(st: LSt, parts: List[TStrPart]) -> (LSt, CExpr) = {
+  var st1 = st
+  var acc: Option[CExpr] = None
+  for p in parts {
+    let piece =
+      match p {
+        TSPText(v) -> CStr(v)
+        TSPInterp(ie) -> {
+          let (st2, v) = lower_expr(st1, ie)
+          st1 = st2
+          to_str(v, tex_ty(ie))
+        }
+      }
+    acc =
+      match acc {
+        None -> Some(piece)
+        Some(a) -> Some(CBinary(CConcat, a, piece, TyString))
+      }
+  }
+  match acc {
+    Some(a) -> (st1, a)
+    None -> (st1, CStr(""))
+  }
+}
+
+fn lower_ctor(
+  st: LSt,
+  adt: Int,
+  ci: Int,
+  written: List[TExpr],
+  slots: List[Option[Int]],
+  spread: Option[TExpr],
+  ty: Ty
+) -> (LSt, CExpr) = {
+  match spread {
+    Some(_) -> panic("lower: constructor spread is not lowered yet")
+    None -> ()
+  }
+  let (st1, ws) = lower_all(st, written)
+  # slots maps field index -> written-arg index, so the constructor's
+  # arguments arrive in field order and backends need no reordering
+  var args: List[CExpr] = []
+  for s in slots {
+    match s {
+      Some(i) -> { args = args ++ [ws[i]] }
+      None -> panic("lower: constructor field without an argument")
+    }
+  }
+  (st1, CCtor(adt, ci, args, ty))
+}
+
+## `match` becomes a once-loop: each arm is a guarded test that assigns the
+## result and breaks. The loop exists so a failed guard falls through to the
+## next arm without duplicating its test, which is exactly what the JVM
+## emitter achieved with a `next_arm` label.
+fn lower_match(st: LSt, scrut: TExpr, arms: List[TArm], ty: Ty) -> (LSt, CExpr) = {
+  let sty = tex_ty(scrut)
+  let (st1, sv) = lower_expr(st, scrut)
+  let (st2, ssym) = fresh_sym(st1)
+  let (st3, rsym) = fresh_sym(st2)
+  let (st4, lid) = fresh_loop(st3)
+  let subj = CLocal(ssym, sty)
+  let produces = ty != TyUnit && ty != TyNever
+
+  var st5 = st4
+  var body: List[CStmt] = []
+  for arm in arms {
+    # or-patterns duplicate the arm body, one branch per alternative; Dawn
+    # binds nothing in them beyond what each alternative establishes
+    for p in arm.pats {
+      let (st6, cond, binds) = pat_test(st5, subj, p, sty)
+      st5 = st6
+      let (st7, armb) = lower_expr(st5, arm.body)
+      st5 = st7
+      let taken =
+        if produces {
+          CBlock([CSAssign(rsym, armb)], Some(CBreak(lid)), TyNever)
+        } else {
+          CBlock([CSDiscard(armb)], Some(CBreak(lid)), TyNever)
+        }
+      let inner =
+        match arm.guard {
+          Some(g) -> {
+            let (st8, gv) = lower_expr(st5, g)
+            st5 = st8
+            CBlock(binds ++ [CSIf(gv, taken, None)], None, TyUnit)
+          }
+          None -> CBlock(binds, Some(taken), TyNever)
+        }
+      body = body ++ [CSIf(cond, inner, None)]
+    }
+  }
+  body = body ++ [CSDiscard(CIntrinsic("panic", [CStr("unreachable match")], TyNever))]
+
+  var stmts: List[CStmt] = [CSLet(ssym, sty, sv)]
+  if produces {
+    stmts = stmts ++ [CSLet(rsym, ty, zero_of(ty))]
+  }
+  # Note that arm bodies are lowered WITHOUT cur_loop set to `lid`: the
+  # once-loop is an implementation detail, so a user `break` inside an arm
+  # must still refer to the enclosing source loop. Both breaks therefore
+  # coexist, which is why CBreak names its loop instead of meaning
+  # "innermost" -- a backend has to be able to leave a non-innermost loop.
+  stmts = stmts ++ [CSLoop(lid, CBlock(body, None, TyUnit), None)]
+  let tail: Option[CExpr] = if produces { Some(CLocal(rsym, ty)) } else { None }
+  (st5, CBlock(stmts, tail, ty))
+}
+
+## A placeholder initialiser for the result slot of a match or if. Every
+## path assigns it before use, but both targets want a definite
+## initialisation at the declaration.
+fn zero_of(t: Ty) -> CExpr =
+  if t == TyInt {
+    CInt(0)
+  } else if t == TyFloat {
+    CFloat(0.0)
+  } else if t == TyBool {
+    CBool(false)
+  } else if t == TyString {
+    CStr("")
+  } else {
+    CIntrinsic("null_ref", [], t)
+  }
+
+## `e?` -- return early on None/Err, otherwise take the payload.
+fn lower_propagate(st: LSt, operand: TExpr, ty: Ty) -> (LSt, CExpr) = {
+  let ot = tex_ty(operand)
+  let (st1, ov) = lower_expr(st, operand)
+  let (st2, sym) = fresh_sym(st1)
+  let subj = CLocal(sym, ot)
+  match ot {
+    TyAdt(adt, _) ->
+      if adt == OPTION_ID {
+        (st2, CBlock(
+          [CSLet(sym, ot, ov),
+            CSIf(CIsCtor(subj, OPTION_ID, NONE_CI),
+              CReturn(Some(CCtor(OPTION_ID, NONE_CI, [], ot))), None)],
+          Some(CField(subj, OPTION_ID, SOME_CI, 0, ty)), ty))
+      } else if adt == RESULT_ID {
+        let err_ty = field_ty(ot, RESULT_ID, ERR_CI, 0)
+        (st2, CBlock(
+          [CSLet(sym, ot, ov),
+            CSIf(CIsCtor(subj, RESULT_ID, ERR_CI),
+              CReturn(Some(CCtor(RESULT_ID, ERR_CI,
+                [CField(subj, RESULT_ID, ERR_CI, 0, err_ty)], ot))), None)],
+          Some(CField(subj, RESULT_ID, OK_CI, 0, ty)), ty))
+      } else {
+        panic("lower: `?` on a non-Option/Result type")
+      }
+    _ -> panic("lower: `?` on a non-ADT")
+  }
+}
+
+## `e!` -- take the payload or panic with the recorded message.
+fn lower_unwrap(st: LSt, operand: TExpr, msg: String, ty: Ty) -> (LSt, CExpr) = {
+  let ot = tex_ty(operand)
+  let (st1, ov) = lower_expr(st, operand)
+  let (st2, sym) = fresh_sym(st1)
+  let subj = CLocal(sym, ot)
+  match ot {
+    TyAdt(adt, _) ->
+      if adt == OPTION_ID {
+        (st2, CBlock(
+          [CSLet(sym, ot, ov),
+            CSIf(CIsCtor(subj, OPTION_ID, NONE_CI),
+              CIntrinsic("panic", [CStr(msg)], TyNever), None)],
+          Some(CField(subj, OPTION_ID, SOME_CI, 0, ty)), ty))
+      } else if adt == RESULT_ID {
+        (st2, CBlock(
+          [CSLet(sym, ot, ov),
+            CSIf(CIsCtor(subj, RESULT_ID, ERR_CI),
+              CIntrinsic("panic", [CStr(msg)], TyNever), None)],
+          Some(CField(subj, RESULT_ID, OK_CI, 0, ty)), ty))
+      } else {
+        panic("lower: `!` on a non-Option/Result type")
+      }
+    _ -> panic("lower: `!` on a non-ADT")
+  }
+}
+
+# ---- statements ----
+
+fn lower_stmts(st: LSt, ss: List[TStmt]) -> (LSt, List[CStmt]) = {
+  var st1 = st
+  var out: List[CStmt] = []
+  for s in ss {
+    let (st2, cs) = lower_stmt(st1, s)
+    st1 = st2
+    out = out ++ cs
+  }
+  (st1, out)
+}
+
+fn lower_stmt(st: LSt, s: TStmt) -> (LSt, List[CStmt]) =
+  match s {
+    TSLet(sym, _, init, _, _) -> {
+      let (st1, v) = lower_expr(st, init)
+      match sym {
+        Some(sy) -> (st1, [CSLet(sy, tex_ty(init), v)])
+        # `let _ = e`: the value goes, the effect stays -- and Core says so
+        None -> (st1, [CSDiscard(v)])
+      }
+    }
+    TSAssign(sym, _, value, _, _) -> {
+      let (st1, v) = lower_expr(st, value)
+      (st1, [CSAssign(sym, v)])
+    }
+    TSExpr(e, _, _) -> {
+      let (st1, v) = lower_expr(st, e)
+      (st1, [CSDiscard(v)])
+    }
+    TSAssert(cond, src, _, _) -> {
+      let (st1, c) = lower_expr(st, cond)
+      let text = match src { Some(t) -> t None -> "assertion failed" }
+      (st1, [CSIf(CUnary(CNot, c, TyBool),
+        CIntrinsic("panic", [CStr("assertion failed: " ++ text)], TyNever), None)])
+    }
+    TSWhile(cond, body, _, _, _) -> {
+      let (st1, lid) = fresh_loop(st)
+      # the condition is evaluated outside the loop's own scope but inside
+      # it at runtime, so it is lowered with cur_loop already set: a
+      # `break` in a condition is legal and belongs to this loop
+      let inner_st = LSt { ..st1, cur_loop: lid }
+      let (st2, c) = lower_expr(inner_st, cond)
+      let (st3, b) = lower_expr(st2, body)
+      # the test becomes an explicit break, so the loop node itself is
+      # unconditional and both backends emit the same shape
+      let inner = CBlock(
+        [CSIf(CUnary(CNot, c, TyBool), CBreak(lid), None), CSDiscard(b)],
+        None, TyUnit)
+      (LSt { ..st3, cur_loop: st.cur_loop }, [CSLoop(lid, inner, None)])
+    }
+    TSFor(sym, _, from, to, body, _, _, _) -> {
+      match to {
+        Some(hi) -> {
+          let (st1, lid) = fresh_loop(st)
+          # bounds are evaluated once, before the loop, so they are lowered
+          # in the OUTER loop context
+          let (st2, lo_v) = lower_expr(st1, from)
+          let (st3, hi_v) = lower_expr(st2, hi)
+          let (st4, bsym) = fresh_sym(st3)
+          let (st5, b) = lower_expr(LSt { ..st4, cur_loop: lid }, body)
+          let iv = CLocal(sym, TyInt)
+          # induction is explicit: init, test, body, step. The step lives on
+          # the loop node rather than at the end of the body so that
+          # `continue` runs it -- see core.CSLoop.
+          let inner = CBlock(
+            [CSIf(CUnary(CNot, CBinary(CLt, iv, CLocal(bsym, TyInt), TyBool), TyBool),
+              CBreak(lid), None),
+              CSDiscard(b)],
+            None, TyUnit)
+          let step = CSAssign(sym, CBinary(CAdd, iv, CInt(1), TyInt))
+          (LSt { ..st5, cur_loop: st.cur_loop }, [
+            CSLet(bsym, TyInt, hi_v),
+            CSLet(sym, TyInt, lo_v),
+            CSLoop(lid, inner, Some(CBlock([step], None, TyUnit)))
+          ])
+        }
+        None -> panic("lower: for-in over a collection is not lowered yet (D2/D3 Iter)")
+      }
+    }
+    TSLetPat(_, _, _, _) -> panic("lower: destructuring let is not lowered yet")
+    TSLocalFn(_, _, _, _, _, _, _, _) -> panic("lower: local functions are not lowered yet")
+  }
+
+# ---- functions and modules ----
+
+## `continue` inside a lowered `for` must run the step before jumping, but
+## Core's CContinue jumps to the loop head. The step is therefore emitted at
+## the top of the next iteration instead of the bottom of this one for
+## `for`; `while` has no step and is unaffected.
+##
+## Phase 0 marks every parameter COwned: the conservative choice, and the
+## one Perceus starts from.
+fn lower_fn(st: LSt, owner: String, f: TFun) -> (LSt, CFun) = {
+  var params: List[CParam] = []
+  var i = 0
+  for pt in f.sig.param_tys {
+    params = params ++ [CParam { sym: f.param_syms[i], ty: pt, mode: COwned }]
+    i = i + 1
+  }
+  var dicts: List[CParam] = []
+  for d in f.dict_syms {
+    dicts = dicts ++ [CParam { sym: d, ty: TyError, mode: COwned }]
+  }
+  let (st1, body) = lower_expr(st, f.body)
+  (st1, CFun {
+    name: f.name,
+    owner: owner,
+    params: params,
+    dicts: dicts,
+    ret: f.sig.ret,
+    body: body,
+    is_test: f.is_test,
+    impl_of: f.impl_of,
+    default_of: f.default_of
+  })
+}
+
+pub fn lower_module(owner: String, tm: TModule) -> CModule = {
+  # temporaries continue above every checker-minted id in this module
+  var top = 0
+  for k in map.keys(tm.syms) {
+    if k > top { top = k }
+  }
+  var st = LSt {
+    next_sym: top + 1, next_loop: 0, owner: owner, cur_loop: -1, syms: tm.syms
+  }
+  var fns: List[CFun] = []
+  for f in tm.fns {
+    let (st1, cf) = lower_fn(st, owner, f)
+    st = st1
+    fns = fns ++ [cf]
+  }
+  CModule { owner: owner, fns: fns }
+}
+
+# ---- diagnostics ----
+
+fn node_name(e: TExpr) -> String =
+  match e {
+    XLambda(_, _, _, _, _, _, _) -> "XLambda"
+    XCtorValue(_, _, _, _, _) -> "XCtorValue"
+    XConstRef(_, _, _, _) -> "XConstRef"
+    XIndex(_, _, _, _, _, _) -> "XIndex"
+    _ -> "an unhandled node"
+  }

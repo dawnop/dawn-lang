@@ -29,6 +29,35 @@ typedef struct {
 #define dawn_str_lit(s, n) ((dawn_str){(s), (int64_t)(n)})
 #define dawn_str_empty ((dawn_str){"", 0})
 
+/* One erased slot. Dawn boxes at type-variable positions and keeps concrete
+ * positions native (llvm-backend-research.md 5.3); this union is what a
+ * boxed slot looks like, and what an ADT field is stored in. Uniform for
+ * now -- tagged pointers for small ints are a later optimisation. */
+typedef union dawn_slot {
+  int64_t i;
+  double f;
+  bool b;
+  void *p;
+  dawn_str s;
+} dawn_slot;
+
+/* Every ADT value, tuple included. `tag` is the constructor index, which is
+ * exactly what CIsCtor tests -- the JVM backend uses class identity instead,
+ * and that difference is confined to the two emitters. */
+typedef struct {
+  int32_t tag;
+  int32_t nfields;
+  dawn_slot fields[];
+} dawn_adt;
+
+dawn_adt *dawn_adt_new(int32_t tag, int32_t nfields);
+
+/* boxing: a type-variable slot holds a pointer to one of these */
+dawn_slot *dawn_box_int(int64_t v);
+dawn_slot *dawn_box_float(double v);
+dawn_slot *dawn_box_bool(bool v);
+dawn_slot *dawn_box_str(dawn_str v);
+
 void dawn_rt_init(int argc, char **argv);
 
 /* stdout */

@@ -1,0 +1,206 @@
+# The second corpus: everything Core IR lowers away. Where hello.dawn proves
+# the toolchain, this proves the lowering -- match decision trees, ADT
+# discriminants and field reads, `?`, `!`, tuples, and guards.
+#
+# If Core carries these correctly, neither backend has to compile `match`.
+use std/io
+
+pub type Shape =
+  | Circle(r: Int)
+  | Rect(w: Int, h: Int)
+  | Point
+  | Tri(a: Int, b: Int, c: Int)
+
+pub type Tree =
+  | Leaf
+  | Node(left: Tree, v: Int, right: Tree)
+
+fn area2(s: Shape) -> Int =
+  match s {
+    Circle(r) -> 6 * r * r
+    Rect(w, h) -> 2 * w * h
+    Point -> 0
+    Tri(a, b, _c) -> a * b
+  }
+
+## Guards, and a wildcard that must be reached only after they fail. A failed
+## guard falls through to the next arm -- the reason Core lowers `match` to a
+## once-loop rather than a plain if/else chain.
+fn classify(n: Int) -> String =
+  match n {
+    0 -> "zero"
+    1 -> "one"
+    x if x < 0 -> "negative"
+    x if x % 2 == 0 -> "even"
+    _ -> "odd"
+  }
+
+## Nested patterns: the inner test is only valid once the outer discriminant
+## has passed, so the conjunction has to short-circuit.
+fn describe(s: Shape) -> String =
+  match s {
+    Rect(w, h) if w == h -> "square ${w}"
+    Rect(w, h) -> "rect ${w}x${h}"
+    Circle(0) -> "degenerate circle"
+    Circle(r) -> "circle ${r}"
+    Point -> "point"
+    Tri(a, b, c) if a == b && b == c -> "equilateral ${a}"
+    Tri(_, _, _) -> "triangle"
+  }
+
+fn insert(t: Tree, x: Int) -> Tree =
+  match t {
+    Leaf -> Node(Leaf, x, Leaf)
+    Node(l, v, r) ->
+      if x < v {
+        Node(insert(l, x), v, r)
+      } else if x > v {
+        Node(l, v, insert(r, x))
+      } else {
+        t
+      }
+  }
+
+fn sum_tree(t: Tree) -> Int =
+  match t {
+    Leaf -> 0
+    Node(l, v, r) -> sum_tree(l) + v + sum_tree(r)
+  }
+
+fn depth(t: Tree) -> Int =
+  match t {
+    Leaf -> 0
+    Node(l, _v, r) -> {
+      let dl = depth(l)
+      let dr = depth(r)
+      1 + (if dl > dr { dl } else { dr })
+    }
+  }
+
+## Option and Result, and the `?` that lowers into an explicit constructor
+## test plus an early return.
+fn safe_div(a: Int, b: Int) -> Option[Int] =
+  if b == 0 {
+    None
+  } else {
+    Some(a / b)
+  }
+
+fn chain(a: Int, b: Int, c: Int) -> Option[Int] = {
+  let x = safe_div(a, b)?
+  let y = safe_div(x, c)?
+  Some(y + 1)
+}
+
+fn checked(n: Int) -> Result[Int, String] =
+  if n < 0 {
+    Err("negative: ${n}")
+  } else {
+    Ok(n * 2)
+  }
+
+fn both(a: Int, b: Int) -> Result[Int, String] = {
+  let x = checked(a)?
+  let y = checked(b)?
+  Ok(x + y)
+}
+
+fn show_result(r: Result[Int, String]) -> String =
+  match r {
+    Ok(v) -> "ok ${v}"
+    Err(e) -> "err ${e}"
+  }
+
+fn show_option(o: Option[Int]) -> String =
+  match o {
+    Some(v) -> "some ${v}"
+    None -> "none"
+  }
+
+## Tuples, including a tuple pattern in a match.
+fn swap_sum(p: (Int, Int)) -> String =
+  match p {
+    (0, b) -> "left zero, right ${b}"
+    (a, 0) -> "right zero, left ${a}"
+    (a, b) -> "sum ${a + b}"
+  }
+
+## A `break` inside a match arm must leave the enclosing loop, not the
+## once-loop that `match` lowers to. This is why CBreak names its loop.
+fn first_shape_over(limit: Int) -> Int = {
+  var found = 0 - 1
+  var i = 0
+  while i < 10 {
+    let s =
+      if i % 3 == 0 {
+        Circle(i)
+      } else if i % 3 == 1 {
+        Rect(i, i + 1)
+      } else {
+        Point
+      }
+    match s {
+      Point -> ()
+      _ ->
+        if area2(s) > limit {
+          found = i
+          break
+        }
+    }
+    i = i + 1
+  }
+  found
+}
+
+pub fn main() -> Unit !io = {
+  println("-- shapes --")
+  println("area2(Circle 3) = ${area2(Circle(3))}")
+  println("area2(Rect 4 5) = ${area2(Rect(4, 5))}")
+  println("area2(Point)    = ${area2(Point)}")
+  println("area2(Tri 6 7 8)= ${area2(Tri(6, 7, 8))}")
+
+  println("-- describe --")
+  println(describe(Rect(4, 4)))
+  println(describe(Rect(4, 9)))
+  println(describe(Circle(0)))
+  println(describe(Circle(7)))
+  println(describe(Point))
+  println(describe(Tri(5, 5, 5)))
+  println(describe(Tri(3, 4, 5)))
+
+  println("-- guards --")
+  var i = 0 - 3
+  var acc = ""
+  while i < 6 {
+    acc = acc ++ classify(i) ++ " "
+    i = i + 1
+  }
+  println(acc)
+
+  println("-- tree --")
+  var t: Tree = Leaf
+  for k in 0..10 {
+    t = insert(t, (k * 7) % 10)
+  }
+  println("sum   = ${sum_tree(t)}")
+  println("depth = ${depth(t)}")
+
+  println("-- option / result --")
+  println(show_option(chain(100, 5, 2)))
+  println(show_option(chain(100, 0, 2)))
+  println(show_option(chain(100, 5, 0)))
+  println(show_result(both(3, 4)))
+  println(show_result(both(3, 0 - 4)))
+  println(show_result(both(0 - 3, 4)))
+
+  println("-- unwrap --")
+  println("safe_div(9,3)! = ${safe_div(9, 3)!}")
+
+  println("-- tuples --")
+  println(swap_sum((0, 5)))
+  println(swap_sum((5, 0)))
+  println(swap_sum((3, 4)))
+
+  println("-- break out of a match arm --")
+  println("first = ${first_shape_over(20)}")
+}

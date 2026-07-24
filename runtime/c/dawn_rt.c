@@ -26,6 +26,42 @@ static void *dawn_alloc(size_t n) {
   return p;
 }
 
+dawn_adt *dawn_adt_new(int32_t tag, int32_t nfields) {
+  dawn_adt *a =
+      (dawn_adt *)dawn_alloc(sizeof(dawn_adt) + (size_t)nfields * sizeof(dawn_slot));
+  a->tag = tag;
+  a->nfields = nfields;
+  return a;
+}
+
+static dawn_slot *dawn_box(void) {
+  return (dawn_slot *)dawn_alloc(sizeof(dawn_slot));
+}
+
+dawn_slot *dawn_box_int(int64_t v) {
+  dawn_slot *s = dawn_box();
+  s->i = v;
+  return s;
+}
+
+dawn_slot *dawn_box_float(double v) {
+  dawn_slot *s = dawn_box();
+  s->f = v;
+  return s;
+}
+
+dawn_slot *dawn_box_bool(bool v) {
+  dawn_slot *s = dawn_box();
+  s->b = v;
+  return s;
+}
+
+dawn_slot *dawn_box_str(dawn_str v) {
+  dawn_slot *s = dawn_box();
+  s->s = v;
+  return s;
+}
+
 dawn_unit dawn_print(dawn_str s) {
   if (s.len > 0) {
     fwrite(s.p, 1, (size_t)s.len, stdout);

@@ -1,40 +1,42 @@
-# The Phase -1 seam spike from docs/native-backend-plan.md: a minimal
-# TAST -> C emitter for the trivial subset (top-level functions, scalars,
-# strings, arithmetic, control flow). Everything else panics with the node
-# name, so the covered surface is exactly what the tests exercise.
+# Core IR -> C. The native backend's emitter, in its first form.
 #
-# This is deliberately NOT the eventual emit_c. That one consumes Core IR
-# (Phase 0) and handles ADTs, closures, dictionaries and collections. The
-# point of this file is to prove three things and then get out of the way:
+# It started as the Phase -1 seam spike (TAST straight to C, trivial subset).
+# It now consumes Core IR instead, which is what makes it useful twice over:
+# it is the native backend, and it is the second consumer that keeps Core's
+# node set from silently becoming a description of the JVM backend.
 #
-#   1. the codegen seam really is "TModule + tables in, target text out";
-#   2. Dawn's expression orientation lowers onto C's statement orientation
-#      by the usual emit-into-a-temp trick, with no surprises;
-#   3. the toolchain path (emit .c -> cc -> run) works end to end.
+# Everything structural is already gone by the time Core arrives -- `match`
+# is discriminant tests and binds, `for` is a loop with an explicit step,
+# `?` is a test against a constructor, interpolation is concat calls. What
+# is left here is genuinely target-specific: C syntax, the tagged-union
+# layout, and how a value with no name gets one.
 #
-# Its second job is to be the design probe for Core IR: every node handled
-# here is one whose C shape is now known rather than guessed.
+# Not yet handled (each panics with its node): closures, trait dictionaries,
+# collections, and CForeign -- which the native backend refuses on purpose,
+# since `use java` is exactly the part that does not port.
 
 use std/str
 use std/list
 use std/map
 use types.{
-  Ty, TyInt, TyFloat, TyBool, TyString, TyUnit, TyNever, TyError, Sym, Sig
+  Ty, TyInt, TyFloat, TyBool, TyString, TyUnit, TyNever, TyError, TyVar,
+  TyAdt, TyTuple
 }
-use tast.{
-  TExpr, TStmt, TStrPart, TFun, TModule, TBinOp, TUnOp, tex_ty,
-  XInt, XFloat, XBool, XUnit, XStr, XLocal, XCallBuiltin, XCallFn,
-  XReturn, XBreak, XContinue, XBinary, XUnary, XIf, XBlock, XUnsafePure,
-  TSPText, TSPInterp,
-  BAdd, BSub, BMul, BDiv, BMod, BConcat, BEq, BNeq, BLt, BLe, BGt, BGe,
-  BAnd, BOr, BBand, BBor, BBxor, BShl, BShr, BUshr, UNeg, UNot, UBnot,
-  TSLet, TSAssign, TSExpr, TSWhile, TSFor
+use core.{
+  diverges,
+  CExpr, CStmt, CCallee, CFun, CModule, CParam,
+  CInt, CFloat, CBool, CStr, CUnit, CLocal, CFnRef, CCall, CIntrinsic,
+  CCtor, CField, CIsCtor, CClosure, CTuple, CTupleGet, CBox, CUnbox,
+  CBinary, CUnary, CIf, CBlock, CListLit, CReturn, CBreak, CContinue, CForeign,
+  CSLet, CSAssign, CSDiscard, CSLoop, CSIf, CSDup, CSDrop,
+  CDirect, CDynamic, CMethod,
+  CBinOp, CUnOp,
+  CAdd, CSub, CMul, CDiv, CMod, CEq, CNe, CLt, CLe, CGt, CGe, CAnd, COr,
+  CBand, CBor, CBxor, CShl, CShr, CUshr, CConcat, CNeg, CNot, CBnot,
+  cex_ty
 }
 
-## Emitter state, threaded like the checker's Cx and emit.dawn's Gen.
-## `out` is the C text built so far, `tmp` the temporary counter, `ind`
-## the current indent, `syms` the module's symbol table (local types).
-pub type CSt = { out: String, tmp: Int, ind: Int, syms: Map[Int, Sym] }
+pub type CSt = { out: String, tmp: Int, ind: Int }
 
 fn pad(n: Int) -> String = {
   var s = ""
@@ -56,21 +58,15 @@ fn push(st: CSt) -> CSt = CSt { ..st, ind: st.ind + 1 }
 
 fn pop(st: CSt) -> CSt = CSt { ..st, ind: st.ind - 1 }
 
-## Drop a value while keeping its effects. Every place that discards an
-## emitted expression must go through here: a C expression that is never
-## written down is never evaluated, so silently dropping the string drops
-## the call too. (This bit the spike on the first run -- a trailing
-## `println` in a Unit-returning function vanished. It is an argument for
-## making the statement/expression boundary explicit in Core IR rather
-## than leaving each consumer to remember.)
+## Drop a value while keeping its effects. Core marks these explicitly with
+## CSDiscard, which is the fix for the bug the Phase -1 spike hit: a C
+## expression that is never written down is never evaluated, so dropping the
+## string dropped the call too.
 fn discard(st: CSt, v: String) -> CSt =
   if v == "DAWN_UNIT" { st } else { line(st, "(void)(" ++ v ++ ");") }
 
 # ---- names ----
 
-## C identifiers admit only [A-Za-z0-9_], so module paths and any other
-## punctuation fold to underscores. Distinct Dawn names can collide after
-## folding; the spike accepts that, the real emitter will need a table.
 fn sanitize(s: String) -> String = {
   var out = ""
   for cp in code_points(s) {
@@ -89,12 +85,18 @@ fn sanitize(s: String) -> String = {
 fn mangle(owner: String, name: String) -> String =
   "dawn_" ++ sanitize(owner) ++ "__" ++ sanitize(name)
 
-## Locals are named by symbol id, not source name: ids are already unique
-## per module and cannot collide with C keywords.
 fn local_name(sym: Int) -> String = "v" ++ to_string(sym)
+
+fn loop_end(id: Int) -> String = "L" ++ to_string(id) ++ "_end"
+
+fn loop_step(id: Int) -> String = "L" ++ to_string(id) ++ "_step"
 
 # ---- types ----
 
+## Erased slots (type variables) and every reference type share one C
+## representation: a pointer. That is the uniform-boxing decision from
+## llvm-backend-research.md 5.3, and it is why a type variable needs no
+## special case here.
 pub fn c_type(t: Ty) -> String =
   if t == TyInt {
     "int64_t"
@@ -104,19 +106,17 @@ pub fn c_type(t: Ty) -> String =
     "bool"
   } else if t == TyString {
     "dawn_str"
-  } else if t == TyUnit {
+  } else if t == TyUnit || t == TyNever {
     "dawn_unit"
-  } else if t == TyNever {
-    # a function that only panics still needs a return type in C
-    "dawn_unit"
-  } else if t == TyError {
-    panic("emitc: XError reached codegen")
   } else {
-    panic("emitc: unsupported type in the spike subset")
+    match t {
+      TyVar(_, _) -> "void*"
+      TyAdt(_, _) -> "dawn_adt*"
+      TyTuple(_) -> "dawn_adt*"
+      _ -> "void*"
+    }
   }
 
-## The zero of a C type, for declaring a temporary before the branches
-## that assign it. C requires the declaration to precede the `if`.
 fn c_zero(t: Ty) -> String =
   if t == TyInt {
     "0"
@@ -126,14 +126,29 @@ fn c_zero(t: Ty) -> String =
     "false"
   } else if t == TyString {
     "dawn_str_empty"
+  } else if t == TyUnit || t == TyNever {
+    "DAWN_UNIT"
   } else {
-    "0"
+    "NULL"
   }
 
-# ---- string literals ----
+## Which member of `dawn_slot` holds a value of this type. Reading an ADT
+## field or unboxing goes through here.
+fn slot_of(t: Ty) -> String =
+  if t == TyInt {
+    "i"
+  } else if t == TyFloat {
+    "f"
+  } else if t == TyBool {
+    "b"
+  } else if t == TyString {
+    "s"
+  } else {
+    "p"
+  }
 
-## C string literal escaping. Dawn strings are UTF-8 already (the source is),
-## so bytes above 0x7f pass through as-is inside the literal.
+# ---- literals ----
+
 fn c_escape(s: String) -> String = {
   var out = ""
   for cp in code_points(s) {
@@ -159,75 +174,46 @@ fn c_escape(s: String) -> String = {
 fn oct3(n: Int) -> String =
   to_string((n >>> 6) & 7) ++ to_string((n >>> 3) & 7) ++ to_string(n & 7)
 
-## A `dawn_str` literal: pointer plus byte length, so the runtime never
-## calls strlen and embedded NULs would survive.
-fn str_lit(s: String) -> String = {
-  let bs = bytes_len(bytes_utf8(s))
-  "dawn_str_lit(\"" ++ c_escape(s) ++ "\", " ++ to_string(bs) ++ ")"
-}
+fn str_lit(s: String) -> String =
+  "dawn_str_lit(\"" ++ c_escape(s) ++ "\", " ++ to_string(bytes_len(bytes_utf8(s))) ++ ")"
 
 # ---- operators ----
 
-fn bin_op_c(op: TBinOp) -> String =
+fn bin_op_c(op: CBinOp) -> String =
   match op {
-    BAdd -> "+"
-    BSub -> "-"
-    BMul -> "*"
-    BDiv -> "/"
-    BMod -> "%"
-    BEq -> "=="
-    BNeq -> "!="
-    BLt -> "<"
-    BLe -> "<="
-    BGt -> ">"
-    BGe -> ">="
-    BAnd -> "&&"
-    BOr -> "||"
-    BBand -> "&"
-    BBor -> "|"
-    BBxor -> "^"
-    BShl -> "<<"
-    BShr -> ">>"
-    BUshr -> ">>>"
-    BConcat -> "++"
+    CAdd -> "+"
+    CSub -> "-"
+    CMul -> "*"
+    CDiv -> "/"
+    CMod -> "%"
+    CEq -> "=="
+    CNe -> "!="
+    CLt -> "<"
+    CLe -> "<="
+    CGt -> ">"
+    CGe -> ">="
+    CAnd -> "&&"
+    COr -> "||"
+    CBand -> "&"
+    CBor -> "|"
+    CBxor -> "^"
+    CShl -> "<<"
+    CShr -> ">>"
+    CUshr -> ">>>"
+    CConcat -> "++"
   }
 
 # ---- expressions ----
 
-## Emit `e`, appending any statements it needs, and return a C expression
-## denoting its value. This is the whole trick that maps an expression
-## language onto a statement language, and it is what Core IR will make
-## explicit instead of rediscovering per backend.
-pub fn emit_expr(st: CSt, e: TExpr) -> (CSt, String) =
+pub fn emit_expr(st: CSt, e: CExpr) -> (CSt, String) =
   match e {
-    XInt(v, _, _) -> (st, "INT64_C(" ++ to_string(v) ++ ")")
-    XFloat(v, _, _) -> (st, to_string(v))
-    XBool(v, _, _) -> (st, if v { "true" } else { "false" })
-    XUnit(_, _) -> (st, "DAWN_UNIT")
-    XLocal(sym, _, _, _, _) -> (st, local_name(sym))
-    XStr(parts, _, _) -> emit_str(st, parts)
-    XUnsafePure(body, _, _, _) -> emit_expr(st, body)
-    XBinary(op, l, r, _, _, _, _, _, ty) -> emit_binary(st, op, l, r, ty)
-    XUnary(op, operand, _, _, _) -> emit_unary(st, op, operand)
-    XIf(cond, thn, els, _, _, ty) -> emit_if(st, cond, thn, els, ty)
-    XBlock(stmts, tail, _, _, ty) -> emit_block(st, stmts, tail, ty)
-    XCallFn(owner, name, args, wits, trait_id, _, _, ty) -> {
-      if len(wits) > 0 {
-        panic("emitc: trait witnesses are out of the spike subset (" ++ name ++ ")")
-      }
-      match trait_id {
-        Some(_) -> panic("emitc: trait dispatch is out of the spike subset (" ++ name ++ ")")
-        None -> ()
-      }
-      emit_call(st, owner, name, args, ty)
-    }
-    XCallBuiltin(name, args, wits, _, _, ty) -> {
-      if len(wits) > 0 {
-        panic("emitc: builtin witnesses are out of the spike subset (" ++ name ++ ")")
-      }
-      emit_builtin(st, name, args, ty)
-    }
-    XReturn(v, _, _) -> {
+    CInt(v) -> (st, "INT64_C(" ++ to_string(v) ++ ")")
+    CFloat(v) -> (st, to_string(v))
+    CBool(v) -> (st, if v { "true" } else { "false" })
+    CStr(v) -> (st, str_lit(v))
+    CUnit -> (st, "DAWN_UNIT")
+    CLocal(sym, _) -> (st, local_name(sym))
+    CReturn(v) ->
       match v {
         Some(inner) -> {
           let (st1, cv) = emit_expr(st, inner)
@@ -235,90 +221,144 @@ pub fn emit_expr(st: CSt, e: TExpr) -> (CSt, String) =
         }
         None -> (line(st, "return DAWN_UNIT;"), "DAWN_UNIT")
       }
+    # Core names the loop, so leaving a non-innermost one is a plain goto.
+    # C's own break/continue could only ever mean "innermost".
+    CBreak(id) -> (line(st, "goto " ++ loop_end(id) ++ ";"), "DAWN_UNIT")
+    CContinue(id) -> (line(st, "goto " ++ loop_step(id) ++ ";"), "DAWN_UNIT")
+    CUnary(op, operand, _) -> {
+      let (st1, v) = emit_expr(st, operand)
+      match op {
+        CNeg -> (st1, "(-(" ++ v ++ "))")
+        CNot -> (st1, "(!(" ++ v ++ "))")
+        CBnot -> (st1, "(~(" ++ v ++ "))")
+      }
     }
-    XBreak(_, _) -> (line(st, "break;"), "DAWN_UNIT")
-    XContinue(_, _) -> (line(st, "continue;"), "DAWN_UNIT")
-    _ -> panic("emitc: expression out of the spike subset: " ++ node_name(e))
+    CBinary(op, l, r, ty) -> emit_binary(st, op, l, r, ty)
+    CIf(cond, thn, els, ty) -> emit_if(st, cond, thn, els, ty)
+    CBlock(stmts, tail, _) -> {
+      var st1 = st
+      for s in stmts {
+        st1 = emit_stmt(st1, s)
+      }
+      match tail {
+        Some(t) -> emit_expr(st1, t)
+        None -> (st1, "DAWN_UNIT")
+      }
+    }
+    CCall(callee, args, ty) -> emit_call(st, callee, args, ty)
+    CIntrinsic(name, args, ty) -> emit_intrinsic(st, name, args, ty)
+    CCtor(_, ci, args, _) -> emit_alloc(st, ci, args)
+    CTuple(elems, _) -> emit_alloc(st, 0, elems)
+    CField(target, _, _, idx, ty) -> {
+      let (st1, tv) = emit_expr(st, target)
+      (st1, "(" ++ tv ++ ")->fields[" ++ to_string(idx) ++ "]." ++ slot_of(ty))
+    }
+    CTupleGet(target, idx, ty) -> {
+      let (st1, tv) = emit_expr(st, target)
+      (st1, "(" ++ tv ++ ")->fields[" ++ to_string(idx) ++ "]." ++ slot_of(ty))
+    }
+    CIsCtor(target, _, ci) -> {
+      let (st1, tv) = emit_expr(st, target)
+      (st1, "((" ++ tv ++ ")->tag == " ++ to_string(ci) ++ ")")
+    }
+    CBox(inner, from) -> {
+      let (st1, v) = emit_expr(st, inner)
+      (st1, box_call(v, from))
+    }
+    CUnbox(inner, to) -> {
+      let (st1, v) = emit_expr(st, inner)
+      if is_ref_c(to) {
+        (st1, "((" ++ c_type(to) ++ ")(" ++ v ++ "))")
+      } else {
+        (st1, "(((dawn_slot*)(" ++ v ++ "))->" ++ slot_of(to) ++ ")")
+      }
+    }
+    CFnRef(_, name, _) ->
+      panic("emitc: function values need closure lowering (" ++ name ++ ")")
+    CClosure(name, _, _, _) ->
+      panic("emitc: closures are not emitted yet (" ++ name ++ ")")
+    CListLit(_, _) ->
+      panic("emitc: list literals await the pure-Dawn collections (D1-D3)")
+    CForeign(_, _) ->
+      # Not a gap: `use java` is the half of FFI that does not port, and
+      # refusing it here is the design (llvm-backend-research.md 9).
+      panic("emitc: `use java` cannot be compiled to native; use `use c`")
   }
 
-fn emit_str(st: CSt, parts: List[TStrPart]) -> (CSt, String) = {
-  # Build left-to-right with the runtime concat. Quadratic for long chains,
-  # which is fine for a spike; the real emitter will use a builder.
-  var st1 = st
-  var acc = ""
-  var first = true
-  for p in parts {
-    let piece =
-      match p {
-        TSPText(v) -> str_lit(v)
-        TSPInterp(ie) -> {
-          let (st2, cv) = emit_expr(st1, ie)
-          st1 = st2
-          let at = tex_ty(ie)
-          if at == TyString {
-            cv
-          } else if at == TyInt {
-            "dawn_str_of_int(" ++ cv ++ ")"
-          } else if at == TyFloat {
-            "dawn_str_of_float(" ++ cv ++ ")"
-          } else if at == TyBool {
-            "dawn_str_of_bool(" ++ cv ++ ")"
-          } else {
-            panic("emitc: interpolating a non-scalar is out of the spike subset")
-          }
-        }
-      }
-    if first {
-      acc = piece
-      first = false
-    } else {
-      acc = "dawn_str_concat(" ++ acc ++ ", " ++ piece ++ ")"
-    }
-  }
-  if first {
-    (st1, "dawn_str_empty")
+fn is_ref_c(t: Ty) -> Bool =
+  not (t == TyInt || t == TyFloat || t == TyBool || t == TyString ||
+      t == TyUnit || t == TyNever)
+
+fn box_call(v: String, from: Ty) -> String =
+  if from == TyInt {
+    "dawn_box_int(" ++ v ++ ")"
+  } else if from == TyFloat {
+    "dawn_box_float(" ++ v ++ ")"
+  } else if from == TyBool {
+    "dawn_box_bool(" ++ v ++ ")"
+  } else if from == TyString {
+    "dawn_box_str(" ++ v ++ ")"
   } else {
-    (st1, acc)
+    # already a pointer
+    "((void*)(" ++ v ++ "))"
   }
+
+fn emit_alloc(st: CSt, tag: Int, args: List[CExpr]) -> (CSt, String) = {
+  var st1 = st
+  var vs: List[CExpr] = args
+  var parts: List[String] = []
+  for a in vs {
+    let (st2, v) = emit_expr(st1, a)
+    st1 = st2
+    parts = parts ++ [v]
+  }
+  let (st3, tmp) = fresh(st1)
+  var st4 = line(st3,
+    "dawn_adt* " ++ tmp ++ " = dawn_adt_new(" ++ to_string(tag) ++ ", " ++
+      to_string(len(parts)) ++ ");")
+  var i = 0
+  for p in parts {
+    let ft = cex_ty(args[i])
+    st4 = line(st4, tmp ++ "->fields[" ++ to_string(i) ++ "]." ++ slot_of(ft) ++
+        " = " ++ p ++ ";")
+    i = i + 1
+  }
+  (st4, tmp)
 }
 
-fn emit_binary(st: CSt, op: TBinOp, l: TExpr, r: TExpr, ty: Ty) -> (CSt, String) = {
-  let lt = tex_ty(l)
-  # && and || must not evaluate the right side eagerly, and the right side
-  # may emit statements -- so they lower to an if, not to C's && operator.
-  if op == BAnd || op == BOr {
+fn emit_binary(st: CSt, op: CBinOp, l: CExpr, r: CExpr, ty: Ty) -> (CSt, String) = {
+  let lt = cex_ty(l)
+  # && and || must not evaluate their right side eagerly, and in Core the
+  # right side may still expand into statements -- so they lower to an if,
+  # not to C's operators. This is load-bearing for pattern tests, whose
+  # nested projections are only valid once the outer test has passed.
+  if op == CAnd || op == COr {
     let (st1, lv) = emit_expr(st, l)
     let (st2, tmp) = fresh(st1)
     let st3 = line(st2, "bool " ++ tmp ++ " = " ++ lv ++ ";")
-    let guard = if op == BAnd { tmp } else { "!" ++ tmp }
+    let guard = if op == CAnd { tmp } else { "!" ++ tmp }
     let st4 = push(line(st3, "if (" ++ guard ++ ") {"))
     let (st5, rv) = emit_expr(st4, r)
     let st6 = pop(line(st5, tmp ++ " = " ++ rv ++ ";"))
     (line(st6, "}"), tmp)
-  } else if op == BConcat {
+  } else if op == CConcat {
     let (st1, lv) = emit_expr(st, l)
     let (st2, rv) = emit_expr(st1, r)
-    if lt == TyString {
-      (st2, "dawn_str_concat(" ++ lv ++ ", " ++ rv ++ ")")
-    } else {
-      panic("emitc: ++ on non-strings is out of the spike subset")
-    }
-  } else if (op == BEq || op == BNeq) && lt == TyString {
+    (st2, "dawn_str_concat(" ++ lv ++ ", " ++ rv ++ ")")
+  } else if (op == CEq || op == CNe) && lt == TyString {
     let (st1, lv) = emit_expr(st, l)
     let (st2, rv) = emit_expr(st1, r)
     let call = "dawn_str_eq(" ++ lv ++ ", " ++ rv ++ ")"
-    (st2, if op == BEq { call } else { "(!" ++ call ++ ")" })
-  } else if op == BUshr {
+    (st2, if op == CEq { call } else { "(!" ++ call ++ ")" })
+  } else if op == CUshr {
     let (st1, lv) = emit_expr(st, l)
     let (st2, rv) = emit_expr(st1, r)
-    # C has no >>> ; on int64 it is a cast to unsigned, shift, cast back
     (st2, "((int64_t)((uint64_t)(" ++ lv ++ ") >> (" ++ rv ++ ")))")
-  } else if op == BDiv && ty == TyInt {
+  } else if op == CDiv && ty == TyInt {
     let (st1, lv) = emit_expr(st, l)
     let (st2, rv) = emit_expr(st1, r)
-    # matches the JVM: division by zero traps rather than being UB
     (st2, "dawn_idiv(" ++ lv ++ ", " ++ rv ++ ")")
-  } else if op == BMod && ty == TyInt {
+  } else if op == CMod && ty == TyInt {
     let (st1, lv) = emit_expr(st, l)
     let (st2, rv) = emit_expr(st1, r)
     (st2, "dawn_imod(" ++ lv ++ ", " ++ rv ++ ")")
@@ -329,16 +369,7 @@ fn emit_binary(st: CSt, op: TBinOp, l: TExpr, r: TExpr, ty: Ty) -> (CSt, String)
   }
 }
 
-fn emit_unary(st: CSt, op: TUnOp, operand: TExpr) -> (CSt, String) = {
-  let (st1, v) = emit_expr(st, operand)
-  match op {
-    UNeg -> (st1, "(-(" ++ v ++ "))")
-    UNot -> (st1, "(!(" ++ v ++ "))")
-    UBnot -> (st1, "(~(" ++ v ++ "))")
-  }
-}
-
-fn emit_if(st: CSt, cond: TExpr, thn: TExpr, els: Option[TExpr], ty: Ty) -> (CSt, String) = {
+fn emit_if(st: CSt, cond: CExpr, thn: CExpr, els: Option[CExpr], ty: Ty) -> (CSt, String) = {
   let (st1, cv) = emit_expr(st, cond)
   let is_value = ty != TyUnit && ty != TyNever
   let (st2, tmp) = fresh(st1)
@@ -365,18 +396,7 @@ fn emit_if(st: CSt, cond: TExpr, thn: TExpr, els: Option[TExpr], ty: Ty) -> (CSt
   (st8, if is_value { tmp } else { "DAWN_UNIT" })
 }
 
-fn emit_block(st: CSt, stmts: List[TStmt], tail: Option[TExpr], ty: Ty) -> (CSt, String) = {
-  var st1 = st
-  for s in stmts {
-    st1 = emit_stmt(st1, s)
-  }
-  match tail {
-    Some(t) -> emit_expr(st1, t)
-    None -> (st1, "DAWN_UNIT")
-  }
-}
-
-fn emit_call(st: CSt, owner: Option[String], name: String, args: List[TExpr], ty: Ty) -> (CSt, String) = {
+fn emit_call(st: CSt, callee: CCallee, args: List[CExpr], ty: Ty) -> (CSt, String) = {
   var st1 = st
   var cargs: List[String] = []
   for a in args {
@@ -384,19 +404,20 @@ fn emit_call(st: CSt, owner: Option[String], name: String, args: List[TExpr], ty
     st1 = st2
     cargs = cargs ++ [v]
   }
-  match owner {
-    Some(o) ->
-      match std_shim(o, name) {
+  match callee {
+    CDirect(owner, name) ->
+      match std_shim(owner, name) {
         Some(rt) -> (st1, rt ++ "(" ++ join(cargs, ", ") ++ ")")
-        None -> (st1, mangle(o, name) ++ "(" ++ join(cargs, ", ") ++ ")")
+        None -> (st1, mangle(owner, name) ++ "(" ++ join(cargs, ", ") ++ ")")
       }
-    None -> (st1, mangle("", name) ++ "(" ++ join(cargs, ", ") ++ ")")
+    CDynamic(_) -> panic("emitc: calls through function values need closures")
+    CMethod(_, _, m) -> panic("emitc: trait dispatch is not emitted yet (" ++ m ++ ")")
   }
 }
 
-## The few std functions the spike needs, mapped straight onto runtime C.
-## In the real backend std is compiled to C like any other Dawn module;
-## this table exists only so the spike need not compile all of std.
+## The handful of std functions the native backend still borrows from its C
+## runtime. In the finished backend std is compiled to C like any other Dawn
+## module and this table disappears.
 fn std_shim(owner: String, name: String) -> Option[String] =
   if owner == "std/io" && name == "println" {
     Some("dawn_println")
@@ -406,7 +427,7 @@ fn std_shim(owner: String, name: String) -> Option[String] =
     None
   }
 
-fn emit_builtin(st: CSt, name: String, args: List[TExpr], ty: Ty) -> (CSt, String) = {
+fn emit_intrinsic(st: CSt, name: String, args: List[CExpr], ty: Ty) -> (CSt, String) = {
   var st1 = st
   var cargs: List[String] = []
   for a in args {
@@ -415,146 +436,129 @@ fn emit_builtin(st: CSt, name: String, args: List[TExpr], ty: Ty) -> (CSt, Strin
     cargs = cargs ++ [v]
   }
   let a0 = if len(cargs) > 0 { cargs[0] } else { "" }
-  if name == "io_println" {
-    (st1, "dawn_println(" ++ a0 ++ ")")
-  } else if name == "io_print" {
-    (st1, "dawn_print(" ++ a0 ++ ")")
-  } else if name == "panic" {
+  if name == "panic" {
     (line(st1, "dawn_panic(" ++ a0 ++ ");"), "DAWN_UNIT")
   } else if name == "todo" {
     (line(st1, "dawn_panic(" ++ str_lit("not yet implemented") ++ ");"), "DAWN_UNIT")
-  } else if name == "to_string" {
-    let at = tex_ty(args[0])
-    if at == TyInt {
-      (st1, "dawn_str_of_int(" ++ a0 ++ ")")
-    } else if at == TyFloat {
-      (st1, "dawn_str_of_float(" ++ a0 ++ ")")
-    } else if at == TyBool {
-      (st1, "dawn_str_of_bool(" ++ a0 ++ ")")
-    } else if at == TyString {
-      (st1, a0)
-    } else {
-      panic("emitc: to_string on a non-scalar is out of the spike subset")
-    }
+  } else if name == "str_of_int" {
+    (st1, "dawn_str_of_int(" ++ a0 ++ ")")
+  } else if name == "str_of_float" {
+    (st1, "dawn_str_of_float(" ++ a0 ++ ")")
+  } else if name == "str_of_bool" {
+    (st1, "dawn_str_of_bool(" ++ a0 ++ ")")
+  } else if name == "str_len" {
+    (st1, "dawn_str_len(" ++ a0 ++ ")")
+  } else if name == "io_println" {
+    (st1, "dawn_println(" ++ a0 ++ ")")
+  } else if name == "io_print" {
+    (st1, "dawn_print(" ++ a0 ++ ")")
   } else if name == "to_float" {
     (st1, "((double)(" ++ a0 ++ "))")
   } else if name == "to_int" {
     (st1, "((int64_t)(" ++ a0 ++ "))")
-  } else if name == "str_len" {
-    (st1, "dawn_str_len(" ++ a0 ++ ")")
+  } else if name == "null_ref" {
+    (st1, c_zero(ty))
+  } else if name == "to_string" {
+    # Core normally lowers this into str_of_*; a residual one means a type
+    # the lowering did not know how to render
+    panic("emitc: to_string survived lowering -- unsupported operand type")
   } else {
-    panic("emitc: builtin out of the spike subset: " ++ name)
+    panic("emitc: intrinsic not implemented for native: " ++ name)
   }
 }
 
 # ---- statements ----
 
-pub fn emit_stmt(st: CSt, s: TStmt) -> CSt =
+pub fn emit_stmt(st: CSt, s: CStmt) -> CSt =
   match s {
-    TSLet(sym, name, init, _, _) -> {
+    CSLet(sym, ty, init) -> {
       let (st1, v) = emit_expr(st, init)
-      match sym {
-        Some(sy) -> {
-          let t = c_type(tex_ty(init))
-          line(st1, t ++ " " ++ local_name(sy) ++ " = " ++ v ++ ";")
-        }
-        # `let _ = e`: keep the effect, drop the value
-        None -> line(st1, "(void)(" ++ v ++ ");")
-      }
+      line(st1, c_type(ty) ++ " " ++ local_name(sym) ++ " = " ++ v ++ ";")
     }
-    TSAssign(sym, _, value, _, _) -> {
+    CSAssign(sym, value) -> {
       let (st1, v) = emit_expr(st, value)
       line(st1, local_name(sym) ++ " = " ++ v ++ ";")
     }
-    TSExpr(e, _, _) -> {
+    CSDiscard(e) -> {
       let (st1, v) = emit_expr(st, e)
       discard(st1, v)
     }
-    TSWhile(cond, body, _, _, _) -> {
-      # The condition may emit statements, so it is re-emitted inside an
-      # infinite loop with a break, rather than placed in the for-header.
+    CSIf(cond, thn, els) -> {
+      let (st1, _) = emit_if(st, cond, thn, els, TyUnit)
+      st1
+    }
+    CSLoop(id, body, step) -> {
       let st1 = push(line(st, "for (;;) {"))
-      let (st2, cv) = emit_expr(st1, cond)
-      let st3 = line(st2, "if (!(" ++ cv ++ ")) break;")
-      let (st4, bv) = emit_expr(st3, body)
-      line(pop(discard(st4, bv)), "}")
-    }
-    TSFor(sym, _, from, to, body, _, _, _) -> {
-      match to {
-        Some(hi) -> {
-          let (st1, lo_v) = emit_expr(st, from)
-          let (st2, hi_v) = emit_expr(st1, hi)
-          let (st3, bound) = fresh(st2)
-          let st4 = line(st3, "const int64_t " ++ bound ++ " = " ++ hi_v ++ ";")
-          let iv = local_name(sym)
-          let st5 = push(line(st4,
-            "for (int64_t " ++ iv ++ " = " ++ lo_v ++ "; " ++ iv ++ " < " ++ bound ++ "; " ++ iv ++ "++) {"))
-          let (st6, bv) = emit_expr(st5, body)
-          line(pop(discard(st6, bv)), "}")
+      let (st2, bv) = emit_expr(st1, body)
+      let st3 = discard(st2, bv)
+      # the step label is where CContinue lands, so `continue` runs the
+      # increment -- the whole reason CSLoop carries a step
+      let st4 = line(st3, loop_step(id) ++ ": ;")
+      let st5 =
+        match step {
+          Some(sv) -> {
+            let (sa, v) = emit_expr(st4, sv)
+            discard(sa, v)
+          }
+          None -> st4
         }
-        None -> panic("emitc: for-in over a collection is out of the spike subset")
-      }
+      let st6 = line(pop(st5), "}")
+      line(st6, loop_end(id) ++ ": ;")
     }
-    _ -> panic("emitc: statement out of the spike subset")
+    CSDup(_) -> st
+    CSDrop(_) -> st
   }
 
 # ---- functions and program ----
 
-fn fn_signature(owner: String, f: TFun) -> String = {
+fn fn_signature(f: CFun) -> String = {
+  if len(f.dicts) > 0 {
+    panic("emitc: dictionary parameters are not emitted yet (" ++ f.name ++ ")")
+  }
   var ps: List[String] = []
-  var i = 0
-  for pt in f.sig.param_tys {
-    ps = ps ++ [c_type(pt) ++ " " ++ local_name(f.param_syms[i])]
-    i = i + 1
+  for p in f.params {
+    ps = ps ++ [c_type(p.ty) ++ " " ++ local_name(p.sym)]
   }
   let plist = if len(ps) == 0 { "void" } else { join(ps, ", ") }
-  c_type(f.sig.ret) ++ " " ++ mangle(owner, f.name) ++ "(" ++ plist ++ ")"
+  c_type(f.ret) ++ " " ++ mangle(f.owner, f.name) ++ "(" ++ plist ++ ")"
 }
 
-fn emit_fn(st: CSt, owner: String, f: TFun) -> CSt = {
-  if len(f.dict_syms) > 0 {
-    panic("emitc: dictionary parameters are out of the spike subset (" ++ f.name ++ ")")
-  }
-  let st1 = push(line(CSt { ..st, tmp: 0 }, fn_signature(owner, f) ++ " {"))
+fn emit_fn(st: CSt, f: CFun) -> CSt = {
+  let st1 = push(line(CSt { ..st, tmp: 0 }, fn_signature(f) ++ " {"))
   let (st2, v) = emit_expr(st1, f.body)
   let st3 =
-    if f.sig.ret == TyUnit {
+    if f.ret == TyUnit {
       line(discard(st2, v), "return DAWN_UNIT;")
-    } else if tex_ty(f.body) == TyNever {
-      # the body already returned or panicked; C still wants a terminator
-      line(st2, "return " ++ c_zero(f.sig.ret) ++ ";")
+    } else if diverges(f.body) {
+      line(st2, "return " ++ c_zero(f.ret) ++ ";")
     } else {
       line(st2, "return " ++ v ++ ";")
     }
   line(pop(st3), "}")
 }
 
-## Emit one whole program: forward declarations first (Dawn has no ordering
-## requirement between top-level functions, C does), then the bodies, then
-## a C `main` that calls the entry point.
-pub fn emit_program(mods: List[(String, TModule)], entry: String) -> String = {
-  var st = CSt { out: "", tmp: 0, ind: 0, syms: map.empty() }
-  st = line(st, "/* generated by dawn __emitc -- the Phase -1 native seam spike */")
+pub fn emit_program(mods: List[CModule], entry: String) -> String = {
+  var st = CSt { out: "", tmp: 0, ind: 0 }
+  st = line(st, "/* generated by dawn __emitc -- Core IR -> C */")
   st = line(st, "#include \"dawn_rt.h\"")
   st = line(st, "")
 
+  # C needs declarations before use; Dawn does not order top-level functions
   for m in mods {
-    let (owner, tm) = m
-    for f in tm.fns {
-      st = line(st, fn_signature(owner, f) ++ ";")
+    for f in m.fns {
+      if not f.is_test {
+        st = line(st, fn_signature(f) ++ ";")
+      }
     }
   }
   st = line(st, "")
 
   for m in mods {
-    let (owner, tm) = m
-    if len(tm.consts) > 0 {
-      panic("emitc: comptime consts are out of the spike subset")
-    }
-    st = CSt { ..st, syms: tm.syms }
-    for f in tm.fns {
-      st = emit_fn(st, owner, f)
-      st = line(st, "")
+    for f in m.fns {
+      if not f.is_test {
+        st = emit_fn(st, f)
+        st = line(st, "")
+      }
     }
   }
 
@@ -567,26 +571,3 @@ pub fn emit_program(mods: List[(String, TModule)], entry: String) -> String = {
   st = line(st, "}")
   st.out
 }
-
-# ---- diagnostics ----
-
-fn node_name(e: TExpr) -> String =
-  match e {
-    XInt(_, _, _) -> "XInt"
-    XFloat(_, _, _) -> "XFloat"
-    XBool(_, _, _) -> "XBool"
-    XUnit(_, _) -> "XUnit"
-    XStr(_, _, _) -> "XStr"
-    XLocal(_, _, _, _, _) -> "XLocal"
-    XCallBuiltin(_, _, _, _, _, _) -> "XCallBuiltin"
-    XCallFn(_, _, _, _, _, _, _, _) -> "XCallFn"
-    XReturn(_, _, _) -> "XReturn"
-    XBreak(_, _) -> "XBreak"
-    XContinue(_, _) -> "XContinue"
-    XBinary(_, _, _, _, _, _, _, _, _) -> "XBinary"
-    XUnary(_, _, _, _, _) -> "XUnary"
-    XIf(_, _, _, _, _, _) -> "XIf"
-    XBlock(_, _, _, _, _) -> "XBlock"
-    XUnsafePure(_, _, _, _) -> "XUnsafePure"
-    _ -> "some other node"
-  }

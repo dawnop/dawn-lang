@@ -44,6 +44,8 @@ use types.{
   TyInt, TyFloat, TyString, Ty, Sig, Traits, ImplI, Adts
 }
 use emit.{emit_module}
+use core.{CModule}
+use lower
 use emitc
 use tast.{TModule}
 use interp.{CtOut, CValue}
@@ -1017,10 +1019,10 @@ fn run_emitc(rest: List[String]) -> Unit !io = {
   let loaded = if io.is_dir(t) { load_directory(t) } else { load_file(t) }
   let prog = analyze_program(loaded, std, 100000000)
   if len(prog.diags) > 0 { fail_compile(prog.diags) }
-  var mods: List[(String, TModule)] = []
+  var mods: List[CModule] = []
   var entry = ""
   for cm in prog.modules {
-    mods = mods ++ [(cm.class_name, cm.tm)]
+    mods = mods ++ [lower.lower_module(cm.class_name, cm.tm)]
     if entry == "" {
       for tf in cm.tm.fns {
         if tf.name == "main" { entry = cm.class_name }
