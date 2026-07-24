@@ -42,6 +42,10 @@ Java 类。**要做的是把这个模型长全。**
    LLVM 后端会把它 lower 成 native 结构。那个"绑 java.util"的纠结**不跟到 LLVM**——它后端本地。
 3. **但现在它泄漏进了 std。** `std/str.dawn` 直接说 `java.lang.String`,集合就是 `java.util`。
    这层泄漏才是接 LLVM 的真正障碍——不是编译器,是语言核心里散落的 `java.*`。
+4. **tast 已经是七成后端无关的 IR。** checker 把语义解析(trait 字典 `WitRef`/`dict_syms`、
+   ADT 布局 `XCtor.slots`、类型槽 `syms`、`ord` witness)烘进了 tast;真正 JVM-only 的 IR 节点
+   只有 `TJavaCall`。**接第二个后端不是「新写一个编译器」,是「共享 tast + 把三处漏进 emit 的
+   lowering 收回」**——这条纠正了「新 codegen = 一整块从零 lowering」的误判,详见 §8。
 
 ## 4. 目标架构:五层,中间立一层 intrinsic 契约
 
@@ -115,7 +119,37 @@ JVM-锁死。LLVM 后端一看 std 里全是 `java.lang.String.codePointCount`,�
 
 ## 8. LLVM 后端具体要什么
 
-- **新 codegen**:TAST → LLVM IR。前端共享,这是新增的一块 lowering。
+- **新 codegen——但不是从零。** 关键发现(2026-07-24 核实 codegen 实际形状):**tast 已经是七成
+  后端无关的 IR**。checker 把后端无关的语义解析烘进了 tast 槽位——trait 派发方案(`WitRef`+`dict_syms`,
+  字典传递、非 JVM 接口)、构造器布局(`XCtor.slots`)、类型信息(`syms`)、`ord` witness;唯一真正
+  JVM-only 的 IR 节点是 `TJavaCall`。第二个后端直接吃这些。
+
+  **障碍不是「新写 codegen」,是三处 lowering 漏过了 tast、卡死在 `emit.dawn`(3568 行)那趟树遍历里**
+  ——正是后端 #2 会被迫重写一遍的东西:
+
+  | 泄漏的 lowering | 现状(entanglement) | 后端 #2 的重写代价 |
+  |---|---|---|
+  | **intrinsic 语义** | 契约有**三份不一致实现**:`types.dawn` 签名表 / `emit.dawn:2235 gen_builtin_call` 31 条手写字节码臂 / `interp.dawn` 反射调 `dawn.rt.*` | 56 个 builtin 语义要重发一遍;native 自举时 interp 的反射求值**根本没法用** |
+  | **结构化控制流 + 语法糖** | `for`/`while`/`match`/`?`/`!`/字符串插值以 tast 节点存活,到 `emit.dawn:764,1026,1456` 才内联 lower 成字节码 | match 编译(决策树)是皇冠明珠,**不想写两遍** |
+  | **装箱 / 擦除** | 泛型擦除到 `Object`;装箱决策 `adapt_to/adapt_from`(`emit.dawn:328`)在每个调用点重算「槽是不是 TyVar → 装箱」,没物化成 IR 节点 | Rank 1 最烂的耦合,散在每个 arg/return 点 |
+
+  **策略:后提取,不前设计**(见 §11)。不对着唯一一个 JVM 后端设计「中立」Core IR(必然把 JVM-ism——
+  2 槽 long、装箱模型、INVOKEINTERFACE——烘进「中立」层还自称中立,最经典的错误),也不先写 LLVM emitter
+  再抽公共层(等于 lower 逻辑写两遍才发现 IR)。而是把上述三处**可证明中立**的 lowering 从 emit 抽成
+  tast→tast 的 pass,**只在 JVM 上做、fixpoint 验证字节码逐字节相同**(output-preserving = 单次发布、
+  非 Emit-Change,不碰种子纪律)。抽完后 `emit.dawn` 残余逼近「Core IR → 字节码编码」,真正的 Core IR
+  边界**被减法减出来**、且已被「产出逐字节相同的 JVM 输出」验证过中立。
+
+  三步按「单在 JVM 上的独立收益」排:
+  1. **Move 1 — intrinsic 语义表(先做)**:消灭 types/emit/interp 三份分歧,给 native 自举需要的
+     **非反射权威语义源**,同时**就是本文 §10 步骤 1「契约显式化」**——一份力气推两条接缝。
+     `gen_builtin_call` 从 31 条手写字节码收成「查表 + 少数性能敏感项保留直发」。
+  2. **Move 2 — 控制流/match lowering pass**:开始 scope 后端 #2 时做;match 编译单独抽出可独立测。
+  3. **Move 3 — 显式 box/unbox 节点**:推迟到后端 #2 逼你面对表示问题时;Perceus RC 正好是
+     **只有 native 后端跑**的 core-IR→core-IR pass、需要所有权/装箱显式化,那时 Move 3 自然到位。
+
+  `TJavaCall` 保持 JVM-only(后端 #2 直接报错,与 `use c` 对称);闭包(indy/LMF,`emit.dawn:1955`)
+  只 ~8 个函数、localized,重写便宜,不进这轮。
 - **native 运行时**(JVM 白送、native 要自造):
   - 持久集合(HAMT/持久向量)、字符串(UTF-8 还是 UTF-16 的 native 表示?决策项)。
   - **内存管理**:JVM 有 GC,native 没有。**Dawn 的纯性是利好**——数据不可变、无可变别名,持久结构是
@@ -146,6 +180,9 @@ JVM-锁死。LLVM 后端一看 std 里全是 `java.lang.String.codePointCount`,�
 
 ## 11. 开放决策
 
+- **~~中间层策略:前设计 Core IR vs 后提取~~ → 已定:后提取**(2026-07-24)。tast 已是七成中立 IR;把
+  intrinsic 语义 / 控制流+match / 装箱这三处漏进 emit 的 lowering 抽成 output-preserving 的 tast→tast
+  pass,让真正的 Core IR 边界从残余 emit 里减出来。三步 Move(1 语义表 / 2 控制流 / 3 装箱)见 §8。
 - **契约边界画多细**(§5 blockquote):细契约更可移植 vs 粗 intrinsic 更快;倾向"细 + 少数性能敏感项保粗"。
 - **集合怎么产生**(§7):A 窄 codegen `extends java` 特性 / B 手搓字节码 / C vendored 归位留指路牌。
 - **ASM/AdtClassWriter**:算不算这轮范围。ASM 是第三方(可当外部依赖),AdtClassWriter 是我们写的但
