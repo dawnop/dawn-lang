@@ -188,6 +188,9 @@ JVM-锁死。LLVM 后端一看 std 里全是 `java.lang.String.codePointCount`,�
   pass,让真正的 Core IR 边界从残余 emit 里减出来。三步 Move(1 语义表 / 2 控制流 / 3 装箱)见 §8。
 - **契约边界画多细**(§5 blockquote):细契约更可移植 vs 粗 intrinsic 更快;倾向"细 + 少数性能敏感项保粗"。
 - **集合怎么产生**(§7):A 窄 codegen `extends java` 特性 / B 手搓字节码 / C vendored 归位留指路牌。
+  → **已调研,推荐 C**(2026-07-24):[collections-dejava-research.md](collections-dejava-research.md)。java.util 身份
+  在 JVM 上不可约(`==`/hash 就是 `Abstract*` 契约),对 native 后端目标 C 已足够;A 违背无继承+仍需 java 数组,
+  B 只有扁平的 DawnList 划算、DawnMap 的 HAMT 层级超出 codegen 现有能力。可选:B-for-List(退 1/3)或 C+(源回树+javac)。
 - **ASM/AdtClassWriter**:算不算这轮范围。ASM 是第三方(可当外部依赖),AdtClassWriter 是我们写的但
   绑死 ASM——彻底零手写 Java 要连它一起换(Dawn 写的字节码+栈帧写入器,`jarw.dawn` 是同类先例)。
 - **LLVM 侧**:字符串 native 表示(UTF-8/16)、内存管理选型(RC/region/GC)。→ 这几项已在
