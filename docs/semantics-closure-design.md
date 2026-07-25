@@ -214,8 +214,48 @@ lowering 用一张平铺的算符表把它翻成 `CEq`(`lower.dawn:195`)。`WStr
 于是 `CModule.dicts` 只有一个读者,而那是未完成的 C 后端——**那张表从来没被验过**,
 `dict_forward:cc` 发出的 C 引用两个不存在的符号就是它的第一份证据。
 
-改法:JVM 也读表。`emit_module` 不再需要 `impl_table` 参数,Core 才**真的**后端无关。
-这一步的门禁是 S0.4 的 Core golden——它是今天唯一看得见 `CModule.dicts` 的东西。
+改法:JVM 也读表。这一步的门禁是 S0.4 的 Core golden——它是今天唯一看得见
+`CModule.dicts` 的东西。
+
+### 5.1 动手之后:病根不在读者那侧,在写者那侧
+
+原以为这步是「把 `emit.dawn:1875` 那几行换成查表」。逐处点下来,**表本身是坏的**,
+换读者只会把坏值读出来。三类槽里有两类根本没有定义:
+
+| 见证 | 槽今天填什么 | 那个符号存在吗 |
+|---|---|---|
+| 用户 `impl`(`provided` 非空) | `CSlotFn` → `make_bridge` 合成的桥 | 存在 |
+| **prelude impl**(标量,`provided` 为空) | `CSlotDefault(owner, "eq")` | **不存在**——prelude trait 没有 default |
+| **derive 来的 impl**(`provided` 也是空的) | `CSlotDefault(owner, "cmp")` | **不存在** |
+| **`WStructural`** | 短路成一个共享 key,**连 `CDictDef` 都不注册** | 不存在 |
+
+而且 `CSlotDefault` 的 owner 取的是 `owner_or(tr.owner, st.owner)`,prelude trait 的
+`owner` 是 `None`,于是回落到**用户模块**——C 里出来的 `dawn_eqhash__default_1_eq`
+连模块都指错了。
+
+所以真正的改法与决策 1 同形:**lowering 把这两类槽也合成成普通 Core 函数**
+(`prim$<tid>$<subject>$<method>`),body 就是 `prim_relation`——`Eq` 走 §3 的展开器,
+`Hash`/`Ord` 走具名 intrinsic。于是三类槽在 Core 里长得一模一样,后端只要转发。
+
+副产品是把 JVM 那五个**手写字节码的字典生成器**(`gen_prelude_eq_impl` /
+`gen_prelude_hash_impl` / `gen_prelude_ord_impl` / `gen_structural_eq_impl` /
+`gen_structural_hash_impl`)连同 `gen_impl_class` 一起删掉:它们的 body 现在是 Core
+函数,类只剩一层转发,一个 `gen_dict_class` 就够。§1 那张表里的 **#3
+(`emit_native_eq`)就是这么消失的**——它不是被改对了,是不再需要存在。
+
+### 5.2 顺带落网的第八条:`cmp(3, 9)` 会在运行期崩
+
+同一个病根还有一个更响的症状,是写这一步时读代码读出来的:
+
+```
+$ dawn run 'println(to_string(cmp(3, 9)))'
+NoSuchMethodError: 'long ordprim.dawn$default$Ord$cmp(Object, Object, Object)'
+```
+
+`==`/`<` 这些运算符不走字典,所以从没碰过;而**直接写 `cmp(a, b)`**、主体是标量时,
+`lower_trait_call` 找不到 `provides`,就落到「调 trait default」那条,而那个 default
+不存在。**编译期全绿,运行期必崩。** 修法就是上面那条:标量 Ord 也是 `primitive_witness`,
+塌缩成 `cmp` 原语,和 `Eq`/`Hash` 一视同仁。
 
 ## 6. S1.4:`Show` 成为第四个 prelude trait
 
@@ -273,7 +313,7 @@ intrinsic 今天用字符串名标识,于是「这个名字属于谁、可见吗
 |---|---|---|---|
 | 1 | S1.2 展开器(ground)+ 决策 3 的具名 intrinsic + 决策 4 的 `Bytes` 配对修 | ✅ 三行已删 | Core golden 已重录 |
 | 2 | S1.6 `WStructural` 收窄(`TyFn`/`TyArray` 报错) | ✅ §11.1 的三已闭合 | 既有 164 测 |
-| 3 | S1.3 字典表成为唯一真相 | `dict_forward:cc` 删除 | Core golden 是唯一看得见它的门 |
+| 3 | S1.3 字典表成为唯一真相 | ✅ `dict_forward:cc` 已删 | Core golden 是唯一看得见它的门 |
 | 4 | S1.4 `Show` 成 trait | `show_derive:emitc`/`const_fold:jvm` 删除 | 差分 harness 全绿 |
 | 5 | S1.5 的「拆」+「合」+ `invalid_key_part` 改走 bound | `impl_subject_ok` 与 prelude 同一份清单 | 既有测试 |
 | 6 | S1.1 intrinsic 身份 | 四份手抄名单消失 | 无红线,靠 golden |
@@ -335,3 +375,43 @@ eq2(f1, f1)   false      # 同一个函数,和自己比
 - **种子纪律**:S1 全程不得让 N−1 的编译器编不动 HEAD 的 `selfhost/src`。展开器是
   编译器**自己**也要用的东西(编译器里到处是 ADT 比较),所以第 2 步是自举压力最大的一步。
 - **`known-red.txt` 是双向 ratchet**:每步修好的那几行必须同批删掉,漏删会红。
+
+### 9.3 第 3 步的实测
+
+- **`dict_forward` 全线绿**:`cc` 通过之后 `native`/`diff`/`stderr`/`exit` 一并通过,
+  即 C 程序不只是编得过,输出与手写的 `.expect` 逐字相同。三种见证(prelude 标量、
+  用户 impl、结构默认)都对。known-red **5 → 4**。
+- **发出去的类少了**:`examples/eqhash.dawn` 从 **76 个类降到 61 个**。旧版一旦程序里
+  任何地方有 `Eq`/`Hash` bound,就无条件铸 20 个字典类(3 个 Ord 标量 + 6 Eq + 6 Hash +
+  2 个 structural + 2 个用户 impl 单例),而这个程序只用到 4 个。现在**按需**:
+  lowering 注册了几个就发几个。
+- **编译器自身**:8 个字典,8 个槽,`CSlotDefault` **零个**——8 个槽以前全是
+  `slot default X.cmp` 这种指向不存在符号的项,现在全是 `slot fn X.prim$0$String$cmp`。
+- **自举比值 1.0910**(7 次采样,spread 7.7%,基线 1.1151)。没有可测退化。
+
+两条本可以静默过去的坑,都是「JVM 第一次真的去调那些 body」暴露的:
+
+1. **合成 body 的 access**。lifted body 一律 `ACC_PRIVATE`,而字典类在
+   `dawn/dict/…` 这个**另一个包**里,一调就 `IllegalAccessError`。以前从没人调过。
+2. **合成 body 的描述符**。`gen_fn` 从 `captures ++ params` 拼描述符,**漏掉 `dicts`**;
+   桥的字节码里却给字典参数分了槽。这个矛盾之所以能长期存在,正是因为**桥从来没被调用过**
+   ——它加载不到的槽从不读,类照样过校验。
+
+第 3 步之后,`emit.dawn` 里再没有第二处「这个见证是谁」的推导。留下的 `impl_table`
+用途(`eq_override`、derive Ord 判定)问的是**类怎么生成**,不是见证身份,见 plan §11.4
+的更正块。
+
+### 9.4 记一条量到两次的噪声:ADT id 不稳
+
+第 1 步和第 3 步各撞了一次:改动与某个模块毫无关系,Core golden 却报它变了。两次都是
+**ADT id 整体漂移**——`checker.next_id` 是 ADT、trait、类型变量、每个符号**共用的一个
+计数器**,所以在 `types.dawn` 里加两个函数,后面所有类型的 id 就 +2。
+
+第 1 步时通过让 `coredump` 按名字渲染构造器压掉了大部分噪声;这次剩下的一处是
+**合成比较函数的名字**(`structeq$Adt1814`)——它由 `ty_key_inst` 拼出,里面就是那个
+裸 id。这不是可以在 dump 里归一化掉的东西:那是真实发射的方法名,归一化等于关掉
+`__emit` 的探测器。
+
+要根治得把 id 空间拆开(ADT 一个计数器,符号另一个),那会重命名一切,不属于 S1。
+记在这里,是因为它的代价已经量到两次:**每次 golden 报「这些模块变了」,都要先排除
+这一项**才能读出真正的改动。

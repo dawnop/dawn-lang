@@ -686,18 +686,24 @@ Blob { data: .. } == Blob { data: .. }    no      # Option / 元组 / List 同
   才是要合的——语言给 `Bytes`/`Cursor` 铸了 impl,却禁止用户给同样的主体写 impl。
 - **`Float` 的 `Eq` 与 `Ord` 刻意不同**(spec §4.3,同 Java/Rust):实测 `-0.0 == 0.0` 为 true 而
   `cmp(-0.0, 0.0)` 为 −1。这看着像第八条缺陷,查 spec 才知道是白纸黑字的裁决——收口时合并即改语义。
+- **S1.3 那句「`emit.dawn` 不再需要 `impl_table` 参数」只对一半。** 字典那条路确实全断了
+  (`CDictRef` 不再回查),但 `impl_table` 还留着两处**与见证无关**的用途:ADT 类的
+  `equals`/`hashCode` 被哪个显式 impl 接管(`eq_override`)、以及某个 ADT 的 `Ord` 是不是
+  derive 来的。这两个问题问的是**类怎么生成**,不是「这个见证是谁」,Core 不携带它们。
 
 | # | 事 | 消灭掉 |
 |---|---|---|
 | S1.1 | intrinsic 身份从 `String` 换成 ADT;可见性 / ABI 类别 / 运行时归属写进 `Sig` 声明 | `rt_intrinsic_target` 的前缀链、`erased_builtin_sig` 的**第二套**前缀链、`internal_builtins()` 的四份手抄名单、两张表里的死臂 |
 | S1.2 | 结构见证展开器:`WStructural` 在 lowering 期展开成 Core 里可见的逐字段比较(判别式 + 递归 `CEq`),标量塌缩成原语 | 11.1 的一;native 的 `dawn_adt_eq` 需求一并消失 |
-| S1.3 | Core 的字典表成为唯一真相,JVM 后端也读它(删 `emit.dawn:1875` 回查 `impl_table`) | 那张没人验过的表;`emit.dawn` 不再需要 `impl_table` 参数,Core 才真的后端无关 |
+| S1.3 ✅ | Core 的字典表成为唯一真相,JVM 后端也读它(删 `emit.dawn:1875` 回查 `impl_table`) | 那张没人验过的表;JVM 手写的五个字典生成器(prelude Eq/Hash/Ord × 标量、两个 structural)与 `gen_impl_class` 一并消失 |
 | S1.4 | `Show` 成为第四个 prelude trait,上同一条字典轨 | 11.1 的二;native 的渲染从「结构性无解」变成「和别的 trait 一样」 |
 | S1.5 | 标量能力表六合一;Map/Set 键合法性改走 bound | Cursor 那条自相矛盾 |
 | S1.6 | `WStructural` 收窄:只发给结构可分解到有 impl 的叶子,`TyFn`/`TyArray` 报错 | 11.1 的三 |
 
 **出口条件**:`known-red.txt` 里 `eq_adt:*`、`eq_bytes:jvm`、`show_derive:emitc`、
-`dict_forward:cc`、`const_fold:jvm` 六行全部删除(ratchet 会强制)。`eq_bytes:jvm` 是
+`dict_forward:cc`、`const_fold:jvm` 六行全部删除(ratchet 会强制)。**已删四行**
+(`eq_adt:native`/`eq_adt:diff`/`eq_bytes:jvm` 见 S1.2,`dict_forward:cc` 见 S1.3),
+余 `show_derive:emitc` 与 `const_fold:jvm`,都在 S1.4。`eq_bytes:jvm` 是
 其中唯一一条**今天就在生产后端上给错答案**的,S1.2 展开结构见证时它自然闭合——
 前提是展开器把 `Bytes` 当成有 impl 的叶子,而不是又一个「引用类型就 `Object.equals`」。
 
