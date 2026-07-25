@@ -19,7 +19,8 @@ use types.{
   subst,
   Ty, TyInt, TyFloat, TyBool, TyString, TyUnit, TyNever, TyError, TyVar,
   TyAdt, TyList, TyTuple, TyFn, Sym, Sig, Traits, TraitI, ImplI, MethodSig,
-  Adts, AdtI, CtorI, adt_of, trait_of, OPTION_ID, RESULT_ID, ORD_ID
+  Adts, AdtI, CtorI, adt_of, trait_of, OPTION_ID, RESULT_ID, ORD_ID, EQ_ID, HASH_ID,
+  is_eq_scalar
 }
 use tast.{
   TExpr, TStmt, TPat, TArm, TStrPart, TFun, TModule, TBinOp, TUnOp, TJavaCall,
@@ -667,6 +668,25 @@ fn lower_trait_call(
   let sg = trait_method_sig(tr, name)
   if len(ws) == 0 {
     panic("lower: trait method call without a witness: " ++ name)
+  }
+  # The prelude Eq/Hash impls over scalars have no body to call -- every
+  # backend compares and hashes these natively. Collapsing them to the
+  # primitive here is not an optimisation but the definition: it is also what
+  # a `[T: Eq]` bound instantiated at a scalar has to end up as.
+  match ws[0] {
+    WConcrete(_, subject) ->
+      if is_eq_scalar(subject) {
+        if tid == EQ_ID {
+          let (sta, lv) = lower_expr(st, args[0])
+          let (stb, rv) = lower_expr(sta, args[1])
+          return (stb, CBinary(CEq, lv, rv, TyBool))
+        }
+        if tid == HASH_ID {
+          let (sta, v) = lower_expr(st, args[0])
+          return (sta, CIntrinsic("hash", [v], TyInt))
+        }
+      }
+    _ -> ()
   }
   match ws[0] {
     WForward(sym) -> {

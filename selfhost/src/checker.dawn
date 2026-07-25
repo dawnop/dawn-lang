@@ -47,7 +47,7 @@ use types.{
   Adts, AdtI, CtorI, FieldI, Traits, TraitI, ImplI, Sym, Sig, MethodSig,
   adt_of, trait_of, ty_show, ctor_render, sig_render, subst, subst_eff,
   ty_named, is_numeric, is_errorish, prelude_adts, prelude_traits, prelude_impls, bounds_of,
-  builtins, opt_ty, result_ty, OPTION_ID, RESULT_ID, ORD_ID
+  builtins, opt_ty, result_ty, OPTION_ID, RESULT_ID, ORD_ID, EQ_ID, HASH_ID, eq_scalars
 }
 use jreflect.{
   JClass, JMethod, JCtor, JField, find_class, class_info, methods_of, ctors_of,
@@ -141,8 +141,9 @@ pub fn cx_new(owner_class: Option[String], src_path: Option[String]) -> Cx = {
   }
   Cx {
     diags: [],
-    # 0 and 1 are the prelude ADT ids (Option/Result); minted ids stay clear
-    next_id: 2,
+    # 0/1 are the prelude ADT ids (Option/Result) and 0/1/2 the prelude trait
+    # ids (Ord/Eq/Hash); one counter feeds both, so minting starts past all of them
+    next_id: 3,
     adts: prelude_adts(),
     traits: prelude_traits(),
     fns: map.empty(),
@@ -1105,13 +1106,15 @@ pub fn seed_prelude(cx: Cx) -> Cx = {
   # prelude traits: methods enter the fn namespace
   var tbn = cx1.traits_by_name
   var fns2 = cx1.fns
-  let ord = trait_of(cx1.traits, ORD_ID)
-  tbn = map.insert(tbn, ord.name, ORD_ID)
-  for entry in ord.methods {
-    let (mname, ms) = entry
-    fns2 = map.insert(fns2, mname, ms.sig)
+  for tid in [ORD_ID, EQ_ID, HASH_ID] {
+    let tr = trait_of(cx1.traits, tid)
+    tbn = map.insert(tbn, tr.name, tid)
+    for entry in tr.methods {
+      let (mname, ms) = entry
+      fns2 = map.insert(fns2, mname, ms.sig)
+    }
   }
-  # prelude Ord impls over the native scalars
+  # prelude Ord/Eq/Hash impls over the native scalars
   var it = cx1.impl_table
   for i in prelude_impls() { it = map.insert(it, (i.trait_id, i.subject), i) }
   Cx {
@@ -1154,6 +1157,16 @@ test "prelude seeding wires names to ids" {
   assert map.has(cx.fns, "cmp")
   assert map.has(cx.impl_table, (ORD_ID, TyInt))
   assert not map.has(cx.impl_table, (ORD_ID, TyBool))
+  # Eq/Hash ride the same rail; they cover the scalars Ord deliberately skips
+  assert map.get(cx.traits_by_name, "Eq") == Some(EQ_ID)
+  assert map.get(cx.traits_by_name, "Hash") == Some(HASH_ID)
+  assert map.has(cx.fns, "eq")
+  assert map.has(cx.fns, "hash")
+  for t in eq_scalars() {
+    assert map.has(cx.impl_table, (EQ_ID, t))
+    assert map.has(cx.impl_table, (HASH_ID, t))
+  }
+  assert not map.has(cx.impl_table, (ORD_ID, TyBytes))
 }
 
 ## What pass 1 learned about one `type` declaration, for pass 2 to finish.
@@ -1645,7 +1658,7 @@ pub fn pass_register_traits(cx: Cx, m: Module) -> Cx = {
         continue
       }
     if map.has(cx1.traits_by_name, d.name) {
-      let msg = if d.name == "Ord" {
+      let msg = if d.name == "Ord" || d.name == "Eq" || d.name == "Hash" {
         "`" ++ d.name ++ "` is a prelude trait and cannot be redefined"
       } else {
         "trait `" ++ d.name ++ "` is defined twice"
@@ -2215,13 +2228,21 @@ pub fn resolve_bounds(cx: Cx, tparams: List[TypeParamDecl]) -> (Cx, List[List[In
           }
           cx1 = cerr_h(cx1, "unknown trait: " ++ b.name, b.lo, b.hi, hint)
         }
-        Some(tid) -> {
-          var have = false
-          for x in ids {
-            if x == tid { have = true }
+        Some(tid) ->
+          # D0 lands Eq/Hash as names and impls before anything can forward
+          # their dictionaries; a bound is what would need one, so it stays
+          # shut until the prelude dictionaries are emitted (D0-2).
+          if tid == EQ_ID || tid == HASH_ID {
+            cx1 = cerr_h(cx1, "`" ++ b.name ++ "` cannot be used as a bound yet", b.lo, b.hi,
+              "impl it for a concrete type and call `" ++
+                (if tid == EQ_ID { "eq" } else { "hash" }) ++ "` directly")
+          } else {
+            var have = false
+            for x in ids {
+              if x == tid { have = true }
+            }
+            if not have { ids = ids ++ [tid] }
           }
-          if not have { ids = ids ++ [tid] }
-        }
       }
     }
     out = out ++ [ids]

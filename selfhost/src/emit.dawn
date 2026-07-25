@@ -25,7 +25,7 @@ use tast.{TJavaCall, TFun, TModule, TBinOp, BEq, BNeq, BLt, BLe, BGt, BGe}
 use interp.{CValue, VInt, VFloat, VBool, VStr, VUnit, VList, VTuple, VAdt, CtOut}
 use codegen.{
   obj, fn_iface, tuple_class, erased_apply_desc, desc_of, method_desc,
-  slots_of, is_ref, load_slot, supers_of, gen_adt, gen_ctor_class,
+  slots_of, is_ref, load_slot, hash_of, supers_of, gen_adt, gen_ctor_class,
   owner_prefix, tr_iface, impl_class, append_const, singleton_scaffold, emit_unerase,
   V17, ACC_PUBLIC, ACC_PRIVATE, ACC_PROTECTED, ACC_STATIC, ACC_FINAL,
   ACC_ABSTRACT, ACC_INTERFACE,
@@ -2152,6 +2152,19 @@ fn gen_cintrinsic(g: Gen, name: String, args: List[CExpr], ty: Ty) -> (Gen, Bool
   if name == "null_ref" {
     g.mv.visitInsn(OP_ACONST_NULL)
     return (g, true)
+  }
+  if name == "hash" {
+    # the prelude Hash over a scalar; the JVM's own hash for that type, widened
+    # because Dawn's Int is a long
+    let at = cex_ty(args[0])
+    let g1 = gen_cargs(g, args)
+    if at == TyBytes {
+      g1.mv.visitMethodInsn(OP_INVOKESTATIC, "java/util/Arrays", "hashCode", "([B)I", false)
+    } else {
+      hash_of(g1.mv, at)
+    }
+    g1.mv.visitInsn(OP_I2L)
+    return (g1, true)
   }
   if name == "args" {
     g.mv.visitFieldInsn(OP_GETSTATIC, g.class_name, ARGS_FIELD, "[Ljava/lang/String;")

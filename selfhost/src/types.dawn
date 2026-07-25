@@ -4,11 +4,15 @@
 # table (Map[Int, AdtI]) instead of holding a cyclic object reference, and
 # display strings are rendered on demand (ty_show needs the table for names).
 #
-# Fixed prelude ids (never minted by the checker's counter, which starts at 1):
-#   ADTs:  Option = 0, Result = 1        traits: Ord = 0
+# Fixed prelude ids (never minted by the checker's counter, which starts at 3):
+#   ADTs:  Option = 0, Result = 1        traits: Ord = 0, Eq = 1, Hash = 2
 #   type vars: builtin-signature T/U/A/K/V = -1..-5, Ord's T = -10,
-#              Option's T = -11, Result's T/E = -12/-13
+#              Option's T = -11, Result's T/E = -12/-13, Eq's T = -14,
+#              Hash's T = -15
 #   effect vars: the builtin signatures' `e` = -1
+#
+# ADT ids and trait ids are separate namespaces (Option and Ord are both 0) that
+# happen to share one counter, so reserving two more trait ids costs two ADT ids.
 
 use std/map
 use std/list
@@ -396,6 +400,15 @@ pub const RESULT_ID: Int = 1
 
 pub const ORD_ID: Int = 0
 
+## `==` and `!=`. Unlike Ord it is not reached by a method call in source --
+## the operator is the spelling -- but it rides the same dictionary rail, which
+## is what a backend without a universal `equals` needs (docs/native-backend-plan.md §1).
+pub const EQ_ID: Int = 1
+
+## The hash half of the same identity. Nothing in the language calls it yet;
+## the pure-Dawn Map/Set of D2 will, through a `[K: Eq + Hash]` bound.
+pub const HASH_ID: Int = 2
+
 pub fn opt_ty(t: Ty) -> Ty = TyAdt(OPTION_ID, [t])
 
 pub fn result_ty(t: Ty, e: Ty) -> Ty = TyAdt(RESULT_ID, [t, e])
@@ -434,7 +447,35 @@ pub fn prelude_adts() -> Adts = {
   map.from([(OPTION_ID, option), (RESULT_ID, result)])
 }
 
-## The prelude Ord trait (id 0): `< <= > >=` bridge to `cmp` beyond scalars.
+fn prelude_method(tid: Int, tv: Ty, name: String, ptys: List[Ty], pnames: List[String],
+  ret: Ty) -> Sig =
+  Sig {
+    name: name,
+    param_tys: ptys,
+    param_names: pnames,
+    ret: ret,
+    eff: EPure,
+    is_builtin: false,
+    tparams: [tv],
+    constraints: [[tid]],
+    owner: None,
+    trait_id: Some(tid),
+    inferring: false
+  }
+
+fn prelude_trait(tid: Int, name: String, tv: Ty, m: String, sig: Sig) -> TraitI =
+  TraitI {
+    id: tid,
+    name: name,
+    tvar: tv,
+    is_pub: true,
+    owner: None,
+    src_path: None,
+    methods: [(m, MethodSig { sig: sig, has_default: false })]
+  }
+
+## The prelude traits: Ord (id 0) whose `cmp` backs `< <= > >=` beyond scalars,
+## Eq (id 1) behind `==`/`!=`, and Hash (id 2), which nothing calls yet.
 pub fn prelude_traits() -> Traits = {
   let tv = TyVar("T", -10)
   let cmp_sig = Sig {
@@ -459,13 +500,18 @@ pub fn prelude_traits() -> Traits = {
     src_path: None,
     methods: [("cmp", MethodSig { sig: cmp_sig, has_default: false })]
   }
-  map.from([(ORD_ID, ord)])
+  let ev = TyVar("T", -14)
+  let eq = prelude_trait(EQ_ID, "Eq", ev, "eq",
+    prelude_method(EQ_ID, ev, "eq", [ev, ev], ["a", "b"], TyBool))
+  let hv = TyVar("T", -15)
+  let hash = prelude_trait(HASH_ID, "Hash", hv, "hash",
+    prelude_method(HASH_ID, hv, "hash", [hv], ["x"], TyInt))
+  map.from([(ORD_ID, ord), (EQ_ID, eq), (HASH_ID, hash)])
 }
 
-## Ord over the natively ordered scalars ships with the language.
-pub fn prelude_impls() -> List[ImplI] =
-  map([TyInt, TyFloat, TyString], fn(t) => ImplI {
-    trait_id: ORD_ID,
+fn prelude_impl(tid: Int, t: Ty) -> ImplI =
+  ImplI {
+    trait_id: tid,
     subject: t,
     lo: 0,
     hi: 1,
@@ -473,7 +519,30 @@ pub fn prelude_impls() -> List[ImplI] =
     owner: None,
     src_path: None,
     provided: []
-  })
+  }
+
+## The scalars every prelude trait covers natively. Ord takes the subset that
+## is actually ordered -- Bool, Bytes and Cursor compare for equality but have
+## no `<`, which is why the two lists differ.
+pub fn eq_scalars() -> List[Ty] = [TyInt, TyFloat, TyBool, TyString, TyBytes, TyCursor]
+
+## Is this one of the scalars whose Eq/Hash the backend implements natively?
+pub fn is_eq_scalar(t: Ty) -> Bool = {
+  for s in eq_scalars() {
+    if s == t { return true }
+  }
+  false
+}
+
+## Ord over the natively ordered scalars, Eq/Hash over every scalar, ship with
+## the language.
+pub fn prelude_impls() -> List[ImplI] = {
+  var out = map([TyInt, TyFloat, TyString], fn(t) => prelude_impl(ORD_ID, t))
+  for t in eq_scalars() {
+    out = out ++ [prelude_impl(EQ_ID, t), prelude_impl(HASH_ID, t)]
+  }
+  out
+}
 
 fn bsig(name: String, ptys: List[Ty], pnames: List[String], ret: Ty) -> Sig =
   Sig {
@@ -682,7 +751,10 @@ test "prelude shapes" {
   assert ctor_render(adts, opt.ctors[0]) == "Some(value: T): Option[T]"
   let traits = prelude_traits()
   assert trait_of(traits, ORD_ID).name == "Ord"
-  assert len(prelude_impls()) == 3
+  assert trait_of(traits, EQ_ID).name == "Eq"
+  assert trait_of(traits, HASH_ID).name == "Hash"
+  # 3 Ord (the ordered scalars) + Eq and Hash over all 6
+  assert len(prelude_impls()) == 3 + 2 * len(eq_scalars())
 }
 
 test "builtin table renders signatures" {
