@@ -51,6 +51,10 @@
 > 字段/元素在 `codegen.dawn:gen_equals_method` 与手写 Java 容器里，没有任何机制强制两者一致，
 > 于是它们在 `Bytes` 上分了岔。
 >
+> **已有语料盯着**：`scripts/spike-native/eq_bytes.dawn` 配一份手写的 `.expect`，把上表变成了
+> 检查；`eq_bytes:jvm` 记在 `known-red.txt` 里，而那是个双向 ratchet——修好的那天，这行必须
+> 跟着删。（`native` 侧还够不着：`bytes_*` 内建在 C 后端没实现。）
+>
 > **现在不修**。只修 record/tuple（能改）会留下「record 结构化、List 仍身份」的更难预测的不一致，
 > 而 `DawnList`/`DawnMap`/`DawnSet` 是归档在 `kotlin-final` 的手写 Java，今天改不动。
 > **D0 让 `Eq` 成为真 trait（`Eq[Bytes]` 只有一份实现）+ D2/D3 让容器变纯 Dawn 之后，

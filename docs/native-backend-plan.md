@@ -528,7 +528,7 @@ harness 把探针模块拷进一份 std/ 副本再编译,已接 CI。它验两�
 D1 收工后做了一次全项目审计,问的是「哪里不够纯粹、哪里是临时补丁」。**得到的答案比这个问题严重一档:
 有四处已经在给错答案了**,而且都不是新引入的。本节记这次审计,并据此重排 §4 的顺序。
 
-### 11.1 四条实测
+### 11.1 五条实测
 
 不是读代码读出来的推论,是跑出来的。
 
@@ -568,6 +568,23 @@ runtime point = Point(1, 2)   # 同一个表达式在运行期
 它只检查「块内有没有 io」,不检查那个 io 是不是 Java 调用。于是一个签名里没有 `!io` 的 `fn`
 可以往 stdout 打印。(升级到「编译期读文件塞进 const」**没能复现**——挡住它的是 `io_read_file`
 不在 comptime 解释器实现的那 37/82 个 intrinsic 里,不是效应系统。)
+
+**五、`Bytes` 的相等只在裸的时候按内容,一嵌进任何东西就变回身份——在 JVM 后端上。**
+
+```
+utf8("hi") == utf8("hi")                  yes
+Wrap(utf8("hi")) == Wrap(utf8("hi"))      no
+Blob { data: .. } == Blob { data: .. }    no      # Option / 元组 / List 同
+```
+
+`Bytes` 运行期就是 JVM 的 `byte[]`,它自带的 `equals` 是引用同一性,所以内容相等是**手写**的
+——而且只写了一处:`emit.gen_equality`,只有 `==` 运算符会走到。派生 `equals` 的字段臂、
+发出来的元组类、运行时容器,各有一份自己的「相等」,没有一份知道 `Bytes` 的存在。
+
+这和第一条是同一条缝的两面:第一条是两个后端对同一个 `CEq` 各自发明含义,这条是**同一个后端内部**
+「相等」有四五份定义。`bytes-design.md` 决策 A 已记下且**判为暂不修**——只修编译器发得出的那几处,
+会留下「record 结构化、List 仍身份」这种更难预测的不一致。闭合它的是 S1(`Eq` 成为真 trait,
+`Eq[Bytes]` 只有一份)+ D2/D3(容器变纯 Dawn),不是补丁。
 
 附带一条:`[T: Eq]` 转发的程序发出的 C 引用 `dawn_dict__default_1_eq` 与 `dawn_dict_1_Structural`,
 两个符号在整个文件里都没有定义。`CModule.dicts` 只有一个读者——未完成的 C 后端;JVM 后端绕过 Core,
@@ -629,7 +646,7 @@ runtime point = Point(1, 2)   # 同一个表达式在运行期
 | # | 事 | 出口条件 |
 |---|---|---|
 | S0.1 | 差分 harness 比 stdout + stderr + 退出码 | ✅ `616d3f7` |
-| S0.2 | 四个语料 + 手写 `.expect` + `known-red.txt` ratchet | ✅ `616d3f7`,六条红在案 |
+| S0.2 | 语料 + 手写 `.expect` + `known-red.txt` ratchet | ✅ `616d3f7` 四个语料六条红;`eq_bytes` 后补,八条红在案 |
 | S0.3 | 收回穷尽性检查 | ✅ `c2a891e`。往 `Ty` 插一个探针变体,报错数 **3 → 9**,两个后端都在内(改动前 emitc **一处都没有**) |
 | S0.4 | Core IR golden | ✅ `scripts/selfhost-core-diff.sh` 进 CI:三个程序的全量 dump + 编译器 52 模块的哈希清单 |
 | S0.5 | 自举耗时基线 | ✅ `scripts/selfhost-bench.sh` + `.baseline`(**本地工具,不进 CI**) |
@@ -668,8 +685,10 @@ runtime point = Point(1, 2)   # 同一个表达式在运行期
 | S1.5 | 标量能力表六合一;Map/Set 键合法性改走 bound | Cursor 那条自相矛盾 |
 | S1.6 | `WStructural` 收窄:只发给结构可分解到有 impl 的叶子,`TyFn`/`TyArray` 报错 | 11.1 的三 |
 
-**出口条件**:`known-red.txt` 里 `eq_adt:*`、`show_derive:emitc`、`dict_forward:cc`、
-`const_fold:jvm` 五行全部删除(ratchet 会强制)。
+**出口条件**:`known-red.txt` 里 `eq_adt:*`、`eq_bytes:jvm`、`show_derive:emitc`、
+`dict_forward:cc`、`const_fold:jvm` 六行全部删除(ratchet 会强制)。`eq_bytes:jvm` 是
+其中唯一一条**今天就在生产后端上给错答案**的,S1.2 展开结构见证时它自然闭合——
+前提是展开器把 `Bytes` 当成有 impl 的叶子,而不是又一个「引用类型就 `Object.equals`」。
 
 #### S2 — 把语言表达不出来的东西还给语言
 

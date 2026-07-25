@@ -26,7 +26,7 @@
 行为认证成正确答案;而**两个后端共有的缺陷会让它们在错答案上达成一致**——凡是编译期折叠的东西
 都属此类,两边折的是同一份 `interp.dawn`。`<name>.expect` 是唯一一份不是从后端抄来的判据。
 
-**当前状态:9 个语料,6 个检查是红的,全部记在 `known-red.txt` 里。**
+**当前状态:10 个语料,8 个检查是红的,全部记在 `known-red.txt` 里。**
 
 ## 组成
 
@@ -45,6 +45,7 @@
 | `show_derive.dawn` | 语料七:`derive Show` 与插值——标量/ADT/泛型参数/prelude 容器 |
 | `dict_forward.dawn` | 语料八:`[T: Eq/Hash/Ord]` bound 的字典转发,三种见证各一 |
 | `const_fold.dawn` | 语料九:comptime 折叠——每个 `const` 都配一行同表达式的运行期输出 |
+| `eq_bytes.dawn` | 语料十:`Bytes` 相等——裸的按内容,嵌进 record/ctor/Option/元组就按身份 |
 | `<name>.expect` | 该语料的期望输出(**手写,不从后端抄**) |
 | `known-red.txt` | 今天就红的检查清单,带 ratchet |
 | `run.sh` | 差分 harness |
@@ -63,8 +64,13 @@ ADT 构造与字段读、match(含守卫、嵌套模式、字面量模式、元�
 **装箱(在类型变量槽的进出)**。
 
 **在外**(碰到就 `panic` 报节点名):集合(List/Map/Set,等 D1–D3)、comptime const、
-derive 出来的 impl、列表模式、解构 let、`use java`。
+derive 出来的 impl、列表模式、解构 let、`bytes_*` 内建、`use java`。
 最后一个不是缺口而是设计——`use java` 正是 FFI 里不可移植的那一半,native 后端**应该**拒绝它。
+
+**在外,但不 panic**:`emitc` 只发**用户模块**。调到 std 的函数会发出一句调用,而那个函数
+的定义从不出现——没有前向声明、没有诊断,唯一发现它的是 `cc` 的 `-Werror`(隐式声明)。
+故语料一律只用内建,不 `use std/*`;`eq_bytes.dawn` 直接调 `bytes_utf8` 而不是
+`bytes.utf8`,就是为了让它红在相等上,而不是红在这条上。
 
 ## 准入规则改了(2026-07-25)
 

@@ -1,0 +1,81 @@
+# `Bytes` equality, bare and nested. spec §4.3 (`==` is structural) and §9.5.1
+# (`Bytes` compares by content).
+#
+# The two rules compose: a record holding two content-equal `Bytes` is equal.
+# Today only the bare case answers that way. `Bytes` is a JVM `byte[]`, whose
+# own `equals` is reference identity, so content equality had to be written by
+# hand -- and it was written once, in `emit.gen_equality`, which is only ever
+# reached by the `==` operator. Every other place that compares two Dawn values
+# has its own copy of "what equal means" and none of them knows about `Bytes`:
+# derived `equals` fields, the emitted tuple class, the runtime containers.
+#
+# So this corpus is not about `Bytes`. It is about equality having no single
+# definition -- `Bytes` is just the type where the copies visibly disagree.
+# eq_adt.dawn shows the same seam across backends; this one shows it inside the
+# backend that ships.
+#
+# Two deliberate restrictions, both so a failure here means what it says:
+#
+#   * `bytes_utf8` / `bytes_slice` are called as intrinsics rather than through
+#     `use std/bytes`. `emitc` emits calls into std without ever emitting std
+#     (see README), so the std spelling would fail at `cc` for a reason that has
+#     nothing to do with equality.
+#   * printing is if/else, never `to_string`. Rendering is show_derive.dawn's
+#     job, and `Show` of `Bytes` is a summary (`<N bytes>`) that would hide the
+#     content the comparisons are about.
+use std/io
+
+pub type Wrap = | Wrap(b: Bytes)
+
+pub type Blob = { name: String, data: Bytes }
+
+pub type Nested = { tag: Int, inner: Blob }
+
+fn yn(label: String, b: Bool) -> String =
+  label ++ ": " ++ (if b { "yes" } else { "no" })
+
+pub fn main() -> Unit !io = {
+  # content-equal, built three different ways, so nothing here can pass by
+  # accident of the two operands being the same array
+  let a = bytes_utf8("hi")
+  let b = bytes_utf8("hi")
+  let c = bytes_utf8("h") ++ bytes_utf8("i")
+  let d = bytes_slice(bytes_utf8("xhiy"), 1, 3)
+  let other = bytes_utf8("ho")
+
+  println("-- bare Bytes: the one place content equality was written --")
+  println(yn("utf8 == utf8    ", a == b))
+  println(yn("utf8 == concat  ", a == c))
+  println(yn("utf8 == slice   ", a == d))
+  println(yn("utf8 == other   ", a == other))
+  println(yn("utf8 != other   ", a != other))
+
+  println("-- in a constructor --")
+  println(yn("Wrap(a) == Wrap(b)", Wrap(a) == Wrap(b)))
+  println(yn("Wrap(a) == Wrap(c)", Wrap(a) == Wrap(c)))
+  println(yn("Wrap(a) == Wrap(o)", Wrap(a) == Wrap(other)))
+
+  println("-- in a record, and in a record inside a record --")
+  let x = Blob { name: "f", data: a }
+  let y = Blob { name: "f", data: b }
+  let z = Blob { name: "f", data: other }
+  println(yn("Blob == Blob      ", x == y))
+  println(yn("Blob == Blob (diff)", x == z))
+  println(yn("Nested == Nested  ", Nested { tag: 1, inner: x } == Nested { tag: 1, inner: y }))
+
+  println("-- in Option and in a tuple --")
+  let sa: Option[Bytes] = Some(a)
+  let sb: Option[Bytes] = Some(b)
+  let none_b: Option[Bytes] = None
+  println(yn("Some(a) == Some(b)", sa == sb))
+  println(yn("Some(a) == None   ", sa == none_b))
+  println(yn("(a,1) == (b,1)    ", (a, 1) == (b, 1)))
+  println(yn("(a,1) == (b,2)    ", (a, 1) == (b, 2)))
+
+  println("-- empty and length-sensitive --")
+  let empty1 = bytes_slice(a, 0, 0)
+  let empty2 = bytes_utf8("")
+  println(yn("empty == empty  ", empty1 == empty2))
+  println(yn("Wrap(e) == Wrap(e)", Wrap(empty1) == Wrap(empty2)))
+  println(yn("hi == h         ", a == bytes_utf8("h")))
+}

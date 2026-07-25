@@ -17,6 +17,22 @@
 eq_adt:native
 eq_adt:diff
 
+# The same seam, inside the backend that ships. `Bytes` is a JVM byte[], so
+# content equality had to be hand-written -- and it was written once, in
+# emit.gen_equality, which only the `==` operator reaches. Derived equals, the
+# tuple class and the runtime containers each carry their own copy of "what
+# equal means" and none of them mentions Bytes, so eight lines of eq_bytes.dawn
+# answer no where the spec says yes. Recorded in bytes-design.md 决策 A: fixing
+# only the parts the compiler emits would leave records structural and lists
+# still identity, which is worse than one consistent wrong answer. What closes
+# it is Eq becoming a real trait with a single Eq[Bytes] (S1.2/S1.6) plus D2/D3
+# turning the containers into Dawn.
+eq_bytes:jvm
+
+# bytes_* has no native implementation yet -- an honest gap, and the reason
+# only the jvm check above carries evidence.
+eq_bytes:emitc
+
 # --- rendering ------------------------------------------------------------
 # Show is not a trait: an AdtI flag, a checker predicate, and an instanceof
 # chain in dawn/rt/Show. A tagged union has no chain to walk, so there is
