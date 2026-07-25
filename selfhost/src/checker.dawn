@@ -33,7 +33,6 @@ use tast.{
   XCallBuiltin, XCallFn, XApply, XJava, XLambda, XCtor, XConstRef, XCtorValue, XField,
   XListLit, XTupleLit, XPropagate, XUnwrap, XIndex, XReturn, XBreak, XContinue,
   XComptime, XUnsafePure, XBinary, XUnary, XIf, XMatch, XBlock, XError,
-  WStructural,
   TBinOp, BAdd, BSub, BMul, BDiv, BMod, BConcat, BEq, BNeq, BLt, BLe, BGt, BGe,
   BAnd, BOr, BBand, BBor, BBxor, BShl, BShr, BUshr,
   TUnOp, UNeg, UNot, UBnot, TStrPart, TSPText, TSPInterp, TArm, TJavaCall,
@@ -4481,9 +4480,13 @@ pub fn resolve_witness(
           # is usually not a missing capability -- but "usually" is not
           # "always", and this used to say always. The same walk `==` asks
           # decides here, so the bound cannot accept what the operator refuses.
+          #
+          # The witness is a plain WConcrete: "which impl" and "is there one"
+          # are the table's question, not a witness kind's, and lowering asks
+          # the table either way.
           if trait_id == EQ_ID || trait_id == HASH_ID {
             match uncomparable_part(cx, t, set.empty()) {
-              None -> return (cx, Some(WStructural(trait_id, t)))
+              None -> return (cx, Some(WConcrete(trait_id, t)))
               Some(bad) -> return (uncomparable_err(cx, t, bad, lo, hi), no_wit())
             }
           }
@@ -4534,6 +4537,17 @@ test "ctor values and witnesses" {
   assert cx4.diags[0].msg == "no impl of `Ord` for `Bool`"
   # Ord over a non-ADT gets the ordering-specific hint (the Kotlin implHint order)
   assert cx4.diags[0].hint == "only Int, Float, String and types with an `impl Ord` can be ordered"
+  # Eq over a type with no impl is the structural default, and it is the same
+  # kind of witness as one an impl supplies -- the table, not the witness,
+  # records which of the two it was
+  let (cx5, ok5) = resolve_witness(cx, EQ_ID, TyList(TyInt), 0, 4, "`f`")
+  assert len(cx5.diags) == 0
+  assert ok5 == Some(WConcrete(EQ_ID, TyList(TyInt)))
+  assert not has_impl_at(cx5.impl_table, EQ_ID, TyList(TyInt))
+  # a function value still has no equality, and says so at the bound
+  let (cx6, ok6) = resolve_witness(cx, EQ_ID, TyList(TyFn([TyInt], TyInt, EPure)), 0, 4, "`f`")
+  assert ok6 == None
+  assert str.contains(cx6.diags[0].msg, "cannot be compared")
 }
 
 # ---- the recursive expression checker (pass 5 core) ----

@@ -36,7 +36,7 @@ use tast.{
   BAnd, BOr, BBand, BBor, BBxor, BShl, BShr, BUshr, UNeg, UNot, UBnot,
   TPWild, TPBind, TPLit, TPTuple, TPList, TPCtor,
   TSLet, TSLetPat, TSLocalFn, TSAssign, TSExpr, TSAssert, TSWhile, TSFor,
-  WitRef, WForward, WConcrete, WStructural
+  WitRef, WForward, WConcrete
 }
 use exhaustive.{LitV, LInt, LFloat, LBool, LStr}
 use core.{
@@ -956,20 +956,22 @@ fn ctor_fields_eq(st: LSt, a: CExpr, b: CExpr, sc: Ty, aid: Int, ci: Int) -> (LS
 fn subject_of(w: WitRef) -> Ty =
   match w {
     WConcrete(_, s) -> s
-    WStructural(_, s) -> s
     WForward(_) -> panic("lower: a forwarded witness has no subject")
   }
 
-fn primitive_witness(w: WitRef, tid: Int) -> Bool =
+## Does this call have to reach `prim_relation` rather than a method body?
+##
+## The table says so. An impl that neither provides a method nor was derived
+## has no body anywhere -- that is the prelude's scalar Eq/Hash/Ord -- and no
+## impl at all means Eq/Hash's structural default. This used to be three
+## hand-written conditions (a witness kind, `is_eq_scalar`, `is_ord_scalar`);
+## they were three spellings of one question the table already answers.
+fn primitive_witness(st: LSt, w: WitRef, tid: Int) -> Bool =
   match w {
-    WStructural(_, _) -> tid == EQ_ID || tid == HASH_ID
     WConcrete(_, subject) ->
-      if tid == EQ_ID || tid == HASH_ID {
-        is_eq_scalar(subject)
-      } else if tid == ORD_ID {
-        is_ord_scalar(subject)
-      } else {
-        false
+      match impl_at(st.impls, tid, subject) {
+        Some(imp) -> not imp.derived && len(imp.provided) == 0
+        None -> tid == EQ_ID || tid == HASH_ID
       }
     _ -> false
   }
@@ -985,12 +987,10 @@ fn is_eq_op(op: TBinOp) -> Bool =
 fn witness_value(st: LSt, w: WitRef) -> (LSt, CExpr) =
   match w {
     WForward(sym) -> (st, CLocal(sym, TyAdt(0 - 1, [])))
-    WConcrete(tid, subject) -> dict_ref(st, tid, subject)
     # The structural default is not a different kind of dictionary, only one
-    # whose slots the compiler supplies. It used to short-circuit to a shared
-    # key with no definition behind it, which is how a dictionary reference
-    # with nothing to point at got into the emitted C.
-    WStructural(tid, subject) -> dict_ref(st, tid, subject)
+    # whose slots the compiler supplies -- which is why deleting WStructural
+    # changed nothing here.
+    WConcrete(tid, subject) -> dict_ref(st, tid, subject)
   }
 
 fn witness_values(st: LSt, ws: List[WitRef]) -> (LSt, List[CExpr]) = {
@@ -1026,7 +1026,7 @@ fn lower_trait_call(
   # relation `==` emits, and what a bound instantiated at either has to end
   # up as. `prim_relation` is also what fills the dictionary slot when the
   # subject is not statically known, so the two forms cannot drift apart.
-  if primitive_witness(ws[0], tid) {
+  if primitive_witness(st, ws[0], tid) {
     var st1 = st
     var vs: List[CExpr] = []
     for a in args {
@@ -1037,8 +1037,6 @@ fn lower_trait_call(
     return prim_relation(st1, tid, subject_of(ws[0]), vs)
   }
   match ws[0] {
-    # only reachable for a trait other than Eq/Hash: the guard above returned
-    WStructural(_, _) -> panic("lower: structural witness for trait " ++ to_string(tid))
     WForward(sym) -> {
       # the dictionary slot has the trait's generic signature, so the
       # subject position is erased and the argument is boxed
