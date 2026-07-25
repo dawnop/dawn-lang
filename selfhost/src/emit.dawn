@@ -3635,7 +3635,9 @@ pub fn emit_module(
 # discipline the backend migration used: keep the old path default and
 # green, bring the new one up beside it, flip when it matches, delete then.
 #
-# Set DAWN_VIA_CORE=1 to compile bodies through Core.
+# This is the flip: Core is the default now. `DAWN_VIA_CORE=0` still selects
+# the TAST path, and exists only to bisect this one commit -- the TAST
+# expression layer is deleted next, and the switch with it.
 #
 # Note how much is NOT here. There is no gen_match, no gen_for_*, no
 # gen_while, no gen_propagate, no gen_unwrap, no gen_str_lit interpolation,
@@ -3644,8 +3646,8 @@ pub fn emit_module(
 
 fn via_core() -> Bool !io =
   match System.getenv("DAWN_VIA_CORE") {
-    Some(v) -> v == "1"
-    None -> false
+    Some(v) -> v != "0"
+    None -> true
   }
 
 fn sig_of_call(g: Gen, owner: String, name: String) -> Sig =
