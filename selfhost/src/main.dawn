@@ -18,7 +18,7 @@ use parser
 use dump
 use astdump
 use checkdump
-use stdlib
+use stdlib.{StdCtx, load_std}
 use analyze.{CheckedMod, LocDiag, load_directory, load_file, analyze_program}
 use vendor
 use jarw
@@ -149,7 +149,7 @@ fn collect_program(
     if File.new(target).isFile() && not str.ends_with(target, ".dawn") {
       cli_error("source files must end in .dawn: " ++ target)
     }
-    let std = match stdlib.load_std(std_dir) {
+    let std = match load_std(std_dir) {
       Ok(sc) -> sc
       Err(e) -> panic("cannot load std from " ++ std_dir ++ ": " ++ e)
     }
@@ -967,7 +967,7 @@ fn run_doc(rest: List[String]) -> Unit !io = {
       i = i + 1
     }
   }
-  let std = match stdlib.load_std(std_dir) {
+  let std = match load_std(std_dir) {
     Ok(sc) -> sc
     Err(e) -> panic("cannot load std from " ++ std_dir ++ ": " ++ e)
   }
@@ -985,6 +985,139 @@ fn run_doc(rest: List[String]) -> Unit !io = {
   let prog = analyze_program(loaded, std, 100000000)
   if len(prog.diags) > 0 { fail_doc(prog.diags) }
   print(doc.project_json(prog))
+}
+
+## Lowering coverage gate (docs/native-backend-plan.md Phase 0): lower every
+## module of a program to Core IR and report which ones survive. Retargeting
+## emit.dawn is gated on this reaching the whole language -- the compiler
+## cannot compile itself through an IR that cannot represent it.
+##
+## Each module is lowered inside catch_panic so one gap does not hide the
+## rest: a single run lists everything still missing.
+fn run_lower(rest: List[String]) -> Unit !io = {
+  var std_dir = "std"
+  var targets: List[String] = []
+  var i = 0
+  while i < len(rest) {
+    if rest[i] == "--std" && i + 1 < len(rest) {
+      std_dir = rest[i + 1]
+      i = i + 2
+    } else {
+      targets = targets ++ [rest[i]]
+      i = i + 1
+    }
+  }
+  if len(targets) != 1 {
+    cli_error("__lower takes exactly one target")
+  }
+  let std = match load_std(std_dir) {
+    Ok(sc) -> sc
+    Err(e) -> panic("cannot load std from " ++ std_dir ++ ": " ++ e)
+  }
+  let t = targets[0]
+  let loaded = if io.is_dir(t) { load_directory(t) } else { load_file(t) }
+  let prog = analyze_program(loaded, std, 100000000)
+  if len(prog.diags) > 0 { fail_compile(prog.diags) }
+  let (adts, traits, impl_table, prog_fns) = program_tables(std, prog.modules)
+
+  var ok = 0
+  var bad = 0
+  var seen: Set[String] = set.empty()
+  # std first: the compiler is compiled against it, so a gap there matters
+  # just as much
+  for sm in std.mods {
+    let (cls, _cx, tm, _ct) = sm
+    match catch_panic(fn() =>
+        lower_size(lower.lower_module(cls, tm, traits, impl_table, adts, prog_fns))) {
+          Ok(_n) -> { ok = ok + 1 }
+          Err(e) -> {
+            bad = bad + 1
+            if not set.has(seen, e) {
+              seen = set.insert(seen, e)
+              println("GAP  " ++ cls ++ ": " ++ e)
+            }
+          }
+        }
+  }
+  for cm in prog.modules {
+    match catch_panic(fn() =>
+        lower_size(lower.lower_module(cm.class_name, cm.tm, traits, impl_table, adts, prog_fns))) {
+          Ok(_n) -> { ok = ok + 1 }
+          Err(e) -> {
+            bad = bad + 1
+            if not set.has(seen, e) {
+              seen = set.insert(seen, e)
+              println("GAP  " ++ cm.class_name ++ ": " ++ e)
+            }
+          }
+        }
+  }
+  println("")
+  println("lowered " ++ to_string(ok) ++ " module(s), " ++ to_string(bad) ++ " failed")
+  if bad > 0 {
+    let _ = System.exit(1)
+    ()
+  }
+}
+
+## Force the lowered module so a panic happens inside catch_panic rather
+## than lazily afterwards.
+fn lower_size(m: CModule) -> Int = {
+  var n = 0
+  for f in m.fns {
+    n = n + len(f.params) + len(f.dicts) + 1
+  }
+  n + len(m.dicts)
+}
+
+## Trait/impl/ADT/signature tables unioned over std and user modules, as
+## collect_program builds them for the JVM path: ids are unique program-wide.
+fn program_tables(
+  std: StdCtx,
+  mods: List[CheckedMod]
+) -> (Adts, Traits, Map[(Int, Ty), ImplI], Map[(String, String), Sig]) = {
+  var adts = prelude_adts()
+  var traits: Traits = map.empty()
+  var impl_table: Map[(Int, Ty), ImplI] = map.empty()
+  var prog_fns: Map[(String, String), Sig] = map.empty()
+  for pr in map.entries(std.adts) {
+    let (k, v) = pr
+    adts = map.insert(adts, k, v)
+  }
+  for sm in std.mods {
+    let (cls, cx, _tm, _ct) = sm
+    for pr in map.entries(cx.traits) {
+      let (k, v) = pr
+      traits = map.insert(traits, k, v)
+    }
+    for pr in map.entries(cx.impl_table) {
+      let (k, v) = pr
+      impl_table = map.insert(impl_table, k, v)
+    }
+    for pr in map.entries(cx.fns) {
+      let (k, v) = pr
+      prog_fns = map.insert(prog_fns, (cls, k), v)
+    }
+  }
+  for cm in mods {
+    for pr in map.entries(cm.cx.adts) {
+      let (k, v) = pr
+      adts = map.insert(adts, k, v)
+    }
+    for pr in map.entries(cm.cx.traits) {
+      let (k, v) = pr
+      traits = map.insert(traits, k, v)
+    }
+    for pr in map.entries(cm.cx.impl_table) {
+      let (k, v) = pr
+      impl_table = map.insert(impl_table, k, v)
+    }
+    for pr in map.entries(cm.cx.fns) {
+      let (k, v) = pr
+      prog_fns = map.insert(prog_fns, (cm.class_name, k), v)
+    }
+  }
+  (adts, traits, impl_table, prog_fns)
 }
 
 ## The Phase -1 native seam spike (docs/native-backend-plan.md): emit C for
@@ -1011,7 +1144,7 @@ fn run_emitc(rest: List[String]) -> Unit !io = {
   if len(targets) != 1 {
     cli_error("__emitc takes exactly one target")
   }
-  let std = match stdlib.load_std(std_dir) {
+  let std = match load_std(std_dir) {
     Ok(sc) -> sc
     Err(e) -> panic("cannot load std from " ++ std_dir ++ ": " ++ e)
   }
@@ -1019,49 +1152,7 @@ fn run_emitc(rest: List[String]) -> Unit !io = {
   let loaded = if io.is_dir(t) { load_directory(t) } else { load_file(t) }
   let prog = analyze_program(loaded, std, 100000000)
   if len(prog.diags) > 0 { fail_compile(prog.diags) }
-  # trait/impl/ADT tables unioned over std and user modules, exactly as
-  # collect_program does for the JVM path: ids are unique program-wide
-  var adts = prelude_adts()
-  var traits: Traits = map.empty()
-  var impl_table: Map[(Int, Ty), ImplI] = map.empty()
-  var prog_fns: Map[(String, String), Sig] = map.empty()
-  for pr in map.entries(std.adts) {
-    let (k, v) = pr
-    adts = map.insert(adts, k, v)
-  }
-  for sm in std.mods {
-    let (cls, cx, _tm, _ct) = sm
-    for pr in map.entries(cx.traits) {
-      let (k, v) = pr
-      traits = map.insert(traits, k, v)
-    }
-    for pr in map.entries(cx.impl_table) {
-      let (k, v) = pr
-      impl_table = map.insert(impl_table, k, v)
-    }
-    for pr in map.entries(cx.fns) {
-      let (k, v) = pr
-      prog_fns = map.insert(prog_fns, (cls, k), v)
-    }
-  }
-  for cm in prog.modules {
-    for pr in map.entries(cm.cx.adts) {
-      let (k, v) = pr
-      adts = map.insert(adts, k, v)
-    }
-    for pr in map.entries(cm.cx.traits) {
-      let (k, v) = pr
-      traits = map.insert(traits, k, v)
-    }
-    for pr in map.entries(cm.cx.impl_table) {
-      let (k, v) = pr
-      impl_table = map.insert(impl_table, k, v)
-    }
-    for pr in map.entries(cm.cx.fns) {
-      let (k, v) = pr
-      prog_fns = map.insert(prog_fns, (cm.class_name, k), v)
-    }
-  }
+  let (adts, traits, impl_table, prog_fns) = program_tables(std, prog.modules)
   var mods: List[CModule] = []
   var entry = ""
   for cm in prog.modules {
@@ -1097,7 +1188,7 @@ fn run_check(rest: List[String]) -> Unit !io = {
       i = i + 1
     }
   }
-  let std = match stdlib.load_std(std_dir) {
+  let std = match load_std(std_dir) {
     Ok(sc) -> sc
     Err(e) -> panic("cannot load std from " ++ std_dir ++ ": " ++ e)
   }
@@ -1123,6 +1214,8 @@ pub fn main() -> Unit !io = {
         run_emitrt(rest)
       } else if mode == "__emitc" {
         run_emitc(rest)
+      } else if mode == "__lower" {
+        run_lower(rest)
       } else if mode == "build" {
         maybe_with_deps(mode, rest)
         run_build(rest)

@@ -19,7 +19,7 @@ use types.{
   subst,
   Ty, TyInt, TyFloat, TyBool, TyString, TyUnit, TyNever, TyError, TyVar,
   TyAdt, TyList, TyTuple, TyFn, Sym, Sig, Traits, TraitI, ImplI, MethodSig,
-  Adts, trait_of, OPTION_ID, RESULT_ID
+  Adts, AdtI, CtorI, adt_of, trait_of, OPTION_ID, RESULT_ID
 }
 use tast.{
   TExpr, TStmt, TPat, TArm, TStrPart, TFun, TModule, TBinOp, TUnOp, TJavaCall,
@@ -174,6 +174,58 @@ fn to_str(e: CExpr, t: Ty) -> CExpr =
     CIntrinsic("show", [adapt_in(e, t, TyVar("T", 0))], TyString)
   }
 
+# ---- constructor fields ----
+
+## A constructor field is STORED at its declared type, which for a generic
+## ADT is a type variable and therefore boxed. Reading it back at the
+## concrete type is an unbox, and writing a concrete value into it is a box.
+##
+## The JVM emitter does this inline at every field access (adapt_from /
+## adapt_to on the declared type); Core has to make it explicit, or the
+## second backend simply will not know the field is erased. Getting it wrong
+## is invisible on a backend whose fields are a union -- which is why the C
+## backend was happy before this was written.
+fn declared_field_ty(st: LSt, adt: Int, ci: Int, idx: Int) -> Ty = {
+  let a = adt_of(st.adts, adt)
+  let c = a.ctors[ci]
+  if idx < len(c.fields) { c.fields[idx].ty } else { TyError }
+}
+
+## The declared field type with the ADT's type arguments substituted in.
+fn concrete_field_ty(st: LSt, scrut: Ty, adt: Int, ci: Int, idx: Int) -> Ty = {
+  let a = adt_of(st.adts, adt)
+  let c = a.ctors[ci]
+  if idx >= len(c.fields) {
+    return TyError
+  }
+  let targs =
+    match scrut {
+      TyAdt(_, args) -> args
+      _ -> []
+    }
+  var m: Map[Int, Ty] = map.empty()
+  var k = 0
+  for tp in a.tparams {
+    match tp {
+      TyVar(_, vid) ->
+        if k < len(targs) {
+          m = map.insert(m, vid, targs[k])
+        }
+      _ -> ()
+    }
+    k = k + 1
+  }
+  subst(c.fields[idx].ty, m, map.empty())
+}
+
+## Read a constructor field, unboxing if the field is declared at a type
+## variable but used at a concrete type.
+fn read_field(st: LSt, target: CExpr, scrut: Ty, adt: Int, ci: Int, idx: Int) -> CExpr = {
+  let declared = declared_field_ty(st, adt, ci, idx)
+  let concrete = concrete_field_ty(st, scrut, adt, ci, idx)
+  adapt_out(CField(target, adt, ci, idx, declared), declared, concrete)
+}
+
 # ---- patterns ----
 
 ## A pattern compiles to (test, binds): a short-circuiting condition over
@@ -215,8 +267,8 @@ fn pat_test(st: LSt, subj: CExpr, p: TPat, t: Ty) -> (LSt, CExpr, List[CStmt]) =
       for fp in field_pats {
         match fp {
           Some(sub) -> {
-            let ft = pat_ty(st1, sub)
-            let proj = CField(subj, adt, ci, i, ft)
+            let ft = concrete_field_ty(st1, t, adt, ci, i)
+            let proj = read_field(st1, subj, t, adt, ci, i)
             let (st2, c, bs) = pat_test(st1, proj, sub, ft)
             st1 = st2
             cond = and_of(cond, c)
@@ -228,11 +280,69 @@ fn pat_test(st: LSt, subj: CExpr, p: TPat, t: Ty) -> (LSt, CExpr, List[CStmt]) =
       }
       (st1, cond, binds)
     }
-    TPList(_, _, _, _) ->
-      # List patterns need the collection surface, which D2/D3 turn into
-      # ordinary constructors. Until then they stay a backend concern.
-      panic("lower: list patterns are not lowered yet (D2/D3)")
+    TPList(pre, has_rest, rest_sym, post) ->
+      lower_list_pattern(st, subj, t, pre, has_rest, rest_sym, post)
   }
+
+## A list pattern: a length test plus element tests at fixed offsets from
+## each end. `..rest` binds the middle. Once D2/D3 make List an ordinary
+## Dawn ADT this becomes a plain constructor pattern and disappears.
+fn lower_list_pattern(
+  st: LSt,
+  subj: CExpr,
+  t: Ty,
+  pre: List[TPat],
+  has_rest: Bool,
+  rest_sym: Option[Int],
+  post: List[TPat]
+) -> (LSt, CExpr, List[CStmt]) = {
+  let et =
+    match t {
+      TyList(e) -> e
+      _ -> TyError
+    }
+  let n = len(pre) + len(post)
+  let count = CIntrinsic("len", [subj], TyInt)
+  var cond: CExpr =
+    if has_rest {
+      CBinary(CGe, count, CInt(n), TyBool)
+    } else {
+      CBinary(CEq, count, CInt(n), TyBool)
+    }
+  var binds: List[CStmt] = []
+  var st1 = st
+  var i = 0
+  for p in pre {
+    let elem = adapt_out(
+      CIntrinsic("list_index", [subj, CInt(i)], TyVar("E", 0)), TyVar("E", 0), et)
+    let (st2, c, bs) = pat_test(st1, elem, p, et)
+    st1 = st2
+    cond = and_of(cond, c)
+    binds = binds ++ bs
+    i = i + 1
+  }
+  var j = len(post)
+  for p in post {
+    # counted from the end, so a `..rest` of unknown width does not shift it
+    let idx = CBinary(CSub, count, CInt(j), TyInt)
+    let elem = adapt_out(
+      CIntrinsic("list_index", [subj, idx], TyVar("E", 0)), TyVar("E", 0), et)
+    let (st2, c, bs) = pat_test(st1, elem, p, et)
+    st1 = st2
+    cond = and_of(cond, c)
+    binds = binds ++ bs
+    j = j - 1
+  }
+  match rest_sym {
+    Some(rs) -> {
+      binds = binds ++ [CSLet(rs, t,
+        CIntrinsic("list_slice",
+          [subj, CInt(len(pre)), CBinary(CSub, count, CInt(len(post)), TyInt)], t))]
+    }
+    None -> ()
+  }
+  (st1, cond, binds)
+}
 
 ## The type a projection should be read at. TPCtor does not carry field
 ## types, but the checker already typed every binding, so the sub-pattern
@@ -412,7 +522,7 @@ fn dict_ref(st: LSt, tid: Int, subject: Ty) -> (LSt, CExpr) = {
     for entry in tr.methods {
       let (mn, _ms) = entry
       if provides(imp, mn) {
-        let (st2, bridge) = make_bridge(st1, tr, tid, subject, iowner, mn)
+        let (st2, bridge) = make_bridge(st1, tr, tid, subject, iowner, mn, imp.derived)
         st1 = st2
         slots = slots ++ [CSlotFn(st1.owner, bridge)]
       } else {
@@ -442,7 +552,8 @@ fn make_bridge(
   tid: Int,
   subject: Ty,
   iowner: String,
-  method: String
+  method: String,
+  derived: Bool
 ) -> (LSt, String) = {
   let sg = trait_method_sig(tr, method)
   let psig = subst_subject(tr, sg, subject)
@@ -469,7 +580,7 @@ fn make_bridge(
     # every slot has the same signature
     let (st3, dsym) = fresh_sym(st1)
     st1 = st3
-    let call = CCall(CImpl(iowner, tid, subject, method), args, psig.ret)
+    let call = CCall(CImpl(iowner, tid, subject, method, derived), args, psig.ret)
     let f = CFun {
       name: name,
       owner: st1.owner,
@@ -533,7 +644,13 @@ fn lower_trait_call(
     WConcrete(_, subject) -> {
       let imp = impl_for(st, tid, subject)
       if imp.derived {
-        panic("lower: derived impls are not lowered yet (" ++ tr.name ++ ")")
+        # a compiler-generated impl (derive Ord): concrete arguments, no
+        # boxing, and the backend picks the derived calling convention
+        let psig0 = subst_subject(tr, sg, subject)
+        let (sta, vsa) = lower_args_to(st, args, psig0.param_tys)
+        return (sta, adapt_out(
+          CCall(CImpl(owner_or(imp.owner, st.owner), tid, subject, name, true),
+            vsa, psig0.ret), psig0.ret, ty))
       }
       if provides(imp, name) {
         # devirtualised: the impl's own method takes the concrete type, so
@@ -541,7 +658,8 @@ fn lower_trait_call(
         let psig = subst_subject(tr, sg, subject)
         let (st1, vs) = lower_args_to(st, args, psig.param_tys)
         (st1, adapt_out(
-          CCall(CImpl(owner_or(imp.owner, st.owner), tid, subject, name), vs, psig.ret),
+          CCall(CImpl(owner_or(imp.owner, st.owner), tid, subject, name, false),
+            vs, psig.ret),
           psig.ret, ty))
       } else {
         # the default body is generic and takes the dictionary like any
@@ -619,6 +737,40 @@ fn lift_lambda(
     CClosure(name, st2.owner, cap_args, ty))
 }
 
+## A constructor used as a function value (`map(xs, Some)`) becomes a
+## closure over a wrapper that builds it -- same treatment as a top-level
+## function, so function values have exactly one representation.
+fn lift_ctor_value(st: LSt, adt: Int, ci: Int, ty: Ty) -> (LSt, CExpr) = {
+  let (st1, lam) = fresh_lam(st)
+  let pts = params_of_fn_ty(ty)
+  let ret = ret_of_fn_ty(ty)
+  var ps: List[CParam] = []
+  var args: List[CExpr] = []
+  var st2 = st1
+  var i = 0
+  for pt in pts {
+    let (st3, sym) = fresh_sym(st2)
+    st2 = st3
+    ps = ps ++ [CParam { sym: sym, ty: pt, mode: COwned }]
+    let declared = declared_field_ty(st2, adt, ci, i)
+    args = args ++ [adapt_in(CLocal(sym, pt), pt, declared)]
+    i = i + 1
+  }
+  let f = CFun {
+    name: lam,
+    owner: st2.owner,
+    captures: [],
+    params: ps,
+    dicts: [],
+    ret: ret,
+    body: CCtor(adt, ci, args, ret),
+    is_test: false,
+    impl_of: None,
+    default_of: None
+  }
+  (LSt { ..st2, lifted: st2.lifted ++ [f] }, CClosure(lam, st2.owner, [], ty))
+}
+
 ## A top-level function used as a value becomes a closure over a wrapper
 ## with no captures, so that every function value has one representation.
 fn lift_fn_value(st: LSt, owner: String, name: String, ty: Ty) -> (LSt, CExpr) = {
@@ -660,7 +812,7 @@ pub fn lower_expr(st: LSt, e: TExpr) -> (LSt, CExpr) =
     XUnit(_, _) -> (st, CUnit)
     XLocal(sym, _, _, _, ty) -> (st, CLocal(sym, ty))
     XUnsafePure(body, _, _, _) -> lower_expr(st, body)
-    XComptime(body, _, _, _) -> lower_expr(st, body)
+    XComptime(_, lo, hi, ty) -> (st, CComptime(lo, hi, ty))
     XError(_, _) -> panic("lower: XError reached lowering")
     XStr(parts, _, _) -> lower_str(st, parts)
     XUnary(op, operand, _, _, ty) -> {
@@ -712,8 +864,9 @@ pub fn lower_expr(st: LSt, e: TExpr) -> (LSt, CExpr) =
       let (st1, tv) = lower_expr(st, target)
       # a record-style read: the ADT has one constructor, so the
       # discriminant is statically known
-      match tex_ty(target) {
-        TyAdt(adt, _) -> (st1, CField(tv, adt, 0, idx, ty))
+      let tt = tex_ty(target)
+      match tt {
+        TyAdt(adt, _) -> (st1, read_field(st1, tv, tt, adt, 0, idx))
         _ -> panic("lower: field read on a non-ADT")
       }
     }
@@ -758,6 +911,22 @@ pub fn lower_expr(st: LSt, e: TExpr) -> (LSt, CExpr) =
           }
         }
       }
+    XConstRef(name, _, _, ty) -> (st, CConstRef(name, ty))
+    XIndex(target, index, on_map, _, _, ty) -> {
+      let (st1, tv) = lower_expr(st, target)
+      let (st2, iv) = lower_expr(st1, index)
+      # indexing yields an erased element, so the unbox is explicit
+      let erased = TyVar("E", 0)
+      let call =
+        if on_map {
+          CIntrinsic("map_index",
+            [tv, adapt_in(iv, tex_ty(index), TyVar("K", 0))], erased)
+        } else {
+          CIntrinsic("list_index", [tv, iv], erased)
+        }
+      (st2, adapt_out(call, erased, ty))
+    }
+    XCtorValue(adt, ci, _, _, ty) -> lift_ctor_value(st, adt, ci, ty)
     XCallDyn(sym, _, args, _, _, ty) -> {
       let (st1, vs) = lower_all(st, args)
       (st1, CCall(CDynamic(CLocal(sym, sym_ty(st1, sym, TyError))), vs, ty))
@@ -833,21 +1002,50 @@ fn lower_ctor(
   spread: Option[TExpr],
   ty: Ty
 ) -> (LSt, CExpr) = {
-  match spread {
-    Some(_) -> panic("lower: constructor spread is not lowered yet")
-    None -> ()
-  }
-  let (st1, ws) = lower_all(st, written)
+  let (st0, base) =
+    match spread {
+      Some(b) -> {
+        let (sa, bv) = lower_expr(st, b)
+        let (sb, bsym) = fresh_sym(sa)
+        (sb, Some((bsym, bv, tex_ty(b))))
+      }
+      None -> (st, None)
+    }
+  let (st1, ws) = lower_all(st0, written)
   # slots maps field index -> written-arg index, so the constructor's
   # arguments arrive in field order and backends need no reordering
   var args: List[CExpr] = []
+  var fi = 0
   for s in slots {
     match s {
-      Some(i) -> { args = args ++ [ws[i]] }
-      None -> panic("lower: constructor field without an argument")
+      Some(i) -> {
+        let declared = declared_field_ty(st1, adt, ci, fi)
+        args = args ++ [adapt_in(ws[i], tex_ty(written[i]), declared)]
+      }
+      # no written argument: the field comes from the spread base, and it
+      # stays at its declared type -- copying erased to erased boxes nothing
+      None ->
+        match base {
+          Some(trip) -> {
+            let (bsym, _bv, bt) = trip
+            args = args ++
+              [CField(CLocal(bsym, bt), adt, ci, fi,
+                declared_field_ty(st1, adt, ci, fi))]
+          }
+          None -> panic("lower: constructor field without an argument")
+        }
     }
+    fi = fi + 1
   }
-  (st1, CCtor(adt, ci, args, ty))
+  let built = CCtor(adt, ci, args, ty)
+  match base {
+    # the base is evaluated once, before any field is read from it
+    Some(trip) -> {
+      let (bsym, bv, bt) = trip
+      (st1, CBlock([CSLet(bsym, bt, bv)], Some(built), ty))
+    }
+    None -> (st1, built)
+  }
 }
 
 ## `match` becomes a once-loop: each arm is a guarded test that assigns the
@@ -936,15 +1134,18 @@ fn lower_propagate(st: LSt, operand: TExpr, ty: Ty) -> (LSt, CExpr) = {
           [CSLet(sym, ot, ov),
             CSIf(CIsCtor(subj, OPTION_ID, NONE_CI),
               CReturn(Some(CCtor(OPTION_ID, NONE_CI, [], ot))), None)],
-          Some(CField(subj, OPTION_ID, SOME_CI, 0, ty)), ty))
+          Some(read_field(st2, subj, ot, OPTION_ID, SOME_CI, 0)), ty))
       } else if adt == RESULT_ID {
         let err_ty = field_ty(ot, RESULT_ID, ERR_CI, 0)
         (st2, CBlock(
           [CSLet(sym, ot, ov),
             CSIf(CIsCtor(subj, RESULT_ID, ERR_CI),
               CReturn(Some(CCtor(RESULT_ID, ERR_CI,
-                [CField(subj, RESULT_ID, ERR_CI, 0, err_ty)], ot))), None)],
-          Some(CField(subj, RESULT_ID, OK_CI, 0, ty)), ty))
+                # re-wrapping, not consuming: the payload stays at its
+                # declared (erased) type, so nothing is unboxed here
+                [CField(subj, RESULT_ID, ERR_CI, 0,
+                  declared_field_ty(st2, RESULT_ID, ERR_CI, 0))], ot))), None)],
+          Some(read_field(st2, subj, ot, RESULT_ID, OK_CI, 0)), ty))
       } else {
         panic("lower: `?` on a non-Option/Result type")
       }
@@ -965,13 +1166,13 @@ fn lower_unwrap(st: LSt, operand: TExpr, msg: String, ty: Ty) -> (LSt, CExpr) = 
           [CSLet(sym, ot, ov),
             CSIf(CIsCtor(subj, OPTION_ID, NONE_CI),
               CIntrinsic("panic", [CStr(msg)], TyNever), None)],
-          Some(CField(subj, OPTION_ID, SOME_CI, 0, ty)), ty))
+          Some(read_field(st2, subj, ot, OPTION_ID, SOME_CI, 0)), ty))
       } else if adt == RESULT_ID {
         (st2, CBlock(
           [CSLet(sym, ot, ov),
             CSIf(CIsCtor(subj, RESULT_ID, ERR_CI),
               CIntrinsic("panic", [CStr(msg)], TyNever), None)],
-          Some(CField(subj, RESULT_ID, OK_CI, 0, ty)), ty))
+          Some(read_field(st2, subj, ot, RESULT_ID, OK_CI, 0)), ty))
       } else {
         panic("lower: `!` on a non-Option/Result type")
       }
@@ -1057,10 +1258,18 @@ fn lower_stmt(st: LSt, s: TStmt) -> (LSt, List[CStmt]) =
             CSLoop(lid, inner, Some(CBlock([step], None, TyUnit)))
           ])
         }
-        None -> panic("lower: for-in over a collection is not lowered yet (D2/D3 Iter)")
+        None -> lower_for_list(st, sym, from, body)
       }
     }
-    TSLetPat(_, _, _, _) -> panic("lower: destructuring let is not lowered yet")
+    TSLetPat(pat, init, _, _) -> {
+      let (st1, v) = lower_expr(st, init)
+      let it = tex_ty(init)
+      let (st2, sym) = fresh_sym(st1)
+      # the checker has already proved the pattern irrefutable, so only the
+      # bindings survive; the test it produces is discarded
+      let (st3, _cond, binds) = pat_test(st2, CLocal(sym, it), pat, it)
+      (st3, [CSLet(sym, it, v)] ++ binds)
+    }
     TSLocalFn(sym, _, params, _, body, captures, _, _) -> {
       # a named local function is a lambda that also binds a name
       let fty = sym_ty(st, sym, TyError)
@@ -1068,6 +1277,44 @@ fn lower_stmt(st: LSt, s: TStmt) -> (LSt, List[CStmt]) =
       (st1, [CSLet(sym, fty, clo)])
     }
   }
+
+## `for x in xs` over a list: an index loop with the element read and
+## unboxed explicitly. The JVM emitter walks java.util.List by index for the
+## same reason -- the language only iterates lists, maps and sets going
+## through `map.entries` first.
+##
+## Once D2/D3 make List an ordinary Dawn ADT this becomes a call to the
+## `Iter` trait and stops being a special case here.
+fn lower_for_list(st: LSt, sym: Int, from: TExpr, body: TExpr) -> (LSt, List[CStmt]) = {
+  let ct = tex_ty(from)
+  let et =
+    match ct {
+      TyList(e) -> e
+      _ -> sym_ty(st, sym, TyError)
+    }
+  let (st1, lid) = fresh_loop(st)
+  let (st2, coll) = lower_expr(st1, from)
+  let (st3, csym) = fresh_sym(st2)
+  let (st4, isym) = fresh_sym(st3)
+  let (st5, b) = lower_expr(LSt { ..st4, cur_loop: lid }, body)
+  let cv = CLocal(csym, ct)
+  let iv = CLocal(isym, TyInt)
+  let elem = adapt_out(
+    CIntrinsic("list_index", [cv, iv], TyVar("E", 0)), TyVar("E", 0), et)
+  let inner = CBlock(
+    [CSIf(CUnary(CNot,
+      CBinary(CLt, iv, CIntrinsic("len", [cv], TyInt), TyBool), TyBool),
+      CBreak(lid), None),
+      CSLet(sym, et, elem),
+      CSDiscard(b)],
+    None, TyUnit)
+  let step = CSAssign(isym, CBinary(CAdd, iv, CInt(1), TyInt))
+  (LSt { ..st5, cur_loop: st.cur_loop }, [
+    CSLet(csym, ct, coll),
+    CSLet(isym, TyInt, CInt(0)),
+    CSLoop(lid, inner, Some(CBlock([step], None, TyUnit)))
+  ])
+}
 
 # ---- functions and modules ----
 

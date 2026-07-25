@@ -56,7 +56,12 @@ pub type CCallee =
 # is known statically and this is an ordinary direct call. Identity stays
 # structural -- (owner, trait, subject, method) -- because how that becomes a
 # symbol is each backend's mangling, not Core's business.
-  | CImpl(owner: String, trait_id: Int, subject: Ty, method: String)
+# `derived` marks an impl the compiler generated rather than the user
+# writing it (today: `derive Ord`). Its calling convention differs -- the
+# arguments are already concrete -- and that is a fact about the impl, not
+# about either backend, so it belongs here rather than in a table each
+# backend has to keep.
+  | CImpl(owner: String, trait_id: Int, subject: Ty, method: String, derived: Bool)
 # The trait's own default body, used when the impl does not provide the
 # method. It takes the dictionary as a trailing argument like any other
 # dictionary-passing call.
@@ -104,6 +109,13 @@ pub type CExpr =
 # a literal list/map/set, still a primitive at this stage; D2/D3 turn these
 # into ordinary constructor calls and this node goes away
   | CListLit(elems: List[CExpr], ty: Ty)
+# A comptime-evaluated constant, by the name the checker recorded. The value
+# itself stays where the comptime interpreter put it; Core carries only the
+# reference, because materialising a value is backend-specific (the JVM
+# spills structures to static fields).
+  | CConstRef(name: String, ty: Ty)
+# the value of a `comptime { ... }` block, keyed by its source span
+  | CComptime(lo: Int, hi: Int, ty: Ty)
 # jumps. `CBreak`/`CContinue` name their loop so lowering can nest freely.
   | CReturn(v: Option[CExpr])
   | CBreak(loop_id: Int)
@@ -273,6 +285,8 @@ pub fn cex_ty(e: CExpr) -> Ty =
     CIf(_, _, _, ty) -> ty
     CBlock(_, _, ty) -> ty
     CListLit(_, ty) -> ty
+    CConstRef(_, ty) -> ty
+    CComptime(_, _, ty) -> ty
     CReturn(_) -> TyNever
     CBreak(_) -> TyNever
     CContinue(_) -> TyNever
