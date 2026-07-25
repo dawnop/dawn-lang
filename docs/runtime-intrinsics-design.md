@@ -80,16 +80,22 @@ Java 类。**要做的是把这个模型长全。**
 - **集合(list/map/set)→ 塌成一个原语 `Array[T]`**。**不再有 `list_*/map_*/set_*` intrinsic**——集合是 `Array` 之上的
   **纯 Dawn ADT**(Map/Set=HAMT,List=严格 RB,relaxed 以后可加;见 collections-dejava-research §5.3/§9.3)。后端只需实现
   这一个不可变数组类型:
-  - `array_new(Int, T) -> Array[T]` / `array_get(Array[T], Int) -> T` / `array_len(Array[T]) -> Int`
-  - `array_with(Array[T], Int, T) -> Array[T]`(**返回新数组,语义纯**)
+  - `array_new() -> Array[T]` / `array_get(Array[T], Int) -> T` / `array_len(Array[T]) -> Int`
+  - `array_push(Array[T], T) -> Array[T]`(追加一格)/ `array_with(Array[T], Int, T) -> Array[T]`(替换一格)
   - 加一个 `popcount`(HAMT bitmap;可纯 Dawn 循环,故可选)。
-  **所有「可变」藏进后端对 `array_with` 的实现**。语言侧全程纯,mutation 不越过契约——DawnList 的
+  **所有「可变」藏进后端对这两个写操作的实现**。语言侧全程纯,mutation 不越过契约——DawnList 的
   「可变数组+CAS 独占检测」由此降级成后端对一个纯原语的私有实现细节。
-  > ⚠️ **`array_with` 的「唯一时就地写」是契约的一部分,不是可选优化**(实测,collections-dejava-research §9.3):
+  > ⚠️ **「唯一时就地写」是契约的一部分,不是可选优化**(实测,collections-dejava-research §9.3):
   > 后端若每次都复制,纯 Dawn List 慢 ~14× → 自举 +129%;若唯一时就地写,只慢 ~2.1× → 自举 +11%。**差 12 倍,
-  > 直接决定 List 能不能纯 Dawn 化。** 两个后端都做得到:JVM 用 DawnList 已验证的 CAS 水位线(实测快路径命中
-  > 99.1%),native 用 Perceus 的 `rc==1`(单线程,连 CAS 都不需要)。故 `Array` 的语义必须写成
+  > 直接决定 List 能不能纯 Dawn 化。** 故 `Array` 的语义必须写成
   > 「**纯值语义 + 唯一时就地实现**」,而不能只写「返回新数组」。
+  >
+  > **但两个后端能就地的范围不同(D1 落地时发现,native-backend-plan §10.1)。** `array_push` 写的是
+  > 一格从没交出去过的存储,水位线就够判断——JVM 用 DawnList 已验证的 CAS(实测快路径命中 99.1%)。
+  > `array_with` 写的槽位**已经交给这个版本、也可能交给了别人**,判断「还有谁在读」要的是引用计数,
+  > 不是水位线:**JVM 上因此只能复制**,native 上 Perceus 的 `rc==1` 才补得上(单线程,连 CAS 都不需要)。
+  > 这就是原语从 4 个变成 5 个、且 `array_new` 不再预填的原因——预填会让水位线一上来就顶满,
+  > 快路径永远进不去。12 倍整个落在 push 那条路上,所以结论不变。
 - **io**:`print`/`println`、`read_line`、`read_file`/`write_file`、`is_dir`、`list_names`。**不可约的效果边界**,小契约保留。
 - **控制**:`panic`、效果系统的 IO 边界。
 

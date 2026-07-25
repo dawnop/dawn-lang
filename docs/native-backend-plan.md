@@ -22,7 +22,7 @@
 | 字符串 | **UTF-8**，Cursor = 字节偏移(观测透明) | 07-25 |
 | Unicode 表 | **先 ASCII-only** | 07-25 |
 | hash/比较任意值 | **传 Eq/Hash 字典** → D0 是前置 | 07-25 |
-| `Array[T]` | **语言不公开**，先作 std 内部原语 | 07-25 |
+| `Array[T]` | **语言不公开**，先作 std 内部原语(已落地;JVM 上 push/with 不对称,见 §10) | 07-25 |
 | List 表示 | **严格 RB**(32 叉 trie + 尾块)，relaxed 以后可加 | 07-25 |
 | panic | **setjmp/longjmp**，两个捕获点(catch_panic / java_try 的对应物) | 07-25 |
 | 泛型 | **不单态化**，沿用 box-at-type-var-slot | 07-25 |
@@ -37,7 +37,7 @@
 
 `llvm-backend-research.md` §5.2 写着「List(持久 vector)、Map/Set(HAMT)是 native 运行时的大头，先用 C 写」。
 **这条已被 D 计划作废。** 集合纯 Dawn 化之后，两个后端复用同一份 Dawn 集合源，C 运行时**永远不需要长出集合库**
-——它只需要实现 `Array[T]` 四个操作。
+——它只需要实现 `Array[T]`(5 个操作 + `popcount`，§10.2)。
 
 后果:**D0→D3 必须排在 C 运行时之前**。反过来做会白写三四千行 C，然后再删掉。这也是 D0(Eq/Hash trait 化)
 从「de-Java 的第一步」变成「native 的关键路径」的第二个理由。
@@ -132,15 +132,19 @@ Kotlin 编译器当标准答案(`__lex`/`__parse` golden diff → B==C 固定点
 
 ### Phase 2 — D1/D2/D3:集合纯 Dawn 化
 
-- **D1**:`Array[T]` 作 std 内部原语(不公开)+ `popcount`。
+- **D1**(**已完成**):`Array[T]` 作 std 内部原语(不公开)+ `popcount`。
   **`array_with` 的语义必须在这一步定死为「纯值语义 + 唯一时就地实现」**，而不是「返回新数组」
   ——实测差 12 倍，直接决定 D3 成不成立(§9.3)。
+  > **动工后的修正。** 这条要求在 JVM 上**做不到**——`with` 写的槽位已经交出去了,没有水位线
+  > 能判断还有谁在读。原语因此拆成 `array_push`(有快路径)和 `array_with`(总是复制),
+  > 而 12 倍恰好整个落在 push 那条路上,所以结论不变。**详见 §10。**
 - **D2**:Map/Set 改纯 Dawn HAMT over `Array` + `Iter` trait(`for-in` 从后端 intrinsic 移到语言 trait)。
   后端契约 4 个原语 → 2 个。
 - **D3**:List 改纯 Dawn 严格 RB。**`for-in` 必须用叶子游走迭代器，不能用 `nth()` 逐个索引**
   (随机索引实测慢 8–18× 且随 n 增长)。后端契约 2 → 1。
 
 出口条件:后端集合契约只剩 `Array[T]`；自举总时长回归 ≤ +15%(实测预期 +11%)；全套测试绿。
+D1 单独的出口条件已达成:`scripts/array-contract/run.sh`(值语义 + 就地追加)进了 CI,见 §10.3。
 
 ### Phase 3 — C 发射器 + C 运行时
 
@@ -164,7 +168,8 @@ Core IR 上新增精确 dup/drop 插入 pass + 复用分析(rc==1 时原地)。K
 
 **必须同时提供一个 `--rc=leak` 调试模式**(drop 全部 no-op)。理由见 §6 R3。
 
-出口条件:`array_with` 在唯一时确实就地写(用计数器验，对照 JVM 侧实测的 99.1% 快路径命中率)。
+出口条件:**`array_with` 在唯一时确实就地写**(用计数器验，对照 JVM 侧实测的 99.1% 快路径命中率)。
+这是 native 相对 JVM 多出来的那一格——JVM 上 `with` 只能复制(§10.1),Perceus 的 `rc==1` 才补得上。
 
 ### Phase 5 — `use c` FFI + Phase A 验收
 
@@ -253,7 +258,7 @@ native 照抄才算"通过"。故语料要配少量**独立的期望输出**(不
 | **Phase −1** 接缝 spike | **完成** |
 | **Phase 0** Core IR | **完成**——IR + lowering 覆盖整门语言;JVM / C / comptime 三个消费者都吃 Core,`emit.dawn` 的 TAST 路已删(4353 → 2318 行) |
 | Phase 1 D0 | **进行中**——trait 已入 prelude(休眠);爆炸半径已实测,见 §9 |
-| Phase 2 D1–D3 | 未动 |
+| Phase 2 D1–D3 | **D1 完成**——`Array[T]` + `popcount` 已落地(std 内部,休眠);契约在 JVM 上被迫拆成 push/with 两半,见 §10。D2/D3 未动 |
 | Phase 3 C 发射器 | **提前完成一大截**(见下) |
 | Phase 4 Perceus | 未动 |
 | Phase 5 `use c` / Phase A 验收 | 差分 harness 已就位并进了 CI,`use c` 未动 |
@@ -405,3 +410,77 @@ trait 的作用是让类型**覆盖**它,不是让类型**选择加入**。
 > 顺带挖出一个先于 D0 的静默 bug:`Bytes` 的相等**只有裸用时**是结构化的,嵌进 record/元组/List/Option
 > 就退回引用同一性(实测见 [bytes-design.md](bytes-design.md) 决策 A)。根因正是 D0 要消灭的
 > 「相等的含义活在两处」。**现在不修**——半修会更不可预测,全修要等 D2/D3 的纯 Dawn 容器。
+
+## 10. D1 的契约,和它在 JVM 上被迫拆开的地方(2026-07-25)
+
+### 10.1 计划写死的那条语义,JVM 实现不了
+
+§5 与 [runtime-intrinsics-design](runtime-intrinsics-design.md) §5 把 `Array` 定成四个操作
+`array_new(Int, T) / array_get / array_len / array_with`,并要求
+
+> `array_with` 的语义必须写成「**纯值语义 + 唯一时就地实现**」……两个后端都做得到:JVM 用
+> DawnList 已验证的 CAS 水位线,native 用 Perceus 的 `rc==1`。
+
+**「两个后端都做得到」对 `with` 不成立。** DawnList 的水位线之所以成立,靠的是一个 `with` 没有的
+前提:**一个版本从不读自己窗口以外的槽位**。追加写的是 `a[size]`——一格谁都还没见过的存储,
+于是「跟别人共享底层数组」和「我改了这一格」不矛盾。而 `with(v, i, x)` 里 `i < len`:那一格
+**已经交给 v、也可能交给了别的版本**,任何共享都会被看见。要判断「没人再读它」,需要的是引用计数,
+不是水位线——JVM 上没有,native 上 Perceus 的 `rc==1` 才有。
+
+半吊子的做法(拿一个 `owned` 标志做一次性移交)是**不安全的**:它把旧版本悄悄变成非法值,而
+「旧版本是不是真死了」恰恰是 JVM 答不上来的那个问题。
+
+### 10.2 于是原语拆成两个,而 12 倍还在
+
+落地的契约(6 个,不是 4 个):
+
+| 原语 | 语义 | JVM 快路径 |
+|---|---|---|
+| `array_new() -> Array[T]` | 空数组 | — |
+| `array_len(a) -> Int` | 长度 | — |
+| `array_get(a, i) -> T` | 取值,越界 panic | — |
+| **`array_push(a, x) -> Array[T]`** | 追加一格 | **有**:版本正好终止于共享水位时 CAS 认领 `a[len]`,就地写 |
+| `array_with(a, i, x) -> Array[T]` | 替换第 i 格 | **无**,总是复制 |
+| `popcount(n) -> Int` | HAMT bitmap 用 | — |
+
+`array_new(Int, T)`(预填 n 格)因此也没有了:预填会让 `used` 一上来就等于 n,快路径永远进不去。
+建 k 宽的 HAMT 节点改成 k 次 push,同样 O(k)。
+
+**结论不变的原因**:§9.3 量的 12 倍来自**尾块追加**——Clojure 式 PersistentVector 的 `conj`
+在尾块未满时就是一次 append,spike 里模拟它的 `push_owned` 写的正是 `tail ++ [x]`。
+那 12 倍整个落在 `push` 这条路上,而 `push` 的快路径是**可靠的**。`with` 只出现在 trie 内部节点
+的路径复制(每 32 次 push 才碰一次一层)和 HAMT 节点更新上——后者实测只占编译时间 0.5%(§9.2)。
+
+**代价记在账上**:native 上 Perceus 会把 `with` 也变成就地写,所以这个不对称是 **JVM 独有的**,
+不是语言语义。契约写的是「纯值语义 + 后端在能证明唯一时就地实现」,JVM 能证明的只有 frontier 那一格。
+
+### 10.3 验收:`scripts/array-contract/`
+
+`Array` 不在语言表面(只有 std 模块能写 `Array`、能调 `array_*`),所以它进不了 `examples/`。
+harness 把探针模块拷进一份 std/ 副本再编译,已接 CI。它验两件:
+
+- **值语义**,尤其 `fork` 一格:两次 push 落在同一个版本上,两个结果各看到自己的元素
+  (一个赢 CAS,另一个复制)。
+- **就地追加真的发生**。这条**故意从 Dawn 里观测不到**,只能拿时钟量:累积形状有它 O(n)、
+  没它 O(n²)。实测 **20 万次 linear 14ms vs 2 万次 forked 666ms**——注意 n 还差 10 倍。
+  CI 给 20 万次 linear 设 3 秒预算,离两边各差一到两个数量级,不是在赌竞态。
+
+### 10.4 顺手挖出的一个先于 D1 的静默 bug
+
+写探针时踩到:在 std 里**直接**拿具体值调擦除槽位的 intrinsic 会发出无法通过校验的类。
+`map_insert(m, "k", 5)` 里 `5` 该装箱进 `V` 的擦除槽,而 lowering 对 `XCallBuiltin` 不做
+`adapt_in`——发出去的是 long,描述符写的是 Object,`VerifyError`。
+
+一直没炸,是因为**每个 std wrapper 自己就是泛型的**:值在进 wrapper 时已经擦除,到 intrinsic
+手上本来就是 Object。D2/D3 要在 std 里写具体元素类型的数组代码,这个洞会立刻变成日常。
+
+修法是让这类 intrinsic 的**声明签名就是它的 ABI**(`erased_builtin_sig`),box/unbox 回到 Core 层——
+和别的调用一视同仁。`unwrap_or`/`expect`/`cast` 不在其列:它们的后端处理器读的是 Core 节点自身的类型
+而不是声明类型(`unwrap_or` 按**结果**类型给 fallback 开槽),在这儿装箱反而会弄坏它们。
+这个划分一直是隐含的,D1 只是把它写了出来。**对现有程序零 Emit-Change**——会变的那些今天本来就发不出来。
+
+### 10.5 落地的 Emit-Change
+
+一个类:每个程序多一个 `dawn/rt/Array`。拿改动前的 jar 对 `examples/{calc,shapes,traits}` 逐字节对拍,
+差异**只有这一个新增文件**,其余一字未动。(它和 `dawn/rt/Lists`/`Maps`/`Strings` 一样是无条件发射的
+运行时类;D0 的字典按需发射是因为那是个组合家族,这里是一个固定类。)
