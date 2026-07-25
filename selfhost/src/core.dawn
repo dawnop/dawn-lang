@@ -34,6 +34,7 @@
 # loops), so flattening to a basic-block CFG would cost both backends work
 # and buy nothing at this stage.
 
+use tast.{TJavaCall}
 use types.{
   Ty, TyInt, TyFloat, TyBool, TyString, TyUnit, TyNever, TyError, TyAdt,
   TyVar, TyList, TyMap, TySet, TyTuple, TyFn, TyBytes, TyCursor, TyJava
@@ -93,7 +94,11 @@ pub type CExpr =
 # A reference to a statically built dictionary, by the key its CDictDef
 # carries. Only needed where a dictionary is passed as a value; a concrete
 # witness at a call site devirtualises to CImpl instead.
-  | CDictRef(key: String, ty: Ty)
+# `key` names the CDictDef for a table-based backend; `trait_id`/`subject`
+# are the same identity for a backend whose dictionaries are types (the JVM
+# looks up an impl singleton). Both, for the same reason CMethod carries
+# both a slot index and a method name.
+  | CDictRef(key: String, trait_id: Int, subject: Ty, ty: Ty)
   | CTuple(elems: List[CExpr], ty: Ty)
   | CTupleGet(target: CExpr, idx: Int, ty: Ty)
 # erasure made explicit: CBox moves a value into a type-variable slot,
@@ -120,15 +125,15 @@ pub type CExpr =
   | CReturn(v: Option[CExpr])
   | CBreak(loop_id: Int)
   | CContinue(loop_id: Int)
-# a JVM-only escape hatch. Present in Core because the JVM backend must
-# still see it; the native backend rejects it, exactly as `use c` will be
-# rejected by the JVM backend. This is the FFI split, accepted by design.
-  | CForeign(payload: CForeignCall, ty: Ty)
-
-## Opaque to Core: the JVM backend reads it, the native backend refuses it.
-## Kept as a distinct node so that "which parts of the IR are portable" is a
-## question the type checker can answer rather than a convention.
-pub type CForeignCall = { kind: String, data: List[String], args: List[CExpr] }
+# The JVM-only escape hatch, carrying its call verbatim -- including
+# arguments that are still TAST.
+#
+# That is deliberate, not a leak. A `use java` argument can be a lambda that
+# needs a SAM bridge built against a Java interface, which is a JVM-shaped
+# fact all the way down; there is nothing portable to lower it to. Quarantining
+# it in one node is the point: the native backend refuses this node, and
+# `use c` will get its own, which the JVM backend will refuse in turn.
+  | CForeign(call: TJavaCall, ty: Ty)
 
 pub type CStmt =
   | CSLet(sym: Int, ty: Ty, init: CExpr)
@@ -275,7 +280,7 @@ pub fn cex_ty(e: CExpr) -> Ty =
     CField(_, _, _, _, ty) -> ty
     CIsCtor(_, _, _) -> TyBool
     CClosure(_, _, _, ty) -> ty
-    CDictRef(_, ty) -> ty
+    CDictRef(_, _, _, ty) -> ty
     CTuple(_, ty) -> ty
     CTupleGet(_, _, ty) -> ty
     CBox(_, _) -> TyError

@@ -19,7 +19,7 @@ use types.{
   subst,
   Ty, TyInt, TyFloat, TyBool, TyString, TyUnit, TyNever, TyError, TyVar,
   TyAdt, TyList, TyTuple, TyFn, Sym, Sig, Traits, TraitI, ImplI, MethodSig,
-  Adts, AdtI, CtorI, adt_of, trait_of, OPTION_ID, RESULT_ID
+  Adts, AdtI, CtorI, adt_of, trait_of, OPTION_ID, RESULT_ID, ORD_ID
 }
 use tast.{
   TExpr, TStmt, TPat, TArm, TStrPart, TFun, TModule, TBinOp, TUnOp, TJavaCall,
@@ -38,7 +38,6 @@ use tast.{
 use exhaustive.{LitV, LInt, LFloat, LBool, LStr}
 use core.{
   CExpr, CStmt, CCallee, CFun, CModule, CParam, CMode, CBinOp, CUnOp,
-  CForeignCall,
   CInt, CFloat, CBool, CStr, CUnit, CLocal, CFnRef, CCall, CIntrinsic,
   CCtor, CField, CIsCtor, CClosure, CTuple, CTupleGet, CBox, CUnbox,
   CBinary, CUnary, CIf, CBlock, CListLit, CReturn, CBreak, CContinue, CForeign,
@@ -66,6 +65,9 @@ pub type LSt = {
   next_loop: Int,
   owner: String,
   cur_loop: Int,
+  # the enclosing function's declared return type, so `return` can box
+  # against it here rather than in each backend
+  ret_ty: Ty,
   # the checker's symbol table for this module: the authority on what a
   # pattern binding's type is, so lowering never has to consult the ADT
   # table to type a field projection
@@ -505,7 +507,7 @@ fn dict_ref(st: LSt, tid: Int, subject: Ty) -> (LSt, CExpr) = {
   }
   let dty = TyAdt(0 - 1, [])
   if seen {
-    (st, CDictRef(key, dty))
+    (st, CDictRef(key, tid, subject, dty))
   } else {
     let tr = trait_of(st.traits, tid)
     let imp = impl_for(st, tid, subject)
@@ -537,7 +539,7 @@ fn dict_ref(st: LSt, tid: Int, subject: Ty) -> (LSt, CExpr) = {
         out = out ++ [d]
       }
     }
-    (LSt { ..st1, dicts: out }, CDictRef(key, dty))
+    (LSt { ..st1, dicts: out }, CDictRef(key, tid, subject, dty))
   }
 }
 
@@ -720,7 +722,8 @@ fn lift_lambda(
     ps = ps ++ [CParam { sym: p, ty: pt, mode: COwned }]
     i = i + 1
   }
-  let (st2, cbody) = lower_expr(st1, body)
+  let (st2, cbody0) = lower_expr(LSt { ..st1, ret_ty: ret_of_fn_ty(ty) }, body)
+  let cbody = adapt_in(cbody0, tex_ty(body), ret_of_fn_ty(ty))
   let f = CFun {
     name: name,
     owner: st2.owner,
@@ -819,11 +822,21 @@ pub fn lower_expr(st: LSt, e: TExpr) -> (LSt, CExpr) =
       let (st1, v) = lower_expr(st, operand)
       (st1, CUnary(un_op(op), v, ty))
     }
-    XBinary(op, l, r, _, _, _, _, _, ty) -> {
-      let (st1, lv) = lower_expr(st, l)
-      let (st2, rv) = lower_expr(st1, r)
-      (st2, CBinary(bin_op(op), lv, rv, ty))
-    }
+    XBinary(op, l, r, ord, _, _, _, _, ty) ->
+      match ord {
+        # `<` on a non-scalar is Ord.cmp under the surface. Lowering makes
+        # that explicit -- `cmp(l, r) <op> 0` -- so neither backend needs a
+        # witness on a comparison node.
+        Some(w) -> {
+          let (st1, c) = lower_trait_call(st, ORD_ID, "cmp", [l, r], [w], TyInt)
+          (st1, CBinary(bin_op(op), c, CInt(0), TyBool))
+        }
+        None -> {
+          let (st1, lv) = lower_expr(st, l)
+          let (st2, rv) = lower_expr(st1, r)
+          (st2, CBinary(bin_op(op), lv, rv, ty))
+        }
+      }
     XIf(cond, thn, els, _, _, ty) -> {
       let (st1, c) = lower_expr(st, cond)
       let (st2, t) = lower_expr(st1, thn)
@@ -849,7 +862,7 @@ pub fn lower_expr(st: LSt, e: TExpr) -> (LSt, CExpr) =
       match v {
         Some(inner) -> {
           let (st1, cv) = lower_expr(st, inner)
-          (st1, CReturn(Some(cv)))
+          (st1, CReturn(Some(adapt_in(cv, tex_ty(inner), st1.ret_ty))))
         }
         None -> (st, CReturn(None))
       }
@@ -945,15 +958,7 @@ pub fn lower_expr(st: LSt, e: TExpr) -> (LSt, CExpr) =
       let o = match owner { Some(x) -> x None -> st.owner }
       lift_fn_value(st, o, name, ty)
     }
-    XJava(call, _, _, ty) -> {
-      let (st1, vs) = lower_all(st, call.args)
-      (st1, CForeign(
-        CForeignCall {
-          kind: "java",
-          data: [call.fqcn, call.decl_cls, call.method, call.ret_cls],
-          args: vs
-        }, ty))
-    }
+    XJava(call, _, _, ty) -> (st, CForeign(call, ty))
     _ -> panic("lower: expression not lowered yet: " ++ node_name(e))
   }
 
@@ -1198,7 +1203,10 @@ fn lower_stmt(st: LSt, s: TStmt) -> (LSt, List[CStmt]) =
     TSLet(sym, _, init, _, _) -> {
       let (st1, v) = lower_expr(st, init)
       match sym {
-        Some(sy) -> (st1, [CSLet(sy, tex_ty(init), v)])
+        # the binding's type is the checker's, not the initialiser's: a
+        # `use java` constructor is typed narrower than its call node, and
+        # taking the wrong one puts an Option where a ZipEntry belongs
+        Some(sy) -> (st1, [CSLet(sy, sym_ty(st1, sy, tex_ty(init)), v)])
         # `let _ = e`: the value goes, the effect stays -- and Core says so
         None -> (st1, [CSDiscard(v)])
       }
@@ -1334,11 +1342,15 @@ fn lower_fn(st: LSt, owner: String, f: TFun) -> (LSt, CFun) = {
   }
   var dicts: List[CParam] = []
   for d in f.dict_syms {
-    # a dictionary is an opaque reference; its shape lives in CDictDef
-    dicts = dicts ++ [CParam { sym: d, ty: TyAdt(0 - 1, []), mode: COwned }]
+    # the checker already typed the hidden dictionary parameters; carrying
+    # that type here keeps a backend from having to reach behind Core into
+    # the symbol table
+    dicts = dicts ++ [CParam { sym: d, ty: sym_ty(st, d, TyError), mode: COwned }]
   }
-  let (st1, body) = lower_expr(st, f.body)
-  (st1, CFun {
+  let (st1, body0) = lower_expr(LSt { ..st, ret_ty: f.sig.ret }, f.body)
+  # the tail value is a return too
+  let body = adapt_in(body0, tex_ty(f.body), f.sig.ret)
+  (LSt { ..st1, ret_ty: st.ret_ty }, CFun {
     name: f.name,
     owner: owner,
     captures: [],
@@ -1350,6 +1362,44 @@ fn lower_fn(st: LSt, owner: String, f: TFun) -> (LSt, CFun) = {
     impl_of: f.impl_of,
     default_of: f.default_of
   })
+}
+
+## Lower a single function, returning it plus whatever lambdas it hoisted.
+## The JVM path uses this because it emits one method at a time; the native
+## path lowers whole modules.
+pub fn lower_fn_only(
+  owner: String,
+  f: TFun,
+  traits: Traits,
+  impls: Map[(Int, Ty), ImplI],
+  adts: Adts,
+  prog_fns: Map[(String, String), Sig],
+  syms: Map[Int, Sym],
+  # lifted names must be unique across the whole class, not just this
+  # function, so the caller seeds and carries the counter
+  lam_start: Int
+) -> (CFun, List[CFun], Int) = {
+  var top = 0
+  for k in map.keys(syms) {
+    if k > top { top = k }
+  }
+  let st = LSt {
+    next_sym: top + 1,
+    next_loop: 0,
+    owner: owner,
+    cur_loop: -1,
+    ret_ty: TyUnit,
+    syms: syms,
+    lifted: [],
+    next_lam: lam_start,
+    traits: traits,
+    impls: impls,
+    adts: adts,
+    prog_fns: prog_fns,
+    dicts: []
+  }
+  let (st1, cf) = lower_fn(st, owner, f)
+  (cf, st1.lifted, st1.next_lam)
 }
 
 pub fn lower_module(
@@ -1370,6 +1420,7 @@ pub fn lower_module(
     next_loop: 0,
     owner: owner,
     cur_loop: -1,
+    ret_ty: TyUnit,
     syms: tm.syms,
     lifted: [],
     next_lam: 0,

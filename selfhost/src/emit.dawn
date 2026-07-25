@@ -50,6 +50,19 @@ use codegen.{
   LISTS_CLASS, STRINGS_CLASS, MAPS_CLASS, FN_CMP_CLASS,
   ARRAYLIST, DAWNLIST_CLASS
 }
+use core.{
+  CExpr, CStmt, CCallee, CFun, CModule, CParam, CDictDef, CDictSlot,
+  CInt, CFloat, CBool, CStr, CUnit, CLocal, CFnRef, CCall, CIntrinsic,
+  CCtor, CField, CIsCtor, CClosure, CTuple, CTupleGet, CBox, CUnbox,
+  CBinary, CUnary, CIf, CBlock, CListLit, CConstRef, CComptime,
+  CReturn, CBreak, CContinue, CForeign, CDictRef,
+  CSLet, CSAssign, CSDiscard, CSLoop, CSIf, CSDup, CSDrop,
+  CDirect, CDynamic, CMethod, CImpl, CDefault,
+  CAdd, CSub, CMul, CDiv, CMod, CEq, CNe, CLt, CLe, CGt, CGe, CAnd, COr,
+  CBand, CBor, CBxor, CShl, CShr, CUshr, CConcat, CNeg, CNot, CBnot,
+  CBinOp, CUnOp, cex_ty
+}
+use lower
 use jreflect
 use java "dawn.tool.AdtClassWriter"
 use java "org.objectweb.asm.MethodVisitor"
@@ -57,6 +70,7 @@ use java "org.objectweb.asm.Label"
 use java "org.objectweb.asm.Handle"
 use java "org.objectweb.asm.Type"
 use java "java.util.Objects"
+use java "java.lang.System"
 use java "java.lang.Long"
 use java "java.lang.Integer"
 use java "java.lang.Double"
@@ -64,6 +78,8 @@ use java "java.lang.Double"
 # ---- opcodes codegen.dawn does not carry yet ----
 
 pub const OP_ICONST_M1: Int = 2
+
+pub const OP_ACONST_NULL: Int = 1
 
 pub const OP_IF_ACMPNE: Int = 166
 
@@ -175,6 +191,9 @@ pub type Gen = {
   cur_fn: Option[TFun],
   self_pending: Option[PendingL],
   loop_stack: List[(Label, Label)],
+  # the Core path's loop stack: Core names its loops, so leaving a
+  # non-innermost one is ordinary rather than impossible
+  cloops: List[(Int, Label, Label)],
   lambda_ctr: Int,
   sam_ctr: Int,
   pending_lambdas: List[PendingL],
@@ -2989,7 +3008,14 @@ fn gen_sam_bridge(g: Gen, cw: AdtClassWriter, b: SamB) -> Gen !io = {
 # ---- functions and the module class ----
 
 ## Reset the per-method state and generate one static method for `f`.
+## The strangler seam. With DAWN_VIA_CORE=1 the body is built from Core IR;
+## otherwise from TAST. Everything else about the method -- its class, name,
+## descriptor and parameter slots -- is shared, so the two paths differ in
+## exactly one thing.
 fn gen_fn(g: Gen, cw: AdtClassWriter, f: TFun, name: String, desc: String, self_named: Bool) -> Gen !io = {
+  if via_core() {
+    return gen_fn_core(g, cw, f, name, desc)
+  }
   let m = cw.method(ACC_PUBLIC + ACC_STATIC, name, desc).expect("mv")
   m.visitCode()
   var g1 = Gen {
@@ -3000,7 +3026,8 @@ fn gen_fn(g: Gen, cw: AdtClassWriter, f: TFun, name: String, desc: String, self_
     method_ret: f.sig.ret,
     rets_null: false,
     self_pending: None,
-    loop_stack: []
+    loop_stack: [],
+    cloops: [],
   }
   for ps in f.param_syms {
     let (g2, slot) = alloc(g1, slots_of(sym_of(g1, ps).ty))
@@ -3018,6 +3045,69 @@ fn gen_fn(g: Gen, cw: AdtClassWriter, f: TFun, name: String, desc: String, self_
     g1 = Gen { ..g1, fn_start: None }
   }
   let (g3, falls) = gen_expr(g1, f.body, self_named)
+  if falls { emit_method_return(g3) }
+  m.visitMaxs(0, 0)
+  m.visitEnd()
+  g3
+}
+
+## The Core path's function body. `lower_fn_only` lowers this one function
+## and hands back any lambdas it hoisted, which are then emitted as ordinary
+## static methods -- the pending-lambda queue the TAST path keeps is not
+## needed, because lifting already happened.
+fn gen_fn_core(g: Gen, cw: AdtClassWriter, f: TFun, name: String, desc: String) -> Gen !io = {
+  let (cf, lifted, next_lam) =
+    lower.lower_fn_only(g.class_name, f, g.traits, g.impl_table, g.adts,
+      g.prog_fns, g.syms, g.lambda_ctr)
+  var g0 = gen_cbody(Gen { ..g, lambda_ctr: next_lam }, cw, cf, name, desc, false)
+  for lf in lifted {
+    var ptys: List[Ty] = []
+    for p in lf.captures { ptys = ptys ++ [p.ty] }
+    for p in lf.params { ptys = ptys ++ [p.ty] }
+    g0 = gen_cbody(g0, cw, lf, lf.name, impl_desc_of(g0, ptys, lf.ret), true)
+  }
+  g0
+}
+
+fn gen_cbody(
+  g: Gen,
+  cw: AdtClassWriter,
+  cf: CFun,
+  name: String,
+  desc: String,
+  lifted: Bool
+) -> Gen !io = {
+  let acc =
+    if lifted { ACC_PRIVATE + ACC_STATIC + OP_ACC_SYNTHETIC } else { ACC_PUBLIC + ACC_STATIC }
+  let m = cw.method(acc, name, desc).expect("mv")
+  m.visitCode()
+  var g1 = Gen {
+    ..g,
+    mv: m,
+    cur_fn: None,
+    next_slot: 0,
+    method_ret: cf.ret,
+    # a lifted body sits behind the erased `apply`, so a zero-slot return
+    # type still has to hand back a reference
+    rets_null: lifted,
+    self_pending: None,
+    loop_stack: [],
+    cloops: [],
+    fn_start: None
+  }
+  for p in cf.captures {
+    let (g2, slot) = alloc(g1, slots_of(p.ty))
+    g1 = cbind(g2, p.sym, p.ty, slot)
+  }
+  for p in cf.params {
+    let (g2, slot) = alloc(g1, slots_of(p.ty))
+    g1 = cbind(g2, p.sym, p.ty, slot)
+  }
+  for d in cf.dicts {
+    let (g2, slot) = alloc(g1, slots_of(d.ty))
+    g1 = cbind(g2, d.sym, d.ty, slot)
+  }
+  let (g3, falls) = gen_cexpr(g1, cf.body, false)
   if falls { emit_method_return(g3) }
   m.visitMaxs(0, 0)
   m.visitEnd()
@@ -3044,7 +3134,8 @@ fn gen_lambda_impl(g: Gen, cw: AdtClassWriter, p: PendingL) -> Gen !io = {
     method_ret: fret,
     rets_null: true,
     self_pending: if has_self { Some(p) } else { None },
-    loop_stack: []
+    loop_stack: [],
+    cloops: [],
   }
   for c in p.captures {
     let (g2, slot) = alloc(g1, slots_of(sym_of(g1, c).ty))
@@ -3380,7 +3471,8 @@ fn gen_test(g: Gen, cw: AdtClassWriter, t: TFun, idx: Int) -> Gen !io = {
     method_ret: TyUnit,
     rets_null: false,
     self_pending: None,
-    loop_stack: []
+    loop_stack: [],
+    cloops: [],
   }
   let (g2, falls) = gen_expr(g1, t.body, false)
   if falls { g2.mv.visitInsn(OP_RETURN) }
@@ -3468,6 +3560,7 @@ pub fn emit_module(
     cur_fn: None,
     self_pending: None,
     loop_stack: [],
+    cloops: [],
     lambda_ctr: 0,
     sam_ctr: 0,
     pending_lambdas: [],
@@ -3529,3 +3622,732 @@ pub fn emit_module(
   cw.visitEnd()
   out ++ [(class_name, cw.toByteArray().expect("bytes"))]
 }
+
+# ---- Core IR -> JVM (Phase 0, docs/native-backend-plan.md) --------------
+#
+# The second path through the same class writer. `gen_fn` picks between this
+# and the TAST path above; the descriptor, the class, and everything outside
+# a method body are shared, so the two differ only in how a body is built.
+#
+# Running both at once is deliberate. Swapping the expression layer of a
+# bytecode emitter in one step has no partial credit -- either the whole
+# thing works or nothing does -- so this follows the same strangler
+# discipline the backend migration used: keep the old path default and
+# green, bring the new one up beside it, flip when it matches, delete then.
+#
+# Set DAWN_VIA_CORE=1 to compile bodies through Core.
+#
+# Note how much is NOT here. There is no gen_match, no gen_for_*, no
+# gen_while, no gen_propagate, no gen_unwrap, no gen_str_lit interpolation,
+# no pattern compiler, and no lambda capture analysis: lowering did all of
+# it. That absence is the whole point of Phase 0.
+
+fn via_core() -> Bool !io =
+  match System.getenv("DAWN_VIA_CORE") {
+    Some(v) -> v == "1"
+    None -> false
+  }
+
+fn sig_of_call(g: Gen, owner: String, name: String) -> Sig =
+  match map.get(g.prog_fns, (owner, name)) {
+    Some(s) -> s
+    None -> panic("codegen: unknown fn `" ++ owner ++ "." ++ name ++ "`")
+  }
+
+## Bind a slot AND record its type. Lowering mints symbols of its own (match
+## scrutinees, `?` temporaries, lifted parameters) which the checker never
+## saw, so the Core path cannot look types up in the checker's table the way
+## the TAST path does -- Core carries the type on the binder instead.
+fn cbind(g: Gen, sym: Int, ty: Ty, slot: Int) -> Gen !io = {
+  let g1 = Gen {
+    ..g,
+    syms: map.insert(g.syms, sym,
+      Sym { name: "", ty: ty, mutable: true, dlo: 0, dhi: 0, dict_of: None })
+  }
+  bind_slot(g1, sym, slot)
+}
+
+fn cloop_of(g: Gen, id: Int) -> (Label, Label) = {
+  var i = len(g.cloops) - 1
+  while i >= 0 {
+    let (lid, cont, brk) = g.cloops[i]
+    if lid == id { return (cont, brk) }
+    i = i - 1
+  }
+  panic("codegen: no enclosing loop " ++ to_string(id))
+}
+
+fn gen_cargs(g: Gen, args: List[CExpr]) -> Gen !io = {
+  var g1 = g
+  for a in args {
+    let (g2, _) = gen_cexpr(g1, a, false)
+    g1 = g2
+  }
+  g1
+}
+
+## Core has already boxed and unboxed everything, so an argument is emitted
+## exactly as it stands -- no adapt_to at the call site.
+fn gen_ccall(g: Gen, callee: CCallee, args: List[CExpr], ty: Ty) -> (Gen, Bool) !io =
+  match callee {
+    CDirect(owner, name) -> {
+      let g1 = gen_cargs(g, args)
+      let sig = sig_of_call(g1, owner, name)
+      g1.mv.visitMethodInsn(OP_INVOKESTATIC, owner, name,
+        fn_desc_with_dicts(g1, sig), false)
+      (g1, true)
+    }
+    CImpl(owner, tid, subject, method, derived) -> {
+      let g1 = gen_cargs(g, args)
+      let tr = trait_of(g1.traits, tid)
+      let desc =
+        if derived {
+          derived_cmp_desc(g1, subject)
+        } else {
+          let psig = subst_subject(tr, trait_method_sig(tr, method), subject)
+          method_desc(g1.adts, psig.param_tys, psig.ret)
+        }
+      g1.mv.visitMethodInsn(OP_INVOKESTATIC, owner,
+        impl_method_name(g1, tr.name, subject, method), desc, false)
+      (g1, true)
+    }
+    CDefault(owner, tid, method) -> {
+      let g1 = gen_cargs(g, args)
+      let tr = trait_of(g1.traits, tid)
+      g1.mv.visitMethodInsn(OP_INVOKESTATIC, owner,
+        default_method_name(tr.name, method),
+        fn_desc_with_dicts(g1, trait_method_sig(tr, method)), false)
+      (g1, true)
+    }
+    CMethod(dict, tid, method, _idx) -> {
+      # the JVM's dictionaries are interfaces, so it dispatches by name and
+      # ignores the slot index the table-based backend uses
+      let tr = trait_of(g.traits, tid)
+      let (g0, _) = gen_cexpr(g, dict, false)
+      g0.mv.visitTypeInsn(OP_CHECKCAST, tr_iface(tr.owner, tr.name))
+      let g1 = gen_cargs(g0, args)
+      g1.mv.visitMethodInsn(OP_INVOKEINTERFACE, tr_iface(tr.owner, tr.name), method,
+        trait_method_desc(g1, trait_method_sig(tr, method)), true)
+      (g1, true)
+    }
+    CDynamic(target) -> {
+      let (g1, falls) = gen_cexpr(g, target, false)
+      if not falls { return (g1, false) }
+      gen_cdynamic(g1, args, cex_ty(target), ty)
+    }
+  }
+
+## Invoke a function value: erased apply, then unerase to the static type.
+fn gen_cdynamic(g: Gen, args: List[CExpr], ft: Ty, ret_static: Ty) -> (Gen, Bool) !io = {
+  let (fps, fret) = tyfn_parts(ft)
+  var g1 = g
+  var i = 0
+  for a in args {
+    let (g2, _) = gen_cexpr(g1, a, false)
+    g1 = g2
+    box_ty(g1.mv, if i < len(fps) { fps[i] } else { cex_ty(a) })
+    i = i + 1
+  }
+  g1.mv.visitMethodInsn(OP_INVOKEINTERFACE, fn_iface(len(fps)), "apply",
+    erased_apply_desc(len(fps)), true)
+  if slots_of(fret) == 0 {
+    g1.mv.visitInsn(OP_POP)
+  } else {
+    unerase(g1, fret)
+  }
+  (g1, true)
+}
+
+fn gen_cclosure(g: Gen, name: String, owner: String, caps: List[CExpr], ty: Ty) -> Gen !io = {
+  var g1 = g
+  var cap_tys: List[Ty] = []
+  for c in caps {
+    let (g2, _) = gen_cexpr(g1, c, false)
+    g1 = g2
+    cap_tys = cap_tys ++ [cex_ty(c)]
+  }
+  let (fps, fret) = tyfn_parts(ty)
+  let impl_desc = impl_desc_of(g1, cap_tys ++ fps, fret)
+  var caps_desc = ""
+  for ct in cap_tys { caps_desc = caps_desc ++ desc_of(g1.adts, ct) }
+  # lowering already hoisted the body to a top-level function, so this is
+  # just an indy site over an existing static method -- there is no pending
+  # lambda queue on this path
+  g1.mv.visitInvokeDynamicInsn("apply",
+    "(" ++ caps_desc ++ ")L" ++ fn_iface(len(fps)) ++ ";", lmf_bsm(),
+    Type.getMethodType(erased_apply_desc(len(fps))).expect("mt"),
+    Handle.new(OP_H_INVOKESTATIC, owner, name, impl_desc, false),
+    instantiated_type(g1, fps, fret))
+  g1
+}
+
+fn gen_cif(g: Gen, cond: CExpr, thn: CExpr, els: Option[CExpr], tail: Bool) -> (Gen, Bool) !io = {
+  let else_l = Label.new()
+  let end = Label.new()
+  let (g1, _) = gen_cexpr(g, cond, false)
+  g1.mv.visitJumpInsn(OP_IFEQ, else_l)
+  let (g2, then_falls) = gen_cexpr(g1, thn, tail)
+  match els {
+    None -> {
+      g2.mv.visitLabel(else_l)
+      (g2, true)
+    }
+    Some(eb) -> {
+      if then_falls { g2.mv.visitJumpInsn(OP_GOTO, end) }
+      g2.mv.visitLabel(else_l)
+      let (g3, else_falls) = gen_cexpr(g2, eb, tail)
+      g3.mv.visitLabel(end)
+      (g3, then_falls || else_falls)
+    }
+  }
+}
+
+pub fn gen_cexpr(g: Gen, e: CExpr, tail: Bool) -> (Gen, Bool) !io =
+  match e {
+    CInt(v) -> {
+      ldc_long(g.mv, v)
+      (g, true)
+    }
+    CFloat(v) -> {
+      ldc_double(g.mv, v)
+      (g, true)
+    }
+    CBool(v) -> {
+      g.mv.visitInsn(if v { OP_ICONST_1 } else { OP_ICONST_0 })
+      (g, true)
+    }
+    CStr(v) -> {
+      ldc_str(g.mv, v)
+      (g, true)
+    }
+    # Unit occupies no stack slot on the JVM; the C backend gives it a byte.
+    # Each backend picks, which is why Core says nothing about width.
+    CUnit -> (g, true)
+    CLocal(sym, _) -> {
+      load_var(g, sym)
+      (g, true)
+    }
+    CBox(inner, from) -> {
+      let (g1, falls) = gen_cexpr(g, inner, false)
+      if falls { box_ty(g1.mv, from) }
+      (g1, falls)
+    }
+    CUnbox(inner, to) -> {
+      let (g1, falls) = gen_cexpr(g, inner, false)
+      if falls {
+        if slots_of(to) == 0 { g1.mv.visitInsn(OP_POP) } else { unerase(g1, to) }
+      }
+      (g1, falls)
+    }
+    CIf(cond, thn, els, _) -> gen_cif(g, cond, thn, els, tail)
+    CBlock(stmts, tl, _) -> {
+      var g1 = g
+      for s in stmts {
+        g1 = gen_cstmt(g1, s)
+      }
+      match tl {
+        Some(t) -> gen_cexpr(g1, t, tail)
+        None -> (g1, true)
+      }
+    }
+    CReturn(vo) ->
+      match vo {
+        None -> {
+          emit_method_return(g)
+          (g, false)
+        }
+        Some(v) -> {
+          let (g1, falls) = gen_cexpr(g, v, false)
+          if falls { emit_method_return(g1) }
+          (g1, false)
+        }
+      }
+    CBreak(id) -> {
+      let (_, brk) = cloop_of(g, id)
+      g.mv.visitJumpInsn(OP_GOTO, brk)
+      (g, false)
+    }
+    CContinue(id) -> {
+      let (cont, _) = cloop_of(g, id)
+      g.mv.visitJumpInsn(OP_GOTO, cont)
+      (g, false)
+    }
+    CCall(callee, args, ty) -> gen_ccall(g, callee, args, ty)
+    CClosure(name, owner, caps, ty) -> (gen_cclosure(g, name, owner, caps, ty), true)
+    CDictRef(_key, tid, subject, _) -> {
+      # the JVM's dictionary is the impl singleton, reached by its type --
+      # the key a table-based backend uses is ignored here
+      let imp = impl_of(g, tid, subject)
+      let tr = trait_of(g.traits, tid)
+      g.mv.visitFieldInsn(OP_GETSTATIC, impl_class(g.adts, imp.owner, tr.name, subject),
+        "INSTANCE", "L" ++ tr_iface(tr.owner, tr.name) ++ ";")
+      (g, true)
+    }
+    CConstRef(name, ty) -> {
+      let v = match map.get(g.consts, name) {
+        Some(cv) -> cv
+        None -> panic("codegen: no comptime value for const `" ++ name ++ "`")
+      }
+      (gen_load_const(g, v, ty, "c:" ++ name), true)
+    }
+    CComptime(lo, hi, ty) -> {
+      let v = match map.get(g.blocks, (lo, hi)) {
+        Some(cv) -> cv
+        None -> panic("codegen: no comptime value for block")
+      }
+      (gen_load_const(g, v, ty, "b:" ++ to_string(lo) ++ ":" ++ to_string(hi)), true)
+    }
+    CFnRef(_, name, _) -> panic("codegen: bare CFnRef survived lowering (" ++ name ++ ")")
+    _ -> gen_cexpr2(g, e, tail)
+  }
+
+## The rest of the Core dispatch, split only to keep either half readable.
+fn gen_cexpr2(g: Gen, e: CExpr, tail: Bool) -> (Gen, Bool) !io =
+  match e {
+    CBinary(op, l, r, ty) -> gen_cbinary(g, op, l, r, ty)
+    CUnary(op, operand, ty) -> {
+      let (g1, falls) = gen_cexpr(g, operand, false)
+      if not falls { return (g1, false) }
+      match op {
+        CNeg -> if ty == TyFloat { g1.mv.visitInsn(OP_DNEG) } else { g1.mv.visitInsn(OP_LNEG) }
+        CNot -> {
+          g1.mv.visitInsn(OP_ICONST_1)
+          g1.mv.visitInsn(OP_IXOR)
+        }
+        CBnot -> {
+          ldc_long(g1.mv, 0 - 1)
+          g1.mv.visitInsn(OP_LXOR)
+        }
+      }
+      (g1, true)
+    }
+    CCtor(adt, ci, args, _) -> {
+      let a = adt_of(g.adts, adt)
+      let c = a.ctors[ci]
+      let cls = ctor_jvm_name(g.adts, c)
+      if len(c.fields) == 0 {
+        g.mv.visitFieldInsn(OP_GETSTATIC, cls, "INSTANCE", "L" ++ cls ++ ";")
+        return (g, true)
+      }
+      g.mv.visitTypeInsn(OP_NEW, cls)
+      g.mv.visitInsn(OP_DUP)
+      let g1 = gen_cargs(g, args)
+      var desc = "("
+      for f in c.fields { desc = desc ++ desc_of(g1.adts, f.ty) }
+      g1.mv.visitMethodInsn(OP_INVOKESPECIAL, cls, "<init>", desc ++ ")V", false)
+      (g1, true)
+    }
+    CField(target, adt, ci, idx, _) -> {
+      let (g1, falls) = gen_cexpr(g, target, false)
+      if not falls { return (g1, false) }
+      let a = adt_of(g1.adts, adt)
+      let c = a.ctors[ci]
+      let cls = ctor_jvm_name(g1.adts, c)
+      g1.mv.visitTypeInsn(OP_CHECKCAST, cls)
+      g1.mv.visitFieldInsn(OP_GETFIELD, cls, c.fields[idx].name,
+        desc_of(g1.adts, c.fields[idx].ty))
+      (g1, true)
+    }
+    CIsCtor(target, adt, ci) -> {
+      let (g1, falls) = gen_cexpr(g, target, false)
+      if not falls { return (g1, false) }
+      let a = adt_of(g1.adts, adt)
+      let c = a.ctors[ci]
+      let cls = ctor_jvm_name(g1.adts, c)
+      if len(c.fields) == 0 {
+        # no-payload constructors are interned singletons, so identity is
+        # the discriminant -- the C backend compares a tag instead
+        let t_l = Label.new()
+        let end = Label.new()
+        g1.mv.visitFieldInsn(OP_GETSTATIC, cls, "INSTANCE", "L" ++ cls ++ ";")
+        g1.mv.visitJumpInsn(OP_IF_ACMPEQ, t_l)
+        g1.mv.visitInsn(OP_ICONST_0)
+        g1.mv.visitJumpInsn(OP_GOTO, end)
+        g1.mv.visitLabel(t_l)
+        g1.mv.visitInsn(OP_ICONST_1)
+        g1.mv.visitLabel(end)
+      } else {
+        g1.mv.visitTypeInsn(OP_INSTANCEOF, cls)
+      }
+      (g1, true)
+    }
+    CTuple(elems, _) -> {
+      let cls = tuple_class(len(elems))
+      g.mv.visitTypeInsn(OP_NEW, cls)
+      g.mv.visitInsn(OP_DUP)
+      var g1 = g
+      for el in elems {
+        let (g2, _) = gen_cexpr(g1, el, false)
+        g1 = g2
+        box_ty(g1.mv, cex_ty(el))
+      }
+      var desc = "("
+      var i = 0
+      while i < len(elems) {
+        desc = desc ++ obj_desc()
+        i = i + 1
+      }
+      g1.mv.visitMethodInsn(OP_INVOKESPECIAL, cls, "<init>", desc ++ ")V", false)
+      (g1, true)
+    }
+    CTupleGet(target, idx, ty) -> {
+      let (g1, falls) = gen_cexpr(g, target, false)
+      if not falls { return (g1, false) }
+      let cls = tuple_class(tuple_arity(cex_ty(target)))
+      g1.mv.visitTypeInsn(OP_CHECKCAST, cls)
+      g1.mv.visitFieldInsn(OP_GETFIELD, cls, "_" ++ to_string(idx), obj_desc())
+      if slots_of(ty) == 0 { g1.mv.visitInsn(OP_POP) } else { unerase(g1, ty) }
+      (g1, true)
+    }
+    CListLit(elems, _) -> {
+      g.mv.visitTypeInsn(OP_NEW, ARRAYLIST)
+      g.mv.visitInsn(OP_DUP)
+      g.mv.visitMethodInsn(OP_INVOKESPECIAL, ARRAYLIST, "<init>", "()V", false)
+      var g1 = g
+      for el in elems {
+        g1.mv.visitInsn(OP_DUP)
+        let (g2, falls) = gen_cexpr(g1, el, false)
+        g1 = g2
+        if not falls { return (g1, false) }
+        g1.mv.visitMethodInsn(OP_INVOKEVIRTUAL, ARRAYLIST, "add",
+          "(Ljava/lang/Object;)Z", false)
+        g1.mv.visitInsn(OP_POP)
+      }
+      (g1, true)
+    }
+    CIntrinsic(name, args, ty) -> gen_cintrinsic(g, name, args, ty)
+    CForeign(call, ty) -> gen_cforeign(g, call, ty)
+    _ -> panic("codegen: Core node not handled on the JVM path")
+  }
+
+fn obj_desc() -> String = "Ljava/lang/Object;"
+
+fn tuple_arity(t: Ty) -> Int =
+  match t {
+    TyTuple(es) -> len(es)
+    _ -> panic("codegen: tuple projection on a non-tuple")
+  }
+
+fn gen_cbinary(g: Gen, op: CBinOp, l: CExpr, r: CExpr, ty: Ty) -> (Gen, Bool) !io = {
+  # short-circuit first: the right side must not be evaluated eagerly.
+  # `<` on a non-scalar never reaches here -- lowering turned it into an
+  # explicit Ord.cmp call, so there is no witness on a comparison node.
+  if op == CAnd {
+    let short = Label.new()
+    let end = Label.new()
+    let (g1, _) = gen_cexpr(g, l, false)
+    g1.mv.visitJumpInsn(OP_IFEQ, short)
+    let (g2, _) = gen_cexpr(g1, r, false)
+    g2.mv.visitJumpInsn(OP_GOTO, end)
+    g2.mv.visitLabel(short)
+    g2.mv.visitInsn(OP_ICONST_0)
+    g2.mv.visitLabel(end)
+    return (g2, true)
+  }
+  if op == COr {
+    let short = Label.new()
+    let end = Label.new()
+    let (g1, _) = gen_cexpr(g, l, false)
+    g1.mv.visitJumpInsn(OP_IFNE, short)
+    let (g2, _) = gen_cexpr(g1, r, false)
+    g2.mv.visitJumpInsn(OP_GOTO, end)
+    g2.mv.visitLabel(short)
+    g2.mv.visitInsn(OP_ICONST_1)
+    g2.mv.visitLabel(end)
+    return (g2, true)
+  }
+  let (ga, _) = gen_cexpr(g, l, false)
+  let (gb, _) = gen_cexpr(ga, r, false)
+  var g1 = gb
+  let t = cex_ty(l)
+  match op {
+    CAdd -> { g1.mv.visitInsn(if t == TyInt { OP_LADD } else { OP_DADD }) }
+    CSub -> { g1.mv.visitInsn(if t == TyInt { OP_LSUB } else { OP_DSUB }) }
+    CMul -> { g1.mv.visitInsn(if t == TyInt { OP_LMUL } else { OP_DMUL }) }
+    CDiv ->
+      if t == TyInt {
+        emit_div_zero_check(g1, "division")
+        g1.mv.visitInsn(OP_LDIV)
+      } else {
+        g1.mv.visitInsn(OP_DDIV)
+      }
+    CMod ->
+      if t == TyInt {
+        emit_div_zero_check(g1, "modulo")
+        g1.mv.visitInsn(OP_LREM)
+      } else {
+        g1.mv.visitInsn(OP_DREM)
+      }
+    CConcat ->
+      match t {
+        TyList(_) -> {
+          g1.mv.visitMethodInsn(OP_INVOKESTATIC, LISTS_CLASS, "concat",
+            "(Ljava/util/List;Ljava/util/List;)Ljava/util/List;", false)
+        }
+        TyBytes -> {
+          g1.mv.visitMethodInsn(OP_INVOKESTATIC, BYTES_CLASS, "concat", "([B[B)[B", false)
+        }
+        _ -> {
+          g1.mv.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/String", "concat",
+            "(Ljava/lang/String;)Ljava/lang/String;", false)
+        }
+      }
+    CEq -> { gen_equality(g1, t, BEq) }
+    CNe -> { gen_equality(g1, t, BNeq) }
+    CLt -> { gen_ordering(g1, t, BLt) }
+    CLe -> { gen_ordering(g1, t, BLe) }
+    CGt -> { gen_ordering(g1, t, BGt) }
+    CGe -> { gen_ordering(g1, t, BGe) }
+    CBand -> { g1.mv.visitInsn(OP_LAND) }
+    CBor -> { g1.mv.visitInsn(OP_LOR) }
+    CBxor -> { g1.mv.visitInsn(OP_LXOR) }
+    CShl -> {
+      g1.mv.visitInsn(OP_L2I)
+      g1.mv.visitInsn(OP_LSHL)
+    }
+    CShr -> {
+      g1.mv.visitInsn(OP_L2I)
+      g1.mv.visitInsn(OP_LSHR)
+    }
+    CUshr -> {
+      g1.mv.visitInsn(OP_L2I)
+      g1.mv.visitInsn(OP_LUSHR)
+    }
+    _ -> ()
+  }
+  (g1, true)
+}
+
+fn gen_cstmt(g: Gen, s: CStmt) -> Gen !io =
+  match s {
+    CSLet(sym, ty, init) -> {
+      let (g1, falls) = gen_cexpr(g, init, false)
+      if not falls { return g1 }
+      let (g2, slot) = alloc(g1, slots_of(ty))
+      store_slot(g2.mv, ty, slot)
+      cbind(g2, sym, ty, slot)
+    }
+    CSAssign(sym, value) -> {
+      let (g1, falls) = gen_cexpr(g, value, false)
+      if falls { store_var(g1, sym) }
+      g1
+    }
+    # the node that exists because a dropped value is not a dropped effect
+    CSDiscard(e) -> {
+      let (g1, falls) = gen_cexpr(g, e, false)
+      if falls { pop_value(g1, cex_ty(e)) }
+      g1
+    }
+    CSIf(cond, thn, els) -> {
+      let (g1, _) = gen_cif(g, cond, thn, els, false)
+      g1
+    }
+    CSLoop(id, body, step) -> {
+      let top = Label.new()
+      let cont = Label.new()
+      let brk = Label.new()
+      g.mv.visitLabel(top)
+      var g1 = Gen { ..g, cloops: g.cloops ++ [(id, cont, brk)] }
+      let (g2, _) = gen_cexpr(g1, body, false)
+      g1 = g2
+      # the continue target is the step, so `continue` runs it -- the whole
+      # reason CSLoop carries one
+      g1.mv.visitLabel(cont)
+      match step {
+        Some(sv) -> {
+          let (g3, falls) = gen_cexpr(g1, sv, false)
+          g1 = g3
+          if falls { pop_value(g1, cex_ty(sv)) }
+        }
+        None -> ()
+      }
+      g1.mv.visitJumpInsn(OP_GOTO, top)
+      g1.mv.visitLabel(brk)
+      Gen { ..g1, cloops: list.take(g1.cloops, len(g1.cloops) - 1) }
+    }
+    # reference counting: Perceus emits these, the JVM has a collector
+    CSDup(_) -> g
+    CSDrop(_) -> g
+  }
+
+## Core intrinsics. The names are Core's own vocabulary, which is why some
+## do not match any TAST builtin: lowering invented `str_of_int`,
+## `list_index` and friends when it destroyed interpolation and indexing.
+fn gen_cintrinsic(g: Gen, name: String, args: List[CExpr], ty: Ty) -> (Gen, Bool) !io = {
+  if name == "panic" {
+    g.mv.visitTypeInsn(OP_NEW, PANIC_CLASS)
+    g.mv.visitInsn(OP_DUP)
+    let (g1, _) = gen_cexpr(g, args[0], false)
+    g1.mv.visitMethodInsn(OP_INVOKESPECIAL, PANIC_CLASS, "<init>",
+      "(Ljava/lang/String;)V", false)
+    g1.mv.visitInsn(OP_ATHROW)
+    return (g1, false)
+  }
+  if name == "todo" {
+    g.mv.visitTypeInsn(OP_NEW, PANIC_CLASS)
+    g.mv.visitInsn(OP_DUP)
+    ldc_str(g.mv, "not yet implemented")
+    g.mv.visitMethodInsn(OP_INVOKESPECIAL, PANIC_CLASS, "<init>",
+      "(Ljava/lang/String;)V", false)
+    g.mv.visitInsn(OP_ATHROW)
+    return (g, false)
+  }
+  if name == "null_ref" {
+    g.mv.visitInsn(OP_ACONST_NULL)
+    return (g, true)
+  }
+  if name == "args" {
+    g.mv.visitFieldInsn(OP_GETSTATIC, g.class_name, ARGS_FIELD, "[Ljava/lang/String;")
+    g.mv.visitMethodInsn(OP_INVOKESTATIC, LISTS_CLASS, "fromArray",
+      "([Ljava/lang/String;)Ljava/util/List;", false)
+    return (g, true)
+  }
+  if name == "expect" {
+    var g1 = gen_cargs(g, args)
+    let (ga, msg_slot) = alloc(g1, 1)
+    g1 = ga
+    g1.mv.visitVarInsn(OP_ASTORE, msg_slot)
+    g1.mv.visitInsn(OP_DUP)
+    g1.mv.visitTypeInsn(OP_INSTANCEOF, "Option\$Some")
+    let ok = Label.new()
+    g1.mv.visitJumpInsn(OP_IFNE, ok)
+    g1.mv.visitTypeInsn(OP_NEW, PANIC_CLASS)
+    g1.mv.visitInsn(OP_DUP)
+    g1.mv.visitVarInsn(OP_ALOAD, msg_slot)
+    g1.mv.visitMethodInsn(OP_INVOKESPECIAL, PANIC_CLASS, "<init>",
+      "(Ljava/lang/String;)V", false)
+    g1.mv.visitInsn(OP_ATHROW)
+    g1.mv.visitLabel(ok)
+    g1.mv.visitTypeInsn(OP_CHECKCAST, "Option\$Some")
+    g1.mv.visitFieldInsn(OP_GETFIELD, "Option\$Some", "value", "Ljava/lang/Object;")
+    if slots_of(ty) == 0 { g1.mv.visitInsn(OP_POP) } else { unerase(g1, ty) }
+    return (g1, true)
+  }
+  if name == "unwrap_or" {
+    var g1 = gen_cargs(g, args)
+    let (ga, fb_slot) = alloc(g1, slots_of(ty))
+    g1 = ga
+    store_slot(g1.mv, ty, fb_slot)
+    g1.mv.visitInsn(OP_DUP)
+    g1.mv.visitTypeInsn(OP_INSTANCEOF, "Option\$Some")
+    let some_l = Label.new()
+    let end = Label.new()
+    g1.mv.visitJumpInsn(OP_IFNE, some_l)
+    g1.mv.visitInsn(OP_POP)
+    load_slot(g1.mv, ty, fb_slot)
+    g1.mv.visitJumpInsn(OP_GOTO, end)
+    g1.mv.visitLabel(some_l)
+    g1.mv.visitTypeInsn(OP_CHECKCAST, "Option\$Some")
+    g1.mv.visitFieldInsn(OP_GETFIELD, "Option\$Some", "value", "Ljava/lang/Object;")
+    unerase(g1, ty)
+    g1.mv.visitLabel(end)
+    return (g1, true)
+  }
+  if name == "cursor_slice" {
+    let g1 = gen_cargs(g, args)
+    g1.mv.visitMethodInsn(OP_INVOKESTATIC, STRINGS_CLASS, "cursorSlice",
+      "(Ljava/lang/String;JJ)Ljava/lang/String;", false)
+    let ok = Label.new()
+    g1.mv.visitInsn(OP_DUP)
+    g1.mv.visitJumpInsn(OP_IFNONNULL, ok)
+    g1.mv.visitTypeInsn(OP_NEW, PANIC_CLASS)
+    g1.mv.visitInsn(OP_DUP)
+    ldc_str(g1.mv, "cursor_slice: invalid cursor range")
+    g1.mv.visitMethodInsn(OP_INVOKESPECIAL, PANIC_CLASS, "<init>",
+      "(Ljava/lang/String;)V", false)
+    g1.mv.visitInsn(OP_ATHROW)
+    g1.mv.visitLabel(ok)
+    return (g1, true)
+  }
+  if name == "to_string" {
+    let g1 = gen_cargs(g, args)
+    let at = cex_ty(args[0])
+    if at == TyInt {
+      g1.mv.visitMethodInsn(OP_INVOKESTATIC, "java/lang/String", "valueOf",
+        "(J)Ljava/lang/String;", false)
+    } else if at == TyFloat {
+      g1.mv.visitMethodInsn(OP_INVOKESTATIC, "java/lang/String", "valueOf",
+        "(D)Ljava/lang/String;", false)
+    } else if at == TyBool {
+      g1.mv.visitMethodInsn(OP_INVOKESTATIC, "java/lang/String", "valueOf",
+        "(Z)Ljava/lang/String;", false)
+    } else if at == TyString {
+      ()
+    } else {
+      box_ty(g1.mv, at)
+      g1.mv.visitMethodInsn(OP_INVOKESTATIC, SHOW_CLASS, "show",
+        "(Ljava/lang/Object;)Ljava/lang/String;", false)
+    }
+    return (g1, true)
+  }
+  let g1 = gen_cargs(g, args)
+  if name == "to_float" {
+    g1.mv.visitInsn(OP_L2D)
+  } else if name == "to_int" {
+    g1.mv.visitInsn(OP_D2L)
+  } else if name == "len" {
+    g1.mv.visitMethodInsn(OP_INVOKEINTERFACE, "java/util/List", "size", "()I", true)
+    g1.mv.visitInsn(OP_I2L)
+  } else if name == "str_of_int" {
+    g1.mv.visitMethodInsn(OP_INVOKESTATIC, "java/lang/String", "valueOf",
+      "(J)Ljava/lang/String;", false)
+  } else if name == "str_of_float" {
+    g1.mv.visitMethodInsn(OP_INVOKESTATIC, "java/lang/String", "valueOf",
+      "(D)Ljava/lang/String;", false)
+  } else if name == "str_of_bool" {
+    g1.mv.visitMethodInsn(OP_INVOKESTATIC, "java/lang/String", "valueOf",
+      "(Z)Ljava/lang/String;", false)
+  } else if name == "show" {
+    g1.mv.visitMethodInsn(OP_INVOKESTATIC, SHOW_CLASS, "show",
+      "(Ljava/lang/Object;)Ljava/lang/String;", false)
+  } else if name == "list_index" {
+    g1.mv.visitMethodInsn(OP_INVOKESTATIC, LISTS_CLASS, "index",
+      "(Ljava/util/List;J)Ljava/lang/Object;", false)
+  } else if name == "map_index" {
+    g1.mv.visitMethodInsn(OP_INVOKESTATIC, MAPS_CLASS, "index",
+      "(Ljava/util/Map;Ljava/lang/Object;)Ljava/lang/Object;", false)
+  } else if name == "list_slice" {
+    g1.mv.visitInsn(OP_L2I)
+    let (ga, hi_slot) = alloc(g1, 1)
+    ga.mv.visitVarInsn(OP_ISTORE, hi_slot)
+    ga.mv.visitInsn(OP_L2I)
+    ga.mv.visitVarInsn(OP_ILOAD, hi_slot)
+    ga.mv.visitMethodInsn(OP_INVOKESTATIC, LISTS_CLASS, "slice",
+      "(Ljava/util/List;II)Ljava/util/List;", false)
+    return (ga, true)
+  } else if name == "starts_with" || name == "ends_with" {
+    g1.mv.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/String",
+      if name == "starts_with" { "startsWith" } else { "endsWith" },
+      "(Ljava/lang/String;)Z", false)
+  } else if name == "cast" {
+    unerase(g1, ty)
+  } else {
+    match rt_intrinsic_target(name) {
+      Some(pair) -> {
+        let (cls, m) = pair
+        let sig = builtin_sig(name)
+        g1.mv.visitMethodInsn(OP_INVOKESTATIC, cls, m,
+          method_desc(g1.adts, sig.param_tys, sig.ret), false)
+      }
+      None -> panic("codegen: Core intrinsic without a JVM mapping: " ++ name)
+    }
+  }
+  (g1, true)
+}
+
+fn builtin_sig(name: String) -> Sig =
+  match map.get(builtins(), name) {
+    Some(s) -> s
+    None -> panic("codegen: no signature for intrinsic " ++ name)
+  }
+
+## The one place TAST survives into the Core path, by design: see
+## core.CForeign. The native backend refuses this node instead.
+fn gen_cforeign(g: Gen, call: TJavaCall, ty: Ty) -> (Gen, Bool) !io =
+  if call.is_field {
+    gen_java_field(g, call)
+  } else if call.is_ctor {
+    gen_java_new(g, call)
+  } else {
+    gen_java_call(g, call, ty)
+  }
