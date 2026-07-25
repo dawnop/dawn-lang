@@ -20,7 +20,7 @@ use std/list
 use std/map
 use types.{
   Ty, TyInt, TyFloat, TyBool, TyString, TyUnit, TyNever, TyError, TyVar,
-  TyAdt, TyTuple, TyFn
+  TyAdt, TyTuple, TyFn, TyBytes, TyCursor, TyList, TyMap, TySet, TyArray, TyJava
 }
 use core.{
   diverges,
@@ -94,59 +94,89 @@ fn loop_step(id: Int) -> String = "L" ++ to_string(id) ++ "_step"
 
 # ---- types ----
 
-## Erased slots (type variables) and every reference type share one C
-## representation: a pointer. That is the uniform-boxing decision from
-## llvm-backend-research.md 5.3, and it is why a type variable needs no
-## special case here.
+## How the C backend carries a value of this type -- the mirror of the JVM
+## side's `JvmRepr`, and for the same reason: the C type, the zero value, the
+## `dawn_slot` member, whether a value needs boxing and whether it is a
+## pointer are five questions with one answer. Answering them separately, in
+## five if-chains the exhaustiveness checker cannot see into, is how a `Ty`
+## variant could reach the native backend and become `void*` five times over
+## without anything failing to build.
+##
+## Erased slots (type variables) and every reference type share `ROpaque`:
+## that is the uniform-boxing decision from llvm-backend-research.md 5.3, and
+## it is why a type variable needs no special case. `ROpaque` is also where
+## everything native cannot represent yet lands, so a program that actually
+## uses one fails later in `emit_intrinsic` with a name rather than here with
+## a type.
+pub type CRepr =
+  | RInt64 # int64_t
+  | RFloat64 # double
+  | RBoolean # bool
+  | RString # dawn_str -- a value (pointer + byte length)
+  | RUnitV # dawn_unit
+  | RAdtPtr # dawn_adt* -- ADTs and tuples share it
+  | RCloPtr # dawn_clo*
+  | ROpaque # void*
+
+## The one function in the C backend that has to account for every `Ty`.
+## Deliberately without a wildcard.
+pub fn c_repr(t: Ty) -> CRepr =
+  match t {
+    TyInt -> RInt64
+    TyFloat -> RFloat64
+    TyBool -> RBoolean
+    TyString -> RString
+    TyUnit -> RUnitV
+    TyNever -> RUnitV
+    TyAdt(_, _) -> RAdtPtr
+    TyTuple(_) -> RAdtPtr
+    TyFn(_, _, _) -> RCloPtr
+    TyVar(_, _) -> ROpaque
+    TyError -> ROpaque
+    TyBytes -> ROpaque
+    # not RInt64, even though a Cursor is a long on the JVM: the chain this
+    # replaced sent it to `void*`, and no cursor op is emittable yet, so the
+    # choice has never been exercised either way
+    TyCursor -> ROpaque
+    TyList(_) -> ROpaque
+    TyMap(_, _) -> ROpaque
+    TySet(_) -> ROpaque
+    TyArray(_) -> ROpaque
+    TyJava(_, _) -> ROpaque
+  }
+
 pub fn c_type(t: Ty) -> String =
-  if t == TyInt {
-    "int64_t"
-  } else if t == TyFloat {
-    "double"
-  } else if t == TyBool {
-    "bool"
-  } else if t == TyString {
-    "dawn_str"
-  } else if t == TyUnit || t == TyNever {
-    "dawn_unit"
-  } else {
-    match t {
-      TyVar(_, _) -> "void*"
-      TyAdt(_, _) -> "dawn_adt*"
-      TyTuple(_) -> "dawn_adt*"
-      TyFn(_, _, _) -> "dawn_clo*"
-      _ -> "void*"
-    }
+  match c_repr(t) {
+    RInt64 -> "int64_t"
+    RFloat64 -> "double"
+    RBoolean -> "bool"
+    RString -> "dawn_str"
+    RUnitV -> "dawn_unit"
+    RAdtPtr -> "dawn_adt*"
+    RCloPtr -> "dawn_clo*"
+    ROpaque -> "void*"
   }
 
 fn c_zero(t: Ty) -> String =
-  if t == TyInt {
-    "0"
-  } else if t == TyFloat {
-    "0.0"
-  } else if t == TyBool {
-    "false"
-  } else if t == TyString {
-    "dawn_str_empty"
-  } else if t == TyUnit || t == TyNever {
-    "DAWN_UNIT"
-  } else {
-    "NULL"
+  match c_repr(t) {
+    RInt64 -> "0"
+    RFloat64 -> "0.0"
+    RBoolean -> "false"
+    RString -> "dawn_str_empty"
+    RUnitV -> "DAWN_UNIT"
+    RAdtPtr | RCloPtr | ROpaque -> "NULL"
   }
 
 ## Which member of `dawn_slot` holds a value of this type. Reading an ADT
 ## field or unboxing goes through here.
 fn slot_of(t: Ty) -> String =
-  if t == TyInt {
-    "i"
-  } else if t == TyFloat {
-    "f"
-  } else if t == TyBool {
-    "b"
-  } else if t == TyString {
-    "s"
-  } else {
-    "p"
+  match c_repr(t) {
+    RInt64 -> "i"
+    RFloat64 -> "f"
+    RBoolean -> "b"
+    RString -> "s"
+    # RUnitV shares the pointer member, as it did in the chain this replaced
+    RUnitV | RAdtPtr | RCloPtr | ROpaque -> "p"
   }
 
 # ---- literals ----
@@ -294,21 +324,19 @@ pub fn emit_expr(st: CSt, e: CExpr) -> (CSt, String) =
   }
 
 fn is_ref_c(t: Ty) -> Bool =
-  not (t == TyInt || t == TyFloat || t == TyBool || t == TyString ||
-      t == TyUnit || t == TyNever)
+  match c_repr(t) {
+    RInt64 | RFloat64 | RBoolean | RString | RUnitV -> false
+    RAdtPtr | RCloPtr | ROpaque -> true
+  }
 
 fn box_call(v: String, from: Ty) -> String =
-  if from == TyInt {
-    "dawn_box_int(" ++ v ++ ")"
-  } else if from == TyFloat {
-    "dawn_box_float(" ++ v ++ ")"
-  } else if from == TyBool {
-    "dawn_box_bool(" ++ v ++ ")"
-  } else if from == TyString {
-    "dawn_box_str(" ++ v ++ ")"
-  } else {
+  match c_repr(from) {
+    RInt64 -> "dawn_box_int(" ++ v ++ ")"
+    RFloat64 -> "dawn_box_float(" ++ v ++ ")"
+    RBoolean -> "dawn_box_bool(" ++ v ++ ")"
+    RString -> "dawn_box_str(" ++ v ++ ")"
     # already a pointer
-    "((void*)(" ++ v ++ "))"
+    RUnitV | RAdtPtr | RCloPtr | ROpaque -> "((void*)(" ++ v ++ "))"
   }
 
 fn emit_closure(st: CSt, name: String, owner: String, caps: List[CExpr]) -> (CSt, String) = {

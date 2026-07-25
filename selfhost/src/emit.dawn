@@ -25,6 +25,7 @@ use tast.{TJavaCall, TFun, TModule, TBinOp, BEq, BNeq, BLt, BLe, BGt, BGe}
 use interp.{CValue, VInt, VFloat, VBool, VStr, VUnit, VList, VTuple, VAdt, CtOut}
 use codegen.{
   obj, fn_iface, tuple_class, erased_apply_desc, desc_of, method_desc,
+  JvmRepr, jvm_repr, RLong, RDouble, RBool, RRef, RUnit, RBottom,
   slots_of, is_ref, load_slot, hash_of, structural_class, supers_of, gen_adt, gen_ctor_class,
   EqOverride, no_override,
   owner_prefix, tr_iface, impl_class, append_const, singleton_scaffold, emit_unerase,
@@ -236,12 +237,12 @@ fn push_int(m: MethodVisitor, v: Int) -> Unit !io = {
 }
 
 fn store_slot(m: MethodVisitor, t: Ty, slot: Int) -> Unit !io = {
-  match t {
-    TyInt -> { m.visitVarInsn(OP_LSTORE, slot) }
-    TyCursor -> { m.visitVarInsn(OP_LSTORE, slot) }
-    TyFloat -> { m.visitVarInsn(OP_DSTORE, slot) }
-    TyBool -> { m.visitVarInsn(OP_ISTORE, slot) }
-    _ -> if is_ref(t) { m.visitVarInsn(OP_ASTORE, slot) }
+  match jvm_repr(t) {
+    RLong -> { m.visitVarInsn(OP_LSTORE, slot) }
+    RDouble -> { m.visitVarInsn(OP_DSTORE, slot) }
+    RBool -> { m.visitVarInsn(OP_ISTORE, slot) }
+    RRef -> { m.visitVarInsn(OP_ASTORE, slot) }
+    RUnit | RBottom -> ()
   }
   ()
 }
@@ -260,23 +261,22 @@ fn push_unit(m: MethodVisitor) -> Unit !io = {
 
 ## Box a primitive about to sit in an erased Object position.
 fn box_ty(m: MethodVisitor, t: Ty) -> Unit !io = {
-  match t {
-    TyInt -> {
+  match jvm_repr(t) {
+    RLong -> {
       m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Long", "valueOf", "(J)Ljava/lang/Long;", false)
     }
-    TyCursor -> {
-      m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Long", "valueOf", "(J)Ljava/lang/Long;", false)
-    }
-    TyFloat -> {
+    RDouble -> {
       m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Double", "valueOf",
         "(D)Ljava/lang/Double;", false)
     }
-    TyBool -> {
+    RBool -> {
       m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Boolean", "valueOf",
         "(Z)Ljava/lang/Boolean;", false)
     }
-    TyUnit -> { push_unit(m) }
-    _ -> ()
+    RUnit -> { push_unit(m) }
+    # a reference is already an Object; the bottom types have nothing on the
+    # stack to box
+    RRef | RBottom -> ()
   }
   ()
 }
@@ -312,7 +312,8 @@ fn unerase(g: Gen, t: Ty) -> Unit !io = {
     TyJava(fqcn, _) -> { m.visitTypeInsn(OP_CHECKCAST, internal_of(fqcn)) }
     TyFn(params, _, _) -> { m.visitTypeInsn(OP_CHECKCAST, fn_iface(len(params))) }
     TyUnit -> { m.visitInsn(OP_POP) }
-    _ -> ()
+    # TyVar is already erased, and the two bottom types carry no value
+    TyVar(_, _) | TyNever | TyError -> ()
   }
   ()
 }
@@ -393,15 +394,13 @@ fn derived_cmp_desc(g: Gen, subject: Ty) -> String =
 
 ## The boxed JVM type of a concrete Dawn type (LMF instantiatedMethodType).
 fn boxed_desc_of(g: Gen, t: Ty) -> String =
-  match t {
-    TyInt -> "Ljava/lang/Long;"
-    TyCursor -> "Ljava/lang/Long;"
-    TyFloat -> "Ljava/lang/Double;"
-    TyBool -> "Ljava/lang/Boolean;"
-    TyUnit -> "Ljava/lang/Object;"
-    TyNever -> "Ljava/lang/Object;"
-    TyError -> "Ljava/lang/Object;"
-    _ -> desc_of(g.adts, t)
+  match jvm_repr(t) {
+    RLong -> "Ljava/lang/Long;"
+    RDouble -> "Ljava/lang/Double;"
+    RBool -> "Ljava/lang/Boolean;"
+    RUnit -> "Ljava/lang/Object;"
+    RBottom -> "Ljava/lang/Object;"
+    RRef -> desc_of(g.adts, t)
   }
 
 fn instantiated_type(g: Gen, params: List[Ty], ret: Ty) -> Type !io = {
@@ -479,7 +478,12 @@ fn subst_tvar(t: Ty, vid: Int, to: Ty) -> Ty =
       for p in ps { out = out ++ [subst_tvar(p, vid, to)] }
       TyFn(out, subst_tvar(r, vid, to), e)
     }
-    _ -> t
+    # the variants with no type arguments to walk into. Spelled out rather than
+    # left to a wildcard: a new *parameterised* variant landing here would
+    # silently stop substituting, which shows up as a wrong descriptor much
+    # later
+    TyInt | TyFloat | TyBool | TyString | TyBytes | TyCursor -> t
+    TyUnit | TyNever | TyError | TyJava(_, _) -> t
   }
 
 fn gen_load_const(g: Gen, v: CValue, t: Ty, key: String) -> Gen !io = {

@@ -266,7 +266,10 @@ pub fn subst(t: Ty, m: Map[Int, Ty], em: Map[Int, Eff]) -> Ty =
     TyTuple(elems) -> TyTuple(map(elems, fn(x) => subst(x, m, em)))
     TyFn(params, ret, eff) ->
       TyFn(map(params, fn(x) => subst(x, m, em)), subst(ret, m, em), subst_eff(eff, em))
-    _ -> t
+    # nothing to walk into. Spelled out rather than left to a wildcard: a new
+    # *parameterised* variant landing here would silently stop substituting
+    TyInt | TyFloat | TyBool | TyString | TyBytes | TyCursor -> t
+    TyUnit | TyNever | TyError | TyJava(_, _) -> t
   }
 
 pub fn subst_eff(e: Eff, em: Map[Int, Eff]) -> Eff =

@@ -73,33 +73,61 @@ pub fn method_desc(adts: Adts, params: List[Ty], ret: Ty) -> String = {
   "(" ++ ps ++ ")" ++ desc_of(adts, ret)
 }
 
+## How the JVM carries a value of this type.
+##
+## `desc_of` says which *class*; this says which *machine representation*, and
+## those are the only two questions the backend asks about a type that every
+## variant has to answer. Slot width, load/store opcode, boxing and hashing all
+## follow from this, so they dispatch on `JvmRepr` rather than re-deciding the
+## scalar/reference split each time.
+pub type JvmRepr =
+  | RLong # 2 slots, boxes to java.lang.Long -- Int and Cursor
+  | RDouble # 2 slots, boxes to java.lang.Double
+  | RBool # 1 slot, boxes to java.lang.Boolean
+  | RRef # 1 slot, already an Object
+  | RUnit # 0 slots; a value exists but carries nothing
+  | RBottom # 0 slots and no value: Never and Error
+
+## The one function that has to account for every `Ty`. Deliberately without a
+## wildcard: a new variant must fail to compile *here*, where the decision is
+## a one-liner, rather than silently inherit a default in a dozen callers.
+pub fn jvm_repr(t: Ty) -> JvmRepr =
+  match t {
+    TyInt -> RLong
+    TyCursor -> RLong
+    TyFloat -> RDouble
+    TyBool -> RBool
+    TyUnit -> RUnit
+    TyNever -> RBottom
+    TyError -> RBottom
+    TyString -> RRef
+    TyBytes -> RRef
+    TyVar(_, _) -> RRef
+    TyAdt(_, _) -> RRef
+    TyList(_) -> RRef
+    TyMap(_, _) -> RRef
+    TySet(_) -> RRef
+    TyArray(_) -> RRef
+    TyJava(_, _) -> RRef
+    TyTuple(_) -> RRef
+    TyFn(_, _, _) -> RRef
+  }
+
 ## JVM stack/local slots of a type (J/D = 2, void = 0).
 pub fn slots_of(t: Ty) -> Int =
-  match t {
-    TyInt -> 2
-    TyCursor -> 2
-    TyFloat -> 2
-    TyBool -> 1
-    TyUnit -> 0
-    TyNever -> 0
-    TyError -> 0
-    _ -> 1
+  match jvm_repr(t) {
+    RLong -> 2
+    RDouble -> 2
+    RBool -> 1
+    RRef -> 1
+    RUnit -> 0
+    RBottom -> 0
   }
 
 pub fn is_ref(t: Ty) -> Bool =
-  match t {
-    TyString -> true
-    TyBytes -> true
-    TyAdt(_, _) -> true
-    TyList(_) -> true
-    TyMap(_, _) -> true
-    TySet(_) -> true
-    TyArray(_) -> true
-    TyVar(_, _) -> true
-    TyFn(_, _, _) -> true
-    TyTuple(_) -> true
-    TyJava(_, _) -> true
-    _ -> false
+  match jvm_repr(t) {
+    RRef -> true
+    RLong | RDouble | RBool | RUnit | RBottom -> false
   }
 
 # ---- tests ----
@@ -2467,28 +2495,32 @@ pub fn gen_ord_interface(supers: List[String]) -> Bytes !io = {
 
 ## Load a value of type `t` from a local slot (nothing for Unit/Never).
 pub fn load_slot(m: MethodVisitor, t: Ty, slot: Int) -> Unit !io = {
-  match t {
-    TyInt -> { m.visitVarInsn(OP_LLOAD, slot) }
-    TyCursor -> { m.visitVarInsn(OP_LLOAD, slot) }
-    TyFloat -> { m.visitVarInsn(OP_DLOAD, slot) }
-    TyBool -> { m.visitVarInsn(OP_ILOAD, slot) }
-    _ -> if is_ref(t) { m.visitVarInsn(OP_ALOAD, slot) }
+  match jvm_repr(t) {
+    RLong -> { m.visitVarInsn(OP_LLOAD, slot) }
+    RDouble -> { m.visitVarInsn(OP_DLOAD, slot) }
+    RBool -> { m.visitVarInsn(OP_ILOAD, slot) }
+    RRef -> { m.visitVarInsn(OP_ALOAD, slot) }
+    RUnit | RBottom -> ()
   }
   ()
 }
 
 ## Consume a value of `t` on the stack, leave its int hash (values are never null).
 pub fn hash_of(m: MethodVisitor, t: Ty) -> Unit !io = {
-  match t {
-    TyInt -> { m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Long", "hashCode", "(J)I", false) }
-    TyCursor -> { m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Long", "hashCode", "(J)I", false) }
-    TyFloat -> {
+  match jvm_repr(t) {
+    RLong -> { m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Long", "hashCode", "(J)I", false) }
+    RDouble -> {
       m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Double", "hashCode", "(D)I", false)
     }
-    TyBool -> {
+    RBool -> {
       m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Boolean", "hashCode", "(Z)I", false)
     }
-    _ -> { m.visitMethodInsn(OP_INVOKEVIRTUAL, obj(), "hashCode", "()I", false) }
+    # RUnit/RBottom cannot reach here (a hashed field always has a value), but
+    # they share the arm rather than panicking: this is the shape the wildcard
+    # already had, and S0.3 is a no-behaviour-change change
+    RRef | RUnit | RBottom -> {
+      m.visitMethodInsn(OP_INVOKEVIRTUAL, obj(), "hashCode", "()I", false)
+    }
   }
   ()
 }
@@ -2838,7 +2870,8 @@ pub fn emit_unerase(m: MethodVisitor, adts: Adts, t: Ty) -> Unit !io = {
     }
     TyFn(params, _, _) -> { m.visitTypeInsn(OP_CHECKCAST, fn_iface(len(params))) }
     TyUnit -> { m.visitInsn(OP_POP) }
-    _ -> ()
+    # TyVar is already erased, and the two bottom types carry no value
+    TyVar(_, _) | TyNever | TyError -> ()
   }
   ()
 }
