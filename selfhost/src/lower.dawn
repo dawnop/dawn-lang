@@ -15,12 +15,13 @@
 
 use std/list
 use std/map
+use std/str
 use types.{
   subst,
   Ty, TyInt, TyFloat, TyBool, TyString, TyUnit, TyNever, TyError, TyVar,
   TyAdt, TyList, TyTuple, TyFn, Sym, Sig, Traits, TraitI, ImplI, MethodSig,
   Adts, AdtI, CtorI, adt_of, trait_of, OPTION_ID, RESULT_ID, ORD_ID, EQ_ID, HASH_ID,
-  is_eq_scalar
+  is_eq_scalar, builtins
 }
 use tast.{
   TExpr, TStmt, TPat, TArm, TStrPart, TFun, TModule, TBinOp, TUnOp, TJavaCall,
@@ -145,6 +146,31 @@ fn adapt_in(e: CExpr, actual: Ty, declared: Ty) -> CExpr =
       }
     _ -> e
   }
+
+## The intrinsics whose declared signature *is* their ABI: a type variable in a
+## slot means that slot is erased, exactly as it does for a Dawn function, and
+## the backend emits one plain call against the declared descriptor. So the box
+## and the unbox belong here, in Core, like they do at every other call.
+##
+## The rest of the table is excluded because its backend handlers read the
+## Core node's own type rather than the declared one -- `unwrap_or` stores its
+## fallback in a slot sized by the *result* type, so boxing it here would break
+## it. That split has always been implicit; naming it is what makes calling one
+## of these with a concrete argument work at all. Before, `map_insert(m, "k",
+## 5)` written directly in std (rather than through the generic wrapper that
+## had already erased 5) emitted a long where the descriptor said Object, and
+## the class failed verification.
+fn erased_builtin_sig(name: String) -> Option[Sig] =
+  if str.starts_with(name, "array_") || is_map_builtin(name) {
+    map.get(builtins(), name)
+  } else {
+    None
+  }
+
+## The persistent Map/Set intrinsics -- the read side takes an erased key, the
+## write side an erased key and value.
+fn is_map_builtin(name: String) -> Bool =
+  str.starts_with(name, "map_") || str.starts_with(name, "set_")
 
 fn adapt_out(e: CExpr, declared: Ty, actual: Ty) -> CExpr =
   match declared {
@@ -1116,9 +1142,18 @@ pub fn lower_expr(st0: LSt, e: TExpr) -> (LSt, CExpr) = {
       (st1, CListLit(vs, ty))
     }
     XCallBuiltin(name, args, wits, _, _, ty) -> {
-      let (st1, vs) = lower_all(st, args)
-      let (st2, ds) = witness_values(st1, wits)
-      (st2, CIntrinsic(name, vs ++ ds, ty))
+      match erased_builtin_sig(name) {
+        Some(sg) -> {
+          let (st1, vs) = lower_args_to(st, args, sg.param_tys)
+          let (st2, ds) = witness_values(st1, wits)
+          (st2, adapt_out(CIntrinsic(name, vs ++ ds, sg.ret), sg.ret, ty))
+        }
+        None -> {
+          let (st1, vs) = lower_all(st, args)
+          let (st2, ds) = witness_values(st1, wits)
+          (st2, CIntrinsic(name, vs ++ ds, ty))
+        }
+      }
     }
     XCallFn(owner, name, args, wits, trait_id, _, _, ty) ->
       match trait_id {
