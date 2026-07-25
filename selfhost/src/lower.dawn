@@ -34,7 +34,7 @@ use tast.{
   BAnd, BOr, BBand, BBor, BBxor, BShl, BShr, BUshr, UNeg, UNot, UBnot,
   TPWild, TPBind, TPLit, TPTuple, TPList, TPCtor,
   TSLet, TSLetPat, TSLocalFn, TSAssign, TSExpr, TSAssert, TSWhile, TSFor,
-  WitRef, WForward, WConcrete
+  WitRef, WForward, WConcrete, WStructural
 }
 use exhaustive.{LitV, LInt, LFloat, LBool, LStr}
 use core.{
@@ -634,12 +634,37 @@ fn make_bridge(
   }
 }
 
+## Does this witness stand for a relation the backend implements directly,
+## rather than for a body to call?
+fn primitive_eq_witness(w: WitRef, tid: Int) -> Bool = {
+  if tid != EQ_ID && tid != HASH_ID { return false }
+  match w {
+    WStructural(_, _) -> true
+    WConcrete(_, subject) -> is_eq_scalar(subject)
+    _ -> false
+  }
+}
+
+fn is_eq_op(op: TBinOp) -> Bool =
+  match op {
+    BEq -> true
+    BNeq -> true
+    _ -> false
+  }
+
 ## A witness as a value, for the hidden trailing arguments of a generic call.
 fn witness_value(st: LSt, w: WitRef) -> (LSt, CExpr) =
   match w {
     WForward(sym) -> (st, CLocal(sym, TyAdt(0 - 1, [])))
     WConcrete(tid, subject) -> dict_ref(st, tid, subject)
+    # one dictionary serves every subject: the structural relation is the
+    # backend's own, not a per-type body, so there is nothing to specialise
+    WStructural(tid, subject) ->
+      (st, CDictRef(structural_key(tid), tid, subject, TyAdt(0 - 1, [])))
   }
+
+## The key of the shared structural Eq/Hash dictionary.
+pub fn structural_key(tid: Int) -> String = "dict\$" ++ to_string(tid) ++ "\$Structural"
 
 fn witness_values(st: LSt, ws: List[WitRef]) -> (LSt, List[CExpr]) = {
   var st1 = st
@@ -669,26 +694,25 @@ fn lower_trait_call(
   if len(ws) == 0 {
     panic("lower: trait method call without a witness: " ++ name)
   }
-  # The prelude Eq/Hash impls over scalars have no body to call -- every
-  # backend compares and hashes these natively. Collapsing them to the
-  # primitive here is not an optimisation but the definition: it is also what
-  # a `[T: Eq]` bound instantiated at a scalar has to end up as.
-  match ws[0] {
-    WConcrete(_, subject) ->
-      if is_eq_scalar(subject) {
-        if tid == EQ_ID {
-          let (sta, lv) = lower_expr(st, args[0])
-          let (stb, rv) = lower_expr(sta, args[1])
-          return (stb, CBinary(CEq, lv, rv, TyBool))
-        }
-        if tid == HASH_ID {
-          let (sta, v) = lower_expr(st, args[0])
-          return (sta, CIntrinsic("hash", [v], TyInt))
-        }
-      }
-    _ -> ()
+  # Two Eq/Hash witnesses have no body to call: the prelude impls over scalars
+  # (the backend compares and hashes those natively) and the structural
+  # default (there is no impl at all). Both collapse to the primitive, which
+  # is not an optimisation but the definition -- it is the same relation `==`
+  # emits, and it is what a bound instantiated at either has to end up as.
+  if primitive_eq_witness(ws[0], tid) {
+    if tid == EQ_ID {
+      let (sta, lv) = lower_expr(st, args[0])
+      let (stb, rv) = lower_expr(sta, args[1])
+      return (stb, CBinary(CEq, lv, rv, TyBool))
+    }
+    if tid == HASH_ID {
+      let (sta, v) = lower_expr(st, args[0])
+      return (sta, CIntrinsic("hash", [v], TyInt))
+    }
   }
   match ws[0] {
+    # only reachable for a trait other than Eq/Hash: the guard above returned
+    WStructural(_, _) -> panic("lower: structural witness for trait " ++ to_string(tid))
     WForward(sym) -> {
       # the dictionary slot has the trait's generic signature, so the
       # subject position is erased and the argument is boxed
@@ -1009,13 +1033,20 @@ pub fn lower_expr(st0: LSt, e: TExpr) -> (LSt, CExpr) = {
     }
     XBinary(op, l, r, ord, _, _, _, _, ty) ->
       match ord {
-        # `<` on a non-scalar is Ord.cmp under the surface. Lowering makes
-        # that explicit -- `cmp(l, r) <op> 0` -- so neither backend needs a
-        # witness on a comparison node.
-        Some(w) -> {
-          let (st1, c) = lower_trait_call(st, ORD_ID, "cmp", [l, r], [w], TyInt)
-          (st1, CBinary(bin_op(op), c, CInt(0), TyBool))
-        }
+        # An operator that is really a trait method. Lowering spells the call
+        # out, so neither backend needs a witness on a comparison node:
+        # `<` becomes `cmp(l, r) <op> 0`, `==` becomes `eq(l, r)`.
+        Some(w) ->
+          if is_eq_op(op) {
+            let (st1, c) = lower_trait_call(st, EQ_ID, "eq", [l, r], [w], TyBool)
+            match op {
+              BEq -> (st1, c)
+              _ -> (st1, CUnary(CNot, c, TyBool))
+            }
+          } else {
+            let (st1, c) = lower_trait_call(st, ORD_ID, "cmp", [l, r], [w], TyInt)
+            (st1, CBinary(bin_op(op), c, CInt(0), TyBool))
+          }
         None -> {
           let (st1, lv) = lower_expr(st, l)
           let (st2, rv) = lower_expr(st1, r)

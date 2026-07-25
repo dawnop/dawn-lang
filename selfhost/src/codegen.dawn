@@ -2323,12 +2323,71 @@ fn gen_hash_code_method(cw: AdtClassWriter, adts: Adts, sub: String, ci: CtorI) 
   ()
 }
 
+## The static an `impl` compiles to (mirrors emit.impl_method_name).
+fn impl_static_name(adts: Adts, trait_name: String, subject: Ty, m: String) -> String =
+  "dawn\$impl\$" ++ trait_name ++ "\$" ++ subject_name(adts, subject) ++ "\$" ++ m
+
+## equals(Object) delegating to `impl Eq`: a non-instance is never equal, so
+## the type test still runs first and the impl only ever sees its own type.
+fn gen_forwarding_equals(
+  cw: AdtClassWriter,
+  adts: Adts,
+  sub: String,
+  owner: String,
+  subject: Ty
+) -> Unit !io = {
+  let m = cw.method(ACC_PUBLIC, "equals", "(Ljava/lang/Object;)Z").expect("mv")
+  m.visitCode()
+  let no = Label.new()
+  m.visitVarInsn(OP_ALOAD, 1)
+  m.visitTypeInsn(OP_INSTANCEOF, adt_jvm_name(adt_of(adts, adt_id_of(subject))))
+  m.visitJumpInsn(OP_IFEQ, no)
+  m.visitVarInsn(OP_ALOAD, 0)
+  m.visitVarInsn(OP_ALOAD, 1)
+  m.visitTypeInsn(OP_CHECKCAST, adt_jvm_name(adt_of(adts, adt_id_of(subject))))
+  let d = desc_of(adts, subject)
+  m.visitMethodInsn(OP_INVOKESTATIC, owner, impl_static_name(adts, "Eq", subject, "eq"),
+    "(" ++ d ++ d ++ ")Z", false)
+  m.visitInsn(OP_IRETURN)
+  m.visitLabel(no)
+  m.visitInsn(OP_ICONST_0)
+  m.visitInsn(OP_IRETURN)
+  close_mv(m)
+  ()
+}
+
+## hashCode() delegating to `impl Hash`; Dawn's Int is a long, so narrow it.
+fn gen_forwarding_hash_code(
+  cw: AdtClassWriter,
+  adts: Adts,
+  sub: String,
+  owner: String,
+  subject: Ty
+) -> Unit !io = {
+  let m = cw.method(ACC_PUBLIC, "hashCode", "()I").expect("mv")
+  m.visitCode()
+  m.visitVarInsn(OP_ALOAD, 0)
+  m.visitMethodInsn(OP_INVOKESTATIC, owner, impl_static_name(adts, "Hash", subject, "hash"),
+    "(" ++ desc_of(adts, subject) ++ ")J", false)
+  m.visitInsn(OP_L2I)
+  m.visitInsn(OP_IRETURN)
+  close_mv(m)
+  ()
+}
+
+fn adt_id_of(t: Ty) -> Int =
+  match t {
+    TyAdt(aid, _) -> aid
+    _ -> panic("impl subject is not an ADT")
+  }
+
 ## One ctor class: final subclass of `base` (or the record class itself).
 pub fn gen_ctor_class(
   supers: List[String],
   adts: Adts,
   base: String,
-  ci: CtorI
+  ci: CtorI,
+  ov: EqOverride
 ) -> Bytes !io = {
   let sub = ctor_jvm_name(adts, ci)
   let cw = AdtClassWriter.new(supers)
@@ -2365,9 +2424,18 @@ pub fn gen_ctor_class(
   }
   init.visitInsn(OP_RETURN)
   close_mv(init)
-  if not singleton {
-    gen_equals_method(cw, adts, sub, ci)
-    gen_hash_code_method(cw, adts, sub, ci)
+  # `equals`/`hashCode` are the JVM's materialisation of the Eq/Hash
+  # dictionary: the collections and every derived field comparison reach the
+  # relation through them, so an `impl Eq` that only changed `==` would leave
+  # `a == b` and `map.get(m, b)` disagreeing. Forward them to the impl.
+  let subject = TyAdt(ci.adt, [])
+  match ov.eq_owner {
+    Some(owner) -> gen_forwarding_equals(cw, adts, sub, owner, subject)
+    None -> if not singleton { gen_equals_method(cw, adts, sub, ci) }
+  }
+  match ov.hash_owner {
+    Some(owner) -> gen_forwarding_hash_code(cw, adts, sub, owner, subject)
+    None -> if not singleton { gen_hash_code_method(cw, adts, sub, ci) }
   }
   # toString is always generated so nested/generic fields render uniformly via
   # dawn/rt/Show; the type checker gates whether it may be called
@@ -2377,14 +2445,25 @@ pub fn gen_ctor_class(
 }
 
 ## The classes of one ADT: (name, bytes) for the base (sums) and each ctor.
-pub fn gen_adt(supers: List[String], adts: Adts, a: AdtI) -> List[(String, Bytes)] !io = {
+## Where a type overrides the structural default: the module class holding
+## the impl's static method, per trait. None = keep the derived body.
+pub type EqOverride = { eq_owner: Option[String], hash_owner: Option[String] }
+
+pub fn no_override() -> EqOverride = EqOverride { eq_owner: None, hash_owner: None }
+
+pub fn gen_adt(
+  supers: List[String],
+  adts: Adts,
+  a: AdtI,
+  ov: EqOverride
+) -> List[(String, Bytes)] !io = {
   let base = adt_jvm_name(a)
   if a.is_record {
     let ci = match a.ctors {
       [only] -> only
       _ -> panic("record with " ++ to_string(len(a.ctors)) ++ " ctors")
     }
-    return [(base, gen_ctor_class(supers, adts, obj(), ci))]
+    return [(base, gen_ctor_class(supers, adts, obj(), ci, ov))]
   }
   let bw = AdtClassWriter.new(supers)
   bw.begin(V17, ACC_PUBLIC + ACC_ABSTRACT, base, obj())
@@ -2398,7 +2477,7 @@ pub fn gen_adt(supers: List[String], adts: Adts, a: AdtI) -> List[(String, Bytes
   bw.visitEnd()
   var out = [(base, bw.toByteArray().expect("bytes"))]
   for ci in a.ctors {
-    out = out ++ [(ctor_jvm_name(adts, ci), gen_ctor_class(supers, adts, base, ci))]
+    out = out ++ [(ctor_jvm_name(adts, ci), gen_ctor_class(supers, adts, base, ci, ov))]
   }
   out
 }
@@ -2561,6 +2640,48 @@ pub fn gen_prelude_hash_impl(supers: List[String], adts: Adts, subject: Ty) -> B
   } else {
     hash_of(m, subject)
   }
+  m.visitInsn(OP_I2L)
+  m.visitInsn(OP_LRETURN)
+  m.visitMaxs(0, 0)
+  m.visitEnd()
+  cw.visitEnd()
+  cw.toByteArray().expect("bytes")
+}
+
+## The one dictionary shared by every subject with no `impl Eq`/`impl Hash`:
+## the structural default. On the JVM that is the value's own equals/hashCode,
+## which is exactly what `==` and the collections already use, so routing a
+## bound through here changes nothing about what the program computes.
+pub fn structural_class(trait_name: String) -> String = "dawn/impl/" ++ trait_name ++ "\$Structural"
+
+pub fn gen_structural_eq_impl(supers: List[String]) -> Bytes !io = {
+  let cls = structural_class("Eq")
+  let iface = tr_iface(None, "Eq")
+  let cw = AdtClassWriter.new(supers)
+  cw.beginWithInterface(V17, ACC_PUBLIC + ACC_FINAL, cls, obj(), iface)
+  singleton_scaffold(cw, cls, iface)
+  let m = cw.method(ACC_PUBLIC, "eq", "(Ljava/lang/Object;Ljava/lang/Object;)Z").expect("mv")
+  m.visitCode()
+  m.visitVarInsn(OP_ALOAD, 1)
+  m.visitVarInsn(OP_ALOAD, 2)
+  m.visitMethodInsn(OP_INVOKEVIRTUAL, obj(), "equals", "(Ljava/lang/Object;)Z", false)
+  m.visitInsn(OP_IRETURN)
+  m.visitMaxs(0, 0)
+  m.visitEnd()
+  cw.visitEnd()
+  cw.toByteArray().expect("bytes")
+}
+
+pub fn gen_structural_hash_impl(supers: List[String]) -> Bytes !io = {
+  let cls = structural_class("Hash")
+  let iface = tr_iface(None, "Hash")
+  let cw = AdtClassWriter.new(supers)
+  cw.beginWithInterface(V17, ACC_PUBLIC + ACC_FINAL, cls, obj(), iface)
+  singleton_scaffold(cw, cls, iface)
+  let m = cw.method(ACC_PUBLIC, "hash", "(Ljava/lang/Object;)J").expect("mv")
+  m.visitCode()
+  m.visitVarInsn(OP_ALOAD, 1)
+  m.visitMethodInsn(OP_INVOKEVIRTUAL, obj(), "hashCode", "()I", false)
   m.visitInsn(OP_I2L)
   m.visitInsn(OP_LRETURN)
   m.visitMaxs(0, 0)

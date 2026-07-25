@@ -19,13 +19,14 @@ use types.{
   Ty, TyInt, TyFloat, TyBool, TyString, TyBytes, TyCursor, TyUnit, TyNever,
   TyError, TyVar, TyAdt, TyList, TyMap, TySet, TyJava, TyTuple, TyFn,
   Adts, AdtI, CtorI, FieldI, adt_of, adt_jvm_name, ctor_jvm_name,
-  Sym, Sig, Eff, Traits, TraitI, MethodSig, ImplI, trait_of, ORD_ID, builtins
+  Sym, Sig, Eff, Traits, TraitI, MethodSig, ImplI, trait_of, ORD_ID, EQ_ID, HASH_ID, builtins
 }
 use tast.{TJavaCall, TFun, TModule, TBinOp, BEq, BNeq, BLt, BLe, BGt, BGe}
 use interp.{CValue, VInt, VFloat, VBool, VStr, VUnit, VList, VTuple, VAdt, CtOut}
 use codegen.{
   obj, fn_iface, tuple_class, erased_apply_desc, desc_of, method_desc,
-  slots_of, is_ref, load_slot, hash_of, supers_of, gen_adt, gen_ctor_class,
+  slots_of, is_ref, load_slot, hash_of, structural_class, supers_of, gen_adt, gen_ctor_class,
+  EqOverride, no_override,
   owner_prefix, tr_iface, impl_class, append_const, singleton_scaffold, emit_unerase,
   V17, ACC_PUBLIC, ACC_PRIVATE, ACC_PROTECTED, ACC_STATIC, ACC_FINAL,
   ACC_ABSTRACT, ACC_INTERFACE,
@@ -1485,6 +1486,31 @@ fn scratch_mv() -> MethodVisitor !io = {
 }
 
 ## One checked module → its classes: ADTs, trait interfaces, impl
+## Which of this ADT's equals/hashCode an `impl Eq`/`impl Hash` takes over.
+## Only an explicit impl counts: without one the derived structural bodies are
+## already the relation, so nothing changes and nothing is re-emitted.
+fn eq_override(
+  impl_table: Map[(Int, Ty), ImplI],
+  class_name: String,
+  subject: Ty
+) -> EqOverride = {
+  let owner_of = fn(tid: Int) => {
+    let none: Option[String] = None
+    match map.get(impl_table, (tid, subject)) {
+      Some(imp) ->
+        if imp.derived { none } else { Some(owner_or_default(imp.owner, class_name)) }
+      None -> none
+    }
+  }
+  EqOverride { eq_owner: owner_of(EQ_ID), hash_owner: owner_of(HASH_ID) }
+}
+
+fn owner_or_default(o: Option[String], fallback: String) -> String =
+  match o {
+    Some(x) -> x
+    None -> fallback
+  }
+
 ## dictionaries, derived Ord singletons, and the class of statics.
 pub fn emit_module(
   supers: List[String],
@@ -1506,7 +1532,8 @@ pub fn emit_module(
 ) -> List[(String, Bytes)] !io = {
   var out: List[(String, Bytes)] = []
   for aid in own_adt_ids {
-    out = out ++ gen_adt(supers, adts, adt_of(adts, aid))
+    out = out ++ gen_adt(supers, adts, adt_of(adts, aid),
+      eq_override(impl_table, class_name, TyAdt(aid, adt_of(adts, aid).tparams)))
   }
   for tid in own_trait_ids {
     let tr = trait_of(traits, tid)
@@ -1836,9 +1863,15 @@ pub fn gen_cexpr(g: Gen, e: CExpr, tail: Bool) -> (Gen, Bool) !io =
     CDictRef(_key, tid, subject, _) -> {
       # the JVM's dictionary is the impl singleton, reached by its type --
       # the key a table-based backend uses is ignored here
-      let imp = impl_of(g, tid, subject)
       let tr = trait_of(g.traits, tid)
-      g.mv.visitFieldInsn(OP_GETSTATIC, impl_class(g.adts, imp.owner, tr.name, subject),
+      # a structural Eq/Hash witness has no impl to name: one shared singleton
+      # forwards to the JVM's own equals/hashCode, which *is* the structural
+      # relation `==` has always emitted
+      let cls = match map.get(g.impl_table, (tid, subject)) {
+        Some(imp) -> impl_class(g.adts, imp.owner, tr.name, subject)
+        None -> structural_class(tr.name)
+      }
+      g.mv.visitFieldInsn(OP_GETSTATIC, cls,
         "INSTANCE", "L" ++ tr_iface(tr.owner, tr.name) ++ ";")
       (g, true)
     }

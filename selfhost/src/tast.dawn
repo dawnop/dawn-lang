@@ -21,6 +21,11 @@ pub type TArm = { pats: List[TPat], guard: Option[TExpr], body: TExpr }
 pub type WitRef =
   | WForward(sym: Int)
   | WConcrete(trait_id: Int, subject: Ty)
+# Eq/Hash only: no impl, so the witness is the structural default every type
+# has. The compiler synthesises it rather than the user writing it, which is
+# what trait v1 cannot express for a generic subject like `List[T]`
+# (docs/native-backend-plan.md §9.1).
+  | WStructural(trait_id: Int, subject: Ty)
 
 ## One Java call, resolved: enough for comptime route C (static, scalar
 ## marshalling) and for codegen. Parameter/return types are JVM class names;
@@ -113,12 +118,13 @@ pub type TExpr =
   | XContinue(lo: Int, hi: Int)
   | XComptime(body: TExpr, lo: Int, hi: Int, ty: Ty)
   | XUnsafePure(body: TExpr, lo: Int, hi: Int, ty: Ty)
-# `ord` is the witness behind < <= > >= on non-scalars
+# `wit` is the trait witness behind an operator that is really a method call:
+# Ord for < <= > >= on non-scalars, Eq for == and != where the type overrides it
   | XBinary(
     op: TBinOp,
     left: TExpr,
     right: TExpr,
-    ord: Option[WitRef],
+    wit: Option[WitRef],
     olo: Int,
     ohi: Int,
     lo: Int,

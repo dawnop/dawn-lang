@@ -33,6 +33,7 @@ use tast.{
   XCallBuiltin, XCallFn, XApply, XJava, XLambda, XCtor, XConstRef, XCtorValue, XField,
   XListLit, XTupleLit, XPropagate, XUnwrap, XIndex, XReturn, XBreak, XContinue,
   XComptime, XUnsafePure, XBinary, XUnary, XIf, XMatch, XBlock, XError,
+  WStructural,
   TBinOp, BAdd, BSub, BMul, BDiv, BMod, BConcat, BEq, BNeq, BLt, BLe, BGt, BGe,
   BAnd, BOr, BBand, BBor, BBxor, BShl, BShr, BUshr,
   TUnOp, UNeg, UNot, UBnot, TStrPart, TSPText, TSPInterp, TArm, TJavaCall,
@@ -47,7 +48,8 @@ use types.{
   Adts, AdtI, CtorI, FieldI, Traits, TraitI, ImplI, Sym, Sig, MethodSig,
   adt_of, trait_of, ty_show, ctor_render, sig_render, subst, subst_eff,
   ty_named, is_numeric, is_errorish, prelude_adts, prelude_traits, prelude_impls, bounds_of,
-  builtins, opt_ty, result_ty, OPTION_ID, RESULT_ID, ORD_ID, EQ_ID, HASH_ID, eq_scalars
+  builtins, opt_ty, result_ty, OPTION_ID, RESULT_ID, ORD_ID, EQ_ID, HASH_ID, eq_scalars,
+  is_eq_scalar
 }
 use jreflect.{
   JClass, JMethod, JCtor, JField, find_class, class_info, methods_of, ctors_of,
@@ -1874,6 +1876,7 @@ pub fn pass_register_impls(
     di = di + 1
   }
   # explicit impls
+  var eq_hash_impls: List[(Int, Ty, Int, Int)] = []
   for d in module_impls(m) {
     let tid = match map.get(cx1.traits_by_name, d.trait_name) {
       None -> {
@@ -1942,6 +1945,9 @@ pub fn pass_register_impls(
         continue
       }
       None -> ()
+    }
+    if tid == EQ_ID || tid == HASH_ID {
+      eq_hash_impls = eq_hash_impls ++ [(tid, subject, d.tlo, d.thi)]
     }
     var inst: Map[Int, Ty] = map.empty()
     match tr.tvar {
@@ -2133,6 +2139,27 @@ pub fn pass_register_impls(
       }
     }
     di = di + 1
+  }
+  # Eq and Hash have to be overridden together. The JVM materialises the two
+  # dictionaries as the class's equals/hashCode, and every container reaches
+  # the relation through that pair; overriding one leaves `a == b` and
+  # `map.get(m, b)` answering differently. The orphan rule keeps both impls in
+  # the subject's own module, so this module sees the pair or the gap.
+  for pr in eq_hash_impls {
+    let (tid, subject, plo, phi) = pr
+    let other = if tid == EQ_ID { HASH_ID } else { EQ_ID }
+    var paired = false
+    for pr2 in eq_hash_impls {
+      let (tid2, subject2, _, _) = pr2
+      if tid2 == other && subject2 == subject { paired = true }
+    }
+    if not paired {
+      let tn = trait_of(cx1.traits, tid).name
+      let on = trait_of(cx1.traits, other).name
+      cx1 = cerr_h(cx1, "`impl " ++ tn ++ "[" ++ ty_show(cx1.adts, subject) ++
+          "]` needs a matching `impl " ++ on ++ "`", plo, phi,
+        "equal values must hash alike, or the type breaks as a Map/Set key")
+    }
   }
   (cx1, impl_sigs)
 }
@@ -2576,6 +2603,56 @@ test "unary checking types and poisons" {
   assert cx2.diags[0].msg == "negation expects a number, got String"
 }
 
+## A forwarded dictionary is an ordinary local as far as closures go: every
+## enclosing lambda has to capture it, or the body cannot reach it.
+fn capture_witness(cx: Cx, sym: Int) -> Cx = {
+  var stack: List[LambdaCx] = []
+  for lc in cx.lambda_stack {
+    var caps = lc.captures
+    var have = false
+    for c in caps {
+      if c == sym { have = true }
+    }
+    if not have { caps = caps ++ [sym] }
+    stack = stack ++ [LambdaCx { ..lc, captures: caps }]
+  }
+  Cx { ..cx, lambda_stack: stack }
+}
+
+## The witness behind `==`/`!=`, which differs from Ord's in one way that
+## matters: equality has a structural default for every type, so "no impl" is
+## not an error -- it means the backend's own structural comparison, which is
+## what `==` has always emitted. A witness is returned only where dispatch
+## would actually differ from that.
+##
+## A rigid type parameter is the exception: `T` has no structure to compare,
+## so it needs the caller's dictionary and therefore a bound.
+pub fn resolve_eq_witness(cx: Cx, t: Ty, lo: Int, hi: Int) -> (Cx, Option[WitRef]) = {
+  if is_errorish(t) { return (cx, no_wit()) }
+  match t {
+    TyVar(_, vid) ->
+      match map.get(cx.dict_syms, (vid, EQ_ID)) {
+        None -> {
+          let cx1 = cerr_h(cx, "values of type " ++ ty_show(cx.adts, t) ++
+              " cannot be compared for equality", lo, hi,
+            "add the bound: [" ++ ty_show(cx.adts, t) ++ ": Eq]")
+          (cx1, no_wit())
+        }
+        Some(sym) -> (capture_witness(cx, sym), Some(WForward(sym)))
+      }
+    _ ->
+      # scalars are native; an ADT with no `impl Eq` keeps its structural default
+      if is_eq_scalar(t) {
+        (cx, no_wit())
+      } else {
+        match map.get(cx.impl_table, (EQ_ID, t)) {
+          Some(_) -> (cx, Some(WConcrete(EQ_ID, t)))
+          None -> (cx, no_wit())
+        }
+      }
+  }
+}
+
 ## Satisfy one trait requirement at a use site (the Kotlin resolveWitness,
 ## specialized here for Ord over `<' family operators): a concrete subject
 ## resolves through the impl table; the caller's own rigid type parameter
@@ -2591,19 +2668,7 @@ pub fn resolve_ord_witness(cx: Cx, t: Ty, lo: Int, hi: Int) -> (Cx, Option[WitRe
               " cannot be ordered", lo, hi, "add the bound: [" ++ ty_show(cx.adts, t) ++ ": Ord]")
           (cx1, no_wit())
         }
-        Some(sym) -> {
-          var stack: List[LambdaCx] = []
-          for lc in cx.lambda_stack {
-            var caps = lc.captures
-            var have = false
-            for c in caps {
-              if c == sym { have = true }
-            }
-            if not have { caps = caps ++ [sym] }
-            stack = stack ++ [LambdaCx { ..lc, captures: caps }]
-          }
-          (Cx { ..cx, lambda_stack: stack }, Some(WForward(sym)))
-        }
+        Some(sym) -> (capture_witness(cx, sym), Some(WForward(sym)))
       }
     _ ->
       match map.get(cx.impl_table, (ORD_ID, t)) {
@@ -2729,7 +2794,8 @@ pub fn check_binary_typed(
             ty_show(cx.adts, lt) ++ " vs " ++ ty_show(cx.adts, rt), olo, ohi), TyError,
           node(no_wit(), TyError))
       }
-      (cx, TyBool, node(no_wit(), TyBool))
+      let (cx1, w) = resolve_eq_witness(cx, lt, olo, ohi)
+      (cx1, TyBool, node(w, TyBool))
     }
     OpLt | OpLe | OpGt | OpGe -> {
       if lt != rt {
@@ -4265,24 +4331,17 @@ pub fn resolve_witness(
               ts ++ "` has no such bound", lo, hi,
             "add the bound: [" ++ ts ++ ": " ++ tr.name ++ "]"), no_wit())
         }
-        Some(sym) -> {
-          var stack: List[LambdaCx] = []
-          for lc in cx.lambda_stack {
-            var caps = lc.captures
-            var have = false
-            for c in caps {
-              if c == sym { have = true }
-            }
-            if not have { caps = caps ++ [sym] }
-            stack = stack ++ [LambdaCx { ..lc, captures: caps }]
-          }
-          (Cx { ..cx, lambda_stack: stack }, Some(WForward(sym)))
-        }
+        Some(sym) -> (capture_witness(cx, sym), Some(WForward(sym)))
       }
     _ ->
       match map.get(cx.impl_table, (trait_id, t)) {
         Some(_) -> (cx, Some(WConcrete(trait_id, t)))
         None -> {
+          # equality and hashing are total: every type has a structural
+          # default, so a missing impl is not a missing capability
+          if trait_id == EQ_ID || trait_id == HASH_ID {
+            return (cx, Some(WStructural(trait_id, t)))
+          }
           let ts = ty_show(cx.adts, t)
           let hint = if trait_id == ORD_ID && not is_adt(t) {
             "only Int, Float, String and types with an `impl Ord` can be ordered"
@@ -7759,6 +7818,61 @@ pub fn check_module(cx: Cx, m: Module, env: Map[String, ModExports]) -> (Cx, TMo
   }
   fns_out = fns_out ++ impl_tfuns ++ default_tfuns
   (cx1, TModule { fns: fns_out, consts: tconsts, tests: ttests, syms: cx1.syms })
+}
+
+test "an Eq impl must come with a Hash impl" {
+  let eq_impl = "type P = { x: Int }\n" ++
+    "impl Eq[P] {\n  fn eq(a: P, b: P) -> Bool = a.x == b.x\n}\n"
+  let hash_impl = "impl Hash[P] {\n  fn hash(p: P) -> Int = p.x\n}\n"
+  let env: Map[String, ModExports] = map.empty()
+  let (m1, _) = parser.parse_module(eq_impl)
+  let (cx1, _) = check_module(seed_prelude(test_cx()), m1, env)
+  assert len(cx1.diags) == 1
+  assert cx1.diags[0].msg == "`impl Eq[P]` needs a matching `impl Hash`"
+  # the other way round reports symmetrically
+  let (m2, _) = parser.parse_module("type P = { x: Int }\n" ++ hash_impl)
+  let (cx2, _) = check_module(seed_prelude(test_cx()), m2, env)
+  assert cx2.diags[0].msg == "`impl Hash[P]` needs a matching `impl Eq`"
+  # together they check
+  let (m3, _) = parser.parse_module(eq_impl ++ hash_impl)
+  let (cx3, _) = check_module(seed_prelude(test_cx()), m3, env)
+  assert len(cx3.diags) == 0
+}
+
+## The witness on the `==` that is the whole body of `fn f` in a checked
+## module (the impl methods in these sources have `==` bodies of their own).
+fn eq_wit_of(src: String) -> Option[WitRef] !io = {
+  let (m, _) = parser.parse_module(src)
+  let env: Map[String, ModExports] = map.empty()
+  let (_cx, tm) = check_module(seed_prelude(test_cx()), m, env)
+  var found: Option[WitRef] = None
+  for tf in tm.fns {
+    if tf.name == "f" {
+      match tf.body {
+        XBinary(_, _, _, w, _, _, _, _, _) -> { found = w }
+        _ -> ()
+      }
+    }
+  }
+  found
+}
+
+test "== carries an Eq witness only where a type overrides the default" {
+  # a scalar and a plain ADT keep the structural default: no witness, so the
+  # backend emits exactly what it always emitted
+  assert eq_wit_of("fn f(a: Int, b: Int) -> Bool = a == b") == None
+  assert eq_wit_of("type C = | R | G\nfn f(a: C, b: C) -> Bool = a == b") == None
+  # an overriding impl puts the operator on the dictionary rail
+  let over = "type P = { x: Int }\n" ++
+    "impl Eq[P] {\n  fn eq(a: P, b: P) -> Bool = a.x == b.x\n}\n" ++
+    "impl Hash[P] {\n  fn hash(p: P) -> Int = p.x\n}\n" ++
+    "fn f(a: P, b: P) -> Bool = a == b\n"
+  var tid = 0 - 1
+  match eq_wit_of(over) {
+    Some(WConcrete(t, _)) -> { tid = t }
+    _ -> ()
+  }
+  assert tid == EQ_ID
 }
 
 test "check_module: a whole module checks end to end" {

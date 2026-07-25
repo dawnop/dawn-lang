@@ -24,16 +24,17 @@ fn digest[T: Hash](xs: List[T]) -> Int = {
   h
 }
 
+## No `impl Eq` here: structural equality is already the default for every
+## type, so a bound over Color is satisfied without writing anything.
 type Color = | Red | Green | Blue
 
-## A type may override the structural default. Nothing else changes: `==` is
-## still the operator, and this is still the relation it names.
-impl Eq[Color] {
-  fn eq(a: Color, b: Color) -> Bool = a == b
-}
-
-## Deliberately coarse -- only `x` counts, so two points that differ in `y`
-## are equal here while `==` still separates them.
+## An override is only ever worth writing to be *non*-structural: here only
+## `x` counts, so two points differing in `y` are equal.
+##
+## Note what the body may not say. `a == b` would be this very function --
+## overriding `==` makes the structural default unreachable from inside the
+## override, exactly as `fn f(x) = f(x)` is unreachable from inside itself.
+## Compare fields, not values.
 type P = { x: Int, y: Int }
 
 impl Eq[P] {
@@ -55,6 +56,6 @@ pub fn main() -> Unit !io = {
   let a = P { x: 1, y: 2 }
   let b = P { x: 1, y: 99 }
   println("eq(a, b) = ${eq(a, b)}    (only x counts)")
-  println("a == b   = ${a == b}   (still structural)")
+  println("a == b   = ${a == b}    (the operator now means the impl too)")
   println("hash(a)  = ${hash(a)}")
 }
