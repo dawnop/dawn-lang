@@ -966,21 +966,94 @@ pub fn is_concrete(cx: Cx, t: Ty) -> Bool =
   }
 
 ## Does the type contain a function anywhere? (functions cannot be compared)
-pub fn contains_fn(t: Ty) -> Bool =
-  match t {
-    TyFn(_, _, _) -> true
-    TyTuple(elems) -> {
-      for e in elems {
-        if contains_fn(e) { return true }
+## The first part of `t` that has no equality, or None.
+##
+## One predicate for both doors. `==` used to ask a walk that did not descend
+## into ADT fields, and a `[T: Eq]` bound used to ask nothing at all: the
+## operator refused `f == g` while the bound accepted it and answered by
+## reference -- not even reflexively, since a function value is a fresh object
+## at each use site, so `eq2(f, f)` came out false. Same relation, two doors,
+## two answers.
+##
+## An explicit `impl Eq` ends the walk: the impl is the definition, and what
+## its fields are made of is its own business.
+pub fn uncomparable_part(cx: Cx, t: Ty, seen: Set[String]) -> Option[Ty] =
+  if map.has(cx.impl_table, (EQ_ID, t)) {
+    None
+  } else {
+    match t {
+      TyFn(_, _, _) -> Some(t)
+      # the D1 growable vector: mutable, and compared by reference. Until it
+      # is a Dawn type with an impl there is no content equality to give.
+      TyArray(_) -> Some(t)
+      TyTuple(elems) -> {
+        for e in elems {
+          match uncomparable_part(cx, e, seen) {
+            Some(b) -> return Some(b)
+            None -> ()
+          }
+        }
+        None
       }
-      false
+      TyList(e) -> uncomparable_part(cx, e, seen)
+      TySet(e) -> uncomparable_part(cx, e, seen)
+      TyMap(k, v) ->
+        match uncomparable_part(cx, k, seen) {
+          Some(b) -> Some(b)
+          None -> uncomparable_part(cx, v, seen)
+        }
+      TyAdt(aid, targs) -> {
+        let a = adt_of(cx.adts, aid)
+        if set.has(seen, a.name) { return None }
+        let seen2 = set.insert(seen, a.name)
+        var m: Map[Int, Ty] = map.empty()
+        var i = 0
+        for tp in a.tparams {
+          match tp {
+            TyVar(_, id) ->
+              match get(targs, i) {
+                Some(arg) -> { m = map.insert(m, id, arg) }
+                None -> ()
+              }
+            _ -> ()
+          }
+          i = i + 1
+        }
+        let em: Map[Int, Eff] = map.empty()
+        for c in a.ctors {
+          for f in c.fields {
+            match uncomparable_part(cx, subst(f.ty, m, em), seen2) {
+              Some(b) -> return Some(b)
+              None -> ()
+            }
+          }
+        }
+        None
+      }
+      # A rigid type parameter stays permissive on purpose: whether `T` has
+      # an equality is the instantiation's business, and demanding a bound
+      # here would reject code that compiles today. It is the erased half
+      # `struct_eq` covers, and it closes with trait v2, not here.
+      _ -> None
     }
-    TyList(e) -> contains_fn(e)
-    TyMap(k, v) -> contains_fn(k) || contains_fn(v)
-    TySet(e) -> contains_fn(e)
-    TyArray(e) -> contains_fn(e)
-    _ -> false
   }
+
+## One wording for both doors. `bad` is the part with no equality; when it is
+## the whole type the message says so directly rather than pointing at itself.
+pub fn uncomparable_err(cx: Cx, t: Ty, bad: Ty, lo: Int, hi: Int) -> Cx = {
+  let (what, hint) = match bad {
+    TyFn(_, _, _) ->
+      ("functions cannot be compared", "compare the values they produce, not the functions")
+    _ -> ("`" ++ ty_show(cx.adts, bad) ++ "` has no equality",
+      "compare something derived from its contents instead")
+  }
+  let msg = if bad == t {
+    what
+  } else {
+    what ++ ", and `" ++ ty_show(cx.adts, t) ++ "` contains one"
+  }
+  cerr_h(cx, msg, lo, hi, hint)
+}
 
 ## A concrete type is printable now: primitives, containers/ADTs of printable types.
 pub fn is_showable(cx: Cx, t: Ty) -> Bool =
@@ -2824,10 +2897,10 @@ pub fn check_binary_typed(
         node(no_wit(), TyError))
     }
     OpEq | OpNeq -> {
-      if contains_fn(lt) || contains_fn(rt) {
-        return (cerr_h(cx, "functions cannot be compared", olo, ohi,
-          "compare the values they produce, not the functions themselves"), TyError,
-          node(no_wit(), TyError))
+      match uncomparable_part(cx, lt, set.empty()) {
+        Some(bad) ->
+          return (uncomparable_err(cx, lt, bad, olo, ohi), TyError, node(no_wit(), TyError))
+        None -> ()
       }
       if lt != rt {
         return (cerr(cx, "== requires both sides to have the same type: " ++
@@ -4390,10 +4463,15 @@ pub fn resolve_witness(
       match map.get(cx.impl_table, (trait_id, t)) {
         Some(_) -> (cx, Some(WConcrete(trait_id, t)))
         None -> {
-          # equality and hashing are total: every type has a structural
-          # default, so a missing impl is not a missing capability
+          # Equality and hashing have a structural default, so a missing impl
+          # is usually not a missing capability -- but "usually" is not
+          # "always", and this used to say always. The same walk `==` asks
+          # decides here, so the bound cannot accept what the operator refuses.
           if trait_id == EQ_ID || trait_id == HASH_ID {
-            return (cx, Some(WStructural(trait_id, t)))
+            match uncomparable_part(cx, t, set.empty()) {
+              None -> return (cx, Some(WStructural(trait_id, t)))
+              Some(bad) -> return (uncomparable_err(cx, t, bad, lo, hi), no_wit())
+            }
           }
           let ts = ty_show(cx.adts, t)
           let hint = if trait_id == ORD_ID && not is_adt(t) {
