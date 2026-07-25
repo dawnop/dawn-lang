@@ -35,6 +35,26 @@
 - 但 `Bytes` **不适合作 Map/Set 键**（容器用的是值自带的 `hashCode`，即引用同一性，
   与结构化 `==` 不一致）。v1 **不**在 checker 里硬禁（省改动面），而是**文档明确劝退**；
   真有需要用键时改用 `decode` 出的 String 或 hex。若日后证明是坑，再加 checker 守卫。
+  （后来确实加了：`checker.dawn:404` 现在硬禁 Bytes 进 Map/Set 键类型，诊断直说
+  「hashes by identity, not content」。）
+
+> **上面那行「`==` 特判为结构相等」只对*裸* `Bytes` 成立**（2026-07-25 做 D0 时实测发现）。
+> 嵌进任何容器就退回引用同一性，且**静默**——内容相同的两个 `Bytes`：
+>
+> | 写法 | 结果 |
+> |---|---|
+> | `x == y` | `true`（`gen_equality` 特判 → `Arrays.equals`） |
+> | `W { b: x } == W { b: y }` | `false`（派生 equals 的字段臂走 `Object.equals`） |
+> | `(1, x) == (1, y)` / `[x] == [y]` / `Some(x) == Some(y)` | `false`（同上，元组类与集合类都按元素 `Object.equals`） |
+>
+> **根因正是 D0 要消灭的东西**：相等的含义活在两处——运算符在 `emit.dawn:gen_equality`，
+> 字段/元素在 `codegen.dawn:gen_equals_method` 与手写 Java 容器里，没有任何机制强制两者一致，
+> 于是它们在 `Bytes` 上分了岔。
+>
+> **现在不修**。只修 record/tuple（能改）会留下「record 结构化、List 仍身份」的更难预测的不一致，
+> 而 `DawnList`/`DawnMap`/`DawnSet` 是归档在 `kotlin-final` 的手写 Java，今天改不动。
+> **D0 让 `Eq` 成为真 trait（`Eq[Bytes]` 只有一份实现）+ D2/D3 让容器变纯 Dawn 之后，
+> 这条自然闭合**，届时 Map/Set 键的硬禁也可以撤。
 
 ### 决策 B：String↔Bytes API = 自由函数 + UFCS（不引入方法机制）
 

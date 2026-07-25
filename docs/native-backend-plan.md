@@ -49,7 +49,7 @@
 | 块 | 规模(估) | 性质 |
 |---|---|---|
 | Phase 0 Core IR | ~4,000–6,000 行净变更 | 重构，有完整 oracle |
-| D0 Eq/Hash trait 化 | ~800–1,500 行 | 巨型 Emit-Change，**全线最高风险** |
+| D0 Eq/Hash trait 化 | ~800–1,500 行 | ~~巨型 Emit-Change，全线最高风险~~ **实测后下调,见 §9** |
 | D1–D3 集合纯 Dawn 化 | ~1,500–2,000 行 | 有实测支撑(§9)，风险已知 |
 | C 发射器 | ~2,500–3,500 行 | 新写，可对差分 |
 | C 运行时 | ~2,000–3,000 行 C | 新写，**无 oracle** |
@@ -112,16 +112,23 @@ Kotlin 编译器当标准答案(`__lex`/`__parse` golden diff → B==C 固定点
 > 逐条审**,并由全套测试 + 固定点 B==C 兜行为等价。**止损点相应改为:形状保持的增量若出现
 > Emit-Change,说明搬错了。**
 
-### Phase 1 — D0:Eq/Hash trait 化(风险最高)
+### Phase 1 — D0:Eq/Hash trait 化
 
 把 `==` 从硬连线 `BEq`、hash 从自动派生结构 `hashCode`，改成骑 Ord 已有的字典轨(`dict_syms` /
 `resolve_witness` → `WitRef`)的可 override trait。
 
-**验收的硬要求:派生默认必须与今天的结构 equals/hashCode 逐字节等价。** 这是巨型 Emit-Change，
-但语义必须零变化。
+**验收的硬要求:派生默认必须与今天的结构 equals/hashCode 逐字节等价。** 语义零变化。
+
+> **动工后修正(2026-07-25):本节原写「风险最高 / 巨型 Emit-Change」,实测后两条都要改。**
+> 爆炸半径已数清(2,047 处 `==`,分类见 §9),预期中最大的工作量(补 `[T: Eq]` bound)**为零**,
+> 而真正的障碍是计划没提的一件:6% 的站点在结构泛型上,trait v1 表达不出。出路是**编译期合成
+> 结构见证**而不是先做 trait v2。Emit-Change 也不「巨型」——见证让后端自己挑物化方式,
+> JVM 的派生路径继续发今天的 `equals`。**详见 §9。**
 
 出口条件:`Map[K,V]` 能要求 `[K: Eq + Hash]`；全套测试绿；Emit-Change 已审。
 遵守两版种子纪律——新 trait 落地一版(休眠)，下一版 selfhost/std 才能用。
+(种子等待比预想的短:只有 selfhost/std **源码写出** `Eq` bound 时才需要新种子,
+编译器内部改动不需要。故 D0-1/D0-2 不必等,D0-3 才等。)
 
 ### Phase 2 — D1/D2/D3:集合纯 Dawn 化
 
@@ -245,7 +252,7 @@ native 照抄才算"通过"。故语料要配少量**独立的期望输出**(不
 |---|---|
 | **Phase −1** 接缝 spike | **完成** |
 | **Phase 0** Core IR | **完成**——IR + lowering 覆盖整门语言;JVM / C / comptime 三个消费者都吃 Core,`emit.dawn` 的 TAST 路已删(4353 → 2318 行) |
-| Phase 1 D0 | 未动 |
+| Phase 1 D0 | **进行中**——trait 已入 prelude(休眠);爆炸半径已实测,见 §9 |
 | Phase 2 D1–D3 | 未动 |
 | Phase 3 C 发射器 | **提前完成一大截**(见下) |
 | Phase 4 Perceus | 未动 |
@@ -323,3 +330,64 @@ JVM-ism」。让那个**不可能继承 JVM 假设**的后端先吃,是最直接
 - 一般尾调用消除。
 - 完整 Unicode(先 ASCII-only)。
 - JVM 侧退役(两后端长期平权)。
+
+## 9. D0 的爆炸半径:实测(2026-07-25)
+
+计划一直把 D0 写成「全线最高风险」,依据是**「改 `==` dispatch 动的是编译器里每一处相等比较」**。
+动工前先把「每一处」数出来了——在检查器的 `==` 处插桩,编译器 + 两个 package 全量跑一遍,
+按操作数静态类型归类。
+
+**编译器自身 2,047 处 `==`**:
+
+| 类别 | 处数 | 占比 | trait v1 能否表达 |
+|---|---|---|---|
+| 标量(String 793 / Int 610 / Float 8 / Bool 3 / Cursor 2) | 1,416 | 69% | ✅ prelude impl |
+| 非泛型 ADT(TokKind 211 / Ty 206 / CBinOp 46 / Eff 28 / …) | 498 | 24% | ✅ `impl Eq[Ty]` |
+| **结构泛型**(`Option[X]` ~79 / `List[X]` ~39 / `Result[X,Y]` 5 / 元组) | ~123 | 6% | ❌ |
+| **裸类型变量 `T`** | **0** | 0% | — |
+
+`packages/web` 形状相同,且出现三层嵌套(`Option[List[(String, String)]]`)。
+
+**两个结论都和计划的预设相反**:
+
+1. **`[T: Eq]` bound 的铺设量是零。** 计划(和我)预期的主要工作量是「给每个比较 `T` 的泛型函数补约束」。
+   实测**一处都没有**——std 压根没有 `list.contains` 这类元素相等函数,`map`/`set` 是 intrinsic 包装。
+   风险最大的那件事不存在。
+2. **真正的障碍是另一件,且计划没提**:6% 的站点落在 `Option[T]`/`List[T]`/元组这类**结构泛型**上,
+   而 spec §3.5 把 trait v1 的主体限定为「非泛型具名类型」、明写「无条件 impl」,§1223 把
+   「条件 impl、泛型主体」排在 trait v2。**`impl[T: Eq] Eq[List[T]]` 今天写不出来**,
+   `ImplI.subject` 是个单态 `Ty`,impl 表键是 `(trait_id, Ty)`。
+
+### 9.1 出路:编译期合成结构见证,而不是先做 trait v2
+
+**不做 trait v2。** 因为实测的第 4 行:**每个使用点的类型都是全具体的**(零 `TyVar`),
+于是 `Eq[Option[String]]` 可以由编译器**按需合成一个单态字典**、闭包住 `Eq[String]`——
+这正是 `impl[T: Eq] Eq[List[T]]` 会产出的东西,只是由编译器生成而非用户书写。
+D2 的纯 Dawn HAMT 里 `K` 确实是类型变量,但它的**调用方**在具体类型上,合成后传下去即可,
+`WForward` 那条轨 Ord 已经证明能走。
+
+这样换来的是:不必现在就裁决 trait v2 的一致性/重叠/孤儿规则(那是比 D0 大得多的设计面),
+而 v1 的「用户只能给自己的非泛型类型写 impl」保持不变。
+
+### 9.2 于是 D0 的风险评级下调
+
+原评级建立在「每处 `==` 都要改 dispatch」上。但 Core 携带见证之后,**后端可以自己挑物化方式**:
+JVM 在见证是派生结构相等时继续发今天的 `INVOKEVIRTUAL equals`(逐字节相同),只有显式 impl 才走字典;
+native 永远走字典。而当前语料里显式 impl 有**零处**。所以「巨型 Emit-Change」不成立——
+JVM 侧的派生路径本来就是「`equals` 方法 = Eq 字典的 JVM 物化」,这不是妥协,是**被现有运行时逼出来的**:
+`DawnMap`/`DawnSet` 是 `java.util.Abstract*` 的子类,在 D2 之前必须继续按 `equals`/`hashCode` 工作。
+
+### 9.3 已落地(D0-1,零 Emit-Change)
+
+`Eq`(id 1)/`Hash`(id 2)进 prelude,六个标量(Int/Float/Bool/String/Bytes/Cursor)有 prelude impl。
+显式 `impl Eq[T]`/`impl Hash[T]` 可写可调;标量上的 `eq`/`hash` **去虚化成原语**而不是查字典
+——prelude impl 没有函数体可调(后端原生比较),而这也正是「bound 实例化到标量」该塌缩成的形状。
+`==` 一个字节没动。`[T: Eq]`/`[T: Hash]` bound 暂时报错:bound 是唯一需要**转发**字典的构造,
+而 prelude 字典类还没发射。
+
+**没有 `derive Eq`**——Dawn 的 `==` 本来就对所有类型结构化(spec §4.3),等于每个类型隐式实现 Eq;
+trait 的作用是让类型**覆盖**它,不是让类型**选择加入**。
+
+> 顺带挖出一个先于 D0 的静默 bug:`Bytes` 的相等**只有裸用时**是结构化的,嵌进 record/元组/List/Option
+> 就退回引用同一性(实测见 [bytes-design.md](bytes-design.md) 决策 A)。根因正是 D0 要消灭的
+> 「相等的含义活在两处」。**现在不修**——半修会更不可预测,全修要等 D2/D3 的纯 Dawn 容器。
