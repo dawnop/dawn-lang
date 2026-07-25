@@ -209,7 +209,7 @@ native 照抄才算"通过"。故语料要配少量**独立的期望输出**(不
   都不必重审)。
 - **R5 — 种子纪律。** Eq/Hash/Iter 三个新 trait 各需两版才能被 selfhost/std 使用。**这给 Phase 1→2 之间
   插了一个无法压缩的等待**，排期时别忘。
-- **R6 — comptime 解释器是第三实现(已决:retarget 到 Core，在 Phase 0 内做)。**
+- **R6 — comptime 解释器是第三实现(已决:retarget 到 Core;Phase 0 内未做完,是唯一的欠账)。**
 
   一个内建的**含义**今天活在两处:`emit.dawn`(编成字节码)与 `interp.dawn:461`(编译期直接在 `VList` 上算)。
   加上 native 就是三处，且没有任何机制强制三者一致。
@@ -242,27 +242,42 @@ native 照抄才算"通过"。故语料要配少量**独立的期望输出**(不
 | 阶段 | 状态 |
 |---|---|
 | **Phase −1** 接缝 spike | **完成** |
-| **Phase 0** Core IR | **主体完成**——IR + lowering 覆盖整门语言,两个后端都吃 Core;`emit.dawn` 的 TAST 路仍在(strangler,待拆) |
+| **Phase 0** Core IR | **完成**——IR + lowering 覆盖整门语言,两个后端都吃 Core,`emit.dawn` 的 TAST 路已删(4353 → 2318 行) |
 | Phase 1 D0 | 未动 |
 | Phase 2 D1–D3 | 未动 |
 | Phase 3 C 发射器 | **提前完成一大截**(见下) |
 | Phase 4 Perceus | 未动 |
-| Phase 5 `use c` / Phase A 验收 | 差分 harness 已就位,`use c` 未动 |
+| Phase 5 `use c` / Phase A 验收 | 差分 harness 已就位并进了 CI,`use c` 未动 |
 | Phase 6 native 自举 | 未动 |
 
 **已落地的件**:`selfhost/src/core.dawn`(IR)、`selfhost/src/lower.dawn`(TAST → Core)、
-`selfhost/src/emitc.dawn`(Core → C)、`emit.dawn` 里的 Core → JVM 路、`runtime/c/dawn_rt.{h,c}`、
-`scripts/spike-native/`(差分 harness + 四个语料)。
-入口:`dawn __emitc <file> -o <out.c>`(发 C)、`dawn __lower <target>`(覆盖率门禁)、
-`DAWN_VIA_CORE=1`(JVM 走 Core 路)。
+`selfhost/src/emitc.dawn`(Core → C)、`emit.dawn`(Core → JVM)、`runtime/c/dawn_rt.{h,c}`、
+`scripts/spike-native/`(差分 harness + 五个语料,已接 CI)。
+入口:`dawn __emitc <file> -o <out.c>`(发 C)、`dawn __lower <target>`(覆盖率门禁)。
 
 **Phase 0 的验收状态**:
-- `dawn __lower` 在编译器 + std + site + 两个 package + playground + m4 例子上**零缺口**(132 模块)。
-- `DAWN_VIA_CORE=1` 下:selfhost 158 / json 1 / web 15 / site 33 / playground 18 测试全绿,
-  **固定点 B==C 成立**——编译器通过 Core IR 编了自己,结果再编自己逐字节相同。
-- 与 TAST 路对比:63 个发射类中 **55 个逐字节相同**,总字节 +1.1%。差异集中在「改变形状的那一半」
-  (match / 循环 / 插值),与 §5 的分增量门禁预测一致。
-- **两条路仍并存**(strangler)。拆掉 TAST 路是 Phase 0 的收尾动作,不阻塞后续阶段。
+- `dawn __lower` 在编译器 + 两个 package + playground + m4 例子上**零缺口**。
+- selfhost 158 / json 1 / web 15 / site 65 / playground 18 测试全绿;**固定点 B==C 成立**
+  ——编译器通过 Core IR 编了自己,结果再编自己逐字节相同。N vs N−1 的四件差分(emit / run /
+  fmt / lsp)全过。
+- Emit-Change 分两次落地。翻默认那次改「改变形状的那一半」(match / 循环 / 插值),m4 json
+  语料 63 个类中 55 个逐字节相同、总字节 +1.1%;拆 TAST 路那次只改 15/3029 个类,全是
+  自递归、递归局部函数或「内建当值用」的调用方。
+
+**拆 TAST 路时补的三件**(都是跑出来的,不是读出来的):
+- **spec §12.4 的自尾调用**。Core 路原本发的是真调用,10⁸ 次深度直接爆栈,而 TAST 路是循环。
+  尾位置**必须在 lowering 期间跟踪**——等 Core 建完再回头找就晚了,match 臂里的尾调用那时
+  已经变成「赋值 + break」。重写形式 = 实参进临时量 → 临时量写回形参 → 跳转;临时量正是
+  `f(b, a)` 正确的原因。这件事做在 lowering 里,于是 C 后端**白拿**(新语料在无优化的 C 下
+  也能跑 500 万层)。
+- **局部命名函数不在自己的捕获表里**(检查器把那个绑定剔掉了),所以在自己体内提到自己
+  只能重建闭包。漏掉它发的是**非法字节码**,不是错答案。
+- **内建当函数值用**(`map(xs, to_string)`)在 lowering 里 panic。现在和普通函数一样走提升包装。
+
+**Phase 0 的真正教训**:出口条件写成「零 Emit-Change」是错的(§6 的自纠已记);更值得记的是
+**「两条路都在」这件事本身是最强的 oracle**。三个 bug 全靠拿同一个程序两边跑出来的差异定位,
+而不是靠读 IR。拆掉旧路之后这个 oracle 就没了——后面每一步都得自带对拍物(N−1 差分、native
+差分、固定点),这也是把 `spike-native/run.sh` 接进 CI 的原因。
 
 **Core 已覆盖并在两个后端对拍验证**:标量、算术/位运算、短路、控制流、字符串与插值、ADT 构造/字段/判别式、
 match(守卫、嵌套模式、字面量模式、元组模式)、`?`/`!`、元组、闭包(lambda 提升 + 捕获环境 + 函数值)、
@@ -275,9 +290,11 @@ trait 字典(去虚化 + 转发 + 默认方法 + 桥接)、类型变量槽的装
 (`CForeign`,native 侧**按设计拒绝**——那是 FFI 不可移植的一半)。
 
 **为什么先让 C 后端吃 Core,而不是先改 `emit.dawn`**:R1 说的就是「对着唯一一个后端设计中立 IR 会长出
-JVM-ism」。让那个**不可能继承 JVM 假设**的后端先吃,是最直接的对冲。代价是 Phase 0 的出口(emit.dawn 改吃 Core)
-仍未达成;好处是节点集已被真实消费者验过四轮,而且验出来的三条设计缺陷(`CSDiscard`、`CSLoop.step`、
-`CBreak` 点名循环、字典槽统一签名)都是**在写第二个后端之前**发现的。
+JVM-ism」。让那个**不可能继承 JVM 假设**的后端先吃,是最直接的对冲。事后看这步是对的:四条设计缺陷
+(`CSDiscard`、`CSLoop.step`、`CBreak` 点名循环、字典槽统一签名)都是**在写第二个后端之前**发现的。
+
+**Phase 0 剩下的唯一一件**:`interp.dawn`(comptime 解释器)仍吃 TAST,见 §6 的 R6。它不阻塞
+Phase 1/2,但**截止点是冻结 Core 节点集之前**——等两个发射器都定型再回头接,就是第三次重写。
 
 ## 8. 明确不在范围内
 
