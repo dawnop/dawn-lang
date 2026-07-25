@@ -189,6 +189,13 @@ D 是一个**语言特性项目**——语言侧加三个 trait(**Eq / Hash / It
 3. **阶段 D2 —— Map/Set 纯 Dawn 化 + `Iter` trait。** HAMT/Set 写成 `Array` 之上的 Dawn ADT + `impl Eq/Hash`;
    加 `Iter` trait 让 `for-in` dispatch 到 Dawn 迭代函数;`desc_of` 重定向 + 调用点路由;退役 DawnMap/DawnSet 两个
    vendored 类,**且删掉 `map_*/set_*` intrinsic**。**手写 Java 4→2。**
+
+   > **前置(2026-07-25 审计补)**:这一行里的 `impl Eq/Hash` 与 `Iter` 主体都是**泛型的**
+   > (`Map[K,V]` / `List[T]`),而 trait v1 的 `impl_subject_ok` 只放行具名非泛型类型。
+   > **今天这两件一行都写不出来。** 出路不是 D0 的 `WStructural`——那是编译器合成的**结构**关系,
+   > 而 HAMT 需要的恰恰是类型自己定义的**非结构**关系;何况 `Array` 的 `==` 是引用同一性且传递,
+   > 结构关系走到节点那一格必然退化。故 **trait v2 的最小切片是 D2 的硬前置**,
+   > 见 [native-backend-plan §11.4](native-backend-plan.md) 的 S2.1。
 4. **阶段 D3 —— List → 先严格 RB(relaxed 以后),两后端统一一份纯 Dawn 源**(已定,见 §5.3/§9.3)。RB 写在同一个 `Array`
    原语上;退掉 DawnList vendored 类、删 `list_*` intrinsic;快路径 native 靠 Perceus RC 原地复用、JVM 靠尾节点吸收
    (均摊 O(1),见 §5.3)。做则手写 Java 4→1(只剩 `AdtClassWriter` ASM shim,属并列的「后端依赖」)。

@@ -29,6 +29,8 @@
 | 一般尾调 | **不做**，大栈代替 | 07-25 |
 | 验收 | **差分测试 + 全套 `dawn test` + native 固定点**，三道全要 | 07-25 |
 | comptime 解释器 | **retarget 到 Core IR**，在 Phase 0 内完成(§6 R6) | 07-25 |
+| trait v2 | **做最小切片**(泛型主体的条件 impl)，是 D2 的前置——推翻 §9.1 的「不做」 | 07-25(审计后) |
+| 阶段顺序 | **按「一件事有几份定义」重排**为 S0–S4，见 §11.4；§4 的内容有效、顺序作废 | 07-25(审计后) |
 
 **平台假设(未经确认，按此推进)**:先只做 **Linux x86-64**，C11 + POSIX。macOS 应接近免费(同为 POSIX)，
 排在 Phase A 验收之后。**Windows 不在范围内**。
@@ -62,6 +64,11 @@ Kotlin 编译器当标准答案(`__lex`/`__parse` golden diff → B==C 固定点
 **没有任何可对拍的参照**，且 bug 以偶发损坏而非干净的不匹配形式出现。
 
 ## 4. 阶段
+
+> **顺序已被 §11 取代(2026-07-25)。** 本节每个阶段**要做的事**仍然有效,读它了解内容;
+> **什么时候做**看 §11。变的是三件:S0(让今天已经错的东西在 CI 上变红)插到最前;
+> 语义收口(相等/渲染/字典/intrinsic 词汇表)从散在各阶段的碎片合成一整段,排在 C 后端之前;
+> trait v2 的最小切片从「不做」变成 D2 的前置。
 
 ### Phase −1 — native 接缝 spike(几小时，可抛弃)
 
@@ -221,6 +228,10 @@ native 照抄才算"通过"。故语料要配少量**独立的期望输出**(不
   都不必重审)。
 - **R5 — 种子纪律。** Eq/Hash/Iter 三个新 trait 各需两版才能被 selfhost/std 使用。**这给 Phase 1→2 之间
   插了一个无法压缩的等待**，排期时别忘。
+
+  > **更正(2026-07-25)**:这一条把 `Iter` 的障碍说小了。种子等待是**次要**障碍,主要障碍是
+  > `impl[T] Iter[List[T]]` 的主体是泛型的,trait v1 写不出来——同 §9.1 的更正块。种子等待
+  > 只在 selfhost/std **源码写出**新构造时才发生;先要有那个构造。
 - **R6 — comptime 解释器是第三实现(已解决:2026-07-25 retarget 到 Core,见 §7)。**
 
   一个内建的**含义**曾经活在两处:`emit.dawn`(编成字节码)与 `interp.dawn`(编译期直接在 `VList` 上算),
@@ -259,7 +270,7 @@ native 照抄才算"通过"。故语料要配少量**独立的期望输出**(不
 | **Phase 0** Core IR | **完成**——IR + lowering 覆盖整门语言;JVM / C / comptime 三个消费者都吃 Core,`emit.dawn` 的 TAST 路已删(4353 → 2318 行) |
 | Phase 1 D0 | **进行中**——trait 已入 prelude(休眠);爆炸半径已实测,见 §9 |
 | Phase 2 D1–D3 | **D1 完成**——`Array[T]` + `popcount` 已落地(std 内部,休眠);契约在 JVM 上被迫拆成 push/with 两半,见 §10。D2/D3 未动 |
-| Phase 3 C 发射器 | **提前完成一大截**(见下) |
+| Phase 3 C 发射器 | **写了不少,但要按收口后的 Core 重导**——它跑在了它所消费的语义前面,见 §11.1 |
 | Phase 4 Perceus | 未动 |
 | Phase 5 `use c` / Phase A 验收 | 差分 harness 已就位并进了 CI,`use c` 未动 |
 | Phase 6 native 自举 | 未动 |
@@ -312,6 +323,16 @@ native 照抄才算"通过"。故语料要配少量**独立的期望输出**(不
 **Core 已覆盖并在两个后端对拍验证**:标量、算术/位运算、短路、控制流、字符串与插值、ADT 构造/字段/判别式、
 match(守卫、嵌套模式、字面量模式、元组模式)、`?`/`!`、元组、闭包(lambda 提升 + 捕获环境 + 函数值)、
 trait 字典(去虚化 + 转发 + 默认方法 + 桥接)、类型变量槽的装箱。
+
+> **更正(2026-07-25,审计后)**:上面这句话的**「对拍验证」四个字要打折**,而且折得很厉害。
+> 差分语料里 `==` **只出现在 `Int` 和 `String` 上,一处都没有比较过两个 ADT 值**——而 ADT 相等
+> 恰恰是两个后端给相反答案的地方(JVM `equal` / native `NOT equal`,都退出 0,无诊断)。
+> 「trait 字典」同理:语料只有在**同一模块内静态可知**的见证,`[T: Eq]` 这类要真转发字典的形状
+> 一个都没有,而它发出的 C 引用两个**没有定义**的符号,`cc` 编不过。
+>
+> 所以这份清单描述的是**lowering 的覆盖面**,不是**两个后端答案一致的覆盖面**。后者今天要小得多。
+> 根因不在语料的勤勉程度,在 harness 的准入规则——详见 §11.2。**已修**:四个语料 + 写下来的期望
+> 输出 + `known-red.txt` 已进 CI(`scripts/spike-native/`)。
 
 **Core 已覆盖的其余部分**:comptime const 与 comptime 块、索引、构造器作函数值、解构 let、
 列表模式、构造器 spread、集合上的 for-in、derive 出来的 impl、有序比较的 Ord 见证。
@@ -373,6 +394,23 @@ D2 的纯 Dawn HAMT 里 `K` 确实是类型变量,但它的**调用方**在具�
 
 这样换来的是:不必现在就裁决 trait v2 的一致性/重叠/孤儿规则(那是比 D0 大得多的设计面),
 而 v1 的「用户只能给自己的非泛型类型写 impl」保持不变。
+
+> **这一节的结论已推翻(2026-07-25,审计后)。** 「不做 trait v2」在 D0 的范围内成立,
+> 但它**推不到 D2**,而计划把它当成了一条通用决策。
+>
+> `WStructural` 是**编译器合成的结构关系**。D2 的纯 Dawn HAMT 需要的恰恰相反:一个
+> **非结构的、由类型自己定义**的相等。两件事方向相反,前者顶不上后者。
+>
+> 实测把这条钉死了:`Array` 的 `==` 是引用同一性,而且**传递地**——一个装着 `Array[Int]`
+> 的 record,两份独立构造、内容相同,`==` 得 `false`;嵌进 `Option`/`List`/元组,每一层
+> 都是 `false`。HAMT 的节点就是 `Array`,所以 `WStructural` 走到那一格必然退化。
+> 于是 `map1 == map2` 对两个内容相同的 map 会是 `false`——而编译器自身有 2,047 处 `==`。
+>
+> **`Iter` 上同一件事重演**:`impl[T] Iter[List[T]]` 的主体也是泛型的。§4 的 D2 把 Iter
+> 写成一行附带项,§6 R5 只把它当「要等两版种子」——两处都没识别出它的前置是同一个 trait v2。
+>
+> 结论:**trait v2 的最小切片(泛型主体的条件 impl)是 D2 的硬前置**,排进 §11 的 S2。
+> 需要裁决的设计面比这一节担心的小:只做 `impl[T: C] Tr[F[T]]` 这一种形状,不开重叠。
 
 ### 9.2 于是 D0 的风险评级下调
 
@@ -484,3 +522,164 @@ harness 把探针模块拷进一份 std/ 副本再编译,已接 CI。它验两�
 一个类:每个程序多一个 `dawn/rt/Array`。拿改动前的 jar 对 `examples/{calc,shapes,traits}` 逐字节对拍,
 差异**只有这一个新增文件**,其余一字未动。(它和 `dawn/rt/Lists`/`Maps`/`Strings` 一样是无条件发射的
 运行时类;D0 的字典按需发射是因为那是个组合家族,这里是一个固定类。)
+
+## 11. 重排(2026-07-25,纯粹性审计之后)
+
+D1 收工后做了一次全项目审计,问的是「哪里不够纯粹、哪里是临时补丁」。**得到的答案比这个问题严重一档:
+有四处已经在给错答案了**,而且都不是新引入的。本节记这次审计,并据此重排 §4 的顺序。
+
+### 11.1 四条实测
+
+不是读代码读出来的推论,是跑出来的。
+
+**一、同一份源码,两个后端给相反的答案。**
+
+```dawn
+type P = | P(x: Int, y: Int)
+let a = P(1, 2)   let b = P(1, 2)
+if a == b { println("equal") } else { println("NOT equal") }
+```
+
+JVM 打 `equal`,native 打 `NOT equal`(发出的 C 是 `if ((v281 == v282))`,指针比较)。
+两边都退出 0,零诊断。
+
+根因:`resolve_eq_witness` 对「具体类型 + 无 impl」返回 `no_wit()`,lowering 于是发一个
+**没有语义的 `CBinary(CEq, ..)`**,含义留给消费者自己发明——`emit.dawn:729` 发 `Object.equals`,
+`emitc.dawn:191` 发 C 的 `==`,`interp.dawn:241` 是第三份手写的结构遍历。
+**Core 号称承载完整语义,而相等这条最基础的关系没进去。**
+
+**二、`const` 静默取到错误的值,在生产的 JVM 后端上。**
+
+```
+const   point = <value>       # to_string(Point(1,2)) 被折成了这个字面量
+runtime point = Point(1, 2)   # 同一个表达式在运行期
+```
+
+`interp.dawn` 把每个非标量渲染成占位串 `"<value>"`,注释断言这条路不可达,实测可达。
+
+**三、`[T: Eq]` 是一个永不失败的约束。**
+
+`checker.dawn:4395` 对任何缺 impl 的类型**无条件**发 `WStructural`,注释写「equality is total」。
+于是两个**函数值**能通过 `[T: Eq]` 并按引用比较,而同一个文件里写 `g == h` 是编译错误
+(`checker.dawn:2828`「functions cannot be compared」)。同一个关系,两道门,答案不同。
+
+**四、`unsafe_pure` 不是 FFI 图章,是无条件的效应擦除器。**
+
+它只检查「块内有没有 io」,不检查那个 io 是不是 Java 调用。于是一个签名里没有 `!io` 的 `fn`
+可以往 stdout 打印。(升级到「编译期读文件塞进 const」**没能复现**——挡住它的是 `io_read_file`
+不在 comptime 解释器实现的那 37/82 个 intrinsic 里,不是效应系统。)
+
+附带一条:`[T: Eq]` 转发的程序发出的 C 引用 `dawn_dict__default_1_eq` 与 `dawn_dict_1_Structural`,
+两个符号在整个文件里都没有定义。`CModule.dicts` 只有一个读者——未完成的 C 后端;JVM 后端绕过 Core,
+回头查检查器的 `impl_table`(`emit.dawn:1875`)。**所以那张表从来没被验过。**
+
+### 11.2 它们为什么全都躲过了 CI
+
+差分 harness 的准入规则原先写在 `run.sh` 的头注释里:
+
+> a program only belongs here once both backends can compile it, so a failure is always a
+> regression, never a gap.
+
+**这条规则是它自己的盲区。** 它只收两个后端已经同意的程序,于是语料只能由实现者随实现增长,
+天然覆盖不到实现者没想到的事。结果就是 §7 那句话要打的折:五个语料里 `==` 只出现在 `Int` 和
+`String` 上。
+
+第二个盲区是 `codebase-audit.md` TEST-01 早就点过的:**只做后端互比,等于把 JVM 今天的行为
+认证成正确答案**;更糟的是**两个后端共有的缺陷会让它们在错答案上达成一致**——凡是编译期折叠的
+都属此类,两边折的是同一份 `interp.dawn`,`diff` 检查对上面第二条会报 ok。
+
+**已修(`616d3f7`)**:`scripts/spike-native/` 加四个语料 `eq_adt` / `show_derive` /
+`dict_forward` / `const_fold`,各配一份**手写的** `.expect`;harness 从「只 diff stdout」改成
+七个具名检查(`emitc` / `cc` / `jvm` / `native` / `diff` / `stderr` / `exit`)。
+今天六个检查是红的,记在 `known-red.txt` 里,那是个**双向 ratchet**:清单外的失败是红的,
+清单内的检查**开始通过**也是红的——修好一个缺陷,对应那行必须跟着删。
+
+新的准入规则:**语料按语言的语义面收,不按后端的完成度收。**
+
+### 11.3 根因:一件事有几份定义
+
+四条实测指向同一件事。「一个值和另一个值的关系」今天有五套互不知情的机制:
+
+| 关系 | 今天是什么 | 后果 |
+|---|---|---|
+| `Ord` | 真 trait + 字典 + `derive Ord` | 唯一做对的一个 |
+| `Eq`/`Hash` | trait(D0)+ 硬连线 `==` + `WStructural` 合成 + JVM 的 `Object.equals` 物化 + `Bytes`/`Array` 两个身份洞 | 11.1 的一、三 |
+| `Show` | **不是 trait**:`AdtI.derives_show` 布尔位 + `is_showable` 静态谓词 + 运行时 instanceof 链,不可覆盖 | 11.1 的二;tagged union 上结构性无解 |
+| Map/Set 键合法性 | `invalid_key_part` 独立结构行走 | 与 Hash trait 平行且打架 |
+| 「哪个标量支持什么」 | **六张手抄表**(`eq_scalars` / Ord prelude impl / `impl_subject_ok` / `<` 快路径 / `is_showable` / `derive Ord` 可比字段) | 已经互相矛盾:`cursor.start(s) < cursor.end(s)` 编得过,`list.sort` 却报 Cursor 无序 |
+
+而这五套有**同一个前置**:`impl_subject_ok`(`checker.dawn:1844`)只放行具名非泛型类型 + 四个标量,
+`impl_table` 的键(`checker.dawn:95`)是一个**基类型**。**`impl[T: Eq] Eq[List[T]]` 写不出来,
+所以每次都绕。** §9.1 把其中一次绕过记成了胜利。
+
+同一个形状还有第三处:`for-in`。`lower.dawn:1589` 的 `lower_for_list` 把 `for x in xs` 降成
+`len` + `list_index` 的下标循环——**迭代硬连线到「可随机索引」**。D3 的严格 RB 随机索引实测慢
+8–18× 且随 n 增长,所以 `Iter` 不是 D2 的附赠品,是 D3 的正确性前提。
+
+### 11.4 重排后的顺序
+
+原顺序按**后端交付物**排(Core IR → 集合 → C 发射器 → Perceus → FFI → 自举)。
+新顺序按**「一件事今天有几份定义」**排。前三段全部在 C 后端之前。
+
+#### S0 — 让已经错的东西变红
+
+今天的门禁量不到 §11.1 里的任何一条。这一段不产生用户可见变化,它的价值是让后面每一步的
+「做完了」第一次有意义。
+
+| # | 事 | 出口条件 |
+|---|---|---|
+| S0.1 | 差分 harness 比 stdout + stderr + 退出码 | ✅ `616d3f7` |
+| S0.2 | 四个语料 + 手写 `.expect` + `known-red.txt` ratchet | ✅ `616d3f7`,六条红在案 |
+| S0.3 | 收回穷尽性检查:删掉两个后端类型映射里的 `_ -> panic` 通配 | 加一个 `Ty` 变体不改后端 ⇒ **编译错误**,不是运行期 panic |
+| S0.4 | Core IR 的 golden dump 进 N−1 差分 | `__lower --dump` 逐字节对拍进 `selfhost-prev-diff.sh` |
+| S0.5 | 自举耗时基线脚本 + baseline 入库 | §4 Phase 2 的「≤ +15%」第一次可测——**今天没有任何脚本能测它,也没有基线** |
+
+#### S1 — 语义收口:一台机器,一次建对
+
+四件事今天是四份实现,本该是同一台机器的四个客户。**必须一起做**;分开做就是把接缝留在最贵的地方。
+
+| # | 事 | 消灭掉 |
+|---|---|---|
+| S1.1 | intrinsic 身份从 `String` 换成 ADT;可见性 / ABI 类别 / 运行时归属写进 `Sig` 声明 | `rt_intrinsic_target` 的前缀链、`erased_builtin_sig` 的**第二套**前缀链、`internal_builtins()` 的四份手抄名单、两张表里的死臂 |
+| S1.2 | 结构见证展开器:`WStructural` 在 lowering 期展开成 Core 里可见的逐字段比较(判别式 + 递归 `CEq`),标量塌缩成原语 | 11.1 的一;native 的 `dawn_adt_eq` 需求一并消失 |
+| S1.3 | Core 的字典表成为唯一真相,JVM 后端也读它(删 `emit.dawn:1875` 回查 `impl_table`) | 那张没人验过的表;`emit.dawn` 不再需要 `impl_table` 参数,Core 才真的后端无关 |
+| S1.4 | `Show` 成为第四个 prelude trait,上同一条字典轨 | 11.1 的二;native 的渲染从「结构性无解」变成「和别的 trait 一样」 |
+| S1.5 | 标量能力表六合一;Map/Set 键合法性改走 bound | Cursor 那条自相矛盾 |
+| S1.6 | `WStructural` 收窄:只发给结构可分解到有 impl 的叶子,`TyFn`/`TyArray` 报错 | 11.1 的三 |
+
+**出口条件**:`known-red.txt` 里 `eq_adt:*`、`show_derive:emitc`、`dict_forward:cc`、
+`const_fold:jvm` 五行全部删除(ratchet 会强制)。
+
+#### S2 — 把语言表达不出来的东西还给语言
+
+| # | 事 | 为什么在这儿 |
+|---|---|---|
+| S2.1 | **trait v2 最小切片:泛型主体的条件 impl**。`impl_table` 改按 head 索引 + 匹配替换 + 递归解 bound;字典从单例扩到**参数化构造**(新 Core 节点,两个后端各一处) | D2 的硬前置,见 §9.1 的更正块。只做 `impl[T: C] Tr[F[T]]` 一种形状,不开重叠 |
+| S2.2 | `Iter` trait;`for-in` 从后端 intrinsic 变成语言 trait | 前置是 S2.1;D3 的正确性前提,不是 D2 的附带项 |
+| S2.3 | `pub opaque type`:库可定义的抽象类型 | 每要隐藏一次表示就现搓一套机制——Cursor 靠编译器铸造的不透明标量,`Array` 靠 `cx.is_std_module` 名字门控,D2 的 HAMT 节点是第三次 |
+| S2.4 | `unsafe_pure` 收窄成真 FFI 图章;`java_try` / `cast` / `catch_panic` 出通用内建表;`std/io` 的错误契约脱离 JVM | 11.1 的四;`std/io` 今天建在 `java_try` 上,所以「可移植 std」是假的 |
+| S2.5 | 发一版 + bump 种子 | **不可压缩的串行点**。§7 把 D1 记成「完成」,但今天 std 里一行 `Array` 都还写不了 |
+
+#### S3 — 集合纯 Dawn 化(原 D2/D3)
+
+内容同 §4 Phase 2,现在可以老实做了。补一件 §4 漏掉的:**`std/list` 的每个函数今天都是
+`get(xs, i)` 索引递归**,D3 换 RB 时必须一起改成叶子游走——§4 只安排了 `for-in`。
+
+#### S4 — native(原 Phase 3–6)
+
+顺序不变,内容变轻。**C 发射器按收口后的 Core 重导**:今天在语义载体缺席时写的那部分
+(ADT 相等、渲染、字典)是负资产,正确动作是先让语料把它照红,不是继续往前补。
+Perceus 的出口条件要重写——§4 引用的 99.1% 是**另一个操作**、在一个 D3 要删掉的类上量的。
+
+### 11.5 代价,和不变的部分
+
+**代价说清楚**:S0 + S1 + S2 大约在 D2 之前插了 3–5k 行,native 自举整体后移。
+换来的是 S3 和 S4 的每一步不用再打补丁。
+
+**不变的**:§1 决策总表除「不做 trait v2」外全部维持——两后端长期平权、直接上 Perceus、
+发 C、完整 Core IR、不单态化、UTF-8、验收三道。§2 的排序结论(D 必须在 C 运行时之前)也维持,
+S1/S2 只是又在它前面插了两段。
+
+**这次审计本身的教训**,和 Phase 0 那条是同一条的另一面:Phase 0 记的是「两条路都在是最强的
+oracle」;这次记的是**「两条路都在」不会自动变成 oracle,得有人去写那个逼它们对答案的语料**。
+四条实测里有三条在 Phase 0 收工那天就已经存在了,而当天的 CI 是绿的。

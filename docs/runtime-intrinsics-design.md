@@ -146,6 +146,10 @@ JVM-锁死。LLVM 后端一看 std 里全是 `java.lang.String.codePointCount`,�
   纯 Dawn 化 + `Iter` trait,4→2 → D3 List→**先严格 RB**(relaxed 以后可加),两后端统一一份纯 Dawn 源)。**语言侧新增 Eq/Hash/Iter
   三 trait,后端侧新增 `Array` 一原语;净效果=集合从后端契约整族搬进语言层(~20 intrinsic → 一个数组类型)。最大
   风险在 D0:改 `==` dispatch 是巨型 Emit-Change,派生默认须逐字节等价。**
+  > **两处已被实测推翻(2026-07-25)**:①D0 的「巨型 Emit-Change」不成立——见证让后端自己挑物化方式,
+  > 现有语料**零 Emit-Change**([native-backend-plan §9.2](native-backend-plan.md));②真正的最大风险在
+  > **D2 之前**:`impl Eq/Hash[Map[K,V]]` 与 `impl Iter[List[T]]` 的主体是泛型的,trait v1 写不出来,
+  > 需要先做 trait v2 的最小切片(同文 §11.4 的 S2.1)。
 - **List 的表示已定:先严格 RB(32 叉 trie + 尾块),relaxed 作以后可加的节点形态**(2026-07-25,collections-dejava-research §5.3/§9.3):不走「可变数组 primitive」原地
   路线(那会让 List 永远是 runtime primitive、与纯 Dawn 相悖)。RB 是纯函数式 ADT、和 HAMT 同族可纯 Dawn 化。
   **成败条件已实测**(§5 的 `array_with` 警示框、collections-dejava-research §9.3):纯 Dawn RB 的追加相对今天的
