@@ -380,6 +380,20 @@ type Pair[A, B] = { l: A, r: B }
 的 `WConcrete` 支)一行不改。`WApply` 只在**有参数要传**时出现——所以见证种类
 从三个变成三个(`WForward`/`WConcrete`/`WApply`),不是四个。
 
+> **动手时这一段收窄了(2026-07-26,提交 `a8410e1`)。** 上面把「删 `WStructural`」和
+> 「引入 `WApply`」当成同一件事,读代码后发现不是:两个见证种类在 lowering 里**早就走
+> 同一条路**(`witness_value` 两支都是 `dict_ref`),唯一分歧在 `primitive_witness`
+> ——「这个调用要不要走 `prim_relation` 而不是方法体」。而那个问题**表里已经有答案**:
+> impl 不提供方法又不是 derived ⇒ 没有任何地方有方法体;没有 impl ⇒ Eq/Hash 的结构默认。
+>
+> 于是 `WStructural` 直接消失,换来的是三份手写条件(见证种类 / `is_eq_scalar` /
+> `is_ord_scalar`)合成一个查表——正是 S1 步 3「表是唯一真相」那条的延续。**零 Emit-Change**
+> (五个未改语料逐字节一致)。
+>
+> `WApply` 挪到刀 4:它要等真有**非 ground 主体**(`Eq[Option[T]]`,T 刚性)才有活干,
+> 而那条路今天走不到。提前引入是前设计,而且 `WApply` 不带 `CDictApply` 无法 lowering
+> ——分两刀会在中间留一个编不过的状态。
+
 设计文档决策 6 那句「`a == b` 与 `[T: Eq]` 实例化后调 `eq(a,b)` 应当发出同一个调用,
 **这一点本身就该有断言**」——到这里才第一次写得出那个断言:两条路走的是同一个 `solve`。
 
@@ -464,9 +478,8 @@ fn head_owner(cx: Cx, h: Head) -> Option[String]
    纯前端,零行为变化。
 2. **`impl_table` 改按 head**。此时还没有条件 impl,所以**这刀必须零 Emit-Change**
    ——是纯重构,拿 Core golden 和 `__emit` 逐字节验。
-3. **`solve` + `WApply` + 按需合成结构 impl**,替掉 `WStructural`。
-   `==` 暂不接(仍走 `resolve_eq_witness`),所以行为不变。
-4. **`CDictApply` + 三个消费者**(JVM / C / interp)。
+3. **删掉 `WStructural`**。~~`solve` + `WApply` + 按需合成~~ —— **动手时收窄了**(见下)。
+4. **`solve` + `WApply` + `CDictApply` + 三个消费者**(JVM / C / interp)。
 5. **`derive Ord` 对泛型解禁**(决策 5)。纯加法,所以要赶在发布前进 2a,让种子学会。
 6. 发布 **2a**。
 7. **std 给容器写 `Eq`/`Hash`/`Ord` 条件 impl** + `==` 走 `solve` + 删三处旧机制。
