@@ -242,7 +242,7 @@ native 照抄才算"通过"。故语料要配少量**独立的期望输出**(不
 | 阶段 | 状态 |
 |---|---|
 | **Phase −1** 接缝 spike | **完成** |
-| **Phase 0** Core IR | **约六成**——IR 节点集 + `lower.dawn` 完成并由 C 后端验证;**`emit.dawn` 尚未改吃 Core** |
+| **Phase 0** Core IR | **主体完成**——IR + lowering 覆盖整门语言,两个后端都吃 Core;`emit.dawn` 的 TAST 路仍在(strangler,待拆) |
 | Phase 1 D0 | 未动 |
 | Phase 2 D1–D3 | 未动 |
 | Phase 3 C 发射器 | **提前完成一大截**(见下) |
@@ -251,15 +251,28 @@ native 照抄才算"通过"。故语料要配少量**独立的期望输出**(不
 | Phase 6 native 自举 | 未动 |
 
 **已落地的件**:`selfhost/src/core.dawn`(IR)、`selfhost/src/lower.dawn`(TAST → Core)、
-`selfhost/src/emitc.dawn`(Core → C)、`runtime/c/dawn_rt.{h,c}`、`scripts/spike-native/`(差分 harness + 四个语料)。
-入口 `dawn __emitc <file> -o <out.c>`。
+`selfhost/src/emitc.dawn`(Core → C)、`emit.dawn` 里的 Core → JVM 路、`runtime/c/dawn_rt.{h,c}`、
+`scripts/spike-native/`(差分 harness + 四个语料)。
+入口:`dawn __emitc <file> -o <out.c>`(发 C)、`dawn __lower <target>`(覆盖率门禁)、
+`DAWN_VIA_CORE=1`(JVM 走 Core 路)。
+
+**Phase 0 的验收状态**:
+- `dawn __lower` 在编译器 + std + site + 两个 package + playground + m4 例子上**零缺口**(132 模块)。
+- `DAWN_VIA_CORE=1` 下:selfhost 158 / json 1 / web 15 / site 33 / playground 18 测试全绿,
+  **固定点 B==C 成立**——编译器通过 Core IR 编了自己,结果再编自己逐字节相同。
+- 与 TAST 路对比:63 个发射类中 **55 个逐字节相同**,总字节 +1.1%。差异集中在「改变形状的那一半」
+  (match / 循环 / 插值),与 §5 的分增量门禁预测一致。
+- **两条路仍并存**(strangler)。拆掉 TAST 路是 Phase 0 的收尾动作,不阻塞后续阶段。
 
 **Core 已覆盖并在两个后端对拍验证**:标量、算术/位运算、短路、控制流、字符串与插值、ADT 构造/字段/判别式、
 match(守卫、嵌套模式、字面量模式、元组模式)、`?`/`!`、元组、闭包(lambda 提升 + 捕获环境 + 函数值)、
 trait 字典(去虚化 + 转发 + 默认方法 + 桥接)、类型变量槽的装箱。
 
-**Core 尚未覆盖**:集合(等 D1–D3)、comptime const、derive 出来的 impl、列表模式、解构 let、
-`use java`(native 侧按设计拒绝)。
+**Core 已覆盖的其余部分**:comptime const 与 comptime 块、索引、构造器作函数值、解构 let、
+列表模式、构造器 spread、集合上的 for-in、derive 出来的 impl、有序比较的 Ord 见证。
+
+**C 后端尚未覆盖**(JVM 侧已全覆盖):集合(等 D1–D3)、comptime const、`use java`
+(`CForeign`,native 侧**按设计拒绝**——那是 FFI 不可移植的一半)。
 
 **为什么先让 C 后端吃 Core,而不是先改 `emit.dawn`**:R1 说的就是「对着唯一一个后端设计中立 IR 会长出
 JVM-ism」。让那个**不可能继承 JVM 假设**的后端先吃,是最直接的对冲。代价是 Phase 0 的出口(emit.dawn 改吃 Core)
