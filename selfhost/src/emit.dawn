@@ -19,7 +19,8 @@ use types.{
   Ty, TyInt, TyFloat, TyBool, TyString, TyBytes, TyCursor, TyUnit, TyNever,
   TyError, TyVar, TyAdt, TyList, TyMap, TySet, TyArray, TyJava, TyTuple, TyFn,
   Adts, AdtI, CtorI, FieldI, adt_of, adt_jvm_name, ctor_jvm_name,
-  Sym, Sig, Eff, Traits, TraitI, MethodSig, ImplI, trait_of, ORD_ID, EQ_ID, HASH_ID, builtins
+  Sym, Sig, Eff, Traits, TraitI, MethodSig, ImplI, trait_of, ORD_ID, EQ_ID, HASH_ID, builtins,
+  Impls, impl_at
 }
 use tast.{TJavaCall, TFun, TModule, TBinOp, BEq, BNeq, BLt, BLe, BGt, BGe}
 use interp.{CValue, VInt, VFloat, VBool, VStr, VUnit, VList, VTuple, VAdt, CtOut}
@@ -162,7 +163,7 @@ pub type Gen = {
   class_name: String,
   adts: Adts,
   traits: Traits,
-  impl_table: Map[(Int, Ty), ImplI],
+  impl_table: Impls,
   # current module's fn signatures (calls with owner = None)
   own_fns: Map[String, Sig],
   # program-wide (class name, fn name) → declared signature
@@ -442,7 +443,7 @@ fn lmf_bsm() -> Handle !io =
 # ---- witness / signature lookup ----
 
 fn impl_of(g: Gen, tid: Int, subject: Ty) -> ImplI =
-  match map.get(g.impl_table, (tid, subject)) {
+  match impl_at(g.impl_table, tid, subject) {
     Some(i) -> i
     None -> panic("codegen: no impl for trait ${tid}")
   }
@@ -1491,13 +1492,13 @@ fn scratch_mv() -> MethodVisitor !io = {
 ## Only an explicit impl counts: without one the derived structural bodies are
 ## already the relation, so nothing changes and nothing is re-emitted.
 fn eq_override(
-  impl_table: Map[(Int, Ty), ImplI],
+  impl_table: Impls,
   class_name: String,
   subject: Ty
 ) -> EqOverride = {
   let owner_of = fn(tid: Int) => {
     let none: Option[String] = None
-    match map.get(impl_table, (tid, subject)) {
+    match impl_at(impl_table, tid, subject) {
       Some(imp) ->
         if imp.derived { none } else { Some(owner_or_default(imp.owner, class_name)) }
       None -> none
@@ -1523,7 +1524,7 @@ pub fn emit_module(
   supers: List[String],
   adts: Adts,
   traits: Traits,
-  impl_table: Map[(Int, Ty), ImplI],
+  impl_table: Impls,
   prog_fns: Map[(String, String), Sig],
   own_fns: Map[String, Sig],
   class_name: String,
@@ -1601,7 +1602,7 @@ pub fn emit_module(
   for aid in own_adt_ids {
     let a = adt_of(adts, aid)
     if a.derives_ord {
-      match map.get(impl_table, (ORD_ID, TyAdt(a.id, a.tparams))) {
+      match impl_at(impl_table, ORD_ID, TyAdt(a.id, a.tparams)) {
         Some(imp) -> if imp.derived { g = gen_derived_ord_cmp(g, cw, a) }
         None -> ()
       }

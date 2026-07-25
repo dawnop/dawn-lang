@@ -49,6 +49,7 @@ use types.{
   adt_of, trait_of, ty_show, ctor_render, sig_render, subst, subst_eff,
   ty_named, is_numeric, is_errorish, prelude_adts, prelude_traits, prelude_impls, bounds_of,
   builtins, opt_ty, result_ty, OPTION_ID, RESULT_ID, ORD_ID, EQ_ID, HASH_ID, eq_scalars,
+  Impls, Head, head_of, impl_at, has_impl_at, insert_impl,
   is_eq_scalar
 }
 use jreflect.{
@@ -92,7 +93,7 @@ pub type Cx = {
   traits_by_name: Map[String, Int],
   local_traits: List[String],
   local_impls: List[ImplI],
-  impl_table: Map[(Int, Ty), ImplI],
+  impl_table: Impls,
   module_aliases: Map[String, String],
   # (alias, fn name) → the imported module's signature (for qualified calls)
   module_fn_sigs: Map[(String, String), Sig],
@@ -978,7 +979,7 @@ pub fn is_concrete(cx: Cx, t: Ty) -> Bool =
 ## An explicit `impl Eq` ends the walk: the impl is the definition, and what
 ## its fields are made of is its own business.
 pub fn uncomparable_part(cx: Cx, t: Ty, seen: Set[String]) -> Option[Ty] =
-  if map.has(cx.impl_table, (EQ_ID, t)) {
+  if has_impl_at(cx.impl_table, EQ_ID, t) {
     None
   } else {
     match t {
@@ -1231,7 +1232,7 @@ pub fn seed_prelude(cx: Cx) -> Cx = {
   }
   # prelude Ord/Eq/Hash impls over the native scalars
   var it = cx1.impl_table
-  for i in prelude_impls() { it = map.insert(it, (i.trait_id, i.subject), i) }
+  for i in prelude_impls() { it = insert_impl(it, i) }
   Cx {
     ..cx1,
     adts_by_name: abn,
@@ -1270,18 +1271,18 @@ test "prelude seeding wires names to ids" {
   assert map.get(cx.ctors_by_name, "None") == Some((OPTION_ID, 1))
   assert map.get(cx.traits_by_name, "Ord") == Some(ORD_ID)
   assert map.has(cx.fns, "cmp")
-  assert map.has(cx.impl_table, (ORD_ID, TyInt))
-  assert not map.has(cx.impl_table, (ORD_ID, TyBool))
+  assert has_impl_at(cx.impl_table, ORD_ID, TyInt)
+  assert not has_impl_at(cx.impl_table, ORD_ID, TyBool)
   # Eq/Hash ride the same rail; they cover the scalars Ord deliberately skips
   assert map.get(cx.traits_by_name, "Eq") == Some(EQ_ID)
   assert map.get(cx.traits_by_name, "Hash") == Some(HASH_ID)
   assert map.has(cx.fns, "eq")
   assert map.has(cx.fns, "hash")
   for t in eq_scalars() {
-    assert map.has(cx.impl_table, (EQ_ID, t))
-    assert map.has(cx.impl_table, (HASH_ID, t))
+    assert has_impl_at(cx.impl_table, EQ_ID, t)
+    assert has_impl_at(cx.impl_table, HASH_ID, t)
   }
-  assert not map.has(cx.impl_table, (ORD_ID, TyBytes))
+  assert not has_impl_at(cx.impl_table, ORD_ID, TyBytes)
 }
 
 ## What pass 1 learned about one `type` declaration, for pass 2 to finish.
@@ -1985,7 +1986,7 @@ pub fn pass_register_impls(
     }
     cx1 = Cx {
       ..cx1,
-      impl_table: map.insert(cx1.impl_table, (ORD_ID, subject), ii),
+      impl_table: insert_impl(cx1.impl_table, ii),
       local_impls: cx1.local_impls ++ [ii]
     }
     di = di + 1
@@ -2051,7 +2052,7 @@ pub fn pass_register_impls(
       continue
     }
     # coherence: at most one impl per (trait, type) in the whole program
-    match map.get(cx1.impl_table, (tid, subject)) {
+    match impl_at(cx1.impl_table, tid, subject) {
       Some(prev) -> {
         let where2 = match prev.src_path {
           Some(p) -> if cx1.src_path == Some(p) { "" } else { " (previous impl in " ++ p ++ ")" }
@@ -2218,7 +2219,7 @@ pub fn pass_register_impls(
     }
     cx1 = Cx {
       ..cx1,
-      impl_table: map.insert(cx1.impl_table, (tid, subject), info),
+      impl_table: insert_impl(cx1.impl_table, info),
       local_impls: cx1.local_impls ++ [info]
     }
     impl_sigs = impl_sigs ++ [msigs]
@@ -2234,7 +2235,7 @@ pub fn pass_register_impls(
       Some(s) -> s
     }
     let info = adt_of(cx1.adts, sh.adt)
-    let derived_ord = match map.get(cx1.impl_table, (ORD_ID, TyAdt(sh.adt, []))) {
+    let derived_ord = match impl_at(cx1.impl_table, ORD_ID, TyAdt(sh.adt, [])) {
       Some(ii) -> info.derives_ord && ii.derived
       None -> false
     }
@@ -2254,7 +2255,7 @@ pub fn pass_register_impls(
       for f in ci.fields {
         let scalar_ok = f.ty == TyInt || f.ty == TyFloat || f.ty == TyString
         let adt_ok = match f.ty {
-          TyAdt(_, _) -> map.has(cx1.impl_table, (ORD_ID, f.ty))
+          TyAdt(_, _) -> has_impl_at(cx1.impl_table, ORD_ID, f.ty)
           _ -> false
         }
         if not scalar_ok && not adt_ok {
@@ -2771,7 +2772,7 @@ pub fn resolve_eq_witness(cx: Cx, t: Ty, lo: Int, hi: Int) -> (Cx, Option[WitRef
       if is_eq_scalar(t) {
         (cx, no_wit())
       } else {
-        match map.get(cx.impl_table, (EQ_ID, t)) {
+        match impl_at(cx.impl_table, EQ_ID, t) {
           Some(_) -> (cx, Some(WConcrete(EQ_ID, t)))
           None -> (cx, no_wit())
         }
@@ -2797,7 +2798,7 @@ pub fn resolve_ord_witness(cx: Cx, t: Ty, lo: Int, hi: Int) -> (Cx, Option[WitRe
         Some(sym) -> (capture_witness(cx, sym), Some(WForward(sym)))
       }
     _ ->
-      match map.get(cx.impl_table, (ORD_ID, t)) {
+      match impl_at(cx.impl_table, ORD_ID, t) {
         Some(_) -> (cx, Some(WConcrete(ORD_ID, t)))
         None -> {
           let hint: Option[String] = match t {
@@ -4473,7 +4474,7 @@ pub fn resolve_witness(
         Some(sym) -> (capture_witness(cx, sym), Some(WForward(sym)))
       }
     _ ->
-      match map.get(cx.impl_table, (trait_id, t)) {
+      match impl_at(cx.impl_table, trait_id, t) {
         Some(_) -> (cx, Some(WConcrete(trait_id, t)))
         None -> {
           # Equality and hashing have a structural default, so a missing impl

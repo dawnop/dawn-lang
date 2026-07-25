@@ -22,7 +22,7 @@ use types.{
   TyAdt, TyList, TyTuple, TyFn, TyBytes, TyCursor, TyMap, TySet, TyArray, TyJava,
   Sym, Sig, Traits, TraitI, ImplI, MethodSig,
   Adts, AdtI, CtorI, adt_of, trait_of, OPTION_ID, RESULT_ID, ORD_ID, EQ_ID, HASH_ID,
-  is_eq_scalar, is_ord_scalar, builtins
+  is_eq_scalar, is_ord_scalar, builtins, Impls, impl_at, has_impl_at
 }
 use tast.{
   TExpr, TStmt, TPat, TArm, TStrPart, TFun, TModule, TBinOp, TUnOp, TJavaCall,
@@ -84,7 +84,7 @@ pub type LSt = {
   # trait metadata, needed to resolve a witness into a call form. It stops
   # here: Core carries the resolved answer, so no backend consults it.
   traits: Traits,
-  impls: Map[(Int, Ty), ImplI],
+  impls: Impls,
   adts: Adts,
   # every function's declared signature, so a call site can box its
   # arguments against the DECLARED parameter types rather than leaving each
@@ -535,7 +535,7 @@ fn sig_of(st: LSt, owner: String, name: String) -> Option[Sig] =
   map.get(st.prog_fns, (owner, name))
 
 fn impl_for(st: LSt, tid: Int, subject: Ty) -> ImplI =
-  match map.get(st.impls, (tid, subject)) {
+  match impl_at(st.impls, tid, subject) {
     Some(i) -> i
     None -> panic("lower: no impl for trait " ++ to_string(tid))
   }
@@ -620,7 +620,7 @@ fn dict_slot(
   mn: String,
   ms: MethodSig
 ) -> (LSt, CDictSlot) = {
-  if map.has(st.impls, (tid, subject)) {
+  if has_impl_at(st.impls, tid, subject) {
     let imp = impl_for(st, tid, subject)
     # a derived impl provides the method without listing it: the compiler
     # wrote the body, so there was no source declaration to record
@@ -826,7 +826,7 @@ fn eq_at(st: LSt, a: CExpr, b: CExpr, t: Ty) -> (LSt, CExpr) = {
   if is_eq_scalar(t) { return (st, CBinary(CEq, a, b, TyBool)) }
   # an explicit `impl Eq` wins over structure, exactly as it does when the
   # same comparison arrives through a bound
-  if map.has(st.impls, (EQ_ID, t)) {
+  if has_impl_at(st.impls, EQ_ID, t) {
     let imp = impl_for(st, EQ_ID, t)
     if imp.derived || provides(imp, "eq") {
       return (st, CCall(
@@ -2003,7 +2003,7 @@ pub fn lower_expr_only(
   owner: String,
   e: TExpr,
   traits: Traits,
-  impls: Map[(Int, Ty), ImplI],
+  impls: Impls,
   adts: Adts,
   prog_fns: Map[(String, String), Sig],
   syms: Map[Int, Sym],
@@ -2042,7 +2042,7 @@ pub fn lower_fn_only(
   owner: String,
   f: TFun,
   traits: Traits,
-  impls: Map[(Int, Ty), ImplI],
+  impls: Impls,
   adts: Adts,
   prog_fns: Map[(String, String), Sig],
   syms: Map[Int, Sym],
@@ -2080,7 +2080,7 @@ pub fn lower_module(
   owner: String,
   tm: TModule,
   traits: Traits,
-  impls: Map[(Int, Ty), ImplI],
+  impls: Impls,
   adts: Adts,
   prog_fns: Map[(String, String), Sig]
 ) -> CModule = {

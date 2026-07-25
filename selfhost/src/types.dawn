@@ -346,6 +346,75 @@ pub type TraitI = {
   methods: List[(String, MethodSig)]
 }
 
+## What an impl is indexed by: the outermost type constructor of its subject,
+## with the arguments dropped (trait-v2-design §3.3).
+##
+## Restricting subjects to a head applied to distinct variables (§3.2) is what
+## lets one equality answer three questions at once -- which impl matches,
+## whether two impls overlap, and whether recursive solving terminates. A type
+## with no head (a variable, a function, an error) can never be an impl
+## subject, which is why `head_of` is partial.
+##
+## Tuples are deliberately absent: they have no head name and are n-ary, so
+## they stay with the compiler-synthesised equality (§3.2, 决策 2/7).
+pub type Head =
+  | HInt
+  | HFloat
+  | HBool
+  | HString
+  | HBytes
+  | HCursor
+  | HUnit
+  | HAdt(adt: Int)
+  | HList
+  | HMap
+  | HSet
+  | HArray
+  | HJava(fqcn: String)
+
+pub fn head_of(t: Ty) -> Option[Head] =
+  match t {
+    TyInt -> Some(HInt)
+    TyFloat -> Some(HFloat)
+    TyBool -> Some(HBool)
+    TyString -> Some(HString)
+    TyBytes -> Some(HBytes)
+    TyCursor -> Some(HCursor)
+    TyUnit -> Some(HUnit)
+    TyAdt(aid, _) -> Some(HAdt(aid))
+    TyList(_) -> Some(HList)
+    TyMap(_, _) -> Some(HMap)
+    TySet(_) -> Some(HSet)
+    TyArray(_) -> Some(HArray)
+    TyJava(fqcn, _) -> Some(HJava(fqcn))
+    _ -> None
+  }
+
+pub alias Impls = Map[(Int, Head), ImplI]
+
+## Look an impl up by subject type. A subject with no head cannot have one,
+## which reads the same as the lookup missing.
+pub fn impl_at(tbl: Impls, tid: Int, t: Ty) -> Option[ImplI] =
+  match head_of(t) {
+    Some(h) -> map.get(tbl, (tid, h))
+    None -> None
+  }
+
+pub fn has_impl_at(tbl: Impls, tid: Int, t: Ty) -> Bool =
+  match impl_at(tbl, tid, t) {
+    Some(_) -> true
+    None -> false
+  }
+
+## Register an impl under its subject's head. Whoever gets here has already
+## established the subject may be one (`impl_subject_ok`, or the prelude's own
+## scalar list), so a headless subject is a compiler bug, not a user error.
+pub fn insert_impl(tbl: Impls, i: ImplI) -> Impls =
+  match head_of(i.subject) {
+    Some(h) -> map.insert(tbl, (i.trait_id, h), i)
+    None -> panic("impl subject has no head")
+  }
+
 pub type ImplI = {
   trait_id: Int,
   subject: Ty,
