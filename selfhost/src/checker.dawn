@@ -1974,6 +1974,8 @@ pub fn pass_register_impls(
     let ii = ImplI {
       trait_id: ORD_ID,
       subject: subject,
+      tparams: [],
+      constraints: [],
       lo: dlo,
       hi: dhi,
       derived: true,
@@ -2005,6 +2007,15 @@ pub fn pass_register_impls(
       Some(t) -> t
     }
     let tr = trait_of(cx1.traits, tid)
+    # Cut 1 of trait v2 parses the conditional form but registers nothing: the
+    # subject would name parameters no scope holds yet, so reject before
+    # resolving it rather than report `unknown type T`.
+    if len(d.tparams) > 0 {
+      cx1 = cerr_h(cx1, "conditional impls are not supported yet", d.tlo, d.thi,
+        "write `impl " ++ d.trait_name ++ "[SomeConcreteType]` for now")
+      impl_sigs = impl_sigs ++ [no_msigs(len(d.methods))]
+      continue
+    }
     let empty_tp: Map[String, Ty] = map.empty()
     let empty_ev: Map[String, Eff] = map.empty()
     cx1 = Cx { ..cx1, current_tparams: empty_tp, current_eff_vars: empty_ev }
@@ -2196,6 +2207,8 @@ pub fn pass_register_impls(
     let info = ImplI {
       trait_id: tid,
       subject: subject,
+      tparams: [],
+      constraints: [],
       lo: d.lo,
       hi: d.hi,
       derived: false,
@@ -2296,7 +2309,7 @@ test "impl registration enforces coherence and signature matching" {
     nlo: 17,
     nhi: 20
   }
-  fn good_impl(lo: Int) -> Decl = DImpl("Eq4", lo, lo + 3, TNamed("Int", [], lo + 4, lo + 7), [FnDecl {
+  fn good_impl(lo: Int) -> Decl = DImpl([], "Eq4", lo, lo + 3, TNamed("Int", [], lo + 4, lo + 7), [FnDecl {
     is_pub: false,
     name: "eq4",
     tparams: no_tparams(),
@@ -2328,7 +2341,7 @@ test "impl registration enforces coherence and signature matching" {
   # a missing method reports with the expected render
   let m2 = Module { decls: [
     DTrait("Eq5", "T", 10, 11, [TraitMethod { ..tm, name: "eq5" }], false, 0, 40, 6, 9),
-    DImpl("Eq5", 50, 53, TNamed("Int", [], 54, 57), no_fn_decls(), 50, 70)
+    DImpl([], "Eq5", 50, 53, TNamed("Int", [], 54, 57), no_fn_decls(), 50, 70)
   ] }
   var cx2 = seed_prelude(test_cx())
   cx2 = pass_register_traits(cx2, m2)

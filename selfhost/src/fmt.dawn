@@ -17,7 +17,7 @@ use lexer
 use token.{
   Token, TokKind,
   INT, FLOAT, STRING, IDENT, TYPEIDENT, UNDERSCORE, NEWLINE, EOF, COMMENT,
-  USE, ELSE, FN, TRUE, FALSE, NOT,
+  USE, ELSE, FN, TRUE, FALSE, NOT, IMPL,
   LPAREN, RPAREN, LBRACE, RBRACE, LBRACKET, RBRACKET,
   COMMA, COLON, DOT, DOTDOT, QUESTION, ARROW, FATARROW,
   EQ, EQEQ, NEQ, LT, LE, GT, GE,
@@ -191,6 +191,10 @@ fn space(prev: Token, cur: Token, unary: Set[Int], postfix: Set[Int], on_use_lin
   # calls / indexing / generics: name(..), name[..], no space before the bracket
   if c == LPAREN && is_callable_before_paren(p) { return false }
   if c == LBRACKET && is_value_end(p) { return false }
+  # a conditional impl carries its parameters right after the keyword --
+  # `impl[T: Eq] Eq[List[T]]`, the way a fn's hug its name. IMPL is not in
+  # is_value_end because it never ends a value; this is its own rule.
+  if c == LBRACKET && p == IMPL { return false }
   # unary minus hugs its operand
   if set.has(unary, prev.lo) { return false }
   true
@@ -265,4 +269,10 @@ test "use paths print tight and unary minus hugs" {
   assert format("use std/list.{ take , drop }\n") == "use std/list.{take, drop}\n"
   let src = "fn f() -> Int = { -1 }\n"
   assert format(src) == src
+}
+
+test "a conditional impl's parameters hug the keyword" {
+  let src = "impl[T: Eq] Eq[List[T]] {\n  fn eq(a: List[T], b: List[T]) -> Bool = true\n}\n"
+  assert format(src) == src
+  assert format("impl [T: Eq] Eq[List[T]] {\n}\n") == "impl[T: Eq] Eq[List[T]] {\n}\n"
 }

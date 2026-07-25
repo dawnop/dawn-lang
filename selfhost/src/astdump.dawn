@@ -71,9 +71,15 @@ fn dump_decl(out: List[String], d: Int, decl: Decl) -> List[String] =
       for m in methods { o = dump_trait_method(o, d + 1, m) }
       o
     }
-    DImpl(trait_name, tlo, thi, subject, methods, lo, hi) -> {
+    DImpl(tparams, trait_name, tlo, thi, subject, methods, lo, hi) -> {
       var o = out ++ [ind(d) ++ "Impl " ++ trait_name ++ " trait" ++ sp(tlo, thi) ++ " " ++
           sp(lo, hi)]
+      # An unconditional impl dumps exactly as it did before trait v2, so the
+      # parse-dump differential stays silent on corpora that use no conditions.
+      for tp in tparams {
+        o = o ++ [ind(d + 1) ++ "TypeParam " ++ tp.name ++ " bounds=" ++ bounds_str(tp.bounds) ++
+            " " ++ sp(tp.lo, tp.hi)]
+      }
       o = dump_tref(o, d + 1, subject)
       for m in methods { o = dump_fn(o, d + 1, m) }
       o

@@ -10,7 +10,7 @@ use ast.{
   Expr, EInt, EVar, ECall, EBinary, ECtor, EBlock,
   BinOp, OpAdd, OpMul,
   Stmt, SWhile,
-  Decl, DFn, DConst, DUseModule, Module
+  Decl, DFn, DConst, DUseModule, DImpl, Module
 }
 
 fn rendered(src: String) -> String = {
@@ -207,4 +207,32 @@ test "unterminated string in an interpolation-free file recovers" {
   let (m, ds) = parse_module("fn f() = \"abc")
   assert len(ds) > 0
   assert ds[0].msg == "unterminated string"
+}
+
+test "a conditional impl carries its own type parameters" {
+  let (m, ds) = parse_module("impl[T: Eq] Eq[List[T]] {\n  fn eq(a: List[T], b: List[T]) -> Bool = true\n}")
+  assert len(ds) == 0
+  match m.decls[0] {
+    DImpl(tparams, trait_name, _tlo, _thi, _subject, methods, _lo, _hi) -> {
+      assert trait_name == "Eq"
+      assert len(tparams) == 1
+      assert tparams[0].name == "T"
+      assert len(tparams[0].bounds) == 1
+      assert tparams[0].bounds[0].name == "Eq"
+      assert len(methods) == 1
+    }
+    _ -> { assert false }
+  }
+}
+
+test "an unconditional impl parses with no type parameters" {
+  let (m, ds) = parse_module("impl Ord[Point] {\n  fn cmp(a: Point, b: Point) -> Int = 0\n}")
+  assert len(ds) == 0
+  match m.decls[0] {
+    DImpl(tparams, trait_name, _tlo, _thi, _subject, _methods, _lo, _hi) -> {
+      assert trait_name == "Ord"
+      assert len(tparams) == 0
+    }
+    _ -> { assert false }
+  }
 }

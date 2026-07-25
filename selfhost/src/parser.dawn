@@ -736,8 +736,14 @@ fn trait_method(p: P, st: St) -> PR[TraitMethod] = {
 }
 
 ## impl Ord[Point] { fn cmp(a: Point, b: Point) -> Int = ... }
+##
+## A conditional impl puts its own parameters first, like a fn does:
+##   impl[T: Eq] Eq[List[T]] { ... }
+## No ambiguity to resolve -- an unconditional impl has a trait name where a
+## conditional one has `[`, so type_params' own "not at `[`" test decides.
 fn impl_decl(p: P, st: St) -> PR[Decl] = {
-  let (st1, kw) = want(p, st, IMPL, "`impl`")?
+  let (st0, kw) = want(p, st, IMPL, "`impl`")?
+  let (st1, tparams) = type_params(p, st0)?
   let (st2, trait_tok) = want(p, st1, TYPEIDENT, "a trait name (uppercase)")?
   let (st3, _) = want(p, st2, LBRACKET,
     "`[` (an impl names its subject type: impl " ++ trait_tok.text ++ "[Point])")?
@@ -756,7 +762,7 @@ fn impl_decl(p: P, st: St) -> PR[Decl] = {
     st8 = want_sep(p, st9)?
   }
   let (st10, close) = want(p, st8, RBRACE, "`}`")?
-  Ok((st10, DImpl(trait_tok.text, trait_tok.lo, trait_tok.hi, subject, methods,
+  Ok((st10, DImpl(tparams, trait_tok.text, trait_tok.lo, trait_tok.hi, subject, methods,
     kw.lo, close.hi)))
 }
 
