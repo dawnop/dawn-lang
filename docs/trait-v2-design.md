@@ -79,6 +79,57 @@ std 里真写 `impl[T: Eq] Eq[List[T]]`,编译器里对应的合成机器删掉�
 
 顺序因此固定:**S2.1(2a → 发布 → 2b)→ S1.4(2a → 发布 → 2b)→ S1.5 → S1.1**。
 
+### 决策 5 — `derive` 对泛型类型**解禁**，生成条件 impl
+
+今天两个 derive 处理泛型的方式不一样,而且都在等条件 impl:
+
+- `derive Ord` 直接报错(`checker.dawn:1968`),hint 自己写着「**v1** Ord subjects are
+  non-generic」——v2 正是解它的地方。
+- `derive Show` 在声明处放行(`is_showable_field` 对 `TyVar` 返回 `true`),**到用处才报**。
+  实测 `type Box[T] = { v: T } derive Show` 编得过,`to_string(Box { v: fn(x: Int) => x + 1 })`
+  才报「cannot print a value of type `Box[fn(Int) -> Int]`」。不是漏洞,但报错点离声明远。
+
+解禁之后两者都变成声明处生成 `impl[T: Ord] Ord[Box[T]]` / `impl[T: Show] Show[Box[T]]`,
+在声明处一次检清——与 §3.7 对 `==` 做的是同一件事,只是换了个 trait。
+
+**落点分两处**(理由同决策 6):`derive Ord` 是纯加法,进 **2a**;`derive Show` 要等
+`Show` 成为 trait,随 **S1.4**。
+
+### 决策 6 — std 给容器写**四种**条件 impl，但 `Show` 那条落在 S1.4
+
+决策 3 只说了 `Eq`(和 §3.10 配对的 `Hash`)。裁决扩到四种:`Eq`/`Hash`/`Ord`/`Show`,
+一次补齐容器的能力,以后不用再回来。今天 `sort(List[List[Int]])` 编不过——
+`prelude_impls()` 的 Ord 只有 `Int`/`Float`/`String` 三个标量。
+
+**但 `Show` 那条今天一个字都写不出来**:`Show` 还不是 trait,是
+`AdtI.derives_show` 标志位 + `is_showable`/`is_showable_field` 两个静态谓词 +
+运行时 `dawn/rt/Show` 的 instanceof 链的合称,没有 `SHOW_ID`、没有字典(§6)。
+这正是 S1.4 要做的事,而 S1.4 排在 S2.1 之后又是因为它要等条件 impl。
+
+不是死锁,是顺序。**保序,不合并**:
+
+| | 内容 | 落点 |
+|---|---|---|
+| `Eq`/`Hash`/`Ord` 的容器条件 impl | 刀 6 | S2.1 的 2b |
+| `impl[T: Show] Show[List[T]]` 等 | S1.4 —— 它本来就是「给 std 补 `[T: Show]` bound」那一刀,顺手写这条正是它的活 | S1.4 的 2b |
+
+否掉合并(把 S1.4 的加法那半塞进 2a)的理由:那会让 2b 同时扛 trait v2 的语义变更
+**和** Show 的字节码面(#24 原话「字节码面很大」),正是决策 4 想避开的不可二分。
+**终态相同,两条路都不产生返工**——每条 impl 只写一次,没有谁要回头改。
+
+### 决策 7 — 元组排进 S3，降级成 std 的 ADT
+
+刀 6 之后 `List`/`Map`/`Set` 都有 std 的显式 impl,**元组成为唯一一个相等仍靠
+编译器合成的类型**(决策 2 把它挡在 head 之外:没有 head 名字、是 n 元的)。
+
+裁决:不承认这个特殊永久化,排进 **S3**。理由是两件事共用终点——S3 本来就是
+「集合纯 Dawn 化」,元组是同一类残留;而 §3.9 的 `head_owner` 脚手架也要等 S3
+(`List`/`Map`/`Set` 变成 std 的真 ADT)才删得掉。
+
+先例见 [`equality-survey.md`](equality-survey.md) §3:选了「元组是 ADT」的 Scala/Kotlin
+这个问题根本不存在;选了「元组保持结构类型」的 Swift,SE-0283 通过六年未能实现,
+社区结论是「别用元组」。
+
 ## 2. 曾经开着的一条：`==` 要不要求 `Eq` bound
 
 > 这一节保留了「开着」时的推理与实测过程,因为**结论是被数据改掉的**,
@@ -400,9 +451,9 @@ fn head_owner(cx: Cx, h: Head) -> Option[String]
 
 | | 内容 | 性质 |
 |---|---|---|
-| **2a** | §3.1 语法 + §3.3 head 索引 + `solve` + `WApply` + `CDictApply` + JVM/C/**interp** 三个消费者 | **全是加法**。std 不写条件 impl,`==` 仍走老路 |
+| **2a** | §3.1 语法 + §3.3 head 索引 + `solve` + `WApply` + `CDictApply` + JVM/C/**interp** 三个消费者 + `derive Ord` 对泛型解禁(决策 5) | **全是加法**。std 不写条件 impl,`==` 仍走老路 |
 | 发布 | v0.12.0 | 种子学会新语法与新 Core 节点 |
-| **2b** | std 写 `impl[T: Eq] Eq[List[T]]` 等;`==` 改走 `solve`;删 `WStructural`/`uncomparable_part`/`resolve_eq_witness` | 破坏性语义变更集中在这里 |
+| **2b** | std 给容器写 `Eq`/`Hash`/`Ord` 条件 impl(决策 6,`Show` 那条留给 S1.4);`==` 改走 `solve`;删 `WStructural`/`uncomparable_part`/`resolve_eq_witness` | 破坏性语义变更集中在这里 |
 
 这么切的理由:2a 不改任何现有程序的行为(新机制无人使用),**所以它的 Emit-Change
 应当接近零**,一旦不是就说明搬错了;2b 的行为变更则全部集中、可二分。
@@ -416,9 +467,11 @@ fn head_owner(cx: Cx, h: Head) -> Option[String]
 3. **`solve` + `WApply` + 按需合成结构 impl**,替掉 `WStructural`。
    `==` 暂不接(仍走 `resolve_eq_witness`),所以行为不变。
 4. **`CDictApply` + 三个消费者**(JVM / C / interp)。
-5. 发布 **2a**。
-6. **std 写条件 impl** + `==` 走 `solve` + 删三处旧机制。**破坏性、Emit-Change 大。**
-7. 收尾:spec §3.5 改 bullet、known-red 该删的删、`trait.md` v1 范围表标注。
+5. **`derive Ord` 对泛型解禁**(决策 5)。纯加法,所以要赶在发布前进 2a,让种子学会。
+6. 发布 **2a**。
+7. **std 给容器写 `Eq`/`Hash`/`Ord` 条件 impl** + `==` 走 `solve` + 删三处旧机制。
+   **破坏性、Emit-Change 大。**(`Show` 那条见决策 6,落在 S1.4。)
+8. 收尾:spec §3.5 改 bullet、known-red 该删的删、`trait.md` v1 范围表标注。
 
 ## 4. 门禁
 
