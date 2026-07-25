@@ -34,18 +34,16 @@ use std/set
 use codegen.{
   fn_iface, tuple_class, gen_fn_interface, gen_tuple_class, gen_panic_class,
   gen_unit_class, supers_of, PANIC_CLASS, UNIT_CLASS, gen_bytes_class,
-  gen_io_class, gen_fn_comparator, gen_ord_interface,
-  gen_prelude_ord_impl, gen_prelude_eq_impl, gen_prelude_hash_impl,
-  gen_structural_eq_impl, gen_structural_hash_impl, structural_class, no_override,
-  impl_class, tr_iface, BYTES_CLASS, IO_CLASS,
+  gen_io_class, gen_fn_comparator, gen_ord_interface, no_override,
+  tr_iface, BYTES_CLASS, IO_CLASS,
   FN_CMP_CLASS, gen_show_class, SHOW_CLASS,
   gen_lists_class, LISTS_CLASS, gen_strings_class, STRINGS_CLASS,
   gen_maps_class, MAPS_CLASS, gen_array_class, ARRAY_CLASS, gen_adt
 }
 use types.{
   prelude_adts, adt_of, adt_jvm_name, trait_of, OPTION_ID, RESULT_ID,
-  EQ_ID, HASH_ID, eq_scalars, bounds_of,
-  TyInt, TyFloat, TyString, Ty, Sig, Traits, ImplI, Adts
+  EQ_ID, HASH_ID, bounds_of,
+  Ty, Sig, Traits, ImplI, Adts
 }
 use emit.{emit_module, gen_trait_interface}
 use core.{CModule}
@@ -196,9 +194,6 @@ fn collect_program(
   classes = classes ++ [(IO_CLASS, gen_io_class(sup))]
   classes = classes ++ [(tr_iface(None, "Ord"), gen_ord_interface(sup))]
   classes = classes ++ [(FN_CMP_CLASS, gen_fn_comparator(sup))]
-  for subj in [TyInt, TyFloat, TyString] {
-    classes = classes ++ [(impl_class(adts, None, "Ord", subj), gen_prelude_ord_impl(sup, adts, subj))]
-  }
   for aid in [OPTION_ID, RESULT_ID] {
     classes = classes ++ gen_adt(sup, adts, adt_of(adts, aid), no_override())
   }
@@ -236,10 +231,11 @@ fn collect_program(
       prog_fns = map.insert(prog_fns, (cm.class_name, k), v)
     }
   }
-  # The prelude Eq/Hash dictionaries, and only if something forwards one. A
-  # bound is the sole construct that needs a dictionary -- everywhere the
-  # subject is statically known, lowering collapses to the primitive -- so a
-  # program with no Eq/Hash bound carries no Eq/Hash classes.
+  # The prelude Eq/Hash trait *interfaces*, and only if something forwards a
+  # bound -- a program with no `[T: Eq]` carries no Eq machinery. The
+  # dictionaries themselves are no longer built here: lowering registers
+  # exactly the ones it referenced and emit_module writes those, so this scan
+  # survives only for the two interfaces, which have no Core representation.
   var wants: List[Int] = []
   for pr in map.entries(prog_fns) {
     let (_k, sg) = pr
@@ -263,20 +259,6 @@ fn collect_program(
   for tid in wants {
     let tr = trait_of(traits, tid)
     classes = classes ++ [(tr_iface(None, tr.name), gen_trait_interface(sup, adts, tr))]
-    for subj in eq_scalars() {
-      let dict = if tid == EQ_ID {
-        gen_prelude_eq_impl(sup, adts, subj)
-      } else {
-        gen_prelude_hash_impl(sup, adts, subj)
-      }
-      classes = classes ++ [(impl_class(adts, None, tr.name, subj), dict)]
-    }
-    let shared = if tid == EQ_ID {
-      gen_structural_eq_impl(sup)
-    } else {
-      gen_structural_hash_impl(sup)
-    }
-    classes = classes ++ [(structural_class(tr.name), shared)]
   }
 
   # const values by declaring module, so importers can materialize them
@@ -290,7 +272,7 @@ fn collect_program(
   for sm in std_mods {
     let (cls, cx, tm, ct) = sm
     classes = classes ++ emit_module(sup, adts, traits, impl_table, prog_fns, cx.fns, cls,
-      own_trait_ids(cx.traits, cls), cx.local_impls, own_adts_of(cx.adts, cls, seen),
+      own_trait_ids(cx.traits, cls), own_adts_of(cx.adts, cls, seen),
       tm, ct, merged_consts(cx, ct, const_vals), false)
     for aid in own_adts_of(cx.adts, cls, seen) {
       seen = set.insert(seen, adt_jvm_name(adt_of(cx.adts, aid)))
@@ -300,7 +282,7 @@ fn collect_program(
   var tests_info: List[(String, String, List[String])] = []
   for cm in mods {
     classes = classes ++ emit_module(sup, adts, traits, impl_table, prog_fns, cm.cx.fns,
-      cm.class_name, own_trait_ids(cm.cx.traits, cm.class_name), cm.cx.local_impls,
+      cm.class_name, own_trait_ids(cm.cx.traits, cm.class_name),
       own_adts_of(cm.cx.adts, cm.class_name, seen), cm.tm, cm.ct,
       merged_consts(cm.cx, cm.ct, const_vals), true)
     for aid in own_adts_of(cm.cx.adts, cm.class_name, seen) {

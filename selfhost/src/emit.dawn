@@ -26,9 +26,9 @@ use interp.{CValue, VInt, VFloat, VBool, VStr, VUnit, VList, VTuple, VAdt, CtOut
 use codegen.{
   obj, fn_iface, tuple_class, erased_apply_desc, desc_of, method_desc,
   JvmRepr, jvm_repr, RLong, RDouble, RBool, RRef, RUnit, RBottom,
-  slots_of, is_ref, load_slot, hash_of, structural_class, supers_of, gen_adt, gen_ctor_class,
+  slots_of, is_ref, load_slot, hash_of, dict_class, supers_of, gen_adt, gen_ctor_class,
   EqOverride, no_override,
-  owner_prefix, tr_iface, impl_class, append_const, singleton_scaffold, emit_unerase,
+  tr_iface, append_const, singleton_scaffold,
   V17, ACC_PUBLIC, ACC_PRIVATE, ACC_PROTECTED, ACC_STATIC, ACC_FINAL,
   ACC_ABSTRACT, ACC_INTERFACE,
   OP_ALOAD, OP_ILOAD, OP_LLOAD, OP_DLOAD, OP_ASTORE, OP_ISTORE, OP_LSTORE,
@@ -55,7 +55,7 @@ use core.{
   CDirect, CDynamic, CMethod, CImpl, CDefault,
   CAdd, CSub, CMul, CDiv, CMod, CEq, CNe, CLt, CLe, CGt, CGe, CAnd, COr,
   CBand, CBor, CBxor, CShl, CShr, CUshr, CConcat, CNeg, CNot, CBnot,
-  CBinOp, CUnOp, cex_ty
+  CBinOp, CUnOp, cex_ty, ty_key, CSlotFn, CSlotDefault
 }
 use lower
 use jreflect
@@ -173,6 +173,11 @@ pub type Gen = {
   # function comparing that type asks for the same method and it must be
   # emitted once.
   lifted_descs: Map[(String, String), String],
+  # the dictionaries lowering built for this class, deduplicated by key and
+  # kept in the order they were asked for. This is Core's own table: naming a
+  # dictionary from anything else is how the JVM backend spent a release not
+  # noticing the table was wrong.
+  dicts: List[CDictDef],
   syms: Map[Int, Sym],
   slots: Map[Int, Int],
   next_slot: Int,
@@ -645,26 +650,28 @@ fn tyfn_parts(t: Ty) -> (List[Ty], Ty) =
     _ -> panic("expected a fn type")
   }
 
-fn emit_native_cmp2(g: Gen, t: Ty) -> Unit !io = {
+## Two same-typed orderable scalars on the stack -> their cmp, widened to a
+## long because Dawn's Int is one.
+##
+## Spelled out per type rather than defaulted to String, for the reason
+## hash_of gives: this is the JVM's implementation of the `cmp` contract, and
+## a type with no order here has to say so instead of being handed the
+## nearest available answer.
+fn emit_scalar_cmp(g: Gen, t: Ty) -> Unit !io = {
   match t {
     TyInt -> { g.mv.visitInsn(OP_LCMP) }
     TyFloat -> {
+      # the total order, which disagrees with `<` on NaN and -0.0 on purpose
       g.mv.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Double", "compare", "(DD)I", false)
     }
-    _ -> {
+    TyString -> {
       g.mv.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/String", "compareTo",
         "(Ljava/lang/String;)I", false)
     }
+    _ -> panic("codegen: no scalar order for " ++ ty_key(t))
   }
   g.mv.visitInsn(OP_I2L)
   ()
-}
-
-fn provided_has(imp: ImplI, name: String) -> Bool = {
-  for p in imp.provided {
-    if p == name { return true }
-  }
-  false
 }
 
 fn is_map_builtin(name: String) -> Bool =
@@ -1154,23 +1161,40 @@ fn gen_sam_bridge(g: Gen, cw: AdtClassWriter, b: SamB) -> Gen !io = {
 ## the body comes from Core, and `lower_fn_only` hands back any lambdas it
 ## hoisted, which are emitted as ordinary static methods beside it.
 fn gen_fn(g: Gen, cw: AdtClassWriter, f: TFun, name: String, desc: String) -> Gen !io = {
-  let (cf, lifted, next_lam) =
+  let (cf, lifted, dicts, next_lam) =
     lower.lower_fn_only(g.class_name, f, g.traits, g.impl_table, g.adts,
       g.prog_fns, g.syms, g.lambda_ctr)
   # Register the hoisted bodies before generating anything: the main body may
   # call one by name, and the descriptor has to be known at that call site.
   var g1 = Gen { ..g, lambda_ctr: next_lam }
+  for d in dicts {
+    var have = false
+    for e in g1.dicts {
+      if e.key == d.key { have = true }
+    }
+    if not have { g1 = Gen { ..g1, dicts: g1.dicts ++ [d] } }
+  }
   var fresh: List[CFun] = []
   for lf in lifted {
     var ptys: List[Ty] = []
     for p in lf.captures { ptys = ptys ++ [p.ty] }
     for p in lf.params { ptys = ptys ++ [p.ty] }
+    # a dictionary parameter is erased and hidden, but it is still a
+    # parameter: a bridge whose descriptor omitted it verified only because
+    # nothing on the JVM ever called one
+    for _d in lf.dicts { ptys = ptys ++ [TyVar("D", 0)] }
     if not map.has(g1.lifted_descs, (g1.class_name, lf.name)) {
-      g1 = Gen {
-        ..g1,
-        lifted_descs: map.insert(g1.lifted_descs, (g1.class_name, lf.name),
-          impl_desc_of(g1, ptys, lf.ret))
-      }
+      # A dictionary slot body is called from the dictionary class against
+      # the trait method's own descriptor. Every other hoisted body sits
+      # behind an erased `apply`, where a zero-slot return still has to hand
+      # back a reference -- which is the difference impl_desc_of encodes.
+      let d =
+        if is_slot_target(g1, lf.name) {
+          method_desc(g1.adts, ptys, lf.ret)
+        } else {
+          impl_desc_of(g1, ptys, lf.ret)
+        }
+      g1 = Gen { ..g1, lifted_descs: map.insert(g1.lifted_descs, (g1.class_name, lf.name), d) }
       fresh = fresh ++ [lf]
     }
   }
@@ -1179,6 +1203,21 @@ fn gen_fn(g: Gen, cw: AdtClassWriter, f: TFun, name: String, desc: String) -> Ge
     g0 = gen_cbody(g0, cw, lf, lf.name, lifted_desc(g0, lf.name), true)
   }
   g0
+}
+
+## Is this hoisted body the target of one of this class's dictionary slots?
+## Those are reached from the dictionary class, which lives in its own
+## package, so they can be neither private nor shaped like a lambda.
+fn is_slot_target(g: Gen, name: String) -> Bool = {
+  for dd in g.dicts {
+    for s in dd.slots {
+      match s {
+        CSlotFn(owner, n) -> if owner == g.class_name && n == name { return true }
+        CSlotDefault(_, _) -> ()
+      }
+    }
+  }
+  false
 }
 
 fn lifted_desc(g: Gen, name: String) -> String =
@@ -1195,8 +1234,15 @@ fn gen_cbody(
   desc: String,
   lifted: Bool
 ) -> Gen !io = {
+  let slot_body = lifted && is_slot_target(g, name)
   let acc =
-    if lifted { ACC_PRIVATE + ACC_STATIC + OP_ACC_SYNTHETIC } else { ACC_PUBLIC + ACC_STATIC }
+    if not lifted {
+      ACC_PUBLIC + ACC_STATIC
+    } else if slot_body {
+      ACC_PUBLIC + ACC_STATIC + OP_ACC_SYNTHETIC
+    } else {
+      ACC_PRIVATE + ACC_STATIC + OP_ACC_SYNTHETIC
+    }
   let m = cw.method(acc, name, desc).expect("mv")
   m.visitCode()
   var g1 = Gen {
@@ -1205,8 +1251,9 @@ fn gen_cbody(
     next_slot: 0,
     method_ret: cf.ret,
     # a lifted body sits behind the erased `apply`, so a zero-slot return
-    # type still has to hand back a reference
-    rets_null: lifted,
+    # type still has to hand back a reference. A dictionary slot body does
+    # not: it is called against the trait's own descriptor.
+    rets_null: lifted && not slot_body,
     cloops: []
   }
   for p in cf.captures {
@@ -1243,7 +1290,7 @@ fn drain_lambdas(g: Gen, cw: AdtClassWriter) -> Gen !io = {
 ## Two same-typed orderable values on the stack → their long cmp.
 fn emit_field_cmp(g: Gen, t: Ty) -> Unit !io = {
   if t == TyInt || t == TyFloat || t == TyString {
-    emit_native_cmp2(g, t)
+    emit_scalar_cmp(g, t)
   } else {
     match t {
       TyAdt(_, _) -> {
@@ -1425,87 +1472,6 @@ fn emit_return_of(m: MethodVisitor, t: Ty) -> Unit !io = {
   ()
 }
 
-## An impl's dictionary: a singleton implementing the trait interface; each
-## erased method unwraps to the concrete static or the trait's default.
-pub fn gen_impl_class(
-  supers: List[String],
-  adts: Adts,
-  traits: Traits,
-  class_name: String,
-  imp: ImplI
-) -> Bytes !io = {
-  let tr = trait_of(traits, imp.trait_id)
-  let cls = impl_class(adts, imp.owner, tr.name, imp.subject)
-  let iface = tr_iface(tr.owner, tr.name)
-  let imp_owner = match imp.owner {
-    Some(o) -> o
-    None -> class_name
-  }
-  let cw = AdtClassWriter.new(supers)
-  cw.beginWithInterface(V17, ACC_PUBLIC + ACC_FINAL, cls, obj(), iface)
-  singleton_scaffold(cw, cls, iface)
-  for entry in tr.methods {
-    let (mname, ms) = entry
-    let m = cw.method(ACC_PUBLIC, mname,
-      method_desc(adts, ms.sig.param_tys, ms.sig.ret)).expect("mv")
-    m.visitCode()
-    let subj_name = match imp.subject {
-      TyInt -> "Int"
-      TyFloat -> "Float"
-      TyBool -> "Bool"
-      TyString -> "String"
-      TyAdt(aid, _) -> adt_of(adts, aid).name
-      _ -> panic("invalid impl subject")
-    }
-    let mangled = "dawn\$impl\$" ++ tr.name ++ "\$" ++ subj_name ++ "\$" ++ mname
-    if imp.derived {
-      m.visitVarInsn(OP_ALOAD, 1)
-      emit_unerase(m, adts, imp.subject)
-      m.visitVarInsn(OP_ALOAD, 2)
-      emit_unerase(m, adts, imp.subject)
-      m.visitMethodInsn(OP_INVOKESTATIC, imp_owner, mangled,
-        "(" ++ desc_of(adts, imp.subject) ++ desc_of(adts, imp.subject) ++ ")J", false)
-    } else if provided_has(imp, mname) {
-      let psig = subst_subject(tr, ms.sig, imp.subject)
-      var slot = 1
-      var i = 0
-      for declared in ms.sig.param_tys {
-        load_slot(m, declared, slot)
-        match declared {
-          TyVar(_, _) -> { emit_unerase(m, adts, psig.param_tys[i]) }
-          _ -> ()
-        }
-        slot = slot + slots_of(declared)
-        i = i + 1
-      }
-      m.visitMethodInsn(OP_INVOKESTATIC, imp_owner, mangled,
-        method_desc(adts, psig.param_tys, psig.ret), false)
-      match ms.sig.ret {
-        TyVar(_, _) -> { box_ty(m, psig.ret) }
-        _ -> ()
-      }
-    } else {
-      var slot = 1
-      for declared in ms.sig.param_tys {
-        load_slot(m, declared, slot)
-        slot = slot + slots_of(declared)
-      }
-      m.visitVarInsn(OP_ALOAD, 0)
-      let tr_owner = match tr.owner {
-        Some(o) -> o
-        None -> class_name
-      }
-      m.visitMethodInsn(OP_INVOKESTATIC, tr_owner, default_method_name(tr.name, mname),
-        sig_desc_with_dicts(adts, ms.sig), false)
-    }
-    emit_return_of(m, ms.sig.ret)
-    m.visitMaxs(0, 0)
-    m.visitEnd()
-  }
-  cw.visitEnd()
-  cw.toByteArray().expect("bytes")
-}
-
 ## One test block → one public static method dawn$test$i()V.
 ## A test block is a nullary Unit function, so it goes through the same Core
 ## path as any other body.
@@ -1546,7 +1512,13 @@ fn owner_or_default(o: Option[String], fallback: String) -> String =
     None -> fallback
   }
 
-## dictionaries, derived Ord singletons, and the class of statics.
+## dictionaries and the class of statics.
+##
+## `impl_table` is still a parameter, but it no longer says anything about
+## dictionaries: what survives is ADT class synthesis -- which of an ADT's
+## equals/hashCode an explicit impl takes over, and whether its Ord was
+## derived. Those are questions about a *class*, not about a witness, and
+## Core does not carry them.
 pub fn emit_module(
   supers: List[String],
   adts: Adts,
@@ -1556,7 +1528,6 @@ pub fn emit_module(
   own_fns: Map[String, Sig],
   class_name: String,
   own_trait_ids: List[Int],
-  own_impls: List[ImplI],
   own_adt_ids: List[Int],
   tm: TModule,
   ct: CtOut,
@@ -1574,27 +1545,6 @@ pub fn emit_module(
     let tr = trait_of(traits, tid)
     out = out ++ [(tr_iface(tr.owner, tr.name), gen_trait_interface(supers, adts, tr))]
   }
-  for imp in own_impls {
-    let tr = trait_of(traits, imp.trait_id)
-    out = out ++ [(impl_class(adts, imp.owner, tr.name, imp.subject),
-      gen_impl_class(supers, adts, traits, class_name, imp))]
-  }
-  # derive Ord singletons for own ADTs
-  for aid in own_adt_ids {
-    let a = adt_of(adts, aid)
-    if a.derives_ord {
-      match map.get(impl_table, (ORD_ID, TyAdt(a.id, a.tparams))) {
-        Some(imp) ->
-          if imp.derived {
-            let tr = trait_of(traits, ORD_ID)
-            out = out ++ [(impl_class(adts, imp.owner, tr.name, imp.subject),
-              gen_impl_class(supers, adts, traits, class_name, imp))]
-          }
-        None -> ()
-      }
-    }
-  }
-
   let cw = AdtClassWriter.new(supers)
   cw.begin(V17, ACC_PUBLIC + ACC_FINAL, class_name, obj())
   cw.field(ACC_PUBLIC + ACC_STATIC, ARGS_FIELD, "[Ljava/lang/String;")
@@ -1609,6 +1559,7 @@ pub fn emit_module(
     own_fns: own_fns,
     prog_fns: prog_fns,
     lifted_descs: map.empty(),
+    dicts: [],
     syms: tm.syms,
     slots: no_slots,
     next_slot: 0,
@@ -1667,8 +1618,60 @@ pub fn emit_module(
   if has_main { gen_jvm_main(g, cw) }
   gen_const_fields(g, cw)
   cw.visitEnd()
+  # exactly the dictionaries this module's Core asked for. A bound that is
+  # never forwarded builds none, which is why a program with no `[T: Eq]`
+  # carries no Eq machinery -- the same property the old whole-program scan
+  # in main.dawn was there to preserve, now a consequence rather than a rule.
+  for dd in g.dicts {
+    out = out ++ [gen_dict_class(g, supers, dd)]
+  }
   out ++ [(class_name, cw.toByteArray().expect("bytes"))]
 }
+
+## One Core dictionary as a JVM singleton.
+##
+## Every slot has the same shape -- the trait method's own erased signature
+## plus the dictionary -- whether lowering filled it with a bridge to an
+## impl, a trait default, or a synthesised primitive. So this forwards, and
+## knows nothing about which of the three it is.
+fn gen_dict_class(g: Gen, supers: List[String], dd: CDictDef) -> (String, Bytes) !io = {
+  let tr = trait_of(g.traits, dd.trait_id)
+  let cls = dict_class(g.class_name, dd.key)
+  let iface = tr_iface(tr.owner, tr.name)
+  let cw = AdtClassWriter.new(supers)
+  cw.beginWithInterface(V17, ACC_PUBLIC + ACC_FINAL, cls, obj(), iface)
+  singleton_scaffold(cw, cls, iface)
+  var i = 0
+  for entry in tr.methods {
+    let (mname, ms) = entry
+    let m = cw.method(ACC_PUBLIC, mname,
+      method_desc(g.adts, ms.sig.param_tys, ms.sig.ret)).expect("mv")
+    m.visitCode()
+    var slot = 1
+    for declared in ms.sig.param_tys {
+      load_slot(m, declared, slot)
+      slot = slot + slots_of(declared)
+    }
+    # the dictionary itself is the trailing argument: a default body reaches
+    # its siblings through it
+    m.visitVarInsn(OP_ALOAD, 0)
+    let (owner, target) = slot_target(tr, dd.slots[i])
+    m.visitMethodInsn(OP_INVOKESTATIC, owner, target,
+      sig_desc_with_dicts(g.adts, ms.sig), false)
+    emit_return_of(m, ms.sig.ret)
+    m.visitMaxs(0, 0)
+    m.visitEnd()
+    i = i + 1
+  }
+  cw.visitEnd()
+  (cls, cw.toByteArray().expect("bytes"))
+}
+
+fn slot_target(tr: TraitI, s: CDictSlot) -> (String, String) =
+  match s {
+    CSlotFn(owner, name) -> (owner, name)
+    CSlotDefault(owner, method) -> (owner, default_method_name(tr.name, method))
+  }
 
 fn sig_of_call(g: Gen, owner: String, name: String) -> Sig =
   match map.get(g.prog_fns, (owner, name)) {
@@ -1900,18 +1903,13 @@ pub fn gen_cexpr(g: Gen, e: CExpr, tail: Bool) -> (Gen, Bool) !io =
     }
     CCall(callee, args, ty) -> gen_ccall(g, callee, args, ty)
     CClosure(name, owner, caps, ty) -> (gen_cclosure(g, name, owner, caps, ty), true)
-    CDictRef(_key, tid, subject, _) -> {
-      # the JVM's dictionary is the impl singleton, reached by its type --
-      # the key a table-based backend uses is ignored here
+    CDictRef(key, tid, _subject, _) -> {
+      # The JVM's dictionary is a singleton implementing the trait interface
+      # rather than a table of pointers, but *which* dictionary comes from
+      # Core's key either way. Deriving it from the checker's impl_table
+      # instead is what left CModule.dicts with one reader.
       let tr = trait_of(g.traits, tid)
-      # a structural Eq/Hash witness has no impl to name: one shared singleton
-      # forwards to the JVM's own equals/hashCode, which *is* the structural
-      # relation `==` has always emitted
-      let cls = match map.get(g.impl_table, (tid, subject)) {
-        Some(imp) -> impl_class(g.adts, imp.owner, tr.name, subject)
-        None -> structural_class(tr.name)
-      }
-      g.mv.visitFieldInsn(OP_GETSTATIC, cls,
+      g.mv.visitFieldInsn(OP_GETSTATIC, dict_class(g.class_name, key),
         "INSTANCE", "L" ++ tr_iface(tr.owner, tr.name) ++ ";")
       (g, true)
     }
@@ -2247,6 +2245,13 @@ fn gen_cintrinsic(g: Gen, name: String, args: List[CExpr], ty: Ty) -> (Gen, Bool
     let g1 = gen_cargs(g, args)
     hash_of(g1.mv, at)
     g1.mv.visitInsn(OP_I2L)
+    return (g1, true)
+  }
+  if name == "cmp" {
+    # the prelude Ord over a scalar, the other half of the same contract
+    let at = cex_ty(args[0])
+    let g1 = gen_cargs(g, args)
+    emit_scalar_cmp(g1, at)
     return (g1, true)
   }
   if name == "args" {

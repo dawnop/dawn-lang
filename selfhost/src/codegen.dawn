@@ -2863,9 +2863,14 @@ fn subject_name(adts: Adts, t: Ty) -> String =
     _ -> panic("invalid impl subject")
   }
 
-## The impl's singleton dictionary class name.
-pub fn impl_class(adts: Adts, owner: Option[String], trait_name: String, subject: Ty) -> String =
-  "dawn/impl/" ++ owner_prefix(owner) ++ trait_name ++ "$" ++ subject_name(adts, subject)
+## The class of one Core dictionary, named from the key its CDictDef carries.
+##
+## A dictionary belongs to the module that built it, so two modules
+## forwarding the same bound get a singleton each. That is the price of the
+## table being the only identity, and it is the cheaper side of the trade: a
+## second derivation is a second thing that can be wrong.
+pub fn dict_class(owner: String, key: String) -> String =
+  "dawn/dict/" ++ join(str.split(owner, "/"), "$") ++ "$" ++ key
 
 ## Recover the concrete type from an erased Object on the stack (unerase).
 pub fn emit_unerase(m: MethodVisitor, adts: Adts, t: Ty) -> Unit !io = {
@@ -2904,157 +2909,4 @@ pub fn emit_unerase(m: MethodVisitor, adts: Adts, t: Ty) -> Unit !io = {
     TyVar(_, _) | TyNever | TyError -> ()
   }
   ()
-}
-
-## Two scalars on the stack → their long cmp (Float via the total order).
-fn emit_native_cmp(m: MethodVisitor, t: Ty) -> Unit !io = {
-  match t {
-    TyInt -> { m.visitInsn(OP_LCMP) }
-    TyFloat -> { m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Double", "compare", "(DD)I", false) }
-    _ -> {
-      m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/String", "compareTo",
-        "(Ljava/lang/String;)I", false)
-    }
-  }
-  m.visitInsn(OP_I2L)
-  ()
-}
-
-## Two same-typed scalars on the stack → a boolean, matching what the `==`
-## operator emits for that type (emit.gen_equality). The two must agree: this
-## is the dictionary a `[T: Eq]` bound forwards, and `==` is the same relation
-## spelled without one.
-fn emit_native_eq(m: MethodVisitor, t: Ty) -> Unit !io = {
-  if t == TyString {
-    m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/String", "equals",
-      "(Ljava/lang/Object;)Z", false)
-    return ()
-  }
-  if t == TyBytes {
-    m.visitMethodInsn(OP_INVOKESTATIC, "java/util/Arrays", "equals", "([B[B)Z", false)
-    return ()
-  }
-  let yes = Label.new()
-  let end = Label.new()
-  if t == TyBool {
-    m.visitJumpInsn(OP_IF_ICMPEQ, yes)
-  } else {
-    m.visitInsn(if t == TyFloat { OP_DCMPL } else { OP_LCMP })
-    m.visitJumpInsn(OP_IFEQ, yes)
-  }
-  m.visitInsn(OP_ICONST_0)
-  m.visitJumpInsn(OP_GOTO, end)
-  m.visitLabel(yes)
-  m.visitInsn(OP_ICONST_1)
-  m.visitLabel(end)
-  ()
-}
-
-## The prelude Eq/Hash dictionaries over one scalar. Only a forwarded bound
-## reaches these: where the subject is statically known, lowering collapses
-## `eq`/`hash` to the primitive and no dictionary is built.
-pub fn gen_prelude_eq_impl(supers: List[String], adts: Adts, subject: Ty) -> Bytes !io = {
-  let cls = impl_class(adts, None, "Eq", subject)
-  let iface = tr_iface(None, "Eq")
-  let cw = AdtClassWriter.new(supers)
-  cw.beginWithInterface(V17, ACC_PUBLIC + ACC_FINAL, cls, obj(), iface)
-  singleton_scaffold(cw, cls, iface)
-  let m = cw.method(ACC_PUBLIC, "eq", "(Ljava/lang/Object;Ljava/lang/Object;)Z").expect("mv")
-  m.visitCode()
-  m.visitVarInsn(OP_ALOAD, 1)
-  emit_unerase(m, adts, subject)
-  m.visitVarInsn(OP_ALOAD, 2)
-  emit_unerase(m, adts, subject)
-  emit_native_eq(m, subject)
-  m.visitInsn(OP_IRETURN)
-  m.visitMaxs(0, 0)
-  m.visitEnd()
-  cw.visitEnd()
-  cw.toByteArray().expect("bytes")
-}
-
-pub fn gen_prelude_hash_impl(supers: List[String], adts: Adts, subject: Ty) -> Bytes !io = {
-  let cls = impl_class(adts, None, "Hash", subject)
-  let iface = tr_iface(None, "Hash")
-  let cw = AdtClassWriter.new(supers)
-  cw.beginWithInterface(V17, ACC_PUBLIC + ACC_FINAL, cls, obj(), iface)
-  singleton_scaffold(cw, cls, iface)
-  let m = cw.method(ACC_PUBLIC, "hash", "(Ljava/lang/Object;)J").expect("mv")
-  m.visitCode()
-  m.visitVarInsn(OP_ALOAD, 1)
-  emit_unerase(m, adts, subject)
-  if subject == TyBytes {
-    m.visitMethodInsn(OP_INVOKESTATIC, "java/util/Arrays", "hashCode", "([B)I", false)
-  } else {
-    hash_of(m, subject)
-  }
-  m.visitInsn(OP_I2L)
-  m.visitInsn(OP_LRETURN)
-  m.visitMaxs(0, 0)
-  m.visitEnd()
-  cw.visitEnd()
-  cw.toByteArray().expect("bytes")
-}
-
-## The one dictionary shared by every subject with no `impl Eq`/`impl Hash`:
-## the structural default. On the JVM that is the value's own equals/hashCode,
-## which is exactly what `==` and the collections already use, so routing a
-## bound through here changes nothing about what the program computes.
-pub fn structural_class(trait_name: String) -> String = "dawn/impl/" ++ trait_name ++ "\$Structural"
-
-pub fn gen_structural_eq_impl(supers: List[String]) -> Bytes !io = {
-  let cls = structural_class("Eq")
-  let iface = tr_iface(None, "Eq")
-  let cw = AdtClassWriter.new(supers)
-  cw.beginWithInterface(V17, ACC_PUBLIC + ACC_FINAL, cls, obj(), iface)
-  singleton_scaffold(cw, cls, iface)
-  let m = cw.method(ACC_PUBLIC, "eq", "(Ljava/lang/Object;Ljava/lang/Object;)Z").expect("mv")
-  m.visitCode()
-  m.visitVarInsn(OP_ALOAD, 1)
-  m.visitVarInsn(OP_ALOAD, 2)
-  m.visitMethodInsn(OP_INVOKEVIRTUAL, obj(), "equals", "(Ljava/lang/Object;)Z", false)
-  m.visitInsn(OP_IRETURN)
-  m.visitMaxs(0, 0)
-  m.visitEnd()
-  cw.visitEnd()
-  cw.toByteArray().expect("bytes")
-}
-
-pub fn gen_structural_hash_impl(supers: List[String]) -> Bytes !io = {
-  let cls = structural_class("Hash")
-  let iface = tr_iface(None, "Hash")
-  let cw = AdtClassWriter.new(supers)
-  cw.beginWithInterface(V17, ACC_PUBLIC + ACC_FINAL, cls, obj(), iface)
-  singleton_scaffold(cw, cls, iface)
-  let m = cw.method(ACC_PUBLIC, "hash", "(Ljava/lang/Object;)J").expect("mv")
-  m.visitCode()
-  m.visitVarInsn(OP_ALOAD, 1)
-  m.visitMethodInsn(OP_INVOKEVIRTUAL, obj(), "hashCode", "()I", false)
-  m.visitInsn(OP_I2L)
-  m.visitInsn(OP_LRETURN)
-  m.visitMaxs(0, 0)
-  m.visitEnd()
-  cw.visitEnd()
-  cw.toByteArray().expect("bytes")
-}
-
-## The prelude Ord[Int/Float/String] dictionaries: cmp is the native comparison.
-pub fn gen_prelude_ord_impl(supers: List[String], adts: Adts, subject: Ty) -> Bytes !io = {
-  let cls = impl_class(adts, None, "Ord", subject)
-  let iface = tr_iface(None, "Ord")
-  let cw = AdtClassWriter.new(supers)
-  cw.beginWithInterface(V17, ACC_PUBLIC + ACC_FINAL, cls, obj(), iface)
-  singleton_scaffold(cw, cls, iface)
-  let m = cw.method(ACC_PUBLIC, "cmp", "(Ljava/lang/Object;Ljava/lang/Object;)J").expect("mv")
-  m.visitCode()
-  m.visitVarInsn(OP_ALOAD, 1)
-  emit_unerase(m, adts, subject)
-  m.visitVarInsn(OP_ALOAD, 2)
-  emit_unerase(m, adts, subject)
-  emit_native_cmp(m, subject)
-  m.visitInsn(OP_LRETURN)
-  m.visitMaxs(0, 0)
-  m.visitEnd()
-  cw.visitEnd()
-  cw.toByteArray().expect("bytes")
 }

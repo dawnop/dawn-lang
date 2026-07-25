@@ -1,17 +1,29 @@
 # The Core IR golden format. One line per node, indentation for structure.
 #
 # `__emit` already gives Core a byte-level detector for most of itself: change
-# the tree and the class files change. Most, not all -- the JVM emitter takes
-# `lower_fn_only`, so `CModule.dicts` reaches no consumer that ships, and
-# `CParam.mode`, `CSDup` and `CSDrop` are emitted-as-nothing by design until
-# Perceus. Those parts can be rewritten, emptied, or renamed and every gate in
-# the tree stays green. This dump is what sees them.
+# the tree and the class files change. Most, not all -- `CParam.mode`,
+# `CSDup` and `CSDrop` are emitted-as-nothing by design until Perceus, so
+# they can be rewritten, emptied or renamed and every gate in the tree stays
+# green. This dump is what sees them.
+#
+# `CModule.dicts` used to be on that list, and was the reason it was written:
+# the JVM emitter re-derived dictionary classes from the checker's impl_table
+# and never read the table lowering built. It does now
+# (semantics-closure-design.md 5), so the dump is no longer the only witness
+# to it -- but it is still the readable one.
 #
 # ## Determinism
 #
 # Symbol and loop ids come from counters that run across a whole lowering, so
 # an unrelated edit upstream shifts every number downstream and the diff is
 # noise. They are renumbered per function in order of first appearance.
+#
+# ADT ids are NOT renumbered, and `next_id` is one counter shared by ADTs,
+# traits, type variables and every symbol -- so adding a function anywhere
+# shifts the ids of every type declared after it. Constructors print by name
+# for that reason; what still carries a raw id is the name of a synthesised
+# comparison (`structeq$Adt1814`), which is a real emitted method name and so
+# belongs to `__emit`'s detector rather than this one.
 #
 # Lifted-lambda and bridge names are NOT normalised. They are real emitted
 # method names, so `__emit` already covers them; normalising here would turn

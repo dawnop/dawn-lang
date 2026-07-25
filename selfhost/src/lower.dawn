@@ -22,7 +22,7 @@ use types.{
   TyAdt, TyList, TyTuple, TyFn, TyBytes, TyCursor, TyMap, TySet, TyArray, TyJava,
   Sym, Sig, Traits, TraitI, ImplI, MethodSig,
   Adts, AdtI, CtorI, adt_of, trait_of, OPTION_ID, RESULT_ID, ORD_ID, EQ_ID, HASH_ID,
-  is_eq_scalar, builtins
+  is_eq_scalar, is_ord_scalar, builtins
 }
 use tast.{
   TExpr, TStmt, TPat, TArm, TStrPart, TFun, TModule, TBinOp, TUnOp, TJavaCall,
@@ -481,8 +481,13 @@ fn lit_eq(subj: CExpr, v: LitV, t: Ty) -> CExpr =
 
 ## A stable name for the dictionary of (trait, subject). Backends use it as
 ## a symbol, so it must be spellable in both C and JVM identifiers.
+## `ty_key_inst` and not `ty_key`: a structural witness names its subject
+## here, and a structural subject can be an instantiated generic. `ty_key`
+## drops ADT type arguments on purpose (it names v1 impl subjects, which are
+## never generic), so it would give `Option[Int]` and `Option[String]` the
+## same dictionary.
 fn dict_key(tid: Int, subject: Ty) -> String =
-  "dict$" ++ to_string(tid) ++ "$" ++ ty_key(subject)
+  "dict$" ++ to_string(tid) ++ "$" ++ ty_key_inst(subject)
 
 ## The trait method's signature with the subject substituted in: what the
 ## impl's own method actually takes, so a devirtualised call boxes nothing.
@@ -558,9 +563,8 @@ fn owner_or(o: Option[String], fallback: String) -> String =
     None -> fallback
   }
 
-## Build (once) the dictionary for a concrete witness and return a reference
-## to it. Each slot is resolved here between the impl's own method and the
-## trait's default, so a backend only has to lay out function pointers.
+## Build (once) the dictionary for a witness and return a reference to it.
+## Every slot is resolved here, so a backend only has to lay out pointers.
 fn dict_ref(st: LSt, tid: Int, subject: Ty) -> (LSt, CExpr) = {
   let key = dict_key(tid, subject)
   var seen = false
@@ -572,10 +576,7 @@ fn dict_ref(st: LSt, tid: Int, subject: Ty) -> (LSt, CExpr) = {
     (st, CDictRef(key, tid, subject, dty))
   } else {
     let tr = trait_of(st.traits, tid)
-    let imp = impl_for(st, tid, subject)
-    let iowner = owner_or(imp.owner, st.owner)
-    let towner = owner_or(tr.owner, st.owner)
-    # reserve the key first: a bridge body may itself reference this same
+    # reserve the key first: a slot body may itself reference this same
     # dictionary, and without the reservation that would recurse forever
     var st1 = LSt {
       ..st,
@@ -584,14 +585,10 @@ fn dict_ref(st: LSt, tid: Int, subject: Ty) -> (LSt, CExpr) = {
     }
     var slots: List[CDictSlot] = []
     for entry in tr.methods {
-      let (mn, _ms) = entry
-      if provides(imp, mn) {
-        let (st2, bridge) = make_bridge(st1, tr, tid, subject, iowner, mn, imp.derived)
-        st1 = st2
-        slots = slots ++ [CSlotFn(st1.owner, bridge)]
-      } else {
-        slots = slots ++ [CSlotDefault(towner, mn)]
-      }
+      let (mn, ms) = entry
+      let (st2, slot) = dict_slot(st1, tr, tid, subject, mn, ms)
+      st1 = st2
+      slots = slots ++ [slot]
     }
     var out: List[CDictDef] = []
     for d in st1.dicts {
@@ -603,6 +600,41 @@ fn dict_ref(st: LSt, tid: Int, subject: Ty) -> (LSt, CExpr) = {
     }
     (LSt { ..st1, dicts: out }, CDictRef(key, tid, subject, dty))
   }
+}
+
+## One slot: the impl's own method, the trait's default, or -- where there is
+## neither -- the relation the language itself defines.
+##
+## That third case is the prelude Eq/Hash/Ord over a scalar and the structural
+## default over everything else. It used to have no Core representation at
+## all: the JVM hand-wrote the body twice in bytecode (`gen_prelude_*_impl`,
+## `gen_structural_*_impl`) and Core emitted `CSlotDefault` naming a default
+## the trait does not have, which is why the C backend named symbols nothing
+## defined. Synthesising an ordinary function is the move `make_bridge`
+## already makes -- past this point no backend knows the slot was special.
+fn dict_slot(
+  st: LSt,
+  tr: TraitI,
+  tid: Int,
+  subject: Ty,
+  mn: String,
+  ms: MethodSig
+) -> (LSt, CDictSlot) = {
+  if map.has(st.impls, (tid, subject)) {
+    let imp = impl_for(st, tid, subject)
+    # a derived impl provides the method without listing it: the compiler
+    # wrote the body, so there was no source declaration to record
+    if provides(imp, mn) || imp.derived {
+      let (st1, bridge) =
+        make_bridge(st, tr, tid, subject, owner_or(imp.owner, st.owner), mn, imp.derived)
+      return (st1, CSlotFn(st1.owner, bridge))
+    }
+  }
+  if ms.has_default {
+    return (st, CSlotDefault(owner_or(tr.owner, st.owner), mn))
+  }
+  let (st1, name) = make_prim_slot(st, tr, tid, subject, mn)
+  (st1, CSlotFn(st1.owner, name))
 }
 
 ## Synthesise the bridge that lets an impl method sit in a dictionary slot:
@@ -659,6 +691,64 @@ fn make_bridge(
     }
     (LSt { ..st1, lifted: st1.lifted ++ [f] }, name)
   }
+}
+
+## The body of a relation the language defines rather than a program.
+##
+## One definition, two callers: `lower_trait_call` uses it where the subject
+## is statically known (no dictionary is built at all), and `make_prim_slot`
+## uses it to fill a dictionary slot where one is. That the devirtualised
+## form and the forwarded form are the same relation is now a fact about the
+## code rather than a claim in a comment.
+fn prim_relation(st: LSt, tid: Int, subject: Ty, args: List[CExpr]) -> (LSt, CExpr) = {
+  if tid == EQ_ID { return eq_at(st, args[0], args[1], subject) }
+  if tid == HASH_ID { return (st, CIntrinsic("hash", [args[0]], TyInt)) }
+  if tid == ORD_ID { return (st, CIntrinsic("cmp", [args[0], args[1]], TyInt)) }
+  panic("lower: no primitive relation for trait " ++ to_string(tid))
+}
+
+## Wrap `prim_relation` in a top-level function with the trait method's own
+## (erased) signature, so it can sit in a dictionary slot like any other.
+fn make_prim_slot(
+  st: LSt,
+  tr: TraitI,
+  tid: Int,
+  subject: Ty,
+  method: String
+) -> (LSt, String) = {
+  let sg = trait_method_sig(tr, method)
+  let name = "prim$" ++ to_string(tid) ++ "$" ++ ty_key_inst(subject) ++ "$" ++ method
+  var seen = false
+  for f in st.lifted {
+    if f.name == name { seen = true }
+  }
+  if seen { return (st, name) }
+  var st1 = st
+  var ps: List[CParam] = []
+  var args: List[CExpr] = []
+  for gt in sg.param_tys {
+    let (st2, sym) = fresh_sym(st1)
+    st1 = st2
+    ps = ps ++ [CParam { sym: sym, ty: gt, mode: COwned }]
+    args = args ++ [adapt_out(CLocal(sym, gt), gt, subject)]
+  }
+  # unused here, but every slot has the same signature
+  let (st3, dsym) = fresh_sym(st1)
+  st1 = st3
+  let (st4, body) = prim_relation(st1, tid, subject, args)
+  let f = CFun {
+    name: name,
+    owner: st4.owner,
+    captures: [],
+    params: ps,
+    dicts: [CParam { sym: dsym, ty: TyAdt(0 - 1, []), mode: COwned }],
+    ret: sg.ret,
+    body: body,
+    is_test: false,
+    impl_of: None,
+    default_of: None
+  }
+  (LSt { ..st4, lifted: st4.lifted ++ [f] }, name)
 }
 
 # ---- structural equality (docs/semantics-closure-design.md 3) ----
@@ -855,16 +945,34 @@ fn ctor_fields_eq(st: LSt, a: CExpr, b: CExpr, sc: Ty, aid: Int, ci: Int) -> (LS
   (st1, conj_or_true(acc))
 }
 
-## Does this witness stand for a relation the backend implements directly,
-## rather than for a body to call?
-fn primitive_eq_witness(w: WitRef, tid: Int) -> Bool = {
-  if tid != EQ_ID && tid != HASH_ID { return false }
+## Does this witness stand for a relation the language defines itself, rather
+## than for an impl body to call?
+##
+## Three shapes qualify: the prelude Eq/Hash over a scalar, the prelude Ord
+## over an ordered scalar, and the structural Eq/Hash default. None of them
+## has an impl with a body, so a call has to reach `prim_relation` -- routing
+## Ord's here instead is what fixes `cmp(3, 9)`, which used to compile and
+## then die at run time looking for a trait default that does not exist.
+fn subject_of(w: WitRef) -> Ty =
   match w {
-    WStructural(_, _) -> true
-    WConcrete(_, subject) -> is_eq_scalar(subject)
+    WConcrete(_, s) -> s
+    WStructural(_, s) -> s
+    WForward(_) -> panic("lower: a forwarded witness has no subject")
+  }
+
+fn primitive_witness(w: WitRef, tid: Int) -> Bool =
+  match w {
+    WStructural(_, _) -> tid == EQ_ID || tid == HASH_ID
+    WConcrete(_, subject) ->
+      if tid == EQ_ID || tid == HASH_ID {
+        is_eq_scalar(subject)
+      } else if tid == ORD_ID {
+        is_ord_scalar(subject)
+      } else {
+        false
+      }
     _ -> false
   }
-}
 
 fn is_eq_op(op: TBinOp) -> Bool =
   match op {
@@ -878,14 +986,12 @@ fn witness_value(st: LSt, w: WitRef) -> (LSt, CExpr) =
   match w {
     WForward(sym) -> (st, CLocal(sym, TyAdt(0 - 1, [])))
     WConcrete(tid, subject) -> dict_ref(st, tid, subject)
-    # one dictionary serves every subject: the structural relation is the
-    # backend's own, not a per-type body, so there is nothing to specialise
-    WStructural(tid, subject) ->
-      (st, CDictRef(structural_key(tid), tid, subject, TyAdt(0 - 1, [])))
+    # The structural default is not a different kind of dictionary, only one
+    # whose slots the compiler supplies. It used to short-circuit to a shared
+    # key with no definition behind it, which is how a dictionary reference
+    # with nothing to point at got into the emitted C.
+    WStructural(tid, subject) -> dict_ref(st, tid, subject)
   }
-
-## The key of the shared structural Eq/Hash dictionary.
-pub fn structural_key(tid: Int) -> String = "dict\$" ++ to_string(tid) ++ "\$Structural"
 
 fn witness_values(st: LSt, ws: List[WitRef]) -> (LSt, List[CExpr]) = {
   var st1 = st
@@ -915,21 +1021,20 @@ fn lower_trait_call(
   if len(ws) == 0 {
     panic("lower: trait method call without a witness: " ++ name)
   }
-  # Two Eq/Hash witnesses have no body to call: the prelude impls over scalars
-  # (the backend compares and hashes those natively) and the structural
-  # default (there is no impl at all). Both collapse to the primitive, which
-  # is not an optimisation but the definition -- it is the same relation `==`
-  # emits, and it is what a bound instantiated at either has to end up as.
-  if primitive_eq_witness(ws[0], tid) {
-    if tid == EQ_ID {
-      let (sta, lv) = lower_expr(st, args[0])
-      let (stb, rv) = lower_expr(sta, args[1])
-      return eq_at(stb, lv, rv, tex_ty(args[0]))
+  # A prelude or structural witness has no body to call. It collapses to the
+  # primitive, which is not an optimisation but the definition -- the same
+  # relation `==` emits, and what a bound instantiated at either has to end
+  # up as. `prim_relation` is also what fills the dictionary slot when the
+  # subject is not statically known, so the two forms cannot drift apart.
+  if primitive_witness(ws[0], tid) {
+    var st1 = st
+    var vs: List[CExpr] = []
+    for a in args {
+      let (st2, v) = lower_expr(st1, a)
+      st1 = st2
+      vs = vs ++ [v]
     }
-    if tid == HASH_ID {
-      let (sta, v) = lower_expr(st, args[0])
-      return (sta, CIntrinsic("hash", [v], TyInt))
-    }
+    return prim_relation(st1, tid, subject_of(ws[0]), vs)
   }
   match ws[0] {
     # only reachable for a trait other than Eq/Hash: the guard above returned
@@ -1944,7 +2049,7 @@ pub fn lower_fn_only(
   # lifted names must be unique across the whole class, not just this
   # function, so the caller seeds and carries the counter
   lam_start: Int
-) -> (CFun, List[CFun], Int) = {
+) -> (CFun, List[CFun], List[CDictDef], Int) = {
   var top = 0
   for k in map.keys(syms) {
     if k > top { top = k }
@@ -1968,7 +2073,7 @@ pub fn lower_fn_only(
     self_tail: false
   }
   let (st1, cf) = lower_fn(st, owner, f)
-  (cf, st1.lifted, st1.next_lam)
+  (cf, st1.lifted, st1.dicts, st1.next_lam)
 }
 
 pub fn lower_module(

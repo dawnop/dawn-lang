@@ -147,6 +147,134 @@ dawn_str dawn_str_of_bool(bool v) {
   return v ? dawn_str_lit("true", 4) : dawn_str_lit("false", 5);
 }
 
+/* ---- hashing and ordering ------------------------------------------------
+ *
+ * Java defines String.hashCode and String.compareTo over UTF-16 code units.
+ * Dawn stores UTF-8, so native has to walk a string the way the JVM sees it
+ * rather than the way it holds it. Everything in the BMP -- CJK included --
+ * is one unit either way; only astral code points split into a surrogate
+ * pair, and that is the only case where the two walks differ. */
+
+/* Next UTF-16 code unit, or -1 at the end. `*i` is the byte cursor and
+ * `*pending` carries the low surrogate a previous step left behind. */
+static int32_t dawn_utf16_next(dawn_str s, int64_t *i, int32_t *pending) {
+  if (*pending >= 0) {
+    int32_t u = *pending;
+    *pending = -1;
+    return u;
+  }
+  if (*i >= s.len) return -1;
+  unsigned char c = (unsigned char)s.p[*i];
+  uint32_t cp;
+  int64_t n;
+  if (c < 0x80) {
+    cp = c;
+    n = 1;
+  } else if ((c & 0xE0) == 0xC0) {
+    cp = c & 0x1Fu;
+    n = 2;
+  } else if ((c & 0xF0) == 0xE0) {
+    cp = c & 0x0Fu;
+    n = 3;
+  } else {
+    cp = c & 0x07u;
+    n = 4;
+  }
+  /* a truncated sequence cannot come from a Dawn string; the clamp is only
+   * so a malformed one reads no further than the buffer */
+  if (*i + n > s.len) n = s.len - *i;
+  for (int64_t k = 1; k < n; k++) {
+    cp = (cp << 6) | ((unsigned char)s.p[*i + k] & 0x3Fu);
+  }
+  *i += n;
+  if (cp >= 0x10000u) {
+    cp -= 0x10000u;
+    *pending = (int32_t)(0xDC00u + (cp & 0x3FFu));
+    return (int32_t)(0xD800u + (cp >> 10));
+  }
+  return (int32_t)cp;
+}
+
+/* Length in UTF-16 code units: what Java's String.length() reports, and what
+ * compareTo falls back on when one string is a prefix of the other. */
+static int64_t dawn_utf16_len(dawn_str s) {
+  int64_t n = 0;
+  for (int64_t i = 0; i < s.len; i++) {
+    unsigned char c = (unsigned char)s.p[i];
+    if ((c & 0xC0) == 0x80) continue;
+    n += (c >= 0xF0) ? 2 : 1;
+  }
+  return n;
+}
+
+/* Java's Double.doubleToLongBits: every NaN collapses to one bit pattern, so
+ * that hashing and the total order both treat NaN as a single value. */
+static int64_t dawn_double_bits(double v) {
+  uint64_t bits;
+  if (v != v) {
+    bits = UINT64_C(0x7ff8000000000000);
+  } else {
+    memcpy(&bits, &v, sizeof bits);
+  }
+  return (int64_t)bits;
+}
+
+int64_t dawn_hash_int(int64_t v) {
+  return (int32_t)((uint32_t)((uint64_t)v ^ ((uint64_t)v >> 32)));
+}
+
+int64_t dawn_hash_float(double v) {
+  uint64_t bits = (uint64_t)dawn_double_bits(v);
+  /* -0.0 and 0.0 have different bits and therefore different hashes, while
+   * `-0.0 == 0.0` is true. That is the JVM's answer too, and it is why the
+   * spec says Hash[Float] should not exist (docs/spec 2.2). Reproduced here
+   * rather than repaired: the two backends have to give one answer, and
+   * removing the impl is a language change, not a runtime one. */
+  return (int32_t)((uint32_t)(bits ^ (bits >> 32)));
+}
+
+int64_t dawn_hash_bool(bool v) { return v ? 1231 : 1237; }
+
+int64_t dawn_hash_str(dawn_str s) {
+  int32_t h = 0;
+  int64_t i = 0;
+  int32_t pending = -1;
+  for (;;) {
+    int32_t u = dawn_utf16_next(s, &i, &pending);
+    if (u < 0) break;
+    h = (int32_t)((uint32_t)h * 31u + (uint32_t)u);
+  }
+  return h;
+}
+
+int64_t dawn_cmp_int(int64_t a, int64_t b) { return a < b ? -1 : (a > b ? 1 : 0); }
+
+int64_t dawn_cmp_float(double a, double b) {
+  /* Double.compare's total order, not IEEE: NaN sorts above everything and
+   * -0.0 below 0.0. Dawn's `<` is the IEEE comparison and deliberately
+   * disagrees with this on exactly those values (spec 4.3). */
+  if (a < b) return -1;
+  if (a > b) return 1;
+  int64_t ba = dawn_double_bits(a);
+  int64_t bb = dawn_double_bits(b);
+  return ba == bb ? 0 : (ba < bb ? -1 : 1);
+}
+
+int64_t dawn_cmp_str(dawn_str a, dawn_str b) {
+  int64_t ia = 0;
+  int64_t ib = 0;
+  int32_t pa = -1;
+  int32_t pb = -1;
+  for (;;) {
+    int32_t ua = dawn_utf16_next(a, &ia, &pa);
+    int32_t ub = dawn_utf16_next(b, &ib, &pb);
+    /* the magnitude matters, not just the sign: String.compareTo hands back
+     * the difference of the first differing unit, and a program can print it */
+    if (ua < 0 || ub < 0) return dawn_utf16_len(a) - dawn_utf16_len(b);
+    if (ua != ub) return ua - ub;
+  }
+}
+
 int64_t dawn_idiv(int64_t a, int64_t b) {
   if (b == 0) {
     dawn_panic(dawn_str_lit("/ by zero", 9));

@@ -545,6 +545,26 @@ fn std_shim(owner: String, name: String) -> Option[String] =
     None
   }
 
+## The runtime entry point of a prelude relation over one scalar. Spelled out
+## per type rather than defaulted, so a type the runtime has no answer for
+## says so here instead of inheriting somebody else's answer -- which is the
+## whole subject of docs/semantics-closure-design.md.
+fn scalar_rt(prefix: String, t: Ty, what: String) -> String =
+  match t {
+    TyInt -> prefix ++ "_int"
+    TyFloat -> prefix ++ "_float"
+    TyString -> prefix ++ "_str"
+    # Bool has an Eq and a Hash but no order, so only one of the two prefixes
+    # reaches it; the other falls through to the gap below
+    TyBool -> if prefix == "dawn_hash" { prefix ++ "_bool" } else { no_rt(what, t) }
+    # Bytes and Cursor have no native representation yet (bytes-design.md):
+    # an honest gap, not a wrong answer
+    _ -> no_rt(what, t)
+  }
+
+fn no_rt(what: String, t: Ty) -> String =
+  panic("emitc: `" ++ what ++ "` not implemented for native on " ++ ty_key(t))
+
 fn emit_intrinsic(st: CSt, name: String, args: List[CExpr], ty: Ty) -> (CSt, String) = {
   var st1 = st
   var cargs: List[String] = []
@@ -576,6 +596,11 @@ fn emit_intrinsic(st: CSt, name: String, args: List[CExpr], ty: Ty) -> (CSt, Str
     (st1, "((int64_t)(" ++ a0 ++ "))")
   } else if name == "null_ref" {
     (st1, c_zero(ty))
+  } else if name == "hash" {
+    (st1, scalar_rt("dawn_hash", cex_ty(args[0]), name) ++ "(" ++ a0 ++ ")")
+  } else if name == "cmp" {
+    (st1, scalar_rt("dawn_cmp", cex_ty(args[0]), name) ++
+        "(" ++ a0 ++ ", " ++ cargs[1] ++ ")")
   } else if name == "to_string" {
     # Core normally lowers this into str_of_*; a residual one means a type
     # the lowering did not know how to render

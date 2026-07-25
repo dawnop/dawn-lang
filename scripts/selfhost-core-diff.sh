@@ -7,19 +7,22 @@
 # ## Why this exists when `__emit` already compares bytes
 #
 # Change Core and the class files change -- for the parts a shipping backend
-# reads. Three parts it does not:
+# reads. Two parts it does not:
 #
-#   * `CModule.dicts`. The JVM emitter takes `lower_fn_only` and re-derives
-#     dictionary class names from the checker's `impl_table`, so the table
-#     lowering builds has exactly one consumer and it is the unfinished C
-#     backend. It can be emptied, renamed, or filled with slots naming
-#     functions that do not exist, and every gate in the tree stays green.
-#     (It currently *is* wrong; see scripts/spike-native/known-red.txt.)
 #   * `CParam.mode` -- always COwned until Perceus, and ignored by both.
 #   * `CSDup` / `CSDrop` -- never emitted until Perceus, and ignored by both.
 #
-# The last two are what Phase 4 will change first. A golden that predates the
-# change is what makes "Perceus touched nothing else" checkable.
+# Those are what Phase 4 will change first. A golden that predates the change
+# is what makes "Perceus touched nothing else" checkable.
+#
+# `CModule.dicts` was the third, and the reason this golden exists: the JVM
+# emitter re-derived dictionary class names from the checker's `impl_table`,
+# so the table lowering built had one consumer and it was the unfinished C
+# backend -- it could be emptied, renamed, or filled with slots naming
+# functions that do not exist, and every gate stayed green. It *was* wrong,
+# and this diff is where the repair was read. The JVM now builds its
+# dictionaries from the table too, so the golden is no longer the only
+# witness; it is still the one that shows the table itself.
 #
 # ## Two goldens, for two questions
 #

@@ -99,6 +99,21 @@ dawn_str dawn_str_of_int(int64_t v);
 dawn_str dawn_str_of_float(double v);
 dawn_str dawn_str_of_bool(bool v);
 
+/* The prelude Hash and Ord over one scalar: what a `[T: Hash]` or `[T: Ord]`
+ * bound instantiated at that scalar ends up calling.
+ *
+ * Both are observable -- a program can print `hash(x)` or `cmp(a, b)` -- so
+ * these are not free choices. Each reproduces the JVM backend's answer bit
+ * for bit; where that answer is surprising, the surprise is documented at the
+ * definition rather than smoothed over here. */
+int64_t dawn_hash_int(int64_t v);
+int64_t dawn_hash_float(double v);
+int64_t dawn_hash_bool(bool v);
+int64_t dawn_hash_str(dawn_str s);
+int64_t dawn_cmp_int(int64_t a, int64_t b);
+int64_t dawn_cmp_float(double a, double b);
+int64_t dawn_cmp_str(dawn_str a, dawn_str b);
+
 /* arithmetic whose C behaviour would be undefined where the JVM's is not */
 int64_t dawn_idiv(int64_t a, int64_t b);
 int64_t dawn_imod(int64_t a, int64_t b);
