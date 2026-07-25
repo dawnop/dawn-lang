@@ -3459,27 +3459,10 @@ pub fn gen_impl_class(
 }
 
 ## One test block → one public static method dawn$test$i()V.
-fn gen_test(g: Gen, cw: AdtClassWriter, t: TFun, idx: Int) -> Gen !io = {
-  let m = cw.method(ACC_PUBLIC + ACC_STATIC, "dawn\$test\$" ++ to_string(idx), "()V").expect("mv")
-  m.visitCode()
-  var g1 = Gen {
-    ..g,
-    mv: m,
-    cur_fn: None,
-    fn_start: None,
-    next_slot: 0,
-    method_ret: TyUnit,
-    rets_null: false,
-    self_pending: None,
-    loop_stack: [],
-    cloops: [],
-  }
-  let (g2, falls) = gen_expr(g1, t.body, false)
-  if falls { g2.mv.visitInsn(OP_RETURN) }
-  m.visitMaxs(0, 0)
-  m.visitEnd()
-  g2
-}
+## A test block is a nullary Unit function, so it goes through the same Core
+## path as any other body.
+fn gen_test(g: Gen, cw: AdtClassWriter, t: TFun, idx: Int) -> Gen !io =
+  gen_fn_core(g, cw, t, "dawn\$test\$" ++ to_string(idx), "()V")
 
 ## A throwaway MethodVisitor so Gen can be constructed before the first real
 ## method opens (the record field is non-optional by design).
