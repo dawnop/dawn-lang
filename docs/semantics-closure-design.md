@@ -272,7 +272,7 @@ intrinsic 今天用字符串名标识,于是「这个名字属于谁、可见吗
 | 步 | 内容 | 出口 | 门禁 |
 |---|---|---|---|
 | 1 | S1.2 展开器(ground)+ 决策 3 的具名 intrinsic + 决策 4 的 `Bytes` 配对修 | ✅ 三行已删 | Core golden 已重录 |
-| 2 | S1.6 `WStructural` 收窄(`TyFn`/`TyArray` 报错) | §11.1 的三闭合 | 既有 164 测 |
+| 2 | S1.6 `WStructural` 收窄(`TyFn`/`TyArray` 报错) | ✅ §11.1 的三已闭合 | 既有 164 测 |
 | 3 | S1.3 字典表成为唯一真相 | `dict_forward:cc` 删除 | Core golden 是唯一看得见它的门 |
 | 4 | S1.4 `Show` 成 trait | `show_derive:emitc`/`const_fold:jvm` 删除 | 差分 harness 全绿 |
 | 5 | S1.5 的「拆」+「合」+ `invalid_key_part` 改走 bound | `impl_subject_ok` 与 prelude 同一份清单 | 既有测试 |
@@ -306,7 +306,27 @@ intrinsic 今天用字符串名标识,于是「这个名字属于谁、可见吗
   变成了 `not (a == b)`——白丢一个两个后端都直接实现的节点。Core golden 的 diff 里
   一眼可见,这正是 S0.4 建它的理由。
 
-## 10. 风险
+### 9.2 第 2 步:比审计说的更糟一档
+
+审计(§11.1 的三)记的是「两个函数值能通过 `[T: Eq]` 并按引用比较」。实测下来还要糟:
+
+```
+eq2(f1, f2)   false
+eq2(f1, f1)   false      # 同一个函数,和自己比
+```
+
+**`Eq` 连自反都不成立**——`f1` 作为值在每个使用点铸一个新对象,于是引用比较对自己也答 false。
+这不是「按引用比较」这种可以接受的弱语义,是没有语义。
+
+收窄的做法不是加一道检查,是**把两道门合成一道**。原先:
+
+- `==` 问 `contains_fn`,而那个 walk **不进 ADT 字段**——`Holder(f) == Holder(g)` 一路放行;
+- `[T: Eq]` bound 什么都不问。
+
+现在两边问同一个 `uncomparable_part`,于是 bound 不可能接受运算符拒绝的东西,
+而 `Holder` 这种「ADT 里藏了个函数」第一次被拦住。诊断措辞也只有一份。
+
+**编译器自身 34k 行一行没改就通过了**,说明这条规则没有误伤真实代码。
 
 - **第 2 步的字节码面很大**。每个被比较的类型多一个合成函数,`equals` 多一层转发。
   自举比值(`scripts/selfhost-bench.sh`,今天 1.115)是这一步唯一的量,做完对一次;
