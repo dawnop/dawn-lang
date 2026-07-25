@@ -80,6 +80,11 @@ pub fn method_desc(adts: Adts, params: List[Ty], ret: Ty) -> String = {
 ## variant has to answer. Slot width, load/store opcode, boxing and hashing all
 ## follow from this, so they dispatch on `JvmRepr` rather than re-deciding the
 ## scalar/reference split each time.
+##
+## The line: this answers *how a value is carried*. A function whose answer
+## depends on Dawn semantics -- content equality, hashing, rendering, order --
+## must stay a `Ty` match, because there a new variant inheriting `RRef` would
+## be a wrong answer rather than a missing one.
 pub type JvmRepr =
   | RLong # 2 slots, boxes to java.lang.Long -- Int and Cursor
   | RDouble # 2 slots, boxes to java.lang.Double
@@ -2507,18 +2512,28 @@ pub fn load_slot(m: MethodVisitor, t: Ty, slot: Int) -> Unit !io = {
 
 ## Consume a value of `t` on the stack, leave its int hash (values are never null).
 pub fn hash_of(m: MethodVisitor, t: Ty) -> Unit !io = {
-  match jvm_repr(t) {
-    RLong -> { m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Long", "hashCode", "(J)I", false) }
-    RDouble -> {
+  # deliberately a `Ty` match and not `jvm_repr`: hashing is a question about
+  # Dawn *values*, not about machine representation, and routing it through
+  # the representation would hide the types whose answer here is wrong.
+  # `TyBytes` is one -- a byte array hashes by identity, which is why the
+  # checker refuses Bytes as a Map/Set key (bytes-design.md decision A).
+  match t {
+    TyInt -> { m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Long", "hashCode", "(J)I", false) }
+    TyCursor -> { m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Long", "hashCode", "(J)I", false) }
+    TyFloat -> {
       m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Double", "hashCode", "(D)I", false)
     }
-    RBool -> {
+    TyBool -> {
       m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Boolean", "hashCode", "(Z)I", false)
     }
-    # RUnit/RBottom cannot reach here (a hashed field always has a value), but
-    # they share the arm rather than panicking: this is the shape the wildcard
-    # already had, and S0.3 is a no-behaviour-change change
-    RRef | RUnit | RBottom -> {
+    TyString | TyBytes | TyVar(_, _) | TyAdt(_, _) | TyJava(_, _) -> {
+      m.visitMethodInsn(OP_INVOKEVIRTUAL, obj(), "hashCode", "()I", false)
+    }
+    TyList(_) | TyMap(_, _) | TySet(_) | TyArray(_) | TyTuple(_) | TyFn(_, _, _) -> {
+      m.visitMethodInsn(OP_INVOKEVIRTUAL, obj(), "hashCode", "()I", false)
+    }
+    # no value to hash; unreachable, and left as the wildcard had it
+    TyUnit | TyNever | TyError -> {
       m.visitMethodInsn(OP_INVOKEVIRTUAL, obj(), "hashCode", "()I", false)
     }
   }
