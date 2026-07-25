@@ -68,6 +68,20 @@ pub type CCallee =
 # dictionary-passing call.
   | CDefault(owner: String, trait_id: Int, method: String)
 
+## A `use java` call site. Everything describing the call -- the class, the
+## descriptor, the SAM conversions, the varargs split -- is a JVM-shaped fact
+## with nothing portable to lower it to, so the node keeps the checker's
+## TJavaCall verbatim for that. The receiver and the arguments are ordinary
+## Core expressions, though, which is what lets the JVM emitter stop walking
+## TAST entirely; `arg_tys` carries the static types the JVM's argument
+## adaptation needs, because `call.args` is no longer consulted.
+pub type CJava = {
+  call: TJavaCall,
+  target: Option[CExpr],
+  args: List[CExpr],
+  arg_tys: List[Ty]
+}
+
 pub type CExpr =
   | CInt(v: Int)
   | CFloat(v: Float)
@@ -125,15 +139,10 @@ pub type CExpr =
   | CReturn(v: Option[CExpr])
   | CBreak(loop_id: Int)
   | CContinue(loop_id: Int)
-# The JVM-only escape hatch, carrying its call verbatim -- including
-# arguments that are still TAST.
-#
-# That is deliberate, not a leak. A `use java` argument can be a lambda that
-# needs a SAM bridge built against a Java interface, which is a JVM-shaped
-# fact all the way down; there is nothing portable to lower it to. Quarantining
-# it in one node is the point: the native backend refuses this node, and
-# `use c` will get its own, which the JVM backend will refuse in turn.
-  | CForeign(call: TJavaCall, ty: Ty)
+# The JVM-only escape hatch. Quarantining it in one node is the point: the
+# native backend refuses this node, and `use c` will get its own, which the
+# JVM backend will refuse in turn.
+  | CForeign(j: CJava, ty: Ty)
 
 pub type CStmt =
   | CSLet(sym: Int, ty: Ty, init: CExpr)

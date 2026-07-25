@@ -40,13 +40,14 @@ use core.{
   CExpr, CStmt, CCallee, CFun, CModule, CParam, CMode, CBinOp, CUnOp,
   CInt, CFloat, CBool, CStr, CUnit, CLocal, CFnRef, CCall, CIntrinsic,
   CCtor, CField, CIsCtor, CClosure, CTuple, CTupleGet, CBox, CUnbox,
-  CBinary, CUnary, CIf, CBlock, CListLit, CReturn, CBreak, CContinue, CForeign,
+  CBinary, CUnary, CIf, CBlock, CListLit, CReturn, CBreak, CContinue,
+  CForeign, CJava,
   CSLet, CSAssign, CSDiscard, CSLoop, CSIf, CSDup, CSDrop,
   CDirect, CDynamic, CMethod, CImpl, CDefault, CDictRef,
   CDictDef, CDictSlot, CSlotFn, CSlotDefault,
   CAdd, CSub, CMul, CDiv, CMod, CEq, CNe, CLt, CLe, CGt, CGe, CAnd, COr,
   CBand, CBor, CBxor, CShl, CShr, CUshr, CConcat, CNeg, CNot, CBnot,
-  COwned, CBorrowed, cex_ty, ty_key
+  COwned, CBorrowed, cex_ty, ty_key, diverges
 }
 
 # Prelude constructor indices, fixed by types.prelude_adts.
@@ -86,7 +87,40 @@ pub type LSt = {
   # arguments against the DECLARED parameter types rather than leaving each
   # backend to recompute "is this slot a type variable"
   prog_fns: Map[(String, String), Sig],
-  dicts: List[CDictDef]
+  dicts: List[CDictDef],
+  # the function whose body is being lowered, as that body sees itself
+  self_ctx: Option[SelfCtx],
+  # whether the expression being lowered sits in tail position
+  tail: Bool,
+  # set once a self tail call was actually rewritten, so only the functions
+  # that need the wrapper loop pay for it
+  self_tail: Bool
+}
+
+## The function currently being lowered, as its own body sees it. Two things
+## need this. A local named function is not in its own capture list -- the
+## checker strips the binding -- so rebuilding its closure is the only way to
+## name it inside its own body. And spec §12.4 guarantees a self tail call
+## compiles to a loop rather than a frame, which is a rewrite, not an
+## optimisation: without it deep self-recursion overflows the stack.
+##
+## Doing both here rather than in a backend is the point of Core. The JVM
+## emitter used to carry `self_pending`/`cur_fn`/`fn_start` for exactly this,
+## and the C backend would have needed its own copy.
+pub type SelfCtx = {
+  # Some for a local named function, reached through its binding; None for a
+  # top-level one, reached by name
+  sym: Option[Int],
+  owner: String,
+  name: String,
+  # a lifted body takes its captures as leading parameters, so rebuilding the
+  # closure means passing them again
+  caps: List[CExpr],
+  # what a tail call reassigns before jumping
+  params: List[Int],
+  ptys: List[Ty],
+  fty: Ty,
+  loop_id: Int
 }
 
 fn fresh_sym(st: LSt) -> (LSt, Int) =
@@ -699,31 +733,144 @@ fn ret_of_fn_ty(t: Ty) -> Ty =
 ## keeping their original symbol ids -- so the body, which already refers to
 ## them by those ids, is copied across unchanged. That is the whole reason
 ## lifting here costs nothing: TAST already recorded the capture set.
+## The function being lowered, referred to as a value from inside its own
+## body. Only a local named function can be named this way -- a top-level one
+## goes through XFnValue -- and it is not in its own capture list, so the
+## closure has to be rebuilt from the captures the lifted body already holds.
+## A function whose self tail call was rewritten becomes a loop whose only
+## exits are returns: falling off the end of a Core loop would repeat it.
+fn wrap_self_loop(used: Bool, lid: Int, body: CExpr, ret: Ty) -> CExpr =
+  if used {
+    CBlock([CSLoop(lid, CReturn(Some(body)), None)], None, ret)
+  } else {
+    body
+  }
+
+fn self_value(st: LSt, sym: Int) -> Option[CExpr] =
+  match st.self_ctx {
+    Some(sc) ->
+      match sc.sym {
+        Some(s) ->
+          if s == sym {
+            Some(CClosure(sc.name, sc.owner, sc.caps, sc.fty))
+          } else {
+            None
+          }
+        None -> None
+      }
+    None -> None
+  }
+
+fn is_self_fn(st: LSt, owner: String, name: String) -> Bool =
+  match st.self_ctx {
+    Some(sc) ->
+      match sc.sym {
+        Some(_) -> false
+        None -> sc.owner == owner && sc.name == name
+      }
+    None -> false
+  }
+
+fn is_self_sym(st: LSt, sym: Int) -> Bool =
+  match st.self_ctx {
+    Some(sc) ->
+      match sc.sym {
+        Some(s) -> s == sym
+        None -> false
+      }
+    None -> false
+  }
+
+## The §12.4 rewrite: evaluate the arguments, write them back over the
+## parameters, jump to the top. The values go through temporaries first
+## because the assignment is simultaneous -- `f(b, a)` must not read `a` back
+## after `a` has been overwritten.
+fn self_tail_jump(st: LSt, args: List[TExpr]) -> (LSt, CExpr) = {
+  let sc = st.self_ctx.expect("self ctx")
+  let (st1, vs) = lower_args_to(st, args, sc.ptys)
+  var st2 = st1
+  var stmts: List[CStmt] = []
+  var tmps: List[(Int, Ty)] = []
+  var i = 0
+  for v in vs {
+    let (st3, t) = fresh_sym(st2)
+    st2 = st3
+    stmts = stmts ++ [CSLet(t, sc.ptys[i], v)]
+    tmps = tmps ++ [(t, sc.ptys[i])]
+    i = i + 1
+  }
+  i = 0
+  for tm in tmps {
+    let (t, ty) = tm
+    stmts = stmts ++ [CSAssign(sc.params[i], CLocal(t, ty))]
+    i = i + 1
+  }
+  (LSt { ..st2, self_tail: true },
+    CBlock(stmts, Some(CContinue(sc.loop_id)), TyNever))
+}
+
 fn lift_lambda(
   st: LSt,
   params: List[Int],
   body: TExpr,
   captures: List[Int],
-  ty: Ty
+  ty: Ty,
+  # Some for a local named function: its own body may call it, and the
+  # checker leaves that binding out of the capture list
+  self_sym: Option[Int]
 ) -> (LSt, CExpr) = {
   let (st1, name) = fresh_lam(st)
   var caps: List[CParam] = []
+  # the closure-allocation site sits in the ENCLOSING frame, so a capture of
+  # an enclosing local named function rebuilds that function's closure; the
+  # same captures seen from INSIDE the lifted body are plain parameters
   var cap_args: List[CExpr] = []
+  var cap_inner: List[CExpr] = []
   for c in captures {
     let ct = sym_ty(st1, c, TyError)
     caps = caps ++ [CParam { sym: c, ty: ct, mode: COwned }]
-    cap_args = cap_args ++ [CLocal(c, ct)]
+    cap_args = cap_args ++ [
+      match self_value(st1, c) {
+        Some(v) -> v
+        None -> CLocal(c, ct)
+      }
+    ]
+    cap_inner = cap_inner ++ [CLocal(c, ct)]
   }
   var ps: List[CParam] = []
+  var ptys: List[Ty] = []
   let pts = params_of_fn_ty(ty)
   var i = 0
   for p in params {
     let pt = if i < len(pts) { pts[i] } else { sym_ty(st1, p, TyError) }
     ps = ps ++ [CParam { sym: p, ty: pt, mode: COwned }]
+    ptys = ptys ++ [pt]
     i = i + 1
   }
-  let (st2, cbody0) = lower_expr(LSt { ..st1, ret_ty: ret_of_fn_ty(ty) }, body)
-  let cbody = adapt_in(cbody0, tex_ty(body), ret_of_fn_ty(ty))
+  let (st1b, lid) = fresh_loop(st1)
+  let sc: Option[SelfCtx] =
+    match self_sym {
+      Some(sy) -> Some(SelfCtx {
+        sym: Some(sy),
+        owner: st1b.owner,
+        name: name,
+        caps: cap_inner,
+        params: params,
+        ptys: ptys,
+        fty: ty,
+        loop_id: lid
+      })
+      None -> None
+    }
+  let (st2, cbody0) = lower_expr(LSt {
+    ..st1b,
+    ret_ty: ret_of_fn_ty(ty),
+    self_ctx: sc,
+    tail: true,
+    self_tail: false
+  }, body)
+  let cbody1 = adapt_in(cbody0, tex_ty(body), ret_of_fn_ty(ty))
+  let cbody = wrap_self_loop(st2.self_tail, lid, cbody1, ret_of_fn_ty(ty))
   let f = CFun {
     name: name,
     owner: st2.owner,
@@ -736,8 +883,13 @@ fn lift_lambda(
     impl_of: None,
     default_of: None
   }
-  (LSt { ..st2, lifted: st2.lifted ++ [f] },
-    CClosure(name, st2.owner, cap_args, ty))
+  (LSt {
+    ..st2,
+    lifted: st2.lifted ++ [f],
+    self_ctx: st.self_ctx,
+    tail: st.tail,
+    self_tail: st.self_tail
+  }, CClosure(name, st2.owner, cap_args, ty))
 }
 
 ## A constructor used as a function value (`map(xs, Some)`) becomes a
@@ -776,7 +928,7 @@ fn lift_ctor_value(st: LSt, adt: Int, ci: Int, ty: Ty) -> (LSt, CExpr) = {
 
 ## A top-level function used as a value becomes a closure over a wrapper
 ## with no captures, so that every function value has one representation.
-fn lift_fn_value(st: LSt, owner: String, name: String, ty: Ty) -> (LSt, CExpr) = {
+fn lift_fn_value(st: LSt, owner: String, name: String, is_builtin: Bool, ty: Ty) -> (LSt, CExpr) = {
   let (st1, lam) = fresh_lam(st)
   let pts = params_of_fn_ty(ty)
   var ps: List[CParam] = []
@@ -797,7 +949,12 @@ fn lift_fn_value(st: LSt, owner: String, name: String, ty: Ty) -> (LSt, CExpr) =
     params: ps,
     dicts: [],
     ret: ret_of_fn_ty(ty),
-    body: CCall(CDirect(owner, name), args, ret_of_fn_ty(ty)),
+    body:
+    if is_builtin {
+      CIntrinsic(name, args, ret_of_fn_ty(ty))
+    } else {
+      CCall(CDirect(owner, name), args, ret_of_fn_ty(ty))
+    },
     is_test: false,
     impl_of: None,
     default_of: None
@@ -807,14 +964,22 @@ fn lift_fn_value(st: LSt, owner: String, name: String, ty: Ty) -> (LSt, CExpr) =
 
 # ---- expressions ----
 
-pub fn lower_expr(st: LSt, e: TExpr) -> (LSt, CExpr) =
+pub fn lower_expr(st0: LSt, e: TExpr) -> (LSt, CExpr) = {
+  # tail position is consumed here and re-established only by the arms that
+  # propagate it, so every other descent is non-tail by construction
+  let tl = st0.tail
+  let st = LSt { ..st0, tail: false }
   match e {
     XInt(v, _, _) -> (st, CInt(v))
     XFloat(v, _, _) -> (st, CFloat(v))
     XBool(v, _, _) -> (st, CBool(v))
     XUnit(_, _) -> (st, CUnit)
-    XLocal(sym, _, _, _, ty) -> (st, CLocal(sym, ty))
-    XUnsafePure(body, _, _, _) -> lower_expr(st, body)
+    XLocal(sym, _, _, _, ty) ->
+      match self_value(st, sym) {
+        Some(c) -> (st, c)
+        None -> (st, CLocal(sym, ty))
+      }
+    XUnsafePure(body, _, _, _) -> lower_expr(LSt { ..st, tail: tl }, body)
     XComptime(_, lo, hi, ty) -> (st, CComptime(lo, hi, ty))
     XError(_, _) -> panic("lower: XError reached lowering")
     XStr(parts, _, _) -> lower_str(st, parts)
@@ -839,10 +1004,10 @@ pub fn lower_expr(st: LSt, e: TExpr) -> (LSt, CExpr) =
       }
     XIf(cond, thn, els, _, _, ty) -> {
       let (st1, c) = lower_expr(st, cond)
-      let (st2, t) = lower_expr(st1, thn)
+      let (st2, t) = lower_expr(LSt { ..st1, tail: tl }, thn)
       match els {
         Some(ee) -> {
-          let (st3, f) = lower_expr(st2, ee)
+          let (st3, f) = lower_expr(LSt { ..st2, tail: tl }, ee)
           (st3, CIf(c, t, Some(f), ty))
         }
         None -> (st2, CIf(c, t, None, ty))
@@ -852,7 +1017,7 @@ pub fn lower_expr(st: LSt, e: TExpr) -> (LSt, CExpr) =
       let (st1, ss) = lower_stmts(st, stmts)
       match tail {
         Some(t) -> {
-          let (st2, tv) = lower_expr(st1, t)
+          let (st2, tv) = lower_expr(LSt { ..st1, tail: tl }, t)
           (st2, CBlock(ss, Some(tv), ty))
         }
         None -> (st1, CBlock(ss, None, ty))
@@ -861,14 +1026,15 @@ pub fn lower_expr(st: LSt, e: TExpr) -> (LSt, CExpr) =
     XReturn(v, _, _) ->
       match v {
         Some(inner) -> {
-          let (st1, cv) = lower_expr(st, inner)
+          let (st1, cv) = lower_expr(LSt { ..st, tail: true }, inner)
+          if diverges(cv) { return (st1, cv) }
           (st1, CReturn(Some(adapt_in(cv, tex_ty(inner), st1.ret_ty))))
         }
         None -> (st, CReturn(None))
       }
     XBreak(_, _) -> (st, CBreak(st.cur_loop))
     XContinue(_, _) -> (st, CContinue(st.cur_loop))
-    XMatch(scrut, arms, _, _, ty) -> lower_match(st, scrut, arms, ty)
+    XMatch(scrut, arms, _, _, ty) -> lower_match(st, scrut, arms, ty, tl)
     XPropagate(operand, _, _, ty) -> lower_propagate(st, operand, ty)
     XUnwrap(operand, msg, _, _, ty) -> lower_unwrap(st, operand, msg, ty)
     XCtor(adt, ci, written, slots, spread, _, _, ty) ->
@@ -908,6 +1074,11 @@ pub fn lower_expr(st: LSt, e: TExpr) -> (LSt, CExpr) =
         Some(tid) -> lower_trait_call(st, tid, name, args, wits, ty)
         None -> {
           let o = match owner { Some(x) -> x None -> st.owner }
+          if tl && is_self_fn(st, o, name) {
+            # dictionaries are not re-passed: a self call is the same
+            # instantiation, so the ones already in scope still hold
+            return self_tail_jump(st, args)
+          }
           match sig_of(st, o, name) {
             Some(sg) -> {
               let (st1, vs) = lower_args_to(st, args, sg.param_tys)
@@ -940,27 +1111,63 @@ pub fn lower_expr(st: LSt, e: TExpr) -> (LSt, CExpr) =
       (st2, adapt_out(call, erased, ty))
     }
     XCtorValue(adt, ci, _, _, ty) -> lift_ctor_value(st, adt, ci, ty)
-    XCallDyn(sym, _, args, _, _, ty) -> {
-      let (st1, vs) = lower_all(st, args)
-      (st1, CCall(CDynamic(CLocal(sym, sym_ty(st1, sym, TyError))), vs, ty))
-    }
+    XCallDyn(sym, _, args, _, _, ty) ->
+      if is_self_sym(st, sym) {
+        if tl {
+          self_tail_jump(st, args)
+        } else {
+          # not a tail call, so the closure is rebuilt and called through
+          let (st1, vs) = lower_all(st, args)
+          let clo = self_value(st1, sym).expect("self closure")
+          (st1, CCall(CDynamic(clo), vs, ty))
+        }
+      } else {
+        let (st1, vs) = lower_all(st, args)
+        (st1, CCall(CDynamic(CLocal(sym, sym_ty(st1, sym, TyError))), vs, ty))
+      }
     XApply(target, args, _, _, ty) -> {
       let (st1, tv) = lower_expr(st, target)
       let (st2, vs) = lower_all(st1, args)
       (st2, CCall(CDynamic(tv), vs, ty))
     }
     XLambda(params, _, body, captures, _, _, ty) ->
-      lift_lambda(st, params, body, captures, ty)
+      lift_lambda(st, params, body, captures, ty, None)
     XFnValue(owner, name, is_builtin, ty, _, _) -> {
-      if is_builtin {
-        panic("lower: a builtin used as a value is not lowered yet: " ++ name)
-      }
+      # a builtin taken as a value gets the same wrapper as a declared
+      # function; only its body differs, and both backends already know how
+      # to emit an intrinsic call
       let o = match owner { Some(x) -> x None -> st.owner }
-      lift_fn_value(st, o, name, ty)
+      lift_fn_value(st, o, name, is_builtin, ty)
     }
-    XJava(call, _, _, ty) -> (st, CForeign(call, ty))
+    XJava(call, _, _, ty) -> lower_java(st, call, ty)
     _ -> panic("lower: expression not lowered yet: " ++ node_name(e))
   }
+}
+
+## `use java`: the receiver and the arguments lower like any other
+## expression, so no backend has to walk TAST to emit them. Everything else
+## about the call is JVM-shaped metadata and rides along unchanged.
+fn lower_java(st: LSt, call: TJavaCall, ty: Ty) -> (LSt, CExpr) = {
+  var st1 = st
+  let tgt: Option[CExpr] =
+    match call.target {
+      Some(t) -> {
+        let (st2, v) = lower_expr(st1, t)
+        st1 = st2
+        Some(v)
+      }
+      None -> None
+    }
+  var args: List[CExpr] = []
+  var tys: List[Ty] = []
+  for a in call.args {
+    let (st2, v) = lower_expr(st1, a)
+    st1 = st2
+    args = args ++ [v]
+    tys = tys ++ [tex_ty(a)]
+  }
+  (st1, CForeign(CJava { call: call, target: tgt, args: args, arg_tys: tys }, ty))
+}
 
 fn lower_all(st: LSt, es: List[TExpr]) -> (LSt, List[CExpr]) = {
   var st1 = st
@@ -1057,7 +1264,7 @@ fn lower_ctor(
 ## result and breaks. The loop exists so a failed guard falls through to the
 ## next arm without duplicating its test, which is exactly what the JVM
 ## emitter achieved with a `next_arm` label.
-fn lower_match(st: LSt, scrut: TExpr, arms: List[TArm], ty: Ty) -> (LSt, CExpr) = {
+fn lower_match(st: LSt, scrut: TExpr, arms: List[TArm], ty: Ty, tl: Bool) -> (LSt, CExpr) = {
   let sty = tex_ty(scrut)
   let (st1, sv) = lower_expr(st, scrut)
   let (st2, ssym) = fresh_sym(st1)
@@ -1074,7 +1281,7 @@ fn lower_match(st: LSt, scrut: TExpr, arms: List[TArm], ty: Ty) -> (LSt, CExpr) 
     for p in arm.pats {
       let (st6, cond, binds) = pat_test(st5, subj, p, sty)
       st5 = st6
-      let (st7, armb) = lower_expr(st5, arm.body)
+      let (st7, armb) = lower_expr(LSt { ..st5, tail: tl }, arm.body)
       st5 = st7
       let taken =
         if produces {
@@ -1281,7 +1488,7 @@ fn lower_stmt(st: LSt, s: TStmt) -> (LSt, List[CStmt]) =
     TSLocalFn(sym, _, params, _, body, captures, _, _) -> {
       # a named local function is a lambda that also binds a name
       let fty = sym_ty(st, sym, TyError)
-      let (st1, clo) = lift_lambda(st, params, body, captures, fty)
+      let (st1, clo) = lift_lambda(st, params, body, captures, fty, Some(sym))
       (st1, [CSLet(sym, fty, clo)])
     }
   }
@@ -1347,10 +1554,32 @@ fn lower_fn(st: LSt, owner: String, f: TFun) -> (LSt, CFun) = {
     # the symbol table
     dicts = dicts ++ [CParam { sym: d, ty: sym_ty(st, d, TyError), mode: COwned }]
   }
-  let (st1, body0) = lower_expr(LSt { ..st, ret_ty: f.sig.ret }, f.body)
+  let (stl, lid) = fresh_loop(st)
+  # spec §12.4 covers plain top-level functions and local named ones. An impl
+  # method, a trait default and a test keep the shape they had, so that the
+  # rewrite lands in one place at a time.
+  let plain = f.impl_of == None && f.default_of == None && not f.is_test
+  let sc: Option[SelfCtx] =
+    if plain {
+      Some(SelfCtx {
+        sym: None,
+        owner: owner,
+        name: f.name,
+        caps: [],
+        params: f.param_syms,
+        ptys: f.sig.param_tys,
+        fty: TyUnit,
+        loop_id: lid
+      })
+    } else {
+      None
+    }
+  let st_in = LSt { ..stl, ret_ty: f.sig.ret, self_ctx: sc, tail: true, self_tail: false }
+  let (st1, body0) = lower_expr(st_in, f.body)
   # the tail value is a return too
-  let body = adapt_in(body0, tex_ty(f.body), f.sig.ret)
-  (LSt { ..st1, ret_ty: st.ret_ty }, CFun {
+  let body1 = adapt_in(body0, tex_ty(f.body), f.sig.ret)
+  let body = wrap_self_loop(st1.self_tail, lid, body1, f.sig.ret)
+  (LSt { ..st1, ret_ty: st.ret_ty, self_ctx: st.self_ctx, tail: st.tail, self_tail: st.self_tail }, CFun {
     name: f.name,
     owner: owner,
     captures: [],
@@ -1396,7 +1625,10 @@ pub fn lower_fn_only(
     impls: impls,
     adts: adts,
     prog_fns: prog_fns,
-    dicts: []
+    dicts: [],
+    self_ctx: None,
+    tail: false,
+    self_tail: false
   }
   let (st1, cf) = lower_fn(st, owner, f)
   (cf, st1.lifted, st1.next_lam)
@@ -1428,7 +1660,10 @@ pub fn lower_module(
     impls: impls,
     adts: adts,
     prog_fns: prog_fns,
-    dicts: []
+    dicts: [],
+    self_ctx: None,
+    tail: false,
+    self_tail: false
   }
   var fns: List[CFun] = []
   for f in tm.fns {

@@ -1,0 +1,68 @@
+# The fifth corpus: recursion, and specifically the two things lowering does
+# to it that neither backend can see afterwards.
+#
+#   * spec §12.4 -- a self tail call is a loop, not a frame. Both backends
+#     get this from the Core rewrite, so both must survive a depth no stack
+#     would hold. C compilers do the same optimisation at -O2, but this runs
+#     unoptimised on purpose: the guarantee is the language's, not the C
+#     compiler's.
+#   * a local named function is not in its own capture list (the checker
+#     strips the binding), so naming it inside its own body means rebuilding
+#     its closure.
+use std/io
+
+## Straight self tail call, past any plausible stack depth.
+fn count_up(i: Int, n: Int) -> Int =
+  if i >= n { i } else { count_up(i + 1, n) }
+
+## The arguments permute, so writing them back one at a time would clobber:
+## `a` must be the value it had on entry when `b` is assigned.
+fn swapper(a: Int, b: Int, k: Int) -> Int =
+  if k == 0 { a * 1000 + b } else { swapper(b, a, k - 1) }
+
+## A tail call from inside a match arm. Core turns a match into a once-loop
+## with a result temporary, so this only works if tail position is tracked
+## during lowering rather than recovered from the Core tree afterwards.
+fn parity(n: Int, even: Bool) -> Bool =
+  match n {
+    0 -> even
+    _ -> parity(n - 1, not even)
+  }
+
+## Not a tail call: the multiply happens after the recursion returns. This one
+## must still be a real call, and is here to prove the rewrite is selective.
+fn fact(n: Int) -> Int = if n <= 1 { 1 } else { n * fact(n - 1) }
+
+## Mutual recursion is explicitly not covered by §12.4; shallow on purpose.
+fn is_even(n: Int) -> Bool = if n == 0 { true } else { is_odd(n - 1) }
+
+fn is_odd(n: Int) -> Bool = if n == 0 { false } else { is_even(n - 1) }
+
+pub fn main() -> Unit !io = {
+  println("-- self tail calls --")
+  println("count_up(0, 5000000) = ${count_up(0, 5000000)}")
+  println("swapper(1, 2, 1000001) = ${swapper(1, 2, 1000001)}")
+  println("parity(2000001, true) = ${parity(2000001, true)}")
+
+  println("-- not a tail call --")
+  println("fact(20) = ${fact(20)}")
+
+  println("-- mutual --")
+  println("is_even(10) = ${is_even(10)}")
+  println("is_odd(10)  = ${is_odd(10)}")
+
+  println("-- local named function --")
+  ## Recursive, and reached only through its own binding.
+  fn down(i: Int, acc: Int) -> Int = if i == 0 { acc } else { down(i - 1, acc + i) }
+  println("down(1000000, 0) = ${down(1000000, 0)}")
+
+  ## Captures a local, and recurses: the closure has to be rebuilt inside its
+  ## own body, with the capture coming from the lifted frame's parameter.
+  let step = 3
+  fn climb(i: Int, n: Int) -> Int = if i >= n { i } else { climb(i + step, n) }
+  println("climb(0, 3000000) = ${climb(0, 3000000)}")
+
+  ## The same function used as a value, from inside itself and from outside.
+  fn apply1(f: fn(Int) -> Int, x: Int) -> Int = f(x)
+  println("via value = ${apply1(fn(x) => down(x, 0), 100)}")
+}
