@@ -1,0 +1,397 @@
+# The Core IR golden format. One line per node, indentation for structure.
+#
+# `__emit` already gives Core a byte-level detector for most of itself: change
+# the tree and the class files change. Most, not all -- the JVM emitter takes
+# `lower_fn_only`, so `CModule.dicts` reaches no consumer that ships, and
+# `CParam.mode`, `CSDup` and `CSDrop` are emitted-as-nothing by design until
+# Perceus. Those parts can be rewritten, emptied, or renamed and every gate in
+# the tree stays green. This dump is what sees them.
+#
+# ## Determinism
+#
+# Symbol and loop ids come from counters that run across a whole lowering, so
+# an unrelated edit upstream shifts every number downstream and the diff is
+# noise. They are renumbered per function in order of first appearance.
+#
+# Lifted-lambda and bridge names are NOT normalised. They are real emitted
+# method names, so `__emit` already covers them; normalising here would turn
+# off a detector that works.
+
+use std/str
+use std/list
+use std/map
+use std/set
+use types.{Adts, Ty, TyAdt, ty_show}
+use core.{
+  CModule, CFun, CParam, CMode, COwned, CBorrowed,
+  CDictDef, CDictSlot, CSlotFn, CSlotDefault,
+  CExpr, CStmt, CCallee,
+  CInt, CFloat, CBool, CStr, CUnit, CLocal, CFnRef, CCall, CIntrinsic,
+  CCtor, CField, CIsCtor, CClosure, CDictRef, CTuple, CTupleGet, CBox, CUnbox,
+  CBinary, CUnary, CIf, CBlock, CListLit, CConstRef, CComptime,
+  CReturn, CBreak, CContinue, CForeign,
+  CSLet, CSAssign, CSDiscard, CSLoop, CSIf, CSDup, CSDrop,
+  CDirect, CDynamic, CMethod, CImpl, CDefault,
+  CBinOp, CUnOp,
+  CAdd, CSub, CMul, CDiv, CMod, CEq, CNe, CLt, CLe, CGt, CGe, CAnd, COr,
+  CBand, CBor, CBxor, CShl, CShr, CUshr, CConcat, CNeg, CNot, CBnot
+}
+use dump
+
+## Per-function renumbering of symbol and loop ids.
+type Names = { syms: Map[Int, String], loops: Map[Int, String] }
+
+fn sym_name(n: Names, s: Int) -> String =
+  match map.get(n.syms, s) {
+    Some(v) -> v
+    # a symbol the collector did not reach: report it rather than inventing a
+    # name, because it means the walk and the renderer disagree
+    None -> "v?" ++ to_string(s)
+  }
+
+fn loop_name(n: Names, l: Int) -> String =
+  match map.get(n.loops, l) {
+    Some(v) -> v
+    None -> "L?" ++ to_string(l)
+  }
+
+# ---- id collection (pre-order, first appearance wins) ----
+
+type Acc = { syms: List[Int], seen_s: Set[Int], loops: List[Int], seen_l: Set[Int] }
+
+fn add_sym(a: Acc, s: Int) -> Acc =
+  if set.has(a.seen_s, s) { a }
+  else { Acc { ..a, syms: a.syms ++ [s], seen_s: set.insert(a.seen_s, s) } }
+
+fn add_loop(a: Acc, l: Int) -> Acc =
+  if set.has(a.seen_l, l) { a }
+  else { Acc { ..a, loops: a.loops ++ [l], seen_l: set.insert(a.seen_l, l) } }
+
+fn walk_all(a: Acc, es: List[CExpr]) -> Acc = {
+  var acc = a
+  for e in es { acc = walk_expr(acc, e) }
+  acc
+}
+
+fn walk_opt(a: Acc, e: Option[CExpr]) -> Acc =
+  match e {
+    Some(x) -> walk_expr(a, x)
+    None -> a
+  }
+
+fn walk_callee(a: Acc, c: CCallee) -> Acc =
+  match c {
+    CDynamic(t) -> walk_expr(a, t)
+    CMethod(d, _, _, _) -> walk_expr(a, d)
+    CDirect(_, _) -> a
+    CImpl(_, _, _, _, _) -> a
+    CDefault(_, _, _) -> a
+  }
+
+fn walk_expr(a: Acc, e: CExpr) -> Acc =
+  match e {
+    CLocal(s, _) -> add_sym(a, s)
+    CCall(callee, args, _) -> walk_all(walk_callee(a, callee), args)
+    CIntrinsic(_, args, _) -> walk_all(a, args)
+    CCtor(_, _, args, _) -> walk_all(a, args)
+    CField(t, _, _, _, _) -> walk_expr(a, t)
+    CIsCtor(t, _, _) -> walk_expr(a, t)
+    CClosure(_, _, caps, _) -> walk_all(a, caps)
+    CTuple(elems, _) -> walk_all(a, elems)
+    CTupleGet(t, _, _) -> walk_expr(a, t)
+    CBox(inner, _) -> walk_expr(a, inner)
+    CUnbox(inner, _) -> walk_expr(a, inner)
+    CBinary(_, l, r, _) -> walk_expr(walk_expr(a, l), r)
+    CUnary(_, o, _) -> walk_expr(a, o)
+    CIf(c, t, e2, _) -> walk_opt(walk_expr(walk_expr(a, c), t), e2)
+    CBlock(stmts, tail, _) -> {
+      var acc = a
+      for s in stmts { acc = walk_stmt(acc, s) }
+      walk_opt(acc, tail)
+    }
+    CListLit(elems, _) -> walk_all(a, elems)
+    CReturn(v) -> walk_opt(a, v)
+    CBreak(l) -> add_loop(a, l)
+    CContinue(l) -> add_loop(a, l)
+    CForeign(j, _) -> walk_all(walk_opt(a, j.target), j.args)
+    CInt(_) -> a
+    CFloat(_) -> a
+    CBool(_) -> a
+    CStr(_) -> a
+    CUnit -> a
+    CFnRef(_, _, _) -> a
+    CDictRef(_, _, _, _) -> a
+    CConstRef(_, _) -> a
+    CComptime(_, _, _) -> a
+  }
+
+fn walk_stmt(a: Acc, s: CStmt) -> Acc =
+  match s {
+    CSLet(sym, _, init) -> walk_expr(add_sym(a, sym), init)
+    CSAssign(sym, v) -> walk_expr(add_sym(a, sym), v)
+    CSDiscard(e) -> walk_expr(a, e)
+    CSLoop(lid, body, step) -> walk_opt(walk_expr(add_loop(a, lid), body), step)
+    CSIf(c, t, e) -> walk_opt(walk_expr(walk_expr(a, c), t), e)
+    CSDup(sym) -> add_sym(a, sym)
+    CSDrop(sym) -> add_sym(a, sym)
+  }
+
+fn names_of(f: CFun) -> Names = {
+  var a = Acc { syms: [], seen_s: set.empty(), loops: [], seen_l: set.empty() }
+  for p in f.captures { a = add_sym(a, p.sym) }
+  for p in f.params { a = add_sym(a, p.sym) }
+  for p in f.dicts { a = add_sym(a, p.sym) }
+  a = walk_expr(a, f.body)
+  var syms: Map[Int, String] = map.empty()
+  var i = 0
+  for s in a.syms {
+    syms = map.insert(syms, s, "v" ++ to_string(i))
+    i = i + 1
+  }
+  var loops: Map[Int, String] = map.empty()
+  var j = 0
+  for l in a.loops {
+    loops = map.insert(loops, l, "L" ++ to_string(j))
+    j = j + 1
+  }
+  Names { syms: syms, loops: loops }
+}
+
+# ---- rendering ----
+
+fn ind(n: Int) -> String = {
+  var s = ""
+  var i = 0
+  while i < n {
+    s = s ++ "  "
+    i = i + 1
+  }
+  s
+}
+
+fn bin_name(op: CBinOp) -> String =
+  match op {
+    CAdd -> "add"
+    CSub -> "sub"
+    CMul -> "mul"
+    CDiv -> "div"
+    CMod -> "mod"
+    CEq -> "eq"
+    CNe -> "ne"
+    CLt -> "lt"
+    CLe -> "le"
+    CGt -> "gt"
+    CGe -> "ge"
+    CAnd -> "and"
+    COr -> "or"
+    CBand -> "band"
+    CBor -> "bor"
+    CBxor -> "bxor"
+    CShl -> "shl"
+    CShr -> "shr"
+    CUshr -> "ushr"
+    CConcat -> "concat"
+  }
+
+fn un_name(op: CUnOp) -> String =
+  match op {
+    CNeg -> "neg"
+    CNot -> "not"
+    CBnot -> "bnot"
+  }
+
+fn mode_name(m: CMode) -> String =
+  match m {
+    COwned -> "owned"
+    CBorrowed -> "borrowed"
+  }
+
+fn callee_line(adts: Adts, c: CCallee) -> String =
+  match c {
+    CDirect(owner, name) -> "direct " ++ owner ++ "." ++ name
+    CDynamic(_) -> "dynamic"
+    CMethod(_, tid, method, idx) ->
+      "method trait=" ++ to_string(tid) ++ " " ++ method ++ " slot=" ++ to_string(idx)
+    CImpl(owner, tid, subject, method, derived) ->
+      "impl " ++ owner ++ " trait=" ++ to_string(tid) ++ " subject=" ++
+      ty_str(adts, subject) ++ " " ++ method ++
+      (if derived { " derived" } else { "" })
+    CDefault(owner, tid, method) ->
+      "default " ++ owner ++ " trait=" ++ to_string(tid) ++ " " ++ method
+  }
+
+## Lowering gives every dictionary slot the same stand-in type, `TyAdt(-1)`,
+## because a dictionary's Dawn-level type is each backend's business. There is
+## no such ADT, so `ty_show` cannot render it -- name it instead of crashing,
+## and keep it visible: this is one of the things the dump exists to show.
+fn ty_str(adts: Adts, t: Ty) -> String =
+  match t {
+    TyAdt(aid, args) -> if aid < 0 && len(args) == 0 { "<dict>" } else { ty_show(adts, t) }
+    _ -> ty_show(adts, t)
+  }
+
+fn ty(adts: Adts, t: Ty) -> String = " : " ++ ty_str(adts, t)
+
+fn expr(adts: Adts, n: Names, d: Int, e: CExpr) -> String =
+  match e {
+    CInt(v) -> ind(d) ++ "int " ++ to_string(v) ++ "\n"
+    CFloat(v) -> ind(d) ++ "float " ++ to_string(v) ++ "\n"
+    CBool(v) -> ind(d) ++ "bool " ++ to_string(v) ++ "\n"
+    CStr(v) -> ind(d) ++ "str \"" ++ dump.esc(v) ++ "\"\n"
+    CUnit -> ind(d) ++ "unit\n"
+    CLocal(s, t) -> ind(d) ++ "local " ++ sym_name(n, s) ++ ty(adts, t) ++ "\n"
+    CFnRef(owner, name, t) ->
+      ind(d) ++ "fnref " ++ owner ++ "." ++ name ++ ty(adts, t) ++ "\n"
+    CCall(callee, args, t) -> {
+      var out = ind(d) ++ "call " ++ callee_line(adts, callee) ++ ty(adts, t) ++ "\n"
+      match callee {
+        CDynamic(target) -> { out = out ++ expr(adts, n, d + 1, target) }
+        CMethod(dict, _, _, _) -> { out = out ++ expr(adts, n, d + 1, dict) }
+        CDirect(_, _) -> ()
+        CImpl(_, _, _, _, _) -> ()
+        CDefault(_, _, _) -> ()
+      }
+      out ++ exprs(adts, n, d + 1, args)
+    }
+    CIntrinsic(name, args, t) ->
+      ind(d) ++ "intrinsic " ++ name ++ ty(adts, t) ++ "\n" ++ exprs(adts, n, d + 1, args)
+    CCtor(adt, ci, args, t) ->
+      ind(d) ++ "ctor " ++ to_string(adt) ++ "/" ++ to_string(ci) ++ ty(adts, t) ++ "\n" ++
+      exprs(adts, n, d + 1, args)
+    CField(target, adt, ci, idx, t) ->
+      ind(d) ++ "field " ++ to_string(adt) ++ "/" ++ to_string(ci) ++ "." ++
+      to_string(idx) ++ ty(adts, t) ++ "\n" ++ expr(adts, n, d + 1, target)
+    CIsCtor(target, adt, ci) ->
+      ind(d) ++ "isctor " ++ to_string(adt) ++ "/" ++ to_string(ci) ++ "\n" ++
+      expr(adts, n, d + 1, target)
+    CClosure(fn_name, owner, caps, t) ->
+      ind(d) ++ "closure " ++ owner ++ "." ++ fn_name ++ ty(adts, t) ++ "\n" ++
+      exprs(adts, n, d + 1, caps)
+    CDictRef(key, tid, subject, t) ->
+      ind(d) ++ "dictref " ++ key ++ " trait=" ++ to_string(tid) ++ " subject=" ++
+      ty_str(adts, subject) ++ ty(adts, t) ++ "\n"
+    CTuple(elems, t) ->
+      ind(d) ++ "tuple" ++ ty(adts, t) ++ "\n" ++ exprs(adts, n, d + 1, elems)
+    CTupleGet(target, idx, t) ->
+      ind(d) ++ "tupleget " ++ to_string(idx) ++ ty(adts, t) ++ "\n" ++
+      expr(adts, n, d + 1, target)
+    CBox(inner, from) ->
+      ind(d) ++ "box from=" ++ ty_str(adts, from) ++ "\n" ++ expr(adts, n, d + 1, inner)
+    CUnbox(inner, to) ->
+      ind(d) ++ "unbox to=" ++ ty_str(adts, to) ++ "\n" ++ expr(adts, n, d + 1, inner)
+    CBinary(op, l, r, t) ->
+      ind(d) ++ "binary " ++ bin_name(op) ++ ty(adts, t) ++ "\n" ++
+      expr(adts, n, d + 1, l) ++ expr(adts, n, d + 1, r)
+    CUnary(op, o, t) ->
+      ind(d) ++ "unary " ++ un_name(op) ++ ty(adts, t) ++ "\n" ++ expr(adts, n, d + 1, o)
+    CIf(c, t2, e2, t) ->
+      ind(d) ++ "if" ++ ty(adts, t) ++ "\n" ++ expr(adts, n, d + 1, c) ++
+      expr(adts, n, d + 1, t2) ++ opt_expr(adts, n, d + 1, e2)
+    CBlock(stmts, tail, t) -> {
+      var out = ind(d) ++ "block" ++ ty(adts, t) ++ "\n"
+      for s in stmts { out = out ++ stmt(adts, n, d + 1, s) }
+      out ++ opt_expr(adts, n, d + 1, tail)
+    }
+    CListLit(elems, t) ->
+      ind(d) ++ "listlit" ++ ty(adts, t) ++ "\n" ++ exprs(adts, n, d + 1, elems)
+    CConstRef(name, t) -> ind(d) ++ "constref " ++ name ++ ty(adts, t) ++ "\n"
+    # the span is the key the interpreter stored the value under, so it is
+    # part of the identity and is not normalised
+    CComptime(lo, hi, t) ->
+      ind(d) ++ "comptime " ++ to_string(lo) ++ ".." ++ to_string(hi) ++ ty(adts, t) ++ "\n"
+    CReturn(v) -> ind(d) ++ "return\n" ++ opt_expr(adts, n, d + 1, v)
+    CBreak(l) -> ind(d) ++ "break " ++ loop_name(n, l) ++ "\n"
+    CContinue(l) -> ind(d) ++ "continue " ++ loop_name(n, l) ++ "\n"
+    CForeign(j, t) -> {
+      var out = ind(d) ++ "foreign " ++ j.call.decl_cls ++ "." ++ j.call.method ++
+        (if j.call.is_static { " static" } else { "" }) ++
+        (if j.call.is_field { " field" } else { "" }) ++
+        ty(adts, t) ++ "\n"
+      out = out ++ opt_expr(adts, n, d + 1, j.target)
+      out ++ exprs(adts, n, d + 1, j.args)
+    }
+  }
+
+fn exprs(adts: Adts, n: Names, d: Int, es: List[CExpr]) -> String = {
+  var out = ""
+  for e in es { out = out ++ expr(adts, n, d, e) }
+  out
+}
+
+fn opt_expr(adts: Adts, n: Names, d: Int, e: Option[CExpr]) -> String =
+  match e {
+    Some(x) -> expr(adts, n, d, x)
+    None -> ""
+  }
+
+fn stmt(adts: Adts, n: Names, d: Int, s: CStmt) -> String =
+  match s {
+    CSLet(sym, t, init) ->
+      ind(d) ++ "let " ++ sym_name(n, sym) ++ ty(adts, t) ++ "\n" ++
+      expr(adts, n, d + 1, init)
+    CSAssign(sym, v) ->
+      ind(d) ++ "assign " ++ sym_name(n, sym) ++ "\n" ++ expr(adts, n, d + 1, v)
+    CSDiscard(e) -> ind(d) ++ "discard\n" ++ expr(adts, n, d + 1, e)
+    CSLoop(lid, body, step) -> {
+      var out = ind(d) ++ "loop " ++ loop_name(n, lid) ++ "\n"
+      out = out ++ expr(adts, n, d + 1, body)
+      match step {
+        Some(st) -> out ++ ind(d + 1) ++ "step\n" ++ expr(adts, n, d + 2, st)
+        None -> out
+      }
+    }
+    CSIf(c, t, e) ->
+      ind(d) ++ "sif\n" ++ expr(adts, n, d + 1, c) ++ expr(adts, n, d + 1, t) ++
+      opt_expr(adts, n, d + 1, e)
+    CSDup(sym) -> ind(d) ++ "dup " ++ sym_name(n, sym) ++ "\n"
+    CSDrop(sym) -> ind(d) ++ "drop " ++ sym_name(n, sym) ++ "\n"
+  }
+
+fn param(adts: Adts, n: Names, d: Int, kind: String, p: CParam) -> String =
+  ind(d) ++ kind ++ " " ++ sym_name(n, p.sym) ++ ty(adts, p.ty) ++ " " ++
+  mode_name(p.mode) ++ "\n"
+
+fn fun(adts: Adts, f: CFun) -> String = {
+  let n = names_of(f)
+  var out = "fn " ++ f.owner ++ "." ++ f.name ++ " -> " ++ ty_str(adts, f.ret)
+  if f.is_test { out = out ++ " test" }
+  match f.impl_of {
+    Some(pair) -> {
+      let (tid, subject) = pair
+      out = out ++ " impl_of=" ++ to_string(tid) ++ "/" ++ ty_str(adts, subject)
+    }
+    None -> ()
+  }
+  match f.default_of {
+    Some(tid) -> { out = out ++ " default_of=" ++ to_string(tid) }
+    None -> ()
+  }
+  out = out ++ "\n"
+  for p in f.captures { out = out ++ param(adts, n, 1, "capture", p) }
+  for p in f.params { out = out ++ param(adts, n, 1, "param", p) }
+  for p in f.dicts { out = out ++ param(adts, n, 1, "dict", p) }
+  out ++ expr(adts, n, 1, f.body)
+}
+
+fn slot(s: CDictSlot) -> String =
+  match s {
+    CSlotFn(owner, name) -> "  slot fn " ++ owner ++ "." ++ name ++ "\n"
+    CSlotDefault(owner, method) -> "  slot default " ++ owner ++ "." ++ method ++ "\n"
+  }
+
+fn dict(adts: Adts, dd: CDictDef) -> String = {
+  var out = "dict " ++ dd.key ++ " trait=" ++ to_string(dd.trait_id) ++
+    " subject=" ++ ty_str(adts, dd.subject) ++ "\n"
+  for s in dd.slots { out = out ++ slot(s) }
+  out
+}
+
+## The whole module, in the order lowering produced it. Dictionaries come
+## first: they are the part no shipping consumer reads, so putting them where
+## a reader sees them is the point of the file.
+pub fn render(adts: Adts, m: CModule) -> String = {
+  var out = "module " ++ m.owner ++ "\n"
+  for dd in m.dicts { out = out ++ dict(adts, dd) }
+  for f in m.fns { out = out ++ fun(adts, f) }
+  out
+}

@@ -1,0 +1,200 @@
+module eqhash
+dict dict$1$Int trait=1 subject=Int
+  slot default eqhash.eq
+dict dict$1$String trait=1 subject=String
+  slot default eqhash.eq
+dict dict$2$Int trait=2 subject=Int
+  slot default eqhash.hash
+fn eqhash.contains -> Bool
+  param v0 : List[T] owned
+  param v1 : T owned
+  dict v2 : T owned
+  block : Bool
+    let v3 : List[T]
+      local v0 : List[T]
+    let v4 : Int
+      int 0
+    loop L0
+      block : Unit
+        sif
+          unary not : Bool
+            binary lt : Bool
+              local v4 : Int
+              intrinsic len : Int
+                local v3 : List[T]
+          break L0
+        let v5 : T
+          intrinsic list_index : E
+            local v3 : List[T]
+            local v4 : Int
+        discard
+          block : Unit
+            if : Unit
+              call method trait=1 eq slot=0 : Bool
+                local v2 : <dict>
+                local v5 : T
+                local v1 : T
+              block : Never
+                return
+                  bool true
+      step
+        block : Unit
+          assign v4
+            binary add : Int
+              local v4 : Int
+              int 1
+    bool false
+fn eqhash.digest -> Int
+  param v0 : List[T] owned
+  dict v1 : T owned
+  block : Int
+    let v2 : Int
+      int 1
+    let v3 : List[T]
+      local v0 : List[T]
+    let v4 : Int
+      int 0
+    loop L0
+      block : Unit
+        sif
+          unary not : Bool
+            binary lt : Bool
+              local v4 : Int
+              intrinsic len : Int
+                local v3 : List[T]
+          break L0
+        let v5 : T
+          intrinsic list_index : E
+            local v3 : List[T]
+            local v4 : Int
+        discard
+          block : Unit
+            assign v2
+              binary add : Int
+                binary mul : Int
+                  local v2 : Int
+                  int 31
+                call method trait=2 hash slot=0 : Int
+                  local v1 : <dict>
+                  local v5 : T
+      step
+        block : Unit
+          assign v4
+            binary add : Int
+              local v4 : Int
+              int 1
+    local v2 : Int
+fn eqhash.main -> Unit
+  block : Unit
+    discard
+      call direct std/io.println : Unit
+        str "-- forwarded dictionaries --"
+    discard
+      call direct std/io.println : Unit
+        binary concat : String
+          str "contains([1, 2, 3], 2)   = "
+          intrinsic str_of_bool : String
+            call direct eqhash.contains : Bool
+              listlit : List[Int]
+                box from=Int
+                  int 1
+                box from=Int
+                  int 2
+                box from=Int
+                  int 3
+              box from=Int
+                int 2
+              dictref dict$1$Int trait=1 subject=Int : <dict>
+    discard
+      call direct std/io.println : Unit
+        binary concat : String
+          str "contains(["a", "b"], "b") = "
+          intrinsic str_of_bool : String
+            call direct eqhash.contains : Bool
+              listlit : List[String]
+                box from=String
+                  str "a"
+                box from=String
+                  str "b"
+              box from=String
+                str "b"
+              dictref dict$1$String trait=1 subject=String : <dict>
+    discard
+      call direct std/io.println : Unit
+        binary concat : String
+          str "contains([Red, Blue], Blue) = "
+          intrinsic str_of_bool : String
+            call direct eqhash.contains : Bool
+              listlit : List[Color]
+                box from=Color
+                  ctor 280/0 : Color
+                box from=Color
+                  ctor 280/2 : Color
+              box from=Color
+                ctor 280/2 : Color
+              dictref dict$1$Structural trait=1 subject=Color : <dict>
+    discard
+      call direct std/io.println : Unit
+        binary concat : String
+          str "digest([1, 2, 3])        = "
+          intrinsic str_of_int : String
+            call direct eqhash.digest : Int
+              listlit : List[Int]
+                box from=Int
+                  int 1
+                box from=Int
+                  int 2
+                box from=Int
+                  int 3
+              dictref dict$2$Int trait=2 subject=Int : <dict>
+    discard
+      call direct std/io.println : Unit
+        str "-- an overriding impl --"
+    let v0 : P
+      ctor 281/0 : P
+        int 1
+        int 2
+    let v1 : P
+      ctor 281/0 : P
+        int 1
+        int 99
+    discard
+      call direct std/io.println : Unit
+        binary concat : String
+          binary concat : String
+            str "eq(a, b) = "
+            intrinsic str_of_bool : String
+              call impl eqhash trait=1 subject=P eq : Bool
+                local v0 : P
+                local v1 : P
+          str "    (only x counts)"
+    discard
+      call direct std/io.println : Unit
+        binary concat : String
+          binary concat : String
+            str "a == b   = "
+            intrinsic str_of_bool : String
+              call impl eqhash trait=1 subject=P eq : Bool
+                local v0 : P
+                local v1 : P
+          str "    (the operator now means the impl too)"
+    call direct std/io.println : Unit
+      binary concat : String
+        str "hash(a)  = "
+        intrinsic str_of_int : String
+          call impl eqhash trait=2 subject=P hash : Int
+            local v0 : P
+fn eqhash.eq -> Bool impl_of=1/P
+  param v0 : P owned
+  param v1 : P owned
+  binary eq : Bool
+    field 281/0.0 : Int
+      local v0 : P
+    field 281/0.0 : Int
+      local v1 : P
+fn eqhash.hash -> Int impl_of=2/P
+  param v0 : P owned
+  binary mul : Int
+    field 281/0.0 : Int
+      local v0 : P
+    int 31

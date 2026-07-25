@@ -18,6 +18,7 @@ use parser
 use dump
 use astdump
 use checkdump
+use coredump
 use stdlib.{StdCtx, load_std}
 use analyze.{CheckedMod, LocDiag, load_directory, load_file, analyze_program}
 use vendor
@@ -1043,11 +1044,15 @@ fn run_doc(rest: List[String]) -> Unit !io = {
 ## rest: a single run lists everything still missing.
 fn run_lower(rest: List[String]) -> Unit !io = {
   var std_dir = "std"
+  var dump_dir = ""
   var targets: List[String] = []
   var i = 0
   while i < len(rest) {
     if rest[i] == "--std" && i + 1 < len(rest) {
       std_dir = rest[i + 1]
+      i = i + 2
+    } else if rest[i] == "--dump" && i + 1 < len(rest) {
+      dump_dir = rest[i + 1]
       i = i + 2
     } else {
       targets = targets ++ [rest[i]]
@@ -1067,6 +1072,26 @@ fn run_lower(rest: List[String]) -> Unit !io = {
   if len(prog.diags) > 0 { fail_compile(prog.diags) }
   let (adts, traits, impl_table, prog_fns) = program_tables(std, prog.modules)
 
+  # `--dump` writes one .core per module next to the coverage count. The
+  # golden it feeds is the only detector for the parts of Core no shipping
+  # backend reads -- see coredump.dawn.
+  let dump_to = dump_dir
+  let dumping = dump_to != ""
+
+  ## Lower one module; on success optionally write its golden. Returns the
+  ## node count so the coverage gate keeps working unchanged.
+  fn one(cls: String, tm: TModule) -> Int !io = {
+    let m = lower.lower_module(cls, tm, traits, impl_table, adts, prog_fns)
+    if dumping {
+      let path = dump_to ++ "/" ++ join(str.split(cls, "/"), ".") ++ ".core"
+      match io.write_file(path, coredump.render(adts, m)) {
+        Ok(_u) -> ()
+        Err(e) -> panic("cannot write " ++ path ++ ": " ++ e)
+      }
+    }
+    lower_size(m)
+  }
+
   var ok = 0
   var bad = 0
   var seen: Set[String] = set.empty()
@@ -1074,30 +1099,28 @@ fn run_lower(rest: List[String]) -> Unit !io = {
   # just as much
   for sm in std.mods {
     let (cls, _cx, tm, _ct) = sm
-    match catch_panic(fn() =>
-        lower_size(lower.lower_module(cls, tm, traits, impl_table, adts, prog_fns))) {
-          Ok(_n) -> { ok = ok + 1 }
-          Err(e) -> {
-            bad = bad + 1
-            if not set.has(seen, e) {
-              seen = set.insert(seen, e)
-              println("GAP  " ++ cls ++ ": " ++ e)
-            }
-          }
+    match catch_panic(fn() => one(cls, tm)) {
+      Ok(_n) -> { ok = ok + 1 }
+      Err(e) -> {
+        bad = bad + 1
+        if not set.has(seen, e) {
+          seen = set.insert(seen, e)
+          println("GAP  " ++ cls ++ ": " ++ e)
         }
+      }
+    }
   }
   for cm in prog.modules {
-    match catch_panic(fn() =>
-        lower_size(lower.lower_module(cm.class_name, cm.tm, traits, impl_table, adts, prog_fns))) {
-          Ok(_n) -> { ok = ok + 1 }
-          Err(e) -> {
-            bad = bad + 1
-            if not set.has(seen, e) {
-              seen = set.insert(seen, e)
-              println("GAP  " ++ cm.class_name ++ ": " ++ e)
-            }
-          }
+    match catch_panic(fn() => one(cm.class_name, cm.tm)) {
+      Ok(_n) -> { ok = ok + 1 }
+      Err(e) -> {
+        bad = bad + 1
+        if not set.has(seen, e) {
+          seen = set.insert(seen, e)
+          println("GAP  " ++ cm.class_name ++ ": " ++ e)
         }
+      }
+    }
   }
   println("")
   println("lowered " ++ to_string(ok) ++ " module(s), " ++ to_string(bad) ++ " failed")
