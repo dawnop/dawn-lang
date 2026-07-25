@@ -209,16 +209,18 @@ native 照抄才算"通过"。故语料要配少量**独立的期望输出**(不
   都不必重审)。
 - **R5 — 种子纪律。** Eq/Hash/Iter 三个新 trait 各需两版才能被 selfhost/std 使用。**这给 Phase 1→2 之间
   插了一个无法压缩的等待**，排期时别忘。
-- **R6 — comptime 解释器是第三实现(已决:retarget 到 Core;Phase 0 内未做完,是唯一的欠账)。**
+- **R6 — comptime 解释器是第三实现(已解决:2026-07-25 retarget 到 Core,见 §7)。**
 
-  一个内建的**含义**今天活在两处:`emit.dawn`(编成字节码)与 `interp.dawn:461`(编译期直接在 `VList` 上算)。
-  加上 native 就是三处，且没有任何机制强制三者一致。
+  一个内建的**含义**曾经活在两处:`emit.dawn`(编成字节码)与 `interp.dawn`(编译期直接在 `VList` 上算),
+  加上 native 就是三处,且没有任何机制强制三者一致。**retarget 之后解释器读的是 Core**,于是「一个内建
+  叫什么名字、拿几个参数、在什么形状的树里」只有一份;剩下的分歧只在**同名 intrinsic 的实现**上,
+  那正是运行时契约要管的事。
 
   有一处例外值得记下:字符串/cursor 那族**没有第二份实现**——`interp.dawn:404` 的 `rt_raw` 反射调用编译器自己
   classpath 上的 `dawn.rt.Strings`(即它编译时会发射的那个类)。**但这条 route-C 依赖 JVM**(反射 / `Class.forName` /
   classpath)，native 上根本不存在，Phase 6 必须换成直接调 C 运行时。
 
-  与集合的耦合:`CValue` 只有扁平的 `VList`，且 `len/get/range/sort_by/concat` 五条原生臂
+  与集合的耦合(仍然成立):`CValue` 只有扁平的 `VList`，且 `len/get/range/sort_by/concat` 五条原生臂
   (`interp.dawn:461–482`)**假设 List 是扁平列表**;`CValue` 更是**压根没有 `VMap`/`VSet`**(今天写不出值是 Map
   的 `const`)。D2 让 Map/Set 变成普通 Dawn ADT 后，`VAdt` 天然能表示它们，**这个洞顺手就补上了**(前提是
   `Array` 有个 CValue 表示);但 D3 之后那五条 `VList` 臂要么删掉(让 comptime 解释 RB 代码，正确但编译期变慢)，
@@ -242,7 +244,7 @@ native 照抄才算"通过"。故语料要配少量**独立的期望输出**(不
 | 阶段 | 状态 |
 |---|---|
 | **Phase −1** 接缝 spike | **完成** |
-| **Phase 0** Core IR | **完成**——IR + lowering 覆盖整门语言,两个后端都吃 Core,`emit.dawn` 的 TAST 路已删(4353 → 2318 行) |
+| **Phase 0** Core IR | **完成**——IR + lowering 覆盖整门语言;JVM / C / comptime 三个消费者都吃 Core,`emit.dawn` 的 TAST 路已删(4353 → 2318 行) |
 | Phase 1 D0 | 未动 |
 | Phase 2 D1–D3 | 未动 |
 | Phase 3 C 发射器 | **提前完成一大截**(见下) |
@@ -274,6 +276,22 @@ native 照抄才算"通过"。故语料要配少量**独立的期望输出**(不
   只能重建闭包。漏掉它发的是**非法字节码**,不是错答案。
 - **内建当函数值用**(`map(xs, to_string)`)在 lowering 里 panic。现在和普通函数一样走提升包装。
 
+**comptime 解释器 retarget(2026-07-25,R6 关账)**:`interp.dawn` 原本自己决定 `match` 是什么、
+`?` 返回什么、`for` 怎么迭代、什么时候装箱——**第三份语言定义**,且没有任何机制强制它和两个后端一致。
+现在它读后端读的同一份 IR。
+- **删掉的**:模式匹配器、`for`/`while`、`?`/`!`、字符串插值,以及四分之三的函数值表示
+  (lowering 把 lambda / 局部命名函数 / 顶层函数当值 / 内建当值 / 裸构造器全提升成同一形状,
+  于是 `VClosure` 顶掉了 `VLambda`/`VFnRef`/`VBuiltinF`/`VCtorRef`)。
+- **两条规则不是搬走而是不再重复**:①**spec §12.4** —— 自尾调用在 Core 里已经是循环,于是 comptime
+  白拿,原先会撞 `MAX_CALL_DEPTH` 的深递归现在能折叠(补了测试);②**`unsafe_pure`** —— 旧的
+  route-C 检查在复述效果系统已经保证的事(没有那个块调用就是 `!io`,而 `!io` 进不了 const),
+  Core 丢掉这个标记,效果系统留着。
+- **函数按需 lowering 并在本次求值内缓存**,不是整程序预先 lowering:一次 comptime 求值只碰到
+  几个函数。实测无可测量的编译耗时变化(4.7–4.9s,噪声内)。
+- **唯一的退步是 span**。Core 没有源位置,所以 comptime 失败现在报在**被折叠的 const / comptime 块**上,
+  而不是子表达式上;消息、hint、条数不变。保持 Core 无 span 是有意的——等真正需要行号表(调试信息)
+  时再一次性加,那时 comptime 的 span 顺带变好。
+
 **Phase 0 的真正教训**:出口条件写成「零 Emit-Change」是错的(§6 的自纠已记);更值得记的是
 **「两条路都在」这件事本身是最强的 oracle**。三个 bug 全靠拿同一个程序两边跑出来的差异定位,
 而不是靠读 IR。拆掉旧路之后这个 oracle 就没了——后面每一步都得自带对拍物(N−1 差分、native
@@ -293,8 +311,9 @@ trait 字典(去虚化 + 转发 + 默认方法 + 桥接)、类型变量槽的装
 JVM-ism」。让那个**不可能继承 JVM 假设**的后端先吃,是最直接的对冲。事后看这步是对的:四条设计缺陷
 (`CSDiscard`、`CSLoop.step`、`CBreak` 点名循环、字典槽统一签名)都是**在写第二个后端之前**发现的。
 
-**Phase 0 剩下的唯一一件**:`interp.dawn`(comptime 解释器)仍吃 TAST,见 §6 的 R6。它不阻塞
-Phase 1/2,但**截止点是冻结 Core 节点集之前**——等两个发射器都定型再回头接,就是第三次重写。
+**Core 有三个消费者,不是两个**:`emit.dawn`(JVM)、`emitc.dawn`(C)、`interp.dawn`(comptime)。
+第三个是有意义的:它**不是代码发生器**,所以它对节点集的要求和两个后端不重叠——它需要节点能被
+*直接求值*,而后端只需要节点能被*翻译*。节点集被这两类消费者一起验过,比被两个后端验两遍强。
 
 ## 8. 明确不在范围内
 
