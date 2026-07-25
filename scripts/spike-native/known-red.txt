@@ -1,0 +1,46 @@
+# Checks that fail today. run.sh treats a listed failure as non-fatal and an
+# unlisted one as fatal -- and it also fails when a *listed* check starts
+# passing, so a fix cannot leave its entry behind.
+#
+# Nothing here is a gap in the native backend's coverage. Each line is a
+# semantic that Core does not carry, so a consumer invented its own answer.
+# These corpora were added on 2026-07-25 precisely because the harness had
+# been admitting only programs both backends already agreed on, which is how
+# four wrong answers stayed invisible.
+
+# --- equality -------------------------------------------------------------
+# `resolve_eq_witness` yields no witness for a concrete type with no impl,
+# lowering emits a bare CBinary(CEq), and each backend picks a meaning:
+# Object.equals on the JVM, C's `==` on native. Every structural equality in
+# eq_adt.dawn that answers yes on the JVM answers no on native -- both exit 0
+# with no diagnostic.
+eq_adt:native
+eq_adt:diff
+
+# --- rendering ------------------------------------------------------------
+# Show is not a trait: an AdtI flag, a checker predicate, and an instanceof
+# chain in dawn/rt/Show. A tagged union has no chain to walk, so there is
+# nothing for native to inherit -- `to_string` of an ADT reaches emitc and
+# panics.
+show_derive:emitc
+
+# --- dictionaries ---------------------------------------------------------
+# CModule.dicts has exactly one reader, and it is the unfinished backend: the
+# JVM ignores the table and re-derives class names from the checker's
+# impl_table. Prelude impls and derived impls carry an empty `provided`, and
+# WStructural registers no CDictDef at all, so the emitted C names symbols
+# nothing defines (dawn_dict__default_1_eq, dawn_dict_1_Structural).
+dict_forward:cc
+
+# --- comptime -------------------------------------------------------------
+# interp.dawn renders every non-scalar as the literal "<value>", so a const
+# holding `to_string` of an ADT folds to the wrong string -- on the JVM, in
+# the backend that ships. This is the check .expect exists for: both targets
+# fold at compile time, so they agree with each other, and a differential
+# comparison alone reports ok.
+const_fold:jvm
+
+# Comptime consts are not emitted for native yet. Unlike the four above, this
+# one is an honest gap rather than an invented answer; it is listed so the
+# corpus can carry the const_fold:jvm evidence.
+const_fold:emitc

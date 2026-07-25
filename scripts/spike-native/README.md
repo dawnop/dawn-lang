@@ -1,6 +1,6 @@
 # native 差分测试(Phase −1 spike → Phase 5 的第一道验收门)
 
-同一个 Dawn 程序在两个后端各跑一遍,`diff` stdout。
+同一个 Dawn 程序在两个后端各编一遍,两边互相比,再各自比一份**写下来的**期望输出。
 
 ```bash
 ./scripts/spike-native/run.sh                      # 跑全部语料
@@ -8,7 +8,25 @@
 ```
 
 它起初是 Phase −1 的接缝 spike(TAST 直接发 C,平凡子集),现在 `emitc` 已改吃 **Core IR**,
-语料已压到 `match`/ADT/闭包/trait 字典。**当前状态:四个语料全部逐字节一致。**
+语料已压到 `match`/ADT/闭包/trait 字典/相等/渲染/字典转发/comptime 折叠。
+
+每个语料产出至多七个具名检查:
+
+| 检查 | 含义 |
+|---|---|
+| `emitc` | `dawn __emitc` 发出了 C |
+| `cc` | 那份 C 能编 |
+| `jvm` | JVM 的 stdout == `<name>.expect` |
+| `native` | native 的 stdout == `<name>.expect` |
+| `diff` | 两个后端的 stdout 一致 |
+| `stderr` | 两个后端的 stderr 一致 |
+| `exit` | 两个后端的退出码一致 |
+
+**`jvm` / `native` 是对 `codebase-audit.md` TEST-01 的回答。** 只做后端互比,等于把 JVM 今天的
+行为认证成正确答案;而**两个后端共有的缺陷会让它们在错答案上达成一致**——凡是编译期折叠的东西
+都属此类,两边折的是同一份 `interp.dawn`。`<name>.expect` 是唯一一份不是从后端抄来的判据。
+
+**当前状态:9 个语料,6 个检查是红的,全部记在 `known-red.txt` 里。**
 
 ## 组成
 
@@ -22,6 +40,13 @@
 | `adt.dawn` | 语料二:match 决策树/守卫/嵌套模式/ADT/`?`/`!`/元组/从 match 臂里 break |
 | `closure.dawn` | 语料三:lambda 提升/捕获环境/函数值/组合/命名局部函数 |
 | `trait.dawn` | 语料四:trait 字典/去虚化/转发见证/默认方法/双约束 |
+| `recurse.dawn` | 语料五:自尾调用(spec §12.4)——无优化的 C 下也要能走 500 万层 |
+| `eq_adt.dawn` | 语料六:结构相等——ADT/记录/递归形状/Option/元组 |
+| `show_derive.dawn` | 语料七:`derive Show` 与插值——标量/ADT/泛型参数/prelude 容器 |
+| `dict_forward.dawn` | 语料八:`[T: Eq/Hash/Ord]` bound 的字典转发,三种见证各一 |
+| `const_fold.dawn` | 语料九:comptime 折叠——每个 `const` 都配一行同表达式的运行期输出 |
+| `<name>.expect` | 该语料的期望输出(**手写,不从后端抄**) |
+| `known-red.txt` | 今天就红的检查清单,带 ratchet |
 | `run.sh` | 差分 harness |
 
 入口是隐藏命令 `dawn __emitc <file> -o <out.c>`,与 `__lex`/`__parse`/`__check` 同族。
@@ -40,6 +65,24 @@ ADT 构造与字段读、match(含守卫、嵌套模式、字面量模式、元�
 **在外**(碰到就 `panic` 报节点名):集合(List/Map/Set,等 D1–D3)、comptime const、
 derive 出来的 impl、列表模式、解构 let、`use java`。
 最后一个不是缺口而是设计——`use java` 正是 FFI 里不可移植的那一半,native 后端**应该**拒绝它。
+
+## 准入规则改了(2026-07-25)
+
+这份 harness 原先的规则写在 `run.sh` 的头注释里:
+
+> a program only belongs here once both backends can compile it, so a failure is always a
+> regression, never a gap.
+
+**那条规则正是它自己的盲区。** 它只收两个后端已经同意的程序,于是语料只能由实现者随实现增长,
+天然覆盖不到实现者没想到的事。结果:五个语料里 `==` 只出现在 `Int` 和 `String` 上,
+一处都没比较过两个 ADT 值——而 ADT 相等在两个后端上给的是相反答案,已经这样很久了。
+
+新规则:**语料按语言的语义面收,不按后端的完成度收。** 今天做不到的检查记进 `known-red.txt`,
+`run.sh` 据此放行;清单外的失败是红的,而清单内的检查一旦**开始通过**也是红的
+——修好一个缺陷,对应那行必须跟着删,清单不会烂在那儿。
+
+于是「native 后端还没做到」与「某个语义压根没人定义」在同一张表里可见,且各自带着理由。
+今天六条红的完整分析在 `known-red.txt` 里。
 
 ## 三个结论
 

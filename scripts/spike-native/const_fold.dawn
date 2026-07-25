@@ -1,0 +1,61 @@
+# Comptime folding. A `const` is evaluated by `interp.dawn` against the same
+# Core IR the two backends consume, so a folded value has to be the value the
+# same expression produces at runtime. That is the whole point of the Phase 0
+# retarget: one lowering, three consumers, no third language definition.
+#
+# This corpus is the reason the harness compares against a written-down
+# expectation and not only the two backends against each other. A const is
+# folded at compile time on *both* targets, so a wrong fold is identical on
+# both -- a differential test agrees with itself and reports ok. Only the
+# .expect file, which nobody derived from a backend, can catch it.
+#
+# codebase-audit.md TEST-01 named this blind spot; this is the first corpus
+# that actually exercises it.
+use std/io
+
+pub type Point = | Point(x: Int, y: Int) derive Show
+
+pub type Suit =
+  | Hearts
+  | Spades
+  derive Show
+
+const N: Int = 6 * 7
+const NEG: Int = 0 - 5
+const FLAG: Bool = 3 < 4
+const TEXT: String = "a" ++ "b" ++ "c"
+const LEN: Int = str_len("hello")
+
+## The same expressions the runtime lines below print. Every pair must match.
+const SHOWN_INT: String = to_string(6 * 7)
+const SHOWN_BOOL: String = to_string(3 < 4)
+const SHOWN_POINT: String = to_string(Point(1, 2))
+const SHOWN_SUIT: String = to_string(Hearts)
+const SHOWN_LIST: String = to_string([1, 2, 3])
+const SHOWN_OPT: String = to_string(Some(9))
+const INTERP: String = "p=${Point(3, 4)}"
+
+pub fn main() -> Unit !io = {
+  println("-- scalars fold --")
+  println("N     = ${N}")
+  println("NEG   = ${NEG}")
+  println("FLAG  = ${FLAG}")
+  println("TEXT  = ${TEXT}")
+  println("LEN   = ${LEN}")
+
+  println("-- folded rendering vs the same expression at runtime --")
+  println("const   int   = ${SHOWN_INT}")
+  println("runtime int   = ${to_string(6 * 7)}")
+  println("const   bool  = ${SHOWN_BOOL}")
+  println("runtime bool  = ${to_string(3 < 4)}")
+  println("const   point = ${SHOWN_POINT}")
+  println("runtime point = ${to_string(Point(1, 2))}")
+  println("const   suit  = ${SHOWN_SUIT}")
+  println("runtime suit  = ${to_string(Hearts)}")
+  println("const   list  = ${SHOWN_LIST}")
+  println("runtime list  = ${to_string([1, 2, 3])}")
+  println("const   opt   = ${SHOWN_OPT}")
+  println("runtime opt   = ${to_string(Some(9))}")
+  println("const   interp= ${INTERP}")
+  println("runtime interp= ${"p=${Point(3, 4)}"}")
+}

@@ -1,0 +1,68 @@
+# Dictionary forwarding. A bound is the only construct that has to pass a
+# dictionary at runtime: a concrete witness devirtualises to a direct call,
+# but `[T: Eq]` on a generic function cannot, so the caller hands one over.
+#
+# Core carries those dictionaries in `CModule.dicts`, and that table is
+# written by lowering for exactly one reader -- the C backend. The JVM
+# backend ignores it and re-derives the class name from the checker's
+# `impl_table` instead, so nothing in the tree that ships has ever read what
+# lowering puts there.
+#
+# Three witness kinds reach a bound: WConcrete over a scalar (prelude impl),
+# WConcrete over a user impl, and WStructural (no impl at all). All three are
+# exercised here.
+use std/io
+
+pub type Key = | Key(v: Int)
+
+pub type Money = | Money(cents: Int)
+
+fn cents(m: Money) -> Int = match m { Money(c) -> c }
+
+## An explicit impl: the only witness kind with a body to call. Eq and Hash
+## have to come as a pair -- a class's equals and hashCode are the JVM
+## materialisation of both, so overriding one alone is the same bug wearing
+## a different face.
+impl Eq[Money] {
+  fn eq(a: Money, b: Money) -> Bool = cents(a) == cents(b)
+}
+
+impl Hash[Money] {
+  fn hash(m: Money) -> Int = cents(m)
+}
+
+fn same[T: Eq](a: T, b: T) -> Bool = eq(a, b)
+
+fn digest[T: Hash](x: T) -> Int = hash(x)
+
+## Deliberately two arguments rather than a list: a `List[T]` would pull in
+## collection intrinsics the native backend cannot emit until D1-D3, and this
+## corpus has to reach the C compiler to be worth anything.
+fn bigger[T: Ord](a: T, b: T) -> T = if a > b { a } else { b }
+
+fn yn(label: String, b: Bool) -> String =
+  label ++ ": " ++ (if b { "yes" } else { "no" })
+
+pub fn main() -> Unit !io = {
+  println("-- Eq forwarded to a scalar (prelude impl) --")
+  println(yn("same(3, 3)      ", same(3, 3)))
+  println(yn("same(3, 4)      ", same(3, 4)))
+  println(yn("same(\"a\", \"a\")  ", same("a", "a")))
+  println(yn("same(true, true)", same(true, true)))
+
+  println("-- Eq forwarded to a user impl --")
+  println(yn("same(Money(5), Money(5))", same(Money(5), Money(5))))
+  println(yn("same(Money(5), Money(6))", same(Money(5), Money(6))))
+
+  println("-- Eq forwarded with no impl (structural) --")
+  println(yn("same(Key(1), Key(1))", same(Key(1), Key(1))))
+  println(yn("same(Key(1), Key(2))", same(Key(1), Key(2))))
+
+  println("-- Hash forwarded --")
+  println(yn("digest(Money(9)) == 9", digest(Money(9)) == 9))
+  println(yn("digest(7) == digest(7)", digest(7) == digest(7)))
+
+  println("-- Ord forwarded --")
+  println(yn("bigger(3, 9) == 9      ", bigger(3, 9) == 9))
+  println(yn("bigger(\"a\", \"c\") == \"c\"", bigger("a", "c") == "c"))
+}

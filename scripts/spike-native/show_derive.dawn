@@ -1,0 +1,54 @@
+# Rendering. `to_string` and `${}` interpolation are type-directed, but Show
+# is not a trait: it is a `derives_show` flag on the ADT, a static
+# `is_showable` predicate in the checker, and a runtime instanceof chain in
+# `dawn/rt/Show`. Nothing about it rides the dictionary track Ord/Eq/Hash use.
+#
+# A tagged union has no instanceof chain to walk, so the JVM's materialisation
+# does not carry over: rendering is the one type-directed operation with no
+# backend-neutral definition at all.
+use std/io
+
+pub type Point = | Point(x: Int, y: Int) derive Show
+
+pub type Shape =
+  | Circle(r: Int)
+  | Rect(w: Int, h: Int)
+  | Origin
+  derive Show
+
+pub type Rec = { name: String, at: Point } derive Show
+
+pub type Boxed[T] = | Boxed(v: T) derive Show
+
+pub fn main() -> Unit !io = {
+  println("-- scalars --")
+  println(to_string(42))
+  println(to_string(0 - 7))
+  println(to_string(true))
+  println(to_string(false))
+  println(to_string(1.5))
+  println(to_string("already a string"))
+
+  println("-- derived ADTs --")
+  println(to_string(Point(1, 2)))
+  println(to_string(Circle(3)))
+  println(to_string(Rect(2, 5)))
+  println(to_string(Origin))
+  println(to_string(Rec { name: "o", at: Point(0, 0) }))
+
+  println("-- a type parameter passes through --")
+  println(to_string(Boxed(7)))
+  println(to_string(Boxed("s")))
+  println(to_string(Boxed(Point(4, 5))))
+
+  println("-- prelude containers --")
+  println(to_string(Some(3)))
+  let nothing: Option[Int] = None
+  println(to_string(nothing))
+  println(to_string([1, 2, 3]))
+  println(to_string([Point(1, 1)]))
+  println(to_string((1, "two")))
+
+  println("-- interpolation is the same operation --")
+  println("point=${Point(6, 7)} n=${8} flag=${true}")
+}
