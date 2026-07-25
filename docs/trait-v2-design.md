@@ -1,14 +1,16 @@
-# trait v2 最小切片：决策记录（设计待写）
+# trait v2 最小切片：设计
 
 > 对应 [`native-backend-plan.md`](native-backend-plan.md) §11.4 的 S2.1。
 > v1 的设计定稿在 [`trait.md`](trait.md)，S1 的在
 > [`semantics-closure-design.md`](semantics-closure-design.md)。
->
-> **这份文件现在只是决策记录,不是设计。** 四条方向已经拍了(2026-07-26),
-> 但真正的设计——替换算法、一致性判定、字典的构造时机、种子怎么切——还没写。
-> 先记下来是因为这四条互相咬合,分开看每条都像小事,合起来决定了 S2.1 有多大。
->
 > 横向调研(其他语言怎么处理相等)在 [`equality-survey.md`](equality-survey.md)。
+>
+> **读法**:§1 是拍下来的四条方向,§2 是动手前的实测(它把「破坏性改动」这个
+> 说法推翻了,并纠正了我记错的两个数),§3 是设计,§3.12 是刀法。
+>
+> 一条贯穿全文的观察:§3 里原本列的七个难题,**有三个是同一个决定的推论**
+> ——把主体形状收到 Haskell 98 的实例头(§3.2),匹配算法、一致性判定、
+> 递归终止一起消失。
 
 ## 0. 为什么 S2.1 从「以后再说」变成「下一件事」
 
@@ -77,9 +79,12 @@ std 里真写 `impl[T: Eq] Eq[List[T]]`,编译器里对应的合成机器删掉�
 
 顺序因此固定:**S2.1(2a → 发布 → 2b)→ S1.4(2a → 发布 → 2b)→ S1.5 → S1.1**。
 
-## 2. 仍然开着的一条：`==` 要不要求 `Eq` bound
+## 2. 曾经开着的一条：`==` 要不要求 `Eq` bound
 
-**这条我不替你推断。** 决策 1 选了参数化构造,它的选项说明里写了「要让残留真死,
+> 这一节保留了「开着」时的推理与实测过程,因为**结论是被数据改掉的**,
+> 而过程比结论有用。落定在 §3.7。
+
+决策 1 选了参数化构造,它的选项说明里写了「要让残留真死,
 `==` 就得要求 `[T: Eq]` bound」——但那句话是**代价提示,不是决定**:
 
 参数化构造给的是**能力**(刚性变量位置解得开),前提是那儿有字典可用。而
@@ -196,29 +201,224 @@ Perceus 确实会要一档运行期信息(擦除槽 drop 时要知道有几个�
 剩下真正要付的只有两条 —— **spec §3.5 改一条 bullet**,以及 **Float 怎么拆**
 (独立问题,取决于要不要让 `Eq` 真有法则;见 [`equality-survey.md`](equality-survey.md) §2)。
 
-**倾向:`==` 要求 bound。** 但正式落定放在 S2.1 的设计文档里,因为它的实现
-(`resolve_eq_witness` 的第四臂改成解真见证)与条件 impl 的求解器是同一段代码。
+**已在 §3.7 落定:`==` 要求 `Eq` bound。** 决定它的不止实测——§3.6 让运算符与
+bound 两条管道并成同一个 `solve`,而并管道之后「`==` 不要 bound」就没有地方安放了。
 
-## 3. 设计文档还欠的（这些不问，设计时定）
+## 3. 设计
 
-1. **替换与匹配算法**。`impl_table` 从 `(Int, Ty)` 改按 head 索引;查 `Eq[List[Int]]`
-   要匹配 `Eq[List[T]]` 并把 `T := Int` 带进 impl 自己的约束里递归求解。多参
-   (`Map[K, V]`)一起。
-2. **一致性与重叠**。默认**禁止重叠**:任意两个 impl 的 head 可合一即报错
-   (于是 `impl Eq[List[Int]]` 与 `impl[T: Eq] Eq[List[T]]` 不能并存)。
-   特化是 Rust 至今没稳定的东西,不在最小切片里。
-3. **递归求解的终止**。`Eq[List[List[List[…]]]]` 要有深度上限或环检测,且报错要
-   指得回用户写的那一行。
-4. **字典的构造时机与缓存**。运行期 `new` 在热路径上是新开销。至少要定:同一个
-   `(trait, 具体类型)` 的字典是不是全程序唯一(缓存),缓存放哪,以及 comptime
-   解释器怎么看它(`interp` 是 Core 的第三个消费者,它对 `VDict` 今天几乎不做事)。
-5. **孤儿规则怎么扩展**。「std 拥有 `List`/`Map`/`Set`/内建构造器」要写成可判定的
-   规则,并且挡住用户模块给它们写 impl。
-6. **`impl Eq` 与 `impl Hash` 成对**这条在条件 impl 下怎么说:
-   `impl[T: Eq] Eq[List[T]]` 是不是强制要求 `impl[T: Hash] Hash[List[T]]`。
-7. **种子怎么切 2a/2b**。2a = 机制进编译器且休眠(std 不用),发布;
-   2b = std 写条件 impl + 删编译器里的合成机器。**`interp` 侧的那一半必须在 2a**
-   ——种子的 comptime 折叠器要先认识它(StdStrings 那次的教训)。
+> 这一节原本是「还欠的七项」清单。写下来之后发现**其中三项是同一个决定的推论**:
+> 把主体形状收得够紧(§3.2),匹配算法、一致性判定、递归终止三个难题一起消失。
+> 所以下面不按清单顺序排,按依赖排。
+
+### 3.1 语法与 AST
+
+```dawn
+impl[T: Eq] Eq[List[T]] { fn eq(a: List[T], b: List[T]) -> Bool = ... }
+impl[K: Eq + Hash, V: Eq] Eq[Map[K, V]] { ... }
+```
+
+`impl_decl`(`parser.dawn:738`)在 trait 名前插一次已有的 `type_params`
+(`parser.dawn:356`,`fn` 用的就是它)。无歧义:`impl` 之后 `[` 是类型参数、
+`TYPEIDENT` 是 trait 名。零新词法。
+
+| 记录 | 加什么 |
+|---|---|
+| `DImpl` / `ImplView`(ast) | `tparams: List[TypeParamDecl]` |
+| `ImplI`(types) | `tparams: List[Ty]`、`constraints: List[List[Int]]` —— **与 `Sig` 同形**,复用 `bounds_of` |
+
+### 3.2 主体形状：head + 互不相同的类型变量
+
+这是全节的支点。合法主体**只有两种**:
+
+1. **具体主体**(今天的形状):具名非泛型 ADT、`Int`/`Float`/`Bool`/`String`。
+2. **head 形状**:`H[a₁, …, aₙ]`,其中 `H` 是具名类型构造器
+   (`TyAdt`、`List`、`Map`、`Set`),`aᵢ` 是**互不相同的类型变量**,
+   且恰好是这个 impl 声明的那些。
+
+```dawn
+impl[T: Eq] Eq[List[T]]          # ✅
+impl[K, V] Eq[Map[K, V]]         # ✅
+impl[T] Eq[Box[T]]               # ✅ 用户泛型 ADT
+impl Eq[List[Int]]               # ❌ 参数不是变量(为什么不放行:§3.4)
+impl[T] Eq[List[List[T]]]        # ❌ 嵌套
+impl[T] Eq[T]                    # ❌ head 是裸变量
+impl[A, B] Eq[(A, B)]            # ❌ 元组(决策 2 已排除)
+```
+
+这就是 Haskell 98 的实例头限制。**它买到三样东西**,每一样单独看都是一个难题:
+
+- **匹配退化成「head 相等 + 逐参绑定」**。查 `Eq[List[Int]]` → head 是 `List` →
+  取那个 impl → `T := Int`。不需要写合一算法,不需要 occurs check。
+- **一致性退化成 head 相等**(§3.4)。
+- **递归求解**自动终止(§3.5)。
+
+代价是失去 `impl Eq[List[Int]]` 这种特化。v1 本来就没有特化,而特化是 Rust 至今
+没稳定的东西——不进最小切片。
+
+### 3.3 索引：`impl_table` 改按 head
+
+```dawn
+pub type Head =
+  | HAdt(id: Int) | HList | HMap | HSet
+  | HInt | HFloat | HBool | HString | HBytes | HCursor
+
+pub fn head_of(t: Ty) -> Option[Head]     # 非法主体 → None
+```
+
+`impl_table: Map[(Int, Ty), ImplI]` → `Map[(Int, Head), ImplI]`。
+
+**查 `Tr[t]` 的算法**(替代今天 `resolve_witness` 的一次 `map.get`):
+
+```
+solve(tr, t, depth):
+  t 是刚性 TyVar  → 查 dict_syms → WForward(sym) / 报错「add the bound」
+  head_of(t) 无   → 报错(TyFn / TyArray / 元组…)
+  查 impl_table[(tr, head_of(t))]:
+    有 impl → 逐参绑定 σ = {impl.tparams[i] := t 的第 i 个实参}
+              对 impl 的每条约束 c:  args ++= [solve(c.trait, σ(c.ty), depth+1)]
+              → WApply(tr, t, args)
+    没有   → 若 tr ∈ {Eq, Hash, Show} 且 head 是 ADT:
+                **按需合成**一个结构 impl(§3.6),再走上面那支
+              否则报错
+```
+
+### 3.4 一致性：每 (trait, head) 至多一个 impl
+
+比「禁止重叠」更强,也更简单:**判定退化成 head 相等**,一行 `map.get`,
+而且用的就是今天那条 duplicate impl 诊断(`checker.dawn:2043`)。
+
+于是 `impl Eq[List[Int]]` 与 `impl[T: Eq] Eq[List[T]]` 不是「重叠」,是**重复**
+——报的是同一条错。这也是 §3.2 排除具体参数的原因:允许它就必须回答
+「哪个更特化」,那是特化,不是最小切片。
+
+### 3.5 递归终止：由形状保证，不靠深度上限
+
+impl 的约束只能落在**它自己的类型参数**上——这一条不是新规矩,是**表示自带的**:
+`constraints: List[List[Int]]` 按类型参数下标索引(§3.1 复用 `Sig` 的形状),
+根本没有地方写一条不在 tparams 上的约束。而 §3.2 又保证那些参数是主体的**直接实参**。
+两条合起来,每个子目标的类型是父目标的**真子项**,项大小严格递减:
+
+```
+Eq[List[(Box[Int])]]  →  Eq[Box[Int]]  →  Eq[Int]  →  prelude,停
+```
+
+**不需要深度上限,不需要环检测**——它们是形状限制换来的。`depth` 参数只作为
+断言性的兜底(超过一个大数就 panic「求解器没有按预期递减」),不是语义的一部分。
+
+### 3.6 `WStructural` 消失：结构相等也是一个（隐式的）条件 impl
+
+spec §3.5 写着「`==` 本来就对每个类型结构化,**等于每个类型隐式实现 Eq**」。
+今天这句话由一个**独立的见证种类** `WStructural` 兑现;改成**真的按需合成一个
+`ImplI`**,这句话就落到了它字面的意思上:
+
+```
+type Pair[A, B] = { l: A, r: B }
+# 求 Eq[Pair[Int, T]] 时按需合成,等价于:
+#   impl[A: Eq, B: Eq] Eq[Pair[A, B]]      (body 仍由 eq_at 展开器生成)
+```
+
+**连锁删除**:
+
+| 删掉 | 为什么不再需要 |
+|---|---|
+| `WStructural`(tast.dawn:28) | 它变成 `WApply` 的一种 |
+| `uncomparable_part`(S1 步 2 加的那道门) | 「函数值不能比」由**求解器解不出 `Eq[TyFn]`** 天然给出,而且报错措辞只剩一份 |
+| `resolve_eq_witness`(`==` 的独立管道) | 第四臂改成调 `solve`,整个函数退化成 `resolve_witness` 的一次调用 |
+
+**`WConcrete` 留着**:非泛型 impl 解出来仍是它,lowering 的去虚化路径(`lower_trait_call`
+的 `WConcrete` 支)一行不改。`WApply` 只在**有参数要传**时出现——所以见证种类
+从三个变成三个(`WForward`/`WConcrete`/`WApply`),不是四个。
+
+设计文档决策 6 那句「`a == b` 与 `[T: Eq]` 实例化后调 `eq(a,b)` 应当发出同一个调用,
+**这一点本身就该有断言**」——到这里才第一次写得出那个断言:两条路走的是同一个 `solve`。
+
+> 隐式合成**只给 `Eq`/`Hash`/`Show`** 这三个「每个类型天然就有」的 trait。
+> `Ord` 不给:它要么 `derive Ord` 要么手写,今天如此,不变。
+
+### 3.7 `==` 正式落定：要求 bound
+
+§2 的实测(破坏面 0)与 §2.2 的 RTTI 论证,加上 §3.6 让两条管道并成一条,
+三者指向同一个决定。**落定:`==` 要求 `Eq` bound。**
+
+实现面比听起来小:`solve` 的第一支(刚性 `TyVar` → 查 `dict_syms`)**今天就已经是
+这个行为**(`resolve_eq_witness` 对裸 `TyVar` 就报「add the bound」)。变的是
+含刚性变量的**复合**类型不再走 `no_wit()`,而是走 `solve` 递归下去。
+
+spec 要改的是 §3.5 的一条 bullet:「编译器合成结构见证」→「由隐式条件 impl 提供;
+主体含类型参数时要求该参数有对应 bound」。§4.3(`==` 对每个类型结构化)不动。
+
+### 3.8 字典物化：ground 静态，非 ground 运行期
+
+决策 1 说「运行期参数化构造」,但**不是所有字典都要**:
+
+| 主体 | 物化 | 代价 |
+|---|---|---|
+| ground(`Eq[List[Int]]`) | **静态单例**——今天的形状,JVM 一个类、C 一个静态 struct | 零新开销 |
+| 非 ground(`Eq[Option[T]]`,`T` 刚性) | 运行期构造 | 新 Core 节点 |
+
+新节点:`CDictApply(key: String, args: List[CExpr], ty: Ty)`。JVM:字典类多一个
+带参构造器,`CDictApply` 发 `NEW`/`DUP`/`INVOKESPECIAL`;C:`dawn_dict_new(n)` +
+逐槽写入。
+
+**缓存:先不做。** 理由是实测——今天全仓 0 处走非 ground 这条路(§2.1),
+先要正确;等语料出现再用 `selfhost-bench.sh` 量。这条写进 §4 门禁。
+
+**`interp` 必须同批**:`CDictRef` 今天返回一个占位的 `VDict`,`CDictApply` 要求
+它携带真的槽表,否则 comptime 里穿过字典的调用就假了。这一半**必须在 2a**
+——种子的 comptime 折叠器要先认识它(StdStrings 的教训)。
+
+### 3.9 孤儿规则：给 head 认一个归属模块
+
+今天(`checker.dawn:2025`):`trait_local || subject_local`,而 `subject_local` 只认
+`TyAdt` 且在本模块声明。内建构造器没有声明模块,所以要:
+
+```dawn
+fn head_owner(cx: Cx, h: Head) -> Option[String]
+#   HAdt(id) → 该 ADT 的声明模块(今天就有)
+#   HList / HMap / HSet → 指定的 std 模块
+#   标量 → 声明 prelude trait 的那个 std 模块
+```
+
+规则变成 `trait_local || head_owner(h) == 当前模块`。用户模块自然被挡住
+——`head_owner(HList)` 是 std,不等于用户模块。
+
+> **这是明知要删的脚手架。** S3 之后 `List`/`Map`/`Set` 是 std 里的真 ADT,
+> `head_owner` 退化成只剩 `HAdt` 那一支。决策 3 选「写进 std 源码」时就接受了
+> 这一段过渡代码;记在这里,免得将来有人把它当永久设计去维护。
+
+### 3.10 `Eq`/`Hash` 成对
+
+今天按 `(tid, subject)` 配对检查。改成**按 head 配对**:
+`impl[T: Eq] Eq[List[T]]` 要求存在 `Hash[List[…]]` 的 impl。
+
+两条约束**不要求相同**:`impl[T: Eq] Eq[List[T]]` 配
+`impl[T: Hash] Hash[List[T]]` 是对的——各自要各自的能力。
+
+隐式合成(§3.6)天然成对:同一个合成器一次铸两个。
+
+### 3.11 种子怎么切 2a / 2b
+
+| | 内容 | 性质 |
+|---|---|---|
+| **2a** | §3.1 语法 + §3.3 head 索引 + `solve` + `WApply` + `CDictApply` + JVM/C/**interp** 三个消费者 | **全是加法**。std 不写条件 impl,`==` 仍走老路 |
+| 发布 | v0.12.0 | 种子学会新语法与新 Core 节点 |
+| **2b** | std 写 `impl[T: Eq] Eq[List[T]]` 等;`==` 改走 `solve`;删 `WStructural`/`uncomparable_part`/`resolve_eq_witness` | 破坏性语义变更集中在这里 |
+
+这么切的理由:2a 不改任何现有程序的行为(新机制无人使用),**所以它的 Emit-Change
+应当接近零**,一旦不是就说明搬错了;2b 的行为变更则全部集中、可二分。
+
+### 3.12 刀法（每刀含测试，均可单独验）
+
+1. **语法 + AST + `ImplI` 扩展**。解析得了,注册时报「条件 impl 尚未支持」。
+   纯前端,零行为变化。
+2. **`impl_table` 改按 head**。此时还没有条件 impl,所以**这刀必须零 Emit-Change**
+   ——是纯重构,拿 Core golden 和 `__emit` 逐字节验。
+3. **`solve` + `WApply` + 按需合成结构 impl**,替掉 `WStructural`。
+   `==` 暂不接(仍走 `resolve_eq_witness`),所以行为不变。
+4. **`CDictApply` + 三个消费者**(JVM / C / interp)。
+5. 发布 **2a**。
+6. **std 写条件 impl** + `==` 走 `solve` + 删三处旧机制。**破坏性、Emit-Change 大。**
+7. 收尾:spec §3.5 改 bullet、known-red 该删的删、`trait.md` v1 范围表标注。
 
 ## 4. 门禁
 
@@ -237,4 +437,9 @@ fixpoint `B == C`、`spike-native/run.sh`、`array-contract`、
 - **决策 1 的验收物**:写一个「主体含刚性变量的 bound 转发」的语料
   (`fn f[T: Eq](x: Option[T], y: Option[T]) = x == y`),两个后端跑出同一个答案。
   今天全仓找不到这种代码(§2.1 的 0),所以**必须自己造一个**,否则参数化构造
-  接没接上刚性变量那一半没有任何门看得见。
+  接没接上刚性变量那一半没有任何门看得见。这一条同时是 §3.8 非 ground 路径的
+  唯一覆盖——那条路今天是死代码。
+- **第 2 刀必须零 Emit-Change**(§3.12)。`impl_table` 改按 head 时还没有条件 impl,
+  所以字节码不该动一个字节;动了就说明 head 索引改变了已有 impl 的解析结果。
+- **每刀之间种子纪律不断**:N−1 的编译器要能编 HEAD 的 `selfhost/src`。1–4 刀
+  不写条件 impl 就自动满足;第 6 刀靠 2a 已发布的种子。
