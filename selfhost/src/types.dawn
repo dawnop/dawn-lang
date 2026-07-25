@@ -133,6 +133,10 @@ pub type Ty =
   | TyList(elem: Ty)
   | TyMap(key: Ty, value: Ty)
   | TySet(elem: Ty)
+# the one collection primitive a backend has to implement (D1): a growable
+# immutable vector std builds List/Map/Set out of. Not part of the language's
+# surface -- only std modules may name it, only std may call `array_*`.
+  | TyArray(elem: Ty)
 # an opaque imported Java class; the display is precomputed at creation
 # (arrays need Class reflection for their readable name)
   | TyJava(fqcn: String, display: String)
@@ -221,6 +225,7 @@ pub fn ty_show(adts: Adts, t: Ty) -> String =
     TyList(e) -> "List[" ++ ty_show(adts, e) ++ "]"
     TyMap(k, v) -> "Map[" ++ ty_show(adts, k) ++ ", " ++ ty_show(adts, v) ++ "]"
     TySet(e) -> "Set[" ++ ty_show(adts, e) ++ "]"
+    TyArray(e) -> "Array[" ++ ty_show(adts, e) ++ "]"
     TyJava(_, display) -> display
     TyTuple(elems) -> "(" ++ join(map(elems, fn(x) => ty_show(adts, x)), ", ") ++ ")"
     TyFn(params, ret, eff) ->
@@ -257,6 +262,7 @@ pub fn subst(t: Ty, m: Map[Int, Ty], em: Map[Int, Eff]) -> Ty =
     TyList(e) -> TyList(subst(e, m, em))
     TyMap(k, v) -> TyMap(subst(k, m, em), subst(v, m, em))
     TySet(e) -> TySet(subst(e, m, em))
+    TyArray(e) -> TyArray(subst(e, m, em))
     TyTuple(elems) -> TyTuple(map(elems, fn(x) => subst(x, m, em)))
     TyFn(params, ret, eff) ->
       TyFn(map(params, fn(x) => subst(x, m, em)), subst(ret, m, em), subst_eff(eff, em))
@@ -670,7 +676,20 @@ pub fn builtins() -> Map[String, Sig] = {
       ..bsig("map_entries", [TyMap(k, v)], ["m"], TyList(TyTuple([k, v]))),
       tparams: [k, v]
     },
-    tp1(bsig("set_to_list", [TySet(t)], ["s"], TyList(t)), t)
+    tp1(bsig("set_to_list", [TySet(t)], ["s"], TyList(t)), t),
+    # array_* intrinsics: the one collection primitive a backend implements, and
+    # the whole of what std needs to build List/Map/Set on top (D1). Values, not
+    # storage: every operation returns a new array and none of them is observably
+    # destructive. `array_push` is the one that must extend in place when it can
+    # -- see the note on the fast path below.
+    tp1(bsig("array_new", [], [], TyArray(t)), t),
+    tp1(bsig("array_len", [TyArray(t)], ["a"], TyInt), t),
+    tp1(bsig("array_get", [TyArray(t), TyInt], ["a", "i"], t), t),
+    tp1(bsig("array_push", [TyArray(t), t], ["a", "x"], TyArray(t)), t),
+    tp1(bsig("array_with", [TyArray(t), TyInt, t], ["a", "i", "x"], TyArray(t)), t),
+    # HAMT bitmaps; a pure-Dawn loop would do, so this is only here because
+    # every target has the instruction (docs/runtime-intrinsics-design.md §5).
+    bsig("popcount", [TyInt], ["n"], TyInt)
   ]
   for s in sigs { out = map.insert(out, s.name, s) }
   out
@@ -782,7 +801,14 @@ test "builtin table renders signatures" {
     }
     None -> { assert false }
   }
-  assert map_size2(bs) == 67
+  match map.get(bs, "array_with") {
+    Some(s) -> {
+      assert sig_render(adts, traits, s) ==
+        "fn array_with[T](a: Array[T], i: Int, x: T) -> Array[T]"
+    }
+    None -> { assert false }
+  }
+  assert map_size2(bs) == 73
 }
 
 fn map_size2(m: Map[String, Sig]) -> Int = map.size(m)

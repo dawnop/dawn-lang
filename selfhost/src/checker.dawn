@@ -43,7 +43,7 @@ use tast.{
 }
 use types.{
   adt_self_ty, Ty, TyInt, TyFloat, TyBool, TyString, TyBytes, TyCursor, TyUnit, TyNever,
-  TyError, TyVar, TyAdt, TyList, TyMap, TySet, TyJava, TyTuple, TyFn,
+  TyError, TyVar, TyAdt, TyList, TyMap, TySet, TyArray, TyJava, TyTuple, TyFn,
   Eff, EPure, EIo, EffVar, EUnion, eff_union, lub_eff, eff_subsumes, eff_suffix,
   Adts, AdtI, CtorI, FieldI, Traits, TraitI, ImplI, Sym, Sig, MethodSig,
   adt_of, trait_of, ty_show, ctor_render, sig_render, subst, subst_eff,
@@ -341,6 +341,7 @@ pub fn invalid_key_part(cx: Cx, t: Ty, seen: Set[String]) -> Option[Ty] =
   match t {
     TyFloat -> Some(TyFloat)
     TyBytes -> Some(TyBytes)
+    TyArray(_) -> Some(t)
     TyList(e) -> invalid_key_part(cx, e, seen)
     TySet(e) -> invalid_key_part(cx, e, seen)
     TyMap(k, v) ->
@@ -400,15 +401,15 @@ pub fn check_key_type(cx: Cx, key_t: Ty, lo: Int, hi: Int) -> Cx = {
   var cx1 = Cx { ..cx, reported_key_types: set.insert(cx.reported_key_types, key_s) }
   let bad_s = ty_show(cx1.adts, bad)
   let inside = if bad == key_t { "" } else { " (inside `" ++ key_s ++ "`)" }
-  let why = if bad == TyFloat {
-    "NaN and -0.0 give Float two different equalities, so no hash can agree with `==`"
-  } else {
-    "Bytes hashes by identity, not content"
+  let why = match bad {
+    TyFloat -> "NaN and -0.0 give Float two different equalities, so no hash can agree with `==`"
+    TyArray(_) -> "an Array hashes by identity, not content"
+    _ -> "Bytes hashes by identity, not content"
   }
-  let hint = if bad == TyFloat {
-    "key by an Int encoding (scaled integer, bits) or a String rendering instead"
-  } else {
-    "key by a String instead: decode(b, \"UTF-8\") or a hex rendering"
+  let hint = match bad {
+    TyFloat -> "key by an Int encoding (scaled integer, bits) or a String rendering instead"
+    TyArray(_) -> "key by the List it backs instead"
+    _ -> "key by a String instead: decode(b, \"UTF-8\") or a hex rendering"
   }
   cerr_h(cx1, "`" ++ bad_s ++ "` cannot be part of a Map/Set key type" ++ inside ++ ": " ++ why,
     lo, hi, hint)
@@ -420,6 +421,7 @@ pub fn check_key_types_in(cx: Cx, t: Ty, lo: Int, hi: Int) -> Cx =
     TyMap(k, v) -> check_key_types_in(check_key_type(cx, k, lo, hi), v, lo, hi)
     TySet(e) -> check_key_type(cx, e, lo, hi)
     TyList(e) -> check_key_types_in(cx, e, lo, hi)
+    TyArray(e) -> check_key_types_in(cx, e, lo, hi)
     TyTuple(elems) -> {
       var cx1 = cx
       for e in elems { cx1 = check_key_types_in(cx1, e, lo, hi) }
@@ -627,6 +629,16 @@ fn resolve_named(cx: Cx, name: String, targs: List[TypeRef], lo: Int, hi: Int) -
     let (cx3, v) = resolve_type(cx2, targs[1])
     return (cx3, TyMap(k, v))
   }
+  # Array is the backend's collection primitive, not part of the language's
+  # surface: only std may name it, so outside std the name falls through to the
+  # ordinary lookups and a user type called `Array` still means their own.
+  if name == "Array" && cx.is_std_module {
+    if len(targs) != 1 {
+      return (cerr(cx, "Array takes exactly one type argument: Array[T]", lo, hi), TyError)
+    }
+    let (cx1, e) = resolve_type(cx, targs[0])
+    return (cx1, TyArray(e))
+  }
   if name == "Set" {
     if len(targs) != 1 {
       return (cerr(cx, "Set takes exactly one type argument: Set[T]", lo, hi), TyError)
@@ -696,6 +708,27 @@ test "scalar and container types resolve" {
     TNamed("Map", [TNamed("Int", [], 4, 7), TNamed("String", [], 9, 15)], 0, 16))
   assert t2 == TyMap(TyInt, TyString)
   assert len(cx2.diags) == 0
+}
+
+test "Array names the backend primitive in std and nothing in user code" {
+  let std_cx = cx_new(Some("std/list"), None)
+  let (s1, t) = resolve_type(std_cx, TNamed("Array", [TNamed("Int", [], 6, 9)], 0, 10))
+  assert t == TyArray(TyInt)
+  assert len(s1.diags) == 0
+  # outside std the name falls through to the ordinary lookups, so a user type
+  # called Array still means their own -- here, nothing declares one
+  let (u1, t2) = resolve_type(test_cx(), TNamed("Array", [TNamed("Int", [], 6, 9)], 0, 10))
+  assert t2 == TyError
+  assert str.contains(u1.diags[0].msg, "unknown type: Array")
+}
+
+test "an Array cannot be a Map/Set key" {
+  let std_cx = cx_new(Some("std/map"), None)
+  let (cx1, _) = resolve_type(std_cx,
+    TNamed("Set", [TNamed("Array", [TNamed("Int", [], 0, 3)], 0, 3)], 0, 4))
+  assert len(cx1.diags) == 1
+  assert str.contains(cx1.diags[0].msg, "cannot be part of a Map/Set key type")
+  assert str.contains(cx1.diags[0].msg, "hashes by identity")
 }
 
 test "a float map key is rejected once per type" {
@@ -834,6 +867,11 @@ pub fn unify_into(
         TySet(a) -> unify_into(cx, d, a, m, em)
         _ -> (m, em, false)
       }
+    TyArray(d) ->
+      match actual {
+        TyArray(a) -> unify_into(cx, d, a, m, em)
+        _ -> (m, em, false)
+      }
     TyTuple(delems) ->
       match actual {
         TyTuple(aelems) -> {
@@ -917,6 +955,7 @@ pub fn is_concrete(cx: Cx, t: Ty) -> Bool =
     TyList(e) -> is_concrete(cx, e)
     TyMap(k, v) -> is_concrete(cx, k) && is_concrete(cx, v)
     TySet(e) -> is_concrete(cx, e)
+    TyArray(e) -> is_concrete(cx, e)
     TyTuple(elems) -> {
       for a in elems {
         if not is_concrete(cx, a) { return false }
@@ -939,6 +978,7 @@ pub fn contains_fn(t: Ty) -> Bool =
     TyList(e) -> contains_fn(e)
     TyMap(k, v) -> contains_fn(k) || contains_fn(v)
     TySet(e) -> contains_fn(e)
+    TyArray(e) -> contains_fn(e)
     _ -> false
   }
 
@@ -2860,6 +2900,10 @@ pub fn internal_builtins() -> Set[String] = {
   for op in ["start", "end", "done", "char", "next", "prev", "slice", "skip"] {
     out = set.insert(out, "cursor_" ++ op)
   }
+  for op in ["new", "len", "get", "push", "with"] {
+    out = set.insert(out, "array_" ++ op)
+  }
+  out = set.insert(out, "popcount")
   set.insert(out, "index_of_from")
 }
 
@@ -2905,11 +2949,20 @@ test "internal builtins hide from user code but not std" {
   assert builtin_sig(user, "len") != None
   let std_cx = cx_new(Some("std/map"), None)
   assert builtin_sig(std_cx, "map_insert") != None
+  # the Array family is std-internal for the same reason: it is the backend
+  # contract, not language surface
+  assert builtin_sig(user, "array_push") == None
+  assert builtin_sig(user, "popcount") == None
+  assert builtin_sig(std_cx, "array_push") != None
+  assert builtin_sig(std_cx, "popcount") != None
   var has_map_insert = false
+  var has_array_push = false
   for n in visible_builtin_names(user) {
     if n == "map_insert" { has_map_insert = true }
+    if n == "array_push" { has_array_push = true }
   }
   assert not has_map_insert
+  assert not has_array_push
 }
 
 ## return / return expr — early return from the enclosing fn (or lambda).

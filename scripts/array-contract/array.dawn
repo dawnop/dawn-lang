@@ -1,0 +1,95 @@
+# The `Array` contract, exercised from the only place that may name it.
+#
+# `Array` and the `array_*` intrinsics are std-internal (docs/native-backend-plan.md
+# D1), so this file is dropped into a copy of std/ rather than sitting in
+# examples/. It is the one place the primitive is covered end to end until D2/D3
+# make std's own collections go through it.
+use java "java.lang.System"
+
+fn now_ms() -> Int !io = System.currentTimeMillis()
+
+fn render(a: Array[Int]) -> String = {
+  var s = ""
+  var i = 0
+  while i < array_len(a) {
+    if i > 0 { s = s ++ "," }
+    s = s ++ "${array_get(a, i)}"
+    i = i + 1
+  }
+  "[" ++ s ++ "]"
+}
+
+## The accumulation loop: each push extends the version the last one returned,
+## so every one of them may claim the frontier slot in place.
+fn build(n: Int) -> Array[Int] = {
+  var a: Array[Int] = array_new()
+  var i = 0
+  while i < n {
+    a = array_push(a, i)
+    i = i + 1
+  }
+  a
+}
+
+## The opposite shape: every push forks from the same published version, so at
+## most one can claim the slot and the rest copy. Returned as a checksum so the
+## work cannot be optimized away.
+fn fork_push(base: Array[Int], n: Int) -> Int = {
+  var acc = 0
+  var i = 0
+  while i < n {
+    acc = acc + array_len(array_push(base, i))
+    i = i + 1
+  }
+  acc
+}
+
+## Value semantics: no operation is observably destructive, whatever the
+## backend does underneath.
+pub fn values() -> List[String] = {
+  var a: Array[Int] = array_new()
+  var i = 0
+  while i < 6 {
+    a = array_push(a, i * 10)
+    i = i + 1
+  }
+  let b = array_with(a, 2, 999)
+  let p = array_push(a, 1)
+  let q = array_push(a, 2)
+  let long = build(40)
+  [
+    "built    ${render(a)} len=${array_len(a)}",
+    "with     ${render(b)}",
+    "original ${render(a)}",
+    "fork     ${render(p)} / ${render(q)}",
+    "grow     len=${array_len(long)} last=${array_get(long, 39)}",
+    "popcount ${popcount(0)} ${popcount(7)} ${popcount(255)}"
+  ]
+}
+
+## The half of the contract a return value cannot show: `array_push` extends in
+## place when this version owns the frontier. Timed rather than asserted
+## structurally because "did it copy" is deliberately unobservable from Dawn --
+## but the two shapes differ by a factor of n, so the clock is unambiguous.
+## The two counts differ because the copying shape is quadratic: `fork` has to
+## stay small enough that the *failing* case still finishes.
+pub fn timings(linear_n: Int, fork_n: Int) -> (Int, Int) !io = {
+  let base = build(fork_n)
+  let t0 = now_ms()
+  let big = build(linear_n)
+  let t1 = now_ms()
+  let acc = fork_push(base, fork_n)
+  let t2 = now_ms()
+  if array_len(big) != linear_n { panic("build lost elements") }
+  if acc != fork_n * (fork_n + 1) { panic("fork_push checksum") }
+  (t1 - t0, t2 - t1)
+}
+
+## Out of bounds panics rather than reading a neighbouring version's slot.
+pub fn out_of_bounds() -> String !io = {
+  let a = build(3)
+  match catch_panic(fn() => array_get(a, 3)) {
+    Ok(_) -> "no panic"
+    Err(m) -> m
+  }
+}

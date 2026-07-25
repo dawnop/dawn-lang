@@ -14,7 +14,7 @@ use std/set
 use types.{
   EPure, prelude_adts, opt_ty,
   Ty, TyInt, TyFloat, TyBool, TyString, TyBytes, TyCursor, TyUnit, TyNever,
-  TyError, TyVar, TyAdt, TyList, TyMap, TySet, TyJava, TyTuple, TyFn,
+  TyError, TyVar, TyAdt, TyList, TyMap, TySet, TyArray, TyJava, TyTuple, TyFn,
   Adts, AdtI, CtorI, adt_of, adt_jvm_name, ctor_jvm_name, Sym, Sig, Eff
 }
 use jreflect
@@ -57,6 +57,7 @@ pub fn desc_of(adts: Adts, t: Ty) -> String =
     TyList(_) -> "Ljava/util/List;"
     TyMap(_, _) -> "Ljava/util/Map;"
     TySet(_) -> "Ljava/util/Set;"
+    TyArray(_) -> "L" ++ ARRAY_CLASS ++ ";"
     TyTuple(elems) -> "L" ++ tuple_class(len(elems)) ++ ";"
     # arrays are their own descriptor ("[B"); reference classes get L…;
     TyJava(fqcn, _) -> {
@@ -93,6 +94,7 @@ pub fn is_ref(t: Ty) -> Bool =
     TyList(_) -> true
     TyMap(_, _) -> true
     TySet(_) -> true
+    TyArray(_) -> true
     TyVar(_, _) -> true
     TyFn(_, _, _) -> true
     TyTuple(_) -> true
@@ -1094,6 +1096,288 @@ pub fn gen_io_class(supers: List[String]) -> Bytes !io = {
 pub const ARRAYLIST: String = "java/util/ArrayList"
 
 pub const DAWNLIST_CLASS: String = "dawn/rt/DawnList"
+
+pub const ARRAY_CLASS: String = "dawn/rt/Array"
+
+pub const ATOMIC_INT: String = "java/util/concurrent/atomic/AtomicInteger"
+
+pub const OP_AALOAD: Int = 50
+
+pub const OP_AASTORE: Int = 83
+
+pub const OP_IF_ICMPLE: Int = 164
+
+pub const OP_ICONST_2: Int = 5
+
+## The smallest backing store a copy hands out, so the first few pushes onto a
+## fresh array do not each reallocate.
+const ARRAY_MIN_CAP: Int = 8
+
+fn array_ctor_desc() -> String = "([Ljava/lang/Object;L" ++ ATOMIC_INT ++ ";I)V"
+
+## `new dawn/rt/Array(a, used, len)` from three values already on the stack in
+## that order -- factored out because push builds one on each of its two paths.
+fn array_wrap_desc() -> String = "L" ++ ARRAY_CLASS ++ ";"
+
+## Throw a PanicError whose message is `prefix ++ i ++ " out of bounds for
+## length " ++ v.len`, with the array in local 0 and the index in local `ivar`.
+fn array_bounds_panic(m: MethodVisitor, prefix: String, ivar: Int) -> Unit !io = {
+  m.visitTypeInsn(OP_NEW, PANIC_CLASS)
+  m.visitInsn(OP_DUP)
+  m.visitTypeInsn(OP_NEW, SB)
+  m.visitInsn(OP_DUP)
+  m.visitMethodInsn(OP_INVOKESPECIAL, SB, "<init>", "()V", false)
+  append_const(m, prefix)
+  m.visitVarInsn(OP_LLOAD, ivar)
+  m.visitMethodInsn(OP_INVOKEVIRTUAL, SB, "append", "(J)L" ++ SB ++ ";", false)
+  append_const(m, " out of bounds for length ")
+  m.visitVarInsn(OP_ALOAD, 0)
+  m.visitFieldInsn(OP_GETFIELD, ARRAY_CLASS, "len", "I")
+  m.visitMethodInsn(OP_INVOKEVIRTUAL, SB, "append", "(I)L" ++ SB ++ ";", false)
+  m.visitMethodInsn(OP_INVOKEVIRTUAL, SB, "toString", "()Ljava/lang/String;", false)
+  m.visitMethodInsn(OP_INVOKESPECIAL, PANIC_CLASS, "<init>", "(Ljava/lang/String;)V", false)
+  m.visitInsn(OP_ATHROW)
+  ()
+}
+
+## dawn/rt/Array: the whole collection contract a backend owes the language
+## (docs/native-backend-plan.md D1). std builds List/Map/Set on top of this, so
+## a second backend implements one immutable vector rather than ~20 collection
+## intrinsics.
+##
+## A value is a window `a[0, len)` over a backing store that neighbouring
+## versions share; `used` counts the slots claimed across every version sharing
+## `a`. That is DawnList's representation, and it is here for DawnList's reason:
+## `array_push` may extend in place exactly when this version ends where the
+## shared region ends, which is the one-owner-at-a-time case an accumulation
+## loop produces (measured 99.1% of the compiler's appends,
+## docs/collections-dejava-research.md §9.5). Losing the CAS costs a copy, not
+## correctness -- a published array never changes, whatever its successors do.
+##
+## `array_with` always copies, and that asymmetry is the point: slot `i < len`
+## has already been handed to this version and possibly others, so no
+## watermark can tell whether anyone still reads it. Only a backend that knows
+## the value is uniquely owned may write it in place -- which on native is
+## Perceus' rc==1, and on the JVM is nothing. The append path is where the 12x
+## lives, so this is a cost the measurements say we can pay.
+pub fn gen_array_class(supers: List[String]) -> Bytes !io = {
+  let cw = AdtClassWriter.new(supers)
+  cw.begin(V17, ACC_PUBLIC + ACC_FINAL, ARRAY_CLASS, obj())
+  cw.field(ACC_PRIVATE + ACC_FINAL, "a", "[Ljava/lang/Object;")
+  cw.field(ACC_PRIVATE + ACC_FINAL, "used", "L" ++ ATOMIC_INT ++ ";")
+  cw.field(ACC_PRIVATE + ACC_FINAL, "len", "I")
+
+  let init = cw.method(ACC_PRIVATE, "<init>", array_ctor_desc()).expect("mv")
+  init.visitCode()
+  init.visitVarInsn(OP_ALOAD, 0)
+  init.visitMethodInsn(OP_INVOKESPECIAL, obj(), "<init>", "()V", false)
+  init.visitVarInsn(OP_ALOAD, 0)
+  init.visitVarInsn(OP_ALOAD, 1)
+  init.visitFieldInsn(OP_PUTFIELD, ARRAY_CLASS, "a", "[Ljava/lang/Object;")
+  init.visitVarInsn(OP_ALOAD, 0)
+  init.visitVarInsn(OP_ALOAD, 2)
+  init.visitFieldInsn(OP_PUTFIELD, ARRAY_CLASS, "used", "L" ++ ATOMIC_INT ++ ";")
+  init.visitVarInsn(OP_ALOAD, 0)
+  init.visitVarInsn(OP_ILOAD, 3)
+  init.visitFieldInsn(OP_PUTFIELD, ARRAY_CLASS, "len", "I")
+  init.visitInsn(OP_RETURN)
+  close_mv(init)
+
+  # array_new() -> the empty array
+  let nv = open_static(cw, "array_new", "()" ++ array_wrap_desc())
+  nv.visitTypeInsn(OP_NEW, ARRAY_CLASS)
+  nv.visitInsn(OP_DUP)
+  nv.visitInsn(OP_ICONST_0)
+  nv.visitTypeInsn(OP_ANEWARRAY, obj())
+  gen_new_watermark(nv, OP_ICONST_0)
+  nv.visitInsn(OP_ICONST_0)
+  nv.visitMethodInsn(OP_INVOKESPECIAL, ARRAY_CLASS, "<init>", array_ctor_desc(), false)
+  nv.visitInsn(OP_ARETURN)
+  close_mv(nv)
+
+  # array_len(v) = v.len
+  let lv = open_static(cw, "array_len", "(" ++ array_wrap_desc() ++ ")J")
+  lv.visitVarInsn(OP_ALOAD, 0)
+  lv.visitFieldInsn(OP_GETFIELD, ARRAY_CLASS, "len", "I")
+  lv.visitInsn(OP_I2L)
+  lv.visitInsn(OP_LRETURN)
+  close_mv(lv)
+
+  gen_array_get(cw)
+  gen_array_push(cw)
+  gen_array_with(cw)
+
+  # popcount(n) = Long.bitCount(n)
+  let pc = open_static(cw, "popcount", "(J)J")
+  pc.visitVarInsn(OP_LLOAD, 0)
+  pc.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Long", "bitCount", "(J)I", false)
+  pc.visitInsn(OP_I2L)
+  pc.visitInsn(OP_LRETURN)
+  close_mv(pc)
+
+  cw.visitEnd()
+  cw.toByteArray().expect("bytes")
+}
+
+## `new AtomicInteger(<the int the given opcode pushes>)`, left on the stack.
+fn gen_new_watermark(m: MethodVisitor, push_op: Int) -> Unit !io = {
+  m.visitTypeInsn(OP_NEW, ATOMIC_INT)
+  m.visitInsn(OP_DUP)
+  m.visitInsn(push_op)
+  m.visitMethodInsn(OP_INVOKESPECIAL, ATOMIC_INT, "<init>", "(I)V", false)
+  ()
+}
+
+## array_get(v, i) -> v.a[i], panicking out of bounds like `xs[i]` does.
+fn gen_array_get(cw: AdtClassWriter) -> Unit !io = {
+  let gv = open_static(cw, "array_get", "(" ++ array_wrap_desc() ++ "J)Ljava/lang/Object;")
+  let bad = Label.new()
+  gv.visitVarInsn(OP_LLOAD, 1)
+  gv.visitInsn(OP_LCONST_0)
+  gv.visitInsn(OP_LCMP)
+  gv.visitJumpInsn(OP_IFLT, bad)
+  gv.visitVarInsn(OP_LLOAD, 1)
+  gv.visitVarInsn(OP_ALOAD, 0)
+  gv.visitFieldInsn(OP_GETFIELD, ARRAY_CLASS, "len", "I")
+  gv.visitInsn(OP_I2L)
+  gv.visitInsn(OP_LCMP)
+  gv.visitJumpInsn(OP_IFGE, bad)
+  gv.visitVarInsn(OP_ALOAD, 0)
+  gv.visitFieldInsn(OP_GETFIELD, ARRAY_CLASS, "a", "[Ljava/lang/Object;")
+  gv.visitVarInsn(OP_LLOAD, 1)
+  gv.visitInsn(OP_L2I)
+  gv.visitInsn(OP_AALOAD)
+  gv.visitInsn(OP_ARETURN)
+  gv.visitLabel(bad)
+  array_bounds_panic(gv, "array index ", 1)
+  close_mv(gv)
+}
+
+## array_push(v, x) -> v with x appended. Extends in place when this version
+## ends at the shared watermark and the store has room; otherwise copies into a
+## store with slack, so the *next* push is cheap either way.
+fn gen_array_push(cw: AdtClassWriter) -> Unit !io = {
+  let pv = open_static(cw, "array_push",
+    "(" ++ array_wrap_desc() ++ "Ljava/lang/Object;)" ++ array_wrap_desc())
+  let slow = Label.new()
+  pv.visitVarInsn(OP_ALOAD, 0)
+  pv.visitFieldInsn(OP_GETFIELD, ARRAY_CLASS, "len", "I")
+  pv.visitVarInsn(OP_ISTORE, 2)
+
+  # room in the store?
+  pv.visitVarInsn(OP_ALOAD, 0)
+  pv.visitFieldInsn(OP_GETFIELD, ARRAY_CLASS, "a", "[Ljava/lang/Object;")
+  pv.visitInsn(OP_ARRAYLENGTH)
+  pv.visitVarInsn(OP_ILOAD, 2)
+  pv.visitJumpInsn(OP_IF_ICMPLE, slow)
+  # claim slot len for this thread alone
+  pv.visitVarInsn(OP_ALOAD, 0)
+  pv.visitFieldInsn(OP_GETFIELD, ARRAY_CLASS, "used", "L" ++ ATOMIC_INT ++ ";")
+  pv.visitVarInsn(OP_ILOAD, 2)
+  pv.visitVarInsn(OP_ILOAD, 2)
+  pv.visitInsn(OP_ICONST_1)
+  pv.visitInsn(OP_IADD)
+  pv.visitMethodInsn(OP_INVOKEVIRTUAL, ATOMIC_INT, "compareAndSet", "(II)Z", false)
+  pv.visitJumpInsn(OP_IFEQ, slow)
+  pv.visitVarInsn(OP_ALOAD, 0)
+  pv.visitFieldInsn(OP_GETFIELD, ARRAY_CLASS, "a", "[Ljava/lang/Object;")
+  pv.visitVarInsn(OP_ILOAD, 2)
+  pv.visitVarInsn(OP_ALOAD, 1)
+  pv.visitInsn(OP_AASTORE)
+  pv.visitTypeInsn(OP_NEW, ARRAY_CLASS)
+  pv.visitInsn(OP_DUP)
+  pv.visitVarInsn(OP_ALOAD, 0)
+  pv.visitFieldInsn(OP_GETFIELD, ARRAY_CLASS, "a", "[Ljava/lang/Object;")
+  pv.visitVarInsn(OP_ALOAD, 0)
+  pv.visitFieldInsn(OP_GETFIELD, ARRAY_CLASS, "used", "L" ++ ATOMIC_INT ++ ";")
+  pv.visitVarInsn(OP_ILOAD, 2)
+  pv.visitInsn(OP_ICONST_1)
+  pv.visitInsn(OP_IADD)
+  pv.visitMethodInsn(OP_INVOKESPECIAL, ARRAY_CLASS, "<init>", array_ctor_desc(), false)
+  pv.visitInsn(OP_ARETURN)
+
+  pv.visitLabel(slow)
+  pv.visitIntInsn(OP_BIPUSH, ARRAY_MIN_CAP)
+  pv.visitVarInsn(OP_ILOAD, 2)
+  pv.visitInsn(OP_ICONST_1)
+  pv.visitInsn(OP_IADD)
+  pv.visitInsn(OP_ICONST_2)
+  pv.visitInsn(OP_IMUL)
+  pv.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Math", "max", "(II)I", false)
+  pv.visitTypeInsn(OP_ANEWARRAY, obj())
+  pv.visitVarInsn(OP_ASTORE, 3)
+  pv.visitVarInsn(OP_ALOAD, 0)
+  pv.visitFieldInsn(OP_GETFIELD, ARRAY_CLASS, "a", "[Ljava/lang/Object;")
+  pv.visitInsn(OP_ICONST_0)
+  pv.visitVarInsn(OP_ALOAD, 3)
+  pv.visitInsn(OP_ICONST_0)
+  pv.visitVarInsn(OP_ILOAD, 2)
+  pv.visitMethodInsn(OP_INVOKESTATIC, "java/lang/System", "arraycopy",
+    "(Ljava/lang/Object;ILjava/lang/Object;II)V", false)
+  pv.visitVarInsn(OP_ALOAD, 3)
+  pv.visitVarInsn(OP_ILOAD, 2)
+  pv.visitVarInsn(OP_ALOAD, 1)
+  pv.visitInsn(OP_AASTORE)
+  pv.visitTypeInsn(OP_NEW, ARRAY_CLASS)
+  pv.visitInsn(OP_DUP)
+  pv.visitVarInsn(OP_ALOAD, 3)
+  pv.visitTypeInsn(OP_NEW, ATOMIC_INT)
+  pv.visitInsn(OP_DUP)
+  pv.visitVarInsn(OP_ILOAD, 2)
+  pv.visitInsn(OP_ICONST_1)
+  pv.visitInsn(OP_IADD)
+  pv.visitMethodInsn(OP_INVOKESPECIAL, ATOMIC_INT, "<init>", "(I)V", false)
+  pv.visitVarInsn(OP_ILOAD, 2)
+  pv.visitInsn(OP_ICONST_1)
+  pv.visitInsn(OP_IADD)
+  pv.visitMethodInsn(OP_INVOKESPECIAL, ARRAY_CLASS, "<init>", array_ctor_desc(), false)
+  pv.visitInsn(OP_ARETURN)
+  close_mv(pv)
+}
+
+## array_with(v, i, x) -> v with slot i replaced. Always copies on this
+## backend; see the class comment for why the watermark cannot help here.
+fn gen_array_with(cw: AdtClassWriter) -> Unit !io = {
+  let wv = open_static(cw, "array_with",
+    "(" ++ array_wrap_desc() ++ "JLjava/lang/Object;)" ++ array_wrap_desc())
+  let bad = Label.new()
+  wv.visitVarInsn(OP_ALOAD, 0)
+  wv.visitFieldInsn(OP_GETFIELD, ARRAY_CLASS, "len", "I")
+  wv.visitVarInsn(OP_ISTORE, 4)
+  wv.visitVarInsn(OP_LLOAD, 1)
+  wv.visitInsn(OP_LCONST_0)
+  wv.visitInsn(OP_LCMP)
+  wv.visitJumpInsn(OP_IFLT, bad)
+  wv.visitVarInsn(OP_LLOAD, 1)
+  wv.visitVarInsn(OP_ILOAD, 4)
+  wv.visitInsn(OP_I2L)
+  wv.visitInsn(OP_LCMP)
+  wv.visitJumpInsn(OP_IFGE, bad)
+  wv.visitVarInsn(OP_ALOAD, 0)
+  wv.visitFieldInsn(OP_GETFIELD, ARRAY_CLASS, "a", "[Ljava/lang/Object;")
+  wv.visitVarInsn(OP_ILOAD, 4)
+  wv.visitMethodInsn(OP_INVOKESTATIC, "java/util/Arrays", "copyOf",
+    "([Ljava/lang/Object;I)[Ljava/lang/Object;", false)
+  wv.visitVarInsn(OP_ASTORE, 5)
+  wv.visitVarInsn(OP_ALOAD, 5)
+  wv.visitVarInsn(OP_LLOAD, 1)
+  wv.visitInsn(OP_L2I)
+  wv.visitVarInsn(OP_ALOAD, 3)
+  wv.visitInsn(OP_AASTORE)
+  wv.visitTypeInsn(OP_NEW, ARRAY_CLASS)
+  wv.visitInsn(OP_DUP)
+  wv.visitVarInsn(OP_ALOAD, 5)
+  wv.visitTypeInsn(OP_NEW, ATOMIC_INT)
+  wv.visitInsn(OP_DUP)
+  wv.visitVarInsn(OP_ILOAD, 4)
+  wv.visitMethodInsn(OP_INVOKESPECIAL, ATOMIC_INT, "<init>", "(I)V", false)
+  wv.visitVarInsn(OP_ILOAD, 4)
+  wv.visitMethodInsn(OP_INVOKESPECIAL, ARRAY_CLASS, "<init>", array_ctor_desc(), false)
+  wv.visitInsn(OP_ARETURN)
+  wv.visitLabel(bad)
+  array_bounds_panic(wv, "array index ", 1)
+  close_mv(wv)
+}
 
 ## sortBy for dawn/rt/Lists — the ordering substrate std/list's sort delegates to.
 fn gen_list_ordering(cw: AdtClassWriter) -> Unit !io = {
@@ -2546,6 +2830,7 @@ pub fn emit_unerase(m: MethodVisitor, adts: Adts, t: Ty) -> Unit !io = {
     TyList(_) -> { m.visitTypeInsn(OP_CHECKCAST, "java/util/List") }
     TyMap(_, _) -> { m.visitTypeInsn(OP_CHECKCAST, "java/util/Map") }
     TySet(_) -> { m.visitTypeInsn(OP_CHECKCAST, "java/util/Set") }
+    TyArray(_) -> { m.visitTypeInsn(OP_CHECKCAST, ARRAY_CLASS) }
     TyTuple(elems) -> { m.visitTypeInsn(OP_CHECKCAST, tuple_class(len(elems))) }
     TyJava(fqcn, _) -> {
       let internal = join(str.split(fqcn, "."), "/")

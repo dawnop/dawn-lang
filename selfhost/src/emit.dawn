@@ -17,7 +17,7 @@ use std/map
 use std/set
 use types.{
   Ty, TyInt, TyFloat, TyBool, TyString, TyBytes, TyCursor, TyUnit, TyNever,
-  TyError, TyVar, TyAdt, TyList, TyMap, TySet, TyJava, TyTuple, TyFn,
+  TyError, TyVar, TyAdt, TyList, TyMap, TySet, TyArray, TyJava, TyTuple, TyFn,
   Adts, AdtI, CtorI, FieldI, adt_of, adt_jvm_name, ctor_jvm_name,
   Sym, Sig, Eff, Traits, TraitI, MethodSig, ImplI, trait_of, ORD_ID, EQ_ID, HASH_ID, builtins
 }
@@ -42,7 +42,7 @@ use codegen.{
   OP_BIPUSH, OP_ARRAYLENGTH,
   PANIC_CLASS, UNIT_CLASS, SB, SHOW_CLASS, BYTES_CLASS, IO_CLASS,
   LISTS_CLASS, STRINGS_CLASS, MAPS_CLASS, FN_CMP_CLASS,
-  ARRAYLIST, DAWNLIST_CLASS
+  ARRAYLIST, DAWNLIST_CLASS, ARRAY_CLASS
 }
 use core.{
   CExpr, CStmt, CCallee, CFun, CModule, CParam, CDictDef, CDictSlot,
@@ -307,6 +307,7 @@ fn unerase(g: Gen, t: Ty) -> Unit !io = {
     TyList(_) -> { m.visitTypeInsn(OP_CHECKCAST, "java/util/List") }
     TyMap(_, _) -> { m.visitTypeInsn(OP_CHECKCAST, "java/util/Map") }
     TySet(_) -> { m.visitTypeInsn(OP_CHECKCAST, "java/util/Set") }
+    TyArray(_) -> { m.visitTypeInsn(OP_CHECKCAST, ARRAY_CLASS) }
     TyTuple(elems) -> { m.visitTypeInsn(OP_CHECKCAST, tuple_class(len(elems))) }
     TyJava(fqcn, _) -> { m.visitTypeInsn(OP_CHECKCAST, internal_of(fqcn)) }
     TyFn(params, _, _) -> { m.visitTypeInsn(OP_CHECKCAST, fn_iface(len(params))) }
@@ -462,6 +463,7 @@ fn subst_tvar(t: Ty, vid: Int, to: Ty) -> Ty =
     TyList(e) -> TyList(subst_tvar(e, vid, to))
     TyMap(k, v2) -> TyMap(subst_tvar(k, vid, to), subst_tvar(v2, vid, to))
     TySet(e) -> TySet(subst_tvar(e, vid, to))
+    TyArray(e) -> TyArray(subst_tvar(e, vid, to))
     TyTuple(es) -> {
       var out: List[Ty] = []
       for e in es { out = out ++ [subst_tvar(e, vid, to)] }
@@ -690,6 +692,9 @@ fn rt_intrinsic_target(name: String) -> Option[(String, String)] =
   else if str.starts_with(name, "str_") { Some((STRINGS_CLASS, name)) }
   else if str.starts_with(name, "bytes_") { Some((BYTES_CLASS, name)) }
   else if str.starts_with(name, "io_") { Some((IO_CLASS, name)) }
+  else if str.starts_with(name, "array_") || name == "popcount" {
+    Some((ARRAY_CLASS, name))
+  }
   else if is_map_builtin(name) { Some((MAPS_CLASS, name)) }
   else { None }
 
