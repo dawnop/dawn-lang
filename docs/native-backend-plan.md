@@ -377,7 +377,7 @@ native 永远走字典。而当前语料里显式 impl 有**零处**。所以「
 JVM 侧的派生路径本来就是「`equals` 方法 = Eq 字典的 JVM 物化」,这不是妥协,是**被现有运行时逼出来的**:
 `DawnMap`/`DawnSet` 是 `java.util.Abstract*` 的子类,在 D2 之前必须继续按 `equals`/`hashCode` 工作。
 
-### 9.3 已落地(D0-1,零 Emit-Change)
+### 9.3 已落地
 
 `Eq`(id 1)/`Hash`(id 2)进 prelude,六个标量(Int/Float/Bool/String/Bytes/Cursor)有 prelude impl。
 显式 `impl Eq[T]`/`impl Hash[T]` 可写可调;标量上的 `eq`/`hash` **去虚化成原语**而不是查字典
@@ -387,6 +387,20 @@ JVM 侧的派生路径本来就是「`equals` 方法 = Eq 字典的 JVM 物化�
 
 **没有 `derive Eq`**——Dawn 的 `==` 本来就对所有类型结构化(spec §4.3),等于每个类型隐式实现 Eq;
 trait 的作用是让类型**覆盖**它,不是让类型**选择加入**。
+
+**D0-2**:`[T: Eq]`/`[T: Hash]` 约束打开,字典按需发射——只有程序里真有这类约束时才带上
+`dawn/tr/{Eq,Hash}` 与 12 个标量字典单例;没有则逐字节不变(拿改动前的 jar 对拍过)。
+
+**D0-3(语义那步)**:`==` 在有显式 `impl Eq` 的类型上即该 impl。配套两件缺一不可——
+①**类的 `equals`/`hashCode` 转发到 impl**(它们是 Eq/Hash 字典在 JVM 上的物化,容器和派生字段比较
+都从这儿走关系;只改运算符会让 `a == b` 为真而 `map.get(m, b)` 为 None);
+②**`impl Eq` 与 `impl Hash` 必须成对**,单边覆盖就是同一个 bug 换张脸。
+见证多了第三种 `WStructural`:约束实例化到没有 impl 的类型时,由编译器合成结构见证
+(JVM 上一个共享单例即可,因为结构关系就是值自己的 `equals`;主体静态已知时直接塌缩成原语)。
+
+> **可覆盖带来一个新陷阱**:`impl Eq[T]` 体内写 `a == b` 就是这个 impl 自己,无限递归——
+> 覆盖之后结构化默认**从覆盖体内够不着**。`examples/eqhash.dawn` 把这条写在注释里。
+> 目前不诊断(直接自递归好查,间接的要做调用图),留给需要时再补。
 
 > 顺带挖出一个先于 D0 的静默 bug:`Bytes` 的相等**只有裸用时**是结构化的,嵌进 record/元组/List/Option
 > 就退回引用同一性(实测见 [bytes-design.md](bytes-design.md) 决策 A)。根因正是 D0 要消灭的

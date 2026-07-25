@@ -317,6 +317,16 @@ fn sort2[T: Ord2](xs: List[T]) -> List[T] = ...   # 约束：[T: Trait (+ Trait)
 - 预置 `trait Ord[T] { fn cmp(a: T, b: T) -> Int }` 及 `Int`/`Float`/`String`
   的 impl；`derive Ord` 生成字段字典序比较（和类型先比构造器声明顺序），字段须为
   `Int`/`Float`/`String` 或自身具 Ord impl 的类型。
+- 预置 `trait Eq[T] { fn eq(a: T, b: T) -> Bool }` 与
+  `trait Hash[T] { fn hash(x: T) -> Int }`，`Int`/`Float`/`Bool`/`String`/`Bytes`/`Cursor`
+  各有 impl。**没有 `derive Eq`**：`==` 本来就对每个类型结构化（§4.3），等于每个类型
+  隐式实现 Eq；写 impl 是为了**覆盖**它。
+  - 覆盖后 `==` 即该 impl，容器与嵌套比较（`equals`/`hashCode`）一并跟随。
+  - **`impl Eq` 与 `impl Hash` 必须成对出现**（编译错误）：相等的值必须哈希相同，
+    否则该类型作 `Map`/`Set` 键即失效。
+  - 覆盖体内不能用 `==` 比较主体类型本身——那就是这个 impl，会无限递归；比字段。
+  - `Eq`/`Hash` 约束实例化到**没有 impl 的类型**（含 `List[T]`、元组等 v1 写不出
+    impl 的形状）时，编译器**合成结构见证**；主体静态已知时直接塌缩成原语。
 - 限制：trait 方法与带约束的函数不可用作函数值（提示包 lambda）；comptime 中
   不允许 trait 约束的调用与 impl 排序。
 
@@ -392,7 +402,8 @@ let area = {
 - `Float` 的 `to_string`/`Show` 渲染 = JVM `Double.toString`（最短往返表示，
   `NaN`/`Infinity`/`-Infinity` 照字面）。
 
-- `==`/`!=` 是结构相等，对任意类型可用（函数类型除外——比较函数是编译错误）。
+- `==`/`!=` 默认是结构相等，对任意类型可用（函数类型除外——比较函数是编译错误）；
+  类型可用 `impl Eq` 覆盖这个默认（§3.5）。
 - 排序比较 `< <=` 等：`Int`/`Float`/`String` 原生有序；其他类型桥接到预置
   trait `Ord` 的 `cmp`（见 §3.5）——有 impl（手写或 `derive Ord`）即可比较，
   受 `[T: Ord]` 约束的类型参数同理。
@@ -1153,7 +1164,7 @@ native-image，责任在库，见 §12.3）。Dawn 无依赖解析——只接�
 | `match` | `instanceof` 链 + 字段读取（不用 indy、不用 pattern switch） |
 | lambda/闭包 | `LambdaMetafactory`（native-image 支持名单内） |
 | 泛型 | 擦除 + 装箱 |
-| 结构相等类型 | ADT/record/元组生成配套 `equals` 与 `hashCode`（供 `Map`/`Set` 作键） |
+| 结构相等类型 | ADT/record/元组生成配套 `equals` 与 `hashCode`（供 `Map`/`Set` 作键）；有 `impl Eq`/`impl Hash` 时两者转发到该 impl，故容器与 `==` 永远同一个关系 |
 | `Int`/`Float`/`Bool` | 原生 `long`/`double`/`boolean`，仅泛型位置装箱 |
 | `panic` | 抛 `dawn.rt.PanicError`（Error 子类，不可被 Dawn 捕获） |
 
