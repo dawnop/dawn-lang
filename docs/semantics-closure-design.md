@@ -271,7 +271,7 @@ intrinsic 今天用字符串名标识,于是「这个名字属于谁、可见吗
 
 | 步 | 内容 | 出口 | 门禁 |
 |---|---|---|---|
-| 1 | S1.2 展开器(ground)+ 决策 3 的具名 intrinsic + 决策 4 的 `Bytes` 配对修 | `eq_adt:native`/`eq_adt:diff`/`eq_bytes:jvm` 三行删除 | Core golden 重录 + `Emit-Change` |
+| 1 | S1.2 展开器(ground)+ 决策 3 的具名 intrinsic + 决策 4 的 `Bytes` 配对修 | ✅ 三行已删 | Core golden 已重录 |
 | 2 | S1.6 `WStructural` 收窄(`TyFn`/`TyArray` 报错) | §11.1 的三闭合 | 既有 164 测 |
 | 3 | S1.3 字典表成为唯一真相 | `dict_forward:cc` 删除 | Core golden 是唯一看得见它的门 |
 | 4 | S1.4 `Show` 成 trait | `show_derive:emitc`/`const_fold:jvm` 删除 | 差分 harness 全绿 |
@@ -290,6 +290,21 @@ intrinsic 今天用字符串名标识,于是「这个名字属于谁、可见吗
 每步都要过:`dawn fmt --check`、`dawn test selfhost`、fixpoint `B == C`、
 `spike-native/run.sh`、`array-contract`、`selfhost-core-diff.sh`、N vs N−1 差分
 (改字节码的必须带 `Emit-Change:`)。
+
+### 9.1 第 1 步做完之后的实测
+
+- **`eq_adt` 在 native 上从「每个 yes 都答成 no」变成全绿**,`diff` 一并绿。C 后端第一次
+  有结构相等,而它一行 C 都没为此写——编的是 lowering 展开出来的同一份 Core。
+- **`eq_bytes:jvm` 全绿**,21 行逐字对上手写的 `.expect`。
+- **残留可数**:编译器自身的 52 个模块里,合成出 **50** 个比较函数,还剩 **54** 处
+  `struct_eq`。约一半,与决策 3 的预期一致——这个数就是 S2.1 的进度条。
+- **自举比值没有可测的退化**:7 次采样中位数 1.0981,相对基线 −1.5%,而 spread 12.6%。
+  换句话说这台机器分辨不出这次改动的开销,**不能**据此声称变快了。
+  (3 次采样那轮给的是 1.1520 / spread 15.0%,正是 S0.5 那条「spread ≥ 15% 就别下结论」
+  的用处——那一轮什么也不能说明。)
+- **顺手抓到一条自伤**:第一版把 `!=` 也一律走展开器,于是标量的 `a != b` 从 `CNe`
+  变成了 `not (a == b)`——白丢一个两个后端都直接实现的节点。Core golden 的 diff 里
+  一眼可见,这正是 S0.4 建它的理由。
 
 ## 10. 风险
 

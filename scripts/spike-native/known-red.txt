@@ -9,28 +9,13 @@
 # four wrong answers stayed invisible.
 
 # --- equality -------------------------------------------------------------
-# `resolve_eq_witness` yields no witness for a concrete type with no impl,
-# lowering emits a bare CBinary(CEq), and each backend picks a meaning:
-# Object.equals on the JVM, C's `==` on native. Every structural equality in
-# eq_adt.dawn that answers yes on the JVM answers no on native -- both exit 0
-# with no diagnostic.
-eq_adt:native
-eq_adt:diff
+# Closed by the structural expander (semantics-closure-design.md 3): lowering
+# spells the comparison out over the type's own structure, so both backends
+# compile one definition instead of inventing one each. eq_adt:native,
+# eq_adt:diff and eq_bytes:jvm were deleted here.
 
-# The same seam, inside the backend that ships. `Bytes` is a JVM byte[], so
-# content equality had to be hand-written -- and it was written once, in
-# emit.gen_equality, which only the `==` operator reaches. Derived equals, the
-# tuple class and the runtime containers each carry their own copy of "what
-# equal means" and none of them mentions Bytes, so eight lines of eq_bytes.dawn
-# answer no where the spec says yes. Recorded in bytes-design.md 决策 A: fixing
-# only the parts the compiler emits would leave records structural and lists
-# still identity, which is worse than one consistent wrong answer. What closes
-# it is Eq becoming a real trait with a single Eq[Bytes] (S1.2/S1.6) plus D2/D3
-# turning the containers into Dawn.
-eq_bytes:jvm
-
-# bytes_* has no native implementation yet -- an honest gap, and the reason
-# only the jvm check above carries evidence.
+# bytes_* has no native implementation yet, so the Bytes corpus cannot reach
+# the C compiler. An honest gap, not an invented answer.
 eq_bytes:emitc
 
 # --- rendering ------------------------------------------------------------

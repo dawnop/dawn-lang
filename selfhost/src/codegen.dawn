@@ -2514,9 +2514,9 @@ pub fn load_slot(m: MethodVisitor, t: Ty, slot: Int) -> Unit !io = {
 pub fn hash_of(m: MethodVisitor, t: Ty) -> Unit !io = {
   # deliberately a `Ty` match and not `jvm_repr`: hashing is a question about
   # Dawn *values*, not about machine representation, and routing it through
-  # the representation would hide the types whose answer here is wrong.
-  # `TyBytes` is one -- a byte array hashes by identity, which is why the
-  # checker refuses Bytes as a Map/Set key (bytes-design.md decision A).
+  # the representation would hide the types whose answer here has to be
+  # spelled out -- `TyBytes` is one, and inheriting "it is a reference, so
+  # Object.hashCode" is how it was wrong before.
   match t {
     TyInt -> { m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Long", "hashCode", "(J)I", false) }
     TyCursor -> { m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Long", "hashCode", "(J)I", false) }
@@ -2526,7 +2526,12 @@ pub fn hash_of(m: MethodVisitor, t: Ty) -> Unit !io = {
     TyBool -> {
       m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Boolean", "hashCode", "(Z)I", false)
     }
-    TyString | TyBytes | TyVar(_, _) | TyAdt(_, _) | TyJava(_, _) -> {
+    # content hash, to stay consistent with the content equality
+    # gen_equals_method now uses for a Bytes field
+    TyBytes -> {
+      m.visitMethodInsn(OP_INVOKESTATIC, "java/util/Arrays", "hashCode", "([B)I", false)
+    }
+    TyString | TyVar(_, _) | TyAdt(_, _) | TyJava(_, _) -> {
       m.visitMethodInsn(OP_INVOKEVIRTUAL, obj(), "hashCode", "()I", false)
     }
     TyList(_) | TyMap(_, _) | TySet(_) | TyArray(_) | TyTuple(_) | TyFn(_, _, _) -> {
@@ -2620,6 +2625,16 @@ fn gen_equals_method(cw: AdtClassWriter, adts: Adts, sub: String, ci: CtorI) -> 
         m.visitJumpInsn(OP_IFNE, no)
       }
       TyBool -> { m.visitJumpInsn(OP_IF_ICMPNE, no) }
+      # a byte[] has no content `equals` of its own, so this arm used to make
+      # a Bytes field compare by identity -- while the `==` operator on the
+      # same two values compared by content. This method is the JVM's
+      # implementation of the `struct_eq` contract, so it has to answer what
+      # the synthesised comparison answers. Paired with hash_of's TyBytes arm:
+      # changing one alone breaks equals/hashCode.
+      TyBytes -> {
+        m.visitMethodInsn(OP_INVOKESTATIC, "java/util/Arrays", "equals", "([B[B)Z", false)
+        m.visitJumpInsn(OP_IFEQ, no)
+      }
       _ -> {
         m.visitMethodInsn(OP_INVOKEVIRTUAL, obj(), "equals", "(Ljava/lang/Object;)Z", false)
         m.visitJumpInsn(OP_IFEQ, no)

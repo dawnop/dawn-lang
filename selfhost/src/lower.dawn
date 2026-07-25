@@ -19,7 +19,8 @@ use std/str
 use types.{
   subst,
   Ty, TyInt, TyFloat, TyBool, TyString, TyUnit, TyNever, TyError, TyVar,
-  TyAdt, TyList, TyTuple, TyFn, Sym, Sig, Traits, TraitI, ImplI, MethodSig,
+  TyAdt, TyList, TyTuple, TyFn, TyBytes, TyCursor, TyMap, TySet, TyArray, TyJava,
+  Sym, Sig, Traits, TraitI, ImplI, MethodSig,
   Adts, AdtI, CtorI, adt_of, trait_of, OPTION_ID, RESULT_ID, ORD_ID, EQ_ID, HASH_ID,
   is_eq_scalar, builtins
 }
@@ -49,7 +50,7 @@ use core.{
   CDictDef, CDictSlot, CSlotFn, CSlotDefault,
   CAdd, CSub, CMul, CDiv, CMod, CEq, CNe, CLt, CLe, CGt, CGe, CAnd, COr,
   CBand, CBor, CBxor, CShl, CShr, CUshr, CConcat, CNeg, CNot, CBnot,
-  COwned, CBorrowed, cex_ty, ty_key, diverges
+  COwned, CBorrowed, cex_ty, ty_key, ty_key_inst, diverges
 }
 
 # Prelude constructor indices, fixed by types.prelude_adts.
@@ -660,6 +661,200 @@ fn make_bridge(
   }
 }
 
+# ---- structural equality (docs/semantics-closure-design.md 3) ----
+#
+# `a == b` used to reach the backends as a bare `CBinary(CEq, ..)` whatever
+# the operand type was, and Core said nothing about what it meant. Each
+# consumer therefore invented an answer: Object.equals on the JVM, C's `==`
+# on native, a hand-written walk in the interpreter, another in the tuple
+# class. Seven of them, and they disagreed.
+#
+# Now the relation is spelled out here, once, over the type's own structure.
+# What a backend still gets to implement is only the two ends: the scalars it
+# compares natively, and `struct_eq` on a value whose type is not ground.
+
+## Does this type still mention a rigid type parameter?
+##
+## A ground type can be compared field by field right here. A non-ground one
+## cannot: the erased slot needs `Eq[T]`, and nothing supplies it -- `==` does
+## not demand an `Eq` bound on a *composite* containing a rigid variable
+## (`fn f[T](x: Option[T], y: Option[T]) = x == y` compiles with no bound).
+## Closing that needs either a breaking change to `==` or S2.1's conditional
+## impls, so until then the erased half stays a named runtime call.
+fn is_ground(t: Ty) -> Bool =
+  match t {
+    TyVar(_, _) -> false
+    TyAdt(_, args) -> all_ground(args)
+    TyTuple(elems) -> all_ground(elems)
+    TyList(e) -> is_ground(e)
+    TySet(e) -> is_ground(e)
+    TyArray(e) -> is_ground(e)
+    TyMap(k, v) -> is_ground(k) && is_ground(v)
+    TyFn(ps, r, _) -> all_ground(ps) && is_ground(r)
+    TyInt | TyFloat | TyBool | TyString | TyBytes | TyCursor -> true
+    TyUnit | TyNever | TyError | TyJava(_, _) -> true
+  }
+
+fn all_ground(ts: List[Ty]) -> Bool = {
+  for t in ts {
+    if not is_ground(t) { return false }
+  }
+  true
+}
+
+## Can the relation be spelled out over this type's own structure? Containers
+## cannot: their element walk lives in the runtime until D2/D3 makes them
+## Dawn. Everything else with fields can.
+fn expandable_eq(t: Ty) -> Bool =
+  match t {
+    TyAdt(_, _) -> true
+    TyTuple(_) -> true
+    _ -> false
+  }
+
+fn conj(acc: Option[CExpr], c: CExpr) -> CExpr =
+  match acc {
+    None -> c
+    Some(e) -> CBinary(CAnd, e, c, TyBool)
+  }
+
+fn conj_or_true(acc: Option[CExpr]) -> CExpr =
+  match acc {
+    Some(e) -> e
+    None -> CBool(true)
+  }
+
+## `a == b` at one type, as Core. **Every** producer of a Dawn equality goes
+## through here: the `==` operator, a `[T: Eq]` bound instantiated at a
+## concrete type, and each field inside a synthesised comparison. Before this
+## the first two were separate pipelines from the language's first day -- the
+## operator never consulted a witness at all -- which is the first cause of
+## the relation having had several definitions.
+fn eq_at(st: LSt, a: CExpr, b: CExpr, t: Ty) -> (LSt, CExpr) = {
+  # the scalars a backend compares natively. From here on `CBinary(CEq, ..)`
+  # means this and nothing else.
+  if is_eq_scalar(t) { return (st, CBinary(CEq, a, b, TyBool)) }
+  # an explicit `impl Eq` wins over structure, exactly as it does when the
+  # same comparison arrives through a bound
+  if map.has(st.impls, (EQ_ID, t)) {
+    let imp = impl_for(st, EQ_ID, t)
+    if imp.derived || provides(imp, "eq") {
+      return (st, CCall(
+        CImpl(owner_or(imp.owner, st.owner), EQ_ID, t, "eq", imp.derived),
+        [a, b], TyBool))
+    }
+  }
+  if is_ground(t) && expandable_eq(t) {
+    let (st1, name) = struct_eq_fn(st, t)
+    return (st1, CCall(CDirect(st1.owner, name), [a, b], TyBool))
+  }
+  (st, CIntrinsic("struct_eq", [a, b], TyBool))
+}
+
+## The structural equality of one ground composite type, as an ordinary
+## top-level function -- no backend knows it is special, the same way no
+## backend knows about a dictionary bridge.
+##
+## Keyed by the *instantiated* type, not the declaration: `Option[Int]` and
+## `Option[Point]` need different comparisons, and a JVM class (one per
+## declaration) could not carry both.
+fn struct_eq_fn(st: LSt, t: Ty) -> (LSt, String) = {
+  let name = "structeq\$" ++ ty_key_inst(t)
+  for f in st.lifted {
+    if f.name == name { return (st, name) }
+  }
+  let (st0, asym) = fresh_sym(st)
+  let (st1, bsym) = fresh_sym(st0)
+  let ps = [
+    CParam { sym: asym, ty: t, mode: COwned },
+    CParam { sym: bsym, ty: t, mode: COwned }
+  ]
+  # publish the name before building the body: a recursive type reaches this
+  # same function from inside itself, and without the reservation that
+  # recurses until the stack ends
+  let stub = CFun {
+    name: name,
+    owner: st1.owner,
+    captures: [],
+    params: ps,
+    dicts: [],
+    ret: TyBool,
+    body: CBool(true),
+    is_test: false,
+    impl_of: None,
+    default_of: None
+  }
+  let st2 = LSt { ..st1, lifted: st1.lifted ++ [stub] }
+  let (st3, body) = struct_eq_body(st2, CLocal(asym, t), CLocal(bsym, t), t)
+  var out: List[CFun] = []
+  for f in st3.lifted {
+    if f.name == name {
+      out = out ++ [CFun { ..f, body: body }]
+    } else {
+      out = out ++ [f]
+    }
+  }
+  (LSt { ..st3, lifted: out }, name)
+}
+
+fn struct_eq_body(st: LSt, a: CExpr, b: CExpr, t: Ty) -> (LSt, CExpr) =
+  match t {
+    TyTuple(elems) -> {
+      var st1 = st
+      var acc: Option[CExpr] = None
+      var i = 0
+      for et in elems {
+        let (st2, c) = eq_at(st1, CTupleGet(a, i, et), CTupleGet(b, i, et), et)
+        st1 = st2
+        acc = Some(conj(acc, c))
+        i = i + 1
+      }
+      (st1, conj_or_true(acc))
+    }
+    TyAdt(aid, _) -> {
+      let info = adt_of(st.adts, aid)
+      # one constructor: there is no discriminant to disagree about
+      if len(info.ctors) == 1 {
+        return ctor_fields_eq(st, a, b, t, aid, 0)
+      }
+      # several: `a` picks the arm and `b` has to be in the same one. Built
+      # back to front so the last `else` is the honest `false`.
+      var st1 = st
+      var chain: CExpr = CBool(false)
+      var ci = len(info.ctors) - 1
+      while ci >= 0 {
+        let (st2, fe) = ctor_fields_eq(st1, a, b, t, aid, ci)
+        st1 = st2
+        let same = if len(info.ctors[ci].fields) == 0 {
+          CIsCtor(b, aid, ci)
+        } else {
+          CBinary(CAnd, CIsCtor(b, aid, ci), fe, TyBool)
+        }
+        chain = CIf(CIsCtor(a, aid, ci), same, Some(chain), TyBool)
+        ci = ci - 1
+      }
+      (st1, chain)
+    }
+    _ -> panic("lower: struct_eq_body on a type with no structure to compare")
+  }
+
+fn ctor_fields_eq(st: LSt, a: CExpr, b: CExpr, sc: Ty, aid: Int, ci: Int) -> (LSt, CExpr) = {
+  let c = adt_of(st.adts, aid).ctors[ci]
+  var st1 = st
+  var acc: Option[CExpr] = None
+  var idx = 0
+  while idx < len(c.fields) {
+    let ft = concrete_field_ty(st1, sc, aid, ci, idx)
+    let (st2, e) = eq_at(st1,
+      read_field(st1, a, sc, aid, ci, idx),
+      read_field(st1, b, sc, aid, ci, idx), ft)
+    st1 = st2
+    acc = Some(conj(acc, e))
+    idx = idx + 1
+  }
+  (st1, conj_or_true(acc))
+}
+
 ## Does this witness stand for a relation the backend implements directly,
 ## rather than for a body to call?
 fn primitive_eq_witness(w: WitRef, tid: Int) -> Bool = {
@@ -729,7 +924,7 @@ fn lower_trait_call(
     if tid == EQ_ID {
       let (sta, lv) = lower_expr(st, args[0])
       let (stb, rv) = lower_expr(sta, args[1])
-      return (stb, CBinary(CEq, lv, rv, TyBool))
+      return eq_at(stb, lv, rv, tex_ty(args[0]))
     }
     if tid == HASH_ID {
       let (sta, v) = lower_expr(st, args[0])
@@ -1073,11 +1268,27 @@ pub fn lower_expr(st0: LSt, e: TExpr) -> (LSt, CExpr) = {
             let (st1, c) = lower_trait_call(st, ORD_ID, "cmp", [l, r], [w], TyInt)
             (st1, CBinary(bin_op(op), c, CInt(0), TyBool))
           }
-        None -> {
-          let (st1, lv) = lower_expr(st, l)
-          let (st2, rv) = lower_expr(st1, r)
-          (st2, CBinary(bin_op(op), lv, rv, ty))
-        }
+        # No witness. For `==`/`!=` that is not "nothing to dispatch": the
+        # checker returns no witness whenever the answer is the structural
+        # default, so this is the operator's own path into the same relation
+        # a bound reaches through `lower_trait_call` -- both end at `eq_at`.
+        None ->
+          # A scalar keeps its own node -- `CNe` is a relation both backends
+          # implement directly, and routing it through `not (a == b)` would
+          # cost a node for nothing.
+          if is_eq_op(op) && not is_eq_scalar(tex_ty(l)) {
+            let (st1, lv) = lower_expr(st, l)
+            let (st2, rv) = lower_expr(st1, r)
+            let (st3, c) = eq_at(st2, lv, rv, tex_ty(l))
+            match op {
+              BEq -> (st3, c)
+              _ -> (st3, CUnary(CNot, c, TyBool))
+            }
+          } else {
+            let (st1, lv) = lower_expr(st, l)
+            let (st2, rv) = lower_expr(st1, r)
+            (st2, CBinary(bin_op(op), lv, rv, ty))
+          }
       }
     XIf(cond, thn, els, _, _, ty) -> {
       let (st1, c) = lower_expr(st, cond)

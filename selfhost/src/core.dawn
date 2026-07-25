@@ -273,6 +273,40 @@ pub fn ty_key(t: Ty) -> String =
     TyJava(_, _) -> "Java"
   }
 
+## The same spelling, but injective over *instantiated* types.
+##
+## `ty_key` may drop type arguments because everything it names is a v1 impl
+## subject, and those are non-generic. Lowering's synthesised structural
+## comparisons are not: there is one per instantiated type, and `Option[Int]`
+## sharing a name with `Option[String]` is not a link error, it is a wrong
+## answer that runs -- the first body built wins and casts the other's fields
+## to the wrong class.
+##
+## `ty_key` stays lossy on purpose: widening it would rename every emitted
+## impl method for no gain.
+pub fn ty_key_inst(t: Ty) -> String =
+  match t {
+    TyAdt(id, args) -> "Adt" ++ to_string(id) ++ args_key(args)
+    TyTuple(es) -> "Tup" ++ to_string(len(es)) ++ args_key(es)
+    TyList(e) -> "List_" ++ ty_key_inst(e)
+    TyMap(k, v) -> "Map_" ++ ty_key_inst(k) ++ "_" ++ ty_key_inst(v)
+    TySet(e) -> "Set_" ++ ty_key_inst(e)
+    TyArray(e) -> "Array_" ++ ty_key_inst(e)
+    TyFn(ps, r, _) -> "Fn" ++ to_string(len(ps)) ++ args_key(ps) ++ "_r" ++ ty_key_inst(r)
+    _ -> ty_key(t)
+  }
+
+fn args_key(ts: List[Ty]) -> String = {
+  if len(ts) == 0 {
+    return ""
+  }
+  var s = "\$of"
+  for t in ts {
+    s = s ++ "\$" ++ ty_key_inst(t)
+  }
+  s
+}
+
 # ---- accessors ----
 
 pub fn cex_ty(e: CExpr) -> Ty =

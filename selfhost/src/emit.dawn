@@ -167,6 +167,12 @@ pub type Gen = {
   own_fns: Map[String, Sig],
   # program-wide (class name, fn name) → declared signature
   prog_fns: Map[(String, String), Sig],
+  # descriptors of the bodies lowering hoisted into this class, which have no
+  # declared signature to look up. Membership doubles as "already written":
+  # a synthesised structural comparison is named after its type, so every
+  # function comparing that type asks for the same method and it must be
+  # emitted once.
+  lifted_descs: Map[(String, String), String],
   syms: Map[Int, Sym],
   slots: Map[Int, Int],
   next_slot: Int,
@@ -1151,15 +1157,35 @@ fn gen_fn(g: Gen, cw: AdtClassWriter, f: TFun, name: String, desc: String) -> Ge
   let (cf, lifted, next_lam) =
     lower.lower_fn_only(g.class_name, f, g.traits, g.impl_table, g.adts,
       g.prog_fns, g.syms, g.lambda_ctr)
-  var g0 = gen_cbody(Gen { ..g, lambda_ctr: next_lam }, cw, cf, name, desc, false)
+  # Register the hoisted bodies before generating anything: the main body may
+  # call one by name, and the descriptor has to be known at that call site.
+  var g1 = Gen { ..g, lambda_ctr: next_lam }
+  var fresh: List[CFun] = []
   for lf in lifted {
     var ptys: List[Ty] = []
     for p in lf.captures { ptys = ptys ++ [p.ty] }
     for p in lf.params { ptys = ptys ++ [p.ty] }
-    g0 = gen_cbody(g0, cw, lf, lf.name, impl_desc_of(g0, ptys, lf.ret), true)
+    if not map.has(g1.lifted_descs, (g1.class_name, lf.name)) {
+      g1 = Gen {
+        ..g1,
+        lifted_descs: map.insert(g1.lifted_descs, (g1.class_name, lf.name),
+          impl_desc_of(g1, ptys, lf.ret))
+      }
+      fresh = fresh ++ [lf]
+    }
+  }
+  var g0 = gen_cbody(g1, cw, cf, name, desc, false)
+  for lf in fresh {
+    g0 = gen_cbody(g0, cw, lf, lf.name, lifted_desc(g0, lf.name), true)
   }
   g0
 }
+
+fn lifted_desc(g: Gen, name: String) -> String =
+  match map.get(g.lifted_descs, (g.class_name, name)) {
+    Some(d) -> d
+    None -> panic("codegen: no descriptor for hoisted body `" ++ name ++ "`")
+  }
 
 fn gen_cbody(
   g: Gen,
@@ -1582,6 +1608,7 @@ pub fn emit_module(
     impl_table: impl_table,
     own_fns: own_fns,
     prog_fns: prog_fns,
+    lifted_descs: map.empty(),
     syms: tm.syms,
     slots: no_slots,
     next_slot: 0,
@@ -1687,9 +1714,13 @@ fn gen_ccall(g: Gen, callee: CCallee, args: List[CExpr], ty: Ty) -> (Gen, Bool) 
   match callee {
     CDirect(owner, name) -> {
       let g1 = gen_cargs(g, args)
-      let sig = sig_of_call(g1, owner, name)
-      g1.mv.visitMethodInsn(OP_INVOKESTATIC, owner, name,
-        fn_desc_with_dicts(g1, sig), false)
+      # a body lowering hoisted has no declared signature; its descriptor was
+      # recorded when the hoisted body was registered
+      let d = match map.get(g1.lifted_descs, (owner, name)) {
+        Some(x) -> x
+        None -> fn_desc_with_dicts(g1, sig_of_call(g1, owner, name))
+      }
+      g1.mv.visitMethodInsn(OP_INVOKESTATIC, owner, name, d, false)
       (g1, true)
     }
     CImpl(owner, tid, subject, method, derived) -> {
@@ -2197,16 +2228,24 @@ fn gen_cintrinsic(g: Gen, name: String, args: List[CExpr], ty: Ty) -> (Gen, Bool
     g.mv.visitInsn(OP_ACONST_NULL)
     return (g, true)
   }
+  if name == "struct_eq" {
+    # Structural equality of two values whose type is not ground, so lowering
+    # could not spell the comparison out (semantics-closure-design.md 3).
+    # This is a *contract*, not a free choice: it has to answer exactly what
+    # the synthesised comparison answers for the same values, or `x == y` and
+    # `map.get(m, x)` stop agreeing. On the JVM the implementation is the
+    # generated `equals`, reached virtually -- the same walk, dispatched at
+    # runtime because the static type does not say which one.
+    let g1 = gen_cargs(g, args)
+    g1.mv.visitMethodInsn(OP_INVOKEVIRTUAL, obj(), "equals", "(Ljava/lang/Object;)Z", false)
+    return (g1, true)
+  }
   if name == "hash" {
     # the prelude Hash over a scalar; the JVM's own hash for that type, widened
     # because Dawn's Int is a long
     let at = cex_ty(args[0])
     let g1 = gen_cargs(g, args)
-    if at == TyBytes {
-      g1.mv.visitMethodInsn(OP_INVOKESTATIC, "java/util/Arrays", "hashCode", "([B)I", false)
-    } else {
-      hash_of(g1.mv, at)
-    }
+    hash_of(g1.mv, at)
     g1.mv.visitInsn(OP_I2L)
     return (g1, true)
   }
