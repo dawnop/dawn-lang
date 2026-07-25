@@ -25,6 +25,19 @@ eq_bytes:emitc
 # panics.
 show_derive:emitc
 
+# A bound whose subject *contains* a rigid variable rather than being one
+# (`[T: Eq]` used at `Option[T]`). Lowering's structural expander only spells
+# out ground types; for anything else it falls back to the `struct_eq`
+# intrinsic, which is runtime structural comparison. The JVM has one
+# (Object.equals, and an `impl Eq` takes over the class's equals, so the
+# recursion honours it); native has no such thing, and needs RTTI to get one.
+# So this is not a missing translation -- it is a semantic the JVM gets for
+# free from its object model and Core does not carry.
+#
+# Closed by giving the whole a dictionary built from the parts' dictionaries
+# (trait-v2-design.md 3.8) rather than a runtime walk.
+eq_generic:emitc
+
 # --- dictionaries ---------------------------------------------------------
 # Closed by making the table the only answer to "which dictionary is this"
 # (semantics-closure-design.md 5): lowering gives every slot a real function

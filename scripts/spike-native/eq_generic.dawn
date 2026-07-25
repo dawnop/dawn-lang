@@ -1,0 +1,73 @@
+# A bound reaching a subject that *contains* a rigid variable, rather than
+# being one. `dict_forward.dawn` covers `[T: Eq]` used at `T`; this covers it
+# used at `Option[T]` and `Pair[A, B]` -- the case where the caller's
+# dictionary is for the parts and the comparison is for the whole.
+#
+# Nothing in the repository was written this way (measured 2026-07-26,
+# trait-v2-design.md 2.1), which is why the path had no gate. It is not dead
+# code, though: the JVM answers correctly, and it answers correctly by a
+# mechanism native cannot have -- an `impl Eq` takes over the class's
+# `equals`, so `Object.equals` recursion happens to honour it. Lowering falls
+# back to the `struct_eq` intrinsic for any non-ground type, and emitc has no
+# implementation of it.
+#
+# `Money` is here to make the difference observable: its impl is deliberately
+# non-structural, so a comparison that ignored the impl and walked the fields
+# would answer `no` where this file says `yes`.
+#
+# Deliberately no `List[T]`: collection intrinsics do not reach the C
+# compiler until D1-D3, and a corpus that cannot be compiled proves nothing.
+use std/io
+
+pub type Money = | Money(cents: Int, note: String)
+
+pub type Pair[A, B] = { l: A, r: B }
+
+fn cents(m: Money) -> Int = match m { Money(c, _) -> c }
+
+## Only `cents` counts. Two Moneys differing in `note` are equal.
+impl Eq[Money] {
+  fn eq(a: Money, b: Money) -> Bool = cents(a) == cents(b)
+}
+
+impl Hash[Money] {
+  fn hash(m: Money) -> Int = cents(m)
+}
+
+## The subject is `Option[T]`, not `T`.
+fn same_opt[T: Eq](a: Option[T], b: Option[T]) -> Bool = eq(a, b)
+
+## Two parameters, so the dictionary the impl needs is built from two.
+fn same_pair[A: Eq, B: Eq](a: Pair[A, B], b: Pair[A, B]) -> Bool = eq(a, b)
+
+## Nested: the subject contains a subject that contains the variable.
+fn same_opt_opt[T: Eq](a: Option[Option[T]], b: Option[Option[T]]) -> Bool = eq(a, b)
+
+fn yn(label: String, b: Bool) -> String =
+  label ++ ": " ++ (if b { "yes" } else { "no" })
+
+pub fn main() -> Unit !io = {
+  let m1 = Money(1, "a")
+  let m2 = Money(1, "b")
+  let m3 = Money(2, "a")
+  # `same_opt(None, None)` alone leaves T unconstrained, so name it once
+  let no_int: Option[Int] = None
+
+  println("-- Option[T] over a scalar --")
+  println(yn("same_opt(Some(3), Some(3))", same_opt(Some(3), Some(3))))
+  println(yn("same_opt(Some(3), Some(4))", same_opt(Some(3), Some(4))))
+  println(yn("same_opt(None, Some(3))   ", same_opt(None, Some(3))))
+  println(yn("same_opt(None, None)      ", same_opt(no_int, no_int)))
+
+  println("-- Option[T] must honour T's impl --")
+  println(yn("same_opt(Some(m1), Some(m2))", same_opt(Some(m1), Some(m2))))
+  println(yn("same_opt(Some(m1), Some(m3))", same_opt(Some(m1), Some(m3))))
+
+  println("-- two parameters --")
+  println(yn("same_pair(Pair(1, m1), Pair(1, m2))", same_pair(Pair { l: 1, r: m1 }, Pair { l: 1, r: m2 })))
+  println(yn("same_pair(Pair(1, m1), Pair(2, m1))", same_pair(Pair { l: 1, r: m1 }, Pair { l: 2, r: m1 })))
+
+  println("-- nested --")
+  println(yn("same_opt_opt(Some(Some(m1)), Some(Some(m2)))", same_opt_opt(Some(Some(m1)), Some(Some(m2)))))
+  println(yn("same_opt_opt(Some(Some(m1)), Some(None))    ", same_opt_opt(Some(Some(m1)), Some(None))))
+}
