@@ -21,7 +21,7 @@ use std/str
 use std/list
 use std/map
 use std/set
-use types.{Adts, Ty, TyAdt, ty_show}
+use types.{Adts, Ty, TyAdt, ty_show, adt_of}
 use core.{
   CModule, CFun, CParam, CMode, COwned, CBorrowed,
   CDictDef, CDictSlot, CSlotFn, CSlotDefault,
@@ -232,6 +232,26 @@ fn ty_str(adts: Adts, t: Ty) -> String =
 
 fn ty(adts: Adts, t: Ty) -> String = " : " ++ ty_str(adts, t)
 
+## An ADT and one of its constructors, by name.
+##
+## Not by id. Ids come off a counter the whole program shares, so *any* edit
+## that changes how many declarations precede a type renumbers it -- and the
+## golden then reports every module mentioning it as changed, for a diff that
+## says nothing. Measured: a checker-only edit that lowered to identical Core
+## churned 19 of 52 modules. Names cost nothing here and the dump reads better.
+##
+## Emitted *method* names (bridges, synthesised comparisons) still carry ids,
+## and deliberately: those are real symbols, a rename is a real byte change,
+## and normalising them here would turn off a detector that works. Ids are
+## stable within one program -- it is only the compiler-compiling-itself dump,
+## where every edit is to the program being measured, that churns.
+fn ctor_at(adts: Adts, adt: Int, ci: Int) -> String = {
+  if adt < 0 { return "<dict>/" ++ to_string(ci) }
+  let a = adt_of(adts, adt)
+  let cn = if ci < len(a.ctors) { a.ctors[ci].name } else { "?" ++ to_string(ci) }
+  a.name ++ "/" ++ cn
+}
+
 fn expr(adts: Adts, n: Names, d: Int, e: CExpr) -> String =
   match e {
     CInt(v) -> ind(d) ++ "int " ++ to_string(v) ++ "\n"
@@ -256,13 +276,13 @@ fn expr(adts: Adts, n: Names, d: Int, e: CExpr) -> String =
     CIntrinsic(name, args, t) ->
       ind(d) ++ "intrinsic " ++ name ++ ty(adts, t) ++ "\n" ++ exprs(adts, n, d + 1, args)
     CCtor(adt, ci, args, t) ->
-      ind(d) ++ "ctor " ++ to_string(adt) ++ "/" ++ to_string(ci) ++ ty(adts, t) ++ "\n" ++
+      ind(d) ++ "ctor " ++ ctor_at(adts, adt, ci) ++ ty(adts, t) ++ "\n" ++
       exprs(adts, n, d + 1, args)
     CField(target, adt, ci, idx, t) ->
-      ind(d) ++ "field " ++ to_string(adt) ++ "/" ++ to_string(ci) ++ "." ++
+      ind(d) ++ "field " ++ ctor_at(adts, adt, ci) ++ "." ++
       to_string(idx) ++ ty(adts, t) ++ "\n" ++ expr(adts, n, d + 1, target)
     CIsCtor(target, adt, ci) ->
-      ind(d) ++ "isctor " ++ to_string(adt) ++ "/" ++ to_string(ci) ++ "\n" ++
+      ind(d) ++ "isctor " ++ ctor_at(adts, adt, ci) ++ "\n" ++
       expr(adts, n, d + 1, target)
     CClosure(fn_name, owner, caps, t) ->
       ind(d) ++ "closure " ++ owner ++ "." ++ fn_name ++ ty(adts, t) ++ "\n" ++
