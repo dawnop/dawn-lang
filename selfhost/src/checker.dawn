@@ -2228,21 +2228,13 @@ pub fn resolve_bounds(cx: Cx, tparams: List[TypeParamDecl]) -> (Cx, List[List[In
           }
           cx1 = cerr_h(cx1, "unknown trait: " ++ b.name, b.lo, b.hi, hint)
         }
-        Some(tid) ->
-          # D0 lands Eq/Hash as names and impls before anything can forward
-          # their dictionaries; a bound is what would need one, so it stays
-          # shut until the prelude dictionaries are emitted (D0-2).
-          if tid == EQ_ID || tid == HASH_ID {
-            cx1 = cerr_h(cx1, "`" ++ b.name ++ "` cannot be used as a bound yet", b.lo, b.hi,
-              "impl it for a concrete type and call `" ++
-                (if tid == EQ_ID { "eq" } else { "hash" }) ++ "` directly")
-          } else {
-            var have = false
-            for x in ids {
-              if x == tid { have = true }
-            }
-            if not have { ids = ids ++ [tid] }
+        Some(tid) -> {
+          var have = false
+          for x in ids {
+            if x == tid { have = true }
           }
+          if not have { ids = ids ++ [tid] }
+        }
       }
     }
     out = out ++ [ids]
@@ -2330,6 +2322,23 @@ pub fn pass_fn_signatures(cx: Cx, m: Module) -> (Cx, List[Sig], List[Map[String,
     }
   }
   (cx1, sigs, evs)
+}
+
+test "Eq and Hash resolve as bounds like any other trait" {
+  let cx = seed_prelude(test_cx())
+  let tp = fn(names: List[String]) => [TypeParamDecl {
+    name: "T",
+    bounds: map(names, fn(n) => Bound { name: n, lo: 0, hi: 1 }),
+    lo: 0,
+    hi: 1
+  }]
+  let (cx1, bs) = resolve_bounds(cx, tp(["Eq", "Hash"]))
+  assert len(cx1.diags) == 0
+  assert bs[0] == [EQ_ID, HASH_ID]
+  # and they compose with Ord, which shares the rail
+  let (cx2, bs2) = resolve_bounds(cx, tp(["Ord", "Eq"]))
+  assert len(cx2.diags) == 0
+  assert bs2[0] == [ORD_ID, EQ_ID]
 }
 
 test "fn signatures resolve with bounds and worst-effect inference" {

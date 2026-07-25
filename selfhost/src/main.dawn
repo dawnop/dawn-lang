@@ -34,16 +34,18 @@ use codegen.{
   fn_iface, tuple_class, gen_fn_interface, gen_tuple_class, gen_panic_class,
   gen_unit_class, supers_of, PANIC_CLASS, UNIT_CLASS, gen_bytes_class,
   gen_io_class, gen_fn_comparator, gen_ord_interface,
-  gen_prelude_ord_impl, impl_class, tr_iface, BYTES_CLASS, IO_CLASS,
+  gen_prelude_ord_impl, gen_prelude_eq_impl, gen_prelude_hash_impl,
+  impl_class, tr_iface, BYTES_CLASS, IO_CLASS,
   FN_CMP_CLASS, gen_show_class, SHOW_CLASS,
   gen_lists_class, LISTS_CLASS, gen_strings_class, STRINGS_CLASS,
   gen_maps_class, MAPS_CLASS, gen_adt
 }
 use types.{
   prelude_adts, adt_of, adt_jvm_name, trait_of, OPTION_ID, RESULT_ID,
+  EQ_ID, HASH_ID, eq_scalars, bounds_of,
   TyInt, TyFloat, TyString, Ty, Sig, Traits, ImplI, Adts
 }
-use emit.{emit_module}
+use emit.{emit_module, gen_trait_interface}
 use core.{CModule}
 use lower
 use emitc
@@ -231,6 +233,43 @@ fn collect_program(
       prog_fns = map.insert(prog_fns, (cm.class_name, k), v)
     }
   }
+  # The prelude Eq/Hash dictionaries, and only if something forwards one. A
+  # bound is the sole construct that needs a dictionary -- everywhere the
+  # subject is statically known, lowering collapses to the primitive -- so a
+  # program with no Eq/Hash bound carries no Eq/Hash classes.
+  var wants: List[Int] = []
+  for pr in map.entries(prog_fns) {
+    let (_k, sg) = pr
+    # a trait method's own bound on its subject is the declaration, not a use:
+    # `eq` is declared `[T: Eq]` and is in every module's fn namespace
+    if sg.trait_id != None { continue }
+    var i = 0
+    for _tp in sg.tparams {
+      for b in bounds_of(sg, i) {
+        if b == EQ_ID || b == HASH_ID {
+          var have = false
+          for w in wants {
+            if w == b { have = true }
+          }
+          if not have { wants = wants ++ [b] }
+        }
+      }
+      i = i + 1
+    }
+  }
+  for tid in wants {
+    let tr = trait_of(traits, tid)
+    classes = classes ++ [(tr_iface(None, tr.name), gen_trait_interface(sup, adts, tr))]
+    for subj in eq_scalars() {
+      let dict = if tid == EQ_ID {
+        gen_prelude_eq_impl(sup, adts, subj)
+      } else {
+        gen_prelude_hash_impl(sup, adts, subj)
+      }
+      classes = classes ++ [(impl_class(adts, None, tr.name, subj), dict)]
+    }
+  }
+
   # const values by declaring module, so importers can materialize them
   var const_vals: Map[String, Map[String, CValue]] = map.empty()
   for sm in std_mods {
