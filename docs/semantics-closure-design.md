@@ -116,21 +116,59 @@ lowering 遇到一个需要结构相等的具体 `Ty` 才合成一份,memo 存�
 - 「每个 ADT 一份」这个说法本身不成立:`Option[Point]` 与 `Option[Int]` 是两份不同的比较。
   按 `Ty` 而不是按 ADT 声明索引,泛型实例化才落得下。
 
-### 决策 3 — JVM 类的 `equals`/`hashCode` **改成转发**到合成函数
+### 决策 3 — 只展开 **ground** 类型;擦除残留变成一个**具名**的运行期原语
 
-这是最容易做错的一步,也是**不能与决策 1 分两次做**的原因。
+> 这条与上一版的「JVM 类的 `equals` 改成转发到合成函数」**不同**。上一版是错的,
+> 动手写展开器的第一天就撞上了两处硬矛盾,记在这里而不是抹掉:
+>
+> 1. **合成函数按实例化类型索引(决策 2),而 JVM 类按声明索引。** `Option[Point]` 与
+>    `Option[Int]` 共用一个 class,一个 `equals` 转发不到两份不同的合成函数。
+>    跨模块也不成立:`Point` 的 class 在声明它的模块里发,比较它的合成函数在使用它的模块里。
+> 2. **`==` 的左值可以含刚性类型变量,而且今天连 bound 都不需要。** 实测:
+>    ```dawn
+>    fn same2[T](x: Option[T], y: Option[T]) -> Bool = x == y   # 编得过,无 [T: Eq]
+>    ```
+>    展开 `Option[T]` 需要 `Eq[T]` 的字典。要拿到它,要么**强制 `==` 要求 `Eq` bound**
+>    (对的方向,同 Rust/Haskell,但是破坏性的语言改动 + 要改 spec),要么等 S2.1 的
+>    条件 impl(`impl[T: Eq] Eq[Option[T]]`)。两条都不在 S1 里。
 
-Dawn 的 `Map`/`Set`/`List` 是 vendored 的 Java 容器,比较键用的是 `key.equals()`。
-若 `==` 改走合成函数、而容器仍走 `gen_equals_method` 生成的 `equals`,
-**Dawn 的 `==` 与 Map 的键相等就变成两个关系**——比今天的一致地错更糟。
+于是分两半:
 
-故 `gen_equals_method` / `gen_hash_code_method` / 元组类的 `equals` 全部改成转发。
-先例现成:`gen_forwarding_equals`(`codegen.dawn:2663`)就是给 `impl Eq` 用的同一手法。
-于是定义仍是一份,容器自动跟随。
+| 左值类型 | lowering 发什么 | 谁实现 |
+|---|---|---|
+| **ground**(不含刚性 `TyVar`) | 合成函数的直接调用 | Core,一份,两个后端都编它 |
+| **非 ground** | `CIntrinsic("struct_eq", ..)` / `("struct_hash", ..)` | 后端各一处,但**有名字、可数、可查** |
 
-代价:`equals` 多一层静态调用。**收益**:`Bytes` 在 record / ctor / Option / 元组里
-自动变成内容相等,连带**装在容器里的 ADT** 也对了,剩下的洞收敛成一种——容器直接装裸
-`Bytes`(`List[Bytes]`)。那一种写进 `known-red.txt` 的说明,等 D2/D3。
+关键在第二行不再是**裸 `CBinary(CEq)`**。今天的擦除路径与标量路径在 Core 里长得一模一样,
+所以「后端自己发明了一个答案」这件事不可见;换成具名 intrinsic 之后:
+
+- JVM 的实现就是 `Object.equals` —— 也就是说 `gen_equals_method`(#2)**不再是一份野生的拷贝**,
+  它是「JVM 对 `struct_eq` 这个契约的实现」。同一份代码,身份变了,从此有契约可对。
+- native 今天的实现是**照名字 panic**,而不是静默的指针比较。缺口从「答错」降级成「答不了」。
+- 残留量**可数**:`grep struct_eq` 数得出还有多少地方没收口,S2.1 落地时这两个 intrinsic 整体删除。
+
+### 决策 4 — 两份实现必须相等,而这件事由语料钉住,不由注释钉住
+
+决策 3 留下两份实现(Core 的合成函数、JVM 的 `struct_eq`)。它们必须是**同一个关系**,
+否则 `x == y` 与 `map.get(m, x)` 会给不同答案——Dawn 的 `Map`/`Set`/`List` 是 vendored 的
+Java 容器,比较键用的就是 `key.equals()`,也就是 `struct_eq` 那条路。
+
+今天它们在 `Bytes` 上已经不等(§1 的表)。所以这一批**必须同时**把
+`gen_equals_method` 的 `Bytes` 臂改成 `Arrays.equals`、`hash_of` 的改成 `Arrays.hashCode`
+(两处必须配对改,否则违反 JVM 的 equals/hashCode 契约)。元组类同理。
+
+这不是「顺手修个 bug」——在决策 3 的结构下它是**契约一致性要求**。
+`bytes-design.md` 决策 A 当初判「不修」,理由是只修 record/tuple 会留下
+「record 结构化、List 仍身份」的更难预测的不一致;而在这里,record 与 List
+走的是同一条 `struct_eq`,一起改,那个理由不再成立。
+
+剩下的洞收敛成**一种**:容器直接装裸 `Bytes`(`List[Bytes]`)——vendored 的 `Lists`
+逐元素调 `Object.equals`,`byte[]` 没有内容 `equals` 可调。那一种留到 D2/D3,
+写进 `known-red.txt` 的说明。
+
+**agreement 由语料钉**:`eq_bytes.dawn` 增加一个容器用例(`List[Wrap]`),
+`==` 与容器查找必须给同一个答案。注释维持不变量的时代到此为止(§1 引的那句
+「The two must agree」就是反例)。
 
 ### 决策 4 — `interp.value_eq` 也调同一份
 
@@ -140,9 +178,21 @@ comptime 解释器执行的是 Core,合成函数就在 Core 里,`value_eq` 对 A
 
 ### 决策 5 — `CEq` 收窄成「后端原生标量关系」并写进 `core.dawn` 的注释
 
-展开器落地后,`CBinary(CEq, ..)` 的合法左值类型收窄成标量(含 `String`/`Bytes`)。
+展开器落地后,`CBinary(CEq, ..)` 的合法左值类型收窄成标量(含 `String`/`Bytes`);
+非标量要么是合成函数的调用(ground),要么是 `struct_eq`(擦除)。
 这一条必须**写进节点定义的注释**并由 lowering 断言,否则下一个人照旧会在 ADT 上发 `CEq`,
 而两个后端照旧会各自发明答案——这次没有语料能发现,因为语料只测已知的类型。
+
+### 决策 6 — 两条入口都要接,它们从一开始就是分开的
+
+`==` 运算符**不经过见证**:checker 对 `BEq` 直接返回 `no_wit()`(`checker.dawn:2848` 一带),
+lowering 用一张平铺的算符表把它翻成 `CEq`(`lower.dawn:195`)。`WStructural` 只服务
+`[T: Eq]` 这条 bound 路(`lower.dawn:728` 的 `primitive_eq_witness`)。
+
+**这就是「一个关系七份定义」的第一因**:运算符和 trait 从语言的第一天起就是两条独立管道,
+而不是一条管道的两个入口。展开器必须同时接上两条,并且在接上之后,
+「`a == b`」与「`[T: Eq]` 实例化到 `T = A` 后调 `eq(a, b)`」在 Core 里应当发出**同一个调用**。
+这一点本身就该有断言。
 
 ## 4. S1.6:`WStructural` 收窄
 
@@ -221,15 +271,21 @@ intrinsic 今天用字符串名标识,于是「这个名字属于谁、可见吗
 
 | 步 | 内容 | 出口 | 门禁 |
 |---|---|---|---|
-| 1 | S1.5 的「拆」:`Eq`/`Hash` 的 prelude 清单分开 | `Hash[Float]`/`Hash[Bytes]` 解不出 | 既有 164 测 + `dict_forward` |
-| 2 | S1.6 收窄 + S1.2 展开器 + 决策 3 的转发(**一批**) | `eq_adt:native`/`eq_adt:diff`/`eq_bytes:jvm` 三行删除 | Core golden 重录 + `Emit-Change` |
-| 3 | S1.3 字典表 | `dict_forward:cc` 删除 | Core golden 是唯一看得见它的门 |
+| 1 | S1.2 展开器(ground)+ 决策 3 的具名 intrinsic + 决策 4 的 `Bytes` 配对修 | `eq_adt:native`/`eq_adt:diff`/`eq_bytes:jvm` 三行删除 | Core golden 重录 + `Emit-Change` |
+| 2 | S1.6 `WStructural` 收窄(`TyFn`/`TyArray` 报错) | §11.1 的三闭合 | 既有 164 测 |
+| 3 | S1.3 字典表成为唯一真相 | `dict_forward:cc` 删除 | Core golden 是唯一看得见它的门 |
 | 4 | S1.4 `Show` 成 trait | `show_derive:emitc`/`const_fold:jvm` 删除 | 差分 harness 全绿 |
-| 5 | S1.5 的「合」+ `invalid_key_part` 改走 bound | `impl_subject_ok` 与 prelude 同一份清单 | 既有测试 |
+| 5 | S1.5 的「拆」+「合」+ `invalid_key_part` 改走 bound | `impl_subject_ok` 与 prelude 同一份清单 | 既有测试 |
 | 6 | S1.1 intrinsic 身份 | 四份手抄名单消失 | 无红线,靠 golden |
 
-**第 2 步是唯一不可再拆的一批**:决策 1 与决策 3 之间的任何中间状态都是「`==` 与
-Map 键相等是两个关系」,那比今天更糟。其余各步之间都可以停。
+**第 1 步不可再拆**:决策 3 与决策 4 之间的中间状态是「`x == y` 与 `map.get(m, x)`
+给不同答案」,那比今天一致地错更糟。其余各步之间都可以停。
+
+> **上一版把 S1.5 的「拆」排在第 1 步,那是错的。** 理由本是「最小、风险最低」,
+> 但实测发现它**观察不到**:`resolve_witness`(`checker.dawn:4395`)对缺 impl 的
+> `Eq`/`Hash` 无条件发 `WStructural`,所以删掉 `Hash[Float]` 的 prelude impl 之后,
+> `[T: Hash]` 实例化到 `Float` 仍然照编不误,只是改走结构默认。
+> **那一步要到 S1.6 收窄之后才有出口条件**,故挪到第 5 步。
 
 每步都要过:`dawn fmt --check`、`dawn test selfhost`、fixpoint `B == C`、
 `spike-native/run.sh`、`array-contract`、`selfhost-core-diff.sh`、N vs N−1 差分
