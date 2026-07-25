@@ -630,9 +630,30 @@ runtime point = Point(1, 2)   # 同一个表达式在运行期
 |---|---|---|
 | S0.1 | 差分 harness 比 stdout + stderr + 退出码 | ✅ `616d3f7` |
 | S0.2 | 四个语料 + 手写 `.expect` + `known-red.txt` ratchet | ✅ `616d3f7`,六条红在案 |
-| S0.3 | 收回穷尽性检查:删掉两个后端类型映射里的 `_ -> panic` 通配 | 加一个 `Ty` 变体不改后端 ⇒ **编译错误**,不是运行期 panic |
-| S0.4 | Core IR 的 golden dump 进 N−1 差分 | `__lower --dump` 逐字节对拍进 `selfhost-prev-diff.sh` |
-| S0.5 | 自举耗时基线脚本 + baseline 入库 | §4 Phase 2 的「≤ +15%」第一次可测——**今天没有任何脚本能测它,也没有基线** |
+| S0.3 | 收回穷尽性检查 | ✅ `c2a891e`。往 `Ty` 插一个探针变体,报错数 **3 → 9**,两个后端都在内(改动前 emitc **一处都没有**) |
+| S0.4 | Core IR golden | ✅ `scripts/selfhost-core-diff.sh` 进 CI:三个程序的全量 dump + 编译器 52 模块的哈希清单 |
+| S0.5 | 自举耗时基线 | ✅ `scripts/selfhost-bench.sh` + `.baseline`(**本地工具,不进 CI**) |
+
+三点要记:
+
+- **S0.3 的形状不是「删 wildcard」。** 两个后端里字面上的 `_ -> panic` 只有三处;危险的是
+  `_ -> <默认值>`(加变体不炸、直接给错答案),以及 **emitc 的五条 `if t == Ty…` 链**
+  ——穷尽性检查结构上够不着它们,必须先变成 `match`。而槽宽、load/store 指令、装箱、C 类型
+  回答的是同一个问题,所以每个后端立一个 `JvmRepr`/`CRepr` 分类器当**唯一**的全函数,
+  其余从它派生。**需要逐变体类名的**(`desc_of`/`unerase`)仍是 `Ty` match。
+  划线处写进了 `JvmRepr` 的文档注释:**答案取决于 Dawn 语义的函数(内容相等、哈希、渲染、序)
+  不得经它分派**——那里新变体继承 `RRef` 是错答案而不是缺答案。
+- **S0.4 的价值不在「多一道保险」。** `CModule.dicts` 今天**没有任何上线的消费者**
+  (JVM 走 `lower_fn_only`,回头查 checker 的 `impl_table`),`CParam.mode`/`CSDup`/`CSDrop`
+  按设计发射成空——这三块可以整体改错而全树门禁不变红。golden 是唯一看得见它们的东西,
+  也正是 §6 R4「Core 不变则两后端都不必重审」所依赖的那个否定判断的证据。
+  顺带验一条以前只是假设的事:**std 的 Core 与目标程序无关**(`program_tables` 会把用户 impl
+  并进表里,所以这是假设不是定理)——脚本拿三个程序对拍它,不成立就先报这件事。
+- **S0.5 量的是比值不是秒数。** fixpoint 的三趟不等价:passA 是**已发布的种子**在编 HEAD,
+  对 HEAD 的任何改动(尤其 D2/D3)结构性免疫,正好是理想对照组。故指标 = 同一次运行内
+  `passC_user / passA_user`,机器/JDK/源码树增长全约掉,**入库的基线在别的机器上才有意义**。
+  今天 = **1.115**,与 §9.2 历史量到的 +11% 同一个量法。wall(离散 4%)与 RSS(换 JVM 差 44%)
+  只记不判。**不进 CI**:runner 抖动远大于 15% 的预算。
 
 #### S1 — 语义收口:一台机器,一次建对
 
