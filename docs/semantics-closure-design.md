@@ -51,7 +51,7 @@ content」——那句话只对容器那条路成立。**同一个 `Bytes`,两�
 
 收口的诱惑是把长得一样的表合并。以下三条**看起来**是重复,实际不是,合并即改语义。
 
-### 2.1 `Float` 的 `Eq` 与 `Ord` 刻意不同
+### 2.1 `Float` 的 `Eq` 与 `Ord` 刻意不同 —— **已推翻(2026-07-26)**
 
 实测:
 
@@ -63,14 +63,44 @@ nan == nan             false
 cmp(nan, nan)          0
 ```
 
-`cmp(a,b) == 0` 与 `a == b` 在 `NaN` 和 `±0.0` 上给相反答案。**这不是缺陷。**
-spec §4.3 明写:`==`/`<` 是 IEEE 比较(NaN 与任何值含自身皆 false、`-0.0 == 0.0` 为 true),
-而 `Ord.cmp` 是**全序**(Java `Double.compare` 语义:NaN 大于一切、`-0.0 < 0.0`),
-两者「**刻意不同**(同 Java `compare` 与 Rust)」。
+`cmp(a,b) == 0` 与 `a == b` 在 `NaN` 和 `±0.0` 上给相反答案。
 
-我在设计 S1.5 时把它当成第八条缺陷,查 spec 才发现是白纸黑字的裁决。**记在这儿是为了
-让下一个人不必再撞一次**:`eq_scalars()` 和 Ord 的标量清单差别只有一部分是能力
-(Bool/Bytes/Cursor 没有 `<`),另一部分是语义,合并会静默抹掉后者。
+**这一段原本的结论是「这不是缺陷」**:spec §4.3 白纸黑字写着两者「刻意不同(同 Java
+`compare` 与 Rust `total_cmp` 的取舍:比较要诚实,排序要成序)」。我在设计 S1.5 时
+把它当成第八条缺陷,查到这句就收手了,还在这里写下「记在这儿是为了让下一个人不必再撞一次」。
+
+**2026-07-26 用户裁决:推翻。`Ord[Float]` 从全序降成偏序 —— 删掉 `Ord[Float]`。**
+
+两条理由:
+
+- 这是**同一个值两个答案,取决于走哪条路**,与同日裁掉的 `Hash[Float]` 是同一种病。
+  留一个删一个是双标。
+- **引 Rust 那句站不住**:Rust 的 `total_cmp` 是 `f64` 的**固有方法**,要显式调用;
+  `f64` 本身**没有 `Ord` impl**。spec 拿 Rust 当先例,而 Rust 恰恰不这么做。真正的
+  先例是 Java —— 而 Java 那条正是 Kotlin 要专门写一节文档、再挂一个未修 issue 的地方
+  ([`equality-survey.md`](equality-survey.md) §2)。
+
+**具体形状**:
+
+- 删 `Ord[Float]`(`prelude_impls()` 的 Ord 标量表去掉 `TyFloat`)。
+- **不引入 `PartialOrd` trait。** Rust 需要它是因为 `<` 在 Rust 就是 trait 方法;
+  Dawn 的 `<`/`<=`/`>`/`>=` 对 `Int/Float/String/Cursor` 走 checker 的 **native fast
+  path,根本不解见证**(`checker.dawn:2919` 的 `OpLt | OpLe | OpGt | OpGe` 支)。
+  Float 的偏序已经由运算符表达着了,`PartialOrd` 没有活干。
+  **「降成偏序」= 少一个 impl,不是多一个 trait。**
+- `a < b` 的行为不变(仍是 IEEE)。变的只是 `[T: Ord]` 不再接受 `Float`。
+
+**实测影响面:全仓 1 处** —— `examples/traits.dawn:71` 的 `assert cmp(1.5, 1.5) == 0`。
+没有 `sort` 落在 Float 列表上;唯一的 `derive Ord`(`examples/traits.dawn:10` 的 `Card`)
+字段是 `Int`/`String`。要给 Float 排序的人改写 `sort_by(xs, fn(a, b) => …)`,把语义显式选出来。
+
+**还留着一处不对称,没裁**:`Eq[Float]` 仍在,而它**不自反**(`nan == nan` 为 false)——
+S1 步 2 正是拿「不自反」挡掉函数值的。Rust 靠拆 `PartialEq`/`Eq` 安置这件事,Dawn 只有
+一个 `Eq`。S1.5 动手前要么裁、要么明确记下不裁。
+
+原来那句「合并会静默抹掉语义」仍然成立,只是理由换了:`eq_scalars()` 和 Ord 的标量清单
+差别一部分是能力(Bool/Bytes/Cursor 没有 `<`),另一部分是语义 —— 而语义那部分现在的
+处置是**让它消失**,不是保留。
 
 ### 2.2 容器自身的相等留到 D2/D3
 
@@ -280,7 +310,7 @@ plan 的一句话是「标量能力表六合一」。逐个看过之后,这句�
 | 表 | 回答的问题 | 处置 |
 |---|---|---|
 | `eq_scalars()`(`types.dawn:536`) | 哪些标量的 Eq/Hash 后端原生实现 | **拆**:见下 |
-| `prelude_impls()` 里 Ord 的 `[Int,Float,String]` | 哪些标量有序 | 保留(§2.1) |
+| `prelude_impls()` 里 Ord 的 `[Int,Float,String]` | 哪些标量有序 | **去掉 `Float`**(§2.1,2026-07-26 裁决) |
 | `is_showable` / `is_showable_field` | 哪些类型可渲染 | S1.4 一并消失 |
 | `invalid_key_part`(`checker.dawn:340`) | 哪些类型不能进 Map/Set 键 | 改走 bound,但见 §2.3 |
 | `impl_subject_ok`(`checker.dawn:1844`) | 用户可以给哪些标量写 impl | **合**:见下 |

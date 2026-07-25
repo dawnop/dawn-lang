@@ -104,9 +104,17 @@ Kotlin 官方文档为此专门写了一节 —— 因为**同一个值在两种
 
 ### 三条要留意的细节
 
-1. **拆 Eq 会连带问 Ord。** Rust 拆的是 `PartialOrd`/`Ord`,`f64` 只有 `PartialOrd`;
-   而 **Dawn 今天的 `Ord[Float]` 已经是全序**(`Double.compare`)。要么跟 Rust 一起拆、
-   `Ord[Float]` 降级成 Partial,要么保持全序 —— 这是拆分方案里唯一要单独裁的一刀。
+1. **拆 Eq 会连带问 Ord —— 已裁(2026-07-26,用户):`Ord[Float]` 降成偏序。**
+   Rust 拆的是 `PartialOrd`/`Ord`,`f64` 只有 `PartialOrd`;而 Dawn 今天的 `Ord[Float]`
+   是全序(`Double.compare`)。裁决是跟 Rust 走,**但形状比 Rust 简单**:Dawn
+   **不引入 `PartialOrd` trait**,只删掉 `Ord[Float]`。Rust 需要那个 trait 是因为 `<`
+   在 Rust 就是 trait 方法,而 Dawn 的 `<` 对标量走 native fast path、不解见证 ——
+   偏序已经由运算符表达着了。实测影响面全仓 1 处。
+   详见 [`semantics-closure-design.md`](semantics-closure-design.md) §2.1。
+
+   顺带纠正本文档写作时未查证的一点:spec 原文引 Rust `total_cmp` 当全序的先例,
+   但 `total_cmp` 是 `f64` 的**固有方法**、要显式调,`f64` 并**没有 `Ord` impl** ——
+   Rust 恰恰不这么做,真先例是 Java。
 2. **Scala 3 的 `CanEqual`(multiversal equality)解决的是另一个问题**:默认全域相等会让
    `Dog == Cat` 编得过。机制是「默认宽松 + `import scala.language.strictEquality` 可选严格」。
    Dawn 的痛点不是「不该比的比了」,是「比了但两个后端答案不同」,所以这条不直接适用 ——
