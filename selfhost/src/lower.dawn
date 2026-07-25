@@ -1593,6 +1593,46 @@ fn lower_fn(st: LSt, owner: String, f: TFun) -> (LSt, CFun) = {
   })
 }
 
+## Lower one expression on its own: the comptime interpreter's entry, which
+## folds a const initializer or a comptime block rather than a function body.
+## The lifted lambdas come back with it, because the interpreter has to be
+## able to call them.
+pub fn lower_expr_only(
+  owner: String,
+  e: TExpr,
+  traits: Traits,
+  impls: Map[(Int, Ty), ImplI],
+  adts: Adts,
+  prog_fns: Map[(String, String), Sig],
+  syms: Map[Int, Sym],
+  lam_start: Int
+) -> (CExpr, List[CFun], Int) = {
+  var top = 0
+  for k in map.keys(syms) {
+    if k > top { top = k }
+  }
+  let st = LSt {
+    next_sym: top + 1,
+    next_loop: 0,
+    owner: owner,
+    cur_loop: -1,
+    ret_ty: tex_ty(e),
+    syms: syms,
+    lifted: [],
+    next_lam: lam_start,
+    traits: traits,
+    impls: impls,
+    adts: adts,
+    prog_fns: prog_fns,
+    dicts: [],
+    self_ctx: None,
+    tail: false,
+    self_tail: false
+  }
+  let (st1, ce) = lower_expr(st, e)
+  (ce, st1.lifted, st1.next_lam)
+}
+
 ## Lower a single function, returning it plus whatever lambdas it hoisted.
 ## The JVM path uses this because it emits one method at a time; the native
 ## path lowers whole modules.
