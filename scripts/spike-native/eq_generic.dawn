@@ -43,6 +43,15 @@ fn same_pair[A: Eq, B: Eq](a: Pair[A, B], b: Pair[A, B]) -> Bool = eq(a, b)
 ## Nested: the subject contains a subject that contains the variable.
 fn same_opt_opt[T: Eq](a: Option[Option[T]], b: Option[Option[T]]) -> Bool = eq(a, b)
 
+## The other shape, and the harder one. Above, `eq` is *called* at
+## `Option[T]`, so the comparison can be spelled out where the caller's
+## dictionary for T is in scope. Here the dictionary for `Eq[Option[T]]` has
+## to become a value and travel -- and it cannot be a static singleton,
+## because what it does depends on a dictionary only the caller has.
+fn same_any[U: Eq](a: U, b: U) -> Bool = eq(a, b)
+
+fn same_opt_boxed[T: Eq](a: Option[T], b: Option[T]) -> Bool = same_any(a, b)
+
 fn yn(label: String, b: Bool) -> String =
   label ++ ": " ++ (if b { "yes" } else { "no" })
 
@@ -70,4 +79,8 @@ pub fn main() -> Unit !io = {
   println("-- nested --")
   println(yn("same_opt_opt(Some(Some(m1)), Some(Some(m2)))", same_opt_opt(Some(Some(m1)), Some(Some(m2)))))
   println(yn("same_opt_opt(Some(Some(m1)), Some(None))    ", same_opt_opt(Some(Some(m1)), Some(None))))
+
+  println("-- the dictionary itself has to travel --")
+  println(yn("same_opt_boxed(Some(m1), Some(m2))", same_opt_boxed(Some(m1), Some(m2))))
+  println(yn("same_opt_boxed(Some(m1), Some(m3))", same_opt_boxed(Some(m1), Some(m3))))
 }
