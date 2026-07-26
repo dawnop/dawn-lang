@@ -2,6 +2,11 @@
 
 > 状态：**已实现**（六刀全部合入 main）。语言规则的规范化摘要在 `spec.md` §3.5，
 > 决策摘要在 `design.md` D9；本文件保留完整的设计推演、实现设计与实现定稿记录（§9）。
+>
+> **v2 已落地（2026-07-26，v0.12.0–v0.15.0）。** 本文件写的是 v1，凡标着「v1 不做」
+> 「留 v2」的地方，多数已经做了：条件 impl（`impl[T: Eq] Eq[List[T]]`）、`==` 走
+> `Eq`、`derive Ord` 对泛型类型解禁、std 给 `List` 写了 `Eq`/`Hash`/`Ord`。设计与
+> 实测记录在 [`trait-v2-design.md`](trait-v2-design.md)，§5 的范围表下面标了逐条现状。
 
 ## 0. 一句话
 
@@ -75,6 +80,10 @@ fn largest[T: Ord + Show](xs: List[T]) -> String = ...
 - **v1 不做条件 impl**（`impl Ord[List[T]] given T: Ord`）——字典需要运行期递归
   构造，留 v2；因此 v1 的 impl 主体只能是：ADT/record 具名类型、内建标量。
   元组/List/Map 不能作 impl 主体（报错提示 v2）。
+  > **v2 做了。** 拼写是 `impl[T: Ord] Ord[List[T]]`（不是 `given`），主体形状收成
+  > Haskell 98 的 instance head。字典确实运行期构造，但只在**主体非 ground** 时；
+  > `Eq[List[Int]]` 仍是编译期常量。元组仍不能作主体（没有 head 名字、n 元），
+  > 排进 S3。
 
 ### 3.3 一致性与孤儿规则
 
@@ -159,6 +168,17 @@ fn largest[T: Ord + Show](xs: List[T]) -> String = ...
 | stdlib：Ord[Int/Float/String] + `sort/sort_by/max/min/max_by/min_by` | 迭代器协议（等条件 impl + 关联类型论证） |
 | 孤儿规则 + 程序级查重 | dyn/trait 对象（ADT/record-of-fns 惯用法顶住） |
 |  | 多参数 trait、关联类型、supertrait |
+
+**右列现状（2026-07-26）**：
+
+| 当时写的 | 现在 |
+|---|---|
+| 条件 impl（v2） | **已做**，v0.13.0 起可写 |
+| `==`→Eq | **已做**：`==` 与 `[T: Eq]` 走同一个求解器 |
+| derive 用户自定义 trait | 未做；`derive Ord` 已对泛型类型解禁 |
+| 迭代器协议 | 未做（S2.2） |
+| 单态化 / dyn / 多参数 trait / 关联类型 / supertrait | 未做，也没排期 |
+| `+`→Num | 未做 |
 
 ## 6. 验收样例（先行，`examples/traits/`）
 

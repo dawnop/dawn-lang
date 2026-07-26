@@ -312,11 +312,21 @@ fn sort2[T: Ord2](xs: List[T]) -> List[T] = ...   # 约束：[T: Trait (+ Trait)
 - trait 恰有一个类型参数；方法进入模块函数命名空间（可直呼、可 UFCS、可管道）。
 - **一致性**：全程序每个「trait × 类型」至多一个 impl；**孤儿规则**：impl 只能
   写在 trait 或主体类型的声明模块。impl 全局生效，不需要 `use`。
-- v1 主体：非泛型具名类型与 `Int`/`Float`/`Bool`/`String`；无条件 impl、无 dyn、
-  无 supertrait。trait 方法效果只能是纯或 `!io`，impl 的效果 ⊑ trait 声明。
+- **主体形状**：一个类型构造器，作用在**互不相同的类型变量**上，而那些变量恰好是
+  这个 impl 自己的参数——`impl Eq[Money]`、`impl[T: Eq] Eq[List[T]]`、
+  `impl[K: Eq, V: Eq] Eq[Map[K, V]]` 都合法；`impl Eq[List[Int]]`（具体实参）与
+  `impl[T] Eq[Map[T, T]]`（重复变量）不合法。这一条同时决定了「哪个 impl 匹配」
+  （head 相等）、「两个 impl 是否重叠」（同上）与「递归求解是否终止」（子目标是
+  父目标的真子项）。
+- **条件 impl**：`impl[T: Eq] Eq[List[T]]` 的方法是泛型函数，按约束接收字典；
+  `Eq[List[Int]]` 这样的具体目标在编译期解成常量字典，`Eq[List[T]]`（`T` 刚性）
+  则在运行期由 `Eq[T]` 构造。无 dyn、无 supertrait、无特化（不问「哪个更特化」）。
+  trait 方法效果只能是纯或 `!io`，impl 的效果 ⊑ trait 声明。
 - 预置 `trait Ord[T] { fn cmp(a: T, b: T) -> Int }` 及 `Int`/`Float`/`String`
   的 impl；`derive Ord` 生成字段字典序比较（和类型先比构造器声明顺序），字段须为
-  `Int`/`Float`/`String` 或自身具 Ord impl 的类型。
+  `Int`/`Float`/`String`、自身具 Ord impl 的类型，或该类型自己的类型参数
+  （此时生成的是条件 impl：`type Box[T] = { v: T } derive Ord` 得到
+  `impl[T: Ord] Ord[Box[T]]`）。`List[T]` 有 std 写的词典序 impl。
 - 预置 `trait Eq[T] { fn eq(a: T, b: T) -> Bool }` 与
   `trait Hash[T] { fn hash(x: T) -> Int }`，`Int`/`Float`/`Bool`/`String`/`Bytes`/`Cursor`
   各有 impl。**没有 `derive Eq`**：`==` 本来就对每个类型结构化（§4.3），等于每个类型
@@ -325,8 +335,11 @@ fn sort2[T: Ord2](xs: List[T]) -> List[T] = ...   # 约束：[T: Trait (+ Trait)
   - **`impl Eq` 与 `impl Hash` 必须成对出现**（编译错误）：相等的值必须哈希相同，
     否则该类型作 `Map`/`Set` 键即失效。
   - 覆盖体内不能用 `==` 比较主体类型本身——那就是这个 impl，会无限递归；比字段。
-  - `Eq`/`Hash` 约束实例化到**没有 impl 的类型**（含 `List[T]`、元组等 v1 写不出
-    impl 的形状）时，编译器**合成结构见证**；主体静态已知时直接塌缩成原语。
+  - `Eq`/`Hash` 约束实例化到**没有 impl 的类型**（ADT、元组）时，编译器按这个类型
+    自己的结构**合成**一份实现——等价于一条隐式的条件 impl，主体含类型参数时要求
+    该参数有对应 bound。主体静态已知时直接塌缩成原语，不建字典。
+  - `List` 不在此列：std 写了 `impl[T: Eq] Eq[List[T]]` 与对应的 `Hash`/`Ord`。
+    `Map`/`Set`/元组仍走合成。
 - 限制：trait 方法与带约束的函数不可用作函数值（提示包 lambda）；comptime 中
   不允许 trait 约束的调用与 impl 排序。
 
