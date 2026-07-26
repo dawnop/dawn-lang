@@ -1913,12 +1913,68 @@ test "trait registration puts methods in the fn namespace" {
   assert str.contains(cx2.diags[0].msg, "already a method of trait `Eq2`")
 }
 
-## The subject-type restriction for v1 impls (spec/docs trait.md).
-fn impl_subject_ok(cx: Cx, subject: Ty) -> Bool =
-  match subject {
-    TyInt | TyFloat | TyBool | TyString -> true
-    TyAdt(aid, _) -> len(adt_of(cx.adts, aid).tparams) == 0
-    _ -> false
+## The subject-shape restriction (trait-v2-design §3.2, Haskell 98's instance
+## head): a named type constructor applied to distinct type variables, and
+## those variables are exactly the impl's own parameters.
+##
+## One rule doing three jobs. Matching becomes head equality, so "which impl"
+## is a map lookup. Overlap becomes head equality too, so coherence is the
+## duplicate diagnostic that already existed. And every sub-goal is a proper
+## sub-term of its parent, so recursive solving terminates on term size rather
+## than on a depth limit.
+##
+## Returns the reason it is not allowed, or None.
+fn impl_shape_bad(cx: Cx, subject: Ty, tvars: List[Ty]) -> Option[String] = {
+  match head_of(subject) {
+    None -> return Some("`" ++ ty_show(cx.adts, subject) ++ "` has no type constructor")
+    Some(_) -> ()
+  }
+  let args = type_args_of(subject)
+  if len(args) != len(tvars) {
+    if len(tvars) == 0 {
+      return Some("`" ++ ty_show(cx.adts, subject) ++
+          "` is applied to types; an impl subject may only be applied to its own parameters")
+    }
+    return Some("the subject applies " ++ to_string(len(args)) ++
+        " argument(s) but the impl declares " ++ to_string(len(tvars)))
+  }
+  var seen: Set[Int] = set.empty()
+  for a in args {
+    match a {
+      TyVar(n, vid) -> {
+        var mine = false
+        for tv in tvars {
+          match tv {
+            TyVar(_, mid) -> if mid == vid { mine = true }
+            _ -> ()
+          }
+        }
+        if not mine {
+          return Some("`" ++ n ++ "` is not a parameter of this impl")
+        }
+        if set.has(seen, vid) {
+          return Some("`" ++ n ++ "` is used twice in the subject")
+        }
+        seen = set.insert(seen, vid)
+      }
+      _ -> return Some("`" ++ ty_show(cx.adts, a) ++
+          "` is a concrete argument; an impl subject takes only its own parameters")
+    }
+  }
+  None
+}
+
+## Which module a head belongs to, for the orphan rule (§3.9). The builtin
+## containers have no declaration to point at, so std claims them by name.
+##
+## This is scaffolding with a known end: after S3 they are ordinary ADTs in
+## std and only the `HAdt` arm survives.
+fn head_owner(h: Head) -> Option[String] =
+  match h {
+    HList -> Some("std/list")
+    HMap -> Some("std/map")
+    HSet -> Some("std/set")
+    _ -> None
   }
 
 ## Pass 2.75b: register impls — derive Ord first (so an explicit duplicate
@@ -2001,40 +2057,52 @@ pub fn pass_register_impls(
       Some(t) -> t
     }
     let tr = trait_of(cx1.traits, tid)
-    # Cut 1 of trait v2 parses the conditional form but registers nothing: the
-    # subject would name parameters no scope holds yet, so reject before
-    # resolving it rather than report `unknown type T`.
-    if len(d.tparams) > 0 {
-      cx1 = cerr_h(cx1, "conditional impls are not supported yet", d.tlo, d.thi,
-        "write `impl " ++ d.trait_name ++ "[SomeConcreteType]` for now")
-      impl_sigs = impl_sigs ++ [no_msigs(len(d.methods))]
-      continue
+    # The impl's own parameters are in scope for the subject AND for every
+    # method signature: `impl[T: Eq] Eq[List[T]]`'s `eq` takes `List[T]`, so
+    # the scope has to outlive the subject.
+    var tpnames: List[String] = []
+    for tp in d.tparams { tpnames = tpnames ++ [tp.name] }
+    if dup_names(tpnames) {
+      cx1 = cerr(cx1, "duplicate type parameter names", d.tlo, d.thi)
     }
-    let empty_tp: Map[String, Ty] = map.empty()
+    var itvars: List[Ty] = []
+    var tp_scope: Map[String, Ty] = map.empty()
+    for tp in d.tparams {
+      let (cxv, v) = fresh_tvar(cx1, tp.name)
+      cx1 = cxv
+      itvars = itvars ++ [v]
+      tp_scope = map.insert(tp_scope, tp.name, v)
+    }
     let empty_ev: Map[String, Eff] = map.empty()
-    cx1 = Cx { ..cx1, current_tparams: empty_tp, current_eff_vars: empty_ev }
+    cx1 = Cx { ..cx1, current_tparams: tp_scope, current_eff_vars: empty_ev }
+    let (cxbnd, iconstraints) = resolve_bounds(cx1, d.tparams)
+    cx1 = cxbnd
     let (cx2, subject) = resolve_type(cx1, d.subject)
     cx1 = cx2
     if subject == TyError {
       impl_sigs = impl_sigs ++ [no_msigs(len(d.methods))]
       continue
     }
-    if not impl_subject_ok(cx1, subject) {
-      cx1 = cerr_h(cx1, "`" ++ ty_show(cx1.adts, subject) ++ "` cannot be an impl subject",
-        t_lo2(d.subject), t_hi2(d.subject),
-        "v1 impls cover named non-generic types and Int/Float/Bool/String; " ++
-          "generic subjects (List, Map, tuples, instantiated generics) need conditional impls (v2)")
-      impl_sigs = impl_sigs ++ [no_msigs(len(d.methods))]
-      continue
+    match impl_shape_bad(cx1, subject, itvars) {
+      Some(why) -> {
+        cx1 = cerr_h(cx1, "`" ++ ty_show(cx1.adts, subject) ++ "` cannot be an impl subject",
+          t_lo2(d.subject), t_hi2(d.subject),
+          why ++ "; a subject is a type constructor applied to this impl's own parameters, " ++
+            "as in `impl[T: Eq] Eq[List[T]]`")
+        impl_sigs = impl_sigs ++ [no_msigs(len(d.methods))]
+        continue
+      }
+      None -> ()
     }
     # orphan rule: the impl lives with the trait or with the subject type
     var trait_local = false
     for n in cx1.local_traits {
       if n == d.trait_name { trait_local = true }
     }
-    let subject_local = match subject {
-      TyAdt(aid, _) -> set.has(local_adts, aid)
-      _ -> false
+    let subject_local = match head_of(subject) {
+      Some(HAdt(aid)) -> set.has(local_adts, aid)
+      Some(h) -> head_owner(h) == cx1.owner_class
+      None -> false
     }
     if not trait_local && not subject_local {
       cx1 = cerr_h(cx1, "orphan impl: `" ++ tr.name ++ "[" ++ ty_show(cx1.adts, subject) ++
@@ -2160,13 +2228,19 @@ pub fn pass_register_impls(
         ret: ret,
         eff: eff,
         is_builtin: false,
-        tparams: [],
-        constraints: [],
+        # A conditional impl's method is a generic function: it takes one
+        # dictionary per bound, exactly like a `[T: Eq]` function does, and
+        # everything downstream (descriptors, call sites, `bind_dicts` for
+        # the body) follows from saying so here.
+        tparams: itvars,
+        constraints: iconstraints,
         owner: cx1.owner_class,
         trait_id: None,
         inferring: false
       })]
     }
+    let no_tp: Map[String, Ty] = map.empty()
+    cx1 = Cx { ..cx1, current_tparams: no_tp }
     var missing: List[MethodSig] = []
     for entry in tr.methods {
       let (mname, msig) = entry
@@ -2201,8 +2275,8 @@ pub fn pass_register_impls(
     let info = ImplI {
       trait_id: tid,
       subject: subject,
-      tparams: [],
-      constraints: [],
+      tparams: itvars,
+      constraints: iconstraints,
       lo: d.lo,
       hi: d.hi,
       derived: false,
@@ -4675,6 +4749,37 @@ test "ctor values and witnesses" {
   assert ok6 == None
   assert str.contains(cx6.diags[0].msg, "cannot be compared")
 }
+
+test "an impl subject is a head applied to the impl's own parameters" {
+  let cx = seed_prelude(test_cx())
+  let t = TyVar("T", 901)
+  let u = TyVar("U", 902)
+  let none_tv: List[Ty] = []
+  # the shapes v1 allowed, and the one v2 adds
+  assert impl_shape_bad(cx, TyInt, none_tv) == None
+  assert impl_shape_bad(cx, TyList(t), [t]) == None
+  assert impl_shape_bad(cx, TyMap(t, u), [t, u]) == None
+  # a concrete argument would make matching ask "which impl is more
+  # specific", which is specialisation, not a minimal slice
+  assert why_bad(cx, TyList(TyInt), none_tv) == "applied to types"
+  # a repeated parameter has no unique binding
+  assert why_bad(cx, TyMap(t, t), [t, u]) == "used twice"
+  # and a variable is not a type constructor
+  assert why_bad(cx, t, [t]) == "no type constructor"
+}
+
+## The reason `impl_shape_bad` gave, reduced to the phrase the test names.
+fn why_bad(cx: Cx, subject: Ty, tvars: List[Ty]) -> String =
+  match impl_shape_bad(cx, subject, tvars) {
+    None -> "accepted"
+    Some(why) -> {
+      for phrase in ["applied to types", "used twice", "no type constructor",
+        "not a parameter", "concrete argument"] {
+          if str.contains(why, phrase) { return phrase }
+        }
+      why
+    }
+  }
 
 test "a subject containing a rigid variable takes its arguments' witnesses" {
   let cx = seed_prelude(test_cx())

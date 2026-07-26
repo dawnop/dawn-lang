@@ -1,0 +1,65 @@
+# A conditional impl: `impl[T: Show2] Show2[Box[T]]`.
+#
+# This is the shape trait v2 exists for, and the one nothing could express
+# before it. What it exercises that `dict_forward` and `eq_generic` do not is
+# a *user-written* body reached at a subject that is not ground, so the impl
+# method is itself a generic function: it takes the dictionary its own bound
+# names, and every call site has to supply one -- the devirtualised call, the
+# bridge sitting in a dictionary slot, and the recursion inside the body.
+#
+# `Wrap` is nested three deep on purpose. The dictionary for `Box[Box[Box[T]]]`
+# is built from the one for `Box[Box[T]]`, which is built from `Box[T]`'s: an
+# error in how a bridge finds its arguments shows up as the wrong depth rather
+# than as a crash, so the expectations have to be read, not just diffed.
+use std/io
+
+pub trait Show2[T] {
+  fn show2(x: T) -> String
+}
+
+pub type Box[T] = { v: T }
+
+pub type Two[A, B] = { l: A, r: B }
+
+impl Show2[Int] {
+  fn show2(x: Int) -> String = if x < 0 { "-" } else { "+" }
+}
+
+impl Show2[String] {
+  fn show2(x: String) -> String = x
+}
+
+impl[T: Show2] Show2[Box[T]] {
+  fn show2(x: Box[T]) -> String = "(" ++ show2(x.v) ++ ")"
+}
+
+## Two parameters, so the dictionary this impl needs is built from two.
+impl[A: Show2, B: Show2] Show2[Two[A, B]] {
+  fn show2(x: Two[A, B]) -> String = "<" ++ show2(x.l) ++ " " ++ show2(x.r) ++ ">"
+}
+
+## The other door: reached through a bound, so a dictionary carries the call
+## instead of the call site naming the impl.
+fn through[T: Show2](x: T) -> String = show2(x)
+
+pub fn main() -> Unit !io = {
+  println(show2(7))
+  println(show2("hi"))
+
+  println("-- one level --")
+  println(show2(Box { v: 7 }))
+  println(show2(Box { v: "hi" }))
+
+  println("-- nested, so the dictionary is built from a built one --")
+  println(show2(Box { v: Box { v: 0 - 1 } }))
+  println(show2(Box { v: Box { v: Box { v: "x" } } }))
+
+  println("-- two parameters --")
+  println(show2(Two { l: 1, r: "a" }))
+  println(show2(Two { l: Box { v: 1 }, r: Two { l: "b", r: 0 - 2 } }))
+
+  println("-- through a bound: the dictionary travels --")
+  println(through(Box { v: 7 }))
+  println(through(Box { v: Box { v: "deep" } }))
+  println(through(Two { l: Box { v: 1 }, r: "z" }))
+}

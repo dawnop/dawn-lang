@@ -1610,9 +1610,16 @@ fn gen_ccall(g: Gen, callee: CCallee, args: List[CExpr], ty: Ty) -> (Gen, Bool) 
       let g1 = gen_cargs(g, args)
       let tr = trait_of(g1.traits, tid)
       let psig = subst_subject(tr, trait_method_sig(tr, method), subject)
+      # A conditional impl's method takes a dictionary per bound. How many is
+      # readable from Core alone -- the arguments beyond the trait method's
+      # own are those dictionaries -- so this does not consult the impl table.
+      var ptys = psig.param_tys
+      for _d in 0 ..(len(args) - len(psig.param_tys)) {
+        ptys = ptys ++ [TyVar("D", 0)]
+      }
       g1.mv.visitMethodInsn(OP_INVOKESTATIC, owner,
         impl_method_name(g1, tr.name, subject, method),
-        method_desc(g1.adts, psig.param_tys, psig.ret), false)
+        method_desc(g1.adts, ptys, psig.ret), false)
       (g1, true)
     }
     CDefault(owner, tid, method) -> {

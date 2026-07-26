@@ -23,7 +23,7 @@ use types.{
   Sym, Sig, Traits, TraitI, ImplI, MethodSig,
   Adts, AdtI, CtorI, adt_of, trait_of, OPTION_ID, RESULT_ID, ORD_ID, EQ_ID, HASH_ID,
   is_eq_scalar, is_ord_scalar, builtins, Impls, impl_at, has_impl_at,
-  is_ground, expandable, type_args_of
+  is_ground, expandable, type_args_of, sub_goals
 }
 use tast.{
   TExpr, TStmt, TPat, TArm, TStrPart, TFun, TModule, TBinOp, TUnOp, TJavaCall,
@@ -581,7 +581,8 @@ fn dict_ty() -> Ty = TyAdt(0 - 1, [])
 ## Build (once) the dictionary for a ground witness and return a reference to
 ## it. Every slot is resolved here, so a backend only has to lay out pointers.
 fn dict_ref(st: LSt, tid: Int, subject: Ty) -> (LSt, CExpr) = {
-  let (st1, key) = dict_def(st, tid, subject, [])
+  let no_goals: List[(Int, Ty)] = []
+  let (st1, key) = dict_def(st, tid, subject, no_goals)
   (st1, CDictRef(key, tid, subject, dict_ty()))
 }
 
@@ -592,7 +593,7 @@ fn dict_ref(st: LSt, tid: Int, subject: Ty) -> (LSt, CExpr) = {
 ## subject's own type arguments (§3.8). A slot body finds those arguments
 ## back through the dictionary it is already handed, so the argument list
 ## changes what the slots may *read*, not what shape they have.
-fn dict_def(st: LSt, tid: Int, subject: Ty, argtys: List[Ty]) -> (LSt, String) = {
+fn dict_def(st: LSt, tid: Int, subject: Ty, goals: List[(Int, Ty)]) -> (LSt, String) = {
   let key = dict_key(tid, subject)
   for d in st.dicts {
     if d.key == key { return (st, key) }
@@ -607,14 +608,14 @@ fn dict_def(st: LSt, tid: Int, subject: Ty, argtys: List[Ty]) -> (LSt, String) =
         key: key,
         trait_id: tid,
         subject: subject,
-        nargs: len(argtys),
+        nargs: len(goals),
         slots: []
       }]
   }
   var slots: List[CDictSlot] = []
   for entry in tr.methods {
     let (mn, ms) = entry
-    let (st2, slot) = dict_slot(st1, tr, tid, subject, key, argtys, mn, ms)
+    let (st2, slot) = dict_slot(st1, tr, tid, subject, key, goals, mn, ms)
     st1 = st2
     slots = slots ++ [slot]
   }
@@ -645,7 +646,7 @@ fn dict_slot(
   tid: Int,
   subject: Ty,
   key: String,
-  argtys: List[Ty],
+  goals: List[(Int, Ty)],
   mn: String,
   ms: MethodSig
 ) -> (LSt, CDictSlot) = {
@@ -653,14 +654,14 @@ fn dict_slot(
     let imp = impl_for(st, tid, subject)
     if provides(imp, mn) {
       let (st1, bridge) =
-        make_bridge(st, tr, tid, subject, owner_or(imp.owner, st.owner), mn)
+        make_bridge(st, tr, tid, subject, owner_or(imp.owner, st.owner), mn, key, goals)
       return (st1, CSlotFn(st1.owner, bridge))
     }
   }
   if ms.has_default {
     return (st, CSlotDefault(owner_or(tr.owner, st.owner), mn))
   }
-  let (st1, name) = make_prim_slot(st, tr, tid, subject, key, argtys, mn)
+  let (st1, name) = make_prim_slot(st, tr, tid, subject, key, goals, mn)
   (st1, CSlotFn(st1.owner, name))
 }
 
@@ -675,11 +676,17 @@ fn make_bridge(
   tid: Int,
   subject: Ty,
   iowner: String,
-  method: String
+  method: String,
+  key: String,
+  goals: List[(Int, Ty)]
 ) -> (LSt, String) = {
   let sg = trait_method_sig(tr, method)
   let psig = subst_subject(tr, sg, subject)
-  let name = "bridge$" ++ to_string(tid) ++ "$" ++ ty_key(subject) ++ "$" ++ method
+  # `ty_key_inst`, not `ty_key`: a conditional impl's bridge names the
+  # dictionary class it reads its arguments out of, so `Box[Int]` and
+  # `Box[Box[Int]]` need different bridges. For a non-generic subject the two
+  # spellings agree, which is why nothing that existed before changed name.
+  let name = "bridge$" ++ to_string(tid) ++ "$" ++ ty_key_inst(subject) ++ "$" ++ method
   var seen = false
   for f in st.lifted {
     if f.name == name { seen = true }
@@ -698,11 +705,20 @@ fn make_bridge(
       args = args ++ [adapt_out(CLocal(sym, gt), gt, psig.param_tys[i])]
       i = i + 1
     }
-    # the dictionary parameter is unused by the bridge but must be there:
-    # every slot has the same signature
+    # Every slot has the same signature, so the dictionary parameter is always
+    # there. For a conditional impl it is also where the impl's own
+    # dictionaries come from.
     let (st3, dsym) = fresh_sym(st1)
     st1 = st3
-    let call = CCall(CImpl(iowner, tid, subject, method), args, psig.ret)
+    # A conditional impl's method is generic: it wants a dictionary per bound,
+    # and the only place to get them is the dictionary this bridge was handed.
+    var ds: List[CExpr] = []
+    var gi = 0
+    for _g in goals {
+      ds = ds ++ [CDictArg(CLocal(dsym, dict_ty()), st1.owner, key, gi, dict_ty())]
+      gi = gi + 1
+    }
+    let call = CCall(CImpl(iowner, tid, subject, method), args ++ ds, psig.ret)
     let f = CFun {
       name: name,
       owner: st1.owner,
@@ -748,7 +764,7 @@ fn make_prim_slot(
   tid: Int,
   subject: Ty,
   key: String,
-  argtys: List[Ty],
+  goals: List[(Int, Ty)],
   method: String
 ) -> (LSt, String) = {
   let sg = trait_method_sig(tr, method)
@@ -771,8 +787,9 @@ fn make_prim_slot(
   st1 = st3
   var env: Map[String, CExpr] = map.empty()
   var ai = 0
-  for at in argtys {
-    env = map.insert(env, dict_key(tid, at),
+  for g in goals {
+    let (gt, gty) = g
+    env = map.insert(env, dict_key(gt, gty),
       CDictArg(CLocal(dsym, dict_ty()), st1.owner, key, ai, dict_ty()))
     ai = ai + 1
   }
@@ -827,16 +844,29 @@ fn dict_available(st: LSt, tid: Int, t: Ty) -> Bool =
           if is_ground(t) || not expandable(t) {
             true
           } else {
-            dicts_available(st, tid, type_args_of(t))
+            goals_available(st, sub_goals(st.impls, tid, t))
           }
       }
   }
 
-fn dicts_available(st: LSt, tid: Int, ts: List[Ty]) -> Bool = {
-  for t in ts {
-    if not dict_available(st, tid, t) { return false }
+fn goals_available(st: LSt, goals: List[(Int, Ty)]) -> Bool = {
+  for g in goals {
+    let (gt, gty) = g
+    if not dict_available(st, gt, gty) { return false }
   }
   true
+}
+
+fn goal_dicts(st: LSt, goals: List[(Int, Ty)]) -> (LSt, List[CExpr]) = {
+  var st1 = st
+  var out: List[CExpr] = []
+  for g in goals {
+    let (gt, gty) = g
+    let (st2, d) = dict_expr(st1, gt, gty)
+    st1 = st2
+    out = out ++ [d]
+  }
+  (st1, out)
 }
 
 ## The dictionary for `t`, as an expression. Only called where
@@ -852,23 +882,12 @@ fn dict_expr(st: LSt, tid: Int, t: Ty) -> (LSt, CExpr) =
       if is_ground(t) || not expandable(t) {
         dict_ref(st, tid, t)
       } else {
-        let args = type_args_of(t)
-        let (st1, ds) = dict_exprs(st, tid, args)
-        let (st2, key) = dict_def(st1, tid, t, args)
+        let goals = sub_goals(st.impls, tid, t)
+        let (st1, ds) = goal_dicts(st, goals)
+        let (st2, key) = dict_def(st1, tid, t, goals)
         (st2, CDictApply(key, ds, dict_ty()))
       }
   }
-
-fn dict_exprs(st: LSt, tid: Int, ts: List[Ty]) -> (LSt, List[CExpr]) = {
-  var st1 = st
-  var out: List[CExpr] = []
-  for t in ts {
-    let (st2, d) = dict_expr(st1, tid, t)
-    st1 = st2
-    out = out ++ [d]
-  }
-  (st1, out)
-}
 
 fn conj(acc: Option[CExpr], c: CExpr) -> CExpr =
   match acc {
@@ -897,8 +916,9 @@ fn eq_at(st: LSt, a: CExpr, b: CExpr, t: Ty) -> (LSt, CExpr) = {
   if has_impl_at(st.impls, EQ_ID, t) {
     let imp = impl_for(st, EQ_ID, t)
     if provides(imp, "eq") {
-      return (st, CCall(
-        CImpl(owner_or(imp.owner, st.owner), EQ_ID, t, "eq"), [a, b], TyBool))
+      let (st1, ds) = goal_dicts(st, sub_goals(st.impls, EQ_ID, t))
+      return (st1, CCall(
+        CImpl(owner_or(imp.owner, st1.owner), EQ_ID, t, "eq"), [a, b] ++ ds, TyBool))
     }
   }
   if is_ground(t) {
@@ -918,8 +938,8 @@ fn eq_at(st: LSt, a: CExpr, b: CExpr, t: Ty) -> (LSt, CExpr) = {
   # Otherwise spell the whole out over its parts, passing each part's
   # dictionary down. That is the same expansion the ground case gets, minus
   # the luxury of knowing what the parts are.
-  if expandable(t) && dicts_available(st, EQ_ID, type_args_of(t)) {
-    let (st1, ds) = dict_exprs(st, EQ_ID, type_args_of(t))
+  if expandable(t) && goals_available(st, sub_goals(st.impls, EQ_ID, t)) {
+    let (st1, ds) = goal_dicts(st, sub_goals(st.impls, EQ_ID, t))
     let (st2, name) = struct_eq_fn(st1, t)
     return (st2, CCall(CDirect(st2.owner, name), [a, b] ++ ds, TyBool))
   }
@@ -977,15 +997,17 @@ fn struct_rel_fn(
     CParam { sym: asym, ty: t, mode: COwned },
     CParam { sym: bsym, ty: t, mode: COwned }
   ]
-  let argtys: List[Ty] = if is_ground(t) { [] } else { type_args_of(t) }
+  let no_goals: List[(Int, Ty)] = []
+  let goals = if is_ground(t) { no_goals } else { sub_goals(st.impls, tid, t) }
   var stD = st1
   var dps: List[CParam] = []
   var env: Map[String, CExpr] = map.empty()
-  for at in argtys {
+  for g in goals {
+    let (gt, gty) = g
     let (stA, dsym) = fresh_sym(stD)
     stD = stA
     dps = dps ++ [CParam { sym: dsym, ty: dict_ty(), mode: COwned }]
-    env = map.insert(env, dict_key(tid, at), CLocal(dsym, dict_ty()))
+    env = map.insert(env, dict_key(gt, gty), CLocal(dsym, dict_ty()))
   }
   # publish the name before building the body: a recursive type reaches this
   # same function from inside itself, and without the reservation that
@@ -1103,8 +1125,9 @@ fn cmp_at(st: LSt, a: CExpr, b: CExpr, t: Ty) -> (LSt, CExpr) = {
   if has_impl_at(st.impls, ORD_ID, t) {
     let imp = impl_for(st, ORD_ID, t)
     if provides(imp, "cmp") {
-      return (st, CCall(
-        CImpl(owner_or(imp.owner, st.owner), ORD_ID, t, "cmp"), [a, b], TyInt))
+      let (st1, ds) = goal_dicts(st, sub_goals(st.impls, ORD_ID, t))
+      return (st1, CCall(
+        CImpl(owner_or(imp.owner, st1.owner), ORD_ID, t, "cmp"), [a, b] ++ ds, TyInt))
     }
   }
   if is_ground(t) {
@@ -1118,8 +1141,8 @@ fn cmp_at(st: LSt, a: CExpr, b: CExpr, t: Ty) -> (LSt, CExpr) = {
     Some(d) -> return cmp_through_dict(st, d, a, b, t)
     None -> ()
   }
-  if expandable(t) && dicts_available(st, ORD_ID, type_args_of(t)) {
-    let (st1, ds) = dict_exprs(st, ORD_ID, type_args_of(t))
+  if expandable(t) && goals_available(st, sub_goals(st.impls, ORD_ID, t)) {
+    let (st1, ds) = goal_dicts(st, sub_goals(st.impls, ORD_ID, t))
     let (st2, name) = struct_cmp_fn(st1, t)
     return (st2, CCall(CDirect(st2.owner, name), [a, b] ++ ds, TyInt))
   }
@@ -1277,7 +1300,7 @@ fn witness_value(st: LSt, w: WitRef) -> (LSt, CExpr) =
     # arguments' dictionaries.
     WApply(tid, subject, args) -> {
       let (st1, ds) = witness_values(st, args)
-      let (st2, key) = dict_def(st1, tid, subject, type_args_of(subject))
+      let (st2, key) = dict_def(st1, tid, subject, sub_goals(st1.impls, tid, subject))
       (st2, CDictApply(key, ds, dict_ty()))
     }
   }
@@ -1303,11 +1326,12 @@ fn enter_wit_env(st: LSt, w: WitRef) -> (LSt, Map[String, CExpr]) =
       var st1 = st
       var env = st.dict_env
       var i = 0
-      for at in type_args_of(subject) {
+      for g in sub_goals(st.impls, tid, subject) {
+        let (gt, gty) = g
         if i < len(args) {
           let (st2, d) = witness_value(st1, args[i])
           st1 = st2
-          env = map.insert(env, dict_key(tid, at), d)
+          env = map.insert(env, dict_key(gt, gty), d)
         }
         i = i + 1
       }
@@ -1368,7 +1392,19 @@ fn lower_trait_call(
     # does. (No impl in the language is conditional yet, so nothing reaches
     # here today; leaving it as a panic would make the first conditional impl
     # a compiler crash rather than a call.)
-    WApply(_, _, _) -> {
+    # A conditional impl at a known subject still devirtualises -- which
+    # body runs is settled; only the dictionaries it needs are values.
+    WApply(_, subject, wargs) -> {
+      let imp = impl_for(st, tid, subject)
+      if provides(imp, name) {
+        let psig = subst_subject(tr, sg, subject)
+        let (st1, vs) = lower_args_to(st, args, psig.param_tys)
+        let (st2, ds) = witness_values(st1, wargs)
+        return (st2, adapt_out(
+          CCall(CImpl(owner_or(imp.owner, st2.owner), tid, subject, name), vs ++ ds,
+            psig.ret),
+          psig.ret, ty))
+      }
       let (st1, d) = witness_value(st, ws[0])
       let (st2, vs) = lower_args_to(st1, args, sg.param_tys)
       (st2, adapt_out(
