@@ -656,3 +656,58 @@ Emit-Change,ground 与非 ground 分开物化确实让绝大多数字典仍是�
 **留给 S3 的**(都记在正文里,不是遗漏):`Map`/`Set` 的 `Eq`/`Hash`(要等容器查找
 本身是 Dawn 的)、元组(没有 head)、`uncomparable_part` 与 `struct_eq` intrinsic
 (要等每个可比类型都有 impl)、`head_owner` 这段过渡脚手架。
+
+## 6. `Iter` 的第二个前置：关联类型（2026-07-27 勘察）
+
+S2.1 关账时，四份文档（`native-backend-plan.md` §4/§6/§9.1/§11.4、
+`collections-dejava-research.md` §5、`runtime-intrinsics-design.md` §7、本文 §0）
+都把 `Iter` 记成「trait v2 之后的下一步」。**trait v2 有了，`Iter` 仍然写不出来**——
+它还有第二个前置，四份文档一处都没有识别。
+
+### 6.1 元素类型没有名字
+
+`TraitI` 只有**一个** subject 类型参数（`tvar: Ty`）。于是：
+
+```dawn
+trait Iter[C] {
+  fn iter_start(c: C) -> IterState
+  fn iter_done(c: C, k: IterState) -> Bool
+  fn iter_next(c: C, k: IterState) -> IterState
+  fn iter_get(c: C, k: IterState) -> ???   # ← 元素类型无处可写
+}
+```
+
+走查过的四条出路，全都撞同一堵墙：
+
+| 出路 | 为什么不行 |
+|---|---|
+| 方法自带类型参数 `fn iter_get[E](...) -> E` | **编译器显式禁止**：`error: trait methods cannot declare their own type parameters`（实测）。就算放开，impl 也无法把自己的 `T` 交给一个自由的 `E` |
+| 高阶主体 `trait Iter[C[_]]` | 高阶类型参数，比关联类型更大 |
+| 双参数 trait `Iter[C, E]` | 多参数 trait：一致性键、impl head、孤儿规则全要重做 |
+| 回调式 `trait Each[C] { fn each(c: C, f: fn(?) -> Unit) }` | 形参位置换了个地方，问题不变 |
+
+所以 **`Iter` 的完整前置是「trait v2 + 关联类型」**，后者的规模与 trait v2 同量级
+（语法、`TraitI.assoc`、impl 侧 `type Item = T`、投影类型 `TyAssoc` 及其归约），
+不是一刀能收的东西。
+
+### 6.2 而且它在 S3 之前无法验证
+
+更要紧的一条：**今天把 `for` 改掉是无法证伪的**。`for x in xs` 现在降成
+`len` + `list_index`，而 `list_index` 落在 `DawnList`（共享数组窗口）上是 **O(1)**——
+随机索引慢 8–18× 是 **D3 把 List 换成 RRB 之后**才出现的事（§9.3 实测）。
+所以现在换掉下标循环，既没有语料能证明它更快，也没有语料能证明它没写错：
+唯一的 oracle 要等 D3 才存在。
+
+### 6.3 结论：重排，不是砍掉
+
+`Iter` 仍然是 D3 的正确性前提——这条没变。变的是它的位置：
+
+- **不在 S2 做**。S2 里它缺前置（关联类型）且缺 oracle（RRB）。
+- **关联类型独立成项**（S2.5），按 trait v2 同样的纪律走：设计定稿 → 分刀 →
+  每刀自己一版种子。它的收益不止 `Iter`：`Eq`/`Hash` 的 key 类型、`Show` 的
+  writer 类型都在等同一个东西。
+- **`Iter` 并进 S3 的第一刀**，和 RRB 一起落地、一起被同一份语料证伪。
+
+把「Iter 是 D2 的附带项」写进计划的那次，代价是没识别出 trait v2；这次的教训一样，
+只是往前挪了一层：**一个 trait 写不写得出来，取决于它的方法签名能不能被声明，
+而不只是它的主体能不能被索引。**
