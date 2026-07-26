@@ -16,7 +16,7 @@ use ast.{Module}
 use types.{Sig, Adts, Impls}
 use tast.{TFun, TModule}
 use checker.{ModExports, check_module, cx_new, exports_of, Cx}
-use interp.{eval_comptime, CtOut}
+use interp.{eval_comptime, note_trait_fn, CtOut}
 use parser
 use lexer
 use std/bytes
@@ -34,6 +34,10 @@ pub type StdCtx = {
   fn_decls: Map[String, TFun],
   # className → (name → typed fn): module-qualified comptime calls
   by_owner: Map[String, Map[String, TFun]],
+  # std's impl methods and trait defaults, by the identity Core names them
+  # with. Separate from by_owner because two impls in one module can define
+  # the same method name and that table is keyed by name alone.
+  impl_fns: Map[(Int, String, String), (String, TFun)],
   std_names: Set[String],
   # the ADT table after all of std (grafted ids for user comptime)
   adts: Adts,
@@ -138,6 +142,7 @@ pub fn load_std(dir: String) -> Result[StdCtx, String] !io = {
   var moved: Map[String, String] = map.empty()
   var fn_decls: Map[String, TFun] = map.empty()
   var by_owner: Map[String, Map[String, TFun]] = map.empty()
+  var impl_fns: Map[(Int, String, String), (String, TFun)] = map.empty()
   var adts: Adts = map.empty()
   var impls: Impls = map.empty()
   var last_cx: Option[Cx] = None
@@ -158,7 +163,7 @@ pub fn load_std(dir: String) -> Result[StdCtx, String] !io = {
     if len(cx1.diags) > 0 {
       return Err("bundled std module `" ++ mod_path ++ "` does not check: " ++ cx1.diags[0].msg)
     }
-    let ct = eval_comptime(tm, fn_decls, by_owner, set.empty(), cx1.adts,
+    let ct = eval_comptime(tm, fn_decls, by_owner, impl_fns, set.empty(), cx1.adts,
       cx1.traits, cx1.impl_table, mod_path, 100000000)
     if len(ct.diags) > 0 {
       return Err("bundled std module `" ++ mod_path ++ "` does not evaluate: " ++ ct.diags[0].msg)
@@ -169,6 +174,7 @@ pub fn load_std(dir: String) -> Result[StdCtx, String] !io = {
     for f in tm.fns {
       fn_decls = map.insert(fn_decls, f.name, f)
       own = map.insert(own, f.name, f)
+      impl_fns = note_trait_fn(impl_fns, mod_path, f)
     }
     by_owner = map.insert(by_owner, mod_path, own)
     for fname in map.keys(exp.fns) {
@@ -199,6 +205,7 @@ pub fn load_std(dir: String) -> Result[StdCtx, String] !io = {
     moved: moved,
     fn_decls: fn_decls,
     by_owner: by_owner,
+    impl_fns: impl_fns,
     std_names: std_names,
     adts: adts,
     impls: impls,

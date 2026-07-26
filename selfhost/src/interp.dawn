@@ -37,9 +37,12 @@ use tast.{
   TSPText, TSPInterp,
   TSLet, TSLetPat, TSLocalFn, TSAssign, TSExpr, TSAssert, TSWhile, TSFor
 }
-use types.{Ty, Sym, Sig, Traits, ImplI, Impls, Adts, adt_of, OPTION_ID}
+use types.{
+  Ty, Sym, Sig, Traits, ImplI, Impls, Adts, adt_of, OPTION_ID,
+  TyList, TyMap, TySet, TyArray, TyTuple
+}
 use core.{
-  CExpr, CStmt, CFun,
+  CExpr, CStmt, CFun, CDictDef, CSlotFn, CSlotDefault, ty_key,
   CInt, CFloat, CBool, CStr, CUnit, CLocal, CFnRef, CCall, CIntrinsic,
   CCtor, CField, CIsCtor, CTagOf, CClosure, CTuple, CTupleGet, CBox, CUnbox,
   CBinary, CUnary, CIf, CBlock, CListLit, CConstRef, CComptime,
@@ -78,10 +81,11 @@ pub type CValue =
 # constructors are all lifted by lowering into a top-level function plus a
 # captured environment, so one case does what four used to.
   | VClosure(owner: String, name: String, caps: Map[Int, CValue])
-# A trait dictionary. The interpreter never looks inside one; it exists so a
-# builtin whose signature carries a bound can still be called, with the
-# dictionary sitting harmlessly in a trailing argument slot.
-  | VDict
+# A trait dictionary, named by the key its CDictDef carries plus the
+# dictionaries it was built from (empty unless the impl behind it is
+# conditional). Comptime dispatches through this: the key finds the slot table
+# and `args` is what a slot body reads back out.
+  | VDict(key: String, args: List[CValue])
 
 type Ctl =
   | KErr(d: Diag)
@@ -99,6 +103,9 @@ type ESt = {
   # lowering lifted out of them. Lowering happens on demand because one
   # comptime run touches a handful of functions out of the whole program.
   lowered: Map[String, CFun],
+  # the dictionaries lowering registered while lowering those bodies, by key:
+  # what `CMethod` looks a slot up in
+  dicts: Map[String, CDictDef],
   # seeds the lifted-lambda counter so names stay unique across the run
   next_lam: Int
 }
@@ -129,6 +136,12 @@ type ICx = {
   owner: String,
   traits: Traits,
   impls: Impls,
+  # Every impl method and trait default in the program, by the identity a
+  # `CImpl`/`CDefault` node carries. A flat table is not a shortcut: coherence
+  # means one impl per (trait, head) program-wide, so the key is unique --
+  # which `by_owner` is not, since two impls in one module can both define
+  # `eq`.
+  impl_fns: Map[(Int, String, String), (String, TFun)],
   syms: Map[Int, Sym]
 }
 
@@ -136,18 +149,13 @@ const MAX_CALL_DEPTH: Int = 100000
 
 fn no_sigs() -> Map[(String, String), Sig] = map.empty()
 
+fn no_impls() -> Map[(Int, String, String), (String, TFun)] = map.empty()
+
 fn cerr(st: ESt, env: Env, msg: String) -> ER =
   Err((st, env, KErr(Diag { msg: "comptime: " ++ msg, lo: 0, hi: 0, hint: "" })))
 
 fn cerrh(st: ESt, env: Env, msg: String, hint: String) -> ER =
   Err((st, env, KErr(Diag { msg: "comptime: " ++ msg, lo: 0, hi: 0, hint: hint })))
-
-## The one message for everything dictionary-passing. Trait dispatch is a
-## runtime construct in v1, and Core spells out each of its forms, so this is
-## a single check where the TAST walker needed one per surface syntax.
-fn no_traits(st: ESt, env: Env, what: String) -> ER =
-  cerrh(st, env, what ++ " uses trait bounds, which comptime cannot evaluate yet",
-    "trait dictionaries are a runtime construct in v1")
 
 fn burn(st: ESt, env: Env) -> ER =
   if st.fuel - 1 < 0 {
@@ -215,7 +223,7 @@ fn cvalue_kind(v: CValue) -> String =
     VTuple(_) -> "tuple"
     VAdt(_, _, _) -> "ADT value"
     VClosure(_, _, _) -> "function"
-    VDict -> "trait dictionary"
+    VDict(_, _) -> "trait dictionary"
   }
 
 fn stringify(v: CValue) -> String =
@@ -326,14 +334,89 @@ fn lower_into(
               Ok(_) -> panic("unreachable")
             }
           Ok(t) -> {
-            # dictionaries are ignored: a body that needs one is rejected
-            # below, since comptime has no dispatch (`no_traits`)
-            let (cf, lifted, _dicts, next) = t
-            var tbl = map.insert(st.lowered, owner ++ "." ++ f.name, cf)
+            let (cf, lifted, dicts, next) = t
+            var tbl = map.insert(st.lowered, cache_key(owner, f), cf)
             for lf in lifted { tbl = map.insert(tbl, lf.owner ++ "." ++ lf.name, lf) }
-            Ok((ESt { ..st, lowered: tbl, next_lam: next }, cf))
+            var dts = st.dicts
+            for d in dicts { dts = map.insert(dts, d.key, d) }
+            Ok((ESt { ..st, lowered: tbl, dicts: dts, next_lam: next }, cf))
           }
         }
+
+## The subject half of that identity: its *head*, because an impl method's
+## `impl_of` names the declared subject (`List[T]`) while a `CImpl` node names
+## the instantiated one (`List[Int]`). `ty_key` drops the arguments of an ADT
+## but not of a builtin container, so it cannot be the key on its own.
+fn subject_key(t: Ty) -> String =
+  match t {
+    TyList(_) -> "List"
+    TyMap(_, _) -> "Map"
+    TySet(_) -> "Set"
+    TyArray(_) -> "Array"
+    TyTuple(es) -> "Tup" ++ to_string(len(es))
+    _ -> ty_key(t)
+  }
+
+## Record one function under the identity a `CImpl` or `CDefault` node names,
+## if it is one. Shared by std's loader and the module being folded so the two
+## tables are built by the same rule.
+pub fn note_trait_fn(
+  tbl: Map[(Int, String, String), (String, TFun)],
+  owner: String,
+  f: TFun
+) -> Map[(Int, String, String), (String, TFun)] =
+  match f.impl_of {
+    Some(w) -> {
+      let (tid, subject) = w
+      map.insert(tbl, (tid, subject_key(subject), f.name), (owner, f))
+    }
+    None ->
+      match f.default_of {
+        Some(tid) -> map.insert(tbl, (tid, "\$default", f.name), (owner, f))
+        None -> tbl
+      }
+  }
+
+## Where a lowered body is cached. An impl method shares its name with the
+## trait method it implements, and a module may hold several, so the key has to
+## carry the impl's own identity rather than just the name.
+fn cache_key(owner: String, f: TFun) -> String =
+  match f.impl_of {
+    Some(w) -> {
+      let (tid, subject) = w
+      owner ++ ".impl$" ++ to_string(tid) ++ "$" ++ ty_key(subject) ++ "$" ++ f.name
+    }
+    None ->
+      match f.default_of {
+        Some(tid) -> owner ++ ".default$" ++ to_string(tid) ++ "$" ++ f.name
+        None -> owner ++ "." ++ f.name
+      }
+  }
+
+## The lowered body of an impl method (or a trait default), found by the
+## identity Core names it with rather than by its bare name.
+fn get_trait_cfun(
+  icx: ICx,
+  st: ESt,
+  env: Env,
+  tid: Int,
+  subject_key: String,
+  method: String
+) -> Result[(ESt, CFun), (ESt, Env, Ctl)] !io =
+  match map.get(icx.impl_fns, (tid, subject_key, method)) {
+    Some(pair) -> {
+      let (owner, f) = pair
+      match map.get(st.lowered, cache_key(owner, f)) {
+        Some(cf) -> Ok((st, cf))
+        None -> lower_into(icx, st, env, owner, f)
+      }
+    }
+    None ->
+      match cerr(st, env, "missing impl method `" ++ method ++ "`") {
+        Err(t) -> Err(t)
+        Ok(_) -> panic("unreachable")
+      }
+  }
 
 ## The checker's resolution order, as the interpreter sees it: the named owner
 ## first, then the flat table (module fns over std fns).
@@ -375,7 +458,7 @@ fn get_cfun(
   match find_fn(icx, owner, name) {
     Some(pair) -> {
       let (o, f) = pair
-      match map.get(st.lowered, o ++ "." ++ name) {
+      match map.get(st.lowered, cache_key(o, f)) {
         Some(cf) -> Ok((st, cf))
         None -> lower_into(icx, st, env, o, f)
       }
@@ -429,6 +512,21 @@ fn call_cfun(
   }
 }
 
+## A trait default body, which is keyed by its trait rather than a subject.
+fn call_default(
+  icx: ICx,
+  st: ESt,
+  env: Env,
+  _owner: String,
+  tid: Int,
+  method: String,
+  args: List[CValue]
+) -> ER !io = {
+  let (st1, cf) = get_trait_cfun(icx, st, env, tid, "\$default", method)?
+  let no_caps: Map[Int, CValue] = map.empty()
+  call_cfun(icx, st1, env, cf, no_caps, args)
+}
+
 fn apply_fn(icx: ICx, st: ESt, env: Env, f: CValue, args: List[CValue]) -> ER !io =
   match f {
     VClosure(owner, name, caps) -> {
@@ -438,8 +536,9 @@ fn apply_fn(icx: ICx, st: ESt, env: Env, f: CValue, args: List[CValue]) -> ER !i
     _ -> cerr(st, env, "cannot call a non-function value")
   }
 
-## A direct call by name. A function with dictionary parameters is exactly one
-## the call site passed witnesses to, which is where comptime stops.
+## A direct call by name. A function with dictionary parameters is one the
+## call site passed witnesses to; `call_cfun` binds them into the frame like
+## any other argument.
 fn call_named(
   icx: ICx,
   st: ESt,
@@ -449,7 +548,6 @@ fn call_named(
   args: List[CValue]
 ) -> ER !io = {
   let (st1, cf) = get_cfun(icx, st, env, owner, name)?
-  if len(cf.dicts) > 0 { return no_traits(st1, env, "`" ++ name ++ "`") }
   let no_caps: Map[Int, CValue] = map.empty()
   # a failure inside std has no location the user can act on, so say where it
   # came from instead
@@ -878,9 +976,38 @@ fn ceval(icx: ICx, st0: ESt, env0: Env, e: CExpr) -> ER !io = {
           let (st2, env2, f) = ceval(icx, st1, env1, target)?
           apply_fn(icx, st2, env2, f, vals)
         }
-        CMethod(_, _, m, _) -> no_traits(st1, env1, "`" ++ m ++ "`")
-        CImpl(_, _, _, m) -> no_traits(st1, env1, "`" ++ m ++ "`")
-        CDefault(_, _, m) -> no_traits(st1, env1, "`" ++ m ++ "`")
+        # dispatch: the dictionary names its slot table, the slot names an
+        # ordinary function, and the dictionary rides along as the trailing
+        # argument -- which is exactly what the JVM's dictionary class does
+        CMethod(dexpr, _, m, idx) -> {
+          let (st2, env2, dv) = ceval(icx, st1, env1, dexpr)?
+          match dv {
+            VDict(key, _) ->
+              match map.get(st2.dicts, key) {
+                Some(dd) ->
+                  if idx >= len(dd.slots) {
+                    cerr(st2, env2, "`" ++ m ++ "` has no slot " ++ to_string(idx))
+                  } else {
+                    match dd.slots[idx] {
+                      CSlotFn(o, n) -> call_named(icx, st2, env2, o, n, vals ++ [dv])
+                      CSlotDefault(o, _) ->
+                        match map.get(icx.traits, dd.trait_id) {
+                          Some(_) -> call_default(icx, st2, env2, o, dd.trait_id, m, vals ++ [dv])
+                          None -> cerr(st2, env2, "unknown trait behind `" ++ m ++ "`")
+                        }
+                    }
+                  }
+                None -> cerr(st2, env2, "no dictionary registered for `" ++ key ++ "`")
+              }
+            _ -> cerr(st2, env2, "`" ++ m ++ "` dispatched on a non-dictionary")
+          }
+        }
+        CImpl(_, tid, subject, m) -> {
+          let (st2, cf) = get_trait_cfun(icx, st1, env1, tid, subject_key(subject), m)?
+          let no_caps: Map[Int, CValue] = map.empty()
+          call_cfun(icx, st2, env1, cf, no_caps, vals)
+        }
+        CDefault(_, tid, m) -> call_default(icx, st1, env1, "", tid, m, vals)
       }
     }
     CIntrinsic(name, args, _) -> {
@@ -986,13 +1113,29 @@ fn ceval(icx: ICx, st0: ESt, env0: Env, e: CExpr) -> ER !io = {
     CBreak(id) -> Err((st, env, KBreak(id)))
     CContinue(id) -> Err((st, env, KContinue(id)))
     CForeign(j, _) -> eval_java(icx, st, env, j)
-    # A dictionary is a placeholder here, parameterised or not: the
-    # interpreter refuses at `CMethod` before anything can be believed about
-    # it (`no_traits`), so there is nothing for a real slot table to make
-    # more honest. Comptime dispatch through a dictionary is its own job.
-    CDictRef(_, _, _, _) -> Ok((st, env, VDict))
-    CDictApply(_, _, _) -> Ok((st, env, VDict))
-    CDictArg(_, _, _, _, _) -> Ok((st, env, VDict))
+    # A dictionary is a value here, the same three ways Core builds one: a
+    # statically registered singleton, a construction from its parts', and a
+    # part read back out of the one a slot body was handed.
+    CDictRef(key, _, _, _) -> {
+      let no_args: List[CValue] = []
+      Ok((st, env, VDict(key, no_args)))
+    }
+    CDictApply(key, args, _) -> {
+      let (st1, env1, vals) = eval_all(icx, st, env, args)?
+      Ok((st1, env1, VDict(key, vals)))
+    }
+    CDictArg(dexpr, _, _, idx, _) -> {
+      let (st1, env1, dv) = ceval(icx, st, env, dexpr)?
+      match dv {
+        VDict(_, args) ->
+          if idx < len(args) {
+            Ok((st1, env1, args[idx]))
+          } else {
+            cerr(st1, env1, "dictionary argument " ++ to_string(idx) ++ " is missing")
+          }
+        _ -> cerr(st1, env1, "dictionary argument read from a non-dictionary")
+      }
+    }
   }
 }
 
@@ -1247,7 +1390,8 @@ pub type CtOut = {
 
 fn fresh_st(fuel: Int) -> ESt = {
   let no_fns: Map[String, CFun] = map.empty()
-  ESt { fuel: fuel, depth: 0, lowered: no_fns, next_lam: 0 }
+  let no_dicts: Map[String, CDictDef] = map.empty()
+  ESt { fuel: fuel, depth: 0, lowered: no_fns, dicts: no_dicts, next_lam: 0 }
 }
 
 ## Lower one expression and run it. Every comptime evaluation goes through
@@ -1267,10 +1411,12 @@ fn fold_expr(icx: ICx, fuel: Int, e: TExpr, lo: Int, hi: Int) -> Result[CValue, 
         hint: ""
       })
     Ok(t) -> {
-      let (ce, lifted, next) = t
+      let (ce, lifted, dicts, next) = t
       var tbl: Map[String, CFun] = map.empty()
       for lf in lifted { tbl = map.insert(tbl, lf.owner ++ "." ++ lf.name, lf) }
-      match ceval(icx, ESt { ..st, lowered: tbl, next_lam: next }, env, ce) {
+      var dts: Map[String, CDictDef] = map.empty()
+      for d in dicts { dts = map.insert(dts, d.key, d) }
+      match ceval(icx, ESt { ..st, lowered: tbl, dicts: dts, next_lam: next }, env, ce) {
         Ok(r) -> {
           let (_, _, v) = r
           Ok(v)
@@ -1437,6 +1583,7 @@ pub fn eval_comptime(
   tm: TModule,
   std_fns: Map[String, TFun],
   by_owner: Map[String, Map[String, TFun]],
+  std_impl_fns: Map[(Int, String, String), (String, TFun)],
   std_names: Set[String],
   adts: Adts,
   traits: Traits,
@@ -1456,6 +1603,9 @@ pub fn eval_comptime(
     for n in map.keys(tbl) { owner_of = map.insert(owner_of, n, o) }
   }
   for f in tm.fns { owner_of = map.insert(owner_of, f.name, owner) }
+  # this module's own impl methods and trait defaults join std's
+  var impl_fns = std_impl_fns
+  for f in tm.fns { impl_fns = note_trait_fn(impl_fns, owner, f) }
   let empty_c: Map[String, CValue] = map.empty()
   let empty_b: Map[(Int, Int), CValue] = map.empty()
   var out = CtOut { diags: [], consts: empty_c, blocks: empty_b }
@@ -1470,6 +1620,7 @@ pub fn eval_comptime(
     owner: owner,
     traits: traits,
     impls: impls,
+    impl_fns: impl_fns,
     syms: tm.syms
   }
   for c in tm.consts {
@@ -1503,7 +1654,7 @@ test "consts evaluate in declaration order and fold across references" {
   assert len(cx1.diags) == 0
   let no_fns: Map[String, TFun] = map.empty()
   let no_owner: Map[String, Map[String, TFun]] = map.empty()
-  let out = eval_comptime(tm, no_fns, no_owner, set.empty(), cx1.adts,
+  let out = eval_comptime(tm, no_fns, no_owner, no_impls(), set.empty(), cx1.adts,
     cx1.traits, cx1.impl_table, "m", 1000000)
   assert len(out.diags) == 0
   assert map.get(out.consts, "A") == Some(VInt(3))
@@ -1535,7 +1686,7 @@ test "const initializers run blocks, local fns, matches and loops" {
   assert len(cx1.diags) == 0
   let no_fns: Map[String, TFun] = map.empty()
   let no_owner: Map[String, Map[String, TFun]] = map.empty()
-  let out = eval_comptime(tm, no_fns, no_owner, set.empty(), cx1.adts,
+  let out = eval_comptime(tm, no_fns, no_owner, no_impls(), set.empty(), cx1.adts,
     cx1.traits, cx1.impl_table, "m", 1000000)
   assert len(out.diags) == 0
   assert map.get(out.consts, "D") == Some(VInt(55))
@@ -1557,7 +1708,7 @@ test "a self tail call in a const folds without growing the interpreter stack" {
   assert len(cx1.diags) == 0
   let no_fns: Map[String, TFun] = map.empty()
   let no_owner: Map[String, Map[String, TFun]] = map.empty()
-  let out = eval_comptime(tm, no_fns, no_owner, set.empty(), cx1.adts,
+  let out = eval_comptime(tm, no_fns, no_owner, no_impls(), set.empty(), cx1.adts,
     cx1.traits, cx1.impl_table, "m", 100000000)
   assert len(out.diags) == 0
   assert map.get(out.consts, "T") == Some(VInt(200000))
@@ -1573,7 +1724,7 @@ test "comptime failures become diagnostics; blocks in bodies fold" {
   assert len(cx1.diags) == 0
   let no_fns: Map[String, TFun] = map.empty()
   let no_owner: Map[String, Map[String, TFun]] = map.empty()
-  let out = eval_comptime(tm, no_fns, no_owner, set.empty(), cx1.adts,
+  let out = eval_comptime(tm, no_fns, no_owner, no_impls(), set.empty(), cx1.adts,
     cx1.traits, cx1.impl_table, "m", 1000000)
   assert len(out.diags) == 1
   assert out.diags[0].msg == "comptime: panicked: Int division by zero"
@@ -1597,7 +1748,7 @@ test "route C folds a vouched static Java call" {
   assert len(cx1.diags) == 0
   let no_fns: Map[String, TFun] = map.empty()
   let no_owner: Map[String, Map[String, TFun]] = map.empty()
-  let out = eval_comptime(tm, no_fns, no_owner, set.empty(), cx1.adts,
+  let out = eval_comptime(tm, no_fns, no_owner, no_impls(), set.empty(), cx1.adts,
     cx1.traits, cx1.impl_table, "m", 1000000)
   assert len(out.diags) == 0
   assert map.get(out.consts, "F") == Some(VInt(5))
@@ -1619,7 +1770,7 @@ test "fuel exhaustion becomes a diagnostic" {
   assert len(cx1.diags) == 0
   let no_fns: Map[String, TFun] = map.empty()
   let no_owner: Map[String, Map[String, TFun]] = map.empty()
-  let out = eval_comptime(tm, no_fns, no_owner, set.empty(), cx1.adts,
+  let out = eval_comptime(tm, no_fns, no_owner, no_impls(), set.empty(), cx1.adts,
     cx1.traits, cx1.impl_table, "m", 2000)
   assert len(out.diags) == 1
   assert str.contains(out.diags[0].msg, "fuel exhausted")

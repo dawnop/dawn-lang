@@ -2527,8 +2527,9 @@ fn lower_fn(st: LSt, owner: String, f: TFun) -> (LSt, CFun) = {
 
 ## Lower one expression on its own: the comptime interpreter's entry, which
 ## folds a const initializer or a comptime block rather than a function body.
-## The lifted lambdas come back with it, because the interpreter has to be
-## able to call them.
+## The lifted lambdas come back with it, and so do the dictionaries, because
+## the interpreter has to be able to call the one and dispatch through the
+## other.
 pub fn lower_expr_only(
   owner: String,
   e: TExpr,
@@ -2538,7 +2539,7 @@ pub fn lower_expr_only(
   prog_fns: Map[(String, String), Sig],
   syms: Map[Int, Sym],
   lam_start: Int
-) -> (CExpr, List[CFun], Int) = {
+) -> (CExpr, List[CFun], List[CDictDef], Int) = {
   var top = 0
   for k in map.keys(syms) {
     if k > top { top = k }
@@ -2563,7 +2564,7 @@ pub fn lower_expr_only(
     self_tail: false
   }
   let (st1, ce) = lower_expr(st, e)
-  (ce, st1.lifted, st1.next_lam)
+  (ce, st1.lifted, st1.dicts, st1.next_lam)
 }
 
 ## Lower a single function, returning it plus whatever lambdas it hoisted.
