@@ -651,11 +651,9 @@ fn dict_slot(
 ) -> (LSt, CDictSlot) = {
   if has_impl_at(st.impls, tid, subject) {
     let imp = impl_for(st, tid, subject)
-    # a derived impl provides the method without listing it: the compiler
-    # wrote the body, so there was no source declaration to record
-    if provides(imp, mn) || imp.derived {
+    if provides(imp, mn) {
       let (st1, bridge) =
-        make_bridge(st, tr, tid, subject, owner_or(imp.owner, st.owner), mn, imp.derived)
+        make_bridge(st, tr, tid, subject, owner_or(imp.owner, st.owner), mn)
       return (st1, CSlotFn(st1.owner, bridge))
     }
   }
@@ -677,8 +675,7 @@ fn make_bridge(
   tid: Int,
   subject: Ty,
   iowner: String,
-  method: String,
-  derived: Bool
+  method: String
 ) -> (LSt, String) = {
   let sg = trait_method_sig(tr, method)
   let psig = subst_subject(tr, sg, subject)
@@ -705,7 +702,7 @@ fn make_bridge(
     # every slot has the same signature
     let (st3, dsym) = fresh_sym(st1)
     st1 = st3
-    let call = CCall(CImpl(iowner, tid, subject, method, derived), args, psig.ret)
+    let call = CCall(CImpl(iowner, tid, subject, method), args, psig.ret)
     let f = CFun {
       name: name,
       owner: st1.owner,
@@ -732,7 +729,7 @@ fn make_bridge(
 fn prim_relation(st: LSt, tid: Int, subject: Ty, args: List[CExpr]) -> (LSt, CExpr) = {
   if tid == EQ_ID { return eq_at(st, args[0], args[1], subject) }
   if tid == HASH_ID { return (st, CIntrinsic("hash", [args[0]], TyInt)) }
-  if tid == ORD_ID { return (st, CIntrinsic("cmp", [args[0], args[1]], TyInt)) }
+  if tid == ORD_ID { return cmp_at(st, args[0], args[1], subject) }
   panic("lower: no primitive relation for trait " ++ to_string(tid))
 }
 
@@ -775,7 +772,7 @@ fn make_prim_slot(
   var env: Map[String, CExpr] = map.empty()
   var ai = 0
   for at in argtys {
-    env = map.insert(env, ty_key_inst(at),
+    env = map.insert(env, dict_key(tid, at),
       CDictArg(CLocal(dsym, dict_ty()), st1.owner, key, ai, dict_ty()))
     ai = ai + 1
   }
@@ -821,7 +818,7 @@ fn make_prim_slot(
 ## Asking first, rather than building and discovering, is what keeps this cut
 ## from turning that code into an error (§3.7 -- that is cut 7's change).
 fn dict_available(st: LSt, tid: Int, t: Ty) -> Bool =
-  match map.get(st.dict_env, ty_key_inst(t)) {
+  match map.get(st.dict_env, dict_key(tid, t)) {
     Some(_) -> true
     None ->
       match t {
@@ -849,7 +846,7 @@ fn dicts_available(st: LSt, tid: Int, ts: List[Ty]) -> Bool = {
 ## is not a constant but a construction, built from its arguments' -- and its
 ## arguments' may themselves be constructions.
 fn dict_expr(st: LSt, tid: Int, t: Ty) -> (LSt, CExpr) =
-  match map.get(st.dict_env, ty_key_inst(t)) {
+  match map.get(st.dict_env, dict_key(tid, t)) {
     Some(d) -> (st, d)
     None ->
       if is_ground(t) || not expandable(t) {
@@ -899,10 +896,9 @@ fn eq_at(st: LSt, a: CExpr, b: CExpr, t: Ty) -> (LSt, CExpr) = {
   # same comparison arrives through a bound
   if has_impl_at(st.impls, EQ_ID, t) {
     let imp = impl_for(st, EQ_ID, t)
-    if imp.derived || provides(imp, "eq") {
+    if provides(imp, "eq") {
       return (st, CCall(
-        CImpl(owner_or(imp.owner, st.owner), EQ_ID, t, "eq", imp.derived),
-        [a, b], TyBool))
+        CImpl(owner_or(imp.owner, st.owner), EQ_ID, t, "eq"), [a, b], TyBool))
     }
   }
   if is_ground(t) {
@@ -915,7 +911,7 @@ fn eq_at(st: LSt, a: CExpr, b: CExpr, t: Ty) -> (LSt, CExpr) = {
   # Not ground: what this compares depends on a type only the caller knows.
   # If a dictionary for the whole is in scope, that dictionary *is* the
   # answer -- go through it rather than guessing at the structure behind it.
-  match map.get(st.dict_env, ty_key_inst(t)) {
+  match map.get(st.dict_env, dict_key(EQ_ID, t)) {
     Some(d) -> return eq_through_dict(st, d, a, b, t)
     None -> ()
   }
@@ -944,21 +940,34 @@ fn eq_through_dict(st: LSt, d: CExpr, a: CExpr, b: CExpr, t: Ty) -> (LSt, CExpr)
     sg.ret, TyBool))
 }
 
-## The structural equality of one composite type, as an ordinary top-level
-## function -- no backend knows it is special, the same way no backend knows
-## about a dictionary bridge.
+## The relation the compiler writes for one composite type, as an ordinary
+## top-level function -- no backend knows it is special, the same way no
+## backend knows about a dictionary bridge.
 ##
 ## Keyed by the *instantiated* type, not the declaration: `Option[Int]` and
 ## `Option[Point]` need different comparisons, and a JVM class (one per
 ## declaration) could not carry both.
 ##
 ## A non-ground type takes one dictionary parameter per type argument and
-## compares its parts through them. So `Option[T]` gets one function rather
+## reaches its parts through them. So `Option[T]` gets one function rather
 ## than one per instantiation: Dawn passes dictionaries instead of
-## monomorphising, and this is that decision reaching the one relation the
+## monomorphising, and this is that decision reaching the relations the
 ## compiler writes for itself.
-fn struct_eq_fn(st: LSt, t: Ty) -> (LSt, String) = {
-  let name = "structeq\$" ++ ty_key_inst(t)
+##
+## Equality and ordering share this scaffold because they are the same
+## construction over the same structure. They used to share nothing: equality
+## was lowered here and ordering was written directly as JVM bytecode, which
+## is why the C backend emitted calls to a derived `cmp` it never defined.
+fn struct_rel_fn(
+  st: LSt,
+  t: Ty,
+  prefix: String,
+  tid: Int,
+  ret: Ty,
+  zero: CExpr,
+  body_of: fn(LSt, CExpr, CExpr, Ty) -> (LSt, CExpr)
+) -> (LSt, String) = {
+  let name = prefix ++ ty_key_inst(t)
   for f in st.lifted {
     if f.name == name { return (st, name) }
   }
@@ -976,7 +985,7 @@ fn struct_eq_fn(st: LSt, t: Ty) -> (LSt, String) = {
     let (stA, dsym) = fresh_sym(stD)
     stD = stA
     dps = dps ++ [CParam { sym: dsym, ty: dict_ty(), mode: COwned }]
-    env = map.insert(env, ty_key_inst(at), CLocal(dsym, dict_ty()))
+    env = map.insert(env, dict_key(tid, at), CLocal(dsym, dict_ty()))
   }
   # publish the name before building the body: a recursive type reaches this
   # same function from inside itself, and without the reservation that
@@ -987,14 +996,14 @@ fn struct_eq_fn(st: LSt, t: Ty) -> (LSt, String) = {
     captures: [],
     params: ps,
     dicts: dps,
-    ret: TyBool,
-    body: CBool(true),
+    ret: ret,
+    body: zero,
     is_test: false,
     impl_of: None,
     default_of: None
   }
   let st2 = LSt { ..stD, lifted: stD.lifted ++ [stub], dict_env: env }
-  let (st3, body) = struct_eq_body(st2, CLocal(asym, t), CLocal(bsym, t), t)
+  let (st3, body) = body_of(st2, CLocal(asym, t), CLocal(bsym, t), t)
   var out: List[CFun] = []
   for f in st3.lifted {
     if f.name == name {
@@ -1005,6 +1014,9 @@ fn struct_eq_fn(st: LSt, t: Ty) -> (LSt, String) = {
   }
   (LSt { ..st3, lifted: out, dict_env: st.dict_env }, name)
 }
+
+fn struct_eq_fn(st: LSt, t: Ty) -> (LSt, String) =
+  struct_rel_fn(st, t, "structeq\$", EQ_ID, TyBool, CBool(true), struct_eq_body)
 
 fn struct_eq_body(st: LSt, a: CExpr, b: CExpr, t: Ty) -> (LSt, CExpr) =
   match t {
@@ -1064,6 +1076,148 @@ fn ctor_fields_eq(st: LSt, a: CExpr, b: CExpr, sc: Ty, aid: Int, ci: Int) -> (LS
   (st1, conj_or_true(acc))
 }
 
+# ---- structural ordering (docs/trait-v2-design.md 3.6) ----
+#
+# `derive Ord`'s body used to be written straight into JVM bytecode
+# (`gen_derived_ord_cmp` / `emit_field_cmp` / `cmp_fields`), so Core never
+# carried it. The C backend therefore emitted a *call* to `impl$0$Adt<n>$cmp`
+# and no definition -- an undefined symbol, with no diagnostic anywhere. This
+# is the same move `eq_at` is: one definition, spelled over the type's own
+# structure, and both backends compile it.
+#
+# Writing it here is also what unblocks `derive Ord` on a generic type. The
+# derived comparison of `Box[T]` needs `Ord[T]`, and a dictionary parameter is
+# something a lowered function can take and a hand-written bytecode body
+# cannot.
+
+## `cmp(a, b)` at one type, as Core. The Ord counterpart of `eq_at`, and every
+## producer of an ordering goes through it: `cmp`, the comparison operators,
+## a `[T: Ord]` bound instantiated at a concrete type, and each field inside a
+## derived comparison.
+##
+## There is no fallback branch. Unlike equality, ordering is not defined for
+## every type -- the checker refuses `Ord` where no impl and no derive supply
+## it -- so reaching the end here is a compiler bug rather than a gap.
+fn cmp_at(st: LSt, a: CExpr, b: CExpr, t: Ty) -> (LSt, CExpr) = {
+  if is_ord_scalar(t) { return (st, CIntrinsic("cmp", [a, b], TyInt)) }
+  if has_impl_at(st.impls, ORD_ID, t) {
+    let imp = impl_for(st, ORD_ID, t)
+    if provides(imp, "cmp") {
+      return (st, CCall(
+        CImpl(owner_or(imp.owner, st.owner), ORD_ID, t, "cmp"), [a, b], TyInt))
+    }
+  }
+  if is_ground(t) {
+    if expandable(t) {
+      let (st1, name) = struct_cmp_fn(st, t)
+      return (st1, CCall(CDirect(st1.owner, name), [a, b], TyInt))
+    }
+    panic("lower: no ordering for " ++ ty_key_inst(t))
+  }
+  match map.get(st.dict_env, dict_key(ORD_ID, t)) {
+    Some(d) -> return cmp_through_dict(st, d, a, b, t)
+    None -> ()
+  }
+  if expandable(t) && dicts_available(st, ORD_ID, type_args_of(t)) {
+    let (st1, ds) = dict_exprs(st, ORD_ID, type_args_of(t))
+    let (st2, name) = struct_cmp_fn(st1, t)
+    return (st2, CCall(CDirect(st2.owner, name), [a, b] ++ ds, TyInt))
+  }
+  panic("lower: no ordering for " ++ ty_key_inst(t))
+}
+
+fn cmp_through_dict(st: LSt, d: CExpr, a: CExpr, b: CExpr, t: Ty) -> (LSt, CExpr) = {
+  let tr = trait_of(st.traits, ORD_ID)
+  let sg = trait_method_sig(tr, "cmp")
+  let idx = method_index(tr, "cmp")
+  (st, adapt_out(
+    CCall(CMethod(d, ORD_ID, "cmp", idx),
+      [adapt_in(a, t, sg.param_tys[0]), adapt_in(b, t, sg.param_tys[1])], sg.ret),
+    sg.ret, TyInt))
+}
+
+fn struct_cmp_fn(st: LSt, t: Ty) -> (LSt, String) =
+  struct_rel_fn(st, t, "structcmp$", ORD_ID, TyInt, CInt(0), struct_cmp_body)
+
+fn struct_cmp_body(st: LSt, a: CExpr, b: CExpr, t: Ty) -> (LSt, CExpr) =
+  match t {
+    TyTuple(elems) -> {
+      var st1 = st
+      var parts: List[CExpr] = []
+      var i = 0
+      for et in elems {
+        let (st2, c) = cmp_at(st1, CTupleGet(a, i, et), CTupleGet(b, i, et), et)
+        st1 = st2
+        parts = parts ++ [c]
+        i = i + 1
+      }
+      lexicographic(st1, parts, 0)
+    }
+    TyAdt(aid, _) -> {
+      let info = adt_of(st.adts, aid)
+      # one constructor: nothing to disagree about but the fields
+      if len(info.ctors) == 1 {
+        return ctor_fields_cmp(st, a, b, t, aid, 0)
+      }
+      # Constructor order first, declaration order being the order. Built back
+      # to front so the last `else` is unreachable-but-honest: `a` is one of
+      # them, and the tags already agreed.
+      var st1 = st
+      var chain: CExpr = CInt(0)
+      var ci = len(info.ctors) - 1
+      while ci >= 0 {
+        let (st2, fe) = ctor_fields_cmp(st1, a, b, t, aid, ci)
+        st1 = st2
+        chain = CIf(CIsCtor(a, aid, ci), fe, Some(chain), TyInt)
+        ci = ci - 1
+      }
+      let (st3, ta) = fresh_sym(st1)
+      let (st4, tb) = fresh_sym(st3)
+      (st4, CBlock(
+        [CSLet(ta, TyInt, CTagOf(a, aid)), CSLet(tb, TyInt, CTagOf(b, aid))],
+        Some(CIf(
+          CBinary(CNe, CLocal(ta, TyInt), CLocal(tb, TyInt), TyBool),
+          CBinary(CSub, CLocal(ta, TyInt), CLocal(tb, TyInt), TyInt),
+          Some(chain), TyInt)),
+        TyInt))
+    }
+    _ -> panic("lower: struct_cmp_body on a type with no structure to order")
+  }
+
+fn ctor_fields_cmp(st: LSt, a: CExpr, b: CExpr, sc: Ty, aid: Int, ci: Int) -> (LSt, CExpr) = {
+  let c = adt_of(st.adts, aid).ctors[ci]
+  var st1 = st
+  var parts: List[CExpr] = []
+  var idx = 0
+  while idx < len(c.fields) {
+    let ft = concrete_field_ty(st1, sc, aid, ci, idx)
+    let (st2, e) = cmp_at(st1,
+      read_field(st1, a, sc, aid, ci, idx),
+      read_field(st1, b, sc, aid, ci, idx), ft)
+    st1 = st2
+    parts = parts ++ [e]
+    idx = idx + 1
+  }
+  lexicographic(st1, parts, 0)
+}
+
+## Fold field comparisons into one: the first non-zero wins, and each is
+## evaluated only if every earlier one tied. A `let` per step, because the
+## result is read twice -- once to test it, once to return it.
+fn lexicographic(st: LSt, parts: List[CExpr], i: Int) -> (LSt, CExpr) = {
+  if i >= len(parts) { return (st, CInt(0)) }
+  if i == len(parts) - 1 { return (st, parts[i]) }
+  let (st1, rest) = lexicographic(st, parts, i + 1)
+  let (st2, sym) = fresh_sym(st1)
+  (st2, CBlock(
+    [CSLet(sym, TyInt, parts[i])],
+    Some(CIf(
+      CBinary(CNe, CLocal(sym, TyInt), CInt(0), TyBool),
+      CLocal(sym, TyInt),
+      Some(rest), TyInt)),
+    TyInt))
+}
+
 ## Does this witness stand for a relation the language defines itself, rather
 ## than for an impl body to call?
 ##
@@ -1095,7 +1249,11 @@ fn primitive_witness(st: LSt, w: WitRef, tid: Int) -> Bool =
 
 fn primitive_subject(st: LSt, tid: Int, subject: Ty) -> Bool =
   match impl_at(st.impls, tid, subject) {
-    Some(imp) -> not imp.derived && len(imp.provided) == 0
+    # A derived impl has no body either -- the compiler is the one that
+    # defines it, which is the same answer the prelude's scalar impls give.
+    # It used to be the opposite, and that is how the derived comparison
+    # ended up written twice: once in bytecode, never in Core.
+    Some(imp) -> imp.derived || len(imp.provided) == 0
     None -> tid == EQ_ID || tid == HASH_ID
   }
 
@@ -1141,7 +1299,7 @@ fn witness_values(st: LSt, ws: List[WitRef]) -> (LSt, List[CExpr]) = {
 ## still in scope.
 fn enter_wit_env(st: LSt, w: WitRef) -> (LSt, Map[String, CExpr]) =
   match w {
-    WApply(_, subject, args) -> {
+    WApply(tid, subject, args) -> {
       var st1 = st
       var env = st.dict_env
       var i = 0
@@ -1149,7 +1307,7 @@ fn enter_wit_env(st: LSt, w: WitRef) -> (LSt, Map[String, CExpr]) =
         if i < len(args) {
           let (st2, d) = witness_value(st1, args[i])
           st1 = st2
-          env = map.insert(env, ty_key_inst(at), d)
+          env = map.insert(env, dict_key(tid, at), d)
         }
         i = i + 1
       }
@@ -1218,23 +1376,13 @@ fn lower_trait_call(
     }
     WConcrete(_, subject) -> {
       let imp = impl_for(st, tid, subject)
-      if imp.derived {
-        # a compiler-generated impl (derive Ord): concrete arguments, no
-        # boxing, and the backend picks the derived calling convention
-        let psig0 = subst_subject(tr, sg, subject)
-        let (sta, vsa) = lower_args_to(st, args, psig0.param_tys)
-        return (sta, adapt_out(
-          CCall(CImpl(owner_or(imp.owner, st.owner), tid, subject, name, true),
-            vsa, psig0.ret), psig0.ret, ty))
-      }
       if provides(imp, name) {
         # devirtualised: the impl's own method takes the concrete type, so
         # nothing is boxed
         let psig = subst_subject(tr, sg, subject)
         let (st1, vs) = lower_args_to(st, args, psig.param_tys)
         (st1, adapt_out(
-          CCall(CImpl(owner_or(imp.owner, st.owner), tid, subject, name, false),
-            vs, psig.ret),
+          CCall(CImpl(owner_or(imp.owner, st.owner), tid, subject, name), vs, psig.ret),
           psig.ret, ty))
       } else {
         # the default body is generic and takes the dictionary like any

@@ -92,8 +92,27 @@ std 里真写 `impl[T: Eq] Eq[List[T]]`,编译器里对应的合成机器删掉�
 解禁之后两者都变成声明处生成 `impl[T: Ord] Ord[Box[T]]` / `impl[T: Show] Show[Box[T]]`,
 在声明处一次检清——与 §3.7 对 `==` 做的是同一件事,只是换了个 trait。
 
-**落点分两处**(理由同决策 6):`derive Ord` 是纯加法,进 **2a**;`derive Show` 要等
+**落点分两处**(理由同决策 6):`derive Ord` 进 **2a**;`derive Show` 要等
 `Show` 成为 trait,随 **S1.4**。
+
+> **「纯加法」是错的(实测 2026-07-26,动手时)。** `derive Ord` 的**方法体根本不在
+> Core 里**——`emit.dawn` 直接写 JVM 字节码(`gen_derived_ord_cmp` / `emit_field_cmp` /
+> `cmp_fields`)。于是给泛型解禁需要那个方法体能收字典参数,而手写字节码收不了。
+>
+> 顺手量出一个**更大的洞**:C 后端对 `derive Ord` 发出一个**调用**
+> `impl$0$Adt<n>$cmp` 却从不定义它——是未定义符号,不是 panic,**一句诊断都没有**。
+> 而 `spike-native/` 里**没有任何语料用 `derive Ord`**(2026-07-26 实测),所以这个洞
+> 一直不可见。先补语料钉住(`ord_derive`,提交 `33a587b`),再修。
+>
+> 修法就是 §3.6 对相等做过的那件事:**把这个关系降到 Core**(`cmp_at` /
+> `struct_cmp_body`,与 `eq_at` 共用 `struct_rel_fn` 脚手架),两个后端各编一次同一份
+> 定义。泛型解禁于是**白拿**——刀 4 的字典参数机制正好就是它要的。连带:
+>
+> - 新 Core 节点 `CTagOf`(「是哪个构造器」)。`CIsCtor` 只答「是不是这个」,
+>   拿它拼出序要 O(n²) 次测试;JVM 是 instanceof 链(本来就有),C 读 `->tag`。
+> - `CImpl` 的 `derived: Bool` **删掉**:derived impl 不再产生 impl 调用,那个位子
+>   永远是 `false`——又一次「表已经知道答案」。
+> - `emit.dawn` 净删 119 行手写字节码。
 
 ### 决策 6 — std 给容器写**四种**条件 impl，但 `Show` 那条落在 S1.4
 
@@ -516,7 +535,7 @@ fn head_owner(cx: Cx, h: Head) -> Option[String]
    ——是纯重构,拿 Core golden 和 `__emit` 逐字节验。
 3. **删掉 `WStructural`**。~~`solve` + `WApply` + 按需合成~~ —— **动手时收窄了**(见下)。
 4. **`WApply` + `CDictApply` + `CDictArg` + 三个消费者**(JVM / C / interp)。**零 Emit-Change**(见 §3.8.1)。
-5. **`derive Ord` 对泛型解禁**(决策 5)。纯加法,所以要赶在发布前进 2a,让种子学会。
+5. **`derive Ord` 对泛型解禁**(决策 5)——实际是**把 derived Ord 降到 Core**,见决策 5 下的实测。**有 Emit-Change**(derived cmp 的字节码改从 Core 生成)。
 6. 发布 **2a**。
 7. **std 给容器写 `Eq`/`Hash`/`Ord` 条件 impl** + `==` 走 `solve` + 删三处旧机制。
    **破坏性、Emit-Change 大。**(`Show` 那条见决策 6,落在 S1.4。)

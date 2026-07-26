@@ -49,7 +49,7 @@ use types.{
   ty_named, is_numeric, is_errorish, prelude_adts, prelude_traits, prelude_impls, bounds_of,
   builtins, opt_ty, result_ty, OPTION_ID, RESULT_ID, ORD_ID, EQ_ID, HASH_ID, eq_scalars,
   Impls, Head, head_of, impl_at, has_impl_at, insert_impl,
-  is_eq_scalar, is_ground, expandable, type_args_of
+  is_eq_scalar, is_ground, expandable, type_args_of, sub_goals
 }
 use jreflect.{
   JClass, JMethod, JCtor, JField, find_class, class_info, methods_of, ctors_of,
@@ -1964,18 +1964,12 @@ pub fn pass_register_impls(
         dhi = b.hi
       }
     }
-    if len(info.tparams) > 0 {
-      cx1 = cerr_h(cx1, "cannot derive Ord for the generic type `" ++ info.name ++ "`",
-        dlo, dhi, "v1 Ord subjects are non-generic; order concrete values instead")
-      di = di + 1
-      continue
-    }
-    let subject = TyAdt(sh.adt, [])
+    let subject = TyAdt(sh.adt, info.tparams)
     let ii = ImplI {
       trait_id: ORD_ID,
       subject: subject,
-      tparams: [],
-      constraints: [],
+      tparams: info.tparams,
+      constraints: derive_constraints(info.tparams, ORD_ID),
       lo: dlo,
       hi: dhi,
       derived: true,
@@ -2234,7 +2228,7 @@ pub fn pass_register_impls(
       Some(s) -> s
     }
     let info = adt_of(cx1.adts, sh.adt)
-    let derived_ord = match impl_at(cx1.impl_table, ORD_ID, TyAdt(sh.adt, [])) {
+    let derived_ord = match impl_at(cx1.impl_table, ORD_ID, TyAdt(sh.adt, info.tparams)) {
       Some(ii) -> info.derives_ord && ii.derived
       None -> false
     }
@@ -2255,6 +2249,9 @@ pub fn pass_register_impls(
         let scalar_ok = f.ty == TyInt || f.ty == TyFloat || f.ty == TyString
         let adt_ok = match f.ty {
           TyAdt(_, _) -> has_impl_at(cx1.impl_table, ORD_ID, f.ty)
+          # the derived impl carries `[T: Ord]`, so a field at one of the
+          # type's own parameters is ordered by whatever instantiates it
+          TyVar(_, _) -> true
           _ -> false
         }
         if not scalar_ok && not adt_ok {
@@ -4474,7 +4471,28 @@ pub fn resolve_witness(
       }
     _ ->
       match impl_at(cx.impl_table, trait_id, t) {
-        Some(_) -> (cx, Some(WConcrete(trait_id, t)))
+        Some(imp) ->
+          if len(imp.tparams) == 0 {
+            (cx, Some(WConcrete(trait_id, t)))
+          } else {
+            # A conditional impl is only a witness once its own bounds are:
+            # `Ord[Box[T]]` holds exactly as far as `Ord[T]` does. Failure
+            # here is a real error, unlike the synthesised case below --
+            # the impl promised the bound, so nothing weaker is available.
+            var cxg = cx
+            var ws: List[WitRef] = []
+            var ok = true
+            for g in sub_goals(cx.impl_table, trait_id, t) {
+              let (gt, gty) = g
+              let (cxh, w) = resolve_witness(cxg, gt, gty, lo, hi, requirer)
+              cxg = cxh
+              match w {
+                Some(wr) -> { ws = ws ++ [wr] }
+                None -> { ok = false }
+              }
+            }
+            if ok { (cxg, Some(WApply(trait_id, t, ws))) } else { (cxg, no_wit()) }
+          }
         None -> {
           # Equality and hashing have a structural default, so a missing impl
           # is usually not a missing capability -- but "usually" is not
@@ -4537,6 +4555,15 @@ fn solved_structurally(cx: Cx, trait_id: Int, t: Ty) -> (Cx, Option[WitRef]) = {
   }
 }
 
+## `derive Ord` on a generic type: one bound per type parameter, on the trait
+## being derived. `Box[T]` orders exactly as far as `T` does, and saying so at
+## the declaration is what the error this replaces could not do.
+fn derive_constraints(tparams: List[Ty], tid: Int) -> List[List[Int]] = {
+  var out: List[List[Int]] = []
+  for _tp in tparams { out = out ++ [[tid]] }
+  out
+}
+
 fn probe_args(cx: Cx, trait_id: Int, args: List[Ty]) -> Option[List[WitRef]] = {
   var out: List[WitRef] = []
   for a in args {
@@ -4561,7 +4588,20 @@ fn probe_witness(cx: Cx, trait_id: Int, t: Ty) -> Option[WitRef] =
       }
     _ ->
       match impl_at(cx.impl_table, trait_id, t) {
-        Some(_) -> Some(WConcrete(trait_id, t))
+        Some(imp) ->
+          if len(imp.tparams) == 0 {
+            Some(WConcrete(trait_id, t))
+          } else {
+            var ws: List[WitRef] = []
+            for g in sub_goals(cx.impl_table, trait_id, t) {
+              let (gt, gty) = g
+              match probe_witness(cx, gt, gty) {
+                Some(w) -> { ws = ws ++ [w] }
+                None -> return None
+              }
+            }
+            Some(WApply(trait_id, t, ws))
+          }
         None -> {
           if trait_id != EQ_ID && trait_id != HASH_ID { return None }
           match uncomparable_part(cx, t, set.empty()) {

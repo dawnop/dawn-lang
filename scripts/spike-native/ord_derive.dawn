@@ -1,19 +1,22 @@
 # `derive Ord`, which no corpus covered until now (measured 2026-07-26).
 #
-# The gap that absence hid is not a panic. The C backend emits a *call* to
-# `impl$0$Adt<n>$cmp` and never defines it, so the program fails at link time
-# with an undefined symbol -- there is no diagnostic, no `not implemented`,
-# nothing for a reader to find. The reason is that the derived body is not
-# lowered at all: `emit.dawn` writes it directly as JVM bytecode
-# (`gen_derived_ord_cmp` / `emit_field_cmp`), so Core never carries it and the
-# other backend has nothing to compile.
+# The gap that absence hid was not a panic. The C backend emitted a *call* to
+# `impl$0$Adt<n>$cmp` and never defined it, so the program failed at link time
+# with an undefined symbol -- no diagnostic, no `not implemented`, nothing for
+# a reader to find. The reason was that the derived body was not lowered at
+# all: `emit.dawn` wrote it directly as JVM bytecode, so Core never carried it
+# and the other backend had nothing to compile. It is lowered now, which is
+# what this file watches.
 #
-# `derive Show` is the same shape and already listed; this is its sibling.
+# `derive Show` is the same shape and still listed in known-red; this is its
+# sibling, and how it will be closed.
 #
 # Covered here: a record (fields left to right), a tagged union (constructor
 # order first, then fields), a nested one whose fields are themselves derived,
-# and the relation reached through an `[T: Ord]` bound rather than directly --
-# the two doors that have to give the same answer.
+# the relation reached through an `[T: Ord]` bound rather than directly -- the
+# two doors that have to give the same answer -- and `derive Ord` on a generic
+# type, which was refused outright until the body became something that can
+# take a dictionary.
 use std/io
 
 pub type Point = { x: Int, y: Int } derive Ord
@@ -21,6 +24,13 @@ pub type Point = { x: Int, y: Int } derive Ord
 pub type Shape = | Dot | Line(a: Int, b: Int) | Named(s: String) derive Ord
 
 pub type Nested = { at: Point, what: Shape } derive Ord
+
+## `derive Ord` on a generic type: `Box[T]` orders exactly as far as `T` does.
+pub type Box[T] = { v: T } derive Ord
+
+pub type Two[A, B] = { l: A, r: B } derive Ord
+
+pub type Maybe[T] = | Nothing | Just(v: T) derive Ord
 
 fn sign(n: Int) -> String =
   if n < 0 { "lt" } else if n > 0 { "gt" } else { "eq" }
@@ -59,4 +69,17 @@ pub fn main() -> Unit !io = {
   println(through("through(p11, p12)", p11, p12))
   println(through("through(n1, n2)  ", n1, n2))
   println(through("through(Dot, Dot)", Dot, Dot))
+
+  println("-- derived on a generic type --")
+  println(direct("cmp(Box 1, Box 2)  ", cmp(Box { v: 1 }, Box { v: 2 })))
+  println(direct("cmp(Box p12, Box p11)", cmp(Box { v: p12 }, Box { v: p11 })))
+  println(direct("cmp(Two, Two)      ",
+    cmp(Two { l: 1, r: "a" }, Two { l: 1, r: "b" })))
+  println(direct("cmp(Just, Nothing) ", cmp(Just(0), Nothing)))
+  println(direct("cmp(Box Box, Box Box)",
+    cmp(Box { v: Box { v: 3 } }, Box { v: Box { v: 3 } })))
+
+  println("-- generic, and through a bound: the dictionary travels --")
+  println(through("through(Box 1, Box 2)", Box { v: 1 }, Box { v: 2 }))
+  println(through("through(Just Box, Just Box)", Just(Box { v: 5 }), Just(Box { v: 4 })))
 }

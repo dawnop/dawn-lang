@@ -466,6 +466,37 @@ pub fn insert_impl(tbl: Impls, i: ImplI) -> Impls =
     None -> panic("impl subject has no head")
   }
 
+## The sub-goals solving `Tr[t]` breaks into: one per bound the matching impl
+## puts on one of its own type parameters, in (parameter, bound) order -- the
+## same order every dictionary parameter list uses.
+##
+## With no conditional impl in the table the rule degrades to "one goal per
+## type argument, same trait", which is the compiler-synthesised structural
+## relation (trait-v2-design §3.6). Both sides of the pipeline ask this, so
+## the checker's witness arguments and lowering's dictionary parameters cannot
+## drift into different orders.
+pub fn sub_goals(tbl: Impls, tid: Int, subject: Ty) -> List[(Int, Ty)] = {
+  let args = type_args_of(subject)
+  match impl_at(tbl, tid, subject) {
+    Some(imp) ->
+      if len(imp.tparams) > 0 {
+        var out: List[(Int, Ty)] = []
+        var i = 0
+        for cons in imp.constraints {
+          for b in cons {
+            if i < len(args) { out = out ++ [(b, args[i])] }
+          }
+          i = i + 1
+        }
+        return out
+      }
+    None -> ()
+  }
+  var out: List[(Int, Ty)] = []
+  for a in args { out = out ++ [(tid, a)] }
+  out
+}
+
 pub type ImplI = {
   trait_id: Int,
   subject: Ty,

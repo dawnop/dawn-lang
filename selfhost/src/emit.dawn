@@ -50,7 +50,7 @@ use codegen.{
 use core.{
   CExpr, CStmt, CCallee, CFun, CModule, CParam, CDictDef, CDictSlot,
   CInt, CFloat, CBool, CStr, CUnit, CLocal, CFnRef, CCall, CIntrinsic,
-  CCtor, CField, CIsCtor, CClosure, CTuple, CTupleGet, CBox, CUnbox,
+  CCtor, CField, CIsCtor, CTagOf, CClosure, CTuple, CTupleGet, CBox, CUnbox,
   CBinary, CUnary, CIf, CBlock, CListLit, CConstRef, CComptime,
   CReturn, CBreak, CContinue, CForeign, CJava, CDictRef, CDictApply, CDictArg,
   CSLet, CSAssign, CSDiscard, CSLoop, CSIf, CSDup, CSDrop,
@@ -401,9 +401,6 @@ fn subject_tag(g: Gen, t: Ty) -> String =
 
 fn default_method_name(trait_name: String, m: String) -> String =
   "dawn\$default\$" ++ trait_name ++ "\$" ++ m
-
-fn derived_cmp_desc(g: Gen, subject: Ty) -> String =
-  "(" ++ desc_of(g.adts, subject) ++ desc_of(g.adts, subject) ++ ")J"
 
 ## The boxed JVM type of a concrete Dawn type (LMF instantiatedMethodType).
 fn boxed_desc_of(g: Gen, t: Ty) -> String =
@@ -1289,125 +1286,6 @@ fn drain_lambdas(g: Gen, cw: AdtClassWriter) -> Gen !io = {
   g1
 }
 
-## Two same-typed orderable values on the stack → their long cmp.
-fn emit_field_cmp(g: Gen, t: Ty) -> Unit !io = {
-  if t == TyInt || t == TyFloat || t == TyString {
-    emit_scalar_cmp(g, t)
-  } else {
-    match t {
-      TyAdt(_, _) -> {
-        let imp = impl_of(g, ORD_ID, t)
-        let imp_owner = match imp.owner {
-          Some(o) -> o
-          None -> g.class_name
-        }
-        if imp.derived {
-          g.mv.visitMethodInsn(OP_INVOKESTATIC, imp_owner,
-            impl_method_name(g, "Ord", t, "cmp"), derived_cmp_desc(g, t), false)
-        } else {
-          let tr = trait_of(g.traits, ORD_ID)
-          let psig = subst_subject(tr, trait_method_sig(tr, "cmp"), t)
-          g.mv.visitMethodInsn(OP_INVOKESTATIC, imp_owner,
-            impl_method_name(g, "Ord", t, "cmp"),
-            method_desc(g.adts, psig.param_tys, psig.ret), false)
-        }
-      }
-      _ -> panic("unorderable derived field")
-    }
-  }
-  ()
-}
-
-## derive Ord: cmp(a, b) — constructor order first, then fields
-## lexicographically, as a concrete static on the module class.
-fn gen_derived_ord_cmp(g: Gen, cw: AdtClassWriter, a: AdtI) -> Gen !io = {
-  let subject = TyAdt(a.id, a.tparams)
-  let m = cw.method(ACC_PUBLIC + ACC_STATIC, impl_method_name(g, "Ord", subject, "cmp"),
-    derived_cmp_desc(g, subject)).expect("mv")
-  m.visitCode()
-  let g1 = Gen { ..g, mv: m }
-  if a.is_record {
-    cmp_fields(g1, ctor_jvm_name(g1.adts, a.ctors[0]), a.ctors[0].fields, 0, 1)
-  } else {
-    emit_tag_of(g1, a, 0, 2)
-    emit_tag_of(g1, a, 1, 3)
-    let same_tag = Label.new()
-    m.visitVarInsn(OP_ILOAD, 2)
-    m.visitVarInsn(OP_ILOAD, 3)
-    m.visitJumpInsn(OP_IF_ICMPEQ, same_tag)
-    m.visitVarInsn(OP_ILOAD, 2)
-    m.visitVarInsn(OP_ILOAD, 3)
-    m.visitInsn(OP_ISUB)
-    m.visitInsn(OP_I2L)
-    m.visitInsn(OP_LRETURN)
-    m.visitLabel(same_tag)
-    for c in a.ctors {
-      if len(c.fields) > 0 {
-        let next = Label.new()
-        let sub = ctor_jvm_name(g1.adts, c)
-        m.visitVarInsn(OP_ALOAD, 0)
-        m.visitTypeInsn(OP_INSTANCEOF, sub)
-        m.visitJumpInsn(OP_IFEQ, next)
-        m.visitVarInsn(OP_ALOAD, 0)
-        m.visitTypeInsn(OP_CHECKCAST, sub)
-        m.visitVarInsn(OP_ASTORE, 4)
-        m.visitVarInsn(OP_ALOAD, 1)
-        m.visitTypeInsn(OP_CHECKCAST, sub)
-        m.visitVarInsn(OP_ASTORE, 5)
-        cmp_fields(g1, sub, c.fields, 4, 5)
-        m.visitLabel(next)
-      }
-    }
-    m.visitInsn(OP_LCONST_0)
-    m.visitInsn(OP_LRETURN)
-  }
-  m.visitMaxs(0, 0)
-  m.visitEnd()
-  g
-}
-
-fn cmp_fields(g: Gen, sub: String, fields: List[FieldI], a_slot: Int, b_slot: Int) -> Unit !io = {
-  for f in fields {
-    g.mv.visitVarInsn(OP_ALOAD, a_slot)
-    g.mv.visitFieldInsn(OP_GETFIELD, sub, f.name, desc_of(g.adts, f.ty))
-    g.mv.visitVarInsn(OP_ALOAD, b_slot)
-    g.mv.visitFieldInsn(OP_GETFIELD, sub, f.name, desc_of(g.adts, f.ty))
-    emit_field_cmp(g, f.ty)
-    let next = Label.new()
-    g.mv.visitInsn(OP_DUP2)
-    g.mv.visitInsn(OP_LCONST_0)
-    g.mv.visitInsn(OP_LCMP)
-    g.mv.visitJumpInsn(OP_IFEQ, next)
-    g.mv.visitInsn(OP_LRETURN)
-    g.mv.visitLabel(next)
-    g.mv.visitInsn(OP_POP2)
-  }
-  g.mv.visitInsn(OP_LCONST_0)
-  g.mv.visitInsn(OP_LRETURN)
-  ()
-}
-
-## Constructor tag of the value in arg_slot, stored as an int in `store`.
-fn emit_tag_of(g: Gen, a: AdtI, arg_slot: Int, store: Int) -> Unit !io = {
-  let done_tag = Label.new()
-  var idx = 0
-  for c in a.ctors {
-    let next = Label.new()
-    g.mv.visitVarInsn(OP_ALOAD, arg_slot)
-    g.mv.visitTypeInsn(OP_INSTANCEOF, ctor_jvm_name(g.adts, c))
-    g.mv.visitJumpInsn(OP_IFEQ, next)
-    push_int(g.mv, idx)
-    g.mv.visitVarInsn(OP_ISTORE, store)
-    g.mv.visitJumpInsn(OP_GOTO, done_tag)
-    g.mv.visitLabel(next)
-    idx = idx + 1
-  }
-  push_int(g.mv, 0 - 1)
-  g.mv.visitVarInsn(OP_ISTORE, store)
-  g.mv.visitLabel(done_tag)
-  ()
-}
-
 ## JVM entry wrapper: catch PanicError → stderr + exit 1 (spec §8.2).
 fn gen_jvm_main(g: Gen, cw: AdtClassWriter) -> Unit !io = {
   let m = cw.method(ACC_PUBLIC + ACC_STATIC, "main", "([Ljava/lang/String;)V").expect("mv")
@@ -1600,15 +1478,6 @@ pub fn emit_module(
     }
     g = drain_lambdas(g, cw)
   }
-  for aid in own_adt_ids {
-    let a = adt_of(adts, aid)
-    if a.derives_ord {
-      match impl_at(impl_table, ORD_ID, TyAdt(a.id, a.tparams)) {
-        Some(imp) -> if imp.derived { g = gen_derived_ord_cmp(g, cw, a) }
-        None -> ()
-      }
-    }
-  }
   if include_tests {
     var ti = 0
     for t in tm.tests {
@@ -1737,18 +1606,13 @@ fn gen_ccall(g: Gen, callee: CCallee, args: List[CExpr], ty: Ty) -> (Gen, Bool) 
       g1.mv.visitMethodInsn(OP_INVOKESTATIC, owner, name, d, false)
       (g1, true)
     }
-    CImpl(owner, tid, subject, method, derived) -> {
+    CImpl(owner, tid, subject, method) -> {
       let g1 = gen_cargs(g, args)
       let tr = trait_of(g1.traits, tid)
-      let desc =
-        if derived {
-          derived_cmp_desc(g1, subject)
-        } else {
-          let psig = subst_subject(tr, trait_method_sig(tr, method), subject)
-          method_desc(g1.adts, psig.param_tys, psig.ret)
-        }
+      let psig = subst_subject(tr, trait_method_sig(tr, method), subject)
       g1.mv.visitMethodInsn(OP_INVOKESTATIC, owner,
-        impl_method_name(g1, tr.name, subject, method), desc, false)
+        impl_method_name(g1, tr.name, subject, method),
+        method_desc(g1.adts, psig.param_tys, psig.ret), false)
       (g1, true)
     }
     CDefault(owner, tid, method) -> {
@@ -2030,6 +1894,31 @@ fn gen_cexpr2(g: Gen, e: CExpr, tail: Bool) -> (Gen, Bool) !io =
       } else {
         g1.mv.visitTypeInsn(OP_INSTANCEOF, cls)
       }
+      (g1, true)
+    }
+    # No tag field to read: an ADT's constructors are separate classes, so
+    # "which one" is a chain of instanceof tests -- the same chain the derived
+    # comparison used to build for itself before Core carried the node.
+    CTagOf(target, adt) -> {
+      let (g1, falls) = gen_cexpr(g, target, false)
+      if not falls { return (g1, false) }
+      let a = adt_of(g1.adts, adt)
+      let done = Label.new()
+      var idx = 0
+      for c in a.ctors {
+        let next = Label.new()
+        g1.mv.visitInsn(OP_DUP)
+        g1.mv.visitTypeInsn(OP_INSTANCEOF, ctor_jvm_name(g1.adts, c))
+        g1.mv.visitJumpInsn(OP_IFEQ, next)
+        g1.mv.visitInsn(OP_POP)
+        ldc_long(g1.mv, idx)
+        g1.mv.visitJumpInsn(OP_GOTO, done)
+        g1.mv.visitLabel(next)
+        idx = idx + 1
+      }
+      g1.mv.visitInsn(OP_POP)
+      ldc_long(g1.mv, 0 - 1)
+      g1.mv.visitLabel(done)
       (g1, true)
     }
     CTuple(elems, _) -> {

@@ -41,7 +41,7 @@ use types.{Ty, Sym, Sig, Traits, ImplI, Impls, Adts, adt_of, OPTION_ID}
 use core.{
   CExpr, CStmt, CFun,
   CInt, CFloat, CBool, CStr, CUnit, CLocal, CFnRef, CCall, CIntrinsic,
-  CCtor, CField, CIsCtor, CClosure, CTuple, CTupleGet, CBox, CUnbox,
+  CCtor, CField, CIsCtor, CTagOf, CClosure, CTuple, CTupleGet, CBox, CUnbox,
   CBinary, CUnary, CIf, CBlock, CListLit, CConstRef, CComptime,
   CReturn, CBreak, CContinue, CForeign, CDictRef, CDictApply, CDictArg, CJava,
   CSLet, CSAssign, CSDiscard, CSLoop, CSIf, CSDup, CSDrop,
@@ -863,7 +863,7 @@ fn ceval(icx: ICx, st0: ESt, env0: Env, e: CExpr) -> ER !io = {
           apply_fn(icx, st2, env2, f, vals)
         }
         CMethod(_, _, m, _) -> no_traits(st1, env1, "`" ++ m ++ "`")
-        CImpl(_, _, _, m, _) -> no_traits(st1, env1, "`" ++ m ++ "`")
+        CImpl(_, _, _, m) -> no_traits(st1, env1, "`" ++ m ++ "`")
         CDefault(_, _, m) -> no_traits(st1, env1, "`" ++ m ++ "`")
       }
     }
@@ -884,6 +884,11 @@ fn ceval(icx: ICx, st0: ESt, env0: Env, e: CExpr) -> ER !io = {
       let (st1, env1, v) = ceval(icx, st, env, target)?
       let (_, vci, _) = as_adt(v)
       Ok((st1, env1, VBool(vci == ci)))
+    }
+    CTagOf(target, _) -> {
+      let (st1, env1, v) = ceval(icx, st, env, target)?
+      let (_, vci, _) = as_adt(v)
+      Ok((st1, env1, VInt(vci)))
     }
     CTuple(elems, _) -> {
       let (st1, env1, vals) = eval_all(icx, st, env, elems)?

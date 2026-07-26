@@ -39,7 +39,7 @@ use core.{
   CDictDef, CDictSlot, CSlotFn, CSlotDefault,
   CExpr, CStmt, CCallee,
   CInt, CFloat, CBool, CStr, CUnit, CLocal, CFnRef, CCall, CIntrinsic,
-  CCtor, CField, CIsCtor, CClosure, CDictRef, CDictApply, CDictArg,
+  CCtor, CField, CIsCtor, CTagOf, CClosure, CDictRef, CDictApply, CDictArg,
   CTuple, CTupleGet, CBox, CUnbox,
   CBinary, CUnary, CIf, CBlock, CListLit, CConstRef, CComptime,
   CReturn, CBreak, CContinue, CForeign,
@@ -97,7 +97,7 @@ fn walk_callee(a: Acc, c: CCallee) -> Acc =
     CDynamic(t) -> walk_expr(a, t)
     CMethod(d, _, _, _) -> walk_expr(a, d)
     CDirect(_, _) -> a
-    CImpl(_, _, _, _, _) -> a
+    CImpl(_, _, _, _) -> a
     CDefault(_, _, _) -> a
   }
 
@@ -109,6 +109,7 @@ fn walk_expr(a: Acc, e: CExpr) -> Acc =
     CCtor(_, _, args, _) -> walk_all(a, args)
     CField(t, _, _, _, _) -> walk_expr(a, t)
     CIsCtor(t, _, _) -> walk_expr(a, t)
+    CTagOf(t, _) -> walk_expr(a, t)
     CClosure(_, _, caps, _) -> walk_all(a, caps)
     CTuple(elems, _) -> walk_all(a, elems)
     CTupleGet(t, _, _) -> walk_expr(a, t)
@@ -227,10 +228,9 @@ fn callee_line(adts: Adts, c: CCallee) -> String =
     CDynamic(_) -> "dynamic"
     CMethod(_, tid, method, idx) ->
       "method trait=" ++ to_string(tid) ++ " " ++ method ++ " slot=" ++ to_string(idx)
-    CImpl(owner, tid, subject, method, derived) ->
+    CImpl(owner, tid, subject, method) ->
       "impl " ++ owner ++ " trait=" ++ to_string(tid) ++ " subject=" ++
-      ty_str(adts, subject) ++ " " ++ method ++
-      (if derived { " derived" } else { "" })
+      ty_str(adts, subject) ++ " " ++ method
     CDefault(owner, tid, method) ->
       "default " ++ owner ++ " trait=" ++ to_string(tid) ++ " " ++ method
   }
@@ -283,7 +283,7 @@ fn expr(adts: Adts, n: Names, d: Int, e: CExpr) -> String =
         CDynamic(target) -> { out = out ++ expr(adts, n, d + 1, target) }
         CMethod(dict, _, _, _) -> { out = out ++ expr(adts, n, d + 1, dict) }
         CDirect(_, _) -> ()
-        CImpl(_, _, _, _, _) -> ()
+        CImpl(_, _, _, _) -> ()
         CDefault(_, _, _) -> ()
       }
       out ++ exprs(adts, n, d + 1, args)
@@ -298,6 +298,9 @@ fn expr(adts: Adts, n: Names, d: Int, e: CExpr) -> String =
       to_string(idx) ++ ty(adts, t) ++ "\n" ++ expr(adts, n, d + 1, target)
     CIsCtor(target, adt, ci) ->
       ind(d) ++ "isctor " ++ ctor_at(adts, adt, ci) ++ "\n" ++
+      expr(adts, n, d + 1, target)
+    CTagOf(target, adt) ->
+      ind(d) ++ "tagof " ++ adt_of(adts, adt).name ++ "\n" ++
       expr(adts, n, d + 1, target)
     CClosure(fn_name, owner, caps, t) ->
       ind(d) ++ "closure " ++ owner ++ "." ++ fn_name ++ ty(adts, t) ++ "\n" ++

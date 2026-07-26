@@ -57,12 +57,12 @@ pub type CCallee =
 # is known statically and this is an ordinary direct call. Identity stays
 # structural -- (owner, trait, subject, method) -- because how that becomes a
 # symbol is each backend's mangling, not Core's business.
-# `derived` marks an impl the compiler generated rather than the user
-# writing it (today: `derive Ord`). Its calling convention differs -- the
-# arguments are already concrete -- and that is a fact about the impl, not
-# about either backend, so it belongs here rather than in a table each
-# backend has to keep.
-  | CImpl(owner: String, trait_id: Int, subject: Ty, method: String, derived: Bool)
+# There used to be a `derived` flag here, for an impl the compiler generated
+# rather than the user writing it (`derive Ord`). It is gone because a derived
+# impl no longer produces a call to an impl at all: the compiler-written body
+# is lowered like any other relation the language defines, so what reaches a
+# backend is an ordinary CDirect.
+  | CImpl(owner: String, trait_id: Int, subject: Ty, method: String)
 # The trait's own default body, used when the impl does not provide the
 # method. It takes the dictionary as a trailing argument like any other
 # dictionary-passing call.
@@ -102,6 +102,10 @@ pub type CExpr =
   | CField(target: CExpr, adt: Int, ci: Int, idx: Int, ty: Ty)
 # discriminant test: is `target` built by constructor `ci`?
   | CIsCtor(target: CExpr, adt: Int, ci: Int)
+# which constructor built `target`, as its declaration index. CIsCtor answers
+# "is it this one"; an ordering needs "which one", and asking that with a
+# chain of CIsCtor tests is quadratic in the constructor count.
+  | CTagOf(target: CExpr, adt: Int)
 # Allocate a closure: a reference to a lifted top-level function plus the
 # values of its captures, in the order that function declares them.
   | CClosure(fn_name: String, owner: String, captures: List[CExpr], ty: Ty)
@@ -343,6 +347,7 @@ pub fn cex_ty(e: CExpr) -> Ty =
     CCtor(_, _, _, ty) -> ty
     CField(_, _, _, _, ty) -> ty
     CIsCtor(_, _, _) -> TyBool
+    CTagOf(_, _) -> TyInt
     CClosure(_, _, _, ty) -> ty
     CDictRef(_, _, _, ty) -> ty
     CDictApply(_, _, ty) -> ty
