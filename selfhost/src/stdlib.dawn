@@ -13,7 +13,7 @@ use std/map
 use std/set
 use token.{Diag}
 use ast.{Module}
-use types.{Sig, Adts}
+use types.{Sig, Adts, Impls}
 use tast.{TFun, TModule}
 use checker.{ModExports, check_module, cx_new, exports_of, Cx}
 use interp.{eval_comptime, CtOut}
@@ -37,6 +37,13 @@ pub type StdCtx = {
   std_names: Set[String],
   # the ADT table after all of std (grafted ids for user comptime)
   adts: Adts,
+  # Every impl std declares, seeded into every module the program checks.
+  #
+  # `impl[T: Eq] Eq[List[T]]` is not something a program opts into by writing
+  # `use std/list` -- coherence is program-wide, so `a == b` on two lists has
+  # to mean the same thing in a module that imports std/list and one that does
+  # not. That makes std's impls part of the baseline, next to the prelude's.
+  impls: Impls,
   # the id counter after all of std: user modules continue from here, so
   # grafted ADT/trait ids never collide across modules
   next_id: Int,
@@ -132,6 +139,7 @@ pub fn load_std(dir: String) -> Result[StdCtx, String] !io = {
   var fn_decls: Map[String, TFun] = map.empty()
   var by_owner: Map[String, Map[String, TFun]] = map.empty()
   var adts: Adts = map.empty()
+  var impls: Impls = map.empty()
   var last_cx: Option[Cx] = None
   var nid = 2
   var mods: List[(String, Cx, TModule, CtOut)] = []
@@ -144,7 +152,7 @@ pub fn load_std(dir: String) -> Result[StdCtx, String] !io = {
       return Err("bundled std module `" ++ mod_path ++ "` does not parse: " ++ pdiags[0].msg)
     }
     var cx = cx_new(Some(mod_path), None)
-    cx = Cx { ..cx, line_starts: lexer.line_starts_of(text), next_id: nid }
+    cx = Cx { ..cx, line_starts: lexer.line_starts_of(text), next_id: nid, impl_table: impls }
     # no std_fns here: std cannot implicitly import itself
     let (cx1, tm) = check_module(cx, m, exports)
     if len(cx1.diags) > 0 {
@@ -173,6 +181,10 @@ pub fn load_std(dir: String) -> Result[StdCtx, String] !io = {
       }
     }
     adts = cx1.adts
+    for pr in map.entries(cx1.impl_table) {
+      let (k, v) = pr
+      impls = map.insert(impls, k, v)
+    }
     last_cx = Some(cx1)
     nid = cx1.next_id
     mods = mods ++ [(mod_path, cx1, tm, ct)]
@@ -189,6 +201,7 @@ pub fn load_std(dir: String) -> Result[StdCtx, String] !io = {
     by_owner: by_owner,
     std_names: std_names,
     adts: adts,
+    impls: impls,
     next_id: nid,
     mods: mods,
     srcs: srcs

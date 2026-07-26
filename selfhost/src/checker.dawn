@@ -2348,7 +2348,12 @@ pub fn pass_register_impls(
     var paired = false
     for pr2 in eq_hash_impls {
       let (tid2, subject2, _, _) = pr2
-      if tid2 == other && subject2 == subject { paired = true }
+      # By head, not by subject: `impl[T: Eq] Eq[List[T]]` and
+      # `impl[T: Hash] Hash[List[T]]` name different type variables, so the
+      # subjects are not equal even though the pair is exactly the one this
+      # rule wants. The two need not carry the same bounds either -- each
+      # asks for the capability it uses (trait-v2-design §3.10).
+      if tid2 == other && head_of(subject2) == head_of(subject) { paired = true }
     }
     if not paired {
       let tn = trait_of(cx1.traits, tid).name
@@ -2816,40 +2821,6 @@ fn capture_witness(cx: Cx, sym: Int) -> Cx = {
   Cx { ..cx, lambda_stack: stack }
 }
 
-## The witness behind `==`/`!=`, which differs from Ord's in one way that
-## matters: equality has a structural default for every type, so "no impl" is
-## not an error -- it means the backend's own structural comparison, which is
-## what `==` has always emitted. A witness is returned only where dispatch
-## would actually differ from that.
-##
-## A rigid type parameter is the exception: `T` has no structure to compare,
-## so it needs the caller's dictionary and therefore a bound.
-pub fn resolve_eq_witness(cx: Cx, t: Ty, lo: Int, hi: Int) -> (Cx, Option[WitRef]) = {
-  if is_errorish(t) { return (cx, no_wit()) }
-  match t {
-    TyVar(_, vid) ->
-      match map.get(cx.dict_syms, (vid, EQ_ID)) {
-        None -> {
-          let cx1 = cerr_h(cx, "values of type " ++ ty_show(cx.adts, t) ++
-              " cannot be compared for equality", lo, hi,
-            "add the bound: [" ++ ty_show(cx.adts, t) ++ ": Eq]")
-          (cx1, no_wit())
-        }
-        Some(sym) -> (capture_witness(cx, sym), Some(WForward(sym)))
-      }
-    _ ->
-      # scalars are native; an ADT with no `impl Eq` keeps its structural default
-      if is_eq_scalar(t) {
-        (cx, no_wit())
-      } else {
-        match impl_at(cx.impl_table, EQ_ID, t) {
-          Some(_) -> (cx, Some(WConcrete(EQ_ID, t)))
-          None -> (cx, no_wit())
-        }
-      }
-  }
-}
-
 ## Satisfy one trait requirement at a use site (the Kotlin resolveWitness,
 ## specialized here for Ord over `<' family operators): a concrete subject
 ## resolves through the impl table; the caller's own rigid type parameter
@@ -2981,17 +2952,17 @@ pub fn check_binary_typed(
         node(no_wit(), TyError))
     }
     OpEq | OpNeq -> {
-      match uncomparable_part(cx, lt, set.empty()) {
-        Some(bad) ->
-          return (uncomparable_err(cx, lt, bad, olo, ohi), TyError, node(no_wit(), TyError))
-        None -> ()
-      }
       if lt != rt {
         return (cerr(cx, "== requires both sides to have the same type: " ++
             ty_show(cx.adts, lt) ++ " vs " ++ ty_show(cx.adts, rt), olo, ohi), TyError,
           node(no_wit(), TyError))
       }
-      let (cx1, w) = resolve_eq_witness(cx, lt, olo, ohi)
+      # One pipeline. `==` used to ask `resolve_eq_witness`, a second solver
+      # that knew about impls but not about conditional ones, so `a == b` on
+      # two lists reached a different answer than the same comparison through
+      # a `[T: Eq]` bound. The design's claim that the two doors give the same
+      # answer is now a fact about the code: they call the same function.
+      let (cx1, w) = resolve_witness(cx, EQ_ID, lt, olo, ohi, "`==`")
       (cx1, TyBool, node(w, TyBool))
     }
     OpLt | OpLe | OpGt | OpGe -> {
@@ -8277,11 +8248,19 @@ fn eq_wit_of(src: String) -> Option[WitRef] !io = {
   found
 }
 
-test "== carries an Eq witness only where a type overrides the default" {
-  # a scalar and a plain ADT keep the structural default: no witness, so the
-  # backend emits exactly what it always emitted
-  assert eq_wit_of("fn f(a: Int, b: Int) -> Bool = a == b") == None
-  assert eq_wit_of("type C = | R | G\nfn f(a: C, b: C) -> Bool = a == b") == None
+test "== resolves its witness the same way a bound does" {
+  # Every `==` now carries a witness, because it asks the one solver a
+  # `[T: Eq]` bound asks. For a scalar or a plain ADT that witness names the
+  # relation the compiler defines, so the emitted code is what it always was
+  # -- what changed is that the two doors cannot answer differently.
+  assert eq_wit_of("fn f(a: Int, b: Int) -> Bool = a == b") ==
+    Some(WConcrete(EQ_ID, TyInt))
+  var adt_tid = 0 - 1
+  match eq_wit_of("type C = | R | G\nfn f(a: C, b: C) -> Bool = a == b") {
+    Some(WConcrete(t, _)) -> { adt_tid = t }
+    _ -> ()
+  }
+  assert adt_tid == EQ_ID
   # an overriding impl puts the operator on the dictionary rail
   let over = "type P = { x: Int }\n" ++
     "impl Eq[P] {\n  fn eq(a: P, b: P) -> Bool = a.x == b.x\n}\n" ++

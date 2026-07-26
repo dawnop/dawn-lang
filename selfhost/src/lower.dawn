@@ -1280,6 +1280,18 @@ fn primitive_subject(st: LSt, tid: Int, subject: Ty) -> Bool =
     None -> tid == EQ_ID || tid == HASH_ID
   }
 
+## `!=`, given what `==` lowered to. A scalar comparison keeps its own node:
+## `CNe` is a relation both backends implement directly, and wrapping it in a
+## `not` would cost an instruction for nothing. This used to be decided by
+## asking whether the type was a scalar, which stopped working when `==`
+## started carrying a witness for every type -- the shape of the answer is the
+## honest question, not the shape of the type.
+fn negated(c: CExpr) -> CExpr =
+  match c {
+    CBinary(CEq, a, b, _) -> CBinary(CNe, a, b, TyBool)
+    _ -> CUnary(CNot, c, TyBool)
+  }
+
 fn is_eq_op(op: TBinOp) -> Bool =
   match op {
     BEq -> true
@@ -1414,11 +1426,14 @@ fn lower_trait_call(
       let imp = impl_for(st, tid, subject)
       if provides(imp, name) {
         # devirtualised: the impl's own method takes the concrete type, so
-        # nothing is boxed
+        # nothing is boxed. A conditional impl still wants its dictionaries,
+        # and at a ground subject they are all statically known.
         let psig = subst_subject(tr, sg, subject)
         let (st1, vs) = lower_args_to(st, args, psig.param_tys)
-        (st1, adapt_out(
-          CCall(CImpl(owner_or(imp.owner, st.owner), tid, subject, name), vs, psig.ret),
+        let (st2, ds) = goal_dicts(st1, sub_goals(st1.impls, tid, subject))
+        (st2, adapt_out(
+          CCall(CImpl(owner_or(imp.owner, st2.owner), tid, subject, name), vs ++ ds,
+            psig.ret),
           psig.ret, ty))
       } else {
         # the default body is generic and takes the dictionary like any
@@ -1720,7 +1735,7 @@ pub fn lower_expr(st0: LSt, e: TExpr) -> (LSt, CExpr) = {
             let (st1, c) = lower_trait_call(st, EQ_ID, "eq", [l, r], [w], TyBool)
             match op {
               BEq -> (st1, c)
-              _ -> (st1, CUnary(CNot, c, TyBool))
+              _ -> (st1, negated(c))
             }
           } else {
             let (st1, c) = lower_trait_call(st, ORD_ID, "cmp", [l, r], [w], TyInt)
@@ -1740,7 +1755,7 @@ pub fn lower_expr(st0: LSt, e: TExpr) -> (LSt, CExpr) = {
             let (st3, c) = eq_at(st2, lv, rv, tex_ty(l))
             match op {
               BEq -> (st3, c)
-              _ -> (st3, CUnary(CNot, c, TyBool))
+              _ -> (st3, negated(c))
             }
           } else {
             let (st1, lv) = lower_expr(st, l)
