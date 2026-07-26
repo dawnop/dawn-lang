@@ -839,17 +839,25 @@ fn resolve(
       } }]
     }
   }
-  # duplicate-import detection (same module used twice in one file)
+  # duplicate-import detection (same module, same *kind*, twice in one file).
+  # `use std/cursor` and `use std/cursor.{Cursor}` are not duplicates: one
+  # binds a module alias to call through, the other binds names. A module that
+  # exports both functions and a type needs both, and the qualified spelling
+  # is the whole point of the former.
   for mp in order {
     let mf = map.get(by_path, mp).expect("module")
-    var seen: Set[String] = set.empty()
+    var seen: Set[(String, Bool)] = set.empty()
     for u in module_uses(mf.m) {
       var all_ok = true
       for s in u.segs {
         if not seg_ok(s) { all_ok = false }
       }
       if all_ok {
-        if set.has(seen, u.path) {
+        let sel = match u.selective {
+          Some(_) -> true
+          None -> false
+        }
+        if set.has(seen, (u.path, sel)) {
           diags = diags ++ [LocDiag { path: mf.path, d: Diag {
             msg: "module `" ++ u.path ++ "` is imported more than once",
             lo: u.nlo,
@@ -857,7 +865,7 @@ fn resolve(
             hint: ""
           } }]
         }
-        seen = set.insert(seen, u.path)
+        seen = set.insert(seen, (u.path, sel))
       }
     }
   }
@@ -1114,6 +1122,33 @@ test "a two-module project analyzes end to end" {
   assert loaded.modules[1].mod_path == "main"
   let prog = analyze_program(loaded, std, ct_default())
   assert len(prog.diags) == 0
+}
+
+test "a module may be imported qualified and selectively at once" {
+  # Two different acts: one binds a module alias to call through, the other
+  # binds names. A module that exports a type AND functions needs both, and
+  # the qualified spelling is the whole point of the former.
+  let root = "/tmp/dawn-selfhost-analyze/proj-dual"
+  mkdirs(root ++ "/src")
+  put(root ++ "/src/main.dawn",
+    "use std/str\nuse std/str.{trim}\n" ++
+      "pub fn main() -> Unit !io = println(trim(str.repeat(\" a \", 1)))\n")
+  let loaded = load_directory(root)
+  for ld in loaded.diags {
+    if str.contains(ld.d.msg, "imported more than once") { assert false }
+  }
+
+  # the same kind twice is still an error
+  let root2 = "/tmp/dawn-selfhost-analyze/proj-dup"
+  mkdirs(root2 ++ "/src")
+  put(root2 ++ "/src/main.dawn",
+    "use std/str\nuse std/str\npub fn main() -> Unit !io = ()\n")
+  let loaded2 = load_directory(root2)
+  var dup = false
+  for ld in loaded2.diags {
+    if str.contains(ld.d.msg, "imported more than once") { dup = true }
+  }
+  assert dup
 }
 
 test "loader reports cycles and missing modules" {
