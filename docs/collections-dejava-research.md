@@ -190,6 +190,10 @@ D 是一个**语言特性项目**——语言侧加三个 trait(**Eq / Hash / It
    加 `Iter` trait 让 `for-in` dispatch 到 Dawn 迭代函数;`desc_of` 重定向 + 调用点路由;退役 DawnMap/DawnSet 两个
    vendored 类,**且删掉 `map_*/set_*` intrinsic**。**手写 Java 4→2。**
 
+   > **更正(2026-07-27,实测)**:`Iter` **trait** 撤下。`for..in` 只迭代 `TyList` 一种类型,
+   > lowering 直接发对 `std/list` 游标函数的具名调用就够,不需要语言特性。
+   > 见 [`trait-v2-design.md`](trait-v2-design.md) §7。
+
    > **前置(2026-07-25 审计补)**:这一行里的 `impl Eq/Hash` 与 `Iter` 主体都是**泛型的**
    > (`Map[K,V]` / `List[T]`),而 trait v1 的 `impl_subject_ok` 只放行具名非泛型类型。
    > **今天这两件一行都写不出来。** 出路不是 D0 的 `WStructural`——那是编译器合成的**结构**关系,

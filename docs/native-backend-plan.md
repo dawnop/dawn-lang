@@ -633,6 +633,15 @@ Blob { data: .. } == Blob { data: .. }    no      # Option / 元组 / List 同
 `len` + `list_index` 的下标循环——**迭代硬连线到「可随机索引」**。D3 的严格 RB 随机索引实测慢
 8–18× 且随 n 增长,所以 `Iter` 不是 D2 的附赠品,是 D3 的正确性前提。
 
+> **更正(2026-07-27,实测)**:上一句把两件事合成了一件。「**不按下标降**」确实是 D3 的正确性
+> 前提;「**按 `Iter` trait 降**」不是。`for..in` 今天只迭代 `TyList` 一种类型
+> (`checker.dawn:5733`),`for` 处没有多态可言;而 lowering 早就能发具名调用
+> (`LSt.prog_fns` + `CCall(CDirect(owner, name), …)`,合成的 `eq`/`cmp`/`show` 就这么发的)。
+> 所以 S3 里 `lower_for_list` 换成对 `std/list` 四个游标函数的直接调用即可——下标没了、
+> 后端 intrinsic 也没了、编译器里的 arm 数不变,**语言一个字都不用加**。
+> `Iter` 买到的是「`for` 能迭代 List 以外的东西」,今天树内无人在等。
+> 推导与证据在 [`trait-v2-design.md`](trait-v2-design.md) §7。
+
 ### 11.4 重排后的顺序
 
 原顺序按**后端交付物**排(Core IR → 集合 → C 发射器 → Perceus → FFI → 自举)。
@@ -712,7 +721,7 @@ Blob { data: .. } == Blob { data: .. }    no      # Option / 元组 / List 同
 | # | 事 | 为什么在这儿 |
 |---|---|---|
 | S2.1 | **trait v2 最小切片:泛型主体的条件 impl**。`impl_table` 改按 head 索引 + 匹配替换 + 递归解 bound;字典从单例扩到**参数化构造**(新 Core 节点,两个后端各一处) | D2 的硬前置,见 §9.1 的更正块。只做 `impl[T: C] Tr[F[T]]` 一种形状,不开重叠 |
-| S2.2 | `Iter` trait;`for-in` 从后端 intrinsic 变成语言 trait | 前置是 S2.1;D3 的正确性前提,不是 D2 的附带项 |
+| S2.2 | ~~`Iter` trait;`for-in` 从后端 intrinsic 变成语言 trait~~ **撤下** | 两次改判:先是发现它缺前置(关联类型)与 oracle(RRB),再是发现**它根本不是前置**——`for` 脱掉下标不需要 trait。见 §11.3 的更正块与 [`trait-v2-design.md`](trait-v2-design.md) §6/§7。`for` 的改造并进 S3 |
 | S2.3 | `pub opaque type`:库可定义的抽象类型 | 每要隐藏一次表示就现搓一套机制——Cursor 靠编译器铸造的不透明标量,`Array` 靠 `cx.is_std_module` 名字门控,D2 的 HAMT 节点是第三次 |
 | S2.4 | `unsafe_pure` 收窄成真 FFI 图章;`java_try` / `cast` / `catch_panic` 出通用内建表;`std/io` 的错误契约脱离 JVM | 11.1 的四;`std/io` 今天建在 `java_try` 上,所以「可移植 std」是假的 |
 | S2.5 | 发一版 + bump 种子 | **不可压缩的串行点**。§7 把 D1 记成「完成」,但今天 std 里一行 `Array` 都还写不了 |

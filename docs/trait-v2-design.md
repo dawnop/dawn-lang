@@ -711,3 +711,67 @@ trait Iter[C] {
 把「Iter 是 D2 的附带项」写进计划的那次，代价是没识别出 trait v2；这次的教训一样，
 只是往前挪了一层：**一个 trait 写不写得出来，取决于它的方法签名能不能被声明，
 而不只是它的主体能不能被索引。**
+
+## 7. 关联类型动手前的实测（2026-07-27）：前置本身是假的
+
+§6 把 `Iter` 挪到 S3、把关联类型独立成一项。动手前按 trait v2 §2 的规矩先实测，
+**实测把 §6 自己的一半推翻了**：关联类型今天在树内一个消费者都没有，而 `Iter`
+也不是 S3 的前置。
+
+### 7.1 「收益不止 `Iter`」是两条没核对的推断
+
+| §6.3 的说法 | 核对结果 |
+|---|---|
+| `Eq`/`Hash` 的 key 类型在等它 | **撤回**。两个 trait 都是 `fn f(x: T) -> …`，只有主体一个类型；`Map[K, V]` 要的 `K: Eq + Hash` 是 bound，trait v2 已经给了 |
+| `Show` 的 writer 类型在等它 | **撤回**。今天 `fn show(x: T) -> String`，没有第二个类型；「改成 writer」是一个还没人提的设计，不是欠着的账 |
+
+于是关联类型的消费者只剩 `Iter` 一个。下一条把这个也拿掉了。
+
+### 7.2 `for` 要脱掉下标，不需要 trait
+
+`lower_for_list`(`lower.dawn:2485`)把 `for x in xs` 降成 `len` + `list_index`，
+它自己的注释写着「D2/D3 之后这里变成 `Iter` trait 的调用」；§11.3 据此把 `Iter`
+记成 D3 的正确性前提（RB 树随机索引慢 8–18×）。
+
+**「不按下标降」和「按 trait 降」是两件事，这里被合成了一件。** 实测两条：
+
+- `for..in` 今天只迭代**一种**类型：`checker.dawn:5733` 的 `TyList(el) -> el`，
+  其余一律报错；Map/Set 要先 `map.entries` / `set.to_list` 转成 List。
+  **`for` 处没有多态可言**，所以也没有 trait 要抽象的东西。
+- 降成具名调用的材料 lowering 早就齐了：`LSt.prog_fns`(`lower.dawn:94`)是
+  `(owner, name) → Sig` 的全表，`CCall(CDirect(owner, name), …)` 就是直接调用的
+  形式，合成的 `eq`/`cmp`/`show` 已经这么发(`lower.dawn:983 / 1199 / 1351`)。
+
+所以 S3 里 `lower_for_list` 把两个 intrinsic 换成对 `std/list` 的四个具名调用
+(`iter_start` / `iter_done` / `iter_next` / `iter_get`)，下标就没了、后端 intrinsic
+也没了，而**编译器里的 arm 数量不变（还是一条 `TyList`），语言一个字都不用加**。
+
+`Iter` 作为 trait 买到的是另一件事:**让 `for` 迭代 List 以外的东西**
+(Map/Set/String/用户容器)。那是功能决定，今天树内没有一处在等它。
+
+### 7.3 `for` 的改法有 oracle，`Iter` 没有
+
+§6.2 的「没有语料能证明它没写错」说过头了：selfhost/src 与 std 里有 **871** 个
+`for x in xs`，改完还能 fixpoint(B == C)是很强的正确性证据。真正缺 oracle 的
+只有「更快」那一半，那要等 RRB——而这一半对具名调用和对 trait 是同一件事。
+
+### 7.4 结论
+
+- **`Iter` 与关联类型一起从 S3 的关键路径撤下。** S3 的 `for` 改造是 lowering 的
+  一处局部改动。
+- **关联类型仍值得做，但理由换成它自己的**：它是**运算符 trait** 的前置——
+  `index_wanted`(`checker.dawn:3293`)今天硬编码 List/Map 两条 arm，用户类型不能
+  支持 `xs[i]`；`for` 同理。这是**表达力**项目，不是纯洁性欠账，按它自己的收益
+  排期，不再挂在 S3 前面。
+
+动手时用得上的两个数，实测已经留下：
+
+- 往 `Ty` 插 `TyAssoc(trait_id, subject, name)` 探针，穷尽性报 **10 处**，
+  与 `TyOpaque` 同一批落点(`ty_show`/`subst`/`core`/`desc_of`/`jvm_repr`/
+  `hash_of`/`emit_unerase`/`unerase`/`subst_tvar`/`c_repr`)。
+- 种子(v0.19.0)两侧语法都不认：trait 体里的 `type Item` 与 impl 体里的
+  `type Item = Int` 都是 parse error。所以第一刀仍要自己占一版。
+
+> 连着两次的教训是同一个形状，只是层级不同：上一次是「没识别出 `Iter` 的前置」，
+> 这一次是「**没核对 `Iter` 本身是不是前置**」。计划里一个待办被别的待办引用得越多，
+> 越没人回头验它——`Iter` 被四份文档引用，四份都是转述同一句话。

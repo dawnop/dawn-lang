@@ -106,6 +106,9 @@ Java 类。**要做的是把这个模型长全。**
 >
 > **迭代不进后端契约**:集合成纯 ADT 后,`for-in` 靠一个 **`Iter` trait**(语言侧,像 Rust `IntoIterator`)dispatch 到集合的
 > Dawn 迭代函数,而非后端 `iter` intrinsic。于是「迭代」也从后端接口移到语言 trait + Dawn 源——同样朝「后端接口更小」走。
+>
+> **更正(2026-07-27,实测)**:结论(迭代不进后端契约)成立,手段改了——不用 trait,
+> lowering 直接发对 `std/list` 游标函数的具名调用。见 [`trait-v2-design.md`](trait-v2-design.md) §7。
 
 ## 6. de-Java 的正确方向 vs 错误方向(关键决策记录)
 
