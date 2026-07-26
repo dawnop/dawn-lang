@@ -27,11 +27,20 @@ eq_bytes:emitc
 # ord_derive:cc was deleted here.
 
 # --- rendering ------------------------------------------------------------
-# Show is not a trait: an AdtI flag, a checker predicate, and an instanceof
-# chain in dawn/rt/Show. A tagged union has no chain to walk, so there is
-# nothing for native to inherit -- `to_string` of an ADT reaches emitc and
-# panics.
-show_derive:emitc
+# show_derive:emitc was here. Show was not a trait but three things wearing
+# one name -- an AdtI flag, a checker predicate, and an instanceof chain in
+# dawn/rt/Show -- and a tagged union has no arm in that chain, so it fell
+# through to the `toString` the JVM emitter wrote directly as bytecode. Core
+# carried neither end. Closed by lowering the rendering over the type's own
+# structure the way equality and ordering already are
+# (semantics-closure-design.md 6), so both backends compile one definition.
+#
+# What remains is the container half, and it is an honest gap rather than an
+# invented answer: a List/Map/Set has no structure for lowering to walk, so
+# `show` at one still reaches the runtime intrinsic and native has no runtime
+# to reach. It closes with S3, when the collections become ADTs in std and
+# these lines move back into show_derive.dawn.
+show_containers:emitc
 
 # A bound whose subject *contains* a rigid variable rather than being one
 # (`[T: Eq]` used at `Option[T]`) was here. It reached the `struct_eq`
@@ -48,11 +57,18 @@ show_derive:emitc
 # dict_forward:cc was deleted here.
 
 # --- comptime -------------------------------------------------------------
-# interp.dawn renders every non-scalar as the literal "<value>", so a const
-# holding `to_string` of an ADT folds to the wrong string -- on the JVM, in
+# interp.dawn rendered every non-scalar as the literal "<value>", so a const
+# holding `to_string` of an ADT folded to the wrong string -- on the JVM, in
 # the backend that ships. This is the check .expect exists for: both targets
 # fold at compile time, so they agree with each other, and a differential
 # comparison alone reports ok.
+#
+# The ADT half is closed: rendering is a Core body now, so the interpreter
+# executes the same definition the backends compile instead of guessing. What
+# still folds to "<value>" is a const holding a rendered *container*, which
+# reaches the intrinsic -- and the interpreter must not grow its own answer to
+# that, or the count of definitions goes back up. It closes when std carries
+# `impl[T: Show] Show[List[T]]` and the walk becomes ordinary Dawn.
 const_fold:jvm
 
 # Comptime consts are not emitted for native yet. Unlike the four above, this

@@ -161,6 +161,28 @@ dawn_str dawn_str_of_bool(bool v) {
   return v ? dawn_str_lit("true", 4) : dawn_str_lit("false", 5);
 }
 
+dawn_str dawn_str_quote(dawn_str s) {
+  /* Worst case every byte doubles, plus the two quotes. Bytes above 0x7f are
+   * copied through: the escapes are the five the JVM backend applies, and a
+   * multi-byte code point has no continuation byte in that set. */
+  char *buf = (char *)dawn_alloc((size_t)(2 * s.len + 2));
+  int64_t n = 0;
+  buf[n++] = '"';
+  for (int64_t i = 0; i < s.len; i++) {
+    char c = s.p[i];
+    switch (c) {
+      case '\\': buf[n++] = '\\'; buf[n++] = '\\'; break;
+      case '"': buf[n++] = '\\'; buf[n++] = '"'; break;
+      case '\n': buf[n++] = '\\'; buf[n++] = 'n'; break;
+      case '\t': buf[n++] = '\\'; buf[n++] = 't'; break;
+      case '\r': buf[n++] = '\\'; buf[n++] = 'r'; break;
+      default: buf[n++] = c; break;
+    }
+  }
+  buf[n++] = '"';
+  return (dawn_str){buf, n};
+}
+
 /* ---- hashing and ordering ------------------------------------------------
  *
  * Java defines String.hashCode and String.compareTo over UTF-16 code units.

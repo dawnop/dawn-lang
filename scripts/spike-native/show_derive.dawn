@@ -1,11 +1,19 @@
-# Rendering. `to_string` and `${}` interpolation are type-directed, but Show
-# is not a trait: it is a `derives_show` flag on the ADT, a static
-# `is_showable` predicate in the checker, and a runtime instanceof chain in
-# `dawn/rt/Show`. Nothing about it rides the dictionary track Ord/Eq/Hash use.
+# Rendering: `to_string` and `${}` interpolation, which are type-directed.
 #
-# A tagged union has no instanceof chain to walk, so the JVM's materialisation
-# does not carry over: rendering is the one type-directed operation with no
-# backend-neutral definition at all.
+# Show used to be three things wearing one name -- a `derives_show` flag on
+# the ADT, an `is_showable` predicate in the checker, and an instanceof chain
+# in `dawn/rt/Show` -- and none of them rode the dictionary track Ord/Eq/Hash
+# use. A tagged union has no arm in that chain: it fell through to
+# `String.valueOf`, which found a `toString` the JVM emitter wrote straight as
+# bytecode. Core carried neither, so the C backend had nothing to compile.
+#
+# What this file watches now is the one definition both backends read. The
+# nesting is deliberate: a String field has to come out quoted while
+# `to_string` of a String does not, and a `derive Show` on a generic type has
+# to take the dictionary its own bound names.
+#
+# Containers are in show_containers.dawn, not here -- their rendering is
+# blocked on the pure-Dawn collections, which is a different gap.
 use std/io
 
 pub type Point = | Point(x: Int, y: Int) derive Show
@@ -19,6 +27,8 @@ pub type Shape =
 pub type Rec = { name: String, at: Point } derive Show
 
 pub type Boxed[T] = | Boxed(v: T) derive Show
+
+pub type Pair[A, B] = { l: A, r: B } derive Show
 
 pub fn main() -> Unit !io = {
   println("-- scalars --")
@@ -36,18 +46,30 @@ pub fn main() -> Unit !io = {
   println(to_string(Origin))
   println(to_string(Rec { name: "o", at: Point(0, 0) }))
 
+  println("-- a nested String is quoted; a top-level one is not --")
+  println(to_string(Rec { name: "has \"quotes\", a \\, a \n and a \t",
+    at: Point(1, 1) }))
+
   println("-- a type parameter passes through --")
   println(to_string(Boxed(7)))
   println(to_string(Boxed("s")))
   println(to_string(Boxed(Point(4, 5))))
+  println(to_string(Boxed(Boxed(Boxed(1)))))
+  println(to_string(Pair { l: Point(1, 2), r: "x" }))
 
-  println("-- prelude containers --")
+  println("-- the prelude ADTs --")
   println(to_string(Some(3)))
   let nothing: Option[Int] = None
   println(to_string(nothing))
-  println(to_string([1, 2, 3]))
-  println(to_string([Point(1, 1)]))
+  println(to_string(Some(Point(1, 2))))
+  let ok: Result[Int, String] = Ok(1)
+  let bad: Result[Int, String] = Err("no")
+  println(to_string(ok))
+  println(to_string(bad))
+
+  println("-- tuples, which have no head to name an impl --")
   println(to_string((1, "two")))
+  println(to_string((Point(0, 0), true, 2.5)))
 
   println("-- interpolation is the same operation --")
   println("point=${Point(6, 7)} n=${8} flag=${true}")

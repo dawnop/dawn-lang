@@ -21,7 +21,7 @@ use types.{
   Ty, TyInt, TyFloat, TyBool, TyString, TyUnit, TyNever, TyError, TyVar,
   TyAdt, TyList, TyTuple, TyFn, TyBytes, TyCursor, TyMap, TySet, TyArray, TyJava,
   Sym, Sig, Traits, TraitI, ImplI, MethodSig,
-  Adts, AdtI, CtorI, adt_of, trait_of, OPTION_ID, RESULT_ID, ORD_ID, EQ_ID, HASH_ID,
+  Adts, AdtI, CtorI, adt_of, trait_of, OPTION_ID, RESULT_ID, ORD_ID, EQ_ID, HASH_ID, SHOW_ID,
   is_eq_scalar, is_ord_scalar, builtins, Impls, impl_at, has_impl_at,
   is_ground, expandable, type_args_of, sub_goals
 }
@@ -232,21 +232,16 @@ fn un_op(op: TUnOp) -> CUnOp =
 ## Interpolation is lowered here rather than left to the backends, which is
 ## why the vocabulary is Core's own (`str_of_int`, ...) rather than any
 ## backend's. Each backend maps these names to its runtime.
-fn to_str(e: CExpr, t: Ty) -> CExpr =
+## `to_string(e)` and `${e}`: the *unquoted* rendering, where a String is
+## itself. Everything else is `show_at`, the trait method -- see its comment
+## for why the two cannot be one.
+fn to_str(st: LSt, e: CExpr, t: Ty) -> (LSt, CExpr) =
   if t == TyString {
-    e
-  } else if t == TyInt {
-    CIntrinsic("str_of_int", [e], TyString)
-  } else if t == TyFloat {
-    CIntrinsic("str_of_float", [e], TyString)
-  } else if t == TyBool {
-    CIntrinsic("str_of_bool", [e], TyString)
+    (st, e)
   } else if t == TyUnit {
-    CStr("()")
+    (st, CStr("()"))
   } else {
-    # everything else goes through Show, which is a runtime dispatch on the
-    # value -- so the argument crosses as an erased reference
-    CIntrinsic("show", [adapt_in(e, t, TyVar("T", 0))], TyString)
+    show_at(st, e, t)
   }
 
 # ---- constructor fields ----
@@ -764,6 +759,7 @@ fn prim_relation(st: LSt, tid: Int, subject: Ty, args: List[CExpr]) -> (LSt, CEx
   if tid == EQ_ID { return eq_at(st, args[0], args[1], subject) }
   if tid == HASH_ID { return (st, CIntrinsic("hash", [args[0]], TyInt)) }
   if tid == ORD_ID { return cmp_at(st, args[0], args[1], subject) }
+  if tid == SHOW_ID { return show_at(st, args[0], subject) }
   panic("lower: no primitive relation for trait " ++ to_string(tid))
 }
 
@@ -1004,20 +1000,26 @@ fn struct_rel_fn(
   t: Ty,
   prefix: String,
   tid: Int,
+  arity: Int,
   ret: Ty,
   zero: CExpr,
-  body_of: fn(LSt, CExpr, CExpr, Ty) -> (LSt, CExpr)
+  body_of: fn(LSt, List[CExpr], Ty) -> (LSt, CExpr)
 ) -> (LSt, String) = {
   let name = prefix ++ ty_key_inst(t)
   for f in st.lifted {
     if f.name == name { return (st, name) }
   }
-  let (st0, asym) = fresh_sym(st)
-  let (st1, bsym) = fresh_sym(st0)
-  let ps = [
-    CParam { sym: asym, ty: t, mode: COwned },
-    CParam { sym: bsym, ty: t, mode: COwned }
-  ]
+  var st1 = st
+  var ps: List[CParam] = []
+  var xs: List[CExpr] = []
+  var k = 0
+  while k < arity {
+    let (stA, sym) = fresh_sym(st1)
+    st1 = stA
+    ps = ps ++ [CParam { sym: sym, ty: t, mode: COwned }]
+    xs = xs ++ [CLocal(sym, t)]
+    k = k + 1
+  }
   let no_goals: List[(Int, Ty)] = []
   let goals = if is_ground(t) { no_goals } else { sub_goals(st.impls, tid, t) }
   var stD = st1
@@ -1046,7 +1048,7 @@ fn struct_rel_fn(
     default_of: None
   }
   let st2 = LSt { ..stD, lifted: stD.lifted ++ [stub], dict_env: env }
-  let (st3, body) = body_of(st2, CLocal(asym, t), CLocal(bsym, t), t)
+  let (st3, body) = body_of(st2, xs, t)
   var out: List[CFun] = []
   for f in st3.lifted {
     if f.name == name {
@@ -1059,7 +1061,8 @@ fn struct_rel_fn(
 }
 
 fn struct_eq_fn(st: LSt, t: Ty) -> (LSt, String) =
-  struct_rel_fn(st, t, "structeq\$", EQ_ID, TyBool, CBool(true), struct_eq_body)
+  struct_rel_fn(st, t, "structeq\$", EQ_ID, 2, TyBool, CBool(true),
+    fn(s, xs, ty) => struct_eq_body(s, xs[0], xs[1], ty))
 
 fn struct_eq_body(st: LSt, a: CExpr, b: CExpr, t: Ty) -> (LSt, CExpr) =
   match t {
@@ -1181,7 +1184,8 @@ fn cmp_through_dict(st: LSt, d: CExpr, a: CExpr, b: CExpr, t: Ty) -> (LSt, CExpr
 }
 
 fn struct_cmp_fn(st: LSt, t: Ty) -> (LSt, String) =
-  struct_rel_fn(st, t, "structcmp$", ORD_ID, TyInt, CInt(0), struct_cmp_body)
+  struct_rel_fn(st, t, "structcmp$", ORD_ID, 2, TyInt, CInt(0),
+    fn(s, xs, ty) => struct_cmp_body(s, xs[0], xs[1], ty))
 
 fn struct_cmp_body(st: LSt, a: CExpr, b: CExpr, t: Ty) -> (LSt, CExpr) =
   match t {
@@ -1260,6 +1264,134 @@ fn lexicographic(st: LSt, parts: List[CExpr], i: Int) -> (LSt, CExpr) = {
       CLocal(sym, TyInt),
       Some(rest), TyInt)),
     TyInt))
+}
+
+# ---- rendering (docs/semantics-closure-design.md 6) ----
+#
+# `to_string` and every `${...}` used to reach `dawn/rt/Show`, an instanceof
+# chain that asks a value at run time what it is. A tagged union has no arm in
+# that chain: it falls through to `String.valueOf`, which finds a `toString`
+# the JVM emitter wrote straight as bytecode. Core carried neither end, so the
+# C backend had nothing to compile -- `show_derive:emitc` is that gap.
+#
+# The rendering is spelled out here now, over the type's own structure, and
+# both backends compile one definition. What a backend still implements is the
+# two ends: the scalars, and (until S3) the builtin containers.
+
+fn cat(a: CExpr, b: CExpr) -> CExpr = CBinary(CConcat, a, b, TyString)
+
+## `show(x)` at one type, as Core.
+##
+## This is the *nested* rendering -- the trait method -- so a String is
+## quoted. `to_str` is the other one: `to_string("a")` is `a`, while a String
+## field inside a record renders as `"a"`. One trait cannot be both, and the
+## language has drawn that line since its first day (Rust draws it as Display
+## vs Debug); what changes here is only that both sides now come from Core.
+fn show_at(st: LSt, x: CExpr, t: Ty) -> (LSt, CExpr) = {
+  if t == TyInt { return (st, CIntrinsic("str_of_int", [x], TyString)) }
+  if t == TyFloat { return (st, CIntrinsic("str_of_float", [x], TyString)) }
+  if t == TyBool { return (st, CIntrinsic("str_of_bool", [x], TyString)) }
+  if t == TyString { return (st, CIntrinsic("quote", [x], TyString)) }
+  if has_impl_at(st.impls, SHOW_ID, t) {
+    let imp = impl_for(st, SHOW_ID, t)
+    if provides(imp, "show") {
+      let (st1, ds) = goal_dicts(st, sub_goals(st.impls, SHOW_ID, t))
+      return (st1, CCall(
+        CImpl(owner_or(imp.owner, st1.owner), SHOW_ID, t, "show"), [x] ++ ds, TyString))
+    }
+  }
+  # Bytes and the builtin containers have no structure of their own to walk,
+  # so the runtime does it. This arm goes away with them in S3.
+  if not expandable(t) {
+    return (st, CIntrinsic("show", [adapt_in(x, t, TyVar("T", 0))], TyString))
+  }
+  if is_ground(t) {
+    let (st1, name) = struct_show_fn(st, t)
+    return (st1, CCall(CDirect(st1.owner, name), [x], TyString))
+  }
+  match map.get(st.dict_env, dict_key(SHOW_ID, t)) {
+    Some(d) -> return show_through_dict(st, d, x, t)
+    None -> ()
+  }
+  let goals = sub_goals(st.impls, SHOW_ID, t)
+  if goals_available(st, goals) {
+    let (st1, ds) = goal_dicts(st, goals)
+    let (st2, name) = struct_show_fn(st1, t)
+    return (st2, CCall(CDirect(st2.owner, name), [x] ++ ds, TyString))
+  }
+  panic("lower: no rendering for " ++ ty_key_inst(t))
+}
+
+fn show_through_dict(st: LSt, d: CExpr, x: CExpr, t: Ty) -> (LSt, CExpr) = {
+  let tr = trait_of(st.traits, SHOW_ID)
+  let sg = trait_method_sig(tr, "show")
+  let idx = method_index(tr, "show")
+  (st, adapt_out(
+    CCall(CMethod(d, SHOW_ID, "show", idx), [adapt_in(x, t, sg.param_tys[0])], sg.ret),
+    sg.ret, TyString))
+}
+
+fn struct_show_fn(st: LSt, t: Ty) -> (LSt, String) =
+  struct_rel_fn(st, t, "structshow$", SHOW_ID, 1, TyString, CStr(""),
+    fn(s, xs, ty) => struct_show_body(s, xs[0], ty))
+
+fn struct_show_body(st: LSt, x: CExpr, t: Ty) -> (LSt, CExpr) =
+  match t {
+    TyTuple(elems) -> {
+      var st1 = st
+      var acc: CExpr = CStr("(")
+      var i = 0
+      for et in elems {
+        if i > 0 { acc = cat(acc, CStr(", ")) }
+        let (st2, s) = show_at(st1, CTupleGet(x, i, et), et)
+        st1 = st2
+        acc = cat(acc, s)
+        i = i + 1
+      }
+      (st1, cat(acc, CStr(")")))
+    }
+    TyAdt(aid, _) -> {
+      let info = adt_of(st.adts, aid)
+      # one constructor: there is no tag to test
+      if len(info.ctors) == 1 {
+        return ctor_show(st, x, t, aid, 0)
+      }
+      # Built back to front, so the last `else` is unreachable-but-honest:
+      # `x` is one of them.
+      var st1 = st
+      var chain: CExpr = CStr("")
+      var ci = len(info.ctors) - 1
+      while ci >= 0 {
+        let (st2, r) = ctor_show(st1, x, t, aid, ci)
+        st1 = st2
+        chain = CIf(CIsCtor(x, aid, ci), r, Some(chain), TyString)
+        ci = ci - 1
+      }
+      (st1, chain)
+    }
+    _ -> panic("lower: struct_show_body on a type with no structure to render")
+  }
+
+## `Name`, `Name(v0, v1)`, or `Name { f0: v0, f1: v1 }` -- the shape the JVM
+## emitter wrote by hand, kept to the character so no program's output moves.
+fn ctor_show(st: LSt, x: CExpr, sc: Ty, aid: Int, ci: Int) -> (LSt, CExpr) = {
+  let info = adt_of(st.adts, aid)
+  let c = info.ctors[ci]
+  if len(c.fields) == 0 { return (st, CStr(c.name)) }
+  let open = if info.is_record { " { " } else { "(" }
+  var st1 = st
+  var acc: CExpr = CStr(c.name ++ open)
+  var idx = 0
+  while idx < len(c.fields) {
+    if idx > 0 { acc = cat(acc, CStr(", ")) }
+    if info.is_record { acc = cat(acc, CStr(c.fields[idx].name ++ ": ")) }
+    let ft = concrete_field_ty(st1, sc, aid, ci, idx)
+    let (st2, s) = show_at(st1, read_field(st1, x, sc, aid, ci, idx), ft)
+    st1 = st2
+    acc = cat(acc, s)
+    idx = idx + 1
+  }
+  (st1, cat(acc, CStr(if info.is_record { " }" } else { ")" })))
 }
 
 ## Does this witness stand for a relation the language defines itself, rather
@@ -1848,6 +1980,13 @@ pub fn lower_expr(st0: LSt, e: TExpr) -> (LSt, CExpr) = {
       (st1, CListLit(vs, ty))
     }
     XCallBuiltin(name, args, wits, _, _, ty) -> {
+      # `to_string` is the surface spelling of a rendering, and rendering is
+      # type-directed: it is settled here rather than left for each backend to
+      # switch on the operand type (which is how they came to disagree).
+      if name == "to_string" {
+        let (st1, v) = lower_expr(st, args[0])
+        return to_str(st1, v, tex_ty(args[0]))
+      }
       match erased_builtin_sig(name) {
         Some(sg) -> {
           let (st1, vs) = lower_args_to(st, args, sg.param_tys)
@@ -1981,8 +2120,9 @@ fn lower_str(st: LSt, parts: List[TStrPart]) -> (LSt, CExpr) = {
         TSPText(v) -> CStr(v)
         TSPInterp(ie) -> {
           let (st2, v) = lower_expr(st1, ie)
-          st1 = st2
-          to_str(v, tex_ty(ie))
+          let (st3, s) = to_str(st2, v, tex_ty(ie))
+          st1 = st3
+          s
         }
       }
     acc =

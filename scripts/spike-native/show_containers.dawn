@@ -1,0 +1,37 @@
+# Rendering a builtin container, which is the half of Show that S1.4 could not
+# close.
+#
+# A List/Map/Set has no structure of its own for lowering to walk: it is a
+# `java.util.*` on the JVM and nothing at all on native. So `show` at one of
+# them still reaches the runtime intrinsic, and the C backend has no runtime
+# to reach. That is an honest gap -- native has no collections yet -- rather
+# than an invented answer, which is why it reads as one blocked corpus instead
+# of a wrong one.
+#
+# It closes with S3: once List/Map/Set are ordinary ADTs in std carrying
+# `impl[T: Show] Show[List[T]]`, this file renders through the same synthesised
+# bodies show_derive.dawn already does, and these lines move back there.
+use std/io
+use std/map
+use std/set
+
+pub type Point = | Point(x: Int, y: Int) derive Show
+
+pub fn main() -> Unit !io = {
+  println("-- lists --")
+  println(to_string([1, 2, 3]))
+  println(to_string(["a", "b"]))
+  println(to_string([Point(1, 1)]))
+  let empty: List[Int] = []
+  println(to_string(empty))
+
+  println("-- a map renders as the call that rebuilds it --")
+  println(to_string(map.from([(1, "one")])))
+
+  println("-- and so does a set --")
+  println(to_string(set.from([7])))
+
+  println("-- nested inside a value that does have structure --")
+  println(to_string(Some([1, 2])))
+  println(to_string((["x"], 1)))
+}

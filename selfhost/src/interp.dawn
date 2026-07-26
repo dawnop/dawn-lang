@@ -228,6 +228,18 @@ fn stringify(v: CValue) -> String =
     _ -> "<value>"
   }
 
+## Source-literal escaping, backslash first -- the same sequence `dawn/rt/Show`
+## applies, and the order is load-bearing: escaping `\` last would double the
+## one the quote escape had just introduced.
+fn quote_str(s: String) -> String = {
+  var out = str.replace(s, "\\", "\\\\")
+  out = str.replace(out, "\"", "\\\"")
+  out = str.replace(out, "\n", "\\n")
+  out = str.replace(out, "\t", "\\t")
+  out = str.replace(out, str.from_char(13), "\\r")
+  "\"" ++ out ++ "\""
+}
+
 ## Java `==` on doubles (DCMPL): NaN is never equal, +0.0 equals -0.0 — unlike
 ## Dawn's own total-order `==`, so it goes through java.lang.Double.
 fn float_java_eq(a: Float, b: Float) -> Bool !io = {
@@ -532,6 +544,10 @@ fn call_builtin(icx: ICx, st: ESt, env: Env, name: String, args: List[CValue]) -
   } else if name == "to_string" || name == "show" || name == "str_of_int" ||
   name == "str_of_float" || name == "str_of_bool" {
     Ok((st, env, VStr(stringify(args[0]))))
+    # the nested rendering of a String, which a synthesised `show` body reaches
+    # for every String field
+  } else if name == "quote" {
+    Ok((st, env, VStr(quote_str(as_str(args[0])))))
   } else if name == "len" {
     Ok((st, env, VInt(len(as_list(args[0])))))
   } else if name == "get" {

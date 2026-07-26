@@ -110,6 +110,10 @@ int64_t dawn_str_len(dawn_str s); /* code points, matching the JVM backend */
 dawn_str dawn_str_of_int(int64_t v);
 dawn_str dawn_str_of_float(double v);
 dawn_str dawn_str_of_bool(bool v);
+/* A String as it appears *inside* a rendered value: source-literal escaping
+ * between double quotes. What the trait method `show` does at a String, so
+ * that punctuation and content stay distinguishable. */
+dawn_str dawn_str_quote(dawn_str s);
 
 /* The prelude Hash and Ord over one scalar: what a `[T: Hash]` or `[T: Ord]`
  * bound instantiated at that scalar ends up calling.
