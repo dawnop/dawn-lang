@@ -775,3 +775,49 @@ trait Iter[C] {
 > 连着两次的教训是同一个形状，只是层级不同：上一次是「没识别出 `Iter` 的前置」，
 > 这一次是「**没核对 `Iter` 本身是不是前置**」。计划里一个待办被别的待办引用得越多，
 > 越没人回头验它——`Iter` 被四份文档引用，四份都是转述同一句话。
+
+## 8. `Cursor` 迁到 `opaque type`（v0.20.0–v0.24.0，五版）
+
+S2.3 立起了 `opaque type`，但没迁走它的两个动机——`Cursor` 是编译器铸造的不透明标量，
+`Array` 靠 `is_std_module` 做名字门控。这一节记 `Cursor` 那一半，以及它为什么花了五版。
+
+**删掉的东西**：`Ty` 的 `TyCursor` 变体、`Head` 的 `HCursor`、`eq_scalars`/`hash_scalars`
+里各一行、七个文件里 37 处引用、`builtin_type_names` 里一个名字。换来 `std/cursor` 的
+一行 `pub opaque type Cursor = Int` + 一个 `impl Ord[Cursor]`。
+
+顺带修掉一处 §11.3 点过名的自相矛盾：`a < b` 编得过而 `list.sort` 报 Cursor 无序，
+因为回答这两个问题的是**两张表**；现在一个 impl 回答两个。
+
+### 8.1 为什么是五版：种子挡的不是语法，是**每一条 std 依赖的规则**
+
+|版本|这一刀|被谁逼出来|
+|---|---|---|
+|v0.20.0|删 `TyCursor`；`Cursor` 暂时是 `Int` 的拼写；名字不再算冲突|种子占着 `Cursor` 这个名字，**一个名字没法在同一版里既释放又重新占用**|
+|v0.21.0|`unify_into` 认不透明转换|转换只写在 `assignable` 里，而**调用路径是 unify 的**，不问 `assignable`|
+|v0.22.0|类型变量**绑定**而非看穿|上一刀连类型变量一起看穿了：`Some(i)` 在 `Id` 上推成 `Option[Int]`|
+|v0.23.0|同一模块可以既限定导入又选择性导入|std 导出**类型**是头一回：`use std/cursor` 只带函数，类型要 `use std/cursor.{Cursor}`，而两者算重复导入|
+|v0.24.0|std 声明 `pub opaque type Cursor = Int`，编译器不再铸造|—|
+
+中间三版每一版都是同一句话的实例：**std 用到的每一条规则都得先在种子里**。
+「刀 1 让语法 parse 得了却注册报错，实际是把种子挡在门外」（§5）说的是语法；
+这次说的是**语义规则**，代价一样。
+
+### 8.2 三个 bug，都是同一种没覆盖
+
+- `emit_return_of` 按 `t == TyInt` 分派，落不到的类型发 void return——trait 方法返回
+  不透明标量时，字典转发方法在**类加载时** `VerifyError`。与 `emit_method_return`
+  同形，S0.3 转过一个、漏了这个。
+- 转换只在 `assignable` 里，调用路径 unify，于是 `f(p)` 被拒而 `let n: Int = p` 通过。
+- 修上一条时连类型变量一起看穿，`Some(i)` 推成 `Option[Int]`——**看穿一个类型不等于忘掉它**。
+
+三个都是「语料只覆盖了一种位置」：`opaque.dawn` 原来只有 return 和 `let`。
+补的语料现在把每个位置都走一遍（实参、类型变量绑定、字典转发、Option 往返、
+泛型函数），列表位置进了 checker 测试（emitc 还没有集合）。
+
+> **可推广的一条**：一个「一行就够」的规则（`sees_through`）不等于**一处就够**。
+> 它被三个地方问：`assignable`、`unify_into`、`check_expr` 的期望类型。
+> 只在一处实现，另外两处就各自默认了一个答案——一个拒绝，一个多做。
+
+### 8.3 剩下的
+
+`Array` 的 `is_std_module` 名字门控还在，随 S3 一起迁——那时 HAMT 节点会是第三个用户。
