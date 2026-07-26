@@ -95,12 +95,30 @@ if ! grep -q ', 0 failed' "$OUT/self.log"; then
   exit 1
 fi
 ( cd "$OUT/self" && sha256sum ./*.core | sort -k2 ) > "$OUT/selfhost.sha"
+# The same hashes over content with every ADT id erased. A module whose exact
+# hash moved but whose normalised hash did not changed only in the id embedded
+# in a generated symbol name (structeq$Adt307, and its cmp/show siblings): no
+# instruction differs. That happens on any edit to an early module, because
+# type inference allocates from the same counter ADT declarations do, so adding
+# a function to types.dawn shifts every id after it.
+#
+# Measured 2026-07-26: one added function to types.dawn moves 6 of 52 modules
+# and 5 of the 6 are drift. Splitting the counter would rename every generated
+# symbol in the language -- a far larger Emit-Change than the noise it removes,
+# so the answer is to name the noise rather than to stop making it.
+norm_sha() {
+  ( cd "$1" && for f in ./*.core; do
+      printf '%s  %s\n' "$(sed -E 's/Adt[0-9]+/AdtN/g' "$f" | sha256sum | cut -d' ' -f1)" "$f"
+    done | sort -k2 )
+}
+norm_sha "$OUT/self" > "$OUT/selfhost.norm.sha"
 
 if [ "$mode" = record ]; then
   rm -rf "$golden"
   mkdir -p "$golden"
   cp "$OUT/flat"/*.core "$golden/"
   cp "$OUT/selfhost.sha" "$golden/"
+  cp "$OUT/selfhost.norm.sha" "$golden/"
   echo "recorded $(ls "$golden"/*.core | wc -l | tr -d ' ') dumps + $(wc -l < "$golden/selfhost.sha" | tr -d ' ') module hashes"
   exit 0
 fi
@@ -111,19 +129,48 @@ if [ ! -d "$golden" ]; then
 fi
 
 fail=0
-if ! diff -ru "$golden" "$OUT/flat" -x selfhost.sha > "$OUT/d.txt"; then
-  echo "Core IR changed:"
-  head -80 "$OUT/d.txt"
-  n=$(wc -l < "$OUT/d.txt" | tr -d ' ')
-  [ "$n" -gt 80 ] && echo "... ($n diff lines total)"
+if ! diff -ru "$golden" "$OUT/flat" -x 'selfhost*.sha' > "$OUT/d.txt"; then
+  # every changed line, with ADT ids erased: if the two sides then agree, the
+  # only thing that moved is an id inside a generated name
+  added=$(grep -E '^\+' "$OUT/d.txt" | grep -v '^+++' | sed -E 's/Adt[0-9]+/AdtN/g')
+  removed=$(grep -E '^-' "$OUT/d.txt" | grep -v '^---' | sed -E 's/Adt[0-9]+/AdtN/g')
+  if [ -n "$added" ] && [ "${added#+}" = "${removed#-}" ]; then
+    echo "Core IR changed, but only in ADT ids -- no instruction differs:"
+    grep -E '^[+-]' "$OUT/d.txt" | grep -Ev '^(\+\+\+|---)' | head -6
+    echo "  (re-record with --record; see the note in this script)"
+  else
+    echo "Core IR changed:"
+    head -80 "$OUT/d.txt"
+    n=$(wc -l < "$OUT/d.txt" | tr -d ' ')
+    [ "$n" -gt 80 ] && echo "... ($n diff lines total)"
+  fi
   fail=1
 fi
 
 if ! diff -u "$golden/selfhost.sha" "$OUT/selfhost.sha" > "$OUT/s.txt"; then
   echo
-  echo "Core IR of the compiler changed in these modules:"
-  grep -E '^[+-][0-9a-f]{64} ' "$OUT/s.txt" \
-    | sed -E 's|^.*  \./(.*)\.core$|  \1|' | sort -u
+  moved=$(grep -E '^[+-][0-9a-f]{64} ' "$OUT/s.txt" \
+    | sed -E 's|^.*  \./(.*)\.core$|\1|' | sort -u)
+  # split them: a module whose normalised hash also moved really changed
+  drifted=""
+  changed=""
+  for m in $moved; do
+    if [ -f "$golden/selfhost.norm.sha" ] && \
+       diff -q <(grep " \./$m\.core\$" "$golden/selfhost.norm.sha") \
+               <(grep " \./$m\.core\$" "$OUT/selfhost.norm.sha") > /dev/null 2>&1; then
+      drifted="$drifted $m"
+    else
+      changed="$changed $m"
+    fi
+  done
+  if [ -n "$changed" ]; then
+    echo "Core IR of the compiler changed in these modules:"
+    for m in $changed; do echo "  $m"; done
+  fi
+  if [ -n "$drifted" ]; then
+    echo "ADT ids shifted in these, with no instruction changed:"
+    for m in $drifted; do echo "  $m"; done
+  fi
   echo "  (rerun with --dump to see the content: bin/dawn __lower --dump <dir> selfhost)"
   fail=1
 fi
