@@ -115,6 +115,19 @@ dawn_str dawn_str_of_bool(bool v);
  * that punctuation and content stay distinguishable. */
 dawn_str dawn_str_quote(dawn_str s);
 
+/* Unicode classification of one code point (the char_is_* intrinsics).
+ *
+ * Exact against the JVM backend for U+0000..U+007F. Above that the answer is a
+ * Unicode derived-property lookup and this runtime has no table yet, so these
+ * panic rather than guess: a wrong classification would differ from the JVM
+ * silently, and a differential run comparing two backends would report ok. */
+bool dawn_char_is_letter(int64_t c);
+bool dawn_char_is_digit(int64_t c);
+bool dawn_char_is_alnum(int64_t c);
+bool dawn_char_is_upper(int64_t c);
+bool dawn_char_is_lower(int64_t c);
+bool dawn_char_is_space(int64_t c);
+
 /* The prelude Hash and Ord over one scalar: what a `[T: Hash]` or `[T: Ord]`
  * bound instantiated at that scalar ends up calling.
  *

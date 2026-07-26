@@ -338,3 +338,44 @@ void dawn_panic(dawn_str msg) {
   fputc('\n', stderr);
   exit(1);
 }
+
+/* ---- code-point classification (char_is_*) ---------------------------- */
+
+/* Above U+007F the answer needs the Unicode tables; see dawn_rt.h. */
+static void dawn_char_ascii_only(int64_t c) {
+  if (c < 0 || c > 0x7F) {
+    dawn_panic(dawn_str_lit(
+      "char classification above U+007F is not implemented on this backend", 67));
+  }
+}
+
+bool dawn_char_is_letter(int64_t c) {
+  dawn_char_ascii_only(c);
+  return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
+}
+
+bool dawn_char_is_digit(int64_t c) {
+  dawn_char_ascii_only(c);
+  return c >= '0' && c <= '9';
+}
+
+bool dawn_char_is_alnum(int64_t c) {
+  return dawn_char_is_letter(c) || dawn_char_is_digit(c);
+}
+
+bool dawn_char_is_upper(int64_t c) {
+  dawn_char_ascii_only(c);
+  return c >= 'A' && c <= 'Z';
+}
+
+bool dawn_char_is_lower(int64_t c) {
+  dawn_char_ascii_only(c);
+  return c >= 'a' && c <= 'z';
+}
+
+/* Java's set for this range: HT VT LF FF CR, the four file/group/record/unit
+ * separators, and space. */
+bool dawn_char_is_space(int64_t c) {
+  dawn_char_ascii_only(c);
+  return (c >= 0x09 && c <= 0x0D) || (c >= 0x1C && c <= 0x1F) || c == 0x20;
+}
