@@ -576,6 +576,11 @@ pub const EQ_ID: Int = 1
 ## the pure-Dawn Map/Set of D2 will, through a `[K: Eq + Hash]` bound.
 pub const HASH_ID: Int = 2
 
+## Rendering. `to_string` and every `${...}` interpolation ask for this
+## witness, which is what makes `derive Show` an impl rather than a flag on
+## the ADT plus an instanceof chain only the JVM has.
+pub const SHOW_ID: Int = 3
+
 pub fn opt_ty(t: Ty) -> Ty = TyAdt(OPTION_ID, [t])
 
 pub fn result_ty(t: Ty, e: Ty) -> Ty = TyAdt(RESULT_ID, [t, e])
@@ -673,7 +678,10 @@ pub fn prelude_traits() -> Traits = {
   let hv = TyVar("T", -15)
   let hash = prelude_trait(HASH_ID, "Hash", hv, "hash",
     prelude_method(HASH_ID, hv, "hash", [hv], ["x"], TyInt))
-  map.from([(ORD_ID, ord), (EQ_ID, eq), (HASH_ID, hash)])
+  let sv = TyVar("T", -16)
+  let show = prelude_trait(SHOW_ID, "Show", sv, "show",
+    prelude_method(SHOW_ID, sv, "show", [sv], ["x"], TyString))
+  map.from([(ORD_ID, ord), (EQ_ID, eq), (HASH_ID, hash), (SHOW_ID, show)])
 }
 
 fn prelude_impl(tid: Int, t: Ty) -> ImplI =
@@ -689,6 +697,27 @@ fn prelude_impl(tid: Int, t: Ty) -> ImplI =
     src_path: None,
     provided: []
   }
+
+## A conditional prelude impl: `impl[T: tid] tid[Head[T]]`, one bound per
+## parameter. `Option` and `Result` carry `derive Show` in their declaration
+## but have no module for the derive pass to walk, so their impls are minted
+## here instead.
+fn prelude_cond_impl(tid: Int, subject: Ty, tps: List[Ty]) -> ImplI = {
+  var cs: List[List[Int]] = []
+  for _tp in tps { cs = cs ++ [[tid]] }
+  ImplI {
+    trait_id: tid,
+    subject: subject,
+    tparams: tps,
+    constraints: cs,
+    lo: 0,
+    hi: 1,
+    derived: true,
+    owner: None,
+    src_path: None,
+    provided: []
+  }
+}
 
 ## The scalars every prelude trait covers natively. Ord takes the subset that
 ## is actually ordered -- Bool, Bytes and Cursor compare for equality but have
@@ -716,14 +745,35 @@ pub fn is_ord_scalar(t: Ty) -> Bool = {
   false
 }
 
-## Ord over the natively ordered scalars, Eq/Hash over every scalar, ship with
-## the language.
+## The scalars the language renders itself. `Cursor` is absent because it is
+## an opaque handle with nothing to print, and `Unit` because `()` is not a
+## value anyone asks to see -- the two ways this list differs from `eq_scalars`.
+pub fn show_scalars() -> List[Ty] = [TyInt, TyFloat, TyBool, TyString, TyBytes]
+
+pub fn is_show_scalar(t: Ty) -> Bool = {
+  for s in show_scalars() {
+    if s == t { return true }
+  }
+  false
+}
+
+## Ord over the natively ordered scalars, Eq/Hash over every scalar, Show over
+## the printable ones: the impls that ship with the language.
 pub fn prelude_impls() -> List[ImplI] = {
   var out = map(ord_scalars(), fn(t) => prelude_impl(ORD_ID, t))
   for t in eq_scalars() {
     out = out ++ [prelude_impl(EQ_ID, t), prelude_impl(HASH_ID, t)]
   }
-  out
+  for t in show_scalars() {
+    out = out ++ [prelude_impl(SHOW_ID, t)]
+  }
+  let ot = TyVar("T", -11)
+  let rt = TyVar("T", -12)
+  let re = TyVar("E", -13)
+  out ++ [
+    prelude_cond_impl(SHOW_ID, TyAdt(OPTION_ID, [ot]), [ot]),
+    prelude_cond_impl(SHOW_ID, TyAdt(RESULT_ID, [rt, re]), [rt, re])
+  ]
 }
 
 fn bsig(name: String, ptys: List[Ty], pnames: List[String], ret: Ty) -> Sig =
@@ -948,8 +998,11 @@ test "prelude shapes" {
   assert trait_of(traits, ORD_ID).name == "Ord"
   assert trait_of(traits, EQ_ID).name == "Eq"
   assert trait_of(traits, HASH_ID).name == "Hash"
-  # 3 Ord (the ordered scalars) + Eq and Hash over all 6
-  assert len(prelude_impls()) == 3 + 2 * len(eq_scalars())
+  assert trait_of(traits, SHOW_ID).name == "Show"
+  # Ord over the ordered scalars, Eq and Hash over all of them, Show over the
+  # printable ones plus the two prelude ADTs that declare `derive Show`
+  assert len(prelude_impls()) ==
+    len(ord_scalars()) + 2 * len(eq_scalars()) + len(show_scalars()) + 2
 }
 
 test "builtin table renders signatures" {

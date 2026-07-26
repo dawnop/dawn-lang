@@ -47,7 +47,8 @@ use types.{
   Adts, AdtI, CtorI, FieldI, Traits, TraitI, ImplI, Sym, Sig, MethodSig,
   adt_of, trait_of, ty_show, ctor_render, sig_render, subst, subst_eff,
   ty_named, is_numeric, is_errorish, prelude_adts, prelude_traits, prelude_impls, bounds_of,
-  builtins, opt_ty, result_ty, OPTION_ID, RESULT_ID, ORD_ID, EQ_ID, HASH_ID, eq_scalars,
+  builtins, opt_ty, result_ty, OPTION_ID, RESULT_ID, ORD_ID, EQ_ID, HASH_ID, SHOW_ID,
+  eq_scalars,
   Impls, Head, head_of, impl_at, has_impl_at, insert_impl,
   is_eq_scalar, is_ground, expandable, type_args_of, sub_goals
 }
@@ -1997,7 +1998,7 @@ pub fn pass_register_impls(
       None -> ()
     }
   }
-  # derive Ord first
+  # the derived impls first, so an explicit duplicate reports as the duplicate
   var di = 0
   for d in module_types(m) {
     let sh = match shells[di] {
@@ -2008,35 +2009,34 @@ pub fn pass_register_impls(
       Some(s) -> s
     }
     let info = adt_of(cx1.adts, sh.adt)
-    if not info.derives_ord {
-      di = di + 1
-      continue
-    }
-    var dlo = d.nlo
-    var dhi = d.nhi
-    for b in d.derives {
-      if b.name == "Ord" {
-        dlo = b.lo
-        dhi = b.hi
+    for want in [("Ord", ORD_ID, info.derives_ord), ("Show", SHOW_ID, info.derives_show)] {
+      let (dname, tid, asked) = want
+      if not asked { continue }
+      var dlo = d.nlo
+      var dhi = d.nhi
+      for b in d.derives {
+        if b.name == dname {
+          dlo = b.lo
+          dhi = b.hi
+        }
       }
-    }
-    let subject = TyAdt(sh.adt, info.tparams)
-    let ii = ImplI {
-      trait_id: ORD_ID,
-      subject: subject,
-      tparams: info.tparams,
-      constraints: derive_constraints(info.tparams, ORD_ID),
-      lo: dlo,
-      hi: dhi,
-      derived: true,
-      owner: cx1.owner_class,
-      src_path: cx1.src_path,
-      provided: []
-    }
-    cx1 = Cx {
-      ..cx1,
-      impl_table: insert_impl(cx1.impl_table, ii),
-      local_impls: cx1.local_impls ++ [ii]
+      let ii = ImplI {
+        trait_id: tid,
+        subject: TyAdt(sh.adt, info.tparams),
+        tparams: info.tparams,
+        constraints: derive_constraints(info.tparams, tid),
+        lo: dlo,
+        hi: dhi,
+        derived: true,
+        owner: cx1.owner_class,
+        src_path: cx1.src_path,
+        provided: []
+      }
+      cx1 = Cx {
+        ..cx1,
+        impl_table: insert_impl(cx1.impl_table, ii),
+        local_impls: cx1.local_impls ++ [ii]
+      }
     }
     di = di + 1
   }
