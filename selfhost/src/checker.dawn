@@ -493,7 +493,7 @@ pub fn alias_effvar_span(ref: TypeRef) -> Option[(Int, Int)] =
   }
 
 ## Resolve an alias target once, memoized; TyError (and an error) on a cycle.
-fn resolve_alias_target(cx: Cx, al: AliasE, use_lo: Int, use_hi: Int) -> (Cx, Ty) = {
+fn resolve_alias_target(cx: Cx, al: AliasE, use_lo: Int, use_hi: Int) -> (Cx, Ty) !io = {
   match map.get(cx.alias_resolved, al.name) {
     Some(t) -> return (cx, t)
     None -> ()
@@ -537,7 +537,7 @@ fn resolve_alias_target(cx: Cx, al: AliasE, use_lo: Int, use_hi: Int) -> (Cx, Ty
 
 ## Resolve a parsed type reference against the current scope (the Kotlin
 ## resolveType with tparams/effVars defaulted to the current ones).
-pub fn resolve_type(cx: Cx, ref: TypeRef) -> (Cx, Ty) =
+pub fn resolve_type(cx: Cx, ref: TypeRef) -> (Cx, Ty) !io =
   match ref {
     TTuple(elems, lo, hi) -> {
       var cx1 = cx
@@ -585,7 +585,7 @@ fn t_hi2(t: TypeRef) -> Int =
     TFn(_, _, _, _, hi) -> hi
   }
 
-fn resolve_named(cx: Cx, name: String, targs: List[TypeRef], lo: Int, hi: Int) -> (Cx, Ty) = {
+fn resolve_named(cx: Cx, name: String, targs: List[TypeRef], lo: Int, hi: Int) -> (Cx, Ty) !io = {
   # type parameters shadow everything
   match map.get(cx.current_tparams, name) {
     Some(v) -> {
@@ -674,7 +674,11 @@ fn resolve_named(cx: Cx, name: String, targs: List[TypeRef], lo: Int, hi: Int) -
         return (cerr(cx, "Java types take no type arguments (generics are erased)", lo, hi),
           TyError)
       }
-      let j = unsafe_pure { class_info(fqcn) }
+      # Reflecting on a class is honestly !io, and an `unsafe_pure` here used
+      # to say otherwise -- vouching not for one static call but for a whole
+      # recursive subsystem. Resolving a type reads the host's class path, so
+      # the pass chain above says !io too; check_module already did.
+      let j = class_info(fqcn)
       return (cx, TyJava(fqcn, j.display))
     }
     None -> ()
@@ -1463,7 +1467,7 @@ fn accepted_slot(sh: Shell, pi: Int) -> Option[Int] = {
 }
 
 ## Pass 2: constructor field types (may reference any type declared above).
-pub fn pass_ctor_fields(cx: Cx, m: Module, shells: List[Option[Shell]]) -> Cx = {
+pub fn pass_ctor_fields(cx: Cx, m: Module, shells: List[Option[Shell]]) -> Cx !io = {
   var cx1 = cx
   var di = 0
   for d in module_types(m) {
@@ -1609,7 +1613,7 @@ test "duplicate constructors and prelude clashes are caught" {
 
 ## Pass 2.25: resolve every alias target now, so cycles and unknown names are
 ## reported at the declaration even if the alias is never used.
-pub fn pass_resolve_aliases(cx: Cx) -> Cx = {
+pub fn pass_resolve_aliases(cx: Cx) -> Cx !io = {
   var cx1 = cx
   for name in map.keys(cx.aliases) {
     let al = map.get(cx1.aliases, name).expect("alias listed")
@@ -1693,7 +1697,7 @@ test "alias cycles and derive Show violations are reported at the declaration" {
 
 ## Pass 2.75a: register trait headers and method signatures; methods enter the
 ## fn namespace (the Kotlin registerTraits).
-pub fn pass_register_traits(cx: Cx, m: Module) -> Cx = {
+pub fn pass_register_traits(cx: Cx, m: Module) -> Cx !io = {
   var cx1 = cx
   for d in module_traits(m) {
     if alias_shadows(cx1, d.name) {
@@ -1933,7 +1937,7 @@ pub fn pass_register_impls(
   cx: Cx,
   m: Module,
   shells: List[Option[Shell]]
-) -> (Cx, List[List[Option[Sig]]]) = {
+) -> (Cx, List[List[Option[Sig]]]) !io = {
   var cx1 = cx
   var impl_sigs: List[List[Option[Sig]]] = []
   # local ADT ids (for the orphan rule)
@@ -2419,7 +2423,7 @@ pub fn resolve_bounds(cx: Cx, tparams: List[TypeParamDecl]) -> (Cx, List[List[In
 
 ## Pass 3: function signatures. Returns the per-decl signature list (aligned
 ## with module_fns order) plus per-decl effect-variable tables for body checks.
-pub fn pass_fn_signatures(cx: Cx, m: Module) -> (Cx, List[Sig], List[Map[String, Eff]]) = {
+pub fn pass_fn_signatures(cx: Cx, m: Module) -> (Cx, List[Sig], List[Map[String, Eff]]) !io = {
   var cx1 = cx
   var sigs: List[Sig] = []
   var evs: List[Map[String, Eff]] = []
@@ -2564,7 +2568,7 @@ test "fn signatures resolve with bounds and worst-effect inference" {
 ## signature inference). The Kotlin declareConst.
 ## Also returns each declared type (aligned with module_consts; None where the
 ## name was skipped for alias/import clashes), for initializer checking.
-pub fn pass_const_decls(cx: Cx, m: Module) -> (Cx, List[Option[Ty]]) = {
+pub fn pass_const_decls(cx: Cx, m: Module) -> (Cx, List[Option[Ty]]) !io = {
   var cx1 = cx
   var decl_tys: List[Option[Ty]] = []
   var all: Set[String] = set.empty()
