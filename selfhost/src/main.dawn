@@ -42,7 +42,7 @@ use codegen.{
 }
 use types.{
   prelude_adts, adt_of, adt_jvm_name, trait_of, OPTION_ID, RESULT_ID,
-  EQ_ID, HASH_ID, bounds_of,
+  EQ_ID, HASH_ID, SHOW_ID, bounds_of,
   Ty, Sig, Traits, ImplI, Adts, Impls
 }
 use emit.{emit_module, gen_trait_interface}
@@ -117,6 +117,17 @@ fn merged_consts(
     }
   }
   out
+}
+
+## Add a prelude trait to the set whose interface the program needs. Ord is
+## unconditional and its methods are reached by name, so it is never wanted
+## here; a user trait's interface comes from the module that declares it.
+fn want_iface(wants: List[Int], tid: Int) -> List[Int] = {
+  if tid != EQ_ID && tid != HASH_ID && tid != SHOW_ID { return wants }
+  for w in wants {
+    if w == tid { return wants }
+  }
+  wants ++ [tid]
 }
 
 fn write_class(dir: String, name: String, bs: Bytes) -> Unit !io = {
@@ -231,11 +242,12 @@ fn collect_program(
       prog_fns = map.insert(prog_fns, (cm.class_name, k), v)
     }
   }
-  # The prelude Eq/Hash trait *interfaces*, and only if something forwards a
-  # bound -- a program with no `[T: Eq]` carries no Eq machinery. The
-  # dictionaries themselves are no longer built here: lowering registers
-  # exactly the ones it referenced and emit_module writes those, so this scan
-  # survives only for the two interfaces, which have no Core representation.
+  # The prelude Eq/Hash/Show trait *interfaces*, and only where a dictionary of
+  # that trait can exist -- a program with no `[T: Eq]` carries no Eq
+  # machinery. The dictionaries themselves are no longer built here: lowering
+  # registers exactly the ones it referenced and emit_module writes those, so
+  # this scan survives only for the interfaces, which have no Core
+  # representation of their own. (Ord's is unconditional, above.)
   var wants: List[Int] = []
   for pr in map.entries(prog_fns) {
     let (_k, sg) = pr
@@ -245,15 +257,23 @@ fn collect_program(
     var i = 0
     for _tp in sg.tparams {
       for b in bounds_of(sg, i) {
-        if b == EQ_ID || b == HASH_ID {
-          var have = false
-          for w in wants {
-            if w == b { have = true }
-          }
-          if not have { wants = wants ++ [b] }
-        }
+        wants = want_iface(wants, b)
       }
       i = i + 1
+    }
+  }
+  # A conditional impl is the other way a dictionary appears: its own
+  # dictionary class implements the trait's interface, and the arguments it
+  # is built from implement the interfaces its bounds name. A program can
+  # reach both without any function ever carrying a bound.
+  for pr in map.entries(impl_table) {
+    let (_k, imp) = pr
+    if len(imp.tparams) == 0 { continue }
+    wants = want_iface(wants, imp.trait_id)
+    for cs in imp.constraints {
+      for b in cs {
+        wants = want_iface(wants, b)
+      }
     }
   }
   for tid in wants {
