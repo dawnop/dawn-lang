@@ -2592,6 +2592,14 @@ fn gen_to_string_method(cw: AdtClassWriter, adts: Adts, sub: String, ci: CtorI) 
           m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Boolean", "valueOf",
             "(Z)Ljava/lang/Boolean;", false)
         }
+        # a Cursor is a long too. The checker keeps one out of a `derive Show`
+        # type (Cursor has no Show impl), so this arm is unreachable -- but the
+        # wildcard below would leave a primitive where an Object is expected,
+        # which is a verify error rather than a diagnostic if it ever is
+        TyCursor -> {
+          m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Long", "valueOf",
+            "(J)Ljava/lang/Long;", false)
+        }
         _ -> ()
       }
       m.visitMethodInsn(OP_INVOKESTATIC, SHOW_CLASS, "show",
@@ -2897,7 +2905,12 @@ pub fn parameterised_scaffold(cw: AdtClassWriter, cls: String, nargs: Int) -> Un
   ()
 }
 
-fn subject_name(adts: Adts, t: Ty) -> String =
+## The name an impl's subject contributes to the static it compiles to. The
+## one definition: `emit.impl_method_name` and `codegen.impl_static_name` both
+## spell the same name, and this used to be written out twice (a third copy,
+## inlined in gen_impl_class, was deleted with that function and had drifted --
+## it was missing Bytes and Cursor).
+pub fn subject_name(adts: Adts, t: Ty) -> String =
   match t {
     TyInt -> "Int"
     TyFloat -> "Float"

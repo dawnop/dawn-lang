@@ -30,7 +30,7 @@ use codegen.{
   slots_of, is_ref, load_slot, hash_of, dict_class, supers_of, gen_adt, gen_ctor_class,
   parameterised_scaffold, dict_arg_field, dict_ctor_desc,
   EqOverride, no_override,
-  tr_iface, append_const, singleton_scaffold,
+  tr_iface, append_const, singleton_scaffold, subject_name,
   V17, ACC_PUBLIC, ACC_PRIVATE, ACC_PROTECTED, ACC_STATIC, ACC_FINAL,
   ACC_ABSTRACT, ACC_INTERFACE,
   OP_ALOAD, OP_ILOAD, OP_LLOAD, OP_DLOAD, OP_ASTORE, OP_ISTORE, OP_LSTORE,
@@ -385,27 +385,7 @@ fn trait_method_desc(g: Gen, s: Sig) -> String = method_desc(g.adts, s.param_tys
 
 ## impl method static name: dawn$impl$<Trait>$<Subject>$<m>.
 fn impl_method_name(g: Gen, trait_name: String, subject: Ty, m: String) -> String =
-  "dawn\$impl\$" ++ trait_name ++ "\$" ++ subject_tag(g, subject) ++ "\$" ++ m
-
-fn subject_tag(g: Gen, t: Ty) -> String =
-  match t {
-    TyInt -> "Int"
-    TyFloat -> "Float"
-    TyBool -> "Bool"
-    TyString -> "String"
-    TyBytes -> "Bytes"
-    TyCursor -> "Cursor"
-    TyAdt(aid, _) -> adt_of(g.adts, aid).name
-    # the builtin containers, now that std writes conditional impls for them.
-    # Arguments are dropped on purpose: this names the *impl*, and coherence
-    # gives a head at most one.
-    TyList(_) -> "List"
-    TyMap(_, _) -> "Map"
-    TySet(_) -> "Set"
-    TyArray(_) -> "Array"
-    TyUnit -> "Unit"
-    _ -> panic("invalid impl subject")
-  }
+  "dawn\$impl\$" ++ trait_name ++ "\$" ++ subject_name(g.adts, subject) ++ "\$" ++ m
 
 fn default_method_name(trait_name: String, m: String) -> String =
   "dawn\$default\$" ++ trait_name ++ "\$" ++ m
@@ -2052,6 +2032,10 @@ fn gen_cbinary(g: Gen, op: CBinOp, l: CExpr, r: CExpr, ty: Ty) -> (Gen, Bool) !i
         TyBytes -> {
           g1.mv.visitMethodInsn(OP_INVOKESTATIC, BYTES_CLASS, "concat", "([B[B)[B", false)
         }
+        # String is the only other thing `++` joins. Spelled as a wildcard
+        # rather than `TyString ->` since S0.3, and worth naming when the
+        # TyList arm goes away in S3: whatever replaces it must not fall
+        # through to here
         _ -> {
           g1.mv.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/String", "concat",
             "(Ljava/lang/String;)Ljava/lang/String;", false)
