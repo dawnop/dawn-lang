@@ -21,8 +21,6 @@ use token.{
   AMPAMP, PIPEPIPE, AMP, CARET, TILDE, SHL, SHR, USHR,
   BANG, AT, NOT
 }
-use java "java.lang.Character"
-use java "java.lang.Long"
 
 # ---- source representation ----
 #
@@ -56,30 +54,14 @@ fn text_of(s: Src, a: Int, b: Int) -> String = {
 
 # ---- small helpers ----
 
-fn is_letter(c: Int) -> Bool = unsafe_pure { Character.isLetter(c) }
-
-fn is_digit(c: Int) -> Bool = unsafe_pure { Character.isDigit(c) }
-
-fn is_letter_or_digit(c: Int) -> Bool = unsafe_pure { Character.isLetterOrDigit(c) }
-
-fn is_upper(c: Int) -> Bool = unsafe_pure { Character.isUpperCase(c) }
-
-fn is_ws(c: Int) -> Bool = unsafe_pure { Character.isWhitespace(c) }
-
-fn is_ident_part(c: Int) -> Bool = is_letter_or_digit(c) || c == '_'
+fn is_ident_part(c: Int) -> Bool = char_is_alnum(c) || c == '_'
 
 fn is_blank(v: String) -> Bool = {
   for c in code_points(v) {
-    if not is_ws(c) { return false }
+    if not char_is_space(c) { return false }
   }
   true
 }
-
-fn parse_radix(digits: String, radix: Int) -> Option[Int] =
-  match unsafe_pure { java_try(fn() => Long.parseLong(digits, radix)) } {
-    Ok(v) -> Some(v)
-    Err(e) -> None
-  }
 
 fn max2(a: Int, b: Int) -> Int = if a > b { a } else { b }
 
@@ -198,7 +180,7 @@ fn lex_go(text: String, base: Int, collect: Bool) -> (List[Token], List[Token], 
           while i < s.n && s.cps[i] != '\n' { i = i + 1 }
         }
       }
-    } else if is_digit(c) {
+    } else if char_is_digit(c) {
       let (j, t, ds) = lex_number(s, i)
       toks = toks ++ [t]
       diags = diags ++ ds
@@ -206,7 +188,7 @@ fn lex_go(text: String, base: Int, collect: Bool) -> (List[Token], List[Token], 
     } else if c == '_' && not is_ident_part(cp_at(s, i + 1)) {
       toks = toks ++ [tok(UNDERSCORE, "_", off(s, i), off(s, i) + 1)]
       i = i + 1
-    } else if is_letter(c) || c == '_' {
+    } else if char_is_letter(c) || c == '_' {
       let (j, t) = lex_word(s, i)
       toks = toks ++ [t]
       i = j
@@ -265,7 +247,7 @@ fn lex_word(s: Src, start: Int) -> (Int, Token) = {
   let text = text_of(s, start, i)
   let k = match keyword(text) {
     Some(kw) -> kw
-    None -> if is_upper(s.cps[start]) { TYPEIDENT } else { IDENT }
+    None -> if char_is_upper(s.cps[start]) { TYPEIDENT } else { IDENT }
   }
   (i, tok(k, text, off(s, start), off(s, i)))
 }
@@ -277,12 +259,12 @@ fn lex_number(s: Src, start: Int) -> (Int, Token, List[Diag]) =
     let radix = if cp_at(s, start + 1) == 'x' { 16 } else { 2 }
     var i = start + 2
     var ds: List[Int] = []
-    while i < s.n && (is_letter_or_digit(s.cps[i]) || s.cps[i] == '_') {
+    while i < s.n && (char_is_alnum(s.cps[i]) || s.cps[i] == '_') {
       if s.cps[i] != '_' { ds = ds ++ [s.cps[i]] }
       i = i + 1
     }
     let text = text_of(s, start, i)
-    match parse_radix(from_code_points(ds), radix) {
+    match parse_int_radix(from_code_points(ds), radix) {
       Some(v) -> (i, int_tok(text, off(s, start), off(s, i), v), no_diags())
       None -> (
         i,
@@ -293,17 +275,17 @@ fn lex_number(s: Src, start: Int) -> (Int, Token, List[Diag]) =
   } else {
     var i = start
     var ds: List[Int] = []
-    while i < s.n && (is_digit(s.cps[i]) || s.cps[i] == '_') {
+    while i < s.n && (char_is_digit(s.cps[i]) || s.cps[i] == '_') {
       if s.cps[i] != '_' { ds = ds ++ [s.cps[i]] }
       i = i + 1
     }
     var is_float = false
     # the 1 in `1..3` is an Int; `1.5` is a Float
-    if cp_at(s, i) == '.' && is_digit(cp_at(s, i + 1)) {
+    if cp_at(s, i) == '.' && char_is_digit(cp_at(s, i + 1)) {
       is_float = true
       ds = ds ++ ['.']
       i = i + 1
-      while i < s.n && (is_digit(s.cps[i]) || s.cps[i] == '_') {
+      while i < s.n && (char_is_digit(s.cps[i]) || s.cps[i] == '_') {
         if s.cps[i] != '_' { ds = ds ++ [s.cps[i]] }
         i = i + 1
       }
@@ -316,7 +298,7 @@ fn lex_number(s: Src, start: Int) -> (Int, Token, List[Diag]) =
         ds = ds ++ [s.cps[i]]
         i = i + 1
       }
-      while i < s.n && is_digit(s.cps[i]) {
+      while i < s.n && char_is_digit(s.cps[i]) {
         ds = ds ++ [s.cps[i]]
         i = i + 1
       }
@@ -391,7 +373,7 @@ fn lex_dollar(
   if next == '{' {
     let (j, sg) = lex_brace_interp(s, at)?
     Ok((j, flush(segs, buf) ++ [sg], no_cps()))
-  } else if is_letter(next) || next == '_' {
+  } else if char_is_letter(next) || next == '_' {
     var i = at + 1
     let name_start = i
     while i < s.n && is_ident_part(s.cps[i]) { i = i + 1 }
@@ -486,7 +468,7 @@ fn lex_unicode(s: Src, u: Int) -> Result[(Int, Int), (Int, Diag)] = {
   let hex = text_of(s, hex_start, i)
   let hlen = off(s, i) - off(s, hex_start)
   let bad = mk_diag("invalid unicode codepoint: " ++ hex, off(s, i) - hlen, off(s, i))
-  match parse_radix(hex, 16) {
+  match parse_int_radix(hex, 16) {
     None -> Err((i, bad))
     Some(code) ->
       if code < 0 || code > 1114111 {

@@ -44,7 +44,6 @@ use ast.{
   e_lo, e_hi, t_lo, t_hi, pat_lo, pat_hi
 }
 use lexer.{lex, lex_at, view_of, slice_cp}
-use java "java.lang.Character"
 
 # ---- parser state ----
 
@@ -123,15 +122,9 @@ fn want_sep(p: P, st: St) -> Result[St, (St, Diag)] =
       "one statement per line; check whether the previous statement is complete")))
   }
 
-fn is_lower_cp(c: Int) -> Bool = unsafe_pure { Character.isLowerCase(c) }
-
-fn is_upper_cp(c: Int) -> Bool = unsafe_pure { Character.isUpperCase(c) }
-
-fn is_ws_cp(c: Int) -> Bool = unsafe_pure { Character.isWhitespace(c) }
-
 fn is_blank_str(v: String) -> Bool = {
   for c in code_points(v) {
-    if not is_ws_cp(c) { return false }
+    if not char_is_space(c) { return false }
   }
   true
 }
@@ -238,7 +231,7 @@ fn java_use(p: P, st: St, kw: Token) -> PR[Decl] = {
     Some(i) -> str.substring(fqcn, i + 1, str.len(fqcn))
     None -> fqcn
   }
-  let ok = not is_blank_str(fqcn) && str.len(tail) > 0 && is_upper_cp(code_points(tail)[0])
+  let ok = not is_blank_str(fqcn) && str.len(tail) > 0 && char_is_upper(code_points(tail)[0])
   if not ok {
     return Err((st2, pd("expected a fully-qualified class name like \"java.lang.StringBuilder\"",
       s.lo, s.hi)))
@@ -335,7 +328,7 @@ fn const_decl(p: P, st: St, is_pub: Bool) -> PR[Decl] = {
 
 fn has_lower(v: String) -> Bool = {
   for c in code_points(v) {
-    if is_lower_cp(c) { return true }
+    if char_is_lower(c) { return true }
   }
   false
 }
