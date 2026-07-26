@@ -862,6 +862,19 @@ pub fn unify_into(
   em: Map[Int, Eff]
 ) -> (Map[Int, Ty], Map[Int, Eff], Bool) = {
   if is_errorish(actual) { return (m, em, true) }
+  # An opaque type IS its target inside the declaring module -- in argument
+  # position as much as in return position, and whichever side carries it.
+  # `assignable` says so already; this path unifies instead of asking it, so
+  # without this peel (and the one in the TyOpaque arm below) the conversion
+  # held everywhere except at a call.
+  match actual {
+    TyOpaque(_, _, aow, atgt) ->
+      match declared {
+        TyOpaque(_, _, _, _) -> ()
+        _ -> if sees_through(cx, aow) { return unify_into(cx, declared, atgt, m, em) }
+      }
+    _ -> ()
+  }
   match declared {
     TyVar(_, id) ->
       match map.get(m, id) {
@@ -920,11 +933,11 @@ pub fn unify_into(
     # live only in the target -- so matching Pair against Pair means matching
     # the targets. The ids must agree first: two opaque types over the same
     # target are still two types.
-    TyOpaque(did, _, _, dtgt) ->
+    TyOpaque(did, _, dow, dtgt) ->
       match actual {
         TyOpaque(aid, _, _, atgt) ->
           if did == aid { unify_into(cx, dtgt, atgt, m, em) } else { (m, em, false) }
-        _ -> (m, em, false)
+        _ -> if sees_through(cx, dow) { unify_into(cx, dtgt, actual, m, em) } else { (m, em, false) }
       }
     TyTuple(delems) ->
       match actual {
