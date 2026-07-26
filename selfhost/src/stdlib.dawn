@@ -16,7 +16,7 @@ use ast.{Module}
 use types.{Sig, Adts, Impls}
 use tast.{TFun, TModule}
 use checker.{ModExports, check_module, cx_new, exports_of, Cx}
-use interp.{eval_comptime, note_trait_fn, CtOut}
+use interp.{eval_comptime, note_trait_fn, CtOut, ct_default}
 use parser
 use lexer
 use std/bytes
@@ -163,8 +163,10 @@ pub fn load_std(dir: String) -> Result[StdCtx, String] !io = {
     if len(cx1.diags) > 0 {
       return Err("bundled std module `" ++ mod_path ++ "` does not check: " ++ cx1.diags[0].msg)
     }
+    # std folds with no host FFI: it has no `use java` at all, and ct_default()
+    # is where that stops being a convention
     let ct = eval_comptime(tm, fn_decls, by_owner, impl_fns, set.empty(), cx1.adts,
-      cx1.traits, cx1.impl_table, mod_path, 100000000)
+      cx1.traits, cx1.impl_table, mod_path, ct_default())
     if len(ct.diags) > 0 {
       return Err("bundled std module `" ++ mod_path ++ "` does not evaluate: " ++ ct.diags[0].msg)
     }

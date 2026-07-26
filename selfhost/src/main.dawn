@@ -50,7 +50,7 @@ use core.{CModule}
 use lower
 use emitc
 use tast.{TModule}
-use interp.{CtOut, CValue}
+use interp.{CtOut, CValue, CtOpts, ct_default, DEFAULT_FUEL}
 use checker.{Cx}
 use java "java.nio.file.Files"
 use java "java.nio.file.Paths"
@@ -149,7 +149,7 @@ fn write_class(dir: String, name: String, bs: Bytes) -> Unit !io = {
 fn collect_program(
   target: String,
   std_dir: String,
-  fuel: Int
+  opts: CtOpts
 ) -> (List[(String, Bytes)], String, List[(String, String, List[String])]) !io = {
   var classes: List[(String, Bytes)] = []
   var adts = prelude_adts()
@@ -173,7 +173,7 @@ fn collect_program(
     }
     let loaded =
       if io.is_dir(target) { load_directory(target) } else { load_file(target) }
-    let prog = analyze_program(loaded, std, fuel)
+    let prog = analyze_program(loaded, std, opts)
     if len(prog.diags) > 0 { fail_compile(prog.diags) }
     mods = prog.modules
     for cm in mods {
@@ -362,15 +362,21 @@ fn usage() -> String = join([
   "                                       platform path separator; repeatable. `build` records",
   "                                       them in the jar manifest's Class-Path. Merged with",
   "                                       anything dawn.toml's [java-deps] resolves to.",
+  "  --comptime-ffi                       let a const or comptime block fold a `use java` call by",
+  "                                       invoking it inside the compiler. Off by default: that is",
+  "                                       running the compiled source's code on this machine, so it",
+  "                                       is yours to grant, not the source's to take.",
   "",
   "environment:",
   "  DAWN_MAVEN_MIRROR                    Maven repository to fetch [java-deps] from",
   "                                       (default: Maven Central)"
 ], "\n") ++ "\n"
 
-## `--comptime-fuel N` / `--comptime-fuel=N`; (fuel, args without the flag).
-fn extract_fuel(rest: List[String]) -> (Int, List[String]) !io = {
-  var fuel = 100000000
+## `--comptime-fuel N` / `--comptime-fuel=N` and `--comptime-ffi`;
+## (options, args without the flags).
+fn extract_ct_opts(rest: List[String]) -> (CtOpts, List[String]) !io = {
+  var fuel = DEFAULT_FUEL
+  var ffi = false
   var out: List[String] = []
   var i = 0
   while i < len(rest) {
@@ -387,12 +393,15 @@ fn extract_fuel(rest: List[String]) -> (Int, List[String]) !io = {
         None -> { cli_error("--comptime-fuel needs a number") }
       }
       i = i + 1
+    } else if a == "--comptime-ffi" {
+      ffi = true
+      i = i + 1
     } else {
       out = out ++ [a]
       i = i + 1
     }
   }
-  (fuel, out)
+  (CtOpts { fuel: fuel, ffi: ffi }, out)
 }
 
 ## `--cp <jars>` / `--cp=jars`; repeatable, `:`-separated, every entry must
@@ -479,7 +488,7 @@ fn peek_target(rest: List[String]) -> String = {
     if a == "--std" || a == "-o" || a == "--vendor" || a == "--comptime-fuel" || a == "--cp" ||
       a == "--embed-std" {
         i = i + 2
-      } else if a == "--native" || a == "--check" {
+      } else if a == "--native" || a == "--check" || a == "--comptime-ffi" {
         i = i + 1
       } else {
         return a
@@ -534,7 +543,7 @@ fn maybe_with_deps(mode: String, rest: List[String]) -> Unit !io = {
     None -> ()
   }
   let (cpjars, rest1) = extract_cp(rest)
-  let (_, rest2) = extract_fuel(rest1)
+  let (_, rest2) = extract_ct_opts(rest1)
   let target = peek_target(rest2)
   if target == "" && len(cpjars) == 0 { return }
   let no_jars: List[String] = []
@@ -578,7 +587,7 @@ fn spawn_java(cp: String, cls: String, args: List[String]) -> Int !io = {
 ## along so `use java` third-party classes stay visible).
 fn run_run(rest0: List[String]) -> Unit !io = {
   let (_, rest1) = extract_cp(rest0)
-  let (fuel, rest) = extract_fuel(rest1)
+  let (opts, rest) = extract_ct_opts(rest1)
   var target = ""
   var std_dir = "std"
   var args2: List[String] = []
@@ -598,7 +607,7 @@ fn run_run(rest0: List[String]) -> Unit !io = {
   if target == "" {
     return cli_error("usage: dawn run [--cp jars] <file.dawn | project-dir>")
   }
-  let (classes, entry, _) = collect_program(target, std_dir, fuel)
+  let (classes, entry, _) = collect_program(target, std_dir, opts)
   if entry == "" {
     return cli_error(target ++ " has no pub fn main() -> Unit !io, nothing to run")
   }
@@ -611,7 +620,7 @@ fn run_run(rest0: List[String]) -> Unit !io = {
 ## test blocks plus a synthesized dawn$TestMain runner, and run it.
 fn run_test(rest0: List[String]) -> Unit !io = {
   let (_, rest1) = extract_cp(rest0)
-  let (fuel, rest) = extract_fuel(rest1)
+  let (opts, rest) = extract_ct_opts(rest1)
   var target = ""
   var std_dir = "std"
   var i = 0
@@ -627,7 +636,7 @@ fn run_test(rest0: List[String]) -> Unit !io = {
   if target == "" {
     return cli_error("usage: dawn test [--cp jars] <file.dawn | project-dir>")
   }
-  let (classes, _, tests_info) = collect_program(target, std_dir, fuel)
+  let (classes, _, tests_info) = collect_program(target, std_dir, opts)
   if len(tests_info) == 0 { return cli_error(target ++ " has no test blocks") }
   var runner_tests: List[(String, Int, String)] = []
   for mi in tests_info {
@@ -667,7 +676,7 @@ fn run_emitrt(rest: List[String]) -> Unit !io = {
   if out == "" {
     return cli_error("usage: dawn __emit <file.dawn | project-dir> -o <dir>")
   }
-  let (classes, _, _) = collect_program(target, std_dir, 100000000)
+  let (classes, _, _) = collect_program(target, std_dir, ct_default())
   var seen: Set[String] = set.empty()
   var n = 0
   for pair in classes {
@@ -828,7 +837,7 @@ fn run_native_image(
 ## and ASM, which is what makes the jar standalone.
 fn run_build(rest0: List[String]) -> Unit !io = {
   let (user_cp, rest1) = extract_cp(rest0)
-  let (fuel, rest) = extract_fuel(rest1)
+  let (opts, rest) = extract_ct_opts(rest1)
   var out = ""
   var target = ""
   var std_dir = "std"
@@ -872,7 +881,7 @@ fn run_build(rest0: List[String]) -> Unit !io = {
   } else {
     stem ++ ".jar"
   }
-  let (classes, entry, _) = collect_program(target, std_dir, fuel)
+  let (classes, entry, _) = collect_program(target, std_dir, opts)
   if entry == "" {
     return cli_error(target ++ " has no pub fn main() -> Unit !io to use as an entry point")
   }
@@ -1032,7 +1041,7 @@ fn run_doc(rest: List[String]) -> Unit !io = {
     return cli_error("no such file or directory: " ++ target)
   }
   let loaded = if io.is_dir(target) { load_directory(target) } else { load_file(target) }
-  let prog = analyze_program(loaded, std, 100000000)
+  let prog = analyze_program(loaded, std, ct_default())
   if len(prog.diags) > 0 { fail_doc(prog.diags) }
   print(doc.project_json(prog))
 }
@@ -1070,7 +1079,7 @@ fn run_lower(rest: List[String]) -> Unit !io = {
   }
   let t = targets[0]
   let loaded = if io.is_dir(t) { load_directory(t) } else { load_file(t) }
-  let prog = analyze_program(loaded, std, 100000000)
+  let prog = analyze_program(loaded, std, ct_default())
   if len(prog.diags) > 0 { fail_compile(prog.diags) }
   let (adts, traits, impl_table, prog_fns) = program_tables(std, prog.modules)
 
@@ -1222,7 +1231,7 @@ fn run_emitc(rest: List[String]) -> Unit !io = {
   }
   let t = targets[0]
   let loaded = if io.is_dir(t) { load_directory(t) } else { load_file(t) }
-  let prog = analyze_program(loaded, std, 100000000)
+  let prog = analyze_program(loaded, std, ct_default())
   if len(prog.diags) > 0 { fail_compile(prog.diags) }
   let (adts, traits, impl_table, prog_fns) = program_tables(std, prog.modules)
   var mods: List[CModule] = []
@@ -1267,7 +1276,7 @@ fn run_check(rest: List[String]) -> Unit !io = {
   for t in targets {
     println("== " ++ t ++ " ==")
     let loaded = if io.is_dir(t) { load_directory(t) } else { load_file(t) }
-    let prog = analyze_program(loaded, std, 100000000)
+    let prog = analyze_program(loaded, std, ct_default())
     print(checkdump.render(prog))
   }
 }
