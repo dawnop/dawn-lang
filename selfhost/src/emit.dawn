@@ -17,7 +17,7 @@ use std/map
 use std/set
 use types.{
   intr_at, Rt, RtLists, RtStrings, RtMaps, RtBytes, RtArray, RtIo,
-  Ty, TyInt, TyFloat, TyBool, TyString, TyBytes, TyCursor, TyUnit, TyNever,
+  Ty, TyInt, TyFloat, TyBool, TyString, TyBytes, TyUnit, TyNever,
   TyError, TyVar, TyAdt, TyList, TyMap, TySet, TyArray, TyJava, TyTuple, TyFn,
   Adts, AdtI, CtorI, FieldI, adt_of, adt_jvm_name, ctor_jvm_name,
   Sym, Sig, Eff, Traits, TraitI, MethodSig, ImplI, trait_of, ORD_ID, EQ_ID, HASH_ID, builtins,
@@ -304,10 +304,6 @@ fn unerase(g: Gen, t: Ty) -> Unit !io = {
       m.visitTypeInsn(OP_CHECKCAST, "java/lang/Long")
       m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/Long", "longValue", "()J", false)
     }
-    TyCursor -> {
-      m.visitTypeInsn(OP_CHECKCAST, "java/lang/Long")
-      m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/Long", "longValue", "()J", false)
-    }
     TyFloat -> {
       m.visitTypeInsn(OP_CHECKCAST, "java/lang/Double")
       m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/Double", "doubleValue", "()D", false)
@@ -483,7 +479,7 @@ fn subst_tvar(t: Ty, vid: Int, to: Ty) -> Ty =
     # left to a wildcard: a new *parameterised* variant landing here would
     # silently stop substituting, which shows up as a wrong descriptor much
     # later
-    TyInt | TyFloat | TyBool | TyString | TyBytes | TyCursor -> t
+    TyInt | TyFloat | TyBool | TyString | TyBytes -> t
     TyUnit | TyNever | TyError | TyJava(_, _) -> t
   }
 
@@ -777,7 +773,7 @@ fn gen_equality(g: Gen, t: Ty, op: TBinOp) -> Unit !io = {
 }
 
 fn gen_ordering(g: Gen, t: Ty, op: TBinOp) -> Unit !io = {
-  if t == TyInt || t == TyCursor {
+  if t == TyInt {
     g.mv.visitInsn(OP_LCMP)
   } else if t == TyString {
     g.mv.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/String", "compareTo",
@@ -1333,17 +1329,17 @@ pub fn gen_trait_interface(supers: List[String], adts: Adts, tr: TraitI) -> Byte
 }
 
 ## The return instruction for a value of declared type `t` on the stack.
+##
+## Asks `jvm_repr` for the same reason `emit_method_return` does: a chain of
+## `t == Ty...` here drops through to void for anything it does not name, and
+## an opaque type over Int is exactly such a thing.
 fn emit_return_of(m: MethodVisitor, t: Ty) -> Unit !io = {
-  if t == TyInt || t == TyCursor {
-    m.visitInsn(OP_LRETURN)
-  } else if t == TyFloat {
-    m.visitInsn(OP_DRETURN)
-  } else if t == TyBool {
-    m.visitInsn(OP_IRETURN)
-  } else if is_ref(t) {
-    m.visitInsn(OP_ARETURN)
-  } else {
-    m.visitInsn(OP_RETURN)
+  match jvm_repr(t) {
+    RLong -> { m.visitInsn(OP_LRETURN) }
+    RDouble -> { m.visitInsn(OP_DRETURN) }
+    RBool -> { m.visitInsn(OP_IRETURN) }
+    RRef -> { m.visitInsn(OP_ARETURN) }
+    RUnit | RBottom -> { m.visitInsn(OP_RETURN) }
   }
   ()
 }

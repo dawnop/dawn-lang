@@ -19,6 +19,22 @@ fn bump(i: Id) -> Id = {
   n + 1
 }
 
+# A trait method that returns an opaque scalar. The dictionary slot forwarder
+# has to return the *target's* machine value; it used to ask `t == TyInt` and
+# drop through to a void return for anything it did not name, which is a
+# VerifyError at class load rather than a diagnostic.
+trait Ided[T] {
+  fn ident(x: T) -> Id
+}
+
+type Box = { v: Int }
+
+impl Ided[Box] {
+  fn ident(x: Box) -> Id = x.v
+}
+
+fn through_dict[T: Ided](x: T) -> Int = int_of(ident(x))
+
 pub fn main() -> Unit !io = {
   println(to_string(int_of(bump(id_of(41)))))
   println(to_string(id_of(7) == id_of(7)))
@@ -31,4 +47,5 @@ pub fn main() -> Unit !io = {
   # rendering follows the target, because the value is the target
   println(to_string(id_of(-3)))
   println(to_string(cmp(id_of(1), id_of(2))))
+  println(to_string(through_dict(Box { v: 5 })))
 }
