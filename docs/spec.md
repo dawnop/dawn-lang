@@ -605,11 +605,15 @@ fn compose[A, B, C](f: fn(A) -> B !e1, g: fn(B) -> C !e2) -> fn(A) -> C !(e1 | e
 的真实写法（Java 侧越界回 `null`，检查器交给 Dawn 就是 `None`）：
 
 ```dawn
-use java "dawn.rt.StdStrings"
+use java "java.lang.Math"
 
-pub fn substring(s: String, from: Int, to: Int) -> String =
-  unsafe_pure { StdStrings.substring(s, from, to).expect("substring: index out of range") }
+pub fn sqrt(x: Float) -> Float = unsafe_pure { Math.sqrt(x) }
 ```
+
+> **std 不用它。** 上面这个例子曾经是 `std/str` 的真实写法；今天 std 一处 `unsafe_pure`、
+> 一处 `use java` 都没有——那些操作已成为 **intrinsic 契约**的一部分（§11），由后端负责兑现，
+> 而不是由调用点逐个作保。编译器自身也在 2026-07-27 走完同一条路（`char_is_*`）。
+> 所以 `unsafe_pure` 今天在整个生态里**零使用点**：它是给用户 FFI 留的门，不是语言的地基。
 
 被包裹的必须是**静态方法调用**：Dawn 原生类型（String/List/Bytes/Map/Set）不是 Java 类型，
 `s.substring(…)` 这种实例调用今天走不通（`pure-ffi-design.md` §九）。
@@ -623,10 +627,14 @@ pub fn substring(s: String, from: Int, to: Int) -> String =
 - **不健全性**：这是可撒谎的口子（名字带刺以示警）。缓解靠具名可 grep + 多余 lint +
   两层结构把担保收敛到极少数一阶原语；编译器不验证 Java 纯度（做不到）。
 - **运行期透明**：codegen 直接生成内层表达式，无任何运行期标记。
-- **编译期折叠（route C）**：`unsafe_pure` 亦是「此 Java 调用允许在 comptime 反射执行」的
-  许可证。**已实现**：`const A: Int = unsafe_pure { Math.max(3, 7) }` 折叠为 7，捆绑 std 的
-  转发（`substring` 等）在 `const` 里同样可折。限制：只反射**静态**方法，边界类型限
-  `Int/Float/Bool/String/Unit`——这两条正是 `unsafe_pure` 之外的第二道闸。
+- **编译期折叠（route C）需要 `--comptime-ffi`，默认关**：`const A: Int = unsafe_pure { Math.max(3, 7) }`
+  折叠为 7，但只在这个 flag 打开时。限制另有两条：只反射**静态**方法，边界类型限
+  `Int/Float/Bool/String/Unit`。
+- **纯度与许可是两件事**（2026-07-27 分家）：`unsafe_pure` 曾同时充当 route C 的许可证，
+  于是「我担保这个调用是纯的」被顺带读成「编译器可以在自己的进程里跑它」。前者是作者对
+  **程序**的断言，后者是对**编译这份源码的那台机器**的索取——受害人不同，就不该同一个记号。
+  这三道闸都不是沙箱：`System.load(String)` 就是静态、String 入参、void 返回。故门由
+  **运行编译器的人**开，不由**被编译的源码**开。
 
 ---
 

@@ -10,6 +10,10 @@
 > **阶段3 已实现**（route C = 反射执行被担保的 Java 调用 + Comptime 接上 std），**阶段4 已开工**
 > （批 A 首枪 `substring`，§十）。于是「纯 ⟺ 可 comptime 折叠」在迁移中得以保持，String 组余下的
 > 不再被 comptime 阻塞。
+>
+> **修订（2026-07-27，S2.4）**：route C 现在需要 `--comptime-ffi`，默认关；`unsafe_pure` 在
+> 全生态已零使用点。§十八 记了勘察、三个方向的证伪与落地的三刀——**先读那节**，本文前面
+> 关于「std 靠 unsafe_pure 转发」的写法都已被 intrinsic 契约取代。
 
 ## 一、结论（TL;DR）
 
@@ -608,3 +612,47 @@ in-process run、test runner、native-image 各一处）外加一个仅为此存
 持有者不迁是批 C 立下的判据，对它同样适用。若未来出现第二个需要「程序级
 运行期常量」的 builtin（env？工作目录？），届时再统一做载体，一次布线摊给
 多个住户才划算。
+
+## 十八、S2.4 收束：不是收窄 `unsafe_pure`，是让它没有用户（2026-07-27）
+
+`codebase-audit.md` 的 **LANG-01（P0）** 说 `unsafe_pure` 是「对用户开放的不健全逃生门」。
+动手前先做了三件事的勘察与**对抗性证伪**，三个收窄方向全部被实测推翻：
+
+| 方向 | 怎么死的 |
+|---|---|
+| **std-only 门控**（`is_std_module`，audit-fixes 分支 `purity-boundary-design.md` 步骤 1） | 把补丁原样打上重建，**编译器自己 10 处红**。那份文档扫生态时写「packages/site/playground/examples 已确认没有」，**漏了编译器自身**——std 是 0 处，全部 10 处都在 lexer/parser/checker |
+| **「块内必须语法上出现 Java 调用」** | `checker.dawn:677` 的 `unsafe_pure { class_info(fqcn) }` 包的是 Dawn 的 `!io` 函数，当场判红 |
+| **FFI provenance**（masked io 必须来自 java 调用/字段/`java_try`） | 实测两条逃逸零诊断：`unsafe_pure { java_try(某 Dawn !io 命名函数) }`、`unsafe_pure { Thread.new(f); t.run() }` |
+
+第三条给出的是**结构性**结论，值得单独记住：
+
+> **只要能把 Dawn 闭包交给 Java，「这个 io 来自 Java 调用」就什么都不保证。
+> 调用点的来源不等于效应的来源。** 任何「masked io 必须来自 X」形式的规则，
+> 都被「X 接受回调」击穿；而把 lambda 判红、命名函数放绿，绕过成本 = 一次 extract-function。
+
+于是问题换了形状：**不问「怎么收窄它」，问「谁还需要它」。** 而这个问题早有答案，只是没被
+当成答案看——**std 是怎么归零的**？不是靠收窄，是靠 intrinsic 契约：以前写
+`unsafe_pure { StdStrings.len(s) }` 靠调用点逐个作保，现在写 `str_len(s)`，
+「这个操作是纯的」从**调用点的一次担保**变成**语言的一次声明，后端有义务兑现**。
+
+### 落地的三刀
+
+1. **route C 与纯度章分家**（`--comptime-ffi`，默认关）。一个记号盖了两个章：
+   「这个调用是纯的」是对**程序**的断言，「编译器可以在自己进程里跑它」是对**编译这份源码
+   的那台机器**的索取。三道限制（只静态方法、只标量/String 边界）不是沙箱——`System.load(String)`
+   正好全部满足。零自举成本：selfhost 与 std 的全部 `const` 都是字面量，一个 comptime 块都没有。
+2. **`char_is_*` × 6 + `parse_int_radix` 进契约**（v0.19.0 两阶段发布）。它们本就不该是 FFI：
+   答案是 Unicode 表的性质，且每个后端都得有。JVM 发射进 `dawn/rt/Strings`；C 运行时 ASCII 精确、
+   U+007F 以上 **panic 而非猜**——猜出来的答案会让两后端差分报 ok，那正是 S1 一路在拆的东西。
+3. **`checker.dawn:677` 诚实化**：`resolve_type` 认 `!io`。传染只有 8 个签名，且链顶的
+   `check_module` 本来就是 `!io`——`jreflect.dawn` 文件头早写着 “that is the true story”。
+
+### 结果与下一步
+
+全生态**零 `unsafe_pure` 使用点**（std 0、packages 0、examples 0、dawnop-site 0、编译器 0）。
+剩下的只有 checker 里它自己的实现，和 interp 测试里的源码字符串。
+
+**存量清零改变了后面的可能性**：上面三条收窄之所以被证伪，都是因为规则要给存量留活路。
+零存量时可以把形态规则定到不留活路的严格度——「块内只准是单个 Java 方法调用表达式，
+且该方法不接受函数类型参数」，这条今天定不了（红 10 处），那时可定，且同时堵死上面两条逃逸。
+届时再裁决要不要干脆删掉这个特性：要 FFI 就诚实写 `!io`，要纯就走 intrinsic 契约申请。
