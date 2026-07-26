@@ -19,6 +19,9 @@
 # dawn/rt/Strings (docs/runtime-intrinsics-design.md). str_index_of and
 # str_last_index_of report "absent" as -1, which the wrappers turn into `None`.
 
+use std/cursor
+use std/cursor.{Cursor}
+
 ## Number of Unicode code points in `s` (not UTF-16 units, and not `chars`' list length).
 pub fn len(s: String) -> Int = str_len(s)
 
@@ -105,24 +108,24 @@ fn rev_cps(cps: List[Int], i: Int, acc: List[Int]) -> List[Int] =
 
 # ---- cursors ----
 #
-# The cursor_* family (cursor_start/end/done/char/next/prev/slice/skip and
-# index_of_from) lives in the BUILTIN table, not here. `Cursor` is a spelling
-# of `Int` for one release, on its way to `opaque type Cursor = Int` in
-# std/cursor (spec §11). chars/split below are their first consumers.
+# Positions come from std/cursor, whose `Cursor` is opaque: only that module
+# may see one as the Int it is, so the raw `cursor_*` builtins have exactly
+# one caller in the whole ecosystem. chars/split below thread positions
+# without ever computing one, which is the guarantee the type carries.
 
 ## The characters of `s`, each as a one-character string.
 ## A surrogate pair stays one element — this splits by character, not by unit.
 pub fn chars(s: String) -> List[String] = {
   let empty: List[String] = []
-  chars_go(s, cursor_start(s), empty)
+  chars_go(s, cursor.start(s), empty)
 }
 
 fn chars_go(s: String, c: Cursor, acc: List[String]) -> List[String] =
-  if cursor_done(s, c) {
+  if cursor.done(s, c) {
     acc
   } else {
-    let n = cursor_next(s, c)
-    chars_go(s, n, acc ++ [cursor_slice(s, c, n)])
+    let n = cursor.next(s, c)
+    chars_go(s, n, acc ++ [cursor.slice(s, c, n)])
   }
 
 ## `s` cut at each occurrence of `sep`, left to right. Adjacent separators yield
@@ -133,14 +136,14 @@ pub fn split(s: String, sep: String) -> List[String] =
     chars(s)
   } else {
     let empty: List[String] = []
-    split_go(s, sep, cursor_start(s), empty)
+    split_go(s, sep, cursor.start(s), empty)
   }
 
 fn split_go(s: String, sep: String, at: Cursor, acc: List[String]) -> List[String] =
-  match index_of_from(s, sep, at) {
-    None -> acc ++ [cursor_slice(s, at, cursor_end(s))]
-    # cursor_skip is the one sanctioned "advance past a known occurrence"
-    Some(i) -> split_go(s, sep, cursor_skip(s, i, sep), acc ++ [cursor_slice(s, at, i)])
+  match cursor.find(s, sep, at) {
+    None -> acc ++ [cursor.slice(s, at, cursor.end(s))]
+    # cursor.skip is the one sanctioned "advance past a known occurrence"
+    Some(i) -> split_go(s, sep, cursor.skip(s, i, sep), acc ++ [cursor.slice(s, at, i)])
   }
 
 ## `s` with every occurrence of `from` replaced by `to`, left to right and

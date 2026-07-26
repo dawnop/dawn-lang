@@ -258,8 +258,8 @@ let bad: Int = wrap(7)                      # ❌ annotated type is Int but the
 > 为什么需要它：在此之前，每要隐藏一次表示就得现搓一套机制——`Cursor` 是编译器铸造的
 > 不透明标量，`Array` 靠 `is_std_module` 做名字门控。这是第三次之前把机制立出来。
 >
-> `Cursor` 那一套已经删了（§11 的过渡说明），下一版由 `std/cursor` 用本节的机制重新
-> 立起来；`Array` 随集合纯 Dawn 化一并迁。
+> `Cursor` 已经迁完（§11）：编译器那一套删干净，由 `std/cursor` 用本节的机制重新
+> 立起来，是这个特性的第一个真实用户。`Array` 随集合纯 Dawn 化一并迁。
 
 ---
 
@@ -1173,12 +1173,15 @@ std → 内建，std 模块自己的 `pub fn len` 正是靠这一条合法。
   字符串内**位置的先后是位置类型的合法操作）、存进容器/record 供回溯（它是普通值，
   回溯不需要额外机制）。**不要对它做算术**——只有算术能凭空造出落在代理对中间的非法位置。
 
-  > **本版是过渡态。** `Cursor` 曾是编译器铸造的不透明标量（`Ty` 的一个变体、`Head` 的
-  > 一支、标量表里的一行），「不要做算术」由类型系统执行。那套机制正是 §2.7 的
-  > `opaque type` 要终结的东西，已经删掉；这一版 `Cursor` 只是 `Int` 的一个拼写，
-  > 于是算术暂时编得过。下一版它在 `std/cursor` 里以 `pub opaque type Cursor = Int`
-  > 回来，不透明随之回来。两半不能同一版落地：种子占着 `Cursor` 这个名字，
-  > 一个名字没法在同一版里既释放又重新占用。
+  **算术与凭空铸造都是编译错误**：`Cursor` 是 `std/cursor` 用 §2.7 的
+  `pub opaque type Cursor = Int` 声明的，只有那个模块能把它看成 `Int`。
+  要在类型位置写出 `Cursor`，除 `use std/cursor` 外还要
+  `use std/cursor.{Cursor}`（前者绑模块别名、后者绑名字，是两件事）。
+
+  > 它曾是编译器铸造的不透明标量——`Ty` 的一个变体、`Head` 的一支、
+  > eq/hash 标量表里各一行、七个文件里各一条 arm。同样的保证，现在没有自己的机制。
+  > 顺带修掉一处自相矛盾：从前 `a < b` 编得过而 `list.sort` 报 Cursor 无序，
+  > 因为回答这两个问题的是两张表；现在 `impl Ord[Cursor]` 一处回答两个。
   单串一次调用用下标版没问题，**循环里必须用游标版**——`docs/seq6-research.md` §五之补有实测。
 - `core/option` / `core/result`：`map unwrap_or expect and_then ...`
 - **`Map` / `Set`**（§2.2 的内建持久容器）——操作在 **`std/map`** 与 **`std/set`**：

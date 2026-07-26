@@ -4,12 +4,17 @@
 # `cursor.next(s, c)`. The underlying operations are compiler intrinsics; these
 # wrappers give them their public, qualified spelling.
 #
-# `Cursor` is a spelling of `Int` for one release. It used to be a type the
-# compiler minted — a `Ty` variant, a `Head`, an entry in the scalar tables —
-# which is the "every hidden representation grows its own mechanism" that
-# `opaque type` exists to end. It comes back here next release as
-# `pub opaque type Cursor = Int`, and opacity comes back with it. Until then
-# arithmetic on a position type-checks, which it should not.
+# A position is opaque: `Cursor` is this module's own type, and only this
+# module may see it as the Int it is. Arithmetic on one is a type error
+# anywhere else, which is the point — only arithmetic can conjure a position
+# that lands in the middle of a surrogate pair.
+#
+# It used to be a type the compiler minted: a `Ty` variant, a `Head`, an entry
+# in the eq/hash scalar tables and an arm in seven files. Same guarantee, and
+# now no mechanism of its own — `opaque type` (spec §2.7) is the mechanism.
+
+## A position in a String: an index the language will not let you compute.
+pub opaque type Cursor = Int
 
 ## The position before the first character.
 pub fn start(s: String) -> Cursor = cursor_start(s)
@@ -37,4 +42,29 @@ pub fn slice(s: String, from: Cursor, to: Cursor) -> String = cursor_slice(s, fr
 pub fn skip(s: String, c: Cursor, sub: String) -> Cursor = cursor_skip(s, c, sub)
 
 ## The position of the first occurrence of `sub` at or after `from`, or `None`.
-pub fn find(s: String, sub: String, from: Cursor) -> Option[Cursor] = index_of_from(s, sub, from)
+##
+## Spelled out because the conversion is a newtype's, not a functor's: inside
+## this module a `Cursor` is an `Int`, but an `Option[Int]` is still not an
+## `Option[Cursor]`.
+pub fn find(s: String, sub: String, from: Cursor) -> Option[Cursor] =
+  match index_of_from(s, sub, from) {
+    Some(i) -> {
+      let c: Cursor = i
+      Some(c)
+    }
+    None -> None
+  }
+
+## Positions in one string are ordered, and that order is the Int's.
+##
+## It used to come from a row in the compiler's scalar tables, and only half
+## of one: `a < b` was allowed while `list.sort` reported Cursor unordered,
+## because two different tables answered the two questions. One impl answers
+## both.
+impl Ord[Cursor] {
+  fn cmp(a: Cursor, b: Cursor) -> Int = {
+    let x: Int = a
+    let y: Int = b
+    if x < y { -1 } else if x > y { 1 } else { 0 }
+  }
+}
