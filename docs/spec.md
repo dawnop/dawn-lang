@@ -257,6 +257,9 @@ let bad: Int = wrap(7)                      # ❌ annotated type is Int but the
 
 > 为什么需要它：在此之前，每要隐藏一次表示就得现搓一套机制——`Cursor` 是编译器铸造的
 > 不透明标量，`Array` 靠 `is_std_module` 做名字门控。这是第三次之前把机制立出来。
+>
+> `Cursor` 那一套已经删了（§11 的过渡说明），下一版由 `std/cursor` 用本节的机制重新
+> 立起来；`Array` 随集合纯 Dawn 化一并迁。
 
 ---
 
@@ -368,7 +371,7 @@ fn sort2[T: Ord2](xs: List[T]) -> List[T] = ...   # 约束：[T: Trait (+ Trait)
   （此时生成的是条件 impl：`type Box[T] = { v: T } derive Ord` 得到
   `impl[T: Ord] Ord[Box[T]]`）。`List[T]` 有 std 写的词典序 impl。
 - 预置 `trait Eq[T] { fn eq(a: T, b: T) -> Bool }` 与
-  `trait Hash[T] { fn hash(x: T) -> Int }`，`Int`/`Float`/`Bool`/`String`/`Bytes`/`Cursor`
+  `trait Hash[T] { fn hash(x: T) -> Int }`，`Int`/`Float`/`Bool`/`String`/`Bytes`
   各有 impl。**没有 `derive Eq`**：`==` 本来就对每个类型结构化（§4.3），等于每个类型
   隐式实现 Eq；写 impl 是为了**覆盖**它。
   - 覆盖后 `==` 即该 impl，容器与嵌套比较（`equals`/`hashCode`）一并跟随。
@@ -1166,13 +1169,16 @@ std → 内建，std 模块自己的 `pub fn len` 正是靠这一条合法。
     **唯一被认可的「游标前进已知宽度」**，替代 `i + len` 式算术
   - `cursor.find(s, sub, from) -> Option[Cursor]` — 游标进、游标出，故沿串反复查找整体仍线性
 
-  游标是**不透明类型 `Cursor`**（运行期就是裸 `long`，零开销）：只能从这些函数取得、
-  传回、比较（`==` 与 `< <= > >=`——**同一字符串内**位置的先后是位置类型的合法操作）、
-  存进容器/record 供回溯（它是普通值，回溯不需要额外机制）。
-  **算术、打印、传给 Java 都是编译错误**——只有算术能凭空造出落在代理对中间的非法
-  位置，「不要对它做算术」由类型系统执行，不再靠注释。底层操作因签名需要 `Cursor`
-  类型而**留在内建表**（std 源码无法从 Int 铸造不透明标量——不透明正是其意义所在），
-  是 builtins→std 迁移的有据例外；`std/cursor` 的包装给它们公开的限定拼写。
+  游标是**位置**而非计数：从这些函数取得、传回、比较（`==` 与 `< <= > >=`——**同一
+  字符串内**位置的先后是位置类型的合法操作）、存进容器/record 供回溯（它是普通值，
+  回溯不需要额外机制）。**不要对它做算术**——只有算术能凭空造出落在代理对中间的非法位置。
+
+  > **本版是过渡态。** `Cursor` 曾是编译器铸造的不透明标量（`Ty` 的一个变体、`Head` 的
+  > 一支、标量表里的一行），「不要做算术」由类型系统执行。那套机制正是 §2.7 的
+  > `opaque type` 要终结的东西，已经删掉；这一版 `Cursor` 只是 `Int` 的一个拼写，
+  > 于是算术暂时编得过。下一版它在 `std/cursor` 里以 `pub opaque type Cursor = Int`
+  > 回来，不透明随之回来。两半不能同一版落地：种子占着 `Cursor` 这个名字，
+  > 一个名字没法在同一版里既释放又重新占用。
   单串一次调用用下标版没问题，**循环里必须用游标版**——`docs/seq6-research.md` §五之补有实测。
 - `core/option` / `core/result`：`map unwrap_or expect and_then ...`
 - **`Map` / `Set`**（§2.2 的内建持久容器）——操作在 **`std/map`** 与 **`std/set`**：

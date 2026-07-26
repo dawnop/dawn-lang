@@ -122,7 +122,6 @@ pub type Ty =
   | TyBool
   | TyString
   | TyBytes
-  | TyCursor
   | TyUnit
 # bottom type: the "return type" of panic/todo; usable as any type
   | TyNever
@@ -177,7 +176,10 @@ pub fn ty_named(name: String) -> Option[Ty] =
     "Bool" -> Some(TyBool)
     "String" -> Some(TyString)
     "Bytes" -> Some(TyBytes)
-    "Cursor" -> Some(TyCursor)
+    # for one release: `Cursor` is on its way from the builtin table into std
+    # as `opaque type Cursor = Int`, and the name has to keep resolving while
+    # the seed still spells it (docs/opaque-cursor.md)
+    "Cursor" -> Some(TyInt)
     "Unit" -> Some(TyUnit)
     _ -> None
   }
@@ -231,7 +233,6 @@ pub fn ty_show(adts: Adts, t: Ty) -> String =
     TyBool -> "Bool"
     TyString -> "String"
     TyBytes -> "Bytes"
-    TyCursor -> "Cursor"
     TyUnit -> "Unit"
     TyNever -> "Never"
     TyError -> "?"
@@ -294,7 +295,7 @@ pub fn subst(t: Ty, m: Map[Int, Ty], em: Map[Int, Eff]) -> Ty =
       TyFn(map(params, fn(x) => subst(x, m, em)), subst(ret, m, em), subst_eff(eff, em))
     # nothing to walk into. Spelled out rather than left to a wildcard: a new
     # *parameterised* variant landing here would silently stop substituting
-    TyInt | TyFloat | TyBool | TyString | TyBytes | TyCursor -> t
+    TyInt | TyFloat | TyBool | TyString | TyBytes -> t
     TyUnit | TyNever | TyError | TyJava(_, _) -> t
   }
 
@@ -389,7 +390,6 @@ pub type Head =
   | HBool
   | HString
   | HBytes
-  | HCursor
   | HUnit
   | HAdt(adt: Int)
   | HList
@@ -406,7 +406,6 @@ pub fn head_of(t: Ty) -> Option[Head] =
     TyBool -> Some(HBool)
     TyString -> Some(HString)
     TyBytes -> Some(HBytes)
-    TyCursor -> Some(HCursor)
     TyUnit -> Some(HUnit)
     TyAdt(aid, _) -> Some(HAdt(aid))
     TyList(_) -> Some(HList)
@@ -444,7 +443,7 @@ pub fn is_ground(t: Ty) -> Bool =
   match t {
     TyVar(_, _) -> false
     TyFn(ps, r, _) -> all_ground(ps) && is_ground(r)
-    TyInt | TyFloat | TyBool | TyString | TyBytes | TyCursor -> true
+    TyInt | TyFloat | TyBool | TyString | TyBytes -> true
     TyUnit | TyNever | TyError | TyJava(_, _) -> true
     _ -> all_ground(type_args_of(t))
   }
@@ -749,7 +748,7 @@ fn prelude_cond_impl(tid: Int, subject: Ty, tps: List[Ty]) -> ImplI = {
 }
 
 ## The scalars the backends compare for equality natively.
-pub fn eq_scalars() -> List[Ty] = [TyInt, TyFloat, TyBool, TyString, TyBytes, TyCursor]
+pub fn eq_scalars() -> List[Ty] = [TyInt, TyFloat, TyBool, TyString, TyBytes]
 
 ## The scalars that *hash*, which is not the same list, and the difference is
 ## `Float`.
@@ -759,7 +758,7 @@ pub fn eq_scalars() -> List[Ty] = [TyInt, TyFloat, TyBool, TyString, TyBytes, Ty
 ## Rust reaches the same place by not implementing `Hash` for `f64`. One table
 ## answered both questions until 2026-07-26, which is why `Float` could be a
 ## Map key and two equal keys could land in different buckets.
-pub fn hash_scalars() -> List[Ty] = [TyInt, TyBool, TyString, TyBytes, TyCursor]
+pub fn hash_scalars() -> List[Ty] = [TyInt, TyBool, TyString, TyBytes]
 
 ## Is this one of the scalars whose equality the backend implements natively?
 pub fn is_eq_scalar(t: Ty) -> Bool = {
@@ -880,15 +879,15 @@ pub fn builtins() -> Map[String, Sig] = {
     bsig("from_code_points", [TyList(TyInt)], ["cs"], TyString),
     bsig("parse_int", [TyString], ["s"], opt_ty(TyInt)),
     bsig("parse_float", [TyString], ["s"], opt_ty(TyFloat)),
-    bsig("cursor_start", [TyString], ["s"], TyCursor),
-    bsig("cursor_end", [TyString], ["s"], TyCursor),
-    bsig("cursor_done", [TyString, TyCursor], ["s", "c"], TyBool),
-    bsig("cursor_char", [TyString, TyCursor], ["s", "c"], TyInt),
-    bsig("cursor_next", [TyString, TyCursor], ["s", "c"], TyCursor),
-    bsig("cursor_prev", [TyString, TyCursor], ["s", "c"], TyCursor),
-    bsig("cursor_slice", [TyString, TyCursor, TyCursor], ["s", "from", "to"], TyString),
-    bsig("cursor_skip", [TyString, TyCursor, TyString], ["s", "c", "sub"], TyCursor),
-    bsig("index_of_from", [TyString, TyString, TyCursor], ["s", "sub", "from"], opt_ty(TyCursor)),
+    bsig("cursor_start", [TyString], ["s"], TyInt),
+    bsig("cursor_end", [TyString], ["s"], TyInt),
+    bsig("cursor_done", [TyString, TyInt], ["s", "c"], TyBool),
+    bsig("cursor_char", [TyString, TyInt], ["s", "c"], TyInt),
+    bsig("cursor_next", [TyString, TyInt], ["s", "c"], TyInt),
+    bsig("cursor_prev", [TyString, TyInt], ["s", "c"], TyInt),
+    bsig("cursor_slice", [TyString, TyInt, TyInt], ["s", "from", "to"], TyString),
+    bsig("cursor_skip", [TyString, TyInt, TyString], ["s", "c", "sub"], TyInt),
+    bsig("index_of_from", [TyString, TyString, TyInt], ["s", "sub", "from"], opt_ty(TyInt)),
     # str_* intrinsics: the string primitives that need Unicode/JVM support and
     # so cannot be pure Dawn (case folding, whitespace, native search). The
     # JVM backend emits them into dawn/rt/Strings; std/str writes the rest over

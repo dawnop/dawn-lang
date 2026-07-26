@@ -13,7 +13,7 @@ use std/map
 use std/set
 use types.{
   EPure, prelude_adts, opt_ty,
-  Ty, TyInt, TyFloat, TyBool, TyString, TyBytes, TyCursor, TyUnit, TyNever,
+  Ty, TyInt, TyFloat, TyBool, TyString, TyBytes, TyUnit, TyNever,
   TyError, TyVar, TyAdt, TyList, TyMap, TySet, TyArray, TyJava, TyTuple, TyFn,
   Adts, AdtI, CtorI, adt_of, adt_jvm_name, ctor_jvm_name, Sym, Sig, Eff
 }
@@ -46,7 +46,6 @@ pub fn desc_of(adts: Adts, t: Ty) -> String =
     # an opaque type has no representation of its own -- it IS its target
     TyOpaque(_, _, _, tgt) -> desc_of(adts, tgt)
     TyInt -> "J"
-    TyCursor -> "J"
     TyFloat -> "D"
     TyBool -> "Z"
     TyString -> "Ljava/lang/String;"
@@ -88,7 +87,7 @@ pub fn method_desc(adts: Adts, params: List[Ty], ret: Ty) -> String = {
 ## must stay a `Ty` match, because there a new variant inheriting `RRef` would
 ## be a wrong answer rather than a missing one.
 pub type JvmRepr =
-  | RLong # 2 slots, boxes to java.lang.Long -- Int and Cursor
+  | RLong # 2 slots, boxes to java.lang.Long
   | RDouble # 2 slots, boxes to java.lang.Double
   | RBool # 1 slot, boxes to java.lang.Boolean
   | RRef # 1 slot, already an Object
@@ -102,7 +101,6 @@ pub fn jvm_repr(t: Ty) -> JvmRepr =
   match t {
     TyOpaque(_, _, _, tgt) -> jvm_repr(tgt)
     TyInt -> RLong
-    TyCursor -> RLong
     TyFloat -> RDouble
     TyBool -> RBool
     TyUnit -> RUnit
@@ -2585,7 +2583,6 @@ pub fn hash_of(m: MethodVisitor, t: Ty) -> Unit !io = {
     # language: an opaque Int hashes, compares and renders as that Int
     TyOpaque(_, _, _, tgt) -> hash_of(m, tgt)
     TyInt -> { m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Long", "hashCode", "(J)I", false) }
-    TyCursor -> { m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Long", "hashCode", "(J)I", false) }
     TyFloat -> {
       m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Double", "hashCode", "(D)I", false)
     }
@@ -2646,14 +2643,6 @@ fn gen_to_string_method(cw: AdtClassWriter, adts: Adts, sub: String, ci: CtorI) 
           m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Boolean", "valueOf",
             "(Z)Ljava/lang/Boolean;", false)
         }
-        # a Cursor is a long too. The checker keeps one out of a `derive Show`
-        # type (Cursor has no Show impl), so this arm is unreachable -- but the
-        # wildcard below would leave a primitive where an Object is expected,
-        # which is a verify error rather than a diagnostic if it ever is
-        TyCursor -> {
-          m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Long", "valueOf",
-            "(J)Ljava/lang/Long;", false)
-        }
         _ -> ()
       }
       m.visitMethodInsn(OP_INVOKESTATIC, SHOW_CLASS, "show",
@@ -2692,10 +2681,6 @@ fn gen_equals_method(cw: AdtClassWriter, adts: Adts, sub: String, ci: CtorI) -> 
     m.visitFieldInsn(OP_GETFIELD, sub, f.name, desc_of(adts, f.ty))
     match f.ty {
       TyInt -> {
-        m.visitInsn(OP_LCMP)
-        m.visitJumpInsn(OP_IFNE, no)
-      }
-      TyCursor -> {
         m.visitInsn(OP_LCMP)
         m.visitJumpInsn(OP_IFNE, no)
       }
@@ -2972,7 +2957,6 @@ pub fn subject_name(adts: Adts, t: Ty) -> String =
     TyString -> "String"
     # not writable as an impl subject in source; the prelude Eq/Hash cover them
     TyBytes -> "Bytes"
-    TyCursor -> "Cursor"
     TyAdt(aid, _) -> adt_of(adts, aid).name
     # the builtin containers, once std writes conditional impls for them.
     # Arguments are dropped on purpose: the name identifies the *impl*, and
@@ -3001,10 +2985,6 @@ pub fn emit_unerase(m: MethodVisitor, adts: Adts, t: Ty) -> Unit !io = {
   match t {
     TyOpaque(_, _, _, tgt) -> emit_unerase(m, adts, tgt)
     TyInt -> {
-      m.visitTypeInsn(OP_CHECKCAST, "java/lang/Long")
-      m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/Long", "longValue", "()J", false)
-    }
-    TyCursor -> {
       m.visitTypeInsn(OP_CHECKCAST, "java/lang/Long")
       m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/Long", "longValue", "()J", false)
     }

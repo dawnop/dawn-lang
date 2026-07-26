@@ -42,7 +42,7 @@ use tast.{
 }
 use types.{
   intrinsics, intr_at,
-  adt_self_ty, Ty, TyInt, TyFloat, TyBool, TyString, TyBytes, TyCursor, TyUnit, TyNever,
+  adt_self_ty, Ty, TyInt, TyFloat, TyBool, TyString, TyBytes, TyUnit, TyNever,
   TyError, TyVar, TyAdt, TyList, TyMap, TySet, TyArray, TyJava, TyTuple, TyFn,
   Eff, EPure, EIo, EffVar, EUnion, eff_union, lub_eff, eff_subsumes, eff_suffix,
   Adts, AdtI, CtorI, FieldI, Traits, TraitI, ImplI, Sym, Sig, MethodSig,
@@ -1380,8 +1380,12 @@ pub fn pass_type_shells(cx: Cx, m: Module) -> (Cx, List[Option[Shell]]) = {
       shells = shells ++ [no_shell()]
       continue
     }
+    # `Cursor` is exempt for one release: the name still resolves (to Int), but
+    # declaring it is no longer a collision. That is what lets std reclaim it
+    # next release as `opaque type Cursor = Int` -- a name cannot be freed and
+    # re-taken in the same release, because the seed reserves it either way
     let is_builtin_name = match ty_named(d.name) {
-      Some(_) -> true
+      Some(_) -> d.name != "Cursor"
       None -> d.name == "List" || d.name == "Map" || d.name == "Set"
     }
     if is_builtin_name {
@@ -2985,8 +2989,8 @@ pub fn check_binary_typed(
             ty_show(cx.adts, lt) ++ " vs " ++ ty_show(cx.adts, rt), olo, ohi), TyError,
           node(no_wit(), TyError))
       }
-      # native fast path; Cursor orders too (spec §11)
-      if lt == TyInt || lt == TyFloat || lt == TyString || lt == TyCursor {
+      # native fast path
+      if lt == TyInt || lt == TyFloat || lt == TyString {
         return (cx, TyBool, node(no_wit(), TyBool))
       }
       let (cx1, w) = resolve_ord_witness(cx, lt, olo, ohi)
