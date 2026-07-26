@@ -1339,6 +1339,13 @@ fn show_at(st: LSt, x: CExpr, t: Ty) -> (LSt, CExpr) = {
         CImpl(owner_or(imp.owner, st1.owner), SHOW_ID, t, "show"), [x] ++ ds, TyString))
     }
   }
+  # An opaque type with no impl of its own renders as its target: the value
+  # on the other side of the barrier is that target. Placed *after* the impl
+  # check, because an `impl Show[Id]` is exactly the reason to declare one.
+  match t {
+    TyOpaque(_, _, _, tgt) -> return show_at(st, x, tgt)
+    _ -> ()
+  }
   if is_ground(t) && expandable(t) {
     let (st1, name) = struct_show_fn(st, t)
     return (st1, CCall(CDirect(st1.owner, name), [x], TyString))

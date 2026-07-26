@@ -20,7 +20,7 @@ use std/list
 use std/map
 use types.{
   Ty, TyInt, TyFloat, TyBool, TyString, TyUnit, TyNever, TyError, TyVar,
-  TyAdt, TyTuple, TyFn, TyBytes, TyCursor, TyList, TyMap, TySet, TyArray, TyJava
+  TyAdt, TyTuple, TyFn, TyBytes, TyCursor, TyList, TyMap, TySet, TyArray, TyJava, peel_opaque
 }
 use core.{
   diverges,
@@ -123,6 +123,7 @@ pub type CRepr =
 ## Deliberately without a wildcard.
 pub fn c_repr(t: Ty) -> CRepr =
   match t {
+    TyOpaque(_, _, _, tgt) -> c_repr(tgt)
     TyInt -> RInt64
     TyFloat -> RFloat64
     TyBool -> RBoolean
@@ -408,8 +409,13 @@ fn emit_alloc(st: CSt, tag: Int, args: List[CExpr]) -> (CSt, String) = {
   (st4, tmp)
 }
 
-fn emit_binary(st: CSt, op: CBinOp, l: CExpr, r: CExpr, ty: Ty) -> (CSt, String) = {
-  let lt = cex_ty(l)
+## `lt`/`ty` here pick a *machine* operation, so both are peeled: this
+## function's dispatch is a chain of `== Ty...` tests that the exhaustiveness
+## checker cannot reach, and an unpeeled opaque type would silently fall
+## through to the pointer comparison at the end.
+fn emit_binary(st: CSt, op: CBinOp, l: CExpr, r: CExpr, ty0: Ty) -> (CSt, String) = {
+  let ty = peel_opaque(ty0)
+  let lt = peel_opaque(cex_ty(l))
   # && and || must not evaluate their right side eagerly, and in Core the
   # right side may still expand into statements -- so they lower to an if,
   # not to C's operators. This is load-bearing for pattern tests, whose
@@ -581,6 +587,8 @@ fn scalar_rt(prefix: String, t: Ty, what: String) -> String =
     # Bool has an Eq and a Hash but no order, so only one of the two prefixes
     # reaches it; the other falls through to the gap below
     TyBool -> if prefix == "dawn_hash" { prefix ++ "_bool" } else { no_rt(what, t) }
+    # an opaque type is its target at run time, here as everywhere
+    TyOpaque(_, _, _, tgt) -> scalar_rt(prefix, tgt, what)
     # Bytes and Cursor have no native representation yet (bytes-design.md):
     # an honest gap, not a wrong answer
     _ -> no_rt(what, t)

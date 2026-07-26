@@ -177,6 +177,14 @@ fn top_decl(p: P, st: St) -> PR[Decl] = {
     st0 = adv1(p, st0)
     is_pub = true
   }
+  # `opaque` is a soft keyword: only `opaque type` means anything, so a
+  # variable or function called `opaque` keeps working
+  if at_kind(p, st0, IDENT) && cur(p, st0).text == "opaque" {
+    if kind_ahead(p, st0, 1) != TYPE {
+      return Err((st0, perr(p, st0, "`opaque` introduces `opaque type Name = ...`")))
+    }
+    return alias_decl(p, adv1(p, st0), is_pub, true)
+  }
   let k = kind_of(p, st0)
   if k == FN {
     let (st1, f) = fn_decl(p, st0, is_pub, false)?
@@ -184,7 +192,7 @@ fn top_decl(p: P, st: St) -> PR[Decl] = {
   } else if k == TYPE {
     type_decl(p, st0, is_pub)
   } else if k == ALIAS {
-    alias_decl(p, st0, is_pub)
+    alias_decl(p, st0, is_pub, false)
   } else if k == CONST {
     const_decl(p, st0, is_pub)
   } else if k == TRAIT {
@@ -384,14 +392,19 @@ fn type_params(p: P, st: St) -> PR[List[TypeParamDecl]] = {
   Ok((st8, out))
 }
 
-## `alias Name[T] = TypeRef` — a transparent type alias (spec §2.6).
-fn alias_decl(p: P, st: St, is_pub: Bool) -> PR[Decl] = {
-  let (st1, kw) = want(p, st, ALIAS, "`alias`")?
+## `alias Name[T] = TypeRef` — a transparent type alias (spec §2.6) — and
+## `opaque type Name[T] = TypeRef`, which parses identically and differs only
+## in who may see through it. One parser, because the shapes are the same
+## shape: a name, type parameters, and a target.
+fn alias_decl(p: P, st: St, is_pub: Bool, is_opaque: Bool) -> PR[Decl] = {
+  let (st1, kw) =
+    if is_opaque { want(p, st, TYPE, "`type`")? } else { want(p, st, ALIAS, "`alias`")? }
   let (st2, name) = want(p, st1, TYPEIDENT, "a type name (uppercase)")?
   let (st3, tparam_decls) = type_params(p, st2)?
   for tp in tparam_decls {
     if len(tp.bounds) > 0 {
-      return Err((st3, pd_h("alias declarations cannot constrain their type parameters",
+      let what = if is_opaque { "opaque type" } else { "alias" }
+      return Err((st3, pd_h(what ++ " declarations cannot constrain their type parameters",
         tp.lo, tp.hi, "trait bounds go on the functions that use the type: fn f[T: Ord](...)")))
     }
   }
@@ -400,6 +413,7 @@ fn alias_decl(p: P, st: St, is_pub: Bool) -> PR[Decl] = {
   let names = map(tparam_decls, fn(t) => t.name)
   Ok((st5, DType(TypeDeclR {
     is_pub: is_pub,
+    is_opaque: is_opaque,
     name: name.text,
     tparams: names,
     ctors: [],
@@ -471,6 +485,7 @@ fn type_decl(p: P, st: St, is_pub: Bool) -> PR[Decl] = {
   }
   Ok((st11, DType(TypeDeclR {
     is_pub: is_pub,
+    is_opaque: false,
     name: name.text,
     tparams: tparams,
     ctors: ctors,
@@ -542,6 +557,7 @@ fn record_decl(
   let end = if len(derives) > 0 { derives[len(derives) - 1].hi } else { close.hi }
   Ok((st6, DType(TypeDeclR {
     is_pub: is_pub,
+    is_opaque: false,
     name: name.text,
     tparams: tparams,
     ctors: [ctor],

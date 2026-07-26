@@ -1,0 +1,34 @@
+# An opaque type has no representation of its own: at run time it IS its
+# target, on both backends. That is what this corpus pins -- if either backend
+# ever gave TyOpaque a box, a tag or a different equality, these lines would
+# stop agreeing.
+#
+# Single-module, so everything here is inside the declaring module and the
+# conversions are allowed. The *refusal* outside it is a checker test
+# (checker.dawn), because a program that is rejected has no output to compare.
+
+opaque type Id = Int
+opaque type Tag = String
+
+fn id_of(n: Int) -> Id = n
+fn int_of(i: Id) -> Int = i
+fn tag_of(s: String) -> Tag = s
+
+fn bump(i: Id) -> Id = {
+  let n: Int = i
+  n + 1
+}
+
+pub fn main() -> Unit !io = {
+  println(to_string(int_of(bump(id_of(41)))))
+  println(to_string(id_of(7) == id_of(7)))
+  println(to_string(id_of(7) == id_of(8)))
+  # built at run time on purpose: two interned literals would compare equal on
+  # the JVM even if the opaque type had fallen through to reference equality,
+  # and this corpus would then certify a bug
+  println(to_string(tag_of(to_string(97)) == tag_of("97")))
+  println(to_string(tag_of(to_string(97)) == tag_of("98")))
+  # rendering follows the target, because the value is the target
+  println(to_string(id_of(-3)))
+  println(to_string(cmp(id_of(1), id_of(2))))
+}

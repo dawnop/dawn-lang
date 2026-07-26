@@ -299,6 +299,7 @@ fn box_ty(m: MethodVisitor, t: Ty) -> Unit !io = {
 fn unerase(g: Gen, t: Ty) -> Unit !io = {
   let m = g.mv
   match t {
+    TyOpaque(_, _, _, tgt) -> unerase(g, tgt)
     TyInt -> {
       m.visitTypeInsn(OP_CHECKCAST, "java/lang/Long")
       m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/Long", "longValue", "()J", false)
@@ -458,6 +459,7 @@ fn subst_subject(tr: TraitI, s: Sig, subject: Ty) -> Sig = {
 fn subst_tvar(t: Ty, vid: Int, to: Ty) -> Ty =
   match t {
     TyVar(_, v) -> if v == vid { to } else { t }
+    TyOpaque(id, n, ow, tgt) -> TyOpaque(id, n, ow, subst_tvar(tgt, vid, to))
     TyList(e) -> TyList(subst_tvar(e, vid, to))
     TyMap(k, v2) -> TyMap(subst_tvar(k, vid, to), subst_tvar(v2, vid, to))
     TySet(e) -> TySet(subst_tvar(e, vid, to))
@@ -613,21 +615,24 @@ fn gen_const_fields(g: Gen, cw: AdtClassWriter) -> Unit !io = {
   ()
 }
 
+## The return instruction follows the *representation*, so this asks the one
+## total function rather than testing types by hand: a chain of `t == Ty...`
+## here is unreachable by the exhaustiveness checker, and its else-branch
+## returns void -- a new variant would silently emit a method that drops its
+## own result (S0.3, and an opaque type is how that was found).
 fn emit_method_return(g: Gen) -> Unit !io = {
-  let t = g.method_ret
-  if t == TyInt || t == TyCursor {
-    g.mv.visitInsn(OP_LRETURN)
-  } else if t == TyFloat {
-    g.mv.visitInsn(OP_DRETURN)
-  } else if t == TyBool {
-    g.mv.visitInsn(OP_IRETURN)
-  } else if is_ref(t) {
-    g.mv.visitInsn(OP_ARETURN)
-  } else if g.rets_null {
-    push_unit(g.mv)
-    g.mv.visitInsn(OP_ARETURN)
-  } else {
-    g.mv.visitInsn(OP_RETURN)
+  match jvm_repr(g.method_ret) {
+    RLong -> { g.mv.visitInsn(OP_LRETURN) }
+    RDouble -> { g.mv.visitInsn(OP_DRETURN) }
+    RBool -> { g.mv.visitInsn(OP_IRETURN) }
+    RRef -> { g.mv.visitInsn(OP_ARETURN) }
+    RUnit | RBottom ->
+      if g.rets_null {
+        push_unit(g.mv)
+        g.mv.visitInsn(OP_ARETURN)
+      } else {
+        g.mv.visitInsn(OP_RETURN)
+      }
   }
   ()
 }
@@ -646,6 +651,14 @@ fn tyfn_parts(t: Ty) -> (List[Ty], Ty) =
 ## a type with no order here has to say so instead of being handed the
 ## nearest available answer.
 fn emit_scalar_cmp(g: Gen, t: Ty) -> Unit !io = {
+  emit_scalar_cmp_at(g, t)
+  g.mv.visitInsn(OP_I2L)
+  ()
+}
+
+## The comparison itself, leaving an int: recursion through an opaque type
+## must not widen once per layer.
+fn emit_scalar_cmp_at(g: Gen, t: Ty) -> Unit !io = {
   match t {
     TyInt -> { g.mv.visitInsn(OP_LCMP) }
     TyFloat -> {
@@ -656,9 +669,11 @@ fn emit_scalar_cmp(g: Gen, t: Ty) -> Unit !io = {
       g.mv.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/String", "compareTo",
         "(Ljava/lang/String;)I", false)
     }
+    # opacity hides a representation from other modules, not from the language:
+    # the value on the stack is the target, so its order is the target's
+    TyOpaque(_, _, _, tgt) -> emit_scalar_cmp_at(g, tgt)
     _ -> panic("codegen: no scalar order for " ++ ty_key(t))
   }
-  g.mv.visitInsn(OP_I2L)
   ()
 }
 

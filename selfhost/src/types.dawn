@@ -142,8 +142,28 @@ pub type Ty =
 # an opaque imported Java class; the display is precomputed at creation
 # (arrays need Class reflection for their readable name)
   | TyJava(fqcn: String, display: String)
+# `opaque type N[..] = T`: a type only its declaring module may see through.
+# The target rides along the way TyJava's display does, so every mapping from
+# a type to a *representation* answers without consulting a table -- at run
+# time an opaque type simply IS its target, and so is its equality, hash,
+# order and rendering. The only thing `id` buys is that outside the declaring
+# module the checker refuses to confuse the two.
+  | TyOpaque(id: Int, name: String, owner: String, target: Ty)
   | TyTuple(elems: List[Ty])
   | TyFn(params: List[Ty], ret: Ty, eff: Eff)
+
+## An opaque type as the language sees the *value* behind it.
+##
+## Opacity is a rule about who may name a representation, never about what the
+## value is: at run time an opaque type IS its target, so every question about
+## the value -- which machine operation, which equality, which order, which
+## rendering -- asks the target. Only the checker, and only outside the
+## declaring module, keeps the two apart.
+pub fn peel_opaque(t: Ty) -> Ty =
+  match t {
+    TyOpaque(_, _, _, tgt) -> peel_opaque(tgt)
+    _ -> t
+  }
 
 pub fn is_numeric(t: Ty) -> Bool = t == TyInt || t == TyFloat
 
@@ -229,6 +249,9 @@ pub fn ty_show(adts: Adts, t: Ty) -> String =
     TySet(e) -> "Set[" ++ ty_show(adts, e) ++ "]"
     TyArray(e) -> "Array[" ++ ty_show(adts, e) ++ "]"
     TyJava(_, display) -> display
+    # the name, never the target: a diagnostic outside the declaring module
+    # must not leak what the module is hiding
+    TyOpaque(_, name, _, _) -> name
     TyTuple(elems) -> "(" ++ join(map(elems, fn(x) => ty_show(adts, x)), ", ") ++ ")"
     TyFn(params, ret, eff) ->
       "fn(" ++ join(map(params, fn(x) => ty_show(adts, x)), ", ") ++ ") -> " ++
@@ -266,6 +289,7 @@ pub fn subst(t: Ty, m: Map[Int, Ty], em: Map[Int, Eff]) -> Ty =
     TySet(e) -> TySet(subst(e, m, em))
     TyArray(e) -> TyArray(subst(e, m, em))
     TyTuple(elems) -> TyTuple(map(elems, fn(x) => subst(x, m, em)))
+    TyOpaque(id, n, ow, tgt) -> TyOpaque(id, n, ow, subst(tgt, m, em))
     TyFn(params, ret, eff) ->
       TyFn(map(params, fn(x) => subst(x, m, em)), subst(ret, m, em), subst_eff(eff, em))
     # nothing to walk into. Spelled out rather than left to a wildcard: a new
@@ -373,6 +397,7 @@ pub type Head =
   | HSet
   | HArray
   | HJava(fqcn: String)
+  | HOpaque(id: Int)
 
 pub fn head_of(t: Ty) -> Option[Head] =
   match t {
@@ -389,6 +414,8 @@ pub fn head_of(t: Ty) -> Option[Head] =
     TySet(_) -> Some(HSet)
     TyArray(_) -> Some(HArray)
     TyJava(fqcn, _) -> Some(HJava(fqcn))
+    # an opaque type may carry its own impl, distinct from its target's
+    TyOpaque(id, _, _, _) -> Some(HOpaque(id))
     _ -> None
   }
 

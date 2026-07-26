@@ -223,11 +223,46 @@ alias Paint = Color                                   # 用户类型（ADT/recor
 限制：别名不可递归（环报错）；不可携带效果变量（只能 `!io` 或纯）；
 `pub` 后可跨模块导入（`use m.{Handler}`）。
 
+### 2.7 不透明类型
+
+```dawn
+pub opaque type UserId = Int                # 只有本模块知道它是 Int
+pub opaque type Env = Map[String, Int]
+pub opaque type Pair[T] = (T, T)            # 可带类型参数
+```
+
+`opaque type N[..] = T` 与 `alias` 的语法一样，差别只有一条：**谁被允许看穿它**。
+声明它的模块里，`N` 与 `T` 可以互相转换；模块之外，两者是不同的类型。
+
+```dawn
+# 在 ids 模块内
+pub fn wrap(n: Int) -> UserId = n           # ✅ 本模块可转换
+pub fn unwrap(u: UserId) -> Int = u         # ✅
+
+# 在别的模块
+let bad: Int = wrap(7)                      # ❌ annotated type is Int but the
+                                            #    initializer is UserId
+```
+
+**转换发生在赋值、传参与返回位置**（即类型可赋值性判定处），不在表达式内部：
+本模块里 `u + 1` 仍是错的，写 `let n: Int = u` 再算，结果回到 `UserId` 位置时自动转回。
+这是 newtype 的纪律，也让「不透明」在实现上只是一条判定，而不是散落各处的特判。
+
+**不透明只挡视线，不改语义**：运行期一个不透明类型**就是**它的目标类型——同样的表示、
+同样的相等、哈希、序与渲染，两个后端都如此，零开销。`opaque` 是软关键字，
+只有 `opaque type` 有意义。
+
+可以给不透明类型写自己的 impl（`impl Show[UserId]`），它优先于目标类型的；孤儿规则把
+不透明类型算作声明模块的本地类型。
+
+> 为什么需要它：在此之前，每要隐藏一次表示就得现搓一套机制——`Cursor` 是编译器铸造的
+> 不透明标量，`Array` 靠 `is_std_module` 做名字门控。这是第三次之前把机制立出来。
+
 ---
 
 ## 3. 声明
 
-模块顶层只允许：`use`、`type`、`alias`、`const`、`fn`、`test`、`trait`、`impl`。
+模块顶层只允许：`use`、`type`（含 `opaque type`）、`alias`、`const`、`fn`、`test`、`trait`、`impl`。
 没有顶层可变状态。
 
 ### 3.1 函数

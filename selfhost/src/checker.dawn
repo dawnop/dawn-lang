@@ -72,6 +72,13 @@ pub type AliasE = {
   tparams: List[Ty],
   # the unresolved target in the declaring module; None on imported aliases
   target: Option[TypeRef],
+  # `opaque type` rather than `alias`: resolving the name yields a TyOpaque
+  # instead of the target, and only `owner` may convert between the two.
+  # `id` is minted from the same counter as ADT ids so the two never collide
+  # in `ty_key`, which names dictionaries and impl methods.
+  is_opaque: Bool,
+  id: Int,
+  owner: String,
   nlo: Int,
   nhi: Int
 }
@@ -605,7 +612,7 @@ fn resolve_named(cx: Cx, name: String, targs: List[TypeRef], lo: Int, hi: Int) -
       }
       let (cx1, target) = resolve_alias_target(cx, al, lo, hi)
       if target == TyError { return (cx1, TyError) }
-      if len(al.tparams) == 0 { return (cx1, target) }
+      if len(al.tparams) == 0 { return (cx1, wrap_opaque(al, target)) }
       var cx2 = cx1
       var m: Map[Int, Ty] = map.empty()
       var i = 0
@@ -621,7 +628,7 @@ fn resolve_named(cx: Cx, name: String, targs: List[TypeRef], lo: Int, hi: Int) -
         i = i + 1
       }
       let em: Map[Int, Eff] = map.empty()
-      return (cx2, subst(target, m, em))
+      return (cx2, wrap_opaque(al, subst(target, m, em)))
     }
     None -> ()
   }
@@ -799,6 +806,20 @@ test "declare and lookup with scope discipline" {
 
 # ---- assignability, unification, printability ----
 
+## An `alias` resolves to its target; an `opaque type` resolves to itself,
+## carrying the target for the backends and `owner` for the check below.
+pub fn wrap_opaque(al: AliasE, target: Ty) -> Ty =
+  if al.is_opaque { TyOpaque(al.id, al.name, al.owner, target) } else { target }
+
+## The declaring module -- and only it -- may convert between an opaque type
+## and its target. This is the whole of opacity: one line of checking, no
+## run-time representation of its own, and nothing for a backend to know.
+fn sees_through(cx: Cx, owner: String) -> Bool =
+  match cx.owner_class {
+    Some(c) -> c == owner
+    None -> false
+  }
+
 ## Can `t` be used where `target` is expected? (Never/TyError as anything;
 ## a pure fn where an io fn is wanted.)
 pub fn assignable(cx: Cx, t: Ty, target: Ty) -> Bool = {
@@ -810,7 +831,14 @@ pub fn assignable(cx: Cx, t: Ty, target: Ty) -> Bool = {
           ps == tps && assignable(cx, r, tr) && (te == EIo || e == EPure || e == te)
         _ -> false
       }
-    _ -> false
+    TyOpaque(_, _, ow, tgt) ->
+      if sees_through(cx, ow) { assignable(cx, tgt, target) } else { false }
+    _ ->
+      match target {
+        TyOpaque(_, _, ow, tgt) ->
+          if sees_through(cx, ow) { assignable(cx, t, tgt) } else { false }
+        _ -> false
+      }
   }
 }
 
@@ -886,6 +914,16 @@ pub fn unify_into(
     TyArray(d) ->
       match actual {
         TyArray(a) -> unify_into(cx, d, a, m, em)
+        _ -> (m, em, false)
+      }
+    # `opaque type Pair[T] = (T, T)` is a type constructor, and its arguments
+    # live only in the target -- so matching Pair against Pair means matching
+    # the targets. The ids must agree first: two opaque types over the same
+    # target are still two types.
+    TyOpaque(did, _, _, dtgt) ->
+      match actual {
+        TyOpaque(aid, _, _, atgt) ->
+          if did == aid { unify_into(cx, dtgt, atgt, m, em) } else { (m, em, false) }
         _ -> (m, em, false)
       }
     TyTuple(delems) ->
@@ -972,6 +1010,10 @@ pub fn is_concrete(cx: Cx, t: Ty) -> Bool =
     TyMap(k, v) -> is_concrete(cx, k) && is_concrete(cx, v)
     TySet(e) -> is_concrete(cx, e)
     TyArray(e) -> is_concrete(cx, e)
+    # an opaque type's arguments live in its target, so concreteness does too --
+    # missing this makes `Pair[T]` at a rigid T look concrete, and the expected
+    # result type then binds the callee's type parameters before its arguments can
+    TyOpaque(_, _, _, tgt) -> is_concrete(cx, tgt)
     TyTuple(elems) -> {
       for a in elems {
         if not is_concrete(cx, a) { return false }
@@ -1376,12 +1418,25 @@ pub fn pass_type_shells(cx: Cx, m: Module) -> (Cx, List[Option[Shell]]) = {
           cx1 = cx2
           tvs = tvs ++ [v]
         }
+        # an opaque type is a type, so it takes an id off the same counter;
+        # a transparent alias is a spelling and needs none
+        var aid = -1
+        if d.is_opaque {
+          aid = cx1.next_id
+          cx1 = Cx { ..cx1, next_id: cx1.next_id + 1 }
+        }
         cx1 = Cx {
           ..cx1,
           aliases: map.insert(cx1.aliases, d.name, AliasE {
             name: d.name,
             tparams: tvs,
             target: Some(target),
+            is_opaque: d.is_opaque,
+            id: aid,
+            owner: match cx1.owner_class {
+              Some(c) -> c
+              None -> ""
+            },
             nlo: d.nlo,
             nhi: d.nhi
           })
@@ -1539,6 +1594,7 @@ test "type shells and fields build recursive types" {
   # type Tree[T] = | Leaf | Node(v: T, kids: List[Tree[T]])
   let m = Module { decls: [DType(TypeDeclR {
     is_pub: false,
+    is_opaque: false,
     name: "Tree",
     tparams: ["T"],
     ctors: [
@@ -1592,6 +1648,7 @@ test "type shells and fields build recursive types" {
 test "duplicate constructors and prelude clashes are caught" {
   let mk = fn(name: String) => DType(TypeDeclR {
     is_pub: false,
+    is_opaque: false,
     name: name,
     tparams: [],
     ctors: [CtorDecl { name: "C" ++ name, fields: [], lo: 0, hi: 1, nlo: 0, nhi: 1 }],
@@ -1628,6 +1685,7 @@ test "alias cycles and derive Show violations are reported at the declaration" {
   let m = Module { decls: [
     DType(TypeDeclR {
       is_pub: false,
+      is_opaque: false,
       name: "A",
       tparams: [],
       ctors: [],
@@ -1641,6 +1699,7 @@ test "alias cycles and derive Show violations are reported at the declaration" {
     }),
     DType(TypeDeclR {
       is_pub: false,
+      is_opaque: false,
       name: "B",
       tparams: [],
       ctors: [],
@@ -1654,6 +1713,7 @@ test "alias cycles and derive Show violations are reported at the declaration" {
     }),
     DType(TypeDeclR {
       is_pub: false,
+      is_opaque: false,
       name: "P",
       tparams: [],
       ctors: [CtorDecl {
@@ -2049,10 +2109,14 @@ pub fn pass_register_impls(
     for n in cx1.local_traits {
       if n == d.trait_name { trait_local = true }
     }
-    let subject_local = match head_of(subject) {
-      Some(HAdt(aid)) -> set.has(local_adts, aid)
-      Some(h) -> head_owner(h) == cx1.owner_class
-      None -> false
+    let subject_local = match subject {
+      TyOpaque(_, _, ow, _) -> Some(ow) == cx1.owner_class
+      _ ->
+        match head_of(subject) {
+          Some(HAdt(aid)) -> set.has(local_adts, aid)
+          Some(h) -> head_owner(h) == cx1.owner_class
+          None -> false
+        }
     }
     if not trait_local && not subject_local {
       cx1 = cerr_h(cx1, "orphan impl: `" ++ tr.name ++ "[" ++ ty_show(cx1.adts, subject) ++
@@ -4432,6 +4496,19 @@ pub fn resolve_witness(
 ) -> (Cx, Option[WitRef]) = {
   if is_errorish(t) { return (cx, no_wit()) }
   let tr = trait_of(cx.traits, trait_id)
+  # An opaque type answers for itself if it has its own impl, and otherwise
+  # falls back to its target. Opacity hides a representation from other
+  # modules; it does not give the value a second equality, hash or order --
+  # at run time it IS the target, so a witness that disagreed with the target
+  # would be a witness for a value that does not exist.
+  match t {
+    TyOpaque(_, _, _, tgt) ->
+      match impl_at(cx.impl_table, trait_id, t) {
+        None -> { return resolve_witness(cx, trait_id, tgt, lo, hi, requirer) }
+        Some(_) -> ()
+      }
+    _ -> ()
+  }
   match t {
     TyVar(_, vid) ->
       match map.get(cx.dict_syms, (vid, trait_id)) {
@@ -4775,6 +4852,22 @@ test "a subject containing a rigid variable takes its arguments' witnesses" {
 ## Check one expression against an optional expected type (the Kotlin
 ## checkExpr/inferExpr pair). Returns (state, type, typed node).
 pub fn check_expr(cx: Cx, e: Expr, expected: Option[Ty]) -> (Cx, Ty, TExpr) !io =
+  match see_through_expected(cx, expected) {
+    Some(t) -> check_expr_at(cx, e, Some(t))
+    None -> check_expr_at(cx, e, expected)
+  }
+
+## The expectation as the declaring module sees it. Peeling here rather than
+## at each leaf is the point: inference reaches `map.empty()`/`[]`/`None` with
+## a concrete type, and the result converts back through `assignable`. Outside
+## the declaring module nothing is peeled, so the expectation stays opaque.
+fn see_through_expected(cx: Cx, expected: Option[Ty]) -> Option[Ty] =
+  match expected {
+    Some(TyOpaque(_, _, ow, tgt)) -> if sees_through(cx, ow) { Some(tgt) } else { None }
+    _ -> None
+  }
+
+fn check_expr_at(cx: Cx, e: Expr, expected: Option[Ty]) -> (Cx, Ty, TExpr) !io =
   match e {
     EInt(v, lo, hi) -> (cx, TyInt, XInt(v, lo, hi))
     EFloat(v, lo, hi) -> (cx, TyFloat, XFloat(v, lo, hi))
@@ -8291,6 +8384,33 @@ test "check_module: a bare None arm infers from a concrete sibling arm" {
   let env: Map[String, ModExports] = map.empty()
   let (cx1, _) = check_module(test_cx(), m, env)
   assert len(cx1.diags) == 0
+}
+
+test "opaque type: the declaring module converts, and only it" {
+  # `sees_through` is the whole of opacity, so both directions of the
+  # conversion and the refusal belong in one test -- they are one line of code
+  let src =
+    "pub opaque type Id = Int\n" ++
+    "pub fn wrap(n: Int) -> Id = n\n" ++
+    "pub fn unwrap(i: Id) -> Int = i\n"
+  let (m, pdiags) = parser.parse_module(src)
+  assert len(pdiags) == 0
+  let env: Map[String, ModExports] = map.empty()
+  let (cx1, _) = check_module(cx_new(Some("ids"), None), m, env)
+  assert len(cx1.diags) == 0
+
+  # the same two conversions, seen from another module, are two errors
+  let (cxo, _) = check_module(cx_new(Some("ids"), None), m, env)
+  let env2 = map.insert(env, "ids", exports_of(cxo, m, "ids", "ids"))
+  let src2 =
+    "use ids.{Id}\n" ++
+    "pub fn peek(i: Id) -> Int = i\n" ++
+    "pub fn make(n: Int) -> Id = n\n"
+  let (m2, pdiags2) = parser.parse_module(src2)
+  assert len(pdiags2) == 0
+  let (cx2, _) = check_module(cx_new(Some("other"), None), m2, env2)
+  assert len(cx2.diags) == 2
+  assert str.contains(cx2.diags[0].msg, "Id")
 }
 
 test "check_module: an inference cycle must annotate" {
