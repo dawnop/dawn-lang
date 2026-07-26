@@ -41,6 +41,7 @@ use tast.{
   TFun, TConst, TModule, WitRef, WForward, WConcrete, WApply
 }
 use types.{
+  intrinsics, intr_at,
   adt_self_ty, Ty, TyInt, TyFloat, TyBool, TyString, TyBytes, TyCursor, TyUnit, TyNever,
   TyError, TyVar, TyAdt, TyList, TyMap, TySet, TyArray, TyJava, TyTuple, TyFn,
   Eff, EPure, EIo, EffVar, EUnion, eff_union, lub_eff, eff_subsumes, eff_suffix,
@@ -2964,20 +2965,13 @@ test "binary checking covers the operator families" {
 ## std/cursor — visible when checking std itself, hidden from user code.
 pub fn internal_builtins() -> Set[String] = {
   var out: Set[String] = set.empty()
-  for op in ["empty", "from", "insert", "remove", "get", "has", "size", "keys", "values", "entries"] {
-    out = set.insert(out, "map_" ++ op)
+  for n in map.keys(intrinsics()) {
+    match intr_at(n) {
+      Some(i) -> if i.internal { out = set.insert(out, n) }
+      None -> ()
+    }
   }
-  for op in ["empty", "from", "insert", "remove", "has", "size", "to_list"] {
-    out = set.insert(out, "set_" ++ op)
-  }
-  for op in ["start", "end", "done", "char", "next", "prev", "slice", "skip"] {
-    out = set.insert(out, "cursor_" ++ op)
-  }
-  for op in ["new", "len", "get", "push", "with"] {
-    out = set.insert(out, "array_" ++ op)
-  }
-  out = set.insert(out, "popcount")
-  set.insert(out, "index_of_from")
+  out
 }
 
 ## The builtin table as visible from this module: user-code resolution skips

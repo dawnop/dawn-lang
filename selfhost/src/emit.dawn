@@ -16,6 +16,7 @@ use std/list
 use std/map
 use std/set
 use types.{
+  intr_at, Rt, RtLists, RtStrings, RtMaps, RtBytes, RtArray, RtIo,
   Ty, TyInt, TyFloat, TyBool, TyString, TyBytes, TyCursor, TyUnit, TyNever,
   TyError, TyVar, TyAdt, TyList, TyMap, TySet, TyArray, TyJava, TyTuple, TyFn,
   Adts, AdtI, CtorI, FieldI, adt_of, adt_jvm_name, ctor_jvm_name,
@@ -661,13 +662,6 @@ fn emit_scalar_cmp(g: Gen, t: Ty) -> Unit !io = {
   ()
 }
 
-fn is_map_builtin(name: String) -> Bool =
-  name == "map_empty" || name == "set_empty" || name == "map_from" || name == "set_from" ||
-  name == "map_insert" || name == "set_insert" || name == "map_remove" ||
-  name == "set_remove" || name == "map_get" || name == "map_has" || name == "set_has" ||
-  name == "map_size" || name == "set_size" || name == "map_keys" || name == "map_values" ||
-  name == "map_entries" || name == "set_to_list"
-
 ## The string/list/map/io half of the intrinsic contract, as one table.
 ## Every entry lowers to a single INVOKESTATIC into a backend runtime class;
 ## the descriptor is `method_desc` of the builtin signature and each arg is
@@ -675,32 +669,31 @@ fn is_map_builtin(name: String) -> Bool =
 ## `None` means the builtin is not a plain runtime call — it has bespoke
 ## bytecode in gen_builtin_call (panic, len, expect, cursor_slice, …). A second
 ## backend re-implements these same names against its own runtime.
-fn rt_intrinsic_target(name: String) -> Option[(String, String)] =
-  if name == "get" { Some((LISTS_CLASS, "get")) }
-  else if name == "range" { Some((LISTS_CLASS, "range")) }
-  else if name == "sort_by" { Some((LISTS_CLASS, "sortBy")) }
-  else if name == "join" { Some((STRINGS_CLASS, "join")) }
-  else if name == "parse_int" { Some((STRINGS_CLASS, "parseInt")) }
-  else if name == "parse_float" { Some((STRINGS_CLASS, "parseFloat")) }
-  else if name == "cursor_start" { Some((STRINGS_CLASS, "cursorStart")) }
-  else if name == "cursor_end" { Some((STRINGS_CLASS, "cursorEnd")) }
-  else if name == "cursor_done" { Some((STRINGS_CLASS, "cursorDone")) }
-  else if name == "cursor_char" { Some((STRINGS_CLASS, "cursorChar")) }
-  else if name == "cursor_next" { Some((STRINGS_CLASS, "cursorNext")) }
-  else if name == "cursor_prev" { Some((STRINGS_CLASS, "cursorPrev")) }
-  else if name == "cursor_skip" { Some((STRINGS_CLASS, "cursorSkip")) }
-  else if name == "index_of_from" { Some((STRINGS_CLASS, "indexOfFrom")) }
-  else if name == "java_try" { Some((IO_CLASS, "javaTry")) }
-  else if name == "catch_panic" { Some((IO_CLASS, "catchPanic")) }
-  else if name == "code_points" || name == "from_code_points" { Some((STRINGS_CLASS, name)) }
-  else if str.starts_with(name, "str_") { Some((STRINGS_CLASS, name)) }
-  else if str.starts_with(name, "bytes_") { Some((BYTES_CLASS, name)) }
-  else if str.starts_with(name, "io_") { Some((IO_CLASS, name)) }
-  else if str.starts_with(name, "array_") || name == "popcount" {
-    Some((ARRAY_CLASS, name))
+## The JVM class each runtime module is. The *which module* half is declared
+## with the intrinsic (types.intrinsics); this is the only part that is the
+## JVM's business, which is what makes the same table usable by emitc.
+fn rt_class(o: Rt) -> String =
+  match o {
+    RtLists -> LISTS_CLASS
+    RtStrings -> STRINGS_CLASS
+    RtMaps -> MAPS_CLASS
+    RtBytes -> BYTES_CLASS
+    RtArray -> ARRAY_CLASS
+    RtIo -> IO_CLASS
   }
-  else if is_map_builtin(name) { Some((MAPS_CLASS, name)) }
-  else { None }
+
+fn rt_intrinsic_target(name: String) -> Option[(String, String)] =
+  match intr_at(name) {
+    Some(i) ->
+      match i.rt {
+        Some(t) -> {
+          let (o, m) = t
+          Some((rt_class(o), m))
+        }
+        None -> None
+      }
+    None -> None
+  }
 
 fn push_cmp_result(g: Gen, jump_if_true: Int) -> Unit !io = {
   let true_l = Label.new()

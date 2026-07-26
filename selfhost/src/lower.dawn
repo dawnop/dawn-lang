@@ -17,6 +17,7 @@ use std/list
 use std/map
 use std/str
 use types.{
+  intr_at,
   subst,
   Ty, TyInt, TyFloat, TyBool, TyString, TyUnit, TyNever, TyError, TyVar,
   TyAdt, TyList, TyTuple, TyFn, TyBytes, TyCursor, TyMap, TySet, TyArray, TyJava,
@@ -172,17 +173,14 @@ fn adapt_in(e: CExpr, actual: Ty, declared: Ty) -> CExpr =
 ## 5)` written directly in std (rather than through the generic wrapper that
 ## had already erased 5) emitted a long where the descriptor said Object, and
 ## the class failed verification.
+## The signature of an intrinsic whose arguments and result cross erased -- a
+## container primitive. Which those are is declared with the intrinsic
+## (types.intrinsics) rather than guessed from the name here.
 fn erased_builtin_sig(name: String) -> Option[Sig] =
-  if str.starts_with(name, "array_") || is_map_builtin(name) {
-    map.get(builtins(), name)
-  } else {
-    None
+  match intr_at(name) {
+    Some(i) -> if i.erased { Some(i.sig) } else { None }
+    None -> None
   }
-
-## The persistent Map/Set intrinsics -- the read side takes an erased key, the
-## write side an erased key and value.
-fn is_map_builtin(name: String) -> Bool =
-  str.starts_with(name, "map_") || str.starts_with(name, "set_")
 
 fn adapt_out(e: CExpr, declared: Ty, actual: Ty) -> CExpr =
   match declared {
