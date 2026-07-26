@@ -132,3 +132,56 @@ pub fn max[T: Ord](xs: List[T]) -> Option[T] = max_by(xs, fn(x) => x)
 
 ## The first least element; `None` when empty. Elements need `Ord`.
 pub fn min[T: Ord](xs: List[T]) -> Option[T] = min_by(xs, fn(x) => x)
+
+# ---- Eq / Hash / Ord for List (trait-v2-design.md 决策 6) ----
+#
+# Until trait v2 these three were the compiler's business: `==` on a list fell
+# through to a `struct_eq` intrinsic, which each backend answered its own way,
+# and `Ord[List[T]]` did not exist at all, so `sort` refused a list of lists.
+# A conditional impl is how a container says what it means, in Dawn, once.
+#
+# The hash matches the shape the JVM's list hash already had (seed 1, step
+# `31 * acc + h`), because `hash` and the runtime's own bucketing must not
+# disagree about the same value.
+
+fn eq_go[T: Eq](a: List[T], b: List[T], i: Int) -> Bool =
+  if i == len(a) {
+    true
+  } else if eq(get(a, i).expect("index below length"), get(b, i).expect("index below length")) {
+    eq_go(a, b, i + 1)
+  } else {
+    false
+  }
+
+## Same length, and equal elements in order.
+impl[T: Eq] Eq[List[T]] {
+  fn eq(a: List[T], b: List[T]) -> Bool =
+    if len(a) != len(b) { false } else { eq_go(a, b, 0) }
+}
+
+fn hash_go[T: Hash](xs: List[T], i: Int, acc: Int) -> Int =
+  if i == len(xs) {
+    acc
+  } else {
+    hash_go(xs, i + 1, acc * 31 + hash(get(xs, i).expect("index below length")))
+  }
+
+impl[T: Hash] Hash[List[T]] {
+  fn hash(xs: List[T]) -> Int = hash_go(xs, 0, 1)
+}
+
+fn cmp_go[T: Ord](a: List[T], b: List[T], i: Int) -> Int =
+  if i == len(a) {
+    if i == len(b) { 0 } else { 0 - 1 }
+  } else if i == len(b) {
+    1
+  } else {
+    let c = cmp(get(a, i).expect("index below length"), get(b, i).expect("index below length"))
+    if c != 0 { c } else { cmp_go(a, b, i + 1) }
+  }
+
+## Lexicographic: the first differing element decides, and a prefix is less
+## than what extends it.
+impl[T: Ord] Ord[List[T]] {
+  fn cmp(a: List[T], b: List[T]) -> Int = cmp_go(a, b, 0)
+}

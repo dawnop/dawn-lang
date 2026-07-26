@@ -581,8 +581,11 @@ fn dict_ty() -> Ty = TyAdt(0 - 1, [])
 ## Build (once) the dictionary for a ground witness and return a reference to
 ## it. Every slot is resolved here, so a backend only has to lay out pointers.
 fn dict_ref(st: LSt, tid: Int, subject: Ty) -> (LSt, CExpr) = {
-  let no_goals: List[(Int, Ty)] = []
-  let (st1, key) = dict_def(st, tid, subject, no_goals)
+  # Ground, so every sub-goal is ground too and its dictionary is a compile
+  # time constant: this dictionary takes no arguments even where the impl
+  # behind it is conditional. Its slots still have to *pass* those constants,
+  # which is what `false` here tells them.
+  let (st1, key) = dict_def(st, tid, subject, sub_goals(st.impls, tid, subject), false)
   (st1, CDictRef(key, tid, subject, dict_ty()))
 }
 
@@ -593,7 +596,13 @@ fn dict_ref(st: LSt, tid: Int, subject: Ty) -> (LSt, CExpr) = {
 ## subject's own type arguments (§3.8). A slot body finds those arguments
 ## back through the dictionary it is already handed, so the argument list
 ## changes what the slots may *read*, not what shape they have.
-fn dict_def(st: LSt, tid: Int, subject: Ty, goals: List[(Int, Ty)]) -> (LSt, String) = {
+fn dict_def(
+  st: LSt,
+  tid: Int,
+  subject: Ty,
+  goals: List[(Int, Ty)],
+  param: Bool
+) -> (LSt, String) = {
   let key = dict_key(tid, subject)
   for d in st.dicts {
     if d.key == key { return (st, key) }
@@ -608,14 +617,14 @@ fn dict_def(st: LSt, tid: Int, subject: Ty, goals: List[(Int, Ty)]) -> (LSt, Str
         key: key,
         trait_id: tid,
         subject: subject,
-        nargs: len(goals),
+        nargs: if param { len(goals) } else { 0 },
         slots: []
       }]
   }
   var slots: List[CDictSlot] = []
   for entry in tr.methods {
     let (mn, ms) = entry
-    let (st2, slot) = dict_slot(st1, tr, tid, subject, key, goals, mn, ms)
+    let (st2, slot) = dict_slot(st1, tr, tid, subject, key, goals, param, mn, ms)
     st1 = st2
     slots = slots ++ [slot]
   }
@@ -647,6 +656,7 @@ fn dict_slot(
   subject: Ty,
   key: String,
   goals: List[(Int, Ty)],
+  param: Bool,
   mn: String,
   ms: MethodSig
 ) -> (LSt, CDictSlot) = {
@@ -654,14 +664,14 @@ fn dict_slot(
     let imp = impl_for(st, tid, subject)
     if provides(imp, mn) {
       let (st1, bridge) =
-        make_bridge(st, tr, tid, subject, owner_or(imp.owner, st.owner), mn, key, goals)
+        make_bridge(st, tr, tid, subject, owner_or(imp.owner, st.owner), mn, key, goals, param)
       return (st1, CSlotFn(st1.owner, bridge))
     }
   }
   if ms.has_default {
     return (st, CSlotDefault(owner_or(tr.owner, st.owner), mn))
   }
-  let (st1, name) = make_prim_slot(st, tr, tid, subject, key, goals, mn)
+  let (st1, name) = make_prim_slot(st, tr, tid, subject, key, goals, param, mn)
   (st1, CSlotFn(st1.owner, name))
 }
 
@@ -678,7 +688,8 @@ fn make_bridge(
   iowner: String,
   method: String,
   key: String,
-  goals: List[(Int, Ty)]
+  goals: List[(Int, Ty)],
+  param: Bool
 ) -> (LSt, String) = {
   let sg = trait_method_sig(tr, method)
   let psig = subst_subject(tr, sg, subject)
@@ -714,8 +725,15 @@ fn make_bridge(
     # and the only place to get them is the dictionary this bridge was handed.
     var ds: List[CExpr] = []
     var gi = 0
-    for _g in goals {
-      ds = ds ++ [CDictArg(CLocal(dsym, dict_ty()), st1.owner, key, gi, dict_ty())]
+    for g in goals {
+      let (gt, gty) = g
+      if param {
+        ds = ds ++ [CDictArg(CLocal(dsym, dict_ty()), st1.owner, key, gi, dict_ty())]
+      } else {
+        let (stG, d) = dict_expr(st1, gt, gty)
+        st1 = stG
+        ds = ds ++ [d]
+      }
       gi = gi + 1
     }
     let call = CCall(CImpl(iowner, tid, subject, method), args ++ ds, psig.ret)
@@ -765,6 +783,7 @@ fn make_prim_slot(
   subject: Ty,
   key: String,
   goals: List[(Int, Ty)],
+  param: Bool,
   method: String
 ) -> (LSt, String) = {
   let sg = trait_method_sig(tr, method)
@@ -789,8 +808,10 @@ fn make_prim_slot(
   var ai = 0
   for g in goals {
     let (gt, gty) = g
-    env = map.insert(env, dict_key(gt, gty),
-      CDictArg(CLocal(dsym, dict_ty()), st1.owner, key, ai, dict_ty()))
+    if param {
+      env = map.insert(env, dict_key(gt, gty),
+        CDictArg(CLocal(dsym, dict_ty()), st1.owner, key, ai, dict_ty()))
+    }
     ai = ai + 1
   }
   let (st4, body) = prim_relation(LSt { ..st1, dict_env: env }, tid, subject, args)
@@ -884,7 +905,7 @@ fn dict_expr(st: LSt, tid: Int, t: Ty) -> (LSt, CExpr) =
       } else {
         let goals = sub_goals(st.impls, tid, t)
         let (st1, ds) = goal_dicts(st, goals)
-        let (st2, key) = dict_def(st1, tid, t, goals)
+        let (st2, key) = dict_def(st1, tid, t, goals, true)
         (st2, CDictApply(key, ds, dict_ty()))
       }
   }
@@ -1312,7 +1333,8 @@ fn witness_value(st: LSt, w: WitRef) -> (LSt, CExpr) =
     # arguments' dictionaries.
     WApply(tid, subject, args) -> {
       let (st1, ds) = witness_values(st, args)
-      let (st2, key) = dict_def(st1, tid, subject, sub_goals(st1.impls, tid, subject))
+      let (st2, key) =
+        dict_def(st1, tid, subject, sub_goals(st1.impls, tid, subject), true)
       (st2, CDictApply(key, ds, dict_ty()))
     }
   }
