@@ -48,7 +48,7 @@ use types.{
   adt_of, trait_of, ty_show, ctor_render, sig_render, subst, subst_eff,
   ty_named, is_numeric, is_errorish, prelude_adts, prelude_traits, prelude_impls, bounds_of,
   builtins, opt_ty, result_ty, OPTION_ID, RESULT_ID, ORD_ID, EQ_ID, HASH_ID, SHOW_ID,
-  eq_scalars,
+  eq_scalars, hash_scalars,
   Impls, Head, head_of, impl_at, has_impl_at, insert_impl,
   is_eq_scalar, is_ground, expandable, type_args_of, sub_goals
 }
@@ -337,7 +337,17 @@ pub fn resolve_eff(cx: Cx, atoms: List[String]) -> (Cx, Eff) = {
 
 # ---- Map/Set key validity (spec §2.2) ----
 
-## The first Float/Bytes anywhere inside a would-be key type, or None.
+## The first Float/Bytes/Array anywhere inside a would-be key type, or None.
+##
+## The rule this encodes is now spelled elsewhere too: a key needs `Hash`, and
+## `Hash[Float]` no longer exists. It is not yet *derived* from that, because
+## an ADT still hashes structurally rather than through an impl, so asking the
+## table would reject every user type as a key. This walk and `uncomparable_part`
+## are the same shape and go together in S3, when the collections are Dawn and
+## every hashable type has a real impl to point at.
+##
+## Bytes and Array stay banned on their own terms whatever the table says: the
+## containers hash them by identity, not content (spec 2.3).
 pub fn invalid_key_part(cx: Cx, t: Ty, seen: Set[String]) -> Option[Ty] =
   match t {
     TyFloat -> Some(TyFloat)
@@ -1250,16 +1260,25 @@ test "prelude seeding wires names to ids" {
   assert map.has(cx.fns, "cmp")
   assert has_impl_at(cx.impl_table, ORD_ID, TyInt)
   assert not has_impl_at(cx.impl_table, ORD_ID, TyBool)
-  # Eq/Hash ride the same rail; they cover the scalars Ord deliberately skips
+  # Eq/Hash/Show ride the same rail, each over its own list of scalars: the
+  # three differ, and each difference is a decision rather than an oversight
   assert map.get(cx.traits_by_name, "Eq") == Some(EQ_ID)
   assert map.get(cx.traits_by_name, "Hash") == Some(HASH_ID)
+  assert map.get(cx.traits_by_name, "Show") == Some(SHOW_ID)
   assert map.has(cx.fns, "eq")
   assert map.has(cx.fns, "hash")
+  assert map.has(cx.fns, "show")
   for t in eq_scalars() {
     assert has_impl_at(cx.impl_table, EQ_ID, t)
+  }
+  for t in hash_scalars() {
     assert has_impl_at(cx.impl_table, HASH_ID, t)
   }
   assert not has_impl_at(cx.impl_table, ORD_ID, TyBytes)
+  # Float compares but does not order and does not hash (spec 4.3)
+  assert has_impl_at(cx.impl_table, EQ_ID, TyFloat)
+  assert not has_impl_at(cx.impl_table, ORD_ID, TyFloat)
+  assert not has_impl_at(cx.impl_table, HASH_ID, TyFloat)
 }
 
 ## What pass 1 learned about one `type` declaration, for pass 2 to finish.
@@ -4480,7 +4499,8 @@ pub fn resolve_witness(
           }
           let ts = ty_show(cx.adts, t)
           let hint = if trait_id == ORD_ID && not is_adt(t) {
-            "only Int, Float, String and types with an `impl Ord` can be ordered"
+            "orderable scalars are Int and String; Float has no total order (NaN), " ++
+              "and everything else needs an `impl Ord`"
           } else if is_nongeneric_adt(cx, t) {
             "define `impl " ++ tr.name ++ "[" ++ ts ++ "] { ... }` in the module declaring `" ++
               ts ++ "` or `" ++ tr.name ++ "`"
@@ -4677,7 +4697,7 @@ test "ctor values and witnesses" {
   assert ok4 == None
   assert cx4.diags[0].msg == "no impl of `Ord` for `Bool`"
   # Ord over a non-ADT gets the ordering-specific hint (the Kotlin implHint order)
-  assert cx4.diags[0].hint == "only Int, Float, String and types with an `impl Ord` can be ordered"
+  assert str.contains(cx4.diags[0].hint, "Float has no total order")
   # Eq over a type with no impl is the structural default, and it is the same
   # kind of witness as one an impl supplies -- the table, not the witness,
   # records which of the two it was

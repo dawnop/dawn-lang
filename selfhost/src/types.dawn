@@ -719,12 +719,20 @@ fn prelude_cond_impl(tid: Int, subject: Ty, tps: List[Ty]) -> ImplI = {
   }
 }
 
-## The scalars every prelude trait covers natively. Ord takes the subset that
-## is actually ordered -- Bool, Bytes and Cursor compare for equality but have
-## no `<`, which is why the two lists differ.
+## The scalars the backends compare for equality natively.
 pub fn eq_scalars() -> List[Ty] = [TyInt, TyFloat, TyBool, TyString, TyBytes, TyCursor]
 
-## Is this one of the scalars whose Eq/Hash the backend implements natively?
+## The scalars that *hash*, which is not the same list, and the difference is
+## `Float`.
+##
+## `Eq[Float]` is IEEE: `-0.0 == 0.0` is true and they have different bit
+## patterns, so no hash can agree with that equality and also with itself.
+## Rust reaches the same place by not implementing `Hash` for `f64`. One table
+## answered both questions until 2026-07-26, which is why `Float` could be a
+## Map key and two equal keys could land in different buckets.
+pub fn hash_scalars() -> List[Ty] = [TyInt, TyBool, TyString, TyBytes, TyCursor]
+
+## Is this one of the scalars whose equality the backend implements natively?
 pub fn is_eq_scalar(t: Ty) -> Bool = {
   for s in eq_scalars() {
     if s == t { return true }
@@ -732,11 +740,25 @@ pub fn is_eq_scalar(t: Ty) -> Bool = {
   false
 }
 
-## The subset the prelude also orders. The two lists differ for a reason that
-## is capability, not semantics: Bool, Bytes and Cursor compare for equality
-## but have no `<`. (Where Eq and Ord differ on values they both accept --
-## Float's NaN and -0.0 -- that is deliberate; see spec 4.3.)
-pub fn ord_scalars() -> List[Ty] = [TyInt, TyFloat, TyString]
+pub fn is_hash_scalar(t: Ty) -> Bool = {
+  for s in hash_scalars() {
+    if s == t { return true }
+  }
+  false
+}
+
+## The subset the prelude also *orders*, and `Float` is not in it.
+##
+## `Ord` is a total order -- that is what `sort` and `derive Ord` need, and
+## what a `[T: Ord]` bound promises. Float has none: NaN is unordered against
+## everything including itself. Java's `Double.compare` and Rust's `total_cmp`
+## invent one by fiat, and Dawn used to copy that; the cost is a `cmp` whose
+## answer contradicts the `<` right next to it. So Float drops to a partial
+## order (2026-07-26), which in Dawn means *one impl fewer* rather than one
+## trait more: `<`/`<=`/`>`/`>=` on scalars never consulted a witness in the
+## first place, so they still work and still mean IEEE. What changes is that
+## `[T: Ord]` no longer accepts Float.
+pub fn ord_scalars() -> List[Ty] = [TyInt, TyString]
 
 pub fn is_ord_scalar(t: Ty) -> Bool = {
   for s in ord_scalars() {
@@ -762,7 +784,10 @@ pub fn is_show_scalar(t: Ty) -> Bool = {
 pub fn prelude_impls() -> List[ImplI] = {
   var out = map(ord_scalars(), fn(t) => prelude_impl(ORD_ID, t))
   for t in eq_scalars() {
-    out = out ++ [prelude_impl(EQ_ID, t), prelude_impl(HASH_ID, t)]
+    out = out ++ [prelude_impl(EQ_ID, t)]
+  }
+  for t in hash_scalars() {
+    out = out ++ [prelude_impl(HASH_ID, t)]
   }
   for t in show_scalars() {
     out = out ++ [prelude_impl(SHOW_ID, t)]
@@ -1004,10 +1029,13 @@ test "prelude shapes" {
   assert trait_of(traits, EQ_ID).name == "Eq"
   assert trait_of(traits, HASH_ID).name == "Hash"
   assert trait_of(traits, SHOW_ID).name == "Show"
-  # Ord over the ordered scalars, Eq and Hash over all of them, Show over the
-  # printable ones plus the two prelude ADTs that declare `derive Show`
-  assert len(prelude_impls()) ==
-    len(ord_scalars()) + 2 * len(eq_scalars()) + len(show_scalars()) + 2
+  # each trait over its own list -- one table per question, which is the point
+  assert len(prelude_impls()) == len(ord_scalars()) + len(eq_scalars()) +
+    len(hash_scalars()) + len(show_scalars()) + 2
+  # the three lists differ, and each difference is a decision (spec 4.3)
+  assert not is_ord_scalar(TyFloat)
+  assert is_eq_scalar(TyFloat)
+  assert not is_hash_scalar(TyFloat)
 }
 
 test "builtin table renders signatures" {

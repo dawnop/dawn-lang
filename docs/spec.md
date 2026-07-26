@@ -413,10 +413,19 @@ let area = {
   panic 而非 Java 异常，故 `java_try` 不拦、只有 `catch_panic` 拦（§9.8）。
 - `Float` 算术遵循 IEEE 754：除零不 panic（得 `±Inf`/`NaN`）；`==` 与 `< <= > >=`
   是 IEEE 比较——NaN 与任何值（含自身）比较均为 false，`-0.0 == 0.0` 为 true。
-- **`Ord.cmp` 对 `Float` 是全序**（Java `Double.compare` 语义）：NaN 大于一切、
-  `-0.0` 排在 `0.0` 之前。`sort`/`max`/`min`/`max_by`/`min_by`/`derive Ord` 走它，
-  与 `<` 的 IEEE 语义在 NaN/`-0.0` 上**刻意不同**（同 Java `compare` 与 Rust
-  `total_cmp` 的取舍：比较要诚实，排序要成序）。
+- **`Float` 没有 `Ord`**（2026-07-26 改；此前照 Java `Double.compare` 给了一个
+  全序）。NaN 与任何值（含自身）都不可比，所以 Float 上没有全序可给，而
+  `Ord` 正是 `sort`/`max`/`min`/`max_by`/`min_by`/`derive Ord` 与 `[T: Ord]`
+  所依赖的东西。「降成偏序」在 Dawn 里是**少一条 impl**，不是多一个 trait：
+  `<`/`<=`/`>`/`>=` 对标量本就不解见证，照旧可用、照旧是 IEEE 语义。
+  变的只有一条：`[T: Ord]` 不再收 Float，`cmp(1.5, 2.5)` 不再编译。
+  （Rust 的 `total_cmp` 是 `f64` 的固有方法，`f64` 同样没有 `Ord` impl。）
+- **`Float` 没有 `Hash`**，因此不能作 Map/Set 的键：`-0.0 == 0.0` 为真而两者
+  位模式不同，没有哈希能同时与这个相等和自身一致（同 Rust）。
+- **`Float` 有 `Eq`，而它不自反**（`nan == nan` 为 false）。这是 IEEE 的事实，
+  不是漏洞，Dawn **不**为此拆出 `PartialEq`/`Eq` 两个 trait（2026-07-26 明确
+  裁定不拆）：Dawn 只有一个 `Eq`，拆开会让 `1.5 == 2.5` 这种日常写法多背一层
+  概念，代价远大于收益。用到自反性的地方（容器查找）另有 Float 不能作键这条挡着。
 - `Float` 的 `to_string`/`Show` 渲染 = JVM `Double.toString`（最短往返表示，
   `NaN`/`Infinity`/`-Infinity` 照字面）。
 

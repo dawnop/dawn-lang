@@ -331,6 +331,26 @@ NoSuchMethodError: 'long ordprim.dawn$default$Ord$cmp(Object, Object, Object)'
 
 ## 7. S1.5:不是「六表合一」,是「拆开被合错的、合并被拆错的」
 
+> **已落地(2026-07-26)。** 两件破坏性改动照裁定做了:`Hash[Float]` 与
+> `Ord[Float]` 都删了,`ord_scalars()` 现在是 `[Int, String]`,`hash_scalars()`
+> 是新表(eq 减去 Float)。实测影响面确实只有一处(`examples/traits.dawn` 的
+> `cmp(1.5, 1.5)`),已改成演示新规则。
+>
+> 三处与设计不同,记在这里:
+>
+> 1. **「要合的」那半已经不用做了。** `impl_subject_ok` 在 trait v2 刀 2 里就被
+>    `impl_shape_bad` 取代了,主体合法性现在由 `head_of` 一处决定——Bytes/Cursor
+>    自然在内,「语言给自己写了用户被禁止写的 impl」这条自相矛盾随之消失。
+>    收口有时是别的刀顺手完成的,动手前值得再查一次。
+> 2. **`invalid_key_part` 还改不成「问表」。** 它要走进容器和 ADT 里面,而 ADT
+>    今天仍是结构性哈希、没有 impl 可指,照表问会把每个用户类型都判成不能当键。
+>    这条与 `uncomparable_part` 同形,一起归 S3。措辞已改准,并把「规则其实已经
+>    是 `Hash` 解不出来」写进了注释。
+> 3. **`Eq[Float]` 明确不裁。** 它不自反(`nan == nan` 为 false),而 S1 步 2 正是
+>    拿「不自反」挡的函数值。仍然留着:Dawn 只有一个 `Eq`,拆成 `PartialEq`/`Eq`
+>    会让 `1.5 == 2.5` 这种日常写法多背一层概念,代价大于收益;要自反性的地方
+>    (容器查找)已由「Float 不能作键」挡住。**这是裁定,不是遗漏。**
+
 plan 的一句话是「标量能力表六合一」。逐个看过之后,这句话**不准确**——六张表回答的
 不是同一个问题:
 
