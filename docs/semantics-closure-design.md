@@ -289,6 +289,33 @@ NoSuchMethodError: 'long ordprim.dawn$default$Ord$cmp(Object, Object, Object)'
 
 ## 6. S1.4:`Show` 成为第四个 prelude trait
 
+> **已落地(2026-07-26,v0.16.0–v0.17.0)。** 下面的判断都成立,动手时另外撞上四件
+> 事,记在这里:
+>
+> 1. **线又画早了一刀。** v0.16.0 注册了 trait、发了版,然后发现 `Show` 从没进
+>    `traits_by_name`——种子认得这个形状,却拒绝用户写 `impl Show[X]`,std 一行也
+>    写不出来。同一条轴、同一类错误,trait v2 刚教过一遍(那次 2 版变 4 版)。
+>    **判据不是「种子解析得了吗」,是「种子能编译一个用了它的 std 吗」**,而这次
+>    还要再加一条:**能编译一个用了它的用户程序吗**。
+> 2. **发接口的那段扫描读错了东西。** 它只认「某个函数签名带这个 bound」,可
+>    条件 impl 是字典出现的另一条路——它自己的字典类实现该接口,它的实参实现
+>    bound 命名的接口——一个 bound 都不写也会走到。`Eq` 有同样的洞,只是 std 的
+>    `eq_go[T: Eq]` 恰好在每个程序的 fn 命名空间里,把它盖住了。
+> 3. **解释器不能只会拒绝。** 渲染一进字典轨,折叠一个含容器的 const 就撞上
+>    `no_traits`——那会把「错答案」变成「编译不过」,更糟。所以这一刀顺手让 comptime
+>    真的会走字典:字典是个带 key 的值,key 找槽表,槽是普通函数,字典本身当尾参
+>    传进去(JVM 的字典类就是这么干的)。impl 方法得另立一张表按 (trait, head, 方法)
+>    找,因为一个模块里两条 impl 可以同名,而 `by_owner` 只按名字键。
+> 4. **一个 trait 兼两职,线只能画在这儿。** `to_string("a")` 是 `a`,`["a"]` 是
+>    `["a"]`——引号是「这是值不是标点」的记号。`show` 只能是其中一份;选了嵌套那份,
+>    于是经 `[T: Show]` 渲染一个字符串带引号,`${x}` 在静态类型就是 `String` 时不带。
+>    Rust 拆成 Display/Debug 才没有这个取舍。
+>
+> 出口达成:`show_derive:emitc` 与 `const_fold:jvm` 都删了,**差分 harness 里
+> 一条「编造的答案」都不剩**,三条 known-red 全是 native 还没有的能力。
+> 代价一处:`to_string` 带 bound 之后不能再当函数值传(`map(xs, to_string)`),
+> 全生态一处(`examples/calc.dawn`),诊断里写着改法。
+
 今天 `Show` 不是 trait,是三件东西的合称:`AdtI.derives_show` 标志、
 `is_showable`/`is_showable_field` 两个静态谓词(`checker.dawn:986`/`1009`)、
 运行时 `dawn/rt/Show` 的 instanceof 链。tagged union 没有链可走,所以 native

@@ -384,9 +384,21 @@ pub fn append_const(m: MethodVisitor, s: String) -> Unit !io = {
   ()
 }
 
-## dawn/rt/Show: the runtime side of `derive Show`. show(Object) renders any
-## erased Dawn value — Strings are quoted, Lists/Maps/Sets recurse, byte[] is a
-## "<N bytes>" summary, everything else delegates to String.valueOf.
+## dawn/rt/Show: rendering an *erased* value, which is a different job from the
+## `Show` trait and all that is left to this class.
+##
+## The trait is what a Dawn program reaches: `to_string` and `${...}` resolve a
+## witness and lowering spells the rendering out in Core, so both backends
+## compile one definition (semantics-closure-design.md 6). Two callers have no
+## static type to resolve from and so cannot: `Maps.index`, whose panic text
+## names the key it did not find, and `quote`, which lowering emits by name
+## because a String field has to come out quoted.
+##
+## show(Object) is therefore a best effort over what the JVM can see -- Strings
+## quoted, Lists/Maps/Sets recursed, byte[] summarised, everything else through
+## String.valueOf, which finds the ADT `toString` below. It is not the
+## language's answer to "how does this render"; it is what a panic message can
+## say about a value whose type was thrown away.
 pub fn gen_show_class(supers: List[String]) -> Bytes !io = {
   let jstr = "java/lang/String"
   let jlist = "java/util/List"
@@ -2545,7 +2557,12 @@ pub fn hash_of(m: MethodVisitor, t: Ty) -> Unit !io = {
   ()
 }
 
-## `derive Show` rendering: Name, Name(v0, v1), or Name { f0: v0, f1: v1 } for records.
+## The ADT's `toString`: Name, Name(v0, v1), or Name { f0: v0, f1: v1 }.
+##
+## Not what `to_string` compiles to any more -- that is a Core body now. This
+## is what `String.valueOf` finds when a panic message renders an erased value,
+## and what a Java caller sees. Kept in step with the Core rendering by hand,
+## which is the price of the JVM having a universal `toString` at all.
 fn gen_to_string_method(cw: AdtClassWriter, adts: Adts, sub: String, ci: CtorI) -> Unit !io = {
   let m = cw.method(ACC_PUBLIC, "toString", "()Ljava/lang/String;").expect("mv")
   m.visitCode()

@@ -7,6 +7,11 @@
 > 「留 v2」的地方，多数已经做了：条件 impl（`impl[T: Eq] Eq[List[T]]`）、`==` 走
 > `Eq`、`derive Ord` 对泛型类型解禁、std 给 `List` 写了 `Eq`/`Hash`/`Ord`。设计与
 > 实测记录在 [`trait-v2-design.md`](trait-v2-design.md)，§5 的范围表下面标了逐条现状。
+>
+> **`Show` 也成了 trait（2026-07-26，v0.16.0–v0.17.0）。** 本文开头那句「`==`/Show
+> 暂不动」两半都过期了：`Show` 是第四个预置 trait，`to_string` 的签名是 `[T: Show]`，
+> `derive Show` 铸 impl，std 给四种容器都写了条件 impl。见
+> [`semantics-closure-design.md`](semantics-closure-design.md) §6。
 
 ## 0. 一句话
 

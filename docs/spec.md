@@ -72,8 +72,8 @@ O(n) 换算——实测与设计取舍见 [`seq6-research.md`](seq6-research.md)
 **花括号 `{` `}` 是普通字符，无需转义**——写 JSON、CSS、代码生成很方便。
 
 插值由 `$` 引导（同 Kotlin/Swift）：`$name` 插入一个简单标识符，`${expr}` 插入
-任意表达式；被插值的类型必须实现 `to_string`（v0.1：所有内建类型与派生了 `Show`
-的用户类型，见 §4.3）：
+任意表达式；被插值的类型必须有 `Show` 见证——预置标量、写了 `impl Show` 或
+`derive Show` 的用户类型、以及元素可渲染的容器与元组（见 §4.3）：
 
 ```dawn
 let n = 3
@@ -310,6 +310,11 @@ fn sort2[T: Ord2](xs: List[T]) -> List[T] = ...   # 约束：[T: Trait (+ Trait)
 ```
 
 - trait 恰有一个类型参数；方法进入模块函数命名空间（可直呼、可 UFCS、可管道）。
+- **预置 trait 四个**：`Ord`（`cmp`，背后是 `<`/`<=` 之外的排序）、`Eq`（`eq`，
+  背后是 `==`/`!=`）、`Hash`（`hash`）、`Show`（`show`，背后是 `to_string` 与
+  `${...}`）。标量的 impl 随语言提供；`derive Ord` / `derive Show` 铸的是普通
+  impl，泛型类型上铸的是条件 impl。元组没有 head，写不出 impl，四者对元组由
+  编译器按结构合成。
 - **一致性**：全程序每个「trait × 类型」至多一个 impl；**孤儿规则**：impl 只能
   写在 trait 或主体类型的声明模块。impl 全局生效，不需要 `use`。
 - **主体形状**：一个类型构造器，作用在**互不相同的类型变量**上，而那些变量恰好是
@@ -422,13 +427,22 @@ let area = {
   受 `[T: Ord]` 约束的类型参数同理。
 - 用户类型的打印：`type` 声明后加 `derive Show` 获得 `to_string` 与字符串插值支持
   （可 derive 的还有 `Ord`，见 §3.5；多个用逗号：`derive Show, Ord`）。
+  `Show` 是**预置 trait**，`derive Show` 铸的就是一条 impl，所以也可以手写
+  `impl Show[T] { fn show(x: T) -> String }` 自定义渲染，泛型类型则用条件 impl
+  （`impl[T: Show] Show[Box[T]]`）。`to_string` 的签名是 `[T: Show]`。
   渲染形如合法 Dawn 源码：
   - 无载荷构造器 → `Red`；带位置字段的构造器 → `Circle(1.5)`；
   - 记录 → `Point { x: 0.0, y: 2.5 }`（带字段名）；
   - `String` 字段带双引号并转义（`"a\nb"`）；`Int`/`Float`/`Bool` 同各自 `to_string`；
   - 容器递归渲染：`List` → `[a, b]`、元组 → `(a, b)`、`Option`/`Result` 随载荷（`Some(Red)`）。
   - 每个字段类型必须可打印（函数字段、未 `derive Show` 的嵌套用户类型 → 声明处报错）；
-    泛型类型可打印 **当且仅当** 其类型实参都可打印（`Box[Int]` 可，`Box[fn(...)→...]` 不可）。
+    泛型类型可打印 **当且仅当** 其类型实参都可打印（`Box[Int]` 可，`Box[fn(...)→...]` 不可）——
+    `derive Show` 在泛型类型上铸的是 `impl[T: Show] Show[Box[T]]`，这条就是它的 bound。
+  - **顶层的 `String` 不加引号，嵌套的加。** `to_string("a")` 是 `a`，而
+    `["a"]` 是 `["a"]`——引号是「这里是一个值，不是周围的标点」的记号。
+    trait 方法 `show` 是**嵌套**那一份，所以经 `[T: Show]` 约束渲染一个字符串
+    会带引号；`to_string`/`${}` 只在**静态类型就是 `String`** 时去掉它。
+    一个 trait 兼二职，这条线就是它的位置（Rust 拆成 Display 与 Debug）。
 
 ### 4.4 管道
 
@@ -1221,7 +1235,7 @@ let n = 42                       var acc = 0
 let (a, b) = pair                acc = acc + 1
 if x > 0 { "pos" } else { "non-pos" }
 match opt { Some(v) -> v, None -> fallback }
-xs |> filter(fn(x) => x > 0) |> map(to_string) |> join(", ")
+xs |> filter(fn(x) => x > 0) |> map(fn(x) => to_string(x)) |> join(", ")
 xs[0]                            # 下标：越界 panic；问询用 get（§4.8）
 read_file(path)?                 # Result 传播
 if n < 0 { return "negative" }   # 提前返回（§4.9）

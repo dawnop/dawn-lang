@@ -1056,66 +1056,48 @@ pub fn uncomparable_err(cx: Cx, t: Ty, bad: Ty, lo: Int, hi: Int) -> Cx = {
   cerr_h(cx, msg, lo, hi, hint)
 }
 
-## A concrete type is printable now: primitives, containers/ADTs of printable types.
-pub fn is_showable(cx: Cx, t: Ty) -> Bool =
+## Can a field of a `derive`d impl carry that capability?
+##
+## The impl table answers, rather than a hand-written walk over the type: the
+## derived impl carries `[T: tid]` for each of the type's own parameters, so a
+## field at one of them is covered by whatever instantiates it, and everything
+## else needs a real impl -- possibly a conditional one, whose own bounds this
+## asks about in turn. A tuple has no head to name an impl with, so it is the
+## one shape the compiler still answers for itself (trait-v2-design decision 7).
+fn derived_field_ok(cx: Cx, tid: Int, own: List[Ty], t: Ty) -> Bool =
   match t {
-    TyInt | TyFloat | TyBool | TyString | TyBytes -> true
-    TyList(e) -> is_showable(cx, e)
-    TyMap(k, v) -> is_showable(cx, k) && is_showable(cx, v)
-    TySet(e) -> is_showable(cx, e)
-    TyTuple(elems) -> {
-      for e in elems {
-        if not is_showable(cx, e) { return false }
+    TyVar(_, vid) -> {
+      for o in own {
+        match o {
+          TyVar(_, ovid) -> if ovid == vid { return true }
+          _ -> ()
+        }
       }
-      true
+      false
     }
-    TyAdt(aid, targs) -> {
-      if not adt_of(cx.adts, aid).derives_show { return false }
-      for a in targs {
-        if not is_showable(cx, a) { return false }
+    _ ->
+      match impl_at(cx.impl_table, tid, t) {
+        Some(imp) ->
+          if len(imp.tparams) == 0 {
+            true
+          } else {
+            for g in sub_goals(cx.impl_table, tid, t) {
+              let (_, gty) = g
+              if not derived_field_ok(cx, tid, own, gty) { return false }
+            }
+            true
+          }
+        None ->
+          match t {
+            TyTuple(es) -> {
+              for e in es {
+                if not derived_field_ok(cx, tid, own, e) { return false }
+              }
+              true
+            }
+            _ -> false
+          }
       }
-      true
-    }
-    _ -> false
-  }
-
-## A field type may derive Show: like is_showable but type parameters pass.
-pub fn is_showable_field(cx: Cx, t: Ty) -> Bool =
-  match t {
-    TyInt | TyFloat | TyBool | TyString | TyBytes | TyVar(_, _) -> true
-    TyList(e) -> is_showable_field(cx, e)
-    TyMap(k, v) -> is_showable_field(cx, k) && is_showable_field(cx, v)
-    TySet(e) -> is_showable_field(cx, e)
-    TyTuple(elems) -> {
-      for e in elems {
-        if not is_showable_field(cx, e) { return false }
-      }
-      true
-    }
-    TyAdt(aid, targs) -> {
-      if not adt_of(cx.adts, aid).derives_show { return false }
-      for a in targs {
-        if not is_showable_field(cx, a) { return false }
-      }
-      true
-    }
-    _ -> false
-  }
-
-## A targeted hint for why `t` is not printable.
-pub fn show_hint(cx: Cx, t: Ty) -> String =
-  match t {
-    TyAdt(aid, _) -> {
-      let a = adt_of(cx.adts, aid)
-      if not a.derives_show {
-        "add `derive Show` to `type " ++ a.name ++ "`"
-      } else {
-        "one of its type arguments is not printable"
-      }
-    }
-    TyVar(_, _) -> "a type parameter is not printable; require a concrete printable type"
-    TyFn(_, _, _) -> "functions cannot be printed"
-    _ -> "printable types are Int, Float, Bool, String, and `derive Show` values"
   }
 
 ## Int/Float/Bool/String and List/tuple/record/ADT built from them (spec §7.2).
@@ -1189,16 +1171,11 @@ test "unification binds and checks variables" {
   assert map.get(em3, 101) == Some(EIo)
 }
 
-test "printability and const-serializability" {
+test "const-serializability" {
   let cx = test_cx()
-  assert is_showable(cx, TyList(TyInt))
-  assert is_showable(cx, opt_ty(TyString))
-  assert not is_showable(cx, TyFn([], TyUnit, EPure))
-  assert not is_showable(cx, TyUnit)
   assert is_const_serializable(cx, opt_ty(TyTuple([TyInt, TyString])), set.empty())
   assert not is_const_serializable(cx, TyMap(TyInt, TyInt), set.empty())
   assert not is_const_serializable(cx, TyVar("T", 5), set.empty())
-  assert show_hint(cx, TyFn([], TyUnit, EPure)) == "functions cannot be printed"
 }
 
 # ---- declaration passes ----
@@ -1622,59 +1599,6 @@ pub fn pass_resolve_aliases(cx: Cx) -> Cx = {
   cx1
 }
 
-## Pass 2.5: derive Show — every field must be renderable (type parameters
-## allowed, resolved at use).
-pub fn pass_derive_show(cx: Cx, m: Module, shells: List[Option[Shell]]) -> Cx = {
-  var cx1 = cx
-  var di = 0
-  for d in module_types(m) {
-    let sh = match shells[di] {
-      None -> {
-        di = di + 1
-        continue
-      }
-      Some(s) -> s
-    }
-    let info = adt_of(cx1.adts, sh.adt)
-    if not info.derives_show {
-      di = di + 1
-      continue
-    }
-    var pi = 0
-    for c in d.ctors {
-      let slot = match accepted_slot(sh, pi) {
-        None -> {
-          pi = pi + 1
-          continue
-        }
-        Some(s2) -> s2
-      }
-      let ci = info.ctors[slot]
-      var fi = 0
-      for f in ci.fields {
-        if not is_showable_field(cx1, f.ty) {
-          # the field's declaration span: find the parsed field by name
-          var flo = d.nlo
-          var fhi = d.nhi
-          for pf in c.fields {
-            if pf.name == f.name {
-              flo = pf.lo
-              fhi = pf.hi
-            }
-          }
-          cx1 = cerr_h(cx1, "cannot derive Show for `" ++ info.name ++ "`: field `" ++
-              f.name ++ "` of type " ++ ty_show(cx1.adts, f.ty) ++ " is not printable",
-            flo, fhi, show_hint(cx1, f.ty))
-        }
-        fi = fi + 1
-      }
-      pi = pi + 1
-    }
-    di = di + 1
-  }
-  cx1
-}
-
 test "alias cycles and derive Show violations are reported at the declaration" {
   # alias A = B, alias B = A  → cycle; type P = { f: fn() -> Unit } derive Show → not printable
   let m = Module { decls: [
@@ -1734,7 +1658,9 @@ test "alias cycles and derive Show violations are reported at the declaration" {
   let (cx1, shells) = pass_type_shells(cx, m)
   var cx2 = pass_ctor_fields(cx1, m, shells)
   cx2 = pass_resolve_aliases(cx2)
-  cx2 = pass_derive_show(cx2, m, shells)
+  # the derive check needs the impl table: what a field must have is an impl
+  let (cx3, _) = pass_register_impls(cx2, m, shells)
+  cx2 = cx3
   var saw_cycle = false
   var saw_show = false
   for dg in cx2.diags {
@@ -2291,7 +2217,9 @@ pub fn pass_register_impls(
     }
     impl_sigs = impl_sigs ++ [msigs]
   }
-  # derive Ord field check, after every impl is known
+  # the derived field checks, after every impl is known -- which is why they
+  # are here and not with the declaration passes: what a field needs is an
+  # impl, and the module's own are registered just above
   di = 0
   for d in module_types(m) {
     let sh = match shells[di] {
@@ -2302,36 +2230,34 @@ pub fn pass_register_impls(
       Some(s) -> s
     }
     let info = adt_of(cx1.adts, sh.adt)
-    let derived_ord = match impl_at(cx1.impl_table, ORD_ID, TyAdt(sh.adt, info.tparams)) {
-      Some(ii) -> info.derives_ord && ii.derived
-      None -> false
-    }
-    if not derived_ord {
-      di = di + 1
-      continue
-    }
-    var dlo = d.nlo
-    var dhi = d.nhi
-    for b in d.derives {
-      if b.name == "Ord" {
-        dlo = b.lo
-        dhi = b.hi
+    let subject = TyAdt(sh.adt, info.tparams)
+    let wanted = [
+      ("Ord", ORD_ID, info.derives_ord, "orderable"),
+      ("Show", SHOW_ID, info.derives_show, "printable")
+    ]
+    for want in wanted {
+      let (dname, tid, asked, adj) = want
+      let derived = match impl_at(cx1.impl_table, tid, subject) {
+        Some(ii) -> asked && ii.derived
+        None -> false
       }
-    }
-    for ci in info.ctors {
-      for f in ci.fields {
-        let scalar_ok = f.ty == TyInt || f.ty == TyFloat || f.ty == TyString
-        let adt_ok = match f.ty {
-          TyAdt(_, _) -> has_impl_at(cx1.impl_table, ORD_ID, f.ty)
-          # the derived impl carries `[T: Ord]`, so a field at one of the
-          # type's own parameters is ordered by whatever instantiates it
-          TyVar(_, _) -> true
-          _ -> false
+      if not derived { continue }
+      var dlo = d.nlo
+      var dhi = d.nhi
+      for b in d.derives {
+        if b.name == dname {
+          dlo = b.lo
+          dhi = b.hi
         }
-        if not scalar_ok && not adt_ok {
-          cx1 = cerr_h(cx1, "cannot derive Ord for `" ++ info.name ++ "`: field `" ++
-              f.name ++ "` of type " ++ ty_show(cx1.adts, f.ty) ++ " is not orderable",
-            dlo, dhi, "orderable fields are Int, Float, String, and types with an Ord impl")
+      }
+      for ci in info.ctors {
+        for f in ci.fields {
+          if not derived_field_ok(cx1, tid, info.tparams, f.ty) {
+            cx1 = cerr_h(cx1, "cannot derive " ++ dname ++ " for `" ++ info.name ++
+                "`: field `" ++ f.name ++ "` of type " ++ ty_show(cx1.adts, f.ty) ++
+                " is not " ++ adj, dlo, dhi,
+              "a field needs an `impl " ++ dname ++ "` (or one of the type's own parameters)")
+          }
         }
       }
     }
@@ -4381,21 +4307,7 @@ pub fn check_fn_value(
     EffVar(_, eid) -> if not map.has(em, eid) { em = map.insert(em, eid, eeff) }
     _ -> ()
   }
-  var cx1 = cx
-  if f.is_builtin && name == "to_string" {
-    let t0 = match f.tparams[0] {
-      TyVar(_, vid) ->
-        match map.get(m, vid) {
-          Some(t) -> t
-          None -> TyError
-        }
-      _ -> TyError
-    }
-    if not is_showable(cx1, t0) && not is_errorish(t0) {
-      cx1 = cerr_h(cx1, "cannot print a value of type " ++ ty_show(cx1.adts, t0), lo, hi,
-        show_hint(cx1, t0))
-    }
-  }
+  let cx1 = cx
   let inst = subst(declared, m, em)
   (cx1, inst, node(inst))
 }
@@ -4553,6 +4465,19 @@ pub fn resolve_witness(
               Some(bad) -> return (uncomparable_err(cx, t, bad, lo, hi), no_wit())
             }
           }
+          # Show has no structural default -- an ADT without `derive Show` is
+          # not printable, and saying otherwise is how the flag became three
+          # things. A tuple is the exception, and not a special case so much as
+          # a missing spelling: it has no head, so there is no impl anyone
+          # could write (trait-v2-design decision 7). Its elements still have
+          # to answer, which is what the ground short-circuit above would have
+          # skipped.
+          if trait_id == SHOW_ID {
+            match t {
+              TyTuple(es) -> return show_tuple_witness(cx, t, es, lo, hi, requirer)
+              _ -> ()
+            }
+          }
           let ts = ty_show(cx.adts, t)
           let hint = if trait_id == ORD_ID && not is_adt(t) {
             "only Int, Float, String and types with an `impl Ord` can be ordered"
@@ -4568,6 +4493,36 @@ pub fn resolve_witness(
           (cerr_h(cx, "no impl of `" ++ tr.name ++ "` for `" ++ ts ++ "`", lo, hi, hint), no_wit())
         }
       }
+  }
+}
+
+## `Show[(A, B)]`: every element's witness, and the whole is `WConcrete` when
+## it is ground -- lowering spells the rendering out then -- or `WApply` when
+## it is not, so the dictionary is built from the elements'.
+fn show_tuple_witness(
+  cx: Cx,
+  t: Ty,
+  es: List[Ty],
+  lo: Int,
+  hi: Int,
+  requirer: String
+) -> (Cx, Option[WitRef]) = {
+  var cx1 = cx
+  var ws: List[WitRef] = []
+  var ok = true
+  for e in es {
+    let (cx2, w) = resolve_witness(cx1, SHOW_ID, e, lo, hi, requirer)
+    cx1 = cx2
+    match w {
+      Some(wr) -> { ws = ws ++ [wr] }
+      None -> { ok = false }
+    }
+  }
+  if not ok { return (cx1, no_wit()) }
+  if is_ground(t) {
+    (cx1, Some(WConcrete(SHOW_ID, t)))
+  } else {
+    (capture_wits(cx1, ws), Some(WApply(SHOW_ID, t, ws)))
   }
 }
 
@@ -4648,6 +4603,21 @@ fn probe_witness(cx: Cx, trait_id: Int, t: Ty) -> Option[WitRef] =
             Some(WApply(trait_id, t, ws))
           }
         None -> {
+          if trait_id == SHOW_ID {
+            match t {
+              TyTuple(es) ->
+                match probe_args(cx, SHOW_ID, es) {
+                  Some(ws) ->
+                    return Some(if is_ground(t) {
+                      WConcrete(SHOW_ID, t)
+                    } else {
+                      WApply(SHOW_ID, t, ws)
+                    })
+                  None -> return None
+                }
+              _ -> return None
+            }
+          }
           if trait_id != EQ_ID && trait_id != HASH_ID { return None }
           match uncomparable_part(cx, t, set.empty()) {
             Some(_) -> return None
@@ -4801,11 +4771,11 @@ pub fn check_expr(cx: Cx, e: Expr, expected: Option[Ty]) -> (Cx, Ty, TExpr) !io 
           SPInterp(x) -> {
             let (cx2, t, tx) = check_expr(cx1, x, no_expected())
             cx1 = cx2
-            if not is_showable(cx1, t) && not is_errorish(t) {
-              cx1 = cerr_h(cx1, "cannot interpolate a value of type " ++ ty_show(cx1.adts, t),
-                e_lo(x), e_hi(x), show_hint(cx1, t))
-            }
-            tparts = tparts ++ [TSPInterp(tx)]
+            # `${x}` is `show(x)` with the quoting undone at the top level, so
+            # it asks for the same witness `to_string` does
+            let (cx3, w) = resolve_witness(cx1, SHOW_ID, t, e_lo(x), e_hi(x), "interpolation")
+            cx1 = cx3
+            tparts = tparts ++ [TSPInterp(tx, w)]
           }
         }
       }
@@ -6011,13 +5981,6 @@ fn check_call(
       i2 = i2 + 1
     }
     if all_ok { wits = ws }
-  }
-  if s.is_builtin && s.name == "to_string" {
-    let t0 = subst(s.param_tys[0], m, em)
-    if not is_showable(cx1, t0) && not is_errorish(t0) {
-      cx1 = cerr_h(cx1, "cannot print a value of type " ++ ty_show(cx1.adts, t0),
-        e_lo(args[0]), e_hi(args[0]), show_hint(cx1, t0))
-    }
   }
   if s.is_builtin && s.name == "cast" {
     # T is bound here (an unbound type param already errored above). It must be
@@ -8040,7 +8003,6 @@ pub fn check_module(cx: Cx, m: Module, env: Map[String, ModExports]) -> (Cx, TMo
   cx1 = cxa
   cx1 = pass_ctor_fields(cx1, m, shells)
   cx1 = pass_resolve_aliases(cx1)
-  cx1 = pass_derive_show(cx1, m, shells)
   cx1 = pass_register_traits(cx1, m)
   let (cxb, impl_sigs) = pass_register_impls(cx1, m, shells)
   cx1 = cxb

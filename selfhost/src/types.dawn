@@ -793,6 +793,11 @@ fn bsig(name: String, ptys: List[Ty], pnames: List[String], ret: Ty) -> Sig =
 
 fn tp1(s: Sig, v: Ty) -> Sig = Sig { ..s, tparams: [v] }
 
+## One type parameter carrying one bound: the shape `to_string` has now that
+## rendering is a trait rather than a predicate the checker applies itself.
+fn tp1b(s: Sig, v: Ty, tid: Int) -> Sig =
+  Sig { ..s, tparams: [v], constraints: [[tid]] }
+
 fn eff1(s: Sig, e: Eff) -> Sig = Sig { ..s, eff: e }
 
 ## The builtin function table (port of Types.kt BUILTINS, same order).
@@ -815,7 +820,7 @@ pub fn builtins() -> Map[String, Sig] = {
     eff1(tp1(bsig("sort_by", [TyList(t), TyFn([t, t], TyInt, e)], ["xs", "cmp"], TyList(t)), t), e),
     tp1(bsig("expect", [opt_ty(t), TyString], ["o", "msg"], t), t),
     tp1(bsig("unwrap_or", [opt_ty(t), t], ["o", "fallback"], t), t),
-    tp1(bsig("to_string", [t], ["x"], TyString), t),
+    tp1b(bsig("to_string", [t], ["x"], TyString), t, SHOW_ID),
     bsig("join", [TyList(TyString), TyString], ["xs", "sep"], TyString),
     bsig("code_points", [TyString], ["s"], TyList(TyInt)),
     bsig("from_code_points", [TyList(TyInt)], ["cs"], TyString),

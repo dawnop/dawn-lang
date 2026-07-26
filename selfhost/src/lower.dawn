@@ -235,13 +235,27 @@ fn un_op(op: TUnOp) -> CUnOp =
 ## `to_string(e)` and `${e}`: the *unquoted* rendering, where a String is
 ## itself. Everything else is `show_at`, the trait method -- see its comment
 ## for why the two cannot be one.
-fn to_str(st: LSt, e: CExpr, t: Ty) -> (LSt, CExpr) =
+##
+## `wit` is what the call site resolved. It matters for exactly one shape: a
+## rigid type variable, whose dictionary is a parameter of the enclosing
+## function and so cannot be found from the type alone.
+fn to_str(st: LSt, e: CExpr, t: Ty, wit: Option[WitRef]) -> (LSt, CExpr) =
   if t == TyString {
     (st, e)
   } else if t == TyUnit {
     (st, CStr("()"))
   } else {
-    show_at(st, e, t)
+    match t {
+      TyVar(_, _) ->
+        match wit {
+          Some(w) -> {
+            let (st1, d) = witness_value(st, w)
+            show_through_dict(st1, d, e, t)
+          }
+          None -> show_at(st, e, t)
+        }
+      _ -> show_at(st, e, t)
+    }
   }
 
 # ---- constructor fields ----
@@ -1300,12 +1314,7 @@ fn show_at(st: LSt, x: CExpr, t: Ty) -> (LSt, CExpr) = {
         CImpl(owner_or(imp.owner, st1.owner), SHOW_ID, t, "show"), [x] ++ ds, TyString))
     }
   }
-  # Bytes and the builtin containers have no structure of their own to walk,
-  # so the runtime does it. This arm goes away with them in S3.
-  if not expandable(t) {
-    return (st, CIntrinsic("show", [adapt_in(x, t, TyVar("T", 0))], TyString))
-  }
-  if is_ground(t) {
+  if is_ground(t) && expandable(t) {
     let (st1, name) = struct_show_fn(st, t)
     return (st1, CCall(CDirect(st1.owner, name), [x], TyString))
   }
@@ -1313,11 +1322,18 @@ fn show_at(st: LSt, x: CExpr, t: Ty) -> (LSt, CExpr) = {
     Some(d) -> return show_through_dict(st, d, x, t)
     None -> ()
   }
-  let goals = sub_goals(st.impls, SHOW_ID, t)
-  if goals_available(st, goals) {
-    let (st1, ds) = goal_dicts(st, goals)
-    let (st2, name) = struct_show_fn(st1, t)
-    return (st2, CCall(CDirect(st2.owner, name), [x] ++ ds, TyString))
+  if expandable(t) {
+    let goals = sub_goals(st.impls, SHOW_ID, t)
+    if goals_available(st, goals) {
+      let (st1, ds) = goal_dicts(st, goals)
+      let (st2, name) = struct_show_fn(st1, t)
+      return (st2, CCall(CDirect(st2.owner, name), [x] ++ ds, TyString))
+    }
+  }
+  # Bytes and the builtin containers have no structure of their own to walk,
+  # so the runtime does it. This arm goes away with them in S3.
+  if not expandable(t) {
+    return (st, CIntrinsic("show", [adapt_in(x, t, TyVar("T", 0))], TyString))
   }
   panic("lower: no rendering for " ++ ty_key_inst(t))
 }
@@ -1985,7 +2001,9 @@ pub fn lower_expr(st0: LSt, e: TExpr) -> (LSt, CExpr) = {
       # switch on the operand type (which is how they came to disagree).
       if name == "to_string" {
         let (st1, v) = lower_expr(st, args[0])
-        return to_str(st1, v, tex_ty(args[0]))
+        let none_wit: Option[WitRef] = None
+        let w = if len(wits) == 1 { Some(wits[0]) } else { none_wit }
+        return to_str(st1, v, tex_ty(args[0]), w)
       }
       match erased_builtin_sig(name) {
         Some(sg) -> {
@@ -2118,9 +2136,9 @@ fn lower_str(st: LSt, parts: List[TStrPart]) -> (LSt, CExpr) = {
     let piece =
       match p {
         TSPText(v) -> CStr(v)
-        TSPInterp(ie) -> {
+        TSPInterp(ie, w) -> {
           let (st2, v) = lower_expr(st1, ie)
-          let (st3, s) = to_str(st2, v, tex_ty(ie))
+          let (st3, s) = to_str(st2, v, tex_ty(ie), w)
           st1 = st3
           s
         }
