@@ -1,6 +1,7 @@
 /* See dawn_rt.h. Phase -1 scope only. */
 #include "dawn_rt.h"
 
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -40,6 +41,19 @@ dawn_clo *dawn_clo_new(void *fn, int32_t ncap) {
   c->fn = fn;
   c->ncap = ncap;
   return c;
+}
+
+dawn_dict *dawn_dict_new(const dawn_dict *tmpl, int32_t nargs, ...) {
+  dawn_dict *d = (dawn_dict *)dawn_alloc(sizeof(dawn_dict));
+  *d = *tmpl;
+  d->nargs = nargs;
+  va_list ap;
+  va_start(ap, nargs);
+  for (int32_t i = 0; i < nargs; i++) {
+    d->args[i] = va_arg(ap, dawn_dict *);
+  }
+  va_end(ap);
+  return d;
 }
 
 static dawn_slot *dawn_box(void) {

@@ -38,7 +38,7 @@ use tast.{
   TUnOp, UNeg, UNot, UBnot, TStrPart, TSPText, TSPInterp, TArm, TJavaCall,
   TPat, TPWild, TPBind, TPLit, TPTuple, TPList, TPCtor,
   TStmt, TSLet, TSLetPat, TSLocalFn, TSAssign, TSExpr, TSAssert, TSWhile, TSFor,
-  TFun, TConst, TModule, WitRef, WForward, WConcrete
+  TFun, TConst, TModule, WitRef, WForward, WConcrete, WApply
 }
 use types.{
   adt_self_ty, Ty, TyInt, TyFloat, TyBool, TyString, TyBytes, TyCursor, TyUnit, TyNever,
@@ -49,7 +49,7 @@ use types.{
   ty_named, is_numeric, is_errorish, prelude_adts, prelude_traits, prelude_impls, bounds_of,
   builtins, opt_ty, result_ty, OPTION_ID, RESULT_ID, ORD_ID, EQ_ID, HASH_ID, eq_scalars,
   Impls, Head, head_of, impl_at, has_impl_at, insert_impl,
-  is_eq_scalar
+  is_eq_scalar, is_ground, expandable, type_args_of
 }
 use jreflect.{
   JClass, JMethod, JCtor, JField, find_class, class_info, methods_of, ctors_of,
@@ -4486,7 +4486,7 @@ pub fn resolve_witness(
           # the table either way.
           if trait_id == EQ_ID || trait_id == HASH_ID {
             match uncomparable_part(cx, t, set.empty()) {
-              None -> return (cx, Some(WConcrete(trait_id, t)))
+              None -> return solved_structurally(cx, trait_id, t)
               Some(bad) -> return (uncomparable_err(cx, t, bad, lo, hi), no_wit())
             }
           }
@@ -4506,6 +4506,92 @@ pub fn resolve_witness(
         }
       }
   }
+}
+
+## No impl, but Eq/Hash hold structurally for every type, so the compiler
+## supplies one (trait-v2-design §3.6). Which *shape* of witness that is comes
+## down to one question: is the subject ground?
+##
+## Ground -- `Eq[Pair[Int, String]]` -- and the relation is fully determined
+## here, so the witness stays `WConcrete` and lowering spells the comparison
+## out. That is every witness the language had before trait v2, which is why
+## this cut changes no existing program's bytecode.
+##
+## Not ground -- `Eq[Option[T]]`, `T` rigid -- and it is not determined here at
+## all: it is a function of `Eq[T]`, and only the caller knows which. So the
+## witness carries the arguments' witnesses (`WApply`) and lowering builds the
+## dictionary from them.
+##
+## Two guards keep this additive. Only a type with structure of its own can use
+## the arguments (a `List[T]` still reaches the runtime intrinsic until S3), and
+## only a subject whose every argument already resolves qualifies -- because
+## demanding an `Eq` bound where none is written today is a breaking change,
+## and it belongs in the cut that makes `==` demand one too (§3.7).
+fn solved_structurally(cx: Cx, trait_id: Int, t: Ty) -> (Cx, Option[WitRef]) = {
+  if is_ground(t) || not expandable(t) {
+    return (cx, Some(WConcrete(trait_id, t)))
+  }
+  match probe_args(cx, trait_id, type_args_of(t)) {
+    Some(ws) -> (capture_wits(cx, ws), Some(WApply(trait_id, t, ws)))
+    None -> (cx, Some(WConcrete(trait_id, t)))
+  }
+}
+
+fn probe_args(cx: Cx, trait_id: Int, args: List[Ty]) -> Option[List[WitRef]] = {
+  var out: List[WitRef] = []
+  for a in args {
+    match probe_witness(cx, trait_id, a) {
+      Some(w) -> { out = out ++ [w] }
+      None -> return None
+    }
+  }
+  Some(out)
+}
+
+## `resolve_witness` without the diagnostics or the capture bookkeeping: can
+## this goal be met at all? Both are side effects, and a probe that fails must
+## leave none behind -- an unmet sub-goal falls back to the old witness rather
+## than becoming an error.
+fn probe_witness(cx: Cx, trait_id: Int, t: Ty) -> Option[WitRef] =
+  match t {
+    TyVar(_, vid) ->
+      match map.get(cx.dict_syms, (vid, trait_id)) {
+        Some(sym) -> Some(WForward(sym))
+        None -> None
+      }
+    _ ->
+      match impl_at(cx.impl_table, trait_id, t) {
+        Some(_) -> Some(WConcrete(trait_id, t))
+        None -> {
+          if trait_id != EQ_ID && trait_id != HASH_ID { return None }
+          match uncomparable_part(cx, t, set.empty()) {
+            Some(_) -> return None
+            None -> ()
+          }
+          if is_ground(t) || not expandable(t) {
+            return Some(WConcrete(trait_id, t))
+          }
+          match probe_args(cx, trait_id, type_args_of(t)) {
+            Some(ws) -> Some(WApply(trait_id, t, ws))
+            None -> None
+          }
+        }
+      }
+  }
+
+## A forwarded dictionary reached through a `WApply` is used just as much as
+## one reached directly, so an enclosing lambda has to capture it either way.
+fn capture_wits(cx: Cx, ws: List[WitRef]) -> Cx = {
+  var cx1 = cx
+  for w in ws {
+    cx1 =
+      match w {
+        WForward(sym) -> capture_witness(cx1, sym)
+        WApply(_, _, inner) -> capture_wits(cx1, inner)
+        WConcrete(_, _) -> cx1
+      }
+  }
+  cx1
 }
 
 fn is_adt(t: Ty) -> Bool =
@@ -4548,6 +4634,36 @@ test "ctor values and witnesses" {
   let (cx6, ok6) = resolve_witness(cx, EQ_ID, TyList(TyFn([TyInt], TyInt, EPure)), 0, 4, "`f`")
   assert ok6 == None
   assert str.contains(cx6.diags[0].msg, "cannot be compared")
+}
+
+test "a subject containing a rigid variable takes its arguments' witnesses" {
+  let cx = seed_prelude(test_cx())
+  let tv = TyVar("T", 900)
+  # Nothing in scope for `T`: the witness stays exactly what it was before
+  # trait v2, so the code that compiles today without an `Eq` bound keeps
+  # compiling. Demanding the bound is cut 7's change, not this one.
+  let (cx1, w1) = resolve_witness(cx, EQ_ID, opt_ty(tv), 0, 4, "`f`")
+  assert len(cx1.diags) == 0
+  assert w1 == Some(WConcrete(EQ_ID, opt_ty(tv)))
+  # With `[T: Eq]` in scope, the whole's witness carries the part's -- which
+  # is the only way to reach a relation the caller decides.
+  let bound = Cx { ..cx, dict_syms: map.insert(cx.dict_syms, (900, EQ_ID), 77) }
+  let (cx2, w2) = resolve_witness(bound, EQ_ID, opt_ty(tv), 0, 4, "`f`")
+  assert len(cx2.diags) == 0
+  assert w2 == Some(WApply(EQ_ID, opt_ty(tv), [WForward(77)]))
+  # Nesting: the argument is itself applied.
+  let (cx3, w3) = resolve_witness(bound, EQ_ID, opt_ty(opt_ty(tv)), 0, 4, "`f`")
+  assert w3 == Some(WApply(EQ_ID, opt_ty(opt_ty(tv)),
+    [WApply(EQ_ID, opt_ty(tv), [WForward(77)])]))
+  # A container has no structure of its own to spell out until S3, so it
+  # keeps the runtime intrinsic -- and therefore the old witness.
+  let (cx4, w4) = resolve_witness(bound, EQ_ID, TyList(tv), 0, 4, "`f`")
+  assert w4 == Some(WConcrete(EQ_ID, TyList(tv)))
+  # A ground subject is untouched. That is the whole reason this cut emits
+  # no different bytecode for any program that exists.
+  let (cx5, w5) = resolve_witness(bound, EQ_ID, opt_ty(TyInt), 0, 4, "`f`")
+  assert len(cx5.diags) == 0
+  assert w5 == Some(WConcrete(EQ_ID, opt_ty(TyInt)))
 }
 
 # ---- the recursive expression checker (pass 5 core) ----

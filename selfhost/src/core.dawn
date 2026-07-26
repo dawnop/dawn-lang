@@ -113,6 +113,21 @@ pub type CExpr =
 # looks up an impl singleton). Both, for the same reason CMethod carries
 # both a slot index and a method name.
   | CDictRef(key: String, trait_id: Int, subject: Ty, ty: Ty)
+# Build a dictionary whose subject is not ground, out of the dictionaries for
+# the subject's own type arguments (trait-v2-design §3.8). `Eq[Option[T]]`
+# cannot be a static singleton -- what it does depends on an `Eq[T]` only the
+# caller has -- so the dictionary is a value with arguments, and this is the
+# node that makes one. `key` names the same CDictDef CDictRef would name; the
+# difference is that that def carries `nargs > 0`.
+  | CDictApply(key: String, args: List[CExpr], ty: Ty)
+# Read argument `idx` back out of the dictionary a slot body was handed.
+# Every slot has the same signature (the trait method's parameters plus the
+# dictionary itself), so a parameterised dictionary reaches its arguments
+# through that trailing parameter rather than through extra ones -- which is
+# what keeps CMethod call sites uniform whether or not the callee happens to
+# be parameterised. `key` is the def whose shape `dict` has, so a backend
+# that types its dictionaries can name the field.
+  | CDictArg(dict: CExpr, owner: String, key: String, idx: Int, ty: Ty)
   | CTuple(elems: List[CExpr], ty: Ty)
   | CTupleGet(target: CExpr, idx: Int, ty: Ty)
 # erasure made explicit: CBox moves a value into a type-variable slot,
@@ -240,6 +255,11 @@ pub type CDictDef = {
   key: String,
   trait_id: Int,
   subject: Ty,
+  # How many dictionaries this one is a function of. Zero -- every dictionary
+  # before trait v2 -- means it is a compile-time constant a backend may build
+  # once and share; anything else means CDictApply constructs it per use, and
+  # its slot bodies read those arguments back with CDictArg.
+  nargs: Int,
   slots: List[CDictSlot]
 }
 
@@ -325,6 +345,8 @@ pub fn cex_ty(e: CExpr) -> Ty =
     CIsCtor(_, _, _) -> TyBool
     CClosure(_, _, _, ty) -> ty
     CDictRef(_, _, _, ty) -> ty
+    CDictApply(_, _, ty) -> ty
+    CDictArg(_, _, _, _, ty) -> ty
     CTuple(_, ty) -> ty
     CTupleGet(_, _, ty) -> ty
     CBox(_, _) -> TyError

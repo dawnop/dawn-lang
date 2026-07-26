@@ -39,7 +39,8 @@ use core.{
   CDictDef, CDictSlot, CSlotFn, CSlotDefault,
   CExpr, CStmt, CCallee,
   CInt, CFloat, CBool, CStr, CUnit, CLocal, CFnRef, CCall, CIntrinsic,
-  CCtor, CField, CIsCtor, CClosure, CDictRef, CTuple, CTupleGet, CBox, CUnbox,
+  CCtor, CField, CIsCtor, CClosure, CDictRef, CDictApply, CDictArg,
+  CTuple, CTupleGet, CBox, CUnbox,
   CBinary, CUnary, CIf, CBlock, CListLit, CConstRef, CComptime,
   CReturn, CBreak, CContinue, CForeign,
   CSLet, CSAssign, CSDiscard, CSLoop, CSIf, CSDup, CSDrop,
@@ -133,6 +134,8 @@ fn walk_expr(a: Acc, e: CExpr) -> Acc =
     CUnit -> a
     CFnRef(_, _, _) -> a
     CDictRef(_, _, _, _) -> a
+    CDictApply(_, args, _) -> walk_all(a, args)
+    CDictArg(d, _, _, _, _) -> walk_expr(a, d)
     CConstRef(_, _) -> a
     CComptime(_, _, _) -> a
   }
@@ -302,6 +305,12 @@ fn expr(adts: Adts, n: Names, d: Int, e: CExpr) -> String =
     CDictRef(key, tid, subject, t) ->
       ind(d) ++ "dictref " ++ key ++ " trait=" ++ to_string(tid) ++ " subject=" ++
       ty_str(adts, subject) ++ ty(adts, t) ++ "\n"
+    CDictApply(key, args, t) ->
+      ind(d) ++ "dictapply " ++ key ++ ty(adts, t) ++ "\n" ++
+      exprs(adts, n, d + 1, args)
+    CDictArg(dv, owner, key, idx, t) ->
+      ind(d) ++ "dictarg " ++ owner ++ "." ++ key ++ " " ++ to_string(idx) ++
+      ty(adts, t) ++ "\n" ++ expr(adts, n, d + 1, dv)
     CTuple(elems, t) ->
       ind(d) ++ "tuple" ++ ty(adts, t) ++ "\n" ++ exprs(adts, n, d + 1, elems)
     CTupleGet(target, idx, t) ->
@@ -413,7 +422,8 @@ fn slot(s: CDictSlot) -> String =
 
 fn dict(adts: Adts, dd: CDictDef) -> String = {
   var out = "dict " ++ dd.key ++ " trait=" ++ to_string(dd.trait_id) ++
-    " subject=" ++ ty_str(adts, dd.subject) ++ "\n"
+    " subject=" ++ ty_str(adts, dd.subject) ++
+    (if dd.nargs > 0 { " nargs=" ++ to_string(dd.nargs) } else { "" }) ++ "\n"
   for s in dd.slots { out = out ++ slot(s) }
   out
 }

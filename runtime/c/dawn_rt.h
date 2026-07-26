@@ -74,10 +74,22 @@ dawn_clo *dawn_clo_new(void *fn, int32_t ncap);
  * DAWN_DICT_MAX only bounds the static initialiser's shape; a dictionary is
  * never indexed beyond the slot count its trait declares. */
 #define DAWN_DICT_MAX 16
-typedef struct {
+typedef struct dawn_dict {
   int32_t nslots;
   void *slots[DAWN_DICT_MAX];
+  /* A dictionary whose subject still mentions a type parameter is a function
+   * of its arguments' dictionaries -- `Eq[Option[T]]` is not one relation but
+   * a family, and which one is decided by the caller's `Eq[T]`. Those
+   * arguments live here, and a slot body reads them back out of the
+   * dictionary it is already handed. Zero for every dictionary the compiler
+   * can build once, which is still nearly all of them. */
+  int32_t nargs;
+  struct dawn_dict *args[DAWN_DICT_MAX];
 } dawn_dict;
+
+/* Copy a static dictionary's slots and bind its arguments. Variadic in the
+ * arguments so a call site emits one expression. */
+dawn_dict *dawn_dict_new(const dawn_dict *tmpl, int32_t nargs, ...);
 
 /* boxing: a type-variable slot holds a pointer to one of these */
 dawn_slot *dawn_box_int(int64_t v);

@@ -16,8 +16,16 @@ pub type TStrPart =
 
 pub type TArm = { pats: List[TPat], guard: Option[TExpr], body: TExpr }
 
-## A trait witness at a use site: the caller's forwarded dictionary symbol, or
-## the unique impl (coherence) identified by (trait, subject).
+## A trait witness at a use site: the caller's forwarded dictionary symbol,
+## the unique impl (coherence) identified by (trait, subject), or -- where the
+## subject still mentions a rigid type parameter -- that impl *applied to* the
+## witnesses for the subject's own arguments.
+##
+## `WApply` is the shape a dictionary takes when it cannot be a compile-time
+## constant: `Eq[Option[T]]` is not one dictionary but a function of `Eq[T]`,
+## and which `Eq[T]` only the caller knows. `WConcrete` stays for everything
+## ground, so the common case still devirtualises to a direct call and builds
+## no dictionary at all (trait-v2-design §3.8).
 ##
 ## There used to be a third kind for Eq/Hash's structural default, on the
 ## theory that "no impl" was a different sort of witness. It is not: what it
@@ -27,6 +35,7 @@ pub type TArm = { pats: List[TPat], guard: Option[TExpr], body: TExpr }
 pub type WitRef =
   | WForward(sym: Int)
   | WConcrete(trait_id: Int, subject: Ty)
+  | WApply(trait_id: Int, subject: Ty, args: List[WitRef])
 
 ## One Java call, resolved: enough for comptime route C (static, scalar
 ## marshalling) and for codegen. Parameter/return types are JVM class names;

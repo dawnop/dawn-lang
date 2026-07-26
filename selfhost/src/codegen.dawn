@@ -2850,6 +2850,36 @@ pub fn singleton_scaffold(cw: AdtClassWriter, cls: String, iface: String) -> Uni
   ()
 }
 
+## The same scaffold for a dictionary that takes arguments: no INSTANCE,
+## because there is nothing to share -- one field per argument and a
+## constructor that binds them. `CDictApply` is what calls it.
+pub fn dict_arg_field(idx: Int) -> String = "a" ++ to_string(idx)
+
+pub fn dict_ctor_desc(nargs: Int) -> String = {
+  var s = "("
+  for _i in 0 ..nargs { s = s ++ "Ljava/lang/Object;" }
+  s ++ ")V"
+}
+
+pub fn parameterised_scaffold(cw: AdtClassWriter, cls: String, nargs: Int) -> Unit !io = {
+  for i in 0 ..nargs {
+    cw.field(ACC_PUBLIC + ACC_FINAL, dict_arg_field(i), "Ljava/lang/Object;")
+  }
+  let init = cw.method(ACC_PUBLIC, "<init>", dict_ctor_desc(nargs)).expect("mv")
+  init.visitCode()
+  init.visitVarInsn(OP_ALOAD, 0)
+  init.visitMethodInsn(OP_INVOKESPECIAL, obj(), "<init>", "()V", false)
+  for i in 0 ..nargs {
+    init.visitVarInsn(OP_ALOAD, 0)
+    init.visitVarInsn(OP_ALOAD, i + 1)
+    init.visitFieldInsn(OP_PUTFIELD, cls, dict_arg_field(i), "Ljava/lang/Object;")
+  }
+  init.visitInsn(OP_RETURN)
+  init.visitMaxs(0, 0)
+  init.visitEnd()
+  ()
+}
+
 fn subject_name(adts: Adts, t: Ty) -> String =
   match t {
     TyInt -> "Int"

@@ -432,6 +432,42 @@ spec 要改的是 §3.5 的一条 bullet:「编译器合成结构见证」→「
 它携带真的槽表,否则 comptime 里穿过字典的调用就假了。这一半**必须在 2a**
 ——种子的 comptime 折叠器要先认识它(StdStrings 的教训)。
 
+#### 3.8.1 动手记(2026-07-26,刀 4 落地)
+
+三处与上面写的不一样,都是读代码/实测改的。
+
+**(a) 多了一个 Core 节点 `CDictArg`,而且它是两个后端要求相反逼出来的。**
+`CDictApply` 建好的字典,槽体怎么拿到它的实参?两条路:让槽多收几个字典参数,
+或者让槽从**它本来就收着的那个 self 字典**里读回来。
+- JVM 两条都行(转发方法多推几个字段,或者槽自己取字段);
+- **C 不行**:`CMethod` 的调用点要在编译期拼出函数指针的类型转换,而调用点
+  **不知道被调字典有几个实参**(`dv->nargs` 是运行期的)。
+
+所以槽签名必须**保持一律「trait 方法参数 + self 字典」**,实参从 self 读回来
+——`CDictArg(dict, owner, key, idx, ty)`。代价是 JVM 侧多一次 `CHECKCAST` +
+`GETFIELD`;换来的是 `CMethod` 调用点、`sig_desc_with_dicts`、`gen_dict_class`
+的转发部分**一行没改**。这条是「Core 不许提到目标」那条规矩的一次实际裁决:
+两个后端要的东西相反时,选那个让**共享节点保持一种形状**的。
+
+**(b) `interp` 不必同批,上面那句「否则就假了」是错的。** 实测:解释器在
+`CMethod` 处就以 `no_traits` 拒绝——comptime 根本走不到穿过字典的调用。
+所以 `CDictApply`/`CDictArg` 跟着 `CDictRef` 一起返回占位 `VDict`,是**拒绝**,
+不是**假答案**。让 comptime 真的能穿字典是另一件事,不在 trait v2 范围内。
+
+**(c) 没有独立的 `solve` 函数。** §3.3 那段伪码里,「刚性变量查 `dict_syms`」
+「查表」两支 `resolve_witness` 本来就是;真正新增的是**子目标怎么求**——而子目标
+恰恰**不能**用 `resolve_witness`:它报错、它写 `capture_witness`,两个都是副作用,
+而一个失败的子目标必须**不留痕迹地回退**到旧见证(否则就成了 §3.7 的破坏性变更,
+那是刀 7)。于是拆成一个纯探针 `probe_witness` + 成功后再补 `capture_wits`。
+
+**保持加法的两道闸**:只对**能展开**的非 ground 主体(ADT/元组)发 `WApply`;
+且**每个实参都已经能求解**才发。实测结果:HEAD 源码用改前/改后两版编译器编出的
+**561 个 class 逐字节一致**,calc/traits/eqhash 三份 Core golden 也逐字节一致。
+
+**已知的浪费(记在 #28 名下)**:字典按 `ty_key_inst` 命名,而 `TyVar` 的拼写带
+它的 id,所以两个不同函数里的 `Option[T]` 会生成两份内容相同的字典。要合并得先
+把自由变量规范化编号,而编号来自 `checker.next_id` 那个共享计数器。
+
 ### 3.9 孤儿规则：给 head 认一个归属模块
 
 今天(`checker.dawn:2025`):`trait_local || subject_local`,而 `subject_local` 只认
@@ -479,7 +515,7 @@ fn head_owner(cx: Cx, h: Head) -> Option[String]
 2. **`impl_table` 改按 head**。此时还没有条件 impl,所以**这刀必须零 Emit-Change**
    ——是纯重构,拿 Core golden 和 `__emit` 逐字节验。
 3. **删掉 `WStructural`**。~~`solve` + `WApply` + 按需合成~~ —— **动手时收窄了**(见下)。
-4. **`solve` + `WApply` + `CDictApply` + 三个消费者**(JVM / C / interp)。
+4. **`WApply` + `CDictApply` + `CDictArg` + 三个消费者**(JVM / C / interp)。**零 Emit-Change**(见 §3.8.1)。
 5. **`derive Ord` 对泛型解禁**(决策 5)。纯加法,所以要赶在发布前进 2a,让种子学会。
 6. 发布 **2a**。
 7. **std 给容器写 `Eq`/`Hash`/`Ord` 条件 impl** + `==` 走 `solve` + 删三处旧机制。

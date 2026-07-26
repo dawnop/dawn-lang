@@ -28,6 +28,7 @@ use codegen.{
   obj, fn_iface, tuple_class, erased_apply_desc, desc_of, method_desc,
   JvmRepr, jvm_repr, RLong, RDouble, RBool, RRef, RUnit, RBottom,
   slots_of, is_ref, load_slot, hash_of, dict_class, supers_of, gen_adt, gen_ctor_class,
+  parameterised_scaffold, dict_arg_field, dict_ctor_desc,
   EqOverride, no_override,
   tr_iface, append_const, singleton_scaffold,
   V17, ACC_PUBLIC, ACC_PRIVATE, ACC_PROTECTED, ACC_STATIC, ACC_FINAL,
@@ -51,7 +52,7 @@ use core.{
   CInt, CFloat, CBool, CStr, CUnit, CLocal, CFnRef, CCall, CIntrinsic,
   CCtor, CField, CIsCtor, CClosure, CTuple, CTupleGet, CBox, CUnbox,
   CBinary, CUnary, CIf, CBlock, CListLit, CConstRef, CComptime,
-  CReturn, CBreak, CContinue, CForeign, CJava, CDictRef,
+  CReturn, CBreak, CContinue, CForeign, CJava, CDictRef, CDictApply, CDictArg,
   CSLet, CSAssign, CSDiscard, CSLoop, CSIf, CSDup, CSDrop,
   CDirect, CDynamic, CMethod, CImpl, CDefault,
   CAdd, CSub, CMul, CDiv, CMod, CEq, CNe, CLt, CLe, CGt, CGe, CAnd, COr,
@@ -1641,7 +1642,16 @@ fn gen_dict_class(g: Gen, supers: List[String], dd: CDictDef) -> (String, Bytes)
   let iface = tr_iface(tr.owner, tr.name)
   let cw = AdtClassWriter.new(supers)
   cw.beginWithInterface(V17, ACC_PUBLIC + ACC_FINAL, cls, obj(), iface)
-  singleton_scaffold(cw, cls, iface)
+  # A dictionary the compiler can build once is a singleton; one that is a
+  # function of its arguments is an ordinary object with those arguments in
+  # fields. Only the scaffold differs -- the forwarding below is the same
+  # either way, because a slot reaches the arguments through the dictionary
+  # it is already passed.
+  if dd.nargs > 0 {
+    parameterised_scaffold(cw, cls, dd.nargs)
+  } else {
+    singleton_scaffold(cw, cls, iface)
+  }
   var i = 0
   for entry in tr.methods {
     let (mname, ms) = entry
@@ -1913,6 +1923,26 @@ pub fn gen_cexpr(g: Gen, e: CExpr, tail: Bool) -> (Gen, Bool) !io =
       g.mv.visitFieldInsn(OP_GETSTATIC, dict_class(g.class_name, key),
         "INSTANCE", "L" ++ tr_iface(tr.owner, tr.name) ++ ";")
       (g, true)
+    }
+    CDictApply(key, args, _) -> {
+      let cls = dict_class(g.class_name, key)
+      g.mv.visitTypeInsn(OP_NEW, cls)
+      g.mv.visitInsn(OP_DUP)
+      var g1 = g
+      for a in args {
+        let (g2, _) = gen_cexpr(g1, a, false)
+        g1 = g2
+      }
+      g1.mv.visitMethodInsn(OP_INVOKESPECIAL, cls, "<init>",
+        dict_ctor_desc(len(args)), false)
+      (g1, true)
+    }
+    CDictArg(dict, owner, key, idx, _) -> {
+      let cls = dict_class(owner, key)
+      let (g1, _) = gen_cexpr(g, dict, false)
+      g1.mv.visitTypeInsn(OP_CHECKCAST, cls)
+      g1.mv.visitFieldInsn(OP_GETFIELD, cls, dict_arg_field(idx), "Ljava/lang/Object;")
+      (g1, true)
     }
     CConstRef(name, ty) -> {
       let v = match map.get(g.consts, name) {

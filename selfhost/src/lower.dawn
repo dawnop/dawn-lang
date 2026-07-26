@@ -22,7 +22,8 @@ use types.{
   TyAdt, TyList, TyTuple, TyFn, TyBytes, TyCursor, TyMap, TySet, TyArray, TyJava,
   Sym, Sig, Traits, TraitI, ImplI, MethodSig,
   Adts, AdtI, CtorI, adt_of, trait_of, OPTION_ID, RESULT_ID, ORD_ID, EQ_ID, HASH_ID,
-  is_eq_scalar, is_ord_scalar, builtins, Impls, impl_at, has_impl_at
+  is_eq_scalar, is_ord_scalar, builtins, Impls, impl_at, has_impl_at,
+  is_ground, expandable, type_args_of
 }
 use tast.{
   TExpr, TStmt, TPat, TArm, TStrPart, TFun, TModule, TBinOp, TUnOp, TJavaCall,
@@ -36,7 +37,7 @@ use tast.{
   BAnd, BOr, BBand, BBor, BBxor, BShl, BShr, BUshr, UNeg, UNot, UBnot,
   TPWild, TPBind, TPLit, TPTuple, TPList, TPCtor,
   TSLet, TSLetPat, TSLocalFn, TSAssign, TSExpr, TSAssert, TSWhile, TSFor,
-  WitRef, WForward, WConcrete
+  WitRef, WForward, WConcrete, WApply
 }
 use exhaustive.{LitV, LInt, LFloat, LBool, LStr}
 use core.{
@@ -46,7 +47,7 @@ use core.{
   CBinary, CUnary, CIf, CBlock, CListLit, CReturn, CBreak, CContinue,
   CForeign, CJava,
   CSLet, CSAssign, CSDiscard, CSLoop, CSIf, CSDup, CSDrop,
-  CDirect, CDynamic, CMethod, CImpl, CDefault, CDictRef,
+  CDirect, CDynamic, CMethod, CImpl, CDefault, CDictRef, CDictApply, CDictArg,
   CDictDef, CDictSlot, CSlotFn, CSlotDefault,
   CAdd, CSub, CMul, CDiv, CMod, CEq, CNe, CLt, CLe, CGt, CGe, CAnd, COr,
   CBand, CBor, CBxor, CShl, CShr, CUshr, CConcat, CNeg, CNot, CBnot,
@@ -91,6 +92,16 @@ pub type LSt = {
   # backend to recompute "is this slot a type variable"
   prog_fns: Map[(String, String), Sig],
   dicts: List[CDictDef],
+  # The dictionaries in scope right here, by the type each one witnesses
+  # `Eq` for (`ty_key_inst`, so `Option[Int]` and `Option[T]` are distinct
+  # keys). Only a non-ground type is ever looked up: a ground one's relation
+  # is decided at compile time and needs no dictionary at all.
+  #
+  # It is scoped, not accumulated. A synthesised body reaches only the
+  # dictionaries its own parameters carry -- the enclosing function's
+  # symbols are not in scope inside a lifted one -- so entering one replaces
+  # this map and leaving restores it.
+  dict_env: Map[String, CExpr],
   # the function whose body is being lowered, as that body sees itself
   self_ctx: Option[SelfCtx],
   # whether the expression being lowered sits in tail position
@@ -563,43 +574,59 @@ fn owner_or(o: Option[String], fallback: String) -> String =
     None -> fallback
   }
 
-## Build (once) the dictionary for a witness and return a reference to it.
-## Every slot is resolved here, so a backend only has to lay out pointers.
+## The type of a dictionary as Core sees it: erased, like every other value a
+## backend chooses its own representation for.
+fn dict_ty() -> Ty = TyAdt(0 - 1, [])
+
+## Build (once) the dictionary for a ground witness and return a reference to
+## it. Every slot is resolved here, so a backend only has to lay out pointers.
 fn dict_ref(st: LSt, tid: Int, subject: Ty) -> (LSt, CExpr) = {
+  let (st1, key) = dict_def(st, tid, subject, [])
+  (st1, CDictRef(key, tid, subject, dict_ty()))
+}
+
+## Register the definition of one dictionary, keyed so it is built once.
+##
+## `argtys` names the types this dictionary is a function of -- empty for
+## every dictionary the language had before trait v2, and otherwise the
+## subject's own type arguments (§3.8). A slot body finds those arguments
+## back through the dictionary it is already handed, so the argument list
+## changes what the slots may *read*, not what shape they have.
+fn dict_def(st: LSt, tid: Int, subject: Ty, argtys: List[Ty]) -> (LSt, String) = {
   let key = dict_key(tid, subject)
-  var seen = false
   for d in st.dicts {
-    if d.key == key { seen = true }
+    if d.key == key { return (st, key) }
   }
-  let dty = TyAdt(0 - 1, [])
-  if seen {
-    (st, CDictRef(key, tid, subject, dty))
-  } else {
-    let tr = trait_of(st.traits, tid)
-    # reserve the key first: a slot body may itself reference this same
-    # dictionary, and without the reservation that would recurse forever
-    var st1 = LSt {
-      ..st,
-      dicts: st.dicts ++
-        [CDictDef { key: key, trait_id: tid, subject: subject, slots: [] }]
-    }
-    var slots: List[CDictSlot] = []
-    for entry in tr.methods {
-      let (mn, ms) = entry
-      let (st2, slot) = dict_slot(st1, tr, tid, subject, mn, ms)
-      st1 = st2
-      slots = slots ++ [slot]
-    }
-    var out: List[CDictDef] = []
-    for d in st1.dicts {
-      if d.key == key {
-        out = out ++ [CDictDef { ..d, slots: slots }]
-      } else {
-        out = out ++ [d]
-      }
-    }
-    (LSt { ..st1, dicts: out }, CDictRef(key, tid, subject, dty))
+  let tr = trait_of(st.traits, tid)
+  # reserve the key first: a slot body may itself reference this same
+  # dictionary, and without the reservation that would recurse forever
+  var st1 = LSt {
+    ..st,
+    dicts: st.dicts ++
+      [CDictDef {
+        key: key,
+        trait_id: tid,
+        subject: subject,
+        nargs: len(argtys),
+        slots: []
+      }]
   }
+  var slots: List[CDictSlot] = []
+  for entry in tr.methods {
+    let (mn, ms) = entry
+    let (st2, slot) = dict_slot(st1, tr, tid, subject, key, argtys, mn, ms)
+    st1 = st2
+    slots = slots ++ [slot]
+  }
+  var out: List[CDictDef] = []
+  for d in st1.dicts {
+    if d.key == key {
+      out = out ++ [CDictDef { ..d, slots: slots }]
+    } else {
+      out = out ++ [d]
+    }
+  }
+  (LSt { ..st1, dicts: out }, key)
 }
 
 ## One slot: the impl's own method, the trait's default, or -- where there is
@@ -617,6 +644,8 @@ fn dict_slot(
   tr: TraitI,
   tid: Int,
   subject: Ty,
+  key: String,
+  argtys: List[Ty],
   mn: String,
   ms: MethodSig
 ) -> (LSt, CDictSlot) = {
@@ -633,7 +662,7 @@ fn dict_slot(
   if ms.has_default {
     return (st, CSlotDefault(owner_or(tr.owner, st.owner), mn))
   }
-  let (st1, name) = make_prim_slot(st, tr, tid, subject, mn)
+  let (st1, name) = make_prim_slot(st, tr, tid, subject, key, argtys, mn)
   (st1, CSlotFn(st1.owner, name))
 }
 
@@ -709,11 +738,20 @@ fn prim_relation(st: LSt, tid: Int, subject: Ty, args: List[CExpr]) -> (LSt, CEx
 
 ## Wrap `prim_relation` in a top-level function with the trait method's own
 ## (erased) signature, so it can sit in a dictionary slot like any other.
+##
+## The trailing dictionary parameter used to be dead weight -- every slot has
+## one, and a primitive relation needed nothing from it. For a parameterised
+## dictionary it is the whole mechanism: the arguments the dictionary was
+## built from are read back out of it. That is why the slot signature did not
+## have to change, and why a `CMethod` call site looks the same whether or not
+## the dictionary it dispatches through happens to take arguments.
 fn make_prim_slot(
   st: LSt,
   tr: TraitI,
   tid: Int,
   subject: Ty,
+  key: String,
+  argtys: List[Ty],
   method: String
 ) -> (LSt, String) = {
   let sg = trait_method_sig(tr, method)
@@ -732,23 +770,29 @@ fn make_prim_slot(
     ps = ps ++ [CParam { sym: sym, ty: gt, mode: COwned }]
     args = args ++ [adapt_out(CLocal(sym, gt), gt, subject)]
   }
-  # unused here, but every slot has the same signature
   let (st3, dsym) = fresh_sym(st1)
   st1 = st3
-  let (st4, body) = prim_relation(st1, tid, subject, args)
+  var env: Map[String, CExpr] = map.empty()
+  var ai = 0
+  for at in argtys {
+    env = map.insert(env, ty_key_inst(at),
+      CDictArg(CLocal(dsym, dict_ty()), st1.owner, key, ai, dict_ty()))
+    ai = ai + 1
+  }
+  let (st4, body) = prim_relation(LSt { ..st1, dict_env: env }, tid, subject, args)
   let f = CFun {
     name: name,
     owner: st4.owner,
     captures: [],
     params: ps,
-    dicts: [CParam { sym: dsym, ty: TyAdt(0 - 1, []), mode: COwned }],
+    dicts: [CParam { sym: dsym, ty: dict_ty(), mode: COwned }],
     ret: sg.ret,
     body: body,
     is_test: false,
     impl_of: None,
     default_of: None
   }
-  (LSt { ..st4, lifted: st4.lifted ++ [f] }, name)
+  (LSt { ..st4, lifted: st4.lifted ++ [f], dict_env: st.dict_env }, name)
 }
 
 # ---- structural equality (docs/semantics-closure-design.md 3) ----
@@ -763,44 +807,71 @@ fn make_prim_slot(
 # What a backend still gets to implement is only the two ends: the scalars it
 # compares natively, and `struct_eq` on a value whose type is not ground.
 
-## Does this type still mention a rigid type parameter?
+## Is there a dictionary this body could use for `t`, without inventing one?
 ##
-## A ground type can be compared field by field right here. A non-ground one
-## cannot: the erased slot needs `Eq[T]`, and nothing supplies it -- `==` does
-## not demand an `Eq` bound on a *composite* containing a rigid variable
-## (`fn f[T](x: Option[T], y: Option[T]) = x == y` compiles with no bound).
-## Closing that needs either a breaking change to `==` or S2.1's conditional
-## impls, so until then the erased half stays a named runtime call.
-fn is_ground(t: Ty) -> Bool =
-  match t {
-    TyVar(_, _) -> false
-    TyAdt(_, args) -> all_ground(args)
-    TyTuple(elems) -> all_ground(elems)
-    TyList(e) -> is_ground(e)
-    TySet(e) -> is_ground(e)
-    TyArray(e) -> is_ground(e)
-    TyMap(k, v) -> is_ground(k) && is_ground(v)
-    TyFn(ps, r, _) -> all_ground(ps) && is_ground(r)
-    TyInt | TyFloat | TyBool | TyString | TyBytes | TyCursor -> true
-    TyUnit | TyNever | TyError | TyJava(_, _) -> true
+## Three ways there is. One is in scope, put there by the enclosing witness or
+## by the enclosing synthesised body's own parameters. Or `t` is ground, so a
+## static singleton settles it. Or `t` has no structure of its own -- a
+## container, until S3 -- and its dictionary's slots reach the runtime
+## intrinsic, which needs no arguments and so needs no dictionary for the
+## parts either.
+##
+## The one case that fails is a bare rigid variable with nothing in scope for
+## it, and that is exactly the code `==` still accepts without an `Eq` bound.
+## Asking first, rather than building and discovering, is what keeps this cut
+## from turning that code into an error (§3.7 -- that is cut 7's change).
+fn dict_available(st: LSt, tid: Int, t: Ty) -> Bool =
+  match map.get(st.dict_env, ty_key_inst(t)) {
+    Some(_) -> true
+    None ->
+      match t {
+        TyVar(_, _) -> false
+        _ ->
+          if is_ground(t) || not expandable(t) {
+            true
+          } else {
+            dicts_available(st, tid, type_args_of(t))
+          }
+      }
   }
 
-fn all_ground(ts: List[Ty]) -> Bool = {
+fn dicts_available(st: LSt, tid: Int, ts: List[Ty]) -> Bool = {
   for t in ts {
-    if not is_ground(t) { return false }
+    if not dict_available(st, tid, t) { return false }
   }
   true
 }
 
-## Can the relation be spelled out over this type's own structure? Containers
-## cannot: their element walk lives in the runtime until D2/D3 makes them
-## Dawn. Everything else with fields can.
-fn expandable_eq(t: Ty) -> Bool =
-  match t {
-    TyAdt(_, _) -> true
-    TyTuple(_) -> true
-    _ -> false
+## The dictionary for `t`, as an expression. Only called where
+## `dict_available` already said yes.
+##
+## A non-ground subject with structure is where trait v2 shows: its dictionary
+## is not a constant but a construction, built from its arguments' -- and its
+## arguments' may themselves be constructions.
+fn dict_expr(st: LSt, tid: Int, t: Ty) -> (LSt, CExpr) =
+  match map.get(st.dict_env, ty_key_inst(t)) {
+    Some(d) -> (st, d)
+    None ->
+      if is_ground(t) || not expandable(t) {
+        dict_ref(st, tid, t)
+      } else {
+        let args = type_args_of(t)
+        let (st1, ds) = dict_exprs(st, tid, args)
+        let (st2, key) = dict_def(st1, tid, t, args)
+        (st2, CDictApply(key, ds, dict_ty()))
+      }
   }
+
+fn dict_exprs(st: LSt, tid: Int, ts: List[Ty]) -> (LSt, List[CExpr]) = {
+  var st1 = st
+  var out: List[CExpr] = []
+  for t in ts {
+    let (st2, d) = dict_expr(st1, tid, t)
+    st1 = st2
+    out = out ++ [d]
+  }
+  (st1, out)
+}
 
 fn conj(acc: Option[CExpr], c: CExpr) -> CExpr =
   match acc {
@@ -834,20 +905,58 @@ fn eq_at(st: LSt, a: CExpr, b: CExpr, t: Ty) -> (LSt, CExpr) = {
         [a, b], TyBool))
     }
   }
-  if is_ground(t) && expandable_eq(t) {
-    let (st1, name) = struct_eq_fn(st, t)
-    return (st1, CCall(CDirect(st1.owner, name), [a, b], TyBool))
+  if is_ground(t) {
+    if expandable(t) {
+      let (st1, name) = struct_eq_fn(st, t)
+      return (st1, CCall(CDirect(st1.owner, name), [a, b], TyBool))
+    }
+    return (st, CIntrinsic("struct_eq", [a, b], TyBool))
+  }
+  # Not ground: what this compares depends on a type only the caller knows.
+  # If a dictionary for the whole is in scope, that dictionary *is* the
+  # answer -- go through it rather than guessing at the structure behind it.
+  match map.get(st.dict_env, ty_key_inst(t)) {
+    Some(d) -> return eq_through_dict(st, d, a, b, t)
+    None -> ()
+  }
+  # Otherwise spell the whole out over its parts, passing each part's
+  # dictionary down. That is the same expansion the ground case gets, minus
+  # the luxury of knowing what the parts are.
+  if expandable(t) && dicts_available(st, EQ_ID, type_args_of(t)) {
+    let (st1, ds) = dict_exprs(st, EQ_ID, type_args_of(t))
+    let (st2, name) = struct_eq_fn(st1, t)
+    return (st2, CCall(CDirect(st2.owner, name), [a, b] ++ ds, TyBool))
   }
   (st, CIntrinsic("struct_eq", [a, b], TyBool))
 }
 
-## The structural equality of one ground composite type, as an ordinary
-## top-level function -- no backend knows it is special, the same way no
-## backend knows about a dictionary bridge.
+## Compare through a dictionary: the only shape available where the type is a
+## rigid variable, since there is no structure to walk and no impl to name.
+## The slot has the trait's own erased signature, so the operands are boxed
+## exactly as they are for any other dictionary call.
+fn eq_through_dict(st: LSt, d: CExpr, a: CExpr, b: CExpr, t: Ty) -> (LSt, CExpr) = {
+  let tr = trait_of(st.traits, EQ_ID)
+  let sg = trait_method_sig(tr, "eq")
+  let idx = method_index(tr, "eq")
+  (st, adapt_out(
+    CCall(CMethod(d, EQ_ID, "eq", idx),
+      [adapt_in(a, t, sg.param_tys[0]), adapt_in(b, t, sg.param_tys[1])], sg.ret),
+    sg.ret, TyBool))
+}
+
+## The structural equality of one composite type, as an ordinary top-level
+## function -- no backend knows it is special, the same way no backend knows
+## about a dictionary bridge.
 ##
 ## Keyed by the *instantiated* type, not the declaration: `Option[Int]` and
 ## `Option[Point]` need different comparisons, and a JVM class (one per
 ## declaration) could not carry both.
+##
+## A non-ground type takes one dictionary parameter per type argument and
+## compares its parts through them. So `Option[T]` gets one function rather
+## than one per instantiation: Dawn passes dictionaries instead of
+## monomorphising, and this is that decision reaching the one relation the
+## compiler writes for itself.
 fn struct_eq_fn(st: LSt, t: Ty) -> (LSt, String) = {
   let name = "structeq\$" ++ ty_key_inst(t)
   for f in st.lifted {
@@ -859,22 +968,32 @@ fn struct_eq_fn(st: LSt, t: Ty) -> (LSt, String) = {
     CParam { sym: asym, ty: t, mode: COwned },
     CParam { sym: bsym, ty: t, mode: COwned }
   ]
+  let argtys: List[Ty] = if is_ground(t) { [] } else { type_args_of(t) }
+  var stD = st1
+  var dps: List[CParam] = []
+  var env: Map[String, CExpr] = map.empty()
+  for at in argtys {
+    let (stA, dsym) = fresh_sym(stD)
+    stD = stA
+    dps = dps ++ [CParam { sym: dsym, ty: dict_ty(), mode: COwned }]
+    env = map.insert(env, ty_key_inst(at), CLocal(dsym, dict_ty()))
+  }
   # publish the name before building the body: a recursive type reaches this
   # same function from inside itself, and without the reservation that
   # recurses until the stack ends
   let stub = CFun {
     name: name,
-    owner: st1.owner,
+    owner: stD.owner,
     captures: [],
     params: ps,
-    dicts: [],
+    dicts: dps,
     ret: TyBool,
     body: CBool(true),
     is_test: false,
     impl_of: None,
     default_of: None
   }
-  let st2 = LSt { ..st1, lifted: st1.lifted ++ [stub] }
+  let st2 = LSt { ..stD, lifted: stD.lifted ++ [stub], dict_env: env }
   let (st3, body) = struct_eq_body(st2, CLocal(asym, t), CLocal(bsym, t), t)
   var out: List[CFun] = []
   for f in st3.lifted {
@@ -884,7 +1003,7 @@ fn struct_eq_fn(st: LSt, t: Ty) -> (LSt, String) = {
       out = out ++ [f]
     }
   }
-  (LSt { ..st3, lifted: out }, name)
+  (LSt { ..st3, lifted: out, dict_env: st.dict_env }, name)
 }
 
 fn struct_eq_body(st: LSt, a: CExpr, b: CExpr, t: Ty) -> (LSt, CExpr) =
@@ -956,6 +1075,7 @@ fn ctor_fields_eq(st: LSt, a: CExpr, b: CExpr, sc: Ty, aid: Int, ci: Int) -> (LS
 fn subject_of(w: WitRef) -> Ty =
   match w {
     WConcrete(_, s) -> s
+    WApply(_, s, _) -> s
     WForward(_) -> panic("lower: a forwarded witness has no subject")
   }
 
@@ -968,12 +1088,15 @@ fn subject_of(w: WitRef) -> Ty =
 ## they were three spellings of one question the table already answers.
 fn primitive_witness(st: LSt, w: WitRef, tid: Int) -> Bool =
   match w {
-    WConcrete(_, subject) ->
-      match impl_at(st.impls, tid, subject) {
-        Some(imp) -> not imp.derived && len(imp.provided) == 0
-        None -> tid == EQ_ID || tid == HASH_ID
-      }
-    _ -> false
+    WConcrete(_, subject) -> primitive_subject(st, tid, subject)
+    WApply(_, subject, _) -> primitive_subject(st, tid, subject)
+    WForward(_) -> false
+  }
+
+fn primitive_subject(st: LSt, tid: Int, subject: Ty) -> Bool =
+  match impl_at(st.impls, tid, subject) {
+    Some(imp) -> not imp.derived && len(imp.provided) == 0
+    None -> tid == EQ_ID || tid == HASH_ID
   }
 
 fn is_eq_op(op: TBinOp) -> Bool =
@@ -991,6 +1114,14 @@ fn witness_value(st: LSt, w: WitRef) -> (LSt, CExpr) =
     # whose slots the compiler supplies -- which is why deleting WStructural
     # changed nothing here.
     WConcrete(tid, subject) -> dict_ref(st, tid, subject)
+    # ...and a non-ground subject is not a different kind either, only one
+    # that cannot be a constant: same slots, built per use out of the
+    # arguments' dictionaries.
+    WApply(tid, subject, args) -> {
+      let (st1, ds) = witness_values(st, args)
+      let (st2, key) = dict_def(st1, tid, subject, type_args_of(subject))
+      (st2, CDictApply(key, ds, dict_ty()))
+    }
   }
 
 fn witness_values(st: LSt, ws: List[WitRef]) -> (LSt, List[CExpr]) = {
@@ -1003,6 +1134,29 @@ fn witness_values(st: LSt, ws: List[WitRef]) -> (LSt, List[CExpr]) = {
   }
   (st1, out)
 }
+
+## Put a witness's argument dictionaries in scope, keyed by the type each one
+## witnesses for, and hand back what was there before. Extends rather than
+## replaces: this runs at a call site inside a body whose own dictionaries are
+## still in scope.
+fn enter_wit_env(st: LSt, w: WitRef) -> (LSt, Map[String, CExpr]) =
+  match w {
+    WApply(_, subject, args) -> {
+      var st1 = st
+      var env = st.dict_env
+      var i = 0
+      for at in type_args_of(subject) {
+        if i < len(args) {
+          let (st2, d) = witness_value(st1, args[i])
+          st1 = st2
+          env = map.insert(env, ty_key_inst(at), d)
+        }
+        i = i + 1
+      }
+      (LSt { ..st1, dict_env: env }, st.dict_env)
+    }
+    _ -> (st, st.dict_env)
+  }
 
 ## A trait method call. A concrete witness devirtualises to a direct call --
 ## Dawn is dictionary-passing, so this is where the dictionary disappears
@@ -1034,7 +1188,12 @@ fn lower_trait_call(
       st1 = st2
       vs = vs ++ [v]
     }
-    return prim_relation(st1, tid, subject_of(ws[0]), vs)
+    # A witness with arguments brings its parts' dictionaries with it. Putting
+    # them in scope here is what lets the relation be spelled out at the call
+    # site -- no dictionary for the whole is ever built.
+    let (st3, saved) = enter_wit_env(st1, ws[0])
+    let (st4, e) = prim_relation(st3, tid, subject_of(ws[0]), vs)
+    return (LSt { ..st4, dict_env: saved }, e)
   }
   match ws[0] {
     WForward(sym) -> {
@@ -1042,8 +1201,20 @@ fn lower_trait_call(
       # subject position is erased and the argument is boxed
       let (st1, vs) = lower_args_to(st, args, sg.param_tys)
       (st1, adapt_out(
-        CCall(CMethod(CLocal(sym, TyAdt(0 - 1, [])), tid, name, idx), vs, sg.ret),
+        CCall(CMethod(CLocal(sym, dict_ty()), tid, name, idx), vs, sg.ret),
         sg.ret, ty))
+    }
+    # An impl with a body, reached at a subject that is not ground: there is
+    # nothing to devirtualise to, because which body runs depends on the
+    # arguments. Build the dictionary and dispatch, exactly as a forwarded one
+    # does. (No impl in the language is conditional yet, so nothing reaches
+    # here today; leaving it as a panic would make the first conditional impl
+    # a compiler crash rather than a call.)
+    WApply(_, _, _) -> {
+      let (st1, d) = witness_value(st, ws[0])
+      let (st2, vs) = lower_args_to(st1, args, sg.param_tys)
+      (st2, adapt_out(
+        CCall(CMethod(d, tid, name, idx), vs, sg.ret), sg.ret, ty))
     }
     WConcrete(_, subject) -> {
       let imp = impl_for(st, tid, subject)
@@ -2025,6 +2196,7 @@ pub fn lower_expr_only(
     adts: adts,
     prog_fns: prog_fns,
     dicts: [],
+    dict_env: map.empty(),
     self_ctx: None,
     tail: false,
     self_tail: false
@@ -2066,6 +2238,7 @@ pub fn lower_fn_only(
     adts: adts,
     prog_fns: prog_fns,
     dicts: [],
+    dict_env: map.empty(),
     self_ctx: None,
     tail: false,
     self_tail: false
@@ -2101,6 +2274,7 @@ pub fn lower_module(
     adts: adts,
     prog_fns: prog_fns,
     dicts: [],
+    dict_env: map.empty(),
     self_ctx: None,
     tail: false,
     self_tail: false

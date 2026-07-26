@@ -29,7 +29,8 @@ use core.{
   CCtor, CField, CIsCtor, CClosure, CTuple, CTupleGet, CBox, CUnbox,
   CBinary, CUnary, CIf, CBlock, CListLit, CReturn, CBreak, CContinue, CForeign,
   CSLet, CSAssign, CSDiscard, CSLoop, CSIf, CSDup, CSDrop,
-  CDirect, CDynamic, CMethod, CImpl, CDefault, CDictRef, CConstRef, CComptime,
+  CDirect, CDynamic, CMethod, CImpl, CDefault, CDictRef, CDictApply, CDictArg,
+  CConstRef, CComptime,
   CDictDef, CDictSlot, CSlotFn, CSlotDefault,
   CBinOp, CUnOp,
   CAdd, CSub, CMul, CDiv, CMod, CEq, CNe, CLt, CLe, CGt, CGe, CAnd, COr,
@@ -311,6 +312,23 @@ pub fn emit_expr(st: CSt, e: CExpr) -> (CSt, String) =
       panic("emitc: bare CFnRef survived lowering (" ++ name ++ ")")
     CClosure(name, owner, caps, _) -> emit_closure(st, name, owner, caps)
     CDictRef(key, _tid, _subj, _) -> (st, "(&" ++ dict_symbol(key) ++ ")")
+    # A dictionary with arguments is the static one's slots plus a binding,
+    # so the static stays exactly what it was and this copies it. The JVM
+    # calls a constructor for the same reason.
+    CDictApply(key, args, _) -> {
+      var st1 = st
+      var parts = ["&" ++ dict_symbol(key), to_string(len(args))]
+      for a in args {
+        let (st2, v) = emit_expr(st1, a)
+        st1 = st2
+        parts = parts ++ [v]
+      }
+      (st1, "dawn_dict_new(" ++ join(parts, ", ") ++ ")")
+    }
+    CDictArg(dv, _owner, _key, idx, _) -> {
+      let (st1, d) = emit_expr(st, dv)
+      (st1, "((" ++ d ++ ")->args[" ++ to_string(idx) ++ "])")
+    }
     CConstRef(name, _) ->
       panic("emitc: comptime constants are not emitted yet (" ++ name ++ ")")
     CComptime(_, _, _) ->
@@ -529,8 +547,10 @@ fn emit_dict(st: CSt, d: CDictDef) -> CSt = {
       }
     ]
   }
+  # the argument half is written out rather than left to default
+  # initialisation: the C backend builds with -Werror=missing-field-initializers
   line(st, "static dawn_dict " ++ dict_symbol(d.key) ++ " = { " ++
-      to_string(len(parts)) ++ ", { " ++ join(parts, ", ") ++ " } };")
+      to_string(len(parts)) ++ ", { " ++ join(parts, ", ") ++ " }, 0, { 0 } };")
 }
 
 ## The handful of std functions the native backend still borrows from its C

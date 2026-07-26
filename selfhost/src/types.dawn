@@ -390,6 +390,57 @@ pub fn head_of(t: Ty) -> Option[Head] =
     _ -> None
   }
 
+## The arguments the head is applied to: the sub-goals an impl's constraints
+## land on (§3.3), and the parts a synthesised structural relation compares
+## through (§3.6). Anything without a head has none.
+pub fn type_args_of(t: Ty) -> List[Ty] =
+  match t {
+    TyAdt(_, args) -> args
+    TyTuple(elems) -> elems
+    TyList(e) -> [e]
+    TySet(e) -> [e]
+    TyArray(e) -> [e]
+    TyMap(k, v) -> [k, v]
+    _ -> []
+  }
+
+## Does this type still mention a rigid type parameter?
+##
+## This is the split trait v2 turns on (§3.8): a ground subject's dictionary is
+## known at compile time and stays a static singleton, a non-ground one's has
+## to be built at run time out of its arguments'. Lowering has always asked the
+## question; the checker asks it too now, so the two agree on which shape a
+## witness takes rather than each deciding for itself.
+pub fn is_ground(t: Ty) -> Bool =
+  match t {
+    TyVar(_, _) -> false
+    TyFn(ps, r, _) -> all_ground(ps) && is_ground(r)
+    TyInt | TyFloat | TyBool | TyString | TyBytes | TyCursor -> true
+    TyUnit | TyNever | TyError | TyJava(_, _) -> true
+    _ -> all_ground(type_args_of(t))
+  }
+
+pub fn all_ground(ts: List[Ty]) -> Bool = {
+  for t in ts {
+    if not is_ground(t) { return false }
+  }
+  true
+}
+
+## Can the compiler spell a relation out over this type's own structure?
+##
+## Records and tagged unions can: their parts are types, and the relation on
+## the whole is the relation on the parts. Containers cannot -- their element
+## walk lives in the runtime until S3 makes them Dawn -- and neither can a
+## function or a scalar. This is what decides whether a synthesised structural
+## impl has anything to do with the arguments it is given.
+pub fn expandable(t: Ty) -> Bool =
+  match t {
+    TyAdt(_, _) -> true
+    TyTuple(_) -> true
+    _ -> false
+  }
+
 pub alias Impls = Map[(Int, Head), ImplI]
 
 ## Look an impl up by subject type. A subject with no head cannot have one,
