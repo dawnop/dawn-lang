@@ -495,6 +495,33 @@ fn lit_eq(subj: CExpr, v: LitV, t: Ty) -> CExpr =
     LStr(s) -> CBinary(CEq, subj, CStr(s), TyBool)
   }
 
+# ---- the intrinsics lowering emits that no user ever writes ----
+#
+# `types.intrinsics()` declares the 73 an ordinary program can name. Lowering
+# emits twelve more, and they are a different contract: a user builtin may be
+# missing from a backend (emitc has no collections yet, honestly), but every
+# one of these is something Core hands over on a path that has no alternative,
+# so a backend that does not implement it is broken rather than incomplete.
+#
+#   cmp hash            the prelude relation at a scalar, after `prim_relation`
+#                       collapses it -- these two are why `cmp(3, 9)` stopped
+#                       looking for a trait default that does not exist
+#   struct_eq           the runtime structural walk, reached only where a
+#                       subject is not ground and has no dictionary. It is the
+#                       last one left, and S3 deletes it
+#   show quote          rendering an erased value, and a nested String
+#   str_of_int/float/bool
+#                       the scalar renderings `to_str` settles without a witness
+#   list_index map_index list_slice
+#                       `xs[i]`, `m[k]` and a list pattern's `..rest`
+#   null_ref            the zero of a reference type, for an uninitialised slot
+#
+# They are listed here, at the one place that emits them, because nothing else
+# knows they exist: measured 2026-07-26, all twelve were absent from every
+# table in the compiler. Making them an ADT so a backend cannot forget one is
+# the other half of S1.1; see the task for why that half is not obviously
+# worth its churn yet.
+
 # ---- trait witnesses ----
 
 ## A stable name for the dictionary of (trait, subject). Backends use it as
