@@ -35,12 +35,26 @@ impl Ided[Box] {
 
 fn through_dict[T: Ided](x: T) -> Int = int_of(ident(x))
 
-# Argument position. The call path unifies rather than asking `assignable`,
-# so this converted everywhere except here until the unifier learned the same
-# rule -- and the corpus only had return and `let` positions to notice with.
+# Every position the conversion has to hold in, inside the declaring module.
+# It lived in `assignable` alone at first, and the call path unifies instead
+# of asking it, so `f(p)` was rejected where `let n: Int = p` was accepted.
+# The corpus had only return and `let`, which is why that shipped.
 fn plain_int(n: Int) -> Int = n * 2
 fn as_arg(i: Id) -> Int = plain_int(i)
 fn to_param(n: Int) -> Id = id_of(n)
+
+# A type variable BINDS rather than converts. `Some(i)` at an Id is an
+# `Option[Id]`, not an `Option[Int]`: seeing through a type is not the same as
+# forgetting it, and a rule that peels on the way into a generic loses the
+# type for the rest of inference.
+fn wrapped(i: Id) -> Option[Id] = Some(i)
+fn unwrapped(o: Option[Id]) -> Int =
+  match o {
+    Some(i) -> int_of(i)
+    None -> -1
+  }
+fn generic_id[T](x: T) -> T = x
+fn through_generic(i: Id) -> Int = int_of(generic_id(i))
 
 pub fn main() -> Unit !io = {
   println(to_string(int_of(bump(id_of(41)))))
@@ -57,4 +71,6 @@ pub fn main() -> Unit !io = {
   println(to_string(through_dict(Box { v: 5 })))
   println(to_string(as_arg(id_of(21))))
   println(to_string(int_of(to_param(6))))
+  println(to_string(unwrapped(wrapped(id_of(9)))))
+  println(to_string(through_generic(id_of(11))))
 }

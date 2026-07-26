@@ -870,7 +870,12 @@ pub fn unify_into(
   match actual {
     TyOpaque(_, _, aow, atgt) ->
       match declared {
+        # same type: match structurally, below
         TyOpaque(_, _, _, _) -> ()
+        # a type variable BINDS rather than converts: `Some(c)` at a Cursor is
+        # an `Option[Cursor]`, not an `Option[Int]`. Seeing through a type is
+        # not the same as forgetting it
+        TyVar(_, _) -> ()
         _ -> if sees_through(cx, aow) { return unify_into(cx, declared, atgt, m, em) }
       }
     _ -> ()
@@ -4869,7 +4874,7 @@ test "a subject containing a rigid variable takes its arguments' witnesses" {
 ## Check one expression against an optional expected type (the Kotlin
 ## checkExpr/inferExpr pair). Returns (state, type, typed node).
 pub fn check_expr(cx: Cx, e: Expr, expected: Option[Ty]) -> (Cx, Ty, TExpr) !io =
-  match see_through_expected(cx, expected) {
+  match see_through_expected(cx, e, expected) {
     Some(t) -> check_expr_at(cx, e, Some(t))
     None -> check_expr_at(cx, e, expected)
   }
@@ -4878,10 +4883,19 @@ pub fn check_expr(cx: Cx, e: Expr, expected: Option[Ty]) -> (Cx, Ty, TExpr) !io 
 ## at each leaf is the point: inference reaches `map.empty()`/`[]`/`None` with
 ## a concrete type, and the result converts back through `assignable`. Outside
 ## the declaring module nothing is peeled, so the expectation stays opaque.
-fn see_through_expected(cx: Cx, expected: Option[Ty]) -> Option[Ty] =
-  match expected {
-    Some(TyOpaque(_, _, ow, tgt)) -> if sees_through(cx, ow) { Some(tgt) } else { None }
-    _ -> None
+fn see_through_expected(cx: Cx, e: Expr, expected: Option[Ty]) -> Option[Ty] =
+  # Only for expressions that cannot be typed without an expectation. Anything
+  # that types itself keeps the opaque expectation and converts at the
+  # boundary instead -- peeling for those loses the type inside inference:
+  # `generic_id(i)` at an `Id` would bind `T` to the target and then reject
+  # the argument it was handed.
+  if not needs_expected(cx, e) {
+    None
+  } else {
+    match expected {
+      Some(TyOpaque(_, _, ow, tgt)) -> if sees_through(cx, ow) { Some(tgt) } else { None }
+      _ -> None
+    }
   }
 
 fn check_expr_at(cx: Cx, e: Expr, expected: Option[Ty]) -> (Cx, Ty, TExpr) !io =
@@ -8428,6 +8442,36 @@ test "opaque type: the declaring module converts, and only it" {
   let (cx2, _) = check_module(cx_new(Some("other"), None), m2, env2)
   assert len(cx2.diags) == 2
   assert str.contains(cx2.diags[0].msg, "Id")
+}
+
+test "opaque type: where the conversion happens, and where it must not" {
+  # The rule is one line (`sees_through`), but it is asked from two places --
+  # `assignable` at a boundary and `unify_into` inside a call -- and it shipped
+  # holding in one of them. Every position that has to convert is here, and so
+  # is the one that must NOT: a type variable binds to the opaque type rather
+  # than to its target, or inference forgets the type for good.
+  let src =
+    "pub opaque type Id = Int\n" ++
+    "pub opaque type Ids = List[Id]\n" ++
+    "fn wrap(n: Int) -> Id = n\n" ++
+    "fn unwrap(i: Id) -> Int = i\n" ++
+    "fn twice(n: Int) -> Int = n * 2\n" ++
+    # argument position: the call path unifies, it does not ask `assignable`
+    "fn at_arg(i: Id) -> Int = twice(i)\n" ++
+    # a type variable binds: this is an Option[Id], and unwrapping it proves it
+    "fn wrapped(i: Id) -> Option[Id] = Some(i)\n" ++
+    "fn back(i: Id) -> Int = unwrap(wrapped(i).expect(\"x\"))\n" ++
+    "fn ident[T](x: T) -> T = x\n" ++
+    "fn through(i: Id) -> Id = ident(i)\n" ++
+    # an expression that cannot type itself DOES take the peeled expectation
+    "fn none() -> Ids = []\n" ++
+    "fn one(i: Id) -> Ids = [i]\n"
+  let (m, pdiags) = parser.parse_module(src)
+  assert len(pdiags) == 0
+  let env: Map[String, ModExports] = map.empty()
+  let (cx1, _) = check_module(cx_new(Some("ids2"), None), m, env)
+  if len(cx1.diags) > 0 { println("UNEXPECTED: " ++ cx1.diags[0].msg) }
+  assert len(cx1.diags) == 0
 }
 
 test "check_module: an inference cycle must annotate" {
