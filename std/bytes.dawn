@@ -15,6 +15,51 @@
 #
 # `Bytes ++ Bytes` is an operator, not a function, and stays in the compiler.
 
+# ---- building bytes ----
+
+## A byte buffer under construction.
+##
+## `Bytes` is finished and immutable, and until this existed it was also
+## *unproduceable*: you could take a string's UTF-8, slice it and read it, but
+## a byte you computed had no spelling at all -- `0x80` would need a string
+## whose UTF-8 encoding is that single byte, and there is none. Anything that
+## decompresses writes bytes it computed, so this is the missing half.
+##
+## It is a value like everything else -- `put` returns the buffer rather than
+## mutating it -- and it inherits `array_push`'s clause: the backend extends in
+## place exactly when the version it is handed is the only one that could be
+## reading the frontier, so building a megabyte is linear and not quadratic.
+## `get` is here because the callers that need this are decompressors, and an
+## LZ77 back-reference reads output that was written a moment ago.
+pub opaque type Buf = Array[Int]
+
+## An empty buffer.
+pub fn buf() -> Buf = array_new()
+
+## Append one byte. A value outside 0..255 is truncated, as a byte store is.
+pub fn put(b: Buf, byte: Int) -> Buf = array_push(b, byte & 0xFF)
+
+## Append all of `src`.
+pub fn put_bytes(b: Buf, src: Bytes) -> Buf = {
+  var out = b
+  var i = 0
+  let n = bytes_len(src)
+  while i < n {
+    out = array_push(out, bytes_at(src, i))
+    i = i + 1
+  }
+  out
+}
+
+## How many bytes have been written.
+pub fn size(b: Buf) -> Int = array_len(b)
+
+## The byte at `i`, as 0..255. Out of range panics, as `at` does.
+pub fn get(b: Buf, i: Int) -> Int = array_get(b, i)
+
+## The finished bytes.
+pub fn freeze(b: Buf) -> Bytes = bytes_from_array(b)
+
 ## The UTF-8 bytes of `s`.
 pub fn utf8(s: String) -> Bytes = bytes_utf8(s)
 

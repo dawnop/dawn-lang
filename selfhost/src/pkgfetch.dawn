@@ -13,6 +13,7 @@ use std/list
 use std/io
 use std/fspath
 use sha2/sha256
+use inflate/gzip
 use java "java.io.ByteArrayInputStream"
 use java "java.net.URI"
 use java "java.net.InetSocketAddress"
@@ -23,7 +24,6 @@ use java "java.net.http.HttpRequest"
 use java "java.net.http.HttpRequest.BodyPublisher"
 use java "java.net.http.HttpRequest.BodyPublishers"
 use java "java.net.http.HttpResponse.BodyHandlers"
-use java "java.util.zip.GZIPInputStream"
 use java "java.util.zip.ZipInputStream"
 
 ## The content-addressed cache root: the `dawn.pkg.cache` property (tests), then
@@ -317,12 +317,11 @@ fn pax_path(recs: String) -> Option[String] = {
 }
 
 fn untar(gz: Bytes, dest: String) -> Result[Unit, String] !io = {
-  let raw = match java_try(fn() =>
-      GZIPInputStream.new(ByteArrayInputStream.new(gz)).readAllBytes().expect("bytes")) {
-        Ok(b) -> b
-        Err(e) -> return Err("not a tar.gz archive (or an empty one)" ++
-            "\n  .zip and .tar.gz archives are supported; for GitHub use .../archive/refs/tags/<tag>.tar.gz")
-      }
+  let raw = match gzip.gunzip(gz) {
+    Ok(b) -> b
+    Err(_) -> return Err("not a tar.gz archive (or an empty one)" ++
+        "\n  .zip and .tar.gz archives are supported; for GitHub use .../archive/refs/tags/<tag>.tar.gz")
+  }
   var any = false
   var off = 0
   var pending: Option[String] = None

@@ -1,0 +1,68 @@
+# The gzip container (RFC 1952): a header, a DEFLATE stream, a CRC-32 and the
+# uncompressed size.
+#
+# The package manager reaches this through .tar.gz -- the tar reader inside it
+# has been pure Dawn since the package format was written; only the outer
+# wrapper was a Java stream class.
+
+use std/bytes
+use deflate
+
+const MAGIC0: Int = 0x1F
+const MAGIC1: Int = 0x8B
+const DEFLATE_METHOD: Int = 8
+
+const FHCRC: Int = 2
+const FEXTRA: Int = 4
+const FNAME: Int = 8
+const FCOMMENT: Int = 16
+
+fn at(b: Bytes, i: Int) -> Int = if i < bytes.len(b) { bytes.at(b, i) } else { -1 }
+
+## Skip a NUL-terminated field, returning the index just past the NUL.
+fn skip_cstr(b: Bytes, from: Int) -> Int = {
+  var i = from
+  while i < bytes.len(b) && bytes.at(b, i) != 0 {
+    i = i + 1
+  }
+  i + 1
+}
+
+## Decompress a gzip member. Trailing members (gzip allows concatenation) are
+## not read: nothing produces them here, and silently dropping data would be
+## worse than not supporting it.
+pub fn gunzip(src: Bytes) -> Result[Bytes, String] = {
+  if bytes.len(src) < 18 { return Err("gzip: too short to be an archive") }
+  if at(src, 0) != MAGIC0 || at(src, 1) != MAGIC1 {
+    return Err("gzip: not a gzip archive (bad magic)")
+  }
+  if at(src, 2) != DEFLATE_METHOD {
+    return Err("gzip: compression method " ++ to_string(at(src, 2)) ++ " is not deflate")
+  }
+  let flags = at(src, 3)
+  var i = 10
+  if flags & FEXTRA != 0 {
+    let xlen = at(src, i) | (at(src, i + 1) << 8)
+    i = i + 2 + xlen
+  }
+  if flags & FNAME != 0 { i = skip_cstr(src, i) }
+  if flags & FCOMMENT != 0 { i = skip_cstr(src, i) }
+  if flags & FHCRC != 0 { i = i + 2 }
+  if i >= bytes.len(src) - 8 { return Err("gzip: header runs past the end") }
+
+  # the last eight bytes are CRC-32 and ISIZE, not deflate data
+  let body = bytes.slice(src, i, bytes.len(src) - 8)
+  let out = match deflate.inflate(body) {
+    Ok(o) -> o
+    Err(e) -> return Err(e)
+  }
+  let n = bytes.len(src)
+  let isize = at(src, n - 4) | (at(src, n - 3) << 8) | (at(src, n - 2) << 16) |
+  (at(src, n - 1) << 24)
+  # ISIZE is the size mod 2^32, so this compares what the format actually says
+  if bytes.len(out) & 0xFFFFFFFF != isize & 0xFFFFFFFF {
+    return Err("gzip: decompressed " ++ to_string(bytes.len(out)) ++
+        " bytes, the archive says " ++ to_string(isize))
+  }
+  Ok(out)
+}

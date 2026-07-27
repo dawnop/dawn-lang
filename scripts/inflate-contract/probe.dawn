@@ -1,0 +1,104 @@
+# Differential probe for packages/inflate against java.util.zip.
+#
+# The oracle is the thing it replaces, and it is used in the direction that
+# matters: Java *compresses*, Dawn decompresses. A round trip through one
+# implementation would only prove it agrees with itself.
+#
+# Deflater's level picks the block type, so the four levels below are not
+# redundancy -- 0 forces stored blocks, 1 tends to fixed Huffman and 6/9 to
+# dynamic, which is all three of RFC 1951's kinds.
+use std/bytes
+use std/io
+use inflate/gzip
+use inflate/deflate
+use java "java.util.zip.GZIPOutputStream"
+use java "java.io.ByteArrayOutputStream"
+use java "java.util.zip.Deflater"
+
+## A real file, passed in so the harness picks it rather than this file
+## hardcoding a path into someone's checkout.
+fn big_file() -> String !io =
+  match args() {
+    [p] -> p
+    _ -> ""
+  }
+
+fn rep(c: String, n: Int) -> String = {
+  var s = ""
+  var i = 0
+  while i < n {
+    s = s ++ c
+    i = i + 1
+  }
+  s
+}
+
+## gzip with Java, so the input is one this side did not produce.
+fn java_gzip(src: Bytes) -> Bytes !io = {
+  let bos = ByteArrayOutputStream.new()
+  let gz = GZIPOutputStream.new(bos)
+  let _ = gz.write(src)
+  let _ = gz.close()
+  bos.toByteArray().expect("bytes")
+}
+
+## Raw deflate at a chosen level. 0 forces stored blocks, 1 tends to fixed
+## Huffman, 6 and 9 to dynamic -- all three block types get exercised.
+fn java_deflate(src: Bytes, level: Int) -> Bytes !io = {
+  let d = Deflater.new(level, true)
+  let _ = d.setInput(src)
+  let _ = d.finish()
+  let bos = ByteArrayOutputStream.new()
+  while not d.finished() {
+    let scratch = bytes.utf8(rep(" ", 8192))
+    let n = d.deflate(scratch)
+    let _ = bos.write(bytes.slice(scratch, 0, n))
+  }
+  let _ = d.end()
+  bos.toByteArray().expect("bytes")
+}
+
+pub fn main() -> Unit !io = {
+  var bad = 0
+  var cases: List[String] = ["", "a", "hello world", rep("a", 1000)]
+  # highly repetitive: long back-references, and runs where the copy overlaps
+  # the write position -- the case a block move would get wrong
+  cases = cases ++ [rep("abcabcabc", 500)]
+  # the compiler's own source: real text, dynamic Huffman, hundreds of KB
+  match io.read_file(big_file()) {
+    Ok(t) -> { cases = cases ++ [t] }
+    Err(e) -> io.println("skipping the big case: " ++ e)
+  }
+  for c in cases {
+    let src = bytes.utf8(c)
+    let gz = java_gzip(src)
+    match gzip.gunzip(gz) {
+      Ok(out) ->
+        if out != src {
+          io.println("gunzip mismatch at len " ++ to_string(bytes.len(src)))
+          bad = bad + 1
+        }
+      Err(e) -> {
+        io.println("gunzip failed at len " ++ to_string(bytes.len(src)) ++ ": " ++ e)
+        bad = bad + 1
+      }
+    }
+    for lvl in [0, 1, 6, 9] {
+      let raw = java_deflate(src, lvl)
+      match deflate.inflate(raw) {
+        Ok(out) ->
+          if out != src {
+            io.println("inflate mismatch len " ++ to_string(bytes.len(src)) ++
+                " level " ++ to_string(lvl))
+            bad = bad + 1
+          }
+        Err(e) -> {
+          io.println("inflate failed len " ++ to_string(bytes.len(src)) ++ " level " ++
+              to_string(lvl) ++ ": " ++ e)
+          bad = bad + 1
+        }
+      }
+    }
+  }
+  io.println("mismatches " ++ to_string(bad))
+}

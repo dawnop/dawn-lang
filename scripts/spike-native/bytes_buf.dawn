@@ -1,0 +1,58 @@
+# `bytes.Buf`: the half of `Bytes` that did not exist.
+#
+# Reading bytes was always possible. *Producing* one was not: the only source
+# was a string's UTF-8, and there is no string whose UTF-8 is the single byte
+# 0x80. So this corpus is about the values above 127 -- below 128 a UTF-8 round
+# trip would have worked and proved nothing.
+#
+# Both backends have to agree on truncation, on random read back into what has
+# already been written (an LZ77 back-reference does exactly that), and on the
+# empty buffer.
+use std/io
+use std/bytes
+
+fn render(b: Bytes) -> String = {
+  var out = ""
+  var i = 0
+  while i < bytes.len(b) {
+    if i > 0 { out = out ++ " " }
+    out = out ++ to_string(bytes.at(b, i))
+    i = i + 1
+  }
+  out
+}
+
+pub fn main() -> Unit !io = {
+  io.println("-- an empty buffer freezes to empty bytes --")
+  io.println("len = " ++ to_string(bytes.len(bytes.freeze(bytes.buf()))))
+
+  io.println("-- the values a UTF-8 round trip would destroy --")
+  var b = bytes.buf()
+  for v in [0, 1, 127, 128, 129, 200, 254, 255] {
+    b = bytes.put(b, v)
+  }
+  io.println(render(bytes.freeze(b)))
+
+  io.println("-- out of range truncates, as a byte store does --")
+  var t = bytes.buf()
+  for v in [256, 257, 511, -1] {
+    t = bytes.put(t, v)
+  }
+  io.println(render(bytes.freeze(t)))
+
+  io.println("-- reading back what was written, and appending bytes wholesale --")
+  io.println("size    = " ++ to_string(bytes.size(b)))
+  io.println("get 4   = " ++ to_string(bytes.get(b, 4)))
+  var c = bytes.put_bytes(bytes.buf(), bytes.utf8("hi"))
+  c = bytes.put_bytes(c, bytes.freeze(t))
+  io.println(render(bytes.freeze(c)))
+
+  io.println("-- a run copied from its own output, the way inflate does --")
+  var r = bytes.put(bytes.put(bytes.buf(), 7), 9)
+  var k = 0
+  while k < 6 {
+    r = bytes.put(r, bytes.get(r, bytes.size(r) - 2))
+    k = k + 1
+  }
+  io.println(render(bytes.freeze(r)))
+}

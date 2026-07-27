@@ -1,0 +1,365 @@
+# DEFLATE decompression (RFC 1951), in Dawn.
+#
+# The package manager unpacks .tar.gz and .zip, and both are DEFLATE inside a
+# container. It was the last thing in the compiler that needed a Java stream
+# class, and it needs no host at all: a bit reader, two Huffman tables and a
+# copy loop.
+#
+# Only decompression. Nothing here compresses, because nothing asks it to --
+# `dawn add` reads archives and never writes one.
+#
+# The structure follows RFC 1951 rather than any implementation. The symbol
+# decode is the canonical-Huffman walk the RFC's own section 3.2.2 describes:
+# counts per length and symbols in order, one bit at a time, which needs no
+# lookup table to build and is impossible to get subtly wrong in a way that
+# still decodes most streams.
+
+use std/bytes
+use std/bytes.{Buf}
+use std/list
+
+## A bit reader over `src`, LSB-first inside each byte (RFC 1951 section 3.1.1).
+## `pos` is the byte index, `bit` how many bits of that byte are spent.
+type Bits = { src: Bytes, pos: Int, bit: Int }
+
+fn bits_of(src: Bytes) -> Bits = Bits { src: src, pos: 0, bit: 0 }
+
+## `n` bits as an integer, low bit first. Past the end reads as zero, which the
+## callers turn into "truncated" when the stream does not end where it should.
+fn take(b: Bits, n: Int) -> (Int, Bits) = {
+  var v = 0
+  var st = b
+  var i = 0
+  while i < n {
+    let byte = if st.pos < bytes.len(st.src) { bytes.at(st.src, st.pos) } else { 0 }
+    v = v | ((byte >>> st.bit) & 1) << i
+    if st.bit == 7 {
+      st = Bits { ..st, pos: st.pos + 1, bit: 0 }
+    } else {
+      st = Bits { ..st, bit: st.bit + 1 }
+    }
+    i = i + 1
+  }
+  (v, st)
+}
+
+## Discard the rest of the current byte (a stored block starts byte-aligned).
+fn align(b: Bits) -> Bits = if b.bit == 0 { b } else { Bits { ..b, pos: b.pos + 1, bit: 0 } }
+
+fn past_end(b: Bits) -> Bool = b.pos >= bytes.len(b.src)
+
+## A canonical Huffman table: how many codes have each length, and the symbols
+## in canonical order. This is exactly the pair RFC 1951 3.2.2 constructs.
+type Huff = { counts: List[Int], symbols: List[Int] }
+
+const MAX_BITS: Int = 15
+
+## Build the table from a code length per symbol (0 = symbol unused).
+fn huff_of(lengths: List[Int]) -> Huff = {
+  var counts: List[Int] = []
+  var i = 0
+  while i <= MAX_BITS {
+    counts = counts ++ [0]
+    i = i + 1
+  }
+  for l in lengths {
+    counts = list_set(counts, l, counts[l] + 1)
+  }
+  # where each length's symbols start in the canonical order
+  var offs: List[Int] = [0, 0]
+  var bl = 1
+  var acc = 0
+  while bl < MAX_BITS {
+    acc = acc + counts[bl]
+    offs = offs ++ [acc]
+    bl = bl + 1
+  }
+  var symbols: List[Int] = []
+  var k = 0
+  while k < len(lengths) {
+    symbols = symbols ++ [0]
+    k = k + 1
+  }
+  var sym = 0
+  while sym < len(lengths) {
+    let l = lengths[sym]
+    if l != 0 {
+      symbols = list_set(symbols, offs[l], sym)
+      offs = list_set(offs, l, offs[l] + 1)
+    }
+    sym = sym + 1
+  }
+  Huff { counts: counts, symbols: symbols }
+}
+
+fn list_set(xs: List[Int], i: Int, v: Int) -> List[Int] =
+  list.take(xs, i) ++ [v] ++ list.drop(xs, i + 1)
+
+## Decode one symbol, one bit at a time (RFC 1951 3.2.2). `code` is the bits
+## read so far, `first` the smallest code of this length, `index` where this
+## length's symbols begin. A code is this length's when it is less than
+## `first + count`.
+fn decode(h: Huff, b: Bits) -> Result[(Int, Bits), String] = {
+  var code = 0
+  var first = 0
+  var index = 0
+  var st = b
+  var length = 1
+  while length <= MAX_BITS {
+    let (bit, st2) = take(st, 1)
+    st = st2
+    code = code | bit
+    let count = h.counts[length]
+    if code - first < count {
+      return Ok((h.symbols[index + code - first], st))
+    }
+    index = index + count
+    first = (first + count) << 1
+    code = code << 1
+    length = length + 1
+  }
+  Err("deflate: no code of any length matches")
+}
+
+## The fixed literal/length table of RFC 1951 3.2.6.
+fn fixed_lit() -> Huff = {
+  var ls: List[Int] = []
+  var i = 0
+  while i < 288 {
+    ls = ls ++ [if i < 144 { 8 } else if i < 256 { 9 } else if i < 280 { 7 } else { 8 }]
+    i = i + 1
+  }
+  huff_of(ls)
+}
+
+## The fixed distance table: thirty-two 5-bit codes.
+fn fixed_dist() -> Huff = {
+  var ls: List[Int] = []
+  var i = 0
+  while i < 30 {
+    ls = ls ++ [5]
+    i = i + 1
+  }
+  huff_of(ls)
+}
+
+fn length_base() -> List[Int] = [
+  3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31,
+  35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258
+]
+
+fn length_extra() -> List[Int] = [
+  0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2,
+  3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0
+]
+
+fn dist_base() -> List[Int] = [
+  1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193,
+  257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577
+]
+
+fn dist_extra() -> List[Int] = [
+  0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6,
+  7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13
+]
+
+## The order the code-length code lengths arrive in (RFC 1951 3.2.7).
+fn clen_order() -> List[Int] =
+  [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15]
+
+## Decompress a raw DEFLATE stream.
+pub fn inflate(src: Bytes) -> Result[Bytes, String] = {
+  var out = bytes.buf()
+  var st = bits_of(src)
+  var last = false
+  while not last {
+    if past_end(st) { return Err("deflate: truncated before the final block") }
+    let (fin, s1) = take(st, 1)
+    let (btype, s2) = take(s1, 2)
+    last = fin == 1
+    st = s2
+    if btype == 0 {
+      match stored(out, st) {
+        Ok(p) -> {
+          let (o2, s3) = p
+          out = o2
+          st = s3
+        }
+        Err(e) -> return Err(e)
+      }
+    } else if btype == 1 {
+      match block(out, st, fixed_lit(), fixed_dist()) {
+        Ok(p) -> {
+          let (o2, s3) = p
+          out = o2
+          st = s3
+        }
+        Err(e) -> return Err(e)
+      }
+    } else if btype == 2 {
+      match dynamic_tables(st) {
+        Ok(t) -> {
+          let (lit, dist, s3) = t
+          match block(out, s3, lit, dist) {
+            Ok(p) -> {
+              let (o2, s4) = p
+              out = o2
+              st = s4
+            }
+            Err(e) -> return Err(e)
+          }
+        }
+        Err(e) -> return Err(e)
+      }
+    } else {
+      return Err("deflate: reserved block type 3")
+    }
+  }
+  Ok(bytes.freeze(out))
+}
+
+## An uncompressed block: byte-aligned, then LEN and its complement.
+fn stored(out0: Buf, b: Bits) -> Result[(Buf, Bits), String] = {
+  var st = align(b)
+  let (lo, s1) = take(st, 8)
+  let (hi, s2) = take(s1, 8)
+  let (nlo, s3) = take(s2, 8)
+  let (nhi, s4) = take(s3, 8)
+  let n = lo | (hi << 8)
+  let nn = nlo | (nhi << 8)
+  if n != (~nn & 0xFFFF) { return Err("deflate: stored block length does not match its complement") }
+  st = s4
+  var out = out0
+  var i = 0
+  while i < n {
+    if st.pos >= bytes.len(st.src) { return Err("deflate: stored block runs past the end") }
+    out = bytes.put(out, bytes.at(st.src, st.pos))
+    st = Bits { ..st, pos: st.pos + 1 }
+    i = i + 1
+  }
+  Ok((out, st))
+}
+
+## The two tables a dynamic block carries, themselves Huffman-coded and then
+## run-length encoded (RFC 1951 3.2.7).
+fn dynamic_tables(b: Bits) -> Result[(Huff, Huff, Bits), String] = {
+  let (hlit, s1) = take(b, 5)
+  let (hdist, s2) = take(s1, 5)
+  let (hclen, s3) = take(s2, 4)
+  let nlit = hlit + 257
+  let ndist = hdist + 1
+  let nclen = hclen + 4
+  var st = s3
+  var clens: List[Int] = []
+  var i = 0
+  while i < 19 {
+    clens = clens ++ [0]
+    i = i + 1
+  }
+  let order = clen_order()
+  i = 0
+  while i < nclen {
+    let (v, s) = take(st, 3)
+    st = s
+    clens = list_set(clens, order[i], v)
+    i = i + 1
+  }
+  let clen_huff = huff_of(clens)
+
+  # one run-length coded list covering both tables, then split
+  var lengths: List[Int] = []
+  while len(lengths) < nlit + ndist {
+    let sym = match decode(clen_huff, st) {
+      Ok(p) -> {
+        let (s, st2) = p
+        st = st2
+        s
+      }
+      Err(e) -> return Err(e)
+    }
+    if sym < 16 {
+      lengths = lengths ++ [sym]
+    } else if sym == 16 {
+      if len(lengths) == 0 { return Err("deflate: a repeat with nothing to repeat") }
+      let (extra, st2) = take(st, 2)
+      st = st2
+      let prev = lengths[len(lengths) - 1]
+      var k = 0
+      while k < 3 + extra {
+        lengths = lengths ++ [prev]
+        k = k + 1
+      }
+    } else if sym == 17 {
+      let (extra, st2) = take(st, 3)
+      st = st2
+      var k = 0
+      while k < 3 + extra {
+        lengths = lengths ++ [0]
+        k = k + 1
+      }
+    } else {
+      let (extra, st2) = take(st, 7)
+      st = st2
+      var k = 0
+      while k < 11 + extra {
+        lengths = lengths ++ [0]
+        k = k + 1
+      }
+    }
+  }
+  if len(lengths) > nlit + ndist { return Err("deflate: code lengths overrun their tables") }
+  Ok((huff_of(list.take(lengths, nlit)), huff_of(list.slice(lengths, nlit, nlit + ndist)), st))
+}
+
+## The literal/length/distance loop shared by fixed and dynamic blocks.
+fn block(out0: Buf, b: Bits, lit: Huff, dist: Huff) -> Result[(Buf, Bits), String] = {
+  var out = out0
+  var st = b
+  let lbase = length_base()
+  let lextra = length_extra()
+  let dbase = dist_base()
+  let dextra = dist_extra()
+  while true {
+    let sym = match decode(lit, st) {
+      Ok(p) -> {
+        let (s, st2) = p
+        st = st2
+        s
+      }
+      Err(e) -> return Err(e)
+    }
+    if sym < 256 {
+      out = bytes.put(out, sym)
+    } else if sym == 256 {
+      return Ok((out, st))
+    } else {
+      let li = sym - 257
+      if li >= len(lbase) { return Err("deflate: length symbol out of range") }
+      let (le, s1) = take(st, lextra[li])
+      st = s1
+      let length = lbase[li] + le
+      let dsym = match decode(dist, st) {
+        Ok(p) -> {
+          let (s, st2) = p
+          st = st2
+          s
+        }
+        Err(e) -> return Err(e)
+      }
+      if dsym >= len(dbase) { return Err("deflate: distance symbol out of range") }
+      let (de, s2) = take(st, dextra[dsym])
+      st = s2
+      let distance = dbase[dsym] + de
+      if distance > bytes.size(out) { return Err("deflate: a back-reference before the start") }
+      # the copy may overlap the write position -- that is how a run is coded,
+      # so it has to be byte by byte and not a block move
+      var k = 0
+      while k < length {
+        out = bytes.put(out, bytes.get(out, bytes.size(out) - distance))
+        k = k + 1
+      }
+    }
+    if past_end(st) && st.bit == 0 { return Err("deflate: truncated inside a block") }
+  }
+  Ok((out, st))
+}
