@@ -46,7 +46,15 @@ known="$here/known-red.txt"
 if [ "$#" -gt 0 ]; then
   progs=("$@")
 else
+  # A corpus entry is a single file, or a project directory when it needs a
+  # dependency -- `dawn run` and `__emitc` both take either, and a project is
+  # the only way to drive a real package (see json_lib).
   progs=("$here"/*.dawn)
+  # written as an `if` rather than `[ -f ] && progs+=`: under `set -e` a
+  # failing test as the body's last command takes the script with it
+  for d in "$here"/*/; do
+    if [ -f "$d/dawn.toml" ]; then progs+=("${d%/}"); fi
+  done
 fi
 
 work="$(mktemp -d)"

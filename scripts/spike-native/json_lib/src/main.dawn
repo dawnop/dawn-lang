@@ -1,0 +1,40 @@
+# A real library through both backends.
+#
+# Every other corpus entry is a single file written for this harness, which
+# means the harness has only ever seen code written by someone who knew what
+# it was testing. This one is `packages/json` -- written for its own sake,
+# before the C backend existed -- driven from the outside.
+#
+# It is also the only way to reach the cursor family, which the single-file
+# corpus cannot: those intrinsics are `internal`, so only std may name them,
+# and std reaches them through `std/cursor`. A JSON lexer is nothing but a
+# cursor walk, and it is where UTF-8 (native) and UTF-16 (JVM) positions
+# would disagree if the opaque `Cursor` were leaking its representation --
+# the surrogate pair below is there to say so.
+#
+# No numbers in the input on purpose: `JNum` holds a Float, and float
+# formatting is a documented divergence between the two backends.
+#
+# One line of the expectation pins something the language does not promise:
+# the key order of a two-key object is std/hamt's iteration order. That is
+# fair to hold the *backends* to -- they compile one HAMT -- but it is not a
+# spec guarantee, so change the trie and this line changes with it.
+use std/io
+use json/parser
+use json/render
+
+fn round(label: String, src: String) -> Unit !io =
+  match parser.parse(src) {
+    Ok(j) -> io.println(label ++ " = " ++ render.render(j))
+    Err(e) -> io.println(label ++ " ! " ++ e)
+  }
+
+pub fn main() -> Unit !io = {
+  round("scalars", "[null, true, false]")
+  round("strings", "[\"a\", \"\", \"quote\\\"in\", \"tab\\tsep\"]")
+  round("unicode", "[\"中文\", \"e\\u00e9\", \"\\ud834\\udd1e\"]")
+  round("nested", "{\"k\": {\"inner\": [\"x\"]}, \"z\": []}")
+  round("spaces", "  {  \"a\" :  [ true ]  }  ")
+  round("bad", "{\"a\": }")
+  round("truncated", "[\"unterminated")
+}
