@@ -26,8 +26,7 @@ use tast.{TFun, TModule}
 use types.{Sym}
 use parser
 use lexer
-use java "java.nio.file.Paths"
-use java "java.nio.file.Path"
+use std/fspath
 
 ## A resolved `[deps]` package: its manifest name, src/ root, and its own
 ## dependencies. Packages reached through different consumers but the same
@@ -55,9 +54,10 @@ pub type LocDiag = { path: String, d: Diag }
 
 pub type LoadResult = { modules: List[LoadedModule], diags: List[LocDiag] }
 
-fn canon(p: String) -> String !io =
-  Paths.get(p).expect("path").toAbsolutePath().expect("abs").normalize().expect("norm")
-  .toString().expect("string")
+## A path in the one spelling the compiler compares module identities by:
+## absolute and normalized. The language server needs the same answer, and
+## used to reach it through its own copy of this line.
+pub fn canon(p: String) -> String !io = fspath.absolute(io.cwd(), p)
 
 fn seg_ok(s: String) -> Bool = {
   if s == "" { return false }

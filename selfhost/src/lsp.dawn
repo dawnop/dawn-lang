@@ -12,7 +12,7 @@ use std/bytes
 use json/parser
 use json/value.{Json, JNull, JBool, JNum, JInt, JStr, JArr, JObj}
 use json/render.{render}
-use analyze.{Program, CheckedMod, analyze_document, analyze_standalone}
+use analyze.{Program, CheckedMod, analyze_document, analyze_standalone, canon}
 use interp.{ct_default}
 use stdlib.{StdCtx, load_std}
 use checker.{ModExports, exports_of}
@@ -26,22 +26,6 @@ use ast.{
 }
 use token.{Diag}
 use fmt
-use java "java.lang.Class"
-use java "java.io.InputStream"
-use java "java.lang.invoke.MethodHandles"
-use java "java.lang.Object"
-use java "java.nio.file.Paths"
-
-# ---- stdin (a static field, reached via a method-handle getter) ----
-
-fn stdin_stream() -> InputStream !io = {
-  let sys = Class.forName("java.lang.System").expect("System")
-  let ins = Class.forName("java.io.InputStream").expect("InputStream")
-  let mh = MethodHandles.publicLookup().expect("lookup")
-    .findStaticGetter(sys, "in", ins).expect("System.in getter")
-  let empty: List[Object] = []
-  cast(mh.invokeWithArguments(empty).expect("stream"))
-}
 
 fn crlf() -> String = from_code_points([13, 10])
 
@@ -255,10 +239,6 @@ pub fn path_to_uri(path: String) -> String = {
 
 fn hex_digit(v: Int) -> Int = if v < 10 { '0' + v } else { 'A' + v - 10 }
 
-fn canon(p: String) -> String !io =
-  Paths.get(p).expect("path").toAbsolutePath().expect("abs").normalize().expect("norm")
-  .toString().expect("string")
-
 # ---- one open document ----
 
 type Doc = {
@@ -324,10 +304,9 @@ pub fn run_lsp(std_dir: String) -> Unit !io = {
     Err(e) -> panic("cannot load std from " ++ std_dir ++ ": " ++ e)
   }
   var st = LspState { std: std, bins: builtins(), docs: map.empty() }
-  let ins = stdin_stream()
   var running = true
   while running {
-    match read_message(ins) {
+    match read_message() {
       Some(msg) -> { st = handle(st, msg) }
       None -> { running = false }
     }
@@ -335,15 +314,16 @@ pub fn run_lsp(std_dir: String) -> Unit !io = {
 }
 
 ## One framed message: headers to CRLFCRLF, then Content-Length bytes of JSON.
-fn read_message(ins: InputStream) -> Option[Json] !io = {
+fn read_message() -> Option[Json] !io = {
   var header: List[Int] = []
   var state = 0
   var eof = false
   while state < 4 && not eof {
-    let b = ins.read()
-    if b < 0 {
+    let one = io.read_stdin(1)
+    if bytes.len(one) == 0 {
       eof = true
     } else {
+      let b = bytes.at(one, 0)
       header = header ++ [b]
       # CR LF CR LF
       if state == 0 && b == 13 {
@@ -373,7 +353,7 @@ fn read_message(ins: InputStream) -> Option[Json] !io = {
     }
   }
   if clen < 0 { return None }
-  let body = ins.readNBytes(clen).expect("body")
+  let body = io.read_stdin(clen)
   if bytes.len(body) < clen { return None }
   match parser.parse(bytes.decode(body, "UTF-8")) {
     Ok(j) -> Some(j)

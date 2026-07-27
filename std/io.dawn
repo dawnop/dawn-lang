@@ -63,6 +63,50 @@ pub fn read_file(path: String) -> Result[String, String] !io =
 pub fn write_file(path: String, content: String) -> Result[Unit, String] !io =
   java_try(fn() => io_write_file(path, content))
 
+## The process's working directory, as an absolute path.
+pub fn cwd() -> String !io = io_cwd()
+
+## The value of the environment variable `name`, or `None` when it is unset.
+pub fn getenv(name: String) -> Option[String] !io = io_getenv(name)
+
+## Read a whole file as bytes. The text half is `read_file`.
+pub fn read_bytes(path: String) -> Result[Bytes, String] !io =
+  java_try(fn() => io_read_bytes(path))
+
+## Write bytes to a file, creating missing parent directories.
+pub fn write_bytes(path: String, content: Bytes) -> Result[Unit, String] !io =
+  java_try(fn() => io_write_bytes(path, content))
+
+## Delete a file, or an empty directory. `true` when there was something to
+## delete: a missing path is not an error, and a non-empty directory is not
+## deleted.
+pub fn delete(path: String) -> Bool !io = io_delete(path)
+
+## Move `src` onto `dst`, replacing it. Atomic when the two are on one
+## filesystem and an error when they are not -- which is the whole point: the
+## caller is publishing something it has already verified, and a move that can
+## be observed half-done would defeat that. Stage with `temp_dir` under the
+## destination's own directory to stay on one filesystem.
+pub fn rename(src: String, dst: String) -> Result[Unit, String] !io =
+  java_try(fn() => io_rename(src, dst))
+
+## A fresh directory under `parent`, named after `prefix`. An empty `parent`
+## means the system temporary directory.
+pub fn temp_dir(parent: String, prefix: String) -> Result[String, String] !io =
+  java_try(fn() => io_temp_dir(parent, prefix))
+
+## Whether `path` is a symbolic link. The link itself is examined, not its
+## target, so a link to a directory is a link and not a directory.
+pub fn is_symlink(path: String) -> Bool !io = io_is_symlink(path)
+
+## Exactly `n` bytes of standard input, shorter only at end of input -- so a
+## short read is how end of input is reported.
+##
+## This reads the stream directly while `read_line` reads a buffered reader
+## over it. A program that used both would lose whatever the reader had already
+## buffered; pick one.
+pub fn read_stdin(n: Int) -> Bytes !io = io_read_stdin(n)
+
 ## The entry names directly under `path`.
 ## A non-directory is reported as an `Err`, not a panic, and — matching the old
 ## behaviour — is checked before anything is read, so a missing path and a plain
