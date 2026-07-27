@@ -16,7 +16,7 @@ use std/list
 use std/map
 use std/set
 use types.{
-  intr_at, Rt, RtLists, RtStrings, RtBytes, RtArray, RtIo,
+  intr_at, Rt, RtStrings, RtBytes, RtArray, RtIo,
   Ty, TyInt, TyFloat, TyBool, TyString, TyBytes, TyUnit, TyNever,
   TyError, TyVar, TyAdt, TyList, TyMap, TySet, TyArray, TyJava, TyTuple, TyFn,
   Adts, AdtI, CtorI, FieldI, adt_of, adt_jvm_name, ctor_jvm_name,
@@ -45,8 +45,8 @@ use codegen.{
   OP_IADD, OP_LADD, OP_ISUB, OP_IMUL, OP_IXOR, OP_LXOR, OP_LNEG, OP_DNEG,
   OP_BIPUSH, OP_ARRAYLENGTH,
   PANIC_CLASS, UNIT_CLASS, SB, SHOW_CLASS, BYTES_CLASS, IO_CLASS,
-  LISTS_CLASS, STRINGS_CLASS, HAMT_CLASS, FN_CMP_CLASS,
-  ARRAYLIST, DAWNLIST_CLASS, ARRAY_CLASS
+  STRINGS_CLASS, HAMT_CLASS, PVEC_CLASS, PVEC_MOD, FN_CMP_CLASS,
+  ARRAYLIST, ARRAY_CLASS
 }
 use core.{
   CExpr, CStmt, CCallee, CFun, CModule, CParam, CDictDef, CDictSlot,
@@ -315,7 +315,7 @@ fn unerase(g: Gen, t: Ty) -> Unit !io = {
     TyString -> { m.visitTypeInsn(OP_CHECKCAST, "java/lang/String") }
     TyBytes -> { m.visitTypeInsn(OP_CHECKCAST, "[B") }
     TyAdt(aid, _) -> { m.visitTypeInsn(OP_CHECKCAST, adt_jvm_name(adt_of(g.adts, aid))) }
-    TyList(_) -> { m.visitTypeInsn(OP_CHECKCAST, "java/util/List") }
+    TyList(_) -> { m.visitTypeInsn(OP_CHECKCAST, PVEC_CLASS) }
     TyMap(_, _) -> { m.visitTypeInsn(OP_CHECKCAST, HAMT_CLASS) }
     TySet(_) -> { m.visitTypeInsn(OP_CHECKCAST, HAMT_CLASS) }
     TyArray(_) -> { m.visitTypeInsn(OP_CHECKCAST, ARRAY_CLASS) }
@@ -547,15 +547,17 @@ fn construct_value(g: Gen, m: MethodVisitor, v: CValue, boxed: Bool) -> Unit !io
     VStr(x) -> { ldc_str(m, x) }
     VUnit -> if boxed { push_unit(m) }
     VList(elems) -> {
-      m.visitTypeInsn(OP_NEW, ARRAYLIST)
-      m.visitInsn(OP_DUP)
-      m.visitMethodInsn(OP_INVOKESPECIAL, ARRAYLIST, "<init>", "()V", false)
+      # a comptime list is materialised the way a list literal is: pushed
+      # onto an `Array` and handed to the vector
+      m.visitMethodInsn(OP_INVOKESTATIC, ARRAY_CLASS, "array_new",
+        "()L" ++ ARRAY_CLASS ++ ";", false)
       for el in elems {
-        m.visitInsn(OP_DUP)
         construct_value(g, m, el, true)
-        m.visitMethodInsn(OP_INVOKEVIRTUAL, ARRAYLIST, "add", "(Ljava/lang/Object;)Z", false)
-        m.visitInsn(OP_POP)
+        m.visitMethodInsn(OP_INVOKESTATIC, ARRAY_CLASS, "array_push",
+          "(L" ++ ARRAY_CLASS ++ ";Ljava/lang/Object;)L" ++ ARRAY_CLASS ++ ";", false)
       }
+      m.visitMethodInsn(OP_INVOKESTATIC, "std/pvec", "of_array",
+        "(L" ++ ARRAY_CLASS ++ ";)L" ++ PVEC_CLASS ++ ";", false)
     }
     VTuple(elems) -> {
       let cls = tuple_class(len(elems))
@@ -685,7 +687,6 @@ fn emit_scalar_cmp_at(g: Gen, t: Ty) -> Unit !io = {
 ## JVM's business, which is what makes the same table usable by emitc.
 fn rt_class(o: Rt) -> String =
   match o {
-    RtLists -> LISTS_CLASS
     RtStrings -> STRINGS_CLASS
     RtBytes -> BYTES_CLASS
     RtArray -> ARRAY_CLASS
@@ -850,10 +851,15 @@ fn is_list_bridge(call: TJavaCall, i: Int) -> Bool = {
   false
 }
 
-## Zero-copy unmodifiable view for a Dawn List handed to Java (spec §9.6).
+## A Dawn List handed to Java (spec §9.6). Since S3 a List is a Dawn vector,
+## which Java has no name for, so it crosses as `Array` -- the backend's own
+## type, and the only shape both sides can talk about. The result is still
+## unmodifiable: `array_to_java` copies the window and wraps it.
 fn emit_list_bridge(g: Gen) -> Unit !io = {
-  g.mv.visitMethodInsn(OP_INVOKESTATIC, "java/util/Collections", "unmodifiableList",
-    "(Ljava/util/List;)Ljava/util/List;", false)
+  g.mv.visitMethodInsn(OP_INVOKESTATIC, "std/pvec", "to_array",
+    "(L" ++ PVEC_CLASS ++ ";)L" ++ ARRAY_CLASS ++ ";", false)
+  g.mv.visitMethodInsn(OP_INVOKESTATIC, ARRAY_CLASS, "array_to_java",
+    "(L" ++ ARRAY_CLASS ++ ";)Ljava/util/List;", false)
   ()
 }
 
@@ -1948,19 +1954,22 @@ fn gen_cexpr2(g: Gen, e: CExpr, tail: Bool) -> (Gen, Bool) !io =
       (g1, true)
     }
     CListLit(elems, _) -> {
-      g.mv.visitTypeInsn(OP_NEW, ARRAYLIST)
-      g.mv.visitInsn(OP_DUP)
-      g.mv.visitMethodInsn(OP_INVOKESPECIAL, ARRAYLIST, "<init>", "()V", false)
+      # Lowering builds a literal out of `push` calls now, so nothing reaches
+      # here. Kept correct rather than deleted because the node is still in
+      # Core for the other backend, and a stale arm that quietly built a
+      # java.util.List would be worse than one that is never taken.
+      g.mv.visitMethodInsn(OP_INVOKESTATIC, ARRAY_CLASS, "array_new",
+        "()L" ++ ARRAY_CLASS ++ ";", false)
       var g1 = g
       for el in elems {
-        g1.mv.visitInsn(OP_DUP)
         let (g2, falls) = gen_cexpr(g1, el, false)
         g1 = g2
         if not falls { return (g1, false) }
-        g1.mv.visitMethodInsn(OP_INVOKEVIRTUAL, ARRAYLIST, "add",
-          "(Ljava/lang/Object;)Z", false)
-        g1.mv.visitInsn(OP_POP)
+        g1.mv.visitMethodInsn(OP_INVOKESTATIC, ARRAY_CLASS, "array_push",
+          "(L" ++ ARRAY_CLASS ++ ";Ljava/lang/Object;)L" ++ ARRAY_CLASS ++ ";", false)
       }
+      g1.mv.visitMethodInsn(OP_INVOKESTATIC, "std/pvec", "of_array",
+        "(L" ++ ARRAY_CLASS ++ ";)L" ++ PVEC_CLASS ++ ";", false)
       (g1, true)
     }
     CIntrinsic(name, args, ty) -> gen_cintrinsic(g, name, args, ty)
@@ -2028,17 +2037,15 @@ fn gen_cbinary(g: Gen, op: CBinOp, l: CExpr, r: CExpr, ty: Ty) -> (Gen, Bool) !i
       }
     CConcat ->
       match t {
-        TyList(_) -> {
-          g1.mv.visitMethodInsn(OP_INVOKESTATIC, LISTS_CLASS, "concat",
-            "(Ljava/util/List;Ljava/util/List;)Ljava/util/List;", false)
-        }
         TyBytes -> {
           g1.mv.visitMethodInsn(OP_INVOKESTATIC, BYTES_CLASS, "concat", "([B[B)[B", false)
         }
+        TyList(_) -> {
+          g1.mv.visitMethodInsn(OP_INVOKESTATIC, PVEC_MOD, "concat",
+            "(L" ++ PVEC_CLASS ++ ";L" ++ PVEC_CLASS ++ ";)L" ++ PVEC_CLASS ++ ";", false)
+        }
         # String is the only other thing `++` joins. Spelled as a wildcard
-        # rather than `TyString ->` since S0.3, and worth naming when the
-        # TyList arm goes away in S3: whatever replaces it must not fall
-        # through to here
+        # rather than `TyString ->` since S0.3
         _ -> {
           g1.mv.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/String", "concat",
             "(Ljava/lang/String;)Ljava/lang/String;", false)
@@ -2122,10 +2129,112 @@ fn gen_cstmt(g: Gen, s: CStmt) -> Gen !io =
     CSDrop(_) -> g
   }
 
+## The list primitives, implemented by calling the Dawn vector in std/pvec.
+##
+## These stay Core intrinsics rather than becoming calls in lowering, which is
+## what Map and Set did. The reason is the comptime interpreter: it evaluates
+## Core, and it implements the list primitives itself, on its own value
+## representation. Lowering them into std calls would mean a `const` could only
+## fold a list by interpreting the vector -- which needs `array_*`, which
+## comptime refuses. Keeping the primitive in Core keeps `const B: List[Int] =
+## [A, 4]` working, and makes the representation the *backend's* choice, which
+## is what it is.
+##
+## The four host primitives that still traffic in `java.util.List` are here for
+## the other half of that: `Array` is the shape both sides can name, so each
+## crosses through it (docs/collections-dejava-research.md §5.1).
+fn gen_list_intrinsic(g: Gen, name: String, args: List[CExpr]) -> Option[(Gen, Bool)] !io = {
+  let vec = "L" ++ PVEC_CLASS ++ ";"
+  let arr = "L" ++ ARRAY_CLASS ++ ";"
+  let jl = "Ljava/util/List;"
+  let obj = "Ljava/lang/Object;"
+
+  ## The vector call for a primitive, as (function, descriptor). One table,
+  ## so a primitive and its callee cannot drift apart silently.
+  fn target(n: String) -> Option[(String, String)] =
+    match n {
+      "len" -> Some(("count", "(" ++ vec ++ ")J"))
+      "get" -> Some(("get", "(" ++ vec ++ "J)LOption;"))
+      "range" -> Some(("range", "(JJ)" ++ vec))
+      "sort_by" -> Some(("sort_by", "(" ++ vec ++ "L" ++ fn_iface(2) ++ ";)" ++ vec))
+      "list_index" -> Some(("index", "(" ++ vec ++ "J)" ++ obj))
+      "list_slice" -> Some(("slice", "(" ++ vec ++ "JJ)" ++ vec))
+      _ -> None
+    }
+
+  match target(name) {
+    Some(t) -> {
+      let (fname, desc) = t
+      let g1 = gen_cargs(g, args)
+      g1.mv.visitMethodInsn(OP_INVOKESTATIC, PVEC_MOD, fname, desc, false)
+      return Some((g1, true))
+    }
+    None -> ()
+  }
+
+  ## A Dawn list on the stack becomes a host list.
+  fn to_host(m: MethodVisitor) -> Unit !io = {
+    m.visitMethodInsn(OP_INVOKESTATIC, PVEC_MOD, "to_array", "(" ++ vec ++ ")" ++ arr, false)
+    m.visitMethodInsn(OP_INVOKESTATIC, ARRAY_CLASS, "array_to_java",
+      "(" ++ arr ++ ")" ++ jl, false)
+    ()
+  }
+
+  ## A host list on the stack becomes a Dawn list.
+  fn of_host(m: MethodVisitor) -> Unit !io = {
+    m.visitMethodInsn(OP_INVOKESTATIC, ARRAY_CLASS, "array_of_java",
+      "(" ++ jl ++ ")" ++ arr, false)
+    m.visitMethodInsn(OP_INVOKESTATIC, PVEC_MOD, "of_array", "(" ++ arr ++ ")" ++ vec, false)
+    ()
+  }
+
+  if name == "join" {
+    var g1 = gen_cargs(g, [args[0]])
+    to_host(g1.mv)
+    g1 = gen_cargs(g1, [args[1]])
+    g1.mv.visitMethodInsn(OP_INVOKESTATIC, STRINGS_CLASS, "join",
+      "(" ++ jl ++ "Ljava/lang/String;)Ljava/lang/String;", false)
+    return Some((g1, true))
+  }
+  if name == "from_code_points" {
+    let g1 = gen_cargs(g, args)
+    to_host(g1.mv)
+    g1.mv.visitMethodInsn(OP_INVOKESTATIC, STRINGS_CLASS, "from_code_points",
+      "(" ++ jl ++ ")Ljava/lang/String;", false)
+    return Some((g1, true))
+  }
+  if name == "code_points" {
+    let g1 = gen_cargs(g, args)
+    g1.mv.visitMethodInsn(OP_INVOKESTATIC, STRINGS_CLASS, "code_points",
+      "(Ljava/lang/String;)" ++ jl, false)
+    of_host(g1.mv)
+    return Some((g1, true))
+  }
+  if name == "io_list_names" {
+    let g1 = gen_cargs(g, args)
+    g1.mv.visitMethodInsn(OP_INVOKESTATIC, IO_CLASS, "io_list_names",
+      "(Ljava/lang/String;)" ++ jl, false)
+    of_host(g1.mv)
+    return Some((g1, true))
+  }
+  if name == "args" {
+    g.mv.visitFieldInsn(OP_GETSTATIC, g.class_name, ARGS_FIELD, "[Ljava/lang/String;")
+    g.mv.visitMethodInsn(OP_INVOKESTATIC, "java/util/Arrays", "asList",
+      "([" ++ obj ++ ")" ++ jl, false)
+    of_host(g.mv)
+    return Some((g, true))
+  }
+  None
+}
+
 ## Core intrinsics. The names are Core's own vocabulary, which is why some
 ## do not match any TAST builtin: lowering invented `str_of_int`,
 ## `list_index` and friends when it destroyed interpolation and indexing.
 fn gen_cintrinsic(g: Gen, name: String, args: List[CExpr], ty: Ty) -> (Gen, Bool) !io = {
+  match gen_list_intrinsic(g, name, args) {
+    Some(r) -> return r
+    None -> ()
+  }
   if name == "panic" {
     g.mv.visitTypeInsn(OP_NEW, PANIC_CLASS)
     g.mv.visitInsn(OP_DUP)
@@ -2175,12 +2284,6 @@ fn gen_cintrinsic(g: Gen, name: String, args: List[CExpr], ty: Ty) -> (Gen, Bool
     let g1 = gen_cargs(g, args)
     emit_scalar_cmp(g1, at)
     return (g1, true)
-  }
-  if name == "args" {
-    g.mv.visitFieldInsn(OP_GETSTATIC, g.class_name, ARGS_FIELD, "[Ljava/lang/String;")
-    g.mv.visitMethodInsn(OP_INVOKESTATIC, LISTS_CLASS, "fromArray",
-      "([Ljava/lang/String;)Ljava/util/List;", false)
-    return (g, true)
   }
   if name == "expect" {
     var g1 = gen_cargs(g, args)
@@ -2265,9 +2368,6 @@ fn gen_cintrinsic(g: Gen, name: String, args: List[CExpr], ty: Ty) -> (Gen, Bool
     g1.mv.visitInsn(OP_L2D)
   } else if name == "to_int" {
     g1.mv.visitInsn(OP_D2L)
-  } else if name == "len" {
-    g1.mv.visitMethodInsn(OP_INVOKEINTERFACE, "java/util/List", "size", "()I", true)
-    g1.mv.visitInsn(OP_I2L)
   } else if name == "str_of_int" {
     g1.mv.visitMethodInsn(OP_INVOKESTATIC, "java/lang/String", "valueOf",
       "(J)Ljava/lang/String;", false)
@@ -2283,18 +2383,6 @@ fn gen_cintrinsic(g: Gen, name: String, args: List[CExpr], ty: Ty) -> (Gen, Bool
   } else if name == "quote" {
     g1.mv.visitMethodInsn(OP_INVOKESTATIC, SHOW_CLASS, "quote",
       "(Ljava/lang/String;)Ljava/lang/String;", false)
-  } else if name == "list_index" {
-    g1.mv.visitMethodInsn(OP_INVOKESTATIC, LISTS_CLASS, "index",
-      "(Ljava/util/List;J)Ljava/lang/Object;", false)
-  } else if name == "list_slice" {
-    g1.mv.visitInsn(OP_L2I)
-    let (ga, hi_slot) = alloc(g1, 1)
-    ga.mv.visitVarInsn(OP_ISTORE, hi_slot)
-    ga.mv.visitInsn(OP_L2I)
-    ga.mv.visitVarInsn(OP_ILOAD, hi_slot)
-    ga.mv.visitMethodInsn(OP_INVOKESTATIC, LISTS_CLASS, "slice",
-      "(Ljava/util/List;II)Ljava/util/List;", false)
-    return (ga, true)
   } else if name == "starts_with" || name == "ends_with" {
     g1.mv.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/String",
       if name == "starts_with" { "startsWith" } else { "endsWith" },

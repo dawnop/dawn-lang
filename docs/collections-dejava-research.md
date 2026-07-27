@@ -1,8 +1,10 @@
 # 集合归位：DawnList/DawnMap/DawnSet 的去 Java 方案（A/B/C 调研 → D 计划）
 
-> 状态：**D2 已落地（2026-07-27）——Map/Set 是 `std/hamt` 的纯 Dawn HAMT，`DawnMap`/`DawnSet`
-> 退役，手写 Java 4→2（`DawnList` + `AdtClassWriter`）。D3 未动。**
-> 实测代价见 §9.6：**自举 +0.7%**，不是本文 §9.2 推算的 +10%。
+> 状态：**D2 与 D3 都已落地（2026-07-27）——三个容器全部是纯 Dawn 源
+> （`Map`/`Set` = `std/hamt` 持久 HAMT，`List` = `std/pvec` 持久向量，都建在 `Array` 上），
+> `DawnList`/`DawnMap`/`DawnSet` 三个手写 Java 类全部退役，`dawn/rt/Lists`、`dawn/rt/Maps`
+> 两个生成类一并消失。手写 Java 4→1（只剩 `AdtClassWriter` 这个 ASM shim，属并列的后端依赖）。**
+> 实测代价见 §9.6：**D2 +0.7%、D3 +11.7%，合计自举 +12.5%**。
 >
 > 原状态：A/B/C 调研完成；C 已作为过渡态落地（`vendor.dawn` 指路牌）；本文改写计划，主推 D。
 > 这是 de-Java 契约的最后一块（[runtime-intrinsics-design.md](runtime-intrinsics-design.md) §7）。
@@ -341,16 +343,19 @@ fast=76,357,600   copy=705,534   → 复制路径仅 0.92%
 > spike 源码:`scripts/spike-hamt/`(`hamt.dawn` 纯 Dawn HAMT、`vec.dawn` 纯 Dawn 持久向量),
 > 扰动与计数实验的补丁 Java 与流程记在同目录 README。
 
-### 9.6 D2 落地后的实测：+0.7%，比 §9.2 的推算好一个数量级
+### 9.6 落地后的实测：D2 好一个数量级，D3 正中预测
 
 `std/hamt` 接管 Map/Set 之后量同一条自举基准（`scripts/selfhost-bench.sh`,3 采样取中位):
 
-| | 比值 |
-|---|---|
-| D2 之前(S3 刀 2 收工) | 0.9303 |
-| **D2 之后** | **0.9367** |
+| | 比值 | 相对上一行 |
+|---|---|---|
+| D2 之前(S3 刀 2 收工) | 0.9303 | — |
+| **D2 之后**(Map/Set 换 HAMT) | **0.9367** | **+0.7%** |
+| **D3 之后**(List 换持久向量) | **1.0467** | **+11.7%** |
 
-**+0.7%,不是 §9.2 推算的 +10%。** 推算不是算错,是**前提变了**——§9.1 的 20× 量的是
+基线 1.1151、容差 0.15(上限 ≈1.28),两步做完仍在门内。
+
+**D2 +0.7%,不是 §9.2 推算的 +10%。** 推算不是算错,是**前提变了**——§9.1 的 20× 量的是
 「今天的语言写的 HAMT」,而那份 spike 有两处代价在 D2 落地时都不存在了:
 
 1. **哈希不再从码点重算。** §9.1 记「Dawn `String` 拿不到 `String.hashCode` 的缓存值」,
@@ -365,3 +370,15 @@ fast=76,357,600   copy=705,534   → 复制路径仅 0.92%
 顺带兑现的一件:`impl Eq[Map[K, V]]` / `impl Hash[Map[K, V]]` 现在写在 `std/map` 里,
 「顺序无关的相等」从 `AbstractMap` 的继承搬进了 Dawn 源——§3 判为「不可约」的那一层,
 按 §5 的预期在 trait 化之后自己散了。
+
+**D3 则正中 §9.3 的预测**:那里量到「`array_with` 唯一时就地写」这条前提成立时是 **+11%**,
+实测 +11.7%。两件事都按预测发生了:`array_push` 的快路径吃到了累积循环(`out = out ++ [x]`
+每次都独占尾部),而随机下标没有变成瓶颈——因为**编译器里绝大多数 list 短于 32**,
+整个落在尾块里、一次数组读,根本不进 trie。§9.3 记的 8–18× 是对**长**列表的随机索引量的,
+那个形状在真实负载里是少数派。
+
+还有一条不在预测里的:**comptime 决定了路由落在哪一层**。Map/Set 的原语在 lowering 期
+就换成了对 `std/hamt` 的具名调用,List 不能——comptime 解释器吃的是 Core,而且它自己
+实现了 list 原语,`const B: List[Int] = [A, 4]` 靠的就是那份实现。若把 list 原语也在
+lowering 期换掉,常量折叠就只能靠解释 `std/pvec`,而那要 `array_*`,comptime 是拒绝的。
+所以 **list 原语留在 Core、由后端翻译成 `std/pvec` 调用**——表示是后端的选择,本来就该在那儿。

@@ -1,20 +1,21 @@
 # The JVM backend's collection runtime, byte-copied into every built program.
 #
-# `DawnList` is what is left of it: one handwritten Java class (source archived
-# at the `kotlin-final` tag; the working tree carries only the compiled .class,
-# inside the compiler artifact). It is NOT unfinished selfhost — it is the JVM
-# backend's implementation of the list intrinsic contract, sitting behind the
-# emitted dawn/rt/Lists helpers exactly as StdStrings/StdBytes/StdIo's logic now
-# sits inside the emitted dawn/rt/Strings/Bytes/Io.
+# There is none left. `DawnList`, `DawnMap` and `DawnSet` all retired with S3:
+# List is the Dawn vector in std/pvec, Map and Set are the Dawn hash trie in
+# std/hamt, and the whole of what a backend implements for collections is
+# `Array` (docs/collections-dejava-research.md §5).
 #
-# `DawnMap`/`DawnSet` left with S3. The old argument for keeping them was that
-# each `extends java.util.Abstract*`, whose structural, order-independent
+# The old argument for keeping the last two was that each
+# `extends java.util.Abstract*`, whose structural, order-independent
 # equals/hashCode *was* Dawn's `==`/hash on maps and sets — an identity Dawn
 # was said to be unable to express without inheritance. What that argument
 # missed is that it only held while `==` and hash were hardwired: once they
-# became traits a container could implement, the identity moved into std source
-# and the container followed it (docs/collections-dejava-research.md §3, §5).
-# `DawnList` goes the same way when List does.
+# became traits a container could implement, the identity moved into std
+# source and the container followed it. The list had no such argument, only a
+# performance one, and that turned on `array_push` extending in place.
+#
+# The mechanism stays because it is the general one: a backend that needs to
+# ship a handwritten class into every program says so here.
 #
 # Mechanism: compiled ahead of time, so they live in the compiler artifact and
 # must be copied into a built program's class table — otherwise `java -jar` dies
@@ -38,10 +39,10 @@ use java "java.lang.System"
 ## Each entry brings its nested/anonymous classes along by the `$` name rule in
 ## `matches`.
 ##
-## `DawnMap` and `DawnSet` left with S3: Map and Set are the Dawn hash trie in
-## std/hamt now, so there is nothing for a handwritten container to implement.
-## `DawnList` is the last one, and it goes the same way when List does.
-pub fn vendored_outers() -> List[String] = ["DawnList"]
+## Nothing, since S3. Kept as the mechanism rather than deleted: it is how a
+## backend declares a class it must copy into every program, and the next one
+## to need that should find the road already built.
+pub fn vendored_outers() -> List[String] = []
 
 fn matches(file: String, outer: String) -> Bool =
   file == outer ++ ".class" ||

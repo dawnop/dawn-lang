@@ -1011,7 +1011,6 @@ pub fn builtins() -> Map[String, Sig] = {
 ## unit -- which is the point of having a contract at all
 ## (runtime-intrinsics-design.md 4).
 pub type Rt =
-  | RtLists
   | RtStrings
   | RtBytes
   | RtArray
@@ -1041,18 +1040,19 @@ pub fn intrinsics() -> Map[String, Intr] = {
   var erased: Set[String] = set.empty()
   var internal: Set[String] = set.empty()
 
-  # the list primitives the JVM keeps in dawn/rt/Lists
-  for e in [("get", "get"), ("range", "range"), ("sort_by", "sortBy")] {
-    let (n, m) = e
-    rt_of = map.insert(rt_of, n, (RtLists, m))
-  }
+  # No runtime module owns a list primitive any more. Each one is a call on
+  # the Dawn vector in std/pvec, written by whichever backend is emitting --
+  # which is a backend's choice of representation, not a contract the
+  # language states. `join`/`code_points`/`from_code_points`/`io_list_names`
+  # are absent below for the same reason: each still reaches a hand-written
+  # method, but through a conversion the emitter puts around it, so naming
+  # the method here would give the wrong descriptor.
   # strings: the ones needing Unicode or native search, plus the cursor walk.
   # `cursor_slice` is absent on purpose -- the emitter writes it inline so it
   # can check the range and panic.
-  for e in [("join", "join"), ("parse_int", "parseInt"), ("parse_float", "parseFloat"),
+  for e in [("parse_int", "parseInt"), ("parse_float", "parseFloat"),
     ("parse_int_radix", "parseIntRadix"),
-    ("index_of_from", "indexOfFrom"), ("code_points", "code_points"),
-    ("from_code_points", "from_code_points")] {
+    ("index_of_from", "indexOfFrom")] {
       let (n, m) = e
       rt_of = map.insert(rt_of, n, (RtStrings, m))
     }
@@ -1070,10 +1070,9 @@ pub fn intrinsics() -> Map[String, Intr] = {
   for op in ["utf8", "decode", "len", "at", "slice"] {
     rt_of = map.insert(rt_of, "bytes_" ++ op, (RtBytes, "bytes_" ++ op))
   }
-  for op in ["print", "println", "read_line", "is_dir", "read_file", "write_file",
-    "list_names"] {
-      rt_of = map.insert(rt_of, "io_" ++ op, (RtIo, "io_" ++ op))
-    }
+  for op in ["print", "println", "read_line", "is_dir", "read_file", "write_file"] {
+    rt_of = map.insert(rt_of, "io_" ++ op, (RtIo, "io_" ++ op))
+  }
   rt_of = map.insert(rt_of, "java_try", (RtIo, "javaTry"))
   rt_of = map.insert(rt_of, "catch_panic", (RtIo, "catchPanic"))
 

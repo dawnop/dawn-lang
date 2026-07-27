@@ -55,7 +55,7 @@ pub fn desc_of(adts: Adts, t: Ty) -> String =
     TyError -> "V"
     TyVar(_, _) -> "Ljava/lang/Object;"
     TyAdt(aid, _) -> "L" ++ adt_jvm_name(adt_of(adts, aid)) ++ ";"
-    TyList(_) -> "Ljava/util/List;"
+    TyList(_) -> "L" ++ PVEC_CLASS ++ ";"
     TyMap(_, _) -> "L" ++ HAMT_CLASS ++ ";"
     TySet(_) -> "L" ++ HAMT_CLASS ++ ";"
     TyArray(_) -> "L" ++ ARRAY_CLASS ++ ";"
@@ -143,7 +143,7 @@ test "descriptors and slot sizes mirror the Kotlin mapping" {
   assert desc_of(adts, TyInt) == "J"
   assert desc_of(adts, TyBool) == "Z"
   assert desc_of(adts, TyBytes) == "[B"
-  assert desc_of(adts, TyList(TyInt)) == "Ljava/util/List;"
+  assert desc_of(adts, TyList(TyInt)) == "Lstd/pvec\$Vec;"
   assert desc_of(adts, TyTuple([TyInt, TyBool])) == "Ldawn/rt/Tuple2;"
   assert desc_of(adts, TyFn([TyInt], TyBool, EPure)) == "Ldawn/rt/Fn1;"
   assert desc_of(adts, opt_ty(TyInt)) == "LOption;"
@@ -787,9 +787,14 @@ pub const BYTES_CLASS: String = "dawn/rt/Bytes"
 
 pub const IO_CLASS: String = "dawn/rt/Io"
 
-pub const LISTS_CLASS: String = "dawn/rt/Lists"
-
 pub const STRINGS_CLASS: String = "dawn/rt/Strings"
+
+## The class a `List` is at run time: the record at the root of the Dawn
+## vector in std/pvec. Same reasoning as HAMT_CLASS below.
+pub const PVEC_CLASS: String = "std/pvec\$Vec"
+
+## The module class its functions are static methods of.
+pub const PVEC_MOD: String = "std/pvec"
 
 ## The class a `Map` or a `Set` is at run time: the record at the root of the
 ## Dawn trie in std/hamt, emitted like any other ADT. There is no runtime
@@ -1138,8 +1143,8 @@ pub fn gen_io_class(supers: List[String]) -> Bytes !io = {
   lnv.visitVarInsn(OP_ALOAD, 1)
   lnv.visitMethodInsn(OP_INVOKESTATIC, "java/util/Arrays", "sort", "([Ljava/lang/Object;)V", false)
   lnv.visitVarInsn(OP_ALOAD, 1)
-  lnv.visitMethodInsn(OP_INVOKESTATIC, LISTS_CLASS, "fromArray",
-    "([Ljava/lang/String;)Ljava/util/List;", false)
+  lnv.visitMethodInsn(OP_INVOKESTATIC, "java/util/Arrays", "asList",
+    "([Ljava/lang/Object;)Ljava/util/List;", false)
   lnv.visitInsn(OP_ARETURN)
   close_mv(lnv)
 
@@ -1148,8 +1153,6 @@ pub fn gen_io_class(supers: List[String]) -> Bytes !io = {
 }
 
 pub const ARRAYLIST: String = "java/util/ArrayList"
-
-pub const DAWNLIST_CLASS: String = "dawn/rt/DawnList"
 
 pub const ARRAY_CLASS: String = "dawn/rt/Array"
 
@@ -1260,6 +1263,7 @@ pub fn gen_array_class(supers: List[String]) -> Bytes !io = {
   gen_array_get(cw)
   gen_array_push(cw)
   gen_array_with(cw)
+  gen_array_java(cw)
 
   # popcount(n) = Long.bitCount(n)
   let pc = open_static(cw, "popcount", "(J)J")
@@ -1280,6 +1284,80 @@ fn gen_new_watermark(m: MethodVisitor, push_op: Int) -> Unit !io = {
   m.visitInsn(push_op)
   m.visitMethodInsn(OP_INVOKESPECIAL, ATOMIC_INT, "<init>", "(I)V", false)
   ()
+}
+
+## The two directions across the host boundary, both by copy.
+##
+## Since S3 a Dawn List is a Dawn value the JVM has no name for, so the handful
+## of places where one still meets `java.util.List` -- a `use java` parameter,
+## and the four host primitives that produce or consume a list of strings or
+## code points -- convert through `Array`, which is the backend's own type.
+## Keeping the boundary here rather than teaching each of those places about
+## the vector is what stopped the flip from rewriting five hand-written methods.
+fn gen_array_java(cw: AdtClassWriter) -> Unit !io = {
+  let jlist = "java/util/List"
+  let jcoll = "java/util/Collection"
+
+  # array_of_java(List) -> Array: push each element, so the result is an
+  # ordinary array with an ordinary watermark
+  let ov = open_static(cw, "array_of_java", "(L" ++ jlist ++ ";)" ++ array_wrap_desc())
+  ov.visitMethodInsn(OP_INVOKESTATIC, ARRAY_CLASS, "array_new", "()" ++ array_wrap_desc(),
+    false)
+  ov.visitVarInsn(OP_ASTORE, 1)
+  ov.visitInsn(OP_ICONST_0)
+  ov.visitVarInsn(OP_ISTORE, 2)
+  let o_loop = Label.new()
+  let o_done = Label.new()
+  ov.visitLabel(o_loop)
+  ov.visitVarInsn(OP_ILOAD, 2)
+  ov.visitVarInsn(OP_ALOAD, 0)
+  ov.visitMethodInsn(OP_INVOKEINTERFACE, jlist, "size", "()I", true)
+  ov.visitJumpInsn(OP_IF_ICMPGE, o_done)
+  ov.visitVarInsn(OP_ALOAD, 1)
+  ov.visitVarInsn(OP_ALOAD, 0)
+  ov.visitVarInsn(OP_ILOAD, 2)
+  ov.visitMethodInsn(OP_INVOKEINTERFACE, jlist, "get", "(I)Ljava/lang/Object;", true)
+  ov.visitMethodInsn(OP_INVOKESTATIC, ARRAY_CLASS, "array_push",
+    "(" ++ array_wrap_desc() ++ "Ljava/lang/Object;)" ++ array_wrap_desc(), false)
+  ov.visitVarInsn(OP_ASTORE, 1)
+  ov.visitIincInsn(2, 1)
+  ov.visitJumpInsn(OP_GOTO, o_loop)
+  ov.visitLabel(o_done)
+  ov.visitVarInsn(OP_ALOAD, 1)
+  ov.visitInsn(OP_ARETURN)
+  close_mv(ov)
+
+  # array_to_java(Array) -> List: an unmodifiable view over a copy of the
+  # window, so handing one to Java cannot be used to write through it
+  let tv = open_static(cw, "array_to_java", "(" ++ array_wrap_desc() ++ ")L" ++ jlist ++ ";")
+  tv.visitTypeInsn(OP_NEW, ARRAYLIST)
+  tv.visitInsn(OP_DUP)
+  tv.visitMethodInsn(OP_INVOKESPECIAL, ARRAYLIST, "<init>", "()V", false)
+  tv.visitVarInsn(OP_ASTORE, 1)
+  tv.visitInsn(OP_ICONST_0)
+  tv.visitVarInsn(OP_ISTORE, 2)
+  let t_loop = Label.new()
+  let t_done = Label.new()
+  tv.visitLabel(t_loop)
+  tv.visitVarInsn(OP_ILOAD, 2)
+  tv.visitVarInsn(OP_ALOAD, 0)
+  tv.visitFieldInsn(OP_GETFIELD, ARRAY_CLASS, "len", "I")
+  tv.visitJumpInsn(OP_IF_ICMPGE, t_done)
+  tv.visitVarInsn(OP_ALOAD, 1)
+  tv.visitVarInsn(OP_ALOAD, 0)
+  tv.visitFieldInsn(OP_GETFIELD, ARRAY_CLASS, "a", "[Ljava/lang/Object;")
+  tv.visitVarInsn(OP_ILOAD, 2)
+  tv.visitInsn(OP_AALOAD)
+  tv.visitMethodInsn(OP_INVOKEINTERFACE, jcoll, "add", "(Ljava/lang/Object;)Z", true)
+  tv.visitInsn(OP_POP)
+  tv.visitIincInsn(2, 1)
+  tv.visitJumpInsn(OP_GOTO, t_loop)
+  tv.visitLabel(t_done)
+  tv.visitVarInsn(OP_ALOAD, 1)
+  tv.visitMethodInsn(OP_INVOKESTATIC, "java/util/Collections", "unmodifiableList",
+    "(L" ++ jlist ++ ";)L" ++ jlist ++ ";", false)
+  tv.visitInsn(OP_ARETURN)
+  close_mv(tv)
 }
 
 ## array_get(v, i) -> v.a[i], panicking out of bounds like `xs[i]` does.
@@ -1431,192 +1509,6 @@ fn gen_array_with(cw: AdtClassWriter) -> Unit !io = {
   wv.visitLabel(bad)
   array_bounds_panic(wv, "array index ", 1)
   close_mv(wv)
-}
-
-## sortBy for dawn/rt/Lists — the ordering substrate std/list's sort delegates to.
-fn gen_list_ordering(cw: AdtClassWriter) -> Unit !io = {
-  # sortBy(List xs, Fn2 cmp) -> List — stable (TimSort under the hood)
-  let sb2 = cw.method(ACC_PUBLIC + ACC_STATIC, "sortBy",
-    "(Ljava/util/List;L" ++ fn_iface(2) ++ ";)Ljava/util/List;").expect("mv")
-  sb2.visitCode()
-  sb2.visitTypeInsn(OP_NEW, ARRAYLIST)
-  sb2.visitInsn(OP_DUP)
-  sb2.visitVarInsn(OP_ALOAD, 0)
-  sb2.visitMethodInsn(OP_INVOKESPECIAL, ARRAYLIST, "<init>", "(Ljava/util/Collection;)V", false)
-  sb2.visitVarInsn(OP_ASTORE, 2)
-  sb2.visitVarInsn(OP_ALOAD, 2)
-  sb2.visitTypeInsn(OP_NEW, FN_CMP_CLASS)
-  sb2.visitInsn(OP_DUP)
-  sb2.visitVarInsn(OP_ALOAD, 1)
-  sb2.visitMethodInsn(OP_INVOKESPECIAL, FN_CMP_CLASS, "<init>",
-    "(L" ++ fn_iface(2) ++ ";)V", false)
-  sb2.visitMethodInsn(OP_INVOKEVIRTUAL, ARRAYLIST, "sort", "(Ljava/util/Comparator;)V", false)
-  sb2.visitVarInsn(OP_ALOAD, 2)
-  sb2.visitInsn(OP_ARETURN)
-  sb2.visitMaxs(0, 0)
-  sb2.visitEnd()
-  ()
-}
-
-## dawn/rt/Lists: get (bounds-checked Option), index (panicking `xs[i]`),
-## range, fromArray (CLI args), slice (list-pattern rest), the ordering
-## family, and concat (delegates to DawnList's owned-tail append).
-pub fn gen_lists_class(supers: List[String]) -> Bytes !io = {
-  let jlist = "java/util/List"
-  let cw = AdtClassWriter.new(supers)
-  cw.begin(V17, ACC_PUBLIC + ACC_FINAL, LISTS_CLASS, obj())
-
-  let g = cw.method(ACC_PUBLIC + ACC_STATIC, "get", "(Ljava/util/List;J)LOption;").expect("mv")
-  g.visitCode()
-  let g_none = Label.new()
-  g.visitVarInsn(OP_LLOAD, 1)
-  g.visitInsn(OP_LCONST_0)
-  g.visitInsn(OP_LCMP)
-  g.visitJumpInsn(OP_IFLT, g_none)
-  g.visitVarInsn(OP_LLOAD, 1)
-  g.visitVarInsn(OP_ALOAD, 0)
-  g.visitMethodInsn(OP_INVOKEINTERFACE, jlist, "size", "()I", true)
-  g.visitInsn(OP_I2L)
-  g.visitInsn(OP_LCMP)
-  g.visitJumpInsn(OP_IFGE, g_none)
-  g.visitTypeInsn(OP_NEW, "Option\$Some")
-  g.visitInsn(OP_DUP)
-  g.visitVarInsn(OP_ALOAD, 0)
-  g.visitVarInsn(OP_LLOAD, 1)
-  g.visitInsn(OP_L2I)
-  g.visitMethodInsn(OP_INVOKEINTERFACE, jlist, "get", "(I)Ljava/lang/Object;", true)
-  g.visitMethodInsn(OP_INVOKESPECIAL, "Option\$Some", "<init>", "(Ljava/lang/Object;)V", false)
-  g.visitInsn(OP_ARETURN)
-  g.visitLabel(g_none)
-  g.visitFieldInsn(OP_GETSTATIC, "Option\$None", "INSTANCE", "LOption\$None;")
-  g.visitInsn(OP_ARETURN)
-  g.visitMaxs(0, 0)
-  g.visitEnd()
-
-  # index(List, long) -> Object: the `xs[i]` operator — panics when out of bounds
-  let ix = cw.method(ACC_PUBLIC + ACC_STATIC, "index",
-    "(Ljava/util/List;J)Ljava/lang/Object;").expect("mv")
-  ix.visitCode()
-  let i_bad = Label.new()
-  ix.visitVarInsn(OP_LLOAD, 1)
-  ix.visitInsn(OP_LCONST_0)
-  ix.visitInsn(OP_LCMP)
-  ix.visitJumpInsn(OP_IFLT, i_bad)
-  ix.visitVarInsn(OP_LLOAD, 1)
-  ix.visitVarInsn(OP_ALOAD, 0)
-  ix.visitMethodInsn(OP_INVOKEINTERFACE, jlist, "size", "()I", true)
-  ix.visitInsn(OP_I2L)
-  ix.visitInsn(OP_LCMP)
-  ix.visitJumpInsn(OP_IFGE, i_bad)
-  ix.visitVarInsn(OP_ALOAD, 0)
-  ix.visitVarInsn(OP_LLOAD, 1)
-  ix.visitInsn(OP_L2I)
-  ix.visitMethodInsn(OP_INVOKEINTERFACE, jlist, "get", "(I)Ljava/lang/Object;", true)
-  ix.visitInsn(OP_ARETURN)
-  ix.visitLabel(i_bad)
-  ix.visitTypeInsn(OP_NEW, PANIC_CLASS)
-  ix.visitInsn(OP_DUP)
-  ix.visitTypeInsn(OP_NEW, SB)
-  ix.visitInsn(OP_DUP)
-  ix.visitMethodInsn(OP_INVOKESPECIAL, SB, "<init>", "()V", false)
-  append_const(ix, "index ")
-  ix.visitVarInsn(OP_LLOAD, 1)
-  ix.visitMethodInsn(OP_INVOKEVIRTUAL, SB, "append", "(J)L" ++ SB ++ ";", false)
-  append_const(ix, " out of bounds for length ")
-  ix.visitVarInsn(OP_ALOAD, 0)
-  ix.visitMethodInsn(OP_INVOKEINTERFACE, jlist, "size", "()I", true)
-  ix.visitMethodInsn(OP_INVOKEVIRTUAL, SB, "append", "(I)L" ++ SB ++ ";", false)
-  ix.visitMethodInsn(OP_INVOKEVIRTUAL, SB, "toString", "()Ljava/lang/String;", false)
-  ix.visitMethodInsn(OP_INVOKESPECIAL, PANIC_CLASS, "<init>", "(Ljava/lang/String;)V", false)
-  ix.visitInsn(OP_ATHROW)
-  ix.visitMaxs(0, 0)
-  ix.visitEnd()
-
-  let rg = cw.method(ACC_PUBLIC + ACC_STATIC, "range", "(JJ)Ljava/util/List;").expect("mv")
-  rg.visitCode()
-  rg.visitTypeInsn(OP_NEW, ARRAYLIST)
-  rg.visitInsn(OP_DUP)
-  rg.visitMethodInsn(OP_INVOKESPECIAL, ARRAYLIST, "<init>", "()V", false)
-  rg.visitVarInsn(OP_ASTORE, 4)
-  rg.visitVarInsn(OP_LLOAD, 0)
-  rg.visitVarInsn(OP_LSTORE, 5)
-  let r_loop = Label.new()
-  let r_done = Label.new()
-  rg.visitLabel(r_loop)
-  rg.visitVarInsn(OP_LLOAD, 5)
-  rg.visitVarInsn(OP_LLOAD, 2)
-  rg.visitInsn(OP_LCMP)
-  rg.visitJumpInsn(OP_IFGE, r_done)
-  rg.visitVarInsn(OP_ALOAD, 4)
-  rg.visitVarInsn(OP_LLOAD, 5)
-  rg.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Long", "valueOf", "(J)Ljava/lang/Long;", false)
-  rg.visitMethodInsn(OP_INVOKEVIRTUAL, ARRAYLIST, "add", "(Ljava/lang/Object;)Z", false)
-  rg.visitInsn(OP_POP)
-  rg.visitVarInsn(OP_LLOAD, 5)
-  rg.visitInsn(OP_LCONST_1)
-  rg.visitInsn(OP_LADD)
-  rg.visitVarInsn(OP_LSTORE, 5)
-  rg.visitJumpInsn(OP_GOTO, r_loop)
-  rg.visitLabel(r_done)
-  rg.visitVarInsn(OP_ALOAD, 4)
-  rg.visitInsn(OP_ARETURN)
-  rg.visitMaxs(0, 0)
-  rg.visitEnd()
-
-  # fromArray(String[]) -> List — CLI args; null (no JVM wrapper ran) → []
-  let fa = cw.method(ACC_PUBLIC + ACC_STATIC, "fromArray",
-    "([Ljava/lang/String;)Ljava/util/List;").expect("mv")
-  fa.visitCode()
-  let fa_null = Label.new()
-  fa.visitVarInsn(OP_ALOAD, 0)
-  fa.visitJumpInsn(OP_IFNULL, fa_null)
-  fa.visitTypeInsn(OP_NEW, ARRAYLIST)
-  fa.visitInsn(OP_DUP)
-  fa.visitVarInsn(OP_ALOAD, 0)
-  fa.visitMethodInsn(OP_INVOKESTATIC, "java/util/Arrays", "asList",
-    "([Ljava/lang/Object;)Ljava/util/List;", false)
-  fa.visitMethodInsn(OP_INVOKESPECIAL, ARRAYLIST, "<init>", "(Ljava/util/Collection;)V", false)
-  fa.visitInsn(OP_ARETURN)
-  fa.visitLabel(fa_null)
-  fa.visitTypeInsn(OP_NEW, ARRAYLIST)
-  fa.visitInsn(OP_DUP)
-  fa.visitMethodInsn(OP_INVOKESPECIAL, ARRAYLIST, "<init>", "()V", false)
-  fa.visitInsn(OP_ARETURN)
-  fa.visitMaxs(0, 0)
-  fa.visitEnd()
-
-  # slice(List, int from, int to) -> List — the `..rest` middle of a list pattern
-  let sc = cw.method(ACC_PUBLIC + ACC_STATIC, "slice",
-    "(Ljava/util/List;II)Ljava/util/List;").expect("mv")
-  sc.visitCode()
-  sc.visitTypeInsn(OP_NEW, ARRAYLIST)
-  sc.visitInsn(OP_DUP)
-  sc.visitVarInsn(OP_ALOAD, 0)
-  sc.visitVarInsn(OP_ILOAD, 1)
-  sc.visitVarInsn(OP_ILOAD, 2)
-  sc.visitMethodInsn(OP_INVOKEINTERFACE, jlist, "subList", "(II)Ljava/util/List;", true)
-  sc.visitMethodInsn(OP_INVOKESPECIAL, ARRAYLIST, "<init>", "(Ljava/util/Collection;)V", false)
-  sc.visitInsn(OP_ARETURN)
-  sc.visitMaxs(0, 0)
-  sc.visitEnd()
-
-  gen_list_ordering(cw)
-
-  # concat delegates to DawnList: appends in place when the left side is the
-  # sole owner of its tail, keeping `acc = acc ++ [x]` linear
-  let ct = cw.method(ACC_PUBLIC + ACC_STATIC, "concat",
-    "(Ljava/util/List;Ljava/util/List;)Ljava/util/List;").expect("mv")
-  ct.visitCode()
-  ct.visitVarInsn(OP_ALOAD, 0)
-  ct.visitVarInsn(OP_ALOAD, 1)
-  ct.visitMethodInsn(OP_INVOKESTATIC, DAWNLIST_CLASS, "concat",
-    "(Ljava/util/List;Ljava/util/List;)Ljava/util/List;", false)
-  ct.visitInsn(OP_ARETURN)
-  ct.visitMaxs(0, 0)
-  ct.visitEnd()
-
-  cw.visitEnd()
-  cw.toByteArray().expect("bytes")
 }
 
 ## parseInt / parseFloat: try/strip/parse/box, NumberFormatException → None.
@@ -2749,7 +2641,7 @@ pub fn emit_unerase(m: MethodVisitor, adts: Adts, t: Ty) -> Unit !io = {
     TyString -> { m.visitTypeInsn(OP_CHECKCAST, "java/lang/String") }
     TyBytes -> { m.visitTypeInsn(OP_CHECKCAST, "[B") }
     TyAdt(aid, _) -> { m.visitTypeInsn(OP_CHECKCAST, adt_jvm_name(adt_of(adts, aid))) }
-    TyList(_) -> { m.visitTypeInsn(OP_CHECKCAST, "java/util/List") }
+    TyList(_) -> { m.visitTypeInsn(OP_CHECKCAST, PVEC_CLASS) }
     TyMap(_, _) -> { m.visitTypeInsn(OP_CHECKCAST, HAMT_CLASS) }
     TySet(_) -> { m.visitTypeInsn(OP_CHECKCAST, HAMT_CLASS) }
     TyArray(_) -> { m.visitTypeInsn(OP_CHECKCAST, ARRAY_CLASS) }

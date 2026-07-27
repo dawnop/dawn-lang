@@ -745,10 +745,16 @@ Blob { data: .. } == Blob { data: .. }    no      # Option / 元组 / List 同
 | 1 | `for` 去下标化:`lower_for_list` 改发 `std/list` 四个游标函数的具名调用 | ✅ 2026-07-27 |
 | 2 | `std/list` 九个顺序游走改走同一组游标 | ✅ 2026-07-27 |
 | 3 | **D2**:Map/Set 换 `std/hamt`(纯 Dawn HAMT over `Array`),`map_*`/`set_*` 从后端 intrinsic 变成 lowering 期对 std 的具名调用;`Eq`/`Hash` 以字典传入;`DawnMap`/`DawnSet`/`dawn/rt/Maps` 退役 | ✅ 2026-07-27,自举 **+0.7%**(见 [collections §9.6](collections-dejava-research.md)) |
-| 4 | **D3**:List 换严格 RB,`Cur` 从下标改成叶子游走,`DawnList`/`dawn/rt/Lists` 退役 | 未动 |
+| 4 | **D3**:List 换 `std/pvec`(32 叉 trie + 尾块,纯 Dawn over `Array`);list 原语留在 Core、由后端翻译成 `std/pvec` 调用;`DawnList`/`dawn/rt/Lists` 退役 | ✅ 2026-07-27,自举 **+11.7%**(§9.3 预测 +11%) |
 
-D2 收工时手写 Java **4→2**(`DawnList` + `AdtClassWriter`),后端集合契约从 ~20 个
-intrinsic 缩到 `Array` 一个 + 仍在的 `list_*`。
+S3 收工:手写 Java **4→1**(只剩 `AdtClassWriter` 这个 ASM shim),`dawn/rt` 里不再有
+任何集合类,后端的集合契约就是 `Array` 五个操作 + `popcount`。合计自举 +12.5%。
+
+**一条排序上的更正**:D2 的原语在 lowering 期换成对 `std/hamt` 的具名调用,D3 不能照做。
+comptime 解释器吃的是 Core,而且它**自己实现了 list 原语**——`const B: List[Int] = [A, 4]`
+靠的就是那份实现。把 list 原语也在 lowering 期换掉,常量折叠就只剩「解释 `std/pvec`」一条路,
+而那要 `array_*`,comptime 是拒绝的。所以 list 原语留在 Core,由**后端**翻译成 `std/pvec`
+调用——表示本来就是后端的选择。Map/Set 没撞上这条,只因为 comptime 从来就拒绝它们。
 
 #### S4 — native(原 Phase 3–6)
 

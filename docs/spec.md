@@ -127,10 +127,11 @@ println("got $n items, first = ${list.get(0)}")
 
 ### 2.2 内建复合类型
 
-- `List[T]` — 不可变持久列表。实现是**共享底层数组的不可变窗口**（`dawn/rt/DawnList`）：
-  索引 O(1)；`++` 在左侧是自身尾部的唯一所有者时**就地延长、O(1) 摊还**，否则复制——
-  故 `acc = acc ++ [x]` 的累积循环是线性的。追加到**旧版本**必然复制，已发布的列表永不改变；
-  并发下槽位先 CAS 认领后写入。
+- `List[T]` — 不可变持久列表。实现是**32 叉 trie + 尾块的持久向量**（`std/pvec`，纯 Dawn 源，
+  建在 `Array` 原语之上）：索引 O(log32 n)——长度 ≤32 时全在尾块、即一次数组读；
+  `++` 逐元素追加，尾块未满时只复制尾块（≤32 槽），每 32 次把尾块压进 trie、复制一条
+  根到叶的路径，故 `acc = acc ++ [x]` 的累积循环是**线性的、O(1) 摊还**。
+  结构共享，已发布的列表永不改变；追加到旧版本不复制整表，只复制它自己的那一小块。
 - `Option[T]` — `Some(T) | None`
 - `Result[T, E]` — `Ok(T) | Err(E)`
 - `Map[K, V]` — 不可变映射（见下）
@@ -1216,8 +1217,8 @@ std → 内建，std 模块自己的 `pub fn len` 正是靠这一条合法。
   - `io.is_dir(path) -> Bool` — 不存在或出错都视为 `false`
 
 实现策略：能薄包 Java 就薄包（`String` 直接是 `java.lang.String`），持久 `List`/`Map`/`Set`
-自实现（`Map`/`Set` 是 `std/hamt` 的纯 Dawn 持久 HAMT，`List` 仍是 `DawnList` 共享数组窗口，
-均保插入序确定）。
+全部是**纯 Dawn 源**（`List` = `std/pvec` 持久向量，`Map`/`Set` = `std/hamt` 持久 HAMT，
+均保插入序确定），后端只需实现 `Array` 一个原语。
 
 ---
 
