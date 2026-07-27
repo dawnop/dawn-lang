@@ -1,21 +1,20 @@
 # The JVM backend's collection runtime, byte-copied into every built program.
 #
-# DawnList/DawnMap/DawnSet are the one part of the runtime that stays handwritten
-# Java (source archived at the `kotlin-final` tag; the working tree carries only
-# the compiled .class, inside the compiler artifact). They are NOT unfinished
-# selfhost — they are the JVM backend's implementation of the list/map/set
-# intrinsic contract, sitting behind the emitted dawn/rt/Maps and dawn/rt/Lists
-# helpers exactly as StdStrings/StdBytes/StdIo's logic now sits inside the
-# emitted dawn/rt/Strings/Bytes/Io. A native backend implements the same contract
-# with a native persistent-collection runtime; neither is language source.
+# `DawnList` is what is left of it: one handwritten Java class (source archived
+# at the `kotlin-final` tag; the working tree carries only the compiled .class,
+# inside the compiler artifact). It is NOT unfinished selfhost — it is the JVM
+# backend's implementation of the list intrinsic contract, sitting behind the
+# emitted dawn/rt/Lists helpers exactly as StdStrings/StdBytes/StdIo's logic now
+# sits inside the emitted dawn/rt/Strings/Bytes/Io.
 #
-# Why these stay Java (docs/collections-dejava-research.md, option C): each
-# `extends java.util.Abstract*`, whose structural, order-independent
-# equals/hashCode IS Dawn's `==`/hash on maps/sets — an identity that is
-# irreducible on the JVM, and that Dawn (no inheritance) cannot express in pure
-# source. Rewriting them as emitted bytecode or Dawn-over-`extends-java` would
-# move the java.util dependency, not remove it, and would not help the native
-# backend (which replaces the container regardless).
+# `DawnMap`/`DawnSet` left with S3. The old argument for keeping them was that
+# each `extends java.util.Abstract*`, whose structural, order-independent
+# equals/hashCode *was* Dawn's `==`/hash on maps and sets — an identity Dawn
+# was said to be unable to express without inheritance. What that argument
+# missed is that it only held while `==` and hash were hardwired: once they
+# became traits a container could implement, the identity moved into std source
+# and the container followed it (docs/collections-dejava-research.md §3, §5).
+# `DawnList` goes the same way when List does.
 #
 # Mechanism: compiled ahead of time, so they live in the compiler artifact and
 # must be copied into a built program's class table — otherwise `java -jar` dies
@@ -35,12 +34,14 @@ use java "java.nio.file.Files"
 use java "java.nio.file.Paths"
 use java "java.lang.System"
 
-## The handwritten-Java runtime classes copied verbatim into every program: the
-## three persistent collections that are the JVM backend's list/map/set contract
-## implementation (see the file header for why they stay Java). Each entry brings
-## its nested/anonymous classes along by the `$` name rule in `matches`.
-pub fn vendored_outers() -> List[String] =
-  ["DawnList", "DawnMap", "DawnSet"]
+## The handwritten-Java runtime classes copied verbatim into every program.
+## Each entry brings its nested/anonymous classes along by the `$` name rule in
+## `matches`.
+##
+## `DawnMap` and `DawnSet` left with S3: Map and Set are the Dawn hash trie in
+## std/hamt now, so there is nothing for a handwritten container to implement.
+## `DawnList` is the last one, and it goes the same way when List does.
+pub fn vendored_outers() -> List[String] = ["DawnList"]
 
 fn matches(file: String, outer: String) -> Bool =
   file == outer ++ ".class" ||

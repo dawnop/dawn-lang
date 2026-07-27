@@ -740,6 +740,16 @@ Blob { data: .. } == Blob { data: .. }    no      # Option / 元组 / List 同
 内容同 §4 Phase 2,现在可以老实做了。补一件 §4 漏掉的:**`std/list` 的每个函数今天都是
 `get(xs, i)` 索引递归**,D3 换 RB 时必须一起改成叶子游走——§4 只安排了 `for-in`。
 
+| 刀 | 事 | 状态 |
+|---|---|---|
+| 1 | `for` 去下标化:`lower_for_list` 改发 `std/list` 四个游标函数的具名调用 | ✅ 2026-07-27 |
+| 2 | `std/list` 九个顺序游走改走同一组游标 | ✅ 2026-07-27 |
+| 3 | **D2**:Map/Set 换 `std/hamt`(纯 Dawn HAMT over `Array`),`map_*`/`set_*` 从后端 intrinsic 变成 lowering 期对 std 的具名调用;`Eq`/`Hash` 以字典传入;`DawnMap`/`DawnSet`/`dawn/rt/Maps` 退役 | ✅ 2026-07-27,自举 **+0.7%**(见 [collections §9.6](collections-dejava-research.md)) |
+| 4 | **D3**:List 换严格 RB,`Cur` 从下标改成叶子游走,`DawnList`/`dawn/rt/Lists` 退役 | 未动 |
+
+D2 收工时手写 Java **4→2**(`DawnList` + `AdtClassWriter`),后端集合契约从 ~20 个
+intrinsic 缩到 `Array` 一个 + 仍在的 `list_*`。
+
 #### S4 — native(原 Phase 3–6)
 
 顺序不变,内容变轻。**C 发射器按收口后的 Core 重导**:今天在语义载体缺席时写的那部分

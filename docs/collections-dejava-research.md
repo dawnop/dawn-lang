@@ -1,6 +1,10 @@
 # 集合归位：DawnList/DawnMap/DawnSet 的去 Java 方案（A/B/C 调研 → D 计划）
 
-> 状态：**A/B/C 调研完成；C 已作为过渡态落地（`vendor.dawn` 指路牌）；本文改写计划，主推 D。**
+> 状态：**D2 已落地（2026-07-27）——Map/Set 是 `std/hamt` 的纯 Dawn HAMT，`DawnMap`/`DawnSet`
+> 退役，手写 Java 4→2（`DawnList` + `AdtClassWriter`）。D3 未动。**
+> 实测代价见 §9.6：**自举 +0.7%**，不是本文 §9.2 推算的 +10%。
+>
+> 原状态：A/B/C 调研完成；C 已作为过渡态落地（`vendor.dawn` 指路牌）；本文改写计划，主推 D。
 > 这是 de-Java 契约的最后一块（[runtime-intrinsics-design.md](runtime-intrinsics-design.md) §7）。
 > StdStrings（v0.10.0）、StdBytes/StdIo（v0.11.0）已退役成 emitter 自写的 `dawn/rt/*` 类；手写 Java
 > 只剩三个集合容器 `DawnList`/`DawnMap`/`DawnSet`（源在 `kotlin-final` tag，工作树只有 vendored `.class`）
@@ -336,3 +340,28 @@ fast=76,357,600   copy=705,534   → 复制路径仅 0.92%
 
 > spike 源码:`scripts/spike-hamt/`(`hamt.dawn` 纯 Dawn HAMT、`vec.dawn` 纯 Dawn 持久向量),
 > 扰动与计数实验的补丁 Java 与流程记在同目录 README。
+
+### 9.6 D2 落地后的实测：+0.7%，比 §9.2 的推算好一个数量级
+
+`std/hamt` 接管 Map/Set 之后量同一条自举基准（`scripts/selfhost-bench.sh`,3 采样取中位):
+
+| | 比值 |
+|---|---|
+| D2 之前(S3 刀 2 收工) | 0.9303 |
+| **D2 之后** | **0.9367** |
+
+**+0.7%,不是 §9.2 推算的 +10%。** 推算不是算错,是**前提变了**——§9.1 的 20× 量的是
+「今天的语言写的 HAMT」,而那份 spike 有两处代价在 D2 落地时都不存在了:
+
+1. **哈希不再从码点重算。** §9.1 记「Dawn `String` 拿不到 `String.hashCode` 的缓存值」,
+   于是每次插入/查找都从码点算一遍。这在 S1 之后不成立:`hash` 是 prelude trait,标量的
+   见证就发 JVM 自己的 `hashCode`,String 的缓存照吃。
+2. **节点数组不再是 `slice ++ [x]`。** §9.1 的 `set_at` 用三次分配模拟 `Array.with`;
+   D1 之后 `array_with` 是一次有界复制,`array_push` 在独占尾部时**原地扩展**。
+
+剩下的差距——路径复制的分配、字典调用——在编译器的真实负载里就是 §9.2 量到的那 0.5%
+的量级。**教训与 §9 开头那条同源:推算的有效期只到它的前提为止,而前提会被别的工作改掉。**
+
+顺带兑现的一件:`impl Eq[Map[K, V]]` / `impl Hash[Map[K, V]]` 现在写在 `std/map` 里,
+「顺序无关的相等」从 `AbstractMap` 的继承搬进了 Dawn 源——§3 判为「不可约」的那一层,
+按 §5 的预期在 trait 化之后自己散了。

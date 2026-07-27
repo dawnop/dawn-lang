@@ -56,8 +56,8 @@ pub fn desc_of(adts: Adts, t: Ty) -> String =
     TyVar(_, _) -> "Ljava/lang/Object;"
     TyAdt(aid, _) -> "L" ++ adt_jvm_name(adt_of(adts, aid)) ++ ";"
     TyList(_) -> "Ljava/util/List;"
-    TyMap(_, _) -> "Ljava/util/Map;"
-    TySet(_) -> "Ljava/util/Set;"
+    TyMap(_, _) -> "L" ++ HAMT_CLASS ++ ";"
+    TySet(_) -> "L" ++ HAMT_CLASS ++ ";"
     TyArray(_) -> "L" ++ ARRAY_CLASS ++ ";"
     TyTuple(elems) -> "L" ++ tuple_class(len(elems)) ++ ";"
     # arrays are their own descriptor ("[B"); reference classes get L…;
@@ -791,7 +791,15 @@ pub const LISTS_CLASS: String = "dawn/rt/Lists"
 
 pub const STRINGS_CLASS: String = "dawn/rt/Strings"
 
-pub const MAPS_CLASS: String = "dawn/rt/Maps"
+## The class a `Map` or a `Set` is at run time: the record at the root of the
+## Dawn trie in std/hamt, emitted like any other ADT. There is no runtime
+## module behind Map/Set any more -- the trie is std source, and the only
+## collection the backend implements is `Array`.
+##
+## Spelled rather than looked up because it is a fixed name (`adt_jvm_name` of
+## a std ADT is `<module>$<type>`), and `desc_of` is asked it often enough that
+## scanning the ADT table for it would show.
+pub const HAMT_CLASS: String = "std/hamt\$Hamt"
 
 pub const FN_CMP_CLASS: String = "dawn/rt/FnComparator"
 
@@ -2234,264 +2242,6 @@ fn close_mv(m: MethodVisitor) -> Unit !io = {
   ()
 }
 
-## dawn/rt/Maps: the runtime for the builtin persistent Map/Set (spec §2.2),
-## backed by the DawnMap/DawnSet HAMTs; read builtins speak java.util.Map/Set.
-pub fn gen_maps_class(supers: List[String]) -> Bytes !io = {
-  let dmap = "dawn/rt/DawnMap"
-  let dset = "dawn/rt/DawnSet"
-  let coll = "java/util/Collection"
-  let iter = "java/util/Iterator"
-  let entry = "java/util/Map\$Entry"
-  let jmap = "java/util/Map"
-  let jset = "java/util/Set"
-  let jlist = "java/util/List"
-  let t2 = tuple_class(2)
-  let cw = AdtClassWriter.new(supers)
-  cw.begin(V17, ACC_PUBLIC + ACC_FINAL, MAPS_CLASS, obj())
-
-  let me = open_static(cw, "map_empty", "()Ljava/util/Map;")
-  me.visitFieldInsn(OP_GETSTATIC, dmap, "EMPTY", "L" ++ dmap ++ ";")
-  me.visitInsn(OP_ARETURN)
-  close_mv(me)
-
-  let se = open_static(cw, "set_empty", "()Ljava/util/Set;")
-  se.visitFieldInsn(OP_GETSTATIC, dset, "EMPTY", "L" ++ dset ++ ";")
-  se.visitInsn(OP_ARETURN)
-  close_mv(se)
-
-  let mi = open_static(cw, "map_insert",
-    "(Ljava/util/Map;Ljava/lang/Object;Ljava/lang/Object;)Ljava/util/Map;")
-  mi.visitVarInsn(OP_ALOAD, 0)
-  mi.visitTypeInsn(OP_CHECKCAST, dmap)
-  mi.visitVarInsn(OP_ALOAD, 1)
-  mi.visitVarInsn(OP_ALOAD, 2)
-  mi.visitMethodInsn(OP_INVOKEVIRTUAL, dmap, "assoc",
-    "(Ljava/lang/Object;Ljava/lang/Object;)L" ++ dmap ++ ";", false)
-  mi.visitInsn(OP_ARETURN)
-  close_mv(mi)
-
-  let si = open_static(cw, "set_insert", "(Ljava/util/Set;Ljava/lang/Object;)Ljava/util/Set;")
-  si.visitVarInsn(OP_ALOAD, 0)
-  si.visitTypeInsn(OP_CHECKCAST, dset)
-  si.visitVarInsn(OP_ALOAD, 1)
-  si.visitMethodInsn(OP_INVOKEVIRTUAL, dset, "conj",
-    "(Ljava/lang/Object;)L" ++ dset ++ ";", false)
-  si.visitInsn(OP_ARETURN)
-  close_mv(si)
-
-  let mr = open_static(cw, "map_remove", "(Ljava/util/Map;Ljava/lang/Object;)Ljava/util/Map;")
-  mr.visitVarInsn(OP_ALOAD, 0)
-  mr.visitTypeInsn(OP_CHECKCAST, dmap)
-  mr.visitVarInsn(OP_ALOAD, 1)
-  mr.visitMethodInsn(OP_INVOKEVIRTUAL, dmap, "without",
-    "(Ljava/lang/Object;)L" ++ dmap ++ ";", false)
-  mr.visitInsn(OP_ARETURN)
-  close_mv(mr)
-
-  let sr = open_static(cw, "set_remove", "(Ljava/util/Set;Ljava/lang/Object;)Ljava/util/Set;")
-  sr.visitVarInsn(OP_ALOAD, 0)
-  sr.visitTypeInsn(OP_CHECKCAST, dset)
-  sr.visitVarInsn(OP_ALOAD, 1)
-  sr.visitMethodInsn(OP_INVOKEVIRTUAL, dset, "disj",
-    "(Ljava/lang/Object;)L" ++ dset ++ ";", false)
-  sr.visitInsn(OP_ARETURN)
-  close_mv(sr)
-
-  let mg = open_static(cw, "map_get", "(Ljava/util/Map;Ljava/lang/Object;)LOption;")
-  let g_none = Label.new()
-  mg.visitVarInsn(OP_ALOAD, 0)
-  mg.visitVarInsn(OP_ALOAD, 1)
-  mg.visitMethodInsn(OP_INVOKEINTERFACE, jmap, "containsKey", "(Ljava/lang/Object;)Z", true)
-  mg.visitJumpInsn(OP_IFEQ, g_none)
-  mg.visitTypeInsn(OP_NEW, "Option\$Some")
-  mg.visitInsn(OP_DUP)
-  mg.visitVarInsn(OP_ALOAD, 0)
-  mg.visitVarInsn(OP_ALOAD, 1)
-  mg.visitMethodInsn(OP_INVOKEINTERFACE, jmap, "get",
-    "(Ljava/lang/Object;)Ljava/lang/Object;", true)
-  mg.visitMethodInsn(OP_INVOKESPECIAL, "Option\$Some", "<init>", "(Ljava/lang/Object;)V", false)
-  mg.visitInsn(OP_ARETURN)
-  mg.visitLabel(g_none)
-  mg.visitFieldInsn(OP_GETSTATIC, "Option\$None", "INSTANCE", "LOption\$None;")
-  mg.visitInsn(OP_ARETURN)
-  close_mv(mg)
-
-  # index(Map, Object) -> Object: the `m[k]` operator — panics when the key is absent
-  let ix = open_static(cw, "index", "(Ljava/util/Map;Ljava/lang/Object;)Ljava/lang/Object;")
-  let absent = Label.new()
-  ix.visitVarInsn(OP_ALOAD, 0)
-  ix.visitVarInsn(OP_ALOAD, 1)
-  ix.visitMethodInsn(OP_INVOKEINTERFACE, jmap, "containsKey", "(Ljava/lang/Object;)Z", true)
-  ix.visitJumpInsn(OP_IFEQ, absent)
-  ix.visitVarInsn(OP_ALOAD, 0)
-  ix.visitVarInsn(OP_ALOAD, 1)
-  ix.visitMethodInsn(OP_INVOKEINTERFACE, jmap, "get",
-    "(Ljava/lang/Object;)Ljava/lang/Object;", true)
-  ix.visitInsn(OP_ARETURN)
-  ix.visitLabel(absent)
-  ix.visitTypeInsn(OP_NEW, PANIC_CLASS)
-  ix.visitInsn(OP_DUP)
-  ix.visitTypeInsn(OP_NEW, SB)
-  ix.visitInsn(OP_DUP)
-  ix.visitMethodInsn(OP_INVOKESPECIAL, SB, "<init>", "()V", false)
-  append_const(ix, "key not found: ")
-  ix.visitVarInsn(OP_ALOAD, 1)
-  ix.visitMethodInsn(OP_INVOKESTATIC, SHOW_CLASS, "show",
-    "(Ljava/lang/Object;)Ljava/lang/String;", false)
-  ix.visitMethodInsn(OP_INVOKEVIRTUAL, SB, "append", "(Ljava/lang/String;)L" ++ SB ++ ";", false)
-  ix.visitMethodInsn(OP_INVOKEVIRTUAL, SB, "toString", "()Ljava/lang/String;", false)
-  ix.visitMethodInsn(OP_INVOKESPECIAL, PANIC_CLASS, "<init>", "(Ljava/lang/String;)V", false)
-  ix.visitInsn(OP_ATHROW)
-  close_mv(ix)
-
-  let mh = open_static(cw, "map_has", "(Ljava/util/Map;Ljava/lang/Object;)Z")
-  mh.visitVarInsn(OP_ALOAD, 0)
-  mh.visitVarInsn(OP_ALOAD, 1)
-  mh.visitMethodInsn(OP_INVOKEINTERFACE, jmap, "containsKey", "(Ljava/lang/Object;)Z", true)
-  mh.visitInsn(OP_IRETURN)
-  close_mv(mh)
-
-  let sh = open_static(cw, "set_has", "(Ljava/util/Set;Ljava/lang/Object;)Z")
-  sh.visitVarInsn(OP_ALOAD, 0)
-  sh.visitVarInsn(OP_ALOAD, 1)
-  sh.visitMethodInsn(OP_INVOKEINTERFACE, jset, "contains", "(Ljava/lang/Object;)Z", true)
-  sh.visitInsn(OP_IRETURN)
-  close_mv(sh)
-
-  let ms = open_static(cw, "map_size", "(Ljava/util/Map;)J")
-  ms.visitVarInsn(OP_ALOAD, 0)
-  ms.visitMethodInsn(OP_INVOKEINTERFACE, jmap, "size", "()I", true)
-  ms.visitInsn(OP_I2L)
-  ms.visitInsn(OP_LRETURN)
-  close_mv(ms)
-
-  let sz = open_static(cw, "set_size", "(Ljava/util/Set;)J")
-  sz.visitVarInsn(OP_ALOAD, 0)
-  sz.visitMethodInsn(OP_INVOKEINTERFACE, jset, "size", "()I", true)
-  sz.visitInsn(OP_I2L)
-  sz.visitInsn(OP_LRETURN)
-  close_mv(sz)
-
-  let mk = open_static(cw, "map_keys", "(Ljava/util/Map;)Ljava/util/List;")
-  mk.visitTypeInsn(OP_NEW, ARRAYLIST)
-  mk.visitInsn(OP_DUP)
-  mk.visitVarInsn(OP_ALOAD, 0)
-  mk.visitMethodInsn(OP_INVOKEINTERFACE, jmap, "keySet", "()Ljava/util/Set;", true)
-  mk.visitMethodInsn(OP_INVOKESPECIAL, ARRAYLIST, "<init>", "(L" ++ coll ++ ";)V", false)
-  mk.visitInsn(OP_ARETURN)
-  close_mv(mk)
-
-  let mv2 = open_static(cw, "map_values", "(Ljava/util/Map;)Ljava/util/List;")
-  mv2.visitTypeInsn(OP_NEW, ARRAYLIST)
-  mv2.visitInsn(OP_DUP)
-  mv2.visitVarInsn(OP_ALOAD, 0)
-  mv2.visitMethodInsn(OP_INVOKEINTERFACE, jmap, "values", "()L" ++ coll ++ ";", true)
-  mv2.visitMethodInsn(OP_INVOKESPECIAL, ARRAYLIST, "<init>", "(L" ++ coll ++ ";)V", false)
-  mv2.visitInsn(OP_ARETURN)
-  close_mv(mv2)
-
-  let sl = open_static(cw, "set_to_list", "(Ljava/util/Set;)Ljava/util/List;")
-  sl.visitTypeInsn(OP_NEW, ARRAYLIST)
-  sl.visitInsn(OP_DUP)
-  sl.visitVarInsn(OP_ALOAD, 0)
-  sl.visitMethodInsn(OP_INVOKESPECIAL, ARRAYLIST, "<init>", "(L" ++ coll ++ ";)V", false)
-  sl.visitInsn(OP_ARETURN)
-  close_mv(sl)
-
-  let sf = open_static(cw, "set_from", "(Ljava/util/List;)Ljava/util/Set;")
-  sf.visitFieldInsn(OP_GETSTATIC, dset, "EMPTY", "L" ++ dset ++ ";")
-  sf.visitVarInsn(OP_ASTORE, 1)
-  sf.visitVarInsn(OP_ALOAD, 0)
-  sf.visitMethodInsn(OP_INVOKEINTERFACE, jlist, "iterator", "()Ljava/util/Iterator;", true)
-  sf.visitVarInsn(OP_ASTORE, 2)
-  let sf_loop = Label.new()
-  let sf_done = Label.new()
-  sf.visitLabel(sf_loop)
-  sf.visitVarInsn(OP_ALOAD, 2)
-  sf.visitMethodInsn(OP_INVOKEINTERFACE, iter, "hasNext", "()Z", true)
-  sf.visitJumpInsn(OP_IFEQ, sf_done)
-  sf.visitVarInsn(OP_ALOAD, 1)
-  sf.visitVarInsn(OP_ALOAD, 2)
-  sf.visitMethodInsn(OP_INVOKEINTERFACE, iter, "next", "()Ljava/lang/Object;", true)
-  sf.visitMethodInsn(OP_INVOKEVIRTUAL, dset, "conj",
-    "(Ljava/lang/Object;)L" ++ dset ++ ";", false)
-  sf.visitVarInsn(OP_ASTORE, 1)
-  sf.visitJumpInsn(OP_GOTO, sf_loop)
-  sf.visitLabel(sf_done)
-  sf.visitVarInsn(OP_ALOAD, 1)
-  sf.visitInsn(OP_ARETURN)
-  close_mv(sf)
-
-  let mf = open_static(cw, "map_from", "(Ljava/util/List;)Ljava/util/Map;")
-  mf.visitFieldInsn(OP_GETSTATIC, dmap, "EMPTY", "L" ++ dmap ++ ";")
-  mf.visitVarInsn(OP_ASTORE, 1)
-  mf.visitVarInsn(OP_ALOAD, 0)
-  mf.visitMethodInsn(OP_INVOKEINTERFACE, jlist, "iterator", "()Ljava/util/Iterator;", true)
-  mf.visitVarInsn(OP_ASTORE, 2)
-  let mf_loop = Label.new()
-  let mf_done = Label.new()
-  mf.visitLabel(mf_loop)
-  mf.visitVarInsn(OP_ALOAD, 2)
-  mf.visitMethodInsn(OP_INVOKEINTERFACE, iter, "hasNext", "()Z", true)
-  mf.visitJumpInsn(OP_IFEQ, mf_done)
-  mf.visitVarInsn(OP_ALOAD, 2)
-  mf.visitMethodInsn(OP_INVOKEINTERFACE, iter, "next", "()Ljava/lang/Object;", true)
-  mf.visitTypeInsn(OP_CHECKCAST, t2)
-  mf.visitVarInsn(OP_ASTORE, 3)
-  mf.visitVarInsn(OP_ALOAD, 1)
-  mf.visitVarInsn(OP_ALOAD, 3)
-  mf.visitFieldInsn(OP_GETFIELD, t2, "_0", "Ljava/lang/Object;")
-  mf.visitVarInsn(OP_ALOAD, 3)
-  mf.visitFieldInsn(OP_GETFIELD, t2, "_1", "Ljava/lang/Object;")
-  mf.visitMethodInsn(OP_INVOKEVIRTUAL, dmap, "assoc",
-    "(Ljava/lang/Object;Ljava/lang/Object;)L" ++ dmap ++ ";", false)
-  mf.visitVarInsn(OP_ASTORE, 1)
-  mf.visitJumpInsn(OP_GOTO, mf_loop)
-  mf.visitLabel(mf_done)
-  mf.visitVarInsn(OP_ALOAD, 1)
-  mf.visitInsn(OP_ARETURN)
-  close_mv(mf)
-
-  let en = open_static(cw, "map_entries", "(Ljava/util/Map;)Ljava/util/List;")
-  en.visitTypeInsn(OP_NEW, ARRAYLIST)
-  en.visitInsn(OP_DUP)
-  en.visitMethodInsn(OP_INVOKESPECIAL, ARRAYLIST, "<init>", "()V", false)
-  en.visitVarInsn(OP_ASTORE, 1)
-  en.visitVarInsn(OP_ALOAD, 0)
-  en.visitMethodInsn(OP_INVOKEINTERFACE, jmap, "entrySet", "()Ljava/util/Set;", true)
-  en.visitMethodInsn(OP_INVOKEINTERFACE, jset, "iterator", "()Ljava/util/Iterator;", true)
-  en.visitVarInsn(OP_ASTORE, 2)
-  let en_loop = Label.new()
-  let en_done = Label.new()
-  en.visitLabel(en_loop)
-  en.visitVarInsn(OP_ALOAD, 2)
-  en.visitMethodInsn(OP_INVOKEINTERFACE, iter, "hasNext", "()Z", true)
-  en.visitJumpInsn(OP_IFEQ, en_done)
-  en.visitVarInsn(OP_ALOAD, 2)
-  en.visitMethodInsn(OP_INVOKEINTERFACE, iter, "next", "()Ljava/lang/Object;", true)
-  en.visitTypeInsn(OP_CHECKCAST, entry)
-  en.visitVarInsn(OP_ASTORE, 3)
-  en.visitVarInsn(OP_ALOAD, 1)
-  en.visitTypeInsn(OP_NEW, t2)
-  en.visitInsn(OP_DUP)
-  en.visitVarInsn(OP_ALOAD, 3)
-  en.visitMethodInsn(OP_INVOKEINTERFACE, entry, "getKey", "()Ljava/lang/Object;", true)
-  en.visitVarInsn(OP_ALOAD, 3)
-  en.visitMethodInsn(OP_INVOKEINTERFACE, entry, "getValue", "()Ljava/lang/Object;", true)
-  en.visitMethodInsn(OP_INVOKESPECIAL, t2, "<init>",
-    "(Ljava/lang/Object;Ljava/lang/Object;)V", false)
-  en.visitMethodInsn(OP_INVOKEVIRTUAL, ARRAYLIST, "add", "(Ljava/lang/Object;)Z", false)
-  en.visitInsn(OP_POP)
-  en.visitJumpInsn(OP_GOTO, en_loop)
-  en.visitLabel(en_done)
-  en.visitVarInsn(OP_ALOAD, 1)
-  en.visitInsn(OP_ARETURN)
-  close_mv(en)
-
-  cw.visitEnd()
-  cw.toByteArray().expect("bytes")
-}
-
 ## The per-trait dictionary interface name: dawn/tr/<owner$…$>Name.
 pub fn owner_prefix(owner: Option[String]) -> String =
   match owner {
@@ -3000,8 +2750,8 @@ pub fn emit_unerase(m: MethodVisitor, adts: Adts, t: Ty) -> Unit !io = {
     TyBytes -> { m.visitTypeInsn(OP_CHECKCAST, "[B") }
     TyAdt(aid, _) -> { m.visitTypeInsn(OP_CHECKCAST, adt_jvm_name(adt_of(adts, aid))) }
     TyList(_) -> { m.visitTypeInsn(OP_CHECKCAST, "java/util/List") }
-    TyMap(_, _) -> { m.visitTypeInsn(OP_CHECKCAST, "java/util/Map") }
-    TySet(_) -> { m.visitTypeInsn(OP_CHECKCAST, "java/util/Set") }
+    TyMap(_, _) -> { m.visitTypeInsn(OP_CHECKCAST, HAMT_CLASS) }
+    TySet(_) -> { m.visitTypeInsn(OP_CHECKCAST, HAMT_CLASS) }
     TyArray(_) -> { m.visitTypeInsn(OP_CHECKCAST, ARRAY_CLASS) }
     TyTuple(elems) -> { m.visitTypeInsn(OP_CHECKCAST, tuple_class(len(elems))) }
     TyJava(fqcn, _) -> {

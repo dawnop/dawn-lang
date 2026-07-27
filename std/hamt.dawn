@@ -259,6 +259,15 @@ pub fn get[K: Eq + Hash, V](m: Hamt[K, V], k: K) -> Option[V] =
     None -> None
   }
 
+## The value bound to `k`, panicking when it is absent — what `m[k]` means.
+## Naming the missing key is why this one asks for `Show` and nothing else
+## does.
+pub fn index[K: Eq + Hash + Show, V](m: Hamt[K, V], k: K) -> V =
+  match get(m, k) {
+    Some(v) -> v
+    None -> panic("key not found: " ++ show(k))
+  }
+
 ## Whether `k` is bound.
 pub fn has[K: Eq + Hash, V](m: Hamt[K, V], k: K) -> Bool =
   match node_leaf(m.root, 0, hash32(k), k) {
@@ -372,4 +381,23 @@ pub fn from[K: Eq + Hash, V](es: List[(K, V)]) -> Hamt[K, V] = {
     m = assoc(m, k, v)
   }
   m
+}
+
+# ---- the set surface ----
+#
+# A set is a map to a value nobody reads, which is how DawnSet related to
+# DawnMap as well. Only the two operations whose shape differs need a name of
+# their own — `has`, `dissoc`, `count` and `keys` already do for a set exactly
+# what a set wants.
+
+## A copy with `x` added; an existing element keeps its position.
+pub fn sadd[T: Eq + Hash](s: Hamt[T, Bool], x: T) -> Hamt[T, Bool] = assoc(s, x, true)
+
+## A set from a list; duplicates collapse onto the first occurrence.
+pub fn sfrom[T: Eq + Hash](xs: List[T]) -> Hamt[T, Bool] = {
+  var s: Hamt[T, Bool] = empty()
+  for x in xs {
+    s = sadd(s, x)
+  }
+  s
 }

@@ -2037,6 +2037,10 @@ pub fn lower_expr(st0: LSt, e: TExpr) -> (LSt, CExpr) = {
         let w = if len(wits) == 1 { Some(wits[0]) } else { none_wit }
         return to_str(st1, v, tex_ty(args[0]), w)
       }
+      match hamt_fn(name) {
+        Some(fname) -> return hamt_call(st, name, fname, args, wits, ty)
+        None -> ()
+      }
       match erased_builtin_sig(name) {
         Some(sg) -> {
           let (st1, vs) = lower_args_to(st, args, sg.param_tys)
@@ -2077,19 +2081,22 @@ pub fn lower_expr(st0: LSt, e: TExpr) -> (LSt, CExpr) = {
         }
       }
     XConstRef(name, _, _, ty) -> (st, CConstRef(name, ty))
-    XIndex(target, index, on_map, _, _, ty) -> {
+    XIndex(target, index, on_map, wits, _, _, ty) -> {
       let (st1, tv) = lower_expr(st, target)
       let (st2, iv) = lower_expr(st1, index)
       # indexing yields an erased element, so the unbox is explicit
       let erased = TyVar("E", 0)
-      let call =
-        if on_map {
-          CIntrinsic("map_index",
-            [tv, adapt_in(iv, tex_ty(index), TyVar("K", 0))], erased)
-        } else {
-          CIntrinsic("list_index", [tv, iv], erased)
-        }
-      (st2, adapt_out(call, erased, ty))
+      if on_map {
+        # `m[k]` is `hamt.index`, which needs the key's Eq, Hash and Show --
+        # the last only to name the key it could not find, which is why the
+        # message survives without every lookup paying to build one.
+        let sg = hamt_sig(st2, "index")
+        let (st3, ds) = witness_values(st2, wits)
+        let call = CCall(CDirect("std/hamt", "index"),
+          [tv, adapt_in(iv, tex_ty(index), sg.param_tys[1])] ++ ds, sg.ret)
+        return (st3, adapt_out(call, sg.ret, ty))
+      }
+      (st2, adapt_out(CIntrinsic("list_index", [tv, iv], erased), erased, ty))
     }
     XCtorValue(adt, ci, _, _, ty) -> lift_ctor_value(st, adt, ci, ty)
     XCallDyn(sym, _, args, _, _, ty) ->
@@ -2531,6 +2538,54 @@ fn iter_sig(st: LSt, name: String) -> Sig =
     None -> panic("lower: std/list." ++ name ++ " is missing")
   }
 
+## Which function on the Dawn trie a Map/Set primitive is.
+##
+## Map and Set are one structure -- a set is a map to a value nobody reads --
+## so most of the two families land on the same name. Nothing here is a
+## backend intrinsic any more: since S3 the only collection a backend
+## implements is `Array`, and everything above it is std source
+## (docs/collections-dejava-research.md §5.1).
+fn hamt_fn(name: String) -> Option[String] =
+  match name {
+    "map_empty" -> Some("empty")
+    "set_empty" -> Some("empty")
+    "map_from" -> Some("from")
+    "set_from" -> Some("sfrom")
+    "map_insert" -> Some("assoc")
+    "set_insert" -> Some("sadd")
+    "map_remove" -> Some("dissoc")
+    "set_remove" -> Some("dissoc")
+    "map_get" -> Some("get")
+    "map_has" -> Some("has")
+    "set_has" -> Some("has")
+    "map_size" -> Some("count")
+    "set_size" -> Some("count")
+    "map_keys" -> Some("keys")
+    "set_to_list" -> Some("keys")
+    "map_values" -> Some("values")
+    "map_entries" -> Some("entries")
+    _ -> None
+  }
+
+fn hamt_sig(st: LSt, name: String) -> Sig =
+  match sig_of(st, "std/hamt", name) {
+    Some(sg) -> sg
+    None -> panic("lower: std/hamt." ++ name ++ " is missing")
+  }
+
+## A Map/Set primitive as a direct call on the trie. The primitive's own
+## signature says which slots are erased, and the trie's says which the callee
+## declares, so the adapts are the ordinary ones -- the two agree everywhere
+## but on the container itself, which is a concrete type on both sides.
+fn hamt_call(
+  st: LSt, prim: String, fname: String, args: List[TExpr], wits: List[WitRef], ty: Ty
+) -> (LSt, CExpr) = {
+  let sg = hamt_sig(st, fname)
+  let (st1, vs) = lower_args_to(st, args, sg.param_tys)
+  let (st2, ds) = witness_values(st1, wits)
+  (st2, adapt_out(CCall(CDirect("std/hamt", fname), vs ++ ds, sg.ret), sg.ret, ty))
+}
+
 ## The list argument is erased at the callee (`xs: List[T]` over a type
 ## variable is not, but the element is), so each argument goes in through the
 ## same adapt every other call site uses.
@@ -2741,6 +2796,6 @@ fn node_name(e: TExpr) -> String =
     XLambda(_, _, _, _, _, _, _) -> "XLambda"
     XCtorValue(_, _, _, _, _) -> "XCtorValue"
     XConstRef(_, _, _, _) -> "XConstRef"
-    XIndex(_, _, _, _, _, _) -> "XIndex"
+    XIndex(_, _, _, _, _, _, _) -> "XIndex"
     _ -> "an unhandled node"
   }

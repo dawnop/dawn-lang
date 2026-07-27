@@ -849,6 +849,17 @@ fn tp1b(s: Sig, v: Ty, tid: Int) -> Sig =
 
 fn eff1(s: Sig, e: Eff) -> Sig = Sig { ..s, eff: e }
 
+## A Map/Set primitive that hashes: its key parameter carries `Eq` and `Hash`,
+## so the dictionaries reach the trie in std/hamt. Which relation decides "same
+## key" is then the key type's own, rather than whatever the host's identity
+## happened to be. The primitives that only count or list entries are
+## deliberately not in this shape -- reading a map should not need the bound.
+fn keyed2(s: Sig, kk: Ty, vv: Ty) -> Sig =
+  Sig { ..s, tparams: [kk, vv], constraints: [[EQ_ID, HASH_ID]] }
+
+fn keyed1(s: Sig, tt: Ty) -> Sig =
+  Sig { ..s, tparams: [tt], constraints: [[EQ_ID, HASH_ID]] }
+
 ## The builtin function table (port of Types.kt BUILTINS, same order).
 pub fn builtins() -> Map[String, Sig] = {
   let t = TyVar("T", -1)
@@ -947,21 +958,15 @@ pub fn builtins() -> Map[String, Sig] = {
     eff1(bsig("io_list_names", [TyString], ["path"], TyList(TyString)), EIo),
     Sig { ..bsig("map_empty", [], [], TyMap(k, v)), tparams: [k, v] },
     tp1(bsig("set_empty", [], [], TySet(t)), t),
-    Sig {
-      ..bsig("map_from", [TyList(TyTuple([k, v]))], ["entries"], TyMap(k, v)),
-      tparams: [k, v]
-    },
-    tp1(bsig("set_from", [TyList(t)], ["xs"], TySet(t)), t),
-    Sig {
-      ..bsig("map_insert", [TyMap(k, v), k, v], ["m", "key", "value"], TyMap(k, v)),
-      tparams: [k, v]
-    },
-    tp1(bsig("set_insert", [TySet(t), t], ["s", "x"], TySet(t)), t),
-    Sig { ..bsig("map_remove", [TyMap(k, v), k], ["m", "key"], TyMap(k, v)), tparams: [k, v] },
-    tp1(bsig("set_remove", [TySet(t), t], ["s", "x"], TySet(t)), t),
-    Sig { ..bsig("map_get", [TyMap(k, v), k], ["m", "key"], opt_ty(v)), tparams: [k, v] },
-    Sig { ..bsig("map_has", [TyMap(k, v), k], ["m", "key"], TyBool), tparams: [k, v] },
-    tp1(bsig("set_has", [TySet(t), t], ["s", "x"], TyBool), t),
+    keyed2(bsig("map_from", [TyList(TyTuple([k, v]))], ["entries"], TyMap(k, v)), k, v),
+    keyed1(bsig("set_from", [TyList(t)], ["xs"], TySet(t)), t),
+    keyed2(bsig("map_insert", [TyMap(k, v), k, v], ["m", "key", "value"], TyMap(k, v)), k, v),
+    keyed1(bsig("set_insert", [TySet(t), t], ["s", "x"], TySet(t)), t),
+    keyed2(bsig("map_remove", [TyMap(k, v), k], ["m", "key"], TyMap(k, v)), k, v),
+    keyed1(bsig("set_remove", [TySet(t), t], ["s", "x"], TySet(t)), t),
+    keyed2(bsig("map_get", [TyMap(k, v), k], ["m", "key"], opt_ty(v)), k, v),
+    keyed2(bsig("map_has", [TyMap(k, v), k], ["m", "key"], TyBool), k, v),
+    keyed1(bsig("set_has", [TySet(t), t], ["s", "x"], TyBool), t),
     Sig { ..bsig("map_size", [TyMap(k, v)], ["m"], TyInt), tparams: [k, v] },
     tp1(bsig("set_size", [TySet(t)], ["s"], TyInt), t),
     Sig { ..bsig("map_keys", [TyMap(k, v)], ["m"], TyList(k)), tparams: [k, v] },
@@ -1008,7 +1013,6 @@ pub fn builtins() -> Map[String, Sig] = {
 pub type Rt =
   | RtLists
   | RtStrings
-  | RtMaps
   | RtBytes
   | RtArray
   | RtIo
@@ -1073,17 +1077,18 @@ pub fn intrinsics() -> Map[String, Intr] = {
   rt_of = map.insert(rt_of, "java_try", (RtIo, "javaTry"))
   rt_of = map.insert(rt_of, "catch_panic", (RtIo, "catchPanic"))
 
-  # the persistent Map/Set: erased on both sides, and std-only
+  # The persistent Map/Set: erased on both sides, and std-only. No runtime
+  # module owns them any more -- lowering turns each into a call on the Dawn
+  # trie in std/hamt, so a backend implements `Array` and nothing else
+  # (docs/collections-dejava-research.md §5.1).
   for op in ["empty", "from", "insert", "remove", "get", "has", "size", "keys", "values",
     "entries"] {
       let n = "map_" ++ op
-      rt_of = map.insert(rt_of, n, (RtMaps, n))
       erased = set.insert(erased, n)
       internal = set.insert(internal, n)
     }
   for op in ["empty", "from", "insert", "remove", "has", "size", "to_list"] {
     let n = "set_" ++ op
-    rt_of = map.insert(rt_of, n, (RtMaps, n))
     erased = set.insert(erased, n)
     internal = set.insert(internal, n)
   }

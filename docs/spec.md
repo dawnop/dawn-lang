@@ -155,8 +155,9 @@ println("got $n items, first = ${list.get(0)}")
 - **迭代顺序 = 插入顺序**，确定且 JVM/native 一致（`map.keys`/`map.entries`/`set.to_list`
   按插入序）。`map.insert` 遇已存在的键**替换值、保留原插入位置**。
 - **相等与顺序无关**：两个键值对相同的 `Map` 相等，无论插入次序。
-- 实现是**持久 HAMT**（`dawn/rt/DawnMap`/`DawnSet`）：`map.insert`/`map.remove`
+- 实现是**持久 HAMT**（`std/hamt`，纯 Dawn 源，建在 `Array` 原语之上）：`map.insert`/`map.remove`
   O(log32 n)，只复制根到叶的路径，其余结构与原映射共享（插入序由逐键序号维持）。
+  键的相等与哈希取自键类型的 `Eq`/`Hash`（以字典传入），不是宿主的对象同一性。
 
 ### 2.3 和类型（ADT）
 
@@ -1215,8 +1216,8 @@ std → 内建，std 模块自己的 `pub fn len` 正是靠这一条合法。
   - `io.is_dir(path) -> Bool` — 不存在或出错都视为 `false`
 
 实现策略：能薄包 Java 就薄包（`String` 直接是 `java.lang.String`），持久 `List`/`Map`/`Set`
-自实现（`DawnList` 共享数组窗口、`DawnMap`/`DawnSet` 持久 HAMT，均保插入序确定；
-自举前用 Kotlin/Java 写运行时）。
+自实现（`Map`/`Set` 是 `std/hamt` 的纯 Dawn 持久 HAMT，`List` 仍是 `DawnList` 共享数组窗口，
+均保插入序确定）。
 
 ---
 

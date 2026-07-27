@@ -16,7 +16,7 @@ use std/list
 use std/map
 use std/set
 use types.{
-  intr_at, Rt, RtLists, RtStrings, RtMaps, RtBytes, RtArray, RtIo,
+  intr_at, Rt, RtLists, RtStrings, RtBytes, RtArray, RtIo,
   Ty, TyInt, TyFloat, TyBool, TyString, TyBytes, TyUnit, TyNever,
   TyError, TyVar, TyAdt, TyList, TyMap, TySet, TyArray, TyJava, TyTuple, TyFn,
   Adts, AdtI, CtorI, FieldI, adt_of, adt_jvm_name, ctor_jvm_name,
@@ -45,7 +45,7 @@ use codegen.{
   OP_IADD, OP_LADD, OP_ISUB, OP_IMUL, OP_IXOR, OP_LXOR, OP_LNEG, OP_DNEG,
   OP_BIPUSH, OP_ARRAYLENGTH,
   PANIC_CLASS, UNIT_CLASS, SB, SHOW_CLASS, BYTES_CLASS, IO_CLASS,
-  LISTS_CLASS, STRINGS_CLASS, MAPS_CLASS, FN_CMP_CLASS,
+  LISTS_CLASS, STRINGS_CLASS, HAMT_CLASS, FN_CMP_CLASS,
   ARRAYLIST, DAWNLIST_CLASS, ARRAY_CLASS
 }
 use core.{
@@ -316,8 +316,8 @@ fn unerase(g: Gen, t: Ty) -> Unit !io = {
     TyBytes -> { m.visitTypeInsn(OP_CHECKCAST, "[B") }
     TyAdt(aid, _) -> { m.visitTypeInsn(OP_CHECKCAST, adt_jvm_name(adt_of(g.adts, aid))) }
     TyList(_) -> { m.visitTypeInsn(OP_CHECKCAST, "java/util/List") }
-    TyMap(_, _) -> { m.visitTypeInsn(OP_CHECKCAST, "java/util/Map") }
-    TySet(_) -> { m.visitTypeInsn(OP_CHECKCAST, "java/util/Set") }
+    TyMap(_, _) -> { m.visitTypeInsn(OP_CHECKCAST, HAMT_CLASS) }
+    TySet(_) -> { m.visitTypeInsn(OP_CHECKCAST, HAMT_CLASS) }
     TyArray(_) -> { m.visitTypeInsn(OP_CHECKCAST, ARRAY_CLASS) }
     TyTuple(elems) -> { m.visitTypeInsn(OP_CHECKCAST, tuple_class(len(elems))) }
     TyJava(fqcn, _) -> { m.visitTypeInsn(OP_CHECKCAST, internal_of(fqcn)) }
@@ -687,7 +687,6 @@ fn rt_class(o: Rt) -> String =
   match o {
     RtLists -> LISTS_CLASS
     RtStrings -> STRINGS_CLASS
-    RtMaps -> MAPS_CLASS
     RtBytes -> BYTES_CLASS
     RtArray -> ARRAY_CLASS
     RtIo -> IO_CLASS
@@ -2287,9 +2286,6 @@ fn gen_cintrinsic(g: Gen, name: String, args: List[CExpr], ty: Ty) -> (Gen, Bool
   } else if name == "list_index" {
     g1.mv.visitMethodInsn(OP_INVOKESTATIC, LISTS_CLASS, "index",
       "(Ljava/util/List;J)Ljava/lang/Object;", false)
-  } else if name == "map_index" {
-    g1.mv.visitMethodInsn(OP_INVOKESTATIC, MAPS_CLASS, "index",
-      "(Ljava/util/Map;Ljava/lang/Object;)Ljava/lang/Object;", false)
   } else if name == "list_slice" {
     g1.mv.visitInsn(OP_L2I)
     let (ga, hi_slot) = alloc(g1, 1)

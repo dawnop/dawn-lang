@@ -3350,6 +3350,23 @@ pub fn index_wanted(cx: Cx, tt: Ty, lo: Int, hi: Int) -> (Cx, Option[(Ty, Ty, Bo
       }
   }
 
+## The three witnesses `m[k]` needs: `Eq` and `Hash` to find the entry, `Show`
+## to name the key when there is none. A missing one is reported here, at the
+## `[]`, rather than surfacing as a gap while lowering.
+fn index_wits(cx: Cx, key_t: Ty, lo: Int, hi: Int) -> (Cx, List[WitRef]) = {
+  var cx1 = cx
+  var out: List[WitRef] = []
+  for tid in [EQ_ID, HASH_ID, SHOW_ID] {
+    let (cx2, w) = resolve_witness(cx1, tid, key_t, lo, hi, "indexing a Map")
+    cx1 = cx2
+    match w {
+      Some(wr) -> { out = out ++ [wr] }
+      None -> ()
+    }
+  }
+  (cx1, out)
+}
+
 ## Record field access p.x — resolve against the record's single constructor.
 pub fn check_field_access_typed(
   cx: Cx,
@@ -5109,8 +5126,14 @@ fn check_expr_at(cx: Cx, e: Expr, expected: Option[Ty]) -> (Cx, Ty, TExpr) !io =
                 e_lo(index), e_hi(index))
             }
             (cx4, TyError, XError(lo, hi))
+          } else if on_map {
+            # `m[k]` hashes the key, compares it, and names it if it is
+            # absent -- three relations the key type owns, so three witnesses
+            # resolved here rather than assumed by the backend.
+            let (cx5, ws) = index_wits(cx4, want_idx, lo, hi)
+            (cx5, result, XIndex(tx, ix, on_map, ws, lo, hi, result))
           } else {
-            (cx4, result, XIndex(tx, ix, on_map, lo, hi, result))
+            (cx4, result, XIndex(tx, ix, on_map, [], lo, hi, result))
           }
         }
       }

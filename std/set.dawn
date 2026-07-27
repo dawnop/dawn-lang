@@ -1,29 +1,60 @@
 # std/set — the persistent hash set (spec §2.2, §11).
 #
 # Short names, module-qualified at the call site: `use std/set`, then
-# `set.insert(s, x)`. Forwards to the compiler intrinsics over dawn/rt/DawnSet,
-# exactly like std/map does for Map.
+# `set.insert(s, x)`. Forwards to the compiler primitives over the same Dawn
+# hash trie a Map is (std/hamt), exactly like std/map does -- a set is a map to
+# a value nobody reads. Bounds follow the same line: finding an element needs
+# `[T: Eq + Hash]`, counting and listing them do not.
 
 ## A set with no elements. The element type comes from the use site.
 pub fn empty[T]() -> Set[T] = set_empty()
 
 ## A set from a list; duplicates collapse, first occurrence keeps its position.
-pub fn from[T](xs: List[T]) -> Set[T] = set_from(xs)
+pub fn from[T: Eq + Hash](xs: List[T]) -> Set[T] = set_from(xs)
 
 ## A copy with `x` added; an existing element keeps its insertion position.
-pub fn insert[T](s: Set[T], x: T) -> Set[T] = set_insert(s, x)
+pub fn insert[T: Eq + Hash](s: Set[T], x: T) -> Set[T] = set_insert(s, x)
 
 ## A copy without `x`; absent elements are fine.
-pub fn remove[T](s: Set[T], x: T) -> Set[T] = set_remove(s, x)
+pub fn remove[T: Eq + Hash](s: Set[T], x: T) -> Set[T] = set_remove(s, x)
 
 ## Whether `x` is an element.
-pub fn has[T](s: Set[T], x: T) -> Bool = set_has(s, x)
+pub fn has[T: Eq + Hash](s: Set[T], x: T) -> Bool = set_has(s, x)
 
 ## Number of elements.
 pub fn size[T](s: Set[T]) -> Int = set_size(s)
 
 ## The elements, in insertion order.
 pub fn to_list[T](s: Set[T]) -> List[T] = set_to_list(s)
+
+# ---- Eq / Hash for Set ----
+#
+# Same reasoning as Map's, which these are: element order is an artifact of
+# insertion, not of the value, so both relations are defined on membership.
+# No `Ord[Set[T]]` for the same reason there is none for Map.
+
+fn eq_go[T: Eq + Hash](b: Set[T], xs: List[T], i: Int) -> Bool =
+  if i == len(xs) {
+    true
+  } else if has(b, xs[i]) {
+    eq_go(b, xs, i + 1)
+  } else {
+    false
+  }
+
+## Same size, and every element of one an element of the other.
+impl[T: Eq + Hash] Eq[Set[T]] {
+  fn eq(a: Set[T], b: Set[T]) -> Bool =
+    if size(a) != size(b) { false } else { eq_go(b, to_list(a), 0) }
+}
+
+fn hash_go[T: Hash](xs: List[T], i: Int, acc: Int) -> Int =
+  if i == len(xs) { acc } else { hash_go(xs, i + 1, acc + hash(xs[i])) }
+
+## A sum over the elements, order-independent like `eq` above.
+impl[T: Hash] Hash[Set[T]] {
+  fn hash(s: Set[T]) -> Int = hash_go(to_list(s), 0, 0)
+}
 
 fn show_go[T: Show](xs: List[T], i: Int, acc: String) -> String =
   if i == len(xs) {

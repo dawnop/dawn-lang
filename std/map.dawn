@@ -1,9 +1,16 @@
 # std/map — the persistent hash map (spec §2.2, §11).
 #
 # Short names, module-qualified at the call site: `use std/map`, then
-# `map.insert(m, k, v)`. Each function forwards to the compiler intrinsic that
-# owns the representation (dawn/rt/DawnMap, a persistent HAMT); the wrappers are
-# what give the operations their public, qualified spelling.
+# `map.insert(m, k, v)`. Each function forwards to the compiler primitive that
+# owns the representation -- since S3 a pure-Dawn hash trie (std/hamt) rather
+# than a handwritten Java one; the wrappers are what give the operations their
+# public, qualified spelling.
+#
+# Everything that has to find an entry carries `[K: Eq + Hash]`, because
+# finding one means hashing the key and comparing it, and those are the key
+# type's own relations. Counting and listing entries do neither, so they stay
+# unbounded -- reading a map should not ask more of its keys than storing one
+# already did.
 #
 # Key validity (no Float/Bytes anywhere inside the key type) is enforced by the
 # checker at every Map type instantiation, so these wrappers need no checks.
@@ -12,19 +19,20 @@
 pub fn empty[K, V]() -> Map[K, V] = map_empty()
 
 ## A map from a list of (key, value) pairs; a repeated key keeps the last value.
-pub fn from[K, V](entries: List[(K, V)]) -> Map[K, V] = map_from(entries)
+pub fn from[K: Eq + Hash, V](entries: List[(K, V)]) -> Map[K, V] = map_from(entries)
 
 ## A copy with `key` bound to `value`; an existing key keeps its insertion position.
-pub fn insert[K, V](m: Map[K, V], key: K, value: V) -> Map[K, V] = map_insert(m, key, value)
+pub fn insert[K: Eq + Hash, V](m: Map[K, V], key: K, value: V) -> Map[K, V] =
+  map_insert(m, key, value)
 
 ## A copy without `key`; absent keys are fine.
-pub fn remove[K, V](m: Map[K, V], key: K) -> Map[K, V] = map_remove(m, key)
+pub fn remove[K: Eq + Hash, V](m: Map[K, V], key: K) -> Map[K, V] = map_remove(m, key)
 
 ## The value bound to `key`, or `None`.
-pub fn get[K, V](m: Map[K, V], key: K) -> Option[V] = map_get(m, key)
+pub fn get[K: Eq + Hash, V](m: Map[K, V], key: K) -> Option[V] = map_get(m, key)
 
 ## Whether `key` is bound.
-pub fn has[K, V](m: Map[K, V], key: K) -> Bool = map_has(m, key)
+pub fn has[K: Eq + Hash, V](m: Map[K, V], key: K) -> Bool = map_has(m, key)
 
 ## Number of entries.
 pub fn size[K, V](m: Map[K, V]) -> Int = map_size(m)
@@ -37,6 +45,48 @@ pub fn values[K, V](m: Map[K, V]) -> List[V] = map_values(m)
 
 ## The (key, value) pairs, in insertion order.
 pub fn entries[K, V](m: Map[K, V]) -> List[(K, V)] = map_entries(m)
+
+# ---- Eq / Hash for Map ----
+#
+# Both are defined on the entries rather than on the structure holding them.
+# A hash trie has no canonical shape: the same entries inserted in a different
+# order, or with a removal in between, are a different tree. Until S3 this was
+# the JVM's business -- `AbstractMap` supplied an order-independent equality
+# that Dawn borrowed and could not state -- and stating it is what let the
+# container become Dawn source (docs/collections-dejava-research.md §3).
+#
+# There is deliberately no `Ord[Map[K, V]]`: entries have no order to compare.
+
+fn eq_go[K: Eq + Hash, V: Eq](b: Map[K, V], es: List[(K, V)], i: Int) -> Bool =
+  if i == len(es) {
+    true
+  } else {
+    let (k, v) = es[i]
+    match get(b, k) {
+      Some(bv) -> if eq(v, bv) { eq_go(b, es, i + 1) } else { false }
+      None -> false
+    }
+  }
+
+## Same size, and every entry of one present with an equal value in the other.
+impl[K: Eq + Hash, V: Eq] Eq[Map[K, V]] {
+  fn eq(a: Map[K, V], b: Map[K, V]) -> Bool =
+    if size(a) != size(b) { false } else { eq_go(b, entries(a), 0) }
+}
+
+fn hash_go[K: Hash, V: Hash](es: List[(K, V)], i: Int, acc: Int) -> Int =
+  if i == len(es) {
+    acc
+  } else {
+    let (k, v) = es[i]
+    hash_go(es, i + 1, acc + hash(k) * 31 + hash(v))
+  }
+
+## A sum over the entries, so it does not depend on the order they come out
+## in — the same requirement `eq` above is written to.
+impl[K: Hash, V: Hash] Hash[Map[K, V]] {
+  fn hash(m: Map[K, V]) -> Int = hash_go(entries(m), 0, 0)
+}
 
 fn show_go[K: Show, V: Show](es: List[(K, V)], i: Int, acc: String) -> String =
   if i == len(es) {
