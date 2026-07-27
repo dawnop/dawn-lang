@@ -2257,14 +2257,16 @@ fn gen_cintrinsic(g: Gen, name: String, args: List[CExpr], ty: Ty) -> (Gen, Bool
     g.mv.visitInsn(OP_ACONST_NULL)
     return (g, true)
   }
-  if name == "struct_eq" {
-    # Structural equality of two values whose type is not ground, so lowering
-    # could not spell the comparison out (semantics-closure-design.md 3).
-    # This is a *contract*, not a free choice: it has to answer exactly what
-    # the synthesised comparison answers for the same values, or `x == y` and
-    # `map.get(m, x)` stop agreeing. On the JVM the implementation is the
-    # generated `equals`, reached virtually -- the same walk, dispatched at
-    # runtime because the static type does not say which one.
+  if name == "java_eq" {
+    # Equality of two values that came from the host (semantics-closure-design
+    # 3). Dawn defines none, so the runtime they came from decides, and here
+    # that is `Object.equals` -- the same instruction `==` at any other
+    # reference type compiles to.
+    #
+    # This was `struct_eq`, and it had to answer exactly what the synthesised
+    # comparison answers or `x == y` and `map.get(m, x)` would stop agreeing.
+    # That obligation is gone with the subjects: nothing Dawn defines reaches
+    # here any more.
     let g1 = gen_cargs(g, args)
     g1.mv.visitMethodInsn(OP_INVOKEVIRTUAL, obj(), "equals", "(Ljava/lang/Object;)Z", false)
     return (g1, true)

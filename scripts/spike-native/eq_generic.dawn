@@ -5,11 +5,15 @@
 #
 # Nothing in the repository was written this way (measured 2026-07-26,
 # trait-v2-design.md 2.1), which is why the path had no gate. It is not dead
-# code, though: the JVM answers correctly, and it answers correctly by a
-# mechanism native cannot have -- an `impl Eq` takes over the class's
-# `equals`, so `Object.equals` recursion happens to honour it. Lowering falls
-# back to the `struct_eq` intrinsic for any non-ground type, and emitc has no
-# implementation of it.
+# code, though: the JVM used to answer correctly by a mechanism native cannot
+# have -- an `impl Eq` takes over the class's `equals`, so `Object.equals`
+# recursion happened to honour it -- because lowering fell back to a runtime
+# structural walk for any non-ground type. Both backends build the dictionary
+# out of the arguments' now, and the same file is what says so.
+#
+# Every bound below is written, and that is the point rather than an
+# accident: dropping one is a compile error since S3's coda, where it used to
+# compile and reach the erased walk.
 #
 # `Money` is here to make the difference observable: its impl is deliberately
 # non-structural, so a comparison that ignored the impl and walked the fields

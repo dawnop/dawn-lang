@@ -2333,10 +2333,11 @@ fn gen_equals_method(cw: AdtClassWriter, adts: Adts, sub: String, ci: CtorI) -> 
       TyBool -> { m.visitJumpInsn(OP_IF_ICMPNE, no) }
       # a byte[] has no content `equals` of its own, so this arm used to make
       # a Bytes field compare by identity -- while the `==` operator on the
-      # same two values compared by content. This method is the JVM's
-      # implementation of the `struct_eq` contract, so it has to answer what
-      # the synthesised comparison answers. Paired with hash_of's TyBytes arm:
-      # changing one alone breaks equals/hashCode.
+      # same two values compared by content. Dawn equality no longer reaches
+      # this method (nothing but a host value reaches `java_eq` now), but Java
+      # does: it is what a Dawn value answers when a Java caller compares it.
+      # Paired with hash_of's TyBytes arm; changing one alone breaks
+      # equals/hashCode.
       TyBytes -> {
         m.visitMethodInsn(OP_INVOKESTATIC, "java/util/Arrays", "equals", "([B[B)Z", false)
         m.visitJumpInsn(OP_IFEQ, no)

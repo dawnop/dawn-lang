@@ -506,9 +506,12 @@ fn lit_eq(subj: CExpr, v: LitV, t: Ty) -> CExpr =
 #   cmp hash            the prelude relation at a scalar, after `prim_relation`
 #                       collapses it -- these two are why `cmp(3, 9)` stopped
 #                       looking for a trait default that does not exist
-#   struct_eq           the runtime structural walk, reached only where a
-#                       subject is not ground and has no dictionary. It is the
-#                       last one left, and S3 deletes it
+#   java_eq             equality of a value that came from the host, the one
+#                       Dawn does not define. Was `struct_eq`, a runtime
+#                       structural walk for anything lowering could not spell
+#                       out; the checker refuses those now, so nothing but a
+#                       foreign object reaches it and a backend with no Java
+#                       owes nothing here
 #   show quote          rendering an erased value, and a nested String
 #   str_of_int/float/bool
 #                       the scalar renderings `to_str` settles without a witness
@@ -875,21 +878,19 @@ fn make_prim_slot(
 #
 # Now the relation is spelled out here, once, over the type's own structure.
 # What a backend still gets to implement is only the two ends: the scalars it
-# compares natively, and `struct_eq` on a value whose type is not ground.
+# compares natively, and `java_eq` on a value that came from the host.
 
 ## Is there a dictionary this body could use for `t`, without inventing one?
 ##
 ## Three ways there is. One is in scope, put there by the enclosing witness or
 ## by the enclosing synthesised body's own parameters. Or `t` is ground, so a
-## static singleton settles it. Or `t` has no structure of its own -- a
-## container, until S3 -- and its dictionary's slots reach the runtime
-## intrinsic, which needs no arguments and so needs no dictionary for the
-## parts either.
+## static singleton settles it. Or `t` has no structure for the compiler to
+## walk, so its dictionary's slots need no dictionary for the parts either.
 ##
 ## The one case that fails is a bare rigid variable with nothing in scope for
-## it, and that is exactly the code `==` still accepts without an `Eq` bound.
-## Asking first, rather than building and discovering, is what keeps this cut
-## from turning that code into an error (§3.7 -- that is cut 7's change).
+## it, and the checker refuses that before lowering sees it. Asking first,
+## rather than building and discovering, is what keeps the failure a question
+## here instead of a half-built body to unwind.
 fn dict_available(st: LSt, tid: Int, t: Ty) -> Bool =
   match map.get(st.dict_env, dict_key(tid, t)) {
     Some(_) -> true
@@ -982,7 +983,7 @@ fn eq_at(st: LSt, a: CExpr, b: CExpr, t: Ty) -> (LSt, CExpr) = {
       let (st1, name) = struct_eq_fn(st, t)
       return (st1, CCall(CDirect(st1.owner, name), [a, b], TyBool))
     }
-    return (st, CIntrinsic("struct_eq", [a, b], TyBool))
+    return (st, foreign_eq(a, b, t))
   }
   # Not ground: what this compares depends on a type only the caller knows.
   # If a dictionary for the whole is in scope, that dictionary *is* the
@@ -999,8 +1000,24 @@ fn eq_at(st: LSt, a: CExpr, b: CExpr, t: Ty) -> (LSt, CExpr) = {
     let (st2, name) = struct_eq_fn(st1, t)
     return (st2, CCall(CDirect(st2.owner, name), [a, b] ++ ds, TyBool))
   }
-  (st, CIntrinsic("struct_eq", [a, b], TyBool))
+  (st, foreign_eq(a, b, t))
 }
+
+## The one equality Dawn does not define: a value that came from the host.
+##
+## This used to be `struct_eq`, a runtime structural walk reached by anything
+## lowering could not spell out -- a Unit, a rigid variable, a composite over
+## one. The checker closes all of those now (`structural_gap`,
+## `solved_structurally`), so the only value left with no Dawn definition is a
+## foreign object, and its equality belongs to the runtime it came from. A
+## backend with no Java has nothing to implement here, which is why native
+## stopped owing an implementation of the walk.
+fn foreign_eq(a: CExpr, b: CExpr, t: Ty) -> CExpr =
+  match t {
+    TyJava(_, _) -> CIntrinsic("java_eq", [a, b], TyBool)
+    _ -> panic("lower: no equality for `" ++ ty_key_inst(t) ++
+        "`; the checker should have refused it")
+  }
 
 ## Compare through a dictionary: the only shape available where the type is a
 ## rigid variable, since there is no structure to walk and no impl to name.
