@@ -3082,10 +3082,14 @@ test "binary checking covers the operator families" {
 ## Builtins with no public spelling (docs/stdlib-naming.md): the container and
 ## cursor families are implementation detail behind std/map, std/set and
 ## std/cursor — visible when checking std itself, hidden from user code.
+## `intr_at` rebuilds the whole intrinsic table for one lookup, so asking it
+## per key rebuilt it once per intrinsic -- quadratic, on a path `builtin_sig`
+## walks for every builtin name it resolves. One table, then read it.
 pub fn internal_builtins() -> Set[String] = {
+  let it = intrinsics()
   var out: Set[String] = set.empty()
-  for n in map.keys(intrinsics()) {
-    match intr_at(n) {
+  for n in map.keys(it) {
+    match map.get(it, n) {
       Some(i) -> if i.internal { out = set.insert(out, n) }
       None -> ()
     }
