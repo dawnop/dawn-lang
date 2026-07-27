@@ -1,0 +1,270 @@
+# std/pvec — the persistent vector behind List.
+#
+# A 32-way trie with a tail buffer: Clojure's PersistentVector, which is what
+# "strict RB" means in docs/collections-dejava-research.md §5.3. The last
+# (partial) block of elements lives in `tail`, an `Array` of at most 32 slots;
+# everything before it lives in a trie whose leaves are the same shape. An
+# append copies the tail — bounded work — and every 32nd one also pushes the
+# full tail into the trie, copying one root-to-leaf path.
+#
+# Why this and not the flat shared-array window it replaces: the window is
+# O(1) to append to only while one version owns the frontier, and O(n) to copy
+# the moment two versions want it. That is fine on a backend that can hand out
+# a mutable array and track who owns it — the JVM one did, with a CAS
+# watermark — but it is not something Dawn source can express, and a second
+# backend would have to reimplement it. Here the sharing is structural, so
+# both backends get it from the same source (docs/native-backend-plan.md §10).
+#
+# The one thing it still asks of the backend is that `array_push` extend in
+# place when the array it is given ends where the shared region ends. That is
+# exactly the accumulation shape — `out = out ++ [x]` — and it is what keeps
+# an append a constant-size copy rather than 32 slots every time.
+#
+# Nothing in std imports this module: `List` is a builtin type name, and the
+# calls that arrive here are the ones lowering writes for a list primitive.
+
+const BITS: Int = 5
+
+const WIDTH: Int = 32
+
+const MASK: Int = 31
+
+## A trie node. Leaves hold elements, branches hold nodes, and both are one
+## `Array` of at most 32 slots — the shape that makes a path copy bounded.
+pub type VNode[T] =
+  | VLeaf(items: Array[T])
+  | VBranch(kids: Array[VNode[T]])
+
+## A whole vector: how many elements, how deep the trie is, the trie, and the
+## unfinished last block.
+pub type Vec[T] = { cnt: Int, shift: Int, root: VNode[T], tail: Array[T] }
+
+# ---- small array helpers ----
+
+fn arr1[T](x: T) -> Array[T] = {
+  let e: Array[T] = array_new()
+  array_push(e, x)
+}
+
+fn arr2[T](x: T, y: T) -> Array[T] = array_push(arr1(x), y)
+
+fn arr_slice[T](a: Array[T], from: Int, to: Int) -> Array[T] = {
+  var out: Array[T] = array_new()
+  var i = from
+  while i < to {
+    out = array_push(out, array_get(a, i))
+    i = i + 1
+  }
+  out
+}
+
+# ---- shape ----
+
+## Where the tail starts: everything at or after this index is in `tail`.
+fn tail_off(cnt: Int) -> Int = if cnt < WIDTH { 0 } else { ((cnt - 1) >>> BITS) << BITS }
+
+## The block holding element `i`. For any vector of fewer than 32 elements this
+## is the tail and costs nothing — which is most lists in most programs, and
+## the reason an index cursor stays cheap.
+fn leaf_for[T](v: Vec[T], i: Int) -> Array[T] =
+  if i >= tail_off(v.cnt) {
+    v.tail
+  } else {
+    var node = v.root
+    var level = v.shift
+    while level > 0 {
+      node = match node {
+        VBranch(kids) -> array_get(kids, (i >>> level) & MASK)
+        VLeaf(_) -> node
+      }
+      level = level - BITS
+    }
+    match node {
+      VLeaf(items) -> items
+      VBranch(_) -> panic("pvec: branch where a leaf belongs")
+    }
+  }
+
+# ---- construction ----
+
+## A vector with no elements.
+pub fn empty[T]() -> Vec[T] = {
+  let e: Array[VNode[T]] = array_new()
+  let t: Array[T] = array_new()
+  Vec { cnt: 0, shift: BITS, root: VBranch(e), tail: t }
+}
+
+## Number of elements.
+pub fn count[T](v: Vec[T]) -> Int = v.cnt
+
+fn new_path[T](level: Int, node: VNode[T]) -> VNode[T] =
+  if level == 0 { node } else { VBranch(arr1(new_path(level - BITS, node))) }
+
+## Fold a full tail into the trie, copying the one path that changes.
+fn push_tail[T](cnt: Int, level: Int, parent: VNode[T], tail: Array[T]) -> VNode[T] =
+  match parent {
+    VLeaf(_) -> VLeaf(tail)
+    VBranch(kids) -> {
+      let sub = ((cnt - 1) >>> level) & MASK
+      if level == BITS {
+        if sub < array_len(kids) {
+          VBranch(array_with(kids, sub, VLeaf(tail)))
+        } else {
+          VBranch(array_push(kids, VLeaf(tail)))
+        }
+      } else if sub < array_len(kids) {
+        VBranch(array_with(kids, sub,
+          push_tail(cnt, level - BITS, array_get(kids, sub), tail)))
+      } else {
+        VBranch(array_push(kids, new_path(level - BITS, VLeaf(tail))))
+      }
+    }
+  }
+
+## A copy with `x` appended.
+pub fn push[T](v: Vec[T], x: T) -> Vec[T] =
+  if array_len(v.tail) < WIDTH {
+    Vec { ..v, cnt: v.cnt + 1, tail: array_push(v.tail, x) }
+  } else if (v.cnt >>> BITS) > (1 << v.shift) {
+    # the trie is full at this depth: grow a level, with the old root beside a
+    # fresh path down to the tail that just came off
+    Vec {
+      cnt: v.cnt + 1,
+      shift: v.shift + BITS,
+      root: VBranch(arr2(v.root, new_path(v.shift, VLeaf(v.tail)))),
+      tail: arr1(x)
+    }
+  } else {
+    Vec {
+      cnt: v.cnt + 1,
+      shift: v.shift,
+      root: push_tail(v.cnt, v.shift, v.root, v.tail),
+      tail: arr1(x)
+    }
+  }
+
+# ---- reading ----
+
+## Element `i`, which must be in range.
+pub fn nth[T](v: Vec[T], i: Int) -> T = array_get(leaf_for(v, i), i & MASK)
+
+## Element `i`, panicking out of range — what `xs[i]` means.
+pub fn index[T](v: Vec[T], i: Int) -> T =
+  if i < 0 || i >= v.cnt {
+    panic("index " ++ to_string(i) ++ " out of bounds for length " ++ to_string(v.cnt))
+  } else {
+    nth(v, i)
+  }
+
+## Element `i`, or `None` when it is out of range.
+pub fn get[T](v: Vec[T], i: Int) -> Option[T] =
+  if i < 0 || i >= v.cnt { None } else { Some(nth(v, i)) }
+
+# ---- bulk ----
+#
+# These walk by block rather than by index: `leaf_for` is cheap but not free,
+# and asking it once per 32 elements instead of once per element is what keeps
+# a copy linear with a small constant.
+
+fn each_block[T, A](v: Vec[T], i: Int, acc: A, f: fn(A, T) -> A !e) -> A !e =
+  if i >= v.cnt {
+    acc
+  } else {
+    let blk = leaf_for(v, i)
+    let base = i - (i & MASK)
+    let stop = if base + array_len(blk) < v.cnt { base + array_len(blk) } else { v.cnt }
+    each_block(v, stop, fold_block(blk, i - base, stop - base, acc, f), f)
+  }
+
+fn fold_block[T, A](blk: Array[T], i: Int, stop: Int, acc: A, f: fn(A, T) -> A !e) -> A !e =
+  if i >= stop { acc } else { fold_block(blk, i + 1, stop, f(acc, array_get(blk, i)), f) }
+
+## Every element in order, as one flat array.
+pub fn to_array[T](v: Vec[T]) -> Array[T] = {
+  let e: Array[T] = array_new()
+  each_block(v, 0, e, fn(a, x) => array_push(a, x))
+}
+
+## A vector holding `a`'s elements in order.
+pub fn of_array[T](a: Array[T]) -> Vec[T] = {
+  var v: Vec[T] = empty()
+  var i = 0
+  while i < array_len(a) {
+    v = push(v, array_get(a, i))
+    i = i + 1
+  }
+  v
+}
+
+## `a` then `b`. Linear in `b`, which is the shape `++` is used in: the right
+## side is almost always a single element being accumulated.
+pub fn concat[T](a: Vec[T], b: Vec[T]) -> Vec[T] =
+  if b.cnt == 0 { a } else { each_block(b, 0, a, fn(v, x) => push(v, x)) }
+
+## The elements in `[from, to)`; the caller has already clamped the ends.
+pub fn slice[T](v: Vec[T], from: Int, to: Int) -> Vec[T] = {
+  var out: Vec[T] = empty()
+  var i = from
+  while i < to {
+    out = push(out, nth(v, i))
+    i = i + 1
+  }
+  out
+}
+
+## `[from, to)` as a vector of Ints.
+pub fn range(from: Int, to: Int) -> Vec[Int] = {
+  var out: Vec[Int] = empty()
+  var i = from
+  while i < to {
+    out = push(out, i)
+    i = i + 1
+  }
+  out
+}
+
+# ---- sorting ----
+#
+# A merge sort on the flat array, because a sort is the one bulk operation
+# that reads by position over and over: paying `leaf_for` per comparison would
+# put the trie in the inner loop. Stable, since a tie takes from the left.
+
+fn merge[T](a: Array[T], b: Array[T], cmp: fn(T, T) -> Int !e) -> Array[T] !e = {
+  var out: Array[T] = array_new()
+  var i = 0
+  var j = 0
+  while i < array_len(a) && j < array_len(b) {
+    let x = array_get(a, i)
+    let y = array_get(b, j)
+    if cmp(y, x) < 0 {
+      out = array_push(out, y)
+      j = j + 1
+    } else {
+      out = array_push(out, x)
+      i = i + 1
+    }
+  }
+  while i < array_len(a) {
+    out = array_push(out, array_get(a, i))
+    i = i + 1
+  }
+  while j < array_len(b) {
+    out = array_push(out, array_get(b, j))
+    j = j + 1
+  }
+  out
+}
+
+fn msort[T](a: Array[T], cmp: fn(T, T) -> Int !e) -> Array[T] !e = {
+  let n = array_len(a)
+  if n <= 1 {
+    a
+  } else {
+    let mid = n / 2
+    merge(msort(arr_slice(a, 0, mid), cmp), msort(arr_slice(a, mid, n), cmp), cmp)
+  }
+}
+
+## Stable ascending sort by `cmp`.
+pub fn sort_by[T](v: Vec[T], cmp: fn(T, T) -> Int !e) -> Vec[T] !e =
+  of_array(msort(to_array(v), cmp))

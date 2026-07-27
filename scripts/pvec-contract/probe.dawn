@@ -1,0 +1,179 @@
+# Differential test for the pure-Dawn persistent vector (std/pvec) against the
+# builtin List.
+#
+# Same idea as the HAMT's probe: the builtin is the oracle, because it is the
+# handwritten Java structure std/pvec is going to replace, so "same answers on
+# the same operation sequence" is the contract the swap has to meet.
+#
+# The sizes are chosen around the shape rather than at random. A vector of
+# fewer than 32 elements is all tail and never touches the trie; 32 is the
+# first tail spill; 1024 is the first time the trie grows a level, and 32768
+# the second. Those four boundaries are where an off-by-one in the shift
+# arithmetic lives, so each is crossed and read back element by element.
+use std/io
+use std/list
+use std/pvec
+use std/pvec.{Vec}
+
+fn to_vec[T](xs: List[T]) -> Vec[T] = {
+  var v: Vec[T] = pvec.empty()
+  for x in xs {
+    v = pvec.push(v, x)
+  }
+  v
+}
+
+fn build(n: Int) -> Vec[Int] = {
+  var v: Vec[Int] = pvec.empty()
+  var i = 0
+  while i < n {
+    v = pvec.push(v, i * 3)
+    i = i + 1
+  }
+  v
+}
+
+fn build_list(n: Int) -> List[Int] = {
+  var xs: List[Int] = []
+  var i = 0
+  while i < n {
+    xs = xs ++ [i * 3]
+    i = i + 1
+  }
+  xs
+}
+
+## Every element read back, plus the count -- the whole of what a vector is.
+fn same(v: Vec[Int], xs: List[Int], label: String) -> List[String] = {
+  var bad: List[String] = []
+  if pvec.count(v) != len(xs) {
+    return ["${label}: count ${pvec.count(v)} vs ${len(xs)}"]
+  }
+  var i = 0
+  while i < len(xs) {
+    if pvec.nth(v, i) != xs[i] {
+      bad = bad ++ ["${label}: at ${i} got ${pvec.nth(v, i)} want ${xs[i]}"]
+      return bad
+    }
+    i = i + 1
+  }
+  bad
+}
+
+fn sizes() -> List[Int] = [0, 1, 31, 32, 33, 63, 64, 1023, 1024, 1025, 32768, 40000]
+
+fn growth() -> List[String] = {
+  var bad: List[String] = []
+  for n in sizes() {
+    bad = bad ++ same(build(n), build_list(n), "grow ${n}")
+  }
+  bad
+}
+
+## Out-of-range reads answer the way the builtin does, on both sides of the
+## range and at the boundary itself.
+fn bounds() -> List[String] = {
+  var bad: List[String] = []
+  let v = build(100)
+  let xs = build_list(100)
+  for i in [0 - 1, 0, 99, 100, 1000] {
+    if pvec.get(v, i) != get(xs, i) {
+      bad = bad ++ ["get ${i}: ${pvec.get(v, i)} vs ${get(xs, i)}"]
+    }
+  }
+  bad
+}
+
+## The other constructors and the bulk operations.
+fn bulk() -> List[String] = {
+  var bad: List[String] = []
+  for n in sizes() {
+    let v = build(n)
+    let xs = build_list(n)
+    # a round trip through the flat array must be the identity
+    bad = bad ++ same(pvec.of_array(pvec.to_array(v)), xs, "roundtrip ${n}")
+    # slices at both ends and across a block boundary
+    for cut in [0, 1, 31, 32, 33] {
+      if cut <= n {
+        bad = bad ++ same(pvec.slice(v, 0, cut), list.take(xs, cut), "take ${n}/${cut}")
+        bad = bad ++ same(pvec.slice(v, cut, n), list.drop(xs, cut), "drop ${n}/${cut}")
+      }
+    }
+  }
+  bad
+}
+
+fn concat_shapes() -> List[String] = {
+  var bad: List[String] = []
+  for a in [0, 1, 31, 32, 33, 1024] {
+    for b in [0, 1, 32, 100] {
+      let joined = pvec.concat(build(a), pvec.of_array(pvec.to_array(build(b))))
+      let want = build_list(a) ++ build_list(b)
+      bad = bad ++ same(joined, want, "concat ${a}+${b}")
+    }
+  }
+  bad
+}
+
+## Order by the first component only, so the second records whether the sort
+## kept equal elements in the order it found them.
+fn by_first(p: (Int, Int), q: (Int, Int)) -> Int = {
+  let (pa, _) = p
+  let (qa, _) = q
+  pa - qa
+}
+
+## Sorting must agree with the builtin, ties included: both are stable, so a
+## comparator that ignores part of the element has to leave that part in its
+## original order.
+fn sorting() -> List[String] = {
+  var bad: List[String] = []
+  var seed = 7
+  var xs: List[(Int, Int)] = []
+  var i = 0
+  while i < 500 {
+    seed = (seed * 1103515245 + 12345) & 1073741823
+    xs = xs ++ [(seed % 20, i)]
+    i = i + 1
+  }
+  let want = sort_by(xs, fn(p, q) => by_first(p, q))
+  let got = pvec.sort_by(to_vec(xs), fn(p, q) => by_first(p, q))
+  if pvec.count(got) != len(want) {
+    return ["sort: count"]
+  }
+  var j = 0
+  while j < len(want) {
+    if pvec.nth(got, j) != want[j] {
+      bad = bad ++ ["sort: at ${j} got ${pvec.nth(got, j)} want ${want[j]}"]
+      return bad
+    }
+    j = j + 1
+  }
+  bad
+}
+
+## Persistence: a version does not see what was appended to it afterwards.
+fn persistence() -> List[String] = {
+  var bad: List[String] = []
+  for n in [0, 31, 32, 1023, 1024] {
+    let base = build(n)
+    let a = pvec.push(base, 111)
+    let b = pvec.push(base, 222)
+    if pvec.count(base) != n { bad = bad ++ ["persist ${n}: base grew"] }
+    if pvec.nth(a, n) != 111 { bad = bad ++ ["persist ${n}: a"] }
+    if pvec.nth(b, n) != 222 { bad = bad ++ ["persist ${n}: b"] }
+  }
+  bad
+}
+
+pub fn main() -> Unit !io = {
+  var bad: List[String] = []
+  bad = bad ++ growth()
+  bad = bad ++ bounds()
+  bad = bad ++ bulk()
+  bad = bad ++ concat_shapes()
+  bad = bad ++ sorting()
+  bad = bad ++ persistence()
+  for b in list.take(bad, 10) { println("FAIL " ++ b) }
+  println("mismatches ${len(bad)}")
+}
