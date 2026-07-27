@@ -11,8 +11,8 @@ use std/str
 use std/bytes
 use std/list
 use std/io
-use java "java.lang.System"
-use java "java.io.File"
+use std/fspath
+use sha2/sha256
 use java "java.io.ByteArrayInputStream"
 use java "java.net.URI"
 use java "java.net.InetSocketAddress"
@@ -23,27 +23,18 @@ use java "java.net.http.HttpRequest"
 use java "java.net.http.HttpRequest.BodyPublisher"
 use java "java.net.http.HttpRequest.BodyPublishers"
 use java "java.net.http.HttpResponse.BodyHandlers"
-use java "java.nio.file.Files"
-use java "java.nio.file.Paths"
-use java "java.nio.file.StandardCopyOption"
-use java "java.security.MessageDigest"
-use java "java.util.HexFormat"
 use java "java.util.zip.GZIPInputStream"
 use java "java.util.zip.ZipInputStream"
 
 ## The content-addressed cache root: the `dawn.pkg.cache` property (tests), then
 ## $DAWN_PKG_CACHE, then ~/.dawn/pkg.
 pub fn cache_root() -> String !io =
-  match System.getProperty("dawn.pkg.cache") {
+  match io.getenv("DAWN_PKG_CACHE") {
     Some(p) -> p
     None ->
-      match System.getenv("DAWN_PKG_CACHE") {
-        Some(p) -> p
-        None ->
-          match System.getProperty("user.home") {
-            Some(h) -> h ++ "/.dawn/pkg"
-            None -> ".dawn-pkg"
-          }
+      match io.getenv("HOME") {
+        Some(h) -> h ++ "/.dawn/pkg"
+        None -> ".dawn-pkg"
       }
   }
 
@@ -54,15 +45,9 @@ pub fn cache_dir(hash: String) -> String !io = cache_root() ++ "/" ++ str.replac
 fn zero_byte() -> Bytes = bytes.utf8(str.from_char(0))
 
 fn read_bytes(path: String) -> Result[Bytes, String] !io =
-  match java_try(fn() => Files.readAllBytes(Paths.get(path).expect("path")).expect("bytes")) {
+  match io.read_bytes(path) {
     Ok(b) -> Ok(b)
     Err(e) -> Err("cannot read " ++ path ++ ": " ++ e)
-  }
-
-fn is_symlink(path: String) -> Bool !io =
-  match java_try(fn() => Files.isSymbolicLink(Paths.get(path).expect("path"))) {
-    Ok(b) -> b
-    Err(_) -> false
   }
 
 ## Regular files under `root`, sorted by relative path; symlinks are refused
@@ -75,7 +60,7 @@ fn collect_files(root: String, rel: String) -> Result[List[String], String] !io 
       for f in sort(names) {
         let r2 = if rel == "" { f } else { rel ++ "/" ++ f }
         let full = root ++ "/" ++ r2
-        if is_symlink(full) {
+        if io.is_symlink(full) {
           return Err("symbolic link in package tree: " ++ r2 ++
               "\n  the d1 hash refuses symlinks — they do not survive archives portably")
         }
@@ -100,30 +85,29 @@ pub fn tree_hash(root: String) -> Result[String, String] !io = {
     Ok(fs) -> sort(fs)
     Err(e) -> return Err(e)
   }
-  let digest = MessageDigest.getInstance("SHA-256").expect("sha-256 exists")
+  var digest = sha256.new()
   for rel in files {
     let content = match read_bytes(root ++ "/" ++ rel) {
       Ok(b) -> b
       Err(e) -> return Err(e)
     }
-    let _ = digest.update(bytes.utf8(rel))
-    let _ = digest.update(zero_byte())
-    let _ = digest.update(bytes.utf8(to_string(bytes.len(content))))
-    let _ = digest.update(zero_byte())
-    let _ = digest.update(content)
+    digest = sha256.update(digest, bytes.utf8(rel))
+    digest = sha256.update(digest, zero_byte())
+    digest = sha256.update(digest, bytes.utf8(to_string(bytes.len(content))))
+    digest = sha256.update(digest, zero_byte())
+    digest = sha256.update(digest, content)
   }
-  let hex = HexFormat.of().expect("hex").formatHex(digest.digest().expect("digest"))
-  Ok("d1:" ++ hex.expect("hex string"))
+  Ok("d1:" ++ sha256.finish(digest))
 }
 
 # ---- download ----
 
 ## `https_proxy`/`HTTPS_PROXY` as host + port — the JDK ignores these env vars.
 fn proxy_from_env() -> Option[(String, Int)] !io = {
-  let raw = match System.getenv("https_proxy") {
+  let raw = match io.getenv("https_proxy") {
     Some(v) -> v
     None ->
-      match System.getenv("HTTPS_PROXY") {
+      match io.getenv("HTTPS_PROXY") {
         Some(v) -> v
         None -> return None
       }
@@ -204,7 +188,7 @@ fn download(url: String) -> Result[Bytes, String] !io =
 # ---- unpack: zip or tar.gz, told apart by magic bytes ----
 
 fn mkdirs(path: String) -> Unit !io = {
-  let _ = java_try(fn() => Files.createDirectories(Paths.get(path).expect("path")))
+  let _ = io.mkdirs(path)
   ()
 }
 
@@ -213,25 +197,24 @@ fn write_file_bytes(path: String, bs: Bytes) -> Result[Unit, String] !io = {
     Some(i) -> mkdirs(str.substring(path, 0, i))
     None -> ()
   }
-  match java_try(fn() => Files.write(Paths.get(path).expect("path"), bs)) {
+  match io.write_bytes(path, bs) {
     Ok(_) -> Ok(())
     Err(e) -> Err("cannot write " ++ path ++ ": " ++ e)
   }
 }
 
 ## The extraction target for an archive entry, with the zip-slip guard.
+##
+## The guard is lexical. It used to resolve both sides with getCanonicalPath,
+## which also follows symbolic links -- but nothing has been extracted yet, so
+## there are no links of the archive's making to follow, and a link already in
+## the destination would be the caller's own. What has to be refused is `..`,
+## and that is arithmetic on the name.
 fn entry_path(dest: String, name: String) -> Result[String, String] !io = {
-  let out = dest ++ "/" ++ name
-  let canon = match java_try(fn() => File.new(out).getCanonicalPath().expect("canon")) {
-    Ok(c) -> c
-    Err(e) -> return Err("archive entry escapes the extraction root: " ++ name)
-  }
-  let base = match java_try(fn() => File.new(dest).getCanonicalPath().expect("canon")) {
-    Ok(c) -> c
-    Err(e) -> return Err(e)
-  }
-  if canon == base || str.starts_with(canon, base ++ "/") {
-    Ok(out)
+  let base = fspath.absolute(io.cwd(), dest)
+  let out = fspath.absolute(io.cwd(), dest ++ "/" ++ name)
+  if out == base || str.starts_with(out, base ++ "/") {
+    Ok(dest ++ "/" ++ name)
   } else {
     Err("archive entry escapes the extraction root: " ++ name)
   }
@@ -426,13 +409,13 @@ fn strip_single_top_dir(work: String) -> String !io =
   }
 
 fn delete_tree(path: String) -> Unit !io = {
-  if io.is_dir(path) && not is_symlink(path) {
+  if io.is_dir(path) && not io.is_symlink(path) {
     match io.list_dir(path) {
       Ok(names) -> { for f in names { delete_tree(path ++ "/" ++ f) } }
       Err(_) -> ()
     }
   }
-  let _ = java_try(fn() => Files.deleteIfExists(Paths.get(path).expect("path")))
+  let _ = io.delete(path)
   ()
 }
 
@@ -441,12 +424,12 @@ fn delete_tree(path: String) -> Unit !io = {
 ## hash of an archive it has never seen.
 pub fn fetch_and_hash(url: String) -> Result[(String, String), String] !io = {
   mkdirs(cache_root())
-  let work = match java_try(fn() =>
-      Files.createTempDirectory(Paths.get(cache_root()).expect("path"), "fetch-")
-      .expect("temp dir").toString().expect("path")) {
-        Ok(d) -> d
-        Err(e) -> return Err("cannot create a temp directory under " ++ cache_root() ++ ": " ++ e)
-      }
+  # staged inside the cache root, so the publishing rename below stays on one
+  # filesystem and is therefore atomic
+  let work = match io.temp_dir(cache_root(), "fetch-") {
+    Ok(d) -> d
+    Err(e) -> return Err("cannot create a temp directory under " ++ cache_root() ++ ": " ++ e)
+  }
   let result = fetch_into(url, work)
   delete_tree(work)
   result
@@ -469,8 +452,7 @@ fn fetch_into(url: String, work: String) -> Result[(String, String), String] !io
   let target = cache_dir(actual)
   if not io.is_dir(target) {
     # rename into place; a concurrent fetch of the same hash yields the same bytes
-    let moved = java_try(fn() => Files.move(Paths.get(root).expect("path"),
-      Paths.get(target).expect("path"), StandardCopyOption.valueOf("ATOMIC_MOVE").expect("option")))
+    let moved = io.rename(root, target)
     match moved {
       Ok(_) -> ()
       Err(e) -> { if not io.is_dir(target) { return Err("cannot move into the cache: " ++ e) } }

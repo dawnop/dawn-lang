@@ -8,6 +8,11 @@
 # A package rather than std: std stays the small set of things the language
 # itself leans on, and nothing in the language leans on SHA-256.
 #
+# The API is incremental because its caller is: a tree hash feeds one file
+# after another, and a one-shot digest would make it concatenate the whole tree
+# first -- quadratic in bytes copied, on the path that decides whether a
+# downloaded package is the one that was asked for.
+#
 # Dawn's `Int` is 64-bit and signed, so every 32-bit operation ends in `& MASK`.
 # The shifts are `>>>` (logical) throughout: the values are masked to 32 bits
 # before they are shifted, so there is no sign bit in them to propagate.
@@ -16,6 +21,11 @@ use std/bytes
 use std/list
 
 const MASK: Int = 0xFFFFFFFF
+
+## A digest in progress: the eight chaining words, the bytes of the block that
+## is not full yet, and how many bytes have been fed in (the padding needs the
+## total, and it is a bit count that must survive past 2^32).
+pub type Digest = { h: List[Int], buf: List[Int], total: Int }
 
 ## The round constants: the first 32 bits of the fractional parts of the cube
 ## roots of the first 64 primes.
@@ -35,36 +45,25 @@ fn round_constants() -> List[Int] = [
 
 fn rotr(x: Int, n: Int) -> Int = ((x >>> n) | (x << (32 - n))) & MASK
 
-## The length of the padded message: the data, a `0x80` byte, zeros up to 56
-## bytes past a block boundary, then the bit count as eight big-endian bytes.
-fn padded_len(n: Int) -> Int = {
-  let body = n + 1
-  let zeros = (56 - body % 64 + 64) % 64
-  body + zeros + 8
-}
-
-## Byte `i` of the padded message, computed rather than stored: padding a
-## megabyte to copy it once more would be the only allocation in here.
-fn padded_at(b: Bytes, n: Int, plen: Int, i: Int) -> Int =
-  if i < n {
-    bytes.at(b, i)
-  } else if i == n {
-    0x80
-  } else if i < plen - 8 {
-    0
-  } else {
-    let shift = 8 * (plen - 1 - i)
-    (n * 8 >>> shift) & 0xFF
+## A fresh digest, chained from the fractional parts of the square roots of the
+## first eight primes.
+pub fn new() -> Digest =
+  Digest {
+    h: [0x6A09E667, 0xBB67AE85, 0x3C6EF372, 0xA54FF53A,
+      0x510E527F, 0x9B05688C, 0x1F83D9AB, 0x5BE0CD19],
+    buf: [],
+    total: 0
   }
 
-## The 64-word message schedule for the block starting at `base`.
-fn schedule(b: Bytes, n: Int, plen: Int, base: Int) -> List[Int] = {
+## One 64-byte block folded into the chaining words.
+fn compress(hs: List[Int], block: List[Int]) -> List[Int] = {
+  let k = round_constants()
   var w: List[Int] = []
   var t = 0
   while t < 16 {
-    let o = base + t * 4
-    w = w ++ [(padded_at(b, n, plen, o) << 24) | (padded_at(b, n, plen, o + 1) << 16) |
-      (padded_at(b, n, plen, o + 2) << 8) | padded_at(b, n, plen, o + 3)]
+    let o = t * 4
+    w = w ++
+      [(block[o] << 24) | (block[o + 1] << 16) | (block[o + 2] << 8) | block[o + 3]]
     t = t + 1
   }
   while t < 64 {
@@ -73,70 +72,81 @@ fn schedule(b: Bytes, n: Int, plen: Int, base: Int) -> List[Int] = {
     w = w ++ [(w[t - 16] + s0 + w[t - 7] + s1) & MASK]
     t = t + 1
   }
-  w
+
+  var a = hs[0]
+  var b = hs[1]
+  var c = hs[2]
+  var d = hs[3]
+  var e = hs[4]
+  var f = hs[5]
+  var g = hs[6]
+  var h = hs[7]
+  t = 0
+  while t < 64 {
+    let s1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25)
+    let ch = (e & f) ^ (~e & MASK & g)
+    let t1 = (h + s1 + ch + k[t] + w[t]) & MASK
+    let s0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22)
+    let maj = (a & b) ^ (a & c) ^ (b & c)
+    let t2 = (s0 + maj) & MASK
+    h = g
+    g = f
+    f = e
+    e = (d + t1) & MASK
+    d = c
+    c = b
+    b = a
+    a = (t1 + t2) & MASK
+    t = t + 1
+  }
+  [(hs[0] + a) & MASK, (hs[1] + b) & MASK, (hs[2] + c) & MASK, (hs[3] + d) & MASK,
+    (hs[4] + e) & MASK, (hs[5] + f) & MASK, (hs[6] + g) & MASK, (hs[7] + h) & MASK]
 }
 
-## The digest of `b` as 64 lower-case hex digits.
-pub fn hex(b: Bytes) -> String = {
+## Feed bytes in. Any number, any number of times.
+pub fn update(d: Digest, b: Bytes) -> Digest = {
+  var hs = d.h
+  var buf = d.buf
   let n = bytes.len(b)
-  let plen = padded_len(n)
-  let k = round_constants()
-
-  var h0 = 0x6A09E667
-  var h1 = 0xBB67AE85
-  var h2 = 0x3C6EF372
-  var h3 = 0xA54FF53A
-  var h4 = 0x510E527F
-  var h5 = 0x9B05688C
-  var h6 = 0x1F83D9AB
-  var h7 = 0x5BE0CD19
-
-  var base = 0
-  while base < plen {
-    let w = schedule(b, n, plen, base)
-    var a = h0
-    var bb = h1
-    var c = h2
-    var d = h3
-    var e = h4
-    var f = h5
-    var g = h6
-    var h = h7
-    var t = 0
-    while t < 64 {
-      let s1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25)
-      let ch = (e & f) ^ (~e & MASK & g)
-      let t1 = (h + s1 + ch + k[t] + w[t]) & MASK
-      let s0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22)
-      let maj = (a & bb) ^ (a & c) ^ (bb & c)
-      let t2 = (s0 + maj) & MASK
-      h = g
-      g = f
-      f = e
-      e = (d + t1) & MASK
-      d = c
-      c = bb
-      bb = a
-      a = (t1 + t2) & MASK
-      t = t + 1
+  var i = 0
+  while i < n {
+    buf = buf ++ [bytes.at(b, i)]
+    if len(buf) == 64 {
+      hs = compress(hs, buf)
+      buf = []
     }
-    h0 = (h0 + a) & MASK
-    h1 = (h1 + bb) & MASK
-    h2 = (h2 + c) & MASK
-    h3 = (h3 + d) & MASK
-    h4 = (h4 + e) & MASK
-    h5 = (h5 + f) & MASK
-    h6 = (h6 + g) & MASK
-    h7 = (h7 + h) & MASK
-    base = base + 64
+    i = i + 1
   }
+  Digest { h: hs, buf: buf, total: d.total + n }
+}
 
+## The digest as 64 lower-case hex digits. The state is not consumed -- it is a
+## value, so `finish` can be called on a prefix and feeding can go on.
+pub fn finish(d: Digest) -> String = {
+  # the 0x80 byte, zeros up to 56 bytes into a block, then the bit count
+  var block = d.buf ++ [0x80]
+  while len(block) % 64 != 56 { block = block ++ [0] }
+  let bits = d.total * 8
+  var s = 56
+  while s >= 0 {
+    block = block ++ [(bits >>> s) & 0xFF]
+    s = s - 8
+  }
+  var hs = d.h
+  var off = 0
+  while off < len(block) {
+    hs = compress(hs, list.slice(block, off, off + 64))
+    off = off + 64
+  }
   var out = ""
-  for word in [h0, h1, h2, h3, h4, h5, h6, h7] {
+  for word in hs {
     out = out ++ word_hex(word)
   }
   out
 }
+
+## The digest of `b` alone.
+pub fn hex(b: Bytes) -> String = finish(update(new(), b))
 
 fn word_hex(w: Int) -> String = {
   var out = ""
@@ -163,4 +173,16 @@ test "the FIPS 180-2 vectors" {
     "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
   assert hex(bytes.utf8("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq")) ==
     "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"
+}
+
+test "feeding in pieces is feeding the same bytes" {
+  # the split lands inside a block and the total crosses one, so this exercises
+  # both the buffer and the carry
+  let whole = bytes.utf8("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq")
+  var d = new()
+  d = update(d, bytes.slice(whole, 0, 5))
+  d = update(d, bytes.slice(whole, 5, 6))
+  d = update(d, bytes.slice(whole, 6, 40))
+  d = update(d, bytes.slice(whole, 40, bytes.len(whole)))
+  assert finish(d) == hex(whole)
 }
