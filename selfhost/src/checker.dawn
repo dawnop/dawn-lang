@@ -128,7 +128,6 @@ pub type Cx = {
   lambda_stack: List[LambdaCx],
   loop_stack: List[Int],
   in_test: Bool,
-  reported_key_types: Set[String],
   is_std_module: Bool,
   owner_class: Option[String],
   src_path: Option[String],
@@ -187,7 +186,6 @@ pub fn cx_new(owner_class: Option[String], src_path: Option[String]) -> Cx = {
     lambda_stack: [],
     loop_stack: [],
     in_test: false,
-    reported_key_types: set.empty(),
     is_std_module: is_std,
     owner_class: owner_class,
     src_path: src_path,
@@ -342,122 +340,6 @@ pub fn resolve_eff(cx: Cx, atoms: List[String]) -> (Cx, Eff) = {
   }
   (cx1, eff_union(effs))
 }
-
-# ---- Map/Set key validity (spec §2.2) ----
-
-## The first Float/Bytes/Array anywhere inside a would-be key type, or None.
-##
-## The rule this encodes is now spelled elsewhere too: a key needs `Hash`, and
-## `Hash[Float]` no longer exists. It is not yet *derived* from that, because
-## an ADT still hashes structurally rather than through an impl, so asking the
-## table would reject every user type as a key. This walk and `uncomparable_part`
-## are the same shape and go together in S3, when the collections are Dawn and
-## every hashable type has a real impl to point at.
-##
-## Bytes and Array stay banned on their own terms whatever the table says: the
-## containers hash them by identity, not content (spec 2.3).
-pub fn invalid_key_part(cx: Cx, t: Ty, seen: Set[String]) -> Option[Ty] =
-  match t {
-    TyFloat -> Some(TyFloat)
-    TyBytes -> Some(TyBytes)
-    TyArray(_) -> Some(t)
-    TyList(e) -> invalid_key_part(cx, e, seen)
-    TySet(e) -> invalid_key_part(cx, e, seen)
-    TyMap(k, v) ->
-      match invalid_key_part(cx, k, seen) {
-        Some(b) -> Some(b)
-        None -> invalid_key_part(cx, v, seen)
-      }
-    TyTuple(elems) -> {
-      for e in elems {
-        match invalid_key_part(cx, e, seen) {
-          Some(b) -> return Some(b)
-          None -> ()
-        }
-      }
-      None
-    }
-    TyAdt(aid, targs) -> {
-      let a = adt_of(cx.adts, aid)
-      if set.has(seen, a.name) { return None }
-      let seen2 = set.insert(seen, a.name)
-      var m: Map[Int, Ty] = map.empty()
-      var i = 0
-      for tp in a.tparams {
-        match tp {
-          TyVar(_, id) ->
-            match get(targs, i) {
-              Some(arg) -> { m = map.insert(m, id, arg) }
-              None -> ()
-            }
-          _ -> ()
-        }
-        i = i + 1
-      }
-      let em: Map[Int, Eff] = map.empty()
-      for c in a.ctors {
-        for f in c.fields {
-          match invalid_key_part(cx, subst(f.ty, m, em), seen2) {
-            Some(b) -> return Some(b)
-            None -> ()
-          }
-        }
-      }
-      None
-    }
-    _ -> None
-  }
-
-## One report per offending key type per module.
-pub fn check_key_type(cx: Cx, key_t: Ty, lo: Int, hi: Int) -> Cx = {
-  if is_errorish(key_t) { return cx }
-  let bad = match invalid_key_part(cx, key_t, set.empty()) {
-    None -> return cx
-    Some(b) -> b
-  }
-  let key_s = ty_show(cx.adts, key_t)
-  if set.has(cx.reported_key_types, key_s) { return cx }
-  var cx1 = Cx { ..cx, reported_key_types: set.insert(cx.reported_key_types, key_s) }
-  let bad_s = ty_show(cx1.adts, bad)
-  let inside = if bad == key_t { "" } else { " (inside `" ++ key_s ++ "`)" }
-  let why = match bad {
-    TyFloat -> "NaN and -0.0 give Float two different equalities, so no hash can agree with `==`"
-    TyArray(_) -> "an Array hashes by identity, not content"
-    _ -> "Bytes hashes by identity, not content"
-  }
-  let hint = match bad {
-    TyFloat -> "key by an Int encoding (scaled integer, bits) or a String rendering instead"
-    TyArray(_) -> "key by the List it backs instead"
-    _ -> "key by a String instead: decode(b, \"UTF-8\") or a hex rendering"
-  }
-  cerr_h(cx1, "`" ++ bad_s ++ "` cannot be part of a Map/Set key type" ++ inside ++ ": " ++ why,
-    lo, hi, hint)
-}
-
-## Every Map key / Set element inside an instantiated type must be a valid key.
-pub fn check_key_types_in(cx: Cx, t: Ty, lo: Int, hi: Int) -> Cx =
-  match t {
-    TyMap(k, v) -> check_key_types_in(check_key_type(cx, k, lo, hi), v, lo, hi)
-    TySet(e) -> check_key_type(cx, e, lo, hi)
-    TyList(e) -> check_key_types_in(cx, e, lo, hi)
-    TyArray(e) -> check_key_types_in(cx, e, lo, hi)
-    TyTuple(elems) -> {
-      var cx1 = cx
-      for e in elems { cx1 = check_key_types_in(cx1, e, lo, hi) }
-      cx1
-    }
-    TyAdt(_, targs) -> {
-      var cx1 = cx
-      for e in targs { cx1 = check_key_types_in(cx1, e, lo, hi) }
-      cx1
-    }
-    TyFn(params, ret, _) -> {
-      var cx1 = cx
-      for e in params { cx1 = check_key_types_in(cx1, e, lo, hi) }
-      check_key_types_in(cx1, ret, lo, hi)
-    }
-    _ -> cx
-  }
 
 pub fn builtin_type_names() -> List[String] =
   ["Int", "Float", "Bool", "String", "Bytes", "Unit", "List", "Map", "Set"]
@@ -644,9 +526,8 @@ fn resolve_named(cx: Cx, name: String, targs: List[TypeRef], lo: Int, hi: Int) -
       return (cerr(cx, "Map takes exactly two type arguments: Map[K, V]", lo, hi), TyError)
     }
     let (cx1, k) = resolve_type(cx, targs[0])
-    let cx2 = check_key_type(cx1, k, t_lo2(targs[0]), t_hi2(targs[0]))
-    let (cx3, v) = resolve_type(cx2, targs[1])
-    return (cx3, TyMap(k, v))
+    let (cx2, v) = resolve_type(cx1, targs[1])
+    return (cx2, TyMap(k, v))
   }
   # Array is the backend's collection primitive, not part of the language's
   # surface: only std may name it, so outside std the name falls through to the
@@ -663,8 +544,7 @@ fn resolve_named(cx: Cx, name: String, targs: List[TypeRef], lo: Int, hi: Int) -
       return (cerr(cx, "Set takes exactly one type argument: Set[T]", lo, hi), TyError)
     }
     let (cx1, e) = resolve_type(cx, targs[0])
-    let cx2 = check_key_type(cx1, e, t_lo2(targs[0]), t_hi2(targs[0]))
-    return (cx2, TySet(e))
+    return (cx1, TySet(e))
   }
   match ty_named(name) {
     Some(t) -> {
@@ -745,26 +625,23 @@ test "Array names the backend primitive in std and nothing in user code" {
   assert str.contains(u1.diags[0].msg, "unknown type: Array")
 }
 
-test "an Array cannot be a Map/Set key" {
-  let std_cx = cx_new(Some("std/map"), None)
-  let (cx1, _) = resolve_type(std_cx,
-    TNamed("Set", [TNamed("Array", [TNamed("Int", [], 0, 3)], 0, 3)], 0, 4))
-  assert len(cx1.diags) == 1
-  assert str.contains(cx1.diags[0].msg, "cannot be part of a Map/Set key type")
-  assert str.contains(cx1.diags[0].msg, "hashes by identity")
-}
-
-test "a float map key is rejected once per type" {
-  let cx = test_cx()
+test "which types may be a Map/Set key is what Hash answers" {
+  let cx = seed_prelude(test_cx())
+  # naming the type is not the error -- an empty `Map[Float, Int]` is a map
+  # nobody can key into, and every operation that would key into it carries
+  # `[K: Eq + Hash]`. That bound is where it is caught, and it is caught by
+  # the same rule that gives `hash(1.5)` outside a map the same answer.
   let (cx1, t) = resolve_type(cx,
     TNamed("Map", [TNamed("Float", [], 4, 9), TNamed("Int", [], 11, 14)], 0, 15))
   assert t == TyMap(TyFloat, TyInt)
-  assert len(cx1.diags) == 1
-  assert str.contains(cx1.diags[0].msg, "cannot be part of a Map/Set key type")
-  # the same offending key type reports only once
-  let (cx2, _) = resolve_type(cx1,
-    TNamed("Map", [TNamed("Float", [], 24, 29), TNamed("Int", [], 31, 34)], 20, 35))
-  assert len(cx2.diags) == 1
+  assert len(cx1.diags) == 0
+  assert structural_gap(cx1, HASH_ID, TyFloat, set.empty()) == Some(TyFloat)
+  assert structural_gap(cx1, EQ_ID, TyFloat, set.empty()) == None
+  assert structural_gap(cx1, HASH_ID, TyArray(TyInt), set.empty()) == Some(TyArray(TyInt))
+  # Bytes was banned here too, for a reason that stopped being true: it
+  # compares by content (Arrays.equals) and hashes by content (Arrays.hashCode)
+  assert structural_gap(cx1, HASH_ID, TyBytes, set.empty()) == None
+  assert structural_gap(cx1, EQ_ID, TyBytes, set.empty()) == None
 }
 
 test "unknown types get suggestions" {
@@ -6253,9 +6130,6 @@ fn check_call(
   }
   cx1 = record_effect(cx1, callee_eff, clo, chi, callee)
   let ret = subst(s.ret, m, em)
-  # a generic call is where a concrete Map/Set key type is first formed from
-  # inference (spec §2.2) — check the instantiated result by type
-  if len(s.tparams) > 0 { cx1 = check_key_types_in(cx1, ret, lo, hi) }
   var txs2: List[TExpr] = []
   for sl in tx_slots {
     match sl {
