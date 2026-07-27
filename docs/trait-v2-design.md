@@ -887,3 +887,38 @@ redefined」。禁令加一条 `d.name == "Array" && cx1.is_std_module` 即可�
 
 （同样问过 trait 名：std 里 `pub trait Array[T]` 实测无害，所以**没**动那一处。
 对称好看不是改代码的理由。）
+
+### 7.5 §7.4 的消费者故事自己也没走通(2026-07-27,动手前第二次勘察)
+
+§7.4 说关联类型的理由是「`index_wanted` 的两条 arm 能挪进 std 的 impl」。**这句话没有被走过一遍**,
+走一遍就停在第一步:std 写不出那个 impl 的体。
+
+```dawn
+impl[T] Index[List[T]] {
+  type Item = T
+  fn index(xs: List[T], i: Int) -> T = xs[i]   # 运算符拿自己定义自己
+}
+```
+
+两条逃生路,各有代价,都不在 §7.4 的账上:
+
+| 路 | 体怎么写 | 代价 |
+|---|---|---|
+| 走 `get` | `get(xs, i).expect("index out of bounds")` | **语义正好**——`xs[i]` 本来就是「取不到就 panic」;但 `get` 的签名是 `opt_ty(t)`(`types.dawn:878`),**每次下标多一次 Option 分配**。值不值要用 `selfhost-bench.sh` 量,不是拍板 |
+| 走 `prim_relation` | 加一条 `INDEX_ID` 臂,由 prelude 铸 impl | 两条 arm 从 `checker.dawn:3274` **搬到 `lower.dawn:807`**——挪了一个文件,没挪进 std;而且要自带解释器臂,因为 `xs[i]` 今天经 `CIntrinsic("list_index")` 在 comptime 折(`lower.dawn:2146` → `interp.dawn:681`) |
+
+顺带两条订正:
+
+- §7.4 引的 `index_wanted` 行号 **3293 是错的**,那里是 `index_wits`;`index_wanted` 在 **3274**,
+  两条 arm 在 3275-3277。
+- **`list_index` 不会因此消失**:列表模式匹配直接发它(`lower.dawn:406`、`418`),与 `[]` 无关。
+
+还有一条更靠前的裁决没做:**trait 方法的关联类型出现在参数位时,这个方法还能不能按名字调用**
+(`index(v, 0)`)。能,则 `Item` 会进 `check_call_sig` 的推断路径;不能,则只出现在返回位就够了。
+**这个问题决定第一刀的表示选型**,先答它再动手。
+
+> §7 的收尾教训是「计划里一个待办被别的待办引用得越多,越没人回头验它」。§7.4 是这一页
+> 上第三条被实测推翻的推断,而它是这一页**自己**刚写下的。
+
+**开工条件**(三条,都不大):①`impl[T] Index[List[T]]` 的体到底怎么写,量过 `get` 那条路的分配代价;
+②参数位关联类型可否按名字调用;③前置缺陷 #55 已修(已完成,`7f79491`)。
