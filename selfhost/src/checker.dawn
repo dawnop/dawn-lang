@@ -1041,20 +1041,24 @@ pub fn is_concrete(cx: Cx, t: Ty) -> Bool =
     _ -> true
   }
 
-## Does the type contain a function anywhere? (functions cannot be compared)
-## The first part of `t` that has no equality, or None.
+## The first part of `t` that `tid` has no answer for, or None.
 ##
-## One predicate for both doors. `==` used to ask a walk that did not descend
-## into ADT fields, and a `[T: Eq]` bound used to ask nothing at all: the
-## operator refused `f == g` while the bound accepted it and answered by
-## reference -- not even reflexively, since a function value is a fresh object
-## at each use site, so `eq2(f, f)` came out false. Same relation, two doors,
-## two answers.
+## One predicate for every door into the two traits that have a structural
+## default. `==` used to ask a walk that did not descend into ADT fields, and
+## a `[T: Eq]` bound used to ask nothing at all: the operator refused `f == g`
+## while the bound accepted it and answered by reference -- not even
+## reflexively, since a function value is a fresh object at each use site, so
+## `eq2(f, f)` came out false. Same relation, two doors, two answers.
 ##
-## An explicit `impl Eq` ends the walk: the impl is the definition, and what
-## its fields are made of is its own business.
-pub fn uncomparable_part(cx: Cx, t: Ty, seen: Set[String]) -> Option[Ty] =
-  if has_impl_at(cx.impl_table, EQ_ID, t) {
+## The trait is a parameter because Eq and Hash bottom out at different
+## scalars. A walk that asked Eq's table for both let `[T: Hash]` accept a
+## `Float` and answer `Double.hashCode`, which is the pairing deleting
+## `Hash[Float]` was meant to end.
+##
+## An impl ends the walk: the impl is the definition, and what its fields are
+## made of is its own business.
+pub fn structural_gap(cx: Cx, tid: Int, t: Ty, seen: Set[String]) -> Option[Ty] =
+  if has_impl_at(cx.impl_table, tid, t) {
     None
   } else {
     match t {
@@ -1062,21 +1066,34 @@ pub fn uncomparable_part(cx: Cx, t: Ty, seen: Set[String]) -> Option[Ty] =
       # the D1 growable vector: mutable, and compared by reference. Until it
       # is a Dawn type with an impl there is no content equality to give.
       TyArray(_) -> Some(t)
+      # Unit has no runtime value at all -- zero JVM stack slots, `V` as a
+      # descriptor -- so there is nothing to compare or hash. Show and tuple
+      # elements already refuse it; these two accepted it and emitted a method
+      # call with an empty operand stack.
+      TyUnit -> Some(t)
+      # reached only for Hash: `Eq[Float]` is a prelude impl, so for equality
+      # the table above has already answered
+      TyFloat -> Some(t)
       TyTuple(elems) -> {
         for e in elems {
-          match uncomparable_part(cx, e, seen) {
+          match structural_gap(cx, tid, e, seen) {
             Some(b) -> return Some(b)
             None -> ()
           }
         }
         None
       }
-      TyList(e) -> uncomparable_part(cx, e, seen)
-      TySet(e) -> uncomparable_part(cx, e, seen)
+      # In a whole program std's conditional impls answer for the containers
+      # before the walk is asked, and the parts then arrive here one at a time
+      # as that impl's sub-goals. These arms are for the contexts that have no
+      # std -- a unit test's table, a module checked on its own -- where the
+      # walk is all there is.
+      TyList(e) -> structural_gap(cx, tid, e, seen)
+      TySet(e) -> structural_gap(cx, tid, e, seen)
       TyMap(k, v) ->
-        match uncomparable_part(cx, k, seen) {
+        match structural_gap(cx, tid, k, seen) {
           Some(b) -> Some(b)
-          None -> uncomparable_part(cx, v, seen)
+          None -> structural_gap(cx, tid, v, seen)
         }
       TyAdt(aid, targs) -> {
         let a = adt_of(cx.adts, aid)
@@ -1098,7 +1115,7 @@ pub fn uncomparable_part(cx: Cx, t: Ty, seen: Set[String]) -> Option[Ty] =
         let em: Map[Int, Eff] = map.empty()
         for c in a.ctors {
           for f in c.fields {
-            match uncomparable_part(cx, subst(f.ty, m, em), seen2) {
+            match structural_gap(cx, tid, subst(f.ty, m, em), seen2) {
               Some(b) -> return Some(b)
               None -> ()
             }
@@ -1106,22 +1123,38 @@ pub fn uncomparable_part(cx: Cx, t: Ty, seen: Set[String]) -> Option[Ty] =
         }
         None
       }
-      # A rigid type parameter stays permissive on purpose: whether `T` has
-      # an equality is the instantiation's business, and demanding a bound
-      # here would reject code that compiles today. It is the erased half
-      # `struct_eq` covers, and it closes with trait v2, not here.
+      # A rigid type parameter is not a gap in the structure -- whether `T`
+      # answers is the instantiation's business, and `resolve_witness` asks it
+      # there, where the bound either is or is not in scope.
       _ -> None
     }
   }
 
-## One wording for both doors. `bad` is the part with no equality; when it is
-## the whole type the message says so directly rather than pointing at itself.
-pub fn uncomparable_err(cx: Cx, t: Ty, bad: Ty, lo: Int, hi: Int) -> Cx = {
+## One wording for every door. `bad` is the part `tid` has no answer for; when
+## it is the whole type the message says so directly rather than pointing at
+## itself.
+pub fn structural_gap_err(cx: Cx, tid: Int, t: Ty, bad: Ty, lo: Int, hi: Int) -> Cx = {
+  let rel = if tid == HASH_ID { "hash" } else { "equality" }
   let (what, hint) = match bad {
     TyFn(_, _, _) ->
-      ("functions cannot be compared", "compare the values they produce, not the functions")
-    _ -> ("`" ++ ty_show(cx.adts, bad) ++ "` has no equality",
-      "compare something derived from its contents instead")
+      if tid == HASH_ID {
+        ("functions cannot be hashed", "hash the values they produce, not the functions")
+      } else {
+        ("functions cannot be compared", "compare the values they produce, not the functions")
+      }
+    TyUnit ->
+      ("`Unit` has no " ++ rel,
+        "there is one Unit and it carries no information, so the answer would be a constant")
+    TyFloat ->
+      ("`Float` has no hash",
+        "NaN and -0.0 give Float two different equalities, so no hash can agree with `==`; " ++
+          "use an Int encoding (scaled integer, bits) or a String rendering instead")
+    TyArray(_) ->
+      ("`" ++ ty_show(cx.adts, bad) ++ "` has no " ++ rel ++ ": an Array is held by identity, " ++
+          "not by content",
+        "use the List it backs instead")
+    _ -> ("`" ++ ty_show(cx.adts, bad) ++ "` has no " ++ rel,
+      "derive the answer from its contents instead")
   }
   let msg = if bad == t {
     what
@@ -4626,9 +4659,10 @@ pub fn resolve_witness(
           # are the table's question, not a witness kind's, and lowering asks
           # the table either way.
           if trait_id == EQ_ID || trait_id == HASH_ID {
-            match uncomparable_part(cx, t, set.empty()) {
-              None -> return solved_structurally(cx, trait_id, t)
-              Some(bad) -> return (uncomparable_err(cx, t, bad, lo, hi), no_wit())
+            match structural_gap(cx, trait_id, t, set.empty()) {
+              None -> return solved_structurally(cx, trait_id, t, lo, hi, requirer)
+              Some(bad) ->
+                return (structural_gap_err(cx, trait_id, t, bad, lo, hi), no_wit())
             }
           }
           # Show has no structural default -- an ADT without `derive Show` is
@@ -4707,19 +4741,37 @@ fn show_tuple_witness(
 ## witness carries the arguments' witnesses (`WApply`) and lowering builds the
 ## dictionary from them.
 ##
-## Two guards keep this additive. Only a type with structure of its own can use
-## the arguments (a `List[T]` still reaches the runtime intrinsic until S3), and
-## only a subject whose every argument already resolves qualifies -- because
-## demanding an `Eq` bound where none is written today is a breaking change,
-## and it belongs in the cut that makes `==` demand one too (§3.7).
-fn solved_structurally(cx: Cx, trait_id: Int, t: Ty) -> (Cx, Option[WitRef]) = {
+## A synthesised impl is a witness exactly as far as its parts are, the same
+## way a conditional impl is: an argument that cannot answer is an error here,
+## not a reason to fall back. It used to fall back to `WConcrete`, and that is
+## how `fn f[T](a: Box[T], b: Box[T]) -> Bool = a == b` compiled without a
+## bound -- lowering had nothing left but the erased runtime walk, which the
+## JVM answered by accident (`Object.equals` recursion) and native could not
+## answer at all. `==` at a bare `T` has demanded the bound since trait v2;
+## this is the same demand one level in.
+fn solved_structurally(
+  cx: Cx,
+  trait_id: Int,
+  t: Ty,
+  lo: Int,
+  hi: Int,
+  requirer: String
+) -> (Cx, Option[WitRef]) = {
   if is_ground(t) || not expandable(t) {
     return (cx, Some(WConcrete(trait_id, t)))
   }
-  match probe_args(cx, trait_id, type_args_of(t)) {
-    Some(ws) -> (capture_wits(cx, ws), Some(WApply(trait_id, t, ws)))
-    None -> (cx, Some(WConcrete(trait_id, t)))
+  var cx1 = cx
+  var ws: List[WitRef] = []
+  var ok = true
+  for a in type_args_of(t) {
+    let (cx2, w) = resolve_witness(cx1, trait_id, a, lo, hi, requirer)
+    cx1 = cx2
+    match w {
+      Some(wr) -> { ws = ws ++ [wr] }
+      None -> { ok = false }
+    }
   }
+  if ok { (cx1, Some(WApply(trait_id, t, ws))) } else { (cx1, no_wit()) }
 }
 
 ## `derive Ord` on a generic type: one bound per type parameter, on the trait
@@ -4786,7 +4838,7 @@ fn probe_witness(cx: Cx, trait_id: Int, t: Ty) -> Option[WitRef] =
             }
           }
           if trait_id != EQ_ID && trait_id != HASH_ID { return None }
-          match uncomparable_part(cx, t, set.empty()) {
+          match structural_gap(cx, trait_id, t, set.empty()) {
             Some(_) -> return None
             None -> ()
           }
@@ -4892,12 +4944,12 @@ fn why_bad(cx: Cx, subject: Ty, tvars: List[Ty]) -> String =
 test "a subject containing a rigid variable takes its arguments' witnesses" {
   let cx = seed_prelude(test_cx())
   let tv = TyVar("T", 900)
-  # Nothing in scope for `T`: the witness stays exactly what it was before
-  # trait v2, so the code that compiles today without an `Eq` bound keeps
-  # compiling. Demanding the bound is cut 7's change, not this one.
+  # Nothing in scope for `T`, so the synthesised impl has no argument witness
+  # to build from and says so, exactly as a conditional impl would. It used to
+  # fall back to `WConcrete` and leave lowering the erased runtime walk.
   let (cx1, w1) = resolve_witness(cx, EQ_ID, opt_ty(tv), 0, 4, "`f`")
-  assert len(cx1.diags) == 0
-  assert w1 == Some(WConcrete(EQ_ID, opt_ty(tv)))
+  assert w1 == None
+  assert str.contains(cx1.diags[0].msg, "requires `Eq[T]`")
   # With `[T: Eq]` in scope, the whole's witness carries the part's -- which
   # is the only way to reach a relation the caller decides.
   let bound = Cx { ..cx, dict_syms: map.insert(cx.dict_syms, (900, EQ_ID), 77) }
@@ -4908,12 +4960,12 @@ test "a subject containing a rigid variable takes its arguments' witnesses" {
   let (cx3, w3) = resolve_witness(bound, EQ_ID, opt_ty(opt_ty(tv)), 0, 4, "`f`")
   assert w3 == Some(WApply(EQ_ID, opt_ty(opt_ty(tv)),
     [WApply(EQ_ID, opt_ty(tv), [WForward(77)])]))
-  # A container has no structure of its own to spell out until S3, so it
-  # keeps the runtime intrinsic -- and therefore the old witness.
+  # A container is not `expandable`: there is no structure here to spell out,
+  # because since S3 the relation is an ordinary conditional impl in std. This
+  # table has no std in it, so the walk is what answers.
   let (cx4, w4) = resolve_witness(bound, EQ_ID, TyList(tv), 0, 4, "`f`")
   assert w4 == Some(WConcrete(EQ_ID, TyList(tv)))
-  # A ground subject is untouched. That is the whole reason this cut emits
-  # no different bytecode for any program that exists.
+  # A ground subject is untouched.
   let (cx5, w5) = resolve_witness(bound, EQ_ID, opt_ty(TyInt), 0, 4, "`f`")
   assert len(cx5.diags) == 0
   assert w5 == Some(WConcrete(EQ_ID, opt_ty(TyInt)))
