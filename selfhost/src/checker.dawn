@@ -1398,9 +1398,13 @@ pub fn pass_type_shells(cx: Cx, m: Module) -> (Cx, List[Option[Shell]]) = {
       shells = shells ++ [no_shell()]
       continue
     }
+    # `Array` is a builtin only inside std -- resolve_type gates that name on
+    # is_std_module -- so only there is redeclaring it a collision. Outside std
+    # a user type called `Array` is their own, which is the point of the gate.
     let is_builtin_name = match ty_named(d.name) {
       Some(_) -> true
       None -> d.name == "List" || d.name == "Map" || d.name == "Set"
+        || (d.name == "Array" && cx1.is_std_module)
     }
     if is_builtin_name {
       cx1 = cerr(cx1, "`" ++ d.name ++ "` is a builtin type and cannot be redefined", d.nlo, d.nhi)
@@ -1684,6 +1688,35 @@ test "duplicate constructors and prelude clashes are caught" {
   assert len(cx1.diags) == 2
   assert cx1.diags[0].msg == "`Option` is a prelude type and cannot be redefined"
   assert cx1.diags[1].msg == "type `A` is defined twice"
+}
+
+test "redeclaring Array collides in std and nowhere else" {
+  # The name resolves to the primitive inside std, so a declaration there is a
+  # collision -- and a silent one before this check: the declaration succeeded
+  # and every *use* of the name still reached the primitive, so the module
+  # failed later with `declares return type Array[Int] but its body is
+  # Array[Int]`, two different types printing the same.
+  let decl = DType(TypeDeclR {
+    is_pub: false,
+    is_opaque: false,
+    name: "Array",
+    tparams: ["T"],
+    ctors: [CtorDecl { name: "Wrap", fields: [], lo: 0, hi: 1, nlo: 0, nhi: 1 }],
+    is_record: false,
+    derives: [],
+    alias_target: None,
+    lo: 0,
+    hi: 1,
+    nlo: 0,
+    nhi: 1
+  })
+  let m = Module { decls: [decl] }
+  let (s1, _) = pass_type_shells(seed_prelude(cx_new(Some("std/list"), None)), m)
+  assert len(s1.diags) == 1
+  assert s1.diags[0].msg == "`Array` is a builtin type and cannot be redefined"
+  # outside std the name is nobody's, so declaring it is ordinary
+  let (u1, _) = pass_type_shells(seed_prelude(test_cx()), m)
+  assert len(u1.diags) == 0
 }
 
 ## Pass 2.25: resolve every alias target now, so cycles and unknown names are
