@@ -267,6 +267,9 @@ dawn_bytes *dawn_bytes_utf8(dawn_str s);
 int64_t dawn_bytes_len(const dawn_bytes *b);
 int64_t dawn_bytes_at(const dawn_bytes *b, int64_t i); /* 0..255, -1 out of range */
 dawn_bytes *dawn_bytes_slice(const dawn_bytes *b, int64_t from, int64_t to);
+/* The one way to make bytes that did not come from text. Elements are boxed
+ * (the array is erased) and truncated to a byte. */
+dawn_bytes *dawn_bytes_from_array(const dawn_array *a);
 /* Option[String]; None only for a charset this runtime cannot decode, which
  * is what the JVM's UnsupportedEncodingException arm means. Malformed input
  * is replaced rather than refused, as `new String(bytes, charset)` does. */

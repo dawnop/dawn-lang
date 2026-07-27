@@ -951,6 +951,16 @@ static bool dawn_charset_is(dawn_str cs, const char *name) {
   return true;
 }
 
+dawn_bytes *dawn_bytes_from_array(const dawn_array *a) {
+  int64_t n = dawn_array_len(a);
+  unsigned char *buf = (unsigned char *)dawn_alloc((size_t)n + 1);
+  for (int64_t i = 0; i < n; i++) {
+    dawn_slot *s = (dawn_slot *)dawn_array_get(a, i);
+    buf[i] = (unsigned char)(s->i & 0xFF);
+  }
+  return dawn_bytes_of(buf, n);
+}
+
 dawn_adt *dawn_bytes_decode(const dawn_bytes *b, dawn_str charset) {
   if (dawn_charset_is(charset, "UTF-8") || dawn_charset_is(charset, "UTF8")) {
     /* Malformed input is replaced, not refused -- what `new String(bytes,

@@ -352,6 +352,15 @@ pub const OP_BALOAD: Int = 51
 
 pub const OP_ANEWARRAY: Int = 189
 
+pub const OP_NEWARRAY: Int = 188
+
+pub const OP_BASTORE: Int = 84
+
+pub const OP_I2B: Int = 145
+
+## The `atype` operand NEWARRAY takes for a byte array (JVMS 6.5).
+pub const T_BYTE: Int = 8
+
 pub const OP_IFNONNULL: Int = 199
 
 pub const OP_IADD: Int = 96
@@ -1032,8 +1041,59 @@ pub fn gen_bytes_class(supers: List[String]) -> Bytes !io = {
   dv.visitInsn(OP_ARETURN)
   close_mv(dv)
 
+  gen_bytes_from_array(cw)
+
   cw.visitEnd()
   cw.toByteArray().expect("bytes")
+}
+
+## bytes_from_array(a): the one way to make bytes that did not come from text.
+##
+## It reads the array through `array_get` rather than its fields: two emitted
+## runtime classes, and the representation stays the Array class's business.
+## Elements arrive boxed (the array is erased), so each one is a Long that I2B
+## truncates -- a value outside 0..255 is the caller's error and is stored the
+## way a byte store anywhere else would store it.
+fn gen_bytes_from_array(cw: AdtClassWriter) -> Unit !io = {
+  let fv = open_static(cw, "bytes_from_array", "(L" ++ ARRAY_CLASS ++ ";)[B")
+  let loop = Label.new()
+  let done = Label.new()
+  # n = (int) array_len(a); out = new byte[n]; i = 0
+  fv.visitVarInsn(OP_ALOAD, 0)
+  fv.visitMethodInsn(OP_INVOKESTATIC, ARRAY_CLASS, "array_len",
+    "(L" ++ ARRAY_CLASS ++ ";)J", false)
+  fv.visitInsn(OP_L2I)
+  fv.visitVarInsn(OP_ISTORE, 1)
+  fv.visitVarInsn(OP_ILOAD, 1)
+  fv.visitIntInsn(OP_NEWARRAY, T_BYTE)
+  fv.visitVarInsn(OP_ASTORE, 2)
+  fv.visitInsn(OP_ICONST_0)
+  fv.visitVarInsn(OP_ISTORE, 3)
+  fv.visitLabel(loop)
+  fv.visitVarInsn(OP_ILOAD, 3)
+  fv.visitVarInsn(OP_ILOAD, 1)
+  fv.visitJumpInsn(OP_IF_ICMPGE, done)
+  fv.visitVarInsn(OP_ALOAD, 2)
+  fv.visitVarInsn(OP_ILOAD, 3)
+  fv.visitVarInsn(OP_ALOAD, 0)
+  fv.visitVarInsn(OP_ILOAD, 3)
+  fv.visitInsn(OP_I2L)
+  fv.visitMethodInsn(OP_INVOKESTATIC, ARRAY_CLASS, "array_get",
+    "(L" ++ ARRAY_CLASS ++ ";J)Ljava/lang/Object;", false)
+  fv.visitTypeInsn(OP_CHECKCAST, "java/lang/Long")
+  fv.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/Long", "longValue", "()J", false)
+  fv.visitInsn(OP_L2I)
+  fv.visitInsn(OP_I2B)
+  fv.visitInsn(OP_BASTORE)
+  fv.visitVarInsn(OP_ILOAD, 3)
+  fv.visitInsn(OP_ICONST_1)
+  fv.visitInsn(OP_IADD)
+  fv.visitVarInsn(OP_ISTORE, 3)
+  fv.visitJumpInsn(OP_GOTO, loop)
+  fv.visitLabel(done)
+  fv.visitVarInsn(OP_ALOAD, 2)
+  fv.visitInsn(OP_ARETURN)
+  close_mv(fv)
 }
 
 fn gen_try_closure(cw: AdtClassWriter, name: String, caught: String) -> Unit !io = {

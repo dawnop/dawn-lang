@@ -932,7 +932,15 @@ pub fn builtins() -> Map[String, Sig] = {
     bsig("bytes_decode", [TyBytes, TyString], ["b", "charset"], opt_ty(TyString)),
     bsig("bytes_len", [TyBytes], ["b"], TyInt),
     bsig("bytes_at", [TyBytes, TyInt], ["b", "i"], TyInt),
-    bsig("bytes_slice", [TyBytes, TyInt, TyInt], ["b", "start", "end"], TyBytes)
+    bsig("bytes_slice", [TyBytes, TyInt, TyInt], ["b", "start", "end"], TyBytes),
+    # The one way to *make* bytes that did not come from text. Without it
+    # `Bytes` is a read-only type: you can take the UTF-8 of a string, slice
+    # it and read it, but you cannot produce an arbitrary byte -- `0x80` would
+    # need a string whose UTF-8 encoding is that one byte, and there is none.
+    # Anything that decompresses has to write bytes it computed, so this is
+    # what std/bytes builds its `Buf` on. Elements outside 0..255 are the
+    # caller's error and are truncated, like a byte store anywhere else.
+    bsig("bytes_from_array", [TyArray(TyInt)], ["a"], TyBytes)
   ]
   sigs = sigs ++ [
     eff1(bsig("args", [], [], TyList(TyString)), EIo),
@@ -1105,9 +1113,11 @@ pub fn intrinsics() -> Map[String, Intr] = {
     "index_of", "last_index_of"] {
       rt_of = map.insert(rt_of, "str_" ++ op, RtStrings)
     }
-  for op in ["utf8", "decode", "len", "at", "slice"] {
+  for op in ["utf8", "decode", "len", "at", "slice", "from_array"] {
     rt_of = map.insert(rt_of, "bytes_" ++ op, RtBytes)
   }
+  # it names Array, so it is std-only for the same reason array_* is
+  internal = set.insert(internal, "bytes_from_array")
   for op in ["print", "println", "eprint", "eprintln", "read_line", "is_dir", "read_file",
     "write_file", "exit", "exists", "mkdirs", "cwd", "getenv", "read_bytes", "write_bytes",
     "delete", "rename", "temp_dir", "is_symlink", "read_stdin"] {
@@ -1308,7 +1318,7 @@ test "builtin table renders signatures" {
     }
     None -> { assert false }
   }
-  assert map_size2(bs) == 94
+  assert map_size2(bs) == 95
 }
 
 fn map_size2(m: Map[String, Sig]) -> Int = map.size(m)

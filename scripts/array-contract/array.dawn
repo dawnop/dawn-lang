@@ -4,6 +4,7 @@
 # D1), so this file is dropped into a copy of std/ rather than sitting in
 # examples/. It is the one place the primitive is covered end to end until D2/D3
 # make std's own collections go through it.
+use std/bytes
 use java "java.lang.System"
 
 fn now_ms() -> Int !io = System.currentTimeMillis()
@@ -92,4 +93,28 @@ pub fn out_of_bounds() -> String !io = {
     Ok(_) -> "no panic"
     Err(m) -> m
   }
+}
+
+## `bytes_from_array` -- the one way to make bytes that did not come from text.
+## It lives here rather than in a spike corpus for the same reason the rest of
+## this module does: its argument type is std-only, so no user program can
+## build one to hand it.
+##
+## The values above 127 are the point. `Bytes` could always be *read*, and a
+## byte read back as 0..255 is not evidence: what had no spelling at all was a
+## byte the caller computed, and 0x80 is the one a UTF-8 round trip destroys.
+pub fn from_array() -> String = {
+  var a: Array[Int] = array_new()
+  for v in [0, 1, 65, 127, 128, 200, 254, 255] {
+    a = array_push(a, v)
+  }
+  let b = bytes_from_array(a)
+  var out = "len=" ++ to_string(bytes.len(b))
+  var i = 0
+  while i < bytes.len(b) {
+    out = out ++ " " ++ to_string(bytes.at(b, i))
+    i = i + 1
+  }
+  let empty: Array[Int] = array_new()
+  out ++ " empty=" ++ to_string(bytes.len(bytes_from_array(empty)))
 }
