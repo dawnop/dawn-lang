@@ -971,6 +971,30 @@ pub fn builtins() -> Map[String, Sig] = {
     eff1(bsig("io_exists", [TyString], ["path"], TyBool), EIo),
     # throws on failure, like read_file/write_file; std wraps it in java_try
     eff1(bsig("io_mkdirs", [TyString], ["path"], TyUnit), EIo),
+    # The rest of what a package manager and a language server need. Measured,
+    # not guessed: each one has a call site in the compiler that reaches it
+    # through `use java` today. Deliberately absent are the ones only the JVM
+    # side wants -- class-path properties, process spawning, `canExecute` --
+    # because a native `dawn run` will not spawn a JVM at all.
+    eff1(bsig("io_cwd", [], [], TyString), EIo),
+    eff1(bsig("io_getenv", [TyString], ["name"], opt_ty(TyString)), EIo),
+    # the binary halves of read_file/write_file; same throw-on-failure contract,
+    # and write_bytes likewise creates the parent directories
+    eff1(bsig("io_read_bytes", [TyString], ["path"], TyBytes), EIo),
+    eff1(bsig("io_write_bytes", [TyString, TyBytes], ["path", "content"], TyUnit), EIo),
+    ## `true` when something was there to delete; a missing path is not an error.
+    eff1(bsig("io_delete", [TyString], ["path"], TyBool), EIo),
+    # Atomic when src and dst share a filesystem, which is why `io_temp_dir`
+    # takes the parent: staging inside the destination's directory is what makes
+    # "download, verify, then publish under the content hash" indivisible.
+    eff1(bsig("io_rename", [TyString, TyString], ["src", "dst"], TyUnit), EIo),
+    # `parent == ""` means the system temp directory.
+    eff1(bsig("io_temp_dir", [TyString, TyString], ["parent", "prefix"], TyString), EIo),
+    eff1(bsig("io_is_symlink", [TyString], ["path"], TyBool), EIo),
+    # Exactly `n` bytes, short only at end of input -- so a short read *is* the
+    # EOF signal. stdin is a channel like stderr, and for the same reason it
+    # cannot be reached through the interop: `System.in` is a static field.
+    eff1(bsig("io_read_stdin", [TyInt], ["n"], TyBytes), EIo),
     Sig { ..bsig("map_empty", [], [], TyMap(k, v)), tparams: [k, v] },
     tp1(bsig("set_empty", [], [], TySet(t)), t),
     keyed2(bsig("map_from", [TyList(TyTuple([k, v]))], ["entries"], TyMap(k, v)), k, v),
@@ -1085,7 +1109,8 @@ pub fn intrinsics() -> Map[String, Intr] = {
     rt_of = map.insert(rt_of, "bytes_" ++ op, RtBytes)
   }
   for op in ["print", "println", "eprint", "eprintln", "read_line", "is_dir", "read_file",
-    "write_file", "exit", "exists", "mkdirs"] {
+    "write_file", "exit", "exists", "mkdirs", "cwd", "getenv", "read_bytes", "write_bytes",
+    "delete", "rename", "temp_dir", "is_symlink", "read_stdin"] {
       rt_of = map.insert(rt_of, "io_" ++ op, RtIo)
     }
   rt_of = map.insert(rt_of, "java_try", RtIo)
@@ -1283,7 +1308,7 @@ test "builtin table renders signatures" {
     }
     None -> { assert false }
   }
-  assert map_size2(bs) == 85
+  assert map_size2(bs) == 94
 }
 
 fn map_size2(m: Map[String, Sig]) -> Int = map.size(m)

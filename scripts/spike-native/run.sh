@@ -111,7 +111,12 @@ for prog in "${progs[@]}"; do
   # behind it until 2026-07-27.
   jvm_rc=0
   jvm_ran=1
-  "$root/bin/dawn" run "$prog" >"$work/$name.jvm" 2>"$work/$name.jvm.err" || jvm_rc=$?
+  # stdin is /dev/null, not the terminal: a corpus program that reads stdin
+  # would otherwise hang the developer's shell and read something different in
+  # CI. At /dev/null both backends see end of input, which is itself a case
+  # worth agreeing on.
+  "$root/bin/dawn" run "$prog" >"$work/$name.jvm" 2>"$work/$name.jvm.err" \
+    </dev/null || jvm_rc=$?
   if [ "$jvm_rc" -ne 0 ]; then
     verdict "$name:jvm-run" bad "$(cat "$work/$name.jvm.err")"
     jvm_ran=0
@@ -156,7 +161,8 @@ for prog in "${progs[@]}"; do
   fi
 
   nat_rc=0
-  "$work/$name.bin" >"$work/$name.native" 2>"$work/$name.native.err" || nat_rc=$?
+  "$work/$name.bin" >"$work/$name.native" 2>"$work/$name.native.err" \
+    </dev/null || nat_rc=$?
 
   if [ -f "$expect" ]; then
     if diff -q "$expect" "$work/$name.native" >/dev/null; then

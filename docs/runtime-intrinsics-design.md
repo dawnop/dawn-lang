@@ -105,6 +105,19 @@ Java 类。**要做的是把这个模型长全。**
   > 都停止把调用当作会落下来——那套机制只有 `panic` 需要。
   > **没进来的**:`getenv`/`getProperty`(只被包管理和 JVM classpath 用)、临时文件(可在 mkdirs 之上搭)、
   > 二进制文件读写(只被 JVM 后端和包管理用)——都不在 native 编译器的关键路径上,不为不需要的东西扩契约。
+  >
+  > **上面那句在一天后被自己推翻(2026-07-28),推翻它的是一个裁决而不是一个发现**:门控形式定为
+  > **两个 main 共享前端**(不引入语言级条件编译)。这句话重新划了「关键路径」——**包管理是目标无关的**
+  > (按 url+hash 取 Dawn 源码包,和发射什么后端无关),所以它必须跟着 native main 走;真正留在 JVM main 的
+  > 是「启一个 JVM 跑刚发射出来的 class」那部分。于是 `getenv` / 二进制读写 / 临时目录**成了**关键路径。
+  > 又补九项:`cwd`、`getenv`、`read_bytes`/`write_bytes`、`delete`、`rename`、`temp_dir`、`is_symlink`、
+  > `read_stdin`。仍然按同一条判据挑——每一项在编译器里都有一个今天走 `use java` 的调用点;
+  > **仍然没进来的**是 classpath 属性、进程派生、`canExecute`,它们只为启动 JVM 而存在。
+  >
+  > `read_stdin` 是 `eprintln` 的同一个故事:`System.in` 也是静态字段,所以 LSP 读消息帧同样绕了 method handle。
+  > **通道不是 method handle。** `rename` 取 `rename(2)` 的语义(同一文件系统内原子、否则失败),
+  > 因为调用方在做「下载、校验、按内容哈希发布」——更弱的语义不成立;`temp_dir` 收一个 parent 参数正是为了这个:
+  > 暂存目录必须和目的地同盘,原子才谈得上。
 - **控制**:`panic`、效果系统的 IO 边界。
 
 > 契约的**边界画在哪**是核心决策(§8)。**集合已给结论=细到极致**:整族集合在后端边界上只剩 `Array[T]` 一个原语
@@ -296,6 +309,12 @@ Cursor 那一行是 `opaque type Cursor = Int` 挣来的:模块外做不了算�
 - `str_of_float` / `parse_float` 不是 Java 的语法/最短往返形式。浮点因此不进差分语料。
 - `java_try`/`catch_panic` 的 `Err` 载荷:JVM 是异常的 `toString`,native 是 panic 消息。**只分支 Ok/Err 的程序一致**。
 - `io_list_names` 的顺序两边都未定义。
+- `io_temp_dir` 的随机后缀两边形状不同(JVM 是数字串,C 是 `mkdtemp` 的六位)。**名字本来就不该被读**,
+  所以这不是可观察的——`io_files` 语料只断言它是个新目录,不打印它。
+
+反过来,**这一批查出一个真偏离并且修了**:`io_write_file` 在 JVM 侧一直 `getParentFile().mkdirs()`,
+C 侧没有,于是「往还不存在的目录里写文件」只在一个后端上成功。没有语料问过这件事——`io_files`
+现在问了,两个写原语也都走同一个 `dawn_mkparents`。
 
 反过来,原本以为要偏离、实测不必的:`char_is_space` 的全 Unicode 集合小到可以写全(§`dawn_is_space_cp`),
 所以它不再是 ASCII-only。

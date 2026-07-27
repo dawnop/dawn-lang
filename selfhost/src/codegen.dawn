@@ -1262,8 +1262,178 @@ pub fn gen_io_class(supers: List[String]) -> Bytes !io = {
   lnv.visitInsn(OP_ARETURN)
   close_mv(lnv)
 
+  gen_io_env(cw)
+  gen_io_bytes_files(cw)
+  gen_io_stdin(cw)
+
   cw.visitEnd()
   cw.toByteArray().expect("bytes")
+}
+
+## The process's view of the world: working directory and environment.
+fn gen_io_env(cw: AdtClassWriter) -> Unit !io = {
+  # io_cwd() = System.getProperty("user.dir")
+  let cv = open_static(cw, "io_cwd", "()Ljava/lang/String;")
+  cv.visitLdcInsn("user.dir")
+  cv.visitMethodInsn(OP_INVOKESTATIC, "java/lang/System", "getProperty",
+    "(Ljava/lang/String;)Ljava/lang/String;", false)
+  cv.visitInsn(OP_ARETURN)
+  close_mv(cv)
+
+  # io_getenv(name): the null-or-value onto Option, like io_read_line
+  let gv = open_static(cw, "io_getenv", "(Ljava/lang/String;)LOption;")
+  let g_none = Label.new()
+  gv.visitVarInsn(OP_ALOAD, 0)
+  gv.visitMethodInsn(OP_INVOKESTATIC, "java/lang/System", "getenv",
+    "(Ljava/lang/String;)Ljava/lang/String;", false)
+  gv.visitVarInsn(OP_ASTORE, 1)
+  gv.visitVarInsn(OP_ALOAD, 1)
+  gv.visitJumpInsn(OP_IFNULL, g_none)
+  gv.visitTypeInsn(OP_NEW, "Option\$Some")
+  gv.visitInsn(OP_DUP)
+  gv.visitVarInsn(OP_ALOAD, 1)
+  gv.visitMethodInsn(OP_INVOKESPECIAL, "Option\$Some", "<init>", "(Ljava/lang/Object;)V", false)
+  gv.visitInsn(OP_ARETURN)
+  gv.visitLabel(g_none)
+  gv.visitFieldInsn(OP_GETSTATIC, "Option\$None", "INSTANCE", "LOption\$None;")
+  gv.visitInsn(OP_ARETURN)
+  close_mv(gv)
+}
+
+## `new File(local).toPath()`, the opening move of every filesystem primitive here.
+fn push_path(m: MethodVisitor, local: Int) -> Unit !io = {
+  m.visitTypeInsn(OP_NEW, "java/io/File")
+  m.visitInsn(OP_DUP)
+  m.visitVarInsn(OP_ALOAD, local)
+  m.visitMethodInsn(OP_INVOKESPECIAL, "java/io/File", "<init>", "(Ljava/lang/String;)V", false)
+  m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/io/File", "toPath", "()Ljava/nio/file/Path;", false)
+}
+
+## An empty varargs array of `cls` — the trailing argument java.nio.file takes.
+fn push_empty_options(m: MethodVisitor, cls: String) -> Unit !io = {
+  m.visitInsn(OP_ICONST_0)
+  m.visitTypeInsn(OP_ANEWARRAY, cls)
+}
+
+## The binary halves of read_file/write_file, plus delete/rename/temp_dir/is_symlink.
+fn gen_io_bytes_files(cw: AdtClassWriter) -> Unit !io = {
+  # io_read_bytes(path) = Files.readAllBytes(path) — throws on failure
+  let rv = open_static(cw, "io_read_bytes", "(Ljava/lang/String;)[B")
+  push_path(rv, 0)
+  rv.visitMethodInsn(OP_INVOKESTATIC, "java/nio/file/Files", "readAllBytes",
+    "(Ljava/nio/file/Path;)[B", false)
+  rv.visitInsn(OP_ARETURN)
+  close_mv(rv)
+
+  # io_write_bytes(path, content): mkdirs parents, then Files.write — throws on failure
+  let wv = open_static(cw, "io_write_bytes", "(Ljava/lang/String;[B)L" ++ UNIT_CLASS ++ ";")
+  let w_skip = Label.new()
+  wv.visitTypeInsn(OP_NEW, "java/io/File")
+  wv.visitInsn(OP_DUP)
+  wv.visitVarInsn(OP_ALOAD, 0)
+  wv.visitMethodInsn(OP_INVOKESPECIAL, "java/io/File", "<init>", "(Ljava/lang/String;)V", false)
+  wv.visitVarInsn(OP_ASTORE, 2)
+  wv.visitVarInsn(OP_ALOAD, 2)
+  wv.visitMethodInsn(OP_INVOKEVIRTUAL, "java/io/File", "getParentFile", "()Ljava/io/File;", false)
+  wv.visitVarInsn(OP_ASTORE, 3)
+  wv.visitVarInsn(OP_ALOAD, 3)
+  wv.visitJumpInsn(OP_IFNULL, w_skip)
+  wv.visitVarInsn(OP_ALOAD, 3)
+  wv.visitMethodInsn(OP_INVOKEVIRTUAL, "java/io/File", "mkdirs", "()Z", false)
+  wv.visitInsn(OP_POP)
+  wv.visitLabel(w_skip)
+  wv.visitVarInsn(OP_ALOAD, 2)
+  wv.visitMethodInsn(OP_INVOKEVIRTUAL, "java/io/File", "toPath", "()Ljava/nio/file/Path;", false)
+  wv.visitVarInsn(OP_ALOAD, 1)
+  push_empty_options(wv, "java/nio/file/OpenOption")
+  wv.visitMethodInsn(OP_INVOKESTATIC, "java/nio/file/Files", "write",
+    "(Ljava/nio/file/Path;[B[Ljava/nio/file/OpenOption;)Ljava/nio/file/Path;", false)
+  wv.visitInsn(OP_POP)
+  return_unit(wv)
+  close_mv(wv)
+
+  # io_delete(path) = new File(path).delete() — false for a missing path, and
+  # for a non-empty directory. `Files.deleteIfExists` would throw on the second,
+  # which C's remove(3) does not; this is the shape both backends can hold.
+  let dv = open_static(cw, "io_delete", "(Ljava/lang/String;)Z")
+  dv.visitTypeInsn(OP_NEW, "java/io/File")
+  dv.visitInsn(OP_DUP)
+  dv.visitVarInsn(OP_ALOAD, 0)
+  dv.visitMethodInsn(OP_INVOKESPECIAL, "java/io/File", "<init>", "(Ljava/lang/String;)V", false)
+  dv.visitMethodInsn(OP_INVOKEVIRTUAL, "java/io/File", "delete", "()Z", false)
+  dv.visitInsn(OP_IRETURN)
+  close_mv(dv)
+
+  # io_rename(src, dst) = Files.move(src, dst, ATOMIC_MOVE) — the JVM spelling of
+  # rename(2): replaces the destination, or throws when the two are not on one
+  # filesystem. Nothing weaker would do; the caller is publishing under a hash.
+  let mv = open_static(cw, "io_rename",
+    "(Ljava/lang/String;Ljava/lang/String;)L" ++ UNIT_CLASS ++ ";")
+  push_path(mv, 0)
+  push_path(mv, 1)
+  mv.visitInsn(OP_ICONST_1)
+  mv.visitTypeInsn(OP_ANEWARRAY, "java/nio/file/CopyOption")
+  mv.visitInsn(OP_DUP)
+  mv.visitInsn(OP_ICONST_0)
+  mv.visitFieldInsn(OP_GETSTATIC, "java/nio/file/StandardCopyOption", "ATOMIC_MOVE",
+    "Ljava/nio/file/StandardCopyOption;")
+  mv.visitInsn(OP_AASTORE)
+  mv.visitMethodInsn(OP_INVOKESTATIC, "java/nio/file/Files", "move",
+    "(Ljava/nio/file/Path;Ljava/nio/file/Path;[Ljava/nio/file/CopyOption;)Ljava/nio/file/Path;",
+    false)
+  mv.visitInsn(OP_POP)
+  return_unit(mv)
+  close_mv(mv)
+
+  # io_temp_dir(parent, prefix): an empty parent means the system temp directory,
+  # resolved here so there is one call shape rather than two.
+  let tv = open_static(cw, "io_temp_dir",
+    "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;")
+  let t_have = Label.new()
+  tv.visitVarInsn(OP_ALOAD, 0)
+  tv.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/String", "isEmpty", "()Z", false)
+  tv.visitJumpInsn(OP_IFEQ, t_have)
+  tv.visitLdcInsn("java.io.tmpdir")
+  tv.visitMethodInsn(OP_INVOKESTATIC, "java/lang/System", "getProperty",
+    "(Ljava/lang/String;)Ljava/lang/String;", false)
+  tv.visitVarInsn(OP_ASTORE, 0)
+  tv.visitLabel(t_have)
+  push_path(tv, 0)
+  tv.visitVarInsn(OP_ALOAD, 1)
+  push_empty_options(tv, "java/nio/file/attribute/FileAttribute")
+  tv.visitMethodInsn(OP_INVOKESTATIC, "java/nio/file/Files", "createTempDirectory",
+    "(Ljava/nio/file/Path;Ljava/lang/String;[Ljava/nio/file/attribute/FileAttribute;)" ++
+      "Ljava/nio/file/Path;", false)
+  tv.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/Object", "toString",
+    "()Ljava/lang/String;", false)
+  tv.visitInsn(OP_ARETURN)
+  close_mv(tv)
+
+  # io_is_symlink(path) = Files.isSymbolicLink(path) — does not follow the link
+  let sv = open_static(cw, "io_is_symlink", "(Ljava/lang/String;)Z")
+  push_path(sv, 0)
+  sv.visitMethodInsn(OP_INVOKESTATIC, "java/nio/file/Files", "isSymbolicLink",
+    "(Ljava/nio/file/Path;)Z", false)
+  sv.visitInsn(OP_IRETURN)
+  close_mv(sv)
+}
+
+## io_read_stdin(n): exactly n bytes, short only at end of input. `System.in` is
+## a static field, so this is the same story as `System.err` — a channel the
+## interop cannot name, which is why it belongs in the contract and not in a
+## module of method handles.
+##
+## It reads the raw stream, while io_read_line reads a BufferedReader over it.
+## Mixing the two in one process loses whatever the reader has buffered; nothing
+## does, and a language server frames its own messages precisely to avoid it.
+fn gen_io_stdin(cw: AdtClassWriter) -> Unit !io = {
+  let rv = open_static(cw, "io_read_stdin", "(J)[B")
+  rv.visitFieldInsn(OP_GETSTATIC, "java/lang/System", "in", "Ljava/io/InputStream;")
+  rv.visitVarInsn(OP_LLOAD, 0)
+  rv.visitInsn(OP_L2I)
+  rv.visitMethodInsn(OP_INVOKEVIRTUAL, "java/io/InputStream", "readNBytes", "(I)[B", false)
+  rv.visitInsn(OP_ARETURN)
+  close_mv(rv)
 }
 
 pub const ARRAYLIST: String = "java/util/ArrayList"

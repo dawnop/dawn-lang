@@ -847,3 +847,64 @@ parse 3 / code_points 与 join / java_try 与 catch_panic),emitc 改成从 intri
   `no_value()` 统一回答「这个分支有没有值可赋」。std/str 的 `substring` 第一行就是。
 - **Bytes 的 `++` 和 `==`**:前者发的是**字符串**拼接,后者比的是指针。`eq_bytes.dawn` 本来就是为这个写的语料,
   之前一直卡在 `emitc` 那步没跑到。
+
+## 14. S4 第二程:门控裁决,与 42 处的真实重量(2026-07-28)
+
+### 14.1 裁决:两个 main 共享前端,不引入条件编译
+
+native 编译器不带 JVM 后端,需要一个门控机制。两个候选:**语言级条件编译**(`#[cfg]` 一类)或
+**两个 entry 共享前端**。定为后者,判据是语言表面积:条件编译一旦进语法就再也拿不出去,
+而两个 main 是纯工程手段、零语言表面积。
+
+这条裁决**重新划了「关键路径」**,而这正是它值得先做的原因——它决定余下 90 处 `use java` 里
+哪些要动。上一程写下的「getenv / 二进制 IO / 临时文件不在关键路径上」在一天后被它推翻:
+**包管理是目标无关的**(按 url+hash 取 Dawn 源码包,和发射什么后端无关),所以 pkgfetch 必须
+跟着 native main 走。真正留在 JVM main 的,是「启一个 JVM 去跑刚发射出来的 class」那部分。
+
+### 14.2 42 处不是一码事:按「归哪个 main」重量
+
+上一程按**碰了什么**分类(文件/进程/网络),这一程按**归哪个 main** 重分,答案很不一样:
+
+| | 处 | 归属 |
+|---|---|---|
+| `maven` | 6 | **JVM 侧**。解析 Maven 坐标只对 JVM 目标有意义;唯一调用点在 `dawn build` 的 java-deps 分支 |
+| `main` 的 `run`/`build`/`test` | 多数 | **JVM 侧**。classpath 属性、`ProcessBuilder java -jar`、找 `JAVA_HOME`/`native-image`、`canExecute` |
+| `main` 的 `fmt`/`doc` | 2 | 目标无关,而且 `io.exists` 早就够——上一程漏网 |
+| `analyze` | 3 | 1 个**死导入**;1 处路径规范化 |
+| `lsp` | 6 | `System.exit` 漏网 1;`System.in` 1(+3 处为它绕的 method handle);路径规范化 1 |
+| `stdlib` | 1 | 换机制:std 源码在 JVM 上从 jar 资源读,native 得另有出处 |
+| `pkgfetch` | 19 | 真要迁,且卡在两件事上(§14.4) |
+
+`analyze.canon` 和 `lsp.canon` 是**逐字重复的同一个函数**——一件事两份定义,和上一程 `subject_key`
+那条同类。
+
+### 14.3 九个原语,一次休眠落地
+
+`cwd`、`getenv`、`read_bytes`/`write_bytes`、`delete`、`rename`、`temp_dir`、`is_symlink`、`read_stdin`。
+判据没变:每一项在编译器里都有一个今天走 `use java` 的调用点。**仍然没进来的**是 classpath 属性、
+进程派生、`canExecute`——它们只为启动 JVM 而存在。
+
+两条设计不是随手定的:
+
+- **`rename` 取 `rename(2)` 的语义**(同一文件系统内原子、否则失败)。调用方在做「下载、校验、
+  按内容哈希发布」,更弱的语义不成立。`temp_dir` 因此收一个 parent 参数——暂存目录必须和目的地同盘,
+  原子才谈得上。
+- **`read_stdin` 是 `eprintln` 的同一个故事**:`System.in` 也是静态字段,所以 LSP 读消息帧同样绕了
+  method handle。通道不是 method handle。
+
+`io_files.dawn` 在休眠这一步就把九项在两个后端上跑通了(语料由 HEAD 编,不受种子纪律约束),
+并顺手查出一个**两个后端答案不同**的真偏离:`io_write_file` 在 JVM 侧一直建父目录,C 侧没有,
+所以「往还不存在的目录里写文件」只在一个后端上成功。没有语料问过这件事。
+
+harness 也改了一处:两个后端的运行都把 stdin 接到 `/dev/null`。读 stdin 的语料本来会挂住开发者的终端,
+而且在 CI 里读到的东西还不一样。
+
+### 14.4 pkgfetch 卡在两件事上(都不在这一刀内)
+
+1. **`Bytes` 没有构造器。** Dawn 里 `Bytes` 目前是**只读**的:能从 `String` 拿(`bytes.utf8`)、能切、
+   能读,但造不出一个任意字节序列——要发出 `0x80` 就得有一个 UTF-8 编码等于它的 `String`,而那不存在。
+   解压要落盘就必须能造。`Array[T]` 是天然的缓冲区,但它是 **std-only** 的(只有 std 能 `array_*`),
+   所以要么 sha256/inflate 进 std,要么给 std 一个 `opaque type BytesBuf`(`Cursor` 是同类先例)。
+2. **HTTP/TLS 写不了。** SHA-256、DEFLATE、zip 读取器都是纯 Dawn 能写的(tar 读取器早就是),
+   HTTPS 不是。三条路:一个 `io_http_get` intrinsic(JVM 用 HttpClient、C 用 libcurl——但那给 native
+   运行时加了一个外部依赖)、shell out 到 curl、或者 native 编译器不支持远程包。**这是下一个裁决。**

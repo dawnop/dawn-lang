@@ -6,12 +6,14 @@
 #include "dawn_rt.h"
 
 #include <dirent.h>
+#include <errno.h>
 #include <setjmp.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 static int dawn_argc;
 static char **dawn_argv;
@@ -1021,6 +1023,53 @@ static char *dawn_cpath(dawn_str s) {
   return p;
 }
 
+/* `mkdir -p` over the *parent* of `p`. The JVM side spells this
+ * getParentFile().mkdirs() inside io_write_file, and this side did not, so a
+ * write into a directory that did not exist yet failed on one backend only.
+ * Both write primitives go through it now. */
+static void dawn_mkparents(const char *p) {
+  size_t n = strlen(p);
+  size_t cut = 0;
+  for (size_t i = 0; i < n; i++) {
+    if (p[i] == '/') cut = i;
+  }
+  if (cut == 0) return;
+  char *dir = (char *)dawn_alloc(cut + 1);
+  memcpy(dir, p, cut);
+  dir[cut] = '\0';
+  for (size_t i = 1; i <= cut; i++) {
+    if (i != cut && dir[i] != '/') continue;
+    char saved = dir[i];
+    dir[i] = '\0';
+    mkdir(dir, 0777); /* an existing directory is fine; fopen reports the rest */
+    dir[i] = saved;
+  }
+  free(dir);
+}
+
+/* Read all of `f` into a fresh buffer. Shared by read_file and read_bytes,
+ * which differ only in what they wrap the result in. */
+static unsigned char *dawn_slurp(FILE *f, size_t *out_len, bool *out_bad) {
+  size_t cap = 4096;
+  size_t n = 0;
+  unsigned char *buf = (unsigned char *)dawn_alloc(cap);
+  for (;;) {
+    if (n == cap) {
+      unsigned char *bigger = (unsigned char *)dawn_alloc(cap * 2);
+      memcpy(bigger, buf, n);
+      free(buf);
+      buf = bigger;
+      cap *= 2;
+    }
+    size_t got = fread(buf + n, 1, cap - n, f);
+    n += got;
+    if (got == 0) break;
+  }
+  *out_bad = ferror(f) != 0;
+  *out_len = n;
+  return buf;
+}
+
 bool dawn_io_is_dir(dawn_str path) {
   char *p = dawn_cpath(path);
   struct stat st;
@@ -1069,31 +1118,19 @@ dawn_str dawn_io_read_file(dawn_str path) {
   if (f == NULL) {
     dawn_panic(dawn_str_lit("io_read_file: cannot open file", 30));
   }
-  size_t cap = 4096;
   size_t n = 0;
-  char *buf = (char *)dawn_alloc(cap);
-  for (;;) {
-    if (n == cap) {
-      char *bigger = (char *)dawn_alloc(cap * 2);
-      memcpy(bigger, buf, n);
-      free(buf);
-      buf = bigger;
-      cap *= 2;
-    }
-    size_t got = fread(buf + n, 1, cap - n, f);
-    n += got;
-    if (got == 0) break;
-  }
-  bool bad = ferror(f) != 0;
+  bool bad = false;
+  unsigned char *buf = dawn_slurp(f, &n, &bad);
   fclose(f);
   if (bad) {
     dawn_panic(dawn_str_lit("io_read_file: read failed", 25));
   }
-  return (dawn_str){buf, (int64_t)n};
+  return (dawn_str){(const char *)buf, (int64_t)n};
 }
 
 dawn_unit dawn_io_write_file(dawn_str path, dawn_str content) {
   char *p = dawn_cpath(path);
+  dawn_mkparents(p);
   FILE *f = fopen(p, "wb");
   free(p);
   if (f == NULL) {
@@ -1126,6 +1163,135 @@ dawn_array *dawn_io_list_names(dawn_str path) {
   }
   closedir(d);
   return a;
+}
+
+dawn_str dawn_io_cwd(void) {
+  size_t cap = 1024;
+  for (;;) {
+    char *buf = (char *)dawn_alloc(cap);
+    if (getcwd(buf, cap) != NULL) {
+      dawn_str s = dawn_str_copy(buf, strlen(buf));
+      free(buf);
+      return s;
+    }
+    free(buf);
+    if (errno != ERANGE) {
+      dawn_panic(dawn_str_lit("io_cwd: cannot read the working directory", 40));
+    }
+    cap *= 2;
+  }
+}
+
+dawn_adt *dawn_io_getenv(dawn_str name) {
+  char *p = dawn_cpath(name);
+  const char *v = getenv(p);
+  free(p);
+  if (v == NULL) return dawn_none();
+  return dawn_some(dawn_box_str(dawn_str_copy(v, strlen(v))));
+}
+
+dawn_bytes *dawn_io_read_bytes(dawn_str path) {
+  char *p = dawn_cpath(path);
+  FILE *f = fopen(p, "rb");
+  free(p);
+  if (f == NULL) {
+    dawn_panic(dawn_str_lit("io_read_bytes: cannot open file", 31));
+  }
+  size_t n = 0;
+  bool bad = false;
+  unsigned char *buf = dawn_slurp(f, &n, &bad);
+  fclose(f);
+  if (bad) {
+    dawn_panic(dawn_str_lit("io_read_bytes: read failed", 26));
+  }
+  return dawn_bytes_of(buf, (int64_t)n);
+}
+
+dawn_unit dawn_io_write_bytes(dawn_str path, const dawn_bytes *content) {
+  char *p = dawn_cpath(path);
+  dawn_mkparents(p);
+  FILE *f = fopen(p, "wb");
+  free(p);
+  if (f == NULL) {
+    dawn_panic(dawn_str_lit("io_write_bytes: cannot open file", 32));
+  }
+  bool bad = content->len > 0 &&
+             fwrite(content->p, 1, (size_t)content->len, f) != (size_t)content->len;
+  if (fclose(f) != 0) bad = true;
+  if (bad) {
+    dawn_panic(dawn_str_lit("io_write_bytes: write failed", 28));
+  }
+  return DAWN_UNIT;
+}
+
+/* remove(3) takes both files and empty directories, which is what File.delete
+ * does; a non-empty directory fails on both sides rather than recursing. */
+bool dawn_io_delete(dawn_str path) {
+  char *p = dawn_cpath(path);
+  bool gone = remove(p) == 0;
+  free(p);
+  return gone;
+}
+
+dawn_unit dawn_io_rename(dawn_str src, dawn_str dst) {
+  char *a = dawn_cpath(src);
+  char *b = dawn_cpath(dst);
+  bool bad = rename(a, b) != 0;
+  free(a);
+  free(b);
+  if (bad) {
+    dawn_panic(dawn_str_lit("io_rename: cannot rename (not one filesystem?)", 45));
+  }
+  return DAWN_UNIT;
+}
+
+dawn_str dawn_io_temp_dir(dawn_str parent, dawn_str prefix) {
+  char *pbuf = NULL;
+  const char *base;
+  if (parent.len == 0) {
+    base = getenv("TMPDIR");
+    if (base == NULL || base[0] == '\0') base = "/tmp";
+  } else {
+    pbuf = dawn_cpath(parent);
+    base = pbuf;
+  }
+  char *pre = dawn_cpath(prefix);
+  size_t bl = strlen(base);
+  size_t pl = strlen(pre);
+  char *tmpl = (char *)dawn_alloc(bl + 1 + pl + 7);
+  memcpy(tmpl, base, bl);
+  tmpl[bl] = '/';
+  memcpy(tmpl + bl + 1, pre, pl);
+  memcpy(tmpl + bl + 1 + pl, "XXXXXX", 7); /* the NUL rides along */
+  free(pre);
+  free(pbuf);
+  if (mkdtemp(tmpl) == NULL) {
+    free(tmpl);
+    dawn_panic(dawn_str_lit("io_temp_dir: cannot create a temporary directory", 47));
+  }
+  dawn_str s = dawn_str_copy(tmpl, strlen(tmpl));
+  free(tmpl);
+  return s;
+}
+
+bool dawn_io_is_symlink(dawn_str path) {
+  char *p = dawn_cpath(path);
+  struct stat st;
+  bool yes = lstat(p, &st) == 0 && S_ISLNK(st.st_mode);
+  free(p);
+  return yes;
+}
+
+dawn_bytes *dawn_io_read_stdin(int64_t n) {
+  if (n <= 0) return dawn_bytes_of((const unsigned char *)"", 0);
+  unsigned char *buf = (unsigned char *)dawn_alloc((size_t)n);
+  size_t got = 0;
+  while (got < (size_t)n) {
+    size_t step = fread(buf + got, 1, (size_t)n - got, stdin);
+    if (step == 0) break; /* end of input, or an error the caller sees as one */
+    got += step;
+  }
+  return dawn_bytes_of(buf, (int64_t)got);
 }
 
 dawn_array *dawn_args(void) {
