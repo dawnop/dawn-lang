@@ -26,7 +26,6 @@
 # repeated the mistake thirty lines below a comment describing it.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
-ROOT=$(pwd)
 DAWN=${DAWN_BIN:-./bin/dawn}
 DIR=scripts/opaque-twin
 OUT=${TMPDIR:-/tmp}/opaque-twin.$$
@@ -38,8 +37,13 @@ if [ $# -gt 0 ]; then
 else
   cases=()
   for f in "$DIR"/*.dawn; do
+    [ -f "$f" ] || continue
     cases+=("$(basename "$f" .dawn)")
   done
+  if [ ${#cases[@]} -eq 0 ]; then
+    echo "opaque-twin: no cases in $DIR"
+    exit 1
+  fi
 fi
 
 fail=0
