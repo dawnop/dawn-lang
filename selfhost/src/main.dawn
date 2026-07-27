@@ -57,7 +57,6 @@ use java "java.nio.file.Files"
 use java "java.nio.file.Paths"
 use java "java.io.File"
 use java "java.util.Map"
-use errio
 use version.{VERSION}
 use diag
 use manifestv
@@ -137,7 +136,7 @@ fn write_class(dir: String, name: String, bs: Bytes) -> Unit !io = {
     Some(i) -> str.substring(path, 0, i)
     None -> dir
   }
-  let _ = java_try(fn() => Files.createDirectories(Paths.get(parent).expect("path")))
+  let _ = io.mkdirs(parent)
   let _ = java_try(fn() => Files.write(Paths.get(path).expect("path"), bs))
   ()
 }
@@ -157,10 +156,10 @@ fn collect_program(
   var mods: List[CheckedMod] = []
   var std_mods: List[(String, Cx, TModule, CtOut)] = []
   if target != "" {
-    if not File.new(target).exists() {
+    if not io.exists(target) {
       cli_error("no such file or directory: " ++ target)
     }
-    if File.new(target).isFile() && not str.ends_with(target, ".dawn") {
+    if io.exists(target) && not io.is_dir(target) && not str.ends_with(target, ".dawn") {
       cli_error("source files must end in .dawn: " ++ target)
     }
     let std = match load_std(std_dir) {
@@ -428,7 +427,7 @@ fn extract_cp(rest: List[String]) -> (List[String], List[String]) !io = {
     if spec != "" {
       for pth in str.split(spec, ":") {
         if pth != "" {
-          if not File.new(pth).exists() { cli_error("--cp entry not found: " ++ pth) }
+          if not io.exists(pth) { cli_error("--cp entry not found: " ++ pth) }
           jars = jars ++ [pth]
         }
       }
@@ -442,9 +441,9 @@ fn extract_cp(rest: List[String]) -> (List[String], List[String]) !io = {
 fn fail_compile(diags: List[LocDiag]) -> Unit !io = {
   var pairs: List[(String, Diag)] = []
   for ld in diags { pairs = pairs ++ [(ld.path, ld.d)] }
-  errio.eprint(diag.render_all(pairs))
-  errio.eprintln(diag.count_line(len(diags)))
-  let _ = System.exit(1)
+  io.eprint(diag.render_all(pairs))
+  io.eprintln(diag.count_line(len(diags)))
+  let _ = io.exit(1)
   ()
 }
 
@@ -453,15 +452,15 @@ fn fail_compile(diags: List[LocDiag]) -> Unit !io = {
 fn fail_doc(diags: List[LocDiag]) -> Unit !io = {
   var pairs: List[(String, Diag)] = []
   for ld in diags { pairs = pairs ++ [(ld.path, ld.d)] }
-  errio.eprint(diag.render_all(pairs))
-  let _ = System.exit(1)
+  io.eprint(diag.render_all(pairs))
+  let _ = io.exit(1)
   ()
 }
 
 ## Print the Kotlin CLI's error shape and exit 2.
 fn cli_error(msg: String) -> Unit !io = {
-  errio.eprintln("error: " ++ msg)
-  let _ = System.exit(2)
+  io.eprintln("error: " ++ msg)
+  let _ = io.exit(2)
   ()
 }
 
@@ -507,13 +506,13 @@ fn resolve_java_deps(target: String) -> List[String] !io = {
   match manifestv.validate(target, mftext) {
     Ok(_) -> ()
     Err(ds) -> {
-      errio.eprint(diag.render_manifest(target ++ "/dawn.toml", mftext, ds))
-      let _ = System.exit(1)
+      io.eprint(diag.render_manifest(target ++ "/dawn.toml", mftext, ds))
+      let _ = io.exit(1)
     }
   }
   let coords = maven.collect_java_deps(target)
   if len(coords) == 0 { return none }
-  errio.eprintln("resolving " ++ to_string(len(coords)) ++ " java-deps from " ++
+  io.eprintln("resolving " ++ to_string(len(coords)) ++ " java-deps from " ++
       target ++ "/dawn.toml...")
   match maven.fetch(coords) {
     Ok(jars) -> jars
@@ -558,7 +557,7 @@ fn maybe_with_deps(mode: String, rest: List[String]) -> Unit !io = {
   let _ = env.put("DAWN_SELFHOST_CP", join(jars, ":"))
   let _ = pb.inheritIO()
   let code = pb.start().expect("java process").waitFor()
-  let _ = System.exit(code)
+  let _ = io.exit(code)
   ()
 }
 
@@ -612,7 +611,7 @@ fn run_run(rest0: List[String]) -> Unit !io = {
   }
   let dir = write_temp_classes(classes)
   let code = spawn_java(dir ++ ":" ++ host_classpath(), entry, args2)
-  if code != 0 { let _ = System.exit(code) }
+  if code != 0 { let _ = io.exit(code) }
 }
 
 ## `selfhost test [--std <dir>] <target>` — mirror of `dawn test`: emit with
@@ -650,7 +649,7 @@ fn run_test(rest0: List[String]) -> Unit !io = {
   let all = classes ++ [(TESTMAIN_CLASS, gen_test_main(runner_tests))]
   let dir = write_temp_classes(all)
   let code = spawn_java(dir ++ ":" ++ host_classpath(), TESTMAIN_CLASS, [])
-  if code != 0 { let _ = System.exit(code) }
+  if code != 0 { let _ = io.exit(code) }
 }
 
 ## `selfhost emit [<target>] [--std <dir>] -o <dir>`: write every class of the
@@ -715,7 +714,7 @@ fn vendor_jars(jars: List[String], jar_path: String) -> List[String] !io = {
   var entries: List[String] = []
   if len(jars) == 0 { return entries }
   let lib_dir = abs_parent(jar_path) ++ "/lib"
-  let _ = java_try(fn() => Files.createDirectories(Paths.get(lib_dir).expect("path")))
+  let _ = io.mkdirs(lib_dir)
   for src in jars {
     let name = match str.last_index_of(src, "/") {
       Some(i) -> str.substring(src, i + 1, str.len(src))
@@ -1004,7 +1003,7 @@ fn run_fmt(rest: List[String]) -> Unit !io = {
       Err(e) -> panic("cannot read " ++ f ++ ": " ++ e)
     }
   }
-  if check && unformatted > 0 { let _ = System.exit(1) }
+  if check && unformatted > 0 { let _ = io.exit(1) }
 }
 
 ## `selfhost doc <target>` / `selfhost doc --builtins` — mirror of `dawn doc`.
@@ -1135,7 +1134,7 @@ fn run_lower(rest: List[String]) -> Unit !io = {
   println("")
   println("lowered " ++ to_string(ok) ++ " module(s), " ++ to_string(bad) ++ " failed")
   if bad > 0 {
-    let _ = System.exit(1)
+    let _ = io.exit(1)
     ()
   }
 }
@@ -1314,7 +1313,7 @@ pub fn main() -> Unit !io = {
   match args() {
     [] -> {
       print(usage())
-      let _ = System.exit(2)
+      let _ = io.exit(2)
       ()
     }
     [mode, ..rest] ->
@@ -1368,9 +1367,9 @@ pub fn main() -> Unit !io = {
       } else if mode == "--help" || mode == "-h" || mode == "help" {
         print(usage())
       } else {
-        errio.eprintln("unknown command: " ++ mode ++ "\n")
+        io.eprintln("unknown command: " ++ mode ++ "\n")
         print(usage())
-        let _ = System.exit(2)
+        let _ = io.exit(2)
         ()
       }
   }

@@ -1,9 +1,12 @@
 # Dawn's standard library: console, files, and process arguments.
 #
-# These write over the io_* intrinsics the JVM backend emits into dawn/rt/Io
-# (print/println/read_line/is_dir/read_file/write_file/list_names); the
+# These write over the io_* intrinsics, which every backend implements; the
 # handwritten dawn.rt.StdIo is retired. They need no `unsafe_pure`: they are
 # honestly effectful, so their signatures just say `!io`.
+#
+# stderr was missing until 2026-07-28, and its absence was not free: the
+# compiler's own `errio.dawn` existed to reach `System.err`, a static field
+# the `use java` interop cannot name, through a method handle.
 #
 # `args` is deliberately NOT here: argv arrives on a static field of the program's
 # own entry class, and a std function compiles to a different class, so it cannot
@@ -22,12 +25,33 @@ pub fn println(s: String) -> Unit !io = io_println(s)
 ## Print a string without a newline.
 pub fn print(s: String) -> Unit !io = io_print(s)
 
+## Print a string to stderr, followed by a newline.
+pub fn eprintln(s: String) -> Unit !io = io_eprintln(s)
+
+## Print a string to stderr without a newline.
+pub fn eprint(s: String) -> Unit !io = io_eprint(s)
+
+## End the process with an exit status. Nothing after the call runs.
+##
+## The result is `Unit` rather than `Never` because the intrinsic maps to
+## `System.exit`, which the JVM types as void; a `Never` here would need both
+## emitters to stop treating the call as falling through.
+pub fn exit(code: Int) -> Unit !io = io_exit(code)
+
 ## Read one line from stdin; `None` at end of input.
 ## The intrinsic maps Java's `null`-or-line straight onto `Option`.
 pub fn read_line() -> Option[String] !io = io_read_line()
 
 ## Whether `path` names a directory.
 pub fn is_dir(path: String) -> Bool !io = io_is_dir(path)
+
+## Whether anything exists at `path` -- a file, a directory, anything.
+pub fn exists(path: String) -> Bool !io = io_exists(path)
+
+## Create `path` and every missing directory above it.
+## An existing directory is not a failure; an existing *file* is.
+pub fn mkdirs(path: String) -> Result[Unit, String] !io =
+  java_try(fn() => io_mkdirs(path))
 
 ## Read a whole file as a UTF-8 string.
 pub fn read_file(path: String) -> Result[String, String] !io =
