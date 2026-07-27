@@ -385,3 +385,93 @@ bool dawn_char_is_space(int64_t c) {
   dawn_char_ascii_only(c);
   return (c >= 0x09 && c <= 0x0D) || (c >= 0x1C && c <= 0x1F) || c == 0x20;
 }
+
+/* ---- Array: the backend's one collection primitive ---- */
+
+#define DAWN_ARRAY_MIN_CAP 8
+
+static dawn_array_buf *dawn_array_buf_new(int32_t cap) {
+  dawn_array_buf *b = (dawn_array_buf *)dawn_alloc(sizeof(dawn_array_buf));
+  if (cap < DAWN_ARRAY_MIN_CAP) {
+    cap = DAWN_ARRAY_MIN_CAP;
+  }
+  b->data = (void **)dawn_alloc((size_t)cap * sizeof(void *));
+  b->cap = cap;
+  b->high = 0;
+  return b;
+}
+
+static dawn_array *dawn_array_of(dawn_array_buf *b, int32_t len) {
+  dawn_array *a = (dawn_array *)dawn_alloc(sizeof(dawn_array));
+  a->buf = b;
+  a->len = len;
+  return a;
+}
+
+dawn_array *dawn_array_new(void) {
+  return dawn_array_of(dawn_array_buf_new(DAWN_ARRAY_MIN_CAP), 0);
+}
+
+int64_t dawn_array_len(const dawn_array *a) { return (int64_t)a->len; }
+
+/* Bounds are the caller's business on the JVM too -- std/pvec and std/hamt
+ * index within a length they just read. A check here is cheap next to what a
+ * wild read costs, and native has no verifier to catch it. */
+void *dawn_array_get(const dawn_array *a, int64_t i) {
+  if (i < 0 || i >= (int64_t)a->len) {
+    dawn_panic(dawn_str_lit("Array index out of bounds", 24));
+  }
+  return a->buf->data[i];
+}
+
+/* The frontier slot has never belonged to any version, so writing it in place
+ * cannot be observed. Anything else copies. */
+dawn_array *dawn_array_push(dawn_array *a, void *x) {
+  dawn_array_buf *b = a->buf;
+  if (a->len == b->high && a->len < b->cap) {
+    b->data[a->len] = x;
+    b->high = a->len + 1;
+    return dawn_array_of(b, a->len + 1);
+  }
+  int32_t cap = a->len + 1;
+  if (cap < b->cap) {
+    cap = b->cap;
+  }
+  if (cap < a->len * 2) {
+    cap = a->len * 2;
+  }
+  dawn_array_buf *nb = dawn_array_buf_new(cap);
+  for (int32_t k = 0; k < a->len; k++) {
+    nb->data[k] = a->buf->data[k];
+  }
+  nb->data[a->len] = x;
+  nb->high = a->len + 1;
+  return dawn_array_of(nb, a->len + 1);
+}
+
+/* Always copies -- see the header: slot `i < len` is already handed out and
+ * no watermark can say who still reads it. */
+dawn_array *dawn_array_with(const dawn_array *a, int64_t i, void *x) {
+  if (i < 0 || i >= (int64_t)a->len) {
+    dawn_panic(dawn_str_lit("Array index out of bounds", 24));
+  }
+  dawn_array_buf *nb = dawn_array_buf_new(a->len);
+  for (int32_t k = 0; k < a->len; k++) {
+    nb->data[k] = a->buf->data[k];
+  }
+  nb->data[i] = x;
+  nb->high = a->len;
+  return dawn_array_of(nb, a->len);
+}
+
+/* std/hamt counts set bits of a 32-way bitmap. Dawn's Int is signed 64-bit,
+ * so this counts all 64 and lets the caller mask. */
+int64_t dawn_popcount(int64_t n) {
+  uint64_t v = (uint64_t)n;
+  int64_t c = 0;
+  while (v != 0) {
+    v &= v - 1;
+    c++;
+  }
+  return c;
+}

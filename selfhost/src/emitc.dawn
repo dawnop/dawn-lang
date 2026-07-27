@@ -336,8 +336,21 @@ pub fn emit_expr(st: CSt, e: CExpr) -> (CSt, String) =
       panic("emitc: comptime constants are not emitted yet (" ++ name ++ ")")
     CComptime(_, _, _) ->
       panic("emitc: comptime blocks are not emitted yet")
-    CListLit(_, _) ->
-      panic("emitc: list literals await the pure-Dawn collections (D1-D3)")
+    # The same recipe the JVM emits: an Array, one push per element, then
+    # `std/pvec.of_array`. It could not be written until D1-D3 landed, because
+    # before them a list literal had to name a host collection this side has
+    # no way to build. Now it names Dawn, and both backends compile the same
+    # std function.
+    CListLit(elems, _) -> {
+      var st1 = st
+      let (sta, tmp) = fresh(st1)
+      st1 = line(sta, "dawn_array* " ++ tmp ++ " = dawn_array_new();")
+      for el in elems {
+        let (st2, v) = emit_expr(st1, el)
+        st1 = line(st2, tmp ++ " = dawn_array_push(" ++ tmp ++ ", " ++ v ++ ");")
+      }
+      (st1, mangle("std/pvec", "of_array") ++ "(" ++ tmp ++ ")")
+    }
     CForeign(_, _) ->
       # Not a gap: `use java` is the half of FFI that does not port, and
       # refusing it here is the design (llvm-backend-research.md 9).
@@ -599,6 +612,24 @@ fn scalar_rt(prefix: String, t: Ty, what: String) -> String =
 fn no_rt(what: String, t: Ty) -> String =
   panic("emitc: `" ++ what ++ "` not implemented for native on " ++ ty_key(t))
 
+## The list primitive → `std/pvec` function table, the C side's copy of the
+## one `gen_list_intrinsic` keeps. Kept as two functions rather than an
+## Option-returning pair so the `else if` chain above stays flat.
+fn is_list_primitive(n: String) -> Bool =
+  n == "len" || n == "get" || n == "range" || n == "sort_by" ||
+  n == "list_index" || n == "list_slice"
+
+fn pvec_target(n: String) -> String =
+  if n == "len" {
+    "count"
+  } else if n == "list_index" {
+    "index"
+  } else if n == "list_slice" {
+    "slice"
+  } else {
+    n
+  }
+
 fn emit_intrinsic(st: CSt, name: String, args: List[CExpr], ty: Ty) -> (CSt, String) = {
   var st1 = st
   var cargs: List[String] = []
@@ -639,6 +670,28 @@ fn emit_intrinsic(st: CSt, name: String, args: List[CExpr], ty: Ty) -> (CSt, Str
   } else if name == "cmp" {
     (st1, scalar_rt("dawn_cmp", cex_ty(args[0]), name) ++
         "(" ++ a0 ++ ", " ++ cargs[1] ++ ")")
+  } else if is_list_primitive(name) {
+    # The list primitives stay Core intrinsics rather than becoming calls in
+    # lowering, because the comptime interpreter implements them itself on its
+    # own value representation (see gen_list_intrinsic's note on the JVM
+    # side). So each backend translates them, and both translate to the same
+    # `std/pvec` function -- one definition, compiled twice.
+    (st1, mangle("std/pvec", pvec_target(name)) ++ "(" ++ join(cargs, ", ") ++ ")")
+  } else if name == "array_new" {
+    (st1, "dawn_array_new()")
+  } else if name == "array_len" {
+    (st1, "dawn_array_len(" ++ a0 ++ ")")
+  } else if name == "array_get" {
+    # `Array`'s element is a type variable, so a slot: the caller's CUnbox
+    # takes it from here to the concrete type, exactly as on the JVM
+    (st1, "dawn_array_get(" ++ a0 ++ ", " ++ cargs[1] ++ ")")
+  } else if name == "array_push" {
+    (st1, "dawn_array_push(" ++ a0 ++ ", " ++ cargs[1] ++ ")")
+  } else if name == "array_with" {
+    (st1,
+      "dawn_array_with(" ++ a0 ++ ", " ++ cargs[1] ++ ", " ++ cargs[2] ++ ")")
+  } else if name == "popcount" {
+    (st1, "dawn_popcount(" ++ a0 ++ ")")
   } else if name == "to_string" {
     # Core normally lowers this into str_of_*; a residual one means a type
     # the lowering did not know how to render

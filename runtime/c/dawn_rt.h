@@ -53,6 +53,56 @@ typedef struct {
 
 dawn_adt *dawn_adt_new(int32_t tag, int32_t nfields);
 
+/* `Array[T]` -- the one collection primitive a backend owes the language
+ * (native-backend-plan D1). std's List, Map and Set are all built on it, so
+ * nothing collection-shaped compiles natively until this does.
+ *
+ * The contract has two halves (scripts/array-contract/README.md):
+ *
+ *   1. VALUE SEMANTICS. Every operation returns a new array and none is
+ *      observably destructive. Two pushes onto the same version must each see
+ *      their own element.
+ *   2. `array_push` EXTENDS IN PLACE WHEN IT IS ALONE. Deliberately not
+ *      observable from Dawn -- if it were, the semantics would not be pure --
+ *      so it is measured with a clock instead: accumulation is O(n) with it
+ *      and O(n^2) without, which at the contract's sizes is 10ms against a
+ *      minute.
+ *
+ * A `dawn_array` is a length plus a shared buffer, and the buffer carries the
+ * high-water mark of how many slots have ever been handed out. A push may
+ * write slot `len` in place exactly when `len == buf->high`: that slot has
+ * never belonged to any version, so no one can be reading it. Otherwise it
+ * copies. This is the same rule the JVM backend enforces with a CAS on the
+ * frontier slot; single-threaded C needs no atomic to state it.
+ *
+ * `array_with` always copies, and that asymmetry is the design rather than a
+ * gap: slot `i < len` has already been handed to this version and maybe to
+ * others, and there is no watermark that can say who still reads it. Perceus
+ * will be able to say (`rc == 1`), and can lift this later. */
+/* Elements are erased, so an Array holds boxed slots by pointer -- the same
+ * shape the JVM backend gets from an Object[]. `array_get` therefore hands
+ * back what `CUnbox` expects to dereference, and `array_push` takes what
+ * `CBox` just produced. */
+typedef struct {
+  void **data;
+  int32_t cap;
+  int32_t high; /* slots ever handed out; only push may raise it */
+} dawn_array_buf;
+
+typedef struct {
+  dawn_array_buf *buf;
+  int32_t len;
+} dawn_array;
+
+dawn_array *dawn_array_new(void);
+int64_t dawn_array_len(const dawn_array *a);
+void *dawn_array_get(const dawn_array *a, int64_t i);
+dawn_array *dawn_array_push(dawn_array *a, void *x);
+dawn_array *dawn_array_with(const dawn_array *a, int64_t i, void *x);
+
+/* The one bit-twiddle std/hamt needs that C does not portably spell. */
+int64_t dawn_popcount(int64_t n);
+
 /* A closure: a code pointer plus the captured environment. The JVM backend
  * gets this shape for free from invokedynamic and LambdaMetafactory; here it
  * is written out, which llvm-backend-research.md 3 called the biggest single

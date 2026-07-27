@@ -1234,6 +1234,14 @@ fn run_emitc(rest: List[String]) -> Unit !io = {
   let (adts, traits, impl_table, prog_fns) = program_tables(std, prog.modules)
   var mods: List[CModule] = []
   var entry = ""
+  # std is deliberately NOT lowered in here yet, though a C translation unit
+  # needs every function it calls and after S3 the collections *are* std --
+  # `[1, 2]` calls `std/pvec.of_array`. Emitting std wholesale was measured
+  # (2026-07-27) and turns every corpus program red at once: std's own modules
+  # reach the string intrinsics native has no implementation for, starting at
+  # `cursor_start`. So the order is fixed -- finish the intrinsic tail, then
+  # link std in. Until then `cc` is the wall for anything holding a list, and
+  # known-red.txt says so.
   for cm in prog.modules {
     mods = mods ++ [lower.lower_module(cm.class_name, cm.tm, traits, impl_table, adts, prog_fns)]
     if entry == "" {

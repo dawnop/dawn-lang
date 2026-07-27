@@ -42,11 +42,20 @@ eq_bytes:emitc
 # used to be that `show` at a List/Map/Set reached the runtime intrinsic and
 # native had no runtime to reach; std carries `impl[T: Show] Show[List[T]]`
 # now, so rendering goes through the same synthesised bodies show_derive.dawn
-# does. The file still cannot reach the C compiler, but the wall it hits is
-# `emitc: list literals await the pure-Dawn collections (D1-D3)` -- those
-# landed and emitc has not been re-derived against them. That is S4's work,
-# not Show's.
-show_containers:emitc
+# does.
+#
+# `emitc` was the wall until 2026-07-27 and no longer is: the C backend has
+# the `Array` contract, the six list primitives and list literals, so it
+# emits C for this file. `cc` is the wall now, and for a different reason --
+# the emitted C *calls* `std/pvec.of_array` and std's own `show` bodies, and
+# `__emitc` lowers only the program's modules, so the translation unit has no
+# definition for them.
+#
+# Linking std in was measured and is premature: it turns every corpus program
+# red at once, because std reaches string intrinsics native has not
+# implemented (`cursor_start` first). The order is therefore fixed -- finish
+# the intrinsic tail, then lower std into the unit, then this line goes.
+show_containers:cc
 
 # A bound whose subject *contains* a rigid variable rather than being one
 # (`[T: Eq]` used at `Option[T]`) was here. It reached the `struct_eq`
