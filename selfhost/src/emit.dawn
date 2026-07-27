@@ -694,14 +694,15 @@ fn rt_class(o: Rt) -> String =
     RtIo -> IO_CLASS
   }
 
-fn rt_intrinsic_target(name: String) -> Option[(String, String)] =
+## Where a primitive lives on this backend: its module's class, and its own
+## name. The name is not a lookup -- a runtime method is spelled exactly as the
+## intrinsic is, which is why `gen_strings_class` and friends read like the
+## table does.
+fn rt_intrinsic_class(name: String) -> Option[String] =
   match intr_at(name) {
     Some(i) ->
       match i.rt {
-        Some(t) -> {
-          let (o, m) = t
-          Some((rt_class(o), m))
-        }
+        Some(o) -> Some(rt_class(o))
         None -> None
       }
     None -> None
@@ -2390,7 +2391,7 @@ fn gen_cintrinsic(g: Gen, name: String, args: List[CExpr], ty: Ty) -> (Gen, Bool
   }
   if name == "cursor_slice" {
     let g1 = gen_cargs(g, args)
-    g1.mv.visitMethodInsn(OP_INVOKESTATIC, STRINGS_CLASS, "cursorSlice",
+    g1.mv.visitMethodInsn(OP_INVOKESTATIC, STRINGS_CLASS, "cursor_slice",
       "(Ljava/lang/String;JJ)Ljava/lang/String;", false)
     let ok = Label.new()
     g1.mv.visitInsn(OP_DUP)
@@ -2452,11 +2453,10 @@ fn gen_cintrinsic(g: Gen, name: String, args: List[CExpr], ty: Ty) -> (Gen, Bool
   } else if name == "cast" {
     unerase(g1, ty)
   } else {
-    match rt_intrinsic_target(name) {
-      Some(pair) -> {
-        let (cls, m) = pair
+    match rt_intrinsic_class(name) {
+      Some(cls) -> {
         let sig = builtin_sig(name)
-        g1.mv.visitMethodInsn(OP_INVOKESTATIC, cls, m,
+        g1.mv.visitMethodInsn(OP_INVOKESTATIC, cls, name,
           method_desc(g1.adts, sig.param_tys, sig.ret), false)
       }
       None -> panic("codegen: Core intrinsic without a JVM mapping: " ++ name)

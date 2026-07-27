@@ -156,7 +156,7 @@ Kotlin CodeGen 从 checked AST 读的注解，逐一映射到 TAST：
   要把 compiler/build/libs/dawn.jar 挂 classpath——AdtClassWriter 在编译器 jar 里）。
 - ✅ P4-5 Bytes/Io/FnComparator/dawn/tr/Ord/prelude Ord impls
   字节级一致（26/65）。Kotlin genBytesClass/genIoClass 的 doc 注释是旧的——实际
-  只有 concat 和 javaTry/catchPanic，以字节对拍为准。
+  只有 concat 和 java_try/catch_panic，以字节对拍为准。
 - ✅ P4-6 Show/Lists/Strings/Maps + vendored rt 字节拷贝（vendor.dawn：从
   classpath 上的编译器 jar 枚举 dawn/rt/<outer>[$*].class，JarFile+Enumeration
   互操作）→ 42/65。Dawn 字面量没有 \r 转义，用 str.from_char(13)。

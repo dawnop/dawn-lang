@@ -1018,25 +1018,28 @@ pub type Rt =
 
 pub type Intr = {
   sig: Sig,
-  ## the runtime module and the name it is called by there. None = the backend
-  ## writes instructions for it inline (arithmetic, and the type-directed ones).
-  rt: Option[(Rt, String)],
+  ## which runtime module implements it. None = the backend writes instructions
+  ## for it inline (arithmetic, and the type-directed ones).
+  ##
+  ## The *name* is deliberately not recorded: a primitive is called by its own
+  ## name in whichever module owns it. This field used to carry one, and every
+  ## entry it held was the intrinsic's name re-spelled in Java's casing --
+  ## which made it one backend's convention living in the shared table, and
+  ## meant a second backend could not read the table at all.
+  rt: Option[Rt],
   ## arguments and result cross at the erased type: a container primitive
   erased: Bool,
   ## only std may name it -- the backend contract, not language surface
   internal: Bool
 }
 
-fn intr_of(s: Sig, o: Option[(Rt, String)], erased: Bool, internal: Bool) -> Intr =
+fn intr_of(s: Sig, o: Option[Rt], erased: Bool, internal: Bool) -> Intr =
   Intr { sig: s, rt: o, erased: erased, internal: internal }
-
-fn camel(prefix: String, op: String) -> String =
-  prefix ++ str.to_upper(str.substring(op, 0, 1)) ++ str.substring(op, 1, str.len(op))
 
 ## Every intrinsic, with the three properties declared.
 pub fn intrinsics() -> Map[String, Intr] = {
   let bs = builtins()
-  var rt_of: Map[String, (Rt, String)] = map.empty()
+  var rt_of: Map[String, Rt] = map.empty()
   var erased: Set[String] = set.empty()
   var internal: Set[String] = set.empty()
 
@@ -1044,37 +1047,33 @@ pub fn intrinsics() -> Map[String, Intr] = {
   # the Dawn vector in std/pvec, written by whichever backend is emitting --
   # which is a backend's choice of representation, not a contract the
   # language states. `join`/`code_points`/`from_code_points`/`io_list_names`
-  # are absent below for the same reason: each still reaches a hand-written
-  # method, but through a conversion the emitter puts around it, so naming
-  # the method here would give the wrong descriptor.
+  # are absent below for a related reason: each does reach a runtime function,
+  # but only through a List↔Array conversion the emitter wraps around it, and
+  # a plain entry here would promise a call the emitter cannot make.
   # strings: the ones needing Unicode or native search, plus the cursor walk.
   # `cursor_slice` is absent on purpose -- the emitter writes it inline so it
   # can check the range and panic.
-  for e in [("parse_int", "parseInt"), ("parse_float", "parseFloat"),
-    ("parse_int_radix", "parseIntRadix"),
-    ("index_of_from", "indexOfFrom")] {
-      let (n, m) = e
-      rt_of = map.insert(rt_of, n, (RtStrings, m))
-    }
+  for n in ["parse_int", "parse_float", "parse_int_radix", "index_of_from"] {
+    rt_of = map.insert(rt_of, n, RtStrings)
+  }
   for op in ["letter", "digit", "alnum", "upper", "lower", "space"] {
-    let n = "char_is_" ++ op
-    rt_of = map.insert(rt_of, n, (RtStrings, n))
+    rt_of = map.insert(rt_of, "char_is_" ++ op, RtStrings)
   }
   for op in ["start", "end", "done", "char", "next", "prev", "skip"] {
-    rt_of = map.insert(rt_of, "cursor_" ++ op, (RtStrings, camel("cursor", op)))
+    rt_of = map.insert(rt_of, "cursor_" ++ op, RtStrings)
   }
   for op in ["len", "trim", "lower", "upper", "contains", "starts_with", "ends_with",
     "index_of", "last_index_of"] {
-      rt_of = map.insert(rt_of, "str_" ++ op, (RtStrings, "str_" ++ op))
+      rt_of = map.insert(rt_of, "str_" ++ op, RtStrings)
     }
   for op in ["utf8", "decode", "len", "at", "slice"] {
-    rt_of = map.insert(rt_of, "bytes_" ++ op, (RtBytes, "bytes_" ++ op))
+    rt_of = map.insert(rt_of, "bytes_" ++ op, RtBytes)
   }
   for op in ["print", "println", "read_line", "is_dir", "read_file", "write_file"] {
-    rt_of = map.insert(rt_of, "io_" ++ op, (RtIo, "io_" ++ op))
+    rt_of = map.insert(rt_of, "io_" ++ op, RtIo)
   }
-  rt_of = map.insert(rt_of, "java_try", (RtIo, "javaTry"))
-  rt_of = map.insert(rt_of, "catch_panic", (RtIo, "catchPanic"))
+  rt_of = map.insert(rt_of, "java_try", RtIo)
+  rt_of = map.insert(rt_of, "catch_panic", RtIo)
 
   # The persistent Map/Set: erased on both sides, and std-only. No runtime
   # module owns them any more -- lowering turns each into a call on the Dawn
@@ -1094,11 +1093,11 @@ pub fn intrinsics() -> Map[String, Intr] = {
   # Array is the one collection primitive a backend must implement (D1)
   for op in ["new", "len", "get", "push", "with"] {
     let n = "array_" ++ op
-    rt_of = map.insert(rt_of, n, (RtArray, n))
+    rt_of = map.insert(rt_of, n, RtArray)
     erased = set.insert(erased, n)
     internal = set.insert(internal, n)
   }
-  rt_of = map.insert(rt_of, "popcount", (RtArray, "popcount"))
+  rt_of = map.insert(rt_of, "popcount", RtArray)
   internal = set.insert(internal, "popcount")
   # the cursor walk and the search it rests on are the representation, not
   # surface: std/str spells the public API over them
@@ -1139,7 +1138,7 @@ test "every intrinsic property is declared against a real intrinsic" {
   assert slice.rt == None
   let pc = intr_at("popcount").expect("popcount")
   assert pc.internal
-  assert pc.rt == Some((RtArray, "popcount"))
+  assert pc.rt == Some(RtArray)
   assert not pc.erased
   let ln = intr_at("len").expect("len")
   assert not ln.internal

@@ -940,11 +940,11 @@ pub fn gen_bytes_class(supers: List[String]) -> Bytes !io = {
   sv.visitVarInsn(OP_ISTORE, 5)
   sv.visitVarInsn(OP_LLOAD, 1)
   sv.visitVarInsn(OP_ILOAD, 5)
-  sv.visitMethodInsn(OP_INVOKESTATIC, BYTES_CLASS, "bytesClamp", "(JI)I", false)
+  sv.visitMethodInsn(OP_INVOKESTATIC, BYTES_CLASS, "bytes_clamp", "(JI)I", false)
   sv.visitVarInsn(OP_ISTORE, 6)
   sv.visitVarInsn(OP_LLOAD, 3)
   sv.visitVarInsn(OP_ILOAD, 5)
-  sv.visitMethodInsn(OP_INVOKESTATIC, BYTES_CLASS, "bytesClamp", "(JI)I", false)
+  sv.visitMethodInsn(OP_INVOKESTATIC, BYTES_CLASS, "bytes_clamp", "(JI)I", false)
   sv.visitVarInsn(OP_ISTORE, 7)
   sv.visitVarInsn(OP_ILOAD, 6)
   sv.visitVarInsn(OP_ILOAD, 7)
@@ -961,8 +961,8 @@ pub fn gen_bytes_class(supers: List[String]) -> Bytes !io = {
   sv.visitInsn(OP_ARETURN)
   close_mv(sv)
 
-  # bytesClamp(v, hi) = v < 0 ? 0 : (v > hi ? hi : (int) v)
-  let cv = open_static(cw, "bytesClamp", "(JI)I")
+  # bytes_clamp(v, hi) = v < 0 ? 0 : (v > hi ? hi : (int) v)
+  let cv = open_static(cw, "bytes_clamp", "(JI)I")
   let cl_pos = Label.new()
   let cl_ok = Label.new()
   cv.visitVarInsn(OP_LLOAD, 0)
@@ -1043,7 +1043,7 @@ fn gen_try_closure(cw: AdtClassWriter, name: String, caught: String) -> Unit !io
   ()
 }
 
-## dawn/rt/Io: the io runtime — javaTry/catchPanic (the Throwable barriers) plus
+## dawn/rt/Io: the io runtime — java_try/catch_panic (the Throwable barriers) plus
 ## the io_* primitives std/io writes over (print/println/read_line/is_dir/
 ## read_file/write_file/list_names). These retire the handwritten dawn.rt.StdIo.
 ## The failing ones (read_file/write_file/list_names) simply throw; std wraps
@@ -1052,8 +1052,8 @@ fn gen_try_closure(cw: AdtClassWriter, name: String, caught: String) -> Unit !io
 pub fn gen_io_class(supers: List[String]) -> Bytes !io = {
   let cw = AdtClassWriter.new(supers)
   cw.begin(V17, ACC_PUBLIC + ACC_FINAL, IO_CLASS, obj())
-  gen_try_closure(cw, "javaTry", "java/lang/Exception")
-  gen_try_closure(cw, "catchPanic", "java/lang/Throwable")
+  gen_try_closure(cw, "java_try", "java/lang/Exception")
+  gen_try_closure(cw, "catch_panic", "java/lang/Throwable")
 
   # a single shared reader: a fresh BufferedReader per call would let one call's
   # buffer swallow input the next call should see. Lazily initialised in io_read_line.
@@ -1553,7 +1553,7 @@ fn gen_array_with(cw: AdtClassWriter) -> Unit !io = {
   close_mv(wv)
 }
 
-## parseInt / parseFloat: try/strip/parse/box, NumberFormatException → None.
+## parse_int / parse_float: try/strip/parse/box, NumberFormatException → None.
 fn gen_parse_method(
   cw: AdtClassWriter,
   name: String,
@@ -1587,11 +1587,11 @@ fn gen_parse_method(
   ()
 }
 
-## parseIntRadix(s, radix): Long.parseLong(s.strip(), (int) radix), with the
+## parse_int_radix(s, radix): Long.parseLong(s.strip(), (int) radix), with the
 ## same NumberFormatException → None shape as gen_parse_method. Separate because
 ## the radix argument makes the descriptor and the loads differ throughout.
 fn gen_parse_radix_method(cw: AdtClassWriter) -> Unit !io = {
-  let m = cw.method(ACC_PUBLIC + ACC_STATIC, "parseIntRadix",
+  let m = cw.method(ACC_PUBLIC + ACC_STATIC, "parse_int_radix",
     "(Ljava/lang/String;J)LOption;").expect("mv")
   m.visitCode()
   let try_start = Label.new()
@@ -1620,8 +1620,8 @@ fn gen_parse_radix_method(cw: AdtClassWriter) -> Unit !io = {
   ()
 }
 
-## dawn/rt/Strings: the string runtime — join, indexOfFrom (sentinel → Option),
-## parseInt/parseFloat, code_points/from_code_points, the cursor family, and the
+## dawn/rt/Strings: the string runtime — join, index_of_from (sentinel → Option),
+## parse_int/parse_float, code_points/from_code_points, the cursor family, and the
 ## str_* primitives. Owns every string operation the language names (spec §1.5,
 ## §11); nothing is vendored in handwritten Java any more.
 pub fn gen_strings_class(supers: List[String]) -> Bytes !io = {
@@ -1670,14 +1670,14 @@ pub fn gen_strings_class(supers: List[String]) -> Bytes !io = {
   jn.visitMaxs(0, 0)
   jn.visitEnd()
 
-  # indexOfFrom: negative sentinel from indexOfFromRaw becomes None
-  let io2 = cw.method(ACC_PUBLIC + ACC_STATIC, "indexOfFrom",
+  # index_of_from: negative sentinel from index_of_from_raw becomes None
+  let io2 = cw.method(ACC_PUBLIC + ACC_STATIC, "index_of_from",
     "(Ljava/lang/String;Ljava/lang/String;J)LOption;").expect("mv")
   io2.visitCode()
   io2.visitVarInsn(OP_ALOAD, 0)
   io2.visitVarInsn(OP_ALOAD, 1)
   io2.visitVarInsn(OP_LLOAD, 2)
-  io2.visitMethodInsn(OP_INVOKESTATIC, STRINGS_CLASS, "indexOfFromRaw",
+  io2.visitMethodInsn(OP_INVOKESTATIC, STRINGS_CLASS, "index_of_from_raw",
     "(Ljava/lang/String;Ljava/lang/String;J)J", false)
   io2.visitVarInsn(OP_LSTORE, 4)
   let n_none = Label.new()
@@ -1697,9 +1697,9 @@ pub fn gen_strings_class(supers: List[String]) -> Bytes !io = {
   io2.visitMaxs(0, 0)
   io2.visitEnd()
 
-  gen_parse_method(cw, "parseInt", "java/lang/Long", "parseLong",
+  gen_parse_method(cw, "parse_int", "java/lang/Long", "parseLong",
     "(Ljava/lang/String;)J", "(J)Ljava/lang/Long;")
-  gen_parse_method(cw, "parseFloat", "java/lang/Double", "parseDouble",
+  gen_parse_method(cw, "parse_float", "java/lang/Double", "parseDouble",
     "(Ljava/lang/String;)D", "(D)Ljava/lang/Double;")
   gen_parse_radix_method(cw)
 
@@ -1784,22 +1784,22 @@ pub fn gen_strings_class(supers: List[String]) -> Bytes !io = {
   # StdStrings' verbatim, character-boundary and surrogate handling included.
   let jchar = "java/lang/Character"
 
-  # cursorStart(s) = 0
-  let csv = open_static(cw, "cursorStart", "(Ljava/lang/String;)J")
+  # cursor_start(s) = 0
+  let csv = open_static(cw, "cursor_start", "(Ljava/lang/String;)J")
   csv.visitInsn(OP_LCONST_0)
   csv.visitInsn(OP_LRETURN)
   close_mv(csv)
 
-  # cursorEnd(s) = (long) s.length()
-  let cev = open_static(cw, "cursorEnd", "(Ljava/lang/String;)J")
+  # cursor_end(s) = (long) s.length()
+  let cev = open_static(cw, "cursor_end", "(Ljava/lang/String;)J")
   cev.visitVarInsn(OP_ALOAD, 0)
   cev.visitMethodInsn(OP_INVOKEVIRTUAL, jstr, "length", "()I", false)
   cev.visitInsn(OP_I2L)
   cev.visitInsn(OP_LRETURN)
   close_mv(cev)
 
-  # cursorDone(s, c) = c < 0 || c >= s.length()
-  let cdv = open_static(cw, "cursorDone", "(Ljava/lang/String;J)Z")
+  # cursor_done(s, c) = c < 0 || c >= s.length()
+  let cdv = open_static(cw, "cursor_done", "(Ljava/lang/String;J)Z")
   let cd_true = Label.new()
   cdv.visitVarInsn(OP_LLOAD, 1)
   cdv.visitInsn(OP_LCONST_0)
@@ -1818,8 +1818,8 @@ pub fn gen_strings_class(supers: List[String]) -> Bytes !io = {
   cdv.visitInsn(OP_IRETURN)
   close_mv(cdv)
 
-  # cursorChar(s, c) = (c < 0 || c >= len) ? -1 : s.codePointAt((int) c)
-  let ccv = open_static(cw, "cursorChar", "(Ljava/lang/String;J)J")
+  # cursor_char(s, c) = (c < 0 || c >= len) ? -1 : s.codePointAt((int) c)
+  let ccv = open_static(cw, "cursor_char", "(Ljava/lang/String;J)J")
   let cc_neg = Label.new()
   ccv.visitVarInsn(OP_LLOAD, 1)
   ccv.visitInsn(OP_LCONST_0)
@@ -1843,8 +1843,8 @@ pub fn gen_strings_class(supers: List[String]) -> Bytes !io = {
   ccv.visitInsn(OP_LRETURN)
   close_mv(ccv)
 
-  # cursorNext(s, c): c<0 -> 0; c>=len -> len; else c + charCount(codePointAt(c))
-  let cnv = open_static(cw, "cursorNext", "(Ljava/lang/String;J)J")
+  # cursor_next(s, c): c<0 -> 0; c>=len -> len; else c + charCount(codePointAt(c))
+  let cnv = open_static(cw, "cursor_next", "(Ljava/lang/String;J)J")
   let cn_zero = Label.new()
   let cn_len = Label.new()
   cnv.visitVarInsn(OP_LLOAD, 1)
@@ -1876,8 +1876,8 @@ pub fn gen_strings_class(supers: List[String]) -> Bytes !io = {
   cnv.visitInsn(OP_LRETURN)
   close_mv(cnv)
 
-  # cursorPrev(s, c): c<=0 -> 0; at = c>len ? len : (int)c; s.offsetByCodePoints(at, -1)
-  let cpv = open_static(cw, "cursorPrev", "(Ljava/lang/String;J)J")
+  # cursor_prev(s, c): c<=0 -> 0; at = c>len ? len : (int)c; s.offsetByCodePoints(at, -1)
+  let cpv = open_static(cw, "cursor_prev", "(Ljava/lang/String;J)J")
   let cp_zero = Label.new()
   let cp_uselen = Label.new()
   let cp_haveat = Label.new()
@@ -1908,8 +1908,8 @@ pub fn gen_strings_class(supers: List[String]) -> Bytes !io = {
   cpv.visitInsn(OP_LRETURN)
   close_mv(cpv)
 
-  # splitsPair(s, at) = at>0 && at<len && isLowSurrogate(s.charAt((int)at))
-  let spv = open_static(cw, "splitsPair", "(Ljava/lang/String;J)Z")
+  # splits_pair(s, at) = at>0 && at<len && isLowSurrogate(s.charAt((int)at))
+  let spv = open_static(cw, "splits_pair", "(Ljava/lang/String;J)Z")
   let sp_false = Label.new()
   spv.visitVarInsn(OP_LLOAD, 1)
   spv.visitInsn(OP_LCONST_0)
@@ -1932,9 +1932,9 @@ pub fn gen_strings_class(supers: List[String]) -> Bytes !io = {
   spv.visitInsn(OP_IRETURN)
   close_mv(spv)
 
-  # cursorSlice(s, from, to): null when out of range or a cursor splits a pair,
+  # cursor_slice(s, from, to): null when out of range or a cursor splits a pair,
   # else s.substring((int)from, (int)to). from=slot1, to=slot3 (each a long).
-  let cslv = open_static(cw, "cursorSlice", "(Ljava/lang/String;JJ)Ljava/lang/String;")
+  let cslv = open_static(cw, "cursor_slice", "(Ljava/lang/String;JJ)Ljava/lang/String;")
   let csl_null = Label.new()
   cslv.visitVarInsn(OP_LLOAD, 1)
   cslv.visitInsn(OP_LCONST_0)
@@ -1952,11 +1952,11 @@ pub fn gen_strings_class(supers: List[String]) -> Bytes !io = {
   cslv.visitJumpInsn(OP_IFGT, csl_null)
   cslv.visitVarInsn(OP_ALOAD, 0)
   cslv.visitVarInsn(OP_LLOAD, 1)
-  cslv.visitMethodInsn(OP_INVOKESTATIC, STRINGS_CLASS, "splitsPair", "(Ljava/lang/String;J)Z", false)
+  cslv.visitMethodInsn(OP_INVOKESTATIC, STRINGS_CLASS, "splits_pair", "(Ljava/lang/String;J)Z", false)
   cslv.visitJumpInsn(OP_IFNE, csl_null)
   cslv.visitVarInsn(OP_ALOAD, 0)
   cslv.visitVarInsn(OP_LLOAD, 3)
-  cslv.visitMethodInsn(OP_INVOKESTATIC, STRINGS_CLASS, "splitsPair", "(Ljava/lang/String;J)Z", false)
+  cslv.visitMethodInsn(OP_INVOKESTATIC, STRINGS_CLASS, "splits_pair", "(Ljava/lang/String;J)Z", false)
   cslv.visitJumpInsn(OP_IFNE, csl_null)
   cslv.visitVarInsn(OP_ALOAD, 0)
   cslv.visitVarInsn(OP_LLOAD, 1)
@@ -1970,9 +1970,9 @@ pub fn gen_strings_class(supers: List[String]) -> Bytes !io = {
   cslv.visitInsn(OP_ARETURN)
   close_mv(cslv)
 
-  # cursorSkip(s, c, sub): past = (c<0?0:c) + sub.length(); min(past, len).
+  # cursor_skip(s, c, sub): past = (c<0?0:c) + sub.length(); min(past, len).
   # c=slot1 (long), sub=slot3.
-  let cskv = open_static(cw, "cursorSkip", "(Ljava/lang/String;JLjava/lang/String;)J")
+  let cskv = open_static(cw, "cursor_skip", "(Ljava/lang/String;JLjava/lang/String;)J")
   let csk_havebase = Label.new()
   let csk_max = Label.new()
   cskv.visitVarInsn(OP_LLOAD, 1)
@@ -2005,9 +2005,9 @@ pub fn gen_strings_class(supers: List[String]) -> Bytes !io = {
   cskv.visitInsn(OP_LRETURN)
   close_mv(cskv)
 
-  # indexOfFromRaw(s, sub, from): from>len -> -1; else s.indexOf(sub, max(0,from)).
-  # The sentinel the Option-returning indexOfFrom (above) unwraps. from=slot2.
-  let iofv = open_static(cw, "indexOfFromRaw", "(Ljava/lang/String;Ljava/lang/String;J)J")
+  # index_of_from_raw(s, sub, from): from>len -> -1; else s.indexOf(sub, max(0,from)).
+  # The sentinel the Option-returning index_of_from (above) unwraps. from=slot2.
+  let iofv = open_static(cw, "index_of_from_raw", "(Ljava/lang/String;Ljava/lang/String;J)J")
   let iof_neg = Label.new()
   let iof_zero = Label.new()
   let iof_have = Label.new()
