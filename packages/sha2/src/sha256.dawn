@@ -1,0 +1,166 @@
+# SHA-256 (FIPS 180-4), in Dawn.
+#
+# It is here because the package manager's content addressing -- the `d1:` tree
+# hash that makes the cache trustworthy -- was reaching java.security. A hash
+# is arithmetic over bytes and nothing else, so there was never a reason for it
+# to be a host service; it only was because a host happened to offer one.
+#
+# A package rather than std: std stays the small set of things the language
+# itself leans on, and nothing in the language leans on SHA-256.
+#
+# Dawn's `Int` is 64-bit and signed, so every 32-bit operation ends in `& MASK`.
+# The shifts are `>>>` (logical) throughout: the values are masked to 32 bits
+# before they are shifted, so there is no sign bit in them to propagate.
+
+use std/bytes
+use std/list
+
+const MASK: Int = 0xFFFFFFFF
+
+## The round constants: the first 32 bits of the fractional parts of the cube
+## roots of the first 64 primes.
+fn round_constants() -> List[Int] = [
+  0x428A2F98, 0x71374491, 0xB5C0FBCF, 0xE9B5DBA5, 0x3956C25B, 0x59F111F1,
+  0x923F82A4, 0xAB1C5ED5, 0xD807AA98, 0x12835B01, 0x243185BE, 0x550C7DC3,
+  0x72BE5D74, 0x80DEB1FE, 0x9BDC06A7, 0xC19BF174, 0xE49B69C1, 0xEFBE4786,
+  0x0FC19DC6, 0x240CA1CC, 0x2DE92C6F, 0x4A7484AA, 0x5CB0A9DC, 0x76F988DA,
+  0x983E5152, 0xA831C66D, 0xB00327C8, 0xBF597FC7, 0xC6E00BF3, 0xD5A79147,
+  0x06CA6351, 0x14292967, 0x27B70A85, 0x2E1B2138, 0x4D2C6DFC, 0x53380D13,
+  0x650A7354, 0x766A0ABB, 0x81C2C92E, 0x92722C85, 0xA2BFE8A1, 0xA81A664B,
+  0xC24B8B70, 0xC76C51A3, 0xD192E819, 0xD6990624, 0xF40E3585, 0x106AA070,
+  0x19A4C116, 0x1E376C08, 0x2748774C, 0x34B0BCB5, 0x391C0CB3, 0x4ED8AA4A,
+  0x5B9CCA4F, 0x682E6FF3, 0x748F82EE, 0x78A5636F, 0x84C87814, 0x8CC70208,
+  0x90BEFFFA, 0xA4506CEB, 0xBEF9A3F7, 0xC67178F2
+]
+
+fn rotr(x: Int, n: Int) -> Int = ((x >>> n) | (x << (32 - n))) & MASK
+
+## The length of the padded message: the data, a `0x80` byte, zeros up to 56
+## bytes past a block boundary, then the bit count as eight big-endian bytes.
+fn padded_len(n: Int) -> Int = {
+  let body = n + 1
+  let zeros = (56 - body % 64 + 64) % 64
+  body + zeros + 8
+}
+
+## Byte `i` of the padded message, computed rather than stored: padding a
+## megabyte to copy it once more would be the only allocation in here.
+fn padded_at(b: Bytes, n: Int, plen: Int, i: Int) -> Int =
+  if i < n {
+    bytes.at(b, i)
+  } else if i == n {
+    0x80
+  } else if i < plen - 8 {
+    0
+  } else {
+    let shift = 8 * (plen - 1 - i)
+    (n * 8 >>> shift) & 0xFF
+  }
+
+## The 64-word message schedule for the block starting at `base`.
+fn schedule(b: Bytes, n: Int, plen: Int, base: Int) -> List[Int] = {
+  var w: List[Int] = []
+  var t = 0
+  while t < 16 {
+    let o = base + t * 4
+    w = w ++ [(padded_at(b, n, plen, o) << 24) | (padded_at(b, n, plen, o + 1) << 16) |
+      (padded_at(b, n, plen, o + 2) << 8) | padded_at(b, n, plen, o + 3)]
+    t = t + 1
+  }
+  while t < 64 {
+    let s0 = rotr(w[t - 15], 7) ^ rotr(w[t - 15], 18) ^ (w[t - 15] >>> 3)
+    let s1 = rotr(w[t - 2], 17) ^ rotr(w[t - 2], 19) ^ (w[t - 2] >>> 10)
+    w = w ++ [(w[t - 16] + s0 + w[t - 7] + s1) & MASK]
+    t = t + 1
+  }
+  w
+}
+
+## The digest of `b` as 64 lower-case hex digits.
+pub fn hex(b: Bytes) -> String = {
+  let n = bytes.len(b)
+  let plen = padded_len(n)
+  let k = round_constants()
+
+  var h0 = 0x6A09E667
+  var h1 = 0xBB67AE85
+  var h2 = 0x3C6EF372
+  var h3 = 0xA54FF53A
+  var h4 = 0x510E527F
+  var h5 = 0x9B05688C
+  var h6 = 0x1F83D9AB
+  var h7 = 0x5BE0CD19
+
+  var base = 0
+  while base < plen {
+    let w = schedule(b, n, plen, base)
+    var a = h0
+    var bb = h1
+    var c = h2
+    var d = h3
+    var e = h4
+    var f = h5
+    var g = h6
+    var h = h7
+    var t = 0
+    while t < 64 {
+      let s1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25)
+      let ch = (e & f) ^ (~e & MASK & g)
+      let t1 = (h + s1 + ch + k[t] + w[t]) & MASK
+      let s0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22)
+      let maj = (a & bb) ^ (a & c) ^ (bb & c)
+      let t2 = (s0 + maj) & MASK
+      h = g
+      g = f
+      f = e
+      e = (d + t1) & MASK
+      d = c
+      c = bb
+      bb = a
+      a = (t1 + t2) & MASK
+      t = t + 1
+    }
+    h0 = (h0 + a) & MASK
+    h1 = (h1 + bb) & MASK
+    h2 = (h2 + c) & MASK
+    h3 = (h3 + d) & MASK
+    h4 = (h4 + e) & MASK
+    h5 = (h5 + f) & MASK
+    h6 = (h6 + g) & MASK
+    h7 = (h7 + h) & MASK
+    base = base + 64
+  }
+
+  var out = ""
+  for word in [h0, h1, h2, h3, h4, h5, h6, h7] {
+    out = out ++ word_hex(word)
+  }
+  out
+}
+
+fn word_hex(w: Int) -> String = {
+  var out = ""
+  var shift = 28
+  while shift >= 0 {
+    out = out ++ digit((w >>> shift) & 0xF)
+    shift = shift - 4
+  }
+  out
+}
+
+fn digit(v: Int) -> String =
+  if v < 10 { from_code_points(['0' + v]) } else { from_code_points(['a' + v - 10]) }
+
+# The known answers are FIPS 180-2's own examples, not another implementation's
+# output: an oracle that is a second implementation can only certify agreement.
+# scripts/sha2-contract sweeps every length across a block boundary against
+# java.security.MessageDigest, which is the other half -- exhaustive on the
+# padding arithmetic, where the vectors are exhaustive on nothing.
+test "the FIPS 180-2 vectors" {
+  assert hex(bytes.utf8("")) ==
+    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  assert hex(bytes.utf8("abc")) ==
+    "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+  assert hex(bytes.utf8("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq")) ==
+    "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"
+}
