@@ -1,0 +1,132 @@
+# Differential test for the pure-Dawn HAMT (std/hamt) against the builtin Map.
+#
+# The builtin is the oracle: it is the handwritten Java persistent map the HAMT
+# is going to replace, so "same answers on the same operation sequence" is
+# exactly the contract that has to hold at the swap. Every observable is
+# compared -- size, lookups, and the *order* `keys`/`entries` come out in,
+# which spec §2.2 fixes as insertion order and which a hash trie does not give
+# for free.
+#
+# The sequence mixes fresh keys, rebinds and removals so the cases that only
+# show up under history are covered: rebinding must keep the original
+# position, a removal must collapse the spine it emptied, and a key removed
+# and re-inserted must come back at the *end* of the order rather than where
+# it used to be.
+use std/io
+use std/list
+use std/map
+use std/hamt
+use std/hamt.{Hamt}
+
+## Deterministic pseudo-random, so a failure reproduces. Knuth's LCG constants,
+## masked to 31 bits because only the spread matters here.
+fn nextr(s: Int) -> Int = (s * 6364136223846793005 + 1442695040888963407) & 2147483647
+
+fn key_of(n: Int) -> String = "k" ++ to_string(n)
+
+## Both structures, driven through the same operations, then compared. Returns
+## the mismatches it found; an empty list is the whole point.
+fn run(steps: Int, space: Int) -> List[String] = {
+  var bad: List[String] = []
+  var m: Map[String, Int] = map.empty()
+  var h: Hamt[String, Int] = hamt.empty()
+  var s = 12345
+  var i = 0
+  while i < steps {
+    s = nextr(s)
+    let k = key_of(s % space)
+    if s % 7 == 0 {
+      m = map.remove(m, k)
+      h = hamt.dissoc(h, k)
+    } else {
+      m = map.insert(m, k, i)
+      h = hamt.assoc(h, k, i)
+    }
+    if map.size(m) != hamt.count(h) {
+      bad = bad ++ ["step ${i}: size ${map.size(m)} vs ${hamt.count(h)}"]
+      return bad
+    }
+    i = i + 1
+  }
+  # every key in the space, present or not
+  var j = 0
+  while j < space {
+    let k = key_of(j)
+    if map.get(m, k) != hamt.get(h, k) {
+      bad = bad ++ ["get ${k}: ${map.get(m, k)} vs ${hamt.get(h, k)}"]
+    }
+    if map.has(m, k) != hamt.has(h, k) {
+      bad = bad ++ ["has ${k}"]
+    }
+    j = j + 1
+  }
+  if map.keys(m) != hamt.keys(h) {
+    bad = bad ++ ["keys order differs"]
+  }
+  if map.values(m) != hamt.values(h) {
+    bad = bad ++ ["values order differs"]
+  }
+  if map.entries(m) != hamt.entries(h) {
+    bad = bad ++ ["entries differ"]
+  }
+  bad
+}
+
+## Keys whose hashes collide, so the collision node is exercised rather than
+## being a branch the tests never reach. "Aa" and "BB" is the textbook pair
+## for java.lang.String; every extension of it collides too.
+fn collisions() -> List[String] = {
+  var bad: List[String] = []
+  let ks = ["Aa", "BB", "AaAa", "BBBB", "AaBB", "BBAa"]
+  var m: Map[String, Int] = map.empty()
+  var h: Hamt[String, Int] = hamt.empty()
+  var i = 0
+  for k in ks {
+    m = map.insert(m, k, i)
+    h = hamt.assoc(h, k, i)
+    i = i + 1
+  }
+  if map.size(m) != hamt.count(h) { bad = bad ++ ["collision size"] }
+  if map.keys(m) != hamt.keys(h) { bad = bad ++ ["collision order"] }
+  for k in ks {
+    if map.get(m, k) != hamt.get(h, k) { bad = bad ++ ["collision get ${k}"] }
+  }
+  # drop one from the middle of the collision node
+  let m1 = map.remove(m, "AaAa")
+  let h1 = hamt.dissoc(h, "AaAa")
+  if map.keys(m1) != hamt.keys(h1) { bad = bad ++ ["collision order after remove"] }
+  if hamt.get(h1, "AaAa") != None { bad = bad ++ ["collision remove"] }
+  if map.get(m1, "BBBB") != hamt.get(h1, "BBBB") { bad = bad ++ ["collision survivor"] }
+  bad
+}
+
+## Persistence: an old version must not see a later one's writes.
+fn persistence() -> List[String] = {
+  var bad: List[String] = []
+  var h: Hamt[Int, Int] = hamt.empty()
+  var i = 0
+  while i < 500 {
+    h = hamt.assoc(h, i, i)
+    i = i + 1
+  }
+  let base = h
+  let a = hamt.assoc(base, 1000, 1)
+  let b = hamt.dissoc(base, 7)
+  if hamt.count(base) != 500 { bad = bad ++ ["base grew"] }
+  if hamt.get(base, 1000) != None { bad = bad ++ ["base saw a's write"] }
+  if hamt.get(base, 7) != Some(7) { bad = bad ++ ["base saw b's removal"] }
+  if hamt.count(a) != 501 { bad = bad ++ ["a size"] }
+  if hamt.count(b) != 499 { bad = bad ++ ["b size"] }
+  bad
+}
+
+pub fn main() -> Unit !io = {
+  var bad: List[String] = []
+  bad = bad ++ run(20000, 400)
+  bad = bad ++ run(4000, 4000)
+  bad = bad ++ run(300, 8)
+  bad = bad ++ collisions()
+  bad = bad ++ persistence()
+  for b in list.take(bad, 10) { println("FAIL " ++ b) }
+  println("mismatches ${len(bad)}")
+}
