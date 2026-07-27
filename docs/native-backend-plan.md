@@ -804,3 +804,46 @@ peel opaque。
 **它为什么一直没被发现**:`scripts/spike-native/run.sh` 在 JVM 那一跑失败时,会把
 `emitc`/`cc`/`native` 全标成 `blocked`——**JVM 拒绝的程序,C 后端永远测不到**。而这一族
 里 JVM 恰恰是先崩的那个。语料 `unit_value.dawn` 现在把七项检查全走一遍。
+
+## 13. S4 第一程:std 进翻译单元,known-red 清空(2026-07-27/28)
+
+### 13.1 顺序是被实测定死的
+
+`__emitc` 原本只 lower **程序自己的**模块。S3 之后集合就是 std(`[1, 2]` 调 `std/pvec.of_array`),
+所以任何拿着 list 的程序都在 `cc` 那步撞墙。07-27 试过直接把 std 链进来,结果整个语料一起红:
+std 自己要 `cursor_start`,C 侧没有。于是顺序写死:**先补 intrinsic 长尾,再链 std**。
+
+这一程按那个顺序走完了:C 运行时把契约整个实现了一遍(cursor 8 / str 9 / bytes 7 / io 8 /
+parse 3 / code_points 与 join / java_try 与 catch_panic),emitc 改成从 intrinsic 表读
+(见 [`runtime-intrinsics-design.md`](runtime-intrinsics-design.md) §12.1),std 随即链得进去。
+`scripts/spike-native/known-red.txt` **现在一条不剩**。
+
+### 13.2 链进 std 之后炸出来的四个静默误编译
+
+都在**擦除边界**上,都能编译,都是 JVM 靠 verifier 和 LambdaMetafactory 免费拿到、C 必须自己写的:
+
+| 缺的那一下 | 症状 |
+|---|---|
+| 元组字段按构造点的具体类型存 | `map_from([(1, "one")])` 把 key 当指针读 → 段错误 |
+| 列表字面量元素不装箱 | `[1, 2, 3]` 渲染时同上 |
+| 闭包 adapter 用 lambda 的具体类型 | `map` 一个 `List[Unit]`:`int64_t` 返回值被当指针 |
+| impl 符号按**实例化**主体命名 | 调用点 `List_Int`、定义点 `List_Var123`,链接失败 |
+
+前三条的共同答案是同一句:**擦除位置上的东西一律走 slot**。元组在 JVM 上是两个 `Object`
+(无论从什么建的),`Fn` 接口的 `apply` 也是擦除的——C 侧照抄这个形状即可。
+
+第四条不是形状问题而是**一件事两份定义**:JVM 的 `codegen.subject_name` 特意丢掉类型实参
+(「名字标识的是 impl,而相干性保证一个 head 至多一个 impl」),emitc 用的 `ty_key` 却保留 list 的元素。
+`ty_key` 的注释写着它假设「impl 主体都是具体类型」——那个前提在 std 写下
+`impl[T: Show] Show[List[T]]` 的那天就没了。规则挪进 `core.subject_key`,
+两边由 codegen 的测试 "an impl is named by its head" 拴住。
+
+### 13.3 顺带
+
+- **comptime const** 现在两个后端都发:标量内联(JVM 也是这么做的),结构化的仍然拒绝并说明理由
+  ——C 没有 `<clinit>` 可以重建它。const 按简单名解析,所以那张表是**每模块**一份
+  (std/pvec 的 `MASK` 和 std/hamt 的 `MASK` 是两个常量)。
+- **`panic` 分支**:JVM 的 ATHROW 不会落下来,C 的赋值却照写不误,`dawn_str t = DAWN_UNIT;` 编不过。
+  `no_value()` 统一回答「这个分支有没有值可赋」。std/str 的 `substring` 第一行就是。
+- **Bytes 的 `++` 和 `==`**:前者发的是**字符串**拼接,后者比的是指针。`eq_bytes.dawn` 本来就是为这个写的语料,
+  之前一直卡在 `emitc` 那步没跑到。

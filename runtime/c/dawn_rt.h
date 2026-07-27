@@ -42,6 +42,15 @@ typedef union dawn_slot {
   dawn_str s;
 } dawn_slot;
 
+/* Dawn's `Bytes`: a byte array behind a pointer. Text is `dawn_str`; this is
+ * what `bytes_utf8` produces and `std/bytes` walks. Separate because the two
+ * are separate Dawn types, and conflating them here would let one be passed
+ * where the other belongs without the C compiler saying so. */
+typedef struct {
+  const unsigned char *p;
+  int64_t len;
+} dawn_bytes;
+
 /* Every ADT value, tuple included. `tag` is the constructor index, which is
  * exactly what CIsCtor tests -- the JVM backend uses class identity instead,
  * and that difference is confined to the two emitters. */
@@ -52,6 +61,21 @@ typedef struct {
 } dawn_adt;
 
 dawn_adt *dawn_adt_new(int32_t tag, int32_t nfields);
+
+/* The prelude ADTs the runtime itself has to build: `parse_int` and
+ * `bytes_decode` return an Option, `java_try` a Result. A constructor's tag is
+ * its index in the declaration order, and these four numbers are the one place
+ * that order is written down outside the compiler -- emitc's test "the C
+ * runtime's constructor tags are the prelude's" is the joint that keeps them
+ * honest. A field at a type-variable position is boxed, here as on the JVM,
+ * so each of these takes a slot pointer. */
+#define DAWN_TAG_SOME 0
+#define DAWN_TAG_NONE 1
+#define DAWN_TAG_OK 0
+#define DAWN_TAG_ERR 1
+
+dawn_adt *dawn_some(void *boxed);
+dawn_adt *dawn_none(void);
 
 /* `Array[T]` -- the one collection primitive a backend owes the language
  * (native-backend-plan D1). std's List, Map and Set are all built on it, so
@@ -151,14 +175,88 @@ dawn_slot *dawn_box_str(dawn_str v);
 
 void dawn_rt_init(int argc, char **argv);
 
-/* stdout */
-dawn_unit dawn_print(dawn_str s);
-dawn_unit dawn_println(dawn_str s);
+/* ---- the runtime-intrinsic contract ------------------------------------
+ *
+ * Everything from here to `dawn_panic` implements a primitive the intrinsic
+ * table says a runtime module owns, and each is named `dawn_` plus the
+ * intrinsic's own name. That is not a convention the emitter can be talked
+ * out of: it emits the call from the table, so a primitive whose C function
+ * is missing or misspelled fails to link, and one that is added here needs no
+ * emitter change at all (docs/runtime-intrinsics-design.md 4). */
+
+/* io */
+dawn_unit dawn_io_print(dawn_str s);
+dawn_unit dawn_io_println(dawn_str s);
+dawn_adt *dawn_io_read_line(void); /* Option[String]; None at EOF */
+bool dawn_io_is_dir(dawn_str path);
+dawn_str dawn_io_read_file(dawn_str path);      /* panics on failure */
+dawn_unit dawn_io_write_file(dawn_str path, dawn_str content);
+dawn_array *dawn_io_list_names(dawn_str path);  /* boxed dawn_str elements */
+dawn_array *dawn_args(void);
+
+/* `f` returns an erased slot, so one cast serves whatever `T` is -- the same
+ * reason the JVM hands these an `Fn0` whose `apply` returns `Object`.
+ *
+ * The JVM catches an exception; native has no exceptions, so these catch a
+ * panic, which is the one failure mechanism there is. The consequence is
+ * visible: the `Err` payload is the panic message rather than a Java
+ * exception's `toString`, so a program that prints it prints different text
+ * on the two backends. Everything that only branches on Ok/Err agrees. */
+dawn_adt *dawn_java_try(dawn_clo *f);
+dawn_adt *dawn_catch_panic(dawn_clo *f);
 
 /* strings */
 dawn_str dawn_str_concat(dawn_str a, dawn_str b);
 bool dawn_str_eq(dawn_str a, dawn_str b);
 int64_t dawn_str_len(dawn_str s); /* code points, matching the JVM backend */
+dawn_str dawn_str_trim(dawn_str s);
+dawn_str dawn_str_lower(dawn_str s);
+dawn_str dawn_str_upper(dawn_str s);
+bool dawn_str_contains(dawn_str s, dawn_str sub);
+bool dawn_str_starts_with(dawn_str s, dawn_str prefix);
+bool dawn_str_ends_with(dawn_str s, dawn_str suffix);
+/* code-point indices, -1 when absent: the wrappers in std/str turn the
+ * sentinel into None, and the index is observable, so it is not the byte
+ * offset the search actually ran on. */
+int64_t dawn_str_index_of(dawn_str s, dawn_str sub);
+int64_t dawn_str_last_index_of(dawn_str s, dawn_str sub);
+dawn_adt *dawn_parse_int(dawn_str s);                    /* Option[Int] */
+dawn_adt *dawn_parse_float(dawn_str s);                  /* Option[Float] */
+dawn_adt *dawn_parse_int_radix(dawn_str s, int64_t radix);
+dawn_array *dawn_code_points(dawn_str s);                /* boxed Int elements */
+dawn_str dawn_from_code_points(dawn_array *cps);
+dawn_str dawn_join(dawn_array *parts, dawn_str sep);
+
+/* Cursors. A position is a byte offset into the UTF-8 here and a UTF-16 index
+ * on the JVM, and neither is observable: `Cursor` is opaque outside
+ * std/cursor, so nothing can print one or do arithmetic on one. What is
+ * observable -- the order, and what `slice` returns -- agrees.
+ *
+ * `cursor_slice` panics on a range that is out of bounds or lands inside a
+ * character. The JVM's returns a sentinel and its emitter raises the panic;
+ * that split is why this one is not in the intrinsic table. */
+int64_t dawn_cursor_start(dawn_str s);
+int64_t dawn_cursor_end(dawn_str s);
+bool dawn_cursor_done(dawn_str s, int64_t c);
+int64_t dawn_cursor_char(dawn_str s, int64_t c); /* -1 at the end */
+int64_t dawn_cursor_next(dawn_str s, int64_t c);
+int64_t dawn_cursor_prev(dawn_str s, int64_t c);
+int64_t dawn_cursor_skip(dawn_str s, int64_t c, dawn_str sub);
+dawn_str dawn_cursor_slice(dawn_str s, int64_t from, int64_t to);
+dawn_adt *dawn_index_of_from(dawn_str s, dawn_str sub, int64_t from);
+
+/* bytes. `concat` and `eq` are not intrinsics -- they are what `++` and `==`
+ * at Bytes compile to, the way dawn_str_concat and dawn_str_eq are for text. */
+dawn_bytes *dawn_bytes_concat(const dawn_bytes *a, const dawn_bytes *b);
+bool dawn_bytes_eq(const dawn_bytes *a, const dawn_bytes *b);
+dawn_bytes *dawn_bytes_utf8(dawn_str s);
+int64_t dawn_bytes_len(const dawn_bytes *b);
+int64_t dawn_bytes_at(const dawn_bytes *b, int64_t i); /* 0..255, -1 out of range */
+dawn_bytes *dawn_bytes_slice(const dawn_bytes *b, int64_t from, int64_t to);
+/* Option[String]; None only for a charset this runtime cannot decode, which
+ * is what the JVM's UnsupportedEncodingException arm means. Malformed input
+ * is replaced rather than refused, as `new String(bytes, charset)` does. */
+dawn_adt *dawn_bytes_decode(const dawn_bytes *b, dawn_str charset);
 dawn_str dawn_str_of_int(int64_t v);
 dawn_str dawn_str_of_float(double v);
 dawn_str dawn_str_of_bool(bool v);

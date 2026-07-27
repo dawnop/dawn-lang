@@ -1,0 +1,109 @@
+# The string face of the runtime-intrinsic contract, checked against a written
+# expectation rather than against whichever backend answered first.
+#
+# The JVM implements these over `java.lang.String`, which is UTF-16, and the C
+# runtime over UTF-8. That difference is supposed to be invisible, and the two
+# places it could leak are here: `str_len` and `str_index_of` report *code
+# point* counts, so neither backend may report its own storage units.
+#
+# The cursor family is not here. Those intrinsics are `internal` -- only std
+# may name them -- so reaching them needs std compiled into the translation
+# unit, which is the next step and not this one. `Cursor` is exercised through
+# std/str once that lands.
+#
+# `parse_float` is not here either: `str_of_float` is not byte-identical to
+# Java's Double.toString, so no float can be printed in a differential corpus.
+use std/io
+
+fn opt_int(o: Option[Int]) -> String =
+  match o {
+    Some(i) -> to_string(i)
+    None -> "none"
+  }
+
+fn ok_or_err(r: Result[String, String]) -> String =
+  match r {
+    Ok(_) -> "ok"
+    # deliberately not the payload: the JVM's is an exception's toString and
+    # native's is the panic message, and that divergence is documented
+    Err(_) -> "err"
+  }
+
+pub fn main() -> Unit !io = {
+  io.println("-- length is in code points --")
+  # "aé中𝄞": one byte, two, three, four. Four code points, five UTF-16 units,
+  # ten UTF-8 bytes -- so a backend reporting its own units is visible here.
+  let mixed = "aé中𝄞"
+  io.println("str_len            = " ++ to_string(str_len(mixed)))
+  io.println("str_len ascii      = " ++ to_string(str_len("abc")))
+
+  io.println("-- search reports a code-point index --")
+  io.println("index_of 中        = " ++ to_string(str_index_of(mixed, "中")))
+  io.println("index_of missing   = " ++ to_string(str_index_of(mixed, "z")))
+  io.println("index_of empty     = " ++ to_string(str_index_of(mixed, "")))
+  io.println("last_index_of l    = " ++ to_string(str_last_index_of("hello", "l")))
+  io.println("last_index_of miss = " ++ to_string(str_last_index_of("hello", "z")))
+  io.println("last_index_of ''   = " ++ to_string(str_last_index_of("hello", "")))
+
+  io.println("-- predicates --")
+  io.println("contains           = " ++ to_string(str_contains(mixed, "é中")))
+  io.println("starts_with        = " ++ to_string(str_starts_with(mixed, "aé")))
+  io.println("ends_with          = " ++ to_string(str_ends_with(mixed, "𝄞")))
+  io.println("ends_with false    = " ++ to_string(str_ends_with(mixed, "中")))
+
+  io.println("-- trimming and case --")
+  io.println("trim               = [" ++ str_trim("  \t hi \n ") ++ "]")
+  io.println("trim nothing       = [" ++ str_trim("hi") ++ "]")
+  io.println("trim all           = [" ++ str_trim("   ") ++ "]")
+  io.println("lower              = " ++ str_lower("MiXeD 42"))
+  io.println("upper              = " ++ str_upper("MiXeD 42"))
+
+  io.println("-- classification --")
+  io.println("is_letter a        = " ++ to_string(char_is_letter(97)))
+  io.println("is_digit a         = " ++ to_string(char_is_digit(97)))
+  io.println("is_space tab       = " ++ to_string(char_is_space(9)))
+  io.println("is_space ideo      = " ++ to_string(char_is_space(12288)))
+  io.println("is_space nbsp      = " ++ to_string(char_is_space(160)))
+
+  io.println("-- parsing --")
+  io.println("parse_int          = " ++ opt_int(parse_int("42")))
+  io.println("parse_int signed   = " ++ opt_int(parse_int("-42")))
+  io.println("parse_int spaced   = " ++ opt_int(parse_int("  7 ")))
+  io.println("parse_int min      = " ++ opt_int(parse_int("-9223372036854775808")))
+  io.println("parse_int over     = " ++ opt_int(parse_int("9223372036854775808")))
+  io.println("parse_int junk     = " ++ opt_int(parse_int("4x")))
+  io.println("parse_int empty    = " ++ opt_int(parse_int("")))
+  io.println("radix 16           = " ++ opt_int(parse_int_radix("ff", 16)))
+  io.println("radix 2            = " ++ opt_int(parse_int_radix("1011", 2)))
+  io.println("radix bad digit    = " ++ opt_int(parse_int_radix("12", 2)))
+
+  io.println("-- code points --")
+  io.println("code_points        = " ++ to_string(code_points("aé中")))
+  io.println("round trip         = " ++ from_code_points(code_points(mixed)))
+  io.println("from_code_points   = " ++ from_code_points([104, 105]))
+  io.println("join               = " ++ join(["a", "b", "c"], "-"))
+  io.println("join empty sep     = " ++ join(["a", "b"], ""))
+  io.println("join one           = " ++ join(["only"], "-"))
+
+  io.println("-- bytes --")
+  let b = bytes_utf8(mixed)
+  io.println("bytes_len          = " ++ to_string(bytes_len(b)))
+  io.println("bytes_at 0         = " ++ to_string(bytes_at(b, 0)))
+  io.println("bytes_at oob       = " ++ to_string(bytes_at(b, 99)))
+  io.println("decode round trip  = " ++
+    match bytes_decode(b, "UTF-8") {
+      Some(s) -> s
+      None -> "none"
+    })
+  io.println("decode bad charset = " ++
+    match bytes_decode(b, "NoSuchCharset") {
+      Some(_) -> "some"
+      None -> "none"
+    })
+
+  io.println("-- the barrier --")
+  # java_try catches an exception on the JVM and a panic natively; both make
+  # this an Err, which is the part that has to agree.
+  io.println("try missing file   = " ++ ok_or_err(java_try(fn() => io_read_file("no-such-file"))))
+  io.println("try ok             = " ++ ok_or_err(java_try(fn() => str_upper("fine"))))
+}

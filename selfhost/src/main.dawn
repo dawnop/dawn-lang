@@ -49,6 +49,7 @@ use emit.{emit_module, gen_trait_interface}
 use core.{CModule}
 use lower
 use emitc
+use emitc.{EmitMod}
 use tast.{TModule}
 use interp.{CtOut, CValue, CtOpts, ct_default, DEFAULT_FUEL}
 use checker.{Cx}
@@ -1232,18 +1233,40 @@ fn run_emitc(rest: List[String]) -> Unit !io = {
   let prog = analyze_program(loaded, std, ct_default())
   if len(prog.diags) > 0 { fail_compile(prog.diags) }
   let (adts, traits, impl_table, prog_fns) = program_tables(std, prog.modules)
-  var mods: List[CModule] = []
+  # const values by declaring module, the same view the JVM path builds: a
+  # const is named by its simple name and imported by it
+  var const_vals: Map[String, Map[String, CValue]] = map.empty()
+  for sm in std.mods {
+    let (cls, _cx, _tm, ct) = sm
+    const_vals = map.insert(const_vals, cls, ct.consts)
+  }
+  for cm in prog.modules { const_vals = map.insert(const_vals, cm.mod_path, cm.ct.consts) }
+
+  var units: List[EmitMod] = []
   var entry = ""
-  # std is deliberately NOT lowered in here yet, though a C translation unit
-  # needs every function it calls and after S3 the collections *are* std --
-  # `[1, 2]` calls `std/pvec.of_array`. Emitting std wholesale was measured
-  # (2026-07-27) and turns every corpus program red at once: std's own modules
-  # reach the string intrinsics native has no implementation for, starting at
-  # `cursor_start`. So the order is fixed -- finish the intrinsic tail, then
-  # link std in. Until then `cc` is the wall for anything holding a list, and
-  # known-red.txt says so.
+  # std goes in first, because a C translation unit needs a definition for
+  # everything it calls and after S3 the collections *are* std -- `[1, 2]`
+  # calls `std/pvec.of_array`. This was measured as premature on 2026-07-27
+  # and is not any more: std reaches the string intrinsics (`cursor_start`
+  # first), and the C runtime implements them now.
+  for sm in std.mods {
+    let (cls, cx, tm, ct) = sm
+    units = units ++ [
+      EmitMod {
+        m: lower.lower_module(cls, tm, traits, impl_table, adts, prog_fns),
+        consts: merged_consts(cx, ct, const_vals),
+        blocks: ct.blocks
+      }
+    ]
+  }
   for cm in prog.modules {
-    mods = mods ++ [lower.lower_module(cm.class_name, cm.tm, traits, impl_table, adts, prog_fns)]
+    units = units ++ [
+      EmitMod {
+        m: lower.lower_module(cm.class_name, cm.tm, traits, impl_table, adts, prog_fns),
+        consts: merged_consts(cm.cx, cm.ct, const_vals),
+        blocks: cm.ct.blocks
+      }
+    ]
     if entry == "" {
       for tf in cm.tm.fns {
         if tf.name == "main" { entry = cm.class_name }
@@ -1251,7 +1274,7 @@ fn run_emitc(rest: List[String]) -> Unit !io = {
     }
   }
   if entry == "" { cli_error("no main function in " ++ t) }
-  let text = emitc.emit_program(mods, entry)
+  let text = emitc.emit_program(units, entry)
   if out == "" {
     print(text)
   } else {

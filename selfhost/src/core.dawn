@@ -299,6 +299,29 @@ pub fn ty_key(t: Ty) -> String =
     TyJava(_, _) -> "Java"
   }
 
+## The name an impl's subject contributes to the symbol it compiles to.
+##
+## An impl is named by its subject's *head*: coherence gives a head at most one
+## impl, so `List[Int]` and `List[T]` are the same impl and have to spell the
+## same name. `ty_key` keeps a container's element -- harmless while every impl
+## subject was concrete, which its own comment says it assumed, and wrong from
+## the moment std wrote `impl[T: Show] Show[List[T]]`: the call site knows
+## `List[Int]` and the definition knows `List[T]`.
+##
+## The JVM backend answers the same question with `codegen.subject_name`, which
+## spells an ADT with its declared name because a JVM method name is read by
+## people. Dropping the arguments is the part that is the rule, and
+## codegen's test "an impl is named by its head" holds the two to it.
+pub fn subject_key(t: Ty) -> String =
+  match t {
+    TyList(_) -> "List"
+    TyMap(_, _) -> "Map"
+    TySet(_) -> "Set"
+    TyArray(_) -> "Array"
+    TyOpaque(id, _, _, tgt) -> "Op" ++ to_string(id) ++ "_" ++ subject_key(tgt)
+    _ -> ty_key(t)
+  }
+
 ## The same spelling, but injective over *instantiated* types.
 ##
 ## `ty_key` may drop type arguments because everything it names is a v1 impl

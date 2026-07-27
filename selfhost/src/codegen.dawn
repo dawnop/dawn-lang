@@ -17,6 +17,7 @@ use types.{
   TyError, TyVar, TyAdt, TyList, TyMap, TySet, TyArray, TyJava, TyTuple, TyFn,
   Adts, AdtI, CtorI, adt_of, adt_jvm_name, ctor_jvm_name, Sym, Sig, Eff
 }
+use core.{subject_key}
 use jreflect
 use java "dawn.tool.AdtClassWriter"
 use java "org.objectweb.asm.MethodVisitor"
@@ -183,6 +184,28 @@ test "a Unit is an ordinary reference, and only the bottom types are void" {
   assert slots_of(TyNever) == 0
   assert is_bottom(TyNever)
   assert is_bottom(TyError)
+}
+
+test "an impl is named by its head" {
+  # Coherence gives a head at most one impl, so `List[Int]` and `List[T]` are
+  # the same impl and both backends have to spell it the same way. They spell
+  # it differently in one respect on purpose -- a JVM method name is read by
+  # people, so an ADT contributes its declared name -- but dropping the
+  # arguments is the rule, and this is where the two are held to it.
+  #
+  # emitc used `ty_key`, which keeps a list's element. Nothing noticed while
+  # every impl subject was concrete; std's `impl[T: Show] Show[List[T]]` made
+  # the call site say `List_Int` and the definition `List_Var123`.
+  let adts = prelude_adts()
+  let it = TyList(TyInt)
+  let gen = TyList(TyVar("T", 7))
+  assert subject_name(adts, it) == subject_name(adts, gen)
+  assert subject_key(it) == subject_key(gen)
+  assert subject_name(adts, TyMap(TyInt, TyString)) == "Map"
+  assert subject_key(TyMap(TyInt, TyString)) == "Map"
+  # and a subject with no arguments is still itself
+  assert subject_name(adts, TyString) == "String"
+  assert subject_key(TyString) == "String"
 }
 
 test "the ASM interop spike: a class assembles through the shared writer" {

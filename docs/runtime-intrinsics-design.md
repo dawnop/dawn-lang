@@ -248,7 +248,51 @@ JVM-锁死。LLVM 后端一看 std 里全是 `java.lang.String.codePointCount`,�
 - **LLVM 侧**:字符串 native 表示(UTF-8/16)、内存管理选型(RC/region/GC)。→ 这几项已在
   [llvm-backend-research.md](llvm-backend-research.md) §4 深挖并给出推荐(UTF-8 / Perceus 式 RC / 先发 C)。
 
-## 12. 结论
+## 12. 契约有了第二份实现(2026-07-27/28)
+
+前面十一节都是**一份实现下的设计**。C 运行时把契约整个实现了一遍,以下是被第二份实现证伪或坐实的东西。
+
+### 12.1 名字:表里不该有名字
+
+`Intr.rt` 原本是 `Option[(Rt, String)]`——模块 + **它在那个模块里叫什么**。逐条看下来,那个 String
+**每一项都是 intrinsic 自己的名字换成 Java 大小写**(`cursor_start` → `cursorStart`,`java_try` → `javaTry`)。
+即:表里存的不是数据,是**一个后端的拼写习惯**,而表是两个后端共用的。后果不是难看,是**第二个后端根本读不了这张表**
+——emitc 只能手写 `else if` 链,于是「哪个运行时函数实现这个 intrinsic」有了两份定义,其中一份还缺了 32 项。
+
+现在 `rt: Option[Rt]` 只说模块,名字各后端自己拼:JVM 是 `(rt_class(o), name)`,C 是 `dawn_` ++ name。
+生成的 `dawn/rt/*` 里那 13 个 camelCase 方法改成了 intrinsic 自己的名字(Emit-Change)。
+
+> **判据**:表里的一列若能由键算出来,它就不是数据。这条同时解释了为什么改完之后
+> 「加一个 native intrinsic」= 「写一个按约定命名的 C 函数」,emitter 不必动。
+
+### 12.2 字符串表示:UTF-8 vs UTF-16 不是开放决策,是**哪些位置可观察**的问题
+
+§11 把它挂在「开放决策」下。实际答案是分层的:
+
+| 位置 | 货币 | 可观察? |
+|---|---|---|
+| `str_len` / `str_index_of` / `str_last_index_of` | **码点**索引 | **是**——两后端必须逐位相同 |
+| `Cursor`(cursor 家族 + `index_of_from`) | JVM=UTF-16 下标,C=**UTF-8 字节偏移** | **否** |
+| `hash` / `cmp` at String | UTF-16 码元(Java 定义) | 是——C 侧按 UTF-16 走一遍 |
+
+Cursor 那一行是 `opaque type Cursor = Int` 挣来的:模块外做不了算术、也没有 `Show[Cursor]`,
+所以那个数**谁也看不见**,两后端各挑各的最省的表示。这跟 `array_push` 的「唯一时就地写」是同一形状——
+**契约规定的是可观察行为,不是实现**;区别只在 Array 那条要用时钟量,这条靠类型系统挡住。
+
+### 12.3 诚实记录:C 侧现存的偏离
+
+不是 gap(未实现),是**实现了但答案可能不同**,各自写在定义处:
+
+- `str_lower`/`str_upper` 只折 ASCII。非 ASCII 有大小写的字母(希腊/西里尔/带音符拉丁)原样返回,JVM 会折。
+  全 Unicode 折叠要的表这个运行时还没有;而「见到非 ASCII 就 panic」会打断 `str.lower("中文")` 这种本来正确的用法。
+- `str_of_float` / `parse_float` 不是 Java 的语法/最短往返形式。浮点因此不进差分语料。
+- `java_try`/`catch_panic` 的 `Err` 载荷:JVM 是异常的 `toString`,native 是 panic 消息。**只分支 Ok/Err 的程序一致**。
+- `io_list_names` 的顺序两边都未定义。
+
+反过来,原本以为要偏离、实测不必的:`char_is_space` 的全 Unicode 集合小到可以写全(§`dawn_is_space_cp`),
+所以它不再是 ASCII-only。
+
+## 13. 结论
 
 去 Java 和接 LLVM 是**同一套重构的两个视角**:立一层运行时 intrinsic 契约,把 `java.*` 全关进 JVM
 后端对它的实现里,std 写在契约之上。这样 selfhost 名副其实(无语言核心里的手写 Java),且 native

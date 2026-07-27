@@ -20,8 +20,10 @@ use std/list
 use std/map
 use types.{
   Ty, TyInt, TyFloat, TyBool, TyString, TyUnit, TyNever, TyError, TyVar,
-  TyAdt, TyTuple, TyFn, TyBytes, TyList, TyMap, TySet, TyArray, TyJava, peel_opaque
+  TyAdt, TyTuple, TyFn, TyBytes, TyList, TyMap, TySet, TyArray, TyJava, peel_opaque,
+  intr_at, adt_of, prelude_adts, OPTION_ID
 }
+use interp.{CValue, VInt, VFloat, VBool, VStr, VUnit}
 use core.{
   diverges,
   CExpr, CStmt, CCallee, CFun, CModule, CParam,
@@ -35,10 +37,26 @@ use core.{
   CBinOp, CUnOp,
   CAdd, CSub, CMul, CDiv, CMod, CEq, CNe, CLt, CLe, CGt, CGe, CAnd, COr,
   CBand, CBor, CBxor, CShl, CShr, CUshr, CConcat, CNeg, CNot, CBnot,
-  cex_ty, ty_key
+  cex_ty, ty_key, subject_key
 }
 
-pub type CSt = { out: String, tmp: Int, ind: Int }
+## A module together with the comptime values its bodies refer to. A `const`
+## is named by its simple name and resolved in the module that declares it, so
+## the two maps belong to a module rather than to the unit -- std/pvec's MASK
+## and std/hamt's MASK are two constants that happen to agree.
+pub type EmitMod = {
+  m: CModule,
+  consts: Map[String, CValue],
+  blocks: Map[(Int, Int), CValue]
+}
+
+pub type CSt = {
+  out: String,
+  tmp: Int,
+  ind: Int,
+  consts: Map[String, CValue],
+  blocks: Map[(Int, Int), CValue]
+}
 
 fn pad(n: Int) -> String = {
   var s = ""
@@ -165,6 +183,18 @@ fn c_zero(t: Ty) -> String =
     RAdtPtr | RCloPtr | ROpaque -> "NULL"
   }
 
+## An erased slot read back at a concrete type. A reference is already a
+## pointer and only needs the C type; anything else was boxed, so the slot has
+## to be dereferenced. `CUnbox` is the usual way here, and the three
+## intrinsics that read an erased position without one -- `expect`,
+## `unwrap_or`, `cast` -- take the same path rather than each writing a cast.
+fn unbox_expr(v: String, to: Ty) -> String =
+  if is_ref_c(to) {
+    "((" ++ c_type(to) ++ ")(" ++ v ++ "))"
+  } else {
+    "(((dawn_slot*)(" ++ v ++ "))->" ++ slot_of(to) ++ ")"
+  }
+
 ## Which member of `dawn_slot` holds a value of this type. Reading an ADT
 ## field or unboxing goes through here.
 fn slot_of(t: Ty) -> String =
@@ -208,6 +238,26 @@ fn oct3(n: Int) -> String =
 
 fn str_lit(s: String) -> String =
   "dawn_str_lit(\"" ++ c_escape(s) ++ "\", " ++ to_string(bytes_len(bytes_utf8(s))) ++ ")"
+
+## A value the interpreter folded, written back out as C.
+##
+## Scalars are literals, exactly as the JVM backend inlines them. A structured
+## value is not: on the JVM it becomes a static field that `<clinit>` rebuilds,
+## and C has no `<clinit>` to rebuild it in, so it needs a generated
+## initialiser this backend does not have yet. That is a gap and it says so --
+## the alternative, folding it to something plausible, is what the const_fold
+## corpus exists to catch.
+fn const_literal(v: CValue, ty: Ty, what: String) -> String =
+  match v {
+    VInt(x) -> "INT64_C(" ++ to_string(x) ++ ")"
+    VFloat(x) -> to_string(x)
+    VBool(x) -> if x { "true" } else { "false" }
+    VStr(x) -> str_lit(x)
+    VUnit -> "DAWN_UNIT"
+    _ ->
+      panic("emitc: " ++ what ++ " folded to a structured value (" ++ ty_key(ty) ++
+          "), which native cannot rebuild yet")
+  }
 
 # ---- operators ----
 
@@ -279,15 +329,16 @@ pub fn emit_expr(st: CSt, e: CExpr) -> (CSt, String) =
     }
     CCall(callee, args, ty) -> emit_call(st, callee, args, ty)
     CIntrinsic(name, args, ty) -> emit_intrinsic(st, name, args, ty)
-    CCtor(_, ci, args, _) -> emit_alloc(st, ci, args)
-    CTuple(elems, _) -> emit_alloc(st, 0, elems)
+    CCtor(_, ci, args, _) -> emit_alloc(st, ci, args, false)
+    CTuple(elems, _) -> emit_alloc(st, 0, elems, true)
     CField(target, _, _, idx, ty) -> {
       let (st1, tv) = emit_expr(st, target)
       (st1, "(" ++ tv ++ ")->fields[" ++ to_string(idx) ++ "]." ++ slot_of(ty))
     }
     CTupleGet(target, idx, ty) -> {
+      # the other half of the tuple's erasure: every element went in boxed
       let (st1, tv) = emit_expr(st, target)
-      (st1, "(" ++ tv ++ ")->fields[" ++ to_string(idx) ++ "]." ++ slot_of(ty))
+      (st1, unbox_expr("(" ++ tv ++ ")->fields[" ++ to_string(idx) ++ "].p", ty))
     }
     CIsCtor(target, _, ci) -> {
       let (st1, tv) = emit_expr(st, target)
@@ -303,11 +354,7 @@ pub fn emit_expr(st: CSt, e: CExpr) -> (CSt, String) =
     }
     CUnbox(inner, to) -> {
       let (st1, v) = emit_expr(st, inner)
-      if is_ref_c(to) {
-        (st1, "((" ++ c_type(to) ++ ")(" ++ v ++ "))")
-      } else {
-        (st1, "(((dawn_slot*)(" ++ v ++ "))->" ++ slot_of(to) ++ ")")
-      }
+      (st1, unbox_expr(v, to))
     }
     CFnRef(_, name, _) ->
       # lowering turns every function value into a CClosure, so a bare
@@ -330,12 +377,18 @@ pub fn emit_expr(st: CSt, e: CExpr) -> (CSt, String) =
     }
     CDictArg(dv, _owner, _key, idx, _) -> {
       let (st1, d) = emit_expr(st, dv)
-      (st1, "((" ++ d ++ ")->args[" ++ to_string(idx) ++ "])")
+      (st1, "(((dawn_dict*)(" ++ d ++ "))->args[" ++ to_string(idx) ++ "])")
     }
-    CConstRef(name, _) ->
-      panic("emitc: comptime constants are not emitted yet (" ++ name ++ ")")
-    CComptime(_, _, _) ->
-      panic("emitc: comptime blocks are not emitted yet")
+    CConstRef(name, ty) ->
+      match map.get(st.consts, name) {
+        Some(v) -> (st, const_literal(v, ty, "const `" ++ name ++ "`"))
+        None -> panic("emitc: no comptime value for const `" ++ name ++ "`")
+      }
+    CComptime(lo, hi, ty) ->
+      match map.get(st.blocks, (lo, hi)) {
+        Some(v) -> (st, const_literal(v, ty, "comptime block"))
+        None -> panic("emitc: no comptime value for block")
+      }
     # The same recipe the JVM emits: an Array, one push per element, then
     # `std/pvec.of_array`. It could not be written until D1-D3 landed, because
     # before them a list literal had to name a host collection this side has
@@ -347,7 +400,10 @@ pub fn emit_expr(st: CSt, e: CExpr) -> (CSt, String) =
       st1 = line(sta, "dawn_array* " ++ tmp ++ " = dawn_array_new();")
       for el in elems {
         let (st2, v) = emit_expr(st1, el)
-        st1 = line(st2, tmp ++ " = dawn_array_push(" ++ tmp ++ ", " ++ v ++ ");")
+        # an Array's element is erased, so it goes in boxed -- the JVM's
+        # array_push takes an Object for the same reason
+        st1 = line(st2,
+          tmp ++ " = dawn_array_push(" ++ tmp ++ ", " ++ box_call(v, cex_ty(el)) ++ ");")
       }
       (st1, mangle("std/pvec", "of_array") ++ "(" ++ tmp ++ ")")
     }
@@ -398,14 +454,25 @@ fn emit_closure(st: CSt, name: String, owner: String, caps: List[CExpr]) -> (CSt
 fn adapter_name(owner: String, name: String) -> String =
   mangle(owner, name) ++ "__clo"
 
-fn emit_alloc(st: CSt, tag: Int, args: List[CExpr]) -> (CSt, String) = {
+## A constructor's or tuple's allocation.
+##
+## `erased` is what separates the two. A constructor field is stored at its
+## *declared* type, and lowering has already put a `CBox` around any argument
+## whose field is declared at a type variable -- which is why the JVM can
+## write the declared descriptor and be handed a value that fits it.
+##
+## A tuple has no declaration to read: `Tuple2` holds two `Object`s on the JVM
+## whatever it was built from, so `(1, "one")` boxes the 1 there. Nothing in
+## Core records that, so it has to be done here too -- and storing the 1 as an
+## `int64_t` instead compiled fine and segfaulted the moment std read the
+## field back at `K`, which is what `map_from` does with every key.
+fn emit_alloc(st: CSt, tag: Int, args: List[CExpr], erased: Bool) -> (CSt, String) = {
   var st1 = st
-  var vs: List[CExpr] = args
   var parts: List[String] = []
-  for a in vs {
+  for a in args {
     let (st2, v) = emit_expr(st1, a)
     st1 = st2
-    parts = parts ++ [v]
+    parts = parts ++ [if erased { box_call(v, cex_ty(a)) } else { v }]
   }
   let (st3, tmp) = fresh(st1)
   var st4 = line(st3,
@@ -413,9 +480,8 @@ fn emit_alloc(st: CSt, tag: Int, args: List[CExpr]) -> (CSt, String) = {
       to_string(len(parts)) ++ ");")
   var i = 0
   for p in parts {
-    let ft = cex_ty(args[i])
-    st4 = line(st4, tmp ++ "->fields[" ++ to_string(i) ++ "]." ++ slot_of(ft) ++
-        " = " ++ p ++ ";")
+    let slot = if erased { "p" } else { slot_of(cex_ty(args[i])) }
+    st4 = line(st4, tmp ++ "->fields[" ++ to_string(i) ++ "]." ++ slot ++ " = " ++ p ++ ";")
     i = i + 1
   }
   (st4, tmp)
@@ -442,13 +508,26 @@ fn emit_binary(st: CSt, op: CBinOp, l: CExpr, r: CExpr, ty0: Ty) -> (CSt, String
     let st6 = pop(line(st5, tmp ++ " = " ++ rv ++ ";"))
     (line(st6, "}"), tmp)
   } else if op == CConcat {
+    # `++` joins three things and each has its own join. The JVM emitter
+    # matches on the same three; a single arm here compiled while nothing
+    # concatenated anything but a String.
     let (st1, lv) = emit_expr(st, l)
     let (st2, rv) = emit_expr(st1, r)
-    (st2, "dawn_str_concat(" ++ lv ++ ", " ++ rv ++ ")")
-  } else if (op == CEq || op == CNe) && lt == TyString {
+    let fname =
+      match lt {
+        TyBytes -> "dawn_bytes_concat"
+        TyList(_) -> mangle("std/pvec", "concat")
+        _ -> "dawn_str_concat"
+      }
+    (st2, fname ++ "(" ++ lv ++ ", " ++ rv ++ ")")
+  } else if (op == CEq || op == CNe) && (lt == TyString || lt == TyBytes) {
+    # Bytes compares by content (spec §9.5.1). Left to the pointer comparison
+    # below it would answer identity -- and answer it silently, which is what
+    # eq_bytes.dawn is in the corpus to catch.
     let (st1, lv) = emit_expr(st, l)
     let (st2, rv) = emit_expr(st1, r)
-    let call = "dawn_str_eq(" ++ lv ++ ", " ++ rv ++ ")"
+    let f = if lt == TyBytes { "dawn_bytes_eq" } else { "dawn_str_eq" }
+    let call = f ++ "(" ++ lv ++ ", " ++ rv ++ ")"
     (st2, if op == CEq { call } else { "(!" ++ call ++ ")" })
   } else if op == CUshr {
     let (st1, lv) = emit_expr(st, l)
@@ -469,6 +548,29 @@ fn emit_binary(st: CSt, op: CBinOp, l: CExpr, r: CExpr, ty0: Ty) -> (CSt, String
   }
 }
 
+## A branch with nothing to assign: it leaves (return/break/continue) or its
+## type is Never, which is what `panic` and `todo` are.
+##
+## The JVM needs no such test -- an ATHROW does not fall through, so no store
+## follows it. C writes the assignment down whatever precedes it, and
+## `dawn_str t = DAWN_UNIT;` does not compile. Nothing in the corpus took a
+## `panic` branch at a value type until std was compiled in; std/str's
+## `substring` does it in its first line.
+fn no_value(e: CExpr) -> Bool = {
+  let t = peel_opaque(cex_ty(e))
+  if diverges(e) || t == TyNever {
+    return true
+  }
+  # A block with no tail expression is worth Unit -- unless its type says
+  # otherwise, and then nothing falls off its end to be worth anything: every
+  # path out of it returned. `emit_expr` hands back DAWN_UNIT for both, so the
+  # difference has to be read from the type here.
+  match e {
+    CBlock(_, None, _) -> t != TyUnit
+    _ -> false
+  }
+}
+
 fn emit_if(st: CSt, cond: CExpr, thn: CExpr, els: Option[CExpr], ty: Ty) -> (CSt, String) = {
   let (st1, cv) = emit_expr(st, cond)
   # peeled for the reason emit_binary is: an opaque type over Unit is still a
@@ -484,14 +586,24 @@ fn emit_if(st: CSt, cond: CExpr, thn: CExpr, els: Option[CExpr], ty: Ty) -> (CSt
     }
   let st4 = push(line(st3, "if (" ++ cv ++ ") {"))
   let (st5, tv) = emit_expr(st4, thn)
-  let st6 = if is_value { line(st5, tmp ++ " = " ++ tv ++ ";") } else { discard(st5, tv) }
+  let st6 =
+    if is_value && not no_value(thn) {
+      line(st5, tmp ++ " = " ++ tv ++ ";")
+    } else {
+      discard(st5, tv)
+    }
   let st7 = pop(st6)
   let st8 =
     match els {
       Some(ee) -> {
         let sa = push(line(st7, "} else {"))
         let (sb, ev) = emit_expr(sa, ee)
-        let sc = if is_value { line(sb, tmp ++ " = " ++ ev ++ ";") } else { discard(sb, ev) }
+        let sc =
+          if is_value && not no_value(ee) {
+            line(sb, tmp ++ " = " ++ ev ++ ";")
+          } else {
+            discard(sb, ev)
+          }
         line(pop(sc), "}")
       }
       None -> line(st7, "}")
@@ -518,7 +630,12 @@ fn emit_call(st: CSt, callee: CCallee, args: List[CExpr], ty: Ty) -> (CSt, Strin
     CDefault(owner, tid, method) ->
       (st1, default_symbol(owner, tid, method) ++ "(" ++ join(cargs, ", ") ++ ")")
     CMethod(dict, _tid, _m, idx) -> {
-      let (st3, dv) = emit_expr(st1, dict)
+      let (st3a, dv0) = emit_expr(st1, dict)
+      # A dictionary reaches here as whatever its position carries -- a
+      # parameter at a type-variable position is `void*`, which C will not
+      # dereference. The JVM's CHECKCAST is this cast.
+      let st3 = st3a
+      let dv = "((dawn_dict*)(" ++ dv0 ++ "))"
       # a dictionary is a flat table of function pointers; the slot index
       # was resolved by lowering, so no trait metadata is needed here
       # every slot has the trait's generic signature plus the dictionary as
@@ -535,15 +652,21 @@ fn emit_call(st: CSt, callee: CCallee, args: List[CExpr], ty: Ty) -> (CSt, Strin
     CDynamic(target) -> {
       let (st3, tv) = emit_expr(st1, target)
       # One indirect call whatever the capture count: the environment is
-      # always the first argument, and the adapter unpacks it.
+      # always the first argument, and the adapter unpacks it. Erased in and
+      # out, because that is the only shape every adapter has -- see
+      # `adapter_signature`.
       var sigp: List[String] = ["dawn_clo*"]
+      var boxed: List[String] = []
+      var i = 0
       for a in args {
-        sigp = sigp ++ [c_type(cex_ty(a))]
+        sigp = sigp ++ ["void*"]
+        boxed = boxed ++ [box_call(cargs[i], cex_ty(a))]
+        i = i + 1
       }
-      let cast = "(" ++ c_type(ty) ++ "(*)(" ++ join(sigp, ", ") ++ "))"
+      let cast = "(void*(*)(" ++ join(sigp, ", ") ++ "))"
       let call =
-        "((" ++ cast ++ "(" ++ tv ++ ")->fn)(" ++ join([tv] ++ cargs, ", ") ++ "))"
-      (st3, call)
+        "((" ++ cast ++ "(" ++ tv ++ ")->fn)(" ++ join([tv] ++ boxed, ", ") ++ "))"
+      (st3, unbox_expr(call, ty))
     }
   }
 }
@@ -553,7 +676,7 @@ fn emit_call(st: CSt, callee: CCallee, args: List[CExpr], ty: Ty) -> (CSt, Strin
 fn dict_symbol(key: String) -> String = "dawn_" ++ sanitize(key)
 
 fn impl_symbol(owner: String, tid: Int, subject: Ty, method: String) -> String =
-  mangle(owner, "impl$" ++ to_string(tid) ++ "$" ++ ty_key(subject) ++ "$" ++ method)
+  mangle(owner, "impl$" ++ to_string(tid) ++ "$" ++ subject_key(subject) ++ "$" ++ method)
 
 fn default_symbol(owner: String, tid: Int, method: String) -> String =
   mangle(owner, "default$" ++ to_string(tid) ++ "$" ++ method)
@@ -583,9 +706,9 @@ fn emit_dict(st: CSt, d: CDictDef) -> CSt = {
 ## module and this table disappears.
 fn std_shim(owner: String, name: String) -> Option[String] =
   if owner == "std/io" && name == "println" {
-    Some("dawn_println")
+    Some("dawn_io_println")
   } else if owner == "std/io" && name == "print" {
-    Some("dawn_print")
+    Some("dawn_io_print")
   } else {
     None
   }
@@ -630,6 +753,47 @@ fn pvec_target(n: String) -> String =
     n
   }
 
+## A primitive its runtime module owns, as the C symbol that implements it.
+##
+## This is the whole of the intrinsic contract on this backend: the table says
+## a module owns the primitive, and the module calls it what the language
+## calls it. So adding a native intrinsic is writing a C function with the
+## conventional name -- the emitter needs no new case, and cannot be the thing
+## that is out of date.
+fn rt_symbol(name: String) -> Option[String] =
+  match intr_at(name) {
+    Some(i) ->
+      match i.rt {
+        Some(_) -> Some("dawn_" ++ name)
+        None -> None
+      }
+    None -> None
+  }
+
+## A Dawn list crossing to a runtime function that takes an Array, and back.
+## The four primitives that traffic in lists cross through Array for the same
+## reason the JVM backend does: it is the shape both sides can name, and it
+## keeps the list's representation std's business (collections-dejava §5.1).
+fn to_host(v: String) -> String = mangle("std/pvec", "to_array") ++ "(" ++ v ++ ")"
+
+fn of_host(v: String) -> String = mangle("std/pvec", "of_array") ++ "(" ++ v ++ ")"
+
+## The tag `expect` and `unwrap_or` test for. Everywhere else a constructor
+## index reaches here inside a `CIsCtor` that lowering resolved; these two read
+## an Option with no `match` in front of them, so the index is read from the
+## table the prelude was declared with rather than written down again.
+fn option_tag(ctor: String) -> Int = {
+  let opt = adt_of(prelude_adts(), OPTION_ID)
+  var i = 0
+  for c in opt.ctors {
+    if c.name == ctor {
+      return i
+    }
+    i = i + 1
+  }
+  panic("emitc: Option has no constructor " ++ ctor)
+}
+
 fn emit_intrinsic(st: CSt, name: String, args: List[CExpr], ty: Ty) -> (CSt, String) = {
   var st1 = st
   var cargs: List[String] = []
@@ -651,14 +815,6 @@ fn emit_intrinsic(st: CSt, name: String, args: List[CExpr], ty: Ty) -> (CSt, Str
     (st1, "dawn_str_of_bool(" ++ a0 ++ ")")
   } else if name == "quote" {
     (st1, "dawn_str_quote(" ++ a0 ++ ")")
-  } else if name == "str_len" {
-    (st1, "dawn_str_len(" ++ a0 ++ ")")
-  } else if str.starts_with(name, "char_is_") {
-    (st1, "dawn_" ++ name ++ "(" ++ a0 ++ ")")
-  } else if name == "io_println" {
-    (st1, "dawn_println(" ++ a0 ++ ")")
-  } else if name == "io_print" {
-    (st1, "dawn_print(" ++ a0 ++ ")")
   } else if name == "to_float" {
     (st1, "((double)(" ++ a0 ++ "))")
   } else if name == "to_int" {
@@ -677,27 +833,49 @@ fn emit_intrinsic(st: CSt, name: String, args: List[CExpr], ty: Ty) -> (CSt, Str
     # side). So each backend translates them, and both translate to the same
     # `std/pvec` function -- one definition, compiled twice.
     (st1, mangle("std/pvec", pvec_target(name)) ++ "(" ++ join(cargs, ", ") ++ ")")
-  } else if name == "array_new" {
-    (st1, "dawn_array_new()")
-  } else if name == "array_len" {
-    (st1, "dawn_array_len(" ++ a0 ++ ")")
-  } else if name == "array_get" {
-    # `Array`'s element is a type variable, so a slot: the caller's CUnbox
-    # takes it from here to the concrete type, exactly as on the JVM
-    (st1, "dawn_array_get(" ++ a0 ++ ", " ++ cargs[1] ++ ")")
-  } else if name == "array_push" {
-    (st1, "dawn_array_push(" ++ a0 ++ ", " ++ cargs[1] ++ ")")
-  } else if name == "array_with" {
-    (st1,
-      "dawn_array_with(" ++ a0 ++ ", " ++ cargs[1] ++ ", " ++ cargs[2] ++ ")")
-  } else if name == "popcount" {
-    (st1, "dawn_popcount(" ++ a0 ++ ")")
+  } else if name == "join" {
+    (st1, "dawn_join(" ++ to_host(a0) ++ ", " ++ cargs[1] ++ ")")
+  } else if name == "from_code_points" {
+    (st1, "dawn_from_code_points(" ++ to_host(a0) ++ ")")
+  } else if name == "code_points" {
+    (st1, of_host("dawn_code_points(" ++ a0 ++ ")"))
+  } else if name == "io_list_names" {
+    (st1, of_host("dawn_io_list_names(" ++ a0 ++ ")"))
+  } else if name == "args" {
+    (st1, of_host("dawn_args()"))
+  } else if name == "cursor_slice" {
+    # Out of the table on both backends, for opposite reasons: the JVM's
+    # runtime returns null for a range that splits a character and the
+    # emitter turns that into the panic, while here the runtime panics
+    # itself. Same observable behaviour, and neither is a plain call.
+    (st1, "dawn_cursor_slice(" ++ a0 ++ ", " ++ cargs[1] ++ ", " ++ cargs[2] ++ ")")
+  } else if name == "expect" {
+    let (sta, tmp) = fresh(st1)
+    var st2 = line(sta, "dawn_adt* " ++ tmp ++ " = " ++ a0 ++ ";")
+    st2 = line(st2, "if (" ++ tmp ++ "->tag != " ++ to_string(option_tag("Some")) ++
+        ") dawn_panic(" ++ cargs[1] ++ ");")
+    (st2, unbox_expr(tmp ++ "->fields[0].p", ty))
+  } else if name == "unwrap_or" {
+    # Both arguments are evaluated, as they are on the JVM and as any other
+    # call would: a ternary over the raw fallback expression would make this
+    # the one intrinsic that does not.
+    let (sta, tmp) = fresh(st1)
+    let (stb, fb) = fresh(sta)
+    var st2 = line(stb, c_type(ty) ++ " " ++ fb ++ " = " ++ cargs[1] ++ ";")
+    st2 = line(st2, "dawn_adt* " ++ tmp ++ " = " ++ a0 ++ ";")
+    (st2, "(" ++ tmp ++ "->tag == " ++ to_string(option_tag("Some")) ++ " ? " ++
+        unbox_expr(tmp ++ "->fields[0].p", ty) ++ " : " ++ fb ++ ")")
+  } else if name == "cast" {
+    (st1, unbox_expr(a0, ty))
   } else if name == "to_string" {
     # Core normally lowers this into str_of_*; a residual one means a type
     # the lowering did not know how to render
     panic("emitc: to_string survived lowering -- unsupported operand type")
   } else {
-    panic("emitc: intrinsic not implemented for native: " ++ name)
+    match rt_symbol(name) {
+      Some(sym) -> (st1, sym ++ "(" ++ join(cargs, ", ") ++ ")")
+      None -> panic("emitc: intrinsic not implemented for native: " ++ name)
+    }
   }
 }
 
@@ -707,7 +885,14 @@ pub fn emit_stmt(st: CSt, s: CStmt) -> CSt =
   match s {
     CSLet(sym, ty, init) -> {
       let (st1, v) = emit_expr(st, init)
-      line(st1, c_type(ty) ++ " " ++ local_name(sym) ++ " = " ++ v ++ ";")
+      if no_value(init) {
+        # `let x = panic(...)` binds nothing; the declaration still has to
+        # exist because later statements name it, but it cannot be initialised
+        # from a value that was never produced
+        line(discard(st1, v), c_type(ty) ++ " " ++ local_name(sym) ++ " = " ++ c_zero(ty) ++ ";")
+      } else {
+        line(st1, c_type(ty) ++ " " ++ local_name(sym) ++ " = " ++ v ++ ";")
+      }
     }
     CSAssign(sym, value) -> {
       let (st1, v) = emit_expr(st, value)
@@ -785,12 +970,24 @@ fn is_lifted(f: CFun) -> Bool = str.starts_with(f.name, "lambda$")
 ## The adapter: uniform `(env, args...)` on the outside, the lifted
 ## function's real parameter list on the inside. Generating one per lifted
 ## body is what keeps every indirect call site identical.
+## Every adapter has one shape: erased slots in, an erased slot out.
+##
+## A closure is called through a pointer, and the call site knows only the
+## *function type* it holds -- which inside `std/list.map` is `fn(T) -> U`,
+## erased. The lambda behind it has concrete types. Adapting between the two
+## is what the JVM gets free from LambdaMetafactory, whose `instantiatedMethodType`
+## boxes and unboxes at the boundary; `dawn/rt/Fn`'s own `apply` is erased for
+## exactly this reason. Here it is written out.
+##
+## Giving the adapter the lambda's concrete types instead compiles -- C casts
+## the pointer without complaint -- and then `map` over a `List[Unit]` reads an
+## `int64_t` return as a pointer. That is the crash show_containers had.
 fn adapter_signature(f: CFun) -> String = {
   var ps: List[String] = ["dawn_clo* env"]
   for p in f.params {
-    ps = ps ++ [c_type(p.ty) ++ " " ++ local_name(p.sym)]
+    ps = ps ++ ["void* " ++ local_name(p.sym)]
   }
-  c_type(f.ret) ++ " " ++ adapter_name(f.owner, f.name) ++ "(" ++ join(ps, ", ") ++ ")"
+  "void* " ++ adapter_name(f.owner, f.name) ++ "(" ++ join(ps, ", ") ++ ")"
 }
 
 fn emit_adapter(st: CSt, f: CFun) -> CSt = {
@@ -802,14 +999,16 @@ fn emit_adapter(st: CSt, f: CFun) -> CSt = {
     i = i + 1
   }
   for p in f.params {
-    args = args ++ [local_name(p.sym)]
+    args = args ++ [unbox_expr(local_name(p.sym), p.ty)]
   }
   let call = fn_symbol(f) ++ "(" ++ join(args, ", ") ++ ")"
+  # a Unit-returning lambda still owes the caller a slot
+  let ret = box_call(call, f.ret)
   let st2 =
     if len(f.captures) == 0 {
-      line(line(st1, "(void)env;"), "return " ++ call ++ ";")
+      line(line(st1, "(void)env;"), "return " ++ ret ++ ";")
     } else {
-      line(st1, "return " ++ call ++ ";")
+      line(st1, "return " ++ ret ++ ";")
     }
   line(pop(st2), "}")
 }
@@ -820,7 +1019,9 @@ fn emit_fn(st: CSt, f: CFun) -> CSt = {
   let st3 =
     if peel_opaque(f.ret) == TyUnit {
       line(discard(st2, v), "return DAWN_UNIT;")
-    } else if diverges(f.body) {
+    } else if no_value(f.body) {
+      # unreachable, and C still needs it written: the function ends in a
+      # `return` on every path, or in a panic
       line(st2, "return " ++ c_zero(f.ret) ++ ";")
     } else {
       line(st2, "return " ++ v ++ ";")
@@ -828,15 +1029,15 @@ fn emit_fn(st: CSt, f: CFun) -> CSt = {
   line(pop(st3), "}")
 }
 
-pub fn emit_program(mods: List[CModule], entry: String) -> String = {
-  var st = CSt { out: "", tmp: 0, ind: 0 }
+pub fn emit_program(units: List[EmitMod], entry: String) -> String = {
+  var st = CSt { out: "", tmp: 0, ind: 0, consts: map.empty(), blocks: map.empty() }
   st = line(st, "/* generated by dawn __emitc -- Core IR -> C */")
   st = line(st, "#include \"dawn_rt.h\"")
   st = line(st, "")
 
   # C needs declarations before use; Dawn does not order top-level functions
-  for m in mods {
-    for f in m.fns {
+  for u in units {
+    for f in u.m.fns {
       if not f.is_test {
         st = line(st, fn_signature(f) ++ ";")
         if is_lifted(f) {
@@ -847,15 +1048,17 @@ pub fn emit_program(mods: List[CModule], entry: String) -> String = {
   }
   st = line(st, "")
 
-  for m in mods {
-    for d in m.dicts {
+  for u in units {
+    for d in u.m.dicts {
       st = emit_dict(st, d)
     }
   }
   st = line(st, "")
 
-  for m in mods {
-    for f in m.fns {
+  for u in units {
+    # a const is resolved in its declaring module, so the maps travel with it
+    st = CSt { ..st, consts: u.consts, blocks: u.blocks }
+    for f in u.m.fns {
       if not f.is_test {
         st = emit_fn(st, f)
         st = line(st, "")
@@ -892,4 +1095,27 @@ test "a slot member and the ref classification agree about every repr" {
   # the pointer group is what is left, and Unit is no longer in it
   assert slot_of(TyBytes) == "p"
   assert is_ref_c(TyBytes)
+}
+
+test "the C runtime's constructor tags are the prelude's" {
+  # The runtime builds an Option (parse_int, index_of_from, bytes_decode) and
+  # a Result (java_try), so DAWN_TAG_SOME and friends are written down in
+  # dawn_rt.h as well as declared here. This is the joint between the two:
+  # reorder the prelude's constructors and this fails, rather than the native
+  # backend quietly reading the wrong arm.
+  assert option_tag("Some") == 0
+  assert option_tag("None") == 1
+}
+
+test "a primitive its module owns needs no arm in the emitter" {
+  # The point of the table: these were seven hand-written cases, and the
+  # families with none were what `emitc: intrinsic not implemented` meant.
+  assert rt_symbol("cursor_next") == Some("dawn_cursor_next")
+  assert rt_symbol("bytes_at") == Some("dawn_bytes_at")
+  assert rt_symbol("io_print") == Some("dawn_io_print")
+  assert rt_symbol("array_push") == Some("dawn_array_push")
+  # and the ones the emitter really does write itself stay out of it
+  assert rt_symbol("cursor_slice") == None
+  assert rt_symbol("expect") == None
+  assert rt_symbol("code_points") == None
 }

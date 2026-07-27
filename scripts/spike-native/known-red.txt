@@ -2,14 +2,17 @@
 # unlisted one as fatal -- and it also fails when a *listed* check starts
 # passing, so a fix cannot leave its entry behind.
 #
-# Every line left is a gap in the native backend's *coverage* -- a feature it
-# does not have yet -- and none is an invented answer. That is a change: when
-# these corpora were added on 2026-07-25 four of the entries were semantics
-# Core did not carry, so each consumer made one up, and the harness had been
-# admitting only programs both backends already agreed on, which is how those
-# four stayed invisible. They are closed (each is recorded below, at the
-# section it was in). What remains is bytes, collections and comptime consts,
-# none of which native implements at all.
+# Nothing is listed. Every corpus program compiles with both backends, runs
+# with both, and agrees with a written expectation.
+#
+# It is worth saying what that does and does not mean. It does not mean the
+# native backend is finished -- it means the *corpus* no longer catches it out,
+# and the way to keep this file honest is to add programs, not to keep entries.
+# When these corpora were added on 2026-07-25 four of the entries turned out to
+# be semantics Core did not carry, so each consumer had invented one, and the
+# harness had been admitting only programs both backends already agreed on;
+# that is how they stayed invisible. Each closure below records what was
+# actually wrong, at the section its entry was in.
 
 # --- equality -------------------------------------------------------------
 # Closed by the structural expander (semantics-closure-design.md 3): lowering
@@ -17,9 +20,12 @@
 # compile one definition instead of inventing one each. eq_adt:native,
 # eq_adt:diff and eq_bytes:jvm were deleted here.
 
-# bytes_* has no native implementation yet, so the Bytes corpus cannot reach
-# the C compiler. An honest gap, not an invented answer.
-eq_bytes:emitc
+# `bytes_* has no native implementation` was here. The C runtime implements
+# the whole bytes family now, and the emitter reaches it from the intrinsic
+# table rather than a hand-written arm. Two defects the refusal had been
+# hiding came out with it, both silent: `++` at Bytes emitted the *string*
+# concatenation, and `==` at Bytes compared pointers, so two content-equal
+# arrays were unequal. eq_bytes:emitc was deleted here.
 
 # `derive Ord` was here: its body was written straight to JVM bytecode, so
 # Core never carried it and the C backend emitted a *call* to
@@ -44,18 +50,18 @@ eq_bytes:emitc
 # now, so rendering goes through the same synthesised bodies show_derive.dawn
 # does.
 #
-# `emitc` was the wall until 2026-07-27 and no longer is: the C backend has
-# the `Array` contract, the six list primitives and list literals, so it
-# emits C for this file. `cc` is the wall now, and for a different reason --
-# the emitted C *calls* `std/pvec.of_array` and std's own `show` bodies, and
-# `__emitc` lowers only the program's modules, so the translation unit has no
-# definition for them.
+# `emitc` and then `cc` were the wall, and neither is now. The C runtime
+# implements the intrinsic contract, so std compiles into the translation unit
+# and `std/pvec.of_array` and std's own `show` bodies have definitions.
 #
-# Linking std in was measured and is premature: it turns every corpus program
-# red at once, because std reaches string intrinsics native has not
-# implemented (`cursor_start` first). The order is therefore fixed -- finish
-# the intrinsic tail, then lower std into the unit, then this line goes.
-show_containers:cc
+# Linking std in is what made four silent miscompiles visible, all of them in
+# the erasure boundary the JVM gets free from its verifier and from
+# LambdaMetafactory: a tuple stored its fields natively and `map_from` read
+# them back as pointers; a list literal pushed unboxed elements; a closure
+# adapter carried the lambda's concrete types where every caller casts to the
+# erased shape; and an impl was named by its instantiated subject at the call
+# site and its generic one at the definition. Each compiled. show_containers:cc
+# was deleted here.
 
 # A bound whose subject *contains* a rigid variable rather than being one
 # (`[T: Eq]` used at `Option[T]`) was here. It reached the `struct_eq`
@@ -85,7 +91,9 @@ show_containers:cc
 # would have turned the wrong answer into a compile error rather than a right
 # one.
 
-# Comptime consts are not emitted for native yet. Unlike the four above, this
-# one is an honest gap rather than an invented answer; it is listed so the
-# corpus can carry the const_fold:jvm evidence.
-const_fold:emitc
+# `Comptime consts are not emitted for native yet` was here. The emitter reads
+# the folded values now, from the same per-module view the JVM path builds --
+# a const is named by its simple name, so std/pvec's MASK and std/hamt's MASK
+# are two constants and the map cannot be global. A value that folded to
+# something structured still refuses, and says so: C has no `<clinit>` to
+# rebuild one in. const_fold:emitc was deleted here.
