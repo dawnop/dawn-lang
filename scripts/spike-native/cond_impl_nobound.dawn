@@ -1,0 +1,66 @@
+# A conditional impl with ZERO bounds, reached through a bound so that the
+# dictionary is materialised rather than devirtualised away.
+#
+# `cond_impl.dawn` next door covers the shape trait v2 was built for -- an
+# impl whose own parameter carries a bound, so its dictionary is a function of
+# the argument's dictionary. This is the degenerate case underneath it: the
+# impl is still conditional (it has a type parameter) but constrains nothing,
+# so it needs no argument dictionaries at all.
+#
+# That case shipped miscompiled. `witness_value`'s WApply arm asked for a
+# *parameterised* dictionary, which with zero goals is a dictionary of no
+# arguments -- so the class was emitted with a singleton scaffold (private
+# constructor plus INSTANCE) while the construction site still emitted NEW and
+# INVOKESPECIAL on it. `IllegalAccessError` at run time, and only through a
+# bound: the devirtualised call on the line above works, which is why nothing
+# in the tree noticed. `impl[T] Index[List[T]]` is this shape, which is how it
+# was found.
+use std/io
+
+pub trait Dup[C] {
+  fn twice(c: C) -> Int
+}
+
+pub type Box[T] = { v: T }
+
+pub type Pair[A, B] = { l: A, r: B }
+
+impl[T] Dup[Box[T]] {
+  fn twice(c: Box[T]) -> Int = 41
+}
+
+## Two parameters, still no bounds -- the argument list being empty is what
+## matters, not how many parameters the impl declares.
+impl[A, B] Dup[Pair[A, B]] {
+  fn twice(c: Pair[A, B]) -> Int = 42
+}
+
+impl Dup[Int] {
+  fn twice(c: Int) -> Int = 43
+}
+
+## The bound is what forces the dictionary to exist as a value.
+fn through_bound[C: Dup](c: C) -> Int = twice(c)
+
+## Two hops, so the dictionary is passed on rather than only built.
+fn forwarded[C: Dup](c: C) -> Int = through_bound(c)
+
+pub fn main() -> Unit !io = {
+  println("-- devirtualised --")
+  println(to_string(twice(Box { v: 1 })))
+  println(to_string(twice(Pair { l: 1, r: "x" })))
+  println(to_string(twice(7)))
+
+  println("-- through a bound, so the dictionary is a value --")
+  println(to_string(through_bound(Box { v: 1 })))
+  println(to_string(through_bound(Pair { l: 1, r: "x" })))
+  println(to_string(through_bound(7)))
+
+  println("-- forwarded one more hop --")
+  println(to_string(forwarded(Box { v: 1 })))
+  println(to_string(forwarded(Pair { l: 1, r: "x" })))
+
+  println("-- the same impl at two different instantiations --")
+  println(to_string(through_bound(Box { v: "s" })))
+  println(to_string(through_bound(Box { v: Box { v: 1 } })))
+}

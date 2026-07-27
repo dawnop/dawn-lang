@@ -1549,10 +1549,19 @@ fn witness_value(st: LSt, w: WitRef) -> (LSt, CExpr) =
     # ...and a non-ground subject is not a different kind either, only one
     # that cannot be a constant: same slots, built per use out of the
     # arguments' dictionaries.
+    #
+    # Unless there are none. An impl that declares type parameters but bounds
+    # none of them -- `impl[T] Dup[Box[T]]` -- has nothing to be a function
+    # of, so its dictionary *is* a constant and `dict_def` gives it the
+    # singleton scaffold (`nargs` is 0 either way). Asking for it with
+    # `CDictApply` then emitted NEW against a private constructor. Handing
+    # this case to `dict_ref` is what makes the two sides unable to disagree:
+    # one call decides both the scaffold and the way it is reached.
     WApply(tid, subject, args) -> {
+      let goals = sub_goals(st.impls, tid, subject)
+      if len(goals) == 0 { return dict_ref(st, tid, subject) }
       let (st1, ds) = witness_values(st, args)
-      let (st2, key) =
-        dict_def(st1, tid, subject, sub_goals(st1.impls, tid, subject), true)
+      let (st2, key) = dict_def(st1, tid, subject, goals, true)
       (st2, CDictApply(key, ds, dict_ty()))
     }
   }
