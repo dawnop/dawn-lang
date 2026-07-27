@@ -622,7 +622,7 @@ Blob { data: .. } == Blob { data: .. }    no      # Option / 元组 / List 同
 | `Ord` | 真 trait + 字典 + `derive Ord` | 唯一做对的一个 |
 | `Eq`/`Hash` | trait(D0)+ 硬连线 `==` + `WStructural` 合成 + JVM 的 `Object.equals` 物化 + `Bytes`/`Array` 两个身份洞 | 11.1 的一、三 |
 | `Show` | **不是 trait**:`AdtI.derives_show` 布尔位 + `is_showable` 静态谓词 + 运行时 instanceof 链,不可覆盖 | 11.1 的二;tagged union 上结构性无解 |
-| Map/Set 键合法性 | `invalid_key_part` 独立结构行走 | 与 Hash trait 平行且打架 |
+| Map/Set 键合法性 | `invalid_key_part` 独立结构行走 | 与 Hash trait 平行且打架(S3 尾款删,键合法性 = `[K: Eq + Hash]`) |
 | 「哪个标量支持什么」 | **六张手抄表**(`eq_scalars` / Ord prelude impl / `impl_subject_ok` / `<` 快路径 / `is_showable` / `derive Ord` 可比字段) | 已经互相矛盾:`cursor.start(s) < cursor.end(s)` 编得过,`list.sort` 却报 Cursor 无序 |
 
 而这五套有**同一个前置**:`impl_subject_ok`(`checker.dawn:1844`)只放行具名非泛型类型 + 四个标量,
@@ -747,8 +747,14 @@ Blob { data: .. } == Blob { data: .. }    no      # Option / 元组 / List 同
 | 3 | **D2**:Map/Set 换 `std/hamt`(纯 Dawn HAMT over `Array`),`map_*`/`set_*` 从后端 intrinsic 变成 lowering 期对 std 的具名调用;`Eq`/`Hash` 以字典传入;`DawnMap`/`DawnSet`/`dawn/rt/Maps` 退役 | ✅ 2026-07-27,自举 **+0.7%**(见 [collections §9.6](collections-dejava-research.md)) |
 | 4 | **D3**:List 换 `std/pvec`(32 叉 trie + 尾块,纯 Dawn over `Array`);list 原语留在 Core、由后端翻译成 `std/pvec` 调用;`DawnList`/`dawn/rt/Lists` 退役 | ✅ 2026-07-27,自举 **+11.7%**(§9.3 预测 +11%) |
 
+| 5 | **尾款**:`struct_eq` 收窄成 `java_eq`(宿主值的相等,native 见不到 `TyJava`,从此不欠这份实现);结构默认按 trait 参数化(`[T: Hash]` 不再收 `Float`);合成 impl 的见证到它各部分为止;键合法性删掉独立行走改走 bound | ✅ 2026-07-27,零 Emit-Change |
+
 S3 收工:手写 Java **4→1**(只剩 `AdtClassWriter` 这个 ASM shim),`dawn/rt` 里不再有
 任何集合类,后端的集合契约就是 `Array` 五个操作 + `popcount`。合计自举 +12.5%。
+
+尾款那一刀关掉了两个能编译却会崩的形状(`Unit` 的 `Eq`/`Hash` 是 JVM 操作数栈下溢,
+`Box[T]` 无 bound 的 `==` 落到擦除行走),两个都不在任何语料里——量法与结论见
+[`semantics-closure-design.md`](semantics-closure-design.md) §10。
 
 **一条排序上的更正**:D2 的原语在 lowering 期换成对 `std/hamt` 的具名调用,D3 不能照做。
 comptime 解释器吃的是 Core,而且它**自己实现了 list 原语**——`const B: List[Int] = [A, 4]`

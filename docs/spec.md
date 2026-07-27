@@ -146,13 +146,17 @@ println("got $n items, first = ${list.get(0)}")
 内建函数操作（清单见 §11）。语义要点：
 
 - **持久（不可变）接口**：`map.insert`/`map.remove` 返回新映射，原值不变。
-- **键类型**可以是任何具**结构相等**的类型（`Int`/`String`/`Bool`/元组/ADT/record）——
-  不再限于 `Int`/`String`。实现要求这些类型有与结构相等一致的哈希（编译器为 ADT/元组/
-  record 自动生成 `hashCode`）。**`Float` 与 `Bytes` 不得出现在键类型的任何位置**
-  （含嵌套在元组/ADT/record/容器里，作键的内层 `Map` 连值位置也算）——编译错误：
-  `Float` 因 NaN/`-0.0` 有两套相等（§4.3），`Bytes` 的哈希是引用同一性；两者都给不出
-  与 `==` 一致的哈希。检查**按类型**落点：类型标注（`resolveType` 出 `Map`/`Set` 处）
-  与泛型调用的实例化点（推断首次拼出具体键类型处）——不点名创建函数，包装/转发天然穿透。
+- **键类型 = 有 `Hash` 的类型**，没有第二条规则。每个会摸到键的操作（`map.insert`/
+  `map.get`/`map.has`/`map.remove`/`m[k]` 与 `set` 的同名者）都带 `[K: Eq + Hash]`
+  bound，键合法性就是这条 bound 解得开——`Int`/`String`/`Bool`/`Bytes`、元组、ADT、
+  record 都可以（没写 impl 的按自身结构合成一份，§4.3），`Float` 不行（NaN/`-0.0`
+  给了它两套相等，§4.3 因此没给它 `Hash`），`Array` 不行（按同一性持有，非按内容）。
+  报错落在**用到键的那个操作**上，不在类型标注上：`Map[Float, Int]` 这个类型本身
+  拼得出来，只是没有任何操作能往里放键。
+  > 2026-07-27 之前另有一条独立的结构行走（`invalid_key_part`）走在类型标注与泛型
+  > 实例化点上。它与 bound 平行且**打架**：它禁 `Bytes`（理由「哈希是引用同一性」，
+  > 而 `Bytes` 早已改成内容哈希），而 bound 放行；它只在键位置拦 `Float`，
+  > 于是 `hash(1.5)` 在键位置之外照样能过。删掉的是那条行走，不是规则。
 - **迭代顺序 = 插入顺序**，确定且 JVM/native 一致（`map.keys`/`map.entries`/`set.to_list`
   按插入序）。`map.insert` 遇已存在的键**替换值、保留原插入位置**。
 - **相等与顺序无关**：两个键值对相同的 `Map` 相等，无论插入次序。
@@ -939,8 +943,9 @@ fn slurp(p: String) -> String !io = {
 `bytes.len`、`bytes.at(b, i) -> Int`（0..255，越界 panic）、`bytes.slice(b, start, end)`
 （`[start,end)`，下标 clamp 进范围）、`bytes.index_of(b, needle, from) -> Option[Int]`。
 `Bytes ++ Bytes` 拼接、`==`/`!=` 按**内容**比较（`Show` 渲染为 `<N bytes>` 摘要）。
-`byte[]` 的 JVM `hashCode` 是引用同一性，与内容 `==` 不一致，故 **`Bytes` 作 Map/Set 键
-（或出现在键类型内部）是编译错误**（§2.2；用 `decode` 出的 String 或十六进制键代替）。`Bytes` 不参与 comptime 常量折叠，也不能作 bare 一等函数值
+`Bytes` 的哈希是**内容**哈希（`Arrays.hashCode`），与内容 `==` 一致，故 `Bytes` **可以**
+作 Map/Set 键。（曾因 `byte[]` 的 JVM `hashCode` 是引用同一性而禁，两头都改成内容之后
+禁令没跟着撤，2026-07-27 撤掉。）`Bytes` 不参与 comptime 常量折叠，也不能作 bare 一等函数值
 （用 lambda 包一层）。
 
 **不透明值收窄回具体引用形参**：擦除泛型的返回（§9.2）落成不透明 `Object`，但业务

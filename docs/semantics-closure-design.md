@@ -102,17 +102,29 @@ S1 步 2 正是拿「不自反」挡掉函数值的。Rust 靠拆 `PartialEq`/`E
 差别一部分是能力(Bool/Bytes/Cursor 没有 `<`),另一部分是语义 —— 而语义那部分现在的
 处置是**让它消失**,不是保留。
 
-### 2.2 容器自身的相等留到 D2/D3
+### 2.2 容器自身的相等留到 D2/D3 —— **已了结(2026-07-25)**
 
-`dawn/rt/Lists` / `Maps` / `Sets` 是 **vendored 的 `.class`**(`vendor.dawn` 从 classpath 读,
-源在归档的 `kotlin-final`),本仓库改不动。所以 `List[Bytes] == List[Bytes]` 这一种
-今天没有任何修法。§3 决策 3 会把洞收敛到**只剩这一种**。
+写下时的理由:`dawn/rt/Lists` / `Maps` / `Sets` 是 **vendored 的 `.class`**
+(`vendor.dawn` 从 classpath 读,源在归档的 `kotlin-final`),本仓库改不动,所以
+`List[Bytes] == List[Bytes]` 这一种没有任何修法。
 
-### 2.3 `Bytes` 进 Map/Set 键的硬禁不撤
+D2/D3 把三个容器换成纯 Dawn 的 `std/hamt` 与 `std/pvec`,vendored 的 `.class` 一个不剩,
+相等改由 std 自己写的条件 impl 给出(`impl[T: Eq] Eq[List[T]]`)。这一种连同它所在的
+那类洞一起没了。
 
-即使 `hash` 内建对 `Bytes` 是内容哈希,容器用的仍是 `byte[]` 自带的 `hashCode`。
-禁令(`checker.dawn:340` `invalid_key_part`)在 D2/D3 之前必须留着。要改的是**诊断措辞**——
-「hashes by identity」得说清是哪条路。
+### 2.3 `Bytes` 进 Map/Set 键的硬禁不撤 —— **已推翻(2026-07-27)**
+
+写下时的理由:即使 `hash` 内建对 `Bytes` 是内容哈希,容器用的仍是 `byte[]` 自带的
+`hashCode`。所以禁令要留到 D2/D3。
+
+D2/D3 之后容器是纯 Dawn 的,查键用的是键类型的 `Eq`/`Hash` 字典,再没有第二套哈希。
+`Bytes` 两头都是内容(`Arrays.equals` / `Arrays.hashCode`),它是一个合法的键,
+S3 尾款把禁令撤了。
+
+**这条留给下一次的教训不是「预判错了」,是「禁令没有到期提醒」。** 禁令的理由是
+「容器用宿主的哈希」,理由消失于 D2/D3,而禁令自己不会知道——它是一条独立的结构行走,
+和它所依赖的那个事实之间没有任何机械联系。撤掉它的办法也正是这个:**让规则由它依赖的
+东西直接给出**(键合法性 = `[K: Eq + Hash]` 这条 bound 解得开),这样理由变了,规则自动跟着变。
 
 ## 3. S1.2:结构见证展开器
 
@@ -495,3 +507,77 @@ eq2(f1, f1)   false      # 同一个函数,和自己比
 要根治得把 id 空间拆开(ADT 一个计数器,符号另一个),那会重命名一切,不属于 S1。
 记在这里,是因为它的代价已经量到两次:**每次 golden 报「这些模块变了」,都要先排除
 这一项**才能读出真正的改动。
+
+## 10. S3 尾款:三处收窄的实测(2026-07-27)
+
+D2/D3 落地后留下三件继承来的清理,记在这里,因为**三件里有两件的前提被实测推翻**。
+
+### 10.1 `struct_eq` 还剩谁能到达
+
+先量,再改。把编译器自身(54 模块)、backend-dawn(27)、`packages/web`(15)、
+`packages/json`(13)、playground(22)全部 `__lower --dump`,`grep 'intrinsic struct_eq'`:
+**零**。决策 3 立这个原语时说「残留量可数」,数出来是 0。
+
+但「语料里没有」不等于「到不了」。逐形状探针跑下来,有三种能到达,其中两种是坏的:
+
+| 形状 | 实测 |
+|---|---|
+| `fn f[T](a: Box[T], b: Box[T]) -> Bool = a == b` | 编译通过,落到擦除的运行期行走 |
+| `eq2((), ())` / `hash(())` / `[()] == [()]` | **VerifyError: 操作数栈下溢** |
+| `javaObj1 == javaObj2` | 正常,等于 `Object.equals` |
+
+第二种的根因值得记:`Unit` 在 JVM 上占 **0 个栈槽**、描述符是 `V`,`unbox to=Unit` 弹掉
+对象什么也不压。于是「先取两个操作数再 `invokevirtual equals`」这条路,操作数是空的。
+Dawn 早就在两个地方拒绝过 `Unit`——`Show[Unit]` 报错、元组元素不能是 `Unit`——只有
+`Eq`/`Hash` 放行,然后崩。**同一个立场在三个地方要各写一遍,写漏一个就是崩溃**,这正是
+S1 那句「一个关系有几份定义」的另一种形态。
+
+第一种的根因是 `solved_structurally` 的兜底:合成 impl 的某个参数解不出见证时,它
+**回落成 `WConcrete`** 而不是报错。写这条兜底时的注释说得很明白——「要求 bound 是破坏性
+变更,属于刀 7」——刀 7 来了又走了,没做。改法是让它和条件 impl 同形:**合成 impl 的
+见证能力,到它各部分的见证为止**。
+
+三种关掉两种之后,`struct_eq` 只剩「宿主传进来的值」这一个主体,于是它改名 `java_eq`,
+契约从「运行期结构行走」变成「宿主自己的相等」。**这对 native 是净减一项**:C 后端根本
+见不到 `TyJava`,从此不欠这份实现——决策 3 当初写的是「S2.1 落地时这两个 intrinsic 整体
+删除」,实际是**换了个更小的契约留下**,因为「Dawn 不定义宿主值的相等」是事实,不是缺口。
+
+### 10.2 `uncomparable_part` / `invalid_key_part` 合不合
+
+`uncomparable_part` 早就不是「第二道门」了——刀 7 之后它长在 `resolve_witness` 里,
+是 Eq/Hash 结构默认的那条判定。真正的问题在它**只问 `Eq` 的表**:
+
+```
+[T: Hash] 实例化到 Float → has_impl_at(EQ_ID, TyFloat) 为真 → 放行 → Double.hashCode
+```
+
+S1.5 删掉 `Hash[Float]` 就是为了让这件事不可能,但那道墙只砌在**键位置**
+(`invalid_key_part`),`hash(1.5)` 在键位置之外照样能过。改法:把它按 trait 参数化,
+Eq 与 Hash 各自落到自己的标量清单上。
+
+而 `invalid_key_part` 的三条禁令,改完之后逐条看:
+
+| 禁 | 结论 |
+|---|---|
+| `Float` | bound 自己拒了(上面那条修完之后) |
+| `Array` | bound 早就拒了(`Array` 按同一性持有) |
+| `Bytes` | **理由已不成立**,见 §2.3 |
+
+于是整条行走(连同 `check_key_type` / `check_key_types_in` / `reported_key_types`)删掉,
+键合法性 = `[K: Eq + Hash]`。plan §11.4 记的阻塞理由是「ADT 不经 impl 哈希,照表问会把
+每个用户类型判成不能当键」——**这条早已过期**:该问的不是 impl 表,是 `resolve_witness`,
+而结构默认本来就是它答案的一部分。
+
+代价一条,记清楚:检查点从**类型标注**移到**用到键的那个操作**。`Map[Float, Int]` 这个
+类型现在拼得出来,只是没有任何操作能往里放键。这是可接受的——一个谁也放不进东西的空 map
+无害,而报错落在真正非法的那一步上,位置比标注处更准。
+
+### 10.3 `head_owner` 删不掉,而且比写下时更承重
+
+注释说它是「有明确终点的脚手架:S3 之后它们是 std 里的普通 ADT,只剩 `HAdt` 那一支」。
+**S3 没有让它们变成 ADT**——D2/D3 的关键裁决恰恰是让 `List`/`Map`/`Set` 继续做 `Ty` 变体,
+只换 `desc_of` 与路由,这才绕开了 `is_builtin_name` 的重定义禁令和种子兼容那堵墙。
+
+而且它现在更承重了:D2/D3 给 std 写了 `impl[K: Eq + Hash, V: Eq] Eq[Map[K, V]]`,
+让这条 impl 不算孤儿的,正是 `head_owner(HMap) == Some("std/map")` 这三行。所以结论是
+**它不是脚手架,是答案**,注释照实改。

@@ -518,9 +518,13 @@ fn head_owner(cx: Cx, h: Head) -> Option[String]
 规则变成 `trait_local || head_owner(h) == 当前模块`。用户模块自然被挡住
 ——`head_owner(HList)` 是 std,不等于用户模块。
 
-> **这是明知要删的脚手架。** S3 之后 `List`/`Map`/`Set` 是 std 里的真 ADT,
-> `head_owner` 退化成只剩 `HAdt` 那一支。决策 3 选「写进 std 源码」时就接受了
-> 这一段过渡代码;记在这里,免得将来有人把它当永久设计去维护。
+> ~~**这是明知要删的脚手架。** S3 之后 `List`/`Map`/`Set` 是 std 里的真 ADT,
+> `head_owner` 退化成只剩 `HAdt` 那一支。~~
+>
+> **2026-07-27 更正:它是答案,不是脚手架。** S3 没让三个容器变成 ADT——D2/D3 的关键
+> 裁决恰恰是让它们继续做 `Ty` 变体,只换 `desc_of` 与路由,这才绕开了 `is_builtin_name`
+> 的重定义禁令和种子兼容那堵墙。而且它比写下时更承重:让 std 自己的
+> `impl[T: Eq] Eq[List[T]]` 不算孤儿的,正是这三行。
 
 ### 3.10 `Eq`/`Hash` 成对
 
@@ -656,6 +660,21 @@ Emit-Change,ground 与非 ground 分开物化确实让绝大多数字典仍是�
 **留给 S3 的**(都记在正文里,不是遗漏):`Map`/`Set` 的 `Eq`/`Hash`(要等容器查找
 本身是 Dawn 的)、元组(没有 head)、`uncomparable_part` 与 `struct_eq` intrinsic
 (要等每个可比类型都有 impl)、`head_owner` 这段过渡脚手架。
+
+> **S3 的结账(2026-07-27)**,四条对三条:
+>
+> - `Map`/`Set` 的 `Eq`/`Hash`:D2 写进 std,如期。
+> - `struct_eq`:**没有整体删掉,是换了个更小的契约留下**——收窄成 `java_eq`
+>   「宿主值的相等」。理由不是做不到,是那件事本来就不是缺口:Dawn 不定义一个
+>   Java 对象的相等,而 C 后端见不到 `TyJava`,所以 native 反而是净减一项。
+> - `uncomparable_part`:**删不掉,但性质变了**。它早已不是「第二道门」(刀 7 把它
+>   放进了 `resolve_witness`),留下来是因为元组没有 head、结构默认得有人兜底。
+>   改的是它只问 `Eq` 表这件事——`[T: Hash]` 因此收了 `Float`。
+> - `head_owner`:**前提未兑现**,见 §3.9 的更正块。
+>
+> 顺带清掉的一件不在这张单子上:`invalid_key_part`。它和 `uncomparable_part` 同形,
+> 但删得掉——键合法性现在就是 `[K: Eq + Hash]` 这条 bound。详见
+> [`semantics-closure-design.md`](semantics-closure-design.md) §10。
 
 ## 6. `Iter` 的第二个前置：关联类型（2026-07-27 勘察）
 
