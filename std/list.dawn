@@ -1,11 +1,11 @@
 # Dawn's standard library: list operations.
 #
 # These are the "layer 2" of docs/pure-ffi-design.md section 3.3: ordinary Dawn
-# recursion over the primitives that must stay in the compiler (`len` and `get`,
-# which touch the representation). Nothing here needs `unsafe_pure` — and it
-# could not use it anyway, since these functions are effect-polymorphic and the
-# stamp deliberately refuses to mask an effect variable. That refusal is what
-# pushed the higher-order functions onto this path in the first place.
+# recursion over the primitives that must stay in the compiler. Nothing here
+# needs `unsafe_pure` — and it could not use it anyway, since these functions
+# are effect-polymorphic and the stamp deliberately refuses to mask an effect
+# variable. That refusal is what pushed the higher-order functions onto this
+# path in the first place.
 #
 # The accumulator helpers are module-level rather than local functions because a
 # local function may not declare an effect variable (spec section 3.1). Each is
@@ -13,45 +13,84 @@
 # `++`, which is O(1) amortized on the list representation (spec section 2.2) —
 # without that, every one of these would be quadratic.
 
-fn map_go[T, U](xs: List[T], f: fn(T) -> U !e, i: Int, acc: List[U]) -> List[U] !e =
-  if i == len(xs) { acc }
-  else { map_go(xs, f, i + 1, acc ++ [f(get(xs, i).expect("index below length"))]) }
+# ---- iteration ----
+#
+# Everything that walks a whole list, here and in the compiler, goes through
+# these four. `for x in xs` lowers to them (lower.dawn's `lower_for_list`)
+# rather than to an index loop, and so does every sequential helper below.
+#
+# The difference is not style: an index walk hardwires "this collection can be
+# randomly indexed", which costs nothing on today's flat representation and
+# O(log n) on the tree D3 replaces it with — measured 8-18x slower and widening
+# with n. Behind a cursor, the representation changes and its callers do not.
+#
+# A cursor is an index today because the representation is flat. When it stops
+# being flat, `Cur` and these four bodies change and nothing else does.
+#
+# Not `pub`: user code has no business holding one, and the compiler does not
+# need it exported — an ordinary function is emitted public static either way.
+
+alias Cur = Int
+
+fn iter_start[T](xs: List[T]) -> Cur = 0
+
+fn iter_done[T](xs: List[T], c: Cur) -> Bool = c >= len(xs)
+
+fn iter_next[T](xs: List[T], c: Cur) -> Cur = c + 1
+
+fn iter_get[T](xs: List[T], c: Cur) -> T = xs[c]
+
+# ---- sequential walks ----
+
+fn map_go[T, U](xs: List[T], f: fn(T) -> U !e, c: Cur, acc: List[U]) -> List[U] !e =
+  if iter_done(xs, c) { acc }
+  else { map_go(xs, f, iter_next(xs, c), acc ++ [f(iter_get(xs, c))]) }
 
 ## `f` applied to every element, in order.
 pub fn map[T, U](xs: List[T], f: fn(T) -> U !e) -> List[U] !e = {
   let empty: List[U] = []
-  map_go(xs, f, 0, empty)
+  map_go(xs, f, iter_start(xs), empty)
 }
 
-fn filter_go[T](xs: List[T], f: fn(T) -> Bool !e, i: Int, acc: List[T]) -> List[T] !e =
-  if i == len(xs) { acc }
+fn filter_go[T](xs: List[T], f: fn(T) -> Bool !e, c: Cur, acc: List[T]) -> List[T] !e =
+  if iter_done(xs, c) { acc }
   else {
-    let x = get(xs, i).expect("index below length")
-    filter_go(xs, f, i + 1, if f(x) { acc ++ [x] } else { acc })
+    let x = iter_get(xs, c)
+    filter_go(xs, f, iter_next(xs, c), if f(x) { acc ++ [x] } else { acc })
   }
 
 ## The elements satisfying `f`, in order.
 pub fn filter[T](xs: List[T], f: fn(T) -> Bool !e) -> List[T] !e = {
   let empty: List[T] = []
-  filter_go(xs, f, 0, empty)
+  filter_go(xs, f, iter_start(xs), empty)
 }
 
-fn fold_go[T, A](xs: List[T], f: fn(A, T) -> A !e, i: Int, acc: A) -> A !e =
-  if i == len(xs) { acc }
-  else { fold_go(xs, f, i + 1, f(acc, get(xs, i).expect("index below length"))) }
+fn fold_go[T, A](xs: List[T], f: fn(A, T) -> A !e, c: Cur, acc: A) -> A !e =
+  if iter_done(xs, c) { acc }
+  else { fold_go(xs, f, iter_next(xs, c), f(acc, iter_get(xs, c))) }
 
 ## Reduce from the left: `f(f(f(init, x0), x1), ...)`.
-pub fn fold[T, A](xs: List[T], init: A, f: fn(A, T) -> A !e) -> A !e = fold_go(xs, f, 0, init)
+pub fn fold[T, A](xs: List[T], init: A, f: fn(A, T) -> A !e) -> A !e =
+  fold_go(xs, f, iter_start(xs), init)
 
-fn find_go[T](xs: List[T], pred: fn(T) -> Bool !e, i: Int) -> Option[T] !e =
-  if i == len(xs) { None }
+fn find_go[T](xs: List[T], pred: fn(T) -> Bool !e, c: Cur) -> Option[T] !e =
+  if iter_done(xs, c) { None }
   else {
-    let x = get(xs, i).expect("index below length")
-    if pred(x) { Some(x) } else { find_go(xs, pred, i + 1) }
+    let x = iter_get(xs, c)
+    if pred(x) { Some(x) } else { find_go(xs, pred, iter_next(xs, c)) }
   }
 
 ## The first element satisfying `pred`, or `None`.
-pub fn find[T](xs: List[T], pred: fn(T) -> Bool !e) -> Option[T] !e = find_go(xs, pred, 0)
+pub fn find[T](xs: List[T], pred: fn(T) -> Bool !e) -> Option[T] !e =
+  find_go(xs, pred, iter_start(xs))
+
+# ---- by position ----
+#
+# `take`/`drop`/`slice`/`reverse` are positional by nature: one asks for a
+# range, the other for the other end. They stay on `get` and stay O(1) per
+# element on a flat list. D3 does not de-index them — it replaces them, since
+# an ordered tree cuts a range by splitting in O(log n) rather than by copying
+# elements one at a time, and reverses by walking its own structure backwards.
 
 fn slice_go[T](xs: List[T], i: Int, stop: Int, acc: List[T]) -> List[T] =
   if i >= stop { acc }
@@ -99,33 +138,39 @@ pub fn sort[T: Ord](xs: List[T]) -> List[T] = sort_by(xs, fn(a, b) => cmp(a, b))
 # builtin. The direction is a Bool rather than a ±1 multiplier because `cmp`
 # contracts sign, not magnitude: scaling its result could overflow.
 fn best_by_go[T, K: Ord](
-  xs: List[T], key: fn(T) -> K !e, i: Int, bx: T, bk: K, greater: Bool
+  xs: List[T], key: fn(T) -> K !e, c: Cur, bx: T, bk: K, greater: Bool
 ) -> T !e =
-  if i == len(xs) { bx }
+  if iter_done(xs, c) { bx }
   else {
-    let x = get(xs, i).expect("index below length")
+    let x = iter_get(xs, c)
     let k = key(x)
-    let c = cmp(k, bk)
-    let better = if greater { c > 0 } else { c < 0 }
-    if better { best_by_go(xs, key, i + 1, x, k, greater) }
-    else { best_by_go(xs, key, i + 1, bx, bk, greater) }
+    let cp = cmp(k, bk)
+    let better = if greater { cp > 0 } else { cp < 0 }
+    if better { best_by_go(xs, key, iter_next(xs, c), x, k, greater) }
+    else { best_by_go(xs, key, iter_next(xs, c), bx, bk, greater) }
   }
 
 ## The first element whose key is greatest; `None` when empty. Keys need `Ord`;
 ## `key` runs once per element.
-pub fn max_by[T, K: Ord](xs: List[T], key: fn(T) -> K !e) -> Option[T] !e =
-  match get(xs, 0) {
-    None -> None
-    Some(x0) -> Some(best_by_go(xs, key, 1, x0, key(x0), true))
+pub fn max_by[T, K: Ord](xs: List[T], key: fn(T) -> K !e) -> Option[T] !e = {
+  let c = iter_start(xs)
+  if iter_done(xs, c) { None }
+  else {
+    let x0 = iter_get(xs, c)
+    Some(best_by_go(xs, key, iter_next(xs, c), x0, key(x0), true))
   }
+}
 
 ## The first element whose key is least; `None` when empty. Keys need `Ord`;
 ## `key` runs once per element.
-pub fn min_by[T, K: Ord](xs: List[T], key: fn(T) -> K !e) -> Option[T] !e =
-  match get(xs, 0) {
-    None -> None
-    Some(x0) -> Some(best_by_go(xs, key, 1, x0, key(x0), false))
+pub fn min_by[T, K: Ord](xs: List[T], key: fn(T) -> K !e) -> Option[T] !e = {
+  let c = iter_start(xs)
+  if iter_done(xs, c) { None }
+  else {
+    let x0 = iter_get(xs, c)
+    Some(best_by_go(xs, key, iter_next(xs, c), x0, key(x0), false))
   }
+}
 
 ## The first greatest element; `None` when empty. Elements need `Ord`.
 pub fn max[T: Ord](xs: List[T]) -> Option[T] = max_by(xs, fn(x) => x)
@@ -143,12 +188,15 @@ pub fn min[T: Ord](xs: List[T]) -> Option[T] = min_by(xs, fn(x) => x)
 # The hash matches the shape the JVM's list hash already had (seed 1, step
 # `31 * acc + h`), because `hash` and the runtime's own bucketing must not
 # disagree about the same value.
+#
+# Two lists take two cursors: a cursor belongs to the list it walks, so there
+# is no single "position i" to share between them.
 
-fn eq_go[T: Eq](a: List[T], b: List[T], i: Int) -> Bool =
-  if i == len(a) {
+fn eq_go[T: Eq](a: List[T], b: List[T], ca: Cur, cb: Cur) -> Bool =
+  if iter_done(a, ca) {
     true
-  } else if eq(get(a, i).expect("index below length"), get(b, i).expect("index below length")) {
-    eq_go(a, b, i + 1)
+  } else if eq(iter_get(a, ca), iter_get(b, cb)) {
+    eq_go(a, b, iter_next(a, ca), iter_next(b, cb))
   } else {
     false
   }
@@ -156,69 +204,48 @@ fn eq_go[T: Eq](a: List[T], b: List[T], i: Int) -> Bool =
 ## Same length, and equal elements in order.
 impl[T: Eq] Eq[List[T]] {
   fn eq(a: List[T], b: List[T]) -> Bool =
-    if len(a) != len(b) { false } else { eq_go(a, b, 0) }
+    if len(a) != len(b) { false } else { eq_go(a, b, iter_start(a), iter_start(b)) }
 }
 
-fn hash_go[T: Hash](xs: List[T], i: Int, acc: Int) -> Int =
-  if i == len(xs) {
+fn hash_go[T: Hash](xs: List[T], c: Cur, acc: Int) -> Int =
+  if iter_done(xs, c) {
     acc
   } else {
-    hash_go(xs, i + 1, acc * 31 + hash(get(xs, i).expect("index below length")))
+    hash_go(xs, iter_next(xs, c), acc * 31 + hash(iter_get(xs, c)))
   }
 
 impl[T: Hash] Hash[List[T]] {
-  fn hash(xs: List[T]) -> Int = hash_go(xs, 0, 1)
+  fn hash(xs: List[T]) -> Int = hash_go(xs, iter_start(xs), 1)
 }
 
-fn cmp_go[T: Ord](a: List[T], b: List[T], i: Int) -> Int =
-  if i == len(a) {
-    if i == len(b) { 0 } else { 0 - 1 }
-  } else if i == len(b) {
+fn cmp_go[T: Ord](a: List[T], b: List[T], ca: Cur, cb: Cur) -> Int =
+  if iter_done(a, ca) {
+    if iter_done(b, cb) { 0 } else { 0 - 1 }
+  } else if iter_done(b, cb) {
     1
   } else {
-    let c = cmp(get(a, i).expect("index below length"), get(b, i).expect("index below length"))
-    if c != 0 { c } else { cmp_go(a, b, i + 1) }
+    let c = cmp(iter_get(a, ca), iter_get(b, cb))
+    if c != 0 { c } else { cmp_go(a, b, iter_next(a, ca), iter_next(b, cb)) }
   }
 
 ## Lexicographic: the first differing element decides, and a prefix is less
 ## than what extends it.
 impl[T: Ord] Ord[List[T]] {
-  fn cmp(a: List[T], b: List[T]) -> Int = cmp_go(a, b, 0)
+  fn cmp(a: List[T], b: List[T]) -> Int = cmp_go(a, b, iter_start(a), iter_start(b))
 }
 
-fn show_go[T: Show](xs: List[T], i: Int, acc: String) -> String =
-  if i == len(xs) {
+# "Am I at the first element?" was `i == 0`. A cursor cannot be asked that, so
+# the separator carries its own state -- the one thing dropping the index costs.
+fn show_go[T: Show](xs: List[T], c: Cur, first: Bool, acc: String) -> String =
+  if iter_done(xs, c) {
     acc
   } else {
-    show_go(xs, i + 1, acc ++ (if i == 0 { "" } else { ", " }) ++
-        show(get(xs, i).expect("index below length")))
+    show_go(xs, iter_next(xs, c), false,
+      acc ++ (if first { "" } else { ", " }) ++ show(iter_get(xs, c)))
   }
 
 ## `[e0, e1]`, each element in its nested form -- so a String element is
 ## quoted where the list itself is not.
 impl[T: Show] Show[List[T]] {
-  fn show(xs: List[T]) -> String = "[" ++ show_go(xs, 0, "") ++ "]"
+  fn show(xs: List[T]) -> String = "[" ++ show_go(xs, iter_start(xs), true, "") ++ "]"
 }
-
-# ---- iteration ----
-#
-# `for x in xs` lowers to these four (lower.dawn's `lower_for_list`), not to an
-# index loop. The difference is not style: an index loop hardwires iteration to
-# "this collection can be randomly indexed", which is O(1) on today's flat
-# representation and O(log n) on the tree D3 replaces it with -- measured 8-18x
-# slower and widening with n. Behind a cursor, the representation changes and
-# the compiler does not learn its shape.
-#
-# A cursor is an index today because the representation is flat. When it stops
-# being flat this becomes a leaf position, and `lower_for_list` does not change.
-#
-# Not `pub`: user code has no business holding one, and the compiler does not
-# need it exported -- ordinary functions are emitted public static either way.
-
-fn iter_start[T](xs: List[T]) -> Int = 0
-
-fn iter_done[T](xs: List[T], c: Int) -> Bool = c >= len(xs)
-
-fn iter_next[T](xs: List[T], c: Int) -> Int = c + 1
-
-fn iter_get[T](xs: List[T], c: Int) -> T = xs[c]
