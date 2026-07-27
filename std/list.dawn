@@ -199,3 +199,26 @@ fn show_go[T: Show](xs: List[T], i: Int, acc: String) -> String =
 impl[T: Show] Show[List[T]] {
   fn show(xs: List[T]) -> String = "[" ++ show_go(xs, 0, "") ++ "]"
 }
+
+# ---- iteration ----
+#
+# `for x in xs` lowers to these four (lower.dawn's `lower_for_list`), not to an
+# index loop. The difference is not style: an index loop hardwires iteration to
+# "this collection can be randomly indexed", which is O(1) on today's flat
+# representation and O(log n) on the tree D3 replaces it with -- measured 8-18x
+# slower and widening with n. Behind a cursor, the representation changes and
+# the compiler does not learn its shape.
+#
+# A cursor is an index today because the representation is flat. When it stops
+# being flat this becomes a leaf position, and `lower_for_list` does not change.
+#
+# Not `pub`: user code has no business holding one, and the compiler does not
+# need it exported -- ordinary functions are emitted public static either way.
+
+fn iter_start[T](xs: List[T]) -> Int = 0
+
+fn iter_done[T](xs: List[T], c: Int) -> Bool = c >= len(xs)
+
+fn iter_next[T](xs: List[T], c: Int) -> Int = c + 1
+
+fn iter_get[T](xs: List[T], c: Int) -> T = xs[c]

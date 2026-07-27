@@ -2475,13 +2475,20 @@ fn lower_stmt(st: LSt, s: TStmt) -> (LSt, List[CStmt]) =
     }
   }
 
-## `for x in xs` over a list: an index loop with the element read and
-## unboxed explicitly. The JVM emitter walks java.util.List by index for the
-## same reason -- the language only iterates lists, maps and sets going
-## through `map.entries` first.
+## `for x in xs` over a list: a cursor walk over `std/list`'s four iteration
+## functions. The language only iterates lists, maps and sets, and the latter
+## two go through `map.entries` first, so a list is the only thing that
+## reaches here.
 ##
-## Once D2/D3 make List an ordinary Dawn ADT this becomes a call to the
-## `Iter` trait and stops being a special case here.
+## It used to be an index loop -- `len` and `list_index` intrinsics, straight
+## against java.util.List. That hardwired iteration to "this collection can be
+## randomly indexed", which costs nothing on a flat representation and O(log n)
+## on the tree D3 replaces it with. Behind these four the representation can
+## change without this function learning its new shape; the cursor type is
+## whatever `iter_start` returns, read from the signature rather than assumed.
+##
+## No `Iter` trait is involved and none is needed: `for` iterates exactly one
+## type, so there is nothing here to be polymorphic over.
 fn lower_for_list(st: LSt, sym: Int, from: TExpr, body: TExpr) -> (LSt, List[CStmt]) = {
   let ct = tex_ty(from)
   let et =
@@ -2489,28 +2496,53 @@ fn lower_for_list(st: LSt, sym: Int, from: TExpr, body: TExpr) -> (LSt, List[CSt
       TyList(e) -> e
       _ -> sym_ty(st, sym, TyError)
     }
+  let start = iter_sig(st, "iter_start")
+  let done = iter_sig(st, "iter_done")
+  let next = iter_sig(st, "iter_next")
+  let getf = iter_sig(st, "iter_get")
+  let cur_t = start.ret
   let (st1, lid) = fresh_loop(st)
   let (st2, coll) = lower_expr(st1, from)
   let (st3, csym) = fresh_sym(st2)
   let (st4, isym) = fresh_sym(st3)
   let (st5, b) = lower_expr(LSt { ..st4, cur_loop: lid }, body)
   let cv = CLocal(csym, ct)
-  let iv = CLocal(isym, TyInt)
-  let elem = adapt_out(
-    CIntrinsic("list_index", [cv, iv], TyVar("E", 0)), TyVar("E", 0), et)
+  let iv = CLocal(isym, cur_t)
+  let elem = adapt_out(iter_call(getf, "iter_get", [cv, iv], ct, cur_t), getf.ret, et)
   let inner = CBlock(
-    [CSIf(CUnary(CNot,
-      CBinary(CLt, iv, CIntrinsic("len", [cv], TyInt), TyBool), TyBool),
-      CBreak(lid), None),
+    [CSIf(iter_call(done, "iter_done", [cv, iv], ct, cur_t), CBreak(lid), None),
       CSLet(sym, et, elem),
       CSDiscard(b)],
     None, TyUnit)
-  let step = CSAssign(isym, CBinary(CAdd, iv, CInt(1), TyInt))
+  let step = CSAssign(isym, iter_call(next, "iter_next", [cv, iv], ct, cur_t))
   (LSt { ..st5, cur_loop: st.cur_loop }, [
     CSLet(csym, ct, coll),
-    CSLet(isym, TyInt, CInt(0)),
+    CSLet(isym, cur_t, iter_call(start, "iter_start", [cv], ct, cur_t)),
     CSLoop(lid, inner, Some(CBlock([step], None, TyUnit)))
   ])
+}
+
+## std/list is bundled into every program (its class is emitted even for a
+## `println` one-liner), so a missing signature is a broken build, not a
+## program the user could have written.
+fn iter_sig(st: LSt, name: String) -> Sig =
+  match sig_of(st, "std/list", name) {
+    Some(sg) -> sg
+    None -> panic("lower: std/list." ++ name ++ " is missing")
+  }
+
+## The list argument is erased at the callee (`xs: List[T]` over a type
+## variable is not, but the element is), so each argument goes in through the
+## same adapt every other call site uses.
+fn iter_call(sg: Sig, name: String, args: List[CExpr], ct: Ty, cur_t: Ty) -> CExpr = {
+  var vs: List[CExpr] = []
+  var i = 0
+  for a in args {
+    let actual = if i == 0 { ct } else { cur_t }
+    vs = vs ++ [adapt_in(a, actual, sg.param_tys[i])]
+    i = i + 1
+  }
+  CCall(CDirect("std/list", name), vs, sg.ret)
 }
 
 # ---- functions and modules ----
