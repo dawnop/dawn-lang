@@ -188,7 +188,16 @@ pub fn load_std(dir: String) -> Result[StdCtx, String] !io = {
             fname ++ "(...)")
       }
     }
-    adts = cx1.adts
+    # union, like the impl table below it: std modules are checked with only
+    # the prelude and their own `use` edges in scope, so a module that does
+    # not import another does not carry that other's ADTs. Taking the last
+    # module's table alone loses every ADT declared before it -- invisible
+    # while no std module declared one, and a missing-adt-id panic the moment
+    # one does.
+    for pr in map.entries(cx1.adts) {
+      let (k, v) = pr
+      adts = map.insert(adts, k, v)
+    }
     for pr in map.entries(cx1.impl_table) {
       let (k, v) = pr
       impls = map.insert(impls, k, v)
