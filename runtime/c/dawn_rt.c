@@ -130,6 +130,28 @@ dawn_unit dawn_io_println(dawn_str s) {
   return DAWN_UNIT;
 }
 
+/* stdout is block-buffered here (dawn_rt_init) and stderr is not, so the two
+ * would interleave in the wrong order if a program used both. Flushing stdout
+ * before writing stderr is what System.err's autoflush gets for free. */
+dawn_unit dawn_io_eprint(dawn_str s) {
+  fflush(stdout);
+  if (s.len > 0) {
+    fwrite(s.p, 1, (size_t)s.len, stderr);
+  }
+  return DAWN_UNIT;
+}
+
+dawn_unit dawn_io_eprintln(dawn_str s) {
+  dawn_io_eprint(s);
+  fputc('\n', stderr);
+  return DAWN_UNIT;
+}
+
+dawn_unit dawn_io_exit(int64_t code) {
+  /* exit() flushes stdio, which the block buffering above makes load-bearing */
+  exit((int)code);
+}
+
 dawn_str dawn_str_concat(dawn_str a, dawn_str b) {
   if (a.len == 0) return b;
   if (b.len == 0) return a;
@@ -1005,6 +1027,39 @@ bool dawn_io_is_dir(dawn_str path) {
   bool yes = stat(p, &st) == 0 && S_ISDIR(st.st_mode);
   free(p);
   return yes;
+}
+
+bool dawn_io_exists(dawn_str path) {
+  char *p = dawn_cpath(path);
+  struct stat st;
+  bool yes = stat(p, &st) == 0;
+  free(p);
+  return yes;
+}
+
+/* Every prefix of the path, `mkdir -p` style. An existing directory is not a
+ * failure; an existing *file* is, which is what Files.createDirectories does
+ * and File.mkdirs does not. */
+dawn_unit dawn_io_mkdirs(dawn_str path) {
+  char *p = dawn_cpath(path);
+  for (int64_t i = 1; i <= path.len; i++) {
+    if (i != path.len && p[i] != '/') continue;
+    char saved = p[i];
+    p[i] = '\0';
+    struct stat st;
+    if (stat(p, &st) == 0) {
+      if (!S_ISDIR(st.st_mode)) {
+        free(p);
+        dawn_panic(dawn_str_lit("io_mkdirs: path exists and is not a directory", 44));
+      }
+    } else if (mkdir(p, 0777) != 0) {
+      free(p);
+      dawn_panic(dawn_str_lit("io_mkdirs: cannot create directory", 34));
+    }
+    p[i] = saved;
+  }
+  free(p);
+  return DAWN_UNIT;
 }
 
 dawn_str dawn_io_read_file(dawn_str path) {

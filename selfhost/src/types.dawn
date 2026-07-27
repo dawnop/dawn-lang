@@ -956,6 +956,22 @@ pub fn builtins() -> Map[String, Sig] = {
     eff1(bsig("io_read_file", [TyString], ["path"], TyString), EIo),
     eff1(bsig("io_write_file", [TyString, TyString], ["path", "content"], TyUnit), EIo),
     eff1(bsig("io_list_names", [TyString], ["path"], TyList(TyString)), EIo),
+    # stderr, and the process/filesystem primitives a CLI needs on any
+    # backend. The compiler reaches all five through `use java` today, which
+    # is why `errio.dawn` exists at all -- `System.err` is a static field and
+    # the interop reaches methods only, so it goes through a method handle.
+    # Nothing in std or selfhost names these yet: a builtin the previous
+    # release does not know cannot appear in selfhost/src until it ships.
+    eff1(bsig("io_eprint", [TyString], ["s"], TyUnit), EIo),
+    eff1(bsig("io_eprintln", [TyString], ["s"], TyUnit), EIo),
+    # `Unit`, not `Never`: it maps to `System.exit`, which the JVM types as
+    # void, and a Never-returning intrinsic would need the emitters to stop
+    # treating a call as falling through -- machinery `panic` has and nothing
+    # else needs.
+    eff1(bsig("io_exit", [TyInt], ["code"], TyUnit), EIo),
+    eff1(bsig("io_exists", [TyString], ["path"], TyBool), EIo),
+    # throws on failure, like read_file/write_file; std wraps it in java_try
+    eff1(bsig("io_mkdirs", [TyString], ["path"], TyUnit), EIo),
     Sig { ..bsig("map_empty", [], [], TyMap(k, v)), tparams: [k, v] },
     tp1(bsig("set_empty", [], [], TySet(t)), t),
     keyed2(bsig("map_from", [TyList(TyTuple([k, v]))], ["entries"], TyMap(k, v)), k, v),
@@ -1069,9 +1085,10 @@ pub fn intrinsics() -> Map[String, Intr] = {
   for op in ["utf8", "decode", "len", "at", "slice"] {
     rt_of = map.insert(rt_of, "bytes_" ++ op, RtBytes)
   }
-  for op in ["print", "println", "read_line", "is_dir", "read_file", "write_file"] {
-    rt_of = map.insert(rt_of, "io_" ++ op, RtIo)
-  }
+  for op in ["print", "println", "eprint", "eprintln", "read_line", "is_dir", "read_file",
+    "write_file", "exit", "exists", "mkdirs"] {
+      rt_of = map.insert(rt_of, "io_" ++ op, RtIo)
+    }
   rt_of = map.insert(rt_of, "java_try", RtIo)
   rt_of = map.insert(rt_of, "catch_panic", RtIo)
 
@@ -1267,7 +1284,7 @@ test "builtin table renders signatures" {
     }
     None -> { assert false }
   }
-  assert map_size2(bs) == 80
+  assert map_size2(bs) == 85
 }
 
 fn map_size2(m: Map[String, Sig]) -> Int = map.size(m)

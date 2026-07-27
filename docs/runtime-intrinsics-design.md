@@ -96,7 +96,15 @@ Java 类。**要做的是把这个模型长全。**
   > 不是水位线:**JVM 上因此只能复制**,native 上 Perceus 的 `rc==1` 才补得上(单线程,连 CAS 都不需要)。
   > 这就是原语从 4 个变成 5 个、且 `array_new` 不再预填的原因——预填会让水位线一上来就顶满,
   > 快路径永远进不去。12 倍整个落在 push 那条路上,所以结论不变。
-- **io**:`print`/`println`、`read_line`、`read_file`/`write_file`、`is_dir`、`list_names`。**不可约的效果边界**,小契约保留。
+- **io**:`print`/`println`、**`eprint`/`eprintln`**、`read_line`、`read_file`/`write_file`、`is_dir`、**`exists`**、
+  **`mkdirs`**、`list_names`、**`exit`**。**不可约的效果边界**,小契约保留。
+  > **加粗五项是 2026-07-28 补的,判据是「命令行程序在任何后端上都要它」**。编译器今天走 `use java` 拿这五样;
+  > 其中 stderr 最尖锐——`System.err` 是**静态字段**,而 `use java` 只到方法(spec §9.1),
+  > 于是 `errio.dawn` 整个模块的存在理由就是用 method handle 绕过去。**stdout 在契约里而 stderr 不在,是意外不是决定**。
+  > `exit` 取 `Unit` 不取 `Never`:它映射到 `System.exit`(JVM 上是 void),而 Never 要两个 emitter
+  > 都停止把调用当作会落下来——那套机制只有 `panic` 需要。
+  > **没进来的**:`getenv`/`getProperty`(只被包管理和 JVM classpath 用)、临时文件(可在 mkdirs 之上搭)、
+  > 二进制文件读写(只被 JVM 后端和包管理用)——都不在 native 编译器的关键路径上,不为不需要的东西扩契约。
 - **控制**:`panic`、效果系统的 IO 边界。
 
 > 契约的**边界画在哪**是核心决策(§8)。**集合已给结论=细到极致**:整族集合在后端边界上只剩 `Array[T]` 一个原语

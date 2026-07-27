@@ -1135,6 +1135,55 @@ pub fn gen_io_class(supers: List[String]) -> Bytes !io = {
   rlv.visitInsn(OP_ARETURN)
   close_mv(rlv)
 
+  # io_eprint/io_eprintln(s) = System.err.print/println(s). `System.err` is a
+  # static field, which the `use java` interop does not reach (spec §9.1 --
+  # methods only); reaching it from Dawn needs a method handle, which is what
+  # `errio.dawn` does. Here it is one GETSTATIC.
+  for e in [("io_eprint", "print"), ("io_eprintln", "println")] {
+    let (dawn_name, java_name) = e
+    let ev = open_static(cw, dawn_name, "(Ljava/lang/String;)L" ++ UNIT_CLASS ++ ";")
+    ev.visitFieldInsn(OP_GETSTATIC, "java/lang/System", "err", "Ljava/io/PrintStream;")
+    ev.visitVarInsn(OP_ALOAD, 0)
+    ev.visitMethodInsn(OP_INVOKEVIRTUAL, "java/io/PrintStream", java_name,
+      "(Ljava/lang/String;)V", false)
+    return_unit(ev)
+    close_mv(ev)
+  }
+
+  # io_exit(code) = System.exit((int) code)
+  let exv = open_static(cw, "io_exit", "(J)L" ++ UNIT_CLASS ++ ";")
+  exv.visitVarInsn(OP_LLOAD, 0)
+  exv.visitInsn(OP_L2I)
+  exv.visitMethodInsn(OP_INVOKESTATIC, "java/lang/System", "exit", "(I)V", false)
+  return_unit(exv)
+  close_mv(exv)
+
+  # io_exists(path) = new File(path).exists()
+  let exsv = open_static(cw, "io_exists", "(Ljava/lang/String;)Z")
+  exsv.visitTypeInsn(OP_NEW, "java/io/File")
+  exsv.visitInsn(OP_DUP)
+  exsv.visitVarInsn(OP_ALOAD, 0)
+  exsv.visitMethodInsn(OP_INVOKESPECIAL, "java/io/File", "<init>", "(Ljava/lang/String;)V", false)
+  exsv.visitMethodInsn(OP_INVOKEVIRTUAL, "java/io/File", "exists", "()Z", false)
+  exsv.visitInsn(OP_IRETURN)
+  close_mv(exsv)
+
+  # io_mkdirs(path): Files.createDirectories — throws on failure, and unlike
+  # File.mkdirs it also fails loudly when the path exists as a file
+  let mkv = open_static(cw, "io_mkdirs", "(Ljava/lang/String;)L" ++ UNIT_CLASS ++ ";")
+  mkv.visitTypeInsn(OP_NEW, "java/io/File")
+  mkv.visitInsn(OP_DUP)
+  mkv.visitVarInsn(OP_ALOAD, 0)
+  mkv.visitMethodInsn(OP_INVOKESPECIAL, "java/io/File", "<init>", "(Ljava/lang/String;)V", false)
+  mkv.visitMethodInsn(OP_INVOKEVIRTUAL, "java/io/File", "toPath", "()Ljava/nio/file/Path;", false)
+  mkv.visitInsn(OP_ICONST_0)
+  mkv.visitTypeInsn(OP_ANEWARRAY, "java/nio/file/attribute/FileAttribute")
+  mkv.visitMethodInsn(OP_INVOKESTATIC, "java/nio/file/Files", "createDirectories",
+    "(Ljava/nio/file/Path;[Ljava/nio/file/attribute/FileAttribute;)Ljava/nio/file/Path;", false)
+  mkv.visitInsn(OP_POP)
+  return_unit(mkv)
+  close_mv(mkv)
+
   # io_is_dir(path) = new File(path).isDirectory()
   let idv = open_static(cw, "io_is_dir", "(Ljava/lang/String;)Z")
   idv.visitTypeInsn(OP_NEW, "java/io/File")

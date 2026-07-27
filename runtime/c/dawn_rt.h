@@ -187,8 +187,13 @@ void dawn_rt_init(int argc, char **argv);
 /* io */
 dawn_unit dawn_io_print(dawn_str s);
 dawn_unit dawn_io_println(dawn_str s);
+dawn_unit dawn_io_eprint(dawn_str s);
+dawn_unit dawn_io_eprintln(dawn_str s);
 dawn_adt *dawn_io_read_line(void); /* Option[String]; None at EOF */
 bool dawn_io_is_dir(dawn_str path);
+bool dawn_io_exists(dawn_str path);
+dawn_unit dawn_io_mkdirs(dawn_str path); /* panics on failure */
+dawn_unit dawn_io_exit(int64_t code);    /* returns a Unit it never delivers */
 dawn_str dawn_io_read_file(dawn_str path);      /* panics on failure */
 dawn_unit dawn_io_write_file(dawn_str path, dawn_str content);
 dawn_array *dawn_io_list_names(dawn_str path);  /* boxed dawn_str elements */
