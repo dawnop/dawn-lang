@@ -818,6 +818,53 @@ S2.3 立起了 `opaque type`，但没迁走它的两个动机——`Cursor` 是�
 > 它被三个地方问：`assignable`、`unify_into`、`check_expr` 的期望类型。
 > 只在一处实现，另外两处就各自默认了一个答案——一个拒绝，一个多做。
 
-### 8.3 剩下的
+### 8.3 `Array` 不跟着迁（2026-07-27 实测推翻）
 
-`Array` 的 `is_std_module` 名字门控还在，随 S3 一起迁——那时 HAMT 节点会是第三个用户。
+这里原先写着「`Array` 的 `is_std_module` 名字门控还在，随 S3 一起迁」。`Cursor` 一收工就去验，
+**是错的**——和 §7 的关联类型同一天、同一个理由：一个待办被别的待办引用得越多，越没人回头验它。
+这句话已经传到三份文档（本节、`spec.md` §2.7、`native-backend-plan.md` 的 S2.3 行）和一个任务里。
+
+三条实测，每条都单独足以否掉它：
+
+**一、没有目标类型可指。** `opaque type N = T` 要一个 `T`；`Cursor` 的是 `Int`，早就存在。
+`Array` 没有——它**就是**表示：JVM 上是每份程序自带的 `dawn/rt/Array`（`codegen.dawn:1146-1427`
+那 282 行），C 后端是 `ROpaque`。把 `List[T]` 当目标实测即死：
+
+```
+std 里 pub opaque type Arr[T] = List[T]，然后 array_len(a)
+→ argument type mismatch: expected Array[T], got Arr
+```
+
+不透明只给身份、不给表示，所以连声明模块内部看穿后拿到的也是 `List[T]`，仍不是 `Array[T]`。
+第三条路（把 `dawn/rt/Array` 当 java 类型）在 `types.dawn:853` 上撞死：`pub fn builtins()`
+不收 `Cx`，却要在五个 `array_*` 签名里造 `TyArray(t)`——`Array` 因此不可能是「每次编译声明出来的」实体。
+
+**二、方向相反。** 这是更根本的一条。`opaque type` **公开名字、隐藏表示**（用户能写
+`var c: Cursor`，只是不能拆开看）；`Array` 的门控**隐藏名字、对 std 公开表示**。
+把前者换成后者不是重构，是换成相反的策略。
+
+**三、它不挡 S3。** S3 真正要的形状今天就能写——std 拿本机制给原语做门面，普通用户模块消费它：
+
+```
+std/vec.dawn:  pub opaque type Vec = Array[Int]   + array_* 包装
+用户模块:      use std/vec.{Vec} → size=5 at3=7
+               而 let n: Array[Int] = v → unknown type: Array
+```
+
+HAMT/RB 节点那半句是对的（节点是 ADT，是真目标），`Array` 那半句是错挂上去的。
+
+**顺手修掉的一个真缺陷**：`Array` 没进 `pass_type_shells` 的重定义禁令
+（`is_builtin_name` 只列 `ty_named` + List/Map/Set）。于是 std 里同名声明**静默走偏**——
+`alias Array = List[Int]` 悄悄盖过原语并编译通过；`type Array[T] = Wrap(x: T)` 反过来输给原语，
+声明成功而每次**使用**都解析到原语，报出
+
+```
+function `f` declares return type Array[Int] but its body is Array[Int]
+```
+
+两个不同类型印成同一行字。对照组 `type List[T]` 给的是干净的「builtin type and cannot be
+redefined」。禁令加一条 `d.name == "Array" && cx1.is_std_module` 即可——只在 std 内，
+因为门控的全部意义就是 std 外面那个 `Array` 是用户自己的。
+
+（同样问过 trait 名：std 里 `pub trait Array[T]` 实测无害，所以**没**动那一处。
+对称好看不是改代码的理由。）

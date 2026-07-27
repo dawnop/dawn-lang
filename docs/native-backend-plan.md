@@ -722,9 +722,18 @@ Blob { data: .. } == Blob { data: .. }    no      # Option / 元组 / List 同
 |---|---|---|
 | S2.1 | **trait v2 最小切片:泛型主体的条件 impl**。`impl_table` 改按 head 索引 + 匹配替换 + 递归解 bound;字典从单例扩到**参数化构造**(新 Core 节点,两个后端各一处) | D2 的硬前置,见 §9.1 的更正块。只做 `impl[T: C] Tr[F[T]]` 一种形状,不开重叠 |
 | S2.2 | ~~`Iter` trait;`for-in` 从后端 intrinsic 变成语言 trait~~ **撤下** | 两次改判:先是发现它缺前置(关联类型)与 oracle(RRB),再是发现**它根本不是前置**——`for` 脱掉下标不需要 trait。见 §11.3 的更正块与 [`trait-v2-design.md`](trait-v2-design.md) §6/§7。`for` 的改造并进 S3 |
-| S2.3 | `pub opaque type`:库可定义的抽象类型 | 每要隐藏一次表示就现搓一套机制——Cursor 靠编译器铸造的不透明标量,`Array` 靠 `cx.is_std_module` 名字门控,D2 的 HAMT 节点是第三次 |
+| S2.3 | `pub opaque type`:库可定义的抽象类型 | 每要隐藏一次表示就现搓一套机制——Cursor 靠编译器铸造的不透明标量,D2 的 HAMT 节点是下一次。**`Array` 曾被列在这儿,是错挂的**,见下方更正块 |
 | S2.4 | `unsafe_pure` 收窄成真 FFI 图章;`java_try` / `cast` / `catch_panic` 出通用内建表;`std/io` 的错误契约脱离 JVM | 11.1 的四;`std/io` 今天建在 `java_try` 上,所以「可移植 std」是假的 |
 | S2.5 | 发一版 + bump 种子 | **不可压缩的串行点**。§7 把 D1 记成「完成」,但今天 std 里一行 `Array` 都还写不了 |
+
+> **更正(2026-07-27,实测)**:S2.3 行原先把 `Array` 的 `cx.is_std_module` 名字门控
+> 列为 `opaque type` 要收编的三套临时机制之一,并因此排了一件「随 S3 一起迁」的待办。
+> **`opaque type` 收编不了它**:本机制要一个目标类型,而 `Array` 没有目标——它就是表示
+> (`codegen.dawn:1146-1427` 的 `dawn/rt/Array`、`emitc.dawn:142` 的 `ROpaque`);
+> 且两者方向相反(本机制公开名字隐藏表示,门控隐藏名字对 std 公开表示)。
+> 门控留着,那件待办删掉。S3 真正要用 `opaque type` 的是 std 自己的节点类型与集合门面
+> (`opaque type Vec = Array[Int]` 这类,目标是原语,实测今天就能写),不需要动门控。
+> 三条实测与顺手修掉的静默重定义缺陷见 [`trait-v2-design.md`](trait-v2-design.md) §8.3。
 
 #### S3 — 集合纯 Dawn 化(原 D2/D3)
 
