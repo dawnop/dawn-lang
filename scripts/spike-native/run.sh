@@ -25,6 +25,14 @@
 # answer. The .expect file is the only check that was not derived from a
 # backend.
 #
+# A stage only blocks what reads its output. A failed JVM run blocks `diff`,
+# `stderr` and `exit` -- the three that compare the backends against each
+# other -- and nothing else: `emitc` and `cc` never run the program, and
+# `native` is checked against .expect rather than against the JVM. This used
+# to block all seven, which meant a program the JVM rejects could never reach
+# the C compiler; the Unit descriptor family (#51) hid a C-side defect behind
+# a JVM crash for exactly that reason.
+#
 # A check listed in known-red.txt is allowed to fail. That file is a ratchet,
 # not a mute button: an unlisted failure is fatal, and so is a *listed* check
 # that starts passing -- fix the defect and the line has to go with it.
@@ -86,15 +94,22 @@ for prog in "${progs[@]}"; do
   expect="$here/$name.expect"
   echo "$name"
 
+  # A failed JVM run blocks only the checks that read its output. `emitc`,
+  # `cc` and `native` do not: the first two never run the program, and
+  # `native` compares against the written expectation rather than against the
+  # JVM. Blocking all seven meant a program the JVM rejects could never reach
+  # the C compiler at all -- and in the Unit descriptor family (#51) the JVM
+  # was the one that died first, so a whole C-side defect stayed invisible
+  # behind it until 2026-07-27.
   jvm_rc=0
+  jvm_ran=1
   "$root/bin/dawn" run "$prog" >"$work/$name.jvm" 2>"$work/$name.jvm.err" || jvm_rc=$?
   if [ "$jvm_rc" -ne 0 ]; then
     verdict "$name:jvm-run" bad "$(cat "$work/$name.jvm.err")"
-    for c in emitc cc jvm native diff stderr exit; do blocked "$name:$c"; done
-    continue
+    jvm_ran=0
   fi
 
-  if [ -f "$expect" ]; then
+  if [ "$jvm_ran" -eq 1 ] && [ -f "$expect" ]; then
     if diff -q "$expect" "$work/$name.jvm" >/dev/null; then
       verdict "$name:jvm" ok
     else
@@ -141,6 +156,13 @@ for prog in "${progs[@]}"; do
     else
       verdict "$name:native" bad "$(diff -u "$expect" "$work/$name.native")"
     fi
+  fi
+
+  # the three that compare the two backends against each other, and so are
+  # the only ones a failed JVM run has anything to say about
+  if [ "$jvm_ran" -eq 0 ]; then
+    for c in diff stderr exit; do blocked "$name:$c"; done
+    continue
   fi
 
   if diff -q "$work/$name.jvm" "$work/$name.native" >/dev/null; then
