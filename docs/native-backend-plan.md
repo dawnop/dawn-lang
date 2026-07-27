@@ -756,6 +756,9 @@ S3 收工:手写 Java **4→1**(只剩 `AdtClassWriter` 这个 ASM shim),`dawn/r
 `Box[T]` 无 bound 的 `==` 落到擦除行走),两个都不在任何语料里——量法与结论见
 [`semantics-closure-design.md`](semantics-closure-design.md) §10。
 
+> 次日(#51)发现前一个的根因写窄了:零槽位是机制不是前提。`Unit` 已改成一个普通
+> 引用槽位,`Eq`/`Hash` 的禁令改由语义单独支撑。见 spec §2.1 与 §12.2。
+
 **一条排序上的更正**:D2 的原语在 lowering 期换成对 `std/hamt` 的具名调用,D3 不能照做。
 comptime 解释器吃的是 Core,而且它**自己实现了 list 原语**——`const B: List[Int] = [A, 4]`
 靠的就是那份实现。把 list 原语也在 lowering 期换掉,常量折叠就只剩「解释 `std/pvec`」一条路,

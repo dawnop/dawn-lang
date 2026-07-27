@@ -47,7 +47,8 @@ use types.{
   Eff, EPure, EIo, EffVar, EUnion, eff_union, lub_eff, eff_subsumes, eff_suffix,
   Adts, AdtI, CtorI, FieldI, Traits, TraitI, ImplI, Sym, Sig, MethodSig,
   adt_of, trait_of, ty_show, ctor_render, sig_render, subst, subst_eff,
-  ty_named, is_numeric, is_errorish, prelude_adts, prelude_traits, prelude_impls, bounds_of,
+  ty_named, is_numeric, is_errorish, peel_opaque,
+  prelude_adts, prelude_traits, prelude_impls, bounds_of,
   builtins, opt_ty, result_ty, OPTION_ID, RESULT_ID, ORD_ID, EQ_ID, HASH_ID, SHOW_ID,
   eq_scalars, hash_scalars,
   Impls, Head, head_of, impl_at, has_impl_at, insert_impl,
@@ -435,12 +436,7 @@ pub fn resolve_type(cx: Cx, ref: TypeRef) -> (Cx, Ty) !io =
       for e in elems {
         let (cx2, t) = resolve_type(cx1, e)
         cx1 = cx2
-        if t == TyUnit {
-          cx1 = cerr(cx1, "tuple elements cannot be Unit", t_lo2(e), t_hi2(e))
-          out = out ++ [TyError]
-        } else {
-          out = out ++ [t]
-        }
+        out = out ++ [t]
         i = i + 1
       }
       (cx1, TyTuple(out))
@@ -943,10 +939,10 @@ pub fn structural_gap(cx: Cx, tid: Int, t: Ty, seen: Set[String]) -> Option[Ty] 
       # the D1 growable vector: mutable, and compared by reference. Until it
       # is a Dawn type with an impl there is no content equality to give.
       TyArray(_) -> Some(t)
-      # Unit has no runtime value at all -- zero JVM stack slots, `V` as a
-      # descriptor -- so there is nothing to compare or hash. Show and tuple
-      # elements already refuse it; these two accepted it and emitted a method
-      # call with an empty operand stack.
+      # There is one Unit and it carries no information, so equality and hash
+      # would be constants -- the same ground on which Show refuses it. A rule
+      # about the relation, not about the representation: a Unit is an
+      # ordinary reference on the JVM and an ordinary byte in C.
       TyUnit -> Some(t)
       # reached only for Hash: `Eq[Float]` is a prelude impl, so for equality
       # the table above has already answered
@@ -1500,7 +1496,10 @@ pub fn pass_ctor_fields(cx: Cx, m: Module, shells: List[Option[Shell]]) -> Cx !i
         let (cx2, ft0) = resolve_type(cx1, f.tref)
         cx1 = cx2
         var ft = ft0
-        if ft == TyUnit {
+        # The one Unit prohibition that is about data modelling rather than
+        # about descriptors, so it outlived them: peeled, because an opaque
+        # type over Unit is the same declaration wearing a different name.
+        if peel_opaque(ft) == TyUnit {
           cx1 = cerr_h(cx1, "constructor fields cannot be Unit", f.lo, f.hi,
             "a no-payload case is just a bare constructor")
           ft = TyError
@@ -5019,12 +5018,7 @@ fn check_expr_at(cx: Cx, e: Expr, expected: Option[Ty]) -> (Cx, Ty, TExpr) !io =
         }
         let (cx2, t, tx) = check_expr(cx1, x, el_exp)
         cx1 = cx2
-        if t == TyUnit {
-          cx1 = cerr(cx1, "tuple elements cannot be Unit", e_lo(x), e_hi(x))
-          tys = tys ++ [TyError]
-        } else {
-          tys = tys ++ [t]
-        }
+        tys = tys ++ [t]
         txs = txs ++ [tx]
         i = i + 1
       }
@@ -5411,10 +5405,6 @@ fn check_lambda(
     if not have {
       cx1 = cerr_h(cx1, "cannot infer the type of `" ++ p.name ++ "`", p.lo, p.hi,
         "annotate it: fn(" ++ p.name ++ ": Int) => ...")
-      t = TyError
-    }
-    if t == TyUnit {
-      cx1 = cerr(cx1, "lambda parameters cannot be Unit", p.lo, p.hi)
       t = TyError
     }
     ptys = ptys ++ [t]
@@ -5817,10 +5807,6 @@ fn check_local_fn(
       }
       # the parser requires annotations on local fn parameters
       None -> TyError
-    }
-    if t == TyUnit {
-      cx1 = cerr(cx1, "function parameters cannot be Unit", p.lo, p.hi)
-      t = TyError
     }
     ptys = ptys ++ [t]
   }

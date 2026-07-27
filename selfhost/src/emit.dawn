@@ -27,8 +27,9 @@ use tast.{TJavaCall, TFun, TModule, TBinOp, BEq, BNeq, BLt, BLe, BGt, BGe}
 use interp.{CValue, VInt, VFloat, VBool, VStr, VUnit, VList, VTuple, VAdt, CtOut}
 use codegen.{
   obj, fn_iface, tuple_class, erased_apply_desc, desc_of, method_desc,
-  JvmRepr, jvm_repr, RLong, RDouble, RBool, RRef, RUnit, RBottom,
-  slots_of, is_ref, load_slot, hash_of, dict_class, supers_of, gen_adt, gen_ctor_class,
+  JvmRepr, jvm_repr, RLong, RDouble, RBool, RRef, RBottom,
+  slots_of, is_ref, is_bottom, load_slot, push_unit, hash_of, dict_class, supers_of,
+  gen_adt, gen_ctor_class,
   parameterised_scaffold, dict_arg_field, dict_ctor_desc,
   EqOverride, no_override,
   tr_iface, append_const, singleton_scaffold, subject_name,
@@ -256,7 +257,7 @@ fn store_slot(m: MethodVisitor, t: Ty, slot: Int) -> Unit !io = {
     RDouble -> { m.visitVarInsn(OP_DSTORE, slot) }
     RBool -> { m.visitVarInsn(OP_ISTORE, slot) }
     RRef -> { m.visitVarInsn(OP_ASTORE, slot) }
-    RUnit | RBottom -> ()
+    RBottom -> ()
   }
   ()
 }
@@ -266,12 +267,6 @@ fn load_var(g: Gen, id: Int) -> Unit !io =
 
 fn store_var(g: Gen, id: Int) -> Unit !io =
   store_slot(g.mv, sym_of(g, id).ty, slot_of(g, id))
-
-## Push the Unit singleton (an erased Object slot needs a value).
-fn push_unit(m: MethodVisitor) -> Unit !io = {
-  m.visitFieldInsn(OP_GETSTATIC, UNIT_CLASS, "INSTANCE", "L" ++ UNIT_CLASS ++ ";")
-  ()
-}
 
 ## Box a primitive about to sit in an erased Object position.
 fn box_ty(m: MethodVisitor, t: Ty) -> Unit !io = {
@@ -287,9 +282,8 @@ fn box_ty(m: MethodVisitor, t: Ty) -> Unit !io = {
       m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Boolean", "valueOf",
         "(Z)Ljava/lang/Boolean;", false)
     }
-    RUnit -> { push_unit(m) }
-    # a reference is already an Object; the bottom types have nothing on the
-    # stack to box
+    # a reference is already an Object -- Unit included, it is the singleton;
+    # the bottom types have nothing on the stack to box
     RRef | RBottom -> ()
   }
   ()
@@ -322,7 +316,7 @@ fn unerase(g: Gen, t: Ty) -> Unit !io = {
     TyTuple(elems) -> { m.visitTypeInsn(OP_CHECKCAST, tuple_class(len(elems))) }
     TyJava(fqcn, _) -> { m.visitTypeInsn(OP_CHECKCAST, internal_of(fqcn)) }
     TyFn(params, _, _) -> { m.visitTypeInsn(OP_CHECKCAST, fn_iface(len(params))) }
-    TyUnit -> { m.visitInsn(OP_POP) }
+    TyUnit -> { m.visitTypeInsn(OP_CHECKCAST, UNIT_CLASS) }
     # TyVar is already erased, and the two bottom types carry no value
     TyVar(_, _) | TyNever | TyError -> ()
   }
@@ -394,7 +388,6 @@ fn boxed_desc_of(g: Gen, t: Ty) -> String =
     RLong -> "Ljava/lang/Long;"
     RDouble -> "Ljava/lang/Double;"
     RBool -> "Ljava/lang/Boolean;"
-    RUnit -> "Ljava/lang/Object;"
     RBottom -> "Ljava/lang/Object;"
     RRef -> desc_of(g.adts, t)
   }
@@ -407,12 +400,12 @@ fn instantiated_type(g: Gen, params: List[Ty], ret: Ty) -> Type !io = {
 
 fn ps2desc(ps: String, ret: String) -> String = "(" ++ ps ++ ")" ++ ret
 
-## impl-method descriptor for lambdas/bridges: concrete types, but a 0-slot
-## return (Unit/Never) becomes Object so LMF can adapt it.
+## impl-method descriptor for lambdas/bridges: concrete types, but a bottom
+## return (Never) becomes Object so LMF can adapt it.
 fn impl_desc_of(g: Gen, params: List[Ty], ret: Ty) -> String = {
   var ps = ""
   for p in params { ps = ps ++ desc_of(g.adts, p) }
-  let r = if slots_of(ret) == 0 { "Ljava/lang/Object;" } else { desc_of(g.adts, ret) }
+  let r = if is_bottom(ret) { "Ljava/lang/Object;" } else { desc_of(g.adts, ret) }
   "(" ++ ps ++ ")" ++ r
 }
 
@@ -545,7 +538,8 @@ fn construct_value(g: Gen, m: MethodVisitor, v: CValue, boxed: Bool) -> Unit !io
       }
     }
     VStr(x) -> { ldc_str(m, x) }
-    VUnit -> if boxed { push_unit(m) }
+    # boxed or not, a Unit is the singleton -- there is nothing to widen
+    VUnit -> push_unit(m)
     VList(elems) -> {
       # a comptime list is materialised the way a list literal is: pushed
       # onto an `Array` and handed to the vector
@@ -624,7 +618,9 @@ fn emit_method_return(g: Gen) -> Unit !io = {
     RDouble -> { g.mv.visitInsn(OP_DRETURN) }
     RBool -> { g.mv.visitInsn(OP_IRETURN) }
     RRef -> { g.mv.visitInsn(OP_ARETURN) }
-    RUnit | RBottom ->
+    # `Never` behind an erased `apply` still has to hand something back: the
+    # body cannot fall through here, but the verifier does not know that.
+    RBottom ->
       if g.rets_null {
         push_unit(g.mv)
         g.mv.visitInsn(OP_ARETURN)
@@ -1037,7 +1033,12 @@ fn gen_java_call(g: Gen, jc: CJava, ty: Ty) -> (Gen, Bool) !io = {
     g1.mv.visitInsn(OP_I2L)
   } else if rc == "float" {
     g1.mv.visitInsn(OP_F2D)
-  } else if rc == "void" || rc == "long" || rc == "double" || rc == "boolean" {
+  } else if rc == "void" {
+    # `void` is the one Java type with no value, and it maps to Dawn's `Unit`,
+    # which has one. The singleton is where that value comes from -- this is
+    # the boundary, not a special case in the interior.
+    push_unit(g1.mv)
+  } else if rc == "long" || rc == "double" || rc == "boolean" {
   } else {
     g1 = wrap_nullable_in_option(g1)
   }
@@ -1294,7 +1295,11 @@ fn gen_jvm_main(g: Gen, cw: AdtClassWriter) -> Unit !io = {
   m.visitVarInsn(OP_ALOAD, 0)
   m.visitFieldInsn(OP_PUTSTATIC, g.class_name, ARGS_FIELD, "[Ljava/lang/String;")
   m.visitLabel(try_start)
-  m.visitMethodInsn(OP_INVOKESTATIC, g.class_name, "main", "()V", false)
+  # `main([Ljava/lang/String;)V` is the JVM's own ABI and stays void; Dawn's
+  # `main` is a Unit function like any other and hands its value back.
+  m.visitMethodInsn(OP_INVOKESTATIC, g.class_name, "main",
+    "()" ++ desc_of(g.adts, TyUnit), false)
+  m.visitInsn(OP_POP)
   m.visitLabel(try_end)
   m.visitInsn(OP_RETURN)
   m.visitLabel(handler)
@@ -1344,16 +1349,17 @@ fn emit_return_of(m: MethodVisitor, t: Ty) -> Unit !io = {
     RDouble -> { m.visitInsn(OP_DRETURN) }
     RBool -> { m.visitInsn(OP_IRETURN) }
     RRef -> { m.visitInsn(OP_ARETURN) }
-    RUnit | RBottom -> { m.visitInsn(OP_RETURN) }
+    RBottom -> { m.visitInsn(OP_RETURN) }
   }
   ()
 }
 
-## One test block → one public static method dawn$test$i()V.
+## One test block → one public static method dawn$test$i.
 ## A test block is a nullary Unit function, so it goes through the same Core
-## path as any other body.
+## path as any other body -- descriptor included, which is why the runner
+## (testrun.dawn) pops what it hands back.
 fn gen_test(g: Gen, cw: AdtClassWriter, t: TFun, idx: Int) -> Gen !io =
-  gen_fn(g, cw, t, "dawn\$test\$" ++ to_string(idx), "()V")
+  gen_fn(g, cw, t, "dawn\$test\$" ++ to_string(idx), "()" ++ desc_of(g.adts, TyUnit))
 
 ## A throwaway MethodVisitor so Gen can be constructed before the first real
 ## method opens (the record field is non-optional by design).
@@ -1658,7 +1664,7 @@ fn gen_cdynamic(g: Gen, args: List[CExpr], ft: Ty, ret_static: Ty) -> (Gen, Bool
   }
   g1.mv.visitMethodInsn(OP_INVOKEINTERFACE, fn_iface(len(fps)), "apply",
     erased_apply_desc(len(fps)), true)
-  if slots_of(fret) == 0 {
+  if is_bottom(fret) {
     g1.mv.visitInsn(OP_POP)
   } else {
     unerase(g1, fret)
@@ -1689,21 +1695,46 @@ fn gen_cclosure(g: Gen, name: String, owner: String, caps: List[CExpr], ty: Ty) 
   g1
 }
 
-fn gen_cif(g: Gen, cond: CExpr, thn: CExpr, els: Option[CExpr], tail: Bool) -> (Gen, Bool) !io = {
+## `ty` is the if's own type and `discard` says the value is not wanted.
+##
+## Both arguments exist because a Unit is a value now. In statement position
+## (`CSIf`) the branches leave one on the stack and nobody takes it off; in
+## expression position an `if` without an `else` has to produce one on the
+## path that skipped the body. Neither was visible while a Unit was zero-wide.
+fn gen_cif(
+  g: Gen,
+  cond: CExpr,
+  thn: CExpr,
+  els: Option[CExpr],
+  ty: Ty,
+  tail: Bool,
+  discard: Bool
+) -> (Gen, Bool) !io = {
   let else_l = Label.new()
   let end = Label.new()
   let (g1, _) = gen_cexpr(g, cond, false)
   g1.mv.visitJumpInsn(OP_IFEQ, else_l)
   let (g2, then_falls) = gen_cexpr(g1, thn, tail)
+  if discard && then_falls { pop_value(g2, cex_ty(thn)) }
   match els {
     None -> {
-      g2.mv.visitLabel(else_l)
+      # An else-less `if` is typed `Unit` (or `Never`), so producing the
+      # missing value is exactly pushing the singleton.
+      if not discard && not is_bottom(ty) {
+        if then_falls { g2.mv.visitJumpInsn(OP_GOTO, end) }
+        g2.mv.visitLabel(else_l)
+        push_unit(g2.mv)
+        g2.mv.visitLabel(end)
+      } else {
+        g2.mv.visitLabel(else_l)
+      }
       (g2, true)
     }
     Some(eb) -> {
       if then_falls { g2.mv.visitJumpInsn(OP_GOTO, end) }
       g2.mv.visitLabel(else_l)
       let (g3, else_falls) = gen_cexpr(g2, eb, tail)
+      if discard && else_falls { pop_value(g3, cex_ty(eb)) }
       g3.mv.visitLabel(end)
       (g3, then_falls || else_falls)
     }
@@ -1728,9 +1759,13 @@ pub fn gen_cexpr(g: Gen, e: CExpr, tail: Bool) -> (Gen, Bool) !io =
       ldc_str(g.mv, v)
       (g, true)
     }
-    # Unit occupies no stack slot on the JVM; the C backend gives it a byte.
-    # Each backend picks, which is why Core says nothing about width.
-    CUnit -> (g, true)
+    # Unit is one reference slot on the JVM (the singleton); the C backend
+    # gives it a byte. Each backend picks, which is why Core says nothing
+    # about width -- but every backend has to leave a value behind.
+    CUnit -> {
+      push_unit(g.mv)
+      (g, true)
+    }
     CLocal(sym, _) -> {
       load_var(g, sym)
       (g, true)
@@ -1743,24 +1778,32 @@ pub fn gen_cexpr(g: Gen, e: CExpr, tail: Bool) -> (Gen, Bool) !io =
     CUnbox(inner, to) -> {
       let (g1, falls) = gen_cexpr(g, inner, false)
       if falls {
-        if slots_of(to) == 0 { g1.mv.visitInsn(OP_POP) } else { unerase(g1, to) }
+        if is_bottom(to) { g1.mv.visitInsn(OP_POP) } else { unerase(g1, to) }
       }
       (g1, falls)
     }
-    CIf(cond, thn, els, _) -> gen_cif(g, cond, thn, els, tail)
-    CBlock(stmts, tl, _) -> {
+    CIf(cond, thn, els, ty) -> gen_cif(g, cond, thn, els, ty, tail, false)
+    CBlock(stmts, tl, ty) -> {
       var g1 = g
       for s in stmts {
         g1 = gen_cstmt(g1, s)
       }
       match tl {
         Some(t) -> gen_cexpr(g1, t, tail)
-        None -> (g1, true)
+        # A block with no tail expression is typed `Unit` (or `Never`) by
+        # construction, so the value it owes is the singleton.
+        None -> {
+          if not is_bottom(ty) { push_unit(g1.mv) }
+          (g1, true)
+        }
       }
     }
     CReturn(vo) ->
       match vo {
+        # a bare `return` is only legal in a Unit function, and that function
+        # owes a value now
         None -> {
+          if not is_bottom(g.method_ret) { push_unit(g.mv) }
           emit_method_return(g)
           (g, false)
         }
@@ -1950,7 +1993,7 @@ fn gen_cexpr2(g: Gen, e: CExpr, tail: Bool) -> (Gen, Bool) !io =
       let cls = tuple_class(tuple_arity(cex_ty(target)))
       g1.mv.visitTypeInsn(OP_CHECKCAST, cls)
       g1.mv.visitFieldInsn(OP_GETFIELD, cls, "_" ++ to_string(idx), obj_desc())
-      if slots_of(ty) == 0 { g1.mv.visitInsn(OP_POP) } else { unerase(g1, ty) }
+      if is_bottom(ty) { g1.mv.visitInsn(OP_POP) } else { unerase(g1, ty) }
       (g1, true)
     }
     CListLit(elems, _) -> {
@@ -2097,8 +2140,11 @@ fn gen_cstmt(g: Gen, s: CStmt) -> Gen !io =
       if falls { pop_value(g1, cex_ty(e)) }
       g1
     }
+    # `discard` rather than a pop afterwards: each branch drops its own value,
+    # so both reach the merge with the same empty stack and the else-less
+    # case owes nothing.
     CSIf(cond, thn, els) -> {
-      let (g1, _) = gen_cif(g, cond, thn, els, false)
+      let (g1, _) = gen_cif(g, cond, thn, els, TyUnit, false, true)
       g1
     }
     CSLoop(id, body, step) -> {
@@ -2107,8 +2153,11 @@ fn gen_cstmt(g: Gen, s: CStmt) -> Gen !io =
       let brk = Label.new()
       g.mv.visitLabel(top)
       var g1 = Gen { ..g, cloops: g.cloops ++ [(id, cont, brk)] }
-      let (g2, _) = gen_cexpr(g1, body, false)
+      let (g2, body_falls) = gen_cexpr(g1, body, false)
       g1 = g2
+      # the body is an expression in statement position, exactly like
+      # CSDiscard's -- and a Unit body now leaves a value behind
+      if body_falls { pop_value(g1, cex_ty(body)) }
       # the continue target is the step, so `continue` runs it -- the whole
       # reason CSLoop carries one
       g1.mv.visitLabel(cont)
@@ -2305,7 +2354,7 @@ fn gen_cintrinsic(g: Gen, name: String, args: List[CExpr], ty: Ty) -> (Gen, Bool
     g1.mv.visitLabel(ok)
     g1.mv.visitTypeInsn(OP_CHECKCAST, "Option\$Some")
     g1.mv.visitFieldInsn(OP_GETFIELD, "Option\$Some", "value", "Ljava/lang/Object;")
-    if slots_of(ty) == 0 { g1.mv.visitInsn(OP_POP) } else { unerase(g1, ty) }
+    if is_bottom(ty) { g1.mv.visitInsn(OP_POP) } else { unerase(g1, ty) }
     return (g1, true)
   }
   if name == "unwrap_or" {

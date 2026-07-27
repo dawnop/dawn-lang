@@ -118,9 +118,16 @@ println("got $n items, first = ${list.get(0)}")
 
 `Int`（64 位）、`Float`（double）、`Bool`、`String`、`Unit`。
 
-`Unit` 是一等值（唯一值 `()`），可像任何类型一样**实例化类型参数**（`Result[Unit, E]`、
-`List[Unit]`、`java_try(fn() => <void 调用>)` 皆可）。运行期它有真实表示——一个单例对象
-（`dawn/rt/Unit`，与 `None` 及无字段构造子同一表示），故在擦除的泛型槽位里也占位得住。
+`Unit` 是一等值（唯一值 `()`），**可出现在任何值能出现的位置**：形参、局部变量、
+闭包捕获、元组元素、返回值，以及实例化类型参数（`Result[Unit, E]`、`List[Unit]`、
+`java_try(fn() => <void 调用>)`）。运行期它有真实表示——一个单例对象
+（`dawn/rt/Unit`，与 `None` 及无字段构造子同一表示），占一个引用槽位，
+C 后端给它一个字节。
+
+只有两条例外，都不是表示上的限制：
+
+- **构造子字段不能是 `Unit`**——没有载荷的分支写成裸构造子就是了，这是建模的说法。
+- **`Eq`/`Hash`/`Show` 对 `Unit` 无实现**——只有一个值，答案会是常量。
 
 **没有 null。** 所有类型的值都必然有效；可缺失用 `Option[T]` 表达。
 **没有隐式转换。** `Int` → `Float` 必须显式 `to_float(n)`。
@@ -1266,6 +1273,8 @@ native-image，责任在库，见 §12.3）。Dawn 无依赖解析——只接�
 | 泛型 | 擦除 + 装箱 |
 | 结构相等类型 | ADT/record/元组生成配套 `equals` 与 `hashCode`（供 `Map`/`Set` 作键）；有 `impl Eq`/`impl Hash` 时两者转发到该 impl，故容器与 `==` 永远同一个关系 |
 | `Int`/`Float`/`Bool` | 原生 `long`/`double`/`boolean`，仅泛型位置装箱 |
+| `Unit` | `Ldawn/rt/Unit;`——单例引用，占一个槽位，形参/字段/捕获位与别的引用无异 |
+| `Never` | `V`，且只出现在返回位（不返回的表达式没有形参或字段可占） |
 | `panic` | 抛 `dawn.rt.PanicError`（Error 子类，不可被 Dawn 捕获） |
 
 运行时支持类（`dawn/rt/Lists`、`Strings`、`Io`、`Show`、`Maps`、`Tuple*`、`Fn*` 等）

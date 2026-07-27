@@ -7,9 +7,10 @@
 
 use codegen.{
   V17, ACC_PUBLIC, ACC_STATIC, ACC_FINAL,
-  OP_ALOAD, OP_ASTORE, OP_ILOAD, OP_ISTORE, OP_RETURN, OP_GOTO,
+  OP_ALOAD, OP_ASTORE, OP_ILOAD, OP_ISTORE, OP_RETURN, OP_GOTO, OP_POP,
   OP_ICONST_0, OP_ICONST_1, OP_IFNULL, OP_IFNE, OP_IF_ICMPGE,
-  OP_GETSTATIC, OP_INVOKESTATIC, OP_INVOKEVIRTUAL, OP_ARRAYLENGTH
+  OP_GETSTATIC, OP_INVOKESTATIC, OP_INVOKEVIRTUAL, OP_ARRAYLENGTH,
+  UNIT_CLASS
 }
 use java "dawn.tool.AdtClassWriter"
 use java "org.objectweb.asm.MethodVisitor"
@@ -109,7 +110,10 @@ fn gen_runner_main(cw: AdtClassWriter, tests: List[(String, Int, String)]) -> Un
     let l_next = Label.new()
     mv.visitTryCatchBlock(l_start, l_end, l_catch, "java/lang/Throwable")
     mv.visitLabel(l_start)
-    mv.visitMethodInsn(OP_INVOKESTATIC, cls, "dawn\$test\$" ++ to_string(idx), "()V", false)
+    # a test block is a Unit function, so it hands one back like any other
+    mv.visitMethodInsn(OP_INVOKESTATIC, cls, "dawn\$test\$" ++ to_string(idx),
+      "()L" ++ UNIT_CLASS ++ ";", false)
+    mv.visitInsn(OP_POP)
     mv.visitLabel(l_end)
     mv.visitLdcInsn(label)
     mv.visitMethodInsn(OP_INVOKESTATIC, TESTMAIN_CLASS, "pass", "(Ljava/lang/String;)V", false)

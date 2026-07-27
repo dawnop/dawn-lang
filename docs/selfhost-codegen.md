@@ -85,9 +85,11 @@ Kotlin CodeGen 从 checked AST 读的注解，逐一映射到 TAST：
 - TupleN：public final Object _i 字段、ctor、结构 equals（IF_ACMPEQ 快路 + INSTANCEOF
   + 逐字段 Object.equals）、hashCode 31 链、toString 经 Show.show。FnN 接口：
   ClassWriter(0)（不是 COMPUTE_FRAMES！）、apply erased。
-- descOf：Int/Cursor=J Float=D Bool=Z String Bytes="[B" Unit/Never/Error=V TVar=Object
-  TAdt=jvmName TList/TMap/TSet=java.util 接口 TTuple=TupleN TJava=internalName TFn=FnN。
-- slotsOf: J/D=2, Z=1, V=0, ref=1。box/unerase/adaptTo(declared TVar→box)/adaptFrom。
+- descOf：Int/Cursor=J Float=D Bool=Z String Bytes="[B" Unit=Ldawn/rt/Unit;
+  Never/Error=V TVar=Object TAdt=jvmName TList/TMap/TSet=java.util 接口
+  TTuple=TupleN TJava=internalName TFn=FnN。
+- slotsOf: J/D=2, Z=1, V=0, ref=1（Unit 是 ref）。box/unerase/adaptTo(declared
+  TVar→box)/adaptFrom。
 - boxedDescOf + instantiatedType（LMF 用 AsmType.getMethodType）。
 - trIface=dawn/tr/<owner$…$>Name；implClass=dawn/impl/<owner$>Trait$Subject；
   implMethodName=dawn$impl$Trait$Subject$m（静态落声明模块类）；
@@ -196,7 +198,7 @@ Kotlin CodeGen 从 checked AST 读的注解，逐一映射到 TAST：
      trait 方法 provided 的具体签名 = trait MethodSig 的 tvar→subject 代换。
      witnesses: WConcrete(tid, subject) → impl_table 查 ImplI（owner/derived）。
   5. 关键 Kotlin 细节别忘：LMF_BSM Handle；lambda impl 是 dawn$lambda$N（计数器
-     per-module）；Unit 返回 fn 值要 dawn$fnval$ 桥（LMF 不适配 void）；builtin
+     per-module）；builtin
      值桥 dawn$bi$<name>（直连表：get/range/sort_by/join/parse_int/parse_float/
      java_try/catch_panic）；ctor 值桥 dawn$ctor$<jvm 名 '/'→'$'>；SAM 桥
      dawn$sam$N；genConstFields 的字段名 dawn$const$N 按首用序、key=const 名或
