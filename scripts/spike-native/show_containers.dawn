@@ -11,7 +11,14 @@
 # It closes with S3: once List/Map/Set are ordinary ADTs in std carrying
 # `impl[T: Show] Show[List[T]]`, this file renders through the same synthesised
 # bodies show_derive.dawn already does, and these lines move back there.
+#
+# The `List[Unit]` lines at the end are here rather than in unit_value.dawn
+# for the same reason: `map` over one needs a lambda whose parameter is Unit,
+# which was a compile error until 2026-07-27 even though spec 2.1 blesses
+# `List[Unit]` -- and covering it needs a list literal, which is this file's
+# wall already.
 use std/io
+use std/list
 use std/map
 use std/set
 
@@ -34,4 +41,12 @@ pub fn main() -> Unit !io = {
   println("-- nested inside a value that does have structure --")
   println(to_string(Some([1, 2])))
   println(to_string((["x"], 1)))
+
+  # `Show[Unit]` is refused on purpose (one value, so the answer is a
+  # constant), so the list itself cannot be rendered -- what is under test is
+  # that a Unit rides an erased slot and a lambda may take one.
+  println("-- a Unit rides an erased slot like any other value --")
+  let us: List[Unit] = [(), ()]
+  println(to_string(len(us)))
+  println(to_string(list.map(us, fn(u) => 1)))
 }

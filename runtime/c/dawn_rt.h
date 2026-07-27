@@ -37,6 +37,7 @@ typedef union dawn_slot {
   int64_t i;
   double f;
   bool b;
+  dawn_unit u;
   void *p;
   dawn_str s;
 } dawn_slot;
@@ -95,6 +96,7 @@ dawn_dict *dawn_dict_new(const dawn_dict *tmpl, int32_t nargs, ...);
 dawn_slot *dawn_box_int(int64_t v);
 dawn_slot *dawn_box_float(double v);
 dawn_slot *dawn_box_bool(bool v);
+dawn_slot *dawn_box_unit(dawn_unit v);
 dawn_slot *dawn_box_str(dawn_str v);
 
 void dawn_rt_init(int argc, char **argv);

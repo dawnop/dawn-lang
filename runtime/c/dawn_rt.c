@@ -78,6 +78,12 @@ dawn_slot *dawn_box_bool(bool v) {
   return s;
 }
 
+dawn_slot *dawn_box_unit(dawn_unit v) {
+  dawn_slot *s = dawn_box();
+  s->u = v;
+  return s;
+}
+
 dawn_slot *dawn_box_str(dawn_str v) {
   dawn_slot *s = dawn_box();
   s->s = v;

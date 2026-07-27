@@ -173,8 +173,10 @@ fn slot_of(t: Ty) -> String =
     RFloat64 -> "f"
     RBoolean -> "b"
     RString -> "s"
-    # RUnitV shares the pointer member, as it did in the chain this replaced
-    RUnitV | RAdtPtr | RCloPtr | ROpaque -> "p"
+    # `dawn_unit` is a byte, not a pointer: filing it under `p` compiled only
+    # while nothing stored one in a slot
+    RUnitV -> "u"
+    RAdtPtr | RCloPtr | ROpaque -> "p"
   }
 
 # ---- literals ----
@@ -354,8 +356,9 @@ fn box_call(v: String, from: Ty) -> String =
     RFloat64 -> "dawn_box_float(" ++ v ++ ")"
     RBoolean -> "dawn_box_bool(" ++ v ++ ")"
     RString -> "dawn_box_str(" ++ v ++ ")"
+    RUnitV -> "dawn_box_unit(" ++ v ++ ")"
     # already a pointer
-    RUnitV | RAdtPtr | RCloPtr | ROpaque -> "((void*)(" ++ v ++ "))"
+    RAdtPtr | RCloPtr | ROpaque -> "((void*)(" ++ v ++ "))"
   }
 
 fn emit_closure(st: CSt, name: String, owner: String, caps: List[CExpr]) -> (CSt, String) = {
@@ -455,7 +458,10 @@ fn emit_binary(st: CSt, op: CBinOp, l: CExpr, r: CExpr, ty0: Ty) -> (CSt, String
 
 fn emit_if(st: CSt, cond: CExpr, thn: CExpr, els: Option[CExpr], ty: Ty) -> (CSt, String) = {
   let (st1, cv) = emit_expr(st, cond)
-  let is_value = ty != TyUnit && ty != TyNever
+  # peeled for the reason emit_binary is: an opaque type over Unit is still a
+  # Unit to the emitter, and asking by name misses it
+  let peeled = peel_opaque(ty)
+  let is_value = peeled != TyUnit && peeled != TyNever
   let (st2, tmp) = fresh(st1)
   let st3 =
     if is_value {
@@ -759,7 +765,7 @@ fn emit_fn(st: CSt, f: CFun) -> CSt = {
   let st1 = push(line(CSt { ..st, tmp: 0 }, fn_signature(f) ++ " {"))
   let (st2, v) = emit_expr(st1, f.body)
   let st3 =
-    if f.ret == TyUnit {
+    if peel_opaque(f.ret) == TyUnit {
       line(discard(st2, v), "return DAWN_UNIT;")
     } else if diverges(f.body) {
       line(st2, "return " ++ c_zero(f.ret) ++ ";")
@@ -816,4 +822,21 @@ pub fn emit_program(mods: List[CModule], entry: String) -> String = {
   st = pop(st)
   st = line(st, "}")
   st.out
+}
+
+# ---- tests ----
+
+test "a slot member and the ref classification agree about every repr" {
+  # These two disagreed about Unit: `dawn_unit` is a byte, but `slot_of` filed
+  # it under the pointer member. Nothing stored a Unit in a slot, so the C
+  # never got compiled -- and the harness marks emitc `blocked` whenever the
+  # JVM run fails, which is why a whole family stayed invisible.
+  assert slot_of(TyUnit) == "u"
+  assert slot_of(TyOpaque(0, "H", "m", TyUnit)) == "u"
+  assert not is_ref_c(TyUnit)
+  assert box_call("x", TyUnit) == "dawn_box_unit(x)"
+  assert c_type(TyUnit) == "dawn_unit"
+  # the pointer group is what is left, and Unit is no longer in it
+  assert slot_of(TyBytes) == "p"
+  assert is_ref_c(TyBytes)
 }

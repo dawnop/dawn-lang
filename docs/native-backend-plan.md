@@ -783,3 +783,24 @@ S1/S2 只是又在它前面插了两段。
 **这次审计本身的教训**,和 Phase 0 那条是同一条的另一面:Phase 0 记的是「两条路都在是最强的
 oracle」;这次记的是**「两条路都在」不会自动变成 oracle,得有人去写那个逼它们对答案的语料**。
 四条实测里有三条在 Phase 0 收工那天就已经存在了,而当天的 CI 是绿的。
+
+## 12. `Unit` 在两个后端上的宽度(2026-07-27,#51)
+
+`dawn_rt.h` 从一开始就写着「Unit is a value, not an absence」,C 后端给它一个字节;
+JVM 后端却给它 **0 个槽位**、描述符 `V`。零宽在 JVM 描述符里没有拼法,于是形参、ADT
+字段、闭包捕获、trait/impl 方法全都写出**非法描述符**,类加载即死;`opaque type H = Unit`
+还能绕过 checker 里那四条写成 `t == TyUnit` 的禁令。spec §2.1 明写 `List[Unit]` 合法,
+可 `map` 一个 `List[Unit]` 编译不过——lambda 形参被拒。
+
+**裁决:JVM 跟 C 走**,`Unit` 是一个普通引用槽位(`Ldawn/rt/Unit;` 单例)。`RUnit` 变体
+删掉,以此逼编译器指出每一个要重读的点;`slots_of(t) == 0`(问宽度)改成 `is_bottom(t)`
+(问有没有值)。五条 `Unit` 禁令只留构造子字段那条——它讲的是建模不是描述符——并让它
+peel opaque。
+
+顺手关掉的 C 侧同族缺陷:`c_type(TyUnit)` 是 `dawn_unit`(一个字节),`slot_of` 却把它
+归到 `dawn_slot` 的**指针**成员。`dawn_slot` 加了 `u` 成员、加了 `dawn_box_unit`,
+两边这才一致。
+
+**它为什么一直没被发现**:`scripts/spike-native/run.sh` 在 JVM 那一跑失败时,会把
+`emitc`/`cc`/`native` 全标成 `blocked`——**JVM 拒绝的程序,C 后端永远测不到**。而这一族
+里 JVM 恰恰是先崩的那个。语料 `unit_value.dawn` 现在把七项检查全走一遍。

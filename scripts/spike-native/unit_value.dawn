@@ -1,0 +1,72 @@
+# Unit in every position a value can occupy. All but the last two were
+# `ClassFormatError: illegal signature` on the JVM until 2026-07-27, because
+# `desc_of(TyUnit)` was `V` -- a return descriptor, and the JVM rejects it in
+# a parameter or a field. The C backend has always given Unit a byte
+# (`dawn_rt.h`: "Unit is a value, not an absence"), so this file is also where
+# the two backends are held to the same answer about it.
+#
+# `opaque type H = Unit` appears twice on purpose: the four checker bans that
+# used to stand here were written as `t == TyUnit`, so an opaque wrapper
+# walked past every one of them and reached the emitter anyway. Only the
+# constructor-field ban survives, and it peels -- so it is not testable here.
+#
+# `List[Unit]` is deliberately not here: it needs a list literal, which is the
+# wall emitc still hits (S4). It lives in show_containers.dawn, which is
+# already known-red for exactly that reason.
+use std/io
+
+opaque type H = Unit
+
+pub trait Tag[T] {
+  fn tag(x: T) -> String
+}
+
+impl Tag[Unit] {
+  fn tag(x: Unit) -> String = "unit"
+}
+
+impl Tag[Int] {
+  # a Unit parameter that is not the subject
+  fn tag(x: Int) -> String = "int"
+}
+
+fn takes(a: Unit, n: Int, b: H) -> Int = n + 1
+
+## A Unit-returning function used as a value: the eta-expansion in lowering
+## builds a wrapper whose parameter is Unit, and LMF pins that arity.
+fn ignore(u: Unit) -> Int = 7
+
+pub fn main() -> Unit !io = {
+  println("-- parameters --")
+  println("takes((), 41, ())    = ${takes((), 41, ())}")
+  let h: H = ()
+  println("takes((), 1, h)      = ${takes((), 1, h)}")
+
+  println("-- capture --")
+  let u: Unit = ()
+  let f = fn(n: Int) => {
+    let _ = u
+    n * 2
+  }
+  println("captured Unit        = ${f(21)}")
+
+  println("-- lambda parameter --")
+  let g = fn(x: Unit) => 5
+  println("g(())                = ${g(())}")
+  let gh = fn(x: H) => 6
+  println("gh(h)                = ${gh(h)}")
+
+  println("-- fn value --")
+  let v = ignore
+  println("v(())                = ${v(())}")
+
+  println("-- tuple element --")
+  let t = ((), 3)
+  match t {
+    (_, n) -> println("(Unit, Int) snd      = ${n}")
+  }
+
+  println("-- trait --")
+  println("tag(())              = ${tag(())}")
+  println("tag(9)               = ${tag(9)}")
+}
