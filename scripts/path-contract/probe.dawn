@@ -1,0 +1,75 @@
+# Differential probe for std/path against java.nio.file.Paths.
+#
+# The oracle is the thing being replaced: `analyze.canon` and `lsp.canon` both
+# spell `Paths.get(p).toAbsolutePath().normalize().toString()`, and the switch
+# to std/path is only safe if the two agree on the paths a workspace actually
+# contains. That is the first table below.
+#
+# `..` above the root went in expecting a divergence -- the kernel resolves the
+# root's parent to the root, and Java looked like it would keep the spelling.
+# It does not. The cases stayed in the table as ordinary agreement.
+use std/path
+use std/io
+use java "java.nio.file.Paths"
+use java "java.lang.System"
+
+fn java_norm(p: String) -> String !io =
+  Paths.get(p).expect("path").normalize().expect("norm").toString().expect("string")
+
+fn cwd() -> String !io =
+  match System.getProperty("user.dir") {
+    Some(d) -> d
+    None -> "/"
+  }
+
+fn java_abs(p: String) -> String !io =
+  Paths.get(p).expect("path").toAbsolutePath().expect("abs").normalize().expect("norm")
+  .toString().expect("string")
+
+pub fn main() -> Unit !io = {
+  var bad = 0
+
+  # normalize: everything a real path can look like
+  let cases = [
+    "", "/", ".", "..", "a", "/a",
+    "a/b", "a/./b", "a//b", "a/b/", "./a", "a/..",
+    "/a/..", "/a/b/../../c", "/a/./b//c/", "../a", "a/../..",
+    "src/../std/path.dawn", "/usr/local/../bin", "a/b/c/../../d",
+    "/a/b/../c/./d/", "....", "a/.../b", "/.hidden/x",
+    "/..", "/../a", "/a/../../b"
+  ]
+  for c in cases {
+    let mine = path.normalize(c)
+    let theirs = java_norm(c)
+    if mine != theirs {
+      io.println("normalize mismatch: " ++ c ++ " -> mine " ++ mine ++ ", java " ++ theirs)
+      bad = bad + 1
+    }
+  }
+
+  # absolute: the operation the two canon functions actually perform
+  let rels = ["a", "a/b", "./a", "../a", "a/../b", "/already/absolute", "."]
+  for r in rels {
+    let mine = path.absolute(cwd(), r)
+    let theirs = java_abs(r)
+    if mine != theirs {
+      io.println("absolute mismatch: " ++ r ++ " -> mine " ++ mine ++ ", java " ++ theirs)
+      bad = bad + 1
+    }
+  }
+
+  # parent, against the same oracle
+  for p in ["/a/b/c", "a/b", "/a", "a", "/", "", "a/b/.."] {
+    let mine = path.parent(p)
+    let theirs = match Paths.get(path.normalize(p)).expect("path").getParent() {
+      Some(x) -> Some(x.toString().expect("string"))
+      None -> None
+    }
+    if mine != theirs {
+      io.println("parent mismatch: " ++ p)
+      bad = bad + 1
+    }
+  }
+
+  io.println("mismatches " ++ to_string(bad))
+}
