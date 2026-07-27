@@ -908,3 +908,30 @@ harness 也改了一处:两个后端的运行都把 stdin 接到 `/dev/null`。�
 2. **HTTP/TLS 写不了。** SHA-256、DEFLATE、zip 读取器都是纯 Dawn 能写的(tar 读取器早就是),
    HTTPS 不是。三条路:一个 `io_http_get` intrinsic(JVM 用 HttpClient、C 用 libcurl——但那给 native
    运行时加了一个外部依赖)、shell out 到 curl、或者 native 编译器不支持远程包。**这是下一个裁决。**
+
+### 14.5 这一刀的结果:`use java` 90 → 74
+
+| | 前 | 后 | |
+|---|---|---|---|
+| `analyze` | 3 | **0** | 一个死导入 + `canon` |
+| `lsp` | 6 | **0** | `System.exit` 漏网 + `System.in` 的 method handle + `canon` |
+| `main` | 7 | 7 | 两处 `File.exists` 换成 `io.exists`,但 `File` 这个导入还被 JVM 侧的 jar 布局用着 |
+| `pkgfetch` | 19 | 12 | 环境/文件/临时目录/原子发布/摘要全下来了 |
+| 其余 | 55 | 55 | JVM 后端 30 + comptime 反射 18 + maven 6 + stdlib 1 |
+
+三件事值得单独记:
+
+- **`analyze.canon` 与 `lsp.canon` 是逐字重复的同一个函数**,现在是 analyze 里一个 `pub fn canon`,
+  建在新的 `std/fspath` 上。**模块叫 `fspath` 不叫 `path`**:模块别名和局部名共用一个命名空间,
+  而 `path` 是这个编译器里十几个函数的形参名。这是语言的一处人体工学缺口,不是模块的问题,先绕开。
+- **`std/fspath` 的验收物是它替掉的那个东西**(`scripts/path-contract`,已进 CI)。写它的时候
+  在文档注释里**声明了一处与 Java 的偏离**——`..` 爬过根目录——跑完发现 **Java 也是这么做的**,
+  于是那三个用例从「声明的偏离」变成普通的一致性用例,注释改成记录这件事本身。
+- **`packages/sha2` 的验收物是 `__pkghash`**:`selfhost-run-diff.sh` 拿上一版编译器和 HEAD
+  对同一棵包树算 d1 哈希,两边一致 ⇒ 纯 Dawn 的 SHA-256 和 `MessageDigest` 逐位相同。
+  API 是**增量的**,因为调用方是增量的:一次性 API 会让 `tree_hash` 先把整棵树拼起来,
+  拷贝的字节数是平方级——而这条路正是「下载下来的包是不是要的那个」的判据。
+  实测 225KB:Dawn 84ms vs `MessageDigest` 4ms(热)/22ms(冷);`dawn add` 是冷的一次性调用。
+
+**顺带查出并修掉的两后端不一致**:`io_write_file` 在 JVM 侧一直建父目录、C 侧没有,
+所以「往还不存在的目录里写文件」只在一个后端上成功。没有语料问过这件事,`io_files` 现在问了。
