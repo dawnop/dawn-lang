@@ -1,0 +1,34 @@
+# An opaque type crossing an erased slot. Whether a slot is erased is a
+# question about the representation, so the box on the way in and the unbox on
+# the way out have to see through the wrapper -- and they cancelled each other
+# when both ends were opaque, which is why this survived so long.
+#
+# The list literals are annotated rather than inferred: a bare `[1, 2, 3]` is
+# `List[Int]`, and converting it to `List[Meters]` would be a conversion
+# inside an expression, which spec 2.7 does not do.
+use std/io
+use std/list
+
+opaque type Meters = Int
+
+fn id[T](x: T) -> T = x
+
+fn pair[T](x: T) -> (T, T) = (x, x)
+
+fn first[T](xs: List[T], fallback: T) -> T =
+  match list.head(xs) {
+    Some(v) -> v
+    None -> fallback
+  }
+
+pub fn main() -> Unit !io = {
+  let m: Meters = 3
+  println(to_string(id(m)))
+  match pair(m) {
+    (a, b) -> println("${a} ${b}")
+  }
+  let xs: List[Meters] = [m, m]
+  println(to_string(len(xs)))
+  println(to_string(first(xs, m)))
+  println(to_string(xs == [m, m]))
+}

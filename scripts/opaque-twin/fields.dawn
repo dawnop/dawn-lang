@@ -1,0 +1,22 @@
+# An opaque type as a constructor field. This one crashed the *compiler*:
+# `desc_of` peels, so the field was loaded at the target's width, while the
+# match that picks the comparison and the boxing did not -- and ASM rejected
+# the frame rather than the program failing.
+use std/io
+
+opaque type Meters = Int
+opaque type Name = String
+
+pub type Leg = | Leg(d: Meters, label: Name) derive Show
+
+pub type Route = | Route(a: Leg, b: Leg) derive Show
+
+pub fn main() -> Unit !io = {
+  let x = Leg(3, "north")
+  let y = Leg(3, "north")
+  let z = Leg(4, "south")
+  println(to_string(x))
+  println(to_string(Route(x, z)))
+  println(to_string(x == y))
+  println(to_string(x == z))
+}

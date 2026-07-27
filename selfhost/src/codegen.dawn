@@ -12,7 +12,7 @@ use std/list
 use std/map
 use std/set
 use types.{
-  EPure, prelude_adts, opt_ty,
+  EPure, prelude_adts, opt_ty, peel_opaque,
   Ty, TyInt, TyFloat, TyBool, TyString, TyBytes, TyUnit, TyNever,
   TyError, TyVar, TyAdt, TyList, TyMap, TySet, TyArray, TyJava, TyTuple, TyFn,
   Adts, AdtI, CtorI, adt_of, adt_jvm_name, ctor_jvm_name, Sym, Sig, Eff
@@ -2333,7 +2333,9 @@ fn gen_to_string_method(cw: AdtClassWriter, adts: Adts, sub: String, ci: CtorI) 
       if is_record { append_const(m, f.name ++ ": ") }
       m.visitVarInsn(OP_ALOAD, 0)
       m.visitFieldInsn(OP_GETFIELD, sub, f.name, desc_of(adts, f.ty))
-      match f.ty {
+      # peeled to agree with `desc_of` one line up, which peels: the field was
+      # loaded at the target's width, so it must be boxed at the target's width
+      match peel_opaque(f.ty) {
         TyInt -> {
           m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Long", "valueOf",
             "(J)Ljava/lang/Long;", false)
@@ -2382,7 +2384,11 @@ fn gen_equals_method(cw: AdtClassWriter, adts: Adts, sub: String, ci: CtorI) -> 
     m.visitFieldInsn(OP_GETFIELD, sub, f.name, desc_of(adts, f.ty))
     m.visitVarInsn(OP_ALOAD, 2)
     m.visitFieldInsn(OP_GETFIELD, sub, f.name, desc_of(adts, f.ty))
-    match f.ty {
+    # peeled for the same reason as gen_to_string_method, and this is where it
+    # cost most: an opaque-over-Int field loaded two longs and then compared
+    # them with the reference arm, which ASM rejects while computing frames --
+    # the compiler died rather than the program
+    match peel_opaque(f.ty) {
       TyInt -> {
         m.visitInsn(OP_LCMP)
         m.visitJumpInsn(OP_IFNE, no)

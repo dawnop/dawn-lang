@@ -19,6 +19,7 @@ use std/str
 use types.{
   intr_at,
   subst,
+  peel_opaque,
   Ty, TyInt, TyFloat, TyBool, TyString, TyUnit, TyNever, TyError, TyVar,
   TyAdt, TyList, TyTuple, TyFn, TyBytes, TyMap, TySet, TyArray, TyJava,
   Sym, Sig, Traits, TraitI, ImplI, MethodSig,
@@ -151,9 +152,11 @@ fn fresh_loop(st: LSt) -> (LSt, Int) =
 ## unboxed. emit.dawn recomputed this at every argument position; Core
 ## decides it once, here.
 fn adapt_in(e: CExpr, actual: Ty, declared: Ty) -> CExpr =
-  match declared {
+  # peeled on both sides: whether a slot is erased is a question about the
+  # representation, and an opaque type's representation is its target's
+  match peel_opaque(declared) {
     TyVar(_, _) ->
-      match actual {
+      match peel_opaque(actual) {
         TyVar(_, _) -> e
         _ -> CBox(e, actual)
       }
@@ -183,9 +186,9 @@ fn erased_builtin_sig(name: String) -> Option[Sig] =
   }
 
 fn adapt_out(e: CExpr, declared: Ty, actual: Ty) -> CExpr =
-  match declared {
+  match peel_opaque(declared) {
     TyVar(_, _) ->
-      match actual {
+      match peel_opaque(actual) {
         TyVar(_, _) -> e
         _ -> CUnbox(e, actual)
       }
@@ -238,9 +241,13 @@ fn un_op(op: TUnOp) -> CUnOp =
 ## rigid type variable, whose dictionary is a parameter of the enclosing
 ## function and so cannot be found from the type alone.
 fn to_str(st: LSt, e: CExpr, t: Ty, wit: Option[WitRef]) -> (LSt, CExpr) =
-  if t == TyString {
+  # `to_string` of a String is the String itself, and that is a fact about the
+  # representation -- so an opaque type over String must not pick up the
+  # quoting `show` gives a String *inside* a structure. Peeled here rather
+  # than at the two `==`, because the witness lookup below is keyed on `t`.
+  if peel_opaque(t) == TyString {
     (st, e)
-  } else if t == TyUnit {
+  } else if peel_opaque(t) == TyUnit {
     (st, CStr("()"))
   } else {
     match t {
@@ -978,6 +985,15 @@ fn eq_at(st: LSt, a: CExpr, b: CExpr, t: Ty) -> (LSt, CExpr) = {
         CImpl(owner_or(imp.owner, st1.owner), EQ_ID, t, "eq"), [a, b] ++ ds, TyBool))
     }
   }
+  # An opaque type with no `impl Eq` of its own compares as its target: the
+  # value behind the barrier *is* that target (spec 2.7). After the impl
+  # check, for the reason show_at gives -- an `impl Eq[Id]` is the point of
+  # declaring one -- and before `is_ground`, which would send it to
+  # `foreign_eq` and panic.
+  match t {
+    TyOpaque(_, _, _, tgt) -> return eq_at(st, a, b, tgt)
+    _ -> ()
+  }
   if is_ground(t) {
     if expandable(t) {
       let (st1, name) = struct_eq_fn(st, t)
@@ -1209,6 +1225,11 @@ fn cmp_at(st: LSt, a: CExpr, b: CExpr, t: Ty) -> (LSt, CExpr) = {
       return (st1, CCall(
         CImpl(owner_or(imp.owner, st1.owner), ORD_ID, t, "cmp"), [a, b] ++ ds, TyInt))
     }
+  }
+  # as in eq_at: the target's ordering, once the impl has had its chance
+  match t {
+    TyOpaque(_, _, _, tgt) -> return cmp_at(st, a, b, tgt)
+    _ -> ()
   }
   if is_ground(t) {
     if expandable(t) {
@@ -2326,18 +2347,23 @@ fn lower_match(st: LSt, scrut: TExpr, arms: List[TArm], ty: Ty, tl: Bool) -> (LS
 ## A placeholder initialiser for the result slot of a match or if. Every
 ## path assigns it before use, but both targets want a definite
 ## initialisation at the declaration.
-fn zero_of(t: Ty) -> CExpr =
-  if t == TyInt {
+## The placeholder a slot holds before its arm writes one. Which zero a slot
+## takes is decided by how wide it is, so this peels; the intrinsic keeps the
+## unpeeled `t` because that is the slot's declared type.
+fn zero_of(t: Ty) -> CExpr = {
+  let p = peel_opaque(t)
+  if p == TyInt {
     CInt(0)
-  } else if t == TyFloat {
+  } else if p == TyFloat {
     CFloat(0.0)
-  } else if t == TyBool {
+  } else if p == TyBool {
     CBool(false)
-  } else if t == TyString {
+  } else if p == TyString {
     CStr("")
   } else {
     CIntrinsic("null_ref", [], t)
   }
+}
 
 ## `e?` -- return early on None/Err, otherwise take the payload.
 fn lower_propagate(st: LSt, operand: TExpr, ty: Ty) -> (LSt, CExpr) = {

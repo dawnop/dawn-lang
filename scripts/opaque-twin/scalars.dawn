@@ -1,0 +1,56 @@
+# The five scalar targets, through the four relations spec 2.7 promises are
+# unchanged by a wrapper -- 「同样的相等、哈希、序与渲染」 -- plus the
+# representation itself. `Bytes` and `String` were the two that were wrong:
+# `==` on an opaque Bytes answered `false` where the alias answered `true`,
+# and `to_string` of an opaque String kept the quotes `show` gives a String.
+#
+# Arithmetic and `<` are deliberately absent. Spec 2.7 says the conversion
+# happens at assignment, argument and return position and *not inside an
+# expression* -- 「本模块里 `u + 1` 仍是错的」 -- so those two legitimately
+# differ between the spellings and are not part of the property.
+use std/io
+use std/bytes
+use std/map
+use std/set
+
+opaque type Meters = Int
+opaque type Celsius = Float
+opaque type Flag = Bool
+opaque type Name = String
+opaque type Digest = Bytes
+
+pub fn main() -> Unit !io = {
+  let m: Meters = 3
+  let m2: Meters = 4
+  let c: Celsius = 1.5
+  let f: Flag = true
+  let n: Name = "bob"
+  let d: Digest = bytes.utf8("x")
+  let d2: Digest = bytes.utf8("x")
+
+  println("-- equality --")
+  println(to_string(m == m2))
+  println(to_string(c == c))
+  println(to_string(f == f))
+  println(to_string(n == n))
+  println(to_string(d == d2))
+
+  println("-- rendering, both ways --")
+  println(to_string(m))
+  println(to_string(c))
+  println(to_string(f))
+  println(to_string(n))
+  println("${m} ${c} ${f} ${n}")
+
+  println("-- order --")
+  println(to_string(sort([m2, m])))
+  println(to_string(sort([n, n])))
+
+  println("-- hash, through a key --")
+  let km: Map[Meters, Int] = map.from([(m, 1)])
+  println(to_string(map.get(km, m)))
+  let kn: Set[Name] = set.from([n])
+  println(to_string(set.has(kn, n)))
+  let kd: Map[Digest, Int] = map.from([(d, 1)])
+  println(to_string(map.get(kd, d2)))
+}

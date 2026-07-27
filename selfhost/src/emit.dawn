@@ -16,7 +16,7 @@ use std/list
 use std/map
 use std/set
 use types.{
-  intr_at, Rt, RtStrings, RtBytes, RtArray, RtIo,
+  intr_at, Rt, RtStrings, RtBytes, RtArray, RtIo, peel_opaque,
   Ty, TyInt, TyFloat, TyBool, TyString, TyBytes, TyUnit, TyNever,
   TyError, TyVar, TyAdt, TyList, TyMap, TySet, TyArray, TyJava, TyTuple, TyFn,
   Adts, AdtI, CtorI, FieldI, adt_of, adt_jvm_name, ctor_jvm_name,
@@ -494,7 +494,12 @@ fn gen_load_const(g: Gen, v: CValue, t: Ty, key: String) -> Gen !io = {
       ldc_str(g.mv, x)
       g
     }
-    VUnit -> g
+    # inline like the other scalars rather than through a static field: there
+    # is one Unit, so the singleton *is* the constant
+    VUnit -> {
+      push_unit(g.mv)
+      g
+    }
     _ -> {
       let (g1, fname) = match map.get(g.const_by_key, key) {
         Some(f) -> (g, f)
@@ -2059,7 +2064,13 @@ fn gen_cbinary(g: Gen, op: CBinOp, l: CExpr, r: CExpr, ty: Ty) -> (Gen, Bool) !i
   let (ga, _) = gen_cexpr(g, l, false)
   let (gb, _) = gen_cexpr(ga, r, false)
   var g1 = gb
-  let t = cex_ty(l)
+  # Peeled: every use of `t` below picks an *instruction* -- LADD or DADD,
+  # Arrays.equals or Object.equals -- and which instruction a value takes is
+  # decided by its representation, which for an opaque type is its target's.
+  # `emitc.dawn`'s emit_binary already does this; this side did not, and an
+  # `opaque type D = Bytes` compared by `==` answered `false` where the same
+  # comparison through a dictionary answered `true`.
+  let t = peel_opaque(cex_ty(l))
   match op {
     CAdd -> { g1.mv.visitInsn(if t == TyInt { OP_LADD } else { OP_DADD }) }
     CSub -> { g1.mv.visitInsn(if t == TyInt { OP_LSUB } else { OP_DSUB }) }

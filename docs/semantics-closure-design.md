@@ -588,3 +588,43 @@ Eq 与 Hash 各自落到自己的标量清单上。
 而且它现在更承重了:D2/D3 给 std 写了 `impl[K: Eq + Hash, V: Eq] Eq[Map[K, V]]`,
 让这条 impl 不算孤儿的,正是 `head_owner(HMap) == Some("std/map")` 这三行。所以结论是
 **它不是脚手架,是答案**,注释照实改。
+
+## 11. opaque 的十二处漏写(2026-07-27,#53/#54 顺出来的)
+
+#53 和 #54 报的是两个函数少了 `TyOpaque` 臂。按「一件事有几份定义」的老习惯把每个吃
+`Ty` 的函数盘了一遍,结果是**十二处**,而且最重的两处不是崩溃是**静默给错答案**:
+
+| 形状 | opaque | `alias` 孪生 |
+|---|---|---|
+| `opaque type N = String`,`to_string(n)` | `"bob"` | `bob` |
+| `opaque type D = Bytes`,`a == b` | **`false`** | **`true`** |
+| `opaque type M = Int` 作构造子字段 | **编译器死在 ASM** | 正常 |
+| `Map[(Celsius,Int),Int]`,`Celsius = Float` | checker 放行、lowering panic | 干净诊断 |
+| `derive Show` 的字段是 opaque | 「not printable」 | 正常 |
+| `const D: Meters = 3` | 拒 | 正常 |
+
+第二行最难看:`==` 说不等,而同一个程序里字典和 HAMT 说相等——**一个关系,两个答案**,
+正是 S1 那条教训的原样重演,只是这次分歧的两边都在同一次运行里。
+
+### 判据:别名替换法
+
+spec §2.6 说 `opaque type` 与 `alias` 的差别**只有一条**——谁被允许看穿。于是判据可以是
+机械的:**把 `opaque type N = T` 换成 `alias N = T`,答案变了就是 bug**,除非你是那四件
+事之一(可赋值性、impl 选择、符号命名、诊断里的类型名)。
+
+还有个次序:**先问身份再问表示**。`is_eq_scalar` 故意**不** peel——它要是 peel 了,
+`eq_at` 会在查 impl 表之前就返回 `CBinary`,`impl Eq[UserId]` 就被删掉了。所以
+peel 的位置一律在 `has_impl_at` 之后,`show_at` 早就是这么写的,这次是让另外两个跟上。
+
+### 为什么文档没拦住
+
+`emit_method_return` 上方有一整段注释讲的就是这个坑(S0.3,「opaque type over Int 就是
+这样一个东西」),**三十行之后** `gen_equality` 原样再犯一次。同一个 `gen_ctor_class` 里
+三个兄弟方法,`gen_hash_code_method` 对了,`gen_equals_method` 和 `gen_to_string_method`
+错了。**文档在三十行的距离上都传不过去**,所以判据落成了脚本:`scripts/opaque-twin/`,
+每个语料跑两遍(原样 / 替换成 `alias`)比输出,编译错误也算输出。它建好当天就抓出了
+第十二处(`derived_field_ok`),那处是手工那一轮漏掉的。
+
+**语料只覆盖 opacity 允许的操作**。spec §2.7 写着转换只发生在赋值/传参/返回位,不在
+表达式内部——`u + 1` 本模块里也是错的。所以算术和 `<` 不在语料里:它们**本来就该**
+两种拼法不同。孪生性质管的是 §2.7 承诺的那四样:相等、哈希、序、渲染,加上表示本身。

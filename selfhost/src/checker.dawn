@@ -996,6 +996,12 @@ pub fn structural_gap(cx: Cx, tid: Int, t: Ty, seen: Set[String]) -> Option[Ty] 
         }
         None
       }
+      # An opaque type answers whatever its target answers -- the `has_impl_at`
+      # at the top already gave an `impl` on the opaque itself its chance.
+      # `resolve_witness` peels before calling here, but only the outermost
+      # type, so without this arm a `(Celsius, Int)` key walked past the Float
+      # ban that `(Float, Int)` is caught by.
+      TyOpaque(_, _, _, tgt) -> structural_gap(cx, tid, tgt, seen)
       # A rigid type parameter is not a gap in the structure -- whether `T`
       # answers is the instantiation's business, and `resolve_witness` asks it
       # there, where the bound either is or is not in scope.
@@ -1076,15 +1082,28 @@ fn derived_field_ok(cx: Cx, tid: Int, own: List[Ty], t: Ty) -> Bool =
               }
               true
             }
+            # Whether a field can be rendered or ordered is a question about
+            # the value, and an opaque type's value is its target's (spec
+            # 2.7). Below the `impl_at` above, so an `impl Show[Id]` still
+            # answers for the wrapper first.
+            TyOpaque(_, _, _, tgt) -> derived_field_ok(cx, tid, own, tgt)
             _ -> false
           }
       }
   }
 
-## Int/Float/Bool/String and List/tuple/record/ADT built from them (spec §7.2).
+## Can the compiler rebuild this value at class-init time? Int/Float/Bool/
+## String/Unit and List/tuple/record/ADT built from them, plus an opaque type
+## wherever its target qualifies (spec §7.2).
 pub fn is_const_serializable(cx: Cx, t: Ty, visited: Set[Int]) -> Bool =
   match t {
     TyInt | TyFloat | TyBool | TyString -> true
+    # One value, so the constant is the singleton. Refusing it was a
+    # representation objection, and #51 removed the representation.
+    TyUnit -> true
+    # Serializability is a question about the representation, so an opaque
+    # type is exactly as serializable as its target.
+    TyOpaque(_, _, _, tgt) -> is_const_serializable(cx, tgt, visited)
     TyList(e) -> is_const_serializable(cx, e, visited)
     TyTuple(elems) -> {
       for e in elems {
@@ -2623,7 +2642,8 @@ pub fn pass_const_decls(cx: Cx, m: Module) -> (Cx, List[Option[Ty]]) !io = {
     if not is_const_serializable(cx1, declared, set.empty()) && declared != TyError {
       cx1 = cerr_h(cx1, "`" ++ ty_show(cx1.adts, declared) ++
           "` is not a constant-serializable type", t_lo2(d.ann), t_hi2(d.ann),
-        "constants hold Int/Float/Bool/String and List/tuple/record/ADT values built from them (spec §7.2)")
+        "constants hold Int/Float/Bool/String/Unit and List/tuple/record/ADT values built " ++
+          "from them (spec §7.2)")
       declared = TyError
     }
     # the initializer still checks against the annotation as written (the
@@ -5115,7 +5135,7 @@ fn check_expr_at(cx: Cx, e: Expr, expected: Option[Ty]) -> (Cx, Ty, TExpr) !io =
       if not is_const_serializable(cx3, t, set.empty()) && not is_errorish(t) {
         (cerr_h(cx3, "a comptime result must be constant-serializable, got " ++
             ty_show(cx3.adts, t), lo, hi,
-          "Int/Float/Bool/String and List/tuple/record/ADT values of them (spec §7.2)"),
+          "Int/Float/Bool/String/Unit and List/tuple/record/ADT values of them (spec §7.2)"),
           TyError, XError(lo, hi))
       } else {
         (cx3, t, XComptime(bx, lo, hi, t))
