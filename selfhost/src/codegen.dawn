@@ -2778,6 +2778,12 @@ fn gen_equals_method(cw: AdtClassWriter, adts: Adts, sub: String, ci: CtorI) -> 
 }
 
 ## hashCode consistent with the structural equals: h = 31*h + field.hash, seeded 1.
+##
+## Not what Dawn's `hash` compiles to any more -- that is a Core body, and it
+## folds the constructor tag in as well, which a per-class `hashCode` has no
+## need of (`equals` here checks the class first). This is what a Java caller
+## sees, and what a Dawn value answers inside a `java.util.HashMap`; it is
+## paired with `gen_equals_method` and changing one alone breaks that pair.
 fn gen_hash_code_method(cw: AdtClassWriter, adts: Adts, sub: String, ci: CtorI) -> Unit !io = {
   let m = cw.method(ACC_PUBLIC, "hashCode", "()I").expect("mv")
   m.visitCode()

@@ -343,6 +343,18 @@ int64_t dawn_hash_str(dawn_str s) {
   return h;
 }
 
+int64_t dawn_hash_bytes(const dawn_bytes *b) {
+  /* java.util.Arrays.hashCode(byte[]): seed 1, h = 31*h + element, and the
+   * element is a *signed* byte there. The same fold the structural hash of a
+   * tuple or a union runs, so the one Dawn spells out and the one the runtime
+   * owns are the same shape. */
+  int32_t h = 1;
+  for (int64_t i = 0; i < b->len; i++) {
+    h = (int32_t)((uint32_t)h * 31u + (uint32_t)(int32_t)(int8_t)b->p[i]);
+  }
+  return h;
+}
+
 int64_t dawn_cmp_int(int64_t a, int64_t b) { return a < b ? -1 : (a > b ? 1 : 0); }
 
 int64_t dawn_cmp_float(double a, double b) {

@@ -24,7 +24,7 @@ use types.{
   TyAdt, TyList, TyTuple, TyFn, TyBytes, TyMap, TySet, TyArray, TyJava,
   Sym, Sig, Traits, TraitI, ImplI, MethodSig,
   Adts, AdtI, CtorI, adt_of, trait_of, OPTION_ID, RESULT_ID, ORD_ID, EQ_ID, HASH_ID, SHOW_ID,
-  is_eq_scalar, is_ord_scalar, builtins, Impls, impl_at, has_impl_at,
+  is_eq_scalar, is_ord_scalar, is_hash_scalar, builtins, Impls, impl_at, has_impl_at,
   is_ground, expandable, type_args_of, sub_goals
 }
 use tast.{
@@ -505,7 +505,7 @@ fn lit_eq(subj: CExpr, v: LitV, t: Ty) -> CExpr =
 # ---- the intrinsics lowering emits that no user ever writes ----
 #
 # `types.intrinsics()` declares the 73 an ordinary program can name. Lowering
-# emits twelve more, and they are a different contract: a user builtin may be
+# emits thirteen more, and they are a different contract: a user builtin may be
 # missing from a backend (emitc has no collections yet, honestly), but every
 # one of these is something Core hands over on a path that has no alternative,
 # so a backend that does not implement it is broken rather than incomplete.
@@ -513,12 +513,12 @@ fn lit_eq(subj: CExpr, v: LitV, t: Ty) -> CExpr =
 #   cmp hash            the prelude relation at a scalar, after `prim_relation`
 #                       collapses it -- these two are why `cmp(3, 9)` stopped
 #                       looking for a trait default that does not exist
-#   java_eq             equality of a value that came from the host, the one
-#                       Dawn does not define. Was `struct_eq`, a runtime
-#                       structural walk for anything lowering could not spell
-#                       out; the checker refuses those now, so nothing but a
-#                       foreign object reaches it and a backend with no Java
-#                       owes nothing here
+#   java_eq java_hash   equality and hash of a value that came from the host,
+#                       the two Dawn does not define. `java_eq` was
+#                       `struct_eq`, a runtime structural walk for anything
+#                       lowering could not spell out; the checker refuses
+#                       those now, so nothing but a foreign object reaches
+#                       either and a backend with no Java owes nothing here
 #   show quote          rendering an erased value, and a nested String
 #   str_of_int/float/bool
 #                       the scalar renderings `to_str` settles without a witness
@@ -806,7 +806,7 @@ fn make_bridge(
 ## code rather than a claim in a comment.
 fn prim_relation(st: LSt, tid: Int, subject: Ty, args: List[CExpr]) -> (LSt, CExpr) = {
   if tid == EQ_ID { return eq_at(st, args[0], args[1], subject) }
-  if tid == HASH_ID { return (st, CIntrinsic("hash", [args[0]], TyInt)) }
+  if tid == HASH_ID { return hash_at(st, args[0], subject) }
   if tid == ORD_ID { return cmp_at(st, args[0], args[1], subject) }
   if tid == SHOW_ID { return show_at(st, args[0], subject) }
   panic("lower: no primitive relation for trait " ++ to_string(tid))
@@ -1341,6 +1341,188 @@ fn lexicographic(st: LSt, parts: List[CExpr], i: Int) -> (LSt, CExpr) = {
       CLocal(sym, TyInt),
       Some(rest), TyInt)),
     TyInt))
+}
+
+# ---- structural hashing (docs/semantics-closure-design.md 3) ----
+#
+# The fourth member of the family, and until 2026-07-28 the only one still a
+# bare `CIntrinsic("hash", ..)` whatever the subject was. On the JVM that
+# reached `Object.hashCode`, which for a generated class is a method the
+# emitter writes straight as bytecode; native had no answer past the scalars,
+# so a tuple key was the first wall `dawn __emitc selfhost` hit.
+#
+# Two of the answers had to be chosen rather than preserved, because the JVM's
+# were not answers a Core body can reproduce:
+#
+#   * A constructor with no fields got no `hashCode` at all, so it inherited
+#     Object's -- the identity hash of the singleton instance. That is not a
+#     function of the value: the same `Origin` hashes differently in two
+#     programs, and no second backend can produce it. It is the fold over no
+#     fields now.
+#
+#   * The tag was absent, while `==` and `cmp` both consult it. With the
+#     identity hash gone, leaving it absent would put every nullary
+#     constructor of every type in one bucket -- `TyInt`, `TyBool`, `TyString`
+#     and the rest of this compiler's own `Ty` among them. So the tag folds in
+#     as a leading field, and only where there is more than one constructor to
+#     tell apart, which is the condition the other two relations already use.
+#
+# Everything else keeps the number it had: seed 1, `h = 31*h + hash(part)`,
+# left to right, which is what the emitted `hashCode` did and what
+# `java.util.Arrays.hashCode` does.
+
+## One step of the fold.
+fn mix(h: CExpr, part: CExpr) -> CExpr =
+  CBinary(CAdd, CBinary(CMul, h, CInt(31), TyInt), part, TyInt)
+
+## Sign-extend the low 32 bits back into Dawn's 64-bit Int.
+##
+## The fold is 32-bit arithmetic -- that is where the numbers come from, and
+## the scalars hand back 32-bit answers to begin with. Running it wide and
+## narrowing once at the end gives the same result as narrowing every step
+## (both are the same arithmetic mod 2^32), and costs three instructions
+## instead of three per field.
+##
+## Written as mask/flip/subtract rather than `(h << 32) >> 32` because every
+## operand stays below 2^32: no shift of a negative, and nothing for C's
+## signed-overflow rules to have an opinion about.
+fn narrow32(e: CExpr) -> CExpr =
+  CBinary(CSub,
+    CBinary(CBxor, CBinary(CBand, e, CInt(0xFFFFFFFF), TyInt), CInt(0x80000000), TyInt),
+    CInt(0x80000000), TyInt)
+
+## `hash(x)` at one type, as Core. The Hash counterpart of `eq_at`, and every
+## producer goes through it: the `hash` method, a `[K: Eq + Hash]` bound at a
+## concrete key type, and each field inside a synthesised hash.
+fn hash_at(st: LSt, x: CExpr, t: Ty) -> (LSt, CExpr) = {
+  # the scalars a backend hashes itself. Float is deliberately not among them
+  # (types.hash_scalars): no hash can agree with an equality where -0.0 == 0.0.
+  if is_hash_scalar(t) { return (st, CIntrinsic("hash", [x], TyInt)) }
+  if has_impl_at(st.impls, HASH_ID, t) {
+    let imp = impl_for(st, HASH_ID, t)
+    if provides(imp, "hash") {
+      let (st1, ds) = goal_dicts(st, sub_goals(st.impls, HASH_ID, t))
+      return (st1, CCall(
+        CImpl(owner_or(imp.owner, st1.owner), HASH_ID, t, "hash"), [x] ++ ds, TyInt))
+    }
+  }
+  # as in eq_at: an opaque type hashes as its target, once its own impl has
+  # had its chance
+  match t {
+    TyOpaque(_, _, _, tgt) -> return hash_at(st, x, tgt)
+    _ -> ()
+  }
+  if is_ground(t) {
+    if expandable(t) {
+      let (st1, name) = struct_hash_fn(st, t)
+      return (st1, CCall(CDirect(st1.owner, name), [x], TyInt))
+    }
+    return (st, foreign_hash(x, t))
+  }
+  match map.get(st.dict_env, dict_key(HASH_ID, t)) {
+    Some(d) -> return hash_through_dict(st, d, x, t)
+    None -> ()
+  }
+  if expandable(t) && goals_available(st, sub_goals(st.impls, HASH_ID, t)) {
+    let (st1, ds) = goal_dicts(st, sub_goals(st.impls, HASH_ID, t))
+    let (st2, name) = struct_hash_fn(st1, t)
+    return (st2, CCall(CDirect(st2.owner, name), [x] ++ ds, TyInt))
+  }
+  (st, foreign_hash(x, t))
+}
+
+## The one hash Dawn does not define, and `foreign_eq`'s twin: a value that
+## came from the host hashes the way the host hashes it, or the two would stop
+## agreeing inside the same Map. A backend with no Java owes nothing here.
+fn foreign_hash(x: CExpr, t: Ty) -> CExpr =
+  match t {
+    TyJava(_, _) -> CIntrinsic("java_hash", [x], TyInt)
+    _ -> panic("lower: no hash for `" ++ ty_key_inst(t) ++
+        "`; the checker should have refused it")
+  }
+
+fn hash_through_dict(st: LSt, d: CExpr, x: CExpr, t: Ty) -> (LSt, CExpr) = {
+  let tr = trait_of(st.traits, HASH_ID)
+  let sg = trait_method_sig(tr, "hash")
+  let idx = method_index(tr, "hash")
+  (st, adapt_out(
+    CCall(CMethod(d, HASH_ID, "hash", idx), [adapt_in(x, t, sg.param_tys[0])], sg.ret),
+    sg.ret, TyInt))
+}
+
+fn struct_hash_fn(st: LSt, t: Ty) -> (LSt, String) =
+  struct_rel_fn(st, t, "structhash\$", HASH_ID, 1, TyInt, CInt(1),
+    fn(s, xs, ty) => struct_hash_body(s, xs[0], ty))
+
+fn struct_hash_body(st: LSt, x: CExpr, t: Ty) -> (LSt, CExpr) =
+  match t {
+    TyTuple(elems) -> {
+      var st1 = st
+      var acc: CExpr = CInt(1)
+      var i = 0
+      for et in elems {
+        let (st2, hp) = hash_at(st1, CTupleGet(x, i, et), et)
+        st1 = st2
+        acc = mix(acc, hp)
+        i = i + 1
+      }
+      (st1, narrow32(acc))
+    }
+    TyAdt(aid, _) -> {
+      let info = adt_of(st.adts, aid)
+      # one constructor: there is no tag to tell anything apart with
+      if len(info.ctors) == 1 {
+        let (st1, e) = ctor_fields_hash(st, x, t, aid, 0, CInt(1))
+        return (st1, narrow32(e))
+      }
+      # several: the tag folds in first, then that arm's fields.
+      #
+      # A constructor with no fields has nothing to fold, so its answer *is*
+      # the seed -- which is what the final `else` says. Only the ones with
+      # fields need an arm, and a union of bare tags needs no test at all:
+      # `Ty` and `Head` in this compiler are exactly that shape, and asking
+      # them thirteen times which one they are to arrive at the same
+      # expression is the sort of thing a structural expansion writes if
+      # nobody looks at what it wrote.
+      let (st1, tsym) = fresh_sym(st)
+      let seed = mix(CInt(1), CLocal(tsym, TyInt))
+      var stx = st1
+      var chain: CExpr = seed
+      var ci = len(info.ctors) - 1
+      while ci >= 0 {
+        if len(info.ctors[ci].fields) > 0 {
+          let (st2, fe) = ctor_fields_hash(stx, x, t, aid, ci, seed)
+          stx = st2
+          chain = CIf(CIsCtor(x, aid, ci), fe, Some(chain), TyInt)
+        }
+        ci = ci - 1
+      }
+      (stx, CBlock(
+        [CSLet(tsym, TyInt, CTagOf(x, aid))], Some(narrow32(chain)), TyInt))
+    }
+    _ -> panic("lower: struct_hash_body on a type with no structure to walk")
+  }
+
+fn ctor_fields_hash(
+  st: LSt,
+  x: CExpr,
+  sc: Ty,
+  aid: Int,
+  ci: Int,
+  seed: CExpr
+) -> (LSt, CExpr) = {
+  let c = adt_of(st.adts, aid).ctors[ci]
+  var st1 = st
+  var acc = seed
+  var idx = 0
+  while idx < len(c.fields) {
+    let ft = concrete_field_ty(st1, sc, aid, ci, idx)
+    let (st2, hp) = hash_at(st1, read_field(st1, x, sc, aid, ci, idx), ft)
+    st1 = st2
+    acc = mix(acc, hp)
+    idx = idx + 1
+  }
+  (st1, acc)
 }
 
 # ---- rendering (docs/semantics-closure-design.md 6) ----

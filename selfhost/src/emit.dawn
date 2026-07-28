@@ -2342,10 +2342,20 @@ fn gen_cintrinsic(g: Gen, name: String, args: List[CExpr], ty: Ty) -> (Gen, Bool
   }
   if name == "hash" {
     # the prelude Hash over a scalar; the JVM's own hash for that type, widened
-    # because Dawn's Int is a long
+    # because Dawn's Int is a long. Only a scalar reaches here now -- a tuple
+    # or a union is a Core body that folds its parts (lower.hash_at).
     let at = cex_ty(args[0])
     let g1 = gen_cargs(g, args)
     hash_of(g1.mv, at)
+    g1.mv.visitInsn(OP_I2L)
+    return (g1, true)
+  }
+  if name == "java_hash" {
+    # Hash of a value that came from the host, and `java_eq`'s twin: the
+    # runtime it came from decides, so that the two keep agreeing inside the
+    # same Map.
+    let g1 = gen_cargs(g, args)
+    g1.mv.visitMethodInsn(OP_INVOKEVIRTUAL, obj(), "hashCode", "()I", false)
     g1.mv.visitInsn(OP_I2L)
     return (g1, true)
   }

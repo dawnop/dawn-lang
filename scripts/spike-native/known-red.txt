@@ -2,10 +2,10 @@
 # unlisted one as fatal -- and it also fails when a *listed* check starts
 # passing, so a fix cannot leave its entry behind.
 #
-# Two are listed, both from hash_key.dawn, which was written to find them.
+# Nothing is listed. Every corpus program compiles with both backends, runs
+# with both, and agrees with a written expectation.
 #
-# It is worth saying what an empty file does and does not mean. It does not
-# mean the
+# It is worth saying what that does and does not mean. It does not mean the
 # native backend is finished -- it means the *corpus* no longer catches it out,
 # and the way to keep this file honest is to add programs, not to keep entries.
 # When these corpora were added on 2026-07-25 four of the entries turned out to
@@ -99,21 +99,19 @@
 # rebuild one in. const_fold:emitc was deleted here.
 
 # --- hashing --------------------------------------------------------------
-# `hash` is the one member of the eq/ord/show family lowering still hands over
-# as a bare intrinsic whatever the subject is, so each backend answers for
-# itself. The corpus that asks was added on 2026-07-28; until then nothing
-# hashed a tuple or a union at all.
+# hash_key:jvm and hash_key:emitc were here, for one day. `hash` was the last
+# member of the eq/ord/show family lowering still handed over as a bare
+# intrinsic whatever the subject was, so each backend answered for itself; no
+# corpus had hashed a tuple or a union until the one that found this.
 #
-# The JVM's answer for a constructor with no fields is the identity hash of
-# the singleton instance -- the class writes no hashCode, so it inherits
-# Object's. That is not a function of the value: two programs get different
-# numbers for the same `Origin`, and a `(Origin, 1)` folds one of them in. The
-# tag is also absent from a union's hash, while `==` and `cmp` both consult
-# it, so every nullary constructor of every type would land in one bucket the
-# moment the identity hash went away.
-hash_key:jvm
+# The JVM's answer for a constructor with no fields was the identity hash of
+# the singleton instance -- the class writes no hashCode, so it inherited
+# Object's. That is not a function of the value: two programs got different
+# numbers for the same `Origin`, and a `(Origin, 1)` folded one of them in.
+# The tag was absent too, while `==` and `cmp` both consult it. Past the
+# scalars native had nothing at all, and no hash for Bytes either, which is a
+# hash scalar the C runtime had never grown one for.
 #
-# Past the scalars native has nothing: `scalar_rt` has no entry for a tuple or
-# a union to reach, and none for Bytes either, which is a hash scalar the C
-# runtime never grew a hash for.
-hash_key:emitc
+# Closed the way the other three were: lowering spells the fold out over the
+# type's own structure, so both backends compile one definition
+# (semantics-closure-design.md 3).

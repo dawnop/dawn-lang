@@ -1020,3 +1020,27 @@ glibc 的 `posix_spawnp` 确实把 ENOENT 从返回值报回来,没推迟到子�
 
 **剩下的 62 处没有一处是「本该纯 Dawn 却不是」**:按两个 main 的裁决,它们本来就归 JVM 侧。
 编译器里最后一个目标无关却绑在 JVM 上的模块已经解绑。
+
+### 14.8 刀 5:`hash` 走结构化降级 —— 第一堵墙不再是 Core 的缺口
+
+`==`、`cmp`、`show` 早已是「lowering 按类型自身结构展开的一个普通 Core 函数」。`hash`
+不是:`prim_relation` 无论主体是什么都发 `CIntrinsic("hash", ..)`,于是 native 过了标量
+就没有答案,而 `dawn __emitc selfhost` 的**第一堵墙就是元组的哈希**(`Impls` 是
+`Map[(Int, Head), ImplI]`)——不是那 62 处 `use java`。
+
+设计、两个被迫重选的答案(无载荷构造器的身份哈希、缺席的标签)、以及爆炸半径的实测,
+都记在 [`semantics-closure-design.md` §12](semantics-closure-design.md)。这里只记 native 侧的三件:
+
+- **`dawn_hash_bytes` 补上。** `Bytes` 是哈希标量,C 运行时却从没给它写过哈希,
+  `scalar_rt` 一路落到 `no_rt`。抄 JVM 的 `Arrays.hashCode`:种子 1、`31*h + 有符号 byte`,
+  和结构哈希是同一个折叠。
+- **`java_hash` 是 `java_eq` 的孪生**,和它一样只在 JVM 后端有实现:宿主来的值由宿主的
+  运行时定哈希,否则同一个 Map 里 `==` 和 `hash` 会各说各话。没有 Java 的后端不欠这一份。
+- **墙挪了。** 现在 `dawn __emitc selfhost` 报的是
+  `use java cannot be compiled to native`——即 §14.1 那条门控裁决本身,而不是 Core 没能
+  携带的某个关系。语料这一侧,`hash_key` 的七项检查(emitc/cc/jvm/native/diff/stderr/exit)
+  全绿。
+
+**语料先行是这一刀的方法,不是修辞。** 两条 known-red 写进去、活了一天、被同一天的下一个
+提交删掉——`.expect` 里那 40 行数是按定义手算的,不是从任何一个后端读出来的,否则它证明的
+只会是「两个后端一起错」。

@@ -403,13 +403,17 @@ fn sort2[T: Ord2](xs: List[T]) -> List[T] = ...   # 约束：[T: Trait (+ Trait)
   `trait Hash[T] { fn hash(x: T) -> Int }`，`Int`/`Float`/`Bool`/`String`/`Bytes`
   各有 impl。**没有 `derive Eq`**：`==` 本来就对每个类型结构化（§4.3），等于每个类型
   隐式实现 Eq；写 impl 是为了**覆盖**它。
-  - 覆盖后 `==` 即该 impl，容器与嵌套比较（`equals`/`hashCode`）一并跟随。
+  - 覆盖后 `==` 即该 impl，容器与嵌套比较一并跟随。
   - **`impl Eq` 与 `impl Hash` 必须成对出现**（编译错误）：相等的值必须哈希相同，
     否则该类型作 `Map`/`Set` 键即失效。
   - 覆盖体内不能用 `==` 比较主体类型本身——那就是这个 impl，会无限递归；比字段。
   - `Eq`/`Hash` 约束实例化到**没有 impl 的类型**（ADT、元组）时，编译器按这个类型
     自己的结构**合成**一份实现——等价于一条隐式的条件 impl，主体含类型参数时要求
     该参数有对应 bound。主体静态已知时直接塌缩成原语，不建字典。
+  - 合成的哈希是**可观测的数**（`hash(x)` 可以打印），故定义在此：种子 `1`，
+    逐部分 `h = 31*h + hash(part)`，32 位环绕算术；元组按元素序，构造器按字段序，
+    **有一个以上构造器时构造器序号作为第一个部分先折进去**（一个构造器时没有可分辨的
+    标签，与 `==`/`cmp` 同一条规则）。
   - `List` 不在此列：std 写了 `impl[T: Eq] Eq[List[T]]` 与对应的 `Hash`/`Ord`。
     `Map`/`Set`/元组仍走合成。
 - 限制：trait 方法与带约束的函数不可用作函数值（提示包 lambda）；comptime 中
@@ -1285,7 +1289,7 @@ native-image，责任在库，见 §12.3）。Dawn 无依赖解析——只接�
 | `match` | `instanceof` 链 + 字段读取（不用 indy、不用 pattern switch） |
 | lambda/闭包 | `LambdaMetafactory`（native-image 支持名单内） |
 | 泛型 | 擦除 + 装箱 |
-| 结构相等类型 | ADT/record/元组生成配套 `equals` 与 `hashCode`（供 `Map`/`Set` 作键）；有 `impl Eq`/`impl Hash` 时两者转发到该 impl，故容器与 `==` 永远同一个关系 |
+| 结构相等类型 | ADT/record/元组仍生成配套 `equals` 与 `hashCode`，但那是**给 Java 调用方看的**——Dawn 的 `==`/`hash` 是 lowering 按结构展开的 Core 函数（§4.3），`Map`/`Set` 经字典走它。有 `impl Eq`/`impl Hash` 时这两个方法转发到该 impl |
 | `Int`/`Float`/`Bool` | 原生 `long`/`double`/`boolean`，仅泛型位置装箱 |
 | `Unit` | `Ldawn/rt/Unit;`——单例引用，占一个槽位，形参/字段/捕获位与别的引用无异 |
 | `Never` | `V`，且只出现在返回位（不返回的表达式没有形参或字段可占） |
