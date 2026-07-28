@@ -457,6 +457,12 @@ static dawn_adt *dawn_run_caught(dawn_clo *f, bool catches_panic) {
   return dawn_ok(v);
 }
 
+/* Two names for one barrier while the rename crosses a release; see the
+ * builtin table in selfhost/src/types.dawn. `catch_fault` is the one that
+ * stays -- it says what the barrier catches, and this runtime is where the
+ * word `fault` comes from. */
+dawn_adt *dawn_catch_fault(dawn_clo *f) { return dawn_run_caught(f, false); }
+
 dawn_adt *dawn_java_try(dawn_clo *f) { return dawn_run_caught(f, false); }
 
 dawn_adt *dawn_catch_panic(dawn_clo *f) { return dawn_run_caught(f, true); }

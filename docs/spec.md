@@ -1013,6 +1013,13 @@ Java 形参声明为 `java.util.List` / `java.util.Collection` / `java.lang.Iter
 
 ### 9.8 异常屏障：`java_try`
 
+> **改名进行中（2026-07-28 起）**：这个内建正在改叫 **`catch_fault`**。它拦的是
+> **fault**——外部世界造成的失败，这个词本来就是两个后端共用的分类（见本节末尾的
+> 方框与 native-backend-plan §14.9），和 Java 早已无关；且它与 `catch_panic` 读起来
+> 成一对。内建名字受种子纪律约束，所以现在**两个名字并存、指同一个屏障**
+> （`scripts/spike-native/catch_kinds.dawn` 断言这一点），发一版之后切调用点、删
+> `java_try`。本节其余部分与全文的 `java_try` 一并在那时改。
+
 Dawn 无异常：Java 调用抛出的异常默认原样穿透并终止程序（等同 panic 语义）。
 但**预期中的外部失败**（网络断开、SQL 约束冲突、解析失败）在 Java 世界以异常表达，
 它们不是 bug，应进 `Result`。内建 `java_try` 是唯一的转换点：

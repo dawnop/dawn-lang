@@ -33,6 +33,20 @@ fn barrier(f: fn() -> Int !io) -> String !io =
     Err(_) -> "through"
   }
 
+## The same thing through `catch_fault`, the name `java_try` is being renamed
+## to. While the rename crosses a release both exist, and "both exist" is only
+## safe if something says they are one barrier rather than two that happen to
+## agree today.
+fn barrier_fault(f: fn() -> Int !io) -> String !io =
+  match catch_panic(fn() => match catch_fault(f) {
+    Ok(_) -> 0
+    Err(_) -> 1
+  }) {
+    Ok(0) -> "ok"
+    Ok(_) -> "caught"
+    Err(_) -> "through"
+  }
+
 ## `catch_panic` alone: it is the catch-all, so nothing may pass it.
 fn outer(f: fn() -> Int !io) -> String !io =
   match catch_panic(f) {
@@ -103,4 +117,9 @@ pub fn main() -> Unit !io = {
   println("panic          " ++ two_deep(fn() => panic("deliberate")))
   println("read_file      " ++ two_deep(fn() => str.len(io_read_file("/no/such/dawn/path"))))
   println("no failure     " ++ two_deep(fn() => n(7)))
+
+  println("-- catch_fault is the same barrier under its new name --")
+  println("no failure     " ++ barrier_fault(fn() => n(7)))
+  println("panic          " ++ barrier_fault(fn() => panic("deliberate")))
+  println("read_file      " ++ barrier_fault(fn() => str.len(io_read_file("/no/such/dawn/path"))))
 }

@@ -218,6 +218,7 @@ dawn_array *dawn_args(void);
  * visible: the `Err` payload is the panic message rather than a Java
  * exception's `toString`, so a program that prints it prints different text
  * on the two backends. Everything that only branches on Ok/Err agrees. */
+dawn_adt *dawn_catch_fault(dawn_clo *f);
 dawn_adt *dawn_java_try(dawn_clo *f);
 dawn_adt *dawn_catch_panic(dawn_clo *f);
 

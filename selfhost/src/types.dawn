@@ -934,6 +934,19 @@ pub fn builtins() -> Map[String, Sig] = {
   ]
   sigs = sigs ++ [
     eff1(bsig("args", [], [], TyList(TyString)), EIo),
+    # `catch_fault` and `java_try` are the same barrier under two names, on
+    # purpose and not for long. The name is being changed -- the thing catches
+    # an *external* failure (a file that is not there, a process that would not
+    # start), which stopped being a Java notion once native gave a failure a
+    # kind (native-backend-plan.md 14.9), and it pairs with `catch_panic` the
+    # way spec 9.8 already talks about the two. A builtin name is under the
+    # seed discipline, so the new one lands dormant, a release makes the
+    # previous compiler know it, and only then do the call sites move and
+    # `java_try` go.
+    eff1(
+      tp1(bsig("catch_fault", [TyFn([], t, EIo)], ["f"], result_ty(t, TyString)), t),
+      EIo
+    ),
     eff1(
       tp1(bsig("java_try", [TyFn([], t, EIo)], ["f"], result_ty(t, TyString)), t),
       EIo
@@ -1129,6 +1142,7 @@ pub fn intrinsics() -> Map[String, Intr] = {
     "delete", "rename", "temp_dir", "is_symlink", "read_stdin"] {
       rt_of = map.insert(rt_of, "io_" ++ op, RtIo)
     }
+  rt_of = map.insert(rt_of, "catch_fault", RtIo)
   rt_of = map.insert(rt_of, "java_try", RtIo)
   rt_of = map.insert(rt_of, "catch_panic", RtIo)
 
@@ -1323,7 +1337,7 @@ test "builtin table renders signatures" {
     }
     None -> { assert false }
   }
-  assert map_size2(bs) == 87
+  assert map_size2(bs) == 88
 }
 
 fn map_size2(m: Map[String, Sig]) -> Int = map.size(m)

@@ -1155,6 +1155,11 @@ fn gen_try_closure(cw: AdtClassWriter, name: String, caught: String) -> Unit !io
 pub fn gen_io_class(supers: List[String]) -> Bytes !io = {
   let cw = AdtClassWriter.new(supers)
   cw.begin(V17, ACC_PUBLIC + ACC_FINAL, IO_CLASS, obj())
+  # catch_fault and java_try are the same barrier under two names while the
+  # rename crosses a release (types.dawn, the builtin table). Emitting both is
+  # what "dormant" means here: the previous compiler has to still know one of
+  # them, and the next one has to already know the other.
+  gen_try_closure(cw, "catch_fault", "java/lang/Exception")
   gen_try_closure(cw, "java_try", "java/lang/Exception")
   gen_try_closure(cw, "catch_panic", "java/lang/Throwable")
 
