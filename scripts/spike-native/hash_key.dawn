@@ -1,0 +1,117 @@
+# Hashing. `hash` is the prelude Hash trait's method, and it is what a Map or
+# a Set reaches through the `[K: Eq + Hash]` bound its keys carry.
+#
+# Equality, ordering and rendering are all spelled out over the type's own
+# structure now, so both backends compile one definition. Hashing is the
+# fourth member of that family and the only one still a bare
+# `CIntrinsic("hash", ..)` whatever the subject is -- so each backend answers
+# for itself, and native has no answer at all past the scalars.
+#
+# The numbers below are the point of the file. A differential run would pass
+# on two backends that agree on a wrong answer, and `hash` has a specific way
+# of being wrong that agreement cannot see: a hash that disagrees with its own
+# `==` puts two equal keys in different buckets, and a hash that is not a
+# function of the value is not reproducible at all. So the expectation is
+# written out from the definition rather than read off a backend:
+#
+#   scalars      the backend's own, as they already are
+#   tuple        h = 1, then h = 31*h + hash(element), left to right
+#   one ctor     the same over the fields; there is no tag to disagree about
+#   many ctors   the same, with the constructor's index as a leading field
+#
+# all of it in 32-bit wrapping arithmetic, which is where the values come from
+# and what makes them the same on a machine whose Int is 64 bits wide.
+use std/io
+use std/map
+use std/set
+
+pub type Point = | Point(x: Int, y: Int)
+
+pub type Shape =
+  | Circle(r: Int)
+  | Rect(w: Int, h: Int)
+  | Origin
+
+pub type Tree =
+  | Leaf
+  | Node(left: Tree, v: Int, right: Tree)
+
+pub type Rec = { name: String, at: Point }
+
+fn h(label: String, v: Int) -> String = label ++ ": " ++ to_string(v)
+
+fn yn(label: String, b: Bool) -> String =
+  label ++ ": " ++ (if b { "yes" } else { "no" })
+
+pub fn main() -> Unit !io = {
+  println("-- scalars --")
+  println(h("0            ", hash(0)))
+  println(h("7            ", hash(7)))
+  println(h("-1           ", hash(0 - 1)))
+  println(h("2^32         ", hash(4294967296)))
+  println(h("true         ", hash(true)))
+  println(h("false        ", hash(false)))
+  println(h("empty string ", hash("")))
+  println(h("abc          ", hash("abc")))
+  println(h("utf8 hi      ", hash(bytes_utf8("hi"))))
+
+  println("-- tuples: order is part of the value --")
+  println(h("(1, 2)       ", hash((1, 2))))
+  println(h("(2, 1)       ", hash((2, 1))))
+  println(h("(1, a, true) ", hash((1, "a", true))))
+
+  println("-- one constructor: nothing to disagree about --")
+  println(h("Point(1, 2)  ", hash(Point(1, 2))))
+  println(h("Rec          ", hash(Rec { name: "o", at: Point(0, 0) })))
+
+  println("-- several constructors: the tag is part of the value --")
+  println(h("Circle(3)    ", hash(Circle(3))))
+  println(h("Rect(3, 3)   ", hash(Rect(3, 3))))
+  println(h("Origin       ", hash(Origin)))
+
+  println("-- recursive, and through the prelude's own union --")
+  println(h("Leaf         ", hash(Leaf)))
+  println(h("Node(L, 1, L)", hash(Node(Leaf, 1, Leaf))))
+  let some_p: Option[Point] = Some(Point(1, 2))
+  let no_p: Option[Point] = None
+  println(h("Some(Point)  ", hash(some_p)))
+  println(h("None         ", hash(no_p)))
+
+  # A nullary constructor is where a hash stops being a function of the value:
+  # with no fields to fold there is nothing to compute, and the JVM's answer
+  # for a value whose class writes no hashCode is the identity hash of the
+  # singleton instance. Two runs can disagree, and native cannot produce it at
+  # all.
+  println("-- equal values hash equally --")
+  println(yn("Point(1,2)   ", hash(Point(1, 2)) == hash(Point(1, 2))))
+  println(yn("Origin       ", hash(Origin) == hash(Origin)))
+  println(yn("(1, a)       ", hash((1, "a")) == hash((1, "a"))))
+  println(yn("Node deep    ", hash(Node(Leaf, 1, Leaf)) == hash(Node(Leaf, 1, Leaf))))
+
+  println("-- and find each other in a Map keyed by them --")
+  var tm: Map[(Int, String), Int] = map.empty()
+  tm = map.insert(tm, (1, "a"), 10)
+  tm = map.insert(tm, (2, "b"), 20)
+  println(yn("(1, a) -> 10 ", map.get(tm, (1, "a")) == Some(10)))
+  println(yn("(2, b) -> 20 ", map.get(tm, (2, "b")) == Some(20)))
+  println(yn("(9, z) absent", not map.has(tm, (9, "z"))))
+
+  var sm: Map[Shape, String] = map.empty()
+  sm = map.insert(sm, Circle(3), "c")
+  sm = map.insert(sm, Rect(3, 3), "r")
+  sm = map.insert(sm, Origin, "o")
+  println(yn("Circle(3)    ", map.get(sm, Circle(3)) == Some("c")))
+  println(yn("Rect(3, 3)   ", map.get(sm, Rect(3, 3)) == Some("r")))
+  println(yn("Origin       ", map.get(sm, Origin) == Some("o")))
+  println(yn("Circle(4) abs", not map.has(sm, Circle(4))))
+  println(h("size         ", map.size(sm)))
+
+  var ss: Set[Tree] = set.empty()
+  ss = set.insert(ss, Leaf)
+  ss = set.insert(ss, Node(Leaf, 1, Leaf))
+  ss = set.insert(ss, Node(Leaf, 1, Leaf))
+  println(yn("Leaf in set  ", set.has(ss, Leaf)))
+  println(yn("Node in set  ", set.has(ss, Node(Leaf, 1, Leaf))))
+  println(yn("other absent ", not set.has(ss, Node(Leaf, 2, Leaf))))
+  println(h("size         ", set.size(ss)))
+}
