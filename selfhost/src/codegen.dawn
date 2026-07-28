@@ -1325,6 +1325,7 @@ pub fn gen_io_class(supers: List[String]) -> Bytes !io = {
   gen_io_env(cw)
   gen_io_bytes_files(cw)
   gen_io_stdin(cw)
+  gen_io_run(cw)
 
   cw.visitEnd()
   cw.toByteArray().expect("bytes")
@@ -1493,6 +1494,55 @@ fn gen_io_stdin(cw: AdtClassWriter) -> Unit !io = {
   rv.visitInsn(OP_L2I)
   rv.visitMethodInsn(OP_INVOKEVIRTUAL, "java/io/InputStream", "readNBytes", "(I)[B", false)
   rv.visitInsn(OP_ARETURN)
+  close_mv(rv)
+}
+
+const PB: String = "java/lang/ProcessBuilder"
+
+const REDIRECT: String = "java/lang/ProcessBuilder\$Redirect"
+
+## `pb.redirect<Which>(path.isEmpty() ? INHERIT : new File(path))`, with the
+## builder pushed inside each arm rather than before the branch: the two arms
+## call different overloads, so there is nothing to merge at the join.
+fn gen_redirect(m: MethodVisitor, which: String, pb_local: Int, path_local: Int) -> Unit !io = {
+  let to_file = Label.new()
+  let done = Label.new()
+  m.visitVarInsn(OP_ALOAD, path_local)
+  m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/String", "isEmpty", "()Z", false)
+  m.visitJumpInsn(OP_IFEQ, to_file)
+  m.visitVarInsn(OP_ALOAD, pb_local)
+  m.visitFieldInsn(OP_GETSTATIC, REDIRECT, "INHERIT", "L" ++ REDIRECT ++ ";")
+  m.visitMethodInsn(OP_INVOKEVIRTUAL, PB, which, "(L" ++ REDIRECT ++ ";)L" ++ PB ++ ";", false)
+  m.visitInsn(OP_POP)
+  m.visitJumpInsn(OP_GOTO, done)
+  m.visitLabel(to_file)
+  m.visitVarInsn(OP_ALOAD, pb_local)
+  m.visitTypeInsn(OP_NEW, "java/io/File")
+  m.visitInsn(OP_DUP)
+  m.visitVarInsn(OP_ALOAD, path_local)
+  m.visitMethodInsn(OP_INVOKESPECIAL, "java/io/File", "<init>", "(Ljava/lang/String;)V", false)
+  m.visitMethodInsn(OP_INVOKEVIRTUAL, PB, which, "(Ljava/io/File;)L" ++ PB ++ ";", false)
+  m.visitInsn(OP_POP)
+  m.visitLabel(done)
+}
+
+## io_run(argv, out_path, err_path): spawn, wait, answer the exit status.
+## `start()` throws when there is no such program; std wraps it in java_try.
+fn gen_io_run(cw: AdtClassWriter) -> Unit !io = {
+  let rv = open_static(cw, "io_run",
+    "(Ljava/util/List;Ljava/lang/String;Ljava/lang/String;)J")
+  rv.visitTypeInsn(OP_NEW, PB)
+  rv.visitInsn(OP_DUP)
+  rv.visitVarInsn(OP_ALOAD, 0)
+  rv.visitMethodInsn(OP_INVOKESPECIAL, PB, "<init>", "(Ljava/util/List;)V", false)
+  rv.visitVarInsn(OP_ASTORE, 3)
+  gen_redirect(rv, "redirectOutput", 3, 1)
+  gen_redirect(rv, "redirectError", 3, 2)
+  rv.visitVarInsn(OP_ALOAD, 3)
+  rv.visitMethodInsn(OP_INVOKEVIRTUAL, PB, "start", "()Ljava/lang/Process;", false)
+  rv.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/Process", "waitFor", "()I", false)
+  rv.visitInsn(OP_I2L)
+  rv.visitInsn(OP_LRETURN)
   close_mv(rv)
 }
 

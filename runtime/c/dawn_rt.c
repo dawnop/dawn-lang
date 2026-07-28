@@ -7,12 +7,15 @@
 
 #include <dirent.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <setjmp.h>
+#include <spawn.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 static int dawn_argc;
@@ -1302,6 +1305,57 @@ dawn_bytes *dawn_io_read_stdin(int64_t n) {
     got += step;
   }
   return dawn_bytes_of(buf, (int64_t)got);
+}
+
+/* Spawn and wait. `posix_spawnp` rather than fork+exec: fork duplicates the
+ * whole address space only to throw it away, and this runs inside a compiler.
+ * Redirection is a file action for the same reason the signature takes paths
+ * at all -- see the note on `io_run` in types.dawn. */
+extern char **environ;
+
+int64_t dawn_io_run(dawn_array *argv, dawn_str out_path, dawn_str err_path) {
+  int64_t n = dawn_array_len(argv);
+  if (n <= 0) {
+    dawn_panic(dawn_str_lit("io_run: argv is empty", 21));
+  }
+  char **args = (char **)dawn_alloc(sizeof(char *) * (size_t)(n + 1));
+  for (int64_t i = 0; i < n; i++) {
+    args[i] = dawn_cpath(((dawn_slot *)dawn_array_get(argv, i))->s);
+  }
+  args[n] = NULL;
+
+  posix_spawn_file_actions_t fa;
+  posix_spawn_file_actions_init(&fa);
+  char *op = NULL;
+  char *ep = NULL;
+  if (out_path.len > 0) {
+    op = dawn_cpath(out_path);
+    posix_spawn_file_actions_addopen(&fa, 1, op, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+  }
+  if (err_path.len > 0) {
+    ep = dawn_cpath(err_path);
+    posix_spawn_file_actions_addopen(&fa, 2, ep, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+  }
+  pid_t pid = 0;
+  int rc = posix_spawnp(&pid, args[0], &fa, NULL, args, environ);
+  posix_spawn_file_actions_destroy(&fa);
+  free(op);
+  free(ep);
+  for (int64_t i = 0; i < n; i++) free(args[i]);
+  free(args);
+  if (rc != 0) {
+    dawn_panic(dawn_str_lit("io_run: cannot start the program", 32));
+  }
+  int status = 0;
+  while (waitpid(pid, &status, 0) < 0) {
+    if (errno != EINTR) {
+      dawn_panic(dawn_str_lit("io_run: waiting for the child failed", 36));
+    }
+  }
+  /* The two numbers the JVM's Process.exitValue() also reports on POSIX. */
+  if (WIFEXITED(status)) return (int64_t)WEXITSTATUS(status);
+  if (WIFSIGNALED(status)) return (int64_t)(128 + WTERMSIG(status));
+  return -1;
 }
 
 dawn_array *dawn_args(void) {

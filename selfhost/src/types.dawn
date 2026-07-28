@@ -1003,6 +1003,23 @@ pub fn builtins() -> Map[String, Sig] = {
     # EOF signal. stdin is a channel like stderr, and for the same reason it
     # cannot be reached through the interop: `System.in` is a static field.
     eff1(bsig("io_read_stdin", [TyInt], ["n"], TyBytes), EIo),
+    # Spawn `argv[0]` (found on PATH), wait, and answer its exit status.
+    #
+    # Both streams go to files rather than back through a pipe, and that is
+    # the whole design: a pipe has a finite buffer, so a caller that waits for
+    # the child before reading it deadlocks as soon as the child writes more
+    # than the buffer holds. Reading concurrently means threads on the JVM and
+    # `poll` here -- a concurrency requirement inside a primitive, to hand back
+    # bytes the caller usually wants on disk anyway. An empty path inherits
+    # this process's stream.
+    #
+    # Spawn failure (no such program) throws, like read_file; the exit status
+    # is the child's own and is not an error.
+    eff1(
+      bsig("io_run", [TyList(TyString), TyString, TyString], ["argv", "out_path", "err_path"],
+        TyInt),
+      EIo
+    ),
     Sig { ..bsig("map_empty", [], [], TyMap(k, v)), tparams: [k, v] },
     tp1(bsig("set_empty", [], [], TySet(t)), t),
     keyed2(bsig("map_from", [TyList(TyTuple([k, v]))], ["entries"], TyMap(k, v)), k, v),
@@ -1093,10 +1110,10 @@ pub fn intrinsics() -> Map[String, Intr] = {
   # No runtime module owns a list primitive any more. Each one is a call on
   # the Dawn vector in std/pvec, written by whichever backend is emitting --
   # which is a backend's choice of representation, not a contract the
-  # language states. `join`/`code_points`/`from_code_points`/`io_list_names`
-  # are absent below for a related reason: each does reach a runtime function,
-  # but only through a List↔Array conversion the emitter wraps around it, and
-  # a plain entry here would promise a call the emitter cannot make.
+  # language states. `join`/`code_points`/`from_code_points`/`io_list_names`/
+  # `io_run` are absent below for a related reason: each does reach a runtime
+  # function, but only through a List↔Array conversion the emitter wraps around
+  # it, and a plain entry here would promise a call the emitter cannot make.
   # strings: the ones needing Unicode or native search, plus the cursor walk.
   # `cursor_slice` is absent on purpose -- the emitter writes it inline so it
   # can check the range and panic.
@@ -1318,7 +1335,7 @@ test "builtin table renders signatures" {
     }
     None -> { assert false }
   }
-  assert map_size2(bs) == 95
+  assert map_size2(bs) == 96
 }
 
 fn map_size2(m: Map[String, Sig]) -> Int = map.size(m)

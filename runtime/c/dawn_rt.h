@@ -206,6 +206,8 @@ dawn_unit dawn_io_rename(dawn_str src, dawn_str dst); /* rename(2): atomic or pa
 dawn_str dawn_io_temp_dir(dawn_str parent, dawn_str prefix); /* "" parent = $TMPDIR */
 bool dawn_io_is_symlink(dawn_str path);
 dawn_bytes *dawn_io_read_stdin(int64_t n); /* short only at end of input */
+/* argv holds boxed dawn_str; an empty path inherits this process's stream */
+int64_t dawn_io_run(dawn_array *argv, dawn_str out_path, dawn_str err_path);
 dawn_array *dawn_args(void);
 
 /* `f` returns an erased slot, so one cast serves whatever `T` is -- the same
