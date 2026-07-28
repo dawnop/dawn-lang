@@ -1132,3 +1132,14 @@ fault,其余(越界、除零、`cursor_slice`、非法码点、本后端未实�
    **这一处不是残留,是 native main 唯一还没答的设计题**:native 编译器怎么拿到 std。
 
 三道缝加起来 19 处,其中 5 处结构性只能拒绝、1 处是待答的设计题。
+
+**缝 2 的第一半已经拆掉:`CValue` 搬进 `core`。** `emitc` 从 `interp` 只取 `CValue`
+那几个**类型**——即「一个已经折好的常量长什么样」——却因此依赖上了整个 comptime 求值器,
+而那正是 `to_java_arg` / `rt_raw` 伸手够 `java.lang.Long` 的地方。**C 后端,在全仓所有模块里,
+偏偏依赖着最 Java 的那一个。** 把 `CValue` 放回它该在的位置(它是「求过值的 Core 表达式」,
+和 `CExpr`/`CFun` 同一族、同一个 `C` 前缀)之后:
+
+- `emitc` 对 `interp` 的依赖**归零**;`checkdump` 也一起掉了;
+- 剩下的引用者只剩 `emit`/`main`(本来就归 JVM 半)、`lsp`(只取 `ct_default` 一个默认值)、
+  和真正的行为边 `analyze`/`stdlib` 的 `eval_comptime`;
+- Core golden **一字未变**——搬的是声明的归属,不是任何函数体。

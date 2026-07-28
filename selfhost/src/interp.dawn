@@ -42,6 +42,8 @@ use types.{
   TyList, TyMap, TySet, TyArray, TyTuple
 }
 use core.{
+  CValue, VInt, VFloat, VBool, VStr, VUnit, VList, VTuple, VAdt,
+  VClosure, VDict,
   CExpr, CStmt, CFun, CDictDef, CSlotFn, CSlotDefault, ty_key,
   CInt, CFloat, CBool, CStr, CUnit, CLocal, CFnRef, CCall, CIntrinsic,
   CCtor, CField, CIsCtor, CTagOf, CClosure, CTuple, CTupleGet, CBox, CUnbox,
@@ -64,28 +66,6 @@ use java "java.lang.Double"
 use java "java.lang.Boolean"
 use java "java.lang.Number"
 use java "java.util.Objects"
-
-## A comptime value. Function values may exist during evaluation but cannot be
-## a result (the checker enforces constant-serializability).
-pub type CValue =
-  | VInt(v: Int)
-  | VFloat(v: Float)
-  | VBool(v: Bool)
-  | VStr(v: String)
-  | VUnit
-  | VList(elems: List[CValue])
-  | VTuple(elems: List[CValue])
-  | VAdt(adt: Int, ci: Int, fields: List[CValue])
-# Every function value has this one shape. Lambdas, local named functions,
-# top-level functions used as values, builtins used as values and bare
-# constructors are all lifted by lowering into a top-level function plus a
-# captured environment, so one case does what four used to.
-  | VClosure(owner: String, name: String, caps: Map[Int, CValue])
-# A trait dictionary, named by the key its CDictDef carries plus the
-# dictionaries it was built from (empty unless the impl behind it is
-# conditional). Comptime dispatches through this: the key finds the slot table
-# and `args` is what a slot body reads back out.
-  | VDict(key: String, args: List[CValue])
 
 type Ctl =
   | KErr(d: Diag)

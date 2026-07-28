@@ -269,6 +269,35 @@ pub type CDictDef = {
 
 pub type CModule = { owner: String, fns: List[CFun], dicts: List[CDictDef] }
 
+## A comptime value: a Core expression that has already been evaluated.
+## Function values may exist during evaluation but cannot be a result (the
+## checker enforces constant-serializability).
+##
+## It lives here rather than in `interp` because both backends read it -- a
+## folded const has to be emitted -- and `interp` is where comptime evaluation
+## of a *Java* call lives, which a backend with no host cannot have. Importing
+## the evaluator to name its result type is how `emitc`, of all modules, came
+## to depend on the one module that reaches for `java.lang.Long`.
+pub type CValue =
+  | VInt(v: Int)
+  | VFloat(v: Float)
+  | VBool(v: Bool)
+  | VStr(v: String)
+  | VUnit
+  | VList(elems: List[CValue])
+  | VTuple(elems: List[CValue])
+  | VAdt(adt: Int, ci: Int, fields: List[CValue])
+# Every function value has this one shape. Lambdas, local named functions,
+# top-level functions used as values, builtins used as values and bare
+# constructors are all lifted by lowering into a top-level function plus a
+# captured environment, so one case does what four used to.
+  | VClosure(owner: String, name: String, caps: Map[Int, CValue])
+# A trait dictionary, named by the key its CDictDef carries plus the
+# dictionaries it was built from (empty unless the impl behind it is
+# conditional). Comptime dispatches through this: the key finds the slot table
+# and `args` is what a slot body reads back out.
+  | VDict(key: String, args: List[CValue])
+
 # ---- naming ----
 
 ## A spelling of a type usable inside a symbol name. It lives here rather
