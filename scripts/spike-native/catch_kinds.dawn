@@ -40,6 +40,26 @@ fn outer(f: fn() -> Int !io) -> String !io =
     Err(_) -> "caught"
   }
 
+## Two io barriers deep. A fault stops at the inner one, and a panic has to
+## walk past both -- which is the one path `barrier` cannot exercise, its skip
+## having at most one frame to skip.
+fn two_deep(f: fn() -> Int !io) -> String !io = {
+  let inner: fn() -> Int !io = fn() =>
+    match java_try(f) {
+      Ok(_) -> 0
+      Err(_) -> 1
+    }
+  match catch_panic(fn() => match java_try(inner) {
+    Ok(v) -> v
+    Err(_) -> 2
+  }) {
+    Ok(0) -> "ok"
+    Ok(1) -> "inner"
+    Ok(_) -> "outer"
+    Err(_) -> "through"
+  }
+}
+
 # `!io` so nothing here folds at compile time -- a comptime `10 / 0` is a
 # compile error, and the point is what happens at run time.
 fn n(i: Int) -> Int !io = i
@@ -78,4 +98,9 @@ pub fn main() -> Unit !io = {
   println("panic          " ++ outer(fn() => panic("deliberate")))
   println("read_file      " ++ outer(fn() => str.len(io_read_file("/no/such/dawn/path"))))
   println("no failure     " ++ outer(fn() => n(7)))
+
+  println("-- two io barriers deep --")
+  println("panic          " ++ two_deep(fn() => panic("deliberate")))
+  println("read_file      " ++ two_deep(fn() => str.len(io_read_file("/no/such/dawn/path"))))
+  println("no failure     " ++ two_deep(fn() => n(7)))
 }
