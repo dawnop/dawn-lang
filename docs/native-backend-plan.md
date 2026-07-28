@@ -1184,3 +1184,70 @@ const T: Bool = str.contains("haystack", "stack")
 
 所以**第一条是唯一自洽的答案**,也说明这道缝比前三道都深:它不是门控问题,是又一处
 「一个关系只有一份定义,而那份定义长在后端里」。
+
+### 14.12 同一道缝的另一半:它**今天**就在给错答案
+
+14.11 说的是「native 宿主上折不了」——将来的问题。再量一遍发现还有一半是现在的:
+**折叠用的是宿主语义,而今天每一次 native 构建都是交叉编译**(JVM 宿主 → native 目标)。
+
+一个零 `use java` 的程序:
+
+```dawn
+const U: String = str.to_upper("mixed é ß")
+```
+
+`__emitc` 出来的 C:
+
+```c
+dawn_io_println(dawn_str_concat(dawn_str_lit("u = ", 4), dawn_str_lit("MIXED É SS", 11)));
+```
+
+`ß → SS` 是 **JVM 的** `String.toUpperCase`。同一个表达式不写 `const`、让它在 native 上跑,
+`dawn_rt.c` 的 `dawn_ascii_case` 会原样吐 `MIXED é ß`。
+
+> **一个 native 程序的答案,取决于表达式有没有写 `const`。**
+
+C 那份实现自己的注释早就承认了分歧("the one place a program can see the backends differ
+without a panic saying so"),而 `strings.dawn` 语料测的是 `str_lower("MiXeD 42")`——
+**纯 ASCII,正好绕开它**。语料是照着不触发它的形状长的,这就是它一直没被算成缺陷的原因。
+
+**反射不是病因。** 就算解释器改成直接调 `str_upper`(不反射),JVM 宿主照样折出 JVM 的答案。
+病因是**一个操作有两份实现且它们不一致**,而 comptime 只够得着其中一份。
+
+#### 边界划错了地方:18 个里只有 7 个是表示相关的
+
+`==`/`cmp`/`show`/`hash` 能收成一份,是因为关系是结构化的。字符串不行:JVM 的 String 是
+UTF-16,C 的 `dawn_str` 是 UTF-8,游标那个 Int 在两边根本不是同一个东西。所以这一族**注定**
+有两份实现——但只该有 7 份:
+
+| 类 | 个数 | 为什么 |
+|---|---|---|
+| `cursor_start/end/done/char/next/prev/slice` | 7 | 真正的表示边界,两边各一份,**按设计如此** |
+| `str_len/trim/contains/starts_with/ends_with/index_of/last_index_of` + `cursor_skip` + `index_of_from` | 9 | 在游标之上写得出来的普通 Dawn 代码。成为 intrinsic 只是因为 `String.indexOf` 快 |
+| `str_lower` / `str_upper` | 2 | 要 Unicode 表。两边都得有,但**表是数据**,可以只有一份 |
+
+#### 裁决:`str.lower`/`str.upper` = 简单(1:1)大小写映射
+
+JVM 现在做的是**完整映射**(`String.toUpperCase`),会改变码点数(`ß`→`SS`)、且是 locale 与
+上下文相关的——**没法当原语**:两个后端不可能从同一张表实现它。C 现在做的是 ASCII,更谈不上。
+
+定为**简单映射**:一个码点进,一个码点出,无 locale、无上下文。它是这个操作唯一能有单一定义的
+版本,不变式是「码点数不变」。完整映射(`ß`→`SS`、土耳其语 `i`、希腊语词尾 sigma)属于能接收
+locale 的库,不属于原语。这条线和 Rust 分开 `char::to_uppercase` 与 `str::to_uppercase` 是同一条。
+
+代价说清楚:**JVM 侧是行为改变**,`str.upper("ß")` 从 `"SS"` 变成 `"ß"`。
+
+#### 收窄计划
+
+`scripts/spike-native/strings_case.dawn` 先落地,写的是**裁决后的语义**,所以 jvm / native /
+diff **三个检查同时红**——两个后端都没实现它,这正是语料该说的话。然后:
+
+1. **大小写对齐**:JVM 改成逐码点 `Character.toUpperCase`(它**就是**简单映射),C 侧生成一张
+   区间表。表由 JDK 的 Unicode 数据生成、逐码点穷举校验,所以「一份数据、两处实现」。
+2. **9 个降成 Dawn**:写进 `std/str` / `std/cursor`,建在 7 个游标之上。删解释器 9 条臂、
+   `gen_strings_class` 9 个 ASM 方法、C 运行时 9 个函数;加约 80 行 Dawn。**三删一加**。
+3. **7 个游标去反射**:解释器自己实现,用码点索引当它自己的游标货币,建在 `code_points` /
+   `str.substring` 这些公开 builtin 上。它自洽即可——`Cursor` 是 opaque,常量里逃不出去
+   (实测:类型名不出 `std/cursor`,而 `const` 强制类型标注,两道门)。
+
+做完 `rt_raw`/`rt_long`/`rt_bool`/`rt_str` 全部死掉,第四道缝关闭。

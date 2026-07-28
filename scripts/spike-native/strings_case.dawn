@@ -1,0 +1,94 @@
+# Case folding, which is the one string operation the two backends answer
+# differently without a panic saying so.
+#
+# The expectation below is *simple* case mapping: one code point in, one code
+# point out, no locale and no context. That is a decision, not a description --
+# neither backend implemented it when this file was written:
+#
+#   * the JVM used `String.toUpperCase`, which is *full* mapping: `ß` becomes
+#     `SS` (one code point becomes two) and lowercasing `İ` yields two code
+#     points. Full mapping is context- and locale-sensitive, so it cannot be a
+#     primitive that two backends implement from one table.
+#   * the C runtime folded ASCII only, leaving every cased letter above U+007F
+#     alone.
+#
+# So the two disagreed above U+007F, and a `const` folded the JVM's answer into
+# a native program (docs/native-backend-plan.md 14.12). Full mapping belongs in
+# a library that can take a locale; `str.lower`/`str.upper` are the primitive,
+# and a primitive has to be the same function everywhere.
+#
+# The invariant that makes simple mapping a primitive at all is at the bottom:
+# it never changes the number of code points.
+use std/io
+
+# The comptime half of the same seam. A `const` is folded by the interpreter,
+# which runs on the compiler's own host; the live call runs on the target. When
+# the two backends disagree the answer depends on whether the expression was
+# written `const`, and these three lines are where that shows.
+const SAMPLE: String = "aÉ中𝐀ßıİσЯ𐐀𐐨"
+const FOLDED_UPPER: String = str_upper(SAMPLE)
+const FOLDED_LOWER: String = str_lower(SAMPLE)
+
+fn cased(label: String, s: String) -> String =
+  label ++ " upper=" ++ str_upper(s) ++ " lower=" ++ str_lower(s) ++
+  " len=" ++ to_string(str_len(s)) ++
+  " ulen=" ++ to_string(str_len(str_upper(s))) ++
+  " llen=" ++ to_string(str_len(str_lower(s)))
+
+pub fn main() -> Unit !io = {
+  io.println("-- ascii is the part that already agreed --")
+  io.println(cased("abcXYZ  ", "abcXYZ"))
+  io.println(cased("digits  ", "42!?"))
+
+  io.println("-- latin-1: the JVM folded these, native did not --")
+  io.println(cased("e-acute ", "é"))
+  io.println(cased("o-slash ", "ø"))
+
+  io.println("-- length-changing full mappings, which simple mapping refuses --")
+  # `ß` uppercases to `SS` under full mapping. Under simple mapping it has no
+  # uppercase, so it stays put -- and `ulen` stays 1.
+  io.println(cased("sharp-s ", "ß"))
+  # `İ` lowercases to `i` plus a combining dot under full mapping. Simple
+  # mapping gives plain `i`.
+  io.println(cased("I-dot   ", "İ"))
+  # the other half of the Turkish pair: dotless `ı` uppercases to plain `I`
+  io.println(cased("dotless ", "ı"))
+
+  io.println("-- greek and cyrillic --")
+  io.println(cased("sigma   ", "σ"))
+  io.println(cased("Sigma   ", "Σ"))
+  io.println(cased("cyr-ya  ", "я"))
+
+  io.println("-- above the BMP: a case pair that is not one UTF-16 unit --")
+  # Deseret U+10400 and U+10428 are an upper/lower pair, four UTF-8 bytes and
+  # two UTF-16 units each, so a backend folding its own storage units is
+  # visible here.
+  io.println(cased("deseret ", "𐐀"))
+  io.println(cased("deser-l ", "𐐨"))
+  # mathematical bold capital A has no case mapping at all
+  io.println(cased("math-A  ", "𝐀"))
+
+  io.println("-- uncased scripts are left alone --")
+  io.println(cased("han     ", "中文"))
+
+  io.println("-- a mixed sentence --")
+  io.println(cased("mixed   ", "aÉ中𝐀ß"))
+
+  io.println("-- the invariant: simple mapping preserves the code-point count --")
+  io.println("sample len         = " ++ to_string(str_len(SAMPLE)))
+  io.println("upper preserves    = " ++
+      to_string(str_len(str_upper(SAMPLE)) == str_len(SAMPLE)))
+  io.println("lower preserves    = " ++
+      to_string(str_len(str_lower(SAMPLE)) == str_len(SAMPLE)))
+  # folding twice is folding once: the mapped code point has no further mapping
+  io.println("upper idempotent   = " ++
+      to_string(str_upper(str_upper(SAMPLE)) == str_upper(SAMPLE)))
+  io.println("lower idempotent   = " ++
+      to_string(str_lower(str_lower(SAMPLE)) == str_lower(SAMPLE)))
+
+  io.println("-- the same expression, folded and live --")
+  io.println("folded upper       = " ++ FOLDED_UPPER)
+  io.println("live   upper       = " ++ str_upper(SAMPLE))
+  io.println("upper agrees       = " ++ to_string(FOLDED_UPPER == str_upper(SAMPLE)))
+  io.println("lower agrees       = " ++ to_string(FOLDED_LOWER == str_lower(SAMPLE)))
+}
