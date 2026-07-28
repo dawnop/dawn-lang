@@ -1143,3 +1143,44 @@ fault,其余(越界、除零、`cursor_slice`、非法码点、本后端未实�
 - 剩下的引用者只剩 `emit`/`main`(本来就归 JVM 半)、`lsp`(只取 `ct_default` 一个默认值)、
   和真正的行为边 `analyze`/`stdlib` 的 `eval_comptime`;
 - Core golden **一字未变**——搬的是声明的归属,不是任何函数体。
+
+### 14.11 第四道缝,而且没人记过它:comptime 折叠字符串要**反射进 JVM 运行时类**
+
+分区量到 `interp` 的时候撞见的。`interp.rt_raw` 上方的注释写得很坦白:
+
+> Comptime folding of the cursor and str_* intrinsics reaches their one
+> implementation — the ASM-emitted dawn/rt/Strings — by route-C reflection.
+> […] there is no second copy of the logic here.
+
+也就是说这 **18 个 intrinsic** 的 comptime 求值,全部走
+`jreflect.invoke_static("dawn.rt.Strings", …)`:
+
+```
+cursor_start / end / done / char / next / prev / slice / skip     8
+index_of_from_raw                                                 1
+str_len / index_of / last_index_of / contains /
+  starts_with / ends_with / trim / lower / upper                  9
+```
+
+**这不是「`use java` 的程序折不了」,是「任何程序都折不了字符串」。** 实测:
+
+```dawn
+const N: Int = str.len("hello, 世界")
+const U: String = str.to_upper("abc")
+const T: Bool = str.contains("haystack", "stack")
+```
+
+`dawn __emitc` 出来的 C 里,三个常量已经是 `INT64_C(9)` / `"ABC"` / `true`——
+源码里一处 `use java` 都没有,而每一个都是编译器**反射进一个 ASM 发出来的 JVM 类**算出来的。
+一个 native 的 `dawn` 编译这个程序会没有答案。
+
+**它当初是个好决定**:正因为有这条路,cursor/str 原语才能从手写的 `dawn.rt.StdStrings`
+里搬走而不必在解释器里再写一份——「没有第二份实现」正是语义收口一直在要的东西。
+代价被推迟到了今天:**那唯一一份实现是 JVM 后端的**。
+
+出路只有一条形状:让这些原语的唯一实现**不是后端的**。要么 `str_*`/`cursor_*` 降成
+更小一组原语上的 Dawn 函数(那样解释器和两个后端读同一份 Core,和 `==`/`cmp`/`show`/`hash`
+走过的路一样),要么解释器自己实现一份——而后者正是「第二份实现」,收口了四次的那个病。
+
+所以**第一条是唯一自洽的答案**,也说明这道缝比前三道都深:它不是门控问题,是又一处
+「一个关系只有一份定义,而那份定义长在后端里」。
