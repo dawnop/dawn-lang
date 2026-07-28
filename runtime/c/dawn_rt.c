@@ -5,6 +5,9 @@
 
 #include "dawn_rt.h"
 
+/* Generated; see scripts/case-contract/. */
+#include "dawn_case_table.h"
+
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -767,29 +770,61 @@ dawn_str dawn_str_trim(dawn_str s) {
   return (dawn_str){s.p + a, b - a};
 }
 
-/* ASCII case only. A cased letter above U+007F -- Greek, Cyrillic, accented
- * Latin -- is left alone where the JVM would fold it, so these two are the
- * one place a program can see the backends differ without a panic saying so.
- * Full folding needs the Unicode tables this runtime does not carry yet, and
- * refusing every non-ASCII string instead would break `str.lower` on text
- * that has no case at all, which is most of it. */
-static dawn_str dawn_ascii_case(dawn_str s, bool up) {
-  char *buf = (char *)dawn_alloc((size_t)s.len);
-  for (int64_t i = 0; i < s.len; i++) {
-    char c = s.p[i];
-    if (up && c >= 'a' && c <= 'z') {
-      c = (char)(c - 32);
-    } else if (!up && c >= 'A' && c <= 'Z') {
-      c = (char)(c + 32);
+/* Simple (1:1) Unicode case mapping, out of the generated table. The JVM
+ * backend calls Character.toUpperCase/toLowerCase, and dawn_case_table.h is
+ * generated from that same oracle, so the two backends are two implementations
+ * of one mapping rather than two mappings (native-backend-plan.md 14.12).
+ * scripts/case-contract/run.sh regenerates the table and fails on a difference.
+ *
+ * This folded ASCII only until 2026-07-28, so every cased letter above U+007F
+ * came back unchanged where the JVM folded it -- the one place a program could
+ * see the backends differ with no panic saying so, and a `const` folded the
+ * JVM's answer into a native binary. */
+static int32_t dawn_case_cp(int32_t cp, const dawn_case_range *rs, size_t n) {
+  size_t lo = 0, hi = n;
+  while (lo < hi) {
+    size_t mid = lo + (hi - lo) / 2;
+    if (cp < rs[mid].lo) {
+      hi = mid;
+    } else if (cp > rs[mid].hi) {
+      lo = mid + 1;
+    } else {
+      return cp + rs[mid].delta;
     }
-    buf[i] = c;
   }
-  return (dawn_str){buf, s.len};
+  return cp;
 }
 
-dawn_str dawn_str_lower(dawn_str s) { return dawn_ascii_case(s, false); }
+/* Two passes: a mapped code point can be wider or narrower than the one it
+ * replaces (U+0131 is two bytes and maps to one-byte `I`), so the output
+ * length is not the input's and is not worth over-allocating four bytes a
+ * character for. */
+static dawn_str dawn_case(dawn_str s, bool up) {
+  const dawn_case_range *rs = up ? dawn_upper_ranges : dawn_lower_ranges;
+  size_t rn = up ? sizeof(dawn_upper_ranges) / sizeof(dawn_upper_ranges[0])
+                 : sizeof(dawn_lower_ranges) / sizeof(dawn_lower_ranges[0]);
+  int64_t out = 0;
+  for (int64_t i = 0; i < s.len;) {
+    int64_t n;
+    uint32_t cp = dawn_utf8_at(s, i, &n);
+    char scratch[4];
+    out += dawn_utf8_put(scratch, (uint32_t)dawn_case_cp((int32_t)cp, rs, rn));
+    i += n;
+  }
+  char *buf = (char *)dawn_alloc((size_t)out + 1);
+  int64_t at = 0;
+  for (int64_t i = 0; i < s.len;) {
+    int64_t n;
+    uint32_t cp = dawn_utf8_at(s, i, &n);
+    at += dawn_utf8_put(buf + at, (uint32_t)dawn_case_cp((int32_t)cp, rs, rn));
+    i += n;
+  }
+  return (dawn_str){buf, at};
+}
 
-dawn_str dawn_str_upper(dawn_str s) { return dawn_ascii_case(s, true); }
+dawn_str dawn_str_lower(dawn_str s) { return dawn_case(s, false); }
+
+dawn_str dawn_str_upper(dawn_str s) { return dawn_case(s, true); }
 
 bool dawn_str_contains(dawn_str s, dawn_str sub) {
   return dawn_find(s, sub, 0) >= 0;

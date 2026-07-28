@@ -21,13 +21,13 @@
 # it never changes the number of code points.
 use std/io
 
-# The comptime half of the same seam. A `const` is folded by the interpreter,
-# which runs on the compiler's own host; the live call runs on the target. When
-# the two backends disagree the answer depends on whether the expression was
-# written `const`, and these three lines are where that shows.
+# The comptime half of this seam is not here, and cannot be: folding a *backend
+# primitive* reaches the runtime class of the jar the compiler is running from,
+# which is the one the seed release emitted, so a change to case folding does
+# not reach comptime until the seed advances (native-backend-plan.md 14.13).
+# The corpus runs on a seed-built `bin/dawn`, so a const here would pin a
+# bootstrap transient rather than a language rule.
 const SAMPLE: String = "aÉ中𝐀ßıİσЯ𐐀𐐨"
-const FOLDED_UPPER: String = str_upper(SAMPLE)
-const FOLDED_LOWER: String = str_lower(SAMPLE)
 
 fn cased(label: String, s: String) -> String =
   label ++ " upper=" ++ str_upper(s) ++ " lower=" ++ str_lower(s) ++
@@ -85,10 +85,4 @@ pub fn main() -> Unit !io = {
       to_string(str_upper(str_upper(SAMPLE)) == str_upper(SAMPLE)))
   io.println("lower idempotent   = " ++
       to_string(str_lower(str_lower(SAMPLE)) == str_lower(SAMPLE)))
-
-  io.println("-- the same expression, folded and live --")
-  io.println("folded upper       = " ++ FOLDED_UPPER)
-  io.println("live   upper       = " ++ str_upper(SAMPLE))
-  io.println("upper agrees       = " ++ to_string(FOLDED_UPPER == str_upper(SAMPLE)))
-  io.println("lower agrees       = " ++ to_string(FOLDED_LOWER == str_lower(SAMPLE)))
 }

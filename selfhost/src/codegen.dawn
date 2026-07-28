@@ -2411,9 +2411,8 @@ pub fn gen_strings_class(supers: List[String]) -> Bytes !io = {
 
   # ---- str_* intrinsics (the string primitives std cannot write in pure Dawn) ----
   # These were vendored on dawn.rt.StdStrings; emitting them here retires that
-  # handwritten class. Bodies are StdStrings' verbatim: code points for lengths
-  # and indices, Locale.ROOT for case, a -1 sentinel for a missing search.
-  let jlocale = "java/util/Locale"
+  # handwritten class. Bodies are StdStrings' verbatim except for case folding:
+  # code points for lengths and indices, a -1 sentinel for a missing search.
 
   # str_len(s) = s.codePointCount(0, s.length())
   let slv = open_static(cw, "str_len", "(Ljava/lang/String;)J")
@@ -2433,23 +2432,16 @@ pub fn gen_strings_class(supers: List[String]) -> Bytes !io = {
   stv.visitInsn(OP_ARETURN)
   close_mv(stv)
 
-  # str_lower(s) = s.toLowerCase(Locale.ROOT)
-  let slov = open_static(cw, "str_lower", "(Ljava/lang/String;)Ljava/lang/String;")
-  slov.visitVarInsn(OP_ALOAD, 0)
-  slov.visitFieldInsn(OP_GETSTATIC, jlocale, "ROOT", "Ljava/util/Locale;")
-  slov.visitMethodInsn(OP_INVOKEVIRTUAL, jstr, "toLowerCase",
-    "(Ljava/util/Locale;)Ljava/lang/String;", false)
-  slov.visitInsn(OP_ARETURN)
-  close_mv(slov)
-
-  # str_upper(s) = s.toUpperCase(Locale.ROOT)
-  let supv = open_static(cw, "str_upper", "(Ljava/lang/String;)Ljava/lang/String;")
-  supv.visitVarInsn(OP_ALOAD, 0)
-  supv.visitFieldInsn(OP_GETSTATIC, jlocale, "ROOT", "Ljava/util/Locale;")
-  supv.visitMethodInsn(OP_INVOKEVIRTUAL, jstr, "toUpperCase",
-    "(Ljava/util/Locale;)Ljava/lang/String;", false)
-  supv.visitInsn(OP_ARETURN)
-  close_mv(supv)
+  # str_lower/str_upper: simple (1:1) mapping, one code point at a time.
+  #
+  # `String.toUpperCase` is *full* mapping, which is not a function a second
+  # backend can implement from a table: it is locale- and context-sensitive,
+  # and it does not preserve the code-point count (a sharp s uppercases to two
+  # letters). `Character.toUpperCase` is the simple mapping, and that is what
+  # the language's primitive means (native-backend-plan.md 14.12). Full mapping
+  # belongs in a library that can take a locale.
+  gen_case_method(cw, "str_lower", "toLowerCase")
+  gen_case_method(cw, "str_upper", "toUpperCase")
 
   # str_contains(s, sub) = s.contains(sub)
   let scv = open_static(cw, "str_contains", "(Ljava/lang/String;Ljava/lang/String;)Z")
@@ -2533,6 +2525,48 @@ pub fn gen_strings_class(supers: List[String]) -> Bytes !io = {
 
   cw.visitEnd()
   cw.toByteArray().expect("bytes")
+}
+
+## One of the two case foldings, as a walk applying `Character.toLowerCase` or
+## `Character.toUpperCase` -- the JVM's *simple* mapping -- to each code point.
+##
+## Locals: 0 the string, 1 the builder, 2 the UTF-16 offset, 3 the code point.
+fn gen_case_method(cw: AdtClassWriter, name: String, java_name: String) -> Unit !io = {
+  let jstr = "java/lang/String"
+  let m = open_static(cw, name, "(Ljava/lang/String;)Ljava/lang/String;")
+  m.visitTypeInsn(OP_NEW, SB)
+  m.visitInsn(OP_DUP)
+  m.visitMethodInsn(OP_INVOKESPECIAL, SB, "<init>", "()V", false)
+  m.visitVarInsn(OP_ASTORE, 1)
+  m.visitInsn(OP_ICONST_0)
+  m.visitVarInsn(OP_ISTORE, 2)
+  let again = Label.new()
+  let out = Label.new()
+  m.visitLabel(again)
+  m.visitVarInsn(OP_ILOAD, 2)
+  m.visitVarInsn(OP_ALOAD, 0)
+  m.visitMethodInsn(OP_INVOKEVIRTUAL, jstr, "length", "()I", false)
+  m.visitJumpInsn(OP_IF_ICMPGE, out)
+  m.visitVarInsn(OP_ALOAD, 0)
+  m.visitVarInsn(OP_ILOAD, 2)
+  m.visitMethodInsn(OP_INVOKEVIRTUAL, jstr, "codePointAt", "(I)I", false)
+  m.visitVarInsn(OP_ISTORE, 3)
+  m.visitVarInsn(OP_ALOAD, 1)
+  m.visitVarInsn(OP_ILOAD, 3)
+  m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Character", java_name, "(I)I", false)
+  m.visitMethodInsn(OP_INVOKEVIRTUAL, SB, "appendCodePoint", "(I)L" ++ SB ++ ";", false)
+  m.visitInsn(OP_POP)
+  m.visitVarInsn(OP_ILOAD, 2)
+  m.visitVarInsn(OP_ILOAD, 3)
+  m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Character", "charCount", "(I)I", false)
+  m.visitInsn(OP_IADD)
+  m.visitVarInsn(OP_ISTORE, 2)
+  m.visitJumpInsn(OP_GOTO, again)
+  m.visitLabel(out)
+  m.visitVarInsn(OP_ALOAD, 1)
+  m.visitMethodInsn(OP_INVOKEVIRTUAL, SB, "toString", "()Ljava/lang/String;", false)
+  m.visitInsn(OP_ARETURN)
+  close_mv(m)
 }
 
 fn open_static(cw: AdtClassWriter, name: String, desc: String) -> MethodVisitor !io = {

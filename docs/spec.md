@@ -1184,7 +1184,13 @@ std → 内建，std 模块自己的 `pub fn len` 正是靠这一条合法。
   其余在 **`std/str`**：`str.len str.is_empty str.trim str.to_lower str.to_upper
   str.contains str.starts_with str.ends_with str.index_of str.last_index_of
   str.repeat str.substring str.pad_start str.reverse str.chars str.split
-  str.from_char`（`to_lower`/`to_upper` 按 Unicode 大小写折叠）。
+  str.from_char`。
+
+  `to_lower`/`to_upper` 是 **Unicode 简单(1:1)大小写映射**：一个码点进、一个码点出，
+  无 locale、无上下文，故**码点数不变**。这排除了完整映射的三类特例——长度会变的
+  （`ß` → `SS`）、locale 相关的（土耳其语的 `i`）、上下文相关的（希腊语词尾 sigma）。
+  取简单映射不是为了省事：完整映射不是一个后端能从一张表实现的函数，而 Dawn 要求
+  一个原语在每个后端上是同一个函数。需要完整映射的场合属于能接收 locale 的库。
 - **`std/bytes`**（一等 `Bytes`，§9.5.1）：`bytes.utf8(s) -> Bytes`（字符串的 UTF-8 字节）、
   `bytes.decode(b, charset) -> String`（按字符集解码，替代旧 `String.new(bytes, charset)`）、
   `bytes.len(b) -> Int`、`bytes.at(b, i) -> Int`（0..255，越界 panic）、

@@ -2,9 +2,8 @@
 # unlisted one as fatal -- and it also fails when a *listed* check starts
 # passing, so a fix cannot leave its entry behind.
 #
-# One check is listed, at the bottom: case folding, which the two backends
-# answer differently. Everything else compiles with both backends, runs with
-# both, and agrees with a written expectation.
+# Nothing is listed. Every corpus program compiles with both backends, runs
+# with both, and agrees with a written expectation.
 #
 # It is worth saying what that does and does not mean. It does not mean the
 # native backend is finished -- it means the *corpus* no longer catches it out,
@@ -147,24 +146,19 @@
 #     index does.
 
 # --- case folding ---------------------------------------------------------
-strings_case:jvm
-strings_case:native
-strings_case:diff
+# strings_case:jvm, strings_case:native and strings_case:diff were here, for
+# one day. `str.lower`/`str.upper` were two different functions wearing one
+# name: the JVM did *full* mapping (`String.toUpperCase`), where a sharp s
+# uppercases to two letters, and the C runtime folded ASCII only, leaving every
+# cased letter above U+007F alone. The existing corpus tested
+# `str_lower("MiXeD 42")` -- pure ASCII, which is exactly the part they agreed
+# on, so the divergence had a comment in the C runtime admitting to it and no
+# check that would fail.
 #
-# The two backends answer `str_lower`/`str_upper` differently, and neither
-# answers what strings_case.expect asks for. The JVM does *full* case mapping
-# (`String.toUpperCase`): `ß` becomes `SS`, so the code-point count is not
-# preserved. The C runtime folds ASCII only, so every cased letter above U+007F
-# is left alone. Each was written to look like the obvious implementation on
-# its own platform, and neither is a function the other can implement.
-#
-# The expectation is *simple* mapping -- one code point in, one out. It is the
-# only version of this operation two backends can implement from one table:
-# full mapping is locale- and context-sensitive, so it belongs in a library
-# that can take a locale rather than in a primitive.
-#
-# The comptime half is in the same file. A `const` is folded on the compiler's
-# host and a live call runs on the target, so `str_upper` gives a different
-# answer today depending on whether the expression was written `const`. That is
-# what makes this a semantics defect rather than a missing feature: one
-# operation with two definitions, and the fold reaches only one of them.
+# Closed by deciding what the operation is. Simple (1:1) mapping is the only
+# version two backends can implement from one table; full mapping is locale-
+# and context-sensitive and does not preserve the code-point count, so it
+# belongs in a library that can take a locale. The JVM backend calls
+# Character.toUpperCase per code point -- that *is* the simple mapping -- and
+# the C runtime carries a table generated from the same oracle, tied to it by
+# scripts/case-contract/run.sh.
