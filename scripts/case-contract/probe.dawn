@@ -11,16 +11,21 @@
 # of it, which is the whole point -- but only as long as the two stay tied
 # together. Hence the two modes:
 #
-#   (default)            every code point that has a mapping, plus a spread of
-#                        ones that should not, checked against the oracle. This
-#                        is the JVM backend's half.
-#   DAWN_CASE_EMIT=1     print the C table. run.sh diffs it against the checked
-#                        in header, so a JDK whose Unicode version has moved on
-#                        fails here rather than silently in a native binary.
+#   (default)            checks both implementations against the oracle: the
+#                        *committed* table, code point by code point, and the
+#                        compiled `str.upper`/`str.lower` over every code point
+#                        that has a mapping plus a spread of ones that do not.
+#   DAWN_CASE_EMIT=1     print the table, for regenerating the header.
+#
+# The default mode reads the header rather than regenerating and diffing it,
+# because what the C runtime compiles is the header -- a byte diff would also
+# fail on a formatting change, and would say "these files differ" where this
+# says which code point and what it should have been.
 use std/io
 use std/list
 use std/str
 use java "java.lang.Character"
+use java "java.lang.System"
 
 const LAST: Int = 0x10FFFF
 
@@ -122,15 +127,14 @@ fn emit() -> Unit !io = {
 # ---- the contract ----
 
 ## Every code point the oracle maps somewhere, plus one in every 1009 that it
-## should leave alone. A spurious range would show up in the emitted table and
-## so in run.sh's diff; what this catches is the *walk* -- surrogate pairs
-## rebuilt wrong, a code point count that did not survive, a mapping applied
-## to the wrong unit.
+## should leave alone. This is the JVM backend's half: what it catches is the
+## *walk* -- surrogate pairs rebuilt wrong, a code-point count that did not
+## survive, a mapping applied to the wrong unit.
 fn interesting(cp: Int) -> Bool !io =
   not is_surrogate(cp) &&
   (oracle(cp, true) != cp || oracle(cp, false) != cp || cp % 1009 == 0)
 
-fn check() -> Unit !io = {
+fn check_walk() -> (Int, Int) !io = {
   var bad = 0
   var seen = 0
   var cp = 0
@@ -156,8 +160,110 @@ fn check() -> Unit !io = {
     }
     cp = cp + 1
   }
+  (seen, bad)
+}
+
+# ---- the C runtime's half: the committed table, against the same oracle ----
+
+fn header_path() -> String !io =
+  match io.getenv("DAWN_CASE_HEADER") {
+    Some(p) -> p
+    None -> "runtime/c/dawn_case_table.h"
+  }
+
+fn hex_val(s: String) -> Int =
+  if str.starts_with(s, "0x") {
+    parse_int_radix(str.substring(s, 2, str.len(s)), 16).expect("hex literal")
+  } else {
+    parse_int(s).expect("decimal literal")
+  }
+
+## `    {0x0061, 0x007A, -32},` -> (0x61, 0x7A, -32).
+fn parse_row(line: String) -> (Int, Int, Int) = {
+  let inner = str.substring(line, 1, str.len(line) - 2)
+  let parts = str.split(inner, ",")
+  (hex_val(str.trim(parts[0])), hex_val(str.trim(parts[1])), hex_val(str.trim(parts[2])))
+}
+
+## The two arrays out of the header, in the order they are declared.
+fn read_table(text: String) -> (List[(Int, Int, Int)], List[(Int, Int, Int)]) = {
+  var upper: List[(Int, Int, Int)] = []
+  var lower: List[(Int, Int, Int)] = []
+  var in_upper = false
+  var in_lower = false
+  for line in str.split(text, "\n") {
+    let t = str.trim(line)
+    if str.contains(t, "dawn_upper_ranges[]") {
+      in_upper = true
+      in_lower = false
+    } else if str.contains(t, "dawn_lower_ranges[]") {
+      in_lower = true
+      in_upper = false
+    } else if str.starts_with(t, "{") {
+      let r = parse_row(t)
+      if in_upper { upper = upper ++ [r] } else if in_lower { lower = lower ++ [r] }
+    } else if t == "};" {
+      in_upper = false
+      in_lower = false
+    }
+  }
+  (upper, lower)
+}
+
+## Walk the code points and the (sorted, disjoint) ranges together, so this is
+## one pass over each rather than a search per code point.
+fn check_table(rs: List[(Int, Int, Int)], up: Bool) -> Int !io = {
+  var bad = 0
+  var i = 0
+  var cp = 0
+  while cp <= LAST {
+    if is_surrogate(cp) {
+      cp = cp + 1
+    } else {
+      while i < len(rs) && {
+        let (_, hi, _) = rs[i]
+        hi < cp
+      } {
+        i = i + 1
+      }
+      var got = cp
+      if i < len(rs) {
+        let (lo, hi, delta) = rs[i]
+        if lo <= cp && cp <= hi { got = cp + delta }
+      }
+      let want = oracle(cp, up)
+      if got != want {
+        if bad < 12 {
+          io.println("table " ++ (if up { "upper " } else { "lower " }) ++ cp_lit(cp) ++
+              " has " ++ cp_lit(got) ++ " want " ++ cp_lit(want))
+        }
+        bad = bad + 1
+      }
+      cp = cp + 1
+    }
+  }
+  bad
+}
+
+fn check() -> Unit !io = {
+  let (seen, walk_bad) = check_walk()
+  let text =
+    match io.read_file(header_path()) {
+      Ok(t) -> t
+      Err(e) -> panic("cannot read " ++ header_path() ++ ": " ++ e)
+    }
+  let (upper, lower) = read_table(text)
+  # the JDK is the oracle, so which one answered is part of the result: a
+  # mismatch here is almost always a Unicode version that moved under the table
+  io.println("jdk " ++
+      match System.getProperty("java.version") {
+        Some(v) -> v
+        None -> "?"
+      })
+  io.println("ranges " ++ to_string(len(upper)) ++ " upper, " ++ to_string(len(lower)) ++ " lower")
+  let table_bad = check_table(upper, true) + check_table(lower, false)
   io.println("checked " ++ to_string(seen))
-  io.println("mismatches " ++ to_string(bad))
+  io.println("mismatches " ++ to_string(walk_bad + table_bad))
 }
 
 pub fn main() -> Unit !io =
