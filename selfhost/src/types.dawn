@@ -893,22 +893,12 @@ pub fn builtins() -> Map[String, Sig] = {
     bsig("cursor_next", [TyString, TyInt], ["s", "c"], TyInt),
     bsig("cursor_prev", [TyString, TyInt], ["s", "c"], TyInt),
     bsig("cursor_slice", [TyString, TyInt, TyInt], ["s", "from", "to"], TyString),
-    bsig("cursor_skip", [TyString, TyInt, TyString], ["s", "c", "sub"], TyInt),
-    bsig("index_of_from", [TyString, TyString, TyInt], ["s", "sub", "from"], opt_ty(TyInt)),
-    # str_* intrinsics: the string primitives that need Unicode/JVM support and
-    # so cannot be pure Dawn (case folding, whitespace, native search). The
-    # JVM backend emits them into dawn/rt/Strings; std/str writes the rest over
-    # these plus code_points/cursors. str_index_of/str_last_index_of report a
-    # missing match as -1, which the std wrapper turns into None.
-    bsig("str_len", [TyString], ["s"], TyInt),
-    bsig("str_trim", [TyString], ["s"], TyString),
+    # str_* intrinsics: what is left once everything expressible as a walk is
+    # written as one. Case folding is a Unicode table, not a walk, so it stays
+    # here; length, trimming and the four searches used to and no longer do
+    # (std/str, docs/native-backend-plan.md 14.12).
     bsig("str_lower", [TyString], ["s"], TyString),
     bsig("str_upper", [TyString], ["s"], TyString),
-    bsig("str_contains", [TyString, TyString], ["s", "sub"], TyBool),
-    bsig("str_starts_with", [TyString, TyString], ["s", "prefix"], TyBool),
-    bsig("str_ends_with", [TyString, TyString], ["s", "suffix"], TyBool),
-    bsig("str_index_of", [TyString, TyString], ["s", "sub"], TyInt),
-    bsig("str_last_index_of", [TyString, TyString], ["s", "sub"], TyInt),
     # char_* intrinsics: Unicode classification of one code point. Same reason
     # the str_* ones exist -- the answer is a property of the Unicode tables,
     # not something Dawn source can compute -- and every backend needs them
@@ -1114,22 +1104,21 @@ pub fn intrinsics() -> Map[String, Intr] = {
   # `io_run` are absent below for a related reason: each does reach a runtime
   # function, but only through a List↔Array conversion the emitter wraps around
   # it, and a plain entry here would promise a call the emitter cannot make.
-  # strings: the ones needing Unicode or native search, plus the cursor walk.
+  # strings: the Unicode tables, plus the cursor walk they and std/str rest on.
   # `cursor_slice` is absent on purpose -- the emitter writes it inline so it
   # can check the range and panic.
-  for n in ["parse_int", "parse_float", "parse_int_radix", "index_of_from"] {
+  for n in ["parse_int", "parse_float", "parse_int_radix"] {
     rt_of = map.insert(rt_of, n, RtStrings)
   }
   for op in ["letter", "digit", "alnum", "upper", "lower", "space"] {
     rt_of = map.insert(rt_of, "char_is_" ++ op, RtStrings)
   }
-  for op in ["start", "end", "done", "char", "next", "prev", "skip"] {
+  for op in ["start", "end", "done", "char", "next", "prev"] {
     rt_of = map.insert(rt_of, "cursor_" ++ op, RtStrings)
   }
-  for op in ["len", "trim", "lower", "upper", "contains", "starts_with", "ends_with",
-    "index_of", "last_index_of"] {
-      rt_of = map.insert(rt_of, "str_" ++ op, RtStrings)
-    }
+  for op in ["lower", "upper"] {
+    rt_of = map.insert(rt_of, "str_" ++ op, RtStrings)
+  }
   for op in ["utf8", "decode", "len", "at", "slice", "from_array"] {
     rt_of = map.insert(rt_of, "bytes_" ++ op, RtBytes)
   }
@@ -1169,10 +1158,9 @@ pub fn intrinsics() -> Map[String, Intr] = {
   internal = set.insert(internal, "popcount")
   # the cursor walk and the search it rests on are the representation, not
   # surface: std/str spells the public API over them
-  for op in ["start", "end", "done", "char", "next", "prev", "slice", "skip"] {
+  for op in ["start", "end", "done", "char", "next", "prev", "slice"] {
     internal = set.insert(internal, "cursor_" ++ op)
   }
-  internal = set.insert(internal, "index_of_from")
 
   var out: Map[String, Intr] = map.empty()
   for n in map.keys(bs) {
@@ -1215,7 +1203,7 @@ test "every intrinsic property is declared against a real intrinsic" {
   # erased is the container primitives, and only those
   assert intr_at("map_get").expect("map_get").erased
   assert intr_at("array_push").expect("array_push").erased
-  assert not intr_at("str_len").expect("str_len").erased
+  assert not intr_at("str_upper").expect("str_upper").erased
 }
 
 test "effect union normalizes" {
@@ -1335,7 +1323,7 @@ test "builtin table renders signatures" {
     }
     None -> { assert false }
   }
-  assert map_size2(bs) == 96
+  assert map_size2(bs) == 87
 }
 
 fn map_size2(m: Map[String, Sig]) -> Int = map.size(m)

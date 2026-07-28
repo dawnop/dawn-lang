@@ -224,18 +224,11 @@ dawn_adt *dawn_catch_panic(dawn_clo *f);
 /* strings */
 dawn_str dawn_str_concat(dawn_str a, dawn_str b);
 bool dawn_str_eq(dawn_str a, dawn_str b);
-int64_t dawn_str_len(dawn_str s); /* code points, matching the JVM backend */
-dawn_str dawn_str_trim(dawn_str s);
 dawn_str dawn_str_lower(dawn_str s);
 dawn_str dawn_str_upper(dawn_str s);
-bool dawn_str_contains(dawn_str s, dawn_str sub);
-bool dawn_str_starts_with(dawn_str s, dawn_str prefix);
-bool dawn_str_ends_with(dawn_str s, dawn_str suffix);
 /* code-point indices, -1 when absent: the wrappers in std/str turn the
  * sentinel into None, and the index is observable, so it is not the byte
  * offset the search actually ran on. */
-int64_t dawn_str_index_of(dawn_str s, dawn_str sub);
-int64_t dawn_str_last_index_of(dawn_str s, dawn_str sub);
 dawn_adt *dawn_parse_int(dawn_str s);                    /* Option[Int] */
 dawn_adt *dawn_parse_float(dawn_str s);                  /* Option[Float] */
 dawn_adt *dawn_parse_int_radix(dawn_str s, int64_t radix);
@@ -257,9 +250,7 @@ bool dawn_cursor_done(dawn_str s, int64_t c);
 int64_t dawn_cursor_char(dawn_str s, int64_t c); /* -1 at the end */
 int64_t dawn_cursor_next(dawn_str s, int64_t c);
 int64_t dawn_cursor_prev(dawn_str s, int64_t c);
-int64_t dawn_cursor_skip(dawn_str s, int64_t c, dawn_str sub);
 dawn_str dawn_cursor_slice(dawn_str s, int64_t from, int64_t to);
-dawn_adt *dawn_index_of_from(dawn_str s, dawn_str sub, int64_t from);
 
 /* bytes. `concat` and `eq` are not intrinsics -- they are what `++` and `==`
  * at Bytes compile to, the way dawn_str_concat and dawn_str_eq are for text. */

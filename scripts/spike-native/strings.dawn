@@ -3,17 +3,19 @@
 #
 # The JVM implements these over `java.lang.String`, which is UTF-16, and the C
 # runtime over UTF-8. That difference is supposed to be invisible, and the two
-# places it could leak are here: `str_len` and `str_index_of` report *code
+# places it could leak are here: `str.len` and `str.index_of` report *code
 # point* counts, so neither backend may report its own storage units.
 #
-# The cursor family is not here. Those intrinsics are `internal` -- only std
-# may name them -- so reaching them needs std compiled into the translation
-# unit, which is the next step and not this one. `Cursor` is exercised through
-# std/str once that lands.
+# Length, trimming and the four searches are std/str functions rather than
+# intrinsics now -- one definition over the cursor walk, compiled by both
+# backends (docs/native-backend-plan.md 14.12) -- so this exercises the walk
+# underneath as well. `Cursor` itself stays out of reach: those intrinsics are
+# `internal`, and only std may name them.
 #
-# `parse_float` is not here either: `str_of_float` is not byte-identical to
-# Java's Double.toString, so no float can be printed in a differential corpus.
+# `parse_float` is not here: `str_of_float` is not byte-identical to Java's
+# Double.toString, so no float can be printed in a differential corpus.
 use std/io
+use std/str
 
 fn opt_int(o: Option[Int]) -> String =
   match o {
@@ -34,27 +36,27 @@ pub fn main() -> Unit !io = {
   # "aé中𝄞": one byte, two, three, four. Four code points, five UTF-16 units,
   # ten UTF-8 bytes -- so a backend reporting its own units is visible here.
   let mixed = "aé中𝄞"
-  io.println("str_len            = " ++ to_string(str_len(mixed)))
-  io.println("str_len ascii      = " ++ to_string(str_len("abc")))
+  io.println("str.len            = " ++ to_string(str.len(mixed)))
+  io.println("str.len ascii      = " ++ to_string(str.len("abc")))
 
   io.println("-- search reports a code-point index --")
-  io.println("index_of 中        = " ++ to_string(str_index_of(mixed, "中")))
-  io.println("index_of missing   = " ++ to_string(str_index_of(mixed, "z")))
-  io.println("index_of empty     = " ++ to_string(str_index_of(mixed, "")))
-  io.println("last_index_of l    = " ++ to_string(str_last_index_of("hello", "l")))
-  io.println("last_index_of miss = " ++ to_string(str_last_index_of("hello", "z")))
-  io.println("last_index_of ''   = " ++ to_string(str_last_index_of("hello", "")))
+  io.println("index_of 中        = " ++ opt_int(str.index_of(mixed, "中")))
+  io.println("index_of missing   = " ++ opt_int(str.index_of(mixed, "z")))
+  io.println("index_of empty     = " ++ opt_int(str.index_of(mixed, "")))
+  io.println("last_index_of l    = " ++ opt_int(str.last_index_of("hello", "l")))
+  io.println("last_index_of miss = " ++ opt_int(str.last_index_of("hello", "z")))
+  io.println("last_index_of ''   = " ++ opt_int(str.last_index_of("hello", "")))
 
   io.println("-- predicates --")
-  io.println("contains           = " ++ to_string(str_contains(mixed, "é中")))
-  io.println("starts_with        = " ++ to_string(str_starts_with(mixed, "aé")))
-  io.println("ends_with          = " ++ to_string(str_ends_with(mixed, "𝄞")))
-  io.println("ends_with false    = " ++ to_string(str_ends_with(mixed, "中")))
+  io.println("contains           = " ++ to_string(str.contains(mixed, "é中")))
+  io.println("starts_with        = " ++ to_string(str.starts_with(mixed, "aé")))
+  io.println("ends_with          = " ++ to_string(str.ends_with(mixed, "𝄞")))
+  io.println("ends_with false    = " ++ to_string(str.ends_with(mixed, "中")))
 
   io.println("-- trimming and case --")
-  io.println("trim               = [" ++ str_trim("  \t hi \n ") ++ "]")
-  io.println("trim nothing       = [" ++ str_trim("hi") ++ "]")
-  io.println("trim all           = [" ++ str_trim("   ") ++ "]")
+  io.println("trim               = [" ++ str.trim("  \t hi \n ") ++ "]")
+  io.println("trim nothing       = [" ++ str.trim("hi") ++ "]")
+  io.println("trim all           = [" ++ str.trim("   ") ++ "]")
   io.println("lower              = " ++ str_lower("MiXeD 42"))
   io.println("upper              = " ++ str_upper("MiXeD 42"))
 
@@ -91,15 +93,15 @@ pub fn main() -> Unit !io = {
   io.println("bytes_at 0         = " ++ to_string(bytes_at(b, 0)))
   io.println("bytes_at oob       = " ++ to_string(bytes_at(b, 99)))
   io.println("decode round trip  = " ++
-    match bytes_decode(b, "UTF-8") {
-      Some(s) -> s
-      None -> "none"
-    })
+      match bytes_decode(b, "UTF-8") {
+        Some(s) -> s
+        None -> "none"
+      })
   io.println("decode bad charset = " ++
-    match bytes_decode(b, "NoSuchCharset") {
-      Some(_) -> "some"
-      None -> "none"
-    })
+      match bytes_decode(b, "NoSuchCharset") {
+        Some(_) -> "some"
+        None -> "none"
+      })
 
   io.println("-- the barrier --")
   # java_try catches an exception on the JVM and a panic natively; both make

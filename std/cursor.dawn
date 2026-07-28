@@ -37,23 +37,57 @@ pub fn prev(s: String, c: Cursor) -> Cursor = cursor_prev(s, c)
 ## The text between two positions.
 pub fn slice(s: String, from: Cursor, to: Cursor) -> String = cursor_slice(s, from, to)
 
+# The three below used to be intrinsics too — `cursor_skip` and
+# `index_of_from`, each with a hand-written implementation in the JVM emitter
+# and another in the C runtime, and a third route in the comptime interpreter
+# that reflected into the emitted JVM class. Search is not a representation
+# question: it is a walk, and the walk is above. Writing it here leaves seven
+# intrinsics under this module, which is the whole representation boundary
+# (docs/native-backend-plan.md 14.12).
+
 ## The position just past `sub`, which is known to start at `c` — the one
 ## sanctioned "advance past a literal" that would otherwise be cursor arithmetic.
-pub fn skip(s: String, c: Cursor, sub: String) -> Cursor = cursor_skip(s, c, sub)
+##
+## Walks both strings together rather than counting `sub` first, so it needs no
+## length and no arithmetic.
+pub fn skip(s: String, c: Cursor, sub: String) -> Cursor = skip_go(s, c, sub, start(sub))
+
+fn skip_go(s: String, sc: Cursor, t: String, tc: Cursor) -> Cursor =
+  if done(t, tc) || done(s, sc) {
+    sc
+  } else {
+    skip_go(s, next(s, sc), t, next(t, tc))
+  }
+
+## Whether `sub` occurs in `s` starting exactly at `c`. An empty `sub` is at
+## every position, including the end.
+pub fn starts_at(s: String, c: Cursor, sub: String) -> Bool =
+  match_go(s, c, sub, start(sub))
+
+fn match_go(s: String, sc: Cursor, t: String, tc: Cursor) -> Bool =
+  if done(t, tc) {
+    true
+  } else if done(s, sc) {
+    false
+  } else if char(s, sc) != char(t, tc) {
+    false
+  } else {
+    match_go(s, next(s, sc), t, next(t, tc))
+  }
 
 ## The position of the first occurrence of `sub` at or after `from`, or `None`.
-##
-## Spelled out because the conversion is a newtype's, not a functor's: inside
-## this module a `Cursor` is an `Int`, but an `Option[Int]` is still not an
-## `Option[Cursor]`.
 pub fn find(s: String, sub: String, from: Cursor) -> Option[Cursor] =
-  match index_of_from(s, sub, from) {
-    Some(i) -> {
-      let c: Cursor = i
-      Some(c)
-    }
-    None -> None
+  if starts_at(s, from, sub) {
+    Some(from)
+  } else if done(s, from) {
+    None
+  } else {
+    find(s, sub, next(s, from))
   }
+
+## The position `n` characters back from `c` (clamped to the start).
+pub fn back(s: String, c: Cursor, n: Int) -> Cursor =
+  if n <= 0 { c } else { back(s, prev(s, c), n - 1) }
 
 ## Positions in one string are ordered, and that order is the Int's.
 ##

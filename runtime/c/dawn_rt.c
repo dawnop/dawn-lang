@@ -175,17 +175,6 @@ bool dawn_str_eq(dawn_str a, dawn_str b) {
   return memcmp(a.p, b.p, (size_t)a.len) == 0;
 }
 
-int64_t dawn_str_len(dawn_str s) {
-  /* Code points, not bytes: the JVM backend's str_len counts code points,
-   * and that is the observable contract (llvm-backend-research.md 4.3).
-   * Continuation bytes are 10xxxxxx; everything else starts a code point. */
-  int64_t n = 0;
-  for (int64_t i = 0; i < s.len; i++) {
-    if (((unsigned char)s.p[i] & 0xC0) != 0x80) n++;
-  }
-  return n;
-}
-
 static dawn_str dawn_str_copy(const char *buf, size_t n) {
   char *out = (char *)dawn_alloc(n);
   memcpy(out, buf, n);
@@ -679,27 +668,6 @@ static int64_t dawn_utf8_put(char *out, uint32_t cp) {
   return 4;
 }
 
-/* Code points in the first `upto` bytes -- how a byte offset becomes the
- * index `str_index_of` reports. */
-static int64_t dawn_cp_count(dawn_str s, int64_t upto) {
-  int64_t n = 0;
-  for (int64_t i = 0; i < upto; i++) {
-    if (((unsigned char)s.p[i] & 0xC0) != 0x80) n++;
-  }
-  return n;
-}
-
-/* First byte offset at or after `from` where `sub` occurs, or -1. An empty
- * needle matches at `from`, as String.indexOf does. */
-static int64_t dawn_find(dawn_str s, dawn_str sub, int64_t from) {
-  if (from < 0) from = 0;
-  if (sub.len == 0) return from <= s.len ? from : -1;
-  for (int64_t i = from; i + sub.len <= s.len; i++) {
-    if (memcmp(s.p + i, sub.p, (size_t)sub.len) == 0) return i;
-  }
-  return -1;
-}
-
 /* ---- cursors ---- */
 
 int64_t dawn_cursor_start(dawn_str s) {
@@ -732,11 +700,6 @@ int64_t dawn_cursor_prev(dawn_str s, int64_t c) {
   return i;
 }
 
-int64_t dawn_cursor_skip(dawn_str s, int64_t c, dawn_str sub) {
-  int64_t n = c + sub.len;
-  return n > s.len ? s.len : n;
-}
-
 dawn_str dawn_cursor_slice(dawn_str s, int64_t from, int64_t to) {
   if (from < 0 || to > s.len || from > to ||
       !dawn_utf8_boundary(s, from) || !dawn_utf8_boundary(s, to)) {
@@ -745,15 +708,11 @@ dawn_str dawn_cursor_slice(dawn_str s, int64_t from, int64_t to) {
   return (dawn_str){s.p + from, to - from};
 }
 
-dawn_adt *dawn_index_of_from(dawn_str s, dawn_str sub, int64_t from) {
-  if (from > s.len) return dawn_none();
-  int64_t i = dawn_find(s, sub, from);
-  return i < 0 ? dawn_none() : dawn_some(dawn_box_int(i));
-}
-
 /* ---- the str_* primitives ---- */
 
-dawn_str dawn_str_trim(dawn_str s) {
+/* Only `parse_int`'s leading/trailing strip uses this now; the language's
+ * `str.trim` is a cursor walk in std/str (native-backend-plan.md 14.12). */
+static dawn_str dawn_str_trim(dawn_str s) {
   int64_t a = 0;
   while (a < s.len) {
     int64_t n;
@@ -825,33 +784,6 @@ static dawn_str dawn_case(dawn_str s, bool up) {
 dawn_str dawn_str_lower(dawn_str s) { return dawn_case(s, false); }
 
 dawn_str dawn_str_upper(dawn_str s) { return dawn_case(s, true); }
-
-bool dawn_str_contains(dawn_str s, dawn_str sub) {
-  return dawn_find(s, sub, 0) >= 0;
-}
-
-bool dawn_str_starts_with(dawn_str s, dawn_str prefix) {
-  return prefix.len <= s.len && memcmp(s.p, prefix.p, (size_t)prefix.len) == 0;
-}
-
-bool dawn_str_ends_with(dawn_str s, dawn_str suffix) {
-  return suffix.len <= s.len &&
-         memcmp(s.p + (s.len - suffix.len), suffix.p, (size_t)suffix.len) == 0;
-}
-
-int64_t dawn_str_index_of(dawn_str s, dawn_str sub) {
-  int64_t i = dawn_find(s, sub, 0);
-  return i < 0 ? -1 : dawn_cp_count(s, i);
-}
-
-int64_t dawn_str_last_index_of(dawn_str s, dawn_str sub) {
-  /* String.lastIndexOf("") is the length, not 0 */
-  if (sub.len == 0) return dawn_str_len(s);
-  for (int64_t i = s.len - sub.len; i >= 0; i--) {
-    if (memcmp(s.p + i, sub.p, (size_t)sub.len) == 0) return dawn_cp_count(s, i);
-  }
-  return -1;
-}
 
 /* ---- parsing ----
  *

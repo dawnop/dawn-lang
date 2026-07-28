@@ -292,9 +292,15 @@ JVM-锁死。LLVM 后端一看 std 里全是 `java.lang.String.codePointCount`,�
 
 | 位置 | 货币 | 可观察? |
 |---|---|---|
-| `str_len` / `str_index_of` / `str_last_index_of` | **码点**索引 | **是**——两后端必须逐位相同 |
-| `Cursor`(cursor 家族 + `index_of_from`) | JVM=UTF-16 下标,C=**UTF-8 字节偏移** | **否** |
+| `str.len` / `str.index_of` / `str.last_index_of` | **码点**索引 | **是**——两后端必须逐位相同 |
+| `Cursor`(cursor 家族) | JVM=UTF-16 下标,C=**UTF-8 字节偏移** | **否** |
 | `hash` / `cmp` at String | UTF-16 码元(Java 定义) | 是——C 侧按 UTF-16 走一遍 |
+
+> **2026-07-28 更新**:第一行不再是 intrinsic。「可观察 ⇒ 两后端必须逐位相同」这个要求,
+> 靠「两份实现 + 一份语料」维持了很久;现在它们是 `std/str` 里**建在游标之上的一份 Dawn 定义**,
+> 两个后端编译同一份代码,要求自动成立。真正留在表示边界上的只有第二行那 7 个游标原语
+> (`index_of_from`/`cursor_skip` 也已降成 `std/cursor` 里的走查)。见
+> `docs/native-backend-plan.md` §14.12。
 
 Cursor 那一行是 `opaque type Cursor = Int` 挣来的:模块外做不了算术、也没有 `Show[Cursor]`,
 所以那个数**谁也看不见**,两后端各挑各的最省的表示。这跟 `array_push` 的「唯一时就地写」是同一形状——

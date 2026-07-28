@@ -10,26 +10,56 @@
 # moving out of the compiler's builtin table (docs/builtins-to-stdlib.md).
 #
 # Two implementation styles live here, on purpose (docs/pure-ffi-design.md §九):
-#   - plain Dawn over the string intrinsics (code_points/from_code_points and the
-#     cursor family), when the operation is expressible that way;
-#   - a str_* intrinsic, for the primitives that need Unicode or native search
-#     and so cannot be pure Dawn: len (code points), case folding, whitespace,
-#     contains/starts_with/ends_with, and index_of/last_index_of.
-# Nothing here names a JVM class any more; the backend owns those in
-# dawn/rt/Strings (docs/runtime-intrinsics-design.md). str_index_of and
-# str_last_index_of report "absent" as -1, which the wrappers turn into `None`.
+#   - plain Dawn over the cursor walk, which is nearly everything;
+#   - a str_* intrinsic, only where the answer is a Unicode table rather than a
+#     walk: case folding, and `char_is_*` underneath `trim`.
+#
+# Length, trimming, and all four searches used to be intrinsics too. Each had a
+# hand-written implementation in the JVM emitter and another in the C runtime,
+# and they disagreed with nothing to say so; the comptime interpreter had no
+# copy at all and reflected into the emitted JVM class, which is a route a
+# native compiler does not have (docs/native-backend-plan.md 14.12). They are
+# walks, not representation, so they are written here once and every consumer
+# reads that one definition.
+#
+# Nothing here names a JVM class; the backend owns the seven cursor primitives
+# and the two case foldings in dawn/rt/Strings (docs/runtime-intrinsics-design.md).
 
 use std/cursor
 use std/cursor.{Cursor}
 
 ## Number of Unicode code points in `s` (not UTF-16 units, and not `chars`' list length).
-pub fn len(s: String) -> Int = str_len(s)
+pub fn len(s: String) -> Int = count(s, cursor.start(s), 0)
+
+fn count(s: String, c: Cursor, n: Int) -> Int =
+  if cursor.done(s, c) { n } else { count(s, cursor.next(s, c), n + 1) }
 
 ## True when the string has no characters.
-pub fn is_empty(s: String) -> Bool = len(s) == 0
+pub fn is_empty(s: String) -> Bool = cursor.done(s, cursor.start(s))
 
 ## `s` without leading or trailing whitespace.
-pub fn trim(s: String) -> String = str_trim(s)
+pub fn trim(s: String) -> String = {
+  let a = skip_space(s, cursor.start(s))
+  cursor.slice(s, a, last_kept(s, a, a))
+}
+
+fn skip_space(s: String, c: Cursor) -> Cursor =
+  if cursor.done(s, c) || not char_is_space(cursor.char(s, c)) {
+    c
+  } else {
+    skip_space(s, cursor.next(s, c))
+  }
+
+## The position just past the last non-space at or after `c`. Walking forward
+## and remembering, rather than walking back from the end, so no two positions
+## ever have to be compared.
+fn last_kept(s: String, c: Cursor, best: Cursor) -> Cursor =
+  if cursor.done(s, c) {
+    best
+  } else {
+    let n = cursor.next(s, c)
+    last_kept(s, n, if char_is_space(cursor.char(s, c)) { best } else { n })
+  }
 
 ## `s` lowercased by simple (1:1) Unicode mapping: one code point in, one out,
 ## no locale and no context, so the code-point count is unchanged.
@@ -42,24 +72,49 @@ pub fn to_lower(s: String) -> String = str_lower(s)
 pub fn to_upper(s: String) -> String = str_upper(s)
 
 ## Whether `sub` occurs anywhere in `s`.
-pub fn contains(s: String, sub: String) -> Bool = str_contains(s, sub)
+pub fn contains(s: String, sub: String) -> Bool =
+  match cursor.find(s, sub, cursor.start(s)) {
+    Some(_) -> true
+    None -> false
+  }
 
 ## Whether `s` begins with `prefix`.
-pub fn starts_with(s: String, prefix: String) -> Bool = str_starts_with(s, prefix)
+pub fn starts_with(s: String, prefix: String) -> Bool =
+  cursor.starts_at(s, cursor.start(s), prefix)
 
 ## Whether `s` ends with `suffix`.
-pub fn ends_with(s: String, suffix: String) -> Bool = str_ends_with(s, suffix)
-
-## The code-point index of the first occurrence of `sub`, or `None`.
-pub fn index_of(s: String, sub: String) -> Option[Int] = {
-  let i = str_index_of(s, sub)
-  if i < 0 { None } else { Some(i) }
+pub fn ends_with(s: String, suffix: String) -> Bool = {
+  let n = len(suffix)
+  if n > len(s) {
+    false
+  } else {
+    cursor.starts_at(s, cursor.back(s, cursor.end(s), n), suffix)
+  }
 }
 
-## The code-point index of the last occurrence of `sub`, or `None`.
-pub fn last_index_of(s: String, sub: String) -> Option[Int] = {
-  let i = str_last_index_of(s, sub)
-  if i < 0 { None } else { Some(i) }
+## The code-point index of the first occurrence of `sub`, or `None`.
+##
+## A code-point index, not a position: `cursor.find` is the one that answers
+## with something you can slice at.
+pub fn index_of(s: String, sub: String) -> Option[Int] = idx(s, sub, cursor.start(s), 0)
+
+fn idx(s: String, sub: String, c: Cursor, i: Int) -> Option[Int] =
+  if cursor.starts_at(s, c, sub) {
+    Some(i)
+  } else if cursor.done(s, c) {
+    None
+  } else {
+    idx(s, sub, cursor.next(s, c), i + 1)
+  }
+
+## The code-point index of the last occurrence of `sub`, or `None`. An empty
+## `sub` is found at the end, which is `len(s)`.
+pub fn last_index_of(s: String, sub: String) -> Option[Int] =
+  last_idx(s, sub, cursor.start(s), 0, None)
+
+fn last_idx(s: String, sub: String, c: Cursor, i: Int, best: Option[Int]) -> Option[Int] = {
+  let seen = if cursor.starts_at(s, c, sub) { Some(i) } else { best }
+  if cursor.done(s, c) { seen } else { last_idx(s, sub, cursor.next(s, c), i + 1, seen) }
 }
 
 ## The single-code-point string for `c`. Panics when `c` is not a valid code point.
