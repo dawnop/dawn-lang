@@ -63,7 +63,7 @@ typedef struct {
 dawn_adt *dawn_adt_new(int32_t tag, int32_t nfields);
 
 /* The prelude ADTs the runtime itself has to build: `parse_int` and
- * `bytes_decode` return an Option, `java_try` a Result. A constructor's tag is
+ * `bytes_decode` return an Option, `catch_fault` a Result. A constructor's tag is
  * its index in the declaration order, and these four numbers are the one place
  * that order is written down outside the compiler -- emitc's test "the C
  * runtime's constructor tags are the prelude's" is the joint that keeps them
@@ -219,7 +219,6 @@ dawn_array *dawn_args(void);
  * exception's `toString`, so a program that prints it prints different text
  * on the two backends. Everything that only branches on Ok/Err agrees. */
 dawn_adt *dawn_catch_fault(dawn_clo *f);
-dawn_adt *dawn_java_try(dawn_clo *f);
 dawn_adt *dawn_catch_panic(dawn_clo *f);
 
 /* Simple (1:1) Unicode case mapping: a code point in `lo..hi` maps to itself
@@ -352,7 +351,7 @@ int64_t dawn_idiv(int64_t a, int64_t b);
 int64_t dawn_imod(int64_t a, int64_t b);
 
 /* Control. The two failure kinds, and the difference is which barrier stops
- * one: `java_try` takes a fault (the outside world said no) and lets a panic
+ * one: `catch_fault` takes a fault (the outside world said no) and lets a panic
  * past, `catch_panic` takes both. The JVM gets the same split from `Error` vs
  * `Exception`; here it is a flag on the handler. Everything in this file
  * raises a fault only where an io primitive failed -- a bad index or a bad

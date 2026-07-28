@@ -78,7 +78,7 @@ pub fn rt_class_family(outer: String) -> List[(String, Bytes)] !io = {
     }
     var out2: List[(String, Bytes)] = []
     for f in sort(names2) {
-      let bs = match java_try(fn() =>
+      let bs = match catch_fault(fn() =>
           Files.readAllBytes(Paths.get(dir ++ "/" ++ f).expect("path")).expect("bytes")) {
             Ok(b) -> b
             Err(e) -> panic("cannot read " ++ f ++ ": " ++ e)
@@ -164,7 +164,7 @@ pub fn classpath_package(prefix: String) -> List[(String, Bytes)] !io = {
   var found: List[(String, Bytes)] = []
   for entry in str.split(cp, ":") {
     if str.ends_with(entry, ".jar") {
-      match java_try(fn() => JarFile.new(entry)) {
+      match catch_fault(fn() => JarFile.new(entry)) {
         Ok(jf) -> {
           let en = jf.entries().expect("entries")
           while en.hasMoreElements() {
@@ -188,7 +188,7 @@ pub fn classpath_package(prefix: String) -> List[(String, Bytes)] !io = {
     } else if io.is_dir(entry ++ "/" ++ prefix) {
       for cls in dir_classes_under(entry, prefix) {
         if not has_name(names, cls) {
-          let bs = match java_try(fn() =>
+          let bs = match catch_fault(fn() =>
               Files.readAllBytes(Paths.get(entry ++ "/" ++ cls ++ ".class").expect("path")).expect("bytes")) {
                 Ok(b) -> b
                 Err(e) -> panic("cannot read " ++ cls ++ ": " ++ e)

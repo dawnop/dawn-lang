@@ -317,7 +317,7 @@ Cursor 那一行是 `opaque type Cursor = Int` 挣来的:模块外做不了算�
   的程序」答案都取决于谁编译的它;native 那边一个是差 18 个码点、一个是当场 panic。
   见 `docs/native-backend-plan.md` §14.15–14.17。
 - `str_of_float` / `parse_float` 不是 Java 的语法/最短往返形式。浮点因此不进差分语料。
-- `java_try`/`catch_panic` 的 `Err` 载荷:JVM 是异常的 `toString`,native 是 panic 消息。**只分支 Ok/Err 的程序一致**。
+- `catch_fault`/`catch_panic` 的 `Err` 载荷:JVM 是异常的 `toString`,native 是 panic 消息。**只分支 Ok/Err 的程序一致**。
 - `io_list_names` 的顺序两边都未定义。
 - `io_temp_dir` 的随机后缀两边形状不同(JVM 是数字串,C 是 `mkdtemp` 的六位)。**名字本来就不该被读**,
   所以这不是可观察的——`io_files` 语料只断言它是个新目录,不打印它。

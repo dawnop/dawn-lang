@@ -117,7 +117,7 @@ let b: Bytes = cast(resp.body()!)         # 旧 as_bytes 的位置（as_bytes �
 pub type StreamResp = { status: Int, stream: InputStream }
 
 pub fn fetch_stream(url, headers) -> Result[StreamResp, String] !io =
-  java_try(fn() => {
+  catch_fault(fn() => {
     ... let resp = shared_client().send(req, BodyHandlers.ofInputStream()!)!
     # statusCode() 先读（判 2xx/206）；body() 是擦除 Object，cast 认领成流，尚未消费
     # stream 字段类型是 InputStream，作 cast 的期望类型（字段位期望类型传播，与删 as_bytes 同路验证）
@@ -163,7 +163,7 @@ match r.stream {
     let out = ex.getResponseBody()!
     # transferTo 可能因客户端中途断开而抛；catch 住，好让上游流照常 close（否则 HttpClient 连接泄漏）
     let _ = catch_panic(fn() => { let _n = s.transferTo(out); () })
-    close_stream(s)   # java_try 包住 close，其失败非致命、也不得跳过 out/ex 的关闭
+    close_stream(s)   # catch_fault 包住 close，其失败非致命、也不得跳过 out/ex 的关闭
     out.close(); ex.close()
   }
   None -> ... # 现有 bin/body 两路不动（仍在各自分支里 sendResponseHeaders(status, 0)）

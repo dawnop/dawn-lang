@@ -54,7 +54,7 @@ pub type JClass = {
 fn sys_loader() -> ClassLoader !io = ClassLoader.getSystemClassLoader().expect("system loader")
 
 fn try_forname(name: String) -> Option[Class] !io =
-  match java_try(fn() => Class.forName(name, false, sys_loader()).expect("forName")) {
+  match catch_fault(fn() => Class.forName(name, false, sys_loader()).expect("forName")) {
     Ok(c) -> Some(c)
     Err(e) -> None
   }
@@ -360,9 +360,9 @@ pub fn invoke_static(
     None -> return Err("no such method: " ++ fqcn ++ "." ++ name)
   }
   let lookup = MethodHandles.publicLookup().expect("lookup")
-  let mh = match java_try(fn() => lookup.unreflect(m2).expect("unreflect")) {
+  let mh = match catch_fault(fn() => lookup.unreflect(m2).expect("unreflect")) {
     Ok(h) -> h
     Err(t) -> return Err(t)
   }
-  java_try(fn() => mh.invokeWithArguments(args))
+  catch_fault(fn() => mh.invokeWithArguments(args))
 }

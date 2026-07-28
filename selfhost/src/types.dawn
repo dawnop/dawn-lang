@@ -934,21 +934,14 @@ pub fn builtins() -> Map[String, Sig] = {
   ]
   sigs = sigs ++ [
     eff1(bsig("args", [], [], TyList(TyString)), EIo),
-    # `catch_fault` and `java_try` are the same barrier under two names, on
-    # purpose and not for long. The name is being changed -- the thing catches
-    # an *external* failure (a file that is not there, a process that would not
-    # start), which stopped being a Java notion once native gave a failure a
-    # kind (native-backend-plan.md 14.9), and it pairs with `catch_panic` the
-    # way spec 9.8 already talks about the two. A builtin name is under the
-    # seed discipline, so the new one lands dormant, a release makes the
-    # previous compiler know it, and only then do the call sites move and
-    # `java_try` go.
+    # The io barrier. It catches a *fault* -- the outside world said no -- and
+    # lets a panic through, which is the split spec 9.8 is about and the one
+    # `catch_panic` is the other half of. It was called `java_try` through
+    # v0.30.0, back when the JVM's class hierarchy was the only place the split
+    # came from; native has had failure kinds since 2026-07-27
+    # (native-backend-plan.md 14.9), and the name outlived the reason.
     eff1(
       tp1(bsig("catch_fault", [TyFn([], t, EIo)], ["f"], result_ty(t, TyString)), t),
-      EIo
-    ),
-    eff1(
-      tp1(bsig("java_try", [TyFn([], t, EIo)], ["f"], result_ty(t, TyString)), t),
       EIo
     ),
     tp1(bsig("cast", [TyJava("java.lang.Object", "Object")], ["x"], t), t),
@@ -958,7 +951,7 @@ pub fn builtins() -> Map[String, Sig] = {
     ),
     # io_* intrinsics: the console/file primitives std/io writes over. All !io.
     # The JVM backend emits them into dawn/rt/Io. read_file/write_file/list_names
-    # throw on failure; std wraps them in java_try. read_line returns Option
+    # throw on failure; std wraps them in catch_fault. read_line returns Option
     # directly (the intrinsic maps Java's null-or-line onto it).
     eff1(bsig("io_print", [TyString], ["s"], TyUnit), EIo),
     eff1(bsig("io_println", [TyString], ["s"], TyUnit), EIo),
@@ -980,7 +973,7 @@ pub fn builtins() -> Map[String, Sig] = {
     # else needs.
     eff1(bsig("io_exit", [TyInt], ["code"], TyUnit), EIo),
     eff1(bsig("io_exists", [TyString], ["path"], TyBool), EIo),
-    # throws on failure, like read_file/write_file; std wraps it in java_try
+    # throws on failure, like read_file/write_file; std wraps it in catch_fault
     eff1(bsig("io_mkdirs", [TyString], ["path"], TyUnit), EIo),
     # The rest of what a package manager and a language server need. Measured,
     # not guessed: each one has a call site in the compiler that reaches it
@@ -1143,7 +1136,6 @@ pub fn intrinsics() -> Map[String, Intr] = {
       rt_of = map.insert(rt_of, "io_" ++ op, RtIo)
     }
   rt_of = map.insert(rt_of, "catch_fault", RtIo)
-  rt_of = map.insert(rt_of, "java_try", RtIo)
   rt_of = map.insert(rt_of, "catch_panic", RtIo)
 
   # The persistent Map/Set: erased on both sides, and std-only. No runtime
@@ -1316,10 +1308,10 @@ test "builtin table renders signatures" {
     }
     None -> { assert false }
   }
-  match map.get(bs, "java_try") {
+  match map.get(bs, "catch_fault") {
     Some(s) -> {
       assert sig_render(adts, traits, s) ==
-        "fn java_try[T](f: fn() -> T !io) -> Result[T, String] !io"
+        "fn catch_fault[T](f: fn() -> T !io) -> Result[T, String] !io"
     }
     None -> { assert false }
   }
@@ -1337,7 +1329,7 @@ test "builtin table renders signatures" {
     }
     None -> { assert false }
   }
-  assert map_size2(bs) == 88
+  assert map_size2(bs) == 87
 }
 
 fn map_size2(m: Map[String, Sig]) -> Int = map.size(m)

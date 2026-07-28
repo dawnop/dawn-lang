@@ -156,7 +156,7 @@ Kotlin CodeGen 从 checked AST 读的注解，逐一映射到 TAST：
   要把 compiler/build/libs/dawn.jar 挂 classpath——AdtClassWriter 在编译器 jar 里）。
 - ✅ P4-5 Bytes/Io/FnComparator/dawn/tr/Ord/prelude Ord impls
   字节级一致（26/65）。Kotlin genBytesClass/genIoClass 的 doc 注释是旧的——实际
-  只有 concat 和 java_try/catch_panic，以字节对拍为准。
+  只有 concat 和 catch_fault/catch_panic，以字节对拍为准。
 - ✅ P4-6 Show/Lists/Strings/Maps + vendored rt 字节拷贝（vendor.dawn：从
   classpath 上的编译器 jar 枚举 dawn/rt/<outer>[$*].class，JarFile+Enumeration
   互操作）→ 42/65。Dawn 字面量没有 \r 转义，用 str.from_char(13)。
@@ -200,7 +200,7 @@ Kotlin CodeGen 从 checked AST 读的注解，逐一映射到 TAST：
   5. 关键 Kotlin 细节别忘：LMF_BSM Handle；lambda impl 是 dawn$lambda$N（计数器
      per-module）；builtin
      值桥 dawn$bi$<name>（直连表：get/range/sort_by/join/parse_int/parse_float/
-     java_try/catch_panic）；ctor 值桥 dawn$ctor$<jvm 名 '/'→'$'>；SAM 桥
+     catch_fault/catch_panic）；ctor 值桥 dawn$ctor$<jvm 名 '/'→'$'>；SAM 桥
      dawn$sam$N；genConstFields 的字段名 dawn$const$N 按首用序、key=const 名或
      comptime 块 (lo,hi)；ARGS_FIELD="dawn$args"；genJvmMain 仅当有 main；
      __emit 是 includeTests=true（std 模块不含 tests）；除零 panic 检查；

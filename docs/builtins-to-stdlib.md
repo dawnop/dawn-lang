@@ -17,7 +17,7 @@
 
 - 编译器现有 **75 个 builtin 函数**（`check/Types.kt` 的 `FnSig` 表）。
 - 按「**即便有了 FFI + Dawn prelude 仍写不出来**」这条硬判据分，**不可约的核只有 4 个**：
-  `java_try`、`catch_panic`、`cast[T]`、`panic`。其余 **71 个**都是「本该在标准库、却塞进了
+  `catch_fault`、`catch_panic`、`cast[T]`、`panic`。其余 **71 个**都是「本该在标准库、却塞进了
   编译器」的东西——**这张 builtin 表就是 Dawn 事实上的 stdlib，只是长错了地方（长在编译器里）**。
 - 架构上这一点被证实：集合/字符串 builtin 全是**薄派发**——lower 成 `INVOKESTATIC dawn/rt/Lists.map(…)`，
   背后 runtime 类（`nLists`/`nStrings`/`nMaps`…）由编译器**手写 ASM 生成**；底层类型是现成的
@@ -47,7 +47,7 @@
 判据是最严的一条：**即便有了 FFI 和 Dawn prelude，仍写不出来**的才留。只剩 4 个：
 
 ```
-java_try      # Dawn 的 try/catch：catch JVM Throwable 要异常表字节码，无 surface 语法可替代
+catch_fault   # Dawn 的 try/catch：catch JVM Throwable 要异常表字节码，无 surface 语法可替代
 catch_panic   # 监督边界：try/catch 覆盖 Dawn panic 在内的一切 Throwable
 cast[T]       # 从类型实参发 CHECKCAST，无通用 Java 方法可替代（见 cast-interop.md）
 panic         # Never 发散 + 抛 PanicError；catch_panic 的语义搭档、穷尽性分析的锚点
@@ -283,7 +283,7 @@ std 收进真模块（`use std/map` → `map.insert`），**平铺内建拼写�
 与 `Lists.sort/best/bestBy` 随之删除。
 
 至此 builtin 表 **46**，且到达端态：容器 17 + cursor 9 是表示持有者（见上一条
-补记），`sort_by` 的 `Fn2`、`java_try/cast/catch_panic` 的效应/类型边界、
+补记），`sort_by` 的 `Fn2`、`catch_fault/cast/catch_panic` 的效应/类型边界、
 `len/get/to_string` 等表示原语都过不了（也不该过）std 的表达边界。剩下唯一
 可议的是 `args`（模块类静态字段布线）。「表越小越好」的原始口号在此修订为：
 **表 = 表示层所有权的清单**，尺寸由所有权决定，不由野心决定。

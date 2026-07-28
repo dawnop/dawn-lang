@@ -120,7 +120,7 @@ println("got $n items, first = ${list.get(0)}")
 
 `Unit` 是一等值（唯一值 `()`），**可出现在任何值能出现的位置**：形参、局部变量、
 闭包捕获、元组元素、返回值，以及实例化类型参数（`Result[Unit, E]`、`List[Unit]`、
-`java_try(fn() => <void 调用>)`）。运行期它有真实表示——一个单例对象
+`catch_fault(fn() => <void 调用>)`）。运行期它有真实表示——一个单例对象
 （`dawn/rt/Unit`，与 `None` 及无字段构造子同一表示），占一个引用槽位，
 C 后端给它一个字节。
 
@@ -481,7 +481,7 @@ let area = {
 - `/` **向零取整**（`-7 / 2 == -3`，不是 floor）；`%` 的**符号随被除数**
   （`-7 % 2 == -1`、`7 % -2 == 1`），恒满足 `a == (a / b) * b + a % b`。
 - `/` 与 `%` 除零是 **panic**（消息 `Int division by zero` / `Int modulo by zero`）——
-  panic 而非 Java 异常，故 `java_try` 不拦、只有 `catch_panic` 拦（§9.8）。
+  panic 而非 Java 异常，故 `catch_fault` 不拦、只有 `catch_panic` 拦（§9.8）。
 - `Float` 算术遵循 IEEE 754：除零不 panic（得 `±Inf`/`NaN`）；`==` 与 `< <= > >=`
   是 IEEE 比较——NaN 与任何值（含自身）比较均为 false，`-0.0 == 0.0` 为 true。
 - **`Float` 没有 `Ord`**（2026-07-26 改；此前照 Java `Double.compare` 给了一个
@@ -804,7 +804,7 @@ let base = HttpRequest.newBuilder()!.uri(uri)!  # 而不是 .expect("b") / .expe
 - **确有话要说**时仍用 `expect(o, "原因")`——它就是为此存在。
 
 `get`/`map.get` 返回 `Option`（问询）；下标 `xs[i]`/`m[k]` 越界/缺键 panic（断言，§4.8）；
-`Int` 除零（`/` 与 `%`）panic——是 panic 故 `java_try` 不拦（§4.3 数值边缘语义）。
+`Int` 除零（`/` 与 `%`）panic——是 panic 故 `catch_fault` 不拦（§4.3 数值边缘语义）。
 
 ---
 
@@ -1011,37 +1011,35 @@ Java 形参声明为 `java.util.List` / `java.util.Collection` / `java.lang.Iter
 `Map`/`Set` 不桥接、Java 集合不反向转换为 Dawn 值（§9.6）。变长参数只支持不传
 可变部分（§9.3）；`Option` 实参传 null 不支持（§9.2）。
 
-### 9.8 异常屏障：`java_try`
+### 9.8 外部失败屏障：`catch_fault`
 
-> **改名进行中（2026-07-28 起）**：这个内建正在改叫 **`catch_fault`**。它拦的是
-> **fault**——外部世界造成的失败，这个词本来就是两个后端共用的分类（见本节末尾的
-> 方框与 native-backend-plan §14.9），和 Java 早已无关；且它与 `catch_panic` 读起来
-> 成一对。内建名字受种子纪律约束，所以现在**两个名字并存、指同一个屏障**
-> （`scripts/spike-native/catch_kinds.dawn` 断言这一点），发一版之后切调用点、删
-> `java_try`。本节其余部分与全文的 `java_try` 一并在那时改。
+> 这个内建到 v0.30.0 为止叫 `java_try`，v0.31.0 改名。它拦的是 **fault**——外部世界
+> 造成的失败——而这个分类自 native 有了失败种类之后就是两个后端共用的
+> （native-backend-plan §14.9），和 Java 无关了；名字比理由多活了一阵。
+> 用旧名字会得到「`java_try` is not a builtin; renamed to `catch_fault`」。
 
 Dawn 无异常：Java 调用抛出的异常默认原样穿透并终止程序（等同 panic 语义）。
 但**预期中的外部失败**（网络断开、SQL 约束冲突、解析失败）在 Java 世界以异常表达，
-它们不是 bug，应进 `Result`。内建 `java_try` 是唯一的转换点：
+它们不是 bug，应进 `Result`。内建 `catch_fault` 是唯一的转换点：
 
 ```dawn
 use java "java.lang.Long"
 
 fn parse(s: String) -> Result[Int, String] !io =
-  java_try(fn() => Long.parseLong(s))       # 异常 → Err("java.lang.NumberFormatException: ...")
+  catch_fault(fn() => Long.parseLong(s))       # 异常 → Err("java.lang.NumberFormatException: ...")
 ```
 
-- 签名 `java_try[T](f: fn() -> T !io) -> Result[T, String] !io`；闭包可为纯函数。
+- 签名 `catch_fault[T](f: fn() -> T !io) -> Result[T, String] !io`；闭包可为纯函数。
 - 只拦 `java.lang.Exception` 及其子类；`Error` 不拦——**Dawn 的 panic
   （`dawn.rt.PanicError` 是 `Error` 子类）原样穿透**，panic 仍然是 bug、不可恢复。
 - `Err` 载荷是 `Throwable.toString()`（异常类名 + 消息），供日志与上抛；
   需要区分异常种类时按前缀匹配字符串，v0.1 不提供结构化异常对象。
-- 边界之内失败照常传播：`java_try` 包住整段复合调用即可，无需逐调用包裹。
+- 边界之内失败照常传播：`catch_fault` 包住整段复合调用即可，无需逐调用包裹。
 
 配套的 `catch_panic[T](f: fn() -> T !io) -> Result[T, String] !io` 拦的是
 **任意 `Throwable`（含 Dawn panic `PanicError`）**，用于**监督边界**——服务器的
 单个请求、任务 runner 的单次执行：一个请求 panic 应变成 500 并记录，而非掀翻整条
-连接或进程。它与 `java_try` 分工明确：`java_try` 处理**预期外部失败**、放 panic 穿透；
+连接或进程。它与 `catch_fault` 分工明确：`catch_fault` 处理**预期外部失败**、放 panic 穿透；
 `catch_panic` 是**隔离点**、兜住一切。普通业务失败仍走 `Result`，别拿 `catch_panic`
 当常规错误处理。
 
@@ -1050,7 +1048,7 @@ fn parse(s: String) -> Result[Int, String] !io =
 > 收不收 panic。判据是同一条：**语言自己定义的失败是 panic**（`panic`、`expect`、
 > 越界下标、除零、非法码点），**外部世界造成的失败不是**（io 原语——量下来也只有
 > 这一类）。两个后端的实测比对在 `scripts/spike-native/catch_kinds.dawn`；
-> 在它写出来之前 native 的 `java_try` 拦下了本该穿透的每一个 panic。
+> 在它写出来之前 native 的 `catch_fault` 拦下了本该穿透的每一个 panic。
 
 ---
 
@@ -1162,7 +1160,7 @@ use java "java.lang.Math"      # Java 互操作（§9），形式不变
 **prelude** 是其中隐式可用、无需 `use` 的高频核：`List`/`Option`/`Result` 的构造器、
 `println`/`print`、`map`/`filter`/`fold`、`sort` 族（std/list）、内建的 `len`/`get`/`range`/
 `to_string`/`join`/`parse_*`/`panic`/`todo`/`expect`/`unwrap_or`/`cast`/
-`java_try`/`catch_panic`/`args` 等一屏以内（全集见 `dawn doc --builtins`）。
+`catch_fault`/`catch_panic`/`args` 等一屏以内（全集见 `dawn doc --builtins`）。
 
 **顶层声明可以遮蔽 builtin/std 函数名**（§10.3，Rust 式）：解析序是本模块声明 →
 std → 内建，std 模块自己的 `pub fn len` 正是靠这一条合法。
@@ -1265,7 +1263,7 @@ std → 内建，std 模块自己的 `pub fn len` 正是靠这一条合法。
 - `core/math`：`abs min max sin cos sqrt pow to_float to_int ...`（纯——
   内部以 `@trusted_pure` 包装 `java.lang.Math`）
 - **`std/io`**：`io.read_line io.read_file io.write_file io.list_dir io.is_dir`（全部 `!io`；
-  `println`/`print` 同住此模块但由 prelude 直呼，`args`/`java_try` 是内建）
+  `println`/`print` 同住此模块但由 prelude 直呼，`args`/`catch_fault` 是内建）
   - `io.write_file(path, content) -> Result[Unit, String]` — **自动创建缺失的父目录**。
     `Ok` 不带值:曾返回 `String.length()`(UTF-16 码元,既不是字符数也不是字节数),
     2026-07-19 去掉——没有调用点读它
@@ -1319,7 +1317,7 @@ native-image，责任在库，见 §12.3）。Dawn 无依赖解析——只接�
 | `Int`/`Float`/`Bool` | 原生 `long`/`double`/`boolean`，仅泛型位置装箱 |
 | `Unit` | `Ldawn/rt/Unit;`——单例引用，占一个槽位，形参/字段/捕获位与别的引用无异 |
 | `Never` | `V`，且只出现在返回位（不返回的表达式没有形参或字段可占） |
-| `panic` | 抛 `dawn.rt.PanicError`（Error 子类，故 `java_try` 不拦；只有隔离点 `catch_panic` 拦，见 §9.8） |
+| `panic` | 抛 `dawn.rt.PanicError`（Error 子类，故 `catch_fault` 不拦；只有隔离点 `catch_panic` 拦，见 §9.8） |
 
 运行时支持类（`dawn/rt/Lists`、`Strings`、`Io`、`Show`、`Maps`、`Tuple*`、`Fn*` 等）
 每个程序生成一份，被全部模块类共享。

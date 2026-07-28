@@ -1084,6 +1084,16 @@ fault,其余(越界、除零、`cursor_slice`、非法码点、本后端未实�
 的错误屏障冠了宿主的名;而它现在两个后端一个含义,和 Java 没有关系了。改名要走一轮
 发布(内建名字由种子的 checker 认),所以它单开一件事,不混进这一刀。
 
+> **2026-07-29 补:做完了,叫 `catch_fault`。** 三步走完整一轮种子纪律:
+> 新名字休眠落地(v0.30.0 之前) → 发 v0.30.0 + `seed-release.txt` 推进 →
+> 切 28 处调用点、删 `java_try`。休眠那一步不是形式:`catch_kinds.dawn` 在两个名字
+> 并存期间断言它们**是同一个屏障**(fault 拦下、panic 穿透,两个后端都是),
+> 而不是两个今天碰巧一致的东西。旧名字留在 `moved_renames` 里,写错会得到
+> 「`java_try` is not a builtin; renamed to `catch_fault`」而不是「未定义」。
+>
+> `dawnop-site/backend-dawn` 有 16 处调用点,它按 `.dawn-version` 钉着旧 release,
+> 所以不受影响——那边的切换与 `.dawn-version` bump 是另一件事。
+
 ### 14.10 两个 main 的分区表:量出来只有三道缝
 
 「剩余 62 处没有一处是『本该纯 Dawn 却不是』」这句话记在好几处,**重验之后是错的**。

@@ -93,16 +93,20 @@ fn moved_renames(out0: Map[String, String]) -> Map[String, String] = {
   for op in ["trim", "contains", "starts_with", "ends_with", "index_of", "last_index_of"] {
     out = map.insert(out, "str_" ++ op, "use std/str, then str." ++ op ++ "(...)")
   }
+  # the only entry here that did not move anywhere: it was renamed in v0.31.0,
+  # because the barrier catches a *fault* and stopped having anything to do
+  # with Java once native got failure kinds
+  out = map.insert(out, "java_try", "renamed to `catch_fault`")
   out
 }
 
 ## A `std/<name>` class-path resource (the embedded std), or None.
 fn resource_text(name: String) -> Option[String] !io = {
-  match java_try(fn() => ClassLoader.getSystemResourceAsStream("std/" ++ name)) {
+  match catch_fault(fn() => ClassLoader.getSystemResourceAsStream("std/" ++ name)) {
     Ok(opt) ->
       match opt {
         Some(ins) ->
-          match java_try(fn() => ins.readAllBytes().expect("resource bytes")) {
+          match catch_fault(fn() => ins.readAllBytes().expect("resource bytes")) {
             Ok(bs) -> Some(bytes.decode(bs, "UTF-8"))
             Err(_) -> None
           }

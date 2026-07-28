@@ -13,11 +13,11 @@
 # name that field. Parking argv on a runtime class instead would make it shared
 # by every program in one JVM — see pure-ffi-design.md §十七.
 #
-# The failing ones compose with `java_try`, which is an intrinsic and stays in
+# The failing ones compose with `catch_fault`, which is an intrinsic and stays in
 # the compiler. That is not a workaround: `Result` is a Dawn ADT and cannot be a
-# Java return type, and `java_try` is precisely the built-in bridge from "Java
-# threw" to `Err(message)` — it produces `throwable.toString()`, byte for byte
-# the string these intrinsics throw with.
+# Java return type, and `catch_fault` is precisely the built-in bridge from "the
+# outside world said no" to `Err(message)` — on the JVM that is a caught
+# exception's `toString()`, byte for byte the string these intrinsics throw with.
 
 ## Print a string followed by a newline.
 pub fn println(s: String) -> Unit !io = io_println(s)
@@ -51,17 +51,17 @@ pub fn exists(path: String) -> Bool !io = io_exists(path)
 ## Create `path` and every missing directory above it.
 ## An existing directory is not a failure; an existing *file* is.
 pub fn mkdirs(path: String) -> Result[Unit, String] !io =
-  java_try(fn() => io_mkdirs(path))
+  catch_fault(fn() => io_mkdirs(path))
 
 ## Read a whole file as a UTF-8 string.
 pub fn read_file(path: String) -> Result[String, String] !io =
-  java_try(fn() => io_read_file(path))
+  catch_fault(fn() => io_read_file(path))
 
 ## Write a string to a file, creating missing parent directories.
 ## `Ok` carries nothing: the only count worth returning would be bytes on disk,
 ## and what this used to return was UTF-16 units. Nobody read it.
 pub fn write_file(path: String, content: String) -> Result[Unit, String] !io =
-  java_try(fn() => io_write_file(path, content))
+  catch_fault(fn() => io_write_file(path, content))
 
 ## The process's working directory, as an absolute path.
 pub fn cwd() -> String !io = io_cwd()
@@ -71,11 +71,11 @@ pub fn getenv(name: String) -> Option[String] !io = io_getenv(name)
 
 ## Read a whole file as bytes. The text half is `read_file`.
 pub fn read_bytes(path: String) -> Result[Bytes, String] !io =
-  java_try(fn() => io_read_bytes(path))
+  catch_fault(fn() => io_read_bytes(path))
 
 ## Write bytes to a file, creating missing parent directories.
 pub fn write_bytes(path: String, content: Bytes) -> Result[Unit, String] !io =
-  java_try(fn() => io_write_bytes(path, content))
+  catch_fault(fn() => io_write_bytes(path, content))
 
 ## Delete a file, or an empty directory. `true` when there was something to
 ## delete: a missing path is not an error, and a non-empty directory is not
@@ -88,12 +88,12 @@ pub fn delete(path: String) -> Bool !io = io_delete(path)
 ## be observed half-done would defeat that. Stage with `temp_dir` under the
 ## destination's own directory to stay on one filesystem.
 pub fn rename(src: String, dst: String) -> Result[Unit, String] !io =
-  java_try(fn() => io_rename(src, dst))
+  catch_fault(fn() => io_rename(src, dst))
 
 ## A fresh directory under `parent`, named after `prefix`. An empty `parent`
 ## means the system temporary directory.
 pub fn temp_dir(parent: String, prefix: String) -> Result[String, String] !io =
-  java_try(fn() => io_temp_dir(parent, prefix))
+  catch_fault(fn() => io_temp_dir(parent, prefix))
 
 ## Whether `path` is a symbolic link. The link itself is examined, not its
 ## target, so a link to a directory is a link and not a directory.
@@ -113,7 +113,7 @@ pub fn read_stdin(n: Int) -> Bytes !io = io_read_stdin(n)
 ## file give the same message.
 pub fn list_dir(path: String) -> Result[List[String], String] !io =
   if is_dir(path) {
-    java_try(fn() => io_list_names(path))
+    catch_fault(fn() => io_list_names(path))
   } else {
     Err("not a directory: " ++ path)
   }
@@ -126,4 +126,4 @@ pub fn list_dir(path: String) -> Result[List[String], String] !io =
 ## path leaves that stream pointing wherever this process's already points.
 ## Files rather than pipes: see the note on the `io_run` intrinsic.
 pub fn run(argv: List[String], out_path: String, err_path: String) -> Result[Int, String] !io =
-  java_try(fn() => io_run(argv, out_path, err_path))
+  catch_fault(fn() => io_run(argv, out_path, err_path))

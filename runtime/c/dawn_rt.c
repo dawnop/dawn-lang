@@ -397,13 +397,13 @@ int64_t dawn_imod(int64_t a, int64_t b) {
  *   panic   the language's own -- `panic`, `expect`, a bad index, division by
  *           zero. A broken invariant inside the program. Only `catch_panic`.
  *   fault   the outside world said no: an io primitive failed. Both barriers,
- *           and `java_try` is *for* this one -- it is how std/io turns a
+ *           and `catch_fault` is *for* this one -- it is how std/io turns a
  *           missing file into a `Result`.
  *
  * The JVM gets the same split from its class hierarchy for free -- `panic`
- * throws an `Error` and `java_try` catches `Exception` -- so this is not a
+ * throws an `Error` and `catch_fault` catches `Exception` -- so this is not a
  * native invention, it is native catching up. Both intrinsics were literally
- * this same function until 2026-07-28, which made `java_try` swallow the
+ * this same function until 2026-07-28, which made the io barrier swallow the
  * panics the JVM lets through; scripts/spike-native/catch_kinds.dawn is the
  * corpus that asked.
  *
@@ -457,13 +457,7 @@ static dawn_adt *dawn_run_caught(dawn_clo *f, bool catches_panic) {
   return dawn_ok(v);
 }
 
-/* Two names for one barrier while the rename crosses a release; see the
- * builtin table in selfhost/src/types.dawn. `catch_fault` is the one that
- * stays -- it says what the barrier catches, and this runtime is where the
- * word `fault` comes from. */
 dawn_adt *dawn_catch_fault(dawn_clo *f) { return dawn_run_caught(f, false); }
-
-dawn_adt *dawn_java_try(dawn_clo *f) { return dawn_run_caught(f, false); }
 
 dawn_adt *dawn_catch_panic(dawn_clo *f) { return dawn_run_caught(f, true); }
 

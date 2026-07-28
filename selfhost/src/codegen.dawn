@@ -1146,21 +1146,16 @@ fn gen_try_closure(cw: AdtClassWriter, name: String, caught: String) -> Unit !io
   ()
 }
 
-## dawn/rt/Io: the io runtime — java_try/catch_panic (the Throwable barriers) plus
+## dawn/rt/Io: the io runtime — catch_fault/catch_panic (the Throwable barriers) plus
 ## the io_* primitives std/io writes over (print/println/read_line/is_dir/
 ## read_file/write_file/list_names). These retire the handwritten dawn.rt.StdIo.
 ## The failing ones (read_file/write_file/list_names) simply throw; std wraps
-## them in java_try, exactly as it wrapped StdIo. read_line maps Java's
+## them in catch_fault, exactly as it wrapped StdIo. read_line maps Java's
 ## null-or-line onto Option here rather than relying on use-java null-wrapping.
 pub fn gen_io_class(supers: List[String]) -> Bytes !io = {
   let cw = AdtClassWriter.new(supers)
   cw.begin(V17, ACC_PUBLIC + ACC_FINAL, IO_CLASS, obj())
-  # catch_fault and java_try are the same barrier under two names while the
-  # rename crosses a release (types.dawn, the builtin table). Emitting both is
-  # what "dormant" means here: the previous compiler has to still know one of
-  # them, and the next one has to already know the other.
   gen_try_closure(cw, "catch_fault", "java/lang/Exception")
-  gen_try_closure(cw, "java_try", "java/lang/Exception")
   gen_try_closure(cw, "catch_panic", "java/lang/Throwable")
 
   # a single shared reader: a fresh BufferedReader per call would let one call's
@@ -1552,7 +1547,7 @@ fn gen_redirect(m: MethodVisitor, which: String, pb_local: Int, path_local: Int)
 }
 
 ## io_run(argv, out_path, err_path): spawn, wait, answer the exit status.
-## `start()` throws when there is no such program; std wraps it in java_try.
+## `start()` throws when there is no such program; std wraps it in catch_fault.
 fn gen_io_run(cw: AdtClassWriter) -> Unit !io = {
   let rv = open_static(cw, "io_run",
     "(Ljava/util/List;Ljava/lang/String;Ljava/lang/String;)J")
@@ -2145,7 +2140,7 @@ pub fn gen_strings_class(supers: List[String]) -> Bytes !io = {
   fc.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/Long", "intValue", "()I", false)
   # An out-of-range code point is the caller's error, so it panics -- the way
   # a bad index does. Left to `appendCodePoint` it came out as
-  # `IllegalArgumentException`, and that is an `Exception`: `java_try` caught
+  # `IllegalArgumentException`, and that is an `Exception`: `catch_fault` caught
   # it, so the io barrier turned an argument error into an `Err` that reads
   # like a missing file. The one place a host exception still escaped
   # (catch_kinds.dawn).

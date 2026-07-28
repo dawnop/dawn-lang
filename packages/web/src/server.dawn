@@ -31,7 +31,7 @@ use java "java.net.http.HttpResponse.BodyHandlers"
 ## response is already committed, or was never sent). Called after pumping a
 ## streaming body so the client connection frees.
 fn close_stream(s: InputStream) -> Unit !io = {
-  let _ = java_try(fn() => s.close())
+  let _ = catch_fault(fn() => s.close())
   ()
 }
 
@@ -176,7 +176,7 @@ fn spill_body(ex: HttpExchange) -> String !io = {
 }
 
 fn delete_quietly(path: String) -> Unit !io = {
-  let r: Result[Bool, String] = java_try(fn() => File.new(path).delete())
+  let r: Result[Bool, String] = catch_fault(fn() => File.new(path).delete())
   match r {
     Ok(_) -> ()
     Err(m) -> println("temp body file not deleted: $m")
