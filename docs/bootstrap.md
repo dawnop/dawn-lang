@@ -51,7 +51,9 @@ v0.6.0–v0.8.0 的 release jar 永久保存；`kotlin-final` tag 保有 Kotlin 
 2. **祝圣仪式（机器强制）**：`release.yml` 在 tag 上重建整条链
    种子→A→B→C（B = HEAD 编 HEAD，即要上传的那份字节），验证 `cmp B C` 闭包
    与版本一致——任一红则 release 不出。push CI（ci.yml）的全金样绿是前置。
-   种子 bump 逐条记进下面的链条表。
+   下面的链条表记的是**种子形态变过的那几环**，不是每一次 bump——每次 bump 的记录
+   就是 `scripts/seed-release.txt` 那一行和它的提交，再抄一遍只会过期（这张表一度
+   写着「逐条记」，却停在 v0.8.0，中间二十一个 release 一个没记）。
 3. **特性纪律**：`selfhost/src`（连同它引用的 `std/`）只准用**当前种子已支持**
    的语言特性。想用新特性：先在 selfhost 实现 → 发 release（过祝圣）→ bump
    `scripts/seed-release.txt` → 下一轮才能自用。（Rust stage0 的规矩，
