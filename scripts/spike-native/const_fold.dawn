@@ -36,6 +36,21 @@ const SHOWN_LIST: String = to_string([1, 2, 3])
 const SHOWN_OPT: String = to_string(Some(9))
 const INTERP: String = "p=${Point(3, 4)}"
 
+## The cursor walk, folded. std/str is ordinary Dawn now, so folding these
+## interprets the same source both backends compile -- and the interpreter
+## walks by *code-point index* where the JVM backend uses a UTF-16 offset and
+## the C runtime a byte offset. A position is opaque, so only the answers have
+## to agree; the astral characters are here because that is where three
+## currencies would diverge if one leaked (native-backend-plan.md 14.12).
+const ASTRAL: String = "a𝄞中b𝄞"
+const A_LEN: Int = str.len(ASTRAL)
+const A_IDX: String = to_string(str.index_of(ASTRAL, "中"))
+const A_LAST: String = to_string(str.last_index_of(ASTRAL, "𝄞"))
+const A_SUB: String = str.substring(ASTRAL, 1, 4)
+const A_SPLIT: String = join(str.split(ASTRAL, "𝄞"), "|")
+const A_TRIM: String = str.trim("  a𝄞中b𝄞  ")
+const A_ENDS: Bool = str.ends_with(ASTRAL, "𝄞")
+
 pub fn main() -> Unit !io = {
   println("-- scalars fold --")
   println("N     = ${N}")
@@ -59,4 +74,20 @@ pub fn main() -> Unit !io = {
   println("runtime opt   = ${to_string(Some(9))}")
   println("const   interp= ${INTERP}")
   println("runtime interp= ${"p=${Point(3, 4)}"}")
+
+  println("-- the cursor walk, folded vs live --")
+  println("const   len   = ${A_LEN}")
+  println("runtime len   = ${str.len(ASTRAL)}")
+  println("const   idx   = ${A_IDX}")
+  println("runtime idx   = ${to_string(str.index_of(ASTRAL, "中"))}")
+  println("const   last  = ${A_LAST}")
+  println("runtime last  = ${to_string(str.last_index_of(ASTRAL, "𝄞"))}")
+  println("const   sub   = ${A_SUB}")
+  println("runtime sub   = ${str.substring(ASTRAL, 1, 4)}")
+  println("const   split = ${A_SPLIT}")
+  println("runtime split = ${join(str.split(ASTRAL, "𝄞"), "|")}")
+  println("const   trim  = [${A_TRIM}]")
+  println("runtime trim  = [${str.trim("  a𝄞中b𝄞  ")}]")
+  println("const   ends  = ${A_ENDS}")
+  println("runtime ends  = ${str.ends_with(ASTRAL, "𝄞")}")
 }

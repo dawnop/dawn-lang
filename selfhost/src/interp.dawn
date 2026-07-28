@@ -573,39 +573,6 @@ fn call_named(
 
 # ---- intrinsics (the pure ones; io never reaches the interpreter) ----
 
-# Comptime folding of the cursor and str_* intrinsics reaches their one
-# implementation — the ASM-emitted dawn/rt/Strings — by route-C reflection. The
-# checker cannot `use java` an emitted class, but it is on the running compiler's
-# class path, so invoke_static finds it, and there is no second copy of the logic
-# here. This is what let the cursor/str primitives leave the vendored StdStrings.
-fn rt_raw(method: String, param_cls: List[String], vals: List[CValue]) -> Option[Object] !io = {
-  var jargs: List[Object] = []
-  var i = 0
-  for p in param_cls {
-    jargs = jargs ++ [to_java_arg(p, vals[i]).expect("rt-intrinsic argument")]
-    i = i + 1
-  }
-  match jreflect.invoke_static("dawn.rt.Strings", method, param_cls, jargs) {
-    Ok(r) -> r
-    Err(t) -> panic("comptime dawn.rt.Strings." ++ method ++ " threw " ++ t)
-  }
-}
-
-fn rt_long(method: String, param_cls: List[String], vals: List[CValue]) -> Int !io = {
-  let n: Number = cast(rt_raw(method, param_cls, vals).expect("primitive result"))
-  n.longValue()
-}
-
-fn rt_bool(method: String, param_cls: List[String], vals: List[CValue]) -> Bool !io = {
-  let b: Boolean = cast(rt_raw(method, param_cls, vals).expect("primitive result"))
-  b.booleanValue()
-}
-
-fn rt_str(method: String, param_cls: List[String], vals: List[CValue]) -> String !io = {
-  let s: String = cast(rt_raw(method, param_cls, vals).expect("string result"))
-  s
-}
-
 fn call_builtin(icx: ICx, st: ESt, env: Env, name: String, args: List[CValue]) -> ER !io =
   if name == "java_eq" {
     # equality of a host value (semantics-closure-design.md 3). Comptime never
@@ -713,28 +680,88 @@ fn call_builtin(icx: ICx, st: ESt, env: Env, name: String, args: List[CValue]) -
       for part in str.split(s, sep) { out = out ++ [VStr(part)] }
       Ok((st, env, VList(out)))
     }
+    # ---- the cursor family ----
+    #
+    # A position is opaque, so nothing outside std/cursor can see the number
+    # and no `const` can hold one -- the type is not nameable outside its
+    # module, and a constant must declare its type. That leaves the
+    # interpreter free to pick its own currency, and it picks the one that
+    # needs no host: a *code-point index*, where the JVM backend uses a UTF-16
+    # offset and the C runtime a byte offset. The seven only have to agree with
+    # each other.
+    #
+    # They reached the emitted `dawn.rt.Strings` by reflection until 2026-07-28,
+    # which is a route a native compiler does not have and which answered with
+    # whatever the *seed* release emitted rather than what this compiler does
+    # (docs/native-backend-plan.md 14.11, 14.13).
+    #
+    # `code_points` per character makes a walk quadratic. Comptime strings are
+    # constants and the fuel counter bounds the loop, so this buys correctness
+    # at a cost nothing here can feel.
   } else if name == "cursor_start" {
-    Ok((st, env, VInt(rt_long("cursor_start", ["java.lang.String"], args))))
+    Ok((st, env, VInt(0)))
   } else if name == "cursor_end" {
-    Ok((st, env, VInt(rt_long("cursor_end", ["java.lang.String"], args))))
+    Ok((st, env, VInt(str.len(as_str(args[0])))))
   } else if name == "cursor_done" {
-    Ok((st, env, VBool(rt_bool("cursor_done", ["java.lang.String", "long"], args))))
+    Ok((st, env, VBool(as_int(args[1]) >= str.len(as_str(args[0])))))
   } else if name == "cursor_char" {
-    Ok((st, env, VInt(rt_long("cursor_char", ["java.lang.String", "long"], args))))
-  } else if name == "cursor_next" {
-    Ok((st, env, VInt(rt_long("cursor_next", ["java.lang.String", "long"], args))))
-  } else if name == "cursor_prev" {
-    Ok((st, env, VInt(rt_long("cursor_prev", ["java.lang.String", "long"], args))))
-  } else if name == "cursor_slice" {
-    match rt_raw("cursor_slice", ["java.lang.String", "long", "long"], args) {
-      Some(o) -> {
-        let cut: String = cast(o)
-        Ok((st, env, VStr(cut)))
-      }
-      None -> cerr(st, env, "panicked: cursor_slice: invalid cursor range")
+    let s = as_str(args[0])
+    let c = as_int(args[1])
+    if c < 0 || c >= str.len(s) {
+      Ok((st, env, VInt(-1)))
+    } else {
+      Ok((st, env, VInt(get(code_points(s), c).expect("in range"))))
     }
-  } else if name == "str_lower" || name == "str_upper" {
-    Ok((st, env, VStr(rt_str(name, ["java.lang.String"], args))))
+  } else if name == "cursor_next" {
+    let n = str.len(as_str(args[0]))
+    let c = as_int(args[1])
+    Ok((st, env, VInt(if c < 0 { 0 } else if c >= n { n } else { c + 1 })))
+  } else if name == "cursor_prev" {
+    let n = str.len(as_str(args[0]))
+    let c = as_int(args[1])
+    Ok((st, env, VInt(if c <= 0 { 0 } else if c > n { n - 1 } else { c - 1 })))
+  } else if name == "cursor_slice" {
+    let s = as_str(args[0])
+    let from = as_int(args[1])
+    let to = as_int(args[2])
+    if from < 0 || to > str.len(s) || from > to {
+      cerr(st, env, "panicked: cursor_slice: invalid cursor range")
+    } else {
+      Ok((st, env, VStr(str.substring(s, from, to))))
+    }
+    # case folding is a Unicode table rather than a walk, so it stays a backend
+    # primitive -- but calling it is not reflecting into one: this is the same
+    # intrinsic every other module writes, compiled for whichever host the
+    # compiler itself runs on.
+    # code_points/from_code_points and the Unicode classifiers. These had no
+    # arm at all until 2026-07-28: nothing reached them, because `substring`
+    # and `trim` were intrinsics, so `const X = str.substring(...)` had never
+    # been written down anywhere that would run it. Moving std off the
+    # intrinsics is what asked the question.
+  } else if name == "code_points" {
+    var out: List[CValue] = []
+    for cp in code_points(as_str(args[0])) { out = out ++ [VInt(cp)] }
+    Ok((st, env, VList(out)))
+  } else if name == "from_code_points" {
+    var cps: List[Int] = []
+    for v in as_list(args[0]) { cps = cps ++ [as_int(v)] }
+    Ok((st, env, VStr(from_code_points(cps))))
+  } else if name == "char_is_letter" {
+    Ok((st, env, VBool(char_is_letter(as_int(args[0])))))
+  } else if name == "char_is_digit" {
+    Ok((st, env, VBool(char_is_digit(as_int(args[0])))))
+  } else if name == "char_is_alnum" {
+    Ok((st, env, VBool(char_is_alnum(as_int(args[0])))))
+  } else if name == "char_is_upper" {
+    Ok((st, env, VBool(char_is_upper(as_int(args[0])))))
+  } else if name == "char_is_lower" {
+    Ok((st, env, VBool(char_is_lower(as_int(args[0])))))
+  } else if name == "char_is_space" {
+    Ok((st, env, VBool(char_is_space(as_int(args[0])))))
+  } else if name == "str_lower" {
+    Ok((st, env, VStr(str_lower(as_str(args[0])))))
+  } else if name == "str_upper" {
+    Ok((st, env, VStr(str_upper(as_str(args[0])))))
   } else if name == "parse_int" {
     match parse_int(as_str(args[0])) {
       Some(n) -> Ok((st, env, some_v(VInt(n))))
