@@ -7,6 +7,7 @@
 
 use std/bytes
 use deflate
+use crc32
 
 const MAGIC0: Int = 0x1F
 const MAGIC1: Int = 0x8B
@@ -64,5 +65,10 @@ pub fn gunzip(src: Bytes) -> Result[Bytes, String] = {
     return Err("gzip: decompressed " ++ to_string(bytes.len(out)) ++
         " bytes, the archive says " ++ to_string(isize))
   }
+  # The length agreeing says almost nothing -- a flipped bit does not change
+  # it. The CRC is the check that catches damage.
+  let want = at(src, n - 8) | (at(src, n - 7) << 8) | (at(src, n - 6) << 16) |
+  (at(src, n - 5) << 24)
+  if crc32.sum(out) != want { return Err("gzip: checksum mismatch") }
   Ok(out)
 }

@@ -9,11 +9,17 @@
 # dynamic, which is all three of RFC 1951's kinds.
 use std/bytes
 use std/io
+use std/str
 use inflate/gzip
 use inflate/deflate
+use inflate/zip
+use inflate/crc32
 use java "java.util.zip.GZIPOutputStream"
 use java "java.io.ByteArrayOutputStream"
 use java "java.util.zip.Deflater"
+use java "java.util.zip.ZipOutputStream"
+use java "java.util.zip.ZipEntry"
+use java "java.util.zip.CRC32"
 
 ## A real file, passed in so the harness picks it rather than this file
 ## hardcoding a path into someone's checkout.
@@ -58,6 +64,103 @@ fn java_deflate(src: Bytes, level: Int) -> Bytes !io = {
   bos.toByteArray().expect("bytes")
 }
 
+## A zip built by java.util.zip, with the method it is told to use. Method 0
+## (stored) has to be told the sizes and the checksum up front, because a
+## stored entry carries no end marker -- which is the same fact that makes the
+## reader go through the central directory.
+fn java_zip(names: List[String], datas: List[String], method: Int) -> Bytes !io = {
+  let bos = ByteArrayOutputStream.new()
+  let zos = ZipOutputStream.new(bos)
+  var i = 0
+  while i < len(names) {
+    let e = ZipEntry.new(names[i])
+    let body = bytes.utf8(datas[i])
+    let _ = e.setMethod(method)
+    if method == 0 {
+      let c = CRC32.new()
+      let _ = c.update(body)
+      let _ = e.setSize(bytes.len(body))
+      let _ = e.setCompressedSize(bytes.len(body))
+      let _ = e.setCrc(c.getValue())
+    }
+    let _ = zos.putNextEntry(e)
+    let _ = zos.write(body)
+    let _ = zos.closeEntry()
+    i = i + 1
+  }
+  let _ = zos.close()
+  bos.toByteArray().expect("bytes")
+}
+
+fn check_zip(label: String, names: List[String], datas: List[String], method: Int) -> Int !io = {
+  match zip.entries(java_zip(names, datas, method)) {
+    Ok(es) -> {
+      if len(es) != len(names) {
+        io.println(label ++ ": read " ++ to_string(len(es)) ++ " entries, wrote " ++
+            to_string(len(names)))
+        return 1
+      }
+      var bad = 0
+      var i = 0
+      while i < len(es) {
+        let e = es[i]
+        if e.name != names[i] {
+          io.println(label ++ ": entry " ++ to_string(i) ++ " came back as `" ++ e.name ++
+              "`, wrote `" ++ names[i] ++ "`")
+          bad = bad + 1
+        } else if e.is_dir != str.ends_with(names[i], "/") {
+          io.println(label ++ ": " ++ e.name ++ " disagrees about being a directory")
+          bad = bad + 1
+        } else if not e.is_dir && bytes.decode(e.data, "UTF-8") != datas[i] {
+          io.println(label ++ ": contents differ for " ++ e.name)
+          bad = bad + 1
+        }
+        i = i + 1
+      }
+      bad
+    }
+    Err(er) -> {
+      io.println(label ++ ": " ++ er)
+      1
+    }
+  }
+}
+
+## Damage one byte. Built through `bytes.Buf`, which is the only way to make a
+## Bytes that is not some string's UTF-8.
+fn flip(b: Bytes, at: Int) -> Bytes = {
+  var buf = bytes.buf()
+  var k = 0
+  while k < bytes.len(b) {
+    buf = bytes.put(buf, if k == at { bytes.at(b, k) ^ 0xFF } else { bytes.at(b, k) })
+    k = k + 1
+  }
+  bytes.freeze(buf)
+}
+
+## A checksum nobody checks is not a checksum, so the refusal is tested too --
+## and tested for the reason, not just for failing.
+fn check_corruption() -> Int !io = {
+  let name = "a.txt"
+  let good = java_zip([name], [rep("x", 200)], 0)
+  # the first local header is at 0, so the first entry's data starts just past
+  # its 30-byte header and its name
+  let broken = flip(good, 30 + str.len(name) + 100)
+  match zip.entries(broken) {
+    Ok(_) -> {
+      io.println("a corrupted stored entry was accepted")
+      1
+    }
+    Err(e) ->
+      if str.index_of(e, "checksum") == None {
+        io.println("a corrupted stored entry was refused, but not by the checksum: " ++ e)
+        1
+      } else {
+        0
+      }
+  }
+}
+
 pub fn main() -> Unit !io = {
   var bad = 0
   var cases: List[String] = ["", "a", "hello world", rep("a", 1000)]
@@ -100,5 +203,31 @@ pub fn main() -> Unit !io = {
       }
     }
   }
+
+  # CRC-32 against the one java.util.zip verifies entries with
+  for c in cases {
+    let b = bytes.utf8(c)
+    let want = CRC32.new()
+    let _ = want.update(b)
+    if crc32.sum(b) != want.getValue() {
+      io.println("crc32 differs at len " ++ to_string(bytes.len(b)))
+      bad = bad + 1
+    }
+  }
+
+  # the container. Both methods over the same entries, so a difference is the
+  # container's and not the entry's
+  let names = ["a.txt", "dir/", "dir/b.txt", "dir/deep/c.txt", "empty.txt", "名字.txt"]
+  let datas = ["hello", "", rep("abcabcabc", 500), rep("q", 3), "", "内容"]
+  for method in [0, 8] {
+    bad = bad + check_zip("zip method " ++ to_string(method), names, datas, method)
+  }
+  # one entry big enough to be dynamic Huffman inside the container
+  match io.read_file(big_file()) {
+    Ok(t) -> { bad = bad + check_zip("zip big", ["src/types.dawn"], [t], 8) }
+    Err(_) -> ()
+  }
+  bad = bad + check_corruption()
+
   io.println("mismatches " ++ to_string(bad))
 }

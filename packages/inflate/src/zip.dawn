@@ -1,0 +1,234 @@
+# The zip container (APPNOTE.TXT), enough of it to unpack a source archive.
+#
+# Read from the **central directory**, never by walking local headers from the
+# front. A zip written as a stream may leave the sizes in its local headers at
+# zero and put the real ones in a data descriptor *after* the data (general
+# purpose flag bit 3). A deflate entry survives that -- its stream ends at
+# BFINAL, so the reader can find the end without being told -- but a stored
+# entry has no end marker at all, and a front-to-back reader would have no way
+# to know where the next header begins. The central directory always carries
+# the true sizes, so reading it first costs one backwards scan and removes the
+# whole class of problem.
+#
+# Only reading, and only the two methods that occur in practice: 0 (stored,
+# the bytes as they are) and 8 (deflate). Anything else is refused by number
+# rather than guessed at.
+
+use std/bytes
+use std/str
+use deflate
+use crc32
+
+## One entry, fully decompressed. Directories carry no data.
+pub type Entry = { name: String, is_dir: Bool, data: Bytes }
+
+const EOCD_SIG: Int = 0x06054B50
+const CD_SIG: Int = 0x02014B50
+const LOCAL_SIG: Int = 0x04034B50
+const Z64_EOCD_SIG: Int = 0x06064B50
+const Z64_LOC_SIG: Int = 0x07064B50
+
+const METHOD_STORED: Int = 0
+const METHOD_DEFLATE: Int = 8
+
+const FLAG_ENCRYPTED: Int = 1
+
+## The value a 32-bit field holds when the real one is off in a zip64 record.
+const ZIP64_MARK: Int = 0xFFFFFFFF
+
+const MAX_COMMENT: Int = 65535
+
+fn in_range(b: Bytes, off: Int, n: Int) -> Bool =
+  off >= 0 && n >= 0 && off + n <= bytes.len(b)
+
+fn u16(b: Bytes, i: Int) -> Int = bytes.at(b, i) | (bytes.at(b, i + 1) << 8)
+
+fn u32(b: Bytes, i: Int) -> Int = u16(b, i) | (u16(b, i + 2) << 16)
+
+fn u64(b: Bytes, i: Int) -> Int = u32(b, i) | (u32(b, i + 4) << 32)
+
+## The end-of-central-directory record is last, but a comment of up to 64KB may
+## follow it, so it has to be searched for. Backwards, and taking the last
+## match: those four bytes can occur inside entry data, and a forward scan
+## would stop at the first accident. The comment length has to account for
+## exactly the rest of the file, which rejects the accidents that remain.
+fn find_eocd(b: Bytes) -> Result[Int, String] = {
+  let n = bytes.len(b)
+  if n < 22 { return Err("zip: too short to be an archive") }
+  let floor = if n - 22 - MAX_COMMENT > 0 { n - 22 - MAX_COMMENT } else { 0 }
+  var i = n - 22
+  while i >= floor {
+    if u32(b, i) == EOCD_SIG && i + 22 + u16(b, i + 20) == n { return Ok(i) }
+    i = i - 1
+  }
+  Err("zip: no end-of-central-directory record (not a zip archive?)")
+}
+
+## Where the central directory starts. The 32-bit field in the EOCD gives way
+## to the zip64 end record once an archive outgrows 4GB.
+fn central_dir(b: Bytes, eocd: Int) -> Result[Int, String] = {
+  let off = u32(b, eocd + 16)
+  if off != ZIP64_MARK {
+    if not in_range(b, off, 0) { return Err("zip: central directory starts past the end") }
+    return Ok(off)
+  }
+  # the locator sits immediately before the EOCD and points at the zip64 end
+  # record, which repeats the same field at full width
+  let loc = eocd - 20
+  if not in_range(b, loc, 20) || u32(b, loc) != Z64_LOC_SIG {
+    return Err("zip: archive needs zip64 but carries no zip64 locator")
+  }
+  let z = u64(b, loc + 8)
+  if not in_range(b, z, 56) || u32(b, z) != Z64_EOCD_SIG {
+    return Err("zip: zip64 locator does not point at a zip64 end record")
+  }
+  let real = u64(b, z + 48)
+  if not in_range(b, real, 0) { return Err("zip: central directory starts past the end") }
+  Ok(real)
+}
+
+## A central directory entry, before its data is read.
+type Head = { name: String, flags: Int, method: Int, crc: Int, csize: Int, size: Int, local: Int }
+
+## The three fields a zip64 archive moves out of the fixed record.
+type Sizes = { csize: Int, size: Int, local: Int }
+
+## The zip64 extended information field (header id 1) carries only those of
+## {uncompressed size, compressed size, local header offset} that were
+## 0xFFFFFFFF in the fixed record, in that order, with nothing in the field to
+## say which. So which ones to take is decided by what the fixed record said --
+## the field cannot be parsed on its own.
+fn zip64(b: Bytes, off: Int, elen: Int, s0: Sizes) -> Result[Sizes, String] = {
+  var csize = s0.csize
+  var size = s0.size
+  var local = s0.local
+  if csize != ZIP64_MARK && size != ZIP64_MARK && local != ZIP64_MARK {
+    return Ok(s0)
+  }
+  let end = off + elen
+  var p = off
+  while p + 4 <= end {
+    let id = u16(b, p)
+    let flen = u16(b, p + 2)
+    if p + 4 + flen > end { return Err("zip: malformed extra field") }
+    if id == 1 {
+      var q = p + 4
+      let stop = p + 4 + flen
+      if size == ZIP64_MARK {
+        if q + 8 > stop { return Err("zip: zip64 extra field is short") }
+        size = u64(b, q)
+        q = q + 8
+      }
+      if csize == ZIP64_MARK {
+        if q + 8 > stop { return Err("zip: zip64 extra field is short") }
+        csize = u64(b, q)
+        q = q + 8
+      }
+      if local == ZIP64_MARK {
+        if q + 8 > stop { return Err("zip: zip64 extra field is short") }
+        local = u64(b, q)
+      }
+      return Ok(Sizes { csize: csize, size: size, local: local })
+    }
+    p = p + 4 + flen
+  }
+  Err("zip: entry needs zip64 but carries no zip64 extra field")
+}
+
+## One central directory entry, and where the next one starts.
+fn read_head(b: Bytes, p: Int) -> Result[(Head, Int), String] = {
+  if not in_range(b, p, 46) { return Err("zip: central directory runs past the end") }
+  let nlen = u16(b, p + 28)
+  let elen = u16(b, p + 30)
+  let clen = u16(b, p + 32)
+  if not in_range(b, p + 46, nlen + elen + clen) {
+    return Err("zip: central directory runs past the end")
+  }
+  # Names are decoded as UTF-8 whether or not the entry says so (flag bit 11).
+  # That is what java.util.zip does by default, and matching it keeps the same
+  # archives readable; the alternative, CP437, needs a table for names that in
+  # practice are ASCII.
+  let name = bytes.decode(bytes.slice(b, p + 46, p + 46 + nlen), "UTF-8")
+  let fixed = Sizes { csize: u32(b, p + 20), size: u32(b, p + 24), local: u32(b, p + 42) }
+  let s = match zip64(b, p + 46 + nlen, elen, fixed) {
+    Ok(t) -> t
+    Err(e) -> return Err(e ++ " (" ++ name ++ ")")
+  }
+  let h = Head {
+    name: name,
+    flags: u16(b, p + 8),
+    method: u16(b, p + 10),
+    crc: u32(b, p + 16),
+    csize: s.csize,
+    size: s.size,
+    local: s.local,
+  }
+  Ok((h, p + 46 + nlen + elen + clen))
+}
+
+fn entry_data(b: Bytes, h: Head) -> Result[Bytes, String] = {
+  if h.flags & FLAG_ENCRYPTED != 0 { return Err("zip: encrypted entry: " ++ h.name) }
+  if not in_range(b, h.local, 30) || u32(b, h.local) != LOCAL_SIG {
+    return Err("zip: no local header for " ++ h.name)
+  }
+  # The local header's name and extra lengths need not match the central
+  # directory's -- writers routinely put zip64 padding in one and not the other
+  # -- so where the data starts is a question only the local header answers.
+  let start = h.local + 30 + u16(b, h.local + 26) + u16(b, h.local + 28)
+  if not in_range(b, start, h.csize) {
+    return Err("zip: entry data runs past the end: " ++ h.name)
+  }
+  let raw = bytes.slice(b, start, start + h.csize)
+  var out = raw
+  if h.method == METHOD_DEFLATE {
+    out = match deflate.inflate(raw) {
+      Ok(o) -> o
+      Err(e) -> return Err("zip: " ++ h.name ++ ": " ++ e)
+    }
+  } else if h.method != METHOD_STORED {
+    return Err("zip: compression method " ++ to_string(h.method) ++
+        " is not supported (" ++ h.name ++ ")")
+  }
+  if bytes.len(out) != h.size {
+    return Err("zip: " ++ h.name ++ " unpacked to " ++ to_string(bytes.len(out)) ++
+        " bytes, the directory says " ++ to_string(h.size))
+  }
+  if crc32.sum(out) != h.crc { return Err("zip: checksum mismatch for " ++ h.name) }
+  Ok(out)
+}
+
+## Every entry in the archive, in central directory order. An archive with no
+## entries reads as the empty list: that is a legal zip, and whether it is an
+## acceptable one is the caller's question.
+pub fn entries(src: Bytes) -> Result[List[Entry], String] = {
+  let eocd = match find_eocd(src) {
+    Ok(i) -> i
+    Err(e) -> return Err(e)
+  }
+  var p = match central_dir(src, eocd) {
+    Ok(i) -> i
+    Err(e) -> return Err(e)
+  }
+  var out: List[Entry] = []
+  while in_range(src, p, 4) && u32(src, p) == CD_SIG {
+    let (h, next) = match read_head(src, p) {
+      Ok(t) -> t
+      Err(e) -> return Err(e)
+    }
+    # A directory is an entry whose name ends in a slash. That is the whole
+    # rule -- ZipEntry.isDirectory() is the same test -- and the external
+    # attributes, which look more authoritative, are written by whatever
+    # operating system made the archive and are not portable.
+    let is_dir = str.ends_with(h.name, "/")
+    var data = bytes.utf8("")
+    if not is_dir {
+      data = match entry_data(src, h) {
+        Ok(d) -> d
+        Err(e) -> return Err(e)
+      }
+    }
+    out = out ++ [Entry { name: h.name, is_dir: is_dir, data: data }]
+    p = next
+  }
+  Ok(out)
+}

@@ -1,0 +1,55 @@
+# CRC-32 (ITU-T V.42 / IEEE 802.3), the checksum both gzip and zip carry.
+#
+# It is here because the readers have to verify. `java.util.zip` checks the CRC
+# of every entry it hands back, so a reader that skipped it would be a step
+# down from the thing it replaces: a truncated archive would unpack quietly and
+# the package hash would then be computed over the damage.
+
+use std/bytes
+
+const POLY: Int = 0xEDB88320
+const MASK: Int = 0xFFFFFFFF
+
+## The 256-entry table, built rather than written out. A literal table is a
+## page of magic numbers nobody can check by eye; this is the definition those
+## numbers come from, and it costs 2048 shifts once per call.
+fn table() -> List[Int] = {
+  var t: List[Int] = []
+  var i = 0
+  while i < 256 {
+    var c = i
+    var k = 0
+    while k < 8 {
+      c = if c & 1 != 0 { POLY ^ (c >>> 1) } else { c >>> 1 }
+      k = k + 1
+    }
+    t = t ++ [c]
+    i = i + 1
+  }
+  t
+}
+
+## The CRC-32 of `b`, as the unsigned 32-bit value the formats store.
+pub fn sum(b: Bytes) -> Int = {
+  let t = table()
+  var c = MASK
+  var i = 0
+  let n = bytes.len(b)
+  while i < n {
+    c = (c >>> 8) ^ t[(c ^ bytes.at(b, i)) & 0xFF]
+    i = i + 1
+  }
+  c ^ MASK
+}
+
+test "the check value every CRC-32 implementation is published with" {
+  assert sum(bytes.utf8("123456789")) == 0xCBF43926
+}
+
+test "the empty message" {
+  assert sum(bytes.utf8("")) == 0
+}
+
+test "one bit of difference is a whole different checksum" {
+  assert sum(bytes.utf8("a")) != sum(bytes.utf8("b"))
+}

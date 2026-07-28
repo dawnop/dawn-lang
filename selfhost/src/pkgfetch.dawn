@@ -14,7 +14,7 @@ use std/io
 use std/fspath
 use sha2/sha256
 use inflate/gzip
-use java "java.io.ByteArrayInputStream"
+use inflate/zip
 use java "java.net.URI"
 use java "java.net.InetSocketAddress"
 use java "java.net.ProxySelector"
@@ -24,7 +24,6 @@ use java "java.net.http.HttpRequest"
 use java "java.net.http.HttpRequest.BodyPublisher"
 use java "java.net.http.HttpRequest.BodyPublishers"
 use java "java.net.http.HttpResponse.BodyHandlers"
-use java "java.util.zip.ZipInputStream"
 
 ## The content-addressed cache root: the `dawn.pkg.cache` property (tests), then
 ## $DAWN_PKG_CACHE, then ~/.dawn/pkg.
@@ -220,37 +219,31 @@ fn entry_path(dest: String, name: String) -> Result[String, String] !io = {
   }
 }
 
+## Unpack a zip. The whole archive is decompressed before anything is written,
+## same as untar below: a source archive is a few megabytes, and the reader
+## works from the central directory rather than a stream anyway.
 fn unzip(bs: Bytes, dest: String) -> Result[Unit, String] !io = {
-  var any = false
-  let zin = ZipInputStream.new(ByteArrayInputStream.new(bs))
-  while true {
-    let next = match java_try(fn() => zin.getNextEntry()) {
-      Ok(o) -> o
-      Err(e) -> return Err("not a zip archive (or an empty one)" ++
-          "\n  .zip and .tar.gz archives are supported; for GitHub use .../archive/refs/tags/<tag>.zip")
-    }
-    match next {
-      Some(entry) -> {
-        any = true
-        let name = entry.getName().expect("entry name")
-        let out = match entry_path(dest, name) {
-          Ok(p) -> p
-          Err(e) -> return Err(e)
-        }
-        if entry.isDirectory() {
-          mkdirs(out)
-        } else {
-          let content = zin.readAllBytes().expect("entry bytes")
-          match write_file_bytes(out, content) {
-            Ok(_) -> ()
-            Err(e) -> return Err(e)
-          }
-        }
-      }
-      None -> break
-    }
+  let entries = match zip.entries(bs) {
+    Ok(es) -> es
+    Err(e) -> return Err(e ++
+        "\n  .zip and .tar.gz archives are supported; for GitHub use .../archive/refs/tags/<tag>.zip")
   }
-  let _ = java_try(fn() => zin.close())
+  var any = false
+  for entry in entries {
+    let out = match entry_path(dest, entry.name) {
+      Ok(p) -> p
+      Err(e) -> return Err(e)
+    }
+    if entry.is_dir {
+      mkdirs(out)
+    } else {
+      match write_file_bytes(out, entry.data) {
+        Ok(_) -> ()
+        Err(e) -> return Err(e)
+      }
+    }
+    any = true
+  }
   if not any {
     Err("not a zip archive (or an empty one)" ++
         "\n  .zip and .tar.gz archives are supported; for GitHub use .../archive/refs/tags/<tag>.zip")
