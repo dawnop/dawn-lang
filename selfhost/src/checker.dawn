@@ -3031,6 +3031,13 @@ pub fn internal_builtins() -> Set[String] = {
   out
 }
 
+## The rule itself, in one place: everything that decides whether a builtin
+## name exists here goes through it -- resolution, the "did you mean" pool, and
+## the language server's tables. When they disagreed, the server offered names
+## the checker then refused.
+pub fn builtin_visible(cx: Cx, hidden: Set[String], name: String) -> Bool =
+  cx.is_std_module || not set.has(hidden, name)
+
 ## The builtin table as visible from this module: user-code resolution skips
 ## the internal intrinsics (the Kotlin `builtin(name)`).
 pub fn builtin_sig(cx: Cx, name: String) -> Option[Sig] = {
@@ -3038,7 +3045,21 @@ pub fn builtin_sig(cx: Cx, name: String) -> Option[Sig] = {
     None -> return None
     Some(s) -> s
   }
-  if not cx.is_std_module && set.has(internal_builtins(), name) { None } else { Some(sig) }
+  if builtin_visible(cx, internal_builtins(), name) { Some(sig) } else { None }
+}
+
+## `bins` keeping only what `cx`'s module may name. The language server builds
+## its table once per query and every consumer -- hover, go to definition,
+## completion -- reads it, so filtering here is what keeps them all honest.
+pub fn visible_bins(bins: Map[String, Sig], cx: Cx) -> Map[String, Sig] = {
+  if cx.is_std_module { return bins }
+  let hidden = internal_builtins()
+  var out: Map[String, Sig] = map.empty()
+  for pr in map.entries(bins) {
+    let (n, s) = pr
+    if builtin_visible(cx, hidden, n) { out = map.insert(out, n, s) }
+  }
+  out
 }
 
 ## The visible builtin names — the "did you mean" pool half.
@@ -3062,7 +3083,7 @@ pub fn visible_builtin_names(cx: Cx) -> List[String] = {
   var out: List[String] = []
   let hidden = internal_builtins()
   for n in map.keys(builtins()) {
-    if cx.is_std_module || not set.has(hidden, n) { out = out ++ [n] }
+    if builtin_visible(cx, hidden, n) { out = out ++ [n] }
   }
   out
 }
@@ -3087,6 +3108,15 @@ test "internal builtins hide from user code but not std" {
   }
   assert not has_map_insert
   assert not has_array_push
+  # the table shape the language server reads has to hide the same names the
+  # resolver does, or it offers what the checker will then refuse
+  let user_bins = visible_bins(builtins(), user)
+  assert map.get(user_bins, "map_insert") == None
+  assert map.get(user_bins, "array_push") == None
+  assert map.get(user_bins, "len") != None
+  let std_bins = visible_bins(builtins(), std_cx)
+  assert map.get(std_bins, "map_insert") != None
+  assert map.size(std_bins) == map.size(builtins())
 }
 
 ## return / return expr — early return from the enclosing fn (or lambda).
