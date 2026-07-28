@@ -4,8 +4,8 @@
 # when the Kotlin side carries one, "\n  " and the hint — so callers print them
 # behind "error: " exactly as the Kotlin CLI does.
 #
-# Enum constants (Redirect.NORMAL, ATOMIC_MOVE) are static fields, which the
-# interop does not reach; `valueOf` is the method-shaped door to the same value.
+# Nothing here reaches the host any more. What is left of the outside world is
+# `curl`, spawned like any other program, and the filesystem through std/io.
 
 use std/str
 use std/bytes
@@ -15,15 +15,6 @@ use std/fspath
 use sha2/sha256
 use inflate/gzip
 use inflate/zip
-use java "java.net.URI"
-use java "java.net.InetSocketAddress"
-use java "java.net.ProxySelector"
-use java "java.net.http.HttpClient"
-use java "java.net.http.HttpClient.Redirect"
-use java "java.net.http.HttpRequest"
-use java "java.net.http.HttpRequest.BodyPublisher"
-use java "java.net.http.HttpRequest.BodyPublishers"
-use java "java.net.http.HttpResponse.BodyHandlers"
 
 ## The content-addressed cache root: the `dawn.pkg.cache` property (tests), then
 ## $DAWN_PKG_CACHE, then ~/.dawn/pkg.
@@ -101,72 +92,48 @@ pub fn tree_hash(root: String) -> Result[String, String] !io = {
 
 # ---- download ----
 
-## `https_proxy`/`HTTPS_PROXY` as host + port — the JDK ignores these env vars.
-fn proxy_from_env() -> Option[(String, Int)] !io = {
-  let raw = match io.getenv("https_proxy") {
-    Some(v) -> v
-    None ->
-      match io.getenv("HTTPS_PROXY") {
-        Some(v) -> v
-        None -> return None
-      }
-  }
-  var rest = raw
-  match str.index_of(rest, "://") {
-    Some(i) -> { rest = str.substring(rest, i + 3, str.len(rest)) }
-    None -> ()
-  }
-  match str.index_of(rest, "/") {
-    Some(i) -> { rest = str.substring(rest, 0, i) }
-    None -> ()
-  }
-  if rest == "" { return None }
-  match str.last_index_of(rest, ":") {
-    Some(i) -> {
-      let host = str.substring(rest, 0, i)
-      match parse_int(str.substring(rest, i + 1, str.len(rest))) {
-        Some(port) -> Some((host, port))
-        None -> Some((rest, 80))
-      }
-    }
-    None -> Some((rest, 80))
-  }
-}
-
+## Fetch over HTTP by running `curl`.
+##
+## Not a client of our own, and not the host's: TLS is the one thing in this
+## file that cannot be written in Dawn, and reaching for the JDK's would mean
+## the package manager only works on the backend that has a JDK under it --
+## while fetching a source package by url and hash has nothing to do with what
+## the compiler emits. One implementation, one dependency, both backends.
+##
+## `--fail` turns a 4xx/5xx into a non-zero status with a line on stderr, which
+## is why no status code is parsed here. The proxy environment variables need
+## no code at all: curl reads them, which the JDK never did.
 fn http_get(url: String) -> Result[Bytes, String] !io = {
-  let sent = java_try(fn() => {
-    let builder = HttpClient.newBuilder().expect("builder")
-    let redirected = builder.followRedirects(Redirect.valueOf("NORMAL").expect("policy")).expect("builder")
-    let ready = match proxy_from_env() {
-      Some(hp) -> {
-        let (host, port) = hp
-        let sel = ProxySelector.of(InetSocketAddress.new(host, port)).expect("selector")
-        redirected.proxy(sel).expect("builder")
+  let work = match io.temp_dir("", "dawn-fetch-") {
+    Ok(d) -> d
+    Err(e) -> return Err("cannot create a temp directory: " ++ e)
+  }
+  let body = work ++ "/body"
+  let diag = work ++ "/stderr"
+  let ran = io.run(["curl", "--silent", "--show-error", "--location", "--fail", url], body, diag)
+  let out: Result[Bytes, String] = match ran {
+    Ok(0) ->
+      match read_bytes(body) {
+        Ok(b) -> Ok(b)
+        Err(e) -> Err("cannot fetch " ++ url ++ ": " ++ e)
       }
-      None -> redirected
-    }
-    let client = ready.build().expect("client")
-    let uri = URI.create(url).expect("uri")
-    let nobody: BodyPublisher = BodyPublishers.noBody().expect("publisher")
-    let req = HttpRequest.newBuilder().expect("rb").uri(uri).expect("rb")
-      .method("GET", nobody).expect("rb").build().expect("request")
-    let resp = client.send(req, BodyHandlers.ofByteArray().expect("handler")).expect("response")
-    let body: Bytes = cast(resp.body().expect("body"))
-    (resp.statusCode(), body)
-  })
-  match sent {
-    Ok(pr) -> {
-      let (status, body) = pr
-      if status != 200 {
-        Err("cannot fetch " ++ url ++ ": HTTP " ++ to_string(status))
-      } else {
-        Ok(body)
-      }
+    Ok(code) -> {
+      let said = str.trim(match io.read_file(diag) {
+        Ok(s) -> s
+        Err(_) -> ""
+      })
+      let why = if said == "" { "curl exited " ++ to_string(code) } else { said }
+      Err("cannot fetch " ++ url ++ ": " ++ why ++
+          "\n  check the network (https_proxy is honored) or pre-seed the cache")
     }
     Err(e) ->
       Err("cannot fetch " ++ url ++ ": " ++ e ++
-          "\n  check the network (https_proxy is honored) or pre-seed the cache")
+          "\n  fetching a remote package needs `curl` on PATH")
   }
+  let _ = io.delete(body)
+  let _ = io.delete(diag)
+  let _ = io.delete(work)
+  out
 }
 
 fn download(url: String) -> Result[Bytes, String] !io =
