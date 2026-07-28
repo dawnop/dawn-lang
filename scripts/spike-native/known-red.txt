@@ -2,10 +2,10 @@
 # unlisted one as fatal -- and it also fails when a *listed* check starts
 # passing, so a fix cannot leave its entry behind.
 #
-# Nothing is listed. Every corpus program compiles with both backends, runs
-# with both, and agrees with a written expectation.
+# Three are listed, all from catch_kinds.dawn, which was written to find them.
 #
-# It is worth saying what that does and does not mean. It does not mean the
+# It is worth saying what an empty file does and does not mean. It does not
+# mean the
 # native backend is finished -- it means the *corpus* no longer catches it out,
 # and the way to keep this file honest is to add programs, not to keep entries.
 # When these corpora were added on 2026-07-25 four of the entries turned out to
@@ -115,3 +115,29 @@
 # Closed the way the other three were: lowering spells the fold out over the
 # type's own structure, so both backends compile one definition
 # (semantics-closure-design.md 3).
+
+# --- the two barriers -----------------------------------------------------
+# `java_try` is what std/io wraps a throwing primitive in; `catch_panic` is
+# the catch-all. On the JVM the difference is the class hierarchy: `panic`
+# throws an `Error`, and `java_try` catches `Exception`. Native has no
+# exceptions -- everything arrives through one `longjmp` -- so the two
+# intrinsics were literally the same function, and `java_try` caught the
+# panics the JVM lets through. Every line of the corpus that raises a Dawn
+# failure disagrees between the backends.
+catch_kinds:native
+catch_kinds:diff
+#
+# Two more the same file found, one on each side:
+#
+#   * `std/bytes.slice` documents "both ends are clamped and `start > end`
+#     yields empty, so this never panics". The JVM does that. The C runtime
+#     panics -- directly under a comment saying it clamps like the JVM does.
+#     That is the `bytes slice` line, and it is not about catching at all:
+#     the two backends give different answers to the same call.
+#
+#   * `from_code_points` with an out-of-range code point is the one place a
+#     *host* exception still escapes on the JVM: `StringBuilder.appendCodePoint`
+#     throws `IllegalArgumentException`, so the io barrier catches an argument
+#     error the way it catches a missing file. Native panics, which is what
+#     an invalid argument is.
+catch_kinds:jvm

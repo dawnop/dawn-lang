@@ -1,0 +1,81 @@
+# The two barriers, and which failures each one stops.
+#
+# `java_try` is what std/io wraps a throwing primitive in, so that a missing
+# file is a `Result` and not the end of the program. `catch_panic` is the
+# other one, and the difference between them is the whole subject here: a
+# Dawn `panic` is a broken invariant inside the program, and the io barrier
+# must not quietly turn one into an `Err` that reads like a missing file.
+#
+# On the JVM that difference is the class hierarchy -- `panic` throws
+# `dawn/rt/PanicError`, an `Error`, and `java_try` catches `Exception`. Native
+# has no exceptions: everything arrives through one `longjmp`, so both
+# intrinsics were the same function and `java_try` caught panics the JVM lets
+# through. Nothing asked until this file.
+#
+# The rule the expectation is written from, and the one a new primitive should
+# be classified by: **a failure the language defines is a panic; a failure the
+# outside world caused is not.** The io primitives are the second kind and, as
+# it turns out, the only one.
+use std/io
+use std/str
+use std/bytes
+use std/map
+
+## Which barrier stops this failure? The thunk runs inside `java_try` inside
+## `catch_panic`, so every outcome is a value rather than the end of the run.
+fn barrier(f: fn() -> Int !io) -> String !io =
+  match catch_panic(fn() => match java_try(f) {
+    Ok(_) -> 0
+    Err(_) -> 1
+  }) {
+    Ok(0) -> "ok"
+    Ok(_) -> "caught"
+    Err(_) -> "through"
+  }
+
+## `catch_panic` alone: it is the catch-all, so nothing may pass it.
+fn outer(f: fn() -> Int !io) -> String !io =
+  match catch_panic(f) {
+    Ok(_) -> "ok"
+    Err(_) -> "caught"
+  }
+
+# `!io` so nothing here folds at compile time -- a comptime `10 / 0` is a
+# compile error, and the point is what happens at run time.
+fn n(i: Int) -> Int !io = i
+
+fn none_int() -> Option[Int] !io = None
+
+fn empty_map() -> Map[Int, Int] !io = map.empty()
+
+pub fn main() -> Unit !io = {
+  println("-- nothing went wrong --")
+  println("no failure     " ++ barrier(fn() => n(7)))
+
+  println("-- the language's own failures: the io barrier lets them past --")
+  println("panic          " ++ barrier(fn() => panic("deliberate")))
+  println("todo           " ++ barrier(fn() => todo()))
+  println("expect None    " ++ barrier(fn() => expect(none_int(), "nothing")))
+  println("div by zero    " ++ barrier(fn() => 10 / n(0)))
+  println("mod by zero    " ++ barrier(fn() => 10 % n(0)))
+  println("list index     " ++ barrier(fn() => [1, 2, 3][n(5)]))
+  println("map key        " ++ barrier(fn() => empty_map()[n(1)]))
+  println("bytes at       " ++ barrier(fn() => bytes.at(bytes_utf8("abc"), n(9))))
+  println("bad code point " ++ barrier(fn() => str.len(from_code_points([n(0x110000)]))))
+
+  # Not a failure at all: std/bytes documents that both ends are clamped and
+  # `start > end` yields empty, so this one has to come back `ok` -- the C
+  # runtime panicked here while its own comment said it clamped like the JVM.
+  println("-- documented not to fail --")
+  println("bytes slice    " ++ barrier(fn() =>
+      bytes.len(bytes.slice(bytes_utf8("abc"), n(3), n(1)))))
+
+  println("-- the outside world's failures: the io barrier is for these --")
+  println("read_file      " ++ barrier(fn() => str.len(io_read_file("/no/such/dawn/path"))))
+  println("list_names     " ++ barrier(fn() => len(io_list_names("/no/such/dawn/path"))))
+
+  println("-- catch_panic is the catch-all: both kinds stop here --")
+  println("panic          " ++ outer(fn() => panic("deliberate")))
+  println("read_file      " ++ outer(fn() => str.len(io_read_file("/no/such/dawn/path"))))
+  println("no failure     " ++ outer(fn() => n(7)))
+}
