@@ -221,6 +221,28 @@ dawn_array *dawn_args(void);
 dawn_adt *dawn_java_try(dawn_clo *f);
 dawn_adt *dawn_catch_panic(dawn_clo *f);
 
+/* Simple (1:1) Unicode case mapping: a code point in `lo..hi` maps to itself
+ * plus `delta`, and one in no range maps to itself.
+ *
+ * Defined by the *generated program*, not by this runtime, because the table
+ * belongs to the compiler (selfhost/src/case_table.dawn) and the JVM backend
+ * receives the same rows in dawn/rt/Strings. It lived here as a generated
+ * header until 2026-07-28, which made it one mapping only while the JDK that
+ * generated it was the JDK the JVM backend happened to be running -- Unicode
+ * 15 and 16 differ by 18 code points, and nothing said so. `dawn __emitc`
+ * always emits these, so the runtime is linked against a program that has
+ * them. */
+typedef struct {
+  int32_t lo;
+  int32_t hi;
+  int32_t delta;
+} dawn_case_range;
+
+extern const dawn_case_range dawn_upper_ranges[];
+extern const int64_t dawn_upper_ranges_n;
+extern const dawn_case_range dawn_lower_ranges[];
+extern const int64_t dawn_lower_ranges_n;
+
 /* strings */
 dawn_str dawn_str_concat(dawn_str a, dawn_str b);
 bool dawn_str_eq(dawn_str a, dawn_str b);

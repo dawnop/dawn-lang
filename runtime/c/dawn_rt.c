@@ -5,9 +5,6 @@
 
 #include "dawn_rt.h"
 
-/* Generated; see scripts/case-contract/. */
-#include "dawn_case_table.h"
-
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -729,11 +726,13 @@ static dawn_str dawn_str_trim(dawn_str s) {
   return (dawn_str){s.p + a, b - a};
 }
 
-/* Simple (1:1) Unicode case mapping, out of the generated table. The JVM
- * backend calls Character.toUpperCase/toLowerCase, and dawn_case_table.h is
- * generated from that same oracle, so the two backends are two implementations
- * of one mapping rather than two mappings (native-backend-plan.md 14.12).
- * scripts/case-contract/run.sh regenerates the table and fails on a difference.
+/* Simple (1:1) Unicode case mapping, out of the table the generated program
+ * carries (dawn_rt.h, selfhost/src/case_table.dawn). The JVM backend decodes
+ * the same rows into dawn/rt/Strings, so the two backends are two
+ * implementations of one mapping rather than two mappings
+ * (native-backend-plan.md 14.12). scripts/case-contract/run.sh checks the
+ * compiled result against the table, and the table against the JDK it was
+ * generated from.
  *
  * This folded ASCII only until 2026-07-28, so every cased letter above U+007F
  * came back unchanged where the JVM folded it -- the one place a program could
@@ -760,8 +759,7 @@ static int32_t dawn_case_cp(int32_t cp, const dawn_case_range *rs, size_t n) {
  * character for. */
 static dawn_str dawn_case(dawn_str s, bool up) {
   const dawn_case_range *rs = up ? dawn_upper_ranges : dawn_lower_ranges;
-  size_t rn = up ? sizeof(dawn_upper_ranges) / sizeof(dawn_upper_ranges[0])
-                 : sizeof(dawn_lower_ranges) / sizeof(dawn_lower_ranges[0]);
+  size_t rn = (size_t)(up ? dawn_upper_ranges_n : dawn_lower_ranges_n);
   int64_t out = 0;
   for (int64_t i = 0; i < s.len;) {
     int64_t n;

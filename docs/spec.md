@@ -1191,6 +1191,11 @@ std → 内建，std 模块自己的 `pub fn len` 正是靠这一条合法。
   （`ß` → `SS`）、locale 相关的（土耳其语的 `i`）、上下文相关的（希腊语词尾 sigma）。
   取简单映射不是为了省事：完整映射不是一个后端能从一张表实现的函数，而 Dawn 要求
   一个原语在每个后端上是同一个函数。需要完整映射的场合属于能接收 locale 的库。
+
+  那张表是**编译器的**（`selfhost/src/case_table.dawn`，生成物，记着生成它的 JDK），
+  两个后端各自领走一份：JVM 写进 `dawn/rt/Strings`，native 写进发出来的 C。所以
+  `str.to_upper` 的答案**不随宿主 JDK 的 Unicode 版本变**——升级到新 Unicode 是重新生成
+  这张表这一件明确的事，而不是换台机器编译就悄悄换了答案。
 - **`std/bytes`**（一等 `Bytes`，§9.5.1）：`bytes.utf8(s) -> Bytes`（字符串的 UTF-8 字节）、
   `bytes.decode(b, charset) -> String`（按字符集解码，替代旧 `String.new(bytes, charset)`）、
   `bytes.len(b) -> Int`、`bytes.at(b, i) -> Int`（0..255，越界 panic）、

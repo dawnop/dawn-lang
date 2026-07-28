@@ -18,6 +18,7 @@ use types.{
   Adts, AdtI, CtorI, adt_of, adt_jvm_name, ctor_jvm_name, Sym, Sig, Eff
 }
 use core.{subject_key}
+use case_table
 use jreflect
 use java "dawn.tool.AdtClassWriter"
 use java "org.objectweb.asm.MethodVisitor"
@@ -225,6 +226,20 @@ test "the ASM interop spike: a class assembles through the shared writer" {
   cw.visitEnd()
   let bs = cw.toByteArray().expect("bytes")
   assert bytes.len(bs) > 0
+}
+
+test "the case payload is three fixed-width fields per range" {
+  # The decoder emitted by gen_case_decode divides the payload by six and the
+  # lookup divides the array by three, so a ragged row would not fail here --
+  # it would shift every range after it and answer plausibly.
+  #
+  # Six hex digits each, and the *target* rather than the offset, so no field
+  # carries a sign: a..z uppercases by -32, hence 0x61..0x7A -> 0x41.
+  assert case_payload([(0x0061, 0x007A, -32)]) == "00006100007a000041"
+  # the widest code point there is still fits the field
+  assert case_payload([(0x10FFFF, 0x10FFFF, 0)]) == "10ffff10ffff10ffff"
+  assert str.len(case_payload(case_table.upper())) == len(case_table.upper()) * 18
+  assert str.len(case_payload(case_table.lower())) == len(case_table.lower()) * 18
 }
 
 # ---- JVM opcode constants (org.objectweb.asm.Opcodes; static fields do not
@@ -1972,6 +1987,22 @@ fn gen_parse_radix_method(cw: AdtClassWriter) -> Unit !io = {
   ()
 }
 
+pub const OP_IALOAD: Int = 46
+
+pub const OP_IASTORE: Int = 79
+
+pub const OP_IDIV: Int = 108
+
+pub const OP_ICONST_3: Int = 6
+
+## The `atype` operand NEWARRAY takes for an int array (JVMS 6.5).
+pub const T_INT: Int = 10
+
+## The two `int[]` the case table is decoded into, one range per three slots.
+const CASE_UPPER: String = "CASE_UPPER"
+
+const CASE_LOWER: String = "CASE_LOWER"
+
 ## dawn/rt/Strings: the string runtime — join, parse_int/parse_float,
 ## code_points/from_code_points, the cursor family, the Unicode classifiers and
 ## case folding. What is left after std/str took over everything expressible as
@@ -2322,16 +2353,37 @@ pub fn gen_strings_class(supers: List[String]) -> Bytes !io = {
   # is the operation whose answer is a Unicode table
   # (docs/native-backend-plan.md 14.12).
 
-  # str_lower/str_upper: simple (1:1) mapping, one code point at a time.
+  # str_lower/str_upper: simple (1:1) mapping, one code point at a time, out of
+  # the compiler's table (selfhost/src/case_table.dawn).
+  #
+  # This called `Character.toUpperCase` until 2026-07-28, which *is* the simple
+  # mapping -- but it is the running JDK's, and the C runtime's answer was the
+  # one the table had been generated from. Unicode 15 and 16 differ by 18 code
+  # points, so "the two backends implement one mapping" held only while the two
+  # JDKs agreed, which is not a property anyone can hold on to. The table is the
+  # language's now and each backend receives it.
   #
   # `String.toUpperCase` is *full* mapping, which is not a function a second
-  # backend can implement from a table: it is locale- and context-sensitive,
-  # and it does not preserve the code-point count (a sharp s uppercases to two
-  # letters). `Character.toUpperCase` is the simple mapping, and that is what
-  # the language's primitive means (native-backend-plan.md 14.12). Full mapping
-  # belongs in a library that can take a locale.
-  gen_case_method(cw, "str_lower", "toLowerCase")
-  gen_case_method(cw, "str_upper", "toUpperCase")
+  # backend could implement from a table at all: it is locale- and
+  # context-sensitive, and it does not preserve the code-point count (a sharp s
+  # uppercases to two letters). That belongs in a library taking a locale.
+  cw.field(ACC_PRIVATE + ACC_STATIC + ACC_FINAL, CASE_UPPER, "[I")
+  cw.field(ACC_PRIVATE + ACC_STATIC + ACC_FINAL, CASE_LOWER, "[I")
+  gen_case_decode(cw)
+  gen_case_lookup(cw)
+  let ci = cw.method(ACC_STATIC, "<clinit>", "()V").expect("mv")
+  ci.visitCode()
+  for e in [(CASE_UPPER, case_table.upper()), (CASE_LOWER, case_table.lower())] {
+    let (field, rs) = e
+    ci.visitLdcInsn(case_payload(rs))
+    ci.visitMethodInsn(OP_INVOKESTATIC, STRINGS_CLASS, "case_decode",
+      "(Ljava/lang/String;)[I", false)
+    ci.visitFieldInsn(OP_PUTSTATIC, STRINGS_CLASS, field, "[I")
+  }
+  ci.visitInsn(OP_RETURN)
+  close_mv(ci)
+  gen_case_method(cw, "str_lower", CASE_LOWER)
+  gen_case_method(cw, "str_upper", CASE_UPPER)
 
   # char_is_*(c): Character.isX((int) c). One code point in, a Unicode table
   # lookup out; the JVM's tables are this backend's answer to the contract.
@@ -2351,11 +2403,159 @@ pub fn gen_strings_class(supers: List[String]) -> Bytes !io = {
   cw.toByteArray().expect("bytes")
 }
 
-## One of the two case foldings, as a walk applying `Character.toLowerCase` or
-## `Character.toUpperCase` -- the JVM's *simple* mapping -- to each code point.
+const CASE_HEX: String = "0123456789abcdef"
+
+## One range as the class file carries it: six hex digits each for the first
+## code point, the last, and what the first maps to. Fixed width, so the
+## decoder has no delimiter to scan; the target rather than the offset, so
+## every field is an unsigned code point and needs no sign convention.
+fn case_payload(rs: List[(Int, Int, Int)]) -> String = {
+  var parts: List[String] = []
+  for r in rs {
+    let (lo, hi, delta) = r
+    parts = parts ++ [hex6(lo), hex6(hi), hex6(lo + delta)]
+  }
+  join(parts, "")
+}
+
+fn hex6(n: Int) -> String = {
+  var s = ""
+  var v = n
+  for _i in 0 ..6 {
+    s = str.substring(CASE_HEX, v % 16, v % 16 + 1) ++ s
+    v = v / 16
+  }
+  s
+}
+
+## The static initializer's half: the payload into one flat int[]. A slice of
+## the constant is parsed in place — `Integer.parseInt(CharSequence, …)` takes
+## bounds — so this allocates the array and nothing else.
+##
+## Locals: 0 the payload, 1 the field count, 2 the array, 3 the field index,
+## 4 where that field starts.
+fn gen_case_decode(cw: AdtClassWriter) -> Unit !io = {
+  let m = open_static(cw, "case_decode", "(Ljava/lang/String;)[I")
+  m.visitVarInsn(OP_ALOAD, 0)
+  m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/String", "length", "()I", false)
+  m.visitIntInsn(OP_BIPUSH, 6)
+  m.visitInsn(OP_IDIV)
+  m.visitVarInsn(OP_ISTORE, 1)
+  m.visitVarInsn(OP_ILOAD, 1)
+  m.visitIntInsn(OP_NEWARRAY, T_INT)
+  m.visitVarInsn(OP_ASTORE, 2)
+  m.visitInsn(OP_ICONST_0)
+  m.visitVarInsn(OP_ISTORE, 3)
+  let again = Label.new()
+  let out = Label.new()
+  m.visitLabel(again)
+  m.visitVarInsn(OP_ILOAD, 3)
+  m.visitVarInsn(OP_ILOAD, 1)
+  m.visitJumpInsn(OP_IF_ICMPGE, out)
+  m.visitVarInsn(OP_ILOAD, 3)
+  m.visitIntInsn(OP_BIPUSH, 6)
+  m.visitInsn(OP_IMUL)
+  m.visitVarInsn(OP_ISTORE, 4)
+  m.visitVarInsn(OP_ALOAD, 2)
+  m.visitVarInsn(OP_ILOAD, 3)
+  m.visitVarInsn(OP_ALOAD, 0)
+  m.visitVarInsn(OP_ILOAD, 4)
+  m.visitVarInsn(OP_ILOAD, 4)
+  m.visitIntInsn(OP_BIPUSH, 6)
+  m.visitInsn(OP_IADD)
+  m.visitIntInsn(OP_BIPUSH, 16)
+  m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Integer", "parseInt",
+    "(Ljava/lang/CharSequence;III)I", false)
+  m.visitInsn(OP_IASTORE)
+  m.visitIincInsn(3, 1)
+  m.visitJumpInsn(OP_GOTO, again)
+  m.visitLabel(out)
+  m.visitVarInsn(OP_ALOAD, 2)
+  m.visitInsn(OP_ARETURN)
+  close_mv(m)
+}
+
+## The range holding a code point, by binary search over the flat table: three
+## slots per range, sorted and disjoint. A code point in no range maps to
+## itself, which is most of them.
+##
+## Locals: 0 the code point, 1 the table, 2 and 3 the search bounds, 4 the
+## midpoint range, 5 where it starts in the array.
+fn gen_case_lookup(cw: AdtClassWriter) -> Unit !io = {
+  let m = open_static(cw, "case_cp", "(I[I)I")
+  m.visitInsn(OP_ICONST_0)
+  m.visitVarInsn(OP_ISTORE, 2)
+  m.visitVarInsn(OP_ALOAD, 1)
+  m.visitInsn(OP_ARRAYLENGTH)
+  m.visitInsn(OP_ICONST_3)
+  m.visitInsn(OP_IDIV)
+  m.visitVarInsn(OP_ISTORE, 3)
+  let again = Label.new()
+  let out = Label.new()
+  let above = Label.new()
+  let hit = Label.new()
+  m.visitLabel(again)
+  m.visitVarInsn(OP_ILOAD, 2)
+  m.visitVarInsn(OP_ILOAD, 3)
+  m.visitJumpInsn(OP_IF_ICMPGE, out)
+  m.visitVarInsn(OP_ILOAD, 2)
+  m.visitVarInsn(OP_ILOAD, 3)
+  m.visitInsn(OP_IADD)
+  m.visitInsn(OP_ICONST_2)
+  m.visitInsn(OP_IDIV)
+  m.visitVarInsn(OP_ISTORE, 4)
+  m.visitVarInsn(OP_ILOAD, 4)
+  m.visitInsn(OP_ICONST_3)
+  m.visitInsn(OP_IMUL)
+  m.visitVarInsn(OP_ISTORE, 5)
+  # below the range: search the left half
+  m.visitVarInsn(OP_ILOAD, 0)
+  m.visitVarInsn(OP_ALOAD, 1)
+  m.visitVarInsn(OP_ILOAD, 5)
+  m.visitInsn(OP_IALOAD)
+  m.visitJumpInsn(OP_IF_ICMPGE, above)
+  m.visitVarInsn(OP_ILOAD, 4)
+  m.visitVarInsn(OP_ISTORE, 3)
+  m.visitJumpInsn(OP_GOTO, again)
+  m.visitLabel(above)
+  # past its end: search the right half
+  m.visitVarInsn(OP_ILOAD, 0)
+  m.visitVarInsn(OP_ALOAD, 1)
+  m.visitVarInsn(OP_ILOAD, 5)
+  m.visitInsn(OP_ICONST_1)
+  m.visitInsn(OP_IADD)
+  m.visitInsn(OP_IALOAD)
+  m.visitJumpInsn(OP_IF_ICMPLE, hit)
+  m.visitVarInsn(OP_ILOAD, 4)
+  m.visitInsn(OP_ICONST_1)
+  m.visitInsn(OP_IADD)
+  m.visitVarInsn(OP_ISTORE, 2)
+  m.visitJumpInsn(OP_GOTO, again)
+  m.visitLabel(hit)
+  # inside it: the same offset from the range's start as from its target
+  m.visitVarInsn(OP_ILOAD, 0)
+  m.visitVarInsn(OP_ALOAD, 1)
+  m.visitVarInsn(OP_ILOAD, 5)
+  m.visitInsn(OP_IALOAD)
+  m.visitInsn(OP_ISUB)
+  m.visitVarInsn(OP_ALOAD, 1)
+  m.visitVarInsn(OP_ILOAD, 5)
+  m.visitInsn(OP_ICONST_2)
+  m.visitInsn(OP_IADD)
+  m.visitInsn(OP_IALOAD)
+  m.visitInsn(OP_IADD)
+  m.visitInsn(OP_IRETURN)
+  m.visitLabel(out)
+  m.visitVarInsn(OP_ILOAD, 0)
+  m.visitInsn(OP_IRETURN)
+  close_mv(m)
+}
+
+## One of the two case foldings, as a walk mapping each code point through
+## `field` -- the *simple* mapping, out of the compiler's table.
 ##
 ## Locals: 0 the string, 1 the builder, 2 the UTF-16 offset, 3 the code point.
-fn gen_case_method(cw: AdtClassWriter, name: String, java_name: String) -> Unit !io = {
+fn gen_case_method(cw: AdtClassWriter, name: String, field: String) -> Unit !io = {
   let jstr = "java/lang/String"
   let m = open_static(cw, name, "(Ljava/lang/String;)Ljava/lang/String;")
   m.visitTypeInsn(OP_NEW, SB)
@@ -2377,7 +2577,8 @@ fn gen_case_method(cw: AdtClassWriter, name: String, java_name: String) -> Unit 
   m.visitVarInsn(OP_ISTORE, 3)
   m.visitVarInsn(OP_ALOAD, 1)
   m.visitVarInsn(OP_ILOAD, 3)
-  m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Character", java_name, "(I)I", false)
+  m.visitFieldInsn(OP_GETSTATIC, STRINGS_CLASS, field, "[I")
+  m.visitMethodInsn(OP_INVOKESTATIC, STRINGS_CLASS, "case_cp", "(I[I)I", false)
   m.visitMethodInsn(OP_INVOKEVIRTUAL, SB, "appendCodePoint", "(I)L" ++ SB ++ ";", false)
   m.visitInsn(OP_POP)
   m.visitVarInsn(OP_ILOAD, 2)

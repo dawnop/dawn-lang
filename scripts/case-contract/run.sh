@@ -1,35 +1,38 @@
 #!/usr/bin/env bash
-# Ties both backends' case folding to one oracle.
+# Ties both backends' case folding to the compiler's table.
 #
 #   ./scripts/case-contract/run.sh
 #
-# `str.lower`/`str.upper` are simple (1:1) Unicode case mapping. The JVM backend
-# gets that from Character.toUpperCase/toLowerCase; the C runtime has no Unicode
-# tables, so it carries runtime/c/dawn_case_table.h. Two implementations of one
-# mapping only stays true if something checks, and the probe checks both against
-# the oracle:
+# `str.lower`/`str.upper` are simple (1:1) Unicode case mapping, the one string
+# operation whose answer is a table rather than a walk. That table is the
+# compiler's -- selfhost/src/case_table.dawn -- and each backend receives it:
+# codegen writes it into dawn/rt/Strings, `__emitc` writes it into the
+# generated C. It used to be `Character.toUpperCase` on one side and a
+# generated C header on the other, which is one mapping only while the two
+# JDKs' Unicode releases agree.
 #
-#   * the compiled `str.upper`/`str.lower` over every code point that has a
-#     mapping, plus a spread of ones that do not;
-#   * the committed header, parsed and walked code point by code point -- what
-#     the C runtime actually compiles, rather than what a regeneration happens
-#     to print. A JDK whose Unicode version has moved on fails here, naming the
-#     code points, rather than silently in a native binary.
+# The probe checks:
 #
-# To regenerate the header after such a move:
+#   * the compiled `str.upper`/`str.lower` against the committed table, over
+#     every code point it maps plus a spread of ones it does not;
+#   * the table against `Character.toUpperCase`, the oracle it was generated
+#     from -- only when the running JDK carries the same Unicode release, since
+#     otherwise the disagreement is between two JDKs and says nothing about us.
+#
+# To regenerate the table after moving to a JDK with newer Unicode data:
 #
 #   DAWN_CASE_EMIT=1 bin/dawn run scripts/case-contract/probe.dawn \
-#     > runtime/c/dawn_case_table.h
+#     > selfhost/src/case_table.dawn
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 probe="$root/scripts/case-contract/probe.dawn"
 
-out="$(DAWN_CASE_HEADER="$root/runtime/c/dawn_case_table.h" "$root/bin/dawn" run "$probe")"
+out="$(DAWN_CASE_TABLE="$root/selfhost/src/case_table.dawn" "$root/bin/dawn" run "$probe")"
 
 if [ "$(printf '%s\n' "$out" | tail -n 1)" != "mismatches 0" ]; then
   printf '%s\n' "$out" >&2
-  echo "FAIL: case folding disagrees with Character.toUpperCase/toLowerCase" >&2
+  echo "FAIL: case folding disagrees with the compiler's table" >&2
   exit 1
 fi
 

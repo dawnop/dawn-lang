@@ -310,8 +310,11 @@ Cursor 那一行是 `opaque type Cursor = Int` 挣来的:模块外做不了算�
 
 不是 gap(未实现),是**实现了但答案可能不同**,各自写在定义处:
 
-- `str_lower`/`str_upper` 只折 ASCII。非 ASCII 有大小写的字母(希腊/西里尔/带音符拉丁)原样返回,JVM 会折。
-  全 Unicode 折叠要的表这个运行时还没有;而「见到非 ASCII 就 panic」会打断 `str.lower("中文")` 这种本来正确的用法。
+- ~~`str_lower`/`str_upper` 只折 ASCII~~ **2026-07-28 关掉**:两条都不再是偏离。先是 C 侧拿到了
+  全 Unicode 的简单映射表,然后**这张表整个收进了编译器**(`selfhost/src/case_table.dawn`)——
+  codegen 把它写进 `dawn/rt/Strings`、emitc 把它写进发出来的 C,两个后端从同一处领同一份数据。
+  在此之前 JVM 侧读的是**宿主 JDK 那一版 Unicode**,和 native 读的表可以差 18 个码点,
+  没有任何东西会说一声。见 `docs/native-backend-plan.md` §14.15–14.16。
 - `str_of_float` / `parse_float` 不是 Java 的语法/最短往返形式。浮点因此不进差分语料。
 - `java_try`/`catch_panic` 的 `Err` 载荷:JVM 是异常的 `toString`,native 是 panic 消息。**只分支 Ok/Err 的程序一致**。
 - `io_list_names` 的顺序两边都未定义。
