@@ -31,12 +31,23 @@ jobs:
       # had to be force-pushed out of history; this exists so that cannot recur.
       - name: no Claude attribution in commit messages
         run: |
+          before='${{ github.event.before }}'
           if [ "${{ github.event_name }}" = pull_request ]; then
             range="origin/${{ github.base_ref }}...HEAD"
-          elif [ "${{ github.event.before }}" = 0000000000000000000000000000000000000000 ]; then
+          elif [ "$before" = 0000000000000000000000000000000000000000 ]; then
             range="HEAD~1..HEAD"
+          elif git cat-file -e "$before^{commit}" 2>/dev/null; then
+            range="$before..HEAD"
           else
-            range="${{ github.event.before }}..HEAD"
+            # A force-push orphans the previous tip, so `fetch-depth: 0` -- which
+            # fetches what is *reachable* -- cannot fetch it, and a range against
+            # it is not a revision at all. This step used to fail there rather
+            # than check, which is precisely the operation the guard exists for:
+            # the trailers it looks for were once removed by force-push. Scanning
+            # the whole history instead is stricter and costs 0.04s for 500
+            # commits.
+            echo "note: $before is unreachable (force-push?) -- scanning all history"
+            range="HEAD"
           fi
           python3 scripts/check-no-claude-trailer.py --range "$range"
 
