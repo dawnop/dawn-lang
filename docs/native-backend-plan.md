@@ -1321,5 +1321,36 @@ C.jar     = HEAD 的源码,由「HEAD 由种子编的那个」编译          �
 * **`cursor_*` 七个**:JVM 是 UTF-16 下标、C 是字节偏移、解释器是码点下标——**三种货币**,
   彼此不必相同,因为 `opaque type Cursor` 让这个数谁也看不见(实测:类型名不出 `std/cursor`,
   而 `const` 强制类型标注,两道门挡住它逃进常量)。
-* **`str_lower`/`str_upper` 与 `char_is_*`**:答案是 Unicode 表不是走查。表由 JDK 生成、
-  `scripts/case-contract/run.sh` 逐码点对拍并重新生成 C 侧头文件,所以**数据只有一份**。
+* **`str_lower`/`str_upper` 与 `char_is_*`**:答案是 Unicode 表不是走查。C 侧的表由 JDK 生成、
+  `scripts/case-contract/run.sh` 逐码点走一遍对拍。
+
+### 14.15 收尾时被 CI 顶出来的残留:**oracle 是一个会动的东西**
+
+`case-contract` 本机全绿、CI 红。查出来的根因不在代码里:
+
+```
+本机  bin/dawn 跑程序时 fork 的是 PATH 上的 java = JDK 26  → Unicode 16
+CI    setup-graalvm 把 GraalVM 21 放在 PATH 首位          → Unicode 15
+```
+
+表是本机生成的(Unicode 16),CI 拿 Unicode 15 的 `Character.toUpperCase` 去对,于是
+**18 个码点对不上**——全是 Unicode 16 新加的大小写对:`A7CB`–`A7DB`(拉丁扩展 D)、
+`1C89`/`1C8A`(西里尔)、`10D50`–`10D73`(Garay)。
+
+这不是表写错了,是**同一个操作又有了两个定义**,只是这次高了一层:
+
+> JVM 后端的 `str.upper` = **宿主 JDK 那一版 Unicode**;native 的 = **表那一版**。
+> 于是「Dawn 的 `str.upper("ꟋA7CB")` 等于什么」取决于编译器碰巧跑在哪个 JDK 上。
+
+跟 14.12 修掉的完全同一个形状。**本刀没有解决它**,做了两件事:
+
+1. 表里记下生成它的 JDK(`/* jdk: 21.0.2 */`),按 CI 钉的那个 JDK 重新生成;
+2. 对拍脚本比较运行 JDK 与表的 JDK,**不同就只跑走查那半、并打印 note**——因为跨 Unicode
+   版本判表是在判两个 JDK,不是在判表。CI 钉了 JDK,所以 CI 上两半都跑。
+
+**真正的答案**是让 JVM 后端也读这张表,而不是问宿主 JDK——那样 Dawn 的大小写钉死在一个
+Unicode 版本上,两个后端读同一份数据,JDK 换了也不动。代价是把 1352 条区间搬进发出来的
+字节码(`<clinit>` 里从字符串常量解码 + 二分),已单开任务,不在本刀内。
+
+**教训**:「数据只有一份」这句话,得先问清楚**那份数据是谁的**。表是我们的,
+`Character.toUpperCase` 不是——它是 JDK 的,而 JDK 会动。
