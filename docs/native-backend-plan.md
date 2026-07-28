@@ -1083,3 +1083,52 @@ fault,其余(越界、除零、`cursor_slice`、非法码点、本后端未实�
 **名字的那半没做。** `java_try` 在一门正把 Java 从自己身上摘干净的语言里,给标准 io
 的错误屏障冠了宿主的名;而它现在两个后端一个含义,和 Java 没有关系了。改名要走一轮
 发布(内建名字由种子的 checker 认),所以它单开一件事,不混进这一刀。
+
+### 14.10 两个 main 的分区表:量出来只有三道缝
+
+「剩余 62 处没有一处是『本该纯 Dawn 却不是』」这句话记在好几处,**重验之后是错的**。
+`main.dawn` 里 `io.mkdirs` 的下一行就是 `Files.write`——#57/#58 加的原语在同一个函数里
+用了一半。清掉的 12 处:
+
+| 原来 | 现在 |
+|---|---|
+| `Files.write` / `Files.readAllBytes` | `io.write_bytes` / `io.read_bytes` |
+| `System.getenv` ×4 | `io.getenv` |
+| `Files.createTempDirectory` / `createTempFile` | `io.temp_dir` |
+| `Files.deleteIfExists` | `io.delete` |
+| `File.getAbsoluteFile().getParent()` / `.getPath()` | `fspath.parent` / `fspath.absolute` |
+| `File.isFile() && length() == length()` | `io.read_bytes` 两边比**内容** |
+
+`Files` 和 `Paths` 两个 import 整个下来了,`use java` **62 → 60**。
+
+两条顺带的行为改动,都是变好而不是变等价:①换成 `fspath.absolute` 之后路径会**规范化**,
+而 Java 的 `getAbsoluteFile().getPath()` 不规范化——`rel_entries` 里那个
+「jar 是否在输出目录之下」的前缀判断,对 `./out.jar` 这种写法原来会答错(base 是 `/cwd/.`);
+②vendor 的「要不要重新拷」从「同名同大小」改成**比内容**——没有 `size` 原语可以更省,
+而字节反正要读进来,于是顺手把「缓存不可变所以同名同大小即同内容」这条推断换成了直接的答案。
+
+**留下的 60 处按模块归半,并且现在是看出来的、不是断言的:**
+
+| 模块 | 处 | 谁能到达它 | 归属 |
+|---|---|---|---|
+| `emit` / `codegen` / `jarw` / `testrun` | 21 | 只有 `main`(及彼此) | JVM main,**已经隔离** |
+| `vendor` / `maven` | 15 | 只有 `main` | JVM main,**已经隔离** |
+| `main` | 5 | — | JVM main:`java.class.path`、`canExecute`、三处 `ProcessBuilder` |
+| `jreflect` | 11 | **`checker`** + codegen/emit/interp | **缝 1** |
+| `interp` | 7 | **`analyze`** + emitc/lsp/main/… | **缝 2** |
+| `stdlib` | 1 | **`analyze`** + doc/lsp/main | **缝 3** |
+
+**36 处已经在门后**——`vendor`/`maven`/`emit`/`codegen`/`jarw`/`testrun` 只被 `main` 够得着,
+分区时它们自动留在 JVM 那半,不需要任何改动。剩下的就是三道缝:
+
+1. **`checker` → `jreflect`**:给含 `use java` 的程序做类型检查要读 Java 类元数据。native
+   编译器的答案是**拒绝**这类程序,不是再写一个 class-file reader——所以这道缝是一句拒绝。
+2. **`analyze` → `interp`**:`emitc` 其实只从 `interp` 取 `CValue` 那几个**类型**,不取行为;
+   真正的行为边是 `analyze` 要的 `eval_comptime`。而 `interp` 的 7 处里,5 处是
+   `to_java_arg`/`from_java_ret`/`rt_raw`,即 **comptime 里求值 Java 调用**——结构性没有出路,
+   只能拒绝;另 2 处(`Double.isNaN`/`compare`)是纯谓词,和前 5 处同一个 import。
+   所以这道缝是「把 Java 调用求值拆成单独模块」,顺带 `CValue` 搬出去就能让 `emitc` 彻底不依赖 `interp`。
+3. **`analyze` → `stdlib`**:`ClassLoader.getSystemResourceAsStream` 从 jar 里读 std 源码。
+   **这一处不是残留,是 native main 唯一还没答的设计题**:native 编译器怎么拿到 std。
+
+三道缝加起来 19 处,其中 5 处结构性只能拒绝、1 处是待答的设计题。

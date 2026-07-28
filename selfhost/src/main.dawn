@@ -53,10 +53,9 @@ use emitc.{EmitMod}
 use tast.{TModule}
 use interp.{CtOut, CValue, CtOpts, ct_default, DEFAULT_FUEL}
 use checker.{Cx}
-use java "java.nio.file.Files"
-use java "java.nio.file.Paths"
 use java "java.io.File"
 use java "java.util.Map"
+use std/fspath
 use version.{VERSION}
 use diag
 use manifestv
@@ -137,7 +136,7 @@ fn write_class(dir: String, name: String, bs: Bytes) -> Unit !io = {
     None -> dir
   }
   let _ = io.mkdirs(parent)
-  let _ = java_try(fn() => Files.write(Paths.get(path).expect("path"), bs))
+  let _ = io.write_bytes(path, bs)
   ()
 }
 
@@ -526,7 +525,7 @@ fn resolve_java_deps(target: String) -> List[String] !io = {
 ## Jar paths the parent invocation resolved, carried across the re-exec.
 fn deps_from_env() -> List[String] !io = {
   let none: List[String] = []
-  match System.getenv("DAWN_SELFHOST_CP") {
+  match io.getenv("DAWN_SELFHOST_CP") {
     Some(s) -> if s == "" { none } else { str.split(s, ":") }
     None -> none
   }
@@ -536,7 +535,7 @@ fn deps_from_env() -> List[String] !io = {
 ## invocation with the jars appended to the class path and never return. In
 ## the child (env set) this is a no-op.
 fn maybe_with_deps(mode: String, rest: List[String]) -> Unit !io = {
-  match System.getenv("DAWN_SELFHOST_CP") {
+  match io.getenv("DAWN_SELFHOST_CP") {
     Some(_) -> return
     None -> ()
   }
@@ -563,7 +562,11 @@ fn maybe_with_deps(mode: String, rest: List[String]) -> Unit !io = {
 
 ## Emit `classes` under a fresh temp directory and return its path.
 fn write_temp_classes(classes: List[(String, Bytes)]) -> String !io = {
-  let dir = Files.createTempDirectory("selfhost-run").expect("temp dir").toString().expect("path")
+  let dir =
+    match io.temp_dir("", "selfhost-run") {
+      Ok(d) -> d
+      Err(e) -> panic("cannot create a temporary directory: " ++ e)
+    }
   for pair in classes {
     let (nm, bs) = pair
     write_class(dir, nm, bs)
@@ -701,11 +704,10 @@ fn target_stem(target: String) -> String = {
 
 ## The absolute directory a jar path lands in.
 fn abs_parent(path: String) -> String !io =
-  match java_try(fn() =>
-      File.new(path).getAbsoluteFile().expect("abs").getParent().expect("parent")) {
-        Ok(p) -> p
-        Err(_) -> "."
-      }
+  match fspath.parent(fspath.absolute(io.cwd(), path)) {
+    Some(p) -> p
+    None -> "."
+  }
 
 ## Copy resolved jars next to the output jar, under lib/ — coursier's cache is
 ## a content-addressed path in the user's home, fine to compile against and
@@ -721,14 +723,21 @@ fn vendor_jars(jars: List[String], jar_path: String) -> List[String] !io = {
       None -> src
     }
     let dst = lib_dir ++ "/" ++ name
-    # the cache is immutable: same name + same size means same bytes
-    let same = File.new(dst).isFile() && File.new(dst).length() == File.new(src).length()
+    let bs =
+      match io.read_bytes(src) {
+        Ok(b) -> b
+        Err(e) -> panic("cannot read " ++ src ++ ": " ++ e)
+      }
+    # Content, where this used to compare name and size and argue that the
+    # cache is immutable. The bytes are in hand either way -- there is no
+    # `size` primitive to be cheaper with, and the answer is now the real one.
+    let same =
+      match io.read_bytes(dst) {
+        Ok(d) -> d == bs
+        Err(_) -> false
+      }
     if not same {
-      let copied = java_try(fn() => {
-        let bs = Files.readAllBytes(Paths.get(src).expect("path")).expect("bytes")
-        Files.write(Paths.get(dst).expect("path"), bs)
-      })
-      match copied {
+      match io.write_bytes(dst, bs) {
         Ok(_) -> ()
         Err(e) -> panic("cannot copy " ++ src ++ " to " ++ dst ++ ": " ++ e)
       }
@@ -745,11 +754,7 @@ fn rel_entries(jars: List[String], jar_path: String) -> List[String] !io = {
   var out: List[String] = []
   let base = abs_parent(jar_path) ++ "/"
   for j in jars {
-    let abs = match java_try(fn() =>
-        File.new(j).getAbsoluteFile().expect("abs").getPath().expect("path")) {
-          Ok(a) -> a
-          Err(_) -> j
-        }
+    let abs = fspath.absolute(io.cwd(), j)
     if str.starts_with(abs, base) {
       out = out ++ [str.substring(abs, str.len(base), str.len(abs))]
     } else {
@@ -761,15 +766,15 @@ fn rel_entries(jars: List[String], jar_path: String) -> List[String] !io = {
 
 fn find_native_image() -> Option[String] !io = {
   var candidates: List[String] = []
-  match System.getenv("GRAALVM_HOME") {
+  match io.getenv("GRAALVM_HOME") {
     Some(h) -> { candidates = candidates ++ [h ++ "/bin/native-image"] }
     None -> ()
   }
-  match System.getenv("JAVA_HOME") {
+  match io.getenv("JAVA_HOME") {
     Some(h) -> { candidates = candidates ++ [h ++ "/bin/native-image"] }
     None -> ()
   }
-  match System.getenv("PATH") {
+  match io.getenv("PATH") {
     Some(p) -> {
       for dir in str.split(p, ":") { candidates = candidates ++ [dir ++ "/native-image"] }
     }
@@ -820,7 +825,13 @@ fn run_native_image(
     if line != "" { println("  " ++ line) }
   }
   let code = proc.waitFor()
-  let _ = java_try(fn() => Files.deleteIfExists(Paths.get(jar_path).expect("path")))
+  # the jar and the temp directory `run_build` staged it in -- there is no
+  # `temp_file` primitive, so the directory is the unit that gets cleaned up
+  let _ = io.delete(jar_path)
+  match fspath.parent(jar_path) {
+    Some(d) -> { let _ = io.delete(d) }
+    None -> ()
+  }
   if code != 0 {
     return cli_error("native-image failed (exit code " ++ to_string(code) ++ ")")
   }
@@ -869,11 +880,10 @@ fn run_build(rest0: List[String]) -> Unit !io = {
   }
   let stem = target_stem(target)
   let jar_path = if native {
-    match java_try(fn() =>
-        Files.createTempFile("dawn-build-", ".jar").expect("temp").toString().expect("path")) {
-          Ok(p) -> p
-          Err(e) -> panic("cannot create a temp jar: " ++ e)
-        }
+    match io.temp_dir("", "dawn-build-") {
+      Ok(d) -> d ++ "/" ++ stem ++ ".jar"
+      Err(e) -> panic("cannot create a temp jar: " ++ e)
+    }
   } else if out != "" {
     out
   } else {
@@ -918,11 +928,10 @@ fn run_build(rest0: List[String]) -> Unit !io = {
         for nm in sort(names) {
           let fp = embed_std ++ "/" ++ nm
           if not io.is_dir(fp) {
-            match java_try(fn() =>
-                Files.readAllBytes(Paths.get(fp).expect("path")).expect("bytes")) {
-                  Ok(bs) -> { resources = resources ++ [("std/" ++ nm, bs)] }
-                  Err(e) -> panic("cannot read " ++ fp ++ ": " ++ e)
-                }
+            match io.read_bytes(fp) {
+              Ok(bs) -> { resources = resources ++ [("std/" ++ nm, bs)] }
+              Err(e) -> panic("cannot read " ++ fp ++ ": " ++ e)
+            }
           }
         }
       }
