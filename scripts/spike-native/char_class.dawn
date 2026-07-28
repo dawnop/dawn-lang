@@ -1,11 +1,19 @@
-# The char_is_* intrinsics over the ASCII range, where both backends must
-# agree exactly. Above U+007F the native runtime has no Unicode table and
-# panics rather than guess, so this corpus deliberately stays inside ASCII --
-# see runtime/c/dawn_rt.h. A corpus that classified CJK would not be a harder
-# test of the same thing, it would be a test of a feature native does not have.
+# The char_is_* intrinsics, which both backends must answer identically.
 #
-# Written without a list literal on purpose: emitc has no collections until
-# D1-D3, and this corpus is about classification, not about containers.
+# This stayed inside ASCII until 2026-07-28, and said so: the native runtime had
+# no Unicode table and panicked above U+007F, so classifying CJK would have
+# tested a feature one backend did not have. It has the table now -- the
+# compiler's, the same rows the JVM backend decodes
+# (selfhost/src/class_table.dawn) -- so the interesting half of the question is
+# finally askable.
+#
+# The expectations are Unicode's, written out rather than recorded from a run:
+# general category Lu is upper, Ll is lower, Nd is digit, and Java's
+# `isWhitespace` excludes the non-breaking separators -- U+00A0 is a space
+# character and is *not* whitespace, which is the one that surprises.
+#
+# Written without a list literal on purpose: this corpus is about
+# classification, not about containers.
 
 fn show6(c: Int) -> String =
   to_string(char_is_letter(c)) ++ to_string(char_is_digit(c)) ++
@@ -23,4 +31,20 @@ pub fn main() -> Unit !io = {
   println(line('\t'))
   println(line('\n'))
   println(line('~'))
+  # latin-1: cased letters that the ASCII rules called neither
+  println(line(0x00C9))
+  println(line(0x00E9))
+  # a sharp s is lowercase and has no uppercase -- the same fact
+  # strings_case.dawn asks about the mapping
+  println(line(0x00DF))
+  # a space character that is not whitespace, and one that is
+  println(line(0x00A0))
+  println(line(0x3000))
+  # uncased script: a letter that is neither upper nor lower
+  println(line(0x4E2D))
+  # a digit that is not an ASCII digit
+  println(line(0x0660))
+  # above the BMP, where one code point is two UTF-16 units
+  println(line(0x10400))
+  println(line(0x10428))
 }

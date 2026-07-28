@@ -1322,11 +1322,11 @@ C.jar     = HEAD 的源码,由「HEAD 由种子编的那个」编译          �
   彼此不必相同,因为 `opaque type Cursor` 让这个数谁也看不见(实测:类型名不出 `std/cursor`,
   而 `const` 强制类型标注,两道门挡住它逃进常量)。
 * **`str_lower`/`str_upper` 与 `char_is_*`**:答案是 Unicode 表不是走查。C 侧的表由 JDK 生成、
-  `scripts/case-contract/run.sh` 逐码点走一遍对拍。
+  `scripts/unicode-contract/run.sh` 逐码点走一遍对拍。
 
 ### 14.15 收尾时被 CI 顶出来的残留:**oracle 是一个会动的东西**
 
-`case-contract` 本机全绿、CI 红。查出来的根因不在代码里:
+`case-contract`(现 `unicode-contract`) 本机全绿、CI 红。查出来的根因不在代码里:
 
 ```
 本机  bin/dawn 跑程序时 fork 的是 PATH 上的 java = JDK 26  → Unicode 16
@@ -1399,7 +1399,42 @@ selfhost/src/case_table.dawn     ← 唯一一份(生成物,1352 条区间,记�
 
 **还留着的不对称**,都是明写的:
 
-* **`char_is_*` 六个**:C 侧在 U+007F 以上直接 panic(`dawn_rt.h` 写了原因),是**声明出来的
-  缺口**而不是静默分歧——差异会当场炸,不会伪装成答案。同一形状的活儿,归 S4。
+* **`char_is_*` 六个**:同一形状,下一节收掉。
 * **comptime 折叠仍滞后一代种子**(§14.13):`bin/dawn` 自己的 `dawn/rt/Strings` 是**种子**发出来的,
   所以它折 `str.upper` 时还在问宿主 JDK。这不是新债,是 §14.13 那条的又一次体现,种子推进后自动跟上。
+
+### 14.17 分类表跟着收:`char_is_*` 六个,和一个被藏了很久的问题(2026-07-28)
+
+同一天把 `char_is_letter/digit/alnum/upper/lower/space` 也收了。**理由不是对称,是它更隐蔽**:
+
+| | 大小写(§14.16 之前) | 分类(本节之前) |
+|---|---|---|
+| JVM | `Character.toUpperCase` → 宿主 JDK | `Character.isLetter` → 宿主 JDK |
+| native | 生成的 C 头 | **U+007F 以上直接 panic** |
+
+C 侧那个 panic 一直被当成「声明出来的缺口」而不是分歧——差异会当场炸,不会伪装成答案。
+那句话是对的,但它掩住了另一半:**JVM 后端自己就在跟宿主 JDK 走**。
+`char_is_letter(0x10D50)` 在 JDK 21 上是 `false`、26 上是 `true`,一个 native 都没参与的、
+纯 JVM 的程序,答案取决于谁编译的它。panic 拦不住这个,因为根本没走到 native 那边。
+
+**做法与 §14.16 同**:`selfhost/src/class_table.dawn`(生成物),五张集合表——
+letter 659 / digit 64 / upper 651 / lower 671 / space 8 条区间。`alnum` **不入表**:
+Java 定义 `isLetterOrDigit = isLetter || isDigit`,存第三张集合就是第三个要维持一致的东西。
+编码是 §14.16 那套去掉第三个字段(12 位十六进制一条),解码器一个就够,只有读的步长不同。
+
+顺带删掉两处:C 侧的 `dawn_char_ascii_only` 门,和**手写的空白字符表**。那张手写表是对的
+(它连 U+00A0 是「空格字符但不是空白」这个坑都写对了),但**「是对的」是一个需要维持的性质,
+不是一个成立的性质**——现在它由表回答。
+
+**语料终于能问了**:`char_class.dawn` 从 2026-07-28 前的「刻意只测 ASCII,因为 native 没这功能」
+变成 17 行,覆盖 Lu/Ll/Lo/Nd、U+00A0 vs U+3000、以及 BMP 外的 Deseret 大小写对。
+`.expect` 按 Unicode 的一般类别手写,不是录下来的。对拍那边一次走 **137942 个码点**,
+mismatches 0。
+
+**两刀合计的代价**:`dawn/rt/Strings.class` 4.5 KB → **52 KB**;发出来的 C 每个程序多 3405 行
+(1352 条映射 + 2053 条集合)。都落在每个程序头上,且与程序用不用它无关——
+`gen_strings_class` 一直是无条件发的。**要减就减这个前提**(按用到的 intrinsic 裁剪运行时类),
+那是一件独立的、对整个 `dawn/rt/*` 都成立的事,不该混进本刀。
+
+> 这条值得单独记:**一个被明确写下来的缺口,会让人不再看它旁边**。C 侧 panic 的注释解释了
+> 为什么 native 不答,读了三遍都没问「那 JVM 是从哪答的」。

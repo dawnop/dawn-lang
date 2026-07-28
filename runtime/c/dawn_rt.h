@@ -243,6 +243,24 @@ extern const int64_t dawn_upper_ranges_n;
 extern const dawn_case_range dawn_lower_ranges[];
 extern const int64_t dawn_lower_ranges_n;
 
+/* Unicode classification, as the ranges each predicate holds at. Defined by
+ * the generated program for the same reason as the case table above. */
+typedef struct {
+  int32_t lo;
+  int32_t hi;
+} dawn_cp_range;
+
+extern const dawn_cp_range dawn_letter_ranges[];
+extern const int64_t dawn_letter_ranges_n;
+extern const dawn_cp_range dawn_digit_ranges[];
+extern const int64_t dawn_digit_ranges_n;
+extern const dawn_cp_range dawn_upper_class_ranges[];
+extern const int64_t dawn_upper_class_ranges_n;
+extern const dawn_cp_range dawn_lower_class_ranges[];
+extern const int64_t dawn_lower_class_ranges_n;
+extern const dawn_cp_range dawn_space_ranges[];
+extern const int64_t dawn_space_ranges_n;
+
 /* strings */
 dawn_str dawn_str_concat(dawn_str a, dawn_str b);
 bool dawn_str_eq(dawn_str a, dawn_str b);
@@ -297,12 +315,14 @@ dawn_str dawn_str_of_bool(bool v);
  * that punctuation and content stay distinguishable. */
 dawn_str dawn_str_quote(dawn_str s);
 
-/* Unicode classification of one code point (the char_is_* intrinsics).
+/* Unicode classification of one code point (the char_is_* intrinsics), out of
+ * the tables above. Exact against the JVM backend everywhere, because both
+ * read the same rows.
  *
- * Exact against the JVM backend for U+0000..U+007F. Above that the answer is a
- * Unicode derived-property lookup and this runtime has no table yet, so these
- * panic rather than guess: a wrong classification would differ from the JVM
- * silently, and a differential run comparing two backends would report ok. */
+ * These classified ASCII and panicked above U+007F until 2026-07-28, on the
+ * grounds that a wrong answer would differ from the JVM silently while a panic
+ * would not. That was the right call while the JVM's answer came from the
+ * running JDK -- there was nothing to copy that would stay copied. */
 bool dawn_char_is_letter(int64_t c);
 bool dawn_char_is_digit(int64_t c);
 bool dawn_char_is_alnum(int64_t c);

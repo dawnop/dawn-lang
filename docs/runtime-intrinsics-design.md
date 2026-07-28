@@ -310,11 +310,12 @@ Cursor 那一行是 `opaque type Cursor = Int` 挣来的:模块外做不了算�
 
 不是 gap(未实现),是**实现了但答案可能不同**,各自写在定义处:
 
-- ~~`str_lower`/`str_upper` 只折 ASCII~~ **2026-07-28 关掉**:两条都不再是偏离。先是 C 侧拿到了
-  全 Unicode 的简单映射表,然后**这张表整个收进了编译器**(`selfhost/src/case_table.dawn`)——
-  codegen 把它写进 `dawn/rt/Strings`、emitc 把它写进发出来的 C,两个后端从同一处领同一份数据。
-  在此之前 JVM 侧读的是**宿主 JDK 那一版 Unicode**,和 native 读的表可以差 18 个码点,
-  没有任何东西会说一声。见 `docs/native-backend-plan.md` §14.15–14.16。
+- ~~`str_lower`/`str_upper` 只折 ASCII~~ / ~~`char_is_*` 在 U+007F 以上 panic~~ **2026-07-28 关掉**:
+  两族都不再是偏离。**两张表整个收进了编译器**(`selfhost/src/case_table.dawn` 与
+  `class_table.dawn`)——codegen 写进 `dawn/rt/Strings`、emitc 写进发出来的 C,两个后端从
+  同一处领同一份数据。在此之前 JVM 侧读的是**宿主 JDK 那一版 Unicode**,所以连「只跑 JVM
+  的程序」答案都取决于谁编译的它;native 那边一个是差 18 个码点、一个是当场 panic。
+  见 `docs/native-backend-plan.md` §14.15–14.17。
 - `str_of_float` / `parse_float` 不是 Java 的语法/最短往返形式。浮点因此不进差分语料。
 - `java_try`/`catch_panic` 的 `Err` 载荷:JVM 是异常的 `toString`,native 是 panic 消息。**只分支 Ok/Err 的程序一致**。
 - `io_list_names` 的顺序两边都未定义。

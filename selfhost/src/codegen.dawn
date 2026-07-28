@@ -19,6 +19,7 @@ use types.{
 }
 use core.{subject_key}
 use case_table
+use class_table
 use jreflect
 use java "dawn.tool.AdtClassWriter"
 use java "org.objectweb.asm.MethodVisitor"
@@ -240,6 +241,10 @@ test "the case payload is three fixed-width fields per range" {
   assert case_payload([(0x10FFFF, 0x10FFFF, 0)]) == "10ffff10ffff10ffff"
   assert str.len(case_payload(case_table.upper())) == len(case_table.upper()) * 18
   assert str.len(case_payload(case_table.lower())) == len(case_table.lower()) * 18
+  # the classification tables are the same encoding with the third field gone
+  assert class_payload([(0x0041, 0x005A)]) == "00004100005a"
+  assert str.len(class_payload(class_table.letters())) == len(class_table.letters()) * 12
+  assert str.len(class_payload(class_table.spaces())) == len(class_table.spaces()) * 12
 }
 
 # ---- JVM opcode constants (org.objectweb.asm.Opcodes; static fields do not
@@ -1998,10 +2003,21 @@ pub const OP_ICONST_3: Int = 6
 ## The `atype` operand NEWARRAY takes for an int array (JVMS 6.5).
 pub const T_INT: Int = 10
 
-## The two `int[]` the case table is decoded into, one range per three slots.
+## The `int[]` the Unicode tables are decoded into: three slots per range for
+## the case maps (first, last, what the first maps to), two for the sets.
 const CASE_UPPER: String = "CASE_UPPER"
 
 const CASE_LOWER: String = "CASE_LOWER"
+
+const CLASS_LETTER: String = "CLASS_LETTER"
+
+const CLASS_DIGIT: String = "CLASS_DIGIT"
+
+const CLASS_UPPER: String = "CLASS_UPPER"
+
+const CLASS_LOWER: String = "CLASS_LOWER"
+
+const CLASS_SPACE: String = "CLASS_SPACE"
 
 ## dawn/rt/Strings: the string runtime — join, parse_int/parse_float,
 ## code_points/from_code_points, the cursor family, the Unicode classifiers and
@@ -2346,37 +2362,49 @@ pub fn gen_strings_class(supers: List[String]) -> Bytes !io = {
   cslv.visitInsn(OP_ARETURN)
   close_mv(cslv)
 
-  # ---- str_* intrinsics: what a walk cannot answer ----
+  # ---- what a walk cannot answer: the Unicode tables ----
+  #
   # Length, trimming and the four searches used to be here as well, each a
   # hand-written body with a second one in the C runtime and no shared
   # definition. std/str writes them over the cursor walk now, so what is left
-  # is the operation whose answer is a Unicode table
-  # (docs/native-backend-plan.md 14.12).
-
-  # str_lower/str_upper: simple (1:1) mapping, one code point at a time, out of
-  # the compiler's table (selfhost/src/case_table.dawn).
+  # is the two operations whose answer is a table rather than a derivation
+  # (docs/native-backend-plan.md 14.12): simple case mapping, and the six
+  # classifications.
   #
-  # This called `Character.toUpperCase` until 2026-07-28, which *is* the simple
-  # mapping -- but it is the running JDK's, and the C runtime's answer was the
-  # one the table had been generated from. Unicode 15 and 16 differ by 18 code
-  # points, so "the two backends implement one mapping" held only while the two
-  # JDKs agreed, which is not a property anyone can hold on to. The table is the
-  # language's now and each backend receives it.
+  # Both used to be `java/lang/Character` calls, so this backend answered from
+  # *the running JDK's* Unicode release while the C runtime answered from a
+  # generated header (case) or gave up above U+007F (classification). Unicode
+  # 15 and 16 differ by 18 cased code points and nothing said so. The tables
+  # are the compiler's now -- selfhost/src/{case,class}_table.dawn -- and both
+  # backends receive them, so a program's answer stops depending on which JDK
+  # compiled it.
   #
   # `String.toUpperCase` is *full* mapping, which is not a function a second
   # backend could implement from a table at all: it is locale- and
   # context-sensitive, and it does not preserve the code-point count (a sharp s
   # uppercases to two letters). That belongs in a library taking a locale.
-  cw.field(ACC_PRIVATE + ACC_STATIC + ACC_FINAL, CASE_UPPER, "[I")
-  cw.field(ACC_PRIVATE + ACC_STATIC + ACC_FINAL, CASE_LOWER, "[I")
-  gen_case_decode(cw)
+  let tables = [
+    (CASE_UPPER, case_payload(case_table.upper())),
+    (CASE_LOWER, case_payload(case_table.lower())),
+    (CLASS_LETTER, class_payload(class_table.letters())),
+    (CLASS_DIGIT, class_payload(class_table.digits())),
+    (CLASS_UPPER, class_payload(class_table.uppers())),
+    (CLASS_LOWER, class_payload(class_table.lowers())),
+    (CLASS_SPACE, class_payload(class_table.spaces()))
+  ]
+  for t in tables {
+    let (field, _) = t
+    cw.field(ACC_PRIVATE + ACC_STATIC + ACC_FINAL, field, "[I")
+  }
+  gen_decode_table(cw)
   gen_case_lookup(cw)
+  gen_class_lookup(cw)
   let ci = cw.method(ACC_STATIC, "<clinit>", "()V").expect("mv")
   ci.visitCode()
-  for e in [(CASE_UPPER, case_table.upper()), (CASE_LOWER, case_table.lower())] {
-    let (field, rs) = e
-    ci.visitLdcInsn(case_payload(rs))
-    ci.visitMethodInsn(OP_INVOKESTATIC, STRINGS_CLASS, "case_decode",
+  for t in tables {
+    let (field, payload) = t
+    ci.visitLdcInsn(payload)
+    ci.visitMethodInsn(OP_INVOKESTATIC, STRINGS_CLASS, "decode_table",
       "(Ljava/lang/String;)[I", false)
     ci.visitFieldInsn(OP_PUTSTATIC, STRINGS_CLASS, field, "[I")
   }
@@ -2385,19 +2413,35 @@ pub fn gen_strings_class(supers: List[String]) -> Bytes !io = {
   gen_case_method(cw, "str_lower", CASE_LOWER)
   gen_case_method(cw, "str_upper", CASE_UPPER)
 
-  # char_is_*(c): Character.isX((int) c). One code point in, a Unicode table
-  # lookup out; the JVM's tables are this backend's answer to the contract.
-  for e in [("char_is_letter", "isLetter"), ("char_is_digit", "isDigit"),
-    ("char_is_alnum", "isLetterOrDigit"), ("char_is_upper", "isUpperCase"),
-    ("char_is_lower", "isLowerCase"), ("char_is_space", "isWhitespace")] {
-      let (dawn_name, java_name) = e
+  # char_is_*(c): is this code point in the table's set?
+  for e in [("char_is_letter", CLASS_LETTER), ("char_is_digit", CLASS_DIGIT),
+    ("char_is_upper", CLASS_UPPER), ("char_is_lower", CLASS_LOWER),
+    ("char_is_space", CLASS_SPACE)] {
+      let (dawn_name, field) = e
       let cv = open_static(cw, dawn_name, "(J)Z")
       cv.visitVarInsn(OP_LLOAD, 0)
       cv.visitInsn(OP_L2I)
-      cv.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Character", java_name, "(I)Z", false)
+      cv.visitFieldInsn(OP_GETSTATIC, STRINGS_CLASS, field, "[I")
+      cv.visitMethodInsn(OP_INVOKESTATIC, STRINGS_CLASS, "in_ranges", "(I[I)Z", false)
       cv.visitInsn(OP_IRETURN)
       close_mv(cv)
     }
+
+  # alnum has no table of its own: Java defines isLetterOrDigit as isLetter ||
+  # isDigit and the C runtime does the same, so storing a third set would be a
+  # third thing to keep in agreement with the other two.
+  let anv = open_static(cw, "char_is_alnum", "(J)Z")
+  let alnum_yes = Label.new()
+  anv.visitVarInsn(OP_LLOAD, 0)
+  anv.visitMethodInsn(OP_INVOKESTATIC, STRINGS_CLASS, "char_is_letter", "(J)Z", false)
+  anv.visitJumpInsn(OP_IFNE, alnum_yes)
+  anv.visitVarInsn(OP_LLOAD, 0)
+  anv.visitMethodInsn(OP_INVOKESTATIC, STRINGS_CLASS, "char_is_digit", "(J)Z", false)
+  anv.visitInsn(OP_IRETURN)
+  anv.visitLabel(alnum_yes)
+  anv.visitInsn(OP_ICONST_1)
+  anv.visitInsn(OP_IRETURN)
+  close_mv(anv)
 
   cw.visitEnd()
   cw.toByteArray().expect("bytes")
@@ -2418,6 +2462,16 @@ fn case_payload(rs: List[(Int, Int, Int)]) -> String = {
   join(parts, "")
 }
 
+## One classification range: the same fixed width, two fields instead of three.
+fn class_payload(rs: List[(Int, Int)]) -> String = {
+  var parts: List[String] = []
+  for r in rs {
+    let (lo, hi) = r
+    parts = parts ++ [hex6(lo), hex6(hi)]
+  }
+  join(parts, "")
+}
+
 fn hex6(n: Int) -> String = {
   var s = ""
   var v = n
@@ -2428,14 +2482,16 @@ fn hex6(n: Int) -> String = {
   s
 }
 
-## The static initializer's half: the payload into one flat int[]. A slice of
-## the constant is parsed in place — `Integer.parseInt(CharSequence, …)` takes
-## bounds — so this allocates the array and nothing else.
+## The static initializer's half: a payload into one flat int[]. A slice of the
+## constant is parsed in place — `Integer.parseInt(CharSequence, …)` takes
+## bounds — so this allocates the array and nothing else. Fields are the same
+## width in every table, so one decoder serves all of them; only the stride the
+## readers use differs.
 ##
 ## Locals: 0 the payload, 1 the field count, 2 the array, 3 the field index,
 ## 4 where that field starts.
-fn gen_case_decode(cw: AdtClassWriter) -> Unit !io = {
-  let m = open_static(cw, "case_decode", "(Ljava/lang/String;)[I")
+fn gen_decode_table(cw: AdtClassWriter) -> Unit !io = {
+  let m = open_static(cw, "decode_table", "(Ljava/lang/String;)[I")
   m.visitVarInsn(OP_ALOAD, 0)
   m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/String", "length", "()I", false)
   m.visitIntInsn(OP_BIPUSH, 6)
@@ -2547,6 +2603,71 @@ fn gen_case_lookup(cw: AdtClassWriter) -> Unit !io = {
   m.visitInsn(OP_IRETURN)
   m.visitLabel(out)
   m.visitVarInsn(OP_ILOAD, 0)
+  m.visitInsn(OP_IRETURN)
+  close_mv(m)
+}
+
+## Whether a code point is in a set, by binary search over the flat table: two
+## slots per range, sorted and disjoint. Same shape as `case_cp` with the third
+## slot and the arithmetic taken out.
+##
+## Locals: 0 the code point, 1 the table, 2 and 3 the search bounds, 4 the
+## midpoint range, 5 where it starts in the array.
+fn gen_class_lookup(cw: AdtClassWriter) -> Unit !io = {
+  let m = open_static(cw, "in_ranges", "(I[I)Z")
+  m.visitInsn(OP_ICONST_0)
+  m.visitVarInsn(OP_ISTORE, 2)
+  m.visitVarInsn(OP_ALOAD, 1)
+  m.visitInsn(OP_ARRAYLENGTH)
+  m.visitInsn(OP_ICONST_2)
+  m.visitInsn(OP_IDIV)
+  m.visitVarInsn(OP_ISTORE, 3)
+  let again = Label.new()
+  let miss = Label.new()
+  let hit = Label.new()
+  let above = Label.new()
+  m.visitLabel(again)
+  m.visitVarInsn(OP_ILOAD, 2)
+  m.visitVarInsn(OP_ILOAD, 3)
+  m.visitJumpInsn(OP_IF_ICMPGE, miss)
+  m.visitVarInsn(OP_ILOAD, 2)
+  m.visitVarInsn(OP_ILOAD, 3)
+  m.visitInsn(OP_IADD)
+  m.visitInsn(OP_ICONST_2)
+  m.visitInsn(OP_IDIV)
+  m.visitVarInsn(OP_ISTORE, 4)
+  m.visitVarInsn(OP_ILOAD, 4)
+  m.visitInsn(OP_ICONST_2)
+  m.visitInsn(OP_IMUL)
+  m.visitVarInsn(OP_ISTORE, 5)
+  # below the range: search the left half
+  m.visitVarInsn(OP_ILOAD, 0)
+  m.visitVarInsn(OP_ALOAD, 1)
+  m.visitVarInsn(OP_ILOAD, 5)
+  m.visitInsn(OP_IALOAD)
+  m.visitJumpInsn(OP_IF_ICMPGE, above)
+  m.visitVarInsn(OP_ILOAD, 4)
+  m.visitVarInsn(OP_ISTORE, 3)
+  m.visitJumpInsn(OP_GOTO, again)
+  m.visitLabel(above)
+  # past its end: search the right half; otherwise it is inside this one
+  m.visitVarInsn(OP_ILOAD, 0)
+  m.visitVarInsn(OP_ALOAD, 1)
+  m.visitVarInsn(OP_ILOAD, 5)
+  m.visitInsn(OP_ICONST_1)
+  m.visitInsn(OP_IADD)
+  m.visitInsn(OP_IALOAD)
+  m.visitJumpInsn(OP_IF_ICMPLE, hit)
+  m.visitVarInsn(OP_ILOAD, 4)
+  m.visitInsn(OP_ICONST_1)
+  m.visitInsn(OP_IADD)
+  m.visitVarInsn(OP_ISTORE, 2)
+  m.visitJumpInsn(OP_GOTO, again)
+  m.visitLabel(hit)
+  m.visitInsn(OP_ICONST_1)
+  m.visitInsn(OP_IRETURN)
+  m.visitLabel(miss)
+  m.visitInsn(OP_ICONST_0)
   m.visitInsn(OP_IRETURN)
   close_mv(m)
 }

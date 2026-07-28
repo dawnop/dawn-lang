@@ -463,53 +463,54 @@ dawn_adt *dawn_catch_panic(dawn_clo *f) { return dawn_run_caught(f, true); }
 
 /* ---- code-point classification (char_is_*) ---------------------------- */
 
-/* Above U+007F the answer needs the Unicode tables; see dawn_rt.h. */
-static void dawn_char_ascii_only(int64_t c) {
-  if (c < 0 || c > 0x7F) {
-    dawn_panic(dawn_str_lit(
-      "char classification above U+007F is not implemented on this backend", 67));
+/* Membership in a sorted, disjoint set of ranges (dawn_rt.h). Out-of-range and
+ * negative inputs fall out as false, which is the answer: the intrinsic takes
+ * an Int and nothing says it is a code point. */
+static bool dawn_cp_in(int64_t c, const dawn_cp_range *rs, size_t n) {
+  size_t lo = 0, hi = n;
+  while (lo < hi) {
+    size_t mid = lo + (hi - lo) / 2;
+    if (c < rs[mid].lo) {
+      hi = mid;
+    } else if (c > rs[mid].hi) {
+      lo = mid + 1;
+    } else {
+      return true;
+    }
   }
+  return false;
 }
 
 bool dawn_char_is_letter(int64_t c) {
-  dawn_char_ascii_only(c);
-  return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
+  return dawn_cp_in(c, dawn_letter_ranges, (size_t)dawn_letter_ranges_n);
 }
 
 bool dawn_char_is_digit(int64_t c) {
-  dawn_char_ascii_only(c);
-  return c >= '0' && c <= '9';
+  return dawn_cp_in(c, dawn_digit_ranges, (size_t)dawn_digit_ranges_n);
 }
 
+/* Not a table of its own: Java defines isLetterOrDigit this way, so a third
+ * set would be a third thing to keep in agreement with the other two. */
 bool dawn_char_is_alnum(int64_t c) {
   return dawn_char_is_letter(c) || dawn_char_is_digit(c);
 }
 
 bool dawn_char_is_upper(int64_t c) {
-  dawn_char_ascii_only(c);
-  return c >= 'A' && c <= 'Z';
+  return dawn_cp_in(c, dawn_upper_class_ranges, (size_t)dawn_upper_class_ranges_n);
 }
 
 bool dawn_char_is_lower(int64_t c) {
-  dawn_char_ascii_only(c);
-  return c >= 'a' && c <= 'z';
+  return dawn_cp_in(c, dawn_lower_class_ranges, (size_t)dawn_lower_class_ranges_n);
 }
 
-/* Whitespace is the one classification whose full answer is small enough to
- * write down, so this one does not stop at U+007F: below it, Java's set is HT
- * VT LF FF CR, the four file/group/record/unit separators, and space; above
- * it, the separators that are not non-breaking. U+00A0, U+2007 and U+202F are
- * separators and are *not* whitespace, which is the part that surprises. */
-static bool dawn_is_space_cp(int64_t c) {
-  if (c <= 0x7F) {
-    return (c >= 0x09 && c <= 0x0D) || (c >= 0x1C && c <= 0x1F) || c == 0x20;
-  }
-  return c == 0x1680 || (c >= 0x2000 && c <= 0x2006) ||
-         (c >= 0x2008 && c <= 0x200A) || c == 0x2028 || c == 0x2029 ||
-         c == 0x205F || c == 0x3000;
+/* Whitespace is the one set small enough that it used to be written out here
+ * by hand, and the hand-written version was right -- but it was a second
+ * definition, and being right is a property that has to be maintained rather
+ * than one that holds. U+00A0, U+2007 and U+202F are separators and are *not*
+ * whitespace, which is the part that surprises; the table says so. */
+bool dawn_char_is_space(int64_t c) {
+  return dawn_cp_in(c, dawn_space_ranges, (size_t)dawn_space_ranges_n);
 }
-
-bool dawn_char_is_space(int64_t c) { return dawn_is_space_cp(c); }
 
 /* ---- Array: the backend's one collection primitive ---- */
 
@@ -713,14 +714,14 @@ static dawn_str dawn_str_trim(dawn_str s) {
   int64_t a = 0;
   while (a < s.len) {
     int64_t n;
-    if (!dawn_is_space_cp((int64_t)dawn_utf8_at(s, a, &n))) break;
+    if (!dawn_char_is_space((int64_t)dawn_utf8_at(s, a, &n))) break;
     a += n;
   }
   int64_t b = s.len;
   while (b > a) {
     int64_t prev = dawn_cursor_prev(s, b);
     int64_t n;
-    if (!dawn_is_space_cp((int64_t)dawn_utf8_at(s, prev, &n))) break;
+    if (!dawn_char_is_space((int64_t)dawn_utf8_at(s, prev, &n))) break;
     b = prev;
   }
   return (dawn_str){s.p + a, b - a};
@@ -730,7 +731,7 @@ static dawn_str dawn_str_trim(dawn_str s) {
  * carries (dawn_rt.h, selfhost/src/case_table.dawn). The JVM backend decodes
  * the same rows into dawn/rt/Strings, so the two backends are two
  * implementations of one mapping rather than two mappings
- * (native-backend-plan.md 14.12). scripts/case-contract/run.sh checks the
+ * (native-backend-plan.md 14.12). scripts/unicode-contract/run.sh checks the
  * compiled result against the table, and the table against the JDK it was
  * generated from.
  *
