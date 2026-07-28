@@ -1044,3 +1044,42 @@ glibc 的 `posix_spawnp` 确实把 ENOENT 从返回值报回来,没推迟到子�
 **语料先行是这一刀的方法,不是修辞。** 两条 known-red 写进去、活了一天、被同一天的下一个
 提交删掉——`.expect` 里那 40 行数是按定义手算的,不是从任何一个后端读出来的,否则它证明的
 只会是「两个后端一起错」。
+
+### 14.9 两个屏障:规矩早就写在 spec 里,native 没照做,也没人问过
+
+spec §9.8 写得很清楚:`java_try` 处理**预期外部失败**、**放 panic 穿透**;`catch_panic`
+是隔离点、兜住一切。§4.3 和 §7 还各点了一次名(除零是 panic,故 `java_try` 不拦)。
+JVM 从类层次白拿这条分工——`panic` 抛 `PanicError`(`Error` 子类),`java_try` 只 catch
+`Exception`。**native 没有异常**:一切失败走同一条 `longjmp`,于是
+
+```c
+dawn_adt *dawn_java_try(dawn_clo *f)    { return dawn_run_caught(f); }
+dawn_adt *dawn_catch_panic(dawn_clo *f) { return dawn_run_caught(f); }
+```
+
+两个内建是**字面上同一个函数**。`scripts/spike-native/catch_kinds.dawn` 写出来那天,
+十三行里除了 io 那两行,**每一行都分叉**:JVM 说 `through`,native 说 `caught`。
+也就是说 native 上 `std/io` 的错误屏障会把 `panic("...")`、越界下标、除零统统吞成
+`Err`,和「文件不存在」长得一模一样。
+
+**修法是给失败一个种类**,即 JVM 从类层次白拿的那个东西:handler 记住自己收不收 panic,
+raise 走到最近一个肯收的——panic 穿过 io 屏障时跳过它。C 运行时里只有 io 原语 raise
+fault,其余(越界、除零、`cursor_slice`、非法码点、本后端未实现)都是语言自己的失败,panic。
+
+**同一个语料还问出两件,一边一件:**
+
+- **`std/bytes.slice` 的契约被 C 运行时违反了。** 文档写着「两端都夹到范围内,
+  `start > end` 得空,所以它永不 panic」,JVM 照做,C **panic**——就写在一句
+  「像 JVM 的 bytes_clamp 那样夹」的注释正下方。这条甚至不关捕获的事:同一个调用,
+  两个答案。
+- **`from_code_points` 是 JVM 上最后一处宿主异常外泄。** `StringBuilder.appendCodePoint`
+  对非法码点抛 `IllegalArgumentException`,那是 `Exception`,于是 io 屏障把一个
+  **参数错误**当成缺文件收进 `Result`。现在它 panic,和越界下标同一档。
+
+**代价说清楚:这一刀改的是每个程序的字节码。** `from_code_points` 住在 `dawn/rt/Strings`
+里,而那是每个发出的程序都带的运行时类——所以 prev-diff 的六个语料**全部**有差异,
+不像上一刀只有编译器自己变。
+
+**名字的那半没做。** `java_try` 在一门正把 Java 从自己身上摘干净的语言里,给标准 io
+的错误屏障冠了宿主的名;而它现在两个后端一个含义,和 Java 没有关系了。改名要走一轮
+发布(内建名字由种子的 checker 认),所以它单开一件事,不混进这一刀。

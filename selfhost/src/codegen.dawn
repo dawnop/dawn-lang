@@ -2117,6 +2117,25 @@ pub fn gen_strings_class(supers: List[String]) -> Bytes !io = {
   fc.visitMethodInsn(OP_INVOKEINTERFACE, jlist, "get", "(I)Ljava/lang/Object;", true)
   fc.visitTypeInsn(OP_CHECKCAST, "java/lang/Long")
   fc.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/Long", "intValue", "()I", false)
+  # An out-of-range code point is the caller's error, so it panics -- the way
+  # a bad index does. Left to `appendCodePoint` it came out as
+  # `IllegalArgumentException`, and that is an `Exception`: `java_try` caught
+  # it, so the io barrier turned an argument error into an `Err` that reads
+  # like a missing file. The one place a host exception still escaped
+  # (catch_kinds.dawn).
+  fc.visitInsn(OP_DUP)
+  fc.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Character", "isValidCodePoint",
+    "(I)Z", false)
+  let f_ok = Label.new()
+  fc.visitJumpInsn(OP_IFNE, f_ok)
+  fc.visitTypeInsn(OP_NEW, PANIC_CLASS)
+  fc.visitInsn(OP_DUP)
+  fc.visitLdcInsn(
+    Objects.requireNonNull("from_code_points: not a valid code point").expect("non-null"))
+  fc.visitMethodInsn(OP_INVOKESPECIAL, PANIC_CLASS, "<init>",
+    "(Ljava/lang/String;)V", false)
+  fc.visitInsn(OP_ATHROW)
+  fc.visitLabel(f_ok)
   fc.visitMethodInsn(OP_INVOKEVIRTUAL, SB, "appendCodePoint", "(I)L" ++ SB ++ ";", false)
   fc.visitInsn(OP_POP)
   fc.visitIincInsn(2, 1)

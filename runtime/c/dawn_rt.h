@@ -317,7 +317,13 @@ int64_t dawn_cmp_str(dawn_str a, dawn_str b);
 int64_t dawn_idiv(int64_t a, int64_t b);
 int64_t dawn_imod(int64_t a, int64_t b);
 
-/* control */
+/* Control. The two failure kinds, and the difference is which barrier stops
+ * one: `java_try` takes a fault (the outside world said no) and lets a panic
+ * past, `catch_panic` takes both. The JVM gets the same split from `Error` vs
+ * `Exception`; here it is a flag on the handler. Everything in this file
+ * raises a fault only where an io primitive failed -- a bad index or a bad
+ * argument is the language's own failure and panics. */
 void dawn_panic(dawn_str msg);
+void dawn_fault(dawn_str msg);
 
 #endif /* DAWN_RT_H */

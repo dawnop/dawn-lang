@@ -1038,6 +1038,13 @@ fn parse(s: String) -> Result[Int, String] !io =
 `catch_panic` 是**隔离点**、兜住一切。普通业务失败仍走 `Result`，别拿 `catch_panic`
 当常规错误处理。
 
+> **这条分工与后端无关。** JVM 从类层次白拿它（`Error` 对 `Exception`）；native
+> 没有异常，一切失败走同一条 `longjmp`，所以失败带一个**种类**、handler 记住自己
+> 收不收 panic。判据是同一条：**语言自己定义的失败是 panic**（`panic`、`expect`、
+> 越界下标、除零、非法码点），**外部世界造成的失败不是**（io 原语——量下来也只有
+> 这一类）。两个后端的实测比对在 `scripts/spike-native/catch_kinds.dawn`；
+> 在它写出来之前 native 的 `java_try` 拦下了本该穿透的每一个 panic。
+
 ---
 
 ## 10. 模块系统
@@ -1293,7 +1300,7 @@ native-image，责任在库，见 §12.3）。Dawn 无依赖解析——只接�
 | `Int`/`Float`/`Bool` | 原生 `long`/`double`/`boolean`，仅泛型位置装箱 |
 | `Unit` | `Ldawn/rt/Unit;`——单例引用，占一个槽位，形参/字段/捕获位与别的引用无异 |
 | `Never` | `V`，且只出现在返回位（不返回的表达式没有形参或字段可占） |
-| `panic` | 抛 `dawn.rt.PanicError`（Error 子类，不可被 Dawn 捕获） |
+| `panic` | 抛 `dawn.rt.PanicError`（Error 子类，故 `java_try` 不拦；只有隔离点 `catch_panic` 拦，见 §9.8） |
 
 运行时支持类（`dawn/rt/Lists`、`Strings`、`Io`、`Show`、`Maps`、`Tuple*`、`Fn*` 等）
 每个程序生成一份，被全部模块类共享。

@@ -401,26 +401,46 @@ int64_t dawn_imod(int64_t a, int64_t b) {
   return a % b;
 }
 
-/* ---- panics, and the two intrinsics that catch one ----------------------
+/* ---- failures, and the two barriers that stop them ----------------------
  *
- * `java_try` and `catch_panic` are one mechanism on the JVM (a try/catch over
- * Exception and over Throwable) and one mechanism here, but not the same one:
- * native has no exceptions, so what these catch is a panic. A handler is a
- * frame on this stack; `dawn_panic` jumps to the innermost one, or reports and
- * exits when there is none, which is what every panic did before this. */
+ * A failure has a kind, and the kind decides which barrier stops it:
+ *
+ *   panic   the language's own -- `panic`, `expect`, a bad index, division by
+ *           zero. A broken invariant inside the program. Only `catch_panic`.
+ *   fault   the outside world said no: an io primitive failed. Both barriers,
+ *           and `java_try` is *for* this one -- it is how std/io turns a
+ *           missing file into a `Result`.
+ *
+ * The JVM gets the same split from its class hierarchy for free -- `panic`
+ * throws an `Error` and `java_try` catches `Exception` -- so this is not a
+ * native invention, it is native catching up. Both intrinsics were literally
+ * this same function until 2026-07-28, which made `java_try` swallow the
+ * panics the JVM lets through; scripts/spike-native/catch_kinds.dawn is the
+ * corpus that asked.
+ *
+ * A handler is a frame on this stack. A raise walks to the innermost handler
+ * that will take its kind -- skipping io barriers when a panic passes through
+ * them -- or reports and exits when there is none. */
 typedef struct dawn_handler {
   jmp_buf jb;
   struct dawn_handler *prev;
+  bool catches_panic;
 } dawn_handler;
 
 static dawn_handler *dawn_handlers;
-static dawn_str dawn_panic_msg;
+static dawn_str dawn_failure_msg;
 
-void dawn_panic(dawn_str msg) {
-  if (dawn_handlers != NULL) {
-    dawn_panic_msg = msg;
-    longjmp(dawn_handlers->jb, 1);
+static void dawn_raise(dawn_str msg, bool is_panic) {
+  dawn_handler *h = dawn_handlers;
+  while (h != NULL && is_panic && !h->catches_panic) h = h->prev;
+  if (h != NULL) {
+    /* The skipped frames go with it: they sit above `h`, and `h`'s own
+     * setjmp branch restores the list to `h->prev`. */
+    dawn_failure_msg = msg;
+    longjmp(h->jb, 1);
   }
+  /* Nothing stopped it, so the program is over either way -- which is why
+   * both kinds report under the same word. */
   fflush(stdout);
   fputs("panic: ", stderr);
   if (msg.len > 0) fwrite(msg.p, 1, (size_t)msg.len, stderr);
@@ -428,24 +448,29 @@ void dawn_panic(dawn_str msg) {
   exit(1);
 }
 
+void dawn_panic(dawn_str msg) { dawn_raise(msg, true); }
+
+void dawn_fault(dawn_str msg) { dawn_raise(msg, false); }
+
 /* The closure returns an erased slot whatever `T` is, so one cast covers
  * every instantiation -- see the header. */
-static dawn_adt *dawn_run_caught(dawn_clo *f) {
+static dawn_adt *dawn_run_caught(dawn_clo *f, bool catches_panic) {
   dawn_handler h;
   h.prev = dawn_handlers;
+  h.catches_panic = catches_panic;
   dawn_handlers = &h;
   if (setjmp(h.jb) != 0) {
     dawn_handlers = h.prev;
-    return dawn_err(dawn_box_str(dawn_panic_msg));
+    return dawn_err(dawn_box_str(dawn_failure_msg));
   }
   void *v = ((void *(*)(dawn_clo *))f->fn)(f);
   dawn_handlers = h.prev;
   return dawn_ok(v);
 }
 
-dawn_adt *dawn_java_try(dawn_clo *f) { return dawn_run_caught(f); }
+dawn_adt *dawn_java_try(dawn_clo *f) { return dawn_run_caught(f, false); }
 
-dawn_adt *dawn_catch_panic(dawn_clo *f) { return dawn_run_caught(f); }
+dawn_adt *dawn_catch_panic(dawn_clo *f) { return dawn_run_caught(f, true); }
 
 /* ---- code-point classification (char_is_*) ---------------------------- */
 
@@ -944,9 +969,10 @@ dawn_bytes *dawn_bytes_slice(const dawn_bytes *b, int64_t from, int64_t to) {
   if (from > b->len) from = b->len;
   if (to < 0) to = 0;
   if (to > b->len) to = b->len;
-  if (from > to) {
-    dawn_panic(dawn_str_lit("bytes_slice: start greater than end", 35));
-  }
+  /* `start > end` yields empty, which is what std/bytes.slice documents and
+   * what the JVM's bytes_clamp path does. This panicked instead until
+   * 2026-07-28 -- under this very comment. */
+  if (from > to) to = from;
   unsigned char *buf = (unsigned char *)dawn_alloc((size_t)(to - from) + 1);
   if (to > from) memcpy(buf, b->p + from, (size_t)(to - from));
   return dawn_bytes_of(buf, to - from);
@@ -1124,11 +1150,11 @@ dawn_unit dawn_io_mkdirs(dawn_str path) {
     if (stat(p, &st) == 0) {
       if (!S_ISDIR(st.st_mode)) {
         free(p);
-        dawn_panic(dawn_str_lit("io_mkdirs: path exists and is not a directory", 44));
+        dawn_fault(dawn_str_lit("io_mkdirs: path exists and is not a directory", 44));
       }
     } else if (mkdir(p, 0777) != 0) {
       free(p);
-      dawn_panic(dawn_str_lit("io_mkdirs: cannot create directory", 34));
+      dawn_fault(dawn_str_lit("io_mkdirs: cannot create directory", 34));
     }
     p[i] = saved;
   }
@@ -1141,14 +1167,14 @@ dawn_str dawn_io_read_file(dawn_str path) {
   FILE *f = fopen(p, "rb");
   free(p);
   if (f == NULL) {
-    dawn_panic(dawn_str_lit("io_read_file: cannot open file", 30));
+    dawn_fault(dawn_str_lit("io_read_file: cannot open file", 30));
   }
   size_t n = 0;
   bool bad = false;
   unsigned char *buf = dawn_slurp(f, &n, &bad);
   fclose(f);
   if (bad) {
-    dawn_panic(dawn_str_lit("io_read_file: read failed", 25));
+    dawn_fault(dawn_str_lit("io_read_file: read failed", 25));
   }
   return (dawn_str){(const char *)buf, (int64_t)n};
 }
@@ -1159,13 +1185,13 @@ dawn_unit dawn_io_write_file(dawn_str path, dawn_str content) {
   FILE *f = fopen(p, "wb");
   free(p);
   if (f == NULL) {
-    dawn_panic(dawn_str_lit("io_write_file: cannot open file", 31));
+    dawn_fault(dawn_str_lit("io_write_file: cannot open file", 31));
   }
   bool bad = content.len > 0 &&
              fwrite(content.p, 1, (size_t)content.len, f) != (size_t)content.len;
   if (fclose(f) != 0) bad = true;
   if (bad) {
-    dawn_panic(dawn_str_lit("io_write_file: write failed", 27));
+    dawn_fault(dawn_str_lit("io_write_file: write failed", 27));
   }
   return DAWN_UNIT;
 }
@@ -1175,7 +1201,7 @@ dawn_array *dawn_io_list_names(dawn_str path) {
   DIR *d = opendir(p);
   free(p);
   if (d == NULL) {
-    dawn_panic(dawn_str_lit("io_list_names: cannot open directory", 36));
+    dawn_fault(dawn_str_lit("io_list_names: cannot open directory", 36));
   }
   dawn_array *a = dawn_array_new();
   struct dirent *e = readdir(d);
@@ -1201,7 +1227,7 @@ dawn_str dawn_io_cwd(void) {
     }
     free(buf);
     if (errno != ERANGE) {
-      dawn_panic(dawn_str_lit("io_cwd: cannot read the working directory", 40));
+      dawn_fault(dawn_str_lit("io_cwd: cannot read the working directory", 40));
     }
     cap *= 2;
   }
@@ -1220,14 +1246,14 @@ dawn_bytes *dawn_io_read_bytes(dawn_str path) {
   FILE *f = fopen(p, "rb");
   free(p);
   if (f == NULL) {
-    dawn_panic(dawn_str_lit("io_read_bytes: cannot open file", 31));
+    dawn_fault(dawn_str_lit("io_read_bytes: cannot open file", 31));
   }
   size_t n = 0;
   bool bad = false;
   unsigned char *buf = dawn_slurp(f, &n, &bad);
   fclose(f);
   if (bad) {
-    dawn_panic(dawn_str_lit("io_read_bytes: read failed", 26));
+    dawn_fault(dawn_str_lit("io_read_bytes: read failed", 26));
   }
   return dawn_bytes_of(buf, (int64_t)n);
 }
@@ -1238,13 +1264,13 @@ dawn_unit dawn_io_write_bytes(dawn_str path, const dawn_bytes *content) {
   FILE *f = fopen(p, "wb");
   free(p);
   if (f == NULL) {
-    dawn_panic(dawn_str_lit("io_write_bytes: cannot open file", 32));
+    dawn_fault(dawn_str_lit("io_write_bytes: cannot open file", 32));
   }
   bool bad = content->len > 0 &&
              fwrite(content->p, 1, (size_t)content->len, f) != (size_t)content->len;
   if (fclose(f) != 0) bad = true;
   if (bad) {
-    dawn_panic(dawn_str_lit("io_write_bytes: write failed", 28));
+    dawn_fault(dawn_str_lit("io_write_bytes: write failed", 28));
   }
   return DAWN_UNIT;
 }
@@ -1265,7 +1291,7 @@ dawn_unit dawn_io_rename(dawn_str src, dawn_str dst) {
   free(a);
   free(b);
   if (bad) {
-    dawn_panic(dawn_str_lit("io_rename: cannot rename (not one filesystem?)", 45));
+    dawn_fault(dawn_str_lit("io_rename: cannot rename (not one filesystem?)", 45));
   }
   return DAWN_UNIT;
 }
@@ -1292,7 +1318,7 @@ dawn_str dawn_io_temp_dir(dawn_str parent, dawn_str prefix) {
   free(pbuf);
   if (mkdtemp(tmpl) == NULL) {
     free(tmpl);
-    dawn_panic(dawn_str_lit("io_temp_dir: cannot create a temporary directory", 47));
+    dawn_fault(dawn_str_lit("io_temp_dir: cannot create a temporary directory", 47));
   }
   dawn_str s = dawn_str_copy(tmpl, strlen(tmpl));
   free(tmpl);
@@ -1328,7 +1354,7 @@ extern char **environ;
 int64_t dawn_io_run(dawn_array *argv, dawn_str out_path, dawn_str err_path) {
   int64_t n = dawn_array_len(argv);
   if (n <= 0) {
-    dawn_panic(dawn_str_lit("io_run: argv is empty", 21));
+    dawn_fault(dawn_str_lit("io_run: argv is empty", 21));
   }
   char **args = (char **)dawn_alloc(sizeof(char *) * (size_t)(n + 1));
   for (int64_t i = 0; i < n; i++) {
@@ -1356,12 +1382,12 @@ int64_t dawn_io_run(dawn_array *argv, dawn_str out_path, dawn_str err_path) {
   for (int64_t i = 0; i < n; i++) free(args[i]);
   free(args);
   if (rc != 0) {
-    dawn_panic(dawn_str_lit("io_run: cannot start the program", 32));
+    dawn_fault(dawn_str_lit("io_run: cannot start the program", 32));
   }
   int status = 0;
   while (waitpid(pid, &status, 0) < 0) {
     if (errno != EINTR) {
-      dawn_panic(dawn_str_lit("io_run: waiting for the child failed", 36));
+      dawn_fault(dawn_str_lit("io_run: waiting for the child failed", 36));
     }
   }
   /* The two numbers the JVM's Process.exitValue() also reports on POSIX. */
