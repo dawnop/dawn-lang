@@ -21,7 +21,7 @@ use std/map
 use types.{
   Ty, TyInt, TyFloat, TyBool, TyString, TyUnit, TyNever, TyError, TyVar,
   TyAdt, TyTuple, TyFn, TyBytes, TyList, TyMap, TySet, TyArray, TyJava, peel_opaque,
-  intr_at, adt_of, prelude_adts, OPTION_ID
+  intr_at, adt_of, prelude_adts, OPTION_ID, is_ref_ty, Eff, EPure
 }
 use case_table
 use class_table
@@ -94,11 +94,6 @@ fn discard(st: CSt, v: String) -> CSt =
 ## the same reason: `slot_of` gives `.p` for an ADT-typed field, so even a
 ## target whose Dawn type is a known ADT can arrive as `void*`.
 fn adt_ref(v: String) -> String = "((dawn_adt*)(" ++ v ++ "))"
-
-## Which slots `drop` has to recurse into: exactly the ones `slot_of` files
-## under `p`. Read off `slot_of` rather than restated -- a second copy of that
-## rule is precisely the kind of thing that drifts (perceus-design.md 9 R2).
-fn is_ptr_slot(t: Ty) -> Bool = slot_of(t) == "p"
 
 ## A field mask as 64-bit words, low word first, each a C literal. Built from
 ## bits rather than accumulated into an Int because a mask with bit 63 set is
@@ -249,7 +244,7 @@ fn c_zero(t: Ty) -> String =
 ## intrinsics that read an erased position without one -- `expect`,
 ## `unwrap_or`, `cast` -- take the same path rather than each writing a cast.
 fn unbox_expr(v: String, to: Ty) -> String =
-  if is_ref_c(to) {
+  if is_ref_ty(to) {
     "((" ++ c_type(to) ++ ")(" ++ v ++ "))"
   } else {
     "(((dawn_box*)(" ++ v ++ "))->val." ++ slot_of(to) ++ ")"
@@ -473,12 +468,6 @@ pub fn emit_expr(st: CSt, e: CExpr) -> (CSt, String) =
       panic("emitc: `use java` cannot be compiled to native; use `use c`")
   }
 
-fn is_ref_c(t: Ty) -> Bool =
-  match c_repr(t) {
-    RInt64 | RFloat64 | RBoolean | RString | RUnitV -> false
-    RAdtPtr | RCloPtr | ROpaque -> true
-  }
-
 fn box_call(v: String, from: Ty) -> String =
   match c_repr(from) {
     RInt64 -> "dawn_box_int(" ++ v ++ ")"
@@ -500,7 +489,7 @@ fn emit_closure(st: CSt, name: String, owner: String, caps: List[CExpr]) -> (CSt
   }
   var bits: List[Bool] = []
   for c in caps {
-    bits = bits ++ [is_ptr_slot(cex_ty(c))]
+    bits = bits ++ [is_ref_ty(cex_ty(c))]
   }
   let (st3, tmp) = fresh(st1)
   let (st3m, mask, wide) = emit_mask_arg(st3, tmp, bits)
@@ -543,7 +532,7 @@ fn emit_alloc(st: CSt, tag: Int, args: List[CExpr], erased: Bool) -> (CSt, Strin
   # a tuple boxed every element, so every one of its slots is a pointer
   var bits: List[Bool] = []
   for a in args {
-    bits = bits ++ [if erased { true } else { is_ptr_slot(cex_ty(a)) }]
+    bits = bits ++ [if erased { true } else { is_ref_ty(cex_ty(a)) }]
   }
   let (st3, tmp) = fresh(st1)
   let (st3m, mask, wide) = emit_mask_arg(st3, tmp, bits)
@@ -1279,12 +1268,30 @@ test "a slot member and the ref classification agree about every repr" {
   # JVM run fails, which is why a whole family stayed invisible.
   assert slot_of(TyUnit) == "u"
   assert slot_of(TyOpaque(0, "H", "m", TyUnit)) == "u"
-  assert not is_ref_c(TyUnit)
+  assert not is_ref_ty(TyUnit)
   assert box_call("x", TyUnit) == "dawn_box_unit(x)"
   assert c_type(TyUnit) == "dawn_unit"
   # the pointer group is what is left, and Unit is no longer in it
   assert slot_of(TyBytes) == "p"
-  assert is_ref_c(TyBytes)
+  assert is_ref_ty(TyBytes)
+
+  # This is the joint the RC pass hangs on. `is_ref_ty` lives in types.dawn
+  # because Core cannot see a backend; `slot_of` lives here because a union
+  # member is a C fact. They have to answer the same question, and until
+  # 2026-07-29 there were three spellings of it -- `is_ref_ty`, emitc's own
+  # `is_ref_c`, and an `is_ptr_slot` added a commit earlier without noticing
+  # the other two. A field mask built from one and a drop built from another
+  # is a use-after-free that only appears for whichever type they disagree on.
+  let every: List[Ty] = [
+    TyInt, TyFloat, TyBool, TyString, TyUnit, TyNever,
+    TyError, TyBytes, TyVar("T", 0), TyAdt(0, []), TyTuple([TyInt]),
+    TyFn([], TyInt, EPure), TyList(TyInt), TyMap(TyInt, TyInt), TySet(TyInt),
+    TyArray(TyInt), TyJava("java.lang.Object", "Object"),
+    TyOpaque(0, "H", "m", TyBytes), TyOpaque(1, "I", "m", TyInt)
+  ]
+  for t in every {
+    assert is_ref_ty(t) == (slot_of(t) == "p")
+  }
 }
 
 test "the C runtime's constructor tags are the prelude's" {

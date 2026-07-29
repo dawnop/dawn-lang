@@ -164,6 +164,39 @@ pub fn peel_opaque(t: Ty) -> Ty =
     _ -> t
   }
 
+## Does a value of this type live on the heap, and therefore get counted?
+##
+## The C backend answers the same question through `c_repr` -- a reference
+## type is exactly one whose slot is `p` -- and emitc's test "the reference
+## types are the pointer slots" is the joint that holds the two together. The
+## predicate lives here rather than there because the RC pass runs on Core,
+## which cannot see a backend, and a second copy of this rule is the kind that
+## drifts apart unnoticed (docs/perceus-design.md 9 R2).
+##
+## `String` is deliberately a value type: `dawn_str` is a pointer and a length
+## passed by value, and its buffer leaks by contract (perceus-design.md 1).
+pub fn is_ref_ty(t: Ty) -> Bool =
+  match t {
+    TyOpaque(_, _, _, tgt) -> is_ref_ty(tgt)
+    TyInt -> false
+    TyFloat -> false
+    TyBool -> false
+    TyString -> false
+    TyUnit -> false
+    TyNever -> false
+    TyAdt(_, _) -> true
+    TyTuple(_) -> true
+    TyFn(_, _, _) -> true
+    TyVar(_, _) -> true
+    TyError -> true
+    TyBytes -> true
+    TyList(_) -> true
+    TyMap(_, _) -> true
+    TySet(_) -> true
+    TyArray(_) -> true
+    TyJava(_, _) -> true
+  }
+
 pub fn is_numeric(t: Ty) -> Bool = t == TyInt || t == TyFloat
 
 pub fn is_errorish(t: Ty) -> Bool = t == TyError || t == TyNever
