@@ -34,13 +34,31 @@ pub fn take_n[T](xs: List[T], n: Int) -> List[T] =
 pub fn drop_trailing_rule(bs: List[Block]) -> List[Block] =
   if get(bs, len(bs) - 1) == Some(Rule) { take_n(bs, len(bs) - 1) } else { bs }
 
-## Everything under docs/, for map_doc_url's existence check. Read once by the
-## caller: map_doc_url must stay pure (render_doc takes a pure fn(String)->String).
-pub fn doc_files() -> List[String] !io =
+## Everything under docs/, for map_doc_url's existence check — subdirectories
+## included, as "dir/file.md" (docs/audit/ was the first one, and a top-level
+## listing declared its files nonexistent). Read once by the caller:
+## map_doc_url must stay pure (render_doc takes a pure fn(String)->String).
+pub fn doc_files() -> List[String] !io = {
+  var out: List[String] = []
   match io.list_dir("docs") {
-    Ok(fs) -> fs
+    Ok(fs) -> {
+      for f in fs {
+        if io.is_dir("docs/$f") {
+          match io.list_dir("docs/$f") {
+            Ok(subs) -> {
+              for sub in subs { out = out ++ ["$f/$sub"] }
+            }
+            Err(e) -> panic("cannot list docs/$f: $e")
+          }
+        } else {
+          out = out ++ [f]
+        }
+      }
+    }
     Err(e) -> panic("cannot list docs/: $e")
   }
+  out
+}
 
 ## Map a docs/-relative Markdown link onto the site. The three rendered docs get
 ## site pages; any other file that REALLY EXISTS under docs/ goes to its source on
