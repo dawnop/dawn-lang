@@ -24,10 +24,10 @@
 #                     value is implicit, which let the Phase -1 spike silently
 #                     drop a trailing println's side effect. Making it a node
 #                     means a backend cannot forget.
-#   * CDup/CSDrop -- reference-count operations. Phase 0 emits none and the
-#                     JVM backend ignores them; Perceus (Phase 4) fills them
-#                     in. They exist now so the IR shape is settled before
-#                     two backends are written against it.
+#   * CDup/CSDrop -- reference-count operations, inserted by `rc.dawn` on the
+#                     way into the C backend and nowhere else: the JVM has a
+#                     collector, so counting there is pure overhead. Both
+#                     backends pass them through until Phase 4's knife 3.
 #
 # What Core deliberately keeps structured: blocks, `if`, and loops. Both
 # targets are structured (the JVM emitter builds labels anyway, C has native
@@ -275,7 +275,12 @@ pub type CDictDef = {
   slots: List[CDictSlot]
 }
 
-pub type CModule = { owner: String, fns: List[CFun], dicts: List[CDictDef] }
+## `next_sym` is the first symbol id nothing in this module uses. A pass that
+## has to name a value -- Perceus does, because a scope's drops only have a
+## place to stand once the block's tail is a binding -- would otherwise have to
+## rediscover it by walking every function, and lowering is the only thing that
+## actually knows.
+pub type CModule = { owner: String, fns: List[CFun], dicts: List[CDictDef], next_sym: Int }
 
 ## A comptime value: a Core expression that has already been evaluated.
 ## Function values may exist during evaluation but cannot be a result (the

@@ -48,6 +48,7 @@ use types.{
 use emit.{emit_module, gen_trait_interface}
 use core.{CModule, CValue}
 use lower
+use rc
 use emitc
 use emitc.{EmitMod}
 use tast.{TModule}
@@ -1099,7 +1100,7 @@ fn run_lower(rest: List[String]) -> Unit !io = {
   ## Lower one module; on success optionally write its golden. Returns the
   ## node count so the coverage gate keeps working unchanged.
   fn one(cls: String, tm: TModule) -> Int !io = {
-    let m = lower.lower_module(cls, tm, traits, impl_table, adts, prog_fns)
+    let m = rc.rc_module(lower.lower_module(cls, tm, traits, impl_table, adts, prog_fns))
     if dumping {
       let path = dump_to ++ "/" ++ join(str.split(cls, "/"), ".") ++ ".core"
       match io.write_file(path, coredump.render(adts, m)) {
@@ -1261,7 +1262,7 @@ fn run_emitc(rest: List[String]) -> Unit !io = {
     let (cls, cx, tm, ct) = sm
     units = units ++ [
       EmitMod {
-        m: lower.lower_module(cls, tm, traits, impl_table, adts, prog_fns),
+        m: rc.rc_module(lower.lower_module(cls, tm, traits, impl_table, adts, prog_fns)),
         consts: merged_consts(cx, ct, const_vals),
         blocks: ct.blocks
       }
@@ -1270,7 +1271,7 @@ fn run_emitc(rest: List[String]) -> Unit !io = {
   for cm in prog.modules {
     units = units ++ [
       EmitMod {
-        m: lower.lower_module(cm.class_name, cm.tm, traits, impl_table, adts, prog_fns),
+        m: rc.rc_module(lower.lower_module(cm.class_name, cm.tm, traits, impl_table, adts, prog_fns)),
         consts: merged_consts(cm.cx, cm.ct, const_vals),
         blocks: cm.ct.blocks
       }
