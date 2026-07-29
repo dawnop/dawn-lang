@@ -14,6 +14,7 @@ use json/value.{Json, JNull, JBool, JNum, JInt, JStr, JArr, JObj}
 use json/render.{render}
 use analyze.{Program, CheckedMod, analyze_document, analyze_standalone, canon}
 use interp.{ct_default}
+use jsig.{Jsig}
 use stdlib.{StdCtx, load_std}
 use checker.{ModExports, exports_of, visible_bins}
 use lspq.{QCx, Target, find_target}
@@ -294,16 +295,20 @@ fn doc_diags(d: Doc) -> List[Diag] = {
   out
 }
 
-type LspState = { std: StdCtx, bins: Map[String, Sig], docs: Map[String, Doc] }
+type LspState = { std: StdCtx, bins: Map[String, Sig], docs: Map[String, Doc], jsig: Jsig }
 
 # ---- the server loop ----
 
-pub fn run_lsp(std_dir: String) -> Unit !io = {
+## `js` is the driver's Java signature oracle, passed straight through to
+## analysis: the JVM main wires jreflect's, so `use java` programs check in
+## the editor exactly as they compile; a native driver would pass the refusal
+## and the editor would show the same refusal the compiler gives.
+pub fn run_lsp(std_dir: String, js: Jsig) -> Unit !io = {
   let std = match load_std(std_dir) {
     Ok(sc) -> sc
     Err(e) -> panic("cannot load std from " ++ std_dir ++ ": " ++ e)
   }
-  var st = LspState { std: std, bins: builtins(), docs: map.empty() }
+  var st = LspState { std: std, bins: builtins(), docs: map.empty(), jsig: js }
   var running = true
   while running {
     match read_message() {
@@ -462,8 +467,8 @@ fn update_doc(st0: LspState, uri: String, text: String) -> LspState !io = {
   var st = st0
   let path = uri_to_path(uri)
   let (prog, entry) = match path {
-    Some(p) -> analyze_document(p, text, st.std, ct_default())
-    None -> (analyze_standalone("<lsp>", text, st.std, ct_default()), "main")
+    Some(p) -> analyze_document(p, text, st.std, ct_default(), st.jsig)
+    None -> (analyze_standalone("<lsp>", text, st.std, ct_default(), st.jsig), "main")
   }
   let d = Doc {
     uri: uri,

@@ -52,6 +52,7 @@ use lower
 use rc
 use emitc
 use jfold.{fold_call}
+use jreflect.{jsig_real}
 use emitc.{EmitMod}
 use tast.{TModule}
 use interp.{CtOut, CtOpts, ct_default, DEFAULT_FUEL}
@@ -175,7 +176,7 @@ fn collect_program(
     }
     let loaded =
       if io.is_dir(target) { load_directory(target) } else { load_file(target) }
-    let prog = analyze_program(loaded, std, opts)
+    let prog = analyze_program(loaded, std, opts, jsig_real())
     if len(prog.diags) > 0 { fail_compile(prog.diags) }
     mods = prog.modules
     for cm in mods {
@@ -1057,7 +1058,7 @@ fn run_doc(rest: List[String]) -> Unit !io = {
     return cli_error("no such file or directory: " ++ target)
   }
   let loaded = if io.is_dir(target) { load_directory(target) } else { load_file(target) }
-  let prog = analyze_program(loaded, std, ct_default())
+  let prog = analyze_program(loaded, std, ct_default(), jsig_real())
   if len(prog.diags) > 0 { fail_doc(prog.diags) }
   print(doc.project_json(prog))
 }
@@ -1095,7 +1096,7 @@ fn run_lower(rest: List[String]) -> Unit !io = {
   }
   let t = targets[0]
   let loaded = if io.is_dir(t) { load_directory(t) } else { load_file(t) }
-  let prog = analyze_program(loaded, std, ct_default())
+  let prog = analyze_program(loaded, std, ct_default(), jsig_real())
   if len(prog.diags) > 0 { fail_compile(prog.diags) }
   let (adts, traits, impl_table, prog_fns) = program_tables(std, prog.modules)
 
@@ -1247,7 +1248,7 @@ fn run_emitc(rest: List[String]) -> Unit !io = {
   }
   let t = targets[0]
   let loaded = if io.is_dir(t) { load_directory(t) } else { load_file(t) }
-  let prog = analyze_program(loaded, std, ct_default())
+  let prog = analyze_program(loaded, std, ct_default(), jsig_real())
   if len(prog.diags) > 0 { fail_compile(prog.diags) }
   let (adts, traits, impl_table, prog_fns) = program_tables(std, prog.modules)
   # const values by declaring module, the same view the JVM path builds: a
@@ -1329,7 +1330,7 @@ fn run_check(rest: List[String]) -> Unit !io = {
   for t in targets {
     println("== " ++ t ++ " ==")
     let loaded = if io.is_dir(t) { load_directory(t) } else { load_file(t) }
-    let prog = analyze_program(loaded, std, ct_default())
+    let prog = analyze_program(loaded, std, ct_default(), jsig_real())
     print(checkdump.render(prog))
   }
 }
@@ -1369,7 +1370,7 @@ pub fn main() -> Unit !io = {
           Err(e) -> cli_error(e)
         }
       } else if mode == "lsp" {
-        lsp.run_lsp("std")
+        lsp.run_lsp("std", jsig_real())
       } else if mode == "__pkghash" {
         run_pkghash(rest)
       } else if mode == "lex" || mode == "__lex" || mode == "parse" || mode == "__parse" {

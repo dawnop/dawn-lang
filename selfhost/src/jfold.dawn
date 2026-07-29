@@ -18,7 +18,7 @@ use core.{CValue, VInt, VFloat, VBool, VStr, VUnit, VAdt}
 use interp.{eval_comptime, CtOpts, cvalue_kind}
 use jreflect
 use parser
-use checker.{ModExports, check_module, cx_new}
+use checker.{ModExports, Cx, check_module, cx_new}
 use java "java.lang.Object"
 use java "java.lang.Long"
 use java "java.lang.Integer"
@@ -133,7 +133,8 @@ test "route C folds a vouched static Java call when the host grants it" {
   let (m, pdiags) = parser.parse_module(ffi_java_src())
   assert len(pdiags) == 0
   let env: Map[String, ModExports] = map.empty()
-  let (cx1, tm) = check_module(cx_new(None, None), m, env)
+  let cx0 = cx_new(None, None)
+  let (cx1, tm) = check_module(Cx { ..cx0, jsig: jreflect.jsig_real() }, m, env)
   assert len(cx1.diags) == 0
   let no_fns: Map[String, TFun] = map.empty()
   let no_owner: Map[String, Map[String, TFun]] = map.empty()

@@ -57,7 +57,8 @@ use core.{
 }
 use lower
 use parser
-use checker.{ModExports, check_module, cx_new}
+use checker.{ModExports, Cx, check_module, cx_new}
+use jsig.{Jsig, JClass, JMethod, jsig_refused}
 
 type Ctl =
   | KErr(d: Diag)
@@ -1743,6 +1744,75 @@ fn ffi_java_src() -> String =
   "const S: String = unsafe_pure { Long.toHexString(255) }.expect(\"hex\")\n" ++
   "use java \"java.lang.Long\"\n"
 
+# A hand-written signature oracle for the two classes ffi_java_src touches:
+# these tests exercise the *comptime* refusal, which only fires after the
+# program checks, and checking may not reach for jreflect here — this module
+# must stay compilable without a JVM host. That a pure-Dawn stand-in is
+# enough to check a `use java` program is the point of the `Jsig` seam.
+
+fn fake_jclass(fqcn: String, simple: String) -> JClass =
+  JClass {
+    fqcn: fqcn,
+    simple: simple,
+    display: simple,
+    is_interface: false,
+    is_primitive: false,
+    is_array: false
+  }
+
+fn fake_find_class(fqcn: String) -> Option[JClass] !io =
+  if fqcn == "java.lang.Math" {
+    Some(fake_jclass(fqcn, "Math"))
+  } else if fqcn == "java.lang.Long" {
+    Some(fake_jclass(fqcn, "Long"))
+  } else {
+    None
+  }
+
+fn fake_class_info(fqcn: String) -> JClass !io =
+  match fake_find_class(fqcn) {
+    Some(j) -> j
+    None -> panic("fake jsig: unknown class " ++ fqcn)
+  }
+
+fn fake_methods_of(fqcn: String) -> List[JMethod] !io =
+  if fqcn == "java.lang.Math" {
+    [JMethod {
+      name: "abs",
+      param_cls: ["long"],
+      ret_cls: "long",
+      is_static: true,
+      is_varargs: false,
+      is_abstract: false,
+      desc: "public static long java.lang.Math.abs(long)",
+      decl_cls: "java.lang.Math"
+    }]
+  } else if fqcn == "java.lang.Long" {
+    [JMethod {
+      name: "toHexString",
+      param_cls: ["long"],
+      ret_cls: "java.lang.String",
+      is_static: true,
+      is_varargs: false,
+      is_abstract: false,
+      desc: "public static java.lang.String java.lang.Long.toHexString(long)",
+      decl_cls: "java.lang.Long"
+    }]
+  } else {
+    []
+  }
+
+fn fake_jsig() -> Jsig = {
+  let base = jsig_refused()
+  Jsig {
+    ..base,
+    on: true,
+    find_class: fake_find_class,
+    class_info: fake_class_info,
+    methods_of: fake_methods_of
+  }
+}
+
 # the granted-and-folded case lives in jfold's tests: it needs the real
 # reflective hook, and this module must stay compilable without one
 
@@ -1752,7 +1822,8 @@ test "route C reaches only a refusal when no host hook is wired in" {
   let (m, pdiags) = parser.parse_module(ffi_java_src())
   assert len(pdiags) == 0
   let env: Map[String, ModExports] = map.empty()
-  let (cx1, tm) = check_module(cx_new(None, None), m, env)
+  let cx0 = cx_new(None, None)
+  let (cx1, tm) = check_module(Cx { ..cx0, jsig: fake_jsig() }, m, env)
   assert len(cx1.diags) == 0
   let no_fns: Map[String, TFun] = map.empty()
   let no_owner: Map[String, Map[String, TFun]] = map.empty()
@@ -1770,7 +1841,8 @@ test "route C is refused by default, however well vouched the call is" {
   let (m, pdiags) = parser.parse_module(ffi_java_src())
   assert len(pdiags) == 0
   let env: Map[String, ModExports] = map.empty()
-  let (cx1, tm) = check_module(cx_new(None, None), m, env)
+  let cx0 = cx_new(None, None)
+  let (cx1, tm) = check_module(Cx { ..cx0, jsig: fake_jsig() }, m, env)
   assert len(cx1.diags) == 0
   let no_fns: Map[String, TFun] = map.empty()
   let no_owner: Map[String, Map[String, TFun]] = map.empty()

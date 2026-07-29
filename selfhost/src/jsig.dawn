@@ -1,0 +1,95 @@
+# The Java signature surface the checker consumes: plain-data records for
+# classes, methods, constructors and fields, and the `Jsig` hook record that
+# answers queries about them. Nothing here touches Java — `jreflect` implements
+# the queries against the host's class path and offers them as `jsig_real()`,
+# and `main` is where a `Cx` gets that oracle. Every other `Cx` keeps the
+# default `jsig_refused()`: its gate bit is off, so `pass_java_uses` answers
+# any `use java` declaration with a refusal instead of resolving it, and — as
+# every other query is downstream of a resolved import — no stub is ever
+# called. A compiler without a JVM host refuses `use java` programs by
+# construction, not by conditional compilation.
+
+## One method, as plain data. `desc` is Method.toString(), printed verbatim in
+## overload-resolution error candidates.
+pub type JMethod = {
+  name: String,
+  param_cls: List[String],
+  ret_cls: String,
+  is_static: Bool,
+  is_varargs: Bool,
+  is_abstract: Bool,
+  desc: String,
+  # the declaring class's name — codegen's invoke owner (Kotlin m.declaringClass)
+  decl_cls: String
+}
+
+pub type JCtor = { param_cls: List[String], is_varargs: Bool, desc: String }
+
+## One static field, as plain data (spec §9.1 — read-only static field access).
+pub type JField = { name: String, type_cls: String, decl_cls: String }
+
+## One class, as plain data. `display` is the TyJava display name (readable
+## array names); `simple` is Class.getSimpleName() for error messages.
+pub type JClass = {
+  fqcn: String,
+  simple: String,
+  display: String,
+  is_interface: Bool,
+  is_primitive: Bool,
+  is_array: Bool
+}
+
+## The signature oracle a `Cx` carries. `on` is the gate `pass_java_uses`
+## consults; when it is false the other fields are unreachable, because every
+## query below is made about a class that gate let in.
+pub type Jsig = {
+  on: Bool,
+  find_class: fn(String) -> Option[JClass] !io,
+  class_info: fn(String) -> JClass !io,
+  methods_of: fn(String) -> List[JMethod] !io,
+  ctors_of: fn(String) -> List[JCtor] !io,
+  static_fields_of: fn(String) -> List[JField] !io,
+  is_assignable: fn(String, String) -> Bool !io,
+  sam_of: fn(String) -> Option[JMethod] !io,
+  component_of: fn(String) -> Option[String] !io
+}
+
+# The stubs behind the refusal: reaching one means a Java type got past the
+# gate, which is a checker bug, not a user error.
+fn no_find_class(fqcn: String) -> Option[JClass] !io =
+  panic("jsig: find_class(" ++ fqcn ++ ") after `use java` was refused")
+
+fn no_class_info(fqcn: String) -> JClass !io =
+  panic("jsig: class_info(" ++ fqcn ++ ") after `use java` was refused")
+
+fn no_methods_of(fqcn: String) -> List[JMethod] !io =
+  panic("jsig: methods_of(" ++ fqcn ++ ") after `use java` was refused")
+
+fn no_ctors_of(fqcn: String) -> List[JCtor] !io =
+  panic("jsig: ctors_of(" ++ fqcn ++ ") after `use java` was refused")
+
+fn no_static_fields_of(fqcn: String) -> List[JField] !io =
+  panic("jsig: static_fields_of(" ++ fqcn ++ ") after `use java` was refused")
+
+fn no_is_assignable(sup: String, sub: String) -> Bool !io =
+  panic("jsig: is_assignable(" ++ sup ++ ", " ++ sub ++ ") after `use java` was refused")
+
+fn no_sam_of(fqcn: String) -> Option[JMethod] !io =
+  panic("jsig: sam_of(" ++ fqcn ++ ") after `use java` was refused")
+
+fn no_component_of(fqcn: String) -> Option[String] !io =
+  panic("jsig: component_of(" ++ fqcn ++ ") after `use java` was refused")
+
+## The default oracle: no host, so `use java` is refused at the declaration.
+pub fn jsig_refused() -> Jsig =
+  Jsig {
+    on: false,
+    find_class: no_find_class,
+    class_info: no_class_info,
+    methods_of: no_methods_of,
+    ctors_of: no_ctors_of,
+    static_fields_of: no_static_fields_of,
+    is_assignable: no_is_assignable,
+    sam_of: no_sam_of,
+    component_of: no_component_of
+  }

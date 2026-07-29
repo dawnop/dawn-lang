@@ -21,6 +21,7 @@ use checker.{
   pass_const_decls, check_fn, check_fn_inferred
 }
 use interp.{eval_comptime, CtOut, CtOpts, ct_default}
+use jsig.{Jsig, jsig_refused}
 use stdlib.{StdCtx, load_std}
 use tast.{TFun, TModule}
 use types.{Sym}
@@ -976,7 +977,7 @@ fn empty_ctout() -> CtOut = {
 
 ## Check a loaded program in dependency order: each module sees the exports of
 ## everything before it (std pre-seeded); comptime runs on clean modules only.
-pub fn analyze_program(loaded: LoadResult, std: StdCtx, opts: CtOpts) -> Program !io = {
+pub fn analyze_program(loaded: LoadResult, std: StdCtx, opts: CtOpts, js: Jsig) -> Program !io = {
   var diags = loaded.diags
   var exports = std.exports
   var out: List[CheckedMod] = []
@@ -993,7 +994,10 @@ pub fn analyze_program(loaded: LoadResult, std: StdCtx, opts: CtOpts) -> Program
       line_starts: lexer.line_starts_of(mf.text),
       next_id: nid,
       # std's impls are part of the baseline, not something `use` turns on
-      impl_table: std.impls
+      impl_table: std.impls,
+      # the host's Java signature oracle: jreflect's on the JVM driver, the
+      # refusing default anywhere else (a native compiler refuses `use java`)
+      jsig: js
     }
     var tm = empty_tmodule()
     var ct = empty_ctout()
@@ -1050,7 +1054,13 @@ fn is_ws(cp: Int) -> Bool =
   cp == ' ' || cp == '\t' || cp == '\n' || cp == 11 || cp == 12 || cp == 13
 
 ## Analyze one buffer without project context (the Kotlin `analyze(text)`).
-pub fn analyze_standalone(path: String, text: String, std: StdCtx, opts: CtOpts) -> Program !io = {
+pub fn analyze_standalone(
+  path: String,
+  text: String,
+  std: StdCtx,
+  opts: CtOpts,
+  js: Jsig
+) -> Program !io = {
   let (m, pdiags) = parser.parse_module(text)
   let mf = LoadedModule {
     mod_path: "main",
@@ -1061,7 +1071,7 @@ pub fn analyze_standalone(path: String, text: String, std: StdCtx, opts: CtOpts)
     pdiags: pdiags,
     pkg: None
   }
-  analyze_program(LoadResult { modules: [mf], diags: [] }, std, opts)
+  analyze_program(LoadResult { modules: [mf], diags: [] }, std, opts, js)
 }
 
 ## Analyze the file behind an editor buffer (the Kotlin `analyzeDocument`):
@@ -1070,9 +1080,15 @@ pub fn analyze_standalone(path: String, text: String, std: StdCtx, opts: CtOpts)
 ## Returns the whole program (cross-file definition targets need the other
 ## modules' ASTs) plus the entry's mod_path; the entry's own diagnostics are
 ## the prog.diags rows whose path is the entry file.
-pub fn analyze_document(path: String, text: String, std: StdCtx, opts: CtOpts) -> (Program, String) !io = {
+pub fn analyze_document(
+  path: String,
+  text: String,
+  std: StdCtx,
+  opts: CtOpts,
+  js: Jsig
+) -> (Program, String) !io = {
   if not has_module_use(text) {
-    return (analyze_standalone(path, text, std, opts), "main")
+    return (analyze_standalone(path, text, std, opts, js), "main")
   }
   let abs = canon(path)
   var over: Map[String, String] = map.empty()
@@ -1083,9 +1099,9 @@ pub fn analyze_document(path: String, text: String, std: StdCtx, opts: CtOpts) -
     if entry == "" && canon(mf.path) == abs { entry = mf.mod_path }
   }
   if entry == "" {
-    return (analyze_standalone(path, text, std, opts), "main")
+    return (analyze_standalone(path, text, std, opts, js), "main")
   }
-  (analyze_program(loaded, std, opts), entry)
+  (analyze_program(loaded, std, opts, js), entry)
 }
 
 # ---- tests ----
@@ -1118,7 +1134,8 @@ test "a two-module project analyzes end to end" {
   # dependency order: util before main
   assert loaded.modules[0].mod_path == "util"
   assert loaded.modules[1].mod_path == "main"
-  let prog = analyze_program(loaded, std, ct_default())
+  # jsig_refused: a project with no `use java` analyzes without any oracle
+  let prog = analyze_program(loaded, std, ct_default(), jsig_refused())
   assert len(prog.diags) == 0
 }
 

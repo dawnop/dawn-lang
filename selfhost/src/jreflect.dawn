@@ -1,6 +1,8 @@
 # Java reflection for the checker (docs/selfhost-checker.md §四): every query
-# the Kotlin checker makes against Class<*> objects, wrapped into plain-data
-# records here so the checker proper never touches a Java object. Arrays from
+# the Kotlin checker makes against Class<*> objects, wrapped into the plain-data
+# records `jsig` declares, so the checker proper never touches a Java object —
+# or this module: it consumes the queries through the `Jsig` hook record, and
+# `jsig_real()` is how the JVM main wires these implementations in. Arrays from
 # getMethods()/getParameterTypes() are walked with java.lang.reflect.Array —
 # the sanctioned detour around Dawn's no-array-indexing rule (spec §9.5).
 #
@@ -9,6 +11,7 @@
 
 use std/str
 use std/list
+use jsig.{JClass, JMethod, JCtor, JField, Jsig}
 use java "java.lang.Object"
 use java "java.lang.Class"
 use java "java.lang.ClassLoader"
@@ -21,35 +24,20 @@ use java "java.util.Objects"
 use java "java.lang.invoke.MethodHandles"
 use java "java.lang.invoke.MethodHandle"
 
-## One method, as plain data. `desc` is Method.toString(), printed verbatim in
-## overload-resolution error candidates.
-pub type JMethod = {
-  name: String,
-  param_cls: List[String],
-  ret_cls: String,
-  is_static: Bool,
-  is_varargs: Bool,
-  is_abstract: Bool,
-  desc: String,
-  # the declaring class's name — codegen's invoke owner (Kotlin m.declaringClass)
-  decl_cls: String
-}
-
-pub type JCtor = { param_cls: List[String], is_varargs: Bool, desc: String }
-
-## One static field, as plain data (spec §9.1 — read-only static field access).
-pub type JField = { name: String, type_cls: String, decl_cls: String }
-
-## One class, as plain data. `display` is the TyJava display name (readable
-## array names); `simple` is Class.getSimpleName() for error messages.
-pub type JClass = {
-  fqcn: String,
-  simple: String,
-  display: String,
-  is_interface: Bool,
-  is_primitive: Bool,
-  is_array: Bool
-}
+## The oracle these implementations add up to — what the JVM main hands the
+## checker in place of the refusal `cx_new` starts with.
+pub fn jsig_real() -> Jsig =
+  Jsig {
+    on: true,
+    find_class: find_class,
+    class_info: class_info,
+    methods_of: methods_of,
+    ctors_of: ctors_of,
+    static_fields_of: static_fields_of,
+    is_assignable: is_assignable,
+    sam_of: sam_of,
+    component_of: component_of
+  }
 
 fn sys_loader() -> ClassLoader !io = ClassLoader.getSystemClassLoader().expect("system loader")
 

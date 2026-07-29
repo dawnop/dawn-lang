@@ -280,7 +280,7 @@ native 照抄才算"通过"。故语料要配少量**独立的期望输出**(不
 | **Phase 3 C 发射器** | **完成**——按收口后的 Core 重导完毕。整编译器(剥掉 JVM-only 模块,26k 行)发 4.7 MB C,cc **零 error 零 warning**,跑出的结果与 JVM 逐字一致 |
 | Phase 4 Perceus | **全部完成(2026-07-29)**:运行时 ABI、所有权推断 pass(`rc.dawn`)、emitc 消费两个节点、最后使用分析、复用分析(`array_with` 唯一时就地写,整编译器就地 73.8%,线性更新 spine 100% 原地)。语料 23 个程序全绿含 AddressSanitizer 档;整编译器前端 native 跑通,`checker.dawn` 峰值 4.4 GB → 1.46 GB、probe 2.77s。`CBorrowed` 判为不需要(开的是 owned 口子)。**字符串/Bytes 已入账(2026-07-29)**:slot 16B→8B、checker.dawn 峰值 1.46GB→81MB(−94%)、probe 2.10s、LeakSanitizer 全量启用(语料 0 漏,字典与被接住的 fault 两类设计内例外写明),见 §5.7/§6 |
 | Phase 5 `use c` / Phase A 验收 | 差分 harness 已就位并进了 CI。**`use c` 已不在关键路径**:§14.3/§14.7 的十个 io intrinsic 解决了编译器自己的 IO 需求 |
-| Phase 6 native 自举 | Phase 4 已通;剩 §14.10 三道缝中的两道(缝 1 拒绝形式、缝 3 native 拿 std 的设计题)+ native main 本身。缝 2 已关(§14.19) |
+| Phase 6 native 自举 | Phase 4 已通;§14.10 三道缝全关(缝 2 §14.19、缝 3 §14.21、缝 1 §14.22),共享前端零 Java 依赖;剩 native main 本身 |
 
 **已落地的件**:`selfhost/src/core.dawn`(IR)、`selfhost/src/lower.dawn`(TAST → Core)、
 `selfhost/src/emitc.dawn`(Core → C)、`emit.dawn`(Core → JVM)、`runtime/c/dawn_rt.{h,c}`、
@@ -1561,3 +1561,32 @@ override 即既有 `--std`(目录优先语义未动)✓;嵌入边界=语义边�
 
 `use java` 真实 import 至此只剩 `main` 5 + `jfold` 7,全在 JVM 半区门后。
 native 自举剩:缝 1(checker→jreflect 拒绝形式)+ native main 本身。
+
+### 14.22 缝 1 关账:checker 的 Java 签名查询改走注入的 oracle(2026-07-30)
+
+§14.10 的裁决是「这道缝是一句拒绝」,落地形式与缝 2 同构:**钩子记录 + 默认拒绝 +
+JVM driver 接线**。新模块 `jsig.dawn`(零 `use java`)承载四个纯数据类型
+(JClass/JMethod/JCtor/JField,自 jreflect 原样迁入)与 `Jsig` 记录——`on: Bool` 闸位
+加八个 fn 字段(find_class/class_info/methods_of/ctors_of/static_fields_of/
+is_assignable/sam_of/component_of)。`cx_new` 默认 `jsig_refused()`;jreflect 保留全部
+实现并新增 `jsig_real()`;`analyze_*` 三个入口加 `js: Jsig` 参数写进 Cx,main 五处 +
+lsp(经 `run_lsp(std_dir, js)` 与 LspState 透传)接线真 oracle。checker 里
+`use jreflect` **归零**,二十来处调用改经 `cx.jsig`,无 cx 的五个叶子辅助函数
+(sam_of_nonprim/sam_param_ty/sam_fn_ty/sam_ret_compatible/param_at)显式收 `js`。
+
+**拒绝就是一句话,而且只需一句**:`pass_java_uses` 是 `use java` 声明的唯一入口,
+`on=false` 时对每条声明报「`` `use java` `` is not available in this compiler」
+(hint 带 fqcn)。其余七个查询全部下游于一次成功的导入——没导入就没有 TyJava、
+没有 java_classes 表项,stub 不可达(可达即 checker bug,stub panic 说的就是这个)。
+
+**钩子顺带把 checker 的 Java 路径变成了宿主无关可测的**:interp 的两个 route-C 测试
+(要先 check 含 `use java` 的程序,而 interp 不许 import jreflect)与 checker 自己的
+三个重载/字段测试,现在用**纯 Dawn 手写的假 oracle** 供元数据(Math 的 abs 两个重载、
+Long.toHexString、Math.PI、Integer.MAX_VALUE)。重载解析「long 胜 int」的判据从
+「宿主 JDK 恰好如此」变成「测试自己写下的表如此」——将来 native 测试跑器也能跑它们。
+jfold 的 granted 用例接 `jsig_real()`(它本来就在 JVM 半区)。
+
+至此三道缝全关。`use java` 真实 import:`main` 5 + `jfold` 7 + `jreflect` 12 +
+emit/codegen/jarw/testrun/maven(JVM 后端实现),全部在 JVM 半区门后;共享前端
+(lexer/parser/checker/lower/analyze/interp/stdlib/lsp)对 Java 的依赖为**零**。
+native 自举只剩 native main 本身(§14.1 的门控形态:两个 main 共享前端,不做条件编译)。

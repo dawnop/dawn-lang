@@ -54,10 +54,7 @@ use types.{
   Impls, Head, head_of, impl_at, has_impl_at, insert_impl,
   is_eq_scalar, is_ground, expandable, type_args_of, sub_goals
 }
-use jreflect.{
-  JClass, JMethod, JCtor, JField, find_class, class_info, methods_of, ctors_of,
-  static_fields_of, is_assignable, sam_of, component_of
-}
+use jsig.{JClass, JMethod, JCtor, JField, Jsig, jsig_refused}
 use exhaustive.{
   LitV, LInt, LFloat, LBool, LStr, SPat, SWild, SCtor, SLit, STuple, SList,
   useful, missing_list_patterns
@@ -114,6 +111,9 @@ pub type Cx = {
   const_cutoff: Option[Set[String]],
   # `use java` imports: simple name → fqcn
   java_classes: Map[String, String],
+  # the host's Java signature oracle; jsig_refused() unless the driver wires
+  # jreflect's (the native form of `use java` is a refusal, plan §14.10)
+  jsig: Jsig,
   # lexical scopes, innermost last; each maps name → symbol id
   scopes: List[Map[String, Int]],
   # symbol table: id → symbol
@@ -176,6 +176,7 @@ pub fn cx_new(owner_class: Option[String], src_path: Option[String]) -> Cx = {
     all_const_names: set.empty(),
     const_cutoff: None,
     java_classes: map.empty(),
+    jsig: jsig_refused(),
     scopes: [],
     syms: map.empty(),
     used_effects: [],
@@ -561,7 +562,7 @@ fn resolve_named(cx: Cx, name: String, targs: List[TypeRef], lo: Int, hi: Int) -
       # to say otherwise -- vouching not for one static call but for a whole
       # recursive subsystem. Resolving a type reads the host's class path, so
       # the pass chain above says !io too; check_module already did.
-      let j = class_info(fqcn)
+      let j = cx.jsig.class_info(fqcn)
       return (cx, TyJava(fqcn, j.display))
     }
     None -> ()
@@ -1220,11 +1221,20 @@ pub fn seed_prelude(cx: Cx) -> Cx = {
   }
 }
 
-## Pass 0.5: `use java` imports, resolved by reflection (spec §9).
+## Pass 0.5: `use java` imports, resolved against the host's signature oracle
+## (spec §9). A driver that wired no oracle refuses the declaration here, and
+## that one refusal covers everything downstream: no import resolves, so no
+## Java type ever enters the module and no other oracle query can be reached.
 pub fn pass_java_uses(cx: Cx, m: Module) -> Cx !io = {
   var cx1 = cx
   for d in module_java_uses(m) {
-    match find_class(d.fqcn) {
+    if not cx1.jsig.on {
+      cx1 = cerr_h(cx1, "`use java` is not available in this compiler", d.nlo, d.nhi,
+        "Java interop needs a JVM host with a class path to resolve `" ++ d.fqcn ++
+          "` against; this build has none")
+      continue
+    }
+    match cx1.jsig.find_class(d.fqcn) {
       None -> {
         cx1 = cerr_h(cx1, "Java class not found: " ++ d.fqcn, d.nlo, d.nhi,
           "the JDK is always visible; third-party jars must be passed with --cp <jars>")
@@ -1239,6 +1249,19 @@ pub fn pass_java_uses(cx: Cx, m: Module) -> Cx !io = {
     }
   }
   cx1
+}
+
+test "a `use java` declaration is refused when no oracle is wired" {
+  # cx_new's default jsig is the refusal: the shape a native compiler is in.
+  # One diagnostic at the declaration, not a missing-class error — the class
+  # path was never consulted, because there is none to consult.
+  let (m, pdiags) = parser.parse_module("use java \"java.lang.Math\"\n")
+  assert len(pdiags) == 0
+  let env: Map[String, ModExports] = map.empty()
+  let (cx1, _) = check_module(cx_new(None, None), m, env)
+  assert len(cx1.diags) == 1
+  assert str.contains(cx1.diags[0].msg, "`use java` is not available in this compiler")
+  assert str.contains(cx1.diags[0].hint, "java.lang.Math")
 }
 
 test "prelude seeding wires names to ids" {
@@ -6508,10 +6531,10 @@ fn is_prim_name(p: String) -> Bool =
   p == "long" || p == "int" || p == "short" || p == "byte" || p == "double" ||
   p == "float" || p == "boolean" || p == "char" || p == "void"
 
-fn sam_of_nonprim(p: String) -> Option[JMethod] !io =
-  if is_prim_name(p) { None } else { sam_of(p) }
+fn sam_of_nonprim(js: Jsig, p: String) -> Option[JMethod] !io =
+  if is_prim_name(p) { None } else { js.sam_of(p) }
 
-fn sam_param_ty(p: String) -> Option[Ty] !io =
+fn sam_param_ty(js: Jsig, p: String) -> Option[Ty] !io =
   if p == "long" || p == "int" || p == "short" || p == "byte" {
     Some(TyInt)
   } else if p == "double" || p == "float" {
@@ -6523,16 +6546,16 @@ fn sam_param_ty(p: String) -> Option[Ty] !io =
   } else if p == "java.lang.String" {
     Some(TyString)
   } else {
-    Some(TyJava(p, class_info(p).display))
+    Some(TyJava(p, js.class_info(p).display))
   }
 
 ## SAM signature → the Dawn function shape a converted argument must have
 ## (spec §9.4). Callback parameters arrive unwrapped; None when the SAM is not
 ## convertible (char).
-fn sam_fn_ty(sm: JMethod) -> Option[(List[Ty], Ty)] !io = {
+fn sam_fn_ty(js: Jsig, sm: JMethod) -> Option[(List[Ty], Ty)] !io = {
   var ps: List[Ty] = []
   for p in sm.param_cls {
-    match sam_param_ty(p) {
+    match sam_param_ty(js, p) {
       Some(t) -> { ps = ps ++ [t] }
       None -> return None
     }
@@ -6551,7 +6574,7 @@ fn sam_fn_ty(sm: JMethod) -> Option[(List[Ty], Ty)] !io = {
   } else if r == "java.lang.String" {
     Some(TyString)
   } else {
-    Some(TyJava(r, class_info(r).display))
+    Some(TyJava(r, js.class_info(r).display))
   }
   match ret {
     Some(rt) -> Some((ps, rt))
@@ -6560,7 +6583,7 @@ fn sam_fn_ty(sm: JMethod) -> Option[(List[Ty], Ty)] !io = {
 }
 
 ## May a Dawn return land where the SAM asks for j? (the boxed rep must be assignable)
-fn sam_ret_compatible(r: Ty, j: String) -> Bool !io =
+fn sam_ret_compatible(js: Jsig, r: Ty, j: String) -> Bool !io =
   if j == "void" {
     r == TyUnit || r == TyNever
   } else if j == "long" || j == "int" || j == "short" || j == "byte" {
@@ -6573,11 +6596,11 @@ fn sam_ret_compatible(r: Ty, j: String) -> Bool !io =
     false
   } else {
     match r {
-      TyString -> is_assignable(j, "java.lang.String")
-      TyInt -> is_assignable(j, "java.lang.Long")
-      TyFloat -> is_assignable(j, "java.lang.Double")
-      TyBool -> is_assignable(j, "java.lang.Boolean")
-      TyJava(fq, _) -> is_assignable(j, fq)
+      TyString -> js.is_assignable(j, "java.lang.String")
+      TyInt -> js.is_assignable(j, "java.lang.Long")
+      TyFloat -> js.is_assignable(j, "java.lang.Double")
+      TyBool -> js.is_assignable(j, "java.lang.Boolean")
+      TyJava(fq, _) -> js.is_assignable(j, fq)
       TyNever -> true
       _ -> false
     }
@@ -6632,9 +6655,9 @@ fn param_score(cx: Cx, p: String, at: Option[Ty], arity: Int) -> Option[Int] !io
   match at {
     # deferred lambda / bare constructor: match a convertible SAM by arity
     None ->
-      match sam_of_nonprim(p) {
+      match sam_of_nonprim(cx.jsig, p) {
         Some(sm) ->
-          match sam_fn_ty(sm) {
+          match sam_fn_ty(cx.jsig, sm) {
             Some(ft) -> {
               let (sps, _) = ft
               if len(sps) == arity { Some(2) } else { None }
@@ -6651,7 +6674,7 @@ fn param_score(cx: Cx, p: String, at: Option[Ty], arity: Int) -> Option[Int] !io
         TyString ->
           if p == "java.lang.String" {
             Some(2)
-          } else if is_assignable(p, "java.lang.String") {
+          } else if cx.jsig.is_assignable(p, "java.lang.String") {
             Some(1)
           } else {
             None
@@ -6660,7 +6683,7 @@ fn param_score(cx: Cx, p: String, at: Option[Ty], arity: Int) -> Option[Int] !io
         TyBytes ->
           if p == "[B" {
             Some(2)
-          } else if not is_prim_name(p) && is_assignable(p, "[B") {
+          } else if not is_prim_name(p) && cx.jsig.is_assignable(p, "[B") {
             Some(1)
           } else {
             None
@@ -6668,7 +6691,7 @@ fn param_score(cx: Cx, p: String, at: Option[Ty], arity: Int) -> Option[Int] !io
         TyJava(fq, _) ->
           if p == fq {
             Some(2)
-          } else if is_assignable(p, fq) {
+          } else if cx.jsig.is_assignable(p, fq) {
             Some(1)
           } else if fq == "java.lang.Object" && not is_prim_name(p) {
             # opaque value (erased generic → Object, spec §9.5) down-cast to a
@@ -6678,12 +6701,16 @@ fn param_score(cx: Cx, p: String, at: Option[Ty], arity: Int) -> Option[Int] !io
             None
           }
         TyFn(fps, fret, _) ->
-          match sam_of_nonprim(p) {
+          match sam_of_nonprim(cx.jsig, p) {
             Some(sm) ->
-              match sam_fn_ty(sm) {
+              match sam_fn_ty(cx.jsig, sm) {
                 Some(ft) -> {
                   let (sps, _) = ft
-                  if fps == sps && sam_ret_compatible(fret, sm.ret_cls) { Some(2) } else { None }
+                  if fps == sps && sam_ret_compatible(cx.jsig, fret, sm.ret_cls) {
+                    Some(2)
+                  } else {
+                    None
+                  }
                 }
                 None -> None
               }
@@ -6743,9 +6770,9 @@ fn sort_ctors(cs: List[JCtor]) -> List[JCtor] = {
 
 ## The i-th parameter as the argument at i sees it: inside a packed variadic
 ## part that is the array's component type, not the array.
-fn param_at(params: List[String], packs: Bool, i: Int) -> String !io =
+fn param_at(js: Jsig, params: List[String], packs: Bool, i: Int) -> String !io =
   if packs && i >= len(params) - 1 {
-    component_of(params[len(params) - 1]).expect("varargs component")
+    js.component_of(params[len(params) - 1]).expect("varargs component")
   } else {
     params[i]
   }
@@ -6765,7 +6792,7 @@ fn score_with(
   var total = 0
   var i = 0
   while i < len(ats) {
-    match param_score(cx, param_at(params, packs, i), ats[i], arities[i]) {
+    match param_score(cx, param_at(cx.jsig, params, packs, i), ats[i], arities[i]) {
       Some(sc) -> { total = total + sc }
       None -> return None
     }
@@ -6832,11 +6859,11 @@ fn finalize_sams(
   var bridges: List[Int] = []
   var i = 0
   for a in args {
-    let p = param_at(params, packs, i)
+    let p = param_at(cx1.jsig, params, packs, i)
     match ats[i] {
       None -> {
-        let sm = sam_of_nonprim(p).expect("sam scored")
-        let ft = sam_fn_ty(sm).expect("sam shape scored")
+        let sm = sam_of_nonprim(cx1.jsig, p).expect("sam scored")
+        let ft = sam_fn_ty(cx1.jsig, sm).expect("sam shape scored")
         let (sps, sret) = ft
         let (cxa, t, ax) = check_expr(cx1, a, Some(TyFn(sps, sret, EIo)))
         cx1 = cxa
@@ -6844,12 +6871,12 @@ fn finalize_sams(
         var fits = false
         match t {
           TyFn(tps, tret, _) ->
-            if tps == sps && sam_ret_compatible(tret, sm.ret_cls) { fits = true }
+            if tps == sps && sam_ret_compatible(cx1.jsig, tret, sm.ret_cls) { fits = true }
           _ -> ()
         }
         if fits { convs = convs ++ [(i, p, sm.name, sm.param_cls, sm.ret_cls)] }
         if not fits && not is_errorish(t) {
-          cx1 = cerr_h(cx1, "this function does not fit `" ++ class_info(p).simple ++ "`",
+          cx1 = cerr_h(cx1, "this function does not fit `" ++ cx1.jsig.class_info(p).simple ++ "`",
             e_lo(a), e_hi(a),
             "expected shape: " ++ ty_show(cx1.adts, TyFn(sps, sret, EIo)) ++
               "\n  single abstract method: " ++ sm.desc)
@@ -6858,7 +6885,7 @@ fn finalize_sams(
       Some(t) ->
         match t {
           TyFn(_, _, _) ->
-            match sam_of_nonprim(p) {
+            match sam_of_nonprim(cx1.jsig, p) {
               Some(sm2) -> { convs = convs ++ [(i, p, sm2.name, sm2.param_cls, sm2.ret_cls)] }
               None -> ()
             }
@@ -6870,7 +6897,7 @@ fn finalize_sams(
             if bridgeable { bridges = bridges ++ [i] }
             if not bridgeable {
               cx1 = cerr_h(cx1, "cannot bridge " ++ ty_show(cx1.adts, t) ++ " to `" ++
-                  class_info(p).simple ++ "`: element type " ++ ty_show(cx1.adts, el) ++
+                  cx1.jsig.class_info(p).simple ++ "`: element type " ++ ty_show(cx1.adts, el) ++
                   " does not cross", e_lo(a), e_hi(a),
                 "bridgeable elements: Int, Float, Bool, String, and Java classes; " ++
                   "nested containers, ADTs, tuples and functions stay on the Dawn side (spec §9.6)")
@@ -6904,7 +6931,7 @@ fn map_java_return(cx: Cx, rc: String, nlo: Int, nhi: Int) -> (Cx, Ty) !io =
     (cx, opt_ty(TyBytes))
   } else {
     # not-imported classes and arrays are still usable as opaque values
-    (cx, opt_ty(TyJava(rc, class_info(rc).display)))
+    (cx, opt_ty(TyJava(rc, cx.jsig.class_info(rc).display)))
   }
 
 ## Class.m(a) / value.m(a) / Class.new(a) — the Kotlin checkJavaCall.
@@ -6962,7 +6989,7 @@ fn check_java_call(
       return (cerr(cx1, "`.new` is called on the class, not on an instance", nlo, nhi),
         TyError, XError(lo, hi))
     }
-    let cands = sort_ctors(ctors_of(cls.fqcn))
+    let cands = sort_ctors(cx1.jsig.ctors_of(cls.fqcn))
     var bph = -1
     var bsc = -1
     var best: List[JCtor] = []
@@ -7030,7 +7057,7 @@ fn check_java_call(
     return (cx1, rt, XJava(call, lo, hi, rt))
   }
   var matching: List[JMethod] = []
-  for m0 in methods_of(cls.fqcn) {
+  for m0 in cx1.jsig.methods_of(cls.fqcn) {
     if m0.name == name && m0.is_static == is_static { matching = matching ++ [m0] }
   }
   var same_name: List[JMethod] = []
@@ -7153,7 +7180,7 @@ fn check_java_static_field(
   hi: Int
 ) -> (Cx, Ty, TExpr) !io = {
   var found: Option[JField] = None
-  for f in static_fields_of(fq) {
+  for f in cx.jsig.static_fields_of(fq) {
     match found {
       None -> if f.name == fname { found = Some(f) }
       Some(_) -> ()
@@ -7274,7 +7301,8 @@ fn check_method_call(
       not map.has(cx1.ctors_by_name, cn) && not map.has(cx1.consts, cn) {
         match map.get(cx1.java_classes, cn) {
           Some(fq) ->
-            return check_java_call(cx1, class_info(fq), None, true, name, args, nlo, nhi, lo, hi)
+            return check_java_call(cx1, cx1.jsig.class_info(fq), None, true, name, args,
+              nlo, nhi, lo, hi)
           None -> ()
         }
       }
@@ -7284,7 +7312,8 @@ fn check_method_call(
   cx1 = cx2
   match tt {
     TyJava(fq, _) ->
-      return check_java_call(cx1, class_info(fq), Some(tx), false, name, args, nlo, nhi, lo, hi)
+      return check_java_call(cx1, cx1.jsig.class_info(fq), Some(tx), false, name, args,
+        nlo, nhi, lo, hi)
     _ -> ()
   }
   if is_errorish(tt) {
@@ -7753,6 +7782,83 @@ test "statements: assignment rules and loop jump tracking" {
   assert str.contains(cx3.diags[0].msg, "`break` can only be used inside a loop body")
 }
 
+# A hand-written oracle for the Java-path tests below: enough of Math, Long
+# and Integer to exercise overload resolution, return mapping and field reads
+# without asking a JVM — the metadata under test is spelled out right here,
+# so the tests hold on any host (and in a native test runner some day).
+
+fn tj_class(fqcn: String, simple: String) -> JClass =
+  JClass {
+    fqcn: fqcn,
+    simple: simple,
+    display: simple,
+    is_interface: false,
+    is_primitive: false,
+    is_array: false
+  }
+
+fn tj_static(name: String, params: List[String], ret: String, owner: String) -> JMethod =
+  JMethod {
+    name: name,
+    param_cls: params,
+    ret_cls: ret,
+    is_static: true,
+    is_varargs: false,
+    is_abstract: false,
+    desc: "public static " ++ ret ++ " " ++ owner ++ "." ++ name ++
+      "(" ++ join(params, ",") ++ ")",
+    decl_cls: owner
+  }
+
+fn tj_find_class(fqcn: String) -> Option[JClass] !io =
+  if fqcn == "java.lang.Math" {
+    Some(tj_class(fqcn, "Math"))
+  } else if fqcn == "java.lang.Long" {
+    Some(tj_class(fqcn, "Long"))
+  } else if fqcn == "java.lang.Integer" {
+    Some(tj_class(fqcn, "Integer"))
+  } else {
+    None
+  }
+
+fn tj_class_info(fqcn: String) -> JClass !io =
+  match tj_find_class(fqcn) {
+    Some(j) -> j
+    None -> panic("test jsig: unknown class " ++ fqcn)
+  }
+
+fn tj_methods_of(fqcn: String) -> List[JMethod] !io =
+  if fqcn == "java.lang.Math" {
+    # both abs overloads, so resolution has a choice to make
+    [tj_static("abs", ["long"], "long", "java.lang.Math"),
+      tj_static("abs", ["int"], "int", "java.lang.Math")]
+  } else if fqcn == "java.lang.Long" {
+    [tj_static("toHexString", ["long"], "java.lang.String", "java.lang.Long")]
+  } else {
+    []
+  }
+
+fn tj_fields_of(fqcn: String) -> List[JField] !io =
+  if fqcn == "java.lang.Math" {
+    [JField { name: "PI", type_cls: "double", decl_cls: "java.lang.Math" }]
+  } else if fqcn == "java.lang.Integer" {
+    [JField { name: "MAX_VALUE", type_cls: "int", decl_cls: "java.lang.Integer" }]
+  } else {
+    []
+  }
+
+fn test_jsig() -> Jsig = {
+  let base = jsig_refused()
+  Jsig {
+    ..base,
+    on: true,
+    find_class: tj_find_class,
+    class_info: tj_class_info,
+    methods_of: tj_methods_of,
+    static_fields_of: tj_fields_of
+  }
+}
+
 test "unsafe_pure masks io and flags redundancy" {
   var cx = seed_prelude(test_cx())
   cx = push_scope(cx)
@@ -7762,7 +7868,8 @@ test "unsafe_pure masks io and flags redundancy" {
   assert t == TyInt
   assert str.contains(cx1.diags[0].msg, "redundant unsafe_pure")
   # a Java-call body (io) is masked: no diags, no recorded effect
-  cx = Cx { ..cx, java_classes: map.insert(cx.java_classes, "Long", "java.lang.Long") }
+  cx = Cx { ..cx, jsig: test_jsig(),
+    java_classes: map.insert(cx.java_classes, "Long", "java.lang.Long") }
   let recv = ECtor("Long", [], None, false, 12, 16, 12, 16)
   let jc = EMethod(recv, "toHexString", [EInt(5, 29, 30)], 17, 28, 12, 31)
   let p = EUnsafePure(jc, 0, 33)
@@ -7774,7 +7881,8 @@ test "unsafe_pure masks io and flags redundancy" {
 
 test "java calls resolve overloads, wrap references and reject unknowns" {
   var cx = seed_prelude(test_cx())
-  cx = Cx { ..cx, java_classes: map.insert(cx.java_classes, "Math", "java.lang.Math") }
+  cx = Cx { ..cx, jsig: test_jsig(),
+    java_classes: map.insert(cx.java_classes, "Math", "java.lang.Math") }
   cx = Cx { ..cx, java_classes: map.insert(cx.java_classes, "Long", "java.lang.Long") }
   cx = push_scope(cx)
   # Math.abs(1): the long overload beats int; primitive return is Int
@@ -7805,7 +7913,8 @@ test "java calls resolve overloads, wrap references and reject unknowns" {
 
 test "static field access reads Class.FIELD, maps types, rejects unknowns" {
   var cx = seed_prelude(test_cx())
-  cx = Cx { ..cx, java_classes: map.insert(cx.java_classes, "Math", "java.lang.Math") }
+  cx = Cx { ..cx, jsig: test_jsig(),
+    java_classes: map.insert(cx.java_classes, "Math", "java.lang.Math") }
   cx = Cx { ..cx, java_classes: map.insert(cx.java_classes, "Integer", "java.lang.Integer") }
   cx = push_scope(cx)
   # Math.PI is a double -> Float; the node is a field read
