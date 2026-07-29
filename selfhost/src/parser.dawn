@@ -38,7 +38,7 @@ use ast.{
   EApply, EMethod, ELambda, ECtor, EFieldAcc, EListLit, ETupleLit, EPropagate,
   EUnwrap, EIndex, EReturn, EBreak, EContinue, EComptime, EUnsafePure,
   EBinary, EUnary, EIf, EMatch, EBlock,
-  PatArg, Pattern, PLit, PBind, PWild, PCtor, PTuple, PList,
+  PatArg, Pattern, PLit, PBind, PWild, PCtor, PQual, PTuple, PList,
   Stmt, SLet, SLetPat, SLocalFn, SAssign, SExpr, SAssert, SWhile, SFor,
   TraitMethod, FnDecl, TypeDeclR, Decl, DFn, DType, DConst, DTrait, DImpl,
   DUseJava, DUseModule, DTest, Module,
@@ -1826,6 +1826,18 @@ fn pattern_p(p: P, st: St) -> PR[Pattern] = {
     }
     Ok((st2, PLit(lit, t.lo, t.hi)))
   } else if k == IDENT {
+    # `m.C(...)` — a qualified constructor pattern (LANG-06): an IDENT that a
+    # dot and an uppercase name follow can only be a module alias
+    if kind_ahead(p, st, 1) == DOT && kind_ahead(p, st, 2) == TYPEIDENT {
+      let (st1, q) = adv(p, st)
+      let st2 = adv1(p, st1)
+      let (st3, pc) = ctor_pat(p, st2)?
+      return match pc {
+        PCtor(name, args, rest, parens, nlo, nhi, _, hi) ->
+          Ok((st3, PQual(q.text, name, args, rest, parens, nlo, nhi, q.lo, hi)))
+        _ -> Err((st3, perr(p, st3, "expected a constructor pattern after the module alias")))
+      }
+    }
     Ok((adv1(p, st), PBind(t.text, t.lo, t.hi)))
   } else if k == TYPEIDENT {
     ctor_pat(p, st)

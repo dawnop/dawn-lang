@@ -21,7 +21,7 @@ use ast.{
   BinOp, UnOp, OpAdd, OpSub, OpMul, OpDiv, OpMod, OpConcat, OpEq, OpNeq, OpLt,
   OpLe, OpGt, OpGe, OpAnd, OpOr, OpBand, OpBor, OpBxor, OpShl, OpShr, OpUshr,
   OpNeg, OpNot, OpBnot,
-  Pattern, PLit, PBind, PWild, PCtor, PTuple, PList, PatArg, MatchArm, CtorArg,
+  Pattern, PLit, PBind, PWild, PCtor, PQual, PTuple, PList, PatArg, MatchArm, CtorArg,
   SPText, SPInterp, EFloat, EStr, pat_lo, pat_hi, e_lo, e_hi,
   ECall, EMethod, EApply, ELambda, EBlock, EIf, EMatch, ECtor, EFieldAcc,
   EListLit, ETupleLit, EBinary, EUnary, EPropagate, EUnwrap, EIndex, EReturn,
@@ -3584,6 +3584,12 @@ pub fn binds_anything(p: Pattern) -> Bool =
       }
       false
     }
+    PQual(_, _, pargs, _, _, _, _, _, _) -> {
+      for a in pargs {
+        if binds_anything(a.pat) { return true }
+      }
+      false
+    }
     PTuple(elems, _, _) -> {
       for e in elems {
         if binds_anything(e) { return true }
@@ -3623,6 +3629,22 @@ pub fn refutable_part(cx: Cx, p: Pattern) -> Option[(Int, Int)] =
       if has_rest && len(pre) == 0 && len(post) == 0 { None } else { Some((lo, hi)) }
     PCtor(cname, pargs, _, _, _, _, lo, hi) -> {
       match map.get(cx.ctors_by_name, cname) {
+        Some(key) -> {
+          let (aid, _) = key
+          if len(adt_of(cx.adts, aid).ctors) > 1 { return Some((lo, hi)) }
+        }
+        None -> ()
+      }
+      for a in pargs {
+        match refutable_part(cx, a.pat) {
+          Some(s) -> return Some(s)
+          None -> ()
+        }
+      }
+      None
+    }
+    PQual(q, cname, pargs, _, _, _, _, lo, hi) -> {
+      match qual_ctor_key(cx, q, cname) {
         Some(key) -> {
           let (aid, _) = key
           if len(adt_of(cx.adts, aid).ctors) > 1 { return Some((lo, hi)) }
@@ -3739,6 +3761,36 @@ pub fn check_pattern(cx: Cx, p: Pattern, scrut: Ty, mutable: Bool) -> (Cx, TPat)
     }
     PCtor(cname, pargs, has_rest, has_parens, nlo, nhi, lo, hi) ->
       check_ctor_pattern(cx, cname, pargs, has_rest, has_parens, nlo, nhi, lo, hi, scrut, mutable)
+    PQual(q, cname, pargs, has_rest, has_parens, nlo, nhi, lo, hi) -> {
+      match map.get(cx.module_exports, q) {
+        None -> {
+          var cx1 = cerr_h(cx, "unknown module alias `" ++ q ++ "` in a pattern", nlo, nhi,
+            "a qualified pattern needs a whole-module import in scope: `use <path> as " ++
+              q ++ "`")
+          for a in pargs {
+            let (cx2, _) = check_pattern(cx1, a.pat, TyError, mutable)
+            cx1 = cx2
+          }
+          (cx1, TPWild)
+        }
+        Some(exp) ->
+          match map.get(exp.ctors, cname) {
+            None -> {
+              var cx1 = cerr_o(cx, "module `" ++ exp.mod_path ++
+                  "` has no exported constructor `" ++ cname ++ "`", nlo, nhi,
+                suggest.hint(cname, map.keys(exp.ctors)))
+              for a in pargs {
+                let (cx2, _) = check_pattern(cx1, a.pat, TyError, mutable)
+                cx1 = cx2
+              }
+              (cx1, TPWild)
+            }
+            Some(key) ->
+              check_ctor_pattern_at(cx, key, cname, pargs, has_rest, has_parens,
+                nlo, nhi, lo, hi, scrut, mutable)
+          }
+      }
+    }
   }
 
 fn check_lit_pattern(cx: Cx, lit: Expr, scrut: Ty, lo: Int, hi: Int) -> (Cx, TPat) = {
@@ -3794,6 +3846,35 @@ fn check_ctor_pattern(
     }
     Some(k) -> k
   }
+  check_ctor_pattern_at(cx1, key, cname, pargs, has_rest, has_parens, nlo, nhi, lo, hi,
+    scrut, mutable)
+}
+
+## The (adt id, ctor slot) a qualified pattern names, or None. Read-only:
+## refutability asks without wanting diagnostics.
+fn qual_ctor_key(cx: Cx, q: String, cname: String) -> Option[(Int, Int)] =
+  match map.get(cx.module_exports, q) {
+    None -> None
+    Some(exp) -> map.get(exp.ctors, cname)
+  }
+
+## The shared tail: the constructor is resolved, check argument shape and
+## subpatterns (both the local and the module-qualified spelling land here).
+fn check_ctor_pattern_at(
+  cx: Cx,
+  key: (Int, Int),
+  cname: String,
+  pargs: List[PatArg],
+  has_rest: Bool,
+  has_parens: Bool,
+  nlo: Int,
+  nhi: Int,
+  lo: Int,
+  hi: Int,
+  scrut: Ty,
+  mutable: Bool
+) -> (Cx, TPat) = {
+  var cx1 = cx
   let (aid, cslot) = key
   let a2 = adt_of(cx1.adts, aid)
   let ci = a2.ctors[cslot]
@@ -8929,4 +9010,24 @@ test "a module-qualified type resolves through the alias (LANG-06)" {
   let (cx5, _) = check_module(cx_new(Some("use_site"), None), m5, env)
   assert len(cx5.diags) > 0
   assert str.contains(cx5.diags[0].msg, "takes 1 type parameter(s), got 0")
+  # a qualified constructor pattern resolves and binds
+  let src6 = "use geom as g\n" ++
+    "pub fn open_box(b: g.Box[Int]) -> Int =\n" ++
+    "  match b {\n" ++
+    "    g.One(v) -> v\n" ++
+    "  }\n"
+  let (m6, pd6) = parser.parse_module(src6)
+  assert len(pd6) == 0
+  let (cx6, _) = check_module(cx_new(Some("use_site"), None), m6, env)
+  assert len(cx6.diags) == 0
+  # an unexported constructor in a pattern names the module
+  let src7 = "use geom as g\n" ++
+    "pub fn f(b: g.Box[Int]) -> Int =\n" ++
+    "  match b {\n" ++
+    "    g.Nope(v) -> v\n" ++
+    "  }\n"
+  let (m7, _) = parser.parse_module(src7)
+  let (cx7, _) = check_module(cx_new(Some("use_site"), None), m7, env)
+  assert len(cx7.diags) > 0
+  assert str.contains(cx7.diags[0].msg, "has no exported constructor `Nope`")
 }
