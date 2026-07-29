@@ -118,6 +118,37 @@ drop 一个 buf 就是对 `data[0..high)` 逐个 drop。
 `dawn_array` 与 `dawn_array_buf` 是**两个独立计数的对象**：多个版本共享一个 buf，
 这正是持久向量的结构共享。buf 的 rc 是「有几个 `dawn_array` 指着我」。
 
+### 2.6 为什么 `kind` 是必需的，不是方便
+
+擦除位置上的 `void*` **不是统一的盒子**。看 `box_call`（emitc.dawn:432）：
+
+```dawn
+    RInt64 -> "dawn_box_int(" ++ v ++ ")"      # 分配一个盒子
+    RAdtPtr | RCloPtr | ROpaque -> "((void*)(" ++ v ++ "))"   # 已经是指针，不分配
+```
+
+标量装箱，引用**直接转型**。所以数组里的一个 `void*` 可能是盒子、可能是 `dawn_adt*`、
+可能是 `dawn_clo*`。通用 drop 唯一能问的就是头里的 `kind`——这一条把它从
+「三选一的实现风格」变成了**唯一可行的做法**。
+
+### 2.7 盒子要变成真的结构体
+
+今天 `dawn_box_int` 返回裸 `dawn_slot*`，`unbox_expr`（emitc.dawn:201）直接
+`((dawn_slot*)(v))->i`。加了头之后这个转型就错了，盒子得是：
+
+```c
+typedef struct { dawn_hdr h; dawn_slot val; } dawn_box;
+```
+
+`unbox_expr` 相应改成读 `->val.<slot>`。**头必须在偏移 0**——放到指针前面
+（`((dawn_hdr*)p)[-1]`）会让 ADT 和盒子的头位置不一致，通用 drop 就没法统一寻址了。
+
+### 2.8 `dawn_bytes` 也要头
+
+`c_repr(TyBytes) = ROpaque`（emitc.dawn:166）⟹ `Bytes` 在槽里是指针 ⟹ 掩码会标它
+⟹ `dawn_drop` 会收到 `dawn_bytes*`。所以它必须有头、必须有 kind。
+**它的 `p` 缓冲区仍然泄漏**（§1 结论一），被 free 的只是那个 24 字节的结构体本身。
+
 ## 3. 不朽对象
 
 有三类堆形状的东西永远不该被 free，dup/drop 必须对它们是**无害的**而不是被调用方
@@ -125,16 +156,25 @@ drop 一个 buf 就是对 `data[0..high)` 逐个 drop。
 
 | 东西 | 处理 |
 |---|---|
-| `static dawn_dict dawn_dict_1_String = {...}` | 头里 `rc = DAWN_IMMORTAL` |
 | 字符串字面量 `dawn_str_lit` | 不是堆对象，压根没有头，不参与 |
 | Unicode 表 / case 表 | 同上，静态数组 |
+| `static dawn_dict dawn_dict_1_String = {...}` | **整个字典家族退出 RC**，见下 |
 
 ```c
 #define DAWN_IMMORTAL INT32_MAX
 ```
 
-`dawn_dup`/`dawn_drop` 都先测 `rc == DAWN_IMMORTAL` 并直接返回。一次比较，
-换掉一整类「谁该被排除」的推理。
+`dawn_dup`/`dawn_drop` 都先测 `rc == DAWN_IMMORTAL` 并直接返回。留着这个哨兵是因为
+以后会有别的不朽形状（比如 interned 常量），一次比较换掉一整类推理。
+
+**字典不加头。** 先想的是给 `dawn_dict` 也加头、静态的初始化成 `DAWN_IMMORTAL`。
+但那要改 `DAWN_DICT_MAX` 的结构和 emitc 写出的**每一个**静态初始化式，而收益是零：
+字典在整编译器的前端跑里分配了 **0 次**（§1），全是静态全局。
+
+改成**结构性排除**：`CFun.dicts` 在 Core 里本来就是与 `params` 分开的一个字段
+（`core.dawn`），字典类型的表达式也认得出来，所以刀 2 的所有权分析可以直接跳过它们，
+不需要运行时帮忙。代价：`dawn_dict_new` 造出来的参数化字典会泄漏——0 次分配，
+写进契约而不是留成待办。
 
 ## 4. 原语表
 
@@ -146,11 +186,14 @@ bool  dawn_is_unique(void *p);  /* rc == 1，复用分析用（刀 4） */
 
 `dawn_drop` 的递归按 `kind`：
 
-- `_ADT` — 按 `ptrmask` 逐字段 `dawn_drop`
-- `_CLO` — 按捕获掩码逐个 `dawn_drop`（同 ADT，闭包环境也是擦除槽）
-- `_ARRAY` — drop `buf`
-- `_ARRAY_BUF` — 对 `data[0..high)` 逐个 drop，再 free `data`
-- `_BOX` — 直接 free（`dawn_slot` 里装的是标量；装指针的位置根本不会走 box）
+| kind | 递归 |
+|---|---|
+| `_ADT` | 按 `ptrmask` 逐字段 `dawn_drop` |
+| `_CLO` | 按捕获掩码逐个 `dawn_drop`（同 ADT，闭包环境也是擦除槽） |
+| `_ARRAY` | drop `buf` |
+| `_ARRAY_BUF` | 对 `data[0..high)` 逐个 drop，再 free `data` |
+| `_BOX` | 直接 free（装的是标量；引用位置根本不走 box，见 §2.6） |
+| `_BYTES` | free 结构体，**不** free `p`（§2.8） |
 
 > `_ARRAY_BUF` 递归到 `high` 而不是 `len`：`len` 是某一个版本的长度，
 > `high` 是这个 buf 曾经交出过的槽位上界，也就是它真正持有的东西。
@@ -224,7 +267,7 @@ JVM 后端继续忽略这两个节点（`emit.dawn:2190`、`interp.dawn:1347` �
 
 | 刀 | 内容 | 门禁 |
 |---|---|---|
-| 1 | 运行时 ABI：公共头、掩码、`dawn_dup/drop/is_unique`、显式工作栈、`--rc=leak` | 语料全绿（此时还没人调 dup/drop，纯粹验 ABI 改动没打坏东西） |
+| 1 | 运行时 ABI：公共头、掩码、`dawn_dup/drop/is_unique`、显式工作栈、`--rc=leak`；emitc 侧同步改 `unbox_expr`（§2.7）与 `emit_alloc`（发掩码） | 语料全绿（此时还没人调 dup/drop，纯粹验 ABI 改动没打坏东西）+ 整编译器仍能发 C 并与 JVM 逐字一致 |
 | 2 | Core pass：所有权推断 + `CSDup`/`CSDrop` 插入 + `CBorrowed` | **JVM 侧零 Emit-Change**；Core golden 只动 dup/drop 行 |
 | 3 | emitc 消费两个节点（今天在 `emitc.dawn:971` 直接丢弃） | 语料全绿 + 整编译器 native 跑通且与 JVM 逐字一致 |
 | 4 | 复用分析（`rc == 1` 原地写） | `array_with` 就地命中率计数器 |
