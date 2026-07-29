@@ -18,7 +18,7 @@ use java "java.util.Iterator"
 use java "java.io.File"
 use java "java.io.FileOutputStream"
 use types.{Request, Response, HttpError, Handler, Middleware, RouteMeta, http_error, error_response, streaming}
-use router.{Route, Dispatch, Found, NoPath, WrongMethod, dispatch, route_meta}
+use router.{Route, Dispatch, Found, NoPath, WrongMethod, dispatch, route_meta, validate_routes}
 use java "java.io.InputStream"
 use java "java.net.URI"
 use java "java.net.URLDecoder"
@@ -326,6 +326,12 @@ pub fn serve_app(port: Int, routes: List[Route], middleware: List[Middleware]) -
 # Same, with the in-memory body ceiling chosen explicitly (0 = unbounded, which
 # is what this framework did before the ceiling existed).
 pub fn serve_app_bounded(port: Int, max_body: Int, routes: List[Route], middleware: List[Middleware]) -> Unit !io = {
+  # WEB-09: a broken table fails here, at startup, with the two routes named —
+  # not at runtime as a silent 404 on the route its author believes exists
+  match validate_routes(routes) {
+    Err(e) -> panic("route table: " ++ e)
+    Ok(_) -> ()
+  }
   let addr = InetSocketAddress.new("127.0.0.1", port)
   let server = HttpServer.create(addr, 0)!
   server.createContext("/", fn(ex) => handle(routes, middleware, max_body, ex))

@@ -136,6 +136,124 @@ fn match_from(
     }
   }
 
+# ---- startup validation (WEB-09): a broken table fails now, not as a 404 ----
+
+fn ident_ok(name: String) -> Bool = {
+  let cps = code_points(name)
+  if len(cps) == 0 { return false }
+  var i = 0
+  for c in cps {
+    let alpha = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_'
+    let digit = c >= '0' && c <= '9'
+    if not alpha && not (digit && i > 0) { return false }
+    i = i + 1
+  }
+  true
+}
+
+## The problems one route can have on its own: an unclosed or empty capture,
+## a capture name that is not an identifier, a duplicate capture name, a tail
+## capture anywhere but last. `None` means the route is well-formed.
+fn route_problem(pattern: String) -> Option[String] = {
+  let ps = segs(pattern)
+  var names: List[String] = []
+  var i = 0
+  for seg in ps {
+    let braced = str.contains(seg, "{") || str.contains(seg, "}")
+    if is_tail(seg) {
+      if i != len(ps) - 1 {
+        return Some("tail capture `" ++ seg ++ "` must be the last segment")
+      }
+      let nm = tail_name(seg)
+      if not ident_ok(nm) { return Some("bad capture name in `" ++ seg ++ "`") }
+      names = names ++ [nm]
+    } else if is_capture(seg) {
+      let nm = capture_name(seg)
+      if not ident_ok(nm) { return Some("bad capture name in `" ++ seg ++ "`") }
+      names = names ++ [nm]
+    } else if braced {
+      return Some("segment `" ++ seg ++ "` is not a capture but contains { or }" ++
+          " — a capture is `{name}` or a trailing `{name*}`")
+    }
+    i = i + 1
+  }
+  var seen: List[String] = []
+  for nm in names {
+    for s in seen {
+      if s == nm { return Some("duplicate capture name `" ++ nm ++ "`") }
+    }
+    seen = seen ++ [nm]
+  }
+  None
+}
+
+# Does pattern segment `a` accept every path segment `b` accepts? A capture
+# accepts anything; a literal accepts exactly itself. (A literal never covers
+# a capture: the capture matches values the literal refuses.)
+fn seg_covers(a: String, b: String) -> Bool =
+  if is_capture(a) { true } else { not is_capture(b) && a == b }
+
+# Does every path that `later` matches also match `earlier`? First match wins
+# in dispatch, so a covered later route is unreachable.
+fn covers(earlier: String, later: String) -> Bool = {
+  let es = segs(earlier)
+  let ls = segs(later)
+  let en = len(es)
+  let ln = len(ls)
+  let etail = en > 0 && is_tail(es[en - 1])
+  let ltail = ln > 0 && is_tail(ls[ln - 1])
+  if etail {
+    # earlier's fixed prefix must cover later's segments there; later must not
+    # be able to produce a path shorter than that prefix
+    let k = en - 1
+    let lfixed = if ltail { ln - 1 } else { ln }
+    if lfixed < k { return false }
+    var i = 0
+    while i < k {
+      if not seg_covers(es[i], ls[i]) { return false }
+      i = i + 1
+    }
+    true
+  } else if ltail {
+    # later matches unboundedly many lengths; a fixed-length earlier cannot
+    # cover them all
+    false
+  } else {
+    if en != ln { return false }
+    var i = 0
+    while i < en {
+      if not seg_covers(es[i], ls[i]) { return false }
+      i = i + 1
+    }
+    true
+  }
+}
+
+## Check a whole table before serving it (WEB-09): pattern syntax, duplicate
+## captures, and shadowing — an earlier route of the same method that covers a
+## later one makes the later one unreachable, which at runtime is a silent 404
+## on the route its author believes exists. `serve_app` panics on `Err`.
+pub fn validate_routes(routes: List[Route]) -> Result[Unit, String] = {
+  var i = 0
+  for r in routes {
+    match route_problem(r.pattern) {
+      Some(p) -> return Err("route " ++ r.method ++ " " ++ r.pattern ++ ": " ++ p)
+      None -> ()
+    }
+    var j = 0
+    while j < i {
+      let e = routes[j]
+      if e.method == r.method && covers(e.pattern, r.pattern) {
+        return Err("route " ++ r.method ++ " " ++ r.pattern ++
+            " is unreachable: shadowed by earlier route " ++ e.method ++ " " ++ e.pattern)
+      }
+      j = j + 1
+    }
+    i = i + 1
+  }
+  Ok(())
+}
+
 # Pick the route for (method, path). First match in table order wins.
 pub fn dispatch(routes: List[Route], method: String, path: String) -> Dispatch =
   dispatch_from(routes, method, path, 0, false)
@@ -212,6 +330,50 @@ test "dispatch: found, 404, and 405 are distinguished" {
   match dispatch(routes, "GET", "/run") {
     WrongMethod -> { assert true }
     _ -> { assert false }
+  }
+}
+
+test "validation refuses bad patterns, duplicate captures and shadows" {
+  # well-formed tables pass, including specific-before-general ordering
+  let ok = [route_get("/a/b", dummy), route_get("/a/{id}", dummy),
+    route_method_of("PROPFIND", "/dav/{rest*}", dummy)]
+  match validate_routes(ok) {
+    Ok(_) -> { assert true }
+    Err(_) -> { assert false }
+  }
+  # a capture route shadows a later literal under the same method...
+  let shadow = [route_get("/a/{id}", dummy), route_get("/a/b", dummy)]
+  match validate_routes(shadow) {
+    Err(e) -> { assert str.contains(e, "shadowed") }
+    Ok(_) -> { assert false }
+  }
+  # ...but not under a different method (405 handling still sees it)
+  match validate_routes([route_get("/a/{id}", dummy), route_post("/a/b", dummy)]) {
+    Ok(_) -> { assert true }
+    Err(_) -> { assert false }
+  }
+  # a tail capture shadows everything under its prefix
+  match validate_routes([route_get("/dav/{rest*}", dummy), route_get("/dav/x", dummy)]) {
+    Err(e) -> { assert str.contains(e, "shadowed") }
+    Ok(_) -> { assert false }
+  }
+  # identical patterns shadow
+  match validate_routes([route_get("/x", dummy), route_get("/x", dummy)]) {
+    Err(e) -> { assert str.contains(e, "shadowed") }
+    Ok(_) -> { assert false }
+  }
+  # malformed captures and misplaced tails are named
+  match validate_routes([route_get("/a/{id", dummy)]) {
+    Err(e) -> { assert str.contains(e, "not a capture") }
+    Ok(_) -> { assert false }
+  }
+  match validate_routes([route_get("/{rest*}/x", dummy)]) {
+    Err(e) -> { assert str.contains(e, "must be the last segment") }
+    Ok(_) -> { assert false }
+  }
+  match validate_routes([route_get("/{x}/{x}", dummy)]) {
+    Err(e) -> { assert str.contains(e, "duplicate capture") }
+    Ok(_) -> { assert false }
   }
 }
 

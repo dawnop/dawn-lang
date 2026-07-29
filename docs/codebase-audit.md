@@ -1466,7 +1466,12 @@ Content-Length，204/304/HEAD 也会进入 body 路径。建议由 ResponseBody 
 
 ### WEB-09（P2）路由和错误接口 stringly typed
 
-> **【待办 —— 认可】**
+> **【已修一半 —— 2026-07-30】** 启动校验落地：`router.validate_routes`
+> （pattern 语法 / 重复 capture / 尾捕获须在最后 / shadow 检测，含 tail-覆盖语义），
+> `serve_app` 起服务前跑、失败 panic 并点名两条路由。method/status 受限类型那半
+> 仍按 web-api-v2-design §四驳回。playground contract 全绿证明现有表通过校验。
+>
+> 原判定：**【待办 —— 认可】**
 >
 > 其中「启动时校验 RouteTable」（pattern 语法、重复 capture 名、route shadow 检测）
 > 是**唯一不破坏 API** 的那部分——可以在 `serve_app` 里加一次启动期检查，
