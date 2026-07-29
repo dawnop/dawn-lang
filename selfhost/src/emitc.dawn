@@ -250,6 +250,26 @@ fn unbox_expr(v: String, to: Ty) -> String =
     "(((dawn_box*)(" ++ v ++ "))->val." ++ slot_of(to) ++ ")"
   }
 
+## The owning read for the erased call boundary. A dynamic call is erased in
+## and out, so a scalar crossing it rides in a box no Core node owns -- the RC
+## pass sees a call typed Int, not the void* underneath -- and whoever reads
+## the slot is the only party who can free the box. References just hand the
+## pointer over; the ownership story is the pass's as usual.
+fn unbox_own_expr(v: String, to: Ty) -> String =
+  if is_ref_ty(to) {
+    "((" ++ c_type(to) ++ ")(" ++ v ++ "))"
+  } else {
+    let f = match c_repr(to) {
+      RInt64 -> "dawn_unbox_int"
+      RFloat64 -> "dawn_unbox_float"
+      RBoolean -> "dawn_unbox_bool"
+      RString -> "dawn_unbox_str"
+      RUnitV -> "dawn_unbox_unit"
+      RAdtPtr | RCloPtr | ROpaque -> panic("unbox_own_expr: ref repr in the scalar arm")
+    }
+    f ++ "(" ++ v ++ ")"
+  }
+
 ## Take a reference and hand the value back at its own type. `dawn_dup` is
 ## typed in `void*` because it is one function for every kind of object, so
 ## the cast is what puts the value back where C can use it.
@@ -470,9 +490,11 @@ pub fn emit_expr(st: CSt, e: CExpr) -> (CSt, String) =
       for el in elems {
         let (st2, v) = emit_expr(st1, el)
         # an Array's element is erased, so it goes in boxed -- the JVM's
-        # array_push takes an Object for the same reason
+        # array_push takes an Object for the same reason. The owning push:
+        # elements arrive owned (the pass consumes literal elements), and the
+        # superseded header is this loop's to release.
         st1 = line(st2,
-          tmp ++ " = dawn_array_push(" ++ tmp ++ ", " ++ box_call(v, cex_ty(el)) ++ ");")
+          tmp ++ " = dawn_array_push_own(" ++ tmp ++ ", " ++ box_call(v, cex_ty(el)) ++ ");")
       }
       (st1, mangle("std/pvec", "of_array") ++ "(" ++ tmp ++ ")")
     }
@@ -755,7 +777,8 @@ fn emit_call(st: CSt, callee: CCallee, args: List[CExpr], ty: Ty) -> (CSt, Strin
       let cast = "(void*(*)(" ++ join(sigp, ", ") ++ "))"
       let call =
         "((" ++ cast ++ "(" ++ tv ++ ")->fn)(" ++ join([tv] ++ boxed, ", ") ++ "))"
-      (st3, unbox_expr(call, ty))
+      # the result box is the callee's gift and nobody else will free it
+      (st3, unbox_own_expr(call, ty))
     }
   }
 }
@@ -1149,8 +1172,10 @@ fn emit_adapter(st: CSt, f: CFun) -> CSt = {
     args = args ++ [dup_expr(slot, c.ty)]
     i = i + 1
   }
+  # scalar parameters arrive in boxes the caller made for this call alone;
+  # reading one owns it (references pass straight through to the callee)
   for p in f.params {
-    args = args ++ [unbox_expr(local_name(p.sym), p.ty)]
+    args = args ++ [unbox_own_expr(local_name(p.sym), p.ty)]
   }
   let call = fn_symbol(f) ++ "(" ++ join(args, ", ") ++ ")"
   # a Unit-returning lambda still owes the caller a slot

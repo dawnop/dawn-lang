@@ -150,6 +150,43 @@ dawn_box *dawn_box_str(dawn_str v) {
   return s;
 }
 
+/* Read a box out and release it in one move. These are for the one place a
+ * box exists that no Core node owns: the erased call boundary. A dynamic
+ * call's adapter boxes its scalar result for the caller, and the caller boxes
+ * scalar arguments for the adapter -- in both directions the box is invisible
+ * to the RC pass (it sees a call typed Int, not the void* underneath), so the
+ * reader is the only party who can free it. Slot reads the pass CAN see
+ * (CUnbox of an ADT field) borrow instead and must not come through here. */
+int64_t dawn_unbox_int(void *b) {
+  int64_t v = ((dawn_box *)b)->val.i;
+  dawn_drop(b);
+  return v;
+}
+
+double dawn_unbox_float(void *b) {
+  double v = ((dawn_box *)b)->val.f;
+  dawn_drop(b);
+  return v;
+}
+
+bool dawn_unbox_bool(void *b) {
+  bool v = ((dawn_box *)b)->val.b;
+  dawn_drop(b);
+  return v;
+}
+
+dawn_unit dawn_unbox_unit(void *b) {
+  dawn_unit v = ((dawn_box *)b)->val.u;
+  dawn_drop(b);
+  return v;
+}
+
+dawn_str dawn_unbox_str(void *b) {
+  dawn_str v = ((dawn_box *)b)->val.s;
+  dawn_drop(b);
+  return v;
+}
+
 /* ---- reference counting (docs/perceus-design.md) ---- */
 
 bool dawn_rc_leak = false;
@@ -763,6 +800,19 @@ dawn_array *dawn_array_push(dawn_array *a, void *x) {
   return dawn_array_of(nb, a->len + 1);
 }
 
+/* `a = push(a, x)` with the references handled: consumes the element and the
+ * old header. The borrowing push returns a fresh header, so a loop that just
+ * reassigns floors one header and one element reference per iteration -- the
+ * runtime's own accumulation loops did (perceus-design.md 5.5: a runtime
+ * function calling a primitive owes the same references emitted code would),
+ * and so did the emitter's list-literal loop, whose elements arrive owned. */
+dawn_array *dawn_array_push_own(dawn_array *a, void *x) {
+  dawn_array *r = dawn_array_push(a, x);
+  dawn_drop(x);
+  dawn_drop(a);
+  return r;
+}
+
 uint64_t dawn_array_with_inplace = 0;
 uint64_t dawn_array_with_copied = 0;
 
@@ -1054,12 +1104,15 @@ dawn_array *dawn_code_points(dawn_str s) {
   while (i < s.len) {
     int64_t n;
     uint32_t cp = dawn_utf8_at(s, i, &n);
-    a = dawn_array_push(a, dawn_box_int((int64_t)cp));
+    a = dawn_array_push_own(a, dawn_box_int((int64_t)cp));
     i += n;
   }
   return a;
 }
 
+/* Consumes `cps`: the array is the emitter's list-to-Array crossing temp
+ * (emitc `to_host`), a value no Core node owns -- the reader is the only
+ * party who can free it. Same for `join` and `io_run` below. */
 dawn_str dawn_from_code_points(dawn_array *cps) {
   int64_t n = dawn_array_len(cps);
   char *buf = (char *)dawn_alloc((size_t)(4 * n) + 1);
@@ -1071,12 +1124,17 @@ dawn_str dawn_from_code_points(dawn_array *cps) {
     }
     at += dawn_utf8_put(buf + at, (uint32_t)cp);
   }
+  dawn_drop(cps);
   return (dawn_str){buf, at};
 }
 
+/* Consumes `parts` -- the crossing temp, see `from_code_points`. */
 dawn_str dawn_join(dawn_array *parts, dawn_str sep) {
   int64_t n = dawn_array_len(parts);
-  if (n == 0) return dawn_str_empty;
+  if (n == 0) {
+    dawn_drop(parts);
+    return dawn_str_empty;
+  }
   int64_t total = sep.len * (n - 1);
   for (int64_t i = 0; i < n; i++) {
     total += ((dawn_box *)dawn_array_get(parts, i))->val.s.len;
@@ -1094,6 +1152,7 @@ dawn_str dawn_join(dawn_array *parts, dawn_str sep) {
       at += part.len;
     }
   }
+  dawn_drop(parts);
   return (dawn_str){buf, at};
 }
 
@@ -1378,7 +1437,7 @@ dawn_array *dawn_io_list_names(dawn_str path) {
   while (e != NULL) {
     if (strcmp(e->d_name, ".") != 0 && strcmp(e->d_name, "..") != 0) {
       size_t n = strlen(e->d_name);
-      a = dawn_array_push(a, dawn_box_str(dawn_str_copy(e->d_name, n)));
+      a = dawn_array_push_own(a, dawn_box_str(dawn_str_copy(e->d_name, n)));
     }
     e = readdir(d);
   }
@@ -1560,6 +1619,7 @@ int64_t dawn_io_run(dawn_array *argv, dawn_str out_path, dawn_str err_path) {
       dawn_fault(dawn_str_lit("io_run: waiting for the child failed", 36));
     }
   }
+  dawn_drop(argv);
   /* The two numbers the JVM's Process.exitValue() also reports on POSIX. */
   if (WIFEXITED(status)) return (int64_t)WEXITSTATUS(status);
   if (WIFSIGNALED(status)) return (int64_t)(128 + WTERMSIG(status));
@@ -1571,7 +1631,7 @@ dawn_array *dawn_args(void) {
    * gets the same list from main's parameter. */
   dawn_array *a = dawn_array_new();
   for (int i = 1; i < dawn_argc; i++) {
-    a = dawn_array_push(a, dawn_box_str(dawn_str_copy(dawn_argv[i], strlen(dawn_argv[i]))));
+    a = dawn_array_push_own(a, dawn_box_str(dawn_str_copy(dawn_argv[i], strlen(dawn_argv[i]))));
   }
   return a;
 }

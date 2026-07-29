@@ -179,8 +179,10 @@ dawn_array *dawn_array_new(void);
 int64_t dawn_array_len(const dawn_array *a);
 void *dawn_array_get(const dawn_array *a, int64_t i);
 dawn_array *dawn_array_push(dawn_array *a, void *x);
-/* Consumes `a` and `x` -- the one owned-argument primitive; see the calling
- * convention note below. */
+/* Consumes `a` and `x`: push for accumulation loops, where the superseded
+ * header and the element reference are the loop's to give up. */
+dawn_array *dawn_array_push_own(dawn_array *a, void *x);
+/* Consumes `a` and `x` -- see the calling convention note below. */
 dawn_array *dawn_array_with(dawn_array *a, int64_t i, void *x);
 /* In-place stores against copies, for the reuse analysis's gate. Counted
  * unconditionally (two increments against an allocation and a loop);
@@ -250,6 +252,16 @@ dawn_box *dawn_box_bool(bool v);
 dawn_box *dawn_box_unit(dawn_unit v);
 dawn_box *dawn_box_str(dawn_str v);
 
+/* Owning reads: the value comes out and the box is released. For the erased
+ * call boundary only (dynamic call results and adapter parameters), where the
+ * box is a wire format the RC pass never sees. A slot read the pass CAN see
+ * (`CUnbox` of a field it borrowed) must not use these. */
+int64_t dawn_unbox_int(void *b);
+double dawn_unbox_float(void *b);
+bool dawn_unbox_bool(void *b);
+dawn_unit dawn_unbox_unit(void *b);
+dawn_str dawn_unbox_str(void *b);
+
 /* ---- reference counting -------------------------------------------------
  *
  * `dawn_drop` walks with an explicit stack rather than C recursion: a
@@ -272,13 +284,14 @@ bool dawn_is_unique(const void *p);
  * found this the hard way: sharing a buffer between versions without counting
  * it means the first version dropped frees a buffer the others still hold.
  *
- * ONE PRIMITIVE IS THE EXCEPTION: `dawn_array_with` consumes its array and
- * its element (perceus-design.md 6, mirrored by `types.intr_owned_args`). A
- * borrowed array keeps the caller's count on it and `rc == 1` can never
- * hold; only after the caller hands its reference over does uniqueness mean
- * "no one can observe a write". The compiler's rc pass emits the transfer or
- * the dup at each call site -- hand-written C (the contract harnesses) must
- * dup anything it wants to keep before calling. */
+ * THE EXCEPTIONS CONSUME AND SAY SO: `dawn_array_with` consumes its array
+ * and its element (perceus-design.md 6, mirrored by `types.intr_owned_args`)
+ * -- a borrowed array keeps the caller's count on it and `rc == 1` could
+ * never mean "no one can observe a write". `dawn_array_push_own` consumes for
+ * accumulation loops, and the `dawn_unbox_*` family consumes the box it
+ * reads. The compiler's rc pass emits the transfer or the dup at each call
+ * site -- hand-written C (the contract harnesses) must dup anything it wants
+ * to keep before calling a consumer. */
 
 void dawn_rt_init(int argc, char **argv);
 
@@ -313,7 +326,8 @@ dawn_unit dawn_io_rename(dawn_str src, dawn_str dst); /* rename(2): atomic or pa
 dawn_str dawn_io_temp_dir(dawn_str parent, dawn_str prefix); /* "" parent = $TMPDIR */
 bool dawn_io_is_symlink(dawn_str path);
 dawn_bytes *dawn_io_read_stdin(int64_t n); /* short only at end of input */
-/* argv holds boxed dawn_str; an empty path inherits this process's stream */
+/* argv holds boxed dawn_str and is CONSUMED (an emitter crossing temp, like
+ * `from_code_points`); an empty path inherits this process's stream */
 int64_t dawn_io_run(dawn_array *argv, dawn_str out_path, dawn_str err_path);
 dawn_array *dawn_args(void);
 
@@ -380,6 +394,8 @@ dawn_adt *dawn_parse_int(dawn_str s);                    /* Option[Int] */
 dawn_adt *dawn_parse_float(dawn_str s);                  /* Option[Float] */
 dawn_adt *dawn_parse_int_radix(dawn_str s, int64_t radix);
 dawn_array *dawn_code_points(dawn_str s);                /* boxed Int elements */
+/* These two CONSUME their array: it is the emitter's list-to-Array crossing
+ * temp (`to_host`), which no Core node owns, so the reader frees it. */
 dawn_str dawn_from_code_points(dawn_array *cps);
 dawn_str dawn_join(dawn_array *parts, dawn_str sep);
 
