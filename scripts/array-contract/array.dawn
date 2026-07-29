@@ -4,10 +4,11 @@
 # D1), so this file is dropped into a copy of std/ rather than sitting in
 # examples/. It is the one place the primitive is covered end to end until D2/D3
 # make std's own collections go through it.
+# No `use java` here: this file rides into a std/ copy, and std modules are
+# checked against the refusing signature oracle -- std may not touch Java,
+# and since seam 1 that is machine-enforced. The clock therefore lives in
+# probe.dawn, which compiles as a user program under the real toolchain.
 use std/bytes
-use java "java.lang.System"
-
-fn now_ms() -> Int !io = System.currentTimeMillis()
 
 fn render(a: Array[Int]) -> String = {
   var s = ""
@@ -68,22 +69,22 @@ pub fn values() -> List[String] = {
   ]
 }
 
-## The half of the contract a return value cannot show: `array_push` extends in
-## place when this version owns the frontier. Timed rather than asserted
-## structurally because "did it copy" is deliberately unobservable from Dawn --
-## but the two shapes differ by a factor of n, so the clock is unambiguous.
-## The two counts differ because the copying shape is quadratic: `fork` has to
-## stay small enough that the *failing* case still finishes.
-pub fn timings(linear_n: Int, fork_n: Int) -> (Int, Int) !io = {
-  let base = build(fork_n)
-  let t0 = now_ms()
-  let big = build(linear_n)
-  let t1 = now_ms()
-  let acc = fork_push(base, fork_n)
-  let t2 = now_ms()
-  if array_len(big) != linear_n { panic("build lost elements") }
-  if acc != fork_n * (fork_n + 1) { panic("fork_push checksum") }
-  (t1 - t0, t2 - t1)
+## One half of the workload the probe times: the accumulation shape, where
+## every push may extend in place. The check runs inside so the work cannot
+## be optimized away; the caller holds the clock (user code cannot name
+## `Array`, so the workload cannot be handed out for timing).
+pub fn linear_build(n: Int) -> Unit = {
+  let big = build(n)
+  if array_len(big) != n { panic("build lost elements") }
+}
+
+## The other half: every push forks the same published version, quadratic by
+## construction. Building the base is n linear pushes -- noise against the
+## quadratic signal, so it stays inside the timed window.
+pub fn forked_sum(n: Int) -> Unit = {
+  let base = build(n)
+  let acc = fork_push(base, n)
+  if acc != n * (n + 1) { panic("fork_push checksum") }
 }
 
 ## Out of bounds panics rather than reading a neighbouring version's slot.

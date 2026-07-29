@@ -1,7 +1,13 @@
 # Driver for the Array contract. Everything interesting is in the std-side
-# module: user code cannot name `Array`, which is the point.
+# module: user code cannot name `Array`, which is the point. The clock is
+# here rather than there because std modules may not `use java` (the checker
+# refuses it -- std loads against the refusing oracle), while this file
+# compiles as a user program under the real JVM toolchain.
 use std/io
 use std/array
+use java "java.lang.System"
+
+fn now_ms() -> Int !io = System.currentTimeMillis()
 
 ## Small enough to stay instant on the fast path, large enough that losing it
 ## means quadratic work measured in minutes.
@@ -15,7 +21,13 @@ pub fn main() -> Unit !io = {
   for line in array.values() { println(line) }
   println("bounds   ${array.out_of_bounds()}")
   println("frombuf  ${array.from_array()}")
-  let (linear, forked) = array.timings(LINEAR_N, FORK_N)
-  println("linear   ${LINEAR_N} pushes in ${linear}ms")
-  println("forked   ${FORK_N} pushes in ${forked}ms")
+  # `array_push` extending in place is deliberately unobservable from Dawn,
+  # so it is checked by the clock: the two shapes differ by a factor of n.
+  let t0 = now_ms()
+  array.linear_build(LINEAR_N)
+  let t1 = now_ms()
+  array.forked_sum(FORK_N)
+  let t2 = now_ms()
+  println("linear   ${LINEAR_N} pushes in ${t1 - t0}ms")
+  println("forked   ${FORK_N} pushes in ${t2 - t1}ms")
 }
