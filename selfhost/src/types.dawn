@@ -188,7 +188,12 @@ pub fn is_ref_ty(t: Ty) -> Bool =
     TyString -> true
     TyUnit -> false
     TyNever -> false
-    TyAdt(_, _) -> true
+    # DICT_ADT_ID is the dictionary pseudo-type: a static table with no
+    # header, outside the ledger entirely (rc's `dictish` is the same rule
+    # seen from the expression side). Before this arm, a closure capturing a
+    # dictionary counted it in its capture mask, and dropping the closure
+    # walked `dawn_drop` into a static -- the unheaded-pointer guard.
+    TyAdt(id, _) -> id != DICT_ADT_ID
     TyTuple(_) -> true
     TyFn(_, _, _) -> true
     TyVar(_, _) -> true
@@ -200,6 +205,11 @@ pub fn is_ref_ty(t: Ty) -> Bool =
     TyArray(_) -> true
     TyJava(_, _) -> true
   }
+
+## The ADT id lowering's `dict_ty()` stamps on dictionary values: no real ADT
+## can have it (minting starts at 0). One name, so "is this a dictionary"
+## has one definition wherever a type is all there is to ask.
+pub const DICT_ADT_ID: Int = 0 - 1
 
 pub fn is_numeric(t: Ty) -> Bool = t == TyInt || t == TyFloat
 

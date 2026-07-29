@@ -1224,14 +1224,15 @@ fn rw_effect(st: RSt, e: CExpr, after: Set[Int]) -> (RSt, CExpr) = {
 
 # ---- entry ----
 
-fn rc_fn(next_sym: Int, f: CFun) -> (Int, CFun) = {
-  var dicts: Set[Int] = set.empty()
+fn rc_fn(base_dicts: Set[Int], next_sym: Int, f: CFun) -> (Int, CFun) = {
+  var dicts = base_dicts
   for d in f.dicts { dicts = set.insert(dicts, d.sym) }
   var st = RSt { scopes: [], dict_syms: dicts, next_sym: next_sym, pinned: false }
   st = push(st, -1, true)
-  # captures and parameters arrive owned; the body is responsible for them
+  # captures and parameters arrive owned; the body is responsible for them.
+  # A dictionary capture is neither: it is a static, outside the ledger.
   for p in f.captures ++ f.params {
-    if is_ref_ty(p.ty) { st = bind(st, p.sym) }
+    if is_ref_ty(p.ty) && not set.has(dicts, p.sym) { st = bind(st, p.sym) }
   }
   let (st1, body1) = rw(st, f.body, true, no_syms())
   let (st2, owned) = pop(st1)
@@ -1240,11 +1241,21 @@ fn rc_fn(next_sym: Int, f: CFun) -> (Int, CFun) = {
 }
 
 ## Insert dup and drop across a module. Idempotent it is not: run it once.
+##
+## The dictionary symbols are unioned module-wide before any function is
+## rewritten: a lifted lambda that captured an enclosing function's
+## dictionary keeps the original symbol id, but carries it as a *capture*,
+## not in its own `dicts` -- and a dictionary is outside the ledger wherever
+## it appears (see `dictish`).
 pub fn rc_module(m: CModule) -> CModule = {
+  var base: Set[Int] = set.empty()
+  for f in m.fns {
+    for d in f.dicts { base = set.insert(base, d.sym) }
+  }
   var next = m.next_sym
   var fns: List[CFun] = []
   for f in m.fns {
-    let (n, f1) = rc_fn(next, f)
+    let (n, f1) = rc_fn(base, next, f)
     next = n
     fns = fns ++ [f1]
   }
@@ -1484,11 +1495,18 @@ fn chk_stmt(c: Chk, s: CStmt) -> Chk =
 ## Every way this module's Core is unbalanced, as sentences. Empty is the
 ## answer the pass is supposed to produce.
 pub fn rc_check(m: CModule) -> List[String] = {
+  # the same module-wide dictionary union the pass makes: a lifted lambda's
+  # dictionary capture is not a counted binding, so the oracle must not
+  # expect a release for it (pass and oracle share one definition)
+  var base: Set[Int] = set.empty()
+  for f in m.fns {
+    for d in f.dicts { base = set.insert(base, d.sym) }
+  }
   var errs: List[String] = []
   for f in m.fns {
     var live: Set[Int] = set.empty()
     for p in f.captures ++ f.params {
-      if is_ref_ty(p.ty) { live = set.insert(live, p.sym) }
+      if is_ref_ty(p.ty) && not set.has(base, p.sym) { live = set.insert(live, p.sym) }
     }
     let c = chk_expr(Chk { live: live, gone: false, errs: [] }, f.body, true)
     var here = c.errs

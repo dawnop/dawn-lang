@@ -1,0 +1,24 @@
+# A closure that captures a dictionary: `sort[T: Ord]`'s comparator lambda
+# closes over the hidden Ord dictionary. The dictionary is a static with no
+# header, so it must stay out of every ledger it passes through -- the
+# closure's capture mask, the adapter's dup, and the lifted body's release.
+# Before 2026-07-30 all three counted it, and the first `sort` died on the
+# unheaded-pointer guard (or corrupted the static, under -O2).
+pub fn main() -> Unit !io = {
+  println("${sort([3, 1, 2])}")
+  println(join(map(sort(["b", "a"]), fn(s) => s), ","))
+  match max([2, 9, 4]) {
+    Some(m) -> println("${m}")
+    None -> println("none")
+  }
+  match min_by([(1, "x"), (5, "y")], fn(p) => {
+    let (n, _) = p
+    n
+  }) {
+    Some(p) -> {
+      let (_, s) = p
+      println(s)
+    }
+    None -> println("none")
+  }
+}
