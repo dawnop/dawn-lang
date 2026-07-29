@@ -43,6 +43,16 @@ fn f(x: Json) -> Int = ...             # 只能这样
 - 平台专用模块（一个只在 Linux 编得过的模块会让所有人编不过）；
 - 生成代码、仅测试依赖。
 
+> **2026-07-30 落地进度**：步 1（`m.T` 类型位，ee9bb0a）与步 2（`m.C(..)` 模式位，
+> 6011d81）已发——两处都在名字解析层终结，checked 树与两后端所见与本地拼写完全相同。
+> **步 3（`m.CONST`）实测出一个文档没预见的墙**：Core 的 const 身份是扁平简单名
+> （`CConstRef(name, ty)`，JVM/C 两后端都按「本模块 merged_consts 视图」查值），
+> 选择性导入靠 `imported_names[name]=owner` 把值并进视图——限定访问若走同一注入，
+> `g.MAX` 会与本地/他处导入的同名 `MAX` 相撞。诚实修法 = `CConstRef` 带 owner
+> （镜像 `CFnRef(owner, name, ty)`），连动 XConstRef/interp/两后端/merged_consts
+> 与 core-golden——单独排一刀，别塞在放宽系列的尾巴上。表达式位置的 `m.C`
+> （构造器作值）依赖同一次梳理，一并排。
+
 ## 二、方案
 
 ### 2.1 `m.X` 推广到类型、构造器、常量（LANG-06）
