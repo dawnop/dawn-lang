@@ -1522,3 +1522,12 @@ total-order `==`」的注释是语义收口前的陈年错话,连同函数一起
 **量出来的**:`use java` 的真实 import 行只剩三处归属——`main` 5(JVM main 专属)、
 `jfold` 7(缝 2,已在门后)、`stdlib` 1(缝 3)。三道缝剩两道:缝 1(checker→jreflect,
 一句拒绝的结构形式)与缝 3(native 编译器怎么拿到 std,待答的设计题)。
+
+### 14.20 缝 3 的方向裁决:std 嵌入改后端中立(2026-07-30,设计输入)
+
+调研了 Rust(sysroot rlib)/Kotlin-Native(klib)/Zig(lib/ 源码)/Go 1.20(源码+缓存)
+之后拍的方向:**留在嵌入模式,做成后端中立**——构建期生成器把 `std/*.dawn` 变成普通
+Dawn 模块(字符串常量表),`stdlib.dawn` 改读它,两后端同一条路,native 免费,
+`stdlib.dawn` 最后一个 `use java` 归零。验收三条:嵌入边界=语义边界(lowering/spec
+引用才配嵌入)、只许一条摄入管线、`--std-dir` override 是影子不是第二机制。
+完整调研、优雅性论证与顺带做的 std 现状审计(S5 开题)见 **`docs/std-audit.md`**。
