@@ -28,6 +28,10 @@ void dawn_rt_init(int argc, char **argv) {
    * differential harness, so it must not be reordered by buffering
    * when stdout is a pipe and stderr is not. */
   setvbuf(stdout, NULL, _IOFBF, 1 << 16);
+  /* Read at run time rather than compiled in, so one binary can be run both
+   * ways. Rebuilding to switch would change the layout, which is the variable
+   * the mode exists to hold still (plan 6 R3). */
+  dawn_rc_leak = getenv("DAWN_RC_LEAK") != NULL;
 }
 
 static void *dawn_alloc(size_t n) {
@@ -39,19 +43,50 @@ static void *dawn_alloc(size_t n) {
   return p;
 }
 
-dawn_adt *dawn_adt_new(int32_t tag, int32_t nfields) {
+/* Every heap object is born with one reference: the one the caller is holding
+ * when the constructor returns. */
+static void dawn_hdr_init(dawn_hdr *h, int32_t kind) {
+  h->rc = 1;
+  h->kind = kind;
+}
+
+dawn_adt *dawn_adt_new(int32_t tag, int32_t nfields, uint64_t mask) {
   dawn_adt *a =
       (dawn_adt *)dawn_alloc(sizeof(dawn_adt) + (size_t)nfields * sizeof(dawn_slot));
+  dawn_hdr_init(&a->h, DAWN_K_ADT);
   a->tag = tag;
   a->nfields = nfields;
+  a->ptrmask.narrow = mask;
   return a;
 }
 
-dawn_clo *dawn_clo_new(void *fn, int32_t ncap) {
+dawn_adt *dawn_adt_new_wide(int32_t tag, int32_t nfields, const uint64_t *mask) {
+  dawn_adt *a =
+      (dawn_adt *)dawn_alloc(sizeof(dawn_adt) + (size_t)nfields * sizeof(dawn_slot));
+  dawn_hdr_init(&a->h, DAWN_K_ADT);
+  a->tag = tag;
+  a->nfields = nfields;
+  a->ptrmask.wide = mask;
+  return a;
+}
+
+dawn_clo *dawn_clo_new(void *fn, int32_t ncap, uint64_t mask) {
   dawn_clo *c =
       (dawn_clo *)dawn_alloc(sizeof(dawn_clo) + (size_t)ncap * sizeof(dawn_slot));
+  dawn_hdr_init(&c->h, DAWN_K_CLO);
   c->fn = fn;
   c->ncap = ncap;
+  c->capmask.narrow = mask;
+  return c;
+}
+
+dawn_clo *dawn_clo_new_wide(void *fn, int32_t ncap, const uint64_t *mask) {
+  dawn_clo *c =
+      (dawn_clo *)dawn_alloc(sizeof(dawn_clo) + (size_t)ncap * sizeof(dawn_slot));
+  dawn_hdr_init(&c->h, DAWN_K_CLO);
+  c->fn = fn;
+  c->ncap = ncap;
+  c->capmask.wide = mask;
   return c;
 }
 
@@ -68,56 +103,196 @@ dawn_dict *dawn_dict_new(const dawn_dict *tmpl, int32_t nargs, ...) {
   return d;
 }
 
-static dawn_slot *dawn_box(void) {
-  return (dawn_slot *)dawn_alloc(sizeof(dawn_slot));
+static dawn_box *dawn_box_new(void) {
+  dawn_box *b = (dawn_box *)dawn_alloc(sizeof(dawn_box));
+  dawn_hdr_init(&b->h, DAWN_K_BOX);
+  return b;
 }
 
-dawn_slot *dawn_box_int(int64_t v) {
-  dawn_slot *s = dawn_box();
-  s->i = v;
+dawn_box *dawn_box_int(int64_t v) {
+  dawn_box *s = dawn_box_new();
+  s->val.i = v;
   return s;
 }
 
-dawn_slot *dawn_box_float(double v) {
-  dawn_slot *s = dawn_box();
-  s->f = v;
+dawn_box *dawn_box_float(double v) {
+  dawn_box *s = dawn_box_new();
+  s->val.f = v;
   return s;
 }
 
-dawn_slot *dawn_box_bool(bool v) {
-  dawn_slot *s = dawn_box();
-  s->b = v;
+dawn_box *dawn_box_bool(bool v) {
+  dawn_box *s = dawn_box_new();
+  s->val.b = v;
   return s;
 }
 
-dawn_slot *dawn_box_unit(dawn_unit v) {
-  dawn_slot *s = dawn_box();
-  s->u = v;
+dawn_box *dawn_box_unit(dawn_unit v) {
+  dawn_box *s = dawn_box_new();
+  s->val.u = v;
   return s;
 }
 
-dawn_slot *dawn_box_str(dawn_str v) {
-  dawn_slot *s = dawn_box();
-  s->s = v;
+dawn_box *dawn_box_str(dawn_str v) {
+  dawn_box *s = dawn_box_new();
+  s->val.s = v;
   return s;
 }
+
+/* ---- reference counting (docs/perceus-design.md) ---- */
+
+bool dawn_rc_leak = false;
+
+void *dawn_dup(void *p) {
+  if (p == NULL) {
+    return p;
+  }
+  dawn_hdr *h = (dawn_hdr *)p;
+  if (h->rc != DAWN_IMMORTAL) {
+    h->rc++;
+  }
+  return p;
+}
+
+bool dawn_is_unique(const void *p) {
+  return p != NULL && ((const dawn_hdr *)p)->rc == 1;
+}
+
+/* Bit i of a field mask. Narrow masks live in the object; wider ones point at
+ * a static array the emitter wrote, and 64 is the discriminator. */
+static bool dawn_mask_bit(const dawn_mask *m, int32_t n, int32_t i) {
+  if (n <= 64) {
+    return ((m->narrow >> (unsigned)i) & UINT64_C(1)) != 0;
+  }
+  return ((m->wide[i >> 6] >> (unsigned)(i & 63)) & UINT64_C(1)) != 0;
+}
+
+/* The work list `dawn_drop` walks instead of recursing. It starts on the C
+ * stack and only reaches the heap for structures deeper than 32 -- which a
+ * persistent vector or a HAMT certainly is, and which C recursion certainly
+ * cannot take at the sizes std reaches. */
+#define DAWN_WS_INLINE 32
+
+typedef struct {
+  void **items;
+  size_t len;
+  size_t cap;
+  void *inline_items[DAWN_WS_INLINE];
+} dawn_ws;
+
+static void dawn_ws_init(dawn_ws *s) {
+  s->items = s->inline_items;
+  s->len = 0;
+  s->cap = DAWN_WS_INLINE;
+}
+
+static void dawn_ws_push(dawn_ws *s, void *p) {
+  if (p == NULL) {
+    return;
+  }
+  if (s->len == s->cap) {
+    size_t cap = s->cap * 2;
+    void **grown = (void **)dawn_alloc(cap * sizeof(void *));
+    memcpy(grown, s->items, s->len * sizeof(void *));
+    if (s->items != s->inline_items) {
+      free(s->items);
+    }
+    s->items = grown;
+    s->cap = cap;
+  }
+  s->items[s->len++] = p;
+}
+
+static void dawn_ws_free(dawn_ws *s) {
+  if (s->items != s->inline_items) {
+    free(s->items);
+  }
+}
+
+void dawn_drop(void *p) {
+  if (dawn_rc_leak || p == NULL) {
+    return;
+  }
+  dawn_ws s;
+  dawn_ws_init(&s);
+  dawn_ws_push(&s, p);
+  while (s.len > 0) {
+    void *q = s.items[--s.len];
+    dawn_hdr *h = (dawn_hdr *)q;
+    if (h->rc == DAWN_IMMORTAL) {
+      continue;
+    }
+    if (h->rc <= 0) {
+      fprintf(stderr, "dawn: drop of a value with rc=%d (kind %d)\n", h->rc, h->kind);
+      exit(1);
+    }
+    if (--h->rc > 0) {
+      continue;
+    }
+    switch (h->kind) {
+      case DAWN_K_ADT: {
+        dawn_adt *a = (dawn_adt *)q;
+        for (int32_t i = 0; i < a->nfields; i++) {
+          if (dawn_mask_bit(&a->ptrmask, a->nfields, i)) {
+            dawn_ws_push(&s, a->fields[i].p);
+          }
+        }
+        break;
+      }
+      case DAWN_K_CLO: {
+        dawn_clo *c = (dawn_clo *)q;
+        for (int32_t i = 0; i < c->ncap; i++) {
+          if (dawn_mask_bit(&c->capmask, c->ncap, i)) {
+            dawn_ws_push(&s, c->caps[i].p);
+          }
+        }
+        break;
+      }
+      case DAWN_K_ARRAY:
+        dawn_ws_push(&s, ((dawn_array *)q)->buf);
+        break;
+      case DAWN_K_ARRAY_BUF: {
+        /* to `high`, not `len`: `len` is one version's length, `high` is every
+         * slot this buffer ever handed out, which is what it actually holds */
+        dawn_array_buf *b = (dawn_array_buf *)q;
+        for (int32_t i = 0; i < b->high; i++) {
+          dawn_ws_push(&s, b->data[i]);
+        }
+        free(b->data);
+        break;
+      }
+      case DAWN_K_BOX:
+        break; /* a scalar; a reference never went through a box */
+      case DAWN_K_BYTES:
+        break; /* the buffer is not owned -- perceus-design.md 2.8 */
+      default:
+        fprintf(stderr, "dawn: drop of an unheaded pointer (kind %d)\n", h->kind);
+        exit(1);
+    }
+    free(q);
+  }
+  dawn_ws_free(&s);
+}
+
+/* The prelude's own constructors: one erased field, so bit 0 of the mask. */
+#define DAWN_MASK_ONE_BOXED UINT64_C(1)
 
 dawn_adt *dawn_some(void *boxed) {
-  dawn_adt *a = dawn_adt_new(DAWN_TAG_SOME, 1);
+  dawn_adt *a = dawn_adt_new(DAWN_TAG_SOME, 1, DAWN_MASK_ONE_BOXED);
   a->fields[0].p = boxed;
   return a;
 }
 
-dawn_adt *dawn_none(void) { return dawn_adt_new(DAWN_TAG_NONE, 0); }
+dawn_adt *dawn_none(void) { return dawn_adt_new(DAWN_TAG_NONE, 0, 0); }
 
 static dawn_adt *dawn_ok(void *boxed) {
-  dawn_adt *a = dawn_adt_new(DAWN_TAG_OK, 1);
+  dawn_adt *a = dawn_adt_new(DAWN_TAG_OK, 1, DAWN_MASK_ONE_BOXED);
   a->fields[0].p = boxed;
   return a;
 }
 
 static dawn_adt *dawn_err(void *boxed) {
-  dawn_adt *a = dawn_adt_new(DAWN_TAG_ERR, 1);
+  dawn_adt *a = dawn_adt_new(DAWN_TAG_ERR, 1, DAWN_MASK_ONE_BOXED);
   a->fields[0].p = boxed;
   return a;
 }
@@ -518,6 +693,7 @@ bool dawn_char_is_space(int64_t c) {
 
 static dawn_array_buf *dawn_array_buf_new(int32_t cap) {
   dawn_array_buf *b = (dawn_array_buf *)dawn_alloc(sizeof(dawn_array_buf));
+  dawn_hdr_init(&b->h, DAWN_K_ARRAY_BUF);
   if (cap < DAWN_ARRAY_MIN_CAP) {
     cap = DAWN_ARRAY_MIN_CAP;
   }
@@ -529,6 +705,7 @@ static dawn_array_buf *dawn_array_buf_new(int32_t cap) {
 
 static dawn_array *dawn_array_of(dawn_array_buf *b, int32_t len) {
   dawn_array *a = (dawn_array *)dawn_alloc(sizeof(dawn_array));
+  dawn_hdr_init(&a->h, DAWN_K_ARRAY);
   a->buf = b;
   a->len = len;
   return a;
@@ -555,9 +732,9 @@ void *dawn_array_get(const dawn_array *a, int64_t i) {
 dawn_array *dawn_array_push(dawn_array *a, void *x) {
   dawn_array_buf *b = a->buf;
   if (a->len == b->high && a->len < b->cap) {
-    b->data[a->len] = x;
+    b->data[a->len] = dawn_dup(x);
     b->high = a->len + 1;
-    return dawn_array_of(b, a->len + 1);
+    return dawn_array_of(dawn_dup(b), a->len + 1);
   }
   int32_t cap = a->len + 1;
   if (cap < b->cap) {
@@ -568,9 +745,9 @@ dawn_array *dawn_array_push(dawn_array *a, void *x) {
   }
   dawn_array_buf *nb = dawn_array_buf_new(cap);
   for (int32_t k = 0; k < a->len; k++) {
-    nb->data[k] = a->buf->data[k];
+    nb->data[k] = dawn_dup(a->buf->data[k]);
   }
-  nb->data[a->len] = x;
+  nb->data[a->len] = dawn_dup(x);
   nb->high = a->len + 1;
   return dawn_array_of(nb, a->len + 1);
 }
@@ -583,9 +760,9 @@ dawn_array *dawn_array_with(const dawn_array *a, int64_t i, void *x) {
   }
   dawn_array_buf *nb = dawn_array_buf_new(a->len);
   for (int32_t k = 0; k < a->len; k++) {
-    nb->data[k] = a->buf->data[k];
+    /* the replaced slot is not copied, so it is not counted either */
+    nb->data[k] = (k == (int32_t)i) ? dawn_dup(x) : dawn_dup(a->buf->data[k]);
   }
-  nb->data[i] = x;
   nb->high = a->len;
   return dawn_array_of(nb, a->len);
 }
@@ -862,7 +1039,7 @@ dawn_str dawn_from_code_points(dawn_array *cps) {
   char *buf = (char *)dawn_alloc((size_t)(4 * n) + 1);
   int64_t at = 0;
   for (int64_t i = 0; i < n; i++) {
-    int64_t cp = ((dawn_slot *)dawn_array_get(cps, i))->i;
+    int64_t cp = ((dawn_box *)dawn_array_get(cps, i))->val.i;
     if (cp < 0 || cp > 0x10FFFF) {
       dawn_panic(dawn_str_lit("from_code_points: not a valid code point", 39));
     }
@@ -876,7 +1053,7 @@ dawn_str dawn_join(dawn_array *parts, dawn_str sep) {
   if (n == 0) return dawn_str_empty;
   int64_t total = sep.len * (n - 1);
   for (int64_t i = 0; i < n; i++) {
-    total += ((dawn_slot *)dawn_array_get(parts, i))->s.len;
+    total += ((dawn_box *)dawn_array_get(parts, i))->val.s.len;
   }
   char *buf = (char *)dawn_alloc((size_t)total + 1);
   int64_t at = 0;
@@ -885,7 +1062,7 @@ dawn_str dawn_join(dawn_array *parts, dawn_str sep) {
       memcpy(buf + at, sep.p, (size_t)sep.len);
       at += sep.len;
     }
-    dawn_str part = ((dawn_slot *)dawn_array_get(parts, i))->s;
+    dawn_str part = ((dawn_box *)dawn_array_get(parts, i))->val.s;
     if (part.len > 0) {
       memcpy(buf + at, part.p, (size_t)part.len);
       at += part.len;
@@ -898,6 +1075,7 @@ dawn_str dawn_join(dawn_array *parts, dawn_str sep) {
 
 static dawn_bytes *dawn_bytes_of(const unsigned char *p, int64_t len) {
   dawn_bytes *b = (dawn_bytes *)dawn_alloc(sizeof(dawn_bytes));
+  dawn_hdr_init(&b->h, DAWN_K_BYTES);
   b->p = p;
   b->len = len;
   return b;
@@ -962,8 +1140,8 @@ dawn_bytes *dawn_bytes_from_array(const dawn_array *a) {
   int64_t n = dawn_array_len(a);
   unsigned char *buf = (unsigned char *)dawn_alloc((size_t)n + 1);
   for (int64_t i = 0; i < n; i++) {
-    dawn_slot *s = (dawn_slot *)dawn_array_get(a, i);
-    buf[i] = (unsigned char)(s->i & 0xFF);
+    dawn_box *s = (dawn_box *)dawn_array_get(a, i);
+    buf[i] = (unsigned char)(s->val.i & 0xFF);
   }
   return dawn_bytes_of(buf, n);
 }
@@ -1324,7 +1502,7 @@ int64_t dawn_io_run(dawn_array *argv, dawn_str out_path, dawn_str err_path) {
   }
   char **args = (char **)dawn_alloc(sizeof(char *) * (size_t)(n + 1));
   for (int64_t i = 0; i < n; i++) {
-    args[i] = dawn_cpath(((dawn_slot *)dawn_array_get(argv, i))->s);
+    args[i] = dawn_cpath(((dawn_box *)dawn_array_get(argv, i))->val.s);
   }
   args[n] = NULL;
 

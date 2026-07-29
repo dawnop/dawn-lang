@@ -95,6 +95,56 @@ fn discard(st: CSt, v: String) -> CSt =
 ## target whose Dawn type is a known ADT can arrive as `void*`.
 fn adt_ref(v: String) -> String = "((dawn_adt*)(" ++ v ++ "))"
 
+## Which slots `drop` has to recurse into: exactly the ones `slot_of` files
+## under `p`. Read off `slot_of` rather than restated -- a second copy of that
+## rule is precisely the kind of thing that drifts (perceus-design.md 9 R2).
+fn is_ptr_slot(t: Ty) -> Bool = slot_of(t) == "p"
+
+## A field mask as 64-bit words, low word first, each a C literal. Built from
+## bits rather than accumulated into an Int because a mask with bit 63 set is
+## not a value Dawn's signed Int can hold.
+fn mask_words(bits: List[Bool]) -> List[String] = {
+  let n = len(bits)
+  if n == 0 {
+    return ["UINT64_C(0)"]
+  }
+  var out: List[String] = []
+  var w = 0
+  while w * 64 < n {
+    var digits = ""
+    var nib = 15
+    while nib >= 0 {
+      var v = 0
+      var b = 3
+      while b >= 0 {
+        let i = w * 64 + nib * 4 + b
+        v = v * 2 + (if i < n && bits[i] { 1 } else { 0 })
+        b = b - 1
+      }
+      digits = digits ++ str.substring(C_HEX, v, v + 1)
+      nib = nib - 1
+    }
+    out = out ++ ["UINT64_C(0x" ++ digits ++ ")"]
+    w = w + 1
+  }
+  out
+}
+
+## `dawn_adt_new`/`dawn_clo_new` take the mask inline; past 64 slots it moves
+## to a static array and the `_wide` entry point. The static is block-scoped --
+## static storage duration, no file-scope plumbing, and it sits right next to
+## the allocation it describes.
+fn emit_mask_arg(st: CSt, tmp: String, bits: List[Bool]) -> (CSt, String, Bool) = {
+  let words = mask_words(bits)
+  if len(bits) > 64 {
+    let name = tmp ++ "_mask"
+    (line(st, "static const uint64_t " ++ name ++ "[] = { " ++ join(words, ", ") ++ " };"),
+      name, true)
+  } else {
+    (st, words[0], false)
+  }
+}
+
 # ---- names ----
 
 fn sanitize(s: String) -> String = {
@@ -202,7 +252,7 @@ fn unbox_expr(v: String, to: Ty) -> String =
   if is_ref_c(to) {
     "((" ++ c_type(to) ++ ")(" ++ v ++ "))"
   } else {
-    "(((dawn_slot*)(" ++ v ++ "))->" ++ slot_of(to) ++ ")"
+    "(((dawn_box*)(" ++ v ++ "))->val." ++ slot_of(to) ++ ")"
   }
 
 ## Which member of `dawn_slot` holds a value of this type. Reading an ADT
@@ -448,10 +498,16 @@ fn emit_closure(st: CSt, name: String, owner: String, caps: List[CExpr]) -> (CSt
     st1 = st2
     parts = parts ++ [v]
   }
+  var bits: List[Bool] = []
+  for c in caps {
+    bits = bits ++ [is_ptr_slot(cex_ty(c))]
+  }
   let (st3, tmp) = fresh(st1)
-  var st4 = line(st3,
-    "dawn_clo* " ++ tmp ++ " = dawn_clo_new((void*)" ++ adapter_name(owner, name) ++
-      ", " ++ to_string(len(parts)) ++ ");")
+  let (st3m, mask, wide) = emit_mask_arg(st3, tmp, bits)
+  var st4 = line(st3m,
+    "dawn_clo* " ++ tmp ++ " = " ++ (if wide { "dawn_clo_new_wide" } else { "dawn_clo_new" }) ++
+      "((void*)" ++ adapter_name(owner, name) ++ ", " ++ to_string(len(parts)) ++ ", " ++
+      mask ++ ");")
   var i = 0
   for p in parts {
     st4 = line(st4, tmp ++ "->caps[" ++ to_string(i) ++ "]." ++
@@ -484,10 +540,16 @@ fn emit_alloc(st: CSt, tag: Int, args: List[CExpr], erased: Bool) -> (CSt, Strin
     st1 = st2
     parts = parts ++ [if erased { box_call(v, cex_ty(a)) } else { v }]
   }
+  # a tuple boxed every element, so every one of its slots is a pointer
+  var bits: List[Bool] = []
+  for a in args {
+    bits = bits ++ [if erased { true } else { is_ptr_slot(cex_ty(a)) }]
+  }
   let (st3, tmp) = fresh(st1)
-  var st4 = line(st3,
-    "dawn_adt* " ++ tmp ++ " = dawn_adt_new(" ++ to_string(tag) ++ ", " ++
-      to_string(len(parts)) ++ ");")
+  let (st3m, mask, wide) = emit_mask_arg(st3, tmp, bits)
+  var st4 = line(st3m,
+    "dawn_adt* " ++ tmp ++ " = " ++ (if wide { "dawn_adt_new_wide" } else { "dawn_adt_new" }) ++
+      "(" ++ to_string(tag) ++ ", " ++ to_string(len(parts)) ++ ", " ++ mask ++ ");")
   var i = 0
   for p in parts {
     let slot = if erased { "p" } else { slot_of(cex_ty(args[i])) }

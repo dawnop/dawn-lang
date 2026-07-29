@@ -165,6 +165,14 @@ jobs:
       - name: Unicode contract
         run: ./scripts/unicode-contract/run.sh
 
+      # Reference counting, checked in C: until the Core pass lands, nothing
+      # emitted calls dup or drop, so no Dawn program can reach them. The
+      # oracle is AddressSanitizer -- a drop that fails to recurse is a leak,
+      # one that recurses twice is a double free -- plus a small-stack run,
+      # because drop walks a 200k-node chain and must not do it by recursing.
+      - name: RC contract
+        run: ./scripts/rc-contract/run.sh
+
       # The playground runs a public endpoint that compiles and executes code
       # strangers send it, and nothing here ever ran its contract test: the
       # sandbox timeout, the 413 on oversized bodies, and the check that compile

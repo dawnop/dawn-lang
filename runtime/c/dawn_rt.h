@@ -18,6 +18,46 @@
 typedef unsigned char dawn_unit;
 #define DAWN_UNIT ((dawn_unit)0)
 
+/* ---- the reference-count header (docs/perceus-design.md) ----------------
+ *
+ * Every heap object starts with one, at offset 0, so `dawn_drop` can ask an
+ * erased `void*` what it is holding. That question is unavoidable rather than
+ * a convenience: `box_call` allocates a box for a scalar and plain-casts a
+ * reference, so a slot's `void*` may be a box, an adt or a closure, and
+ * nothing in the static type of an erased position says which.
+ *
+ * Counts are non-atomic. Dawn is strict, immutable and has no mutable
+ * aliasing, so a cycle cannot be constructed and plain RC is complete --
+ * that, and single-threaded programs, is what buys both simplifications. */
+typedef struct {
+  int32_t rc;
+  int32_t kind;
+} dawn_hdr;
+
+enum {
+  DAWN_K_ADT = 1,
+  DAWN_K_CLO,
+  DAWN_K_ARRAY,
+  DAWN_K_ARRAY_BUF,
+  DAWN_K_BOX,
+  DAWN_K_BYTES
+};
+
+/* Never freed, and dup/drop return immediately on it. Static dictionaries are
+ * out of RC by construction (the pass skips them -- CFun.dicts is its own
+ * field), so nothing wears this yet; it is here because interned constants
+ * will, and because one comparison is cheaper than a rule about who may be
+ * passed to drop. */
+#define DAWN_IMMORTAL INT32_MAX
+
+/* A field or capture mask: bit i is set when slot i holds a heap pointer that
+ * `drop` must recurse into. `wide` is used when the slot count exceeds 64,
+ * pointing at a static array the emitter writes next to the allocation. */
+typedef union {
+  uint64_t narrow;
+  const uint64_t *wide;
+} dawn_mask;
+
 /* UTF-8 bytes plus a length. Not NUL-terminated: the length is authoritative,
  * so slices can share a buffer and embedded NULs survive. Passed by value;
  * the two words are cheaper to copy than to chase. */
@@ -46,7 +86,13 @@ typedef union dawn_slot {
  * what `bytes_utf8` produces and `std/bytes` walks. Separate because the two
  * are separate Dawn types, and conflating them here would let one be passed
  * where the other belongs without the C compiler saying so. */
+/* `p` is not owned: a Bytes buffer leaks, deliberately. Bytes and String
+ * together are 0.1% of what the compiler allocates (perceus-design.md 1), and
+ * giving a leaked buffer an owner would mean a header in front of every
+ * literal. The struct itself is counted because `c_repr(TyBytes)` is ROpaque,
+ * which makes a Bytes field a masked pointer that does reach drop. */
 typedef struct {
+  dawn_hdr h;
   const unsigned char *p;
   int64_t len;
 } dawn_bytes;
@@ -55,12 +101,15 @@ typedef struct {
  * exactly what CIsCtor tests -- the JVM backend uses class identity instead,
  * and that difference is confined to the two emitters. */
 typedef struct {
+  dawn_hdr h;
   int32_t tag;
   int32_t nfields;
+  dawn_mask ptrmask;
   dawn_slot fields[];
 } dawn_adt;
 
-dawn_adt *dawn_adt_new(int32_t tag, int32_t nfields);
+dawn_adt *dawn_adt_new(int32_t tag, int32_t nfields, uint64_t mask);
+dawn_adt *dawn_adt_new_wide(int32_t tag, int32_t nfields, const uint64_t *mask);
 
 /* The prelude ADTs the runtime itself has to build: `parse_int` and
  * `bytes_decode` return an Option, `catch_fault` a Result. A constructor's tag is
@@ -108,12 +157,17 @@ dawn_adt *dawn_none(void);
  * back what `CUnbox` expects to dereference, and `array_push` takes what
  * `CBox` just produced. */
 typedef struct {
+  dawn_hdr h;
   void **data;
   int32_t cap;
   int32_t high; /* slots ever handed out; only push may raise it */
 } dawn_array_buf;
 
+/* Counted separately from its buffer, because that is exactly the structure
+ * sharing a persistent vector is made of: several versions, one buffer. The
+ * buffer's count is how many versions point at it. */
 typedef struct {
+  dawn_hdr h;
   dawn_array_buf *buf;
   int32_t len;
 } dawn_array;
@@ -133,12 +187,16 @@ int64_t dawn_popcount(int64_t n);
  * piece of native codegen. `fn` always points at the generated adapter, so
  * every call site is one indirect call regardless of capture count. */
 typedef struct {
+  dawn_hdr h;
   void *fn;
   int32_t ncap;
+  int32_t _pad;
+  dawn_mask capmask;
   dawn_slot caps[];
 } dawn_clo;
 
-dawn_clo *dawn_clo_new(void *fn, int32_t ncap);
+dawn_clo *dawn_clo_new(void *fn, int32_t ncap, uint64_t mask);
+dawn_clo *dawn_clo_new_wide(void *fn, int32_t ncap, const uint64_t *mask);
 
 /* A trait dictionary: a flat table of function pointers in the trait's
  * declaration order. Dawn is dictionary-passing rather than monomorphising,
@@ -166,12 +224,43 @@ typedef struct dawn_dict {
  * arguments so a call site emits one expression. */
 dawn_dict *dawn_dict_new(const dawn_dict *tmpl, int32_t nargs, ...);
 
-/* boxing: a type-variable slot holds a pointer to one of these */
-dawn_slot *dawn_box_int(int64_t v);
-dawn_slot *dawn_box_float(double v);
-dawn_slot *dawn_box_bool(bool v);
-dawn_slot *dawn_box_unit(dawn_unit v);
-dawn_slot *dawn_box_str(dawn_str v);
+/* boxing: a type-variable slot holds a pointer to one of these. The header
+ * has to sit at offset 0 like every other heap object's -- a header behind
+ * the pointer would leave adts and boxes with theirs in different places, and
+ * a uniform drop cannot have that. So `unbox_expr` reads `->val`, and the old
+ * cast straight to `dawn_slot*` is gone. */
+typedef struct {
+  dawn_hdr h;
+  dawn_slot val;
+} dawn_box;
+
+dawn_box *dawn_box_int(int64_t v);
+dawn_box *dawn_box_float(double v);
+dawn_box *dawn_box_bool(bool v);
+dawn_box *dawn_box_unit(dawn_unit v);
+dawn_box *dawn_box_str(dawn_str v);
+
+/* ---- reference counting -------------------------------------------------
+ *
+ * `dawn_drop` walks with an explicit stack rather than C recursion: a
+ * persistent vector or a HAMT is deep, and dropping a hundred-thousand-node
+ * structure would otherwise overflow. That is not a tuning choice; the
+ * symptom without it is a segfault that only appears on large inputs. */
+extern bool dawn_rc_leak; /* --rc=leak: drop becomes a no-op (plan 6 R3) */
+
+void *dawn_dup(void *p);
+void dawn_drop(void *p);
+bool dawn_is_unique(const void *p);
+
+/* THE CALLING CONVENTION FOR EVERY PRIMITIVE BELOW: arguments are BORROWED,
+ * and anything a primitive keeps it dups for itself. So `array_push` counts
+ * both the element it stores and the buffer it goes on sharing, and the
+ * caller still owes a drop on the array it passed in and on the element.
+ *
+ * Written down because the alternative -- consuming arguments -- reads the
+ * same at every call site and differs only in who leaks. The array contract
+ * found this the hard way: sharing a buffer between versions without counting
+ * it means the first version dropped frees a buffer the others still hold. */
 
 void dawn_rt_init(int argc, char **argv);
 
