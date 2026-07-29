@@ -51,6 +51,7 @@ use reach
 use lower
 use rc
 use emitc
+use cdriver
 use jfold.{fold_call}
 use jreflect.{jsig_real}
 use emitc.{EmitMod}
@@ -91,33 +92,6 @@ fn own_trait_ids(traits: Traits, cls: String) -> List[Int] = {
       None -> false
     }
     if is_own { out = out ++ [tid] }
-  }
-  out
-}
-
-## This module's const-name → value view: its own comptime results, plus
-## imported consts resolved in their declaring module's results.
-fn merged_consts(
-  cx: Cx,
-  ct: CtOut,
-  by_mod: Map[String, Map[String, CValue]]
-) -> Map[String, CValue] = {
-  var out = ct.consts
-  for name in map.keys(cx.consts) {
-    if not map.has(out, name) {
-      match map.get(cx.imported_names, name) {
-        Some(from) ->
-          match map.get(by_mod, from) {
-            Some(vals) ->
-              match map.get(vals, name) {
-                Some(v) -> { out = map.insert(out, name, v) }
-                None -> ()
-              }
-            None -> ()
-          }
-        None -> ()
-      }
-    }
   }
   out
 }
@@ -318,7 +292,7 @@ fn collect_program(
     let (cls, cx, tm, ct) = sm
     classes = classes ++ emit_module(sup, adts, traits, impl_table, prog_fns, cx.fns, cls,
       own_trait_ids(cx.traits, cls), own_adts_of(cx.adts, cls, seen),
-      tm, ct, merged_consts(cx, ct, const_vals), false)
+      tm, ct, cdriver.merged_consts(cx, ct, const_vals), false)
     for aid in own_adts_of(cx.adts, cls, seen) {
       seen = set.insert(seen, adt_jvm_name(adt_of(cx.adts, aid)))
     }
@@ -329,7 +303,7 @@ fn collect_program(
     classes = classes ++ emit_module(sup, adts, traits, impl_table, prog_fns, cm.cx.fns,
       cm.class_name, own_trait_ids(cm.cx.traits, cm.class_name),
       own_adts_of(cm.cx.adts, cm.class_name, seen), cm.tm, cm.ct,
-      merged_consts(cm.cx, cm.ct, const_vals), true)
+      cdriver.merged_consts(cm.cx, cm.ct, const_vals), true)
     for aid in own_adts_of(cm.cx.adts, cm.class_name, seen) {
       seen = set.insert(seen, adt_jvm_name(adt_of(cm.cx.adts, aid)))
     }
@@ -1098,7 +1072,7 @@ fn run_lower(rest: List[String]) -> Unit !io = {
   let loaded = if io.is_dir(t) { load_directory(t) } else { load_file(t) }
   let prog = analyze_program(loaded, std, ct_default(), jsig_real())
   if len(prog.diags) > 0 { fail_compile(prog.diags) }
-  let (adts, traits, impl_table, prog_fns) = program_tables(std, prog.modules)
+  let (adts, traits, impl_table, prog_fns) = cdriver.program_tables(std, prog.modules)
 
   # `--dump` writes one .core per module next to the coverage count. The
   # golden it feeds is the only detector for the parts of Core no shipping
@@ -1170,54 +1144,6 @@ fn lower_size(m: CModule) -> Int = {
 
 ## Trait/impl/ADT/signature tables unioned over std and user modules, as
 ## collect_program builds them for the JVM path: ids are unique program-wide.
-fn program_tables(
-  std: StdCtx,
-  mods: List[CheckedMod]
-) -> (Adts, Traits, Impls, Map[(String, String), Sig]) = {
-  var adts = prelude_adts()
-  var traits: Traits = map.empty()
-  var impl_table: Impls = map.empty()
-  var prog_fns: Map[(String, String), Sig] = map.empty()
-  for pr in map.entries(std.adts) {
-    let (k, v) = pr
-    adts = map.insert(adts, k, v)
-  }
-  for sm in std.mods {
-    let (cls, cx, _tm, _ct) = sm
-    for pr in map.entries(cx.traits) {
-      let (k, v) = pr
-      traits = map.insert(traits, k, v)
-    }
-    for pr in map.entries(cx.impl_table) {
-      let (k, v) = pr
-      impl_table = map.insert(impl_table, k, v)
-    }
-    for pr in map.entries(cx.fns) {
-      let (k, v) = pr
-      prog_fns = map.insert(prog_fns, (cls, k), v)
-    }
-  }
-  for cm in mods {
-    for pr in map.entries(cm.cx.adts) {
-      let (k, v) = pr
-      adts = map.insert(adts, k, v)
-    }
-    for pr in map.entries(cm.cx.traits) {
-      let (k, v) = pr
-      traits = map.insert(traits, k, v)
-    }
-    for pr in map.entries(cm.cx.impl_table) {
-      let (k, v) = pr
-      impl_table = map.insert(impl_table, k, v)
-    }
-    for pr in map.entries(cm.cx.fns) {
-      let (k, v) = pr
-      prog_fns = map.insert(prog_fns, (cm.class_name, k), v)
-    }
-  }
-  (adts, traits, impl_table, prog_fns)
-}
-
 ## The Phase -1 native seam spike (docs/native-backend-plan.md): emit C for
 ## the trivial subset instead of class files. Hidden and unsupported --
 ## `emitc.dawn` panics on anything outside that subset, and both are
@@ -1250,56 +1176,10 @@ fn run_emitc(rest: List[String]) -> Unit !io = {
   let loaded = if io.is_dir(t) { load_directory(t) } else { load_file(t) }
   let prog = analyze_program(loaded, std, ct_default(), jsig_real())
   if len(prog.diags) > 0 { fail_compile(prog.diags) }
-  let (adts, traits, impl_table, prog_fns) = program_tables(std, prog.modules)
-  # const values by declaring module, the same view the JVM path builds: a
-  # const is named by its simple name and imported by it
-  var const_vals: Map[String, Map[String, CValue]] = map.empty()
-  for sm in std.mods {
-    let (cls, _cx, _tm, ct) = sm
-    const_vals = map.insert(const_vals, cls, ct.consts)
+  let text = match cdriver.c_text(std, prog) {
+    Ok(s) -> s
+    Err(e) -> return cli_error(e ++ " in " ++ t)
   }
-  for cm in prog.modules { const_vals = map.insert(const_vals, cm.mod_path, cm.ct.consts) }
-
-  var units: List[EmitMod] = []
-  var entry = ""
-  # std goes in first, because a C translation unit needs a definition for
-  # everything it calls and after S3 the collections *are* std -- `[1, 2]`
-  # calls `std/pvec.of_array`. This was measured as premature on 2026-07-27
-  # and is not any more: std reaches the string intrinsics (`cursor_start`
-  # first), and the C runtime implements them now.
-  for sm in std.mods {
-    let (cls, cx, tm, ct) = sm
-    units = units ++ [
-      EmitMod {
-        m: rc.rc_module(lower.lower_module(cls, tm, traits, impl_table, adts, prog_fns)),
-        consts: merged_consts(cx, ct, const_vals),
-        blocks: ct.blocks
-      }
-    ]
-  }
-  for cm in prog.modules {
-    units = units ++ [
-      EmitMod {
-        m: rc.rc_module(lower.lower_module(cm.class_name, cm.tm, traits, impl_table, adts, prog_fns)),
-        consts: merged_consts(cm.cx, cm.ct, const_vals),
-        blocks: cm.ct.blocks
-      }
-    ]
-    if entry == "" {
-      for tf in cm.tm.fns {
-        if tf.name == "main" { entry = cm.class_name }
-      }
-    }
-  }
-  if entry == "" { cli_error("no main function in " ++ t) }
-  # same question, same answer as the JVM path: which Unicode tables ride.
-  # The units are already lowered (rc included; the walk ignores CDup/CSDrop),
-  # so reach reads them as they are.
-  var reach_mods: List[CModule] = []
-  for u2 in units { reach_mods = reach_mods ++ [u2.m] }
-  var reach_roots: List[String] = []
-  for cm in prog.modules { reach_roots = reach_roots ++ [cm.class_name] }
-  let text = emitc.emit_program(units, entry, reach.table_use(reach_mods, reach_roots))
   if out == "" {
     print(text)
   } else {

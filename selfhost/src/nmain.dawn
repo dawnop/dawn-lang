@@ -1,0 +1,236 @@
+# The native driver (docs/native-backend-plan.md §14.1): the shared frontend
+# behind a `main` that wires no JVM hook. Everything host-specific is a
+# default -- `use java` checking is refused (cx_new's jsig), compile-time
+# Java folding is refused (ct_default's jcall), std comes embedded (stdsrc),
+# and the C runtime comes embedded too (rtsrc, via cdriver) -- so the binary
+# this module compiles to is a complete toolchain with no files of its own.
+#
+# `build` shells out to the system C compiler: emitting C *is* this
+# backend's codegen, and cc is its assembler. Subcommands are a subset of
+# the JVM driver's on purpose; `test` and the rest arrive in later knives.
+
+use std/io
+use std/str
+use token.{Diag}
+use diag
+use stdlib.{StdCtx, load_std}
+use interp.{ct_default}
+use jsig.{jsig_refused}
+use analyze.{Program, LocDiag, load_directory, load_file, analyze_program}
+use cdriver
+use version.{VERSION}
+
+fn usage() -> String =
+  join([
+    "dawnc " ++ VERSION ++ " -- the Dawn compiler, native backend",
+    "",
+    "usage:",
+    "  dawnc check [--std <dir>] <target>          type-check, report diagnostics",
+    "  dawnc build [--std <dir>] <target> [-o out] compile to a native binary via cc",
+    "  dawnc emitc [--std <dir>] <target> [-o out] emit the C translation unit",
+    "  dawnc run   [--std <dir>] <target>          compile and run",
+    "  dawnc version                               print the version",
+    "",
+    "A <target> is a single .dawn file or a project directory (src/main.dawn entry).",
+    "`use java` programs are rejected: Java interop needs the JVM toolchain."
+  ], "\n") ++ "\n"
+
+fn fail_usage() -> Unit !io = {
+  io.eprint(usage())
+  let _ = io.exit(2)
+  ()
+}
+
+fn fail_compile(diags: List[LocDiag]) -> Unit !io = {
+  var pairs: List[(String, Diag)] = []
+  for ld in diags { pairs = pairs ++ [(ld.path, ld.d)] }
+  io.eprint(diag.render_all(pairs))
+  io.eprintln(diag.count_line(len(diags)))
+  let _ = io.exit(1)
+  ()
+}
+
+fn cli_error(msg: String) -> Unit !io = {
+  io.eprintln("error: " ++ msg)
+  let _ = io.exit(1)
+  ()
+}
+
+## `--std <dir>` and `-o <out>` picked out of the argument tail; the one
+## remaining positional is the target.
+fn parse_tail(rest: List[String]) -> (String, String, String) !io = {
+  var std_dir = "std"
+  var out = ""
+  var target = ""
+  var i = 0
+  while i < len(rest) {
+    if rest[i] == "--std" && i + 1 < len(rest) {
+      std_dir = rest[i + 1]
+      i = i + 2
+    } else if rest[i] == "-o" && i + 1 < len(rest) {
+      out = rest[i + 1]
+      i = i + 2
+    } else if target == "" {
+      target = rest[i]
+      i = i + 1
+    } else {
+      fail_usage()
+      i = i + 1
+    }
+  }
+  if target == "" { fail_usage() }
+  (std_dir, out, target)
+}
+
+fn load_or_die(std_dir: String) -> StdCtx !io =
+  match load_std(std_dir) {
+    Ok(sc) -> sc
+    Err(e) -> panic("bundled std is broken: " ++ e)
+  }
+
+fn analyzed(std: StdCtx, target: String) -> Program !io = {
+  if not io.exists(target) {
+    cli_error("no such file or directory: " ++ target)
+  }
+  if not io.is_dir(target) && not str.ends_with(target, ".dawn") {
+    cli_error("source files must end in .dawn: " ++ target)
+  }
+  let loaded = if io.is_dir(target) { load_directory(target) } else { load_file(target) }
+  let prog = analyze_program(loaded, std, ct_default(), jsig_refused())
+  if len(prog.diags) > 0 { fail_compile(prog.diags) }
+  prog
+}
+
+fn emitted(std_dir: String, target: String) -> String !io = {
+  let std = load_or_die(std_dir)
+  let prog = analyzed(std, target)
+  match cdriver.c_text(std, prog) {
+    Ok(s) -> s
+    Err(e) -> {
+      cli_error(e ++ " in " ++ target)
+      ""
+    }
+  }
+}
+
+## The output name `build` defaults to: the target's basename, extension off.
+fn default_out(target: String) -> String = {
+  let base = match str.last_index_of(target, "/") {
+    Some(i) -> str.substring(target, i + 1, str.len(target))
+    None -> target
+  }
+  let stem = if str.ends_with(base, ".dawn") {
+    str.substring(base, 0, str.len(base) - 5)
+  } else {
+    base
+  }
+  if stem == "" { "a.out" } else { stem }
+}
+
+## Write the C and the embedded runtime into a scratch directory, run cc, and
+## leave the binary at `out`. The cc diagnostics stream to this process's
+## stderr -- an empty err_path means "inherit", and cc failing is the user's
+## compile error to read.
+fn cc_build(ctext: String, out: String) -> Unit !io = {
+  let work = match io.temp_dir("", "dawnc") {
+    Ok(d) -> d
+    Err(e) -> {
+      cli_error("cannot make a scratch directory: " ++ e)
+      return ()
+    }
+  }
+  var wrote = io.write_file(work ++ "/main.c", ctext)
+  for f in ["dawn_rt.c", "dawn_rt.h"] {
+    match cdriver.runtime_source(f) {
+      Some(t) -> { wrote = io.write_file(work ++ "/" ++ f, t) }
+      None -> panic("embedded runtime is missing " ++ f)
+    }
+  }
+  match wrote {
+    Ok(_) -> ()
+    Err(e) -> {
+      cli_error("cannot stage the C sources: " ++ e)
+      return ()
+    }
+  }
+  let cc = match io.getenv("CC") {
+    Some(c) -> c
+    None -> "cc"
+  }
+  let argv = [
+    cc, "-std=c11", "-O2", "-fwrapv", "-fno-strict-aliasing",
+    "-I", work,
+    "-o", out, work ++ "/main.c", work ++ "/dawn_rt.c", "-lm"
+  ]
+  match io.run(argv, "", "") {
+    Ok(0) -> ()
+    Ok(code) -> cli_error(cc ++ " failed (exit code " ++ "${code}" ++ ")")
+    Err(e) -> cli_error("cannot run " ++ cc ++ ": " ++ e)
+  }
+}
+
+fn cmd_check(rest: List[String]) -> Unit !io = {
+  let (std_dir, _out, target) = parse_tail(rest)
+  let std = load_or_die(std_dir)
+  let _ = analyzed(std, target)
+  println("ok")
+}
+
+fn cmd_emitc(rest: List[String]) -> Unit !io = {
+  let (std_dir, out, target) = parse_tail(rest)
+  let text = emitted(std_dir, target)
+  if out == "" {
+    print(text)
+  } else {
+    match io.write_file(out, text) {
+      Ok(_) -> ()
+      Err(e) -> cli_error("cannot write " ++ out ++ ": " ++ e)
+    }
+  }
+}
+
+fn cmd_build(rest: List[String]) -> Unit !io = {
+  let (std_dir, out0, target) = parse_tail(rest)
+  let out = if out0 == "" { default_out(target) } else { out0 }
+  cc_build(emitted(std_dir, target), out)
+}
+
+fn cmd_run(rest: List[String]) -> Unit !io = {
+  let (std_dir, _out, target) = parse_tail(rest)
+  let work = match io.temp_dir("", "dawnc-run") {
+    Ok(d) -> d
+    Err(e) -> {
+      cli_error("cannot make a scratch directory: " ++ e)
+      return ()
+    }
+  }
+  let bin = work ++ "/program"
+  cc_build(emitted(std_dir, target), bin)
+  match io.run([bin], "", "") {
+    Ok(code) -> {
+      let _ = io.exit(code)
+      ()
+    }
+    Err(e) -> cli_error("cannot run the built program: " ++ e)
+  }
+}
+
+pub fn main() -> Unit !io = {
+  match args() {
+    [] -> fail_usage()
+    [mode, ..rest] ->
+      if mode == "check" {
+        cmd_check(rest)
+      } else if mode == "build" {
+        cmd_build(rest)
+      } else if mode == "emitc" {
+        cmd_emitc(rest)
+      } else if mode == "run" {
+        cmd_run(rest)
+      } else if mode == "version" || mode == "--version" {
+        println("dawnc " ++ VERSION ++ " (native)")
+      } else {
+        fail_usage()
+      }
+  }
+}

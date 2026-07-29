@@ -280,7 +280,7 @@ native 照抄才算"通过"。故语料要配少量**独立的期望输出**(不
 | **Phase 3 C 发射器** | **完成**——按收口后的 Core 重导完毕。整编译器(剥掉 JVM-only 模块,26k 行)发 4.7 MB C,cc **零 error 零 warning**,跑出的结果与 JVM 逐字一致 |
 | Phase 4 Perceus | **全部完成(2026-07-29)**:运行时 ABI、所有权推断 pass(`rc.dawn`)、emitc 消费两个节点、最后使用分析、复用分析(`array_with` 唯一时就地写,整编译器就地 73.8%,线性更新 spine 100% 原地)。语料 23 个程序全绿含 AddressSanitizer 档;整编译器前端 native 跑通,`checker.dawn` 峰值 4.4 GB → 1.46 GB、probe 2.77s。`CBorrowed` 判为不需要(开的是 owned 口子)。**字符串/Bytes 已入账(2026-07-29)**:slot 16B→8B、checker.dawn 峰值 1.46GB→81MB(−94%)、probe 2.10s、LeakSanitizer 全量启用(语料 0 漏,字典与被接住的 fault 两类设计内例外写明),见 §5.7/§6 |
 | Phase 5 `use c` / Phase A 验收 | 差分 harness 已就位并进了 CI。**`use c` 已不在关键路径**:§14.3/§14.7 的十个 io intrinsic 解决了编译器自己的 IO 需求 |
-| Phase 6 native 自举 | Phase 4 已通;§14.10 三道缝全关(缝 2 §14.19、缝 3 §14.21、缝 1 §14.22),共享前端零 Java 依赖;剩 native main 本身 |
+| Phase 6 native 自举 | **完成(2026-07-30,§14.23)**:三道缝全关 + native driver `nmain` 落地,`scripts/native-fixpoint.sh` 过——native 编译器自举 B == C,裸目录 smoke 全通 |
 
 **已落地的件**:`selfhost/src/core.dawn`(IR)、`selfhost/src/lower.dawn`(TAST → Core)、
 `selfhost/src/emitc.dawn`(Core → C)、`emit.dawn`(Core → JVM)、`runtime/c/dawn_rt.{h,c}`、
@@ -1590,3 +1590,32 @@ jfold 的 granted 用例接 `jsig_real()`(它本来就在 JVM 半区)。
 emit/codegen/jarw/testrun/maven(JVM 后端实现),全部在 JVM 半区门后;共享前端
 (lexer/parser/checker/lower/analyze/interp/stdlib/lsp)对 Java 的依赖为**零**。
 native 自举只剩 native main 本身(§14.1 的门控形态:两个 main 共享前端,不做条件编译)。
+
+### 14.23 Phase 6 出口:native 固定点(2026-07-30)
+
+**B == C 成立:native 编译器编译自己得到的下一代与自身逐字节一致,闭环里没有 JVM。**
+门禁 `scripts/native-fixpoint.sh`(里程碑门禁,非日常):A = JVM 工具链 `__emitc` 出
+native driver 的 C、cc 编成 `dawnc-A`;B = A 编译 nmain 自己,**其 C 与 A 的逐字节相同**
+(两个工具链发射一致,这在动手当天就成立);C = B 再编自己,B == C。全程约 71s/代
+(编译器吞下自己 65 模块 ≈ 10.7 万行 C)。随后的裸目录 smoke:embedded std + embedded
+runtime,无仓库文件,`dawnc run/build/check` 全通。
+
+**native driver = `nmain.dawn`**(§14.1 的第二个 entry):共享前端 + 全默认拒绝
+(jsig_refused/ct_default)+ 嵌入 std(stdsrc)+ 嵌入 C 运行时(rtsrc,
+`scripts/gen-rtsrc.py` 生成、round-trip 测试防陈旧,单字面量 60KB 头寸守卫)。
+子命令 check/emitc/build/run;`build` = 写出 C + 运行时到暂存目录、`io.run` 调 cc
+——发 C 就是这个后端的 codegen,cc 是它的汇编器。管线本体在新模块 **`cdriver.dawn`**
+(program_tables/merged_consts 自 main 迁入 + `c_text`),两个 driver 共用一份定义;
+main 的 `__emitc` 同步改走它。
+
+**顺手挖出并修掉一个存量 C 后端 bug(字典被闭包捕获 = 三重故障)**:`sort[T: Ord]`
+的比较 lambda 捕获隐藏 Ord 字典——字典是无头静态表,却 (1) 在闭包捕获 mask 里被标为
+计数、(2) adapter 解包时被 dup、(3) lifted body 里被 rc 当 owned 参数 drop。第一次
+`sort([3,1,2])` 就死在 unheaded-pointer 守卫上;spike 语料从没在 native 侧调过 sort,
+故一直没暴露。根因:捕获的记录类型来自 checker(字典符号 typed as the tvar),
+按类型认不出字典。修法 = **按符号认**:rc_module/rc_check/emitc 各做模块级
+dict-param 符号并集(lifted lambda 保留原符号 id,天然命中),mask/adapter-dup/
+bind/oracle 四处同步;`types.dawn` 顺带给 dict 伪 id 起名 `DICT_ADT_ID` 并让
+`is_ref_ty` 对它答 false(belt)。语料补 `dict_capture.dawn`(sort/max/min_by,ASan 下绿)。
+教训又是 Perceus 那句:**pass 与 oracle 必须同一份定义**——这次 oracle(rc_check)
+先按旧定义报了假失衡,才把 pass 侧漏改的 bind 顶了出来。

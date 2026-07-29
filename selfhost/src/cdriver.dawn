@@ -1,0 +1,180 @@
+# The compile pipeline both drivers share, from an analyzed program to one C
+# translation unit. `main` (the JVM driver) reaches it for `__emitc`, and
+# `nmain` (the native driver) is little more than a CLI around it -- one
+# definition of "how a program becomes C", per the one-definition doctrine.
+#
+# `program_tables` and `merged_consts` live here rather than in a driver
+# because they are the same merge for every backend: the JVM codegen path
+# calls them too.
+
+use std/io
+use std/map
+use core.{CValue, CModule}
+use types.{Adts, Traits, Impls, Sig, prelude_adts}
+use checker.{Cx}
+use interp.{CtOut}
+use stdlib.{StdCtx}
+use analyze.{CheckedMod, Program}
+use lower
+use rc
+use reach
+use emitc
+use emitc.{EmitMod}
+use rtsrc
+
+## The program-wide tables codegen reads: every module's ADTs, traits, impls
+## and function signatures, std's first, later declarations winning.
+pub fn program_tables(
+  std: StdCtx,
+  mods: List[CheckedMod]
+) -> (Adts, Traits, Impls, Map[(String, String), Sig]) = {
+  var adts = prelude_adts()
+  var traits: Traits = map.empty()
+  var impl_table: Impls = map.empty()
+  var prog_fns: Map[(String, String), Sig] = map.empty()
+  for pr in map.entries(std.adts) {
+    let (k, v) = pr
+    adts = map.insert(adts, k, v)
+  }
+  for sm in std.mods {
+    let (cls, cx, _tm, _ct) = sm
+    for pr in map.entries(cx.traits) {
+      let (k, v) = pr
+      traits = map.insert(traits, k, v)
+    }
+    for pr in map.entries(cx.impl_table) {
+      let (k, v) = pr
+      impl_table = map.insert(impl_table, k, v)
+    }
+    for pr in map.entries(cx.fns) {
+      let (k, v) = pr
+      prog_fns = map.insert(prog_fns, (cls, k), v)
+    }
+  }
+  for cm in mods {
+    for pr in map.entries(cm.cx.adts) {
+      let (k, v) = pr
+      adts = map.insert(adts, k, v)
+    }
+    for pr in map.entries(cm.cx.traits) {
+      let (k, v) = pr
+      traits = map.insert(traits, k, v)
+    }
+    for pr in map.entries(cm.cx.impl_table) {
+      let (k, v) = pr
+      impl_table = map.insert(impl_table, k, v)
+    }
+    for pr in map.entries(cm.cx.fns) {
+      let (k, v) = pr
+      prog_fns = map.insert(prog_fns, (cm.class_name, k), v)
+    }
+  }
+  (adts, traits, impl_table, prog_fns)
+}
+
+## This module's const-name → value view: its own comptime results, plus
+## imported consts resolved in their declaring module's results.
+pub fn merged_consts(
+  cx: Cx,
+  ct: CtOut,
+  by_mod: Map[String, Map[String, CValue]]
+) -> Map[String, CValue] = {
+  var out = ct.consts
+  for name in map.keys(cx.consts) {
+    if not map.has(out, name) {
+      match map.get(cx.imported_names, name) {
+        Some(from) ->
+          match map.get(by_mod, from) {
+            Some(vals) ->
+              match map.get(vals, name) {
+                Some(v) -> { out = map.insert(out, name, v) }
+                None -> ()
+              }
+            None -> ()
+          }
+        None -> ()
+      }
+    }
+  }
+  out
+}
+
+## An analyzed program as one C translation unit, or Err when it has no
+## `main`. std goes in first: a C translation unit needs a definition for
+## everything it calls, and after S3 the collections *are* std -- `[1, 2]`
+## calls `std/pvec.of_array`.
+pub fn c_text(std: StdCtx, prog: Program) -> Result[String, String] !io = {
+  let (adts, traits, impl_table, prog_fns) = program_tables(std, prog.modules)
+  # const values by declaring module, the same view the JVM path builds: a
+  # const is named by its simple name and imported by it
+  var const_vals: Map[String, Map[String, CValue]] = map.empty()
+  for sm in std.mods {
+    let (cls, _cx, _tm, ct) = sm
+    const_vals = map.insert(const_vals, cls, ct.consts)
+  }
+  for cm in prog.modules { const_vals = map.insert(const_vals, cm.mod_path, cm.ct.consts) }
+
+  var units: List[EmitMod] = []
+  var entry = ""
+  for sm in std.mods {
+    let (cls, cx, tm, ct) = sm
+    units = units ++ [
+      EmitMod {
+        m: rc.rc_module(lower.lower_module(cls, tm, traits, impl_table, adts, prog_fns)),
+        consts: merged_consts(cx, ct, const_vals),
+        blocks: ct.blocks
+      }
+    ]
+  }
+  for cm in prog.modules {
+    units = units ++ [
+      EmitMod {
+        m: rc.rc_module(lower.lower_module(cm.class_name, cm.tm, traits, impl_table, adts,
+          prog_fns)),
+        consts: merged_consts(cm.cx, cm.ct, const_vals),
+        blocks: cm.ct.blocks
+      }
+    ]
+    if entry == "" {
+      for tf in cm.tm.fns {
+        if tf.name == "main" { entry = cm.class_name }
+      }
+    }
+  }
+  if entry == "" { return Err("no pub fn main() -> Unit !io, nothing to compile") }
+  # same question, same answer as the JVM path: which Unicode tables ride.
+  # The units are already lowered (rc included; the walk ignores CDup/CSDrop),
+  # so reach reads them as they are.
+  var reach_mods: List[CModule] = []
+  for u2 in units { reach_mods = reach_mods ++ [u2.m] }
+  var reach_roots: List[String] = []
+  for cm in prog.modules { reach_roots = reach_roots ++ [cm.class_name] }
+  Ok(emitc.emit_program(units, entry, reach.table_use(reach_mods, reach_roots)))
+}
+
+## The embedded C runtime file `name`, for the native driver's `build` to
+## write beside the C it emits.
+pub fn runtime_source(name: String) -> Option[String] = rtsrc.source(name)
+
+test "the embedded C runtime matches runtime/c on disk" {
+  # the staleness gate for the generated rtsrc.dawn, same shape as the
+  # embedded-std one in stdlib.dawn
+  for f in ["dawn_rt.c", "dawn_rt.h"] {
+    let disk = match io.read_file("runtime/c/" ++ f) {
+      Ok(t) -> t
+      Err(e) -> panic("runtime/c/" ++ f ++ ": " ++ e)
+    }
+    match rtsrc.source(f) {
+      Some(t) -> {
+        if t != disk {
+          println("stale embedded runtime: " ++ f ++ " (run python3 scripts/gen-rtsrc.py)")
+        }
+        assert t == disk
+      }
+      None -> {
+        println("missing from embedded runtime: " ++ f ++ " (run python3 scripts/gen-rtsrc.py)")
+        assert false
+      }
+    }
+  }
+}
