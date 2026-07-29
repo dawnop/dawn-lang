@@ -27,11 +27,10 @@ native-image 直接得到。本教程带你从第一个程序走到调 Java。
 
 第一个程序。函数默认是纯的；碰 IO（这里是打印）必须在签名标 `!io`：
 
-```dawn
+```dawn run
 pub fn main() -> Unit !io =
   println("你好，Dawn")
 ```
-
 ```output
 你好，Dawn
 ```
@@ -39,14 +38,13 @@ pub fn main() -> Unit !io =
 字符串插值由 `$` 引导：`$name` 插简单变量，`${expr}` 插任意表达式（插入的值必须可打印）。
 花括号本身是普通字符——不写 `$` 就不是插值：
 
-```dawn
+```dawn run
 pub fn main() -> Unit !io = {
   let name = "Dawn"
   let year = 2026
   println("$name 诞生于 $year")
 }
 ```
-
 ```output
 Dawn 诞生于 2026
 ```
@@ -58,7 +56,7 @@ Dawn 诞生于 2026
 `let` 绑定不可变，`var` 可变。基本类型有 `Int`、`Float`、`Bool`、`String`。
 顶层函数必须写全参数类型与返回类型——签名即契约。
 
-```dawn
+```dawn run
 fn square(x: Int) -> Int = x * x
 
 fn abs(x: Int) -> Int =
@@ -71,21 +69,19 @@ pub fn main() -> Unit !io = {
   println(to_string(total))
 }
 ```
-
 ```output
 13
 ```
 
 管道 `|>` 把左侧塞进右侧调用的第一个参数，读起来是数据的流向：
 
-```dawn
+```dawn run
 fn double(x: Int) -> Int = x * 2
 fn inc(x: Int) -> Int = x + 1
 
 pub fn main() -> Unit !io =
   5 |> double |> inc |> to_string |> println
 ```
-
 ```output
 11
 ```
@@ -96,7 +92,7 @@ pub fn main() -> Unit !io =
 
 `match` 按模式分派。编译器检查**穷尽性**：漏了分支会报错，并告诉你漏了哪个。
 
-```dawn
+```dawn run
 fn sign(x: Int) -> String =
   match x {
     0 -> "zero"
@@ -110,7 +106,6 @@ pub fn main() -> Unit !io = {
   println(sign(-2))
 }
 ```
-
 ```output
 zero
 positive
@@ -123,7 +118,7 @@ negative
 
 代数数据类型（ADT）用 `|` 列出各构造器。加 `derive Show` 让它能打印：
 
-```dawn
+```dawn run
 type Shape =
   | Circle(r: Float)
   | Rect(w: Float, h: Float)
@@ -140,7 +135,6 @@ pub fn main() -> Unit !io = {
   println(to_string(area(Rect(3.0, 4.0))))
 }
 ```
-
 ```output
 Circle(2.0)
 12.0
@@ -148,7 +142,7 @@ Circle(2.0)
 
 record 是带命名字段的乘积类型，用花括号构造与更新：
 
-```dawn
+```dawn run
 type Point = { x: Float, y: Float } derive Show
 
 fn shift(p: Point, dx: Float) -> Point =
@@ -159,7 +153,6 @@ pub fn main() -> Unit !io = {
   println(to_string(shift(a, 10.0)))
 }
 ```
-
 ```output
 Point { x: 11.0, y: 2.0 }
 ```
@@ -168,7 +161,7 @@ Point { x: 11.0, y: 2.0 }
 `type` 声明的永远是新类型；给已有类型起**别名**用 `alias`——两边可以互换使用，
 常用来给元组或函数类型一个说话用的名字：
 
-```dawn
+```dawn run
 alias Point = (Int, Int)
 
 fn shift(p: Point, dx: Int) -> Point = {
@@ -181,7 +174,6 @@ pub fn main() -> Unit !io = {
   println(to_string(shift(p, 3)))
 }
 ```
-
 ```output
 (4, 2)
 ```
@@ -192,7 +184,7 @@ pub fn main() -> Unit !io = {
 
 内建 `List` 有字面量、`++` 连接、`len`、`range`、for-in。列表模式能解构头尾：
 
-```dawn
+```dawn run
 fn describe(xs: List[Int]) -> String =
   match xs {
     [] -> "空"
@@ -206,7 +198,6 @@ pub fn main() -> Unit !io = {
   println(describe([1, 2, 3]))
 }
 ```
-
 ```output
 空
 单个 9
@@ -215,7 +206,7 @@ pub fn main() -> Unit !io = {
 
 元组打包定长异构值，`let` 可直接解构：
 
-```dawn
+```dawn run
 fn divmod(a: Int, b: Int) -> (Int, Int) = (a / b, a % b)
 
 pub fn main() -> Unit !io = {
@@ -223,7 +214,6 @@ pub fn main() -> Unit !io = {
   println("$q 余 $r")
 }
 ```
-
 ```output
 3 余 2
 ```
@@ -236,7 +226,7 @@ pub fn main() -> Unit !io = {
 `for i in a..b`（含 a 不含 b）。`break` 提前退出**最内层**循环，`continue` 跳到下一轮；
 它们是 `Never` 类型的表达式，不能穿过 lambda 边界。
 
-```dawn
+```dawn run
 pub fn main() -> Unit !io = {
   var sum = 0
   for i in 0..5 {
@@ -253,7 +243,6 @@ pub fn main() -> Unit !io = {
   println("$n")
 }
 ```
-
 ```output
 7
 6
@@ -266,7 +255,7 @@ pub fn main() -> Unit !io = {
 Dawn 没有异常。可恢复的错误走 `Result[T, E]`；`?` 在 `Ok`/`Some` 时取值、
 在 `Err`/`None` 时提前返回。不可恢复的用 `panic`（它不返回，故不需要 `!io`）。
 
-```dawn
+```dawn run
 fn half(x: Int) -> Result[Int, String] =
   if x % 2 == 0 { Ok(x / 2) } else { Err("$x 是奇数") }
 
@@ -281,7 +270,6 @@ pub fn main() -> Unit !io =
     Err(e) -> println("错误：$e")
   }
 ```
-
 ```output
 得到 5
 ```
@@ -293,7 +281,7 @@ pub fn main() -> Unit !io =
 匿名函数用 `fn(参数) => 表达式`；类型可推导时参数注解可省。函数类型写作
 `fn(A) -> B !e`，其中 `!e` 是效果。纯函数看签名即知没有副作用，测试无需 mock。
 
-```dawn
+```dawn run
 pub fn main() -> Unit !io = {
   let nums = [1, 2, 3, 4]
   let evens = filter(nums, fn(n) => n % 2 == 0)
@@ -301,7 +289,6 @@ pub fn main() -> Unit !io = {
   println(to_string(doubled))
 }
 ```
-
 ```output
 [4, 8]
 ```
@@ -309,7 +296,7 @@ pub fn main() -> Unit !io = {
 高阶函数用**效果变量**转发参数的效果：`map(f)` 的效果等于 `f` 的效果。
 两个函数参数的效果之并写作 `!(e1 | e2)`——纯 ∘ 纯还是纯，沾 io 便是 io。
 
-```dawn
+```dawn run
 fn compose[A, B, C](f: fn(A) -> B !e1, g: fn(B) -> C !e2) -> fn(A) -> C !(e1 | e2) =
   fn(a) => g(f(a))
 
@@ -321,7 +308,6 @@ pub fn main() -> Unit !io = {
   println(to_string(f(10)))
 }
 ```
-
 ```output
 22
 ```
@@ -337,7 +323,7 @@ pub fn main() -> Unit !io = {
 
 字符串函数按码点处理。`str.split` 是**字面量**分隔（不是正则）；`join` 是它的逆：
 
-```dawn
+```dawn run
 use std/str
 
 pub fn main() -> Unit !io = {
@@ -346,7 +332,6 @@ pub fn main() -> Unit !io = {
   println(join(parts, " - "))
 }
 ```
-
 ```output
 3
 a - b - c
@@ -356,19 +341,18 @@ a - b - c
 剥公共缩进、引号免转义（插值照常）；**反引号 `` `...` `` 是 raw string**——无转义、
 无插值、可跨行，写正则、代码样本、HTML 片段所见即值（唯一限制：内容不能含反引号）：
 
-```dawn
+```dawn run
 pub fn main() -> Unit !io = {
   println(`"quotes" and $dollar and \n stay literal`)
 }
 ```
-
 ```output
 "quotes" and $dollar and \n stay literal
 ```
 
 `parse_int` 把字符串转成 `Option[Int]`（失败是 `None`，不是异常）：
 
-```dawn
+```dawn run
 fn parseOr(s: String, fallback: Int) -> Int =
   match parse_int(s) {
     Some(n) -> n
@@ -380,7 +364,6 @@ pub fn main() -> Unit !io = {
   println(to_string(parseOr("oops", -1)))
 }
 ```
-
 ```output
 42
 -1
@@ -393,7 +376,7 @@ pub fn main() -> Unit !io = {
 `comptime { ... }` 在编译期由解释器执行，结果烧进常量池——没有宏。
 顶层 `const` 名字用全大写，其初始化隐式是 comptime：
 
-```dawn
+```dawn run
 fn fib(n: Int) -> Int =
   if n < 2 { n } else { fib(n - 1) + fib(n - 2) }
 
@@ -402,7 +385,6 @@ const FIB10: Int = comptime { fib(10) }
 pub fn main() -> Unit !io =
   println(to_string(FIB10))
 ```
-
 ```output
 55
 ```
@@ -414,7 +396,7 @@ pub fn main() -> Unit !io =
 `use java "..."` 直接调 Java 类。所有 Java 调用自动视为 `!io`；引用类型返回值
 自动包成 `Option[T]`——null 进不了 Dawn。构造用 `.new`，静态方法用类名。
 
-```dawn
+```dawn run
 use java "java.lang.Math"
 
 pub fn main() -> Unit !io = {
@@ -422,7 +404,6 @@ pub fn main() -> Unit !io = {
   println(to_string(n))
 }
 ```
-
 ```output
 7
 ```
@@ -434,7 +415,7 @@ pub fn main() -> Unit !io = {
 `test "名字" { ... }` 里用 `assert` 写断言；`dawn test` 执行它们，`dawn build`
 会把它们剥除。纯函数测试不需要任何 mock：
 
-```dawn
+```dawn run
 fn add(a: Int, b: Int) -> Int = a + b
 
 test "加法可交换" {
@@ -444,7 +425,6 @@ test "加法可交换" {
 
 pub fn main() -> Unit !io = println("ok")
 ```
-
 ```output
 ok
 ```
@@ -506,7 +486,7 @@ test 块，`dawn build myapp` 打成一个 jar。单文件的 `dawn run foo.dawn
 没有字面量语法，操作都在 `std/map` 与 `std/set` 模块里。迭代顺序 = 插入顺序
 （JVM 与 native 一致）。
 
-```dawn
+```dawn run
 use std/map
 use std/set
 
@@ -521,7 +501,6 @@ pub fn main() -> Unit !io = {
   println(to_string(set.has(s, 2)))
 }
 ```
-
 ```output
 Some(1)
 None
@@ -540,7 +519,7 @@ true
 Dawn 没有独立的字符类型，走 Go 的 rune 路线：字符字面量 `'a'` 就是等于它**码点**的
 `Int`（`'a' == 97`）。于是它在 `match` 里就是普通整数模式，字符串按码点处理。
 
-```dawn
+```dawn run
 use std/str
 
 fn is_digit(c: Int) -> Bool = c >= '0' && c <= '9'
@@ -552,7 +531,6 @@ pub fn main() -> Unit !io = {
   println(from_code_points([104, 105]))
 }
 ```
-
 ```output
 true
 7
@@ -567,7 +545,7 @@ hi
 用 `std/cursor`：**游标**是不透明的位置，每步恒定开销；对它做算术是编译错误，
 比较先后（`==`、`<`）是允许的。
 
-```dawn
+```dawn run
 use std/cursor
 
 pub fn main() -> Unit !io = {
@@ -577,7 +555,6 @@ pub fn main() -> Unit !io = {
   println(cursor.slice(s, c, cursor.end(s)))
 }
 ```
-
 ```output
 127880
 🎈b
@@ -594,7 +571,7 @@ pub fn main() -> Unit !io = {
 **trait** 给类型参数加上能力约束。声明一个 trait，为具体类型写 `impl`，
 然后用 `[T: Trait]` 约束泛型：
 
-```dawn
+```dawn run
 trait Area[T] {
   fn area(s: T) -> Float
   fn bigger_than(s: T, limit: Float) -> Bool = area(s) > limit
@@ -616,7 +593,6 @@ pub fn main() -> Unit !io = {
   println(to_string(rooms[0].bigger_than(10.0)))
 }
 ```
-
 ```output
 16.0
 true
@@ -632,7 +608,7 @@ impl 必须写在 trait 或者主体类型所在的模块里（孤儿规则）�
 桥接了 `< <= > >=`：`Int`/`Float`/`String` 天生有序，自定义类型给一个 `Ord` impl
 （或直接 `derive Ord`）就能用比较运算符、当 `[T: Ord]` 的实参、喂给排序函数：
 
-```dawn
+```dawn run
 type Card = { rank: Int, name: String } derive Show, Ord
 
 fn max2[T: Ord](a: T, b: T) -> T = if a < b { b } else { a }
@@ -647,7 +623,6 @@ pub fn main() -> Unit !io = {
   println(to_string(max_by(hand, fn(c) => c.rank)))
 }
 ```
-
 ```output
 true
 pear

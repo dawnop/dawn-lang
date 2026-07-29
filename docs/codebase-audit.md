@@ -1827,7 +1827,15 @@ DawnList 的共享窗口、CAS 所有权、DawnMap/Set 的持久性、equals/has
 
 ### TEST-04（P2）文档与 EBNF 没有可执行一致性检查
 
-> **【待办 —— 认可】**
+> **【已修大半 —— 2026-07-30】** `scripts/doc-check.py` 进 CI：50 篇文档的
+> 相对链接与同文件锚点全检（零假阳性——Dawn 的类型语法与 Markdown 链接同形，
+> 靠「剥代码 + 目标必须像路径」两道过滤），加上**标注为 ```dawn run / compile
+> 的块真编真跑**（26 个，README 首页示例 + tutorial 全部整程序块）。
+> 第一次运行就抓到 README 首页示例调用了不存在的 `sum`——即本条的论据本身。
+> 块检查是**opt-in**：spec 里多数示例是片段，逼它们变成整模块会毁掉行文。
+> 仍未做：accept/reject grammar corpus（EBNF 对拍）、文档里手写数字的自动生成。
+>
+> 原判定：**【待办 —— 认可】**
 >
 > 五条建议全部成立，且本次处置的经历是它们的直接论据：
 > README 首页示例的插值语法是错的（DOC-02）、tutorial 的安装命令不可执行（DOC-03）、

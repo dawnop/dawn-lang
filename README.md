@@ -6,7 +6,7 @@ native-image 直接获得——语言对两个目标零感知。编译器**已�
 打包并逐字节重建自身；最初的 Kotlin 实现已归档在 `kotlin-final` tag
 （[docs/bootstrap.md](docs/bootstrap.md)）。
 
-```dawn
+```dawn run
 type Shape =
   | Circle(r: Float)
   | Rect(w: Float, h: Float)
@@ -20,7 +20,7 @@ fn area(s: Shape) -> Float =
 pub fn main() -> Unit !io =
   [Circle(1.0), Rect(2.0, 3.0)]
     |> map(area)
-    |> sum
+    |> fold(0.0, fn(a, x) => a + x)
     |> fn(t) => println("total: $t")
 ```
 
