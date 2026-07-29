@@ -250,6 +250,16 @@ fn unbox_expr(v: String, to: Ty) -> String =
     "(((dawn_box*)(" ++ v ++ "))->val." ++ slot_of(to) ++ ")"
   }
 
+## Take a reference and hand the value back at its own type. `dawn_dup` is
+## typed in `void*` because it is one function for every kind of object, so
+## the cast is what puts the value back where C can use it.
+fn dup_expr(v: String, t: Ty) -> String =
+  if is_ref_ty(t) {
+    "((" ++ c_type(t) ++ ")dawn_dup(" ++ v ++ "))"
+  } else {
+    v
+  }
+
 ## Which member of `dawn_slot` holds a value of this type. Reading an ADT
 ## field or unboxing goes through here.
 fn slot_of(t: Ty) -> String =
@@ -407,9 +417,10 @@ pub fn emit_expr(st: CSt, e: CExpr) -> (CSt, String) =
       let (st1, v) = emit_expr(st, inner)
       (st1, box_call(v, from))
     }
-    # inert until knife 3: the pass may already be inserting these, and
-    # turning them on is what makes the first free happen
-    CDup(inner, _) -> emit_expr(st, inner)
+    CDup(inner, ty) -> {
+      let (st1, v) = emit_expr(st, inner)
+      (st1, dup_expr(v, ty))
+    }
     CUnbox(inner, to) -> {
       let (st1, v) = emit_expr(st, inner)
       (st1, unbox_expr(v, to))
@@ -577,13 +588,15 @@ fn emit_binary(st: CSt, op: CBinOp, l: CExpr, r: CExpr, ty0: Ty) -> (CSt, String
     # concatenated anything but a String.
     let (st1, lv) = emit_expr(st, l)
     let (st2, rv) = emit_expr(st1, r)
-    let fname =
-      match lt {
-        TyBytes -> "dawn_bytes_concat"
-        TyList(_) -> mangle("std/pvec", "concat")
-        _ -> "dawn_str_concat"
-      }
-    (st2, fname ++ "(" ++ lv ++ ", " ++ rv ++ ")")
+    match lt {
+      # `std/pvec.concat` is a Dawn function and takes both sides owned; the
+      # other two are runtime primitives and borrow. See `own_args`.
+      TyList(_) ->
+        (st2, mangle("std/pvec", "concat") ++ "(" ++ dup_expr(lv, lt) ++ ", " ++
+            dup_expr(rv, lt) ++ ")")
+      TyBytes -> (st2, "dawn_bytes_concat(" ++ lv ++ ", " ++ rv ++ ")")
+      _ -> (st2, "dawn_str_concat(" ++ lv ++ ", " ++ rv ++ ")")
+    }
   } else if (op == CEq || op == CNe) && (lt == TyString || lt == TyBytes) {
     # Bytes compares by content (spec §9.5.1). Left to the pointer comparison
     # below it would answer identity -- and answer it silently, which is what
@@ -844,6 +857,18 @@ fn pvec_target(n: String) -> String =
     n
   }
 
+## The primitives that hand back something they do not own: an element still
+## inside its container, or an argument passed straight through.
+##
+## Every other primitive allocates what it returns, and the arguments it was
+## given stay the caller's (dawn_rt.h's calling convention). Core has one rule
+## for all of them -- a call's result is owned, so a binding may release it --
+## and these are where that rule would otherwise release someone else's value.
+## The reference is taken here rather than inside the runtime function because
+## the runtime calls these itself, where borrowing is what it wants.
+fn returns_borrow(n: String) -> Bool =
+  n == "array_get" || n == "expect" || n == "unwrap_or" || n == "cast"
+
 ## A primitive its runtime module owns, as the C symbol that implements it.
 ##
 ## This is the whole of the intrinsic contract on this backend: the table says
@@ -868,6 +893,25 @@ fn rt_symbol(name: String) -> Option[String] =
 fn to_host(v: String) -> String = mangle("std/pvec", "to_array") ++ "(" ++ v ++ ")"
 
 fn of_host(v: String) -> String = mangle("std/pvec", "of_array") ++ "(" ++ v ++ ")"
+
+## Arguments for a Dawn function this emitter calls where Core wrote something
+## else -- the list operations live in `std/pvec`, and `++` on a list is one of
+## them. Core borrowed them, because Core saw an intrinsic or an operator and
+## those borrow (docs/perceus-design.md 5.1); the callee is an ordinary Dawn
+## function and releases what it was handed. So the reference is taken here.
+## Miss it and the callee's drop is the second one on that value -- which is
+## what `iter_done` did, taking the list out from under its own loop.
+fn own0(args: List[CExpr], a0: String) -> String = dup_expr(a0, cex_ty(args[0]))
+
+fn own_args(args: List[CExpr], cargs: List[String]) -> List[String] = {
+  var out: List[String] = []
+  var i = 0
+  for a in args {
+    out = out ++ [dup_expr(cargs[i], cex_ty(a))]
+    i = i + 1
+  }
+  out
+}
 
 ## The tag `expect` and `unwrap_or` test for. Everywhere else a constructor
 ## index reaches here inside a `CIsCtor` that lowering resolved; these two read
@@ -923,17 +967,17 @@ fn emit_intrinsic(st: CSt, name: String, args: List[CExpr], ty: Ty) -> (CSt, Str
     # own value representation (see gen_list_intrinsic's note on the JVM
     # side). So each backend translates them, and both translate to the same
     # `std/pvec` function -- one definition, compiled twice.
-    (st1, mangle("std/pvec", pvec_target(name)) ++ "(" ++ join(cargs, ", ") ++ ")")
+    (st1, mangle("std/pvec", pvec_target(name)) ++ "(" ++ join(own_args(args, cargs), ", ") ++ ")")
   } else if name == "join" {
-    (st1, "dawn_join(" ++ to_host(a0) ++ ", " ++ cargs[1] ++ ")")
+    (st1, "dawn_join(" ++ to_host(own0(args, a0)) ++ ", " ++ cargs[1] ++ ")")
   } else if name == "from_code_points" {
-    (st1, "dawn_from_code_points(" ++ to_host(a0) ++ ")")
+    (st1, "dawn_from_code_points(" ++ to_host(own0(args, a0)) ++ ")")
   } else if name == "code_points" {
     (st1, of_host("dawn_code_points(" ++ a0 ++ ")"))
   } else if name == "io_list_names" {
     (st1, of_host("dawn_io_list_names(" ++ a0 ++ ")"))
   } else if name == "io_run" {
-    (st1, "dawn_io_run(" ++ to_host(a0) ++ ", " ++ cargs[1] ++ ", " ++ cargs[2] ++ ")")
+    (st1, "dawn_io_run(" ++ to_host(own0(args, a0)) ++ ", " ++ cargs[1] ++ ", " ++ cargs[2] ++ ")")
   } else if name == "args" {
     (st1, of_host("dawn_args()"))
   } else if name == "cursor_slice" {
@@ -947,7 +991,7 @@ fn emit_intrinsic(st: CSt, name: String, args: List[CExpr], ty: Ty) -> (CSt, Str
     var st2 = line(sta, "dawn_adt* " ++ tmp ++ " = " ++ a0 ++ ";")
     st2 = line(st2, "if (" ++ tmp ++ "->tag != " ++ to_string(option_tag("Some")) ++
         ") dawn_panic(" ++ cargs[1] ++ ");")
-    (st2, unbox_expr(tmp ++ "->fields[0].p", ty))
+    (st2, dup_expr(unbox_expr(tmp ++ "->fields[0].p", ty), ty))
   } else if name == "unwrap_or" {
     # Both arguments are evaluated, as they are on the JVM and as any other
     # call would: a ternary over the raw fallback expression would make this
@@ -956,17 +1000,20 @@ fn emit_intrinsic(st: CSt, name: String, args: List[CExpr], ty: Ty) -> (CSt, Str
     let (stb, fb) = fresh(sta)
     var st2 = line(stb, c_type(ty) ++ " " ++ fb ++ " = " ++ cargs[1] ++ ";")
     st2 = line(st2, "dawn_adt* " ++ tmp ++ " = " ++ a0 ++ ";")
-    (st2, "(" ++ tmp ++ "->tag == " ++ to_string(option_tag("Some")) ++ " ? " ++
-        unbox_expr(tmp ++ "->fields[0].p", ty) ++ " : " ++ fb ++ ")")
+    (st2, dup_expr("(" ++ tmp ++ "->tag == " ++ to_string(option_tag("Some")) ++ " ? " ++
+        unbox_expr(tmp ++ "->fields[0].p", ty) ++ " : " ++ fb ++ ")", ty))
   } else if name == "cast" {
-    (st1, unbox_expr(a0, ty))
+    (st1, dup_expr(unbox_expr(a0, ty), ty))
   } else if name == "to_string" {
     # Core normally lowers this into str_of_*; a residual one means a type
     # the lowering did not know how to render
     panic("emitc: to_string survived lowering -- unsupported operand type")
   } else {
     match rt_symbol(name) {
-      Some(sym) -> (st1, sym ++ "(" ++ join(cargs, ", ") ++ ")")
+      Some(sym) -> {
+        let call = sym ++ "(" ++ join(cargs, ", ") ++ ")"
+        (st1, if returns_borrow(name) { dup_expr(call, ty) } else { call })
+      }
       None -> panic("emitc: intrinsic not implemented for native: " ++ name)
     }
   }
@@ -1022,7 +1069,10 @@ pub fn emit_stmt(st: CSt, s: CStmt) -> CSt =
       let st6 = line(pop(st5), "}")
       line(st6, loop_end(id) ++ ": ;")
     }
-    CSDrop(_) -> st
+    # `rc.dawn` only names a binding here when its type is a reference, so
+    # there is no test to make: a scalar would not compile, which is the loud
+    # failure and the right one.
+    CSDrop(sym) -> line(st, "dawn_drop(" ++ local_name(sym) ++ ");")
   }
 
 # ---- functions and program ----
@@ -1091,8 +1141,12 @@ fn emit_adapter(st: CSt, f: CFun) -> CSt = {
   let st1 = push(line(st, adapter_signature(f) ++ " {"))
   var args: List[String] = []
   var i = 0
+  # The closure keeps its captures; the function it forwards to takes them
+  # owned like any other parameter and will release them. Without a reference
+  # of its own, the first call would free what the closure still points at.
   for c in f.captures {
-    args = args ++ ["env->caps[" ++ to_string(i) ++ "]." ++ slot_of(c.ty)]
+    let slot = "env->caps[" ++ to_string(i) ++ "]." ++ slot_of(c.ty)
+    args = args ++ [dup_expr(slot, c.ty)]
     i = i + 1
   }
   for p in f.params {

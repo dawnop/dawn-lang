@@ -148,12 +148,13 @@ fn counted(st: RSt, e: CExpr) -> Bool = is_ref_ty(cex_ty(e)) && not immortal(st,
 fn wrap(st: RSt, lets: List[CStmt], e: CExpr, ty: Ty, temps: List[Int]) -> (RSt, CExpr) = {
   if len(lets) == 0 && len(temps) == 0 { return (st, e) }
   let tail_drops = drops(list.reverse(temps))
-  # A jump released its own scopes on the way out, so the drops here are dead
-  # code. It has to stay recognisable as a jump, though: burying it in a
-  # tail-less block hides it from `diverges`, and the C emitter reads that to
-  # decide whether a branch has a value to assign -- an arm that answered
-  # "yes" while emitting a `goto` produced `dawn_str t = DAWN_UNIT;`.
-  if diverges(e) {
+  # Nothing that never delivers a value gets named. A jump released its own
+  # scopes on the way out and a panic ends the process, so the drops here are
+  # dead code either way -- and naming the value would cost more than the dead
+  # statements: `yields` is what the C emitter reads (as `no_value`) to decide
+  # whether a branch has anything to assign, and a block that answered "yes"
+  # while emitting a `goto` produced `dawn_str t = DAWN_UNIT;`.
+  if not yields(e) {
     if len(lets) == 0 { return (st, e) }
     return (st, CBlock(lets, Some(e), ty))
   }
@@ -176,16 +177,30 @@ fn wrap(st: RSt, lets: List[CStmt], e: CExpr, ty: Ty, temps: List[Int]) -> (RSt,
           bty
         ))
       },
-    CBlock(stmts, Some(tail), bty) -> {
-      let (st1, t) = fresh(st)
-      (st1, CBlock(lets ++ stmts ++ [CSLet(t, bty, tail)] ++ tail_drops, Some(CLocal(t, bty)), bty))
-    }
+    CBlock(stmts, Some(tail), bty) ->
+      if not yields(tail) {
+        # the block's own tail is a jump or a panic, so the scope is never
+        # left the ordinary way and these drops would be unreachable
+        (st, CBlock(lets ++ stmts, Some(tail), bty))
+      } else {
+        let (st1, t) = fresh(st)
+        (st1, CBlock(
+          lets ++ stmts ++ [CSLet(t, bty, tail)] ++ tail_drops,
+          Some(CLocal(t, bty)),
+          bty
+        ))
+      },
     _ -> {
       let (st1, t) = fresh(st)
       (st1, CBlock(lets ++ [CSLet(t, ty, e)] ++ tail_drops, Some(CLocal(t, ty)), ty))
     }
   }
 }
+
+## Whether this expression delivers a value that can be given a name. A jump
+## does not, and neither does a `panic`: its type is `Never`, which is exactly
+## what emitc's `no_value` reads.
+fn yields(e: CExpr) -> Bool = not diverges(e) && cex_ty(e) != TyNever
 
 ## Release `syms` after `e` has produced its value.
 fn seal(st: RSt, e: CExpr, ty: Ty, syms: List[Int]) -> (RSt, CExpr) = wrap(st, [], e, ty, syms)
@@ -409,6 +424,13 @@ fn rw(st: RSt, e: CExpr, consume: Bool) -> (RSt, CExpr) = {
       }
       let out = unwind(st1, -1)
       if len(out) == 0 { return (st1, CReturn(v1)) }
+      # `return panic(...)` never returns, so neither the name nor the drops
+      # after it are reachable
+      match v1 {
+        Some(x1) ->
+          if not yields(x1) { return (st1, x1) }
+        None -> ()
+      }
       match v1 {
         None -> (st1, CBlock(drops(out), Some(CReturn(None)), TyNever))
         Some(x1) ->
@@ -620,7 +642,15 @@ fn chk_dict(e: CExpr) -> Bool =
     _ -> false
   }
 
-fn chk_expr(c: Chk, e: CExpr) -> Chk =
+## A `Never` is a path that ends: `panic` and `todo` reach it, and so does
+## every jump. Nothing after one is reachable, and nothing it still holds is
+## worth releasing -- the process is over or the frame is gone.
+fn chk_expr(c: Chk, e: CExpr) -> Chk = {
+  let c1 = chk_walk(c, e)
+  if cex_ty(e) == TyNever { Chk { ..c1, gone: true } } else { c1 }
+}
+
+fn chk_walk(c: Chk, e: CExpr) -> Chk =
   match e {
     CBlock(stmts, tail, _) -> {
       var c1 = c

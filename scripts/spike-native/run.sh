@@ -17,6 +17,20 @@
 #   diff    the two backends' stdout agree
 #   stderr  the two backends' stderr agree
 #   exit    the two backends' exit codes agree
+#   asan    the same program, under AddressSanitizer, is clean
+#
+# `asan` exists because reference counting arrived (docs/perceus-design.md
+# knife 3): a drop too many is a use-after-free, and a use-after-free reads
+# memory that usually still holds the right bytes. It passes the diff, and it
+# passes it until the day the allocator reuses the block. The sanitizer is the
+# only thing here that sees it at the moment it happens rather than at the
+# moment it matters.
+#
+# Leak detection is off. Strings are not counted at all (knife 1), so every
+# concatenation leaks by design, and turning it on would report that hundreds
+# of times per program while saying nothing about the counting. The half this
+# checks -- releasing something twice, or reading it after -- is the half that
+# produces wrong answers.
 #
 # `jvm` and `native` only run when <name>.expect exists. They are the answer
 # to codebase-audit.md TEST-01: a differential test alone certifies whatever
@@ -58,6 +72,18 @@ else
 fi
 
 work="$(mktemp -d)"
+
+# Whether this machine's cc can build with AddressSanitizer. Probed once,
+# because a corpus of 23 programs would otherwise ask 23 times, and reported
+# as `blocked` rather than as a failure: a missing sanitizer is no evidence
+# either way.
+asan_ok=1
+printf 'int main(void){return 0;}\n' >"$work/asan_probe.c"
+if ! "$cc_bin" -fsanitize=address -o "$work/asan_probe" "$work/asan_probe.c" \
+  >/dev/null 2>&1; then
+  asan_ok=0
+  echo "note: $cc_bin cannot build with -fsanitize=address; asan checks skipped"
+fi
 trap 'rm -rf "$work"' EXIT
 
 # warm the toolchain before any output is captured: bin/dawn announces a
@@ -163,6 +189,30 @@ for prog in "${progs[@]}"; do
   nat_rc=0
   "$work/$name.bin" >"$work/$name.native" 2>"$work/$name.native.err" \
     </dev/null || nat_rc=$?
+
+  # -O0 so the report names the Dawn function rather than whatever it was
+  # inlined into; the answer is not being checked here, only the memory.
+  if [ "$asan_ok" -eq 1 ]; then
+    if "$cc_bin" -std=c11 -g -O0 -fno-omit-frame-pointer -fwrapv \
+      -fno-strict-aliasing -fsanitize=address \
+      -I "$root/runtime/c" \
+      -o "$work/$name.asan" "$work/$name.c" "$root/runtime/c/dawn_rt.c" -lm \
+      >"$work/$name.asan.cc" 2>&1; then
+      asan_rc=0
+      ASAN_OPTIONS=detect_leaks=0 "$work/$name.asan" \
+        >/dev/null 2>"$work/$name.asan.err" </dev/null || asan_rc=$?
+      if [ "$asan_rc" -eq "$nat_rc" ] &&
+        ! grep -q 'ERROR: AddressSanitizer' "$work/$name.asan.err"; then
+        verdict "$name:asan" ok
+      else
+        verdict "$name:asan" bad "$(head -25 "$work/$name.asan.err")"
+      fi
+    else
+      verdict "$name:asan" bad "$(cat "$work/$name.asan.cc")"
+    fi
+  else
+    blocked "$name:asan"
+  fi
 
   if [ -f "$expect" ]; then
     if diff -q "$expect" "$work/$name.native" >/dev/null; then
