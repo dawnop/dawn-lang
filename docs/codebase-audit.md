@@ -1735,6 +1735,13 @@ Content-Length，204/304/HEAD 也会进入 body 路径。建议由 ResponseBody 
 
 ### TEST-01（P1）差分测试会把旧 bug 固化成正确行为
 
+> **【追修 —— 2026-07-30】** classfile 那项也做了：`scripts/classfile-verify/run.sh`
+> 把 8 个语料发射出的全部类（~1386 个）逐个强制链接过 **JVM 自带 verifier**，进 CI
+> （gates.yml「classfile verification」）。用 JVM verifier 而非 CheckClassAdapter：
+> vendored ASM 只带 core+signature（asm-util 是另一个 artifact），AdtClassWriter 源
+> 已随 kotlin-final 归档不宜再动——而 verifier 本尊就在每个 JVM 里，惰性链接才是
+> 「没人碰的类从不被校验」这个洞的根源，强制链接直接堵根源。
+>
 > **【已修一项 —— 这是本次最重要的一条方法论批评】**
 >
 > 「它们验证的是**一致**，不是**正确**」——JSON 精度、renderer 控制字符、body limit
