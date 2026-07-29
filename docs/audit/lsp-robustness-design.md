@@ -8,6 +8,13 @@
 > 但 §四里「不留 fallback」那条的**理由**被它作废了，已改写。
 > 台账见 [native-plan-overlap.md](native-plan-overlap.md) §3.7。
 
+
+> **2026-07-30 改判后落地（LSP-01 的 UTF-8 半）**：台账 §3.7 的「换 JDK」处方被当日
+> 架构再次作废——缝 1 之后 `lsp.dawn` 是共享前端（零 `use java`，两个 main 共用一份），
+> 换回 `java.net.URI` 等于把它踢出共享半区。按原则的正确形态落地：**手写 decoder 修成
+> 校验的**（continuation 区间 / overlong / surrogate / 超 U+10FFFF 全拒，坏序列出
+> U+FFFD 降级续读），一份纯 Dawn 实现两个工具链共用，单测钉住五类畸形输入。
+> LSP-02（file URI 其余面）与 LSP-04（debounce）仍待做。
 ## 一、问题
 
 ### 1.1 手写 UTF-8 decoder 不校验（LSP-01）

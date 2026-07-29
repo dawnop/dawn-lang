@@ -181,7 +181,14 @@ pub fn uri_to_path(uri: String) -> Option[String] = {
   Some(utf8_decode(bs))
 }
 
-## Decode UTF-8 bytes to a string (percent-decoded URI bytes).
+## Decode UTF-8 bytes to a string (percent-decoded URI bytes), validating
+## (LSP-01): a continuation byte must be 0x80..0xBF, an overlong encoding, a
+## surrogate and anything past U+10FFFF are malformed. Each malformed
+## sequence becomes one U+FFFD and decoding resumes at the next byte — the
+## URI came from an editor, and a bad one should degrade, not crash or smuggle
+## a code point the encoder could never have produced. One pure-Dawn
+## implementation, shared by both toolchains (the JDK is not on the native
+## side, and an unvalidating decoder was not worth keeping on either).
 fn utf8_decode(bs: List[Int]) -> String = {
   var cps: List[Int] = []
   var i = 0
@@ -191,21 +198,58 @@ fn utf8_decode(bs: List[Int]) -> String = {
     if b0 < 128 {
       cps = cps ++ [b0]
       i = i + 1
-    } else if b0 >= 240 && i + 3 < n {
-      cps = cps ++ [(b0 - 240) * 262144 + (bs[i + 1] - 128) * 4096 +
-          (bs[i + 2] - 128) * 64 + (bs[i + 3] - 128)]
-      i = i + 4
-    } else if b0 >= 224 && i + 2 < n {
-      cps = cps ++ [(b0 - 224) * 4096 + (bs[i + 1] - 128) * 64 + (bs[i + 2] - 128)]
-      i = i + 3
-    } else if b0 >= 192 && i + 1 < n {
+    } else if b0 >= 194 && b0 <= 223 && i + 1 < n && is_cont(bs[i + 1]) {
+      # 0xC2..0xDF: two bytes; 0xC0/0xC1 would be overlong and fall through
       cps = cps ++ [(b0 - 192) * 64 + (bs[i + 1] - 128)]
       i = i + 2
-    } else {
-      i = i + 1
-    }
+    } else if b0 >= 224 && b0 <= 239 && i + 2 < n && is_cont(bs[i + 1]) &&
+      is_cont(bs[i + 2]) {
+        let cp = (b0 - 224) * 4096 + (bs[i + 1] - 128) * 64 + (bs[i + 2] - 128)
+        # below 0x800 is overlong; D800..DFFF is a surrogate
+        if cp < 2048 || (cp >= 55296 && cp <= 57343) {
+          cps = cps ++ [65533]
+          i = i + 1
+        } else {
+          cps = cps ++ [cp]
+          i = i + 3
+        }
+      } else if b0 >= 240 && b0 <= 244 && i + 3 < n && is_cont(bs[i + 1]) &&
+      is_cont(bs[i + 2]) && is_cont(bs[i + 3]) {
+        let cp = (b0 - 240) * 262144 + (bs[i + 1] - 128) * 4096 +
+          (bs[i + 2] - 128) * 64 + (bs[i + 3] - 128)
+        # below 0x10000 is overlong; above 0x10FFFF is out of range
+        if cp < 65536 || cp > 1114111 {
+          cps = cps ++ [65533]
+          i = i + 1
+        } else {
+          cps = cps ++ [cp]
+          i = i + 4
+        }
+      } else {
+        # lone continuation, overlong lead (C0/C1), out-of-range lead (F5..FF),
+        # or a truncated sequence
+        cps = cps ++ [65533]
+        i = i + 1
+      }
   }
   from_code_points(cps)
+}
+
+fn is_cont(b: Int) -> Bool = b >= 128 && b <= 191
+
+test "uri decoding validates utf-8 instead of trusting it" {
+  let fffd = from_code_points([65533])
+  # the happy path: percent-encoded multibyte decodes exactly (U+00E9)
+  assert uri_to_path("file:///tmp/caf%C3%A9.dawn") ==
+    Some("/tmp/caf" ++ from_code_points([233]) ++ ".dawn")
+  # a continuation byte that never comes: C3 '(' is malformed, becomes U+FFFD
+  assert uri_to_path("file:///a%C3%28b") == Some("/a" ++ fffd ++ "(b")
+  # overlong '/' (C0 AF) must not decode to '/': two malformed bytes
+  assert uri_to_path("file:///x%C0%AFy") == Some("/x" ++ fffd ++ fffd ++ "y")
+  # a surrogate half is not a code point
+  assert uri_to_path("file:///s%ED%A0%80e") == Some("/s" ++ fffd ++ fffd ++ fffd ++ "e")
+  # a lone continuation byte
+  assert uri_to_path("file:///l%80r") == Some("/l" ++ fffd ++ "r")
 }
 
 fn utf8_bytes(cp: Int) -> List[Int] =
