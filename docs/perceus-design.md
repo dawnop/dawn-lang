@@ -261,8 +261,19 @@ Dawn 函数不能照搬——**刀 4 的出口条件要求它是 owned**：
 
 消费性使用 = 值被交出去且对方会持有它：Dawn 调用的实参、`CCtor`/`CTuple`/
 `CClosure`/`CListLit`/`CDictApply` 的操作数、`CBox` 的内层、`CReturn` 的值、
-`CSAssign` 的右值。**非**消费性 = `CIntrinsic` 的实参（借用）、`CField`/
-`CTupleGet`/`CIsCtor`/`CTagOf` 的 target、`CIf` 的条件、`CBinary` 的操作数。
+`CSLet` 的 init、`CSAssign` 的右值。**非**消费性 = `CIntrinsic` 的实参（借用）、
+`CField`/`CTupleGet`/`CIsCtor`/`CTagOf` 的 target、`CIf` 的条件、`CBinary` 的操作数。
+
+但**只有借用来源需要 dup**。一个刚构造出来的值（`CCall`/`CCtor`/`CIntrinsic` 的结果）
+本来就带着自己那份引用，交出去就是转移，不必 dup。要 dup 的是那几个**产出借用**的
+节点：`CLocal`、`CField`、`CTupleGet`、`CDictArg`，以及内层是借用的 `CUnbox`。
+这也正是 `CDup` 必须是表达式而不是语句的原因——`f(p.x)` 里要计数的是 `p.x`，
+它没有名字。
+
+> `CConstRef` / `CComptime` 不在这张表里，查过了：C 侧 `const_literal`
+> 只认标量，结构化常量直接 panic「native cannot rebuild yet」。所以到得了 C 后端的
+> 常量一定是标量，`is_ref_ty` 一定是 false，怎么归类都不会 dup。等结构化常量能落地时
+> 这条要重看。
 
 这条规则的正确性不需要活跃性分析：
 
