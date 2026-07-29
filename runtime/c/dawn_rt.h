@@ -374,8 +374,11 @@ dawn_adt *dawn_catch_panic(dawn_clo *f);
  * header until 2026-07-28, which made it one mapping only while the JDK that
  * generated it was the JDK the JVM backend happened to be running -- Unicode
  * 15 and 16 differ by 18 code points, and nothing said so. `dawn __emitc`
- * always emits these, so the runtime is linked against a program that has
- * them. */
+ * always emits these symbols, so the runtime always links -- but a table
+ * nothing reachable reads is emitted with a count of zero (reach.dawn), and
+ * a zero count is a claim, not a set: no real table is empty, so the readers
+ * (dawn_cp_in, dawn_case) panic on n == 0 rather than answer from rows that
+ * are not there. */
 typedef struct {
   int32_t lo;
   int32_t hi;

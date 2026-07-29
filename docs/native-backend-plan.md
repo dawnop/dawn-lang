@@ -1455,3 +1455,39 @@ mismatches 0。
 
 > 这条值得单独记:**一个被明确写下来的缺口,会让人不再看它旁边**。C 侧 panic 的注释解释了
 > 为什么 native 不答,读了三遍都没问「那 JVM 是从哪答的」。
+
+### 14.18 表改按可达性发:hello world 不再背 52KB(2026-07-30)
+
+上一节末尾说的那件独立的事,做了——但**范围只是两组 Unicode 表**,不是整个 `dawn/rt/*`。
+理由在下面。
+
+**「用没用」不能全 Core 扫**:std 十个模块无条件进每个 jar,而 `std/str.to_upper` 的函数体里
+就是 `str_upper`——全量扫描永远回答「用了」。所以是一个可达性问题(`reach.dawn`):
+根 = 用户模块的全部函数(含 test,它们都被发射),std 只有被调用链够到才算。
+边覆盖 `CDirect`/`CFnRef`/`CClosure`/`CImpl`/`CDefault`,以及字典:引用一个字典就点亮它
+全部槽位(哪个槽被 `CMethod` 读是运行期的事)。JVM 路径为这次分析把模块**再降一次** Core
+(emit_module 自己逐函数降,两边同源 TAST;实测整编译器自建 +0.6s,hello 无感);
+`__emitc` 路径直接读现成的 units。
+
+**剪错必须响,不能哑**——这是整个设计的安全底座,两个后端各有一条现成的机制:
+
+* JVM 常量池**懒解析**:`std/str.class` 里引用 `Strings.str_upper` 的 Methodref 在死代码里
+  永远不会被解析,所以方法整个不发是安全的;真剪错了是 NoSuchMethodError 点名那个方法,
+  不是错答案。
+* C 侧符号必须链接,所以表**总是发**,只是剪掉的发成 0 行:真表不可能是空的,
+  运行时(`dawn_cp_in`/`dawn_case`)把 `n == 0` 当「编译器断言此处不可达」,到了就 panic。
+
+**一处必须写死的跨后端不对称**:C 的 `parse_int/parse_float` 内部用 space 集合修剪首尾空白
+(`dawn_str_trim_span`),JVM 用 `String.strip`。所以 `parse` 是 `TableUse` 里单独一个事实,
+C 侧并进 space 表,JVM 侧无视。语料 `strings.dawn` 的 `parse_int("  7 ")` 正好钉住这条。
+
+**量出来的**:hello world 的 `Strings.class` 53252 → **2805 字节**,jar(压缩后)61.5 → 48.0 KB;
+只用 `to_upper`+`parse_int` 的程序 15.7 KB(只有 upper 映射跟来);comptime 折叠掉的用法
+不算用(常量已烤好,7 张表全剪)。编译器自己的 jar 满表不动(lexer/interp 真用)。
+三处自查过的雷:编译器自身经 interp **原生**调这些 intrinsic(#64 之后无反射边,可达性看得见);
+无 target 的 runtime-only jar 没有推理根,保守发全表;`char_is_alnum` 点亮 letter+digit 两张。
+
+**其余 `dawn/rt/*` 不剪,是裁决不是遗漏**:std 整体入 jar 的现状下,Io/Array/Show/Tuple/Fn
+都被 std 真实引用,类级裁剪一字节都省不下;真正的下一刀是**按可达性裁 std 模块本身**
+(hello 还背着 ~50KB 的 hamt/pvec/map/set/fspath),`reach.dawn` 的函数级答案已经是它的底座,
+值不值得做取决于「发小 jar」这个场景的分量。

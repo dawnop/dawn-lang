@@ -47,6 +47,7 @@ use types.{
 }
 use emit.{emit_module, gen_trait_interface}
 use core.{CModule, CValue}
+use reach
 use lower
 use rc
 use emitc
@@ -197,7 +198,9 @@ fn collect_program(
   classes = classes ++ [(PANIC_CLASS, gen_panic_class())]
   classes = classes ++ [(UNIT_CLASS, gen_unit_class())]
   classes = classes ++ [(SHOW_CLASS, gen_show_class(sup))]
-  classes = classes ++ [(STRINGS_CLASS, gen_strings_class(sup))]
+  # dawn/rt/Strings is emitted further down: which Unicode tables it carries
+  # depends on what the user's modules can reach, and answering that needs
+  # the program tables built below
   classes = classes ++ [(BYTES_CLASS, gen_bytes_class(sup))]
   classes = classes ++ [(ARRAY_CLASS, gen_array_class(sup))]
   classes = classes ++ [(IO_CLASS, gen_io_class(sup))]
@@ -278,6 +281,28 @@ fn collect_program(
     let tr = trait_of(traits, tid)
     classes = classes ++ [(tr_iface(None, tr.name), gen_trait_interface(sup, adts, tr))]
   }
+
+  # Which Unicode tables dawn/rt/Strings carries: what the user's modules can
+  # reach decides (reach.dawn). The modules are lowered once more purely for
+  # that answer -- emit_module lowers per function on its own, and the two
+  # agree because both start from the same TAST. Without a target there is no
+  # program to reason from, so the runtime-only jar carries everything.
+  var tuse = reach.all_tables()
+  if target != "" {
+    var cmods: List[CModule] = []
+    var reach_roots: List[String] = []
+    for sm in std_mods {
+      let (cls, _cx2, tm2, _ct2) = sm
+      cmods = cmods ++ [lower.lower_module(cls, tm2, traits, impl_table, adts, prog_fns)]
+    }
+    for cm in mods {
+      cmods = cmods ++
+        [lower.lower_module(cm.class_name, cm.tm, traits, impl_table, adts, prog_fns)]
+      reach_roots = reach_roots ++ [cm.class_name]
+    }
+    tuse = reach.table_use(cmods, reach_roots)
+  }
+  classes = classes ++ [(STRINGS_CLASS, gen_strings_class(sup, tuse))]
 
   # const values by declaring module, so importers can materialize them
   var const_vals: Map[String, Map[String, CValue]] = map.empty()
@@ -1283,7 +1308,14 @@ fn run_emitc(rest: List[String]) -> Unit !io = {
     }
   }
   if entry == "" { cli_error("no main function in " ++ t) }
-  let text = emitc.emit_program(units, entry)
+  # same question, same answer as the JVM path: which Unicode tables ride.
+  # The units are already lowered (rc included; the walk ignores CDup/CSDrop),
+  # so reach reads them as they are.
+  var reach_mods: List[CModule] = []
+  for u2 in units { reach_mods = reach_mods ++ [u2.m] }
+  var reach_roots: List[String] = []
+  for cm in prog.modules { reach_roots = reach_roots ++ [cm.class_name] }
+  let text = emitc.emit_program(units, entry, reach.table_use(reach_mods, reach_roots))
   if out == "" {
     print(text)
   } else {

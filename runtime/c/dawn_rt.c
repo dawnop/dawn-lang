@@ -751,6 +751,10 @@ dawn_adt *dawn_catch_panic(dawn_clo *f) { return dawn_run_caught(f, true); }
  * negative inputs fall out as false, which is the answer: the intrinsic takes
  * an Int and nothing says it is a code point. */
 static bool dawn_cp_in(int64_t c, const dawn_cp_range *rs, size_t n) {
+  /* n == 0 is not an empty set -- no real table is empty. It is the emitter
+   * saying nothing reachable reads this one (reach.dawn), so getting here
+   * means the pruning was wrong; answer loudly rather than "false". */
+  if (n == 0) dawn_panic(dawn_str_lit("unicode table pruned but reached", 32));
   size_t lo = 0, hi = n;
   while (lo < hi) {
     size_t mid = lo + (hi - lo) / 2;
@@ -1081,6 +1085,9 @@ static int32_t dawn_case_cp(int32_t cp, const dawn_case_range *rs, size_t n) {
 static dawn_str *dawn_case(dawn_str *s, bool up) {
   const dawn_case_range *rs = up ? dawn_upper_ranges : dawn_lower_ranges;
   size_t rn = (size_t)(up ? dawn_upper_ranges_n : dawn_lower_ranges_n);
+  /* same contract as dawn_cp_in: a zero-length table is the emitter's claim
+   * that this call cannot run (reach.dawn), not a mapping with no rows */
+  if (rn == 0) dawn_panic(dawn_str_lit("unicode table pruned but reached", 32));
   int64_t out = 0;
   for (int64_t i = 0; i < s->len;) {
     int64_t n;

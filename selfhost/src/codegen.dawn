@@ -18,6 +18,7 @@ use types.{
   Adts, AdtI, CtorI, adt_of, adt_jvm_name, ctor_jvm_name, Sym, Sig, Eff
 }
 use core.{subject_key}
+use reach.{TableUse}
 use case_table
 use class_table
 use jreflect
@@ -2024,7 +2025,7 @@ const CLASS_SPACE: String = "CLASS_SPACE"
 ## case folding. What is left after std/str took over everything expressible as
 ## a walk (docs/native-backend-plan.md 14.12): the representation boundary and
 ## the Unicode tables, and nothing vendored in handwritten Java.
-pub fn gen_strings_class(supers: List[String]) -> Bytes !io = {
+pub fn gen_strings_class(supers: List[String], u: TableUse) -> Bytes !io = {
   let jstr = "java/lang/String"
   let jlist = "java/util/List"
   let cw = AdtClassWriter.new(supers)
@@ -2383,65 +2384,84 @@ pub fn gen_strings_class(supers: List[String]) -> Bytes !io = {
   # backend could implement from a table at all: it is locale- and
   # context-sensitive, and it does not preserve the code-point count (a sharp s
   # uppercases to two letters). That belongs in a library taking a locale.
-  let tables = [
-    (CASE_UPPER, case_payload(case_table.upper())),
-    (CASE_LOWER, case_payload(case_table.lower())),
-    (CLASS_LETTER, class_payload(class_table.letters())),
-    (CLASS_DIGIT, class_payload(class_table.digits())),
-    (CLASS_UPPER, class_payload(class_table.uppers())),
-    (CLASS_LOWER, class_payload(class_table.lowers())),
-    (CLASS_SPACE, class_payload(class_table.spaces()))
-  ]
+  # Which rows ride is the caller's answer (reach.dawn): a program that never
+  # reaches case folding does not pay the mapping rows, one that never
+  # classifies skips the sets. A pruned method is absent, not stubbed -- the
+  # JVM resolves constant-pool entries lazily, so nothing notices unless the
+  # pruning was wrong, and then it is a NoSuchMethodError naming the method
+  # rather than a wrong answer. `char_is_alnum` forces letter and digit in
+  # (it calls both); `u.parse` is ignored here, because these parsers strip
+  # with `String.strip` rather than with our space set.
+  let want_letter = u.is_letter || u.is_alnum
+  let want_digit = u.is_digit || u.is_alnum
+  var tables: List[(String, String)] = []
+  if u.str_upper { tables = tables ++ [(CASE_UPPER, case_payload(case_table.upper()))] }
+  if u.str_lower { tables = tables ++ [(CASE_LOWER, case_payload(case_table.lower()))] }
+  if want_letter { tables = tables ++ [(CLASS_LETTER, class_payload(class_table.letters()))] }
+  if want_digit { tables = tables ++ [(CLASS_DIGIT, class_payload(class_table.digits()))] }
+  if u.is_upper { tables = tables ++ [(CLASS_UPPER, class_payload(class_table.uppers()))] }
+  if u.is_lower { tables = tables ++ [(CLASS_LOWER, class_payload(class_table.lowers()))] }
+  if u.is_space { tables = tables ++ [(CLASS_SPACE, class_payload(class_table.spaces()))] }
   for t in tables {
     let (field, _) = t
     cw.field(ACC_PRIVATE + ACC_STATIC + ACC_FINAL, field, "[I")
   }
-  gen_decode_table(cw)
-  gen_case_lookup(cw)
-  gen_class_lookup(cw)
-  let ci = cw.method(ACC_STATIC, "<clinit>", "()V").expect("mv")
-  ci.visitCode()
-  for t in tables {
-    let (field, payload) = t
-    ci.visitLdcInsn(payload)
-    ci.visitMethodInsn(OP_INVOKESTATIC, STRINGS_CLASS, "decode_table",
-      "(Ljava/lang/String;)[I", false)
-    ci.visitFieldInsn(OP_PUTSTATIC, STRINGS_CLASS, field, "[I")
+  if len(tables) > 0 {
+    gen_decode_table(cw)
+    let ci = cw.method(ACC_STATIC, "<clinit>", "()V").expect("mv")
+    ci.visitCode()
+    for t in tables {
+      let (field, payload) = t
+      ci.visitLdcInsn(payload)
+      ci.visitMethodInsn(OP_INVOKESTATIC, STRINGS_CLASS, "decode_table",
+        "(Ljava/lang/String;)[I", false)
+      ci.visitFieldInsn(OP_PUTSTATIC, STRINGS_CLASS, field, "[I")
+    }
+    ci.visitInsn(OP_RETURN)
+    close_mv(ci)
   }
-  ci.visitInsn(OP_RETURN)
-  close_mv(ci)
-  gen_case_method(cw, "str_lower", CASE_LOWER)
-  gen_case_method(cw, "str_upper", CASE_UPPER)
+  if u.str_upper || u.str_lower { gen_case_lookup(cw) }
+  if want_letter || want_digit || u.is_upper || u.is_lower || u.is_space {
+    gen_class_lookup(cw)
+  }
+  if u.str_lower { gen_case_method(cw, "str_lower", CASE_LOWER) }
+  if u.str_upper { gen_case_method(cw, "str_upper", CASE_UPPER) }
 
   # char_is_*(c): is this code point in the table's set?
-  for e in [("char_is_letter", CLASS_LETTER), ("char_is_digit", CLASS_DIGIT),
-    ("char_is_upper", CLASS_UPPER), ("char_is_lower", CLASS_LOWER),
-    ("char_is_space", CLASS_SPACE)] {
-      let (dawn_name, field) = e
-      let cv = open_static(cw, dawn_name, "(J)Z")
-      cv.visitVarInsn(OP_LLOAD, 0)
-      cv.visitInsn(OP_L2I)
-      cv.visitFieldInsn(OP_GETSTATIC, STRINGS_CLASS, field, "[I")
-      cv.visitMethodInsn(OP_INVOKESTATIC, STRINGS_CLASS, "in_ranges", "(I[I)Z", false)
-      cv.visitInsn(OP_IRETURN)
-      close_mv(cv)
-    }
+  var preds: List[(String, String)] = []
+  if want_letter { preds = preds ++ [("char_is_letter", CLASS_LETTER)] }
+  if want_digit { preds = preds ++ [("char_is_digit", CLASS_DIGIT)] }
+  if u.is_upper { preds = preds ++ [("char_is_upper", CLASS_UPPER)] }
+  if u.is_lower { preds = preds ++ [("char_is_lower", CLASS_LOWER)] }
+  if u.is_space { preds = preds ++ [("char_is_space", CLASS_SPACE)] }
+  for e in preds {
+    let (dawn_name, field) = e
+    let cv = open_static(cw, dawn_name, "(J)Z")
+    cv.visitVarInsn(OP_LLOAD, 0)
+    cv.visitInsn(OP_L2I)
+    cv.visitFieldInsn(OP_GETSTATIC, STRINGS_CLASS, field, "[I")
+    cv.visitMethodInsn(OP_INVOKESTATIC, STRINGS_CLASS, "in_ranges", "(I[I)Z", false)
+    cv.visitInsn(OP_IRETURN)
+    close_mv(cv)
+  }
 
   # alnum has no table of its own: Java defines isLetterOrDigit as isLetter ||
   # isDigit and the C runtime does the same, so storing a third set would be a
   # third thing to keep in agreement with the other two.
-  let anv = open_static(cw, "char_is_alnum", "(J)Z")
-  let alnum_yes = Label.new()
-  anv.visitVarInsn(OP_LLOAD, 0)
-  anv.visitMethodInsn(OP_INVOKESTATIC, STRINGS_CLASS, "char_is_letter", "(J)Z", false)
-  anv.visitJumpInsn(OP_IFNE, alnum_yes)
-  anv.visitVarInsn(OP_LLOAD, 0)
-  anv.visitMethodInsn(OP_INVOKESTATIC, STRINGS_CLASS, "char_is_digit", "(J)Z", false)
-  anv.visitInsn(OP_IRETURN)
-  anv.visitLabel(alnum_yes)
-  anv.visitInsn(OP_ICONST_1)
-  anv.visitInsn(OP_IRETURN)
-  close_mv(anv)
+  if u.is_alnum {
+    let anv = open_static(cw, "char_is_alnum", "(J)Z")
+    let alnum_yes = Label.new()
+    anv.visitVarInsn(OP_LLOAD, 0)
+    anv.visitMethodInsn(OP_INVOKESTATIC, STRINGS_CLASS, "char_is_letter", "(J)Z", false)
+    anv.visitJumpInsn(OP_IFNE, alnum_yes)
+    anv.visitVarInsn(OP_LLOAD, 0)
+    anv.visitMethodInsn(OP_INVOKESTATIC, STRINGS_CLASS, "char_is_digit", "(J)Z", false)
+    anv.visitInsn(OP_IRETURN)
+    anv.visitLabel(alnum_yes)
+    anv.visitInsn(OP_ICONST_1)
+    anv.visitInsn(OP_IRETURN)
+    close_mv(anv)
+  }
 
   cw.visitEnd()
   cw.toByteArray().expect("bytes")
