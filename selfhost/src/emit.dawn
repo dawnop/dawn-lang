@@ -55,8 +55,8 @@ use core.{
   CInt, CFloat, CBool, CStr, CUnit, CLocal, CFnRef, CCall, CIntrinsic,
   CCtor, CField, CIsCtor, CTagOf, CClosure, CTuple, CTupleGet, CBox, CUnbox,
   CBinary, CUnary, CIf, CBlock, CListLit, CConstRef, CComptime,
-  CReturn, CBreak, CContinue, CForeign, CJava, CDictRef, CDictApply, CDictArg,
-  CSLet, CSAssign, CSDiscard, CSLoop, CSIf, CSDup, CSDrop,
+  CReturn, CBreak, CContinue, CForeign, CDup, CJava, CDictRef, CDictApply, CDictArg,
+  CSLet, CSAssign, CSDiscard, CSLoop, CSIf, CSDrop,
   CDirect, CDynamic, CMethod, CImpl, CDefault,
   CAdd, CSub, CMul, CDiv, CMod, CEq, CNe, CLt, CLe, CGt, CGe, CAnd, COr,
   CBand, CBor, CBxor, CShl, CShr, CUshr, CConcat, CNeg, CNot, CBnot,
@@ -2024,6 +2024,8 @@ fn gen_cexpr2(g: Gen, e: CExpr, tail: Bool) -> (Gen, Bool) !io =
     }
     CIntrinsic(name, args, ty) -> gen_cintrinsic(g, name, args, ty)
     CForeign(call, ty) -> gen_cforeign(g, call, ty)
+    # the JVM has a collector; a count is a fact about the C runtime only
+    CDup(inner, _) -> gen_cexpr(g, inner, false)
     _ -> panic("codegen: Core node not handled on the JVM path")
   }
 
@@ -2187,7 +2189,6 @@ fn gen_cstmt(g: Gen, s: CStmt) -> Gen !io =
       Gen { ..g1, cloops: list.take(g1.cloops, len(g1.cloops) - 1) }
     }
     # reference counting: Perceus emits these, the JVM has a collector
-    CSDup(_) -> g
     CSDrop(_) -> g
   }
 

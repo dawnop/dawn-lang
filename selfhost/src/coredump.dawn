@@ -42,8 +42,8 @@ use core.{
   CCtor, CField, CIsCtor, CTagOf, CClosure, CDictRef, CDictApply, CDictArg,
   CTuple, CTupleGet, CBox, CUnbox,
   CBinary, CUnary, CIf, CBlock, CListLit, CConstRef, CComptime,
-  CReturn, CBreak, CContinue, CForeign,
-  CSLet, CSAssign, CSDiscard, CSLoop, CSIf, CSDup, CSDrop,
+  CReturn, CBreak, CContinue, CForeign, CDup,
+  CSLet, CSAssign, CSDiscard, CSLoop, CSIf, CSDrop,
   CDirect, CDynamic, CMethod, CImpl, CDefault,
   CBinOp, CUnOp,
   CAdd, CSub, CMul, CDiv, CMod, CEq, CNe, CLt, CLe, CGt, CGe, CAnd, COr,
@@ -115,6 +115,7 @@ fn walk_expr(a: Acc, e: CExpr) -> Acc =
     CTupleGet(t, _, _) -> walk_expr(a, t)
     CBox(inner, _) -> walk_expr(a, inner)
     CUnbox(inner, _) -> walk_expr(a, inner)
+    CDup(inner, _) -> walk_expr(a, inner)
     CBinary(_, l, r, _) -> walk_expr(walk_expr(a, l), r)
     CUnary(_, o, _) -> walk_expr(a, o)
     CIf(c, t, e2, _) -> walk_opt(walk_expr(walk_expr(a, c), t), e2)
@@ -148,7 +149,6 @@ fn walk_stmt(a: Acc, s: CStmt) -> Acc =
     CSDiscard(e) -> walk_expr(a, e)
     CSLoop(lid, body, step) -> walk_opt(walk_expr(add_loop(a, lid), body), step)
     CSIf(c, t, e) -> walk_opt(walk_expr(walk_expr(a, c), t), e)
-    CSDup(sym) -> add_sym(a, sym)
     CSDrop(sym) -> add_sym(a, sym)
   }
 
@@ -323,6 +323,7 @@ fn expr(adts: Adts, n: Names, d: Int, e: CExpr) -> String =
       ind(d) ++ "box from=" ++ ty_str(adts, from) ++ "\n" ++ expr(adts, n, d + 1, inner)
     CUnbox(inner, to) ->
       ind(d) ++ "unbox to=" ++ ty_str(adts, to) ++ "\n" ++ expr(adts, n, d + 1, inner)
+    CDup(inner, _) -> ind(d) ++ "dup\n" ++ expr(adts, n, d + 1, inner)
     CBinary(op, l, r, t) ->
       ind(d) ++ "binary " ++ bin_name(op) ++ ty(adts, t) ++ "\n" ++
       expr(adts, n, d + 1, l) ++ expr(adts, n, d + 1, r)
@@ -387,7 +388,6 @@ fn stmt(adts: Adts, n: Names, d: Int, s: CStmt) -> String =
     CSIf(c, t, e) ->
       ind(d) ++ "sif\n" ++ expr(adts, n, d + 1, c) ++ expr(adts, n, d + 1, t) ++
       opt_expr(adts, n, d + 1, e)
-    CSDup(sym) -> ind(d) ++ "dup " ++ sym_name(n, sym) ++ "\n"
     CSDrop(sym) -> ind(d) ++ "drop " ++ sym_name(n, sym) ++ "\n"
   }
 

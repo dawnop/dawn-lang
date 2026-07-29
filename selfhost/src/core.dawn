@@ -24,7 +24,7 @@
 #                     value is implicit, which let the Phase -1 spike silently
 #                     drop a trailing println's side effect. Making it a node
 #                     means a backend cannot forget.
-#   * CSDup/CSDrop -- reference-count operations. Phase 0 emits none and the
+#   * CDup/CSDrop -- reference-count operations. Phase 0 emits none and the
 #                     JVM backend ignores them; Perceus (Phase 4) fills them
 #                     in. They exist now so the IR shape is settled before
 #                     two backends are written against it.
@@ -162,6 +162,12 @@ pub type CExpr =
 # native backend refuses this node, and `use c` will get its own, which the
 # JVM backend will refuse in turn.
   | CForeign(j: CJava, ty: Ty)
+# Take a reference to `inner` and hand it back -- `dawn_dup` in the C runtime,
+# ignored by every other consumer. An expression rather than a statement
+# because what needs counting is often not a binding: `let y = p.x` hands over
+# a projection, and there is no symbol to name until after the let. Unused
+# until Phase 4 (docs/perceus-design.md 5).
+  | CDup(inner: CExpr, ty: Ty)
 
 pub type CStmt =
   | CSLet(sym: Int, ty: Ty, init: CExpr)
@@ -178,8 +184,10 @@ pub type CStmt =
 # a field of the node is what keeps that from being each backend's problem.
   | CSLoop(loop_id: Int, body: CExpr, step: Option[CExpr])
   | CSIf(cond: CExpr, thn: CExpr, els: Option[CExpr])
-# reference counting. Unused until Phase 4; the JVM backend ignores both.
-  | CSDup(sym: Int)
+# Release a reference at a scope's exit. A drop always names a binding, which
+# is why this one is a statement and takes a symbol -- unlike CDup, which has
+# to sit wherever a value is handed over. Unused until Phase 4; the JVM
+# backend ignores it.
   | CSDrop(sym: Int)
 
 pub type CBinOp =
@@ -421,6 +429,7 @@ pub fn cex_ty(e: CExpr) -> Ty =
     CBreak(_) -> TyNever
     CContinue(_) -> TyNever
     CForeign(_, ty) -> ty
+    CDup(_, ty) -> ty
   }
 
 ## Whether evaluating this expression can transfer control away (return,
