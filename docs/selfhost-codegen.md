@@ -1,5 +1,7 @@
 # Selfhost P4：CodeGen 移植计划与通读笔记
 
+> 状态：**historical** —— codegen 的移植设计，已实现；现状看 `selfhost/src/codegen.dawn`/`emit.dawn`。
+>
 > P3b（checker）已于 2026-07-22 全量对拍绿（见 selfhost-checker.md §七）。本文件是
 > P4 的接力棒：目标、金标准、TAST 缺口清单、通读笔记，随移植推进持续更新。
 

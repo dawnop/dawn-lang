@@ -1,5 +1,7 @@
 # Dawn 教程
 
+> 状态：**current** —— 面向读者的教程；其中标注 `dawn run` 的示例由 CI 实跑（`scripts/doc-check.py`）。
+
 一门刻意小的静态类型语言：编译到 JVM 字节码，native 可执行文件由 GraalVM
 native-image 直接得到。本教程带你从第一个程序走到调 Java。
 

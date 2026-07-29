@@ -1,5 +1,7 @@
 # Perceus 设计（S4 Phase 4）
 
+> 状态：**current** —— native 的内存管理设计，五刀已全部落地（§14.x 有关账记录），仍是该子系统的权威说明。
+>
 > 对应 [`native-backend-plan.md`](native-backend-plan.md) §4 Phase 4。那里三段话定了
 > 方向（精确 RC + 复用分析、非原子、无环回收器、必配 `--rc=leak`）；这份是动码前的设计，
 > 把「往哪个对象上加计数、drop 怎么递归、掩码放哪」这些真正要裁的东西写下来。

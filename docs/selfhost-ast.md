@@ -1,5 +1,7 @@
 # 自举 AST 架构：Parsed → Typed 双树（P0.5 草案）
 
+> 状态：**historical** —— 双树架构已实现（`ast.dawn`/`tast.dawn`），本文是当时的动码前定稿。
+>
 > 这是 [`selfhost-gaps.md`](selfhost-gaps.md) §三「选甲」的兑现草案，属**动码前的
 > 定稿**（惯例见 [`bytes-design.md`](bytes-design.md)/[`unwrap-design.md`](unwrap-design.md)）。
 > 目标：在写第一行 Dawn 版 lexer **之前**，把「哪一刀产出哪棵树、每个注解落在哪」定死，

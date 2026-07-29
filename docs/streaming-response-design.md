@@ -1,5 +1,7 @@
 # 流式响应设计草案（GET 代理下载恒定内存）
 
+> 状态：**historical** —— 流式响应已落地，本文是当时的草案。
+>
 > 对应 [`m6-retro.md`](m6-retro.md) **§4 无流式请求/响应**的后半，以及
 > [`streaming-design.md`](streaming-design.md) **§六**留的尾巴（「响应流式……留作下一轮」）。
 > 依 [`bytes-design.md`](bytes-design.md)、[`unwrap-design.md`](unwrap-design.md)、

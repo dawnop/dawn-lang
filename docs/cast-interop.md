@@ -1,5 +1,7 @@
 # `cast[T]`：统一的 interop 认领原语
 
+> 状态：**historical** —— 泛型 `cast` 已落地，本文是当时的动码前设计。
+>
 > 语言层设计，**先文档、后实现**。目标：把「从擦除的 Java `Object` 认领回具体类型」从
 > **一类型一 builtin**（`as_bytes`、将来的 `as_input_stream`…）收敛成**一个泛型内建 `cast`**
 > （概念上是 `cast[T]`；v1 surface 写 `cast(x)`、T 由期望类型定，见 §四）。

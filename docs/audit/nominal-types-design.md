@@ -1,5 +1,7 @@
 # 给标量一个自己的身份：`Char` 与 newtype
 
+> 状态：**驳回（proposed → rejected）** —— 见文首 2026-07-30 重判：机制已由 `opaque type` 提供。
+>
 > 动码前的**调研与方案**，不是设计定稿。
 > 覆盖 codebase-audit.md 的 **LANG-04（P2）** 与 **LANG-05（P2）**。
 >

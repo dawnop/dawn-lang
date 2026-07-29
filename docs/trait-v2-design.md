@@ -1,5 +1,7 @@
 # trait v2 最小切片：设计
 
+> 状态：**historical** —— trait v2 八刀已全部落地；权威描述在 spec §7 与 `docs/trait.md`。
+>
 > 对应 [`native-backend-plan.md`](native-backend-plan.md) §11.4 的 S2.1。
 > v1 的设计定稿在 [`trait.md`](trait.md)，S1 的在
 > [`semantics-closure-design.md`](semantics-closure-design.md)。

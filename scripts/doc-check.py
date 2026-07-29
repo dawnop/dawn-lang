@@ -14,6 +14,7 @@ gets disabled, and then it protects nothing):
   anchors   every same-file `#fragment` link matches a heading in that file
   blocks    every fenced block marked ```dawn run / ```dawn compile is
             compiled (and run) by the toolchain
+  status    every document under docs/ declares its status near the top
 
 Blocks are opt-in rather than opt-out: most examples in the spec are
 fragments -- a type declaration, three lines of a match -- and demanding
@@ -93,6 +94,21 @@ def check_links(path: pathlib.Path, text: str) -> list[str]:
     return bad
 
 
+def check_status(path: pathlib.Path, text: str) -> list[str]:
+    """DOC-10: a reader must be able to tell whether a document still applies
+    without reading it. 28 documents had accumulated by the audit -- plans,
+    surveys, landing logs, specs and runbooks in one pile -- and the fix is a
+    status line, in the form this repository already uses (`> 状态：…` right
+    under the H1) rather than YAML front matter the site renderer would print
+    as prose. A convention nothing checks decays, so it is checked."""
+    if "docs/" not in str(path):
+        return []
+    if "状态" in "\n".join(text.split("\n")[:12]):
+        return []
+    return [f"{path.relative_to(ROOT)}: no `> 状态：…` line in the first 12 lines "
+            f"(normative / current / historical / proposed -- see docs/README.md)"]
+
+
 def check_blocks(path: pathlib.Path, text: str, work: pathlib.Path) -> list[str]:
     bad = []
     for i, (info, body) in enumerate(FENCE.findall(text)):
@@ -118,6 +134,7 @@ def main() -> None:
         for path in DOCS:
             text = path.read_text(encoding="utf-8")
             problems += check_links(path, text)
+            problems += check_status(path, text)
             for info, _ in FENCE.findall(text):
                 if len(info.split()) > 1 and info.split()[1] in ("run", "compile"):
                     blocks += 1
@@ -128,7 +145,8 @@ def main() -> None:
             print(p, file=sys.stderr)
         print(f"FAIL: {len(problems)} documentation problem(s)", file=sys.stderr)
         sys.exit(1)
-    print(f"OK: {len(DOCS)} documents, links and anchors resolve, {blocks} checked block(s)")
+    print(f"OK: {len(DOCS)} documents -- links, anchors and status lines resolve, "
+          f"{blocks} checked block(s)")
 
 
 if __name__ == "__main__":

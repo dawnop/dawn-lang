@@ -1,5 +1,7 @@
 # 流式请求体设计草案（WebDAV PUT 恒定内存）
 
+> 状态：**historical** —— 流式请求体已落地（WebDAV PUT 恒定内存），本文是当时的草案。
+>
 > 对应 [`m6-retro.md`](m6-retro.md) **§4 无流式请求/响应**。依 [`bytes-design.md`](bytes-design.md)（序 4）、
 > [`unwrap-design.md`](unwrap-design.md)（序 5）的先例：**动码前先出草案**。
 > 前置：序 4 的一等 `Bytes` 已落地（复盘说「流式依赖序 4 先做更顺」）。

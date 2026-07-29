@@ -1,5 +1,7 @@
 # P3b：Checker 移植设计（Dawn 版类型检查器）
 
+> 状态：**historical** —— checker 的移植设计，已实现；现状看 `selfhost/src/checker.dawn`。
+>
 > P3a（Parser）已完成：`selfhost/src/parser.dawn`，全语料对拍逐字节一致。
 > 本文件是 Checker 半刀（`check/*.kt` ≈ 5,100 行）的移植决定，按 [`selfhost-ast.md`](selfhost-ast.md)
 > 选甲：checker 是 lowering 一刀，消费 `ast.dawn` 的纯解析树。**动码前先出草案**（序 4/5 先例）。

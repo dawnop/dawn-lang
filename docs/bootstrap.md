@@ -1,5 +1,7 @@
 # Bootstrap 链：从种子到自举闭包
 
+> 状态：**current** —— 自举与种子推进协议的现行说明（M8 收口后仍照做）。
+>
 > 2026-07-22 自举完成（design.md M7、selfhost-gaps.md §七）；2026-07-23 **M8
 > 收口：Kotlin 实现归档在 `kotlin-final` tag，main 上只剩 selfhost**
 > （[m8-selfhost-only.md](m8-selfhost-only.md)）。本文回答一个问题：

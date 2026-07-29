@@ -1,5 +1,7 @@
 # 序 5 设计草案：互操作 Option 解包（后缀 `!`）
 
+> 状态：**historical** —— 后缀 `!` 已落地（spec §8.2），本文是当时的草案。
+>
 > 对应 [`m6-retro.md`](m6-retro.md) **根因 3**（🟠 Java 互操作把一切包进 Option → `.expect()` 满天飞）。
 > 依 [`bytes-design.md`](bytes-design.md)（序 4）的先例：**动码前先出草案**。
 

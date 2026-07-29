@@ -1,5 +1,7 @@
 # M6 复盘：用 Dawn 重写生产后端暴露的语言/标准库/框架设计问题
 
+> 状态：**historical** —— M6 生产复盘；它排的修复优先级已由 M7/M8 及此后各 S-pass 执行完。
+>
 > 背景：M6 用 Dawn 把 dawnop.com 的 FastAPI 后端整体重写（`~/workspace/dawnop-site/backend-dawn/`，
 > 44 个 `.dawn` 文件 ~4000 行），覆盖鉴权、文章/页面/标签 CRUD、全站搜索、七牛文件管理、
 > 监控聚合、WebDAV，并逐字节对拍 FastAPI。整个后端已 100% 上线、退役 Python。

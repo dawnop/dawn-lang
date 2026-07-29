@@ -108,6 +108,7 @@ codebase-audit.md 的 DOC-10 提了三件事，这里只落地了第一件：
 
 `scripts/doc-check.py`（CI 门禁「documentation checks」）检查三件事：
 
+- 每篇 `docs/` 下的文档在开头 12 行内声明 `> 状态：…`（三档 + proposed，见上）；
 - 每条相对链接指向真实存在的文件；
 - 每个同文件 `#锚点` 对得上某个标题；
 - 每个标注为 ```` ```dawn run ```` / ```` ```dawn compile ```` 的代码块真的编得过、跑得起来。

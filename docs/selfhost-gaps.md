@@ -1,5 +1,7 @@
 # M7 自举前置：缺口清单与修复计划
 
+> 状态：**historical** —— M7 自举前置缺口清单，已全部关闭（§七）。
+>
 > 依 [`bytes-design.md`](bytes-design.md)（序 4）、[`unwrap-design.md`](unwrap-design.md)（序 5）
 > 的先例：**动码前先出草案**。
 >
