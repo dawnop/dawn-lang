@@ -863,7 +863,13 @@ surrogate 和最大码点；不完整序列还会静默跳字节。URI 解码结
 
 ### LSP-02（P1）file URI 实现不符合跨平台 URI 语义
 
-> **【待办 —— 认可，与 LSP-01 同一次改动】**——`Paths`/`URI` 确实已经能正确完成
+> **【已修 —— 2026-07-30】** authority / query / fragment / Windows 盘符 / 空 authority
+> 输出全部按 RFC 3986 处理，往返测试钉住（含重音与盘符）。**没有换成 `Paths`/`URI`**：
+> 缝 1 之后 `lsp.dawn` 是共享前端，一份实现供两个工具链，native 侧没有 JDK——
+> 与 LSP-01 同一个理由（台账 §3.7 的改判）。UNC 与远程主机判为「本进程打不开的文件」
+> 回 None，而不是拼一个可能指向别处的路径。
+>
+> 原判定：**【待办 —— 认可，与 LSP-01 同一次改动】**——`Paths`/`URI` 确实已经能正确完成
 > authority、Windows drive、UNC、normalization，不该手写。见 LSP-01 的排期理由。
 
 

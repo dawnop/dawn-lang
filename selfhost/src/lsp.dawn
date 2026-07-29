@@ -152,10 +152,50 @@ fn hex_val(c: Int) -> Int =
     -1
   }
 
-## file:// URI → filesystem path, or None for non-file URIs.
+## file:// URI → filesystem path, or None for anything this process cannot
+## open as a local file (LSP-02).
+##
+## Four things the old two-line version got wrong, all of them shapes a real
+## client sends:
+##
+## * **authority**. `file://server/share/x` used to yield the *relative* path
+##   `server/share/x` -- a path that either does not exist or, worse, exists
+##   somewhere unrelated. An empty authority (`file:///x`, what every editor
+##   sends) and `localhost` mean "this machine"; any other host is a file this
+##   process cannot open, so it is `None` rather than a guess.
+## * **query and fragment**. A URI may carry `?` / `#`; a path may not. They
+##   are cut before decoding, so a percent escape inside them cannot leak into
+##   the path either.
+## * **Windows drive letters**. `file:///C:/x` decodes to `/C:/x`, which is not
+##   a path on the platform that spells it `C:/x`. A leading slash before a
+##   drive letter is dropped -- harmless on POSIX, where no such path exists.
+## * **percent-decoding is still validated** (LSP-01): a malformed sequence
+##   becomes U+FFFD, so the result is a path that does not exist rather than a
+##   path assembled from bytes nobody wrote.
 pub fn uri_to_path(uri: String) -> Option[String] = {
   if not str.starts_with(uri, "file://") { return None }
-  let rest = str.substring(uri, 7, str.len(uri))
+  var rest = str.substring(uri, 7, str.len(uri))
+  # authority: everything before the first `/` of the path
+  if not str.starts_with(rest, "/") {
+    let cut = match str.index_of(rest, "/") {
+      Some(i) -> i
+      None -> str.len(rest)
+    }
+    let authority = str.substring(rest, 0, cut)
+    if authority != "" && str.to_lower(authority) != "localhost" { return None }
+    rest = str.substring(rest, cut, str.len(rest))
+  }
+  # a path carries neither query nor fragment
+  match str.index_of(rest, "#") {
+    Some(i) -> { rest = str.substring(rest, 0, i) }
+    None -> ()
+  }
+  match str.index_of(rest, "?") {
+    Some(i) -> { rest = str.substring(rest, 0, i) }
+    None -> ()
+  }
+  if rest == "" { return None }
+  rest = drive_path(rest)
   # percent-decode into UTF-8 bytes, then decode
   var bs: List[Int] = []
   let cps = code_points(rest)
@@ -237,6 +277,30 @@ fn utf8_decode(bs: List[Int]) -> String = {
 
 fn is_cont(b: Int) -> Bool = b >= 128 && b <= 191
 
+test "file URIs: authority, query, fragment and drive letters (LSP-02)" {
+  # the shape every editor sends
+  assert uri_to_path("file:///tmp/a.dawn") == Some("/tmp/a.dawn")
+  # localhost means this machine; another host is a file we cannot open
+  assert uri_to_path("file://localhost/tmp/a.dawn") == Some("/tmp/a.dawn")
+  assert uri_to_path("file://server/share/a.dawn") == None
+  # a path carries neither query nor fragment
+  assert uri_to_path("file:///tmp/a.dawn?v=2") == Some("/tmp/a.dawn")
+  assert uri_to_path("file:///tmp/a.dawn#L10") == Some("/tmp/a.dawn")
+  # a drive-letter path does not begin with a separator...
+  assert uri_to_path("file:///C:/src/a.dawn") == Some("C:/src/a.dawn")
+  # ...and a single letter without a colon is not a drive
+  assert uri_to_path("file:///c/src/a.dawn") == Some("/c/src/a.dawn")
+  # non-file schemes and the empty path stay None
+  assert uri_to_path("http://x/y") == None
+  assert uri_to_path("file://") == None
+  # the other direction roots what it emits: three slashes, never two
+  assert path_to_uri("/tmp/a.dawn") == "file:///tmp/a.dawn"
+  assert path_to_uri("C:/src/a.dawn") == "file:///C:/src/a.dawn"
+  # and both directions compose, drive letter included
+  let accented = "/tmp/caf" ++ from_code_points([233]) ++ ".dawn"
+  assert uri_to_path(path_to_uri(accented)) == Some(accented)
+}
+
 test "uri decoding validates utf-8 instead of trusting it" {
   let fffd = from_code_points([65533])
   # the happy path: percent-encoded multibyte decodes exactly (U+00E9)
@@ -265,9 +329,28 @@ fn utf8_bytes(cp: Int) -> List[Int] =
 
 fn uri_ok(c: Int) -> Bool =
   (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
-  c == '/' || c == '-' || c == '_' || c == '.' || c == '~'
+  c == '/' || c == '-' || c == '_' || c == '.' || c == '~' ||
+  # ':' is a legal path character (RFC 3986 pchar) and has to survive
+  # unencoded, or a Windows drive would round-trip as `%3A` -- readable to a
+  # parser, unrecognisable to a human reading the log
+  c == ':'
 
-## filesystem path → file:// URI (the Kotlin Path.toUri().toString()).
+## `/C:/x` → `C:/x`: a drive-letter path does not begin with a separator.
+## Left alone anywhere else, including `/c/x` (a single letter is not a drive
+## without the colon) and plain POSIX paths.
+fn drive_path(p: String) -> String = {
+  let cps = code_points(p)
+  if len(cps) < 3 { return p }
+  if cps[0] != '/' { return p }
+  let c = cps[1]
+  let alpha = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+  if alpha && cps[2] == ':' { str.substring(p, 1, str.len(p)) } else { p }
+}
+
+## filesystem path → file:// URI, with the empty authority the standard asks
+## for: `file:///x`, never `file://x` (LSP-02). A Windows path (`C:/x`) gains
+## the leading slash it needs -- without it the drive letter would parse as the
+## authority, and the URI would name a host called `C:`.
 pub fn path_to_uri(path: String) -> String = {
   var out: List[Int] = []
   for c in code_points(path) {
@@ -279,7 +362,9 @@ pub fn path_to_uri(path: String) -> String = {
       }
     }
   }
-  "file://" ++ from_code_points(out)
+  let body = from_code_points(out)
+  let rooted = if str.starts_with(body, "/") { body } else { "/" ++ body }
+  "file://" ++ rooted
 }
 
 fn hex_digit(v: Int) -> Int = if v < 10 { '0' + v } else { 'A' + v - 10 }

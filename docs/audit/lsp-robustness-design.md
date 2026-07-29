@@ -14,7 +14,11 @@
 > 换回 `java.net.URI` 等于把它踢出共享半区。按原则的正确形态落地：**手写 decoder 修成
 > 校验的**（continuation 区间 / overlong / surrogate / 超 U+10FFFF 全拒，坏序列出
 > U+FFFD 降级续读），一份纯 Dawn 实现两个工具链共用，单测钉住五类畸形输入。
-> LSP-02（file URI 其余面）仍待做。**LSP-04（debounce）撞墙已记档**：§2.2 的方案
+> **LSP-02 也已落地（同日）**：authority（空/localhost 才是本机，其他主机回 None
+> 而不是猜出一个相对路径）、query 与 fragment 在解码前切掉、Windows 盘符
+> （`file:///C:/x` → `C:/x`；`/c/x` 不是盘符）、`path_to_uri` 恒发三斜杠的空 authority
+> 形式（`C:/x` 若不补斜杠会把盘符解析成主机名），`:` 不再被百分号编码（RFC 3986 的
+> pchar，且 `%3A` 人读不出）。往返测试含重音字符与盘符。**LSP-04（debounce）撞墙已记档**：§2.2 的方案
 > 依赖「`read_message` 加一个超时形式（有输入就读，没输入就返回 `Idle`）」，
 > 而 std/io 只有阻塞的 `read_stdin(n)`——**没有任何「就绪/超时」原语**。
 > 造一个（`io_stdin_ready(timeout_ms) -> Bool` 之类）是**运行时契约变更**：
