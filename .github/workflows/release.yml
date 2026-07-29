@@ -16,7 +16,16 @@ permissions:
   contents: write # create the release and upload the jar
 
 jobs:
+  # The same gate list ci.yml runs, not a hand-copied subset. A tag can point at
+  # any commit — including one main CI never saw — which is precisely why this
+  # has to be the *identical* definition rather than a shorter one that says it
+  # is re-running the suite.
+  gates:
+    uses: ./.github/workflows/gates.yml
+    secrets: inherit
+
   release:
+    needs: gates
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -43,13 +52,6 @@ jobs:
           cmp dawn-selfhost.jar c.jar
           echo "closure OK (B == C)"
 
-      # ci.yml runs on push to main, but a tag can point anywhere. Re-run the
-      # suite here rather than trust that some earlier run covered this commit.
-      - name: tests
-        run: |
-          java -Xss512m -jar dawn-selfhost.jar test selfhost
-          java -Xss512m -jar dawn-selfhost.jar test site
-
       # The tag is what consumers pin, so it must name what is in the jar
       # (VERSION in selfhost/src/version.dawn).
       - name: the jar reports the version we think it does
@@ -61,6 +63,17 @@ jobs:
             *) echo "::error::--version said '$OUT' (bump selfhost/src/version.dawn)"; exit 1 ;;
           esac
 
+      # Every release jar is the next repo's bootstrap seed, and seedjar.sh
+      # verifies each seed against scripts/seed-checksums.txt before using it.
+      # Publishing the digest next to the jar is what lets the *next* bump fill
+      # that file in from the release rather than from whatever happens to be in
+      # someone's local cache.
+      - name: checksum
+        run: |
+          sha256sum dawn-selfhost.jar | tee dawn-selfhost.jar.sha256
+          echo "::notice::add this line to scripts/seed-checksums.txt when bumping the seed:"
+          echo "::notice::$(cut -d' ' -f1 dawn-selfhost.jar.sha256)  $GITHUB_REF_NAME"
+
       # gh is preinstalled on runners — no third-party action in the release path.
       - name: publish
         env:
@@ -68,5 +81,6 @@ jobs:
         run: |
           gh release create "$GITHUB_REF_NAME" \
             dawn-selfhost.jar \
+            dawn-selfhost.jar.sha256 \
             --title "$GITHUB_REF_NAME" \
             --generate-notes

@@ -129,17 +129,122 @@ pub fn binary(status: Int, content_type: String, raw: Bytes) -> Response =
 pub fn streaming(status: Int, content_type: String, stream: InputStream) -> Response =
   Response { status: status, content_type: content_type, headers: [], body: "", bin: None, stream: Some(stream) }
 
+# ---- header hygiene ----
+#
+# A header field value is one line by definition (RFC 9110 §5.5). A CR or LF
+# inside one does not travel as data — it ends the field and starts another, so
+# any value built from request input (a filename, a redirect target, a proxied
+# name) is a response-splitting vector until something removes them. Nothing
+# did: `attachment` spliced a filename straight into a quoted-string and
+# `redirect` passed its Location through untouched.
+#
+# Stripping rather than rejecting, because for every value that was already
+# legal this is the identity, and for the rest no encoding would have
+# transmitted them anyway. SP and HTAB stay (both are field-content); the other
+# C0 controls and DEL go.
+pub fn header_value(v: String) -> String = {
+  let cs = code_points(v)
+  var out: List[Int] = []
+  var i = 0
+  while i < len(cs) {
+    let c = unwrap_or(get(cs, i), 0)
+    if c == '\t' || (c >= 32 && c != 127) {
+      out = out ++ [c]
+    }
+    i = i + 1
+  }
+  from_code_points(out)
+}
+
+# A field name is a token (RFC 9110 §5.1) — no separators, no whitespace, no
+# controls. Anything else would let a name carry its own `:` and inject a field.
+fn header_name(n: String) -> String = {
+  let cs = code_points(n)
+  var out: List[Int] = []
+  var i = 0
+  while i < len(cs) {
+    let c = unwrap_or(get(cs, i), 0)
+    let alnum = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+    let punct = c == '!' || c == '#' || c == '$' || c == '%' || c == '&' || c == '\'' ||
+      c == '*' || c == '+' || c == '-' || c == '.' || c == '^' || c == '_' || c == '`' ||
+      c == '|' || c == '~'
+    if alnum || punct {
+      out = out ++ [c]
+    }
+    i = i + 1
+  }
+  from_code_points(out)
+}
+
 # Append one response header (records are immutable — returns a new Response).
+# Every header the framework emits goes through here, which is why the guard
+# lives here and not at each call site.
 pub fn with_header(r: Response, name: String, value: String) -> Response =
-  Response { ..r, headers: r.headers ++ [(name, value)] }
+  Response { ..r, headers: r.headers ++ [(header_name(name), header_value(value))] }
 
 # A redirect: status (301/302/303/307) plus a Location header, empty body.
 pub fn redirect(status: Int, location: String) -> Response =
   with_header(raw(status, "text/plain; charset=utf-8", ""), "Location", location)
 
+# Percent-encode as RFC 5987 attr-char: everything but ALPHA / DIGIT and the
+# fifteen listed punctuation marks, over the *UTF-8 bytes* rather than the code
+# points. Hand-rolled instead of URLEncoder because that one is
+# application/x-www-form-urlencoded — it writes '+' for space and leaves '*'
+# alone, and neither is an attr-char.
+fn pct_encode(s: String) -> String = {
+  let b = bytes.utf8(s)
+  var out = ""
+  var i = 0
+  while i < bytes.len(b) {
+    let c = bytes.at(b, i)
+    let alnum = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+    let safe = c == '!' || c == '#' || c == '$' || c == '&' || c == '+' || c == '-' ||
+      c == '.' || c == '^' || c == '_' || c == '`' || c == '|' || c == '~'
+    if alnum || safe {
+      out = out ++ str.from_char(c)
+    } else {
+      out = out ++ "%" ++ str.to_upper(str.pad_start(to_hex(c), 2, "0"))
+    }
+    i = i + 1
+  }
+  out
+}
+
+fn to_hex(n: Int) -> String = {
+  let digits = "0123456789abcdef"
+  str.substring(digits, n / 16, n / 16 + 1) ++ str.substring(digits, n % 16, n % 16 + 1)
+}
+
+# The quoted-string fallback: keep printable ASCII, escape the two characters
+# that end or continue a quoted-string, drop everything else (a non-ASCII byte
+# has no meaning in this parameter — that is what `filename*` is for).
+fn ascii_filename(name: String) -> String = {
+  let cs = code_points(name)
+  var out = ""
+  var i = 0
+  while i < len(cs) {
+    let c = unwrap_or(get(cs, i), 0)
+    if c == '"' || c == '\\' {
+      out = out ++ "\\" ++ str.from_char(c)
+    } else if c >= 32 && c < 127 {
+      out = out ++ str.from_char(c)
+    }
+    i = i + 1
+  }
+  out
+}
+
 # Force a download with a given filename via Content-Disposition.
+#
+# Two parameters, per RFC 6266 §4.1 + RFC 5987: `filename=` is a quoted-string
+# and so can hold neither a bare `"` nor any non-ASCII character, while
+# `filename*=` carries UTF-8 and is what every current client reads. The old
+# one-parameter form spliced the name in raw, so a `"` ended the parameter, a
+# `;` added new ones, and a non-ASCII name arrived mangled.
 pub fn attachment(content_type: String, filename: String, body: String) -> Response =
-  with_header(raw(200, content_type, body), "Content-Disposition", "attachment; filename=\"$filename\"")
+  with_header(raw(200, content_type, body), "Content-Disposition",
+    "attachment; filename=\"" ++ ascii_filename(filename) ++ "\"; filename*=UTF-8''" ++
+      pct_encode(filename))
 
 # The server's rendering of the Err branch and of its own 404/405.
 # backend-dawn divergence (M6): the key is "detail" to match FastAPI's error
@@ -281,5 +386,43 @@ test "response header helpers" {
   assert rd.status == 302
   assert rd.headers == [("Location", "/here")]
   let at = attachment("text/markdown", "post.md", "# hi")
-  assert at.headers == [("Content-Disposition", "attachment; filename=\"post.md\"")]
+  assert at.headers ==
+    [("Content-Disposition",
+      "attachment; filename=\"post.md\"; filename*=UTF-8''post.md")]
+}
+
+test "header values cannot carry a second header" {
+  # CRLF injection: the classic response-splitting payload
+  let r = with_header(raw(200, "text/plain", ""), "Location",
+    "/next\r\nSet-Cookie: admin=1")
+  assert r.headers == [("Location", "/nextSet-Cookie: admin=1")]
+  # a bare LF, and the other C0 controls, go the same way; SP and HTAB stay
+  assert header_value("a\nb") == "ab"
+  assert header_value("a\u{0}b\u{7f}c") == "abc"
+  assert header_value("a b\tc") == "a b\tc"
+  # names are tokens: a ':' or a space in one would inject a field of its own
+  let n = with_header(raw(200, "text/plain", ""), "X-Bad: y\r\nZ", "1")
+  assert n.headers == [("X-BadyZ", "1")]
+}
+
+test "attachment quotes and encodes the filename" {
+  let plain = attachment("text/plain", "report.txt", "")
+  assert plain.headers ==
+    [("Content-Disposition",
+      "attachment; filename=\"report.txt\"; filename*=UTF-8''report.txt")]
+  # a quote used to end the parameter and let a ';' add more
+  let evil = attachment("text/plain", "a\";x=\"b", "")
+  assert evil.headers ==
+    [("Content-Disposition",
+      "attachment; filename=\"a\\\";x=\\\"b\"; filename*=UTF-8''a%22%3Bx%3D%22b")]
+  # non-ASCII survives only in filename*, which is what clients read
+  let cn = attachment("text/plain", "报告.txt", "")
+  assert cn.headers ==
+    [("Content-Disposition",
+      "attachment; filename=\".txt\"; filename*=UTF-8''%E6%8A%A5%E5%91%8A.txt")]
+}
+
+test "redirect targets cannot inject headers either" {
+  let r = redirect(302, "/ok\r\nX-Evil: 1")
+  assert r.headers == [("Location", "/okX-Evil: 1")]
 }

@@ -18,7 +18,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 - `.dawn` 源码（`selfhost/`、`site/`、`playground/`、`packages/`、`std/`）注释全英文；
   报错信息、CLI 输出全英文。
-- `docs/` 14 篇、4000+ 行，全中文。README 中文。提交信息 `type(scope): 中文摘要`。
+- `docs/` 43 篇、12000+ 行，全中文（索引与状态分层见 [docs/README.md](docs/README.md)）。
+  README 中文。提交信息 `type(scope): 中文摘要`。
 
 写代码时别把 docs 的语言带进去，反之亦然。
 
@@ -72,8 +73,17 @@ examples/          示例
 
 codegen 的**运行时 intrinsic 契约**(string/list/map/io 那半边)集中在 `emit.dawn` 的
 `rt_intrinsic_target` 表——每个 builtin 的 `(class, method)`,descriptor 由 `method_desc(签名)`
-派生、装箱走 `adapt_to`。这是接第二个后端时唯一要重指向的地方；背景与分期见
+派生、装箱走 `adapt_to`。这是**运行时 intrinsic 那半边**唯一要重指向的地方；背景与分期见
 [docs/runtime-intrinsics-design.md](docs/runtime-intrinsics-design.md)。
+
+> 别把这句读成「接第二后端只改这张表」——它曾经就是这么写的，而那不成立：
+> `tast.dawn` 的 `TJavaCall` 直接携带 JVM 类名、descriptor、SAM 与 List bridge；
+> checker 靠 Java 反射解析 `use java`；`emit.dawn`/`codegen.dawn` 遍布 ASM opcode、
+> JVM descriptor、LambdaMetafactory 与 CHECKCAST；运行时表示、擦除、装箱和异常
+> 也都写死 JVM。真要第二后端，得先有 backend-neutral 的 lowered IR 与 FFI capability
+> ——调研见 [docs/llvm-backend-research.md](docs/llvm-backend-research.md)、
+> [docs/collections-dejava-research.md](docs/collections-dejava-research.md)，
+> 现状记录在 docs/codebase-audit.md 的 ARCH-03/ARCH-04。
 
 Kotlin 实现（compiler/，1170 项测试、386 个黄金文件）已随 `kotlin-final` tag
 整体归档——考古看那个 tag，别在 main 找。

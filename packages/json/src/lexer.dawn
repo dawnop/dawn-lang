@@ -12,9 +12,25 @@
 # No panics — malformed input becomes an Err.
 
 use std/cursor
+use std/str
 use std/cursor.{Cursor}
 
 pub fn peek(src: String, i: Cursor) -> Int = cursor.char(src, i)
+
+# ---- error positions ----
+
+# Code-point offset of `i` in `src`. Cursors are opaque on purpose (std/cursor),
+# so there is no arithmetic to read a position out of one; slicing from the
+# start and measuring is the sanctioned way. It is O(n), which is why it is only
+# ever called on the failure path — a parse produces at most one error.
+pub fn offset(src: String, i: Cursor) -> Int =
+  str.len(cursor.slice(src, cursor.start(src), i))
+
+# Every error carries where it happened. Callers validating config, signatures
+# or API payloads need to point at the offending character; a bare message means
+# they have to re-scan the document themselves to say anything useful.
+pub fn err_at(src: String, i: Cursor, msg: String) -> String =
+  msg ++ " at offset " ++ to_string(offset(src, i))
 
 pub fn is_digit(c: Int) -> Bool = c >= '0' && c <= '9'
 
@@ -85,7 +101,7 @@ pub fn scan_string(src: String, start: Cursor) -> Result[(String, Cursor), Strin
     let c = peek(src, i)
     if c == -1 {
       status = 2
-      errmsg = "unterminated string"
+      errmsg = err_at(src, i, "unterminated string")
     } else if c == '"' {
       i = cursor.next(src, i)
       status = 1
@@ -96,7 +112,7 @@ pub fn scan_string(src: String, start: Cursor) -> Result[(String, Cursor), Strin
         match read_hex4(src, cursor.next(src, ie)) {
           None -> {
             status = 2
-            errmsg = "invalid \\u escape"
+            errmsg = err_at(src, i, "invalid \\u escape")
           }
           Some((code, after)) -> {
             if code >= 55296 && code <= 56319 {
@@ -105,7 +121,7 @@ pub fn scan_string(src: String, start: Cursor) -> Result[(String, Cursor), Strin
                 match read_hex4(src, cursor.next(src, iu)) {
                   None -> {
                     status = 2
-                    errmsg = "invalid \\u escape"
+                    errmsg = err_at(src, i, "invalid \\u escape")
                   }
                   Some((low, after2)) -> {
                     if low >= 56320 && low <= 57343 {
@@ -138,13 +154,13 @@ pub fn scan_string(src: String, start: Cursor) -> Result[(String, Cursor), Strin
           }
           None -> {
             status = 2
-            errmsg = "invalid escape"
+            errmsg = err_at(src, i, "invalid escape")
           }
         }
       }
     } else if c < 32 {
       status = 2
-      errmsg = "control character in string"
+      errmsg = err_at(src, i, "control character in string")
     } else {
       acc = acc ++ [c]
       i = cursor.next(src, i)
@@ -168,14 +184,18 @@ fn scan_int_part(src: String, i: Cursor) -> Result[Cursor, String] =
   } else if peek(src, i) >= '1' && peek(src, i) <= '9' {
     Ok(skip_digits(src, cursor.next(src, i)))
   } else {
-    Err("invalid number: expected a digit")
+    Err(err_at(src, i, "invalid number: expected a digit"))
   }
 
 fn scan_frac(src: String, i: Cursor) -> Result[Cursor, String] =
   if peek(src, i) == '.' {
     let i1 = cursor.next(src, i)
     let j = skip_digits(src, i1)
-    if j == i1 { Err("invalid number: digits expected after '.'") } else { Ok(j) }
+    if j == i1 {
+      Err(err_at(src, i1, "invalid number: digits expected after '.'"))
+    } else {
+      Ok(j)
+    }
   } else {
     Ok(i)
   }
@@ -185,22 +205,27 @@ fn scan_exp(src: String, i: Cursor) -> Result[Cursor, String] =
     let i1 = cursor.next(src, i)
     let i2 = if peek(src, i1) == '+' || peek(src, i1) == '-' { cursor.next(src, i1) } else { i1 }
     let j = skip_digits(src, i2)
-    if j == i2 { Err("invalid number: digits expected in exponent") } else { Ok(j) }
+    if j == i2 {
+      Err(err_at(src, i2, "invalid number: digits expected in exponent"))
+    } else {
+      Ok(j)
+    }
   } else {
     Ok(i)
   }
 
-# `start` begins a number; returns (value, cursor past the number). The literal's
+# `start` begins a number; returns (the literal's *text*, cursor past it). The
 # text comes out with one `cursor_slice`, where the List[Int] version had to copy
 # the span element by element and rebuild a string from it.
-pub fn scan_number(src: String, start: Cursor) -> Result[(Float, Cursor), String] = {
+#
+# Handing back the lexeme rather than a Float is the whole point: routing every
+# integer through a double is what silently turned 9007199254740993 into
+# ...992. Only the caller knows whether this literal is an Int or a Float, so
+# only the caller can pick a lossless conversion — see `number_of` in parser.
+pub fn scan_number(src: String, start: Cursor) -> Result[(String, Cursor), String] = {
   let i0 = if peek(src, start) == '-' { cursor.next(src, start) } else { start }
   let i1 = scan_int_part(src, i0)?
   let i2 = scan_frac(src, i1)?
   let i3 = scan_exp(src, i2)?
-  let text = cursor.slice(src, start, i3)
-  match parse_float(text) {
-    Some(f) -> Ok((f, i3))
-    None -> Err("invalid number")
-  }
+  Ok((cursor.slice(src, start, i3), i3))
 }

@@ -18,6 +18,11 @@ export PATH="$JAVA_HOME/bin:$PATH"
 export DAWN_BIN="$ROOT/bin/dawn"
 export PLAY_JAVA="$JAVA_HOME/bin/java"
 export PLAY_TIMEOUT=3
+export PLAY_COMPILE_TIMEOUT=60
+# The sandbox is on unless something opts out (config.sandbox_enabled is
+# fail-closed since the audit). There is no systemd-run wrapper on a dev box or
+# in CI, so this harness is exactly the caller that has to say so.
+export PLAY_UNSAFE_LOCAL=1
 # Overridable because WSL2 cannot bind large swathes of the low port range —
 # Windows' WinNAT reserves them, and the bind fails with "Address already in use"
 # against a port that `ss` shows as free. 8097 is inside one such range on some

@@ -1117,14 +1117,22 @@ fn gen_bytes_from_array(cw: AdtClassWriter) -> Unit !io = {
   close_mv(fv)
 }
 
-fn gen_try_closure(cw: AdtClassWriter, name: String, caught: String) -> Unit !io = {
+## One `fn() -> T` run under a catch, its result as `Result[T, String]`.
+##
+## `caught` lists the exception types the handler claims. Several entries mean
+## several try-catch table rows onto the same handler, which is how the JVM
+## spells "catch A or B" — there is no supertype of PanicError and Exception
+## short of Throwable, and Throwable is precisely what must not be caught.
+fn gen_try_closure(cw: AdtClassWriter, name: String, caught: List[String]) -> Unit !io = {
   let m = cw.method(ACC_PUBLIC + ACC_STATIC, name, "(L" ++ fn_iface(0) ++ ";)LResult;")
     .expect("mv")
   m.visitCode()
   let try_start = Label.new()
   let try_end = Label.new()
   let handler = Label.new()
-  m.visitTryCatchBlock(try_start, try_end, handler, caught)
+  for c in caught {
+    m.visitTryCatchBlock(try_start, try_end, handler, c)
+  }
   m.visitLabel(try_start)
   m.visitTypeInsn(OP_NEW, "Result\$Ok")
   m.visitInsn(OP_DUP)
@@ -1156,8 +1164,15 @@ fn gen_try_closure(cw: AdtClassWriter, name: String, caught: String) -> Unit !io
 pub fn gen_io_class(supers: List[String]) -> Bytes !io = {
   let cw = AdtClassWriter.new(supers)
   cw.begin(V17, ACC_PUBLIC + ACC_FINAL, IO_CLASS, obj())
-  gen_try_closure(cw, "catch_fault", "java/lang/Exception")
-  gen_try_closure(cw, "catch_panic", "java/lang/Throwable")
+  gen_try_closure(cw, "catch_fault", ["java/lang/Exception"])
+  # catch_panic catches a Dawn panic and the exceptions a caller can survive —
+  # not `Throwable`. Catching Throwable also caught OutOfMemoryError,
+  # StackOverflowError and the rest of VirtualMachineError, turned each into a
+  # `String`, and let the process carry on — a web server rendering a 500 from
+  # an exhausted heap while every other thread fails the same way. Resource
+  # exhaustion is not a value; it propagates. (The C backend agrees for free:
+  # native failure kinds have no VM-error arm at all.)
+  gen_try_closure(cw, "catch_panic", [PANIC_CLASS, "java/lang/Exception"])
 
   # a single shared reader: a fresh BufferedReader per call would let one call's
   # buffer swallow input the next call should see. Lazily initialised in io_read_line.

@@ -25,6 +25,7 @@
 use std/str
 use std/list
 use std/io
+use java "java.io.File"
 use java "java.lang.ClassLoader"
 use java "java.net.URL"
 use java "java.util.jar.JarFile"
@@ -162,7 +163,9 @@ pub fn classpath_package(prefix: String) -> List[(String, Bytes)] !io = {
   }
   var names: List[String] = []
   var found: List[(String, Bytes)] = []
-  for entry in str.split(cp, ":") {
+  # File.pathSeparator, not ':': on Windows java.class.path is ';'-separated and
+  # splitting on ':' would cut every entry at its drive letter.
+  for entry in str.split(cp, File.pathSeparator!) {
     if str.ends_with(entry, ".jar") {
       match catch_fault(fn() => JarFile.new(entry)) {
         Ok(jf) -> {

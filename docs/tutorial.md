@@ -3,17 +3,23 @@
 一门刻意小的静态类型语言：编译到 JVM 字节码，native 可执行文件由 GraalVM
 native-image 直接得到。本教程带你从第一个程序走到调 Java。
 
-> 本文所有 `dawn` 围栏代码块都由测试机械保证能编译（`TutorialTest`）；带 `output`
-> 的块还会真的运行并核对输出。放心照抄。
+> 本文的 `dawn` 围栏代码块曾由 Kotlin 侧的 `TutorialTest` 机械抽取、编译、运行并核对
+> `output`。那套测试随 Kotlin 实现一起归档在 `kotlin-final` tag，**当前 CI 没有等价门禁**
+> ——所以这些代码块现在是人工维护的，可能落后于语言。发现不对请开 issue。
+> （恢复这个门禁列在 docs/codebase-audit.md 的 TEST-04。）
 
 ---
 
 ## 1. 安装与第一个程序
 
-构建编译器需要 JDK 21（native 编译另需 GraalVM）：
+需要 JDK 21（native 编译另需 GraalVM）。`bin/dawn` 会自己拉起工具链：首次运行时它下载
+`scripts/seed-release.txt` 钉住的那个 release 的 `dawn-selfhost.jar`（**种子**，按
+`scripts/seed-checksums.txt` 校验 SHA-256），再用种子把 `selfhost/` 编译成当前的编译器。
+没有 Gradle——Kotlin 实现已随 `kotlin-final` tag 归档，`./gradlew :compiler:fatJar`
+在 main 上不存在。
 
 ```bash
-./gradlew :compiler:fatJar       # 产出 dawn 工具
+./bin/dawn --version              # 首次会自动取种子并重建工具链
 ./bin/dawn run  hello.dawn        # 编译并运行（JVM 内）
 ./bin/dawn test hello.dawn        # 运行文件里的 test 块
 ./bin/dawn build hello.dawn --native -o hello   # 产出独立二进制

@@ -3,6 +3,7 @@
 # server written in Dawn (spec §9 interop dogfood, M6 warm-up) — and the first
 # service on the `web` framework, which it doubles as the acceptance test for.
 use std/str
+use std/bytes
 use java "java.util.concurrent.Semaphore"
 use web/types.{Request, Response, HttpError, text, raw}
 use web/router.{Route, route_get, route_post}
@@ -28,7 +29,9 @@ fn health(req: Request) -> Result[Response, HttpError] !io = Ok(text(200, "ok"))
 # errors are rendered into the contract's own JSON shapes (via raw), not the
 # framework's Err branch.
 fn rpc(req: Request, gate: Semaphore, check_only: Bool) -> Result[Response, HttpError] !io =
-  if str.len(req.body) > MAX_BODY {
+  # bytes, not code points: str.len counts characters, so a program written in
+  # CJK got up to three times the stated budget
+  if bytes.len(req.raw) > MAX_BODY {
     Ok(raw(413, JSON_CT, render_error("source exceeds ${MAX_BODY} bytes")))
   } else {
     match parse_request(req.body) {

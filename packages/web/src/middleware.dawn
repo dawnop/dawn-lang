@@ -3,7 +3,9 @@
 # composed by serve_app with the first element outermost. No registry, no
 # annotations — wrapping a function is the whole mechanism.
 use std/str
+use std/bytes
 use std/list
+use std/map
 use java "java.lang.System"
 use types.{Request, Response, HttpError, Handler, with_header, text, header}
 
@@ -34,9 +36,19 @@ fn route_has_tag(req: Request, tag: String) -> Bool =
 # Reject bodies over a byte budget before the handler sees them. Upload routes
 # (WebDAV PUT, /api/fm/upload) carry file bytes and are bounded by nginx
 # (client_max_body_size) instead — they opt out with the "raw-body" tag.
+#
+# This is a per-application budget layered under the server's own ceiling
+# (server.DEFAULT_MAX_BODY), which is what actually bounds the allocation; by
+# the time a middleware runs, the body has been read. Keeping it is still worth
+# it — an app may want a limit far below the server's — but it is a policy
+# check, not a memory guard, and the comment used to imply otherwise.
+#
+# It also measures `raw`, the bytes, rather than `str.len(body)`, which counts
+# code points. The message always said "bytes" while the check counted
+# characters, so a body of CJK or emoji got up to 3-4x the stated budget.
 pub fn with_body_limit(limit: Int, next: Handler) -> Handler =
   fn(req) =>
-  if route_has_tag(req, "raw-body") == false && str.len(req.body) > limit {
+  if route_has_tag(req, "raw-body") == false && bytes.len(req.raw) > limit {
     Err(HttpError { status: 413, message: "request body exceeds $limit bytes" })
   } else {
     next(req)
@@ -63,22 +75,108 @@ pub fn with_cors(origins: String, next: Handler) -> Handler =
 
 fn cors_list(csv: String) -> List[String] = filter(map(str.split(csv, ","), fn(s) => str.trim(s)), fn(s) => s != "")
 
-# echo the request Origin when allow-listed, else fall back to the first configured
-# origin (a non-matching Allow-Origin is blocked by the browser, same as FastAPI
-# omitting the header for a disallowed origin)
-fn pick_origin(req: Request, allowed: List[String]) -> String = {
-  let first = if len(allowed) == 0 { "" } else { allowed[0] }
+# The allow-listed Origin to echo, or None.
+#
+# This used to fall back to the *first configured* origin when the request's
+# Origin was not allow-listed, and stamp Access-Control-Allow-Origin
+# unconditionally. The browser does block that response — but a shared cache
+# does not: it sees one URL answered with `Allow-Origin: https://a.example` and
+# is free to serve that same stored response to a request from
+# https://b.example, which then passes the check. Sending no header at all is
+# both the correct denial and what FastAPI's CORSMiddleware does.
+fn pick_origin(req: Request, allowed: List[String]) -> Option[String] =
   match header(req, "origin") {
-    Some(o) -> if list.find(allowed, fn(x) => x == o) != None { o } else { first }
-    None -> first
+    Some(o) -> if list.find(allowed, fn(x) => x == o) != None { Some(o) } else { None }
+    None -> None
+  }
+
+# `Vary: Origin` is not optional once the response body or headers depend on the
+# request's Origin — without it a cache keyed on the URL alone will reuse one
+# origin's response for another. It is sent even on the denial path, because
+# "no CORS headers" is itself an Origin-dependent answer.
+fn cors_headers(origin: Option[String], r: Response) -> Response = {
+  let varied = with_header(r, "Vary", "Origin")
+  match origin {
+    None -> varied
+    Some(o) ->
+      with_header(
+        with_header(
+          with_header(
+            with_header(varied, "Access-Control-Allow-Origin", o),
+            "Access-Control-Allow-Credentials", "true"),
+          "Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS"),
+        "Access-Control-Allow-Headers", "Authorization, Content-Type")
   }
 }
 
-fn cors_headers(origin: String, r: Response) -> Response =
-  with_header(
-    with_header(
-      with_header(
-        with_header(r, "Access-Control-Allow-Origin", origin),
-        "Access-Control-Allow-Credentials", "true"),
-      "Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS"),
-    "Access-Control-Allow-Headers", "Authorization, Content-Type")
+# A bare request with the given method and headers; the fields these middleware
+# never read stay empty.
+fn req_of(method: String, headers: Map[String, String]) -> Request =
+  Request {
+    method: method, path: "/x", params: map.empty(), query: map.empty(),
+    headers: headers, body: "", raw: bytes.utf8(""), body_file: None, route: None,
+  }
+
+fn ok_handler(_req: Request) -> Result[Response, HttpError] !io = Ok(text(200, "ok"))
+
+test "CORS sends no Allow-Origin to an origin that is not allow-listed" {
+  let app = with_cors("https://a.example, https://b.example", ok_handler)
+  let denied = app(req_of("GET", map.from([("origin", "https://evil.example")])))
+  match denied {
+    Ok(r) -> {
+      # it used to answer with the *first configured* origin, which a shared
+      # cache can then hand to a different origin's request
+      assert list.find(r.headers, fn(h) => h == ("Access-Control-Allow-Origin", "https://a.example")) == None
+      assert list.find(r.headers, fn(h) => {
+        let (k, _) = h
+        k == "Access-Control-Allow-Origin"
+      }) == None
+      # the denial is still Origin-dependent, so it still has to vary on it
+      assert list.find(r.headers, fn(h) => h == ("Vary", "Origin")) != None
+    }
+    Err(_) -> { assert false }
+  }
+}
+
+test "CORS echoes an allow-listed origin, and always varies on Origin" {
+  let app = with_cors("https://a.example, https://b.example", ok_handler)
+  match app(req_of("GET", map.from([("origin", "https://b.example")]))) {
+    Ok(r) -> {
+      assert list.find(r.headers, fn(h) => h == ("Access-Control-Allow-Origin", "https://b.example")) != None
+      assert list.find(r.headers, fn(h) => h == ("Access-Control-Allow-Credentials", "true")) != None
+      assert list.find(r.headers, fn(h) => h == ("Vary", "Origin")) != None
+    }
+    Err(_) -> { assert false }
+  }
+  # no Origin header at all: nothing to echo
+  match app(req_of("GET", map.empty())) {
+    Ok(r) -> {
+      assert list.find(r.headers, fn(h) => {
+        let (k, _) = h
+        k == "Access-Control-Allow-Origin"
+      }) == None
+      assert list.find(r.headers, fn(h) => h == ("Vary", "Origin")) != None
+    }
+    Err(_) -> { assert false }
+  }
+}
+
+test "with_body_limit counts bytes, not code points" {
+  let app = with_body_limit(8, ok_handler)
+  let mk = fn(body: String) => Request { ..req_of("POST", map.empty()), body: body, raw: bytes.utf8(body) }
+  # 9 ASCII bytes: over
+  match app(mk("123456789")) {
+    Err(e) -> { assert e.status == 413 }
+    Ok(_) -> { assert false }
+  }
+  # 3 CJK characters is 9 UTF-8 bytes — also over, but str.len said 3 and let it through
+  match app(mk("中文字")) {
+    Err(e) -> { assert e.status == 413 }
+    Ok(_) -> { assert false }
+  }
+  # 8 bytes exactly: allowed
+  match app(mk("12345678")) {
+    Ok(r) -> { assert r.status == 200 }
+    Err(_) -> { assert false }
+  }
+}

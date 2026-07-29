@@ -2,6 +2,13 @@
 use std/map
 use value.{Json, JNull, JBool, JNum, JInt, JStr, JArr, JObj}
 
+fn hex_cp(v: Int) -> Int = if v < 10 { '0' + v } else { 'a' + (v - 10) }
+
+# RFC 8259 §7 requires *every* code point below U+0020 to be escaped. Five have
+# short forms; the rest only have \u00XX. The earlier version handled quote,
+# backslash, LF, CR and TAB and passed the other 27 through verbatim, so a
+# document containing a literal \b — which this package's own lexer decodes from
+# `\b` — rendered back out as a raw 0x08 and was no longer parseable JSON.
 fn escape_cps(cs: List[Int]) -> List[Int] = {
   var out: List[Int] = []
   var i = 0
@@ -11,12 +18,18 @@ fn escape_cps(cs: List[Int]) -> List[Int] = {
       out = out ++ ['\\', '"']
     } else if c == '\\' {
       out = out ++ ['\\', '\\']
+    } else if c == 8 {
+      out = out ++ ['\\', 'b']
+    } else if c == 12 {
+      out = out ++ ['\\', 'f']
     } else if c == '\n' {
       out = out ++ ['\\', 'n']
     } else if c == '\t' {
       out = out ++ ['\\', 't']
     } else if c == 13 {
       out = out ++ ['\\', 'r']
+    } else if c < 32 {
+      out = out ++ ['\\', 'u', '0', '0', hex_cp(c / 16), hex_cp(c % 16)]
     } else {
       out = out ++ [c]
     }
@@ -32,13 +45,41 @@ fn render_entry(e: (String, Json)) -> String = {
   quote(k) ++ ":" ++ render(v)
 }
 
+# `to_string` on a Float renders NaN/Infinity/-Infinity literally (spec §4.3),
+# and RFC 8259 has no syntax for any of them. The parser already refuses to
+# build such a value, so this only fires for a hand-built `JNum(1.0 / 0.0)` —
+# but `render` is total and its one job is to emit legal JSON, so it must not
+# depend on the parser having been the source. `null` is the substitution
+# JavaScript's `JSON.stringify` makes, for the same reason.
+fn render_num(n: Float) -> String = if n - n == 0.0 { to_string(n) } else { "null" }
+
 pub fn render(j: Json) -> String =
   match j {
     JNull -> "null"
     JBool(b) -> if b { "true" } else { "false" }
-    JNum(n) -> to_string(n)
+    JNum(n) -> render_num(n)
     JInt(n) -> to_string(n)
     JStr(s) -> quote(s)
     JArr(xs) -> "[" ++ join(map(xs, render), ",") ++ "]"
     JObj(m) -> "{" ++ join(map(map.entries(m), render_entry), ",") ++ "}"
   }
+
+test "every C0 control is escaped" {
+  # the five with short forms
+  assert render(JStr(from_code_points([8, 12, 10, 13, 9]))) == "\"\\b\\f\\n\\r\\t\""
+  # and the rest as \u00XX, lower-case hex, always four digits
+  assert render(JStr(from_code_points([0]))) == "\"\\u0000\""
+  assert render(JStr(from_code_points([1, 31]))) == "\"\\u0001\\u001f\""
+  assert render(JStr(from_code_points([27]))) == "\"\\u001b\""
+  # U+0020 and up are literal
+  assert render(JStr(" ~")) == "\" ~\""
+  assert render(JStr("a\"b\\c")) == "\"a\\\"b\\\\c\""
+}
+
+test "non-finite JNum cannot leak an illegal token" {
+  let inf = unwrap_or(parse_float("1e400"), 0.0)
+  assert render(JNum(inf)) == "null"
+  assert render(JNum(0.0 - inf)) == "null"
+  assert render(JNum(inf - inf)) == "null"
+  assert render(JNum(1.5)) == "1.5"
+}

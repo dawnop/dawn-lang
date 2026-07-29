@@ -312,14 +312,28 @@ pub fn run_lsp(std_dir: String, js: Jsig) -> Unit !io = {
   var running = true
   while running {
     match read_message() {
-      Some(msg) -> { st = handle(st, msg) }
-      None -> { running = false }
+      Eof -> { running = false }
+      Message(msg) -> { st = handle(st, msg) }
+      # A bad frame is not end of input. This used to collapse into the same
+      # `None` as EOF, so one malformed message — a truncated header from a
+      # crashing client, a stray write into the pipe — made the server exit
+      # without a word, and the editor showed a language server that had simply
+      # stopped. JSON-RPC 2.0 §4.2 asks for an error response instead; the read
+      # is resynchronised on a frame boundary, so the session continues.
+      Malformed(code, why) -> {
+        send(jobj([("jsonrpc", JStr("2.0")), ("id", JNull),
+          ("error", jobj([("code", JInt(code)), ("message", JStr(why))]))]))
+      }
     }
   }
 }
 
+## The outcome of one read: a message, clean end of input, or a frame that could
+## not be understood but left the stream positioned at the next one.
+type Frame = Eof | Message(value: Json) | Malformed(code: Int, why: String)
+
 ## One framed message: headers to CRLFCRLF, then Content-Length bytes of JSON.
-fn read_message() -> Option[Json] !io = {
+fn read_message() -> Frame !io = {
   var header: List[Int] = []
   var state = 0
   var eof = false
@@ -344,7 +358,7 @@ fn read_message() -> Option[Json] !io = {
       }
     }
   }
-  if eof { return None }
+  if eof { return Eof }
   # header bytes are ASCII
   let htext = from_code_points(header)
   var clen = -1
@@ -357,12 +371,16 @@ fn read_message() -> Option[Json] !io = {
       }
     }
   }
-  if clen < 0 { return None }
+  # No Content-Length: nothing to read for this frame, but the header block was
+  # consumed up to CRLFCRLF, so the stream is already at the next one.
+  if clen < 0 { return Malformed(0 - 32600, "Invalid Request: missing Content-Length header") }
   let body = io.read_stdin(clen)
-  if bytes.len(body) < clen { return None }
+  # A short body is genuinely end of input — the declared bytes are not coming.
+  if bytes.len(body) < clen { return Eof }
   match parser.parse(bytes.decode(body, "UTF-8")) {
-    Ok(j) -> Some(j)
-    Err(_) -> None
+    Ok(j) -> Message(j)
+    # exactly clen bytes were consumed, so the next frame starts where it should
+    Err(e) -> Malformed(0 - 32700, "Parse error: " ++ e)
   }
 }
 

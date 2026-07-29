@@ -21,6 +21,7 @@ use types.{Request, Response, HttpError, Handler, Middleware, RouteMeta, http_er
 use router.{Route, Dispatch, Found, NoPath, WrongMethod, dispatch, route_meta}
 use java "java.io.InputStream"
 use java "java.net.URI"
+use java "java.net.URLDecoder"
 use java "java.net.http.HttpClient"
 use java "java.net.http.HttpRequest"
 use java "java.net.http.HttpRequest.BodyPublisher"
@@ -35,14 +36,43 @@ fn close_stream(s: InputStream) -> Unit !io = {
   ()
 }
 
+# The Content-Length the client claims, or 0 when it does not say. A claim, not
+# a fact — it only ever produces a fast rejection, never permission to read.
+fn declared_length(ex: HttpExchange) -> Int !io =
+  match ex.getRequestHeaders()!.getFirst("Content-Length") {
+    Some(v) -> unwrap_or(parse_int(str.trim(v)), 0)
+    None -> 0
+  }
+
 # Read the whole request body once as Bytes (spec §9.5.1), plus its UTF-8 decode
 # for the common text/JSON/form handlers. Binary handlers (multipart upload,
 # WebDAV PUT) take the raw Bytes and recover exact file bytes with no latin-1
 # detour — a single decode, not two.
-fn read_body(ex: HttpExchange) -> (String, Bytes) !io = {
+#
+# `limit` is a hard ceiling on bytes read, and it is enforced *here* rather than
+# by a middleware afterwards. The old arrangement called readAllBytes() and let
+# with_body_limit compare the result against a budget, which cannot stop
+# anything: by the time the 413 is decided, the whole body is already resident,
+# and a handful of concurrent large POSTs is the entire attack. readNBytes stops
+# one byte past the ceiling — enough to know the body is oversized, and the most
+# that can ever be allocated for one.
+#
+# limit <= 0 means unbounded, for the routes that opt out (see `handle`).
+fn read_body(ex: HttpExchange, limit: Int) -> Result[(String, Bytes), HttpError] !io = {
   let stream = ex.getRequestBody()!
-  let raw = stream.readAllBytes()!
-  (bytes.decode(raw, "UTF-8"), raw)
+  if limit <= 0 {
+    let raw = stream.readAllBytes()!
+    Ok((bytes.decode(raw, "UTF-8"), raw))
+  } else if declared_length(ex) > limit {
+    Err(http_error(413, "request body exceeds $limit bytes"))
+  } else {
+    let raw = stream.readNBytes(limit + 1)!
+    if bytes.len(raw) > limit {
+      Err(http_error(413, "request body exceeds $limit bytes"))
+    } else {
+      Ok((bytes.decode(raw, "UTF-8"), raw))
+    }
+  }
 }
 
 # Write a response. Length 0 selects chunked transfer encoding, so we never
@@ -107,25 +137,43 @@ fn collect_headers(headers: Headers, it: Iterator, acc: Map[String, String]) -> 
     acc
   }
 
-# "a=1&b=x" -> [("a","1"),("b","x")]. URI.getQuery() hands us the string
-# already percent-decoded; a value may itself contain '=', so only the first
-# one splits.
-pub fn parse_query(q: String) -> List[(String, String)] =
+# Percent-decode one application/x-www-form-urlencoded component: '+' is a
+# space, %XX is a byte, and the resulting byte sequence is UTF-8.
+#
+# Decoding has to happen *after* splitting on '&' and '=', never before. The old
+# code took `URI.getQuery()`, which is already decoded, and split that — so a
+# value containing an encoded ampersand (`a=1%262`) arrived as `a=1&2` and split
+# into two parameters. Anything that let a client forge a parameter boundary
+# this way is a parameter-smuggling bug, not just a decoding nicety.
+#
+# URLDecoder throws on a truncated escape (`%A`, `%ZZ`); a malformed query is
+# not worth failing a request over, so the raw component stands in.
+#
+# The `!io` on this and its two callers is bookkeeping, not a real effect:
+# decoding a string is pure, but the JDK call that does it can throw and
+# `catch_fault` — the only structured way to catch that — is itself `!io`. The
+# alternative was a hand-written UTF-8 decoder, and the repo already has one of
+# those to answer for (see the LSP); a second is not the fix.
+fn pct_decode(s: String) -> String !io =
+  match catch_fault(fn() => URLDecoder.decode(s, "UTF-8")!) {
+    Ok(v) -> v
+    Err(_) -> s
+  }
+
+# "a=1&b=x" -> [("a","1"),("b","x")], over the *raw* (still encoded) string.
+# A value may itself contain '=', so only the first one splits — and since the
+# split happens first, an encoded '=' in a value stays part of that value.
+pub fn parse_query(q: String) -> List[(String, String)] !io =
   map(filter(str.split(q, "&"), fn(pair) => pair != ""), fn(pair) => {
     let parts = str.split(pair, "=")
-    (parts[0], join(tail(parts), "="))
+    (pct_decode(parts[0]), pct_decode(join(tail(parts), "=")))
   })
 
-# Parse an application/x-www-form-urlencoded body into a map. Same grammar as a
-# query string but '+' also means space; percent-decoding is the caller's if
-# needed (login/form fields here are ASCII).
-pub fn parse_form(body: String) -> Map[String, String] =
-  map.from(map(parse_query(body), fn(kv) => {
-    let (k, v) = kv
-    (k, replace_plus(v))
-  }))
-
-fn replace_plus(s: String) -> String = join(str.split(s, "+"), " ")
+# Parse an application/x-www-form-urlencoded body into a map. Same grammar and
+# the same decoding as a query string — this used to replace '+' with a space
+# and stop there, so every percent escape in a form field reached the handler
+# still encoded (`%40` for '@' in an email, and so on).
+pub fn parse_form(body: String) -> Map[String, String] !io = map.from(parse_query(body))
 
 fn tail(xs: List[String]) -> List[String] =
   map(range(1, len(xs)), fn(i) => xs[i])
@@ -133,24 +181,26 @@ fn tail(xs: List[String]) -> List[String] =
 fn rev[T](xs: List[T]) -> List[T] =
   map(range(0, len(xs)), fn(i) => xs[len(xs) - 1 - i])
 
-fn build_request(ex: HttpExchange, meta: Option[RouteMeta]) -> Request !io = {
+fn build_request(ex: HttpExchange, meta: Option[RouteMeta], max_body: Int) -> Result[Request, HttpError] !io = {
   let uri = ex.getRequestURI()!
   let no_query: Map[String, String] = map.from([])
-  # Query params follow form-urlencoded semantics ('+' means space), matching
-  # Starlette/FastAPI; URI.getQuery() percent-decodes %XX but leaves '+' literal.
-  let q = match uri.getQuery() {
-    Some(s) -> map.from(map(parse_query(s), fn(kv) => {
-      let (k, v) = kv
-      (k, replace_plus(v))
-    }))
+  # getRawQuery, not getQuery: the split into parameters must see the encoded
+  # form, or a client can put an encoded '&' in a value and forge a parameter.
+  # Each component is decoded afterwards with form-urlencoded semantics ('+' is
+  # a space), matching Starlette/FastAPI.
+  let q = match uri.getRawQuery() {
+    Some(s) -> map.from(parse_query(s))
     None -> no_query
   }
   # A "stream-body" route never sees the body in memory: it goes to a temp file
-  # and the handler gets the path. Everything else reads as before.
+  # and the handler gets the path. Everything else reads as before, under the
+  # ceiling — except routes tagged "raw-body" (uploads bounded by nginx's
+  # client_max_body_size instead), which opt out of it.
   let streaming = meta_has_tag(meta, "stream-body")
-  let (body, raw) = if streaming { ("", bytes.utf8("")) } else { read_body(ex) }
+  let limit = if meta_has_tag(meta, "raw-body") { 0 } else { max_body }
+  let (body, raw) = if streaming { ("", bytes.utf8("")) } else { read_body(ex, limit)? }
   let bf: Option[String] = if streaming { Some(spill_body(ex)) } else { None }
-  Request {
+  Ok(Request {
     method: ex.getRequestMethod()!,
     path: uri.getPath()!,
     params: no_query,
@@ -160,7 +210,7 @@ fn build_request(ex: HttpExchange, meta: Option[RouteMeta]) -> Request !io = {
     raw: raw,
     body_file: bf,
     route: meta,
-  }
+  })
 }
 
 # Stream the request body to a temp file, 8KB at a time (transferTo's buffer), and
@@ -210,7 +260,7 @@ fn meta_of(d: Dispatch) -> Option[RouteMeta] =
     WrongMethod -> None
   }
 
-fn handle(routes: List[Route], middleware: List[Middleware], ex: HttpExchange) -> Unit !io = {
+fn handle(routes: List[Route], middleware: List[Middleware], max_body: Int, ex: HttpExchange) -> Unit !io = {
   # a handler panic is isolated to this request: catch_panic turns it into a 500
   # instead of resetting the connection or leaking the virtual thread (spec §9.8).
   let outcome = catch_panic(fn() => {
@@ -219,24 +269,35 @@ fn handle(routes: List[Route], middleware: List[Middleware], ex: HttpExchange) -
     # ("stream-body" spills it to disk instead of into memory). The same decision
     # is executed by run_dispatch below — no second table walk.
     let d = dispatch(routes, ex.getRequestMethod()!, ex.getRequestURI()!.getPath()!)
-    let req = build_request(ex, meta_of(d))
-    # first middleware in the list is outermost: [a, b] runs a(b(core)). Middleware
-    # still wraps the core, so CORS preflight and logging cover unmatched requests.
-    let app = fold(rev(middleware), fn(rq: Request) => run_dispatch(d, rq), fn(h, m) => m(h))
-    # the temp body file lives exactly as long as the handler call. Dawn has no
-    # try/finally, so catch_panic plays that role (same idiom as with_tx): it
-    # returns rather than unwinding, so the delete below always runs.
-    let served = catch_panic(fn() => app(req))
-    match req.body_file {
-      Some(p) -> delete_quietly(p)
-      None -> ()
-    }
-    match served {
-      Ok(Ok(r)) -> r
-      Ok(Err(e)) -> error_response(e)
-      Err(m) -> {
-        println("request panicked: $m")
-        error_response(http_error(500, "服务器内部错误"))
+    # An oversized body is refused before it is read, which also means before any
+    # middleware runs: there is no Request to hand them. That costs the 413 its
+    # access-log line and its CORS headers, and is the price of the refusal
+    # happening early enough to be worth anything.
+    match build_request(ex, meta_of(d), max_body) {
+      Err(e) -> {
+        println("${ex.getRequestMethod()!} ${ex.getRequestURI()!.getPath()!} -> ${e.status} (${e.message})")
+        error_response(e)
+      }
+      Ok(req) -> {
+        # first middleware in the list is outermost: [a, b] runs a(b(core)). Middleware
+        # still wraps the core, so CORS preflight and logging cover unmatched requests.
+        let app = fold(rev(middleware), fn(rq: Request) => run_dispatch(d, rq), fn(h, m) => m(h))
+        # the temp body file lives exactly as long as the handler call. Dawn has no
+        # try/finally, so catch_panic plays that role (same idiom as with_tx): it
+        # returns rather than unwinding, so the delete below always runs.
+        let served = catch_panic(fn() => app(req))
+        match req.body_file {
+          Some(p) -> delete_quietly(p)
+          None -> ()
+        }
+        match served {
+          Ok(Ok(r)) -> r
+          Ok(Err(e)) -> error_response(e)
+          Err(m) -> {
+            println("request panicked: $m")
+            error_response(http_error(500, "服务器内部错误"))
+          }
+        }
       }
     }
   })
@@ -250,12 +311,24 @@ fn handle(routes: List[Route], middleware: List[Middleware], ex: HttpExchange) -
   write_response(ex, response)
 }
 
+# The ceiling on a request body read into memory, in bytes. 8 MiB: comfortably
+# above any JSON or form this framework is meant to carry, far below what a few
+# concurrent requests could use to exhaust a heap. Routes that legitimately take
+# more opt out with the "raw-body" tag (nginx bounds those) or the "stream-body"
+# tag (those never touch the heap at all).
+pub const DEFAULT_MAX_BODY: Int = 8388608
+
 # Start on 127.0.0.1:port and block forever (main() returning would let the
 # JVM exit out from under the request threads).
-pub fn serve_app(port: Int, routes: List[Route], middleware: List[Middleware]) -> Unit !io = {
+pub fn serve_app(port: Int, routes: List[Route], middleware: List[Middleware]) -> Unit !io =
+  serve_app_bounded(port, DEFAULT_MAX_BODY, routes, middleware)
+
+# Same, with the in-memory body ceiling chosen explicitly (0 = unbounded, which
+# is what this framework did before the ceiling existed).
+pub fn serve_app_bounded(port: Int, max_body: Int, routes: List[Route], middleware: List[Middleware]) -> Unit !io = {
   let addr = InetSocketAddress.new("127.0.0.1", port)
   let server = HttpServer.create(addr, 0)!
-  server.createContext("/", fn(ex) => handle(routes, middleware, ex))
+  server.createContext("/", fn(ex) => handle(routes, middleware, max_body, ex))
   server.setExecutor(Executors.newVirtualThreadPerTaskExecutor()!)
   server.start()
   println("listening on http://127.0.0.1:$port")
@@ -270,10 +343,28 @@ test "query strings parse, including empty and embedded =" {
   assert parse_query("flag") == [("flag", "")]
 }
 
-test "form bodies parse, with + as space" {
+test "an encoded separator stays inside its value" {
+  # the smuggling case: decoding before splitting turned this into two params
+  assert parse_query("a=1%262") == [("a", "1&2")]
+  assert parse_query("a=x%3Dy") == [("a", "x=y")]
+  # keys are decoded too, and were not before
+  assert parse_query("a%20b=c") == [("a b", "c")]
+  # '+' is a space on both sides
+  assert parse_query("a+b=c+d") == [("a b", "c d")]
+  # UTF-8 percent escapes decode as bytes, not as characters
+  assert parse_query("q=%E4%B8%AD%E6%96%87") == [("q", "\u{4e2d}\u{6587}")]
+  # a truncated escape is not worth a 400; the component stands as written
+  assert parse_query("a=%A") == [("a", "%A")]
+}
+
+test "form bodies parse, with + as space and %XX decoded" {
   let f = parse_form("username=admin&password=a+b+c")
   assert map.get(f, "username") == Some("admin")
   assert map.get(f, "password") == Some("a b c")
+  # percent escapes used to reach the handler still encoded
+  let g = parse_form("email=a%40b.com&note=1%262")
+  assert map.get(g, "email") == Some("a@b.com")
+  assert map.get(g, "note") == Some("1&2")
 }
 
 # ---- test-only HTTP client: the streaming test needs a real client to pump

@@ -1,4 +1,10 @@
-# Dawn 语言规范（v0.1 草案）
+# Dawn 语言规范
+
+> 状态：**normative（权威）**。适用版本：0.11.0（`selfhost/src/version.dawn` 的 `VERSION`）。
+> 实现与本文冲突时，以本文为准并把实现当 bug——除非本文某条被显式标注为「已被 X 取代」。
+>
+> 标题曾长期写「v0.1 草案」，而工具链已到 0.11：一份自称草案的文档没法充当裁判，
+> 而这是仓库里唯一有资格裁判语义争议的文档。版本号跟 `VERSION` 走，不再单独编号。
 
 本文是语法与语义的权威定义。设计动机见 [design.md](design.md)，
 机器可读语法见 [grammar.ebnf](grammar.ebnf)。
@@ -24,12 +30,25 @@
 
 ### 1.3 标识符与命名约定
 
-- 值、函数、模块名：`lower_snake_case`，匹配 `[a-z][a-z0-9_]*`
-- 类型与构造器：`UpperCamelCase`，匹配 `[A-Z][A-Za-z0-9]*`
-- 效果变量：`!` 后接 `[a-z][a-z0-9_]*`（`io` 为保留效果名）
+**强制的部分**——首字符决定语法类别，parser 靠它消歧（模式匹配中 `x` 是绑定、
+`X` 是构造器；`TYPEIDENT` 是独立 token）：
 
-命名约定是**强制的**：小写开头一定是值，大写开头一定是类型/构造器。
-parser 依赖这一点消歧（模式匹配中 `x` 是绑定、`X` 是构造器）。
+- 值、函数、模块名：**首字符是小写字母或 `_`**
+- 类型与构造器：**首字符是大写字母**
+- 效果变量：`!` 后接一个值标识符（`io` 为保留效果名）
+
+**风格约定**——工具链不强制，但全仓遵守：值用 `lower_snake_case`
+（`[a-z][a-z0-9_]*`），类型用 `UpperCamelCase`（`[A-Z][A-Za-z0-9]*`）。
+
+> **关于非 ASCII**：「大写 / 小写」按 Java 的 `Character.isUpperCase`
+> 判定，后续字符按 `Character.isLetterOrDigit` 或 `_`。于是 `fn 中文()`、
+> `fn _hidden()` 都能编译——汉字既非大写也非小写，走「不是大写」这一支，即值标识符。
+>
+> 这是**实现定义**的，不是设计过的：Unicode 的 XID_Start/XID_Continue、
+> normalization（`é` 的两种写法算不算同一个名字）、同形字符，本规范**全部未定义**，
+> 依赖它们的代码不可移植。无大小写文字（汉字、阿拉伯文、假名）因此只能作值名，
+> 作类型名没有自然写法。收敛到明确定义的 Unicode 标识符语法是一项未决工作
+> （docs/codebase-audit.md 的 SYN-01）。
 
 ### 1.4 关键字
 
@@ -147,7 +166,7 @@ C 后端给它一个字节。
 - 函数类型 `fn(A, B) -> C !e`（`!e` 可省略，表示纯）
 
 `Option` 与 `Result` 就是普通 ADT，在标准库中定义，无特殊地位
-（`?` 运算符对它们有语法支持，见 §9）。
+（`?` 运算符对它们有语法支持，见 §8.1）。
 
 **`Map[K, V]` / `Set[T]`** 是与 `List` 同级的内建持久容器，无字面量语法，全部经
 内建函数操作（清单见 §11）。语义要点：
@@ -228,6 +247,15 @@ alias Paint = Color                                   # 用户类型（ADT/recor
 
 别名有**自己的关键字 `alias`**；`type` 只声明**名义类型**（ADT 或 record）。
 别名是**透明**的（不是 newtype）：解析期展开，与被指的类型完全互换。
+
+> **`alias Meters = Float` 不提供任何单位安全。** 它与 `Float` 完全互换：
+> `Meters` 和 `Seconds` 可以相加，函数收 `Meters` 时传裸 `Float` 也照过。
+> 上面第一行只是「别名可以指内建标量」的语法示例，别把它读成领域建模的推荐做法——
+> 单位类型是 alias **最容易误导**的用法。别名的真实价值在下面几行：给长类型起短名
+> （`Handler`、`Lookup[T]`）。
+>
+> 真正的单位安全需要 newtype / opaque type，Dawn 目前没有
+> （docs/codebase-audit.md 的 LANG-05）。
 
 > 历史注记：两者曾共用 `type`，靠「右侧形状」启发式区分——同形不同义，且用户类型
 > 无法被别名（裸大写名恒被读作构造器）。现在 `type X = <fn 类型/元组/Name[...]/内建标量>`
@@ -313,7 +341,7 @@ fn greet(name: String) -> Unit !io = {
   ① `pub`；② 递归/互递归（编译器按调用图拓扑序推导，环上无法推导）；
   ③ 体内用了 `return` 或 `?`（二者需要已知的返回类型）。
 - 写了 `-> T` 的函数维持原规则：效果省略即纯，**体内出现 io 而签名未标则报错**——签名是承诺。
-- 函数体是 `=` 后的单个表达式；块 `{ }` 也是表达式（§5.2）。
+- 函数体是 `=` 后的单个表达式；块 `{ }` 也是表达式（§4.2）。
 - 没有默认参数、没有变长参数、没有重载。
 
 **局部命名函数**：块内可写 `fn name(params) -> T [!io] = body` 语句——本质是
@@ -338,7 +366,7 @@ const SIN_TABLE: List[Float] = comptime {
 }
 ```
 
-顶层 `const` 的右侧隐式处于 comptime 上下文（§8），必须是纯的、可常量化的。
+顶层 `const` 的右侧隐式处于 comptime 上下文（§7），必须是纯的、可常量化的。
 
 ### 3.3 可见性
 
@@ -469,7 +497,7 @@ let area = {
 | 10 | `+ -` | 左 | 仅数值，两侧同类型 |
 | 11 | `* / %` | 左 | 仅数值；`Int` 除零 panic |
 | 12 | `not`、一元 `-`、`~` | 前缀 | `~` 仅 `Int` 按位取反 |
-| 13 | `? . () []调用` | 后缀 | `?` 见 §9 |
+| 13 | `? . () []调用` | 后缀 | `?` 见 §8.1 |
 
 - 按位 `& ^ \|` 与移位**仅作用于 `Int`**（无 `Float` 位模式）；它们**紧于比较**，
   故 `a & b == c` 是 `(a & b) == c`，无 C 家族那个坑。移位计数取低 6 位（同 JVM `LSHL`）。
@@ -1261,7 +1289,7 @@ std → 内建，std 模块自己的 `pub fn len` 正是靠这一条合法。
   ```
 
 - `core/math`：`abs min max sin cos sqrt pow to_float to_int ...`（纯——
-  内部以 `@trusted_pure` 包装 `java.lang.Math`）
+  内部以 `unsafe_pure` 包装 `java.lang.Math`；`@trusted_pure` 是该逃生门的旧名，已废弃）
 - **`std/io`**：`io.read_line io.read_file io.write_file io.list_dir io.is_dir`（全部 `!io`；
   `println`/`print` 同住此模块但由 prelude 直呼，`args`/`catch_fault` 是内建）
   - `io.write_file(path, content) -> Result[Unit, String]` — **自动创建缺失的父目录**。
@@ -1296,8 +1324,12 @@ std → 内建，std 模块自己的 `pub fn len` 正是靠这一条合法。
 编译期 `use java` 解析与运行期加载共用这份 classpath。`build` 把各 jar 记入 manifest
 的 `Class-Path`（相对产物目录，jar 挪走要一起挪），产物仍 `java -jar` 直接跑；
 `build --native` 改以 `-cp` 形式调 native-image（第三方库的反射/JNI 是否过
-native-image，责任在库，见 §12.3）。Dawn 无依赖解析——只接受**单 jar、零传递依赖**
-的库，需要依赖树的库不适配。
+native-image，责任在库，见 §12.3）。
+
+`--cp` 本身不做依赖解析：它要什么就挂什么，传递依赖得自己列全。**需要依赖树的库走
+`[java-deps]`**（§10.1 的 `dawn.toml`）——那条路径经 coursier 解析 Maven 传递依赖。本节曾写「Dawn
+无依赖解析——只接受单 jar、零传递依赖的库」，那是 `[java-deps]` 出现之前的事实，
+与 §10.1 直接冲突。
 
 **保证**：同一程序在 JVM 与 native 下行为一致（除启动时间与内存占用）。
 

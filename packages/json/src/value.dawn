@@ -1,12 +1,24 @@
-# The JSON data model (RFC 8259). Parsed numbers are all Float; objects
-# preserve insertion order via the builtin Map.
+# The JSON data model (RFC 8259). Objects preserve insertion order via the
+# builtin Map.
+#
+# Numbers are split in two on purpose. A JSON number is one syntactic category,
+# but collapsing it onto Float alone loses integers above 2^53 — and the values
+# that actually flow through JSON in this range (ids, money in minor units,
+# epoch millis) are exactly the ones nobody may round. So an integer literal
+# becomes JInt and everything else JNum, decided by the literal's *text*
+# (parser.number_of), not by a double round-trip.
+#
+# What this model still cannot hold: integers wider than 64 bits, and decimals
+# whose value is not a double. The parser rejects both rather than approximating
+# them. Representing them needs a decimal/BigInteger case here, which is a
+# deliberate non-goal — it would put a non-primitive number in every consumer's
+# match arms for input that no `y_` fixture requires.
 pub type Json =
   | JNull
   | JBool(value: Bool)
   | JNum(value: Float)
-# JInt renders without a decimal point (ids, counts) — the parser never
-# produces it (all parsed numbers are JNum/Float); it exists for serialization
-# fidelity with an integer-typed API.
+# An integer-valued number: renders without a decimal point, and is what the
+# parser produces for any literal with no '.', 'e' or 'E'.
   | JInt(value: Int)
   | JStr(value: String)
   | JArr(items: List[Json])

@@ -45,7 +45,7 @@ M6 复盘结尾那句自我总结正好适用：
 
 ### 1. 整程序源码编译 → 包 = 源码树
 
-`ModuleLoader.loadDirectory`（[`ModuleLoader.kt:54`](../compiler/src/main/kotlin/dawn/check/ModuleLoader.kt)）
+`ModuleLoader.loadDirectory`（[`ModuleLoader.kt:54`](https://github.com/dawnop/dawn-lang/blob/kotlin-final/compiler/src/main/kotlin/dawn/check/ModuleLoader.kt)）
 走 `src/` 全部文件、拓扑排序、按依赖序类型检查、一把梭出一个 jar。
 
 推论：**一个包就是另一棵源码树**。不需要 ABI、不需要分离编译、不需要 `.rlib`/`.beam` 之类的
@@ -53,7 +53,7 @@ M6 复盘结尾那句自我总结正好适用：
 
 ### 2. orphan rule + 全程序 coherence 已经有了，而且更严
 
-[`Checker.kt:558-565`](../compiler/src/main/kotlin/dawn/check/Checker.kt) 要求 impl 必须住在声明
+[`Checker.kt:558-565`](https://github.com/dawnop/dawn-lang/blob/kotlin-final/compiler/src/main/kotlin/dawn/check/Checker.kt) 要求 impl 必须住在声明
 trait 或声明 subject 的**模块**里；`implTable`（`Checker.kt:51`）保证全程序一个 `(trait, type)`
 只有一个 impl。
 
@@ -171,7 +171,7 @@ key = ["a", "b"]      # 单行字符串数组
 ### 4.3 别名在 manifest，不在源码（项目 B）
 
 **不抄 Go 的「模块路径 = URL」。** Go 要求源码写 `import "github.com/x/dawn-web"`，
-而 Dawn 的段文法是 `^[a-z_][a-z0-9_]*$`（[`ModuleLoader.kt:51`](../compiler/src/main/kotlin/dawn/check/ModuleLoader.kt)），
+而 Dawn 的段文法是 `^[a-z_][a-z0-9_]*$`（[`ModuleLoader.kt:51`](https://github.com/dawnop/dawn-lang/blob/kotlin-final/compiler/src/main/kotlin/dawn/check/ModuleLoader.kt)），
 **禁止 `.` 和 `-`**，`github.com/dawnop/dawn-web` 根本不合法。改文法迁就它，代价远大于收益。
 
 **走 alias-in-manifest（Zig `build.zig.zon` / Cargo 模型）**：manifest 把本地别名映射到远端源，
@@ -185,7 +185,7 @@ key = ["a", "b"]      # 单行字符串数组
 
 ### 4.4 类名命名空间（项目 B 的唯一硬阻塞）
 
-[`ModuleLoader.kt:113`](../compiler/src/main/kotlin/dawn/check/ModuleLoader.kt)：
+[`ModuleLoader.kt:113`](https://github.com/dawnop/dawn-lang/blob/kotlin-final/compiler/src/main/kotlin/dawn/check/ModuleLoader.kt)：
 
 ```kotlin
 val modPath = modulePathOf(root, file)

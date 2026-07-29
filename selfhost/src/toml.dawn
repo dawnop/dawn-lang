@@ -1,13 +1,24 @@
-# Format-preserving TOML parsing and editing for dawn.toml (the Kotlin
-# manifest/Toml.kt, both sides). The CST is a plain list of lines — every
-# supported construct fits on one line — so edits replace one line's text and
-# rendering reproduces the input byte for byte when nothing was touched.
+# Format-preserving parsing and editing for dawn.toml.
 #
-# Errors are Diags with absolute source spans, mirroring the Kotlin
-# TomlParser sink message for message and span for span (M8: the selfhost
-# toolchain is the validation authority). Offsets accumulate in UTF-16 units
-# across lines; within a line the scanner walks code points, which agrees
-# with UTF-16 for everything but astral characters (manifests are ASCII).
+# **This is not a general TOML parser, and dawn.toml is not general TOML.** It
+# accepts a deliberate subset — one construct per line, basic strings only — and
+# *rejects* literal strings, floats, inline tables, arrays of tables, quoted
+# keys, dotted keys and multi-line values. A file that a general TOML parser
+# reads happily can be an error here; the error says so rather than
+# mis-parsing. The name stays `.toml` because it is what dawnop-site, every
+# example, the docs and every user project already write.
+#
+# Why not a real TOML library: selfhost may only use language features the
+# current seed supports, and a third-party parser means giving the compiler a
+# Maven dependency — but dawn.toml is the file read *in order to* resolve Maven
+# dependencies. See docs/codebase-audit.md, PKG-03.
+#
+# The CST is a plain list of lines — every supported construct fits on one line
+# — so edits replace one line's text and rendering reproduces the input byte for
+# byte when nothing was touched. Errors are Diags with absolute source spans.
+# Offsets accumulate in UTF-16 units across lines; within a line the scanner
+# walks code points, which agrees with UTF-16 for everything but astral
+# characters (manifests are ASCII).
 
 use std/str
 use std/list
