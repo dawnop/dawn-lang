@@ -20,11 +20,11 @@
 | 包管理(native) | **shell 出去调 `curl`**；`[java-deps]`/coursier 在 native 上直接报不支持 | 07-25 |
 | 生成的 C | **不入库**，只作发版 artifact | 07-25 |
 | 字符串 | **UTF-8**，Cursor = 字节偏移(观测透明) | 07-25 |
-| Unicode 表 | **先 ASCII-only** | 07-25 |
+| Unicode 表 | ~~先 ASCII-only~~ → **两张全表(case + class)已收进编译器**,两后端各领一份,由 `scripts/unicode-contract` 对拍 | 07-28 |
 | hash/比较任意值 | **传 Eq/Hash 字典** → D0 是前置 | 07-25 |
 | `Array[T]` | **语言不公开**，先作 std 内部原语(已落地;JVM 上 push/with 不对称,见 §10) | 07-25 |
 | List 表示 | **严格 RB**(32 叉 trie + 尾块)，relaxed 以后可加 | 07-25 |
-| panic | **setjmp/longjmp**，两个捕获点(catch_panic / java_try 的对应物) | 07-25 |
+| panic | **setjmp/longjmp**，两个捕获点(`catch_panic` / `catch_fault`) | 07-25 |
 | 泛型 | **不单态化**，沿用 box-at-type-var-slot | 07-25 |
 | 一般尾调 | **不做**，大栈代替 | 07-25 |
 | 验收 | **差分测试 + 全套 `dawn test` + native 固定点**，三道全要 | 07-25 |
@@ -170,13 +170,20 @@ C 编译标志:`-fwrapv`(Int 回绕同 JVM long)、`-fno-strict-aliasing`。这�
 
 ### Phase 4 — Perceus
 
+> **设计已写完**:[`perceus-design.md`](perceus-design.md)。下面这几行是路线,那份是裁决——
+> 尤其它推翻了本节两处:per-constructor drop 在 Dawn 的擦除模型下用不了(§2),
+> 而下面那个 99.1% 是个作废的数(§6)。
+
 Core IR 上新增精确 dup/drop 插入 pass + 复用分析(rc==1 时原地)。Koka 论文有完整算法，Dawn 的纯性
 (严格求值 + 不可变 + 无可变别名 → **无法构造环**)让它可解且无需环回收器。
 
 **必须同时提供一个 `--rc=leak` 调试模式**(drop 全部 no-op)。理由见 §6 R3。
 
-出口条件:**`array_with` 在唯一时确实就地写**(用计数器验，对照 JVM 侧实测的 99.1% 快路径命中率)。
-这是 native 相对 JVM 多出来的那一格——JVM 上 `with` 只能复制(§10.1),Perceus 的 `rc==1` 才补得上。
+出口条件:**`array_with` 在唯一时确实就地写**(用计数器验)。这是 native 相对 JVM 多出来的
+那一格——JVM 上 `with` 只能复制(§10.1),Perceus 的 `rc==1` 才补得上。
+
+> ~~对照 JVM 侧实测的 99.1% 快路径命中率~~ ——**作废**。§11.4 已经指出那 99.1% 是另一个
+> 操作、在一个 D3 已删掉的类上量的;基准要重新量,办法见 perceus-design.md §6。
 
 ### Phase 5 — `use c` FFI + Phase A 验收
 
@@ -262,18 +269,18 @@ native 照抄才算"通过"。故语料要配少量**独立的期望输出**(不
 
 **止损点**:Phase 0 出口若无法做到零 Emit-Change，说明 Core IR 的边界画错了，退回重划而不是硬推。
 
-## 7. 进度(2026-07-25)
+## 7. 进度(2026-07-29)
 
 | 阶段 | 状态 |
 |---|---|
 | **Phase −1** 接缝 spike | **完成** |
 | **Phase 0** Core IR | **完成**——IR + lowering 覆盖整门语言;JVM / C / comptime 三个消费者都吃 Core,`emit.dawn` 的 TAST 路已删(4353 → 2318 行) |
-| Phase 1 D0 | **进行中**——trait 已入 prelude(休眠);爆炸半径已实测,见 §9 |
-| Phase 2 D1–D3 | **D1 完成**——`Array[T]` + `popcount` 已落地(std 内部,休眠);契约在 JVM 上被迫拆成 push/with 两半,见 §10。D2/D3 未动 |
-| Phase 3 C 发射器 | **写了不少,但要按收口后的 Core 重导**——它跑在了它所消费的语义前面,见 §11.1 |
-| Phase 4 Perceus | 未动 |
-| Phase 5 `use c` / Phase A 验收 | 差分 harness 已就位并进了 CI,`use c` 未动 |
-| Phase 6 native 自举 | 未动 |
+| **Phase 1 D0** | **完成**——见 §11.4 的 S1/S2 重排,trait v2 与语义收口都已关账 |
+| **Phase 2 D1–D3** | **完成**——`Array[T]` + `popcount`;Map/Set 换纯 Dawn HAMT、List 换持久向量,均 over Array |
+| **Phase 3 C 发射器** | **完成**——按收口后的 Core 重导完毕。整编译器(剥掉 JVM-only 模块,26k 行)发 4.7 MB C,cc **零 error 零 warning**,跑出的结果与 JVM 逐字一致 |
+| Phase 4 Perceus | **设计完成,码未动**——见 [`perceus-design.md`](perceus-design.md)。这是 native 自举**唯一剩下的阻塞项** |
+| Phase 5 `use c` / Phase A 验收 | 差分 harness 已就位并进了 CI。**`use c` 已不在关键路径**:§14.3/§14.7 的十个 io intrinsic 解决了编译器自己的 IO 需求 |
+| Phase 6 native 自举 | 卡在 Phase 4 |
 
 **已落地的件**:`selfhost/src/core.dawn`(IR)、`selfhost/src/lower.dawn`(TAST → Core)、
 `selfhost/src/emitc.dawn`(Core → C)、`emit.dawn`(Core → JVM)、`runtime/c/dawn_rt.{h,c}`、
