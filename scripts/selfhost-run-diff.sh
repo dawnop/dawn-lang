@@ -24,20 +24,19 @@ SH=(./bin/dawn)
 # build the HEAD toolchain up front so rebuild chatter stays out of transcripts
 ./bin/dawn --version > /dev/null
 
-declared() {
-  git log "$(tr -d ' \n' < scripts/seed-release.txt)..HEAD" --format=%B 2>/dev/null \
-    | grep -E '^Emit-Change:' || true
-}
+. scripts/emitchange.sh
 
 fail=0
 check() { # name ref-exit head-exit
   if [ "$2" != "$3" ] || ! diff "$OUT/k.txt" "$OUT/d.txt" > "$OUT/check-diff.txt"; then
     local decls
-    decls=$(declared)
+    decls=$(declared_for "$1")
     if [ -n "$decls" ]; then
-      echo "NOTE $1 differs vs the seed — declared since the tag"
+      echo "NOTE $1 differs vs the seed — declared since the tag:"
+      echo "$decls" | sed 's/^/       /'
     else
       echo "FAIL: $1 differs (exits $2 vs $3)"
+      echo "      (declare it with 'Emit-Change(<label glob>): why' — this label is '$1')"
       head -20 "$OUT/check-diff.txt"
       fail=1
     fi

@@ -233,8 +233,8 @@ run_session "$REF" lsp > "$OUT/kotlin.txt"
 run_session "$SELF" lsp > "$OUT/self.txt"
 
 if ! diff "$OUT/kotlin.txt" "$OUT/self.txt" > "$OUT/diff.txt" 2>&1; then
-  decls=$(git log "$(tr -d ' \n' < scripts/seed-release.txt)..HEAD" --format=%B 2>/dev/null \
-    | grep -E '^Emit-Change:' || true)
+  . scripts/emitchange.sh
+  decls=$(declared_for "lsp")
   if [ -n "$decls" ]; then
     echo "NOTE lsp transcripts differ vs the seed — declared since the tag:"
     echo "$decls" | sed 's/^/       /'

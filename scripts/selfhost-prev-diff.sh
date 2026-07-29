@@ -35,20 +35,18 @@ echo "OK   $TAG compiles HEAD selfhost (seed feature discipline)"
 ./bin/dawn --version > /dev/null
 HEAD_BIN=(./bin/dawn)
 
-declared() {
-  git log "$TAG..HEAD" --format=%B 2>/dev/null | grep -E '^Emit-Change:' || true
-}
+. scripts/emitchange.sh
 
 fail=0
-report_diff() { # target
+report_diff() { # check label, e.g. "emit selfhost"
   local decls
-  decls=$(declared)
+  decls=$(declared_for "$1")
   if [ -n "$decls" ]; then
     echo "NOTE $1 differs vs $TAG — declared since the tag:"
     echo "$decls" | sed 's/^/       /'
   else
     echo "FAIL $1 differs vs $TAG and no commit since the tag declares it"
-    echo "     (declare intentional output changes with an 'Emit-Change:' line)"
+    echo "     (declare it with 'Emit-Change(<label glob>): why' — this label is '$1')"
     fail=1
   fi
 }

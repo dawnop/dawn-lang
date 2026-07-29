@@ -63,13 +63,20 @@
 （`docs/` 用中文）。正文写**读代码看不出来的东西**：根因、被推翻的方案、实测数据、
 验证手段。不写「改了什么」——那个 diff 里有。
 
-**改变工具链输出**（发出来的字节码、CLI 文本、格式化结果、LSP 响应）时，正文里加一行
-`Emit-Change: <说明>`。`selfhost-prev-diff.sh` / `run-diff` / `fmt-diff` / `lsp-diff`
-会拿 HEAD 和上一个 tag 对拍，**没有声明的差异是 CI 红灯**。
+**改变工具链输出**（发出来的字节码、C 文本、CLI 文本、格式化结果、LSP 响应）时，正文里加一行
+`Emit-Change(<label glob>): <说明>`。label 是差分脚本打印的那个检查名——
+`emit selfhost`、`emit packages/json`、`run calc (args)`、`fmt`、`lsp`——glob 支持 `*`。
+`selfhost-prev-diff.sh` / `run-diff` / `fmt-diff` / `lsp-diff` 会拿 HEAD 和上一个 tag 对拍，
+**没有匹配声明的差异是 CI 红灯**（REL-02，`scripts/emitchange.sh`）。
 
-> 有个坑：那四个脚本查的是**上个 tag 到 HEAD 整段**里有没有 `Emit-Change:`，不是逐个提交查。
-> 所以一旦这一段里有人声明过，后面所有差异都被一起放行了。**先跑门禁、再写这一行**，
-> 否则你看到的绿是别人的声明挡出来的。
+> 裸 `Emit-Change: <说明>`（不带括号）仍被接受，但语义是**通配**——一行放行所有 target
+> 的任意差异，这正是 REL-02 修的洞。新声明请带 scope；两个后端并存之后，
+> 不带 scope 的声明说不清改的是谁的输出。
+>
+> 有个坑没变：脚本查的是**上个 tag 到 HEAD 整段**里的声明，不是逐个提交查。
+> 所以同段里一条宽 scope 会替后面的差异挡灯。**先跑门禁、再写这一行**，
+> 否则你看到的绿是别人的声明挡出来的。scope 收窄让这个坑小了，但没消失——
+> 真正的出口是发版重置窗口。
 
 **绝不加 Claude 署名**（`Co-Authored-By` / `Claude-Session` 一概不要）。本项目以开源为标准。
 

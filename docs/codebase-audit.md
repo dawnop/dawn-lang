@@ -1095,7 +1095,13 @@ tag 的确能绕过 main CI，因此 release 应复用同一个 required workflo
 
 ### REL-02（P2）`Emit-Change` 豁免粒度过粗
 
-> **【待办 —— 认可】**
+> **【已修 —— 2026-07-30】** 声明改为 `Emit-Change(<label glob>): <说明>`，label 即
+> 差分脚本打印的检查名（`emit selfhost`、`run calc (args)`、`fmt`、`lsp`），四个差分
+> 脚本经 `scripts/emitchange.sh` 按 scope 匹配后才放行；裸声明保持通配语义以兼容历史。
+> 时机正是台账 §3.8 说的那个：第二个后端（native fixpoint）当天出现。
+> 「golden 快照进仓库」那半仍如下文所记，先记着。
+>
+> 原判定：**【待办 —— 认可】**
 >
 > 「一行 `Emit-Change:` 放行所有 target 的任意差异」确实过宽，而且本次处置正好
 > 是它的压力测试：ERR-01 与 BOOT-04 两处刻意的字节变更，声明里没有任何机制

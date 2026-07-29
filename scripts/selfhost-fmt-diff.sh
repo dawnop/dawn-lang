@@ -33,8 +33,8 @@ done < <(git ls-files '*.dawn')
 ./bin/dawn fmt "$OUT/d" > /dev/null
 
 if ! diff -r "$OUT/k" "$OUT/d" > "$OUT/diff.txt" 2>&1; then
-  decls=$(git log "$(tr -d ' \n' < scripts/seed-release.txt)..HEAD" --format=%B 2>/dev/null \
-    | grep -E '^Emit-Change:' || true)
+  . scripts/emitchange.sh
+  decls=$(declared_for "fmt")
   if [ -n "$decls" ]; then
     echo "NOTE formatter differs vs the seed — declared since the tag:"
     echo "$decls" | sed 's/^/       /'

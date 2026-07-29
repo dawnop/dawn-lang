@@ -3,6 +3,16 @@
 > 状态：**current**。这是 2026-07-25 那次全仓审查（[../codebase-audit.md](../codebase-audit.md)）
 > 剩下的 28 条待办的作业计划。审查本身已经处置了 40 条、驳回 8 条。
 >
+> **2026-07-30 合并与解冻**：分支于当日选择性合入 main（合并提交 `fa2a85f`，
+> 逐条对着已前进 30+ 提交的主线重判——保留仍成立的、按今日形状重实现的、
+> 丢弃被取代的，明细见该提交信息）。同日 §二/§三所等的三个信号**全部到期**：
+> Phase 0（Core IR）早已落地、R6 已决（interp 吃 Core）、**Phase 6 当日出口**
+> （native fixpoint B==C，`../native-backend-plan.md` §14.23）。第 3 批全部解冻；
+> 第 0 批第 1 条 REL-02 已做（`scripts/emitchange.sh`，声明格式
+> `Emit-Change(<label glob>): ...`，裸声明保持通配兼容）。
+> purity-boundary 步骤 2 所修的洞已被缝 2（CtOpts.jcall 默认拒绝 + --comptime-ffi
+> 闸）覆盖大半，重判后再动。
+>
 > 本文回答两个问题：**每条待办的方案在哪份文档里**，以及**按什么顺序做**。
 > 每份设计文档都是 proposed 状态——按 CONTRIBUTING.md 第一条，动码前先写下来，
 > 因为写下来会杀死一批方案，而在编辑器里杀死方案比在 4000 行 diff 之后便宜。

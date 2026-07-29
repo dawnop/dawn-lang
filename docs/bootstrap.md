@@ -34,7 +34,7 @@ v0.6.0–v0.8.0 的 release jar 永久保存；`kotlin-final` tag 保有 Kotlin 
 > [m8-selfhost-only.md](m8-selfhost-only.md)，本文只留现行链。
 
 **现行的 oracle**：`scripts/selfhost-prev-diff.sh`——上一 release 与 HEAD 编同一
-语料 + 生态扫描，未声明的字节差异红灯（声明方式：提交信息里的 `Emit-Change:` 行），
+语料 + 生态扫描，未声明的字节差异红灯（声明方式：提交信息里的 `Emit-Change(<label glob>):` 行），
 同时机器强制种子特性纪律（N−1 的 jar 必须仍能编 HEAD 的 `selfhost/src`）。
 配套还有 `selfhost-run-diff.sh`（CLI 转写）、`selfhost-fmt-diff.sh`（格式化）、
 `selfhost-lsp-diff.sh`（LSP 会话）。
@@ -100,7 +100,7 @@ __emit` 全仓逐字节对拍）已随 `kotlin-final` 完成使命；现行 orac
 **N vs N−1**（`selfhost-prev-diff.sh`：上一 release 与 HEAD 编同一语料 +
 backend-dawn 生态扫描，未声明的字节差异红灯）加 CLI/格式化/LSP 三条转写差分
 （`selfhost-run-diff.sh` / `selfhost-fmt-diff.sh` / `selfhost-lsp-diff.sh`）。
-故意改变输出的提交在信息里声明 `Emit-Change: <说明>`。
+故意改变输出的提交在信息里声明 `Emit-Change(<label glob>): <说明>`（裸声明=通配，兼容历史）。
 
 ## 运行注意
 
