@@ -254,8 +254,10 @@ alias Paint = Color                                   # 用户类型（ADT/recor
 > 单位类型是 alias **最容易误导**的用法。别名的真实价值在下面几行：给长类型起短名
 > （`Handler`、`Lookup[T]`）。
 >
-> 真正的单位安全需要 newtype / opaque type，Dawn 目前没有
-> （docs/codebase-audit.md 的 LANG-05）。
+> 想要单位安全，用的是**下一节的 `opaque type`**：`pub opaque type Meters = Float`
+> 在模块外与 `Float`、与 `Seconds` 都不互换，出入写两个一行函数（§2.7）。
+> 这句曾写着「Dawn 目前没有」——那是 §2.7 落地前的话，忘了回来改（LANG-05 的病根
+> 正是示例与指路不同步，这句自己也犯了一次）。
 
 > 历史注记：两者曾共用 `type`，靠「右侧形状」启发式区分——同形不同义，且用户类型
 > 无法被别名（裸大写名恒被读作构造器）。现在 `type X = <fn 类型/元组/Name[...]/内建标量>`

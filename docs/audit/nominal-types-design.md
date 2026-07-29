@@ -3,7 +3,24 @@
 > 动码前的**调研与方案**，不是设计定稿。
 > 覆盖 codebase-audit.md 的 **LANG-04（P2）** 与 **LANG-05（P2）**。
 >
-> 状态：**步骤 1–3（`type X = new T` 的语言机制）proposed 且可做；
+> **2026-07-30 重判：步骤 1–3 驳回，机制已存在。** 本文成文时没有对着当时已落地的
+> `opaque type`（spec §2.7，S2.3）对账——而它就是这里要发明的东西：
+> `pub opaque type Meters = Float` 模块外名义不互换、零开销、可写自有 impl 且优先于
+> 目标类型（「先问身份再问表示」）、Map 键合法性经 `[K: Eq+Hash]` bound 自然穿透
+> （opaque-over-Float 没有 Hash impl 就当不了键，无后门可开）、`opaque-twin` 门禁
+> 机器化守护语义。`new` 相对它只多两件事：**模块内也名义**（opaque 在声明模块内
+> 透明）与**自动生成转换函数对**——前者保护的是模块对自己的纪律（模块内代码量小、
+> 自我审查成本低），后者是两行手写函数的糖。为这两件边角引入第二个名义包装机制，
+> 正是本仓「一件事一份定义」要杀的表面重复。
+>
+> **各条目的去处**：LANG-05（alias 被当单位安全示例）→ 已修：spec §2.6 现在直接
+> 指路 §2.7。LANG-04（Char）→ 机制用现成的 `pub opaque type Char = Int` + 受检构造
+> `char_of(n: Int) -> Option[Char]`（§2.4 的 API 形状仍然对），作为独立迁移刀排队
+> ——Phase 6 已于当日出口，冻结解除，但 `'a'` 字面量类型切换牵动 lexer/json/fmt
+> 全部调用点与一次发布窗口，不与任何东西合并做。步骤 4 的排期理由不变，等待对象
+> 从「Phase 6 排期」改为「有人真的需要 Char 而不是 Int 的那一天」。
+>
+> 原状态：**步骤 1–3（`type X = new T` 的语言机制）proposed 且可做；
 > 步骤 4（`'a'` 变 `Char`）冻结，与
 > [`../native-backend-plan.md`](../native-backend-plan.md) 的 **Phase 6** 合并做。**
 > 那一阶段要把 `java.lang.Character`/`Long.parseLong` 从 lexer/parser 里纯 Dawn 化，

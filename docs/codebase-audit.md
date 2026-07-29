@@ -482,6 +482,12 @@ Playground 的生产 systemd sandbox 能缓解，但语言工具本身没有隔�
 
 ### LANG-04（P2）字符只是 `Int`，类型系统不能保证 Unicode scalar
 
+> **【改判 —— 2026-07-30】** 机制已存在：`pub opaque type Char = Int` + 受检构造
+> `char_of` 就是本条要的形状（nominal-types-design §2.4 的 API 对，载体换成现成的
+> opaque type，不引入 `new`）。剩余的是 `'a'` 字面量类型切换的**迁移刀**（lexer/json/
+> fmt 全部调用点 + 发布窗口），等真实需求再排。
+>
+
 > **【待办 —— 认可，属语言变更】**
 >
 > 「Cursor 已经证明不透明标量可行」是很强的论据：`Cursor` 就是同一招，
@@ -495,6 +501,11 @@ Playground 的生产 systemd sandbox 能缓解，但语言工具本身没有隔�
 索引、计数、字节和字符。Cursor 已经证明不透明标量可行，Char/Rune 也应采用同样方案。
 
 ### LANG-05（P2）透明 alias 不能提供领域安全
+
+> **【已修 —— 2026-07-30】** spec §2.6 的警示改为直接指路 §2.7 `opaque type`
+> （原文写「Dawn 目前没有」——§2.7 落地后没人回来改，答案一直存在）。
+> `type X = new T` 第二机制被驳回，理由在 nominal-types-design 顶部。
+>
 
 > **【已修（示例部分），newtype 待办】**
 >
