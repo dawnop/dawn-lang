@@ -133,6 +133,10 @@ native 免费,`stdlib.dawn` 最后一个 `use java` 归零,缝 3 变成「结构
 4. **发现性**:`dawn doc --std` + 站点 /stdlib 页(已有独立待办);修 std go-to-def
    (根因:module_ast_by_class 对 std 返回 def_path=None)。
 5. **缝 3 实现**(可先行,属 S4):§2 的生成模块方案,三张账单作验收。
+   **已完成(2026-07-30,b72eabd,见 native-backend-plan §14.21)**:管线唯一与
+   override-即-影子两张账单已兑现;「嵌入边界=语义边界」仍归本节的分层刀。
+   顺带记档:`--std` 默认 `std` 且目录优先,任意 cwd 下恰好有 `std/` 会被静默
+   当作 std 用——skew 口子,S5 一并收。
 
 ## 5. 立即生效的两条纪律(不等 S5)
 
