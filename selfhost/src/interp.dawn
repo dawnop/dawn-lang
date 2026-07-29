@@ -30,7 +30,7 @@ use std/map
 use std/set
 use token.{Diag}
 use tast.{
-  TExpr, TStmt, TFun, TModule,
+  TExpr, TStmt, TFun, TModule, TJavaCall,
   XStr, XLambda, XApply, XJava, XPropagate, XUnwrap, XReturn, XIndex,
   XCallDyn, XCallBuiltin, XCallFn, XCtor, XField, XListLit, XTupleLit,
   XBinary, XUnary, XIf, XMatch, XBlock, XComptime, XUnsafePure,
@@ -56,16 +56,8 @@ use core.{
   CBinOp
 }
 use lower
-use jreflect
 use parser
 use checker.{ModExports, check_module, cx_new}
-use java "java.lang.Object"
-use java "java.lang.Long"
-use java "java.lang.Integer"
-use java "java.lang.Double"
-use java "java.lang.Boolean"
-use java "java.lang.Number"
-use java "java.util.Objects"
 
 type Ctl =
   | KErr(d: Diag)
@@ -105,16 +97,35 @@ alias SR = Result[(ESt, Env), (ESt, Env, Ctl)]
 ## compiler passes `--comptime-ffi`. An `unsafe_pure` in the source vouches
 ## that a call is pure; it does not, and must not, also grant that call the
 ## run of the host -- those are promises to different parties.
-pub type CtOpts = { fuel: Int, ffi: Bool }
+##
+## `jcall` is how a granted call actually happens: policy lives here, the
+## reflective invoke lives in `jfold`, and a main that can host it wires
+## `jfold.fold_call` in. The default refuses, so this module -- and every
+## module a JVM-less main pulls in -- carries no `use java`.
+pub type CtOpts = {
+  fuel: Int,
+  ffi: Bool,
+  jcall: fn(TJavaCall, List[CValue]) -> Result[CValue, (String, String)] !io
+}
 
 pub const DEFAULT_FUEL: Int = 100000000
 
+## The default `jcall`: a compiler with no host JVM wired in. Only reachable
+## when policy said yes (--comptime-ffi) but no main provided the capability.
+pub fn jcall_refused(
+  jc: TJavaCall,
+  args: List[CValue]
+) -> Result[CValue, (String, String)] !io =
+  Err(("compile-time Java calls are not available in this compiler",
+    "this build cannot invoke a host JVM; make this a runtime call instead of a const"))
+
 ## Defaults: all the fuel a real compile gets, and no host FFI.
-pub fn ct_default() -> CtOpts = CtOpts { fuel: DEFAULT_FUEL, ffi: false }
+pub fn ct_default() -> CtOpts =
+  CtOpts { fuel: DEFAULT_FUEL, ffi: false, jcall: jcall_refused }
 
 ## Defaults with the fuel dialled down (the fuel tests, and callers that want
 ## a comptime run bounded well below a real compile's).
-pub fn ct_fuel(n: Int) -> CtOpts = CtOpts { fuel: n, ffi: false }
+pub fn ct_fuel(n: Int) -> CtOpts = CtOpts { fuel: n, ffi: false, jcall: jcall_refused }
 
 ## The interpreter's static context: how to find a function body, the tables
 ## lowering needs, and the results already folded.
@@ -143,8 +154,9 @@ type ICx = {
   # `eq`.
   impl_fns: Map[(Int, String, String), (String, TFun)],
   syms: Map[Int, Sym],
-  # whether this run may call into the host JVM (see CtOpts)
-  ffi: Bool
+  # whether this run may call into the host JVM, and how (see CtOpts)
+  ffi: Bool,
+  jcall: fn(TJavaCall, List[CValue]) -> Result[CValue, (String, String)] !io
 }
 
 const MAX_CALL_DEPTH: Int = 100000
@@ -214,7 +226,7 @@ fn as_adt(v: CValue) -> (Int, Int, List[CValue]) =
     _ -> panic("comptime interpreter bug: expected an ADT value")
   }
 
-fn cvalue_kind(v: CValue) -> String =
+pub fn cvalue_kind(v: CValue) -> String =
   match v {
     VInt(_) -> "Int"
     VFloat(_) -> "Float"
@@ -250,17 +262,12 @@ fn quote_str(s: String) -> String = {
   "\"" ++ out ++ "\""
 }
 
-## Java `==` on doubles (DCMPL): NaN is never equal, +0.0 equals -0.0 — unlike
-## Dawn's own total-order `==`, so it goes through java.lang.Double.
-fn float_java_eq(a: Float, b: Float) -> Bool !io = {
-  if Double.isNaN(a) || Double.isNaN(b) { return false }
-  let za = a == 0.0 || a == -0.0
-  let zb = b == 0.0 || b == -0.0
-  if za && zb { return true }
-  Double.compare(a, b) == 0
-}
+## Float `==` is IEEE (spec §4.3): NaN equals nothing, -0.0 equals 0.0. The
+## interpreter is itself compiled by a backend that implements exactly that,
+## so Dawn's own `==` on Float *is* the answer — no host query needed.
+fn float_ieee_eq(a: Float, b: Float) -> Bool = a == b
 
-fn value_eq(a: CValue, b: CValue) -> Bool !io =
+fn value_eq(a: CValue, b: CValue) -> Bool =
   match a {
     VInt(x) ->
       match b {
@@ -269,7 +276,7 @@ fn value_eq(a: CValue, b: CValue) -> Bool !io =
       }
     VFloat(x) ->
       match b {
-        VFloat(y) -> float_java_eq(x, y)
+        VFloat(y) -> float_ieee_eq(x, y)
         _ -> false
       }
     VBool(x) ->
@@ -305,7 +312,7 @@ fn value_eq(a: CValue, b: CValue) -> Bool !io =
     _ -> false
   }
 
-fn list_eq(xs: List[CValue], ys: List[CValue]) -> Bool !io = {
+fn list_eq(xs: List[CValue], ys: List[CValue]) -> Bool = {
   if len(xs) != len(ys) { return false }
   var i = 0
   while i < len(xs) {
@@ -814,72 +821,19 @@ fn merge_sort(
   Ok((st3, out))
 }
 
-# ---- route C: fold a vouched Java call reflectively ----
+# ---- route C: fold a vouched Java call ----
 
-fn to_java_arg(p: String, v: CValue) -> Option[Object] !io =
-  match v {
-    VInt(n) ->
-      if p == "long" {
-        Some(Objects.requireNonNull(Long.valueOf(n).expect("box")).expect("non-null"))
-      } else if p == "int" {
-        Some(Objects.requireNonNull(Integer.valueOf(n).expect("box")).expect("non-null"))
-      } else {
-        None
-      }
-    VFloat(f) ->
-      if p == "double" {
-        Some(Objects.requireNonNull(Double.valueOf(f).expect("box")).expect("non-null"))
-      } else {
-        None
-      }
-    VBool(b) ->
-      if p == "boolean" {
-        Some(Objects.requireNonNull(Boolean.valueOf(b).expect("box")).expect("non-null"))
-      } else {
-        None
-      }
-    VStr(s) ->
-      if p == "java.lang.String" {
-        Some(Objects.requireNonNull(s).expect("non-null"))
-      } else {
-        None
-      }
-    _ -> None
-  }
-
-## Java result → Dawn value; must agree with the checker's map_java_return or
-## folding would lie. Reference returns arrive wrapped in Option.
-fn from_java_ret(st: ESt, env: Env, rc: String, r: Option[Object]) -> ER !io =
-  if rc == "void" {
-    Ok((st, env, VUnit))
-  } else if rc == "long" || rc == "int" || rc == "short" || rc == "byte" {
-    let o = r.expect("primitive result")
-    let n2: Number = cast(o)
-    Ok((st, env, VInt(n2.longValue())))
-  } else if rc == "double" || rc == "float" {
-    let o = r.expect("primitive result")
-    let n2: Number = cast(o)
-    Ok((st, env, VFloat(n2.doubleValue())))
-  } else if rc == "boolean" {
-    let o = r.expect("primitive result")
-    let b2: Boolean = cast(o)
-    Ok((st, env, VBool(b2.booleanValue())))
-  } else if rc == "java.lang.String" {
-    match r {
-      None -> Ok((st, env, none_v()))
-      Some(o) -> {
-        let s2: String = cast(o)
-        Ok((st, env, some_v(VStr(s2))))
-      }
-    }
-  } else {
-    cerrh(st, env, "cannot bring this Java result back at compile time",
-      "route C returns Int/Float/Bool/String (and Unit) only; got " ++
-        jreflect.class_info(rc).simple)
-  }
+## The class's simple name, for diagnostics. A string split, not reflection:
+## the messages this feeds must not be a reason to import `jreflect` here.
+fn simple_of(fqcn: String) -> String = {
+  let parts = str.split(fqcn, ".")
+  parts[len(parts) - 1]
+}
 
 ## Route C (docs/pure-ffi-design.md): only static methods, only across the
-## scalar/String boundary.
+## scalar/String boundary. The policy checks live here; the marshalling and
+## the reflective invoke live behind `icx.jcall` (see CtOpts) -- `jfold` on a
+## JVM host, a refusal otherwise.
 ##
 ## There is no `unsafe_pure` check here any more, because Core drops the
 ## marker -- lowering treats the block as transparent. The effect system is
@@ -895,9 +849,10 @@ fn from_java_ret(st: ESt, env: Env, rc: String, r: Option[Object]) -> ER !io =
 ## method taking a String and returning void.
 fn eval_java(icx: ICx, st: ESt, env: Env, j: CJava) -> ER !io = {
   let jc = j.call
+  let simple = simple_of(jc.fqcn)
   if not icx.ffi {
     return cerrh(st, env, "compile-time Java calls are disabled",
-      "folding this would invoke `" ++ jreflect.class_info(jc.fqcn).simple ++ "." ++
+      "folding this would invoke `" ++ simple ++ "." ++
         jc.method ++ "` inside the compiler; pass --comptime-ffi to allow it, or " ++
         "make this a runtime call instead of a const")
   }
@@ -907,7 +862,6 @@ fn eval_java(icx: ICx, st: ESt, env: Env, j: CJava) -> ER !io = {
   if jc.is_field {
     return cerr(st, env, "Java static fields are not available at compile time")
   }
-  let simple = jreflect.class_info(jc.fqcn).simple
   if not jc.is_static {
     return cerrh(st, env, "only static Java methods can be folded",
       "`" ++ simple ++ "." ++ jc.method ++ "` needs a receiver, and comptime " ++
@@ -922,27 +876,11 @@ fn eval_java(icx: ICx, st: ESt, env: Env, j: CJava) -> ER !io = {
     env1 = env2
     vals = vals ++ [v]
   }
-  var jargs: List[Object] = []
-  var i = 0
-  for p in jc.param_cls {
-    let v = vals[i]
-    match to_java_arg(p, v) {
-      Some(o) -> { jargs = jargs ++ [o] }
-      None ->
-        return cerrh(st1, env1, "cannot pass this argument to Java at compile time",
-          "route C marshals Int/Float/Bool/String only; got a " ++ cvalue_kind(v) ++
-            " for a " ++ jreflect.class_info(p).simple ++ " parameter")
-    }
-    i = i + 1
-  }
   # a Java call is opaque to the fuel counter, so charge a flat cost
   let (st3, env3, _) = burn_n(st1, env1, 100)?
-  match jreflect.invoke_static(jc.fqcn, jc.method, jc.param_cls, jargs) {
-    Err(t) ->
-      cerrh(st3, env3, "`" ++ simple ++ "." ++ jc.method ++ "` threw " ++ t,
-        "the unsafe_pure around this call vouches that it is pure and total; " ++
-          "a throw means that promise does not hold for these arguments")
-    Ok(r) -> from_java_ret(st3, env3, jc.ret_cls, r)
+  match icx.jcall(jc, vals) {
+    Ok(v) -> Ok((st3, env3, v))
+    Err((m, h)) -> cerrh(st3, env3, m, h)
   }
 }
 
@@ -1084,7 +1022,9 @@ fn ceval(icx: ICx, st0: ESt, env0: Env, e: CExpr) -> ER !io = {
         CNeg ->
           match v {
             VInt(n) -> Ok((st1, env1, VInt(0 - n)))
-            VFloat(f) -> Ok((st1, env1, VFloat(0.0 - f)))
+            # `-f`, not `0.0 - f`: the subtraction loses the sign of zero
+            # (0.0 - 0.0 is +0.0), while the backends emit a true negate
+            VFloat(f) -> Ok((st1, env1, VFloat(-f)))
             _ -> cerr(st1, env1, "negation needs a number")
           }
         CBnot ->
@@ -1222,9 +1162,12 @@ fn eval_binary(icx: ICx, st: ESt, env: Env, op: CBinOp, l: CExpr, r: CExpr) -> E
         VFloat(x) -> x
         _ -> panic("comptime interpreter bug: mixed comparison")
       }
-      # NaN: every ordered comparison is false (spec §4.3)
-      if Double.isNaN(a) || Double.isNaN(b) { return Ok((st2, env2, VBool(false))) }
-      c = Double.compare(a, b)
+      # NaN: every ordered comparison is false (spec §4.3). `x != x` is the
+      # IEEE NaN test, and Dawn's Float `!=` is IEEE.
+      if a != a || b != b { return Ok((st2, env2, VBool(false))) }
+      # IEEE ordering, not Double.compare: the latter puts -0.0 below 0.0,
+      # which folded `-0.0 < 0.0` to true while both backends answer false
+      c = if a < b { -1 } else if a > b { 1 } else { 0 }
     }
     _ -> return cerr(st2, env2, "cannot order these values")
   }
@@ -1650,7 +1593,8 @@ pub fn eval_comptime(
     impls: impls,
     impl_fns: impl_fns,
     syms: tm.syms,
-    ffi: opts.ffi
+    ffi: opts.ffi,
+    jcall: opts.jcall
   }
   for c in tm.consts {
     # a comptime block inside the initializer folds first
@@ -1765,13 +1709,46 @@ test "comptime failures become diagnostics; blocks in bodies fold" {
   assert vals == [VInt(42)]
 }
 
+test "float folds agree with the backends on signed zero and NaN" {
+  # every one of these had (or could have had) a comptime answer that differed
+  # from what the emitted program computes: Double.compare puts -0.0 below
+  # 0.0, and a negation written as `0.0 - f` loses the sign of zero
+  let src = "const A: Bool = comptime { (0.0 - 1.0) * 0.0 < 0.0 }\n" ++
+    "const B: Bool = comptime { (0.0 - 1.0) * 0.0 <= 0.0 }\n" ++
+    "const C: Bool = comptime { 1.0 / (-0.0) < 0.0 }\n" ++
+    "const D: Bool = comptime { let n = 0.0 / 0.0\n  n == n }\n" ++
+    "const E: Bool = comptime { let n = 0.0 / 0.0\n  n <= n }\n" ++
+    "const F: Bool = comptime { -0.0 == 0.0 }\n"
+  let (m, pdiags) = parser.parse_module(src)
+  assert len(pdiags) == 0
+  let env: Map[String, ModExports] = map.empty()
+  let (cx1, tm) = check_module(cx_new(None, None), m, env)
+  assert len(cx1.diags) == 0
+  let no_fns: Map[String, TFun] = map.empty()
+  let no_owner: Map[String, Map[String, TFun]] = map.empty()
+  let out = eval_comptime(tm, no_fns, no_owner, no_impls(), set.empty(), cx1.adts,
+    cx1.traits, cx1.impl_table, "m", ct_fuel(1000000))
+  assert len(out.diags) == 0
+  assert map.get(out.consts, "A") == Some(VBool(false))
+  assert map.get(out.consts, "B") == Some(VBool(true))
+  assert map.get(out.consts, "C") == Some(VBool(true))
+  assert map.get(out.consts, "D") == Some(VBool(false))
+  assert map.get(out.consts, "E") == Some(VBool(false))
+  assert map.get(out.consts, "F") == Some(VBool(true))
+}
+
 fn ffi_java_src() -> String =
   "use java \"java.lang.Math\"\n" ++
   "const F: Int = unsafe_pure { Math.abs(-5) }\n" ++
   "const S: String = unsafe_pure { Long.toHexString(255) }.expect(\"hex\")\n" ++
   "use java \"java.lang.Long\"\n"
 
-test "route C folds a vouched static Java call when the host grants it" {
+# the granted-and-folded case lives in jfold's tests: it needs the real
+# reflective hook, and this module must stay compilable without one
+
+test "route C reaches only a refusal when no host hook is wired in" {
+  # policy said yes (ffi: true), but the default jcall is jcall_refused --
+  # the shape a compiler without a JVM host is in
   let (m, pdiags) = parser.parse_module(ffi_java_src())
   assert len(pdiags) == 0
   let env: Map[String, ModExports] = map.empty()
@@ -1780,10 +1757,11 @@ test "route C folds a vouched static Java call when the host grants it" {
   let no_fns: Map[String, TFun] = map.empty()
   let no_owner: Map[String, Map[String, TFun]] = map.empty()
   let out = eval_comptime(tm, no_fns, no_owner, no_impls(), set.empty(), cx1.adts,
-    cx1.traits, cx1.impl_table, "m", CtOpts { fuel: 1000000, ffi: true })
-  assert len(out.diags) == 0
-  assert map.get(out.consts, "F") == Some(VInt(5))
-  assert map.get(out.consts, "S") == Some(VStr("ff"))
+    cx1.traits, cx1.impl_table, "m",
+    CtOpts { fuel: 1000000, ffi: true, jcall: jcall_refused })
+  assert len(out.diags) == 2
+  assert str.contains(out.diags[0].msg, "not available in this compiler")
+  assert map.get(out.consts, "F") == None
 }
 
 test "route C is refused by default, however well vouched the call is" {

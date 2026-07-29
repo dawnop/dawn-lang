@@ -280,7 +280,7 @@ native 照抄才算"通过"。故语料要配少量**独立的期望输出**(不
 | **Phase 3 C 发射器** | **完成**——按收口后的 Core 重导完毕。整编译器(剥掉 JVM-only 模块,26k 行)发 4.7 MB C,cc **零 error 零 warning**,跑出的结果与 JVM 逐字一致 |
 | Phase 4 Perceus | **全部完成(2026-07-29)**:运行时 ABI、所有权推断 pass(`rc.dawn`)、emitc 消费两个节点、最后使用分析、复用分析(`array_with` 唯一时就地写,整编译器就地 73.8%,线性更新 spine 100% 原地)。语料 23 个程序全绿含 AddressSanitizer 档;整编译器前端 native 跑通,`checker.dawn` 峰值 4.4 GB → 1.46 GB、probe 2.77s。`CBorrowed` 判为不需要(开的是 owned 口子)。**字符串/Bytes 已入账(2026-07-29)**:slot 16B→8B、checker.dawn 峰值 1.46GB→81MB(−94%)、probe 2.10s、LeakSanitizer 全量启用(语料 0 漏,字典与被接住的 fault 两类设计内例外写明),见 §5.7/§6 |
 | Phase 5 `use c` / Phase A 验收 | 差分 harness 已就位并进了 CI。**`use c` 已不在关键路径**:§14.3/§14.7 的十个 io intrinsic 解决了编译器自己的 IO 需求 |
-| Phase 6 native 自举 | 卡在 Phase 4 |
+| Phase 6 native 自举 | Phase 4 已通;剩 §14.10 三道缝中的两道(缝 1 拒绝形式、缝 3 native 拿 std 的设计题)+ native main 本身。缝 2 已关(§14.19) |
 
 **已落地的件**:`selfhost/src/core.dawn`(IR)、`selfhost/src/lower.dawn`(TAST → Core)、
 `selfhost/src/emitc.dawn`(Core → C)、`emit.dawn`(Core → JVM)、`runtime/c/dawn_rt.{h,c}`、
@@ -1491,3 +1491,34 @@ C 侧并进 space 表,JVM 侧无视。语料 `strings.dawn` 的 `parse_int("  7 
 都被 std 真实引用,类级裁剪一字节都省不下;真正的下一刀是**按可达性裁 std 模块本身**
 (hello 还背着 ~50KB 的 hamt/pvec/map/set/fspath),`reach.dawn` 的函数级答案已经是它的底座,
 值不值得做取决于「发小 jar」这个场景的分量。
+
+### 14.19 缝 2 关账:comptime 的 Java 求值拆出 interp(2026-07-30)
+
+§14.10 说缝 2 的修法是「把 Java 调用求值拆成单独模块」,前半(`CValue` 搬进 core)当时
+已做,这次做完后半:`interp` 的 7 个 `use java` + `use jreflect` **归零**,marshalling 与
+反射调用整体搬进新模块 `jfold.dawn`。
+
+**边的方向是反着的,这是设计的全部**:`interp` 不 import `jfold`——它经 `CtOpts` 里的
+`jcall` 函数字段拿到能力(`fn(TJavaCall, List[CValue]) -> Result[CValue, (String, String)] !io`),
+默认值是本模块的 `jcall_refused`(拒绝并给诊断),JVM main 在 `extract_ct_opts` 里布线
+`jfold.fold_call`。于是将来的 native main 什么都不用做:不布线就是拒绝,`interp` 连同
+整个 native 闭包不再有 `use java`。职责分割:policy(--comptime-ffi 门、static-only、
+无 ctor/无 field)留在 `interp`,诊断里的类名从 `jreflect.class_info` 改为字符串切分
+(`simple_of`)——错误消息不构成 import 反射的理由。
+
+**顺手挖出两条现行错答案**(§14.12 同族:comptime 对后端撒谎,无诊断):
+
+- **`Double.compare` 把 -0.0 排在 0.0 之下**,而两个后端(DCMPL / C 的 `<`)按 IEEE 答
+  「相等」。实测 `const A = comptime { (0.0 - 1.0) * 0.0 < 0.0 }` 折成 `true`,运行时 `false`。
+- **取负写成 `0.0 - f` 丢零的符号**(0.0 - 0.0 = +0.0),后端发的是真取负(DNEG / `-x`)。
+  实测 `comptime { 1.0 / (-0.0) }` 折成 `Infinity`,运行时 `-Infinity`。
+
+修法与拆缝是同一件事:spec §4.3 钉死 Float 的 `==`/`<` 是 IEEE 比较,而 interp 自己
+就是被照此实现的后端编译出来的 Dawn 代码——`a == b`、`a < b`、`-f` 写在 interp 源里
+**就是**权威答案,NaN 测试用 `x != x`。`float_java_eq` 里那句「unlike Dawn's own
+total-order `==`」的注释是语义收口前的陈年错话,连同函数一起换掉了。
+回归测试钉住六个折叠答案(interp),route C 的 granted 用例随反射钩子迁去 jfold。
+
+**量出来的**:`use java` 的真实 import 行只剩三处归属——`main` 5(JVM main 专属)、
+`jfold` 7(缝 2,已在门后)、`stdlib` 1(缝 3)。三道缝剩两道:缝 1(checker→jreflect,
+一句拒绝的结构形式)与缝 3(native 编译器怎么拿到 std,待答的设计题)。
