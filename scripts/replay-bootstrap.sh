@@ -40,7 +40,7 @@ esac
 cd "$(dirname "$0")/.."
 # --std std explicitly: an old seed's *default* std is its embedded copy, but
 # the replay must compile today's sources against today's std
-VENDOR=(--std std --embed-std std
+VENDOR=(--std std
   --vendor dawn/tool --vendor org/objectweb/asm --vendor coursierapi)
 
 # 1) the seed compiles today's selfhost sources

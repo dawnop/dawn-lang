@@ -1,11 +1,13 @@
-# The bundled standard library (the Kotlin StdLib): std sources are read from a
-# directory (`--std <dir>`, default std), falling
-# back to `std/<name>` class-path resources when the directory is absent — a
-# standalone jar built with `--embed-std` carries them, so the toolchain works
-# outside the repo. Each module is parsed and checked once in modules.txt
-# order, its pub surface handed to every user module. std is checked with no std of its own in scope — only the
-# prelude, the builtins and explicit `use` edges — keeping the bootstrap
-# acyclic. A broken bundled std is a compiler bug: fail loudly.
+# The bundled standard library: std sources are read from a directory
+# (`--std <dir>`, default std), falling back to the embedded copy in
+# `stdsrc.dawn` when the directory is absent — generated string constants
+# compiled into the toolchain like any other module, so a standalone build
+# works outside the repo on every backend with no host resource API.
+# Each module is parsed and checked once in modules.txt order, its pub
+# surface handed to every user module. std is checked with no std of its
+# own in scope — only the prelude, the builtins and explicit `use` edges —
+# keeping the bootstrap acyclic. A broken bundled std is a compiler bug:
+# fail loudly.
 
 use std/io
 use std/str
@@ -19,8 +21,7 @@ use checker.{ModExports, check_module, cx_new, exports_of, Cx}
 use interp.{eval_comptime, note_trait_fn, CtOut, ct_default}
 use parser
 use lexer
-use std/bytes
-use java "java.lang.ClassLoader"
+use stdsrc
 
 ## Everything user-module analysis needs from std.
 pub type StdCtx = {
@@ -100,29 +101,13 @@ fn moved_renames(out0: Map[String, String]) -> Map[String, String] = {
   out
 }
 
-## A `std/<name>` class-path resource (the embedded std), or None.
-fn resource_text(name: String) -> Option[String] !io = {
-  match catch_fault(fn() => ClassLoader.getSystemResourceAsStream("std/" ++ name)) {
-    Ok(opt) ->
-      match opt {
-        Some(ins) ->
-          match catch_fault(fn() => ins.readAllBytes().expect("resource bytes")) {
-            Ok(bs) -> Some(bytes.decode(bs, "UTF-8"))
-            Err(_) -> None
-          }
-        None -> None
-      }
-    Err(_) -> None
-  }
-}
-
 ## A std source file: the directory first (repo development edits win), then
-## the class-path resources a standalone jar embeds.
+## the embedded copy `stdsrc.dawn` carries.
 fn std_read(dir: String, name: String) -> Result[String, String] !io =
   match io.read_file(dir ++ "/" ++ name) {
     Ok(t) -> Ok(t)
     Err(e) ->
-      match resource_text(name) {
+      match stdsrc.source(name) {
         Some(t) -> Ok(t)
         None -> Err(e)
       }
@@ -233,6 +218,35 @@ pub fn load_std(dir: String) -> Result[StdCtx, String] !io = {
     mods: mods,
     srcs: srcs
   })
+}
+
+test "the embedded std matches std/ on disk" {
+  # the staleness gate for the generated stdsrc.dawn: an edit under std/
+  # that forgot to regenerate fails here, in every `dawn test selfhost`
+  let names = match read_index("std") {
+    Ok(ns) -> ns
+    Err(e) -> panic("std index: " ++ e)
+  }
+  var files = ["modules.txt"]
+  for n in names { files = files ++ [n ++ ".dawn"] }
+  for f in files {
+    let disk = match io.read_file("std/" ++ f) {
+      Ok(t) -> t
+      Err(e) -> panic("std/" ++ f ++ ": " ++ e)
+    }
+    match stdsrc.source(f) {
+      Some(t) -> {
+        if t != disk {
+          println("stale embedded std: " ++ f ++ " (run python3 scripts/gen-stdsrc.py)")
+        }
+        assert t == disk
+      }
+      None -> {
+        println("missing from embedded std: " ++ f ++ " (run python3 scripts/gen-stdsrc.py)")
+        assert false
+      }
+    }
+  }
 }
 
 test "the bundled std loads, checks and evaluates" {

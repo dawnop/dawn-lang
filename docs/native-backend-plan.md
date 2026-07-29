@@ -1531,3 +1531,33 @@ Dawn 模块(字符串常量表),`stdlib.dawn` 改读它,两后端同一条路,na
 `stdlib.dawn` 最后一个 `use java` 归零。验收三条:嵌入边界=语义边界(lowering/spec
 引用才配嵌入)、只许一条摄入管线、`--std-dir` override 是影子不是第二机制。
 完整调研、优雅性论证与顺带做的 std 现状审计(S5 开题)见 **`docs/std-audit.md`**。
+
+### 14.21 缝 3 关账:std 嵌入改后端中立(2026-07-30)
+
+§14.20 拍的方向,落地了。`stdlib.dawn` 原本经 `ClassLoader.getSystemResourceAsStream`
+读回 jar 资源里的 std——宿主专属的取回路径,native 无法共享。现在
+`scripts/gen-stdsrc.py` 把 `std/modules.txt` + 11 个文件生成 `selfhost/src/stdsrc.dawn`
+(字符串常量,68KB,入库),`std_read` 的兜底从资源换成 `stdsrc.source(name)`,
+`stdlib.dawn` 的 `use java` **归零**。
+
+**`--embed-std` 整条机制删除**(main 的三处解析/打包、`jarw.write_jar_full` 与资源写入、
+bin/dawn、fixpoint/bench/replay-bootstrap/release.yml 的调用点):嵌入不再是打 jar 时的
+一步动作,而是**作为源文件存在**——任何编译器(含 N−1 种子)编 selfhost 都自动得到
+自包含的工具链,两个后端同一条路。资源概念从 jarw 里整个消失。
+
+**防陈旧靠测试不靠约定**:`stdlib.dawn` 新增 round-trip 测试,每次 `dawn test selfhost`
+把 `stdsrc.source(f)` 与磁盘逐文件比对,实测改 std 不重新生成会红并打印
+「run python3 scripts/gen-stdsrc.py」。生成文件 fmt 稳定(fmt-diff 155 文件过)。
+
+**端到端**:无 `std/` 目录的环境里,独立 jar 的 check/build/run 全通,hello 52KB
+(#67 的裁表尺寸,`to_upper` 走的就是嵌入 std)。fixpoint B==C、prev-diff(v0.30.0 种子
+编 stdsrc.dawn 无压力)、run-diff、spike-native 全绿;core-golden 变化恰为
+jarw/main/stdlib + 新模块 stdsrc,已重录。
+
+**§14.20 三张账单的兑现情况**:管线唯一✓(blob 走同一 parser/checker,只换了兜底来源);
+override 即既有 `--std`(目录优先语义未动)✓;嵌入边界=语义边界**未兑现**——嵌的仍是
+整个 std,边界收窄归 S5(`docs/std-audit.md` §4)。顺带记一个既有未修的坑:`--std` 默认
+`std` 且目录优先,任何 cwd 下恰好有 `std/` 目录都会被静默当作 std 用——skew 口子,归 S5。
+
+`use java` 真实 import 至此只剩 `main` 5 + `jfold` 7,全在 JVM 半区门后。
+native 自举剩:缝 1(checker→jreflect 拒绝形式)+ native main 本身。

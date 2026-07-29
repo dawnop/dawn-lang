@@ -61,7 +61,7 @@ OUT=${TMPDIR:-/tmp}/selfhost-bench.$$
 mkdir -p "$OUT"
 trap 'rm -rf "$OUT"' EXIT
 
-VENDOR=(--std std --embed-std std
+VENDOR=(--std std
   --vendor dawn/tool --vendor org/objectweb/asm --vendor coursierapi)
 
 SEED="$(seed_jar)"

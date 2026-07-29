@@ -31,7 +31,7 @@ git show kotlin-final:compiler/src/main/java/dawn/rt/DawnList.java > /tmp/DawnLi
 # 2. 改成干 20 遍,结果存进一个 volatile static 防止被优化掉,javac -d /tmp/patched
 # 3. 量(种子路径按 scripts/seed-release.txt)
 SEED=.dawn/seeds/v0.11.0/seed.jar
-ARGS="build selfhost --std std --embed-std std --vendor dawn/tool \
+ARGS="build selfhost --std std --vendor dawn/tool \
       --vendor org/objectweb/asm --vendor coursierapi"
 /usr/bin/time -f "base  wall=%e user=%U" java -Xss512m -cp "$SEED"          main $ARGS -o /tmp/a.jar
 /usr/bin/time -f "patch wall=%e user=%U" java -Xss512m -cp "/tmp/patched:$SEED" main $ARGS -o /tmp/b.jar

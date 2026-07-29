@@ -511,14 +511,13 @@ fn peek_target(rest: List[String]) -> String = {
   var i = 0
   while i < len(rest) {
     let a = rest[i]
-    if a == "--std" || a == "-o" || a == "--vendor" || a == "--comptime-fuel" || a == "--cp" ||
-      a == "--embed-std" {
-        i = i + 2
-      } else if a == "--native" || a == "--check" || a == "--comptime-ffi" {
-        i = i + 1
-      } else {
-        return a
-      }
+    if a == "--std" || a == "-o" || a == "--vendor" || a == "--comptime-fuel" || a == "--cp" {
+      i = i + 2
+    } else if a == "--native" || a == "--check" || a == "--comptime-ffi" {
+      i = i + 1
+    } else {
+      return a
+    }
   }
   ""
 }
@@ -880,7 +879,6 @@ fn run_build(rest0: List[String]) -> Unit !io = {
   var target = ""
   var std_dir = "std"
   var vendor_pkgs: List[String] = []
-  var embed_std = ""
   var native = false
   var i = 0
   while i < len(rest) {
@@ -892,9 +890,6 @@ fn run_build(rest0: List[String]) -> Unit !io = {
       i = i + 2
     } else if rest[i] == "--vendor" && i + 1 < len(rest) {
       vendor_pkgs = vendor_pkgs ++ [rest[i + 1]]
-      i = i + 2
-    } else if rest[i] == "--embed-std" && i + 1 < len(rest) {
-      embed_std = rest[i + 1]
       i = i + 2
     } else if rest[i] == "--native" {
       native = true
@@ -950,24 +945,9 @@ fn run_build(rest0: List[String]) -> Unit !io = {
   } else {
     vendor_jars(deps, jar_path) ++ rel_entries(user_cp, jar_path)
   }
-  var resources: List[(String, Bytes)] = []
-  if embed_std != "" {
-    match io.list_dir(embed_std) {
-      Ok(names) -> {
-        for nm in sort(names) {
-          let fp = embed_std ++ "/" ++ nm
-          if not io.is_dir(fp) {
-            match io.read_bytes(fp) {
-              Ok(bs) -> { resources = resources ++ [("std/" ++ nm, bs)] }
-              Err(e) -> panic("cannot read " ++ fp ++ ": " ++ e)
-            }
-          }
-        }
-      }
-      Err(e) -> panic("cannot list " ++ embed_std ++ ": " ++ e)
-    }
-  }
-  jarw.write_jar_full(jar_path, entry, all, cp_entries, resources)
+  # no std resources any more: the toolchain's own jar carries std as the
+  # compiled stdsrc module, so embedding happens by being a source file
+  jarw.write_jar_cp(jar_path, entry, all, cp_entries)
   if native {
     let bin_out = if out != "" { out } else { stem }
     return run_native_image(jar_path, bin_out, user_cp, entry)
