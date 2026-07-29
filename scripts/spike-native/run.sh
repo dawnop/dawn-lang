@@ -151,7 +151,7 @@ for prog in "${progs[@]}"; do
     -Wno-unused-variable -Wno-unused-but-set-variable \
     -Wno-unused-parameter -Wno-unused-label \
     -I "$root/runtime/c" \
-    -o "$work/$name.bin" "$work/$name.c" "$root/runtime/c/dawn_rt.c" \
+    -o "$work/$name.bin" "$work/$name.c" "$root/runtime/c/dawn_rt.c" -lm \
     >"$work/$name.cc" 2>&1; then
     verdict "$name:cc" ok
   else

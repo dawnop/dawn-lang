@@ -87,6 +87,14 @@ fn pop(st: CSt) -> CSt = CSt { ..st, ind: st.ind - 1 }
 fn discard(st: CSt, v: String) -> CSt =
   if v == "DAWN_UNIT" { st } else { line(st, "(void)(" ++ v ++ ");") }
 
+## An ADT layout reached through an erased position. Every union slot is
+## `void*` and every generic or opaque local is `void*`, so the C type of a
+## projection's target says nothing about what it holds -- exactly the
+## situation the JVM answers with a CHECKCAST. The cast is unconditional for
+## the same reason: `slot_of` gives `.p` for an ADT-typed field, so even a
+## target whose Dawn type is a known ADT can arrive as `void*`.
+fn adt_ref(v: String) -> String = "((dawn_adt*)(" ++ v ++ "))"
+
 # ---- names ----
 
 fn sanitize(s: String) -> String = {
@@ -335,20 +343,20 @@ pub fn emit_expr(st: CSt, e: CExpr) -> (CSt, String) =
     CTuple(elems, _) -> emit_alloc(st, 0, elems, true)
     CField(target, _, _, idx, ty) -> {
       let (st1, tv) = emit_expr(st, target)
-      (st1, "(" ++ tv ++ ")->fields[" ++ to_string(idx) ++ "]." ++ slot_of(ty))
+      (st1, adt_ref(tv) ++ "->fields[" ++ to_string(idx) ++ "]." ++ slot_of(ty))
     }
     CTupleGet(target, idx, ty) -> {
       # the other half of the tuple's erasure: every element went in boxed
       let (st1, tv) = emit_expr(st, target)
-      (st1, unbox_expr("(" ++ tv ++ ")->fields[" ++ to_string(idx) ++ "].p", ty))
+      (st1, unbox_expr(adt_ref(tv) ++ "->fields[" ++ to_string(idx) ++ "].p", ty))
     }
     CIsCtor(target, _, ci) -> {
       let (st1, tv) = emit_expr(st, target)
-      (st1, "((" ++ tv ++ ")->tag == " ++ to_string(ci) ++ ")")
+      (st1, "(" ++ adt_ref(tv) ++ "->tag == " ++ to_string(ci) ++ ")")
     }
     CTagOf(target, _) -> {
       let (st1, tv) = emit_expr(st, target)
-      (st1, "((int64_t)(" ++ tv ++ ")->tag)")
+      (st1, "((int64_t)" ++ adt_ref(tv) ++ "->tag)")
     }
     CBox(inner, from) -> {
       let (st1, v) = emit_expr(st, inner)
@@ -531,6 +539,18 @@ fn emit_binary(st: CSt, op: CBinOp, l: CExpr, r: CExpr, ty0: Ty) -> (CSt, String
     let f = if lt == TyBytes { "dawn_bytes_eq" } else { "dawn_str_eq" }
     let call = f ++ "(" ++ lv ++ ", " ++ rv ++ ")"
     (st2, if op == CEq { call } else { "(!" ++ call ++ ")" })
+  } else if (op == CLt || op == CLe || op == CGt || op == CGe) && lt == TyString {
+    # `dawn_str` is a struct, so C's relational operators do not apply to it;
+    # the order is the same code-point order `dawn_cmp_str` gives the Ord
+    # dictionary.
+    let (st1, lv) = emit_expr(st, l)
+    let (st2, rv) = emit_expr(st1, r)
+    (st2, "(dawn_cmp_str(" ++ lv ++ ", " ++ rv ++ ") " ++ bin_op_c(op) ++ " 0)")
+  } else if op == CMod && ty == TyFloat {
+    # C's `%` is integer-only. `fmod` is the IEEE remainder the JVM's DREM is.
+    let (st1, lv) = emit_expr(st, l)
+    let (st2, rv) = emit_expr(st1, r)
+    (st2, "fmod(" ++ lv ++ ", " ++ rv ++ ")")
   } else if op == CUshr {
     let (st1, lv) = emit_expr(st, l)
     let (st2, rv) = emit_expr(st1, r)
@@ -683,11 +703,25 @@ fn impl_symbol(owner: String, tid: Int, subject: Ty, method: String) -> String =
 fn default_symbol(owner: String, tid: Int, method: String) -> String =
   mangle(owner, "default$" ++ to_string(tid) ++ "$" ++ method)
 
+## What fills each slot, without the module that happens to hold the copy.
+fn slot_shape(d: CDictDef) -> String = {
+  var parts: List[String] = []
+  for slot in d.slots {
+    parts = parts ++ [
+      match slot {
+        CSlotFn(_, n) -> "fn:" ++ n
+        CSlotDefault(_, m) -> "default:" ++ m
+      }
+    ]
+  }
+  join(parts, ",")
+}
+
 ## A dictionary is a flat array of function pointers in the trait's
 ## declaration order. The JVM backend uses an interface and a singleton
 ## instead; that difference stays inside the two emitters because Core
 ## already resolved which function fills each slot.
-fn emit_dict(st: CSt, d: CDictDef) -> CSt = {
+fn dict_line(d: CDictDef) -> String = {
   var parts: List[String] = []
   for slot in d.slots {
     parts = parts ++ [
@@ -699,8 +733,8 @@ fn emit_dict(st: CSt, d: CDictDef) -> CSt = {
   }
   # the argument half is written out rather than left to default
   # initialisation: the C backend builds with -Werror=missing-field-initializers
-  line(st, "static dawn_dict " ++ dict_symbol(d.key) ++ " = { " ++
-      to_string(len(parts)) ++ ", { " ++ join(parts, ", ") ++ " }, 0, { 0 } };")
+  "static dawn_dict " ++ dict_symbol(d.key) ++ " = { " ++
+    to_string(len(parts)) ++ ", { " ++ join(parts, ", ") ++ " }, 0, { 0 } };"
 }
 
 ## The handful of std functions the native backend still borrows from its C
@@ -901,7 +935,12 @@ pub fn emit_stmt(st: CSt, s: CStmt) -> CSt =
     }
     CSAssign(sym, value) -> {
       let (st1, v) = emit_expr(st, value)
-      line(st1, local_name(sym) ++ " = " ++ v ++ ";")
+      # Same reason the `let` above tests it: a right-hand side that leaves
+      # never reaches the store, and `emit_expr` hands back DAWN_UNIT for it,
+      # which does not assign to the variable's type.
+      if no_value(value) { discard(st1, v) } else {
+        line(st1, local_name(sym) ++ " = " ++ v ++ ";")
+      }
     }
     CSDiscard(e) -> {
       let (st1, v) = emit_expr(st, e)
@@ -1083,6 +1122,9 @@ pub fn emit_program(units: List[EmitMod], entry: String) -> String = {
   var st = CSt { out: "", tmp: 0, ind: 0, consts: map.empty(), blocks: map.empty() }
   st = line(st, "/* generated by dawn __emitc -- Core IR -> C */")
   st = line(st, "#include \"dawn_rt.h\"")
+  # `fmod`, for Float `%`. Without the declaration C would assume it returns
+  # int and truncate the answer -- a wrong result, and only a warning.
+  st = line(st, "#include <math.h>")
   st = line(st, "")
   st = emit_case_table(st, "dawn_upper_ranges", case_table.upper())
   st = line(st, "")
@@ -1111,9 +1153,32 @@ pub fn emit_program(units: List[EmitMod], entry: String) -> String = {
   }
   st = line(st, "")
 
+  # One translation unit for the whole program, so a dictionary two modules
+  # both need would be defined twice under the same symbol. The JVM dedupes by
+  # the same key (emit.dawn skips one its Gen already carries), but there the
+  # scope is a class, and a class is a module -- which is why only C sees it.
+  #
+  # Every module that needs `Eq[String]` lowers its own copy of the slot
+  # function, so the two definitions are not textually equal: they differ in
+  # the owner the slot symbol is mangled from, and nothing else. Keeping the
+  # first is therefore sound, and `slot_shape` is what says so -- it drops the
+  # owner and holds the rest to being identical, so a real disagreement about
+  # what fills a slot is a panic rather than a silent choice.
+  var seen: Map[String, String] = map.empty()
   for u in units {
     for d in u.m.dicts {
-      st = emit_dict(st, d)
+      let shape = slot_shape(d)
+      match map.get(seen, d.key) {
+        Some(prev) ->
+          if prev != shape {
+            panic("emitc: dictionary " ++ d.key ++ " filled two ways: " ++
+                prev ++ " vs " ++ shape)
+          }
+        None -> {
+          seen = map.insert(seen, d.key, shape)
+          st = line(st, dict_line(d))
+        }
+      }
     }
   }
   st = line(st, "")

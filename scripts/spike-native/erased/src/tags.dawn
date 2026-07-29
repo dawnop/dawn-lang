@@ -1,0 +1,21 @@
+# The second module exists for one reason: it needs the same dictionaries
+# `main` does. The JVM gives each module its own class and dedupes dictionary
+# definitions inside it, so a shared one is simply emitted twice and nothing
+# collides. C has one translation unit for the whole program, and two
+# definitions of the same symbol is an error there.
+
+use std/list
+
+pub type Inner = { tag: Int, label: String }
+
+pub type Box = { name: String, inner: Inner }
+
+## `Eq[List[String]]` -- the dictionary `main` also needs.
+pub fn is_ab(xs: List[String]) -> Bool = xs == ["a", "b"]
+
+## A projection whose target is itself a projection: `b.inner` is read out of
+## an erased field slot, so the C expression holding it is `void*` however
+## well its Dawn type is known.
+pub fn label_of(b: Box) -> String = b.inner.label
+
+pub fn tag_of(b: Box) -> Int = b.inner.tag

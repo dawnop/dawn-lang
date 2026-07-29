@@ -1,0 +1,50 @@
+# Four things C gets wrong that the JVM does not, all of them found by
+# emitting the compiler itself (S4):
+#
+#   * a projection off an erased slot -- `->fields` on a `void*`
+#   * `<` on String -- `dawn_str` is a struct, so C's operator does not apply
+#   * `%` on Float -- C's `%` is integer-only, and `fmod` undeclared silently
+#     truncates to int
+#   * a store whose right-hand side leaves -- `emit_expr` hands back DAWN_UNIT
+#     and C will not assign that to a String
+#
+# The dictionary collision needs the second module; see tags.dawn.
+
+use std/io
+use std/list
+use tags.{Box, Inner, is_ab, label_of, tag_of}
+
+## The right-hand side has type Never, so there is no value to store. Reached
+## only when `ok` is false, which `main` never does -- the point is that the
+## branch compiles at all.
+fn pick(ok: Bool) -> String = {
+  var s: String = "start"
+  if not ok { s = panic("unreachable") }
+  s
+}
+
+pub fn main() -> Unit !io = {
+  let b = Box { name: "outer", inner: Inner { tag: 7, label: "deep" } }
+
+  println("-- erased projection --")
+  println("label_of(b)   = ${label_of(b)}")
+  println("tag_of(b)     = ${tag_of(b)}")
+  println("b.inner.label = ${b.inner.label}")
+
+  println("-- String order --")
+  println("apple < banana = ${"apple" < "banana"}")
+  println("banana < apple = ${"banana" < "apple"}")
+  println("apple <= apple = ${"apple" <= "apple"}")
+  println("banana > apple = ${"banana" > "apple"}")
+
+  println("-- Float remainder --")
+  println("7.5 % 2.0     = ${7.5 % 2.0}")
+  println("-7.5 % 2.0    = ${-7.5 % 2.0}")
+
+  println("-- diverging store --")
+  println("pick(true)    = ${pick(true)}")
+
+  println("-- shared dictionary --")
+  println("is_ab here    = ${["a", "b"] == ["a", "b"]}")
+  println("is_ab there   = ${is_ab(["a", "b"])}")
+}
