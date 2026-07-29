@@ -1176,6 +1176,11 @@ use java "java.lang.Math"      # Java 互操作（§9），形式不变
 所有声明默认模块私有；`pub` 导出 `fn`/`type`/`alias`/`const`（`pub type` 连带构造器与字段，见 §3.3）。
 访问或引入非 `pub` 项 → 错误（`` `parse` is private to module json/parser ``，附 hint：加 `pub`）。
 
+> **加载范围（2026-07-30，LANG-07）**：`dawn run/test/build <dir>` 默认加载 `src/` 下
+> **全部**模块——未被引用的模块也检查（bit-rot 防护，这是对的默认）。`--closure`
+> 收窄为「入口 `src/main.dawn` 的 use 闭包」，供大工程出产物用；`dawn check` 恒为全仓。
+> CI 推荐：`dawn check` 守全仓、`dawn build --closure` 出产物。
+
 ### 10.5 编译单元与求值顺序
 
 - **目录模式加载 `src/` 下全部 `.dawn` 文件**（不止 `use` 闭包）：未被引用的模块也要通过

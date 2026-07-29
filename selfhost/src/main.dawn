@@ -151,7 +151,8 @@ fn write_class(dir: String, name: String, bs: Bytes) -> Result[Unit, String] !io
 fn collect_program(
   target: String,
   std_dir: String,
-  opts: CtOpts
+  opts: CtOpts,
+  closure: Bool
 ) -> (List[(String, Bytes)], String, List[(String, String, List[String])]) !io = {
   var classes: List[(String, Bytes)] = []
   var adts = prelude_adts()
@@ -173,8 +174,22 @@ fn collect_program(
       let (k, v) = pr
       adts = map.insert(adts, k, v)
     }
+    # --closure: seed from the entry and follow its use edges only, instead of
+    # loading everything under src/ (module-access-design 2.2). The full-load
+    # default stays: unreferenced modules still check, which is bit-rot
+    # protection worth keeping as the default.
     let loaded =
-      if io.is_dir(target) { load_directory(target) } else { load_file(target) }
+      if closure && io.is_dir(target) {
+        let entry_file = target ++ "/src/main.dawn"
+        if not io.exists(entry_file) {
+          cli_error("--closure needs an entry module (expected " ++ entry_file ++ ")")
+        }
+        load_file(entry_file)
+      } else if io.is_dir(target) {
+        load_directory(target)
+      } else {
+        load_file(target)
+      }
     let prog = analyze_program(loaded, std, opts, jsig_real())
     if len(prog.diags) > 0 { fail_compile(prog.diags) }
     mods = prog.modules
@@ -369,6 +384,7 @@ fn usage() -> String = join([
   "  dawn test <target>                   compile with test blocks and run them",
   "  dawn build <target> [-o out.jar]     produce an executable jar (tests stripped)",
   "  dawn build <target> --native [-o out]",
+  "  dawn run/test/build ... --closure     load only the entry's use closure (default: all of src/)",
   "                                       produce a standalone native binary (needs native-image)",
   "  dawn fmt <file.dawn | dir>...        format files in place (a dir formats all .dawn under it)",
   "  dawn fmt --check <target>...         report files that are not formatted (exit 1 if any)",
@@ -543,6 +559,16 @@ fn run_pkghash(rest: List[String]) -> Unit !io = {
 # (the checker's `use java` reflection reads the system class path; the Kotlin
 # CLI swaps in a URLClassLoader instead, which reflection here cannot do) ----
 
+## Pull a boolean `--flag` out of an argument list.
+fn extract_flag(rest: List[String], flag: String) -> (Bool, List[String]) = {
+  var found = false
+  var out: List[String] = []
+  for a in rest {
+    if a == flag { found = true } else { out = out ++ [a] }
+  }
+  (found, out)
+}
+
 ## The positional target: the first token no known `--flag value` pair claims.
 fn peek_target(rest: List[String]) -> String = {
   var i = 0
@@ -550,11 +576,12 @@ fn peek_target(rest: List[String]) -> String = {
     let a = rest[i]
     if a == "--std" || a == "-o" || a == "--vendor" || a == "--comptime-fuel" || a == "--cp" {
       i = i + 2
-    } else if a == "--native" || a == "--check" || a == "--comptime-ffi" {
-      i = i + 1
-    } else {
-      return a
-    }
+    } else if a == "--native" || a == "--check" || a == "--comptime-ffi" ||
+      a == "--closure" {
+        i = i + 1
+      } else {
+        return a
+      }
   }
   ""
 }
@@ -659,7 +686,8 @@ fn spawn_java(cp: String, cls: String, args: List[String]) -> Int !io = {
 ## along so `use java` third-party classes stay visible).
 fn run_run(rest0: List[String]) -> Unit !io = {
   let (_, rest1) = extract_cp(rest0)
-  let (opts, rest) = extract_ct_opts(rest1)
+  let (opts, restb) = extract_ct_opts(rest1)
+  let (closure, rest) = extract_flag(restb, "--closure")
   var target = ""
   var std_dir = "std"
   var args2: List[String] = []
@@ -679,7 +707,7 @@ fn run_run(rest0: List[String]) -> Unit !io = {
   if target == "" {
     return cli_error("usage: dawn run [--cp jars] <file.dawn | project-dir>")
   }
-  let (classes, entry, _) = collect_program(target, std_dir, opts)
+  let (classes, entry, _) = collect_program(target, std_dir, opts, closure)
   if entry == "" {
     return cli_error(target ++ " has no pub fn main() -> Unit !io, nothing to run")
   }
@@ -692,7 +720,8 @@ fn run_run(rest0: List[String]) -> Unit !io = {
 ## test blocks plus a synthesized dawn$TestMain runner, and run it.
 fn run_test(rest0: List[String]) -> Unit !io = {
   let (_, rest1) = extract_cp(rest0)
-  let (opts, rest) = extract_ct_opts(rest1)
+  let (opts, restb) = extract_ct_opts(rest1)
+  let (closure2, rest) = extract_flag(restb, "--closure")
   var target = ""
   var std_dir = "std"
   var i = 0
@@ -708,7 +737,7 @@ fn run_test(rest0: List[String]) -> Unit !io = {
   if target == "" {
     return cli_error("usage: dawn test [--cp jars] <file.dawn | project-dir>")
   }
-  let (classes, _, tests_info) = collect_program(target, std_dir, opts)
+  let (classes, _, tests_info) = collect_program(target, std_dir, opts, closure2)
   if len(tests_info) == 0 { return cli_error(target ++ " has no test blocks") }
   var runner_tests: List[(String, Int, String)] = []
   for mi in tests_info {
@@ -748,7 +777,7 @@ fn run_emitrt(rest: List[String]) -> Unit !io = {
   if out == "" {
     return cli_error("usage: dawn __emit <file.dawn | project-dir> -o <dir>")
   }
-  let (classes, _, _) = collect_program(target, std_dir, ct_default())
+  let (classes, _, _) = collect_program(target, std_dir, ct_default(), false)
   var seen: Set[String] = set.empty()
   var n = 0
   for pair in classes {
@@ -920,7 +949,8 @@ fn run_native_image(
 ## and ASM, which is what makes the jar standalone.
 fn run_build(rest0: List[String]) -> Unit !io = {
   let (user_cp, rest1) = extract_cp(rest0)
-  let (opts, rest) = extract_ct_opts(rest1)
+  let (opts, restb) = extract_ct_opts(rest1)
+  let (closure, rest) = extract_flag(restb, "--closure")
   var out = ""
   var target = ""
   var std_dir = "std"
@@ -959,7 +989,7 @@ fn run_build(rest0: List[String]) -> Unit !io = {
   } else {
     stem ++ ".jar"
   }
-  let (classes, entry, _) = collect_program(target, std_dir, opts)
+  let (classes, entry, _) = collect_program(target, std_dir, opts, closure)
   if entry == "" {
     return cli_error(target ++ " has no pub fn main() -> Unit !io to use as an entry point")
   }

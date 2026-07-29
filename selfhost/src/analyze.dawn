@@ -1139,6 +1139,21 @@ test "a two-module project analyzes end to end" {
   assert len(prog.diags) == 0
 }
 
+test "closure loading skips an unreferenced module (module-access 2.2)" {
+  let root = "/tmp/dawn-selfhost-analyze/closure1"
+  mkdirs(root ++ "/src")
+  put(root ++ "/src/main.dawn", "pub fn main() -> Unit !io = println(\"hi\")\n")
+  # broken on purpose, and nothing imports it
+  put(root ++ "/src/orphan.dawn", "fn bad() -> Int = \"nope\"\n")
+  # the full load sees both (bit-rot protection, the default)
+  let full = load_directory(root)
+  assert len(full.modules) == 2
+  # the closure load seeds from the entry and never reaches the orphan
+  let clo = load_file(root ++ "/src/main.dawn")
+  assert len(clo.modules) == 1
+  assert clo.modules[0].mod_path == "main"
+}
+
 test "a module may be imported qualified and selectively at once" {
   # Two different acts: one binds a module alias to call through, the other
   # binds names. A module that exports a type AND functions needs both, and
