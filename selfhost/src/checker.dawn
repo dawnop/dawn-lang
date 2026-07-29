@@ -5385,7 +5385,22 @@ fn check_var(cx: Cx, name: String, expected: Option[Ty], lo: Int, hi: Int) -> (C
 ## usual — locals stay in scope — but its effects are captured in isolation.
 ## Concrete io is masked to Pure; an effect variable is rejected; a body that
 ## did no io at all flags the stamp as redundant.
+##
+## std-only (LANG-01, docs/audit/purity-boundary-design.md step 1): the stamp
+## unconditionally erases an effect the checker proved, and everything purity
+## licenses — folding, reordering, dropping a call — believes it. That is a
+## soundness escape hatch, and design.md's original ruling was that it does
+## not open to user code. std is the one place a wrapper over a host call is
+## reviewed, versioned and differentially tested with the compiler itself;
+## nothing outside std uses the stamp today (ecosystem scanned 2026-07-30).
 fn check_unsafe_pure(cx: Cx, body: Expr, expected: Option[Ty], lo: Int, hi: Int) -> (Cx, Ty, TExpr) !io = {
+  if not cx.is_std_module {
+    let (cxe, t0, bx0) = check_expr(cx, body, expected)
+    return (cerr_h(cxe, "unsafe_pure is not available in user code", lo, hi,
+      "the stamp erases a proven io effect, and everything purity licenses believes it; " ++
+        "declare the function !io, or — if the computation truly is pure — ask for a std " ++
+        "function (docs/audit/purity-boundary-design.md)"), t0, bx0)
+  }
   let saved_used = cx.used_effects
   let saved_wit = cx.eff_witness
   let empty_w: Map[Eff, (Int, Int, String)] = map.empty()
@@ -7860,7 +7875,9 @@ fn test_jsig() -> Jsig = {
 }
 
 test "unsafe_pure masks io and flags redundancy" {
+  # std module: the stamp is std-only (purity-boundary step 1)
   var cx = seed_prelude(test_cx())
+  cx = Cx { ..cx, is_std_module: true }
   cx = push_scope(cx)
   # a pure body makes the stamp a no-op
   let e = EUnsafePure(EInt(1, 12, 13), 0, 14)
@@ -7877,6 +7894,17 @@ test "unsafe_pure masks io and flags redundancy" {
   assert t2 == opt_ty(TyString)
   assert len(cx2.diags) == 0
   assert len(cx2.used_effects) == 0
+}
+
+test "unsafe_pure is refused outside std" {
+  # the same expression a std module may write is an error in user code:
+  # the stamp erases a proven effect, and that door does not open outward
+  var cx = seed_prelude(test_cx())
+  cx = push_scope(cx)
+  let e = EUnsafePure(EInt(1, 12, 13), 0, 14)
+  let (cx1, _, _) = check_expr(cx, e, no_expected())
+  assert len(cx1.diags) > 0
+  assert str.contains(cx1.diags[0].msg, "not available in user code")
 }
 
 test "java calls resolve overloads, wrap references and reject unknowns" {

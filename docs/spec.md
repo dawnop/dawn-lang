@@ -696,23 +696,29 @@ fn compose[A, B, C](f: fn(A) -> B !e1, g: fn(B) -> C !e2) -> fn(A) -> C !(e1 | e
   规范化为 `!io`；两者皆纯则规范化为纯，结果可在纯上下文调用。
 - 调用点实例化：`map(xs, println)` 中 `e = io`，故整个调用是 io。
 
-### 6.4 逃生门：`unsafe_pure`
+### 6.4 逃生门：`unsafe_pure`（仅限 std）
 
 `unsafe_pure { <表达式> }` 是**纯 FFI** 的表达式块：作者担保被包裹的表达式为纯，
-类型系统据此把它的效果由 `!io` **屏蔽为 pure**，于是一个 Java 互操作调用可以支撑一个
-纯函数。设计见 [`docs/pure-ffi-design.md`](pure-ffi-design.md)。捆绑 std 里 `substring`
-的真实写法（Java 侧越界回 `null`，检查器交给 Dawn 就是 `None`）：
+类型系统据此把它的效果由 `!io` **屏蔽为 pure**，于是一个宿主互操作调用可以支撑一个
+纯函数。设计见 [`docs/pure-ffi-design.md`](pure-ffi-design.md)。
+
+**用户代码不可用（2026-07-30 收窄，LANG-01）**：这个戳无条件抹掉检查器证明过的效果，
+而纯性许可的一切推理（折叠、重排、省略调用）都会相信它——这是健全性的口子，
+`design.md` 的原始裁决本就是「unsafe escape 不向用户代码开放」。它只在捆绑 std 模块内
+合法（`is_std_module`）；用户模块中出现即编译错误。std 是唯一随编译器一起发布、
+一起自举、一起被 N vs N−1 差分守护的代码——担保收在那儿才有人对账。
+真有 std 之外的纯包装需求，它应该成为一个 std 函数（不给逃生阀：给了等于没收窄）。
 
 ```dawn
 use java "java.lang.Math"
 
-pub fn sqrt(x: Float) -> Float = unsafe_pure { Math.sqrt(x) }
+pub fn sqrt(x: Float) -> Float = unsafe_pure { Math.sqrt(x) }   # 仅 std 模块内合法
 ```
 
-> **std 不用它。** 上面这个例子曾经是 `std/str` 的真实写法；今天 std 一处 `unsafe_pure`、
-> 一处 `use java` 都没有——那些操作已成为 **intrinsic 契约**的一部分（§11），由后端负责兑现，
-> 而不是由调用点逐个作保。编译器自身也在 2026-07-27 走完同一条路（`char_is_*`）。
-> 所以 `unsafe_pure` 今天在整个生态里**零使用点**：它是给用户 FFI 留的门，不是语言的地基。
+> **而 std 今天也不用它。** 上面这个例子曾经是 `std/str` 的真实写法；今天 std 一处
+> `unsafe_pure`、一处 `use java` 都没有——那些操作已成为 **intrinsic 契约**的一部分（§11），
+> 由后端负责兑现，而不是由调用点逐个作保。所以 `unsafe_pure` 在整个生态里**零使用点**：
+> 留着它是给未来 std 底层包装的机制，不是语言表面。
 
 被包裹的必须是**静态方法调用**：Dawn 原生类型（String/List/Bytes/Map/Set）不是 Java 类型，
 `s.substring(…)` 这种实例调用今天走不通（`pure-ffi-design.md` §九）。

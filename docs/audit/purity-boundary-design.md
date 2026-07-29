@@ -3,7 +3,16 @@
 > 动码前的**调研与方案**，不是设计定稿。
 > 覆盖 codebase-audit.md 的 **LANG-01（P0）** 与 **ARCH-06（P1）**。
 >
-> 状态：**步骤 1、2 proposed 且可做；步骤 3 冻结。**
+> **2026-07-30**：**步骤 1 已落地**（`check_unsafe_pure` 对非 std 模块直接报错，
+> 生态扫描零使用点含 dawnop-site；spec §6.4 已改）。**步骤 2 被当日状态吞并**：
+> 缝 2 之后 comptime 的 Java 求值只经 `CtOpts.jcall` 钩子（默认拒绝、--comptime-ffi
+> 另设闸），而缝 1 之后捆绑 std 被禁 `use java`（load_std 用拒绝 oracle 检查）——
+> 步骤 1 又把 unsafe_pure 收归 std，于是 route C 不存在合法生产者，allowlist 没有
+> 对象可列。机制保留在 jfold（门后），测试夹具是唯一使用者。步骤 3 维持冻结
+> ——R6 虽已裁决（interp 吃 Core 的 CValue、TAST 的树），trampoline 化的收益
+> 要与 native 侧栈深实测一起重估。
+>
+> 原状态：**步骤 1、2 proposed 且可做；步骤 3 冻结。**
 > 步骤 3（`ceval` trampoline 化）与 [`../native-backend-plan.md`](../native-backend-plan.md)
 > 的 **R6**（「Core IR 落地后，comptime 解释器该吃 Core 还是继续吃 TAST?**此项未决**」）
 > 撞车——interp 若改吃 Core，trampoline 化的工作全部重做。
