@@ -186,7 +186,7 @@ Dawn 是 dict-passing 而非单态化,改成单态化是大手术且与字典表
 ### 5.4 深递归 / 栈
 
 `-Xss512m` 说明存在深的非尾递归(一般/互递归尾调不 TCO,见 §4.1)。native 先给**大主线程栈**
-(`pthread_attr_setstacksize`/`ulimit`),或按 `m8-selfhost-only.md` 的可选后续把热点深递归改迭代。
+(`pthread_attr_setstacksize`/`ulimit`),或按 `history/m8-selfhost-only.md` 的可选后续把热点深递归改迭代。
 
 ## 6. 分期
 

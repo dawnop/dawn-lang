@@ -2,7 +2,7 @@
 
 > 状态：**historical** —— 一等 `Bytes` 已落地（spec §9.5.1），本文是当时的动码前设计。
 >
-> 输入：[`m6-retro.md`](m6-retro.md) 根因 1「没有一等 `byte[]`，String 不能自己变字节」+
+> 输入：[`history/m6-retro.md`](history/m6-retro.md) 根因 1「没有一等 `byte[]`，String 不能自己变字节」+
 > 第六节优先级表序 4。目标：让字节数组成为**可命名、可传参、可存储**的一等类型，回收
 > `utf8_bytes`/`latin1_bytes` hack、消灭全栈的 ISO-8859-1 字符串滥用、简化 web 框架的
 > `Request.raw`/`Response.bin` bolt-on，并为将来的流式 I/O 铺路。
@@ -244,5 +244,5 @@ UFCS 写法：`s.utf8()`、`b.decode("UTF-8")`、`b.byte_len()`、`b.byte_slice(
 
 1. 语言本体：`Bytes` 类型 + 6 内建 + `++`/`==`/Show + 互操作桥；`dawn.jar` 重建；`:compiler:test` 全绿。
 2. 后端：按 §5 迁移；`build.sh` 全绿 + 冒烟。
-3. 文档：`spec.md`/`design.md`/`m7-progress.md`（序 4 完成）+ 本草案标注「已实现」。
+3. 文档：`spec.md`/`design.md`/`history/m7-progress.md`（序 4 完成）+ 本草案标注「已实现」。
 4. 两仓提交（不加 Co-Authored-By），按需推送。

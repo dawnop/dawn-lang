@@ -20,7 +20,7 @@
 
 > **注意：这张表是 M6 复盘的清单，不是自举的清单。** 序 6 清掉不等于可以开始 M7 自举——
 > 自举另有自己的坎（位运算符零逃生口、不可变性把编译器逼向 Map 最慢的形状），
-> 见 [`selfhost-gaps.md`](selfhost-gaps.md)：缺口清单、实测证据与分阶段计划。
+> 见 [`selfhost-gaps.md`](../selfhost-gaps.md)：缺口清单、实测证据与分阶段计划。
 
 ---
 
@@ -117,7 +117,7 @@ pattern-match 访问器删除改字段访问；② `web/types.dawn`：新增 `Ro
 
 ## 序 4 — 一等 `Bytes` 类型（✅ 根因 1）
 
-设计定稿见 [`bytes-design.md`](bytes-design.md)（动码前先出草案，`c42f88c`）。
+设计定稿见 [`bytes-design.md`](../bytes-design.md)（动码前先出草案，`c42f88c`）。
 
 **语言本体**（dawn-lang `fe128b3`）：新增 `Type.TBytes`（运行期就是裸 `byte[]`，与不透明数组
 同表示、零间接），内建 `utf8/decode/byte_len/byte_at/byte_slice/byte_index_of/as_bytes`，
@@ -132,7 +132,7 @@ comptime 折叠与 value-handle **有意跳过**，同旧 byte 内建）。UFCS 
 但**泛型内的 `expect[T]` 会把期望类型 `Bytes` 灌进 `T` → `Option[Object]` vs `Option[Bytes]` 不合**，
 且 codegen 无处插 `CHECKCAST`；改为显式内建（运行期 CHECKCAST，非 `byte[]` 即 CCE 穿透，spec §9.5）。
 （**v0.2.0 起 `as_bytes` 已泛化为通用的 `cast(x) -> T`**、`as_bytes` 删除——一个内建认领任意具体
-引用类型，T 由期望类型定，见 [`cast-interop.md`](cast-interop.md)。响应流式那轮撞出的语言缺口。）
+引用类型，T 由期望类型定，见 [`cast-interop.md`](../cast-interop.md)。响应流式那轮撞出的语言缺口。）
 
 **后端迁移**（backend-dawn `f9c339e`，有界路线）：`Request.raw` latin-1 String→`Bytes`、
 `Response.bin` `Option[Object]`→`Option[Bytes]`（Response 重获 `derive Show`）、`read_body` 单次解码、
@@ -146,7 +146,7 @@ upload/PUT 往返对拍留部署时（同 M6.5，需 qiniu 钥 + 网络）。
 
 ## 序 5 — 互操作 Option 解包：后缀 `!`（✅ 根因 3）
 
-设计定稿见 [`unwrap-design.md`](unwrap-design.md)（动码前先出草案，`8331e6b`）。
+设计定稿见 [`unwrap-design.md`](../unwrap-design.md)（动码前先出草案，`8331e6b`）。
 
 **推翻了复盘的两条前提**（这是本轮最有价值的产出，记下来免得再走一遍）：
 
@@ -194,7 +194,7 @@ M7 的方向应是补齐被省掉的基础能力，而非放松已被证明有�
 
 ## 流式请求体（✅ 复盘 §4 的请求侧，backend `063c4e6`/`23c954d`）
 
-设计定稿见 [`streaming-design.md`](streaming-design.md)（草案 `221a1e3`）。**无语言改动**——
+设计定稿见 [`streaming-design.md`](../streaming-design.md)（草案 `221a1e3`）。**无语言改动**——
 `InputStream.transferTo` / `BodyPublishers.ofFile` 都是现成的 JDK 能力。
 
 **约束（实测）**：opaque Java 字段**破坏 `derive Show`**，且 `Show` 不是 trait（只有 `Ord` 是）、
@@ -225,7 +225,7 @@ M7 的方向应是补齐被省掉的基础能力，而非放松已被证明有�
 
 ## 传可变实参（✅ 语言，lang `edf9188`、backend `52c0f0f`）
 
-设计定稿见 [`varargs-design.md`](varargs-design.md)。补的是 spec §9.3 记录的 v0.1 缺口——
+设计定稿见 [`varargs-design.md`](../varargs-design.md)。补的是 spec §9.3 记录的 v0.1 缺口——
 **流式那轮撞上的正是它**（`BodyPublishers.concat` 调不了，只好绕成磁盘装配）。
 
 **草案被推翻的一条**：上一节曾把修法记为「互操作层把 `List[T]` 桥到 `T[]` 形参」。**没采用**，
@@ -255,16 +255,16 @@ List 桥在可变部分内自动可用；AST 记 `varargsPack`（开始打包的
 
 ## 响应流式（GET 代理，✅ v0.2.0，lang `c2af8d2`/`6a32a5d` + backend streaming）
 
-复盘 §4 的响应侧、[`streaming-design.md`](streaming-design.md) §六留的尾巴。设计定稿见
-[`streaming-response-design.md`](streaming-response-design.md)（方案 A：`Response` 去 `derive Show`、
+复盘 §4 的响应侧、[`streaming-design.md`](../streaming-design.md) §六留的尾巴。设计定稿见
+[`streaming-response-design.md`](../streaming-response-design.md)（方案 A：`Response` 去 `derive Show`、
 直接持 `Option[InputStream]`——实测那个 Show 无人消费）。
 
 **撞出两个语言改动**（都进 v0.2.0）：
 - **`cast(x) -> T`**（`c2af8d2`）：`ofInputStream` 的 body 是擦除泛型 `Object`，认领成 `InputStream`
-  用通用 `cast`（期望类型驱动）——顺带泛化并删掉 `as_bytes`，见 [`cast-interop.md`](cast-interop.md)。
+  用通用 `cast`（期望类型驱动）——顺带泛化并删掉 `as_bytes`，见 [`cast-interop.md`](../cast-interop.md)。
 - **Unit 可实例化类型参数**（`6a32a5d`）：`close_stream` 要 `java_try(fn() => s.close())` 包 void 调用，
   撞上「T 不能是 Unit」的旧禁令。改为 Unit 走单例 `dawn/rt/Unit`（对齐 `None`），`java_try[Unit]`/
-  `Result[Unit]`/`List[Unit]` 全解锁，见 [`builtins-to-stdlib.md`](builtins-to-stdlib.md) 的 Unit 一等讨论。
+  `Result[Unit]`/`List[Unit]` 全解锁，见 [`builtins-to-stdlib.md`](../builtins-to-stdlib.md) 的 Unit 一等讨论。
 
 **后端**：`http.fetch_stream`（`ofInputStream` + `cast`，`StreamResp = {status, stream}`）与并存的
 `fetch_bytes`；`web/server.write_response` 加流分支（`transferTo` 泵到 socket、`catch_panic` 当 finally

@@ -2,7 +2,7 @@
 
 > 状态：**historical** —— 流式响应已落地，本文是当时的草案。
 >
-> 对应 [`m6-retro.md`](m6-retro.md) **§4 无流式请求/响应**的后半，以及
+> 对应 [`history/m6-retro.md`](history/m6-retro.md) **§4 无流式请求/响应**的后半，以及
 > [`streaming-design.md`](streaming-design.md) **§六**留的尾巴（「响应流式……留作下一轮」）。
 > 依 [`bytes-design.md`](bytes-design.md)、[`unwrap-design.md`](unwrap-design.md)、
 > [`varargs-design.md`](varargs-design.md) 的先例：**动码前先出草案**。
@@ -205,7 +205,7 @@ match r.stream {
 5. 中间件核对：确认无逐字段重建 `Response`（都走 `{..r}` 展开）。
 6. 测试：字节精确往返（含 >8KB 多块）、206 分段字节与 `Content-Range` 正确、上游非 2xx 走 `Err` 不流、恒定内存证据。
 7. `docs/spec.md`：§9.5 **删 `as_bytes`**、补 `cast`（期望类型驱动的互操作认领，`Bytes` 只是它的一个目标）；`Response` 去 Show 记进 backend README。
-8. 回填 [`m7-progress.md`](m7-progress.md)：把「响应流式」从「不进本轮」移入已完成，记提交哈希。
+8. 回填 [`history/m7-progress.md`](history/m7-progress.md)：把「响应流式」从「不进本轮」移入已完成，记提交哈希。
 
 ## 六、不做（记录理由）
 

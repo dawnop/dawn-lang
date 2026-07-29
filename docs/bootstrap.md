@@ -4,7 +4,7 @@
 >
 > 2026-07-22 自举完成（design.md M7、selfhost-gaps.md §七）；2026-07-23 **M8
 > 收口：Kotlin 实现归档在 `kotlin-final` tag，main 上只剩 selfhost**
-> （[m8-selfhost-only.md](m8-selfhost-only.md)）。本文回答一个问题：
+> （[m8-selfhost-only.md](history/m8-selfhost-only.md)）。本文回答一个问题：
 > **手上只有源码和一个种子 jar 时，如何从零得到一个能编译自己的 Dawn 编译器**，
 > 以及每一步靠什么验收。
 
@@ -33,7 +33,7 @@ v0.6.0–v0.8.0 的 release jar 永久保存；`kotlin-final` tag 保有 Kotlin 
 > `DAWN_KOTLIN=1` 逃生阀、`bin/dawn-kotlin` 作为金样 oracle）曾写在这里，读起来
 > 像现状——而它们都不是了：Kotlin 实现在 `kotlin-final` tag，`DAWN_KOTLIN` 与
 > `bin/dawn-kotlin` 都已删除，LSP 也早已是 selfhost 的。过程记录见
-> [m8-selfhost-only.md](m8-selfhost-only.md)，本文只留现行链。
+> [m8-selfhost-only.md](history/m8-selfhost-only.md)，本文只留现行链。
 
 **现行的 oracle**：`scripts/selfhost-prev-diff.sh`——上一 release 与 HEAD 编同一
 语料 + 生态扫描，未声明的字节差异红灯（声明方式：提交信息里的 `Emit-Change(<label glob>):` 行），

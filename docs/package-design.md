@@ -6,7 +6,7 @@
 
 ## 一、为什么现在做
 
-M6 复盘（[`m6-retro.md`](m6-retro.md)）排了 6 项修复优先级，**没有一项是包管理**。但 backend-dawn
+M6 复盘（[`history/m6-retro.md`](history/m6-retro.md)）排了 6 项修复优先级，**没有一项是包管理**。但 backend-dawn
 自己的代码里写着这句：
 
 ```dawn

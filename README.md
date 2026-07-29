@@ -81,7 +81,7 @@ VS Code 扩展与 Neovim / Helix 配置见 [editors/](editors/)。
 （[docs/trait.md](docs/trait.md)）、`Bytes` 与流式响应、`Cursor` 与字符串性能
 （[docs/seq6-research.md](docs/seq6-research.md)）、源码包与 Maven 依赖
 （[docs/package-design.md](docs/package-design.md)）、以及 **M8：淘汰 Kotlin 实现，
-编译器只剩自举的一套**（[docs/m8-selfhost-only.md](docs/m8-selfhost-only.md)）。
+编译器只剩自举的一套**（[docs/m8-selfhost-only.md](docs/history/m8-selfhost-only.md)）。
 下面按里程碑展开的是 M0–M4；M5 之后的落地记录在 `docs/` 各自的设计文档里。
 
 验收样例 [examples/shapes.dawn](examples/shapes.dawn)、[examples/calc.dawn](examples/calc.dawn)

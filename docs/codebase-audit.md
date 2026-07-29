@@ -1679,7 +1679,7 @@ Content-Length，204/304/HEAD 也会进入 body 路径。建议由 ResponseBody 
 >
 > 按建议做：M8 阶段二/三/四的逐阶段快照从 `bootstrap.md` 移走，
 > 换成一段明确的说明——那些描述（哪些能力还在 Kotlin 侧、`DAWN_KOTLIN=1` 逃生阀、
-> `bin/dawn-kotlin` 作金样 oracle）**都已不是现状**，过程记录见 `m8-selfhost-only.md`。
+> `bin/dawn-kotlin` 作金样 oracle）**都已不是现状**，过程记录见 `history/m8-selfhost-only.md`。
 > 正文只留现行链，并把现行 oracle（`selfhost-prev-diff.sh` 及三份转写对拍）写清楚。
 
 
@@ -1764,9 +1764,10 @@ Content-Length，204/304/HEAD 也会进入 body 路径。建议由 ResponseBody 
 > tutorial）正是要渲染的。补的 21 篇逐篇判定：设计草案落地了的写 historical 并指向
 > 现状（spec 条款或实现文件），仍在推进的写 current，被驳回的写驳回。
 >
-> **(3) 仍没做**：里程碑与提交哈希记录移进 `docs/history/`。移动会牵动十几处入链
-> （CONTRIBUTING/README/CLAUDE + 若干 docs），而链接门禁刚好能守住这类改动——
-> 留待单独一提交，收益是「历史与现行分开」，纯组织性。
+> **(3) 也已做（同日）**：四篇里程碑日志（m6 / m6-retro / m7-progress / m8-selfhost-only）
+> 移进 `docs/history/`，16 个文件的入链与被移文件自己的出链一并改写——**改写的正确性由
+> 刚建成的链接门禁验证**（它是这次移动敢做的前提；站点自己的 fixture 也顺带覆盖了
+> 「子目录里的文档」这条分支）。docs/ 顶层现在只剩规范、现行流程与设计/调研。
 
 
 28 篇文档按时间叠加，计划、调研、落地日志、规范、复盘和当前运维说明混在一起。建议增加：

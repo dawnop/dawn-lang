@@ -5,7 +5,7 @@
 >
 > - 「编译器预算 6–8 千行（Kotlin）」「实现语言 = Kotlin」——Kotlin 实现已随
 >   `kotlin-final` tag 归档，main 上只有自举的 `selfhost/`（约 3.5 万行 Dawn），
->   见 [m8-selfhost-only.md](m8-selfhost-only.md)。
+>   见 [m8-selfhost-only.md](history/m8-selfhost-only.md)。
 > - 「unsafe 逃生门不向用户代码开放」——`unsafe_pure` 现在是普通语法，用户可写，
 >   见 spec.md §6.4 与 codebase-audit.md 的 LANG-01。
 > - 「不引入 IR」——论证在小编译器阶段成立，现在 checker + emit 已过一万行，
@@ -260,7 +260,7 @@ builtin/std 函数名改为 Rust 式合法**（解析序本就是本模块声明
     native-image 构建期展开，边界可以放开；
   - 迁移策略：逐端点替换，nginx 按路由切流量；WebDAV 量大且走独立子域名，最后迁或留 Python。
   - 验收：Vue 前端不改一行指向 Dawn 后端，现有契约测试 + 端到端全绿。
-- **M6 复盘 → 修复批次**（[`m6-retro.md`](m6-retro.md) 排优先级，进展见 [`m7-progress.md`](m7-progress.md)）：
+- **M6 复盘 → 修复批次**（[`history/m6-retro.md`](history/m6-retro.md) 排优先级，进展见 [`history/m7-progress.md`](history/m7-progress.md)）：
   用真实生产后端的编码摩擦反推语言/库/框架补强。序 1（补 `find/take/drop/reverse` +
   字符串 `index_of`）、序 2（SQL 命名列取值）、序 3（web 框架 Route 开放记录 + 中间件路由
   tag 感知）已落地。**序 4「一等 `Bytes`」（2026-07-16，根因 1）**：设计定稿见

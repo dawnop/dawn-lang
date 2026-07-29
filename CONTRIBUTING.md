@@ -48,11 +48,11 @@
 草案不是写完就扔的。落地后：
 
 - 大改动开一份 `docs/m<N>-progress.md`，逐条记状态，**回填提交哈希**，
-  写明「供中断后接续」（见 [`docs/m7-progress.md`](docs/m7-progress.md)）。
+  写明「供中断后接续」（见 [`docs/history/m7-progress.md`](docs/history/m7-progress.md)）。
   跨仓的活儿要注明两边的哈希——语言本体在 `dawn-lang/`，后端在 `dawnop-site/backend-dawn/`。
 - 草案里被现实推翻的前提，**回头改掉那份草案**，别留着骗人。
 - 里程碑做完写 `docs/m<N>-retro.md`：复盘 + 排下一批的修复优先级表
-  （[`docs/m6-retro.md`](docs/m6-retro.md) 那张表直接变成了 M7 的序 1–6）。
+  （[`docs/history/m6-retro.md`](docs/history/m6-retro.md) 那张表直接变成了 M7 的序 1–6）。
 
 > 历史哈希是会失效的：仓库为清理 trailer 重写过一次历史，随后专门发了一个提交回填
 > 文档里失效的 11 处引用。回填哈希时留意这件事。

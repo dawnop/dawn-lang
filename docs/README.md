@@ -82,10 +82,10 @@
 [selfhost-ast.md](selfhost-ast.md) ·
 [selfhost-checker.md](selfhost-checker.md) ·
 [selfhost-codegen.md](selfhost-codegen.md) ·
-[m6.md](m6.md) ·
-[m6-retro.md](m6-retro.md) ·
-[m7-progress.md](m7-progress.md) ·
-[m8-selfhost-only.md](m8-selfhost-only.md)（淘汰 Kotlin 实现的决策与落地）
+[m6.md](history/m6.md) ·
+[m6-retro.md](history/m6-retro.md) ·
+[m7-progress.md](history/m7-progress.md) ·
+[m8-selfhost-only.md](history/m8-selfhost-only.md)（淘汰 Kotlin 实现的决策与落地）
 
 这一层全部 historical。指向 `compiler/` 的链接已改为 `kotlin-final` tag 上的
 GitHub URL——那套实现不在 main。

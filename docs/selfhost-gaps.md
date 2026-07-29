@@ -5,7 +5,7 @@
 > 依 [`bytes-design.md`](bytes-design.md)（序 4）、[`unwrap-design.md`](unwrap-design.md)（序 5）
 > 的先例：**动码前先出草案**。
 >
-> [`m7-progress.md`](m7-progress.md) 记的是 **M6 复盘**的修复清单（序 1–6），那张表只剩序 6。
+> [`history/m7-progress.md`](history/m7-progress.md) 记的是 **M6 复盘**的修复清单（序 1–6），那张表只剩序 6。
 > 但那不是**自举**的清单——自举有它自己的坎，本文件是把 Kotlin 编译器实际用到的构造
 > 逐条拿去问「Dawn 写得出来吗」得出的。所有计数都是 grep 实数，所有耗时都可用
 > `scripts/bench-map.dawn` 复跑。
@@ -390,5 +390,5 @@ Kotlin 版已冻结为 bootstrap 种子（2026-07-22，自 v0.6.0；学 Go 保�
 
 - **为编译器开可变集合的口子**。Dawn 的内核是不可变 + 无运行期崩溃；为了写自己的编译器
   破例，等于承认这套设计写不了正经程序。§三选甲正是为了**不必**破这个例。
-- **`@NonNull` 第三方 jar 识别**——[`m7-progress.md`](m7-progress.md) 已记：与痛点不相交。
+- **`@NonNull` 第三方 jar 识别**——[`history/m7-progress.md`](history/m7-progress.md) 已记：与痛点不相交。
 - **移植那 49 个 `var` 字段的可变 AST 架构**——见 §三理由二，那是债不是特性。

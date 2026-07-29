@@ -115,7 +115,7 @@ Windows 的 WinNAT 保留了大片低端口，8097 bind 会报 "Address already 
 **release 即下一个种子**：发布后把 `scripts/seed-release.txt` bump 到新 tag。
 `selfhost/src` 只准用当前种子已支持的语言特性（机器强制：种子编不动 HEAD 就红）——
 种子推进协议见 [docs/bootstrap.md](docs/bootstrap.md)，M8（淘汰 Kotlin）的
-决策与落地记录见 [docs/m8-selfhost-only.md](docs/m8-selfhost-only.md)。
+决策与落地记录见 [docs/m8-selfhost-only.md](docs/history/m8-selfhost-only.md)。
 
 **dawnop-site 按 `.dawn-version` 钉住某个 release**，不再跟 main。所以破坏性语言改动要
 先发 tag，那边再提一个 bump 的提交。别指望改完这边那边就自动跟上——那正是当初要治的病。

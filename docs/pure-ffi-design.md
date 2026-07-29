@@ -309,7 +309,7 @@ comptime 里可用,迁走会让调用方的 `const` 折叠失效——那是实�
 
 - [`builtins-to-stdlib.md`](builtins-to-stdlib.md) —— 75→4 的动机与三层分类（§6 的「纯转发」前提由本文修正）
 - [`cast-interop.md`](cast-interop.md) —— 同属 interop 人体工学的前一议题
-- [`m6-retro.md`](m6-retro.md) —— 复盘（序6 的源头）
+- [`history/m6-retro.md`](history/m6-retro.md) —— 复盘（序6 的源头）
 - `Checker.kt`（效果系统）、`Comptime.kt`（编译期解释器）、`Types.kt`（builtin 表）
 
 ## 十二、批 A 其余部分:String 组 10 个(2026-07-18,已落地)

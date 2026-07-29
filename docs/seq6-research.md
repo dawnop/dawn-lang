@@ -253,7 +253,7 @@ JVM 填满再收，于是 RSS 反映的是「JVM 懒得回收」。二分 `-Xmx`
 
 - **`dawn run site` 在 HEAD 上是坏的**：三处独立断裂，全是**文档漂移过了硬编码的 lint**
   （`md/parser.dawn:155` 不认 `####` 而 `spec.md:734` 新增了一个；`gen/common.dawn:52` 的文档链接白名单没登记
-  `m6-retro.md`；`gen_api` 需要 `site/build/builtins.json` 而只有 `site/build.sh` 会造它）。
+  `history/m6-retro.md`；`gen_api` 需要 `site/build/builtins.json` 而只有 `site/build.sh` 会造它）。
 - **没有任何 CI**（`.github/workflows/` 不存在）。上面那个站点腐烂**就是这么无声上线的**。
   测试跑完只要 **1.74s**，接 CI 几乎零成本。
 - **README:99 的两个数字都是陈的**：「测试 748 项」（实为 1142）、「native 启动约 7ms」（无任何 harness 支撑）。
