@@ -278,7 +278,7 @@ native 照抄才算"通过"。故语料要配少量**独立的期望输出**(不
 | **Phase 1 D0** | **完成**——见 §11.4 的 S1/S2 重排,trait v2 与语义收口都已关账 |
 | **Phase 2 D1–D3** | **完成**——`Array[T]` + `popcount`;Map/Set 换纯 Dawn HAMT、List 换持久向量,均 over Array |
 | **Phase 3 C 发射器** | **完成**——按收口后的 Core 重导完毕。整编译器(剥掉 JVM-only 模块,26k 行)发 4.7 MB C,cc **零 error 零 warning**,跑出的结果与 JVM 逐字一致 |
-| Phase 4 Perceus | **刀 1–3 + 2b 完成(2026-07-29)**:运行时 ABI、所有权推断 pass(`rc.dawn`)、emitc 消费两个节点、最后使用分析(转移代替 dup+drop,整编译器 dup −22% / drop −30%)。语料 23 个程序全绿并新增 AddressSanitizer 一档;整编译器前端 native 跑通,`checker.dawn` 峰值 4.4 GB → 1.42 GB。剩刀 4(复用分析,`CBorrowed` 随它),见 [`perceus-design.md`](perceus-design.md) |
+| Phase 4 Perceus | **全部完成(2026-07-29)**:运行时 ABI、所有权推断 pass(`rc.dawn`)、emitc 消费两个节点、最后使用分析、复用分析(`array_with` 唯一时就地写,整编译器就地 73.8%,线性更新 spine 100% 原地)。语料 23 个程序全绿含 AddressSanitizer 档;整编译器前端 native 跑通,`checker.dawn` 峰值 4.4 GB → 1.46 GB、probe 2.77s。`CBorrowed` 判为不需要(开的是 owned 口子),见 [`perceus-design.md`](perceus-design.md) §6 |
 | Phase 5 `use c` / Phase A 验收 | 差分 harness 已就位并进了 CI。**`use c` 已不在关键路径**:§14.3/§14.7 的十个 io intrinsic 解决了编译器自己的 IO 需求 |
 | Phase 6 native 自举 | 卡在 Phase 4 |
 

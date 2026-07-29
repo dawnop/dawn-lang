@@ -21,6 +21,14 @@
 static int dawn_argc;
 static char **dawn_argv;
 
+/* Stderr, so a differential run comparing stdout byte for byte stays clean
+ * even with the stats on. */
+static void dawn_rc_stats_dump(void) {
+  fprintf(stderr, "rc-stats: array_with in-place %llu, copied %llu\n",
+          (unsigned long long)dawn_array_with_inplace,
+          (unsigned long long)dawn_array_with_copied);
+}
+
 void dawn_rt_init(int argc, char **argv) {
   dawn_argc = argc;
   dawn_argv = argv;
@@ -32,6 +40,9 @@ void dawn_rt_init(int argc, char **argv) {
    * ways. Rebuilding to switch would change the layout, which is the variable
    * the mode exists to hold still (plan 6 R3). */
   dawn_rc_leak = getenv("DAWN_RC_LEAK") != NULL;
+  if (getenv("DAWN_RC_STATS") != NULL) {
+    atexit(dawn_rc_stats_dump);
+  }
 }
 
 static void *dawn_alloc(size_t n) {
@@ -752,19 +763,34 @@ dawn_array *dawn_array_push(dawn_array *a, void *x) {
   return dawn_array_of(nb, a->len + 1);
 }
 
-/* Always copies -- see the header: slot `i < len` is already handed out and
- * no watermark can say who still reads it. */
-dawn_array *dawn_array_with(const dawn_array *a, int64_t i, void *x) {
+uint64_t dawn_array_with_inplace = 0;
+uint64_t dawn_array_with_copied = 0;
+
+/* Consumes `a` and `x` -- see the header: no watermark can say who still
+ * reads slot `i`, but the counts can. Both the array and its buffer have to
+ * be unique: an array alone at rc 1 may still share its buffer with another
+ * version whose slots these are too. */
+dawn_array *dawn_array_with(dawn_array *a, int64_t i, void *x) {
   if (i < 0 || i >= (int64_t)a->len) {
     dawn_panic(dawn_str_lit("Array index out of bounds", 24));
   }
+  if (!dawn_rc_leak && dawn_is_unique(a) && dawn_is_unique(a->buf)) {
+    dawn_array_with_inplace++;
+    void *old = a->buf->data[i];
+    a->buf->data[i] = x;
+    dawn_drop(old);
+    return a;
+  }
+  dawn_array_with_copied++;
   dawn_array_buf *nb = dawn_array_buf_new(a->len);
   for (int32_t k = 0; k < a->len; k++) {
-    /* the replaced slot is not copied, so it is not counted either */
-    nb->data[k] = (k == (int32_t)i) ? dawn_dup(x) : dawn_dup(a->buf->data[k]);
+    /* the consumed `x` lands with the reference the caller handed over */
+    nb->data[k] = (k == (int32_t)i) ? x : dawn_dup(a->buf->data[k]);
   }
   nb->high = a->len;
-  return dawn_array_of(nb, a->len);
+  dawn_array *r = dawn_array_of(nb, a->len);
+  dawn_drop(a);
+  return r;
 }
 
 /* std/hamt counts set bits of a 32-way bitmap. Dawn's Int is signed 64-bit,

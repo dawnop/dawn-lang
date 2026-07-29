@@ -1212,6 +1212,17 @@ pub fn intrinsics() -> Map[String, Intr] = {
 
 pub fn intr_at(name: String) -> Option[Intr] = map.get(intrinsics(), name)
 
+## The reuse-analysis exceptions (docs/perceus-design.md 6): argument
+## positions the native runtime consumes rather than borrows. `array_with`
+## takes its array owned because uniqueness is only decidable after the caller
+## hands its reference over -- a borrowed argument keeps the caller's count on
+## it and `rc == 1` can never hold -- and takes the element owned because
+## every call site passes a freshly built value that would otherwise cross
+## through a dup/drop pair. A function rather than an `Intr` field: the rc
+## pass asks at every intrinsic node, and this answer must not cost a table.
+pub fn intr_owned_args(name: String) -> List[Int] =
+  if name == "array_with" { [0, 2] } else { [] }
+
 # ---- tests ----
 
 test "every intrinsic property is declared against a real intrinsic" {

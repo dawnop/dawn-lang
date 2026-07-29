@@ -41,7 +41,8 @@ use core.{
   CDynamic, CDirect, CBinOp, CAnd, COr, CInt, CBool, COwned,
   cex_ty, diverges
 }
-use types.{Ty, TyInt, TyBool, TyList, TyTuple, TyUnit, TyNever, is_ref_ty}
+use types.{Ty, TyInt, TyBool, TyList, TyTuple, TyUnit, TyNever, TyArray, is_ref_ty,
+  intr_owned_args }
 use std/list
 use std/set
 
@@ -50,7 +51,18 @@ use std/set
 ## One lexical scope and the bindings it owns. `loop_id` is the loop whose
 ## body this scope is, or -1: a `break` has to release every scope down to and
 ## including the one it is leaving, and that is how it recognises the floor.
-type Sc = { syms: List[Int], loop_id: Int }
+##
+## A loop scope normally refuses releases of bindings that live outside it,
+## for two reasons at once: the back edge (next iteration reads them again)
+## and the joins (every `break` path and the fall-through meet after the
+## loop, and they must agree on what was released). `open` is true when both
+## reasons provably vanish -- the body cannot complete normally, so the only
+## back edges are its `continue`s, which the after-set pins one path at a
+## time (`pin_of`); and it contains no `break` of its own id, so nothing
+## rejoins carrying a one-sided release. Tail-call loops (body = return)
+## qualify; source `while`/`for` loops do not, and the match once-loop is
+## taken apart by `unloop` before the question comes up.
+type Sc = { syms: List[Int], loop_id: Int, open: Bool }
 
 type RSt = {
   # outermost first
@@ -67,8 +79,8 @@ fn fresh(st: RSt) -> (RSt, Int) = (RSt { ..st, next_sym: st.next_sym + 1 }, st.n
 
 fn no_syms() -> Set[Int] = set.empty()
 
-fn push(st: RSt, loop_id: Int) -> RSt =
-  RSt { ..st, scopes: st.scopes ++ [Sc { syms: [], loop_id: loop_id }] }
+fn push(st: RSt, loop_id: Int, open: Bool) -> RSt =
+  RSt { ..st, scopes: st.scopes ++ [Sc { syms: [], loop_id: loop_id, open: open }] }
 
 ## Pop the innermost scope, handing back the bindings it still owns.
 fn pop(st: RSt) -> (RSt, List[Int]) = {
@@ -128,23 +140,62 @@ fn strip_syms(st: RSt, syms: List[Int]) -> RSt = {
   RSt { ..st, scopes: out }
 }
 
-## Whether the last use of `sym` may take the value instead of copying it.
-## The binding has to be found before any loop boundary on the way out: a
-## binding that lives across iterations is used once per trip round, and
-## "last use" inside the body only means last use *this* iteration -- taking
-## the value would leave the next iteration reading a released binding.
-fn transferable(st: RSt, sym: Int) -> Bool = {
+## Whether a release of `sym` here may be trusted -- a transfer at its last
+## use, or a sweep once nothing later touches it. The binding has to be found
+## before any closed loop boundary on the way out: a binding that lives
+## across iterations is used once per trip round, and "last use" inside the
+## body only means last use *this* iteration. An `open` loop scope (see `Sc`)
+## is crossed instead, unless a `continue` of that loop is still ahead on
+## this path -- the pin in the after-set -- in which case this path *is* a
+## next iteration's prefix and the refusal is back.
+fn transferable(st: RSt, sym: Int, after: Set[Int]) -> Bool = {
   var i = len(st.scopes) - 1
   while i >= 0 {
     let sc = st.scopes[i]
     if list_has(sc.syms, sym) { return true }
-    if sc.loop_id >= 0 { return false }
+    if sc.loop_id >= 0 {
+      if not sc.open { return false }
+      if set.has(after, pin_of(sc.loop_id)) { return false }
+    }
     i = i - 1
   }
   false
 }
 
 fn release(st: RSt, sym: Int) -> RSt = strip_syms(st, [sym])
+
+## Which scope holds `sym`, outermost first; -1 when none does.
+fn scope_index_of(st: RSt, sym: Int) -> Int = {
+  var i = len(st.scopes) - 1
+  while i >= 0 {
+    if list_has(st.scopes[i].syms, sym) { return i }
+    i = i - 1
+  }
+  0 - 1
+}
+
+## Put `sym` back into the scope at index `at` -- the reassignment path,
+## where a binding briefly left its scope and returns holding a new value.
+fn bind_at(st: RSt, at: Int, sym: Int) -> RSt = {
+  let sc = st.scopes[at]
+  let sc2 = Sc { ..sc, syms: sc.syms ++ [sym] }
+  RSt { ..st, scopes: list.take(st.scopes, at) ++ [sc2] ++ list.drop(st.scopes, at + 1) }
+}
+
+## The pin of a loop: a pseudo-binding meaning "a `continue` of this loop is
+## still ahead on this path". Symbols and loop ids are both non-negative, so
+## the negative range is free to carry them inside the same after-sets.
+fn pin_of(lid: Int) -> Int = 0 - (lid + 1)
+
+## Only the pins of an after-set: what a loop body's base set inherits, since
+## a `continue` of an enclosing loop after this one still closes it.
+fn pins_only(after: Set[Int]) -> Set[Int] = {
+  var out: Set[Int] = set.empty()
+  for x in set.to_list(after) {
+    if x < 0 { out = set.insert(out, x) }
+  }
+  out
+}
 
 # ---- liveness ----
 #
@@ -201,6 +252,9 @@ fn fv_expr(e: CExpr, acc: Set[Int]) -> Set[Int] =
         Some(x) -> fv_expr(x, acc)
       },
     CDup(inner, _) -> fv_expr(inner, acc)
+    # a continue is a read of every binding its next iteration touches; the
+    # pin stands in for all of them at once
+    CContinue(lid) -> set.insert(acc, pin_of(lid))
     # inert on the path this pass runs for, but a symbol read only in here
     # must still count as read -- see the header of this section
     CForeign(j, _) -> {
@@ -245,6 +299,201 @@ fn fv_stmts(stmts: List[CStmt], acc: Set[Int]) -> Set[Int] = {
   var a = acc
   for s in stmts { a = fv_stmt(s, a) }
   a
+}
+
+# ---- loop shape ----
+
+## Whether evaluation can run off the end of `e` with control intact. This
+## digs one level deeper than `core.diverges`, which reads only tails: a
+## block whose *statement* binds or discards a Never value is over at that
+## statement, whatever its tail says. The depth is not optional -- the
+## checker's `gone` walks statements, and `reconcile` decides by this
+## judgement which arms still run; disagree and reconcile seals compensating
+## drops onto a path that is very much alive (found the hard way: `unloop`
+## flattens an arm's `break` tail away, leaving exactly the
+## statements-diverge-tail-None shape).
+fn completes(e: CExpr) -> Bool =
+  match e {
+    CBlock(stmts, tail, _) -> {
+      for s in stmts {
+        let ends = match s {
+          CSDiscard(x) -> not completes(x)
+          CSLet(_, _, v) -> not completes(v)
+          CSAssign(_, v) -> not completes(v)
+          _ -> false
+        }
+        if ends { return false }
+      }
+      match tail {
+        None -> true
+        Some(t) -> completes(t)
+      }
+    }
+    CIf(_, thn, els, _) ->
+      match els {
+        None -> true
+        Some(x) -> completes(thn) || completes(x)
+      },
+    _ -> not diverges(e) && cex_ty(e) != TyNever
+  }
+
+## Whether a jump to `lid` occurs anywhere inside -- `brk` and `cont` select
+## which kinds count. `open` needs the breaks (a break of this loop rejoins
+## code after it); `unloop` refuses on either kind left inside an arm.
+fn jumps(e: CExpr, lid: Int, brk: Bool, cont: Bool) -> Bool =
+  match e {
+    CBreak(l) -> brk && l == lid
+    CContinue(l) -> cont && l == lid
+    CCall(callee, args, _) -> {
+      let hit = match callee {
+        CDynamic(t) -> jumps(t, lid, brk, cont)
+        _ -> false
+      }
+      hit || jumps_list(args, lid, brk, cont)
+    }
+    CIntrinsic(_, args, _) -> jumps_list(args, lid, brk, cont)
+    CCtor(_, _, args, _) -> jumps_list(args, lid, brk, cont)
+    CField(t, _, _, _, _) -> jumps(t, lid, brk, cont)
+    CIsCtor(t, _, _) -> jumps(t, lid, brk, cont)
+    CTagOf(t, _) -> jumps(t, lid, brk, cont)
+    CClosure(_, _, caps, _) -> jumps_list(caps, lid, brk, cont)
+    CDictApply(_, args, _) -> jumps_list(args, lid, brk, cont)
+    CDictArg(d, _, _, _, _) -> jumps(d, lid, brk, cont)
+    CTuple(es, _) -> jumps_list(es, lid, brk, cont)
+    CTupleGet(t, _, _) -> jumps(t, lid, brk, cont)
+    CBox(x, _) -> jumps(x, lid, brk, cont)
+    CUnbox(x, _) -> jumps(x, lid, brk, cont)
+    CBinary(_, l, r, _) -> jumps(l, lid, brk, cont) || jumps(r, lid, brk, cont)
+    CUnary(_, x, _) -> jumps(x, lid, brk, cont)
+    CIf(c, t, e2, _) -> {
+      let hit = jumps(c, lid, brk, cont) || jumps(t, lid, brk, cont)
+      match e2 {
+        None -> hit
+        Some(x) -> hit || jumps(x, lid, brk, cont)
+      }
+    }
+    CBlock(stmts, tail, _) -> {
+      let hit = jumps_stmts(stmts, lid, brk, cont)
+      match tail {
+        None -> hit
+        Some(t) -> hit || jumps(t, lid, brk, cont)
+      }
+    }
+    CListLit(es, _) -> jumps_list(es, lid, brk, cont)
+    CReturn(v) ->
+      match v {
+        None -> false
+        Some(x) -> jumps(x, lid, brk, cont)
+      },
+    CDup(x, _) -> jumps(x, lid, brk, cont)
+    _ -> false
+  }
+
+fn jumps_list(es: List[CExpr], lid: Int, brk: Bool, cont: Bool) -> Bool = {
+  for e in es {
+    if jumps(e, lid, brk, cont) { return true }
+  }
+  false
+}
+
+fn jumps_stmt(s: CStmt, lid: Int, brk: Bool, cont: Bool) -> Bool =
+  match s {
+    CSLet(_, _, v) -> jumps(v, lid, brk, cont)
+    CSAssign(_, v) -> jumps(v, lid, brk, cont)
+    CSDiscard(x) -> jumps(x, lid, brk, cont)
+    CSLoop(_, body, step) -> {
+      let hit = jumps(body, lid, brk, cont)
+      match step {
+        None -> hit
+        Some(x) -> hit || jumps(x, lid, brk, cont)
+      }
+    }
+    CSIf(c, t, e2) -> {
+      let hit = jumps(c, lid, brk, cont) || jumps(t, lid, brk, cont)
+      match e2 {
+        None -> hit
+        Some(x) -> hit || jumps(x, lid, brk, cont)
+      }
+    }
+    CSDrop(_) -> false
+  }
+
+fn jumps_stmts(stmts: List[CStmt], lid: Int, brk: Bool, cont: Bool) -> Bool = {
+  for s in stmts {
+    if jumps_stmt(s, lid, brk, cont) { return true }
+  }
+  false
+}
+
+## The arm's statements with its final `break lid` peeled off: lower_match
+## ends every taken arm with one, sometimes behind a nest of blocks. Merging
+## the nest into one statement list is fine -- symbols are globally unique,
+## so the flattened scope releases the same bindings at the same end.
+fn strip_break(e: CExpr, lid: Int) -> Option[List[CStmt]] =
+  match e {
+    CBreak(l) -> if l == lid { Some([]) } else { None }
+    CBlock(stmts, Some(t), _) ->
+      match strip_break(t, lid) {
+        Some(rest) -> Some(stmts ++ rest)
+        None -> None
+      },
+    _ -> None
+  }
+
+## lower_match encodes `match` as a once-loop: each arm a guarded test that
+## assigns the result and breaks, an unreachable panic at the bottom, a loop
+## head no path re-enters. The JVM emitter reads that shape as cheap labels;
+## for this pass it is poison -- the loop guard cannot see that the loop
+## never loops, so every binding outside the match is pinned for the whole of
+## it, and the matched value itself survives to scope end. That is exactly
+## the reference that keeps `array_with` from ever finding its array unique
+## (docs/perceus-design.md 6). So the C path takes the costume off: a loop of
+## `if (test) { arm; break }` statements over an unreachable tail is the
+## branch tree the match was, and as a branch tree its arms reconcile like
+## any other -- released early where dead, sealed where arms disagree.
+## Anything that does not match the shape exactly (a guarded arm falls
+## through its own test, so its break is conditional) keeps the loop and the
+## conservative account.
+fn unloop(lid: Int, body: CExpr) -> Option[CStmt] = {
+  match body {
+    CBlock(stmts, None, _) -> {
+      let n = len(stmts)
+      if n < 2 { return None }
+      let ok_last = match stmts[n - 1] {
+        CSDiscard(x) -> not yields(x)
+        _ -> false
+      }
+      if not ok_last { return None }
+      var conds: List[CExpr] = []
+      var armbs: List[CExpr] = []
+      var i = 0
+      while i < n - 1 {
+        match stmts[i] {
+          CSIf(cond, thn, None) ->
+            match strip_break(thn, lid) {
+              Some(astmts) -> {
+                if jumps(cond, lid, true, true) || jumps_stmts(astmts, lid, true, true) {
+                  return None
+                }
+                conds = conds ++ [cond]
+                armbs = armbs ++ [CBlock(astmts, None, TyUnit)]
+              }
+              None -> return None
+            },
+          _ -> return None
+        }
+        i = i + 1
+      }
+      var els = CBlock([stmts[n - 1]], None, TyUnit)
+      var k = len(conds) - 1
+      while k > 0 {
+        els = CBlock([CSIf(conds[k], armbs[k], Some(els))], None, TyUnit)
+        k = k - 1
+      }
+      Some(CSIf(conds[0], armbs[0], Some(els)))
+    }
+    _ -> None
+  }
 }
 
 # ---- classification ----
@@ -346,9 +595,9 @@ fn wrap(st: RSt, lets: List[CStmt], e: CExpr, ty: Ty, temps: List[Int]) -> (RSt,
 }
 
 ## Whether this expression delivers a value that can be given a name. A jump
-## does not, and neither does a `panic`: its type is `Never`, which is exactly
-## what emitc's `no_value` reads.
-fn yields(e: CExpr) -> Bool = not diverges(e) && cex_ty(e) != TyNever
+## does not, and neither does a `panic`: its type is `Never`. Statement-level
+## divergence counts too -- see `completes` for why the depth matters.
+fn yields(e: CExpr) -> Bool = completes(e)
 
 ## Release `syms` after `e` has produced its value.
 fn seal(st: RSt, e: CExpr, ty: Ty, syms: List[Int]) -> (RSt, CExpr) = wrap(st, [], e, ty, syms)
@@ -388,10 +637,21 @@ fn borrow(st: RSt, e: CExpr, after: Set[Int]) -> (RSt, List[CStmt], CExpr, List[
 ## is a pointer someone else owns, and the operation reads it only after all
 ## of them have run, so nothing evaluated for a later operand may take an
 ## earlier one's backing binding away.
-fn borrow_all(st: RSt, es: List[CExpr], after: Set[Int]) -> (RSt, List[CStmt], List[CExpr], List[Int]) = {
+fn borrow_all(st: RSt, es: List[CExpr], after: Set[Int]) -> (RSt, List[CStmt], List[CExpr], List[Int]) =
+  intr_args(st, es, [], after)
+
+## The general operand-list rewrite: borrowed positions as `borrow_all` says,
+## and the positions in `owned` handed over -- the reuse-analysis exceptions
+## (docs/perceus-design.md 6), where the callee consumes the argument so that
+## `rc == 1` inside it means the caller gave its reference up. An owned
+## operand hoisted for order's sake is passed on bare and not released here;
+## the callee does that.
+fn intr_args(st: RSt, es: List[CExpr], owned: List[Int], after: Set[Int]) -> (RSt, List[CStmt], List[CExpr], List[Int]) = {
   var any = false
+  var h = 0
   for e in es {
-    if counted(st, e) && not borrows(st, e) { any = true }
+    if not list_has(owned, h) && counted(st, e) && not borrows(st, e) { any = true }
+    h = h + 1
   }
   let n = len(es)
   var st2 = st
@@ -406,8 +666,9 @@ fn borrow_all(st: RSt, es: List[CExpr], after: Set[Int]) -> (RSt, List[CStmt], L
       if j != i { a = fv_expr(es[j], a) }
       j = j + 1
     }
+    let own = list_has(owned, i)
     if not any {
-      let (s2, e1) = rw(st2, e, false, a)
+      let (s2, e1) = rw(st2, e, own, a)
       st2 = s2
       outs = outs ++ [e1]
     } else {
@@ -417,7 +678,7 @@ fn borrow_all(st: RSt, es: List[CExpr], after: Set[Int]) -> (RSt, List[CStmt], L
       st2 = s3
       lets = lets ++ [CSLet(t, ty, e1)]
       outs = outs ++ [CLocal(t, ty)]
-      if counted(s3, e) { temps = temps ++ [t] }
+      if counted(s3, e) && not own { temps = temps ++ [t] }
     }
     i = i + 1
   }
@@ -502,7 +763,7 @@ fn rw(st: RSt, e: CExpr, consume: Bool, after: Set[Int]) -> (RSt, CExpr) = {
     CLocal(sym, _) ->
       if consume && counted(st, e) {
         # the last consuming use takes the value; every earlier one copies
-        if not st.pinned && not set.has(after, sym) && transferable(st, sym) {
+        if not st.pinned && not set.has(after, sym) && transferable(st, sym, after) {
           (release(st, sym), e)
         } else {
           (st, CDup(e, ty))
@@ -569,9 +830,10 @@ fn rw(st: RSt, e: CExpr, consume: Bool, after: Set[Int]) -> (RSt, CExpr) = {
       wrap(st2, lets, CCall(c1, args1, cty), cty, temps)
     }
 
-    # Runtime primitives borrow, and dup whatever they decide to keep.
+    # Runtime primitives borrow, and dup whatever they decide to keep --
+    # except the argument positions the reuse analysis flipped to owned.
     CIntrinsic(name, args, ity) -> {
-      let (st1, lets, args1, temps) = borrow_all(st, args, after)
+      let (st1, lets, args1, temps) = intr_args(st, args, intr_owned_args(name), after)
       wrap(st1, lets, CIntrinsic(name, args1, ity), ity, temps)
     }
 
@@ -648,7 +910,7 @@ fn rw(st: RSt, e: CExpr, consume: Bool, after: Set[Int]) -> (RSt, CExpr) = {
     }
 
     CBlock(stmts, tail, bty) -> {
-      let st1 = push(st, -1)
+      let st1 = push(st, -1, true)
       let base = match tail {
         None -> after
         Some(t) -> fv_expr(t, after)
@@ -737,9 +999,27 @@ fn rw_callee(st: RSt, c: CCallee, after: Set[Int]) -> (RSt, List[CStmt], CCallee
     _ -> (st, [], c, [])
   }
 
+## Bindings nothing later touches, released here rather than at scope end.
+## This is the drop half of Perceus placement (docs/perceus-design.md 6): the
+## sooner a reference goes away, the sooner `rc == 1` holds for whatever it
+## kept alive -- a matched node released before the arm rebuilds is exactly
+## what lets `array_with` find its array unique. The refusals mirror the
+## transfer's, and for the transfer's reasons: a binding outside the current
+## loop is touched again next iteration even when this one is done with it,
+## and inside a short-circuit right side a drop would only sometimes run.
+fn sweep(st: RSt, after: Set[Int]) -> (RSt, List[CStmt]) = {
+  if st.pinned { return (st, []) }
+  var dead: List[Int] = []
+  for sym in scope_syms(st) {
+    if not set.has(after, sym) && transferable(st, sym, after) { dead = dead ++ [sym] }
+  }
+  if len(dead) == 0 { (st, []) } else { (strip_syms(st, dead), drops(dead)) }
+}
+
 ## Statements, each rewritten with the union of everything after it still
 ## alive. The after-sets are built back to front so the whole list costs one
-## walk, then spent front to back with the rewrite.
+## walk, then spent front to back with the rewrite; a sweep between each pair
+## of statements releases whatever the suffix no longer touches.
 fn rw_stmts(st: RSt, stmts: List[CStmt], base: Set[Int]) -> (RSt, List[CStmt]) = {
   let n = len(stmts)
   var afters: List[Set[Int]] = []
@@ -755,8 +1035,9 @@ fn rw_stmts(st: RSt, stmts: List[CStmt], base: Set[Int]) -> (RSt, List[CStmt]) =
   var j = 0
   for s in stmts {
     let (s2, ss) = rw_stmt(st1, s, afters[n - 1 - j])
-    st1 = s2
-    out = out ++ ss
+    let (s3, ds) = sweep(s2, afters[n - 1 - j])
+    st1 = s3
+    out = out ++ ss ++ ds
     j = j + 1
   }
   (st1, out)
@@ -771,18 +1052,46 @@ fn rw_stmt(st: RSt, s: CStmt, after: Set[Int]) -> (RSt, List[CStmt]) =
     }
 
     # The new value is computed first: `s = s ++ "x"` reads the old one, and
-    # the old one is only released once the new value holds its own reference.
-    # The target is in the value's after-set for the same reason -- the
-    # expansion's drop is a read of the old value, and an earlier transfer
-    # would make it the second release.
+    # the old one is released only once the new value holds its own
+    # reference. But when the value's own evaluation consumes the binding --
+    # `m = map.insert(m, k, v)` hands `m` to an owned parameter -- that
+    # transfer IS the old value's release: the expansion's drop disappears
+    # and the callee sees `rc == 1`, which is the whole linear-update case of
+    # the reuse analysis (docs/perceus-design.md 6). The binding is re-homed
+    # into the innermost scope while the value is rewritten so the transfer
+    # is not refused across a loop boundary -- sound because the assignment
+    # re-establishes it in the same statement; a value that could jump into
+    # an enclosing loop's next iteration between those two points keeps the
+    # conservative form.
     CSAssign(sym, value) -> {
-      let (st1, v1) = rw(st, value, true, set.insert(after, sym))
       let ty = cex_ty(value)
       if not is_ref_ty(ty) || immortal(st, value) {
-        (st1, [CSAssign(sym, v1)])
-      } else {
+        let (st1, v1) = rw(st, value, true, set.insert(after, sym))
+        return (st1, [CSAssign(sym, v1)])
+      }
+      let at = scope_index_of(st, sym)
+      var jumps_out = false
+      var i = len(st.scopes) - 1
+      while i >= 0 {
+        let lid = st.scopes[i].loop_id
+        if lid >= 0 && jumps(value, lid, true, true) { jumps_out = true }
+        i = i - 1
+      }
+      if at < 0 || jumps_out {
+        let (st1, v1) = rw(st, value, true, set.insert(after, sym))
         let (st2, t) = fresh(st1)
-        (st2, [CSLet(t, ty, v1), CSDrop(sym), CSAssign(sym, CLocal(t, ty))])
+        return (st2, [CSLet(t, ty, v1), CSDrop(sym), CSAssign(sym, CLocal(t, ty))])
+      }
+      let st0 = bind(strip_syms(st, [sym]), sym)
+      let (st1, v1) = rw(st0, value, true, after)
+      let (st2, t) = fresh(st1)
+      if scope_index_of(st1, sym) < 0 {
+        # taken: the old value's single release already happened inside `v1`
+        (bind_at(st2, at, sym), [CSLet(t, ty, v1), CSAssign(sym, CLocal(t, ty))])
+      } else {
+        # not taken: move the binding home and release the old value here
+        let st3 = bind_at(strip_syms(st2, [sym]), at, sym)
+        (st3, [CSLet(t, ty, v1), CSDrop(sym), CSAssign(sym, CLocal(t, ty))])
       }
     }
 
@@ -797,24 +1106,32 @@ fn rw_stmt(st: RSt, s: CStmt, after: Set[Int]) -> (RSt, List[CStmt]) =
     }
 
     CSLoop(loop_id, body, step) -> {
-      let st1 = push(st, loop_id)
-      # inside the body, nothing bound outside the loop may be transferred --
-      # the guard in `transferable` sees the loop scope -- and everything
-      # bound inside it lives only to the end of the iteration, so an empty
-      # after-set is exact
-      let (st2, lets, b1, temps) = borrow(st1, body, no_syms())
+      # the match once-loop is a branch tree in a loop costume; taken apart,
+      # its arms reconcile like any branch and its scrutinee can die early
+      match unloop(loop_id, body) {
+        Some(s1) -> return rw_stmt(st, s1, after)
+        None -> ()
+      }
+      let open = not completes(body) && not jumps(body, loop_id, true, false)
+      let st1 = push(st, loop_id, open)
+      # the body's base set: bindings outside the loop are guarded by the
+      # scope itself (`transferable`), and everything bound inside it lives
+      # only to the end of the iteration -- but a `continue` of an enclosing
+      # loop after this one still closes that loop, so its pin flows in
+      let (st2, lets, b1, temps) = borrow(st1, body, pins_only(after))
       let body1 = if len(lets) == 0 {
         b1
       } else {
         CBlock(lets ++ drops(list.reverse(temps)), None, TyUnit)
       }
       # The step also runs once per iteration and reads what outlives the
-      # iteration, so the loop scope stays pushed while it is rewritten:
-      # `transferable`'s guard only works from inside the loop.
+      # iteration, so the loop scope stays pushed while it is rewritten --
+      # and the step precedes a re-entry by construction, so its own pin is
+      # in the base: even an open loop refuses releases here.
       let (st3, step1) = match step {
         None -> (st2, None)
         Some(x) -> {
-          let (s, l2, x1, t2) = borrow(st2, x, no_syms())
+          let (s, l2, x1, t2) = borrow(st2, x, set.insert(pins_only(after), pin_of(loop_id)))
           if len(l2) == 0 {
             (s, Some(x1))
           } else {
@@ -887,7 +1204,7 @@ fn rc_fn(next_sym: Int, f: CFun) -> (Int, CFun) = {
   var dicts: Set[Int] = set.empty()
   for d in f.dicts { dicts = set.insert(dicts, d.sym) }
   var st = RSt { scopes: [], dict_syms: dicts, next_sym: next_sym, pinned: false }
-  st = push(st, -1)
+  st = push(st, -1, true)
   # captures and parameters arrive owned; the body is responsible for them
   for p in f.captures ++ f.params {
     if is_ref_ty(p.ty) { st = bind(st, p.sym) }
@@ -1033,7 +1350,16 @@ fn chk_walk(c: Chk, e: CExpr, k: Bool) -> Chk =
       for a in args { c1 = chk_expr(c1, a, true) }
       c1
     }
-    CIntrinsic(_, args, _) -> chk_list(c, args, false)
+    CIntrinsic(name, args, _) -> {
+      let owned = intr_owned_args(name)
+      var c1 = c
+      var i = 0
+      for a in args {
+        c1 = chk_expr(c1, a, list_has(owned, i))
+        i = i + 1
+      }
+      c1
+    }
     CCtor(_, _, args, _) -> chk_list(c, args, true)
     CTuple(elems, _) -> chk_list(c, elems, true)
     CListLit(elems, _) -> chk_list(c, elems, true)
@@ -1096,7 +1422,7 @@ fn chk_stmt(c: Chk, s: CStmt) -> Chk =
         }
       }
     }
-    CSLoop(_, body, step) -> {
+    CSLoop(lid, body, step) -> {
       let cb = chk_expr(Chk { ..c, gone: false }, body, false)
       let c1 = if cb.gone {
         Chk { ..cb, live: c.live, gone: false }
@@ -1105,10 +1431,14 @@ fn chk_stmt(c: Chk, s: CStmt) -> Chk =
       } else {
         Chk { ..cb, live: c.live, gone: false }
       }
-      match step {
+      let c2 = match step {
         None -> c1
         Some(x) -> chk_expr(c1, x, false)
       }
+      # a loop nothing breaks out of is never left: what follows it is
+      # unreachable, and an open loop's paths released their own accounts at
+      # their returns -- the restored live set must not be charged again
+      if jumps(body, lid, true, false) { c2 } else { Chk { ..c2, gone: true } }
     }
   }
 
@@ -1339,6 +1669,129 @@ test "the right side of a short circuit refuses to take" {
       match ss[1] {
         CSDrop(d) -> { assert d == 1 }
         _ -> panic("expected the parameter released at the end")
+      }
+    }
+    _ -> panic("expected a block")
+  }
+}
+
+test "array_with takes its owned operands bare at their last use" {
+  let arr = TyArray(TyInt)
+  let lst = TyList(TyInt)
+  let p1 = CParam { sym: 1, ty: arr, mode: COwned }
+  let p2 = CParam { sym: 2, ty: lst, mode: COwned }
+  let body = CIntrinsic("array_with", [CLocal(1, arr), CInt(0), CLocal(2, lst)], arr)
+  let m = rc_module(one_fn([p1, p2], arr, body))
+  assert len(rc_check(m)) == 0
+  # both owned positions hand their reference over: no dup, no scope drop
+  match m.fns[0].body {
+    CIntrinsic(_, args, _) -> {
+      match args[0] {
+        CLocal(s, _) -> { assert s == 1 }
+        _ -> panic("expected the array handed over bare")
+      }
+      match args[2] {
+        CLocal(s, _) -> { assert s == 2 }
+        _ -> panic("expected the element handed over bare")
+      }
+    }
+    _ -> panic("expected the intrinsic to survive")
+  }
+}
+
+test "a binding is released at the statement that stops touching it" {
+  let lst = TyList(TyInt)
+  let p = CParam { sym: 1, ty: lst, mode: COwned }
+  # the parameter is only ever borrowed, so no transfer can release it; the
+  # sweep must, and right after its last touch rather than at scope end
+  let body = CBlock(
+    [
+      CSDiscard(CIntrinsic("len", [CLocal(1, lst)], TyInt)),
+      CSDiscard(CCall(CDirect("m", "g"), [], TyInt))
+    ],
+    Some(CInt(0)),
+    TyInt
+  )
+  let m = rc_module(one_fn([p], TyInt, body))
+  assert len(rc_check(m)) == 0
+  match m.fns[0].body {
+    CBlock(ss, _, _) -> {
+      match ss[1] {
+        CSDrop(d) -> { assert d == 1 }
+        _ -> panic("expected the release between the statements")
+      }
+    }
+    _ -> panic("expected a block")
+  }
+}
+
+test "the match once-loop is unlooped and its arm takes the binding" {
+  let lst = TyList(TyInt)
+  let p = CParam { sym: 1, ty: lst, mode: COwned }
+  # lower_match's shape: `if (test) { arm; break }` rows over an unreachable
+  # tail; inside the loop the transfer would be refused, unlooped it happens
+  let arm = CBlock(
+    [CSDiscard(CCall(CDirect("m", "g"), [CLocal(1, lst)], TyInt))],
+    Some(CBreak(7)),
+    TyNever
+  )
+  let body = CBlock(
+    [CSLoop(7, CBlock(
+      [CSIf(CBool(true), arm, None), CSDiscard(CIntrinsic("todo", [], TyNever))],
+      None, TyUnit), None)],
+    Some(CInt(0)),
+    TyInt
+  )
+  let m = rc_module(one_fn([p], TyInt, body))
+  assert len(rc_check(m)) == 0
+  match m.fns[0].body {
+    CBlock(ss, _, _) ->
+      match ss[0] {
+        CSLoop(_, _, _) -> panic("expected the once-loop to be taken apart")
+        CSIf(_, thn, _) ->
+          match thn {
+            CBlock(as2, _, _) ->
+              match as2[0] {
+                CSDiscard(CCall(_, args2, _)) ->
+                  match args2[0] {
+                    CLocal(s, _) -> { assert s == 1 }
+                    _ -> panic("expected the arm to take the value")
+                  }
+                _ -> panic("expected the arm's call")
+              }
+            _ -> panic("expected the arm block")
+          }
+        _ -> panic("expected the branch tree")
+      },
+    _ -> panic("expected a block")
+  }
+}
+
+test "reassignment from the old value is a hand-over, not copy and drop" {
+  let lst = TyList(TyInt)
+  let p = CParam { sym: 1, ty: lst, mode: COwned }
+  # `m = g(m)`: the call consumes the old value, so the expansion has no
+  # drop of its own -- this is what lets the callee see rc == 1
+  let body = CBlock(
+    [CSAssign(1, CCall(CDirect("m", "g"), [CLocal(1, lst)], lst))],
+    Some(CInt(0)),
+    TyInt
+  )
+  let m = rc_module(one_fn([p], TyInt, body))
+  assert len(rc_check(m)) == 0
+  match m.fns[0].body {
+    CBlock(ss, _, _) -> {
+      match ss[0] {
+        CSLet(_, _, CCall(_, args2, _)) ->
+          match args2[0] {
+            CLocal(s, _) -> { assert s == 1 }
+            _ -> panic("expected the old value handed into the call")
+          }
+        _ -> panic("expected the value named first")
+      }
+      match ss[1] {
+        CSAssign(_, _) -> ()
+        _ -> panic("expected the assignment right after, with no drop between")
       }
     }
     _ -> panic("expected a block")

@@ -148,10 +148,13 @@ dawn_adt *dawn_none(void);
  * copies. This is the same rule the JVM backend enforces with a CAS on the
  * frontier slot; single-threaded C needs no atomic to state it.
  *
- * `array_with` always copies, and that asymmetry is the design rather than a
- * gap: slot `i < len` has already been handed to this version and maybe to
- * others, and there is no watermark that can say who still reads it. Perceus
- * will be able to say (`rc == 1`), and can lift this later. */
+ * `array_with` copies unless it is alone: slot `i < len` has already been
+ * handed to this version and maybe to others, and no watermark can say who
+ * still reads it -- but the reference counts can (perceus-design.md 6). With
+ * the array *and* its buffer both at `rc == 1` and the caller's reference
+ * consumed, no one is left who could observe the write, and the copy becomes
+ * an in-place store. Under `--rc=leak` counts only ever grow, so the test is
+ * skipped and a leak-mode run doubles as the all-copies baseline. */
 /* Elements are erased, so an Array holds boxed slots by pointer -- the same
  * shape the JVM backend gets from an Object[]. `array_get` therefore hands
  * back what `CUnbox` expects to dereference, and `array_push` takes what
@@ -176,7 +179,14 @@ dawn_array *dawn_array_new(void);
 int64_t dawn_array_len(const dawn_array *a);
 void *dawn_array_get(const dawn_array *a, int64_t i);
 dawn_array *dawn_array_push(dawn_array *a, void *x);
-dawn_array *dawn_array_with(const dawn_array *a, int64_t i, void *x);
+/* Consumes `a` and `x` -- the one owned-argument primitive; see the calling
+ * convention note below. */
+dawn_array *dawn_array_with(dawn_array *a, int64_t i, void *x);
+/* In-place stores against copies, for the reuse analysis's gate. Counted
+ * unconditionally (two increments against an allocation and a loop);
+ * DAWN_RC_STATS=1 prints both on exit. */
+extern uint64_t dawn_array_with_inplace;
+extern uint64_t dawn_array_with_copied;
 
 /* The one bit-twiddle std/hamt needs that C does not portably spell. */
 int64_t dawn_popcount(int64_t n);
@@ -260,7 +270,15 @@ bool dawn_is_unique(const void *p);
  * Written down because the alternative -- consuming arguments -- reads the
  * same at every call site and differs only in who leaks. The array contract
  * found this the hard way: sharing a buffer between versions without counting
- * it means the first version dropped frees a buffer the others still hold. */
+ * it means the first version dropped frees a buffer the others still hold.
+ *
+ * ONE PRIMITIVE IS THE EXCEPTION: `dawn_array_with` consumes its array and
+ * its element (perceus-design.md 6, mirrored by `types.intr_owned_args`). A
+ * borrowed array keeps the caller's count on it and `rc == 1` can never
+ * hold; only after the caller hands its reference over does uniqueness mean
+ * "no one can observe a write". The compiler's rc pass emits the transfer or
+ * the dup at each call site -- hand-written C (the contract harnesses) must
+ * dup anything it wants to keep before calling. */
 
 void dawn_rt_init(int argc, char **argv);
 

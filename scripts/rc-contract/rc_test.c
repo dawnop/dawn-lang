@@ -98,8 +98,10 @@ static void test_array(void) {
   dawn_drop(xs);
 }
 
-/* `array_with` copies, so the version it came from stays intact and both have
- * to be dropped -- and the element it replaced must not outlive the copy. */
+/* `array_with` consumes what it is given (the one owned-argument primitive),
+ * and answers uniqueness with reuse: shared, it copies and the version it
+ * came from stays intact; alone, it writes the slot in place and hands the
+ * same array back. Both halves are asserted, counters included. */
 static void test_array_with(void) {
   dawn_array *xs = dawn_array_new();
   for (int i = 0; i < 8; i++) {
@@ -109,13 +111,23 @@ static void test_array_with(void) {
     dawn_drop(xs);
     xs = n;
   }
+  uint64_t inplace0 = dawn_array_with_inplace;
+  uint64_t copied0 = dawn_array_with_copied;
+
+  /* shared: the caller keeps xs, so it dups both arguments in */
   dawn_box *replacement = dawn_box_int(99);
-  dawn_array *ys = dawn_array_with(xs, 3, replacement);
-  dawn_drop(replacement);
+  dawn_array *ys = dawn_array_with(dawn_dup(xs), 3, dawn_dup(replacement));
+  check(dawn_array_with_copied == copied0 + 1, "a shared array is copied");
   check(((dawn_box *)dawn_array_get(xs, 3))->val.i == 3, "the base is unchanged");
   check(((dawn_box *)dawn_array_get(ys, 3))->val.i == 99, "the copy has the new value");
-  dawn_drop(xs);
   dawn_drop(ys);
+
+  /* alone: xs's reference is handed over, and the same array comes back */
+  dawn_array *zs = dawn_array_with(xs, 3, replacement);
+  check(dawn_array_with_inplace == inplace0 + 1, "a unique array is written in place");
+  check(zs == xs, "and it is the same array");
+  check(((dawn_box *)dawn_array_get(zs, 3))->val.i == 99, "with the new value in the slot");
+  dawn_drop(zs);
 }
 
 /* The reason drop walks with an explicit stack. A persistent vector and a

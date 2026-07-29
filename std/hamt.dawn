@@ -278,18 +278,27 @@ pub fn has[K: Eq + Hash, V](m: Hamt[K, V], k: K) -> Bool =
 ## A copy with `k` bound to `v`. A key already present keeps the position it
 ## was first inserted at, which is what makes iteration order stable under
 ## rebinding (spec §2.2).
+# The fields come out into bindings before the update is built: after the
+# last of these reads nothing touches `m`, so a caller that handed over its
+# only reference gets the map released *before* `node_put` runs -- which is
+# what lets the spine be rewritten in place instead of path-copied
+# (perceus-design.md 6). Written `..m`-style, `m` survives to the end of the
+# expression and pins the whole spine at rc 2.
 pub fn assoc[K: Eq + Hash, V](m: Hamt[K, V], k: K, v: V) -> Hamt[K, V] = {
   let h = hash32(k)
-  match node_leaf(m.root, 0, h, k) {
+  let root = m.root
+  let count = m.count
+  let nseq = m.nseq
+  match node_leaf(root, 0, h, k) {
     Some(leaf) -> {
       let s = leaf_seq(leaf)
-      Hamt { ..m, root: node_put(m.root, 0, h, k, v, s) }
+      Hamt { root: node_put(root, 0, h, k, v, s), count: count, nseq: nseq }
     }
     None ->
       Hamt {
-        root: node_put(m.root, 0, h, k, v, m.nseq),
-        count: m.count + 1,
-        nseq: m.nseq + 1
+        root: node_put(root, 0, h, k, v, nseq),
+        count: count + 1,
+        nseq: nseq + 1
       }
   }
 }
@@ -301,11 +310,17 @@ fn leaf_seq[K, V](n: Node[K, V]) -> Int =
   }
 
 ## A copy without `k`; absent keys are fine.
+# Field bindings before the rebuild, for assoc's reason.
 pub fn dissoc[K: Eq + Hash, V](m: Hamt[K, V], k: K) -> Hamt[K, V] = {
   let h = hash32(k)
-  match node_leaf(m.root, 0, h, k) {
+  let root = m.root
+  let count = m.count
+  let nseq = m.nseq
+  match node_leaf(root, 0, h, k) {
+    # `m` itself: on this path it is the arm's value, and on the other path
+    # it is dead before `node_del` runs -- per-path accounting keeps both
     None -> m
-    Some(_) -> Hamt { ..m, root: node_del(m.root, 0, h, k), count: m.count - 1 }
+    Some(_) -> Hamt { root: node_del(root, 0, h, k), count: count - 1, nseq: nseq }
   }
 }
 
