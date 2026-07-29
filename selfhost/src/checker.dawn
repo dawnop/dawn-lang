@@ -13,7 +13,7 @@ use std/map
 use std/set
 use token.{Diag}
 use ast.{
-  TypeRef, TNamed, TTuple, TFn, Bound, TypeParamDecl, Module,
+  TypeRef, TNamed, TQual, TTuple, TFn, Bound, TypeParamDecl, Module,
   module_java_uses, module_fns, module_types, module_consts, module_traits,
   module_impls, module_tests, module_uses,
   DType, TypeDeclR, CtorDecl, FieldDecl, DTrait, TraitMethod, Param, Expr,
@@ -372,6 +372,15 @@ pub fn alias_effvar_span(ref: TypeRef) -> Option[(Int, Int)] =
       }
       None
     }
+    TQual(_, _, targs, _, _) -> {
+      for e in targs {
+        match alias_effvar_span(e) {
+          Some(s) -> return Some(s)
+          None -> ()
+        }
+      }
+      None
+    }
     TNamed(_, targs, _, _) -> {
       for e in targs {
         match alias_effvar_span(e) {
@@ -455,11 +464,13 @@ pub fn resolve_type(cx: Cx, ref: TypeRef) -> (Cx, Ty) !io =
       (cx4, TyFn(ps, rt, eff))
     }
     TNamed(name, targs, lo, hi) -> resolve_named(cx, name, targs, lo, hi)
+    TQual(q, name, targs, lo, hi) -> resolve_qual(cx, q, name, targs, lo, hi)
   }
 
 fn t_lo2(t: TypeRef) -> Int =
   match t {
     TNamed(_, _, lo, _) -> lo
+    TQual(_, _, _, lo, _) -> lo
     TTuple(_, lo, _) -> lo
     TFn(_, _, _, lo, _) -> lo
   }
@@ -467,9 +478,96 @@ fn t_lo2(t: TypeRef) -> Int =
 fn t_hi2(t: TypeRef) -> Int =
   match t {
     TNamed(_, _, _, hi) -> hi
+    TQual(_, _, _, _, hi) -> hi
     TTuple(_, _, hi) -> hi
     TFn(_, _, _, _, hi) -> hi
   }
+
+## `m.T` — a type qualified by a whole-module alias (LANG-06). Resolution
+## reads the exporter's surface: a pub alias means what the declaring module
+## resolved it to, a pub ADT is its (grafted) id. The alias namespace is
+## separate from values (spec §10.3), so a lowercase name in type position
+## can only be one of these.
+fn resolve_qual(
+  cx: Cx,
+  q: String,
+  name: String,
+  targs: List[TypeRef],
+  lo: Int,
+  hi: Int
+) -> (Cx, Ty) !io = {
+  let exp = match map.get(cx.module_exports, q) {
+    None ->
+      return (cerr_h(cx, "unknown module alias `" ++ q ++ "` in a type position", lo, hi,
+        "a qualified type needs a whole-module import in scope: `use <path> as " ++ q ++ "`"),
+        TyError)
+    Some(e) -> e
+  }
+  match map.get(exp.aliases, name) {
+    Some(al) -> {
+      if len(targs) != len(al.tparams) {
+        return (cerr(cx, "`" ++ al.name ++ "` takes " ++ to_string(len(al.tparams)) ++
+            " type parameter(s), got " ++ to_string(len(targs)), lo, hi), TyError)
+      }
+      # imported aliases carry their declaring module's resolution; nothing
+      # here re-resolves the target against this module's scope
+      let target = match map.get(exp.alias_resolved, name) {
+        Some(t) -> t
+        None -> TyError
+      }
+      if target == TyError { return (cx, TyError) }
+      if len(al.tparams) == 0 { return (cx, wrap_opaque(al, target)) }
+      var cx2 = cx
+      var m2: Map[Int, Ty] = map.empty()
+      var i = 0
+      for v in al.tparams {
+        match v {
+          TyVar(_, id) -> {
+            let (cx3, at) = resolve_type(cx2, targs[i])
+            cx2 = cx3
+            m2 = map.insert(m2, id, at)
+          }
+          _ -> ()
+        }
+        i = i + 1
+      }
+      let em: Map[Int, Eff] = map.empty()
+      return (cx2, wrap_opaque(al, subst(target, m2, em)))
+    }
+    None -> ()
+  }
+  match map.get(exp.types_by_name, name) {
+    Some(aid) -> {
+      let info = adt_of(cx.adts, aid)
+      if len(targs) != len(info.tparams) {
+        return (cerr(cx, "`" ++ info.name ++ "` takes " ++ to_string(len(info.tparams)) ++
+            " type parameter(s), got " ++ to_string(len(targs)), lo, hi), TyError)
+      }
+      var cx1 = cx
+      var args: List[Ty] = []
+      for a in targs {
+        let (cx2, t) = resolve_type(cx1, a)
+        cx1 = cx2
+        args = args ++ [t]
+      }
+      (cx1, TyAdt(aid, args))
+    }
+    None -> {
+      let pool = map.keys(exp.types_by_name) ++ map.keys(exp.aliases)
+      let hint = match suggest.hint(name, pool) {
+        Some(h) -> h
+        None ->
+          if len(pool) == 0 {
+            "module `" ++ exp.mod_path ++ "` exports no types"
+          } else {
+            "exported types: " ++ join(sort(pool), ", ")
+          }
+      }
+      (cerr_h(cx, "module `" ++ exp.mod_path ++ "` has no exported type `" ++ name ++ "`",
+        lo, hi, hint), TyError)
+    }
+  }
+}
 
 fn resolve_named(cx: Cx, name: String, targs: List[TypeRef], lo: Int, hi: Int) -> (Cx, Ty) !io = {
   # type parameters shadow everything
@@ -8787,4 +8885,48 @@ test "exports_of exposes the pub surface, and imports consume it" {
   let (m3, _) = parser.parse_module(src3)
   let (cx3, _) = check_module(cx_new(Some("use_site"), None), m3, env)
   assert cx3.diags[0].msg == "`hidden` is private to module `geom`"
+}
+
+test "a module-qualified type resolves through the alias (LANG-06)" {
+  let src = "pub type Pt = { x: Int, y: Int }\n" ++
+    "pub type Box[T] = | One(v: T)\n" ++
+    "pub alias Idx = Int\n" ++
+    "type Secret = { s: Int }\n" ++
+    "pub fn mk(x: Int, y: Int) -> Pt = Pt { x: x, y: y }\n"
+  let (m, pdiags) = parser.parse_module(src)
+  assert len(pdiags) == 0
+  let env0: Map[String, ModExports] = map.empty()
+  let (cx1, _) = check_module(cx_new(Some("geom"), None), m, env0)
+  assert len(cx1.diags) == 0
+  let env = map.from([("geom", exports_of(cx1, m, "geom", "geom"))])
+  # annotation, generic argument, alias, and a local fn signature all take g.T
+  let src2 = "use geom as g\n" ++
+    "pub fn go(p: g.Pt) -> Int = p.x\n" ++
+    "pub fn boxed(b: g.Box[Int]) -> g.Box[Int] = b\n" ++
+    "pub fn take(i: g.Idx) -> Int = i\n" ++
+    "pub fn deep(xs: List[g.Pt]) -> Int = len(xs)\n"
+  let (m2, pdiags2) = parser.parse_module(src2)
+  assert len(pdiags2) == 0
+  let (cx2, _) = check_module(cx_new(Some("use_site"), None), m2, env)
+  assert len(cx2.diags) == 0
+  # a type the module does not export is an error that names the module
+  let src3 = "use geom as g\n" ++
+    "pub fn go(p: g.Secret) -> Int = 1\n"
+  let (m3, _) = parser.parse_module(src3)
+  let (cx3, _) = check_module(cx_new(Some("use_site"), None), m3, env)
+  assert len(cx3.diags) > 0
+  assert str.contains(cx3.diags[0].msg, "has no exported type `Secret`")
+  # a dangling alias is named too
+  let src4 = "pub fn go(p: nope.Pt) -> Int = 1\n"
+  let (m4, _) = parser.parse_module(src4)
+  let (cx4, _) = check_module(cx_new(Some("use_site"), None), m4, env)
+  assert len(cx4.diags) > 0
+  assert str.contains(cx4.diags[0].msg, "unknown module alias `nope`")
+  # arity still checks through the alias
+  let src5 = "use geom as g\n" ++
+    "pub fn go(b: g.Box) -> Int = 1\n"
+  let (m5, _) = parser.parse_module(src5)
+  let (cx5, _) = check_module(cx_new(Some("use_site"), None), m5, env)
+  assert len(cx5.diags) > 0
+  assert str.contains(cx5.diags[0].msg, "takes 1 type parameter(s), got 0")
 }

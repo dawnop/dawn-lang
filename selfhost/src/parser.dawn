@@ -29,7 +29,7 @@ use token.{
   keyword
 }
 use ast.{
-  TypeRef, TNamed, TTuple, TFn, Bound, TypeParamDecl, Param, LambdaParam,
+  TypeRef, TNamed, TQual, TTuple, TFn, Bound, TypeParamDecl, Param, LambdaParam,
   FieldDecl, CtorDecl, ImportName, StrPart, SPText, SPInterp,
   BinOp, OpAdd, OpSub, OpMul, OpDiv, OpMod, OpConcat, OpEq, OpNeq, OpLt, OpLe,
   OpGt, OpGe, OpAnd, OpOr, OpBand, OpBor, OpBxor, OpShl, OpShr, OpUshr,
@@ -794,12 +794,34 @@ fn impl_decl(p: P, st: St) -> PR[Decl] = {
 fn type_ref(p: P, st: St) -> PR[TypeRef] = {
   if at_kind(p, st, FN) { return fn_type_ref(p, st) }
   if at_kind(p, st, LPAREN) { return tuple_type_ref(p, st) }
-  let (st1, t) = want(p, st, TYPEIDENT, "a type name (uppercase)")?
-  if not at_kind(p, st1, LBRACKET) {
-    let none: List[TypeRef] = []
-    return Ok((st1, TNamed(t.text, none, t.lo, t.hi)))
+  # `m.T` — a module-qualified type (LANG-06). A lowercase name in type
+  # position can only be a module alias, so the shape is unambiguous.
+  if at_kind(p, st, IDENT) {
+    let (stq, q) = adv(p, st)
+    let (stq1, _) = want(p, stq, DOT, "`.` (a lowercase name in type position is a module alias)")?
+    let (stq2, t) = want(p, stq1, TYPEIDENT, "a type name (uppercase)")?
+    let (stq3, pr) = type_args(p, stq2, t.hi)?
+    let (args, hi) = pr
+    return Ok((stq3, TQual(q.text, t.text, args, q.lo, hi)))
   }
-  var st2 = adv1(p, st1)
+  let (st1, t) = want(p, st, TYPEIDENT, "a type name (uppercase)")?
+  let (st2, pr) = type_args(p, st1, t.hi)?
+  let (args, hi) = pr
+  if len(args) == 0 {
+    Ok((st2, TNamed(t.text, [], t.lo, t.hi)))
+  } else {
+    Ok((st2, TNamed(t.text, args, t.lo, hi)))
+  }
+}
+
+## The optional `[T, ...]` argument list after a type name; hi is the closing
+## bracket's, or the given fallback when there is no list.
+fn type_args(p: P, st: St, hi0: Int) -> PR[(List[TypeRef], Int)] = {
+  if not at_kind(p, st, LBRACKET) {
+    let none: List[TypeRef] = []
+    return Ok((st, (none, hi0)))
+  }
+  var st2 = adv1(p, st)
   var args: List[TypeRef] = []
   while not at_kind(p, st2, RBRACKET) {
     let (st3, a) = type_ref(p, st2)?
@@ -813,7 +835,7 @@ fn type_ref(p: P, st: St) -> PR[TypeRef] = {
   if len(args) == 0 {
     return Err((st4, perr(p, st4, "type argument list cannot be empty")))
   }
-  Ok((st4, TNamed(t.text, args, t.lo, close.hi)))
+  Ok((st4, (args, close.hi)))
 }
 
 ## (A, B) — tuple type, 2 to 8 elements

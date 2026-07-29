@@ -10,7 +10,8 @@ use ast.{
   Expr, EInt, EVar, ECall, EBinary, ECtor, EBlock,
   BinOp, OpAdd, OpMul,
   Stmt, SWhile,
-  Decl, DFn, DConst, DUseModule, DImpl, Module
+  Decl, DFn, DConst, DUseModule, DImpl, Module,
+  TypeRef, TQual, TNamed
 }
 
 fn rendered(src: String) -> String = {
@@ -179,6 +180,36 @@ test "use ... as binds an explicit alias" {
     }
     _ -> { assert false }
   }
+}
+
+test "a module-qualified type parses in type position" {
+  # `m.T` — a lowercase name in type position can only be a module alias
+  let (m, ds) = parse_module("fn f(x: v.Json) -> v.Box[Int] = x\n")
+  assert len(ds) == 0
+  match m.decls[0] {
+    DFn(f) -> {
+      match f.params[0].tref {
+        TQual(q, name, targs, _, _) -> {
+          assert q == "v"
+          assert name == "Json"
+          assert len(targs) == 0
+        }
+        _ -> { assert false }
+      }
+      match f.ret {
+        Some(TQual(q2, name2, targs2, _, _)) -> {
+          assert q2 == "v"
+          assert name2 == "Box"
+          assert len(targs2) == 1
+        }
+        _ -> { assert false }
+      }
+    }
+    _ -> { assert false }
+  }
+  # a lowercase name with no dot is still an error, and says why
+  let (_, ds2) = parse_module("fn f(x: json) -> Int = 1\n")
+  assert len(ds2) > 0
 }
 
 test "selective use keeps its import names" {

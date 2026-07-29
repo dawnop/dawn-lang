@@ -1158,9 +1158,11 @@ use java "java.lang.Math"      # Java 互操作（§9），形式不变
   **声明任何与模块别名同名的顶层 fn/type/const、局部或参数都是编译错误**
   （"`lexer` shadows the imported module `json/lexer`"）。由此 `lexer.next(x)` 永不歧义——
   `lexer` 要么是一个绑定（走 §4 的 UFCS 点调用），要么是模块别名（限定访问），不可能两者兼是。
-- 限定访问只支持**表达式位置**的 `alias.fn(args)`（调用一个 pub 函数）。
-  **类型、构造器、常量跨模块只能经选择性引入**（`use m.{Shape, MAX_DEPTH}`）：限定类型引用
-  `m.Shape`、限定构造器模式、限定常量 `m.NAME` v0.1 都不做（常量名是大写，本就不走点取）。
+- 限定访问支持**表达式位置**的 `alias.fn(args)`（调用一个 pub 函数），以及**类型位置**的
+  `alias.T[...]`（LANG-06，2026-07-30）：类型位置的小写名只可能是模块别名，故无歧义；
+  可指向导出的 ADT/record 或 `pub alias`（后者按声明方的解析展开）。
+  **构造器模式与限定常量 `m.NAME` 仍只能经选择性引入**（`use m.{Shape, MAX_DEPTH}`）——
+  这两个位置的推广在 [`docs/audit/module-access-design.md`](audit/module-access-design.md) 排队。
 - 选择性引入一个 `type` 同时引入其**全部构造器**（与 `pub type` 导出构造器+字段的规则一致）。
 - 选择性引入的名字与本模块顶层声明或其他引入冲突 → 错误。**与 prelude 名冲突**：
   选择性引入**可以**遮蔽 prelude（你逐字要来的名字，意图明确）；**顶层 fn / trait 方法**
