@@ -61,6 +61,40 @@ static void dawn_hdr_init(dawn_hdr *h, int32_t kind) {
   h->kind = kind;
 }
 
+dawn_str dawn_str_empty_obj = {{DAWN_IMMORTAL, DAWN_K_STR}, 0, ""};
+
+dawn_str *dawn_str_new(int64_t len) {
+  dawn_str *s = (dawn_str *)dawn_alloc(sizeof(dawn_str) + (size_t)len + 1);
+  dawn_hdr_init(&s->h, DAWN_K_STR);
+  s->len = len;
+  s->p = (const char *)(s + 1);
+  /* not part of the value (len is authoritative); a convenience for the seams
+   * that hand `p` to the C library */
+  ((char *)(s + 1))[len] = '\0';
+  return s;
+}
+
+dawn_str *dawn_str_copy(const char *p, int64_t n) {
+  dawn_str *s = dawn_str_new(n);
+  if (n > 0) memcpy(dawn_str_data(s), p, (size_t)n);
+  return s;
+}
+
+/* Trim a just-built string to its measured length, for the producers whose
+ * worst case is known but whose exact size is not worth a second pass. The
+ * block may move, so only the builder's own reference may exist yet. */
+static dawn_str *dawn_str_shrink(dawn_str *s, int64_t len) {
+  dawn_str *r = (dawn_str *)realloc(s, sizeof(dawn_str) + (size_t)len + 1);
+  if (r == NULL) {
+    fputs("dawn: out of memory\n", stderr);
+    exit(1);
+  }
+  r->len = len;
+  r->p = (const char *)(r + 1);
+  ((char *)(r + 1))[len] = '\0';
+  return r;
+}
+
 dawn_adt *dawn_adt_new(int32_t tag, int32_t nfields, uint64_t mask) {
   dawn_adt *a =
       (dawn_adt *)dawn_alloc(sizeof(dawn_adt) + (size_t)nfields * sizeof(dawn_slot));
@@ -101,8 +135,28 @@ dawn_clo *dawn_clo_new_wide(void *fn, int32_t ncap, const uint64_t *mask) {
   return c;
 }
 
+/* Dictionaries are outside reference counting by design (perceus-design.md
+ * 3): no header, never freed. An argument-carrying dictionary is built here
+ * at run time and lives forever, so LeakSanitizer is told it is owned --
+ * without this, leak detection on the corpus (the whole point of counting
+ * strings) would drown in reports about a decided design. */
+#ifdef __SANITIZE_ADDRESS__
+#include <sanitizer/lsan_interface.h>
+#define DAWN_LSAN_OWN(p) __lsan_ignore_object(p)
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer)
+#include <sanitizer/lsan_interface.h>
+#define DAWN_LSAN_OWN(p) __lsan_ignore_object(p)
+#else
+#define DAWN_LSAN_OWN(p) ((void)0)
+#endif
+#else
+#define DAWN_LSAN_OWN(p) ((void)0)
+#endif
+
 dawn_dict *dawn_dict_new(const dawn_dict *tmpl, int32_t nargs, ...) {
   dawn_dict *d = (dawn_dict *)dawn_alloc(sizeof(dawn_dict));
+  DAWN_LSAN_OWN(d);
   *d = *tmpl;
   d->nargs = nargs;
   va_list ap;
@@ -144,11 +198,6 @@ dawn_box *dawn_box_unit(dawn_unit v) {
   return s;
 }
 
-dawn_box *dawn_box_str(dawn_str v) {
-  dawn_box *s = dawn_box_new();
-  s->val.s = v;
-  return s;
-}
 
 /* Read a box out and release it in one move. These are for the one place a
  * box exists that no Core node owns: the erased call boundary. A dynamic
@@ -181,11 +230,6 @@ dawn_unit dawn_unbox_unit(void *b) {
   return v;
 }
 
-dawn_str dawn_unbox_str(void *b) {
-  dawn_str v = ((dawn_box *)b)->val.s;
-  dawn_drop(b);
-  return v;
-}
 
 /* ---- reference counting (docs/perceus-design.md) ---- */
 
@@ -312,7 +356,12 @@ void dawn_drop(void *p) {
       case DAWN_K_BOX:
         break; /* a scalar; a reference never went through a box */
       case DAWN_K_BYTES:
-        break; /* the buffer is not owned -- perceus-design.md 2.8 */
+        /* every constructor allocates the buffer fresh, so it goes with the
+         * struct -- the leaked-by-contract era ended with counted strings */
+        free((void *)((dawn_bytes *)q)->p);
+        break;
+      case DAWN_K_STR:
+        break; /* one block: the bytes sit right after the header */
       default:
         fprintf(stderr, "dawn: drop of an unheaded pointer (kind %d)\n", h->kind);
         exit(1);
@@ -345,14 +394,14 @@ static dawn_adt *dawn_err(void *boxed) {
   return a;
 }
 
-dawn_unit dawn_io_print(dawn_str s) {
-  if (s.len > 0) {
-    fwrite(s.p, 1, (size_t)s.len, stdout);
+dawn_unit dawn_io_print(dawn_str *s) {
+  if (s->len > 0) {
+    fwrite(s->p, 1, (size_t)s->len, stdout);
   }
   return DAWN_UNIT;
 }
 
-dawn_unit dawn_io_println(dawn_str s) {
+dawn_unit dawn_io_println(dawn_str *s) {
   dawn_io_print(s);
   fputc('\n', stdout);
   return DAWN_UNIT;
@@ -361,15 +410,15 @@ dawn_unit dawn_io_println(dawn_str s) {
 /* stdout is block-buffered here (dawn_rt_init) and stderr is not, so the two
  * would interleave in the wrong order if a program used both. Flushing stdout
  * before writing stderr is what System.err's autoflush gets for free. */
-dawn_unit dawn_io_eprint(dawn_str s) {
+dawn_unit dawn_io_eprint(dawn_str *s) {
   fflush(stdout);
-  if (s.len > 0) {
-    fwrite(s.p, 1, (size_t)s.len, stderr);
+  if (s->len > 0) {
+    fwrite(s->p, 1, (size_t)s->len, stderr);
   }
   return DAWN_UNIT;
 }
 
-dawn_unit dawn_io_eprintln(dawn_str s) {
+dawn_unit dawn_io_eprintln(dawn_str *s) {
   dawn_io_eprint(s);
   fputc('\n', stderr);
   return DAWN_UNIT;
@@ -380,34 +429,31 @@ dawn_unit dawn_io_exit(int64_t code) {
   exit((int)code);
 }
 
-dawn_str dawn_str_concat(dawn_str a, dawn_str b) {
-  if (a.len == 0) return b;
-  if (b.len == 0) return a;
-  char *buf = (char *)dawn_alloc((size_t)(a.len + b.len));
-  memcpy(buf, a.p, (size_t)a.len);
-  memcpy(buf + a.len, b.p, (size_t)b.len);
-  return (dawn_str){buf, a.len + b.len};
+dawn_str *dawn_str_concat(dawn_str *a, dawn_str *b) {
+  /* the shortcut hands back a value the caller will own; its own reference
+   * to the operand still stands, so the result needs one of its own */
+  if (a->len == 0) return (dawn_str *)dawn_dup(b);
+  if (b->len == 0) return (dawn_str *)dawn_dup(a);
+  dawn_str *r = dawn_str_new(a->len + b->len);
+  char *buf = dawn_str_data(r);
+  memcpy(buf, a->p, (size_t)a->len);
+  memcpy(buf + a->len, b->p, (size_t)b->len);
+  return r;
 }
 
-bool dawn_str_eq(dawn_str a, dawn_str b) {
-  if (a.len != b.len) return false;
-  if (a.len == 0) return true;
-  return memcmp(a.p, b.p, (size_t)a.len) == 0;
+bool dawn_str_eq(dawn_str *a, dawn_str *b) {
+  if (a->len != b->len) return false;
+  if (a->len == 0) return true;
+  return memcmp(a->p, b->p, (size_t)a->len) == 0;
 }
 
-static dawn_str dawn_str_copy(const char *buf, size_t n) {
-  char *out = (char *)dawn_alloc(n);
-  memcpy(out, buf, n);
-  return (dawn_str){out, (int64_t)n};
-}
-
-dawn_str dawn_str_of_int(int64_t v) {
+dawn_str *dawn_str_of_int(int64_t v) {
   char buf[32];
   int n = snprintf(buf, sizeof buf, "%lld", (long long)v);
   return dawn_str_copy(buf, (size_t)n);
 }
 
-dawn_str dawn_str_of_float(double v) {
+dawn_str *dawn_str_of_float(double v) {
   /* Approximates Java's Double.toString well enough for the spike but is
    * NOT byte-identical to it (Java emits the shortest round-tripping form).
    * Floats are therefore excluded from the differential corpus until the
@@ -429,19 +475,25 @@ dawn_str dawn_str_of_float(double v) {
   return dawn_str_copy(buf, (size_t)n);
 }
 
-dawn_str dawn_str_of_bool(bool v) {
-  return v ? dawn_str_lit("true", 4) : dawn_str_lit("false", 5);
+/* Static, not `dawn_str_lit`: the macro's storage is the enclosing block,
+ * and a return hands the pointer out of it. */
+static dawn_str dawn_true_str = {{DAWN_IMMORTAL, DAWN_K_STR}, 4, "true"};
+static dawn_str dawn_false_str = {{DAWN_IMMORTAL, DAWN_K_STR}, 5, "false"};
+
+dawn_str *dawn_str_of_bool(bool v) {
+  return v ? &dawn_true_str : &dawn_false_str;
 }
 
-dawn_str dawn_str_quote(dawn_str s) {
+dawn_str *dawn_str_quote(dawn_str *s) {
   /* Worst case every byte doubles, plus the two quotes. Bytes above 0x7f are
    * copied through: the escapes are the five the JVM backend applies, and a
    * multi-byte code point has no continuation byte in that set. */
-  char *buf = (char *)dawn_alloc((size_t)(2 * s.len + 2));
+  dawn_str *r = dawn_str_new(2 * s->len + 2);
+  char *buf = dawn_str_data(r);
   int64_t n = 0;
   buf[n++] = '"';
-  for (int64_t i = 0; i < s.len; i++) {
-    char c = s.p[i];
+  for (int64_t i = 0; i < s->len; i++) {
+    char c = s->p[i];
     switch (c) {
       case '\\': buf[n++] = '\\'; buf[n++] = '\\'; break;
       case '"': buf[n++] = '\\'; buf[n++] = '"'; break;
@@ -452,7 +504,7 @@ dawn_str dawn_str_quote(dawn_str s) {
     }
   }
   buf[n++] = '"';
-  return (dawn_str){buf, n};
+  return dawn_str_shrink(r, n);
 }
 
 /* ---- hashing and ordering ------------------------------------------------
@@ -465,14 +517,14 @@ dawn_str dawn_str_quote(dawn_str s) {
 
 /* Next UTF-16 code unit, or -1 at the end. `*i` is the byte cursor and
  * `*pending` carries the low surrogate a previous step left behind. */
-static int32_t dawn_utf16_next(dawn_str s, int64_t *i, int32_t *pending) {
+static int32_t dawn_utf16_next(dawn_str *s, int64_t *i, int32_t *pending) {
   if (*pending >= 0) {
     int32_t u = *pending;
     *pending = -1;
     return u;
   }
-  if (*i >= s.len) return -1;
-  unsigned char c = (unsigned char)s.p[*i];
+  if (*i >= s->len) return -1;
+  unsigned char c = (unsigned char)s->p[*i];
   uint32_t cp;
   int64_t n;
   if (c < 0x80) {
@@ -490,9 +542,9 @@ static int32_t dawn_utf16_next(dawn_str s, int64_t *i, int32_t *pending) {
   }
   /* a truncated sequence cannot come from a Dawn string; the clamp is only
    * so a malformed one reads no further than the buffer */
-  if (*i + n > s.len) n = s.len - *i;
+  if (*i + n > s->len) n = s->len - *i;
   for (int64_t k = 1; k < n; k++) {
-    cp = (cp << 6) | ((unsigned char)s.p[*i + k] & 0x3Fu);
+    cp = (cp << 6) | ((unsigned char)s->p[*i + k] & 0x3Fu);
   }
   *i += n;
   if (cp >= 0x10000u) {
@@ -505,10 +557,10 @@ static int32_t dawn_utf16_next(dawn_str s, int64_t *i, int32_t *pending) {
 
 /* Length in UTF-16 code units: what Java's String.length() reports, and what
  * compareTo falls back on when one string is a prefix of the other. */
-static int64_t dawn_utf16_len(dawn_str s) {
+static int64_t dawn_utf16_len(dawn_str *s) {
   int64_t n = 0;
-  for (int64_t i = 0; i < s.len; i++) {
-    unsigned char c = (unsigned char)s.p[i];
+  for (int64_t i = 0; i < s->len; i++) {
+    unsigned char c = (unsigned char)s->p[i];
     if ((c & 0xC0) == 0x80) continue;
     n += (c >= 0xF0) ? 2 : 1;
   }
@@ -543,7 +595,7 @@ int64_t dawn_hash_float(double v) {
 
 int64_t dawn_hash_bool(bool v) { return v ? 1231 : 1237; }
 
-int64_t dawn_hash_str(dawn_str s) {
+int64_t dawn_hash_str(dawn_str *s) {
   int32_t h = 0;
   int64_t i = 0;
   int32_t pending = -1;
@@ -580,7 +632,7 @@ int64_t dawn_cmp_float(double a, double b) {
   return ba == bb ? 0 : (ba < bb ? -1 : 1);
 }
 
-int64_t dawn_cmp_str(dawn_str a, dawn_str b) {
+int64_t dawn_cmp_str(dawn_str *a, dawn_str *b) {
   int64_t ia = 0;
   int64_t ib = 0;
   int32_t pa = -1;
@@ -640,29 +692,38 @@ typedef struct dawn_handler {
 } dawn_handler;
 
 static dawn_handler *dawn_handlers;
-static dawn_str dawn_failure_msg;
 
-static void dawn_raise(dawn_str msg, bool is_panic) {
+/* The message is copied here rather than kept by pointer: the raiser's frame
+ * -- and with it a `dawn_str_lit` compound literal, or a heap message whose
+ * owner unwound -- is gone by the time the catcher reads it. */
+#define DAWN_FAILURE_MAX 512
+static char dawn_failure_buf[DAWN_FAILURE_MAX];
+static int64_t dawn_failure_len;
+
+static void dawn_raise(dawn_str *msg, bool is_panic) {
   dawn_handler *h = dawn_handlers;
   while (h != NULL && is_panic && !h->catches_panic) h = h->prev;
   if (h != NULL) {
     /* The skipped frames go with it: they sit above `h`, and `h`'s own
      * setjmp branch restores the list to `h->prev`. */
-    dawn_failure_msg = msg;
+    dawn_failure_len = msg->len < DAWN_FAILURE_MAX ? msg->len : DAWN_FAILURE_MAX;
+    if (dawn_failure_len > 0) {
+      memcpy(dawn_failure_buf, msg->p, (size_t)dawn_failure_len);
+    }
     longjmp(h->jb, 1);
   }
   /* Nothing stopped it, so the program is over either way -- which is why
    * both kinds report under the same word. */
   fflush(stdout);
   fputs("panic: ", stderr);
-  if (msg.len > 0) fwrite(msg.p, 1, (size_t)msg.len, stderr);
+  if (msg->len > 0) fwrite(msg->p, 1, (size_t)msg->len, stderr);
   fputc('\n', stderr);
   exit(1);
 }
 
-void dawn_panic(dawn_str msg) { dawn_raise(msg, true); }
+void dawn_panic(dawn_str *msg) { dawn_raise(msg, true); }
 
-void dawn_fault(dawn_str msg) { dawn_raise(msg, false); }
+void dawn_fault(dawn_str *msg) { dawn_raise(msg, false); }
 
 /* The closure returns an erased slot whatever `T` is, so one cast covers
  * every instantiation -- see the header. */
@@ -673,7 +734,7 @@ static dawn_adt *dawn_run_caught(dawn_clo *f, bool catches_panic) {
   dawn_handlers = &h;
   if (setjmp(h.jb) != 0) {
     dawn_handlers = h.prev;
-    return dawn_err(dawn_box_str(dawn_failure_msg));
+    return dawn_err(dawn_str_copy(dawn_failure_buf, dawn_failure_len));
   }
   void *v = ((void *(*)(dawn_clo *))f->fn)(f);
   dawn_handlers = h.prev;
@@ -869,15 +930,15 @@ static int64_t dawn_utf8_seq(unsigned char c) {
 }
 
 /* A byte offset lands between characters, rather than inside one. */
-static bool dawn_utf8_boundary(dawn_str s, int64_t i) {
-  return i == s.len || ((unsigned char)s.p[i] & 0xC0) != 0x80;
+static bool dawn_utf8_boundary(dawn_str *s, int64_t i) {
+  return i == s->len || ((unsigned char)s->p[i] & 0xC0) != 0x80;
 }
 
 /* The code point starting at `i`; `*n` receives its length in bytes. */
-static uint32_t dawn_utf8_at(dawn_str s, int64_t i, int64_t *n) {
-  unsigned char c = (unsigned char)s.p[i];
+static uint32_t dawn_utf8_at(dawn_str *s, int64_t i, int64_t *n) {
+  unsigned char c = (unsigned char)s->p[i];
   int64_t k = dawn_utf8_seq(c);
-  if (i + k > s.len) k = s.len - i;
+  if (i + k > s->len) k = s->len - i;
   uint32_t cp;
   if (k == 1) {
     cp = c;
@@ -889,7 +950,7 @@ static uint32_t dawn_utf8_at(dawn_str s, int64_t i, int64_t *n) {
     cp = c & 0x07u;
   }
   for (int64_t j = 1; j < k; j++) {
-    cp = (cp << 6) | ((unsigned char)s.p[i + j] & 0x3Fu);
+    cp = (cp << 6) | ((unsigned char)s->p[i + j] & 0x3Fu);
   }
   *n = k;
   return cp;
@@ -921,63 +982,69 @@ static int64_t dawn_utf8_put(char *out, uint32_t cp) {
 
 /* ---- cursors ---- */
 
-int64_t dawn_cursor_start(dawn_str s) {
+int64_t dawn_cursor_start(dawn_str *s) {
   (void)s;
   return 0;
 }
 
-int64_t dawn_cursor_end(dawn_str s) { return s.len; }
+int64_t dawn_cursor_end(dawn_str *s) { return s->len; }
 
-bool dawn_cursor_done(dawn_str s, int64_t c) { return c >= s.len; }
+bool dawn_cursor_done(dawn_str *s, int64_t c) { return c >= s->len; }
 
-int64_t dawn_cursor_char(dawn_str s, int64_t c) {
-  if (c < 0 || c >= s.len) return -1;
+int64_t dawn_cursor_char(dawn_str *s, int64_t c) {
+  if (c < 0 || c >= s->len) return -1;
   int64_t n;
   return (int64_t)dawn_utf8_at(s, c, &n);
 }
 
-int64_t dawn_cursor_next(dawn_str s, int64_t c) {
+int64_t dawn_cursor_next(dawn_str *s, int64_t c) {
   if (c < 0) return 0;
-  if (c >= s.len) return s.len;
-  int64_t k = dawn_utf8_seq((unsigned char)s.p[c]);
-  return c + k > s.len ? s.len : c + k;
+  if (c >= s->len) return s->len;
+  int64_t k = dawn_utf8_seq((unsigned char)s->p[c]);
+  return c + k > s->len ? s->len : c + k;
 }
 
-int64_t dawn_cursor_prev(dawn_str s, int64_t c) {
+int64_t dawn_cursor_prev(dawn_str *s, int64_t c) {
   if (c <= 0) return 0;
-  if (c > s.len) c = s.len;
+  if (c > s->len) c = s->len;
   int64_t i = c - 1;
-  while (i > 0 && ((unsigned char)s.p[i] & 0xC0) == 0x80) i--;
+  while (i > 0 && ((unsigned char)s->p[i] & 0xC0) == 0x80) i--;
   return i;
 }
 
-dawn_str dawn_cursor_slice(dawn_str s, int64_t from, int64_t to) {
-  if (from < 0 || to > s.len || from > to ||
+/* A copy now, not a shared-buffer view: a counted string's header has to be
+ * findable from its pointer, and a mid-buffer pointer has no header. Slices
+ * are token-sized in practice (the lexer is the caller that matters). */
+dawn_str *dawn_cursor_slice(dawn_str *s, int64_t from, int64_t to) {
+  if (from < 0 || to > s->len || from > to ||
       !dawn_utf8_boundary(s, from) || !dawn_utf8_boundary(s, to)) {
     dawn_panic(dawn_str_lit("cursor_slice: invalid cursor range", 34));
   }
-  return (dawn_str){s.p + from, to - from};
+  return dawn_str_copy(s->p + from, to - from);
 }
 
 /* ---- the str_* primitives ---- */
 
 /* Only `parse_int`'s leading/trailing strip uses this now; the language's
- * `str.trim` is a cursor walk in std/str (native-backend-plan.md 14.12). */
-static dawn_str dawn_str_trim(dawn_str s) {
+ * `str.trim` is a cursor walk in std/str (native-backend-plan.md 14.12).
+ * Answers as a byte span into `s` rather than a string, so the parsers can
+ * strip without an allocation. */
+static void dawn_str_trim_span(dawn_str *s, int64_t *from, int64_t *to) {
   int64_t a = 0;
-  while (a < s.len) {
+  while (a < s->len) {
     int64_t n;
     if (!dawn_char_is_space((int64_t)dawn_utf8_at(s, a, &n))) break;
     a += n;
   }
-  int64_t b = s.len;
+  int64_t b = s->len;
   while (b > a) {
     int64_t prev = dawn_cursor_prev(s, b);
     int64_t n;
     if (!dawn_char_is_space((int64_t)dawn_utf8_at(s, prev, &n))) break;
     b = prev;
   }
-  return (dawn_str){s.p + a, b - a};
+  *from = a;
+  *to = b;
 }
 
 /* Simple (1:1) Unicode case mapping, out of the table the generated program
@@ -1011,31 +1078,32 @@ static int32_t dawn_case_cp(int32_t cp, const dawn_case_range *rs, size_t n) {
  * replaces (U+0131 is two bytes and maps to one-byte `I`), so the output
  * length is not the input's and is not worth over-allocating four bytes a
  * character for. */
-static dawn_str dawn_case(dawn_str s, bool up) {
+static dawn_str *dawn_case(dawn_str *s, bool up) {
   const dawn_case_range *rs = up ? dawn_upper_ranges : dawn_lower_ranges;
   size_t rn = (size_t)(up ? dawn_upper_ranges_n : dawn_lower_ranges_n);
   int64_t out = 0;
-  for (int64_t i = 0; i < s.len;) {
+  for (int64_t i = 0; i < s->len;) {
     int64_t n;
     uint32_t cp = dawn_utf8_at(s, i, &n);
     char scratch[4];
     out += dawn_utf8_put(scratch, (uint32_t)dawn_case_cp((int32_t)cp, rs, rn));
     i += n;
   }
-  char *buf = (char *)dawn_alloc((size_t)out + 1);
+  dawn_str *r = dawn_str_new(out);
+  char *buf = dawn_str_data(r);
   int64_t at = 0;
-  for (int64_t i = 0; i < s.len;) {
+  for (int64_t i = 0; i < s->len;) {
     int64_t n;
     uint32_t cp = dawn_utf8_at(s, i, &n);
     at += dawn_utf8_put(buf + at, (uint32_t)dawn_case_cp((int32_t)cp, rs, rn));
     i += n;
   }
-  return (dawn_str){buf, at};
+  return r;
 }
 
-dawn_str dawn_str_lower(dawn_str s) { return dawn_case(s, false); }
+dawn_str *dawn_str_lower(dawn_str *s) { return dawn_case(s, false); }
 
-dawn_str dawn_str_upper(dawn_str s) { return dawn_case(s, true); }
+dawn_str *dawn_str_upper(dawn_str *s) { return dawn_case(s, true); }
 
 /* ---- parsing ----
  *
@@ -1049,21 +1117,21 @@ static int64_t dawn_digit_val(char c) {
   return -1;
 }
 
-static dawn_adt *dawn_parse_radix(dawn_str s, int64_t radix) {
+static dawn_adt *dawn_parse_radix(dawn_str *s, int64_t radix) {
   if (radix < 2 || radix > 36) return dawn_none();
-  dawn_str t = dawn_str_trim(s);
-  int64_t i = 0;
+  int64_t i, end;
+  dawn_str_trim_span(s, &i, &end);
   bool neg = false;
-  if (i < t.len && (t.p[i] == '+' || t.p[i] == '-')) {
-    neg = t.p[i] == '-';
+  if (i < end && (s->p[i] == '+' || s->p[i] == '-')) {
+    neg = s->p[i] == '-';
     i++;
   }
-  if (i >= t.len) return dawn_none();
+  if (i >= end) return dawn_none();
   /* accumulated as the magnitude, so that LONG_MIN parses */
   uint64_t limit = neg ? (uint64_t)INT64_MAX + 1u : (uint64_t)INT64_MAX;
   uint64_t acc = 0;
-  for (; i < t.len; i++) {
-    int64_t d = dawn_digit_val(t.p[i]);
+  for (; i < end; i++) {
+    int64_t d = dawn_digit_val(s->p[i]);
     if (d < 0 || d >= radix) return dawn_none();
     if (acc > (limit - (uint64_t)d) / (uint64_t)radix) return dawn_none();
     acc = acc * (uint64_t)radix + (uint64_t)d;
@@ -1073,22 +1141,23 @@ static dawn_adt *dawn_parse_radix(dawn_str s, int64_t radix) {
   return dawn_some(dawn_box_int(v));
 }
 
-dawn_adt *dawn_parse_int(dawn_str s) { return dawn_parse_radix(s, 10); }
+dawn_adt *dawn_parse_int(dawn_str *s) { return dawn_parse_radix(s, 10); }
 
-dawn_adt *dawn_parse_int_radix(dawn_str s, int64_t radix) {
+dawn_adt *dawn_parse_int_radix(dawn_str *s, int64_t radix) {
   return dawn_parse_radix(s, radix);
 }
 
-dawn_adt *dawn_parse_float(dawn_str s) {
+dawn_adt *dawn_parse_float(dawn_str *s) {
   /* strtod's grammar is close to Double.parseDouble's but not equal to it:
    * Java also accepts a trailing f/F/d/D and spells the infinities
    * "Infinity", while strtod also takes hex floats. Floats are already out of
    * the differential corpus over dawn_str_of_float; this is the same gap. */
-  dawn_str t = dawn_str_trim(s);
-  if (t.len == 0) return dawn_none();
-  char *buf = (char *)dawn_alloc((size_t)t.len + 1);
-  memcpy(buf, t.p, (size_t)t.len);
-  buf[t.len] = '\0';
+  int64_t a, b;
+  dawn_str_trim_span(s, &a, &b);
+  if (b - a == 0) return dawn_none();
+  char *buf = (char *)dawn_alloc((size_t)(b - a) + 1);
+  memcpy(buf, s->p + a, (size_t)(b - a));
+  buf[b - a] = '\0';
   char *end = NULL;
   double v = strtod(buf, &end);
   bool whole = end != NULL && *end == '\0';
@@ -1098,10 +1167,10 @@ dawn_adt *dawn_parse_float(dawn_str s) {
 
 /* ---- code points, and the list primitives that cross through Array ---- */
 
-dawn_array *dawn_code_points(dawn_str s) {
+dawn_array *dawn_code_points(dawn_str *s) {
   dawn_array *a = dawn_array_new();
   int64_t i = 0;
-  while (i < s.len) {
+  while (i < s->len) {
     int64_t n;
     uint32_t cp = dawn_utf8_at(s, i, &n);
     a = dawn_array_push_own(a, dawn_box_int((int64_t)cp));
@@ -1113,9 +1182,10 @@ dawn_array *dawn_code_points(dawn_str s) {
 /* Consumes `cps`: the array is the emitter's list-to-Array crossing temp
  * (emitc `to_host`), a value no Core node owns -- the reader is the only
  * party who can free it. Same for `join` and `io_run` below. */
-dawn_str dawn_from_code_points(dawn_array *cps) {
+dawn_str *dawn_from_code_points(dawn_array *cps) {
   int64_t n = dawn_array_len(cps);
-  char *buf = (char *)dawn_alloc((size_t)(4 * n) + 1);
+  dawn_str *r = dawn_str_new(4 * n);
+  char *buf = dawn_str_data(r);
   int64_t at = 0;
   for (int64_t i = 0; i < n; i++) {
     int64_t cp = ((dawn_box *)dawn_array_get(cps, i))->val.i;
@@ -1125,35 +1195,37 @@ dawn_str dawn_from_code_points(dawn_array *cps) {
     at += dawn_utf8_put(buf + at, (uint32_t)cp);
   }
   dawn_drop(cps);
-  return (dawn_str){buf, at};
+  return dawn_str_shrink(r, at);
 }
 
 /* Consumes `parts` -- the crossing temp, see `from_code_points`. */
-dawn_str dawn_join(dawn_array *parts, dawn_str sep) {
+dawn_str *dawn_join(dawn_array *parts, dawn_str *sep) {
   int64_t n = dawn_array_len(parts);
   if (n == 0) {
     dawn_drop(parts);
     return dawn_str_empty;
   }
-  int64_t total = sep.len * (n - 1);
+  int64_t total = sep->len * (n - 1);
   for (int64_t i = 0; i < n; i++) {
-    total += ((dawn_box *)dawn_array_get(parts, i))->val.s.len;
+    /* a string element rides in the erased slot as itself, not in a box */
+    total += ((dawn_str *)dawn_array_get(parts, i))->len;
   }
-  char *buf = (char *)dawn_alloc((size_t)total + 1);
+  dawn_str *r = dawn_str_new(total);
+  char *buf = dawn_str_data(r);
   int64_t at = 0;
   for (int64_t i = 0; i < n; i++) {
-    if (i > 0 && sep.len > 0) {
-      memcpy(buf + at, sep.p, (size_t)sep.len);
-      at += sep.len;
+    if (i > 0 && sep->len > 0) {
+      memcpy(buf + at, sep->p, (size_t)sep->len);
+      at += sep->len;
     }
-    dawn_str part = ((dawn_box *)dawn_array_get(parts, i))->val.s;
-    if (part.len > 0) {
-      memcpy(buf + at, part.p, (size_t)part.len);
-      at += part.len;
+    dawn_str *part = (dawn_str *)dawn_array_get(parts, i);
+    if (part->len > 0) {
+      memcpy(buf + at, part->p, (size_t)part->len);
+      at += part->len;
     }
   }
   dawn_drop(parts);
-  return (dawn_str){buf, at};
+  return r;
 }
 
 /* ---- bytes ---- */
@@ -1179,10 +1251,10 @@ bool dawn_bytes_eq(const dawn_bytes *a, const dawn_bytes *b) {
   return memcmp(a->p, b->p, (size_t)a->len) == 0;
 }
 
-dawn_bytes *dawn_bytes_utf8(dawn_str s) {
-  unsigned char *buf = (unsigned char *)dawn_alloc((size_t)s.len + 1);
-  if (s.len > 0) memcpy(buf, s.p, (size_t)s.len);
-  return dawn_bytes_of(buf, s.len);
+dawn_bytes *dawn_bytes_utf8(dawn_str *s) {
+  unsigned char *buf = (unsigned char *)dawn_alloc((size_t)s->len + 1);
+  if (s->len > 0) memcpy(buf, s->p, (size_t)s->len);
+  return dawn_bytes_of(buf, s->len);
 }
 
 int64_t dawn_bytes_len(const dawn_bytes *b) { return b->len; }
@@ -1208,11 +1280,11 @@ dawn_bytes *dawn_bytes_slice(const dawn_bytes *b, int64_t from, int64_t to) {
 }
 
 /* Charset names compare the way Java's do: case-insensitively. */
-static bool dawn_charset_is(dawn_str cs, const char *name) {
+static bool dawn_charset_is(dawn_str *cs, const char *name) {
   size_t n = strlen(name);
-  if ((size_t)cs.len != n) return false;
+  if ((size_t)cs->len != n) return false;
   for (size_t i = 0; i < n; i++) {
-    char a = cs.p[i];
+    char a = cs->p[i];
     char b = name[i];
     if (a >= 'A' && a <= 'Z') a = (char)(a + 32);
     if (b >= 'A' && b <= 'Z') b = (char)(b + 32);
@@ -1231,17 +1303,19 @@ dawn_bytes *dawn_bytes_from_array(const dawn_array *a) {
   return dawn_bytes_of(buf, n);
 }
 
-dawn_adt *dawn_bytes_decode(const dawn_bytes *b, dawn_str charset) {
+dawn_adt *dawn_bytes_decode(const dawn_bytes *b, dawn_str *charset) {
   if (dawn_charset_is(charset, "UTF-8") || dawn_charset_is(charset, "UTF8")) {
     /* Malformed input is replaced, not refused -- what `new String(bytes,
      * charset)` does. A byte that starts no valid sequence becomes U+FFFD. */
-    char *buf = (char *)dawn_alloc((size_t)(3 * b->len) + 1);
+    dawn_str *r = dawn_str_new(3 * b->len);
+    char *buf = dawn_str_data(r);
     int64_t at = 0;
     int64_t i = 0;
-    dawn_str src = {(const char *)b->p, b->len};
+    /* a borrowed view over the byte buffer, so the UTF-8 walker can read it */
+    dawn_str src = {{DAWN_IMMORTAL, DAWN_K_STR}, b->len, (const char *)b->p};
     while (i < b->len) {
       int64_t n;
-      uint32_t cp = dawn_utf8_at(src, i, &n);
+      uint32_t cp = dawn_utf8_at(&src, i, &n);
       bool ok = true;
       for (int64_t j = 1; j < n; j++) {
         if ((b->p[i + j] & 0xC0) != 0x80) ok = false;
@@ -1254,15 +1328,16 @@ dawn_adt *dawn_bytes_decode(const dawn_bytes *b, dawn_str charset) {
         i += n;
       }
     }
-    return dawn_some(dawn_box_str((dawn_str){buf, at}));
+    return dawn_some(dawn_str_shrink(r, at));
   }
   if (dawn_charset_is(charset, "ISO-8859-1") || dawn_charset_is(charset, "latin1")) {
-    char *buf = (char *)dawn_alloc((size_t)(2 * b->len) + 1);
+    dawn_str *r = dawn_str_new(2 * b->len);
+    char *buf = dawn_str_data(r);
     int64_t at = 0;
     for (int64_t i = 0; i < b->len; i++) {
       at += dawn_utf8_put(buf + at, b->p[i]);
     }
-    return dawn_some(dawn_box_str((dawn_str){buf, at}));
+    return dawn_some(dawn_str_shrink(r, at));
   }
   return dawn_none();
 }
@@ -1291,15 +1366,17 @@ dawn_adt *dawn_io_read_line(void) {
   }
   /* BufferedReader.readLine keeps neither terminator */
   if (n > 0 && buf[n - 1] == '\r') n--;
-  return dawn_some(dawn_box_str((dawn_str){buf, (int64_t)n}));
+  dawn_str *line = dawn_str_copy(buf, (int64_t)n);
+  free(buf);
+  return dawn_some(line);
 }
 
 /* A Dawn string is not NUL-terminated; every path handed to the C library
  * has to be copied to get the terminator. */
-static char *dawn_cpath(dawn_str s) {
-  char *p = (char *)dawn_alloc((size_t)s.len + 1);
-  if (s.len > 0) memcpy(p, s.p, (size_t)s.len);
-  p[s.len] = '\0';
+static char *dawn_cpath(dawn_str *s) {
+  char *p = (char *)dawn_alloc((size_t)s->len + 1);
+  if (s->len > 0) memcpy(p, s->p, (size_t)s->len);
+  p[s->len] = '\0';
   return p;
 }
 
@@ -1350,7 +1427,7 @@ static unsigned char *dawn_slurp(FILE *f, size_t *out_len, bool *out_bad) {
   return buf;
 }
 
-bool dawn_io_is_dir(dawn_str path) {
+bool dawn_io_is_dir(dawn_str *path) {
   char *p = dawn_cpath(path);
   struct stat st;
   bool yes = stat(p, &st) == 0 && S_ISDIR(st.st_mode);
@@ -1358,7 +1435,7 @@ bool dawn_io_is_dir(dawn_str path) {
   return yes;
 }
 
-bool dawn_io_exists(dawn_str path) {
+bool dawn_io_exists(dawn_str *path) {
   char *p = dawn_cpath(path);
   struct stat st;
   bool yes = stat(p, &st) == 0;
@@ -1369,10 +1446,10 @@ bool dawn_io_exists(dawn_str path) {
 /* Every prefix of the path, `mkdir -p` style. An existing directory is not a
  * failure; an existing *file* is, which is what Files.createDirectories does
  * and File.mkdirs does not. */
-dawn_unit dawn_io_mkdirs(dawn_str path) {
+dawn_unit dawn_io_mkdirs(dawn_str *path) {
   char *p = dawn_cpath(path);
-  for (int64_t i = 1; i <= path.len; i++) {
-    if (i != path.len && p[i] != '/') continue;
+  for (int64_t i = 1; i <= path->len; i++) {
+    if (i != path->len && p[i] != '/') continue;
     char saved = p[i];
     p[i] = '\0';
     struct stat st;
@@ -1391,7 +1468,7 @@ dawn_unit dawn_io_mkdirs(dawn_str path) {
   return DAWN_UNIT;
 }
 
-dawn_str dawn_io_read_file(dawn_str path) {
+dawn_str *dawn_io_read_file(dawn_str *path) {
   char *p = dawn_cpath(path);
   FILE *f = fopen(p, "rb");
   free(p);
@@ -1405,10 +1482,12 @@ dawn_str dawn_io_read_file(dawn_str path) {
   if (bad) {
     dawn_fault(dawn_str_lit("io_read_file: read failed", 25));
   }
-  return (dawn_str){(const char *)buf, (int64_t)n};
+  dawn_str *s = dawn_str_copy((const char *)buf, (int64_t)n);
+  free(buf);
+  return s;
 }
 
-dawn_unit dawn_io_write_file(dawn_str path, dawn_str content) {
+dawn_unit dawn_io_write_file(dawn_str *path, dawn_str *content) {
   char *p = dawn_cpath(path);
   dawn_mkparents(p);
   FILE *f = fopen(p, "wb");
@@ -1416,8 +1495,8 @@ dawn_unit dawn_io_write_file(dawn_str path, dawn_str content) {
   if (f == NULL) {
     dawn_fault(dawn_str_lit("io_write_file: cannot open file", 31));
   }
-  bool bad = content.len > 0 &&
-             fwrite(content.p, 1, (size_t)content.len, f) != (size_t)content.len;
+  bool bad = content->len > 0 &&
+             fwrite(content->p, 1, (size_t)content->len, f) != (size_t)content->len;
   if (fclose(f) != 0) bad = true;
   if (bad) {
     dawn_fault(dawn_str_lit("io_write_file: write failed", 27));
@@ -1425,7 +1504,7 @@ dawn_unit dawn_io_write_file(dawn_str path, dawn_str content) {
   return DAWN_UNIT;
 }
 
-dawn_array *dawn_io_list_names(dawn_str path) {
+dawn_array *dawn_io_list_names(dawn_str *path) {
   char *p = dawn_cpath(path);
   DIR *d = opendir(p);
   free(p);
@@ -1437,7 +1516,7 @@ dawn_array *dawn_io_list_names(dawn_str path) {
   while (e != NULL) {
     if (strcmp(e->d_name, ".") != 0 && strcmp(e->d_name, "..") != 0) {
       size_t n = strlen(e->d_name);
-      a = dawn_array_push_own(a, dawn_box_str(dawn_str_copy(e->d_name, n)));
+      a = dawn_array_push_own(a, dawn_str_copy(e->d_name, (int64_t)n));
     }
     e = readdir(d);
   }
@@ -1445,12 +1524,12 @@ dawn_array *dawn_io_list_names(dawn_str path) {
   return a;
 }
 
-dawn_str dawn_io_cwd(void) {
+dawn_str *dawn_io_cwd(void) {
   size_t cap = 1024;
   for (;;) {
     char *buf = (char *)dawn_alloc(cap);
     if (getcwd(buf, cap) != NULL) {
-      dawn_str s = dawn_str_copy(buf, strlen(buf));
+      dawn_str *s = dawn_str_copy(buf, (int64_t)strlen(buf));
       free(buf);
       return s;
     }
@@ -1462,15 +1541,15 @@ dawn_str dawn_io_cwd(void) {
   }
 }
 
-dawn_adt *dawn_io_getenv(dawn_str name) {
+dawn_adt *dawn_io_getenv(dawn_str *name) {
   char *p = dawn_cpath(name);
   const char *v = getenv(p);
   free(p);
   if (v == NULL) return dawn_none();
-  return dawn_some(dawn_box_str(dawn_str_copy(v, strlen(v))));
+  return dawn_some(dawn_str_copy(v, (int64_t)strlen(v)));
 }
 
-dawn_bytes *dawn_io_read_bytes(dawn_str path) {
+dawn_bytes *dawn_io_read_bytes(dawn_str *path) {
   char *p = dawn_cpath(path);
   FILE *f = fopen(p, "rb");
   free(p);
@@ -1487,7 +1566,7 @@ dawn_bytes *dawn_io_read_bytes(dawn_str path) {
   return dawn_bytes_of(buf, (int64_t)n);
 }
 
-dawn_unit dawn_io_write_bytes(dawn_str path, const dawn_bytes *content) {
+dawn_unit dawn_io_write_bytes(dawn_str *path, const dawn_bytes *content) {
   char *p = dawn_cpath(path);
   dawn_mkparents(p);
   FILE *f = fopen(p, "wb");
@@ -1506,14 +1585,14 @@ dawn_unit dawn_io_write_bytes(dawn_str path, const dawn_bytes *content) {
 
 /* remove(3) takes both files and empty directories, which is what File.delete
  * does; a non-empty directory fails on both sides rather than recursing. */
-bool dawn_io_delete(dawn_str path) {
+bool dawn_io_delete(dawn_str *path) {
   char *p = dawn_cpath(path);
   bool gone = remove(p) == 0;
   free(p);
   return gone;
 }
 
-dawn_unit dawn_io_rename(dawn_str src, dawn_str dst) {
+dawn_unit dawn_io_rename(dawn_str *src, dawn_str *dst) {
   char *a = dawn_cpath(src);
   char *b = dawn_cpath(dst);
   bool bad = rename(a, b) != 0;
@@ -1525,10 +1604,10 @@ dawn_unit dawn_io_rename(dawn_str src, dawn_str dst) {
   return DAWN_UNIT;
 }
 
-dawn_str dawn_io_temp_dir(dawn_str parent, dawn_str prefix) {
+dawn_str *dawn_io_temp_dir(dawn_str *parent, dawn_str *prefix) {
   char *pbuf = NULL;
   const char *base;
-  if (parent.len == 0) {
+  if (parent->len == 0) {
     base = getenv("TMPDIR");
     if (base == NULL || base[0] == '\0') base = "/tmp";
   } else {
@@ -1549,12 +1628,12 @@ dawn_str dawn_io_temp_dir(dawn_str parent, dawn_str prefix) {
     free(tmpl);
     dawn_fault(dawn_str_lit("io_temp_dir: cannot create a temporary directory", 47));
   }
-  dawn_str s = dawn_str_copy(tmpl, strlen(tmpl));
+  dawn_str *s = dawn_str_copy(tmpl, (int64_t)strlen(tmpl));
   free(tmpl);
   return s;
 }
 
-bool dawn_io_is_symlink(dawn_str path) {
+bool dawn_io_is_symlink(dawn_str *path) {
   char *p = dawn_cpath(path);
   struct stat st;
   bool yes = lstat(p, &st) == 0 && S_ISLNK(st.st_mode);
@@ -1563,7 +1642,8 @@ bool dawn_io_is_symlink(dawn_str path) {
 }
 
 dawn_bytes *dawn_io_read_stdin(int64_t n) {
-  if (n <= 0) return dawn_bytes_of((const unsigned char *)"", 0);
+  /* an owned empty buffer, not a static "": drop frees `p` now */
+  if (n <= 0) return dawn_bytes_of((unsigned char *)dawn_alloc(1), 0);
   unsigned char *buf = (unsigned char *)dawn_alloc((size_t)n);
   size_t got = 0;
   while (got < (size_t)n) {
@@ -1580,14 +1660,14 @@ dawn_bytes *dawn_io_read_stdin(int64_t n) {
  * at all -- see the note on `io_run` in types.dawn. */
 extern char **environ;
 
-int64_t dawn_io_run(dawn_array *argv, dawn_str out_path, dawn_str err_path) {
+int64_t dawn_io_run(dawn_array *argv, dawn_str *out_path, dawn_str *err_path) {
   int64_t n = dawn_array_len(argv);
   if (n <= 0) {
     dawn_fault(dawn_str_lit("io_run: argv is empty", 21));
   }
   char **args = (char **)dawn_alloc(sizeof(char *) * (size_t)(n + 1));
   for (int64_t i = 0; i < n; i++) {
-    args[i] = dawn_cpath(((dawn_box *)dawn_array_get(argv, i))->val.s);
+    args[i] = dawn_cpath((dawn_str *)dawn_array_get(argv, i));
   }
   args[n] = NULL;
 
@@ -1595,11 +1675,11 @@ int64_t dawn_io_run(dawn_array *argv, dawn_str out_path, dawn_str err_path) {
   posix_spawn_file_actions_init(&fa);
   char *op = NULL;
   char *ep = NULL;
-  if (out_path.len > 0) {
+  if (out_path->len > 0) {
     op = dawn_cpath(out_path);
     posix_spawn_file_actions_addopen(&fa, 1, op, O_WRONLY | O_CREAT | O_TRUNC, 0644);
   }
-  if (err_path.len > 0) {
+  if (err_path->len > 0) {
     ep = dawn_cpath(err_path);
     posix_spawn_file_actions_addopen(&fa, 2, ep, O_WRONLY | O_CREAT | O_TRUNC, 0644);
   }
@@ -1631,7 +1711,7 @@ dawn_array *dawn_args(void) {
    * gets the same list from main's parameter. */
   dawn_array *a = dawn_array_new();
   for (int i = 1; i < dawn_argc; i++) {
-    a = dawn_array_push_own(a, dawn_box_str(dawn_str_copy(dawn_argv[i], strlen(dawn_argv[i]))));
+    a = dawn_array_push_own(a, dawn_str_copy(dawn_argv[i], (int64_t)strlen(dawn_argv[i])));
   }
   return a;
 }

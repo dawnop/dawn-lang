@@ -1,8 +1,7 @@
-/* The Phase -1 native runtime: the smallest thing the seam spike needs.
- *
- * See docs/native-backend-plan.md. This covers scalars, strings and stdout.
- * It does not free memory -- Perceus (Phase 4) is what makes that precise,
- * and a spike that guessed at a scheme now would only have to be undone.
+/* The native runtime: scalars, strings, collections, io, and the reference
+ * counting that frees them (docs/perceus-design.md -- Phase 4 complete,
+ * strings and Bytes counted since 2026-07-29). LeakSanitizer runs over the
+ * corpus with detection on: a leak here is a real hole in the counting.
  *
  * Compile generated code with -fwrapv (Dawn's Int wraps like the JVM's long)
  * and -fno-strict-aliasing. Both are load-bearing, not tuning. */
@@ -40,7 +39,8 @@ enum {
   DAWN_K_ARRAY,
   DAWN_K_ARRAY_BUF,
   DAWN_K_BOX,
-  DAWN_K_BYTES
+  DAWN_K_BYTES,
+  DAWN_K_STR
 };
 
 /* Never freed, and dup/drop return immediately on it. Static dictionaries are
@@ -58,39 +58,62 @@ typedef union {
   const uint64_t *wide;
 } dawn_mask;
 
-/* UTF-8 bytes plus a length. Not NUL-terminated: the length is authoritative,
- * so slices can share a buffer and embedded NULs survive. Passed by value;
- * the two words are cheaper to copy than to chase. */
+/* A counted UTF-8 string: header, byte length, and the bytes. Heap strings
+ * are one block -- `p` points at the trailing `data`. A literal is a static
+ * the emitter (or `dawn_str_lit`) writes with an immortal header and `p`
+ * aimed at the C string literal, so literals cost no copy and no count
+ * traffic. Not NUL-terminated: `len` is authoritative and embedded NULs
+ * survive.
+ *
+ * This was a two-word value (`{p, len}`, buffer leaked by contract) until the
+ * strings-join-the-ledger change: by count strings are 0.1% of allocations
+ * (perceus-design.md 1), but the compiler concatenates by the hundred
+ * megabyte, and the leak was what kept LeakSanitizer off the corpus. Slices
+ * copy now -- `cursor_slice` hands out token-sized strings, and a shared
+ * buffer would need a second word of owner to find the header from a
+ * mid-buffer pointer. */
 typedef struct {
-  const char *p;
+  dawn_hdr h;
   int64_t len; /* bytes, not code points */
+  const char *p; /* heap: the bytes right after this struct; literal: .rodata */
 } dawn_str;
 
-#define dawn_str_lit(s, n) ((dawn_str){(s), (int64_t)(n)})
-#define dawn_str_empty ((dawn_str){"", 0})
+/* A borrowed literal with automatic storage: fine to read, print or panic
+ * with inside the enclosing block, NOT fine to store or hand to anything
+ * that keeps it. Emitted code never uses this -- the emitter writes named
+ * statics for `CStr` -- but the runtime's own messages do. */
+#define dawn_str_lit(s, n) \
+  (&(dawn_str){{DAWN_IMMORTAL, DAWN_K_STR}, (int64_t)(n), (s)})
+
+extern dawn_str dawn_str_empty_obj;
+#define dawn_str_empty (&dawn_str_empty_obj)
+
+/* A fresh heap string of `len` bytes, rc 1, `p` aimed at the bytes right
+ * after the struct; the caller fills them via `dawn_str_data`. The one
+ * constructor every string-producing primitive below funnels through. */
+dawn_str *dawn_str_new(int64_t len);
+dawn_str *dawn_str_copy(const char *p, int64_t n);
+#define dawn_str_data(s) ((char *)((s) + 1))
 
 /* One erased slot. Dawn boxes at type-variable positions and keeps concrete
  * positions native (llvm-backend-research.md 5.3); this union is what a
- * boxed slot looks like, and what an ADT field is stored in. Uniform for
- * now -- tagged pointers for small ints are a later optimisation. */
+ * boxed slot looks like, and what an ADT field is stored in. One word since
+ * strings became references -- the inline `dawn_str` was what held it at
+ * two. Uniform for now -- tagged pointers for small ints are a later
+ * optimisation. */
 typedef union dawn_slot {
   int64_t i;
   double f;
   bool b;
   dawn_unit u;
   void *p;
-  dawn_str s;
 } dawn_slot;
 
 /* Dawn's `Bytes`: a byte array behind a pointer. Text is `dawn_str`; this is
  * what `bytes_utf8` produces and `std/bytes` walks. Separate because the two
  * are separate Dawn types, and conflating them here would let one be passed
- * where the other belongs without the C compiler saying so. */
-/* `p` is not owned: a Bytes buffer leaks, deliberately. Bytes and String
- * together are 0.1% of what the compiler allocates (perceus-design.md 1), and
- * giving a leaked buffer an owner would mean a header in front of every
- * literal. The struct itself is counted because `c_repr(TyBytes)` is ROpaque,
- * which makes a Bytes field a masked pointer that does reach drop. */
+ * where the other belongs without the C compiler saying so. `p` is owned and
+ * freed with the struct: every constructor allocates it fresh. */
 typedef struct {
   dawn_hdr h;
   const unsigned char *p;
@@ -250,7 +273,8 @@ dawn_box *dawn_box_int(int64_t v);
 dawn_box *dawn_box_float(double v);
 dawn_box *dawn_box_bool(bool v);
 dawn_box *dawn_box_unit(dawn_unit v);
-dawn_box *dawn_box_str(dawn_str v);
+/* No box for strings: a string IS a reference now, and an erased slot holds
+ * the `dawn_str*` the way it holds any other pointer. */
 
 /* Owning reads: the value comes out and the box is released. For the erased
  * call boundary only (dynamic call results and adapter parameters), where the
@@ -260,7 +284,6 @@ int64_t dawn_unbox_int(void *b);
 double dawn_unbox_float(void *b);
 bool dawn_unbox_bool(void *b);
 dawn_unit dawn_unbox_unit(void *b);
-dawn_str dawn_unbox_str(void *b);
 
 /* ---- reference counting -------------------------------------------------
  *
@@ -305,30 +328,30 @@ void dawn_rt_init(int argc, char **argv);
  * emitter change at all (docs/runtime-intrinsics-design.md 4). */
 
 /* io */
-dawn_unit dawn_io_print(dawn_str s);
-dawn_unit dawn_io_println(dawn_str s);
-dawn_unit dawn_io_eprint(dawn_str s);
-dawn_unit dawn_io_eprintln(dawn_str s);
+dawn_unit dawn_io_print(dawn_str *s);
+dawn_unit dawn_io_println(dawn_str *s);
+dawn_unit dawn_io_eprint(dawn_str *s);
+dawn_unit dawn_io_eprintln(dawn_str *s);
 dawn_adt *dawn_io_read_line(void); /* Option[String]; None at EOF */
-bool dawn_io_is_dir(dawn_str path);
-bool dawn_io_exists(dawn_str path);
-dawn_unit dawn_io_mkdirs(dawn_str path); /* panics on failure */
+bool dawn_io_is_dir(dawn_str *path);
+bool dawn_io_exists(dawn_str *path);
+dawn_unit dawn_io_mkdirs(dawn_str *path); /* panics on failure */
 dawn_unit dawn_io_exit(int64_t code);    /* returns a Unit it never delivers */
-dawn_str dawn_io_read_file(dawn_str path);      /* panics on failure */
-dawn_unit dawn_io_write_file(dawn_str path, dawn_str content);
-dawn_array *dawn_io_list_names(dawn_str path);  /* boxed dawn_str elements */
-dawn_str dawn_io_cwd(void);
-dawn_adt *dawn_io_getenv(dawn_str name); /* Option[String] */
-dawn_bytes *dawn_io_read_bytes(dawn_str path);
-dawn_unit dawn_io_write_bytes(dawn_str path, const dawn_bytes *content);
-bool dawn_io_delete(dawn_str path); /* false when there was nothing to delete */
-dawn_unit dawn_io_rename(dawn_str src, dawn_str dst); /* rename(2): atomic or panic */
-dawn_str dawn_io_temp_dir(dawn_str parent, dawn_str prefix); /* "" parent = $TMPDIR */
-bool dawn_io_is_symlink(dawn_str path);
+dawn_str *dawn_io_read_file(dawn_str *path);      /* panics on failure */
+dawn_unit dawn_io_write_file(dawn_str *path, dawn_str *content);
+dawn_array *dawn_io_list_names(dawn_str *path);  /* boxed dawn_str elements */
+dawn_str *dawn_io_cwd(void);
+dawn_adt *dawn_io_getenv(dawn_str *name); /* Option[String] */
+dawn_bytes *dawn_io_read_bytes(dawn_str *path);
+dawn_unit dawn_io_write_bytes(dawn_str *path, const dawn_bytes *content);
+bool dawn_io_delete(dawn_str *path); /* false when there was nothing to delete */
+dawn_unit dawn_io_rename(dawn_str *src, dawn_str *dst); /* rename(2): atomic or panic */
+dawn_str *dawn_io_temp_dir(dawn_str *parent, dawn_str *prefix); /* "" parent = $TMPDIR */
+bool dawn_io_is_symlink(dawn_str *path);
 dawn_bytes *dawn_io_read_stdin(int64_t n); /* short only at end of input */
 /* argv holds boxed dawn_str and is CONSUMED (an emitter crossing temp, like
  * `from_code_points`); an empty path inherits this process's stream */
-int64_t dawn_io_run(dawn_array *argv, dawn_str out_path, dawn_str err_path);
+int64_t dawn_io_run(dawn_array *argv, dawn_str *out_path, dawn_str *err_path);
 dawn_array *dawn_args(void);
 
 /* `f` returns an erased slot, so one cast serves whatever `T` is -- the same
@@ -383,21 +406,21 @@ extern const dawn_cp_range dawn_space_ranges[];
 extern const int64_t dawn_space_ranges_n;
 
 /* strings */
-dawn_str dawn_str_concat(dawn_str a, dawn_str b);
-bool dawn_str_eq(dawn_str a, dawn_str b);
-dawn_str dawn_str_lower(dawn_str s);
-dawn_str dawn_str_upper(dawn_str s);
+dawn_str *dawn_str_concat(dawn_str *a, dawn_str *b);
+bool dawn_str_eq(dawn_str *a, dawn_str *b);
+dawn_str *dawn_str_lower(dawn_str *s);
+dawn_str *dawn_str_upper(dawn_str *s);
 /* code-point indices, -1 when absent: the wrappers in std/str turn the
  * sentinel into None, and the index is observable, so it is not the byte
  * offset the search actually ran on. */
-dawn_adt *dawn_parse_int(dawn_str s);                    /* Option[Int] */
-dawn_adt *dawn_parse_float(dawn_str s);                  /* Option[Float] */
-dawn_adt *dawn_parse_int_radix(dawn_str s, int64_t radix);
-dawn_array *dawn_code_points(dawn_str s);                /* boxed Int elements */
+dawn_adt *dawn_parse_int(dawn_str *s);                    /* Option[Int] */
+dawn_adt *dawn_parse_float(dawn_str *s);                  /* Option[Float] */
+dawn_adt *dawn_parse_int_radix(dawn_str *s, int64_t radix);
+dawn_array *dawn_code_points(dawn_str *s);                /* boxed Int elements */
 /* These two CONSUME their array: it is the emitter's list-to-Array crossing
  * temp (`to_host`), which no Core node owns, so the reader frees it. */
-dawn_str dawn_from_code_points(dawn_array *cps);
-dawn_str dawn_join(dawn_array *parts, dawn_str sep);
+dawn_str *dawn_from_code_points(dawn_array *cps);
+dawn_str *dawn_join(dawn_array *parts, dawn_str *sep);
 
 /* Cursors. A position is a byte offset into the UTF-8 here and a UTF-16 index
  * on the JVM, and neither is observable: `Cursor` is opaque outside
@@ -407,19 +430,19 @@ dawn_str dawn_join(dawn_array *parts, dawn_str sep);
  * `cursor_slice` panics on a range that is out of bounds or lands inside a
  * character. The JVM's returns a sentinel and its emitter raises the panic;
  * that split is why this one is not in the intrinsic table. */
-int64_t dawn_cursor_start(dawn_str s);
-int64_t dawn_cursor_end(dawn_str s);
-bool dawn_cursor_done(dawn_str s, int64_t c);
-int64_t dawn_cursor_char(dawn_str s, int64_t c); /* -1 at the end */
-int64_t dawn_cursor_next(dawn_str s, int64_t c);
-int64_t dawn_cursor_prev(dawn_str s, int64_t c);
-dawn_str dawn_cursor_slice(dawn_str s, int64_t from, int64_t to);
+int64_t dawn_cursor_start(dawn_str *s);
+int64_t dawn_cursor_end(dawn_str *s);
+bool dawn_cursor_done(dawn_str *s, int64_t c);
+int64_t dawn_cursor_char(dawn_str *s, int64_t c); /* -1 at the end */
+int64_t dawn_cursor_next(dawn_str *s, int64_t c);
+int64_t dawn_cursor_prev(dawn_str *s, int64_t c);
+dawn_str *dawn_cursor_slice(dawn_str *s, int64_t from, int64_t to);
 
 /* bytes. `concat` and `eq` are not intrinsics -- they are what `++` and `==`
  * at Bytes compile to, the way dawn_str_concat and dawn_str_eq are for text. */
 dawn_bytes *dawn_bytes_concat(const dawn_bytes *a, const dawn_bytes *b);
 bool dawn_bytes_eq(const dawn_bytes *a, const dawn_bytes *b);
-dawn_bytes *dawn_bytes_utf8(dawn_str s);
+dawn_bytes *dawn_bytes_utf8(dawn_str *s);
 int64_t dawn_bytes_len(const dawn_bytes *b);
 int64_t dawn_bytes_at(const dawn_bytes *b, int64_t i); /* 0..255, -1 out of range */
 dawn_bytes *dawn_bytes_slice(const dawn_bytes *b, int64_t from, int64_t to);
@@ -429,14 +452,14 @@ dawn_bytes *dawn_bytes_from_array(const dawn_array *a);
 /* Option[String]; None only for a charset this runtime cannot decode, which
  * is what the JVM's UnsupportedEncodingException arm means. Malformed input
  * is replaced rather than refused, as `new String(bytes, charset)` does. */
-dawn_adt *dawn_bytes_decode(const dawn_bytes *b, dawn_str charset);
-dawn_str dawn_str_of_int(int64_t v);
-dawn_str dawn_str_of_float(double v);
-dawn_str dawn_str_of_bool(bool v);
+dawn_adt *dawn_bytes_decode(const dawn_bytes *b, dawn_str *charset);
+dawn_str *dawn_str_of_int(int64_t v);
+dawn_str *dawn_str_of_float(double v);
+dawn_str *dawn_str_of_bool(bool v);
 /* A String as it appears *inside* a rendered value: source-literal escaping
  * between double quotes. What the trait method `show` does at a String, so
  * that punctuation and content stay distinguishable. */
-dawn_str dawn_str_quote(dawn_str s);
+dawn_str *dawn_str_quote(dawn_str *s);
 
 /* Unicode classification of one code point (the char_is_* intrinsics), out of
  * the tables above. Exact against the JVM backend everywhere, because both
@@ -463,11 +486,11 @@ bool dawn_char_is_space(int64_t c);
 int64_t dawn_hash_int(int64_t v);
 int64_t dawn_hash_float(double v);
 int64_t dawn_hash_bool(bool v);
-int64_t dawn_hash_str(dawn_str s);
+int64_t dawn_hash_str(dawn_str *s);
 int64_t dawn_hash_bytes(const dawn_bytes *b);
 int64_t dawn_cmp_int(int64_t a, int64_t b);
 int64_t dawn_cmp_float(double a, double b);
-int64_t dawn_cmp_str(dawn_str a, dawn_str b);
+int64_t dawn_cmp_str(dawn_str *a, dawn_str *b);
 
 /* arithmetic whose C behaviour would be undefined where the JVM's is not */
 int64_t dawn_idiv(int64_t a, int64_t b);
@@ -479,7 +502,7 @@ int64_t dawn_imod(int64_t a, int64_t b);
  * `Exception`; here it is a flag on the handler. Everything in this file
  * raises a fault only where an io primitive failed -- a bad index or a bad
  * argument is the language's own failure and panics. */
-void dawn_panic(dawn_str msg);
-void dawn_fault(dawn_str msg);
+void dawn_panic(dawn_str *msg);
+void dawn_fault(dawn_str *msg);
 
 #endif /* DAWN_RT_H */

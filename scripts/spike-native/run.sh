@@ -26,11 +26,19 @@
 # only thing here that sees it at the moment it happens rather than at the
 # moment it matters.
 #
-# Leak detection is off. Strings are not counted at all (knife 1), so every
-# concatenation leaks by design, and turning it on would report that hundreds
-# of times per program while saying nothing about the counting. The half this
-# checks -- releasing something twice, or reading it after -- is the half that
-# produces wrong answers.
+# Leak detection is ON. It could not be while strings went uncounted (every
+# concatenation leaked by design); strings joined the ledger on 2026-07-29,
+# and since then a reported leak is a real hole in the counting -- a drop the
+# pass forgot, or a runtime function flooring a reference. This is the other
+# half of the memory oracle: double-free and use-after-free produce wrong
+# answers, leaks only ever produce this report.
+#
+# One decided exception rides as a marker file: a program that *takes* a
+# fault barrier (`catch_fault` with the fault actually raised) leaks what
+# the discarded C frames held -- longjmp cannot release them, and that is
+# the documented cost of the mechanism, not a counting hole. Such a corpus
+# file has `<name>.leaks-on-catch` next to it and runs with leak detection
+# off; every other program answers for every byte.
 #
 # `jvm` and `native` only run when <name>.expect exists. They are the answer
 # to codebase-audit.md TEST-01: a differential test alone certifies whatever
@@ -199,10 +207,16 @@ for prog in "${progs[@]}"; do
       -o "$work/$name.asan" "$work/$name.c" "$root/runtime/c/dawn_rt.c" -lm \
       >"$work/$name.asan.cc" 2>&1; then
       asan_rc=0
-      ASAN_OPTIONS=detect_leaks=0 "$work/$name.asan" \
+      leaks=1
+      # a taken fault barrier leaks its discarded frames by design -- see
+      # the header note; the marker is the opt-out, not a default
+      if [ -f "$here/$name.leaks-on-catch" ]; then leaks=0; fi
+      ASAN_OPTIONS=detect_leaks=$leaks "$work/$name.asan" \
         >/dev/null 2>"$work/$name.asan.err" </dev/null || asan_rc=$?
+      # LeakSanitizer prints its own banner, and a program that already
+      # exits 1 (the panic corpus) would hide a leak behind a matching code
       if [ "$asan_rc" -eq "$nat_rc" ] &&
-        ! grep -q 'ERROR: AddressSanitizer' "$work/$name.asan.err"; then
+        ! grep -Eq 'ERROR: (Address|Leak)Sanitizer' "$work/$name.asan.err"; then
         verdict "$name:asan" ok
       else
         verdict "$name:asan" bad "$(head -25 "$work/$name.asan.err")"

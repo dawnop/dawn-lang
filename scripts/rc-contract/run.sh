@@ -13,8 +13,10 @@
 #     on the 200k-node chain instead of quietly working until some larger
 #     input. `ulimit -s` is the whole point of this second run.
 #
-# String and Bytes buffers leak by design (perceus-design.md 1), so the test
-# stays off both -- a reported leak here is always a real one.
+# Strings and Bytes are counted like everything else (they joined the ledger
+# 2026-07-29), so the sanitized run keeps leak detection on and a reported
+# leak here is always a real one. Only the --rc=leak run turns it off: that
+# mode leaks everything on purpose.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"

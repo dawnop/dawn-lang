@@ -186,7 +186,7 @@ pub type CRepr =
   | RInt64 # int64_t
   | RFloat64 # double
   | RBoolean # bool
-  | RString # dawn_str -- a value (pointer + byte length)
+  | RString # dawn_str* -- a counted reference, like the ADTs
   | RUnitV # dawn_unit
   | RAdtPtr # dawn_adt* -- ADTs and tuples share it
   | RCloPtr # dawn_clo*
@@ -221,7 +221,7 @@ pub fn c_type(t: Ty) -> String =
     RInt64 -> "int64_t"
     RFloat64 -> "double"
     RBoolean -> "bool"
-    RString -> "dawn_str"
+    RString -> "dawn_str*"
     RUnitV -> "dawn_unit"
     RAdtPtr -> "dawn_adt*"
     RCloPtr -> "dawn_clo*"
@@ -263,9 +263,9 @@ fn unbox_own_expr(v: String, to: Ty) -> String =
       RInt64 -> "dawn_unbox_int"
       RFloat64 -> "dawn_unbox_float"
       RBoolean -> "dawn_unbox_bool"
-      RString -> "dawn_unbox_str"
       RUnitV -> "dawn_unbox_unit"
-      RAdtPtr | RCloPtr | ROpaque -> panic("unbox_own_expr: ref repr in the scalar arm")
+      RString | RAdtPtr | RCloPtr | ROpaque ->
+        panic("unbox_own_expr: ref repr in the scalar arm")
     }
     f ++ "(" ++ v ++ ")"
   }
@@ -287,7 +287,7 @@ fn slot_of(t: Ty) -> String =
     RInt64 -> "i"
     RFloat64 -> "f"
     RBoolean -> "b"
-    RString -> "s"
+    RString -> "p"
     # `dawn_unit` is a byte, not a pointer: filing it under `p` compiled only
     # while nothing stored one in a slot
     RUnitV -> "u"
@@ -321,8 +321,24 @@ fn c_escape(s: String) -> String = {
 fn oct3(n: Int) -> String =
   to_string((n >>> 6) & 7) ++ to_string((n >>> 3) & 7) ++ to_string(n & 7)
 
+## Borrow-only: `dawn_str_lit` is a compound literal whose header lives on the
+## stack of the enclosing block. Reserved for the panic messages this emitter
+## writes itself -- `dawn_raise` copies before it unwinds, so nothing keeps
+## the pointer. A literal the *program* names goes through `emit_str_static`,
+## because emitted code stores what it likes.
 fn str_lit(s: String) -> String =
   "dawn_str_lit(\"" ++ c_escape(s) ++ "\", " ++ to_string(bytes_len(bytes_utf8(s))) ++ ")"
+
+## A string literal as a named block-scope static: an immortal header, `p`
+## aimed at the C literal in .rodata, no allocation and no count traffic.
+## The RC pass leaves literals alone (`immortal`), and dup/drop return
+## immediately on the header if one does reach them.
+fn emit_str_static(st: CSt, v: String) -> (CSt, String) = {
+  let (st1, t) = fresh(st)
+  let st2 = line(st1, "static dawn_str " ++ t ++ "_lit = {{DAWN_IMMORTAL, DAWN_K_STR}, " ++
+      to_string(bytes_len(bytes_utf8(v))) ++ ", \"" ++ c_escape(v) ++ "\"};")
+  (st2, "(&" ++ t ++ "_lit)")
+}
 
 ## A value the interpreter folded, written back out as C.
 ##
@@ -337,7 +353,9 @@ fn const_literal(v: CValue, ty: Ty, what: String) -> String =
     VInt(x) -> "INT64_C(" ++ to_string(x) ++ ")"
     VFloat(x) -> to_string(x)
     VBool(x) -> if x { "true" } else { "false" }
-    VStr(x) -> str_lit(x)
+    # both callers peel VStr off to `emit_str_static` first -- a stored
+    # literal needs static storage, which this signature cannot emit
+    VStr(_) -> panic("emitc: " ++ what ++ " -- a string const belongs to emit_str_static")
     VUnit -> "DAWN_UNIT"
     _ ->
       panic("emitc: " ++ what ++ " folded to a structured value (" ++ ty_key(ty) ++
@@ -377,7 +395,7 @@ pub fn emit_expr(st: CSt, e: CExpr) -> (CSt, String) =
     CInt(v) -> (st, "INT64_C(" ++ to_string(v) ++ ")")
     CFloat(v) -> (st, to_string(v))
     CBool(v) -> (st, if v { "true" } else { "false" })
-    CStr(v) -> (st, str_lit(v))
+    CStr(v) -> emit_str_static(st, v)
     CUnit -> (st, "DAWN_UNIT")
     CLocal(sym, _) -> (st, local_name(sym))
     CReturn(v) ->
@@ -470,11 +488,14 @@ pub fn emit_expr(st: CSt, e: CExpr) -> (CSt, String) =
     }
     CConstRef(name, ty) ->
       match map.get(st.consts, name) {
+        # a folded string is storable like any literal, so it gets the static
+        Some(VStr(x)) -> emit_str_static(st, x)
         Some(v) -> (st, const_literal(v, ty, "const `" ++ name ++ "`"))
         None -> panic("emitc: no comptime value for const `" ++ name ++ "`")
       }
     CComptime(lo, hi, ty) ->
       match map.get(st.blocks, (lo, hi)) {
+        Some(VStr(x)) -> emit_str_static(st, x)
         Some(v) -> (st, const_literal(v, ty, "comptime block"))
         None -> panic("emitc: no comptime value for block")
       }
@@ -509,10 +530,9 @@ fn box_call(v: String, from: Ty) -> String =
     RInt64 -> "dawn_box_int(" ++ v ++ ")"
     RFloat64 -> "dawn_box_float(" ++ v ++ ")"
     RBoolean -> "dawn_box_bool(" ++ v ++ ")"
-    RString -> "dawn_box_str(" ++ v ++ ")"
     RUnitV -> "dawn_box_unit(" ++ v ++ ")"
-    # already a pointer
-    RAdtPtr | RCloPtr | ROpaque -> "((void*)(" ++ v ++ "))"
+    # already a pointer -- a string too, now that it is counted
+    RString | RAdtPtr | RCloPtr | ROpaque -> "((void*)(" ++ v ++ "))"
   }
 
 fn emit_closure(st: CSt, name: String, owner: String, caps: List[CExpr]) -> (CSt, String) = {
@@ -732,10 +752,7 @@ fn emit_call(st: CSt, callee: CCallee, args: List[CExpr], ty: Ty) -> (CSt, Strin
   }
   match callee {
     CDirect(owner, name) ->
-      match std_shim(owner, name) {
-        Some(rt) -> (st1, rt ++ "(" ++ join(cargs, ", ") ++ ")")
-        None -> (st1, mangle(owner, name) ++ "(" ++ join(cargs, ", ") ++ ")")
-      }
+      (st1, mangle(owner, name) ++ "(" ++ join(cargs, ", ") ++ ")")
     CImpl(owner, tid, subject, method) ->
       (st1, impl_symbol(owner, tid, subject, method) ++ "(" ++ join(cargs, ", ") ++ ")")
     CDefault(owner, tid, method) ->
@@ -826,18 +843,6 @@ fn dict_line(d: CDictDef) -> String = {
   "static dawn_dict " ++ dict_symbol(d.key) ++ " = { " ++
     to_string(len(parts)) ++ ", { " ++ join(parts, ", ") ++ " }, 0, { 0 } };"
 }
-
-## The handful of std functions the native backend still borrows from its C
-## runtime. In the finished backend std is compiled to C like any other Dawn
-## module and this table disappears.
-fn std_shim(owner: String, name: String) -> Option[String] =
-  if owner == "std/io" && name == "println" {
-    Some("dawn_io_println")
-  } else if owner == "std/io" && name == "print" {
-    Some("dawn_io_print")
-  } else {
-    None
-  }
 
 ## The runtime entry point of a prelude relation over one scalar. Spelled out
 ## per type rather than defaulted, so a type the runtime has no answer for
@@ -1355,6 +1360,12 @@ test "a slot member and the ref classification agree about every repr" {
   # the pointer group is what is left, and Unit is no longer in it
   assert slot_of(TyBytes) == "p"
   assert is_ref_ty(TyBytes)
+  # String crossed the aisle when it joined the ledger (2026-07-29): counted
+  # reference, pointer slot, no box
+  assert is_ref_ty(TyString)
+  assert slot_of(TyString) == "p"
+  assert c_type(TyString) == "dawn_str*"
+  assert box_call("x", TyString) == "((void*)(x))"
 
   # This is the joint the RC pass hangs on. `is_ref_ty` lives in types.dawn
   # because Core cannot see a backend; `slot_of` lives here because a union

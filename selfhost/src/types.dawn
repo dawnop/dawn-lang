@@ -173,15 +173,19 @@ pub fn peel_opaque(t: Ty) -> Ty =
 ## which cannot see a backend, and a second copy of this rule is the kind that
 ## drifts apart unnoticed (docs/perceus-design.md 9 R2).
 ##
-## `String` is deliberately a value type: `dawn_str` is a pointer and a length
-## passed by value, and its buffer leaks by contract (perceus-design.md 1).
+## `String` was a value type (a pointer and a length passed by value, buffer
+## leaked by contract) until strings joined the ledger: the compiler
+## concatenates by the hundred megabyte, and the by-contract leak was what
+## kept LeakSanitizer off the corpus. A counted `dawn_str*` also halves the
+## erased slot -- the inline two-word string was what held every ADT field at
+## sixteen bytes. Literals are immortal statics, so they still cost nothing.
 pub fn is_ref_ty(t: Ty) -> Bool =
   match t {
     TyOpaque(_, _, _, tgt) -> is_ref_ty(tgt)
     TyInt -> false
     TyFloat -> false
     TyBool -> false
-    TyString -> false
+    TyString -> true
     TyUnit -> false
     TyNever -> false
     TyAdt(_, _) -> true

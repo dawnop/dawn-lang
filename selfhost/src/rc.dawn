@@ -38,11 +38,11 @@ use core.{
   CUnary, CIf, CBlock, CListLit, CConstRef, CComptime, CReturn, CBreak,
   CContinue, CForeign, CDup,
   CSLet, CSAssign, CSDiscard, CSLoop, CSIf, CSDrop,
-  CDynamic, CDirect, CBinOp, CAnd, COr, CInt, CBool, COwned,
+  CDynamic, CDirect, CBinOp, CAnd, COr, CInt, CBool, CStr, COwned,
   cex_ty, diverges
 }
-use types.{Ty, TyInt, TyBool, TyList, TyTuple, TyUnit, TyNever, TyArray, is_ref_ty,
-  intr_owned_args }
+use types.{Ty, TyInt, TyBool, TyString, TyList, TyTuple, TyUnit, TyNever, TyArray,
+  is_ref_ty, intr_owned_args }
 use std/list
 use std/set
 
@@ -498,14 +498,10 @@ fn unloop(lid: Int, body: CExpr) -> Option[CStmt] = {
 
 # ---- classification ----
 
-## Values that are never counted: dictionaries, which are immortal by
-## construction (docs/perceus-design.md 3).
-##
-## A folded constant looks like it belongs here too, and does not: `CConstRef`
-## of a reference type never reaches the backend this pass runs for, because
-## emitc's `const_literal` refuses anything but a scalar. Listing it would be
-## a rule about a case that cannot arise.
-fn immortal(st: RSt, e: CExpr) -> Bool =
+## A dictionary: outside the ledger entirely. It has no header at all -- a
+## drop on one would read garbage as a count -- so no binding of one is ever
+## tracked and no release is ever emitted (docs/perceus-design.md 3).
+fn dictish(st: RSt, e: CExpr) -> Bool =
   match e {
     CLocal(s, _) -> set.has(st.dict_syms, s)
     CDictRef(_, _, _, _) -> true
@@ -513,6 +509,26 @@ fn immortal(st: RSt, e: CExpr) -> Bool =
     CDictArg(_, _, _, _, _) -> true
     _ -> false
   }
+
+## An immortal-headed literal: a static the emitter writes, with a real
+## header whose count is DAWN_IMMORTAL. Free to dup or drop (both return
+## immediately), so a *binding* that holds one is an ordinary ledger entry;
+## only as an operand is it exempt from counting, because hoisting one into
+## a temporary would be pure noise.
+##
+## A folded constant of any *other* reference type cannot reach this backend
+## -- emitc's `const_literal` refuses structured values -- so String is the
+## only type the `CConstRef`/`CComptime` arms have to mean.
+fn lit_immortal(e: CExpr) -> Bool =
+  match e {
+    CStr(_) -> true
+    CConstRef(_, ty) -> ty == TyString
+    CComptime(_, _, ty) -> ty == TyString
+    _ -> false
+  }
+
+## Values never counted as operands: dictionaries and immortal literals.
+fn immortal(st: RSt, e: CExpr) -> Bool = dictish(st, e) || lit_immortal(e)
 
 ## Does this expression hand back a reference someone else owns?
 ##
@@ -678,7 +694,9 @@ fn intr_args(st: RSt, es: List[CExpr], owned: List[Int], after: Set[Int]) -> (RS
       st2 = s3
       lets = lets ++ [CSLet(t, ty, e1)]
       outs = outs ++ [CLocal(t, ty)]
-      if counted(s3, e) && not own { temps = temps ++ [t] }
+      # a hoisted literal's temporary is a binding like any other (its drop
+      # is free); only what was never counted at all stays out
+      if (counted(s3, e) || lit_immortal(e)) && not own { temps = temps ++ [t] }
     }
     i = i + 1
   }
@@ -1047,7 +1065,10 @@ fn rw_stmt(st: RSt, s: CStmt, after: Set[Int]) -> (RSt, List[CStmt]) =
   match s {
     CSLet(sym, ty, init) -> {
       let (st1, i1) = rw(st, init, true, after)
-      let st2 = if is_ref_ty(ty) && not immortal(st, init) { bind(st1, sym) } else { st1 }
+      # a literal-initialised binding is tracked like any other -- its scope
+      # drop is a no-op on the static header, and one rule beats two; only a
+      # dictionary stays out (no header to speak to)
+      let st2 = if is_ref_ty(ty) && not dictish(st, init) { bind(st1, sym) } else { st1 }
       (st2, [CSLet(sym, ty, i1)])
     }
 
@@ -1065,7 +1086,10 @@ fn rw_stmt(st: RSt, s: CStmt, after: Set[Int]) -> (RSt, List[CStmt]) =
     # conservative form.
     CSAssign(sym, value) -> {
       let ty = cex_ty(value)
-      if not is_ref_ty(ty) || immortal(st, value) {
+      # the shortcut is for scalars and dictionaries only: an immortal
+      # literal on the right still overwrites an old value that may be the
+      # last counted reference, so it takes the dropping path below
+      if not is_ref_ty(ty) || dictish(st, value) {
         let (st1, v1) = rw(st, value, true, set.insert(after, sym))
         return (st1, [CSAssign(sym, v1)])
       }
@@ -1248,7 +1272,12 @@ type Chk = { live: Set[Int], gone: Bool, errs: List[String] }
 fn chk_err(c: Chk, msg: String) -> Chk = Chk { ..c, errs: c.errs ++ [msg] }
 
 ## The half of `immortal` a walk with no state can recognise.
-fn chk_dict(e: CExpr) -> Bool =
+## The checker's mirror of `dictish` (minus the local dictionary syms, which
+## are CDict* nodes by the time this walk runs). Deliberately NOT a mirror of
+## `immortal`: a literal-initialised binding is live like any other -- its
+## release is a free no-op -- and keeping the two sides on one definition of
+## "tracked" is lesson 3 of the reuse analysis.
+fn chk_dictish(e: CExpr) -> Bool =
   match e {
     CDictRef(_, _, _, _) -> true
     CDictApply(_, _, _) -> true
@@ -1327,7 +1356,17 @@ fn chk_walk(c: Chk, e: CExpr, k: Bool) -> Chk =
         # the value on its way out is a consuming position like any other
         Some(x) -> chk_expr(c, x, true)
       }
-      let c2 = if set.size(c1.live) > 0 { chk_err(c1, "a return left a binding behind") } else { c1 }
+      # a value that diverged never comes back to this return -- the TCO
+      # shape wraps the whole body in `return <Never block>`, and what was
+      # still held at the panic inside it is the panic's dead code, already
+      # forgiven where it diverged
+      if c1.gone { return Chk { ..c1, gone: true } }
+      let c2 = if set.size(c1.live) > 0 {
+        chk_err(c1, "a return left a binding behind: " ++
+            join(list.map(set.to_list(c1.live), fn(x) => to_string(x)), ","))
+      } else {
+        c1
+      }
       Chk { ..c2, gone: true }
     }
 
@@ -1377,7 +1416,7 @@ fn chk_stmt(c: Chk, s: CStmt) -> Chk =
   match s {
     CSLet(sym, ty, init) -> {
       let c1 = chk_expr(c, init, true)
-      if is_ref_ty(ty) && not chk_dict(init) && not set.has(c1.live, sym) {
+      if is_ref_ty(ty) && not chk_dictish(init) && not set.has(c1.live, sym) {
         Chk { ..c1, live: set.insert(c1.live, sym) }
       } else {
         c1
@@ -1385,7 +1424,7 @@ fn chk_stmt(c: Chk, s: CStmt) -> Chk =
     }
     CSAssign(sym, value) -> {
       let c1 = chk_expr(c, value, true)
-      if is_ref_ty(cex_ty(value)) && not chk_dict(value) {
+      if is_ref_ty(cex_ty(value)) && not chk_dictish(value) {
         Chk { ..c1, live: set.insert(c1.live, sym) }
       } else {
         c1
