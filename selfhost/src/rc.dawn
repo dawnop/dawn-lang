@@ -14,30 +14,34 @@
 # leaking: `list_len(f(x))` hands a fresh list to a primitive that will not
 # release it, so the list gets a name and a drop of its own.
 #
-# The rule is docs/perceus-design.md 5.2, deliberately the conservative form:
-# dup at every consuming use, drop every binding on every path out of its
-# scope. A binding consumed n times gets n dups and one drop; the last use
-# still pays for a dup it could have transferred. That is last-use analysis
-# (knife 2b), not this.
+# The base rule is docs/perceus-design.md 5.2, the conservative form: dup at
+# every consuming use, drop every binding on every path out of its scope. On
+# top of it sits last-use analysis (5.8): the *last* consuming use of a
+# binding takes the value instead of copying it, and the scope-end drop
+# disappears with it. What makes "last" decidable is the after-set threaded
+# through the rewrite -- the bindings anything later still reads -- plus two
+# refusals: a binding that lives across loop iterations is used once per trip
+# round, so inside a loop "last" only means last *this* iteration; and the
+# right side of && / || only sometimes runs, so nothing in it may transfer.
 #
-# `rc_check` at the bottom is this pass's local oracle. Nothing emitted reads
-# dup or drop yet (knife 3), so a misplaced drop is invisible until it is
-# tangled up with codegen bugs -- exactly the confusion `--rc=leak` exists to
-# prevent. The checker walks the result and insists every binding is released
-# exactly once on every path, which is the half of correctness a structural
-# walk can settle.
+# `rc_check` at the bottom is this pass's local oracle. It walks the result
+# and insists every binding is released exactly once on every path -- where a
+# release is a drop or a transfer, so the walk mirrors the rewrite's
+# classification of consuming positions. What it cannot see is whether the
+# dups match the consuming uses; that needs the type of every receiver, and
+# the corpus for it is the spike-native asan check.
 
 use core.{
-  CModule, CFun, CParam, CExpr, CStmt, CCallee,
+  CModule, CFun, CParam, CExpr, CStmt, CCallee, CJava,
   CLocal, CCall, CIntrinsic, CCtor, CField, CIsCtor, CTagOf, CClosure,
   CDictRef, CDictApply, CDictArg, CTuple, CTupleGet, CBox, CUnbox, CBinary,
   CUnary, CIf, CBlock, CListLit, CConstRef, CComptime, CReturn, CBreak,
   CContinue, CForeign, CDup,
   CSLet, CSAssign, CSDiscard, CSLoop, CSIf, CSDrop,
-  CDynamic, CInt, COwned,
+  CDynamic, CDirect, CBinOp, CAnd, COr, CInt, CBool, COwned,
   cex_ty, diverges
 }
-use types.{Ty, TyInt, TyList, TyUnit, TyNever, is_ref_ty}
+use types.{Ty, TyInt, TyBool, TyList, TyTuple, TyUnit, TyNever, is_ref_ty}
 use std/list
 use std/set
 
@@ -53,15 +57,20 @@ type RSt = {
   scopes: List[Sc],
   # dictionary parameters of the function being rewritten; see `immortal`
   dict_syms: Set[Int],
-  next_sym: Int
+  next_sym: Int,
+  # inside the right side of && / ||, where evaluation is conditional and
+  # transfers are refused -- see `rw_scircuit`
+  pinned: Bool
 }
 
 fn fresh(st: RSt) -> (RSt, Int) = (RSt { ..st, next_sym: st.next_sym + 1 }, st.next_sym)
 
+fn no_syms() -> Set[Int] = set.empty()
+
 fn push(st: RSt, loop_id: Int) -> RSt =
   RSt { ..st, scopes: st.scopes ++ [Sc { syms: [], loop_id: loop_id }] }
 
-## Pop the innermost scope, handing back the bindings it owned.
+## Pop the innermost scope, handing back the bindings it still owns.
 fn pop(st: RSt) -> (RSt, List[Int]) = {
   let n = len(st.scopes)
   let top = st.scopes[n - 1]
@@ -97,6 +106,145 @@ fn list_has(xs: List[Int], x: Int) -> Bool = {
     if y == x { return true }
   }
   false
+}
+
+## Every binding the scopes still own, for comparing what an if's two arms
+## did to them.
+fn scope_syms(st: RSt) -> List[Int] = {
+  var out: List[Int] = []
+  for sc in st.scopes { out = out ++ sc.syms }
+  out
+}
+
+fn diff(a: List[Int], b: List[Int]) -> List[Int] =
+  list.filter(a, fn(x: Int) => not list_has(b, x))
+
+fn strip_syms(st: RSt, syms: List[Int]) -> RSt = {
+  if len(syms) == 0 { return st }
+  var out: List[Sc] = []
+  for sc in st.scopes {
+    out = out ++ [Sc { ..sc, syms: list.filter(sc.syms, fn(y: Int) => not list_has(syms, y)) }]
+  }
+  RSt { ..st, scopes: out }
+}
+
+## Whether the last use of `sym` may take the value instead of copying it.
+## The binding has to be found before any loop boundary on the way out: a
+## binding that lives across iterations is used once per trip round, and
+## "last use" inside the body only means last use *this* iteration -- taking
+## the value would leave the next iteration reading a released binding.
+fn transferable(st: RSt, sym: Int) -> Bool = {
+  var i = len(st.scopes) - 1
+  while i >= 0 {
+    let sc = st.scopes[i]
+    if list_has(sc.syms, sym) { return true }
+    if sc.loop_id >= 0 { return false }
+    i = i - 1
+  }
+  false
+}
+
+fn release(st: RSt, sym: Int) -> RSt = strip_syms(st, [sym])
+
+# ---- liveness ----
+#
+# The after-set is the bindings anything later still touches, and "touches"
+# deliberately includes two non-reads: the target of an assignment, because
+# the assignment's expansion releases the old value and an earlier transfer
+# would make that the second release; and the symbol of a drop, for the same
+# reason. Everything here is an over-approximation in one direction only --
+# a symbol wrongly present costs a dup, a symbol wrongly absent costs a
+# use-after-free.
+
+fn fv_expr(e: CExpr, acc: Set[Int]) -> Set[Int] =
+  match e {
+    CLocal(sym, _) -> set.insert(acc, sym)
+    CCall(callee, args, _) -> {
+      let a1 = match callee {
+        CDynamic(t) -> fv_expr(t, acc)
+        _ -> acc
+      }
+      fv_list(args, a1)
+    }
+    CIntrinsic(_, args, _) -> fv_list(args, acc)
+    CCtor(_, _, args, _) -> fv_list(args, acc)
+    CField(t, _, _, _, _) -> fv_expr(t, acc)
+    CIsCtor(t, _, _) -> fv_expr(t, acc)
+    CTagOf(t, _) -> fv_expr(t, acc)
+    CClosure(_, _, caps, _) -> fv_list(caps, acc)
+    CDictApply(_, args, _) -> fv_list(args, acc)
+    CDictArg(d, _, _, _, _) -> fv_expr(d, acc)
+    CTuple(elems, _) -> fv_list(elems, acc)
+    CTupleGet(t, _, _) -> fv_expr(t, acc)
+    CBox(inner, _) -> fv_expr(inner, acc)
+    CUnbox(inner, _) -> fv_expr(inner, acc)
+    CBinary(_, l, r, _) -> fv_expr(r, fv_expr(l, acc))
+    CUnary(_, x, _) -> fv_expr(x, acc)
+    CIf(cond, thn, els, _) -> {
+      let a1 = fv_expr(thn, fv_expr(cond, acc))
+      match els {
+        None -> a1
+        Some(x) -> fv_expr(x, a1)
+      }
+    }
+    CBlock(stmts, tail, _) -> {
+      let a1 = fv_stmts(stmts, acc)
+      match tail {
+        None -> a1
+        Some(t) -> fv_expr(t, a1)
+      }
+    }
+    CListLit(elems, _) -> fv_list(elems, acc)
+    CReturn(v) ->
+      match v {
+        None -> acc
+        Some(x) -> fv_expr(x, acc)
+      },
+    CDup(inner, _) -> fv_expr(inner, acc)
+    # inert on the path this pass runs for, but a symbol read only in here
+    # must still count as read -- see the header of this section
+    CForeign(j, _) -> {
+      let a1 = match j.target {
+        None -> acc
+        Some(t) -> fv_expr(t, acc)
+      }
+      fv_list(j.args, a1)
+    }
+    _ -> acc
+  }
+
+fn fv_list(es: List[CExpr], acc: Set[Int]) -> Set[Int] = {
+  var a = acc
+  for e in es { a = fv_expr(e, a) }
+  a
+}
+
+fn fv_stmt(s: CStmt, acc: Set[Int]) -> Set[Int] =
+  match s {
+    CSLet(_, _, init) -> fv_expr(init, acc)
+    CSAssign(sym, v) -> set.insert(fv_expr(v, acc), sym)
+    CSDiscard(x) -> fv_expr(x, acc)
+    CSLoop(_, body, step) -> {
+      let a1 = fv_expr(body, acc)
+      match step {
+        None -> a1
+        Some(x) -> fv_expr(x, a1)
+      }
+    }
+    CSIf(cond, thn, els) -> {
+      let a1 = fv_expr(thn, fv_expr(cond, acc))
+      match els {
+        None -> a1
+        Some(x) -> fv_expr(x, a1)
+      }
+    }
+    CSDrop(sym) -> set.insert(acc, sym)
+  }
+
+fn fv_stmts(stmts: List[CStmt], acc: Set[Int]) -> Set[Int] = {
+  var a = acc
+  for s in stmts { a = fv_stmt(s, a) }
+  a
 }
 
 # ---- classification ----
@@ -215,13 +363,13 @@ fn seal(st: RSt, e: CExpr, ty: Ty, syms: List[Int]) -> (RSt, CExpr) = wrap(st, [
 ## is named and released once the enclosing operation is done with it --
 ## without that, every `list_len(f(x))` would leak the list, because the
 ## runtime primitives borrow (docs/perceus-design.md 5.1).
-fn borrow(st: RSt, e: CExpr) -> (RSt, List[CStmt], CExpr, List[Int]) = {
+fn borrow(st: RSt, e: CExpr, after: Set[Int]) -> (RSt, List[CStmt], CExpr, List[Int]) = {
   if borrows(st, e) || not counted(st, e) {
-    let (st1, e1) = rw(st, e, false)
+    let (st1, e1) = rw(st, e, false, after)
     (st1, [], e1, [])
   } else {
     let ty = cex_ty(e)
-    let (st1, e1) = rw(st, e, true)
+    let (st1, e1) = rw(st, e, true, after)
     let (st2, t) = fresh(st1)
     (st2, [CSLet(t, ty, e1)], CLocal(t, ty), [t])
   }
@@ -231,93 +379,159 @@ fn borrow(st: RSt, e: CExpr) -> (RSt, List[CStmt], CExpr, List[Int]) = {
 ##
 ## Hoisting one operand moves it ahead of the operands written before it, so
 ## once any of them needs a name they all get one: evaluation order is
-## observable and reordering it is not this pass's business.
-fn borrow_all(st: RSt, es: List[CExpr]) -> (RSt, List[CStmt], List[CExpr], List[Int]) = {
+## observable and reordering it is not this pass's business. A hoisted operand
+## goes through the consuming rewrite -- which transfers when this is the
+## binding's last use, and dups otherwise -- so the temporary is owned either
+## way and the balance stays provable.
+##
+## Each operand's after-set includes every *other* operand: a borrowed operand
+## is a pointer someone else owns, and the operation reads it only after all
+## of them have run, so nothing evaluated for a later operand may take an
+## earlier one's backing binding away.
+fn borrow_all(st: RSt, es: List[CExpr], after: Set[Int]) -> (RSt, List[CStmt], List[CExpr], List[Int]) = {
   var any = false
   for e in es {
     if counted(st, e) && not borrows(st, e) { any = true }
   }
-  if not any {
-    var st1 = st
-    var out: List[CExpr] = []
-    for e in es {
-      let (s2, e1) = rw(st1, e, false)
-      st1 = s2
-      out = out ++ [e1]
-    }
-    return (st1, [], out, [])
-  }
+  let n = len(es)
   var st2 = st
   var lets: List[CStmt] = []
   var outs: List[CExpr] = []
   var temps: List[Int] = []
+  var i = 0
   for e in es {
-    let (s3, l, e1, tm) = borrow(st2, e)
-    st2 = s3
-    if len(l) > 0 {
-      lets = lets ++ l
-      outs = outs ++ [e1]
-      temps = temps ++ tm
-    } else {
-      # Already borrowed, but it has to keep its place in the order. It takes
-      # a reference of its own rather than aliasing: a binding initialised
-      # from a bare local is indistinguishable from one that took the value
-      # over, and leaving that ambiguity in the output makes the balance
-      # unprovable. The extra pair is knife 2b's to remove.
-      let ty = cex_ty(e)
-      let (s4, t) = fresh(s3)
-      st2 = s4
-      let owned = if counted(s4, e) { CDup(e1, ty) } else { e1 }
-      lets = lets ++ [CSLet(t, ty, owned)]
-      outs = outs ++ [CLocal(t, ty)]
-      if counted(s4, e) { temps = temps ++ [t] }
+    var a = after
+    var j = 0
+    while j < n {
+      if j != i { a = fv_expr(es[j], a) }
+      j = j + 1
     }
+    if not any {
+      let (s2, e1) = rw(st2, e, false, a)
+      st2 = s2
+      outs = outs ++ [e1]
+    } else {
+      let ty = cex_ty(e)
+      let (s2, e1) = rw(st2, e, true, a)
+      let (s3, t) = fresh(s2)
+      st2 = s3
+      lets = lets ++ [CSLet(t, ty, e1)]
+      outs = outs ++ [CLocal(t, ty)]
+      if counted(s3, e) { temps = temps ++ [t] }
+    }
+    i = i + 1
   }
   (st2, lets, outs, temps)
 }
 
 ## Rewrite each operand in a consuming position: the value is handed over and
 ## the receiver keeps it.
-fn consume_all(st: RSt, es: List[CExpr]) -> (RSt, List[CExpr]) = {
+##
+## An operand's after-set covers every *other* operand, earlier ones
+## included, not just what is written after it. Core is evaluated left to
+## right, but the C emitter spells an operand list as C argument expressions,
+## and C leaves their order unspecified -- gcc runs them right to left. Two
+## dups commute, so knife 2's output never noticed; a transfer does not:
+## `show_go(dup(x), iter_start(x))` is correct left to right and a
+## use-after-free right to left. Keeping every operand's transfers away from
+## every other operand's reads makes the list order-independent again, at the
+## cost of a dup/drop pair only when one call mentions the same binding
+## twice.
+fn consume_all(st: RSt, es: List[CExpr], after: Set[Int]) -> (RSt, List[CExpr]) = {
+  let n = len(es)
   var st1 = st
   var out: List[CExpr] = []
+  var i = 0
   for e in es {
-    let (s2, e1) = rw(st1, e, true)
+    var a = after
+    var j = 0
+    while j < n {
+      if j != i { a = fv_expr(es[j], a) }
+      j = j + 1
+    }
+    let (s2, e1) = rw(st1, e, true, a)
     st1 = s2
     out = out ++ [e1]
+    i = i + 1
   }
   (st1, out)
 }
 
-## `consume` says whether the value is handed over. It only ever matters for a
+## Rewrite an if's two arms, started from the same scope state, back into
+## agreement: a binding one arm transferred away is dropped by the other, so
+## every path out of the if has released the same things. An arm that never
+## delivers a value released its own path at its jump and stays untouched.
+## `entry` is the state the arms started from; `st_els` carries the threading
+## (next_sym) forward.
+fn reconcile(entry: RSt, st_thn: RSt, st_els: RSt, t1: CExpr, e1: CExpr, ty: Ty) -> (RSt, CExpr, CExpr) = {
+  if not yields(t1) && not yields(e1) {
+    return (RSt { ..st_els, scopes: entry.scopes }, t1, e1)
+  }
+  if not yields(t1) { return (st_els, t1, e1) }
+  if not yields(e1) { return (RSt { ..st_els, scopes: st_thn.scopes }, t1, e1) }
+  let thn_gone = diff(scope_syms(entry), scope_syms(st_thn))
+  let els_gone = diff(scope_syms(entry), scope_syms(st_els))
+  let need_t = diff(els_gone, thn_gone)
+  let need_e = diff(thn_gone, els_gone)
+  let (st4, t2) = if len(need_t) == 0 { (st_els, t1) } else { seal(st_els, t1, ty, need_t) }
+  let (st5, e2) = if len(need_e) == 0 { (st4, e1) } else { seal(st4, e1, ty, need_e) }
+  let st6 = strip_syms(RSt { ..st5, scopes: entry.scopes }, thn_gone ++ els_gone)
+  (st6, t2, e2)
+}
+
+## The right side of && / || only sometimes runs. A transfer that happens on
+## one evaluation and not another cannot be balanced by any placement of
+## drops, so while the right side is rewritten the pass refuses to transfer
+## at all. Both sides are Bool, so nothing is hoisted and order is untouched;
+## dups nested inside the right side pair with consumes nested beside them --
+## conditional, but conditional together.
+fn rw_scircuit(st: RSt, op: CBinOp, l: CExpr, r: CExpr, bty: Ty, after: Set[Int]) -> (RSt, CExpr) = {
+  let (st1, l1) = rw(st, l, false, fv_expr(r, after))
+  let was = st1.pinned
+  let (st2, r1) = rw(RSt { ..st1, pinned: true }, r, false, after)
+  (RSt { ..st2, pinned: was }, CBinary(op, l1, r1, bty))
+}
+
+## `consume` says whether the value is handed over; `after` is the bindings
+## anything later still touches. Both only ever decide something at a
 ## borrow-producing node of counted type: everything else either produces its
 ## own reference already or is not counted at all.
-fn rw(st: RSt, e: CExpr, consume: Bool) -> (RSt, CExpr) = {
+fn rw(st: RSt, e: CExpr, consume: Bool, after: Set[Int]) -> (RSt, CExpr) = {
   let ty = cex_ty(e)
   match e {
-    CLocal(_, _) -> (st, if consume && counted(st, e) { CDup(e, ty) } else { e })
+    CLocal(sym, _) ->
+      if consume && counted(st, e) {
+        # the last consuming use takes the value; every earlier one copies
+        if not st.pinned && not set.has(after, sym) && transferable(st, sym) {
+          (release(st, sym), e)
+        } else {
+          (st, CDup(e, ty))
+        }
+      } else {
+        (st, e)
+      },
 
     CField(target, adt, ci, idx, fty) -> {
-      let (st1, lets, t1, temps) = borrow(st, target)
+      let (st1, lets, t1, temps) = borrow(st, target, after)
       let node = CField(t1, adt, ci, idx, fty)
       let node2 = if consume && is_ref_ty(fty) { CDup(node, fty) } else { node }
       wrap(st1, lets, node2, fty, temps)
     }
 
     CTupleGet(target, idx, ety) -> {
-      let (st1, lets, t1, temps) = borrow(st, target)
+      let (st1, lets, t1, temps) = borrow(st, target, after)
       let node = CTupleGet(t1, idx, ety)
       let node2 = if consume && is_ref_ty(ety) { CDup(node, ety) } else { node }
       wrap(st1, lets, node2, ety, temps)
     }
 
     CIsCtor(target, adt, ci) -> {
-      let (st1, lets, t1, temps) = borrow(st, target)
+      let (st1, lets, t1, temps) = borrow(st, target, after)
       wrap(st1, lets, CIsCtor(t1, adt, ci), cex_ty(e), temps)
     }
 
     CTagOf(target, adt) -> {
-      let (st1, lets, t1, temps) = borrow(st, target)
+      let (st1, lets, t1, temps) = borrow(st, target, after)
       wrap(st1, lets, CTagOf(t1, adt), cex_ty(e), temps)
     }
 
@@ -325,88 +539,125 @@ fn rw(st: RSt, e: CExpr, consume: Bool) -> (RSt, CExpr) = {
     # that owns itself. Either way the wrapper is transparent to counting.
     CBox(inner, from) ->
       if is_ref_ty(from) {
-        let (st1, i1) = rw(st, inner, consume)
+        let (st1, i1) = rw(st, inner, consume, after)
         (st1, CBox(i1, from))
       } else {
-        let (st1, lets, i1, temps) = borrow(st, inner)
+        let (st1, lets, i1, temps) = borrow(st, inner, after)
         wrap(st1, lets, CBox(i1, from), ty, temps)
       },
 
     CUnbox(inner, to) ->
       if is_ref_ty(to) {
-        let (st1, i1) = rw(st, inner, consume)
+        let (st1, i1) = rw(st, inner, consume, after)
         (st1, CUnbox(i1, to))
       } else {
-        let (st1, lets, i1, temps) = borrow(st, inner)
+        let (st1, lets, i1, temps) = borrow(st, inner, after)
         wrap(st1, lets, CUnbox(i1, to), to, temps)
       },
 
     # Dawn functions take their arguments owned (docs/perceus-design.md 5.1);
-    # the dictionaries a call forwards are not counted and pass through.
+    # the dictionaries a call forwards are not counted and pass through. A
+    # callee that is a value is read at the moment of the call, after every
+    # argument has run: each side's after-set covers the other.
     CCall(callee, args, cty) -> {
-      let (st1, lets, c1, temps) = rw_callee(st, callee)
-      let (st2, args1) = consume_all(st1, args)
+      let (st1, lets, c1, temps) = rw_callee(st, callee, fv_list(args, after))
+      let cbase = match callee {
+        CDynamic(t) -> fv_expr(t, after)
+        _ -> after
+      }
+      let (st2, args1) = consume_all(st1, args, cbase)
       wrap(st2, lets, CCall(c1, args1, cty), cty, temps)
     }
 
     # Runtime primitives borrow, and dup whatever they decide to keep.
     CIntrinsic(name, args, ity) -> {
-      let (st1, lets, args1, temps) = borrow_all(st, args)
+      let (st1, lets, args1, temps) = borrow_all(st, args, after)
       wrap(st1, lets, CIntrinsic(name, args1, ity), ity, temps)
     }
 
     CCtor(adt, ci, args, cty) -> {
-      let (st1, args1) = consume_all(st, args)
+      let (st1, args1) = consume_all(st, args, after)
       (st1, CCtor(adt, ci, args1, cty))
     }
 
     CTuple(elems, tty) -> {
-      let (st1, es1) = consume_all(st, elems)
+      let (st1, es1) = consume_all(st, elems, after)
       (st1, CTuple(es1, tty))
     }
 
     CListLit(elems, lty) -> {
-      let (st1, es1) = consume_all(st, elems)
+      let (st1, es1) = consume_all(st, elems, after)
       (st1, CListLit(es1, lty))
     }
 
     CClosure(fn_name, owner, caps, cty) -> {
-      let (st1, caps1) = consume_all(st, caps)
+      let (st1, caps1) = consume_all(st, caps, after)
       (st1, CClosure(fn_name, owner, caps1, cty))
     }
 
-    CBinary(op, l, r, bty) -> {
-      let (st1, lets, ops, temps) = borrow_all(st, [l, r])
-      wrap(st1, lets, CBinary(op, ops[0], ops[1], bty), bty, temps)
-    }
+    CBinary(op, l, r, bty) ->
+      match op {
+        CAnd -> rw_scircuit(st, op, l, r, bty, after)
+        COr -> rw_scircuit(st, op, l, r, bty, after)
+        _ -> {
+          let (st1, lets, ops, temps) = borrow_all(st, [l, r], after)
+          wrap(st1, lets, CBinary(op, ops[0], ops[1], bty), bty, temps)
+        }
+      },
 
     CUnary(op, x, uty) -> {
-      let (st1, lets, ops, temps) = borrow_all(st, [x])
+      let (st1, lets, ops, temps) = borrow_all(st, [x], after)
       wrap(st1, lets, CUnary(op, ops[0], uty), uty, temps)
     }
 
     CIf(cond, thn, els, ity) -> {
-      let (st1, lets, c1, temps) = borrow(st, cond)
-      let (st2, t1) = rw(st1, thn, consume)
-      let (st3, e1) = match els {
-        None -> (st2, None)
-        Some(x) -> {
-          let (s, x1) = rw(st2, x, consume)
-          (s, Some(x1))
+      let cond_after = {
+        let a1 = fv_expr(thn, after)
+        match els {
+          None -> a1
+          Some(x) -> fv_expr(x, a1)
         }
       }
-      # the condition's temporary dies before the arms run, not after
-      let (st4, cond2) = wrap(st3, lets, c1, cex_ty(cond), temps)
-      (st4, CIf(cond2, t1, e1, ity))
+      let (st1, lets, c1, temps) = borrow(st, cond, cond_after)
+      let (st2, t1) = rw(st1, thn, consume, after)
+      match els {
+        None -> {
+          # one-armed ifs are Unit; a transfer on the taken path would leave
+          # the untaken path holding more, so the arm's removals materialise
+          # an else that releases the same bindings
+          if not yields(t1) {
+            let (st4, cond2) = wrap(RSt { ..st2, scopes: st1.scopes }, lets, c1, cex_ty(cond), temps)
+            return (st4, CIf(cond2, t1, None, ity))
+          }
+          let escaped = diff(scope_syms(st1), scope_syms(st2))
+          let (st4, cond2) = wrap(st2, lets, c1, cex_ty(cond), temps)
+          if len(escaped) == 0 {
+            (st4, CIf(cond2, t1, None, ity))
+          } else {
+            (st4, CIf(cond2, t1, Some(CBlock(drops(escaped), None, TyUnit)), ity))
+          }
+        }
+        Some(x) -> {
+          let (st3, e1) = rw(RSt { ..st2, scopes: st1.scopes }, x, consume, after)
+          let (st4, t2, e2) = reconcile(st1, st2, st3, t1, e1, ity)
+          # the condition's temporary dies before the arms run, not after
+          let (st5, cond2) = wrap(st4, lets, c1, cex_ty(cond), temps)
+          (st5, CIf(cond2, t2, Some(e2), ity))
+        }
+      }
     }
 
     CBlock(stmts, tail, bty) -> {
       let st1 = push(st, -1)
-      let (st2, stmts1) = rw_stmts(st1, stmts)
+      let base = match tail {
+        None -> after
+        Some(t) -> fv_expr(t, after)
+      }
+      let (st2, stmts1) = rw_stmts(st1, stmts, base)
       let (st3, tail1) = match tail {
         None -> (st2, None)
         Some(t) -> {
-          let (s, t1) = rw(st2, t, consume)
+          let (s, t1) = rw(st2, t, consume, after)
           (s, Some(t1))
         }
       }
@@ -415,10 +666,12 @@ fn rw(st: RSt, e: CExpr, consume: Bool) -> (RSt, CExpr) = {
     }
 
     CReturn(v) -> {
+      # nothing runs after a return, so the value's after-set is empty and
+      # `return x` is a bare hand-over whenever x is this function's to give
       let (st1, v1) = match v {
         None -> (st, None)
         Some(x) -> {
-          let (s, x1) = rw(st, x, true)
+          let (s, x1) = rw(st, x, true, no_syms())
           (s, Some(x1))
         }
       }
@@ -435,7 +688,7 @@ fn rw(st: RSt, e: CExpr, consume: Bool) -> (RSt, CExpr) = {
         None -> (st1, CBlock(drops(out), Some(CReturn(None)), TyNever))
         Some(x1) ->
           # the value is computed, then named, and only then does the frame go
-          # away -- `return x` dups x before dropping the binding it came from
+          # away -- the drops must not run before the value exists
           if cex_ty(x1) == TyUnit {
             (st1, CBlock([CSDiscard(x1)] ++ drops(out), Some(CReturn(None)), TyNever))
           } else {
@@ -473,40 +726,57 @@ fn rw(st: RSt, e: CExpr, consume: Bool) -> (RSt, CExpr) = {
   }
 }
 
-fn rw_callee(st: RSt, c: CCallee) -> (RSt, List[CStmt], CCallee, List[Int]) =
+fn rw_callee(st: RSt, c: CCallee, after: Set[Int]) -> (RSt, List[CStmt], CCallee, List[Int]) =
   match c {
     # calling a function value reads it; it is not consumed by the call
     CDynamic(target) -> {
-      let (st1, lets, t1, temps) = borrow(st, target)
+      let (st1, lets, t1, temps) = borrow(st, target, after)
       (st1, lets, CDynamic(t1), temps)
     }
     # a dictionary is not counted, so the method's receiver passes through
     _ -> (st, [], c, [])
   }
 
-fn rw_stmts(st: RSt, stmts: List[CStmt]) -> (RSt, List[CStmt]) = {
+## Statements, each rewritten with the union of everything after it still
+## alive. The after-sets are built back to front so the whole list costs one
+## walk, then spent front to back with the rewrite.
+fn rw_stmts(st: RSt, stmts: List[CStmt], base: Set[Int]) -> (RSt, List[CStmt]) = {
+  let n = len(stmts)
+  var afters: List[Set[Int]] = []
+  var acc = base
+  var i = n - 1
+  while i >= 0 {
+    afters = afters ++ [acc]
+    acc = fv_stmt(stmts[i], acc)
+    i = i - 1
+  }
   var st1 = st
   var out: List[CStmt] = []
+  var j = 0
   for s in stmts {
-    let (s2, ss) = rw_stmt(st1, s)
+    let (s2, ss) = rw_stmt(st1, s, afters[n - 1 - j])
     st1 = s2
     out = out ++ ss
+    j = j + 1
   }
   (st1, out)
 }
 
-fn rw_stmt(st: RSt, s: CStmt) -> (RSt, List[CStmt]) =
+fn rw_stmt(st: RSt, s: CStmt, after: Set[Int]) -> (RSt, List[CStmt]) =
   match s {
     CSLet(sym, ty, init) -> {
-      let (st1, i1) = rw(st, init, true)
+      let (st1, i1) = rw(st, init, true, after)
       let st2 = if is_ref_ty(ty) && not immortal(st, init) { bind(st1, sym) } else { st1 }
       (st2, [CSLet(sym, ty, i1)])
     }
 
     # The new value is computed first: `s = s ++ "x"` reads the old one, and
     # the old one is only released once the new value holds its own reference.
+    # The target is in the value's after-set for the same reason -- the
+    # expansion's drop is a read of the old value, and an earlier transfer
+    # would make it the second release.
     CSAssign(sym, value) -> {
-      let (st1, v1) = rw(st, value, true)
+      let (st1, v1) = rw(st, value, true, set.insert(after, sym))
       let ty = cex_ty(value)
       if not is_ref_ty(ty) || immortal(st, value) {
         (st1, [CSAssign(sym, v1)])
@@ -517,7 +787,7 @@ fn rw_stmt(st: RSt, s: CStmt) -> (RSt, List[CStmt]) =
     }
 
     CSDiscard(x) -> {
-      let (st1, lets, x1, temps) = borrow(st, x)
+      let (st1, lets, x1, temps) = borrow(st, x, after)
       if len(lets) == 0 {
         (st1, [CSDiscard(x1)])
       } else {
@@ -528,25 +798,23 @@ fn rw_stmt(st: RSt, s: CStmt) -> (RSt, List[CStmt]) =
 
     CSLoop(loop_id, body, step) -> {
       let st1 = push(st, loop_id)
-      let (st2, lets, b1, temps) = borrow(st1, body)
-      let (st3, owned) = pop(st2)
+      # inside the body, nothing bound outside the loop may be transferred --
+      # the guard in `transferable` sees the loop scope -- and everything
+      # bound inside it lives only to the end of the iteration, so an empty
+      # after-set is exact
+      let (st2, lets, b1, temps) = borrow(st1, body, no_syms())
       let body1 = if len(lets) == 0 {
         b1
       } else {
         CBlock(lets ++ drops(list.reverse(temps)), None, TyUnit)
       }
-      # the scope's own bindings go at the end of the iteration, which is
-      # where a `continue` also releases them
-      let body2 = if len(owned) == 0 {
-        body1
-      } else {
-        CBlock([CSDiscard(body1)] ++ drops(list.reverse(owned)), None, TyUnit)
-      }
-      # the step runs after that, and reads only what outlives the iteration
-      let (st4, step1) = match step {
-        None -> (st3, None)
+      # The step also runs once per iteration and reads what outlives the
+      # iteration, so the loop scope stays pushed while it is rewritten:
+      # `transferable`'s guard only works from inside the loop.
+      let (st3, step1) = match step {
+        None -> (st2, None)
         Some(x) -> {
-          let (s, l2, x1, t2) = borrow(st3, x)
+          let (s, l2, x1, t2) = borrow(st2, x, no_syms())
           if len(l2) == 0 {
             (s, Some(x1))
           } else {
@@ -554,21 +822,49 @@ fn rw_stmt(st: RSt, s: CStmt) -> (RSt, List[CStmt]) =
           }
         }
       }
+      let (st4, owned) = pop(st3)
+      # the scope's own bindings go at the end of the iteration, which is
+      # where a `continue` also releases them
+      let body2 = if len(owned) == 0 {
+        body1
+      } else {
+        CBlock([CSDiscard(body1)] ++ drops(list.reverse(owned)), None, TyUnit)
+      }
       (st4, [CSLoop(loop_id, body2, step1)])
     }
 
     CSIf(cond, thn, els) -> {
-      let (st1, lets, c1, temps) = borrow(st, cond)
-      let (st2, t1) = rw_effect(st1, thn)
-      let (st3, e1) = match els {
-        None -> (st2, None)
-        Some(x) -> {
-          let (s, x1) = rw_effect(st2, x)
-          (s, Some(x1))
+      let cond_after = {
+        let a1 = fv_expr(thn, after)
+        match els {
+          None -> a1
+          Some(x) -> fv_expr(x, a1)
         }
       }
-      let (st4, cond2) = wrap(st3, lets, c1, cex_ty(cond), temps)
-      (st4, [CSIf(cond2, t1, e1)])
+      let (st1, lets, c1, temps) = borrow(st, cond, cond_after)
+      let (st2, t1) = rw_effect(st1, thn, after)
+      match els {
+        None -> {
+          if not yields(t1) {
+            let (st4, cond2) = wrap(RSt { ..st2, scopes: st1.scopes }, lets, c1, cex_ty(cond), temps)
+            return (st4, [CSIf(cond2, t1, None)])
+          }
+          let escaped = diff(scope_syms(st1), scope_syms(st2))
+          let (st4, cond2) = wrap(st2, lets, c1, cex_ty(cond), temps)
+          if len(escaped) == 0 {
+            (st4, [CSIf(cond2, t1, None)])
+          } else {
+            # see the one-armed CIf: the untaken path releases the same things
+            (st4, [CSIf(cond2, t1, Some(CBlock(drops(escaped), None, TyUnit)))])
+          }
+        }
+        Some(x) -> {
+          let (st3, e1) = rw_effect(RSt { ..st2, scopes: st1.scopes }, x, after)
+          let (st4, t2, e2) = reconcile(st1, st2, st3, t1, e1, TyUnit)
+          let (st5, cond2) = wrap(st4, lets, c1, cex_ty(cond), temps)
+          (st5, [CSIf(cond2, t2, Some(e2))])
+        }
+      }
     }
 
     CSDrop(_) -> (st, [s])
@@ -576,8 +872,8 @@ fn rw_stmt(st: RSt, s: CStmt) -> (RSt, List[CStmt]) =
 
 ## An expression evaluated for its effect: whatever it produces is released
 ## right here, because nothing downstream will.
-fn rw_effect(st: RSt, e: CExpr) -> (RSt, CExpr) = {
-  let (st1, lets, e1, temps) = borrow(st, e)
+fn rw_effect(st: RSt, e: CExpr, after: Set[Int]) -> (RSt, CExpr) = {
+  let (st1, lets, e1, temps) = borrow(st, e, after)
   if len(lets) == 0 {
     (st1, e1)
   } else {
@@ -590,13 +886,13 @@ fn rw_effect(st: RSt, e: CExpr) -> (RSt, CExpr) = {
 fn rc_fn(next_sym: Int, f: CFun) -> (Int, CFun) = {
   var dicts: Set[Int] = set.empty()
   for d in f.dicts { dicts = set.insert(dicts, d.sym) }
-  var st = RSt { scopes: [], dict_syms: dicts, next_sym: next_sym }
+  var st = RSt { scopes: [], dict_syms: dicts, next_sym: next_sym, pinned: false }
   st = push(st, -1)
   # captures and parameters arrive owned; the body is responsible for them
   for p in f.captures ++ f.params {
     if is_ref_ty(p.ty) { st = bind(st, p.sym) }
   }
-  let (st1, body1) = rw(st, f.body, true)
+  let (st1, body1) = rw(st, f.body, true, no_syms())
   let (st2, owned) = pop(st1)
   let (st3, body2) = seal(st2, body1, f.ret, list.reverse(owned))
   (st3.next_sym, CFun { ..f, body: body2 })
@@ -621,13 +917,14 @@ pub fn rc_module(m: CModule) -> CModule = {
 
 # ---- the local oracle ----
 #
-# Nothing reads dup or drop yet, so a bug here would sit until knife 3 and
-# then arrive mixed in with codegen bugs. This walk settles the half that is
-# structural: every binding released exactly once, the two arms of a branch
-# agreeing on what they released, a loop body ending where it started, and a
-# `return` leaving nothing behind. What it cannot see is whether the dups
-# match the consuming uses; that needs the type of every receiver, and the
-# corpus for it is knife 3's runtime.
+# This walk settles the half of correctness that is structural: every binding
+# released exactly once on every path -- where a release is a scope drop *or*
+# a transfer, so the walk mirrors the rewrite's classification of consuming
+# positions -- the two arms of a branch agreeing on what they released, a
+# loop body ending where it started, and a `return` leaving nothing behind.
+# What it cannot see is whether the dups match the consuming uses; that needs
+# the type of every receiver, and the corpus for it is spike-native's asan
+# check.
 
 type Chk = { live: Set[Int], gone: Bool, errs: List[String] }
 
@@ -645,13 +942,23 @@ fn chk_dict(e: CExpr) -> Bool =
 ## A `Never` is a path that ends: `panic` and `todo` reach it, and so does
 ## every jump. Nothing after one is reachable, and nothing it still holds is
 ## worth releasing -- the process is over or the frame is gone.
-fn chk_expr(c: Chk, e: CExpr) -> Chk = {
-  let c1 = chk_walk(c, e)
+##
+## `k` marks a consuming position, where a bare binding is a transfer: the
+## reference moves out and no drop will follow.
+fn chk_expr(c: Chk, e: CExpr, k: Bool) -> Chk = {
+  let c1 = chk_walk(c, e, k)
   if cex_ty(e) == TyNever { Chk { ..c1, gone: true } } else { c1 }
 }
 
-fn chk_walk(c: Chk, e: CExpr) -> Chk =
+fn chk_walk(c: Chk, e: CExpr, k: Bool) -> Chk =
   match e {
+    CLocal(sym, _) ->
+      if k && set.has(c.live, sym) {
+        Chk { ..c, live: set.remove(c.live, sym) }
+      } else {
+        c
+      },
+
     CBlock(stmts, tail, _) -> {
       var c1 = c
       # A statement that always jumps ends the block: what lowering wrote after
@@ -663,21 +970,14 @@ fn chk_walk(c: Chk, e: CExpr) -> Chk =
       if c1.gone { return c1 }
       match tail {
         None -> c1
-        Some(t) -> {
-          let c2 = chk_expr(c1, t)
-          # a block's tail may hand a binding out of the scope that made it
-          match t {
-            CLocal(sym, _) ->
-              if set.has(c2.live, sym) { Chk { ..c2, live: set.remove(c2.live, sym) } } else { c2 }
-            _ -> c2
-          }
-        }
+        # a block's tail hands its value out, transfers included
+        Some(t) -> chk_expr(c1, t, k)
       }
     }
 
     CIf(cond, thn, els, _) -> {
-      let c1 = chk_expr(c, cond)
-      let ct = chk_expr(Chk { ..c1, gone: false }, thn)
+      let c1 = chk_expr(c, cond, false)
+      let ct = chk_expr(Chk { ..c1, gone: false }, thn, k)
       match els {
         None ->
           if ct.gone {
@@ -688,7 +988,7 @@ fn chk_walk(c: Chk, e: CExpr) -> Chk =
             Chk { ..c1, errs: ct.errs }
           }
         Some(x) -> {
-          let ce = chk_expr(Chk { ..c1, live: c1.live, gone: false, errs: ct.errs }, x)
+          let ce = chk_expr(Chk { ..c1, live: c1.live, gone: false, errs: ct.errs }, x, k)
           if ct.gone && ce.gone {
             Chk { ..ce, gone: true }
           } else if ct.gone {
@@ -707,55 +1007,50 @@ fn chk_walk(c: Chk, e: CExpr) -> Chk =
     CReturn(v) -> {
       let c1 = match v {
         None -> c
-        Some(x) -> chk_expr(c, x)
+        # the value on its way out is a consuming position like any other
+        Some(x) -> chk_expr(c, x, true)
       }
-      # the value on its way out is the one binding a return may still hold
-      let c2 = match v {
-        Some(CLocal(sym, _)) ->
-          if set.has(c1.live, sym) { Chk { ..c1, live: set.remove(c1.live, sym) } } else { c1 }
-        _ -> c1
-      }
-      let c3 = if set.size(c2.live) > 0 { chk_err(c2, "a return left a binding behind") } else { c2 }
-      Chk { ..c3, gone: true }
+      let c2 = if set.size(c1.live) > 0 { chk_err(c1, "a return left a binding behind") } else { c1 }
+      Chk { ..c2, gone: true }
     }
 
     CBreak(_) -> Chk { ..c, gone: true }
     CContinue(_) -> Chk { ..c, gone: true }
-    CDup(inner, _) -> chk_expr(c, inner)
-    CField(t, _, _, _, _) -> chk_expr(c, t)
-    CTupleGet(t, _, _) -> chk_expr(c, t)
-    CIsCtor(t, _, _) -> chk_expr(c, t)
-    CTagOf(t, _) -> chk_expr(c, t)
-    CBox(i, _) -> chk_expr(c, i)
-    CUnbox(i, _) -> chk_expr(c, i)
-    CUnary(_, x, _) -> chk_expr(c, x)
-    CBinary(_, l, r, _) -> chk_expr(chk_expr(c, l), r)
+    CDup(inner, _) -> chk_expr(c, inner, false)
+    CField(t, _, _, _, _) -> chk_expr(c, t, false)
+    CTupleGet(t, _, _) -> chk_expr(c, t, false)
+    CIsCtor(t, _, _) -> chk_expr(c, t, false)
+    CTagOf(t, _) -> chk_expr(c, t, false)
+    CBox(inner, from) -> chk_expr(c, inner, k && is_ref_ty(from))
+    CUnbox(inner, to) -> chk_expr(c, inner, k && is_ref_ty(to))
+    CUnary(_, x, _) -> chk_expr(c, x, false)
+    CBinary(_, l, r, _) -> chk_expr(chk_expr(c, l, false), r, false)
     CCall(callee, args, _) -> {
       var c1 = match callee {
-        CDynamic(t) -> chk_expr(c, t)
+        CDynamic(t) -> chk_expr(c, t, false)
         _ -> c
       }
-      for a in args { c1 = chk_expr(c1, a) }
+      for a in args { c1 = chk_expr(c1, a, true) }
       c1
     }
-    CIntrinsic(_, args, _) -> chk_list(c, args)
-    CCtor(_, _, args, _) -> chk_list(c, args)
-    CTuple(elems, _) -> chk_list(c, elems)
-    CListLit(elems, _) -> chk_list(c, elems)
-    CClosure(_, _, caps, _) -> chk_list(c, caps)
+    CIntrinsic(_, args, _) -> chk_list(c, args, false)
+    CCtor(_, _, args, _) -> chk_list(c, args, true)
+    CTuple(elems, _) -> chk_list(c, elems, true)
+    CListLit(elems, _) -> chk_list(c, elems, true)
+    CClosure(_, _, caps, _) -> chk_list(c, caps, true)
     _ -> c
   }
 
-fn chk_list(c: Chk, es: List[CExpr]) -> Chk = {
+fn chk_list(c: Chk, es: List[CExpr], k: Bool) -> Chk = {
   var c1 = c
-  for e in es { c1 = chk_expr(c1, e) }
+  for e in es { c1 = chk_expr(c1, e, k) }
   c1
 }
 
 fn chk_stmt(c: Chk, s: CStmt) -> Chk =
   match s {
     CSLet(sym, ty, init) -> {
-      let c1 = chk_expr(c, init)
+      let c1 = chk_expr(c, init, true)
       if is_ref_ty(ty) && not chk_dict(init) && not set.has(c1.live, sym) {
         Chk { ..c1, live: set.insert(c1.live, sym) }
       } else {
@@ -763,19 +1058,14 @@ fn chk_stmt(c: Chk, s: CStmt) -> Chk =
       }
     }
     CSAssign(sym, value) -> {
-      let c1 = chk_expr(c, value)
-      let c2 = match value {
-        CLocal(src, _) ->
-          if set.has(c1.live, src) { Chk { ..c1, live: set.remove(c1.live, src) } } else { c1 }
-        _ -> c1
-      }
+      let c1 = chk_expr(c, value, true)
       if is_ref_ty(cex_ty(value)) && not chk_dict(value) {
-        Chk { ..c2, live: set.insert(c2.live, sym) }
+        Chk { ..c1, live: set.insert(c1.live, sym) }
       } else {
-        c2
+        c1
       }
     }
-    CSDiscard(x) -> chk_expr(c, x)
+    CSDiscard(x) -> chk_expr(c, x, false)
     CSDrop(sym) ->
       if set.has(c.live, sym) {
         Chk { ..c, live: set.remove(c.live, sym) }
@@ -783,12 +1073,19 @@ fn chk_stmt(c: Chk, s: CStmt) -> Chk =
         chk_err(c, "released a binding that was not held: " ++ to_string(sym))
       }
     CSIf(cond, thn, els) -> {
-      let c1 = chk_expr(c, cond)
-      let ct = chk_expr(Chk { ..c1, gone: false }, thn)
+      let c1 = chk_expr(c, cond, false)
+      let ct = chk_expr(Chk { ..c1, gone: false }, thn, false)
       match els {
-        None -> Chk { ..c1, errs: ct.errs }
+        None ->
+          if ct.gone {
+            Chk { ..c1, errs: ct.errs }
+          } else if set.size(ct.live) != set.size(c1.live) {
+            chk_err(Chk { ..c1, errs: ct.errs }, "a one-armed if released a binding")
+          } else {
+            Chk { ..c1, errs: ct.errs }
+          }
         Some(x) -> {
-          let ce = chk_expr(Chk { ..c1, gone: false, errs: ct.errs }, x)
+          let ce = chk_expr(Chk { ..c1, gone: false, errs: ct.errs }, x, false)
           if ct.gone { ce } else if ce.gone { Chk { ..ce, live: ct.live, gone: false } } else {
             if set.size(ct.live) != set.size(ce.live) {
               chk_err(ce, "the arms of an if disagree on what they released")
@@ -800,7 +1097,7 @@ fn chk_stmt(c: Chk, s: CStmt) -> Chk =
       }
     }
     CSLoop(_, body, step) -> {
-      let cb = chk_expr(Chk { ..c, gone: false }, body)
+      let cb = chk_expr(Chk { ..c, gone: false }, body, false)
       let c1 = if cb.gone {
         Chk { ..cb, live: c.live, gone: false }
       } else if set.size(cb.live) != set.size(c.live) {
@@ -810,7 +1107,7 @@ fn chk_stmt(c: Chk, s: CStmt) -> Chk =
       }
       match step {
         None -> c1
-        Some(x) -> chk_expr(c1, x)
+        Some(x) -> chk_expr(c1, x, false)
       }
     }
   }
@@ -824,7 +1121,7 @@ pub fn rc_check(m: CModule) -> List[String] = {
     for p in f.captures ++ f.params {
       if is_ref_ty(p.ty) { live = set.insert(live, p.sym) }
     }
-    let c = chk_expr(Chk { live: live, gone: false, errs: [] }, f.body)
+    let c = chk_expr(Chk { live: live, gone: false, errs: [] }, f.body, true)
     var here = c.errs
     if not c.gone && set.size(c.live) > 0 {
       here = here ++ ["a body left " ++ to_string(set.size(c.live)) ++ " binding(s) held"]
@@ -859,26 +1156,191 @@ test "a reference parameter the body never touches is still released" {
   assert len(rc_check(rc_module(one_fn([p], TyInt, CInt(1))))) == 0
 }
 
-test "handing a parameter back takes a reference of its own" {
+test "handing a parameter back is a move, not a copy" {
   let lst = TyList(TyInt)
   let p = CParam { sym: 1, ty: lst, mode: COwned }
   let m = rc_module(one_fn([p], lst, CLocal(1, lst)))
   assert len(rc_check(m)) == 0
-  # the body is now `let t = dup v1; drop v1; t` -- a dup and a drop, not a
-  # bare hand-over. Collapsing that pair is knife 2b, so it has to be here.
-  let body = m.fns[0].body
-  match body {
-    CBlock(stmts, _, _) -> {
-      assert len(stmts) == 2
-      match stmts[0] {
-        CSLet(_, _, CDup(_, _)) -> ()
-        _ -> panic("expected the returned value to take a reference")
+  # the last (only) use takes the value: no dup, no drop, nothing to balance
+  match m.fns[0].body {
+    CLocal(s, _) -> { assert s == 1 }
+    _ -> panic("expected the body to stay a bare hand-over")
+  }
+}
+
+test "an earlier use copies, the last one takes" {
+  let lst = TyList(TyInt)
+  let p = CParam { sym: 1, ty: lst, mode: COwned }
+  let g = CDirect("m", "g")
+  let body = CBlock(
+    [CSDiscard(CCall(g, [CLocal(1, lst)], TyInt))],
+    Some(CCall(g, [CLocal(1, lst)], TyInt)),
+    TyInt
+  )
+  let m = rc_module(one_fn([p], TyInt, body))
+  assert len(rc_check(m)) == 0
+  match m.fns[0].body {
+    CBlock(ss, tail, _) -> {
+      match ss[0] {
+        CSDiscard(CCall(_, a1, _)) ->
+          match a1[0] {
+            CDup(_, _) -> ()
+            _ -> panic("expected the earlier use to copy")
+          }
+        _ -> panic("expected the discarded call")
       }
-      match stmts[1] {
-        CSDrop(sym) -> { assert sym == 1 }
-        _ -> panic("expected the parameter to be released")
+      match tail {
+        Some(CCall(_, a2, _)) ->
+          match a2[0] {
+            CLocal(s, _) -> { assert s == 1 }
+            _ -> panic("expected the last use to take the value")
+          }
+        _ -> panic("expected the tail call")
       }
     }
-    _ -> panic("expected the body to have grown a block")
+    _ -> panic("expected the block to survive")
+  }
+}
+
+test "two uses in one operand list both copy" {
+  # C leaves argument order unspecified, so "earlier" and "last" only exist
+  # between sequenced positions -- inside one operand list the transfer is
+  # refused on both sides and the binding is released at the end
+  let lst = TyList(TyInt)
+  let p = CParam { sym: 1, ty: lst, mode: COwned }
+  let pair = TyTuple([lst, lst])
+  let m = rc_module(one_fn([p], pair, CTuple([CLocal(1, lst), CLocal(1, lst)], pair)))
+  assert len(rc_check(m)) == 0
+  match m.fns[0].body {
+    CBlock(ss, _, _) -> {
+      match ss[0] {
+        CSLet(_, _, CTuple(elems, _)) -> {
+          match elems[0] {
+            CDup(_, _) -> ()
+            _ -> panic("expected the first use to copy")
+          }
+          match elems[1] {
+            CDup(_, _) -> ()
+            _ -> panic("expected the second use to copy too")
+          }
+        }
+        _ -> panic("expected the tuple to be named")
+      }
+      match ss[1] {
+        CSDrop(d) -> { assert d == 1 }
+        _ -> panic("expected the parameter released at the end")
+      }
+    }
+    _ -> panic("expected a block")
+  }
+}
+
+test "a use inside a loop copies every trip round" {
+  let lst = TyList(TyInt)
+  let p = CParam { sym: 1, ty: lst, mode: COwned }
+  let call = CCall(CDirect("m", "g"), [CLocal(1, lst)], TyInt)
+  let body = CBlock(
+    [CSLoop(7, CBlock([CSDiscard(call)], None, TyUnit), None)],
+    Some(CInt(0)),
+    TyInt
+  )
+  let m = rc_module(one_fn([p], TyInt, body))
+  assert len(rc_check(m)) == 0
+  # the textual last use runs once per iteration; it must copy, and the
+  # binding is released after the loop instead
+  match m.fns[0].body {
+    CBlock(stmts, _, _) ->
+      match stmts[0] {
+        CSLoop(_, lb, _) ->
+          match lb {
+            CBlock(ls, _, _) ->
+              match ls[0] {
+                CSDiscard(CCall(_, args2, _)) ->
+                  match args2[0] {
+                    CDup(_, _) -> ()
+                    _ -> panic("expected the loop use to copy")
+                  }
+                _ -> panic("expected the discarded call")
+              }
+            _ -> panic("expected the loop body block")
+          }
+        _ -> panic("expected the loop")
+      }
+    _ -> panic("expected a block")
+  }
+}
+
+test "the arm that keeps a binding drops what the other arm took" {
+  let lst = TyList(TyInt)
+  let p = CParam { sym: 1, ty: lst, mode: COwned }
+  let body = CIf(
+    CBool(true),
+    CCall(CDirect("m", "g"), [CLocal(1, lst)], TyInt),
+    Some(CInt(0)),
+    TyInt
+  )
+  let m = rc_module(one_fn([p], TyInt, body))
+  assert len(rc_check(m)) == 0
+  match m.fns[0].body {
+    CIf(_, thn, els, _) -> {
+      match thn {
+        CCall(_, args2, _) ->
+          match args2[0] {
+            CLocal(s, _) -> { assert s == 1 }
+            _ -> panic("expected the then arm to take the value")
+          }
+        _ -> panic("expected the call to survive")
+      }
+      match els {
+        Some(CBlock(ss, _, _)) -> {
+          var seen = false
+          for s2 in ss {
+            match s2 {
+              CSDrop(d) -> { if d == 1 { seen = true } }
+              _ -> ()
+            }
+          }
+          assert seen
+        }
+        _ -> panic("expected the else arm to grow a release")
+      }
+    }
+    _ -> panic("expected the if to survive")
+  }
+}
+
+test "the right side of a short circuit refuses to take" {
+  let lst = TyList(TyInt)
+  let p = CParam { sym: 1, ty: lst, mode: COwned }
+  let body = CBinary(
+    CAnd,
+    CBool(true),
+    CCall(CDirect("m", "p"), [CLocal(1, lst)], TyBool),
+    TyBool
+  )
+  let m = rc_module(one_fn([p], TyBool, body))
+  assert len(rc_check(m)) == 0
+  # the call only sometimes runs, so its use must copy, and the release
+  # stays at the end of the function where it is unconditional
+  match m.fns[0].body {
+    CBlock(ss, _, _) -> {
+      match ss[0] {
+        CSLet(_, _, CBinary(_, _, r, _)) ->
+          match r {
+            CCall(_, args2, _) ->
+              match args2[0] {
+                CDup(_, _) -> ()
+                _ -> panic("expected the conditional use to copy")
+              }
+            _ -> panic("expected the call")
+          }
+        _ -> panic("expected the binary to be named")
+      }
+      match ss[1] {
+        CSDrop(d) -> { assert d == 1 }
+        _ -> panic("expected the parameter released at the end")
+      }
+    }
+    _ -> panic("expected a block")
   }
 }
