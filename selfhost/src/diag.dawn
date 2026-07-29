@@ -7,7 +7,7 @@ use std/str
 use std/list
 use std/io
 use std/map
-use lexer.{line_starts_of, view_of, slice_cp}
+use lexer.{line_starts_of, view_of, slice_cp, SourceView}
 use token.{Diag}
 
 ## UTF-16 length of `s` (surrogate pairs count as two units).
@@ -45,9 +45,13 @@ fn max2(a: Int, b: Int) -> Int = if a > b { a } else { b }
 ## Render one diagnostic against its source text (label is always `error`:
 ## the Kotlin sink's warn() has no call sites, so the selfhost Diag carries
 ## no severity).
-pub fn render(path: String, text: String, d: Diag) -> String = {
-  let v = view_of(text)
-  let starts = line_starts_of(text)
+pub fn render(path: String, text: String, d: Diag) -> String =
+  render_at(path, view_of(text), line_starts_of(text), d)
+
+## The same, against a source already decoded. `view_of` and `line_starts_of`
+## both walk the whole file, so callers with several diagnostics for one file
+## prepare them once instead of once per diagnostic.
+fn render_at(path: String, v: SourceView, starts: List[Int], d: Diag) -> String = {
   let total = len(v.cps)
   let li = line_index(starts, d.lo)
   let line = li + 1
@@ -77,30 +81,34 @@ pub fn count_line(n: Int) -> String =
 ## Manifest diagnostics render the same way compile errors do, count line
 ## included (the Kotlin renderManifestDiagnostics).
 pub fn render_manifest(path: String, text: String, ds: List[Diag]) -> String = {
+  let v = view_of(text)
+  let starts = line_starts_of(text)
   var out = ""
-  for d in ds { out = out ++ render(path, text, d) }
+  for d in ds { out = out ++ render_at(path, v, starts, d) }
   out ++ count_line(len(ds)) ++ "\n"
 }
 
-## Render (path, diagnostic) pairs in order, reading each file's text once
-## (the render arithmetic needs the source; diags carry only the path).
+## Render (path, diagnostic) pairs in order, reading and decoding each file's
+## text once (the render arithmetic needs the source; diags carry only the path).
 pub fn render_all(diags: List[(String, Diag)]) -> String !io = {
-  var texts: Map[String, String] = map.empty()
+  var srcs: Map[String, (SourceView, List[Int])] = map.empty()
   var out = ""
   for pr in diags {
     let (path, d) = pr
-    let text = match map.get(texts, path) {
-      Some(t) -> t
+    let src = match map.get(srcs, path) {
+      Some(s) -> s
       None -> {
         let t = match io.read_file(path) {
           Ok(s) -> s
           Err(_) -> ""
         }
-        texts = map.insert(texts, path, t)
-        t
+        let s = (view_of(t), line_starts_of(t))
+        srcs = map.insert(srcs, path, s)
+        s
       }
     }
-    out = out ++ render(path, text, d)
+    let (v, starts) = src
+    out = out ++ render_at(path, v, starts, d)
   }
   out
 }

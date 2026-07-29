@@ -43,11 +43,15 @@ use ast.{
   DUseJava, DUseModule, DTest, Module,
   e_lo, e_hi, t_lo, t_hi, pat_lo, pat_hi
 }
-use lexer.{lex, lex_at, view_of, slice_cp}
+use lexer.{lex, lex_at, view_of, slice_cp, SourceView}
 
 # ---- parser state ----
 
-type P = { toks: List[Token], src: Option[String] }
+## `view` is the decoded module source, present only when the module has an
+## `assert` (which records its own source text — see `assert_stmt`). It is built
+## once per module rather than per assert: `view_of` walks the whole file, so
+## rebuilding it per assert makes parse allocation O(asserts x file size).
+type P = { toks: List[Token], view: Option[SourceView] }
 
 ## Scan position plus the diagnostics accumulated so far (the Kotlin sink).
 type St = { pos: Int, diags: List[Diag] }
@@ -131,13 +135,22 @@ fn is_blank_str(v: String) -> Bool = {
 
 fn no_diags2() -> List[Diag] = []
 
+## Does this module need the source view at all? A module without `assert` never
+## slices its own text, and decoding it would be pure waste.
+fn has_assert(toks: List[Token]) -> Bool = {
+  for t in toks {
+    if t.kind == ASSERT { return true }
+  }
+  false
+}
+
 # ---- module ----
 
 ## Parse a whole file: lex, then descend. Never fails — broken declarations are
 ## reported and skipped, like the Kotlin recovery points.
 pub fn parse_module(text: String) -> (Module, List[Diag]) = {
   let (toks, lexds) = lex(text)
-  let p = P { toks: toks, src: Some(text) }
+  let p = P { toks: toks, view: if has_assert(toks) { Some(view_of(text)) } else { None } }
   var st = St { pos: 0, diags: lexds }
   var decls: List[Decl] = []
   st = skip_nl(p, st)
@@ -1012,9 +1025,9 @@ fn expr_stmt(p: P, st: St) -> PR[Stmt] = {
 fn assert_stmt(p: P, st: St) -> PR[Stmt] = {
   let (st1, kw) = adv(p, st)
   let (st2, cond) = expression(p, st1, false)?
-  let src: Option[String] = match p.src {
+  let src: Option[String] = match p.view {
     None -> None
-    Some(text) -> Some(slice_cp(view_of(text), e_lo(cond), e_hi(cond)))
+    Some(v) -> Some(slice_cp(v, e_lo(cond), e_hi(cond)))
   }
   Ok((st2, SAssert(cond, src, kw.lo, e_hi(cond))))
 }
@@ -1499,7 +1512,7 @@ fn str_lit(p: P, st: St, t: Token) -> PR[Expr] = {
       SCode(src, o) -> {
         let (subtoks, lexds) = lex_at(src, o)
         diags = diags ++ lexds
-        let subp = P { toks: subtoks, src: None }
+        let subp = P { toks: subtoks, view: None }
         let sst = St { pos: 0, diags: diags }
         match expression(subp, sst, false) {
           Err(fe) -> {
