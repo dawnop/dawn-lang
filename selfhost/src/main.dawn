@@ -392,6 +392,7 @@ fn usage() -> String = join([
   "  dawn doc --builtins                  emit the builtin function reference as JSON",
   "  dawn add <spec> [--subdir <p>] [--as <alias>] [--dir <project>]",
   "  dawn cache verify                    re-hash every cached package against its name",
+  "  dawn lock [--check] [<dir>]           freeze (or verify) the resolved [java-deps] closure",
   "                                       add a dependency to dawn.toml, preserving the file's",
   "                                       formatting: a Maven coordinate (group:artifact:version",
   "                                       → [java-deps]), an archive url (fetched and hashed",
@@ -605,11 +606,97 @@ fn resolve_java_deps(target: String) -> List[String] !io = {
   if len(coords) == 0 { return none }
   io.eprintln("resolving " ++ to_string(len(coords)) ++ " java-deps from " ++
       target ++ "/dawn.toml...")
-  match maven.fetch(coords) {
-    Ok(jars) -> jars
+  let jars = match maven.fetch(coords) {
+    Ok(js) -> js
     Err(e) -> {
       cli_error(e)
-      none
+      return none
+    }
+  }
+  # PKG-04: with a dawn.lock beside the manifest, the resolution has to agree
+  # with it by bytes -- a moved transitive version, a mirror answering
+  # differently or a damaged cache all stop here instead of building
+  match io.read_file(maven.lock_path(target)) {
+    Err(_) -> ()
+    Ok(text) ->
+      match maven.parse_lock(text) {
+        Err(e) -> cli_error(maven.lock_path(target) ++ ": " ++ e)
+        Ok(locked) ->
+          match maven.lock_of(coords, jars) {
+            Err(e) -> cli_error(e)
+            Ok(fresh) ->
+              match maven.check_lock(locked, fresh) {
+                Err(e) -> cli_error(e)
+                Ok(_) -> ()
+              }
+          }
+      }
+  }
+  jars
+}
+
+## `dawn lock [--check] [<dir>]` — write (or verify) the resolved [java-deps]
+## closure. This is the only command that rewrites dawn.lock; every other one
+## only refuses to disagree with it.
+fn run_lock(rest: List[String]) -> Unit !io = {
+  var check_only = false
+  var target = "."
+  var seen_target = false
+  for a in rest {
+    if a == "--check" {
+      check_only = true
+    } else if not seen_target {
+      target = a
+      seen_target = true
+    } else {
+      return cli_error("usage: dawn lock [--check] [<project-dir>]")
+    }
+  }
+  if not io.is_dir(target) { return cli_error("not a directory: " ++ target) }
+  let path = maven.lock_path(target)
+  let coords = maven.collect_java_deps(target)
+  if len(coords) == 0 {
+    if io.exists(path) {
+      return cli_error(path ++ " exists but " ++ target ++
+          "/dawn.toml declares no [java-deps]\n  delete the lock, or add the dependency back")
+    }
+    println("no [java-deps] to lock")
+    return ()
+  }
+  io.eprintln("resolving " ++ to_string(len(coords)) ++ " java-deps...")
+  let jars = match maven.fetch(coords) {
+    Ok(js) -> js
+    Err(e) -> {
+      cli_error(e)
+      return ()
+    }
+  }
+  let fresh = match maven.lock_of(coords, jars) {
+    Ok(l) -> l
+    Err(e) -> {
+      cli_error(e)
+      return ()
+    }
+  }
+  if check_only {
+    match io.read_file(path) {
+      Err(_) -> cli_error(path ++ " does not exist -- run `dawn lock`")
+      Ok(text) ->
+        match maven.parse_lock(text) {
+          Err(e) -> cli_error(path ++ ": " ++ e)
+          Ok(locked) ->
+            match maven.check_lock(locked, fresh) {
+              Err(e) -> cli_error(e)
+              Ok(_) -> println(path ++ " is up to date (" ++
+                  to_string(len(fresh.arts)) ++ " artifacts)")
+            }
+        }
+    }
+  } else {
+    match io.write_file(path, maven.render_lock(fresh)) {
+      Ok(_) -> println("wrote " ++ path ++ " (" ++ to_string(len(fresh.arts)) ++
+          " artifacts from " ++ to_string(len(coords)) ++ " direct)")
+      Err(e) -> cli_error("cannot write " ++ path ++ ": " ++ e)
     }
   }
 }
@@ -1352,6 +1439,8 @@ pub fn main() -> Unit !io = {
         }
       } else if mode == "lsp" {
         lsp.run_lsp("std", jsig_real())
+      } else if mode == "lock" {
+        run_lock(rest)
       } else if mode == "cache" {
         run_cache(rest)
       } else if mode == "__pkghash" {

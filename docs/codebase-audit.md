@@ -986,6 +986,12 @@ literal string、float、inline table、quoted key、dotted key 等。用户会�
 
 ### PKG-04（P2）无 lockfile 的可复现论证过强
 
+> **【已修 —— 2026-07-30】** `dawn.lock` 落地：记录整个解析闭包的字节（basename +
+> sha256）与直依赖坐标；`dawn run/test/build` 在有 lock 时校验、不符即停；
+> `dawn lock` 写、`dawn lock --check` 进 CI。五个反例中 1–4 关闭，第 5（上游删除）
+> 明确不解决且写进注释。与设计的偏离（不记 per-artifact coord/url、改「解析后校验」
+> 而非「按 lock 装」）与理由记在 package-integrity-design 顶部。
+
 > **【待办 —— 认可】**
 >
 > 五条反例都成立（传递 POM 的版本区间、mirror 返回不同内容、无 artifact checksum、
