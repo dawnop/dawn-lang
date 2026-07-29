@@ -212,6 +212,18 @@ test "a module-qualified type parses in type position" {
   assert len(ds2) > 0
 }
 
+test "application is a postfix: call results and groups apply directly" {
+  # each of these was a syntax error before the postfix arm existed
+  let (_, ds) = parse_module("fn f() -> Int = add(3)(4)\n")
+  assert len(ds) == 0
+  let (_, ds2) = parse_module("fn g() -> Int = (pick(true))(1)\n")
+  assert len(ds2) == 0
+  let (_, ds3) = parse_module("fn h() -> Int = {\n  let x = 5\n  (0 - 1)\n  x\n}\n")
+  # the parenthesized line is its own statement, not an application of x --
+  # a newline ends the chain (only `.` may continue across lines)
+  assert len(ds3) == 0
+}
+
 test "a qualified constructor pattern parses" {
   let (m, ds) = parse_module(
     "fn f(x: Int) -> Int =\n  match x {\n    v.JInt(n) -> n\n    other -> 0\n  }\n")

@@ -7,6 +7,14 @@
 > 把五种调用形式收成一个后缀节点，Core IR 那边的 `LCall` 就少一批要 lower 的源形态。
 > 台账见 [native-plan-overlap.md](native-plan-overlap.md)。
 
+> **2026-07-30 落地（加法形态）**：postfix 循环新增同行 `(` 臂 → 既有 `EApply` 节点，
+> 三个验收形态（`make()(1)`、`(if c { f } else { g })(1)`、`get_handler()(req)`）全通，
+> 双后端语料 `apply_postfix.dawn` 钉住。**刻意保留了 `ident_or_call` 与构造器特判**：
+> 旧程序的 AST 与错误文案逐字节不变，prev-diff 免声明——这与 §六「不留快路径」的
+> 裁决相反，理由是分阶段：新增能力先落地零风险，**统一节点（删特判 + named-arg
+> 语法全位置放行 + AST dump 重基线 + Emit-Change）作为独立刀排队**，那时 §六的
+> 裁决再兑现。SYN-03（EBNF 的 named-arg 产生式为真）随统一刀结清。
+
 ## 一、问题
 
 `docs/grammar.ebnf` 把 `call_args` 写成任意 `primary_expr` 的 postfix，

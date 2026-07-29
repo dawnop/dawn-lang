@@ -1369,6 +1369,26 @@ fn postfix_expr(p: P, st: St, ns: Bool) -> PR[Expr] = {
           st1 = st3
         }
       }
+    } else if k == LPAREN {
+      # General application (SYN-02): any postfix expression may be applied.
+      # The named heads (`f(x)`, constructor calls, `x.m(y)`) still parse in
+      # their own paths with their own AST shapes; this arm catches only what
+      # used to be a syntax error -- make()(1), (if c { f } else { g })(1),
+      # get_handler()(req). Same-line only, for free: a newline surfaces as a
+      # NEWLINE token first, and that arm only continues a chain for `.` --
+      # so `let x = f` followed by a line `(1 + 2)` stays two statements.
+      # Arguments are positional; a function type carries no parameter names.
+      var st2 = skip_nl(p, adv1(p, st1))
+      var args: List[Expr] = []
+      while not at_kind(p, st2, RPAREN) {
+        let (st3, a) = expression(p, st2, false)?
+        args = args ++ [a]
+        st2 = skip_nl(p, st3)
+        if at_kind(p, st2, COMMA) { st2 = skip_nl(p, adv1(p, st2)) } else { break }
+      }
+      let (st4, close) = want(p, st2, RPAREN, "`)`")?
+      e = EApply(e, args, e_lo(e), close.hi)
+      st1 = st4
     } else if k == NEWLINE {
       # vertical method chains: `.` may start the next line (spec §1.7)
       var look = st1.pos
