@@ -471,12 +471,38 @@ fn fetch_into(url: String, work: String) -> Result[(String, String), String] !io
   Ok((target, actual))
 }
 
+## Re-hash a cache entry and compare against the hash its directory name
+## claims (PKG-02): the cache is content-addressed, so the name is the
+## declaration and a fresh d1 walk is the whole verification — hand edits,
+## disk rot and a half-written concurrent unpack all surface as a mismatch.
+pub fn verify_cached(dir: String, hash: String) -> Result[Unit, String] !io =
+  match tree_hash(dir) {
+    Err(e) -> Err("cache entry " ++ dir ++ " is unreadable: " ++ e ++
+        "\n  delete it and re-run; the next fetch re-downloads")
+    Ok(actual) ->
+      if actual != hash {
+        Err("cache entry " ++ dir ++ " does not match its own name" ++
+            "\n  named:     " ++ hash ++ "\n  actual:    " ++ actual ++
+            "\n  the local copy was modified or damaged after fetch; delete it and re-run")
+      } else {
+        Ok(())
+      }
+  }
+
 ## The unpacked archive for `hash`, fetching from `url` on a cache miss.
-## Verification happens exactly once, at fetch time — the cache is immutable
-## afterwards (verify on download, trust the local copy).
+## A hit is re-verified every time (PKG-02): fetch-time verification alone
+## means a later modification of the local copy is trusted forever — the
+## seed jars had the same hole until scripts/seed-checksums.txt. Re-hashing
+## costs one read of the package's bytes (measured ~0.9s for a 7MB tree,
+## milliseconds for typical source packages).
 pub fn ensure_cached(url: String, hash: String) -> Result[String, String] !io = {
   let target = cache_dir(hash)
-  if io.is_dir(target) { return Ok(target) }
+  if io.is_dir(target) {
+    match verify_cached(target, hash) {
+      Ok(_) -> return Ok(target)
+      Err(e) -> return Err(e)
+    }
+  }
   match fetch_and_hash(url) {
     Ok(pr) -> {
       let (dir, actual) = pr

@@ -375,6 +375,7 @@ fn usage() -> String = join([
   "  dawn doc <target>                    emit the pub API (## doc comments) as JSON on stdout",
   "  dawn doc --builtins                  emit the builtin function reference as JSON",
   "  dawn add <spec> [--subdir <p>] [--as <alias>] [--dir <project>]",
+  "  dawn cache verify                    re-hash every cached package against its name",
   "                                       add a dependency to dawn.toml, preserving the file's",
   "                                       formatting: a Maven coordinate (group:artifact:version",
   "                                       → [java-deps]), an archive url (fetched and hashed",
@@ -490,6 +491,42 @@ fn cli_error(msg: String) -> Unit !io = {
   io.eprintln("error: " ++ msg)
   let _ = io.exit(2)
   ()
+}
+
+## `dawn cache verify` — re-hash every entry in the package cache and compare
+## it with the hash its directory name claims (PKG-02's companion command:
+## the per-use check catches the entry a build touches, this sweeps them all).
+fn run_cache(rest: List[String]) -> Unit !io = {
+  if len(rest) != 1 || rest[0] != "verify" {
+    return cli_error("usage: dawn cache verify")
+  }
+  let root = pkgfetch.cache_root()
+  let names = match io.list_dir(root) {
+    Ok(ns) -> ns
+    Err(_) -> {
+      println("cache is empty (" ++ root ++ ")")
+      return ()
+    }
+  }
+  var checked = 0
+  var bad = 0
+  for n in sort(names) {
+    if str.starts_with(n, "d1-") {
+      let hash = str.replace(n, "d1-", "d1:")
+      checked = checked + 1
+      match pkgfetch.verify_cached(root ++ "/" ++ n, hash) {
+        Ok(_) -> println("ok   " ++ n)
+        Err(e) -> {
+          println("BAD  " ++ n)
+          io.eprintln(e)
+          bad = bad + 1
+        }
+      }
+    }
+  }
+  println(to_string(checked) ++ " entr" ++ (if checked == 1 { "y" } else { "ies" }) ++
+      " checked, " ++ to_string(bad) ++ " bad")
+  if bad > 0 { let _ = io.exit(1) }
 }
 
 ## `selfhost __pkghash <dir>` — the d1 canonical tree hash (dawn __pkghash).
@@ -1285,6 +1322,8 @@ pub fn main() -> Unit !io = {
         }
       } else if mode == "lsp" {
         lsp.run_lsp("std", jsig_real())
+      } else if mode == "cache" {
+        run_cache(rest)
       } else if mode == "__pkghash" {
         run_pkghash(rest)
       } else if mode == "lex" || mode == "__lex" || mode == "parse" || mode == "__parse" {
