@@ -231,6 +231,69 @@ Dawn 的纯性给了两个便宜：**严格求值 + 不可变 + 无可变别名 
 JVM 后端继续忽略这两个节点（`emit.dawn:2190`、`interp.dawn:1347` 已经这么写了），
 所以刀 2 在 JVM 上必须是**零 Emit-Change**。这是刀 2 的门禁。
 
+### 5.1 调用约定：两条，不是一条
+
+刀 1 给运行时原语定了**借用**（头里写着：参数是借的，留下什么自己 dup）。
+Dawn 函数不能照搬——**刀 4 的出口条件要求它是 owned**：
+
+`array_with(a, i, x)` 要就地写，得知道 `a` 唯一。如果参数是借的，调用方手里那份
+引用还在，`rc >= 1` 永远成立，被调方**永远看不到 `rc == 1`**。唯一性只有在
+调用方把所有权交出去之后才成立。所以 Perceus 的复用分析和 owned 参数是同一件事，
+拆不开。
+
+于是：
+
+| 谁 | 参数 | 理由 |
+|---|---|---|
+| Dawn 函数 | **owned** | 刀 4 的唯一性判据依赖它；`CParam.mode` 本来就是为它准备的 |
+| 运行时原语（`CIntrinsic`） | **borrowed** | 50+ 个手写 C 函数各自负责正确 drop，是最难查的那类 bug 的最大来源面 |
+
+这不是妥协出来的不一致，是 Koka 也有的形状——它同样按函数标注 borrowed/owned。
+`CMode` 存在的意义就是承载这个区别，而 `types.Intr` 那张「声明属性」表
+（`rt` / `erased` / `internal`）就是刀 4 给个别原语开 owned 口子的地方。
+刀 2 只用整体规则，不动那张表。
+
+### 5.2 插入规则：先要正确，不要最优
+
+刀 2 只做**保守但正确**的那版：
+
+> **在每个「消费性使用」前 dup，在每条离开作用域的路径上 drop 该作用域的全部绑定。**
+
+消费性使用 = 值被交出去且对方会持有它：Dawn 调用的实参、`CCtor`/`CTuple`/
+`CClosure`/`CListLit`/`CDictApply` 的操作数、`CBox` 的内层、`CReturn` 的值、
+`CSAssign` 的右值。**非**消费性 = `CIntrinsic` 的实参（借用）、`CField`/
+`CTupleGet`/`CIsCtor`/`CTagOf` 的 target、`CIf` 的条件、`CBinary` 的操作数。
+
+这条规则的正确性不需要活跃性分析：
+
+- 一个绑定被消费 n 次 ⟹ n 个 dup + 作用域末 1 个 drop。交出去 n 份、自己那份还掉。
+- 一次没被消费 ⟹ 只有那个 drop。
+- **返回值也是它管的**：`return x` 先 dup（消费性），再 drop 掉包括 `x` 在内的
+  全部绑定，净效果是引用数不变、交出去的是那个 dup。返回不需要特例。
+
+**不最优在哪**：最后一次使用本该直接转移所有权，这版仍然 dup 一次再 drop 一次。
+那是「最后使用分析」，是刀 2 之后的细化，不是刀 2 的内容。先让它对。
+
+### 5.3 非局部退出是这一刀的难处
+
+`CReturn` / `CBreak(id)` / `CContinue(id)` 会跳过作用域末尾的 drop。所以要维护一个
+**作用域栈**，每层记该层拥有的 sym：
+
+| 出口 | 要 drop 的 |
+|---|---|
+| 正常走到作用域末 | 该层 |
+| `CReturn` | 函数内**全部**层 |
+| `CBreak(id)` | 到该 loop 的 body 层为止的所有层 |
+| `CContinue(id)` | 同上（`step` 在 drop 之后跑，它读的是循环外的变量） |
+
+`CSAssign(sym, v)`：先求 `v`（消费性 ⟹ dup），**再 drop `sym` 的旧值**，最后写入。
+顺序是有讲究的——`s = s ++ "x"` 里新值已经持有了自己的引用，先算后 drop 才安全。
+
+### 5.4 字典按结构跳过
+
+`CFun.dicts` 是与 `params` 分开的字段，字典类型的表达式（`CDictRef`/`CDictApply`/
+`CDictArg`）也认得出来。这一族整个不进所有权分析——§3 说过为什么它们不在 RC 里。
+
 ## 6. 复用分析（刀 4）
 
 `dawn_rt.h` 里已经把这一格写下来了：
@@ -268,7 +331,8 @@ JVM 后端继续忽略这两个节点（`emit.dawn:2190`、`interp.dawn:1347` �
 | 刀 | 内容 | 门禁 |
 |---|---|---|
 | 1 | 运行时 ABI：公共头、掩码、`dawn_dup/drop/is_unique`、显式工作栈、`--rc=leak`；emitc 侧同步改 `unbox_expr`（§2.7）与 `emit_alloc`（发掩码） | 语料全绿（此时还没人调 dup/drop，纯粹验 ABI 改动没打坏东西）+ 整编译器仍能发 C 并与 JVM 逐字一致 |
-| 2 | Core pass：所有权推断 + `CSDup`/`CSDrop` 插入 + `CBorrowed` | **JVM 侧零 Emit-Change**；Core golden 只动 dup/drop 行 |
+| 2 | Core pass：所有权推断 + `CSDup`/`CSDrop` 插入（§5.2 的保守版） | **JVM 侧零 Emit-Change**；Core golden 只动 dup/drop 行 |
+| 2b | 最后使用分析：把「dup 一次再 drop 一次」收成一次转移；`CBorrowed` 第一次有值 | 同上，且 dup/drop 计数显著下降 |
 | 3 | emitc 消费两个节点（今天在 `emitc.dawn:971` 直接丢弃） | 语料全绿 + 整编译器 native 跑通且与 JVM 逐字一致 |
 | 4 | 复用分析（`rc == 1` 原地写） | `array_with` 就地命中率计数器 |
 
