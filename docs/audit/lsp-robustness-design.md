@@ -14,7 +14,15 @@
 > 换回 `java.net.URI` 等于把它踢出共享半区。按原则的正确形态落地：**手写 decoder 修成
 > 校验的**（continuation 区间 / overlong / surrogate / 超 U+10FFFF 全拒，坏序列出
 > U+FFFD 降级续读），一份纯 Dawn 实现两个工具链共用，单测钉住五类畸形输入。
-> LSP-02（file URI 其余面）与 LSP-04（debounce）仍待做。
+> LSP-02（file URI 其余面）仍待做。**LSP-04（debounce）撞墙已记档**：§2.2 的方案
+> 依赖「`read_message` 加一个超时形式（有输入就读，没输入就返回 `Idle`）」，
+> 而 std/io 只有阻塞的 `read_stdin(n)`——**没有任何「就绪/超时」原语**。
+> 造一个（`io_stdin_ready(timeout_ms) -> Bool` 之类）是**运行时契约变更**：
+> 两个后端各实现一份（JVM 的 available/带超时读 vs C 的 poll/select）、进 spec §11
+> 的原语表、进 intrinsic 语义表。那是一把独立的刀，且它的设计题（就绪 vs 超时读、
+> EOF 怎么表达、native 上的信号语义）比 debounce 本身大——**不该顺手塞进 LSP 改动里**，
+> 半设计好的原语进语言表面比不做更糟。debounce 的其余部分（generation 计数、
+> `$/cancelRequest` 直接回 RequestCancelled）都在那个原语之后才有意义。
 ## 一、问题
 
 ### 1.1 手写 UTF-8 decoder 不校验（LSP-01）

@@ -1833,7 +1833,9 @@ DawnList 的共享窗口、CAS 所有权、DawnMap/Set 的持久性、equals/has
 > 的块真编真跑**（26 个，README 首页示例 + tutorial 全部整程序块）。
 > 第一次运行就抓到 README 首页示例调用了不存在的 `sum`——即本条的论据本身。
 > 块检查是**opt-in**：spec 里多数示例是片段，逼它们变成整模块会毁掉行文。
-> 仍未做：accept/reject grammar corpus（EBNF 对拍）、文档里手写数字的自动生成。
+> **accept/reject grammar corpus 也已落地（同日）**：`scripts/grammar-corpus/`
+> 进 CI，6 accept + 8 reject，后者每篇钉住拒绝理由（否则语料会退化成「只要报错就行」）。
+> 仍未做：文档里手写数字的自动生成。
 >
 > 原判定：**【待办 —— 认可】**
 >

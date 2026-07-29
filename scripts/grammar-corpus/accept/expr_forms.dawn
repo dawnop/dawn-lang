@@ -1,0 +1,41 @@
+# EBNF expr and postfix forms: pipeline, match with guard, block, if/else,
+# indexing, propagation, unwrap, interpolation, lambda, and general application
+# (the last one is what the EBNF always described and the parser gained on
+# 2026-07-30: SYN-02).
+use std/list
+
+fn add(a: Int) -> fn(Int) -> Int = fn(b) => a + b
+
+fn classify(n: Int) -> String =
+  match n {
+    0 -> "zero"
+    k if k < 0 -> "negative"
+    _ -> "positive"
+  }
+
+fn pipeline(xs: List[Int]) -> Int =
+  xs |> map(fn(x) => x * 2) |> fold(0, fn(a, x) => a + x)
+
+fn postfixes(xs: List[Int], o: Option[Int]) -> Int = {
+  let head = xs[0]
+  let un = o!
+  let applied = add(1)(2)
+  head + un + applied
+}
+
+fn propagates(r: Result[Int, String]) -> Result[Int, String] = Ok(r? + 1)
+
+fn interpolated(n: Int) -> String = "n=$n and ${n * 2}"
+
+fn blocks(n: Int) -> Int = {
+  var acc = 0
+  var i = 0
+  while i < n {
+    acc = acc + i
+    i = i + 1
+  }
+  for k in 0..3 {
+    acc = acc + k
+  }
+  if acc > 0 { acc } else { 0 - acc }
+}
