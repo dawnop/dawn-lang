@@ -111,12 +111,28 @@ pub fn class_info(fqcn: String) -> JClass !io =
     None -> panic("class vanished between queries: " ++ fqcn)
   }
 
+# The five reflective walks below all reclaim an erased `Array.get` element as
+# the class the JDK declared the array to hold — `getMethods()` is `Method[]`,
+# and nothing on this class path can make it otherwise. So a miss is a bug in
+# this file rather than a condition, and the `cast_e` that hands the failure
+# back as a value (LANG-02) is unwrapped by stopping the compiler with the walk
+# named: the uncaught ClassCastException this replaces, minus the guessing
+# about which of the five it came out of.
+#
+# Written out at each walk rather than behind one helper: `cast_e[T]` takes T
+# from the expected type at the call site, so a `fn reclaim[T](o: Object) -> T`
+# would check against T's erasure — `Object` — and pass everything.
+
 fn class_names(arr: Object) -> List[String] !io = {
   var out: List[String] = []
   let n = Array.getLength(arr)
   var i = 0
   while i < n {
-    let c: Class = cast(Array.get(arr, i).expect("class array element"))
+    let got: Result[Class, ForeignError] = cast_e(Array.get(arr, i).expect("class array element"))
+    let c: Class = match got {
+      Ok(v) -> v
+      Err(e) -> panic("jreflect.class_names: not a Class: " ++ e.message)
+    }
     out = out ++ [c.getName().expect("class name")]
     i = i + 1
   }
@@ -146,7 +162,11 @@ pub fn methods_of(fqcn: String) -> List[JMethod] !io = {
   let n = Array.getLength(arr)
   var i = 0
   while i < n {
-    let m: Method = cast(Array.get(arr, i).expect("method array element"))
+    let got: Result[Method, ForeignError] = cast_e(Array.get(arr, i).expect("method array element"))
+    let m: Method = match got {
+      Ok(v) -> v
+      Err(e) -> panic("jreflect.methods_of: not a Method: " ++ e.message)
+    }
     if not m.isBridge() && not m.isSynthetic() { out = out ++ [method_of(m)] }
     i = i + 1
   }
@@ -161,7 +181,11 @@ pub fn ctors_of(fqcn: String) -> List[JCtor] !io = {
   let n = Array.getLength(arr)
   var i = 0
   while i < n {
-    let k: Constructor = cast(Array.get(arr, i).expect("ctor array element"))
+    let got: Result[Constructor, ForeignError] = cast_e(Array.get(arr, i).expect("ctor array element"))
+    let k: Constructor = match got {
+      Ok(v) -> v
+      Err(e) -> panic("jreflect.ctors_of: not a Constructor: " ++ e.message)
+    }
     if not k.isSynthetic() {
       out = out ++ [JCtor {
         param_cls: class_names(Objects.requireNonNull(k.getParameterTypes().expect("param types")).expect("non-null")),
@@ -183,7 +207,11 @@ pub fn static_fields_of(fqcn: String) -> List[JField] !io = {
   let n = Array.getLength(arr)
   var i = 0
   while i < n {
-    let f: Field = cast(Array.get(arr, i).expect("field array element"))
+    let got: Result[Field, ForeignError] = cast_e(Array.get(arr, i).expect("field array element"))
+    let f: Field = match got {
+      Ok(v) -> v
+      Err(e) -> panic("jreflect.static_fields_of: not a Field: " ++ e.message)
+    }
     if Modifier.isStatic(f.getModifiers()) {
       out = out ++ [JField {
         name: f.getName().expect("field name"),
@@ -349,7 +377,11 @@ pub fn invoke_static(
   var i = 0
   var found: List[Method] = []
   while i < n {
-    let m: Method = cast(Array.get(arr, i).expect("method array element"))
+    let got: Result[Method, ForeignError] = cast_e(Array.get(arr, i).expect("method array element"))
+    let m: Method = match got {
+      Ok(v) -> v
+      Err(e) -> panic("jreflect.invoke_static: not a Method: " ++ e.message)
+    }
     if len(found) == 0 && m.getName().expect("name") == name {
       let ps = class_names(Objects.requireNonNull(m.getParameterTypes().expect("param types")).expect("non-null"))
       if ps == param_cls { found = [m] }

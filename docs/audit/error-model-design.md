@@ -156,6 +156,9 @@ pub fn cast[T](o: Object) -> Result[T, ForeignError]   # pure，失败是值
 > `jreflect` 5、`jfold` 4、`vendor` 2、`maven` 1、`packages/web` 2——
 > 上面那份「`interp.dawn` 与 `pkgfetch.dawn`」是写方案时凭印象点的，两个都没有。
 > 而且这一步和 A 步一样**一期做不完**：改签名要三期两发布，理由同 §6.2。
+> 「都改成 `cast(x)?` 或显式 match」这句也没落成：14 处一处也用不上 `?`
+> （落空全是本文件的 bug，不是要往上传的情况），而 match 得配一条带注解的 `let`
+> ——scrutinee 位置没有期望类型，T 就不绑定。见 §6.11。
 
 ### C. `bracket`：先给标准库函数，不给语法
 
@@ -444,9 +447,9 @@ B 步受的约束与 A 步**逐字相同**，不是类比：`cast[T](o) -> T` �
 
 | 期 | 落什么 | 边界 |
 |---|---|---|
-| **1**（本提交） | `cast_e` 过渡内建（表 87 → 88），两后端都发射；测试与语料。**`cast(` 一个不动。** | 之后发 tag，`seed-release.txt` 推进 |
-| **2** | 全部 `cast` 调用点迁到 `cast_e`；**同一提交**里把 `cast` 的表项改成 `Result[T, ForeignError]`（此时它零调用点） | 再发 tag + 种子推进 |
-| **3** | 调用点从 `cast_e` 换回 `cast`；删掉 `cast_e` 的表项，两个后端的发射改指原名 | 终局 |
+| **1**（已合并） | `cast_e` 过渡内建（表 87 → 88），两后端都发射；测试与语料。**`cast(` 一个不动。** | 之后发 tag，`seed-release.txt` 推进 |
+| **2**（已合并） | 全部 `cast` 调用点迁到 `cast_e`；**同一提交**里把 `cast` 的表项改成 `Result[T, ForeignError]`，**并把两个后端的发射一起改指新形状**（此时它零调用点）。落下来的样子见 §6.11 | 再发 tag + 种子推进 |
+| **3** | 调用点从 `cast_e` 换回 `cast`；删掉 `cast_e` 的表项与两个发射器分支里的第二个名字；JVM 那个 `dawn/rt/Io.cast_e` 方法收编成 `cast`（native 没有对应符号，它是内联的 C，不必动） | 终局 |
 
 **阶段 1 的具体清单**：
 
@@ -487,3 +490,60 @@ B 步受的约束与 A 步**逐字相同**，不是类比：`cast[T](o) -> T` �
 **阶段 1 的 Emit-Change**：`emit *` 六个目标各差**一个文件**——`dawn/rt/Io.class`
 多一个 `cast_e` 方法，别的一字不动；`doc --builtins` 多一条；`lsp` 的三份补全清单
 各多一项。Core golden 的 13 份 dump 逐字节不变，只有 selfhost 自身改到的模块 hash 动。
+
+### 6.11 B 步阶段 2 落下来的样子
+
+- **调用点 14 个迁到 `cast_e`**：`jreflect` 5、`jfold` 4、`vendor` 2、`maven` 1、
+  `packages/web` 2。**全部是 unwrap-panic**，一个也没改成传播：这些 `cast` 的目标类
+  都是 JDK 或第三方库当场声明的（`getMethods()` 是 `Method[]`，coursier 的 `fetch()`
+  是 `List<File>`，`ofByteArray` 的 body 是 `byte[]`），落空是本文件的 bug 而不是一种
+  情况，而**恰好有两处的外层函数返回 `Result`**——`jfold.from_java_ret` 与 `maven.fetch`
+  ——把落空折进那个 `Err` 会让「编译器自己坏了」伪装成「你的依赖拉不下来 / 你的
+  comptime 调用不合法」，怪错人。没有一个调用点在屏障里（`vendor`/`maven` 那两处
+  看着像，实际在 `catch_fault` 的 `Ok` 臂里、闭包之外），所以 panic 保住了
+  「原样致命」这条语义。
+- **`scripts/error-contract/probe.dawn` 反过来留着 `cast`**，而且是全仓唯一一处：
+  它把 `thrown_by_cast`（原来靠 `catch_fault` 接住抛出）改写成 `missed_by_cast`
+  （直接读 `Result`），并断言两个拼法的 `kind` **与 `message` 都**逐字相同。
+  这一处能留，是因为 `scripts/` 只被 HEAD 的 `bin/dawn` 编译，种子从不碰它（§6.2 的
+  约束是「同一段源要过两张表」，这段只过一张）。留它的收益是把 §6.8 那颗地雷变成
+  一道闸门：**表项翻了而发射器没翻的话，`let r: Result[Bytes, ForeignError] = cast(x)`
+  会发出一条 `CHECKCAST Result`，probe 在进函数的路上就死**，而不是等到阶段 3 才被
+  发现。
+- **同一提交里翻的三处**：`types.dawn` 的表项、`emit.dawn` 的 JVM 分支、`emitc.dawn`
+  的 C 分支。后两处不是各写一份，而是**和 `cast_e` 合成同一条分支**（`name == "cast"
+  || name == "cast_e"`）——A 步阶段 2 留下的正是「一个名字有两份实现，其中一份陈了」，
+  而合并之后这件事在语法上就不可能再发生一次。checker 那条「目标须是引用类型」的
+  两分支读法也合了，两个拼法现在都从 `Result` 里读 T。
+- **`unerase` 没有变成死码**：`cast` 曾是它的调用者之一，还有四处（函数值 apply 的
+  回收、CCast、erased 汇合点）。
+
+**四件计划没预料到的**：
+
+1. **`emit *` 一格没动**，尽管这一步动了 14 个调用点。因为 `prev-diff` 比的是
+   **两个编译器编同一份源**：种子（v0.34.0）和 HEAD 都认识 `cast_e`，而翻掉的那条
+   `cast` 分支在语料里零调用点、根本发射不到。所以本阶段的 Emit-Change 恰好两条
+   （`doc --builtins` 与 `lsp`），与 A 步阶段 2 同形同因（§6.6）。
+2. **不存在一个泛型的 unwrap 助手**，这是 B 步比 A 步啰嗦的真正原因。A 步的调用点是
+   `catch_fault(f)` → `catch_fault_e(f)`，一个词的事；B 步每处要多三行。想收成
+   `fn reclaim[T](o: Object) -> T` 是不行的：`cast[T]` 的 T 取自**调用点的期望类型**，
+   写进一个泛型函数里，T 在那里就是个类型变量，`unerase_class` 给出 `Object`——
+   检查会**静默失效**、什么都放行。所以 14 处都是写开的。
+3. **调用点是两条语句，不是一条。** `match cast_e(x) { .. }` 编不过：match 的
+   scrutinee 没有期望类型，T 于是不绑定，`check_call` 报「cannot infer type
+   parameter(s) T」。定型是 `let r: Result[T, ForeignError] = cast_e(..)` 再 match
+   `r`。**这个形状是永久的**——阶段 3 只把 `cast_e(` 改回 `cast(`，不重排这三行。
+4. **`jreflect.invoke_static` 里那处仍是 panic**，尽管它是 §6.6 点名的「全仓唯一把
+   `kind` 印进文本的地方」，而且外层就返回 `Result[_, String]`。它印 `kind` 是在报
+   *被调用的 Java 方法*抛了什么；`Method[]` 里躺着个非 `Method` 不是那件事。
+
+**阶段 2 的 Emit-Change**（实测）：
+
+- `doc --builtins`：`cast` 的 `sig` 从 `fn cast[T](x: Object) -> T` 变成
+  `fn cast[T](x: Object) -> Result[T, ForeignError]`，两条 `doc` 文本各重写一次。
+- `lsp`：三份补全清单（id 31 / 36 / 39）里 `cast` 那项的 `detail` 就是签名，
+  共 6 行（三对）。别的一字不动。
+- `emit *` / `fmt` / `spike-native` / `native-fixpoint` / `table-freight` 全绿未动；
+  Core golden 的 13 份 dump 逐字节不变，`selfhost.sha` 动了 9 个模块（checker、doc、
+  emit、emitc、jfold、jreflect、maven、types、vendor）——恰好是改了**代码**的那些，
+  `interp` 只改了注释所以没动，这本身是那份 hash 的一次抽检。
