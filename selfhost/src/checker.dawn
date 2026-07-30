@@ -457,6 +457,21 @@ fn qual_const(cx: Cx, target: Expr, fname: String) -> Option[(String, Ty)] = {
   }
 }
 
+## `m.C` read as a qualified constructor: the (adt id, slot) the alias exports
+## under `fname`, or None (LANG-06).
+fn qual_ctor(cx: Cx, target: Expr, fname: String) -> Option[(Int, Int)] = {
+  let alias_name = match target {
+    ECtor(cn, cargs, sp, hp, _, _, _, _) ->
+      if hp || len(cargs) > 0 || sp != None { return None } else { cn }
+    EVar(n, _, _) -> n
+    _ -> return None
+  }
+  match map.get(cx.module_exports, alias_name) {
+    None -> None
+    Some(exp) -> map.get(exp.ctors, fname)
+  }
+}
+
 ## Resolve a parsed type reference against the current scope (the Kotlin
 ## resolveType with tparams/effVars defaulted to the current ones).
 pub fn resolve_type(cx: Cx, ref: TypeRef) -> (Cx, Ty) !io =
@@ -5399,7 +5414,7 @@ fn check_expr_at(cx: Cx, e: Expr, expected: Option[Ty]) -> (Cx, Ty, TExpr) !io =
     ECall(callee, args, clo, chi, lo, hi) ->
       check_call(cx, callee, args, expected, None, no_sig(), clo, chi, lo, hi)
     ECtor(cname, cargs, spread, has_parens, cclo, cchi, lo, hi) ->
-      check_ctor_call(cx, cname, cargs, spread, has_parens, expected, cclo, cchi, lo, hi)
+      check_ctor_call(cx, cname, cargs, spread, has_parens, expected, None, cclo, cchi, lo, hi)
     ELambda(params, body, lo, hi) -> check_lambda(cx, params, body, expected, lo, hi)
     EApply(target, args, lo, hi) -> check_apply(cx, target, args, lo, hi)
     EMethod(target, name, args, nlo, nhi, lo, hi) ->
@@ -5415,14 +5430,27 @@ fn check_expr_at(cx: Cx, e: Expr, expected: Option[Ty]) -> (Cx, Ty, TExpr) !io =
           (cx, ct, XConstRef(mod_path, fname, lo, hi, ct))
         }
         None ->
-          match static_field_target(cx, target) {
-            # Class.FIELD reads a public static field (spec §9.1) — the receiver is a
-            # java class name (a nullary ctor spelling), not an evaluable expression
-            Some(fq) -> check_java_static_field(cx, fq, fname, flo, fhi, lo, hi)
-            None -> {
-              let (cx1, tt, tx) = check_expr(cx, target, no_expected())
-              check_field_access_typed(cx1, tt, tx, fname, flo, fhi, lo, hi)
+          # `m.C` with no arguments: a nullary constructor's value, or -- in a
+          # function-typed position -- the constructor as a function. Decided
+          # by the same code the unqualified spelling goes through, with the
+          # constructor already resolved through the alias.
+          match qual_ctor(cx, target, fname) {
+            Some(k) -> {
+              let no_args: List[CtorArg] = []
+              check_ctor_call(cx, fname, no_args, None, false, expected, Some(k),
+                flo, fhi, lo, hi)
             }
+            None ->
+              match static_field_target(cx, target) {
+                # Class.FIELD reads a public static field (spec §9.1) — the receiver
+                # is a java class name (a nullary ctor spelling), not an evaluable
+                # expression
+                Some(fq) -> check_java_static_field(cx, fq, fname, flo, fhi, lo, hi)
+                None -> {
+                  let (cx1, tt, tx) = check_expr(cx, target, no_expected())
+                  check_field_access_typed(cx1, tt, tx, fname, flo, fhi, lo, hi)
+                }
+              }
           }
       }
     EMatch(scrut, arms, lo, hi) -> check_match(cx, scrut, arms, expected, lo, hi)
@@ -5747,6 +5775,25 @@ fn check_lambda(
 }
 
 fn check_apply(cx: Cx, target: Expr, args: List[Expr], lo: Int, hi: Int) -> (Cx, Ty, TExpr) !io = {
+  # `m.C(a, b)`: general application over a qualified constructor. Routed into
+  # check_ctor_call rather than treated as calling a function value, so field
+  # names, arity, spread and generic instantiation are decided by the one
+  # implementation the unqualified `C(a, b)` uses (LANG-06).
+  match target {
+    EFieldAcc(recv, fname, flo, fhi, _, _) ->
+      match qual_ctor(cx, recv, fname) {
+        Some(k) -> {
+          var cargs: List[CtorArg] = []
+          for a in args {
+            cargs = cargs ++ [CtorArg { name: None, e: a, lo: e_lo(a), hi: e_hi(a) }]
+          }
+          return check_ctor_call(cx, fname, cargs, None, true, no_expected(), Some(k),
+            flo, fhi, lo, hi)
+        }
+        None -> ()
+      }
+    _ -> ()
+  }
   # piping into an unannotated lambda: the arguments determine its parameter types
   var lambda_unannotated = false
   match target {
@@ -6440,6 +6487,11 @@ fn check_call(
 
 ## Ctor(args) / Record { fields } / bare Name (the Kotlin checkCtorCall): also
 ## the landing site for SCREAMING_SNAKE constant references.
+## `pre` is the constructor already resolved by the caller -- how a qualified
+## spelling (`m.C`, LANG-06) reaches exactly this checking without the name
+## being in scope. Everything after resolution (field names, arity, spread,
+## generic instantiation, ctor-as-value) is then one implementation, so the
+## qualified form cannot drift from the local one.
 fn check_ctor_call(
   cx: Cx,
   cname: String,
@@ -6447,6 +6499,7 @@ fn check_ctor_call(
   spread: Option[Expr],
   has_parens: Bool,
   expected: Option[Ty],
+  pre: Option[(Int, Int)],
   cclo: Int,
   cchi: Int,
   lo: Int,
@@ -6457,7 +6510,10 @@ fn check_ctor_call(
     Some(_) -> true
     None -> false
   }
-  let key = map.get(cx1.ctors_by_name, cname)
+  let key = match pre {
+    Some(k) -> Some(k)
+    None -> map.get(cx1.ctors_by_name, cname)
+  }
   match key {
     None -> {
       # a bare SCREAMING_SNAKE name may be a constant reference; inside a
@@ -9077,6 +9133,29 @@ test "a module-qualified type resolves through the alias (LANG-06)" {
     if f.name == "both" { owners = const_owners(f.body, owners) }
   }
   assert owners == ["", "geom"]
+  # a qualified constructor in expression position: built through the alias,
+  # generic and nullary alike, next to a local constructor of the same name
+  let src10 = "use geom as g\n" ++
+    "type Mine = | One(n: Int)\n" ++
+    "pub fn f() -> Int =\n" ++
+    "  match g.One(3) {\n" ++
+    "    g.One(v) -> v\n" ++
+    "  }\n" ++
+    "pub fn local() -> Int =\n" ++
+    "  match One(4) {\n" ++
+    "    One(n) -> n\n" ++
+    "  }\n"
+  let (m10, pd10) = parser.parse_module(src10)
+  assert len(pd10) == 0
+  let (cx10, _) = check_module(cx_new(Some("use_site"), None), m10, env)
+  assert len(cx10.diags) == 0
+  # a constructor the module does not export is not reachable through the alias
+  let src11 = "use geom as g\n" ++
+    "pub fn f() -> Int = g.Nope(1)\n"
+  let (m11, _) = parser.parse_module(src11)
+  let (cx11, _) = check_module(cx_new(Some("use_site"), None), m11, env)
+  assert len(cx11.diags) > 0
+
   # a constant the module does not export is not reachable through the alias
   let src9 = "use geom as g\n" ++
     "pub fn f() -> Int = g.NOPE\n"
