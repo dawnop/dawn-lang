@@ -983,6 +983,16 @@ pub fn analyze_program(loaded: LoadResult, std: StdCtx, opts: CtOpts, js: Jsig) 
   var out: List[CheckedMod] = []
   # ids continue across modules so grafted ADT/trait ids never collide
   var nid = std.next_id
+  # The program's impls, accumulated the way `exports` is -- but for a
+  # different reason. An export is reachable only through a `use`; an impl is
+  # in force everywhere (spec §3.5), so this table is not what the importer
+  # asked for, it is the whole program's.
+  #
+  # Dependency order is enough to have every impl that can matter: the orphan
+  # rule puts an impl in the module declaring the trait or the one declaring
+  # the subject, so a module able to name both has already been preceded by
+  # whichever of the two wrote it.
+  var impls = std.impls
   for mf in loaded.modules {
     for d in mf.pdiags { diags = diags ++ [LocDiag { path: mf.path, d: d }] }
     let parse_failed = len(mf.pdiags) > 0
@@ -993,8 +1003,9 @@ pub fn analyze_program(loaded: LoadResult, std: StdCtx, opts: CtOpts, js: Jsig) 
       moved: std.moved,
       line_starts: lexer.line_starts_of(mf.text),
       next_id: nid,
-      # std's impls are part of the baseline, not something `use` turns on
-      impl_table: std.impls,
+      # std's impls are part of the baseline, not something `use` turns on --
+      # and neither are the ones the modules before this got to
+      impl_table: impls,
       # the host's Java signature oracle: jreflect's on the JVM driver, the
       # refusing default anywhere else (a native compiler refuses `use java`)
       jsig: js
@@ -1013,6 +1024,12 @@ pub fn analyze_program(loaded: LoadResult, std: StdCtx, opts: CtOpts, js: Jsig) 
       for d in ct.diags { diags = diags ++ [LocDiag { path: mf.path, d: d }] }
     }
     nid = cx.next_id
+    # registration already rejected anything that collided with a key already
+    # in this table, so every row here is either new or the one put there
+    for pr in map.entries(cx.impl_table) {
+      let (k, v) = pr
+      impls = map.insert(impls, k, v)
+    }
     exports = map.insert(exports, mf.mod_path, exports_of(cx, mf.m, mf.mod_path, mf.class_name))
     out = out ++ [CheckedMod {
       mod_path: mf.mod_path,
@@ -1137,6 +1154,62 @@ test "a two-module project analyzes end to end" {
   # jsig_refused: a project with no `use java` analyzes without any oracle
   let prog = analyze_program(loaded, std, ct_default(), jsig_refused())
   assert len(prog.diags) == 0
+}
+
+test "an impl is in force in every module, not just its own (spec §3.5)" {
+  let root = "/tmp/dawn-selfhost-analyze/trait-cross"
+  mkdirs(root ++ "/src")
+  put(root ++ "/src/lib.dawn",
+    "pub trait Sizey[T] { fn sizey(x: T) -> Int }\n" ++
+      "pub type Box = { n: Int } derive Show\n" ++
+      "impl Sizey[Box] { fn sizey(b: Box) -> Int = b.n + 2 }\n" ++
+      "pub fn describe[T: Sizey](x: T) -> Int = sizey(x)\n")
+  # every spelling that reaches the impl from outside its module: a generic
+  # entry whose bound is solved at the call site, the method called through
+  # the module alias, the method imported by name, and UFCS on the import.
+  # `derive Show` on an imported type is the same question -- the derived
+  # impl is an impl -- and it was equally unreachable.
+  put(root ++ "/src/main.dawn",
+    "use lib\nuse lib.{Box, sizey}\n" ++
+      "pub fn main() -> Unit !io = println(to_string(lib.describe(Box { n: 1 }))\n" ++
+      "  ++ to_string(lib.sizey(Box { n: 2 })) ++ to_string(sizey(Box { n: 3 }))\n" ++
+      "  ++ to_string(Box { n: 4 }.sizey()) ++ to_string(Box { n: 5 }))\n")
+  let std = match load_std("std") {
+    Ok(sc) -> sc
+    Err(e) -> panic("std: " ++ e)
+  }
+  let loaded = load_directory(root)
+  assert len(loaded.diags) == 0
+  let prog = analyze_program(loaded, std, ct_default(), jsig_refused())
+  for d in prog.diags { panic("unexpected: " ++ d.d.msg) }
+  assert len(prog.diags) == 0
+}
+
+test "a second module cannot supply a rival impl" {
+  # The program-wide coherence check now sees the whole program's table, but
+  # it is not what reports this: the orphan rule gets there first, and between
+  # two *different* modules it always does. An impl may only live with its
+  # trait or with its subject, and a module that could name both would have to
+  # import the other, which the loader rejects as a cycle. So "one impl per
+  # trait and type" holds across modules by construction, and the accumulated
+  # table is what makes the module that *uses* the pair see the one impl.
+  let root = "/tmp/dawn-selfhost-analyze/trait-rival"
+  mkdirs(root ++ "/src")
+  put(root ++ "/src/lib.dawn",
+    "pub trait Sizey[T] { fn sizey(x: T) -> Int }\n" ++
+      "pub type Box = { n: Int }\n" ++
+      "impl Sizey[Box] { fn sizey(b: Box) -> Int = b.n + 2 }\n")
+  put(root ++ "/src/main.dawn",
+    "use lib.{Sizey, Box}\n" ++
+      "impl Sizey[Box] { fn sizey(b: Box) -> Int = b.n }\n" ++
+      "pub fn main() -> Unit !io = ()\n")
+  let std = match load_std("std") {
+    Ok(sc) -> sc
+    Err(e) -> panic("std: " ++ e)
+  }
+  let prog = analyze_program(load_directory(root), std, ct_default(), jsig_refused())
+  assert len(prog.diags) == 1
+  assert str.contains(prog.diags[0].d.msg, "orphan impl: `Sizey[Box]`")
 }
 
 test "closure loading skips an unreferenced module (module-access 2.2)" {
