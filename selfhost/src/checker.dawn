@@ -153,9 +153,12 @@ pub fn cx_new(owner_class: Option[String], src_path: Option[String]) -> Cx = {
   }
   Cx {
     diags: [],
-    # 0/1 are the prelude ADT ids (Option/Result) and 0/1/2 the prelude trait
-    # ids (Ord/Eq/Hash); one counter feeds both, so minting starts past all of them
-    next_id: 3,
+    # 0/1/2 are the prelude ADT ids (Option/Result/ForeignError) and 0/1/2/3
+    # the prelude trait ids (Ord/Eq/Hash/Show); one counter feeds both, so
+    # minting starts past all of them. When Show arrived the counter stayed at
+    # 3, and no user trait collided with it only because a trait declaration
+    # mints its type variable first -- an ordering nothing asserted.
+    next_id: 4,
     adts: prelude_adts(),
     traits: prelude_traits(),
     fns: map.empty(),
@@ -1398,6 +1401,17 @@ test "a `use java` declaration is refused when no oracle is wired" {
   assert len(cx1.diags) == 1
   assert str.contains(cx1.diags[0].msg, "`use java` is not available in this compiler")
   assert str.contains(cx1.diags[0].hint, "java.lang.Math")
+}
+
+test "the shared counter starts past every prelude id" {
+  # ADTs and traits draw from one counter but live in separate id spaces, so
+  # a minted id equal to a prelude id of the *other* kind is fine -- equal to
+  # one of its own kind is a silent map overwrite. When Show took trait id 3
+  # the counter stayed at 3, and the first user trait missed it only because
+  # a trait declaration mints its type variable first.
+  let cx = test_cx()
+  assert cx.next_id > FOREIGN_ERROR_ID
+  assert cx.next_id > SHOW_ID
 }
 
 test "prelude seeding wires names to ids" {
