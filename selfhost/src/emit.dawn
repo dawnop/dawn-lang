@@ -1863,12 +1863,16 @@ pub fn gen_cexpr(g: Gen, e: CExpr, tail: Bool) -> (Gen, Bool) !io =
       g1.mv.visitFieldInsn(OP_GETFIELD, cls, dict_arg_field(idx), "Ljava/lang/Object;")
       (g1, true)
     }
-    CConstRef(name, ty) -> {
-      let v = match map.get(g.consts, name) {
+    CConstRef(owner, name, ty) -> {
+      # "" = resolved in this module's view (the shape every constant had
+      # before qualified access); otherwise the declaring module's entry, which
+      # merged_consts filed under `<module>.<NAME>`
+      let key = if owner == "" { name } else { owner ++ "." ++ name }
+      let v = match map.get(g.consts, key) {
         Some(cv) -> cv
-        None -> panic("codegen: no comptime value for const `" ++ name ++ "`")
+        None -> panic("codegen: no comptime value for const `" ++ key ++ "`")
       }
-      (gen_load_const(g, v, ty, "c:" ++ name), true)
+      (gen_load_const(g, v, ty, "c:" ++ key), true)
     }
     CComptime(lo, hi, ty) -> {
       let v = match map.get(g.blocks, (lo, hi)) {

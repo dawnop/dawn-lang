@@ -118,7 +118,9 @@ pub type TExpr =
     ty: Ty
   )
 # a reference to a (comptime-evaluated) constant
-  | XConstRef(name: String, lo: Int, hi: Int, ty: Ty)
+# owner: "" when resolved in this module's view, else the declaring module's
+# path (a qualified `m.MAX`) -- see core.CConstRef (LANG-06 step 3)
+  | XConstRef(owner: String, name: String, lo: Int, hi: Int, ty: Ty)
 # a bare constructor-with-fields used as a function value: map(xs, Some)
   | XCtorValue(adt: Int, ci: Int, lo: Int, hi: Int, ty: Ty)
   | XField(target: TExpr, field_idx: Int, lo: Int, hi: Int, ty: Ty)
@@ -266,7 +268,7 @@ pub fn x_lo(e: TExpr) -> Int =
     XJava(_, lo, _, _) -> lo
     XLambda(_, _, _, _, lo, _, _) -> lo
     XCtor(_, _, _, _, _, lo, _, _) -> lo
-    XConstRef(_, lo, _, _) -> lo
+    XConstRef(_, _, lo, _, _) -> lo
     XCtorValue(_, _, lo, _, _) -> lo
     XField(_, _, lo, _, _) -> lo
     XListLit(_, lo, _, _) -> lo
@@ -303,7 +305,7 @@ pub fn x_hi(e: TExpr) -> Int =
     XJava(_, _, hi, _) -> hi
     XLambda(_, _, _, _, _, hi, _) -> hi
     XCtor(_, _, _, _, _, _, hi, _) -> hi
-    XConstRef(_, _, hi, _) -> hi
+    XConstRef(_, _, _, hi, _) -> hi
     XCtorValue(_, _, _, hi, _) -> hi
     XField(_, _, _, hi, _) -> hi
     XListLit(_, _, hi, _) -> hi
@@ -341,7 +343,7 @@ pub fn tex_ty(e: TExpr) -> Ty =
     XJava(_, _, _, ty) -> ty
     XLambda(_, _, _, _, _, _, ty) -> ty
     XCtor(_, _, _, _, _, _, _, ty) -> ty
-    XConstRef(_, _, _, ty) -> ty
+    XConstRef(_, _, _, _, ty) -> ty
     XCtorValue(_, _, _, _, ty) -> ty
     XField(_, _, _, _, ty) -> ty
     XListLit(_, _, _, ty) -> ty

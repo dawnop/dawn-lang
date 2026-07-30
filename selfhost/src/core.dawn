@@ -151,7 +151,13 @@ pub type CExpr =
 # itself stays where the comptime interpreter put it; Core carries only the
 # reference, because materialising a value is backend-specific (the JVM
 # spills structures to static fields).
-  | CConstRef(name: String, ty: Ty)
+# A folded constant. `owner` is "" when the reference was resolved in the
+# referring module's own view -- a local constant, or one a selective import
+# merged in under that name -- which is every constant a program could name
+# before LANG-06 step 3. It is the declaring module's path when the constant
+# was reached through a whole-module alias (`m.MAX`), because then the simple
+# name alone is ambiguous: the referring module may have a `MAX` of its own.
+  | CConstRef(owner: String, name: String, ty: Ty)
 # the value of a `comptime { ... }` block, keyed by its source span
   | CComptime(lo: Int, hi: Int, ty: Ty)
 # jumps. `CBreak`/`CContinue` name their loop so lowering can nest freely.
@@ -433,7 +439,7 @@ pub fn cex_ty(e: CExpr) -> Ty =
     CIf(_, _, _, ty) -> ty
     CBlock(_, _, ty) -> ty
     CListLit(_, ty) -> ty
-    CConstRef(_, ty) -> ty
+    CConstRef(_, _, ty) -> ty
     CComptime(_, _, ty) -> ty
     CReturn(_) -> TyNever
     CBreak(_) -> TyNever

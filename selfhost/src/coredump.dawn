@@ -138,7 +138,7 @@ fn walk_expr(a: Acc, e: CExpr) -> Acc =
     CDictRef(_, _, _, _) -> a
     CDictApply(_, args, _) -> walk_all(a, args)
     CDictArg(d, _, _, _, _) -> walk_expr(a, d)
-    CConstRef(_, _) -> a
+    CConstRef(_, _, _) -> a
     CComptime(_, _, _) -> a
   }
 
@@ -339,7 +339,15 @@ fn expr(adts: Adts, n: Names, d: Int, e: CExpr) -> String =
     }
     CListLit(elems, t) ->
       ind(d) ++ "listlit" ++ ty(adts, t) ++ "\n" ++ exprs(adts, n, d + 1, elems)
-    CConstRef(name, t) -> ind(d) ++ "constref " ++ name ++ ty(adts, t) ++ "\n"
+    CConstRef(owner, name, t) -> {
+      # an empty owner means "resolved in this module's view", so it renders as
+      # the bare name -- printing a leading dot would claim a nameless owner,
+      # and it would churn the golden for every constant in the compiler while
+      # saying nothing. A qualified one shows as `module.NAME`, which is the
+      # difference the golden exists to make visible.
+      let shown = if owner == "" { name } else { owner ++ "." ++ name }
+      ind(d) ++ "constref " ++ shown ++ ty(adts, t) ++ "\n"
+    }
     # the span is the key the interpreter stored the value under, so it is
     # part of the identity and is not normalised
     CComptime(lo, hi, t) ->

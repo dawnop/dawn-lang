@@ -435,6 +435,28 @@ fn resolve_alias_target(cx: Cx, al: AliasE, use_lo: Int, use_hi: Int) -> (Cx, Ty
   (cx3, t)
 }
 
+## `m.NAME` read as a qualified constant: Some((declaring module, its type))
+## when `target` is a whole-module alias that exports a constant called
+## `fname`. A miss is not an error here -- the caller has a Java-static-field
+## path and a value path to try (LANG-06 step 3).
+fn qual_const(cx: Cx, target: Expr, fname: String) -> Option[(String, Ty)] = {
+  let alias_name = match target {
+    # a bare lowercase name parses as a nullary constructor spelling
+    ECtor(cn, cargs, sp, hp, _, _, _, _) ->
+      if hp || len(cargs) > 0 || sp != None { return None } else { cn }
+    EVar(n, _, _) -> n
+    _ -> return None
+  }
+  match map.get(cx.module_exports, alias_name) {
+    None -> None
+    Some(exp) ->
+      match map.get(exp.consts, fname) {
+        None -> None
+        Some(t) -> Some((exp.mod_path, t))
+      }
+  }
+}
+
 ## Resolve a parsed type reference against the current scope (the Kotlin
 ## resolveType with tparams/effVars defaulted to the current ones).
 pub fn resolve_type(cx: Cx, ref: TypeRef) -> (Cx, Ty) !io =
@@ -5383,14 +5405,25 @@ fn check_expr_at(cx: Cx, e: Expr, expected: Option[Ty]) -> (Cx, Ty, TExpr) !io =
     EMethod(target, name, args, nlo, nhi, lo, hi) ->
       check_method_call(cx, target, name, args, expected, nlo, nhi, lo, hi)
     EFieldAcc(target, fname, flo, fhi, lo, hi) ->
-      match static_field_target(cx, target) {
-        # Class.FIELD reads a public static field (spec §9.1) — the receiver is a
-        # java class name (a nullary ctor spelling), not an evaluable expression
-        Some(fq) -> check_java_static_field(cx, fq, fname, flo, fhi, lo, hi)
-        None -> {
-          let (cx1, tt, tx) = check_expr(cx, target, no_expected())
-          check_field_access_typed(cx1, tt, tx, fname, flo, fhi, lo, hi)
+      # `m.NAME` where `m` is a whole-module alias: a qualified constant
+      # (LANG-06 step 3). Checked before the Java and value paths because a
+      # module alias is not a value -- spec 10.3 forbids anything else of that
+      # name being in scope, so there is nothing to be ambiguous with.
+      match qual_const(cx, target, fname) {
+        Some(pr) -> {
+          let (mod_path, ct) = pr
+          (cx, ct, XConstRef(mod_path, fname, lo, hi, ct))
         }
+        None ->
+          match static_field_target(cx, target) {
+            # Class.FIELD reads a public static field (spec §9.1) — the receiver is a
+            # java class name (a nullary ctor spelling), not an evaluable expression
+            Some(fq) -> check_java_static_field(cx, fq, fname, flo, fhi, lo, hi)
+            None -> {
+              let (cx1, tt, tx) = check_expr(cx, target, no_expected())
+              check_field_access_typed(cx1, tt, tx, fname, flo, fhi, lo, hi)
+            }
+          }
       }
     EMatch(scrut, arms, lo, hi) -> check_match(cx, scrut, arms, expected, lo, hi)
   }
@@ -6441,7 +6474,7 @@ fn check_ctor_call(
             return (cerr(cx1, "`" ++ cname ++ "` is a constant, not a constructor", cclo, cchi),
               TyError, XError(lo, hi))
           }
-          return (cx1, ct, XConstRef(cname, lo, hi, ct))
+          return (cx1, ct, XConstRef("", cname, lo, hi, ct))
         }
         None -> ()
       }
@@ -7900,7 +7933,7 @@ test "ctor calls infer type arguments; constants land as refs" {
   let (cx4, t4, node4) = check_expr(cx, ECtor("LIMIT", [], None, false, 0, 5, 0, 5), no_expected())
   assert t4 == TyInt
   match node4 {
-    XConstRef(n, ..) -> { assert n == "LIMIT" }
+    XConstRef(_, n, ..) -> { assert n == "LIMIT" }
     _ -> { assert false }
   }
 }
@@ -8968,11 +9001,20 @@ test "exports_of exposes the pub surface, and imports consume it" {
   assert cx3.diags[0].msg == "`hidden` is private to module `geom`"
 }
 
+## Every XConstRef owner inside an expression, left to right (test helper).
+fn const_owners(e: TExpr, out: List[String]) -> List[String] =
+  match e {
+    XConstRef(owner, _, _, _, _) -> out ++ [owner]
+    XBinary(_, l, r, ..) -> const_owners(r, const_owners(l, out))
+    _ -> out
+  }
+
 test "a module-qualified type resolves through the alias (LANG-06)" {
   let src = "pub type Pt = { x: Int, y: Int }\n" ++
     "pub type Box[T] = | One(v: T)\n" ++
     "pub alias Idx = Int\n" ++
     "type Secret = { s: Int }\n" ++
+    "pub const ORIGIN_X: Int = 0\n" ++
     "pub fn mk(x: Int, y: Int) -> Pt = Pt { x: x, y: y }\n"
   let (m, pdiags) = parser.parse_module(src)
   assert len(pdiags) == 0
@@ -9020,6 +9062,28 @@ test "a module-qualified type resolves through the alias (LANG-06)" {
   assert len(pd6) == 0
   let (cx6, _) = check_module(cx_new(Some("use_site"), None), m6, env)
   assert len(cx6.diags) == 0
+  # a qualified constant, beside a local one of the same simple name: the
+  # flat Core identity could not tell them apart (LANG-06 step 3)
+  let src8 = "use geom as g\n" ++
+    "const ORIGIN_X: Int = 7\n" ++
+    "pub fn both() -> Int = ORIGIN_X + g.ORIGIN_X\n"
+  let (m8, pd8) = parser.parse_module(src8)
+  assert len(pd8) == 0
+  let (cx8, tm8) = check_module(cx_new(Some("use_site"), None), m8, env)
+  assert len(cx8.diags) == 0
+  # the qualified reference carries the declaring module, the local one does not
+  var owners: List[String] = []
+  for f in tm8.fns {
+    if f.name == "both" { owners = const_owners(f.body, owners) }
+  }
+  assert owners == ["", "geom"]
+  # a constant the module does not export is not reachable through the alias
+  let src9 = "use geom as g\n" ++
+    "pub fn f() -> Int = g.NOPE\n"
+  let (m9, _) = parser.parse_module(src9)
+  let (cx9, _) = check_module(cx_new(Some("use_site"), None), m9, env)
+  assert len(cx9.diags) > 0
+
   # an unexported constructor in a pattern names the module
   let src7 = "use geom as g\n" ++
     "pub fn f(b: g.Box[Int]) -> Int =\n" ++

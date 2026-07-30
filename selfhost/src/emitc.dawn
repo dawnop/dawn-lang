@@ -495,13 +495,16 @@ pub fn emit_expr(st: CSt, e: CExpr) -> (CSt, String) =
       let (st1, d) = emit_expr(st, dv)
       (st1, "(((dawn_dict*)(" ++ d ++ "))->args[" ++ to_string(idx) ++ "])")
     }
-    CConstRef(name, ty) ->
-      match map.get(st.consts, name) {
+    CConstRef(owner, name, ty) -> {
+      # same key rule as the JVM emitter: "" means this module's own view
+      let key = if owner == "" { name } else { owner ++ "." ++ name }
+      match map.get(st.consts, key) {
         # a folded string is storable like any literal, so it gets the static
         Some(VStr(x)) -> emit_str_static(st, x)
-        Some(v) -> (st, const_literal(v, ty, "const `" ++ name ++ "`"))
-        None -> panic("emitc: no comptime value for const `" ++ name ++ "`")
+        Some(v) -> (st, const_literal(v, ty, "const `" ++ key ++ "`"))
+        None -> panic("emitc: no comptime value for const `" ++ key ++ "`")
       }
+    }
     CComptime(lo, hi, ty) ->
       match map.get(st.blocks, (lo, hi)) {
         Some(VStr(x)) -> emit_str_static(st, x)

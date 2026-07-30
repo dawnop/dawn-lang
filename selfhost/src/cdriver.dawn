@@ -96,6 +96,27 @@ pub fn merged_consts(
       }
     }
   }
+  # qualified constants (`m.MAX`, LANG-06 step 3) are filed under
+  # `<declaring module>.<NAME>` -- the key CConstRef asks for when its owner is
+  # not empty. A separate key rather than merging by simple name, because the
+  # referring module may declare a `MAX` of its own and both must survive.
+  for al in map.keys(cx.module_exports) {
+    match map.get(cx.module_exports, al) {
+      None -> ()
+      Some(exp) ->
+        match map.get(by_mod, exp.mod_path) {
+          None -> ()
+          Some(vals) -> {
+            for nm in map.keys(exp.consts) {
+              match map.get(vals, nm) {
+                Some(v) -> { out = map.insert(out, exp.mod_path ++ "." ++ nm, v) }
+                None -> ()
+              }
+            }
+          }
+        }
+    }
+  }
   out
 }
 

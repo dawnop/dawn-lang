@@ -1059,10 +1059,15 @@ fn ceval(icx: ICx, st0: ESt, env0: Env, e: CExpr) -> ER !io = {
         None -> Ok((st1, env1, VUnit))
       }
     }
-    CConstRef(name, _) ->
+    CConstRef(owner, name, _) ->
+      # `consts` is the folding module's view: its own constants plus the ones
+      # it imported, keyed by simple name. A qualified reference names another
+      # module, and comptime cannot see into a module it did not import, so a
+      # miss here is the honest answer rather than a lookup by owner.
       match map.get(icx.consts, name) {
         Some(v) -> Ok((st, env, v))
-        None -> cerr(st, env, "const `" ++ name ++ "` failed to evaluate")
+        None ->
+          cerr(st, env, "const `" ++ owner ++ "." ++ name ++ "` failed to evaluate")
       }
     # a comptime block nested in what is being folded: the driver folded it
     # first, exactly as codegen would have
