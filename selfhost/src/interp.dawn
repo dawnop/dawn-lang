@@ -38,7 +38,7 @@ use tast.{
   TSLet, TSLetPat, TSLocalFn, TSAssign, TSExpr, TSAssert, TSWhile, TSFor
 }
 use types.{
-  Ty, Sym, Sig, Traits, ImplI, Impls, Adts, adt_of, OPTION_ID,
+  Ty, Sym, Sig, Traits, ImplI, Impls, Adts, adt_of, intrinsics, OPTION_ID,
   TyList, TyMap, TySet, TyArray, TyTuple
 }
 use core.{
@@ -599,9 +599,113 @@ fn call_named(
 }
 
 # ---- intrinsics (the pure ones; io never reaches the interpreter) ----
+#
+# This chain is the third dispatcher over intrinsic names, and until
+# 2026-07-30 it was the only one that answered out of its own head: emit and
+# emitc both look the name up in `types.intrinsics()`, so a primitive added
+# there reaches them, while one added here reached nothing and no test said so.
+# Both directions had drifted -- three arms below had no producer left, and
+# `str_of_bytes` had to be added by hand when RP-02 introduced it (audit RP-12).
+#
+# The two lists below close that. Together they partition
+# `types.intrinsics()` + `lower.internal_intrinsics()`: every intrinsic in the
+# program is either interpreted here or deliberately refused, the gate test at
+# the bottom of this file checks the partition is total and disjoint, and it
+# probes each name to check the lists say what the chain does.
+
+## Every name the chain below has an arm for -- 41 of them, 10 emitted by
+## lowering and 31 writable by a user.
+##
+## Consulted *before* the chain rather than alongside it, so this is a gate and
+## not a second copy: a name missing from here can never reach an arm, which
+## makes an undeclared arm dead by construction instead of invisible. Omitting
+## a name that should be here is caught rather than silent -- if the name is an
+## intrinsic the partition check goes red, and if it is not, the arm was
+## already unreachable from lowering.
+fn interp_arms() -> List[String] = [
+  # lowering's own intrinsics (lower.internal_intrinsics()); `cmp`, `hash` and
+  # `java_hash` are the three it emits that are refused instead, below
+  "java_eq", "show", "quote", "str_of_int", "str_of_float", "str_of_bool",
+  "str_of_bytes", "list_index", "list_slice", "null_ref",
+  # user builtins
+  "panic", "todo", "expect", "unwrap_or", "to_float", "to_int", "to_string",
+  "len", "get", "range", "sort_by", "join",
+  "cursor_start", "cursor_end", "cursor_done", "cursor_char", "cursor_next",
+  "cursor_prev", "cursor_slice",
+  "code_points", "from_code_points",
+  "char_is_letter", "char_is_digit", "char_is_alnum", "char_is_upper",
+  "char_is_lower", "char_is_space",
+  "str_lower", "str_upper", "parse_int", "parse_float"
+]
+
+## Every intrinsic a comptime run refuses, and why it is a group rather than an
+## oversight.
+##
+## Read it as the real answer to "what can a `const` do". Spec §7.2.2 answers
+## in prose, and the prose is short by an order of magnitude: it names Map and
+## Set, which is 17 of the 59 names below (audit RP-11). The list is measured
+## here -- the gate test calls each one and checks it really is refused -- and
+## rewriting the spec against it is a separate job.
+fn comptime_rejects() -> List[String] = {
+  # `cmp`/`hash` are the prelude relation collapsed at a scalar and `java_hash`
+  # is the host's; a const that needs an ordering says so as a trait call,
+  # which comptime refuses one level up
+  var out = ["cmp", "hash", "java_hash"]
+  # `CValue` has no `VBytes`: comptime cannot hold a Bytes at all, so the six
+  # byte primitives have nothing to operate on
+  for op in ["utf8", "decode", "len", "at", "slice", "from_array"] {
+    out = out ++ ["bytes_" ++ op]
+  }
+  # io is the point: a compile must not read files or spawn processes because
+  # a source file said so. `args` is the same rule at the process boundary,
+  # and `catch_fault`/`catch_panic` take an `!io` thunk they would have to run.
+  for op in ["print", "println", "eprint", "eprintln", "read_line", "is_dir", "read_file",
+    "write_file", "exit", "exists", "mkdirs", "cwd", "getenv", "read_bytes", "write_bytes",
+    "delete", "rename", "temp_dir", "is_symlink", "read_stdin", "list_names", "run"] {
+    out = out ++ ["io_" ++ op]
+  }
+  out = out ++ ["args", "catch_fault", "catch_panic"]
+  # `cast` unerases a host object, and comptime never has one
+  out = out ++ ["cast"]
+  # Map/Set/Array: `CValue` has no representation for any of the three, so
+  # `const M = map.from([...])` does not fold. This is the group spec §7.2.2
+  # names, and it is the smaller half of what is actually refused.
+  for op in ["empty", "from", "insert", "remove", "get", "has", "size", "keys", "values",
+    "entries"] {
+    out = out ++ ["map_" ++ op]
+  }
+  for op in ["empty", "from", "insert", "remove", "has", "size", "to_list"] {
+    out = out ++ ["set_" ++ op]
+  }
+  for op in ["new", "len", "get", "push", "with"] { out = out ++ ["array_" ++ op] }
+  # a bitmap operation on the array representation, so it is refused with it
+  out = out ++ ["popcount"]
+  # no arm, and no reason beyond that: `parse_int` folds and this one does not.
+  # Left refused rather than quietly added, because a new arm is a new answer
+  # the two backends then have to agree with.
+  out = out ++ ["parse_int_radix"]
+  out
+}
+
+fn has_name(xs: List[String], n: String) -> Bool = {
+  for x in xs {
+    if x == n { return true }
+  }
+  false
+}
+
+## The refusal a name with no arm gets. One function because the gate test
+## recognises the refusal by its text, and a message that drifted from the
+## test would make every probe read as "interpreted".
+fn no_arm_msg(name: String) -> String =
+  "builtin `" ++ name ++ "` is not available at comptime"
+
+const NO_ARM_LISTED: String = "listed in interp_arms but has no arm: "
 
 fn call_builtin(icx: ICx, st: ESt, env: Env, name: String, args: List[CValue]) -> ER !io =
-  if name == "java_eq" {
+  if not has_name(interp_arms(), name) {
+    cerr(st, env, no_arm_msg(name))
+  } else if name == "java_eq" {
     # equality of a host value (semantics-closure-design.md 3). Comptime never
     # reaches a real Java object -- `use java` is not foldable -- so this is
     # the interpreter's own value equality, kept so the arm is not a hole.
@@ -679,8 +783,6 @@ fn call_builtin(icx: ICx, st: ESt, env: Env, name: String, args: List[CValue]) -
     let from = as_int(args[1])
     let to = as_int(args[2])
     Ok((st, env, VList(list.take(list.drop(xs, from), to - from))))
-  } else if name == "map_index" {
-    cerr(st, env, "`[]` in comptime indexes List only")
     # the placeholder a match or if result slot is declared with; every path
     # assigns before reading, so its value is never observed
   } else if name == "null_ref" {
@@ -699,26 +801,10 @@ fn call_builtin(icx: ICx, st: ESt, env: Env, name: String, args: List[CValue]) -
   } else if name == "sort_by" {
     let (st1, sorted) = merge_sort(icx, st, env, as_list(args[0]), args[1])?
     Ok((st1, env, VList(sorted)))
-  } else if name == "chars" {
-    let s = as_str(args[0])
-    let (st1, _, _) = burn_n(st, env, str.len(s))?
-    var out: List[CValue] = []
-    for c in str.chars(s) { out = out ++ [VStr(c)] }
-    Ok((st1, env, VList(out)))
   } else if name == "join" {
     var parts: List[String] = []
     for x in as_list(args[0]) { parts = parts ++ [as_str(x)] }
     Ok((st, env, VStr(join(parts, as_str(args[1])))))
-  } else if name == "split" {
-    let s = as_str(args[0])
-    let sep = as_str(args[1])
-    if sep == "" {
-      call_builtin(icx, st, env, "chars", [args[0]])
-    } else {
-      var out: List[CValue] = []
-      for part in str.split(s, sep) { out = out ++ [VStr(part)] }
-      Ok((st, env, VList(out)))
-    }
     # ---- the cursor family ----
     #
     # A position is opaque, so nothing outside std/cursor can see the number
@@ -812,7 +898,9 @@ fn call_builtin(icx: ICx, st: ESt, env: Env, name: String, args: List[CValue]) -
       None -> Ok((st, env, none_v()))
     }
   } else {
-    cerr(st, env, "builtin `" ++ name ++ "` is not available at comptime")
+    # unreachable while the gate test is green: the guard at the top let this
+    # name through, so `interp_arms()` claims an arm the chain does not have
+    panic(NO_ARM_LISTED ++ name)
   }
 
 ## Stable merge sort with the interpreted comparator (Kotlin sortedWith).
@@ -1652,6 +1740,111 @@ pub fn eval_comptime(
 }
 
 # ---- tests ----
+
+# ---- the intrinsic gate (audit RP-12) ----
+
+## An interpreter context with nothing in it, for asking `call_builtin` a
+## question. The prelude tables come from the checker because two arms read
+## `icx.adts` to find `Option`; everything else an arm could reach is empty,
+## and no probe gets far enough to look.
+fn probe_icx() -> ICx = {
+  let cx = cx_new(None, None)
+  let no_fns: Map[String, TFun] = map.empty()
+  let no_owner: Map[String, Map[String, TFun]] = map.empty()
+  let no_owner_of: Map[String, String] = map.empty()
+  let no_consts: Map[String, CValue] = map.empty()
+  let no_blocks: Map[(Int, Int), CValue] = map.empty()
+  let no_syms: Map[Int, Sym] = map.empty()
+  ICx {
+    fns: no_fns,
+    by_owner: no_owner,
+    owner_of: no_owner_of,
+    std_names: set.empty(),
+    adts: cx.adts,
+    consts: no_consts,
+    blocks: no_blocks,
+    owner: "probe",
+    traits: cx.traits,
+    impls: cx.impl_table,
+    impl_fns: no_impls(),
+    syms: no_syms,
+    ffi: false,
+    jcall: jcall_refused
+  }
+}
+
+## What `call_builtin` really does with `name`, asked by calling it:
+## `"arm"`, `"refused"`, or `"listed-no-arm"`.
+##
+## No arguments are passed, and that is the whole trick. Every arm that reads
+## one panics on the empty list, and a panic is exactly the evidence wanted --
+## control reached an arm. So no arm has to be handed a plausible argument, and
+## an arm added later needs nothing here to be seen. The two non-arm outcomes
+## have texts of their own (`no_arm_msg`, `NO_ARM_LISTED`), which is why both
+## are written once and read from here.
+fn probe_builtin(icx: ICx, name: String) -> String !io = {
+  let env: Env = map.empty()
+  let no_args: List[CValue] = []
+  match catch_panic(fn() => call_builtin(icx, fresh_st(1000), env, name, no_args)) {
+    Err(msg) -> if str.contains(msg, NO_ARM_LISTED) { "listed-no-arm" } else { "arm" }
+    Ok(r) ->
+      match r {
+        Ok(_) -> "arm"
+        Err(t) -> {
+          let (_, _, ctl) = t
+          match ctl {
+            KErr(d) ->
+              if d.msg == "comptime: " ++ no_arm_msg(name) { "refused" } else { "arm" }
+            _ -> "arm"
+          }
+        }
+      }
+  }
+}
+
+test "the comptime interpreter covers every intrinsic, or refuses it by name" {
+  let arms = interp_arms()
+  let rejects = comptime_rejects()
+  # the two tables that between them name every intrinsic in the program:
+  # what a user may write, and what lowering emits on top of that
+  let user = map.keys(intrinsics())
+  let internal = lower.internal_intrinsics()
+  let icx = probe_icx()
+
+  # 1. the lists partition the tables. This is the check that makes a new
+  #    primitive impossible to forget: added to `types.intrinsics()` and to
+  #    neither list here, it lands in no group and this fails.
+  for n in user ++ internal {
+    let a = has_name(arms, n)
+    let r = has_name(rejects, n)
+    assert a || r
+    assert not (a && r)
+  }
+
+  # 2. nothing on either list is outside the tables. This is the direction
+  #    that had rotted: `map_index`, `chars` and `split` had arms here long
+  #    after their producers went away (`m[k]` became a `std/hamt.index` call,
+  #    the other two moved into std/str), and nothing said so.
+  for n in arms ++ rejects {
+    assert has_name(user, n) || has_name(internal, n)
+  }
+
+  # 3. the lists say what the chain does. Without this the lists would be a
+  #    second copy of the chain, free to drift from it the way the chain drifted
+  #    from `types.intrinsics()`.
+  for n in arms { assert probe_builtin(icx, n) == "arm" }
+  for n in rejects { assert probe_builtin(icx, n) == "refused" }
+  # and a name that is no intrinsic at all gets the same refusal, which is
+  # what the probe reads as "no arm"
+  assert probe_builtin(icx, "no_such_primitive") == "refused"
+
+  # 4. the sizes the comments above quote. A count written in prose is what
+  #    went wrong in the list this gate replaces -- lowering's own said
+  #    "thirteen more" and "all twelve" in the same paragraph -- so the two
+  #    numbers this file states are asserted rather than asserted-by-nobody.
+  assert len(arms) == 41
+  assert len(rejects) == 59
+}
 
 test "consts evaluate in declaration order and fold across references" {
   let src = "const A: Int = 1 + 2\n" ++

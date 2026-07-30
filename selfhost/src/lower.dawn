@@ -505,34 +505,52 @@ fn lit_eq(subj: CExpr, v: LitV, t: Ty) -> CExpr =
   }
 
 # ---- the intrinsics lowering emits that no user ever writes ----
-#
-# `types.intrinsics()` declares the 73 an ordinary program can name. Lowering
-# emits thirteen more, and they are a different contract: a user builtin may be
-# missing from a backend (emitc has no collections yet, honestly), but every
-# one of these is something Core hands over on a path that has no alternative,
-# so a backend that does not implement it is broken rather than incomplete.
-#
-#   cmp hash            the prelude relation at a scalar, after `prim_relation`
-#                       collapses it -- these two are why `cmp(3, 9)` stopped
-#                       looking for a trait default that does not exist
-#   java_eq java_hash   equality and hash of a value that came from the host,
-#                       the two Dawn does not define. `java_eq` was
-#                       `struct_eq`, a runtime structural walk for anything
-#                       lowering could not spell out; the checker refuses
-#                       those now, so nothing but a foreign object reaches
-#                       either and a backend with no Java owes nothing here
-#   show quote          rendering an erased value, and a nested String
-#   str_of_int/float/bool
-#                       the scalar renderings `to_str` settles without a witness
-#   list_index map_index list_slice
-#                       `xs[i]`, `m[k]` and a list pattern's `..rest`
-#   null_ref            the zero of a reference type, for an uninitialised slot
-#
-# They are listed here, at the one place that emits them, because nothing else
-# knows they exist: measured 2026-07-26, all twelve were absent from every
-# table in the compiler. Making them an ADT so a backend cannot forget one is
-# the other half of S1.1; see the task for why that half is not obviously
-# worth its churn yet.
+
+## The intrinsic names Core carries that `types.intrinsics()` does not declare.
+##
+## A different contract from the user builtins: one of those may be missing
+## from a backend (emitc has no collections yet, honestly), but every name here
+## is something lowering hands over on a path that has no alternative, so a
+## backend that does not implement one is broken rather than incomplete.
+##
+## This was a comment until 2026-07-30, and a comment cannot be checked: it
+## still listed `map_index`, which stopped being emitted when `m[k]` became a
+## call on `std/hamt.index`, and it counted the entries twice with two
+## different answers ("thirteen more", "all twelve"). It is a list now because
+## the comptime gate in interp.dawn reads it -- an intrinsic in neither this
+## list nor `types.intrinsics()` is a name no dispatcher should have an arm
+## for, which is how the three dead arms were found (audit RC-09).
+##
+##   cmp hash            the prelude relation at a scalar, after `prim_relation`
+##                       collapses it -- these two are why `cmp(3, 9)` stopped
+##                       looking for a trait default that does not exist
+##   java_eq java_hash   equality and hash of a value that came from the host,
+##                       the two Dawn does not define. `java_eq` was
+##                       `struct_eq`, a runtime structural walk for anything
+##                       lowering could not spell out; the checker refuses
+##                       those now, so nothing but a foreign object reaches
+##                       either and a backend with no Java owes nothing here
+##   show quote          rendering an erased value, and a nested String
+##   str_of_int/float/bool/bytes
+##                       the scalar renderings `to_str` settles without a
+##                       witness; `str_of_bytes` joined them when the erased
+##                       `show` stopped having to guess at a Bytes (audit RP-02)
+##   list_index list_slice
+##                       `xs[i]` and a list pattern's `..rest`
+##   null_ref            the zero of a reference type, for an uninitialised slot
+##
+## Not an ADT, though the comment this replaces proposed one. Measured before
+## deciding: `CIntrinsic` carries a `String` because it also carries the 87
+## user builtin names, so an ADT for these thirteen either splits the node in
+## two or swallows all 100, and the `name == "..."` comparisons that would have
+## to be rewritten are 44 in interp, 28 in emit and 24 in emitc. A list the
+## gate reads buys the property the ADT was wanted for -- a backend cannot
+## forget one silently -- for thirteen lines instead of that.
+pub fn internal_intrinsics() -> List[String] = [
+  "cmp", "hash", "java_eq", "java_hash", "show", "quote",
+  "str_of_int", "str_of_float", "str_of_bool", "str_of_bytes",
+  "list_index", "list_slice", "null_ref"
+]
 
 # ---- trait witnesses ----
 
