@@ -3,9 +3,10 @@
 > 动码前的**调研与方案**，不是设计定稿。
 > 覆盖 codebase-audit.md 的 **ERR-02（P1）**、**ERR-03（P1）**、**LANG-02（P1）**。
 >
-> 状态：**A 步分期落地中——阶段 1 已合并（`ForeignError` + `catch_fault_e`/
-> `catch_panic_e` 两个过渡内建，两后端都发射，selfhost 自身调用点未动）；
-> 阶段 2、3 等种子推进。B 步 proposed 且可做；C2 步冻结。**
+> 状态：**A 步分期落地中——阶段 1（`ForeignError` + `catch_fault_e`/`catch_panic_e`
+> 两个过渡内建，两后端都发射）与阶段 2（全部调用点迁到 `_e`；`catch_fault`/
+> `catch_panic` 的表项换成 `Result[T, ForeignError]`；`std/io` 走 (ii)）都已合并；
+> 阶段 3 等种子推进。B 步 proposed 且可做；C2 步冻结。**
 > 分期理由与每期内容见下方 §六「落地分期」——**那一节是现状，第二节是意图**，
 > 两者冲突时以第六节为准。第二、五节里几处与代码对不上的说法，第六节开头逐条记了。
 > [`../native-backend-plan.md`](../native-backend-plan.md) §1 定了 native 的 panic 是
@@ -206,7 +207,8 @@ pub fn bracket[A, B](
 - **给 `ForeignError` 加 `Show` 之外的渲染**。`derive Show` 够用；
   服务端要什么格式是服务端的事。
 - **保留 `Result[T, String]` 版本作为便利函数**。留着它，所有旧代码就都不会迁移，
-  两种错误类型会永久共存——那是这次改动想消灭的东西。
+  两种错误类型会永久共存——那是这次改动想消灭的东西。（阶段 2 兑现：`catch_fault`/
+  `catch_panic` 的 String 载荷已不存在，`std/io` 也没在门口降级。）
 - **给 `ForeignError` 的 `kind` 定义一套跨后端的规范化取值**（比如把
   `java.io.IOException` 和 libc 的 `EIO` 映射到同一个 `io_error`）。
   听起来可移植，实际是在**猜**两套错误分类的对应关系，而猜错的地方
@@ -285,7 +287,7 @@ selfhost 自己的源要**同时**过两张 intrinsic 表：种子那张（用�
 | 期 | 落什么 | 边界 |
 |---|---|---|
 | **1**（已合并） | `ForeignError` prelude 类型 + `catch_fault_e`/`catch_panic_e` 两个新内建，两后端都发射；测试与语料。**调用点一个不动。** | 之后发 tag，`seed-release.txt` 推进 |
-| **2** | 全部调用点迁到 `_e`；`std/error.dawn` 此期才能建；**同一提交**里把 `catch_fault`/`catch_panic` 的表项改成 `Result[T, ForeignError]`（此时它们零调用点，改了不影响任何源） | 再发 tag + 种子推进 |
+| **2**（已合并） | 全部调用点迁到 `_e`；`std/io` 走 §6.5 的 (ii)；**同一提交**里把 `catch_fault`/`catch_panic` 的表项改成 `Result[T, ForeignError]`（此时它们零调用点，改了不影响任何源）。`std/error.dawn` **没建**，见 §6.7 | 再发 tag + 种子推进 |
 | **3** | 调用点从 `_e` 换回 `catch_fault`/`catch_panic`；删掉 `_e` 的表项、JVM 的两次
 `gen_try_closure_e` 调用、C 的两个符号 | 终局 |
 
@@ -332,20 +334,56 @@ selfhost 自己的源要**同时**过两张 intrinsic 表：种子那张（用�
 阶段 1 之后 `foreign_error.dawn` 又多两处旧写法，那是**故意**的：它把同一个 thunk
 同时喂给两对屏障，断言两边的裁决逐字一致；阶段 3 随 `_e` 一起清掉。
 
-### 6.5 要主线裁决的两件事
+### 6.5 主线裁决（已定）
 
 1. **`std/io` 的公开错误类型**（阶段 2 的规模由它决定）。`io.read_file` 那 9 个函数
-   今天返回 `Result[T, String]`，`Err` 里装的就是 `catch_fault` 的载荷。两条路：
+   到 v0.32.0 为止返回 `Result[T, String]`，`Err` 里装的就是 `catch_fault` 的载荷。
+   两条路：
    - **(i) std/io 在边界上降级**：`e.message` 转回 String，公开签名不变。改动最小，
      代价是把这次想消灭的东西留在 std 的门口——所有人拿到的仍然是一段文本。
    - **(ii) std/io 也返回 `Result[T, ForeignError]`**：直接调用点 72 处，加上所有用 `?`
      把它往上传的函数（它们的错误类型跟着变），会溢出到 `dawnop-site`。
-     推荐 (ii)——第一节 1.1 的临床表现正是「跨层接口依赖消息文本」，止在 std 门口
-     等于没治——但它得先定，因为阶段 2 的大小两条路差一个量级。
-2. **`_e` 这个拼法**。它只活两期，但会出现在一个 release 的 `dawn doc --builtins` 里。
-   要换成别的过渡名（`catch_fault2`、`try_fault`……），现在换成本最低。
 
-### 6.6 路过看见的一处旧账（不在本步范围）
+   **裁决：(ii)**，阶段 2 已照此落地。第一节 1.1 的临床表现正是「跨层接口依赖消息
+   文本」，止在 std 门口等于没治。`dawnop-site` 的外溢在它下一次升 `.dawn-version`
+   时处理，不在本仓范围内。
+2. **`_e` 这个拼法**。留着不换：它只活两期，v0.32.0 那一版的 `dawn doc --builtins`
+   里已经有了，再换一次名字等于让同一件事在两个 release 的公开清单里各留一道疤。
+
+### 6.6 阶段 2 落下来的样子
+
+- **调用点 45 个**，一个不剩地迁到 `_e`：std/io 9、selfhost 14（vendor 3、main 3、
+  jreflect 3、interp 3、maven 1、jarw 1）、`packages/web` 6、playground 3、语料 13。
+  `scripts/spike-native/foreign_error.dawn` 里那两处旧写法**留着**——它把同一个
+  thunk 同时喂给两对屏障、断言裁决逐字一致，而它只用 `Err(_)`，是唯一在两张表下
+  都成立的调用点写法（§6.2），也正是那两个表项能被翻的原因。
+- **`std/io` 的 9 个签名换成 `Result[T, ForeignError]`**，直接调用点 76 处随之改：
+  绝大多数是 `"... : " ++ e` 变成 `++ e.message`。三处需要判断：
+  - `stdlib.std_read` 的错误类型**留 String**——`load_std` 的 `Err` 是编译器自己
+    造的句子（「bundled std module 不 parse」），不是外部失败；边界上取 `.message`。
+  - `analyze.read_over` 的错误类型跟着 std/io 变——它只是转发，两个调用点都丢载荷。
+  - `jreflect.invoke_static` 保留 `Result[_, String]`，并且是**全仓唯一**把 `kind`
+    印进文本的地方（本地 helper `rendered`，等价于 `Throwable.toString()`）：那句
+    诊断是「`Math.abs` threw java.lang.ArithmeticException」，异常类名就是答案，
+    而这个模块本身就是 JVM 反射路线，不存在第二个后端。
+- **`kind` 在文本里的通则**：别的地方一律只取 `.message`。`kind` 是后端自己的名字，
+  印它会让同一段 CLI 输出在两个后端上不一样——这正是 `foreign_error.dawn` 从不打印
+  `kind` 的理由。
+- **`std/io.list_dir` 的非目录分支**是 std 自己造的 `ForeignError`，`kind` 定为
+  `"io.not_a_directory"`——全 std 唯一一个不是后端给的 kind。
+- Emit-Change 两处：`doc --builtins`（两个屏障的签名，外加两条 `_e` 的说明文字）与
+  `lsp`（补全项的 `detail` 就是签名）。Core golden 只有 `std.io.core` 变，另有 5 个
+  模块是 ADT id 漂移（脚本自己会说「no instruction differs」），已 `--record`。
+
+### 6.7 `std/error.dawn` 没有建
+
+§6.1 第 5 条的怀疑成立：`ForeignError` 是 record，`e.message` 是一次字段读，
+`message()` 那个助手没有存在的理由。阶段 2 全程只出现过一个渲染需求
+（`jreflect` 那句 `threw ...`），而它要的恰恰是**不可移植**的那一半——`kind`——
+所以它是个模块内的私有函数，不是 std 的公开 API。std 里凭空多一个模块，
+代价是一个永久的公开命名空间和一条种子纪律，收益是省掉一个点号。
+
+### 6.8 路过看见的一处旧账（不在本步范围）
 
 `SHOW_ID = 3`，而 `checker.cx_new` 的 `next_id` 也从 3 起，旁边的注释只列到
 Ord/Eq/Hash——Show 是后加的，注释没跟。ADT 那半边没问题（prelude 占 0/1/2，

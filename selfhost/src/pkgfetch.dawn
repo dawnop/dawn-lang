@@ -37,7 +37,7 @@ fn zero_byte() -> Bytes = bytes.utf8(str.from_char(0))
 fn read_bytes(path: String) -> Result[Bytes, String] !io =
   match io.read_bytes(path) {
     Ok(b) -> Ok(b)
-    Err(e) -> Err("cannot read " ++ path ++ ": " ++ e)
+    Err(e) -> Err("cannot read " ++ path ++ ": " ++ e.message)
   }
 
 ## Regular files under `root`, sorted by relative path; symlinks are refused
@@ -65,7 +65,7 @@ fn collect_files(root: String, rel: String) -> Result[List[String], String] !io 
       }
       Ok(out)
     }
-    Err(e) -> Err("cannot list " ++ dir ++ ": " ++ e)
+    Err(e) -> Err("cannot list " ++ dir ++ ": " ++ e.message)
   }
 }
 
@@ -128,7 +128,7 @@ fn too_big(what: String, n: Int, limit: Int) -> String =
 fn http_get(url: String) -> Result[Bytes, String] !io = {
   let work = match io.temp_dir("", "dawn-fetch-") {
     Ok(d) -> d
-    Err(e) -> return Err("cannot create a temp directory: " ++ e)
+    Err(e) -> return Err("cannot create a temp directory: " ++ e.message)
   }
   let body = work ++ "/body"
   let diag = work ++ "/stderr"
@@ -160,7 +160,7 @@ fn http_get(url: String) -> Result[Bytes, String] !io = {
           "\n  check the network (https_proxy is honored) or pre-seed the cache")
     }
     Err(e) ->
-      Err("cannot fetch " ++ url ++ ": " ++ e ++
+      Err("cannot fetch " ++ url ++ ": " ++ e.message ++
           "\n  fetching a remote package needs `curl` on PATH")
   }
   let _ = io.delete(body)
@@ -198,7 +198,7 @@ fn write_file_bytes(path: String, bs: Bytes) -> Result[Unit, String] !io = {
   }
   match io.write_bytes(path, bs) {
     Ok(_) -> Ok(())
-    Err(e) -> Err("cannot write " ++ path ++ ": " ++ e)
+    Err(e) -> Err("cannot write " ++ path ++ ": " ++ e.message)
   }
 }
 
@@ -438,7 +438,7 @@ pub fn fetch_and_hash(url: String) -> Result[(String, String), String] !io = {
   # filesystem and is therefore atomic
   let work = match io.temp_dir(cache_root(), "fetch-") {
     Ok(d) -> d
-    Err(e) -> return Err("cannot create a temp directory under " ++ cache_root() ++ ": " ++ e)
+    Err(e) -> return Err("cannot create a temp directory under " ++ cache_root() ++ ": " ++ e.message)
   }
   let result = fetch_into(url, work)
   delete_tree(work)
@@ -465,7 +465,7 @@ fn fetch_into(url: String, work: String) -> Result[(String, String), String] !io
     let moved = io.rename(root, target)
     match moved {
       Ok(_) -> ()
-      Err(e) -> { if not io.is_dir(target) { return Err("cannot move into the cache: " ++ e) } }
+      Err(e) -> { if not io.is_dir(target) { return Err("cannot move into the cache: " ++ e.message) } }
     }
   }
   Ok((target, actual))

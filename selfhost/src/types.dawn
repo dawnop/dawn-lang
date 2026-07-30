@@ -1037,27 +1037,36 @@ pub fn builtins() -> Map[String, Sig] = {
     # v0.30.0, back when the JVM's class hierarchy was the only place the split
     # came from; native has had failure kinds since 2026-07-27
     # (native-backend-plan.md 14.9), and the name outlived the reason.
+    #
+    # The payload is a `ForeignError` as of stage 2 of the error model
+    # (docs/audit/error-model-design.md 六). It used to be the failure rendered
+    # as a String, which left a caller nothing to act on but the text -- the
+    # thing spec 9.8 used to advise matching on and ERR-02 was raised about.
+    # These two entries could only change on a release where nothing called
+    # them, because a builtin's *signature* is under the seed discipline the
+    # same way its name is: the compiler's own sources have to type-check under
+    # the previous release's table and today's at once, and no call site
+    # satisfies `Result[T, String]` and `Result[T, ForeignError]` together
+    # unless it throws the payload away. Hence the detour below.
     eff1(
-      tp1(bsig("catch_fault", [TyFn([], t, EIo)], ["f"], result_ty(t, TyString)), t),
+      tp1(bsig("catch_fault", [TyFn([], t, EIo)], ["f"],
+        result_ty(t, foreign_error_ty())), t),
       EIo
     ),
     tp1(bsig("cast", [TyJava("java.lang.Object", "Object")], ["x"], t), t),
     eff1(
-      tp1(bsig("catch_panic", [TyFn([], t, EIo)], ["f"], result_ty(t, TyString)), t),
+      tp1(bsig("catch_panic", [TyFn([], t, EIo)], ["f"],
+        result_ty(t, foreign_error_ty())), t),
       EIo
     ),
-    # The same two barriers with the payload the error model wants -- a
-    # `ForeignError` rather than a rendered string
-    # (docs/audit/error-model-design.md A). The `_e` suffix is transitional and
-    # says so: these names exist because a builtin's *signature* is under the
-    # seed discipline the same way its name is, and worse -- a rename can be
-    # staged by accepting both spellings of one type, a payload change cannot,
-    # because the compiler's own call sites have to type-check under the
-    # previous release's table and today's at once. So the new shape lands
-    # under a name nothing calls, a release teaches the previous compiler, and
-    # only then do the call sites move. Stage 3 gives these signatures back to
-    # `catch_fault`/`catch_panic` and deletes the `_e` pair; see the design
-    # doc's 落地分期. No String-payload barrier survives that stage.
+    # The same two barriers under transitional names, and now with the same
+    # signatures too. These are what every call site in the repository spells
+    # today, and the only reason they exist: the new payload had to land under
+    # a name nothing called (stage 1), a release taught the previous compiler
+    # both spellings, and only then could the call sites move and the entries
+    # above be flipped (stage 2 -- this commit). Stage 3 moves the call sites
+    # back to the plain names and deletes these two, once a release has taught
+    # the previous compiler that `catch_fault` means this.
     eff1(
       tp1(bsig("catch_fault_e", [TyFn([], t, EIo)], ["f"],
         result_ty(t, foreign_error_ty())), t),
@@ -1070,7 +1079,7 @@ pub fn builtins() -> Map[String, Sig] = {
     ),
     # io_* intrinsics: the console/file primitives std/io writes over. All !io.
     # The JVM backend emits them into dawn/rt/Io. read_file/write_file/list_names
-    # throw on failure; std wraps them in catch_fault. read_line returns Option
+    # throw on failure; std wraps them in a barrier. read_line returns Option
     # directly (the intrinsic maps Java's null-or-line onto it).
     eff1(bsig("io_print", [TyString], ["s"], TyUnit), EIo),
     eff1(bsig("io_println", [TyString], ["s"], TyUnit), EIo),
@@ -1092,7 +1101,7 @@ pub fn builtins() -> Map[String, Sig] = {
     # else needs.
     eff1(bsig("io_exit", [TyInt], ["code"], TyUnit), EIo),
     eff1(bsig("io_exists", [TyString], ["path"], TyBool), EIo),
-    # throws on failure, like read_file/write_file; std wraps it in catch_fault
+    # throws on failure, like read_file/write_file; std wraps it in a barrier
     eff1(bsig("io_mkdirs", [TyString], ["path"], TyUnit), EIo),
     # The rest of what a package manager and a language server need. Measured,
     # not guessed: each one has a call site in the compiler that reaches it
@@ -1466,7 +1475,7 @@ test "builtin table renders signatures" {
   match map.get(bs, "catch_fault") {
     Some(s) -> {
       assert sig_render(adts, traits, s) ==
-        "fn catch_fault[T](f: fn() -> T !io) -> Result[T, String] !io"
+        "fn catch_fault[T](f: fn() -> T !io) -> Result[T, ForeignError] !io"
     }
     None -> { assert false }
   }
@@ -1487,14 +1496,15 @@ test "builtin table renders signatures" {
   assert map_size2(bs) == 89
 }
 
-test "the transitional barriers carry a ForeignError, not a rendered string" {
-  # The pair the error model's step A introduces (design doc 二.A). They are
-  # the same two barriers -- same parameter, same effect -- and differ in one
-  # thing, which is the point of asserting them next to their originals.
+test "no barrier renders its failure into a String any more" {
+  # Stage 2 of the error model (design doc 六): the plain names now carry what
+  # the `_e` pair was introduced to carry, so all four render the same shape.
+  # A String payload surviving anywhere is the regression this asserts against
+  # -- it is what a caller has to parse, and parsing it is ERR-02.
   let adts = prelude_adts()
   let traits = prelude_traits()
   let bs = builtins()
-  for n in ["catch_fault_e", "catch_panic_e"] {
+  for n in ["catch_fault", "catch_panic", "catch_fault_e", "catch_panic_e"] {
     match map.get(bs, n) {
       Some(s) -> {
         assert sig_render(adts, traits, s) ==
@@ -1503,10 +1513,12 @@ test "the transitional barriers carry a ForeignError, not a rendered string" {
       None -> { assert false }
     }
   }
-  # and both reach the io runtime, so a backend implements them where it
-  # implements the originals rather than growing a case in the emitter
-  assert intr_at("catch_fault_e").expect("catch_fault_e").rt == Some(RtIo)
-  assert intr_at("catch_panic_e").expect("catch_panic_e").rt == Some(RtIo)
+  # and all four reach the io runtime, so a backend implements the transitional
+  # pair where it implements the originals rather than growing a case in the
+  # emitter -- which is what makes stage 3 a deletion and not a port
+  for n in ["catch_fault", "catch_panic", "catch_fault_e", "catch_panic_e"] {
+    assert intr_at(n).expect(n).rt == Some(RtIo)
+  }
 }
 
 test "ForeignError is a prelude record whose fields every backend can answer" {

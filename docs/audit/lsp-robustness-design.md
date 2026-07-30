@@ -101,8 +101,8 @@ JSON 的解码是这个包的**产品**，得自己掌握（且要跟 fixture �
 URI 解码是**基础设施**，正确性早有定义、JDK 早有实现。
 `packages/web` 的 WEB-02 修复走的就是这条路（改用 `URLDecoder`），本文一致。
 
-**要注意的**：`java_try` 目前返回 `Result[T, String]`，
-[error-model-design.md](error-model-design.md) 会把它改成 `ForeignError`。
+**要注意的**：`catch_fault`（当时叫 `java_try`）曾返回 `Result[T, String]`，
+[error-model-design.md](error-model-design.md) 已把它改成 `ForeignError`。
 两者不冲突——这里只用了 `Err(_)`，不看内容。
 
 ### 2.2 debounce + generation cancellation（LSP-04 第一步）

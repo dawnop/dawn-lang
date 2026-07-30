@@ -1,15 +1,22 @@
 # The structured failure payload, on both backends.
 #
-# `catch_fault_e`/`catch_panic_e` are `catch_fault`/`catch_panic` with a
-# `ForeignError` where the string was (docs/audit/error-model-design.md A).
-# Two things have to hold and only one of them is portable, which is what this
-# file is arranged around.
+# `catch_fault_e`/`catch_panic_e` are the transitional names of
+# `catch_fault`/`catch_panic` (docs/audit/error-model-design.md 六). Since
+# stage 2 both pairs carry a `ForeignError`; they are still four distinct
+# entries in the intrinsic table and four distinct runtime symbols, which is
+# what this file is about. Two things have to hold and only one of them is
+# portable, which is what it is arranged around.
 #
-# **Portable**: the two barriers still split the same way. A fault stops at the
-# io barrier and a panic walks past it -- the property `catch_kinds.dawn`
-# pins for the string-payload pair, asked again here because a second pair of
-# barriers is a second place for the split to be got wrong, and the day it
-# disagrees is the day the transition ships two error models instead of one.
+# **Portable**: the two pairs split the same way. A fault stops at the io
+# barrier and a panic walks past it -- the property `catch_kinds.dawn` pins for
+# one pair, asked here of the other, because a second pair of barriers is a
+# second place for the split to be got wrong, and the day it disagrees is the
+# day the transition ships two error models instead of one. `barrier_str`
+# below is deliberately the only caller of the plain names left in the tree:
+# it throws the payload away (`Err(_)`), which is the one call-site shape that
+# type-checks under both the previous release's table and today's, and is why
+# the plain names could be flipped in the first place. Stage 3 deletes it
+# along with the `_e` spelling.
 #
 # **Portable**: `kind` is a *name*. The failure mode this guards against is the
 # JVM handler calling `Throwable.toString()`, which renders as
@@ -42,8 +49,8 @@ fn barrier(f: fn() -> Int !io) -> String !io =
     Err(_) -> "through"
   }
 
-## The same question of the string pair, so the two answers can be compared
-## rather than each read on its own.
+## The same question of the plain-named pair, so the two answers can be
+## compared rather than each read on its own.
 fn barrier_str(f: fn() -> Int !io) -> String !io =
   match catch_panic(fn() => match catch_fault(f) {
     Ok(_) -> 0
@@ -55,7 +62,7 @@ fn barrier_str(f: fn() -> Int !io) -> String !io =
   }
 
 fn agree(label: String, f: fn() -> Int !io) -> Unit !io =
-  println(label ++ " " ++ barrier(f) ++ "  same as the string pair: "
+  println(label ++ " " ++ barrier(f) ++ "  same as the plain-named pair: "
       ++ to_string(barrier(f) == barrier_str(f)))
 
 ## The error a failing io primitive hands back through the structured barrier.
@@ -75,7 +82,7 @@ fn is_a_name(s: String) -> Bool =
 fn n(i: Int) -> Int !io = i
 
 pub fn main() -> Unit !io = {
-  println("-- the split is the same as the string pair's --")
+  println("-- the split is the same as the plain-named pair's --")
   agree("no failure    ", fn() => n(7))
   agree("panic         ", fn() => panic("deliberate"))
   agree("read_file     ", fn() => str.len(raw.read_file("/no/such/dawn/path")))

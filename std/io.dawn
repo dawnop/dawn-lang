@@ -13,11 +13,22 @@
 # name that field. Parking argv on a runtime class instead would make it shared
 # by every program in one JVM — see pure-ffi-design.md §十七.
 #
-# The failing ones compose with `catch_fault`, which is an intrinsic and stays in
-# the compiler. That is not a workaround: `Result` is a Dawn ADT and cannot be a
-# Java return type, and `catch_fault` is precisely the built-in bridge from "the
-# outside world said no" to `Err(message)` — on the JVM that is a caught
-# exception's `toString()`, byte for byte the string these intrinsics throw with.
+# The failing ones compose with `catch_fault_e`, which is an intrinsic and stays
+# in the compiler. That is not a workaround: `Result` is a Dawn ADT and cannot be
+# a Java return type, and the barrier is precisely the built-in bridge from "the
+# outside world said no" to an `Err`.
+#
+# That `Err` carries a `ForeignError`, not a String (docs/audit/error-model-design.md
+# 六). A rendered message is a dead end for a caller: the only thing it can do
+# with one is match on its text, which is what spec §9.8 used to advise and what
+# the error model exists to stop. The record hands over `kind` (the backend's own
+# name for the failure class), `message` and `cause` separately, so a caller that
+# wants to *decide* reads `kind` and a caller that wants to *report* reads
+# `message` — neither has to parse. Rendering one back into a line of text is
+# still a `to_string(e)` away for whoever actually wants the line.
+#
+# `catch_fault_e` is the transitional spelling; stage 3 of the migration gives
+# these signatures back to the name `catch_fault`. Nothing here changes then.
 
 ## Print a string followed by a newline.
 pub fn println(s: String) -> Unit !io = io_println(s)
@@ -50,18 +61,18 @@ pub fn exists(path: String) -> Bool !io = io_exists(path)
 
 ## Create `path` and every missing directory above it.
 ## An existing directory is not a failure; an existing *file* is.
-pub fn mkdirs(path: String) -> Result[Unit, String] !io =
-  catch_fault(fn() => io_mkdirs(path))
+pub fn mkdirs(path: String) -> Result[Unit, ForeignError] !io =
+  catch_fault_e(fn() => io_mkdirs(path))
 
 ## Read a whole file as a UTF-8 string.
-pub fn read_file(path: String) -> Result[String, String] !io =
-  catch_fault(fn() => io_read_file(path))
+pub fn read_file(path: String) -> Result[String, ForeignError] !io =
+  catch_fault_e(fn() => io_read_file(path))
 
 ## Write a string to a file, creating missing parent directories.
 ## `Ok` carries nothing: the only count worth returning would be bytes on disk,
 ## and what this used to return was UTF-16 units. Nobody read it.
-pub fn write_file(path: String, content: String) -> Result[Unit, String] !io =
-  catch_fault(fn() => io_write_file(path, content))
+pub fn write_file(path: String, content: String) -> Result[Unit, ForeignError] !io =
+  catch_fault_e(fn() => io_write_file(path, content))
 
 ## The process's working directory, as an absolute path.
 pub fn cwd() -> String !io = io_cwd()
@@ -70,12 +81,12 @@ pub fn cwd() -> String !io = io_cwd()
 pub fn getenv(name: String) -> Option[String] !io = io_getenv(name)
 
 ## Read a whole file as bytes. The text half is `read_file`.
-pub fn read_bytes(path: String) -> Result[Bytes, String] !io =
-  catch_fault(fn() => io_read_bytes(path))
+pub fn read_bytes(path: String) -> Result[Bytes, ForeignError] !io =
+  catch_fault_e(fn() => io_read_bytes(path))
 
 ## Write bytes to a file, creating missing parent directories.
-pub fn write_bytes(path: String, content: Bytes) -> Result[Unit, String] !io =
-  catch_fault(fn() => io_write_bytes(path, content))
+pub fn write_bytes(path: String, content: Bytes) -> Result[Unit, ForeignError] !io =
+  catch_fault_e(fn() => io_write_bytes(path, content))
 
 ## Delete a file, or an empty directory. `true` when there was something to
 ## delete: a missing path is not an error, and a non-empty directory is not
@@ -87,13 +98,13 @@ pub fn delete(path: String) -> Bool !io = io_delete(path)
 ## caller is publishing something it has already verified, and a move that can
 ## be observed half-done would defeat that. Stage with `temp_dir` under the
 ## destination's own directory to stay on one filesystem.
-pub fn rename(src: String, dst: String) -> Result[Unit, String] !io =
-  catch_fault(fn() => io_rename(src, dst))
+pub fn rename(src: String, dst: String) -> Result[Unit, ForeignError] !io =
+  catch_fault_e(fn() => io_rename(src, dst))
 
 ## A fresh directory under `parent`, named after `prefix`. An empty `parent`
 ## means the system temporary directory.
-pub fn temp_dir(parent: String, prefix: String) -> Result[String, String] !io =
-  catch_fault(fn() => io_temp_dir(parent, prefix))
+pub fn temp_dir(parent: String, prefix: String) -> Result[String, ForeignError] !io =
+  catch_fault_e(fn() => io_temp_dir(parent, prefix))
 
 ## Whether `path` is a symbolic link. The link itself is examined, not its
 ## target, so a link to a directory is a link and not a directory.
@@ -111,11 +122,21 @@ pub fn read_stdin(n: Int) -> Bytes !io = io_read_stdin(n)
 ## A non-directory is reported as an `Err`, not a panic, and — matching the old
 ## behaviour — is checked before anything is read, so a missing path and a plain
 ## file give the same message.
-pub fn list_dir(path: String) -> Result[List[String], String] !io =
+##
+## Its `kind` is `"io.not_a_directory"`, the one failure kind std mints itself:
+## every other one in this module is whatever the backend called it, and this
+## failure never reaches a backend, because the check happens first. It is
+## spelled as a name rather than a sentence for the same reason every other
+## `kind` is — a caller may match on it.
+pub fn list_dir(path: String) -> Result[List[String], ForeignError] !io =
   if is_dir(path) {
-    catch_fault(fn() => io_list_names(path))
+    catch_fault_e(fn() => io_list_names(path))
   } else {
-    Err("not a directory: " ++ path)
+    Err(ForeignError {
+      kind: "io.not_a_directory",
+      message: "not a directory: " ++ path,
+      cause: None
+    })
   }
 
 ## Run `argv[0]` (found on PATH) with `argv` as its arguments, wait for it, and
@@ -125,5 +146,5 @@ pub fn list_dir(path: String) -> Result[List[String], String] !io =
 ## Each stream goes to the file named by its path, truncating it, and an empty
 ## path leaves that stream pointing wherever this process's already points.
 ## Files rather than pipes: see the note on the `io_run` intrinsic.
-pub fn run(argv: List[String], out_path: String, err_path: String) -> Result[Int, String] !io =
-  catch_fault(fn() => io_run(argv, out_path, err_path))
+pub fn run(argv: List[String], out_path: String, err_path: String) -> Result[Int, ForeignError] !io =
+  catch_fault_e(fn() => io_run(argv, out_path, err_path))

@@ -42,7 +42,7 @@ pub fn jsig_real() -> Jsig =
 fn sys_loader() -> ClassLoader !io = ClassLoader.getSystemClassLoader().expect("system loader")
 
 fn try_forname(name: String) -> Option[Class] !io =
-  match catch_fault(fn() => Class.forName(name, false, sys_loader()).expect("forName")) {
+  match catch_fault_e(fn() => Class.forName(name, false, sys_loader()).expect("forName")) {
     Ok(c) -> Some(c)
     Err(e) -> None
   }
@@ -318,6 +318,19 @@ test "array classes display readably" {
   assert class_info("[B").display == "byte[]"
 }
 
+## A caught throwable as the JVM renders it: `Throwable.toString()`, which is
+## `<class>: <message>` and bare `<class>` when there was no message.
+##
+## Everywhere else a `ForeignError` reaches a message, the call site takes
+## `.message` alone and leaves `.kind` out — a binary class name is the JVM's
+## own vocabulary and printing it makes the text backend-specific. Here it is
+## the answer: this module *is* the JVM reflection route, and "threw
+## `java.lang.ArithmeticException`" is what the user needs to read. The class
+## is also the half that says whether the `unsafe_pure` promise was broken by
+## the arguments or by the method.
+fn rendered(e: ForeignError) -> String =
+  if e.message == "" { e.kind } else { e.kind ++ ": " ++ e.message }
+
 ## Invoke a public static method reflectively (comptime route C): the Method is
 ## found by exact parameter-class names, unreflected into a MethodHandle, and
 ## called with pre-boxed arguments. Err carries the thrown exception's rendering.
@@ -348,9 +361,12 @@ pub fn invoke_static(
     None -> return Err("no such method: " ++ fqcn ++ "." ++ name)
   }
   let lookup = MethodHandles.publicLookup().expect("lookup")
-  let mh = match catch_fault(fn() => lookup.unreflect(m2).expect("unreflect")) {
+  let mh = match catch_fault_e(fn() => lookup.unreflect(m2).expect("unreflect")) {
     Ok(h) -> h
-    Err(t) -> return Err(t)
+    Err(t) -> return Err(rendered(t))
   }
-  catch_fault(fn() => mh.invokeWithArguments(args))
+  match catch_fault_e(fn() => mh.invokeWithArguments(args)) {
+    Ok(v) -> Ok(v)
+    Err(t) -> Err(rendered(t))
+  }
 }

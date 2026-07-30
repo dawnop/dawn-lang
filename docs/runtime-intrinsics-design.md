@@ -317,8 +317,9 @@ Cursor 那一行是 `opaque type Cursor = Int` 挣来的:模块外做不了算�
   的程序」答案都取决于谁编译的它;native 那边一个是差 18 个码点、一个是当场 panic。
   见 `docs/native-backend-plan.md` §14.15–14.17。
 - `str_of_float` / `parse_float` 不是 Java 的语法/最短往返形式。浮点因此不进差分语料。
-- `catch_fault`/`catch_panic` 的 `Err` 载荷:JVM 是异常的 `toString`,native 是 panic 消息。**只分支 Ok/Err 的程序一致**。
-  它们的结构化版本 `catch_fault_e`/`catch_panic_e` 把这条从「偏离」改成**写明的契约**,见 §12.4。
+- `catch_fault`/`catch_panic` 的 `Err` 载荷:2026-07-30 起是 `ForeignError`,把这条从「偏离」
+  改成**写明的契约**,见 §12.4。此前是一句渲染好的字符串——JVM 是异常的 `toString`,native 是
+  panic 消息——**只分支 Ok/Err 的程序一致**,再细就不是了。
 - `io_list_names` 的顺序两边都未定义。
 - `io_temp_dir` 的随机后缀两边形状不同(JVM 是数字串,C 是 `mkdtemp` 的六位)。**名字本来就不该被读**,
   所以这不是可观察的——`io_files` 语料只断言它是个新目录,不打印它。
@@ -332,9 +333,9 @@ C 侧没有,于是「往还不存在的目录里写文件」只在一个后端�
 
 ### 12.4 `ForeignError.kind`:一个**声明为后端相关**的契约位
 
-2026-07-30 起,两个屏障有了结构化载荷的孪生版本
-(`catch_fault_e`/`catch_panic_e` → `Result[T, ForeignError]`,
-见 [audit/error-model-design.md](audit/error-model-design.md) §六)。
+2026-07-30 起,两个屏障的载荷是结构化的
+(`catch_fault`/`catch_panic` → `Result[T, ForeignError]`;过渡期里还有一对同签名的
+`_e` 拼法,见 [audit/error-model-design.md](audit/error-model-design.md) §六)。
 `ForeignError` 是 prelude 类型,三个字段,其中 **`kind` 是这份契约里唯一一个
 「两后端答案不同、而且这是规定」的位置**:
 
@@ -365,8 +366,9 @@ C 侧没有,于是「往还不存在的目录里写文件」只在一个后端�
    `dawn_fault` 加上 errno 符号名是一次扩展,而不是一次毁约——`kind` 从第一天就
    声明为「后端自己的名字」,正是为了留这个口子。
 3. **两个屏障的分工不因载荷而变。** `catch_fault_e` 抓的和 `catch_fault` 抓的
-   逐字相同,`catch_panic_e` 同理;`foreign_error.dawn` 把同一个 thunk 喂给两对屏障
-   并断言裁决一致,免得过渡期里长出两套错误模型。
+   逐字相同,`catch_panic_e` 同理——它们是四个不同的运行时符号,不是同一个;
+   `foreign_error.dawn` 把同一个 thunk 喂给两对屏障并断言裁决一致,
+   免得过渡期里长出两套错误模型。
 
 ## 13. 结论
 

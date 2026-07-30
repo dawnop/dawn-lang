@@ -134,10 +134,10 @@ fn write_class(dir: String, name: String, bs: Bytes) -> Result[Unit, String] !io
     None -> dir
   }
   match io.mkdirs(parent) {
-    Err(m) -> Err("cannot create " ++ parent ++ ": " ++ m)
+    Err(m) -> Err("cannot create " ++ parent ++ ": " ++ m.message)
     Ok(_) ->
       match io.write_bytes(path, bs) {
-        Err(m) -> Err("cannot write " ++ path ++ ": " ++ m)
+        Err(m) -> Err("cannot write " ++ path ++ ": " ++ m.message)
         Ok(_) -> Ok(())
       }
   }
@@ -713,7 +713,7 @@ fn run_lock(rest: List[String]) -> Unit !io = {
     match io.write_file(path, maven.render_lock(fresh)) {
       Ok(_) -> println("wrote " ++ path ++ " (" ++ to_string(len(fresh.arts)) ++
           " artifacts from " ++ to_string(len(coords)) ++ " direct)")
-      Err(e) -> cli_error("cannot write " ++ path ++ ": " ++ e)
+      Err(e) -> cli_error("cannot write " ++ path ++ ": " ++ e.message)
     }
   }
 }
@@ -761,7 +761,7 @@ fn write_temp_classes(classes: List[(String, Bytes)]) -> String !io = {
   let dir =
     match io.temp_dir("", "selfhost-run") {
       Ok(d) -> d
-      Err(e) -> panic("cannot create a temporary directory: " ++ e)
+      Err(e) -> panic("cannot create a temporary directory: " ++ e.message)
     }
   for pair in classes {
     let (nm, bs) = pair
@@ -933,7 +933,7 @@ fn vendor_jars(jars: List[String], jar_path: String) -> List[String] !io = {
     let bs =
       match io.read_bytes(src) {
         Ok(b) -> b
-        Err(e) -> panic("cannot read " ++ src ++ ": " ++ e)
+        Err(e) -> panic("cannot read " ++ src ++ ": " ++ e.message)
       }
     # Content, where this used to compare name and size and argue that the
     # cache is immutable. The bytes are in hand either way -- there is no
@@ -946,7 +946,7 @@ fn vendor_jars(jars: List[String], jar_path: String) -> List[String] !io = {
     if not same {
       match io.write_bytes(dst, bs) {
         Ok(_) -> ()
-        Err(e) -> panic("cannot copy " ++ src ++ " to " ++ dst ++ ": " ++ e)
+        Err(e) -> panic("cannot copy " ++ src ++ " to " ++ dst ++ ": " ++ e.message)
       }
     }
     entries = entries ++ ["lib/" ++ name]
@@ -988,7 +988,7 @@ fn find_native_image() -> Option[String] !io = {
     None -> ()
   }
   for c in candidates {
-    let ok = match catch_fault(fn() => File.new(c).canExecute()) {
+    let ok = match catch_fault_e(fn() => File.new(c).canExecute()) {
       Ok(b) -> b
       Err(_) -> false
     }
@@ -1086,7 +1086,7 @@ fn run_build(rest0: List[String]) -> Unit !io = {
   let jar_path = if native {
     match io.temp_dir("", "dawn-build-") {
       Ok(d) -> d ++ "/" ++ stem ++ ".jar"
-      Err(e) -> panic("cannot create a temp jar: " ++ e)
+      Err(e) -> panic("cannot create a temp jar: " ++ e.message)
     }
   } else if out != "" {
     out
@@ -1158,7 +1158,7 @@ fn dawn_files_under(dir: String) -> List[String] !io = {
         }
       }
     }
-    Err(e) -> panic("cannot list " ++ dir ++ ": " ++ e)
+    Err(e) -> panic("cannot list " ++ dir ++ ": " ++ e.message)
   }
   out
 }
@@ -1193,12 +1193,12 @@ fn run_fmt(rest: List[String]) -> Unit !io = {
           } else {
             match io.write_file(f, formatted) {
               Ok(_) -> println("formatted " ++ f)
-              Err(e) -> panic("cannot write " ++ f ++ ": " ++ e)
+              Err(e) -> panic("cannot write " ++ f ++ ": " ++ e.message)
             }
           }
         }
       }
-      Err(e) -> panic("cannot read " ++ f ++ ": " ++ e)
+      Err(e) -> panic("cannot read " ++ f ++ ": " ++ e.message)
     }
   }
   if check && unformatted > 0 { let _ = io.exit(1) }
@@ -1293,7 +1293,7 @@ fn run_lower(rest: List[String]) -> Unit !io = {
       let path = dump_to ++ "/" ++ join(str.split(cls, "/"), ".") ++ ".core"
       match io.write_file(path, coredump.render(adts, m)) {
         Ok(_u) -> ()
-        Err(e) -> panic("cannot write " ++ path ++ ": " ++ e)
+        Err(e) -> panic("cannot write " ++ path ++ ": " ++ e.message)
       }
     }
     lower_size(m)
@@ -1306,25 +1306,25 @@ fn run_lower(rest: List[String]) -> Unit !io = {
   # just as much
   for sm in std.mods {
     let (cls, _cx, tm, _ct) = sm
-    match catch_panic(fn() => one(cls, tm)) {
+    match catch_panic_e(fn() => one(cls, tm)) {
       Ok(_n) -> { ok = ok + 1 }
       Err(e) -> {
         bad = bad + 1
-        if not set.has(seen, e) {
-          seen = set.insert(seen, e)
-          println("GAP  " ++ cls ++ ": " ++ e)
+        if not set.has(seen, e.message) {
+          seen = set.insert(seen, e.message)
+          println("GAP  " ++ cls ++ ": " ++ e.message)
         }
       }
     }
   }
   for cm in prog.modules {
-    match catch_panic(fn() => one(cm.class_name, cm.tm)) {
+    match catch_panic_e(fn() => one(cm.class_name, cm.tm)) {
       Ok(_n) -> { ok = ok + 1 }
       Err(e) -> {
         bad = bad + 1
-        if not set.has(seen, e) {
-          seen = set.insert(seen, e)
-          println("GAP  " ++ cm.class_name ++ ": " ++ e)
+        if not set.has(seen, e.message) {
+          seen = set.insert(seen, e.message)
+          println("GAP  " ++ cm.class_name ++ ": " ++ e.message)
         }
       }
     }
@@ -1390,7 +1390,7 @@ fn run_emitc(rest: List[String]) -> Unit !io = {
   } else {
     match io.write_file(out, text) {
       Ok(_) -> ()
-      Err(e) -> cli_error("cannot write " ++ out ++ ": " ++ e)
+      Err(e) -> cli_error("cannot write " ++ out ++ ": " ++ e.message)
     }
   }
 }
@@ -1474,7 +1474,7 @@ pub fn main() -> Unit !io = {
                 let (m, diags) = parser.parse_module(text)
                 println(astdump.render_module(m, diags))
               }
-            Err(e) -> panic("cannot read " ++ pth ++ ": " ++ e)
+            Err(e) -> panic("cannot read " ++ pth ++ ": " ++ e.message)
           }
         }
       } else if mode == "--version" || mode == "-V" || mode == "version" {
