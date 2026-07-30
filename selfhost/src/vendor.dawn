@@ -97,7 +97,14 @@ pub fn rt_class_family(outer: String) -> List[(String, Bytes)] !io = {
   var names: List[String] = []
   let en = jf.entries().expect("entries")
   while en.hasMoreElements() {
-    let e: JarEntry = cast(en.nextElement().expect("entry"))
+    # `Enumeration` is erased, but a `JarFile`'s is a `JarEntry` enumeration by
+    # construction — so the `Err` `cast_e` now returns (LANG-02) is a broken
+    # invariant, and it stops the same way the ClassCastException used to.
+    let got: Result[JarEntry, ForeignError] = cast_e(en.nextElement().expect("entry"))
+    let e: JarEntry = match got {
+      Ok(v) -> v
+      Err(x) -> panic("vendor.rt_class_family: not a JarEntry: " ++ x.message)
+    }
     let nm = e.getName().expect("entry name")
     if str.starts_with(nm, "dawn/rt/") &&
       matches(str.substring(nm, str.len("dawn/rt/"), str.len(nm)), outer) {
@@ -171,7 +178,12 @@ pub fn classpath_package(prefix: String) -> List[(String, Bytes)] !io = {
         Ok(jf) -> {
           let en = jf.entries().expect("entries")
           while en.hasMoreElements() {
-            let je: JarEntry = cast(en.nextElement().expect("entry"))
+            # same invariant as rt_class_family's walk, same treatment
+            let got: Result[JarEntry, ForeignError] = cast_e(en.nextElement().expect("entry"))
+            let je: JarEntry = match got {
+              Ok(v) -> v
+              Err(x) -> panic("vendor.classpath_package: not a JarEntry: " ++ x.message)
+            }
             let nm = je.getName().expect("entry name")
             if str.starts_with(nm, prefix ++ "/") && str.ends_with(nm, ".class") {
               let cls = str.substring(nm, 0, str.len(nm) - str.len(".class"))

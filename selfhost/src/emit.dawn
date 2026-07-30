@@ -2480,12 +2480,17 @@ fn gen_cintrinsic(g: Gen, name: String, args: List[CExpr], ty: Ty) -> (Gen, Bool
   } else if name == "quote" {
     g1.mv.visitMethodInsn(OP_INVOKESTATIC, SHOW_CLASS, "quote",
       "(Ljava/lang/String;)Ljava/lang/String;", false)
-  } else if name == "cast" {
-    unerase(g1, ty)
-  } else if name == "cast_e" {
-    # The same check, moved off this stack and into a method
-    # (codegen.gen_cast_e says why), with the target passed along as the
-    # `Class` the CHECKCAST would have named.
+  } else if name == "cast" || name == "cast_e" {
+    # Both spellings are one reclaim since step B's stage 2 flipped `cast`'s
+    # table entry, and they share this arm rather than each having one: a
+    # signature that says `Result` and an emitter that still writes a bare
+    # CHECKCAST is the disagreement step A left between its stage 2 and stage 3
+    # (design doc 六.8), and one arm is how it cannot happen twice.
+    #
+    # The check moves off this stack and into a method (codegen.gen_cast_e says
+    # why), with the target passed along as the `Class` the CHECKCAST would
+    # have named. `cast_e` is still the runtime method's name -- stage 3 gives
+    # it the surface name it has been standing in for.
     ldc_class(g1.mv, unerase_class(g1.adts, cast_e_target(ty)))
     g1.mv.visitMethodInsn(OP_INVOKESTATIC, IO_CLASS, "cast_e",
       "(Ljava/lang/Object;Ljava/lang/Class;)LResult;", false)

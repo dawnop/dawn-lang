@@ -64,26 +64,49 @@ fn to_java_arg(p: String, v: CValue) -> Option[Object] !io =
 
 ## Java result → Dawn value; must agree with the checker's map_java_return or
 ## folding would lie. Reference returns arrive wrapped in Option.
+##
+## The four reclaims are the arms of that agreement, not places a value could
+## surprise us: `rc` is the method's declared return class and the JDK boxes a
+## `long` to a `Long`. So the `Err` that `cast_e` now hands back (LANG-02) is a
+## broken invariant, and it stops the compiler rather than becoming an `Err` of
+## this function — that `Err` is a diagnostic about the *user's* program, and
+## turning a bug in this file into one would blame the wrong party.
 fn from_java_ret(rc: String, r: Option[Object]) -> Result[CValue, (String, String)] !io =
   if rc == "void" {
     Ok(VUnit)
   } else if rc == "long" || rc == "int" || rc == "short" || rc == "byte" {
     let o = r.expect("primitive result")
-    let n2: Number = cast(o)
+    let got: Result[Number, ForeignError] = cast_e(o)
+    let n2: Number = match got {
+      Ok(v) -> v
+      Err(e) -> panic("jfold.from_java_ret: " ++ rc ++ " did not box to a Number: " ++ e.message)
+    }
     Ok(VInt(n2.longValue()))
   } else if rc == "double" || rc == "float" {
     let o = r.expect("primitive result")
-    let n2: Number = cast(o)
+    let got: Result[Number, ForeignError] = cast_e(o)
+    let n2: Number = match got {
+      Ok(v) -> v
+      Err(e) -> panic("jfold.from_java_ret: " ++ rc ++ " did not box to a Number: " ++ e.message)
+    }
     Ok(VFloat(n2.doubleValue()))
   } else if rc == "boolean" {
     let o = r.expect("primitive result")
-    let b2: Boolean = cast(o)
+    let got: Result[Boolean, ForeignError] = cast_e(o)
+    let b2: Boolean = match got {
+      Ok(v) -> v
+      Err(e) -> panic("jfold.from_java_ret: boolean did not box to a Boolean: " ++ e.message)
+    }
     Ok(VBool(b2.booleanValue()))
   } else if rc == "java.lang.String" {
     match r {
       None -> Ok(none_v())
       Some(o) -> {
-        let s2: String = cast(o)
+        let got: Result[String, ForeignError] = cast_e(o)
+        let s2: String = match got {
+          Ok(v) -> v
+          Err(e) -> panic("jfold.from_java_ret: a String return was not a String: " ++ e.message)
+        }
         Ok(some_v(VStr(s2)))
       }
     }

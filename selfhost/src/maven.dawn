@@ -143,7 +143,16 @@ pub fn fetch(coords: List[Coord]) -> Result[List[String], String] !io = {
       var out: List[String] = []
       var i = 0
       while i < files.size() {
-        let jar: File = cast(files.get(i).expect("file"))
+        # coursier hands back a `List<File>`; the element type is erased, not
+        # in doubt. So the `Err` `cast_e` now returns (LANG-02) is a broken
+        # invariant rather than a fetch failure, and it must not be folded into
+        # the `Err` arm below — that one is a message shown to whoever asked
+        # for the dependency.
+        let got: Result[File, ForeignError] = cast_e(files.get(i).expect("file"))
+        let jar: File = match got {
+          Ok(v) -> v
+          Err(x) -> panic("maven.fetch: not a File: " ++ x.message)
+        }
         out = out ++ [jar.getAbsolutePath().expect("path")]
         i = i + 1
       }

@@ -1136,20 +1136,24 @@ fn emit_intrinsic(st: CSt, name: String, args: List[CExpr], ty: Ty) -> (CSt, Str
     st2 = line(st2, "dawn_adt* " ++ tmp ++ " = " ++ a0 ++ ";")
     (st2, dup_expr("(" ++ tmp ++ "->tag == " ++ to_string(option_tag("Some")) ++ " ? " ++
         unbox_expr(tmp ++ "->fields[0].p", ty) ++ " : " ++ fb ++ ")", ty))
-  } else if name == "cast" {
-    (st1, dup_expr(unbox_expr(a0, ty), ty))
-  } else if name == "cast_e" {
-    # `cast` with its failure as a value (the error model's step B). On this
-    # backend the `Err` arm is unreachable, and saying so is more honest than
-    # emitting a handler for it: `cast` here is a reinterpretation, not a
-    # check -- there is no runtime type to compare against -- and the only
-    # producer of the `Object` it takes is `use java`, which emit_expr refuses
-    # a few hundred lines up. So the answer is always `Ok`, exactly the value
-    # `cast` would have produced.
+  } else if name == "cast" || name == "cast_e" {
+    # The reclaim, with its failure as a value (the error model's step B).
+    # Both spellings share this arm since stage 2 flipped `cast`'s table entry:
+    # a signature that promises a `Result` and an emitter that hands back a
+    # bare value would be the disagreement step A left behind (design doc 六.8),
+    # and here it would not even be a type error -- the C backend has no
+    # verifier to catch it.
     #
-    # That is the mirror, not an invention: the two spellings differ on the
-    # JVM because a CHECKCAST can fail there. Should native ever grow host
-    # objects, this arm grows the `Err` its `cast` grows a check.
+    # On this backend the `Err` arm is unreachable, and saying so is more
+    # honest than emitting a handler for it: a cast here is a reinterpretation,
+    # not a check -- there is no runtime type to compare against -- and the
+    # only producer of the `Object` it takes is `use java`, which emit_expr
+    # refuses a few hundred lines up. So the answer is always `Ok`, wrapping
+    # exactly the value this arm used to hand back unwrapped.
+    #
+    # That is the mirror, not an invention: the reclaim can fail on the JVM
+    # because a CHECKCAST can fail there. Should native ever grow host objects,
+    # this arm grows the `Err` that its cast grows a check.
     let t = cast_e_target(ty)
     let (sta, tmp) = fresh(st1)
     var st2 = line(sta, "dawn_adt* " ++ tmp ++ " = dawn_adt_new(" ++

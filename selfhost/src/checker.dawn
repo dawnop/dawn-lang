@@ -6486,17 +6486,12 @@ fn check_call(
     # T is bound here (an unbound type param already errored above). It must be
     # a reference type: CHECKCAST cannot target a primitive (docs/cast-interop.md §三)
     #
-    # `cast` hands T back and `cast_e` wraps it in a `Result`, so the type the
-    # rule is about is read differently -- but it is the same rule, and saying
-    # so here is what keeps the transitional spelling from being a second,
-    # slightly different `cast`.
-    let target = if s.name == "cast" {
-      subst(s.ret, m, em)
-    } else {
-      match subst(s.ret, m, em) {
-        TyAdt(_, targs) -> targs[0]
-        _ -> TyError
-      }
+    # Both spellings return `Result[T, ForeignError]` since step B's stage 2,
+    # so T is read from inside it for both. It was a two-branch read for one
+    # release, while `cast` still handed T back bare.
+    let target = match subst(s.ret, m, em) {
+      TyAdt(_, targs) -> targs[0]
+      _ -> TyError
     }
     if target == TyInt || target == TyFloat || target == TyBool {
       cx1 = cerr_h(cx1, "`" ++ s.name ++ "` target must be a reference type, not " ++

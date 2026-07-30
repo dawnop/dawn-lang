@@ -381,14 +381,28 @@ fn test_get(url: String) -> HttpRequest !io = {
   HttpRequest.newBuilder()!.uri(URI.create(url)!)!.method("GET", nobody)!.build()!
 }
 
+# `body()` is an erased generic, and what it holds is decided by the handler
+# passed one line up -- `ofInputStream` gives an `InputStream`, `ofByteArray`
+# a `byte[]`. So the `Err` that `cast_e` now returns (LANG-02) means the pair
+# was mismatched here, in test scaffolding, and stopping is what the uncaught
+# ClassCastException already did: nothing upstream catches it, and a test that
+# silently fetched nothing would be worse than one that stops.
 fn test_fetch_stream(url: String) -> (Int, InputStream) !io = {
   let resp = HttpClient.newHttpClient()!.send(test_get(url), BodyHandlers.ofInputStream()!)!
-  (resp.statusCode(), cast(resp.body()!))
+  let got: Result[InputStream, ForeignError] = cast_e(resp.body()!)
+  match got {
+    Ok(s) -> (resp.statusCode(), s)
+    Err(e) -> panic("test_fetch_stream: body is not an InputStream: " ++ e.message)
+  }
 }
 
 fn test_fetch_bytes(url: String) -> (Int, Bytes) !io = {
   let resp = HttpClient.newHttpClient()!.send(test_get(url), BodyHandlers.ofByteArray()!)!
-  (resp.statusCode(), cast(resp.body()!))
+  let got: Result[Bytes, ForeignError] = cast_e(resp.body()!)
+  match got {
+    Ok(b) -> (resp.statusCode(), b)
+    Err(e) -> panic("test_fetch_bytes: body is not a byte[]: " ++ e.message)
+  }
 }
 
 test "write_response pumps an upstream stream to the client byte-exact (>8KB, multi-chunk)" {

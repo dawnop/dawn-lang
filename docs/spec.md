@@ -1029,18 +1029,18 @@ fn slurp(p: String) -> String !io = {
 （省一次全量拷贝，大文件不顶爆内存）。
 
 若确知某个擦除泛型的不透明 `Object` 运行期是某个具体引用类型（如 `HttpResponse.body()` 配
-`BodyHandlers.ofByteArray()` 时是 `byte[]`），用泛型内建 `cast(x) -> T` 把它**认领**成该类型
-（T 取自调用点的期望类型，如 `let b: Bytes = cast(...)`；§9.5.1）——桥接处插一次运行期 `CHECKCAST`，
-类型不符即 `ClassCastException` 穿透。T 须是引用类型（编译期拒绝 primitive / 无期望类型）。
+`BodyHandlers.ofByteArray()` 时是 `byte[]`），用泛型内建
+`cast[T](x: Object) -> Result[T, ForeignError]` 把它**认领**成该类型
+（T 取自调用点的期望类型，如 `let b: Result[Bytes, ForeignError] = cast(...)`；§9.5.1）——
+认领处做一次运行期检查，**类型不符是 `Err` 而不是穿透的异常**，载荷见 §9.8.1
+（JVM 上 `kind` 是 `java.lang.ClassCastException`）。T 须是引用类型
+（编译期拒绝 primitive / 无期望类型）。
 
-> **这条正在被改**（LANG-02）：一个签名为纯的函数不该能用宿主异常退出。替代物是同一次
-> 认领、失败成为值：`cast_e[T](x: Object) -> Result[T, ForeignError]`（载荷见 §9.8.1；
-> JVM 上落空的 `kind` 是 `java.lang.ClassCastException`）。它现在是**过渡拼法**，
-> 与 `catch_fault_e`/`catch_panic_e` 当初同一个理由——内建的签名受种子纪律约束，
-> 而没有一个调用点能同时满足 `T` 和 `Result[T, ForeignError]`，所以新形状先以零调用点的
-> 名字落地，发一次 release 教会上一代编译器，再迁调用点，最后把签名交还给 `cast` 并删掉
-> `cast_e`。**本节这段说的仍是今天的 `cast`**：迁移完成前它照旧抛。
-> 分期见 `docs/audit/error-model-design.md` §6.10。
+> **签名为纯的函数不该能用宿主异常退出**（LANG-02）——`cast` 从前抛 `ClassCastException`，
+> 那正是纯签名本该排除的那条出口。现在失败是值。
+>
+> 迁移仍在进行：过渡拼法 `cast_e` 与 `cast` 签名逐字相同，只为让上一代编译器有个名字可调，
+> 下一期删掉。**新代码写 `cast`。** 分期见 `docs/audit/error-model-design.md` §6.10。
 
 ### 9.6 List 桥接：Dawn `List` 直达集合形参
 
@@ -1302,8 +1302,8 @@ std → 内建，std 模块自己的 `pub fn len` 正是靠这一条合法。
   `bytes.len(b) -> Int`、`bytes.at(b, i) -> Int`（0..255，越界 panic）、
   `bytes.slice(b, start, end) -> Bytes`（`[start,end)`，下标 clamp）、
   `bytes.index_of(b, needle, from) -> Option[Int]`（字节下标首次出现）。
-  prelude 里另有 `cast(x) -> T`（把擦除泛型的不透明 `Object` 认领为具体引用类型 T，
-  T 取自期望类型，§9.5）。
+  prelude 里另有 `cast(x) -> Result[T, ForeignError]`（把擦除泛型的不透明 `Object` 认领为
+  具体引用类型 T，T 取自期望类型，§9.5）。
   另有操作符 `Bytes ++ Bytes` 与按内容的 `==`/`!=`。二进制请求体（multipart 上传、WebDAV PUT）、
   crypto/签名、HTTP 收发都直接走 `Bytes`，不再借道 latin-1 字符串。
 - `Result` **没有**配套的库函数（无 `map_err`、无 `ok`）。`match` 和 `?` 够用，
