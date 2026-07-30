@@ -729,12 +729,18 @@ static dawn_handler *dawn_handlers;
 static char dawn_failure_buf[DAWN_FAILURE_MAX];
 static int64_t dawn_failure_len;
 
+/* The failure's kind, as the name `ForeignError.kind` hands back. A static
+ * string rather than a copy: the two are compile-time literals, not something
+ * a raiser computes. */
+static const char *dawn_failure_kind = "panic";
+
 static void dawn_raise(dawn_str *msg, bool is_panic) {
   dawn_handler *h = dawn_handlers;
   while (h != NULL && is_panic && !h->catches_panic) h = h->prev;
   if (h != NULL) {
     /* The skipped frames go with it: they sit above `h`, and `h`'s own
      * setjmp branch restores the list to `h->prev`. */
+    dawn_failure_kind = is_panic ? "panic" : "fault";
     dawn_failure_len = msg->len < DAWN_FAILURE_MAX ? msg->len : DAWN_FAILURE_MAX;
     if (dawn_failure_len > 0) {
       memcpy(dawn_failure_buf, msg->p, (size_t)dawn_failure_len);
@@ -773,6 +779,37 @@ static dawn_adt *dawn_run_caught(dawn_clo *f, bool catches_panic) {
 dawn_adt *dawn_catch_fault(dawn_clo *f) { return dawn_run_caught(f, false); }
 
 dawn_adt *dawn_catch_panic(dawn_clo *f) { return dawn_run_caught(f, true); }
+
+/* `ForeignError { kind, message, cause }` out of what the raise left behind.
+ * Three reference fields, so all three mask bits: the record owns each one
+ * and a drop of the whole releases them. */
+#define DAWN_MASK_THREE_BOXED UINT64_C(7)
+
+static dawn_adt *dawn_foreign_error(void) {
+  dawn_adt *a = dawn_adt_new(DAWN_TAG_FOREIGN_ERROR, 3, DAWN_MASK_THREE_BOXED);
+  a->fields[0].p = dawn_str_copy(dawn_failure_kind, (int64_t)strlen(dawn_failure_kind));
+  a->fields[1].p = dawn_str_copy(dawn_failure_buf, dawn_failure_len);
+  a->fields[2].p = dawn_none();
+  return a;
+}
+
+static dawn_adt *dawn_run_caught_e(dawn_clo *f, bool catches_panic) {
+  dawn_handler h;
+  h.prev = dawn_handlers;
+  h.catches_panic = catches_panic;
+  dawn_handlers = &h;
+  if (setjmp(h.jb) != 0) {
+    dawn_handlers = h.prev;
+    return dawn_err(dawn_foreign_error());
+  }
+  void *v = ((void *(*)(dawn_clo *))f->fn)(f);
+  dawn_handlers = h.prev;
+  return dawn_ok(v);
+}
+
+dawn_adt *dawn_catch_fault_e(dawn_clo *f) { return dawn_run_caught_e(f, false); }
+
+dawn_adt *dawn_catch_panic_e(dawn_clo *f) { return dawn_run_caught_e(f, true); }
 
 /* ---- code-point classification (char_is_*) ---------------------------- */
 

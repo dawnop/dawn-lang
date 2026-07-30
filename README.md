@@ -44,7 +44,7 @@ pub fn main() -> Unit !io =
   "没有 trait（v0.1）" 是 M1 之前的话。
 - **"没有异常" 是语法，不是运行时保证**。Dawn 没有 `throw`/`catch`，可恢复失败一律走
   `Result` + `?`。但 JVM 异常会**穿透** Dawn 栈：`cast` 失败抛 `ClassCastException`，
-  任何 `use java` 方法都可能抛。边界工具是 `java_try`（拦 `Exception`）与 `catch_panic`
+  任何 `use java` 方法都可能抛。边界工具是 `catch_fault`（拦 `Exception`）与 `catch_panic`
   （拦 panic + `Exception`，不拦 `OutOfMemoryError` 这类不该恢复的 `Error`），见 spec §8.2、§9。
 
 ## 文档
