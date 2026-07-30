@@ -23,8 +23,9 @@ use types.{
   Ty, TyInt, TyFloat, TyBool, TyString, TyUnit, TyNever, TyError, TyVar,
   TyAdt, TyList, TyTuple, TyFn, TyBytes, TyMap, TySet, TyArray, TyJava,
   DICT_ADT_ID,
-  Sym, Sig, Traits, TraitI, ImplI, MethodSig,
-  Adts, AdtI, CtorI, adt_of, trait_of, OPTION_ID, RESULT_ID, ORD_ID, EQ_ID, HASH_ID, SHOW_ID,
+  Sym, Sig, EPure, Traits, TraitI, ImplI, MethodSig,
+  Adts, AdtI, CtorI, adt_of, trait_of, prelude_adts,
+  OPTION_ID, RESULT_ID, ORD_ID, EQ_ID, HASH_ID, SHOW_ID,
   is_eq_scalar, is_ord_scalar, is_hash_scalar, builtins, Impls, impl_at, has_impl_at,
   is_ground, expandable, type_args_of, sub_goals
 }
@@ -2960,8 +2961,12 @@ pub fn lower_expr_only(
 }
 
 ## Lower a single function, returning it plus whatever lambdas it hoisted.
-## The JVM path uses this because it emits one method at a time; the native
-## path lowers whole modules.
+##
+## The comptime interpreter's entry, and the only one left: it lowers what
+## evaluation reaches, one function at a time, across module boundaries, so
+## there is no module to lower. Both real backends lower whole modules --
+## the JVM one used to come through here too, and the two passes disagreed
+## about which bodies exist (docs/audit/re-audit-2026-07-30.md RC-04).
 pub fn lower_fn_only(
   owner: String,
   f: TFun,
@@ -3001,14 +3006,40 @@ pub fn lower_fn_only(
   (cf, st1.lifted, st1.dicts, st1.next_lam)
 }
 
-pub fn lower_module(
+## One module lowered once, in the two shapes its consumers want.
+##
+## `fns` and `tests` keep the grouping the flat list loses: each source
+## function paired with the bodies lowering hoisted while lowering *it*. The
+## JVM emitter needs that, because it writes a hoisted body as a static
+## method beside the function that asked for it.
+##
+## `m` is the same functions flat -- sources in source order, then the hoisted
+## bodies in hoisting order -- which is what a whole-translation-unit backend
+## (`emitc`) and `reach` read. Test bodies stay out of it, and so do the
+## dictionaries only a test asks for: `reach` answers what freight the
+## *program* carries, and there is no test to compile natively. `dicts` is
+## the unabridged list, tests included, for the backend that emits them.
+pub type LMod = {
+  m: CModule,
+  fns: List[(CFun, List[CFun])],
+  tests: List[(CFun, List[CFun])],
+  dicts: List[CDictDef]
+}
+
+## Lower a whole module: one LSt for all of it, so a hoisted body is
+## synthesised once however many functions need it, and symbol and lambda
+## counters never restart.
+##
+## `include_tests` is the JVM path's; a test block has no native meaning.
+pub fn lower_module_full(
   owner: String,
   tm: TModule,
   traits: Traits,
   impls: Impls,
   adts: Adts,
-  prog_fns: Map[(String, String), Sig]
-) -> CModule = {
+  prog_fns: Map[(String, String), Sig],
+  include_tests: Bool
+) -> LMod = {
   # temporaries continue above every checker-minted id in this module
   var top = 0
   for k in map.keys(tm.syms) {
@@ -3033,16 +3064,126 @@ pub fn lower_module(
     tail: false,
     self_tail: false
   }
-  var fns: List[CFun] = []
+  var fns: List[(CFun, List[CFun])] = []
+  var flat: List[CFun] = []
   for f in tm.fns {
+    let before = len(st.lifted)
     let (st1, cf) = lower_fn(st, owner, f)
     st = st1
-    fns = fns ++ [cf]
+    # whatever grew onto the shared list while this function was lowered is
+    # what this function hoisted; a body an earlier function already
+    # synthesised was reused and grows nothing
+    fns = fns ++ [(cf, list.drop(st.lifted, before))]
+    flat = flat ++ [cf]
   }
   # lifted bodies are appended after the source functions; they are ordinary
   # top-level functions from here on and no backend can tell the difference
-  CModule { owner: owner, fns: fns ++ st.lifted, dicts: st.dicts, next_sym: st.next_sym }
+  let m =
+    CModule { owner: owner, fns: flat ++ st.lifted, dicts: st.dicts, next_sym: st.next_sym }
+  var tests: List[(CFun, List[CFun])] = []
+  if include_tests {
+    for t in tm.tests {
+      let before = len(st.lifted)
+      let (st1, cf) = lower_fn(st, owner, t)
+      st = st1
+      tests = tests ++ [(cf, list.drop(st.lifted, before))]
+    }
+  }
+  LMod { m: m, fns: fns, tests: tests, dicts: st.dicts }
 }
+
+test "the flat module and the grouped functions are one lowering" {
+  # `reach` reads LMod.m to decide what Unicode freight a program carries and
+  # the JVM emitter reads LMod.fns to write the methods. Those used to be two
+  # separate lowerings, and a comment asserted they agreed
+  # (docs/audit/re-audit-2026-07-30.md RC-04). They are one now; this is the
+  # check, because "the same value" is only true while nobody rebuilds it.
+  let tt = TyTuple([TyInt, TyInt])
+  let sym = fn(nm: String) => Sym {
+    name: nm,
+    ty: tt,
+    mutable: false,
+    dlo: 0,
+    dhi: 0,
+    dict_of: None
+  }
+  var syms: Map[Int, Sym] = map.empty()
+  syms = map.insert(syms, 1, sym("a"))
+  syms = map.insert(syms, 2, sym("b"))
+  let no_wit: Option[WitRef] = None
+  # `a == b` over a tuple: lowering has to synthesise the structural
+  # comparison, and both functions want the same one
+  let body =
+    XBinary(BEq, XLocal(1, "a", 0, 0, tt), XLocal(2, "b", 0, 0, tt), no_wit,
+      0, 0, 0, 0, TyBool)
+  let fn_named = fn(nm: String) => TFun {
+    name: nm,
+    sig: Sig {
+      name: nm,
+      param_tys: [tt, tt],
+      param_names: ["a", "b"],
+      ret: TyBool,
+      eff: EPure,
+      is_builtin: false,
+      tparams: [],
+      constraints: [],
+      owner: None,
+      trait_id: None,
+      inferring: false
+    },
+    param_syms: [1, 2],
+    dict_syms: [],
+    body: body,
+    is_test: false,
+    impl_of: None,
+    default_of: None
+  }
+  let no_traits: Traits = map.empty()
+  let no_impls: Impls = map.empty()
+  let no_sigs: Map[(String, String), Sig] = map.empty()
+  let tm = TModule { fns: [fn_named("f"), fn_named("g")], consts: [], tests: [], syms: syms }
+  let lm = lower_module_full("m", tm, no_traits, no_impls, prelude_adts(), no_sigs, false)
+
+  # the flat list is the grouped one: sources in source order, then the
+  # hoisted bodies in hoisting order
+  var expect: List[String] = []
+  for pr in lm.fns {
+    let (cf, _lifts) = pr
+    expect = expect ++ [cf.name]
+  }
+  for pr in lm.fns {
+    let (_cf, lifts) = pr
+    for lf in lifts { expect = expect ++ [lf.name] }
+  }
+  var got: List[String] = []
+  for cf in lm.m.fns { got = got ++ [cf.name] }
+  assert got == expect
+
+  # and nothing was synthesised twice: one LSt for the module is what makes
+  # the dedup module-wide, and what the two lowerings used to disagree about
+  var seen: List[String] = []
+  for nm in got {
+    for s in seen { assert s != nm }
+    seen = seen ++ [nm]
+  }
+  # the shared structural comparison is attributed to the first asker
+  assert len(lm.m.fns) == 3
+  let (_f, f_lifts) = lm.fns[0]
+  let (_g, g_lifts) = lm.fns[1]
+  assert len(f_lifts) == 1
+  assert len(g_lifts) == 0
+}
+
+## The flat shape on its own, for the consumers that want nothing else.
+pub fn lower_module(
+  owner: String,
+  tm: TModule,
+  traits: Traits,
+  impls: Impls,
+  adts: Adts,
+  prog_fns: Map[(String, String), Sig]
+) -> CModule =
+  lower_module_full(owner, tm, traits, impls, adts, prog_fns, false).m
 
 # ---- diagnostics ----
 

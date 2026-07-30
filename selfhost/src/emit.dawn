@@ -47,7 +47,7 @@ use core.{
   CBand, CBor, CBxor, CShl, CShr, CUshr, CConcat, CNeg, CNot, CBnot,
   CBinOp, CUnOp, cex_ty, ty_key, CSlotFn, CSlotDefault
 }
-use lower
+use lower.{LMod}
 use jreflect
 use java "dawn.tool.AdtClassWriter"
 use java "org.objectweb.asm.MethodVisitor"
@@ -98,11 +98,12 @@ pub type Gen = {
   # program-wide (class name, fn name) → declared signature
   prog_fns: Map[(String, String), Sig],
   # descriptors of the bodies lowering hoisted into this class, which have no
-  # declared signature to look up. Membership doubles as "already written":
-  # a synthesised structural comparison is named after its type, so every
-  # function comparing that type asks for the same method and it must be
-  # emitted once.
-  lifted_descs: Map[(String, String), String],
+  # declared signature to look up. Filled in one pass before the first method
+  # is written: a body may call one that is hoisted after it, and the
+  # descriptor has to be known at the call site. Lowering already hoists each
+  # body once per module, so this table no longer doubles as "already
+  # written" the way it did when the JVM path lowered function by function.
+  lift_descs: Map[(String, String), String],
   # the dictionaries lowering built for this class, deduplicated by key and
   # kept in the order they were asked for. This is Core's own table: naming a
   # dictionary from anything else is how the JVM backend spent a release not
@@ -116,7 +117,6 @@ pub type Gen = {
   # Core names its loops, so leaving a non-innermost one is ordinary rather
   # than impossible
   cloops: List[(Int, Label, Label)],
-  lambda_ctr: Int,
   sam_ctr: Int,
   pending_sam: List[SamB],
   consts: Map[String, CValue],
@@ -1086,26 +1086,30 @@ fn gen_sam_bridge(g: Gen, cw: AdtClassWriter, b: SamB) -> Gen !io = {
 
 # ---- functions and the module class ----
 
-## Generate one static method for `f`. Everything about the method except
-## its body -- class, name, descriptor, parameter slots -- is set up here;
-## the body comes from Core, and `lower_fn_only` hands back any lambdas it
-## hoisted, which are emitted as ordinary static methods beside it.
-fn gen_fn(g: Gen, cw: AdtClassWriter, f: TFun, name: String, desc: String) -> Gen !io = {
-  let (cf, lifted, dicts, next_lam) =
-    lower.lower_fn_only(g.class_name, f, g.traits, g.impl_table, g.adts,
-      g.prog_fns, g.syms, g.lambda_ctr)
-  # Register the hoisted bodies before generating anything: the main body may
-  # call one by name, and the descriptor has to be known at that call site.
-  var g1 = Gen { ..g, lambda_ctr: next_lam }
-  for d in dicts {
-    var have = false
-    for e in g1.dicts {
-      if e.key == d.key { have = true }
-    }
-    if not have { g1 = Gen { ..g1, dicts: g1.dicts ++ [d] } }
+## Generate one static method from its lowered body, followed by the bodies
+## lowering hoisted while lowering it -- ordinary static methods beside it.
+## Everything about a method except its body -- class, name, descriptor,
+## parameter slots -- is set up here.
+fn gen_fn(
+  g: Gen,
+  cw: AdtClassWriter,
+  cf: CFun,
+  lifts: List[CFun],
+  name: String,
+  desc: String
+) -> Gen !io = {
+  var g0 = gen_cbody(g, cw, cf, name, desc, false)
+  for lf in lifts {
+    g0 = gen_cbody(g0, cw, lf, lf.name, lifted_desc(g0, lf.name), true)
   }
-  var fresh: List[CFun] = []
-  for lf in lifted {
+  g0
+}
+
+## The descriptor of every hoisted body of this module, before any of them is
+## written: one may call another, and a call site needs the descriptor.
+fn note_lifts(g: Gen, lifts: List[CFun]) -> Gen = {
+  var g1 = g
+  for lf in lifts {
     var ptys: List[Ty] = []
     for p in lf.captures { ptys = ptys ++ [p.ty] }
     for p in lf.params { ptys = ptys ++ [p.ty] }
@@ -1113,26 +1117,19 @@ fn gen_fn(g: Gen, cw: AdtClassWriter, f: TFun, name: String, desc: String) -> Ge
     # parameter: a bridge whose descriptor omitted it verified only because
     # nothing on the JVM ever called one
     for _d in lf.dicts { ptys = ptys ++ [TyVar("D", 0)] }
-    if not map.has(g1.lifted_descs, (g1.class_name, lf.name)) {
-      # A dictionary slot body is called from the dictionary class against
-      # the trait method's own descriptor. Every other hoisted body sits
-      # behind an erased `apply`, where a zero-slot return still has to hand
-      # back a reference -- which is the difference impl_desc_of encodes.
-      let d =
-        if is_slot_target(g1, lf.name) {
-          method_desc(g1.adts, ptys, lf.ret)
-        } else {
-          impl_desc_of(g1, ptys, lf.ret)
-        }
-      g1 = Gen { ..g1, lifted_descs: map.insert(g1.lifted_descs, (g1.class_name, lf.name), d) }
-      fresh = fresh ++ [lf]
-    }
+    # A dictionary slot body is called from the dictionary class against
+    # the trait method's own descriptor. Every other hoisted body sits
+    # behind an erased `apply`, where a zero-slot return still has to hand
+    # back a reference -- which is the difference impl_desc_of encodes.
+    let d =
+      if is_slot_target(g1, lf.name) {
+        method_desc(g1.adts, ptys, lf.ret)
+      } else {
+        impl_desc_of(g1, ptys, lf.ret)
+      }
+    g1 = Gen { ..g1, lift_descs: map.insert(g1.lift_descs, (g1.class_name, lf.name), d) }
   }
-  var g0 = gen_cbody(g1, cw, cf, name, desc, false)
-  for lf in fresh {
-    g0 = gen_cbody(g0, cw, lf, lf.name, lifted_desc(g0, lf.name), true)
-  }
-  g0
+  g1
 }
 
 ## Is this hoisted body the target of one of this class's dictionary slots?
@@ -1151,7 +1148,7 @@ fn is_slot_target(g: Gen, name: String) -> Bool = {
 }
 
 fn lifted_desc(g: Gen, name: String) -> String =
-  match map.get(g.lifted_descs, (g.class_name, name)) {
+  match map.get(g.lift_descs, (g.class_name, name)) {
     Some(d) -> d
     None -> panic("codegen: no descriptor for hoisted body `" ++ name ++ "`")
   }
@@ -1291,8 +1288,14 @@ fn emit_return_of(m: MethodVisitor, t: Ty) -> Unit !io = {
 ## A test block is a nullary Unit function, so it goes through the same Core
 ## path as any other body -- descriptor included, which is why the runner
 ## (testrun.dawn) pops what it hands back.
-fn gen_test(g: Gen, cw: AdtClassWriter, t: TFun, idx: Int) -> Gen !io =
-  gen_fn(g, cw, t, "dawn\$test\$" ++ to_string(idx), "()" ++ desc_of(g.adts, TyUnit))
+fn gen_test(
+  g: Gen,
+  cw: AdtClassWriter,
+  cf: CFun,
+  lifts: List[CFun],
+  idx: Int
+) -> Gen !io =
+  gen_fn(g, cw, cf, lifts, "dawn\$test\$" ++ to_string(idx), "()" ++ desc_of(g.adts, TyUnit))
 
 ## A throwaway MethodVisitor so Gen can be constructed before the first real
 ## method opens (the record field is non-optional by design).
@@ -1346,11 +1349,15 @@ pub fn emit_module(
   own_trait_ids: List[Int],
   own_adt_ids: List[Int],
   tm: TModule,
+  # this module's Core, lowered once by the caller -- the same value `reach`
+  # reads to decide what freight the program carries. The JVM path used to
+  # lower here, per function, and the two lowerings could disagree about
+  # which bodies exist (docs/audit/re-audit-2026-07-30.md RC-04).
+  lm: LMod,
   ct: CtOut,
   # this module's const-name → comptime value view, imported consts included
   # (their values live in the declaring module's CtOut)
-  all_consts: Map[String, CValue],
-  include_tests: Bool
+  all_consts: Map[String, CValue]
 ) -> List[(String, Bytes)] !io = {
   var out: List[(String, Bytes)] = []
   for aid in own_adt_ids {
@@ -1374,15 +1381,17 @@ pub fn emit_module(
     impl_table: impl_table,
     own_fns: own_fns,
     prog_fns: prog_fns,
-    lifted_descs: map.empty(),
-    dicts: [],
+    lift_descs: map.empty(),
+    # every dictionary the module asked for, tests included, in the order
+    # lowering asked for them. Known up front so `is_slot_target` answers the
+    # same for a hoisted body wherever in the class it is written.
+    dicts: lm.dicts,
     syms: tm.syms,
     slots: no_slots,
     next_slot: 0,
     method_ret: TyUnit,
     rets_null: false,
     cloops: [],
-    lambda_ctr: 0,
     sam_ctr: 0,
     pending_sam: [],
     consts: all_consts,
@@ -1390,37 +1399,52 @@ pub fn emit_module(
     const_fields: [],
     const_by_key: no_ckey
   }
+  for pr in lm.fns {
+    let (_cf, lifts) = pr
+    g = note_lifts(g, lifts)
+  }
+  for pr in lm.tests {
+    let (_cf, lifts) = pr
+    g = note_lifts(g, lifts)
+  }
   var has_main = false
+  var fi = 0
   for f in tm.fns {
+    let (cf, lifts) = lm.fns[fi]
+    fi = fi + 1
+    # the lowered functions are this module's, in source order; a mismatch
+    # means the two lists were built from different modules
+    if cf.name != f.name {
+      panic("codegen: lowered `" ++ cf.name ++ "` where `" ++ f.name ++ "` was declared")
+    }
     match f.impl_of {
       Some(pair) -> {
         let (tid, subject) = pair
         let tr = trait_of(traits, tid)
-        g = gen_fn(g, cw, f, impl_method_name(g, tr.name, subject, f.name),
+        g = gen_fn(g, cw, cf, lifts, impl_method_name(g, tr.name, subject, f.name),
           fn_desc_with_dicts(g, f.sig))
       }
       None ->
         match f.default_of {
           Some(tid) -> {
             let tr = trait_of(traits, tid)
-            g = gen_fn(g, cw, f, default_method_name(tr.name, f.name),
+            g = gen_fn(g, cw, cf, lifts, default_method_name(tr.name, f.name),
               fn_desc_with_dicts(g, f.sig))
           }
           None -> {
             if f.name == "main" { has_main = true }
-            g = gen_fn(g, cw, f, f.name, fn_desc_with_dicts(g, f.sig))
+            g = gen_fn(g, cw, cf, lifts, f.name, fn_desc_with_dicts(g, f.sig))
           }
         }
     }
     g = drain_lambdas(g, cw)
   }
-  if include_tests {
-    var ti = 0
-    for t in tm.tests {
-      g = gen_test(g, cw, t, ti)
-      g = drain_lambdas(g, cw)
-      ti = ti + 1
-    }
+  var ti = 0
+  for pr in lm.tests {
+    let (cf, lifts) = pr
+    g = gen_test(g, cw, cf, lifts, ti)
+    g = drain_lambdas(g, cw)
+    ti = ti + 1
   }
   if has_main { gen_jvm_main(g, cw) }
   gen_const_fields(g, cw)
@@ -1533,9 +1557,9 @@ fn gen_ccall(g: Gen, callee: CCallee, args: List[CExpr], ty: Ty) -> (Gen, Bool) 
   match callee {
     CDirect(owner, name) -> {
       let g1 = gen_cargs(g, args)
-      # a body lowering hoisted has no declared signature; its descriptor was
-      # recorded when the hoisted body was registered
-      let d = match map.get(g1.lifted_descs, (owner, name)) {
+      # a body lowering hoisted has no declared signature; note_lifts recorded
+      # its descriptor before the first method of this class was written
+      let d = match map.get(g1.lift_descs, (owner, name)) {
         Some(x) -> x
         None -> fn_desc_with_dicts(g1, sig_of_call(g1, owner, name))
       }
@@ -1807,157 +1831,170 @@ pub fn gen_cexpr(g: Gen, e: CExpr, tail: Bool) -> (Gen, Bool) !io =
       (gen_load_const(g, v, ty, "b:" ++ to_string(lo) ++ ":" ++ to_string(hi)), true)
     }
     CFnRef(_, name, _) -> panic("codegen: bare CFnRef survived lowering (" ++ name ++ ")")
-    _ -> gen_cexpr2(g, e, tail)
-  }
-
-## The rest of the Core dispatch, split only to keep either half readable.
-fn gen_cexpr2(g: Gen, e: CExpr, tail: Bool) -> (Gen, Bool) !io =
-  match e {
+    # The rest, one node per named body below. The dispatch stays in this one
+    # match so that a new Core node is a compile error here rather than a
+    # panic at run time -- it used to fall through a wildcard into a second
+    # match that ended in another wildcard.
     CBinary(op, l, r, ty) -> gen_cbinary(g, op, l, r, ty)
-    CUnary(op, operand, ty) -> {
-      let (g1, falls) = gen_cexpr(g, operand, false)
-      if not falls { return (g1, false) }
-      match op {
-        CNeg -> if ty == TyFloat { g1.mv.visitInsn(OP_DNEG) } else { g1.mv.visitInsn(OP_LNEG) }
-        CNot -> {
-          g1.mv.visitInsn(OP_ICONST_1)
-          g1.mv.visitInsn(OP_IXOR)
-        }
-        CBnot -> {
-          ldc_long(g1.mv, 0 - 1)
-          g1.mv.visitInsn(OP_LXOR)
-        }
-      }
-      (g1, true)
-    }
-    CCtor(adt, ci, args, _) -> {
-      let a = adt_of(g.adts, adt)
-      let c = a.ctors[ci]
-      let cls = ctor_jvm_name(g.adts, c)
-      if len(c.fields) == 0 {
-        g.mv.visitFieldInsn(OP_GETSTATIC, cls, "INSTANCE", "L" ++ cls ++ ";")
-        return (g, true)
-      }
-      g.mv.visitTypeInsn(OP_NEW, cls)
-      g.mv.visitInsn(OP_DUP)
-      let g1 = gen_cargs(g, args)
-      var desc = "("
-      for f in c.fields { desc = desc ++ desc_of(g1.adts, f.ty) }
-      g1.mv.visitMethodInsn(OP_INVOKESPECIAL, cls, "<init>", desc ++ ")V", false)
-      (g1, true)
-    }
-    CField(target, adt, ci, idx, _) -> {
-      let (g1, falls) = gen_cexpr(g, target, false)
-      if not falls { return (g1, false) }
-      let a = adt_of(g1.adts, adt)
-      let c = a.ctors[ci]
-      let cls = ctor_jvm_name(g1.adts, c)
-      g1.mv.visitTypeInsn(OP_CHECKCAST, cls)
-      g1.mv.visitFieldInsn(OP_GETFIELD, cls, c.fields[idx].name,
-        desc_of(g1.adts, c.fields[idx].ty))
-      (g1, true)
-    }
-    CIsCtor(target, adt, ci) -> {
-      let (g1, falls) = gen_cexpr(g, target, false)
-      if not falls { return (g1, false) }
-      let a = adt_of(g1.adts, adt)
-      let c = a.ctors[ci]
-      let cls = ctor_jvm_name(g1.adts, c)
-      if len(c.fields) == 0 {
-        # no-payload constructors are interned singletons, so identity is
-        # the discriminant -- the C backend compares a tag instead
-        let t_l = Label.new()
-        let end = Label.new()
-        g1.mv.visitFieldInsn(OP_GETSTATIC, cls, "INSTANCE", "L" ++ cls ++ ";")
-        g1.mv.visitJumpInsn(OP_IF_ACMPEQ, t_l)
-        g1.mv.visitInsn(OP_ICONST_0)
-        g1.mv.visitJumpInsn(OP_GOTO, end)
-        g1.mv.visitLabel(t_l)
-        g1.mv.visitInsn(OP_ICONST_1)
-        g1.mv.visitLabel(end)
-      } else {
-        g1.mv.visitTypeInsn(OP_INSTANCEOF, cls)
-      }
-      (g1, true)
-    }
-    # No tag field to read: an ADT's constructors are separate classes, so
-    # "which one" is a chain of instanceof tests -- the same chain the derived
-    # comparison used to build for itself before Core carried the node.
-    CTagOf(target, adt) -> {
-      let (g1, falls) = gen_cexpr(g, target, false)
-      if not falls { return (g1, false) }
-      let a = adt_of(g1.adts, adt)
-      let done = Label.new()
-      var idx = 0
-      for c in a.ctors {
-        let next = Label.new()
-        g1.mv.visitInsn(OP_DUP)
-        g1.mv.visitTypeInsn(OP_INSTANCEOF, ctor_jvm_name(g1.adts, c))
-        g1.mv.visitJumpInsn(OP_IFEQ, next)
-        g1.mv.visitInsn(OP_POP)
-        ldc_long(g1.mv, idx)
-        g1.mv.visitJumpInsn(OP_GOTO, done)
-        g1.mv.visitLabel(next)
-        idx = idx + 1
-      }
-      g1.mv.visitInsn(OP_POP)
-      ldc_long(g1.mv, 0 - 1)
-      g1.mv.visitLabel(done)
-      (g1, true)
-    }
-    CTuple(elems, _) -> {
-      let cls = tuple_class(len(elems))
-      g.mv.visitTypeInsn(OP_NEW, cls)
-      g.mv.visitInsn(OP_DUP)
-      var g1 = g
-      for el in elems {
-        let (g2, _) = gen_cexpr(g1, el, false)
-        g1 = g2
-        box_ty(g1.mv, cex_ty(el))
-      }
-      var desc = "("
-      var i = 0
-      while i < len(elems) {
-        desc = desc ++ obj_desc()
-        i = i + 1
-      }
-      g1.mv.visitMethodInsn(OP_INVOKESPECIAL, cls, "<init>", desc ++ ")V", false)
-      (g1, true)
-    }
-    CTupleGet(target, idx, ty) -> {
-      let (g1, falls) = gen_cexpr(g, target, false)
-      if not falls { return (g1, false) }
-      let cls = tuple_class(tuple_arity(cex_ty(target)))
-      g1.mv.visitTypeInsn(OP_CHECKCAST, cls)
-      g1.mv.visitFieldInsn(OP_GETFIELD, cls, "_" ++ to_string(idx), obj_desc())
-      if is_bottom(ty) { g1.mv.visitInsn(OP_POP) } else { unerase(g1, ty) }
-      (g1, true)
-    }
-    CListLit(elems, _) -> {
-      # Lowering builds a literal out of `push` calls now, so nothing reaches
-      # here. Kept correct rather than deleted because the node is still in
-      # Core for the other backend, and a stale arm that quietly built a
-      # java.util.List would be worse than one that is never taken.
-      g.mv.visitMethodInsn(OP_INVOKESTATIC, ARRAY_CLASS, "array_new",
-        "()L" ++ ARRAY_CLASS ++ ";", false)
-      var g1 = g
-      for el in elems {
-        let (g2, falls) = gen_cexpr(g1, el, false)
-        g1 = g2
-        if not falls { return (g1, false) }
-        g1.mv.visitMethodInsn(OP_INVOKESTATIC, ARRAY_CLASS, "array_push",
-          "(L" ++ ARRAY_CLASS ++ ";Ljava/lang/Object;)L" ++ ARRAY_CLASS ++ ";", false)
-      }
-      g1.mv.visitMethodInsn(OP_INVOKESTATIC, "std/pvec", "of_array",
-        "(L" ++ ARRAY_CLASS ++ ";)L" ++ PVEC_CLASS ++ ";", false)
-      (g1, true)
-    }
+    CUnary(op, operand, ty) -> gen_cunary(g, op, operand, ty)
+    CCtor(adt, ci, args, _) -> gen_cctor(g, adt, ci, args)
+    CField(target, adt, ci, idx, _) -> gen_cfield(g, target, adt, ci, idx)
+    CIsCtor(target, adt, ci) -> gen_cisctor(g, target, adt, ci)
+    CTagOf(target, adt) -> gen_ctagof(g, target, adt)
+    CTuple(elems, _) -> gen_ctuple(g, elems)
+    CTupleGet(target, idx, ty) -> gen_ctupleget(g, target, idx, ty)
+    CListLit(elems, _) -> gen_clistlit(g, elems)
     CIntrinsic(name, args, ty) -> gen_cintrinsic(g, name, args, ty)
     CForeign(call, ty) -> gen_cforeign(g, call, ty)
     # the JVM has a collector; a count is a fact about the C runtime only
     CDup(inner, _) -> gen_cexpr(g, inner, false)
-    _ -> panic("codegen: Core node not handled on the JVM path")
   }
+
+fn gen_cunary(g: Gen, op: CUnOp, operand: CExpr, ty: Ty) -> (Gen, Bool) !io = {
+  let (g1, falls) = gen_cexpr(g, operand, false)
+  if not falls { return (g1, false) }
+  match op {
+    CNeg -> if ty == TyFloat { g1.mv.visitInsn(OP_DNEG) } else { g1.mv.visitInsn(OP_LNEG) }
+    CNot -> {
+      g1.mv.visitInsn(OP_ICONST_1)
+      g1.mv.visitInsn(OP_IXOR)
+    }
+    CBnot -> {
+      ldc_long(g1.mv, 0 - 1)
+      g1.mv.visitInsn(OP_LXOR)
+    }
+  }
+  (g1, true)
+}
+
+fn gen_cctor(g: Gen, adt: Int, ci: Int, args: List[CExpr]) -> (Gen, Bool) !io = {
+  let a = adt_of(g.adts, adt)
+  let c = a.ctors[ci]
+  let cls = ctor_jvm_name(g.adts, c)
+  if len(c.fields) == 0 {
+    g.mv.visitFieldInsn(OP_GETSTATIC, cls, "INSTANCE", "L" ++ cls ++ ";")
+    return (g, true)
+  }
+  g.mv.visitTypeInsn(OP_NEW, cls)
+  g.mv.visitInsn(OP_DUP)
+  let g1 = gen_cargs(g, args)
+  var desc = "("
+  for f in c.fields { desc = desc ++ desc_of(g1.adts, f.ty) }
+  g1.mv.visitMethodInsn(OP_INVOKESPECIAL, cls, "<init>", desc ++ ")V", false)
+  (g1, true)
+}
+
+fn gen_cfield(g: Gen, target: CExpr, adt: Int, ci: Int, idx: Int) -> (Gen, Bool) !io = {
+  let (g1, falls) = gen_cexpr(g, target, false)
+  if not falls { return (g1, false) }
+  let a = adt_of(g1.adts, adt)
+  let c = a.ctors[ci]
+  let cls = ctor_jvm_name(g1.adts, c)
+  g1.mv.visitTypeInsn(OP_CHECKCAST, cls)
+  g1.mv.visitFieldInsn(OP_GETFIELD, cls, c.fields[idx].name,
+    desc_of(g1.adts, c.fields[idx].ty))
+  (g1, true)
+}
+
+fn gen_cisctor(g: Gen, target: CExpr, adt: Int, ci: Int) -> (Gen, Bool) !io = {
+  let (g1, falls) = gen_cexpr(g, target, false)
+  if not falls { return (g1, false) }
+  let a = adt_of(g1.adts, adt)
+  let c = a.ctors[ci]
+  let cls = ctor_jvm_name(g1.adts, c)
+  if len(c.fields) == 0 {
+    # no-payload constructors are interned singletons, so identity is
+    # the discriminant -- the C backend compares a tag instead
+    let t_l = Label.new()
+    let end = Label.new()
+    g1.mv.visitFieldInsn(OP_GETSTATIC, cls, "INSTANCE", "L" ++ cls ++ ";")
+    g1.mv.visitJumpInsn(OP_IF_ACMPEQ, t_l)
+    g1.mv.visitInsn(OP_ICONST_0)
+    g1.mv.visitJumpInsn(OP_GOTO, end)
+    g1.mv.visitLabel(t_l)
+    g1.mv.visitInsn(OP_ICONST_1)
+    g1.mv.visitLabel(end)
+  } else {
+    g1.mv.visitTypeInsn(OP_INSTANCEOF, cls)
+  }
+  (g1, true)
+}
+
+## No tag field to read: an ADT's constructors are separate classes, so
+## "which one" is a chain of instanceof tests -- the same chain the derived
+## comparison used to build for itself before Core carried the node.
+fn gen_ctagof(g: Gen, target: CExpr, adt: Int) -> (Gen, Bool) !io = {
+  let (g1, falls) = gen_cexpr(g, target, false)
+  if not falls { return (g1, false) }
+  let a = adt_of(g1.adts, adt)
+  let done = Label.new()
+  var idx = 0
+  for c in a.ctors {
+    let next = Label.new()
+    g1.mv.visitInsn(OP_DUP)
+    g1.mv.visitTypeInsn(OP_INSTANCEOF, ctor_jvm_name(g1.adts, c))
+    g1.mv.visitJumpInsn(OP_IFEQ, next)
+    g1.mv.visitInsn(OP_POP)
+    ldc_long(g1.mv, idx)
+    g1.mv.visitJumpInsn(OP_GOTO, done)
+    g1.mv.visitLabel(next)
+    idx = idx + 1
+  }
+  g1.mv.visitInsn(OP_POP)
+  ldc_long(g1.mv, 0 - 1)
+  g1.mv.visitLabel(done)
+  (g1, true)
+}
+
+fn gen_ctuple(g: Gen, elems: List[CExpr]) -> (Gen, Bool) !io = {
+  let cls = tuple_class(len(elems))
+  g.mv.visitTypeInsn(OP_NEW, cls)
+  g.mv.visitInsn(OP_DUP)
+  var g1 = g
+  for el in elems {
+    let (g2, _) = gen_cexpr(g1, el, false)
+    g1 = g2
+    box_ty(g1.mv, cex_ty(el))
+  }
+  var desc = "("
+  var i = 0
+  while i < len(elems) {
+    desc = desc ++ obj_desc()
+    i = i + 1
+  }
+  g1.mv.visitMethodInsn(OP_INVOKESPECIAL, cls, "<init>", desc ++ ")V", false)
+  (g1, true)
+}
+
+fn gen_ctupleget(g: Gen, target: CExpr, idx: Int, ty: Ty) -> (Gen, Bool) !io = {
+  let (g1, falls) = gen_cexpr(g, target, false)
+  if not falls { return (g1, false) }
+  let cls = tuple_class(tuple_arity(cex_ty(target)))
+  g1.mv.visitTypeInsn(OP_CHECKCAST, cls)
+  g1.mv.visitFieldInsn(OP_GETFIELD, cls, "_" ++ to_string(idx), obj_desc())
+  if is_bottom(ty) { g1.mv.visitInsn(OP_POP) } else { unerase(g1, ty) }
+  (g1, true)
+}
+
+## Lowering builds a literal out of `push` calls now, so nothing reaches
+## here. Kept correct rather than deleted because the node is still in Core
+## for the other backend, and a stale arm that quietly built a java.util.List
+## would be worse than one that is never taken.
+fn gen_clistlit(g: Gen, elems: List[CExpr]) -> (Gen, Bool) !io = {
+  g.mv.visitMethodInsn(OP_INVOKESTATIC, ARRAY_CLASS, "array_new",
+    "()L" ++ ARRAY_CLASS ++ ";", false)
+  var g1 = g
+  for el in elems {
+    let (g2, falls) = gen_cexpr(g1, el, false)
+    g1 = g2
+    if not falls { return (g1, false) }
+    g1.mv.visitMethodInsn(OP_INVOKESTATIC, ARRAY_CLASS, "array_push",
+      "(L" ++ ARRAY_CLASS ++ ";Ljava/lang/Object;)L" ++ ARRAY_CLASS ++ ";", false)
+  }
+  g1.mv.visitMethodInsn(OP_INVOKESTATIC, "std/pvec", "of_array",
+    "(L" ++ ARRAY_CLASS ++ ";)L" ++ PVEC_CLASS ++ ";", false)
+  (g1, true)
+}
 
 fn obj_desc() -> String = "Ljava/lang/Object;"
 

@@ -298,23 +298,33 @@ fn collect_program(
     classes = classes ++ [(tr_iface(None, tr.name), gen_trait_interface(sup, adts, tr))]
   }
 
+  # Every module's Core, lowered once. `reach` reads it below and emit_module
+  # reads it further down -- the same value, not two lowerings that are
+  # asserted to agree (docs/audit/re-audit-2026-07-30.md RC-04). Test blocks
+  # ride along for the user's modules only, because only those are emitted.
+  var std_lm: List[lower.LMod] = []
+  for sm in std_mods {
+    let (cls, _cx2, tm2, _ct2) = sm
+    std_lm = std_lm ++
+      [lower.lower_module_full(cls, tm2, traits, impl_table, adts, prog_fns, false)]
+  }
+  var user_lm: List[lower.LMod] = []
+  for cm in mods {
+    user_lm = user_lm ++
+      [lower.lower_module_full(cm.class_name, cm.tm, traits, impl_table, adts, prog_fns, true)]
+  }
+
   # Which Unicode tables dawn/rt/Strings carries: what the user's modules can
-  # reach decides (reach.dawn). The modules are lowered once more purely for
-  # that answer -- emit_module lowers per function on its own, and the two
-  # agree because both start from the same TAST. Without a target there is no
-  # program to reason from, so the runtime-only jar carries everything.
+  # reach decides (reach.dawn). Without a target there is no program to reason
+  # from, so the runtime-only jar carries everything.
   var tuse = reach.all_tables()
   if target != "" {
     var cmods: List[CModule] = []
     var reach_roots: List[String] = []
-    for sm in std_mods {
-      let (cls, _cx2, tm2, _ct2) = sm
-      cmods = cmods ++ [lower.lower_module(cls, tm2, traits, impl_table, adts, prog_fns)]
-    }
-    for cm in mods {
-      cmods = cmods ++
-        [lower.lower_module(cm.class_name, cm.tm, traits, impl_table, adts, prog_fns)]
-      reach_roots = reach_roots ++ [cm.class_name]
+    for l in std_lm { cmods = cmods ++ [l.m] }
+    for l in user_lm {
+      cmods = cmods ++ [l.m]
+      reach_roots = reach_roots ++ [l.m.owner]
     }
     tuse = reach.table_use(cmods, reach_roots)
   }
@@ -328,22 +338,26 @@ fn collect_program(
   }
   for cm in mods { const_vals = map.insert(const_vals, cm.mod_path, cm.ct.consts) }
   var seen: Set[String] = set.empty()
+  var si = 0
   for sm in std_mods {
     let (cls, cx, tm, ct) = sm
     classes = classes ++ emit_module(sup, adts, traits, impl_table, prog_fns, cx.fns, cls,
       own_trait_ids(cx.traits, cls), own_adts_of(cx.adts, cls, seen),
-      tm, ct, cdriver.merged_consts(cx, ct, const_vals), false)
+      tm, std_lm[si], ct, cdriver.merged_consts(cx, ct, const_vals))
+    si = si + 1
     for aid in own_adts_of(cx.adts, cls, seen) {
       seen = set.insert(seen, adt_jvm_name(adt_of(cx.adts, aid)))
     }
   }
   var entry = ""
   var tests_info: List[(String, String, List[String])] = []
+  var ui = 0
   for cm in mods {
     classes = classes ++ emit_module(sup, adts, traits, impl_table, prog_fns, cm.cx.fns,
       cm.class_name, own_trait_ids(cm.cx.traits, cm.class_name),
-      own_adts_of(cm.cx.adts, cm.class_name, seen), cm.tm, cm.ct,
-      cdriver.merged_consts(cm.cx, cm.ct, const_vals), true)
+      own_adts_of(cm.cx.adts, cm.class_name, seen), cm.tm, user_lm[ui], cm.ct,
+      cdriver.merged_consts(cm.cx, cm.ct, const_vals))
+    ui = ui + 1
     for aid in own_adts_of(cm.cx.adts, cm.class_name, seen) {
       seen = set.insert(seen, adt_jvm_name(adt_of(cm.cx.adts, aid)))
     }

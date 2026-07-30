@@ -33,12 +33,12 @@
 
 use core.{
   CModule, CFun, CParam, CExpr, CStmt, CCallee, CJava,
-  CLocal, CCall, CIntrinsic, CCtor, CField, CIsCtor, CTagOf, CClosure,
+  CLocal, CFnRef, CCall, CIntrinsic, CCtor, CField, CIsCtor, CTagOf, CClosure,
   CDictRef, CDictApply, CDictArg, CTuple, CTupleGet, CBox, CUnbox, CBinary,
   CUnary, CIf, CBlock, CListLit, CConstRef, CComptime, CReturn, CBreak,
   CContinue, CForeign, CDup,
   CSLet, CSAssign, CSDiscard, CSLoop, CSIf, CSDrop,
-  CDynamic, CDirect, CBinOp, CAnd, COr, CInt, CBool, CStr, COwned,
+  CDynamic, CDirect, CBinOp, CAnd, COr, CInt, CFloat, CBool, CStr, CUnit, COwned,
   cex_ty, diverges
 }
 use types.{Ty, TyInt, TyBool, TyString, TyList, TyTuple, TyUnit, TyNever, TyArray,
@@ -264,7 +264,24 @@ fn fv_expr(e: CExpr, acc: Set[Int]) -> Set[Int] =
       }
       fv_list(j.args, a1)
     }
-    _ -> acc
+    # The leaves, enumerated rather than swept up by a wildcard: a symbol
+    # wrongly absent costs a use-after-free, so a Core node added later has
+    # to come back here as a compile error and not as `acc`.
+    CInt(_) -> acc
+    CFloat(_) -> acc
+    CBool(_) -> acc
+    CStr(_) -> acc
+    CUnit -> acc
+    # names a top-level function, a statically built dictionary, a folded
+    # constant or a comptime block -- none of them a binding of this body
+    CFnRef(_, _, _) -> acc
+    CDictRef(_, _, _, _) -> acc
+    CConstRef(_, _, _) -> acc
+    CComptime(_, _, _) -> acc
+    # a break leaves the loop for good, so nothing its next iteration would
+    # have touched is still ahead of this path: it pins nothing, which is the
+    # one place it differs from CContinue
+    CBreak(_) -> acc
   }
 
 fn fv_list(es: List[CExpr], acc: Set[Int]) -> Set[Int] = {
