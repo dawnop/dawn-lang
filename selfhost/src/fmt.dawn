@@ -314,3 +314,29 @@ test "a conditional impl's parameters hug the keyword" {
   assert format(src) == src
   assert format("impl [T: Eq] Eq[List[T]] {\n}\n") == "impl[T: Eq] Eq[List[T]] {\n}\n"
 }
+
+## The three shapes where a body's `{` lands on a wrapped line. Each is written
+## here the way it should come out, and asserted from *both* directions: left
+## alone when already right, and recovered from a copy with the indentation
+## stripped. The first check is the one that matters -- the bug these pin
+## produced a *stable* wrong answer, so idempotence and `--check` both endorsed
+## it, and only "is this specific shape correct" could tell.
+test "a body under a wrapped header keeps the header's level" {
+  # subject wraps: the arms follow the `match`, not the continuation line
+  let m = "fn f(x: Int) -> Int =\n  match g(x,\n    x) {\n    0 -> 1\n    _ -> 2\n  }\n"
+  assert format(m) == m
+  assert format("fn f(x: Int) -> Int =\nmatch g(x,\nx) {\n0 -> 1\n_ -> 2\n}\n") == m
+
+  # signature wraps: the body is one level in, not two (analyze.dawn's shape)
+  let s = "fn h(\n  a: Int\n) -> Int = {\n  let y = a\n  y\n}\n"
+  assert format(s) == s
+  assert format("fn h(\na: Int\n) -> Int = {\nlet y = a\ny\n}\n") == s
+
+  # but a brace *inside* an unclosed `(` still belongs to its own line: the
+  # closure body is three levels in, under `fn`, not two under `map`. Getting
+  # the case above right by anchoring every brace to the construct broke this
+  # one -- they need telling apart, so both directions are pinned.
+  let c = "fn k(xs: List[Int]) -> List[Int] =\n  map(xs,\n    fn(x: Int) => {\n      x + 1\n    })\n"
+  assert format(c) == c
+  assert format("fn k(xs: List[Int]) -> List[Int] =\nmap(xs,\nfn(x: Int) => {\nx + 1\n})\n") == c
+}
