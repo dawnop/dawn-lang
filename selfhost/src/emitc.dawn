@@ -23,7 +23,8 @@ use std/set
 use types.{
   Ty, TyInt, TyFloat, TyBool, TyString, TyUnit, TyNever, TyError, TyVar,
   TyAdt, TyTuple, TyFn, TyBytes, TyList, TyMap, TySet, TyArray, TyJava, peel_opaque,
-  intr_at, adt_of, prelude_adts, OPTION_ID, is_ref_ty, Eff, EPure
+  intr_at, adt_of, prelude_adts, OPTION_ID, RESULT_ID, cast_e_target,
+  is_ref_ty, Eff, EPure
 }
 use reach.{TableUse}
 use case_table
@@ -1009,6 +1010,19 @@ fn option_tag(ctor: String) -> Int = {
   panic("emitc: Option has no constructor " ++ ctor)
 }
 
+## The same question for `Result`, which `cast_e` builds by hand.
+fn result_tag(ctor: String) -> Int = {
+  let res = adt_of(prelude_adts(), RESULT_ID)
+  var i = 0
+  for c in res.ctors {
+    if c.name == ctor {
+      return i
+    }
+    i = i + 1
+  }
+  panic("emitc: Result has no constructor " ++ ctor)
+}
+
 ## The static type behind an operand that crosses erased.
 ##
 ## Lowering boxes a value on its way into a type-variable slot and the CBox
@@ -1124,6 +1138,27 @@ fn emit_intrinsic(st: CSt, name: String, args: List[CExpr], ty: Ty) -> (CSt, Str
         unbox_expr(tmp ++ "->fields[0].p", ty) ++ " : " ++ fb ++ ")", ty))
   } else if name == "cast" {
     (st1, dup_expr(unbox_expr(a0, ty), ty))
+  } else if name == "cast_e" {
+    # `cast` with its failure as a value (the error model's step B). On this
+    # backend the `Err` arm is unreachable, and saying so is more honest than
+    # emitting a handler for it: `cast` here is a reinterpretation, not a
+    # check -- there is no runtime type to compare against -- and the only
+    # producer of the `Object` it takes is `use java`, which emit_expr refuses
+    # a few hundred lines up. So the answer is always `Ok`, exactly the value
+    # `cast` would have produced.
+    #
+    # That is the mirror, not an invention: the two spellings differ on the
+    # JVM because a CHECKCAST can fail there. Should native ever grow host
+    # objects, this arm grows the `Err` its `cast` grows a check.
+    let t = cast_e_target(ty)
+    let (sta, tmp) = fresh(st1)
+    var st2 = line(sta, "dawn_adt* " ++ tmp ++ " = dawn_adt_new(" ++
+        to_string(result_tag("Ok")) ++ ", 1, 1);")
+    # a `Result`'s payload sits at a type variable, so it is boxed here as
+    # emit_alloc boxes an erased constructor field
+    st2 = line(st2, tmp ++ "->fields[0].p = " ++
+        box_call(dup_expr(unbox_expr(a0, t), t), t) ++ ";")
+    (st2, tmp)
   } else if name == "to_string" {
     # Core normally lowers this into str_of_*; a residual one means a type
     # the lowering did not know how to render
@@ -1522,6 +1557,10 @@ test "the C runtime's constructor tags are the prelude's" {
   # backend quietly reading the wrong arm.
   assert option_tag("Some") == 0
   assert option_tag("None") == 1
+  # DAWN_TAG_OK / DAWN_TAG_ERR, and `cast_e` builds an `Ok` in emitted C
+  # without going through the runtime at all
+  assert result_tag("Ok") == 0
+  assert result_tag("Err") == 1
 }
 
 test "a primitive its module owns needs no arm in the emitter" {

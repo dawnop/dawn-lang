@@ -666,6 +666,23 @@ pub fn result_ty(t: Ty, e: Ty) -> Ty = TyAdt(RESULT_ID, [t, e])
 
 pub fn foreign_error_ty() -> Ty = TyAdt(FOREIGN_ERROR_ID, [])
 
+## The `T` in a `cast_e` call's `Result[T, ForeignError]`.
+##
+## Both emitters need it -- it is the type the reclaim is checked against --
+## and neither can read it off the argument, which is an erased `Object`. It
+## lives here rather than in one of them because a backend that peeled the
+## type differently would be checking against a different class.
+pub fn cast_e_target(ty: Ty) -> Ty =
+  match peel_opaque(ty) {
+    TyAdt(aid, args) ->
+      if aid == RESULT_ID && len(args) == 2 {
+        args[0]
+      } else {
+        panic("cast_e: not typed Result[T, ForeignError]")
+      }
+    _ -> panic("cast_e: not typed Result[T, ForeignError]")
+  }
+
 ## The three prelude ADTs, keyed by their fixed ids.
 pub fn prelude_adts() -> Adts = {
   let ot = TyVar("T", -11)
@@ -1059,6 +1076,24 @@ pub fn builtins() -> Map[String, Sig] = {
       EIo
     ),
     tp1(bsig("cast", [TyJava("java.lang.Object", "Object")], ["x"], t), t),
+    # The same reclaim with the failure as a value rather than as an exception
+    # thrown through a signature that says `pure`
+    # (docs/audit/error-model-design.md 二.B, LANG-02). Still pure: a
+    # `ForeignError` handed back is not an effect, and that is the whole
+    # difference -- today a `cast` that misses leaves the function by a route
+    # its type does not mention.
+    #
+    # The `_e` suffix is transitional and is the same arithmetic step B
+    # inherits from step A (design doc 六.2): a builtin's *signature* is under
+    # the seed discipline the way its name is, and no call site satisfies `T`
+    # and `Result[T, ForeignError]` at once, so the compiler's own 14 `cast`
+    # sites cannot type-check against the seed's table and today's together.
+    # The new shape lands under a name nothing calls, a release teaches the
+    # previous compiler, and only then do the call sites move. Stage 3 gives
+    # this signature back to `cast` and deletes `cast_e`; see the design doc's
+    # 六.10. No throwing `cast` survives that stage.
+    tp1(bsig("cast_e", [TyJava("java.lang.Object", "Object")], ["x"],
+      result_ty(t, foreign_error_ty())), t),
     eff1(
       tp1(bsig("catch_panic", [TyFn([], t, EIo)], ["f"],
         result_ty(t, foreign_error_ty())), t),
@@ -1478,7 +1513,40 @@ test "builtin table renders signatures" {
     }
     None -> { assert false }
   }
-  assert map_size2(bs) == 87
+  assert map_size2(bs) == 88
+}
+
+test "the transitional cast carries a ForeignError instead of throwing" {
+  # Step B of the error model (design doc 二.B): `cast` is declared pure and
+  # leaves by throwing a ClassCastException, which is the one thing a pure
+  # signature is supposed to rule out. `cast_e` is the same reclaim with the
+  # failure as a value, and it is asserted next to its original because the
+  # pair differs in exactly one thing.
+  let adts = prelude_adts()
+  let traits = prelude_traits()
+  let bs = builtins()
+  match map.get(bs, "cast") {
+    Some(s) -> {
+      assert sig_render(adts, traits, s) == "fn cast[T](x: Object) -> T"
+    }
+    None -> { assert false }
+  }
+  match map.get(bs, "cast_e") {
+    Some(s) -> {
+      assert sig_render(adts, traits, s) ==
+        "fn cast_e[T](x: Object) -> Result[T, ForeignError]"
+    }
+    None -> { assert false }
+  }
+  # Pure, and deliberately: the failure became a value, so there is no effect
+  # to declare. The barriers are `!io` because the thunk they run is; this one
+  # runs nothing.
+  assert intr_at("cast_e").expect("cast_e").sig.eff == EPure
+  # and no runtime module owns it -- like `cast`, both emitters spell it
+  # themselves, because the class to check against comes from the call site
+  # and a runtime symbol named after the primitive cannot be handed one.
+  assert intr_at("cast").expect("cast").rt == None
+  assert intr_at("cast_e").expect("cast_e").rt == None
 }
 
 test "no barrier renders its failure into a String any more" {

@@ -665,8 +665,12 @@ fn comptime_rejects() -> List[String] = {
     out = out ++ ["io_" ++ op]
   }
   out = out ++ ["args", "catch_fault", "catch_panic"]
-  # `cast` unerases a host object, and comptime never has one
-  out = out ++ ["cast"]
+  # `cast` unerases a host object, and comptime never has one. `cast_e` is the
+  # same reclaim with its failure as a value (the error model's step B), so it
+  # is refused for the same reason and not for a different one -- there is
+  # still no host object to reclaim, and an `Err` would be a fabricated answer
+  # rather than a fold.
+  out = out ++ ["cast", "cast_e"]
   # Map/Set/Array: `CValue` has no representation for any of the three, so
   # `const M = map.from([...])` does not fold. This is the group spec §7.2.2
   # names, and it is the smaller half of what is actually refused.
@@ -1843,7 +1847,7 @@ test "the comptime interpreter covers every intrinsic, or refuses it by name" {
   #    "thirteen more" and "all twelve" in the same paragraph -- so the two
   #    numbers this file states are asserted rather than asserted-by-nobody.
   assert len(arms) == 41
-  assert len(rejects) == 59
+  assert len(rejects) == 60
 }
 
 test "consts evaluate in declaration order and fold across references" {

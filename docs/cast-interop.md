@@ -1,6 +1,9 @@
 # `cast[T]`：统一的 interop 认领原语
 
 > 状态：**historical** —— 泛型 `cast` 已落地，本文是当时的动码前设计。
+> 其中「失败抛 `ClassCastException`」这一条正在被 LANG-02 改掉：过渡拼法
+> `cast_e` 把失败换成 `Result[T, ForeignError]`，迁移完成后签名交还给 `cast`。
+> 见 [`audit/error-model-design.md`](audit/error-model-design.md) §6.10 与 `spec.md` §9.5。
 >
 > 语言层设计，**先文档、后实现**。目标：把「从擦除的 Java `Object` 认领回具体类型」从
 > **一类型一 builtin**（`as_bytes`、将来的 `as_input_stream`…）收敛成**一个泛型内建 `cast`**

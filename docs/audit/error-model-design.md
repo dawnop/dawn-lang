@@ -8,7 +8,8 @@
 > `catch_fault`/`catch_panic` 的表项换成 `Result[T, ForeignError]`；`std/io` 走 (ii)）、
 > 阶段 3（调用点迁回原名，两后端的实现重新指向结构化那份，过渡拼法删除）。
 > 终局只有一对屏障，载荷是 `ForeignError`，不保留 String 版本。
-> B 步 proposed 且可做；C2 步冻结。**
+> **B 步进行中——阶段 1 已落地**（`cast_e` 过渡内建，dormant；调用点一个不动），
+> 分期见 §6.10；C2 步冻结。**
 > 分期理由与每期内容见下方 §六「落地分期」——**那一节是现状，第二节是意图**，
 > 两者冲突时以第六节为准。第二、五节里几处与代码对不上的说法，第六节开头逐条记了。
 > [`../native-backend-plan.md`](../native-backend-plan.md) §1 定了 native 的 panic 是
@@ -151,6 +152,11 @@ pub fn cast[T](o: Object) -> Result[T, ForeignError]   # pure，失败是值
 
 **破坏性**：是。按 CONTRIBUTING §六先发 tag，dawnop-site 再 bump。
 
+> **落地时的两处更正**（以 §6.10 为准）：调用点是 14 处，去处是
+> `jreflect` 5、`jfold` 4、`vendor` 2、`maven` 1、`packages/web` 2——
+> 上面那份「`interp.dawn` 与 `pkgfetch.dawn`」是写方案时凭印象点的，两个都没有。
+> 而且这一步和 A 步一样**一期做不完**：改签名要三期两发布，理由同 §6.2。
+
 ### C. `bracket`：先给标准库函数，不给语法
 
 ```dawn
@@ -225,7 +231,7 @@ pub fn bracket[A, B](
 | 步 | 状态 | 文件 | 测试 |
 |---|---|---|---|
 | A | **可做** | `selfhost/src/codegen.dawn`（`gen_try_closure`）、prelude ADT 表、`std/error.dawn`、全部 `java_try` 调用点 | 现有全量 + 一个「`kind` 是二进制名而非 toString 前缀」的 test |
-| B | **可做** | `selfhost/src/types.dawn`（`cast` 签名）、`docs/spec.md` §9、`docs/cast-interop.md`、各调用点 | cast 失败返回 `Err` 而非抛的 test |
+| B | **进行中**（阶段 1 已落地，见 §6.10） | `selfhost/src/types.dawn`（`cast` 签名）、`docs/spec.md` §9、`docs/cast-interop.md`、各调用点 | cast 失败返回 `Err` 而非抛的 test |
 | C2 | **冻结**，等 Core IR | 降级阶段的 `LProtect` 节点 + 两个后端的发射、`std/resource.dawn`、三处手写惯用法改写 | 「release 在 panic 路径也执行、且原失败继续传播」的 test |
 
 A 与 B 都是破坏性变更 → 各自先发 tag。A 会改发射的字节码 → `Emit-Change:`
@@ -429,3 +435,55 @@ selfhost 自己的源要**同时**过两张 intrinsic 表：种子那张（用�
 Ord/Eq/Hash——Show 是后加的，注释没跟。ADT 那半边没问题（prelude 占 0/1/2，
 计数器从 3 起正好接上，这也是 `ForeignError` 拿 2 不用动计数器的原因），
 trait 那半边第一个用户 trait 会拿到 3，是否真会与 Show 撞本步没查。
+
+### 6.10 B 步的分期（`cast` → `Result`）
+
+B 步受的约束与 A 步**逐字相同**，不是类比：`cast[T](o) -> T` 和
+`cast[T](o) -> Result[T, ForeignError]` 没有任何一个调用点能同时满足，而 selfhost 自己的
+14 处 `cast` 要同时过种子那张表和 HEAD 这张表（§6.2）。所以又是三期两发布。
+
+| 期 | 落什么 | 边界 |
+|---|---|---|
+| **1**（本提交） | `cast_e` 过渡内建（表 87 → 88），两后端都发射；测试与语料。**`cast(` 一个不动。** | 之后发 tag，`seed-release.txt` 推进 |
+| **2** | 全部 `cast` 调用点迁到 `cast_e`；**同一提交**里把 `cast` 的表项改成 `Result[T, ForeignError]`（此时它零调用点） | 再发 tag + 种子推进 |
+| **3** | 调用点从 `cast_e` 换回 `cast`；删掉 `cast_e` 的表项，两个后端的发射改指原名 | 终局 |
+
+**阶段 1 的具体清单**：
+
+- `selfhost/src/types.dawn`：intrinsic 表多一条 `cast_e`（**纯**——失败成了值，
+  没有效应可声明，这正是这次改动的内容）；`cast_e_target()` 供两个后端读
+  `Result[T, ForeignError]` 里的 T。
+- `selfhost/src/checker.dawn`：`visible_to_user_code()` 多一个名字；「目标须是引用类型」
+  那条检查两个拼法共用（`cast` 读返回类型，`cast_e` 读它的第一个类型实参）。
+- `selfhost/src/codegen.dawn`：`gen_cast_e` 往 `dawn/rt/Io` 里写一个
+  `cast_e(Object, Class) -> Result`；`gen_try_closure` 的 handler 抽成 `gen_caught_err`，
+  两处共用同一份 `ForeignError` 字段纪律（发射的字节逐字不变）。
+- `selfhost/src/emit.dawn`：`cast_e` 的分支把目标类当 `Class` 常量 LDC 上去再调那个方法；
+  `unerase_class()` 是 `unerase` 那张表的「名字版」。
+- `selfhost/src/emitc.dawn`：`cast_e` 分支恒出 `Ok`，见下条。
+- `selfhost/src/interp.dawn`：comptime 拒绝（同 `cast` 的理由——comptime 没有宿主对象）。
+- `selfhost/src/doc.dawn`：`interop` 组多一条。
+- 测试：`types.dawn` 两处（表计数、两个拼法的签名并列）；
+  `scripts/error-contract/probe.dawn` 加五条——命中带出原值、落空的 `kind` 逐字是
+  `java.lang.ClassCastException`、它是名字不是渲染、`cause` 为 `None`、
+  以及**`cast_e` 报的就是 `cast` 抛的**（阶段 3 是一次替换的前提）。
+
+**三处判断，不是照抄**：
+
+1. **JVM 侧是一个方法，不是内联的 try 块。** `cast` 是写进调用者的一条 CHECKCAST，
+   而把**那条**包进 handler 不成立：进 handler 时 JVM 会清空操作数栈，于是
+   `f(a, cast_e(x))` 这种表达式中途的 `cast_e` 会在汇合点丢掉已经压进去的 `a`。
+   方法有自己的栈——这也正是两个屏障是方法的原因。
+2. **`Class.cast`，不是 `instanceof` 测试。** 它就是 CHECKCAST 把操作数改成参数传，
+   所以 `null` 照样通过（CHECKCAST 就是这么放行的），抛的是真的
+   `ClassCastException`，`kind` 于是仍然是从异常上**读**下来的，而不是这份代码
+   写死的字面量。
+3. **native 侧恒出 `Ok`，并且说明理由而不是发死代码。** 这个后端的 `cast` 是一次
+   **重解释**而非检查——没有运行期类型可比——而它那个 `Object` 唯一的来源是
+   `use java`，`emitc` 在几百行之外就拒绝了。所以 `Err` 这条路在这里不可达，
+   照抄一份 handler 只会是永远跑不到的代码。这是镜像不是发明：两个拼法在 JVM 上
+   有区别，是因为那里的 CHECKCAST **会**失败。
+
+**阶段 1 的 Emit-Change**：`emit *` 六个目标各差**一个文件**——`dawn/rt/Io.class`
+多一个 `cast_e` 方法，别的一字不动；`doc --builtins` 多一条；`lsp` 的三份补全清单
+各多一项。Core golden 的 13 份 dump 逐字节不变，只有 selfhost 自身改到的模块 hash 动。

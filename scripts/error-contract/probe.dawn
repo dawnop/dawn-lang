@@ -25,6 +25,8 @@ use std/io
 use std/str
 
 use java "java.lang.Long"
+use java "java.util.ArrayList"
+use java "java.lang.Object"
 
 ## An expectation and its outcome, so the count and the report come from one
 ## place -- 1 is a mismatch, which is what the last line adds up.
@@ -50,6 +52,29 @@ fn boom() -> Int !io = panic("boom")
 
 fn not_a_number() -> Int !io = Long.parseLong("nope")
 
+## An erased `Object` that really holds a String. `ArrayList.get` is the
+## shortest honest source of one: its element type is erased, so the reclaim
+## is the situation `cast` exists for rather than a contrived cast of a value
+## whose type was never in doubt.
+fn a_string_as_object() -> Object !io = {
+  let xs = ArrayList.new()
+  xs.add("hello")
+  xs.get(0).expect("element")
+}
+
+## The same reclaim through the old spelling, which leaves by throwing. Here
+## to show the two name the same failure -- step B's analogue of the barriers
+## agreeing (`foreign_error.dawn`) -- and it is the reason `cast_e` exists:
+## `cast` is declared pure and exits this way anyway.
+fn thrown_by_cast() -> ForeignError !io =
+  match catch_fault(fn() => {
+    let b: Bytes = cast(a_string_as_object())
+    b
+  }) {
+    Ok(_) -> panic("cast accepted a String as Bytes")
+    Err(e) -> e
+  }
+
 pub fn main() -> Unit !io = {
   let p = taken(boom)
   let n = taken(not_a_number)
@@ -74,5 +99,35 @@ pub fn main() -> Unit !io = {
   # what they catch, not in what they report
   bad = bad + check("both barriers report the same kind", f.kind, n.kind)
   bad = bad + check("both barriers report the same message", f.message, n.message)
+
+  # ---- step B: `cast_e`, the reclaim whose failure is a value -------------
+  #
+  # `cast` is declared pure and leaves by throwing (design doc 一.3, LANG-02).
+  # `cast_e` is the transitional spelling that hands the failure back instead,
+  # and the two questions worth asking on this backend are the two below: a
+  # hit is `Ok` with the value intact, and a miss is `Err` under the JVM's own
+  # name for it.
+  let o = a_string_as_object()
+  let hit: Result[String, ForeignError] = cast_e(o)
+  bad = bad + check("a cast that hits carries the value through",
+    match hit {
+      Ok(s) -> s
+      Err(e) -> "Err(" ++ e.kind ++ ")"
+    }, "hello")
+  let miss: Result[Bytes, ForeignError] = cast_e(o)
+  let m = match miss {
+    Ok(_) -> panic("cast_e accepted a String as Bytes")
+    Err(e) -> e
+  }
+  bad = bad + check("a cast that misses names the JVM's own failure class",
+    m.kind, "java.lang.ClassCastException")
+  # the same distinction the barriers are checked for: a name, not a rendering
+  bad = bad + check_true("the kind is a name and not a rendering",
+    not str.contains(m.kind, ":"))
+  bad = bad + check("nothing sits under a failed cast", to_string(m.cause), "None")
+  # and the two spellings are the same reclaim: what `cast` throws is what
+  # `cast_e` hands back, which is what makes stage 3 a substitution
+  bad = bad + check("cast_e reports what cast throws", m.kind, thrown_by_cast().kind)
+
   println("mismatches " ++ to_string(bad))
 }

@@ -3278,7 +3278,7 @@ fn hidden_from_user_code() -> List[String] =
 fn visible_to_user_code() -> List[String] =
   ["len", "get", "range", "sort_by", "to_string", "join", "panic", "expect",
     "parse_int", "parse_int_radix", "char_is_alnum", "code_points",
-    "from_code_points", "args", "catch_fault", "catch_panic", "cast"]
+    "from_code_points", "args", "catch_fault", "catch_panic", "cast", "cast_e"]
 
 test "internal builtins hide from user code but not std" {
   let user = test_cx()
@@ -6482,12 +6482,24 @@ fn check_call(
     }
     if all_ok { wits = ws }
   }
-  if s.is_builtin && s.name == "cast" {
+  if s.is_builtin && (s.name == "cast" || s.name == "cast_e") {
     # T is bound here (an unbound type param already errored above). It must be
     # a reference type: CHECKCAST cannot target a primitive (docs/cast-interop.md §三)
-    let target = subst(s.ret, m, em)
+    #
+    # `cast` hands T back and `cast_e` wraps it in a `Result`, so the type the
+    # rule is about is read differently -- but it is the same rule, and saying
+    # so here is what keeps the transitional spelling from being a second,
+    # slightly different `cast`.
+    let target = if s.name == "cast" {
+      subst(s.ret, m, em)
+    } else {
+      match subst(s.ret, m, em) {
+        TyAdt(_, targs) -> targs[0]
+        _ -> TyError
+      }
+    }
     if target == TyInt || target == TyFloat || target == TyBool {
-      cx1 = cerr_h(cx1, "`cast` target must be a reference type, not " ++
+      cx1 = cerr_h(cx1, "`" ++ s.name ++ "` target must be a reference type, not " ++
           ty_show(cx1.adts, target), lo, hi,
         "cast reclaims an erased Java Object via CHECKCAST; primitive targets aren't supported")
     }

@@ -16,7 +16,7 @@ use std/list
 use std/map
 use std/set
 use types.{
-  intr_at, Rt, RtStrings, RtBytes, RtArray, RtIo, peel_opaque,
+  intr_at, Rt, RtStrings, RtBytes, RtArray, RtIo, peel_opaque, cast_e_target,
   Ty, TyInt, TyFloat, TyBool, TyString, TyBytes, TyUnit, TyNever,
   TyError, TyVar, TyAdt, TyList, TyMap, TySet, TyArray, TyJava, TyTuple, TyFn,
   Adts, AdtI, CtorI, FieldI, adt_of, adt_jvm_name, ctor_jvm_name,
@@ -152,6 +152,15 @@ fn ldc_str(m: MethodVisitor, s: String) -> Unit !io = {
   ()
 }
 
+## A class constant. ASM spells one as a `Type` handed to `visitLdcInsn`; the
+## JVM resolves it at first execution, which is why `cast_e` can be given its
+## target as a value without the emitter knowing anything the CHECKCAST would
+## not have known.
+fn ldc_class(m: MethodVisitor, internal: String) -> Unit !io = {
+  m.visitLdcInsn(Type.getObjectType(internal).expect("class constant"))
+  ()
+}
+
 fn ldc_long(m: MethodVisitor, v: Int) -> Unit !io = {
   m.visitLdcInsn(Long.valueOf(v).expect("boxed"))
   ()
@@ -250,6 +259,37 @@ fn unerase(g: Gen, t: Ty) -> Unit !io = {
   }
   ()
 }
+
+## The class `unerase` would check against, as a name rather than as an
+## emitted instruction. `cast_e` needs the same decision as a `Class` operand,
+## because its check happens inside a runtime method instead of here
+## (codegen.gen_cast_e), and taking it from a second table is how the two
+## would come to disagree about, say, whether a `Set` is a HAMT.
+##
+## The two places it cannot mirror an instruction: `unerase` unboxes after
+## checking a primitive's box, which a `Class` cannot express -- and does not
+## need to, since the checker refuses a primitive target for both spellings --
+## and it emits nothing for the erased types, where `Object` is the class that
+## accepts everything, which is the same answer as no check at all.
+fn unerase_class(adts: Adts, t: Ty) -> String =
+  match t {
+    TyOpaque(_, _, _, tgt) -> unerase_class(adts, tgt)
+    TyInt -> "java/lang/Long"
+    TyFloat -> "java/lang/Double"
+    TyBool -> "java/lang/Boolean"
+    TyString -> "java/lang/String"
+    TyBytes -> "[B"
+    TyAdt(aid, _) -> adt_jvm_name(adt_of(adts, aid))
+    TyList(_) -> PVEC_CLASS
+    TyMap(_, _) -> HAMT_CLASS
+    TySet(_) -> HAMT_CLASS
+    TyArray(_) -> ARRAY_CLASS
+    TyTuple(elems) -> tuple_class(len(elems))
+    TyJava(fqcn, _) -> internal_of(fqcn)
+    TyFn(params, _, _) -> fn_iface(len(params))
+    TyUnit -> UNIT_CLASS
+    TyVar(_, _) | TyNever | TyError -> obj()
+  }
 
 fn pop_value(g: Gen, t: Ty) -> Unit !io = {
   let n = slots_of(t)
@@ -2442,6 +2482,13 @@ fn gen_cintrinsic(g: Gen, name: String, args: List[CExpr], ty: Ty) -> (Gen, Bool
       "(Ljava/lang/String;)Ljava/lang/String;", false)
   } else if name == "cast" {
     unerase(g1, ty)
+  } else if name == "cast_e" {
+    # The same check, moved off this stack and into a method
+    # (codegen.gen_cast_e says why), with the target passed along as the
+    # `Class` the CHECKCAST would have named.
+    ldc_class(g1.mv, unerase_class(g1.adts, cast_e_target(ty)))
+    g1.mv.visitMethodInsn(OP_INVOKESTATIC, IO_CLASS, "cast_e",
+      "(Ljava/lang/Object;Ljava/lang/Class;)LResult;", false)
   } else {
     match rt_intrinsic_class(name) {
       Some(cls) -> {

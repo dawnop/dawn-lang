@@ -369,6 +369,14 @@ C 侧没有,于是「往还不存在的目录里写文件」只在一个后端�
    `catch_fault` 拦下和被 `catch_panic` 拦下,拿到的 `kind`/`message` 逐字相同;
    `foreign_error.dawn` 在两个后端上都断言这一点。过渡期(v0.32.0/v0.33.0)另有一对
    `catch_fault_e`/`catch_panic_e`,那是种子纪律的产物,已随迁移收尾删掉。
+4. **屏障不是 `ForeignError` 的唯一来源。** 2026-07-30 起还有 `cast_e`
+   (LANG-02 的过渡拼法,终局是 `cast` 本身;见 audit/error-model-design.md §6.10)。
+   它把这张表用到一个新地方,两格的答案是:JVM 的 `kind` 是
+   `java.lang.ClassCastException`——从真抛出来的异常上读的,和屏障同一段代码
+   (`gen_caught_err`)——而 **native 上这个失败根本不存在**:那个后端的 `cast` 是一次
+   重解释而非检查,而它那个 `Object` 唯一的来源 `use java` 在 native 上是拒绝的。
+   所以 native 的 `cast_e` 恒出 `Ok`。这不是第二套错误模型,是**同一张表在一个后端
+   上有一格是空的**——照第 2 条,以后填上也不算毁约。
 
 ## 13. 结论
 
