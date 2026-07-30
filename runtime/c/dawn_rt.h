@@ -459,6 +459,9 @@ dawn_adt *dawn_bytes_decode(const dawn_bytes *b, dawn_str *charset);
 dawn_str *dawn_str_of_int(int64_t v);
 dawn_str *dawn_str_of_float(double v);
 dawn_str *dawn_str_of_bool(bool v);
+/* `<N bytes>` -- the language renders a Bytes as its length, not its content.
+ * The fourth member of the str_of_* family, one per show scalar. */
+dawn_str *dawn_str_of_bytes(const dawn_bytes *b);
 /* A String as it appears *inside* a rendered value: source-literal escaping
  * between double quotes. What the trait method `show` does at a String, so
  * that punctuation and content stay distinguishable. */

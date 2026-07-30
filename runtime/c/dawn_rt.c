@@ -475,6 +475,17 @@ dawn_str *dawn_str_of_float(double v) {
   return dawn_str_copy(buf, (size_t)n);
 }
 
+dawn_str *dawn_str_of_bytes(const dawn_bytes *b) {
+  /* A summary, not the contents: `Bytes` is one of the show scalars
+   * (types.dawn's `show_scalars`) and the language renders it as `<N bytes>`.
+   * That is what `dawn/rt/Show` answers for a `byte[]` on the JVM, and this
+   * is the same rendering compiled for the other backend rather than a second
+   * opinion about what a Bytes looks like. */
+  char buf[32];
+  int n = snprintf(buf, sizeof buf, "<%lld bytes>", (long long)b->len);
+  return dawn_str_copy(buf, (size_t)n);
+}
+
 /* Static, not `dawn_str_lit`: the macro's storage is the enclosing block,
  * and a return hands the pointer out of it. */
 static dawn_str dawn_true_str = {{DAWN_IMMORTAL, DAWN_K_STR}, 4, "true"};

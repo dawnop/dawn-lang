@@ -1008,6 +1008,20 @@ fn option_tag(ctor: String) -> Int = {
   panic("emitc: Option has no constructor " ++ ctor)
 }
 
+## The static type behind an operand that crosses erased.
+##
+## Lowering boxes a value on its way into a type-variable slot and the CBox
+## records what it came from, which is the only place that type survives:
+## `cex_ty(CBox(_, _))` is TyError, because past the box the slot's type is
+## the variable's. Used for diagnostics, where naming the type is the whole
+## difference between a message someone can act on and one they cannot.
+fn erased_from(e: CExpr) -> Ty =
+  match e {
+    CBox(_, from) -> from
+    CDup(inner, _) -> erased_from(inner)
+    _ -> cex_ty(e)
+  }
+
 fn emit_intrinsic(st: CSt, name: String, args: List[CExpr], ty: Ty) -> (CSt, String) = {
   var st1 = st
   var cargs: List[String] = []
@@ -1027,8 +1041,27 @@ fn emit_intrinsic(st: CSt, name: String, args: List[CExpr], ty: Ty) -> (CSt, Str
     (st1, "dawn_str_of_float(" ++ a0 ++ ")")
   } else if name == "str_of_bool" {
     (st1, "dawn_str_of_bool(" ++ a0 ++ ")")
+  } else if name == "str_of_bytes" {
+    (st1, "dawn_str_of_bytes(" ++ a0 ++ ")")
   } else if name == "quote" {
     (st1, "dawn_str_quote(" ++ a0 ++ ")")
+  } else if name == "show" {
+    # Lowering's last resort (lower.dawn's show_at): a value with a Show
+    # witness that it could neither walk nor find an impl body for, handed
+    # over *erased* for a runtime to identify. The JVM has one that can --
+    # `dawn/rt/Show.show`, an instanceof chain over what the host still knows
+    # at run time. Native does not and cannot: an erased slot here is a
+    # `void*` carrying a kind tag, and a tag says "an ADT", never which one,
+    # so the `String.valueOf` half of that chain has no counterpart.
+    #
+    # Nothing produces this today -- Bytes was the one type that reached it,
+    # and it comes through `str_of_bytes` above now. The arm is here so that
+    # if something ever does, the refusal names the type instead of the
+    # intrinsic. The box lowering wrapped the value in is the only place that
+    # type survives: `cex_ty` of a CBox is TyError.
+    panic("emitc: cannot render " ++ ty_key(erased_from(args[0])) ++
+        " for native -- `show` hands the value over erased and there is no " ++
+        "run-time type to recover it from; give the type an `impl Show`")
   } else if name == "to_float" {
     (st1, "((double)(" ++ a0 ++ "))")
   } else if name == "to_int" {

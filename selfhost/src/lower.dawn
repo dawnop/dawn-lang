@@ -1553,6 +1553,13 @@ fn show_at(st: LSt, x: CExpr, t: Ty) -> (LSt, CExpr) = {
   if t == TyFloat { return (st, CIntrinsic("str_of_float", [x], TyString)) }
   if t == TyBool { return (st, CIntrinsic("str_of_bool", [x], TyString)) }
   if t == TyString { return (st, CIntrinsic("quote", [x], TyString)) }
+  # The fifth show scalar (types.dawn's `show_scalars`), and the only one that
+  # used to fall off the end of this function into the erased `show` below.
+  # It has no structure to walk -- the language renders it as a summary of its
+  # length, not as its contents -- so it belongs with the other four: named,
+  # unerased, one arm per backend. Erased, it was unimplementable on native,
+  # where a `void*` and a kind tag are all there is to identify a value by.
+  if t == TyBytes { return (st, CIntrinsic("str_of_bytes", [x], TyString)) }
   if has_impl_at(st.impls, SHOW_ID, t) {
     let imp = impl_for(st, SHOW_ID, t)
     if provides(imp, "show") {
@@ -1584,8 +1591,20 @@ fn show_at(st: LSt, x: CExpr, t: Ty) -> (LSt, CExpr) = {
       return (st2, CCall(CDirect(st2.owner, name), [x] ++ ds, TyString))
     }
   }
-  # Bytes and the builtin containers have no structure of their own to walk,
-  # so the runtime does it. This arm goes away with them in S3.
+  # The last resort: hand the value over erased and let a runtime identify it.
+  #
+  # This used to carry Bytes and the builtin containers. S3 made the
+  # containers ordinary Dawn types with `impl[T: Show] Show[List[T]]` in std,
+  # and Bytes is named above, so nothing known reaches this arm any more --
+  # every type the checker gives a Show witness to is answered before here.
+  #
+  # It stays rather than becoming the panic below, and the reason is a cost
+  # asymmetry rather than a producer. What the JVM does with an erased value
+  # (`dawn/rt/Show.show`, an instanceof chain ending in `String.valueOf`) is a
+  # real best-effort answer; native has none and cannot have one, so its
+  # emitter refuses and says which type it refused. Deleting the arm would
+  # turn a type this list has not foreseen into a compiler panic on *both*
+  # backends, which is worse than the JVM keeping an answer native declines.
   if not expandable(t) {
     return (st, CIntrinsic("show", [adapt_in(x, t, TyVar("T", 0))], TyString))
   }

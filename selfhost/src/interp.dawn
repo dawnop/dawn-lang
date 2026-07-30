@@ -251,6 +251,25 @@ fn stringify(v: CValue) -> String =
     _ -> "<value>"
   }
 
+## The trait method `show`, which is the *nested* rendering and so a different
+## function from `stringify` above: `to_string("a")` is `a`, while a String
+## reached through a `[T: Show]` bound is `"a"` (spec §4.3, and lower.dawn's
+## show_at draws the same line at the other end). The two were one arm of
+## `call_builtin` until 2026-07-30, and one arm cannot answer both.
+##
+## `None` is a refusal, and the reason it is not a rendering: `show` is what
+## lowering emits for a value handed over *erased*, and the interpreter has no
+## more run-time type to recover it from than the C backend does. The merged
+## arm answered the literal string `"<value>"` for those -- a wrong answer
+## rather than a refusal, and a const folds into the emitted program, so it
+## would have been baked into both backends' output.
+fn show_value(v: CValue) -> Option[String] =
+  match v {
+    VStr(s) -> Some(quote_str(s))
+    VInt(_) | VFloat(_) | VBool(_) -> Some(stringify(v))
+    _ -> None
+  }
+
 ## Source-literal escaping, backslash first -- the same sequence `dawn/rt/Show`
 ## applies, and the order is load-bearing: escaping `\` last would double the
 ## one the quote escape had just introduced.
@@ -613,11 +632,23 @@ fn call_builtin(icx: ICx, st: ESt, env: Env, name: String, args: List[CValue]) -
       _ -> panic("comptime interpreter bug: to_int expects Float")
     }
     Ok((st, env, VInt(to_int(f))))
-    # str_of_* and show are what interpolation lowers to; to_string is the
-    # surface builtin. All four are one operation here.
-  } else if name == "to_string" || name == "show" || name == "str_of_int" ||
+    # str_of_* is what interpolation lowers to; to_string is the surface
+    # builtin. These are the *top-level* rendering, where a String is itself
+    # and not a quoted literal.
+  } else if name == "to_string" || name == "str_of_int" ||
   name == "str_of_float" || name == "str_of_bool" {
     Ok((st, env, VStr(stringify(args[0]))))
+  } else if name == "show" {
+    match show_value(args[0]) {
+      Some(s) -> Ok((st, env, VStr(s)))
+      None -> cerr(st, env, "`show` cannot render this value at comptime")
+    }
+  } else if name == "str_of_bytes" {
+    # There is no `VBytes`: comptime has no Bytes values at all, so nothing
+    # can reach this. Refusing by name beats falling through to the generic
+    # "not available at comptime", which would read as a missing feature
+    # rather than as a value the interpreter cannot hold.
+    cerr(st, env, "a Bytes cannot be rendered at comptime")
     # the nested rendering of a String, which a synthesised `show` body reaches
     # for every String field
   } else if name == "quote" {
@@ -1741,6 +1772,25 @@ test "float folds agree with the backends on signed zero and NaN" {
   assert map.get(out.consts, "D") == Some(VBool(false))
   assert map.get(out.consts, "E") == Some(VBool(false))
   assert map.get(out.consts, "F") == Some(VBool(true))
+}
+
+test "`show` is the nested rendering and `to_string` is not" {
+  # The one place the two operations differ is a String, and they shared an
+  # arm of `call_builtin` until 2026-07-30 -- so comptime answered the
+  # top-level form for both, against the contract lower.dawn writes down.
+  # Nothing in Core reaches the `show` arm today (Bytes was its only producer
+  # and is named now), which is exactly why this is a unit test: no program
+  # can put the contract under a differential.
+  assert show_value(VStr("a")) == Some("\"a\"")
+  assert stringify(VStr("a")) == "a"
+  assert show_value(VStr("a\nb\"c")) == Some("\"a\\nb\\\"c\"")
+  # the scalars render the same either way -- quoting is the whole difference
+  assert show_value(VInt(0 - 3)) == Some("-3")
+  assert show_value(VBool(true)) == Some("true")
+  # and a value the interpreter cannot identify is a refusal rather than the
+  # literal "<value>" the merged arm used to fold in
+  assert show_value(VList([VInt(1)])) == None
+  assert show_value(VUnit) == None
 }
 
 fn ffi_java_src() -> String =
