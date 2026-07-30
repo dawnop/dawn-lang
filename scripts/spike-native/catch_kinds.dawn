@@ -16,7 +16,12 @@
 # be classified by: **a failure the language defines is a panic; a failure the
 # outside world caused is not.** The io primitives are the second kind and, as
 # it turns out, the only one.
+#
+# The fault-raising io primitives are std-only, so they come from
+# `use std/raw`: `io.read_file` is the same call inside `catch_fault`, which
+# would answer the question this file asks before the barrier here saw it.
 use std/io
+use std/raw
 use std/str
 use std/bytes
 use std/map
@@ -80,7 +85,7 @@ pub fn main() -> Unit !io = {
   println("mod by zero    " ++ barrier(fn() => 10 % n(0)))
   println("list index     " ++ barrier(fn() => [1, 2, 3][n(5)]))
   println("map key        " ++ barrier(fn() => empty_map()[n(1)]))
-  println("bytes at       " ++ barrier(fn() => bytes.at(bytes_utf8("abc"), n(9))))
+  println("bytes at       " ++ barrier(fn() => bytes.at(bytes.utf8("abc"), n(9))))
   println("bad code point " ++ barrier(fn() => str.len(from_code_points([n(0x110000)]))))
 
   # Not a failure at all: std/bytes documents that both ends are clamped and
@@ -88,19 +93,19 @@ pub fn main() -> Unit !io = {
   # runtime panicked here while its own comment said it clamped like the JVM.
   println("-- documented not to fail --")
   println("bytes slice    " ++ barrier(fn() =>
-      bytes.len(bytes.slice(bytes_utf8("abc"), n(3), n(1)))))
+      bytes.len(bytes.slice(bytes.utf8("abc"), n(3), n(1)))))
 
   println("-- the outside world's failures: the io barrier is for these --")
-  println("read_file      " ++ barrier(fn() => str.len(io_read_file("/no/such/dawn/path"))))
-  println("list_names     " ++ barrier(fn() => len(io_list_names("/no/such/dawn/path"))))
+  println("read_file      " ++ barrier(fn() => str.len(raw.read_file("/no/such/dawn/path"))))
+  println("list_names     " ++ barrier(fn() => len(raw.list_names("/no/such/dawn/path"))))
 
   println("-- catch_panic is the catch-all: both kinds stop here --")
   println("panic          " ++ outer(fn() => panic("deliberate")))
-  println("read_file      " ++ outer(fn() => str.len(io_read_file("/no/such/dawn/path"))))
+  println("read_file      " ++ outer(fn() => str.len(raw.read_file("/no/such/dawn/path"))))
   println("no failure     " ++ outer(fn() => n(7)))
 
   println("-- two io barriers deep --")
   println("panic          " ++ two_deep(fn() => panic("deliberate")))
-  println("read_file      " ++ two_deep(fn() => str.len(io_read_file("/no/such/dawn/path"))))
+  println("read_file      " ++ two_deep(fn() => str.len(raw.read_file("/no/such/dawn/path"))))
   println("no failure     " ++ two_deep(fn() => n(7)))
 }

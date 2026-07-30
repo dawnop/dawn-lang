@@ -11,11 +11,12 @@
 # field, so the interop cannot name it and the language server reaches it
 # through a method handle. A channel is not a method handle.
 #
-# Like io_cli, this cannot live in selfhost/src or std yet -- the previous
-# release's compiler has to compile HEAD's sources and does not know these
-# names. The corpus is compiled by HEAD alone, so this is where they get their
-# first differential run.
+# The four that can fail -- `temp_dir`, `write_bytes`, `read_bytes`, `rename` --
+# come from `use std/raw` rather than std/io, because the primitive is what the
+# two backends have to agree on and std/io's job is to put it inside
+# `catch_fault`. See stdext/raw.dawn.
 use std/io
+use std/raw
 use std/str
 use std/bytes
 
@@ -29,46 +30,46 @@ fn is_set(o: Option[String]) -> Bool =
 
 pub fn main() -> Unit !io = {
   io.println("-- the process's own view --")
-  line("cwd is absolute ", str.starts_with(io_cwd(), "/"))
-  line("PATH is set     ", is_set(io_getenv("PATH")))
-  line("no such var     ", is_set(io_getenv("DAWN_SPIKE_NO_SUCH_VAR")))
+  line("cwd is absolute ", str.starts_with(io.cwd(), "/"))
+  line("PATH is set     ", is_set(io.getenv("PATH")))
+  line("no such var     ", is_set(io.getenv("DAWN_SPIKE_NO_SUCH_VAR")))
 
   # a fresh directory rather than a fixed path: two of these primitives are
   # about publishing something indivisibly, and a shared scratch path would let
   # one run see another's leftovers
   io.println("-- a scratch directory of our own --")
-  let dir = io_temp_dir("", "dawn-spike-files-")
-  line("fresh and a dir ", io_is_dir(dir))
-  line("not a symlink   ", io_is_symlink(dir))
+  let dir = raw.temp_dir("", "dawn-spike-files-")
+  line("fresh and a dir ", io.is_dir(dir))
+  line("not a symlink   ", io.is_symlink(dir))
 
   # the parent directories do not exist: the JVM side has always created them
   # and the C side had not, which no corpus had ever asked
   io.println("-- bytes round-trip, through parents that did not exist --")
   let nested = dir ++ "/one/two/three.bin"
   let payload = bytes.utf8("héllo — 字节")
-  io_write_bytes(nested, payload)
-  let back = io_read_bytes(nested)
-  line("parents created ", io_exists(nested))
+  raw.write_bytes(nested, payload)
+  let back = raw.read_bytes(nested)
+  line("parents created ", io.exists(nested))
   line("bytes agree     ", back == payload)
   line("multi-byte kept ", bytes.len(back) == bytes.len(payload))
 
   io.println("-- rename is a move, not a copy --")
   let moved = dir ++ "/one/two/moved.bin"
-  io_rename(nested, moved)
-  line("source is gone  ", not io_exists(nested))
-  line("target is there ", io_exists(moved))
+  raw.rename(nested, moved)
+  line("source is gone  ", not io.exists(nested))
+  line("target is there ", io.exists(moved))
 
   io.println("-- delete reports whether there was anything to delete --")
-  line("first delete    ", io_delete(moved))
-  line("second delete   ", io_delete(moved))
+  line("first delete    ", io.delete(moved))
+  line("second delete   ", io.delete(moved))
 
   # the harness runs both backends with stdin at /dev/null, so a short read is
   # the end-of-input signal and both must agree on it
   io.println("-- stdin at end of input --")
-  line("nothing to read ", bytes.len(io_read_stdin(16)) == 0)
+  line("nothing to read ", bytes.len(io.read_stdin(16)) == 0)
 
   io.println("-- and it cleans up after itself --")
-  let _ = io_delete(dir ++ "/one/two")
-  let _ = io_delete(dir ++ "/one")
-  line("scratch removed ", io_delete(dir))
+  let _ = io.delete(dir ++ "/one/two")
+  let _ = io.delete(dir ++ "/one")
+  line("scratch removed ", io.delete(dir))
 }

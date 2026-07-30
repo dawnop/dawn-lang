@@ -14,7 +14,13 @@
 #
 # `parse_float` is not here: `str_of_float` is not byte-identical to Java's
 # Double.toString, so no float can be printed in a differential corpus.
+#
+# `use std/raw` is where the primitives std does something to come from:
+# `bytes_at`'s -1, `bytes_decode`'s `None` and `io_read_file`'s raise are what
+# the two backends have to agree on, and std turns each into something else.
 use std/io
+use std/bytes
+use std/raw
 use std/str
 
 fn opt_int(o: Option[Int]) -> String =
@@ -57,8 +63,8 @@ pub fn main() -> Unit !io = {
   io.println("trim               = [" ++ str.trim("  \t hi \n ") ++ "]")
   io.println("trim nothing       = [" ++ str.trim("hi") ++ "]")
   io.println("trim all           = [" ++ str.trim("   ") ++ "]")
-  io.println("lower              = " ++ str_lower("MiXeD 42"))
-  io.println("upper              = " ++ str_upper("MiXeD 42"))
+  io.println("lower              = " ++ str.to_lower("MiXeD 42"))
+  io.println("upper              = " ++ str.to_upper("MiXeD 42"))
 
   io.println("-- classification --")
   io.println("is_letter a        = " ++ to_string(char_is_letter(97)))
@@ -88,17 +94,17 @@ pub fn main() -> Unit !io = {
   io.println("join one           = " ++ join(["only"], "-"))
 
   io.println("-- bytes --")
-  let b = bytes_utf8(mixed)
-  io.println("bytes_len          = " ++ to_string(bytes_len(b)))
-  io.println("bytes_at 0         = " ++ to_string(bytes_at(b, 0)))
-  io.println("bytes_at oob       = " ++ to_string(bytes_at(b, 99)))
+  let b = bytes.utf8(mixed)
+  io.println("bytes_len          = " ++ to_string(bytes.len(b)))
+  io.println("bytes_at 0         = " ++ to_string(raw.byte_at(b, 0)))
+  io.println("bytes_at oob       = " ++ to_string(raw.byte_at(b, 99)))
   io.println("decode round trip  = " ++
-      match bytes_decode(b, "UTF-8") {
+      match raw.decode(b, "UTF-8") {
         Some(s) -> s
         None -> "none"
       })
   io.println("decode bad charset = " ++
-      match bytes_decode(b, "NoSuchCharset") {
+      match raw.decode(b, "NoSuchCharset") {
         Some(_) -> "some"
         None -> "none"
       })
@@ -106,6 +112,6 @@ pub fn main() -> Unit !io = {
   io.println("-- the barrier --")
   # catch_fault catches an exception on the JVM and a panic natively; both make
   # this an Err, which is the part that has to agree.
-  io.println("try missing file   = " ++ ok_or_err(catch_fault(fn() => io_read_file("no-such-file"))))
-  io.println("try ok             = " ++ ok_or_err(catch_fault(fn() => str_upper("fine"))))
+  io.println("try missing file   = " ++ ok_or_err(catch_fault(fn() => raw.read_file("no-such-file"))))
+  io.println("try ok             = " ++ ok_or_err(catch_fault(fn() => str.to_upper("fine"))))
 }

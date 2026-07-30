@@ -3246,34 +3246,52 @@ pub fn visible_builtin_names(cx: Cx) -> List[String] = {
   out
 }
 
+## One name from each std-only family, and one from each family that is
+## deliberately language surface. Naming three of them was how half the table
+## stayed missing until 2026-07-30: `io_*`, `bytes_*` and `str_lower/upper`
+## were declared internal nowhere and asserted about nowhere, so user code
+## could call `io_read_file` and take the fault raw
+## (docs/audit/re-audit-2026-07-30.md RD-02). A per-family sample fails the
+## day a family is added without a decision about it.
+fn hidden_from_user_code() -> List[String] =
+  ["map_insert", "set_has", "array_push", "popcount", "cursor_next",
+    "io_read_file", "io_println", "io_run", "bytes_at", "bytes_from_array",
+    "str_upper"]
+
+## The prelude half: names spec 11 promises user code may write. A fix that
+## over-reaches shows up here rather than in somebody's program.
+fn visible_to_user_code() -> List[String] =
+  ["len", "get", "range", "sort_by", "to_string", "join", "panic", "expect",
+    "parse_int", "parse_int_radix", "char_is_alnum", "code_points",
+    "from_code_points", "args", "catch_fault", "catch_panic", "cast"]
+
 test "internal builtins hide from user code but not std" {
   let user = test_cx()
-  assert builtin_sig(user, "map_insert") == None
-  assert builtin_sig(user, "len") != None
   let std_cx = cx_new(Some("std/map"), None)
-  assert builtin_sig(std_cx, "map_insert") != None
-  # the Array family is std-internal for the same reason: it is the backend
-  # contract, not language surface
-  assert builtin_sig(user, "array_push") == None
-  assert builtin_sig(user, "popcount") == None
-  assert builtin_sig(std_cx, "array_push") != None
-  assert builtin_sig(std_cx, "popcount") != None
-  var has_map_insert = false
-  var has_array_push = false
-  for n in visible_builtin_names(user) {
-    if n == "map_insert" { has_map_insert = true }
-    if n == "array_push" { has_array_push = true }
-  }
-  assert not has_map_insert
-  assert not has_array_push
-  # the table shape the language server reads has to hide the same names the
-  # resolver does, or it offers what the checker will then refuse
+  # the table the language server reads has to hide exactly what the resolver
+  # hides, or it offers names the checker then refuses
   let user_bins = visible_bins(builtins(), user)
-  assert map.get(user_bins, "map_insert") == None
-  assert map.get(user_bins, "array_push") == None
-  assert map.get(user_bins, "len") != None
+  var user_names: Set[String] = set.empty()
+  for n in visible_builtin_names(user) { user_names = set.insert(user_names, n) }
+
+  for n in hidden_from_user_code() {
+    # it is a builtin at all -- a typo here would pass every assertion below
+    assert map.get(builtins(), n) != None
+    assert builtin_sig(user, n) == None
+    assert builtin_sig(std_cx, n) != None
+    assert map.get(user_bins, n) == None
+    assert not set.has(user_names, n)
+  }
+  for n in visible_to_user_code() {
+    assert builtin_sig(user, n) != None
+    assert map.get(user_bins, n) != None
+    assert set.has(user_names, n)
+  }
+  # std sees the whole table, which is what makes std/io and std/bytes able to
+  # write over the primitives they wrap
   let std_bins = visible_bins(builtins(), std_cx)
   assert map.get(std_bins, "map_insert") != None
+  assert map.get(std_bins, "io_read_file") != None
   assert map.size(std_bins) == map.size(builtins())
 }
 

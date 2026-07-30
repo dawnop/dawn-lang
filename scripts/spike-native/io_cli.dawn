@@ -8,34 +8,38 @@
 # irreducible effect boundary than stdout, and the contract had one and not
 # the other -- an accident, not a decision.
 #
-# They cannot be used from selfhost/src or std yet: the previous release's
-# compiler has to compile HEAD's sources, and it does not know these names.
-# This corpus is compiled by HEAD alone, so it is where they get exercised in
-# the meantime -- and the harness compares stdout, stderr and the exit code,
-# which is exactly the three surfaces these touch.
+# std/io spells all five now, so most of this reads through it -- the wrappers
+# for the non-failing ones are one-line aliases and reach the same runtime
+# function. `mkdirs` is the exception and comes from `use std/raw`: it raises a
+# fault, `io.mkdirs` is that call inside `catch_fault`, and what the two
+# backends have to agree on is the primitive. See stdext/raw.dawn.
+#
+# The harness compares stdout, stderr and the exit code, which is exactly the
+# three surfaces these touch.
 use std/io
+use std/raw
 
 pub fn main() -> Unit !io = {
   io.println("-- stderr is a channel, not a method handle --")
-  io_eprint("on stderr: ")
-  io_eprintln("no trailing space before this")
+  io.eprint("on stderr: ")
+  io.eprintln("no trailing space before this")
 
   io.println("-- existence and directories --")
   # absolute paths, so the answers do not depend on where the harness was run
-  io.println("exists /          = " ++ to_string(io_exists("/")))
-  io.println("exists /nonexist  = " ++ to_string(io_exists("/nonexistent-zzz")))
-  io.println("is_dir /          = " ++ to_string(io_is_dir("/")))
-  io.println("is_dir /nonexist  = " ++ to_string(io_is_dir("/nonexistent-zzz")))
+  io.println("exists /          = " ++ to_string(io.exists("/")))
+  io.println("exists /nonexist  = " ++ to_string(io.exists("/nonexistent-zzz")))
+  io.println("is_dir /          = " ++ to_string(io.is_dir("/")))
+  io.println("is_dir /nonexist  = " ++ to_string(io.is_dir("/nonexistent-zzz")))
 
   io.println("-- mkdirs is idempotent --")
   # a fixed path, and deliberately run twice: creating what already exists is
   # not a failure, which is the half of the contract a first run cannot show
   let d = "/tmp/dawn-spike-io-cli/a/b"
-  io_mkdirs(d)
-  io_mkdirs(d)
-  io.println("made and remade   = " ++ to_string(io_is_dir(d)))
+  raw.mkdirs(d)
+  raw.mkdirs(d)
+  io.println("made and remade   = " ++ to_string(io.is_dir(d)))
 
   io.println("-- exit ends it --")
-  io_exit(0)
+  io.exit(0)
   io.println("unreachable")
 }
