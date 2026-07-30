@@ -1098,26 +1098,32 @@ fn gen_caught_err(m: MethodVisitor, base: Int) -> Unit !io = {
   ()
 }
 
-## `cast_e(o, c)`: reclaim `o` as `c`, handing back `Ok(o)` or an `Err`
-## carrying what the failure was (docs/audit/error-model-design.md 二.B). The
-## transitional half of step B -- `cast` keeps throwing until stage 3.
+## `cast(o, c)`: reclaim `o` as `c`, handing back `Ok(o)` or an `Err` carrying
+## what the failure was (docs/audit/error-model-design.md 二.B).
 ##
 ## Two things about the shape are decisions rather than convenience:
 ##
-## 1. **A method, not an inlined try block.** `cast` is one CHECKCAST written
-##    straight into the caller, and wrapping *that* in a handler cannot work:
-##    the JVM clears the operand stack when it enters one, so a `cast_e` part
-##    way through an expression -- `f(a, cast_e(x))`, with `a` already pushed
-##    -- would arrive at the merge point having lost `a`. A method has a stack
-##    of its own, which is the same reason the barriers above are methods.
+## 1. **A method, not an inlined try block.** The reclaim used to be one
+##    CHECKCAST written straight into the caller, and wrapping *that* in a
+##    handler cannot work: the JVM clears the operand stack when it enters one,
+##    so a `cast` part way through an expression -- `f(a, cast(x))`, with `a`
+##    already pushed -- would arrive at the merge point having lost `a`. A
+##    method has a stack of its own, which is the same reason the barriers
+##    above are methods.
 ## 2. **`Class.cast`, not an `instanceof` test.** It is CHECKCAST with its
 ##    operand passed in rather than baked into the instruction, so `null` is
 ##    still reclaimed (as CHECKCAST reclaims it) and the exception is a real
 ##    `ClassCastException` with the JVM's own message. `kind` is therefore
 ##    read off a thrown exception exactly as it is in the barriers, rather
 ##    than being a string literal this file made up.
-fn gen_cast_e(cw: AdtClassWriter) -> Unit !io = {
-  let m = cw.method(ACC_PUBLIC + ACC_STATIC, "cast_e",
+##
+## The method was called `cast_e` while step B's transitional spelling existed
+## (v0.34.0/v0.35.0). It is named after the intrinsic again, which is what
+## every other method in this class is named after -- an implementation symbol
+## outliving the surface name it was a stand-in for would leave the runtime
+## class the last place a deleted spelling survives.
+fn gen_cast(cw: AdtClassWriter) -> Unit !io = {
+  let m = cw.method(ACC_PUBLIC + ACC_STATIC, "cast",
     "(Ljava/lang/Object;Ljava/lang/Class;)LResult;").expect("mv")
   m.visitCode()
   let try_start = Label.new()
@@ -1162,11 +1168,11 @@ pub fn gen_io_class(supers: List[String]) -> Bytes !io = {
   # native failure kinds have no VM-error arm at all.)
   gen_try_closure(cw, "catch_panic", [PANIC_CLASS, "java/lang/Exception"])
 
-  # Not an io primitive and not a barrier: `cast_e` is pure. It lives here
+  # Not an io primitive and not a barrier: `cast` is pure. It lives here
   # because this is the class that owns the one translation from a Throwable
   # to a `ForeignError`, and a second copy of that translation is exactly
   # what the design forbids.
-  gen_cast_e(cw)
+  gen_cast(cw)
 
   # a single shared reader: a fresh BufferedReader per call would let one call's
   # buffer swallow input the next call should see. Lazily initialised in io_read_line.

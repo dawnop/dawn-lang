@@ -16,7 +16,7 @@ use std/list
 use std/map
 use std/set
 use types.{
-  intr_at, Rt, RtStrings, RtBytes, RtArray, RtIo, peel_opaque, cast_e_target,
+  intr_at, Rt, RtStrings, RtBytes, RtArray, RtIo, peel_opaque, cast_target,
   Ty, TyInt, TyFloat, TyBool, TyString, TyBytes, TyUnit, TyNever,
   TyError, TyVar, TyAdt, TyList, TyMap, TySet, TyArray, TyJava, TyTuple, TyFn,
   Adts, AdtI, CtorI, FieldI, adt_of, adt_jvm_name, ctor_jvm_name,
@@ -153,7 +153,7 @@ fn ldc_str(m: MethodVisitor, s: String) -> Unit !io = {
 }
 
 ## A class constant. ASM spells one as a `Type` handed to `visitLdcInsn`; the
-## JVM resolves it at first execution, which is why `cast_e` can be given its
+## JVM resolves it at first execution, which is why `cast` can be given its
 ## target as a value without the emitter knowing anything the CHECKCAST would
 ## not have known.
 fn ldc_class(m: MethodVisitor, internal: String) -> Unit !io = {
@@ -261,9 +261,9 @@ fn unerase(g: Gen, t: Ty) -> Unit !io = {
 }
 
 ## The class `unerase` would check against, as a name rather than as an
-## emitted instruction. `cast_e` needs the same decision as a `Class` operand,
+## emitted instruction. `cast` needs the same decision as a `Class` operand,
 ## because its check happens inside a runtime method instead of here
-## (codegen.gen_cast_e), and taking it from a second table is how the two
+## (codegen.gen_cast), and taking it from a second table is how the two
 ## would come to disagree about, say, whether a `Set` is a HAMT.
 ##
 ## The two places it cannot mirror an instruction: `unerase` unboxes after
@@ -2480,19 +2480,12 @@ fn gen_cintrinsic(g: Gen, name: String, args: List[CExpr], ty: Ty) -> (Gen, Bool
   } else if name == "quote" {
     g1.mv.visitMethodInsn(OP_INVOKESTATIC, SHOW_CLASS, "quote",
       "(Ljava/lang/String;)Ljava/lang/String;", false)
-  } else if name == "cast" || name == "cast_e" {
-    # Both spellings are one reclaim since step B's stage 2 flipped `cast`'s
-    # table entry, and they share this arm rather than each having one: a
-    # signature that says `Result` and an emitter that still writes a bare
-    # CHECKCAST is the disagreement step A left between its stage 2 and stage 3
-    # (design doc 六.8), and one arm is how it cannot happen twice.
-    #
-    # The check moves off this stack and into a method (codegen.gen_cast_e says
+  } else if name == "cast" {
+    # The check moves off this stack and into a method (codegen.gen_cast says
     # why), with the target passed along as the `Class` the CHECKCAST would
-    # have named. `cast_e` is still the runtime method's name -- stage 3 gives
-    # it the surface name it has been standing in for.
-    ldc_class(g1.mv, unerase_class(g1.adts, cast_e_target(ty)))
-    g1.mv.visitMethodInsn(OP_INVOKESTATIC, IO_CLASS, "cast_e",
+    # have named.
+    ldc_class(g1.mv, unerase_class(g1.adts, cast_target(ty)))
+    g1.mv.visitMethodInsn(OP_INVOKESTATIC, IO_CLASS, "cast",
       "(Ljava/lang/Object;Ljava/lang/Class;)LResult;", false)
   } else {
     match rt_intrinsic_class(name) {

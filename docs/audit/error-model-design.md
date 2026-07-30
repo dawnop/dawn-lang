@@ -8,8 +8,9 @@
 > `catch_fault`/`catch_panic` 的表项换成 `Result[T, ForeignError]`；`std/io` 走 (ii)）、
 > 阶段 3（调用点迁回原名，两后端的实现重新指向结构化那份，过渡拼法删除）。
 > 终局只有一对屏障，载荷是 `ForeignError`，不保留 String 版本。
-> **B 步进行中——阶段 1 已落地**（`cast_e` 过渡内建，dormant；调用点一个不动），
-> 分期见 §6.10；C2 步冻结。**
+> **B 步也已完成——三期全部合并**（阶段 1 `cast_e` 过渡内建、阶段 2 调用点迁移 +
+> 表项翻转、阶段 3 调用点迁回并删除过渡拼法），`cast` 的失败从此是值，
+> 分期见 §6.10、收尾见 §6.12；C2 步冻结。**
 > 分期理由与每期内容见下方 §六「落地分期」——**那一节是现状，第二节是意图**，
 > 两者冲突时以第六节为准。第二、五节里几处与代码对不上的说法，第六节开头逐条记了。
 > [`../native-backend-plan.md`](../native-backend-plan.md) §1 定了 native 的 panic 是
@@ -449,7 +450,7 @@ B 步受的约束与 A 步**逐字相同**，不是类比：`cast[T](o) -> T` �
 |---|---|---|
 | **1**（已合并） | `cast_e` 过渡内建（表 87 → 88），两后端都发射；测试与语料。**`cast(` 一个不动。** | 之后发 tag，`seed-release.txt` 推进 |
 | **2**（已合并） | 全部 `cast` 调用点迁到 `cast_e`；**同一提交**里把 `cast` 的表项改成 `Result[T, ForeignError]`，**并把两个后端的发射一起改指新形状**（此时它零调用点）。落下来的样子见 §6.11 | 再发 tag + 种子推进 |
-| **3** | 调用点从 `cast_e` 换回 `cast`；删掉 `cast_e` 的表项与两个发射器分支里的第二个名字；JVM 那个 `dawn/rt/Io.cast_e` 方法收编成 `cast`（native 没有对应符号，它是内联的 C，不必动） | 终局 |
+| **3**（已合并） | 调用点从 `cast_e` 换回 `cast`；删掉 `cast_e` 的表项与两个发射器分支里的第二个名字；JVM 那个 `dawn/rt/Io.cast_e` 方法收编成 `cast`（native 没有对应符号，它是内联的 C，不必动）。落下来的样子见 §6.12 | 终局 |
 
 **阶段 1 的具体清单**：
 
@@ -547,3 +548,48 @@ B 步受的约束与 A 步**逐字相同**，不是类比：`cast[T](o) -> T` �
   Core golden 的 13 份 dump 逐字节不变，`selfhost.sha` 动了 9 个模块（checker、doc、
   emit、emitc、jfold、jreflect、maven、types、vendor）——恰好是改了**代码**的那些，
   `interp` 只改了注释所以没动，这本身是那份 hash 的一次抽检。
+
+### 6.12 B 步阶段 3 落下来的样子（迁移收尾）
+
+- **调用点 16 处换回 `cast`**：树内 14（`jreflect` 5、`jfold` 4、`vendor` 2、`maven` 1、
+  `packages/web` 2）加 `scripts/error-contract/probe.dawn` 2。**形状一处没动**——
+  `let r: Result[T, ForeignError] = cast(..)` 再 match `r` 是永久形状（§6.11 第 3 条），
+  这一步只换了一个词，没有把三行收成一行的余地。
+- **删掉的**：`types.dawn` 的表项（88 → 87）；`checker.visible_to_user_code()` 少一个名字；
+  `interp` 的 comptime 拒绝名单少一条（60 → 59）；`doc.dawn` 的 builtin 清单少一条；
+  两个发射器的 `name == "cast" || name == "cast_e"` 合回 `name == "cast"`，checker 那条
+  「目标须是引用类型」同理。编译器内部的两个名字一并跟上（`cast_e_target` →
+  `cast_target`、`gen_cast_e` → `gen_cast`），它们只在源码里存在，不值一个字节。
+- **`dawn/rt/Io.cast_e` 改名成 `cast`，这是一处判断而不是照抄。** 这个方法对用户不可见，
+  留着旧名字也能跑；改的理由是 `dawn/rt/Io` 里**每一个**方法都以它实现的那个 intrinsic
+  命名（`catch_fault`、`catch_panic`、`io_*`），留下 `cast_e` 就是让运行时类成为全仓
+  最后一处还活着的死拼法，而解释它的只有一句注释和 git 历史。代价是可测的一次性开销
+  （下面的 `emit *`），不对称的是那处不协调是永久的。A 步的同题答案指向同一边：那边的
+  屏障方法名一直就是表面名，改名的是发射器里的函数（`gen_try_closure_e` →
+  `gen_try_closure`），一个字节都没动。
+- **native 一行不用改**：那个后端的 cast 是发射在调用处的一次重解释，压根没有对应的
+  运行时符号可改（§6.10 的表里已经写明），恒出 `Ok` 的那条分支照旧。
+- **probe 换了问法**（同 §6.8 的做法）。「两个拼法逐字一致」的两条断言随第二个拼法消失，
+  预算改问同样没人问过的另一半载荷：失败的 `message` 里**两个类名都在**——它是什么、
+  它没能变成什么（实测 `Cannot cast java.lang.String to [B`）。这是 JVM 给失败的
+  `Class.cast` 写的原话，钉住它就是把「从真异常上读下来的」和「这段代码自己编的字符串」
+  分开——与上面 `kind` 那两条是同一个区分，只是换了一个字段。`missed_by_cast` 那个
+  只为对照存在的助手一并删掉。
+
+**阶段 3 的 Emit-Change**（实测，三处）：
+
+- `doc --builtins`：少 `cast_e` 那一条，5 行。
+- `lsp`：三份补全清单（id 31 / 36 / 39）各少一项 `cast_e`，`detail` 就是签名，共 6 行（三对）。
+- `emit *`：**六个目标全动**，与前两期只动一格不同。`dawn/rt/Io.class` 六份都变
+  （方法改名 + 常量池整体后移一格，javap 逐条比对无一条指令不同）；另外有 `cast` 调用点的
+  模块也各变一条 invokestatic 的 NameAndType：`selfhost` 的 `jreflect`/`jfold`/`vendor`/`maven`
+  （5+4+2+1）、`packages/web` 的 `server`（2）、`playground` 里那份随包带进去的
+  `dawn$pkg$web/server`（2）。`site`、`packages/json`、`examples/calc.dawn` 只有 `Io.class`。
+- Core golden 的 13 份 dump 逐字节不变；`selfhost.sha` 动了 13 个模块，其中 11 个是真改了
+  代码的（checker、codegen、doc、emit、emitc、interp、jfold、jreflect、maven、types、vendor），
+  另 2 个（exhaustive、reach）是 `types.dawn` 一动就顺带的 ADT id 漂移。
+
+**一条实测出来的账**：`emit *` 这一整格**全部**是改运行时方法名的价钱，跟 14 个调用点无关。
+把改名单独退回去再量一次，`selfhost` 与 `packages/web` 与种子逐字节相同——原因和 §6.11 第 1 条
+一样，调用点写的是哪个拼法在字节码里根本不存在，被调方法的名字才在。所以这次的 Emit-Change
+不是「迁移收尾自然会有的」，是一次命名决定的标价，它就该这么被读。

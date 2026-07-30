@@ -3278,7 +3278,7 @@ fn hidden_from_user_code() -> List[String] =
 fn visible_to_user_code() -> List[String] =
   ["len", "get", "range", "sort_by", "to_string", "join", "panic", "expect",
     "parse_int", "parse_int_radix", "char_is_alnum", "code_points",
-    "from_code_points", "args", "catch_fault", "catch_panic", "cast", "cast_e"]
+    "from_code_points", "args", "catch_fault", "catch_panic", "cast"]
 
 test "internal builtins hide from user code but not std" {
   let user = test_cx()
@@ -6482,13 +6482,13 @@ fn check_call(
     }
     if all_ok { wits = ws }
   }
-  if s.is_builtin && (s.name == "cast" || s.name == "cast_e") {
+  if s.is_builtin && s.name == "cast" {
     # T is bound here (an unbound type param already errored above). It must be
     # a reference type: CHECKCAST cannot target a primitive (docs/cast-interop.md §三)
     #
-    # Both spellings return `Result[T, ForeignError]` since step B's stage 2,
-    # so T is read from inside it for both. It was a two-branch read for one
-    # release, while `cast` still handed T back bare.
+    # T is read from inside the `Result` the reclaim returns. It was a bare
+    # return type until step B's stage 2, and a two-branch read for the one
+    # release the transitional spelling lived through.
     let target = match subst(s.ret, m, em) {
       TyAdt(_, targs) -> targs[0]
       _ -> TyError
