@@ -354,11 +354,11 @@ fn lower_into(
   owner: String,
   f: TFun
 ) -> Result[(ESt, CFun), (ESt, Env, Ctl)] !io =
-  match catch_panic(fn() =>
+  match catch_panic_e(fn() =>
       lower.lower_fn_only(owner, f, icx.traits, icx.impls, icx.adts, no_sigs(),
         icx.syms, st.next_lam)) {
     Err(e) ->
-      match cerr(st, env, "`" ++ f.name ++ "` cannot be evaluated at compile time (" ++ e ++ ")") {
+      match cerr(st, env, "`" ++ f.name ++ "` cannot be evaluated at compile time (" ++ e.message ++ ")") {
         Err(t) -> Err(t)
         Ok(_) -> panic("unreachable")
       }
@@ -1494,13 +1494,13 @@ fn fresh_st(fuel: Int) -> ESt = {
 fn fold_expr(icx: ICx, fuel: Int, e: TExpr, lo: Int, hi: Int) -> Result[CValue, Diag] !io = {
   let st = fresh_st(fuel)
   let env: Env = map.empty()
-  let lowered = catch_panic(fn() =>
+  let lowered = catch_panic_e(fn() =>
       lower.lower_expr_only(icx.owner, e, icx.traits, icx.impls, icx.adts,
         no_sigs(), icx.syms, 0))
   match lowered {
     Err(msg) ->
       Err(Diag {
-        msg: "comptime: this cannot be evaluated at compile time (" ++ msg ++ ")",
+        msg: "comptime: this cannot be evaluated at compile time (" ++ msg.message ++ ")",
         lo: lo,
         hi: hi,
         hint: ""
@@ -1785,8 +1785,8 @@ fn probe_icx() -> ICx = {
 fn probe_builtin(icx: ICx, name: String) -> String !io = {
   let env: Env = map.empty()
   let no_args: List[CValue] = []
-  match catch_panic(fn() => call_builtin(icx, fresh_st(1000), env, name, no_args)) {
-    Err(msg) -> if str.contains(msg, NO_ARM_LISTED) { "listed-no-arm" } else { "arm" }
+  match catch_panic_e(fn() => call_builtin(icx, fresh_st(1000), env, name, no_args)) {
+    Err(msg) -> if str.contains(msg.message, NO_ARM_LISTED) { "listed-no-arm" } else { "arm" }
     Ok(r) ->
       match r {
         Ok(_) -> "arm"

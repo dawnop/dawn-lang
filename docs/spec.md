@@ -1070,23 +1070,25 @@ Dawn 无异常：Java 调用抛出的异常默认原样穿透并终止程序（�
 ```dawn
 use java "java.lang.Long"
 
-fn parse(s: String) -> Result[Int, String] !io =
-  catch_fault(fn() => Long.parseLong(s))       # 异常 → Err("java.lang.NumberFormatException: ...")
+fn parse(s: String) -> Result[Int, ForeignError] !io =
+  catch_fault(fn() => Long.parseLong(s))
+  # Err(ForeignError { kind: "java.lang.NumberFormatException", message: ..., cause: None })
 ```
 
-- 签名 `catch_fault[T](f: fn() -> T !io) -> Result[T, String] !io`；闭包可为纯函数。
+- 签名 `catch_fault[T](f: fn() -> T !io) -> Result[T, ForeignError] !io`；闭包可为纯函数。
 - 只拦 `java.lang.Exception` 及其子类；`Error` 不拦——**Dawn 的 panic
   （`dawn.rt.PanicError` 是 `Error` 子类）原样穿透**，panic 仍然是 bug、不可恢复。
-- `Err` 载荷是 `Throwable.toString()`（异常类名 + 消息），供日志与上抛；
-  需要区分异常种类时按前缀匹配字符串。**这条建议正在被撤销**——见下面的
-  `catch_fault_e`。
+- `Err` 载荷是 `ForeignError`——一个 prelude record，字段与取值见 §9.8.1。它到
+  v0.32.0 为止是一句**渲染好的字符串**（`Throwable.toString()`），本节也曾建议
+  「需要区分异常种类时按前缀匹配字符串」；那条建议已被撤销，`kind` 是它的替代物。
 - 边界之内失败照常传播：`catch_fault` 包住整段复合调用即可，无需逐调用包裹。
 
-配套的 `catch_panic[T](f: fn() -> T !io) -> Result[T, String] !io` 拦的是
-**任意 `Throwable`（含 Dawn panic `PanicError`）**，用于**监督边界**——服务器的
-单个请求、任务 runner 的单次执行：一个请求 panic 应变成 500 并记录，而非掀翻整条
-连接或进程。它与 `catch_fault` 分工明确：`catch_fault` 处理**预期外部失败**、放 panic 穿透；
-`catch_panic` 是**隔离点**、兜住一切。普通业务失败仍走 `Result`，别拿 `catch_panic`
+配套的 `catch_panic[T](f: fn() -> T !io) -> Result[T, ForeignError] !io` 拦的是
+**Dawn panic（`PanicError`）与 `Exception` 两类**——不是任意 `Throwable`：
+`VirtualMachineError`（堆耗尽、栈溢出）穿透，资源耗尽不是一个值。它用于**监督边界**——
+服务器的单个请求、任务 runner 的单次执行：一个请求 panic 应变成 500 并记录，而非掀翻
+整条连接或进程。它与 `catch_fault` 分工明确：`catch_fault` 处理**预期外部失败**、放
+panic 穿透；`catch_panic` 是**隔离点**。普通业务失败仍走 `Result`，别拿 `catch_panic`
 当常规错误处理。
 
 > **这条分工与后端无关。** JVM 从类层次白拿它（`Error` 对 `Exception`）；native
@@ -1096,20 +1098,14 @@ fn parse(s: String) -> Result[Int, String] !io =
 > 这一类）。两个后端的实测比对在 `scripts/spike-native/catch_kinds.dawn`；
 > 在它写出来之前 native 的 `catch_fault` 拦下了本该穿透的每一个 panic。
 
-#### 9.8.1 结构化载荷：`catch_fault_e` / `catch_panic_e`（过渡期）
+#### 9.8.1 载荷 `ForeignError`
 
-「按前缀匹配字符串」是一条**要被撤销**的建议：它把控制流建在一句可以被重构、被
-本地化、被换一版 JDK 改掉的文本上。替代物是同样两个屏障、载荷换成一个 prelude
-record：
+「按前缀匹配字符串」曾是本节的建议，现已**撤销**：它把控制流建在一句可以被重构、被
+本地化、被换一版 JDK 改掉的文本上。载荷是一个 prelude record：
 
 ```dawn
 type ForeignError = { kind: String, message: String, cause: Option[String] }
-
-fn catch_fault_e[T](f: fn() -> T !io) -> Result[T, ForeignError] !io
-fn catch_panic_e[T](f: fn() -> T !io) -> Result[T, ForeignError] !io
 ```
-
-抓什么、放什么穿透，与不带 `_e` 的那对**逐字相同**；差别只在 `Err` 里装的是什么。
 
 - `kind` 是**后端自己给这类失败起的名字**，而且是个**名字**不是一句渲染：JVM 上是
   二进制名（`getClass().getName()`，如 `java.lang.NumberFormatException`、
@@ -1119,12 +1115,14 @@ fn catch_panic_e[T](f: fn() -> T !io) -> Result[T, ForeignError] !io
 - `message` 是失败自己说的话（JVM 的 `getMessage()`，无则空串）；`cause` 是底下那层
   失败的渲染，没有则 `None`。不带栈：渲染栈的代价要付在每一次屏障上。
 
-**`_e` 这个后缀是过渡的。** 一个内建的**签名**和它的名字一样受种子纪律约束，而且更
-紧——改名可以一期内让两张表都认识两个拼法，改载荷类型不行：编译器自己的调用点没法
-同时满足两张表。所以新形状先以不被任何人调用的名字落地，发一次 release 教会上一代
-编译器，再迁调用点，最后把这两个签名交还给 `catch_fault`/`catch_panic` 并删掉 `_e`。
-分期见 `docs/audit/error-model-design.md` §六。终局只有一对屏障，载荷是
-`ForeignError`，不保留 String 版本。
+**还有一对过渡拼法 `catch_fault_e` / `catch_panic_e`。** 它们与上面两个**签名完全
+相同**，抓什么、放什么穿透也逐字相同，存在的唯一理由是种子纪律：一个内建的**签名**
+和它的名字一样受它约束，而且更紧——改名可以一期内让两张表都认识两个拼法，改载荷
+类型不行，编译器自己的调用点没法同时满足两张表。所以新形状先以不被任何人调用的名字
+落地（v0.32.0），发一次 release 教会上一代编译器，再迁调用点并把签名交还给
+`catch_fault`/`catch_panic`（本版）。**新代码一律写不带 `_e` 的名字**；下一次种子推进
+之后 `_e` 这对会被删掉。分期见 `docs/audit/error-model-design.md` §六。终局只有一对
+屏障，载荷是 `ForeignError`，不保留 String 版本。
 
 ---
 
@@ -1350,10 +1348,16 @@ std → 内建，std 模块自己的 `pub fn len` 正是靠这一条合法。
   内部以 `unsafe_pure` 包装 `java.lang.Math`；`@trusted_pure` 是该逃生门的旧名，已废弃）
 - **`std/io`**：`io.read_line io.read_file io.write_file io.list_dir io.is_dir`（全部 `!io`；
   `println`/`print` 同住此模块但由 prelude 直呼，`args`/`catch_fault` 是内建）
-  - `io.write_file(path, content) -> Result[Unit, String]` — **自动创建缺失的父目录**。
+  - 会失败的那些一律 `Result[T, ForeignError]`（§9.8.1）——`mkdirs` / `read_file` /
+    `write_file` / `read_bytes` / `write_bytes` / `rename` / `temp_dir` / `list_dir` /
+    `run`。到 v0.32.0 为止是 `Result[T, String]`，装的是屏障渲染好的那句话；换成
+    结构化载荷，是因为「止在 std 门口」等于把这次要消灭的东西留给每一个调用方
+  - `io.write_file(path, content) -> Result[Unit, ForeignError]` — **自动创建缺失的父目录**。
     `Ok` 不带值:曾返回 `String.length()`(UTF-16 码元,既不是字符数也不是字节数),
     2026-07-19 去掉——没有调用点读它
-  - `io.list_dir(path) -> Result[List[String], String]` — 排序后的条目名；path 不是目录时 `Err`
+  - `io.list_dir(path) -> Result[List[String], ForeignError]` — 排序后的条目名；path 不是
+    目录时 `Err`，`kind` 是 `"io.not_a_directory"`——std 自己铸的唯一一个 kind，
+    其余都是后端给的
   - `io.is_dir(path) -> Bool` — 不存在或出错都视为 `false`
 
 实现策略：能薄包 Java 就薄包（`String` 直接是 `java.lang.String`），持久 `List`/`Map`/`Set`
