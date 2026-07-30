@@ -1,0 +1,80 @@
+# The numeric edges spec §4.3 lists as *guarantees* -- the ones where C's
+# answer is undefined and the JVM's is not, so a backend that writes the
+# obvious C operator is right only by accident of the host.
+#
+# Two families, both found by the 2026-07-30 re-audit (RP-03) and both green
+# on x86-64 before the fix, which is the whole reason they are written down:
+#
+#   shifts     the count is taken mod 64 ("the low 6 bits", same as LSHL).
+#              C says a count >= the width, or a negative one, is undefined.
+#              x86-64's shift instruction masks by 63 in hardware, so the
+#              emitted C happened to agree; AArch64's `lsl` by 64 gives 0.
+#   to_int     Float -> Int is D2L, which saturates: NaN -> 0, out of range ->
+#              the nearer end. C's cast is undefined for all three and
+#              x86-64's `cvttsd2si` answers INT64_MIN for all three.
+#
+# Every value printed here is an Int or a Bool. Float *rendering* still
+# diverges between the backends (RP-01: the C runtime has no shortest
+# round-trip dtoa), so printing a Float would make this corpus fail for a
+# reason it is not about.
+#
+# The operands come out of `var`s where a literal would do, because a
+# constant-folded shift is the comptime interpreter's answer rather than the
+# backend's, and it is the backend that was wrong.
+use std/io
+
+fn shl(a: Int, b: Int) -> Int = a << b
+
+fn shr(a: Int, b: Int) -> Int = a >> b
+
+fn ushr(a: Int, b: Int) -> Int = a >>> b
+
+pub fn main() -> Unit !io = {
+  var one = 1
+  var eight = -8
+  var min = -9223372036854775807 - 1
+
+  println("-- a shift count is its low 6 bits --")
+  # 64 selects 0, so the value is untouched; 65 selects 1
+  println(to_string(shl(one, 64)))
+  println(to_string(shl(one, 65)))
+  println(to_string(shr(eight, 64)))
+  println(to_string(shr(eight, 65)))
+  println(to_string(ushr(eight, 64)))
+  println(to_string(ushr(eight, 65)))
+
+  println("-- including a negative one: -1 selects 63 --")
+  println(to_string(shl(one, -1)))
+  println(to_string(shr(min, -1)))
+  println(to_string(ushr(min, -1)))
+
+  println("-- and shifting into the sign bit is a value, not an overflow --")
+  println(to_string(shl(one, 63)))
+  println(to_string(shl(one, 63) == min))
+  println(to_string(ushr(min, 63)))
+  println(to_string(shr(min, 63)))
+
+  println("-- the ordinary counts still work --")
+  println(to_string(shl(one, 3)))
+  println(to_string(shr(eight, 1)))
+  println(to_string(ushr(eight, 60)))
+
+  println("-- to_int saturates the way D2L does --")
+  var zero = 0.0
+  var big = 1.0
+  let nan = zero / zero
+  let inf = big / zero
+  println(to_string(to_int(nan)))
+  println(to_string(to_int(inf)))
+  println(to_string(to_int(0.0 - inf)))
+  println(to_string(to_int(1.0e30)))
+  println(to_string(to_int(0.0 - 1.0e30)))
+  println(to_string(to_int(9223372036854775808.0)))
+  println(to_string(to_int(-9223372036854775808.0)))
+
+  println("-- and truncates toward zero in range --")
+  println(to_string(to_int(2.7)))
+  println(to_string(to_int(0.0 - 2.7)))
+  println(to_string(to_int(0.0)))
+  println(to_string(to_int(0.0 - 0.0)))
+}

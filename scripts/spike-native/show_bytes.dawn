@@ -1,0 +1,66 @@
+# Rendering a `Bytes`, the fifth show scalar and the last one that had no
+# intrinsic of its own.
+#
+# `show_scalars()` promises the language renders Int, Float, Bool, String and
+# Bytes itself. Four of them lower to a named intrinsic (`str_of_int`,
+# `str_of_float`, `str_of_bool`, `quote`); Bytes fell past all of them into
+# the *erased* `show`, which hands the value to a runtime and asks it what it
+# is. The JVM has one that can answer -- an instanceof chain -- and native
+# does not, so `dawn __emitc` on any of the lines below died in the emitter
+# with "intrinsic not implemented for native: show". A program the JVM
+# compiles and runs, and the other backend cannot compile at all: RP-02.
+#
+# The rendering itself is a summary, `<N bytes>`, not the contents. That is
+# what the JVM already printed, so what changed is which backends can print
+# it, not what gets printed.
+#
+# Every position matters separately, because each reaches show_at by a
+# different route: top level through `to_string`, a record field and a
+# constructor payload through the synthesised structural body, a list element
+# and an Option payload through a dictionary, a tuple element through the
+# tuple witness.
+use std/bytes
+use std/io
+
+pub type Blob = { name: String, data: Bytes } derive Show
+
+pub type Wrap =
+  | Empty
+  | One(b: Bytes)
+derive Show
+
+pub fn main() -> Unit !io = {
+  let hi = bytes.utf8("hi")
+  let none: Bytes = bytes.utf8("")
+  let long = bytes.utf8("0123456789")
+
+  println("-- on its own --")
+  println(to_string(hi))
+  println(to_string(none))
+  println(to_string(long))
+
+  println("-- interpolated, which is the same rendering --")
+  println("${hi} and ${none}")
+
+  println("-- as a field, where a String next to it is quoted and it is not --")
+  println(to_string(Blob { name: "a\nb", data: hi }))
+
+  println("-- as a constructor payload --")
+  println(to_string(One(long)))
+  println(to_string(Empty))
+
+  println("-- through a dictionary: an Option payload and a list element --")
+  println(to_string(Some(hi)))
+  let no: Option[Bytes] = None
+  println(to_string(no))
+  println(to_string([hi, none]))
+
+  println("-- and in a tuple, whose witness is built from its elements --")
+  println(to_string((hi, 1)))
+  println(to_string((hi, "s", long)))
+
+  println("-- the summary is the length, so a concatenation shows the sum --")
+  println(to_string(hi ++ long))
+  println(to_string(bytes.len(hi ++ long)))
+  println(to_string(bytes.slice(long, 2, 5)))
+}

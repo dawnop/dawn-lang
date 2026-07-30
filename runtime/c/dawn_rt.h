@@ -459,6 +459,9 @@ dawn_adt *dawn_bytes_decode(const dawn_bytes *b, dawn_str *charset);
 dawn_str *dawn_str_of_int(int64_t v);
 dawn_str *dawn_str_of_float(double v);
 dawn_str *dawn_str_of_bool(bool v);
+/* `<N bytes>` -- the language renders a Bytes as its length, not its content.
+ * The fourth member of the str_of_* family, one per show scalar. */
+dawn_str *dawn_str_of_bytes(const dawn_bytes *b);
 /* A String as it appears *inside* a rendered value: source-literal escaping
  * between double quotes. What the trait method `show` does at a String, so
  * that punctuation and content stay distinguishable. */
@@ -495,9 +498,12 @@ int64_t dawn_cmp_int(int64_t a, int64_t b);
 int64_t dawn_cmp_float(double a, double b);
 int64_t dawn_cmp_str(dawn_str *a, dawn_str *b);
 
-/* arithmetic whose C behaviour would be undefined where the JVM's is not */
+/* arithmetic whose C behaviour would be undefined where the JVM's is not.
+ * The shifts are the third member of this family and are emitted inline --
+ * masking the count to six bits is an expression, so it needs no call. */
 int64_t dawn_idiv(int64_t a, int64_t b);
 int64_t dawn_imod(int64_t a, int64_t b);
+int64_t dawn_int_of_float(double v); /* Float -> Int, saturating like D2L */
 
 /* Control. The two failure kinds, and the difference is which barrier stops
  * one: `catch_fault` takes a fault (the outside world said no) and lets a panic

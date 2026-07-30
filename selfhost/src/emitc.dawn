@@ -682,10 +682,34 @@ fn emit_binary(st: CSt, op: CBinOp, l: CExpr, r: CExpr, ty0: Ty) -> (CSt, String
     let (st1, lv) = emit_expr(st, l)
     let (st2, rv) = emit_expr(st1, r)
     (st2, "fmod(" ++ lv ++ ", " ++ rv ++ ")")
-  } else if op == CUshr {
+  } else if op == CShl || op == CShr || op == CUshr {
+    # A shift takes the low six bits of its count -- spec §4.3 states it as a
+    # guarantee, not as whatever the hardware does, because that is what the
+    # JVM's LSHL/LSHR/LUSHR do and the two backends have to answer alike.
+    #
+    # C guarantees the opposite: a count of 64 or more, or a negative one, is
+    # undefined (C11 6.5.7p3). The three arms here emitted the count raw, and
+    # the corpus stayed green because x86-64's shift instruction masks by 63
+    # in hardware -- so the emitted C happened to be right on the one
+    # architecture CI runs. AArch64's `lsl` by 64 answers 0, and `1 << -1`
+    # answers whatever the low bits of -1 select, which is `1 << 63` here and
+    # need not be there.
     let (st1, lv) = emit_expr(st, l)
     let (st2, rv) = emit_expr(st1, r)
-    (st2, "((int64_t)((uint64_t)(" ++ lv ++ ") >> (" ++ rv ++ ")))")
+    let n = "((" ++ rv ++ ") & 63)"
+    # `<<` also goes through uint64_t: shifting a bit into (or past) the sign
+    # bit of a signed type is undefined on its own account (C11 6.5.7p4), and
+    # `1 << 63` is a value Dawn defines -- Int wraps, so it is Int.MIN.
+    # `>>` is the one that stays signed, because the sign extension *is* the
+    # arithmetic shift `>>` promises; gcc and clang both define it that way
+    # for a negative left operand, which C leaves implementation-defined.
+    (st2,
+      if op == CShr {
+        "((" ++ lv ++ ") >> " ++ n ++ ")"
+      } else {
+        let sh = if op == CShl { " << " } else { " >> " }
+        "((int64_t)((uint64_t)(" ++ lv ++ ")" ++ sh ++ n ++ "))"
+      })
   } else if op == CDiv && ty == TyInt {
     let (st1, lv) = emit_expr(st, l)
     let (st2, rv) = emit_expr(st1, r)
@@ -985,6 +1009,20 @@ fn option_tag(ctor: String) -> Int = {
   panic("emitc: Option has no constructor " ++ ctor)
 }
 
+## The static type behind an operand that crosses erased.
+##
+## Lowering boxes a value on its way into a type-variable slot and the CBox
+## records what it came from, which is the only place that type survives:
+## `cex_ty(CBox(_, _))` is TyError, because past the box the slot's type is
+## the variable's. Used for diagnostics, where naming the type is the whole
+## difference between a message someone can act on and one they cannot.
+fn erased_from(e: CExpr) -> Ty =
+  match e {
+    CBox(_, from) -> from
+    CDup(inner, _) -> erased_from(inner)
+    _ -> cex_ty(e)
+  }
+
 fn emit_intrinsic(st: CSt, name: String, args: List[CExpr], ty: Ty) -> (CSt, String) = {
   var st1 = st
   var cargs: List[String] = []
@@ -1004,12 +1042,38 @@ fn emit_intrinsic(st: CSt, name: String, args: List[CExpr], ty: Ty) -> (CSt, Str
     (st1, "dawn_str_of_float(" ++ a0 ++ ")")
   } else if name == "str_of_bool" {
     (st1, "dawn_str_of_bool(" ++ a0 ++ ")")
+  } else if name == "str_of_bytes" {
+    (st1, "dawn_str_of_bytes(" ++ a0 ++ ")")
   } else if name == "quote" {
     (st1, "dawn_str_quote(" ++ a0 ++ ")")
+  } else if name == "show" {
+    # Lowering's last resort (lower.dawn's show_at): a value with a Show
+    # witness that it could neither walk nor find an impl body for, handed
+    # over *erased* for a runtime to identify. The JVM has one that can --
+    # `dawn/rt/Show.show`, an instanceof chain over what the host still knows
+    # at run time. Native does not and cannot: an erased slot here is a
+    # `void*` carrying a kind tag, and a tag says "an ADT", never which one,
+    # so the `String.valueOf` half of that chain has no counterpart.
+    #
+    # Nothing produces this today -- Bytes was the one type that reached it,
+    # and it comes through `str_of_bytes` above now. The arm is here so that
+    # if something ever does, the refusal names the type instead of the
+    # intrinsic. The box lowering wrapped the value in is the only place that
+    # type survives: `cex_ty` of a CBox is TyError.
+    panic("emitc: cannot render " ++ ty_key(erased_from(args[0])) ++
+        " for native -- `show` hands the value over erased and there is no " ++
+        "run-time type to recover it from; give the type an `impl Show`")
   } else if name == "to_float" {
     (st1, "((double)(" ++ a0 ++ "))")
   } else if name == "to_int" {
-    (st1, "((int64_t)(" ++ a0 ++ "))")
+    # Not a cast. `to_int` is the JVM's D2L, which saturates -- NaN answers 0,
+    # and a value past either end answers that end (JVMS 6.5 d2l) -- while C's
+    # cast is undefined for all three (C11 6.3.1.4). x86-64 answers INT64_MIN
+    # for every one of them, so `to_int(0.0 / 0.0)` was 0 on the JVM and
+    # Int.MIN on native. The saturation is written down in the runtime rather
+    # than inline for the same reason `dawn_idiv` is: it is a branch, not an
+    # expression.
+    (st1, "dawn_int_of_float(" ++ a0 ++ ")")
   } else if name == "null_ref" {
     (st1, c_zero(ty))
   } else if name == "hash" {

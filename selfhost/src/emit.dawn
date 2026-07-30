@@ -2390,7 +2390,13 @@ fn gen_cintrinsic(g: Gen, name: String, args: List[CExpr], ty: Ty) -> (Gen, Bool
   } else if name == "str_of_bool" {
     g1.mv.visitMethodInsn(OP_INVOKESTATIC, "java/lang/String", "valueOf",
       "(Z)Ljava/lang/String;", false)
-  } else if name == "show" {
+  } else if name == "show" || name == "str_of_bytes" {
+    # `str_of_bytes` is the same instruction as the erased `show` and not by
+    # coincidence: a `byte[]` is already an Object, so the operand needed no
+    # box even when lowering erased it, and `Show.show`'s `instanceof [B` arm
+    # is where it landed either way. Naming the operand's type changed which
+    # emitter can compile it (native could not read a type off an erased slot)
+    # without changing a byte of what this one emits.
     g1.mv.visitMethodInsn(OP_INVOKESTATIC, SHOW_CLASS, "show",
       "(Ljava/lang/Object;)Ljava/lang/String;", false)
   } else if name == "quote" {

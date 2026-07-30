@@ -475,6 +475,17 @@ dawn_str *dawn_str_of_float(double v) {
   return dawn_str_copy(buf, (size_t)n);
 }
 
+dawn_str *dawn_str_of_bytes(const dawn_bytes *b) {
+  /* A summary, not the contents: `Bytes` is one of the show scalars
+   * (types.dawn's `show_scalars`) and the language renders it as `<N bytes>`.
+   * That is what `dawn/rt/Show` answers for a `byte[]` on the JVM, and this
+   * is the same rendering compiled for the other backend rather than a second
+   * opinion about what a Bytes looks like. */
+  char buf[32];
+  int n = snprintf(buf, sizeof buf, "<%lld bytes>", (long long)b->len);
+  return dawn_str_copy(buf, (size_t)n);
+}
+
 /* Static, not `dawn_str_lit`: the macro's storage is the enclosing block,
  * and a return hands the pointer out of it. */
 static dawn_str dawn_true_str = {{DAWN_IMMORTAL, DAWN_K_STR}, 4, "true"};
@@ -663,6 +674,24 @@ int64_t dawn_imod(int64_t a, int64_t b) {
   }
   if (a == INT64_MIN && b == -1) return 0;
   return a % b;
+}
+
+int64_t dawn_int_of_float(double v) {
+  /* `to_int` is the JVM's D2L, and D2L saturates: NaN is 0, and a value past
+   * either end of the range is that end (JVMS 6.5 d2l). A plain `(int64_t)v`
+   * is undefined for all three (C11 6.3.1.4), and on x86-64 `cvttsd2si`
+   * answers INT64_MIN for all three -- so `to_int(0.0 / 0.0)` was 0 on the
+   * JVM and INT64_MIN here.
+   *
+   * The bounds are compared in double, and 2^63 is written out rather than
+   * spelled INT64_MAX: 2^63 is exactly representable and INT64_MAX is not, so
+   * `(double)INT64_MAX` rounds *up* to 2^63 and a `v > (double)INT64_MAX`
+   * test would let 2^63 itself through into the undefined cast. INT64_MIN is
+   * exactly -2^63, so its end is inclusive. */
+  if (v != v) return 0;
+  if (v >= 9223372036854775808.0) return INT64_MAX;
+  if (v <= -9223372036854775808.0) return INT64_MIN;
+  return (int64_t)v;
 }
 
 /* ---- failures, and the two barriers that stop them ----------------------
