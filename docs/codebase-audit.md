@@ -28,6 +28,10 @@
 `WEB-08` `PLAY-01` `PLAY-02` `PLAY-03` `DOC-01`–`DOC-10` `TEST-01` `TEST-03`
 （其中 `SYN-04`/`ARCH-03`/`DOC-10`/`TEST-01`/`BOOT-03` 是部分修，条目里写明修了哪半）。
 
+**上表是 07-25 的定格，不重新计数**（理由见下一节末）。此后有条目改判：
+`SYN-02` 已于 2026-07-31 修完（连带把 `SYN-03` 从「以标 historical 的方式已修」
+变成产生式为真），见该条目。
+
 **驳回（8）**——`SYN-01`（标识符收窄会破坏现有代码，改的是规范措辞）、
 `SYN-05`（`!` 的两处用法位置不重叠，纯风格）、`SYN-06`（报歧义是刻意取舍，
 规范已写明理由）、`LANG-07`（禁环那半驳回，加载范围那半待办）、
@@ -154,7 +158,7 @@ TAST、codegen、LSP、spec 和历史文档之间的同步税。
 | 复现 | 处置前 | 处置后 |
 |---|---|---|
 | `中文` / `_hidden` 标识符 | 可编译运行 | 不变（SYN-01 驳回，改的是规范措辞） |
-| `make()(1)` | 语法错误 | 不变（SYN-02 待办） |
+| `make()(1)` | 语法错误 | 可编译运行（SYN-02 已修，2026-07-30/31 两刀） |
 | `9007199254740993` 往返 | `9007199254740992` | `9007199254740993` |
 | `1e400` 往返 | `Infinity` | `Err("number out of Float range: 1e400 at offset 0")` |
 | `"\b\f"` 往返 | 裸字节 `08 0c` | `"\b\f"` |
@@ -224,15 +228,22 @@ TAST、codegen、LSP、spec 和历史文档之间的同步税。
 
 ### SYN-02（P1）函数值调用不是正交的一般后缀调用
 
-> **【待办 —— 认可，属语言变更】**
+> **【已修 —— 分两刀，设计见 [application-syntax](audit/application-syntax-design.md)】**
 >
-> 描述准确：`make()(1)` 确实不能解析。这是 parser + AST + checker 三层的结构性改动
-> （`ECall`/`EMethod`/构造器特判合并成统一的 application 节点），会改变错误信息、
-> AST dump 与 `__parse` 的字节输出，必须走 `docs/<特性>-design.md` + 种子推进协议。
+> 描述准确：`make()(1)` 当时确实不能解析。
 >
-> 审查给的第二个选项（「在规范里明确承认这是受限的一等函数并删掉错误的 EBNF」）**部分已做**：
-> EBNF 已标 historical（SYN-04）。但规范里正面写清「函数值只在名字绑定位置可调用」
-> 还没写——那要连着 SYN-02 的最终取舍一起定，先留白比先写错好。
+> - **2026-07-30（加法）**：postfix 循环加同行 `(` 臂，三个验收形态全通，旧程序的
+>   AST 与错误文案逐字节不变。
+> - **2026-07-31（统一）**：删掉 `ident_or_call` 与构造器调用两处特判，`f(x)`、
+>   `Circle(1.0)` 与 `make()(1)` 走同一条后缀路径、落到同一个 `EApply` 节点；
+>   `ECall` 从 AST 消失。是哪种调用改由 checker 按 callee 判（`check_apply` 四分支），
+>   named argument 随之在**每个调用位置语法合法**、只有构造器接受——这一条结清了
+>   SYN-03。AST dump 因此重基线（`Emit-Change(parse …)`），字节码不变
+>   （同一棵 typed tree：改前的全部源码在新旧编译器下 `__emit` 逐字节相同）。
+>
+> 审查给的第二个选项（「在规范里明确承认这是受限的一等函数并删掉错误的 EBNF」）
+> 没有走：真正的问题不是文档说错了，是实现少做了一步。现在 spec §4.3 正面写了
+> 新规则（含跨行 `(` 不吃、named argument 由类型判定）。
 
 
 **证据**
@@ -241,7 +252,7 @@ TAST、codegen、LSP、spec 和历史文档之间的同步税。
 - `selfhost/src/parser.dawn:1263` 的 postfix 循环只处理 `?`、`!`、`[]` 和 `.`。
 - 普通调用只在 `selfhost/src/parser.dawn:1458` 的 `ident_or_call` 特判。
 - 构造器调用也在 `selfhost/src/parser.dawn:1390` 单独特判。
-- 实测 `make()(1)` 在第二个 `(` 报语法错误。
+- 实测 `make()(1)` 在第二个 `(` 报语法错误。（以上均为处置前的行号与行为。）
 
 **影响**
 
@@ -256,8 +267,16 @@ TAST、codegen、LSP、spec 和历史文档之间的同步税。
 
 ### SYN-03（P2）EBNF 的 named argument 范围错误
 
-> **【已修（以 SYN-04 的方式）】**——EBNF 整体标为 historical 并指明以 parser 为准，
-> 这条具体的错误随之不再误导。逐条修产生式的理由见 SYN-04。
+> **【已修 —— 先止血，2026-07-31 真正修完】**
+>
+> 第一步（止血）：EBNF 整体标为 historical 并指明以 parser 为准，这条具体的错误
+> 随之不再误导。
+>
+> 第二步（SYN-02 的统一刀）：`arg = [ IDENT ":" ] expr` 现在是**真的**——名字在每个
+> 调用位置都解析得下来，包括点调用与应用一个函数值。合法性从语法位置变成类型判定：
+> 只有构造器接受名字，其余 callee 报的是类型错误（「`f` is a function, not a
+> constructor; function calls do not take argument names」）而不再是一句
+> 「expected `)`」。EBNF 里这四条产生式因此不再是 historical 的一部分。
 
 
 `docs/grammar.ebnf:96` 写所有 `arg` 都可为 `IDENT ":" expr`，但
@@ -1980,7 +1999,6 @@ Dawn 当前最大的风险不是“功能少”，而是**项目对自己的承�
 | LANG-01（P0）+ ARCH-06 | `unsafe_pure` 的边界、comptime allowlist、trampoline evaluator | [purity-boundary](audit/purity-boundary-design.md) | 步 1–2 做／**步 3 冻结**（等 R6） |
 | ARCH-01/02（+ARCH-03/04） | 小型 lowered IR，及靠它拆 checker/emitter | [lowered-ir](audit/lowered-ir-design.md) —— **已降级为补充材料** | **等 Core IR**，然后拆 `Cx`/`Gen` |
 | ERR-02 / ERR-03 / LANG-02 | `ForeignError`、`bracket`、`cast` 返回 Result | [error-model](audit/error-model-design.md) | A、B 做／**C2 冻结**（等 Core IR） |
-| SYN-02（+SYN-03） | 统一的 application 后缀节点 | [application-syntax](audit/application-syntax-design.md) | **做**（不重合） |
 | LANG-04 / LANG-05 | `Char` 不透明类型、`type X = new T` | [nominal-types](audit/nominal-types-design.md) | 步 1–3 做／**步 4 冻结**（并入 Phase 6） |
 | LANG-06 / LANG-07 | `m.T`/`m.C`/`m.CONST`、`--closure` | [module-access](audit/module-access-design.md) | **做**（不重合） |
 | LSP-01 / LSP-02 / LSP-04 | URI/UTF-8 交给 JDK、debounce + generation | [lsp-robustness](audit/lsp-robustness-design.md) | **做**（不重合） |

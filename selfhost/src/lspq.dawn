@@ -12,9 +12,9 @@ use std/map
 use std/list
 use ast.{
   Module, Decl, Expr, Pattern, Stmt, FnDecl, CtorDecl, FieldDecl, MatchArm,
-  CtorArg, PatArg, LambdaParam, Param, TraitMethod, TypeDeclR, ImportName,
+  Arg, arg_exprs, PatArg, LambdaParam, Param, TraitMethod, TypeDeclR, ImportName,
   StrPart, SPText, SPInterp,
-  EInt, EFloat, EBool, EUnit, EStr, EVar, ECall, EApply, EMethod, ELambda,
+  EInt, EFloat, EBool, EUnit, EStr, EVar, EApply, EMethod, ELambda,
   ECtor, EFieldAcc, EListLit, ETupleLit, EPropagate, EUnwrap, EIndex, EReturn,
   EBreak, EContinue, EComptime, EUnsafePure, EBinary, EUnary, EIf, EMatch,
   EBlock,
@@ -592,17 +592,22 @@ fn walk_e(qc: QCx, q0: Q, pe: Expr, te: Option[TExpr]) -> Q = {
         }
         _ -> { q = walk_e(qc, q, body, None) }
       }
-    EApply(target, args, _, _) ->
-      match te {
-        Some(XApply(tt, targs, _, _, _)) -> {
-          q = walk_e(qc, q, target, Some(tt))
-          q = walk_list(qc, q, args, opt_list(targs))
-        }
-        _ -> {
-          q = walk_e(qc, q, target, None)
-          q = walk_list(qc, q, args, no_texprs(args))
-        }
+    # one application node, so this arm answers for every shape of call: a name
+    # (the sig at the name's span), a constructor, and a function value. The
+    # callee of the first two is not walked as a value -- it is not one.
+    EApply(target, args0, _, _) -> {
+      let args = arg_exprs(args0)
+      match target {
+        EVar(callee, vlo, vhi) -> { q = walk_named_call(qc, q, callee, vlo, vhi, args, te) }
+        ECtor(cname, cargs, spread, hp, clo, chi, _, _) ->
+          if not hp && len(cargs) == 0 && spread == None {
+            q = walk_ctor_call(qc, q, args0, None, clo, chi, te)
+          } else {
+            q = walk_apply_value(qc, q, target, args, te)
+          }
+        _ -> { q = walk_apply_value(qc, q, target, args, te) }
       }
+    }
     EIndex(target, index, _, _) ->
       match te {
         Some(XIndex(tt, ti, _, _, _, _, _)) -> {
@@ -623,7 +628,8 @@ fn walk_e(qc: QCx, q0: Q, pe: Expr, te: Option[TExpr]) -> Q = {
           }
         None -> ()
       }
-    EMethod(target, name, args, nlo, nhi, _, _) -> {
+    EMethod(target, name, args0, nlo, nhi, _, _) -> {
+      let args = arg_exprs(args0)
       # module-qualified (alias.fn) and UFCS calls carry the resolved sig
       match te {
         Some(XCallFn(owner, fname, targs, _, trait_id, _, _, _)) -> {
@@ -684,99 +690,9 @@ fn walk_e(qc: QCx, q0: Q, pe: Expr, te: Option[TExpr]) -> Q = {
         Some(XTupleLit(telems, _, _, _)) -> { q = walk_list(qc, q, elems, opt_list(telems)) }
         _ -> { q = walk_list(qc, q, elems, no_texprs(elems)) }
       }
-    ECall(callee, args, clo, chi, _, _) -> {
-      match te {
-        Some(XCallFn(owner, fname, targs, _, trait_id, _, _, _)) -> {
-          match sig_by_owner(qc, owner, fname, trait_id) {
-            Some(s) -> {
-              let (dsp, dp) = def_of_sig(qc, s)
-              q = offer(q, clo, chi, render_sig(qc, s), dsp, dp)
-            }
-            None -> ()
-          }
-          q = walk_call_args(qc, q, args, targs)
-        }
-        Some(XCallBuiltin(bname, targs, _, _, _, _)) -> {
-          match map.get(qc.bins, bname) {
-            Some(s) -> { q = offer(q, clo, chi, render_sig(qc, s), None, None) }
-            None -> ()
-          }
-          q = walk_call_args(qc, q, args, targs)
-        }
-        Some(XCallDyn(_, _, targs, _, _, _)) -> {
-          match sig_of(qc, callee) {
-            Some(s) -> {
-              let (dsp, dp) = def_of_sig(qc, s)
-              q = offer(q, clo, chi, render_sig(qc, s), dsp, dp)
-            }
-            None -> ()
-          }
-          q = walk_call_args(qc, q, args, targs)
-        }
-        _ -> {
-          match sig_of(qc, callee) {
-            Some(s) -> {
-              let (dsp, dp) = def_of_sig(qc, s)
-              q = offer(q, clo, chi, render_sig(qc, s), dsp, dp)
-            }
-            None -> ()
-          }
-          q = walk_list(qc, q, args, no_texprs(args))
-        }
-      }
+    ECtor(_, args, spread, _, clo, chi, _, _) -> {
+      q = walk_ctor_call(qc, q, args, spread, clo, chi, te)
     }
-    ECtor(name, args, spread, _, clo, chi, _, _) ->
-      match te {
-        Some(XCtor(aid, ci, written, _, tspread, _, _, _)) -> {
-          let a = adt_of(qc.entry.cx.adts, aid)
-          match get(a.ctors, ci) {
-            Some(c) -> {
-              let (dsp, dp) = def_of_ctor(qc, aid, c.name)
-              q = offer(q, clo, chi, render_ctor(qc, c), dsp, dp)
-            }
-            None -> ()
-          }
-          match spread {
-            Some(sp) ->
-              match tspread {
-                Some(tsp) -> { q = walk_e(qc, q, sp, Some(tsp)) }
-                None -> { q = walk_e(qc, q, sp, None) }
-              }
-            None -> ()
-          }
-          var i = 0
-          for a2 in args {
-            q = walk_e(qc, q, a2.e, opt_get(written, i))
-            i = i + 1
-          }
-        }
-        Some(XConstRef(_, cname, _, _, _)) -> {
-          match map.get(qc.entry.cx.consts, cname) {
-            Some(t) -> {
-              let (dsp, dp) = def_of_const(qc, cname)
-              q = offer(q, clo, chi, "const " ++ cname ++ ": " ++ show_ty(qc, t), dsp, dp)
-            }
-            None -> ()
-          }
-        }
-        Some(XCtorValue(aid, ci, _, _, _)) -> {
-          let a = adt_of(qc.entry.cx.adts, aid)
-          match get(a.ctors, ci) {
-            Some(c) -> {
-              let (dsp, dp) = def_of_ctor(qc, aid, c.name)
-              q = offer(q, clo, chi, render_ctor(qc, c), dsp, dp)
-            }
-            None -> ()
-          }
-        }
-        _ -> {
-          match spread {
-            Some(sp) -> { q = walk_e(qc, q, sp, None) }
-            None -> ()
-          }
-          for a2 in args { q = walk_e(qc, q, a2.e, None) }
-        }
-      }
     EFieldAcc(target, _, flo, fhi, _, _) ->
       match te {
         Some(XField(tt, fi, _, _, _)) -> {
@@ -955,6 +871,145 @@ fn walk_method_children(qc: QCx, q0: Q, target: Expr, args: List[Expr], targs: L
   q
 }
 
+## A call whose callee is a name: `f(x)`, and the UFCS/module spellings that
+## resolve to one. The signature is offered at the name's own span, which is
+## what hover and go-to-definition point at.
+fn walk_named_call(
+  qc: QCx,
+  q0: Q,
+  callee: String,
+  clo: Int,
+  chi: Int,
+  args: List[Expr],
+  te: Option[TExpr]
+) -> Q = {
+  var q = q0
+  match te {
+    Some(XCallFn(owner, fname, targs, _, trait_id, _, _, _)) -> {
+      match sig_by_owner(qc, owner, fname, trait_id) {
+        Some(s) -> {
+          let (dsp, dp) = def_of_sig(qc, s)
+          q = offer(q, clo, chi, render_sig(qc, s), dsp, dp)
+        }
+        None -> ()
+      }
+      q = walk_call_args(qc, q, args, targs)
+    }
+    Some(XCallBuiltin(bname, targs, _, _, _, _)) -> {
+      match map.get(qc.bins, bname) {
+        Some(s) -> { q = offer(q, clo, chi, render_sig(qc, s), None, None) }
+        None -> ()
+      }
+      q = walk_call_args(qc, q, args, targs)
+    }
+    Some(XCallDyn(_, _, targs, _, _, _)) -> {
+      match sig_of(qc, callee) {
+        Some(s) -> {
+          let (dsp, dp) = def_of_sig(qc, s)
+          q = offer(q, clo, chi, render_sig(qc, s), dsp, dp)
+        }
+        None -> ()
+      }
+      q = walk_call_args(qc, q, args, targs)
+    }
+    _ -> {
+      match sig_of(qc, callee) {
+        Some(s) -> {
+          let (dsp, dp) = def_of_sig(qc, s)
+          q = offer(q, clo, chi, render_sig(qc, s), dsp, dp)
+        }
+        None -> ()
+      }
+      q = walk_list(qc, q, args, no_texprs(args))
+    }
+  }
+
+  q
+}
+
+## A construction: `Some(1)`, `Point { x: 1 }`, a bare nullary constructor, or
+## the SCREAMING_SNAKE constant that shares the spelling.
+fn walk_ctor_call(
+  qc: QCx,
+  q0: Q,
+  args: List[Arg],
+  spread: Option[Expr],
+  clo: Int,
+  chi: Int,
+  te: Option[TExpr]
+) -> Q = {
+  var q = q0
+  match te {
+    Some(XCtor(aid, ci, written, _, tspread, _, _, _)) -> {
+      let a = adt_of(qc.entry.cx.adts, aid)
+      match get(a.ctors, ci) {
+        Some(c) -> {
+          let (dsp, dp) = def_of_ctor(qc, aid, c.name)
+          q = offer(q, clo, chi, render_ctor(qc, c), dsp, dp)
+        }
+        None -> ()
+      }
+      match spread {
+        Some(sp) ->
+          match tspread {
+            Some(tsp) -> { q = walk_e(qc, q, sp, Some(tsp)) }
+            None -> { q = walk_e(qc, q, sp, None) }
+          }
+        None -> ()
+      }
+      var i = 0
+      for a2 in args {
+        q = walk_e(qc, q, a2.e, opt_get(written, i))
+        i = i + 1
+      }
+    }
+    Some(XConstRef(_, cname, _, _, _)) -> {
+      match map.get(qc.entry.cx.consts, cname) {
+        Some(t) -> {
+          let (dsp, dp) = def_of_const(qc, cname)
+          q = offer(q, clo, chi, "const " ++ cname ++ ": " ++ show_ty(qc, t), dsp, dp)
+        }
+        None -> ()
+      }
+    }
+    Some(XCtorValue(aid, ci, _, _, _)) -> {
+      let a = adt_of(qc.entry.cx.adts, aid)
+      match get(a.ctors, ci) {
+        Some(c) -> {
+          let (dsp, dp) = def_of_ctor(qc, aid, c.name)
+          q = offer(q, clo, chi, render_ctor(qc, c), dsp, dp)
+        }
+        None -> ()
+      }
+    }
+    _ -> {
+      match spread {
+        Some(sp) -> { q = walk_e(qc, q, sp, None) }
+        None -> ()
+      }
+      for a2 in args { q = walk_e(qc, q, a2.e, None) }
+    }
+  }
+  q
+}
+
+## Applying a function value: nothing is named, so nothing is offered beyond
+## the types the walk already carries.
+fn walk_apply_value(qc: QCx, q0: Q, target: Expr, args: List[Expr], te: Option[TExpr]) -> Q = {
+  var q = q0
+  match te {
+    Some(XApply(tt, targs, _, _, _)) -> {
+      q = walk_e(qc, q, target, Some(tt))
+      q = walk_list(qc, q, args, opt_list(targs))
+    }
+    _ -> {
+      q = walk_e(qc, q, target, None)
+      q = walk_list(qc, q, args, no_texprs(args))
+    }
+  }
+  q
+}
+
 fn walk_call_args(qc: QCx, q0: Q, args: List[Expr], targs: List[TExpr]) -> Q = {
   var q = q0
   if len(targs) == len(args) {
@@ -980,6 +1035,8 @@ fn walk_list(qc: QCx, q0: Q, es: List[Expr], tes: List[Option[TExpr]]) -> Q = {
 }
 
 fn opt_list(tes: List[TExpr]) -> List[Option[TExpr]] = map(tes, fn(t) => Some(t))
+
+fn no_texpr() -> Option[TExpr] = None
 
 fn no_texprs(es: List[Expr]) -> List[Option[TExpr]] = {
   var out: List[Option[TExpr]] = []
@@ -1406,27 +1463,8 @@ fn collect_e(
       }
       acc = collect_e(qc, acc, body, tb, before)
     }
-    ECall(_, args, _, _, _, _) -> {
-      let targs = match te {
-        Some(XCallFn(_, _, ts, _, _, _, _, _)) -> ts
-        Some(XCallBuiltin(_, ts, _, _, _, _)) -> ts
-        Some(XCallDyn(_, _, ts, _, _, _)) -> ts
-        _ -> {
-          let none: List[TExpr] = []
-          none
-        }
-      }
-      if len(targs) == len(args) {
-        var i = 0
-        for a in args {
-          acc = collect_e(qc, acc, a, get(targs, i), before)
-          i = i + 1
-        }
-      } else {
-        for a in args { acc = collect_e(qc, acc, a, None, before) }
-      }
-    }
-    EMethod(target, _, args, _, _, _, _) -> {
+    EMethod(target, _, args0, _, _, _, _) -> {
+      let args = arg_exprs(args0)
       let targs = match te {
         Some(XCallFn(_, _, ts, _, _, _, _, _)) -> ts
         Some(XCallBuiltin(_, ts, _, _, _, _)) -> ts
@@ -1447,16 +1485,33 @@ fn collect_e(
         for a in args { acc = collect_e(qc, acc, a, None, before) }
       }
     }
-    EApply(target, args, _, _) -> {
+    # every call shape: the typed node is an XApply only when a function value
+    # is applied -- a named call carries XCallFn/XCallBuiltin/XCallDyn and a
+    # construction an XCtor, and their arguments are still these arguments
+    EApply(target, args0, _, _) -> {
+      let args = arg_exprs(args0)
       let (tt, targs) = match te {
         Some(XApply(t, ts, _, _, _)) -> (Some(t), opt_list(ts))
+        Some(XCallFn(_, _, ts, _, _, _, _, _)) -> (no_texpr(), opt_list(ts))
+        Some(XCallBuiltin(_, ts, _, _, _, _)) -> (no_texpr(), opt_list(ts))
+        Some(XCallDyn(_, _, ts, _, _, _)) -> (no_texpr(), opt_list(ts))
+        Some(XCtor(_, _, written, _, _, _, _, _)) -> (no_texpr(), opt_list(written))
         _ -> {
-          let n: Option[TExpr] = None
           let none: List[Option[TExpr]] = []
-          (n, none)
+          (no_texpr(), none)
         }
       }
-      acc = collect_e(qc, acc, target, tt, before)
+      match tt {
+        Some(_) -> { acc = collect_e(qc, acc, target, tt, before) }
+        # the callee of a named call or a construction is not a value: walking
+        # it would offer a local named `f` for the `f` in `f(x)`
+        None ->
+          match target {
+            EVar(_, _, _) -> ()
+            ECtor(_, _, _, _, _, _, _, _) -> ()
+            _ -> { acc = collect_e(qc, acc, target, None, before) }
+          }
+      }
       var i = 0
       for a in args {
         acc = collect_e(qc, acc, a, opt_get2(targs, i), before)

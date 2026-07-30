@@ -1,8 +1,14 @@
 # EBNF expr and postfix forms: pipeline, match with guard, block, if/else,
-# indexing, propagation, unwrap, interpolation, lambda, and general application
-# (the last one is what the EBNF always described and the parser gained on
-# 2026-07-30: SYN-02).
+# indexing, propagation, unwrap, interpolation, lambda, general application and
+# named arguments. The last two are what the EBNF always described and the
+# parser grew into: application became a postfix on 2026-07-30, and the
+# `arg = [ IDENT ":" ] expr` production became true when the call special cases
+# went (SYN-02/SYN-03). Names are grammatical at every call position here --
+# that only a constructor *accepts* them is a type rule, and this corpus only
+# parses.
 use std/list
+
+type Rect = { w: Float, h: Float }
 
 fn add(a: Int) -> fn(Int) -> Int = fn(b) => a + b
 
@@ -21,6 +27,15 @@ fn postfixes(xs: List[Int], o: Option[Int]) -> Int = {
   let un = o!
   let applied = add(1)(2)
   head + un + applied
+}
+
+fn named_args(r: Rect, xs: List[Int]) -> Rect = {
+  let ctor = Rect(w: 1.0, h: 2.0)
+  let mixed = Rect(1.0, h: 2.0)
+  let on_a_function = add(a: 1)(2)
+  let on_a_dot_call = xs.at(i: 0)
+  let on_an_applied_result = add(1)(b: 2)
+  ctor
 }
 
 fn propagates(r: Result[Int, String]) -> Result[Int, String] = Ok(r? + 1)

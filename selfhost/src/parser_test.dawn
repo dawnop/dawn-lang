@@ -7,7 +7,7 @@ use std/str
 use parser.{parse_module}
 use astdump.{render_module}
 use ast.{
-  Expr, EInt, EVar, ECall, EBinary, ECtor, EBlock,
+  Expr, EInt, EVar, EApply, EBinary, ECtor, EBlock,
   BinOp, OpAdd, OpMul,
   Stmt, SWhile,
   Decl, DFn, DConst, DUseModule, DImpl, Module,
@@ -56,10 +56,13 @@ test "pipe rewrites into a call with the left side first" {
   match m.decls[0] {
     DFn(f) ->
       match f.body {
-        ECall(callee, args, a, b, c, d) -> {
-          assert callee == "g"
+        EApply(callee, args, c, d) -> {
+          match callee {
+            EVar(n, a, b) -> { assert n == "g" }
+            _ -> { assert false }
+          }
           assert len(args) == 2
-          match args[0] {
+          match args[0].e {
             EVar(n, e2, f2) -> { assert n == "x" }
             _ -> { assert false }
           }
@@ -68,6 +71,52 @@ test "pipe rewrites into a call with the left side first" {
       }
     _ -> { assert false }
   }
+  # the pipe still only takes a named call, a bare name or a lambda on the
+  # right: a construction or an applied call result is an error, as before
+  let (_, ds2) = parse_module("fn f() = x |> Some(1)")
+  assert len(ds2) > 0
+  let (_, ds3) = parse_module("fn f() = x |> make()(1)")
+  assert len(ds3) > 0
+}
+
+test "every call is one application node" {
+  # `f(x)` and `Circle(1.0)` had a parse special case each; both are gone, so
+  # both are an Apply over whatever the callee spelling parses to (SYN-02)
+  let out = rendered("fn f() = g(1)")
+  assert str.contains(out, "Apply nargs=1")
+  assert str.contains(out, "Var g ")
+  let out2 = rendered("fn f() = Some(1)")
+  assert str.contains(out2, "Apply nargs=1")
+  assert str.contains(out2, "CtorCall Some parens=false")
+  # a record literal is not an application -- braces, not parens
+  let out3 = rendered("fn f() = Point { x: 1 }")
+  assert not str.contains(out3, "Apply")
+  assert str.contains(out3, "CtorCall Point parens=true")
+}
+
+test "an argument may be named at every call position" {
+  # `IDENT: expr` is grammatical wherever arguments are (SYN-03). Whether the
+  # callee accepts names is a type question, so none of these is a parse error.
+  for src in [
+    "fn f() = Rect(2.0, h: 3.0)",
+    "fn f() = g(h: 1)",
+    "fn f() = x.m(h: 1)",
+    "fn f() = make()(h: 1)",
+    "fn f() = m.C(h: 1)"
+  ] {
+    let (_, ds2) = parse_module(src)
+    assert len(ds2) == 0
+  }
+  assert str.contains(rendered("fn f() = g(h: 1)"), "Arg name=h")
+  assert str.contains(rendered("fn f() = x.m(h: 1)"), "Arg name=h")
+}
+
+test "a `(` on the next line is not a call" {
+  # spec 4.3: a newline ends the postfix chain (only `.` continues one), so
+  # this is a let, a parenthesized expression statement, and a tail
+  let out = rendered("fn f() -> Int = {\n  let x = g\n  (1 + 2)\n  x\n}\n")
+  assert not str.contains(out, "Apply")
+  assert str.contains(out, "Binary ADD")
 }
 
 test "a broken declaration is reported and the next one still parses" {
