@@ -983,47 +983,16 @@ fn gen_bytes_from_array(cw: AdtClassWriter) -> Unit !io = {
   close_mv(fv)
 }
 
-## One `fn() -> T` run under a catch, its result as `Result[T, String]`.
+## One `fn() -> T` run under a catch, its result as `Result[T, ForeignError]`.
 ##
 ## `caught` lists the exception types the handler claims. Several entries mean
 ## several try-catch table rows onto the same handler, which is how the JVM
 ## spells "catch A or B" — there is no supertype of PanicError and Exception
 ## short of Throwable, and Throwable is precisely what must not be caught.
-fn gen_try_closure(cw: AdtClassWriter, name: String, caught: List[String]) -> Unit !io = {
-  let m = cw.method(ACC_PUBLIC + ACC_STATIC, name, "(L" ++ fn_iface(0) ++ ";)LResult;")
-    .expect("mv")
-  m.visitCode()
-  let try_start = Label.new()
-  let try_end = Label.new()
-  let handler = Label.new()
-  for c in caught {
-    m.visitTryCatchBlock(try_start, try_end, handler, c)
-  }
-  m.visitLabel(try_start)
-  m.visitTypeInsn(OP_NEW, "Result\$Ok")
-  m.visitInsn(OP_DUP)
-  m.visitVarInsn(OP_ALOAD, 0)
-  m.visitMethodInsn(OP_INVOKEINTERFACE, fn_iface(0), "apply", erased_apply_desc(0), true)
-  m.visitMethodInsn(OP_INVOKESPECIAL, "Result\$Ok", "<init>", "(Ljava/lang/Object;)V", false)
-  m.visitLabel(try_end)
-  m.visitInsn(OP_ARETURN)
-  m.visitLabel(handler)
-  m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/Throwable", "toString",
-    "()Ljava/lang/String;", false)
-  m.visitVarInsn(OP_ASTORE, 1)
-  m.visitTypeInsn(OP_NEW, "Result\$Err")
-  m.visitInsn(OP_DUP)
-  m.visitVarInsn(OP_ALOAD, 1)
-  m.visitMethodInsn(OP_INVOKESPECIAL, "Result\$Err", "<init>", "(Ljava/lang/Object;)V", false)
-  m.visitInsn(OP_ARETURN)
-  m.visitMaxs(0, 0)
-  m.visitEnd()
-  ()
-}
-
-## The same barrier with a `ForeignError` where the other one puts a string
-## (docs/audit/error-model-design.md A). Three fields, and this is the JVM
-## backend's half of the contract that says what goes in each:
+##
+## The payload has three fields, and this is the JVM backend's half of the
+## contract that says what goes in each
+## (docs/audit/error-model-design.md A):
 ##
 ##   kind     `getClass().getName()` — the *binary* name, so `Result$Err` and
 ##            not `Err`, and never `toString()`, which prefixes the name onto
@@ -1035,7 +1004,12 @@ fn gen_try_closure(cw: AdtClassWriter, name: String, caught: List[String]) -> Un
 ##   cause    `getCause().toString()`, or `None`. Rendered rather than nested,
 ##            because a `ForeignError` holding a `ForeignError` would need
 ##            this handler to recurse down a chain a caller almost never reads.
-fn gen_try_closure_e(cw: AdtClassWriter, name: String, caught: List[String]) -> Unit !io = {
+##
+## Until 2026-07-30 this wrote a bare `Throwable.toString()` into an
+## `Err(String)` and the structured version lived beside it under a
+## transitional name; the migration that flipped the signature is over and
+## there is one handler again.
+fn gen_try_closure(cw: AdtClassWriter, name: String, caught: List[String]) -> Unit !io = {
   let m = cw.method(ACC_PUBLIC + ACC_STATIC, name, "(L" ++ fn_iface(0) ++ ";)LResult;")
     .expect("mv")
   m.visitCode()
@@ -1130,11 +1104,6 @@ pub fn gen_io_class(supers: List[String]) -> Bytes !io = {
   # exhaustion is not a value; it propagates. (The C backend agrees for free:
   # native failure kinds have no VM-error arm at all.)
   gen_try_closure(cw, "catch_panic", [PANIC_CLASS, "java/lang/Exception"])
-  # The `_e` twin of each, catching exactly what its original does — the split
-  # between the two barriers is the same question and must not become two
-  # answers while the transition runs (docs/audit/error-model-design.md 落地分期).
-  gen_try_closure_e(cw, "catch_fault_e", ["java/lang/Exception"])
-  gen_try_closure_e(cw, "catch_panic_e", [PANIC_CLASS, "java/lang/Exception"])
 
   # a single shared reader: a fresh BufferedReader per call would let one call's
   # buffer swallow input the next call should see. Lazily initialised in io_read_line.

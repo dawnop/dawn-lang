@@ -760,26 +760,6 @@ void dawn_panic(dawn_str *msg) { dawn_raise(msg, true); }
 
 void dawn_fault(dawn_str *msg) { dawn_raise(msg, false); }
 
-/* The closure returns an erased slot whatever `T` is, so one cast covers
- * every instantiation -- see the header. */
-static dawn_adt *dawn_run_caught(dawn_clo *f, bool catches_panic) {
-  dawn_handler h;
-  h.prev = dawn_handlers;
-  h.catches_panic = catches_panic;
-  dawn_handlers = &h;
-  if (setjmp(h.jb) != 0) {
-    dawn_handlers = h.prev;
-    return dawn_err(dawn_str_copy(dawn_failure_buf, dawn_failure_len));
-  }
-  void *v = ((void *(*)(dawn_clo *))f->fn)(f);
-  dawn_handlers = h.prev;
-  return dawn_ok(v);
-}
-
-dawn_adt *dawn_catch_fault(dawn_clo *f) { return dawn_run_caught(f, false); }
-
-dawn_adt *dawn_catch_panic(dawn_clo *f) { return dawn_run_caught(f, true); }
-
 /* `ForeignError { kind, message, cause }` out of what the raise left behind.
  * Three reference fields, so all three mask bits: the record owns each one
  * and a drop of the whole releases them. */
@@ -793,7 +773,9 @@ static dawn_adt *dawn_foreign_error(void) {
   return a;
 }
 
-static dawn_adt *dawn_run_caught_e(dawn_clo *f, bool catches_panic) {
+/* The closure returns an erased slot whatever `T` is, so one cast covers
+ * every instantiation -- see the header. */
+static dawn_adt *dawn_run_caught(dawn_clo *f, bool catches_panic) {
   dawn_handler h;
   h.prev = dawn_handlers;
   h.catches_panic = catches_panic;
@@ -807,9 +789,9 @@ static dawn_adt *dawn_run_caught_e(dawn_clo *f, bool catches_panic) {
   return dawn_ok(v);
 }
 
-dawn_adt *dawn_catch_fault_e(dawn_clo *f) { return dawn_run_caught_e(f, false); }
+dawn_adt *dawn_catch_fault(dawn_clo *f) { return dawn_run_caught(f, false); }
 
-dawn_adt *dawn_catch_panic_e(dawn_clo *f) { return dawn_run_caught_e(f, true); }
+dawn_adt *dawn_catch_panic(dawn_clo *f) { return dawn_run_caught(f, true); }
 
 /* ---- code-point classification (char_is_*) ---------------------------- */
 

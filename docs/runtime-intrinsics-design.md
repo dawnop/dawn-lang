@@ -365,10 +365,10 @@ C 侧没有,于是「往还不存在的目录里写文件」只在一个后端�
    raise API 就是 `dawn_raise(msg, is_panic)`:没有 errno,也不捕信号。将来给
    `dawn_fault` 加上 errno 符号名是一次扩展,而不是一次毁约——`kind` 从第一天就
    声明为「后端自己的名字」,正是为了留这个口子。
-3. **两个屏障的分工不因载荷而变。** `catch_fault_e` 抓的和 `catch_fault` 抓的
-   逐字相同,`catch_panic_e` 同理——它们是四个不同的运行时符号,不是同一个;
-   `foreign_error.dawn` 把同一个 thunk 喂给两对屏障并断言裁决一致,
-   免得过渡期里长出两套错误模型。
+3. **两个屏障只在「抓什么」上不同,不在「怎么报」上不同。** 同一个 fault 被
+   `catch_fault` 拦下和被 `catch_panic` 拦下,拿到的 `kind`/`message` 逐字相同;
+   `foreign_error.dawn` 在两个后端上都断言这一点。过渡期(v0.32.0/v0.33.0)另有一对
+   `catch_fault_e`/`catch_panic_e`,那是种子纪律的产物,已随迁移收尾删掉。
 
 ## 13. 结论
 

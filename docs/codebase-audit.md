@@ -455,11 +455,11 @@ Playground 的生产 systemd sandbox 能缓解，但语言工具本身没有隔�
 > `ForeignError`**：`class_name` 是 JVM 二进制名，而 native 后端上没有类名——
 > 一个跨 FFI 边界的错误类型不该从第一天就假设有 Java 类（台账 §3.3）。
 >
-> **进度（2026-07-30）**：分期落地的阶段 1、2 已合并——`catch_fault`/`catch_panic`
+> **进度（2026-07-30）**：分期落地的三期都已合并——`catch_fault`/`catch_panic`
 > 与 `std/io` 会失败的那 9 个函数都已返回 `Result[T, ForeignError]`，下面那句
-> 「只返回 `Result[T, String]`」不再成立。本条仍挂着，是因为
-> `packages/web/src/types.dawn` 的 `as_http_with` 还在按文本分类（那半边是 WEB-06），
-> 且过渡拼法 `_e` 要到阶段 3 才删。
+> 「只返回 `Result[T, String]`」不再成立；过渡拼法 `_e` 也已随阶段 3 删除，
+> 语言里只剩一对屏障。本条仍挂着，是因为 `packages/web/src/types.dawn` 的
+> `as_http_with` 还在按文本分类（那半边是 WEB-06）。
 
 
 - `java_try`/`catch_panic` 只返回 `Result[T, String]`，丢失类型、cause、stack 和结构化字段。

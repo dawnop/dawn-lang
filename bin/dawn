@@ -102,13 +102,38 @@ elif [ ! -f "$STAMP" ] || [ "$WANT" != "$(cat "$STAMP")" ]; then
   needs_build=1
 fi
 
+# Two stages, not one: the seed builds A from today's sources, and then A
+# builds the jar we keep.
+#
+# The reason is that a built jar carries the *runtime* classes (dawn/rt/Io and
+# friends) emitted by whichever compiler did the building. A is today's sources
+# linked against the previous release's runtime, and that pair only holds while
+# the runtime contract has not moved. When it moves, A compiles fine and dies
+# at run time: the error-model migration changed what dawn/rt/Io.catch_fault
+# puts in an `Err`, and A -- today's call sites, last release's barrier --
+# threw a ClassCastException at every failure path, including `use java` on a
+# nested class, which is two in-repo targets. Nothing in the build said a word.
+#
+# The second stage costs one more compile (~5s here) and makes the jar
+# self-consistent: sources and runtime from the same tree. It is the same B the
+# fixpoint gate builds, and the property `dawn` should have had all along --
+# selfhost-fixpoint.sh only ever promised B == C, and this script was shipping
+# A. Stage 1 still has to succeed, which is the seed feature discipline
+# selfhost-prev-diff.sh asserts separately.
 if [ "$needs_build" = 1 ]; then
   SEED="$(seed_jar)"
+  # the .jar suffix is load-bearing: `--vendor` copies classes off
+  # java.class.path and the scan only opens entries that end in .jar
+  STAGE1="$ROOT/build/dawn-selfhost.stage1.jar"
   echo "dawn: rebuilding the selfhost toolchain (sources changed)..." >&2
   mkdir -p "$ROOT/build"
-  "$JAVA" -Xss512m -jar "$SEED" build "$ROOT/selfhost" -o "$SJAR.tmp" \
+  "$JAVA" -Xss512m -jar "$SEED" build "$ROOT/selfhost" -o "$STAGE1" \
     --std "$STD" \
     --vendor dawn/tool --vendor org/objectweb/asm --vendor coursierapi > /dev/null
+  "$JAVA" -Xss512m -jar "$STAGE1" build "$ROOT/selfhost" -o "$SJAR.tmp" \
+    --std "$STD" \
+    --vendor dawn/tool --vendor org/objectweb/asm --vendor coursierapi > /dev/null
+  rm -f "$STAGE1"
   mv "$SJAR.tmp" "$SJAR"
   # written only after the jar is in place, so an interrupted build reruns
   printf '%s\n' "$WANT" > "$STAMP"

@@ -32,7 +32,7 @@ use java "java.net.http.HttpResponse.BodyHandlers"
 ## response is already committed, or was never sent). Called after pumping a
 ## streaming body so the client connection frees.
 fn close_stream(s: InputStream) -> Unit !io = {
-  let _ = catch_fault_e(fn() => s.close())
+  let _ = catch_fault(fn() => s.close())
   ()
 }
 
@@ -90,7 +90,7 @@ fn write_response(ex: HttpExchange, r: Response) -> Unit !io = {
     # try/finally), so the upstream stream is still closed and the HttpClient
     # connection frees. close failure is non-fatal (close_stream swallows it).
     Some(s) -> {
-      let _ = catch_panic_e(fn() => s.transferTo(out))
+      let _ = catch_panic(fn() => s.transferTo(out))
       close_stream(s)
     }
     None ->
@@ -151,11 +151,11 @@ fn collect_headers(headers: Headers, it: Iterator, acc: Map[String, String]) -> 
 #
 # The `!io` on this and its two callers is bookkeeping, not a real effect:
 # decoding a string is pure, but the JDK call that does it can throw and
-# `catch_fault_e` — the only structured way to catch that — is itself `!io`. The
+# `catch_fault` — the only structured way to catch that — is itself `!io`. The
 # alternative was a hand-written UTF-8 decoder, and the repo already has one of
 # those to answer for (see the LSP); a second is not the fix.
 fn pct_decode(s: String) -> String !io =
-  match catch_fault_e(fn() => URLDecoder.decode(s, "UTF-8")!) {
+  match catch_fault(fn() => URLDecoder.decode(s, "UTF-8")!) {
     Ok(v) -> v
     Err(_) -> s
   }
@@ -226,7 +226,7 @@ fn spill_body(ex: HttpExchange) -> String !io = {
 }
 
 fn delete_quietly(path: String) -> Unit !io = {
-  let r: Result[Bool, ForeignError] = catch_fault_e(fn() => File.new(path).delete())
+  let r: Result[Bool, ForeignError] = catch_fault(fn() => File.new(path).delete())
   match r {
     Ok(_) -> ()
     Err(m) -> println("temp body file not deleted: ${m.message}")
@@ -263,7 +263,7 @@ fn meta_of(d: Dispatch) -> Option[RouteMeta] =
 fn handle(routes: List[Route], middleware: List[Middleware], max_body: Int, ex: HttpExchange) -> Unit !io = {
   # a handler panic is isolated to this request: catch_panic turns it into a 500
   # instead of resetting the connection or leaking the virtual thread (spec §9.8).
-  let outcome = catch_panic_e(fn() => {
+  let outcome = catch_panic(fn() => {
     # Dispatch BEFORE touching the body: method and path come from the request
     # line, and the matched route's tags decide how the body is read at all
     # ("stream-body" spills it to disk instead of into memory). The same decision
@@ -285,7 +285,7 @@ fn handle(routes: List[Route], middleware: List[Middleware], max_body: Int, ex: 
         # the temp body file lives exactly as long as the handler call. Dawn has no
         # try/finally, so catch_panic plays that role (same idiom as with_tx): it
         # returns rather than unwinding, so the delete below always runs.
-        let served = catch_panic_e(fn() => app(req))
+        let served = catch_panic(fn() => app(req))
         match req.body_file {
           Some(p) -> delete_quietly(p)
           None -> ()
