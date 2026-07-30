@@ -318,6 +318,7 @@ Cursor 那一行是 `opaque type Cursor = Int` 挣来的:模块外做不了算�
   见 `docs/native-backend-plan.md` §14.15–14.17。
 - `str_of_float` / `parse_float` 不是 Java 的语法/最短往返形式。浮点因此不进差分语料。
 - `catch_fault`/`catch_panic` 的 `Err` 载荷:JVM 是异常的 `toString`,native 是 panic 消息。**只分支 Ok/Err 的程序一致**。
+  它们的结构化版本 `catch_fault_e`/`catch_panic_e` 把这条从「偏离」改成**写明的契约**,见 §12.4。
 - `io_list_names` 的顺序两边都未定义。
 - `io_temp_dir` 的随机后缀两边形状不同(JVM 是数字串,C 是 `mkdtemp` 的六位)。**名字本来就不该被读**,
   所以这不是可观察的——`io_files` 语料只断言它是个新目录,不打印它。
@@ -328,6 +329,44 @@ C 侧没有,于是「往还不存在的目录里写文件」只在一个后端�
 
 反过来,原本以为要偏离、实测不必的:`char_is_space` 的全 Unicode 集合小到可以写全(§`dawn_is_space_cp`),
 所以它不再是 ASCII-only。
+
+### 12.4 `ForeignError.kind`:一个**声明为后端相关**的契约位
+
+2026-07-30 起,两个屏障有了结构化载荷的孪生版本
+(`catch_fault_e`/`catch_panic_e` → `Result[T, ForeignError]`,
+见 [audit/error-model-design.md](audit/error-model-design.md) §六)。
+`ForeignError` 是 prelude 类型,三个字段,其中 **`kind` 是这份契约里唯一一个
+「两后端答案不同、而且这是规定」的位置**:
+
+| 字段 | JVM 后端 | native 后端 | 可移植? |
+|---|---|---|---|
+| `kind` | `getClass().getName()`,即**二进制名**(`java.io.FileNotFoundException`、`dawn.rt.PanicError`) | 运行时自己的失败种类:`"panic"` / `"fault"` | **否——按定义** |
+| `message` | `getMessage()`,null 记作 `""` | raise 时那条消息 | 否(文本本就不受约束) |
+| `cause` | `getCause().toString()`,无则 `None` | 恒为 `None` | 否 |
+
+前面每一行「可观察 ⇒ 两后端必须逐位相同」的要求,到这一行**故意反过来**。理由与
+§12.2 的 Cursor 那行是同一个形状,但结论相反:Cursor 那个数**谁也看不见**,所以两边
+各挑各的;`kind` 谁都看得见,但它答的是「**这个后端**把这类失败叫什么」,而两套失败
+分类之间没有真实的对应关系。硬造一层规范化取值(把 `java.io.IOException` 和 `EIO`
+映射到同一个 `io_error`)是在**猜**,猜错的地方正是调用方会依赖的地方。所以:
+
+> **可移植的匹配只有 `Ok`/`Err` 这一层。** 按 `kind` 分流的代码就是后端相关的代码。
+
+三条随之而来的规矩:
+
+1. **`kind` 是名字,不是渲染。** JVM 侧的失败模式很具体:`toString()` 就在
+   `getName()` 旁边,拼出来是 `名字: 消息`——那正是 spec §9.8 从前让调用方去解析的
+   东西。`scripts/error-contract/` 逐字钉住 JVM 的名字,
+   `scripts/spike-native/foreign_error.dawn` 在两个后端上钉住「它是个名字」
+   (没有冒号、没有空格,且 `message` 不为空也不等于它)——后者能同时对
+   `java.io.FileNotFoundException` 和 `fault` 成立,这也是它写成那样的原因。
+2. **native 的取值可以变细,不算违约。** 今天是 `"panic"`/`"fault"`,因为 C 运行时的
+   raise API 就是 `dawn_raise(msg, is_panic)`:没有 errno,也不捕信号。将来给
+   `dawn_fault` 加上 errno 符号名是一次扩展,而不是一次毁约——`kind` 从第一天就
+   声明为「后端自己的名字」,正是为了留这个口子。
+3. **两个屏障的分工不因载荷而变。** `catch_fault_e` 抓的和 `catch_fault` 抓的
+   逐字相同,`catch_panic_e` 同理;`foreign_error.dawn` 把同一个 thunk 喂给两对屏障
+   并断言裁决一致,免得过渡期里长出两套错误模型。
 
 ## 13. 结论
 

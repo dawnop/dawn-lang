@@ -49,7 +49,8 @@ use types.{
   adt_of, trait_of, ty_show, ctor_render, sig_render, subst, subst_eff,
   ty_named, is_numeric, is_errorish, peel_opaque,
   prelude_adts, prelude_traits, prelude_impls, bounds_of,
-  builtins, opt_ty, result_ty, OPTION_ID, RESULT_ID, ORD_ID, EQ_ID, HASH_ID, SHOW_ID,
+  builtins, opt_ty, result_ty, OPTION_ID, RESULT_ID, FOREIGN_ERROR_ID,
+  ORD_ID, EQ_ID, HASH_ID, SHOW_ID,
   eq_scalars, hash_scalars,
   Impls, Head, head_of, impl_at, has_impl_at, insert_impl,
   is_eq_scalar, is_ground, expandable, type_args_of, sub_goals
@@ -1320,10 +1321,10 @@ test "const-serializability" {
 ## prelude traits with their methods in the fn namespace, prelude Ord impls.
 pub fn seed_prelude(cx: Cx) -> Cx = {
   var cx1 = cx
-  # Option/Result and their constructors
+  # Option/Result/ForeignError and their constructors
   var abn = cx1.adts_by_name
   var cbn = cx1.ctors_by_name
-  for aid in [OPTION_ID, RESULT_ID] {
+  for aid in [OPTION_ID, RESULT_ID, FOREIGN_ERROR_ID] {
     let a = adt_of(cx1.adts, aid)
     abn = map.insert(abn, a.name, aid)
     var i = 0
@@ -1495,7 +1496,7 @@ pub fn pass_type_shells(cx: Cx, m: Module) -> (Cx, List[Option[Shell]]) = {
       continue
     }
     if map.has(cx1.adts_by_name, d.name) || map.has(cx1.aliases, d.name) {
-      let msg = if d.name == "Option" || d.name == "Result" {
+      let msg = if d.name == "Option" || d.name == "Result" || d.name == "ForeignError" {
         "`" ++ d.name ++ "` is a prelude type and cannot be redefined"
       } else {
         "type `" ++ d.name ++ "` is defined twice"
@@ -3263,7 +3264,8 @@ fn hidden_from_user_code() -> List[String] =
 fn visible_to_user_code() -> List[String] =
   ["len", "get", "range", "sort_by", "to_string", "join", "panic", "expect",
     "parse_int", "parse_int_radix", "char_is_alnum", "code_points",
-    "from_code_points", "args", "catch_fault", "catch_panic", "cast"]
+    "from_code_points", "args", "catch_fault", "catch_panic",
+    "catch_fault_e", "catch_panic_e", "cast"]
 
 test "internal builtins hide from user code but not std" {
   let user = test_cx()

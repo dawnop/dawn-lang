@@ -1,0 +1,78 @@
+# What the JVM backend puts in `ForeignError.kind`, in exact text.
+#
+# The differential corpus (scripts/spike-native/foreign_error.dawn) can only
+# ask portable questions, because both backends are checked against one
+# expectation and `kind` is deliberately not portable. This is the other half:
+# one backend, and therefore the actual names.
+#
+# The claim under test is the design doc's (docs/audit/error-model-design.md
+# A): `kind` is a *binary name*. Three renderings of a Java class are within
+# one method call of each other and only one of them is a name --
+#
+#   getClass().getName()        java.lang.NumberFormatException   <- this one
+#   getClass().getSimpleName()  NumberFormatException
+#   toString()                  java.lang.NumberFormatException: For input ...
+#
+# -- and the third is what `catch_fault` hands back today, which is why
+# spec 9.8 used to advise matching on a message prefix. Asserting the
+# fully-qualified spelling rules out the second; asserting there is no colon
+# in it rules out the third.
+#
+# `dawn.rt.PanicError` is here as well as a JDK exception because it is *our*
+# class: its name cannot drift with the host JDK, and a Dawn panic is the one
+# foreign failure every program can raise without `use java`.
+use std/io
+use std/str
+
+use java "java.lang.Long"
+
+## An expectation and its outcome, so the count and the report come from one
+## place -- 1 is a mismatch, which is what the last line adds up.
+fn check(what: String, got: String, want: String) -> Int !io =
+  if got == want {
+    println("ok   " ++ what)
+    0
+  } else {
+    println("BAD  " ++ what ++ ": got `" ++ got ++ "`, want `" ++ want ++ "`")
+    1
+  }
+
+fn check_true(what: String, got: Bool) -> Int !io =
+  check(what, to_string(got), "true")
+
+fn taken(f: fn() -> Int !io) -> ForeignError !io =
+  match catch_panic_e(f) {
+    Ok(_) -> panic("the thunk was supposed to fail")
+    Err(e) -> e
+  }
+
+fn boom() -> Int !io = panic("boom")
+
+fn not_a_number() -> Int !io = Long.parseLong("nope")
+
+pub fn main() -> Unit !io = {
+  let p = taken(boom)
+  let n = taken(not_a_number)
+  let f = match catch_fault_e(not_a_number) {
+    Ok(_) -> panic("parseLong accepted `nope`")
+    Err(e) -> e
+  }
+  var bad = 0
+  bad = bad + check("a Dawn panic's kind is the runtime class's binary name",
+    p.kind, "dawn.rt.PanicError")
+  bad = bad + check("a Dawn panic's message is what panic was given", p.message, "boom")
+  bad = bad + check("a Dawn panic has no cause", to_string(p.cause), "None")
+  bad = bad + check("a JDK exception's kind is its binary name",
+    n.kind, "java.lang.NumberFormatException")
+  # the distinction the whole field exists for: `toString()` would have put
+  # the message here behind a colon
+  bad = bad + check_true("the kind is a name and not a rendering",
+    not str.contains(n.kind, ":"))
+  bad = bad + check_true("the message is the exception's own",
+    str.contains(n.message, "nope"))
+  # the fault barrier's `_e` twin fills the same fields the same way -- the
+  # two differ in what they catch, not in what they report
+  bad = bad + check("both barriers report the same kind", f.kind, n.kind)
+  bad = bad + check("both barriers report the same message", f.message, n.message)
+  println("mismatches " ++ to_string(bad))
+}

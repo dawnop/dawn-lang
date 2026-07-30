@@ -1,0 +1,96 @@
+# The structured failure payload, on both backends.
+#
+# `catch_fault_e`/`catch_panic_e` are `catch_fault`/`catch_panic` with a
+# `ForeignError` where the string was (docs/audit/error-model-design.md A).
+# Two things have to hold and only one of them is portable, which is what this
+# file is arranged around.
+#
+# **Portable**: the two barriers still split the same way. A fault stops at the
+# io barrier and a panic walks past it -- the property `catch_kinds.dawn`
+# pins for the string-payload pair, asked again here because a second pair of
+# barriers is a second place for the split to be got wrong, and the day it
+# disagrees is the day the transition ships two error models instead of one.
+#
+# **Portable**: `kind` is a *name*. The failure mode this guards against is the
+# JVM handler calling `Throwable.toString()`, which renders as
+# `java.io.FileNotFoundException: /no/such/path` -- a name, a colon, a space
+# and the message. So: no colon and no whitespace in `kind`, and a `message`
+# that is not empty and is not the same text. That holds on a backend whose
+# names are `java.io.FileNotFoundException` and on one whose names are `fault`,
+# without either being written down here.
+#
+# **Not portable**: the names themselves. `kind` is the backend's own name for
+# the failure class and matching on it is backend-specific by design, so this
+# file never prints one -- the two backends' output has to agree byte for byte.
+# The JVM's exact binary name is pinned in scripts/error-contract/, which runs
+# on one backend and can therefore say what it is.
+#
+# The fault-raising io primitives are std-only, so they come from
+# `use std/raw`, the same arrangement `catch_kinds.dawn` uses.
+use std/io
+use std/raw
+use std/str
+
+## Which barrier stops this failure, asked of the structured pair.
+fn barrier(f: fn() -> Int !io) -> String !io =
+  match catch_panic_e(fn() => match catch_fault_e(f) {
+    Ok(_) -> 0
+    Err(_) -> 1
+  }) {
+    Ok(0) -> "ok"
+    Ok(_) -> "caught"
+    Err(_) -> "through"
+  }
+
+## The same question of the string pair, so the two answers can be compared
+## rather than each read on its own.
+fn barrier_str(f: fn() -> Int !io) -> String !io =
+  match catch_panic(fn() => match catch_fault(f) {
+    Ok(_) -> 0
+    Err(_) -> 1
+  }) {
+    Ok(0) -> "ok"
+    Ok(_) -> "caught"
+    Err(_) -> "through"
+  }
+
+fn agree(label: String, f: fn() -> Int !io) -> Unit !io =
+  println(label ++ " " ++ barrier(f) ++ "  same as the string pair: "
+      ++ to_string(barrier(f) == barrier_str(f)))
+
+## The error a failing io primitive hands back through the structured barrier.
+fn taken() -> ForeignError !io =
+  match catch_fault_e(fn() => str.len(raw.read_file("/no/such/dawn/path"))) {
+    Ok(_) -> panic("/no/such/dawn/path is readable")
+    Err(e) -> e
+  }
+
+## A name has no colon and no space in it. A rendered `Throwable.toString()`
+## has both, which is the whole distinction.
+fn is_a_name(s: String) -> Bool =
+  str.len(s) > 0 && not str.contains(s, ":") && not str.contains(s, " ")
+
+# `!io` so nothing folds at compile time: the question is what happens at run
+# time, and a comptime fold would answer for neither backend.
+fn n(i: Int) -> Int !io = i
+
+pub fn main() -> Unit !io = {
+  println("-- the split is the same as the string pair's --")
+  agree("no failure    ", fn() => n(7))
+  agree("panic         ", fn() => panic("deliberate"))
+  agree("read_file     ", fn() => str.len(raw.read_file("/no/such/dawn/path")))
+
+  println("-- the payload of a taken fault --")
+  let e = taken()
+  println("kind is a name        " ++ to_string(is_a_name(e.kind)))
+  println("message is not empty  " ++ to_string(str.len(e.message) > 0))
+  println("message is not kind   " ++ to_string(e.message != e.kind))
+  println("kind is not rendered  " ++ to_string(not str.contains(e.message, e.kind ++ ":")))
+  println("cause                 " ++ to_string(e.cause))
+
+  println("-- and Ok still carries the value --")
+  println("ok            " ++ to_string(match catch_fault_e(fn() => n(7)) {
+    Ok(v) -> v
+    Err(_) -> -1
+  }))
+}

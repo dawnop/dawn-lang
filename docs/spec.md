@@ -1078,7 +1078,8 @@ fn parse(s: String) -> Result[Int, String] !io =
 - 只拦 `java.lang.Exception` 及其子类；`Error` 不拦——**Dawn 的 panic
   （`dawn.rt.PanicError` 是 `Error` 子类）原样穿透**，panic 仍然是 bug、不可恢复。
 - `Err` 载荷是 `Throwable.toString()`（异常类名 + 消息），供日志与上抛；
-  需要区分异常种类时按前缀匹配字符串，v0.1 不提供结构化异常对象。
+  需要区分异常种类时按前缀匹配字符串。**这条建议正在被撤销**——见下面的
+  `catch_fault_e`。
 - 边界之内失败照常传播：`catch_fault` 包住整段复合调用即可，无需逐调用包裹。
 
 配套的 `catch_panic[T](f: fn() -> T !io) -> Result[T, String] !io` 拦的是
@@ -1094,6 +1095,36 @@ fn parse(s: String) -> Result[Int, String] !io =
 > 越界下标、除零、非法码点），**外部世界造成的失败不是**（io 原语——量下来也只有
 > 这一类）。两个后端的实测比对在 `scripts/spike-native/catch_kinds.dawn`；
 > 在它写出来之前 native 的 `catch_fault` 拦下了本该穿透的每一个 panic。
+
+#### 9.8.1 结构化载荷：`catch_fault_e` / `catch_panic_e`（过渡期）
+
+「按前缀匹配字符串」是一条**要被撤销**的建议：它把控制流建在一句可以被重构、被
+本地化、被换一版 JDK 改掉的文本上。替代物是同样两个屏障、载荷换成一个 prelude
+record：
+
+```dawn
+type ForeignError = { kind: String, message: String, cause: Option[String] }
+
+fn catch_fault_e[T](f: fn() -> T !io) -> Result[T, ForeignError] !io
+fn catch_panic_e[T](f: fn() -> T !io) -> Result[T, ForeignError] !io
+```
+
+抓什么、放什么穿透，与不带 `_e` 的那对**逐字相同**；差别只在 `Err` 里装的是什么。
+
+- `kind` 是**后端自己给这类失败起的名字**，而且是个**名字**不是一句渲染：JVM 上是
+  二进制名（`getClass().getName()`，如 `java.lang.NumberFormatException`、
+  `dawn.rt.PanicError`），native 上是运行时的失败种类（`"panic"` / `"fault"`）。
+- **按 `kind` 分流的代码是后端相关的代码。** 可移植的匹配只有 `Ok`/`Err` 这一层。
+  取值表与理由在 `docs/runtime-intrinsics-design.md` §12.4。
+- `message` 是失败自己说的话（JVM 的 `getMessage()`，无则空串）；`cause` 是底下那层
+  失败的渲染，没有则 `None`。不带栈：渲染栈的代价要付在每一次屏障上。
+
+**`_e` 这个后缀是过渡的。** 一个内建的**签名**和它的名字一样受种子纪律约束，而且更
+紧——改名可以一期内让两张表都认识两个拼法，改载荷类型不行：编译器自己的调用点没法
+同时满足两张表。所以新形状先以不被任何人调用的名字落地，发一次 release 教会上一代
+编译器，再迁调用点，最后把这两个签名交还给 `catch_fault`/`catch_panic` 并删掉 `_e`。
+分期见 `docs/audit/error-model-design.md` §六。终局只有一对屏障，载荷是
+`ForeignError`，不保留 String 版本。
 
 ---
 

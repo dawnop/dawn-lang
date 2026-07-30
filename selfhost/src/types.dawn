@@ -5,7 +5,8 @@
 # display strings are rendered on demand (ty_show needs the table for names).
 #
 # Fixed prelude ids (never minted by the checker's counter, which starts at 3):
-#   ADTs:  Option = 0, Result = 1        traits: Ord = 0, Eq = 1, Hash = 2
+#   ADTs:  Option = 0, Result = 1, ForeignError = 2
+#                                        traits: Ord = 0, Eq = 1, Hash = 2
 #   type vars: builtin-signature T/U/A/K/V = -1..-5, Ord's T = -10,
 #              Option's T = -11, Result's T/E = -12/-13, Eq's T = -14,
 #              Hash's T = -15
@@ -636,6 +637,13 @@ pub const OPTION_ID: Int = 0
 
 pub const RESULT_ID: Int = 1
 
+## What a foreign failure looks like once it has crossed into Dawn: the
+## payload of `catch_fault_e`/`catch_panic_e` (docs/audit/error-model-design.md
+## A). A prelude type rather than a std one, for the reason `Option` is: an
+## intrinsic returns it, so every program can name it without importing
+## anything, and std cannot declare a type the compiler already had to know.
+pub const FOREIGN_ERROR_ID: Int = 2
+
 pub const ORD_ID: Int = 0
 
 ## `==` and `!=`. Unlike Ord it is not reached by a method call in source --
@@ -656,7 +664,9 @@ pub fn opt_ty(t: Ty) -> Ty = TyAdt(OPTION_ID, [t])
 
 pub fn result_ty(t: Ty, e: Ty) -> Ty = TyAdt(RESULT_ID, [t, e])
 
-## The two prelude ADTs, keyed by their fixed ids.
+pub fn foreign_error_ty() -> Ty = TyAdt(FOREIGN_ERROR_ID, [])
+
+## The three prelude ADTs, keyed by their fixed ids.
 pub fn prelude_adts() -> Adts = {
   let ot = TyVar("T", -11)
   let option = AdtI {
@@ -687,7 +697,43 @@ pub fn prelude_adts() -> Adts = {
     derives_ord: false,
     owner: None
   }
-  map.from([(OPTION_ID, option), (RESULT_ID, result)])
+  # A record, so a caller reads `e.kind` with no `match` in the way, and with
+  # three fields chosen for what every backend can answer:
+  #
+  #   kind     the backend's own name for the failure class -- a JVM binary
+  #            name (`getClass().getName()`), the native runtime's failure
+  #            kind. A *name*, never a rendered message: matching on a name is
+  #            a decision a compiler could one day check for typos, matching
+  #            on a message prefix (what spec 9.8 used to advise) is a
+  #            decision the JDK or libc can silently invalidate. Which names a
+  #            backend uses is backend-specific and documented as such --
+  #            portable matching is `Ok`/`Err` and nothing finer.
+  #   message  what the failure said, and nothing about its class.
+  #   cause    the failure underneath, rendered, where the backend has one.
+  #
+  # No stack: rendering `StackTraceElement[]` would be paid on every barrier,
+  # including the ones that never fail.
+  let ferr = AdtI {
+    id: FOREIGN_ERROR_ID,
+    name: "ForeignError",
+    is_record: true,
+    tparams: [],
+    ctors: [
+      CtorI {
+        adt: FOREIGN_ERROR_ID,
+        name: "ForeignError",
+        fields: [
+          FieldI { name: "kind", ty: TyString },
+          FieldI { name: "message", ty: TyString },
+          FieldI { name: "cause", ty: opt_ty(TyString) }
+        ]
+      }
+    ],
+    derives_show: true,
+    derives_ord: false,
+    owner: None
+  }
+  map.from([(OPTION_ID, option), (RESULT_ID, result), (FOREIGN_ERROR_ID, ferr)])
 }
 
 fn prelude_method(tid: Int, tv: Ty, name: String, ptys: List[Ty], pnames: List[String],
@@ -868,7 +914,11 @@ pub fn prelude_impls() -> List[ImplI] = {
   let re = TyVar("E", -13)
   out ++ [
     prelude_cond_impl(SHOW_ID, TyAdt(OPTION_ID, [ot]), [ot]),
-    prelude_cond_impl(SHOW_ID, TyAdt(RESULT_ID, [rt, re]), [rt, re])
+    prelude_cond_impl(SHOW_ID, TyAdt(RESULT_ID, [rt, re]), [rt, re]),
+    # `ForeignError` takes no parameters, so its `derive Show` is the same
+    # mint with nothing to constrain -- the fields are String/String/
+    # Option[String] and each already shows.
+    prelude_cond_impl(SHOW_ID, foreign_error_ty(), [])
   ]
 }
 
@@ -994,6 +1044,28 @@ pub fn builtins() -> Map[String, Sig] = {
     tp1(bsig("cast", [TyJava("java.lang.Object", "Object")], ["x"], t), t),
     eff1(
       tp1(bsig("catch_panic", [TyFn([], t, EIo)], ["f"], result_ty(t, TyString)), t),
+      EIo
+    ),
+    # The same two barriers with the payload the error model wants -- a
+    # `ForeignError` rather than a rendered string
+    # (docs/audit/error-model-design.md A). The `_e` suffix is transitional and
+    # says so: these names exist because a builtin's *signature* is under the
+    # seed discipline the same way its name is, and worse -- a rename can be
+    # staged by accepting both spellings of one type, a payload change cannot,
+    # because the compiler's own call sites have to type-check under the
+    # previous release's table and today's at once. So the new shape lands
+    # under a name nothing calls, a release teaches the previous compiler, and
+    # only then do the call sites move. Stage 3 gives these signatures back to
+    # `catch_fault`/`catch_panic` and deletes the `_e` pair; see the design
+    # doc's 落地分期. No String-payload barrier survives that stage.
+    eff1(
+      tp1(bsig("catch_fault_e", [TyFn([], t, EIo)], ["f"],
+        result_ty(t, foreign_error_ty())), t),
+      EIo
+    ),
+    eff1(
+      tp1(bsig("catch_panic_e", [TyFn([], t, EIo)], ["f"],
+        result_ty(t, foreign_error_ty())), t),
       EIo
     ),
     # io_* intrinsics: the console/file primitives std/io writes over. All !io.
@@ -1207,6 +1279,8 @@ pub fn intrinsics() -> Map[String, Intr] = {
   }
   rt_of = map.insert(rt_of, "catch_fault", RtIo)
   rt_of = map.insert(rt_of, "catch_panic", RtIo)
+  rt_of = map.insert(rt_of, "catch_fault_e", RtIo)
+  rt_of = map.insert(rt_of, "catch_panic_e", RtIo)
 
   # The persistent Map/Set: erased on both sides, and std-only. No runtime
   # module owns them any more -- lowering turns each into a call on the Dawn
@@ -1371,7 +1445,7 @@ test "prelude shapes" {
   assert trait_of(traits, SHOW_ID).name == "Show"
   # each trait over its own list -- one table per question, which is the point
   assert len(prelude_impls()) == len(ord_scalars()) + len(eq_scalars()) +
-    len(hash_scalars()) + len(show_scalars()) + 2
+    len(hash_scalars()) + len(show_scalars()) + 3
   # the three lists differ, and each difference is a decision (spec 4.3)
   assert not is_ord_scalar(TyFloat)
   assert is_eq_scalar(TyFloat)
@@ -1410,7 +1484,52 @@ test "builtin table renders signatures" {
     }
     None -> { assert false }
   }
-  assert map_size2(bs) == 87
+  assert map_size2(bs) == 89
+}
+
+test "the transitional barriers carry a ForeignError, not a rendered string" {
+  # The pair the error model's step A introduces (design doc 二.A). They are
+  # the same two barriers -- same parameter, same effect -- and differ in one
+  # thing, which is the point of asserting them next to their originals.
+  let adts = prelude_adts()
+  let traits = prelude_traits()
+  let bs = builtins()
+  for n in ["catch_fault_e", "catch_panic_e"] {
+    match map.get(bs, n) {
+      Some(s) -> {
+        assert sig_render(adts, traits, s) ==
+          "fn " ++ n ++ "[T](f: fn() -> T !io) -> Result[T, ForeignError] !io"
+      }
+      None -> { assert false }
+    }
+  }
+  # and both reach the io runtime, so a backend implements them where it
+  # implements the originals rather than growing a case in the emitter
+  assert intr_at("catch_fault_e").expect("catch_fault_e").rt == Some(RtIo)
+  assert intr_at("catch_panic_e").expect("catch_panic_e").rt == Some(RtIo)
+}
+
+test "ForeignError is a prelude record whose fields every backend can answer" {
+  let adts = prelude_adts()
+  let fe = adt_of(adts, FOREIGN_ERROR_ID)
+  assert fe.name == "ForeignError"
+  assert fe.is_record
+  assert fe.tparams == []
+  assert fe.derives_show
+  let ci = fe.ctors[0]
+  # a record's one constructor wears the type's name, as every other record does
+  assert ci.name == "ForeignError"
+  assert len(ci.fields) == 3
+  assert ci.fields[0].name == "kind"
+  assert ci.fields[0].ty == TyString
+  assert ci.fields[1].name == "message"
+  assert ci.fields[1].ty == TyString
+  # the cause is optional because only some backends have one, and rendered
+  # because a `ForeignError` inside a `ForeignError` would be a cycle in a
+  # record the emitters build by hand
+  assert ci.fields[2].name == "cause"
+  assert ci.fields[2].ty == opt_ty(TyString)
+  assert ty_show(adts, foreign_error_ty()) == "ForeignError"
 }
 
 fn map_size2(m: Map[String, Sig]) -> Int = map.size(m)

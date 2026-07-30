@@ -146,6 +146,12 @@ dawn_adt *dawn_adt_new_wide(int32_t tag, int32_t nfields, const uint64_t *mask);
 #define DAWN_TAG_OK 0
 #define DAWN_TAG_ERR 1
 
+/* `ForeignError`, the third prelude type, is a record: one constructor, so
+ * one tag, and three fields in declaration order (kind, message, cause). The
+ * `_e` barriers build it, so the order is written down here for the same
+ * reason the four tags above are. */
+#define DAWN_TAG_FOREIGN_ERROR 0
+
 dawn_adt *dawn_some(void *boxed);
 dawn_adt *dawn_none(void);
 
@@ -364,6 +370,24 @@ dawn_array *dawn_args(void);
  * on the two backends. Everything that only branches on Ok/Err agrees. */
 dawn_adt *dawn_catch_fault(dawn_clo *f);
 dawn_adt *dawn_catch_panic(dawn_clo *f);
+
+/* The same two barriers with a `ForeignError` payload rather than a bare
+ * message (docs/audit/error-model-design.md A). What this backend puts in
+ * each field, which is the native half of a contract the language says is
+ * backend-specific by design:
+ *
+ *   kind     the runtime's own name for the failure class, which here is the
+ *            failure kind itself -- "panic" or "fault", the split
+ *            `dawn_raise` already routes by. Not an errno symbol and not a
+ *            signal name: `dawn_fault` is handed a message and nothing else,
+ *            and a signal is not caught at all. Both would be a wider change
+ *            at every raise site, and `kind` is documented as the backend's
+ *            own name precisely so it can get more specific later without
+ *            breaking a promise.
+ *   message  what was raised, the same text `catch_fault` hands back today.
+ *   cause    always None. Nothing here chains one failure onto another. */
+dawn_adt *dawn_catch_fault_e(dawn_clo *f);
+dawn_adt *dawn_catch_panic_e(dawn_clo *f);
 
 /* Simple (1:1) Unicode case mapping: a code point in `lo..hi` maps to itself
  * plus `delta`, and one in no range maps to itself.
