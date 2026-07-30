@@ -665,6 +665,24 @@ int64_t dawn_imod(int64_t a, int64_t b) {
   return a % b;
 }
 
+int64_t dawn_int_of_float(double v) {
+  /* `to_int` is the JVM's D2L, and D2L saturates: NaN is 0, and a value past
+   * either end of the range is that end (JVMS 6.5 d2l). A plain `(int64_t)v`
+   * is undefined for all three (C11 6.3.1.4), and on x86-64 `cvttsd2si`
+   * answers INT64_MIN for all three -- so `to_int(0.0 / 0.0)` was 0 on the
+   * JVM and INT64_MIN here.
+   *
+   * The bounds are compared in double, and 2^63 is written out rather than
+   * spelled INT64_MAX: 2^63 is exactly representable and INT64_MAX is not, so
+   * `(double)INT64_MAX` rounds *up* to 2^63 and a `v > (double)INT64_MAX`
+   * test would let 2^63 itself through into the undefined cast. INT64_MIN is
+   * exactly -2^63, so its end is inclusive. */
+  if (v != v) return 0;
+  if (v >= 9223372036854775808.0) return INT64_MAX;
+  if (v <= -9223372036854775808.0) return INT64_MIN;
+  return (int64_t)v;
+}
+
 /* ---- failures, and the two barriers that stop them ----------------------
  *
  * A failure has a kind, and the kind decides which barrier stops it:

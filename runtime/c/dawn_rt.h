@@ -495,9 +495,12 @@ int64_t dawn_cmp_int(int64_t a, int64_t b);
 int64_t dawn_cmp_float(double a, double b);
 int64_t dawn_cmp_str(dawn_str *a, dawn_str *b);
 
-/* arithmetic whose C behaviour would be undefined where the JVM's is not */
+/* arithmetic whose C behaviour would be undefined where the JVM's is not.
+ * The shifts are the third member of this family and are emitted inline --
+ * masking the count to six bits is an expression, so it needs no call. */
 int64_t dawn_idiv(int64_t a, int64_t b);
 int64_t dawn_imod(int64_t a, int64_t b);
+int64_t dawn_int_of_float(double v); /* Float -> Int, saturating like D2L */
 
 /* Control. The two failure kinds, and the difference is which barrier stops
  * one: `catch_fault` takes a fault (the outside world said no) and lets a panic
