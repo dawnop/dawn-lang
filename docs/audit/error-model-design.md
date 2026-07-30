@@ -3,7 +3,11 @@
 > 动码前的**调研与方案**，不是设计定稿。
 > 覆盖 codebase-audit.md 的 **ERR-02（P1）**、**ERR-03（P1）**、**LANG-02（P1）**。
 >
-> 状态：**A、B 步 proposed 且可做；C2 步冻结。**
+> 状态：**A 步分期落地中——阶段 1 已合并（`ForeignError` + `catch_fault_e`/
+> `catch_panic_e` 两个过渡内建，两后端都发射，selfhost 自身调用点未动）；
+> 阶段 2、3 等种子推进。B 步 proposed 且可做；C2 步冻结。**
+> 分期理由与每期内容见下方 §六「落地分期」——**那一节是现状，第二节是意图**，
+> 两者冲突时以第六节为准。第二、五节里几处与代码对不上的说法，第六节开头逐条记了。
 > [`../native-backend-plan.md`](../native-backend-plan.md) §1 定了 native 的 panic 是
 > setjmp/longjmp、捕获点是「`catch_panic` / `java_try` 的**对应物**」。两个后果：
 > 错误类型不能带 JVM 类名（§2.A 已改），`bracket` 不能是 JVM codegen 特例
@@ -222,3 +226,128 @@ pub fn bracket[A, B](
 
 A 与 B 都是破坏性变更 → 各自先发 tag。A 会改发射的字节码 → `Emit-Change:`
 （按 REL-02 的新格式，要标 target；见 [native-plan-overlap.md](native-plan-overlap.md) §3.8）。
+
+## 六、落地分期
+
+> 本节写于 A 步阶段 1 落地时（2026-07-30），描述的是**代码里真实发生的事**。
+> 与第二、五节冲突处以本节为准。
+
+### 6.1 先勘误：第二、五节与今天的代码对不上的地方
+
+写第二节时 native 后端还没有，`java_try` 还没改名。逐条：
+
+1. **`java_try` 已在 v0.30.0→v0.31.0 之间改名 `catch_fault`**（见 stdlib.dawn 的 `moved`
+   表，旧名字现在只换来一句「renamed to `catch_fault`」）。下文一律用新名。
+2. **A 步必须同时覆盖 C 后端**。第二节只点了 `gen_try_closure`——那个函数还在
+   `selfhost/src/codegen.dawn`（写的是 `dawn/rt/Io` 这类运行时类；`emit.dawn` 是用户代码的
+   JVM 发射器，`emitc.dawn` 是 C 发射器）。但 native 后端 2026-07 已经在跑，
+   `runtime/c/dawn_rt.c` 里 `dawn_catch_fault`/`dawn_catch_panic` 是一对 setjmp/longjmp
+   屏障。**好消息是 C 侧不必改发射器**：intrinsic 表说某个原语归 `RtIo`，emitc 就发
+   `dawn_<name>` 的调用，加一个原语等于在 C 里写一个同名函数。
+3. **`ForeignError` 不能声明在 `std/error.dawn` 里**。intrinsic 的返回类型要求编译器
+   在读任何 std 之前就知道这个类型，所以它只能是 **prelude 类型**（与 `Option`/`Result`
+   同列，固定 id = 2），而 prelude 类型不允许被 std 重新声明。第二节那段
+   `# std/error.dawn（新增）` 的代码块是不可行的写法。
+4. **过渡助手 `message()` 阶段 1 一行都放不下**。std 是**整目录被当前跑着的编译器读的**
+   （`--std` 默认就是 `std/`，`modules.txt` 也从目录读、而不是从嵌到 jar 里的副本读），
+   所以只要把 `error` 写进 `std/modules.txt`，**种子**就会去编译 `std/error.dawn`，而种子
+   不认识 `ForeignError`。它只能进阶段 2。
+5. 而且它未必必要：`ForeignError` 是 **record**，调用点直接写 `e.message` 就行，
+   不需要一个函数去取字段。第二节把它想成「机械但量大的改写」，是因为当时把它当成了 ADT。
+6. **native 的 `kind` 不是 errno 符号名**。C 运行时的 raise API 是
+   `dawn_raise(msg, is_panic)`——**没有 errno**，也**不捕信号**。所以 native 的 `kind`
+   落在运行时真有的那个东西上：`"panic"` / `"fault"`，也就是 `catch_kinds.dawn` 早就
+   在问的那个分工。要 errno 得给每一个 `dawn_fault` 调用点加一个 kind 参数，那是独立的
+   一件事，而 `kind` 之所以定义成「后端自己的名字」，正是为了它以后能变细而不违约。
+7. **`cause` 在 JVM 侧是渲染而非嵌套**：取 `getCause().toString()`。嵌一个
+   `ForeignError` 进 `ForeignError` 会让 handler 沿着链递归，而调用方几乎不读它。
+   native 侧恒为 `None`——那里没有任何东西把一个失败挂在另一个下面。
+8. **第五节表里 A 步那格「全部 `java_try` 调用点」属于阶段 2**，而且比那一格写的大得多，
+   见 6.4。
+
+### 6.2 为什么一期做不完：种子约束
+
+`bin/dawn` 是种子驱动的（种子 = `scripts/seed-release.txt` 钉的 release，现为 v0.31.0）。
+selfhost 自己的源要**同时**过两张 intrinsic 表：种子那张（用来把 selfhost 编成编译器 A），
+和 HEAD 这张（A 再编 selfhost 一遍，跑内联 test、做 fixpoint）。于是：
+
+- **改名可以一期做完**：一次加两个名字，两张表都认识旧名，新名先 dormant。
+  `java_try`→`catch_fault` 就是这么走的（`10ed122` 加新名 dormant → v0.31.0 发布 +
+  种子推进 → `a3cf536` 迁调用点并删旧名）。
+- **改签名不行**：同一段源码不可能同时满足 `Result[T, String]` 和
+  `Result[T, ForeignError]`。唯一两边都过的调用点写法是 `Err(_)`（把载荷丢掉），
+  而需要消息的调用点——也就是这次改动想服务的那些——恰好没有这种写法。
+
+所以签名变更要**两次发布 + 两次种子推进**，代码分三期。这不是保守，是算术。
+
+### 6.3 三期
+
+| 期 | 落什么 | 边界 |
+|---|---|---|
+| **1**（已合并） | `ForeignError` prelude 类型 + `catch_fault_e`/`catch_panic_e` 两个新内建，两后端都发射；测试与语料。**调用点一个不动。** | 之后发 tag，`seed-release.txt` 推进 |
+| **2** | 全部调用点迁到 `_e`；`std/error.dawn` 此期才能建；**同一提交**里把 `catch_fault`/`catch_panic` 的表项改成 `Result[T, ForeignError]`（此时它们零调用点，改了不影响任何源） | 再发 tag + 种子推进 |
+| **3** | 调用点从 `_e` 换回 `catch_fault`/`catch_panic`；删掉 `_e` 的表项、JVM 的两次
+`gen_try_closure_e` 调用、C 的两个符号 | 终局 |
+
+第四节那条「**不**保留 `Result[T, String]` 便利版本」是**终局**的约束，阶段 3 兑现。
+中间两期存在一对过渡拼法，是因为它们**证明会死**——阶段 3 的内容就是删掉它们。
+
+**阶段 1 的具体清单**（都在 `fix/error-model-a`）：
+
+- `selfhost/src/types.dawn`：`FOREIGN_ERROR_ID = 2`、`foreign_error_ty()`、
+  `prelude_adts()` 里的 record（`kind`/`message`/`cause: Option[String]`，`derive Show`）、
+  `prelude_impls()` 多一条 Show、intrinsic 表 87 → 89 条。
+- `selfhost/src/checker.dawn`：`seed_prelude` 注册类型名与构造器名（所以用户也能
+  自己造一个 `ForeignError { .. }`）；重定义时的报错话术把它和 `Option`/`Result` 并列；
+  `visible_to_user_code()` 多两个名字。
+- `selfhost/src/codegen.dawn`：`gen_try_closure_e` 发射
+  `dawn/rt/Io.catch_fault_e`/`catch_panic_e`，`kind` 取 `getClass().getName()`
+  （**不是** `toString()`，也不是 `getSimpleName()`）。
+- `selfhost/src/main.dawn`：`ForeignError` 进无条件发射的 prelude 类列表。
+- `runtime/c/dawn_rt.{h,c}`：`dawn_catch_fault_e`/`dawn_catch_panic_e`；`dawn_raise`
+  记下 `"panic"`/`"fault"`。**emitc 一行没改**——表就是契约。
+- `selfhost/src/interp.dawn`：comptime 拒绝这两个名字（和它们的原版同理由）。
+- 测试：`types.dawn` 两个新 test；`scripts/spike-native/foreign_error.dawn`（两后端，
+  只问可移植的：两个屏障的分工与串版逐字一致、`kind` 是名字不是渲染）；
+  `scripts/error-contract/`（单后端，问 JVM 的名字逐字是什么）。
+
+**阶段 1 的 Emit-Change**：六个 `emit *` 标签全动。实测差异**恰为两处**——
+多一个 `ForeignError.class`，`dawn/rt/Io.class` 多两个方法；Core golden 的 13 份 dump
+逐字节不变，只有 selfhost 自身的模块 hash 动（改了哪些模块就动哪些）。
+
+### 6.4 调用点账（阶段 2 要动的）
+
+`catch_fault(` / `catch_panic(` 的调用，按去处（不含生成文件 `stdsrc.dawn`/`rtsrc.dawn`
+里那些字符串常量）：
+
+| 去处 | 个数 |
+|---|---|
+| `std/io.dawn` | 9 |
+| `selfhost/src/`（vendor 3、main 3、jreflect 3、interp 3、maven 1、jarw 1） | 14 |
+| `packages/web/src/server.dawn` | 6 |
+| `playground/src/play/gate.dawn` | 3 |
+| 语料（catch_kinds 6、pvec-contract 3、strings 2、io_run 1、array-contract 1） | 13 |
+| **合计** | **45** |
+
+阶段 1 之后 `foreign_error.dawn` 又多两处旧写法，那是**故意**的：它把同一个 thunk
+同时喂给两对屏障，断言两边的裁决逐字一致；阶段 3 随 `_e` 一起清掉。
+
+### 6.5 要主线裁决的两件事
+
+1. **`std/io` 的公开错误类型**（阶段 2 的规模由它决定）。`io.read_file` 那 9 个函数
+   今天返回 `Result[T, String]`，`Err` 里装的就是 `catch_fault` 的载荷。两条路：
+   - **(i) std/io 在边界上降级**：`e.message` 转回 String，公开签名不变。改动最小，
+     代价是把这次想消灭的东西留在 std 的门口——所有人拿到的仍然是一段文本。
+   - **(ii) std/io 也返回 `Result[T, ForeignError]`**：直接调用点 72 处，加上所有用 `?`
+     把它往上传的函数（它们的错误类型跟着变），会溢出到 `dawnop-site`。
+     推荐 (ii)——第一节 1.1 的临床表现正是「跨层接口依赖消息文本」，止在 std 门口
+     等于没治——但它得先定，因为阶段 2 的大小两条路差一个量级。
+2. **`_e` 这个拼法**。它只活两期，但会出现在一个 release 的 `dawn doc --builtins` 里。
+   要换成别的过渡名（`catch_fault2`、`try_fault`……），现在换成本最低。
+
+### 6.6 路过看见的一处旧账（不在本步范围）
+
+`SHOW_ID = 3`，而 `checker.cx_new` 的 `next_id` 也从 3 起，旁边的注释只列到
+Ord/Eq/Hash——Show 是后加的，注释没跟。ADT 那半边没问题（prelude 占 0/1/2，
+计数器从 3 起正好接上，这也是 `ForeignError` 拿 2 不用动计数器的原因），
+trait 那半边第一个用户 trait 会拿到 3，是否真会与 Show 撞本步没查。
