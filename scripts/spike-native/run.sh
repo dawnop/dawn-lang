@@ -98,6 +98,20 @@ trap 'rm -rf "$work"' EXIT
 # rebuild on stderr, and stderr is compared now
 "$root/bin/dawn" --version > /dev/null
 
+# std, plus stdext/raw.dawn -- the backend primitives std wraps, under names a
+# corpus program may write. `io_*`, `bytes_at` and `bytes_decode` are std-only
+# (types.dawn's `internal` set), and this corpus is the one caller that wants
+# the primitive rather than the wrapper: `catch_kinds` asks which barrier takes
+# a *fault*, and with `use java` refused on native nothing else can raise one.
+# Same arrangement as scripts/array-contract, which reaches `array_*` this way.
+# It costs nothing: `--std` reads from disk what the embedded copy would have
+# supplied, so a corpus run is no slower for it.
+stdcopy="$work/std"
+mkdir -p "$stdcopy"
+cp "$root"/std/*.dawn "$root/std/modules.txt" "$stdcopy/"
+cp "$here/stdext/raw.dawn" "$stdcopy/"
+echo raw >> "$stdcopy/modules.txt"
+
 fail=0
 known_hit=0
 
@@ -149,7 +163,7 @@ for prog in "${progs[@]}"; do
   # would otherwise hang the developer's shell and read something different in
   # CI. At /dev/null both backends see end of input, which is itself a case
   # worth agreeing on.
-  "$root/bin/dawn" run "$prog" >"$work/$name.jvm" 2>"$work/$name.jvm.err" \
+  "$root/bin/dawn" run --std "$stdcopy" "$prog" >"$work/$name.jvm" 2>"$work/$name.jvm.err" \
     </dev/null || jvm_rc=$?
   if [ "$jvm_rc" -ne 0 ]; then
     verdict "$name:jvm-run" bad "$(cat "$work/$name.jvm.err")"
@@ -164,7 +178,8 @@ for prog in "${progs[@]}"; do
     fi
   fi
 
-  if "$root/bin/dawn" __emitc "$prog" -o "$work/$name.c" >"$work/$name.emitc" 2>&1; then
+  if "$root/bin/dawn" __emitc --std "$stdcopy" "$prog" -o "$work/$name.c" \
+    >"$work/$name.emitc" 2>&1; then
     verdict "$name:emitc" ok
   else
     verdict "$name:emitc" bad "$(cat "$work/$name.emitc")"

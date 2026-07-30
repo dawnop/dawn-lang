@@ -1,0 +1,77 @@
+# The backend primitives that std wraps, reachable by name.
+#
+# `io_*`, `bytes_at` and `bytes_decode` are std-only (the `internal` set in
+# selfhost/src/types.dawn). That is the error model's boundary: an io primitive
+# raises a *fault* and std/io turns it into `Result`; `bytes_at` answers -1 out
+# of range and `bytes.at` turns that into a panic; `bytes_decode` answers `None`
+# for an unknown charset and `bytes.decode` turns that into a panic. User code
+# that could call the primitive would be routing around all three
+# (docs/audit/re-audit-2026-07-30.md RD-02).
+#
+# This corpus is the one caller that wants the primitive rather than the
+# wrapper, because the primitive is what the two backends have to agree on:
+# `catch_kinds.dawn` asks which barrier takes a fault, and once `use java` is
+# refused on native there is no other way for a program to raise one at all.
+#
+# So it rides in the way scripts/array-contract/array.dawn does. run.sh copies
+# std/ to a scratch directory, drops this file in, appends `raw` to
+# modules.txt, and compiles every corpus program with `--std <copy>`. It is not
+# part of the bundled std, no released toolchain can see it, and `dawn run` on
+# a corpus file outside the harness will not resolve `use std/raw`. It sits in
+# `stdext/` rather than beside the corpus because run.sh's corpus is
+# `spike-native/*.dawn` and this is not a program.
+#
+# Only the primitives std does something to are here. Where the std function is
+# a one-line alias -- `bytes.utf8`, `bytes.len`, `bytes.slice`, `str.to_upper`,
+# `io.println`, `io.exists` -- the corpus calls that, because it reaches the
+# same runtime function under a name a reader can look up.
+#
+# The names differ from the intrinsics' (`byte_at`, not `bytes_at`) for a
+# mechanical reason: a declaration shadows a builtin of the same name across
+# the whole module, so `fn bytes_at(...) = bytes_at(...)` would call itself.
+
+# ---- io: the failing half, unwrapped ----
+#
+# Each of these raises a fault the caller has to be ready for. std/io spells
+# the same call inside `catch_fault`.
+
+## The file's contents; raises when it cannot be read.
+pub fn read_file(path: String) -> String !io = io_read_file(path)
+
+## Write `content`, creating missing parents; raises on failure.
+pub fn write_file(path: String, content: String) -> Unit !io = io_write_file(path, content)
+
+## The file's bytes; raises when it cannot be read.
+pub fn read_bytes(path: String) -> Bytes !io = io_read_bytes(path)
+
+## Write `content`, creating missing parents; raises on failure.
+pub fn write_bytes(path: String, content: Bytes) -> Unit !io = io_write_bytes(path, content)
+
+## Create `path` and every missing directory above it; raises on failure.
+pub fn mkdirs(path: String) -> Unit !io = io_mkdirs(path)
+
+## Move `src` onto `dst`; raises when the two are not on one filesystem.
+pub fn rename(src: String, dst: String) -> Unit !io = io_rename(src, dst)
+
+## A fresh directory under `parent`; raises on failure.
+pub fn temp_dir(parent: String, prefix: String) -> String !io = io_temp_dir(parent, prefix)
+
+## The entry names under `path`; raises when it cannot be listed. Unlike
+## `io.list_dir` this does not check `is_dir` first, so a plain file raises
+## here rather than answering `Err`.
+pub fn list_names(path: String) -> List[String] !io = io_list_names(path)
+
+## Spawn, wait, answer the exit status; raises when the program cannot be
+## started at all. A non-zero status is the answer, not a failure.
+pub fn run(argv: List[String], out_path: String, err_path: String) -> Int !io =
+  io_run(argv, out_path, err_path)
+
+# ---- bytes: the sentinel half ----
+
+## The byte at `i`, or -1 out of range. `bytes.at` is this with the sentinel
+## turned into a panic.
+pub fn byte_at(b: Bytes, i: Int) -> Int = bytes_at(b, i)
+
+## `b` decoded, or `None` when the charset is unknown. `bytes.decode` is this
+## with the `None` turned into a panic.
+pub fn decode(b: Bytes, charset: String) -> Option[String] = bytes_decode(b, charset)

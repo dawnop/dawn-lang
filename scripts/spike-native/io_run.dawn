@@ -7,7 +7,12 @@
 # files, and the two reasons that matters are checked: output larger than a
 # pipe buffer would hold -- where a pipe-based primitive that waits before
 # draining deadlocks -- and stdout and stderr staying apart.
+#
+# `io_run` is std-only, so the calls below go through `use std/raw`: `io.run`
+# wraps the same primitive in `catch_fault`, and the last case here is about the
+# raise itself -- a program that is not there is a failure, not a status.
 use std/io
+use std/raw
 use std/str
 
 fn tmp(name: String) -> String = "/tmp/dawn-io-run-" ++ name
@@ -23,17 +28,17 @@ pub fn main() -> Unit !io = {
   let err = tmp("err")
 
   io.println("-- the status is the child's own --")
-  io.println("0  -> " ++ to_string(io_run(["sh", "-c", "exit 0"], out, err)))
-  io.println("3  -> " ++ to_string(io_run(["sh", "-c", "exit 3"], out, err)))
-  io.println("42 -> " ++ to_string(io_run(["sh", "-c", "exit 42"], out, err)))
+  io.println("0  -> " ++ to_string(raw.run(["sh", "-c", "exit 0"], out, err)))
+  io.println("3  -> " ++ to_string(raw.run(["sh", "-c", "exit 3"], out, err)))
+  io.println("42 -> " ++ to_string(raw.run(["sh", "-c", "exit 42"], out, err)))
 
   io.println("-- the two streams stay apart --")
-  let _ = io_run(["sh", "-c", "printf out; printf err >&2"], out, err)
+  let _ = raw.run(["sh", "-c", "printf out; printf err >&2"], out, err)
   io.println("stdout = " ++ slurp(out))
   io.println("stderr = " ++ slurp(err))
 
   io.println("-- each run truncates, it does not append --")
-  let _ = io_run(["sh", "-c", "printf second"], out, err)
+  let _ = raw.run(["sh", "-c", "printf second"], out, err)
   io.println("stdout = " ++ slurp(out))
 
   io.println("-- more output than a pipe would buffer --")
@@ -41,19 +46,19 @@ pub fn main() -> Unit !io = {
   # shell itself so this does not depend on `head -c`, which POSIX does not
   # have. A primitive that waited for the child before reading would hang here
   # rather than print a number.
-  let _ = io_run(["sh", "-c", "i=0; while [ \$i -lt 8192 ]; do printf %064d \$i; i=\$((i+1)); done"],
+  let _ = raw.run(["sh", "-c", "i=0; while [ \$i -lt 8192 ]; do printf %064d \$i; i=\$((i+1)); done"],
     out, err)
   io.println("bytes = " ++ to_string(str.len(slurp(out))))
 
   io.println("-- empty paths inherit, so nothing is redirected --")
-  io.println("7 -> " ++ to_string(io_run(["sh", "-c", "exit 7"], "", "")))
+  io.println("7 -> " ++ to_string(raw.run(["sh", "-c", "exit 7"], "", "")))
 
   io.println("-- argv reaches the program as given, unparsed --")
-  let _ = io_run(["printf", "[%s]", "a b", "c*d", "-n"], out, err)
+  let _ = raw.run(["printf", "[%s]", "a b", "c*d", "-n"], out, err)
   io.println("argv = " ++ slurp(out))
 
   io.println("-- a program that is not there is a failure, not a status --")
-  match catch_panic(fn() => io_run(["dawn-no-such-program"], out, err)) {
+  match catch_panic(fn() => raw.run(["dawn-no-such-program"], out, err)) {
     Ok(code) -> io.println("returned " ++ to_string(code))
     Err(_) -> io.println("refused")
   }

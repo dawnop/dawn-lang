@@ -94,6 +94,27 @@ fn moved_renames(out0: Map[String, String]) -> Map[String, String] = {
   for op in ["trim", "contains", "starts_with", "ends_with", "index_of", "last_index_of"] {
     out = map.insert(out, "str_" ++ op, "use std/str, then str." ++ op ++ "(...)")
   }
+  # The intrinsics that became std-only on 2026-07-30 (RD-02). They were
+  # always meant to be the backend contract rather than language surface, and
+  # nothing said so, so `io_read_file` was a spelling that skipped the whole
+  # error model. Same shape as the entries above: the name still exists, it is
+  # just not one user code may write, and the hint gives the one it may.
+  for op in ["print", "println", "eprint", "eprintln", "exit", "read_line", "is_dir",
+    "exists", "mkdirs", "read_file", "write_file", "cwd", "getenv", "read_bytes",
+    "write_bytes", "delete", "rename", "temp_dir", "is_symlink", "read_stdin", "run"] {
+    out = map.insert(out, "io_" ++ op, "use std/io, then io." ++ op ++ "(...)")
+  }
+  # the one io primitive std renamed: it answers entry names, and `list_dir`
+  # is what the module calls that
+  out = map.insert(out, "io_list_names", "use std/io, then io.list_dir(...)")
+  for op in ["utf8", "decode", "len", "at", "slice"] {
+    out = map.insert(out, "bytes_" ++ op, "use std/bytes, then bytes." ++ op ++ "(...)")
+  }
+  out = map.insert(out, "bytes_from_array",
+    "use std/bytes, then bytes.buf()/bytes.put(...)/bytes.freeze(...)")
+  for op in ["lower", "upper"] {
+    out = map.insert(out, "str_" ++ op, "use std/str, then str.to_" ++ op ++ "(...)")
+  }
   # the only entry here that did not move anywhere: it was renamed in v0.31.0,
   # because the barrier catches a *fault* and stopped having anything to do
   # with Java once native got failure kinds

@@ -1169,18 +1169,41 @@ pub fn intrinsics() -> Map[String, Intr] = {
   for op in ["start", "end", "done", "char", "next", "prev"] {
     rt_of = map.insert(rt_of, "cursor_" ++ op, RtStrings)
   }
+  # Case folding is the table, `str.to_lower`/`str.to_upper` is the spelling.
+  # Both existed until 2026-07-30 and the intrinsic one was reachable from user
+  # code, which is two names for one operation and a second thing to keep
+  # documented (docs/audit/re-audit-2026-07-30.md RD-02).
   for op in ["lower", "upper"] {
     rt_of = map.insert(rt_of, "str_" ++ op, RtStrings)
+    internal = set.insert(internal, "str_" ++ op)
   }
+  # The byte primitives are std-only for the reason std/bytes exists: their
+  # result shapes are sentinels. `bytes_at` answers -1 out of range and
+  # `bytes_decode` answers None for an unknown charset, and turning those into
+  # a panic and an `Option` is the whole of what `bytes.at`/`bytes.decode` do.
+  # Reachable from user code, the wrapper is advice rather than a boundary.
+  # `bytes_from_array` also names Array, which is std-only on its own.
   for op in ["utf8", "decode", "len", "at", "slice", "from_array"] {
     rt_of = map.insert(rt_of, "bytes_" ++ op, RtBytes)
+    internal = set.insert(internal, "bytes_" ++ op)
   }
-  # it names Array, so it is std-only for the same reason array_* is
-  internal = set.insert(internal, "bytes_from_array")
-  for op in ["print", "println", "eprint", "eprintln", "read_line", "is_dir", "read_file",
+  let io_in_rt = ["print", "println", "eprint", "eprintln", "read_line", "is_dir", "read_file",
     "write_file", "exit", "exists", "mkdirs", "cwd", "getenv", "read_bytes", "write_bytes",
-    "delete", "rename", "temp_dir", "is_symlink", "read_stdin"] {
+    "delete", "rename", "temp_dir", "is_symlink", "read_stdin"]
+  for op in io_in_rt {
     rt_of = map.insert(rt_of, "io_" ++ op, RtIo)
+  }
+  # Every io primitive is std-only, `list_names`/`run` included -- one list plus
+  # the two, rather than a second copy of twenty names, so an io primitive
+  # cannot be added to one of these loops and not the other.
+  #
+  # This is the error model's boundary and not a style preference:
+  # `io_read_file` raises a *fault* on failure, and std/io is where that becomes
+  # `Result[String, String]`. Called directly, the fault reaches the user as a
+  # JVM stack trace on one backend and a `longjmp` on the other -- the whole of
+  # spec 8 routed around by spelling a name (RD-02).
+  for op in io_in_rt ++ ["list_names", "run"] {
+    internal = set.insert(internal, "io_" ++ op)
   }
   rt_of = map.insert(rt_of, "catch_fault", RtIo)
   rt_of = map.insert(rt_of, "catch_panic", RtIo)

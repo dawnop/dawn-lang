@@ -14,16 +14,19 @@
 # eq_adt.dawn shows the same seam across backends; this one shows it inside the
 # backend that ships.
 #
-# Two deliberate restrictions, both so a failure here means what it says:
+# One deliberate restriction, so that a failure here means what it says:
+# printing is if/else, never `to_string`. Rendering is show_derive.dawn's job,
+# and `Show` of `Bytes` is a summary (`<N bytes>`) that would hide the content
+# the comparisons are about.
 #
-#   * `bytes_utf8` / `bytes_slice` are called as intrinsics rather than through
-#     `use std/bytes`. `emitc` emits calls into std without ever emitting std
-#     (see README), so the std spelling would fail at `cc` for a reason that has
-#     nothing to do with equality.
-#   * printing is if/else, never `to_string`. Rendering is show_derive.dawn's
-#     job, and `Show` of `Bytes` is a summary (`<N bytes>`) that would hide the
-#     content the comparisons are about.
+# `bytes.utf8` / `bytes.slice` were once spelled as the bare intrinsics here,
+# because `emitc` emitted calls into std without ever emitting std and the std
+# spelling failed at `cc` for a reason that had nothing to do with equality.
+# S3 linked std into the translation unit, so that reason is gone -- and both
+# functions are one-line aliases of the primitive, so this reaches the same
+# runtime code under a name a reader can look up.
 use std/io
+use std/bytes
 
 pub type Wrap = | Wrap(b: Bytes)
 
@@ -37,11 +40,11 @@ fn yn(label: String, b: Bool) -> String =
 pub fn main() -> Unit !io = {
   # content-equal, built three different ways, so nothing here can pass by
   # accident of the two operands being the same array
-  let a = bytes_utf8("hi")
-  let b = bytes_utf8("hi")
-  let c = bytes_utf8("h") ++ bytes_utf8("i")
-  let d = bytes_slice(bytes_utf8("xhiy"), 1, 3)
-  let other = bytes_utf8("ho")
+  let a = bytes.utf8("hi")
+  let b = bytes.utf8("hi")
+  let c = bytes.utf8("h") ++ bytes.utf8("i")
+  let d = bytes.slice(bytes.utf8("xhiy"), 1, 3)
+  let other = bytes.utf8("ho")
 
   println("-- bare Bytes: the one place content equality was written --")
   println(yn("utf8 == utf8    ", a == b))
@@ -73,9 +76,9 @@ pub fn main() -> Unit !io = {
   println(yn("(a,1) == (b,2)    ", (a, 1) == (b, 2)))
 
   println("-- empty and length-sensitive --")
-  let empty1 = bytes_slice(a, 0, 0)
-  let empty2 = bytes_utf8("")
+  let empty1 = bytes.slice(a, 0, 0)
+  let empty2 = bytes.utf8("")
   println(yn("empty == empty  ", empty1 == empty2))
   println(yn("Wrap(e) == Wrap(e)", Wrap(empty1) == Wrap(empty2)))
-  println(yn("hi == h         ", a == bytes_utf8("h")))
+  println(yn("hi == h         ", a == bytes.utf8("h")))
 }
