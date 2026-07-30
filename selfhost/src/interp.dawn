@@ -354,7 +354,7 @@ fn lower_into(
   owner: String,
   f: TFun
 ) -> Result[(ESt, CFun), (ESt, Env, Ctl)] !io =
-  match catch_panic_e(fn() =>
+  match catch_panic(fn() =>
       lower.lower_fn_only(owner, f, icx.traits, icx.impls, icx.adts, no_sigs(),
         icx.syms, st.next_lam)) {
     Err(e) ->
@@ -664,7 +664,7 @@ fn comptime_rejects() -> List[String] = {
     "delete", "rename", "temp_dir", "is_symlink", "read_stdin", "list_names", "run"] {
     out = out ++ ["io_" ++ op]
   }
-  out = out ++ ["args", "catch_fault", "catch_panic", "catch_fault_e", "catch_panic_e"]
+  out = out ++ ["args", "catch_fault", "catch_panic"]
   # `cast` unerases a host object, and comptime never has one
   out = out ++ ["cast"]
   # Map/Set/Array: `CValue` has no representation for any of the three, so
@@ -1494,7 +1494,7 @@ fn fresh_st(fuel: Int) -> ESt = {
 fn fold_expr(icx: ICx, fuel: Int, e: TExpr, lo: Int, hi: Int) -> Result[CValue, Diag] !io = {
   let st = fresh_st(fuel)
   let env: Env = map.empty()
-  let lowered = catch_panic_e(fn() =>
+  let lowered = catch_panic(fn() =>
       lower.lower_expr_only(icx.owner, e, icx.traits, icx.impls, icx.adts,
         no_sigs(), icx.syms, 0))
   match lowered {
@@ -1785,7 +1785,7 @@ fn probe_icx() -> ICx = {
 fn probe_builtin(icx: ICx, name: String) -> String !io = {
   let env: Env = map.empty()
   let no_args: List[CValue] = []
-  match catch_panic_e(fn() => call_builtin(icx, fresh_st(1000), env, name, no_args)) {
+  match catch_panic(fn() => call_builtin(icx, fresh_st(1000), env, name, no_args)) {
     Err(msg) -> if str.contains(msg.message, NO_ARM_LISTED) { "listed-no-arm" } else { "arm" }
     Ok(r) ->
       match r {
@@ -1843,7 +1843,7 @@ test "the comptime interpreter covers every intrinsic, or refuses it by name" {
   #    "thirteen more" and "all twelve" in the same paragraph -- so the two
   #    numbers this file states are asserted rather than asserted-by-nobody.
   assert len(arms) == 41
-  assert len(rejects) == 61
+  assert len(rejects) == 59
 }
 
 test "consts evaluate in declaration order and fold across references" {

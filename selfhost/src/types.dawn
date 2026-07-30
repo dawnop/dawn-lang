@@ -638,7 +638,7 @@ pub const OPTION_ID: Int = 0
 pub const RESULT_ID: Int = 1
 
 ## What a foreign failure looks like once it has crossed into Dawn: the
-## payload of `catch_fault_e`/`catch_panic_e` (docs/audit/error-model-design.md
+## payload of `catch_fault`/`catch_panic` (docs/audit/error-model-design.md
 ## A). A prelude type rather than a std one, for the reason `Option` is: an
 ## intrinsic returns it, so every program can name it without importing
 ## anything, and std cannot declare a type the compiler already had to know.
@@ -1038,16 +1038,21 @@ pub fn builtins() -> Map[String, Sig] = {
     # came from; native has had failure kinds since 2026-07-27
     # (native-backend-plan.md 14.9), and the name outlived the reason.
     #
-    # The payload is a `ForeignError` as of stage 2 of the error model
-    # (docs/audit/error-model-design.md 六). It used to be the failure rendered
-    # as a String, which left a caller nothing to act on but the text -- the
-    # thing spec 9.8 used to advise matching on and ERR-02 was raised about.
-    # These two entries could only change on a release where nothing called
-    # them, because a builtin's *signature* is under the seed discipline the
-    # same way its name is: the compiler's own sources have to type-check under
-    # the previous release's table and today's at once, and no call site
-    # satisfies `Result[T, String]` and `Result[T, ForeignError]` together
-    # unless it throws the payload away. Hence the detour below.
+    # The payload is a `ForeignError` (docs/audit/error-model-design.md 六). It
+    # used to be the failure rendered as a String, which left a caller nothing
+    # to act on but the text -- the thing spec 9.8 used to advise matching on
+    # and ERR-02 was raised about.
+    #
+    # Changing it took three releases, because a builtin's *signature* is under
+    # the seed discipline the same way its name is, and more tightly: the
+    # compiler's own sources have to type-check under the previous release's
+    # table and today's at once, and no call site satisfies
+    # `Result[T, String]` and `Result[T, ForeignError]` together unless it
+    # throws the payload away. So the new shape landed under a pair of names
+    # nothing called (`catch_fault_e`/`catch_panic_e`, v0.32.0), a release
+    # taught the previous compiler both spellings, the call sites moved and
+    # these two entries were flipped at zero callers (v0.33.0), and the call
+    # sites came back here. The transitional pair is gone.
     eff1(
       tp1(bsig("catch_fault", [TyFn([], t, EIo)], ["f"],
         result_ty(t, foreign_error_ty())), t),
@@ -1056,24 +1061,6 @@ pub fn builtins() -> Map[String, Sig] = {
     tp1(bsig("cast", [TyJava("java.lang.Object", "Object")], ["x"], t), t),
     eff1(
       tp1(bsig("catch_panic", [TyFn([], t, EIo)], ["f"],
-        result_ty(t, foreign_error_ty())), t),
-      EIo
-    ),
-    # The same two barriers under transitional names, and now with the same
-    # signatures too. These are what every call site in the repository spells
-    # today, and the only reason they exist: the new payload had to land under
-    # a name nothing called (stage 1), a release taught the previous compiler
-    # both spellings, and only then could the call sites move and the entries
-    # above be flipped (stage 2 -- this commit). Stage 3 moves the call sites
-    # back to the plain names and deletes these two, once a release has taught
-    # the previous compiler that `catch_fault` means this.
-    eff1(
-      tp1(bsig("catch_fault_e", [TyFn([], t, EIo)], ["f"],
-        result_ty(t, foreign_error_ty())), t),
-      EIo
-    ),
-    eff1(
-      tp1(bsig("catch_panic_e", [TyFn([], t, EIo)], ["f"],
         result_ty(t, foreign_error_ty())), t),
       EIo
     ),
@@ -1288,8 +1275,6 @@ pub fn intrinsics() -> Map[String, Intr] = {
   }
   rt_of = map.insert(rt_of, "catch_fault", RtIo)
   rt_of = map.insert(rt_of, "catch_panic", RtIo)
-  rt_of = map.insert(rt_of, "catch_fault_e", RtIo)
-  rt_of = map.insert(rt_of, "catch_panic_e", RtIo)
 
   # The persistent Map/Set: erased on both sides, and std-only. No runtime
   # module owns them any more -- lowering turns each into a call on the Dawn
@@ -1493,18 +1478,20 @@ test "builtin table renders signatures" {
     }
     None -> { assert false }
   }
-  assert map_size2(bs) == 89
+  assert map_size2(bs) == 87
 }
 
 test "no barrier renders its failure into a String any more" {
-  # Stage 2 of the error model (design doc 六): the plain names now carry what
-  # the `_e` pair was introduced to carry, so all four render the same shape.
-  # A String payload surviving anywhere is the regression this asserts against
-  # -- it is what a caller has to parse, and parsing it is ERR-02.
+  # The end of the error model's migration (design doc 六): there is one pair
+  # of barriers and its payload is structured. A String payload surviving
+  # anywhere is the regression this asserts against -- it is what a caller has
+  # to parse, and parsing it is ERR-02. The transitional `_e` spelling is gone,
+  # and its absence is asserted here too: leaving it behind would leave a
+  # second way to spell the same thing in `dawn doc --builtins` forever.
   let adts = prelude_adts()
   let traits = prelude_traits()
   let bs = builtins()
-  for n in ["catch_fault", "catch_panic", "catch_fault_e", "catch_panic_e"] {
+  for n in ["catch_fault", "catch_panic"] {
     match map.get(bs, n) {
       Some(s) -> {
         assert sig_render(adts, traits, s) ==
@@ -1512,12 +1499,18 @@ test "no barrier renders its failure into a String any more" {
       }
       None -> { assert false }
     }
-  }
-  # and all four reach the io runtime, so a backend implements the transitional
-  # pair where it implements the originals rather than growing a case in the
-  # emitter -- which is what makes stage 3 a deletion and not a port
-  for n in ["catch_fault", "catch_panic", "catch_fault_e", "catch_panic_e"] {
+    # and each reaches the io runtime, which is where a backend implements it
     assert intr_at(n).expect(n).rt == Some(RtIo)
+  }
+  for n in ["catch_fault_e", "catch_panic_e"] {
+    match map.get(bs, n) {
+      Some(_) -> { assert false }
+      None -> { }
+    }
+    match intr_at(n) {
+      Some(_) -> { assert false }
+      None -> { }
+    }
   }
 }
 

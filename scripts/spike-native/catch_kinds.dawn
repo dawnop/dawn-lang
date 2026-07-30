@@ -29,7 +29,7 @@ use std/map
 ## Which barrier stops this failure? The thunk runs inside `catch_fault` inside
 ## `catch_panic`, so every outcome is a value rather than the end of the run.
 fn barrier(f: fn() -> Int !io) -> String !io =
-  match catch_panic_e(fn() => match catch_fault_e(f) {
+  match catch_panic(fn() => match catch_fault(f) {
     Ok(_) -> 0
     Err(_) -> 1
   }) {
@@ -40,7 +40,7 @@ fn barrier(f: fn() -> Int !io) -> String !io =
 
 ## `catch_panic` alone: it is the catch-all, so nothing may pass it.
 fn outer(f: fn() -> Int !io) -> String !io =
-  match catch_panic_e(f) {
+  match catch_panic(f) {
     Ok(_) -> "ok"
     Err(_) -> "caught"
   }
@@ -50,11 +50,11 @@ fn outer(f: fn() -> Int !io) -> String !io =
 ## having at most one frame to skip.
 fn two_deep(f: fn() -> Int !io) -> String !io = {
   let inner: fn() -> Int !io = fn() =>
-    match catch_fault_e(f) {
+    match catch_fault(f) {
       Ok(_) -> 0
       Err(_) -> 1
     }
-  match catch_panic_e(fn() => match catch_fault_e(inner) {
+  match catch_panic(fn() => match catch_fault(inner) {
     Ok(v) -> v
     Err(_) -> 2
   }) {

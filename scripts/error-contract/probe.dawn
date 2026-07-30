@@ -41,7 +41,7 @@ fn check_true(what: String, got: Bool) -> Int !io =
   check(what, to_string(got), "true")
 
 fn taken(f: fn() -> Int !io) -> ForeignError !io =
-  match catch_panic_e(f) {
+  match catch_panic(f) {
     Ok(_) -> panic("the thunk was supposed to fail")
     Err(e) -> e
   }
@@ -53,7 +53,7 @@ fn not_a_number() -> Int !io = Long.parseLong("nope")
 pub fn main() -> Unit !io = {
   let p = taken(boom)
   let n = taken(not_a_number)
-  let f = match catch_fault_e(not_a_number) {
+  let f = match catch_fault(not_a_number) {
     Ok(_) -> panic("parseLong accepted `nope`")
     Err(e) -> e
   }
@@ -70,8 +70,8 @@ pub fn main() -> Unit !io = {
     not str.contains(n.kind, ":"))
   bad = bad + check_true("the message is the exception's own",
     str.contains(n.message, "nope"))
-  # the fault barrier's `_e` twin fills the same fields the same way -- the
-  # two differ in what they catch, not in what they report
+  # the fault barrier fills the same fields the same way -- the two differ in
+  # what they catch, not in what they report
   bad = bad + check("both barriers report the same kind", f.kind, n.kind)
   bad = bad + check("both barriers report the same message", f.message, n.message)
   println("mismatches " ++ to_string(bad))

@@ -364,17 +364,12 @@ dawn_array *dawn_args(void);
  * reason the JVM hands these an `Fn0` whose `apply` returns `Object`.
  *
  * The JVM catches an exception; native has no exceptions, so these catch a
- * panic, which is the one failure mechanism there is. The consequence is
- * visible: the `Err` payload is the panic message rather than a Java
- * exception's `toString`, so a program that prints it prints different text
- * on the two backends. Everything that only branches on Ok/Err agrees. */
-dawn_adt *dawn_catch_fault(dawn_clo *f);
-dawn_adt *dawn_catch_panic(dawn_clo *f);
-
-/* The same two barriers with a `ForeignError` payload rather than a bare
- * message (docs/audit/error-model-design.md A). What this backend puts in
- * each field, which is the native half of a contract the language says is
- * backend-specific by design:
+ * raise, which is the one failure mechanism there is.
+ *
+ * The `Err` payload is a `ForeignError`
+ * (docs/audit/error-model-design.md A). What this backend puts in each field
+ * is the native half of a contract the language says is backend-specific by
+ * design:
  *
  *   kind     the runtime's own name for the failure class, which here is the
  *            failure kind itself -- "panic" or "fault", the split
@@ -384,10 +379,14 @@ dawn_adt *dawn_catch_panic(dawn_clo *f);
  *            at every raise site, and `kind` is documented as the backend's
  *            own name precisely so it can get more specific later without
  *            breaking a promise.
- *   message  what was raised, the same text `catch_fault` hands back today.
- *   cause    always None. Nothing here chains one failure onto another. */
-dawn_adt *dawn_catch_fault_e(dawn_clo *f);
-dawn_adt *dawn_catch_panic_e(dawn_clo *f);
+ *   message  what was raised.
+ *   cause    always None. Nothing here chains one failure onto another.
+ *
+ * `kind` is a backend's own name, so a program that *prints* one prints
+ * different text on the two backends; everything that branches on Ok/Err, or
+ * reads `message`, agrees. */
+dawn_adt *dawn_catch_fault(dawn_clo *f);
+dawn_adt *dawn_catch_panic(dawn_clo *f);
 
 /* Simple (1:1) Unicode case mapping: a code point in `lo..hi` maps to itself
  * plus `delta`, and one in no range maps to itself.

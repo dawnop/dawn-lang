@@ -1115,14 +1115,16 @@ type ForeignError = { kind: String, message: String, cause: Option[String] }
 - `message` 是失败自己说的话（JVM 的 `getMessage()`，无则空串）；`cause` 是底下那层
   失败的渲染，没有则 `None`。不带栈：渲染栈的代价要付在每一次屏障上。
 
-**还有一对过渡拼法 `catch_fault_e` / `catch_panic_e`。** 它们与上面两个**签名完全
-相同**，抓什么、放什么穿透也逐字相同，存在的唯一理由是种子纪律：一个内建的**签名**
-和它的名字一样受它约束，而且更紧——改名可以一期内让两张表都认识两个拼法，改载荷
-类型不行，编译器自己的调用点没法同时满足两张表。所以新形状先以不被任何人调用的名字
-落地（v0.32.0），发一次 release 教会上一代编译器，再迁调用点并把签名交还给
-`catch_fault`/`catch_panic`（本版）。**新代码一律写不带 `_e` 的名字**；下一次种子推进
-之后 `_e` 这对会被删掉。分期见 `docs/audit/error-model-design.md` §六。终局只有一对
-屏障，载荷是 `ForeignError`，不保留 String 版本。
+屏障只有这一对，载荷只有 `ForeignError`，**不保留 String 版本**。
+
+> **历史**：把载荷从 String 换成 `ForeignError` 花了三个 release，因为一个内建的
+> **签名**和它的名字一样受种子纪律约束，而且更紧——改名可以一期内让两张表都认识两个
+> 拼法，改载荷类型不行：编译器自己的调用点没法同时满足 `Result[T, String]` 和
+> `Result[T, ForeignError]` 两张表。所以新形状先以零调用点的过渡拼法
+> `catch_fault_e`/`catch_panic_e` 落地（v0.32.0），发一次 release 教会上一代编译器，
+> 迁调用点并翻转原名的表项（v0.33.0），再把调用点迁回原名、删掉过渡拼法（本版）。
+> 那对名字在 v0.32.0/v0.33.0 的 `dawn doc --builtins` 里出现过，此后不再存在。
+> 分期见 `docs/audit/error-model-design.md` §六。
 
 ---
 

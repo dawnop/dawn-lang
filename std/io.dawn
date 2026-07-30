@@ -13,7 +13,7 @@
 # name that field. Parking argv on a runtime class instead would make it shared
 # by every program in one JVM — see pure-ffi-design.md §十七.
 #
-# The failing ones compose with `catch_fault_e`, which is an intrinsic and stays
+# The failing ones compose with `catch_fault`, which is an intrinsic and stays
 # in the compiler. That is not a workaround: `Result` is a Dawn ADT and cannot be
 # a Java return type, and the barrier is precisely the built-in bridge from "the
 # outside world said no" to an `Err`.
@@ -26,9 +26,6 @@
 # wants to *decide* reads `kind` and a caller that wants to *report* reads
 # `message` — neither has to parse. Rendering one back into a line of text is
 # still a `to_string(e)` away for whoever actually wants the line.
-#
-# `catch_fault_e` is the transitional spelling; stage 3 of the migration gives
-# these signatures back to the name `catch_fault`. Nothing here changes then.
 
 ## Print a string followed by a newline.
 pub fn println(s: String) -> Unit !io = io_println(s)
@@ -62,17 +59,17 @@ pub fn exists(path: String) -> Bool !io = io_exists(path)
 ## Create `path` and every missing directory above it.
 ## An existing directory is not a failure; an existing *file* is.
 pub fn mkdirs(path: String) -> Result[Unit, ForeignError] !io =
-  catch_fault_e(fn() => io_mkdirs(path))
+  catch_fault(fn() => io_mkdirs(path))
 
 ## Read a whole file as a UTF-8 string.
 pub fn read_file(path: String) -> Result[String, ForeignError] !io =
-  catch_fault_e(fn() => io_read_file(path))
+  catch_fault(fn() => io_read_file(path))
 
 ## Write a string to a file, creating missing parent directories.
 ## `Ok` carries nothing: the only count worth returning would be bytes on disk,
 ## and what this used to return was UTF-16 units. Nobody read it.
 pub fn write_file(path: String, content: String) -> Result[Unit, ForeignError] !io =
-  catch_fault_e(fn() => io_write_file(path, content))
+  catch_fault(fn() => io_write_file(path, content))
 
 ## The process's working directory, as an absolute path.
 pub fn cwd() -> String !io = io_cwd()
@@ -82,11 +79,11 @@ pub fn getenv(name: String) -> Option[String] !io = io_getenv(name)
 
 ## Read a whole file as bytes. The text half is `read_file`.
 pub fn read_bytes(path: String) -> Result[Bytes, ForeignError] !io =
-  catch_fault_e(fn() => io_read_bytes(path))
+  catch_fault(fn() => io_read_bytes(path))
 
 ## Write bytes to a file, creating missing parent directories.
 pub fn write_bytes(path: String, content: Bytes) -> Result[Unit, ForeignError] !io =
-  catch_fault_e(fn() => io_write_bytes(path, content))
+  catch_fault(fn() => io_write_bytes(path, content))
 
 ## Delete a file, or an empty directory. `true` when there was something to
 ## delete: a missing path is not an error, and a non-empty directory is not
@@ -99,12 +96,12 @@ pub fn delete(path: String) -> Bool !io = io_delete(path)
 ## be observed half-done would defeat that. Stage with `temp_dir` under the
 ## destination's own directory to stay on one filesystem.
 pub fn rename(src: String, dst: String) -> Result[Unit, ForeignError] !io =
-  catch_fault_e(fn() => io_rename(src, dst))
+  catch_fault(fn() => io_rename(src, dst))
 
 ## A fresh directory under `parent`, named after `prefix`. An empty `parent`
 ## means the system temporary directory.
 pub fn temp_dir(parent: String, prefix: String) -> Result[String, ForeignError] !io =
-  catch_fault_e(fn() => io_temp_dir(parent, prefix))
+  catch_fault(fn() => io_temp_dir(parent, prefix))
 
 ## Whether `path` is a symbolic link. The link itself is examined, not its
 ## target, so a link to a directory is a link and not a directory.
@@ -130,7 +127,7 @@ pub fn read_stdin(n: Int) -> Bytes !io = io_read_stdin(n)
 ## `kind` is — a caller may match on it.
 pub fn list_dir(path: String) -> Result[List[String], ForeignError] !io =
   if is_dir(path) {
-    catch_fault_e(fn() => io_list_names(path))
+    catch_fault(fn() => io_list_names(path))
   } else {
     Err(ForeignError {
       kind: "io.not_a_directory",
@@ -147,4 +144,4 @@ pub fn list_dir(path: String) -> Result[List[String], ForeignError] !io =
 ## path leaves that stream pointing wherever this process's already points.
 ## Files rather than pipes: see the note on the `io_run` intrinsic.
 pub fn run(argv: List[String], out_path: String, err_path: String) -> Result[Int, ForeignError] !io =
-  catch_fault_e(fn() => io_run(argv, out_path, err_path))
+  catch_fault(fn() => io_run(argv, out_path, err_path))

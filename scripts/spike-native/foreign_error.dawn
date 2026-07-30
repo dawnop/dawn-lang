@@ -1,22 +1,21 @@
 # The structured failure payload, on both backends.
 #
-# `catch_fault_e`/`catch_panic_e` are the transitional names of
-# `catch_fault`/`catch_panic` (docs/audit/error-model-design.md 六). Since
-# stage 2 both pairs carry a `ForeignError`; they are still four distinct
-# entries in the intrinsic table and four distinct runtime symbols, which is
-# what this file is about. Two things have to hold and only one of them is
-# portable, which is what it is arranged around.
+# `catch_fault`/`catch_panic` carry a `ForeignError`
+# (docs/audit/error-model-design.md 六). Through the migration this file also
+# held a second copy of every question, asked of the transitional
+# `catch_fault_e`/`catch_panic_e` spelling, so that four table entries and four
+# runtime symbols could be shown to agree; those are gone and there is one pair
+# again. What is left is what was always the point: what the payload looks like
+# on a backend that has exceptions and on one that has a `longjmp`.
 #
-# **Portable**: the two pairs split the same way. A fault stops at the io
-# barrier and a panic walks past it -- the property `catch_kinds.dawn` pins for
-# one pair, asked here of the other, because a second pair of barriers is a
-# second place for the split to be got wrong, and the day it disagrees is the
-# day the transition ships two error models instead of one. `barrier_str`
-# below is deliberately the only caller of the plain names left in the tree:
-# it throws the payload away (`Err(_)`), which is the one call-site shape that
-# type-checks under both the previous release's table and today's, and is why
-# the plain names could be flipped in the first place. Stage 3 deletes it
-# along with the `_e` spelling.
+# Two things have to hold and only one of them is portable, which is what this
+# file is arranged around.
+#
+# **Portable**: the two barriers split the failures the same way on both
+# backends -- a fault stops at the io barrier and a panic walks past it -- and
+# when they both catch the same failure they report the same payload. They
+# differ in *what they catch*, not in what they say about it, and a second
+# report shape would be a second error model.
 #
 # **Portable**: `kind` is a *name*. The failure mode this guards against is the
 # JVM handler calling `Throwable.toString()`, which renders as
@@ -29,8 +28,8 @@
 # **Not portable**: the names themselves. `kind` is the backend's own name for
 # the failure class and matching on it is backend-specific by design, so this
 # file never prints one -- the two backends' output has to agree byte for byte.
-# The JVM's exact binary name is pinned in scripts/error-contract/, which runs
-# on one backend and can therefore say what it is.
+# The JVM's exact binary names are pinned in scripts/error-contract/, which
+# runs on one backend and can therefore say what they are.
 #
 # The fault-raising io primitives are std-only, so they come from
 # `use std/raw`, the same arrangement `catch_kinds.dawn` uses.
@@ -38,20 +37,8 @@ use std/io
 use std/raw
 use std/str
 
-## Which barrier stops this failure, asked of the structured pair.
+## Which barrier stops this failure.
 fn barrier(f: fn() -> Int !io) -> String !io =
-  match catch_panic_e(fn() => match catch_fault_e(f) {
-    Ok(_) -> 0
-    Err(_) -> 1
-  }) {
-    Ok(0) -> "ok"
-    Ok(_) -> "caught"
-    Err(_) -> "through"
-  }
-
-## The same question of the plain-named pair, so the two answers can be
-## compared rather than each read on its own.
-fn barrier_str(f: fn() -> Int !io) -> String !io =
   match catch_panic(fn() => match catch_fault(f) {
     Ok(_) -> 0
     Err(_) -> 1
@@ -61,13 +48,18 @@ fn barrier_str(f: fn() -> Int !io) -> String !io =
     Err(_) -> "through"
   }
 
-fn agree(label: String, f: fn() -> Int !io) -> Unit !io =
-  println(label ++ " " ++ barrier(f) ++ "  same as the plain-named pair: "
-      ++ to_string(barrier(f) == barrier_str(f)))
+## A failing io primitive: the one failure both barriers take, so the two can
+## be asked the same question and their answers compared.
+fn read_missing() -> Int !io = str.len(raw.read_file("/no/such/dawn/path"))
 
-## The error a failing io primitive hands back through the structured barrier.
-fn taken() -> ForeignError !io =
-  match catch_fault_e(fn() => str.len(raw.read_file("/no/such/dawn/path"))) {
+fn taken_by_fault() -> ForeignError !io =
+  match catch_fault(read_missing) {
+    Ok(_) -> panic("/no/such/dawn/path is readable")
+    Err(e) -> e
+  }
+
+fn taken_by_panic() -> ForeignError !io =
+  match catch_panic(read_missing) {
     Ok(_) -> panic("/no/such/dawn/path is readable")
     Err(e) -> e
   }
@@ -77,26 +69,55 @@ fn taken() -> ForeignError !io =
 fn is_a_name(s: String) -> Bool =
   str.len(s) > 0 && not str.contains(s, ":") && not str.contains(s, " ")
 
+## The three portable claims about one taken failure, printed under a label so
+## a disagreement names the case rather than the line.
+fn report(label: String, e: ForeignError) -> Unit !io = {
+  println(label ++ " kind is a name        " ++ to_string(is_a_name(e.kind)))
+  println(label ++ " message is not empty  " ++ to_string(str.len(e.message) > 0))
+  println(label ++ " message is not kind   " ++ to_string(e.message != e.kind))
+  println(label ++ " kind is not rendered  "
+    ++ to_string(not str.contains(e.message, e.kind ++ ":")))
+  println(label ++ " cause                 " ++ to_string(e.cause))
+}
+
 # `!io` so nothing folds at compile time: the question is what happens at run
 # time, and a comptime fold would answer for neither backend.
 fn n(i: Int) -> Int !io = i
 
+## A named thunk rather than a lambda: `fn() => panic(...)` leaves the barrier's
+## `T` with nothing to infer it from.
+fn boom() -> Int !io = panic("deliberate")
+
 pub fn main() -> Unit !io = {
-  println("-- the split is the same as the plain-named pair's --")
-  agree("no failure    ", fn() => n(7))
-  agree("panic         ", fn() => panic("deliberate"))
-  agree("read_file     ", fn() => str.len(raw.read_file("/no/such/dawn/path")))
+  println("-- which barrier stops what --")
+  println("no failure     " ++ barrier(fn() => n(7)))
+  println("panic          " ++ barrier(boom))
+  println("read_file      " ++ barrier(read_missing))
 
   println("-- the payload of a taken fault --")
-  let e = taken()
-  println("kind is a name        " ++ to_string(is_a_name(e.kind)))
-  println("message is not empty  " ++ to_string(str.len(e.message) > 0))
-  println("message is not kind   " ++ to_string(e.message != e.kind))
-  println("kind is not rendered  " ++ to_string(not str.contains(e.message, e.kind ++ ":")))
-  println("cause                 " ++ to_string(e.cause))
+  let f = taken_by_fault()
+  report("fault ", f)
+
+  println("-- the same fault, taken by the other barrier --")
+  let p = taken_by_panic()
+  report("panic ", p)
+  # what the two barriers may not disagree about: they select different
+  # failures, they do not describe one differently
+  println("same kind             " ++ to_string(f.kind == p.kind))
+  println("same message          " ++ to_string(f.message == p.message))
+
+  println("-- a panic's payload, which only the panic barrier sees --")
+  let d = match catch_panic(boom) {
+    Ok(_) -> panic("panic() returned")
+    Err(e) -> e
+  }
+  report("raised", d)
+  # the message is the argument, unrendered, on both backends -- the one part
+  # of a payload that is portable text
+  println("message is the argument " ++ to_string(d.message == "deliberate"))
 
   println("-- and Ok still carries the value --")
-  println("ok            " ++ to_string(match catch_fault_e(fn() => n(7)) {
+  println("ok            " ++ to_string(match catch_fault(fn() => n(7)) {
     Ok(v) -> v
     Err(_) -> -1
   }))

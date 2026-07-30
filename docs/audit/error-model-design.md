@@ -3,10 +3,12 @@
 > 动码前的**调研与方案**，不是设计定稿。
 > 覆盖 codebase-audit.md 的 **ERR-02（P1）**、**ERR-03（P1）**、**LANG-02（P1）**。
 >
-> 状态：**A 步分期落地中——阶段 1（`ForeignError` + `catch_fault_e`/`catch_panic_e`
-> 两个过渡内建，两后端都发射）与阶段 2（全部调用点迁到 `_e`；`catch_fault`/
-> `catch_panic` 的表项换成 `Result[T, ForeignError]`；`std/io` 走 (ii)）都已合并；
-> 阶段 3 等种子推进。B 步 proposed 且可做；C2 步冻结。**
+> 状态：**A 步已完成——三期全部合并。阶段 1（`ForeignError` + `catch_fault_e`/
+> `catch_panic_e` 两个过渡内建，两后端都发射）、阶段 2（全部调用点迁到 `_e`；
+> `catch_fault`/`catch_panic` 的表项换成 `Result[T, ForeignError]`；`std/io` 走 (ii)）、
+> 阶段 3（调用点迁回原名，两后端的实现重新指向结构化那份，过渡拼法删除）。
+> 终局只有一对屏障，载荷是 `ForeignError`，不保留 String 版本。
+> B 步 proposed 且可做；C2 步冻结。**
 > 分期理由与每期内容见下方 §六「落地分期」——**那一节是现状，第二节是意图**，
 > 两者冲突时以第六节为准。第二、五节里几处与代码对不上的说法，第六节开头逐条记了。
 > [`../native-backend-plan.md`](../native-backend-plan.md) §1 定了 native 的 panic 是
@@ -288,8 +290,9 @@ selfhost 自己的源要**同时**过两张 intrinsic 表：种子那张（用�
 |---|---|---|
 | **1**（已合并） | `ForeignError` prelude 类型 + `catch_fault_e`/`catch_panic_e` 两个新内建，两后端都发射；测试与语料。**调用点一个不动。** | 之后发 tag，`seed-release.txt` 推进 |
 | **2**（已合并） | 全部调用点迁到 `_e`；`std/io` 走 §6.5 的 (ii)；**同一提交**里把 `catch_fault`/`catch_panic` 的表项改成 `Result[T, ForeignError]`（此时它们零调用点，改了不影响任何源）。`std/error.dawn` **没建**，见 §6.7 | 再发 tag + 种子推进 |
-| **3** | 调用点从 `_e` 换回 `catch_fault`/`catch_panic`；删掉 `_e` 的表项、JVM 的两次
-`gen_try_closure_e` 调用、C 的两个符号 | 终局 |
+| **3**（已合并） | 调用点从 `_e` 换回 `catch_fault`/`catch_panic`；删掉 `_e` 的表项、JVM 的两次
+`gen_try_closure_e` 调用、C 的两个符号。落下来的样子见 §6.8——两个后端的原版实现是**陈的**，
+所以不止是删 | 终局 |
 
 第四节那条「**不**保留 `Result[T, String]` 便利版本」是**终局**的约束，阶段 3 兑现。
 中间两期存在一对过渡拼法，是因为它们**证明会死**——阶段 3 的内容就是删掉它们。
@@ -383,7 +386,44 @@ selfhost 自己的源要**同时**过两张 intrinsic 表：种子那张（用�
 所以它是个模块内的私有函数，不是 std 的公开 API。std 里凭空多一个模块，
 代价是一个永久的公开命名空间和一条种子纪律，收益是省掉一个点号。
 
-### 6.8 路过看见的一处旧账（不在本步范围）
+### 6.8 阶段 3 落下来的样子（迁移收尾）
+
+- **调用点 47 个换回原名**：std/io 9、selfhost 14（vendor 3、main 3、jreflect 3、
+  interp 3、maven 1、jarw 1）、`packages/web` 6、playground 3、语料 15（catch_kinds 6、
+  pvec-contract 3、error-contract 2、strings 2、io_run 1、array-contract 1）。
+  比 §6.4 那张表多 2，是因为 `scripts/error-contract/` 是阶段 1 才建的，生下来就写 `_e`，
+  没进过那份账。
+- **删掉的**：`types.dawn` 的两条表项（89 → 87）与两条 `rt_of`；`checker.visible_to_user_code()`
+  少两个名字；`interp` 的 comptime 拒绝名单少两个；`doc.dawn` 的 builtin 清单少两条。
+- **两个后端各有一份「陈的原版」要处置，不是单纯删 `_e`**。阶段 2 翻的是**表项**，
+  两个后端的**实现**没跟着翻：JVM 的 `gen_io_class` 仍把原名指向 `gen_try_closure`
+  （渲染成 String 的那份），C 的 `dawn_catch_fault`/`dawn_catch_panic` 仍走
+  `dawn_run_caught`（同样是 String）。这在阶段 2 无害——原名零调用点——但它意味着
+  阶段 3 不是删两个孪生，而是**把原名重新指到出 `ForeignError` 的那份实现上，再删掉
+  陈的那份**。JVM：`gen_try_closure_e` 改名成 `gen_try_closure`，旧的整个删掉；
+  C：`dawn_run_caught_e` 收编成 `dawn_run_caught`，旧的整个删掉。两边都不留第二份
+  handler 逻辑。
+- **顺手补上一条 §6.2 没算到的纪律：运行时符号的契约也归种子管，而 `bin/dawn` 从前
+  是一段式自举。** 一个 jar 里的 `dawn/rt/Io` 是**谁编的谁发射的**：`bin/dawn` 拿种子
+  编出 A 就直接用，于是 A = 今天的调用点 + 上一版的屏障。载荷没变的时候这对得上，
+  变了就对不上——本步实测 A 在每一条失败路径上抛 ClassCastException（`String` 转
+  `ForeignError`），包括 `use java` 走 `$` 回退的那条，`playground` 和 `packages/web`
+  两个仓内目标当场编不动，而构建过程一声不吭。修法是让 `bin/dawn` 走两段：种子编出
+  A，A 再编一次，留下的是 fixpoint 那个 B。多花一次编译（本机 ~5s），换来「源码与
+  运行时同出一棵树」——`selfhost-fixpoint.sh` 从来只承诺 B == C，而这个脚本一直在发
+  A。这不是错误模型专有的坑，是**任何一次运行时契约变更**都会踩的坑，所以修在
+  `bin/dawn` 而不是修在这次迁移里。
+- **`foreign_error.dawn` 换了问法**。它原来的一半是「两对拼法裁决一致」，那个问题随
+  `_e` 消失。剩下的预算改问一个同样可移植、而且以前没人问过的：**同一个 fault 被
+  `catch_fault` 拦下和被 `catch_panic` 拦下，`kind`/`message` 逐字相同**——两个屏障
+  只在「抓什么」上不同，不在「怎么报」上不同。顺带补了 panic 载荷的三条可移植断言，
+  以及唯一一条可移植的**文本**断言：`panic("deliberate")` 的 `message` 就是那个实参，
+  两个后端都是。仍然一次都不打印 `kind`。
+- **Emit-Change 三处**：`doc --builtins` 少两条；`lsp` 的三份补全清单各少两项
+  （`detail` 就是签名）；`emit *` 六个目标各差**一个文件**——`dawn/rt/Io.class`
+  （少两个 `_e` 方法，原名那两个改出 `ForeignError`）。第三处是阶段 2 欠下的，见上一条。
+
+### 6.9 路过看见的一处旧账（不在本步范围）
 
 `SHOW_ID = 3`，而 `checker.cx_new` 的 `next_id` 也从 3 起，旁边的注释只列到
 Ord/Eq/Hash——Show 是后加的，注释没跟。ADT 那半边没问题（prelude 占 0/1/2，
