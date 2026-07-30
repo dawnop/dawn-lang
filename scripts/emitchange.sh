@@ -15,11 +15,17 @@
 # which diff, and an over-broad one is visible in review.
 
 # Every declaration since the seed tag that covers this check label.
+#
+# "No declarations at all" is the normal case, not an error: `grep` exits 1 on no
+# match, and every caller runs under `set -o pipefail`, so an unguarded grep made
+# `decls=$(declared_for ...)` fail and `set -e` kill the script — right where it
+# was about to print the diff and say which declaration was missing. The gate
+# still failed, but as an unexplained exit 1 with no output.
 declared_for() { # label
   local label="$1" tag line scope
   tag=$(tr -d ' \n' < "$(git rev-parse --show-toplevel)/scripts/seed-release.txt")
   git log "$tag..HEAD" --format=%B 2>/dev/null \
-    | grep -E '^Emit-Change(\([^)]*\))?:' \
+    | { grep -E '^Emit-Change(\([^)]*\))?:' || true; } \
     | while IFS= read -r line; do
         scope=$(printf '%s' "$line" | sed -n 's/^Emit-Change(\([^)]*\)):.*/\1/p')
         if [ -z "$scope" ]; then

@@ -338,20 +338,20 @@ fn lower_into(
   match catch_panic(fn() =>
       lower.lower_fn_only(owner, f, icx.traits, icx.impls, icx.adts, no_sigs(),
         icx.syms, st.next_lam)) {
-          Err(e) ->
-            match cerr(st, env, "`" ++ f.name ++ "` cannot be evaluated at compile time (" ++ e ++ ")") {
-              Err(t) -> Err(t)
-              Ok(_) -> panic("unreachable")
-            }
-          Ok(t) -> {
-            let (cf, lifted, dicts, next) = t
-            var tbl = map.insert(st.lowered, cache_key(owner, f), cf)
-            for lf in lifted { tbl = map.insert(tbl, lf.owner ++ "." ++ lf.name, lf) }
-            var dts = st.dicts
-            for d in dicts { dts = map.insert(dts, d.key, d) }
-            Ok((ESt { ..st, lowered: tbl, dicts: dts, next_lam: next }, cf))
-          }
-        }
+    Err(e) ->
+      match cerr(st, env, "`" ++ f.name ++ "` cannot be evaluated at compile time (" ++ e ++ ")") {
+        Err(t) -> Err(t)
+        Ok(_) -> panic("unreachable")
+      }
+    Ok(t) -> {
+      let (cf, lifted, dicts, next) = t
+      var tbl = map.insert(st.lowered, cache_key(owner, f), cf)
+      for lf in lifted { tbl = map.insert(tbl, lf.owner ++ "." ++ lf.name, lf) }
+      var dts = st.dicts
+      for d in dicts { dts = map.insert(dts, d.key, d) }
+      Ok((ESt { ..st, lowered: tbl, dicts: dts, next_lam: next }, cf))
+    }
+  }
 
 ## The subject half of that identity: its *head*, because an impl method's
 ## `impl_of` names the declared subject (`List[T]`) while a `CImpl` node names

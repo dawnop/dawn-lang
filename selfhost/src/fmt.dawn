@@ -72,11 +72,28 @@ fn postfix_bang(raw: List[Token]) -> Set[Int] = {
 
 fn is_effect_start(k: TokKind) -> Bool = k == IDENT || k == LPAREN
 
+## A still-open bracket: the indent (in levels) its closer aligns to, and whether
+## it is a brace. The brace flag is what tells a *body* from a mid-expression
+## bracket when `reflow` picks an anchor.
+type Opener = { at: Int, brace: Bool }
+
 fn reflow(src: String, toks: List[Token], unary: Set[Int], postfix: Set[Int]) -> String = {
   var out: List[String] = []
-  # indent (in levels) of the line each still-open bracket sits on
-  var openers: List[Int] = []
+  var openers: List[Opener] = []
   var line_indent = 0
+  # The indent of the line the innermost construct began on, and the bracket depth
+  # there. A `{` opening a body anchors to these rather than to the physical line
+  # it sits on: in
+  #
+  #     match query(a,
+  #       b) {
+  #
+  # the brace sits on the wrapped line, and anchoring the arms to it indented the
+  # whole body one level too deep. The wrong answer was a stable fixpoint, so
+  # `fmt --check` and the idempotence oracle both agreed with it -- it only
+  # surfaced as "9 files are unformatted" in a repo whose files were right.
+  var logical_indent = 0
+  var logical_depth = 0
   var line_first = toks[0]
   var prev = toks[0]
   # Last *code* token seen, which is what decides whether a new line continues
@@ -114,10 +131,19 @@ fn reflow(src: String, toks: List[Token], unary: Set[Int], postfix: Set[Int]) ->
         # collapse >=2 blank lines to 1
         out = out ++ [if nl >= 2 { "\n\n" } else { "\n" }]
         let pl = if have_prev_code { prev_code } else { prev }
-        line_indent = indent_of(t, openers, pl, line_indent, unary)
+        let cont = is_continuation(pl, t, unary)
+        line_indent = indent_of(t, openers, line_indent, cont)
         let lvl = if line_indent < 0 { 0 } else { line_indent }
         out = out ++ [str.repeat("  ", lvl)]
         out = out ++ [ttext]
+        # A line with no `(`/`[` open above it begins a construct, even when it
+        # continues the previous line: `fn f() =` then `match x {` is a wrapped
+        # statement, and the arms follow the `match`, not the `fn`. A line inside
+        # an unclosed `(` is mid-expression instead, and inherits the anchor.
+        if in_block(openers) {
+          logical_indent = line_indent
+          logical_depth = len(openers)
+        }
       }
     }
     if t.kind != COMMENT {
@@ -125,7 +151,15 @@ fn reflow(src: String, toks: List[Token], unary: Set[Int], postfix: Set[Int]) ->
       have_prev_code = true
     }
     if t.kind == LPAREN || t.kind == LBRACKET || t.kind == LBRACE {
-      openers = openers ++ [line_indent]
+      # A brace that closes no enclosing bracket since the logical line began is
+      # this statement's body, and follows the statement. Anything else -- a
+      # `(`/`[`, or a brace nested inside one (a closure argument, say) -- belongs
+      # to the line it is written on.
+      let body = t.kind == LBRACE && len(openers) == logical_depth
+      openers = openers ++ [Opener {
+        at: if body { logical_indent } else { line_indent },
+        brace: t.kind == LBRACE,
+      }]
     } else if t.kind == RPAREN || t.kind == RBRACKET || t.kind == RBRACE {
       if len(openers) > 0 { openers = list.take(openers, len(openers) - 1) }
     }
@@ -135,29 +169,33 @@ fn reflow(src: String, toks: List[Token], unary: Set[Int], postfix: Set[Int]) ->
   join(out, "") ++ "\n"
 }
 
-## Indent (2-space levels) for a line whose first token is `t`; `prev_line_last`
-## ended the previous line, which sat at `prev_indent`.
+## Indent (2-space levels) for a line whose first token is `t`; the previous line
+## sat at `prev_indent`, and `cont` says this line continues it.
 fn indent_of(
   t: Token,
-  openers: List[Int],
-  prev_line_last: Token,
+  openers: List[Opener],
   prev_indent: Int,
-  unary: Set[Int]
+  cont: Bool
 ) -> Int = {
-  let top = if len(openers) == 0 { -1 } else { openers[len(openers) - 1] }
+  let top = if len(openers) == 0 { -1 } else { openers[len(openers) - 1].at }
   let content = top + 1
   if is_closer(t.kind) {
-    # align a leading closer with its opener line
-    if len(openers) == 0 { 0 } else { openers[len(openers) - 1] }
+    # align a leading closer with the indent its opener anchored to
+    if len(openers) == 0 { 0 } else { top }
   } else if t.kind == ELSE {
     # A leading `else` lines up with its `if` rather than nesting under it.
     prev_indent
-  } else if is_continuation(prev_line_last, t, unary) {
+  } else if cont {
     content + 1
   } else {
     content
   }
 }
+
+## Whether the innermost still-open bracket is a brace -- i.e. whether the next
+## line sits in a statement list rather than inside a `(`/`[`.
+fn in_block(openers: List[Opener]) -> Bool =
+  len(openers) == 0 || openers[len(openers) - 1].brace
 
 ## A leading `-` means two different things: `a\n  - b` wraps a subtraction, so
 ## the second line is a continuation, while `{\n  -1\n}` opens an expression
