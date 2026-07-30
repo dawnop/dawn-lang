@@ -72,7 +72,15 @@ fn growth() -> List[String] = {
 
 ## Out-of-range reads answer the way the builtin does, on both sides of the
 ## range and at the boundary itself.
-fn bounds() -> List[String] = {
+##
+## `nth` is here because it used to be the one that did not: it was `pub` and
+## unchecked, and `i & MASK` folds an out-of-range index back onto a legal
+## slot, so a 64-element vector answered `nth(v, 70)` with element 38 instead
+## of failing (docs/audit/re-audit-2026-07-30.md RD-01). The masked indices
+## below are chosen to land inside the tail the way that one did -- an index
+## far enough out that the mask cannot reach a live slot panics either way,
+## from `array_get`, and would have proved nothing.
+fn bounds() -> List[String] !io = {
   var bad: List[String] = []
   let v = build(100)
   let xs = build_list(100)
@@ -80,6 +88,25 @@ fn bounds() -> List[String] = {
     if pvec.get(v, i) != get(xs, i) {
       bad = bad ++ ["get ${i}: ${pvec.get(v, i)} vs ${get(xs, i)}"]
     }
+  }
+  for i in [0, 1, 63, 99] {
+    match catch_panic(fn() => pvec.nth(v, i)) {
+      Ok(x) -> if x != xs[i] { bad = bad ++ ["nth ${i}: ${x} vs ${xs[i]}"] }
+      Err(e) -> { bad = bad ++ ["nth ${i}: panicked in range (${e})"] }
+    }
+  }
+  # 130 masks to tail slot 2 (element 98) and 70 on a 64-element vector masks
+  # to tail slot 6 (element 38): the two shapes that used to answer quietly.
+  for i in [0 - 1, 100, 130, 1000] {
+    match catch_panic(fn() => pvec.nth(v, i)) {
+      Ok(x) -> { bad = bad ++ ["nth ${i}: answered ${x} instead of panicking"] }
+      Err(_) -> ()
+    }
+  }
+  let w = build(64)
+  match catch_panic(fn() => pvec.nth(w, 70)) {
+    Ok(x) -> { bad = bad ++ ["nth 70 of 64: answered ${x} instead of panicking"] }
+    Err(_) -> ()
   }
   bad
 }

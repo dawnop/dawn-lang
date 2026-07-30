@@ -144,21 +144,37 @@ pub fn push[T](v: Vec[T], x: T) -> Vec[T] =
   }
 
 # ---- reading ----
+#
+# One unchecked reader, private, and every public way in checks first. It was
+# the other way round until 2026-07-30: `nth` was `pub` and did no checking,
+# so `nth(v, 70)` on a 64-element vector answered `38` rather than failing --
+# `i & MASK` folds an out-of-range index back onto a legal slot in whichever
+# block `leaf_for` picked. That is the "illegal input, silently wrong answer"
+# shape, and spec 9.8 says an out-of-range index is a panic
+# (docs/audit/re-audit-2026-07-30.md RD-01).
 
-## Element `i`, which must be in range.
-pub fn nth[T](v: Vec[T], i: Int) -> T = array_get(leaf_for(v, i), i & MASK)
+## Element `i`, whose range the caller has already established. Out of range
+## this answers with some other element rather than failing, which is why it
+## is not `pub`.
+fn at[T](v: Vec[T], i: Int) -> T = array_get(leaf_for(v, i), i & MASK)
 
 ## Element `i`, panicking out of range — what `xs[i]` means.
 pub fn index[T](v: Vec[T], i: Int) -> T =
   if i < 0 || i >= v.cnt {
     panic("index " ++ to_string(i) ++ " out of bounds for length " ++ to_string(v.cnt))
   } else {
-    nth(v, i)
+    at(v, i)
   }
+
+## Element `i`, panicking out of range. The name Clojure gives the checked
+## accessor, and the same function `index` is: the comparison it costs is
+## nothing beside `leaf_for`, so there is no unchecked public reader to make
+## the saving worth a wrong answer.
+pub fn nth[T](v: Vec[T], i: Int) -> T = index(v, i)
 
 ## Element `i`, or `None` when it is out of range.
 pub fn get[T](v: Vec[T], i: Int) -> Option[T] =
-  if i < 0 || i >= v.cnt { None } else { Some(nth(v, i)) }
+  if i < 0 || i >= v.cnt { None } else { Some(at(v, i)) }
 
 # ---- bulk ----
 #
@@ -206,7 +222,7 @@ pub fn slice[T](v: Vec[T], from: Int, to: Int) -> Vec[T] = {
   var out: Vec[T] = empty()
   var i = from
   while i < to {
-    out = push(out, nth(v, i))
+    out = push(out, at(v, i))
     i = i + 1
   }
   out
