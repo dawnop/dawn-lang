@@ -3033,10 +3033,11 @@ pub fn lower_fn_only(
 ##
 ## `m` is the same functions flat -- sources in source order, then the hoisted
 ## bodies in hoisting order -- which is what a whole-translation-unit backend
-## (`emitc`) and `reach` read. Test bodies stay out of it, and so do the
-## dictionaries only a test asks for: `reach` answers what freight the
-## *program* carries, and there is no test to compile natively. `dicts` is
-## the unabridged list, tests included, for the backend that emits them.
+## (`emitc`) reads. Test bodies stay out of it, and so do the dictionaries only
+## a test asks for: there is no test to compile natively. `dicts` is the
+## unabridged list, tests included, for the backend that emits them, and
+## `emitted_core` below puts the two halves back together for the consumer
+## that has to see everything a jar holds.
 pub type LMod = {
   m: CModule,
   fns: List[(CFun, List[CFun])],
@@ -3190,6 +3191,108 @@ test "the flat module and the grouped functions are one lowering" {
   let (_g, g_lifts) = lm.fns[1]
   assert len(f_lifts) == 1
   assert len(g_lifts) == 0
+}
+
+## Everything of this module a JVM artifact holds, as one flat CModule: `m`,
+## then each test body followed by whatever lowering hoisted out of it, over
+## the unabridged dictionary list.
+##
+## `m` alone is not that. The JVM emitter writes test blocks into every
+## artifact it produces -- `dawn build` and `dawn test` walk the same
+## `collect_program` -- so a question about what the emitted code can do has
+## to be asked of this and not of `m`. `reach` is that question (reach.dawn);
+## when it was asked about `m`, a Unicode table only a test could reach was
+## pruned out from under the test that needed it.
+##
+## For a module lowered without tests this is `m` unchanged, which is what the
+## std modules and the native path get.
+pub fn emitted_core(l: LMod) -> CModule = {
+  var fns = l.m.fns
+  for pr in l.tests {
+    let (cf, lifts) = pr
+    fns = fns ++ [cf] ++ lifts
+  }
+  CModule { ..l.m, fns: fns, dicts: l.dicts }
+}
+
+test "emitted_core carries the test bodies and what they hoisted" {
+  # `reach` walks this to decide what Unicode freight a jar takes. It walked
+  # `m` until 2026-07-30, and `m` has no test in it: a program whose only
+  # `str.to_upper` sat in a test block shipped without the case table and the
+  # test died on a missing method. The two structural comparisons below stand
+  # in for that -- one hoisted by a function, one by a test.
+  let ti = TyTuple([TyInt, TyInt])
+  let ts = TyTuple([TyString, TyString])
+  let sym = fn(nm: String, t: Ty) => Sym {
+    name: nm,
+    ty: t,
+    mutable: false,
+    dlo: 0,
+    dhi: 0,
+    dict_of: None
+  }
+  var syms: Map[Int, Sym] = map.empty()
+  syms = map.insert(syms, 1, sym("a", ti))
+  syms = map.insert(syms, 2, sym("b", ti))
+  syms = map.insert(syms, 3, sym("s", ts))
+  syms = map.insert(syms, 4, sym("t", ts))
+  let no_wit: Option[WitRef] = None
+  let eq_of = fn(x: Int, y: Int, nx: String, ny: String, t: Ty) =>
+    XBinary(BEq, XLocal(x, nx, 0, 0, t), XLocal(y, ny, 0, 0, t), no_wit, 0, 0, 0, 0, TyBool)
+  let src = TFun {
+    name: "f",
+    sig: Sig {
+      name: "f",
+      param_tys: [ti, ti],
+      param_names: ["a", "b"],
+      ret: TyBool,
+      eff: EPure,
+      is_builtin: false,
+      tparams: [],
+      constraints: [],
+      owner: None,
+      trait_id: None,
+      inferring: false
+    },
+    param_syms: [1, 2],
+    dict_syms: [],
+    body: eq_of(1, 2, "a", "b", ti),
+    is_test: false,
+    impl_of: None,
+    default_of: None
+  }
+  # a test takes no parameters and answers Unit; the string tuple keeps its
+  # comparison distinct from the one `f` asked for, so it really is hoisted
+  let tst = TFun {
+    ..src,
+    name: "strings compare",
+    sig: Sig { ..src.sig, name: "strings compare", param_tys: [], param_names: [], ret: TyUnit },
+    param_syms: [],
+    body: XBlock([TSAssert(eq_of(3, 4, "s", "t", ts), None, 0, 0)], None, 0, 0, TyUnit),
+    is_test: true
+  }
+  let no_traits: Traits = map.empty()
+  let no_impls: Impls = map.empty()
+  let no_sigs: Map[(String, String), Sig] = map.empty()
+  let tm = TModule { fns: [src], consts: [], tests: [tst], syms: syms }
+  let lm = lower_module_full("m", tm, no_traits, no_impls, prelude_adts(), no_sigs, true)
+
+  # `f` and the comparison it hoisted, and nothing of the test
+  var flat: List[String] = []
+  for cf in lm.m.fns { flat = flat ++ [cf.name] }
+  assert len(flat) == 2
+  assert flat[0] == "f"
+
+  var whole: List[String] = []
+  for cf in emitted_core(lm).fns { whole = whole ++ [cf.name] }
+  # the same two, then the test body, then the comparison the test hoisted
+  assert len(whole) == 4
+  assert whole[0] == flat[0]
+  assert whole[1] == flat[1]
+  assert whole[2] == "strings compare"
+  assert whole[3] != flat[1]
+  # and the dictionaries are the unabridged list, not m's pre-test snapshot
+  assert len(emitted_core(lm).dicts) == len(lm.dicts)
 }
 
 ## The flat shape on its own, for the consumers that want nothing else.

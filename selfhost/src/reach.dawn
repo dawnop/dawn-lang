@@ -13,11 +13,15 @@
 # The walk is conservative on purpose:
 #
 #   * every function of every user module is a root -- they are all emitted,
-#     and any of them is an entry point as far as freight is concerned. Not a
-#     test block, though: freight is a question about the program, and a
-#     module's Core (lower.LMod.m) leaves the test bodies out. A table only a
-#     test can reach is therefore not carried, which is an undershoot the
-#     paragraph below says is loud rather than silent;
+#     and any of them is an entry point as far as freight is concerned. Test
+#     blocks included, on the backend that emits them: the JVM writes a test
+#     body into every artifact, `dawn build` and `dawn test` being one code
+#     path, so `str.to_upper` called from a test alone is still a call the
+#     emitted bytes can make. What the caller hands over decides this rather
+#     than reach itself -- the JVM path passes lower.emitted_core (tests and
+#     their hoisted bodies folded in), the native path passes the plain Core
+#     because emitc drops test functions on the floor. Freight follows what is
+#     emitted, per backend;
 #   * a referenced dictionary contributes every slot it carries;
 #   * a trait default matches by (owner, name) without its trait id, so two
 #     traits sharing a method name both count.
@@ -140,8 +144,14 @@ fn build_idx(mods: List[CModule]) -> Idx = {
               by_default = map.insert(by_default, k, cur ++ [i])
             }
             # only plain functions: several impls in one module all name their
-            # method `eq`, and the last inserted would shadow the rest
-            None -> { by_name = map.insert(by_name, (f.owner, f.name), i) }
+            # method `eq`, and the last inserted would shadow the rest.
+            # A test body is not one either: it is a root and never a callee,
+            # and its name is the description string, so `test "shout"` beside
+            # `fn shout` would otherwise take over the name calls resolve by.
+            None ->
+              if not f.is_test {
+                by_name = map.insert(by_name, (f.owner, f.name), i)
+              }
           }
       }
       i = i + 1
@@ -438,4 +448,36 @@ test "no roots reaches nothing" {
   let m = tmod("std/str", [tfn("std/str", "to_upper", intr("str_upper"))])
   let u = table_use([m], [])
   assert not u.str_upper
+}
+
+test "a test block is a root like any other function" {
+  # what the JVM path hands over (lower.emitted_core) has the test bodies in
+  # it, and a call only a test makes still has to find its table
+  let body = CFun { ..tfn("app", "only in a test", CUnit), is_test: true }
+  let app = tmod("app", [
+    tfn("app", "shout", CStr("!")),
+    CFun { ..body, body: CCall(CDirect("std/str", "to_upper"), [], TyString) }
+  ])
+  let std_str = tmod("std/str", [tfn("std/str", "to_upper", intr("str_upper"))])
+  let u = table_use([app, std_str], ["app"])
+  assert u.str_upper
+}
+
+test "a test's description never shadows a function of the same name" {
+  # a test body is named by its description string, so `test \"shout\"` beside
+  # `fn shout` would take over the (owner, name) key calls resolve by
+  # emitted_core appends the tests, so the test is the later insert and would
+  # win the key
+  let app = tmod("app", [
+    tfn("app", "shout", CCall(CDirect("std/str", "to_lower"), [], TyString)),
+    CFun { ..tfn("app", "shout", CUnit), is_test: true }
+  ])
+  let std_str = tmod("std/str", [tfn("std/str", "to_lower", intr("str_lower"))])
+  # the real `shout` is a root either way; the caller here is a third module
+  # that only knows the name
+  let other = tmod("app2", [
+    tfn("app2", "main", CCall(CDirect("app", "shout"), [], TyString))
+  ])
+  let u = table_use([app, std_str, other], ["app2"])
+  assert u.str_lower
 }
