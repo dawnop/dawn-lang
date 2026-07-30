@@ -107,7 +107,35 @@ pub fn un_op_name(op: UnOp) -> String =
     OpBnot -> "BNOT"
   }
 
-pub type CtorArg = { name: Option[String], e: Expr, lo: Int, hi: Int }
+## One argument of a call, a construction or a record literal — the EBNF `arg`
+## production. `name` is `Some` for the `IDENT: expr` spelling, which is legal
+## *syntactically* at every call position (SYN-02/SYN-03): whether names are
+## accepted is decided by what the callee is, in the checker
+## (docs/audit/application-syntax-design.md §3.2). `lo` starts at the name when
+## there is one, so the span covers what a diagnostic must underline.
+pub type Arg = { name: Option[String], e: Expr, lo: Int, hi: Int }
+
+## A positional argument around an expression (the common case).
+pub fn pos_arg(e: Expr) -> Arg = Arg { name: None, e: e, lo: e_lo(e), hi: e_hi(e) }
+
+## Drop the names: for the callees that reject them, everything downstream
+## works on plain expressions.
+pub fn arg_exprs(args: List[Arg]) -> List[Expr] = {
+  var out: List[Expr] = []
+  for a in args { out = out ++ [a.e] }
+  out
+}
+
+## The first argument written with a name, if any.
+pub fn first_named(args: List[Arg]) -> Option[Arg] = {
+  for a in args {
+    match a.name {
+      Some(_) -> return Some(a)
+      None -> ()
+    }
+  }
+  None
+}
 
 pub type MatchArm = { pats: List[Pattern], guard: Option[Expr], body: Expr, lo: Int, hi: Int }
 
@@ -118,13 +146,15 @@ pub type Expr =
   | EUnit(lo: Int, hi: Int)
   | EStr(parts: List[StrPart], lo: Int, hi: Int)
   | EVar(name: String, lo: Int, hi: Int)
-  | ECall(callee: String, args: List[Expr], clo: Int, chi: Int, lo: Int, hi: Int)
-  | EApply(target: Expr, args: List[Expr], lo: Int, hi: Int)
-  | EMethod(target: Expr, name: String, args: List[Expr], nlo: Int, nhi: Int, lo: Int, hi: Int)
+# the one application node (SYN-02): `f(x)`, `Circle(1.0)`, `make()(1)` and
+# `(if c { f } else { g })(1)` all parse to this. What kind of call it is
+# follows from what `target` resolves to, and is decided in check_apply.
+  | EApply(target: Expr, args: List[Arg], lo: Int, hi: Int)
+  | EMethod(target: Expr, name: String, args: List[Arg], nlo: Int, nhi: Int, lo: Int, hi: Int)
   | ELambda(params: List[LambdaParam], body: Expr, lo: Int, hi: Int)
   | ECtor(
     name: String,
-    args: List[CtorArg],
+    args: List[Arg],
     spread: Option[Expr],
     has_parens: Bool,
     clo: Int,
@@ -318,7 +348,6 @@ pub fn e_lo(e: Expr) -> Int =
     EUnit(lo, _) -> lo
     EStr(_, lo, _) -> lo
     EVar(_, lo, _) -> lo
-    ECall(_, _, _, _, lo, _) -> lo
     EApply(_, _, lo, _) -> lo
     EMethod(_, _, _, _, _, lo, _) -> lo
     ELambda(_, _, lo, _) -> lo
@@ -349,7 +378,6 @@ pub fn e_hi(e: Expr) -> Int =
     EUnit(_, hi) -> hi
     EStr(_, _, hi) -> hi
     EVar(_, _, hi) -> hi
-    ECall(_, _, _, _, _, hi) -> hi
     EApply(_, _, _, hi) -> hi
     EMethod(_, _, _, _, _, _, hi) -> hi
     ELambda(_, _, _, hi) -> hi

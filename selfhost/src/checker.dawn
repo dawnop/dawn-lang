@@ -21,9 +21,10 @@ use ast.{
   BinOp, UnOp, OpAdd, OpSub, OpMul, OpDiv, OpMod, OpConcat, OpEq, OpNeq, OpLt,
   OpLe, OpGt, OpGe, OpAnd, OpOr, OpBand, OpBor, OpBxor, OpShl, OpShr, OpUshr,
   OpNeg, OpNot, OpBnot,
-  Pattern, PLit, PBind, PWild, PCtor, PQual, PTuple, PList, PatArg, MatchArm, CtorArg,
+  Pattern, PLit, PBind, PWild, PCtor, PQual, PTuple, PList, PatArg, MatchArm,
+  Arg, pos_arg, arg_exprs, first_named,
   SPText, SPInterp, EFloat, EStr, pat_lo, pat_hi, e_lo, e_hi,
-  ECall, EMethod, EApply, ELambda, EBlock, EIf, EMatch, ECtor, EFieldAcc,
+  EMethod, EApply, ELambda, EBlock, EIf, EMatch, ECtor, EFieldAcc,
   EListLit, ETupleLit, EBinary, EUnary, EPropagate, EUnwrap, EIndex, EReturn,
   EComptime, EUnsafePure, Stmt, SLet, SLetPat, SLocalFn, SAssign, SExpr,
   SAssert, SWhile, SFor, LambdaParam, ConstView
@@ -4128,19 +4129,16 @@ fn no_pargs() -> List[PatArg] = []
 pub fn name_refs(e: Expr, out: Set[String]) -> Set[String] =
   match e {
     EVar(name, _, _) -> set.insert(out, name)
-    ECall(callee, args, _, _, _, _) -> {
-      var o = set.insert(out, callee)
-      for a in args { o = name_refs(a, o) }
-      o
-    }
     EMethod(target, name, args, _, _, _, _) -> {
       var o = name_refs(target, set.insert(out, name))
-      for a in args { o = name_refs(a, o) }
+      for a in args { o = name_refs(a.e, o) }
       o
     }
+    # the callee is walked like any other subexpression: a named call reaches
+    # the EVar arm above, which is where its name is recorded
     EApply(target, args, _, _) -> {
       var o = name_refs(target, out)
-      for a in args { o = name_refs(a, o) }
+      for a in args { o = name_refs(a.e, o) }
       o
     }
     ELambda(_, body, _, _) -> name_refs(body, out)
@@ -4236,9 +4234,10 @@ fn stmt_name_refs(s: Stmt, out: Set[String]) -> Set[String] =
 
 test "name refs walk every call position" {
   let e = EBlock(
-    [SLet("x", false, None, ECall("g", [EVar("y", 0, 1)], 0, 1, 0, 4), 0, 5)],
-    Some(EMethod(EVar("m", 6, 7), "h", [ELambda(no_lparams(), EVar("z", 10, 11), 8, 12)],
-      8, 9, 6, 13)),
+    [SLet("x", false, None,
+      EApply(EVar("g", 0, 1), [pos_arg(EVar("y", 2, 3))], 0, 4), 0, 5)],
+    Some(EMethod(EVar("m", 6, 7), "h",
+      [pos_arg(ELambda(no_lparams(), EVar("z", 10, 11), 8, 12))], 8, 9, 6, 13)),
     0,
     14
   )
@@ -4586,17 +4585,32 @@ pub fn needs_expected(cx: Cx, e: Expr) -> Bool =
       }
       false
     }
-    # a zero-arg generic call (map_empty()) can only be typed from context
-    ECall(callee, args, _, _, _, _) -> {
-      match lookup(cx, callee) {
-        Some(_) -> return false
-        None -> ()
+    # a zero-arg generic call (map_empty()) can only be typed from context, and
+    # so can a written-out generic construction with no arguments (`Nil()`)
+    EApply(target, args, _, _) ->
+      match target {
+        EVar(callee, _, _) -> {
+          match lookup(cx, callee) {
+            Some(_) -> return false
+            None -> ()
+          }
+          match lookup_fn_sig(cx, callee) {
+            Some(s) -> len(s.tparams) > 0 && len(args) == 0
+            None -> false
+          }
+        }
+        ECtor(cname, _, _, _, _, _, _, _) ->
+          match map.get(cx.ctors_by_name, cname) {
+            None -> false
+            Some(key) -> {
+              let (aid, cslot) = key
+              let a = adt_of(cx.adts, aid)
+              let ci = a.ctors[cslot]
+              len(ci.fields) == 0 && len(a.tparams) > 0
+            }
+          }
+        _ -> false
       }
-      match lookup_fn_sig(cx, callee) {
-        Some(s) -> len(s.tparams) > 0 && len(args) == 0
-        None -> false
-      }
-    }
     # same for its module-qualified spelling (map.empty(), spec §10.3) — needs
     # the import env, resolved by the caller via a pre-filled table; here the
     # alias fns live in cx via pass_imports' std handling at check time
@@ -5444,12 +5458,10 @@ fn check_expr_at(cx: Cx, e: Expr, expected: Option[Ty]) -> (Cx, Ty, TExpr) !io =
       }
     }
     EUnsafePure(body, lo, hi) -> check_unsafe_pure(cx, body, expected, lo, hi)
-    ECall(callee, args, clo, chi, lo, hi) ->
-      check_call(cx, callee, args, expected, None, no_sig(), clo, chi, lo, hi)
     ECtor(cname, cargs, spread, has_parens, cclo, cchi, lo, hi) ->
       check_ctor_call(cx, cname, cargs, spread, has_parens, expected, None, cclo, cchi, lo, hi)
     ELambda(params, body, lo, hi) -> check_lambda(cx, params, body, expected, lo, hi)
-    EApply(target, args, lo, hi) -> check_apply(cx, target, args, lo, hi)
+    EApply(target, args, lo, hi) -> check_apply(cx, target, args, expected, lo, hi)
     EMethod(target, name, args, nlo, nhi, lo, hi) ->
       check_method_call(cx, target, name, args, expected, nlo, nhi, lo, hi)
     EFieldAcc(target, fname, flo, fhi, lo, hi) ->
@@ -5469,7 +5481,7 @@ fn check_expr_at(cx: Cx, e: Expr, expected: Option[Ty]) -> (Cx, Ty, TExpr) !io =
           # constructor already resolved through the alias.
           match qual_ctor(cx, target, fname) {
             Some(k) -> {
-              let no_args: List[CtorArg] = []
+              let no_args: List[Arg] = []
               check_ctor_call(cx, fname, no_args, None, false, expected, Some(k),
                 flo, fhi, lo, hi)
             }
@@ -5506,7 +5518,9 @@ fn unwrap_msg(cx: Cx, operand: Expr, lo: Int, hi: Int) -> String = {
         EVar(rname, _, _) -> Some(rname ++ "." ++ mname ++ "()")
         _ -> Some(mname ++ "()")
       }
-    ECall(callee, _, _, _, _, _) -> Some(callee ++ "()")
+    # a named call: `f(x)!`. A construction (`Some(x)!`) is also an EApply now,
+    # and deliberately not named here -- the panic text stays what it was.
+    EApply(EVar(callee, _, _), _, _, _) -> Some(callee ++ "()")
     _ -> None
   }
   match desc {
@@ -5807,24 +5821,100 @@ fn check_lambda(
   (cx3, t, XLambda(psyms, pnames, bx, popped.captures, lo, hi, t))
 }
 
-fn check_apply(cx: Cx, target: Expr, args: List[Expr], lo: Int, hi: Int) -> (Cx, Ty, TExpr) !io = {
-  # `m.C(a, b)`: general application over a qualified constructor. Routed into
-  # check_ctor_call rather than treated as calling a function value, so field
-  # names, arity, spread and generic instantiation are decided by the one
-  # implementation the unqualified `C(a, b)` uses (LANG-06).
+fn named_arg_hint() -> String =
+  "only constructor calls take argument names, as in `Rect(2.0, h: 3.0)`"
+
+fn fn_named_arg_msg(name: String) -> String =
+  "`" ++ name ++ "` is a function, not a constructor; function calls do not take argument names"
+
+fn value_named_arg_msg() -> String =
+  "this callee is a function value, not a constructor; " ++
+  "function calls do not take argument names"
+
+## What to say about `f(x: 1)` when `f` is not a constructor. Each of the three
+## non-constructor callees says what it is, because that is the thing the
+## author got wrong -- the old syntax error could only say "expected `)`".
+fn named_arg_msg(cx: Cx, target: Expr) -> String =
   match target {
+    EVar(name, _, _) -> fn_named_arg_msg(name)
+    EFieldAcc(recv, fname, _, _, _, _) ->
+      match recv {
+        ECtor(cn, _, _, _, _, _, _, _) ->
+          match static_field_target(cx, recv) {
+            Some(_) -> "`" ++ cn ++ "." ++ fname ++
+              "` is a Java member, not a constructor; Java calls do not take argument names"
+            None -> value_named_arg_msg()
+          }
+        _ -> value_named_arg_msg()
+      }
+    _ -> value_named_arg_msg()
+  }
+
+## Argument names name a constructor's fields, so every other callee rejects
+## them. One report per call, at the first named argument: repeating the same
+## sentence once per argument is noise, not information.
+fn reject_named_args(cx: Cx, target: Expr, args: List[Arg]) -> Cx =
+  match first_named(args) {
+    None -> cx
+    Some(a) -> cerr_h(cx, named_arg_msg(cx, target), a.lo, a.hi, named_arg_hint())
+  }
+
+## The same rejection for a dot call: `x.f(a: 1)`. Its callee is a name, so it
+## can be quoted; whether it resolves to UFCS, a module function, a fn-typed
+## field or a Java method, none of them has parameter names to write.
+fn reject_named_method_args(cx: Cx, name: String, args: List[Arg]) -> Cx =
+  match first_named(args) {
+    None -> cx
+    Some(a) -> cerr_h(cx, fn_named_arg_msg(name), a.lo, a.hi, named_arg_hint())
+  }
+
+## `callee(args)` — the one application node, and the four things it can mean
+## (docs/audit/application-syntax-design.md §3.2). The parser no longer decides
+## any of this: what the callee resolves to does.
+##
+##   constructor name  -> construction, argument names ACCEPTED (the only place)
+##   function name     -> static call (or a local holding a function: XCallDyn)
+##   Java member       -> a Java call
+##   any expression    -> apply a function value
+##
+## Argument names outside a construction are a type error here, not a syntax
+## error in the parser: the shape is legal, the callee is what makes it wrong.
+fn check_apply(
+  cx: Cx,
+  target: Expr,
+  args0: List[Arg],
+  expected: Option[Ty],
+  lo: Int,
+  hi: Int
+) -> (Cx, Ty, TExpr) !io = {
+  # a constructor: `Circle(1.0)`, `Rect(2.0, h: 3.0)`, or its qualified
+  # spelling `m.C(a, b)` (LANG-06). Routed into check_ctor_call so field names,
+  # arity, spread and generic instantiation are decided by one implementation.
+  match target {
+    ECtor(cname, cargs, sp, hp, cclo, cchi, _, _) ->
+      if not hp && len(cargs) == 0 && sp == None {
+        return check_ctor_call(cx, cname, args0, None, true, expected, None, cclo, cchi, lo, hi)
+      }
     EFieldAcc(recv, fname, flo, fhi, _, _) ->
       match qual_ctor(cx, recv, fname) {
-        Some(k) -> {
-          var cargs: List[CtorArg] = []
-          for a in args {
-            cargs = cargs ++ [CtorArg { name: None, e: a, lo: e_lo(a), hi: e_hi(a) }]
-          }
-          return check_ctor_call(cx, fname, cargs, None, true, no_expected(), Some(k),
+        # `expected` is deliberately not forwarded here: the qualified spelling
+        # has never seen it, and threading it in is an inference change, not
+        # part of unifying the syntax.
+        Some(k) ->
+          return check_ctor_call(cx, fname, args0, None, true, no_expected(), Some(k),
             flo, fhi, lo, hi)
-        }
         None -> ()
       }
+    _ -> ()
+  }
+  # everything below is a call, and a call has no argument names to give
+  let cx_n = reject_named_args(cx, target, args0)
+  let args = arg_exprs(args0)
+  # a name: `f(x)`. check_call keeps the split a name has always had -- a local
+  # holding a function value calls dynamically, anything else statically.
+  match target {
+    EVar(name, vlo, vhi) ->
+      return check_call(cx_n, name, args, expected, None, no_sig(), vlo, vhi, lo, hi)
     _ -> ()
   }
   # piping into an unannotated lambda: the arguments determine its parameter types
@@ -5840,7 +5930,7 @@ fn check_apply(cx: Cx, target: Expr, args: List[Expr], lo: Int, hi: Int) -> (Cx,
     }
     _ -> ()
   }
-  var cx1 = cx
+  var cx1 = cx_n
   var pre: Option[List[Ty]] = None
   var pre_txs: List[TExpr] = []
   var ft = TyError
@@ -6535,7 +6625,7 @@ fn check_call(
 fn check_ctor_call(
   cx: Cx,
   cname: String,
-  cargs: List[CtorArg],
+  cargs: List[Arg],
   spread: Option[Expr],
   has_parens: Bool,
   expected: Option[Ty],
@@ -7601,14 +7691,17 @@ fn check_method_call(
   cx: Cx,
   target: Expr,
   name: String,
-  args: List[Expr],
+  args0: List[Arg],
   expected: Option[Ty],
   nlo: Int,
   nhi: Int,
   lo: Int,
   hi: Int
 ) -> (Cx, Ty, TExpr) !io = {
-  var cx1 = cx
+  # a dot call is a call: `x.f(a: 1)` parses (every argument list takes the
+  # `name: value` shape, SYN-03) and is rejected here, by type
+  var cx1 = reject_named_method_args(cx, name, args0)
+  let args = arg_exprs(args0)
   # module-qualified call: alias.fn(args), where alias is a whole-module import
   match target {
     EVar(rname, _, _) ->
@@ -7972,48 +8065,135 @@ test "apply: piping arguments into an unannotated lambda" {
   var cx = seed_prelude(test_cx())
   cx = push_scope(cx)
   let lam = ELambda([LambdaParam { name: "x", ann: None, lo: 1, hi: 2 }], EVar("x", 7, 8), 0, 8)
-  let ap = EApply(lam, [EInt(1, 10, 11)], 0, 12)
+  let ap = EApply(lam, [pos_arg(EInt(1, 10, 11))], 0, 12)
   let (cx1, t, _) = check_expr(cx, ap, no_expected())
   assert t == TyInt
   assert len(cx1.diags) == 0
-  # calling a non-function
-  let (cxa, _) = declare(cx, "n", TyInt, false, 0, 1)
-  let ap2 = EApply(EVar("n", 0, 1), [], 0, 3)
-  let (cx2, _, _) = check_expr(cxa, ap2, no_expected())
+  # calling a non-function value: the callee is an expression, so the error is
+  # about its type (a *name* goes through check_call and is named instead)
+  let ap2 = EApply(EInt(1, 0, 1), [], 0, 3)
+  let (cx2, _, _) = check_expr(cx, ap2, no_expected())
   assert str.contains(cx2.diags[0].msg, "cannot call a value of type Int")
+  let (cxa, _) = declare(cx, "n", TyInt, false, 0, 1)
+  let ap3 = EApply(EVar("n", 0, 1), [], 0, 3)
+  let (cx3, _, _) = check_expr(cxa, ap3, no_expected())
+  assert str.contains(cx3.diags[0].msg, "`n` is not a function (it is Int)")
 }
 
 test "calls: builtins, dynamic targets, arity and undefined" {
   var cx = seed_prelude(test_cx())
   cx = push_scope(cx)
   # len([1]) : Int
-  let call = ECall("len", [EListLit([EInt(1, 5, 6)], 4, 7)], 0, 3, 0, 8)
+  let call = EApply(EVar("len", 0, 3), [pos_arg(EListLit([EInt(1, 5, 6)], 4, 7))], 0, 8)
   let (cx1, t, _) = check_expr(cx, call, no_expected())
   assert t == TyInt
   assert len(cx1.diags) == 0
   # a local fn value is a dynamic call target
   let (cxa, _) = declare(cx, "f", TyFn([TyInt], TyBool, EPure), false, 0, 1)
-  let (cx2, t2, node2) = check_expr(cxa, ECall("f", [EInt(1, 2, 3)], 0, 1, 0, 4), no_expected())
+  let (cx2, t2, node2) =
+    check_expr(cxa, EApply(EVar("f", 0, 1), [pos_arg(EInt(1, 2, 3))], 0, 4), no_expected())
   assert t2 == TyBool
   match node2 {
     XCallDyn(_, n, ..) -> { assert n == "f" }
     _ -> { assert false }
   }
   # arity mismatch reports the signature
-  let bad = ECall("len", [], 0, 3, 0, 5)
+  let bad = EApply(EVar("len", 0, 3), [], 0, 5)
   let (cx3, _, _) = check_expr(cx, bad, no_expected())
   assert str.contains(cx3.diags[0].msg, "`len` takes 1 argument(s), got 0")
   # undefined
-  let (cx4, _, _) = check_expr(cx, ECall("nope", [], 0, 4, 0, 6), no_expected())
+  let (cx4, _, _) = check_expr(cx, EApply(EVar("nope", 0, 4), [], 0, 6), no_expected())
   assert cx4.diags[0].msg == "undefined function: nope"
+}
+
+test "argument names are a constructor's business, and every other callee says so" {
+  var cx = seed_prelude(test_cx())
+  cx = push_scope(cx)
+  let bare_some = ECtor("Some", [], None, false, 0, 4, 0, 4)
+  # (1) a constructor accepts them -- and validates them against its fields
+  let named = EApply(bare_some,
+    [Arg { name: Some("value"), e: EInt(1, 12, 13), lo: 5, hi: 13 }], 0, 14)
+  let (cx1, t1, _) = check_expr(cx, named, Some(opt_ty(TyInt)))
+  assert t1 == opt_ty(TyInt)
+  assert len(cx1.diags) == 0
+  let wrong = EApply(bare_some,
+    [Arg { name: Some("nope"), e: EInt(1, 11, 12), lo: 5, hi: 12 }], 0, 13)
+  let (cx2, _, _) = check_expr(cx, wrong, Some(opt_ty(TyInt)))
+  assert str.contains(cx2.diags[0].msg, "no field `nope`")
+  # (2) a function name: named for what it is, and told what names are for
+  let (cxf, _) = declare(cx, "f", TyFn([TyInt], TyInt, EPure), false, 0, 1)
+  let on_fn = EApply(EVar("f", 0, 1),
+    [Arg { name: Some("a"), e: EInt(1, 5, 6), lo: 2, hi: 6 }], 0, 7)
+  let (cx3, _, _) = check_expr(cxf, on_fn, no_expected())
+  assert cx3.diags[0].msg ==
+    "`f` is a function, not a constructor; function calls do not take argument names"
+  assert str.contains(cx3.diags[0].hint, "only constructor calls take argument names")
+  assert cx3.diags[0].lo == 2
+  # (3) a function value has no parameter names to write
+  let lam = ELambda([LambdaParam { name: "x", ann: Some(TNamed("Int", [], 4, 7)), lo: 1, hi: 2 }],
+    EVar("x", 11, 12), 0, 12)
+  let on_value = EApply(lam, [Arg { name: Some("a"), e: EInt(1, 16, 17), lo: 13, hi: 17 }], 0, 18)
+  let (cx4, _, _) = check_expr(cx, on_value, no_expected())
+  assert cx4.diags[0].msg == "this callee is a function value, not a constructor; " ++
+    "function calls do not take argument names"
+  # (4) a Java member
+  cx = Cx { ..cx, jsig: test_jsig(),
+    java_classes: map.insert(cx.java_classes, "Long", "java.lang.Long") }
+  let jrecv = ECtor("Long", [], None, false, 0, 4, 0, 4)
+  let on_java = EApply(EFieldAcc(jrecv, "MAX_VALUE", 5, 14, 0, 14),
+    [Arg { name: Some("a"), e: EInt(1, 18, 19), lo: 15, hi: 19 }], 0, 20)
+  let (cx5, _, _) = check_expr(cx, on_java, no_expected())
+  assert cx5.diags[0].msg == "`Long.MAX_VALUE` is a Java member, not a constructor; " ++
+    "Java calls do not take argument names"
+  # (5) a dot call is a call too
+  let on_dot = EMethod(EVar("f", 0, 1), "g",
+    [Arg { name: Some("a"), e: EInt(1, 6, 7), lo: 3, hi: 7 }], 2, 3, 0, 8)
+  let (cx6, _, _) = check_expr(cxf, on_dot, no_expected())
+  assert cx6.diags[0].msg ==
+    "`g` is a function, not a constructor; function calls do not take argument names"
+}
+
+test "the same call, four callees, four kinds of typed node" {
+  var cx = seed_prelude(test_cx())
+  cx = push_scope(cx)
+  # a function name is a static call
+  let (_, _, n1) = check_expr(cx,
+    EApply(EVar("len", 0, 3), [pos_arg(EListLit([EInt(1, 5, 6)], 4, 7))], 0, 8), no_expected())
+  match n1 {
+    XCallBuiltin(n, ..) -> { assert n == "len" }
+    _ -> { assert false }
+  }
+  # a local holding a function is a dynamic call, still by name
+  let (cxb, _) = declare(cx, "h", TyFn([TyInt], TyInt, EPure), false, 0, 1)
+  let (_, _, n2) = check_expr(cxb, EApply(EVar("h", 0, 1), [pos_arg(EInt(1, 2, 3))], 0, 4),
+    no_expected())
+  match n2 {
+    XCallDyn(_, n, ..) -> { assert n == "h" }
+    _ -> { assert false }
+  }
+  # a constructor name constructs
+  let (_, _, n3) = check_expr(cx,
+    EApply(ECtor("Some", [], None, false, 0, 4, 0, 4), [pos_arg(EInt(1, 5, 6))], 0, 7),
+    no_expected())
+  match n3 {
+    XCtor(..) -> ()
+    _ -> { assert false }
+  }
+  # anything else applies a function value
+  let lam = ELambda([LambdaParam { name: "x", ann: Some(TNamed("Int", [], 4, 7)), lo: 1, hi: 2 }],
+    EVar("x", 11, 12), 0, 12)
+  let (_, _, n4) = check_expr(cx, EApply(lam, [pos_arg(EInt(1, 13, 14))], 0, 15), no_expected())
+  match n4 {
+    XApply(..) -> ()
+    _ -> { assert false }
+  }
 }
 
 test "ctor calls infer type arguments; constants land as refs" {
   var cx = seed_prelude(test_cx())
   cx = push_scope(cx)
   # Some(1) : Option[Int]
-  let e = ECtor("Some", [CtorArg { name: None, e: EInt(1, 5, 6), lo: 5, hi: 6 }],
-    None, true, 0, 4, 0, 7)
+  let e = EApply(ECtor("Some", [], None, false, 0, 4, 0, 4), [pos_arg(EInt(1, 5, 6))], 0, 7)
   let (cx1, t, _) = check_expr(cx, e, no_expected())
   assert t == opt_ty(TyInt)
   assert len(cx1.diags) == 0
@@ -8196,7 +8376,7 @@ test "unsafe_pure masks io and flags redundancy" {
   cx = Cx { ..cx, jsig: test_jsig(),
     java_classes: map.insert(cx.java_classes, "Long", "java.lang.Long") }
   let recv = ECtor("Long", [], None, false, 12, 16, 12, 16)
-  let jc = EMethod(recv, "toHexString", [EInt(5, 29, 30)], 17, 28, 12, 31)
+  let jc = EMethod(recv, "toHexString", [pos_arg(EInt(5, 29, 30))], 17, 28, 12, 31)
   let p = EUnsafePure(jc, 0, 33)
   let (cx2, t2, _) = check_expr(cx, p, no_expected())
   assert t2 == opt_ty(TyString)
@@ -8223,7 +8403,7 @@ test "java calls resolve overloads, wrap references and reject unknowns" {
   cx = push_scope(cx)
   # Math.abs(1): the long overload beats int; primitive return is Int
   let recv = ECtor("Math", [], None, false, 0, 4, 0, 4)
-  let call = EMethod(recv, "abs", [EInt(1, 9, 10)], 5, 8, 0, 11)
+  let call = EMethod(recv, "abs", [pos_arg(EInt(1, 9, 10))], 5, 8, 0, 11)
   let (cx1, t, node) = check_expr(cx, call, no_expected())
   assert t == TyInt
   assert len(cx1.diags) == 0
@@ -8237,7 +8417,7 @@ test "java calls resolve overloads, wrap references and reject unknowns" {
   }
   # a String return lands as Option[String]
   let recv2 = ECtor("Long", [], None, false, 0, 4, 0, 4)
-  let call2 = EMethod(recv2, "toHexString", [EInt(5, 17, 18)], 5, 16, 0, 19)
+  let call2 = EMethod(recv2, "toHexString", [pos_arg(EInt(5, 17, 18))], 5, 16, 0, 19)
   let (cx2, t2, _) = check_expr(cx, call2, no_expected())
   assert t2 == opt_ty(TyString)
   assert len(cx2.diags) == 0

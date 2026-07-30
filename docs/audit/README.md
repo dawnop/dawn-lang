@@ -36,7 +36,7 @@
 | [purity-boundary-design.md](purity-boundary-design.md) | **LANG-01(P0)** ARCH-06 | 是（语言收窄） | 步 1–2 可做／**步 3 冻结** |
 | [lowered-ir-design.md](lowered-ir-design.md) | ARCH-04 ARCH-01 ARCH-02 ARCH-03 | 否（输出必须逐字节不变） | **降级为补充材料**；仅 ARCH-01/02 归本目录 |
 | [error-model-design.md](error-model-design.md) | ERR-02 ERR-03 LANG-02 | 是 | A、B 可做／**C2 冻结** |
-| [application-syntax-design.md](application-syntax-design.md) | SYN-02 SYN-03 | 否（语法放宽） | **可做**（不重合） |
+| [application-syntax-design.md](application-syntax-design.md) | SYN-02 SYN-03 | 否（语法放宽） | **已落地**（2026-07-30 加法 + 07-31 统一） |
 | [nominal-types-design.md](nominal-types-design.md) | LANG-04 LANG-05 | 部分 | 步 1–3 可做／**步 4 冻结** |
 | [module-access-design.md](module-access-design.md) | LANG-06 LANG-07 | 否 | **可做**（不重合） |
 | [lsp-robustness-design.md](lsp-robustness-design.md) | LSP-01 LSP-02 LSP-04 | 否 | **可做**（理由已改，见台账 §3.7） |

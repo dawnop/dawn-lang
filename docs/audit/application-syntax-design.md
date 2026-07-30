@@ -1,11 +1,38 @@
 # 把调用变成真正的后缀运算
 
-> 动码前的**调研与方案**，不是设计定稿。
+> 动码前的**调研与方案**，不是设计定稿；正文保留原样，落地记录见下面两条。
 > 覆盖 codebase-audit.md 的 **SYN-02（P1）**，顺带结清 **SYN-03**。
-> 状态：**proposed，可做**——与 [`../native-backend-plan.md`](../native-backend-plan.md)
+> 状态：**已落地（2026-07-31 结清）**。当初写下时是 proposed——与
+> [`../native-backend-plan.md`](../native-backend-plan.md)
 > 不重合（本文只动 parser 与 checker，不动 emit）。反而是**顺风**：
 > 把五种调用形式收成一个后缀节点，Core IR 那边的 `LCall` 就少一批要 lower 的源形态。
 > 台账见 [native-plan-overlap.md](native-plan-overlap.md)。
+
+> **2026-07-31 落地（统一形态）——本文结清**：`ident_or_call` 与构造器调用两处特判
+> 已删，`f(x)`、`Circle(1.0)`、`make()(1)` 全走 postfix 循环的 `(` 臂，落到同一个
+> `EApply(callee, List[Arg])`；`ECall` 从 AST 消失。`Arg` 就是原来的 `CtorArg` 改名
+> （形状本来就对：`name: Option[String]`），不另起一个平行类型。checker 的
+> `check_apply` 按 callee 四分支（§3.2 那张表），named argument 从语法判定改为
+> 类型判定。SYN-02/SYN-03 一并结清。
+>
+> 与本文有出入的两处，记录裁决：
+>
+> - **§3.3 说点调用也变成 `EApplyPost(EField(r, "f"), …)`——没做**，`EMethod` 原样
+>   保留（§六「不顺手统一 EMethod」）。变的只有它的实参表：`List[Expr]` → `List[Arg]`，
+>   于是 `x.f(a: 1)` 也解析得下来、由 checker 拒绝——EBNF 的 `arg` 产生式要为真，
+>   这一步是必须的。消歧规则（SYN-06）与 UFCS 一行未动。
+> - **四分支里的「Java 成员」**在保留 `EMethod` 之后只剩一个到达路径：
+>   `Class.FIELD(...)`（`Math.PI(a: 1)`）。那里就是它的实现处。
+>
+> 另外两条刻意的「不动」：`m.C(a, b)` 这条限定构造器路径**仍不接 `expected`**
+> （改了是推断变化，不属本刀）；`|>` 右侧仍只收具名调用/裸名字/lambda，
+> `x |> Some(1)` 与 `x |> make()(1)` 保持原来的错误。
+>
+> **输出变化**：AST dump 重基线 → `Emit-Change(parse backend-dawn)`；字节码不变，
+> 且是量过的——改动前的全部源码（含改动前的 selfhost）在新旧编译器下 `__emit`
+> 逐字节相同，lsp / run 两套 transcript 与改动前 HEAD 逐字节相同。Core golden
+> 重录：只有 ast/astdump/checker/lspq/parser 五个模块的 Core 变了，其余模块只是
+> `Expr` 少一个变体带来的 ADT id 位移，指令一条没变。
 
 > **2026-07-30 落地（加法形态）**：postfix 循环新增同行 `(` 臂 → 既有 `EApply` 节点，
 > 三个验收形态（`make()(1)`、`(if c { f } else { g })(1)`、`get_handler()(req)`）全通，
@@ -142,7 +169,7 @@ postfix 循环天然做到——这一条不产生新冲突，因为今天 `f(1,
 | 文件 | 改什么 |
 |---|---|
 | `selfhost/src/parser.dawn` | postfix 循环加 `(`；删 `ident_or_call` 与构造器的调用特判；跨行 `(` 不吃 |
-| `selfhost/src/ast.dawn` | `EApplyPost` + `Arg` 求和类型 |
+| `selfhost/src/ast.dawn` | 复用既有的 `EApply`（不叫 `EApplyPost`）+ `CtorArg` 改名 `Arg` |
 | `selfhost/src/checker.dawn` | `check_apply` 四分支；named argument 从语法判定改为类型判定 |
 | `selfhost/src/astdump.dawn` | AST dump 形状变化 |
 | `docs/spec.md` §4.3 | 后缀表里 `()` 的说明；跨行 `(` 的规则 |

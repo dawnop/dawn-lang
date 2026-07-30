@@ -34,7 +34,7 @@ use ast.{
   BinOp, OpAdd, OpSub, OpMul, OpDiv, OpMod, OpConcat, OpEq, OpNeq, OpLt, OpLe,
   OpGt, OpGe, OpAnd, OpOr, OpBand, OpBor, OpBxor, OpShl, OpShr, OpUshr,
   UnOp, OpNeg, OpNot, OpBnot,
-  CtorArg, MatchArm, Expr, EInt, EFloat, EBool, EUnit, EStr, EVar, ECall,
+  Arg, pos_arg, MatchArm, Expr, EInt, EFloat, EBool, EUnit, EStr, EVar,
   EApply, EMethod, ELambda, ECtor, EFieldAcc, EListLit, ETupleLit, EPropagate,
   EUnwrap, EIndex, EReturn, EBreak, EContinue, EComptime, EUnsafePure,
   EBinary, EUnary, EIf, EMatch, EBlock,
@@ -1068,11 +1068,16 @@ fn pipe_expr(p: P, st: St, ns: Bool) -> PR[Expr] = {
     if p.toks[look].kind != PIPEGT { break }
     let st2 = skip_nl(p, St { ..st1, pos: look + 1 })
     let (st3, rhs) = or_expr(p, st2, ns)?
+    # `x |> f(a)` is `f(x, a)`: the pipe inserts `left` as the first argument of
+    # a *named* call, or applies a bare name / lambda to it. Deliberately not
+    # every application node -- `x |> make()(1)` and `x |> Some(1)` stay the
+    # errors they were before calls became a general postfix (SYN-02).
     left = match rhs {
-      ECall(callee, args, clo, chi, _, rhi) ->
-        ECall(callee, [left] ++ args, clo, chi, e_lo(left), rhi)
-      EVar(name, vlo, vhi) -> ECall(name, [left], vlo, vhi, e_lo(left), vhi)
-      ELambda(ps, b, llo, lhi) -> EApply(ELambda(ps, b, llo, lhi), [left], e_lo(left), lhi)
+      EApply(EVar(name, vlo, vhi), args, _, rhi) ->
+        EApply(EVar(name, vlo, vhi), [pos_arg(left)] ++ args, e_lo(left), rhi)
+      EVar(name, vlo, vhi) -> EApply(EVar(name, vlo, vhi), [pos_arg(left)], e_lo(left), vhi)
+      ELambda(ps, b, llo, lhi) ->
+        EApply(ELambda(ps, b, llo, lhi), [pos_arg(left)], e_lo(left), lhi)
       other -> return Err((st3, pd_h(
         "the right side of `|>` must be a call, a function name, or a lambda",
         e_lo(other), e_hi(other), "x |> f(a) is equivalent to f(x, a)")))
@@ -1353,15 +1358,7 @@ fn postfix_expr(p: P, st: St, ns: Bool) -> PR[Expr] = {
             "expected a field or function name after `.`, found `" ++ nt2.text ++ "`")))
         }
         if at_kind(p, st3, LPAREN) {
-          var st4 = skip_nl(p, adv1(p, st3))
-          var args: List[Expr] = []
-          while not at_kind(p, st4, RPAREN) {
-            let (st5, a) = expression(p, st4, false)?
-            args = args ++ [a]
-            st4 = skip_nl(p, st5)
-            if at_kind(p, st4, COMMA) { st4 = skip_nl(p, adv1(p, st4)) } else { break }
-          }
-          let (st6, close) = want(p, st4, RPAREN, "`)`")?
+          let (st6, args, close) = call_args(p, st3)?
           e = EMethod(e, f.text, args, f.lo, f.hi, e_lo(e), close.hi)
           st1 = st6
         } else {
@@ -1370,23 +1367,17 @@ fn postfix_expr(p: P, st: St, ns: Bool) -> PR[Expr] = {
         }
       }
     } else if k == LPAREN {
-      # General application (SYN-02): any postfix expression may be applied.
-      # The named heads (`f(x)`, constructor calls, `x.m(y)`) still parse in
-      # their own paths with their own AST shapes; this arm catches only what
-      # used to be a syntax error -- make()(1), (if c { f } else { g })(1),
-      # get_handler()(req). Same-line only, for free: a newline surfaces as a
-      # NEWLINE token first, and that arm only continues a chain for `.` --
-      # so `let x = f` followed by a line `(1 + 2)` stays two statements.
-      # Arguments are positional; a function type carries no parameter names.
-      var st2 = skip_nl(p, adv1(p, st1))
-      var args: List[Expr] = []
-      while not at_kind(p, st2, RPAREN) {
-        let (st3, a) = expression(p, st2, false)?
-        args = args ++ [a]
-        st2 = skip_nl(p, st3)
-        if at_kind(p, st2, COMMA) { st2 = skip_nl(p, adv1(p, st2)) } else { break }
-      }
-      let (st4, close) = want(p, st2, RPAREN, "`)`")?
+      # Application is a general postfix (SYN-02): every `(` after an
+      # expression parses here -- `f(x)` and `Circle(1.0)` no longer have
+      # special cases of their own, and `make()(1)`,
+      # `(if c { f } else { g })(1)`, `get_handler()(req)` fall out for free.
+      # Which kind of call it is (static, construction, function value, Java)
+      # is the checker's decision, from what `e` resolves to.
+      #
+      # Same-line only, for free: a newline surfaces as a NEWLINE token first,
+      # and that arm only continues a chain for `.` -- so `let x = f` followed
+      # by a line `(1 + 2)` stays two statements (spec §4.3).
+      let (st4, args, close) = call_args(p, st1)?
       e = EApply(e, args, e_lo(e), close.hi)
       st1 = st4
     } else if k == NEWLINE {
@@ -1416,7 +1407,8 @@ fn primary_expr(p: P, st: St, ns: Bool) -> PR[Expr] = {
   } else if k == STRING {
     str_lit(p, adv1(p, st), t)
   } else if k == IDENT {
-    ident_or_call(p, st)
+    let (st1, name) = adv(p, st)
+    Ok((st1, EVar(name.text, name.lo, name.hi)))
   } else if k == IF {
     if_expr(p, st)
   } else if k == MATCH {
@@ -1457,35 +1449,42 @@ fn primary_expr(p: P, st: St, ns: Bool) -> PR[Expr] = {
   }
 }
 
-## Circle(1.0) / Rect(2.0, h: 3.0) / bare nullary Point / Point { x: 1.0 } / Point { ..p, x: 3.0 }
+## The head of a constructor spelling: bare `None` / `Point`, or the record
+## literal `Point { x: 1.0 }` / `Point { ..p, x: 3.0 }`. `Circle(1.0)` is *not*
+## parsed here -- the parenthesised form is the general application postfix
+## over this bare head (SYN-02), and `check_apply` turns it back into a
+## construction because that is what the head resolves to.
 fn ctor_expr(p: P, st: St, ns: Bool) -> PR[Expr] = {
   let (st1, name) = adv(p, st)
-  if at_kind(p, st1, LPAREN) { return ctor_paren_args(p, st1, name) }
   if at_kind(p, st1, LBRACE) && not ns { return record_lit(p, st1, name) }
-  let none: List[CtorArg] = []
+  let none: List[Arg] = []
   Ok((st1, ECtor(name.text, none, None, false, name.lo, name.hi, name.lo, name.hi)))
 }
 
-fn ctor_paren_args(p: P, st: St, name: Token) -> PR[Expr] = {
+## `( arg, ... )` — the EBNF `call_args`, shared by the application postfix and
+## by the dot call. `st` is at the `(`. An argument may be written `name: expr`
+## anywhere (SYN-03); only constructors accept that, and saying so is the
+## checker's job (docs/audit/application-syntax-design.md §3.2).
+fn call_args(p: P, st: St) -> Result[(St, List[Arg], Token), (St, Diag)] = {
   var st1 = skip_nl(p, adv1(p, st))
-  var args: List[CtorArg] = []
+  var args: List[Arg] = []
   while not at_kind(p, st1, RPAREN) {
     if at_kind(p, st1, IDENT) && kind_ahead(p, st1, 1) == COLON {
       let (st2, arg_name) = adv(p, st1)
       let st3 = skip_nl(p, adv1(p, st2))
       let (st4, value) = expression(p, st3, false)?
-      args = args ++ [CtorArg { name: Some(arg_name.text), e: value, lo: arg_name.lo, hi: e_hi(value) }]
+      args = args ++ [Arg { name: Some(arg_name.text), e: value, lo: arg_name.lo, hi: e_hi(value) }]
       st1 = st4
     } else {
       let (st2, value) = expression(p, st1, false)?
-      args = args ++ [CtorArg { name: None, e: value, lo: e_lo(value), hi: e_hi(value) }]
+      args = args ++ [pos_arg(value)]
       st1 = st2
     }
     st1 = skip_nl(p, st1)
     if at_kind(p, st1, COMMA) { st1 = skip_nl(p, adv1(p, st1)) } else { break }
   }
   let (st5, close) = want(p, st1, RPAREN, "`)`")?
-  Ok((st5, ECtor(name.text, args, None, true, name.lo, name.hi, name.lo, close.hi)))
+  Ok((st5, args, close))
 }
 
 fn record_lit(p: P, st: St, name: Token) -> PR[Expr] = {
@@ -1502,7 +1501,7 @@ fn record_lit(p: P, st: St, name: Token) -> PR[Expr] = {
       return Err((st1, perr(p, st1, "expected `,` or `}` after the `..base` spread")))
     }
   }
-  var args: List[CtorArg] = []
+  var args: List[Arg] = []
   while not at_kind(p, st1, RBRACE) {
     if at_kind(p, st1, DOTDOT) {
       return Err((st1, perr(p, st1, "`..base` must come first in a record literal")))
@@ -1511,12 +1510,12 @@ fn record_lit(p: P, st: St, name: Token) -> PR[Expr] = {
     if at_kind(p, st2, COLON) {
       let st3 = skip_nl(p, adv1(p, st2))
       let (st4, value) = expression(p, st3, false)?
-      args = args ++ [CtorArg { name: Some(f.text), e: value, lo: f.lo, hi: e_hi(value) }]
+      args = args ++ [Arg { name: Some(f.text), e: value, lo: f.lo, hi: e_hi(value) }]
       st1 = st4
     } else {
       # shorthand { x } means { x: x }
       let value = EVar(f.text, f.lo, f.hi)
-      args = args ++ [CtorArg { name: Some(f.text), e: value, lo: f.lo, hi: f.hi }]
+      args = args ++ [Arg { name: Some(f.text), e: value, lo: f.lo, hi: f.hi }]
       st1 = st2
     }
     st1 = skip_nl(p, st1)
@@ -1524,23 +1523,6 @@ fn record_lit(p: P, st: St, name: Token) -> PR[Expr] = {
   }
   let (st5, close) = want(p, st1, RBRACE, "`}`")?
   Ok((st5, ECtor(name.text, args, spread, true, name.lo, name.hi, name.lo, close.hi)))
-}
-
-fn ident_or_call(p: P, st: St) -> PR[Expr] = {
-  let (st1, name) = adv(p, st)
-  if not at_kind(p, st1, LPAREN) {
-    return Ok((st1, EVar(name.text, name.lo, name.hi)))
-  }
-  var st2 = skip_nl(p, adv1(p, st1))
-  var args: List[Expr] = []
-  while not at_kind(p, st2, RPAREN) {
-    let (st3, a) = expression(p, st2, false)?
-    args = args ++ [a]
-    st2 = skip_nl(p, st3)
-    if at_kind(p, st2, COMMA) { st2 = skip_nl(p, adv1(p, st2)) } else { break }
-  }
-  let (st4, close) = want(p, st2, RPAREN, "`)`")?
-  Ok((st4, ECall(name.text, args, name.lo, name.hi, name.lo, close.hi)))
 }
 
 ## Parse the segments of a STRING token: text stays text, each interpolation is
