@@ -26,28 +26,13 @@ use types.{
 use tast.{TJavaCall, TFun, TModule, TBinOp, BEq, BNeq, BLt, BLe, BGt, BGe}
 use interp.{CtOut}
 use codegen.{
-  obj, fn_iface, tuple_class, erased_apply_desc, desc_of, method_desc,
-  JvmRepr, jvm_repr, RLong, RDouble, RBool, RRef, RBottom,
-  slots_of, is_ref, is_bottom, load_slot, push_unit, hash_of, dict_class, supers_of,
-  gen_adt, gen_ctor_class,
-  parameterised_scaffold, dict_arg_field, dict_ctor_desc,
-  EqOverride, no_override,
-  tr_iface, append_const, singleton_scaffold, subject_name,
-  V17, ACC_PUBLIC, ACC_PRIVATE, ACC_PROTECTED, ACC_STATIC, ACC_FINAL,
-  ACC_ABSTRACT, ACC_INTERFACE,
-  OP_ALOAD, OP_ILOAD, OP_LLOAD, OP_DLOAD, OP_ASTORE, OP_ISTORE, OP_LSTORE,
-  OP_DSTORE, OP_RETURN, OP_ARETURN, OP_IRETURN, OP_LRETURN, OP_DRETURN,
-  OP_DUP, OP_DUP2, OP_POP, OP_POP2, OP_NEW, OP_CHECKCAST, OP_INSTANCEOF,
-  OP_INVOKESPECIAL, OP_INVOKESTATIC, OP_INVOKEVIRTUAL, OP_INVOKEINTERFACE,
-  OP_GETFIELD, OP_PUTFIELD, OP_GETSTATIC, OP_PUTSTATIC, OP_ATHROW, OP_GOTO,
-  OP_IFEQ, OP_IFNE, OP_IFLT, OP_IFGE, OP_IFGT, OP_IFLE, OP_IF_ICMPEQ,
-  OP_IF_ICMPNE, OP_IF_ICMPGE, OP_IF_ACMPEQ, OP_IFNULL, OP_ICONST_0,
-  OP_ICONST_1, OP_LCONST_0, OP_LCONST_1, OP_LCMP, OP_DCMPL, OP_I2L, OP_L2I,
-  OP_IADD, OP_LADD, OP_ISUB, OP_IMUL, OP_IXOR, OP_LXOR, OP_LNEG, OP_DNEG,
-  OP_BIPUSH, OP_ARRAYLENGTH,
-  PANIC_CLASS, UNIT_CLASS, SB, SHOW_CLASS, BYTES_CLASS, IO_CLASS,
-  STRINGS_CLASS, HAMT_CLASS, PVEC_CLASS, PVEC_MOD, FN_CMP_CLASS,
-  ARRAYLIST, ARRAY_CLASS
+  obj, fn_iface, tuple_class, erased_apply_desc, desc_of, method_desc, JvmRepr, jvm_repr,
+  RLong, RDouble, RBool, RRef, RBottom, slots_of, is_ref, is_bottom, load_slot, push_unit,
+  hash_of, dict_class, supers_of, gen_adt, gen_ctor_class, parameterised_scaffold,
+  dict_arg_field, dict_ctor_desc, EqOverride, no_override, tr_iface, append_const,
+  singleton_scaffold, subject_name, PANIC_CLASS, UNIT_CLASS, SB, SHOW_CLASS, BYTES_CLASS,
+  IO_CLASS, STRINGS_CLASS, HAMT_CLASS, PVEC_CLASS, PVEC_MOD, FN_CMP_CLASS, ARRAYLIST,
+  ARRAY_CLASS
 }
 use core.{
   CValue, VInt, VFloat, VBool, VStr, VUnit, VList, VTuple, VAdt,
@@ -74,84 +59,24 @@ use java "java.lang.System"
 use java "java.lang.Long"
 use java "java.lang.Integer"
 use java "java.lang.Double"
+use jvmops.{
+  ACC_ABSTRACT, ACC_FINAL, ACC_INTERFACE, ACC_PRIVATE, ACC_PROTECTED, ACC_PUBLIC,
+  ACC_STATIC, OP_AASTORE, OP_ACC_SYNTHETIC, OP_ACONST_NULL, OP_ALOAD, OP_ANEWARRAY,
+  OP_ARETURN, OP_ARRAYLENGTH, OP_ASTORE, OP_ATHROW, OP_BASTORE, OP_BIPUSH, OP_CASTORE,
+  OP_CHECKCAST, OP_D2F, OP_D2L, OP_DADD, OP_DASTORE, OP_DCMPG, OP_DCMPL, OP_DDIV, OP_DLOAD,
+  OP_DMUL, OP_DNEG, OP_DREM, OP_DRETURN, OP_DSTORE, OP_DSUB, OP_DUP, OP_DUP2, OP_F2D,
+  OP_FASTORE, OP_FLOAD, OP_FRETURN, OP_GETFIELD, OP_GETSTATIC, OP_GOTO, OP_H_INVOKESTATIC,
+  OP_I2L, OP_IADD, OP_IASTORE, OP_ICONST_0, OP_ICONST_1, OP_ICONST_M1, OP_IFEQ, OP_IFGE,
+  OP_IFGT, OP_IFLE, OP_IFLT, OP_IFNE, OP_IFNONNULL, OP_IFNULL, OP_IF_ACMPEQ, OP_IF_ACMPNE,
+  OP_IF_ICMPEQ, OP_IF_ICMPGE, OP_IF_ICMPLT, OP_IF_ICMPNE, OP_ILOAD, OP_IMUL, OP_INSTANCEOF,
+  OP_INVOKEINTERFACE, OP_INVOKESPECIAL, OP_INVOKESTATIC, OP_INVOKEVIRTUAL, OP_IRETURN,
+  OP_ISTORE, OP_ISUB, OP_IXOR, OP_L2D, OP_L2I, OP_LADD, OP_LAND, OP_LASTORE, OP_LCMP,
+  OP_LCONST_0, OP_LCONST_1, OP_LDIV, OP_LLOAD, OP_LMUL, OP_LNEG, OP_LOR, OP_LREM,
+  OP_LRETURN, OP_LSHL, OP_LSHR, OP_LSTORE, OP_LSUB, OP_LUSHR, OP_LXOR, OP_NEW, OP_NEWARRAY,
+  OP_POP, OP_POP2, OP_PUTFIELD, OP_PUTSTATIC, OP_RETURN, OP_SASTORE, V17
+}
 
 # ---- opcodes codegen.dawn does not carry yet ----
-
-pub const OP_ICONST_M1: Int = 2
-
-pub const OP_ACONST_NULL: Int = 1
-
-pub const OP_IF_ACMPNE: Int = 166
-
-pub const OP_LSUB: Int = 101
-
-pub const OP_LMUL: Int = 105
-
-pub const OP_LDIV: Int = 109
-
-pub const OP_LREM: Int = 113
-
-pub const OP_DADD: Int = 99
-
-pub const OP_DSUB: Int = 103
-
-pub const OP_DMUL: Int = 107
-
-pub const OP_DDIV: Int = 111
-
-pub const OP_DREM: Int = 115
-
-pub const OP_LAND: Int = 127
-
-pub const OP_LOR: Int = 129
-
-pub const OP_LSHL: Int = 121
-
-pub const OP_LSHR: Int = 123
-
-pub const OP_LUSHR: Int = 125
-
-pub const OP_DCMPG: Int = 152
-
-pub const OP_IF_ICMPLT: Int = 161
-
-pub const OP_IFNONNULL: Int = 199
-
-pub const OP_L2D: Int = 138
-
-pub const OP_D2L: Int = 143
-
-pub const OP_D2F: Int = 144
-
-pub const OP_F2D: Int = 141
-
-pub const OP_FLOAD: Int = 23
-
-pub const OP_FRETURN: Int = 174
-
-pub const OP_ACC_SYNTHETIC: Int = 4096
-
-pub const OP_H_INVOKESTATIC: Int = 6
-
-pub const OP_NEWARRAY: Int = 188
-
-pub const OP_ANEWARRAY: Int = 189
-
-pub const OP_LASTORE: Int = 80
-
-pub const OP_IASTORE: Int = 79
-
-pub const OP_DASTORE: Int = 82
-
-pub const OP_FASTORE: Int = 81
-
-pub const OP_BASTORE: Int = 84
-
-pub const OP_SASTORE: Int = 86
-
-pub const OP_CASTORE: Int = 85
-
-pub const OP_AASTORE: Int = 83
 
 pub const ARGS_FIELD: String = "dawn\$args"
 

@@ -2000,7 +2000,7 @@ WEB-03、WEB-04、WEB-06、WEB-07、WEB-09、WEB-10 —— 一次做完，`packa
 | TEST-01 | classfile 过 `CheckClassAdapter` | 最便宜的一条，emit 时多包一层。native 计划采纳了它的论证，没采纳这个动作项 |
 | TEST-04 | 文档 CI（fenced block 执行、链接检查、grammar corpus） | 独立一套工作 |
 | DOC-10 | 每篇 front matter、`docs/history/` | 30 余个文件的机械改动，会淹掉本次改动。native 那条线还在加文档，越晚越贵 |
-| ARCH-01/02 | 先把 opcode/descriptor 统一到一个后端模块 | ARCH-05 建议三，可独立于 IR |
+| ARCH-01/02 | 先把 opcode/descriptor 统一到一个后端模块 | **已做（2026-07-30）**：`selfhost/src/jvmops.dawn`，116 个常量一处，8 个曾有两份定义的 opcode 收成一份；发射字节逐字节不变。拆 `Cx`/`Gen` 本身仍待做 |
 
 **审查漏掉的一条**（登记在台账 §四）：`==` 硬连线 `BEq`、hash 是自动派生的结构
 `hashCode`，于是「任意值能不能比较/哈希」不由 trait 决定。native 计划把它列为
