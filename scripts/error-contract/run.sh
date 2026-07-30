@@ -10,7 +10,9 @@
 # differ. This script is where the names themselves are written down.
 #
 # See probe.dawn for what each line asserts and why the three renderings of a
-# Java class are worth telling apart.
+# Java class are worth telling apart. `cast_e` is checked here too, for the
+# same reason and with a second one: on the other backend a cast cannot fail
+# at all, so what a failed one says is a JVM question by construction.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"

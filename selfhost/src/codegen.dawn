@@ -1028,58 +1028,115 @@ fn gen_try_closure(cw: AdtClassWriter, name: String, caught: List[String]) -> Un
   m.visitLabel(try_end)
   m.visitInsn(OP_ARETURN)
   m.visitLabel(handler)
+  gen_caught_err(m, 1)
+  m.visitInsn(OP_ARETURN)
+  m.visitMaxs(0, 0)
+  m.visitEnd()
+  ()
+}
+
+## A handler's body: the caught `Throwable` on the stack, a `Result$Err`
+## carrying a `ForeignError` left on it. `base` is the first scratch local
+## free in the enclosing method, and six consecutive ones are used from there.
+##
+## Shared rather than copied because the field discipline documented above
+## *is* this sequence -- a second handler that spelled `getSimpleName()` or
+## `toString()` would be a second answer to a question the design fixed once.
+fn gen_caught_err(m: MethodVisitor, base: Int) -> Unit !io = {
   # Each part is computed into a local before the record is allocated. The
   # order matters to the verifier and not to the reader: an uninitialised
   # `NEW` left on the stack across a branch is a stack-map shape a class file
   # may not describe, and both the message and the cause branch.
-  m.visitVarInsn(OP_ASTORE, 1)
-  m.visitVarInsn(OP_ALOAD, 1)
+  m.visitVarInsn(OP_ASTORE, base)
+  m.visitVarInsn(OP_ALOAD, base)
   m.visitMethodInsn(OP_INVOKEVIRTUAL, obj(), "getClass", "()Ljava/lang/Class;", false)
   m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/Class", "getName",
     "()Ljava/lang/String;", false)
-  m.visitVarInsn(OP_ASTORE, 2)
-  m.visitVarInsn(OP_ALOAD, 1)
+  m.visitVarInsn(OP_ASTORE, base + 1)
+  m.visitVarInsn(OP_ALOAD, base)
   m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/Throwable", "getMessage",
     "()Ljava/lang/String;", false)
-  m.visitVarInsn(OP_ASTORE, 3)
+  m.visitVarInsn(OP_ASTORE, base + 2)
   let has_msg = Label.new()
-  m.visitVarInsn(OP_ALOAD, 3)
+  m.visitVarInsn(OP_ALOAD, base + 2)
   m.visitJumpInsn(OP_IFNONNULL, has_msg)
   m.visitLdcInsn(Objects.requireNonNull("").expect("non-null"))
-  m.visitVarInsn(OP_ASTORE, 3)
+  m.visitVarInsn(OP_ASTORE, base + 2)
   m.visitLabel(has_msg)
-  m.visitVarInsn(OP_ALOAD, 1)
+  m.visitVarInsn(OP_ALOAD, base)
   m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/Throwable", "getCause",
     "()Ljava/lang/Throwable;", false)
-  m.visitVarInsn(OP_ASTORE, 4)
+  m.visitVarInsn(OP_ASTORE, base + 3)
   let no_cause = Label.new()
   let cause_done = Label.new()
-  m.visitVarInsn(OP_ALOAD, 4)
+  m.visitVarInsn(OP_ALOAD, base + 3)
   m.visitJumpInsn(OP_IFNULL, no_cause)
   m.visitTypeInsn(OP_NEW, "Option\$Some")
   m.visitInsn(OP_DUP)
-  m.visitVarInsn(OP_ALOAD, 4)
+  m.visitVarInsn(OP_ALOAD, base + 3)
   m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/Throwable", "toString",
     "()Ljava/lang/String;", false)
   m.visitMethodInsn(OP_INVOKESPECIAL, "Option\$Some", "<init>", "(Ljava/lang/Object;)V", false)
-  m.visitVarInsn(OP_ASTORE, 5)
+  m.visitVarInsn(OP_ASTORE, base + 4)
   m.visitJumpInsn(OP_GOTO, cause_done)
   m.visitLabel(no_cause)
   m.visitFieldInsn(OP_GETSTATIC, "Option\$None", "INSTANCE", "LOption\$None;")
-  m.visitVarInsn(OP_ASTORE, 5)
+  m.visitVarInsn(OP_ASTORE, base + 4)
   m.visitLabel(cause_done)
   m.visitTypeInsn(OP_NEW, FERR_CLASS)
   m.visitInsn(OP_DUP)
-  m.visitVarInsn(OP_ALOAD, 2)
-  m.visitVarInsn(OP_ALOAD, 3)
-  m.visitVarInsn(OP_ALOAD, 5)
+  m.visitVarInsn(OP_ALOAD, base + 1)
+  m.visitVarInsn(OP_ALOAD, base + 2)
+  m.visitVarInsn(OP_ALOAD, base + 4)
   m.visitMethodInsn(OP_INVOKESPECIAL, FERR_CLASS, "<init>",
     "(Ljava/lang/String;Ljava/lang/String;LOption;)V", false)
-  m.visitVarInsn(OP_ASTORE, 6)
+  m.visitVarInsn(OP_ASTORE, base + 5)
   m.visitTypeInsn(OP_NEW, "Result\$Err")
   m.visitInsn(OP_DUP)
-  m.visitVarInsn(OP_ALOAD, 6)
+  m.visitVarInsn(OP_ALOAD, base + 5)
   m.visitMethodInsn(OP_INVOKESPECIAL, "Result\$Err", "<init>", "(Ljava/lang/Object;)V", false)
+  ()
+}
+
+## `cast_e(o, c)`: reclaim `o` as `c`, handing back `Ok(o)` or an `Err`
+## carrying what the failure was (docs/audit/error-model-design.md 二.B). The
+## transitional half of step B -- `cast` keeps throwing until stage 3.
+##
+## Two things about the shape are decisions rather than convenience:
+##
+## 1. **A method, not an inlined try block.** `cast` is one CHECKCAST written
+##    straight into the caller, and wrapping *that* in a handler cannot work:
+##    the JVM clears the operand stack when it enters one, so a `cast_e` part
+##    way through an expression -- `f(a, cast_e(x))`, with `a` already pushed
+##    -- would arrive at the merge point having lost `a`. A method has a stack
+##    of its own, which is the same reason the barriers above are methods.
+## 2. **`Class.cast`, not an `instanceof` test.** It is CHECKCAST with its
+##    operand passed in rather than baked into the instruction, so `null` is
+##    still reclaimed (as CHECKCAST reclaims it) and the exception is a real
+##    `ClassCastException` with the JVM's own message. `kind` is therefore
+##    read off a thrown exception exactly as it is in the barriers, rather
+##    than being a string literal this file made up.
+fn gen_cast_e(cw: AdtClassWriter) -> Unit !io = {
+  let m = cw.method(ACC_PUBLIC + ACC_STATIC, "cast_e",
+    "(Ljava/lang/Object;Ljava/lang/Class;)LResult;").expect("mv")
+  m.visitCode()
+  let try_start = Label.new()
+  let try_end = Label.new()
+  let handler = Label.new()
+  m.visitTryCatchBlock(try_start, try_end, handler, "java/lang/ClassCastException")
+  m.visitLabel(try_start)
+  m.visitTypeInsn(OP_NEW, "Result\$Ok")
+  m.visitInsn(OP_DUP)
+  m.visitVarInsn(OP_ALOAD, 1)
+  m.visitVarInsn(OP_ALOAD, 0)
+  m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/Class", "cast",
+    "(Ljava/lang/Object;)Ljava/lang/Object;", false)
+  m.visitMethodInsn(OP_INVOKESPECIAL, "Result\$Ok", "<init>", "(Ljava/lang/Object;)V", false)
+  m.visitLabel(try_end)
+  m.visitInsn(OP_ARETURN)
+  m.visitLabel(handler)
+  # the two parameters occupy 0 and 1, so the handler's scratch starts at 2
+  gen_caught_err(m, 2)
   m.visitInsn(OP_ARETURN)
   m.visitMaxs(0, 0)
   m.visitEnd()
@@ -1104,6 +1161,12 @@ pub fn gen_io_class(supers: List[String]) -> Bytes !io = {
   # exhaustion is not a value; it propagates. (The C backend agrees for free:
   # native failure kinds have no VM-error arm at all.)
   gen_try_closure(cw, "catch_panic", [PANIC_CLASS, "java/lang/Exception"])
+
+  # Not an io primitive and not a barrier: `cast_e` is pure. It lives here
+  # because this is the class that owns the one translation from a Throwable
+  # to a `ForeignError`, and a second copy of that translation is exactly
+  # what the design forbids.
+  gen_cast_e(cw)
 
   # a single shared reader: a fresh BufferedReader per call would let one call's
   # buffer swallow input the next call should see. Lazily initialised in io_read_line.

@@ -1033,6 +1033,15 @@ fn slurp(p: String) -> String !io = {
 （T 取自调用点的期望类型，如 `let b: Bytes = cast(...)`；§9.5.1）——桥接处插一次运行期 `CHECKCAST`，
 类型不符即 `ClassCastException` 穿透。T 须是引用类型（编译期拒绝 primitive / 无期望类型）。
 
+> **这条正在被改**（LANG-02）：一个签名为纯的函数不该能用宿主异常退出。替代物是同一次
+> 认领、失败成为值：`cast_e[T](x: Object) -> Result[T, ForeignError]`（载荷见 §9.8.1；
+> JVM 上落空的 `kind` 是 `java.lang.ClassCastException`）。它现在是**过渡拼法**，
+> 与 `catch_fault_e`/`catch_panic_e` 当初同一个理由——内建的签名受种子纪律约束，
+> 而没有一个调用点能同时满足 `T` 和 `Result[T, ForeignError]`，所以新形状先以零调用点的
+> 名字落地，发一次 release 教会上一代编译器，再迁调用点，最后把签名交还给 `cast` 并删掉
+> `cast_e`。**本节这段说的仍是今天的 `cast`**：迁移完成前它照旧抛。
+> 分期见 `docs/audit/error-model-design.md` §6.10。
+
 ### 9.6 List 桥接：Dawn `List` 直达集合形参
 
 Java 形参声明为 `java.util.List` / `java.util.Collection` / `java.lang.Iterable` 时，
