@@ -62,21 +62,6 @@ fn a_string_as_object() -> Object !io = {
   xs.get(0).expect("element")
 }
 
-## The same miss through the plain spelling. Until stage 2 this had to go
-## through `catch_fault`, because `cast` left by throwing; now `cast` carries
-## the signature `cast_e` was holding for it and the two are one reclaim under
-## two names. That is the thing worth asserting here, and it is worth
-## asserting on this backend rather than in a comment: a stage that flipped the
-## table entry without repointing the emitter would leave `cast` writing a
-## CHECKCAST to `Result` and this function would die on the way in.
-fn missed_by_cast() -> ForeignError !io = {
-  let r: Result[Bytes, ForeignError] = cast(a_string_as_object())
-  match r {
-    Ok(_) -> panic("cast accepted a String as Bytes")
-    Err(e) -> e
-  }
-}
-
 pub fn main() -> Unit !io = {
   let p = taken(boom)
   let n = taken(not_a_number)
@@ -105,19 +90,19 @@ pub fn main() -> Unit !io = {
   # ---- step B: the reclaim whose failure is a value -----------------------
   #
   # `cast` used to be declared pure and leave by throwing (design doc 一.3,
-  # LANG-02). Stage 2 gave it the `Result` signature, so both spellings now
-  # answer the same two questions on this backend: a hit is `Ok` with the value
-  # intact, and a miss is `Err` under the JVM's own name for it.
+  # LANG-02). It hands the failure back instead, and answers two questions on
+  # this backend: a hit is `Ok` with the value intact, and a miss is `Err`
+  # under the JVM's own name for it.
   let o = a_string_as_object()
-  let hit: Result[String, ForeignError] = cast_e(o)
+  let hit: Result[String, ForeignError] = cast(o)
   bad = bad + check("a cast that hits carries the value through",
     match hit {
       Ok(s) -> s
       Err(e) -> "Err(" ++ e.kind ++ ")"
     }, "hello")
-  let miss: Result[Bytes, ForeignError] = cast_e(o)
+  let miss: Result[Bytes, ForeignError] = cast(o)
   let m = match miss {
-    Ok(_) -> panic("cast_e accepted a String as Bytes")
+    Ok(_) -> panic("cast accepted a String as Bytes")
     Err(e) -> e
   }
   bad = bad + check("a cast that misses names the JVM's own failure class",
@@ -126,12 +111,17 @@ pub fn main() -> Unit !io = {
   bad = bad + check_true("the kind is a name and not a rendering",
     not str.contains(m.kind, ":"))
   bad = bad + check("nothing sits under a failed cast", to_string(m.cause), "None")
-  # and the two spellings are one reclaim, which is what makes stage 3 a
-  # substitution. Both halves of the payload: agreeing on `kind` while
-  # disagreeing on `message` would not be a synonym.
-  let c = missed_by_cast()
-  bad = bad + check("cast reports the kind cast_e reports", c.kind, m.kind)
-  bad = bad + check("cast reports the message cast_e reports", c.message, m.message)
+  # Two lines here used to show that the transitional spelling and this one
+  # were one reclaim. One spelling is left, and the budget goes to the half of
+  # the payload nothing was asking about: `message` names both classes -- what
+  # the object is and what it could not become. That is the JVM's own wording
+  # for a failed `Class.cast`, and asserting it is how "read off a real
+  # exception" is told apart from "a string this compiler made up", which is
+  # the same distinction the `kind` lines above draw one field over.
+  bad = bad + check_true("the message names the class the object is",
+    str.contains(m.message, "java.lang.String"))
+  bad = bad + check_true("the message names the class it could not become",
+    str.contains(m.message, "[B"))
 
   println("mismatches " ++ to_string(bad))
 }

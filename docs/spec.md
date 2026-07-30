@@ -1037,10 +1037,8 @@ fn slurp(p: String) -> String !io = {
 （编译期拒绝 primitive / 无期望类型）。
 
 > **签名为纯的函数不该能用宿主异常退出**（LANG-02）——`cast` 从前抛 `ClassCastException`，
-> 那正是纯签名本该排除的那条出口。现在失败是值。
->
-> 迁移仍在进行：过渡拼法 `cast_e` 与 `cast` 签名逐字相同，只为让上一代编译器有个名字可调，
-> 下一期删掉。**新代码写 `cast`。** 分期见 `docs/audit/error-model-design.md` §6.10。
+> 那正是纯签名本该排除的那条出口。现在失败是值。迁移经过的三期（含一个只活一个
+> 版本的过渡拼法）记在 `docs/audit/error-model-design.md` §6.10–§6.12，已收尾。
 
 ### 9.6 List 桥接：Dawn `List` 直达集合形参
 

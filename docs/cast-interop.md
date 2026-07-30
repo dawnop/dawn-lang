@@ -3,7 +3,7 @@
 > 状态：**historical** —— 泛型 `cast` 已落地，本文是当时的动码前设计。
 > 其中「失败抛 `ClassCastException`」这一条已被 LANG-02 改掉：`cast` 现在返回
 > `Result[T, ForeignError]`，失败是值。本文余下关于**抛异常**的段落（三、五、六）
-> 因此是史料，别照着写新代码。过渡拼法 `cast_e` 与 `cast` 签名相同、还留一期。
+> 因此是史料，别照着写新代码。
 > 见 [`audit/error-model-design.md`](audit/error-model-design.md) §6.10 与 `spec.md` §9.5。
 >
 > 语言层设计，**先文档、后实现**。目标：把「从擦除的 Java `Object` 认领回具体类型」从

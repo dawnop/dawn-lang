@@ -666,21 +666,21 @@ pub fn result_ty(t: Ty, e: Ty) -> Ty = TyAdt(RESULT_ID, [t, e])
 
 pub fn foreign_error_ty() -> Ty = TyAdt(FOREIGN_ERROR_ID, [])
 
-## The `T` in a `cast_e` call's `Result[T, ForeignError]`.
+## The `T` in a `cast` call's `Result[T, ForeignError]`.
 ##
 ## Both emitters need it -- it is the type the reclaim is checked against --
 ## and neither can read it off the argument, which is an erased `Object`. It
 ## lives here rather than in one of them because a backend that peeled the
 ## type differently would be checking against a different class.
-pub fn cast_e_target(ty: Ty) -> Ty =
+pub fn cast_target(ty: Ty) -> Ty =
   match peel_opaque(ty) {
     TyAdt(aid, args) ->
       if aid == RESULT_ID && len(args) == 2 {
         args[0]
       } else {
-        panic("cast_e: not typed Result[T, ForeignError]")
+        panic("cast: not typed Result[T, ForeignError]")
       }
-    _ -> panic("cast_e: not typed Result[T, ForeignError]")
+    _ -> panic("cast: not typed Result[T, ForeignError]")
   }
 
 ## The three prelude ADTs, keyed by their fixed ids.
@@ -1085,19 +1085,14 @@ pub fn builtins() -> Map[String, Sig] = {
     # builtin's *signature* is under the seed discipline the way its name is,
     # and no call site satisfies `T` and `Result[T, ForeignError]` at once, so
     # the compiler's own `cast` sites could not type-check against the seed's
-    # table and today's together. The new shape landed under a name nothing
+    # table and today's together. So the new shape landed under a name nothing
     # called (`cast_e`, v0.34.0), a release taught the previous compiler, the
-    # call sites moved, and this entry was flipped at zero callers -- with both
+    # call sites moved and this entry was flipped at zero callers -- with both
     # emitters repointed in the same commit, because a table entry and a
     # runtime that disagree is what step A's stage 2 left for its stage 3 to
-    # find (六.8). Stage 3 brings the call sites back to this name and deletes
-    # `cast_e`; see 六.10.
+    # find (六.8) -- and the call sites came back here (v0.35.0). The
+    # transitional spelling is gone; see 六.10.
     tp1(bsig("cast", [TyJava("java.lang.Object", "Object")], ["x"],
-      result_ty(t, foreign_error_ty())), t),
-    # The transitional spelling, now a synonym of the entry above and nothing
-    # else. It stays exactly one release, so that the compiler being built by
-    # the previous one has a name it can call; stage 3 deletes it.
-    tp1(bsig("cast_e", [TyJava("java.lang.Object", "Object")], ["x"],
       result_ty(t, foreign_error_ty())), t),
     eff1(
       tp1(bsig("catch_panic", [TyFn([], t, EIo)], ["f"],
@@ -1518,38 +1513,44 @@ test "builtin table renders signatures" {
     }
     None -> { assert false }
   }
-  assert map_size2(bs) == 88
+  assert map_size2(bs) == 87
 }
 
-test "the reclaim's failure is a value, under both of its names" {
+test "the reclaim's failure is a value, under the one name left" {
   # Step B of the error model (design doc 二.B): `cast` was declared pure and
   # left by throwing a ClassCastException, which is the one thing a pure
   # signature is supposed to rule out. It now hands the failure back.
   #
-  # The two names are asserted with one string because for exactly one release
-  # they are one signature: `cast_e` exists so that the compiler the previous
-  # release builds has a name it can call, and stage 3 deletes it. Asserting
-  # them apart would let them drift, and a drift is precisely what stage 3
-  # would have to reconcile instead of delete.
+  # The transitional spelling is gone and its absence is asserted below:
+  # leaving it behind would leave a second way to spell one reclaim in
+  # `dawn doc --builtins` forever, and a second entry is a second thing that
+  # can drift.
   let adts = prelude_adts()
   let traits = prelude_traits()
   let bs = builtins()
-  for n in ["cast", "cast_e"] {
-    match map.get(bs, n) {
-      Some(s) -> {
-        assert sig_render(adts, traits, s) ==
-          "fn " ++ n ++ "[T](x: Object) -> Result[T, ForeignError]"
-      }
-      None -> { assert false }
+  match map.get(bs, "cast") {
+    Some(s) -> {
+      assert sig_render(adts, traits, s) ==
+        "fn cast[T](x: Object) -> Result[T, ForeignError]"
     }
-    # Pure, and deliberately: the failure became a value, so there is no effect
-    # to declare. The barriers are `!io` because the thunk they run is; this
-    # one runs nothing.
-    assert intr_at(n).expect(n).sig.eff == EPure
-    # and no runtime module owns it -- both emitters spell it themselves,
-    # because the class to check against comes from the call site and a runtime
-    # symbol named after the primitive cannot be handed one.
-    assert intr_at(n).expect(n).rt == None
+    None -> { assert false }
+  }
+  # Pure, and deliberately: the failure became a value, so there is no effect
+  # to declare. The barriers are `!io` because the thunk they run is; this one
+  # runs nothing.
+  assert intr_at("cast").expect("cast").sig.eff == EPure
+  # and the `rt` table does not carry it, although `dawn/rt/Io.cast` exists:
+  # that route emits the descriptor the *signature* names, and this call needs
+  # a second operand (the target class, which only the call site knows). Both
+  # emitters therefore write the call themselves.
+  assert intr_at("cast").expect("cast").rt == None
+  match map.get(bs, "cast_e") {
+    Some(_) -> { assert false }
+    None -> { }
+  }
+  match intr_at("cast_e") {
+    Some(_) -> { assert false }
+    None -> { }
   }
 }
 
