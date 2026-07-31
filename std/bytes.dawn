@@ -71,15 +71,6 @@ pub fn decode_utf8(b: Bytes) -> String =
 pub fn decode_latin1(b: Bytes) -> String =
   bytes_decode(b, "ISO-8859-1").expect("decode_latin1: backend lost ISO-8859-1")
 
-## Deprecated: use `decode_utf8` / `decode_latin1`. A charset parameter is a
-## registry in an argument position, and the registry has exactly two rows
-## (audit RP-04, decision C) -- this wrapper goes away at the next seed
-## boundary together with the intrinsic's charset argument.
-##
-## `b` decoded with the named charset. Panics when no such charset exists.
-pub fn decode(b: Bytes, charset: String) -> String =
-  bytes_decode(b, charset).expect("decode: unsupported charset")
-
 ## Number of bytes in `b`.
 pub fn len(b: Bytes) -> Int = bytes_len(b)
 
@@ -122,3 +113,209 @@ fn matches_at(b: Bytes, needle: Bytes, nlen: Int, i: Int, k: Int) -> Bool =
   } else {
     false
   }
+
+# ---- text encodings ----
+#
+# Hex and Base64 are byte arithmetic and a lookup table, which makes them the
+# kind of thing that has no business being a host call -- and yet the same
+# "four bits to a hex digit" was written eight times across this tree (two of
+# them disagreeing about case), and Base64 had no pure spelling at all, so
+# crypto and WebDAV each reached for `use java java.util.Base64` and stained
+# an otherwise pure call chain with `!io` all the way up
+# (audit RD-03/RD-10). Written here once, both backends get them for free.
+#
+# The alphabets are arithmetic rather than a string to index into: indexing a
+# constant string costs a code-point walk per digit, and the ranges are
+# contiguous in ASCII anyway.
+
+fn hex_char(v: Int) -> Int = if v < 10 { '0' + v } else { 'a' + (v - 10) }
+
+fn hex_val(c: Int) -> Int =
+  if c >= '0' && c <= '9' {
+    c - '0'
+  } else if c >= 'a' && c <= 'f' {
+    c - 'a' + 10
+  } else if c >= 'A' && c <= 'F' {
+    c - 'A' + 10
+  } else {
+    -1
+  }
+
+## `b` as hexadecimal: two digits per byte, most significant first, nothing
+## between them. Lower case, which is the canonical spelling this library
+## produces -- `from_hex` reads either case, `to_hex` writes one.
+pub fn to_hex(b: Bytes) -> String = {
+  var out: List[Int] = []
+  var i = 0
+  let n = bytes_len(b)
+  while i < n {
+    let v = bytes_at(b, i)
+    out = out ++ [hex_char(v / 16), hex_char(v % 16)]
+    i = i + 1
+  }
+  from_code_points(out)
+}
+
+## `s` read as hexadecimal, or `None` when it is not an even-length run of hex
+## digits. Either case is accepted; nothing else is, not even whitespace.
+##
+## Inquiry (spec §4.8, criterion 2): text arriving from a file or a header is
+## checked, not asserted, so a malformed input is a branch and not a panic.
+pub fn from_hex(s: String) -> Option[Bytes] = {
+  var out = buf()
+  var hi = -1
+  for c in code_points(s) {
+    let v = hex_val(c)
+    if v < 0 {
+      return None
+    }
+    if hi < 0 {
+      hi = v
+    } else {
+      out = put(out, hi * 16 + v)
+      hi = -1
+    }
+  }
+  if hi >= 0 {
+    None
+  } else {
+    Some(freeze(out))
+  }
+}
+
+# Base64 has two alphabets that differ only in the last two symbols, and two
+# padding conventions. Rather than four encoders they are two parameters:
+# `url` picks `-_` over `+/` (RFC 4648 §5) and `pad` decides whether the
+# output is rounded up to a multiple of four with `=`.
+
+fn b64_char(v: Int, url: Bool) -> Int =
+  if v < 26 {
+    'A' + v
+  } else if v < 52 {
+    'a' + (v - 26)
+  } else if v < 62 {
+    '0' + (v - 52)
+  } else if v == 62 {
+    if url { '-' } else { '+' }
+  } else {
+    if url { '_' } else { '/' }
+  }
+
+fn b64_val(c: Int, url: Bool) -> Int =
+  if c >= 'A' && c <= 'Z' {
+    c - 'A'
+  } else if c >= 'a' && c <= 'z' {
+    c - 'a' + 26
+  } else if c >= '0' && c <= '9' {
+    c - '0' + 52
+  } else if c == (if url { '-' } else { '+' }) {
+    62
+  } else if c == (if url { '_' } else { '/' }) {
+    63
+  } else {
+    -1
+  }
+
+fn b64_encode(b: Bytes, url: Bool, pad: Bool) -> String = {
+  var out: List[Int] = []
+  let n = bytes_len(b)
+  var i = 0
+  while i + 3 <= n {
+    let x = bytes_at(b, i) * 65536 + bytes_at(b, i + 1) * 256 + bytes_at(b, i + 2)
+    out = out ++ [
+      b64_char(x / 262144, url), b64_char((x / 4096) % 64, url),
+      b64_char((x / 64) % 64, url), b64_char(x % 64, url)
+    ]
+    i = i + 3
+  }
+  let rest = n - i
+  if rest == 1 {
+    let x = bytes_at(b, i) * 16
+    out = out ++ [b64_char(x / 64, url), b64_char(x % 64, url)]
+    if pad {
+      out = out ++ ['=', '=']
+    }
+  } else if rest == 2 {
+    let x = bytes_at(b, i) * 1024 + bytes_at(b, i + 1) * 4
+    out = out ++ [b64_char(x / 4096, url), b64_char((x / 64) % 64, url), b64_char(x % 64, url)]
+    if pad {
+      out = out ++ ['=']
+    }
+  }
+  from_code_points(out)
+}
+
+# One decoder for both alphabets. It accepts a trailing `=` run or no padding
+# at all -- the padded and unpadded spellings of the same bytes have to read
+# back the same, since the url-safe encoder here omits padding -- but it
+# rejects everything else: a wrong number of `=`, a symbol after them, a
+# leftover group of one character (which encodes no byte), and a final group
+# whose unused low bits are not zero. That last check is what makes decoding
+# injective: without it `AB==` and `AC==` would both be one byte.
+fn b64_decode(s: String, url: Bool) -> Option[Bytes] = {
+  var out = buf()
+  var acc = 0
+  var have = 0
+  var pad = 0
+  for c in code_points(s) {
+    if c == '=' {
+      pad = pad + 1
+    } else if pad > 0 {
+      return None
+    } else {
+      let v = b64_val(c, url)
+      if v < 0 {
+        return None
+      }
+      acc = acc * 64 + v
+      have = have + 1
+      if have == 4 {
+        out = put(out, acc / 65536)
+        out = put(out, (acc / 256) % 256)
+        out = put(out, acc % 256)
+        acc = 0
+        have = 0
+      }
+    }
+  }
+  if have == 2 {
+    if acc % 16 != 0 || (pad != 0 && pad != 2) {
+      return None
+    }
+    out = put(out, acc / 16)
+  } else if have == 3 {
+    if acc % 4 != 0 || (pad != 0 && pad != 1) {
+      return None
+    }
+    out = put(out, acc / 1024)
+    out = put(out, (acc / 4) % 256)
+  } else if have != 0 || pad != 0 {
+    # `have == 1` encodes no byte at all, and padding with nothing to pad is
+    # not a spelling of anything either
+    return None
+  }
+  Some(freeze(out))
+}
+
+## `b` as Base64 with the standard alphabet (`A-Za-z0-9+/`, RFC 4648 §4) and
+## `=` padding to a multiple of four characters.
+pub fn to_base64(b: Bytes) -> String = b64_encode(b, false, true)
+
+## `s` read as standard-alphabet Base64, or `None` when it is not.
+##
+## Inquiry (spec §4.8, criterion 2). Padding is optional on the way in even
+## though `to_base64` always writes it; the url-safe alphabet is not accepted
+## here -- `from_base64_url` is the function that reads it.
+pub fn from_base64(s: String) -> Option[Bytes] = b64_decode(s, false)
+
+## `b` as Base64 with the url- and filename-safe alphabet (`A-Za-z0-9-_`,
+## RFC 4648 §5) and **no** padding, which is the shape a JWT segment, a
+## signature parameter and a path component all want -- `=` has to be
+## percent-encoded in a query and means nothing in a file name.
+pub fn to_base64_url(b: Bytes) -> String = b64_encode(b, true, false)
+
+## `s` read as url-safe Base64, with or without padding, or `None` when it is
+## not. The standard alphabet's `+` and `/` are rejected here, as `-` and `_`
+## are by `from_base64`: which alphabet a string is in is the caller's claim,
+## and a decoder that guesses turns a mismatch into wrong bytes.
+pub fn from_base64_url(s: String) -> Option[Bytes] = b64_decode(s, true)

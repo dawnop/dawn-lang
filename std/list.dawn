@@ -84,6 +84,75 @@ fn find_go[T](xs: List[T], pred: fn(T) -> Bool !e, c: Cur) -> Option[T] !e =
 pub fn find[T](xs: List[T], pred: fn(T) -> Bool !e) -> Option[T] !e =
   find_go(xs, pred, iter_start(xs))
 
+# ---- membership and quantifiers ----
+#
+# Each of these stops at the first element that settles the question. `fold`
+# cannot: it is defined to visit every element, so an `any` written as a fold
+# over `||` is a full walk wearing a short-circuit's name -- six of those were
+# in the tree, next to 31 `||` chains asking whether a constant was in a set of
+# three and 32 hand-written `var found = false` loops.
+#
+# They walk with the same four-function cursor everything else here does, so
+# "stops early" survives the representation change D3 makes.
+
+fn any_go[T](xs: List[T], f: fn(T) -> Bool !e, c: Cur) -> Bool !e =
+  if iter_done(xs, c) { false }
+  else if f(iter_get(xs, c)) { true }
+  else { any_go(xs, f, iter_next(xs, c)) }
+
+## Whether `f` holds for at least one element. `false` for the empty list.
+## Short-circuits: `f` runs on the elements up to the first that satisfies it
+## and no further, which is observable when `f` has an effect.
+pub fn any[T](xs: List[T], f: fn(T) -> Bool !e) -> Bool !e = any_go(xs, f, iter_start(xs))
+
+fn all_go[T](xs: List[T], f: fn(T) -> Bool !e, c: Cur) -> Bool !e =
+  if iter_done(xs, c) { true }
+  else if f(iter_get(xs, c)) { all_go(xs, f, iter_next(xs, c)) }
+  else { false }
+
+## Whether `f` holds for every element. `true` for the empty list.
+## Short-circuits at the first element that fails, as `any` does.
+pub fn all[T](xs: List[T], f: fn(T) -> Bool !e) -> Bool !e = all_go(xs, f, iter_start(xs))
+
+fn index_go[T: Eq](xs: List[T], x: T, c: Cur, i: Int) -> Option[Int] =
+  if iter_done(xs, c) { None }
+  else if eq(iter_get(xs, c), x) { Some(i) }
+  else { index_go(xs, x, iter_next(xs, c), i + 1) }
+
+## The index of the first element equal to `x`, or `None`.
+##
+## Inquiry (spec §4.8, criterion 2): a miss is a branch the caller takes. The
+## currency is `str.index_of`'s -- `Option[Int]`, never a `-1`, which is the
+## one sentinel this library does not hand out.
+pub fn index_of[T: Eq](xs: List[T], x: T) -> Option[Int] =
+  index_go(xs, x, iter_start(xs), 0)
+
+## Whether some element equals `x`. Stops at the first match; the same answer
+## as `index_of(xs, x)` being `Some`, and the same walk.
+pub fn contains[T: Eq](xs: List[T], x: T) -> Bool =
+  match index_of(xs, x) {
+    Some(_) -> true
+    None -> false
+  }
+
+## The elements with later duplicates dropped: every value survives once, at
+## the position of its first occurrence.
+##
+## `Eq + Hash` and not `Eq` alone, which is the one place this family asks for
+## more than the audit did. An `Eq`-only dedupe rescans the output for each
+## element and is quadratic, and what callers deduplicate here are lists of
+## module paths, file names and diagnostics -- the sizes where that starts to
+## cost. A `Set` is `Eq + Hash` by construction, and it already answers the
+## ordering clause: a set collapses duplicates keeping the first occurrence's
+## position and gives them back in that order, so this is one line rather than
+## a second implementation of the same rule.
+##
+## `set_from`/`set_to_list` rather than `std/set`'s wrappers around them: std
+## modules are checked in `std/modules.txt` order and `list` precedes `set`, so
+## the `use` edge would have to reorder the bundle. Those two are the same
+## primitives `std/set` forwards to, not a second route to the structure.
+pub fn unique[T: Eq + Hash](xs: List[T]) -> List[T] = set_to_list(set_from(xs))
+
 # ---- by position ----
 #
 # `take`/`drop`/`slice`/`reverse` are positional by nature: one asks for a

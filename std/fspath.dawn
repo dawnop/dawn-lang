@@ -47,8 +47,20 @@ pub fn normalize(p: String) -> String = {
       out = out ++ [seg]
     }
   }
-  let body = join(out, "/")
+  let body = segments(out)
   if abs { "/" ++ body } else { body }
+}
+
+# The prelude's `join` is not reachable from this module any more: `pub fn
+# join` below shadows it, the way a top-level declaration shadows any builtin
+# (spec §10.6). Three lines here, rather than a worse name for the path join
+# that 41 call sites were waiting for.
+fn segments(xs: List[String]) -> String = {
+  var out = ""
+  for seg in xs {
+    out = if out == "" { seg } else { out ++ "/" ++ seg }
+  }
+  out
 }
 
 ## `p` resolved against `base` when it is relative, then normalized. `base` is
@@ -67,4 +79,75 @@ pub fn parent(p: String) -> Option[String] = {
     Some(i) -> Some(str.substring(n, 0, i))
     None -> None
   }
+}
+
+# ---- the four the compiler happened not to need ----
+#
+# This module started as exactly what `analyze.canon` and `lsp.canon` spelled
+# in Java and nothing else, which left 41 call sites writing `dir ++ "/" ++ n`
+# by hand, three hand-written basenames, and two places subtracting a literal
+# 5 because that is `str.len(".dawn")` (audit RD-09).
+
+## `p` resolved against directory `base`, normalized.
+##
+## An absolute `p` ignores `base` entirely -- the same rule `absolute` and the
+## shell's `cd` follow -- and an empty `base` or `p` leaves the other one
+## normalized rather than growing a stray separator. This is the function the
+## 41 `++ "/" ++` sites wanted: `io.list_dir` answers with bare names, and a
+## bare name joined onto a directory is the shape every one of them had.
+pub fn join(base: String, p: String) -> String =
+  if base == "" || is_absolute(p) {
+    normalize(p)
+  } else if p == "" {
+    normalize(base)
+  } else {
+    normalize(base ++ "/" ++ p)
+  }
+
+## The last segment of `p`: its name, with every directory above it removed.
+## `p` is normalized first, so `a/b/` and `a/b/.` both name `b`.
+##
+## `""` for the root and for the empty path, which are the two paths that have
+## no name. Not `Option`: every call site here holds a path it just built or
+## just listed, and a branch none of them can take is a branch all of them
+## would have to write.
+pub fn basename(p: String) -> String = {
+  let n = normalize(p)
+  match str.last_index_of(n, "/") {
+    Some(i) -> str.drop(n, i + 1)
+    None -> n
+  }
+}
+
+## The extension of `basename(p)`, written without its dot, or `None`.
+##
+## A dot only starts an extension when there is a name before it and something
+## after it: `.gitignore` is a dotfile and not an extension, and `x.` has none
+## either. Inquiry (spec §4.8, criterion 2) -- "this file has no extension" is
+## a case every caller distinguishes, which is precisely what the two `- 5`
+## sites could not.
+pub fn extension(p: String) -> Option[String] = {
+  let name = basename(p)
+  match str.last_index_of(name, ".") {
+    Some(i) ->
+      if i <= 0 || i == str.len(name) - 1 {
+        None
+      } else {
+        Some(str.drop(name, i + 1))
+      }
+    None -> None
+  }
+}
+
+## `p` (normalized) with its extension replaced by `ext`, itself written
+## without a dot. A path with no extension gains one, and an empty `ext`
+## removes it -- so `with_extension(p, "")` is how you drop a suffix without
+## counting its characters.
+pub fn with_extension(p: String, ext: String) -> String = {
+  let n = normalize(p)
+  let stem = match extension(n) {
+    Some(e) -> str.take(n, str.len(n) - str.len(e) - 1)
+    None -> n
+  }
+  if ext == "" { stem } else { stem ++ "." ++ ext }
 }

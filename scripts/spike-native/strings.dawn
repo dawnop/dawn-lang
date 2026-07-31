@@ -20,8 +20,15 @@
 # the two backends have to agree on, and std turns each into something else.
 use std/io
 use std/bytes
+use std/cursor
 use std/raw
 use std/str
+
+fn opt_str(o: Option[String]) -> String =
+  match o {
+    Some(s) -> "[" ++ s ++ "]"
+    None -> "none"
+  }
 
 fn opt_int(o: Option[Int]) -> String =
   match o {
@@ -102,6 +109,56 @@ pub fn main() -> Unit !io = {
   io.println("sub from > to      = [" ++ str.substring(mixed, 3, 1) ++ "]")
   io.println("sub negative from  = " ++ str.substring(mixed, -5, 2))
   io.println("sub negative both  = [" ++ str.substring(mixed, -5, -1) ++ "]")
+
+  io.println("-- affixes (spec 4.8, criterion 2) --")
+  # Test and peel in one call: a miss is None, not a panic and not a -1.
+  io.println("strip_prefix       = " ++ opt_str(str.strip_prefix(mixed, "aé")))
+  io.println("strip_prefix miss  = " ++ opt_str(str.strip_prefix(mixed, "é")))
+  io.println("strip_prefix all   = " ++ opt_str(str.strip_prefix(mixed, mixed)))
+  io.println("strip_prefix ''    = " ++ opt_str(str.strip_prefix("ab", "")))
+  io.println("strip_suffix       = " ++ opt_str(str.strip_suffix("main.dawn", ".dawn")))
+  io.println("strip_suffix miss  = " ++ opt_str(str.strip_suffix("main.dawn", ".c")))
+  io.println("strip_suffix wide  = " ++ opt_str(str.strip_suffix(mixed, "中𝄞")))
+  io.println("strip_suffix ''    = " ++ opt_str(str.strip_suffix("ab", "")))
+
+  io.println("-- take/drop clamp, at asserts --")
+  # take/drop are substring's two one-ended spellings, so they clamp (criterion
+  # 3); `at` names a position the caller says exists, so it panics (criterion
+  # 1) -- catch_kinds.dawn is where that panic is exercised.
+  io.println("take               = [" ++ str.take(mixed, 2) ++ "]")
+  io.println("take past end      = [" ++ str.take(mixed, 99) ++ "]")
+  io.println("take negative      = [" ++ str.take(mixed, -1) ++ "]")
+  io.println("drop               = [" ++ str.drop(mixed, 2) ++ "]")
+  io.println("drop past end      = [" ++ str.drop(mixed, 99) ++ "]")
+  io.println("drop negative      = [" ++ str.drop(mixed, -1) ++ "]")
+  io.println("at 0               = " ++ to_string(str.at(mixed, 0)))
+  io.println("at astral          = " ++ to_string(str.at(mixed, 3)))
+
+  io.println("-- one-sided trims and pad_end --")
+  io.println("trim_start         = [" ++ str.trim_start("  hi  ") ++ "]")
+  io.println("trim_end           = [" ++ str.trim_end("  hi  ") ++ "]")
+  io.println("trim_start all     = [" ++ str.trim_start("   ") ++ "]")
+  io.println("trim_end all       = [" ++ str.trim_end("   ") ++ "]")
+  io.println("pad_start          = [" ++ str.pad_start("7", 4, "0") ++ "]")
+  io.println("pad_end            = [" ++ str.pad_end("7", 4, "0") ++ "]")
+  io.println("pad_end cycles     = [" ++ str.pad_end("7", 6, "ab") ++ "]")
+  io.println("pad_end wide       = [" ++ str.pad_end("x", 3, "中") ++ "]")
+  io.println("pad_end no room    = [" ++ str.pad_end("hello", 3, "0") ++ "]")
+  io.println("pad_end no filler  = [" ++ str.pad_end("hi", 9, "") ++ "]")
+
+  io.println("-- the Int <-> Cursor bridge --")
+  # cursor.at clamps (criterion 3) and cursor.offset counts; the two are
+  # inverses on every in-range index, which is the property that lets a
+  # scanner holding an Int stop re-deriving its position per character.
+  io.println("offset of at 2     = " ++ to_string(cursor.offset(mixed, cursor.at(mixed, 2))))
+  io.println("slice at 1..3      = [" ++
+      cursor.slice(mixed, cursor.at(mixed, 1), cursor.at(mixed, 3)) ++ "]")
+  io.println("at past end        = " ++ to_string(cursor.offset(mixed, cursor.at(mixed, 99))))
+  io.println("at negative        = " ++ to_string(cursor.offset(mixed, cursor.at(mixed, -3))))
+  io.println("offset of end      = " ++ to_string(cursor.offset(mixed, cursor.end(mixed))))
+  io.println("offset of start    = " ++ to_string(cursor.offset(mixed, cursor.start(mixed))))
+  io.println("offset empty       = " ++ to_string(cursor.offset("", cursor.end(""))))
+  io.println("char at astral     = " ++ to_string(cursor.char(mixed, cursor.at(mixed, 3))))
 
   io.println("-- bytes --")
   let b = bytes.utf8(mixed)

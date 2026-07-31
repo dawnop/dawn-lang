@@ -1,0 +1,65 @@
+# std/list's membership and quantifier layer, on both backends.
+#
+# The property worth a differential is not the answer -- `contains` is three
+# lines -- but the *number of calls*: `any`/`all` are specified to stop at the
+# first element that settles the question, and a fold-based imposter gives the
+# same Bool while visiting everything. A lambda cannot mutate a counter here
+# (capture is by value), so the witness is the trace it prints: the effect
+# order is the short circuit, made visible.
+#
+# `unique` is here for the other reason -- it is the one function in the batch
+# that goes through the hash set, so it is the one whose answer depends on a
+# representation the two backends implement separately.
+use std/io
+use std/list
+
+fn opt_int(o: Option[Int]) -> String =
+  match o {
+    Some(i) -> to_string(i)
+    None -> "none"
+  }
+
+## The predicate, announcing every element it is handed.
+fn seen(x: Int, want: Int) -> Bool !io = {
+  io.println("    saw " ++ to_string(x))
+  x == want
+}
+
+pub fn main() -> Unit !io = {
+  let xs = [3, 1, 4, 1, 5, 9, 2, 6, 5]
+  let empty: List[Int] = []
+
+  io.println("-- contains / index_of (spec 4.8, criterion 2) --")
+  io.println("contains 4      = " ++ to_string(list.contains(xs, 4)))
+  io.println("contains 7      = " ++ to_string(list.contains(xs, 7)))
+  io.println("contains empty  = " ++ to_string(list.contains(empty, 1)))
+  io.println("index_of first  = " ++ opt_int(list.index_of(xs, 1)))
+  io.println("index_of last   = " ++ opt_int(list.index_of(xs, 6)))
+  io.println("index_of miss   = " ++ opt_int(list.index_of(xs, 7)))
+  io.println("index_of empty  = " ++ opt_int(list.index_of(empty, 1)))
+  io.println("contains string = " ++ to_string(list.contains(["a", "b"], "b")))
+  io.println("contains list   = " ++ to_string(list.contains([[1], [2, 3]], [2, 3])))
+
+  io.println("-- any / all --")
+  io.println("any > 8         = " ++ to_string(list.any(xs, fn(x) => x > 8)))
+  io.println("any > 90        = " ++ to_string(list.any(xs, fn(x) => x > 90)))
+  io.println("any of empty    = " ++ to_string(list.any(empty, fn(x) => x > 0)))
+  io.println("all > 0         = " ++ to_string(list.all(xs, fn(x) => x > 0)))
+  io.println("all > 2         = " ++ to_string(list.all(xs, fn(x) => x > 2)))
+  io.println("all of empty    = " ++ to_string(list.all(empty, fn(x) => x > 0)))
+
+  io.println("-- and they stop --")
+  io.println("any, hit at 4:")
+  io.println("  = " ++ to_string(list.any(xs, fn(x) => seen(x, 4))))
+  io.println("all, fails at 1:")
+  io.println("  = " ++ to_string(list.all(xs, fn(x) => not seen(x, 1))))
+  io.println("any, never hits:")
+  io.println("  = " ++ to_string(list.any([7, 8], fn(x) => seen(x, 0))))
+
+  io.println("-- unique keeps the first occurrence --")
+  io.println("ints            = " ++ to_string(list.unique(xs)))
+  io.println("empty           = " ++ to_string(list.unique(empty)))
+  io.println("strings         = " ++ to_string(list.unique(["b", "a", "b", "c", "a"])))
+  io.println("all same        = " ++ to_string(list.unique([2, 2, 2])))
+  io.println("nested          = " ++ to_string(list.unique([[1], [2], [1]])))
+}

@@ -670,11 +670,15 @@ let c = rows[1][0]   # 可链式、可与 ?/./() 组合
 §11 的库函数）恰属其一，按参数的**含义**归类而不是逐函数各定各的：
 
 1. **断言**——参数是一个**位置**，调用方声称它合法，越界是 bug：`xs[i]`、`m[k]`、
-   `bytes.at`、`pvec.index`/`nth`、`cursor.slice` 的非法区间 → **panic**（含负下标）。
+   `bytes.at`、`str.at`、`pvec.index`/`nth`、`cursor.slice` 的非法区间 →
+   **panic**（含负下标）。
 2. **问询**——越界/缺键是调用方要区分的正常分支：`get` 族（`list.get`、`map.get`、
-   `set.has` 的缺席、`index_of` 族的未命中）→ **`Option`**（或 `Bool`）。
+   `set.has` 的缺席、`index_of` 族（`str`/`bytes`/`list`）的未命中、`str.strip_prefix`/
+   `strip_suffix` 的不匹配、`bytes.from_hex`/`from_base64` 与 `fspath.extension` 的
+   格式不合）→ **`Option`**（或 `Bool`）。
 3. **钳位**——参数是一个**区间**，说的是「要这一段里有的部分」，不断言端点存在：
-   `list.take`/`drop`/`slice`、`bytes.slice`、`str.substring` → 两端各自夹进
+   `list.take`/`drop`/`slice`、`bytes.slice`、`str.substring`/`take`/`drop`、
+   `cursor.next`/`prev`/`back`/`at` → 两端各自夹进
    `[0, len]`（负数取 `0`、超长取 `len`），`from > to` 得空序列，**永不 panic**。
 
 **唯一具名例外**：`cursor.char(s, c)` 到尾返回哨兵 `-1` 而非 `Option`（§11「std/cursor」）。
@@ -1347,6 +1351,14 @@ std → 内建，std 模块自己的 `pub fn len` 正是靠这一条合法。
   - `sort_by(xs, cmp: fn(T, T) -> Int) -> List[T]` — 自定义比较函数
   - `max/min[T: Ord](xs) -> Option[T]` — 极值；空列表 `None`
   - `max_by/min_by[T, K: Ord](xs, key: fn(T) -> K) -> Option[T]` — 按键取极值
+
+  成员与量词（都在 **`std/list`**，都**短路**——用 `fold` 假冒的 `any`/`all` 是一趟全走）：
+  - `list.any(xs, f) / list.all(xs, f) -> Bool` — 存在 / 全称；空列表分别为 `false` / `true`
+  - `list.contains[T: Eq](xs, x) -> Bool`、`list.index_of[T: Eq](xs, x) -> Option[Int]`
+    （判据 2，货币同 `str.index_of`，不发 `-1`）
+  - `list.unique[T: Eq + Hash](xs) -> List[T]` — 去重且保序（每个值留在首次出现的位置）。
+    这一条比其余多要一个 `Hash`：只有 `Eq` 的去重是二次的，而 `Set` 的插入序恰好就是
+    这里要的顺序
 - **字符串**：prelude 里有 `join parse_int parse_float to_string`（字符串转数字是
   `parse_int(s) -> Option[Int]`——没有重载，`to_int`/`to_float` 只做 Int↔Float 转换）。
 
@@ -1372,10 +1384,17 @@ std → 内建，std 模块自己的 `pub fn len` 正是靠这一条合法。
   三个，见 §4.3 的往返闭合）、全角与阿拉伯-印度等非 ASCII 数字（宿主的
   `Character.digit` 收它们，Dawn 的数字集是 ASCII 封闭的）。
 
-  其余在 **`std/str`**：`str.len str.is_empty str.trim str.to_lower str.to_upper
-  str.contains str.starts_with str.ends_with str.index_of str.last_index_of
-  str.repeat str.substring str.pad_start str.reverse str.chars str.split
-  str.from_char`。
+  其余在 **`std/str`**：`str.len str.is_empty str.trim str.trim_start str.trim_end
+  str.to_lower str.to_upper str.contains str.starts_with str.ends_with
+  str.strip_prefix str.strip_suffix str.index_of str.last_index_of
+  str.repeat str.substring str.take str.drop str.at str.pad_start str.pad_end
+  str.reverse str.chars str.split str.replace str.from_char`。
+
+  `strip_prefix`/`strip_suffix` 回 `Option[String]`：判定与剥离一次完成，故调用方
+  不必自己算偏移（判据 2）。`take`/`drop` 是 `substring` 的两个单端写法、同样钳位
+  （判据 3），`truncate` 就是 `take`，不另设一个名字。`at(s, i)` 回**码点 `Int`**、
+  越界 panic（判据 1）——字符即码点是本语言的既定货币（`code_points`/`from_char`/
+  `cursor.char` 都是它），回 `List[String]` 的是 `chars`。
 
   `to_lower`/`to_upper` 是 **Unicode 简单(1:1)大小写映射**：一个码点进、一个码点出，
   无 locale、无上下文，故**码点数不变**。这排除了完整映射的三类特例——长度会变的
@@ -1391,11 +1410,23 @@ std → 内建，std 模块自己的 `pub fn len` 正是靠这一条合法。
 - **`std/bytes`**（一等 `Bytes`，§9.5.1）：`bytes.utf8(s) -> Bytes`（字符串的 UTF-8 字节）、
   `bytes.decode_utf8(b) -> String` 与 `bytes.decode_latin1(b) -> String`（解码；语言承诺的
   字符集就这两个，**函数名即定义域**，没有字符集注册表——审计 RP-04 裁决 C。
-  旧 `bytes.decode(b, charset)` 已废弃，仅余这两支的等价拼写，未知 charset panic；
-  与其 charset 参数一并在下个种子边界删除）、
+  带 charset 参数的旧 `bytes.decode` 已删除；`bytes_decode` 原语的该参数按种子纪律
+  另行收窄）、
   `bytes.len(b) -> Int`、`bytes.at(b, i) -> Int`（0..255，越界 panic）、
   `bytes.slice(b, start, end) -> Bytes`（`[start,end)`，下标 clamp）、
   `bytes.index_of(b, needle, from) -> Option[Int]`（字节下标首次出现）。
+  构造侧是 `bytes.buf()`/`put`/`put_bytes`/`get`/`size`/`freeze`（§9.5.1 的 `Buf`）。
+
+  **文本编码**（纯 Dawn 字节算术，无 `use java`，故两个后端同一份定义）：
+  `bytes.to_hex(b) -> String`（每字节两位、**小写**为规范拼写）与
+  `bytes.from_hex(s) -> Option[Bytes]`（大小写皆收，其余一概不收）；
+  `bytes.to_base64(b) -> String`（RFC 4648 §4 标准字母表，`=` 补齐）与
+  `bytes.to_base64_url(b) -> String`（§5 的 url/文件名安全字母表，**不补 `=`**），
+  两个解码器 `bytes.from_base64` / `bytes.from_base64_url -> Option[Bytes]`
+  各只认自己的字母表（猜字母表会把拼错的输入变成错的字节），padding 可有可无，
+  但末组的空余低位必须为零——否则同一串字节会有多个拼写。
+  四个解码器都属判据 2（§4.8）：外来文本是要校验的，不是要断言的。
+
   prelude 里另有 `cast(x) -> Result[T, ForeignError]`（把擦除泛型的不透明 `Object` 认领为
   具体引用类型 T，T 取自期望类型，§9.5）。
   另有操作符 `Bytes ++ Bytes` 与按内容的 `==`/`!=`。二进制请求体（multipart 上传、WebDAV PUT）、
@@ -1419,6 +1450,10 @@ std → 内建，std 模块自己的 `pub fn len` 正是靠这一条合法。
   - `cursor.skip(s, c, sub) -> Cursor` — 越过一处已知出现的 `sub`（它恰是 `sub` 宽）——
     **唯一被认可的「游标前进已知宽度」**，替代 `i + len` 式算术
   - `cursor.find(s, sub, from) -> Option[Cursor]` — 游标进、游标出，故沿串反复查找整体仍线性
+  - `cursor.at(s, i) -> Cursor` / `cursor.offset(s, c) -> Int` — 两套位置货币之间的桥：
+    前者从串首走 `i` 个字符（钳位，判据 3：负数得串首、超长得串尾），后者一趟数出
+    `c` 之前有几个字符。各一趟 O(n)，用在**边界**上（外面来的 `Int` 下标进来、
+    位置要报给外面时）；放进循环就变回它要消灭的 O(n²)
 
   游标是**位置**而非计数：从这些函数取得、传回、比较（`==` 与 `< <= > >=`——**同一
   字符串内**位置的先后是位置类型的合法操作）、存进容器/record 供回溯（它是普通值，

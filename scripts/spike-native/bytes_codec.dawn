@@ -1,0 +1,96 @@
+# Hex and Base64: the two text encodings std/bytes owns, checked against
+# written-down vectors rather than against whichever backend answered first.
+#
+# They are here for two reasons. The first is that they are new, pure Dawn
+# and shared: the JVM and the C runtime run the same source, so a divergence
+# would be a codegen defect in the byte arithmetic (`/ 262144`, `% 64`) and
+# nothing else. The second is that the arithmetic is where the bugs live --
+# every one of the three partial-group cases has its own shift, and the
+# canonical-trailing-bits check is the difference between a decoder and a
+# decoder that accepts two spellings of one byte string.
+#
+# The encoder vectors are RFC 4648 section 10's, which is why "" through
+# "foobar" are all here: they walk the remainder through 0, 1 and 2 twice.
+use std/io
+use std/bytes
+
+fn dec(o: Option[Bytes]) -> String =
+  match o {
+    Some(b) -> "[" ++ bytes.to_hex(b) ++ "]"
+    None -> "none"
+  }
+
+fn utf8(s: String) -> Bytes = bytes.utf8(s)
+
+## Every byte value once, in order: the only input that exercises the whole
+## alphabet in both directions and the sign of a byte over 127 in both
+## runtimes (`byte` is signed on the JVM, `unsigned char` in C).
+fn all_bytes() -> Bytes = {
+  var b = bytes.buf()
+  var i = 0
+  while i < 256 {
+    b = bytes.put(b, i)
+    i = i + 1
+  }
+  bytes.freeze(b)
+}
+
+pub fn main() -> Unit !io = {
+  io.println("-- hex --")
+  io.println("empty        = [" ++ bytes.to_hex(utf8("")) ++ "]")
+  io.println("foobar       = " ++ bytes.to_hex(utf8("foobar")))
+  io.println("astral       = " ++ bytes.to_hex(utf8("é𝄞")))
+  io.println("high bytes   = " ++ bytes.to_hex(bytes.slice(all_bytes(), 250, 256)))
+
+  io.println("-- from_hex (spec 4.8, criterion 2) --")
+  io.println("lower        = " ++ dec(bytes.from_hex("deadbeef")))
+  io.println("upper        = " ++ dec(bytes.from_hex("DEADBEEF")))
+  io.println("mixed case   = " ++ dec(bytes.from_hex("DeAdBeEf")))
+  io.println("empty        = " ++ dec(bytes.from_hex("")))
+  io.println("odd length   = " ++ dec(bytes.from_hex("abc")))
+  io.println("non-digit    = " ++ dec(bytes.from_hex("zz")))
+  io.println("spaced       = " ++ dec(bytes.from_hex("de ad")))
+  io.println("round trip   = " ++
+      to_string(bytes.from_hex(bytes.to_hex(all_bytes())) == Some(all_bytes())))
+
+  io.println("-- base64, RFC 4648 section 10 --")
+  io.println("''           = [" ++ bytes.to_base64(utf8("")) ++ "]")
+  io.println("f            = " ++ bytes.to_base64(utf8("f")))
+  io.println("fo           = " ++ bytes.to_base64(utf8("fo")))
+  io.println("foo          = " ++ bytes.to_base64(utf8("foo")))
+  io.println("foob         = " ++ bytes.to_base64(utf8("foob")))
+  io.println("fooba        = " ++ bytes.to_base64(utf8("fooba")))
+  io.println("foobar       = " ++ bytes.to_base64(utf8("foobar")))
+
+  io.println("-- base64 url-safe, unpadded --")
+  io.println("f            = " ++ bytes.to_base64_url(utf8("f")))
+  io.println("fo           = " ++ bytes.to_base64_url(utf8("fo")))
+  io.println("foo          = " ++ bytes.to_base64_url(utf8("foo")))
+  # 0xFB 0xFF is 62 and 63 in the last two positions: the two symbols the two
+  # alphabets disagree about, and the whole reason there are two.
+  io.println("62 and 63    = " ++ bytes.to_base64(bytes.slice(all_bytes(), 251, 253)))
+  io.println("62 and 63 url= " ++ bytes.to_base64_url(bytes.slice(all_bytes(), 251, 253)))
+
+  io.println("-- from_base64 (spec 4.8, criterion 2) --")
+  io.println("padded       = " ++ dec(bytes.from_base64("Zg==")))
+  io.println("unpadded     = " ++ dec(bytes.from_base64("Zg")))
+  io.println("one pad      = " ++ dec(bytes.from_base64("Zm8=")))
+  io.println("no pad       = " ++ dec(bytes.from_base64("Zm9v")))
+  io.println("empty        = " ++ dec(bytes.from_base64("")))
+  io.println("lone char    = " ++ dec(bytes.from_base64("Z")))
+  io.println("wrong pads   = " ++ dec(bytes.from_base64("Zg=")))
+  io.println("pad only     = " ++ dec(bytes.from_base64("=")))
+  io.println("after pad    = " ++ dec(bytes.from_base64("Zg==x")))
+  io.println("stray bits   = " ++ dec(bytes.from_base64("Zh==")))
+  io.println("other set    = " ++ dec(bytes.from_base64("-_==")))
+  io.println("space        = " ++ dec(bytes.from_base64("Zm 9v")))
+
+  io.println("-- from_base64_url --")
+  io.println("unpadded     = " ++ dec(bytes.from_base64_url("_w")))
+  io.println("padded too   = " ++ dec(bytes.from_base64_url("_w==")))
+  io.println("other set    = " ++ dec(bytes.from_base64_url("/w==")))
+  io.println("round trip   = " ++
+      to_string(bytes.from_base64(bytes.to_base64(all_bytes())) == Some(all_bytes())))
+  io.println("round trip u = " ++
+      to_string(bytes.from_base64_url(bytes.to_base64_url(all_bytes())) == Some(all_bytes())))
+}
