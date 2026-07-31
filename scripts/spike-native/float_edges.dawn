@@ -1,0 +1,103 @@
+# The Float edges spec §4.3 and §11 pin now that rendering and parsing are
+# language-owned (audits RP-01/RP-05): shortest-round-trip dtoa out of
+# std/fmt, the parse EBNF, and the round-trip law between them.
+#
+# int_edges.dawn used to carry a header apologising that "printing a Float
+# would make this corpus fail for a reason it is not about" -- the C runtime
+# answered %.17g while the JVM answered Double.toString. That gap is closed:
+# both backends compile std/fmt.dtoa, so this corpus is the differential the
+# avoidance was waiting for.
+#
+# Operands come out of `var`s where a literal would do, so the backend rather
+# than the comptime fold answers; the two `const` lines are the opposite on
+# purpose -- the fold and the runtime call must print the same bytes inside
+# one binary (the defect RP-01 opened with: a native binary whose folded
+# `to_string(0.1)` and runtime `to_string(0.1)` disagreed).
+use std/io
+
+fn pf(s: String) -> String =
+  match parse_float(s) {
+    Some(v) -> "Some(" ++ to_string(v) ++ ")"
+    None -> "None"
+  }
+
+fn pi(s: String) -> String =
+  match parse_int(s) {
+    Some(v) -> "Some(" ++ to_string(v) ++ ")"
+    None -> "None"
+  }
+
+fn pr(s: String, radix: Int) -> String =
+  match parse_int_radix(s, radix) {
+    Some(v) -> "Some(" ++ to_string(v) ++ ")"
+    None -> "None"
+  }
+
+fn rt(v: Float) -> Bool = parse_float(to_string(v)) == Some(v)
+
+const FOLDED: String = comptime { to_string(0.1) }
+
+pub fn main() -> Unit !io = {
+  var zero = 0.0
+  var one = 1.0
+  var nan = zero / zero
+  var inf = one / zero
+  var neg_zero = -0.0
+
+  println("-- a fold and a runtime call answer alike in one binary --")
+  println(FOLDED)
+  var tenth = 0.1
+  println(to_string(tenth))
+
+  println("-- shortest round trip, plain form inside 10^-3 <= |v| < 10^7 --")
+  var a = 2.0
+  var b = 100.0
+  var c = 123.456
+  var d = 0.001
+  var e = 0.0015
+  var f = 9999999.0
+  var g = 1.0000000000000002
+  println("${a} ${b} ${c} ${d} ${e} ${f} ${g}")
+
+  println("-- scientific outside it, E, no exponent sign when positive --")
+  var h = 10000000.0
+  var i = 0.0009999999999999998
+  var j = 3.0e-7
+  var k = 1.0e300
+  var l = 1.0e-300
+  println("${h} ${i} ${j} ${k} ${l}")
+
+  println("-- the three spellings, signed zero, integer .0 --")
+  println("${nan} ${inf} ${zero - inf} ${zero} ${neg_zero}")
+
+  println("-- extremes: subnormals, the largest finite, 2^53 and its neighbor --")
+  var sub_min = 4.9e-324
+  var sub_max = 2.225073858507201e-308
+  var norm_min = 2.2250738585072014e-308
+  var max = 1.7976931348623157e308
+  var p53 = 9007199254740992.0
+  var p53n = 9007199254740993.0
+  println("${sub_min} ${sub_max} ${norm_min} ${max} ${p53} ${p53n}")
+
+  println("-- parse(to_string(x)) closes over every family --")
+  println("${rt(tenth)} ${rt(sub_min)} ${rt(max)} ${rt(neg_zero)} ${rt(j)} ${rt(f)}")
+
+  println("-- parse_float: the EBNF and the three spellings, nothing else --")
+  println(pf("1.5") ++ " " ++ pf("+1.5") ++ " " ++ pf("1.") ++ " " ++ pf(".5") ++
+    " " ++ pf("1.e3") ++ " " ++ pf("5e-1") ++ " " ++ pf(" 2.5 "))
+  println(pf("Infinity") ++ " " ++ pf("-Infinity") ++ " " ++ pf("NaN"))
+  println(pf("1.5f") ++ " " ++ pf("1.5d") ++ " " ++ pf("0x1p3") ++ " " ++ pf("inf") ++
+    " " ++ pf("+Infinity") ++ " " ++ pf("-NaN") ++ " " ++ pf("1_0") ++ " " ++ pf("."))
+  println(pf("1e") ++ " " ++ pf("1e+") ++ " " ++ pf("١٢٣") ++ " " ++ pf("１２３"))
+
+  println("-- parse_int: ASCII digits, sign, Dawn's own trim, range refusal --")
+  println(pi("007") ++ " " ++ pi("+5") ++ " " ++ pi(" -12 ") ++ " " ++ pi("9223372036854775807"))
+  println(pi("9223372036854775808") ++ " " ++ pi("-9223372036854775808") ++ " " ++
+    pi("0x10") ++ " " ++ pi("1_0") ++ " " ++ pi("١٢٣") ++ " " ++ pi("１２３") ++ " " ++ pi(""))
+
+  println("-- parse_int_radix: 0-9a-zA-Z cut at radix, radix in 2..36 --")
+  println(pr("ff", 16) ++ " " ++ pr("FF", 16) ++ " " ++ pr("z", 36) ++ " " ++
+    pr("z", 35) ++ " " ++ pr("-10", 2) ++ " " ++ pr("8", 8) ++ " " ++
+    pr("10", 1) ++ " " ++ pr("10", 37))
+  println(pr("-8000000000000000", 16) ++ " " ++ pr("8000000000000000", 16))
+}

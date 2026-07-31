@@ -1,0 +1,115 @@
+# Differential probe: std/fmt.dtoa against Double.toString, plus the
+# round-trip law parse_float(to_string(v)) == v (spec §4.3 / §11).
+#
+# Reads the TSV Oracle.java writes ("bits<TAB>Double.toString") as arg 1.
+# Each double is rebuilt from its bit pattern with exact power-of-two
+# scaling -- Dawn has no Float bit intrinsic and needs none: scaling by a
+# power of two is exact whenever the result is representable, and every
+# intermediate below is. The rebuild is cross-checked by parsing the oracle's
+# own string, so a symmetric rebuild bug cannot hide (a NaN collapses its
+# payload and a zero its sign there; dtoa's own comparison still sees both).
+
+use std/io
+use std/str
+use std/fmt
+
+fn pow2f(e0: Int) -> Float = {
+  var r = 1.0
+  var e = e0
+  while e >= 512 {
+    r = r * two_to(512)
+    e = e - 512
+  }
+  while e <= -512 {
+    r = r * (1.0 / two_to(512))
+    e = e + 512
+  }
+  if e >= 0 { r * two_to(e) } else { r / two_to(0 - e) }
+}
+
+fn two_to(e: Int) -> Float = {
+  var r = 1.0
+  var i = 0
+  while i < e {
+    r = r * 2.0
+    i = i + 1
+  }
+  r
+}
+
+fn from_bits(bits: Int) -> Float = {
+  let t = bits & 4503599627370495
+  let bq = (bits >>> 52) & 2047
+  let neg = bits < 0
+  var v = 0.0
+  if bq == 2047 {
+    v = if t != 0 { 0.0 / 0.0 } else { 1.0 / 0.0 }
+  } else if bq == 0 {
+    v = to_float(t) * pow2f(-537) * pow2f(-537)
+  } else {
+    let c = 4503599627370496 + t
+    let q = bq - 1075
+    if q >= -1022 {
+      v = to_float(c) * pow2f(q)
+    } else {
+      v = to_float(c) * pow2f(-1022) * pow2f(q + 1022)
+    }
+  }
+  # negate by multiplication: `0.0 - v` would lose the sign of zero
+  if neg && not (v != v) { v * (0.0 - 1.0) } else { v }
+}
+
+pub fn main() -> Unit !io = {
+  let path = args()[0]
+  let text = match io.read_file(path) {
+    Ok(s) -> s
+    Err(e) -> panic("read: " ++ e.message)
+  }
+  var n = 0
+  var bad = 0
+  var crossbad = 0
+  var rtbad = 0
+  for line in str.split(text, "\n") {
+    if line != "" {
+      let parts = str.split(line, "\t")
+      let bits = fmt.atoi(parts[0]).expect("bits")
+      let want = parts[1]
+      let v = from_bits(bits)
+      if not (v != v) {
+        let back = parse_float(want).expect("oracle parse")
+        if not (back == v) {
+          crossbad = crossbad + 1
+          if crossbad < 10 {
+            println("REBUILD " ++ parts[0] ++ " want " ++ want)
+          }
+        }
+      }
+      let got = fmt.dtoa(v)
+      n = n + 1
+      if got != want {
+        bad = bad + 1
+        if bad < 20 {
+          println("MISMATCH bits=" ++ parts[0] ++ " want=" ++ want ++ " got=" ++ got)
+        }
+      }
+      # the round-trip law, on the string this language actually emits
+      let closed = match fmt.atod(got) {
+        Some(w) ->
+          if v != v {
+            w != w
+          } else if v == 0.0 {
+            w == 0.0 && fmt.dtoa(w) == got
+          } else {
+            w == v
+          }
+        None -> false
+      }
+      if not closed {
+        rtbad = rtbad + 1
+        if rtbad < 10 { println("ROUNDTRIP OPEN " ++ got) }
+      }
+    }
+  }
+  println(to_string(n) ++ " samples, " ++ to_string(bad) ++ " dtoa mismatches, " ++
+    to_string(crossbad) ++ " rebuild mismatches, " ++ to_string(rtbad) ++ " open roundtrips")
+}
