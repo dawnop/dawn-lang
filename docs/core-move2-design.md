@@ -474,6 +474,19 @@ is a name no dispatcher should have an arm for, which is how the three dead arms
 
 ## 6. 开放决策
 
+> **三条均已裁决（2026-07-31，用户，附对 Rust/Kotlin/Koka/Gleam/Go/Haskell 的横向调研）**：
+>
+> 1. **C（intrinsic + 留糖后路）**——刀 1 现在做；**签名取 Haskell 序
+>    `bracket(acquire, release, use)`（use 在最后）**，为将来 Koka `with`/Gleam `use` 式
+>    「剩余块作尾闭包」的 parser 级糖留路（糖机制 = 剩余块附加为**最后一个**实参；
+>    本文正文示例写的旧序 `(acq, use, rel)` 以本裁决为准）。`with` 已查证：不在关键字表、
+>    全仓（含 backend-dawn）零同名标识符，升格属破坏窗口，候选与 #90 同窗；`use` 被导入
+>    语义终身占用，不复用。defer/糖/关键字升格**另行裁决**，带上 §2.7 的 10 处泄漏与调研。
+> 2. **A（返回 `B`）**——protect 与 catch 正交；Haskell `bracket`/Kotlin `use`/Koka
+>    `finally`/Go `defer` 无一返回 Result，行业全体一致。
+> 3. **A（站点迁移分开、滞后一个发布）**——selfhost 内站点本被自举强制滞后
+>    （种子要先认识 bracket）。
+
 ### 决策 1 —— `bracket` 是运行时 intrinsic，还是 Core 节点？
 
 **推荐：intrinsic（刀 1），并把 `CSProtect` 的图纸留在 §2.3–2.5 备用。**
