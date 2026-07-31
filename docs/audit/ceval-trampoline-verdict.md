@@ -159,6 +159,8 @@ comptime: call depth limit (100000) exceeded
 
 ## 五、native 侧的现状（grep + 事故记录）
 
+> 本节记的是 **2026-07-31 上午**的状态，当天下午两个缺陷都关掉了——**读之前先看 §5.1**。
+
 **今天 native 没有设任何栈。** `runtime/c/dawn_rt.{c,h}`、`selfhost/src/nmain.dawn`、
 `selfhost/src/cdriver.dawn`、`selfhost/src/emitc.dawn`（发的 `int main` 在 `emitc.dawn:1504`）
 里 **没有** `pthread_attr_setstacksize`、没有 `setrlimit(RLIMIT_STACK)`、没有任何栈尺寸设置。
@@ -187,6 +189,50 @@ Phase 3 的运行时其余项里——**没落地**。native 今天吃的是 OS 
 **本次没有复现它**：复现要先 `__emitc nmain.dawn` 出 4.7 MB C 再 `cc -O2`，是分钟级
 且 `cc` 自己就是内存大户；而在 4 GB 上限下它只会变成一次干净的 malloc 失败，
 换不来比上面这两行更多的信息。按 brief 的界限，记录，不追。
+
+### 5.1 追加（2026-07-31，§6.1 第 2 笔的两个缺陷都关了）
+
+**(a) 大栈已落地。** `dawn_rt_main`（`runtime/c/dawn_rt.h` 「the program's stack」）
+把发射程序的入口跑在 512 MB 栈的线程上，与 JVM 的 `-Xss512m` 同一个数字、同一条决策。
+定义在运行时而非发射的 `main` 里：`nmain`/`cdriver` 自己也是发射出来的程序，
+所以编译器和用户程序共用一份。同一段非尾递归的最深可过深度：**旧 10 万–20 万 → 新 900 万–1280 万**，
+正是 512/8 = 64 倍。门禁 `scripts/spike-native/deep_stack.dawn`（换回旧 `main` 形状即 SIGSEGV 无输出）。
+「打一行 stack overflow」的 SIGSEGV handler 实测后**不做**，理由在 `dawn_rt.h` 同一段注释。
+
+**(b) 13 GB 是 `emitc.line` 的二次拷贝，不是 native 独有，也不是栈问题。**
+按 §3.3 的五个合成家族逐个喂给 native 编译器（`ulimit -v 4 GB` + cgroup `MemoryMax` + 串行），
+只有一个家族非线性：**长 `++` 链**。
+
+| `s ++ s ++ …` 的 n | 400 | 1600 | 3200 | 6400 | 12800 |
+|---|---:|---:|---:|---:|---:|
+| 修前 native 峰值 | 74 MB | 314 MB | 740 MB | 1949 MB | **4 GB OOM** |
+| 修后 native 峰值 | 9.6 MB | 12.0 MB | 17.7 MB | 29.3 MB | 51.6 MB |
+
+外推修前曲线，n≈1.2 万–1.6 万就是 13 GB——事故那一行的量级对得上。
+其余四家族（嵌套块 / 嵌套 match / 右嵌套括号 / 深 comptime 递归）内存全平，
+只有时间是超线性的；深嵌套的**调用**、`&&` 链、宽 List 字面量、字符串插值也都平——
+所以「深」不是判据，`++` 才是。
+
+诊断路径：`dawnc check`（parse+check）全程平（9.6→15 MB），所以在 lower/rc/emitc；
+排除了 malloc 碎片（`MALLOC_MMAP_THRESHOLD_`/`ARENA_MAX` 三档 RSS 一字不差）
+和 RC 漏（LeakSanitizer 跑整个 native 编译器只报 565 字节）。最后用 `LD_PRELOAD`
+的活堆剖析器定位：峰值的 **99% 是 128–256 KB 的对象，全部由 `emitc.line` 里的
+`dawn_str_concat` 分配**，调用栈是 `emit_stmt`→`emit_expr`→`emit_stmt`→… 交替。
+
+机制：`line` 曾是 `st.out ++ pad ++ text ++ "\n"`——**每发射一行就整份拷贝一次已发射的全文**。
+平时看不见，因为每份拷贝立刻就死；深嵌套下就看得见了：`emit_expr`/`emit_stmt` 是递归下降，
+**每一层挂起的帧都握着自己那份 `CSt`**，于是峰值 = 嵌套深度 × 当前输出长度。
+`++` 链是唯一会「一个操作数一层嵌套」的输入形状（rc pass 把每个 concat 展成嵌套的
+let/drop 块），所以只有它触发。
+
+**这不是 native 独有的**——emitc 是两个后端共用的一份源码，JVM 侧同样中招，只是
+GC 把它藏在堆上限后面：修前 `-Xmx200m` 在 n=1600 就 OOM，修后 n=25600 也过。
+事故只在 native 上被看见，是因为 native 没有堆上限、直接顶到整机。
+
+修法四行：`CSt.out` 从 `String` 改成 `List[String]`，`line` 追加一块（`push` 是 O(1)
+且共享历史），末尾 `join` 一次。发射的 C 逐字节不变（`concat_var(200)` 与
+`nmain.dawn` 两份都对过 sha256）。**真实工作量也一起变快**：native 编译器发射
+`nmain.dawn`（7.05 MB C）峰值 **489 MB → 125 MB**、耗时 **19.2 s → 7.7 s**。
 
 ## 六、裁决：**不做**
 
@@ -221,11 +267,14 @@ Phase 3 的运行时其余项里——**没落地**。native 今天吃的是 OS 
    最便宜的修法是在常量旁记下实测的 128m 分界，让下一个想调小 `-Xss` 的人知道
    代价是什么。**不要**把它改成「按栈算出来的动态值」——§四量到这个深度是 JIT 相关的，
    拿一个跑起来才知道的数当界限，比现在这个诚实的常量更差。
-2. **native 无栈保护另立一笔**（BUG 类，两个缺陷）。(a) Phase 3 的
+2. ~~**native 无栈保护另立一笔**（BUG 类，两个缺陷）。(a) Phase 3 的
    `pthread_attr_setstacksize` 没落地，native 深输入 → SIGSEGV 无消息；
    (b) 某类深输入让 native 编译器涨到 13 GB RSS（正常峰值 81 MB）并 OOM 掉整机。
    两件都不属于 comptime，**不要**并进步骤 3；(b) 尤其该单独查——
-   160 倍的非线性不像栈问题，更像某个 pass 在深输入上物化了不该物化的东西。
+   160 倍的非线性不像栈问题，更像某个 pass 在深输入上物化了不该物化的东西。~~
+   **两件都已关账，见 §5.1。**「不像栈问题」猜对了；「某个 pass 物化了不该物化的东西」
+   也猜对了，但物化的是**发射器的输出缓冲**，而且不是 native 独有——JVM 侧一样，
+   只是被堆上限挡住了。
 
 ## 七、什么事实会把它翻回「做」
 
