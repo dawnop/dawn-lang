@@ -1319,11 +1319,16 @@ fn struct_cmp_body(st: LSt, a: CExpr, b: CExpr, t: Ty) -> (LSt, CExpr) =
       }
       let (st3, ta) = fresh_sym(st1)
       let (st4, tb) = fresh_sym(st3)
+      # Disagreeing tags answer -1/1, not the tag difference: `cmp` contracts
+      # the sign only (spec 3.5), and the raw subtraction leaked how far apart
+      # the constructors were declared.
       (st4, CBlock(
         [CSLet(ta, TyInt, CTagOf(a, aid)), CSLet(tb, TyInt, CTagOf(b, aid))],
         Some(CIf(
           CBinary(CNe, CLocal(ta, TyInt), CLocal(tb, TyInt), TyBool),
-          CBinary(CSub, CLocal(ta, TyInt), CLocal(tb, TyInt), TyInt),
+          CIf(
+            CBinary(CLt, CLocal(ta, TyInt), CLocal(tb, TyInt), TyBool),
+            CInt(0 - 1), Some(CInt(1)), TyInt),
           Some(chain), TyInt)),
         TyInt))
     }

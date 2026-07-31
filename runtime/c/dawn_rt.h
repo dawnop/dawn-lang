@@ -555,9 +555,10 @@ bool dawn_char_is_space(int64_t c);
  * bound instantiated at that scalar ends up calling.
  *
  * Both are observable -- a program can print `hash(x)` or `cmp(a, b)` -- so
- * these are not free choices. Each reproduces the JVM backend's answer bit
- * for bit; where that answer is surprising, the surprise is documented at the
- * definition rather than smoothed over here. */
+ * these are not free choices: spec 3.5 defines the hash leaves, and `cmp`
+ * contracts code point order and only the sign (-1/0/1). Where an answer is
+ * surprising, the surprise is documented at the definition rather than
+ * smoothed over here. */
 int64_t dawn_hash_int(int64_t v);
 int64_t dawn_hash_bool(bool v);
 int64_t dawn_hash_str(dawn_str *s);

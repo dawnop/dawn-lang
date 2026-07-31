@@ -426,8 +426,18 @@ fn sort2[T: Ord2](xs: List[T]) -> List[T] = ...   # 约束：[T: Trait (+ Trait)
   trait 方法效果只能是纯或 `!io`，impl 的效果 ⊑ trait 声明。
 - 预置 `trait Ord[T] { fn cmp(a: T, b: T) -> Int }` 及 `Int`/`String` 的 impl
   （**`Float` 没有**，NaN 下无全序可给——拒绝理由见 §4.3 数值边缘语义，2026-07-26
-  撤销了此前照 `Double.compare` 给的那份）；`derive Ord` 生成字段字典序比较
-  （和类型先比构造器声明顺序），字段须为
+  撤销了此前照 `Double.compare` 给的那份）。
+  - **`cmp` 只承诺符号**：小于返回 `-1`、相等返回 `0`、大于返回 `1`，
+    **不承诺其它幅值**——此前 `cmp("a", "z")` 会把宿主的码元差 `-25` 漏出来，
+    2026-07-31 起全类型统一 −1/0/1（把结果当差值缩放本就可能溢出，std 一直只用符号）。
+  - **`Ord[String]` 是码点序**：逐码点比较，首个不同的码点定大小，前缀相同时短者小。
+    UTF-8 的字节序与码点序等价（编码的设计属性）；哈希的货币仍是 UTF-16 码元
+    （见下文哈希叶子），**有意不跟走**——哈希只须与 `==` 一致，不必与序同货币。
+    语言其余各处（`str.len`/`substring`/`chars`/`code_points`/游标）本就以码点为货币，
+    序是最后一处对齐的（2026-07-31，此前是 UTF-16 码元序，只在增补平面字符上可观测）。
+
+  `derive Ord` 生成字段字典序比较
+  （和类型先比构造器声明顺序，构造器不同时只产生 `-1`/`1`），字段须为
   `Int`/`String`、自身具 Ord impl 的类型，或该类型自己的类型参数
   （此时生成的是条件 impl：`type Box[T] = { v: T } derive Ord` 得到
   `impl[T: Ord] Ord[Box[T]]`）。`List[T]` 有 std 写的词典序 impl。
@@ -568,8 +578,8 @@ let area = {
     一样解 `Ord` 的见证。`Float` 没有 impl（拒绝理由见上文「`Float` 没有 `Ord`」，
     不在此重复），故 `cmp(1.5, 2.5)` 不编译，而 `1.5 < 2.5` 照旧合法。
   - 两套机制在 `Int`/`String` 上**答案相同**（`String` 上 `<` 与 `cmp` 是同一条
-    比较、同一个序），在 `Float` 上**有意不同**：原生 `<` 是 IEEE 偏序，
-    `Ord` 要的是全序，Float 只有前者。
+    比较、同一个序——**码点序**，见 §3.5），在 `Float` 上**有意不同**：原生 `<`
+    是 IEEE 偏序，`Ord` 要的是全序，Float 只有前者。
 - 用户类型的打印：`type` 声明后加 `derive Show` 获得 `to_string` 与字符串插值支持
   （可 derive 的还有 `Ord`，见 §3.5；多个用逗号：`derive Show, Ord`）。
   `Show` 是**预置 trait**，`derive Show` 铸的就是一条 impl，所以也可以手写

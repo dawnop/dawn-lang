@@ -554,11 +554,14 @@ dawn_str *dawn_str_quote(dawn_str *s) {
 
 /* ---- hashing and ordering ------------------------------------------------
  *
- * Java defines String.hashCode and String.compareTo over UTF-16 code units.
- * Dawn stores UTF-8, so native has to walk a string the way the JVM sees it
- * rather than the way it holds it. Everything in the BMP -- CJK included --
- * is one unit either way; only astral code points split into a surrogate
- * pair, and that is the only case where the two walks differ. */
+ * Two currencies, on purpose (spec 3.5). `hash(String)` is Java's
+ * String.hashCode, defined over UTF-16 code units, so native walks a string
+ * the way the JVM sees it rather than the way it holds it. Everything in the
+ * BMP -- CJK included -- is one unit either way; only astral code points
+ * split into a surrogate pair, and that is the only case where the walks
+ * differ. `cmp(String)` is *code point* order (RP-06), which for UTF-8 bytes
+ * is plain memcmp -- hash deliberately did not follow the order's currency
+ * change, since a hash only has to agree with `==`. */
 
 /* Next UTF-16 code unit, or -1 at the end. `*i` is the byte cursor and
  * `*pending` carries the low surrogate a previous step left behind. */
@@ -600,18 +603,6 @@ static int32_t dawn_utf16_next(dawn_str *s, int64_t *i, int32_t *pending) {
   return (int32_t)cp;
 }
 
-/* Length in UTF-16 code units: what Java's String.length() reports, and what
- * compareTo falls back on when one string is a prefix of the other. */
-static int64_t dawn_utf16_len(dawn_str *s) {
-  int64_t n = 0;
-  for (int64_t i = 0; i < s->len; i++) {
-    unsigned char c = (unsigned char)s->p[i];
-    if ((c & 0xC0) == 0x80) continue;
-    n += (c >= 0xF0) ? 2 : 1;
-  }
-  return n;
-}
-
 int64_t dawn_hash_int(int64_t v) {
   return (int32_t)((uint32_t)((uint64_t)v ^ ((uint64_t)v >> 32)));
 }
@@ -645,18 +636,15 @@ int64_t dawn_hash_bytes(const dawn_bytes *b) {
 int64_t dawn_cmp_int(int64_t a, int64_t b) { return a < b ? -1 : (a > b ? 1 : 0); }
 
 int64_t dawn_cmp_str(dawn_str *a, dawn_str *b) {
-  int64_t ia = 0;
-  int64_t ib = 0;
-  int32_t pa = -1;
-  int32_t pb = -1;
-  for (;;) {
-    int32_t ua = dawn_utf16_next(a, &ia, &pa);
-    int32_t ub = dawn_utf16_next(b, &ib, &pb);
-    /* the magnitude matters, not just the sign: String.compareTo hands back
-     * the difference of the first differing unit, and a program can print it */
-    if (ua < 0 || ub < 0) return dawn_utf16_len(a) - dawn_utf16_len(b);
-    if (ua != ub) return ua - ub;
-  }
+  /* Code point order, and only the sign: `cmp` contracts -1/0/1 (spec 3.5),
+   * the magnitude is not a value a program may rely on. Comparing UTF-8
+   * bytewise *is* comparing by code point -- the encoding was designed so --
+   * and when one string is a prefix of the other the shorter one is smaller
+   * in either currency, so the byte lengths settle it. */
+  int64_t n = a->len < b->len ? a->len : b->len;
+  int c = memcmp(a->p, b->p, (size_t)n);
+  if (c != 0) return c < 0 ? -1 : 1;
+  return a->len < b->len ? -1 : (a->len > b->len ? 1 : 0);
 }
 
 int64_t dawn_idiv(int64_t a, int64_t b) {

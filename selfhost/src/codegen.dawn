@@ -49,7 +49,7 @@ use jvmops.{
   OP_GETSTATIC, OP_GOTO, OP_I2B, OP_I2L, OP_IADD, OP_IALOAD, OP_IASTORE, OP_ICONST_0,
   OP_ICONST_1, OP_ICONST_2, OP_ICONST_3, OP_ICONST_M1, OP_IDIV, OP_IFEQ, OP_IFGE, OP_IFGT,
   OP_IFLE, OP_IFLT, OP_IFNE, OP_IFNONNULL, OP_IFNULL, OP_IF_ACMPEQ, OP_IF_ICMPEQ,
-  OP_IF_ICMPGE, OP_IF_ICMPLE, OP_IF_ICMPNE, OP_ILOAD, OP_IMUL,
+  OP_IF_ICMPGE, OP_IF_ICMPLE, OP_IF_ICMPLT, OP_IF_ICMPNE, OP_ILOAD, OP_IMUL,
   OP_INSTANCEOF, OP_INVOKEINTERFACE, OP_INVOKESPECIAL, OP_INVOKESTATIC, OP_INVOKEVIRTUAL,
   OP_IRETURN, OP_ISTORE, OP_ISUB, OP_IXOR, OP_L2I, OP_LADD, OP_LCMP, OP_LCONST_0,
   OP_LCONST_1, OP_LLOAD, OP_LNEG, OP_LRETURN, OP_LSTORE, OP_LXOR, OP_NEW, OP_NEWARRAY,
@@ -2016,7 +2016,7 @@ const CLASS_LOWER: String = "CLASS_LOWER"
 
 const CLASS_SPACE: String = "CLASS_SPACE"
 
-## dawn/rt/Strings: the string runtime — join, parse_int/parse_float,
+## dawn/rt/Strings: the string runtime — join, cmp, parse_int/parse_float,
 ## code_points/from_code_points, the cursor family, the Unicode classifiers and
 ## case folding. What is left after std/str took over everything expressible as
 ## a walk (docs/native-backend-plan.md 14.12): the representation boundary and
@@ -2164,6 +2164,73 @@ pub fn gen_strings_class(supers: List[String], u: TableUse) -> Bytes !io = {
   fc.visitInsn(OP_ARETURN)
   fc.visitMaxs(0, 0)
   fc.visitEnd()
+
+  # cmp(a, b): Ord[String] -- *code point* order, sign only (-1/0/1), spec
+  # 3.5 (RP-06). Not String.compareTo: that is UTF-16 code unit order, which
+  # disagrees with code point order exactly when one side's first differing
+  # unit is a surrogate and the other's is in [U+E000, U+FFFF]. The walk
+  # compares code units until the first difference -- equal prefixes cannot
+  # split a surrogate pair unevenly, so at the first differing index both
+  # sides sit on the same kind of boundary and codePointAt reads the right
+  # thing -- and only there pays for codePointAt. A shared prefix leaves the
+  # shorter string smaller in either currency, so lengths settle that case.
+  let cm = open_static(cw, "cmp", "(Ljava/lang/String;Ljava/lang/String;)I")
+  cm.visitVarInsn(OP_ALOAD, 0)
+  cm.visitMethodInsn(OP_INVOKEVIRTUAL, jstr, "length", "()I", false)
+  cm.visitVarInsn(OP_ALOAD, 1)
+  cm.visitMethodInsn(OP_INVOKEVIRTUAL, jstr, "length", "()I", false)
+  cm.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Math", "min", "(II)I", false)
+  cm.visitVarInsn(OP_ISTORE, 2)
+  cm.visitInsn(OP_ICONST_0)
+  cm.visitVarInsn(OP_ISTORE, 3)
+  let m_loop = Label.new()
+  let m_prefix = Label.new()
+  let m_differ = Label.new()
+  let m_zero = Label.new()
+  let m_neg = Label.new()
+  cm.visitLabel(m_loop)
+  cm.visitVarInsn(OP_ILOAD, 3)
+  cm.visitVarInsn(OP_ILOAD, 2)
+  cm.visitJumpInsn(OP_IF_ICMPGE, m_prefix)
+  cm.visitVarInsn(OP_ALOAD, 0)
+  cm.visitVarInsn(OP_ILOAD, 3)
+  cm.visitMethodInsn(OP_INVOKEVIRTUAL, jstr, "charAt", "(I)C", false)
+  cm.visitVarInsn(OP_ALOAD, 1)
+  cm.visitVarInsn(OP_ILOAD, 3)
+  cm.visitMethodInsn(OP_INVOKEVIRTUAL, jstr, "charAt", "(I)C", false)
+  cm.visitJumpInsn(OP_IF_ICMPNE, m_differ)
+  cm.visitIincInsn(3, 1)
+  cm.visitJumpInsn(OP_GOTO, m_loop)
+  cm.visitLabel(m_prefix)
+  cm.visitVarInsn(OP_ALOAD, 0)
+  cm.visitMethodInsn(OP_INVOKEVIRTUAL, jstr, "length", "()I", false)
+  cm.visitVarInsn(OP_ALOAD, 1)
+  cm.visitMethodInsn(OP_INVOKEVIRTUAL, jstr, "length", "()I", false)
+  cm.visitJumpInsn(OP_IF_ICMPEQ, m_zero)
+  cm.visitVarInsn(OP_ALOAD, 0)
+  cm.visitMethodInsn(OP_INVOKEVIRTUAL, jstr, "length", "()I", false)
+  cm.visitVarInsn(OP_ALOAD, 1)
+  cm.visitMethodInsn(OP_INVOKEVIRTUAL, jstr, "length", "()I", false)
+  cm.visitJumpInsn(OP_IF_ICMPLT, m_neg)
+  cm.visitInsn(OP_ICONST_1)
+  cm.visitInsn(OP_IRETURN)
+  cm.visitLabel(m_differ)
+  cm.visitVarInsn(OP_ALOAD, 0)
+  cm.visitVarInsn(OP_ILOAD, 3)
+  cm.visitMethodInsn(OP_INVOKEVIRTUAL, jstr, "codePointAt", "(I)I", false)
+  cm.visitVarInsn(OP_ALOAD, 1)
+  cm.visitVarInsn(OP_ILOAD, 3)
+  cm.visitMethodInsn(OP_INVOKEVIRTUAL, jstr, "codePointAt", "(I)I", false)
+  cm.visitJumpInsn(OP_IF_ICMPLT, m_neg)
+  cm.visitInsn(OP_ICONST_1)
+  cm.visitInsn(OP_IRETURN)
+  cm.visitLabel(m_zero)
+  cm.visitInsn(OP_ICONST_0)
+  cm.visitInsn(OP_IRETURN)
+  cm.visitLabel(m_neg)
+  cm.visitInsn(OP_ICONST_M1)
+  cm.visitInsn(OP_IRETURN)
+  close_mv(cm)
 
   # ---- cursors ----
   # A cursor is a UTF-16 offset into `s`, handed to Dawn as an opaque Int (a JVM
