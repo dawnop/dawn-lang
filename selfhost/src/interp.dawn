@@ -160,6 +160,14 @@ type ICx = {
   jcall: fn(TJavaCall, List[CValue]) -> Result[CValue, (String, String)] !io
 }
 
+# A deliberate constant, not a value derived from the stack. Measured
+# 2026-07-31 (docs/audit/ceval-trampoline-verdict.md 4): the interpreter's own
+# frames exhaust -Xss below 128m before this counter fires, so the limit only
+# binds at -Xss >= 128m -- at the shipped 512m it is what actually stops
+# runaway comptime recursion. Anyone lowering -Xss below 128m trades this
+# diagnostic for a raw StackOverflowError. Do not make it dynamic: the measured
+# depth-per-stack is JIT-dependent, and a limit you only learn by running is
+# worse than an honest constant.
 const MAX_CALL_DEPTH: Int = 100000
 
 fn no_sigs() -> Map[(String, String), Sig] = map.empty()
