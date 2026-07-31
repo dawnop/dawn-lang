@@ -512,6 +512,10 @@ is a name no dispatcher should have an arm for, which is how the three dead arms
 >   **尾闭包位保留 `fn` 拼写**保无歧义（否则与柯里化调用 `f(a)(x)` 撞）。占位符 lambda
 >   （Kotlin `it`/Scala `_`）判不做：边界歧义与显式气质相斥。具名函数裸传（eta 缩减）
 >   今天已可用，是消 lambda 噪音的第一手段。
+> - **match 臂 `->` 与 lambda `=>` 刻意不统一**（spec §4.5 已记原则）：去 `fn` 后 `=>` 接过
+>   「lambda 起点标记」职责，臂体嵌 lambda 时两种箭头是唯一视觉信号（Rust 同款分立，
+>   Scala 式统一反而在最需要区分处失去区分）。`->` = 子句箭头（类型、臂），
+>   `=>` = 表达式箭头。
 
 ### 决策 1 —— `bracket` 是运行时 intrinsic，还是 Core 节点？
 
