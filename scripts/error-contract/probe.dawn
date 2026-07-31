@@ -123,5 +123,34 @@ pub fn main() -> Unit !io = {
   bad = bad + check_true("the message names the class it could not become",
     str.contains(m.message, "[B"))
 
+  # ---- bracket: a release ran, and it changed nothing --------------------
+  #
+  # `bracket` is the barrier family's third member and the only one that
+  # reports nothing -- it runs a release and gets out of the way. So what it
+  # owes this file is the absence of a difference: the `kind` and `message`
+  # that reach the catch have to be the same *text* a bare `catch_fault` gets,
+  # not merely a name of the same shape. The differential corpus cannot ask
+  # that, because it may not print either field.
+  #
+  # The release is observed rather than assumed, through a list it appends to.
+  # An assertion that the failure came out unchanged is worth nothing if the
+  # release never ran: the two would then agree because bracket did nothing at
+  # all.
+  let released = ArrayList.new()
+  let crossed = match catch_fault(fn() =>
+    bracket("a resource", fn(r: String) => {
+      released.add("released " ++ r)
+      ()
+    }, fn(_r: String) => not_a_number())) {
+    Ok(_) -> panic("parseLong accepted `nope`")
+    Err(e) -> e
+  }
+  bad = bad + check("the release ran, exactly once",
+    to_string(released.size()), "1")
+  bad = bad + check("a fault that crossed a bracket keeps its kind",
+    crossed.kind, n.kind)
+  bad = bad + check("a fault that crossed a bracket keeps its message",
+    crossed.message, n.message)
+
   println("mismatches " ++ to_string(bad))
 }

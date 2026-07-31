@@ -40,6 +40,13 @@
 # file has `<name>.leaks-on-catch` next to it and runs with leak detection
 # off; every other program answers for every byte.
 #
+# A second marker says a program is *supposed* to die: `<name>.exits-nonzero`.
+# Without it a non-zero JVM exit is a failed run, which blocks `diff`,
+# `stderr` and `exit` -- and those three are exactly what a program about
+# ending the run has to be checked on. The exit code itself is still compared
+# between the backends, so the marker says "non-zero is expected here", never
+# "any exit will do".
+#
 # `jvm` and `native` only run when <name>.expect exists. They are the answer
 # to codebase-audit.md TEST-01: a differential test alone certifies whatever
 # the JVM already does, and a defect the two backends share -- anything
@@ -159,13 +166,19 @@ for prog in "${progs[@]}"; do
   # behind it until 2026-07-27.
   jvm_rc=0
   jvm_ran=1
+  # a program whose subject is the end of the run declares itself; see the
+  # header. This only stops a non-zero code from being read as a broken run --
+  # `jvm_rc` keeps the real code, and the `exit` check below still compares it
+  # against native's.
+  fatal_ok=0
+  [ -f "$here/$name.exits-nonzero" ] && fatal_ok=1
   # stdin is /dev/null, not the terminal: a corpus program that reads stdin
   # would otherwise hang the developer's shell and read something different in
   # CI. At /dev/null both backends see end of input, which is itself a case
   # worth agreeing on.
   "$root/bin/dawn" run --std "$stdcopy" "$prog" >"$work/$name.jvm" 2>"$work/$name.jvm.err" \
     </dev/null || jvm_rc=$?
-  if [ "$jvm_rc" -ne 0 ]; then
+  if [ "$jvm_rc" -ne 0 ] && [ "$fatal_ok" -eq 0 ]; then
     verdict "$name:jvm-run" bad "$(cat "$work/$name.jvm.err")"
     jvm_ran=0
   fi

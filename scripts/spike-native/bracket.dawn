@@ -1,0 +1,149 @@
+# `bracket`, the barrier family's third member and the one that catches
+# nothing (docs/core-move2-design.md 4, knife 1).
+#
+# `catch_fault` and `catch_panic` stop a failure and hand it back as a value.
+# This one stops nothing: it runs `release` on every way out of `use` -- the
+# value, a panic, a fault -- and then gets out of the way, so the failure
+# reaches whatever was going to stop it with its kind and its message
+# untouched.
+#
+# The two backends implement that by unrelated mechanisms. The JVM gets a
+# method with a real handler that rethrows the same `Throwable`; native gets a
+# `longjmp` handler that takes everything and re-raises out of the failure
+# state the raise left behind. Five claims are asked of both:
+#
+#   1. the normal path runs use, then release, in that order, and hands back
+#      what `use` answered -- `B`, not a `Result`;
+#   2. release runs on the failing paths too, exactly once, and the failure
+#      that comes out the far side is the same one -- a panic taken by
+#      `catch_panic` still says what `panic` was given, and a fault taken by
+#      `catch_fault` still carries the kind and message it would have had with
+#      no bracket in the way. The fault half is asked by comparing against the
+#      same failure raised bare, because the names themselves are not portable
+#      (foreign_error.dawn says why);
+#   3. nested brackets release inside out;
+#   4. **a panic that crossed a bracket is still a panic**, so the io barrier
+#      may not take it. This is the claim the whole thing turns on and the one
+#      neither backend gets for free: a bracket has to *take* the failure in
+#      order to run the release, so between the raise and the re-raise the
+#      failure is sitting in a handler that catches everything. The JVM
+#      rethrows the same object, whose class is its kind. Native has no
+#      exceptions -- everything arrives through one `longjmp` and the kind is
+#      a variable the raise wrote down -- so the re-raise routes by the saved
+#      bit, which is what `dawn_failure_is_panic` exists for and its only
+#      reader. Without it the `panic` line below reads `caught` on native and
+#      `through` on the JVM;
+#   5. release runs before the failure resumes, not after -- the transcript
+#      would print the two in the other order otherwise.
+#
+# The resource is a value, not an acquire thunk, so acquisition is ordinary
+# code before the call and a failure there has nothing to do with bracket at
+# all. That is why there is no "acquire failed" case here: the call has not
+# happened yet.
+#
+# The fault-raising io primitives are std-only and arrive through `use
+# std/raw`, the arrangement catch_kinds.dawn explains.
+use std/io
+use std/raw
+use std/str
+
+## Acquire a named resource: ordinary code, before the bracket.
+fn open(name: String) -> String !io = {
+  println("  acquire " ++ name)
+  name
+}
+
+## Release it, announcing it. Every path in this file goes through here, so a
+## missing line is a release that did not run and a doubled one is a release
+## that ran twice. The transcript is the whole of the evidence: a released
+## resource is by definition gone, so there is nothing to inspect afterwards.
+fn close(name: String) -> Unit !io = println("  release " ++ name)
+
+# `!io` so nothing folds at compile time: the question is what happens at run
+# time, and both backends fold with the same interpreter.
+fn n(i: Int) -> Int !io = i
+
+## The body, on the path where nothing goes wrong.
+fn use_ok(a: String) -> Int !io = {
+  println("  use " ++ a)
+  n(7)
+}
+
+## The body, panicking. Named rather than a lambda: `fn(a) => panic(...)`
+## leaves `B` with nothing to infer it from.
+fn use_panics(a: String) -> Int !io = panic("deliberate " ++ a)
+
+## The body, raising a fault. An io primitive is the only failure a native
+## program can raise that is not a panic -- `use java` is refused there.
+fn read_missing() -> Int !io = str.len(raw.read_file("/no/such/dawn/path"))
+
+fn use_faults(a: String) -> Int !io = {
+  println("  use " ++ a)
+  read_missing()
+}
+
+## Which barrier stops the failure, with a bracket in the way? The body runs
+## inside a bracket inside `catch_fault` inside `catch_panic`, so every outcome
+## is a value rather than the end of the run -- and `through` is the answer
+## that says the failure came out of the bracket as what it went in as.
+##
+## Same shape as catch_kinds.dawn's `barrier`, on purpose: the answers here
+## must be the answers there, or the bracket changed the failure.
+fn barrier(name: String, f: fn(String) -> Int !io) -> String !io =
+  match catch_panic(fn() => match catch_fault(fn() => bracket(open(name), close, f)) {
+    Ok(_) -> 0
+    Err(_) -> 1
+  }) {
+    Ok(0) -> "ok"
+    Ok(_) -> "caught"
+    Err(_) -> "through"
+  }
+
+fn taken_panic(f: fn() -> Int !io) -> ForeignError !io =
+  match catch_panic(f) {
+    Ok(_) -> panic("the thunk was supposed to fail")
+    Err(e) -> e
+  }
+
+fn taken_fault(f: fn() -> Int !io) -> ForeignError !io =
+  match catch_fault(f) {
+    Ok(_) -> panic("the thunk was supposed to fail")
+    Err(e) -> e
+  }
+
+pub fn main() -> Unit !io = {
+  println("-- the normal path: use, release, and the body's own answer --")
+  println("value          " ++ to_string(bracket(open("r1"), close, use_ok)))
+
+  println("-- use panics: release runs, and the panic carries on --")
+  let p = taken_panic(fn() => bracket(open("r2"), close, use_panics))
+  println("message        " ++ p.message)
+
+  println("-- use faults: release runs, and the fault carries on --")
+  # the same failure with no bracket in the way, to compare against
+  let bare = taken_fault(read_missing)
+  let crossed = taken_fault(fn() => bracket(open("r3"), close, use_faults))
+  println("same kind      " ++ to_string(bare.kind == crossed.kind))
+  println("same message   " ++ to_string(bare.message == crossed.message))
+
+  println("-- nested: the inner resource is released first --")
+  let outer = open("outer")
+  let nested = bracket(outer, close, fn(o) => {
+    let inner = open("inner")
+    bracket(inner, close, fn(i) => {
+      println("  use " ++ o ++ " and " ++ i)
+      n(2)
+    })
+  })
+  println("value          " ++ to_string(nested))
+
+  println("-- nested, and the body panics: still inside out --")
+  let np = taken_panic(fn() => bracket(open("outer"), close, fn(o) =>
+    bracket(open("inner"), close, use_panics)))
+  println("message        " ++ np.message)
+
+  println("-- which barrier stops what, with a bracket in the way --")
+  println("no failure     " ++ barrier("r4", use_ok))
+  println("panic          " ++ barrier("r5", use_panics))
+  println("read_file      " ++ barrier("r6", use_faults))
+}
