@@ -49,6 +49,28 @@ fn matches(file: String, outer: String) -> Bool =
   file == outer ++ ".class" ||
   (str.starts_with(file, outer ++ "\$") && str.ends_with(file, ".class"))
 
+# The releases the two jar walks below bracket with. Both walks panic on a
+# broken invariant partway through, which is exactly the way out that used to
+# skip the close.
+fn close_jar(jf: JarFile) -> Unit !io = {
+  let _ = jf.close()
+  ()
+}
+
+fn close_entry_stream(ins: InputStream) -> Unit !io = {
+  let _ = ins.close()
+  ()
+}
+
+## One entry's bytes, with the stream released however the read ends. It takes
+## the stream rather than (jar, entry) because the two walks hold different
+## entry types — `getEntry` hands back a `ZipEntry`, the enumeration a
+## `JarEntry` — and Java's parameter subtyping does not reach Dawn signatures.
+fn entry_bytes(ins: InputStream) -> Bytes !io = {
+  with s <- bracket(ins, close_entry_stream)
+  s.readAllBytes().expect("entry bytes")
+}
+
 ## `dawn/rt/<outer>` plus every nested `dawn/rt/<outer>$…` beside it, as
 ## (class name, bytes) pairs sorted by name. Requires the compiler jar on the
 ## class path (the same condition the checker's reflection already needs).
@@ -93,7 +115,7 @@ pub fn rt_class_family(outer: String) -> List[(String, Bytes)] !io = {
   }
   let bang = str.index_of(u, "!").expect("jar url separator")
   let jar_path = str.substring(u, str.len("jar:file:"), bang)
-  let jf = JarFile.new(jar_path)
+  with jf <- bracket(JarFile.new(jar_path), close_jar)
   var names: List[String] = []
   let en = jf.entries().expect("entries")
   while en.hasMoreElements() {
@@ -117,12 +139,9 @@ pub fn rt_class_family(outer: String) -> List[(String, Bytes)] !io = {
       Some(je) -> je
       None -> panic("jar entry vanished: " ++ nm)
     }
-    let ins = jf.getInputStream(e).expect("entry stream")
-    let bs = ins.readAllBytes().expect("entry bytes")
-    let _ = ins.close()
+    let bs = entry_bytes(jf.getInputStream(e).expect("entry stream"))
     out = out ++ [(str.substring(nm, 0, str.len(nm) - str.len(".class")), bs)]
   }
-  let _ = jf.close()
   out
 }
 
@@ -158,6 +177,36 @@ fn dir_classes_under(root: String, rel: String) -> List[String] !io = {
   out
 }
 
+## Every .class under `prefix` in one open jar, skipping the names in `seen`.
+##
+## Its own function because the accumulators it would otherwise write into are
+## `var`s of the caller, and a closure cannot capture those — so the walk gets
+## its own, returns them, and the caller merges. That is what buys the bracket:
+## the jar is released whether the walk finishes or a broken entry panics it.
+fn jar_classes(jf: JarFile, prefix: String, seen: List[String]) -> List[(String, Bytes)] !io = {
+  with j <- bracket(jf, close_jar)
+  var taken: List[String] = []
+  var out: List[(String, Bytes)] = []
+  let en = j.entries().expect("entries")
+  while en.hasMoreElements() {
+    # same invariant as rt_class_family's walk, same treatment
+    let got: Result[JarEntry, ForeignError] = cast(en.nextElement().expect("entry"))
+    let je: JarEntry = match got {
+      Ok(v) -> v
+      Err(x) -> panic("vendor.classpath_package: not a JarEntry: " ++ x.message)
+    }
+    let nm = je.getName().expect("entry name")
+    if str.starts_with(nm, prefix ++ "/") && str.ends_with(nm, ".class") {
+      let cls = str.substring(nm, 0, str.len(nm) - str.len(".class"))
+      if not has_name(seen, cls) && not has_name(taken, cls) {
+        taken = taken ++ [cls]
+        out = out ++ [(cls, entry_bytes(j.getInputStream(je).expect("entry stream")))]
+      }
+    }
+  }
+  out
+}
+
 ## Every .class under package path `prefix` (e.g. "org/objectweb/asm") found
 ## on java.class.path, as (class name, bytes) pairs sorted by name. The first
 ## class-path entry providing a class wins, like the class loader. This is how
@@ -176,27 +225,11 @@ pub fn classpath_package(prefix: String) -> List[(String, Bytes)] !io = {
     if str.ends_with(entry, ".jar") {
       match catch_fault(fn() => JarFile.new(entry)) {
         Ok(jf) -> {
-          let en = jf.entries().expect("entries")
-          while en.hasMoreElements() {
-            # same invariant as rt_class_family's walk, same treatment
-            let got: Result[JarEntry, ForeignError] = cast(en.nextElement().expect("entry"))
-            let je: JarEntry = match got {
-              Ok(v) -> v
-              Err(x) -> panic("vendor.classpath_package: not a JarEntry: " ++ x.message)
-            }
-            let nm = je.getName().expect("entry name")
-            if str.starts_with(nm, prefix ++ "/") && str.ends_with(nm, ".class") {
-              let cls = str.substring(nm, 0, str.len(nm) - str.len(".class"))
-              if not has_name(names, cls) {
-                let ins = jf.getInputStream(je).expect("entry stream")
-                let bs = ins.readAllBytes().expect("entry bytes")
-                let _ = ins.close()
-                names = names ++ [cls]
-                found = found ++ [(cls, bs)]
-              }
-            }
+          for pair in jar_classes(jf, prefix, names) {
+            let (cls, _) = pair
+            names = names ++ [cls]
+            found = found ++ [pair]
           }
-          let _ = jf.close()
         }
         Err(_) -> ()
       }
