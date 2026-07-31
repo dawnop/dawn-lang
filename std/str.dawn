@@ -43,6 +43,16 @@ pub fn trim(s: String) -> String = {
   cursor.slice(s, a, last_kept(s, a, a))
 }
 
+## `s` without leading whitespace.
+pub fn trim_start(s: String) -> String =
+  cursor.slice(s, skip_space(s, cursor.start(s)), cursor.end(s))
+
+## `s` without trailing whitespace.
+pub fn trim_end(s: String) -> String = {
+  let a = cursor.start(s)
+  cursor.slice(s, a, last_kept(s, a, a))
+}
+
 fn skip_space(s: String, c: Cursor) -> Cursor =
   if cursor.done(s, c) || not char_is_space(cursor.char(s, c)) {
     c
@@ -91,6 +101,29 @@ pub fn ends_with(s: String, suffix: String) -> Bool = {
     cursor.starts_at(s, cursor.back(s, cursor.end(s), n), suffix)
   }
 }
+
+## `s` with `prefix` removed, or `None` when `s` does not begin with it.
+##
+## Inquiry (spec §4.8, criterion 2): "no such prefix" is a branch the caller
+## takes, not a bug. Testing and peeling in one call is the point -- the pair
+## `starts_with` plus a hand-computed `substring(s, 16, len(s))` is what put
+## magic offsets in 33 call sites, and an offset that is one out still compiles.
+## No arithmetic happens here either: `cursor.skip` walks past the prefix.
+pub fn strip_prefix(s: String, prefix: String) -> Option[String] =
+  if starts_with(s, prefix) {
+    Some(cursor.slice(s, cursor.skip(s, cursor.start(s), prefix), cursor.end(s)))
+  } else {
+    None
+  }
+
+## `s` with `suffix` removed, or `None` when `s` does not end with it.
+## The mirror of `strip_prefix`, and the answer to `- 5` meaning `len(".dawn")`.
+pub fn strip_suffix(s: String, suffix: String) -> Option[String] =
+  if ends_with(s, suffix) {
+    Some(cursor.slice(s, cursor.start(s), cursor.back(s, cursor.end(s), len(suffix))))
+  } else {
+    None
+  }
 
 ## The code-point index of the first occurrence of `sub`, or `None`.
 ##
@@ -145,6 +178,37 @@ pub fn substring(s: String, from: Int, to: Int) -> String = {
 
 fn clamp_cp(i: Int, n: Int) -> Int = if i < 0 { 0 } else if i > n { n } else { i }
 
+## The first `n` characters, or all of them when there are fewer. `n` is
+## clamped into `[0, len]`, so this never panics: it names a stretch rather
+## than asserting that position `n` exists (spec §4.8, criterion 3), the same
+## way `substring` and `list.take` do.
+##
+## `truncate` would be this function under another name, so there is no
+## `truncate`.
+pub fn take(s: String, n: Int) -> String = substring(s, 0, n)
+
+## Everything after the first `n` characters; `n` is clamped into `[0, len]`,
+## so this never panics. This is the "the rest of it" that 50 call sites spell
+## `substring(x, i, str.len(x))`.
+pub fn drop(s: String, n: Int) -> String = substring(s, n, len(s))
+
+## The code point at `i`. Panics when `i` is out of range -- `i` is a position
+## the caller says exists, exactly like `xs[i]` and `bytes.at`
+## (spec §4.8, criterion 1); `get`-style inquiry about a character is
+## `cursor.char` on a position you already hold.
+##
+## A code point, not a one-character string: `Int` is the currency
+## `code_points`, `from_char` and `cursor.char` already trade in, and `chars`
+## is the function that answers with strings.
+pub fn at(s: String, i: Int) -> Int = {
+  let c = cursor.at(s, i)
+  if i < 0 || cursor.done(s, c) {
+    panic("str.at: index out of range")
+  } else {
+    cursor.char(s, c)
+  }
+}
+
 fn slice_cps(cps: List[Int], i: Int, to: Int, acc: List[Int]) -> List[Int] =
   if i >= to { acc } else { slice_cps(cps, i + 1, to, acc ++ [get(cps, i).expect("in range")]) }
 
@@ -164,6 +228,20 @@ pub fn pad_start(s: String, width: Int, pad: String) -> String = {
 fn pad_fill(pad: List[Int], plen: Int, need: Int, i: Int, acc: List[Int]) -> List[Int] =
   if i >= need { acc }
   else { pad_fill(pad, plen, need, i + 1, acc ++ [get(pad, i % plen).expect("cycle in range")]) }
+
+## `s` right-padded with `pad` until it is `width` code points wide. The mirror
+## of `pad_start`, with the same clauses: `s` comes back unchanged when it is
+## already wide enough or `pad` is empty, and the filler is truncated to land
+## exactly on width.
+pub fn pad_end(s: String, width: Int, pad: String) -> String = {
+  let have = len(s)
+  if have >= width || pad == "" {
+    s
+  } else {
+    let acc: List[Int] = []
+    s ++ from_code_points(pad_fill(code_points(pad), len(pad), width - have, 0, acc))
+  }
+}
 
 ## `s` with its code points in reverse order (surrogate pairs stay intact).
 pub fn reverse(s: String) -> String = {

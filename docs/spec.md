@@ -1372,10 +1372,17 @@ std → 内建，std 模块自己的 `pub fn len` 正是靠这一条合法。
   三个，见 §4.3 的往返闭合）、全角与阿拉伯-印度等非 ASCII 数字（宿主的
   `Character.digit` 收它们，Dawn 的数字集是 ASCII 封闭的）。
 
-  其余在 **`std/str`**：`str.len str.is_empty str.trim str.to_lower str.to_upper
-  str.contains str.starts_with str.ends_with str.index_of str.last_index_of
-  str.repeat str.substring str.pad_start str.reverse str.chars str.split
-  str.from_char`。
+  其余在 **`std/str`**：`str.len str.is_empty str.trim str.trim_start str.trim_end
+  str.to_lower str.to_upper str.contains str.starts_with str.ends_with
+  str.strip_prefix str.strip_suffix str.index_of str.last_index_of
+  str.repeat str.substring str.take str.drop str.at str.pad_start str.pad_end
+  str.reverse str.chars str.split str.replace str.from_char`。
+
+  `strip_prefix`/`strip_suffix` 回 `Option[String]`：判定与剥离一次完成，故调用方
+  不必自己算偏移（判据 2）。`take`/`drop` 是 `substring` 的两个单端写法、同样钳位
+  （判据 3），`truncate` 就是 `take`，不另设一个名字。`at(s, i)` 回**码点 `Int`**、
+  越界 panic（判据 1）——字符即码点是本语言的既定货币（`code_points`/`from_char`/
+  `cursor.char` 都是它），回 `List[String]` 的是 `chars`。
 
   `to_lower`/`to_upper` 是 **Unicode 简单(1:1)大小写映射**：一个码点进、一个码点出，
   无 locale、无上下文，故**码点数不变**。这排除了完整映射的三类特例——长度会变的
