@@ -500,6 +500,18 @@ is a name no dispatcher should have an arm for, which is how the three dead arms
 >   在表达式导向 + `?` 透明组合下不承重。§2.3–2.5 图纸存档，推翻需新证据。
 > - **连锁**：积压的破坏窗口队列（RD-06 命名族、RD-09 尾款、RD-14 渲染，#90 视 lexer 进度）
 >   排成有日程的破坏批，v0.40.0 后紧随清算，不再「等着」。
+>
+> **再修订（同日，lambda 人体工学轮）**：
+>
+> - **acquire 改急切值**：`bracket(resource: A, release: fn(A) -> Unit !e, use: fn(A) -> B !e) -> B`
+>   ——Dawn 无异步异常，「资源已取、保护未装」的窗口里没有用户代码可跑，thunk 无保护收益
+>   （Haskell 包 thunk 只为异步异常；Koka `finally` 即急切形）。两个闭包位而非三个；
+>   配合 with 糖后资源代码零 lambda：`with f <- bracket(open(path), close)`。
+> - **箭头 lambda 进破坏批（#109）**：`x => e` / `(a, b) => e` / `() => e`，去掉 `fn` 仪式
+>   （`=>` 已独占标记 lambda，match 臂是 `->` 不冲突；parser 用 JS/Scala 式重解释）。
+>   **尾闭包位保留 `fn` 拼写**保无歧义（否则与柯里化调用 `f(a)(x)` 撞）。占位符 lambda
+>   （Kotlin `it`/Scala `_`）判不做：边界歧义与显式气质相斥。具名函数裸传（eta 缩减）
+>   今天已可用，是消 lambda 噪音的第一手段。
 
 ### 决策 1 —— `bracket` 是运行时 intrinsic，还是 Core 节点？
 
