@@ -1361,6 +1361,15 @@ fn postfix_expr(p: P, st: St, ns: Bool) -> PR[Expr] = {
           let (st6, args, close) = call_args(p, st3)?
           e = EMethod(e, f.text, args, f.lo, f.hi, e_lo(e), close.hi)
           st1 = st6
+        } else if at_kind(p, st3, FN) {
+          # paren-less trailing lambda: `xs.each fn(x) => ...` is the method
+          # call `xs.each(fn(x) => ...)`. Decided here rather than in the
+          # generic FN arm below so it lands on the same node `xs.each(...)`
+          # does -- attaching to the EFieldAcc would apply the field's value
+          # instead of calling the method.
+          let (st6, lam) = lambda_expr(p, st3, ns)?
+          e = EMethod(e, f.text, [pos_arg(lam)], f.lo, f.hi, e_lo(e), e_hi(lam))
+          st1 = st6
         } else {
           e = EFieldAcc(e, f.text, f.lo, f.hi, e_lo(e), f.hi)
           st1 = st3
@@ -1380,6 +1389,21 @@ fn postfix_expr(p: P, st: St, ns: Bool) -> PR[Expr] = {
       let (st4, args, close) = call_args(p, st1)?
       e = EApply(e, args, e_lo(e), close.hi)
       st1 = st4
+    } else if k == FN {
+      # Trailing lambda (spec §4.5): an `fn` lambda written right after an
+      # expression becomes that call's last argument -- `f(a) fn(x) => e` is
+      # `f(a, fn(x) => e)`, and `f fn(x) => e` is `f(fn(x) => e)`. Only the
+      # `fn`-spelled form; a bare `{ ... }` after a call stays what it was,
+      # because a paren-less `if` header could not then tell its own body from
+      # a trailing block.
+      #
+      # Same-line only, and for the same reason application is: a line break
+      # surfaces as NEWLINE first, and the arm below only continues a chain for
+      # `.`. So `let x = f(a)` followed by a line `fn helper(...) -> T = ...`
+      # stays two statements -- the local function is not swallowed.
+      let (st5, lam) = lambda_expr(p, st1, ns)?
+      e = attach_trailing(e, lam)
+      st1 = st5
     } else if k == NEWLINE {
       # vertical method chains: `.` may start the next line (spec §1.7)
       var look = st1.pos

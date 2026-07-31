@@ -393,3 +393,51 @@ test "`with` needs a name and an arrow, and only lives in a block" {
   assert len(d3) > 0
   assert str.contains(d3[0].msg, "`with` is a statement")
 }
+
+test "a trailing `fn` lambda is the call's last argument" {
+  # after a parenthesised call
+  let out = rendered("fn f(xs: List[Int]) -> Unit = map(xs) fn(x) => x")
+  assert str.contains(out, "Apply nargs=2")
+  # after a bare name: the zero-argument form falls out of the same node
+  let out2 = rendered("fn f() -> Unit = twice fn(x) => x")
+  assert str.contains(out2, "Apply nargs=1")
+  # after `recv.name`: a method call, not a field applied to a function
+  let out3 = rendered("fn f(xs: List[Int]) -> Unit = xs.each fn(x) => x")
+  assert str.contains(out3, "MethodCall each nargs=1")
+  # and after `recv.name(a)`: the lambda joins the arguments already there
+  let out4 = rendered("fn f(xs: List[Int]) -> Unit = xs.fold(0) fn(a, x) => a")
+  assert str.contains(out4, "MethodCall fold nargs=2")
+}
+
+test "a trailing `fn` attaches only on the same line" {
+  # a local function declaration on the next line is a statement of its own --
+  # the newline ends the call, exactly as it does for `(`
+  let (m, ds) = parse_module("fn f() -> Int = {\n  let y = g(1)\n  fn h(k: Int) -> Int = k\n  h(y)\n}")
+  assert len(ds) == 0
+  match m.decls[0] {
+    DFn(f) ->
+      match f.body {
+        EBlock(stmts, tail, _, _) -> { assert len(stmts) == 2 }
+        _ -> { assert false }
+      }
+    _ -> { assert false }
+  }
+  # a lambda on the next line is likewise its own statement, not an argument
+  let (m2, ds2) = parse_module("fn f() -> Int = {\n  g(1)\n  fn(x) => x\n}")
+  assert len(ds2) == 0
+  match m2.decls[0] {
+    DFn(f) ->
+      match f.body {
+        EBlock(stmts, tail, _, _) -> { assert len(stmts) == 1 }
+        _ -> { assert false }
+      }
+    _ -> { assert false }
+  }
+}
+
+test "a bare `{ ... }` after a call is not a trailing lambda" {
+  # permanently refused: a paren-less `if` header could not tell its own body
+  # from a trailing block (docs/core-move2-design.md §6)
+  let (_, ds) = parse_module("fn f(xs: List[Int]) -> Unit = {\n  map(xs) { x }\n}")
+  assert len(ds) > 0
+}
