@@ -1,0 +1,59 @@
+# Every shape of the two 2026-07-31 sugars: the `with` statement (spec §4.10)
+# and the `fn` trailing lambda (spec §4.3). Parsing only -- what they mean is
+# pinned by scripts/spike-native/{with_sugar,trailing_fn}.dawn.
+
+fn one(path: String) -> Unit !io = {
+  with f <- bracket(open(path), close)
+  write(f)
+}
+
+fn nested(a: String, b: String) -> Unit !io = {
+  with x <- bracket(open(a), close)
+  with y <- bracket(open(b), close)
+  write2(x, y)
+}
+
+# a `with` after ordinary statements, and a wrapped header
+fn after_statements(path: String) -> Unit !io = {
+  let p = normalize(path)
+  let n = 1
+  with f <-
+    bracket(open(p), close)
+  write(f)
+}
+
+# the right-hand side may be a method call or a bare name
+fn other_callees(r: Handle) -> Unit !io = {
+  with a <- r.borrow()
+  with b <- lease
+  use_both(a, b)
+}
+
+# a loop inside the region is the region's own: its break crosses nothing
+fn loop_inside(xs: List[Int]) -> Unit !io = {
+  with f <- bracket(open("r"), close)
+  for x in xs {
+    if x == 0 { break }
+  }
+  write(f)
+}
+
+fn trailing(xs: List[Int]) -> Unit !io = {
+  let a = map(xs) fn(x) => x + 1
+  let b = fold(xs, 0) fn(acc, x) => acc + x
+  let c = xs.each fn(x) => x
+  let d = run fn() => 1
+  let e = map(xs) fn(x) => {
+    let y = x + 1
+    y
+  }
+  report(a, b, c, d, e)
+}
+
+# a trailing lambda binds to the call on its own line; the next line's `fn` is
+# a local function declaration
+fn boundary(xs: List[Int]) -> Int = {
+  let ys = map(xs) fn(x) => x
+  fn helper(k: Int) -> Int = k
+  helper(len(ys))
+}

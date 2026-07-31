@@ -20,9 +20,9 @@ use token.{
   INT, FLOAT, STRING, IDENT, TYPEIDENT, UNDERSCORE, NEWLINE, EOF,
   FN, LET, VAR, TYPE, ALIAS, CONST, USE, JAVA, PUB, TRAIT, IMPL,
   MATCH, IF, ELSE, FOR, IN, WHILE, RETURN, BREAK, CONTINUE,
-  COMPTIME, UNSAFE_PURE, TEST, ASSERT, TRUE, FALSE, NOT,
+  COMPTIME, UNSAFE_PURE, TEST, ASSERT, WITH, TRUE, FALSE, NOT,
   LPAREN, RPAREN, LBRACE, RBRACE, LBRACKET, RBRACKET,
-  COMMA, COLON, DOT, DOTDOT, QUESTION, ARROW, FATARROW,
+  COMMA, COLON, DOT, DOTDOT, QUESTION, ARROW, LARROW, FATARROW,
   EQ, EQEQ, NEQ, LT, LE, GT, GE,
   PLUS, MINUS, STAR, SLASH, PERCENT, PLUSPLUS, PIPEGT, PIPE,
   AMPAMP, PIPEPIPE, AMP, CARET, TILDE, SHL, SHR, USHR, BANG, AT,
@@ -1076,8 +1076,8 @@ fn pipe_expr(p: P, st: St, ns: Bool) -> PR[Expr] = {
       EApply(EVar(name, vlo, vhi), args, _, rhi) ->
         EApply(EVar(name, vlo, vhi), [pos_arg(left)] ++ args, e_lo(left), rhi)
       EVar(name, vlo, vhi) -> EApply(EVar(name, vlo, vhi), [pos_arg(left)], e_lo(left), vhi)
-      ELambda(ps, b, llo, lhi) ->
-        EApply(ELambda(ps, b, llo, lhi), [pos_arg(left)], e_lo(left), lhi)
+      ELambda(ps, b, sg, llo, lhi) ->
+        EApply(ELambda(ps, b, sg, llo, lhi), [pos_arg(left)], e_lo(left), lhi)
       other -> return Err((st3, pd_h(
         "the right side of `|>` must be a call, a function name, or a lambda",
         e_lo(other), e_hi(other), "x |> f(a) is equivalent to f(x, a)")))
@@ -1361,6 +1361,15 @@ fn postfix_expr(p: P, st: St, ns: Bool) -> PR[Expr] = {
           let (st6, args, close) = call_args(p, st3)?
           e = EMethod(e, f.text, args, f.lo, f.hi, e_lo(e), close.hi)
           st1 = st6
+        } else if at_kind(p, st3, FN) {
+          # paren-less trailing lambda: `xs.each fn(x) => ...` is the method
+          # call `xs.each(fn(x) => ...)`. Decided here rather than in the
+          # generic FN arm below so it lands on the same node `xs.each(...)`
+          # does -- attaching to the EFieldAcc would apply the field's value
+          # instead of calling the method.
+          let (st6, lam) = lambda_expr(p, st3, ns)?
+          e = EMethod(e, f.text, [pos_arg(lam)], f.lo, f.hi, e_lo(e), e_hi(lam))
+          st1 = st6
         } else {
           e = EFieldAcc(e, f.text, f.lo, f.hi, e_lo(e), f.hi)
           st1 = st3
@@ -1380,6 +1389,21 @@ fn postfix_expr(p: P, st: St, ns: Bool) -> PR[Expr] = {
       let (st4, args, close) = call_args(p, st1)?
       e = EApply(e, args, e_lo(e), close.hi)
       st1 = st4
+    } else if k == FN {
+      # Trailing lambda (spec §4.5): an `fn` lambda written right after an
+      # expression becomes that call's last argument -- `f(a) fn(x) => e` is
+      # `f(a, fn(x) => e)`, and `f fn(x) => e` is `f(fn(x) => e)`. Only the
+      # `fn`-spelled form; a bare `{ ... }` after a call stays what it was,
+      # because a paren-less `if` header could not then tell its own body from
+      # a trailing block.
+      #
+      # Same-line only, and for the same reason application is: a line break
+      # surfaces as NEWLINE first, and the arm below only continues a chain for
+      # `.`. So `let x = f(a)` followed by a line `fn helper(...) -> T = ...`
+      # stays two statements -- the local function is not swallowed.
+      let (st5, lam) = lambda_expr(p, st1, ns)?
+      e = attach_trailing(e, lam)
+      st1 = st5
     } else if k == NEWLINE {
       # vertical method chains: `.` may start the next line (spec §1.7)
       var look = st1.pos
@@ -1444,6 +1468,11 @@ fn primary_expr(p: P, st: St, ns: Bool) -> PR[Expr] = {
     Ok((st2, EUnsafePure(b, t.lo, e_hi(b))))
   } else if k == TYPEIDENT {
     ctor_expr(p, st, ns)
+  } else if k == WITH {
+    # `with` is a statement, not an expression: it needs a rest-of-block to turn
+    # into a closure, and only a block has one (spec §4.10).
+    Err((st, perr_h(p, st, "`with` is a statement and needs an enclosing block",
+      "wrap the body in braces: fn f() = { with x <- g(...) ... }")))
   } else {
     Err((st, perr(p, st, "expected an expression, found `" ++ t.text ++ "`")))
   }
@@ -1585,7 +1614,7 @@ fn lambda_expr(p: P, st: St, ns: Bool) -> PR[Expr] = {
   let (st9, _) = want(p, st8, FATARROW, "`=>` (lambda body)")?
   let st10 = skip_nl(p, st9)
   let (st11, body) = expression(p, st10, ns)?
-  Ok((st11, ELambda(params, body, kw.lo, e_hi(body))))
+  Ok((st11, ELambda(params, body, false, kw.lo, e_hi(body))))
 }
 
 fn list_lit(p: P, st: St) -> PR[Expr] = {
@@ -1656,22 +1685,59 @@ fn if_expr(p: P, st: St) -> PR[Expr] = {
 
 fn block_expr(p: P, st: St) -> PR[Expr] = {
   let (st0, open) = want(p, st, LBRACE, "`{`")?
-  var st1 = skip_nl(p, st0)
+  let st1 = skip_nl(p, st0)
+  let (st2, stmts, tail) = block_body(p, st1)?
+  let (st3, close) = want(p, st2, RBRACE, "`}`")?
+  Ok((st3, EBlock(stmts, tail, open.lo, close.hi)))
+}
+
+## The statements of a block, up to but not including its `}` (or EOF). Split
+## out of `block_expr` because `with` needs to call it on the *rest* of a block
+## it is standing in the middle of.
+##
+## Two things end the list: the closing brace, and a `with` statement — which
+## swallows everything after it into a closure and hands back the desugared call
+## as the block's value (spec §4.10).
+fn block_body(
+  p: P,
+  st: St
+) -> Result[(St, List[Stmt], Option[Expr]), (St, Diag)] = {
+  var st1 = st
   var stmts: List[Stmt] = []
-  while not at_kind(p, st1, RBRACE) && not at_kind(p, st1, EOF) {
-    match stmt_and_sep(p, st1) {
-      Ok(r) -> {
-        let (st2, s) = r
-        stmts = stmts ++ [s]
-        st1 = st2
+  var with_tail: Option[Expr] = None
+  var done = false
+  while not done && not at_kind(p, st1, RBRACE) && not at_kind(p, st1, EOF) {
+    if at_kind(p, st1, WITH) {
+      match with_stmt(p, st1) {
+        Ok(r) -> {
+          let (st2, e) = r
+          with_tail = Some(e)
+          st1 = st2
+          done = true
+        }
+        Err(fe) -> {
+          let (st2, d) = fe
+          st1 = sync_stmt(p, St { ..st2, diags: st2.diags ++ [d] })
+        }
       }
-      Err(fe) -> {
-        let (st2, d) = fe
-        st1 = sync_stmt(p, St { ..st2, diags: st2.diags ++ [d] })
+    } else {
+      match stmt_and_sep(p, st1) {
+        Ok(r) -> {
+          let (st2, s) = r
+          stmts = stmts ++ [s]
+          st1 = st2
+        }
+        Err(fe) -> {
+          let (st2, d) = fe
+          st1 = sync_stmt(p, St { ..st2, diags: st2.diags ++ [d] })
+        }
       }
     }
   }
-  let (st3, close) = want(p, st1, RBRACE, "`}`")?
+  match with_tail {
+    Some(e) -> return Ok((st1, stmts, Some(e)))
+    None -> ()
+  }
   # trailing expression rule: a final plain expression statement is the block's value
   var tail: Option[Expr] = None
   if len(stmts) > 0 {
@@ -1683,8 +1749,52 @@ fn block_expr(p: P, st: St) -> PR[Expr] = {
       other -> ()
     }
   }
-  Ok((st3, EBlock(stmts, tail, open.lo, close.hi)))
+  Ok((st1, stmts, tail))
 }
+
+## `with x <- f(a)` plus the rest of the enclosing block, which becomes a
+## closure attached as f's **last** argument (spec §4.10):
+##
+##     with x <- f(a)      f(a, fn(x) => {
+##     g(x)          ==>     g(x)
+##     h(x)                  h(x)
+##                         })
+##
+## `st` is at the `with`; the returned state sits on the block's `}`, because
+## everything up to it belongs to the closure now. Nesting is free: the inner
+## `block_body` meets the next `with` and does this again, so releases run in
+## reverse order when the calls are `bracket`.
+fn with_stmt(p: P, st: St) -> PR[Expr] = {
+  let (st1, kw) = adv(p, st)
+  # a plain name, like a lambda parameter -- which is what it becomes. `_` is
+  # not accepted for the same reason `fn(_) => ...` is not: there is one
+  # spelling for a binding here, and it is a name.
+  let (st2, name) = want(p, st1, IDENT, "a name to bind (`with x <- f(...)`)")?
+  let (st3, _) = want(p, st2, LARROW, "`<-`")?
+  let st4 = skip_nl(p, st3)
+  let (st5, callee) = expression(p, st4, false)?
+  let st6 = want_sep(p, st5)?
+  let rest_lo = cur(p, st6).lo
+  let (st7, stmts, tail) = block_body(p, st6)?
+  let rest_hi = cur(p, st7).lo
+  let param = LambdaParam { name: name.text, ann: None, lo: name.lo, hi: name.hi }
+  let body = EBlock(stmts, tail, rest_lo, rest_hi)
+  let lam = ELambda([param], body, true, kw.lo, rest_hi)
+  Ok((st7, attach_trailing(callee, lam)))
+}
+
+## Attach `lam` as the last argument of `callee`. A call grows one argument; a
+## `recv.name` becomes the method call it looks like; anything else is applied
+## to the closure, which is what `with x <- f` on a bare function value means.
+## This is the one place both sugars land — `with` and the `fn` trailing lambda
+## are the same attachment, reached from two spellings.
+fn attach_trailing(callee: Expr, lam: Expr) -> Expr =
+  match callee {
+    EApply(t, args, clo, chi) -> EApply(t, args ++ [pos_arg(lam)], clo, e_hi(lam))
+    EMethod(t, n, args, nlo, nhi, clo, chi) ->
+      EMethod(t, n, args ++ [pos_arg(lam)], nlo, nhi, clo, e_hi(lam))
+    other -> EApply(other, [pos_arg(lam)], e_lo(other), e_hi(lam))
+  }
 
 fn stmt_and_sep(p: P, st: St) -> PR[Stmt] = {
   let (st1, s) = statement(p, st)?

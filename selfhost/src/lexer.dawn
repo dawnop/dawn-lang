@@ -16,7 +16,7 @@ use token.{
   TokKind, Token, Seg, SText, SCode, Diag, keyword, kind_name,
   INT, FLOAT, STRING, IDENT, TYPEIDENT, UNDERSCORE, NEWLINE, EOF, COMMENT,
   LPAREN, RPAREN, LBRACE, RBRACE, LBRACKET, RBRACKET,
-  COMMA, COLON, DOT, DOTDOT, QUESTION, ARROW, FATARROW,
+  COMMA, COLON, DOT, DOTDOT, QUESTION, ARROW, LARROW, FATARROW,
   EQ, EQEQ, NEQ, LT, LE, GT, GE,
   PLUS, MINUS, STAR, SLASH, PERCENT, PLUSPLUS, PIPEGT, PIPE,
   AMPAMP, PIPEPIPE, AMP, CARET, TILDE, SHL, SHR, USHR,
@@ -108,8 +108,8 @@ fn continues_line(k: TokKind) -> Bool =
   match k {
     PLUS | MINUS | STAR | SLASH | PERCENT | PLUSPLUS | PIPEGT | PIPE | AMPAMP |
     PIPEPIPE | AMP | CARET | SHL | SHR | USHR | EQEQ | NEQ | LT | LE | GT |
-    GE | COMMA | LPAREN | LBRACKET | LBRACE | ARROW | FATARROW | EQ | COLON |
-    DOT | NOT | AT | NEWLINE -> true
+    GE | COMMA | LPAREN | LBRACKET | LBRACE | ARROW | LARROW | FATARROW | EQ |
+    COLON | DOT | NOT | AT | NEWLINE -> true
     _ -> false
   }
 
@@ -694,10 +694,15 @@ fn strip_triple_indent(segs_in: List[Seg]) -> List[Seg] = {
 
 # ---- symbols ----
 
+## The two-character operators. `<-` is one of them by the same maximal munch
+## every other pair here gets: `a<-b` reads as `a <- b`, not `a < (-b)`. Spaced
+## code (`a < -b`) is untouched, and `dawn fmt` puts spaces around every binary
+## operator, so no formatted source can reach the second reading (spec §1.4).
 fn two_kind(c: Int, c1: Int) -> Option[TokKind] =
   if c == '<' && c1 == '<' { Some(SHL) }
   else if c == '>' && c1 == '>' { Some(SHR) }
   else if c == '-' && c1 == '>' { Some(ARROW) }
+  else if c == '<' && c1 == '-' { Some(LARROW) }
   else if c == '=' && c1 == '>' { Some(FATARROW) }
   else if c == '=' && c1 == '=' { Some(EQEQ) }
   else if c == '!' && c1 == '=' { Some(NEQ) }
@@ -927,6 +932,20 @@ test "unrecognized character" {
 test "three char and two char operators" {
   assert kinds(">>> >> << |> ++ .. && ||") ==
     ["USHR", "SHR", "SHL", "PIPEGT", "PLUSPLUS", "DOTDOT", "AMPAMP", "PIPEPIPE", "NEWLINE", "EOF"]
+}
+
+test "`<-` munches maximally and `with` is a keyword" {
+  assert kinds("with f <- g()") ==
+    ["WITH", "IDENT", "LARROW", "IDENT", "LPAREN", "RPAREN", "NEWLINE", "EOF"]
+  # unspaced is the same token (the consequence of the munch, spec §1.4)
+  assert kinds("a<-b") == ["IDENT", "LARROW", "IDENT", "NEWLINE", "EOF"]
+  # spaced-out comparison against a negation is untouched
+  assert kinds("a < -b") == ["IDENT", "LT", "MINUS", "IDENT", "NEWLINE", "EOF"]
+  # the longer pairs still win: `<<` and `<=` are probed first
+  assert kinds("a <<-b") == ["IDENT", "SHL", "MINUS", "IDENT", "NEWLINE", "EOF"]
+  # a line ending in `<-` continues onto the next
+  assert kinds("with f <-\n  g()") ==
+    ["WITH", "IDENT", "LARROW", "IDENT", "LPAREN", "RPAREN", "NEWLINE", "EOF"]
 }
 
 test "underscore alone vs in identifiers" {

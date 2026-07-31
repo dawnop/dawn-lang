@@ -144,7 +144,11 @@ pub type Cx = {
   loop_jumps: Set[Int]
 }
 
-pub type LambdaCx = { boundary: Int, expected_ret: Option[Ty], captures: List[Int] }
+## One lambda's frame. `sugar` says the parser synthesized this lambda from a
+## `with` statement (ast.dawn), which changes nothing about how it is checked
+## and everything about how a `return`/`break`/`?` inside it is reported.
+pub type LambdaCx =
+  { boundary: Int, expected_ret: Option[Ty], captures: List[Int], sugar: Bool }
 
 ## A fresh checker state for one module.
 pub fn cx_new(owner_class: Option[String], src_path: Option[String]) -> Cx = {
@@ -3326,12 +3330,33 @@ test "internal builtins hide from user code but not std" {
   assert map.size(std_bins) == map.size(builtins())
 }
 
+## Is the innermost lambda one the parser synthesized from a `with` statement?
+## Every diagnostic about crossing a closure boundary asks this first: the author
+## of a `with` block wrote straight-line statements, so naming "a lambda" would
+## point at code that is not on the screen.
+pub fn in_with_sugar(cx: Cx) -> Bool =
+  len(cx.lambda_stack) > 0 && cx.lambda_stack[len(cx.lambda_stack) - 1].sugar
+
+## The message for a jump that would have to leave a `with` region (spec §4.10).
+pub fn with_cross_msg(kw: String) -> String =
+  "`" ++ kw ++ "` cannot cross the closure `with` introduced: the statements " ++
+  "after `with` are that closure's body"
+
 ## return / return expr — early return from the enclosing fn (or lambda).
 ## The value is checked by the caller (recursion lives there); this decides the
 ## target type or errors. Returns Some(target) when a value should be checked
 ## against it, None when the return is malformed (already reported).
 pub fn return_target(cx: Cx, lo: Int, hi: Int) -> (Cx, Option[Ty]) = {
   if len(cx.lambda_stack) > 0 {
+    # A `with` region is refused outright rather than quietly returning from the
+    # synthesized closure: that reads as the enclosing function's return only
+    # when the `with` block is itself in tail position, and nothing on the page
+    # says which case the reader is in.
+    if in_with_sugar(cx) {
+      return (cerr_h(cx, with_cross_msg("return"), lo, hi,
+        "drop the `return` — the block's last expression is already what the " ++
+          "`with` call hands back"), None)
+    }
     let lc = cx.lambda_stack[len(cx.lambda_stack) - 1]
     match lc.expected_ret {
       Some(t) -> (cx, Some(t))
@@ -3361,6 +3386,11 @@ pub fn check_loop_jump(cx: Cx, kw: String, lo: Int, hi: Int) -> (Cx, Bool) = {
   }
   let depth = cx.loop_stack[len(cx.loop_stack) - 1]
   if depth != len(cx.lambda_stack) {
+    if in_with_sugar(cx) {
+      return (cerr_h(cx, with_cross_msg(kw), lo, hi,
+        "the loop is outside that closure; move the `with` inside the loop body, " ++
+          "or call the resource-using part as its own function"), false)
+    }
     return (cerr_h(cx, "`" ++ kw ++ "` cannot cross a lambda boundary to reach the loop outside",
       lo, hi, "a lambda is its own function: use `return` to exit it, or restructure the loop"),
       false)
@@ -3379,10 +3409,24 @@ pub fn check_propagate_typed(cx: Cx, ot: Ty, operand: TExpr, lo: Int, hi: Int) -
     let lc = cx.lambda_stack[len(cx.lambda_stack) - 1]
     sig_ret = match lc.expected_ret {
       Some(t) -> t
-      None -> return (cerr_h(cx,
-        "`?` inside a lambda needs the lambda's return type to be known from context", lo, hi,
-        "handle the Option/Result with match, or make the expected function type explicit"),
-        TyError, XError(lo, hi))
+      None ->
+        # `?` is meant to compose transparently through `with` (spec §4.10):
+        # the synthesized closure's return type is the `with` call's, which is
+        # the block's value. When that type is not yet known, say so in the
+        # reader's terms rather than naming a lambda they did not write.
+        if in_with_sugar(cx) {
+          return (cerr_h(cx,
+            "`?` after `with` needs the type of the `with` call to be known from context",
+            lo, hi,
+            "annotate the enclosing function's return type, so the closure `with` " ++
+              "introduced knows what it hands back"), TyError, XError(lo, hi))
+        } else {
+          return (cerr_h(cx,
+            "`?` inside a lambda needs the lambda's return type to be known from context",
+            lo, hi,
+            "handle the Option/Result with match, or make the expected function type explicit"),
+            TyError, XError(lo, hi))
+        }
     }
   } else {
     sig_ret = match cx.current_sig {
@@ -3477,7 +3521,10 @@ test "loop jumps respect lambda boundaries" {
   cx = Cx { ..cx, loop_stack: [0] }
   let (cx2, ok2) = check_loop_jump(cx, "break", 0, 5)
   assert ok2
-  cx = Cx { ..cx, lambda_stack: [LambdaCx { boundary: 0, expected_ret: None, captures: [] }] }
+  cx = Cx {
+    ..cx,
+    lambda_stack: [LambdaCx { boundary: 0, expected_ret: None, captures: [], sugar: false }]
+  }
   let (cx3, ok3) = check_loop_jump(cx, "continue", 0, 8)
   assert not ok3
   assert str.contains(cx3.diags[0].msg, "cannot cross a lambda boundary")
@@ -4156,7 +4203,7 @@ pub fn name_refs(e: Expr, out: Set[String]) -> Set[String] =
       for a in args { o = name_refs(a.e, o) }
       o
     }
-    ELambda(_, body, _, _) -> name_refs(body, out)
+    ELambda(_, body, _, _, _) -> name_refs(body, out)
     EBlock(stmts, tail, _, _) -> {
       var o = out
       for s in stmts { o = stmt_name_refs(s, o) }
@@ -4252,7 +4299,7 @@ test "name refs walk every call position" {
     [SLet("x", false, None,
       EApply(EVar("g", 0, 1), [pos_arg(EVar("y", 2, 3))], 0, 4), 0, 5)],
     Some(EMethod(EVar("m", 6, 7), "h",
-      [pos_arg(ELambda(no_lparams(), EVar("z", 10, 11), 8, 12))], 8, 9, 6, 13)),
+      [pos_arg(ELambda(no_lparams(), EVar("z", 10, 11), false, 8, 12))], 8, 9, 6, 13)),
     0,
     14
   )
@@ -4591,7 +4638,7 @@ pub fn needs_expected(cx: Cx, e: Expr) -> Bool =
             (not has_parens && len(ci.fields) > 0 && not a.is_record)
         }
       }
-    ELambda(params, _, _, _) -> {
+    ELambda(params, _, _, _, _) -> {
       for p in params {
         match p.ann {
           None -> return true
@@ -5475,7 +5522,7 @@ fn check_expr_at(cx: Cx, e: Expr, expected: Option[Ty]) -> (Cx, Ty, TExpr) !io =
     EUnsafePure(body, lo, hi) -> check_unsafe_pure(cx, body, expected, lo, hi)
     ECtor(cname, cargs, spread, has_parens, cclo, cchi, lo, hi) ->
       check_ctor_call(cx, cname, cargs, spread, has_parens, expected, None, cclo, cchi, lo, hi)
-    ELambda(params, body, lo, hi) -> check_lambda(cx, params, body, expected, lo, hi)
+    ELambda(params, body, sugar, lo, hi) -> check_lambda(cx, params, body, sugar, expected, lo, hi)
     EApply(target, args, lo, hi) -> check_apply(cx, target, args, expected, lo, hi)
     EMethod(target, name, args, nlo, nhi, lo, hi) ->
       check_method_call(cx, target, name, args, expected, nlo, nhi, lo, hi)
@@ -5746,6 +5793,7 @@ fn check_lambda(
   cx: Cx,
   params: List[LambdaParam],
   body: Expr,
+  sugar: Bool,
   expected: Option[Ty],
   lo: Int,
   hi: Int
@@ -5808,7 +5856,8 @@ fn check_lambda(
   let empty_w: Map[Eff, (Int, Int, String)] = map.empty()
   let exp_ret: Option[Ty] =
     if have_exp && is_concrete(cx1, eret) { Some(eret) } else { None }
-  let ctx = LambdaCx { boundary: len(cx1.scopes), expected_ret: exp_ret, captures: [] }
+  let ctx =
+    LambdaCx { boundary: len(cx1.scopes), expected_ret: exp_ret, captures: [], sugar: sugar }
   cx1 = Cx {
     ..cx1,
     used_effects: [],
@@ -5935,7 +5984,7 @@ fn check_apply(
   # piping into an unannotated lambda: the arguments determine its parameter types
   var lambda_unannotated = false
   match target {
-    ELambda(ps, _, _, _) -> {
+    ELambda(ps, _, _, _, _) -> {
       for p in ps {
         match p.ann {
           None -> { lambda_unannotated = true }
@@ -6312,7 +6361,7 @@ fn check_local_fn(
   let ft = TyFn(ptys, ret, eff)
   let (cxc, sid) = declare(cx1, name, ft, false, nlo, nhi)
   cx1 = cxc
-  let (cxd, actual, lam) = check_lambda(cx1, params, body, Some(ft), lo, hi)
+  let (cxd, actual, lam) = check_lambda(cx1, params, body, false, Some(ft), lo, hi)
   cx1 = cxd
   match actual {
     TyFn(_, ar, ae) -> {
@@ -6343,7 +6392,7 @@ fn check_local_fn(
 
 fn is_lambda_or_var(e: Expr) -> Bool =
   match e {
-    ELambda(_, _, _, _) -> true
+    ELambda(_, _, _, _, _) -> true
     EVar(_, _, _) -> true
     _ -> false
   }
@@ -7038,7 +7087,7 @@ fn sam_ret_compatible(js: Jsig, r: Ty, j: String) -> Bool !io =
 ## scored by arity now, checked once the winning overload is known.
 fn sam_deferred(cx: Cx, a: Expr) -> Bool =
   match a {
-    ELambda(ps, _, _, _) -> {
+    ELambda(ps, _, _, _, _) -> {
       for p in ps {
         match p.ann {
           None -> return true
@@ -7066,7 +7115,7 @@ fn sam_deferred(cx: Cx, a: Expr) -> Bool =
 
 fn deferred_arity(cx: Cx, a: Expr) -> Int =
   match a {
-    ELambda(ps, _, _, _) -> len(ps)
+    ELambda(ps, _, _, _, _) -> len(ps)
     ECtor(cn, _, _, _, _, _, _, _) ->
       match map.get(cx.ctors_by_name, cn) {
         Some(k) -> {
@@ -8057,7 +8106,7 @@ test "lambdas infer parameters from expected types and track captures" {
   let (cxk, _) = declare(cx, "k", TyInt, false, 0, 1)
   # fn(x) => x + k against fn(Int) -> Int captures k
   let lam = ELambda([LambdaParam { name: "x", ann: None, lo: 3, hi: 4 }],
-    EBinary(OpAdd, EVar("x", 9, 10), EVar("k", 13, 14), 11, 12, 9, 14), 0, 14)
+    EBinary(OpAdd, EVar("x", 9, 10), EVar("k", 13, 14), 11, 12, 9, 14), false, 0, 14)
   let (cx1, t, node) = check_expr(cxk, lam, Some(TyFn([TyInt], TyInt, EPure)))
   assert t == TyFn([TyInt], TyInt, EPure)
   assert len(cx1.diags) == 0
@@ -8071,7 +8120,7 @@ test "lambdas infer parameters from expected types and track captures" {
   # a var cannot be captured
   let (cxv, _) = declare(cxk, "v", TyInt, true, 0, 1)
   let lam2 = ELambda([LambdaParam { name: "y", ann: None, lo: 3, hi: 4 }],
-    EVar("v", 9, 10), 0, 10)
+    EVar("v", 9, 10), false, 0, 10)
   let (cx3, _, _) = check_expr(cxv, lam2, Some(TyFn([TyInt], TyInt, EPure)))
   assert str.contains(cx3.diags[0].msg, "lambdas cannot capture `var` bindings")
 }
@@ -8079,7 +8128,7 @@ test "lambdas infer parameters from expected types and track captures" {
 test "apply: piping arguments into an unannotated lambda" {
   var cx = seed_prelude(test_cx())
   cx = push_scope(cx)
-  let lam = ELambda([LambdaParam { name: "x", ann: None, lo: 1, hi: 2 }], EVar("x", 7, 8), 0, 8)
+  let lam = ELambda([LambdaParam { name: "x", ann: None, lo: 1, hi: 2 }], EVar("x", 7, 8), false, 0, 8)
   let ap = EApply(lam, [pos_arg(EInt(1, 10, 11))], 0, 12)
   let (cx1, t, _) = check_expr(cx, ap, no_expected())
   assert t == TyInt
@@ -8146,7 +8195,7 @@ test "argument names are a constructor's business, and every other callee says s
   assert cx3.diags[0].lo == 2
   # (3) a function value has no parameter names to write
   let lam = ELambda([LambdaParam { name: "x", ann: Some(TNamed("Int", [], 4, 7)), lo: 1, hi: 2 }],
-    EVar("x", 11, 12), 0, 12)
+    EVar("x", 11, 12), false, 0, 12)
   let on_value = EApply(lam, [Arg { name: Some("a"), e: EInt(1, 16, 17), lo: 13, hi: 17 }], 0, 18)
   let (cx4, _, _) = check_expr(cx, on_value, no_expected())
   assert cx4.diags[0].msg == "this callee is a function value, not a constructor; " ++
@@ -8196,7 +8245,7 @@ test "the same call, four callees, four kinds of typed node" {
   }
   # anything else applies a function value
   let lam = ELambda([LambdaParam { name: "x", ann: Some(TNamed("Int", [], 4, 7)), lo: 1, hi: 2 }],
-    EVar("x", 11, 12), 0, 12)
+    EVar("x", 11, 12), false, 0, 12)
   let (_, _, n4) = check_expr(cx, EApply(lam, [pos_arg(EInt(1, 13, 14))], 0, 15), no_expected())
   match n4 {
     XApply(..) -> ()
@@ -9438,4 +9487,89 @@ test "a module-qualified type resolves through the alias (LANG-06)" {
   let (cx7, _) = check_module(cx_new(Some("use_site"), None), m7, env)
   assert len(cx7.diags) > 0
   assert str.contains(cx7.diags[0].msg, "has no exported constructor `Nope`")
+}
+
+## The `with` sugar's whole checker surface. `with` is a parser rewrite, so
+## nothing here type-checks differently -- what is pinned is that a jump out of
+## the region is refused, and that the refusal talks about `with` rather than
+## about the lambda the author never wrote (ast.dawn, spec §4.10).
+test "a jump out of a `with` region names the sugar, not a lambda" {
+  let head = "fn hold(r: Int, f: fn(Int) -> Int) -> Int = f(r)\n"
+  let bad_return = head ++
+    "fn go() -> Int = {\n" ++
+    "  with x <- hold(1)\n" ++
+    "  return x\n" ++
+    "}\n"
+  let (m, pdiags) = parser.parse_module(bad_return)
+  assert len(pdiags) == 0
+  let env: Map[String, ModExports] = map.empty()
+  let (cx1, _) = check_module(test_cx(), m, env)
+  assert len(cx1.diags) == 1
+  assert cx1.diags[0].msg == with_cross_msg("return")
+  assert str.contains(cx1.diags[0].hint, "drop the `return`")
+
+  # break reaching a loop outside the region: the generic "crosses a lambda"
+  # message would be a lie about what is on the page
+  let bad_break = head ++
+    "fn go(xs: List[Int]) -> Int = {\n" ++
+    "  for i in xs {\n" ++
+    "    with x <- hold(1)\n" ++
+    "    break\n" ++
+    "  }\n" ++
+    "  0\n" ++
+    "}\n"
+  let (m2, pd2) = parser.parse_module(bad_break)
+  assert len(pd2) == 0
+  let (cx2, _) = check_module(test_cx(), m2, env)
+  assert len(cx2.diags) > 0
+  assert cx2.diags[0].msg == with_cross_msg("break")
+  assert str.contains(cx2.diags[0].hint, "the loop is outside that closure")
+
+  # a loop *inside* the region is untouched: its break never crosses anything
+  let ok_break = head ++
+    "fn go(xs: List[Int]) -> Int = {\n" ++
+    "  with x <- hold(1)\n" ++
+    "  for i in xs { break }\n" ++
+    "  x\n" ++
+    "}\n"
+  let (m3, pd3) = parser.parse_module(ok_break)
+  assert len(pd3) == 0
+  let (cx3, _) = check_module(test_cx(), m3, env)
+  assert len(cx3.diags) == 0
+
+  # a lambda the author *did* write, inside the region, keeps the old message
+  let inner = head ++
+    "fn go(xs: List[Int]) -> Int = {\n" ++
+    "  with x <- hold(1)\n" ++
+    "  for i in xs {\n" ++
+    "    let f = fn(k: Int) => { break }\n" ++
+    "    ()\n" ++
+    "  }\n" ++
+    "  x\n" ++
+    "}\n"
+  let (m4, pd4) = parser.parse_module(inner)
+  assert len(pd4) == 0
+  let (cx4, _) = check_module(test_cx(), m4, env)
+  assert len(cx4.diags) > 0
+  assert str.contains(cx4.diags[0].msg, "cannot cross a lambda boundary")
+}
+
+## `?` composes through `with` (docs/core-move2-design.md §6): the synthesized
+## closure hands back the `with` call's value, which is the block's value, so an
+## `Err` propagated inside the region leaves the enclosing function.
+test "`?` inside a `with` region propagates out of the function" {
+  let src =
+    "fn hold(r: Int, f: fn(Int) -> Result[Int, String]) -> Result[Int, String] = f(r)\n" ++
+    "fn parse(s: String) -> Result[Int, String] = Ok(1)\n" ++
+    "fn go(s: String) -> Result[Int, String] = {\n" ++
+    "  with x <- hold(1)\n" ++
+    "  let n = parse(s)?\n" ++
+    "  Ok(n + x)\n" ++
+    "}\n"
+  let (m, pdiags) = parser.parse_module(src)
+  assert len(pdiags) == 0
+  let env: Map[String, ModExports] = map.empty()
+  let (cx1, _) = check_module(test_cx(), m, env)
+  if len(cx1.diags) > 0 { println("UNEXPECTED: " ++ cx1.diags[0].msg) }
+  assert len(cx1.diags) == 0
 }
