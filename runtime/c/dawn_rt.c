@@ -487,28 +487,6 @@ dawn_str *dawn_str_of_int(int64_t v) {
   return dawn_str_copy(buf, (size_t)n);
 }
 
-dawn_str *dawn_str_of_float(double v) {
-  /* Approximates Java's Double.toString well enough for the spike but is
-   * NOT byte-identical to it (Java emits the shortest round-tripping form).
-   * Floats are therefore excluded from the differential corpus until the
-   * real emitter lands a proper dtoa. */
-  char buf[64];
-  int n = snprintf(buf, sizeof buf, "%.17g", v);
-  bool plain = true;
-  for (int i = 0; i < n; i++) {
-    if (buf[i] == '.' || buf[i] == 'e' || buf[i] == 'E' ||
-        buf[i] == 'n' || buf[i] == 'i') {
-      plain = false;
-      break;
-    }
-  }
-  if (plain && n + 2 < (int)sizeof buf) {
-    buf[n++] = '.';
-    buf[n++] = '0';
-  }
-  return dawn_str_copy(buf, (size_t)n);
-}
-
 dawn_str *dawn_str_of_bytes(const dawn_bytes *b) {
   /* A summary, not the contents: `Bytes` is one of the show scalars
    * (types.dawn's `show_scalars`) and the language renders it as `<N bytes>`.
@@ -1066,28 +1044,6 @@ dawn_str *dawn_cursor_slice(dawn_str *s, int64_t from, int64_t to) {
 
 /* ---- the str_* primitives ---- */
 
-/* Only `parse_int`'s leading/trailing strip uses this now; the language's
- * `str.trim` is a cursor walk in std/str (native-backend-plan.md 14.12).
- * Answers as a byte span into `s` rather than a string, so the parsers can
- * strip without an allocation. */
-static void dawn_str_trim_span(dawn_str *s, int64_t *from, int64_t *to) {
-  int64_t a = 0;
-  while (a < s->len) {
-    int64_t n;
-    if (!dawn_char_is_space((int64_t)dawn_utf8_at(s, a, &n))) break;
-    a += n;
-  }
-  int64_t b = s->len;
-  while (b > a) {
-    int64_t prev = dawn_cursor_prev(s, b);
-    int64_t n;
-    if (!dawn_char_is_space((int64_t)dawn_utf8_at(s, prev, &n))) break;
-    b = prev;
-  }
-  *from = a;
-  *to = b;
-}
-
 /* Simple (1:1) Unicode case mapping, out of the table the generated program
  * carries (dawn_rt.h, selfhost/src/case_table.dawn). The JVM backend decodes
  * the same rows into dawn/rt/Strings, so the two backends are two
@@ -1151,57 +1107,22 @@ dawn_str *dawn_str_upper(dawn_str *s) { return dawn_case(s, true); }
 
 /* ---- parsing ----
  *
- * Long.parseLong and Double.parseDouble strip first and reject anything left
- * over, and overflow is a refusal rather than a wrap. */
-
-static int64_t dawn_digit_val(char c) {
-  if (c >= '0' && c <= '9') return c - '0';
-  if (c >= 'a' && c <= 'z') return c - 'a' + 10;
-  if (c >= 'A' && c <= 'Z') return c - 'A' + 10;
-  return -1;
-}
-
-static dawn_adt *dawn_parse_radix(dawn_str *s, int64_t radix) {
-  if (radix < 2 || radix > 36) return dawn_none();
-  int64_t i, end;
-  dawn_str_trim_span(s, &i, &end);
-  bool neg = false;
-  if (i < end && (s->p[i] == '+' || s->p[i] == '-')) {
-    neg = s->p[i] == '-';
-    i++;
-  }
-  if (i >= end) return dawn_none();
-  /* accumulated as the magnitude, so that LONG_MIN parses */
-  uint64_t limit = neg ? (uint64_t)INT64_MAX + 1u : (uint64_t)INT64_MAX;
-  uint64_t acc = 0;
-  for (; i < end; i++) {
-    int64_t d = dawn_digit_val(s->p[i]);
-    if (d < 0 || d >= radix) return dawn_none();
-    if (acc > (limit - (uint64_t)d) / (uint64_t)radix) return dawn_none();
-    acc = acc * (uint64_t)radix + (uint64_t)d;
-  }
-  /* negated as unsigned: LONG_MIN's magnitude has no int64_t to be negated in */
-  int64_t v = neg ? (int64_t)(0u - acc) : (int64_t)acc;
-  return dawn_some(dawn_box_int(v));
-}
-
-dawn_adt *dawn_parse_int(dawn_str *s) { return dawn_parse_radix(s, 10); }
-
-dawn_adt *dawn_parse_int_radix(dawn_str *s, int64_t radix) {
-  return dawn_parse_radix(s, radix);
-}
+ * The accepted language of `parse_int`/`parse_float`/`parse_int_radix` is an
+ * EBNF in spec 11, and the scanner that enforces it is Dawn source
+ * (std/fmt, audit RP-05) -- the integer parsers never reach this runtime at
+ * all. What remains here is one conversion: fmt.atod hands over a string its
+ * scanner already validated and trimmed, and asks for the IEEE 754
+ * round-to-nearest-even reading of it. On that subset strtod and Java's
+ * Double.parseDouble are the same function (correct rounding is required of
+ * both), so delegating cannot reintroduce host grammar skew; every input the
+ * two hosts ever disagreed on (hex floats, "1.5f", "inf", Unicode digits) is
+ * refused by the scanner before either host can see it. */
 
 dawn_adt *dawn_parse_float(dawn_str *s) {
-  /* strtod's grammar is close to Double.parseDouble's but not equal to it:
-   * Java also accepts a trailing f/F/d/D and spells the infinities
-   * "Infinity", while strtod also takes hex floats. Floats are already out of
-   * the differential corpus over dawn_str_of_float; this is the same gap. */
-  int64_t a, b;
-  dawn_str_trim_span(s, &a, &b);
-  if (b - a == 0) return dawn_none();
-  char *buf = (char *)dawn_alloc((size_t)(b - a) + 1);
-  memcpy(buf, s->p + a, (size_t)(b - a));
-  buf[b - a] = '\0';
+  if (s->len == 0) return dawn_none();
+  char *buf = (char *)dawn_alloc((size_t)s->len + 1);
+  memcpy(buf, s->p, (size_t)s->len);
+  buf[s->len] = '\0';
   char *end = NULL;
   double v = strtod(buf, &end);
   bool whole = end != NULL && *end == '\0';

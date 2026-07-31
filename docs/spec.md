@@ -560,8 +560,19 @@ let area = {
   不是漏洞，Dawn **不**为此拆出 `PartialEq`/`Eq` 两个 trait（2026-07-26 明确
   裁定不拆）：Dawn 只有一个 `Eq`，拆开会让 `1.5 == 2.5` 这种日常写法多背一层
   概念，代价远大于收益。用到自反性的地方（容器查找）另有 Float 不能作键这条挡着。
-- `Float` 的 `to_string`/`Show` 渲染 = JVM `Double.toString`（最短往返表示，
-  `NaN`/`Infinity`/`-Infinity` 照字面）。
+- **`Float` 的 `to_string`/`Show` 渲染是语言自己写下的规则**（实现是 `std/fmt.dtoa`
+  一份 Dawn 源码，两后端与 comptime 折叠共用；2026-07-31 起不再引用宿主方法——
+  规则的**形状**取自当日 JVM `Double.toString`（JDK 19+ 的 Schubfach 最短往返），
+  故已发布的 JVM 字节一个不变，但此后宿主换算法**也不跟**）：
+  - **最短往返**：输出是能唯一读回原 double 的**最短**十进制数字串；同长候选取
+    最接近真值者，仍平局取偶数尾数。
+  - **两种形式**，按数值大小切换：`10^-3 ≤ |v| < 10^7` 用普通小数形式（`0.001`、
+    `9999999.0`），此外用科学计数法 `d.dddEe`——首位恰一个非零数字、小数点后至少
+    一位、大写 `E`、指数无前导零、负指数带 `-`、正指数不带 `+`（`1.0E7`、
+    `9.999999999999998E-4`、`4.9E-324`）。
+  - 整值保留 `.0`（`1.0` 不是 `1`）；小数部分**至少一位**；`-0.0` 保留符号。
+  - 三个特殊拼写：`NaN`（**无符号**）、`Infinity`、`-Infinity`——与 `parse_float`
+    认的三个拼写相同，故 `parse_float(to_string(x))` 对每个 `x` 闭合（§11）。
 - **`to_int(x)` 向零截断且饱和**（同 JVM `D2L`）：`to_int(2.7) == 2`、
   `to_int(-2.7) == -2`；`NaN` 得 `0`，超出 `Int` 范围的（含 `±Inf`）得**较近的那一端**
   （`to_int(1.0 / 0.0) == Int` 的最大值）。写下来是因为 C 的强转对这三种输入全是未定义、
@@ -1283,7 +1294,10 @@ use java "java.lang.Math"      # Java 互操作（§9），形式不变
 ### 10.6 捆绑标准库与 prelude
 
 标准库以 **Dawn 源码随编译器捆绑**，组织为真模块（[`stdlib-naming.md`](stdlib-naming.md)）：
-`std/str`、`std/bytes`、`std/io`、`std/list`、`std/map`、`std/set`、`std/cursor`。
+`std/str`、`std/fmt`、`std/bytes`、`std/io`、`std/list`、`std/map`、`std/set`、`std/cursor`。
+（`std/fmt` 是数字渲染与解析的实现处——`fmt.dtoa` 即 `to_string(Float)`（§4.3），
+`fmt.atoi`/`fmt.atod`/`fmt.atoi_radix` 即三个 `parse_*`（§11 的 EBNF）；用户写内建
+拼写即可，模块名存在是因为实现是一份普通的 Dawn 源码而非某个后端的宿主方法。）
 `use std/x` 命中编译器 jar 内的资源而非磁盘（磁盘上 `src/std/` 路径**保留**，落文件报错）；
 之后与普通模块引入完全一致——限定访问 `map.insert(m, k, v)`、选择性引入
 `use std/list.{find}`（§10.2/§10.3）。同名短名跨模块共存（`str.len` / `bytes.len`），
@@ -1317,7 +1331,30 @@ std → 内建，std 模块自己的 `pub fn len` 正是靠这一条合法。
   - `max/min[T: Ord](xs) -> Option[T]` — 极值；空列表 `None`
   - `max_by/min_by[T, K: Ord](xs, key: fn(T) -> K) -> Option[T]` — 按键取极值
 - **字符串**：prelude 里有 `join parse_int parse_float to_string`（字符串转数字是
-  `parse_int(s) -> Option[Int]`——没有重载，`to_int`/`to_float` 只做 Int↔Float 转换）；
+  `parse_int(s) -> Option[Int]`——没有重载，`to_int`/`to_float` 只做 Int↔Float 转换）。
+
+  **`parse_int` / `parse_float` / `parse_int_radix` 的接受语言是这段 EBNF**，由
+  `std/fmt` 自己的扫描器实施（两后端不再各自委托宿主解析器的文法；宿主只在
+  `parse_float` 通过校验后做十进制→二进制的**正确舍入**，IEEE 754 最近偶数——
+  在该子集上 `strtod` 与 `Double.parseDouble` 是同一个函数）。首尾空白先按
+  **Dawn 自己的空白表**修剪（与 `str.trim` 同一张 `char_is_space` 表，不是宿主的）：
+
+  ```
+  int    = [ "+" | "-" ] digit { digit }                    (* digit 仅 ASCII 0-9 *)
+  float  = [ "+" | "-" ] mant [ exp ] | "Infinity" | "-Infinity" | "NaN"
+  mant   = digit { digit } [ "." { digit } ] | "." digit { digit }
+  exp    = ( "e" | "E" ) [ "+" | "-" ] digit { digit }
+  radix  = [ "+" | "-" ] rdigit { rdigit }
+  ```
+
+  `parse_int_radix` 用 `radix` 产生式：`rdigit` ∈ `0-9 a-z A-Z`（值 = 10..35，
+  大小写同值），数字值 ≥ radix 拒绝；radix 不在 2..36 内答 `None`。整数超出
+  64 位范围是 `None` 不是环绕。**有意排除**（今天的宿主解析器有的收、Dawn 一律
+  拒绝）：下划线、`0x` 前缀与十六进制浮点（`0x1p3`）、`f/F/d/D` 后缀、`inf`/`nan`
+  等小写变体、带符号的 `NaN` 与 `+Infinity`（合法特殊拼写恰是 `to_string` 能输出的
+  三个，见 §4.3 的往返闭合）、全角与阿拉伯-印度等非 ASCII 数字（宿主的
+  `Character.digit` 收它们，Dawn 的数字集是 ASCII 封闭的）。
+
   其余在 **`std/str`**：`str.len str.is_empty str.trim str.to_lower str.to_upper
   str.contains str.starts_with str.ends_with str.index_of str.last_index_of
   str.repeat str.substring str.pad_start str.reverse str.chars str.split

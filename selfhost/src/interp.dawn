@@ -25,6 +25,7 @@
 # the host stack, so the selfhost JVM is launched with -Xss512m instead.
 
 use std/str
+use std/fmt
 use std/list
 use std/map
 use std/set
@@ -252,7 +253,11 @@ pub fn cvalue_kind(v: CValue) -> String =
 fn stringify(v: CValue) -> String =
   match v {
     VInt(n) -> to_string(n)
-    VFloat(f) -> to_string(f)
+    # the shared dtoa, called directly rather than through `to_string`: the
+    # first selfhost generation is compiled by a seed whose `to_string(Float)`
+    # is still the host's, and a comptime fold must give the new answer from
+    # generation one (the bootstrap lesson of audit RP-02)
+    VFloat(f) -> fmt.dtoa(f)
     VBool(b) -> to_string(b)
     VStr(s) -> s
     # unreachable: the checker restricts printable types
@@ -621,7 +626,7 @@ fn call_named(
 # the bottom of this file checks the partition is total and disjoint, and it
 # probes each name to check the lists say what the chain does.
 
-## Every name the chain below has an arm for -- 41 of them, 10 emitted by
+## Every name the chain below has an arm for -- 40 of them, 9 emitted by
 ## lowering and 31 writable by a user.
 ##
 ## Consulted *before* the chain rather than alongside it, so this is a gate and
@@ -633,7 +638,7 @@ fn call_named(
 fn interp_arms() -> List[String] = [
   # lowering's own intrinsics (lower.internal_intrinsics()); `cmp`, `hash` and
   # `java_hash` are the three it emits that are refused instead, below
-  "java_eq", "show", "quote", "str_of_int", "str_of_float", "str_of_bool",
+  "java_eq", "show", "quote", "str_of_int", "str_of_bool",
   "str_of_bytes", "list_index", "list_slice", "null_ref",
   # user builtins
   "panic", "todo", "expect", "unwrap_or", "to_float", "to_int", "to_string",
@@ -750,8 +755,7 @@ fn call_builtin(icx: ICx, st: ESt, env: Env, name: String, args: List[CValue]) -
     # str_of_* is what interpolation lowers to; to_string is the surface
     # builtin. These are the *top-level* rendering, where a String is itself
     # and not a quoted literal.
-  } else if name == "to_string" || name == "str_of_int" ||
-  name == "str_of_float" || name == "str_of_bool" {
+  } else if name == "to_string" || name == "str_of_int" || name == "str_of_bool" {
     Ok((st, env, VStr(stringify(args[0]))))
   } else if name == "show" {
     match show_value(args[0]) {
@@ -899,12 +903,16 @@ fn call_builtin(icx: ICx, st: ESt, env: Env, name: String, args: List[CValue]) -
   } else if name == "str_upper" {
     Ok((st, env, VStr(str.to_upper(as_str(args[0])))))
   } else if name == "parse_int" {
-    match parse_int(as_str(args[0])) {
+    # fmt.atoi, not the builtin: the builtin's own lowering routes there for
+    # every program this compiler emits, and calling it here through the
+    # *seed's* lowering would fold with the seed host's grammar for one
+    # generation (audit RP-05; same bootstrap rule as `stringify`'s Float arm)
+    match fmt.atoi(as_str(args[0])) {
       Some(n) -> Ok((st, env, some_v(VInt(n))))
       None -> Ok((st, env, none_v()))
     }
   } else if name == "parse_float" {
-    match parse_float(as_str(args[0])) {
+    match fmt.atod(as_str(args[0])) {
       Some(f) -> Ok((st, env, some_v(VFloat(f))))
       None -> Ok((st, env, none_v()))
     }
@@ -1871,7 +1879,7 @@ test "the comptime interpreter covers every intrinsic, or refuses it by name" {
   #    went wrong in the list this gate replaces -- lowering's own said
   #    "thirteen more" and "all twelve" in the same paragraph -- so the two
   #    numbers this file states are asserted rather than asserted-by-nobody.
-  assert len(arms) == 41
+  assert len(arms) == 40
   assert len(rejects) == 59
 }
 

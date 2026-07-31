@@ -482,12 +482,9 @@ dawn_str *dawn_str_concat(dawn_str *a, dawn_str *b);
 bool dawn_str_eq(dawn_str *a, dawn_str *b);
 dawn_str *dawn_str_lower(dawn_str *s);
 dawn_str *dawn_str_upper(dawn_str *s);
-/* code-point indices, -1 when absent: the wrappers in std/str turn the
- * sentinel into None, and the index is observable, so it is not the byte
- * offset the search actually ran on. */
-dawn_adt *dawn_parse_int(dawn_str *s);                    /* Option[Int] */
+/* the one parse primitive left: fmt.atod's decimal-to-binary conversion on a
+ * pre-validated, pre-trimmed string (std/fmt owns the accepted language) */
 dawn_adt *dawn_parse_float(dawn_str *s);                  /* Option[Float] */
-dawn_adt *dawn_parse_int_radix(dawn_str *s, int64_t radix);
 dawn_array *dawn_code_points(dawn_str *s);                /* boxed Int elements */
 /* These two CONSUME their array: it is the emitter's list-to-Array crossing
  * temp (`to_host`), which no Core node owns, so the reader frees it. */
@@ -526,10 +523,9 @@ dawn_bytes *dawn_bytes_from_array(const dawn_array *a);
  * is replaced rather than refused, as `new String(bytes, charset)` does. */
 dawn_adt *dawn_bytes_decode(const dawn_bytes *b, dawn_str *charset);
 dawn_str *dawn_str_of_int(int64_t v);
-dawn_str *dawn_str_of_float(double v);
 dawn_str *dawn_str_of_bool(bool v);
 /* `<N bytes>` -- the language renders a Bytes as its length, not its content.
- * The fourth member of the str_of_* family, one per show scalar. */
+ * The third member of the str_of_* family (Float renders in std/fmt). */
 dawn_str *dawn_str_of_bytes(const dawn_bytes *b);
 /* A String as it appears *inside* a rendered value: source-literal escaping
  * between double quotes. What the trait method `show` does at a String, so

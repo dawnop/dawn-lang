@@ -531,24 +531,28 @@ fn lit_eq(subj: CExpr, v: LitV, t: Ty) -> CExpr =
 ##                       those now, so nothing but a foreign object reaches
 ##                       either and a backend with no Java owes nothing here
 ##   show quote          rendering an erased value, and a nested String
-##   str_of_int/float/bool/bytes
+##   str_of_int/bool/bytes
 ##                       the scalar renderings `to_str` settles without a
 ##                       witness; `str_of_bytes` joined them when the erased
-##                       `show` stopped having to guess at a Bytes (audit RP-02)
+##                       `show` stopped having to guess at a Bytes (audit RP-02).
+##                       `str_of_float` left the family when the Float
+##                       rendering became Dawn source (std/fmt.dtoa, audit
+##                       RP-01) -- `show_at` writes a direct call, so no
+##                       backend owes a float renderer any more
 ##   list_index list_slice
 ##                       `xs[i]` and a list pattern's `..rest`
 ##   null_ref            the zero of a reference type, for an uninitialised slot
 ##
 ## Not an ADT, though the comment this replaces proposed one. Measured before
 ## deciding: `CIntrinsic` carries a `String` because it also carries the 87
-## user builtin names, so an ADT for these thirteen either splits the node in
+## user builtin names, so an ADT for these twelve either splits the node in
 ## two or swallows all 100, and the `name == "..."` comparisons that would have
 ## to be rewritten are 44 in interp, 28 in emit and 24 in emitc. A list the
 ## gate reads buys the property the ADT was wanted for -- a backend cannot
-## forget one silently -- for thirteen lines instead of that.
+## forget one silently -- for twelve lines instead of that.
 pub fn internal_intrinsics() -> List[String] = [
   "cmp", "hash", "java_eq", "java_hash", "show", "quote",
-  "str_of_int", "str_of_float", "str_of_bool", "str_of_bytes",
+  "str_of_int", "str_of_bool", "str_of_bytes",
   "list_index", "list_slice", "null_ref"
 ]
 
@@ -1574,7 +1578,12 @@ fn cat(a: CExpr, b: CExpr) -> CExpr = CBinary(CConcat, a, b, TyString)
 ## vs Debug); what changes here is only that both sides now come from Core.
 fn show_at(st: LSt, x: CExpr, t: Ty) -> (LSt, CExpr) = {
   if t == TyInt { return (st, CIntrinsic("str_of_int", [x], TyString)) }
-  if t == TyFloat { return (st, CIntrinsic("str_of_float", [x], TyString)) }
+  # Float is the one scalar whose rendering is not a backend intrinsic: the
+  # shortest-round-trip algorithm is Dawn source (std/fmt.dtoa, audit RP-01),
+  # and both backends compile that one definition. std/fmt itself must never
+  # render a Float through `to_string`/interpolation -- this rewrite would
+  # make it a self-call.
+  if t == TyFloat { return (st, CCall(CDirect("std/fmt", "dtoa"), [x], TyString)) }
   if t == TyBool { return (st, CIntrinsic("str_of_bool", [x], TyString)) }
   if t == TyString { return (st, CIntrinsic("quote", [x], TyString)) }
   # The fifth show scalar (types.dawn's `show_scalars`), and the only one that
@@ -2311,6 +2320,23 @@ pub fn lower_expr(st0: LSt, e: TExpr) -> (LSt, CExpr) = {
         let w = if len(wits) == 1 { Some(wits[0]) } else { none_wit }
         return to_str(st1, v, tex_ty(args[0]), w)
       }
+      # The numeric parsers are Dawn source too (std/fmt, audit RP-05): the
+      # accepted language is spec §11's EBNF, checked by fmt's own scanner,
+      # so neither backend's host grammar is the definition any more. The one
+      # exception is `parse_float` *inside* std/fmt itself: fmt.atod hands a
+      # validated, trimmed string to the raw backend primitive for the
+      # decimal-to-binary conversion, and that call must stay an intrinsic or
+      # it would loop.
+      if name == "parse_int" || name == "parse_int_radix" ||
+        (name == "parse_float" && st.owner != "std/fmt") {
+          let fname = match name {
+            "parse_int" -> "atoi"
+            "parse_int_radix" -> "atoi_radix"
+            _ -> "atod"
+          }
+          let (st1, vs) = lower_all(st, args)
+          return (st1, CCall(CDirect("std/fmt", fname), vs, ty))
+        }
       match hamt_fn(name) {
         Some(fname) -> return hamt_call(st, name, fname, args, wits, ty)
         None -> ()
