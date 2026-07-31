@@ -670,11 +670,15 @@ let c = rows[1][0]   # 可链式、可与 ?/./() 组合
 §11 的库函数）恰属其一，按参数的**含义**归类而不是逐函数各定各的：
 
 1. **断言**——参数是一个**位置**，调用方声称它合法，越界是 bug：`xs[i]`、`m[k]`、
-   `bytes.at`、`pvec.index`/`nth`、`cursor.slice` 的非法区间 → **panic**（含负下标）。
+   `bytes.at`、`str.at`、`pvec.index`/`nth`、`cursor.slice` 的非法区间 →
+   **panic**（含负下标）。
 2. **问询**——越界/缺键是调用方要区分的正常分支：`get` 族（`list.get`、`map.get`、
-   `set.has` 的缺席、`index_of` 族的未命中）→ **`Option`**（或 `Bool`）。
+   `set.has` 的缺席、`index_of` 族（`str`/`bytes`/`list`）的未命中、`str.strip_prefix`/
+   `strip_suffix` 的不匹配、`bytes.from_hex`/`from_base64` 与 `fspath.extension` 的
+   格式不合）→ **`Option`**（或 `Bool`）。
 3. **钳位**——参数是一个**区间**，说的是「要这一段里有的部分」，不断言端点存在：
-   `list.take`/`drop`/`slice`、`bytes.slice`、`str.substring` → 两端各自夹进
+   `list.take`/`drop`/`slice`、`bytes.slice`、`str.substring`/`take`/`drop`、
+   `cursor.next`/`prev`/`back`/`at` → 两端各自夹进
    `[0, len]`（负数取 `0`、超长取 `len`），`from > to` 得空序列，**永不 panic**。
 
 **唯一具名例外**：`cursor.char(s, c)` 到尾返回哨兵 `-1` 而非 `Option`（§11「std/cursor」）。
