@@ -541,6 +541,10 @@ dawn_bytes *dawn_bytes_from_array(const dawn_array *a);
  * is what the JVM's UnsupportedEncodingException arm means. Malformed input
  * is replaced rather than refused, as `new String(bytes, charset)` does. */
 dawn_adt *dawn_bytes_decode(const dawn_bytes *b, dawn_str *charset);
+/* The same two decodings without the charset, and so without the Option: the
+ * function name is the domain, and both charsets read every byte string. */
+dawn_str *dawn_bytes_decode_utf8(const dawn_bytes *b);
+dawn_str *dawn_bytes_decode_latin1(const dawn_bytes *b);
 dawn_str *dawn_str_of_int(int64_t v);
 dawn_str *dawn_str_of_bool(bool v);
 /* `<N bytes>` -- the language renders a Bytes as its length, not its content.

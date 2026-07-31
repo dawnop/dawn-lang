@@ -928,10 +928,37 @@ pub fn gen_bytes_class(supers: List[String]) -> Bytes !io = {
   dv.visitInsn(OP_ARETURN)
   close_mv(dv)
 
+  # bytes_decode_utf8(b) / bytes_decode_latin1(b): the same `new String(b,
+  # charset)` the arm above runs, with the charset chosen here rather than
+  # looked up from a name. No Option comes back because nothing can fail --
+  # a Charset constant admits no UnsupportedEncodingException, and both of
+  # these charsets decode every byte string (UTF-8 by replacing what it
+  # cannot read with U+FFFD, which is what `new String` already did).
+  gen_bytes_decode_fixed(cw, "bytes_decode_utf8", "UTF_8")
+  gen_bytes_decode_fixed(cw, "bytes_decode_latin1", "ISO_8859_1")
+
   gen_bytes_from_array(cw)
 
   cw.visitEnd()
   cw.toByteArray().expect("bytes")
+}
+
+## One of the two narrowed decoders: `new String(b, StandardCharsets.<field>)`.
+##
+## `field` is a `Charset` constant rather than a name, so the constructor that
+## takes one throws nothing and the method returns a bare String. That is the
+## whole of what dropping the charset parameter buys (audit RP-04, decision C).
+fn gen_bytes_decode_fixed(cw: AdtClassWriter, name: String, field: String) -> Unit !io = {
+  let mv = open_static(cw, name, "([B)Ljava/lang/String;")
+  mv.visitTypeInsn(OP_NEW, "java/lang/String")
+  mv.visitInsn(OP_DUP)
+  mv.visitVarInsn(OP_ALOAD, 0)
+  mv.visitFieldInsn(OP_GETSTATIC, "java/nio/charset/StandardCharsets", field,
+    "Ljava/nio/charset/Charset;")
+  mv.visitMethodInsn(OP_INVOKESPECIAL, "java/lang/String", "<init>",
+    "([BLjava/nio/charset/Charset;)V", false)
+  mv.visitInsn(OP_ARETURN)
+  close_mv(mv)
 }
 
 ## bytes_from_array(a): the one way to make bytes that did not come from text.

@@ -1,0 +1,90 @@
+# The two narrowed decoders, `bytes_decode_utf8` and `bytes_decode_latin1`
+# (audit RP-04, decision C: the charsets the language promises are two
+# functions, and the function name is the domain).
+#
+# Phase 1 of three -- the primitives exist, std/bytes still calls the
+# charset-taking `bytes_decode`, and moving it needs a seed that carries these.
+# So this corpus is their only caller, and the only place the two backends are
+# checked against each other on them. It reaches them through
+# `stdext/raw.dawn`, the way every std-only primitive is reached here.
+#
+# The last section is the phase-2 contract: the new function must answer
+# exactly what `bytes_decode(b, "UTF-8")` answers today, byte for byte. It is
+# not a restatement of the implementation -- on the JVM the two are different
+# `String` constructors, and in C they are one body called two ways.
+#
+# ## What is deliberately not here
+#
+# Three families of malformed UTF-8 where the two backends *already* disagree,
+# in `bytes_decode` and so in the new pair with it -- this is a pre-existing
+# gap in the C walker, not something phase 1 introduced, and pinning it would
+# mean deciding it:
+#
+#   truncated 3- and 4-byte  the JVM replaces the maximal subpart with one
+#                            U+FFFD; the C walker steps one byte at a time and
+#                            emits one per byte (`e4 b8` -> 1 vs 2)
+#   overlong                 the JVM replaces; C decodes it (`c0 af` -> U+FFFD
+#                            U+FFFD vs `/`)
+#   surrogate halves         the JVM replaces; C passes the code point through
+#                            (`ed a0 80` -> U+FFFD vs U+D800)
+#
+# The families below are the ones both backends already answer alike, and they
+# are what pins the replacement behaviour the two new functions inherit.
+use std/io
+use std/bytes
+use std/str
+use std/raw
+
+fn of(vals: List[Int]) -> Bytes = {
+  var b = bytes.buf()
+  for v in vals {
+    b = bytes.put(b, v)
+  }
+  bytes.freeze(b)
+}
+
+## A decoded string as something a diff can read: its code-point count and the
+## UTF-8 of the result. Printing the string itself would put a lone U+FFFD
+## through a terminal and a diff on the way to being compared.
+fn seen(s: String) -> String = to_string(str.len(s)) ++ " " ++ bytes.to_hex(bytes.utf8(s))
+
+pub fn main() -> Unit !io = {
+  io.println("-- valid UTF-8 round trips, astral included --")
+  var text = "aA 中文 𝄞 ß"
+  io.println(raw.decode_utf8(bytes.utf8(text)))
+  io.println("${raw.decode_utf8(bytes.utf8(text)) == text} ${raw.decode_utf8(of([])) == ""}")
+
+  io.println("-- latin1 is one code point per byte, over the whole range --")
+  var all = raw.decode_latin1(of(range(0, 256)))
+  io.println("${str.len(all)} ${code_points(all) == range(0, 256)}")
+  io.println(seen(raw.decode_latin1(of([0x00, 0x41, 0x7F, 0x80, 0xA9, 0xFF]))))
+
+  io.println("-- the same bytes, two domains: the function name decides --")
+  var pound = of([0xC2, 0xA3])
+  io.println("${raw.decode_utf8(pound)} ${raw.decode_latin1(pound)}")
+  io.println("${str.len(raw.decode_utf8(pound))} ${str.len(raw.decode_latin1(pound))}")
+
+  io.println("-- malformed UTF-8 is replaced, not refused --")
+  io.println("lone continuation " ++ seen(raw.decode_utf8(of([0x80]))))
+  io.println("truncated 2-byte  " ++ seen(raw.decode_utf8(of([0xC3]))))
+  io.println("bad continuation  " ++ seen(raw.decode_utf8(of([0xE4, 0x41, 0xB8]))))
+  io.println("never a lead byte " ++ seen(raw.decode_utf8(of([0xFF]))))
+  io.println("embedded          " ++ seen(raw.decode_utf8(of([0x61, 0xFF, 0x62]))))
+
+  io.println("-- phase 2's contract: the pair answers what the charset did --")
+  var cases = [
+    of([]), bytes.utf8(text), of(range(0, 256)),
+    of([0x80]), of([0xC3]), of([0xE4, 0x41, 0xB8]), of([0xFF]), of([0x61, 0xFF, 0x62])
+  ]
+  var same_utf8 = true
+  var same_latin1 = true
+  for b in cases {
+    if raw.decode(b, "UTF-8") != Some(raw.decode_utf8(b)) {
+      same_utf8 = false
+    }
+    if raw.decode(b, "ISO-8859-1") != Some(raw.decode_latin1(b)) {
+      same_latin1 = false
+    }
+  }
+  io.println("${same_utf8} ${same_latin1}")
+}
