@@ -27,7 +27,8 @@
 |---|---|---|
 | [bootstrap.md](bootstrap.md) | current | 自举链：种子 → A → B → C、固定点、种子推进协议。 |
 | [package-design.md](package-design.md) | current | 源码包（`[deps]`）与 Maven 依赖（`[java-deps]`）的清单与解析。 |
-| [runtime-intrinsics-design.md](runtime-intrinsics-design.md) | current | `emit.dawn` 的 `rt_intrinsic_target` 契约——运行时 intrinsic 落到哪个类哪个方法。 |
+| [runtime-intrinsics-design.md](runtime-intrinsics-design.md) | current | `emit.dawn` 的 `rt_intrinsic_target` 契约——运行时 intrinsic 落到哪个类哪个方法。**§8 的三步 Move 表已被 [core-move2-design.md](core-move2-design.md) 更正**。 |
+| [core-move2-design.md](core-move2-design.md) | current | 上面那张表里「Move 2 控制流/match」的**结账盘点**：主体已随 Core IR Phase 0 落地，残余只剩 `CSProtect`（error-model 的 C2），并论证它多半不必被建出来。 |
 | [trait.md](trait.md) | current | trait/impl/derive 与 `Ord`。§落地记录里 Float 比较那段已被实现取代（见文内标注）。 |
 | [tutorial.md](tutorial.md) | current | 上手教程。代码块目前**人工维护**——机械校验随 Kotlin 侧 `TutorialTest` 一起归档了。 |
 | [codebase-audit.md](codebase-audit.md) | current | 2026-07-25 的全仓审查，76 条逐条带处置结论（已修 / 驳回 / 待办）。 |

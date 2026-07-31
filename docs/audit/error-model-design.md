@@ -201,6 +201,11 @@ pub fn bracket[A, B](
 而 C1 会让第二次改动多一批调用点要动），但**它现在冻结**，等 Core IR 落地——
 见 [native-plan-overlap.md](native-plan-overlap.md) §3.4。
 
+> **2026-07-31 冻结解除**：Core IR 已落地。复核结论见
+> [../core-move2-design.md](../core-move2-design.md)——`catch_fault` 定形后「绑死 JVM」的
+> 论证不再成立，`bracket` 多半该是运行时 intrinsic 而非 IR 节点（该文 §2.6 与开放决策 1）；
+> 本节的返回类型签名与「原始失败继续传播」互相矛盾（该文决策 2）。
+
 ## 三、为什么不顺手把 X 也改了
 
 - **不引入业务错误 ADT**。审查建议「`JavaError` 和业务错误 ADT」。前者是语言/std 的事，
