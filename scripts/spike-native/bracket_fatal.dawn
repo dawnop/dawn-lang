@@ -1,0 +1,39 @@
+# A panic that crossed a `bracket` with nothing left to catch it ends the
+# program -- and ends it the same way on both backends.
+#
+# bracket.dawn asks the routing half of this claim (does `catch_fault` decline
+# a panic that crossed a bracket) and can only ask it with an outer
+# `catch_panic` in place, because a corpus program that dies has no further
+# output to compare. This file asks the other half: what happens when nothing
+# catches it at all. That is a different code path on native -- `dawn_reraise`
+# walks the handler chain, finds nothing that takes a panic, and reports out of
+# the saved failure buffer rather than out of a message whose frame is gone --
+# and the only thing that says it agrees with the JVM is a run that lets it
+# happen.
+#
+# So this program is *supposed* to exit non-zero, which the harness has to be
+# told: the marker file `bracket_fatal.exits-nonzero` is that. What is checked
+# is the stdout up to the failure (against .expect), and then the stderr and
+# the exit code, compared between the backends. A backend that swallowed the
+# panic would show up as a 0 against a 1.
+use std/io
+
+fn open(name: String) -> String !io = {
+  println("  acquire " ++ name)
+  name
+}
+
+fn close(name: String) -> Unit !io = println("  release " ++ name)
+
+## Named rather than a lambda: `fn(a) => panic(...)` leaves `B` with nothing
+## to infer it from.
+fn use_panics(a: String) -> Int !io = panic("a panic that crossed a bracket")
+
+pub fn main() -> Unit !io = {
+  println("nothing here catches a panic")
+  let v = bracket(open("r"), close, use_panics)
+  # Unreachable. The release above ran and the panic resumed with no handler
+  # left, so the program is already over. Printing is how a backend that got
+  # this wrong says so, rather than passing quietly.
+  println("WRONG: bracket swallowed it and answered " ++ to_string(v))
+}

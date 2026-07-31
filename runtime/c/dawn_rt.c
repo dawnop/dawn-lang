@@ -701,13 +701,29 @@ static int64_t dawn_failure_len;
  * a raiser computes. */
 static const char *dawn_failure_kind = "panic";
 
-static void dawn_raise(dawn_str *msg, bool is_panic) {
+/* The same fact as a bit, for the one reader that has to *route* by it rather
+ * than report it: `dawn_reraise`. Written wherever `dawn_failure_kind` is, and
+ * the two must stay in lockstep -- a re-raise that lost this would offer a
+ * panic to the next `catch_fault` down the chain, which is precisely the
+ * failure `catch_fault` is defined not to take (spec 9.8). Comparing the kind
+ * string would work and would also make the routing depend on a name the
+ * design says is the backend's own to change. */
+static bool dawn_failure_is_panic = true;
+
+/* The innermost handler that will take a failure of this kind, or NULL. */
+static dawn_handler *dawn_find_handler(bool is_panic) {
   dawn_handler *h = dawn_handlers;
   while (h != NULL && is_panic && !h->catches_panic) h = h->prev;
+  return h;
+}
+
+static void dawn_raise(dawn_str *msg, bool is_panic) {
+  dawn_handler *h = dawn_find_handler(is_panic);
   if (h != NULL) {
     /* The skipped frames go with it: they sit above `h`, and `h`'s own
      * setjmp branch restores the list to `h->prev`. */
     dawn_failure_kind = is_panic ? "panic" : "fault";
+    dawn_failure_is_panic = is_panic;
     dawn_failure_len = msg->len < DAWN_FAILURE_MAX ? msg->len : DAWN_FAILURE_MAX;
     if (dawn_failure_len > 0) {
       memcpy(dawn_failure_buf, msg->p, (size_t)dawn_failure_len);
@@ -759,6 +775,75 @@ static dawn_adt *dawn_run_caught(dawn_clo *f, bool catches_panic) {
 dawn_adt *dawn_catch_fault(dawn_clo *f) { return dawn_run_caught(f, false); }
 
 dawn_adt *dawn_catch_panic(dawn_clo *f) { return dawn_run_caught(f, true); }
+
+/* Hand the failure that is already in `dawn_failure_*` to the next handler out.
+ *
+ * This is what `bracket` needs and neither barrier does: the barriers stop a
+ * failure and turn it into a value, so the failure is over by the time they
+ * are. A bracket takes one only to run a release, and then owes the program
+ * the *same* failure -- same kind, same message -- as though nothing had been
+ * protected. So the buffer is not rewritten; only the routing runs again, and
+ * it routes by the saved `is_panic` rather than by the kind string.
+ *
+ * With no handler left, the program is over, and it reports out of the buffer
+ * rather than out of a message it no longer has. That truncates at
+ * DAWN_FAILURE_MAX where an unprotected raise would not -- the buffer is what
+ * survives a longjmp, and 512 bytes of a panic message is the whole of the
+ * difference a bracket makes to a fatal one. */
+static _Noreturn void dawn_reraise(void) {
+  dawn_handler *h = dawn_find_handler(dawn_failure_is_panic);
+  if (h != NULL) longjmp(h->jb, 1);
+  fflush(stdout);
+  fputs("panic: ", stderr);
+  if (dawn_failure_len > 0) {
+    fwrite(dawn_failure_buf, 1, (size_t)dawn_failure_len, stderr);
+  }
+  fputc('\n', stderr);
+  exit(1);
+}
+
+/* `bracket(resource, release, use)` -- the parameter order is the intrinsic's:
+ * the resource first, and the use-closure last.
+ *
+ * The resource arrives already acquired rather than as a thunk to call. That
+ * is not a simplification of Haskell's `bracket` but a consequence of Dawn
+ * having no asynchronous failures: nothing can raise between the caller
+ * evaluating the argument and this function pushing its handler, so there is
+ * no window for a thunk to close. Acquisition is ordinary code at the call
+ * site, where a failure needs no release because nothing was acquired.
+ *
+ * The handler takes everything -- `catches_panic` is true -- because a release
+ * that runs for a fault and not for a panic is not a release. It does not stop
+ * anything: `dawn_reraise` hands the failure straight back to the chain, and
+ * the frame is already off it by then (`dawn_handlers = h.prev`), so the next
+ * handler out is found exactly as if this one had never existed.
+ *
+ * Counting: an intrinsic borrows its arguments (perceus-design.md 5.1), so the
+ * resource stays the caller's and each closure call needs a reference of its
+ * own -- a closure's parameters arrive owned and it releases them (see
+ * emitc.adapter_signature). Hence one `dawn_dup` per call and none for the
+ * caller's. On the unwind path `use`'s reference is lost with the discarded C
+ * frames, which is the documented cost of the mechanism and the reason a
+ * corpus program that takes this path carries a `.leaks-on-catch` marker.
+ * The Unit each release call hands back is a box the emitter made for the
+ * erased return, so it is dropped here -- nobody else can see it. */
+void *dawn_bracket(void *resource, dawn_clo *release, dawn_clo *use) {
+  dawn_handler h;
+  h.prev = dawn_handlers;
+  h.catches_panic = true;
+  dawn_handlers = &h;
+  if (setjmp(h.jb) != 0) {
+    dawn_handlers = h.prev;
+    dawn_drop(((void *(*)(dawn_clo *, void *))release->fn)(release,
+                                                          dawn_dup(resource)));
+    dawn_reraise();
+  }
+  void *r = ((void *(*)(dawn_clo *, void *))use->fn)(use, dawn_dup(resource));
+  dawn_handlers = h.prev;
+  dawn_drop(
+    ((void *(*)(dawn_clo *, void *))release->fn)(release, dawn_dup(resource)));
+  return r;
+}
 
 /* ---- code-point classification (char_is_*) ---------------------------- */
 

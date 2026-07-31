@@ -434,6 +434,25 @@ dawn_array *dawn_args(void);
 dawn_adt *dawn_catch_fault(dawn_clo *f);
 dawn_adt *dawn_catch_panic(dawn_clo *f);
 
+/* The third of the family, and the one that stops nothing. `use` runs on the
+ * already-acquired `resource` under a handler that takes both kinds; whichever
+ * way `use` leaves, `release` runs exactly once, and a failure carries on to
+ * whatever was going to stop it with its kind and message untouched. So
+ * `catch_fault` still refuses a panic that crossed a bracket -- the saved kind
+ * is re-raised, not re-derived.
+ *
+ * The parameter order is the intrinsic's declared order: resource, release,
+ * use. The resource is a value and not an acquire thunk because Dawn has no
+ * asynchronous failures -- nothing runs between the caller evaluating it and
+ * the handler below going up. Everything crosses erased, `use`'s answer
+ * included, for the same reason the two above take an `Fn0` whose apply
+ * returns Object.
+ *
+ * A taken unwind path leaks what the discarded C frames held, exactly as a
+ * taken barrier does; see the note above and scripts/spike-native's
+ * `.leaks-on-catch` markers. */
+void *dawn_bracket(void *resource, dawn_clo *release, dawn_clo *use);
+
 /* Simple (1:1) Unicode case mapping: a code point in `lo..hi` maps to itself
  * plus `delta`, and one in no range maps to itself.
  *
