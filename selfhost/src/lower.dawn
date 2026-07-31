@@ -767,11 +767,7 @@ fn make_bridge(
   # `Box[Box[Int]]` need different bridges. For a non-generic subject the two
   # spellings agree, which is why nothing that existed before changed name.
   let name = "bridge$" ++ to_string(tid) ++ "$" ++ ty_key_inst(subject) ++ "$" ++ method
-  var seen = false
-  for f in st.lifted {
-    if f.name == name { seen = true }
-  }
-  if seen {
+  if list.any(st.lifted, fn(f) => f.name == name) {
     (st, name)
   } else {
     var st1 = st
@@ -811,7 +807,7 @@ fn make_bridge(
       owner: st1.owner,
       captures: [],
       params: ps,
-      dicts: [CParam { sym: dsym, ty: TyAdt(0 - 1, []), mode: COwned }],
+      dicts: [CParam { sym: dsym, ty: TyAdt(-1, []), mode: COwned }],
       ret: sg.ret,
       body: adapt_in(call, psig.ret, sg.ret),
       is_test: false,
@@ -858,11 +854,7 @@ fn make_prim_slot(
 ) -> (LSt, String) = {
   let sg = trait_method_sig(tr, method)
   let name = "prim$" ++ to_string(tid) ++ "$" ++ ty_key_inst(subject) ++ "$" ++ method
-  var seen = false
-  for f in st.lifted {
-    if f.name == name { seen = true }
-  }
-  if seen { return (st, name) }
+  if list.any(st.lifted, fn(f) => f.name == name) { return (st, name) }
   var st1 = st
   var ps: List[CParam] = []
   var args: List[CExpr] = []
@@ -1332,7 +1324,7 @@ fn struct_cmp_body(st: LSt, a: CExpr, b: CExpr, t: Ty) -> (LSt, CExpr) =
           CBinary(CNe, CLocal(ta, TyInt), CLocal(tb, TyInt), TyBool),
           CIf(
             CBinary(CLt, CLocal(ta, TyInt), CLocal(tb, TyInt), TyBool),
-            CInt(0 - 1), Some(CInt(1)), TyInt),
+            CInt(-1), Some(CInt(1)), TyInt),
           Some(chain), TyInt)),
         TyInt))
     }
@@ -1777,7 +1769,7 @@ fn is_eq_op(op: TBinOp) -> Bool =
 ## A witness as a value, for the hidden trailing arguments of a generic call.
 fn witness_value(st: LSt, w: WitRef) -> (LSt, CExpr) =
   match w {
-    WForward(sym) -> (st, CLocal(sym, TyAdt(0 - 1, [])))
+    WForward(sym) -> (st, CLocal(sym, TyAdt(-1, [])))
     # The structural default is not a different kind of dictionary, only one
     # whose slots the compiler supplies -- which is why deleting WStructural
     # changed nothing here.

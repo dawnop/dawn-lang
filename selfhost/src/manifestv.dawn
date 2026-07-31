@@ -108,7 +108,7 @@ fn name_ok(s: String) -> Bool = {
 ## `d1:` + 64 hex digits — the canonical tree hash format.
 fn hash_ok(s: String) -> Bool = {
   if not str.starts_with(s, "d1:") { return false }
-  let hex = str.substring(s, 3, str.len(s))
+  let hex = str.strip_prefix(s, "d1:").unwrap_or(s)
   if str.len(hex) != 64 { return false }
   for c in str.chars(hex) {
     if not str.contains("0123456789abcdef", c) { return false }
@@ -179,9 +179,9 @@ pub fn mcoord_parse(spec: String, aname: String, lo: Int, hi: Int) -> Result[MCo
 ## The last path segment of `dir`, `-` mapped to `_` — the suggested name.
 fn dir_name_hint(dir: String) -> String = {
   var t = dir
-  while str.ends_with(t, "/") { t = str.substring(t, 0, str.len(t) - 1) }
+  while str.ends_with(t, "/") { t = str.take(t, str.len(t) - 1) }
   let base = match str.last_index_of(t, "/") {
-    Some(i) -> str.substring(t, i + 1, str.len(t))
+    Some(i) -> str.drop(t, i + 1)
     None -> t
   }
   if base == "" { "my_project" } else { str.replace(base, "-", "_") }
@@ -294,7 +294,7 @@ fn validate_doc(doc: TomlDoc, dir: String) -> (Option[ManifestV], List[Diag]) = 
   let root = table_full(doc, None)
 
   # `schema` first: the format version must be readable before anything else
-  var schema_i = 0 - 1
+  var schema_i = -1
   var i = 0
   for e in root {
     let (key, _, _, _) = e
@@ -430,7 +430,7 @@ fn validate_doc(doc: TomlDoc, dir: String) -> (Option[ManifestV], List[Diag]) = 
   }
   for t in distinct(table_names(doc)) {
     if str.starts_with(t, "deps.") {
-      let aname = str.substring(t, 5, str.len(t))
+      let aname = str.strip_prefix(t, "deps.").unwrap_or(t)
       let (hlo, hhi) = header_span(doc, t).unwrap_or((0, 1))
       if not name_ok(aname) {
         errs = errs ++ [diag("invalid dependency alias `" ++ aname ++ "`", hlo, hhi,

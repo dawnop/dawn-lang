@@ -36,7 +36,7 @@ fn unquote(v: String) -> Option[String] = {
 ## never hold `#` inside strings, and invalid input is Kotlin's department.
 fn strip_comment(line: String) -> String =
   match str.index_of(line, "#") {
-    Some(i) -> str.substring(line, 0, i)
+    Some(i) -> str.take(line, i)
     None -> line
   }
 
@@ -75,14 +75,14 @@ pub fn read_manifest(dir: String) -> Option[ManifestLite] !io = {
       remote = None
       table = str.substring(line, 1, str.len(line) - 1)
       if str.starts_with(table, "deps.") {
-        let aname = str.substring(table, 5, str.len(table))
+        let aname = str.strip_prefix(table, "deps.").unwrap_or(table)
         remote = Some(RemoteAcc { key: aname, url: "", version: "", hash: "", subdir: "" })
       }
     } else {
       match str.index_of(line, "=") {
         Some(i) -> {
-          let key = str.trim(str.substring(line, 0, i))
-          let val = str.substring(line, i + 1, str.len(line))
+          let key = str.trim(str.take(line, i))
+          let val = str.drop(line, i + 1)
           if table == "" && key == "name" {
             match unquote(val) {
               Some(v) -> { name = v }

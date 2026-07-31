@@ -585,7 +585,10 @@ fn drop_lead_nl(p: Seg) -> Seg =
   match p {
     SCode(c, o) -> p
     SText(v) ->
-      if str.starts_with(v, "\n") { SText(str.substring(v, 1, str.len(v))) } else { p }
+      match str.strip_prefix(v, "\n") {
+        Some(t) -> SText(t)
+        None -> p
+      }
   }
 
 fn drop_trail_blank(p: Seg) -> Seg =
@@ -595,8 +598,8 @@ fn drop_trail_blank(p: Seg) -> Seg =
       match str.last_index_of(v, "\n") {
         None -> p
         Some(i) ->
-          if is_blank(str.substring(v, i + 1, str.len(v))) {
-            SText(str.substring(v, 0, i))
+          if is_blank(str.drop(v, i + 1)) {
+            SText(str.take(v, i))
           } else {
             p
           }

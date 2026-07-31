@@ -214,7 +214,7 @@ pub type Lock = { coords: List[String], arts: List[(String, String)] }
 
 fn basename(path: String) -> String =
   match str.last_index_of(path, "/") {
-    Some(i) -> str.substring(path, i + 1, str.len(path))
+    Some(i) -> str.drop(path, i + 1)
     None -> path
   }
 
@@ -245,13 +245,13 @@ pub fn parse_lock(text: String) -> Result[Lock, String] = {
     } else if t == "schema 1" {
       saw_schema = true
     } else if str.starts_with(t, "coord ") {
-      coords = coords ++ [str.trim(str.substring(t, 6, str.len(t)))]
+      coords = coords ++ [str.trim(str.strip_prefix(t, "coord ").unwrap_or(t))]
     } else if str.starts_with(t, "artifact ") {
-      let rest = str.trim(str.substring(t, 9, str.len(t)))
+      let rest = str.trim(str.strip_prefix(t, "artifact ").unwrap_or(t))
       match str.index_of(rest, " ") {
         Some(i) -> {
-          let nm = str.trim(str.substring(rest, i + 1, str.len(rest)))
-          arts = arts ++ [(nm, str.substring(rest, 0, i))]
+          let nm = str.trim(str.drop(rest, i + 1))
+          arts = arts ++ [(nm, str.take(rest, i))]
         }
         None -> return Err("malformed artifact line: " ++ t)
       }

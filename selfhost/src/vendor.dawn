@@ -85,9 +85,9 @@ pub fn rt_class_family(outer: String) -> List[(String, Bytes)] !io = {
   # a classes directory on the class path (running the self-emitted compiler):
   # list the sibling .class files instead of walking a jar
   if str.starts_with(u, "file:") {
-    let fpath = str.substring(u, str.len("file:"), str.len(u))
+    let fpath = str.strip_prefix(u, "file:").unwrap_or(u)
     let dir = match str.last_index_of(fpath, "/") {
-      Some(i) -> str.substring(fpath, 0, i)
+      Some(i) -> str.take(fpath, i)
       None -> fpath
     }
     var names2: List[String] = []
@@ -106,7 +106,7 @@ pub fn rt_class_family(outer: String) -> List[(String, Bytes)] !io = {
         Ok(b) -> b
         Err(e) -> panic("cannot read " ++ f ++ ": " ++ e.message)
       }
-      out2 = out2 ++ [("dawn/rt/" ++ str.substring(f, 0, str.len(f) - str.len(".class")), bs)]
+      out2 = out2 ++ [("dawn/rt/" ++ str.strip_suffix(f, ".class").unwrap_or(f), bs)]
     }
     return out2
   }
@@ -129,7 +129,7 @@ pub fn rt_class_family(outer: String) -> List[(String, Bytes)] !io = {
     }
     let nm = e.getName().expect("entry name")
     if str.starts_with(nm, "dawn/rt/") &&
-      matches(str.substring(nm, str.len("dawn/rt/"), str.len(nm)), outer) {
+      matches(str.strip_prefix(nm, "dawn/rt/").unwrap_or(nm), outer) {
         names = names ++ [nm]
       }
   }
@@ -140,7 +140,7 @@ pub fn rt_class_family(outer: String) -> List[(String, Bytes)] !io = {
       None -> panic("jar entry vanished: " ++ nm)
     }
     let bs = entry_bytes(jf.getInputStream(e).expect("entry stream"))
-    out = out ++ [(str.substring(nm, 0, str.len(nm) - str.len(".class")), bs)]
+    out = out ++ [(str.strip_suffix(nm, ".class").unwrap_or(nm), bs)]
   }
   out
 }
@@ -168,7 +168,7 @@ fn dir_classes_under(root: String, rel: String) -> List[String] !io = {
         if io.is_dir(root ++ "/" ++ r2) {
           out = out ++ dir_classes_under(root, r2)
         } else if str.ends_with(f, ".class") {
-          out = out ++ [str.substring(r2, 0, str.len(r2) - str.len(".class"))]
+          out = out ++ [str.strip_suffix(r2, ".class").unwrap_or(r2)]
         }
       }
     }
@@ -197,7 +197,7 @@ fn jar_classes(jf: JarFile, prefix: String, seen: List[String]) -> List[(String,
     }
     let nm = je.getName().expect("entry name")
     if str.starts_with(nm, prefix ++ "/") && str.ends_with(nm, ".class") {
-      let cls = str.substring(nm, 0, str.len(nm) - str.len(".class"))
+      let cls = str.strip_suffix(nm, ".class").unwrap_or(nm)
       if not has_name(seen, cls) && not has_name(taken, cls) {
         taken = taken ++ [cls]
         out = out ++ [(cls, entry_bytes(j.getInputStream(je).expect("entry stream")))]

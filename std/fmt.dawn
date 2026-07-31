@@ -792,17 +792,17 @@ fn to_chars(f0: Int, e0: Int) -> String = {
   while n > 1 && str.substring(ds, n - 1, n) == "0" {
     n = n - 1
   }
-  ds = str.substring(ds, 0, n)
+  ds = str.take(ds, n)
   if e > 0 && e <= 7 {
     if n <= e {
       ds ++ str.repeat("0", e - n) ++ ".0"
     } else {
-      str.substring(ds, 0, e) ++ "." ++ str.substring(ds, e, n)
+      str.take(ds, e) ++ "." ++ str.substring(ds, e, n)
     }
   } else if e > -3 && e <= 0 {
-    "0." ++ str.repeat("0", 0 - e) ++ ds
+    "0." ++ str.repeat("0", -e) ++ ds
   } else {
-    let head = str.substring(ds, 0, 1)
+    let head = str.take(ds, 1)
     let frac = if n > 1 { str.substring(ds, 1, n) } else { "0" }
     head ++ "." ++ frac ++ "E" ++ to_string(e - 1)
   }
@@ -827,7 +827,7 @@ fn to_decimal(q: Int, c: Int, dk: Int) -> String = {
     cbl = cb - 1
     k = flog10_three_quarters_pow2(q)
   }
-  let h = q + flog2pow10(0 - k) + 2
+  let h = q + flog2pow10(-k) + 2
   let (g1, g0) = g_pair(k + 324)
   let vb = rop(g1, g0, cb << h)
   let vbl = rop(g1, g0, cbl << h)
@@ -866,7 +866,7 @@ pub fn dtoa(v: Float) -> String = {
   if v == 0.0 {
     return sign ++ "0.0"
   }
-  let a = if neg { 0.0 - v } else { v }
+  let a = if neg { -v } else { v }
   # only an infinity survives `a - a != 0` with the NaN case gone
   if a - a != 0.0 {
     return sign ++ "Infinity"
@@ -907,7 +907,7 @@ pub fn dtoa(v: Float) -> String = {
   let c = to_int(m)
   if c >= 4503599627370496 {
     # normal: integers with an exact short form skip the interval machinery
-    let mq = 0 - q
+    let mq = -q
     if mq > 0 && mq < 53 {
       let f = c >> mq
       if (f << mq) == c {
@@ -986,7 +986,7 @@ pub fn atoi_radix(s: String, radix: Int) -> Option[Int] = {
     acc = acc - d
     cur = cursor.next(t, cur)
   }
-  Some(if neg { acc } else { 0 - acc })
+  Some(if neg { acc } else { -acc })
 }
 
 ## Does trimmed text match spec §11's float shape? sign? (digits ["." digits?]
@@ -1060,7 +1060,7 @@ pub fn atod(s: String) -> Option[Float] = {
     return Some(1.0 / 0.0)
   }
   if t == "-Infinity" {
-    return Some((0.0 - 1.0) / 0.0)
+    return Some(-1.0 / 0.0)
   }
   if t == "NaN" {
     return Some(0.0 / 0.0)
