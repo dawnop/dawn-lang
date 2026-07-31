@@ -327,6 +327,44 @@ C 一节的标题就是「先给标准库函数，不给语法」。**所以在�
 剩下的——尤其是跨函数的那一例——要的不是标准库函数，是 `defer`。
 **所以「不给语法」这条决策，应该在看过这 10 处泄漏之后再确认一次，而不是照抄。**
 
+#### 2.7.1 迁移记（2026-08-01，`with` 落地后按今天的源重新走查）
+
+上面那份清单是 2026-07-31 的。带着 `with x <- bracket(...)` 回去逐个核对，**21 处生产站点，
+迁走 17 处、留 4 处**。清单本身要更正三点：
+
+**更正一：`nmain.dawn` 的两处不是「漏了释放」，是从来没有释放。** `cc_build`（今 `:135`）
+与 `cmd_run`（今 `:200`）各取一个临时目录，全函数没有任何 `io.delete`——今天 `/tmp/dawnc*`
+是留在盘上的（cc 失败时正好拿来看生成的 C）。给它们加清理是**新增行为**而不是补全已有释放，
+所以不进这一批。
+
+**更正二：清单漏了 6 处，都在「已有一条正确的释放语句、只是不覆盖失败路径」这一类。**
+`vendor.dawn` 两处 entry 的 `InputStream`（`readAllBytes` panic 就跳过 `ins.close()`）；
+`server.dawn` `write_response` 的 `HttpExchange`、响应 `OutputStream`、`OutputStreamWriter`
+三个（`sendResponseHeaders` 或写体一 throw，漏的是一条连接）；`spill_body` 的
+`FileOutputStream`。走查只盯 `catch_panic`/`catch_fault` 的调用点会看不见它们——**这类站点
+一个屏障也没有**，它就是「直线写下来、最后一行 close」。
+
+**更正三：`pkgfetch.dawn:435` 那条「为了单出口把体挪进兄弟函数」的证据，`with` 之后仍然成立，
+但原因换了。** `fetch_and_hash` 现在是 `with work <- bracket(staged, delete_tree)` + 一行
+`fetch_into(url, work)`；`fetch_into` 没有被并回去，因为糖区内拒 `return`，而它的四个
+`return Err(e)` 里有三个能改成 `?`、第四个（`rename` 失败后再看一眼 target 是否已存在）
+是条件早退，改写要绕一圈，收益不抵。**「体是早退形状」这条观察没有被推翻——只是它现在
+不再逼着谁去搬函数，搬不搬成了可读性问题。**
+
+留下的 4 处，以及为什么 `bracket` 服务不到：
+
+| 站点 | 形状 | 为什么不迁 |
+|---|---|---|
+| `main.dawn:1087` `run_build` 的 build 临时目录 | 取在 `run_build`、放在 `run_native_image:1038`（跨函数，且必须等 native-image 子进程跑完） | 两层原因，第二层更硬：`run_build` 的早退是 `return cli_error(...)`，而 `cli_error` 调 `io.exit`——**进程直接结束，finally 不会跑**，`bracket` 在这条边上接不住任何东西。要堵上它，缺的不是 `defer` 而是把 `cli_error` 从「立刻退进程」改成「返回错误值、让调用链自己走完」，那是 CLI 错误模型的一刀 |
+| `main.dawn:761` `write_temp_classes` 的目录 | 交给 `spawn_java`，随后 `io.exit(code)` | 释放点不存在也不该存在：子进程正在读那些 class。**资源的生命周期就是进程的生命周期**，要的是 `deleteOnExit` / shutdown hook 那一类，与 `bracket` 正交 |
+| `nmain.dawn:135` `cc_build` 的 scratch 目录 | 三条失败路径全是 `cli_error` → `io.exit` | 同上：出口全是进程退出。且今天没有释放（更正一） |
+| `nmain.dawn:200` `cmd_run` 的 scratch 目录 | **成功**路径也是 `io.exit(code)` | 四条出口一条都不 unwind。这是「`bracket` 的 release 只在栈上跑」这条性质最干净的反例：它不是控制流形状的问题，是**根本没有栈可退** |
+
+**这四处把 §2.6 的结论收得更紧了。** 2.7 当时的判断是「跨函数那一例要 `defer`」——今天看，
+`defer` 也救不了它，因为 `defer` 同样是栈上的东西，而这四处的共同出口是 `System.exit`。
+**它们不是语法缺口，是「CLI 用退出码当控制流」的账。** §6 的「defer 关档不做」因此站得更稳，
+而不是被这批数据动摇。
+
 ## 3. Pass 架构
 
 ### 3.1 流水线现状，以及新 pass 会插在哪
