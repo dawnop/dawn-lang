@@ -110,7 +110,17 @@ pub type JavaError = { class_name: String, message: String, cause: Option[String
 好消息是这一改让 C2 从「等 lowered-ir 阶段 C」变成「**就是** IR 的一部分」——
 依赖关系反而简单了。**冻结，等 Phase 0。**
 
-### 3.5 `ceval` trampoline 化与 R6 撞车（ARCH-06 + LANG-01 建议 3）
+### 3.5 `ceval` trampoline 化与 R6 撞车（ARCH-06 + LANG-01 建议 3）——**已结账**
+
+> **2026-07-31 结账。** R6 已于 07-25 决议（interp 吃 Core），本条的冻结条件消失；
+> 随后的收益重估把步骤 3 判为**不做**，裁决与实测在
+> [ceval-trampoline-verdict.md](ceval-trampoline-verdict.md)。
+> 关键数字：深输入下 parser 每层烧 16 帧、`-Xss1m` 只吃得下 153 层嵌套，
+> 比 `ceval`（159 层）更早倒——**trampoline 掉 `ceval` 只是换个先崩的 pass，
+> `-Xss512m` 摘不掉**；而真实语料（含编译器自己 31,175 行）在 `-Xss256k` 下编得过，
+> 也不需要靠它摘。下面的原文保留：翻案条件（那份 §七）成立时它仍是起点。
+>
+> 连带作废的是 §五「这份台账什么时候可以删」的条件 2——R6 决议已到期且已消费。
 
 计划 R6 写得很明确：
 
@@ -122,7 +132,8 @@ pub type JavaError = { class_name: String, message: String, cause: Option[String
 「求值子表达式前」与「子表达式回来之后」两半。**如果 interp 之后改吃 Core，
 这份工作全部重做。**
 
-**处理：步骤 3 冻结，等 R6 决议**（计划自己承诺在 Phase 2 之前给出）。
+~~**处理：步骤 3 冻结，等 R6 决议**（计划自己承诺在 Phase 2 之前给出）。~~
+**处理（07-31 改）：步骤 3 不做**，见本节表头。
 步骤 1（`unsafe_pure` 收归 std）与步骤 2（comptime allowlist）**不受影响，照做**——
 它们改的是 checker 的一个判定和 `eval_java` 的一张表，与 `ceval` 的形状无关。
 
@@ -131,6 +142,13 @@ Phase 3 的 `pthread_attr_setstacksize` 就是 `-Xss512m` 在 native 上的延�
 也就是说「用户程序靠大栈跑深递归」从**债**变成了**决策**。
 ARCH-06 能拿掉的只有「编译器的 comptime 求值器吃宿主栈」那一半。
 这一点要写进 spec，不要让用户以为深递归以后会变好。
+
+> **07-31 补两条实测**（[verdict](ceval-trampoline-verdict.md) §三、§五）：
+> ①「用户程序靠大栈」这条决策的代价是可量的——编译成 jar 的 100,000 层非尾递归
+> 要 `-Xss8m`，512m 给的是约 640 万帧余量；②Phase 3 的 `pthread_attr_setstacksize`
+> **至今没落地**（`runtime/c/` 与 `nmain`/`cdriver`/`emitc` 全无栈尺寸设置），
+> native 今天吃 OS 默认 8 MB，深输入的表现是 SIGSEGV 无消息。
+> 「`-Xss512m` 在 native 上的延续」现在还只是计划里的一行字。
 
 ### 3.6 `'a'` 变 `Char` 与 Phase 6 撞同一批文件（LANG-04）
 
@@ -218,7 +236,8 @@ d1 canonical tree hash 是唯一的完整性手段。
 三个条件同时成立：
 
 1. Phase 0 出口达成（Core IR 落地、零 Emit-Change），§3.1 与 §3.2 的登记兑现；
-2. R6 决议（interp 吃 Core 还是吃 TAST），§3.5 解冻；
+2. ~~R6 决议（interp 吃 Core 还是吃 TAST），§3.5 解冻~~ —— **已满足（07-31）**：
+   R6 于 07-25 决议，§3.5 随之解冻并结账为「不做」；
 3. Phase 6 出口（native 固定点），§3.7 的第二份 decoder 有了着落。
 
 在那之前，本目录任何一份文档动手前**先读这里**——它记的是「你要改的东西

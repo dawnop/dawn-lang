@@ -33,7 +33,8 @@
 |---|---|---|---|
 | [re-audit-2026-07-30.md](re-audit-2026-07-30.md) | 第二轮复审：RP/RX/RC/RD 共 53 条 | 分级见其 §六 | **current（发现记录）** |
 | [native-plan-overlap.md](native-plan-overlap.md) | 撞车登记（台账，非方案） | — | current |
-| [purity-boundary-design.md](purity-boundary-design.md) | **LANG-01(P0)** ARCH-06 | 是（语言收窄） | 步 1–2 可做／**步 3 冻结** |
+| [purity-boundary-design.md](purity-boundary-design.md) | **LANG-01(P0)** ARCH-06 | 是（语言收窄） | 步 1–2 已落地／**步 3 不做** |
+| [ceval-trampoline-verdict.md](ceval-trampoline-verdict.md) | purity-boundary 步 3 的收益重估（裁决，非方案） | — | **current（不做，07-31）** |
 | [lowered-ir-design.md](lowered-ir-design.md) | ARCH-04 ARCH-01 ARCH-02 ARCH-03 | 否（输出必须逐字节不变） | **降级为补充材料**；仅 ARCH-01/02 归本目录 |
 | [error-model-design.md](error-model-design.md) | ERR-02 ERR-03 LANG-02 | 是 | A、B 可做／**C2 冻结** |
 | [application-syntax-design.md](application-syntax-design.md) | SYN-02 SYN-03 | 否（语法放宽） | **已落地**（2026-07-30 加法 + 07-31 统一） |
@@ -60,7 +61,7 @@ ARCH-05 的前两条建议。台账 §二。**不要并行动它们。**
 
 第 1 批（P0，不重合的那两步）
   purity-boundary 步骤1（unsafe_pure 收归 std）──► 步骤2（comptime allowlist）
-                                                    步骤3 ✗ 冻结（等 R6）
+                                                    步骤3 ✗ 不做（07-31 裁决）
 
 第 2 批（破坏性，各自发窗口）
   error-model A（ForeignError）──► B（cast 返回 Result）
@@ -70,7 +71,7 @@ ARCH-05 的前两条建议。台账 §二。**不要并行动它们。**
 第 3 批（等 native 那条线）
   Phase 0 落地 ──► ARCH-01（拆 Cx）──► ARCH-02（拆 Gen）──► 要在 Phase 5 之前
                 └► error-model C2
-  R6 决议    ──► purity-boundary 步骤 3 ──► 摘 -Xss512m（只摘编译器那一半）
+  R6 决议    ──► purity-boundary 步骤 3 ✗ 不做，-Xss512m 留着（ceval-trampoline-verdict）
   Phase 6    ──► nominal-types 步骤 4（'a' 变 Char，与纯 Dawn 化合并做）
 
 * REL-02 从「可以立刻做」升为**前置**：两后端平权之后，
@@ -80,7 +81,8 @@ ARCH-05 的前两条建议。台账 §二。**不要并行动它们。**
 真依赖只剩两条（原来的三条里，「lowered-ir 必须在拆 Cx 之前」这条现在由
 native 计划的 Phase 0 承担）：
 
-- **`purity-boundary` 的三步内部有序**，且步骤 3 额外等 R6。
+- **`purity-boundary` 的三步内部有序**；步骤 3 已裁决为不做
+  （[ceval-trampoline-verdict.md](ceval-trampoline-verdict.md)），不再是依赖。
 - **`error-model` A → B**（B 用 A 的错误类型），C2 额外等 Phase 0。
 
 其余全部可以并行。
@@ -146,7 +148,7 @@ native 计划的 Phase 0 承担）：
 |---|---|---|
 | **ARCH-01 拆 `Cx` / ARCH-02 拆 `Gen`** | Phase 0（Core IR）出口 | 排在 **Phase 5 之前**——`use c` 落到拆开的 checker 上更便宜 |
 | **error-model C2（`LProtect`）** | Phase 0 | 它**就是** IR 的一部分，不再是后续改动 |
-| **purity-boundary 步骤 3（trampoline）** | **R6 决议**（interp 吃 Core 还是吃 TAST） | 若吃 Core，整份工作要照 Core 重写 |
+| ~~**purity-boundary 步骤 3（trampoline）**~~ | ~~**R6 决议**~~ | **已结账 07-31：不做**——重估后收益不成立，见 [ceval-trampoline-verdict.md](ceval-trampoline-verdict.md) |
 | **nominal-types 步骤 4（`'a'` 变 `Char`）** | Phase 6 排期 | **合并成一次改**，且 `Char` 先落 |
 
 ## 四、发布纪律速查
