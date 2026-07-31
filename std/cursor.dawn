@@ -89,6 +89,45 @@ pub fn find(s: String, sub: String, from: Cursor) -> Option[Cursor] =
 pub fn back(s: String, c: Cursor, n: Int) -> Cursor =
   if n <= 0 { c } else { back(s, prev(s, c), n - 1) }
 
+# ---- the bridge to code-point indices ----
+#
+# There are two ways to say where you are in a string -- a code-point `Int`
+# and a `Cursor` -- and until these two functions existed there was no way to
+# get from either to the other. `str.index_of` answers in the first and
+# `cursor.slice` demands the second, so a scanner whose state is an `Int` (the
+# TOML one, for instance) had to re-derive its position from the start of the
+# string on every character: O(n) per step, O(n^2) per line. Neither of these
+# makes that cheap -- each is one walk -- but one walk at the boundary is not
+# one walk per character.
+
+## The position `i` characters from the start of `s`.
+##
+## Clamped, not asserted: a negative `i` is the start and an `i` past the end
+## is the end (spec §4.8, criterion 3, the same clause `next`, `prev` and
+## `back` already answer to). Every position in a string is a legal *answer*
+## here -- the guarantee `Cursor` carries is that arithmetic cannot land you
+## between the halves of a surrogate pair, and walking `i` characters cannot.
+##
+## O(i). Use it once, at the point where an `Int` index arrives from outside;
+## a loop that calls it per character is the O(n^2) it exists to remove.
+pub fn at(s: String, i: Int) -> Cursor = at_go(s, start(s), i)
+
+fn at_go(s: String, c: Cursor, i: Int) -> Cursor =
+  if i <= 0 || done(s, c) { c } else { at_go(s, next(s, c), i - 1) }
+
+## How many characters lie before `c`: the code-point index `at` would take.
+##
+## One pass, counting forward from the start, rather than the two-scan version
+## `packages/json` wrote for itself. `c` must be a position in `s`; a cursor
+## from another string counts to whichever end it compares past.
+pub fn offset(s: String, c: Cursor) -> Int = offset_go(s, start(s), c, 0)
+
+fn offset_go(s: String, p: Cursor, c: Cursor, n: Int) -> Int = {
+  let x: Int = p
+  let y: Int = c
+  if x >= y || done(s, p) { n } else { offset_go(s, next(s, p), c, n + 1) }
+}
+
 ## Positions in one string are ordered, and that order is the Int's.
 ##
 ## It used to come from a row in the compiler's scalar tables, and only half
