@@ -1,0 +1,61 @@
+# Non-finite Float constants: folded at compile time, then written back out
+# by each backend.
+#
+# The C backend rendered a folded Float with `to_string`, and spec §11's
+# spellings -- `Infinity`, `-Infinity`, `NaN` -- are not C tokens, so `cc`
+# refused the emitted file with `'Infinity' undeclared` (#111). The JVM
+# backend was always right: `ldc_double` takes the value, not its rendering.
+#
+# Nothing caught it because no corpus held a non-finite *const*.
+# float_edges.dawn builds its infinities out of `var`s on purpose -- so that
+# the backends answer rather than the fold -- and that is precisely the case
+# that already worked. The gap was the other direction, and it is this file.
+#
+# Signed zero rides along. `-0.0` is a valid C literal and always was, but
+# `-0.0 == 0.0` is true, so a dropped sign bit is invisible to every
+# comparison; only `to_string` and `1.0 / v` can see it, and both are here.
+use std/io
+
+const F_INF: Float = comptime { 1.0 / 0.0 }
+const F_NEG_INF: Float = comptime { -1.0 / 0.0 }
+const F_NAN: Float = comptime { 0.0 / 0.0 }
+const F_NEG_ZERO: Float = comptime { -0.0 }
+const F_ZERO: Float = comptime { 0.0 }
+
+## Arithmetic that *reaches* a non-finite value inside the fold, which the
+## interpreter has to get right before the emitter is ever asked.
+const F_INF_PLUS: Float = comptime { (1.0 / 0.0) + 1.0 }
+const F_INF_DIV: Float = comptime { (1.0 / 0.0) / (1.0 / 0.0) }
+const F_OVERFLOW: Float = comptime { 1.7976931348623157e308 * 2.0 }
+const NAN_SELF_EQ: Bool = comptime { (0.0 / 0.0) == (0.0 / 0.0) }
+const ZERO_SIGN_EQ: Bool = comptime { -0.0 == 0.0 }
+
+pub fn main() -> Unit !io = {
+  println("-- the three spellings, folded --")
+  println("${F_INF} ${F_NEG_INF} ${F_NAN}")
+
+  println("-- folded arithmetic reaching them --")
+  println("${F_INF_PLUS} ${F_INF_DIV} ${F_OVERFLOW}")
+
+  println("-- signed zero: == cannot see the sign, to_string and / can --")
+  println("${F_NEG_ZERO} ${F_ZERO} ${ZERO_SIGN_EQ}")
+  println("${1.0 / F_NEG_ZERO} ${1.0 / F_ZERO}")
+
+  println("-- a folded const equals the same expression computed at runtime --")
+  var one = 1.0
+  var zero = 0.0
+  println("${F_INF == one / zero} ${F_NEG_INF == (0.0 - one) / zero} ${to_string(zero / zero)}")
+
+  println("-- NaN is unequal to everything, itself included --")
+  println("${NAN_SELF_EQ} ${F_NAN == F_NAN} ${F_NAN != F_NAN} ${F_NAN < F_INF} ${F_NAN > F_NEG_INF}")
+
+  println("-- ordering across the infinities --")
+  println("${F_NEG_INF < F_ZERO} ${F_ZERO < F_INF} ${F_NEG_INF < F_INF} ${F_INF == F_INF}")
+
+  println("-- runtime arithmetic on folded non-finite operands --")
+  println("${F_INF + 1.0} ${F_INF - F_INF} ${F_INF * 0.0} ${F_NEG_INF * F_NEG_INF}")
+  println("${F_NAN + 1.0} ${1.0 / F_INF} ${1.0 / F_NEG_INF}")
+
+  println("-- the spellings round trip through parse_float --")
+  println("${parse_float(to_string(F_INF)) == Some(F_INF)} ${parse_float(to_string(F_NEG_INF)) == Some(F_NEG_INF)}")
+}

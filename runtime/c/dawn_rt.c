@@ -1353,41 +1353,54 @@ dawn_bytes *dawn_bytes_from_array(const dawn_array *a) {
   return dawn_bytes_of(buf, n);
 }
 
+/* Malformed input is replaced, not refused -- what `new String(bytes,
+ * charset)` does. A byte that starts no valid sequence becomes U+FFFD. */
+dawn_str *dawn_bytes_decode_utf8(const dawn_bytes *b) {
+  dawn_str *r = dawn_str_new(3 * b->len);
+  char *buf = dawn_str_data(r);
+  int64_t at = 0;
+  int64_t i = 0;
+  /* a borrowed view over the byte buffer, so the UTF-8 walker can read it */
+  dawn_str src = {{DAWN_IMMORTAL, DAWN_K_STR}, b->len, (const char *)b->p};
+  while (i < b->len) {
+    int64_t n;
+    uint32_t cp = dawn_utf8_at(&src, i, &n);
+    bool ok = true;
+    for (int64_t j = 1; j < n; j++) {
+      if ((b->p[i + j] & 0xC0) != 0x80) ok = false;
+    }
+    if (!ok || i + dawn_utf8_seq(b->p[i]) > b->len) {
+      at += dawn_utf8_put(buf + at, 0xFFFDu);
+      i++;
+    } else {
+      at += dawn_utf8_put(buf + at, cp);
+      i += n;
+    }
+  }
+  return dawn_str_shrink(r, at);
+}
+
+/* One code point per byte, 0..255 -- so every byte string decodes and the
+ * result is never longer than two UTF-8 bytes per input byte. */
+dawn_str *dawn_bytes_decode_latin1(const dawn_bytes *b) {
+  dawn_str *r = dawn_str_new(2 * b->len);
+  char *buf = dawn_str_data(r);
+  int64_t at = 0;
+  for (int64_t i = 0; i < b->len; i++) {
+    at += dawn_utf8_put(buf + at, b->p[i]);
+  }
+  return dawn_str_shrink(r, at);
+}
+
+/* The charset-taking original, kept until std moves onto the pair above and a
+ * seed carries them (three phases, one release each). It is the dispatch and
+ * nothing else now: both arms are the functions above. */
 dawn_adt *dawn_bytes_decode(const dawn_bytes *b, dawn_str *charset) {
   if (dawn_charset_is(charset, "UTF-8") || dawn_charset_is(charset, "UTF8")) {
-    /* Malformed input is replaced, not refused -- what `new String(bytes,
-     * charset)` does. A byte that starts no valid sequence becomes U+FFFD. */
-    dawn_str *r = dawn_str_new(3 * b->len);
-    char *buf = dawn_str_data(r);
-    int64_t at = 0;
-    int64_t i = 0;
-    /* a borrowed view over the byte buffer, so the UTF-8 walker can read it */
-    dawn_str src = {{DAWN_IMMORTAL, DAWN_K_STR}, b->len, (const char *)b->p};
-    while (i < b->len) {
-      int64_t n;
-      uint32_t cp = dawn_utf8_at(&src, i, &n);
-      bool ok = true;
-      for (int64_t j = 1; j < n; j++) {
-        if ((b->p[i + j] & 0xC0) != 0x80) ok = false;
-      }
-      if (!ok || i + dawn_utf8_seq(b->p[i]) > b->len) {
-        at += dawn_utf8_put(buf + at, 0xFFFDu);
-        i++;
-      } else {
-        at += dawn_utf8_put(buf + at, cp);
-        i += n;
-      }
-    }
-    return dawn_some(dawn_str_shrink(r, at));
+    return dawn_some(dawn_bytes_decode_utf8(b));
   }
   if (dawn_charset_is(charset, "ISO-8859-1") || dawn_charset_is(charset, "latin1")) {
-    dawn_str *r = dawn_str_new(2 * b->len);
-    char *buf = dawn_str_data(r);
-    int64_t at = 0;
-    for (int64_t i = 0; i < b->len; i++) {
-      at += dawn_utf8_put(buf + at, b->p[i]);
-    }
-    return dawn_some(dawn_str_shrink(r, at));
+    return dawn_some(dawn_bytes_decode_latin1(b));
   }
   return dawn_none();
 }
