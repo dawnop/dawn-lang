@@ -19,6 +19,7 @@ use types.{Sig, Adts, Impls}
 use tast.{TFun, TModule}
 use checker.{ModExports, check_module, cx_new, exports_of, Cx}
 use interp.{eval_comptime, note_trait_fn, CtOut, ct_default}
+use core.{VStr, VBool}
 use parser
 use lexer
 use stdsrc
@@ -268,6 +269,53 @@ test "the embedded std matches std/ on disk" {
       }
     }
   }
+}
+
+test "float rendering and parsing fold through std/fmt, not the host" {
+  # The RP-12 gate's float line, after audits RP-01/RP-05 moved the answers
+  # into std: `to_string(Float)` lowers to std/fmt.dtoa and the parsers to
+  # fmt.atoi/atod, so a comptime fold interprets the program's own std Core.
+  # The expected strings below are spec §4.3's, written literally -- if the
+  # fold ever rode a host renderer or host grammar again, a JDK could change
+  # them out from under the spec and this test is what would say so.
+  let std = match load_std("std") {
+    Ok(s) -> s
+    Err(e) -> panic("std: " ++ e)
+  }
+  let src = "const A: String = comptime { to_string(0.1) }\n" ++
+    "const B: String = comptime { to_string(3.0e-7) }\n" ++
+    "const C: String = comptime { to_string(1.0e300) }\n" ++
+    "const D: String = comptime { to_string(-0.0) }\n" ++
+    "const E: String = comptime { to_string(0.0 / 0.0) }\n" ++
+    "const F: String = comptime { to_string(1.0 / 0.0) }\n" ++
+    "const G: String = comptime { to_string(9999999.0) }\n" ++
+    "const H: String = comptime { to_string(10000000.0) }\n" ++
+    "const P: Bool = comptime { parse_float(\"1.5f\") == None }\n" ++
+    "const Q: Bool = comptime { parse_float(\"Infinity\") == Some(1.0 / 0.0) }\n" ++
+    "const R: Bool = comptime { parse_int(\" 42 \") == Some(42) }\n" ++
+    "const S: Bool = comptime { parse_int(\"9223372036854775808\") == None }\n"
+  let (m, pdiags) = parser.parse_module(src)
+  assert len(pdiags) == 0
+  var cx = cx_new(None, None)
+  cx = Cx { ..cx, next_id: std.next_id, impl_table: std.impls }
+  let (cx1, tm) = check_module(cx, m, std.exports)
+  assert len(cx1.diags) == 0
+  let ct = eval_comptime(tm, std.fn_decls, std.by_owner, std.impl_fns,
+    std.std_names, cx1.adts, cx1.traits, cx1.impl_table, "m", ct_default())
+  if len(ct.diags) > 0 { println("FOLD DIAG: " ++ ct.diags[0].msg) }
+  assert len(ct.diags) == 0
+  assert map.get(ct.consts, "A") == Some(VStr("0.1"))
+  assert map.get(ct.consts, "B") == Some(VStr("3.0E-7"))
+  assert map.get(ct.consts, "C") == Some(VStr("1.0E300"))
+  assert map.get(ct.consts, "D") == Some(VStr("-0.0"))
+  assert map.get(ct.consts, "E") == Some(VStr("NaN"))
+  assert map.get(ct.consts, "F") == Some(VStr("Infinity"))
+  assert map.get(ct.consts, "G") == Some(VStr("9999999.0"))
+  assert map.get(ct.consts, "H") == Some(VStr("1.0E7"))
+  assert map.get(ct.consts, "P") == Some(VBool(true))
+  assert map.get(ct.consts, "Q") == Some(VBool(true))
+  assert map.get(ct.consts, "R") == Some(VBool(true))
+  assert map.get(ct.consts, "S") == Some(VBool(true))
 }
 
 test "the bundled std loads, checks and evaluates" {

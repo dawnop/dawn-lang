@@ -2438,25 +2438,11 @@ fn gen_cintrinsic(g: Gen, name: String, args: List[CExpr], ty: Ty) -> (Gen, Bool
     return (g1, true)
   }
   if name == "to_string" {
-    let g1 = gen_cargs(g, args)
-    let at = cex_ty(args[0])
-    if at == TyInt {
-      g1.mv.visitMethodInsn(OP_INVOKESTATIC, "java/lang/String", "valueOf",
-        "(J)Ljava/lang/String;", false)
-    } else if at == TyFloat {
-      g1.mv.visitMethodInsn(OP_INVOKESTATIC, "java/lang/String", "valueOf",
-        "(D)Ljava/lang/String;", false)
-    } else if at == TyBool {
-      g1.mv.visitMethodInsn(OP_INVOKESTATIC, "java/lang/String", "valueOf",
-        "(Z)Ljava/lang/String;", false)
-    } else if at == TyString {
-      ()
-    } else {
-      box_ty(g1.mv, at)
-      g1.mv.visitMethodInsn(OP_INVOKESTATIC, SHOW_CLASS, "show",
-        "(Ljava/lang/Object;)Ljava/lang/String;", false)
-    }
-    return (g1, true)
+    # Core lowers this into str_of_* / std/fmt.dtoa / quote; a residual one
+    # means a type the lowering did not know how to render. Same refusal as
+    # emitc's -- this arm used to re-switch on the operand type, which was a
+    # second copy of `to_str`'s dispatch that could only ever drift.
+    panic("emit: to_string survived lowering -- unsupported operand type")
   }
   let g1 = gen_cargs(g, args)
   if name == "to_float" {
@@ -2466,9 +2452,6 @@ fn gen_cintrinsic(g: Gen, name: String, args: List[CExpr], ty: Ty) -> (Gen, Bool
   } else if name == "str_of_int" {
     g1.mv.visitMethodInsn(OP_INVOKESTATIC, "java/lang/String", "valueOf",
       "(J)Ljava/lang/String;", false)
-  } else if name == "str_of_float" {
-    g1.mv.visitMethodInsn(OP_INVOKESTATIC, "java/lang/String", "valueOf",
-      "(D)Ljava/lang/String;", false)
   } else if name == "str_of_bool" {
     g1.mv.visitMethodInsn(OP_INVOKESTATIC, "java/lang/String", "valueOf",
       "(Z)Ljava/lang/String;", false)

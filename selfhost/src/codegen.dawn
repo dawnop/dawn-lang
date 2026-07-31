@@ -1933,16 +1933,18 @@ fn gen_array_with(cw: AdtClassWriter) -> Unit !io = {
   close_mv(wv)
 }
 
-## parse_int / parse_float: try/strip/parse/box, NumberFormatException → None.
-fn gen_parse_method(
-  cw: AdtClassWriter,
-  name: String,
-  box: String,
-  parse: String,
-  parse_desc: String,
-  value_of_desc: String
-) -> Unit !io = {
-  let m = cw.method(ACC_PUBLIC + ACC_STATIC, name, "(Ljava/lang/String;)LOption;").expect("mv")
+## The one parse primitive left on this backend: `parse_float`, the
+## decimal-to-binary conversion std/fmt.atod delegates after validating and
+## trimming (audit RP-05 -- the accepted *language* is fmt's EBNF, never
+## Double.parseDouble's grammar; on the validated subset parseDouble is pure
+## IEEE round-to-nearest, which is all this method is asked for). No
+## `String.strip` here any more: the input arrives trimmed by Dawn's own
+## space table. The exception net stays as a safety net, though a validated
+## string cannot trip it. `parse_int`/`parse_int_radix` are gone entirely --
+## fmt.atoi is pure Dawn source and never reaches a runtime method.
+fn gen_parse_float_method(cw: AdtClassWriter) -> Unit !io = {
+  let m = cw.method(ACC_PUBLIC + ACC_STATIC, "parse_float",
+    "(Ljava/lang/String;)LOption;").expect("mv")
   m.visitCode()
   let try_start = Label.new()
   let try_end = Label.new()
@@ -1952,42 +1954,10 @@ fn gen_parse_method(
   m.visitTypeInsn(OP_NEW, "Option\$Some")
   m.visitInsn(OP_DUP)
   m.visitVarInsn(OP_ALOAD, 0)
-  m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/String", "strip", "()Ljava/lang/String;", false)
-  m.visitMethodInsn(OP_INVOKESTATIC, box, parse, parse_desc, false)
-  m.visitMethodInsn(OP_INVOKESTATIC, box, "valueOf", value_of_desc, false)
-  m.visitMethodInsn(OP_INVOKESPECIAL, "Option\$Some", "<init>", "(Ljava/lang/Object;)V", false)
-  m.visitLabel(try_end)
-  m.visitInsn(OP_ARETURN)
-  m.visitLabel(handler)
-  m.visitInsn(OP_POP)
-  m.visitFieldInsn(OP_GETSTATIC, "Option\$None", "INSTANCE", "LOption\$None;")
-  m.visitInsn(OP_ARETURN)
-  m.visitMaxs(0, 0)
-  m.visitEnd()
-  ()
-}
-
-## parse_int_radix(s, radix): Long.parseLong(s.strip(), (int) radix), with the
-## same NumberFormatException → None shape as gen_parse_method. Separate because
-## the radix argument makes the descriptor and the loads differ throughout.
-fn gen_parse_radix_method(cw: AdtClassWriter) -> Unit !io = {
-  let m = cw.method(ACC_PUBLIC + ACC_STATIC, "parse_int_radix",
-    "(Ljava/lang/String;J)LOption;").expect("mv")
-  m.visitCode()
-  let try_start = Label.new()
-  let try_end = Label.new()
-  let handler = Label.new()
-  m.visitTryCatchBlock(try_start, try_end, handler, "java/lang/NumberFormatException")
-  m.visitLabel(try_start)
-  m.visitTypeInsn(OP_NEW, "Option\$Some")
-  m.visitInsn(OP_DUP)
-  m.visitVarInsn(OP_ALOAD, 0)
-  m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/String", "strip", "()Ljava/lang/String;", false)
-  m.visitVarInsn(OP_LLOAD, 1)
-  m.visitInsn(OP_L2I)
-  m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Long", "parseLong",
-    "(Ljava/lang/String;I)J", false)
-  m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Long", "valueOf", "(J)Ljava/lang/Long;", false)
+  m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Double", "parseDouble",
+    "(Ljava/lang/String;)D", false)
+  m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Double", "valueOf",
+    "(D)Ljava/lang/Double;", false)
   m.visitMethodInsn(OP_INVOKESPECIAL, "Option\$Some", "<init>", "(Ljava/lang/Object;)V", false)
   m.visitLabel(try_end)
   m.visitInsn(OP_ARETURN)
@@ -2016,7 +1986,7 @@ const CLASS_LOWER: String = "CLASS_LOWER"
 
 const CLASS_SPACE: String = "CLASS_SPACE"
 
-## dawn/rt/Strings: the string runtime — join, cmp, parse_int/parse_float,
+## dawn/rt/Strings: the string runtime — join, cmp, parse_float,
 ## code_points/from_code_points, the cursor family, the Unicode classifiers and
 ## case folding. What is left after std/str took over everything expressible as
 ## a walk (docs/native-backend-plan.md 14.12): the representation boundary and
@@ -2067,11 +2037,7 @@ pub fn gen_strings_class(supers: List[String], u: TableUse) -> Bytes !io = {
   jn.visitMaxs(0, 0)
   jn.visitEnd()
 
-  gen_parse_method(cw, "parse_int", "java/lang/Long", "parseLong",
-    "(Ljava/lang/String;)J", "(J)Ljava/lang/Long;")
-  gen_parse_method(cw, "parse_float", "java/lang/Double", "parseDouble",
-    "(Ljava/lang/String;)D", "(D)Ljava/lang/Double;")
-  gen_parse_radix_method(cw)
+  gen_parse_float_method(cw)
 
   # code_points(String) -> List[Int]: one Long-boxed code point per element
   let cp = cw.method(ACC_PUBLIC + ACC_STATIC, "code_points",
@@ -2453,8 +2419,8 @@ pub fn gen_strings_class(supers: List[String], u: TableUse) -> Bytes !io = {
   # JVM resolves constant-pool entries lazily, so nothing notices unless the
   # pruning was wrong, and then it is a NoSuchMethodError naming the method
   # rather than a wrong answer. `char_is_alnum` forces letter and digit in
-  # (it calls both); `u.parse` is ignored here, because these parsers strip
-  # with `String.strip` rather than with our space set.
+  # (it calls both). The parse family stopped touching tables when the
+  # parsers became std/fmt source (audit RP-05).
   let want_letter = u.is_letter || u.is_alnum
   let want_digit = u.is_digit || u.is_alnum
   var tables: List[(String, String)] = []

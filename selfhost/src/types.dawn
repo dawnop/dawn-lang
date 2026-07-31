@@ -1263,9 +1263,11 @@ pub fn intrinsics() -> Map[String, Intr] = {
   # strings: the Unicode tables, plus the cursor walk they and std/str rest on.
   # `cursor_slice` is absent on purpose -- the emitter writes it inline so it
   # can check the range and panic.
-  for n in ["parse_int", "parse_float", "parse_int_radix"] {
-    rt_of = map.insert(rt_of, n, RtStrings)
-  }
+  # Of the three numeric parsers only `parse_float` still owns a runtime
+  # method: the decimal-to-binary conversion std/fmt.atod delegates after its
+  # EBNF validation (audit RP-05). `parse_int`/`parse_int_radix` lower to
+  # std/fmt source and never reach a backend.
+  rt_of = map.insert(rt_of, "parse_float", RtStrings)
   for op in ["letter", "digit", "alnum", "upper", "lower", "space"] {
     rt_of = map.insert(rt_of, "char_is_" ++ op, RtStrings)
   }

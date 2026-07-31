@@ -52,10 +52,11 @@ use std/set
 ## and the five predicates with the class payloads; the C emitter does the
 ## same per named table.
 ##
-## `parse` is a separate fact because the two runtimes disagree about what
-## parsing needs: the C parsers strip leading and trailing whitespace with the
-## space set (dawn_str_trim_span), while the JVM answers with `String.strip`.
-## So the C backend folds `parse` into its space table and the JVM ignores it.
+## There is no `parse` fact any more: the numeric parsers are std/fmt source
+## (audit RP-05), which trims through `str.trim` like everything else, so the
+## space set rides on `is_space` alone. The one residual parse primitive
+## (`parse_float`, the decimal-to-binary conversion fmt.atod delegates)
+## receives a pre-trimmed string and touches no table.
 pub type TableUse = {
   str_upper: Bool,
   str_lower: Bool,
@@ -64,8 +65,7 @@ pub type TableUse = {
   is_alnum: Bool,
   is_upper: Bool,
   is_lower: Bool,
-  is_space: Bool,
-  parse: Bool
+  is_space: Bool
 }
 
 ## Everything on: the answer when there is no program to reason from (the
@@ -79,8 +79,7 @@ pub fn all_tables() -> TableUse =
     is_alnum: true,
     is_upper: true,
     is_lower: true,
-    is_space: true,
-    parse: true
+    is_space: true
   }
 
 fn no_tables() -> TableUse =
@@ -92,8 +91,7 @@ fn no_tables() -> TableUse =
     is_alnum: false,
     is_upper: false,
     is_lower: false,
-    is_space: false,
-    parse: false
+    is_space: false
   }
 
 ## How a body names the function it calls, resolved to positions in one flat
@@ -233,8 +231,6 @@ fn mark(u: TableUse, name: String) -> TableUse =
     TableUse { ..u, is_lower: true }
   } else if name == "char_is_space" {
     TableUse { ..u, is_space: true }
-  } else if name == "parse_int" || name == "parse_float" || name == "parse_int_radix" {
-    TableUse { ..u, parse: true }
   } else {
     u
   }
@@ -437,10 +433,11 @@ test "a referenced dictionary charges every slot" {
   assert u.is_letter
 }
 
-test "the parse family is one fact, marked by any member" {
+test "the residual parse primitive marks no table" {
+  # fmt.atod's delegate gets a pre-trimmed, validated string: the space set
+  # rides on `is_space` (str.trim's char_is_space), never on parsing itself
   let u = table_use(
-    [tmod("app", [tfn("app", "main", intr("parse_int_radix"))])], ["app"])
-  assert u.parse
+    [tmod("app", [tfn("app", "main", intr("parse_float"))])], ["app"])
   assert not u.is_space
 }
 
