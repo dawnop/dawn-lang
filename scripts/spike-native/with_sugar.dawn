@@ -1,0 +1,79 @@
+# The `with` statement (spec §4.10), end to end on both backends.
+#
+# `with` is a parser rewrite -- the rest of the block becomes a closure attached
+# as the call's last argument -- so there is no new node for a backend to
+# implement and nothing here should be able to differ between them. That is
+# exactly why it is worth running on both: a rewrite that is only ever read
+# through the JVM is a rewrite whose spans, capture set and evaluation order
+# were checked once.
+#
+# What the transcript pins:
+#
+#   1. the desugared call runs `use` and then `release`, and hands back the
+#      body's own value -- the same three claims bracket.dawn makes of the
+#      hand-written spelling, made again of the sugar;
+#   2. two `with`s in one block nest, so releases come out inside first. Nothing
+#      in the parser says "nested": the second `with` swallows what is left of
+#      the block, which is already inside the first closure;
+#   3. captures cross the synthesized boundary -- the closure reads locals bound
+#      before the `with` (`tag` below), which is the part a rewrite gets wrong
+#      by dropping a scope;
+#   4. **`?` composes through the sugar**, which is the claim the design turns
+#      on (docs/core-move2-design.md §6). The closure hands back the `with`
+#      call's value, and that is the block's value, so an `Err` propagated
+#      inside the region leaves the *enclosing function* -- and the release
+#      still runs on the way out. The `err` line below is that release plus that
+#      `Err`, in that order.
+#
+# No failure crosses a barrier here, so every byte is accounted for and the file
+# carries no `.leaks-on-catch`: `?` propagation is an ordinary return.
+use std/io
+
+fn open(name: String) -> String !io = {
+  println("  acquire " ++ name)
+  name
+}
+
+fn close(name: String) -> Unit !io = println("  release " ++ name)
+
+fn parse(s: String) -> Result[Int, String] = if s == "1" { Ok(1) } else { Err("bad " ++ s) }
+
+## One resource, and a local bound before the `with` that the closure reads.
+fn simple(tag: String) -> Int !io = {
+  let bonus = 40
+  with f <- bracket(open("r1"), close)
+  println("  use " ++ f ++ " for " ++ tag)
+  bonus + 2
+}
+
+## Two `with`s in one block: the second is inside the first's closure, so the
+## inner resource is released first.
+fn nested() -> Int !io = {
+  with o <- bracket(open("outer"), close)
+  with i <- bracket(open("inner"), close)
+  println("  use " ++ o ++ " and " ++ i)
+  2
+}
+
+## `?` inside the region: the Err leaves this function, and `close` still runs.
+fn propagating(s: String) -> Result[Int, String] !io = {
+  with f <- bracket(open("r2"), close)
+  let n = parse(s)?
+  Ok(n + str_len(f))
+}
+
+fn str_len(s: String) -> Int = len(code_points(s))
+
+pub fn main() -> Unit !io = {
+  println("-- one resource, and a capture from before the `with` --")
+  println("value          " ++ to_string(simple("t")))
+
+  println("-- two `with`s in one block release inside out --")
+  println("value          " ++ to_string(nested()))
+
+  println("-- `?` in the region: Ok --")
+  println("ok             " ++ to_string(propagating("1")))
+
+  println("-- `?` in the region: the Err leaves the function, release still runs --")
+  println("err            " ++ to_string(propagating("2")))
+}
