@@ -353,24 +353,24 @@ pub fn builtin_type_names() -> List[String] =
 
 # ---- type resolution ----
 
-## The span of the first effect variable inside an alias target, if any.
-pub fn alias_effvar_span(ref: TypeRef) -> Option[(Int, Int)] =
+## The span of the first effect variable inside a type reference, if any.
+pub fn effvar_span(ref: TypeRef) -> Option[(Int, Int)] =
   match ref {
     TFn(params, ret, effs, lo, hi) -> {
       for a in effs {
         if a != "io" { return Some((lo, hi)) }
       }
       for p in params {
-        match alias_effvar_span(p) {
+        match effvar_span(p) {
           Some(s) -> return Some(s)
           None -> ()
         }
       }
-      alias_effvar_span(ret)
+      effvar_span(ret)
     }
     TTuple(elems, _, _) -> {
       for e in elems {
-        match alias_effvar_span(e) {
+        match effvar_span(e) {
           Some(s) -> return Some(s)
           None -> ()
         }
@@ -379,7 +379,7 @@ pub fn alias_effvar_span(ref: TypeRef) -> Option[(Int, Int)] =
     }
     TQual(_, _, targs, _, _) -> {
       for e in targs {
-        match alias_effvar_span(e) {
+        match effvar_span(e) {
           Some(s) -> return Some(s)
           None -> ()
         }
@@ -388,13 +388,27 @@ pub fn alias_effvar_span(ref: TypeRef) -> Option[(Int, Int)] =
     }
     TNamed(_, targs, _, _) -> {
       for e in targs {
-        match alias_effvar_span(e) {
+        match effvar_span(e) {
           Some(s) -> return Some(s)
           None -> ()
         }
       }
       None
     }
+  }
+
+## Effect variables are only introduced by function signatures (spec §6.3);
+## in a type declaration -- an alias target or a record/variant constructor
+## field -- `!e` would have no binder, so both positions refuse it with the
+## same words. True in the result means the reference was refused.
+pub fn refuse_decl_effvar(cx: Cx, ref: TypeRef) -> (Cx, Bool) =
+  match effvar_span(ref) {
+    Some(sp) -> {
+      let (lo, hi) = sp
+      (cerr_h(cx, "a type declaration cannot carry effect variables", lo, hi,
+        "write !io, or leave the function type pure"), true)
+    }
+    None -> (cx, false)
   }
 
 ## Resolve an alias target once, memoized; TyError (and an error) on a cycle.
@@ -1525,14 +1539,8 @@ pub fn pass_type_shells(cx: Cx, m: Module) -> (Cx, List[Option[Shell]]) = {
     }
     match d.alias_target {
       Some(target) -> {
-        match alias_effvar_span(target) {
-          Some(sp) -> {
-            let (alo, ahi) = sp
-            cx1 = cerr_h(cx1, "a type alias cannot carry effect variables", alo, ahi,
-              "write !io, or leave the function type pure")
-          }
-          None -> ()
-        }
+        let (cxe, _) = refuse_decl_effvar(cx1, target)
+        cx1 = cxe
         var tvs: List[Ty] = []
         for tn in d.tparams {
           let (cx2, v) = fresh_tvar(cx1, tn)
@@ -1686,6 +1694,13 @@ pub fn pass_ctor_fields(cx: Cx, m: Module, shells: List[Option[Shell]]) -> Cx !i
           continue
         }
         fnames = set.insert(fnames, f.name)
+        # same refusal as an alias target: a field's `!e` would have no binder
+        let (cxe, bad_eff) = refuse_decl_effvar(cx1, f.tref)
+        cx1 = cxe
+        if bad_eff {
+          fields = fields ++ [FieldI { name: f.name, ty: TyError }]
+          continue
+        }
         let (cx2, ft0) = resolve_type(cx1, f.tref)
         cx1 = cx2
         var ft = ft0
@@ -9152,6 +9167,36 @@ test "check_module: impl methods and trait defaults check as bodies" {
   let (cx2, _) = check_module(test_cx(), m2, env)
   assert len(cx2.diags) == 1
   assert cx2.diags[0].msg == "function `f` is not declared !io but calls `g` (!io)"
+}
+
+test "check_module: type declarations refuse effect variables" {
+  let env: Map[String, ModExports] = map.empty()
+  # record field
+  let (m1, p1) = parser.parse_module("pub type Box = { f: fn(Int) -> Int !e }\n")
+  assert len(p1) == 0
+  let (cx1, _) = check_module(test_cx(), m1, env)
+  assert len(cx1.diags) == 1
+  assert cx1.diags[0].msg == "a type declaration cannot carry effect variables"
+  assert cx1.diags[0].hint == "write !io, or leave the function type pure"
+  # variant field
+  let (m2, p2) = parser.parse_module("type T2 = | A(f: fn(Int) -> Int !e) | B\n")
+  assert len(p2) == 0
+  let (cx2, _) = check_module(test_cx(), m2, env)
+  assert len(cx2.diags) == 1
+  assert cx2.diags[0].msg == "a type declaration cannot carry effect variables"
+  # alias target shares the same words
+  let (m3, p3) = parser.parse_module("alias F = fn(Int) -> Int !e\n")
+  assert len(p3) == 0
+  let (cx3, _) = check_module(test_cx(), m3, env)
+  assert len(cx3.diags) == 1
+  assert cx3.diags[0].msg == "a type declaration cannot carry effect variables"
+  assert cx3.diags[0].hint == "write !io, or leave the function type pure"
+  # a concrete !io in the same positions stays legal
+  let (m4, p4) = parser.parse_module(
+    "pub type Cb = { f: fn(Int) -> Int !io }\nalias G = fn(Int) -> Int !io\n")
+  assert len(p4) == 0
+  let (cx4, _) = check_module(test_cx(), m4, env)
+  assert len(cx4.diags) == 0
 }
 
 ## The pub surface of a checked module for importers (the Kotlin exportsOf).
