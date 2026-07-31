@@ -1,0 +1,59 @@
+# std/fspath's four convenience functions, on both backends.
+#
+# `normalize`/`absolute` already have a differential of their own -- against
+# java.nio.file.Paths, in scripts/path-contract, which is the oracle for the
+# logic they replaced. These four have no Java counterpart to be checked
+# against (Path.getFileName answers null for the root and a Path for
+# everything else), so the oracle is the written expectation below, and this
+# file is what says the two backends read it the same way.
+#
+# Everything here normalizes first, which is where the interesting cases are:
+# a trailing slash, a `.` segment and a `..` pair all have to disappear before
+# the last segment means anything.
+use std/io
+use std/fspath
+
+fn opt_str(o: Option[String]) -> String =
+  match o {
+    Some(s) -> "[" ++ s ++ "]"
+    None -> "none"
+  }
+
+pub fn main() -> Unit !io = {
+  io.println("-- join --")
+  io.println("relative       = [" ++ fspath.join("a/b", "c.dawn") ++ "]")
+  io.println("trailing slash = [" ++ fspath.join("a/b/", "c.dawn") ++ "]")
+  io.println("absolute wins  = [" ++ fspath.join("a/b", "/etc/x") ++ "]")
+  io.println("empty base     = [" ++ fspath.join("", "c.dawn") ++ "]")
+  io.println("empty path     = [" ++ fspath.join("a/b", "") ++ "]")
+  io.println("both empty     = [" ++ fspath.join("", "") ++ "]")
+  io.println("at the root    = [" ++ fspath.join("/", "x") ++ "]")
+  io.println("climbing       = [" ++ fspath.join("a/b", "../c") ++ "]")
+  io.println("past the root  = [" ++ fspath.join("/a", "../../b") ++ "]")
+
+  io.println("-- basename --")
+  io.println("absolute       = [" ++ fspath.basename("/a/b/c.dawn") ++ "]")
+  io.println("bare name      = [" ++ fspath.basename("c.dawn") ++ "]")
+  io.println("trailing slash = [" ++ fspath.basename("a/b/") ++ "]")
+  io.println("dot segment    = [" ++ fspath.basename("a/b/.") ++ "]")
+  io.println("the root       = [" ++ fspath.basename("/") ++ "]")
+  io.println("empty          = [" ++ fspath.basename("") ++ "]")
+  io.println("non-ascii      = [" ++ fspath.basename("/tmp/中文.dawn") ++ "]")
+
+  io.println("-- extension (spec 4.8, criterion 2) --")
+  io.println("has one        = " ++ opt_str(fspath.extension("/a/b/c.dawn")))
+  io.println("has none       = " ++ opt_str(fspath.extension("/a/b/c")))
+  io.println("dotfile        = " ++ opt_str(fspath.extension("/a/b/.gitignore")))
+  io.println("trailing dot   = " ++ opt_str(fspath.extension("/a/b/c.")))
+  io.println("dot above only = " ++ opt_str(fspath.extension("/a.b/c")))
+  io.println("two dots       = " ++ opt_str(fspath.extension("a.tar.gz")))
+  io.println("empty          = " ++ opt_str(fspath.extension("")))
+
+  io.println("-- with_extension --")
+  io.println("replaced       = [" ++ fspath.with_extension("src/main.dawn", "class") ++ "]")
+  io.println("added          = [" ++ fspath.with_extension("src/main", "class") ++ "]")
+  io.println("removed        = [" ++ fspath.with_extension("src/main.dawn", "") ++ "]")
+  io.println("dot above only = [" ++ fspath.with_extension("/a.b/c", "d") ++ "]")
+  io.println("dotfile kept   = [" ++ fspath.with_extension("/a/.gitignore", "bak") ++ "]")
+  io.println("two dots       = [" ++ fspath.with_extension("a.tar.gz", "bz2") ++ "]")
+}
