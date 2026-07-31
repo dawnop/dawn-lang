@@ -374,7 +374,7 @@ fn emit_str_static(st: CSt, v: String) -> (CSt, String) = {
 fn const_literal(v: CValue, ty: Ty, what: String) -> String =
   match v {
     VInt(x) -> "INT64_C(" ++ to_string(x) ++ ")"
-    VFloat(x) -> to_string(x)
+    VFloat(x) -> float_lit(x)
     VBool(x) -> if x { "true" } else { "false" }
     # both callers peel VStr off to `emit_str_static` first -- a stored
     # literal needs static storage, which this signature cannot emit
@@ -384,6 +384,33 @@ fn const_literal(v: CValue, ty: Ty, what: String) -> String =
       panic("emitc: " ++ what ++ " folded to a structured value (" ++ ty_key(ty) ++
           "), which native cannot rebuild yet")
   }
+
+## A Float as a C expression.
+##
+## `to_string` answers the spec §11 spellings, and `Infinity`, `-Infinity` and
+## `NaN` are not C tokens -- a folded non-finite constant reached `cc` as an
+## undeclared identifier (#111). The JVM backend never saw this: `ldc_double`
+## takes the value, not its rendering.
+##
+## The three replacements reproduce the exact bit pattern and need no
+## <math.h> -- the runtime header does not include it, and the C compiler
+## folds each of them at translation time. Every finite value, signed zero
+## included, already renders as a literal C reads back bit for bit.
+fn float_lit(v: Float) -> String = {
+  let inf = 1.0 / 0.0
+  # NaN is the only value unequal to itself, so this arm has to come first:
+  # NaN compares false against the infinities too, and would fall through to
+  # `to_string` and out as a bare `NaN`.
+  if v != v {
+    "(0.0/0.0)"
+  } else if v == inf {
+    "(1.0/0.0)"
+  } else if v == -1.0 / 0.0 {
+    "(-1.0/0.0)"
+  } else {
+    to_string(v)
+  }
+}
 
 # ---- operators ----
 
@@ -416,7 +443,7 @@ fn bin_op_c(op: CBinOp) -> String =
 pub fn emit_expr(st: CSt, e: CExpr) -> (CSt, String) =
   match e {
     CInt(v) -> (st, "INT64_C(" ++ to_string(v) ++ ")")
-    CFloat(v) -> (st, to_string(v))
+    CFloat(v) -> (st, float_lit(v))
     CBool(v) -> (st, if v { "true" } else { "false" })
     CStr(v) -> emit_str_static(st, v)
     CUnit -> (st, "DAWN_UNIT")
@@ -1595,4 +1622,32 @@ test "a primitive its module owns needs no arm in the emitter" {
   assert rt_symbol("cursor_slice") == None
   assert rt_symbol("expect") == None
   assert rt_symbol("code_points") == None
+}
+
+test "a non-finite Float is written as C, not as its spelling" {
+  # #111. Spec §11 renders these `Infinity`, `-Infinity` and `NaN`; none of
+  # the three is a C token, so a folded const reached `cc` as an undeclared
+  # identifier. The replacements carry the same bit pattern and need no
+  # <math.h> -- the runtime header does not include it.
+  let inf = 1.0 / 0.0
+  assert float_lit(inf) == "(1.0/0.0)"
+  assert float_lit(-1.0 / 0.0) == "(-1.0/0.0)"
+  assert float_lit(0.0 / 0.0) == "(0.0/0.0)"
+  # NaN is unequal to the infinities as well, so its arm has to come first --
+  # last, it would fall through to `to_string` and out as a bare `NaN`.
+  assert float_lit(inf - inf) == "(0.0/0.0)"
+
+  # every finite value, signed zero included, is already a literal C reads
+  # back bit for bit, so the rewrite must not touch it
+  assert float_lit(0.0) == "0.0"
+  assert float_lit(-0.0) == "-0.0"
+  assert float_lit(0.1) == "0.1"
+  assert float_lit(1.0e300) == "1.0E300"
+  assert float_lit(4.9e-324) == "4.9E-324"
+
+  # both paths that print a Float share the rewrite: the inlined `CFloat` and
+  # the interpreter's folded `VFloat`
+  assert const_literal(VFloat(inf), TyFloat, "c") == "(1.0/0.0)"
+  assert const_literal(VFloat(0.0 / 0.0), TyFloat, "c") == "(0.0/0.0)"
+  assert const_literal(VFloat(-0.0), TyFloat, "c") == "-0.0"
 }
