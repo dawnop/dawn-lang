@@ -1347,6 +1347,14 @@ std → 内建，std 模块自己的 `pub fn len` 正是靠这一条合法。
   - `sort_by(xs, cmp: fn(T, T) -> Int) -> List[T]` — 自定义比较函数
   - `max/min[T: Ord](xs) -> Option[T]` — 极值；空列表 `None`
   - `max_by/min_by[T, K: Ord](xs, key: fn(T) -> K) -> Option[T]` — 按键取极值
+
+  成员与量词（都在 **`std/list`**，都**短路**——用 `fold` 假冒的 `any`/`all` 是一趟全走）：
+  - `list.any(xs, f) / list.all(xs, f) -> Bool` — 存在 / 全称；空列表分别为 `false` / `true`
+  - `list.contains[T: Eq](xs, x) -> Bool`、`list.index_of[T: Eq](xs, x) -> Option[Int]`
+    （判据 2，货币同 `str.index_of`，不发 `-1`）
+  - `list.unique[T: Eq + Hash](xs) -> List[T]` — 去重且保序（每个值留在首次出现的位置）。
+    这一条比其余多要一个 `Hash`：只有 `Eq` 的去重是二次的，而 `Set` 的插入序恰好就是
+    这里要的顺序
 - **字符串**：prelude 里有 `join parse_int parse_float to_string`（字符串转数字是
   `parse_int(s) -> Option[Int]`——没有重载，`to_int`/`to_float` 只做 Int↔Float 转换）。
 
