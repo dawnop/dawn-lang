@@ -20,6 +20,7 @@ use java "java.io.FileOutputStream"
 use types.{Request, Response, HttpError, Handler, Middleware, RouteMeta, http_error, error_response, streaming}
 use router.{Route, Dispatch, Found, NoPath, WrongMethod, dispatch, route_meta, validate_routes}
 use java "java.io.InputStream"
+use java "java.io.OutputStream"
 use java "java.net.URI"
 use java "java.net.URLDecoder"
 use java "java.net.http.HttpClient"
@@ -35,6 +36,15 @@ fn close_stream(s: InputStream) -> Unit !io = {
   let _ = catch_fault(fn() => s.close())
   ()
 }
+
+## The rest of the releases `write_response` brackets with, innermost first.
+## These do *not* swallow: a failure to flush the response body is the client's
+## problem to hear about, and the exchange is the connection.
+fn close_writer(w: OutputStreamWriter) -> Unit !io = w.close()
+
+fn close_body(o: OutputStream) -> Unit !io = o.close()
+
+fn close_exchange(ex: HttpExchange) -> Unit !io = ex.close()
 
 # The Content-Length the client claims, or 0 when it does not say. A claim, not
 # a fact — it only ever produces a fast rejection, never permission to read.
@@ -78,20 +88,26 @@ fn read_body(ex: HttpExchange, limit: Int) -> Result[(String, Bytes), HttpError]
 # Write a response. Length 0 selects chunked transfer encoding, so we never
 # need the byte count up front; the Writer handles UTF-8.
 fn write_response(ex: HttpExchange, r: Response) -> Unit !io = {
-  let headers = ex.getResponseHeaders()!
+  with x <- bracket(ex, close_exchange)
+  let headers = x.getResponseHeaders()!
   headers.set("Content-Type", r.content_type)
   set_extra_headers(headers, r.headers)
-  ex.sendResponseHeaders(r.status, 0)
-  let out = ex.getResponseBody()!
+  x.sendResponseHeaders(r.status, 0)
+  with out <- bracket(x.getResponseBody()!, close_body)
   match r.stream {
     # streaming body: pump the upstream InputStream straight to the socket, 8KB at a
     # time — constant memory, first byte out immediately. transferTo can throw if the
-    # client disconnects mid-download; catch_panic is our finally (Dawn has no
-    # try/finally), so the upstream stream is still closed and the HttpClient
-    # connection frees. close failure is non-fatal (close_stream swallows it).
+    # client disconnects mid-download; the bracket is the finally, so the upstream
+    # stream is closed and the HttpClient connection frees either way. The
+    # catch_panic outside it keeps a mid-download disconnect from being an error:
+    # the response is already committed, there is nothing left to say. Close
+    # failure is non-fatal too (close_stream swallows it).
     Some(s) -> {
-      let _ = catch_panic(fn() => s.transferTo(out))
-      close_stream(s)
+      let _ = catch_panic(fn() => {
+        with up <- bracket(s, close_stream)
+        up.transferTo(out)
+      })
+      ()
     }
     None ->
       match r.bin {
@@ -101,15 +117,12 @@ fn write_response(ex: HttpExchange, r: Response) -> Unit !io = {
           out.flush()
         }
         None -> {
-          let writer = OutputStreamWriter.new(out, "UTF-8")
+          with writer <- bracket(OutputStreamWriter.new(out, "UTF-8"), close_writer)
           writer.write(r.body)
           writer.flush()
-          writer.close()
         }
       }
   }
-  out.close()
-  ex.close()
 }
 
 fn set_extra_headers(headers: Headers, hs: List[(String, String)]) -> Unit !io = {
@@ -218,12 +231,13 @@ fn build_request(ex: HttpExchange, meta: Option[RouteMeta], max_body: Int) -> Re
 # whole exercise. The caller deletes it once the handler is done.
 fn spill_body(ex: HttpExchange) -> String !io = {
   let tmp = File.createTempFile("dawn-put-", ".tmp")!
-  let out = FileOutputStream.new(tmp)
+  with out <- bracket(FileOutputStream.new(tmp), close_spill)
   let stream = ex.getRequestBody()!
   let _n = stream.transferTo(out)
-  out.close()
   String.valueOf(tmp.getPath()!)!
 }
+
+fn close_spill(o: FileOutputStream) -> Unit !io = o.close()
 
 fn delete_quietly(path: String) -> Unit !io = {
   let r: Result[Bool, ForeignError] = catch_fault(fn() => File.new(path).delete())
@@ -232,6 +246,15 @@ fn delete_quietly(path: String) -> Unit !io = {
     Err(m) -> println("temp body file not deleted: ${m.message}")
   }
 }
+
+## The release for the spilled request body: a Request owns its temp file for
+## exactly the length of the handler call, and there is nothing to delete when
+## the body never went to disk.
+fn drop_body_file(req: Request) -> Unit !io =
+  match req.body_file {
+    Some(p) -> delete_quietly(p)
+    None -> ()
+  }
 
 fn meta_has_tag(meta: Option[RouteMeta], tag: String) -> Bool =
   match meta {
@@ -282,14 +305,12 @@ fn handle(routes: List[Route], middleware: List[Middleware], max_body: Int, ex: 
         # first middleware in the list is outermost: [a, b] runs a(b(core)). Middleware
         # still wraps the core, so CORS preflight and logging cover unmatched requests.
         let app = fold(rev(middleware), fn(rq: Request) => run_dispatch(d, rq), fn(h, m) => m(h))
-        # the temp body file lives exactly as long as the handler call. Dawn has no
-        # try/finally, so catch_panic plays that role (same idiom as with_tx): it
-        # returns rather than unwinding, so the delete below always runs.
-        let served = catch_panic(fn() => app(req))
-        match req.body_file {
-          Some(p) -> delete_quietly(p)
-          None -> ()
-        }
+        # the temp body file lives exactly as long as the handler call, and the
+        # bracket is what makes that true on every way out — including the ones
+        # the catch_panic below does not see, such as a panic while rendering
+        # the 500 for a panic.
+        with held <- bracket(req, drop_body_file)
+        let served = catch_panic(fn() => app(held))
         match served {
           Ok(Ok(r)) -> r
           Ok(Err(e)) -> error_response(e)

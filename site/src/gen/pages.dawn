@@ -20,13 +20,15 @@ fn parsed(path: String) -> List[Block] !io =
 # Byte-for-byte copy for binary assets (icons). read_file/write_file are
 # UTF-8 string APIs and would corrupt PNG/ICO bytes.
 fn copy_bin(src: String, dst: String) -> Unit !io = {
-  let i = FileInputStream.new(src)
-  let o = FileOutputStream.new(dst)
+  with i <- bracket(FileInputStream.new(src), close_in)
+  with o <- bracket(FileOutputStream.new(dst), close_out)
   i.transferTo(o)
-  i.close()
-  o.close()
   ()
 }
+
+fn close_in(i: FileInputStream) -> Unit !io = i.close()
+
+fn close_out(o: FileOutputStream) -> Unit !io = o.close()
 
 pub fn gen_assets(out: String) -> Unit !io = {
   write_page("$out/assets/style.css", str.trim(must_read("site/assets/style.css")))
