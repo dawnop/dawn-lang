@@ -1035,6 +1035,83 @@ fn gen_try_closure(cw: AdtClassWriter, name: String, caught: List[String]) -> Un
   ()
 }
 
+## `bracket(resource, release, use)`: hold a resource across one closure call
+## and let it go on every way out.
+##
+##   try { return use.apply(resource); } finally { release.apply(resource); }
+##
+## Four things about the shape are decisions rather than transcription:
+##
+## 1. **A method, not an inlined try block**, for the reason `gen_cast` gives
+##    one sentence at a time: entering a handler clears the operand stack, so a
+##    protected region that starts part way through an expression loses what
+##    was already pushed. A method starts with an empty stack by construction.
+##    This is also why no Core node stands behind the primitive
+##    (docs/core-move2-design.md 2.6): the protected region is one call, and a
+##    protect whose region is always a call is a runtime function taking a
+##    closure.
+## 2. **The resource arrives acquired**, so there is no acquire call here and
+##    nothing before the protected range that could fail with something to
+##    release. Haskell passes a thunk to close the window an asynchronous
+##    exception could arrive in; Dawn has no asynchronous failures, so the
+##    acquisition is ordinary code at the call site (types.builtins).
+## 3. **The handler catches `Throwable`**, which is the catch-all a class file
+##    can name (a zero `catch_type` means the same thing and Dawn cannot spell
+##    a null here). Catching `Throwable` is what the barriers next door must
+##    *not* do -- but they turn what they catch into a value, and this rethrows
+##    it. A release skipped because the failure was an `OutOfMemoryError` is a
+##    file handle leaked at the worst possible moment.
+## 4. **The handler does not merge with the normal path.** It stores the
+##    Throwable, calls release, and throws it again; nothing jumps past it. So
+##    the only frame `COMPUTE_FRAMES` has to invent holds a `java/lang/Throwable`
+##    on the stack, and `AdtClassWriter.getCommonSuperClass` is never asked
+##    about a pair of generated ADT classes.
+##
+## The two closures are `Fn1` at the erasure convention and the resource is an
+## `Object`, so every value crossing here is erased. The boxing is lowering's
+## `CBox`/`CUnbox` and is not repeated here -- `bracket` is declared `erased`
+## in `types.intrinsics()`, which is what puts the box on the argument and the
+## unbox at the call site.
+fn gen_bracket(cw: AdtClassWriter) -> Unit !io = {
+  let m = cw.method(ACC_PUBLIC + ACC_STATIC, "bracket",
+    "(Ljava/lang/Object;L" ++ fn_iface(1) ++ ";L" ++ fn_iface(1) ++
+      ";)Ljava/lang/Object;").expect("mv")
+  m.visitCode()
+  let try_start = Label.new()
+  let try_end = Label.new()
+  let handler = Label.new()
+  m.visitTryCatchBlock(try_start, try_end, handler, "java/lang/Throwable")
+  # the three parameters occupy 0..2; the answer is slot 3 and the caught
+  # Throwable slot 4
+  m.visitLabel(try_start)
+  m.visitVarInsn(OP_ALOAD, 2)
+  m.visitVarInsn(OP_ALOAD, 0)
+  m.visitMethodInsn(OP_INVOKEINTERFACE, fn_iface(1), "apply", erased_apply_desc(1), true)
+  m.visitVarInsn(OP_ASTORE, 3)
+  m.visitLabel(try_end)
+  # normal path: release, then hand back what `use` answered
+  m.visitVarInsn(OP_ALOAD, 1)
+  m.visitVarInsn(OP_ALOAD, 0)
+  m.visitMethodInsn(OP_INVOKEINTERFACE, fn_iface(1), "apply", erased_apply_desc(1), true)
+  m.visitInsn(OP_POP)
+  m.visitVarInsn(OP_ALOAD, 3)
+  m.visitInsn(OP_ARETURN)
+  # unwind path: release, then the same failure again -- same object, so its
+  # class, message and stack trace are the ones the caller would have seen had
+  # nothing been protected
+  m.visitLabel(handler)
+  m.visitVarInsn(OP_ASTORE, 4)
+  m.visitVarInsn(OP_ALOAD, 1)
+  m.visitVarInsn(OP_ALOAD, 0)
+  m.visitMethodInsn(OP_INVOKEINTERFACE, fn_iface(1), "apply", erased_apply_desc(1), true)
+  m.visitInsn(OP_POP)
+  m.visitVarInsn(OP_ALOAD, 4)
+  m.visitInsn(OP_ATHROW)
+  m.visitMaxs(0, 0)
+  m.visitEnd()
+  ()
+}
+
 ## A handler's body: the caught `Throwable` on the stack, a `Result$Err`
 ## carrying a `ForeignError` left on it. `base` is the first scratch local
 ## free in the enclosing method, and six consecutive ones are used from there.
@@ -1149,7 +1226,8 @@ fn gen_cast(cw: AdtClassWriter) -> Unit !io = {
   ()
 }
 
-## dawn/rt/Io: the io runtime — catch_fault/catch_panic (the Throwable barriers) plus
+## dawn/rt/Io: the io runtime — catch_fault/catch_panic (the Throwable barriers),
+## bracket (the one that releases and rethrows), plus
 ## the io_* primitives std/io writes over (print/println/read_line/is_dir/
 ## read_file/write_file/list_names). These retire the handwritten dawn.rt.StdIo.
 ## The failing ones (read_file/write_file/list_names) simply throw; std wraps
@@ -1167,6 +1245,10 @@ pub fn gen_io_class(supers: List[String]) -> Bytes !io = {
   # exhaustion is not a value; it propagates. (The C backend agrees for free:
   # native failure kinds have no VM-error arm at all.)
   gen_try_closure(cw, "catch_panic", [PANIC_CLASS, "java/lang/Exception"])
+
+  # The third of the family, and the one that catches nothing: it releases on
+  # both ways out and rethrows.
+  gen_bracket(cw)
 
   # Not an io primitive and not a barrier: `cast` is pure. It lives here
   # because this is the class that owns the one translation from a Throwable

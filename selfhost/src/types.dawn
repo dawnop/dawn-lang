@@ -981,6 +981,8 @@ pub fn builtins() -> Map[String, Sig] = {
   let a = TyVar("A", -3)
   let k = TyVar("K", -4)
   let v = TyVar("V", -5)
+  # `bracket`'s two: the resource it holds and the answer it hands back
+  let b = TyVar("B", -6)
   let e = EffVar("e", -1)
   var out: Map[String, Sig] = map.empty()
   var sigs = [
@@ -1097,6 +1099,51 @@ pub fn builtins() -> Map[String, Sig] = {
     eff1(
       tp1(bsig("catch_panic", [TyFn([], t, EIo)], ["f"],
         result_ty(t, foreign_error_ty())), t),
+      EIo
+    ),
+    # The third member of the family, and the one that catches nothing. It runs
+    # `release` on every way out of `use` -- the value, a panic, a fault -- and
+    # then gets out of the way: the failure carries on to whatever was going to
+    # stop it, with its kind and message untouched. `finally`, not `catch`.
+    #
+    # The resource arrives as a *value*, not as an acquire thunk. Haskell's
+    # `bracket` takes the thunk because Haskell has asynchronous exceptions: a
+    # timer or another thread can interrupt between acquiring and installing
+    # the handler, so the acquisition has to happen where the handler already
+    # is. Dawn has no such thing -- a failure only ever originates in code the
+    # program itself called -- and nothing of the caller's runs between the
+    # argument evaluation and the handler this primitive installs. So the
+    # thunk would buy no window; Koka's `finally` takes the resource eagerly
+    # for the same reason. Acquisition is ordinary code before the call, where
+    # a failure needs no release because nothing was acquired.
+    #
+    # `use` is last, which is a decision about what can be built on top: a
+    # `with`-style sugar attaches the remaining block as the *last* argument,
+    # so a primitive whose use-closure sits in the middle would have to be
+    # re-spelled the day that sugar exists (docs/core-move2-design.md 6,
+    # ruling 1). With eager acquisition and that sugar a resource site carries
+    # no lambdas at all: `with f <- bracket(open(path), close)`.
+    #
+    # It returns `B` rather than a `Result` because protecting and catching are
+    # orthogonal, and every language that has both says so -- Haskell's
+    # `bracket`, Kotlin's `use`, Koka's `finally`, Go's `defer` hand back the
+    # body's own answer. A caller who wants the failure as a value writes
+    # `catch_fault(fn() => bracket(...))`, which is two primitives each doing
+    # one thing (ruling 2).
+    #
+    # No `CSProtect` node stands behind it. The protected region is exactly one
+    # closure call, so no `return`/`?`/`break` can leave it -- the language
+    # stops them at the closure boundary -- and a protect whose region is always
+    # a call is a runtime primitive taking a closure, which is what
+    # `catch_fault` already is. That is the intrinsic contract, not a second
+    # implementation (docs/core-move2-design.md 2.6).
+    eff1(
+      Sig {
+        ..bsig("bracket",
+          [a, TyFn([a], TyUnit, EIo), TyFn([a], b, EIo)],
+          ["resource", "release", "use"], b),
+        tparams: [a, b]
+      },
       EIo
     ),
     # io_* intrinsics: the console/file primitives std/io writes over. All !io.
@@ -1237,7 +1284,10 @@ pub type Intr = {
   ## which made it one backend's convention living in the shared table, and
   ## meant a second backend could not read the table at all.
   rt: Option[Rt],
-  ## arguments and result cross at the erased type: a container primitive
+  ## arguments and result cross at the erased type, so the declared signature
+  ## *is* the ABI and lowering puts the box and the unbox in. The container
+  ## primitives are why it exists; `bracket` is here too, for the same reason
+  ## read the other way -- it hands back a bare type variable.
   erased: Bool,
   ## only std may name it -- the backend contract, not language surface
   internal: Bool
@@ -1313,6 +1363,15 @@ pub fn intrinsics() -> Map[String, Intr] = {
   }
   rt_of = map.insert(rt_of, "catch_fault", RtIo)
   rt_of = map.insert(rt_of, "catch_panic", RtIo)
+  # `bracket` joins them in the io runtime, and is `erased` for the reason the
+  # flag names rather than the container family it was introduced for: its
+  # declared signature *is* its ABI. The resource goes in at `A` and the answer
+  # comes back at `B`, both bare type variables, so lowering owes a box on the
+  # argument and an unbox on the result -- an intrinsic answering a bare type
+  # variable is the first one outside the collections, and without this the
+  # call site would read a box as whatever `B` turned out to be.
+  rt_of = map.insert(rt_of, "bracket", RtIo)
+  erased = set.insert(erased, "bracket")
 
   # The persistent Map/Set: erased on both sides, and std-only. No runtime
   # module owns them any more -- lowering turns each into a call on the Dawn
@@ -1516,7 +1575,7 @@ test "builtin table renders signatures" {
     }
     None -> { assert false }
   }
-  assert map_size2(bs) == 87
+  assert map_size2(bs) == 88
 }
 
 test "the reclaim's failure is a value, under the one name left" {
@@ -1588,6 +1647,47 @@ test "no barrier renders its failure into a String any more" {
       None -> { }
     }
   }
+}
+
+test "bracket protects a resource and hands the body's own answer back" {
+  # The third barrier-family primitive (docs/core-move2-design.md 4, knife 1).
+  # Four things about the signature are decisions, and all four are asserted
+  # here because each has an alternative that also compiles:
+  #
+  #   the resource is a VALUE, not an acquire thunk. The thunk is what Haskell
+  #   needs to close the window an asynchronous exception could arrive in;
+  #   Dawn has no asynchronous failures and nothing of the caller's runs
+  #   between the arguments and the handler, so acquisition is ordinary code
+  #   before the call;
+  #   the use-closure is LAST (Haskell's order), so a future `with`-style
+  #   sugar that attaches the remaining block as the last argument has a
+  #   primitive to attach it to -- and with the resource eager, such a site
+  #   spells no lambda at all;
+  #   the result is `B` and not a `Result`, because bracket does not catch --
+  #   the failure carries on and a caller who wants it as a value wraps the
+  #   whole thing in `catch_fault`;
+  #   `release` answers `Unit`, so nothing a caller might read can be dropped
+  #   on the floor by the unwind path.
+  let adts = prelude_adts()
+  let traits = prelude_traits()
+  let bs = builtins()
+  match map.get(bs, "bracket") {
+    Some(s) -> {
+      assert sig_render(adts, traits, s) ==
+        "fn bracket[A, B](resource: A, release: fn(A) -> Unit !io, " ++
+        "use: fn(A) -> B !io) -> B !io"
+    }
+    None -> { assert false }
+  }
+  let i = intr_at("bracket").expect("bracket")
+  # the io runtime implements it, as it implements the two barriers
+  assert i.rt == Some(RtIo)
+  # its declared signature is its ABI: the result comes back erased and
+  # lowering is what unboxes it
+  assert i.erased
+  # and it is language surface, not a std-only backend contract
+  assert not i.internal
+  assert i.sig.eff == EIo
 }
 
 test "ForeignError is a prelude record whose fields every backend can answer" {
