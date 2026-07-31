@@ -270,7 +270,7 @@ fn unzip(bs: Bytes, dest: String) -> Result[Unit, String] !io = {
 fn tar_str(b: Bytes, off: Int, len_: Int) -> String = {
   var end = off
   while end < off + len_ && bytes.at(b, end) != 0 { end = end + 1 }
-  bytes.decode(bytes.slice(b, off, end), "UTF-8")
+  bytes.decode_utf8(bytes.slice(b, off, end))
 }
 
 fn tar_octal(b: Bytes, off: Int, len_: Int) -> Result[Int, String] = {
@@ -356,13 +356,13 @@ fn untar(gz: Bytes, dest: String) -> Result[Unit, String] !io = {
     let padded = size + (512 - size % 512) % 512
     # type bytes: 'L' 76, 'x' 120, 'g' 103, '5' 53, '0' 48, NUL 0, '7' 55, links 49/50
     if tchar == 76 {
-      let long_name = bytes.decode(bytes.slice(raw, data_start, data_start + size), "UTF-8")
+      let long_name = bytes.decode_utf8(bytes.slice(raw, data_start, data_start + size))
       pending = Some(match str.index_of(long_name, str.from_char(0)) {
         Some(i) -> str.substring(long_name, 0, i)
         None -> long_name
       })
     } else if tchar == 120 {
-      let recs = bytes.decode(bytes.slice(raw, data_start, data_start + size), "UTF-8")
+      let recs = bytes.decode_utf8(bytes.slice(raw, data_start, data_start + size))
       pending = pax_path(recs)
     } else if tchar == 103 {
       ()
