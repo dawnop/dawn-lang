@@ -1074,7 +1074,8 @@ fn slurp(p: String) -> String !io = {
 #### 9.5.1 `Bytes`：一等不可变字节序列
 
 `Bytes` 是不可变的字节序列，运行期就是裸 `byte[]`。库函数（§11「bytes」组）：
-`utf8(s) -> Bytes`（字符串的 UTF-8 字节）、`decode(b, charset) -> String`（按字符集解码）、
+`utf8(s) -> Bytes`（字符串的 UTF-8 字节）、`decode_utf8(b) -> String` /
+`decode_latin1(b) -> String`（解码，见 §11）、
 `bytes.len`、`bytes.at(b, i) -> Int`（0..255，越界 panic）、`bytes.slice(b, start, end)`
 （`[start,end)`，下标 clamp 进范围）、`bytes.index_of(b, needle, from) -> Option[Int]`。
 `Bytes ++ Bytes` 拼接、`==`/`!=` 按**内容**比较（`Show` 渲染为 `<N bytes>` 摘要）。
@@ -1388,7 +1389,10 @@ std → 内建，std 模块自己的 `pub fn len` 正是靠这一条合法。
   这张表这一件明确的事，而不是换台机器编译就悄悄换了答案。分类（`char_is_*`）同理，
   表在 `selfhost/src/class_table.dawn`。
 - **`std/bytes`**（一等 `Bytes`，§9.5.1）：`bytes.utf8(s) -> Bytes`（字符串的 UTF-8 字节）、
-  `bytes.decode(b, charset) -> String`（按字符集解码，替代旧 `String.new(bytes, charset)`）、
+  `bytes.decode_utf8(b) -> String` 与 `bytes.decode_latin1(b) -> String`（解码；语言承诺的
+  字符集就这两个，**函数名即定义域**，没有字符集注册表——审计 RP-04 裁决 C。
+  旧 `bytes.decode(b, charset)` 已废弃，仅余这两支的等价拼写，未知 charset panic；
+  与其 charset 参数一并在下个种子边界删除）、
   `bytes.len(b) -> Int`、`bytes.at(b, i) -> Int`（0..255，越界 panic）、
   `bytes.slice(b, start, end) -> Bytes`（`[start,end)`，下标 clamp）、
   `bytes.index_of(b, needle, from) -> Option[Int]`（字节下标首次出现）。
