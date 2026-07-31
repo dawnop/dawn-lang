@@ -666,6 +666,22 @@ let c = rows[1][0]   # 可链式、可与 ?/./() 组合
 - comptime 中支持 `List` 下标（越界为编译错误）。
 - 只读——列表与映射是不可变的，没有 `xs[i] = v`。
 
+**越界三判据**。语言只承诺三条越界策略，每个带下标/区间参数的操作（本节的 `[]` 与
+§11 的库函数）恰属其一，按参数的**含义**归类而不是逐函数各定各的：
+
+1. **断言**——参数是一个**位置**，调用方声称它合法，越界是 bug：`xs[i]`、`m[k]`、
+   `bytes.at`、`pvec.index`/`nth`、`cursor.slice` 的非法区间 → **panic**（含负下标）。
+2. **问询**——越界/缺键是调用方要区分的正常分支：`get` 族（`list.get`、`map.get`、
+   `set.has` 的缺席、`index_of` 族的未命中）→ **`Option`**（或 `Bool`）。
+3. **钳位**——参数是一个**区间**，说的是「要这一段里有的部分」，不断言端点存在：
+   `list.take`/`drop`/`slice`、`bytes.slice`、`str.substring` → 两端各自夹进
+   `[0, len]`（负数取 `0`、超长取 `len`），`from > to` 得空序列，**永不 panic**。
+
+**唯一具名例外**：`cursor.char(s, c)` 到尾返回哨兵 `-1` 而非 `Option`（§11「std/cursor」）。
+它是逐字符前进的原语——每步包一层 `Option` 就是每步一次分配；同一个哨兵在 `bytes.at`
+那里被 std 包装成 panic（判据 1），在 `cursor.char` 这里则是公开契约的一部分
+（`packages/json` 的 lexer 依赖它）。除此之外，任何库函数不得以哨兵值表达越界。
+
 ### 4.9 return
 
 ```dawn
@@ -1388,7 +1404,8 @@ std → 内建，std 模块自己的 `pub fn len` 正是靠这一条合法。
   - `from_code_points(cs: List[Int]) -> String` — 由码点组装（接受增补码点）
   - `str.from_char(c: Int) -> String` — 单码点转字符串（非法码点 panic）
   - `str.len(s: String) -> Int` — 码点数（区别于 `str.chars` 返回的 `List[String]`）
-  - `str.substring(s: String, from: Int, to: Int) -> String` — 按**码点下标**切片，越界 panic
+  - `str.substring(s: String, from: Int, to: Int) -> String` — 按**码点下标**切片，
+    两端 clamp 进范围、`from > to` 得空串（§4.8 判据 3，与 `bytes.slice` 同策略）
 - **`std/cursor`**——上面这些**按码点下标**的函数，每次调用都要从串首数到那个下标，
   即单次 O(n)、放进循环就是 O(n²)。游标是**位置**而非计数，故每步恒定开销：
   - `cursor.start(s) / cursor.end(s) -> Cursor` — 串首 / 串尾游标

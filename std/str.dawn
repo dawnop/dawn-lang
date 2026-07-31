@@ -127,14 +127,23 @@ pub fn repeat(s: String, n: Int) -> String = if n <= 0 { "" } else { s ++ repeat
 # index because `len` here is str.len (String → code points) and so shadows the
 # builtin list length; `str.len(s)` doubles as the code-point count of that list.
 
-## The code points of `s` in `[from, to)`. Panics when the range is out of bounds.
-pub fn substring(s: String, from: Int, to: Int) -> String =
-  if from < 0 || from > to || to > len(s) {
-    panic("substring: index out of range")
+## The code points of `s` in `[from, to)`. Both ends are clamped into range
+## (a negative index reads as 0, one past the end as `len`) and `from > to`
+## yields the empty string, so this never panics — a range parameter selects
+## a stretch, it does not assert its endpoints exist (spec §4.8).
+pub fn substring(s: String, from: Int, to: Int) -> String = {
+  let n = len(s)
+  let f = clamp_cp(from, n)
+  let t = clamp_cp(to, n)
+  if f >= t {
+    ""
   } else {
     let acc: List[Int] = []
-    from_code_points(slice_cps(code_points(s), from, to, acc))
+    from_code_points(slice_cps(code_points(s), f, t, acc))
   }
+}
+
+fn clamp_cp(i: Int, n: Int) -> Int = if i < 0 { 0 } else if i > n { n } else { i }
 
 fn slice_cps(cps: List[Int], i: Int, to: Int, acc: List[Int]) -> List[Int] =
   if i >= to { acc } else { slice_cps(cps, i + 1, to, acc ++ [get(cps, i).expect("in range")]) }
