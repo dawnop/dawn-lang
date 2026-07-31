@@ -502,14 +502,14 @@ fn read_message() -> Frame !io = {
   }
   # No Content-Length: nothing to read for this frame, but the header block was
   # consumed up to CRLFCRLF, so the stream is already at the next one.
-  if clen < 0 { return Malformed(0 - 32600, "Invalid Request: missing Content-Length header") }
+  if clen < 0 { return Malformed(-32600, "Invalid Request: missing Content-Length header") }
   let body = io.read_stdin(clen)
   # A short body is genuinely end of input — the declared bytes are not coming.
   if bytes.len(body) < clen { return Eof }
   match parser.parse(bytes.decode_utf8(body)) {
     Ok(j) -> Message(j)
     # exactly clen bytes were consumed, so the next frame starts where it should
-    Err(e) -> Malformed(0 - 32700, "Parse error: " ++ e)
+    Err(e) -> Malformed(-32700, "Parse error: " ++ e)
   }
 }
 
@@ -594,7 +594,7 @@ fn handle(st0: LspState, msg: Json) -> LspState !io = {
     if has_id {
       send(jobj([("jsonrpc", JStr("2.0")), ("id", echo_id(id)),
         ("error", jobj([
-          ("code", JInt(0 - 32601)),
+          ("code", JInt(-32601)),
           ("message", JStr("Unsupported request method: " ++ method))
         ]))]))
     }
