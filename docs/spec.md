@@ -424,9 +424,11 @@ fn sort2[T: Ord2](xs: List[T]) -> List[T] = ...   # 约束：[T: Trait (+ Trait)
   `Eq[List[Int]]` 这样的具体目标在编译期解成常量字典，`Eq[List[T]]`（`T` 刚性）
   则在运行期由 `Eq[T]` 构造。无 dyn、无 supertrait、无特化（不问「哪个更特化」）。
   trait 方法效果只能是纯或 `!io`，impl 的效果 ⊑ trait 声明。
-- 预置 `trait Ord[T] { fn cmp(a: T, b: T) -> Int }` 及 `Int`/`Float`/`String`
-  的 impl；`derive Ord` 生成字段字典序比较（和类型先比构造器声明顺序），字段须为
-  `Int`/`Float`/`String`、自身具 Ord impl 的类型，或该类型自己的类型参数
+- 预置 `trait Ord[T] { fn cmp(a: T, b: T) -> Int }` 及 `Int`/`String` 的 impl
+  （**`Float` 没有**，NaN 下无全序可给——拒绝理由见 §4.3 数值边缘语义，2026-07-26
+  撤销了此前照 `Double.compare` 给的那份）；`derive Ord` 生成字段字典序比较
+  （和类型先比构造器声明顺序），字段须为
+  `Int`/`String`、自身具 Ord impl 的类型，或该类型自己的类型参数
   （此时生成的是条件 impl：`type Box[T] = { v: T } derive Ord` 得到
   `impl[T: Ord] Ord[Box[T]]`）。`List[T]` 有 std 写的词典序 impl。
 - 预置 `trait Eq[T] { fn eq(a: T, b: T) -> Bool }` 与
@@ -444,6 +446,14 @@ fn sort2[T: Ord2](xs: List[T]) -> List[T] = ...   # 约束：[T: Trait (+ Trait)
     逐部分 `h = 31*h + hash(part)`，32 位环绕算术；元组按元素序，构造器按字段序，
     **有一个以上构造器时构造器序号作为第一个部分先折进去**（一个构造器时没有可分辨的
     标签，与 `==`/`cmp` 同一条规则）。
+  - 四个标量叶子的算法同样定义在此（全部 32 位环绕算术，结果为 32 位数）：
+    - `Int`：`v ^ (v >>> 32)`，取低 32 位。
+    - `Bool`：`true` 得 `1231`，`false` 得 `1237`。
+    - `String`：种子 `0`，逐 **UTF-16 码元** `h = 31*h + unit`。哈希的货币是
+      UTF-16 码元，与序的货币是**两回事**，这是有意的：哈希只须与 `==` 一致
+      （内容相同 ⟹ 哈希相同），不必与任何序同货币，序的货币变时哈希**不跟走**。
+    - `Bytes`：种子 `1`，逐字节 `h = 31*h + b`，`b` 取**有符号** byte（−128..127）。
+      恰与上面的复合规则同形——把每个字节当一个 part 折。
   - `List` 不在此列：std 写了 `impl[T: Eq] Eq[List[T]]` 与对应的 `Hash`/`Ord`。
     `Map`/`Set`/元组仍走合成。
 - 限制：trait 方法与带约束的函数不可用作函数值（提示包 lambda）；comptime 中
@@ -549,9 +559,17 @@ let area = {
 
 - `==`/`!=` 默认是结构相等，对任意类型可用（函数类型除外——比较函数是编译错误）；
   类型可用 `impl Eq` 覆盖这个默认（§3.5）。
-- 排序比较 `< <=` 等：`Int`/`Float`/`String` 原生有序；其他类型桥接到预置
-  trait `Ord` 的 `cmp`（见 §3.5）——有 impl（手写或 `derive Ord`）即可比较，
-  受 `[T: Ord]` 约束的类型参数同理。
+- 排序比较 `<`/`<=`/`>`/`>=` 有**两套机制**，不是一套：
+  - 在 `Int`/`Float`/`String` 上它们是**不解见证的原生运算**——不查 impl、不建字典。
+    `Float` 上是 IEEE 语义（NaN 参与的比较一律 false，见上文数值边缘语义）。
+    其他具体类型桥接到预置 trait `Ord` 的 `cmp`（见 §3.5）——有 impl
+    （手写或 `derive Ord`）即可比较。
+  - `[T: Ord]` 是 trait bound，走字典：受它约束的类型参数上，`<` 与 `cmp`/`sort`
+    一样解 `Ord` 的见证。`Float` 没有 impl（拒绝理由见上文「`Float` 没有 `Ord`」，
+    不在此重复），故 `cmp(1.5, 2.5)` 不编译，而 `1.5 < 2.5` 照旧合法。
+  - 两套机制在 `Int`/`String` 上**答案相同**（`String` 上 `<` 与 `cmp` 是同一条
+    比较、同一个序），在 `Float` 上**有意不同**：原生 `<` 是 IEEE 偏序，
+    `Ord` 要的是全序，Float 只有前者。
 - 用户类型的打印：`type` 声明后加 `derive Show` 获得 `to_string` 与字符串插值支持
   （可 derive 的还有 `Ord`，见 §3.5；多个用逗号：`derive Show, Ord`）。
   `Show` 是**预置 trait**，`derive Show` 铸的就是一条 impl，所以也可以手写
@@ -1021,7 +1039,8 @@ fn slurp(p: String) -> String !io = {
 `bytes.len`、`bytes.at(b, i) -> Int`（0..255，越界 panic）、`bytes.slice(b, start, end)`
 （`[start,end)`，下标 clamp 进范围）、`bytes.index_of(b, needle, from) -> Option[Int]`。
 `Bytes ++ Bytes` 拼接、`==`/`!=` 按**内容**比较（`Show` 渲染为 `<N bytes>` 摘要）。
-`Bytes` 的哈希是**内容**哈希（`Arrays.hashCode`），与内容 `==` 一致，故 `Bytes` **可以**
+`Bytes` 的哈希是**内容**哈希（种子 `1`，逐字节 `h = 31*h + 有符号 byte`，32 位环绕，
+见 §3.5——与那里的复合规则同形），与内容 `==` 一致，故 `Bytes` **可以**
 作 Map/Set 键。（曾因 `byte[]` 的 JVM `hashCode` 是引用同一性而禁，两头都改成内容之后
 禁令没跟着撤，2026-07-27 撤掉。）`Bytes` 不参与 comptime 常量折叠，也不能作 bare 一等函数值
 （用 lambda 包一层）。

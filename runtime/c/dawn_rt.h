@@ -559,12 +559,10 @@ bool dawn_char_is_space(int64_t c);
  * for bit; where that answer is surprising, the surprise is documented at the
  * definition rather than smoothed over here. */
 int64_t dawn_hash_int(int64_t v);
-int64_t dawn_hash_float(double v);
 int64_t dawn_hash_bool(bool v);
 int64_t dawn_hash_str(dawn_str *s);
 int64_t dawn_hash_bytes(const dawn_bytes *b);
 int64_t dawn_cmp_int(int64_t a, int64_t b);
-int64_t dawn_cmp_float(double a, double b);
 int64_t dawn_cmp_str(dawn_str *a, dawn_str *b);
 
 /* arithmetic whose C behaviour would be undefined where the JVM's is not.

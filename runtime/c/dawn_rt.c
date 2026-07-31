@@ -612,30 +612,8 @@ static int64_t dawn_utf16_len(dawn_str *s) {
   return n;
 }
 
-/* Java's Double.doubleToLongBits: every NaN collapses to one bit pattern, so
- * that hashing and the total order both treat NaN as a single value. */
-static int64_t dawn_double_bits(double v) {
-  uint64_t bits;
-  if (v != v) {
-    bits = UINT64_C(0x7ff8000000000000);
-  } else {
-    memcpy(&bits, &v, sizeof bits);
-  }
-  return (int64_t)bits;
-}
-
 int64_t dawn_hash_int(int64_t v) {
   return (int32_t)((uint32_t)((uint64_t)v ^ ((uint64_t)v >> 32)));
-}
-
-int64_t dawn_hash_float(double v) {
-  uint64_t bits = (uint64_t)dawn_double_bits(v);
-  /* -0.0 and 0.0 have different bits and therefore different hashes, while
-   * `-0.0 == 0.0` is true. That is the JVM's answer too, and it is why the
-   * spec says Hash[Float] should not exist (docs/spec 2.2). Reproduced here
-   * rather than repaired: the two backends have to give one answer, and
-   * removing the impl is a language change, not a runtime one. */
-  return (int32_t)((uint32_t)(bits ^ (bits >> 32)));
 }
 
 int64_t dawn_hash_bool(bool v) { return v ? 1231 : 1237; }
@@ -665,17 +643,6 @@ int64_t dawn_hash_bytes(const dawn_bytes *b) {
 }
 
 int64_t dawn_cmp_int(int64_t a, int64_t b) { return a < b ? -1 : (a > b ? 1 : 0); }
-
-int64_t dawn_cmp_float(double a, double b) {
-  /* Double.compare's total order, not IEEE: NaN sorts above everything and
-   * -0.0 below 0.0. Dawn's `<` is the IEEE comparison and deliberately
-   * disagrees with this on exactly those values (spec 4.3). */
-  if (a < b) return -1;
-  if (a > b) return 1;
-  int64_t ba = dawn_double_bits(a);
-  int64_t bb = dawn_double_bits(b);
-  return ba == bb ? 0 : (ba < bb ? -1 : 1);
-}
 
 int64_t dawn_cmp_str(dawn_str *a, dawn_str *b) {
   int64_t ia = 0;
