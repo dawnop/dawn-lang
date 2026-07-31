@@ -1,0 +1,62 @@
+# Ord[String] is *code point* order, and `cmp` contracts only the sign
+# (spec 3.5, RP-06). Until 2026-07-31 both backends agreed on UTF-16 code
+# unit order -- "\u{1F600}" < "\u{FFFD}" answered true, because the high
+# surrogate 0xD83D sits below 0xFFFD -- and `cmp` leaked the host
+# representation's unit difference (cmp("a", "z") was -25, cmp of the two
+# strings above was -10176). Nothing was *inconsistent*: the two backends
+# and the interpreter agreed with each other, which is exactly why only a
+# written-down expectation can hold the repaired contract in place.
+#
+# Three consumers are pinned here: both backends at run time, and the
+# comptime interpreter through the consts -- whose folds must match the
+# same expressions evaluated below. The interp fold matters doubly, because
+# its String comparison cannot ride on the host's `<` (that is the seed
+# compiler's order for one bootstrap step); it walks code points itself.
+use std/io
+use std/list
+use std/str
+
+## Constructor order first; Hearts and Clubs are three tags apart, which the
+## derived cmp must clamp to -1/1 rather than hand out as a difference.
+pub type Suit = | Hearts | Spades | Diamonds | Clubs derive Ord
+
+## The flip RP-06 targets: an astral code point against U+FFFD. Under UTF-16
+## unit order the first answered true; under code point order it is false.
+const ASTRAL_LT_FFFD: Bool = "\u{1F600}" < "\u{FFFD}"
+const FFFD_LT_ASTRAL: Bool = "\u{FFFD}" < "\u{1F600}"
+const PREFIX_LT: Bool = "ab" < "abc"
+
+pub fn main() -> Unit !io = {
+  # comptime folded: must agree with the run-time lines that follow
+  println("const astral<fffd = ${ASTRAL_LT_FFFD}")
+  println("const fffd<astral = ${FFFD_LT_ASTRAL}")
+  println("const prefix<     = ${PREFIX_LT}")
+
+  # the same comparisons, decided at run time
+  let smiley = str.from_char(0x1F600)
+  let repl = str.from_char(0xFFFD)
+  println("run   astral<fffd = ${smiley < repl}")
+  println("run   fffd<astral = ${repl < smiley}")
+  let prefix_lt = "ab" < "abc"
+  println("run   prefix<     = ${prefix_lt}")
+
+  # cmp answers exactly -1/0/1, on every type
+  let az = cmp("a", "z")
+  let za = cmp("z", "a")
+  let aa = cmp("a", "a")
+  let sr = cmp(smiley, repl)
+  let pre = cmp("ab", "abc")
+  println("cmp(a, z)          = ${az}")
+  println("cmp(z, a)          = ${za}")
+  println("cmp(a, a)          = ${aa}")
+  println("cmp(astral, fffd)  = ${sr}")
+  println("cmp(ab, abc)       = ${pre}")
+  let hc = cmp(Hearts, Clubs)
+  let ch = cmp(Clubs, Hearts)
+  println("cmp(Hearts, Clubs) = ${hc}")
+  println("cmp(Clubs, Hearts) = ${ch}")
+
+  # sort under the same order: every BMP string sorts before every astral one
+  let xs = [smiley, "z", repl, "a", "\u{4E2D}"]
+  println(to_string(list.sort(xs)))
+}

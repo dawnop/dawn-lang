@@ -633,8 +633,10 @@ fn emit_scalar_cmp_at(g: Gen, t: Ty) -> Unit !io = {
       g.mv.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Double", "compare", "(DD)I", false)
     }
     TyString -> {
-      g.mv.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/String", "compareTo",
-        "(Ljava/lang/String;)I", false)
+      # code point order, sign only -- not String.compareTo, which is UTF-16
+      # code unit order and hands back a unit difference (spec 3.5, RP-06)
+      g.mv.visitMethodInsn(OP_INVOKESTATIC, STRINGS_CLASS, "cmp",
+        "(Ljava/lang/String;Ljava/lang/String;)I", false)
     }
     # opacity hides a representation from other modules, not from the language:
     # the value on the stack is the target, so its order is the target's
@@ -746,8 +748,10 @@ fn gen_ordering(g: Gen, t: Ty, op: TBinOp) -> Unit !io = {
   if t == TyInt {
     g.mv.visitInsn(OP_LCMP)
   } else if t == TyString {
-    g.mv.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/String", "compareTo",
-      "(Ljava/lang/String;)I", false)
+    # `<` and `cmp` are the same comparison on String (spec 4.3): code point
+    # order, via the runtime's cmp rather than compareTo's UTF-16 unit order
+    g.mv.visitMethodInsn(OP_INVOKESTATIC, STRINGS_CLASS, "cmp",
+      "(Ljava/lang/String;Ljava/lang/String;)I", false)
   } else {
     let use_g = match op {
       BLt -> true
