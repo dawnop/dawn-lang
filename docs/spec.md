@@ -1411,6 +1411,18 @@ std → 内建，std 模块自己的 `pub fn len` 正是靠这一条合法。
   `bytes.len(b) -> Int`、`bytes.at(b, i) -> Int`（0..255，越界 panic）、
   `bytes.slice(b, start, end) -> Bytes`（`[start,end)`，下标 clamp）、
   `bytes.index_of(b, needle, from) -> Option[Int]`（字节下标首次出现）。
+  构造侧是 `bytes.buf()`/`put`/`put_bytes`/`get`/`size`/`freeze`（§9.5.1 的 `Buf`）。
+
+  **文本编码**（纯 Dawn 字节算术，无 `use java`，故两个后端同一份定义）：
+  `bytes.to_hex(b) -> String`（每字节两位、**小写**为规范拼写）与
+  `bytes.from_hex(s) -> Option[Bytes]`（大小写皆收，其余一概不收）；
+  `bytes.to_base64(b) -> String`（RFC 4648 §4 标准字母表，`=` 补齐）与
+  `bytes.to_base64_url(b) -> String`（§5 的 url/文件名安全字母表，**不补 `=`**），
+  两个解码器 `bytes.from_base64` / `bytes.from_base64_url -> Option[Bytes]`
+  各只认自己的字母表（猜字母表会把拼错的输入变成错的字节），padding 可有可无，
+  但末组的空余低位必须为零——否则同一串字节会有多个拼写。
+  四个解码器都属判据 2（§4.8）：外来文本是要校验的，不是要断言的。
+
   prelude 里另有 `cast(x) -> Result[T, ForeignError]`（把擦除泛型的不透明 `Object` 认领为
   具体引用类型 T，T 取自期望类型，§9.5）。
   另有操作符 `Bytes ++ Bytes` 与按内容的 `==`/`!=`。二进制请求体（multipart 上传、WebDAV PUT）、
