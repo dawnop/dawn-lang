@@ -1501,11 +1501,19 @@ pub fn emit_program(units: List[EmitMod], entry: String, u: TableUse) -> String 
     }
   }
 
+  # The program body runs on the runtime's own stack, not the OS default one
+  # (dawn_rt.h, "the program's stack"). The thunk exists because the entry's
+  # C return type follows its Dawn one, and `dawn_rt_main` takes one shape;
+  # the name has a single underscore, so no mangled name can collide with it.
+  st = line(st, "static void dawn_program_entry(void) {")
+  st = push(st)
+  st = line(st, "(void)" ++ mangle(entry, "main") ++ "();")
+  st = pop(st)
+  st = line(st, "}")
+  st = line(st, "")
   st = line(st, "int main(int argc, char** argv) {")
   st = push(st)
-  st = line(st, "dawn_rt_init(argc, argv);")
-  st = line(st, "(void)" ++ mangle(entry, "main") ++ "();")
-  st = line(st, "return 0;")
+  st = line(st, "return dawn_rt_main(argc, argv, dawn_program_entry);")
   st = pop(st)
   st = line(st, "}")
   st.out

@@ -8,6 +8,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <pthread.h>
 #include <setjmp.h>
 #include <spawn.h>
 #include <stdarg.h>
@@ -43,6 +44,39 @@ void dawn_rt_init(int argc, char **argv) {
   if (getenv("DAWN_RC_STATS") != NULL) {
     atexit(dawn_rc_stats_dump);
   }
+}
+
+/* See dawn_rt.h: the entry point runs on a DAWN_STACK_BYTES stack, not on
+ * whatever the OS gave the main thread. Held in a static because casting an
+ * object pointer to a function pointer is not conforming C, only POSIX. */
+static void (*dawn_entry_fn)(void);
+
+static void *dawn_stack_thread(void *unused) {
+  (void)unused;
+  dawn_entry_fn();
+  return NULL;
+}
+
+int dawn_rt_main(int argc, char **argv, void (*entry)(void)) {
+  pthread_attr_t at;
+  pthread_t th;
+  dawn_rt_init(argc, argv);
+  dawn_entry_fn = entry;
+  if (pthread_attr_init(&at) == 0) {
+    int ok = pthread_attr_setstacksize(&at, DAWN_STACK_BYTES) == 0 &&
+             pthread_create(&th, &at, dawn_stack_thread, NULL) == 0;
+    pthread_attr_destroy(&at);
+    if (ok) {
+      pthread_join(th, NULL);
+      return 0;
+    }
+  }
+  /* Run anyway rather than refuse to start -- but say so, because the whole
+   * point of the big stack is that the failure it prevents is silent. */
+  fputs("dawn: no big stack; deep recursion may crash without a message\n",
+        stderr);
+  entry();
+  return 0;
 }
 
 static void *dawn_alloc(size_t n) {
