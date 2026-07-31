@@ -207,6 +207,10 @@ JVM-锁死。LLVM 后端一看 std 里全是 `java.lang.String.codePointCount`,�
   非 Emit-Change,不碰种子纪律)。抽完后 `emit.dawn` 残余逼近「Core IR → 字节码编码」,真正的 Core IR
   边界**被减法减出来**、且已被「产出逐字节相同的 JVM 输出」验证过中立。
 
+  > **2026-07-31 更新**:Move 2 与 Move 3 均已落地(由 [native-backend-plan.md](native-backend-plan.md)
+  > Phase 0 完成,Move 3 先于 Move 2;下面三个 emit.dawn 行号属 3568 行时代,今已不存在)。
+  > 逐项核对与残余(`CSProtect`/`bracket`)见 [core-move2-design.md](core-move2-design.md)。
+
   三步按「单在 JVM 上的独立收益」排:
   1. **Move 1 — intrinsic 语义表(先做)**:消灭 types/emit/interp 三份分歧,给 native 自举需要的
      **非反射权威语义源**,同时**就是本文 §10 步骤 1「契约显式化」**——一份力气推两条接缝。
