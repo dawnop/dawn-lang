@@ -489,6 +489,9 @@ is a name no dispatcher should have an arm for, which is how the three dead arms
 >
 > **同日修订（大前提变更：语言处早期，不惧破坏、只求最优形态）**——「另行裁决」的部分就地定案：
 >
+> **落地记（2026-08-01）**：bracket intrinsic 随 v0.39.0、`with` 语句与 `fn` 尾闭包随
+> v0.40.0 均已发布（语义入 spec §4.10/§4.3/§9.8.2）；下文从「目标」读作「已发生」。
+>
 > - **`with` 语句不再等窗口**：紧随刀 1 排期（目标 v0.40.0：`with x <- f(...)` 关键字 + `<-`
 >   形式 + checker 拒糖区内 `return`/`break`；`?` 透明组合）。10 处泄漏站点**直接用最终形态**
 >   迁移，不经历裸嵌套闭包的中间态。
