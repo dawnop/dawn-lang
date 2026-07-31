@@ -144,7 +144,11 @@ pub type Cx = {
   loop_jumps: Set[Int]
 }
 
-pub type LambdaCx = { boundary: Int, expected_ret: Option[Ty], captures: List[Int] }
+## One lambda's frame. `sugar` says the parser synthesized this lambda from a
+## `with` statement (ast.dawn), which changes nothing about how it is checked
+## and everything about how a `return`/`break`/`?` inside it is reported.
+pub type LambdaCx =
+  { boundary: Int, expected_ret: Option[Ty], captures: List[Int], sugar: Bool }
 
 ## A fresh checker state for one module.
 pub fn cx_new(owner_class: Option[String], src_path: Option[String]) -> Cx = {
@@ -3477,7 +3481,10 @@ test "loop jumps respect lambda boundaries" {
   cx = Cx { ..cx, loop_stack: [0] }
   let (cx2, ok2) = check_loop_jump(cx, "break", 0, 5)
   assert ok2
-  cx = Cx { ..cx, lambda_stack: [LambdaCx { boundary: 0, expected_ret: None, captures: [] }] }
+  cx = Cx {
+    ..cx,
+    lambda_stack: [LambdaCx { boundary: 0, expected_ret: None, captures: [], sugar: false }]
+  }
   let (cx3, ok3) = check_loop_jump(cx, "continue", 0, 8)
   assert not ok3
   assert str.contains(cx3.diags[0].msg, "cannot cross a lambda boundary")
@@ -4156,7 +4163,7 @@ pub fn name_refs(e: Expr, out: Set[String]) -> Set[String] =
       for a in args { o = name_refs(a.e, o) }
       o
     }
-    ELambda(_, body, _, _) -> name_refs(body, out)
+    ELambda(_, body, _, _, _) -> name_refs(body, out)
     EBlock(stmts, tail, _, _) -> {
       var o = out
       for s in stmts { o = stmt_name_refs(s, o) }
@@ -4252,7 +4259,7 @@ test "name refs walk every call position" {
     [SLet("x", false, None,
       EApply(EVar("g", 0, 1), [pos_arg(EVar("y", 2, 3))], 0, 4), 0, 5)],
     Some(EMethod(EVar("m", 6, 7), "h",
-      [pos_arg(ELambda(no_lparams(), EVar("z", 10, 11), 8, 12))], 8, 9, 6, 13)),
+      [pos_arg(ELambda(no_lparams(), EVar("z", 10, 11), false, 8, 12))], 8, 9, 6, 13)),
     0,
     14
   )
@@ -4591,7 +4598,7 @@ pub fn needs_expected(cx: Cx, e: Expr) -> Bool =
             (not has_parens && len(ci.fields) > 0 && not a.is_record)
         }
       }
-    ELambda(params, _, _, _) -> {
+    ELambda(params, _, _, _, _) -> {
       for p in params {
         match p.ann {
           None -> return true
@@ -5475,7 +5482,7 @@ fn check_expr_at(cx: Cx, e: Expr, expected: Option[Ty]) -> (Cx, Ty, TExpr) !io =
     EUnsafePure(body, lo, hi) -> check_unsafe_pure(cx, body, expected, lo, hi)
     ECtor(cname, cargs, spread, has_parens, cclo, cchi, lo, hi) ->
       check_ctor_call(cx, cname, cargs, spread, has_parens, expected, None, cclo, cchi, lo, hi)
-    ELambda(params, body, lo, hi) -> check_lambda(cx, params, body, expected, lo, hi)
+    ELambda(params, body, sugar, lo, hi) -> check_lambda(cx, params, body, sugar, expected, lo, hi)
     EApply(target, args, lo, hi) -> check_apply(cx, target, args, expected, lo, hi)
     EMethod(target, name, args, nlo, nhi, lo, hi) ->
       check_method_call(cx, target, name, args, expected, nlo, nhi, lo, hi)
@@ -5746,6 +5753,7 @@ fn check_lambda(
   cx: Cx,
   params: List[LambdaParam],
   body: Expr,
+  sugar: Bool,
   expected: Option[Ty],
   lo: Int,
   hi: Int
@@ -5808,7 +5816,8 @@ fn check_lambda(
   let empty_w: Map[Eff, (Int, Int, String)] = map.empty()
   let exp_ret: Option[Ty] =
     if have_exp && is_concrete(cx1, eret) { Some(eret) } else { None }
-  let ctx = LambdaCx { boundary: len(cx1.scopes), expected_ret: exp_ret, captures: [] }
+  let ctx =
+    LambdaCx { boundary: len(cx1.scopes), expected_ret: exp_ret, captures: [], sugar: sugar }
   cx1 = Cx {
     ..cx1,
     used_effects: [],
@@ -5935,7 +5944,7 @@ fn check_apply(
   # piping into an unannotated lambda: the arguments determine its parameter types
   var lambda_unannotated = false
   match target {
-    ELambda(ps, _, _, _) -> {
+    ELambda(ps, _, _, _, _) -> {
       for p in ps {
         match p.ann {
           None -> { lambda_unannotated = true }
@@ -6312,7 +6321,7 @@ fn check_local_fn(
   let ft = TyFn(ptys, ret, eff)
   let (cxc, sid) = declare(cx1, name, ft, false, nlo, nhi)
   cx1 = cxc
-  let (cxd, actual, lam) = check_lambda(cx1, params, body, Some(ft), lo, hi)
+  let (cxd, actual, lam) = check_lambda(cx1, params, body, false, Some(ft), lo, hi)
   cx1 = cxd
   match actual {
     TyFn(_, ar, ae) -> {
@@ -6343,7 +6352,7 @@ fn check_local_fn(
 
 fn is_lambda_or_var(e: Expr) -> Bool =
   match e {
-    ELambda(_, _, _, _) -> true
+    ELambda(_, _, _, _, _) -> true
     EVar(_, _, _) -> true
     _ -> false
   }
@@ -7038,7 +7047,7 @@ fn sam_ret_compatible(js: Jsig, r: Ty, j: String) -> Bool !io =
 ## scored by arity now, checked once the winning overload is known.
 fn sam_deferred(cx: Cx, a: Expr) -> Bool =
   match a {
-    ELambda(ps, _, _, _) -> {
+    ELambda(ps, _, _, _, _) -> {
       for p in ps {
         match p.ann {
           None -> return true
@@ -7066,7 +7075,7 @@ fn sam_deferred(cx: Cx, a: Expr) -> Bool =
 
 fn deferred_arity(cx: Cx, a: Expr) -> Int =
   match a {
-    ELambda(ps, _, _, _) -> len(ps)
+    ELambda(ps, _, _, _, _) -> len(ps)
     ECtor(cn, _, _, _, _, _, _, _) ->
       match map.get(cx.ctors_by_name, cn) {
         Some(k) -> {
@@ -8057,7 +8066,7 @@ test "lambdas infer parameters from expected types and track captures" {
   let (cxk, _) = declare(cx, "k", TyInt, false, 0, 1)
   # fn(x) => x + k against fn(Int) -> Int captures k
   let lam = ELambda([LambdaParam { name: "x", ann: None, lo: 3, hi: 4 }],
-    EBinary(OpAdd, EVar("x", 9, 10), EVar("k", 13, 14), 11, 12, 9, 14), 0, 14)
+    EBinary(OpAdd, EVar("x", 9, 10), EVar("k", 13, 14), 11, 12, 9, 14), false, 0, 14)
   let (cx1, t, node) = check_expr(cxk, lam, Some(TyFn([TyInt], TyInt, EPure)))
   assert t == TyFn([TyInt], TyInt, EPure)
   assert len(cx1.diags) == 0
@@ -8071,7 +8080,7 @@ test "lambdas infer parameters from expected types and track captures" {
   # a var cannot be captured
   let (cxv, _) = declare(cxk, "v", TyInt, true, 0, 1)
   let lam2 = ELambda([LambdaParam { name: "y", ann: None, lo: 3, hi: 4 }],
-    EVar("v", 9, 10), 0, 10)
+    EVar("v", 9, 10), false, 0, 10)
   let (cx3, _, _) = check_expr(cxv, lam2, Some(TyFn([TyInt], TyInt, EPure)))
   assert str.contains(cx3.diags[0].msg, "lambdas cannot capture `var` bindings")
 }
@@ -8079,7 +8088,7 @@ test "lambdas infer parameters from expected types and track captures" {
 test "apply: piping arguments into an unannotated lambda" {
   var cx = seed_prelude(test_cx())
   cx = push_scope(cx)
-  let lam = ELambda([LambdaParam { name: "x", ann: None, lo: 1, hi: 2 }], EVar("x", 7, 8), 0, 8)
+  let lam = ELambda([LambdaParam { name: "x", ann: None, lo: 1, hi: 2 }], EVar("x", 7, 8), false, 0, 8)
   let ap = EApply(lam, [pos_arg(EInt(1, 10, 11))], 0, 12)
   let (cx1, t, _) = check_expr(cx, ap, no_expected())
   assert t == TyInt
@@ -8146,7 +8155,7 @@ test "argument names are a constructor's business, and every other callee says s
   assert cx3.diags[0].lo == 2
   # (3) a function value has no parameter names to write
   let lam = ELambda([LambdaParam { name: "x", ann: Some(TNamed("Int", [], 4, 7)), lo: 1, hi: 2 }],
-    EVar("x", 11, 12), 0, 12)
+    EVar("x", 11, 12), false, 0, 12)
   let on_value = EApply(lam, [Arg { name: Some("a"), e: EInt(1, 16, 17), lo: 13, hi: 17 }], 0, 18)
   let (cx4, _, _) = check_expr(cx, on_value, no_expected())
   assert cx4.diags[0].msg == "this callee is a function value, not a constructor; " ++
@@ -8196,7 +8205,7 @@ test "the same call, four callees, four kinds of typed node" {
   }
   # anything else applies a function value
   let lam = ELambda([LambdaParam { name: "x", ann: Some(TNamed("Int", [], 4, 7)), lo: 1, hi: 2 }],
-    EVar("x", 11, 12), 0, 12)
+    EVar("x", 11, 12), false, 0, 12)
   let (_, _, n4) = check_expr(cx, EApply(lam, [pos_arg(EInt(1, 13, 14))], 0, 15), no_expected())
   match n4 {
     XApply(..) -> ()

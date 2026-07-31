@@ -335,3 +335,61 @@ test "an unconditional impl parses with no type parameters" {
     _ -> { assert false }
   }
 }
+
+test "`with` turns the rest of its block into a trailing closure" {
+  # the canonical shape: one `with`, two statements after it (spec §4.10)
+  let out = rendered("fn f(p: String) -> Unit !io = {\n" ++
+      "  with h <- bracket(open(p), close)\n  a(h)\n  b(h)\n}")
+  # the call grew one argument, and that argument is the marked lambda
+  assert str.contains(out, "Apply nargs=3")
+  assert str.contains(out, "Lambda(with)")
+  # the closure's body is the rest of the block, both statements inside it
+  assert str.contains(out, "Block")
+  assert str.contains(out, "Apply nargs=1")
+}
+
+test "`with` on a bare name applies it to the closure" {
+  let (m, ds) = parse_module("fn f() -> Unit = {\n  with x <- g\n  h(x)\n}")
+  assert len(ds) == 0
+  match m.decls[0] {
+    DFn(f) ->
+      match f.body {
+        EBlock(stmts, tail, _, _) -> {
+          assert len(stmts) == 0
+          match tail {
+            Some(EApply(callee, args, _, _)) -> {
+              match callee {
+                EVar(n, _, _) -> { assert n == "g" }
+                _ -> { assert false }
+              }
+              assert len(args) == 1
+            }
+            _ -> { assert false }
+          }
+        }
+        _ -> { assert false }
+      }
+    _ -> { assert false }
+  }
+}
+
+test "two `with`s in one block nest, they do not sit side by side" {
+  let out = rendered("fn f() -> Unit !io = {\n  with a <- p()\n  with b <- q()\n  r(a, b)\n}")
+  # one closure inside the other: two markers, and the inner one is deeper
+  assert str.contains(out, "Lambda(with)")
+  let (m, ds) = parse_module("fn f() -> Unit !io = {\n  with a <- p()\n  with b <- q()\n  r(a, b)\n}")
+  assert len(ds) == 0
+}
+
+test "`with` needs a name and an arrow, and only lives in a block" {
+  let (_, d1) = parse_module("fn f() -> Unit = {\n  with <- g()\n  h()\n}")
+  assert len(d1) > 0
+  assert str.contains(d1[0].msg, "a name to bind")
+  let (_, d2) = parse_module("fn f() -> Unit = {\n  with x = g()\n  h()\n}")
+  assert len(d2) > 0
+  assert str.contains(d2[0].msg, "`<-`")
+  # outside a block there is no rest-of-block to close over
+  let (_, d3) = parse_module("fn f() -> Unit = with x <- g()")
+  assert len(d3) > 0
+  assert str.contains(d3[0].msg, "`with` is a statement")
+}

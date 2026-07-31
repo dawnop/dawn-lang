@@ -151,7 +151,12 @@ pub type Expr =
 # follows from what `target` resolves to, and is decided in check_apply.
   | EApply(target: Expr, args: List[Arg], lo: Int, hi: Int)
   | EMethod(target: Expr, name: String, args: List[Arg], nlo: Int, nhi: Int, lo: Int, hi: Int)
-  | ELambda(params: List[LambdaParam], body: Expr, lo: Int, hi: Int)
+# `sugar` marks a lambda the parser synthesized rather than one the author
+# wrote: the `with` statement turns the rest of its block into this node
+# (spec §4.10). The checker reads the flag only to phrase diagnostics -- a
+# `return` crossing this boundary must talk about `with`, not accuse the
+# author of a lambda they never typed.
+  | ELambda(params: List[LambdaParam], body: Expr, sugar: Bool, lo: Int, hi: Int)
   | ECtor(
     name: String,
     args: List[Arg],
@@ -350,7 +355,7 @@ pub fn e_lo(e: Expr) -> Int =
     EVar(_, lo, _) -> lo
     EApply(_, _, lo, _) -> lo
     EMethod(_, _, _, _, _, lo, _) -> lo
-    ELambda(_, _, lo, _) -> lo
+    ELambda(_, _, _, lo, _) -> lo
     ECtor(_, _, _, _, _, _, lo, _) -> lo
     EFieldAcc(_, _, _, _, lo, _) -> lo
     EListLit(_, lo, _) -> lo
@@ -380,7 +385,7 @@ pub fn e_hi(e: Expr) -> Int =
     EVar(_, _, hi) -> hi
     EApply(_, _, _, hi) -> hi
     EMethod(_, _, _, _, _, _, hi) -> hi
-    ELambda(_, _, _, hi) -> hi
+    ELambda(_, _, _, _, hi) -> hi
     ECtor(_, _, _, _, _, _, _, hi) -> hi
     EFieldAcc(_, _, _, _, _, hi) -> hi
     EListLit(_, _, hi) -> hi
