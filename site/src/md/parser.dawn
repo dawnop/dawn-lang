@@ -4,7 +4,7 @@
 use std/str
 use md/ast.{Inline, Text, Code, Bold, Block, Heading, Para, CodeBlock, UList, OList, Table, Quote, Rule}
 use md/inline.{parse_inlines}
-use md/text.{cp_at, indent_of, strip_indent, drop_cps}
+use md/text.{cp_at, indent_of, strip_indent}
 
 fn line_at(lines: List[String], i: Int) -> String = unwrap_or(get(lines, i), "")
 
@@ -124,7 +124,7 @@ fn parse_blocks(lines: List[String]) -> Result[List[Block], String] = {
 ## ``` fenced code; "dawn skip-check" (a tutorial test marker) renders as dawn.
 fn scan_fence(lines: List[String], start: Int) -> Result[(Block, Int), String] = {
   let first = line_at(lines, start)
-  let raw = str.trim(drop_cps(first, 3))
+  let raw = str.trim(str.drop(first, 3))
   let lang = if raw == "dawn skip-check" { "dawn" } else { raw }
   let n = len(lines)
   var body: List[String] = []
@@ -155,14 +155,14 @@ fn heading(line: String) -> Result[Block, String] = {
   if lvl > 4 {
     Err("heading deeper than #### is outside the subset: $line")
   } else if cp_at(cs, lvl) == ' ' {
-    Ok(Heading(lvl, parse_inlines(str.trim(drop_cps(line, lvl + 1)))))
+    Ok(Heading(lvl, parse_inlines(str.trim(str.drop(line, lvl + 1)))))
   } else {
     Err("malformed heading: $line")
   }
 }
 
 fn quote_body(l: String) -> String =
-  if str.starts_with(l, "> ") { drop_cps(l, 2) } else { drop_cps(l, 1) }
+  if str.starts_with(l, "> ") { str.drop(l, 2) } else { str.drop(l, 1) }
 
 fn scan_quote(lines: List[String], start: Int) -> Result[(Block, Int), String] = {
   let n = len(lines)
@@ -264,7 +264,7 @@ fn scan_list(lines: List[String], start: Int, ordered: Bool) -> Result[(Block, I
     if w == 0 {
       stop = true
     } else {
-      var body: List[String] = [drop_cps(line, w)]
+      var body: List[String] = [str.drop(line, w)]
       let cont = if ordered { w } else { 2 }
       i = i + 1
       var more = true

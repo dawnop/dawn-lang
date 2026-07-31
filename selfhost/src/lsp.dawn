@@ -174,24 +174,24 @@ fn hex_val(c: Int) -> Int =
 ##   path assembled from bytes nobody wrote.
 pub fn uri_to_path(uri: String) -> Option[String] = {
   if not str.starts_with(uri, "file://") { return None }
-  var rest = str.substring(uri, 7, str.len(uri))
+  var rest = str.strip_prefix(uri, "file://").unwrap_or(uri)
   # authority: everything before the first `/` of the path
   if not str.starts_with(rest, "/") {
     let cut = match str.index_of(rest, "/") {
       Some(i) -> i
       None -> str.len(rest)
     }
-    let authority = str.substring(rest, 0, cut)
+    let authority = str.take(rest, cut)
     if authority != "" && str.to_lower(authority) != "localhost" { return None }
-    rest = str.substring(rest, cut, str.len(rest))
+    rest = str.drop(rest, cut)
   }
   # a path carries neither query nor fragment
   match str.index_of(rest, "#") {
-    Some(i) -> { rest = str.substring(rest, 0, i) }
+    Some(i) -> { rest = str.take(rest, i) }
     None -> ()
   }
   match str.index_of(rest, "?") {
-    Some(i) -> { rest = str.substring(rest, 0, i) }
+    Some(i) -> { rest = str.take(rest, i) }
     None -> ()
   }
   if rest == "" { return None }
@@ -344,7 +344,7 @@ fn drive_path(p: String) -> String = {
   if cps[0] != '/' { return p }
   let c = cps[1]
   let alpha = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
-  if alpha && cps[2] == ':' { str.substring(p, 1, str.len(p)) } else { p }
+  if alpha && cps[2] == ':' { str.drop(p, 1) } else { p }
 }
 
 ## filesystem path → file:// URI, with the empty authority the standard asks
@@ -382,14 +382,7 @@ type Doc = {
 }
 
 fn doc_qcx(st: LspState, d: Doc) -> Option[QCx] = {
-  var entry: Option[CheckedMod] = None
-  var seen = false
-  for cm in d.prog.modules {
-    if not seen && cm.mod_path == d.entry {
-      seen = true
-      entry = Some(cm)
-    }
-  }
+  let entry = list.find(d.prog.modules, fn(cm) => cm.mod_path == d.entry)
   match entry {
     Some(e) -> {
       var env = st.std.exports
@@ -494,7 +487,7 @@ fn read_message() -> Frame !io = {
   for line in str.split(htext, "\n") {
     let t = str.trim(line)
     if str.starts_with(t, "Content-Length:") {
-      match parse_int(str.trim(str.substring(t, 15, str.len(t)))) {
+      match parse_int(str.trim(str.strip_prefix(t, "Content-Length:").unwrap_or(t))) {
         Some(n) -> { clen = n }
         None -> ()
       }
@@ -798,7 +791,7 @@ fn decl_symbol(qc: QCx, d: Doc, dc: Decl) -> Option[Json] !io = {
     DImpl(_, trait_name, tlo, thi, _, _, lo, hi) -> Some((trait_name, false, lo, hi, tlo, thi))
     DUseJava(fqcn, lo, hi, nlo, nhi) -> {
       let simple = match str.last_index_of(fqcn, ".") {
-        Some(i) -> str.substring(fqcn, i + 1, str.len(fqcn))
+        Some(i) -> str.drop(fqcn, i + 1)
         None -> fqcn
       }
       Some((simple, false, lo, hi, nlo, nhi))

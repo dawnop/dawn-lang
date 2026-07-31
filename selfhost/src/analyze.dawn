@@ -101,15 +101,15 @@ fn class_name_of(mod_path: String) -> String !io = {
 ## module path = file path relative to root, minus extension.
 fn module_path_of(root_abs: String, file_abs: String) -> String = {
   let rel = if str.starts_with(file_abs, root_abs ++ "/") {
-    str.substring(file_abs, str.len(root_abs) + 1, str.len(file_abs))
+    str.drop(file_abs, str.len(root_abs) + 1)
   } else {
     # not under the root: just the file name
     match str.last_index_of(file_abs, "/") {
-      Some(i) -> str.substring(file_abs, i + 1, str.len(file_abs))
+      Some(i) -> str.drop(file_abs, i + 1)
       None -> file_abs
     }
   }
-  if str.ends_with(rel, ".dawn") { str.substring(rel, 0, str.len(rel) - 5) } else { rel }
+  str.strip_suffix(rel, ".dawn").unwrap_or(rel)
 }
 
 ## Everything .dawn under `dir`, recursively, full display paths.
@@ -591,14 +591,14 @@ fn apply_rewrites(m: Module, rw: Map[String, List[String]]) -> Module = {
 fn nearest_src_root(file: String) -> String !io = {
   let abs = canon(file)
   var dir = match str.last_index_of(abs, "/") {
-    Some(i) -> str.substring(abs, 0, i)
+    Some(i) -> str.take(abs, i)
     None -> abs
   }
   var out = dir
   var found = false
   while not found && str.contains(dir, "/") {
     let name = match str.last_index_of(dir, "/") {
-      Some(i) -> str.substring(dir, i + 1, str.len(dir))
+      Some(i) -> str.drop(dir, i + 1)
       None -> dir
     }
     if name == "src" {
@@ -606,7 +606,7 @@ fn nearest_src_root(file: String) -> String !io = {
       found = true
     } else {
       dir = match str.last_index_of(dir, "/") {
-        Some(i) -> str.substring(dir, 0, i)
+        Some(i) -> str.take(dir, i)
         None -> dir
       }
     }
@@ -633,7 +633,7 @@ pub fn load_file(file: String) -> LoadResult !io = {
 pub fn load_file_over(file: String, over: Map[String, String]) -> LoadResult !io = {
   let root = nearest_src_root(file)
   let proj = match str.last_index_of(root, "/") {
-    Some(i) -> if str.substring(root, i + 1, str.len(root)) == "src" { str.substring(root, 0, i) } else { root }
+    Some(i) -> if str.drop(root, i + 1) == "src" { str.take(root, i) } else { root }
     None -> root
   }
   let no_mfc: Map[String, Option[ManifestLite]] = map.empty()

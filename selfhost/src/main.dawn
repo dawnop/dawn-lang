@@ -130,7 +130,7 @@ fn path_sep() -> String !io = File.pathSeparator!
 fn write_class(dir: String, name: String, bs: Bytes) -> Result[Unit, String] !io = {
   let path = dir ++ "/" ++ name ++ ".class"
   let parent = match str.last_index_of(path, "/") {
-    Some(i) -> str.substring(path, 0, i)
+    Some(i) -> str.take(path, i)
     None -> dir
   }
   match io.mkdirs(parent) {
@@ -447,7 +447,7 @@ fn extract_ct_opts(rest: List[String]) -> (CtOpts, List[String]) !io = {
       }
       i = i + 2
     } else if str.starts_with(a, "--comptime-fuel=") {
-      match parse_int(str.substring(a, 16, str.len(a))) {
+      match parse_int(str.strip_prefix(a, "--comptime-fuel=").unwrap_or(a)) {
         Some(n) -> { fuel = n }
         None -> { cli_error("--comptime-fuel needs a number") }
       }
@@ -481,7 +481,7 @@ fn extract_cp(rest: List[String]) -> (List[String], List[String]) !io = {
       cli_error("--cp needs a path")
       i = i + 1
     } else if str.starts_with(a, "--cp=") {
-      spec = str.substring(a, 5, str.len(a))
+      spec = str.strip_prefix(a, "--cp=").unwrap_or(a)
       i = i + 1
     } else {
       out = out ++ [a]
@@ -901,12 +901,12 @@ fn run_emitrt(rest: List[String]) -> Unit !io = {
 ## The target's basename, `.dawn` stripped — what `-o` defaults derive from.
 fn target_stem(target: String) -> String = {
   var t = target
-  while str.ends_with(t, "/") { t = str.substring(t, 0, str.len(t) - 1) }
+  while str.ends_with(t, "/") { t = str.take(t, str.len(t) - 1) }
   let base = match str.last_index_of(t, "/") {
-    Some(i) -> str.substring(t, i + 1, str.len(t))
+    Some(i) -> str.drop(t, i + 1)
     None -> t
   }
-  if str.ends_with(base, ".dawn") { str.substring(base, 0, str.len(base) - 5) } else { base }
+  str.strip_suffix(base, ".dawn").unwrap_or(base)
 }
 
 ## The absolute directory a jar path lands in.
@@ -926,7 +926,7 @@ fn vendor_jars(jars: List[String], jar_path: String) -> List[String] !io = {
   let _ = io.mkdirs(lib_dir)
   for src in jars {
     let name = match str.last_index_of(src, "/") {
-      Some(i) -> str.substring(src, i + 1, str.len(src))
+      Some(i) -> str.drop(src, i + 1)
       None -> src
     }
     let dst = lib_dir ++ "/" ++ name
@@ -963,7 +963,7 @@ fn rel_entries(jars: List[String], jar_path: String) -> List[String] !io = {
   for j in jars {
     let abs = fspath.absolute(io.cwd(), j)
     if str.starts_with(abs, base) {
-      out = out ++ [str.substring(abs, str.len(base), str.len(abs))]
+      out = out ++ [str.drop(abs, str.len(base))]
     } else {
       out = out ++ ["file:" ++ abs]
     }

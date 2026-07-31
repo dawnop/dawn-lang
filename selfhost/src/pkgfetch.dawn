@@ -169,7 +169,7 @@ fn http_get(url: String) -> Result[Bytes, String] !io = {
 
 fn download(url: String) -> Result[Bytes, String] !io =
   if str.starts_with(url, "file://") {
-    let path = str.substring(url, str.len("file://"), str.len(url))
+    let path = str.strip_prefix(url, "file://").unwrap_or(url)
     if io.is_dir(path) {
       Err("no such file: " ++ url)
     } else {
@@ -191,7 +191,7 @@ fn mkdirs(path: String) -> Unit !io = {
 
 fn write_file_bytes(path: String, bs: Bytes) -> Result[Unit, String] !io = {
   match str.last_index_of(path, "/") {
-    Some(i) -> mkdirs(str.substring(path, 0, i))
+    Some(i) -> mkdirs(str.take(path, i))
     None -> ()
   }
   match io.write_bytes(path, bs) {
@@ -310,9 +310,9 @@ fn pax_path(recs: String) -> Option[String] = {
     }
     if rec_len <= 0 || i + rec_len > n { break }
     var rec = str.substring(recs, sp + 1, i + rec_len)
-    if str.ends_with(rec, "\n") { rec = str.substring(rec, 0, str.len(rec) - 1) }
+    rec = str.strip_suffix(rec, "\n").unwrap_or(rec)
     if str.starts_with(rec, "path=") {
-      out = Some(str.substring(rec, str.len("path="), str.len(rec)))
+      out = Some(str.strip_prefix(rec, "path=").unwrap_or(rec))
     }
     i = i + rec_len
   }
@@ -356,7 +356,7 @@ fn untar(gz: Bytes, dest: String) -> Result[Unit, String] !io = {
     if tchar == 76 {
       let long_name = bytes.decode_utf8(bytes.slice(raw, data_start, data_start + size))
       pending = Some(match str.index_of(long_name, str.from_char(0)) {
-        Some(i) -> str.substring(long_name, 0, i)
+        Some(i) -> str.take(long_name, i)
         None -> long_name
       })
     } else if tchar == 120 {
