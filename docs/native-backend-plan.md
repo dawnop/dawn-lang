@@ -164,9 +164,16 @@ D1 单独的出口条件已达成:`scripts/array-contract/run.sh`(值语义 + �
   例外:`Show` 是运行时按值分发。
 - **字符串**:UTF-8 + 一个小编解码器；`str_lower/upper/trim` 先 ASCII-only。
 - **运行时其余**:`panic`(setjmp/longjmp)、`StdIo`(syscall)、真 `main(argc, argv)`、大主线程栈
-  (`pthread_attr_setstacksize`)。
+  (`pthread_attr_setstacksize`)。**大栈 2026-07-31 落地**:`dawn_rt_main`
+  (`runtime/c/dawn_rt.h` 「the program's stack」)把入口跑在 512 MB 栈的线程上——与 JVM 侧
+  `-Xss512m` 同一个数字、同一条「一般尾调不做、大栈代替」的决策。定义在运行时而非发射的 `main` 里,
+  因为 `nmain`/`cdriver` 自己也是被发射的程序,这样编译器与用户程序共享同一份。落地前 native 吃 OS
+  默认 8 MB:实测同一段非尾递归,旧的 10 万–20 万层就 SIGSEGV **且一个字都不打**,现在是 900 万–1280 万层
+  (正是 512/8 = 64 倍)。门禁在 `scripts/spike-native/deep_stack.dawn`。
+  「打一行 stack overflow」的 SIGSEGV handler **实测后不做**,理由写在 `dawn_rt.h` 同一段注释里。
 
 C 编译标志:`-fwrapv`(Int 回绕同 JVM long)、`-fno-strict-aliasing`。这两条不是可选的。
+链接标志 `-pthread`:大栈靠它。
 
 ### Phase 4 — Perceus
 

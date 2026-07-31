@@ -1,0 +1,43 @@
+# The sixth corpus: how deep a *non*-tail recursion the two backends carry.
+#
+# recurse.dawn covers the calls lowering turns into loops. This covers the
+# ones it cannot: the recursive call's result is combined with the frame's own
+# locals afterwards, so every level is a real frame on both backends and the
+# only thing standing between the program and a crash is the size of the
+# stack.
+#
+# That size is a decision, not a default. The JVM backend gets `-Xss512m` from
+# `bin/dawn` and from `spawn_java`, because general tail calls are not
+# implemented and a big stack is the substitute
+# (docs/native-backend-plan.md 1). Native had nothing at all until 2026-07-31
+# and ran on whatever the OS gave the main thread -- 8MB here -- so this
+# program's depth used to be a SIGSEGV with no output whatsoever, where the
+# JVM printed a StackOverflowError line. Measured on this machine, in the
+# shape below: the last depth the old native binary survived was between
+# 100,000 and 200,000; with the runtime's own stack it is between 9,000,000
+# and 12,800,000, which is the 64x the sizes predict.
+#
+# 400,000 is chosen to sit in the gap -- past the 8MB wall by 2-4x, and inside
+# 512MB by more than 20x even in the fattest build the harness makes (asan at
+# -O0). It costs milliseconds: this is a depth check, not a benchmark.
+use std/io
+use std/str
+
+## Not an accumulator the C compiler can rewrite into a loop at -O2: the value
+## returned is chosen by a comparison against locals of the frame itself, so
+## there is no associative operator to hoist through the call. Written this
+## way deliberately -- the guarantee under test is the stack's, and a `1 + f(n-1)`
+## would have been quietly turned into iteration and tested nothing.
+fn deep(n: Int, tag: String) -> Int = {
+  if n <= 0 { return 0 }
+  let a = n * 3 + str.len(tag)
+  let b = n + 7
+  let c = str.len(tag) + n
+  let label = "d"
+  let below = deep(n - 1, label)
+  if below > a { below - a } else { below + a + b + c + str.len(label) }
+}
+
+pub fn main() -> Unit !io = {
+  io.println("deep(400000) = ${deep(400000, "x")}")
+}

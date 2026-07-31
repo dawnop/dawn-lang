@@ -57,7 +57,19 @@ pub type EmitMod = {
 }
 
 pub type CSt = {
-  out: String,
+  # The emitted text, in the order it was emitted, NOT joined until the end.
+  #
+  # This was one `String` that every `line` rebuilt (`st.out ++ ...`), which
+  # is a full copy of everything emitted so far per emitted line. Normally
+  # invisible: each copy dies at once, so only the newest is live. It stops
+  # being invisible on a deeply nested Core tree -- `emit_expr`/`emit_stmt`
+  # descend recursively, and every suspended frame holds its own `CSt`, so
+  # peak live memory was (nesting depth) x (output so far). A chain of `++`
+  # is the input shape that produces one nesting level per operand, and 3,200
+  # of them cost 740MB native / >400MB of JVM heap. Appending a chunk instead
+  # is O(1) and shares its history, so a held-onto older `CSt` now costs a
+  # length and a few trie nodes rather than a copy of the file.
+  out: List[String],
   tmp: Int,
   ind: Int,
   consts: Map[String, CValue],
@@ -82,7 +94,7 @@ fn pad(n: Int) -> String = {
 }
 
 fn line(st: CSt, text: String) -> CSt =
-  CSt { ..st, out: st.out ++ pad(st.ind) ++ text ++ "\n" }
+  CSt { ..st, out: st.out ++ [pad(st.ind) ++ text ++ "\n"] }
 
 fn fresh(st: CSt) -> (CSt, String) =
   (CSt { ..st, tmp: st.tmp + 1 }, "t" ++ to_string(st.tmp))
@@ -1405,7 +1417,7 @@ fn emit_cp_table(st0: CSt, name: String, rs: List[(Int, Int)], want: Bool) -> CS
 
 pub fn emit_program(units: List[EmitMod], entry: String, u: TableUse) -> String = {
   var st = CSt {
-    out: "",
+    out: [],
     tmp: 0,
     ind: 0,
     consts: map.empty(),
@@ -1501,14 +1513,22 @@ pub fn emit_program(units: List[EmitMod], entry: String, u: TableUse) -> String 
     }
   }
 
-  st = line(st, "int main(int argc, char** argv) {")
+  # The program body runs on the runtime's own stack, not the OS default one
+  # (dawn_rt.h, "the program's stack"). The thunk exists because the entry's
+  # C return type follows its Dawn one, and `dawn_rt_main` takes one shape;
+  # the name has a single underscore, so no mangled name can collide with it.
+  st = line(st, "static void dawn_program_entry(void) {")
   st = push(st)
-  st = line(st, "dawn_rt_init(argc, argv);")
   st = line(st, "(void)" ++ mangle(entry, "main") ++ "();")
-  st = line(st, "return 0;")
   st = pop(st)
   st = line(st, "}")
-  st.out
+  st = line(st, "")
+  st = line(st, "int main(int argc, char** argv) {")
+  st = push(st)
+  st = line(st, "return dawn_rt_main(argc, argv, dawn_program_entry);")
+  st = pop(st)
+  st = line(st, "}")
+  join(st.out, "")
 }
 
 # ---- tests ----

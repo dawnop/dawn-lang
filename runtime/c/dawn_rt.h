@@ -324,6 +324,52 @@ bool dawn_is_unique(const void *p);
 
 void dawn_rt_init(int argc, char **argv);
 
+/* ---- the program's stack ------------------------------------------------
+ *
+ * `dawn_rt_main` is what the emitted `main` calls, and it is the *only* thing
+ * it calls: it initialises the runtime, runs `entry` on a thread whose stack
+ * is DAWN_STACK_BYTES rather than whatever the OS handed the main thread, and
+ * returns the process status.
+ *
+ * The size is the JVM backend's `-Xss512m` (bin/dawn, and `spawn_java` in
+ * main.dawn), deliberately the same number for the same reason: general tail
+ * calls are not implemented and a big stack is the substitute
+ * (docs/native-backend-plan.md 1). It is address space, not memory -- the
+ * pages are touched only as the stack actually grows.
+ *
+ * Until this existed native ran on the OS default 8MB and deep input died
+ * with SIGSEGV and not one word of output -- the guard page, at a depth the
+ * JVM backend clears by a factor of 64. Nine such crashes are on the record
+ * for one afternoon's synthetic inputs (docs/audit/ceval-trampoline-verdict.md
+ * 5). The runtime is where it belongs rather than the emitted main, because
+ * `nmain`/`cdriver` are emitted programs too: one definition, and the
+ * compiler's own native build gets the same stack a user program does.
+ *
+ * The thread is the mechanism, not a concurrency model. `main` does nothing
+ * but join, so exactly one thread ever runs Dawn code and the non-atomic
+ * reference counts and the single handler chain stay correct.
+ *
+ * Requires -pthread (glibc merged it into libc in 2.34, but the flag is the
+ * portable spelling and also sets _REENTRANT).
+ *
+ * There is deliberately no SIGSEGV handler printing "stack overflow" next to
+ * this, which would be the other half of parity with StackOverflowError. It
+ * was prototyped and measured on 2026-07-31, and the price is wrong for one
+ * line of text: `sigaltstack`/`SA_ONSTACK` are not visible under this file's
+ * `_POSIX_C_SOURCE 200809L`, so the whole translation unit's symbol
+ * visibility would have to move to `_XOPEN_SOURCE 700`; `SIGSTKSZ` stopped
+ * being a compile-time constant in glibc 2.34, so the alternate stack has to
+ * be a made-up size; and -- measured -- installing the handler *silences*
+ * AddressSanitizer's own stack-overflow report, which is strictly better than
+ * the one line, so it would need a `__SANITIZE_ADDRESS__` opt-out and the
+ * sanitized build would stop being the shipped one. Detection is also only a
+ * heuristic (is the faulting address near the stack?), and a wild pointer
+ * mislabelled "stack overflow" is worse than no message. The stack itself
+ * moved the threshold by 64x, which was the part worth having. */
+#define DAWN_STACK_BYTES ((size_t)512 << 20)
+
+int dawn_rt_main(int argc, char **argv, void (*entry)(void));
+
 /* ---- the runtime-intrinsic contract ------------------------------------
  *
  * Everything from here to `dawn_panic` implements a primitive the intrinsic

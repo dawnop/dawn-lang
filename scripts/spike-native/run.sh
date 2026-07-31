@@ -195,7 +195,7 @@ for prog in "${progs[@]}"; do
   # as an int-from-pointer warning, long before it shows up as a wrong
   # answer. That is how the pattern-binding types were caught. The three
   # -Wno- flags cover noise a code generator legitimately produces.
-  if "$cc_bin" -std=c11 -O2 -fwrapv -fno-strict-aliasing \
+  if "$cc_bin" -std=c11 -O2 -fwrapv -fno-strict-aliasing -pthread \
     -Wall -Wextra -Werror \
     -Wno-unused-variable -Wno-unused-but-set-variable \
     -Wno-unused-parameter -Wno-unused-label \
@@ -217,7 +217,7 @@ for prog in "${progs[@]}"; do
   # inlined into; the answer is not being checked here, only the memory.
   if [ "$asan_ok" -eq 1 ]; then
     if "$cc_bin" -std=c11 -g -O0 -fno-omit-frame-pointer -fwrapv \
-      -fno-strict-aliasing -fsanitize=address \
+      -fno-strict-aliasing -fsanitize=address -pthread \
       -I "$root/runtime/c" \
       -o "$work/$name.asan" "$work/$name.c" "$root/runtime/c/dawn_rt.c" -lm \
       >"$work/$name.asan.cc" 2>&1; then
