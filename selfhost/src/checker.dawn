@@ -3330,12 +3330,33 @@ test "internal builtins hide from user code but not std" {
   assert map.size(std_bins) == map.size(builtins())
 }
 
+## Is the innermost lambda one the parser synthesized from a `with` statement?
+## Every diagnostic about crossing a closure boundary asks this first: the author
+## of a `with` block wrote straight-line statements, so naming "a lambda" would
+## point at code that is not on the screen.
+pub fn in_with_sugar(cx: Cx) -> Bool =
+  len(cx.lambda_stack) > 0 && cx.lambda_stack[len(cx.lambda_stack) - 1].sugar
+
+## The message for a jump that would have to leave a `with` region (spec §4.10).
+pub fn with_cross_msg(kw: String) -> String =
+  "`" ++ kw ++ "` cannot cross the closure `with` introduced: the statements " ++
+  "after `with` are that closure's body"
+
 ## return / return expr — early return from the enclosing fn (or lambda).
 ## The value is checked by the caller (recursion lives there); this decides the
 ## target type or errors. Returns Some(target) when a value should be checked
 ## against it, None when the return is malformed (already reported).
 pub fn return_target(cx: Cx, lo: Int, hi: Int) -> (Cx, Option[Ty]) = {
   if len(cx.lambda_stack) > 0 {
+    # A `with` region is refused outright rather than quietly returning from the
+    # synthesized closure: that reads as the enclosing function's return only
+    # when the `with` block is itself in tail position, and nothing on the page
+    # says which case the reader is in.
+    if in_with_sugar(cx) {
+      return (cerr_h(cx, with_cross_msg("return"), lo, hi,
+        "drop the `return` — the block's last expression is already what the " ++
+          "`with` call hands back"), None)
+    }
     let lc = cx.lambda_stack[len(cx.lambda_stack) - 1]
     match lc.expected_ret {
       Some(t) -> (cx, Some(t))
@@ -3365,6 +3386,11 @@ pub fn check_loop_jump(cx: Cx, kw: String, lo: Int, hi: Int) -> (Cx, Bool) = {
   }
   let depth = cx.loop_stack[len(cx.loop_stack) - 1]
   if depth != len(cx.lambda_stack) {
+    if in_with_sugar(cx) {
+      return (cerr_h(cx, with_cross_msg(kw), lo, hi,
+        "the loop is outside that closure; move the `with` inside the loop body, " ++
+          "or call the resource-using part as its own function"), false)
+    }
     return (cerr_h(cx, "`" ++ kw ++ "` cannot cross a lambda boundary to reach the loop outside",
       lo, hi, "a lambda is its own function: use `return` to exit it, or restructure the loop"),
       false)
@@ -3383,10 +3409,24 @@ pub fn check_propagate_typed(cx: Cx, ot: Ty, operand: TExpr, lo: Int, hi: Int) -
     let lc = cx.lambda_stack[len(cx.lambda_stack) - 1]
     sig_ret = match lc.expected_ret {
       Some(t) -> t
-      None -> return (cerr_h(cx,
-        "`?` inside a lambda needs the lambda's return type to be known from context", lo, hi,
-        "handle the Option/Result with match, or make the expected function type explicit"),
-        TyError, XError(lo, hi))
+      None ->
+        # `?` is meant to compose transparently through `with` (spec §4.10):
+        # the synthesized closure's return type is the `with` call's, which is
+        # the block's value. When that type is not yet known, say so in the
+        # reader's terms rather than naming a lambda they did not write.
+        if in_with_sugar(cx) {
+          return (cerr_h(cx,
+            "`?` after `with` needs the type of the `with` call to be known from context",
+            lo, hi,
+            "annotate the enclosing function's return type, so the closure `with` " ++
+              "introduced knows what it hands back"), TyError, XError(lo, hi))
+        } else {
+          return (cerr_h(cx,
+            "`?` inside a lambda needs the lambda's return type to be known from context",
+            lo, hi,
+            "handle the Option/Result with match, or make the expected function type explicit"),
+            TyError, XError(lo, hi))
+        }
     }
   } else {
     sig_ret = match cx.current_sig {
@@ -9447,4 +9487,89 @@ test "a module-qualified type resolves through the alias (LANG-06)" {
   let (cx7, _) = check_module(cx_new(Some("use_site"), None), m7, env)
   assert len(cx7.diags) > 0
   assert str.contains(cx7.diags[0].msg, "has no exported constructor `Nope`")
+}
+
+## The `with` sugar's whole checker surface. `with` is a parser rewrite, so
+## nothing here type-checks differently -- what is pinned is that a jump out of
+## the region is refused, and that the refusal talks about `with` rather than
+## about the lambda the author never wrote (ast.dawn, spec §4.10).
+test "a jump out of a `with` region names the sugar, not a lambda" {
+  let head = "fn hold(r: Int, f: fn(Int) -> Int) -> Int = f(r)\n"
+  let bad_return = head ++
+    "fn go() -> Int = {\n" ++
+    "  with x <- hold(1)\n" ++
+    "  return x\n" ++
+    "}\n"
+  let (m, pdiags) = parser.parse_module(bad_return)
+  assert len(pdiags) == 0
+  let env: Map[String, ModExports] = map.empty()
+  let (cx1, _) = check_module(test_cx(), m, env)
+  assert len(cx1.diags) == 1
+  assert cx1.diags[0].msg == with_cross_msg("return")
+  assert str.contains(cx1.diags[0].hint, "drop the `return`")
+
+  # break reaching a loop outside the region: the generic "crosses a lambda"
+  # message would be a lie about what is on the page
+  let bad_break = head ++
+    "fn go(xs: List[Int]) -> Int = {\n" ++
+    "  for i in xs {\n" ++
+    "    with x <- hold(1)\n" ++
+    "    break\n" ++
+    "  }\n" ++
+    "  0\n" ++
+    "}\n"
+  let (m2, pd2) = parser.parse_module(bad_break)
+  assert len(pd2) == 0
+  let (cx2, _) = check_module(test_cx(), m2, env)
+  assert len(cx2.diags) > 0
+  assert cx2.diags[0].msg == with_cross_msg("break")
+  assert str.contains(cx2.diags[0].hint, "the loop is outside that closure")
+
+  # a loop *inside* the region is untouched: its break never crosses anything
+  let ok_break = head ++
+    "fn go(xs: List[Int]) -> Int = {\n" ++
+    "  with x <- hold(1)\n" ++
+    "  for i in xs { break }\n" ++
+    "  x\n" ++
+    "}\n"
+  let (m3, pd3) = parser.parse_module(ok_break)
+  assert len(pd3) == 0
+  let (cx3, _) = check_module(test_cx(), m3, env)
+  assert len(cx3.diags) == 0
+
+  # a lambda the author *did* write, inside the region, keeps the old message
+  let inner = head ++
+    "fn go(xs: List[Int]) -> Int = {\n" ++
+    "  with x <- hold(1)\n" ++
+    "  for i in xs {\n" ++
+    "    let f = fn(k: Int) => { break }\n" ++
+    "    ()\n" ++
+    "  }\n" ++
+    "  x\n" ++
+    "}\n"
+  let (m4, pd4) = parser.parse_module(inner)
+  assert len(pd4) == 0
+  let (cx4, _) = check_module(test_cx(), m4, env)
+  assert len(cx4.diags) > 0
+  assert str.contains(cx4.diags[0].msg, "cannot cross a lambda boundary")
+}
+
+## `?` composes through `with` (docs/core-move2-design.md §6): the synthesized
+## closure hands back the `with` call's value, which is the block's value, so an
+## `Err` propagated inside the region leaves the enclosing function.
+test "`?` inside a `with` region propagates out of the function" {
+  let src =
+    "fn hold(r: Int, f: fn(Int) -> Result[Int, String]) -> Result[Int, String] = f(r)\n" ++
+    "fn parse(s: String) -> Result[Int, String] = Ok(1)\n" ++
+    "fn go(s: String) -> Result[Int, String] = {\n" ++
+    "  with x <- hold(1)\n" ++
+    "  let n = parse(s)?\n" ++
+    "  Ok(n + x)\n" ++
+    "}\n"
+  let (m, pdiags) = parser.parse_module(src)
+  assert len(pdiags) == 0
+  let env: Map[String, ModExports] = map.empty()
+  let (cx1, _) = check_module(test_cx(), m, env)
+  if len(cx1.diags) > 0 { println("UNEXPECTED: " ++ cx1.diags[0].msg) }
+  assert len(cx1.diags) == 0
 }
