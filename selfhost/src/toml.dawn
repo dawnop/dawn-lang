@@ -22,6 +22,8 @@
 
 use std/str
 use std/list
+use std/cursor
+use std/cursor.{Cursor}
 use token.{Diag}
 
 ## A value from the supported subset; lo/hi are absolute source offsets.
@@ -50,17 +52,20 @@ fn line_text(l: TLine) -> String =
     LEntry(_, _, _, _, t, _) -> t
   }
 
-fn unit_at(s: String, i: Int) -> String = str.substring(s, i, i + 1)
+## The character at `c` as a one-character string, or "" at the end of `s`.
+fn char_at(s: String, c: Cursor) -> String = {
+  let cp = cursor.char(s, c)
+  if cp < 0 { "" } else { str.from_char(cp) }
+}
 
 fn is_bare_key(s: String) -> Bool = {
-  let n = str.len(s)
-  if n == 0 { return false }
-  var i = 0
-  while i < n {
-    let c = unit_at(s, i)
-    let ok = str.contains("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-", c)
+  if str.is_empty(s) { return false }
+  var c = cursor.start(s)
+  while not cursor.done(s, c) {
+    let ok = str.contains("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-",
+      char_at(s, c))
     if not ok { return false }
-    i = i + 1
+    c = cursor.next(s, c)
   }
   true
 }
@@ -78,25 +83,32 @@ fn diag(msg: String, lo: Int, hi: Int, hint: String) -> Diag =
   Diag { msg: msg, lo: lo, hi: hi, hint: hint }
 
 # ---- per-line scanning ----
-# `end` excludes a trailing CR; `pos` walks code points; `base` is the line's
-# absolute start offset, so `base + pos` lifts a span to the source.
+# `end` excludes a trailing CR; `pos` walks code points as a `Cursor`; `base`
+# is the line's absolute start offset, so `abs` lifts a position to the source
+# by counting the code points before it. That count is one walk, taken a
+# handful of times per line where a span is built -- the positions themselves
+# move by `cursor.next`, never by index arithmetic, so a line costs one pass
+# rather than one pass per character.
 
-type Scan = { line: String, pos: Int, end: Int, base: Int }
+type Scan = { line: String, pos: Cursor, end: Cursor, base: Int }
 
 fn scan_of(line: String, base: Int) -> Scan = {
-  let e = if str.ends_with(line, str.from_char(13)) { str.len(line) - 1 } else { str.len(line) }
-  Scan { line: line, pos: 0, end: e, base: base }
+  let last = cursor.end(line)
+  let e = if str.ends_with(line, str.from_char(13)) { cursor.prev(line, last) } else { last }
+  Scan { line: line, pos: cursor.start(line), end: e, base: base }
 }
 
 fn eol(s: Scan) -> Bool = s.pos >= s.end
 
-fn peek(s: Scan) -> String = unit_at(s.line, s.pos)
+fn peek(s: Scan) -> String = char_at(s.line, s.pos)
 
-fn abs(s: Scan, p: Int) -> Int = s.base + p
+fn abs(s: Scan, p: Cursor) -> Int = s.base + cursor.offset(s.line, p)
 
 fn skip_space(s: Scan) -> Scan = {
   var p = s.pos
-  while p < s.end && (unit_at(s.line, p) == " " || unit_at(s.line, p) == "\t") { p = p + 1 }
+  while p < s.end && (char_at(s.line, p) == " " || char_at(s.line, p) == "\t") {
+    p = cursor.next(s.line, p)
+  }
   Scan { ..s, pos: p }
 }
 
@@ -112,21 +124,19 @@ type ValR = { val: TVal, s: Scan }
 
 fn parse_string_at(s0: Scan) -> Result[(String, Scan), Diag] = {
   let start = s0.pos
-  let has3 = str.len(s0.line) - s0.pos >= 3 &&
-    str.substring(s0.line, s0.pos, s0.pos + 3) == "\"\"\""
-  if has3 {
+  if cursor.starts_at(s0.line, s0.pos, "\"\"\"") {
     return Err(diag("multi-line strings are not supported in dawn.toml",
       abs(s0, start), abs(s0, start) + 3, "put the value on one line with a basic string"))
   }
-  var p = s0.pos + 1
+  var p = cursor.next(s0.line, s0.pos)
   var out = ""
   while true {
     if p >= s0.end {
       return Err(diag("unterminated string", abs(s0, start), abs(s0, p),
         "add a closing `\"`; strings may not span lines in dawn.toml"))
     }
-    let c = unit_at(s0.line, p)
-    p = p + 1
+    let c = char_at(s0.line, p)
+    p = cursor.next(s0.line, p)
     if c == "\"" {
       return Ok((out, Scan { ..s0, pos: p }))
     }
@@ -134,10 +144,10 @@ fn parse_string_at(s0: Scan) -> Result[(String, Scan), Diag] = {
       out = out ++ c
     } else {
       if p >= s0.end {
-        return Err(diag("unterminated escape", abs(s0, p - 1), abs(s0, p), ""))
+        return Err(diag("unterminated escape", abs(s0, p) - 1, abs(s0, p), ""))
       }
-      let e = unit_at(s0.line, p)
-      p = p + 1
+      let e = char_at(s0.line, p)
+      p = cursor.next(s0.line, p)
       if e == "\"" {
         out = out ++ "\""
       } else if e == "\\" {
@@ -149,10 +159,16 @@ fn parse_string_at(s0: Scan) -> Result[(String, Scan), Diag] = {
       } else if e == "r" {
         out = out ++ str.from_char(13)
       } else if e == "u" {
-        if s0.end - p < 4 {
-          return Err(diag("`\\u` needs four hex digits", abs(s0, p - 2), abs(s0, p), ""))
+        var q = p
+        var got = 0
+        while got < 4 && q < s0.end {
+          q = cursor.next(s0.line, q)
+          got = got + 1
         }
-        let hex = str.substring(s0.line, p, p + 4)
+        if got < 4 {
+          return Err(diag("`\\u` needs four hex digits", abs(s0, p) - 2, abs(s0, p), ""))
+        }
+        let hex = cursor.slice(s0.line, p, q)
         var code = 0
         var ok = true
         for ch in str.chars(hex) {
@@ -163,12 +179,12 @@ fn parse_string_at(s0: Scan) -> Result[(String, Scan), Diag] = {
         }
         if not ok {
           return Err(diag("invalid `\\u` escape `\\u" ++ hex ++ "`",
-            abs(s0, p - 2), abs(s0, p + 4), "use four hex digits, e.g. `\\u00e9`"))
+            abs(s0, p) - 2, abs(s0, p) + 4, "use four hex digits, e.g. `\\u00e9`"))
         }
         out = out ++ str.from_char(code)
-        p = p + 4
+        p = q
       } else {
-        return Err(diag("unsupported escape `\\" ++ e ++ "`", abs(s0, p - 2), abs(s0, p),
+        return Err(diag("unsupported escape `\\" ++ e ++ "`", abs(s0, p) - 2, abs(s0, p),
           "dawn.toml supports \\\" \\\\ \\n \\t \\r and \\uXXXX"))
       }
     }
@@ -178,11 +194,12 @@ fn parse_string_at(s0: Scan) -> Result[(String, Scan), Diag] = {
 
 fn parse_array(s0: Scan) -> Result[ValR, Diag] = {
   let start = s0.pos
-  var s = skip_space(Scan { ..s0, pos: s0.pos + 1 })
+  var s = skip_space(Scan { ..s0, pos: cursor.next(s0.line, s0.pos) })
   var items: List[String] = []
   if not eol(s) && peek(s) == "]" {
     return Ok(ValR {
-      val: TArr(items, abs(s, start), abs(s, s.pos + 1)), s: Scan { ..s, pos: s.pos + 1 }
+      val: TArr(items, abs(s, start), abs(s, s.pos) + 1),
+      s: Scan { ..s, pos: cursor.next(s.line, s.pos) }
     })
   }
   while true {
@@ -208,18 +225,19 @@ fn parse_array(s0: Scan) -> Result[ValR, Diag] = {
         "close it with `]`; arrays may not span lines in dawn.toml"))
     }
     let c = peek(s)
-    s = Scan { ..s, pos: s.pos + 1 }
+    s = Scan { ..s, pos: cursor.next(s.line, s.pos) }
     if c == "," {
       s = skip_space(s)
       if not eol(s) && peek(s) == "]" {
         return Ok(ValR {
-          val: TArr(items, abs(s, start), abs(s, s.pos + 1)), s: Scan { ..s, pos: s.pos + 1 }
+          val: TArr(items, abs(s, start), abs(s, s.pos) + 1),
+          s: Scan { ..s, pos: cursor.next(s.line, s.pos) }
         })
       }
     } else if c == "]" {
       return Ok(ValR { val: TArr(items, abs(s, start), abs(s, s.pos)), s: s })
     } else {
-      return Err(diag("expected `,` or `]` in array", abs(s, s.pos - 1), abs(s, s.pos), ""))
+      return Err(diag("expected `,` or `]` in array", abs(s, s.pos) - 1, abs(s, s.pos), ""))
     }
   }
   Err(diag("unterminated array", abs(s0, start), abs(s0, s0.end), ""))
@@ -227,11 +245,11 @@ fn parse_array(s0: Scan) -> Result[ValR, Diag] = {
 
 ## Consume to whitespace or a comment — the Kotlin error-span extension for
 ## out-of-subset values (dates, floats, hex), so the caret covers the value.
-fn extend_to_space(s: Scan, p0: Int) -> Int = {
+fn extend_to_space(s: Scan, p0: Cursor) -> Cursor = {
   var p = p0
   while p < s.end {
-    let c = unit_at(s.line, p)
-    if c == " " || c == "\t" || c == "#" { break } else { p = p + 1 }
+    let c = char_at(s.line, p)
+    if c == " " || c == "\t" || c == "#" { break } else { p = cursor.next(s.line, p) }
   }
   p
 }
@@ -239,11 +257,15 @@ fn extend_to_space(s: Scan, p0: Int) -> Int = {
 fn parse_number(s0: Scan) -> Result[ValR, Diag] = {
   let start = s0.pos
   var p = s0.pos
-  if p < s0.end && (unit_at(s0.line, p) == "+" || unit_at(s0.line, p) == "-") { p = p + 1 }
-  while p < s0.end && (is_digit(unit_at(s0.line, p)) || unit_at(s0.line, p) == "_") { p = p + 1 }
-  let raw = str.substring(s0.line, start, p)
+  if p < s0.end && (char_at(s0.line, p) == "+" || char_at(s0.line, p) == "-") {
+    p = cursor.next(s0.line, p)
+  }
+  while p < s0.end && (is_digit(char_at(s0.line, p)) || char_at(s0.line, p) == "_") {
+    p = cursor.next(s0.line, p)
+  }
+  let raw = cursor.slice(s0.line, start, p)
   if p < s0.end {
-    let c = unit_at(s0.line, p)
+    let c = char_at(s0.line, p)
     if c == "-" || c == ":" {
       let e = extend_to_space(s0, p)
       return Err(diag("date-time values are not supported in dawn.toml",
@@ -262,7 +284,7 @@ fn parse_number(s0: Scan) -> Result[ValR, Diag] = {
   }
   if raw == "" || raw == "+" || raw == "-" {
     let e = extend_to_space(s0, p)
-    return Err(diag("invalid value `" ++ str.substring(s0.line, start, e) ++ "`",
+    return Err(diag("invalid value `" ++ cursor.slice(s0.line, start, e) ++ "`",
       abs(s0, start), abs(s0, e),
       "dawn.toml values are strings, integers, booleans, or arrays of strings"))
   }
@@ -277,31 +299,31 @@ fn parse_value(s0: Scan) -> Result[ValR, Diag] = {
   if eol(s0) {
     return Err(diag("expected a value", abs(s0, s0.pos), abs(s0, s0.pos) + 1, ""))
   }
+  let lo = abs(s0, s0.pos)
   let c = peek(s0)
   if c == "\"" {
-    let start = s0.pos
     match parse_string_at(s0) {
       Ok(pr) -> {
         let (v, s2) = pr
-        Ok(ValR { val: TStr(v, abs(s0, start), abs(s2, s2.pos)), s: s2 })
+        Ok(ValR { val: TStr(v, lo, abs(s2, s2.pos)), s: s2 })
       }
       Err(e) -> Err(e)
     }
   } else if c == "'" {
     Err(diag("literal strings are not supported in dawn.toml",
-      abs(s0, s0.pos), abs(s0, s0.pos) + 1, "use a basic string with double quotes"))
+      lo, lo + 1, "use a basic string with double quotes"))
   } else if c == "[" {
     parse_array(s0)
   } else if c == "{" {
     Err(diag("inline tables are not supported in dawn.toml",
-      abs(s0, s0.pos), abs(s0, s0.pos) + 1, "use a `[table]` header with one key per line"))
-  } else if str.starts_with(str.substring(s0.line, s0.pos, s0.end), "true") {
+      lo, lo + 1, "use a `[table]` header with one key per line"))
+  } else if cursor.starts_at(s0.line, s0.pos, "true") {
     Ok(ValR {
-      val: TBool(true, abs(s0, s0.pos), abs(s0, s0.pos + 4)), s: Scan { ..s0, pos: s0.pos + 4 }
+      val: TBool(true, lo, lo + 4), s: Scan { ..s0, pos: cursor.skip(s0.line, s0.pos, "true") }
     })
-  } else if str.starts_with(str.substring(s0.line, s0.pos, s0.end), "false") {
+  } else if cursor.starts_at(s0.line, s0.pos, "false") {
     Ok(ValR {
-      val: TBool(false, abs(s0, s0.pos), abs(s0, s0.pos + 5)), s: Scan { ..s0, pos: s0.pos + 5 }
+      val: TBool(false, lo, lo + 5), s: Scan { ..s0, pos: cursor.skip(s0.line, s0.pos, "false") }
     })
   } else {
     parse_number(s0)
@@ -309,20 +331,21 @@ fn parse_value(s0: Scan) -> Result[ValR, Diag] = {
 }
 
 fn parse_header(raw: String, s1: Scan) -> Result[TLine, Diag] = {
-  var s = Scan { ..s1, pos: s1.pos + 1 }
+  var s = Scan { ..s1, pos: cursor.next(s1.line, s1.pos) }
   if not eol(s) && peek(s) == "[" {
     # the Kotlin span here is line-local (its one un-lifted Span) — kept as is
+    let at = cursor.offset(s.line, s.pos)
     return Err(diag("arrays of tables are not supported in dawn.toml",
-      s.pos - 1, s.pos + 1, "use `[table]` with one key per entry"))
+      at - 1, at + 1, "use `[table]` with one key per entry"))
   }
   s = skip_space(s)
   let name_start = s.pos
   var p = s.pos
   while p < s.end {
-    let c = unit_at(s.line, p)
-    if c == "]" || c == " " || c == "\t" { break } else { p = p + 1 }
+    let c = char_at(s.line, p)
+    if c == "]" || c == " " || c == "\t" { break } else { p = cursor.next(s.line, p) }
   }
-  let name = str.substring(raw, name_start, p)
+  let name = cursor.slice(raw, name_start, p)
   let nlo = abs(s, name_start)
   let nhi = abs(s, p)
   if name == "" { return Err(diag("table name is empty", nlo, nhi, "")) }
@@ -342,7 +365,7 @@ fn parse_header(raw: String, s1: Scan) -> Result[TLine, Diag] = {
     return Err(diag("expected `]` to close the table header",
       abs(s, s.pos), abs(s, s.pos) + 1, ""))
   }
-  s = Scan { ..s, pos: s.pos + 1 }
+  s = Scan { ..s, pos: cursor.next(s.line, s.pos) }
   match finish_line(s) {
     Some(e) -> Err(e)
     None -> Ok(LHeader(name, nlo, nhi, raw))
@@ -357,10 +380,10 @@ fn parse_entry(raw: String, s1: Scan) -> Result[TLine, Diag] = {
   let key_start = s1.pos
   var p = s1.pos
   while p < s1.end {
-    let c = unit_at(s1.line, p)
-    if c == "=" || c == " " || c == "\t" { break } else { p = p + 1 }
+    let c = char_at(s1.line, p)
+    if c == "=" || c == " " || c == "\t" { break } else { p = cursor.next(s1.line, p) }
   }
-  let key = str.substring(raw, key_start, p)
+  let key = cursor.slice(raw, key_start, p)
   let klo = abs(s1, key_start)
   let khi = abs(s1, p)
   if key == "" { return Err(diag("expected a key", klo, khi, "")) }
@@ -377,7 +400,7 @@ fn parse_entry(raw: String, s1: Scan) -> Result[TLine, Diag] = {
     return Err(diag("expected `=` after key `" ++ key ++ "`",
       abs(s, s.pos), abs(s, s.pos) + 1, ""))
   }
-  s = skip_space(Scan { ..s, pos: s.pos + 1 })
+  s = skip_space(Scan { ..s, pos: cursor.next(s.line, s.pos) })
   match parse_value(s) {
     Ok(vr) ->
       match finish_line(vr.s) {
