@@ -1406,8 +1406,8 @@ std → 内建，std 模块自己的 `pub fn len` 正是靠这一条合法。
 - **`std/bytes`**（一等 `Bytes`，§9.5.1）：`bytes.utf8(s) -> Bytes`（字符串的 UTF-8 字节）、
   `bytes.decode_utf8(b) -> String` 与 `bytes.decode_latin1(b) -> String`（解码；语言承诺的
   字符集就这两个，**函数名即定义域**，没有字符集注册表——审计 RP-04 裁决 C。
-  旧 `bytes.decode(b, charset)` 已废弃，仅余这两支的等价拼写，未知 charset panic；
-  与其 charset 参数一并在下个种子边界删除）、
+  带 charset 参数的旧 `bytes.decode` 已删除；`bytes_decode` 原语的该参数按种子纪律
+  另行收窄）、
   `bytes.len(b) -> Int`、`bytes.at(b, i) -> Int`（0..255，越界 panic）、
   `bytes.slice(b, start, end) -> Bytes`（`[start,end)`，下标 clamp）、
   `bytes.index_of(b, needle, from) -> Option[Int]`（字节下标首次出现）。
