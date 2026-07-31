@@ -8,11 +8,16 @@
 > 缝 2 之后 comptime 的 Java 求值只经 `CtOpts.jcall` 钩子（默认拒绝、--comptime-ffi
 > 另设闸），而缝 1 之后捆绑 std 被禁 `use java`（load_std 用拒绝 oracle 检查）——
 > 步骤 1 又把 unsafe_pure 收归 std，于是 route C 不存在合法生产者，allowlist 没有
-> 对象可列。机制保留在 jfold（门后），测试夹具是唯一使用者。步骤 3 维持冻结
-> ——R6 虽已裁决（interp 吃 Core 的 CValue、TAST 的树），trampoline 化的收益
-> 要与 native 侧栈深实测一起重估。
+> 对象可列。机制保留在 jfold（门后），测试夹具是唯一使用者。
 >
-> 原状态：**步骤 1、2 proposed 且可做；步骤 3 冻结。**
+> **2026-07-31：步骤 3 解冻并裁决为「不做」**，见
+> [ceval-trampoline-verdict.md](ceval-trampoline-verdict.md)。重估的结论是收益散了：
+> 深输入下 parser（142–153 层/MB）比 `ceval`（159 层/MB）更早爆栈，故 trampoline
+> **摘不掉** `-Xss512m`；而真实语料（含编译器自己）在 `-Xss256k` 下就编得过，
+> 故也**不需要**靠它摘。唯一独占收益（深 comptime 递归崩溃而非给诊断）实测在
+> `-Xss ≥ 128m` 时本就不存在，且可由改一个常量关掉。翻回「做」的条件见该文 §七。
+>
+> 原状态：**步骤 1、2 proposed 且可做；步骤 3 冻结（等 R6）。**
 > 步骤 3（`ceval` trampoline 化）与 [`../native-backend-plan.md`](../native-backend-plan.md)
 > 的 **R6**（「Core IR 落地后，comptime 解释器该吃 Core 还是继续吃 TAST?**此项未决**」）
 > 撞车——interp 若改吃 Core，trampoline 化的工作全部重做。
@@ -149,15 +154,17 @@ const COMPTIME_ALLOWLIST: List[String] = [
 且幂等），`java.lang.Character` 的行为随 Unicode 版本走（同一 JDK 内确定）。
 两者都在「同一 JDK 下同参同值」的意义上是纯的，这正是 `unsafe_pure` 承诺的东西。
 
-### 步骤 3：求值器不再吃宿主栈（对应 ARCH-06 + LANG-01 建议 3）——**冻结**
+### 步骤 3：求值器不再吃宿主栈（对应 ARCH-06 + LANG-01 建议 3）——**不做**
 
-> **先读这段。** 本步骤要把 `ceval` 的 30 余个 `TExpr` 构造器逐个拆成
-> 「求值子表达式前」与「子表达式回来之后」两半——那是本步骤的全部工作量。
-> 而 `../native-backend-plan.md` 的 R6 把「interp 吃 Core IR 还是吃 TAST」列为**未决**，
-> 并承诺在 Phase 2 之前决定。**若结论是吃 Core，这份逐构造器的拆分全部重做。**
+> **先读这段（2026-07-31 改写）。** 本步骤已裁决为**不做**，
+> 裁决与全部实测在 [ceval-trampoline-verdict.md](ceval-trampoline-verdict.md)。
+> 下面保留原方案的正文，因为翻案条件（那份 §七）成立时它仍是起点。
 >
-> 所以：**等 R6 决议再动**。步骤 1、2 不受影响（它们改的是 checker 的一个判定和
-> `eval_java` 的一张表，与 `ceval` 的形状无关），照做。
+> 需要修正的两处原文：①「30 余个 `TExpr` 构造器」——R6 之后 interp 吃 Core，
+> 实际是 `CExpr` 的 **33 个臂**加 `CStmt` 的 6 个；②「那是本步骤的全部工作量」是错的
+> ——`ceval` 是一张**十二个函数的互递归网**（`eval_all` / `eval_binary` / `exec_cstmt` /
+> `exec_loop` / `call_cfun` / `call_named` / `call_default` / `apply_fn` / `call_builtin` /
+> `eval_java` / `get_cfun` / `lower_into`），只要有一个还在宿主栈上，整张网就还在。
 >
 > 另有一半是**做不掉**的：那份计划 §1 定了「一般尾调**不做**，大栈代替」，
 > Phase 3 的 `pthread_attr_setstacksize` 就是 `-Xss512m` 在 native 上的延续。
@@ -211,8 +218,12 @@ const COMPTIME_ALLOWLIST: List[String] = [
 
 ## 五、不做的（记录理由）
 
-- **把 512MB 调小到某个「合理」值**。现在的 512MB 与 Kotlin 版的 64MB 都没有实测出处。
-  在步骤 3 落地之前调它只是换一个同样没根据的数字，而步骤 3 之后这个参数根本不存在。
+- ~~**把 512MB 调小到某个「合理」值**。现在的 512MB 与 Kotlin 版的 64MB 都没有实测出处。
+  在步骤 3 落地之前调它只是换一个同样没根据的数字，而步骤 3 之后这个参数根本不存在。~~
+  **2026-07-31 作废**：步骤 3 不做，这个参数会一直存在；而「没有实测出处」也不再成立
+  ——[verdict](ceval-trampoline-verdict.md) §四量到了出处：`MAX_CALL_DEPTH = 100000`
+  这道界在 `-Xss64m` 下够不着（宿主栈先崩且无诊断）、在 `128m` 下够得着，
+  512m 是该下限的 4 倍。要调它现在有数可依。
 - **给 `unsafe_pure` 加「可信度等级」**（比如 `unsafe_pure(total)` /
   `unsafe_pure(deterministic)`）。听起来更精确，实际是让用户在**编译器无法检查**的
   维度上做更细的声明——声明越细，错得越具体。要么信要么不信。
@@ -229,12 +240,13 @@ const COMPTIME_ALLOWLIST: List[String] = [
 | 1 | **可做** | `selfhost/src/checker.dawn`（`check_unsafe_pure` 加 `is_std_module` 判定） | checker 内联 test：用户模块用 `unsafe_pure` 报错；std 模块不报 |
 | 1 | **可做** | `docs/spec.md` §6.4 改写、`docs/design.md` 回填「原决策现已恢复」 | — |
 | 2 | **可做** | `selfhost/src/interp.dawn`（`eval_java` 查表） | interp 内联 test：表内类可折叠、表外类报错并给出表 |
-| 3 | **冻结**，等 R6 | `selfhost/src/interp.dawn`（`ceval` trampoline 化） | 现有 comptime test 全绿 + 一个「深度 10 万」的 test 不再依赖宿主栈 |
-| 3 | **冻结**，等 R6 | `bin/dawn`、`selfhost/src/main.dawn`、`scripts/*.sh` 去 `-Xss512m` | `selfhost-fixpoint.sh` + 全仓测试 |
+| 3 | **不做**（[verdict](ceval-trampoline-verdict.md)） | ~~`selfhost/src/interp.dawn`（`ceval` trampoline 化）~~ | — |
+| 3 | **不做**（同上） | ~~`bin/dawn`、`selfhost/src/main.dawn`、`scripts/*.sh` 去 `-Xss512m`~~ | — |
 
 > 步骤 2 的 allowlist 在 native 上会**自然消失**——`use c` 没有反射，
 > comptime 折不了任意 static 方法。它是 JVM 后端的措施，不是永久的语言机制。
 > 落地时在表的注释里写明这一点，免得将来有人以为它是 spec 的一部分。
 
-**发布纪律**：步骤 1 是语言收窄 → 先发 tag。步骤 2、3 不改语言表面，
-但步骤 3 会改 `spawn_java` 的 argv → 属工具链输出变化，要 `Emit-Change:`。
+**发布纪律**：步骤 1 是语言收窄 → 先发 tag。步骤 2 不改语言表面。
+（步骤 3 原本会改 `spawn_java` 的 argv → 属工具链输出变化、要 `Emit-Change:`；
+它已裁决为不做，这条随之作废。）
