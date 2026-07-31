@@ -42,6 +42,27 @@ fn put(zos: ZipOutputStream, name: String, bs: Bytes) -> Unit !io = {
   ()
 }
 
+# The two releases `write_jar_cp` brackets with. Closing the zip stream writes
+# the central directory and closes the file under it, so the outer release is
+# a no-op on the way out the front door; it exists for the window between
+# opening the file and wrapping it, and for a `put` that never gets that far.
+#
+# Neither swallows a close failure. Finishing a jar is where a full disk shows
+# up, and a truncated jar that reports success would defeat the byte-for-byte
+# closure check this module exists for. The cost is that a failure raised while
+# the zip is still empty gets replaced by ZipOutputStream's "at least one
+# entry" complaint — the manifest is written first, so that window is one call
+# wide.
+fn close_zip(z: ZipOutputStream) -> Unit !io = {
+  let _ = z.close()
+  ()
+}
+
+fn close_file(f: FileOutputStream) -> Unit !io = {
+  let _ = f.close()
+  ()
+}
+
 ## A manifest Class-Path line, wrapped: physical lines stay under the spec's
 ## 72-byte cap, continuations start with one space and re-join on read.
 fn class_path_lines(entries: List[String]) -> String = {
@@ -74,7 +95,8 @@ pub fn write_jar_cp(
     Ok(f) -> f
     Err(e) -> panic("cannot write " ++ path ++ ": " ++ e.message)
   }
-  let zos = ZipOutputStream.new(fos)
+  with file <- bracket(fos, close_file)
+  with zos <- bracket(ZipOutputStream.new(file), close_zip)
   let manifest =
     "Manifest-Version: 1.0" ++ crlf() ++
     "Main-Class: " ++ dotted(main_class) ++ crlf() ++
@@ -84,8 +106,6 @@ pub fn write_jar_cp(
     let (nm, bs) = pair
     put(zos, nm ++ ".class", bs)
   }
-  let _ = zos.close()
-  ()
 }
 
 test "dotted turns an internal name into a binary name" {

@@ -126,10 +126,11 @@ fn too_big(what: String, n: Int, limit: Int) -> String =
 ## is advisory (servers may not send a length), so the size is checked again
 ## on the downloaded bytes.
 fn http_get(url: String) -> Result[Bytes, String] !io = {
-  let work = match io.temp_dir("", "dawn-fetch-") {
+  let staged = match io.temp_dir("", "dawn-fetch-") {
     Ok(d) -> d
     Err(e) -> return Err("cannot create a temp directory: " ++ e.message)
   }
+  with work <- bracket(staged, delete_tree)
   let body = work ++ "/body"
   let diag = work ++ "/stderr"
   let ran = io.run([
@@ -163,9 +164,6 @@ fn http_get(url: String) -> Result[Bytes, String] !io = {
       Err("cannot fetch " ++ url ++ ": " ++ e.message ++
           "\n  fetching a remote package needs `curl` on PATH")
   }
-  let _ = io.delete(body)
-  let _ = io.delete(diag)
-  let _ = io.delete(work)
   out
 }
 
@@ -436,15 +434,17 @@ pub fn fetch_and_hash(url: String) -> Result[(String, String), String] !io = {
   mkdirs(cache_root())
   # staged inside the cache root, so the publishing rename below stays on one
   # filesystem and is therefore atomic
-  let work = match io.temp_dir(cache_root(), "fetch-") {
+  let staged = match io.temp_dir(cache_root(), "fetch-") {
     Ok(d) -> d
     Err(e) -> return Err("cannot create a temp directory under " ++ cache_root() ++ ": " ++ e.message)
   }
-  let result = fetch_into(url, work)
-  delete_tree(work)
-  result
+  with work <- bracket(staged, delete_tree)
+  fetch_into(url, work)
 }
 
+## The body of the fetch. Still its own function, but no longer *because* of
+## the release: the staging directory now has a bracket around it, and this
+## keeps its four early `Err` returns, which the sugared region would refuse.
 fn fetch_into(url: String, work: String) -> Result[(String, String), String] !io = {
   let body = match download(url) {
     Ok(b) -> b

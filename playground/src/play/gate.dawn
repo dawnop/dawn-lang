@@ -17,19 +17,15 @@ pub fn leave(gate: Semaphore) -> Unit !io = gate.release()
 # Run `body` while holding a permit, waiting up to `wait_secs` to acquire one.
 # None means the gate was saturated and the caller should answer 429. The permit
 # is released even if `body` panics: execute() can panic on a compiler-internal
-# bug, and without this finally that permit leaks — after `permits` such panics
-# the gate wedges shut and every later request 429s. catch_panic makes leave()
-# unconditional; a caught panic is re-raised after release so the caller still
-# sees the framework's 500 path (spec §9.8) unchanged. The permit spans `body`
-# only — callers render the reply after with_gate returns.
+# bug, and without a finally that permit leaks — after `permits` such panics the
+# gate wedges shut and every later request 429s. The bracket is that finally,
+# and it re-raises the original failure rather than a copy of its message, so
+# the caller still sees the framework's 500 path (spec §9.8) unchanged. The
+# permit spans `body` only — callers render the reply after with_gate returns.
 pub fn with_gate[T](gate: Semaphore, wait_secs: Int, body: fn() -> T !io) -> Option[T] !io =
   if try_enter(gate, wait_secs) {
-    let caught = catch_panic(body)
-    leave(gate)
-    match caught {
-      Ok(v) -> Some(v)
-      Err(m) -> panic(m.message)
-    }
+    with permit <- bracket(gate, leave)
+    Some(body())
   } else {
     None
   }
