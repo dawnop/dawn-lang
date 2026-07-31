@@ -1193,7 +1193,8 @@ type ForeignError = { kind: String, message: String, cause: Option[String] }
 - `message` 是失败自己说的话（JVM 的 `getMessage()`，无则空串）；`cause` 是底下那层
   失败的渲染，没有则 `None`。不带栈：渲染栈的代价要付在每一次屏障上。
 
-屏障只有这一对，载荷只有 `ForeignError`，**不保留 String 版本**。
+屏障只有这一对（**拦**失败的只有这一对；§9.8.2 的 `bracket` 什么都不拦），
+载荷只有 `ForeignError`，**不保留 String 版本**。
 
 > **历史**：把载荷从 String 换成 `ForeignError` 花了三个 release，因为一个内建的
 > **签名**和它的名字一样受种子纪律约束，而且更紧——改名可以一期内让两张表都认识两个
@@ -1203,6 +1204,45 @@ type ForeignError = { kind: String, message: String, cause: Option[String] }
 > 迁调用点并翻转原名的表项（v0.33.0），再把调用点迁回原名、删掉过渡拼法（本版）。
 > 那对名字在 v0.32.0/v0.33.0 的 `dawn doc --builtins` 里出现过，此后不再存在。
 > 分期见 `docs/audit/error-model-design.md` §六。
+
+#### 9.8.2 释放，而不是拦截：`bracket`
+
+Dawn 没有 `try`/`finally`，也不打算有（§9.8 那对屏障是**拦**，不是**放**）。
+「无论怎么退出都要把资源还回去」这件事由第三个内建承担：
+
+```dawn
+fn bracket[A, B](resource: A, release: fn(A) -> Unit !io, use: fn(A) -> B !io) -> B !io
+```
+
+```dawn
+let f = FileOutputStream.new(path)          # 取资源：普通代码，在调用之前
+bracket(f, fn(s) => s.close(), fn(s) => write_all(s, bytes))
+```
+
+**资源是个值，不是 acquire 闭包。** Haskell 的 `bracket` 收 thunk 是为了堵住
+asynchronous exception 的窗口——别的线程或定时器可能在「取到」和「装上 handler」之间打断它。
+Dawn 没有这种东西：失败只从程序自己调用的代码里发出，而实参求值与本内建装 handler 之间
+不跑调用方的任何代码，所以 thunk 堵不到任何窗口（Koka 的 `finally` 同理，也是直接收资源）。
+**取资源因此是调用之前的普通代码**——那里失败无需释放，因为还没取到。
+
+**`use` 在最后**是给将来留的路：`with`/`use` 式的糖把「剩下的块」当**最后一个**实参附加，
+`use` 在中间的原语那天就得改拼写。资源提前取之后，那种站点一个 lambda 都不用写：
+`with f <- bracket(open(path), close)`。
+
+三条保证：
+
+- **`release` 每条路径恰好跑一次**——`use` 正常返回、panic、fault，三条都跑，且只跑一次。
+- **原失败原样继续传播**：`kind`/`message` 逐字不变，**panic 仍是 panic、fault 仍是 fault**。
+  所以 `catch_fault` 依然不拦一个穿过 bracket 的 panic（native 侧靠 re-raise 复原那个
+  种类位，不是重新推断；两个后端的实测比对在 `scripts/spike-native/bracket.dawn` 与
+  `bracket_fatal.dawn`）。
+- **`bracket` 不拦任何东西**，故返回 `B` 而非 `Result`——护与拦是两件正交的事
+  （Haskell `bracket`、Kotlin `use`、Koka `finally`、Go `defer` 无一返回 Result）。
+  要把失败拿成值就写 `catch_fault(fn() => bracket(...))`，两个原语各做一件事。
+
+> 它不给 `defer` 那样的面语法：受保护的区间恒为**一次闭包调用**，所以
+> `return`/`?`/`break` 在语言层面就跨不出去，编译器也就不欠一套逃逸改写。
+> 判据与被推翻的旧结论见 `docs/core-move2-design.md` §2.6 与 §6。
 
 ---
 
@@ -1327,7 +1367,7 @@ use java "java.lang.Math"      # Java 互操作（§9），形式不变
 **prelude** 是其中隐式可用、无需 `use` 的高频核：`List`/`Option`/`Result` 的构造器、
 `println`/`print`、`map`/`filter`/`fold`、`sort` 族（std/list）、内建的 `len`/`get`/`range`/
 `to_string`/`join`/`parse_*`/`panic`/`todo`/`expect`/`unwrap_or`/`cast`/
-`catch_fault`/`catch_panic`/`args` 等一屏以内（全集见 `dawn doc --builtins`）。
+`catch_fault`/`catch_panic`/`bracket`/`args` 等一屏以内（全集见 `dawn doc --builtins`）。
 
 **顶层声明可以遮蔽 builtin/std 函数名**（§10.3，Rust 式）：解析序是本模块声明 →
 std → 内建，std 模块自己的 `pub fn len` 正是靠这一条合法。
