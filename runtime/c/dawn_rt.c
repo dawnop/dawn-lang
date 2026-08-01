@@ -1060,6 +1060,127 @@ static uint32_t dawn_utf8_at(dawn_str *s, int64_t i, int64_t *n) {
   return cp;
 }
 
+/* `dawn_utf8_seq`, `dawn_utf8_boundary` and `dawn_utf8_at` above assume what
+ * they walk is well-formed, and they are entitled to: every string the runtime
+ * builds is built from valid UTF-8 or from a code point, and the one door
+ * foreign bytes come through is `dawn_bytes_decode_utf8`, which validates.
+ * Do not make them strict -- they are on the cursor and case paths, and the
+ * cost would be paid on every character of every lexer run.
+ *
+ * (The io_* readers -- `read_file`, `read_line`, `cwd`, `env`, `list_dir`,
+ * `args`, `run` -- copy operating-system bytes into a string without looking
+ * at them. That is a separate divergence from the JVM, which decodes there,
+ * and not this walker's: they never call it. #112 is about the decoder.)
+ *
+ * Strict UTF-8, for the decoder below. Rejects the overlong forms, the
+ * surrogate halves and anything above U+10FFFF; on malformed input it answers
+ * U+FFFD and reports, in `*n`, how many bytes go with that one replacement.
+ * The rules are the JVM's, byte for byte, because `bytes_decode_utf8` has to
+ * answer what `new String(bytes, UTF_8)` answers and
+ * scripts/spike-native/bytes_decode.dawn compares them. */
+
+static bool dawn_utf8_cont(unsigned char b) { return (b & 0xC0u) == 0x80u; }
+
+/* The second byte of a three-byte sequence: E0 80..9F would be an overlong
+ * form, and a non-continuation ends the sequence early. */
+static bool dawn_utf8_bad3_2(unsigned char b1, unsigned char b2) {
+  return (b1 == 0xE0u && (b2 & 0xE0u) == 0x80u) || !dawn_utf8_cont(b2);
+}
+
+/* The second byte of a four-byte sequence: below F0 90 is overlong, above
+ * F4 8F is past U+10FFFF. */
+static bool dawn_utf8_bad4_2(unsigned char b1, unsigned char b2) {
+  return (b1 == 0xF0u && (b2 < 0x90u || b2 > 0xBFu)) ||
+         (b1 == 0xF4u && (b2 & 0xF0u) != 0x80u) || !dawn_utf8_cont(b2);
+}
+
+/* One step: the code point starting at `i`, or U+FFFD for a malformed
+ * sequence. `*n` is how far to advance -- never zero, so this terminates. */
+static uint32_t dawn_utf8_step(const unsigned char *p, int64_t len, int64_t i,
+                               int64_t *n) {
+  unsigned char b1 = p[i];
+  int64_t rest = len - i - 1;
+  if (b1 < 0x80u) {
+    *n = 1;
+    return b1;
+  }
+  /* C0 and C1 lead only overlong forms, so the two-byte leads start at C2 */
+  if (b1 >= 0xC2u && b1 <= 0xDFu) {
+    if (rest >= 1 && dawn_utf8_cont(p[i + 1])) {
+      *n = 2;
+      return ((uint32_t)(b1 & 0x1Fu) << 6) | (uint32_t)(p[i + 1] & 0x3Fu);
+    }
+    *n = 1;
+    return 0xFFFDu;
+  }
+  if (b1 >= 0xE0u && b1 <= 0xEFu) {
+    if (rest >= 2) {
+      unsigned char b2 = p[i + 1], b3 = p[i + 2];
+      if (dawn_utf8_bad3_2(b1, b2)) {
+        *n = 1;
+        return 0xFFFDu;
+      }
+      if (!dawn_utf8_cont(b3)) {
+        *n = 2;
+        return 0xFFFDu;
+      }
+      uint32_t cp = ((uint32_t)(b1 & 0x0Fu) << 12) |
+                    ((uint32_t)(b2 & 0x3Fu) << 6) | (uint32_t)(b3 & 0x3Fu);
+      *n = 3;
+      /* a surrogate half is not a code point a string may hold, and unlike
+       * the two checks above this one costs the whole sequence */
+      return (cp >= 0xD800u && cp <= 0xDFFFu) ? 0xFFFDu : cp;
+    }
+    /* cut short by the end of the input */
+    if (rest == 1 && dawn_utf8_bad3_2(b1, p[i + 1])) {
+      *n = 1;
+      return 0xFFFDu;
+    }
+    *n = rest + 1;
+    return 0xFFFDu;
+  }
+  if (b1 >= 0xF0u && b1 <= 0xF7u) {
+    if (rest >= 3) {
+      unsigned char b2 = p[i + 1], b3 = p[i + 2], b4 = p[i + 3];
+      uint32_t cp =
+          ((uint32_t)(b1 & 0x07u) << 18) | ((uint32_t)(b2 & 0x3Fu) << 12) |
+          ((uint32_t)(b3 & 0x3Fu) << 6) | (uint32_t)(b4 & 0x3Fu);
+      if (dawn_utf8_cont(b2) && dawn_utf8_cont(b3) && dawn_utf8_cont(b4) &&
+          cp >= 0x10000u && cp <= 0x10FFFFu) {
+        *n = 4;
+        return cp;
+      }
+      /* malformed, and how much of it goes with the one replacement is
+       * decided by how far the sequence got before it went wrong */
+      if (b1 > 0xF4u || dawn_utf8_bad4_2(b1, b2)) {
+        *n = 1;
+        return 0xFFFDu;
+      }
+      if (!dawn_utf8_cont(b3)) {
+        *n = 2;
+        return 0xFFFDu;
+      }
+      *n = 3;
+      return 0xFFFDu;
+    }
+    if (b1 > 0xF4u || (rest >= 1 && dawn_utf8_bad4_2(b1, p[i + 1]))) {
+      *n = 1;
+      return 0xFFFDu;
+    }
+    /* the lead and its second byte go together; a third byte that is not a
+     * continuation is left for the next step to answer for */
+    if (rest >= 2 && !dawn_utf8_cont(p[i + 2])) {
+      *n = 2;
+      return 0xFFFDu;
+    }
+    *n = rest + 1;
+    return 0xFFFDu;
+  }
+  /* a continuation byte with nothing to continue, or F8..FF */
+  *n = 1;
+  return 0xFFFDu;
+}
+
 /* Writes at most four bytes; returns how many. */
 static int64_t dawn_utf8_put(char *out, uint32_t cp) {
   if (cp < 0x80u) {
@@ -1354,28 +1475,24 @@ dawn_bytes *dawn_bytes_from_array(const dawn_array *a) {
 }
 
 /* Malformed input is replaced, not refused -- what `new String(bytes,
- * charset)` does. A byte that starts no valid sequence becomes U+FFFD. */
+ * charset)` does. One U+FFFD per malformed sequence, not per byte: how many
+ * bytes a replacement stands for is `dawn_utf8_step`'s answer, and it is the
+ * JVM's answer.
+ *
+ * This is the only door foreign bytes enter a string through, so it is the
+ * only place validity is established -- everything downstream may assume it.
+ * Three bounds at 3 bytes per input byte: a valid sequence never grows, and a
+ * replacement is three bytes for at least one byte consumed. */
 dawn_str *dawn_bytes_decode_utf8(const dawn_bytes *b) {
   dawn_str *r = dawn_str_new(3 * b->len);
   char *buf = dawn_str_data(r);
   int64_t at = 0;
   int64_t i = 0;
-  /* a borrowed view over the byte buffer, so the UTF-8 walker can read it */
-  dawn_str src = {{DAWN_IMMORTAL, DAWN_K_STR}, b->len, (const char *)b->p};
   while (i < b->len) {
     int64_t n;
-    uint32_t cp = dawn_utf8_at(&src, i, &n);
-    bool ok = true;
-    for (int64_t j = 1; j < n; j++) {
-      if ((b->p[i + j] & 0xC0) != 0x80) ok = false;
-    }
-    if (!ok || i + dawn_utf8_seq(b->p[i]) > b->len) {
-      at += dawn_utf8_put(buf + at, 0xFFFDu);
-      i++;
-    } else {
-      at += dawn_utf8_put(buf + at, cp);
-      i += n;
-    }
+    uint32_t cp = dawn_utf8_step(b->p, b->len, i, &n);
+    at += dawn_utf8_put(buf + at, cp);
+    i += n;
   }
   return dawn_str_shrink(r, at);
 }

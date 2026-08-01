@@ -9,8 +9,10 @@ ordinary Dawn module of string constants, checked in, with a round-trip test
 (in cdriver.dawn) that fails when a runtime edit forgot to regenerate.
 
 The JVM constant pool caps one string literal at 64KB of modified UTF-8; the
-runtime is ASCII, so bytes == UTF-8 length. The guard leaves headroom -- when
-dawn_rt.c outgrows it, teach this generator to chunk before raising the cap.
+runtime is ASCII, so bytes == UTF-8 length. A file past the budget is split at
+line boundaries into several literals joined by `++` -- a runtime concat in an
+ordinary `fn`, not a `const`, so comptime folding never puts it back together.
+dawn_rt.c crossed the budget on 2026-08-01; the cap itself was not raised.
 """
 
 import pathlib
@@ -45,6 +47,29 @@ def esc(text: str) -> str:
     return "".join(out)
 
 
+def split(text: str, limit: int) -> list[str]:
+    """`text` in as few pieces of at most `limit` bytes as it takes, cut at
+    line boundaries and balanced so the pieces come out about even."""
+    raw = len(text.encode("utf-8"))
+    parts = max(1, -(-raw // limit))
+    target = -(-raw // parts)
+    out: list[str] = []
+    cur: list[str] = []
+    n = 0
+    for line in text.splitlines(keepends=True):
+        w = len(line.encode("utf-8"))
+        if n > 0 and n + w > target and len(out) < parts - 1:
+            out.append("".join(cur))
+            cur, n = [], 0
+        cur.append(line)
+        n += w
+    out.append("".join(cur))
+    for piece in out:
+        if len(piece.encode("utf-8")) > limit:
+            sys.exit(f"a single line exceeds the {limit}-byte literal budget")
+    return out
+
+
 def main() -> None:
     lines = [
         "## GENERATED FILE -- do not edit. Regenerate with `python3 scripts/gen-rtsrc.py`",
@@ -53,6 +78,9 @@ def main() -> None:
         "##",
         "## The embedded C runtime: what the native driver's `build` writes beside the",
         "## emitted C so a standalone toolchain needs no runtime directory on disk.",
+        "##",
+        "## A file arrives in several literals joined by `++` once it outgrows what one",
+        "## JVM constant-pool entry holds. This is a `fn`, so that is a runtime concat.",
         "",
         "## The file's text, or None for a name that is not part of the runtime.",
         "pub fn source(name: String) -> Option[String] =",
@@ -60,16 +88,11 @@ def main() -> None:
     first = True
     for f in FILES:
         text = (RT / f).read_text(encoding="utf-8")
-        raw = len(text.encode("utf-8"))
-        if raw > LIMIT:
-            sys.exit(
-                f"{f} is {raw} bytes; the single-literal budget is {LIMIT} "
-                "(JVM constant-pool cap with headroom). Teach gen-rtsrc.py to chunk."
-            )
         kw = "if" if first else "} else if"
         first = False
+        body = " ++ ".join(f'"{esc(piece)}"' for piece in split(text, LIMIT))
         lines.append(f"  {kw} name == \"{f}\" {{")
-        lines.append(f"    Some(\"{esc(text)}\")")
+        lines.append(f"    Some({body})")
     lines.append("  } else {")
     lines.append("    None")
     lines.append("  }")

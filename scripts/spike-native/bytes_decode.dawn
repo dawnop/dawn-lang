@@ -13,23 +13,18 @@
 # not a restatement of the implementation -- on the JVM the two are different
 # `String` constructors, and in C they are one body called two ways.
 #
-# ## What is deliberately not here
+# ## The malformed sections
 #
-# Three families of malformed UTF-8 where the two backends *already* disagree,
-# in `bytes_decode` and so in the new pair with it -- this is a pre-existing
-# gap in the C walker, not something phase 1 introduced, and pinning it would
-# mean deciding it:
+# Three families used to be excluded here, because the C walker answered them
+# differently from the JVM (#112): it decoded the overlong forms, passed
+# surrogate halves through, and emitted one U+FFFD per byte of a truncated
+# sequence rather than one for the sequence. `c0 af` came out as `/`, which is
+# a path-traversal primitive on any path that decodes before it checks.
 #
-#   truncated 3- and 4-byte  the JVM replaces the maximal subpart with one
-#                            U+FFFD; the C walker steps one byte at a time and
-#                            emits one per byte (`e4 b8` -> 1 vs 2)
-#   overlong                 the JVM replaces; C decodes it (`c0 af` -> U+FFFD
-#                            U+FFFD vs `/`)
-#   surrogate halves         the JVM replaces; C passes the code point through
-#                            (`ed a0 80` -> U+FFFD vs U+D800)
-#
-# The families below are the ones both backends already answer alike, and they
-# are what pins the replacement behaviour the two new functions inherit.
+# They are in now, and they are the point: what a decoder does with input that
+# is not what it claims to be is the part of it that has to be pinned. Every
+# expectation below is what the JVM prints -- the C side is the one that had
+# to move.
 use std/io
 use std/bytes
 use std/str
@@ -71,10 +66,39 @@ pub fn main() -> Unit !io = {
   io.println("never a lead byte " ++ seen(raw.decode_utf8(of([0xFF]))))
   io.println("embedded          " ++ seen(raw.decode_utf8(of([0x61, 0xFF, 0x62]))))
 
+  io.println("-- an overlong form is not the character it encodes --")
+  io.println("c0 af             " ++ seen(raw.decode_utf8(of([0xC0, 0xAF]))))
+  io.println("c0 80             " ++ seen(raw.decode_utf8(of([0xC0, 0x80]))))
+  io.println("e0 80 af          " ++ seen(raw.decode_utf8(of([0xE0, 0x80, 0xAF]))))
+  io.println("f0 8f bf bf       " ++ seen(raw.decode_utf8(of([0xF0, 0x8F, 0xBF, 0xBF]))))
+  io.println("embedded          " ++ seen(raw.decode_utf8(of([0x61, 0xC0, 0xAF, 0x62]))))
+
+  io.println("-- a surrogate half is not a code point a string may hold --")
+  io.println("ed a0 80          " ++ seen(raw.decode_utf8(of([0xED, 0xA0, 0x80]))))
+  io.println("ed bf bf          " ++ seen(raw.decode_utf8(of([0xED, 0xBF, 0xBF]))))
+  io.println("ed 9f bf (valid)  " ++ seen(raw.decode_utf8(of([0xED, 0x9F, 0xBF]))))
+
+  io.println("-- one replacement per sequence, not per byte --")
+  io.println("e2 82 at end      " ++ seen(raw.decode_utf8(of([0xE2, 0x82]))))
+  io.println("f0 9f 92 at end   " ++ seen(raw.decode_utf8(of([0xF0, 0x9F, 0x92]))))
+  io.println("f0 9f then ascii  " ++ seen(raw.decode_utf8(of([0xF0, 0x9F, 0x61, 0x7A]))))
+  io.println("ascii then f0 9f  " ++ seen(raw.decode_utf8(of([0x61, 0xF0, 0x9F, 0x7A]))))
+
+  io.println("-- nothing above U+10FFFF --")
+  io.println("f5                " ++ seen(raw.decode_utf8(of([0xF5]))))
+  io.println("f5 80 80 80       " ++ seen(raw.decode_utf8(of([0xF5, 0x80, 0x80, 0x80]))))
+  io.println("f4 90 80 80       " ++ seen(raw.decode_utf8(of([0xF4, 0x90, 0x80, 0x80]))))
+  io.println("f4 8f bf bf (val) " ++ seen(raw.decode_utf8(of([0xF4, 0x8F, 0xBF, 0xBF]))))
+
   io.println("-- phase 2's contract: the pair answers what the charset did --")
   var cases = [
     of([]), bytes.utf8(text), of(range(0, 256)),
-    of([0x80]), of([0xC3]), of([0xE4, 0x41, 0xB8]), of([0xFF]), of([0x61, 0xFF, 0x62])
+    of([0x80]), of([0xC3]), of([0xE4, 0x41, 0xB8]), of([0xFF]), of([0x61, 0xFF, 0x62]),
+    of([0xC0, 0xAF]), of([0xC0, 0x80]), of([0xE0, 0x80, 0xAF]), of([0xF0, 0x8F, 0xBF, 0xBF]),
+    of([0x61, 0xC0, 0xAF, 0x62]), of([0xED, 0xA0, 0x80]), of([0xED, 0xBF, 0xBF]),
+    of([0xED, 0x9F, 0xBF]), of([0xE2, 0x82]), of([0xF0, 0x9F, 0x92]),
+    of([0xF0, 0x9F, 0x61, 0x7A]), of([0x61, 0xF0, 0x9F, 0x7A]), of([0xF5]),
+    of([0xF5, 0x80, 0x80, 0x80]), of([0xF4, 0x90, 0x80, 0x80]), of([0xF4, 0x8F, 0xBF, 0xBF])
   ]
   var same_utf8 = true
   var same_latin1 = true
