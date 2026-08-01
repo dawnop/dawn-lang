@@ -1019,9 +1019,25 @@ fn assign_stmt(p: P, st: St) -> PR[Stmt] = {
 fn while_stmt(p: P, st: St) -> PR[Stmt] = {
   let (st1, kw) = adv(p, st)
   let (st2, cond) = expression(p, st1, true)?
+  no_lambda_header(p, st2, cond, "while")?
   let (st3, body) = block_expr(p, st2)?
   Ok((st3, SWhile(cond, body, kw.lo, e_hi(body))))
 }
+
+## A header expression that came out a lambda swallowed the block that was
+## meant to be the body: `while xs => { ... }` parses the braces as the lambda's
+## body and then finds no `while` body at all, and `if x => y { ... }` reads the
+## braces as the body of an `if` whose condition is a function. Both used to
+## surface as an "expected `{`" or a type error about `fn(...)` and `Bool`,
+## which point at the consequence rather than the decision (spec §4.5).
+fn no_lambda_header(p: P, st: St, cond: Expr, kw: String) -> Result[Unit, (St, Diag)] =
+  match cond {
+    ELambda(_, _, _, lo, hi) ->
+      Err((st, pd_h("this `" ++ kw ++ "` condition parsed as a lambda", lo, hi,
+        "a lambda is not a `Bool`; parenthesise it if the call was meant to " ++
+          "take one, as in `" ++ kw ++ " list.any(xs, x => x > 0) { ... }`")))
+    _ -> Ok(())
+  }
 
 fn for_stmt(p: P, st: St) -> PR[Stmt] = {
   let (st1, kw) = adv(p, st)
@@ -1387,6 +1403,16 @@ fn postfix_expr(p: P, st: St, ns: Bool) -> PR[Expr] = {
       # and that arm only continues a chain for `.` -- so `let x = f` followed
       # by a line `(1 + 2)` stays two statements (spec §4.3).
       let (st4, args, close) = call_args(p, st1)?
+      # `f(a)(x) => e`: the arguments were already consumed as a call, which is
+      # what a `(` after an expression always is. A bare arrow lambda cannot be
+      # a trailing closure for exactly this reason -- `f(a)(x)` is a curried
+      # call, and the two readings are indistinguishable until the `=>`
+      # (spec §4.5). Say so rather than leaving `=>` to fail as a statement.
+      if at_kind(p, st4, FATARROW) {
+        return Err((st4, perr_h(p, st4,
+          "a trailing closure must be written with `fn`",
+          "`f(a) fn(x) => e`; a bare `(x) => e` here would be the call `f(a)(x)`")))
+      }
       e = EApply(e, args, e_lo(e), close.hi)
       st1 = st4
     } else if k == FN {
@@ -1431,8 +1457,14 @@ fn primary_expr(p: P, st: St, ns: Bool) -> PR[Expr] = {
   } else if k == STRING {
     str_lit(p, adv1(p, st), t)
   } else if k == IDENT {
-    let (st1, name) = adv(p, st)
-    Ok((st1, EVar(name.text, name.lo, name.hi)))
+    # `x => e`: one token of lookahead past a name. Nothing else in the grammar
+    # puts `=>` after a bare identifier, so no backtracking is needed.
+    if kind_ahead(p, st, 1) == FATARROW {
+      bare_lambda1(p, st, ns)
+    } else {
+      let (st1, name) = adv(p, st)
+      Ok((st1, EVar(name.text, name.lo, name.hi)))
+    }
   } else if k == IF {
     if_expr(p, st)
   } else if k == MATCH {
@@ -1453,7 +1485,7 @@ fn primary_expr(p: P, st: St, ns: Bool) -> PR[Expr] = {
   } else if k == LBRACE {
     block_expr(p, st)
   } else if k == LPAREN {
-    paren_expr(p, st)
+    paren_expr(p, st, ns)
   } else if k == LBRACKET {
     list_lit(p, st)
   } else if k == FN {
@@ -1590,31 +1622,115 @@ fn str_lit(p: P, st: St, t: Token) -> PR[Expr] = {
   Ok((St { ..st, diags: diags }, EStr(parts, t.lo, t.hi)))
 }
 
+## `( name [: type] , ... )`, the parameter list both lambda spellings share.
+## `st` is at the `(`; the result is positioned just past the `)`.
+##
+## `bare` picks the diagnostic. After `fn` the `(` has already committed to a
+## parameter list, so "expected a parameter name" is the whole story. In the
+## bare form the same tokens could have been a parenthesised expression until
+## the `=>` arrived, so a wrong element gets a message that says which decision
+## was made and what broke it.
+fn lambda_params(p: P, st: St, bare: Bool) -> Result[(St, List[LambdaParam]), (St, Diag)] = {
+  let (st1, _) = want(p, st, LPAREN, "`(`")?
+  var st2 = skip_nl(p, st1)
+  var params: List[LambdaParam] = []
+  while not at_kind(p, st2, RPAREN) {
+    if not at_kind(p, st2, IDENT) {
+      return Err((st2, param_err(p, st2, bare, "a parameter name")))
+    }
+    let (st3, name) = adv(p, st2)
+    var ann: Option[TypeRef] = None
+    var st4 = st3
+    if at_kind(p, st4, COLON) {
+      let st5 = adv1(p, st4)
+      let (st6, t) = type_ref(p, st5)?
+      ann = Some(t)
+      st4 = st6
+    }
+    params = params ++ [LambdaParam { name: name.text, ann: ann, lo: name.lo, hi: name.hi }]
+    st2 = skip_nl(p, st4)
+    if at_kind(p, st2, COMMA) {
+      st2 = skip_nl(p, adv1(p, st2))
+    } else if bare && not at_kind(p, st2, RPAREN) {
+      # `(a + 1) => e`: the `(` was reinterpreted as a parameter list the
+      # moment `=>` was seen, and `+` is where that reading fails. Naming the
+      # token is the difference between this and a bare "expected `)`".
+      return Err((st2, param_err(p, st2, bare, "`,` or `)`")))
+    } else {
+      break
+    }
+  }
+  let (st7, _) = want(p, st2, RPAREN, "`)`")?
+  Ok((st7, params))
+}
+
+fn param_err(p: P, st: St, bare: Bool, what: String) -> Diag = {
+  let found = "expected " ++ what ++ ", found `" ++ cur(p, st).text ++ "`"
+  if bare {
+    perr_h(p, st, "invalid parameter list before `=>`: " ++ found,
+      "an arrow lambda's parameters are plain names, each optionally `: Type`")
+  } else {
+    perr(p, st, found)
+  }
+}
+
 ## fn(x, y: Int) => expr
 fn lambda_expr(p: P, st: St, ns: Bool) -> PR[Expr] = {
   let (st1, kw) = adv(p, st)
-  let (st2, _) = want(p, st1, LPAREN, "`(`")?
-  var st3 = skip_nl(p, st2)
-  var params: List[LambdaParam] = []
-  while not at_kind(p, st3, RPAREN) {
-    let (st4, name) = want(p, st3, IDENT, "a parameter name")?
-    var ann: Option[TypeRef] = None
-    var st5 = st4
-    if at_kind(p, st5, COLON) {
-      let st6 = adv1(p, st5)
-      let (st7, t) = type_ref(p, st6)?
-      ann = Some(t)
-      st5 = st7
+  let (st2, params) = lambda_params(p, st1, false)?
+  let (st3, _) = want(p, st2, FATARROW, "`=>` (lambda body)")?
+  let st4 = skip_nl(p, st3)
+  let (st5, body) = expression(p, st4, ns)?
+  Ok((st5, ELambda(params, body, false, kw.lo, e_hi(body))))
+}
+
+## Does the parenthesised group starting at `st` close with `=>` right after
+## it? The one token of lookahead the bare arrow forms need, done by scanning
+## to the matching `)` rather than by parsing and backtracking.
+##
+## A cover grammar cannot decide this here: `(a: Int) => e` is a legal
+## parameter list and not a legal expression, so the reinterpretation has to
+## happen before the group is parsed, not after (spec §4.5).
+fn paren_is_lambda(p: P, st: St) -> Bool = {
+  var i = st.pos
+  var depth = 0
+  let last = len(p.toks) - 1
+  while i <= last {
+    let k = p.toks[i].kind
+    if k == EOF {
+      return false
+    } else if k == LPAREN || k == LBRACKET || k == LBRACE {
+      depth = depth + 1
+    } else if k == RPAREN || k == RBRACKET || k == RBRACE {
+      depth = depth - 1
+      # a newline between `)` and `=>` does not join them, exactly as it does
+      # not in the `fn` form
+      if depth == 0 { return tok_at(p, i, 1).kind == FATARROW }
     }
-    params = params ++ [LambdaParam { name: name.text, ann: ann, lo: name.lo, hi: name.hi }]
-    st3 = skip_nl(p, st5)
-    if at_kind(p, st3, COMMA) { st3 = skip_nl(p, adv1(p, st3)) } else { break }
+    i = i + 1
   }
-  let (st8, _) = want(p, st3, RPAREN, "`)`")?
-  let (st9, _) = want(p, st8, FATARROW, "`=>` (lambda body)")?
-  let st10 = skip_nl(p, st9)
-  let (st11, body) = expression(p, st10, ns)?
-  Ok((st11, ELambda(params, body, false, kw.lo, e_hi(body))))
+  false
+}
+
+## `(a, b) => e` / `(a: Int) => e` / `() => e`. `st` is at the `(`, and
+## `paren_is_lambda` has already said this is one.
+fn bare_lambda(p: P, st: St, ns: Bool) -> PR[Expr] = {
+  let open = cur(p, st)
+  let (st1, params) = lambda_params(p, st, true)?
+  let (st2, _) = want(p, st1, FATARROW, "`=>` (lambda body)")?
+  let st3 = skip_nl(p, st2)
+  let (st4, body) = expression(p, st3, ns)?
+  Ok((st4, ELambda(params, body, false, open.lo, e_hi(body))))
+}
+
+## `x => e`. `st` is at the parameter name, and the caller has checked that
+## `=>` follows it.
+fn bare_lambda1(p: P, st: St, ns: Bool) -> PR[Expr] = {
+  let (st1, name) = adv(p, st)
+  let st2 = skip_nl(p, adv1(p, st1))
+  let (st3, body) = expression(p, st2, ns)?
+  let param = LambdaParam { name: name.text, ann: None, lo: name.lo, hi: name.hi }
+  Ok((st3, ELambda([param], body, false, name.lo, e_hi(body))))
 }
 
 fn list_lit(p: P, st: St) -> PR[Expr] = {
@@ -1631,7 +1747,13 @@ fn list_lit(p: P, st: St) -> PR[Expr] = {
   Ok((st4, EListLit(elems, open.lo, close.hi)))
 }
 
-fn paren_expr(p: P, st: St) -> PR[Expr] = {
+fn paren_expr(p: P, st: St, ns: Bool) -> PR[Expr] = {
+  # `(a, b) => e` / `(a: Int) => e` / `() => e`: decided before the group is
+  # parsed, because a parameter list is not an expression (see
+  # `paren_is_lambda`). Only in primary position -- a `(` *after* an expression
+  # is an application, which is what keeps `f(a)(x)` from becoming a trailing
+  # closure.
+  if paren_is_lambda(p, st) { return bare_lambda(p, st, ns) }
   let (st1, open) = adv(p, st)
   if at_kind(p, st1, RPAREN) {
     let (st2, close) = adv(p, st1)
@@ -1671,6 +1793,7 @@ fn paren_expr(p: P, st: St) -> PR[Expr] = {
 fn if_expr(p: P, st: St) -> PR[Expr] = {
   let (st1, kw) = adv(p, st)
   let (st2, cond) = expression(p, st1, true)?
+  no_lambda_header(p, st2, cond, "if")?
   let (st3, thn) = block_expr(p, st2)?
   # else may sit on the line after }
   let st4 = skip_nl(p, st3)

@@ -1,0 +1,50 @@
+# The bare arrow lambda (spec §4.5): `x => e`, `(a, b) => e`, `() => e`, each
+# parameter optionally `: Type`. Parsing only -- that the node is the one the
+# `fn` form produces is pinned by selfhost/src/parser_test.dawn.
+
+fn arities(xs: List[Int]) -> Unit = {
+  let one = x => x * 2
+  let two = (a, b) => a + b
+  let none = () => 0
+  let paren_one = (x) => x
+  let annotated = (a: Int, b: List[String]) => a
+  let annotated_one = (n: Int) => n
+  ()
+}
+
+# a lambda body is a full expression, so it ends where the argument does
+fn as_arguments(xs: List[Int]) -> List[Int] = map(filter(xs, x => x > 0), x => x + 1)
+
+# nesting, in both directions
+fn nested(xs: List[Int]) -> List[List[Int]] = map(xs, x => map(xs, y => x + y))
+
+fn returns_one() -> fn(Int) -> Int = x => x + 1
+
+fn immediately_applied() -> Int = (x => x + 1)(1)
+
+# through a pipeline, which is where the noise the sugar removes was loudest
+fn piped(xs: List[Int]) -> String =
+  xs |> filter(x => x > 0) |> map(x => to_string(x)) |> join(", ")
+
+# a block body, and a lambda whose body is a match
+fn blocks(xs: List[Int]) -> Unit = {
+  let f = x => {
+    let y = x + 1
+    y * 2
+  }
+  let g = o => match o {
+    Some(v) -> v
+    None -> 0
+  }
+  ()
+}
+
+# the `fn` spelling still parses, in every position -- including the trailing
+# one, which is the only place it is still mandatory
+fn fn_form_survives(xs: List[Int]) -> Unit = {
+  let f = fn(x) => x
+  let g = fn(a: Int, b: Int) => a + b
+  let h = fn() => 0
+  map(xs) fn(x) => x
+  ()
+}

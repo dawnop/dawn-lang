@@ -1,0 +1,47 @@
+# The bare arrow lambda (spec §4.5): `x => e`, `(a, b) => e`, `() => e`.
+#
+# Like the `fn` trailing lambda, this is a parse spelling and nothing more --
+# both forms build the identical `ELambda`, so neither backend has an arm of
+# its own and the claim being made here is exactly that. What the corpus can
+# still say is that closures built through the new spelling capture, nest and
+# escape the same way, on both backends.
+use std/io
+use std/list
+
+fn twice(f: fn(Int) -> Int, x: Int) -> Int = f(f(x))
+
+fn adder(n: Int) -> fn(Int) -> Int = x => x + n
+
+pub fn main() -> Unit !io = {
+  let xs = [1, 2, 3, 4]
+
+  println("-- one parameter, with and without parentheses --")
+  println(to_string(map(xs, x => x * 2)))
+  println(to_string(map(xs, (x) => x * 3)))
+  println(to_string(filter(xs, x => x > 2)))
+
+  println("-- two parameters, and type ascriptions --")
+  println(to_string(fold(xs, 0, (a, b) => a + b)))
+  println(to_string(fold(xs, 1, (a: Int, b: Int) => a * b)))
+
+  println("-- zero parameters --")
+  let k = () => 7
+  println(to_string(k()))
+
+  println("-- capture, nesting, escape --")
+  let n = 10
+  println(to_string(map(xs, x => x + n)))
+  println(to_string(map(xs, x => map(xs, y => x * y))))
+  println(to_string(twice(x => x + 1, 5)))
+  println(to_string(adder(100)(5)))
+
+  println("-- the same lambda, both spellings --")
+  println(to_string(map(xs, x => x + 1) == map(xs, fn(x: Int) => x + 1)))
+
+  println("-- through a pipeline --")
+  println(xs |> filter(x => x > 1) |> map(x => to_string(x)) |> join(", "))
+
+  println("-- and the short-circuiting quantifiers it was written for --")
+  println(to_string(list.any(xs, x => x > 3)))
+  println(to_string(list.all(xs, x => x > 0)))
+}

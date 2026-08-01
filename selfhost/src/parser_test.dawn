@@ -441,3 +441,71 @@ test "a bare `{ ... }` after a call is not a trailing lambda" {
   let (_, ds) = parse_module("fn f(xs: List[Int]) -> Unit = {\n  map(xs) { x }\n}")
   assert len(ds) > 0
 }
+
+test "bare arrow lambdas parse to the same node the `fn` form does" {
+  # one arity per line, and the `fn` form beside each: the spelling is a parse
+  # detail, so the two renderings have to be identical past the span
+  let bare1 = rendered("fn f(xs: List[Int]) -> Unit = map(xs, x => x)")
+  let fn1 = rendered("fn f(xs: List[Int]) -> Unit = map(xs, fn(x) => x)")
+  assert str.contains(bare1, "Lambda")
+  assert str.contains(bare1, "LParam x ann=false")
+  assert str.contains(fn1, "LParam x ann=false")
+
+  let two = rendered("fn f(xs: List[Int]) -> Unit = fold(xs, 0, (a, b) => a)")
+  assert str.contains(two, "LParam a ann=false")
+  assert str.contains(two, "LParam b ann=false")
+
+  let none = rendered("fn f() -> Unit = k(() => 1)")
+  assert str.contains(none, "Lambda")
+
+  let ann = rendered("fn f(xs: List[Int]) -> Unit = map(xs, (a: Int) => a)")
+  assert str.contains(ann, "LParam a ann=true")
+
+  # nested, and through a pipeline -- the body is a full expression, so it
+  # swallows to the end of the argument and no further
+  let nested = rendered("fn f(xs: List[Int]) -> Unit = map(xs, x => map(xs, y => y))")
+  assert str.contains(nested, "LParam y ann=false")
+  let piped = rendered("fn f(xs: List[Int]) -> Unit = xs |> filter(x => x > 0)")
+  assert str.contains(piped, "LParam x ann=false")
+}
+
+test "a bare arrow lambda is not a trailing closure" {
+  # `f(a) (x) => e` cannot be one: the parenthesised group after an expression
+  # is already the curried call `f(a)(x)`, and only `=>` distinguishes the two
+  # readings. The `fn` spelling stays mandatory there (spec §4.5).
+  let (_, ds) = parse_module("fn f(xs: List[Int]) -> Unit = g(xs) (x) => x")
+  assert len(ds) > 0
+  assert str.contains(ds[0].msg, "a trailing closure must be written with `fn`")
+  # the `fn` form in the same position still attaches
+  let out = rendered("fn f(xs: List[Int]) -> Unit = g(xs) fn(x) => x")
+  assert str.contains(out, "Apply nargs=2")
+}
+
+test "a lambda in a condition is reported as one" {
+  # the block after `=>` would otherwise swallow the `{` that starts the body
+  let (_, d1) = parse_module("fn f() -> Unit = {\n  if x => { g() } { h() }\n}")
+  assert len(d1) > 0
+  assert str.contains(d1[0].msg, "this `if` condition parsed as a lambda")
+  let (_, d2) = parse_module("fn f() -> Unit = {\n  while x => { g() } { h() }\n}")
+  assert len(d2) > 0
+  assert str.contains(d2[0].msg, "this `while` condition parsed as a lambda")
+}
+
+test "a parenthesised group that is not a parameter list says so" {
+  # the cover-grammar failure: `(` committed to a parameter list at the `=>`,
+  # and the message names the token that broke the reading
+  let (_, d1) = parse_module("fn f() -> Unit = (a + 1) => a")
+  assert len(d1) > 0
+  assert str.contains(d1[0].msg, "invalid parameter list before `=>`")
+  assert str.contains(d1[0].msg, "found `+`")
+  let (_, d2) = parse_module("fn f() -> Unit = (a, b + 1) => a")
+  assert len(d2) > 0
+  assert str.contains(d2[0].msg, "invalid parameter list before `=>`")
+  let (_, d3) = parse_module("fn f() -> Unit = (1) => a")
+  assert len(d3) > 0
+  assert str.contains(d3[0].msg, "invalid parameter list before `=>`")
+  assert str.contains(d3[0].msg, "a parameter name")
+  # an ordinary parenthesised expression is untouched
+  let (_, ok) = parse_module("fn f() -> Int = (a + 1) * 2")
+  assert len(ok) == 0
+}
