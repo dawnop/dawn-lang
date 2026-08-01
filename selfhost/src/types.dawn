@@ -28,6 +28,15 @@ pub type Eff =
   | EffVar(name: String, id: Int)
 # a normalized union: >= 2 distinct variables, no io, sorted by id
   | EUnion(vars: List[(Int, String)])
+# The second axis (docs/effects-design.md §4.1): a base row -- one of the four
+# constructors above, never this one -- plus a non-empty, id-sorted set of
+# declared effects. Labels are a component of the normal form, not a member of
+# the base lattice: io absorbs effect variables and never absorbs a label,
+# because evidence is synthesised per label and an absorbed one has no
+# parameter to arrive through. `labels` empty is not representable: the normal
+# form is then the base alone, which is what keeps every label-free program's
+# behaviour byte-identical to what it was before labels existed.
+  | ELabeled(base: Eff, labels: List[(Int, String)])
 
 fn union_has(vs: List[(Int, String)], id: Int) -> Bool = {
   for v in vs {
@@ -37,8 +46,42 @@ fn union_has(vs: List[(Int, String)], id: Int) -> Bool = {
   false
 }
 
-## Combine effects into their normalized least upper bound.
-pub fn eff_union(effs: List[Eff]) -> Eff = {
+fn by_id(vs: List[(Int, String)]) -> List[(Int, String)] =
+  sort_by(vs, (a, b) => {
+    let (ia, _) = a
+    let (ib, _) = b
+    ia - ib
+  })
+
+## The base row: the effect with its labels taken off.
+pub fn eff_base(e: Eff) -> Eff =
+  match e {
+    ELabeled(b, _) -> b
+    _ -> e
+  }
+
+## The declared effects in this row, id-sorted (empty for a bare base).
+pub fn eff_labels(e: Eff) -> List[(Int, String)] =
+  match e {
+    ELabeled(_, ls) -> ls
+    _ -> []
+  }
+
+## The normal form of (base, labels): no labels means the base itself.
+pub fn eff_with_labels(base: Eff, labels: List[(Int, String)]) -> Eff =
+  if len(labels) == 0 { base } else { ELabeled(base, by_id(labels)) }
+
+fn merge_labels(a: List[(Int, String)], b: List[(Int, String)]) -> List[(Int, String)] = {
+  var out = a
+  for l in b {
+    let (id, _) = l
+    if not union_has(out, id) { out = out ++ [l] }
+  }
+  out
+}
+
+## The base-axis union: io absorbs everything, variables accumulate.
+fn base_union(effs: List[Eff]) -> Eff = {
   for e in effs {
     if e == EIo { return EIo }
   }
@@ -60,18 +103,33 @@ pub fn eff_union(effs: List[Eff]) -> Eff = {
     let (id, n) = vars[0]
     return EffVar(n, id)
   }
-  EUnion(sort_by(vars, (a, b) => {
-    let (ia, _) = a
-    let (ib, _) = b
-    ia - ib
-  }))
+  EUnion(by_id(vars))
+}
+
+## Combine effects into their normalized least upper bound.
+pub fn eff_union(effs: List[Eff]) -> Eff = {
+  var bases: List[Eff] = []
+  var labels: List[(Int, String)] = []
+  var any_label = false
+  for e in effs {
+    match e {
+      ELabeled(b, ls) -> {
+        any_label = true
+        bases = bases ++ [b]
+        labels = merge_labels(labels, ls)
+      }
+      _ -> { bases = bases ++ [e] }
+    }
+  }
+  let base = base_union(bases)
+  if not any_label { return base }
+  eff_with_labels(base, labels)
 }
 
 ## Least upper bound in the effect lattice.
 pub fn lub_eff(a: Eff, b: Eff) -> Eff = eff_union([a, b])
 
-## Does `outer` permit every effect in `inner`? io covers all; pure is bottom.
-pub fn eff_subsumes(outer: Eff, inner: Eff) -> Bool =
+fn base_subsumes(outer: Eff, inner: Eff) -> Bool =
   if outer == EIo {
     true
   } else if inner == EPure {
@@ -96,21 +154,52 @@ pub fn eff_subsumes(outer: Eff, inner: Eff) -> Bool =
     }
   }
 
-## Render an effect: "", "io", "e", "(e1|e2)" (union names sorted, like Kotlin).
-pub fn eff_show(e: Eff) -> String =
-  match e {
-    EPure -> ""
-    EIo -> "io"
-    EffVar(n, _) -> n
+## Does `outer` permit every effect in `inner`? io covers all of the base axis;
+## pure is its bottom. The label axis is plain set containment: `!io` does not
+## cover a declared effect, which is what makes a label something a signature
+## has to admit to rather than something io quietly swallows.
+pub fn eff_subsumes(outer: Eff, inner: Eff) -> Bool = {
+  let ols = eff_labels(outer)
+  for l in eff_labels(inner) {
+    let (id, _) = l
+    if not union_has(ols, id) { return false }
+  }
+  base_subsumes(eff_base(outer), eff_base(inner))
+}
+
+## The atoms of a row, unsorted: "io" / variable names / effect names.
+fn eff_atoms(e: Eff) -> List[String] = {
+  var names: List[String] = []
+  match eff_base(e) {
+    EPure -> ()
+    EIo -> { names = names ++ ["io"] }
+    EffVar(n, _) -> { names = names ++ [n] }
     EUnion(vs) -> {
-      var names: List[String] = []
       for v in vs {
         let (_, n) = v
         names = names ++ [n]
       }
-      "(" ++ join(sort(names), "|") ++ ")"
     }
+    ELabeled(_, _) -> ()
   }
+  for l in eff_labels(e) {
+    let (_, n) = l
+    names = names ++ [n]
+  }
+  names
+}
+
+## Render an effect: "", "io", "e", "Ask", "(e1|e2)" (names sorted, like Kotlin).
+pub fn eff_show(e: Eff) -> String = {
+  let names = eff_atoms(e)
+  if len(names) == 0 {
+    ""
+  } else if len(names) == 1 {
+    names[0]
+  } else {
+    "(" ++ join(sort(names), "|") ++ ")"
+  }
+}
 
 ## Render as a signature suffix: "", " !io", " !e", " !(e1|e2)".
 pub fn eff_suffix(e: Eff) -> String = if e == EPure { "" } else { " !" ++ eff_show(e) }
@@ -343,6 +432,10 @@ pub fn subst(t: Ty, m: Map[Int, Ty], em: Map[Int, Eff]) -> Ty =
     TyUnit | TyNever | TyError | TyJava(_, _) -> t
   }
 
+## Substitution walks the normal form component by component: the base axis
+## substitutes as it always did, and labels ride through untouched -- a label
+## is not a variable and has nothing to be replaced by. A base that
+## substitutes *into* a labelled row merges through `eff_union`.
 pub fn subst_eff(e: Eff, em: Map[Int, Eff]) -> Eff =
   match e {
     EffVar(n, id) ->
@@ -361,6 +454,7 @@ pub fn subst_eff(e: Eff, em: Map[Int, Eff]) -> Eff =
       }
       eff_union(effs)
     }
+    ELabeled(b, ls) -> eff_union([subst_eff(b, em), ELabeled(EPure, ls)])
     _ -> e
   }
 
@@ -390,6 +484,10 @@ pub type Sig = {
   constraints: List[List[Int]],
   owner: Option[String],
   trait_id: Option[Int],
+  # (effect id, field index) when this signature is an effect *operation*
+  # rather than a function: calling it is a field read off the evidence in
+  # scope plus a closure call, never a call of a symbol that exists
+  op_of: Option[(Int, Int)],
   # the return type (and effect) is still being inferred; ret is a placeholder
   inferring: Bool
 }
@@ -400,6 +498,27 @@ pub fn bounds_of(s: Sig, i: Int) -> List[Int] =
     Some(bs) -> bs
     None -> []
   }
+
+# ---- effects ----
+
+## One declared effect. Its `id` is also the id of the synthesised evidence
+## record: the label and the record it is served by are one identity, so
+## nothing has to carry a second table from a label to its representation
+## (docs/effects-design.md §5.1).
+pub type EffectI = {
+  id: Int,
+  name: String,
+  owner: Option[String],
+  # operation names in declaration order = the evidence record's field order
+  ops: List[String]
+}
+
+pub alias Effects = Map[Int, EffectI]
+
+## The name of the evidence record an effect declaration synthesises. It is
+## unspellable on purpose -- `$` is not an identifier character -- so it shares
+## the ADT namespace with user types without ever colliding with one.
+pub fn ev_record_name(effect_name: String) -> String = "ev\$" ++ effect_name
 
 # ---- traits ----
 
@@ -766,6 +885,7 @@ fn prelude_method(tid: Int, tv: Ty, name: String, ptys: List[Ty], pnames: List[S
     constraints: [[tid]],
     owner: None,
     trait_id: Some(tid),
+    op_of: None,
     inferring: false
   }
 
@@ -795,6 +915,7 @@ pub fn prelude_traits() -> Traits = {
     constraints: [[ORD_ID]],
     owner: None,
     trait_id: Some(ORD_ID),
+    op_of: None,
     inferring: false
   }
   let ord = TraitI {
@@ -951,6 +1072,7 @@ fn bsig(name: String, ptys: List[Ty], pnames: List[String], ret: Ty) -> Sig =
     constraints: [],
     owner: None,
     trait_id: None,
+    op_of: None,
     inferring: false
   }
 

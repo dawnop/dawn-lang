@@ -17,10 +17,10 @@ use ast.{
   EInt, EFloat, EBool, EUnit, EStr, EVar, EApply, EMethod, ELambda,
   ECtor, EFieldAcc, EListLit, ETupleLit, EPropagate, EUnwrap, EIndex, EReturn,
   EBreak, EContinue, EComptime, EUnsafePure, EBinary, EUnary, EIf, EMatch,
-  EBlock,
+  EBlock, EHandle,
   PLit, PBind, PWild, PCtor, PTuple, PList,
   SLet, SLetPat, SLocalFn, SAssign, SExpr, SAssert, SWhile, SFor,
-  DFn, DType, DConst, DTrait, DImpl, DUseJava, DUseModule, DTest,
+  DFn, DType, DConst, DTrait, DImpl, DUseJava, DUseModule, DTest, DEffect,
   e_lo, e_hi, module_uses, UseView, module_fns, module_impls, module_traits
 }
 use tast.{
@@ -401,6 +401,15 @@ fn visit_decl(qc: QCx, q0: Q, d: Decl) -> Q = {
         }
       }
     }
+    DEffect(e) -> {
+      q = offer(q, e.nlo, e.nhi, "effect " ++ e.name, Some((e.nlo, e.nhi)), None)
+      for op in e.ops {
+        match map.get(qc.entry.cx.fns, op.name) {
+          Some(sg) -> { q = offer(q, op.nlo, op.nhi, render_sig(qc, sg), Some((op.nlo, op.nhi)), None) }
+          None -> ()
+        }
+      }
+    }
     DImpl(_, trait_name, tlo, thi, _, methods, _, _) -> {
       q = offer(q, tlo, thi, "impl " ++ trait_name ++ "[...]", Some((tlo, thi)), None)
       for m in methods { q = visit_fn_decl(qc, q, m) }
@@ -632,7 +641,7 @@ fn walk_e(qc: QCx, q0: Q, pe: Expr, te: Option[TExpr]) -> Q = {
       let args = arg_exprs(args0)
       # module-qualified (alias.fn) and UFCS calls carry the resolved sig
       match te {
-        Some(XCallFn(owner, fname, targs, _, trait_id, _, _, _)) -> {
+        Some(XCallFn(owner, fname, targs, _, _, trait_id, _, _, _)) -> {
           if fname == name {
             match sig_by_owner(qc, owner, fname, trait_id) {
               Some(s) -> {
@@ -885,7 +894,7 @@ fn walk_named_call(
 ) -> Q = {
   var q = q0
   match te {
-    Some(XCallFn(owner, fname, targs, _, trait_id, _, _, _)) -> {
+    Some(XCallFn(owner, fname, targs, _, _, trait_id, _, _, _)) -> {
       match sig_by_owner(qc, owner, fname, trait_id) {
         Some(s) -> {
           let (dsp, dp) = def_of_sig(qc, s)
@@ -1466,7 +1475,7 @@ fn collect_e(
     EMethod(target, _, args0, _, _, _, _) -> {
       let args = arg_exprs(args0)
       let targs = match te {
-        Some(XCallFn(_, _, ts, _, _, _, _, _)) -> ts
+        Some(XCallFn(_, _, ts, _, _, _, _, _, _)) -> ts
         Some(XCallBuiltin(_, ts, _, _, _, _)) -> ts
         _ -> {
           let none: List[TExpr] = []
@@ -1492,7 +1501,7 @@ fn collect_e(
       let args = arg_exprs(args0)
       let (tt, targs) = match te {
         Some(XApply(t, ts, _, _, _)) -> (Some(t), opt_list(ts))
-        Some(XCallFn(_, _, ts, _, _, _, _, _)) -> (no_texpr(), opt_list(ts))
+        Some(XCallFn(_, _, ts, _, _, _, _, _, _)) -> (no_texpr(), opt_list(ts))
         Some(XCallBuiltin(_, ts, _, _, _, _)) -> (no_texpr(), opt_list(ts))
         Some(XCallDyn(_, _, ts, _, _, _)) -> (no_texpr(), opt_list(ts))
         Some(XCtor(_, _, written, _, _, _, _, _)) -> (no_texpr(), opt_list(written))

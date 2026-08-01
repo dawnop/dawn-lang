@@ -808,6 +808,7 @@ fn make_bridge(
       captures: [],
       params: ps,
       dicts: [CParam { sym: dsym, ty: TyAdt(-1, []), mode: COwned }],
+      evs: [],
       ret: sg.ret,
       body: adapt_in(call, psig.ret, sg.ret),
       is_test: false,
@@ -883,6 +884,7 @@ fn make_prim_slot(
     captures: [],
     params: ps,
     dicts: [CParam { sym: dsym, ty: dict_ty(), mode: COwned }],
+    evs: [],
     ret: sg.ret,
     body: body,
     is_test: false,
@@ -1130,6 +1132,7 @@ fn struct_rel_fn(
     captures: [],
     params: ps,
     dicts: dps,
+    evs: [],
     ret: ret,
     body: zero,
     is_test: false,
@@ -2092,6 +2095,7 @@ fn lift_lambda(
     captures: caps,
     params: ps,
     dicts: [],
+    evs: [],
     ret: ret_of_fn_ty(ty),
     body: cbody,
     is_test: false,
@@ -2132,6 +2136,7 @@ fn lift_ctor_value(st: LSt, adt: Int, ci: Int, ty: Ty) -> (LSt, CExpr) = {
     captures: [],
     params: ps,
     dicts: [],
+    evs: [],
     ret: ret,
     body: CCtor(adt, ci, args, ret),
     is_test: false,
@@ -2163,6 +2168,7 @@ fn lift_fn_value(st: LSt, owner: String, name: String, is_builtin: Bool, ty: Ty)
     captures: [],
     params: ps,
     dicts: [],
+    evs: [],
     ret: ret_of_fn_ty(ty),
     body:
     if is_builtin {
@@ -2346,28 +2352,32 @@ pub fn lower_expr(st0: LSt, e: TExpr) -> (LSt, CExpr) = {
         }
       }
     }
-    XCallFn(owner, name, args, wits, trait_id, _, _, ty) ->
+    XCallFn(owner, name, args, wits, evid, trait_id, _, _, ty) ->
       match trait_id {
         Some(tid) -> lower_trait_call(st, tid, name, args, wits, ty)
         None -> {
           let o = match owner { Some(x) -> x None -> st.owner }
           if tl && is_self_fn(st, o, name) {
-            # dictionaries are not re-passed: a self call is the same
-            # instantiation, so the ones already in scope still hold
+            # neither dictionaries nor evidence are re-passed: a self call is
+            # the same instantiation under the same handlers, so what is
+            # already in scope still holds
             return self_tail_jump(st, args)
           }
           match sig_of(st, o, name) {
             Some(sg) -> {
               let (st1, vs) = lower_args_to(st, args, sg.param_tys)
               # a generic function takes its dictionaries as hidden trailing
-              # arguments, in bound order -- the order the callee declares
+              # arguments, in bound order -- the order the callee declares --
+              # and an effectful one its evidence, right behind them
               let (st2, ds) = witness_values(st1, wits)
-              (st2, adapt_out(CCall(CDirect(o, name), vs ++ ds, sg.ret), sg.ret, ty))
+              let (st3, es) = lower_all(st2, evid)
+              (st3, adapt_out(CCall(CDirect(o, name), vs ++ ds ++ es, sg.ret), sg.ret, ty))
             }
             None -> {
               let (st1, vs) = lower_all(st, args)
               let (st2, ds) = witness_values(st1, wits)
-              (st2, CCall(CDirect(o, name), vs ++ ds, ty))
+              let (st3, es) = lower_all(st2, evid)
+              (st3, CCall(CDirect(o, name), vs ++ ds ++ es, ty))
             }
           }
         }
@@ -2920,6 +2930,12 @@ fn lower_fn(st: LSt, owner: String, f: TFun) -> (LSt, CFun) = {
     # the symbol table
     dicts = dicts ++ [CParam { sym: d, ty: sym_ty(st, d, TyError), mode: COwned }]
   }
+  # evidence follows the dictionaries, in the order the checker recorded --
+  # the callee's half of the convention whose caller half is in lower_expr
+  var evs: List[CParam] = []
+  for e in f.ev_syms {
+    evs = evs ++ [CParam { sym: e, ty: sym_ty(st, e, TyError), mode: COwned }]
+  }
   let (stl, lid) = fresh_loop(st)
   # spec §12.4 covers plain top-level functions and local named ones. An impl
   # method, a trait default and a test keep the shape they had, so that the
@@ -2951,6 +2967,7 @@ fn lower_fn(st: LSt, owner: String, f: TFun) -> (LSt, CFun) = {
     captures: [],
     params: params,
     dicts: dicts,
+    evs: evs,
     ret: f.sig.ret,
     body: body,
     is_test: f.is_test,
@@ -3171,10 +3188,12 @@ test "the flat module and the grouped functions are one lowering" {
       constraints: [],
       owner: None,
       trait_id: None,
+      op_of: None,
       inferring: false
     },
     param_syms: [1, 2],
     dict_syms: [],
+    ev_syms: [],
     body: body,
     is_test: false,
     impl_of: None,
@@ -3275,10 +3294,12 @@ test "emitted_core carries the test bodies and what they hoisted" {
       constraints: [],
       owner: None,
       trait_id: None,
+      op_of: None,
       inferring: false
     },
     param_syms: [1, 2],
     dict_syms: [],
+    ev_syms: [],
     body: eq_of(1, 2, "a", "b", ti),
     is_test: false,
     impl_of: None,

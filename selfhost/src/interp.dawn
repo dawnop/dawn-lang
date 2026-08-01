@@ -539,6 +539,13 @@ fn call_cfun(
     if i < len(args) { fenv = map.insert(fenv, d.sym, args[i]) }
     i = i + 1
   }
+  # evidence rides in the slots behind them. Comptime refuses declared
+  # effects, so nothing should get this far -- binding it anyway keeps the
+  # frame honest instead of silently off by one if something ever does
+  for e in cf.evs {
+    if i < len(args) { fenv = map.insert(fenv, e.sym, args[i]) }
+    i = i + 1
+  }
   match ceval(icx, ESt { ..st, depth: st.depth + 1 }, fenv, cf.body) {
     Ok(t) -> {
       let (st1, _, v) = t

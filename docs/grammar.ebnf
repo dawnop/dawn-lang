@@ -26,7 +26,7 @@
 module          = { top_decl } ;
 
 top_decl        = use_decl | type_decl | alias_decl | const_decl | fn_decl
-                | test_decl | trait_decl | impl_decl ;
+                | test_decl | trait_decl | impl_decl | effect_decl ;
 
 (* ---- use ---- *)
 use_decl        = "use" ( java_use | module_use ) ;
@@ -56,9 +56,10 @@ applied_type    = TYPEIDENT [ "[" type_expr { "," type_expr } "]" ] ;
 tuple_type      = "(" type_expr "," type_expr { "," type_expr } ")" ;
 fn_type         = "fn" "(" [ type_expr { "," type_expr } ] ")" "->" type_expr [ effect ] ;
 
-effect          = "!" effect_atom
+effect          = eff_group { eff_group } ;                  (* !io !Ask 可叠写 *)
+eff_group       = "!" effect_atom
                 | "!" "(" effect_atom { "|" effect_atom } ")" ;
-effect_atom     = "io" | EFFVAR ;
+effect_atom     = "io" | EFFVAR | TYPEIDENT ;                (* TYPEIDENT: 已声明的效果 *)
 
 (* ---- const / fn / test ---- *)
 const_decl      = [ "pub" ] "const" UPPER_IDENT ":" type_expr "=" expr ;
@@ -79,10 +80,22 @@ trait_method    = "fn" IDENT "(" [ param_list ] ")" "->" type_expr [ effect ]
 impl_decl       = "impl" TYPEIDENT "[" type_expr "]"
                   "{" { fn_decl } "}" ;                           (* 方法不写 pub/类型参数 *)
 
+(* ---- effect (docs/effects-design.md, spec §6.5) ---- *)
+effect_decl     = [ "pub" ] "effect" TYPEIDENT
+                  "{" effect_op { NEWLINE effect_op } "}" ;
+effect_op       = "fn" IDENT "(" [ param_list ] ")" "->" type_expr ;
+                  (* 无体、无自己的效果注记、无类型参数 *)
+
 (* ---- 语句与块 ---- *)
 block           = "{" { stmt NEWLINE } [ expr ] "}" ;
 stmt            = let_stmt | var_stmt | assign_stmt | for_stmt | while_stmt
-                | local_fn_stmt | assert_stmt | expr ;
+                | local_fn_stmt | assert_stmt | with_stmt | expr ;
+
+(* `with` 吞掉块的剩余部分, 变成一个闭包 (spec §4.10, §6.5)。
+   `handle` 是上下文关键字: 只有它后面不是 `<-` 时才是 handler 子句。 *)
+with_stmt       = "with" ( IDENT "<-" expr | handle_clause ) ;
+handle_clause   = "handle" TYPEIDENT "{" handler_arm { NEWLINE handler_arm } "}" ;
+handler_arm     = IDENT "(" [ lambda_params ] ")" "=>" expr ;
 let_stmt        = "let" pattern [ ":" type_expr ] "=" expr ;
 var_stmt        = "var" IDENT [ ":" type_expr ] "=" expr ;
 assign_stmt     = IDENT "=" expr ;

@@ -1,0 +1,53 @@
+# The lexical half of the effect design (docs/effects-design.md §4.4): which
+# handler answers an operation is decided where the call is written, not where
+# the stack is when it runs. Four consequences, one per section.
+use std/io
+use std/list
+
+effect Ask {
+  fn ask() -> Int
+}
+
+fn sum_three() -> Int !Ask = ask() + ask() + ask()
+
+# an arm raising the effect it answers reaches the OUTER handler: a handler
+# does not answer itself
+fn inner_ten() -> Int !Ask = {
+  with handle Ask { ask() => ask() * 10 }
+  ask() + ask()
+}
+
+# a closure built inside the handled region keeps that handler after the
+# region ends -- there is no stack to unwind, so nothing to invalidate. Its
+# type still says `!Ask`, and the caller's row still has to admit it; what
+# escaping settles is *which* handler answers, not whether it is written down
+fn escaping() -> fn() -> Int !Ask = {
+  with handle Ask { ask() => 7 }
+  () => ask() + 1
+}
+
+# a higher-order library function is untouched by all of this: `list.map` has
+# no label of its own, and the closure it calls carries its own evidence
+fn shifted(xs: List[Int]) -> List[Int] !Ask = list.map(xs, x => x + ask())
+
+# the label rides an effect variable through the callee's row, so `for` (which
+# desugars through std/list) works inside a handled region like anything else
+fn total(xs: List[Int]) -> Int !Ask = {
+  var acc = 0
+  for x in xs { acc = acc + x * ask() }
+  acc
+}
+
+pub fn main() -> Unit !io = {
+  with handle Ask { ask() => 42 }
+  # 42 * 10, twice
+  io.println("${inner_ten()}")
+  # innermost wins, and only inside its own region
+  with handle Ask { ask() => 2 }
+  io.println("${sum_three()}")
+  io.println("${shifted([1, 2, 3])}")
+  io.println("${total([1, 2, 3])}")
+  let f = escaping()
+  io.println("${f()}")
+  io.println("${f() + sum_three()}")
+}

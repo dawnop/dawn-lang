@@ -20,7 +20,8 @@ use types.{
   Ty, TyInt, TyFloat, TyBool, TyString, TyBytes, TyUnit, TyNever,
   TyError, TyVar, TyAdt, TyList, TyMap, TySet, TyArray, TyJava, TyTuple, TyFn,
   Adts, AdtI, CtorI, FieldI, adt_of, adt_jvm_name, ctor_jvm_name,
-  Sym, Sig, Eff, Traits, TraitI, MethodSig, ImplI, trait_of, ORD_ID, EQ_ID, HASH_ID, builtins,
+  Sym, Sig, Eff, eff_labels, Traits, TraitI, MethodSig, ImplI, trait_of, ORD_ID, EQ_ID, HASH_ID,
+  builtins,
   Impls, impl_at
 }
 use tast.{TJavaCall, TFun, TModule, TBinOp, BEq, BNeq, BLt, BLe, BGt, BGe}
@@ -336,6 +337,13 @@ fn sig_desc_with_dicts(adts: Adts, s: Sig) -> String = {
   var dicts = 0
   for c in s.constraints { dicts = dicts + len(c) }
   for _i in 0 ..dicts { ps = ps ++ "Ljava/lang/Object;" }
+  # one evidence parameter per declared effect, after the dictionaries. A
+  # label's id is its evidence record's ADT id, so the descriptor is exact --
+  # no erasure, and the field reads inside need no cast
+  for l in eff_labels(s.eff) {
+    let (eid, _) = l
+    ps = ps ++ desc_of(adts, TyAdt(eid, []))
+  }
   "(" ++ ps ++ ")" ++ desc_of(adts, s.ret)
 }
 
@@ -1162,6 +1170,7 @@ fn note_lifts(g: Gen, lifts: List[CFun]) -> Gen = {
     # parameter: a bridge whose descriptor omitted it verified only because
     # nothing on the JVM ever called one
     for _d in lf.dicts { ptys = ptys ++ [TyVar("D", 0)] }
+    for e in lf.evs { ptys = ptys ++ [e.ty] }
     # A dictionary slot body is called from the dictionary class against
     # the trait method's own descriptor. Every other hoisted body sits
     # behind an erased `apply`, where a zero-slot return still has to hand
@@ -1239,6 +1248,12 @@ fn gen_cbody(
   for d in cf.dicts {
     let (g2, slot) = alloc(g1, slots_of(d.ty))
     g1 = cbind(g2, d.sym, d.ty, slot)
+  }
+  # evidence sits behind the dictionaries, which is where `sig_desc_with_dicts`
+  # puts it in the descriptor: the two orders are one convention
+  for e in cf.evs {
+    let (g2, slot) = alloc(g1, slots_of(e.ty))
+    g1 = cbind(g2, e.sym, e.ty, slot)
   }
   let (g3, falls) = gen_cexpr(g1, cf.body, false)
   if falls { emit_method_return(g3) }
