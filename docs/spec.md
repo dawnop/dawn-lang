@@ -697,7 +697,7 @@ let c = rows[1][0]   # 可链式、可与 ?/./() 组合
    **panic**（含负下标）。
 2. **问询**——越界/缺键是调用方要区分的正常分支：`get` 族（`list.get`、`map.get`、
    `set.has` 的缺席、`index_of` 族（`str`/`bytes`/`list`）的未命中、`str.strip_prefix`/
-   `strip_suffix` 的不匹配、`bytes.from_hex`/`from_base64` 与 `fspath.extension` 的
+   `strip_suffix` 的不匹配、`bytes.from_hex`/`from_base64` 与 `fspath.extension`(包)的
    格式不合）→ **`Option`**（或 `Bool`）。
 3. **钳位**——参数是一个**区间**，说的是「要这一段里有的部分」，不断言端点存在：
    `list.take`/`drop`/`slice`、`bytes.slice`、`str.substring`/`take`/`drop`、
