@@ -13,5 +13,25 @@ truncated 2-byte  1 efbfbd
 bad continuation  3 efbfbd41efbfbd
 never a lead byte 1 efbfbd
 embedded          3 61efbfbd62
+-- an overlong form is not the character it encodes --
+c0 af             2 efbfbdefbfbd
+c0 80             2 efbfbdefbfbd
+e0 80 af          3 efbfbdefbfbdefbfbd
+f0 8f bf bf       4 efbfbdefbfbdefbfbdefbfbd
+embedded          4 61efbfbdefbfbd62
+-- a surrogate half is not a code point a string may hold --
+ed a0 80          1 efbfbd
+ed bf bf          1 efbfbd
+ed 9f bf (valid)  1 ed9fbf
+-- one replacement per sequence, not per byte --
+e2 82 at end      1 efbfbd
+f0 9f 92 at end   1 efbfbd
+f0 9f then ascii  3 efbfbd617a
+ascii then f0 9f  3 61efbfbd7a
+-- nothing above U+10FFFF --
+f5                1 efbfbd
+f5 80 80 80       4 efbfbdefbfbdefbfbdefbfbd
+f4 90 80 80       4 efbfbdefbfbdefbfbdefbfbd
+f4 8f bf bf (val) 1 f48fbfbf
 -- phase 2's contract: the pair answers what the charset did --
 true true
