@@ -1728,6 +1728,8 @@ dawn_array *dawn_io_list_names(dawn_str *path) {
   if (d == NULL) {
     dawn_fault(dawn_str_lit("io_list_names: cannot open directory", 36));
   }
+  /* readdir order, deliberately: the intrinsic's order is unspecified, and
+   * std/io's list_dir sorts (code-point order) so every backend agrees. */
   dawn_array *a = dawn_array_new();
   struct dirent *e = readdir(d);
   while (e != NULL) {
