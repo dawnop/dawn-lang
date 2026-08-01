@@ -1,0 +1,131 @@
+# What the io readers do with bytes that are not UTF-8 (#113).
+#
+# `bytes_decode.dawn` pinned the *decoder* on malformed input. This is the
+# other half of the same question, and the half a program hits without asking
+# for it: the readers take bytes from the operating system, and nothing
+# guarantees a file's contents, a filename or a line of stdin is UTF-8. The C
+# runtime used to copy those bytes into a string verbatim, so `c0 af` in a
+# filename reached the walkers as the character `/`.
+#
+# The two answers are not the same, and which one a primitive gives was read
+# off the JVM rather than chosen here:
+#
+#   read_file    Files.readString decodes with REPORT -- a malformed file is a
+#                *fault*, not a string full of U+FFFD. Reading text that is not
+#                the text on disk is the failure this exists to stop; the
+#                primitive for input that is not text is `read_bytes`.
+#   the rest     read_line, cwd, getenv, list_names, temp_dir, args -- the JVM
+#                produces these strings with a decoder that REPLACES (the
+#                InputStreamReader behind readLine, and the platform decoder
+#                behind System.getenv and File.list). So they replace here too:
+#                a filename that is not UTF-8 is still a filename.
+#
+# ## What this file may and may not pin
+#
+# The fault is pinned in full, because `Files.readString` names UTF-8 itself
+# and is therefore the same on every machine.
+#
+# The *result* of a replacement is not, because on the JVM the strings in the
+# second group come from `sun.jnu.encoding` -- the platform locale, which is
+# ASCII on a machine without a UTF-8 one, and the replacements then fall in
+# different places. What is portable is the property the divergence was about:
+# whatever comes back is a **well-formed string**, which is exactly what the C
+# side did not produce. `well_formed` asks that without printing a code point.
+#
+# The primitives are std-only, so they come from `use std/raw`, the same
+# arrangement `catch_kinds.dawn` uses. Stdin is not driven at all: the harness
+# runs both backends with stdin at /dev/null.
+use std/io
+use std/raw
+use std/str
+use std/bytes
+
+fn of(vals: List[Int]) -> Bytes = {
+  var b = bytes.buf()
+  for v in vals {
+    b = bytes.put(b, v)
+  }
+  bytes.freeze(b)
+}
+
+## Which barrier stops this failure -- `catch_kinds.dawn`'s helper, for the
+## same reason: every outcome becomes a value instead of the end of the run,
+## and "caught" tells a fault apart from a panic that walked past the io
+## barrier.
+fn barrier(f: fn() -> Int !io) -> String !io =
+  match catch_panic(() => match catch_fault(f) {
+    Ok(_) -> 0
+    Err(_) -> 1
+  }) {
+    Ok(0) -> "ok"
+    Ok(_) -> "caught"
+    Err(_) -> "through"
+  }
+
+## A string the runtime handed out is well-formed UTF-8: encoding it and
+## decoding it back is the identity. A string carrying raw `c0 af` fails this
+## -- the decoder replaces those two bytes and the result is a different string
+## -- and it fails it without anyone having to say what the right answer was.
+fn well_formed(s: String) -> Bool = raw.decode_utf8(bytes.utf8(s)) == s
+
+fn wrote(dir: String, name: String, vals: List[Int]) -> String !io = {
+  let p = dir ++ "/" ++ name
+  raw.write_bytes(p, of(vals))
+  p
+}
+
+pub fn main() -> Unit !io = {
+  let dir = raw.temp_dir("", "dawn-io-utf8-")
+
+  io.println("-- read_file reads UTF-8 --")
+  let good = wrote(dir, "good", [0x61, 0xC3, 0xA9])
+  io.println("valid       " ++ barrier(() => str.len(raw.read_file(good))))
+  io.println("code points " ++ to_string(str.len(raw.read_file(good))))
+
+  # the three families bytes_decode.dawn replaces under: an overlong form, a
+  # surrogate half, and a sequence cut short by the end of the input
+  io.println("-- and refuses what is not UTF-8 --")
+  let overlong = wrote(dir, "overlong", [0xC0, 0xAF])
+  let surrogate = wrote(dir, "surrogate", [0xED, 0xA0, 0x80])
+  let truncated = wrote(dir, "truncated", [0x61, 0xE2, 0x82])
+  let lone = wrote(dir, "lone", [0x80])
+  io.println("c0 af       " ++ barrier(() => str.len(raw.read_file(overlong))))
+  io.println("ed a0 80    " ++ barrier(() => str.len(raw.read_file(surrogate))))
+  io.println("61 e2 82    " ++ barrier(() => str.len(raw.read_file(truncated))))
+  io.println("80          " ++ barrier(() => str.len(raw.read_file(lone))))
+
+  # "caught" above says a fault, not a panic; this says the file was readable
+  # all along and it is the *decoding* that refused
+  io.println("-- the bytes are still there, for the primitive that wants bytes --")
+  io.println("c0 af       " ++ bytes.to_hex(raw.read_bytes(overlong)))
+  io.println("61 e2 82    " ++ bytes.to_hex(raw.read_bytes(truncated)))
+
+  # A Dawn String cannot hold `c0 af`, so no call in this file could create
+  # this name -- the shell has to. Its own directory, so the listing is one
+  # entry and there is nothing for an ordering to disagree about.
+  io.println("-- a filename that is not UTF-8 is a filename, not a failure --")
+  let sub = dir ++ "/sub"
+  raw.mkdirs(sub)
+  io.println("sh exit     "
+    ++ to_string(raw.run(["sh", "-c", "printf x > \"\$0/bad\$(printf '\\300\\257').txt\"", sub],
+      "", "")))
+  for n in raw.list_names(sub) {
+    io.println("well formed " ++ to_string(well_formed(n)))
+    io.println("ascii kept  "
+      ++ to_string(str.starts_with(n, "bad") && str.ends_with(n, ".txt")))
+  }
+
+  # the process's own strings are well-formed on any machine, malformed or not
+  io.println("-- and so is everything else the process was handed --")
+  io.println("cwd         " ++ to_string(well_formed(io.cwd())))
+  io.println("temp dir    " ++ to_string(well_formed(dir)))
+  io.println("PATH        " ++ to_string(match io.getenv("PATH") {
+    Some(v) -> well_formed(v)
+    None -> false
+  }))
+
+  # `rm -rf` rather than io.delete: one of these entries has a name this
+  # program cannot spell.
+  let _ = raw.run(["rm", "-rf", dir], "", "")
+  io.println("cleaned up  " ++ to_string(not io.exists(dir)))
+}

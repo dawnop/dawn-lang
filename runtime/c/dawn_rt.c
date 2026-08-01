@@ -1062,15 +1062,14 @@ static uint32_t dawn_utf8_at(dawn_str *s, int64_t i, int64_t *n) {
 
 /* `dawn_utf8_seq`, `dawn_utf8_boundary` and `dawn_utf8_at` above assume what
  * they walk is well-formed, and they are entitled to: every string the runtime
- * builds is built from valid UTF-8 or from a code point, and the one door
- * foreign bytes come through is `dawn_bytes_decode_utf8`, which validates.
- * Do not make them strict -- they are on the cursor and case paths, and the
- * cost would be paid on every character of every lexer run.
+ * builds is built from valid UTF-8 or from a code point, and the doors foreign
+ * bytes come through -- `dawn_bytes_decode_utf8` and `dawn_str_from_os` --
+ * both validate. Do not make them strict -- they are on the cursor and case
+ * paths, and the cost would be paid on every character of every lexer run.
  *
- * (The io_* readers -- `read_file`, `read_line`, `cwd`, `env`, `list_dir`,
- * `args`, `run` -- copy operating-system bytes into a string without looking
- * at them. That is a separate divergence from the JVM, which decodes there,
- * and not this walker's: they never call it. #112 is about the decoder.)
+ * (The io_* readers used to copy operating-system bytes into a string without
+ * looking at them, which is how a `c0 af` in a filename became a `/`. They go
+ * through the walker now; #113 is that half, #112 was the decoder.)
  *
  * Strict UTF-8, for the decoder below. Rejects the overlong forms, the
  * surrogate halves and anything above U+10FFFF; on malformed input it answers
@@ -1203,6 +1202,63 @@ static int64_t dawn_utf8_put(char *out, uint32_t cp) {
   out[2] = (char)(0x80u | ((cp >> 6) & 0x3Fu));
   out[3] = (char)(0x80u | (cp & 0x3Fu));
   return 4;
+}
+
+/* Every byte of `p[0, len)` is part of a well-formed sequence -- the same
+ * question `dawn_utf8_step` already answers, asked without building anything.
+ * One walker, two answers: a second copy of the rules would be a second place
+ * for them to drift from the JVM's.
+ *
+ * `dawn_utf8_step` reports a malformed sequence as U+FFFD, and U+FFFD is also
+ * a character a well-formed input may contain, so the two are told apart by
+ * what was consumed: the real one is exactly its own three bytes, EF BF BD. */
+static bool dawn_utf8_valid(const unsigned char *p, int64_t len) {
+  int64_t i = 0;
+  while (i < len) {
+    int64_t n;
+    uint32_t cp = dawn_utf8_step(p, len, i, &n);
+    if (cp == 0xFFFDu &&
+        !(n == 3 && p[i] == 0xEFu && p[i + 1] == 0xBFu && p[i + 2] == 0xBDu)) {
+      return false;
+    }
+    i += n;
+  }
+  return true;
+}
+
+/* The replacement walk itself. Three bounds at 3 bytes per input byte: a valid
+ * sequence never grows, and a replacement is three bytes for at least one byte
+ * consumed. */
+static dawn_str *dawn_utf8_replace(const unsigned char *p, int64_t len) {
+  dawn_str *r = dawn_str_new(3 * len);
+  char *buf = dawn_str_data(r);
+  int64_t at = 0;
+  int64_t i = 0;
+  while (i < len) {
+    int64_t n;
+    uint32_t cp = dawn_utf8_step(p, len, i, &n);
+    at += dawn_utf8_put(buf + at, cp);
+    i += n;
+  }
+  return dawn_str_shrink(r, at);
+}
+
+/* Operating-system bytes -- a filename, an environment value, a line of stdin
+ * -- as a string. The other door into the set of valid strings, and the one
+ * #113 put a check on: these bytes used to be copied verbatim, so a malformed
+ * name reached `dawn_utf8_at`, which is entitled to assume it never would.
+ *
+ * Replacement rather than refusal, because that is what the JVM does with the
+ * same bytes: `System.getenv`, `File.list` and the `InputStreamReader` behind
+ * `io_read_line` all decode with `CodingErrorAction.REPLACE`. Only
+ * `io_read_file` reports, and it is the one primitive here that does not go
+ * through this function.
+ *
+ * Valid input -- every read, on every machine whose paths are UTF-8 -- pays a
+ * scan and then the same copy as before, rather than a scan and a rebuild. */
+static dawn_str *dawn_str_from_os(const char *p, int64_t len) {
+  if (dawn_utf8_valid((const unsigned char *)p, len)) return dawn_str_copy(p, len);
+  return dawn_utf8_replace((const unsigned char *)p, len);
 }
 
 /* ---- cursors ---- */
@@ -1465,22 +1521,12 @@ dawn_bytes *dawn_bytes_from_array(const dawn_array *a) {
  * bytes a replacement stands for is `dawn_utf8_step`'s answer, and it is the
  * JVM's answer.
  *
- * This is the only door foreign bytes enter a string through, so it is the
- * only place validity is established -- everything downstream may assume it.
- * Three bounds at 3 bytes per input byte: a valid sequence never grows, and a
- * replacement is three bytes for at least one byte consumed. */
+ * This is one of the two doors foreign bytes enter a string through -- the
+ * other is `dawn_str_from_os`, which walks the same rules -- so it is one of
+ * the two places validity is established, and everything downstream may assume
+ * it. */
 dawn_str *dawn_bytes_decode_utf8(const dawn_bytes *b) {
-  dawn_str *r = dawn_str_new(3 * b->len);
-  char *buf = dawn_str_data(r);
-  int64_t at = 0;
-  int64_t i = 0;
-  while (i < b->len) {
-    int64_t n;
-    uint32_t cp = dawn_utf8_step(b->p, b->len, i, &n);
-    at += dawn_utf8_put(buf + at, cp);
-    i += n;
-  }
-  return dawn_str_shrink(r, at);
+  return dawn_utf8_replace(b->p, b->len);
 }
 
 /* One code point per byte, 0..255 -- so every byte string decodes and the
@@ -1519,7 +1565,10 @@ dawn_adt *dawn_io_read_line(void) {
   }
   /* BufferedReader.readLine keeps neither terminator */
   if (n > 0 && buf[n - 1] == '\r') n--;
-  dawn_str *line = dawn_str_copy(buf, (int64_t)n);
+  /* the JVM reads this stream through an InputStreamReader built on UTF_8,
+   * whose decoder replaces rather than reports -- so a malformed line is a
+   * line, here too */
+  dawn_str *line = dawn_str_from_os(buf, (int64_t)n);
   free(buf);
   return dawn_some(line);
 }
@@ -1635,6 +1684,21 @@ dawn_str *dawn_io_read_file(dawn_str *path) {
   if (bad) {
     dawn_fault(dawn_str_lit("io_read_file: read failed", 25));
   }
+  /* The one reader that refuses. `Files.readString` decodes with
+   * `CodingErrorAction.REPORT` and throws a `MalformedInputException`, so a
+   * file that is not UTF-8 is a failed read on the JVM rather than a string
+   * full of U+FFFD -- and a text reader that quietly answers something other
+   * than what is on disk is the failure mode this whole pair of issues is
+   * about. `read_bytes` is the primitive for input that is not text.
+   *
+   * The buffer goes back before the raise: `dawn_fault` longjmps past every
+   * frame between here and the barrier, so anything still owned at the call is
+   * owned by nobody. Same shape as the `free(p)` before the raises in
+   * `io_mkdirs`. */
+  if (!dawn_utf8_valid(buf, (int64_t)n)) {
+    free(buf);
+    dawn_fault(dawn_str_lit("io_read_file: malformed UTF-8", 29));
+  }
   dawn_str *s = dawn_str_copy((const char *)buf, (int64_t)n);
   free(buf);
   return s;
@@ -1669,7 +1733,7 @@ dawn_array *dawn_io_list_names(dawn_str *path) {
   while (e != NULL) {
     if (strcmp(e->d_name, ".") != 0 && strcmp(e->d_name, "..") != 0) {
       size_t n = strlen(e->d_name);
-      a = dawn_array_push_own(a, dawn_str_copy(e->d_name, (int64_t)n));
+      a = dawn_array_push_own(a, dawn_str_from_os(e->d_name, (int64_t)n));
     }
     e = readdir(d);
   }
@@ -1682,7 +1746,7 @@ dawn_str *dawn_io_cwd(void) {
   for (;;) {
     char *buf = (char *)dawn_alloc(cap);
     if (getcwd(buf, cap) != NULL) {
-      dawn_str *s = dawn_str_copy(buf, (int64_t)strlen(buf));
+      dawn_str *s = dawn_str_from_os(buf, (int64_t)strlen(buf));
       free(buf);
       return s;
     }
@@ -1699,7 +1763,7 @@ dawn_adt *dawn_io_getenv(dawn_str *name) {
   const char *v = getenv(p);
   free(p);
   if (v == NULL) return dawn_none();
-  return dawn_some(dawn_str_copy(v, (int64_t)strlen(v)));
+  return dawn_some(dawn_str_from_os(v, (int64_t)strlen(v)));
 }
 
 dawn_bytes *dawn_io_read_bytes(dawn_str *path) {
@@ -1781,7 +1845,8 @@ dawn_str *dawn_io_temp_dir(dawn_str *parent, dawn_str *prefix) {
     free(tmpl);
     dawn_fault(dawn_str_lit("io_temp_dir: cannot create a temporary directory", 47));
   }
-  dawn_str *s = dawn_str_copy(tmpl, (int64_t)strlen(tmpl));
+  /* `prefix` was already a string, but the base may be `$TMPDIR` */
+  dawn_str *s = dawn_str_from_os(tmpl, (int64_t)strlen(tmpl));
   free(tmpl);
   return s;
 }
@@ -1864,7 +1929,8 @@ dawn_array *dawn_args(void) {
    * gets the same list from main's parameter. */
   dawn_array *a = dawn_array_new();
   for (int i = 1; i < dawn_argc; i++) {
-    a = dawn_array_push_own(a, dawn_str_copy(dawn_argv[i], (int64_t)strlen(dawn_argv[i])));
+    a = dawn_array_push_own(a,
+      dawn_str_from_os(dawn_argv[i], (int64_t)strlen(dawn_argv[i])));
   }
   return a;
 }

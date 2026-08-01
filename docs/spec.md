@@ -1644,6 +1644,17 @@ std → 内建，std 模块自己的 `pub fn len` 正是靠这一条合法。
     目录时 `Err`，`kind` 是 `"io.not_a_directory"`——std 自己铸的唯一一个 kind，
     其余都是后端给的
   - `io.is_dir(path) -> Bool` — 不存在或出错都视为 `false`
+  - **读进来的字节不是 UTF-8 时**：操作系统给的字节没有任何东西保证它是 UTF-8，
+    故每个把字节变成 `String` 的读取原语都必须表态。分两类，且**两个后端一致**：
+    - `io.read_file` **失败**（`Err`，即屏障接得住的 fault）。读文本读回来的却不是
+      盘上那段文本，正是这条规则要挡的事；输入本来就不是文本时该用 `io.read_file`
+      的字节孪生 `io.read_bytes`，它一个字节都不看
+    - `io.read_line` / `io.cwd` / `io.getenv` / `io.list_dir` / `io.temp_dir` / `args`
+      **替换**：非法序列换成 U+FFFD，规则逐字沿用 `bytes.decode_utf8`（§11 的
+      「文本编码」，一个非法序列一个 U+FFFD，不是一个字节一个）。文件名不是 UTF-8
+      仍然是个文件名，拒绝它等于让程序连目录都列不了
+    - 由此得一条不变式：**`String` 里没有非良构的 UTF-8**。这不是修辞——`c0 af`
+      原样进了字符串，下游走码点的那些原语会把它当成 `/`（#112 / #113）
 
 实现策略：能薄包 Java 就薄包（`String` 直接是 `java.lang.String`），持久 `List`/`Map`/`Set`
 全部是**纯 Dawn 源**（`List` = `std/pvec` 持久向量，`Map`/`Set` = `std/hamt` 持久 HAMT，
