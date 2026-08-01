@@ -89,7 +89,7 @@ body_file: Option[String],
 
 ```dawn
 fn with_body_file(path, f) = {
-  let out = catch_panic(fn() => f())   # 捕获后返回，不会穿过我们
+  let out = catch_panic(() => f())   # 捕获后返回，不会穿过我们
   delete_file(path)                    # 故这一行必然执行（含 handler panic）
   ...
 }

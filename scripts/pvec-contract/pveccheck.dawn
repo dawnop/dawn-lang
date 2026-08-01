@@ -96,7 +96,7 @@ fn bounds() -> List[String] !io = {
     }
   }
   for i in [0, 1, 63, 99] {
-    match catch_panic(fn() => pvec.nth(v, i)) {
+    match catch_panic(() => pvec.nth(v, i)) {
       Ok(x) -> if x != xs[i] { bad = bad ++ ["nth ${i}: ${x} vs ${xs[i]}"] }
       Err(e) -> { bad = bad ++ ["nth ${i}: panicked in range (${e.message})"] }
     }
@@ -104,13 +104,13 @@ fn bounds() -> List[String] !io = {
   # 130 masks to tail slot 2 (element 98) and 70 on a 64-element vector masks
   # to tail slot 6 (element 38): the two shapes that used to answer quietly.
   for i in [0 - 1, 100, 130, 1000] {
-    match catch_panic(fn() => pvec.nth(v, i)) {
+    match catch_panic(() => pvec.nth(v, i)) {
       Ok(x) -> { bad = bad ++ ["nth ${i}: answered ${x} instead of panicking"] }
       Err(_) -> ()
     }
   }
   let w = build(64)
-  match catch_panic(fn() => pvec.nth(w, 70)) {
+  match catch_panic(() => pvec.nth(w, 70)) {
     Ok(x) -> { bad = bad ++ ["nth 70 of 64: answered ${x} instead of panicking"] }
     Err(_) -> ()
   }
@@ -169,8 +169,8 @@ fn sorting() -> List[String] = {
     xs = xs ++ [(seed % 20, i)]
     i = i + 1
   }
-  let want = sort_by(xs, fn(p, q) => by_first(p, q))
-  let got = pvec.sort_by(to_vec(xs), fn(p, q) => by_first(p, q))
+  let want = sort_by(xs, (p, q) => by_first(p, q))
+  let got = pvec.sort_by(to_vec(xs), (p, q) => by_first(p, q))
   if pvec.count(got) != len(want) {
     return ["sort: count"]
   }

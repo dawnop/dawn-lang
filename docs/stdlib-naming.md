@@ -14,7 +14,7 @@ use std/list.{map, filter}      # 选择性：热名直呼（Gleam 模型）
 
 let m = map.insert(map.empty(), "k", 1)
 let v = map.get(m, "k")
-xs |> filter(fn(x) => x > 0)    # 选择性引入的短名进管道，零摩擦
+xs |> filter(x => x > 0)    # 选择性引入的短名进管道，零摩擦
 ```
 
 - std 收进**真模块**：`std/list`、`std/map`、`std/set`、`std/str`、`std/bytes`、

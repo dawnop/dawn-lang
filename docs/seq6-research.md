@@ -329,6 +329,6 @@ markdown 清洗(给全站搜索建索引)**自己手搓了 `index_of_from`**—�
 已修 `eq_at`(dawnop-site `7c55cc0`)。**物化仍在每次调用里**——彻底修需要把整条
 清洗流水线改成在 `List[Int]` 上跑,属 A1 落地后的自然产物,没有单独去动。
 
-> 注意 `eq_at` 那个 `fold(range(0, len(ncps)), true, fn(acc, k) => acc && ...)`:
+> 注意 `eq_at` 那个 `fold(range(0, len(ncps)), true, (acc, k) => acc && ...)`:
 > `&&` 短路的是**表达式**,不是 fold 的**迭代**——首字符不匹配仍会把整个 needle 比完。
 > 这是个容易重犯的写法。

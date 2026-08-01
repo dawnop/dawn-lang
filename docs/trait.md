@@ -201,7 +201,7 @@ impl Ord[Version] {
 
 type Task = { name: String, priority: Int } derive Show, Ord   # derive = 字段字典序
 
-fn newest(vs: List[Version]) -> Option[Version] = max_by(vs, fn(v) => v)   # 约束转发
+fn newest(vs: List[Version]) -> Option[Version] = max_by(vs, v => v)   # 约束转发
 
 pub fn main() -> Unit !io = {
   let vs = [Version{major:1,minor:2,patch:0}, Version{major:1,minor:10,patch:3}]
@@ -248,7 +248,7 @@ pub fn main() -> Unit !io = {
   排序，这是有意的。用户 trait 以标量为主体的 impl 必须写在该 trait 的模块。
 - **字典即隐藏局部**：受约束函数的每个（类型参数 × 约束）生成一个合成 Symbol
   （`dictOf` 标记、类型记作该 tvar、擦除后一槽），lambda 捕获走既有机制——
-  `fold(xs, first, fn(acc, x) => ...acc < x...)` 里字典随捕获进闭包，零特判。
+  `fold(xs, first, (acc, x) => ...acc < x...)` 里字典随捕获进闭包，零特判。
 - **去虚化**：具体见证点直接 `invokestatic` 到 impl 静态方法；prelude 标量的
   `cmp` 内联为 `LCMP`/`DCMPL`/`String.compareTo`。仅 Forward（约束转发）走
   `invokeinterface`。

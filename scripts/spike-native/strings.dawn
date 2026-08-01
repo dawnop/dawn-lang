@@ -16,8 +16,8 @@
 # differential when the rendering became std/fmt.dtoa (audit RP-01).
 #
 # `use std/raw` is where the primitives std does something to come from:
-# `bytes_at`'s -1, `bytes_decode`'s `None` and `io_read_file`'s raise are what
-# the two backends have to agree on, and std turns each into something else.
+# `bytes_at`'s -1 and `io_read_file`'s raise are what the two backends have to
+# agree on, and std turns each into something else.
 use std/io
 use std/bytes
 use std/cursor
@@ -165,24 +165,15 @@ pub fn main() -> Unit !io = {
   io.println("bytes_len          = " ++ to_string(bytes.len(b)))
   io.println("bytes_at 0         = " ++ to_string(raw.byte_at(b, 0)))
   io.println("bytes_at oob       = " ++ to_string(raw.byte_at(b, 99)))
-  io.println("decode round trip  = " ++
-      match raw.decode(b, "UTF-8") {
-        Some(s) -> s
-        None -> "none"
-      })
-  io.println("decode bad charset = " ++
-      match raw.decode(b, "NoSuchCharset") {
-        Some(_) -> "some"
-        None -> "none"
-      })
   # The two named decoders (audit RP-04): the charset is in the function name,
-  # so there is no unknown-charset failure mode to exercise.
+  # so there is no unknown-charset failure mode left to exercise -- the
+  # charset-taking decoder that had one is gone.
   io.println("decode_utf8        = " ++ bytes.decode_utf8(b))
   io.println("decode_latin1 len  = " ++ to_string(str.len(bytes.decode_latin1(b))))
 
   io.println("-- the barrier --")
   # catch_fault catches an exception on the JVM and a panic natively; both make
   # this an Err, which is the part that has to agree.
-  io.println("try missing file   = " ++ ok_or_err(catch_fault(fn() => raw.read_file("no-such-file"))))
-  io.println("try ok             = " ++ ok_or_err(catch_fault(fn() => str.to_upper("fine"))))
+  io.println("try missing file   = " ++ ok_or_err(catch_fault(() => raw.read_file("no-such-file"))))
+  io.println("try ok             = " ++ ok_or_err(catch_fault(() => str.to_upper("fine"))))
 }

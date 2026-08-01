@@ -52,7 +52,7 @@ pub fn as_http_with[T](r: Result[T, String], f: fn(String) -> HttpError) -> ...
 # the temp body file lives exactly as long as the handler call. Dawn has no
 # try/finally, so catch_panic plays that role (same idiom as with_tx): it
 # returns rather than unwinding, so the delete below always runs.
-let served = catch_panic(fn() => app(req))
+let served = catch_panic(() => app(req))
 match req.body_file { Some(p) -> delete_quietly(p); None -> () }
 ```
 

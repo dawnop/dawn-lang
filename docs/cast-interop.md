@@ -60,7 +60,7 @@ let b: Bytes = cast(opt.get()!)           # as_bytes 的位置
   这**完全可发**。`as_bytes` 能 work 正因 `Bytes` 具体；`cast` 对**任何被期望类型定死的具体 T** 一样。
 
 Dawn 已有**同构先例**：`map_empty`、`set_empty`、`java_try`、`catch_panic` 都靠期望类型解析结果类型
-（**实际用法从不写显式 `[T]`**：`let m: Map[String, Int] = map_empty()`、`java_try(fn() => 1)`）。
+（**实际用法从不写显式 `[T]`**：`let m: Map[String, Int] = map_empty()`、`java_try(() => 1)`）。
 `cast` 同款，只多一步——codegen 用解析后的 T 发 CHECKCAST，而**这个 T 已现成落在 Call 节点的
 `Expr.type` 上**（checker 填，`ast/Ast.kt:222`）。
 

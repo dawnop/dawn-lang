@@ -78,11 +78,10 @@ derive 出来的 impl、列表模式、解构 let、`use java`。
 
 ## `stdext/raw.dawn`:语料怎么拿到 std 包起来的那层原语
 
-`io_*` / `bytes_at` / `bytes_decode` 是 **std-only** 的(`selfhost/src/types.dawn` 的 `internal`
+`io_*` / `bytes_at` / 两个解码原语是 **std-only** 的(`selfhost/src/types.dawn` 的 `internal`
 集,见 `docs/audit/re-audit-2026-07-30.md` RD-02):io 原语失败时抛的是**fault**,`std/io` 才是
-把它变成 `Result` 的地方;`bytes_at` 越界回 `-1`、`bytes_decode` 未知字符集回 `None`,把这两个
-哨兵变成 panic 正是 `bytes.at`/`bytes.decode` 的全部内容。用户代码若能直呼原语,这三层就都是
-建议而非边界。
+把它变成 `Result` 的地方;`bytes_at` 越界回 `-1`,把这个哨兵变成 panic 正是 `bytes.at` 的全部
+内容。用户代码若能直呼原语,这两层就都是建议而非边界。
 
 而这份语料恰是**唯一想要原语本身**的调用者——两个后端必须在原语上一致,`catch_kinds.dawn` 问的
 就是「哪个屏障接住 fault」,而 native 拒绝 `use java` 之后,程序再没有别的办法引发一个 fault。

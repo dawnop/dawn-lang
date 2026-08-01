@@ -1789,7 +1789,7 @@ test "type shells and fields build recursive types" {
 }
 
 test "duplicate constructors and prelude clashes are caught" {
-  let mk = fn(name: String) => DType(TypeDeclR {
+  let mk = (name: String) => DType(TypeDeclR {
     is_pub: false,
     is_opaque: false,
     name: name,
@@ -2003,7 +2003,7 @@ pub fn pass_register_traits(cx: Cx, m: Module) -> Cx !io = {
       let sig = Sig {
         name: me.name,
         param_tys: ptys,
-        param_names: map(me.params, fn(p) => p.name),
+        param_names: map(me.params, p => p.name),
         ret: ret,
         eff: eff,
         is_builtin: false,
@@ -2398,10 +2398,10 @@ pub fn pass_register_impls(
       }
       let inst2 = inst
       let adts2 = cx1.adts
-      let want = map(msv.sig.param_tys, fn(t) => subst(t, inst2, em0))
+      let want = map(msv.sig.param_tys, t => subst(t, inst2, em0))
       let want_ret = subst(msv.sig.ret, inst2, em0)
       let want_render = "fn " ++ me.name ++ "(" ++
-        join(map(want, fn(t) => ty_show(adts2, t)), ", ") ++ ") -> " ++
+        join(map(want, t => ty_show(adts2, t)), ", ") ++ ") -> " ++
         ty_show(cx1.adts, want_ret) ++ eff_suffix(msv.sig.eff)
       if ptys != want || ret != want_ret {
         cx1 = cerr_h(cx1, "`" ++ me.name ++ "` does not match the trait's signature",
@@ -2415,7 +2415,7 @@ pub fn pass_register_impls(
       msigs = msigs ++ [Some(Sig {
         name: me.name,
         param_tys: ptys,
-        param_names: map(me.params, fn(p) => p.name),
+        param_names: map(me.params, p => p.name),
         ret: ret,
         eff: eff,
         is_builtin: false,
@@ -2712,7 +2712,7 @@ pub fn pass_fn_signatures(cx: Cx, m: Module) -> (Cx, List[Sig], List[Map[String,
     let sig = Sig {
       name: d.name,
       param_tys: ptys,
-      param_names: map(d.params, fn(p) => p.name),
+      param_names: map(d.params, p => p.name),
       ret: ret,
       eff: final_eff,
       is_builtin: false,
@@ -2746,9 +2746,9 @@ pub fn pass_fn_signatures(cx: Cx, m: Module) -> (Cx, List[Sig], List[Map[String,
 
 test "Eq and Hash resolve as bounds like any other trait" {
   let cx = seed_prelude(test_cx())
-  let tp = fn(names: List[String]) => [TypeParamDecl {
+  let tp = (names: List[String]) => [TypeParamDecl {
     name: "T",
-    bounds: map(names, fn(n) => Bound { name: n, lo: 0, hi: 1 }),
+    bounds: map(names, n => Bound { name: n, lo: 0, hi: 1 }),
     lo: 0,
     hi: 1
   }]
@@ -3071,7 +3071,7 @@ pub fn check_binary_typed(
   lo: Int,
   hi: Int
 ) -> (Cx, Ty, TExpr) = {
-  let node = fn(ord: Option[WitRef], t: Ty) => XBinary(tbin_of(op), left, right, ord, olo, ohi, lo, hi, t)
+  let node = (ord: Option[WitRef], t: Ty) => XBinary(tbin_of(op), left, right, ord, olo, ohi, lo, hi, t)
   # one side already failed: pick a plausible result type, stay silent
   if is_errorish(lt) || is_errorish(rt) {
     let t = match op {
@@ -3402,7 +3402,7 @@ pub fn check_loop_jump(cx: Cx, kw: String, lo: Int, hi: Int) -> (Cx, Bool) = {
 pub fn check_propagate_typed(cx: Cx, ot: Ty, operand: TExpr, lo: Int, hi: Int) -> (Cx, Ty, TExpr) = {
   if is_errorish(ot) { return (cx, TyError, XError(lo, hi)) }
   # the node closes over the result type once it is known
-  let node = fn(t: Ty) => XPropagate(operand, lo, hi, t)
+  let node = (t: Ty) => XPropagate(operand, lo, hi, t)
   # inside a lambda, ? returns from the lambda — its return type must be known
   var sig_ret = TyError
   if len(cx.lambda_stack) > 0 {
@@ -4746,7 +4746,7 @@ pub fn check_fn_value(
       None -> "`" ++ name ++ "` has trait bounds and cannot be used as a value"
     }
     return (cerr_h(cx, msg, lo, hi,
-      "wrap it in a lambda: fn(" ++ ps ++ ") => " ++ name ++ "(" ++ ps ++ ")"),
+      "wrap it in a lambda: (" ++ ps ++ ") => " ++ name ++ "(" ++ ps ++ ")"),
       TyError, XError(lo, hi))
   }
   let declared = TyFn(f.param_tys, f.ret, f.eff)
@@ -4754,7 +4754,7 @@ pub fn check_fn_value(
     EffVar(_, _) -> true
     _ -> false
   }
-  let node = fn(t: Ty) => XFnValue(f.owner, name, f.is_builtin, t, lo, hi)
+  let node = (t: Ty) => XFnValue(f.owner, name, f.is_builtin, t, lo, hi)
   if len(f.tparams) == 0 && not eff_is_var {
     return (cx, declared, node(declared))
   }
@@ -4767,7 +4767,7 @@ pub fn check_fn_value(
     None ->
       return (cerr_h(cx, "cannot infer the type parameter(s) of `" ++ name ++
           "` used as a value here", lo, hi,
-        "wrap it in a lambda with annotated parameters: fn(x: Int) => " ++ name ++ "(x)"),
+        "wrap it in a lambda with annotated parameters: (x: Int) => " ++ name ++ "(x)"),
         TyError, XError(lo, hi))
     Some(v) -> v
   }
@@ -4854,7 +4854,7 @@ pub fn check_ctor_value(
   var params: List[Ty] = []
   for f in ci.fields { params = params ++ [f.ty] }
   let ret = adt_self_ty(a)
-  let node = fn(t: Ty) => XCtorValue(aid, cslot, lo, hi, t)
+  let node = (t: Ty) => XCtorValue(aid, cslot, lo, hi, t)
   if len(eps) != len(params) {
     return (cerr_h(cx, "`" ++ ci.name ++ "` takes " ++ to_string(len(params)) ++
         " field(s), but " ++ ty_show(cx.adts, TyFn(eps, eret, eeff)) ++ " is expected", lo, hi,
@@ -5876,7 +5876,7 @@ fn check_lambda(
     }
     if not have {
       cx1 = cerr_h(cx1, "cannot infer the type of `" ++ p.name ++ "`", p.lo, p.hi,
-        "annotate it: fn(" ++ p.name ++ ": Int) => ...")
+        "annotate it: (" ++ p.name ++ ": Int) => ...")
       t = TyError
     }
     ptys = ptys ++ [t]
@@ -8577,7 +8577,7 @@ test "ufcs rewrites x.f(a) into f(x, a) with the receiver pre-typed" {
 ## bindDicts): typed as the tvar itself, marked with (trait, tvar).
 fn bind_dicts(cx: Cx, s: Sig, nlo: Int, nhi: Int) -> Cx = {
   let empty_d: Map[(Int, Int), Int] = map.empty()
-  if not list.any(s.constraints, fn(bs) => len(bs) > 0) {
+  if not list.any(s.constraints, bs => len(bs) > 0) {
     return Cx { ..cx, dict_syms: empty_d }
   }
   var cx1 = Cx { ..cx, dict_syms: empty_d }
@@ -9572,7 +9572,7 @@ test "a jump out of a `with` region names the sugar, not a lambda" {
     "fn go(xs: List[Int]) -> Int = {\n" ++
     "  with x <- hold(1)\n" ++
     "  for i in xs {\n" ++
-    "    let f = fn(k: Int) => { break }\n" ++
+    "    let f = (k: Int) => { break }\n" ++
     "    ()\n" ++
     "  }\n" ++
     "  x\n" ++

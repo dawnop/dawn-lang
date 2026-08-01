@@ -134,8 +134,8 @@ typedef struct {
 dawn_adt *dawn_adt_new(int32_t tag, int32_t nfields, uint64_t mask);
 dawn_adt *dawn_adt_new_wide(int32_t tag, int32_t nfields, const uint64_t *mask);
 
-/* The prelude ADTs the runtime itself has to build: `parse_int` and
- * `bytes_decode` return an Option, `catch_fault` a Result. A constructor's tag is
+/* The prelude ADTs the runtime itself has to build: `parse_float` and
+ * `io_getenv` return an Option, `catch_fault` a Result. A constructor's tag is
  * its index in the declaration order, and these four numbers are the one place
  * that order is written down outside the compiler -- emitc's test "the C
  * runtime's constructor tags are the prelude's" is the joint that keeps them
@@ -537,12 +537,10 @@ dawn_bytes *dawn_bytes_slice(const dawn_bytes *b, int64_t from, int64_t to);
 /* The one way to make bytes that did not come from text. Elements are boxed
  * (the array is erased) and truncated to a byte. */
 dawn_bytes *dawn_bytes_from_array(const dawn_array *a);
-/* Option[String]; None only for a charset this runtime cannot decode, which
- * is what the JVM's UnsupportedEncodingException arm means. Malformed input
- * is replaced rather than refused, as `new String(bytes, charset)` does. */
-dawn_adt *dawn_bytes_decode(const dawn_bytes *b, dawn_str *charset);
-/* The same two decodings without the charset, and so without the Option: the
- * function name is the domain, and both charsets read every byte string. */
+/* The two decodings the language promises, one function each rather than one
+ * taking a charset name: the function name is the domain, both charsets read
+ * every byte string, and so neither answers an Option. Malformed UTF-8 is
+ * replaced rather than refused, as `new String(bytes, charset)` does. */
 dawn_str *dawn_bytes_decode_utf8(const dawn_bytes *b);
 dawn_str *dawn_bytes_decode_latin1(const dawn_bytes *b);
 dawn_str *dawn_str_of_int(int64_t v);

@@ -94,7 +94,7 @@ cmp(nan, nan)          0
 
 **实测影响面:全仓 1 处** —— `examples/traits.dawn:71` 的 `assert cmp(1.5, 1.5) == 0`。
 没有 `sort` 落在 Float 列表上;唯一的 `derive Ord`(`examples/traits.dawn:10` 的 `Card`)
-字段是 `Int`/`String`。要给 Float 排序的人改写 `sort_by(xs, fn(a, b) => …)`,把语义显式选出来。
+字段是 `Int`/`String`。要给 Float 排序的人改写 `sort_by(xs, (a, b) => …)`,把语义显式选出来。
 
 **还留着一处不对称,没裁**:`Eq[Float]` 仍在,而它**不自反**(`nan == nan` 为 false)——
 S1 步 2 正是拿「不自反」挡掉函数值的。Rust 靠拆 `PartialEq`/`Eq` 安置这件事,Dawn 只有

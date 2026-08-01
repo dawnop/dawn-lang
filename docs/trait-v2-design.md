@@ -88,7 +88,7 @@ std 里真写 `impl[T: Eq] Eq[List[T]]`,编译器里对应的合成机器删掉�
 - `derive Ord` 直接报错(`checker.dawn:1968`),hint 自己写着「**v1** Ord subjects are
   non-generic」——v2 正是解它的地方。
 - `derive Show` 在声明处放行(`is_showable_field` 对 `TyVar` 返回 `true`),**到用处才报**。
-  实测 `type Box[T] = { v: T } derive Show` 编得过,`to_string(Box { v: fn(x: Int) => x + 1 })`
+  实测 `type Box[T] = { v: T } derive Show` 编得过,`to_string(Box { v: (x: Int) => x + 1 })`
   才报「cannot print a value of type `Box[fn(Int) -> Int]`」。不是漏洞,但报错点离声明远。
 
 解禁之后两者都变成声明处生成 `impl[T: Ord] Ord[Box[T]]` / `impl[T: Show] Show[Box[T]]`,

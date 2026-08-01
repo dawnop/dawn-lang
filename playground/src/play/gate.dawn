@@ -35,16 +35,16 @@ test "with_gate releases the permit even when body panics" {
   # with_gate re-raises the body's panic after releasing; catch it so the test
   # survives, then prove the single permit came back by acquiring it again.
   # body is Never (panic), so T can't be inferred from it — pin it via the annotation
-  let first: Result[Option[Int], ForeignError] = catch_panic(fn() => with_gate(gate, 0, fn() => panic("boom")))
+  let first: Result[Option[Int], ForeignError] = catch_panic(() => with_gate(gate, 0, () => panic("boom")))
   assert match first { Ok(_) -> false, Err(_) -> true }
-  let second: Result[Option[Int], ForeignError] = catch_panic(fn() => with_gate(gate, 0, fn() => panic("boom")))
+  let second: Result[Option[Int], ForeignError] = catch_panic(() => with_gate(gate, 0, () => panic("boom")))
   assert match second { Ok(_) -> false, Err(_) -> true }
   # permit returned each time: a fresh non-panicking body still gets in
-  assert match with_gate(gate, 0, fn() => 42) { Some(v) -> v == 42, None -> false }
+  assert match with_gate(gate, 0, () => 42) { Some(v) -> v == 42, None -> false }
 }
 
 test "with_gate returns None when no permit is available" {
   let gate = new_gate(1)
   assert try_enter(gate, 0)
-  assert match with_gate(gate, 0, fn() => 1) { Some(_) -> false, None -> true }
+  assert match with_gate(gate, 0, () => 1) { Some(_) -> false, None -> true }
 }

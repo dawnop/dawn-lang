@@ -108,9 +108,13 @@ unary_expr      = [ "not" | "-" | "~" ] postfix_expr ;
 postfix_expr    = primary_expr { postfix } ;
 postfix         = "?"                                        (* Result/Option 传播 *)
                 | "!"                                        (* Option 解包, None panic *)
-                | "." IDENT [ call_args ]                    (* 字段/方法 *)
+                | "." IDENT [ call_args | trailing_lambda ] (* 字段/方法 *)
                 | "[" expr "]"                               (* List/Map 下标 *)
-                | call_args ;                                (* 应用: 须与 callee 同行 *)
+                | call_args                                  (* 应用: 须与 callee 同行 *)
+                | trailing_lambda ;                          (* 尾闭包: 同上, 见 spec 4.3 *)
+trailing_lambda = "fn" "(" [ lambda_params ] ")" "=>" expr ;
+                  (* 作为最后一个实参附加。"fn" 在 lambda 上仅存的用途:
+                     这里的裸 "(x) =>" 会先被读成柯里化调用 f(a)(x)。 *)
 call_args       = "(" [ arg { "," arg } [ "," ] ] ")" ;
 arg             = [ IDENT ":" ] expr ;                       (* 可按名传参 *)
                   (* 名字在每个调用位置都合法; 只有构造器接受, 由 checker 判 *)
@@ -129,10 +133,11 @@ paren_or_tuple  = "(" expr { "," expr } ")" ;
 ctor_expr       = TYPEIDENT ;                                (* 带实参的构造 = ctor_expr + call_args *)
 record_expr     = TYPEIDENT "{" [ ".." expr "," ] rec_field { "," rec_field } [ "," ] "}" ;
 rec_field       = IDENT [ ":" expr ] ;                       (* 同名简写 { x } *)
-lambda          = [ "fn" ] "(" [ lambda_params ] ")" "=>" expr
+lambda          = "(" [ lambda_params ] ")" "=>" expr
                 | IDENT "=>" expr ;                          (* 单参数, 括号可省 *)
-                  (* 无 "fn" 的括号形只在 primary 位: 表达式之后的 "(" 是应用,
-                     故尾闭包位 (spec 4.5) 必须写 "fn" -- 否则与 f(a)(x) 撞。
+                  (* "fn" 前缀已退休 (2026-08-01): lambda 只在 primary 位,
+                     且只有这两种写法; 表达式之后的 "(" 是应用, 故尾闭包位
+                     (trailing_lambda 下) 仍写 "fn" -- 否则与 f(a)(x) 撞。
                      "(" 开头时先扫到配对的 ")" 看下一个记号是不是 "=>":
                      "(a: Int)" 是合法参数表而不是合法表达式, 覆盖文法不成立。 *)
 lambda_params   = lambda_param { "," lambda_param } ;

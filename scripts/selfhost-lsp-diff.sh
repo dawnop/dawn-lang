@@ -56,7 +56,7 @@ fn compute(n: Int) -> Int = {
   let p = Point { x: n, y: helper(n) }
   let t = str.trim("  hi  ")
   let xs = [1, 2, 3]
-  let total = fold(xs, 0, fn(acc, x) => acc + x)
+  let total = fold(xs, 0, (acc, x) => acc + x)
   # a comment line
   let msg = "sum ${total} of ${p.x}"
   match s {

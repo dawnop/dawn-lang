@@ -33,7 +33,7 @@ use java "java.net.http.HttpResponse.BodyHandlers"
 ## response is already committed, or was never sent). Called after pumping a
 ## streaming body so the client connection frees.
 fn close_stream(s: InputStream) -> Unit !io = {
-  let _ = catch_fault(fn() => s.close())
+  let _ = catch_fault(() => s.close())
   ()
 }
 
@@ -103,7 +103,7 @@ fn write_response(ex: HttpExchange, r: Response) -> Unit !io = {
     # the response is already committed, there is nothing left to say. Close
     # failure is non-fatal too (close_stream swallows it).
     Some(s) -> {
-      let _ = catch_panic(fn() => {
+      let _ = catch_panic(() => {
         with up <- bracket(s, close_stream)
         up.transferTo(out)
       })
@@ -168,7 +168,7 @@ fn collect_headers(headers: Headers, it: Iterator, acc: Map[String, String]) -> 
 # alternative was a hand-written UTF-8 decoder, and the repo already has one of
 # those to answer for (see the LSP); a second is not the fix.
 fn pct_decode(s: String) -> String !io =
-  match catch_fault(fn() => URLDecoder.decode(s, "UTF-8")!) {
+  match catch_fault(() => URLDecoder.decode(s, "UTF-8")!) {
     Ok(v) -> v
     Err(_) -> s
   }
@@ -177,7 +177,7 @@ fn pct_decode(s: String) -> String !io =
 # A value may itself contain '=', so only the first one splits — and since the
 # split happens first, an encoded '=' in a value stays part of that value.
 pub fn parse_query(q: String) -> List[(String, String)] !io =
-  map(filter(str.split(q, "&"), fn(pair) => pair != ""), fn(pair) => {
+  map(filter(str.split(q, "&"), pair => pair != ""), pair => {
     let parts = str.split(pair, "=")
     (pct_decode(parts[0]), pct_decode(join(tail(parts), "=")))
   })
@@ -189,10 +189,10 @@ pub fn parse_query(q: String) -> List[(String, String)] !io =
 pub fn parse_form(body: String) -> Map[String, String] !io = map.from(parse_query(body))
 
 fn tail(xs: List[String]) -> List[String] =
-  map(range(1, len(xs)), fn(i) => xs[i])
+  map(range(1, len(xs)), i => xs[i])
 
 fn rev[T](xs: List[T]) -> List[T] =
-  map(range(0, len(xs)), fn(i) => xs[len(xs) - 1 - i])
+  map(range(0, len(xs)), i => xs[len(xs) - 1 - i])
 
 fn build_request(ex: HttpExchange, meta: Option[RouteMeta], max_body: Int) -> Result[Request, HttpError] !io = {
   let uri = ex.getRequestURI()!
@@ -240,7 +240,7 @@ fn spill_body(ex: HttpExchange) -> String !io = {
 fn close_spill(o: FileOutputStream) -> Unit !io = o.close()
 
 fn delete_quietly(path: String) -> Unit !io = {
-  let r: Result[Bool, ForeignError] = catch_fault(fn() => File.new(path).delete())
+  let r: Result[Bool, ForeignError] = catch_fault(() => File.new(path).delete())
   match r {
     Ok(_) -> ()
     Err(m) -> println("temp body file not deleted: ${m.message}")
@@ -258,7 +258,7 @@ fn drop_body_file(req: Request) -> Unit !io =
 
 fn meta_has_tag(meta: Option[RouteMeta], tag: String) -> Bool =
   match meta {
-    Some(m) -> list.find(m.tags, fn(t) => t == tag) != None
+    Some(m) -> list.find(m.tags, t => t == tag) != None
     None -> false
   }
 
@@ -286,7 +286,7 @@ fn meta_of(d: Dispatch) -> Option[RouteMeta] =
 fn handle(routes: List[Route], middleware: List[Middleware], max_body: Int, ex: HttpExchange) -> Unit !io = {
   # a handler panic is isolated to this request: catch_panic turns it into a 500
   # instead of resetting the connection or leaking the virtual thread (spec §9.8).
-  let outcome = catch_panic(fn() => {
+  let outcome = catch_panic(() => {
     # Dispatch BEFORE touching the body: method and path come from the request
     # line, and the matched route's tags decide how the body is read at all
     # ("stream-body" spills it to disk instead of into memory). The same decision
@@ -304,13 +304,13 @@ fn handle(routes: List[Route], middleware: List[Middleware], max_body: Int, ex: 
       Ok(req) -> {
         # first middleware in the list is outermost: [a, b] runs a(b(core)). Middleware
         # still wraps the core, so CORS preflight and logging cover unmatched requests.
-        let app = fold(rev(middleware), fn(rq: Request) => run_dispatch(d, rq), fn(h, m) => m(h))
+        let app = fold(rev(middleware), (rq: Request) => run_dispatch(d, rq), (h, m) => m(h))
         # the temp body file lives exactly as long as the handler call, and the
         # bracket is what makes that true on every way out — including the ones
         # the catch_panic below does not see, such as a panic while rendering
         # the 500 for a panic.
         with held <- bracket(req, drop_body_file)
-        let served = catch_panic(fn() => app(held))
+        let served = catch_panic(() => app(held))
         match served {
           Ok(Ok(r)) -> r
           Ok(Err(e)) -> error_response(e)
@@ -355,7 +355,7 @@ pub fn serve_app_bounded(port: Int, max_body: Int, routes: List[Route], middlewa
   }
   let addr = InetSocketAddress.new("127.0.0.1", port)
   let server = HttpServer.create(addr, 0)!
-  server.createContext("/", fn(ex) => handle(routes, middleware, max_body, ex))
+  server.createContext("/", ex => handle(routes, middleware, max_body, ex))
   server.setExecutor(Executors.newVirtualThreadPerTaskExecutor()!)
   server.start()
   println("listening on http://127.0.0.1:$port")
@@ -430,10 +430,10 @@ test "write_response pumps an upstream stream to the client byte-exact (>8KB, mu
   # The full realistic path: upstream HTTP -> ofInputStream + cast -> streaming() ->
   # write_response's stream branch -> transferTo pumps the InputStream to the socket
   # -> close. 12000 bytes forces transferTo's 8KB buffer across more than one chunk.
-  let payload = bytes.utf8(join(map(range(0, 1200), fn(i) => "0123456789"), ""))
+  let payload = bytes.utf8(join(map(range(0, 1200), i => "0123456789"), ""))
   # upstream: serves the payload
   let up = HttpServer.create(InetSocketAddress.new("127.0.0.1", 0), 0)!
-  up.createContext("/", fn(ex) => {
+  up.createContext("/", ex => {
     ex.sendResponseHeaders(200, bytes.len(payload))
     let os = ex.getResponseBody()!
     os.write(payload)
@@ -443,7 +443,7 @@ test "write_response pumps an upstream stream to the client byte-exact (>8KB, mu
   let upurl = "http://127.0.0.1:${up.getAddress()!.getPort()}/"
   # download: proxies upstream as a live stream through write_response's stream branch
   let dn = HttpServer.create(InetSocketAddress.new("127.0.0.1", 0), 0)!
-  dn.createContext("/", fn(ex) => {
+  dn.createContext("/", ex => {
     let (st, stream) = test_fetch_stream(upurl)
     write_response(ex, streaming(st, "application/octet-stream", stream))
   })

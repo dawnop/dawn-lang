@@ -101,7 +101,7 @@ pub fn rt_class_family(outer: String) -> List[(String, Bytes)] !io = {
     }
     var out2: List[(String, Bytes)] = []
     for f in sort(names2) {
-      let bs = match catch_fault(fn() =>
+      let bs = match catch_fault(() =>
           Files.readAllBytes(Paths.get(dir ++ "/" ++ f).expect("path")).expect("bytes")) {
         Ok(b) -> b
         Err(e) -> panic("cannot read " ++ f ++ ": " ++ e.message)
@@ -223,7 +223,7 @@ pub fn classpath_package(prefix: String) -> List[(String, Bytes)] !io = {
   # splitting on ':' would cut every entry at its drive letter.
   for entry in str.split(cp, File.pathSeparator!) {
     if str.ends_with(entry, ".jar") {
-      match catch_fault(fn() => JarFile.new(entry)) {
+      match catch_fault(() => JarFile.new(entry)) {
         Ok(jf) -> {
           for pair in jar_classes(jf, prefix, names) {
             let (cls, _) = pair
@@ -236,7 +236,7 @@ pub fn classpath_package(prefix: String) -> List[(String, Bytes)] !io = {
     } else if io.is_dir(entry ++ "/" ++ prefix) {
       for cls in dir_classes_under(entry, prefix) {
         if not has_name(names, cls) {
-          let bs = match catch_fault(fn() =>
+          let bs = match catch_fault(() =>
               Files.readAllBytes(Paths.get(entry ++ "/" ++ cls ++ ".class").expect("path")).expect("bytes")) {
             Ok(b) -> b
             Err(e) -> panic("cannot read " ++ cls ++ ": " ++ e.message)

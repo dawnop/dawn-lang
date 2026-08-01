@@ -106,7 +106,7 @@ trap 'rm -rf "$work"' EXIT
 "$root/bin/dawn" --version > /dev/null
 
 # std, plus stdext/raw.dawn -- the backend primitives std wraps, under names a
-# corpus program may write. `io_*`, `bytes_at` and `bytes_decode` are std-only
+# corpus program may write. `io_*`, `bytes_at` and the decoders are std-only
 # (types.dawn's `internal` set), and this corpus is the one caller that wants
 # the primitive rather than the wrapper: `catch_kinds` asks which barrier takes
 # a *fault*, and with `use java` refused on native nothing else can raise one.

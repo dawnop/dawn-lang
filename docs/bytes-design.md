@@ -82,7 +82,7 @@ Dawn 的 `x.f(a)` 是 **UFCS 糖**（`Ast.kt:257`：desugar 成 `f(x,a)`）。�
 | `Show`（`derive Show` 里含 Bytes） | ✅ | 渲染为摘要 `<N bytes>`，保住 `Request`/`Response` 的 derive Show |
 | Java `byte[]` 返回 → `Bytes`、`Bytes` → Java `byte[]` 参 | ✅ | 互操作桥 |
 | comptime 折叠（const 里用 Bytes） | ❌ | 需 `CValue.VBytes`；后端无此需求，触碰即报「not available at comptime」（同今日 byte 内建） |
-| 作 bare 一等函数值（`map(xs, utf8)`） | ❌ | 用 lambda（`fn(x)=>utf8(x)`）；同今日 byte 内建无 value-handle |
+| 作 bare 一等函数值（`map(xs, utf8)`） | ❌ | 用 lambda（`x=>utf8(x)`）；同今日 byte 内建无 value-handle |
 | 作 Map/Set 键 | ⚠️ | 引用同一性，文档劝退（见决策 A） |
 | 索引糖 `b[i]` | ❌ | 用 `byte_at(b,i)`；`checkIndex` 不动 |
 | 通用 `encode(s,charset)->Bytes` | ❌ | 后端只需 utf8；YAGNI，日后可加 |
