@@ -1,4 +1,16 @@
-# std/fspath — text operations on POSIX paths.
+# fspath — text operations on POSIX paths.
+#
+# A package and not a std module (audit RD-09): nothing in the language is
+# defined in terms of a path, no lowering reaches here, and a std module is
+# carried by every program whether it wants one or not. It was in std because
+# the compiler needed two of these functions the day the module was written --
+# a reason to write it, not a reason to bundle it.
+#
+# > **Two copies exist, deliberately.** `selfhost/src/fspath.dawn` holds the
+# > four functions the compiler itself uses, because the compiler cannot take a
+# > package dependency -- it is what resolves them. That copy is a subset and
+# > not a fork: this file is the user-facing one, and a change here belongs in
+# > both. See RD-09 in docs/audit/re-audit-2026-07-30.md.
 #
 # Named `fspath` and not `path` because Dawn puts an imported module's alias in
 # the same namespace as local names, and `path` is one of the most common local
@@ -13,8 +25,8 @@
 #
 # The separator is `/`. That is not an oversight: the C runtime already spells
 # `/` in its mkdirs and temp-directory primitives, so the language's own
-# filesystem contract is POSIX-shaped, and a std that pretended otherwise would
-# be pretending on one backend only.
+# filesystem contract is POSIX-shaped, and a library that pretended otherwise
+# would be pretending on one backend only.
 
 use std/str
 use std/list
@@ -66,7 +78,12 @@ fn segments(xs: List[String]) -> String = {
 ## `p` resolved against `base` when it is relative, then normalized. `base` is
 ## the working directory at the call site -- passed in rather than read here,
 ## because reading it is an effect and normalizing is not.
-pub fn absolute(base: String, p: String) -> String =
+##
+## Subject first, like every other function in this module. It used to read
+## `absolute(base, p)`, which put the one path it does not always look at in
+## front of the one it always does, and was the module's only disagreement with
+## itself (audit RD-09).
+pub fn absolute(p: String, base: String) -> String =
   if is_absolute(p) { normalize(p) } else { normalize(base ++ "/" ++ p) }
 
 ## Everything above `p`, or `None` when `p` is a bare name or the root itself.
@@ -150,4 +167,37 @@ pub fn with_extension(p: String, ext: String) -> String = {
     None -> n
   }
   if ext == "" { stem } else { stem ++ "." ++ ext }
+}
+
+test "absolute takes the subject first" {
+  # The order flipped in the batch that moved this module out of std (audit
+  # RD-09), and it is the one change here a caller cannot see the compiler
+  # catch: both parameters are `String`.
+  assert absolute("a/b", "/work") == "/work/a/b"
+  assert absolute("/etc/x", "/work") == "/etc/x"
+  assert absolute("../a", "/work/sub") == "/work/a"
+}
+
+test "the four convenience functions" {
+  assert join("a/b", "c.dawn") == "a/b/c.dawn"
+  assert join("a/b", "/etc/x") == "/etc/x"
+  assert join("", "c.dawn") == "c.dawn"
+  assert basename("/a/b/c.dawn") == "c.dawn"
+  assert basename("a/b/") == "b"
+  assert basename("/") == ""
+  assert extension("/a/b/c.dawn") == Some("dawn")
+  assert extension("/a/b/.gitignore") == None
+  assert extension("/a.b/c") == None
+  assert with_extension("src/main.dawn", "class") == "src/main.class"
+  assert with_extension("src/main.dawn", "") == "src/main"
+}
+
+test "normalize and parent" {
+  assert normalize("a/./b//c/") == "a/b/c"
+  assert normalize("/a/../../b") == "/b"
+  assert normalize("../a") == "../a"
+  assert parent("/a/b/c") == Some("/a/b")
+  assert parent("/a") == Some("/")
+  assert parent("a") == None
+  assert parent("/") == None
 }

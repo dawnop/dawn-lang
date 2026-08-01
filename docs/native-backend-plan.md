@@ -823,7 +823,7 @@ peel opaque。
 
 ### 13.1 顺序是被实测定死的
 
-`__emitc` 原本只 lower **程序自己的**模块。S3 之后集合就是 std(`[1, 2]` 调 `std/pvec.of_array`),
+`__emitc` 原本只 lower **程序自己的**模块。S3 之后集合就是 std(`[1, 2]` 调 `std/pvec.from_array`),
 所以任何拿着 list 的程序都在 `cc` 那步撞墙。07-27 试过直接把 std 链进来,结果整个语料一起红:
 std 自己要 `cursor_start`,C 侧没有。于是顺序写死:**先补 intrinsic 长尾,再链 std**。
 
@@ -936,9 +936,11 @@ harness 也改了一处:两个后端的运行都把 stdin 接到 `/dev/null`。�
 三件事值得单独记:
 
 - **`analyze.canon` 与 `lsp.canon` 是逐字重复的同一个函数**,现在是 analyze 里一个 `pub fn canon`,
-  建在新的 `std/fspath` 上。**模块叫 `fspath` 不叫 `path`**:模块别名和局部名共用一个命名空间,
+  建在新的 `fspath` 上。**模块叫 `fspath` 不叫 `path`**:模块别名和局部名共用一个命名空间,
   而 `path` 是这个编译器里十几个函数的形参名。这是语言的一处人体工学缺口,不是模块的问题,先绕开。
-- **`std/fspath` 的验收物是它替掉的那个东西**(`scripts/path-contract`,已进 CI)。写它的时候
+  (它当初落在 `std/fspath`;审计 RD-09 判它不该在 std,现在是 `packages/fspath` 包,
+  编译器自己另有一份只含四个函数的 `selfhost/src/fspath.dawn`——编译器不能依赖包。)
+- **`fspath` 的验收物是它替掉的那个东西**(`scripts/path-contract`,已进 CI)。写它的时候
   在文档注释里**声明了一处与 Java 的偏离**——`..` 爬过根目录——跑完发现 **Java 也是这么做的**,
   于是那三个用例从「声明的偏离」变成普通的一致性用例,注释改成记录这件事本身。
 - **`packages/sha2` 的验收物是 `__pkghash`**:`selfhost-run-diff.sh` 拿上一版编译器和 HEAD
@@ -1504,7 +1506,7 @@ C 侧并进 space 表,JVM 侧无视。语料 `strings.dawn` 的 `parse_int("  7 
 
 **其余 `dawn/rt/*` 不剪,是裁决不是遗漏**:std 整体入 jar 的现状下,Io/Array/Show/Tuple/Fn
 都被 std 真实引用,类级裁剪一字节都省不下;真正的下一刀是**按可达性裁 std 模块本身**
-(hello 还背着 ~50KB 的 hamt/pvec/map/set/fspath),`reach.dawn` 的函数级答案已经是它的底座,
+(hello 还背着 ~50KB 的 hamt/pvec/map/set),`reach.dawn` 的函数级答案已经是它的底座,
 值不值得做取决于「发小 jar」这个场景的分量。
 
 ### 14.19 缝 2 关账:comptime 的 Java 求值拆出 interp(2026-07-30)

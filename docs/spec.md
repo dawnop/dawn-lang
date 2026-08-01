@@ -615,6 +615,9 @@ let area = {
   - 记录 → `Point { x: 0.0, y: 2.5 }`（带字段名）；
   - `String` 字段带双引号并转义（`"a\nb"`）；`Int`/`Float`/`Bool` 同各自 `to_string`；
   - 容器递归渲染：`List` → `[a, b]`、元组 → `(a, b)`、`Option`/`Result` 随载荷（`Some(Red)`）。
+    `Map`/`Set` 没有字面量语法，渲染成**重建它的那个调用**：`map.from([(k, v), ...])`、
+    `set.from([e0, e1])`——写的是公开拼写，因为「读起来像源码」的意义在于**能粘回去**
+    （曾输出已退役的平铺名 `map_from`，粘回去报 undefined function；审计 RD-14）。
   - 每个字段类型必须可打印（函数字段、未 `derive Show` 的嵌套用户类型 → 声明处报错）；
     泛型类型可打印 **当且仅当** 其类型实参都可打印（`Box[Int]` 可，`Box[fn(...)→...]` 不可）——
     `derive Show` 在泛型类型上铸的是 `impl[T: Show] Show[Box[T]]`，这条就是它的 bound。
@@ -632,14 +635,26 @@ let area = {
 ### 4.5 Lambda
 
 ```dawn
-let double = fn(x: Int) => x * 2
-let add = fn(a, b) => a + b       # 参数类型可推导时可省略
-xs |> map(fn(x) => x * x)
+let double = (x: Int) => x * 2
+let add = (a, b) => a + b         # 参数类型可推导时可省略
+let now = () => 0                 # 零参数
+xs |> map(x => x * x)             # 单参数可省括号
+let old = fn(x) => x * 2          # `fn` 前缀形，仍然合法
 ```
 
-- `fn(params) => expr`；body 要多条语句就用块 `fn(x) => { ... }`。
+- **两种拼写，一个语法树**：`params => expr` 与 `fn(params) => expr` 解析成同一个
+  节点，检查、lowering、comptime 都看不出区别；`fn` 只是 `(` 之前的一个可选前缀。
+  `params` 是 `x`（单参数，括号可省）、`(a, b)`、`()`，每个参数可带 `: Type`。
+- body 要多条语句就用块：`(x) => { ... }`。
 - 写在调用后面（同一行）时它是那次调用的**最后一个实参**——尾闭包，见 §4.3。
-  `=>` 在尾闭包位也不可省：Dawn 只有一种 lambda 拼写。
+  **尾闭包位必须写 `fn`**：`f(a) (x) => e` 里的 `(x)` 已经是柯里化调用 `f(a)(x)`，
+  两种读法在读到 `=>` 之前无法区分，所以那个位置只留一种拼写。诊断会点名这件事。
+- `(` 开头的形式**先看 `)` 之后是不是 `=>` 再决定怎么解析**：`(a: Int)` 是合法的
+  参数表而不是合法的表达式，覆盖文法（先当表达式解析、见到 `=>` 再重解释）在这里
+  不成立。判定失败时报「invalid parameter list before `=>`」并点名出错的那个记号
+  （`(a + 1) => e`）。
+- **lambda 不能直接当 `if`/`while` 的条件**：`if x => { ... }` 会把本该是循环体的
+  花括号吃成 lambda 的 body。这是一条专门的诊断，不是「expected `{`」。
 - 闭包按值捕获绑定（捕获 `var` 是编译错误——想共享可变状态请显式传递）。
 - **箭头分工（设计裁决，2026-07-31，刻意不统一）**：`->` 是**子句箭头**，只出现在
   「声明形状」的位置——函数类型（§2.2）与 match 臂（§4.4）；`=>` 是**表达式箭头**，
@@ -697,7 +712,7 @@ let c = rows[1][0]   # 可链式、可与 ?/./() 组合
    **panic**（含负下标）。
 2. **问询**——越界/缺键是调用方要区分的正常分支：`get` 族（`list.get`、`map.get`、
    `set.has` 的缺席、`index_of` 族（`str`/`bytes`/`list`）的未命中、`str.strip_prefix`/
-   `strip_suffix` 的不匹配、`bytes.from_hex`/`from_base64` 与 `fspath.extension` 的
+   `strip_suffix` 的不匹配、`bytes.from_hex`/`from_base64` 与 `fspath.extension`(包)的
    格式不合）→ **`Option`**（或 `Bool`）。
 3. **钳位**——参数是一个**区间**，说的是「要这一段里有的部分」，不断言端点存在：
    `list.take`/`drop`/`slice`、`bytes.slice`、`str.substring`/`take`/`drop`、
@@ -1426,6 +1441,9 @@ use java "java.lang.Math"      # Java 互操作（§9），形式不变
 
 标准库以 **Dawn 源码随编译器捆绑**，组织为真模块（[`stdlib-naming.md`](stdlib-naming.md)）：
 `std/str`、`std/fmt`、`std/bytes`、`std/io`、`std/list`、`std/map`、`std/set`、`std/cursor`。
+另有两个**内部模块** `std/hamt` 与 `std/pvec`——`Map`/`Set`/`List` 的表示（§11）。它们随
+std 一起捆绑、在 std 内部互相引用，但 **std 之外 `use std/hamt` / `use std/pvec` 是编译
+错误**：表示要能整体换掉，而能换的前提是没有程序依赖它。
 （`std/fmt` 是数字渲染与解析的实现处——`fmt.dtoa` 即 `to_string(Float)`（§4.3），
 `fmt.atoi`/`fmt.atod`/`fmt.atoi_radix` 即三个 `parse_*`（§11 的 EBNF）；用户写内建
 拼写即可，模块名存在是因为实现是一份普通的 Dawn 源码而非某个后端的宿主方法。）
@@ -1469,6 +1487,8 @@ std → 内建，std 模块自己的 `pub fn len` 正是靠这一条合法。
   - `list.unique[T: Eq + Hash](xs) -> List[T]` — 去重且保序（每个值留在首次出现的位置）。
     这一条比其余多要一个 `Hash`：只有 `Eq` 的去重是二次的，而 `Set` 的插入序恰好就是
     这里要的顺序
+  - `list.is_empty(xs) -> Bool` — 判空。问游标而非比长度，故表示换成长度不是 O(1) 的
+    结构时它仍是 O(1)
 - **字符串**：prelude 里有 `join parse_int parse_float to_string`（字符串转数字是
   `parse_int(s) -> Option[Int]`——没有重载，`to_int`/`to_float` 只做 Int↔Float 转换）。
 
@@ -1526,10 +1546,12 @@ std → 内建，std 模块自己的 `pub fn len` 正是靠这一条合法。
   「不认识的字符集」这个失败面，故返回裸 `String` 而非 `Option`。std 侧的
   `bytes.decode_utf8`/`decode_latin1` 下个版本（种子带上这两个原语后）改接它们，
   再下个版本删掉 `bytes_decode`）、
-  `bytes.len(b) -> Int`、`bytes.at(b, i) -> Int`（0..255，越界 panic）、
+  `bytes.len(b) -> Int`、`bytes.is_empty(b) -> Bool`、`bytes.at(b, i) -> Int`（0..255，越界 panic）、
   `bytes.slice(b, start, end) -> Bytes`（`[start,end)`，下标 clamp）、
   `bytes.index_of(b, needle, from) -> Option[Int]`（字节下标首次出现）。
   构造侧是 `bytes.buf()`/`put`/`put_bytes`/`get`/`size`/`freeze`（§9.5.1 的 `Buf`）。
+  这里的 `size` 是「长度只叫 `len`」那条规则的**唯一具名例外**：`bytes.len` 已经是成品
+  `Bytes` 的长度，语言又无重载，故写入游标只能另取一名（CONTRIBUTING「命名族」）。
 
   **文本编码**（纯 Dawn 字节算术，无 `use java`，故两个后端同一份定义）：
   `bytes.to_hex(b) -> String`（每字节两位、**小写**为规范拼写）与
@@ -1592,12 +1614,21 @@ std → 内建，std 模块自己的 `pub fn len` 正是靠这一条合法。
   map.insert(m, k, v) -> Map[K, V]            set.insert(s, x) -> Set[T]
   map.remove(m, k) -> Map[K, V]               set.remove(s, x) -> Set[T]
   map.get(m, k) -> Option[V]                  set.has(s, x) -> Bool
-  map.has(m, k) -> Bool                        set.size(s) -> Int
-  map.size(m) -> Int                           set.to_list(s) -> List[T]
+  map.has(m, k) -> Bool                        set.len(s) -> Int
+  map.len(m) -> Int                           set.is_empty(s) -> Bool
+  map.is_empty(m) -> Bool                     set.to_list(s) -> List[T]
   map.keys(m) -> List[K]
   map.values(m) -> List[V]
   map.entries(m) -> List[(K, V)]
   ```
+
+  **长度只有 `len` 一个名字，判空只有 `is_empty` 一个名字**——`str`/`list`/`map`/`set`/
+  `bytes` 五处同拼写（`bytes.size(b: Buf)` 是唯一例外：`bytes.len` 已经是成品字节串的
+  长度，而语言无重载；判据与例外见 CONTRIBUTING「命名族」）。
+
+  两者的**表示**是纯 Dawn 的 `std/hamt`（持久 HAMT）与 `std/pvec`（持久向量），它们是
+  **内部模块**：`use std/hamt` / `use std/pvec` 在 std 之外是编译错误，诊断指回
+  `std/map`/`std/set`/`std/list`。表示要能换，而能换的前提是没人依赖它。
 
 - `core/math`：`abs min max sin cos sqrt pow to_float to_int ...`（纯——
   内部以 `unsafe_pure` 包装 `java.lang.Math`；`@trusted_pure` 是该逃生门的旧名，已废弃）

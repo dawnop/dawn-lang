@@ -1992,7 +1992,7 @@ pub fn pass_register_traits(cx: Cx, m: Module) -> Cx !io = {
       }
       let (cx5, ret) = resolve_type(cx1, me.ret)
       cx1 = cx5
-      let leaked = map.size(cx1.current_eff_vars) > 0
+      let leaked = map.len(cx1.current_eff_vars) > 0
       cx1 = Cx { ..cx1, current_tparams: saved_tp, current_eff_vars: saved_ev }
       if leaked {
         cx1 = cerr_h(cx1, "trait method signatures cannot carry effect variables", me.nlo, me.nhi,
@@ -2389,7 +2389,7 @@ pub fn pass_register_impls(
       }
       cx1 = cx4
       let eff = if len(me.effs) == 0 { EPure } else { EIo }
-      let leaked = map.size(cx1.current_eff_vars) > 0
+      let leaked = map.len(cx1.current_eff_vars) > 0
       cx1 = Cx { ..cx1, current_eff_vars: saved_ev }
       if leaked {
         cx1 = cerr(cx1, "impl method signatures cannot carry effect variables", me.nlo, me.nhi)
@@ -3327,7 +3327,7 @@ test "internal builtins hide from user code but not std" {
   let std_bins = visible_bins(builtins(), std_cx)
   assert map.get(std_bins, "map_insert") != None
   assert map.get(std_bins, "io_read_file") != None
-  assert map.size(std_bins) == map.size(builtins())
+  assert map.len(std_bins) == map.len(builtins())
 }
 
 ## Is the innermost lambda one the parser synthesized from a `with` statement?
@@ -4336,12 +4336,44 @@ pub type ModExports = {
   trait_infos: Map[Int, TraitI]
 }
 
+## The bundled modules that exist to hold a representation, not to be called:
+## `Map`/`Set` are `std/hamt` and `List` is `std/pvec`. They are `pub` because
+## std/map, std/set and the lowering of a list primitive call into them, and
+## bundled std has no visibility level below `pub` — so the boundary is here
+## instead, next to `internal_builtins`, which draws the same line for the
+## `map_*`/`array_*` intrinsic names (audit RD-06).
+##
+## The point is that the representation can be replaced whole. Nothing outside
+## std may name it, so replacing it cannot break a program.
+pub fn internal_std_modules() -> List[String] = ["std/hamt", "std/pvec"]
+
+fn substrate_of(path: String) -> String =
+  if path == "std/hamt" {
+    "`Map` and `Set`"
+  } else {
+    "`List`"
+  }
+
+fn substrate_use(path: String) -> String =
+  if path == "std/hamt" {
+    "use std/map or std/set"
+  } else {
+    "use std/list, or the builtin list operations"
+  }
+
 ## Resolve module imports: whole-module `use` decls become aliases; selective
 ## `use m.{...}` decls inject the named pub members (the Kotlin processImports).
 ## `env` maps modPath → exports for every module checked before this one.
 pub fn pass_imports(cx: Cx, m: Module, env: Map[String, ModExports]) -> Cx = {
   var cx1 = cx
   for u in module_uses(m) {
+    if not cx.is_std_module && list.contains(internal_std_modules(), u.path) {
+      cx1 = cerr_h(cx1, "`" ++ u.path ++ "` is internal to the standard library",
+        u.nlo, u.nhi,
+        "it is how " ++ substrate_of(u.path) ++
+          " are represented, not a container of its own: " ++ substrate_use(u.path))
+      continue
+    }
     let exp = match map.get(env, u.path) {
       None -> {
         # std paths never reach the module loader, so unknown ones report here

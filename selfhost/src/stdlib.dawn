@@ -80,12 +80,16 @@ fn moved_renames(out0: Map[String, String]) -> Map[String, String] = {
   out = map.insert(out, "byte_at", "use std/bytes, then bytes.at(...)")
   out = map.insert(out, "byte_slice", "use std/bytes, then bytes.slice(...)")
   out = map.insert(out, "byte_index_of", "use std/bytes, then bytes.index_of(...)")
-  for op in ["empty", "from", "insert", "remove", "get", "has", "size", "keys", "values", "entries"] {
+  for op in ["empty", "from", "insert", "remove", "get", "has", "keys", "values", "entries"] {
     out = map.insert(out, "map_" ++ op, "use std/map, then map." ++ op ++ "(...)")
   }
-  for op in ["empty", "from", "insert", "remove", "has", "size", "to_list"] {
+  for op in ["empty", "from", "insert", "remove", "has", "to_list"] {
     out = map.insert(out, "set_" ++ op, "use std/set, then set." ++ op ++ "(...)")
   }
+  # the two whose public name is not the primitive's: length is `len` on every
+  # container now, so the flat spelling's hint has to say `len` (audit RD-06)
+  out = map.insert(out, "map_size", "use std/map, then map.len(...)")
+  out = map.insert(out, "set_size", "use std/set, then set.len(...)")
   for op in ["start", "end", "done", "char", "next", "prev", "slice", "skip"] {
     out = map.insert(out, "cursor_" ++ op, "use std/cursor, then cursor." ++ op ++ "(...)")
   }
@@ -333,6 +337,10 @@ test "the bundled std loads, checks and evaluates" {
       assert not map.has(std.std_fns, "trim")
       # everything else moved behind its module
       assert map.get(std.moved, "map_insert") == Some("use std/map, then map.insert(...)")
+      # the hint names the *public* spelling, which for length is not the
+      # primitive's own name any more (audit RD-06)
+      assert map.get(std.moved, "map_size") == Some("use std/map, then map.len(...)")
+      assert map.get(std.moved, "set_size") == Some("use std/set, then set.len(...)")
       assert map.get(std.moved, "trim") == Some("use std/str, then str.trim(...)")
       assert set.has(std.std_names, "trim")
     }
