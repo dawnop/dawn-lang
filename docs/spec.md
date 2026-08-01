@@ -1756,7 +1756,10 @@ std → 内建，std 模块自己的 `pub fn len` 正是靠这一条合法。
   - `io.write_file(path, content) -> Result[Unit, ForeignError]` — **自动创建缺失的父目录**。
     `Ok` 不带值:曾返回 `String.length()`(UTF-16 码元,既不是字符数也不是字节数),
     2026-07-19 去掉——没有调用点读它
-  - `io.list_dir(path) -> Result[List[String], ForeignError]` — 排序后的条目名；path 不是
+  - `io.list_dir(path) -> Result[List[String], ForeignError]` — **码点序**排序的条目名。
+    排序在 std 层做（`list.sort` 走语言自己的 `Ord[String]`），`io_list_names` 原语
+    不承诺顺序——各后端不再各排各的（JVM 曾用 `Arrays.sort`，UTF-16 码元序，
+    astral 文件名会排在 U+E000..U+FFFF 之前）。path 不是
     目录时 `Err`，`kind` 是 `"io.not_a_directory"`——std 自己铸的唯一一个 kind，
     其余都是后端给的
   - `io.is_dir(path) -> Bool` — 不存在或出错都视为 `false`

@@ -1420,7 +1420,10 @@ pub fn gen_io_class(supers: List[String]) -> Bytes !io = {
   return_unit(wfv)
   close_mv(wfv)
 
-  # io_list_names(path): sorted entry names, or throw if the dir cannot be listed
+  # io_list_names(path): entry names in the OS's order, or throw if the dir
+  # cannot be listed. No sort here: std/io sorts (code-point order, the
+  # language's own Ord[String]) so both backends agree by construction --
+  # Arrays.sort would be UTF-16 unit order, which disagrees on astral names.
   let lnv = open_static(cw, "io_list_names", "(Ljava/lang/String;)Ljava/util/List;")
   let ln_ok = Label.new()
   lnv.visitTypeInsn(OP_NEW, "java/io/File")
@@ -1438,8 +1441,6 @@ pub fn gen_io_class(supers: List[String]) -> Bytes !io = {
     "(Ljava/lang/String;)V", false)
   lnv.visitInsn(OP_ATHROW)
   lnv.visitLabel(ln_ok)
-  lnv.visitVarInsn(OP_ALOAD, 1)
-  lnv.visitMethodInsn(OP_INVOKESTATIC, "java/util/Arrays", "sort", "([Ljava/lang/Object;)V", false)
   lnv.visitVarInsn(OP_ALOAD, 1)
   lnv.visitMethodInsn(OP_INVOKESTATIC, "java/util/Arrays", "asList",
     "([Ljava/lang/Object;)Ljava/util/List;", false)

@@ -1,0 +1,48 @@
+# What order `list_dir` answers in (#114).
+#
+# One line used to hide two divergences. The C runtime returned readdir
+# order -- whatever walk the filesystem's directory hash produced, so not an
+# order at all -- while the JVM sorted. And the JVM's sort was `Arrays.sort`,
+# UTF-16 unit order, which puts an astral name *before* U+E000..U+FFFF names:
+# U+1F600 encodes as the surrogate pair d83d de00, and d83d < fffd.
+#
+# The fix moved the sort into std/io: one `list.sort` over the language's own
+# `Ord[String]` (code-point order, spec 3.7), above the intrinsic, so every
+# backend agrees by construction. This file pins the std-level answer and
+# deliberately says nothing about `io_list_names`'s order, which is now
+# unspecified.
+#
+# The names are created in an order that is neither sorted nor reverse
+# sorted, and the pair that decides which ordering we are in is
+# U+FFFD/U+1F600: code-point order says U+FFFD first, UTF-16 order said
+# U+1F600 first. An unsorted readdir walk could answer either by luck once,
+# but not the whole list.
+use std/io
+use std/raw
+use std/bytes
+
+pub fn main() -> Unit !io = {
+  let dir = raw.temp_dir("", "dawn-list-dir-")
+  let names = ["b", from_code_points([0x1F600]), "a", from_code_points([0xFFFD]), "c"]
+  for n in names {
+    raw.write_bytes(dir ++ "/" ++ n, bytes.utf8("x"))
+  }
+  raw.mkdirs(dir ++ "/sub")
+
+  io.println("-- code-point order: ascii, then U+FFFD, then U+1F600 --")
+  match io.list_dir(dir) {
+    Ok(entries) -> {
+      for e in entries {
+        io.println(e)
+      }
+    }
+    Err(_) -> io.println("unreachable")
+  }
+
+  for n in names {
+    let _ = io.delete(dir ++ "/" ++ n)
+  }
+  let _ = io.delete(dir ++ "/sub")
+  let _ = io.delete(dir)
+  io.println("cleaned up " ++ to_string(not io.exists(dir)))
+}
