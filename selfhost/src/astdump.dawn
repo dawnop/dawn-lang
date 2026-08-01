@@ -15,11 +15,11 @@ use ast.{
   Arg, MatchArm, Expr, EInt, EFloat, EBool, EUnit, EStr, EVar,
   EApply, EMethod, ELambda, ECtor, EFieldAcc, EListLit, ETupleLit, EPropagate,
   EUnwrap, EIndex, EReturn, EBreak, EContinue, EComptime, EUnsafePure,
-  EBinary, EUnary, EIf, EMatch, EBlock,
+  EBinary, EUnary, EIf, EMatch, EBlock, EHandle, HandlerArm,
   PatArg, Pattern, PLit, PBind, PWild, PCtor, PQual, PTuple, PList,
   Stmt, SLet, SLetPat, SLocalFn, SAssign, SExpr, SAssert, SWhile, SFor,
   TraitMethod, FnDecl, TypeDeclR, Decl, DFn, DType, DConst, DTrait, DImpl,
-  DUseJava, DUseModule, DTest, Module
+  DUseJava, DUseModule, DTest, DEffect, EffectDeclR, EffectOp, Module
 }
 
 fn sp(lo: Int, hi: Int) -> String = "@${lo}..${hi}"
@@ -61,6 +61,7 @@ fn dump_decl(out: List[String], d: Int, decl: Decl) -> List[String] =
   match decl {
     DFn(f) -> dump_fn(out, d, f)
     DType(t) -> dump_type(out, d, t)
+    DEffect(e) -> dump_effect(out, d, e)
     DConst(name, is_pub, ann, init, lo, hi, nlo, nhi) -> {
       var o = out ++ [ind(d) ++ "Const " ++ name ++ " pub=" ++ bstr(is_pub) ++ " name" ++
           sp(nlo, nhi) ++ " " ++ sp(lo, hi)]
@@ -154,6 +155,22 @@ fn dump_type(out: List[String], d: Int, t: TypeDeclR) -> List[String] = {
       o = o ++ [ind(d + 2) ++ "Field " ++ f.name ++ " " ++ sp(f.lo, f.hi)]
       o = dump_tref(o, d + 3, f.tref)
     }
+  }
+  o
+}
+
+fn dump_effect(out: List[String], d: Int, e: EffectDeclR) -> List[String] = {
+  var o = out ++ [ind(d) ++ "Effect " ++ e.name ++ " pub=" ++ bstr(e.is_pub) ++ " name" ++
+      sp(e.nlo, e.nhi) ++ " " ++ sp(e.lo, e.hi)]
+  for op in e.ops {
+    o = o ++ [ind(d + 1) ++ "Op " ++ op.name ++ " name" ++ sp(op.nlo, op.nhi) ++ " " ++
+        sp(op.lo, op.hi)]
+    for pm in op.params {
+      o = o ++ [ind(d + 2) ++ "Param " ++ pm.name ++ " " ++ sp(pm.lo, pm.hi)]
+      o = dump_tref(o, d + 3, pm.tref)
+    }
+    o = o ++ [ind(d + 2) ++ "Ret"]
+    o = dump_tref(o, d + 3, op.ret)
   }
   o
 }
@@ -450,6 +467,16 @@ fn dump_expr(out: List[String], d: Int, e: Expr) -> List[String] =
         Some(t) -> dump_expr(o, d + 1, t)
         None -> o
       }
+    }
+    EHandle(name, arms, rest, nlo, nhi, lo, hi) -> {
+      var o = out ++ [ind(d) ++ "Handle " ++ name ++ " name" ++ sp(nlo, nhi) ++ " " ++ sp(lo, hi)]
+      for a in arms {
+        o = o ++ [ind(d + 1) ++ "Arm " ++ a.name ++ " name" ++ sp(a.nlo, a.nhi) ++ " " ++
+            sp(a.lo, a.hi)]
+        for pm in a.params { o = dump_lparam(o, d + 2, pm) }
+        o = dump_expr(o, d + 2, a.body)
+      }
+      dump_expr(o, d + 1, rest)
     }
   }
 

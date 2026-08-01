@@ -139,6 +139,20 @@ pub fn first_named(args: List[Arg]) -> Option[Arg] = {
 
 pub type MatchArm = { pats: List[Pattern], guard: Option[Expr], body: Expr, lo: Int, hi: Int }
 
+## One arm of a `with handle E { ... }` clause: `op(a, b) => body`. The arm is
+## a closure over the operation's parameters, so it carries what a lambda
+## carries; `nlo`/`nhi` span the operation name, which is what a diagnostic
+## about an unknown or duplicated operation underlines.
+pub type HandlerArm = {
+  name: String,
+  params: List[LambdaParam],
+  body: Expr,
+  lo: Int,
+  hi: Int,
+  nlo: Int,
+  nhi: Int
+}
+
 pub type Expr =
   | EInt(v: Int, lo: Int, hi: Int)
   | EFloat(v: Float, lo: Int, hi: Int)
@@ -183,6 +197,20 @@ pub type Expr =
   | EIf(cond: Expr, thn: Expr, els: Option[Expr], lo: Int, hi: Int)
   | EMatch(scrut: Expr, arms: List[MatchArm], lo: Int, hi: Int)
   | EBlock(stmts: List[Stmt], tail: Option[Expr], lo: Int, hi: Int)
+# `with handle E { op(..) => ... }` plus the rest of its block, which the
+# parser turned into `rest`: a parameterless sugar lambda, exactly as the
+# `with x <- f(..)` form does (spec §4.10). The handler is not a call, so the
+# closure has nowhere to be attached and rides here instead; the checker is
+# what discharges E from the remainder's effect row.
+  | EHandle(
+    name: String,
+    arms: List[HandlerArm],
+    rest: Expr,
+    nlo: Int,
+    nhi: Int,
+    lo: Int,
+    hi: Int
+  )
 
 # ---- patterns ----
 
@@ -293,8 +321,32 @@ pub type TypeDeclR = {
   nhi: Int
 }
 
+## One operation of an `effect` declaration: an ordinary function signature
+## with no body and no effect annotation of its own -- an operation's effect
+## is the effect that declares it (docs/effects-design.md §3.1).
+pub type EffectOp = {
+  name: String,
+  params: List[Param],
+  ret: TypeRef,
+  lo: Int,
+  hi: Int,
+  nlo: Int,
+  nhi: Int
+}
+
+pub type EffectDeclR = {
+  is_pub: Bool,
+  name: String,
+  ops: List[EffectOp],
+  lo: Int,
+  hi: Int,
+  nlo: Int,
+  nhi: Int
+}
+
 pub type Decl =
   | DFn(f: FnDecl)
+  | DEffect(e: EffectDeclR)
   | DType(t: TypeDeclR)
   | DConst(
     name: String,
@@ -373,6 +425,7 @@ pub fn e_lo(e: Expr) -> Int =
     EIf(_, _, _, lo, _) -> lo
     EMatch(_, _, lo, _) -> lo
     EBlock(_, _, lo, _) -> lo
+    EHandle(_, _, _, _, _, lo, _) -> lo
   }
 
 pub fn e_hi(e: Expr) -> Int =
@@ -403,6 +456,7 @@ pub fn e_hi(e: Expr) -> Int =
     EIf(_, _, _, _, hi) -> hi
     EMatch(_, _, _, hi) -> hi
     EBlock(_, _, _, hi) -> hi
+    EHandle(_, _, _, _, _, _, hi) -> hi
   }
 
 pub fn t_lo(t: TypeRef) -> Int =
@@ -450,6 +504,17 @@ pub fn module_fns(m: Module) -> List[FnDecl] = {
   for d in m.decls {
     match d {
       DFn(f) -> { out = out ++ [f] }
+      _ -> ()
+    }
+  }
+  out
+}
+
+pub fn module_effects(m: Module) -> List[EffectDeclR] = {
+  var out: List[EffectDeclR] = []
+  for d in m.decls {
+    match d {
+      DEffect(e) -> { out = out ++ [e] }
       _ -> ()
     }
   }

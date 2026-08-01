@@ -1,0 +1,68 @@
+# Every shape of the effect declaration and the `with handle` clause
+# (docs/effects-design.md §3). Parsing only -- what they mean is pinned by
+# scripts/spike-native/effect_{handler,lexical}.dawn.
+
+effect Ask {
+  fn ask() -> Int
+}
+
+pub effect Store {
+  ## Read the whole thing.
+  fn get() -> String
+  fn put(k: String, v: Int) -> Unit
+}
+
+# a label sits in the effect position beside io and effect variables, and
+# several may be stacked
+fn one() -> Int !Ask = ask()
+
+fn stacked(x: Int) -> Int !Ask !io = x + ask()
+
+fn in_a_union() -> Int !(io | Ask) = ask()
+
+fn through_a_variable(f: fn() -> Int !e) -> Int !e = f()
+
+# the clause, with one arm and with several
+fn single() -> Int = {
+  with handle Ask { ask() => 42 }
+  one()
+}
+
+fn several() -> Unit = {
+  with handle Store {
+    get() => "x"
+    put(k, v) => ()
+  }
+  ()
+}
+
+# an arm body may be a block, and an arm may be written over several lines
+fn blocky() -> Int = {
+  with handle Ask {
+    ask() => {
+      let k = 1
+      k + 1
+    }
+  }
+  one()
+}
+
+# handlers nest, and mix with the binder form of `with`
+fn nested(path: String) -> Int !io = {
+  with handle Ask { ask() => 1 }
+  with f <- bracket(open(path), close)
+  with handle Store {
+    get() => "y"
+    put(k, v) => ()
+  }
+  one()
+}
+
+# `handle` is contextual, never reserved: this is an ordinary binder named
+# `handle`, and a function of that name still declares
+fn binder_named_handle(r: Handle) -> Unit !io = {
+  with handle <- r.borrow()
+  use_it(handle)
+}
+
+fn handle(x: Int) -> Int = x

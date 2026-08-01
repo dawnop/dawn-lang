@@ -18,7 +18,7 @@ use std/list
 use token.{
   Token, TokKind, Seg, SText, SCode, Diag,
   INT, FLOAT, STRING, IDENT, TYPEIDENT, UNDERSCORE, NEWLINE, EOF,
-  FN, LET, VAR, TYPE, ALIAS, CONST, USE, JAVA, PUB, TRAIT, IMPL,
+  FN, LET, VAR, TYPE, ALIAS, CONST, USE, JAVA, PUB, TRAIT, IMPL, EFFECT,
   MATCH, IF, ELSE, FOR, IN, WHILE, RETURN, BREAK, CONTINUE,
   COMPTIME, UNSAFE_PURE, TEST, ASSERT, WITH, TRUE, FALSE, NOT,
   LPAREN, RPAREN, LBRACE, RBRACE, LBRACKET, RBRACKET,
@@ -37,11 +37,11 @@ use ast.{
   Arg, pos_arg, MatchArm, Expr, EInt, EFloat, EBool, EUnit, EStr, EVar,
   EApply, EMethod, ELambda, ECtor, EFieldAcc, EListLit, ETupleLit, EPropagate,
   EUnwrap, EIndex, EReturn, EBreak, EContinue, EComptime, EUnsafePure,
-  EBinary, EUnary, EIf, EMatch, EBlock,
+  EBinary, EUnary, EIf, EMatch, EBlock, EHandle, HandlerArm,
   PatArg, Pattern, PLit, PBind, PWild, PCtor, PQual, PTuple, PList,
   Stmt, SLet, SLetPat, SLocalFn, SAssign, SExpr, SAssert, SWhile, SFor,
   TraitMethod, FnDecl, TypeDeclR, Decl, DFn, DType, DConst, DTrait, DImpl,
-  DUseJava, DUseModule, DTest, Module,
+  DUseJava, DUseModule, DTest, DEffect, EffectDeclR, EffectOp, Module,
   e_lo, e_hi, t_lo, t_hi, pat_lo, pat_hi
 }
 use lexer.{lex, lex_at, view_of, slice_cp, SourceView}
@@ -178,7 +178,7 @@ fn sync_decl(p: P, st: St) -> St = {
   if not at_kind(p, s, EOF) { s = adv1(p, s) }
   while not at_kind(p, s, EOF) && not at_kind(p, s, FN) && not at_kind(p, s, PUB) &&
     not at_kind(p, s, TYPE) && not at_kind(p, s, ALIAS) && not at_kind(p, s, CONST) &&
-    not at_kind(p, s, TRAIT) && not at_kind(p, s, IMPL) {
+    not at_kind(p, s, TRAIT) && not at_kind(p, s, IMPL) && not at_kind(p, s, EFFECT) {
       s = adv1(p, s)
     }
   s
@@ -211,6 +211,8 @@ fn top_decl(p: P, st: St) -> PR[Decl] = {
     const_decl(p, st0, is_pub)
   } else if k == TRAIT {
     trait_decl(p, st0, is_pub)
+  } else if k == EFFECT {
+    effect_decl(p, st0, is_pub)
   } else if k == IMPL {
     if is_pub {
       Err((st0, perr(p, st0, "an impl cannot be pub (its visibility follows the trait)")))
@@ -758,6 +760,78 @@ fn trait_method(p: P, st: St) -> PR[TraitMethod] = {
   }))
 }
 
+## effect Ask { fn ask() -> Int }
+##
+## The shape is a trait body without a subject: operation signatures, no
+## bodies, no type parameters (docs/effects-design.md §3.1, D2). An operation
+## carries no effect annotation of its own -- the effect it belongs to *is*
+## its effect -- so `!io` on one is refused where it is written rather than
+## silently ignored.
+fn effect_decl(p: P, st: St, is_pub: Bool) -> PR[Decl] = {
+  let (st1, kw) = want(p, st, EFFECT, "`effect`")?
+  let (st2, name) = want(p, st1, TYPEIDENT, "an effect name (uppercase)")?
+  if at_kind(p, st2, LBRACKET) {
+    return Err((st2, perr_h(p, st2, "an effect cannot declare type parameters",
+      "v1 effects are bare labels; specialize at the declaration instead")))
+  }
+  let st3 = skip_nl(p, st2)
+  let (st4, _) = want(p, st3, LBRACE, "`{` (the effect body)")?
+  var st5 = skip_nl(p, st4)
+  var ops: List[EffectOp] = []
+  while not at_kind(p, st5, RBRACE) && not at_kind(p, st5, EOF) {
+    let (st6, op) = effect_op(p, st5)?
+    ops = ops ++ [op]
+    st5 = want_sep(p, st6)?
+  }
+  let (st7, close) = want(p, st5, RBRACE, "`}`")?
+  if len(ops) == 0 {
+    return Err((st7, pd("an effect must declare at least one operation", kw.lo, close.hi)))
+  }
+  Ok((st7, DEffect(EffectDeclR {
+    is_pub: is_pub,
+    name: name.text,
+    ops: ops,
+    lo: kw.lo,
+    hi: close.hi,
+    nlo: name.lo,
+    nhi: name.hi
+  })))
+}
+
+## fn ask() -> Int — one operation signature inside an `effect` body.
+fn effect_op(p: P, st: St) -> PR[EffectOp] = {
+  let (st1, fn_tok) = want(p, st, FN, "`fn` (an effect body only contains operations)")?
+  let (st2, name_tok) = want(p, st1, IDENT, "an operation name (lowercase)")?
+  if at_kind(p, st2, LBRACKET) {
+    return Err((st2, perr_h(p, st2, "an effect operation cannot declare type parameters",
+      "v1 effects are bare labels")))
+  }
+  let (st3, _) = want(p, st2, LPAREN, "`(`")?
+  let (st4, params) = typed_params(p, st3, "effect operation")?
+  let (st5, _) = want(p, st4, RPAREN, "`)`")?
+  let (st6, _) = want(p, st5, ARROW, "`->` (an operation must declare a return type)")?
+  let (st7, ret) = type_ref(p, st6)?
+  if at_kind(p, st7, BANG) {
+    return Err((st7, perr_h(p, st7, "an effect operation cannot declare effects of its own",
+      "the operation's effect is the effect that declares it; what an arm does is " ++
+        "recorded where the handler is installed")))
+  }
+  if at_kind(p, st7, EQ) {
+    return Err((st7, perr_h(p, st7, "an effect operation cannot have a body",
+      "the body is the handler arm: with handle E { " ++ name_tok.text ++ "(...) => ... }")))
+  }
+  let end = tok_at(p, st7.pos, -1).hi
+  Ok((st7, EffectOp {
+    name: name_tok.text,
+    params: params,
+    ret: ret,
+    lo: fn_tok.lo,
+    hi: end,
+    nlo: name_tok.lo,
+    nhi: name_tok.hi
+  }))
+}
+
 ## impl Ord[Point] { fn cmp(a: Point, b: Point) -> Int = ... }
 ##
 ## A conditional impl puts its own parameters first, like a fn does:
@@ -885,25 +959,49 @@ fn fn_type_ref(p: P, st: St) -> PR[TypeRef] = {
   Ok((st8, TFn(params, ret, effs, kw.lo, end)))
 }
 
+## One atom of an effect annotation. `io` and effect variables are lowercase
+## idents; a declared effect is spelled with its own (uppercase) name, and
+## which of the three an atom is stays a checker question -- the parser only
+## says that a name is there.
+fn effect_atom(p: P, st: St) -> PR[Token] = {
+  if at_kind(p, st, TYPEIDENT) {
+    return Ok(adv(p, st))
+  }
+  want(p, st, IDENT, "an effect name (io, an effect variable, or a declared effect)")
+}
+
 ## Optional effect annotation after a return type: nothing (pure), `!io`, `!e`,
-## or a union `!(e1 | e2 | ...)`. Returns the atom names.
+## `!Ask`, or a union `!(e1 | Ask | ...)`. Returns the atom names.
 fn parse_effect(p: P, st: St) -> PR[List[String]] = {
+  var atoms: List[String] = []
+  var st0 = st
+  # `!io !Ask` stacks: each `!` contributes its atoms to one row. A single
+  # group is the whole of what existed before, and parses identically.
+  while at_kind(p, st0, BANG) {
+    let (st1, group) = effect_group(p, st0)?
+    atoms = atoms ++ group
+    st0 = st1
+  }
+  Ok((st0, atoms))
+}
+
+fn effect_group(p: P, st: St) -> PR[List[String]] = {
   if not at_kind(p, st, BANG) {
     let none: List[String] = []
     return Ok((st, none))
   }
   let st1 = adv1(p, st)
   if not at_kind(p, st1, LPAREN) {
-    let (st2, n) = want(p, st1, IDENT, "an effect name (io or an effect variable)")?
+    let (st2, n) = effect_atom(p, st1)?
     return Ok((st2, [n.text]))
   }
   let st2 = adv1(p, st1)
-  let (st3, first) = want(p, st2, IDENT, "an effect name (io or an effect variable)")?
+  let (st3, first) = effect_atom(p, st2)?
   var atoms = [first.text]
   var st4 = st3
   while at_kind(p, st4, PIPE) {
     let st5 = adv1(p, st4)
-    let (st6, n) = want(p, st5, IDENT, "an effect name (io or an effect variable)")?
+    let (st6, n) = effect_atom(p, st5)?
     atoms = atoms ++ [n.text]
     st4 = st6
   }
@@ -1899,6 +1997,12 @@ fn block_body(
 ## reverse order when the calls are `bracket`.
 fn with_stmt(p: P, st: St) -> PR[Expr] = {
   let (st1, kw) = adv(p, st)
+  # `handle` is contextual, never reserved: it is the handler clause only when
+  # what follows is not the binder arrow. `with handle <- f()` stays a binding
+  # named `handle`, which is what keeps every existing `fn handle` compiling.
+  if at_kind(p, st1, IDENT) && cur(p, st1).text == "handle" && kind_ahead(p, st1, 1) != LARROW {
+    return handle_stmt(p, adv1(p, st1), kw)
+  }
   # a plain name, like a lambda parameter -- which is what it becomes. `_` is
   # not accepted for the same reason `(_) => ...` is not: there is one
   # spelling for a binding here, and it is a name.
@@ -1914,6 +2018,62 @@ fn with_stmt(p: P, st: St) -> PR[Expr] = {
   let body = EBlock(stmts, tail, rest_lo, rest_hi)
   let lam = ELambda([param], body, true, kw.lo, rest_hi)
   Ok((st7, attach_trailing(callee, lam)))
+}
+
+## `with handle E { op(a) => body ... }` plus the rest of the enclosing block,
+## which becomes a parameterless closure exactly as the binder form's does
+## (docs/effects-design.md §3.3):
+##
+##     with handle Ask {      EHandle(Ask, [ask() => 42], () => {
+##       ask() => 42            g()
+##     }                        h()
+##     g()               ==>  })
+##     h()
+##
+## `st` is just past `handle`; the returned state sits on the block's `}`.
+fn handle_stmt(p: P, st: St, kw: Token) -> PR[Expr] = {
+  let (st1, name) = want(p, st, TYPEIDENT, "the effect to handle (`with handle Ask { ... }`)")?
+  let st2 = skip_nl(p, st1)
+  let (st3, _) = want(p, st2, LBRACE, "`{` (the handler arms)")?
+  var st4 = skip_nl(p, st3)
+  var arms: List[HandlerArm] = []
+  while not at_kind(p, st4, RBRACE) && not at_kind(p, st4, EOF) {
+    let (st5, a) = handler_arm(p, st4)?
+    arms = arms ++ [a]
+    st4 = want_sep(p, st5)?
+  }
+  let (st6, close) = want(p, st4, RBRACE, "`}`")?
+  if len(arms) == 0 {
+    return Err((st6, pd_h("a handler must answer at least one operation", kw.lo, close.hi,
+      "write one arm per operation the effect declares")))
+  }
+  let st7 = want_sep(p, st6)?
+  let rest_lo = cur(p, st7).lo
+  let (st8, stmts, tail) = block_body(p, st7)?
+  let rest_hi = cur(p, st8).lo
+  let no_params: List[LambdaParam] = []
+  let body = EBlock(stmts, tail, rest_lo, rest_hi)
+  let rest = ELambda(no_params, body, true, kw.lo, rest_hi)
+  Ok((st8, EHandle(name.text, arms, rest, name.lo, name.hi, kw.lo, rest_hi)))
+}
+
+## `op(a, b) => expr` — one handler arm. The parameter list is a lambda's, and
+## so is the body: an arm *is* the closure the operation call reaches.
+fn handler_arm(p: P, st: St) -> PR[HandlerArm] = {
+  let (st1, name) = want(p, st, IDENT, "an operation name (`op(...) => ...`)")?
+  let (st2, params) = lambda_params(p, st1, false)?
+  let (st3, _) = want(p, st2, FATARROW, "`=>` (an arm is a closure)")?
+  let st4 = skip_nl(p, st3)
+  let (st5, body) = expression(p, st4, false)?
+  Ok((st5, HandlerArm {
+    name: name.text,
+    params: params,
+    body: body,
+    lo: name.lo,
+    hi: e_hi(body),
+    nlo: name.lo,
+    nhi: name.hi
+  }))
 }
 
 ## Attach `lam` as the last argument of `callee`. A call grows one argument; a

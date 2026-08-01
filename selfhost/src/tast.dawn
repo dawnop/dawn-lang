@@ -88,6 +88,10 @@ pub type TExpr =
     name: String,
     args: List[TExpr],
     witnesses: List[WitRef],
+    # the evidence the callee's declared effects need, in effect-id order:
+    # the innermost handler for each, or this function's own evidence
+    # parameter. Resolved lexically, here, because only the checker has scopes.
+    evidence: List[TExpr],
     trait_id: Option[Int],
     lo: Int,
     hi: Int,
@@ -232,6 +236,11 @@ pub type TFun = {
   sig: Sig,
   param_syms: List[Int],
   dict_syms: List[Int],
+  # hidden evidence parameters, one per declared effect in the signature, in
+  # effect-id order -- the same convention the dictionaries follow, appended
+  # after them (docs/effects-design.md §5.2). Empty for every function whose
+  # signature carries no label, which is every function that existed before.
+  ev_syms: List[Int],
   body: TExpr,
   is_test: Bool,
   impl_of: Option[(Int, Ty)],
@@ -263,7 +272,7 @@ pub fn x_lo(e: TExpr) -> Int =
     XFnValue(_, _, _, _, lo, _) -> lo
     XCallDyn(_, _, _, lo, _, _) -> lo
     XCallBuiltin(_, _, _, lo, _, _) -> lo
-    XCallFn(_, _, _, _, _, lo, _, _) -> lo
+    XCallFn(_, _, _, _, _, _, lo, _, _) -> lo
     XApply(_, _, lo, _, _) -> lo
     XJava(_, lo, _, _) -> lo
     XLambda(_, _, _, _, lo, _, _) -> lo
@@ -300,7 +309,7 @@ pub fn x_hi(e: TExpr) -> Int =
     XFnValue(_, _, _, _, _, hi) -> hi
     XCallDyn(_, _, _, _, hi, _) -> hi
     XCallBuiltin(_, _, _, _, hi, _) -> hi
-    XCallFn(_, _, _, _, _, _, hi, _) -> hi
+    XCallFn(_, _, _, _, _, _, _, hi, _) -> hi
     XApply(_, _, _, hi, _) -> hi
     XJava(_, _, hi, _) -> hi
     XLambda(_, _, _, _, _, hi, _) -> hi
@@ -338,7 +347,7 @@ pub fn tex_ty(e: TExpr) -> Ty =
     XFnValue(_, _, _, ty, _, _) -> ty
     XCallDyn(_, _, _, _, _, ty) -> ty
     XCallBuiltin(_, _, _, _, _, ty) -> ty
-    XCallFn(_, _, _, _, _, _, _, ty) -> ty
+    XCallFn(_, _, _, _, _, _, _, _, ty) -> ty
     XApply(_, _, _, _, ty) -> ty
     XJava(_, _, _, ty) -> ty
     XLambda(_, _, _, _, _, _, ty) -> ty

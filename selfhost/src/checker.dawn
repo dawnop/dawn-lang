@@ -27,7 +27,8 @@ use ast.{
   EMethod, EApply, ELambda, EBlock, EIf, EMatch, ECtor, EFieldAcc,
   EListLit, ETupleLit, EBinary, EUnary, EPropagate, EUnwrap, EIndex, EReturn,
   EComptime, EUnsafePure, Stmt, SLet, SLetPat, SLocalFn, SAssign, SExpr,
-  SAssert, SWhile, SFor, LambdaParam, ConstView
+  SAssert, SWhile, SFor, LambdaParam, ConstView,
+  EHandle, HandlerArm, DEffect, EffectDeclR, EffectOp, module_effects
 }
 use tast.{
   TExpr, XInt, XFloat, XBool, XUnit, XStr, XLocal, XFnValue, XCallDyn,
@@ -44,10 +45,11 @@ use tast.{
 use types.{
   intrinsics, intr_at,
   adt_self_ty, Ty, TyInt, TyFloat, TyBool, TyString, TyBytes, TyUnit, TyNever,
-  TyError, TyVar, TyAdt, TyList, TyMap, TySet, TyArray, TyJava, TyTuple, TyFn,
-  Eff, EPure, EIo, EffVar, EUnion, eff_union, lub_eff, eff_subsumes, eff_suffix,
+  TyError, TyVar, TyAdt, TyList, TyMap, TySet, TyArray, TyJava, TyTuple, TyFn, TyOpaque,
+  Eff, EPure, EIo, EffVar, EUnion, ELabeled, eff_union, lub_eff, eff_subsumes, eff_suffix,
+  eff_base, eff_labels, eff_with_labels, EffectI, Effects, ev_record_name,
   Adts, AdtI, CtorI, FieldI, Traits, TraitI, ImplI, Sym, Sig, MethodSig,
-  adt_of, trait_of, ty_show, ctor_render, sig_render, subst, subst_eff,
+  adt_of, trait_of, ty_show, ctor_render, sig_render, subst, subst_eff, eff_show,
   ty_named, is_numeric, is_errorish, peel_opaque,
   prelude_adts, prelude_traits, prelude_impls, bounds_of,
   builtins, opt_ty, result_ty, OPTION_ID, RESULT_ID, FOREIGN_ERROR_ID,
@@ -120,6 +122,10 @@ pub type Cx = {
   scopes: List[Map[String, Int]],
   # symbol table: id → symbol
   syms: Map[Int, Sym],
+  # declared effects visible here: name -> effect id, which is also the id of
+  # the synthesised evidence record (docs/effects-design.md §5.1)
+  effects: Map[String, Int],
+  effect_infos: Effects,
   # effect bookkeeping for the body being checked
   used_effects: List[Eff],
   eff_witness: Map[Eff, (Int, Int, String)],
@@ -131,6 +137,9 @@ pub type Cx = {
   lambda_stack: List[LambdaCx],
   loop_stack: List[Int],
   in_test: Bool,
+  # inside a comptime block or a const initializer: no effect of any kind may
+  # cross, and v1 refuses declared effects there outright (design §4.5)
+  isolated: Bool,
   is_std_module: Bool,
   owner_class: Option[String],
   src_path: Option[String],
@@ -147,8 +156,11 @@ pub type Cx = {
 ## One lambda's frame. `sugar` says the parser synthesized this lambda from a
 ## `with` statement (ast.dawn), which changes nothing about how it is checked
 ## and everything about how a `return`/`break`/`?` inside it is reported.
+## `arm` narrows `sugar`: the closure is a `with handle` arm rather than the
+## remainder of a `with` block. Both are code the author did not spell as a
+## lambda, and each has to be named as what it is when a jump tries to leave it.
 pub type LambdaCx =
-  { boundary: Int, expected_ret: Option[Ty], captures: List[Int], sugar: Bool }
+  { boundary: Int, expected_ret: Option[Ty], captures: List[Int], sugar: Bool, arm: Bool }
 
 ## A fresh checker state for one module.
 pub fn cx_new(owner_class: Option[String], src_path: Option[String]) -> Cx = {
@@ -180,6 +192,8 @@ pub fn cx_new(owner_class: Option[String], src_path: Option[String]) -> Cx = {
     module_aliases: map.empty(),
     module_fn_sigs: map.empty(),
     imported_names: map.empty(),
+    effects: map.empty(),
+    effect_infos: map.empty(),
     consts: map.empty(),
     const_order: [],
     all_const_names: set.empty(),
@@ -197,6 +211,7 @@ pub fn cx_new(owner_class: Option[String], src_path: Option[String]) -> Cx = {
     lambda_stack: [],
     loop_stack: [],
     in_test: false,
+    isolated: false,
     is_std_module: is_std,
     owner_class: owner_class,
     src_path: src_path,
@@ -330,26 +345,108 @@ pub fn record_effect(cx: Cx, e: Eff, lo: Int, hi: Int, name: String) -> Cx = {
   }
 }
 
+## The declared effect behind an id (the table is grafted across modules the
+## way the ADT table is).
+pub fn effect_of(cx: Cx, id: Int) -> EffectI =
+  match map.get(cx.effect_infos, id) {
+    Some(e) -> e
+    None -> panic("unknown effect id: ${id}")
+  }
+
+## The name of the local that carries an effect's evidence. It is minted from
+## the id, not just the name, so two modules declaring the same effect name
+## cannot shadow each other's evidence; `$` keeps it unspellable, so nothing a
+## user writes can bind or read it.
+pub fn ev_local_name(cx: Cx, id: Int) -> String =
+  "ev\$" ++ to_string(id) ++ "\$" ++ effect_of(cx, id).name
+
+## A row carrying exactly one declared effect.
+pub fn label_eff(cx: Cx, id: Int) -> Eff = ELabeled(EPure, [(id, effect_of(cx, id).name)])
+
 ## Resolve parsed effect atoms into a normalized Eff, interning variables per
 ## signature (the Kotlin resolveEff over currentEffVars).
-pub fn resolve_eff(cx: Cx, atoms: List[String]) -> (Cx, Eff) = {
+##
+## An atom that names a declared effect is a label; anything else is an effect
+## variable, as it always was. The lookup is what decides -- not the spelling
+## -- so a program with no effect declarations resolves exactly as before. An
+## uppercase atom that resolves to nothing would silently become an effect
+## variable named `Ask`, which is never what the author meant, so it reports.
+pub fn resolve_eff(cx: Cx, atoms: List[String]) -> (Cx, Eff) =
+  resolve_eff_at(cx, atoms, 0, 0)
+
+pub fn resolve_eff_at(cx: Cx, atoms: List[String], lo: Int, hi: Int) -> (Cx, Eff) = {
   var cx1 = cx
   var effs: List[Eff] = []
   for a in atoms {
     if a == "io" {
       effs = effs ++ [EIo]
     } else {
-      match map.get(cx1.current_eff_vars, a) {
-        Some(v) -> { effs = effs ++ [v] }
-        None -> {
-          let (cx2, v) = fresh_effvar(cx1, a)
-          cx1 = Cx { ..cx2, current_eff_vars: map.insert(cx2.current_eff_vars, a, v) }
-          effs = effs ++ [v]
-        }
+      match map.get(cx1.effects, a) {
+        Some(eid) -> { effs = effs ++ [label_eff(cx1, eid)] }
+        None ->
+          if is_upper_name(a) {
+            cx1 = cerr_h(cx1, "unknown effect `" ++ a ++ "`", lo, hi,
+              "declare it with `effect " ++ a ++ " { ... }` (or import it); " ++
+                "effect variables are lowercase")
+          } else {
+            match map.get(cx1.current_eff_vars, a) {
+              Some(v) -> { effs = effs ++ [v] }
+              None -> {
+                let (cx2, v) = fresh_effvar(cx1, a)
+                cx1 = Cx { ..cx2, current_eff_vars: map.insert(cx2.current_eff_vars, a, v) }
+                effs = effs ++ [v]
+              }
+            }
+          }
       }
     }
   }
   (cx1, eff_union(effs))
+}
+
+fn is_upper_name(s: String) -> Bool = {
+  for c in code_points(s) {
+    return char_is_upper(c)
+  }
+  false
+}
+
+## The first declared effect a resolved signature carries anywhere inside it,
+## or "". Trait and impl methods use it the way `leaked` is used for effect
+## variables: the two are refused in the same positions, for the same reason.
+fn sig_label(cx: Cx, ptys: List[Ty], ret: Ty) -> String = {
+  for t in ptys ++ [ret] {
+    let n = ty_label(t)
+    if n != "" { return n }
+  }
+  ""
+}
+
+fn ty_label(t: Ty) -> String =
+  match t {
+    TyFn(ps, r, ef) -> {
+      for l in eff_labels(ef) {
+        let (_, n) = l
+        return n
+      }
+      sig_label_ty(ps ++ [r])
+    }
+    TyList(e) -> ty_label(e)
+    TySet(e) -> ty_label(e)
+    TyArray(e) -> ty_label(e)
+    TyMap(k, v) -> sig_label_ty([k, v])
+    TyTuple(es) -> sig_label_ty(es)
+    TyAdt(_, args) -> sig_label_ty(args)
+    TyOpaque(_, _, _, tgt) -> ty_label(tgt)
+    _ -> ""
+  }
+
+fn sig_label_ty(ts: List[Ty]) -> String = {
+  for t in ts {
+    let n = ty_label(t)
+    if n != "" { return n }
+  }
+  ""
 }
 
 pub fn builtin_type_names() -> List[String] =
@@ -512,7 +609,7 @@ pub fn resolve_type(cx: Cx, ref: TypeRef) -> (Cx, Ty) !io =
       (cx1, TyTuple(out))
     }
     TFn(params, ret, effs, lo, hi) -> {
-      let (cx1, eff) = resolve_eff(cx, effs)
+      let (cx1, eff) = resolve_eff_at(cx, effs, lo, hi)
       var cx2 = cx1
       var ps: List[Ty] = []
       for p in params {
@@ -1021,10 +1118,16 @@ pub fn unify_into(
 }
 
 ## Effect side of unification: pure ⊑ io; declared variables accumulate a lub.
+##
+## io is the top of the *base* axis only: a parameter declared `!io` does not
+## accept a value that raises a declared effect, because nothing at that call
+## site would supply the evidence (docs/effects-design.md §4.1). An effect
+## variable does accept it -- that is what carries a labelled closure through
+## `list.map`.
 pub fn unify_eff(declared: Eff, actual: Eff, em: Map[Int, Eff]) -> (Map[Int, Eff], Bool) =
   match declared {
     EPure -> (em, actual == EPure)
-    EIo -> (em, true)
+    EIo -> (em, len(eff_labels(actual)) == 0)
     EffVar(_, id) -> {
       let prev = match map.get(em, id) {
         Some(p) -> p
@@ -1035,6 +1138,13 @@ pub fn unify_eff(declared: Eff, actual: Eff, em: Map[Int, Eff]) -> (Map[Int, Eff
     # a union in a declared parameter position is not inferred into; accept when
     # the actual is already subsumed
     EUnion(_) -> (em, eff_subsumes(subst_eff(declared, em), actual))
+    # a declared label is not inferred into either: its base unifies, and its
+    # labels have to cover the actual's
+    ELabeled(b, ls) -> {
+      let (em1, ok) = unify_eff(b, eff_base(actual), em)
+      (em1, ok && eff_subsumes(ELabeled(EPure, ls),
+        eff_with_labels(EPure, eff_labels(actual))))
+    }
   }
 
 ## A rigid type parameter of the enclosing declaration is a known type; only a
@@ -1927,6 +2037,127 @@ test "alias cycles and derive Show violations are reported at the declaration" {
   assert saw_show
 }
 
+## Pass 2.75z: register effect declarations. Each one mints an id that is at
+## once the label's identity and the id of the evidence record synthesised for
+## it -- a plain record whose fields are the operations' function types
+## (docs/effects-design.md §5.1). The operations enter the module's function
+## namespace with a signature whose effect is the label, which is what makes
+## `use m.{ask}` and `m.ask(...)` ordinary; what a call to one *compiles to* is
+## decided in check_call, off `Sig.op_of`.
+##
+## Runs after aliases resolve (an operation may name any type) and before
+## function signatures (a signature may name the effect).
+pub fn pass_effects(cx: Cx, m: Module) -> Cx !io = {
+  var cx1 = cx
+  for d in module_effects(m) {
+    if alias_shadows(cx1, d.name) {
+      cx1 = alias_shadow(cx1, d.name, d.nlo, d.nhi)
+      continue
+    }
+    if import_clashes(cx1, d.name) {
+      cx1 = import_clash(cx1, d.name, d.nlo, d.nhi, "effect")
+      continue
+    }
+    let is_builtin_name = match ty_named(d.name) {
+      Some(_) -> true
+      None -> d.name == "List" || d.name == "Map" || d.name == "Set"
+    }
+    if is_builtin_name {
+      cx1 = cerr(cx1, "`" ++ d.name ++ "` is a builtin type and cannot be an effect name",
+        d.nlo, d.nhi)
+      continue
+    }
+    if map.has(cx1.adts_by_name, d.name) || map.has(cx1.aliases, d.name) ||
+      map.has(cx1.traits_by_name, d.name) || map.has(cx1.java_classes, d.name) {
+        cx1 = cerr_h(cx1, "effect `" ++ d.name ++ "` collides with a type of the same name",
+          d.nlo, d.nhi, "effects, traits and types share one namespace; rename one")
+        continue
+      }
+    if map.has(cx1.effects, d.name) {
+      cx1 = cerr(cx1, "effect `" ++ d.name ++ "` is defined twice", d.nlo, d.nhi)
+      continue
+    }
+    let (cx2, eid) = fresh(cx1)
+    cx1 = cx2
+    let saved_tp = cx1.current_tparams
+    let saved_ev = cx1.current_eff_vars
+    let empty_tp: Map[String, Ty] = map.empty()
+    let empty_ev: Map[String, Eff] = map.empty()
+    var fields: List[FieldI] = []
+    var op_names: List[String] = []
+    var seen: Set[String] = set.empty()
+    for op in d.ops {
+      if set.has(seen, op.name) {
+        cx1 = cerr(cx1, "operation `" ++ op.name ++ "` is declared twice in effect `" ++
+            d.name ++ "`", op.nlo, op.nhi)
+        continue
+      }
+      seen = set.insert(seen, op.name)
+      cx1 = Cx { ..cx1, current_tparams: empty_tp, current_eff_vars: empty_ev }
+      var ptys: List[Ty] = []
+      for p in op.params {
+        let (cxa, t) = resolve_type(cx1, p.tref)
+        cx1 = cxa
+        ptys = ptys ++ [t]
+      }
+      let (cxb, ret) = resolve_type(cx1, op.ret)
+      cx1 = Cx { ..cxb, current_tparams: saved_tp, current_eff_vars: saved_ev }
+      # the arm is a closure the caller reaches through evidence, so what the
+      # arm's body does is recorded where the handler is installed, never here
+      let idx = len(fields)
+      fields = fields ++ [FieldI { name: op.name, ty: TyFn(ptys, ret, EPure) }]
+      op_names = op_names ++ [op.name]
+      let sig = Sig {
+        name: op.name,
+        param_tys: ptys,
+        param_names: map(op.params, p => p.name),
+        ret: ret,
+        eff: ELabeled(EPure, [(eid, d.name)]),
+        is_builtin: false,
+        tparams: [],
+        constraints: [],
+        owner: cx1.owner_class,
+        trait_id: None,
+        op_of: Some((eid, idx)),
+        inferring: false
+      }
+      if alias_shadows(cx1, op.name) {
+        cx1 = alias_shadow(cx1, op.name, op.nlo, op.nhi)
+      } else if import_clashes(cx1, op.name) {
+        cx1 = import_clash(cx1, op.name, op.nlo, op.nhi, "operation")
+      } else if map.has(cx1.fns, op.name) {
+        cx1 = cerr_h(cx1, "operation `" ++ op.name ++ "` is already a function in this module",
+          op.nlo, op.nhi, "operations and functions share one namespace; rename one")
+      } else {
+        cx1 = Cx { ..cx1, fns: map.insert(cx1.fns, op.name, sig) }
+      }
+    }
+    let rec_name = ev_record_name(d.name)
+    let info = AdtI {
+      id: eid,
+      name: rec_name,
+      is_record: true,
+      tparams: [],
+      ctors: [CtorI { adt: eid, name: rec_name, fields: fields }],
+      derives_show: false,
+      derives_ord: false,
+      owner: cx1.owner_class
+    }
+    cx1 = Cx {
+      ..cx1,
+      adts: map.insert(cx1.adts, eid, info),
+      effects: map.insert(cx1.effects, d.name, eid),
+      effect_infos: map.insert(cx1.effect_infos, eid, EffectI {
+        id: eid,
+        name: d.name,
+        owner: cx1.owner_class,
+        ops: op_names
+      })
+    }
+  }
+  cx1
+}
+
 ## Pass 2.75a: register trait headers and method signatures; methods enter the
 ## fn namespace (the Kotlin registerTraits).
 pub fn pass_register_traits(cx: Cx, m: Module) -> Cx !io = {
@@ -1973,12 +2204,22 @@ pub fn pass_register_traits(cx: Cx, m: Module) -> Cx !io = {
     let saved_tp = cx1.current_tparams
     for me in d.methods {
       var non_io = false
+      var label = ""
       for a in me.effs {
-        if a != "io" { non_io = true }
+        if a != "io" {
+          non_io = true
+          if map.has(cx1.effects, a) && label == "" { label = a }
+        }
       }
       if non_io {
-        cx1 = cerr_h(cx1, "trait methods cannot declare effect variables", me.nlo, me.nhi,
-          "a trait method is pure or !io")
+        # the fourth refusal of design §4.5: a trait method's row is pure or
+        # io, and a declared effect is neither
+        let msg = if label != "" {
+          "trait methods cannot declare the effect `" ++ label ++ "`"
+        } else {
+          "trait methods cannot declare effect variables"
+        }
+        cx1 = cerr_h(cx1, msg, me.nlo, me.nhi, "a trait method is pure or !io")
         continue
       }
       let saved_ev = cx1.current_eff_vars
@@ -1994,8 +2235,14 @@ pub fn pass_register_traits(cx: Cx, m: Module) -> Cx !io = {
       cx1 = cx5
       let leaked = map.len(cx1.current_eff_vars) > 0
       cx1 = Cx { ..cx1, current_tparams: saved_tp, current_eff_vars: saved_ev }
-      if leaked {
-        cx1 = cerr_h(cx1, "trait method signatures cannot carry effect variables", me.nlo, me.nhi,
+      let carried = sig_label(cx1, ptys, ret)
+      if leaked || carried != "" {
+        let msg3 = if carried != "" {
+          "trait method signatures cannot carry the effect `" ++ carried ++ "`"
+        } else {
+          "trait method signatures cannot carry effect variables"
+        }
+        cx1 = cerr_h(cx1, msg3, me.nlo, me.nhi,
           "write !io on the function type, or leave it pure")
         continue
       }
@@ -2011,6 +2258,7 @@ pub fn pass_register_traits(cx: Cx, m: Module) -> Cx !io = {
         constraints: [[tid]],
         owner: cx1.owner_class,
         trait_id: Some(tid),
+        op_of: None,
         inferring: false
       }
       # like top-level fns, a trait method may shadow a builtin/std name
@@ -2365,12 +2613,20 @@ pub fn pass_register_impls(
         continue
       }
       var non_io = false
+      var label2 = ""
       for a in me.effs {
-        if a != "io" { non_io = true }
+        if a != "io" {
+          non_io = true
+          if map.has(cx1.effects, a) && label2 == "" { label2 = a }
+        }
       }
       if non_io {
-        cx1 = cerr_h(cx1, "impl methods cannot declare effect variables", me.nlo, me.nhi,
-          "an impl method is pure or !io")
+        let msg2 = if label2 != "" {
+          "impl methods cannot declare the effect `" ++ label2 ++ "`"
+        } else {
+          "impl methods cannot declare effect variables"
+        }
+        cx1 = cerr_h(cx1, msg2, me.nlo, me.nhi, "an impl method is pure or !io")
         msigs = msigs ++ [no_sig()]
         continue
       }
@@ -2391,8 +2647,14 @@ pub fn pass_register_impls(
       let eff = if len(me.effs) == 0 { EPure } else { EIo }
       let leaked = map.len(cx1.current_eff_vars) > 0
       cx1 = Cx { ..cx1, current_eff_vars: saved_ev }
-      if leaked {
-        cx1 = cerr(cx1, "impl method signatures cannot carry effect variables", me.nlo, me.nhi)
+      let carried2 = sig_label(cx1, ptys, ret)
+      if leaked || carried2 != "" {
+        let msg4 = if carried2 != "" {
+          "impl method signatures cannot carry the effect `" ++ carried2 ++ "`"
+        } else {
+          "impl method signatures cannot carry effect variables"
+        }
+        cx1 = cerr(cx1, msg4, me.nlo, me.nhi)
         msigs = msigs ++ [no_sig()]
         continue
       }
@@ -2427,6 +2689,7 @@ pub fn pass_register_impls(
         constraints: iconstraints,
         owner: cx1.owner_class,
         trait_id: None,
+        op_of: None,
         inferring: false
       })]
     }
@@ -2686,7 +2949,7 @@ pub fn pass_fn_signatures(cx: Cx, m: Module) -> (Cx, List[Sig], List[Map[String,
     let saved_ev = cx1.current_eff_vars
     let empty_ev: Map[String, Eff] = map.empty()
     cx1 = Cx { ..cx1, current_tparams: tp_scope, current_eff_vars: empty_ev }
-    let (cx3, eff) = resolve_eff(cx1, d.effs)
+    let (cx3, eff) = resolve_eff_at(cx1, d.effs, d.nlo, d.nhi)
     cx1 = cx3
     let inferring = match d.ret {
       Some(_) -> false
@@ -2720,6 +2983,7 @@ pub fn pass_fn_signatures(cx: Cx, m: Module) -> (Cx, List[Sig], List[Map[String,
       constraints: constraints,
       owner: cx1.owner_class,
       trait_id: None,
+      op_of: None,
       inferring: inferring
     }
     sigs = sigs ++ [sig]
@@ -2872,6 +3136,15 @@ pub fn pass_main_check(cx: Cx, m: Module, sigs: List[Sig]) -> Cx = {
       if not d.is_pub {
         cx1 = cerr_h(cx1, "main must be pub", d.nlo, d.nhi, "write pub fn main() -> Unit !io")
       }
+      # main is the outermost frame: there is no caller to hand it evidence,
+      # so a declared effect that reaches it is one nobody ever answered
+      # (docs/effects-design.md §4.2)
+      for l in eff_labels(sig.eff) {
+        let (_, nm) = l
+        cx1 = cerr_h(cx1, "main cannot declare the effect `" ++ nm ++ "`", d.nlo, d.nhi,
+          "nothing calls main, so nothing can answer it: install the handler inside " ++
+            "main with `with handle " ++ nm ++ " { ... }`")
+      }
     }
     i = i + 1
   }
@@ -2894,6 +3167,19 @@ test "const declarations register in order with serializability checks" {
   assert len(cx.diags) == 2
   assert str.contains(cx.diags[0].msg, "not a constant-serializable type")
   assert cx.diags[1].msg == "constant `A` is defined twice"
+}
+
+test "main cannot owe a declared effect" {
+  let src = "effect Ask {\n  fn ask() -> Int\n}\n" ++
+    "pub fn main() -> Unit !Ask !io = ()\n"
+  let (m, _) = parser.parse_module(src)
+  let env: Map[String, ModExports] = map.empty()
+  let (cx1, _) = check_module(test_cx(), m, env)
+  var saw = false
+  for d in cx1.diags {
+    if d.msg == "main cannot declare the effect `Ask`" { saw = true }
+  }
+  assert saw
 }
 
 test "main shape violations are reported" {
@@ -3337,7 +3623,20 @@ test "internal builtins hide from user code but not std" {
 pub fn in_with_sugar(cx: Cx) -> Bool =
   len(cx.lambda_stack) > 0 && cx.lambda_stack[len(cx.lambda_stack) - 1].sugar
 
-## The message for a jump that would have to leave a `with` region (spec §4.10).
+## Is the innermost lambda a `with handle` arm?
+pub fn in_handler_arm(cx: Cx) -> Bool =
+  len(cx.lambda_stack) > 0 && cx.lambda_stack[len(cx.lambda_stack) - 1].arm
+
+## The message for a jump that would have to leave a `with` region (spec §4.10),
+## in the words of whichever of the two closures `with` makes it is standing in.
+pub fn with_cross_msg_cx(cx: Cx, kw: String) -> String =
+  if in_handler_arm(cx) {
+    "`" ++ kw ++ "` cannot cross a `with handle` arm: the arm is a closure the " ++
+      "handler calls, not part of the enclosing function"
+  } else {
+    with_cross_msg(kw)
+  }
+
 pub fn with_cross_msg(kw: String) -> String =
   "`" ++ kw ++ "` cannot cross the closure `with` introduced: the statements " ++
   "after `with` are that closure's body"
@@ -3353,9 +3652,14 @@ pub fn return_target(cx: Cx, lo: Int, hi: Int) -> (Cx, Option[Ty]) = {
     # when the `with` block is itself in tail position, and nothing on the page
     # says which case the reader is in.
     if in_with_sugar(cx) {
-      return (cerr_h(cx, with_cross_msg("return"), lo, hi,
+      let hint = if in_handler_arm(cx) {
+        "drop the `return` — the arm's last expression is what the operation call " ++
+          "hands back"
+      } else {
         "drop the `return` — the block's last expression is already what the " ++
-          "`with` call hands back"), None)
+          "`with` call hands back"
+      }
+      return (cerr_h(cx, with_cross_msg_cx(cx, "return"), lo, hi, hint), None)
     }
     let lc = cx.lambda_stack[len(cx.lambda_stack) - 1]
     match lc.expected_ret {
@@ -3387,9 +3691,14 @@ pub fn check_loop_jump(cx: Cx, kw: String, lo: Int, hi: Int) -> (Cx, Bool) = {
   let depth = cx.loop_stack[len(cx.loop_stack) - 1]
   if depth != len(cx.lambda_stack) {
     if in_with_sugar(cx) {
-      return (cerr_h(cx, with_cross_msg(kw), lo, hi,
+      let hint = if in_handler_arm(cx) {
+        "the loop is outside the arm; an arm is called from wherever the operation " ++
+          "is raised, which need not be inside any loop"
+      } else {
         "the loop is outside that closure; move the `with` inside the loop body, " ++
-          "or call the resource-using part as its own function"), false)
+          "or call the resource-using part as its own function"
+      }
+      return (cerr_h(cx, with_cross_msg_cx(cx, kw), lo, hi, hint), false)
     }
     return (cerr_h(cx, "`" ++ kw ++ "` cannot cross a lambda boundary to reach the loop outside",
       lo, hi, "a lambda is its own function: use `return` to exit it, or restructure the loop"),
@@ -3501,6 +3810,7 @@ test "propagate demands matching option and result shapes" {
     constraints: [],
     owner: None,
     trait_id: None,
+    op_of: None,
     inferring: false
   }
   cx = Cx { ..cx, current_sig: Some(ret_sig) }
@@ -3523,7 +3833,13 @@ test "loop jumps respect lambda boundaries" {
   assert ok2
   cx = Cx {
     ..cx,
-    lambda_stack: [LambdaCx { boundary: 0, expected_ret: None, captures: [], sugar: false }]
+    lambda_stack: [LambdaCx {
+      boundary: 0,
+      expected_ret: None,
+      captures: [],
+      sugar: false,
+      arm: false
+    }]
   }
   let (cx3, ok3) = check_loop_jump(cx, "continue", 0, 8)
   assert not ok3
@@ -4331,6 +4647,10 @@ pub type ModExports = {
   all_names: List[String],
   src_path: Option[String],
   traits_by_name: Map[String, Int],
+  # declared effects by name, and the whole id-keyed table (grafted like the
+  # ADT table is: an effect id has to mean the same thing in every module)
+  effects: Map[String, Int],
+  effect_infos: Effects,
   impls: List[ImplI],
   adt_infos: Map[Int, AdtI],
   trait_infos: Map[Int, TraitI]
@@ -4404,7 +4724,14 @@ pub fn pass_imports(cx: Cx, m: Module, env: Map[String, ModExports]) -> Cx = {
         None -> ()
       }
     }
-    cx1 = Cx { ..cx1, adts: adts2, traits: traits2 }
+    var effs2 = cx1.effect_infos
+    for k in map.keys(exp.effect_infos) {
+      match map.get(exp.effect_infos, k) {
+        Some(v) -> { effs2 = map.insert(effs2, k, v) }
+        None -> ()
+      }
+    }
+    cx1 = Cx { ..cx1, adts: adts2, traits: traits2, effect_infos: effs2 }
     match u.selective {
       None -> {
         match map.get(cx1.module_aliases, u.alias_name) {
@@ -4456,7 +4783,9 @@ fn inject_selective(
   let ct = map.get(exp.ctors, name)
   let al = map.get(exp.aliases, name)
   let tr = map.get(exp.traits_by_name, name)
-  let nothing = f == None && ty == None && cn == None && ct == None && al == None && tr == None
+  let ef = map.get(exp.effects, name)
+  let nothing = f == None && ty == None && cn == None && ct == None && al == None &&
+    tr == None && ef == None
   if nothing {
     var known = false
     for n in exp.all_names {
@@ -4467,7 +4796,7 @@ fn inject_selective(
         lo, hi, "add `pub` to its declaration in " ++ from_path)
     }
     let pool = map.keys(exp.fns) ++ map.keys(exp.types_by_name) ++ map.keys(exp.consts) ++
-      map.keys(exp.ctors) ++ map.keys(exp.traits_by_name)
+      map.keys(exp.ctors) ++ map.keys(exp.traits_by_name) ++ map.keys(exp.effects)
     return cerr_o(cx1, "module `" ++ from_path ++ "` has no exported name `" ++ name ++ "`",
       lo, hi, suggest.hint(name, pool))
   }
@@ -4530,6 +4859,20 @@ fn inject_selective(
     Some(tid) -> { cx1 = Cx { ..cx1, traits_by_name: map.insert(cx1.traits_by_name, name, tid) } }
     None -> ()
   }
+  # an imported effect brings its operations, as a type brings its
+  # constructors: `use m.{Ask}` is what makes both `!Ask` and `ask()` sayable
+  match ef {
+    Some(eid) -> {
+      cx1 = Cx { ..cx1, effects: map.insert(cx1.effects, name, eid) }
+      for op in effect_of(cx1, eid).ops {
+        match map.get(exp.fns, op) {
+          Some(sg) -> { cx1 = Cx { ..cx1, fns: map.insert(cx1.fns, op, sg) } }
+          None -> ()
+        }
+      }
+    }
+    None -> ()
+  }
   cx1
 }
 
@@ -4539,6 +4882,7 @@ fn inject_selective(
 ## initializers, unsafe_pure). The Kotlin originals save/restore the checker's
 ## mutable members; here the frame is just the old values.
 pub type EffFrame = {
+  isolated: Bool,
   used: List[Eff],
   witness: Map[Eff, (Int, Int, String)],
   sig: Option[Sig],
@@ -4552,6 +4896,7 @@ pub type EffFrame = {
 ## empty effect record (the Kotlin checkComptimeBody's prologue).
 pub fn enter_isolated(cx: Cx) -> (Cx, EffFrame) = {
   let frame = EffFrame {
+    isolated: cx.isolated,
     used: cx.used_effects,
     witness: cx.eff_witness,
     sig: cx.current_sig,
@@ -4571,7 +4916,8 @@ pub fn enter_isolated(cx: Cx) -> (Cx, EffFrame) = {
     dict_syms: empty_d,
     scopes: [fresh_scope],
     lambda_stack: [],
-    loop_stack: []
+    loop_stack: [],
+    isolated: true
   }, frame)
 }
 
@@ -4584,8 +4930,14 @@ pub fn leave_isolated(cx: Cx, frame: EffFrame, what: String, blo: Int, bhi: Int)
       Some(w) -> w
       None -> (blo, bhi, "?")
     }
+    let hint = if len(eff_labels(used)) > 0 {
+      "compile-time evaluation cannot raise a declared effect; v1 has no handlers " ++
+        "at comptime (docs/effects-design.md §4.5)"
+    } else {
+      "compile-time evaluation cannot perform io (spec §7.2)"
+    }
     cx1 = cerr_h(cx1, what ++ " must be pure, but `" ++ name ++ "` is !" ++ eff_show(used),
-      wlo, whi, "compile-time evaluation cannot perform io (spec §7.2)")
+      wlo, whi, hint)
   }
   Cx {
     ..cx1,
@@ -4595,25 +4947,10 @@ pub fn leave_isolated(cx: Cx, frame: EffFrame, what: String, blo: Int, bhi: Int)
     dict_syms: frame.dicts,
     scopes: frame.scopes,
     lambda_stack: frame.lambdas,
-    loop_stack: frame.loops
+    loop_stack: frame.loops,
+    isolated: frame.isolated
   }
 }
-
-## Render one effect for messages ("io", "e", "(e1|e2)").
-fn eff_show(e: Eff) -> String =
-  match e {
-    EPure -> ""
-    EIo -> "io"
-    EffVar(n, _) -> n
-    EUnion(vs) -> {
-      var names: List[String] = []
-      for v in vs {
-        let (_, n) = v
-        names = names ++ [n]
-      }
-      "(" ++ join(sort(names), "|") ++ ")"
-    }
-  }
 
 test "isolated contexts capture and report their effects" {
   var cx = test_cx()
@@ -4735,6 +5072,21 @@ pub fn check_fn_value(
   lo: Int,
   hi: Int
 ) -> (Cx, Ty, TExpr) = {
+  # A declared effect is served by a hidden parameter, and a function value
+  # has nowhere to put one: the wrapper is a lambda, and a lambda captures its
+  # evidence. So the language asks for the lambda rather than synthesising it
+  # -- the same answer trait bounds get, one line above.
+  if len(eff_labels(f.eff)) > 0 {
+    let ps2 = join(f.param_names, ", ")
+    let what = match f.op_of {
+      Some(_) -> "effect operation `" ++ name ++ "`"
+      None -> "`" ++ name ++ "`"
+    }
+    return (cerr_h(cx, what ++ " raises !" ++ eff_show(eff_with_labels(EPure, eff_labels(f.eff))) ++
+        " and cannot be used as a value", lo, hi,
+      "wrap it in a lambda: (" ++ ps2 ++ ") => " ++ name ++ "(" ++ ps2 ++ ")"),
+      TyError, XError(lo, hi))
+  }
   var has_bounds = false
   for bs in f.constraints {
     if len(bs) > 0 { has_bounds = true }
@@ -4827,7 +5179,7 @@ test "fn values instantiate from the expected type" {
   let bounded = Sig {
     name: "sortish", param_tys: [TyList(tv)], param_names: ["xs"], ret: TyList(tv),
     eff: EPure, is_builtin: true, tparams: [tv], constraints: [[ORD_ID]],
-    owner: None, trait_id: None, inferring: false
+    owner: None, trait_id: None, op_of: None, inferring: false
   }
   let (cx3, t3, _) = check_fn_value(cx, "sortish", bounded, None, 0, 4)
   assert cx3.diags[0].msg == "`sortish` has trait bounds and cannot be used as a value"
@@ -5538,6 +5890,8 @@ fn check_expr_at(cx: Cx, e: Expr, expected: Option[Ty]) -> (Cx, Ty, TExpr) !io =
       if ok { (cx1, TyNever, XContinue(lo, hi)) } else { (cx1, TyError, XError(lo, hi)) }
     }
     EBlock(stmts, tail, lo, hi) -> check_block(cx, stmts, tail, expected, lo, hi)
+    EHandle(name, arms, rest, nlo, nhi, lo, hi) ->
+      check_handle(cx, name, arms, rest, nlo, nhi, lo, hi, expected)
     EComptime(body, lo, hi) -> {
       let (cx1, frame) = enter_isolated(cx)
       let (cx2, t, bx) = check_expr(cx1, body, expected)
@@ -5554,7 +5908,8 @@ fn check_expr_at(cx: Cx, e: Expr, expected: Option[Ty]) -> (Cx, Ty, TExpr) !io =
     EUnsafePure(body, lo, hi) -> check_unsafe_pure(cx, body, expected, lo, hi)
     ECtor(cname, cargs, spread, has_parens, cclo, cchi, lo, hi) ->
       check_ctor_call(cx, cname, cargs, spread, has_parens, expected, None, cclo, cchi, lo, hi)
-    ELambda(params, body, sugar, lo, hi) -> check_lambda(cx, params, body, sugar, expected, lo, hi)
+    ELambda(params, body, sugar, lo, hi) ->
+      check_lambda(cx, params, body, sugar, false, expected, lo, hi)
     EApply(target, args, lo, hi) -> check_apply(cx, target, args, expected, lo, hi)
     EMethod(target, name, args, nlo, nhi, lo, hi) ->
       check_method_call(cx, target, name, args, expected, nlo, nhi, lo, hi)
@@ -5788,6 +6143,19 @@ fn check_unsafe_pure(cx: Cx, body: Expr, expected: Option[Ty], lo: Int, hi: Int)
   let (cx1, t, bx) = check_expr(Cx { ..cx, used_effects: [], eff_witness: empty_w }, body, expected)
   let inner = cx1.used_effects
   var cx2 = Cx { ..cx1, used_effects: saved_used, eff_witness: saved_wit }
+  # the stamp vouches that a concrete io effect is absent, and that is all it
+  # can vouch for: a declared effect is served by evidence, and masking it
+  # would leave a call with a parameter nothing fills (design §4.5)
+  for u in inner {
+    let ls = eff_labels(u)
+    if len(ls) > 0 {
+      let (wlo, whi, wname) = match map.get(cx1.eff_witness, u) {
+        Some(w) -> w
+        None -> (lo, hi, "?")
+      }
+      cx2 = record_effect(cx2, eff_with_labels(EPure, ls), wlo, whi, wname)
+    }
+  }
   var poly: Option[Eff] = None
   for u in inner {
     match u {
@@ -5826,6 +6194,7 @@ fn check_lambda(
   params: List[LambdaParam],
   body: Expr,
   sugar: Bool,
+  arm: Bool,
   expected: Option[Ty],
   lo: Int,
   hi: Int
@@ -5889,7 +6258,13 @@ fn check_lambda(
   let exp_ret: Option[Ty] =
     if have_exp && is_concrete(cx1, eret) { Some(eret) } else { None }
   let ctx =
-    LambdaCx { boundary: len(cx1.scopes), expected_ret: exp_ret, captures: [], sugar: sugar }
+    LambdaCx {
+      boundary: len(cx1.scopes),
+      expected_ret: exp_ret,
+      captures: [],
+      sugar: sugar,
+      arm: arm
+    }
   cx1 = Cx {
     ..cx1,
     used_effects: [],
@@ -5915,6 +6290,169 @@ fn check_lambda(
   cx3 = Cx { ..cx3, used_effects: saved_used, eff_witness: saved_wit }
   let t = TyFn(ptys, bt, lam_eff)
   (cx3, t, XLambda(psyms, pnames, bx, popped.captures, lo, hi, t))
+}
+
+## The label a `with handle` discharges, taken off a row (design §4.3).
+fn eff_minus(e: Eff, eid: Int) -> Eff = {
+  var ls: List[(Int, String)] = []
+  for l in eff_labels(e) {
+    let (id, _) = l
+    if id != eid { ls = ls ++ [l] }
+  }
+  eff_with_labels(eff_base(e), ls)
+}
+
+fn fn_ty_parts(t: Ty) -> (List[Ty], Ty, Eff) =
+  match t {
+    TyFn(ps, r, ef) -> (ps, r, ef)
+    _ -> ([], TyError, EPure)
+  }
+
+## `with handle E { op(..) => ... }` and the rest of its block
+## (docs/effects-design.md §3.3 and §4.3).
+##
+## Three things happen here and nowhere else. The arms are checked *before*
+## the evidence is bound, so an arm raising the effect it answers reaches the
+## outer handler rather than itself (§4.4). The evidence is an ordinary local
+## under an unspellable name, so the remainder closure captures it the way it
+## captures anything else -- which is the whole of what makes a closure that
+## escapes the block keep answering to this handler. And the block is charged
+## with the remainder's effects *minus* E, plus everything the arms do: this
+## node is the only place in the language where an effect row loses a member.
+fn check_handle(
+  cx: Cx,
+  name: String,
+  arms: List[HandlerArm],
+  rest: Expr,
+  nlo: Int,
+  nhi: Int,
+  lo: Int,
+  hi: Int,
+  expected: Option[Ty]
+) -> (Cx, Ty, TExpr) !io = {
+  var cx1 = cx
+  if cx1.isolated {
+    cx1 = cerr_h(cx1, "`with handle` is not available at compile time", lo, hi,
+      "comptime blocks and const initializers are pure in v1 " ++
+        "(docs/effects-design.md §4.5)")
+  }
+  let eid = match map.get(cx1.effects, name) {
+    Some(id) -> id
+    None -> {
+      cx1 = cerr_o(cx1, "unknown effect `" ++ name ++ "`", nlo, nhi,
+        suggest.hint(name, map.keys(cx1.effects)))
+      let (cxr, rt, rx) = check_expr(cx1, rest, rest_expected(expected))
+      let (_, rret, _) = fn_ty_parts(rt)
+      return (cxr, rret, XApply(rx, [], lo, hi, rret))
+    }
+  }
+  let info = effect_of(cx1, eid)
+  let rec = adt_of(cx1.adts, eid).ctors[0]
+  # one arm per declared operation: no fewer, no more, none unknown
+  var chosen: List[Option[HandlerArm]] = []
+  for _o in info.ops { chosen = chosen ++ [no_arm()] }
+  for a in arms {
+    match op_index(info.ops, a.name) {
+      None -> {
+        cx1 = cerr_o(cx1, "`" ++ a.name ++ "` is not an operation of effect `" ++ name ++ "`",
+          a.nlo, a.nhi, suggest.hint(a.name, info.ops))
+      }
+      Some(idx) ->
+        match chosen[idx] {
+          Some(_) -> {
+            cx1 = cerr(cx1, "operation `" ++ a.name ++ "` is answered twice", a.nlo, a.nhi)
+          }
+          None -> { chosen = list.take(chosen, idx) ++ [Some(a)] ++ list.drop(chosen, idx + 1) }
+        }
+    }
+  }
+  var missing: List[String] = []
+  var i = 0
+  for o in info.ops {
+    match chosen[i] {
+      None -> { missing = missing ++ [o] }
+      Some(_) -> ()
+    }
+    i = i + 1
+  }
+  if len(missing) > 0 {
+    cx1 = cerr_h(cx1, "handler for `" ++ name ++ "` does not answer " ++
+        join(map(missing, o => "`" ++ o ++ "`"), ", "), nlo, nhi,
+      "a handler answers every operation its effect declares")
+  }
+  # the arms, each against the operation's own signature. Their own effects
+  # are charged to this block: an arm's body runs where the handler was
+  # installed, not where the operation was raised
+  var arm_nodes: List[TExpr] = []
+  var slots: List[Option[Int]] = []
+  var k = 0
+  for o in info.ops {
+    let field = rec.fields[k]
+    let (fptys, fret, _) = fn_ty_parts(field.ty)
+    let node = match chosen[k] {
+      None -> XError(nlo, nhi)
+      Some(a) -> {
+        var cxa = cx1
+        if len(a.params) != len(fptys) {
+          cxa = cerr_h(cxa, "arm `" ++ a.name ++ "` takes " ++ to_string(len(a.params)) ++
+              " parameter(s), but operation `" ++ a.name ++ "` declares " ++
+              to_string(len(fptys)), a.nlo, a.nhi,
+            "the arm is the operation's body: " ++ ty_show(cxa.adts, field.ty))
+        }
+        let (cxb, at, ax) = check_lambda(cxa, a.params, a.body, true, true,
+          Some(field.ty), a.lo, a.hi)
+        cxa = cxb
+        let (_, aret, aeff) = fn_ty_parts(at)
+        if not assignable(cxa, aret, fret) {
+          cxa = cerr(cxa, "arm `" ++ a.name ++ "` returns " ++ ty_show(cxa.adts, aret) ++
+              " but operation `" ++ a.name ++ "` declares " ++ ty_show(cxa.adts, fret),
+            e_lo(a.body), e_hi(a.body))
+        }
+        cxa = record_effect(cxa, aeff, a.nlo, a.nhi, a.name)
+        cx1 = cxa
+        ax
+      }
+    }
+    arm_nodes = arm_nodes ++ [node]
+    slots = slots ++ [Some(k)]
+    k = k + 1
+  }
+  let ev_ty = TyAdt(eid, [])
+  let ev_node = XCtor(eid, 0, arm_nodes, slots, no_expr(), lo, hi, ev_ty)
+  # the evidence is in scope for the remainder only, which is exactly the
+  # region `handle` claims
+  cx1 = push_scope(cx1)
+  let ev_name = ev_local_name(cx1, eid)
+  let (cx2, ev_sym) = declare(cx1, ev_name, ev_ty, false, nlo, nhi)
+  cx1 = cx2
+  let (cx3, rt, rx) = check_expr(cx1, rest, rest_expected(expected))
+  cx1 = pop_scope(cx3)
+  let (_, rret, reff) = fn_ty_parts(rt)
+  cx1 = record_effect(cx1, eff_minus(reff, eid), lo, hi, "the block after `with handle`")
+  let call = XApply(rx, [], lo, hi, rret)
+  (cx1, rret,
+    XBlock([TSLet(Some(ev_sym), ev_name, ev_node, lo, hi)], Some(call), lo, hi, rret))
+}
+
+fn no_arm() -> Option[HandlerArm] = None
+
+fn no_expr() -> Option[TExpr] = None
+
+## The remainder closure takes no parameters and hands back the block's value,
+## so an expected type for the block is an expected type for the closure.
+fn rest_expected(expected: Option[Ty]) -> Option[Ty] =
+  match expected {
+    Some(t) -> Some(TyFn([], t, EPure))
+    None -> None
+  }
+
+fn op_index(ops: List[String], name: String) -> Option[Int] = {
+  var i = 0
+  for o in ops {
+    if o == name { return Some(i) }
+    i = i + 1
+  }
+  None
 }
 
 fn named_arg_hint() -> String =
@@ -6393,7 +6931,7 @@ fn check_local_fn(
   let ft = TyFn(ptys, ret, eff)
   let (cxc, sid) = declare(cx1, name, ft, false, nlo, nhi)
   cx1 = cxc
-  let (cxd, actual, lam) = check_lambda(cx1, params, body, false, Some(ft), lo, hi)
+  let (cxd, actual, lam) = check_lambda(cx1, params, body, false, false, Some(ft), lo, hi)
   cx1 = cxd
   match actual {
     TyFn(_, ar, ae) -> {
@@ -6686,14 +7224,7 @@ fn check_call(
     }
   }
   # instantiate the callee's effect: an unbound effect variable means pure
-  let callee_eff = match s.eff {
-    EffVar(_, eid) ->
-      match map.get(em, eid) {
-        Some(ef) -> ef
-        None -> EPure
-      }
-    _ -> s.eff
-  }
+  let callee_eff = instantiate_eff(s.eff, em)
   cx1 = record_effect(cx1, callee_eff, clo, chi, callee)
   let ret = subst(s.ret, m, em)
   var txs2: List[TExpr] = []
@@ -6703,12 +7234,80 @@ fn check_call(
       None -> { txs2 = txs2 ++ [XError(lo, hi)] }
     }
   }
+  # the evidence the callee's *written* labels need, in effect-id order. A
+  # label that arrived by instantiating an effect variable is not here on
+  # purpose: that effect belongs to a closure the caller handed over, and the
+  # closure carries its own evidence in its captures (design §5.2 step 4).
+  let (cxv, evs) = evidence_args(cx1, s.eff, clo, chi)
+  cx1 = cxv
   let node = if s.is_builtin {
     XCallBuiltin(callee, txs2, wits, lo, hi, ret)
   } else {
-    XCallFn(s.owner, callee, txs2, wits, s.trait_id, lo, hi, ret)
+    match s.op_of {
+      # an operation call is a field read off the evidence plus a closure
+      # call: there is no symbol named `ask` anywhere in the output
+      Some(pr) -> {
+        let (eid, idx) = pr
+        let recv = if len(evs) == 1 { evs[0] } else { XError(lo, hi) }
+        XApply(XField(recv, idx, clo, chi, TyFn(s.param_tys, s.ret, EPure)), txs2, lo, hi, ret)
+      }
+      None -> XCallFn(s.owner, callee, txs2, wits, evs, s.trait_id, lo, hi, ret)
+    }
   }
   (cx1, ret, node)
+}
+
+## Instantiate a callee's declared effect at a call site: an unbound effect
+## variable means pure, and labels ride through unchanged.
+fn instantiate_eff(e: Eff, em: Map[Int, Eff]) -> Eff =
+  match e {
+    EffVar(_, eid) ->
+      match map.get(em, eid) {
+        Some(ef) -> ef
+        None -> EPure
+      }
+    ELabeled(b, ls) -> eff_union([instantiate_eff(b, em), ELabeled(EPure, ls)])
+    _ -> e
+  }
+
+## Resolve one evidence value per label written in `declared`, in effect-id
+## order. A label with nothing to answer it is the "nobody is handling this"
+## error, reported here -- at the call that raises it, which is the only place
+## that knows which call it was.
+fn evidence_args(cx: Cx, declared: Eff, lo: Int, hi: Int) -> (Cx, List[TExpr]) = {
+  var cx1 = cx
+  var out: List[TExpr] = []
+  for l in eff_labels(declared) {
+    let (eid, _) = l
+    let nm = ev_local_name(cx1, eid)
+    let (cxa, found) = resolve_local(cx1, nm, lo, hi, false)
+    cx1 = cxa
+    match found {
+      Some(sid) -> { out = out ++ [XLocal(sid, nm, lo, hi, TyAdt(eid, []))] }
+      None -> {
+        # inside comptime the refusal belongs to `leave_isolated`, which says
+        # what the construct is; saying "declare it" there would be advice
+        # that cannot be taken
+        if not cx1.isolated { cx1 = unhandled_effect(cx1, eid, lo, hi) }
+        out = out ++ [XError(lo, hi)]
+      }
+    }
+  }
+  (cx1, out)
+}
+
+## docs/effects-design.md §4.2: the effect is used, and nothing in scope
+## answers it. Either the signature admits it, or a handler discharges it.
+fn unhandled_effect(cx: Cx, eid: Int, lo: Int, hi: Int) -> Cx = {
+  let nm = effect_of(cx, eid).name
+  let who = match cx.current_sig {
+    Some(sg) -> "`" ++ sg.name ++ "`"
+    None -> "this code"
+  }
+  cerr_h(cx, who ++ " uses the effect `" ++ nm ++ "`, but its signature does not declare !" ++ nm,
+    lo, hi,
+    "add !" ++ nm ++ " to the signature, or answer it here with `with handle " ++ nm ++
+      " { ... }`")
 }
 
 ## Ctor(args) / Record { fields } / bare Name (the Kotlin checkCtorCall): also
@@ -8652,7 +9251,36 @@ fn enter_fn(cx: Cx, s: Sig, ev: Map[String, Eff], nlo: Int, nhi: Int) -> Cx = {
     loop_stack: [],
     scopes: []
   }
-  push_scope(cx1)
+  bind_evidence(push_scope(cx1), s, nlo, nhi)
+}
+
+## Bind one hidden evidence parameter per declared effect in the signature, in
+## effect-id order (docs/effects-design.md §5.2 step 1). They are ordinary
+## locals under an unspellable name, so an operation call inside a lambda
+## reaches them through the same capture bookkeeping every other local uses --
+## which is the whole of what makes an escaping closure keep its handler.
+fn bind_evidence(cx: Cx, s: Sig, nlo: Int, nhi: Int) -> Cx = {
+  var cx1 = cx
+  for l in eff_labels(s.eff) {
+    let (eid, _) = l
+    let (cx2, _) = declare(cx1, ev_local_name(cx1, eid), TyAdt(eid, []), false, nlo, nhi)
+    cx1 = cx2
+  }
+  cx1
+}
+
+## The signature's evidence symbols in effect-id order (lowering appends them
+## behind the dictionaries in exactly this order).
+fn ev_sym_list(cx: Cx, s: Sig) -> List[Int] = {
+  var out: List[Int] = []
+  for l in eff_labels(s.eff) {
+    let (eid, _) = l
+    match lookup(cx, ev_local_name(cx, eid)) {
+      Some(sid) -> { out = out ++ [sid] }
+      None -> ()
+    }
+  }
+  out
 }
 
 ## The signature is the promise: every used effect must be subsumed by the
@@ -8669,14 +9297,19 @@ fn verify_effects(
 ) -> Cx = {
   var cx1 = cx
   for used in cx.used_effects {
-    if not eff_subsumes(declared, used) {
+    # the label axis answers for itself: a declared effect raised where no
+    # evidence is in scope is reported at the raise site, in the words of
+    # docs/effects-design.md §4.2, and repeating it here would say the same
+    # thing twice about the same call
+    let base = eff_base(used)
+    if not eff_subsumes(eff_base(declared), base) {
       let (wlo, whi, wname) = match map.get(cx.eff_witness, used) {
         Some(w) -> w
         None -> (nlo, nhi, "?")
       }
-      cx1 = cerr_h(cx1, kind ++ " `" ++ name ++ "` is not declared !" ++ eff_show(used) ++
-          " but calls `" ++ wname ++ "` (!" ++ eff_show(used) ++ ")", wlo, whi,
-        "add !" ++ eff_show(used) ++ " to " ++ where2 ++ ", or remove the call")
+      cx1 = cerr_h(cx1, kind ++ " `" ++ name ++ "` is not declared !" ++ eff_show(base) ++
+          " but calls `" ++ wname ++ "` (!" ++ eff_show(base) ++ ")", wlo, whi,
+        "add !" ++ eff_show(base) ++ " to " ++ where2 ++ ", or remove the call")
     }
   }
   cx1
@@ -8702,12 +9335,14 @@ pub fn check_fn(cx: Cx, d: FnDecl, s: Sig, ev: Map[String, Eff]) -> (Cx, TFun) !
   }
   cx1 = verify_effects(cx1, "function", d.name, s.eff, "the end of the signature", d.nlo, d.nhi)
   let dsyms = dict_sym_list(cx1, s)
+  let esyms = ev_sym_list(cx1, s)
   cx1 = pop_scope(cx1)
   (cx1, TFun {
     name: d.name,
     sig: s,
     param_syms: psyms,
     dict_syms: dsyms,
+    ev_syms: esyms,
     body: bx,
     is_test: false,
     impl_of: None,
@@ -8732,7 +9367,13 @@ pub fn check_fn_inferred(cx: Cx, d: FnDecl, s: Sig, ev: Map[String, Eff]) -> (Cx
   cx1 = cx2
   var final_eff = EPure
   if len(d.effs) == 0 {
-    final_eff = eff_union(cx1.used_effects)
+    # Effect *variables* and io are inferred; a declared effect is not. Its
+    # evidence parameter is synthesised from the written signature, and a
+    # label that appeared only after the body was checked would have no
+    # parameter to arrive through. Every such label was already refused where
+    # it was raised (no evidence was in scope to raise it with), so the seal
+    # keeps the base row only.
+    final_eff = eff_base(eff_union(cx1.used_effects))
   } else {
     # the registration pass resolved the declared effect
     cx1 = verify_effects(cx1, "function", d.name, s.eff, "the end of the signature", d.nlo, d.nhi)
@@ -8740,6 +9381,7 @@ pub fn check_fn_inferred(cx: Cx, d: FnDecl, s: Sig, ev: Map[String, Eff]) -> (Cx
   }
   let sealed = Sig { ..s, ret: bt, eff: final_eff, inferring: false }
   let dsyms = dict_sym_list(cx1, s)
+  let esyms = ev_sym_list(cx1, s)
   var cx3 = pop_scope(cx1)
   if map.get(cx3.fns, d.name) == Some(s) {
     cx3 = Cx { ..cx3, fns: map.insert(cx3.fns, d.name, sealed) }
@@ -8750,6 +9392,7 @@ pub fn check_fn_inferred(cx: Cx, d: FnDecl, s: Sig, ev: Map[String, Eff]) -> (Cx
       sig: sealed,
       param_syms: psyms,
       dict_syms: dsyms,
+      ev_syms: esyms,
       body: bx,
       is_test: false,
       impl_of: None,
@@ -8779,12 +9422,14 @@ pub fn check_trait_default(cx: Cx, m2: TraitMethod, s: Sig, body: Expr) -> (Cx, 
   }
   cx1 = verify_effects(cx1, "method", m2.name, s.eff, "the trait method", m2.nlo, m2.nhi)
   let dsyms = dict_sym_list(cx1, s)
+  let esyms = ev_sym_list(cx1, s)
   cx1 = pop_scope(cx1)
   (cx1, TFun {
     name: m2.name,
     sig: s,
     param_syms: psyms,
     dict_syms: dsyms,
+    ev_syms: esyms,
     body: bx,
     is_test: false,
     impl_of: None,
@@ -8804,6 +9449,7 @@ fn test_sig(name: String) -> Sig =
     constraints: [],
     owner: None,
     trait_id: None,
+    op_of: None,
     inferring: false
   }
 
@@ -8841,6 +9487,7 @@ pub fn check_test(cx: Cx, name: String, body: Expr) -> (Cx, TFun) !io = {
     sig: test_sig(name),
     param_syms: [],
     dict_syms: [],
+    ev_syms: [],
     body: bx,
     is_test: true,
     impl_of: None,
@@ -8888,6 +9535,7 @@ pub fn check_module(cx: Cx, m: Module, env: Map[String, ModExports]) -> (Cx, TMo
   let (cxa, shells) = pass_type_shells(cx1, m)
   cx1 = cxa
   cx1 = pass_ctor_fields(cx1, m, shells)
+  cx1 = pass_effects(cx1, m)
   cx1 = pass_resolve_aliases(cx1)
   cx1 = pass_register_traits(cx1, m)
   let (cxb, impl_sigs) = pass_register_impls(cx1, m, shells)
@@ -9278,6 +9926,249 @@ test "check_module: type declarations refuse effect variables" {
   assert len(cx4.diags) == 0
 }
 
+# ---- effect handlers (docs/effects-design.md) ----
+
+fn eff_src(body: String) -> String = "effect Ask {\n  fn ask() -> Int\n}\n" ++ body
+
+fn eff_check(body: String) -> Cx !io = {
+  let (m, _) = parser.parse_module(eff_src(body))
+  let env: Map[String, ModExports] = map.empty()
+  let (cx1, _) = check_module(test_cx(), m, env)
+  cx1
+}
+
+test "an effect declaration synthesises an evidence record and an operation" {
+  let (m, pdiags) = parser.parse_module(eff_src(""))
+  assert len(pdiags) == 0
+  let env: Map[String, ModExports] = map.empty()
+  let (cx1, _) = check_module(test_cx(), m, env)
+  assert len(cx1.diags) == 0
+  let eid = map.get(cx1.effects, "Ask").expect("Ask is declared")
+  # the label's id IS the evidence record's ADT id: one identity, one table
+  let rec = adt_of(cx1.adts, eid)
+  assert rec.name == "ev\$Ask"
+  assert rec.is_record
+  assert rec.ctors[0].fields[0].name == "ask"
+  assert rec.ctors[0].fields[0].ty == TyFn([], TyInt, EPure)
+  # the operation is an ordinary name in the function namespace, and its own
+  # effect is the label
+  let sg = map.get(cx1.fns, "ask").expect("ask is in scope")
+  assert sg.eff == ELabeled(EPure, [(eid, "Ask")])
+  assert sg.op_of == Some((eid, 0))
+}
+
+test "an operation raised with nobody answering names the effect, not the row" {
+  let cx = eff_check("fn f() -> Int = ask()\n")
+  assert len(cx.diags) == 1
+  assert cx.diags[0].msg == "`f` uses the effect `Ask`, but its signature does not declare !Ask"
+  assert cx.diags[0].hint ==
+    "add !Ask to the signature, or answer it here with `with handle Ask { ... }`"
+  # declaring it is one of the two ways out
+  let cx2 = eff_check("fn f() -> Int !Ask = ask()\n")
+  assert len(cx2.diags) == 0
+  # and answering it is the other
+  let cx3 = eff_check("fn f() -> Int = {\n  with handle Ask { ask() => 1 }\n  ask()\n}\n")
+  assert len(cx3.diags) == 0
+}
+
+test "a declared effect is served by a hidden evidence parameter" {
+  let (m, pdiags) = parser.parse_module(eff_src("fn f() -> Int !Ask = ask()\n"))
+  assert len(pdiags) == 0
+  let env: Map[String, ModExports] = map.empty()
+  let (cx1, tm) = check_module(test_cx(), m, env)
+  assert len(cx1.diags) == 0
+  let f = tm.fns[0]
+  assert f.name == "f"
+  # one label, so one evidence symbol -- behind the (empty) dictionary list
+  assert len(f.dict_syms) == 0
+  assert len(f.ev_syms) == 1
+  let eid = map.get(cx1.effects, "Ask").expect("Ask")
+  assert sym_of(cx1, f.ev_syms[0]).ty == TyAdt(eid, [])
+}
+
+test "io does not absorb a label, and a label does not absorb io" {
+  let eid = 77
+  let ask = ELabeled(EPure, [(eid, "Ask")])
+  # the base axis is untouched: io still swallows an effect variable
+  assert eff_union([EIo, EffVar("e", 1)]) == EIo
+  # labels never merge into io, in either direction
+  assert eff_union([EIo, ask]) == ELabeled(EIo, [(eid, "Ask")])
+  assert not eff_subsumes(EIo, ask)
+  assert eff_subsumes(ELabeled(EIo, [(eid, "Ask")]), ask)
+  assert eff_subsumes(ask, ask)
+  # and an empty label set is not representable: the normal form is the base
+  assert eff_with_labels(EIo, []) == EIo
+  assert eff_show(ELabeled(EIo, [(eid, "Ask")])) == "(Ask|io)"
+}
+
+test "the row loses E at the handle node, and only there" {
+  # the block after the handler is charged with everything but Ask
+  let cx = eff_check("fn g() -> Int !Ask = ask()\n" ++
+      "fn f() -> Int = {\n  with handle Ask { ask() => 1 }\n  g()\n}\n")
+  assert len(cx.diags) == 0
+  # what the arm itself does is charged to the block that installs it: `f` is
+  # pure, the arm is not, and the arm is where the report lands
+  let cx2 = eff_check("fn noisy() -> Int !io = 1\n" ++
+      "fn f() -> Int = {\n  with handle Ask { ask() => noisy() }\n  1\n}\n")
+  assert len(cx2.diags) == 1
+  assert cx2.diags[0].msg == "function `f` is not declared !io but calls `ask` (!io)"
+}
+
+test "an arm raising its own effect reaches the outer handler" {
+  # no outer handler: the arm owes the label like any other body
+  let cx = eff_check("fn f() -> Int = {\n" ++
+      "  with handle Ask { ask() => ask() + 1 }\n  2\n}\n")
+  assert len(cx.diags) == 1
+  assert str.contains(cx.diags[0].msg, "uses the effect `Ask`")
+  # with one, the arm binds to it
+  let cx2 = eff_check("fn f() -> Int = {\n" ++
+      "  with handle Ask { ask() => 1 }\n" ++
+      "  with handle Ask { ask() => ask() + 1 }\n  ask()\n}\n")
+  assert len(cx2.diags) == 0
+}
+
+test "a handler answers every operation its effect declares, and only those" {
+  let two = "effect St {\n  fn get() -> Int\n  fn put(v: Int) -> Unit\n}\n"
+  let env: Map[String, ModExports] = map.empty()
+  let missing = two ++ "fn f() -> Int = {\n  with handle St { get() => 1 }\n  2\n}\n"
+  let (m1, p1) = parser.parse_module(missing)
+  assert len(p1) == 0
+  let (cx1, _) = check_module(test_cx(), m1, env)
+  assert len(cx1.diags) == 1
+  assert cx1.diags[0].msg == "handler for `St` does not answer `put`"
+  # an arm that is not of the effect, and one written twice
+  let stray = two ++ "fn f() -> Int = {\n" ++
+    "  with handle St {\n    get() => 1\n    put(v) => ()\n    nope() => 1\n  }\n  2\n}\n"
+  let (m2, p2) = parser.parse_module(stray)
+  assert len(p2) == 0
+  let (cx2, _) = check_module(test_cx(), m2, env)
+  assert cx2.diags[0].msg == "`nope` is not an operation of effect `St`"
+  let twice = two ++ "fn f() -> Int = {\n" ++
+    "  with handle St {\n    get() => 1\n    put(v) => ()\n    get() => 2\n  }\n  2\n}\n"
+  let (m3, p3) = parser.parse_module(twice)
+  assert len(p3) == 0
+  let (cx3, _) = check_module(test_cx(), m3, env)
+  assert cx3.diags[0].msg == "operation `get` is answered twice"
+}
+
+test "an arm answers with the operation's own signature" {
+  let cx = eff_check("fn f() -> Int = {\n  with handle Ask { ask() => \"no\" }\n  1\n}\n")
+  assert len(cx.diags) == 1
+  assert cx.diags[0].msg == "arm `ask` returns String but operation `ask` declares Int"
+  let cx2 = eff_check("fn f() -> Int = {\n  with handle Ask { ask(x) => x }\n  1\n}\n")
+  assert str.contains(cx2.diags[0].msg, "arm `ask` takes 1 parameter(s)")
+}
+
+test "the four refusals: trait, impl, comptime, type declaration" {
+  let env: Map[String, ModExports] = map.empty()
+  let base = "effect Ask {\n  fn ask() -> Int\n}\n"
+  # a trait method's row is pure or io, and a label is neither
+  let (m1, _) = parser.parse_module(base ++ "trait W[T] {\n  fn w(x: T) -> Int !Ask\n}\n")
+  let (cx1, _) = check_module(test_cx(), m1, env)
+  assert cx1.diags[0].msg == "trait methods cannot declare the effect `Ask`"
+  # the same for an impl method
+  let (m2, _) = parser.parse_module(base ++
+      "trait W[T] {\n  fn w(x: T) -> Int\n}\n" ++
+      "type P = { v: Int }\n" ++
+      "impl W[P] {\n  fn w(x: P) -> Int !Ask = 1\n}\n")
+  let (cx2, _) = check_module(test_cx(), m2, env)
+  var saw_impl = false
+  for d in cx2.diags {
+    if d.msg == "impl methods cannot declare the effect `Ask`" { saw_impl = true }
+  }
+  assert saw_impl
+  # comptime is pure in v1, handlers included
+  let (m3, _) = parser.parse_module(base ++ "const K: Int = comptime { ask() }\n")
+  let (cx3, _) = check_module(test_cx(), m3, env)
+  var saw_ct = false
+  for d in cx3.diags {
+    if str.contains(d.msg, "must be pure, but `ask` is !Ask") { saw_ct = true }
+  }
+  assert saw_ct
+  # a type declaration refuses a label exactly as it refuses an effect variable
+  let (m4, _) = parser.parse_module(base ++ "pub type Box = { f: fn() -> Int !Ask }\n")
+  let (cx4, _) = check_module(test_cx(), m4, env)
+  assert cx4.diags[0].msg == "a type declaration cannot carry effect variables"
+}
+
+test "an operation cannot be a value, and unsafe_pure cannot mask a label" {
+  let cx = eff_check("fn f() -> Int !Ask = {\n  let g = ask\n  g()\n}\n")
+  assert cx.diags[0].msg == "effect operation `ask` raises !Ask and cannot be used as a value"
+  assert str.contains(cx.diags[0].hint, "wrap it in a lambda")
+  # unsafe_pure vouches that io is absent; evidence is not something it can vouch for
+  let (m2, p2) = parser.parse_module(eff_src("fn f() -> Int = unsafe_pure { ask() }\n"))
+  assert len(p2) == 0
+  let env: Map[String, ModExports] = map.empty()
+  let (cx2, _) = check_module(cx_new(Some("std/x"), None), m2, env)
+  var saw = false
+  for d in cx2.diags {
+    if str.contains(d.msg, "uses the effect `Ask`") { saw = true }
+  }
+  assert saw
+}
+
+test "a jump out of a handler arm names `with handle`, not a lambda" {
+  let cx = eff_check("fn f() -> Int = {\n  with handle Ask { ask() => return 4 }\n  ask()\n}\n")
+  assert len(cx.diags) == 1
+  assert cx.diags[0].msg == with_cross_msg_cx(arm_cx(), "return")
+  assert str.contains(cx.diags[0].msg, "with handle")
+  # the remainder closure keeps the words `with` had before handlers existed
+  let cx2 = eff_check("fn f() -> Int = {\n" ++
+      "  with handle Ask { ask() => 1 }\n  return ask()\n}\n")
+  assert cx2.diags[0].msg == with_cross_msg("return")
+}
+
+## A context standing inside a handler arm, for the message helpers to answer.
+fn arm_cx() -> Cx =
+  Cx {
+    ..cx_new(None, None),
+    lambda_stack: [LambdaCx {
+      boundary: 0,
+      expected_ret: None,
+      captures: [],
+      sugar: true,
+      arm: true
+    }]
+  }
+
+test "a parameter declared !io does not accept a labelled closure" {
+  # io is the top of the base axis only: nothing at the call site could supply
+  # the evidence the closure would need
+  let cx = eff_check("fn run(f: fn() -> Int !io) -> Int !io = f()\n" ++
+      "fn f() -> Int !Ask !io = run(() => ask())\n")
+  var saw = false
+  for d in cx.diags {
+    if str.contains(d.msg, "argument type mismatch") { saw = true }
+  }
+  assert saw
+  # an effect variable does accept it -- that is what carries a labelled
+  # closure through list.map
+  let cx2 = eff_check("fn run(f: fn() -> Int !e) -> Int !e = f()\n" ++
+      "fn f() -> Int !Ask = run(() => ask())\n")
+  assert len(cx2.diags) == 0
+}
+
+test "a declared effect crosses a module boundary with its operations" {
+  let src = "pub effect Ask {\n  fn ask() -> Int\n}\n"
+  let (m, pdiags) = parser.parse_module(src)
+  assert len(pdiags) == 0
+  let env0: Map[String, ModExports] = map.empty()
+  let (cx1, _) = check_module(cx_new(Some("eff"), None), m, env0)
+  assert len(cx1.diags) == 0
+  let exp = exports_of(cx1, m, "eff", "eff")
+  assert map.has(exp.effects, "Ask")
+  assert map.has(exp.fns, "ask")
+  # the importer says `!Ask` and `with handle Ask` with the same words
+  let src2 = "use eff.{Ask}\n" ++
+    "fn f() -> Int !Ask = ask()\n" ++
+    "pub fn g() -> Int = {\n  with handle Ask { ask() => 3 }\n  f()\n}\n"
+  let (m2, p2) = parser.parse_module(src2)
+  assert len(p2) == 0
+  let env = map.from([("eff", exp)])
+  let (cx2, _) = check_module(cx_new(Some("use_site"), None), m2, env)
+  assert len(cx2.diags) == 0
+}
+
 ## The pub surface of a checked module for importers (the Kotlin exportsOf).
 ## The whole ADT/trait tables ride along — extra entries graft harmlessly.
 pub fn exports_of(cx: Cx, m: Module, mod_path: String, class_name: String) -> ModExports = {
@@ -9288,6 +10179,7 @@ pub fn exports_of(cx: Cx, m: Module, mod_path: String, class_name: String) -> Mo
   var ctors2: Map[String, (Int, Int)] = map.empty()
   var consts2: Map[String, Ty] = map.empty()
   var traits2: Map[String, Int] = map.empty()
+  var effects2: Map[String, Int] = map.empty()
   var all: List[String] = []
   for d in module_fns(m) {
     all = all ++ [d.name]
@@ -9334,6 +10226,26 @@ pub fn exports_of(cx: Cx, m: Module, mod_path: String, class_name: String) -> Mo
       }
     }
   }
+  for d in module_effects(m) {
+    all = all ++ [d.name]
+    for op in d.ops { all = all ++ [op.name] }
+    if d.is_pub {
+      match map.get(cx.effects, d.name) {
+        Some(eid) -> {
+          effects2 = map.insert(effects2, d.name, eid)
+          # a pub effect brings its operations, the way a pub trait brings its
+          # methods: they are the only way to raise it
+          for op in effect_of(cx, eid).ops {
+            match map.get(cx.fns, op) {
+              Some(sg) -> { fns2 = map.insert(fns2, op, sg) }
+              None -> ()
+            }
+          }
+        }
+        None -> ()
+      }
+    }
+  }
   for d in module_traits(m) {
     all = all ++ [d.name]
     for me in d.methods { all = all ++ [me.name] }
@@ -9363,6 +10275,8 @@ pub fn exports_of(cx: Cx, m: Module, mod_path: String, class_name: String) -> Mo
     all_names: all,
     src_path: cx.src_path,
     traits_by_name: traits2,
+    effects: effects2,
+    effect_infos: cx.effect_infos,
     impls: cx.local_impls,
     adt_infos: cx.adts,
     trait_infos: cx.traits

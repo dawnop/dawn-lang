@@ -520,3 +520,43 @@ test "a parenthesised group that is not a parameter list says so" {
   let (_, ok) = parse_module("fn f() -> Int = (a + 1) * 2")
   assert len(ok) == 0
 }
+
+test "an effect declaration parses to operations with no bodies" {
+  let out = rendered("effect Ask {\n  fn ask() -> Int\n  fn tell(x: Int) -> Unit\n}")
+  assert str.contains(out, "Effect Ask pub=false")
+  assert str.contains(out, "Op ask")
+  assert str.contains(out, "Op tell")
+  # an operation carries no effect of its own, and no body
+  let (_, ds) = parse_module("effect Ask {\n  fn ask() -> Int !io\n}")
+  assert len(ds) == 1
+  assert str.contains(ds[0].msg, "cannot declare effects of its own")
+}
+
+test "`with handle` claims the rest of its block, like the binder form" {
+  let out = rendered("fn f() -> Int = {\n  with handle Ask { ask() => 1 }\n  g()\n  h()\n}")
+  assert str.contains(out, "Handle Ask")
+  assert str.contains(out, "Arm ask")
+  # the remainder is the same synthesized closure `with x <- f()` builds
+  assert str.contains(out, "Lambda(with)")
+}
+
+test "`handle` is contextual: `with handle <-` is still a binder" {
+  let out = rendered("fn f() -> Unit = {\n  with handle <- g()\n  use_it(handle)\n}")
+  assert not str.contains(out, "Handle")
+  assert str.contains(out, "LParam handle")
+  # and a function may be called `handle`
+  let (m, ds) = parse_module("fn handle(x: Int) -> Int = x")
+  assert len(ds) == 0
+  match m.decls[0] {
+    DFn(f) -> { assert f.name == "handle" }
+    _ -> { assert false }
+  }
+}
+
+test "effect atoms stack, and a declared effect is spelled with its own name" {
+  let out = rendered("fn f() -> Int !Ask !io = 1")
+  assert str.contains(out, "eff=Ask,io")
+  # the union spelling takes the same atoms
+  let out2 = rendered("fn f() -> Int !(io | Ask) = 1")
+  assert str.contains(out2, "eff=io,Ask")
+}

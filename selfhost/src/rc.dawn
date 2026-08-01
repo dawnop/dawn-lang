@@ -1241,7 +1241,9 @@ fn rc_fn(base_dicts: Set[Int], next_sym: Int, f: CFun) -> (Int, CFun) = {
   st = push(st, -1, true)
   # captures and parameters arrive owned; the body is responsible for them.
   # A dictionary capture is neither: it is a static, outside the ledger.
-  for p in f.captures ++ f.params {
+  # Evidence is an ordinary counted record and rides with the parameters,
+  # which is the entire reason it is not carried in `dicts`.
+  for p in f.captures ++ f.params ++ f.evs {
     if is_ref_ty(p.ty) && not set.has(dicts, p.sym) { st = bind(st, p.sym) }
   }
   let (st1, body1) = rw(st, f.body, true, no_syms())
@@ -1515,7 +1517,7 @@ pub fn rc_check(m: CModule) -> List[String] = {
   var errs: List[String] = []
   for f in m.fns {
     var live: Set[Int] = set.empty()
-    for p in f.captures ++ f.params {
+    for p in f.captures ++ f.params ++ f.evs {
       if is_ref_ty(p.ty) && not set.has(base, p.sym) { live = set.insert(live, p.sym) }
     }
     let c = chk_expr(Chk { live: live, gone: false, errs: [] }, f.body, true)
@@ -1532,7 +1534,7 @@ fn one_fn(params: List[CParam], ret: Ty, body: CExpr) -> CModule =
   CModule {
     owner: "m",
     fns: [CFun {
-      name: "f", owner: "m", captures: [], params: params, dicts: [],
+      name: "f", owner: "m", captures: [], params: params, dicts: [], evs: [],
       ret: ret, body: body, is_test: false, impl_of: None, default_of: None
     }],
     dicts: [],

@@ -1,0 +1,51 @@
+# Effect handlers, tail-resumptive tier (docs/effects-design.md): a declared
+# effect, a handler clause, and the two ways an operation reaches its evidence
+# -- a signature that declares the label, and a closure that captured it.
+use std/io
+use std/str
+
+effect Ask {
+  ## The context's number.
+  fn ask() -> Int
+}
+
+effect Store {
+  fn get() -> String
+  fn put(k: String, v: Int) -> String
+}
+
+# the label travels in the signature, so this function takes evidence
+fn sum_three() -> Int !Ask = ask() + ask() + ask()
+
+# labels compose with io on the same signature; the base axis is untouched
+fn shout(n: Int) -> Unit !Ask !io = io.println("shout ${n + ask()}")
+
+# an effect with more than one operation: evidence is a record with two fields
+fn use_store() -> String !Store = put("k", 1) ++ "/" ++ get()
+
+# a handler answers an effect the block never raises: harmless dead evidence
+fn unused() -> Int = {
+  with handle Ask { ask() => 99 }
+  17
+}
+
+pub fn main() -> Unit !io = {
+  with handle Ask { ask() => 42 }
+  io.println("${sum_three()}")
+  shout(0)
+  with handle Store {
+    get() => "read"
+    put(k, v) => "put(${k}=${v})"
+  }
+  io.println(use_store())
+  io.println("${unused()}")
+  # an arm may do io: what an arm does is charged to the block that installs
+  # the handler, which is why main is still just !io
+  with handle Ask {
+    ask() => {
+      io.println("arm ran")
+      5
+    }
+  }
+  io.println("${sum_three()}")
+}
