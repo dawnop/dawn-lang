@@ -823,7 +823,7 @@ peel opaque。
 
 ### 13.1 顺序是被实测定死的
 
-`__emitc` 原本只 lower **程序自己的**模块。S3 之后集合就是 std(`[1, 2]` 调 `std/pvec.of_array`),
+`__emitc` 原本只 lower **程序自己的**模块。S3 之后集合就是 std(`[1, 2]` 调 `std/pvec.from_array`),
 所以任何拿着 list 的程序都在 `cc` 那步撞墙。07-27 试过直接把 std 链进来,结果整个语料一起红:
 std 自己要 `cursor_start`,C 侧没有。于是顺序写死:**先补 intrinsic 长尾,再链 std**。
 

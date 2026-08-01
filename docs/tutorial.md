@@ -499,7 +499,7 @@ pub fn main() -> Unit !io = {
   println(to_string(map.keys(m)))
 
   let s = set.from([3, 1, 2, 1, 3])
-  println(to_string(set.size(s)))
+  println(to_string(set.len(s)))
   println(to_string(set.has(s, 2)))
 }
 ```

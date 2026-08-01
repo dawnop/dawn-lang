@@ -1349,7 +1349,7 @@ fn chk_walk(c: Chk, e: CExpr, k: Bool) -> Chk =
         None ->
           if ct.gone {
             Chk { ..c1, errs: ct.errs }
-          } else if set.size(ct.live) != set.size(c1.live) {
+          } else if set.len(ct.live) != set.len(c1.live) {
             chk_err(Chk { ..c1, errs: ct.errs }, "a one-armed if released a binding")
           } else {
             Chk { ..c1, errs: ct.errs }
@@ -1362,7 +1362,7 @@ fn chk_walk(c: Chk, e: CExpr, k: Bool) -> Chk =
             ce
           } else if ce.gone {
             Chk { ..ce, live: ct.live, gone: false }
-          } else if set.size(ct.live) != set.size(ce.live) {
+          } else if set.len(ct.live) != set.len(ce.live) {
             chk_err(ce, "the arms of an if disagree on what they released")
           } else {
             Chk { ..ce, live: ct.live, gone: false }
@@ -1382,7 +1382,7 @@ fn chk_walk(c: Chk, e: CExpr, k: Bool) -> Chk =
       # still held at the panic inside it is the panic's dead code, already
       # forgiven where it diverged
       if c1.gone { return Chk { ..c1, gone: true } }
-      let c2 = if set.size(c1.live) > 0 {
+      let c2 = if set.len(c1.live) > 0 {
         chk_err(c1, "a return left a binding behind: " ++
             join(list.map(set.to_list(c1.live), fn(x) => to_string(x)), ","))
       } else {
@@ -1465,7 +1465,7 @@ fn chk_stmt(c: Chk, s: CStmt) -> Chk =
         None ->
           if ct.gone {
             Chk { ..c1, errs: ct.errs }
-          } else if set.size(ct.live) != set.size(c1.live) {
+          } else if set.len(ct.live) != set.len(c1.live) {
             chk_err(Chk { ..c1, errs: ct.errs }, "a one-armed if released a binding")
           } else {
             Chk { ..c1, errs: ct.errs }
@@ -1473,7 +1473,7 @@ fn chk_stmt(c: Chk, s: CStmt) -> Chk =
         Some(x) -> {
           let ce = chk_expr(Chk { ..c1, gone: false, errs: ct.errs }, x, false)
           if ct.gone { ce } else if ce.gone { Chk { ..ce, live: ct.live, gone: false } } else {
-            if set.size(ct.live) != set.size(ce.live) {
+            if set.len(ct.live) != set.len(ce.live) {
               chk_err(ce, "the arms of an if disagree on what they released")
             } else {
               Chk { ..ce, live: ct.live, gone: false }
@@ -1486,7 +1486,7 @@ fn chk_stmt(c: Chk, s: CStmt) -> Chk =
       let cb = chk_expr(Chk { ..c, gone: false }, body, false)
       let c1 = if cb.gone {
         Chk { ..cb, live: c.live, gone: false }
-      } else if set.size(cb.live) != set.size(c.live) {
+      } else if set.len(cb.live) != set.len(c.live) {
         chk_err(cb, "a loop body did not end where it started")
       } else {
         Chk { ..cb, live: c.live, gone: false }
@@ -1520,8 +1520,8 @@ pub fn rc_check(m: CModule) -> List[String] = {
     }
     let c = chk_expr(Chk { live: live, gone: false, errs: [] }, f.body, true)
     var here = c.errs
-    if not c.gone && set.size(c.live) > 0 {
-      here = here ++ ["a body left " ++ to_string(set.size(c.live)) ++ " binding(s) held"]
+    if not c.gone && set.len(c.live) > 0 {
+      here = here ++ ["a body left " ++ to_string(set.len(c.live)) ++ " binding(s) held"]
     }
     for e2 in here { errs = errs ++ [f.name ++ ": " ++ e2] }
   }

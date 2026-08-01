@@ -35,7 +35,12 @@ pub fn get[K: Eq + Hash, V](m: Map[K, V], key: K) -> Option[V] = map_get(m, key)
 pub fn has[K: Eq + Hash, V](m: Map[K, V], key: K) -> Bool = map_has(m, key)
 
 ## Number of entries.
-pub fn size[K, V](m: Map[K, V]) -> Int = map_size(m)
+pub fn len[K, V](m: Map[K, V]) -> Int = map_size(m)
+
+## Whether there are no entries. Cheaper to read than `len(m) == 0` and, since
+## the trie keeps its own count, no cheaper to compute -- the point is that one
+## question has one spelling across every container (CONTRIBUTING §naming).
+pub fn is_empty[K, V](m: Map[K, V]) -> Bool = map_size(m) == 0
 
 ## The keys, in insertion order.
 pub fn keys[K, V](m: Map[K, V]) -> List[K] = map_keys(m)
@@ -56,14 +61,20 @@ pub fn entries[K, V](m: Map[K, V]) -> List[(K, V)] = map_entries(m)
 # container become Dawn source (docs/collections-dejava-research.md §3).
 #
 # There is deliberately no `Ord[Map[K, V]]`: entries have no order to compare.
+#
+# The three walks below carry the entry count as a parameter instead of asking
+# `len(es)` for it. `len` in this module is the one declared above (a module's
+# own declarations shadow the prelude, spec §10.6), so it answers for maps, not
+# for the entry list being walked; the count is `len(m)` either way, taken once
+# at the entry point.
 
-fn eq_go[K: Eq + Hash, V: Eq](b: Map[K, V], es: List[(K, V)], i: Int) -> Bool =
-  if i == len(es) {
+fn eq_go[K: Eq + Hash, V: Eq](b: Map[K, V], es: List[(K, V)], i: Int, n: Int) -> Bool =
+  if i == n {
     true
   } else {
     let (k, v) = es[i]
     match get(b, k) {
-      Some(bv) -> if eq(v, bv) { eq_go(b, es, i + 1) } else { false }
+      Some(bv) -> if eq(v, bv) { eq_go(b, es, i + 1, n) } else { false }
       None -> false
     }
   }
@@ -71,34 +82,35 @@ fn eq_go[K: Eq + Hash, V: Eq](b: Map[K, V], es: List[(K, V)], i: Int) -> Bool =
 ## Same size, and every entry of one present with an equal value in the other.
 impl[K: Eq + Hash, V: Eq] Eq[Map[K, V]] {
   fn eq(a: Map[K, V], b: Map[K, V]) -> Bool =
-    if size(a) != size(b) { false } else { eq_go(b, entries(a), 0) }
+    if len(a) != len(b) { false } else { eq_go(b, entries(a), 0, len(a)) }
 }
 
-fn hash_go[K: Hash, V: Hash](es: List[(K, V)], i: Int, acc: Int) -> Int =
-  if i == len(es) {
+fn hash_go[K: Hash, V: Hash](es: List[(K, V)], i: Int, n: Int, acc: Int) -> Int =
+  if i == n {
     acc
   } else {
     let (k, v) = es[i]
-    hash_go(es, i + 1, acc + hash(k) * 31 + hash(v))
+    hash_go(es, i + 1, n, acc + hash(k) * 31 + hash(v))
   }
 
 ## A sum over the entries, so it does not depend on the order they come out
 ## in — the same requirement `eq` above is written to.
 impl[K: Hash, V: Hash] Hash[Map[K, V]] {
-  fn hash(m: Map[K, V]) -> Int = hash_go(entries(m), 0, 0)
+  fn hash(m: Map[K, V]) -> Int = hash_go(entries(m), 0, len(m), 0)
 }
 
-fn show_go[K: Show, V: Show](es: List[(K, V)], i: Int, acc: String) -> String =
-  if i == len(es) {
+fn show_go[K: Show, V: Show](es: List[(K, V)], i: Int, n: Int, acc: String) -> String =
+  if i == n {
     acc
   } else {
     let (k, v) = es[i]
-    show_go(es, i + 1, acc ++ (if i == 0 { "" } else { ", " }) ++
+    show_go(es, i + 1, n, acc ++ (if i == 0 { "" } else { ", " }) ++
         "(" ++ show(k) ++ ", " ++ show(v) ++ ")")
   }
 
 ## The call that rebuilds it: `map_from([(k, v), ...])`. A map has no literal
 ## syntax, so the rendering names the function that does (spec §2.2).
 impl[K: Show, V: Show] Show[Map[K, V]] {
-  fn show(m: Map[K, V]) -> String = "map_from([" ++ show_go(entries(m), 0, "") ++ "])"
+  fn show(m: Map[K, V]) -> String =
+    "map_from([" ++ show_go(entries(m), 0, len(m), "") ++ "])"
 }

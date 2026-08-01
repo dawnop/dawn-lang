@@ -1156,6 +1156,28 @@ test "a two-module project analyzes end to end" {
   assert len(prog.diags) == 0
 }
 
+test "the representation modules are closed to user code (audit RD-06)" {
+  # The accept half is `load_std` itself: std/map is a `use std/hamt`-free
+  # module only because lowering rewrites its primitives, but std/list does
+  # import std/set's primitives and the bundle as a whole is checked with the
+  # gate on. A std module that the gate wrongly refused would fail this load
+  # with "does not check", so the two halves are one test.
+  let std = match load_std("std") {
+    Ok(sc) -> sc
+    Err(e) -> panic("std: " ++ e)
+  }
+  let root = "/tmp/dawn-selfhost-analyze/substrate"
+  mkdirs(root ++ "/src")
+  put(root ++ "/src/main.dawn",
+    "use std/hamt\nuse std/pvec\npub fn main() -> Unit !io = ()\n")
+  let prog = analyze_program(load_directory(root), std, ct_default(), jsig_refused())
+  assert len(prog.diags) == 2
+  assert prog.diags[0].d.msg == "`std/hamt` is internal to the standard library"
+  assert str.contains(prog.diags[0].d.hint, "use std/map or std/set")
+  assert prog.diags[1].d.msg == "`std/pvec` is internal to the standard library"
+  assert str.contains(prog.diags[1].d.hint, "use std/list")
+}
+
 test "an impl is in force in every module, not just its own (spec §3.5)" {
   let root = "/tmp/dawn-selfhost-analyze/trait-cross"
   mkdirs(root ++ "/src")

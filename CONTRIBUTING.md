@@ -92,3 +92,24 @@
 发布：改 `selfhost/src/version.dawn` 的 `VERSION` → 提交 → `git tag v0.9.0 && git push --tags`，
 发布后 bump `scripts/seed-release.txt`（种子推进协议见 docs/bootstrap.md）。
 `release.yml` 会校验 tag 与 version 一致、跑全量测试、把 `dawn.jar` 传上 Release。
+
+## 七、命名族：std 的准入判据
+
+一次审计（`docs/audit/re-audit-2026-07-30.md` RD-06）数出长度四个名字、判空只在一个
+零调用者的模块存在、转换五种命名法。下面这几条是那次收口留下的**准入判据**——
+新加一个 std 或包的 pub 名字时对着看，不是历史记录。
+
+- **一个概念一个名字。** 长度是 `len`，判空是 `is_empty`，`str`/`list`/`map`/`set`/`bytes`
+  五处逐字相同。唯一具名例外是 `bytes.size(b: Buf)`：`bytes.len` 已经是成品字节串的
+  长度，而 Dawn 无重载，所以写入游标只能另取一名——例外要**在代码里写明为什么**，
+  否则下一个人会照抄成惯例。
+- **转换是 `to_X` / `from_X`。** `to_hex`/`from_hex`、`to_base64`/`from_base64`、
+  `to_array`/`from_array`、`to_list`。领域动词只在**名字本身承载语义**时留下：
+  `bytes.freeze` 是「结束 `Buf` 的扩展契约」，不是「转成 Bytes」；`bytes.utf8` 点名的是
+  编码而不是目标类型。判据是「换成 `to_X` 会丢掉一句话吗」——会，就留动词。
+- **增删按容器种类分。** 有键的容器是 `insert`/`remove`（`map`、`set`）；
+  只往末尾追加的构造器是 `put`/`push`（`bytes.Buf`、`Array`）。同一个模块里不要两套。
+- **表示是内部模块。** `std/hamt`、`std/pvec` 持有 `Map`/`Set`/`List` 的表示，
+  std 之外 `use` 它们是编译错误（`checker.internal_std_modules`）。判据是
+  「换掉这份实现会不会破坏别人的程序」——会，说明它不该是公开的。
+  同一条判据在包里更硬：包的 `pub` 有版本号背书（RD-12）。

@@ -22,7 +22,11 @@ pub fn remove[T: Eq + Hash](s: Set[T], x: T) -> Set[T] = set_remove(s, x)
 pub fn has[T: Eq + Hash](s: Set[T], x: T) -> Bool = set_has(s, x)
 
 ## Number of elements.
-pub fn size[T](s: Set[T]) -> Int = set_size(s)
+pub fn len[T](s: Set[T]) -> Int = set_size(s)
+
+## Whether there are no elements. The same question `str.is_empty` answers, in
+## the same words (CONTRIBUTING §naming).
+pub fn is_empty[T](s: Set[T]) -> Bool = set_size(s) == 0
 
 ## The elements, in insertion order.
 pub fn to_list[T](s: Set[T]) -> List[T] = set_to_list(s)
@@ -32,12 +36,15 @@ pub fn to_list[T](s: Set[T]) -> List[T] = set_to_list(s)
 # Same reasoning as Map's, which these are: element order is an artifact of
 # insertion, not of the value, so both relations are defined on membership.
 # No `Ord[Set[T]]` for the same reason there is none for Map.
+#
+# As in std/map, the walks take the element count as a parameter: `len` here is
+# the set's, declared above, so it does not answer for the list being walked.
 
-fn eq_go[T: Eq + Hash](b: Set[T], xs: List[T], i: Int) -> Bool =
-  if i == len(xs) {
+fn eq_go[T: Eq + Hash](b: Set[T], xs: List[T], i: Int, n: Int) -> Bool =
+  if i == n {
     true
   } else if has(b, xs[i]) {
-    eq_go(b, xs, i + 1)
+    eq_go(b, xs, i + 1, n)
   } else {
     false
   }
@@ -45,25 +52,25 @@ fn eq_go[T: Eq + Hash](b: Set[T], xs: List[T], i: Int) -> Bool =
 ## Same size, and every element of one an element of the other.
 impl[T: Eq + Hash] Eq[Set[T]] {
   fn eq(a: Set[T], b: Set[T]) -> Bool =
-    if size(a) != size(b) { false } else { eq_go(b, to_list(a), 0) }
+    if len(a) != len(b) { false } else { eq_go(b, to_list(a), 0, len(a)) }
 }
 
-fn hash_go[T: Hash](xs: List[T], i: Int, acc: Int) -> Int =
-  if i == len(xs) { acc } else { hash_go(xs, i + 1, acc + hash(xs[i])) }
+fn hash_go[T: Hash](xs: List[T], i: Int, n: Int, acc: Int) -> Int =
+  if i == n { acc } else { hash_go(xs, i + 1, n, acc + hash(xs[i])) }
 
 ## A sum over the elements, order-independent like `eq` above.
 impl[T: Hash] Hash[Set[T]] {
-  fn hash(s: Set[T]) -> Int = hash_go(to_list(s), 0, 0)
+  fn hash(s: Set[T]) -> Int = hash_go(to_list(s), 0, len(s), 0)
 }
 
-fn show_go[T: Show](xs: List[T], i: Int, acc: String) -> String =
-  if i == len(xs) {
+fn show_go[T: Show](xs: List[T], i: Int, n: Int, acc: String) -> String =
+  if i == n {
     acc
   } else {
-    show_go(xs, i + 1, acc ++ (if i == 0 { "" } else { ", " }) ++ show(xs[i]))
+    show_go(xs, i + 1, n, acc ++ (if i == 0 { "" } else { ", " }) ++ show(xs[i]))
   }
 
 ## `set_from([e0, e1])`, for the same reason a map renders as `map_from`.
 impl[T: Show] Show[Set[T]] {
-  fn show(s: Set[T]) -> String = "set_from([" ++ show_go(to_list(s), 0, "") ++ "])"
+  fn show(s: Set[T]) -> String = "set_from([" ++ show_go(to_list(s), 0, len(s), "") ++ "])"
 }

@@ -1426,6 +1426,9 @@ use java "java.lang.Math"      # Java 互操作（§9），形式不变
 
 标准库以 **Dawn 源码随编译器捆绑**，组织为真模块（[`stdlib-naming.md`](stdlib-naming.md)）：
 `std/str`、`std/fmt`、`std/bytes`、`std/io`、`std/list`、`std/map`、`std/set`、`std/cursor`。
+另有两个**内部模块** `std/hamt` 与 `std/pvec`——`Map`/`Set`/`List` 的表示（§11）。它们随
+std 一起捆绑、在 std 内部互相引用，但 **std 之外 `use std/hamt` / `use std/pvec` 是编译
+错误**：表示要能整体换掉，而能换的前提是没有程序依赖它。
 （`std/fmt` 是数字渲染与解析的实现处——`fmt.dtoa` 即 `to_string(Float)`（§4.3），
 `fmt.atoi`/`fmt.atod`/`fmt.atoi_radix` 即三个 `parse_*`（§11 的 EBNF）；用户写内建
 拼写即可，模块名存在是因为实现是一份普通的 Dawn 源码而非某个后端的宿主方法。）
@@ -1469,6 +1472,8 @@ std → 内建，std 模块自己的 `pub fn len` 正是靠这一条合法。
   - `list.unique[T: Eq + Hash](xs) -> List[T]` — 去重且保序（每个值留在首次出现的位置）。
     这一条比其余多要一个 `Hash`：只有 `Eq` 的去重是二次的，而 `Set` 的插入序恰好就是
     这里要的顺序
+  - `list.is_empty(xs) -> Bool` — 判空。问游标而非比长度，故表示换成长度不是 O(1) 的
+    结构时它仍是 O(1)
 - **字符串**：prelude 里有 `join parse_int parse_float to_string`（字符串转数字是
   `parse_int(s) -> Option[Int]`——没有重载，`to_int`/`to_float` 只做 Int↔Float 转换）。
 
@@ -1526,10 +1531,12 @@ std → 内建，std 模块自己的 `pub fn len` 正是靠这一条合法。
   「不认识的字符集」这个失败面，故返回裸 `String` 而非 `Option`。std 侧的
   `bytes.decode_utf8`/`decode_latin1` 下个版本（种子带上这两个原语后）改接它们，
   再下个版本删掉 `bytes_decode`）、
-  `bytes.len(b) -> Int`、`bytes.at(b, i) -> Int`（0..255，越界 panic）、
+  `bytes.len(b) -> Int`、`bytes.is_empty(b) -> Bool`、`bytes.at(b, i) -> Int`（0..255，越界 panic）、
   `bytes.slice(b, start, end) -> Bytes`（`[start,end)`，下标 clamp）、
   `bytes.index_of(b, needle, from) -> Option[Int]`（字节下标首次出现）。
   构造侧是 `bytes.buf()`/`put`/`put_bytes`/`get`/`size`/`freeze`（§9.5.1 的 `Buf`）。
+  这里的 `size` 是「长度只叫 `len`」那条规则的**唯一具名例外**：`bytes.len` 已经是成品
+  `Bytes` 的长度，语言又无重载，故写入游标只能另取一名（CONTRIBUTING「命名族」）。
 
   **文本编码**（纯 Dawn 字节算术，无 `use java`，故两个后端同一份定义）：
   `bytes.to_hex(b) -> String`（每字节两位、**小写**为规范拼写）与
@@ -1592,12 +1599,21 @@ std → 内建，std 模块自己的 `pub fn len` 正是靠这一条合法。
   map.insert(m, k, v) -> Map[K, V]            set.insert(s, x) -> Set[T]
   map.remove(m, k) -> Map[K, V]               set.remove(s, x) -> Set[T]
   map.get(m, k) -> Option[V]                  set.has(s, x) -> Bool
-  map.has(m, k) -> Bool                        set.size(s) -> Int
-  map.size(m) -> Int                           set.to_list(s) -> List[T]
+  map.has(m, k) -> Bool                        set.len(s) -> Int
+  map.len(m) -> Int                           set.is_empty(s) -> Bool
+  map.is_empty(m) -> Bool                     set.to_list(s) -> List[T]
   map.keys(m) -> List[K]
   map.values(m) -> List[V]
   map.entries(m) -> List[(K, V)]
   ```
+
+  **长度只有 `len` 一个名字，判空只有 `is_empty` 一个名字**——`str`/`list`/`map`/`set`/
+  `bytes` 五处同拼写（`bytes.size(b: Buf)` 是唯一例外：`bytes.len` 已经是成品字节串的
+  长度，而语言无重载；判据与例外见 CONTRIBUTING「命名族」）。
+
+  两者的**表示**是纯 Dawn 的 `std/hamt`（持久 HAMT）与 `std/pvec`（持久向量），它们是
+  **内部模块**：`use std/hamt` / `use std/pvec` 在 std 之外是编译错误，诊断指回
+  `std/map`/`std/set`/`std/list`。表示要能换，而能换的前提是没人依赖它。
 
 - `core/math`：`abs min max sin cos sqrt pow to_float to_int ...`（纯——
   内部以 `unsafe_pure` 包装 `java.lang.Math`；`@trusted_pure` 是该逃生门的旧名，已废弃）

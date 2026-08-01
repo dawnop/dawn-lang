@@ -52,6 +52,14 @@ pub fn put_bytes(b: Buf, src: Bytes) -> Buf = {
 }
 
 ## How many bytes have been written.
+##
+## `size` and not `len`, which is the one place this library spells the length
+## question a second way. Dawn has no overloading and `len(b: Bytes)` above is
+## the finished-bytes length, so the builder cannot have the name; the survey
+## behind the naming rule (CONTRIBUTING §naming) put the exception here rather
+## than on the container, because a `Buf` is not one -- it is a write cursor
+## with a contract that ends at `freeze`, and its callers are decompressors
+## reading back what they just wrote (audit RD-06).
 pub fn size(b: Buf) -> Int = array_len(b)
 
 ## The byte at `i`, as 0..255. Out of range panics, as `at` does.
@@ -71,6 +79,10 @@ pub fn decode_latin1(b: Bytes) -> String = bytes_decode_latin1(b)
 
 ## Number of bytes in `b`.
 pub fn len(b: Bytes) -> Int = bytes_len(b)
+
+## Whether `b` has no bytes. The same question `str.is_empty` answers, in the
+## same words (CONTRIBUTING §naming).
+pub fn is_empty(b: Bytes) -> Bool = bytes_len(b) == 0
 
 ## The byte at `i` as 0..255. Panics when `i` is out of range — a programming
 ## error, like indexing a list past its end. The -1 the intrinsic returns is
