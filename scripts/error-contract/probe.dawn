@@ -23,6 +23,7 @@
 # foreign failure every program can raise without `use java`.
 use std/io
 use std/str
+use std/bytes
 
 use java "java.lang.Long"
 use java "java.util.ArrayList"
@@ -60,6 +61,24 @@ fn a_string_as_object() -> Object !io = {
   let xs = ArrayList.new()
   xs.add("hello")
   xs.get(0).expect("element")
+}
+
+## A file holding `c0 af`, which is not UTF-8. Written through `write_bytes`
+## because `write_file` takes a String and a String cannot hold those two bytes
+## -- which is the same reason `read_file` may refuse to hand one back.
+fn malformed_file() -> String !io = {
+  let dir = match io.temp_dir("", "dawn-error-contract-") {
+    Ok(d) -> d
+    Err(e) -> panic("no temporary directory: " ++ e.message)
+  }
+  let p = dir ++ "/not-utf8"
+  var b = bytes.buf()
+  b = bytes.put(b, 0xC0)
+  b = bytes.put(b, 0xAF)
+  match io.write_bytes(p, bytes.freeze(b)) {
+    Ok(_) -> p
+    Err(e) -> panic("cannot write " ++ p ++ ": " ++ e.message)
+  }
 }
 
 pub fn main() -> Unit !io = {
@@ -122,6 +141,23 @@ pub fn main() -> Unit !io = {
     str.contains(m.message, "java.lang.String"))
   bad = bad + check_true("the message names the class it could not become",
     str.contains(m.message, "[B"))
+
+  # ---- the fault an io *reader* raises on input that is not text ---------
+  #
+  # `read_file` decodes with REPORT (#113), so a file that is not UTF-8 is a
+  # failed read rather than a string full of U+FFFD. That failure class is
+  # a JDK one and it belongs here for the reason every other name does: the
+  # differential corpus (scripts/spike-native/io_utf8.dawn) can only ask that
+  # the fault barrier takes it, because the C runtime calls the same failure
+  # `fault` and the two texts are not meant to agree.
+  let mal = match io.read_file(malformed_file()) {
+    Ok(_) -> panic("read_file accepted bytes that are not UTF-8")
+    Err(e) -> e
+  }
+  bad = bad + check("a malformed read names the JDK's decoder failure",
+    mal.kind, "java.nio.charset.MalformedInputException")
+  bad = bad + check_true("the kind is a name and not a rendering",
+    not str.contains(mal.kind, ":"))
 
   # ---- bracket: a release ran, and it changed nothing --------------------
   #
