@@ -615,6 +615,9 @@ let area = {
   - 记录 → `Point { x: 0.0, y: 2.5 }`（带字段名）；
   - `String` 字段带双引号并转义（`"a\nb"`）；`Int`/`Float`/`Bool` 同各自 `to_string`；
   - 容器递归渲染：`List` → `[a, b]`、元组 → `(a, b)`、`Option`/`Result` 随载荷（`Some(Red)`）。
+    `Map`/`Set` 没有字面量语法，渲染成**重建它的那个调用**：`map.from([(k, v), ...])`、
+    `set.from([e0, e1])`——写的是公开拼写，因为「读起来像源码」的意义在于**能粘回去**
+    （曾输出已退役的平铺名 `map_from`，粘回去报 undefined function；审计 RD-14）。
   - 每个字段类型必须可打印（函数字段、未 `derive Show` 的嵌套用户类型 → 声明处报错）；
     泛型类型可打印 **当且仅当** 其类型实参都可打印（`Box[Int]` 可，`Box[fn(...)→...]` 不可）——
     `derive Show` 在泛型类型上铸的是 `impl[T: Show] Show[Box[T]]`，这条就是它的 bound。
