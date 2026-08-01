@@ -51,7 +51,7 @@ cat > "$smoke/hello.dawn" <<'EOF'
 use std/str
 
 pub fn main() -> Unit !io = {
-  println(join(map(sort([3, 1, 2]), fn(x) => "${x}"), ","))
+  println(join(map(sort([3, 1, 2]), x => "${x}"), ","))
   println(str.to_upper("fixpoint"))
 }
 EOF

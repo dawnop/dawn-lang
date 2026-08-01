@@ -767,7 +767,7 @@ fn make_bridge(
   # `Box[Box[Int]]` need different bridges. For a non-generic subject the two
   # spellings agree, which is why nothing that existed before changed name.
   let name = "bridge$" ++ to_string(tid) ++ "$" ++ ty_key_inst(subject) ++ "$" ++ method
-  if list.any(st.lifted, fn(f) => f.name == name) {
+  if list.any(st.lifted, f => f.name == name) {
     (st, name)
   } else {
     var st1 = st
@@ -854,7 +854,7 @@ fn make_prim_slot(
 ) -> (LSt, String) = {
   let sg = trait_method_sig(tr, method)
   let name = "prim$" ++ to_string(tid) ++ "$" ++ ty_key_inst(subject) ++ "$" ++ method
-  if list.any(st.lifted, fn(f) => f.name == name) { return (st, name) }
+  if list.any(st.lifted, f => f.name == name) { return (st, name) }
   var st1 = st
   var ps: List[CParam] = []
   var args: List[CExpr] = []
@@ -1151,7 +1151,7 @@ fn struct_rel_fn(
 
 fn struct_eq_fn(st: LSt, t: Ty) -> (LSt, String) =
   struct_rel_fn(st, t, "structeq\$", EQ_ID, 2, TyBool, CBool(true),
-    fn(s, xs, ty) => struct_eq_body(s, xs[0], xs[1], ty))
+    (s, xs, ty) => struct_eq_body(s, xs[0], xs[1], ty))
 
 fn struct_eq_body(st: LSt, a: CExpr, b: CExpr, t: Ty) -> (LSt, CExpr) =
   match t {
@@ -1279,7 +1279,7 @@ fn cmp_through_dict(st: LSt, d: CExpr, a: CExpr, b: CExpr, t: Ty) -> (LSt, CExpr
 
 fn struct_cmp_fn(st: LSt, t: Ty) -> (LSt, String) =
   struct_rel_fn(st, t, "structcmp$", ORD_ID, 2, TyInt, CInt(0),
-    fn(s, xs, ty) => struct_cmp_body(s, xs[0], xs[1], ty))
+    (s, xs, ty) => struct_cmp_body(s, xs[0], xs[1], ty))
 
 fn struct_cmp_body(st: LSt, a: CExpr, b: CExpr, t: Ty) -> (LSt, CExpr) =
   match t {
@@ -1474,7 +1474,7 @@ fn hash_through_dict(st: LSt, d: CExpr, x: CExpr, t: Ty) -> (LSt, CExpr) = {
 
 fn struct_hash_fn(st: LSt, t: Ty) -> (LSt, String) =
   struct_rel_fn(st, t, "structhash\$", HASH_ID, 1, TyInt, CInt(1),
-    fn(s, xs, ty) => struct_hash_body(s, xs[0], ty))
+    (s, xs, ty) => struct_hash_body(s, xs[0], ty))
 
 fn struct_hash_body(st: LSt, x: CExpr, t: Ty) -> (LSt, CExpr) =
   match t {
@@ -1647,7 +1647,7 @@ fn show_through_dict(st: LSt, d: CExpr, x: CExpr, t: Ty) -> (LSt, CExpr) = {
 
 fn struct_show_fn(st: LSt, t: Ty) -> (LSt, String) =
   struct_rel_fn(st, t, "structshow$", SHOW_ID, 1, TyString, CStr(""),
-    fn(s, xs, ty) => struct_show_body(s, xs[0], ty))
+    (s, xs, ty) => struct_show_body(s, xs[0], ty))
 
 fn struct_show_body(st: LSt, x: CExpr, t: Ty) -> (LSt, CExpr) =
   match t {
@@ -3141,7 +3141,7 @@ test "the flat module and the grouped functions are one lowering" {
   # (docs/audit/re-audit-2026-07-30.md RC-04). They are one now; this is the
   # check, because "the same value" is only true while nobody rebuilds it.
   let tt = TyTuple([TyInt, TyInt])
-  let sym = fn(nm: String) => Sym {
+  let sym = (nm: String) => Sym {
     name: nm,
     ty: tt,
     mutable: false,
@@ -3158,7 +3158,7 @@ test "the flat module and the grouped functions are one lowering" {
   let body =
     XBinary(BEq, XLocal(1, "a", 0, 0, tt), XLocal(2, "b", 0, 0, tt), no_wit,
       0, 0, 0, 0, TyBool)
-  let fn_named = fn(nm: String) => TFun {
+  let fn_named = (nm: String) => TFun {
     name: nm,
     sig: Sig {
       name: nm,
@@ -3246,7 +3246,7 @@ test "emitted_core carries the test bodies and what they hoisted" {
   # in for that -- one hoisted by a function, one by a test.
   let ti = TyTuple([TyInt, TyInt])
   let ts = TyTuple([TyString, TyString])
-  let sym = fn(nm: String, t: Ty) => Sym {
+  let sym = (nm: String, t: Ty) => Sym {
     name: nm,
     ty: t,
     mutable: false,
@@ -3260,7 +3260,7 @@ test "emitted_core carries the test bodies and what they hoisted" {
   syms = map.insert(syms, 3, sym("s", ts))
   syms = map.insert(syms, 4, sym("t", ts))
   let no_wit: Option[WitRef] = None
-  let eq_of = fn(x: Int, y: Int, nx: String, ny: String, t: Ty) =>
+  let eq_of = (x: Int, y: Int, nx: String, ny: String, t: Ty) =>
     XBinary(BEq, XLocal(x, nx, 0, 0, t), XLocal(y, ny, 0, 0, t), no_wit, 0, 0, 0, 0, TyBool)
   let src = TFun {
     name: "f",

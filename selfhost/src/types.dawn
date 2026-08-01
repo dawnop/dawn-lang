@@ -60,7 +60,7 @@ pub fn eff_union(effs: List[Eff]) -> Eff = {
     let (id, n) = vars[0]
     return EffVar(n, id)
   }
-  EUnion(sort_by(vars, fn(a, b) => {
+  EUnion(sort_by(vars, (a, b) => {
     let (ia, _) = a
     let (ib, _) = b
     ia - ib
@@ -286,7 +286,7 @@ pub fn ty_show(adts: Adts, t: Ty) -> String =
       if len(targs) == 0 {
         name
       } else {
-        name ++ "[" ++ join(map(targs, fn(x) => ty_show(adts, x)), ", ") ++ "]"
+        name ++ "[" ++ join(map(targs, x => ty_show(adts, x)), ", ") ++ "]"
       }
     }
     TyList(e) -> "List[" ++ ty_show(adts, e) ++ "]"
@@ -297,9 +297,9 @@ pub fn ty_show(adts: Adts, t: Ty) -> String =
     # the name, never the target: a diagnostic outside the declaring module
     # must not leak what the module is hiding
     TyOpaque(_, name, _, _) -> name
-    TyTuple(elems) -> "(" ++ join(map(elems, fn(x) => ty_show(adts, x)), ", ") ++ ")"
+    TyTuple(elems) -> "(" ++ join(map(elems, x => ty_show(adts, x)), ", ") ++ ")"
     TyFn(params, ret, eff) ->
-      "fn(" ++ join(map(params, fn(x) => ty_show(adts, x)), ", ") ++ ") -> " ++
+      "fn(" ++ join(map(params, x => ty_show(adts, x)), ", ") ++ ") -> " ++
       ty_show(adts, ret) ++ eff_suffix(eff)
   }
 
@@ -307,7 +307,7 @@ pub fn ty_show(adts: Adts, t: Ty) -> String =
 pub fn ctor_render(adts: Adts, c: CtorI) -> String = {
   let a = adt_of(adts, c.adt)
   let ret = ty_show(adts, adt_self_ty(a))
-  let fields = join(map(c.fields, fn(f) => f.name ++ ": " ++ ty_show(adts, f.ty)), ", ")
+  let fields = join(map(c.fields, f => f.name ++ ": " ++ ty_show(adts, f.ty)), ", ")
   if a.is_record {
     c.name ++ " { " ++ fields ++ " }"
   } else if len(c.fields) == 0 {
@@ -328,15 +328,15 @@ pub fn subst(t: Ty, m: Map[Int, Ty], em: Map[Int, Eff]) -> Ty =
         None -> t
       }
     TyAdt(aid, targs) ->
-      if len(targs) == 0 { t } else { TyAdt(aid, map(targs, fn(x) => subst(x, m, em))) }
+      if len(targs) == 0 { t } else { TyAdt(aid, map(targs, x => subst(x, m, em))) }
     TyList(e) -> TyList(subst(e, m, em))
     TyMap(k, v) -> TyMap(subst(k, m, em), subst(v, m, em))
     TySet(e) -> TySet(subst(e, m, em))
     TyArray(e) -> TyArray(subst(e, m, em))
-    TyTuple(elems) -> TyTuple(map(elems, fn(x) => subst(x, m, em)))
+    TyTuple(elems) -> TyTuple(map(elems, x => subst(x, m, em)))
     TyOpaque(id, n, ow, tgt) -> TyOpaque(id, n, ow, subst(tgt, m, em))
     TyFn(params, ret, eff) ->
-      TyFn(map(params, fn(x) => subst(x, m, em)), subst(ret, m, em), subst_eff(eff, em))
+      TyFn(map(params, x => subst(x, m, em)), subst(ret, m, em), subst_eff(eff, em))
     # nothing to walk into. Spelled out rather than left to a wildcard: a new
     # *parameterised* variant landing here would silently stop substituting
     TyInt | TyFloat | TyBool | TyString | TyBytes -> t
@@ -610,7 +610,7 @@ pub fn sig_render(adts: Adts, traits: Traits, s: Sig) -> String = {
       if len(bs) == 0 {
         parts = parts ++ [vname]
       } else {
-        let bnames = map(bs, fn(b) => trait_of(traits, b).name)
+        let bnames = map(bs, b => trait_of(traits, b).name)
         parts = parts ++ [vname ++ ": " ++ join(bnames, " + ")]
       }
       i = i + 1
@@ -916,7 +916,7 @@ pub fn is_show_scalar(t: Ty) -> Bool = {
 ## Ord over the natively ordered scalars, Eq/Hash over every scalar, Show over
 ## the printable ones: the impls that ship with the language.
 pub fn prelude_impls() -> List[ImplI] = {
-  var out = map(ord_scalars(), fn(t) => prelude_impl(ORD_ID, t))
+  var out = map(ord_scalars(), t => prelude_impl(ORD_ID, t))
   for t in eq_scalars() {
     out = out ++ [prelude_impl(EQ_ID, t)]
   }

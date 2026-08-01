@@ -280,14 +280,15 @@ pub fn main() -> Unit !io =
 
 ## 8. lambda 与效果系统
 
-匿名函数用 `fn(参数) => 表达式`；类型可推导时参数注解可省。函数类型写作
+匿名函数用 `(参数) => 表达式`——单个不带注解的参数可省括号，写成 `x => 表达式`；
+类型可推导时参数注解可省。函数类型写作
 `fn(A) -> B !e`，其中 `!e` 是效果。纯函数看签名即知没有副作用，测试无需 mock。
 
 ```dawn run
 pub fn main() -> Unit !io = {
   let nums = [1, 2, 3, 4]
-  let evens = filter(nums, fn(n) => n % 2 == 0)
-  let doubled = map(evens, fn(n) => n * 2)
+  let evens = filter(nums, n => n % 2 == 0)
+  let doubled = map(evens, n => n * 2)
   println(to_string(doubled))
 }
 ```
@@ -300,7 +301,7 @@ pub fn main() -> Unit !io = {
 
 ```dawn run
 fn compose[A, B, C](f: fn(A) -> B !e1, g: fn(B) -> C !e2) -> fn(A) -> C !(e1 | e2) =
-  fn(a) => g(f(a))
+  a => g(f(a))
 
 fn inc(x: Int) -> Int = x + 1
 fn dbl(x: Int) -> Int = x * 2
@@ -586,7 +587,7 @@ impl Area[Rect] {
 }
 
 fn total_area[T: Area](xs: List[T]) -> Float =
-  fold(xs, 0.0, fn(acc, x) => acc + area(x))
+  fold(xs, 0.0, (acc, x) => acc + area(x))
 
 pub fn main() -> Unit !io = {
   let rooms = [Rect { w: 3.0, h: 4.0 }, Rect { w: 2.0, h: 2.0 }]
@@ -621,8 +622,8 @@ pub fn main() -> Unit !io = {
   println(to_string(hand[1] < hand[0]))
   println(max2("pear", "apple"))
   println(to_string(sort([3, 1, 2])))
-  println(to_string(map(sort(hand), fn(c) => c.name)))
-  println(to_string(max_by(hand, fn(c) => c.rank)))
+  println(to_string(map(sort(hand), c => c.name)))
+  println(to_string(max_by(hand, c => c.rank)))
 }
 ```
 ```output

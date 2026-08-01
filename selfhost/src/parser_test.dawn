@@ -423,7 +423,7 @@ test "a trailing `fn` attaches only on the same line" {
     _ -> { assert false }
   }
   # a lambda on the next line is likewise its own statement, not an argument
-  let (m2, ds2) = parse_module("fn f() -> Int = {\n  g(1)\n  fn(x) => x\n}")
+  let (m2, ds2) = parse_module("fn f() -> Int = {\n  g(1)\n  (x) => x\n}")
   assert len(ds2) == 0
   match m2.decls[0] {
     DFn(f) ->
@@ -442,14 +442,14 @@ test "a bare `{ ... }` after a call is not a trailing lambda" {
   assert len(ds) > 0
 }
 
-test "bare arrow lambdas parse to the same node the `fn` form does" {
-  # one arity per line, and the `fn` form beside each: the spelling is a parse
-  # detail, so the two renderings have to be identical past the span
+test "every lambda arity parses to a Lambda node" {
+  # one arity per line; parenthesising a single unannotated parameter is
+  # optional and changes nothing past the span
   let bare1 = rendered("fn f(xs: List[Int]) -> Unit = map(xs, x => x)")
-  let fn1 = rendered("fn f(xs: List[Int]) -> Unit = map(xs, fn(x) => x)")
+  let paren1 = rendered("fn f(xs: List[Int]) -> Unit = map(xs, (x) => x)")
   assert str.contains(bare1, "Lambda")
   assert str.contains(bare1, "LParam x ann=false")
-  assert str.contains(fn1, "LParam x ann=false")
+  assert str.contains(paren1, "LParam x ann=false")
 
   let two = rendered("fn f(xs: List[Int]) -> Unit = fold(xs, 0, (a, b) => a)")
   assert str.contains(two, "LParam a ann=false")
@@ -479,6 +479,17 @@ test "a bare arrow lambda is not a trailing closure" {
   # the `fn` form in the same position still attaches
   let out = rendered("fn f(xs: List[Int]) -> Unit = g(xs) fn(x) => x")
   assert str.contains(out, "Apply nargs=2")
+}
+
+test "the `fn` prefix on a lambda is retired outside the trailing position" {
+  # every non-trailing position takes the bare form only, and the diagnostic
+  # teaches it rather than reporting an unexpected token (spec §4.5)
+  let (_, d1) = parse_module("fn f(xs: List[Int]) -> Unit = map(xs, fn(x) => x)")
+  assert len(d1) > 0
+  assert str.contains(d1[0].msg, "a lambda has no `fn` prefix")
+  let (_, d2) = parse_module("fn f() -> Unit = {\n  let g = fn(a: Int) => a\n  ()\n}")
+  assert len(d2) > 0
+  assert str.contains(d2[0].msg, "a lambda has no `fn` prefix")
 }
 
 test "a lambda in a condition is reported as one" {

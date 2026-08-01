@@ -144,7 +144,7 @@ println("got $n items, first = ${list.get(0)}")
 
 `Unit` 是一等值（唯一值 `()`），**可出现在任何值能出现的位置**：形参、局部变量、
 闭包捕获、元组元素、返回值，以及实例化类型参数（`Result[Unit, E]`、`List[Unit]`、
-`catch_fault(fn() => <void 调用>)`）。运行期它有真实表示——一个单例对象
+`catch_fault(() => <void 调用>)`）。运行期它有真实表示——一个单例对象
 （`dawn/rt/Unit`，与 `None` 及无字段构造子同一表示），占一个引用槽位，
 C 后端给它一个字节。
 
@@ -206,7 +206,7 @@ type Shape =
 
 - 构造器字段**必须**带名字；构造调用可按位置或按名：`Rect(2.0, h: 3.0)`。
 - 构造器（含字段的）裸名在函数位置是**普通函数值**：`map(xs, Some)` 等价于
-  `map(xs, fn(x) => Some(x))`。类型参数从期望的函数类型推导（`Some` 的元素类型来自
+  `map(xs, x => Some(x))`。类型参数从期望的函数类型推导（`Some` 的元素类型来自
   上下文）；仅由字段无法确定的类型参数（如 `Ok` 的错误类型 `E`）需上下文补足，
   否则报「无法推导类型参数」。无载荷构造器（`Point`）本身是值不是函数；记录构造用
   花括号语法，不参与此规则。
@@ -369,7 +369,7 @@ fn sum(xs: List[Int]) -> Int = {
 ```dawn
 const MAX_DEPTH: Int = 64
 const SIN_TABLE: List[Float] = comptime {
-  range(0, 360) |> map(fn(d) => sin(to_radians(d)))
+  range(0, 360) |> map(d => sin(to_radians(d)))
 }
 ```
 
@@ -535,8 +535,8 @@ let area = {
   **跨行的 `(` 不吃**：换行结束后缀链（只有 `.` 可跨行续链，§1.7），
   故 `let x = f` 换行 `(1 + 2)` 仍是两条语句——与一元 `-` 不续行同一条纪律。
 - **尾闭包：同一行紧跟的 `fn` lambda 是最后一个实参**（2026-07-31）。
-  `f(a) fn(x) => e` 就是 `f(a, fn(x) => e)`，`xs.each fn(x) => e` 就是
-  `xs.each(fn(x) => e)`，`f fn(x) => e` 就是 `f(fn(x) => e)`——落点与 `(` 完全相同
+  `f(a) fn(x) => e` 就是 `f(a, x => e)`，`xs.each fn(x) => e` 就是
+  `xs.each(x => e)`，`f fn(x) => e` 就是 `f(x => e)`——落点与 `(` 完全相同
   （所以点调用出方法调用、其余出应用），糖只换拼写不换节点。
   **只认 `fn` 拼写的形式**：裸 `{ ... }` 尾闭包（Kotlin 式）永久不做，
   它与无括号 `if`/`while` 头的体无法区分（`if c { ... }`）。
@@ -639,16 +639,17 @@ let double = (x: Int) => x * 2
 let add = (a, b) => a + b         # 参数类型可推导时可省略
 let now = () => 0                 # 零参数
 xs |> map(x => x * x)             # 单参数可省括号
-let old = fn(x) => x * 2          # `fn` 前缀形，仍然合法
 ```
 
-- **两种拼写，一个语法树**：`params => expr` 与 `fn(params) => expr` 解析成同一个
-  节点，检查、lowering、comptime 都看不出区别；`fn` 只是 `(` 之前的一个可选前缀。
-  `params` 是 `x`（单参数，括号可省）、`(a, b)`、`()`，每个参数可带 `: Type`。
+- **写法只有一种**：`params => expr`。`params` 是 `x`（单参数且不带注解时括号可省）、
+  `(a, b)`、`()`，每个参数可带 `: Type`。`=>` 独占「一个匿名函数从这里开始」这个职责。
+- **`fn` 前缀已退休**（2026-08-01）：`fn(x) => e` 不再解析成 lambda，专有诊断
+  「a lambda has no `fn` prefix」教新拼写。表达式里 `fn` 只剩一个位置——尾闭包。
 - body 要多条语句就用块：`(x) => { ... }`。
 - 写在调用后面（同一行）时它是那次调用的**最后一个实参**——尾闭包，见 §4.3。
   **尾闭包位必须写 `fn`**：`f(a) (x) => e` 里的 `(x)` 已经是柯里化调用 `f(a)(x)`，
-  两种读法在读到 `=>` 之前无法区分，所以那个位置只留一种拼写。诊断会点名这件事。
+  两种读法在读到 `=>` 之前无法区分，所以那个位置留的正是带 `fn` 的那种拼写——
+  它是 `fn` 在 lambda 上仅存的用途。诊断会点名这件事。
 - `(` 开头的形式**先看 `)` 之后是不是 `=>` 再决定怎么解析**：`(a: Int)` 是合法的
   参数表而不是合法的表达式，覆盖文法（先当表达式解析、见到 `=>` 再重解释）在这里
   不成立。判定失败时报「invalid parameter list before `=>`」并点名出错的那个记号
@@ -659,7 +660,7 @@ let old = fn(x) => x * 2          # `fn` 前缀形，仍然合法
 - **箭头分工（设计裁决，2026-07-31，刻意不统一）**：`->` 是**子句箭头**，只出现在
   「声明形状」的位置——函数类型（§2.2）与 match 臂（§4.4）；`=>` 是**表达式箭头**，
   唯一职责是标记一个匿名函数的起点。两者不互相客串：臂体是 lambda 时
-  （`Some(f) -> fn(x) => f(x)`），两种箭头正是读者辨认层级边界的信号——
+  （`Some(f) -> x => f(x)`），两种箭头正是读者辨认层级边界的信号——
   这与 Rust 保持 `->`/`=>` 分立同理，与 Scala 的统一相反。
 
 ### 4.6 if
@@ -745,18 +746,18 @@ fn classify(n: Int) -> String = {
 
 ```dawn
 fn write_all(path: String, bytes: Bytes) -> Unit !io = {
-  with f <- bracket(FileOutputStream.new(path), fn(s) => s.close())
+  with f <- bracket(FileOutputStream.new(path), s => s.close())
   f.write(bytes)!
   f.flush()!
 }
 ```
 
 `with x <- f(a, b)` 是 **parser 级的糖**：块里它之后的**所有**语句被打包成
-`fn(x) => { ... }`，作为 `f` 的**最后一个**实参附加上去，整个调用成为块在这一点的值。
+`x => { ... }`，作为 `f` 的**最后一个**实参附加上去，整个调用成为块在这一点的值。
 上面那段等价于
 
 ```dawn
-bracket(FileOutputStream.new(path), fn(s) => s.close(), fn(f) => {
+bracket(FileOutputStream.new(path), s => s.close(), f => {
   f.write(bytes)!
   f.flush()!
 })
@@ -767,7 +768,7 @@ bracket(FileOutputStream.new(path), fn(s) => s.close(), fn(f) => {
 - **一个块里多个 `with` 自然嵌套**——第二个吃的是它自己之后的部分。配合 `bracket`
   时释放顺序因此天然是**由内向外**（§9.8.2）。
 - **落点与尾闭包同一处**（§4.3）：`f(a, b)` 长一个实参、`r.m(a)` 长一个实参、
-  裸名字 `g` 变成 `g(fn(x) => ...)`。所以 `with` 与 `fn` 尾闭包组合起来只是普通调用，
+  裸名字 `g` 变成 `g(x => ...)`。所以 `with` 与 `fn` 尾闭包组合起来只是普通调用，
   没有第三条规则。
 - **`?` 透明穿过**：闭包交回的就是 `with` 调用的值，而那就是块的值，所以糖区内的
   `expr?` 传播出去的 `Err` 会成为外层函数的返回值——`bracket` 的 release 照跑
@@ -775,7 +776,7 @@ bracket(FileOutputStream.new(path), fn(s) => s.close(), fn(f) => {
 - **`return`/`break`/`continue` 在糖区内被拒**，诊断点名 `with`：它们要穿的是一个
   作者没有写出来的闭包边界，而「穿出去」只在这个块恰好处于尾位时才等于读者以为的
   意思。糖区内**自己的**循环不受影响（`for` 在 `with` 之后，`break` 属于它）。
-- 绑定处写一个名字，规则同 lambda 形参；没有 `_` 形式（`fn(_) => ...` 也没有）。
+- 绑定处写一个名字，规则同 lambda 形参；没有 `_` 形式（lambda 形参也没有）。
 
 > 为什么是 `bracket` 而不是 `defer`：受保护的区间恒为一次闭包调用，
 > `return`/`break` 在语言层面就跨不出去，编译器因此不欠一套逃逸改写。
@@ -1106,7 +1107,7 @@ let b = BodyPublishers.concat(head, file, tail)! # 可变部分可放 Java 引�
 use java "java.lang.Thread"
 
 fn spawn_hello(msg: String) -> Unit !io = {
-  let t = Thread.new(fn() => println(msg))   # Dawn lambda → java.lang.Runnable
+  let t = Thread.new(() => println(msg))   # Dawn lambda → java.lang.Runnable
   t.start()
   t.join()
 }
@@ -1229,7 +1230,7 @@ Dawn 无异常：Java 调用抛出的异常默认原样穿透并终止程序（�
 use java "java.lang.Long"
 
 fn parse(s: String) -> Result[Int, ForeignError] !io =
-  catch_fault(fn() => Long.parseLong(s))
+  catch_fault(() => Long.parseLong(s))
   # Err(ForeignError { kind: "java.lang.NumberFormatException", message: ..., cause: None })
 ```
 
@@ -1296,7 +1297,7 @@ fn bracket[A, B](resource: A, release: fn(A) -> Unit !io, use: fn(A) -> B !io) -
 
 ```dawn
 let f = FileOutputStream.new(path)          # 取资源：普通代码，在调用之前
-bracket(f, fn(s) => s.close(), fn(s) => write_all(s, bytes))
+bracket(f, s => s.close(), s => write_all(s, bytes))
 ```
 
 **资源是个值，不是 acquire 闭包。** Haskell 的 `bracket` 收 thunk 是为了堵住
@@ -1323,7 +1324,7 @@ with f <- bracket(open(path), close)
   `bracket_fatal.dawn`）。
 - **`bracket` 不拦任何东西**，故返回 `B` 而非 `Result`——护与拦是两件正交的事
   （Haskell `bracket`、Kotlin `use`、Koka `finally`、Go `defer` 无一返回 Result）。
-  要把失败拿成值就写 `catch_fault(fn() => bracket(...))`，两个原语各做一件事。
+  要把失败拿成值就写 `catch_fault(() => bracket(...))`，两个原语各做一件事。
 
 > 它不给 `defer` 那样的面语法：受保护的区间恒为**一次闭包调用**，所以
 > `return`/`?`/`break` 在语言层面就跨不出去，编译器也就不欠一套逃逸改写。
@@ -1739,7 +1740,7 @@ let n = 42                       var acc = 0
 let (a, b) = pair                acc = acc + 1
 if x > 0 { "pos" } else { "non-pos" }
 match opt { Some(v) -> v, None -> fallback }
-xs |> filter(fn(x) => x > 0) |> map(fn(x) => to_string(x)) |> join(", ")
+xs |> filter(x => x > 0) |> map(x => to_string(x)) |> join(", ")
 xs[0]                            # 下标：越界 panic；问询用 get（§4.8）
 read_file(path)?                 # Result 传播
 if n < 0 { return "negative" }   # 提前返回（§4.9）

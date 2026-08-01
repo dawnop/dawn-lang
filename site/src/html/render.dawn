@@ -14,7 +14,7 @@ pub type TocEntry = { level: Int, id: String, text: String } derive Show
 
 ## The plain text of an inline run (for titles and TOC labels).
 pub fn inline_text(items: List[Inline]) -> String =
-  join(map(items, fn(it) =>
+  join(map(items, it =>
       match it {
         Text(s) -> s
         Code(s) -> s
@@ -34,7 +34,7 @@ fn inline_html(it: Inline, map_url: fn(String) -> String) -> String =
   }
 
 fn inlines_html(items: List[Inline], map_url: fn(String) -> String) -> String =
-  join(map(items, fn(it) => inline_html(it, map_url)), "")
+  join(map(items, it => inline_html(it, map_url)), "")
 
 fn code_html(lang: String, body: String) -> String =
   if lang == "dawn" {
@@ -53,10 +53,10 @@ fn item_body(bs: List[Block], map_url: fn(String) -> String) -> String =
   }
 
 fn items_html(items: List[List[Block]], map_url: fn(String) -> String) -> String =
-  join(map(items, fn(bs) => "<li>" ++ item_body(bs, map_url) ++ "</li>"), "\n")
+  join(map(items, bs => "<li>" ++ item_body(bs, map_url) ++ "</li>"), "\n")
 
 fn cell_html(tag: String, cells: List[List[Inline]], map_url: fn(String) -> String) -> String =
-  join(map(cells, fn(c) => "<$tag>" ++ inlines_html(c, map_url) ++ "</$tag>"), "")
+  join(map(cells, c => "<$tag>" ++ inlines_html(c, map_url) ++ "</$tag>"), "")
 
 fn table_html(
   header: List[List[Inline]],
@@ -64,7 +64,7 @@ fn table_html(
   map_url: fn(String) -> String,
 ) -> String = {
   let head = "<thead>\n<tr>" ++ cell_html("th", header, map_url) ++ "</tr>\n</thead>"
-  let body = join(map(rows, fn(r) => "<tr>" ++ cell_html("td", r, map_url) ++ "</tr>"), "\n")
+  let body = join(map(rows, r => "<tr>" ++ cell_html("td", r, map_url) ++ "</tr>"), "\n")
   "<table>\n" ++ head ++ "\n<tbody>\n" ++ body ++ "\n</tbody>\n</table>"
 }
 
@@ -87,7 +87,7 @@ fn block_html(b: Block, map_url: fn(String) -> String) -> String =
   }
 
 fn blocks_html(bs: List[Block], map_url: fn(String) -> String) -> String =
-  join(map(bs, fn(b) => block_html(b, map_url)), "\n")
+  join(map(bs, b => block_html(b, map_url)), "\n")
 
 ## Render a whole document: h2/h3 get numbered ids and TOC entries; the first
 ## h1 becomes the title. h4 gets a numbered id too but stays OUT of the TOC —
@@ -139,7 +139,7 @@ fn keep_url(u: String) -> String = u
 test "inline rendering escapes and maps links" {
   assert inlines_html([Text("a < b "), Code("x>y")], keep_url) ==
     "a &lt; b <code>x&gt;y</code>"
-  assert inline_html(Link("规范", "spec.md"), fn(u) => "mapped/" ++ u) ==
+  assert inline_html(Link("规范", "spec.md"), u => "mapped/" ++ u) ==
     `<a href="mapped/spec.md">规范</a>`
 }
 

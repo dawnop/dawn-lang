@@ -85,7 +85,7 @@ use java "java.nio.file.Paths"
 ## with it — URI does both, correctly, including rejecting the malformed
 ## sequences the hand-rolled decoder silently skipped.
 pub fn uri_to_path(uri: String) -> Option[String] =
-  match java_try(fn() => Paths.get(URI.create(uri)!)!.toString()!) {
+  match java_try(() => Paths.get(URI.create(uri)!)!.toString()!) {
     Ok(p) -> Some(p)
     Err(_) -> None
   }

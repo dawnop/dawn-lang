@@ -170,7 +170,7 @@ C2 写于 `lowered-ir-design.md` 的 `LIR`/`L*` 命名下。那套命名没有�
 
 **I1 要有门禁，不能只写在文档里。** `coredump.dawn` 已经是 Core 的可读化输出，
 `scripts/selfhost-core-diff.sh` 已经在 CI 里；I1 的检查放进 `dawn __lower` 的覆盖率走查
-（`main.dawn:1300` 附近那趟 `catch_panic(fn() => one(...))`）最省事：走查时对每个 `CSProtect`
+（`main.dawn:1300` 附近那趟 `catch_panic(() => one(...))`）最省事：走查时对每个 `CSProtect`
 的 body 做一次「有没有逃逸跳转」的遍历，有就 panic，走查把它报成 GAP。
 
 ### 2.4 JVM 渲染
@@ -301,8 +301,8 @@ C 一节的标题就是「先给标准库函数，不给语法」。**所以在�
 | | 位置 | 形状 |
 |---|---|---|
 | permit | `playground/src/play/gate.dawn:25` `with_gate` | `try_enter` → `catch_panic(body)` → `leave` → 重抛 |
-| upstream stream | `packages/web/src/server.dawn:86` | `catch_panic(fn() => s.transferTo(out))` → `close_stream(s)` |
-| 临时 body 文件 | `packages/web/src/server.dawn:283` | `catch_panic(fn() => app(req))` → `delete_quietly` |
+| upstream stream | `packages/web/src/server.dawn:86` | `catch_panic(() => s.transferTo(out))` → `close_stream(s)` |
+| 临时 body 文件 | `packages/web/src/server.dawn:283` | `catch_panic(() => app(req))` → `delete_quietly` |
 
 三处的注释都写着同一句话：「Dawn has no try/finally, so catch_panic plays that role」。
 
@@ -581,7 +581,7 @@ C2 冻结时的反对论证（「绑死 JVM」）针对的是 codegen 特例，�
 那个签名是 C1（纯 Dawn、内部 `catch_panic`）的形状被带进了 C2 那一段。
 
 返回 `B` 的好处是**正交**：protect 和 catch 是两件事，要 `Result` 的调用方写
-`catch_fault(fn() => bracket(...))`，两个原语各做一件事。三处手写惯用法里
+`catch_fault(() => bracket(...))`，两个原语各做一件事。三处手写惯用法里
 `with_gate` 现在正是「接住 → 释放 → **重新 panic**」，返回 `B` 之后它整个塌成一行。
 
 ### 决策 3 —— 三处（或十五处）站点的迁移，跟刀 1 同批还是分开？

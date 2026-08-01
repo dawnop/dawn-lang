@@ -90,7 +90,7 @@ fn use_faults(a: String) -> Int !io = {
 ## Same shape as catch_kinds.dawn's `barrier`, on purpose: the answers here
 ## must be the answers there, or the bracket changed the failure.
 fn barrier(name: String, f: fn(String) -> Int !io) -> String !io =
-  match catch_panic(fn() => match catch_fault(fn() => bracket(open(name), close, f)) {
+  match catch_panic(() => match catch_fault(() => bracket(open(name), close, f)) {
     Ok(_) -> 0
     Err(_) -> 1
   }) {
@@ -116,21 +116,21 @@ pub fn main() -> Unit !io = {
   println("value          " ++ to_string(bracket(open("r1"), close, use_ok)))
 
   println("-- use panics: release runs, and the panic carries on --")
-  let p = taken_panic(fn() => bracket(open("r2"), close, use_panics))
+  let p = taken_panic(() => bracket(open("r2"), close, use_panics))
   println("message        " ++ p.message)
 
   println("-- use faults: release runs, and the fault carries on --")
   # the same failure with no bracket in the way, to compare against
   let bare = taken_fault(read_missing)
-  let crossed = taken_fault(fn() => bracket(open("r3"), close, use_faults))
+  let crossed = taken_fault(() => bracket(open("r3"), close, use_faults))
   println("same kind      " ++ to_string(bare.kind == crossed.kind))
   println("same message   " ++ to_string(bare.message == crossed.message))
 
   println("-- nested: the inner resource is released first --")
   let outer = open("outer")
-  let nested = bracket(outer, close, fn(o) => {
+  let nested = bracket(outer, close, o => {
     let inner = open("inner")
-    bracket(inner, close, fn(i) => {
+    bracket(inner, close, i => {
       println("  use " ++ o ++ " and " ++ i)
       n(2)
     })
@@ -138,7 +138,7 @@ pub fn main() -> Unit !io = {
   println("value          " ++ to_string(nested))
 
   println("-- nested, and the body panics: still inside out --")
-  let np = taken_panic(fn() => bracket(open("outer"), close, fn(o) =>
+  let np = taken_panic(() => bracket(open("outer"), close, o =>
     bracket(open("inner"), close, use_panics)))
   println("message        " ++ np.message)
 

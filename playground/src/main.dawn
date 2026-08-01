@@ -40,7 +40,7 @@ fn rpc(req: Request, gate: Semaphore, check_only: Bool) -> Result[Response, Http
         let wait = if check_only { CHECK_WAIT_SECS } else { QUEUE_WAIT_SECS }
         # Hold a permit across execution only; with_gate releases it even if the
         # compiler panics, then we render outside the permit. None = saturated.
-        match with_gate(gate, wait, fn() => if check_only { check(code) } else { execute(code) }) {
+        match with_gate(gate, wait, () => if check_only { check(code) } else { execute(code) }) {
           Some(outcome) ->
             Ok(raw(200, JSON_CT, if check_only { render_check(outcome) } else { render_outcome(outcome) }))
           None -> Ok(raw(429, JSON_CT, render_error("server busy, try again shortly")))
@@ -53,7 +53,7 @@ pub fn main() -> Unit !io = {
   let gate = new_gate(MAX_CONCURRENT)
   serve_app(port(), [
     route_get("/health", health),
-    route_post("/run", fn(req) => rpc(req, gate, false)),
-    route_post("/check", fn(req) => rpc(req, gate, true)),
+    route_post("/run", req => rpc(req, gate, false)),
+    route_post("/check", req => rpc(req, gate, true)),
   ], [with_logging])
 }

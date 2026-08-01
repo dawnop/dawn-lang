@@ -20,8 +20,8 @@ fn area(s: Shape) -> Float =
 pub fn main() -> Unit !io =
   [Circle(1.0), Rect(2.0, 3.0)]
     |> map(area)
-    |> fold(0.0, fn(a, x) => a + x)
-    |> fn(t) => println("total: $t")
+    |> fold(0.0, (a, x) => a + x)
+    |> t => println("total: $t")
 ```
 
 ## 三个立身特性

@@ -517,7 +517,7 @@ final 字段的 freeze 语义(JLS 17.5)——写入发生在构造完成前,读�
 
 ```dawn
 pub fn read_file(path: String) -> Result[String, String] !io =
-  java_try(fn() => StdIo.readFile(path).expect("null only on failure, which throws"))
+  java_try(() => StdIo.readFile(path).expect("null only on failure, which throws"))
 ```
 
 ### `args` 迁不动,而且原因是结构性的
@@ -573,14 +573,14 @@ argv 通过 `PUTSTATIC <程序自己的入口类>.dawn$args` 到达程序,而 st
 - **真正 witnessed 的是排序族**（`sort/max/min/max_by/min_by`，Ord 约束 +
   调用点注入字典）。当时设想的两条路：①「字典物化」= 给语言加「把 bound 字典
   拿到手当值」的内建（新语言表面，spec 承诺 + 双编译器 + comptime 全要动）；
-  ②「lambda 捕获」= std 用 `fn(a, b) => cmp(a, b)` 包住 bound 的 cmp 传给收
+  ②「lambda 捕获」= std 用 `(a, b) => cmp(a, b)` 包住 bound 的 cmp 传给收
   `Fn2` 的 `sort_by`。实测 ② **今天就能写**——lambda 捕获 enclosing 函数的字典
   是既有机制，零语言改动、零运行时 API 改动。①的唯一优势（运行时路径逐字节不变）
   换不回它的代价，弃。
 
 ### 排序族迁移（已落地，双编译器同做）
 
-- `sort` = `sort_by(xs, fn(a, b) => cmp(a, b))`（TimSort 与稳定性原样保留）；
+- `sort` = `sort_by(xs, (a, b) => cmp(a, b))`（TimSort 与稳定性原样保留）；
   `max_by/min_by` = 纯 Dawn 单遍 fold，**key 每元素恰好一次、严格更优才换（先者胜）**
   ——两条都是可观测语义（效应 key/并列），从退役的 `bestBy` 逐条抄来；比较方向用
   Bool 不用 ±1 乘子（`cmp` 只约定符号不约定幅度，乘会溢出）。`max/min` = 恒等 key
