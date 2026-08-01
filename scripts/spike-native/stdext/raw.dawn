@@ -1,11 +1,10 @@
 # The backend primitives that std wraps, reachable by name.
 #
-# `io_*`, `bytes_at` and `bytes_decode` are std-only (the `internal` set in
+# `io_*`, `bytes_at` and the byte decoders are std-only (the `internal` set in
 # selfhost/src/types.dawn). That is the error model's boundary: an io primitive
 # raises a *fault* and std/io turns it into `Result`; `bytes_at` answers -1 out
-# of range and `bytes.at` turns that into a panic; `bytes_decode` answers `None`
-# for an unknown charset and `bytes.decode` turns that into a panic. User code
-# that could call the primitive would be routing around all three
+# of range and `bytes.at` turns that into a panic. User code that could call
+# the primitive would be routing around both
 # (docs/audit/re-audit-2026-07-30.md RD-02).
 #
 # This corpus is the one caller that wants the primitive rather than the
@@ -72,15 +71,11 @@ pub fn run(argv: List[String], out_path: String, err_path: String) -> Int !io =
 ## turned into a panic.
 pub fn byte_at(b: Bytes, i: Int) -> Int = bytes_at(b, i)
 
-## `b` decoded, or `None` when the charset is unknown. `bytes.decode` is this
-## with the `None` turned into a panic.
-pub fn decode(b: Bytes, charset: String) -> Option[String] = bytes_decode(b, charset)
-
-## `b` decoded as UTF-8. The narrowed pair (audit RP-04, decision C): with the
-## charset gone there is no unknown-charset case, so no Option comes back and
-## std has nothing to unwrap. std/bytes moves onto these once a seed carries
-## them; until then this is the only caller they have, and the only place the
-## two backends are checked against each other on them.
+## `b` decoded as UTF-8. The narrowed pair (audit RP-04, decision C): the
+## charset-taking decoder these replaced answered an Option because the name
+## could be one it did not know, and with the name gone that case went with
+## it. std/bytes calls these; this module is how the corpus reaches them
+## directly, which is where the two backends are compared on them.
 pub fn decode_utf8(b: Bytes) -> String = bytes_decode_utf8(b)
 
 ## `b` decoded as ISO-8859-1: one code point per byte, 0..255.

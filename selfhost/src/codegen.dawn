@@ -906,36 +906,11 @@ pub fn gen_bytes_class(supers: List[String]) -> Bytes !io = {
   cv.visitInsn(OP_IRETURN)
   close_mv(cv)
 
-  # bytes_decode(b, charset): Some(new String(b, charset)) / None on bad charset
-  let dv = open_static(cw, "bytes_decode", "([BLjava/lang/String;)LOption;")
-  let d_start = Label.new()
-  let d_end = Label.new()
-  let d_handler = Label.new()
-  dv.visitTryCatchBlock(d_start, d_end, d_handler, "java/io/UnsupportedEncodingException")
-  dv.visitLabel(d_start)
-  dv.visitTypeInsn(OP_NEW, "Option\$Some")
-  dv.visitInsn(OP_DUP)
-  dv.visitTypeInsn(OP_NEW, "java/lang/String")
-  dv.visitInsn(OP_DUP)
-  dv.visitVarInsn(OP_ALOAD, 0)
-  dv.visitVarInsn(OP_ALOAD, 1)
-  dv.visitMethodInsn(OP_INVOKESPECIAL, "java/lang/String", "<init>",
-    "([BLjava/lang/String;)V", false)
-  dv.visitMethodInsn(OP_INVOKESPECIAL, "Option\$Some", "<init>", "(Ljava/lang/Object;)V", false)
-  dv.visitLabel(d_end)
-  dv.visitInsn(OP_ARETURN)
-  dv.visitLabel(d_handler)
-  dv.visitInsn(OP_POP)
-  dv.visitFieldInsn(OP_GETSTATIC, "Option\$None", "INSTANCE", "LOption\$None;")
-  dv.visitInsn(OP_ARETURN)
-  close_mv(dv)
-
-  # bytes_decode_utf8(b) / bytes_decode_latin1(b): the same `new String(b,
-  # charset)` the arm above runs, with the charset chosen here rather than
-  # looked up from a name. No Option comes back because nothing can fail --
-  # a Charset constant admits no UnsupportedEncodingException, and both of
-  # these charsets decode every byte string (UTF-8 by replacing what it
-  # cannot read with U+FFFD, which is what `new String` already did).
+  # bytes_decode_utf8(b) / bytes_decode_latin1(b): `new String(b, charset)`
+  # with the charset picked here rather than looked up from a name. No Option
+  # comes back because nothing can fail -- a Charset constant admits no
+  # UnsupportedEncodingException, and both of these charsets decode every byte
+  # string (UTF-8 by replacing what it cannot read with U+FFFD).
   gen_bytes_decode_fixed(cw, "bytes_decode_utf8", "UTF_8")
   gen_bytes_decode_fixed(cw, "bytes_decode_latin1", "ISO_8859_1")
 
@@ -949,7 +924,9 @@ pub fn gen_bytes_class(supers: List[String]) -> Bytes !io = {
 ##
 ## `field` is a `Charset` constant rather than a name, so the constructor that
 ## takes one throws nothing and the method returns a bare String. That is the
-## whole of what dropping the charset parameter buys (audit RP-04, decision C).
+## whole of what dropping the charset parameter bought (audit RP-04,
+## decision C) -- the name-taking decoder it replaced returned an Option only
+## because the name could be one Java does not know.
 fn gen_bytes_decode_fixed(cw: AdtClassWriter, name: String, field: String) -> Unit !io = {
   let mv = open_static(cw, name, "([B)Ljava/lang/String;")
   mv.visitTypeInsn(OP_NEW, "java/lang/String")

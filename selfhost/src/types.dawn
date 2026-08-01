@@ -1031,20 +1031,16 @@ pub fn builtins() -> Map[String, Sig] = {
     bsig("parse_int_radix", [TyString, TyInt], ["s", "radix"], opt_ty(TyInt)),
     # bytes_* intrinsics: the byte primitives std/bytes writes over. Bytes is a
     # JVM byte[] (crosses FFI both ways), so the JVM backend emits these into
-    # dawn/rt/Bytes; a missing/out-of-range result comes back as a sentinel
-    # (-1 for bytes_at) or Option (bytes_decode), which std turns into panic/None.
-    # bytes_index_of stays pure Dawn over bytes_len/bytes_at.
+    # dawn/rt/Bytes; an out-of-range read comes back as the sentinel -1, which
+    # std turns into a panic. bytes_index_of stays pure Dawn over
+    # bytes_len/bytes_at.
     bsig("bytes_utf8", [TyString], ["s"], TyBytes),
-    bsig("bytes_decode", [TyBytes, TyString], ["b", "charset"], opt_ty(TyString)),
-    # The charset parameter narrowed away (audit RP-04, decision C: the two
-    # charsets the language promises are two functions, and the function name
-    # is the domain). Neither returns an Option, because with no charset to
-    # get wrong there is no failure left to report -- both charsets decode
-    # every byte string, UTF-8 by replacing what it cannot read with U+FFFD.
-    #
-    # These are phase 1 of the three the seed discipline needs: the primitives
-    # land now, std/bytes moves onto them once a seed carries them, and
-    # `bytes_decode` goes after that.
+    # Two decoders rather than one taking a charset name (audit RP-04,
+    # decision C: the two charsets the language promises are two functions,
+    # and the function name is the domain). Neither returns an Option, because
+    # with no charset to get wrong there is no failure left to report -- both
+    # charsets decode every byte string, UTF-8 by replacing what it cannot
+    # read with U+FFFD.
     bsig("bytes_decode_utf8", [TyBytes], ["b"], TyString),
     bsig("bytes_decode_latin1", [TyBytes], ["b"], TyString),
     bsig("bytes_len", [TyBytes], ["b"], TyInt),
@@ -1344,16 +1340,13 @@ pub fn intrinsics() -> Map[String, Intr] = {
     internal = set.insert(internal, "str_" ++ op)
   }
   # The byte primitives are std-only for the reason std/bytes exists: their
-  # result shapes are sentinels. `bytes_at` answers -1 out of range and
-  # `bytes_decode` answers None for an unknown charset, and turning those into
-  # a panic and a promise is the whole of what `bytes.at` and
-  # `bytes.decode_utf8`/`decode_latin1` do. The narrowed pair
-  # `bytes_decode_utf8`/`bytes_decode_latin1` has no sentinel left to unwrap
-  # and is std-only for the plainer reason: std/bytes owns the byte surface,
+  # result shapes are sentinels. `bytes_at` answers -1 out of range, and
+  # turning that into a panic is the whole of what `bytes.at` does.
+  # `bytes_decode_utf8`/`bytes_decode_latin1` have no sentinel left to unwrap
+  # and are std-only for the plainer reason: std/bytes owns the byte surface,
   # and two spellings of one operation is one too many.
-  # Reachable from user code, the wrapper is advice rather than a boundary.
   # `bytes_from_array` also names Array, which is std-only on its own.
-  for op in ["utf8", "decode", "decode_utf8", "decode_latin1", "len", "at", "slice",
+  for op in ["utf8", "decode_utf8", "decode_latin1", "len", "at", "slice",
     "from_array"] {
     rt_of = map.insert(rt_of, "bytes_" ++ op, RtBytes)
     internal = set.insert(internal, "bytes_" ++ op)
@@ -1474,17 +1467,15 @@ test "every intrinsic property is declared against a real intrinsic" {
 }
 
 test "the narrowed decoders drop the charset, and the Option with it" {
-  # audit RP-04 decision C, phase 1 of three: the primitives land here, std
-  # moves onto them once a seed carries them, `bytes_decode` goes after that.
+  # audit RP-04 decision C, all three phases done: the primitives landed,
+  # std/bytes moved onto them, and the charset-taking `bytes_decode` is gone.
   #
-  # What makes this a narrowing rather than two more primitives is the shape.
-  # `bytes_decode` answers an Option for exactly one reason -- the charset may
-  # be a name it cannot decode -- so with the parameter gone the failure has
-  # no case left to report, and a `.expect` at every call site would be
-  # unwrapping something that cannot be `None`.
-  let wide = intr_at("bytes_decode").expect("bytes_decode")
-  assert wide.sig.param_tys == [TyBytes, TyString]
-  assert wide.sig.ret == opt_ty(TyString)
+  # What made this a narrowing rather than two more primitives is the shape.
+  # The retired decoder answered an Option for exactly one reason -- the
+  # charset may be a name it cannot decode -- so with the parameter gone the
+  # failure has no case left to report, and a `.expect` at every call site
+  # would be unwrapping something that cannot be `None`.
+  assert intr_at("bytes_decode") == None
   for n in ["bytes_decode_utf8", "bytes_decode_latin1"] {
     let i = intr_at(n).expect(n)
     assert i.sig.param_tys == [TyBytes]
@@ -1613,7 +1604,7 @@ test "builtin table renders signatures" {
     }
     None -> { assert false }
   }
-  assert map_size2(bs) == 90
+  assert map_size2(bs) == 89
 }
 
 test "the reclaim's failure is a value, under the one name left" {

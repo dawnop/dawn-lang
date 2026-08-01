@@ -1,17 +1,12 @@
-# The two narrowed decoders, `bytes_decode_utf8` and `bytes_decode_latin1`
-# (audit RP-04, decision C: the charsets the language promises are two
-# functions, and the function name is the domain).
+# The two decoders, `bytes_decode_utf8` and `bytes_decode_latin1` (audit
+# RP-04, decision C: the charsets the language promises are two functions, and
+# the function name is the domain).
 #
-# Phase 1 of three -- the primitives exist, std/bytes still calls the
-# charset-taking `bytes_decode`, and moving it needs a seed that carries these.
-# So this corpus is their only caller, and the only place the two backends are
-# checked against each other on them. It reaches them through
-# `stdext/raw.dawn`, the way every std-only primitive is reached here.
-#
-# The last section is the phase-2 contract: the new function must answer
-# exactly what `bytes_decode(b, "UTF-8")` answers today, byte for byte. It is
-# not a restatement of the implementation -- on the JVM the two are different
-# `String` constructors, and in C they are one body called two ways.
+# All three phases are done -- the primitives landed, std/bytes moved onto
+# them, and the charset-taking `bytes_decode` is gone. This corpus reaches
+# them through `stdext/raw.dawn`, the way every std-only primitive is reached
+# here, so the two backends are compared on the primitive rather than on
+# std's wrapper.
 #
 # ## The malformed sections
 #
@@ -89,26 +84,4 @@ pub fn main() -> Unit !io = {
   io.println("f5 80 80 80       " ++ seen(raw.decode_utf8(of([0xF5, 0x80, 0x80, 0x80]))))
   io.println("f4 90 80 80       " ++ seen(raw.decode_utf8(of([0xF4, 0x90, 0x80, 0x80]))))
   io.println("f4 8f bf bf (val) " ++ seen(raw.decode_utf8(of([0xF4, 0x8F, 0xBF, 0xBF]))))
-
-  io.println("-- phase 2's contract: the pair answers what the charset did --")
-  var cases = [
-    of([]), bytes.utf8(text), of(range(0, 256)),
-    of([0x80]), of([0xC3]), of([0xE4, 0x41, 0xB8]), of([0xFF]), of([0x61, 0xFF, 0x62]),
-    of([0xC0, 0xAF]), of([0xC0, 0x80]), of([0xE0, 0x80, 0xAF]), of([0xF0, 0x8F, 0xBF, 0xBF]),
-    of([0x61, 0xC0, 0xAF, 0x62]), of([0xED, 0xA0, 0x80]), of([0xED, 0xBF, 0xBF]),
-    of([0xED, 0x9F, 0xBF]), of([0xE2, 0x82]), of([0xF0, 0x9F, 0x92]),
-    of([0xF0, 0x9F, 0x61, 0x7A]), of([0x61, 0xF0, 0x9F, 0x7A]), of([0xF5]),
-    of([0xF5, 0x80, 0x80, 0x80]), of([0xF4, 0x90, 0x80, 0x80]), of([0xF4, 0x8F, 0xBF, 0xBF])
-  ]
-  var same_utf8 = true
-  var same_latin1 = true
-  for b in cases {
-    if raw.decode(b, "UTF-8") != Some(raw.decode_utf8(b)) {
-      same_utf8 = false
-    }
-    if raw.decode(b, "ISO-8859-1") != Some(raw.decode_latin1(b)) {
-      same_latin1 = false
-    }
-  }
-  io.println("${same_utf8} ${same_latin1}")
 }

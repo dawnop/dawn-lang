@@ -1450,20 +1450,6 @@ dawn_bytes *dawn_bytes_slice(const dawn_bytes *b, int64_t from, int64_t to) {
   return dawn_bytes_of(buf, to - from);
 }
 
-/* Charset names compare the way Java's do: case-insensitively. */
-static bool dawn_charset_is(dawn_str *cs, const char *name) {
-  size_t n = strlen(name);
-  if ((size_t)cs->len != n) return false;
-  for (size_t i = 0; i < n; i++) {
-    char a = cs->p[i];
-    char b = name[i];
-    if (a >= 'A' && a <= 'Z') a = (char)(a + 32);
-    if (b >= 'A' && b <= 'Z') b = (char)(b + 32);
-    if (a != b) return false;
-  }
-  return true;
-}
-
 dawn_bytes *dawn_bytes_from_array(const dawn_array *a) {
   int64_t n = dawn_array_len(a);
   unsigned char *buf = (unsigned char *)dawn_alloc((size_t)n + 1);
@@ -1507,19 +1493,6 @@ dawn_str *dawn_bytes_decode_latin1(const dawn_bytes *b) {
     at += dawn_utf8_put(buf + at, b->p[i]);
   }
   return dawn_str_shrink(r, at);
-}
-
-/* The charset-taking original, kept until std moves onto the pair above and a
- * seed carries them (three phases, one release each). It is the dispatch and
- * nothing else now: both arms are the functions above. */
-dawn_adt *dawn_bytes_decode(const dawn_bytes *b, dawn_str *charset) {
-  if (dawn_charset_is(charset, "UTF-8") || dawn_charset_is(charset, "UTF8")) {
-    return dawn_some(dawn_bytes_decode_utf8(b));
-  }
-  if (dawn_charset_is(charset, "ISO-8859-1") || dawn_charset_is(charset, "latin1")) {
-    return dawn_some(dawn_bytes_decode_latin1(b));
-  }
-  return dawn_none();
 }
 
 /* ---- io ---- */

@@ -1541,12 +1541,10 @@ std → 内建，std 模块自己的 `pub fn len` 正是靠这一条合法。
 - **`std/bytes`**（一等 `Bytes`，§9.5.1）：`bytes.utf8(s) -> Bytes`（字符串的 UTF-8 字节）、
   `bytes.decode_utf8(b) -> String` 与 `bytes.decode_latin1(b) -> String`（解码；语言承诺的
   字符集就这两个，**函数名即定义域**，没有字符集注册表——审计 RP-04 裁决 C。
-  带 charset 参数的旧 `bytes.decode` 已删除；`bytes_decode` 原语的该参数按种子纪律
-  分三期收窄，**第 1 期已落地**：运行期原语 `bytes_decode_utf8(b) -> String` 与
-  `bytes_decode_latin1(b) -> String` 已在两个后端实现——没有 charset 参数就没有
-  「不认识的字符集」这个失败面，故返回裸 `String` 而非 `Option`。std 侧的
-  `bytes.decode_utf8`/`decode_latin1` 下个版本（种子带上这两个原语后）改接它们，
-  再下个版本删掉 `bytes_decode`）、
+  带 charset 参数的旧 `bytes.decode` 与它底下的 `bytes_decode` 原语都已删除：
+  运行期原语是 `bytes_decode_utf8(b) -> String` 与 `bytes_decode_latin1(b) -> String`，
+  两个后端各实现一份——没有 charset 参数就没有「不认识的字符集」这个失败面，
+  故返回裸 `String` 而非 `Option`）、
   `bytes.len(b) -> Int`、`bytes.is_empty(b) -> Bool`、`bytes.at(b, i) -> Int`（0..255，越界 panic）、
   `bytes.slice(b, start, end) -> Bytes`（`[start,end)`，下标 clamp）、
   `bytes.index_of(b, needle, from) -> Option[Int]`（字节下标首次出现）。
