@@ -643,6 +643,130 @@ v1 的边界：impl 的主体只能是**非泛型**具名类型或 `Int`/`Float`
 lambda 即可）；comptime 里不能用 trait 约束的调用。完整设计见
 [trait.md](trait.md)。
 
+## 17. 自己的效果：`effect` 与 `with handle`
+
+`!io` 是编译器内建的那一种效果。你也可以声明自己的：一组**操作**，谁来实现由调用方
+在使用点决定。
+
+```dawn run
+effect Ask {
+  fn ask() -> Int
+}
+
+fn sum_three() -> Int !Ask = ask() + ask() + ask()
+
+pub fn main() -> Unit !io = {
+  with handle Ask { ask() => 42 }
+  println(to_string(sum_three()))
+}
+```
+```output
+126
+```
+
+三件事在这段里：
+
+- `effect Ask { ... }` 声明效果与它的操作。操作是**没有体**的函数签名——体由 handler 给。
+- `sum_three` 直接调 `ask()`，签名里写下 `!Ask`。不写会报错，并告诉你两条出路。
+- `with handle Ask { ask() => 42 }` 装上 handler：**这一句之后的整个块**在它的作用域内。
+  臂 `ask() => 42` 就是一个闭包，调用 `ask()` 就是调它，返回值就是 `ask()` 的值。
+
+### 多个操作，和有参数的操作
+
+一个效果可以有多个操作，handler 必须**每个都答**，一个不多一个不少：
+
+```dawn run
+effect Log {
+  fn note(msg: String) -> Unit
+  fn level() -> Int
+}
+
+fn work(n: Int) -> Int !Log = {
+  note("working on ${n}")
+  n * level()
+}
+
+pub fn main() -> Unit !io = {
+  with handle Log {
+    note(m) => println("[log] ${m}")
+    level() => 3
+  }
+  println(to_string(work(7)))
+}
+```
+```output
+[log] working on 7
+21
+```
+
+臂的身体可以做任何事——包括 io。它算在**装 handler 的那个块**头上（上面的 `main` 因此
+是 `!io`），不算在发出操作的 `work` 头上：`work` 只欠 `!Log`。
+
+### 谁来应答：词法上最近的那个
+
+handler 是按**写在哪里**找的，不是按运行时的栈找的。内层遮蔽外层：
+
+```dawn run
+effect Ask {
+  fn ask() -> Int
+}
+
+fn twice() -> Int !Ask = ask() + ask()
+
+pub fn main() -> Unit !io = {
+  with handle Ask { ask() => 1 }
+  println(to_string(twice()))
+  with handle Ask { ask() => 10 }
+  println(to_string(twice()))
+}
+```
+```output
+2
+20
+```
+
+臂里再发**本效果**，找的是**外层**的 handler（handler 不答自己）——所以
+`with handle Ask { ask() => ask() * 10 }` 是「把外面那个答案乘十」，不是死循环。
+
+闭包在**创建的地方**捕获 handler，带着它跑出块外也照样有效。它的类型仍写着 `!Ask`：
+逃逸决定的是谁应答，不是标签写不写。
+
+### 高阶函数不用改一行
+
+效果变量（`!e`）会连同具名效果一起转发，所以 `map`、`fold`、`for` 循环都照旧：
+
+```dawn run
+effect Ask {
+  fn ask() -> Int
+}
+
+fn shifted(xs: List[Int]) -> List[Int] !Ask = map(xs, x => x + ask())
+
+pub fn main() -> Unit !io = {
+  with handle Ask { ask() => 100 }
+  println(to_string(shifted([1, 2, 3])))
+}
+```
+```output
+[101, 102, 103]
+```
+
+### v1 的边界
+
+- 一个臂就是一次普通调用、返回值即结果（**尾恢复**）。没有「把延续存起来以后再恢复」
+  「恢复两次」这类玩法——那需要延续捕获，不在这一档里。
+- 「操作不返回调用点」的用法请走既有的失败机制：`Result` + `?`、
+  `catch_fault`/`catch_panic`/`bracket`。
+- 效果不带类型参数（没有 `effect Yield[T]`）。
+- trait / impl 方法、comptime / const、类型声明位（`alias` 目标、record 字段）
+  都不接受具名效果。
+- 带标签的函数（含操作本身）不能直接当函数值传——包一层 lambda 即可
+  （`() => ask()`），lambda 会捕获证据。
+- 臂是闭包，所以臂里不能写外层的 `var`，也不能 `return`/`break` 跳出去。
+
+完整规则见 [spec.md](spec.md) §6.5，设计取舍见
+[effects-design.md](effects-design.md)。
+
 ---
 
 至此你已见过 Dawn 的全部核心特性。更深的规范见
