@@ -10,7 +10,7 @@ use std/io
 use lexer
 use token.{Token}
 use ast.{
-  Module, module_fns, module_types, module_consts, module_traits
+  Module, module_fns, module_types, module_consts, module_traits, module_effects
 }
 use analyze.{Program, CheckedMod}
 use checker.{Cx, ModExports}
@@ -304,6 +304,36 @@ fn module_json(w: W, cm: CheckedMod, ds: DocSrc) -> W = {
     }
   }
   w1 = close_arr(w1, any)
+  w1 = w_key(w1, "effects")
+  w1 = open_arr(w1)
+  any = false
+  for ed in module_effects(cm.m) {
+    if ed.is_pub {
+      any = true
+      w1 = open_obj(w1)
+      w1 = w_field(w1, "name", ed.name)
+      w1 = w_key(w1, "ops")
+      w1 = open_arr(w1)
+      for op in ed.ops {
+        w1 = open_obj(w1)
+        w1 = w_field(w1, "name", op.name)
+        # an operation's sig lands in cx.fns under its own name (pass_effects),
+        # rendered with its `!Effect` row; the bare name is the same graceful
+        # fallback the fns loop uses for a signature the checker refused
+        let sig = match map.get(cm.cx.fns, op.name) {
+          Some(s) -> sig_render(cm.cx.adts, cm.cx.traits, s)
+          None -> op.name
+        }
+        w1 = w_field(w1, "sig", sig)
+        w1 = w_field_opt(w1, "doc", doc_of(ds, op.lo))
+        w1 = close_obj(w1)
+      }
+      w1 = close_arr(w1, len(ed.ops) > 0)
+      w1 = w_field_opt(w1, "doc", doc_of(ds, ed.lo))
+      w1 = close_obj(w1)
+    }
+  }
+  w1 = close_arr(w1, any)
   w1 = w_key(w1, "impls")
   w1 = open_arr(w1)
   for ii in cm.cx.local_impls {
@@ -445,6 +475,35 @@ pub fn builtins_json(std: StdCtx) -> String = {
         w = w_field(w, "name", fd.name)
         w = w_field(w, "sig", sig_render(std.adts, traits, sig))
         w = w_field(w, "doc", unwrap_or(doc_of(ds, fd.lo), ""))
+        w = close_obj(w)
+      }
+    }
+    w = close_arr(w, any)
+    # empty for every std module today; here so the first pub effect std
+    # mints appears in the reference instead of silently missing (#115)
+    w = w_key(w, "effects")
+    w = open_arr(w)
+    any = false
+    for ed in module_effects(m) {
+      if ed.is_pub {
+        any = true
+        w = open_obj(w)
+        w = w_field(w, "name", ed.name)
+        w = w_key(w, "ops")
+        w = open_arr(w)
+        for op in ed.ops {
+          let sig = match map.get(exp.fns, op.name) {
+            Some(s) -> s
+            None -> panic("std effect operation without a signature: " ++ op.name)
+          }
+          w = open_obj(w)
+          w = w_field(w, "name", op.name)
+          w = w_field(w, "sig", sig_render(std.adts, traits, sig))
+          w = w_field(w, "doc", unwrap_or(doc_of(ds, op.lo), ""))
+          w = close_obj(w)
+        }
+        w = close_arr(w, len(ed.ops) > 0)
+        w = w_field(w, "doc", unwrap_or(doc_of(ds, ed.lo), ""))
         w = close_obj(w)
       }
     }

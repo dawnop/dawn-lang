@@ -184,6 +184,25 @@ check "doc site" "$k" "$d"
 "${SH[@]}" doc examples/traits.dawn > "$OUT/d.txt" 2>&1 && d=0 || d=$?
 check "doc traits example" "$k" "$d"
 
+# doc: a pub effect and its operations reach the JSON; a private one does not (#115)
+cat > "$OUT/effects_doc.dawn" <<'EOF'
+## Answer questions from ambient context.
+pub effect Ask {
+  ## The context's number.
+  fn ask(prompt: String) -> Int
+  fn tell(n: Int) -> Unit
+}
+
+effect Hidden {
+  fn peek() -> Int
+}
+
+pub fn main() -> Unit !io = println("ok")
+EOF
+"$DAWN" doc "$OUT/effects_doc.dawn" > "$OUT/k.txt" 2>&1 && k=0 || k=$?
+"${SH[@]}" doc "$OUT/effects_doc.dawn" > "$OUT/d.txt" 2>&1 && d=0 || d=$?
+check "doc (pub effect)" "$k" "$d"
+
 # ---- error paths (M8 phase 3): the selfhost toolchain renders human
 # diagnostics — spans, carets, hints, count lines — byte for byte ----
 
