@@ -446,9 +446,19 @@ diff <(norm /tmp/coreA '') <(norm /tmp/coreB 's/\bjvmhelp\./emit./g')
 >    `ARRAY_MIN_CAP: Int = 8` 改成 `9`，归一化不变量返回 0；换成改函数体里的字面量才得到
 >    预期的 4 行。
 >
-> 所以搬 const 的刀（A1 搬了 26 个，B2 的 `cx.dawn` 也会搬），**const 那部分只由五语料
+> 所以搬 const 的刀（A1 搬了 26 个；B2 实测**没有**搬 const），**const 那部分只由五语料
 > 逐字节比对覆盖**。写这类刀时要确认：被搬的 const 确实被那五个语料实际用到；否则它们
 > 处在全部门禁的盲区里。
+
+> **★ 两份 Core 收据也看不见 test 块。**（B2 实测）
+> `__lower` 不发射 test 块——实测 `checker.core` 里只有 4 处 `test_cx` 调用，而源码里有 89 处。
+> 于是「只被 test 块用到」的搬运在 Core 侧完全隐形：B2 的 9 个 importer 里有 **6 个**
+> `use` 行变了而 `.core` 逐字节不变，全部是这个原因（与 A1 的 `testrun` 是同一个
+> 「`use` ≠ Core」缺口，但成因不同：A1 是 const 不入 Core，B2 是 test 块不入 Core）。
+>
+> 这一块由 **`dawn test selfhost`** 覆盖，不由任何 Core 收据覆盖。含义是：
+> 搬动只被 test 块引用的东西时，唯一的守卫是 295 个内联 test 本身——所以那一刀不能同时
+> 改动 test 的内容，否则守卫和被守卫的东西一起变了。
 
 ### 5.3 v0.47.0 为什么是开工前提（P3 的理由）
 
