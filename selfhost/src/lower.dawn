@@ -19,6 +19,7 @@ use std/str
 use types.{
   intr_at,
   subst,
+  reduce_via_bindings,
   peel_opaque,
   Ty, TyInt, TyFloat, TyBool, TyString, TyUnit, TyNever, TyError, TyVar, TyAssoc,
   TyAdt, TyList, TyTuple, TyFn, TyBytes, TyMap, TySet, TyArray, TyJava,
@@ -570,9 +571,13 @@ pub fn internal_intrinsics() -> List[String] = [
 fn dict_key(tid: Int, subject: Ty) -> String =
   "dict$" ++ to_string(tid) ++ "$" ++ ty_key_inst(subject)
 
-## The trait method's signature with the subject substituted in: what the
-## impl's own method actually takes, so a devirtualised call boxes nothing.
-fn subst_subject(tr: TraitI, sg: Sig, subject: Ty) -> Sig = {
+## The trait method's signature with the subject substituted in and its
+## projections rewritten to the impl's own bindings: what the impl's own
+## method actually takes (the checker pinned that shape at registration), so
+## a devirtualised call boxes nothing -- and, since assoc types, so it boxes
+## *correctly*: `Cur = Int` makes the slot an unboxed Int, `Item = T` keeps
+## it erased, and the trait-side spelling `C.Cur`/`C.Item` says neither.
+fn subst_subject(tr: TraitI, sg: Sig, subject: Ty, bindings: List[(String, Ty)]) -> Sig = {
   let vid =
     match tr.tvar {
       TyVar(_, v) -> v
@@ -582,9 +587,13 @@ fn subst_subject(tr: TraitI, sg: Sig, subject: Ty) -> Sig = {
   m = map.insert(m, vid, subject)
   var ps: List[Ty] = []
   for p in sg.param_tys {
-    ps = ps ++ [subst(p, m, map.empty())]
+    ps = ps ++ [reduce_via_bindings(subst(p, m, map.empty()), tr.id, subject, bindings)]
   }
-  Sig { ..sg, param_tys: ps, ret: subst(sg.ret, m, map.empty()) }
+  Sig {
+    ..sg,
+    param_tys: ps,
+    ret: reduce_via_bindings(subst(sg.ret, m, map.empty()), tr.id, subject, bindings)
+  }
 }
 
 fn trait_method_sig(tr: TraitI, name: String) -> Sig = {
@@ -763,7 +772,9 @@ fn make_bridge(
   param: Bool
 ) -> (LSt, String) = {
   let sg = trait_method_sig(tr, method)
-  let psig = subst_subject(tr, sg, subject)
+  # only reached when the impl provides this method (dict_slot checked), so
+  # the lookup cannot miss
+  let psig = subst_subject(tr, sg, subject, impl_for(st, tid, subject).assoc_bindings)
   # `ty_key_inst`, not `ty_key`: a conditional impl's bridge names the
   # dictionary class it reads its arguments out of, so `Box[Int]` and
   # `Box[Box[Int]]` need different bridges. For a non-generic subject the two
@@ -1891,7 +1902,7 @@ fn lower_trait_call(
     WApply(_, subject, wargs) -> {
       let imp = impl_for(st, tid, subject)
       if provides(imp, name) {
-        let psig = subst_subject(tr, sg, subject)
+        let psig = subst_subject(tr, sg, subject, imp.assoc_bindings)
         let (st1, vs) = lower_args_to(st, args, psig.param_tys)
         let (st2, ds) = witness_values(st1, wargs)
         return (st2, adapt_out(
@@ -1910,7 +1921,7 @@ fn lower_trait_call(
         # devirtualised: the impl's own method takes the concrete type, so
         # nothing is boxed. A conditional impl still wants its dictionaries,
         # and at a ground subject they are all statically known.
-        let psig = subst_subject(tr, sg, subject)
+        let psig = subst_subject(tr, sg, subject, imp.assoc_bindings)
         let (st1, vs) = lower_args_to(st, args, psig.param_tys)
         let (st2, ds) = goal_dicts(st1, sub_goals(st1.impls, tid, subject))
         (st2, adapt_out(

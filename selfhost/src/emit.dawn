@@ -22,7 +22,7 @@ use types.{
   Adts, AdtI, CtorI, FieldI, adt_of, adt_jvm_name, ctor_jvm_name,
   Sym, Sig, Eff, eff_labels, Traits, TraitI, MethodSig, ImplI, trait_of, ORD_ID, EQ_ID, HASH_ID,
   builtins,
-  Impls, impl_at
+  Impls, impl_at, reduce_via_bindings
 }
 use tast.{TJavaCall, TFun, TModule, TBinOp, BEq, BNeq, BLt, BLe, BGt, BGe}
 use interp.{CtOut}
@@ -410,16 +410,26 @@ fn trait_method_sig(tr: TraitI, name: String) -> Sig = {
   panic("codegen: trait `" ++ tr.name ++ "` has no method `" ++ name ++ "`")
 }
 
-## The trait method's signature with the subject substituted for the tvar —
-## the concrete shape of the impl's provided static (checker verified match).
-fn subst_subject(tr: TraitI, s: Sig, subject: Ty) -> Sig = {
+## The trait method's signature with the subject substituted for the tvar and
+## projections rewritten to the impl's bindings — the concrete shape of the
+## impl's provided static (checker verified match). The binding RHS goes in
+## verbatim, mirroring lower.dawn's subst_subject: the impl method's declared
+## signature is the descriptor, so `Cur = Int` is an I slot and `Item = T`
+## stays an erased Object one.
+fn subst_subject(tr: TraitI, s: Sig, subject: Ty, bindings: List[(String, Ty)]) -> Sig = {
   let vid = match tr.tvar {
     TyVar(_, v) -> v
     _ -> panic("trait tvar")
   }
   var ps: List[Ty] = []
-  for p in s.param_tys { ps = ps ++ [subst_tvar(p, vid, subject)] }
-  Sig { ..s, param_tys: ps, ret: subst_tvar(s.ret, vid, subject) }
+  for p in s.param_tys {
+    ps = ps ++ [reduce_via_bindings(subst_tvar(p, vid, subject), tr.id, subject, bindings)]
+  }
+  Sig {
+    ..s,
+    param_tys: ps,
+    ret: reduce_via_bindings(subst_tvar(s.ret, vid, subject), tr.id, subject, bindings)
+  }
 }
 
 fn subst_tvar(t: Ty, vid: Int, to: Ty) -> Ty =
@@ -1631,7 +1641,8 @@ fn gen_ccall(g: Gen, callee: CCallee, args: List[CExpr], ty: Ty) -> (Gen, Bool) 
     CImpl(owner, tid, subject, method) -> {
       let g1 = gen_cargs(g, args)
       let tr = trait_of(g1.traits, tid)
-      let psig = subst_subject(tr, trait_method_sig(tr, method), subject)
+      let psig = subst_subject(tr, trait_method_sig(tr, method), subject,
+        impl_of(g1, tid, subject).assoc_bindings)
       # A conditional impl's method takes a dictionary per bound. How many is
       # readable from Core alone -- the arguments beyond the trait method's
       # own are those dictionaries -- so this does not consult the impl table.

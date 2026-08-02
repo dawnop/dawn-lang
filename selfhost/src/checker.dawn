@@ -50,6 +50,7 @@ use types.{
   eff_base, eff_labels, eff_with_labels, EffectI, Effects, ev_record_name,
   Adts, AdtI, CtorI, FieldI, Traits, TraitI, ImplI, Sym, Sig, MethodSig,
   adt_of, trait_of, ty_show, ctor_render, sig_render, subst, subst_eff, eff_show,
+  reduce_via_bindings,
   ty_named, is_numeric, is_errorish, peel_opaque,
   prelude_adts, prelude_traits, prelude_impls, bounds_of,
   builtins, opt_ty, result_ty, OPTION_ID, RESULT_ID, FOREIGN_ERROR_ID,
@@ -630,44 +631,6 @@ pub fn resolve_type(cx: Cx, ref: TypeRef) -> (Cx, Ty) !io =
     TNamed(name, targs, lo, hi) -> resolve_named(cx, name, targs, lo, hi)
     TQual(q, name, targs, lo, hi) -> resolve_qual(cx, q, name, targs, lo, hi)
     TAssoc(subj, name, lo, hi) -> resolve_assoc(cx, subj, name, lo, hi)
-  }
-
-## Rewrite `subject.name` projections to an impl's own bindings -- used while
-## that impl's methods are being checked, before it has entered the table.
-## Everything else walks structurally.
-fn reduce_via_bindings(t: Ty, tid: Int, subject: Ty, bindings: List[(String, Ty)]) -> Ty =
-  match t {
-    TyAssoc(s0, t0, n) -> {
-      let s2 = reduce_via_bindings(s0, tid, subject, bindings)
-      if t0 == tid && s2 == subject {
-        var out = TyAssoc(s2, t0, n)
-        for pr in bindings {
-          let (bn, bt) = pr
-          if bn == n { out = bt }
-        }
-        out
-      } else {
-        TyAssoc(s2, t0, n)
-      }
-    }
-    TyAdt(aid, targs) ->
-      if len(targs) == 0 { t } else {
-        TyAdt(aid, map(targs, x => reduce_via_bindings(x, tid, subject, bindings)))
-      }
-    TyList(e) -> TyList(reduce_via_bindings(e, tid, subject, bindings))
-    TyMap(k, v) ->
-      TyMap(reduce_via_bindings(k, tid, subject, bindings),
-        reduce_via_bindings(v, tid, subject, bindings))
-    TySet(e) -> TySet(reduce_via_bindings(e, tid, subject, bindings))
-    TyArray(e) -> TyArray(reduce_via_bindings(e, tid, subject, bindings))
-    TyTuple(elems) -> TyTuple(map(elems, x => reduce_via_bindings(x, tid, subject, bindings)))
-    TyOpaque(id, n2, ow, tgt) -> TyOpaque(id, n2, ow, reduce_via_bindings(tgt, tid, subject, bindings))
-    TyFn(params, ret, eff) ->
-      TyFn(map(params, x => reduce_via_bindings(x, tid, subject, bindings)),
-        reduce_via_bindings(ret, tid, subject, bindings), eff)
-    TyVar(_, _) -> t
-    TyInt | TyFloat | TyBool | TyString | TyBytes -> t
-    TyUnit | TyNever | TyError | TyJava(_, _) -> t
   }
 
 ## `T.Item` -- the subject must be a type parameter in scope, and exactly one

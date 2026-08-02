@@ -446,6 +446,50 @@ pub fn subst(t: Ty, m: Map[Int, Ty], em: Map[Int, Eff]) -> Ty =
     TyUnit | TyNever | TyError | TyJava(_, _) -> t
   }
 
+## Rewrite `subject.name` projections to an impl's own bindings -- everything
+## else walks structurally. Two callers, one shape: the checker uses it while
+## an impl's methods are being checked (before the impl has entered the
+## table), and lowering/codegen use it to spell a devirtualised call's
+## signature. The binding RHS goes in *verbatim* -- its own type variables are
+## the impl's parameters, exactly as they appear in the impl method's declared
+## signature -- because that declared signature is the callee's ABI: `Cur =
+## Int` must become an unboxed slot and `Item = T` must stay an erased one,
+## and instantiating the RHS would get the second wrong.
+pub fn reduce_via_bindings(t: Ty, tid: Int, subject: Ty, bindings: List[(String, Ty)]) -> Ty =
+  match t {
+    TyAssoc(s0, t0, n) -> {
+      let s2 = reduce_via_bindings(s0, tid, subject, bindings)
+      if t0 == tid && s2 == subject {
+        var out = TyAssoc(s2, t0, n)
+        for pr in bindings {
+          let (bn, bt) = pr
+          if bn == n { out = bt }
+        }
+        out
+      } else {
+        TyAssoc(s2, t0, n)
+      }
+    }
+    TyAdt(aid, targs) ->
+      if len(targs) == 0 { t } else {
+        TyAdt(aid, map(targs, x => reduce_via_bindings(x, tid, subject, bindings)))
+      }
+    TyList(e) -> TyList(reduce_via_bindings(e, tid, subject, bindings))
+    TyMap(k, v) ->
+      TyMap(reduce_via_bindings(k, tid, subject, bindings),
+        reduce_via_bindings(v, tid, subject, bindings))
+    TySet(e) -> TySet(reduce_via_bindings(e, tid, subject, bindings))
+    TyArray(e) -> TyArray(reduce_via_bindings(e, tid, subject, bindings))
+    TyTuple(elems) -> TyTuple(map(elems, x => reduce_via_bindings(x, tid, subject, bindings)))
+    TyOpaque(id, n2, ow, tgt) -> TyOpaque(id, n2, ow, reduce_via_bindings(tgt, tid, subject, bindings))
+    TyFn(params, ret, eff) ->
+      TyFn(map(params, x => reduce_via_bindings(x, tid, subject, bindings)),
+        reduce_via_bindings(ret, tid, subject, bindings), eff)
+    TyVar(_, _) -> t
+    TyInt | TyFloat | TyBool | TyString | TyBytes -> t
+    TyUnit | TyNever | TyError | TyJava(_, _) -> t
+  }
+
 ## Substitution walks the normal form component by component: the base axis
 ## substitutes as it always did, and labels ride through untouched -- a label
 ## is not a variable and has nothing to be replaced by. A base that
