@@ -4,11 +4,18 @@
 > 覆盖 codebase-audit.md 的 **ARCH-04（P2）**、**ARCH-01（P1）**、**ARCH-02（P1）**、
 > 以及 **ARCH-03（P1）** 的「若真要第二后端」那一半。
 >
-> 状态：**降级为补充材料。** 本文与 [`../native-backend-plan.md`](../native-backend-plan.md)
-> 的 **Phase 0（Core IR）** 是独立写出来的两份方案，结论一致（一层 IR、不做 SSA、
-> 验收是零 Emit-Change）。**动手时以那份计划的 Phase 0 为准**——它的节点集更全
-> （见 §三的表），且它知道 native 后端要什么。本文保留的价值在两处：
-> §1.3 的排序论证，和 §3.2/3.3 的 `Cx`/`Gen` 拆分方案——**后者不在那份计划里**。
+> 状态：**整篇降级为补充材料，不是任何一条待办的方案。**
+>
+> - **§一–§二、§四–§六（LIR 本身）**：与 [`../native-backend-plan.md`](../native-backend-plan.md)
+>   的 **Phase 0（Core IR）** 是独立写出来的两份方案，结论一致（一层 IR、不做 SSA、
+>   验收是零 Emit-Change）。**以那份计划的 Phase 0 为准**——它的节点集更全（见 §三的表），
+>   且它知道 native 后端要什么。Phase 0 已落地。
+> - **§3.2/§3.3（`Cx`/`Gen` 拆分）**：曾是本文唯一没被那份计划覆盖的部分，
+>   **已于 2026-08-03 被 [`../arch-split-design.md`](../arch-split-design.md) 复测取代**
+>   ——六组件表判为不做，理由见该文 §6.1，摘要见本文 §3.2 的警示框。
+> - **仍然有效的只剩 §1.3 的排序论证**（先做 IR 再拆 God module，反了会做两遍）。
+>
+> **本文的所有行数与字段数都停在 2026-07-25**，逐处已加复测标注；引用数字前先看标注。
 > 撞车登记见 [native-plan-overlap.md](native-plan-overlap.md) §3.1、§3.2。
 
 ## 一、问题
@@ -49,13 +56,29 @@ Java 反射（`java_classes`）、import/export（`module_aliases`/`module_fn_si
 （`pending_fnval`/`pending_bi`/`pending_ctorb`/`emitted_*`）、trait witness、
 常量字段（`consts`/`blocks`/`const_fields`/`const_by_key`）和控制流 label（`loop_stack`/`fn_start`）。
 
+> **复测（2026-08-03，`86b1cec`）——上表与上面两段的字段名单都已过期，别照着它做事：**
+>
+> | 文件 | 行数 | 状态记录字段数 |
+> |---|---:|---:|
+> | `checker.dawn` | **11,308** | `Cx` **47** @ `:91-164` |
+> | `emit.dawn` | **2,534** | `Gen` **21** @ `:92-128` |
+> | `codegen.dawn` | **3,425** | —（全文零 `Gen` 引用） |
+>
+> `Cx` 的 `reported_key_types` **已不存在**（全 `selfhost/src/` 零命中，随 `check_key_type`
+> 那条行走一起删掉，见 [`../semantics-closure-design.md`](../semantics-closure-design.md)）。
+> `pending_lambdas`/`lambda_ctr`/`pending_fnval`/`pending_bi`/`pending_ctorb` 全仓已零命中；
+> `emitted_*`/`fn_start` 还在，但在 `lower.dawn` 里，不再是 `Gen` 的字段；`Gen` 的 `loop_stack`
+> 换成了 `cloops`（Core 给循环起了名字）。**lowering 搬进 Core 之后 `emit.dawn` 反而变短**
+> ——本节「emitter 也成了单体」的论据，今天只剩 `checker.dawn` 那一半还成立。
+> 现状与拆法以 [`../arch-split-design.md`](../arch-split-design.md) §1.1、§2.3、§2.4 为准。
+
 审查里最尖锐的一句要原样记住：
 
 > 不可变记录线程化只是把「一个可变大对象」变成「每步复制/更新一个不可变大对象」，
 > 没有真正降低耦合。
 
 对。不可变性在这里买到的是「不会有人从别处偷偷改它」，**不是**模块化。
-46 个字段仍然被 7,900 行以任意组合读写。
+46 个字段仍然被 7,900 行以任意组合读写（2026-08-03：**47 个字段、11,308 行**）。
 
 ### 1.3 为什么这份文档排在最前面
 
@@ -123,10 +146,30 @@ parse → check（出 TAST）→ lower（出 LIR）→ [opt: LIR→LIR 改写] �
 
 ### 3.2 拆 checker（ARCH-01）
 
+> **⚠ 本节与 §3.3 已被 [`../arch-split-design.md`](../arch-split-design.md) 取代（2026-08-03）。**
+>
+> 下面这张六组件表**判为不执行**，理由是那份文档 §6.1 的三条复测：
+>
+> 1. **收窄不了签名**——body 检查是一个整体，`check_fn` 家族五个入口的传递可达字段
+>    几乎是全集，切成六份不会让任何一个函数少收一个字段。
+> 2. **`DiagSink` 想要的漏斗已经存在**——`Cx.diags` 在 `checker.dawn` 里只有两处记录更新
+>    （`cerr`/`cerr_h`，`cerr_o` 委托给它们）。把它做成子记录只换来字段数的算术减法，
+>    却要改掉每一个 `cerr` 调用点。
+> 3. **表本身已经烂了**——`reported_key_types` 已随 `check_key_type` 那条行走一起删除
+>    （全 `selfhost/src/` 零命中）；而 `src_path` 被划进 `DiagSink` 是误判，它与
+>    `local_traits` 的共现更紧（孤儿规则报错要说清 impl 在哪个文件），**是身份不是输出**。
+>
+> 取代它的形状：**模块拆到位、记录只切两刀**（`Frame`、`GenCtx`）。理由是 Dawn 里
+> 「拆文件」和「拆状态」不是同一件事——模块拆分对调用点零代价，记录拆分每个写点加一层。
+>
+> 本节保留原文，作为「一个看起来正确、复测之后不成立的方案」的记录。
+> §1.3 的排序论证不受影响，仍然有效。
+
 > **这一节和下一节是本文唯一没有被 native 计划覆盖的部分。** 那份计划的 Phase 0
-> 只做「抽出 Core IR」，46 字段的 `Cx` 与 31 字段的 `Gen` 原样留着；
-> 而它的 Phase 5 还要往 checker 里加 `use c` 的解析面——`Cx` 只会更大。
-> 所以拆 God module 仍然是本目录的事，**排在 Phase 0 之后、Phase 5 之前**。
+> 只做「抽出 Core IR」，`Cx` 与 `Gen` 原样留着（写这段时是 46 / 31 字段，
+> 今天是 **47 / 21**）；而它的 Phase 5 还要往 checker 里加 `use c` 的解析面——
+> `Cx` 只会更大。所以拆 God module 仍然是本目录的事，
+> **排在 Phase 0 之后、Phase 5 之前**。
 
 有了 LIR，checker 的输出边界变窄了（它只需要产出 TAST，不再需要为 emit 准备信息），
 `Cx` 才拆得动。按审查的六分法：
@@ -138,7 +181,7 @@ parse → check（出 TAST）→ lower（出 LIR）→ [opt: LIR→LIR 改写] �
 | `EffEnv` | `used_effects` `eff_witness` `current_eff_vars` |
 | `TraitEnv` | `traits` `traits_by_name` `local_traits` `local_impls` `impl_table` `dict_syms` |
 | `JavaResolver` | `java_classes` |
-| `DiagSink` | `diags` `src_path` `line_starts` `reported_key_types` |
+| `DiagSink` | `diags` `src_path` `line_starts` |
 
 剩下的（import/export、const/comptime、lambda/loop）留在一个明显更小的 `Cx` 里。
 
@@ -150,6 +193,14 @@ parse → check（出 TAST）→ lower（出 LIR）→ [opt: LIR→LIR 改写] �
 同理，且更简单——LIR 已经把 label、闭包捕获、witness 显式化了，
 `Gen` 里那些 `pending_*` 队列大部分会直接消失（它们存在的原因就是
 「emit 一边走树一边发现还需要生成别的东西」）。
+
+> **这一句被证实了**（2026-08-03）：Core IR 落地后 `Gen` 从 31 字段降到 **21**，
+> `pending_lambdas`/`lambda_ctr`/`pending_fnval`/`pending_bi`/`pending_ctorb`
+> 全部消失，`emit.dawn` 从 3,532 行降到 **2,534** 行。
+> **但由此推不出 ARCH-02 已经解决**：真实盘子是 `codegen.dawn` 3,425 + `emit.dawn` 2,534
+> = 5,959 行，其中 `codegen.dawn` 那 3,425 行**一次都没提到 `Gen`**——它是另一种病
+> （一个模块里塞了三块互不相干的字节码写手），拆法见
+> [`../arch-split-design.md`](../arch-split-design.md) §2.2。
 
 ## 四、为什么不顺手把 X 也改了
 
@@ -192,9 +243,11 @@ parse → check（出 TAST）→ lower（出 LIR）→ [opt: LIR→LIR 改写] �
 | B | 新增 `lower.dawn`：TAST → LIR，先只覆盖 call 与控制流 | lower 的内联 test | 同上 |
 | C | `emit.dawn` 改吃 LIR（call/控制流部分） | fixpoint + prev-diff **零差异** | 同上 |
 | D | 依次搬 match、装箱/擦除、closure、trait witness、FFI、所有权 | 每步 fixpoint + prev-diff 零差异 | 同上 |
-| E | 拆 `Cx` 六组件（ARCH-01），一次一个 | 每步全量 + 差分 | **本目录**，Phase 0 后 / Phase 5 前 |
-| F | 拆 `Gen`（ARCH-02） | 同上 | 同上 |
+| ~~E~~ | ~~拆 `Cx` 六组件（ARCH-01），一次一个~~ | ~~每步全量 + 差分~~ | **已被 [`../arch-split-design.md`](../arch-split-design.md) 取代**（六组件判为不做，见 §3.2 的警示框） |
+| ~~F~~ | ~~拆 `Gen`（ARCH-02）~~ | ~~同上~~ | 同上——`Gen` 改为**二分**（只读 `GenCtx` + 可变 `Gen`），且主刀在 `codegen.dawn` 而非 `Gen` |
 
 **阶段 A–D 已让位给 native 计划的 Phase 0**，本文不再是它们的方案，只是补充材料
-（§3 表的第 7、8 行是补给它的）。**E、F 归本目录**，另开 progress 文档记录
-（CONTRIBUTING §四：大改动开 `docs/m<N>-progress.md`，回填提交哈希）。
+（§3 表的第 7、8 行是补给它的）。**E、F 已让位给
+[`../arch-split-design.md`](../arch-split-design.md)**（2026-08-03，任务 #88），
+那里把它们重排成十一刀、每刀单独可证。至此本文**整篇**是补充材料，
+不再是任何一条待办的方案。

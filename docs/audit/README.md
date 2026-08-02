@@ -27,7 +27,7 @@
 > 高危论断已逐条独立复核。含 triage：立即可做的正确性小刀 / 待裁决契约件 /
 > 并入已立项任务的侧面 / 独立排期的结构清理 / 等窗口的破坏性变更。
 
-## 一、九份设计文档 + 一份台账
+## 一、十份设计文档 + 一份台账
 
 | 文档 | 覆盖 | 破坏性 | 状态 |
 |---|---|---|---|
@@ -35,8 +35,9 @@
 | [native-plan-overlap.md](native-plan-overlap.md) | 撞车登记（台账，非方案） | — | current |
 | [purity-boundary-design.md](purity-boundary-design.md) | **LANG-01(P0)** ARCH-06 | 是（语言收窄） | 步 1–2 已落地／**步 3 不做** |
 | [ceval-trampoline-verdict.md](ceval-trampoline-verdict.md) | purity-boundary 步 3 的收益重估（裁决，非方案） | — | **current（不做，07-31）** |
-| [lowered-ir-design.md](lowered-ir-design.md) | ARCH-04 ARCH-01 ARCH-02 ARCH-03 | 否（输出必须逐字节不变） | **降级为补充材料**；仅 ARCH-01/02 归本目录 |
-| [error-model-design.md](error-model-design.md) | ERR-02 ERR-03 LANG-02 | 是 | A、B 可做／**C2 冻结** |
+| [lowered-ir-design.md](lowered-ir-design.md) | ARCH-04 ARCH-01 ARCH-02 ARCH-03 | 否（输出必须逐字节不变） | **整篇降级为补充材料**——§3.2/§3.3 的 `Cx`/`Gen` 方案已被 [../arch-split-design.md](../arch-split-design.md) 复测取代 |
+| [../arch-split-design.md](../arch-split-design.md) | **ARCH-01 ARCH-02**（任务 #88） | 否（发射字节必须逐字节不变） | proposed |
+| [error-model-design.md](error-model-design.md) | ERR-02 ERR-03 LANG-02 | 是 | A、B 已落地／**C2 不做**（07-31 关档） |
 | [application-syntax-design.md](application-syntax-design.md) | SYN-02 SYN-03 | 否（语法放宽） | **已落地**（2026-07-30 加法 + 07-31 统一） |
 | [nominal-types-design.md](nominal-types-design.md) | LANG-04 LANG-05 | 部分 | 步 1–3 可做／**步 4 冻结** |
 | [module-access-design.md](module-access-design.md) | LANG-06 LANG-07 | 否 | **可做**（不重合） |
@@ -65,12 +66,12 @@ ARCH-05 的前两条建议。台账 §二。**不要并行动它们。**
 
 第 2 批（破坏性，各自发窗口）
   error-model A（ForeignError）──► B（cast 返回 Result）
-                                    C2（LProtect）✗ 冻结（等 Phase 0）
+                                    C2（LProtect/CSProtect）✗ 不做（07-31 关档）
   web-api-v2 步 1–6（packages/web 2.0，跨仓契约）
 
 第 3 批（等 native 那条线）
-  Phase 0 落地 ──► ARCH-01（拆 Cx）──► ARCH-02（拆 Gen）──► 要在 Phase 5 之前
-                └► error-model C2
+  Phase 0 落地 ──┬► ARCH-01（拆 Cx）  ┐ 两条互无技术依赖，可并行
+                 └► ARCH-02（拆 Gen） ┘ 都要在 Phase 5 之前
   R6 决议    ──► purity-boundary 步骤 3 ✗ 不做，-Xss512m 留着（ceval-trampoline-verdict）
   Phase 6    ──► nominal-types 步骤 4（'a' 变 Char，与纯 Dawn 化合并做）
 
@@ -140,14 +141,15 @@ native 计划的 Phase 0 承担）：
     但它是**跨仓契约**（CONTRIBUTING §六）：这边先发 tag，dawnop-site 再 bump。
     找一个那边有空迁移的窗口做。
 
-### 第 3 批：等 native 那条线的三个信号
+### 第 3 批：曾经等 native 那条线的三个信号
 
-**这一批一件都不要提前动**，每条都写明了等什么：
+**三个信号已于 2026-07-30 全部到期，本批解冻**（见本文头部）。下表留着是为了记住
+每条当初等的是什么、以及等到之后各自的结局：
 
 | 待办 | 等什么 | 等到之后 |
 |---|---|---|
-| **ARCH-01 拆 `Cx` / ARCH-02 拆 `Gen`** | Phase 0（Core IR）出口 | 排在 **Phase 5 之前**——`use c` 落到拆开的 checker 上更便宜 |
-| **error-model C2（`LProtect`）** | Phase 0 | 它**就是** IR 的一部分，不再是后续改动 |
+| **ARCH-01 拆 `Cx` / ARCH-02 拆 `Gen`** | ~~Phase 0（Core IR）出口~~ **已到，前提解除** | 排在 **Phase 5 之前**——`use c` 落到拆开的 checker 上更便宜。方案 = [../arch-split-design.md](../arch-split-design.md)。**两者之间没有技术依赖**：`emit.dawn` 是叶子、与 checker 零耦合，上面写成串行的那条线是排期不是依赖（该文 D12），两条 lane 并行 |
+| ~~**error-model C2（`LProtect`）**~~ | ~~Phase 0~~ | **已结账 07-31：不做**——`bracket` 改以运行时 intrinsic 落地（v0.39.0），冻结时「codegen intrinsic 会把 bracket 绑死在 JVM 上」的论证在 `catch_fault` 之后不成立。见 [../core-move2-design.md](../core-move2-design.md) §2.6 与该文头部落地记 |
 | ~~**purity-boundary 步骤 3（trampoline）**~~ | ~~**R6 决议**~~ | **已结账 07-31：不做**——重估后收益不成立，见 [ceval-trampoline-verdict.md](ceval-trampoline-verdict.md) |
 | **nominal-types 步骤 4（`'a'` 变 `Char`）** | Phase 6 排期 | **合并成一次改**，且 `Char` 先落 |
 

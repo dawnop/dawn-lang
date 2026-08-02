@@ -62,6 +62,14 @@ C 的 19 条见 [README.md](README.md) §三的批次表——那里是排期，
 
 已写进 [lowered-ir-design.md](lowered-ir-design.md) §7 的阶段表。
 
+> **更新（2026-08-03）**：Phase 0 已落地，这条的排期条件到期。方案改由
+> [`../arch-split-design.md`](../arch-split-design.md) 承接（lowered-ir §7 的 E/F 两行已划掉）。
+> 本节的数字也全线过期：`Cx` 今天是 **47** 字段、`checker.dawn` 是 **11,308** 行，
+> 而 `Gen` 反向缩到 **21** 字段、`emit.dawn` 缩到 **2,534** 行——lowering 搬进 Core
+> 之后 emitter 那半边的病情自己好了一大半，剩下的病灶在 `codegen.dawn`（3,425 行，
+> 一次都没提到 `Gen`）。**「ARCH-01 ──► ARCH-02」是排期不是技术依赖**：`emit.dawn`
+> 是叶子、与 checker 零耦合，两条 lane 可并行（该文 D12）。
+
 ### 3.2 Core IR 的节点集：本目录漏了两样
 
 计划 Phase 0 要搬四样，本目录的 `LIR` 只覆盖其中两样：

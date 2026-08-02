@@ -93,7 +93,10 @@ Playground 都有可运行测试，错误恢复、持久集合、效果多态、
 3. **编译器已超过最初“小而直接”的架构预算。** 7,924 行的 checker、3,531 行的 emitter、
    大型状态记录、直接 TAST→ASM 和二进制运行时续传，使维护成本与文档里的原始论证明显脱节。
    （**待办（ARCH-01/02/04/05）+ 已修文档**：`design.md` 已标明「6–8 千行 Kotlin 预算」
-   等前提已被推翻，不再读作现状。重构本身不在本次范围。）
+   等前提已被推翻，不再读作现状。重构本身不在本次范围。
+   **2026-08-03 复测**：checker 已是 **11,308** 行；emitter 反而降到 **2,534** 行——
+   lowering 搬进了 Core，那部分不是消失是换了地方。拆分方案见
+   [arch-split-design.md](arch-split-design.md)。）
 4. **几个对外包存在确定的协议错误。** JSON 会丢失大整数精度并能输出非法 JSON；Web body limit
    在完整读入后才检查；query/form、CORS、响应体和错误模型也有明显接口缺陷。
    （**大部分已修**：JSON-01/02/03、WEB-01/02/05/08 都已修并加了回归测试。响应体与错误
@@ -185,7 +188,7 @@ TAST、codegen、LSP、spec 和历史文档之间的同步税。
 | WEB-01 | P1 | body limit 在 `readAllBytes` 之后执行，无法阻止内存型 DoS | **已修** |
 | PKG-01 | P1 | 包下载/解压无体积、条目数、膨胀率和超时限制 | **已修** |
 | CLI-01 | P1 | `write_class` 吞掉目录创建和文件写入错误 | **已修** |
-| ARCH-01 | P1 | checker/emitter 已形成大型单体和超宽状态对象 | **待办** |
+| ARCH-01 | P1 | checker/emitter 已形成大型单体和超宽状态对象 | **待办**（方案已出：[arch-split-design.md](arch-split-design.md)，任务 #88） |
 | ERR-01 | P1 | `catch_panic` 捕获全部 `Throwable`，会吞下 JVM 致命错误 | **已修** |
 | DOC-01 | P1 | 权威 spec、EBNF 和当前实现存在多处可执行语法冲突 | **已修**（EBNF 除外，见 SYN-04） |
 
@@ -611,16 +614,26 @@ type-only cycle。建议把“全仓 lint/test”与“构建当前入口闭包�
 > 不可变大对象』，没有真正降低耦合」——这条批评成立，不可变性在这里买到的是
 > 数据竞争安全，不是模块化。
 >
-> 拆成六个组件是正确的方向，也正因为正确才不能顺手做：`Cx` 的 44 个字段被
-> 7,900 行代码以任意组合读写，拆分要么是一次几千行的机械改写（风险大、评审不可能细看），
+> 拆成六个组件是正确的方向，也正因为正确才不能顺手做：`Cx` 的字段被整个 checker
+> 以任意组合读写，拆分要么是一次几千行的机械改写（风险大、评审不可能细看），
 > 要么分多次做（每次要能独立验证）。**前提是先有 lowered IR**（ARCH-04）——
 > 否则 checker 拆完，emit 仍然直接吃 TAST，耦合只是换了个地方。
 > 先做 IR、再拆 checker，顺序反了会做两遍。
+>
+> **前提已满足（2026-08-03）**：Core IR 随 native 计划 Phase 0 落地，`runtime-intrinsics-design.md`
+> §8 记的那三处「漏进 emit 的 lowering」已全部关闭——逐行核对见
+> [core-move2-design.md](core-move2-design.md) §1.1（在 `77d7aa4` 上做的核对）。
+> emit 残余的 TAST 依赖是「关于**类**的问题」（方法名/描述符），不流经 `Cx`。
+> **本条的方案 = [arch-split-design.md](arch-split-design.md)**（任务 #88）；
+> 下面那句「拆成符号环境 / 类型推断状态 / … 六个组件」的建议**已被它复测取代**，
+> 理由见该文 §6.1：body 检查是一个整体，切成六份不会让任何一个入口少收一个字段；
+> 而 `DiagSink` 想要的漏斗（诊断只从 `cerr`/`cerr_h`/`cerr_o` 三个写点进）**今天已经存在**。
 
 
-`selfhost/src/checker.dawn` 有 7,924 行、约 215 个函数/test。
-`Cx` 在 `selfhost/src/checker.dawn:76` 到 `selfhost/src/checker.dawn:132`
-包含约 44 个字段，混合了：
+`selfhost/src/checker.dawn` 有 11,308 行、249 个函数 + 88 个内联 test。
+`Cx` 在 `selfhost/src/checker.dawn:91` 到 `selfhost/src/checker.dawn:164`
+包含 47 个字段（以上为 2026-08-03 在 `86b1cec` 上的复测值；审查当日记的是
+7,924 行 / `:76-132` / 44 字段——**没修之前只会更大**），混合了：
 
 - 名字与作用域；
 - ADT/alias/trait/impl；
@@ -637,11 +650,28 @@ type-only cycle。建议把“全仓 lint/test”与“构建当前入口闭包�
 
 ### ARCH-02（P1）emitter 状态和职责同样过宽
 
-> **【待办 —— 认可】**——同 ARCH-01，且同样应排在 lowered IR 之后。
+> **【待办 —— 认可】**——同 ARCH-01。「排在 lowered IR 之后」这个前提也同 ARCH-01
+> 已满足（Core IR 的 Phase 0 已落地）。
+>
+> **本条的方案 = [arch-split-design.md](arch-split-design.md)**（任务 #88）。两件口径要更正：
+>
+> 1. **ARCH-02 的真实盘子是 `codegen.dawn` 3,425 行 + `emit.dawn` 2,534 行 = 5,959 行**
+>    （2026-08-03 复测）。`selfhost/src/class_table.dawn`（2,089 行）与 `case_table.dawn`
+>    （1,384 行）**不是后端模块**——它们是 `scripts/unicode-contract/probe.dawn` 生成的
+>    Unicode 数据表（文件头写着「GENERATED … do not edit」），两个后端都读，
+>    把它们算进后端盘子是口径错误。
+> 2. 那 5,959 行里，**`codegen.dawn` 的 3,425 行一次都没提到 `Gen`**（`grep -c '\bg\.'`
+>    为 0，全文唯一的 "Gen" 是注释里的 "CodeGen.kt"）。所以第一刀不是「按子系统给 `Gen`
+>    分层」，而是**把本来就不碰 `Gen` 的行搬成叶子模块**。见 arch-split-design.md §2.2。
 
 
-`selfhost/src/emit.dawn` 3,531 行；`Gen` 在 `selfhost/src/emit.dawn:159` 有 30 余字段，
-同时管理 JVM 栈槽、闭包、SAM、函数值桥、构造器桥、trait witness、常量字段和控制流 label。
+`selfhost/src/emit.dawn` 2,534 行；`Gen` 在 `selfhost/src/emit.dawn:92` 到 `:128`
+有 21 个字段（2026-08-03 复测；审查当日记的是 3,531 行 / `:159` / 30 余字段——
+`emit.dawn` 变短是因为 lowering 已经搬进 Core），
+同时管理 JVM 栈槽、闭包、SAM、函数值桥、构造器桥、trait witness、常量字段和控制流 label
+（下面这份职责清单也是审查当日的：`pending_lambdas`/`lambda_ctr`/`pending_fnval`/
+`pending_bi`/`pending_ctorb`/`emitted_*`/`fn_start` 已随 lowering 一起离开 `Gen`，
+`loop_stack` 换成了 `cloops`）。
 新增任一语义特性都很容易触碰整个后端。
 
 建议引入 method-local builder、closure lowering、trait lowering、constant materialization 等分层，
@@ -692,6 +722,10 @@ backend-neutral lowered IR 和 FFI capability；若不打算做，应删除误�
 > Perceus 决策的直接后果，会改 IR 的形状。[audit/lowered-ir-design.md](audit/lowered-ir-design.md)
 > 因此降级为它的补充材料，只保留 ARCH-01/02 的拆分方案——**那部分不在 Phase 0 里**。
 > 台账 [§3.1、§3.2](audit/native-plan-overlap.md)。
+>
+> **后续（2026-08-03）**：Phase 0 已落地，本条作为 ARCH-01/02 前提的那一半随之解除；
+> 它给 lowered-ir-design.md 保留的最后一块（§3.2/§3.3 的 `Cx`/`Gen` 拆分方案）也
+> **已被 [arch-split-design.md](arch-split-design.md) 复测取代**。那份文档现在整篇是补充材料。
 
 
 `docs/design.md:73` 在小编译器阶段拒绝 IR 是合理的，但现在 TAST 同时承担类型树、lowered tree、
@@ -1927,8 +1961,8 @@ README 示例、tutorial、grammar 和 spec 的错误都没有被测试发现。
 
 ### 第三阶段：重构编译器
 
-1. 拆 checker 的环境和 pass。—— **待办**（ARCH-01，等 Core IR 落地，
-   且要排在 native 计划的 Phase 5 之前）
+1. 拆 checker 的环境和 pass。—— **待办**（ARCH-01。Core IR 已落地，前提解除；
+   方案见 [arch-split-design.md](arch-split-design.md)，仍要排在 native 计划的 Phase 5 之前）
 2. 引入小型 lowered IR，统一所有 call/control-flow/FFI。—— **已让位**（ARCH-04
    → [native-backend-plan.md](native-backend-plan.md) 的 Phase 0。这条判断本身是对的
    ——它确实是 1、3、5 的共同前提——只是那条线的方案更全，见台账 §3.2）
@@ -1983,7 +2017,8 @@ Dawn 当前最大的风险不是“功能少”，而是**项目对自己的承�
 
 ## 15. 剩余项（按建议顺序）
 
-> **28 条待办的方案已经写好**，在 [`docs/audit/`](audit/) 下九份设计文档里，
+> **28 条待办的方案已经写好**，在 [`docs/audit/`](audit/) 下的设计文档里
+> （ARCH-01/02 那份例外，落在 [`docs/arch-split-design.md`](arch-split-design.md)），
 > 索引与修复顺序见 [`docs/audit/README.md`](audit/README.md)。下表的「设计文档」
 > 一列指向对应的那份。
 >
@@ -1997,8 +2032,8 @@ Dawn 当前最大的风险不是“功能少”，而是**项目对自己的承�
 | 编号 | 题目 | 设计文档 | 排期 |
 |---|---|---|---|
 | LANG-01（P0）+ ARCH-06 | `unsafe_pure` 的边界、comptime allowlist、trampoline evaluator | [purity-boundary](audit/purity-boundary-design.md) | 步 1–2 做／**步 3 冻结**（等 R6） |
-| ARCH-01/02（+ARCH-03/04） | 小型 lowered IR，及靠它拆 checker/emitter | [lowered-ir](audit/lowered-ir-design.md) —— **已降级为补充材料** | **等 Core IR**，然后拆 `Cx`/`Gen` |
-| ERR-02 / ERR-03 / LANG-02 | `ForeignError`、`bracket`、`cast` 返回 Result | [error-model](audit/error-model-design.md) | A、B 做／**C2 冻结**（等 Core IR） |
+| ARCH-01/02（+ARCH-03/04） | 小型 lowered IR，及靠它拆 checker/emitter | [arch-split-design.md](arch-split-design.md)（**取代** [lowered-ir](audit/lowered-ir-design.md) §3.2 的六组件方案，后者已降级为补充材料） | Core IR 已落地，**前提解除**；拆 `Cx`/`Gen` 排上（#88），两条 lane 无技术依赖、可并行 |
+| ERR-02 / ERR-03 / LANG-02 | `ForeignError`、`bracket`、`cast` 返回 Result | [error-model](audit/error-model-design.md) | A、B **已落地**（v0.32.0–v0.35.0）／**C2 关档不做**（07-31，`bracket` 改走运行时 intrinsic，v0.39.0） |
 | LANG-04 / LANG-05 | `Char` 不透明类型、`type X = new T` | [nominal-types](audit/nominal-types-design.md) | 步 1–3 做／**步 4 冻结**（并入 Phase 6） |
 | LANG-06 / LANG-07 | `m.T`/`m.C`/`m.CONST`、`--closure` | [module-access](audit/module-access-design.md) | **做**（不重合） |
 | LSP-01 / LSP-02 / LSP-04 | URI/UTF-8 交给 JDK、debounce + generation | [lsp-robustness](audit/lsp-robustness-design.md) | **做**（不重合） |

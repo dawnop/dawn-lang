@@ -1,6 +1,14 @@
 # 运行时 intrinsic 契约：去 Java 与后端可移植的统一重构
 
-> 状态：**规划中,未实现**。本文把两个看似独立的诉求——① 去掉编译器里手写的 Java 运行时代码、
+> 状态：**current —— 契约已立,分期计划走到第 4 步**(2026-08-03 更正;此处曾长期写着
+> 「规划中,未实现」,与 [docs/README.md](README.md) 的 `current` 冲突,且被文内自己的落地记推翻)。
+> §10 的五步:1(契约显式化)、2(JVM 后端实现契约)、3(std over-intrinsic)**已落地**;
+> 4(非 JVM 后端)由 C 后端完成——§12 就是「契约有了第二份实现」之后被证伪/坐实的清单;
+> 5(native 自举)已于 2026-07-30 达成([native-backend-plan.md](native-backend-plan.md) §14.23,fixpoint B==C)。
+> §8 的三步 Move 表已被 [core-move2-design.md](core-move2-design.md) 更正并结账。
+> 未落地的只剩 §11 里仍标着开放的几项(契约边界画多细、ASM/AdtClassWriter 算不算范围)。
+>
+> 本文把两个看似独立的诉求——① 去掉编译器里手写的 Java 运行时代码、
 > ② 将来能接一个非 JVM(如 LLVM/native)后端——收敛成**同一件事**:在语言核心与后端之间立一层
 > **显式的运行时 intrinsic 契约**,把所有 `java.*` 关进 JVM 后端对该契约的实现里。
 > 相关:[sourceview-design.md](sourceview-design.md)(切片器收敛,同类"把实现细节收口"的重构)、

@@ -44,7 +44,7 @@
 
 [audit/purity-boundary-design.md](audit/purity-boundary-design.md)（LANG-01 P0 + ARCH-06，步 3 冻结）·
 [audit/lowered-ir-design.md](audit/lowered-ir-design.md)（ARCH-01/02/03/04，**已降级为 Core IR 的补充材料**）·
-[audit/error-model-design.md](audit/error-model-design.md)（ERR-02/03 + LANG-02，C2 冻结）·
+[audit/error-model-design.md](audit/error-model-design.md)（ERR-02/03 + LANG-02，A/B 已落地，**C2 关档不做**）·
 [audit/application-syntax-design.md](audit/application-syntax-design.md)（SYN-02/03）·
 [audit/nominal-types-design.md](audit/nominal-types-design.md)（LANG-04/05，步 4 冻结）·
 [audit/module-access-design.md](audit/module-access-design.md)（LANG-06/07）·

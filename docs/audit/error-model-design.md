@@ -205,6 +205,12 @@ pub fn bracket[A, B](
 > [../core-move2-design.md](../core-move2-design.md)——`catch_fault` 定形后「绑死 JVM」的
 > 论证不再成立，`bracket` 多半该是运行时 intrinsic 而非 IR 节点（该文 §2.6 与开放决策 1）；
 > 本节的返回类型签名与「原始失败继续传播」互相矛盾（该文决策 2）。
+>
+> **同日结账：C2 关档「不做」，`bracket` 以运行时 intrinsic 落地（v0.39.0）。**
+> 第三个屏障族 `bracket(resource, release, use) -> B`：急切 acquire、release 每条路径
+> 恰好执行一次、原失败原样传播（native 按 `is_panic` 位 re-raise）。
+> **`CSProtect`（本节写作 `LProtect`）这个 Core 节点不会被建出来**，图纸存
+> [../core-move2-design.md](../core-move2-design.md) §2.3–2.5，推翻需新证据。
 
 ## 三、为什么不顺手把 X 也改了
 
@@ -231,7 +237,7 @@ pub fn bracket[A, B](
   听起来可移植，实际是在**猜**两套错误分类的对应关系，而猜错的地方
   正是调用方会依赖的地方。`kind` 是后端自己的名字，可移植的匹配只有
   `Ok`/`Err` 这一层——把这条限制写明白比造一层假的可移植性诚实。
-- **等 A/B 也一起冻结**。C2 冻结是因为它要 IR，A 与 B 不要
+- **等 A/B 也一起冻结**（当时的判断；C2 后来关档不做，A/B 已全部落地）。C2 冻结是因为它要 IR，A 与 B 不要
   （A 改 `gen_try_closure` 与调用点，B 改 `cast` 签名）。两者都是破坏性变更，
   越早发窗口越宽。
 
@@ -241,7 +247,7 @@ pub fn bracket[A, B](
 |---|---|---|---|
 | A | **可做** | `selfhost/src/codegen.dawn`（`gen_try_closure`）、prelude ADT 表、`std/error.dawn`、全部 `java_try` 调用点 | 现有全量 + 一个「`kind` 是二进制名而非 toString 前缀」的 test |
 | B | **进行中**（阶段 1 已落地，见 §6.10） | `selfhost/src/types.dawn`（`cast` 签名）、`docs/spec.md` §9、`docs/cast-interop.md`、各调用点 | cast 失败返回 `Err` 而非抛的 test |
-| C2 | **冻结**，等 Core IR | 降级阶段的 `LProtect` 节点 + 两个后端的发射、`std/resource.dawn`、三处手写惯用法改写 | 「release 在 panic 路径也执行、且原失败继续传播」的 test |
+| ~~C2~~ | **关档「不做」**（2026-07-31）——`bracket` 改以**运行时 intrinsic** 落地（v0.39.0），不建 `LProtect` 节点 | ~~降级阶段的 `LProtect` 节点 + 两个后端的发射~~、`std/resource.dawn`、三处手写惯用法改写 | 「release 在 panic 路径也执行、且原失败继续传播」的 test（随 v0.39.0 落地） |
 
 A 与 B 都是破坏性变更 → 各自先发 tag。A 会改发射的字节码 → `Emit-Change:`
 （按 REL-02 的新格式，要标 target；见 [native-plan-overlap.md](native-plan-overlap.md) §3.8）。
