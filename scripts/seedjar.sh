@@ -91,9 +91,16 @@ seed_std_dir() {
   _ss_tag=$(tr -d ' \n' < "$ROOT/scripts/seed-release.txt")
   _ss_dir=${DAWN_SEED_CACHE:-$ROOT/.dawn/seeds}/std-$_ss_tag
   if [ ! -f "$_ss_dir/modules.txt" ]; then
+    # A fresh CI checkout is shallow and tagless (actions/checkout defaults:
+    # depth 1, no tags), so the seed's tag is usually absent there. Fetch just
+    # that tag before asking archive for it; offline with the tag already
+    # present never reaches the fetch.
+    git -C "$ROOT" rev-parse -q --verify "refs/tags/$_ss_tag" > /dev/null ||
+      git -C "$ROOT" fetch -q --depth 1 origin tag "$_ss_tag" || true
     mkdir -p "$_ss_dir.tmp"
     git -C "$ROOT" archive "$_ss_tag" std | tar -x -C "$_ss_dir.tmp" || {
       echo "error: cannot extract std/ from tag $_ss_tag (the seed's released std)" >&2
+      echo "  the tag is not in this clone, and fetching it from origin failed" >&2
       exit 1
     }
     rm -rf "$_ss_dir"
