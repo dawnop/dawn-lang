@@ -42,7 +42,11 @@ ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")
 # The checker's own modules, in the order docs/arch-split-design.md §2.1 puts
 # them: `cerr` and the resolvers it reports from now live in the base module,
 # and a site that leaves this glob leaves the ratchet with it.
-SOURCES = ("selfhost/src/cx.dawn", "selfhost/src/checker*.dawn")
+SOURCES = (
+    "selfhost/src/cx.dawn",
+    "selfhost/src/passes.dawn",
+    "selfhost/src/checker*.dawn",
+)
 CASES = "scripts/checker-corpus/cases"
 UNCOVERED = "scripts/checker-corpus/uncovered.txt"
 
