@@ -1,0 +1,2745 @@
+# The bytecode writers for the shared `dawn/rt/*` runtime classes: Fn, Show,
+# TupleN, Unit, PanicError, Bytes, Io, Array, Strings, FnComparator and the
+# prelude Ord interface. Each one must byte-match what the Kotlin CodeGen.kt
+# emitted, so the class names and the opcode sequences are spelled out rather
+# than derived (docs/selfhost-codegen.md).
+#
+# A leaf: it writes these fixed classes and knows nothing about the module
+# being compiled, so it sits below codegen.dawn instead of inside it.
+
+use std/str
+use std/map
+use std/set
+use types.{Adts, adt_of, adt_jvm_name, ctor_jvm_name}
+use reach.{TableUse}
+use case_table
+use class_table
+use java "dawn.tool.AdtClassWriter"
+use java "org.objectweb.asm.MethodVisitor"
+use java "org.objectweb.asm.Label"
+use java "java.util.Objects"
+use jvmops.{
+  ACC_ABSTRACT, ACC_FINAL, ACC_INTERFACE, ACC_PRIVATE, ACC_PUBLIC, ACC_STATIC, OP_AALOAD,
+  OP_AASTORE, OP_ACONST_NULL, OP_ALOAD, OP_ANEWARRAY, OP_ARETURN, OP_ARRAYLENGTH, OP_ASTORE,
+  OP_ATHROW, OP_BALOAD, OP_BASTORE, OP_BIPUSH, OP_CHECKCAST, OP_DUP, OP_GETFIELD, OP_GETSTATIC,
+  OP_GOTO, OP_I2B, OP_I2L, OP_IADD, OP_IALOAD, OP_IASTORE, OP_ICONST_0, OP_ICONST_1, OP_ICONST_2,
+  OP_ICONST_3, OP_ICONST_M1, OP_IDIV, OP_IFEQ, OP_IFGE, OP_IFGT, OP_IFLE, OP_IFLT, OP_IFNE,
+  OP_IFNONNULL, OP_IFNULL, OP_IF_ACMPEQ, OP_IF_ICMPEQ, OP_IF_ICMPGE, OP_IF_ICMPLE, OP_IF_ICMPLT,
+  OP_IF_ICMPNE, OP_ILOAD, OP_IMUL, OP_INSTANCEOF, OP_INVOKEINTERFACE, OP_INVOKESPECIAL,
+  OP_INVOKESTATIC, OP_INVOKEVIRTUAL, OP_IRETURN, OP_ISTORE, OP_ISUB, OP_L2I, OP_LADD, OP_LCMP,
+  OP_LCONST_0, OP_LLOAD, OP_LRETURN, OP_NEW, OP_NEWARRAY, OP_POP, OP_PUTFIELD, OP_PUTSTATIC,
+  OP_RETURN, T_BYTE, T_INT, V17
+}
+
+# ---- naming (must match the Kotlin side byte for byte) ----
+
+pub fn obj() -> String = "java/lang/Object"
+
+pub fn fn_iface(arity: Int) -> String = "dawn/rt/Fn" ++ to_string(arity)
+
+pub fn tuple_class(arity: Int) -> String = "dawn/rt/Tuple" ++ to_string(arity)
+
+pub fn erased_apply_desc(arity: Int) -> String = {
+  var ps = ""
+  for _i in 0 ..arity { ps = ps ++ "Ljava/lang/Object;" }
+  "(" ++ ps ++ ")Ljava/lang/Object;"
+}
+
+test "the case payload is three fixed-width fields per range" {
+  # The decoder emitted by gen_case_decode divides the payload by six and the
+  # lookup divides the array by three, so a ragged row would not fail here --
+  # it would shift every range after it and answer plausibly.
+  #
+  # Six hex digits each, and the *target* rather than the offset, so no field
+  # carries a sign: a..z uppercases by -32, hence 0x61..0x7A -> 0x41.
+  assert case_payload([(0x0061, 0x007A, -32)]) == "00006100007a000041"
+  # the widest code point there is still fits the field
+  assert case_payload([(0x10FFFF, 0x10FFFF, 0)]) == "10ffff10ffff10ffff"
+  assert str.len(case_payload(case_table.upper())) == len(case_table.upper()) * 18
+  assert str.len(case_payload(case_table.lower())) == len(case_table.lower()) * 18
+  # the classification tables are the same encoding with the third field gone
+  assert class_payload([(0x0041, 0x005A)]) == "00004100005a"
+  assert str.len(class_payload(class_table.letters())) == len(class_table.letters()) * 12
+  assert str.len(class_payload(class_table.spaces())) == len(class_table.spaces()) * 12
+}
+
+# ---- shared runtime classes (each must byte-match the Kotlin emission) ----
+
+pub const PANIC_CLASS: String = "dawn/rt/PanicError"
+
+## The prelude record the two `_e` barriers build. Spelled rather than looked
+## up for the reason the other fixed names here are: this is a class the
+## runtime writes by hand, so the name has to be a constant somewhere, and
+## `adt_jvm_name(adt_of(adts, FOREIGN_ERROR_ID))` needs a table the io class
+## generator is not given.
+pub const FERR_CLASS: String = "ForeignError"
+
+pub const UNIT_CLASS: String = "dawn/rt/Unit"
+
+pub const SB: String = "java/lang/StringBuilder"
+
+pub const SHOW_CLASS: String = "dawn/rt/Show"
+
+## dawn/rt/FnN: the erased function interface (ClassWriter(0), like Kotlin).
+pub fn gen_fn_interface(arity: Int) -> Bytes !io = {
+  let cw = AdtClassWriter.plain(0).expect("writer")
+  AdtClassWriter.beginOn(cw, V17, ACC_PUBLIC + ACC_ABSTRACT + ACC_INTERFACE, fn_iface(arity), obj())
+  let m = AdtClassWriter.methodOn(cw, ACC_PUBLIC + ACC_ABSTRACT, "apply", erased_apply_desc(arity))
+    .expect("mv")
+  m.visitEnd()
+  cw.visitEnd()
+  cw.toByteArray().expect("bytes")
+}
+
+## dawn/rt/PanicError: an Error subclass carrying the panic message.
+pub fn gen_panic_class() -> Bytes !io = {
+  let cw = AdtClassWriter.plain(0).expect("writer")
+  AdtClassWriter.beginOn(cw, V17, ACC_PUBLIC + ACC_FINAL, PANIC_CLASS, "java/lang/Error")
+  let ctor = AdtClassWriter.methodOn(cw, ACC_PUBLIC, "<init>", "(Ljava/lang/String;)V").expect("mv")
+  ctor.visitCode()
+  ctor.visitVarInsn(OP_ALOAD, 0)
+  ctor.visitVarInsn(OP_ALOAD, 1)
+  ctor.visitMethodInsn(OP_INVOKESPECIAL, "java/lang/Error", "<init>", "(Ljava/lang/String;)V", false)
+  ctor.visitInsn(OP_RETURN)
+  ctor.visitMaxs(2, 2)
+  ctor.visitEnd()
+  cw.visitEnd()
+  cw.toByteArray().expect("bytes")
+}
+
+## dawn/rt/Unit: the Unit singleton (materialized only in erased Object slots).
+pub fn gen_unit_class() -> Bytes !io = {
+  let cw = AdtClassWriter.plain(0).expect("writer")
+  AdtClassWriter.beginOn(cw, V17, ACC_PUBLIC + ACC_FINAL, UNIT_CLASS, obj())
+  AdtClassWriter.fieldOn(cw, ACC_PUBLIC + ACC_STATIC + ACC_FINAL, "INSTANCE", "L" ++ UNIT_CLASS ++ ";")
+  let ctor = AdtClassWriter.methodOn(cw, ACC_PRIVATE, "<init>", "()V").expect("mv")
+  ctor.visitCode()
+  ctor.visitVarInsn(OP_ALOAD, 0)
+  ctor.visitMethodInsn(OP_INVOKESPECIAL, obj(), "<init>", "()V", false)
+  ctor.visitInsn(OP_RETURN)
+  ctor.visitMaxs(1, 1)
+  ctor.visitEnd()
+  # A Unit can now reach an erased slot that gets rendered -- a tuple element,
+  # a `List[Unit]` -- where the default would print dawn.rt.Unit@1b6d. `()` is
+  # what Core's own rendering says (lower.dawn, CStr("()")).
+  let ts = AdtClassWriter.methodOn(cw, ACC_PUBLIC, "toString", "()Ljava/lang/String;").expect("mv")
+  ts.visitCode()
+  ts.visitLdcInsn("()")
+  ts.visitInsn(OP_ARETURN)
+  ts.visitMaxs(1, 1)
+  ts.visitEnd()
+  let cl = AdtClassWriter.methodOn(cw, ACC_STATIC, "<clinit>", "()V").expect("mv")
+  cl.visitCode()
+  cl.visitTypeInsn(OP_NEW, UNIT_CLASS)
+  cl.visitInsn(OP_DUP)
+  cl.visitMethodInsn(OP_INVOKESPECIAL, UNIT_CLASS, "<init>", "()V", false)
+  cl.visitFieldInsn(OP_PUTSTATIC, UNIT_CLASS, "INSTANCE", "L" ++ UNIT_CLASS ++ ";")
+  cl.visitInsn(OP_RETURN)
+  cl.visitMaxs(2, 0)
+  cl.visitEnd()
+  cw.visitEnd()
+  cw.toByteArray().expect("bytes")
+}
+
+pub fn append_const(m: MethodVisitor, s: String) -> Unit !io = {
+  m.visitLdcInsn(Objects.requireNonNull(s).expect("non-null"))
+  m.visitMethodInsn(OP_INVOKEVIRTUAL, SB, "append", "(Ljava/lang/String;)L" ++ SB ++ ";", false)
+  ()
+}
+
+## dawn/rt/Show: rendering an *erased* value, which is a different job from the
+## `Show` trait and all that is left to this class.
+##
+## The trait is what a Dawn program reaches: `to_string` and `${...}` resolve a
+## witness and lowering spells the rendering out in Core, so both backends
+## compile one definition (semantics-closure-design.md 6). Two callers have no
+## static type to resolve from and so cannot: `Maps.index`, whose panic text
+## names the key it did not find, and `quote`, which lowering emits by name
+## because a String field has to come out quoted.
+##
+## show(Object) is therefore a best effort over what the JVM can see -- Strings
+## quoted, Lists/Maps/Sets recursed, byte[] summarised, everything else through
+## String.valueOf, which finds the ADT `toString` below. It is not the
+## language's answer to "how does this render"; it is what a panic message can
+## say about a value whose type was thrown away.
+pub fn gen_show_class(supers: List[String]) -> Bytes !io = {
+  let jstr = "java/lang/String"
+  let jlist = "java/util/List"
+  let jmap = "java/util/Map"
+  let jset = "java/util/Set"
+  let iter = "java/util/Iterator"
+  let entry = "java/util/Map\$Entry"
+  let obj_to_str = "(Ljava/lang/Object;)Ljava/lang/String;"
+  let cw = AdtClassWriter.new(supers)
+  cw.begin(V17, ACC_PUBLIC + ACC_FINAL, SHOW_CLASS, obj())
+
+  # static String show(Object o): the instanceof chain
+  let sh = cw.method(ACC_PUBLIC + ACC_STATIC, "show", obj_to_str).expect("mv")
+  sh.visitCode()
+  let not_string = Label.new()
+  let not_list = Label.new()
+  sh.visitVarInsn(OP_ALOAD, 0)
+  sh.visitTypeInsn(OP_INSTANCEOF, jstr)
+  sh.visitJumpInsn(OP_IFEQ, not_string)
+  sh.visitVarInsn(OP_ALOAD, 0)
+  sh.visitTypeInsn(OP_CHECKCAST, jstr)
+  sh.visitMethodInsn(OP_INVOKESTATIC, SHOW_CLASS, "quote",
+    "(Ljava/lang/String;)Ljava/lang/String;", false)
+  sh.visitInsn(OP_ARETURN)
+  sh.visitLabel(not_string)
+  sh.visitVarInsn(OP_ALOAD, 0)
+  sh.visitTypeInsn(OP_INSTANCEOF, jlist)
+  sh.visitJumpInsn(OP_IFEQ, not_list)
+  sh.visitVarInsn(OP_ALOAD, 0)
+  sh.visitTypeInsn(OP_CHECKCAST, jlist)
+  sh.visitMethodInsn(OP_INVOKESTATIC, SHOW_CLASS, "showList",
+    "(Ljava/util/List;)Ljava/lang/String;", false)
+  sh.visitInsn(OP_ARETURN)
+  sh.visitLabel(not_list)
+  let not_map = Label.new()
+  sh.visitVarInsn(OP_ALOAD, 0)
+  sh.visitTypeInsn(OP_INSTANCEOF, jmap)
+  sh.visitJumpInsn(OP_IFEQ, not_map)
+  sh.visitVarInsn(OP_ALOAD, 0)
+  sh.visitTypeInsn(OP_CHECKCAST, jmap)
+  sh.visitMethodInsn(OP_INVOKESTATIC, SHOW_CLASS, "showMap",
+    "(Ljava/util/Map;)Ljava/lang/String;", false)
+  sh.visitInsn(OP_ARETURN)
+  sh.visitLabel(not_map)
+  let not_set = Label.new()
+  sh.visitVarInsn(OP_ALOAD, 0)
+  sh.visitTypeInsn(OP_INSTANCEOF, jset)
+  sh.visitJumpInsn(OP_IFEQ, not_set)
+  sh.visitVarInsn(OP_ALOAD, 0)
+  sh.visitTypeInsn(OP_CHECKCAST, jset)
+  sh.visitMethodInsn(OP_INVOKESTATIC, SHOW_CLASS, "showSet",
+    "(Ljava/util/Set;)Ljava/lang/String;", false)
+  sh.visitInsn(OP_ARETURN)
+  sh.visitLabel(not_set)
+  let not_bytes = Label.new()
+  sh.visitVarInsn(OP_ALOAD, 0)
+  sh.visitTypeInsn(OP_INSTANCEOF, "[B")
+  sh.visitJumpInsn(OP_IFEQ, not_bytes)
+  sh.visitTypeInsn(OP_NEW, SB)
+  sh.visitInsn(OP_DUP)
+  sh.visitMethodInsn(OP_INVOKESPECIAL, SB, "<init>", "()V", false)
+  append_const(sh, "<")
+  sh.visitVarInsn(OP_ALOAD, 0)
+  sh.visitTypeInsn(OP_CHECKCAST, "[B")
+  sh.visitInsn(OP_ARRAYLENGTH)
+  sh.visitMethodInsn(OP_INVOKEVIRTUAL, SB, "append", "(I)L" ++ SB ++ ";", false)
+  append_const(sh, " bytes>")
+  sh.visitMethodInsn(OP_INVOKEVIRTUAL, SB, "toString", "()Ljava/lang/String;", false)
+  sh.visitInsn(OP_ARETURN)
+  sh.visitLabel(not_bytes)
+  sh.visitVarInsn(OP_ALOAD, 0)
+  sh.visitMethodInsn(OP_INVOKESTATIC, jstr, "valueOf", obj_to_str, false)
+  sh.visitInsn(OP_ARETURN)
+  sh.visitMaxs(0, 0)
+  sh.visitEnd()
+
+  # static String quote(String s): source-literal escaping, backslash first
+  let q = cw.method(ACC_PUBLIC + ACC_STATIC, "quote",
+    "(Ljava/lang/String;)Ljava/lang/String;").expect("mv")
+  q.visitCode()
+  q.visitTypeInsn(OP_NEW, SB)
+  q.visitInsn(OP_DUP)
+  q.visitMethodInsn(OP_INVOKESPECIAL, SB, "<init>", "()V", false)
+  append_const(q, "\"")
+  q.visitVarInsn(OP_ALOAD, 0)
+  # no \r escape in Dawn literals; build the CR character from its code point
+  let esc = [("\\", "\\\\"), ("\"", "\\\""), ("\n", "\\n"), ("\t", "\\t"), (str.from_char(13), "\\r")]
+  for pair in esc {
+    let (f, r) = pair
+    q.visitLdcInsn(Objects.requireNonNull(f).expect("non-null"))
+    q.visitLdcInsn(Objects.requireNonNull(r).expect("non-null"))
+    q.visitMethodInsn(OP_INVOKEVIRTUAL, jstr, "replace",
+      "(Ljava/lang/CharSequence;Ljava/lang/CharSequence;)Ljava/lang/String;", false)
+  }
+  q.visitMethodInsn(OP_INVOKEVIRTUAL, SB, "append", "(Ljava/lang/String;)L" ++ SB ++ ";", false)
+  append_const(q, "\"")
+  q.visitMethodInsn(OP_INVOKEVIRTUAL, SB, "toString", "()Ljava/lang/String;", false)
+  q.visitInsn(OP_ARETURN)
+  q.visitMaxs(0, 0)
+  q.visitEnd()
+
+  # static String showList(List xs): "[e0, e1, ...]" with elements shown
+  let sl = cw.method(ACC_PUBLIC + ACC_STATIC, "showList",
+    "(Ljava/util/List;)Ljava/lang/String;").expect("mv")
+  sl.visitCode()
+  sl.visitTypeInsn(OP_NEW, SB)
+  sl.visitInsn(OP_DUP)
+  sl.visitMethodInsn(OP_INVOKESPECIAL, SB, "<init>", "()V", false)
+  sl.visitVarInsn(OP_ASTORE, 1)
+  sl.visitVarInsn(OP_ALOAD, 1)
+  append_const(sl, "[")
+  sl.visitInsn(OP_POP)
+  sl.visitInsn(OP_ICONST_0)
+  sl.visitVarInsn(OP_ISTORE, 2)
+  sl.visitVarInsn(OP_ALOAD, 0)
+  sl.visitMethodInsn(OP_INVOKEINTERFACE, jlist, "size", "()I", true)
+  sl.visitVarInsn(OP_ISTORE, 3)
+  let l_loop = Label.new()
+  let l_done = Label.new()
+  sl.visitLabel(l_loop)
+  sl.visitVarInsn(OP_ILOAD, 2)
+  sl.visitVarInsn(OP_ILOAD, 3)
+  sl.visitJumpInsn(OP_IF_ICMPGE, l_done)
+  let l_no_comma = Label.new()
+  sl.visitVarInsn(OP_ILOAD, 2)
+  sl.visitJumpInsn(OP_IFEQ, l_no_comma)
+  sl.visitVarInsn(OP_ALOAD, 1)
+  append_const(sl, ", ")
+  sl.visitInsn(OP_POP)
+  sl.visitLabel(l_no_comma)
+  sl.visitVarInsn(OP_ALOAD, 1)
+  sl.visitVarInsn(OP_ALOAD, 0)
+  sl.visitVarInsn(OP_ILOAD, 2)
+  sl.visitMethodInsn(OP_INVOKEINTERFACE, jlist, "get", "(I)Ljava/lang/Object;", true)
+  sl.visitMethodInsn(OP_INVOKESTATIC, SHOW_CLASS, "show", obj_to_str, false)
+  sl.visitMethodInsn(OP_INVOKEVIRTUAL, SB, "append", "(Ljava/lang/String;)L" ++ SB ++ ";", false)
+  sl.visitInsn(OP_POP)
+  sl.visitIincInsn(2, 1)
+  sl.visitJumpInsn(OP_GOTO, l_loop)
+  sl.visitLabel(l_done)
+  sl.visitVarInsn(OP_ALOAD, 1)
+  append_const(sl, "]")
+  sl.visitMethodInsn(OP_INVOKEVIRTUAL, SB, "toString", "()Ljava/lang/String;", false)
+  sl.visitInsn(OP_ARETURN)
+  sl.visitMaxs(0, 0)
+  sl.visitEnd()
+
+  # static String showMap(Map m): "map.from([(k, v), ...])" (spec §2.2 shape).
+  # The same spelling std/map's `Show` impl writes -- the public one, because a
+  # rendering that reads like source has to be pasteable (audit RD-14).
+  let sm = cw.method(ACC_PUBLIC + ACC_STATIC, "showMap",
+    "(Ljava/util/Map;)Ljava/lang/String;").expect("mv")
+  sm.visitCode()
+  sm.visitTypeInsn(OP_NEW, SB)
+  sm.visitInsn(OP_DUP)
+  sm.visitMethodInsn(OP_INVOKESPECIAL, SB, "<init>", "()V", false)
+  sm.visitVarInsn(OP_ASTORE, 1)
+  sm.visitVarInsn(OP_ALOAD, 1)
+  append_const(sm, "map.from([")
+  sm.visitInsn(OP_POP)
+  sm.visitVarInsn(OP_ALOAD, 0)
+  sm.visitMethodInsn(OP_INVOKEINTERFACE, jmap, "entrySet", "()Ljava/util/Set;", true)
+  sm.visitMethodInsn(OP_INVOKEINTERFACE, jset, "iterator", "()Ljava/util/Iterator;", true)
+  sm.visitVarInsn(OP_ASTORE, 2)
+  sm.visitInsn(OP_ICONST_0)
+  sm.visitVarInsn(OP_ISTORE, 3)
+  let m_loop = Label.new()
+  let m_done = Label.new()
+  let m_no_comma = Label.new()
+  sm.visitLabel(m_loop)
+  sm.visitVarInsn(OP_ALOAD, 2)
+  sm.visitMethodInsn(OP_INVOKEINTERFACE, iter, "hasNext", "()Z", true)
+  sm.visitJumpInsn(OP_IFEQ, m_done)
+  sm.visitVarInsn(OP_ALOAD, 2)
+  sm.visitMethodInsn(OP_INVOKEINTERFACE, iter, "next", "()Ljava/lang/Object;", true)
+  sm.visitTypeInsn(OP_CHECKCAST, entry)
+  sm.visitVarInsn(OP_ASTORE, 4)
+  sm.visitVarInsn(OP_ILOAD, 3)
+  sm.visitJumpInsn(OP_IFEQ, m_no_comma)
+  sm.visitVarInsn(OP_ALOAD, 1)
+  append_const(sm, ", ")
+  sm.visitInsn(OP_POP)
+  sm.visitLabel(m_no_comma)
+  sm.visitVarInsn(OP_ALOAD, 1)
+  append_const(sm, "(")
+  sm.visitInsn(OP_POP)
+  sm.visitVarInsn(OP_ALOAD, 1)
+  sm.visitVarInsn(OP_ALOAD, 4)
+  sm.visitMethodInsn(OP_INVOKEINTERFACE, entry, "getKey", "()Ljava/lang/Object;", true)
+  sm.visitMethodInsn(OP_INVOKESTATIC, SHOW_CLASS, "show", obj_to_str, false)
+  sm.visitMethodInsn(OP_INVOKEVIRTUAL, SB, "append", "(Ljava/lang/String;)L" ++ SB ++ ";", false)
+  sm.visitInsn(OP_POP)
+  sm.visitVarInsn(OP_ALOAD, 1)
+  append_const(sm, ", ")
+  sm.visitInsn(OP_POP)
+  sm.visitVarInsn(OP_ALOAD, 1)
+  sm.visitVarInsn(OP_ALOAD, 4)
+  sm.visitMethodInsn(OP_INVOKEINTERFACE, entry, "getValue", "()Ljava/lang/Object;", true)
+  sm.visitMethodInsn(OP_INVOKESTATIC, SHOW_CLASS, "show", obj_to_str, false)
+  sm.visitMethodInsn(OP_INVOKEVIRTUAL, SB, "append", "(Ljava/lang/String;)L" ++ SB ++ ";", false)
+  sm.visitInsn(OP_POP)
+  sm.visitVarInsn(OP_ALOAD, 1)
+  append_const(sm, ")")
+  sm.visitInsn(OP_POP)
+  sm.visitIincInsn(3, 1)
+  sm.visitJumpInsn(OP_GOTO, m_loop)
+  sm.visitLabel(m_done)
+  sm.visitVarInsn(OP_ALOAD, 1)
+  append_const(sm, "])")
+  sm.visitMethodInsn(OP_INVOKEVIRTUAL, SB, "toString", "()Ljava/lang/String;", false)
+  sm.visitInsn(OP_ARETURN)
+  sm.visitMaxs(0, 0)
+  sm.visitEnd()
+
+  # static String showSet(Set s): "set.from([e0, e1, ...])"
+  let ss = cw.method(ACC_PUBLIC + ACC_STATIC, "showSet",
+    "(Ljava/util/Set;)Ljava/lang/String;").expect("mv")
+  ss.visitCode()
+  ss.visitTypeInsn(OP_NEW, SB)
+  ss.visitInsn(OP_DUP)
+  ss.visitMethodInsn(OP_INVOKESPECIAL, SB, "<init>", "()V", false)
+  ss.visitVarInsn(OP_ASTORE, 1)
+  ss.visitVarInsn(OP_ALOAD, 1)
+  append_const(ss, "set.from([")
+  ss.visitInsn(OP_POP)
+  ss.visitVarInsn(OP_ALOAD, 0)
+  ss.visitMethodInsn(OP_INVOKEINTERFACE, jset, "iterator", "()Ljava/util/Iterator;", true)
+  ss.visitVarInsn(OP_ASTORE, 2)
+  ss.visitInsn(OP_ICONST_0)
+  ss.visitVarInsn(OP_ISTORE, 3)
+  let s_loop = Label.new()
+  let s_done = Label.new()
+  let s_no_comma = Label.new()
+  ss.visitLabel(s_loop)
+  ss.visitVarInsn(OP_ALOAD, 2)
+  ss.visitMethodInsn(OP_INVOKEINTERFACE, iter, "hasNext", "()Z", true)
+  ss.visitJumpInsn(OP_IFEQ, s_done)
+  ss.visitVarInsn(OP_ALOAD, 2)
+  ss.visitMethodInsn(OP_INVOKEINTERFACE, iter, "next", "()Ljava/lang/Object;", true)
+  ss.visitVarInsn(OP_ASTORE, 4)
+  ss.visitVarInsn(OP_ILOAD, 3)
+  ss.visitJumpInsn(OP_IFEQ, s_no_comma)
+  ss.visitVarInsn(OP_ALOAD, 1)
+  append_const(ss, ", ")
+  ss.visitInsn(OP_POP)
+  ss.visitLabel(s_no_comma)
+  ss.visitVarInsn(OP_ALOAD, 1)
+  ss.visitVarInsn(OP_ALOAD, 4)
+  ss.visitMethodInsn(OP_INVOKESTATIC, SHOW_CLASS, "show", obj_to_str, false)
+  ss.visitMethodInsn(OP_INVOKEVIRTUAL, SB, "append", "(Ljava/lang/String;)L" ++ SB ++ ";", false)
+  ss.visitInsn(OP_POP)
+  ss.visitIincInsn(3, 1)
+  ss.visitJumpInsn(OP_GOTO, s_loop)
+  ss.visitLabel(s_done)
+  ss.visitVarInsn(OP_ALOAD, 1)
+  append_const(ss, "])")
+  ss.visitMethodInsn(OP_INVOKEVIRTUAL, SB, "toString", "()Ljava/lang/String;", false)
+  ss.visitInsn(OP_ARETURN)
+  ss.visitMaxs(0, 0)
+  ss.visitEnd()
+
+  cw.visitEnd()
+  cw.toByteArray().expect("bytes")
+}
+
+## dawn/rt/TupleN: N public final Object fields + structural equals/hashCode +
+## Show-rendering toString (the Kotlin genTupleClass; frame-computing writer).
+pub fn gen_tuple_class(supers: List[String], n: Int) -> Bytes !io = {
+  let cls = tuple_class(n)
+  let cw = AdtClassWriter.new(supers)
+  cw.begin(V17, ACC_PUBLIC + ACC_FINAL, cls, obj())
+  var i = 0
+  while i < n {
+    cw.field(ACC_PUBLIC + ACC_FINAL, "_" ++ to_string(i), "Ljava/lang/Object;")
+    i = i + 1
+  }
+  var ps = ""
+  for _k in 0 ..n { ps = ps ++ "Ljava/lang/Object;" }
+  let ctor_desc = "(" ++ ps ++ ")V"
+  let init = cw.method(ACC_PUBLIC, "<init>", ctor_desc).expect("mv")
+  init.visitCode()
+  init.visitVarInsn(OP_ALOAD, 0)
+  init.visitMethodInsn(OP_INVOKESPECIAL, obj(), "<init>", "()V", false)
+  i = 0
+  while i < n {
+    init.visitVarInsn(OP_ALOAD, 0)
+    init.visitVarInsn(OP_ALOAD, i + 1)
+    init.visitFieldInsn(OP_PUTFIELD, cls, "_" ++ to_string(i), "Ljava/lang/Object;")
+    i = i + 1
+  }
+  init.visitInsn(OP_RETURN)
+  init.visitMaxs(0, 0)
+  init.visitEnd()
+  let eq = cw.method(ACC_PUBLIC, "equals", "(Ljava/lang/Object;)Z").expect("mv")
+  eq.visitCode()
+  let yes = Label.new()
+  let no = Label.new()
+  eq.visitVarInsn(OP_ALOAD, 0)
+  eq.visitVarInsn(OP_ALOAD, 1)
+  eq.visitJumpInsn(OP_IF_ACMPEQ, yes)
+  eq.visitVarInsn(OP_ALOAD, 1)
+  eq.visitTypeInsn(OP_INSTANCEOF, cls)
+  eq.visitJumpInsn(OP_IFEQ, no)
+  eq.visitVarInsn(OP_ALOAD, 1)
+  eq.visitTypeInsn(OP_CHECKCAST, cls)
+  eq.visitVarInsn(OP_ASTORE, 2)
+  i = 0
+  while i < n {
+    eq.visitVarInsn(OP_ALOAD, 0)
+    eq.visitFieldInsn(OP_GETFIELD, cls, "_" ++ to_string(i), "Ljava/lang/Object;")
+    eq.visitVarInsn(OP_ALOAD, 2)
+    eq.visitFieldInsn(OP_GETFIELD, cls, "_" ++ to_string(i), "Ljava/lang/Object;")
+    eq.visitMethodInsn(OP_INVOKEVIRTUAL, obj(), "equals", "(Ljava/lang/Object;)Z", false)
+    eq.visitJumpInsn(OP_IFEQ, no)
+    i = i + 1
+  }
+  eq.visitLabel(yes)
+  eq.visitInsn(OP_ICONST_1)
+  eq.visitInsn(OP_IRETURN)
+  eq.visitLabel(no)
+  eq.visitInsn(OP_ICONST_0)
+  eq.visitInsn(OP_IRETURN)
+  eq.visitMaxs(0, 0)
+  eq.visitEnd()
+  let hc = cw.method(ACC_PUBLIC, "hashCode", "()I").expect("mv")
+  hc.visitCode()
+  hc.visitInsn(OP_ICONST_1)
+  i = 0
+  while i < n {
+    hc.visitIntInsn(OP_BIPUSH, 31)
+    hc.visitInsn(OP_IMUL)
+    hc.visitVarInsn(OP_ALOAD, 0)
+    hc.visitFieldInsn(OP_GETFIELD, cls, "_" ++ to_string(i), "Ljava/lang/Object;")
+    hc.visitMethodInsn(OP_INVOKEVIRTUAL, obj(), "hashCode", "()I", false)
+    hc.visitInsn(OP_IADD)
+    i = i + 1
+  }
+  hc.visitInsn(OP_IRETURN)
+  hc.visitMaxs(0, 0)
+  hc.visitEnd()
+  let ts = cw.method(ACC_PUBLIC, "toString", "()Ljava/lang/String;").expect("mv")
+  ts.visitCode()
+  ts.visitTypeInsn(OP_NEW, SB)
+  ts.visitInsn(OP_DUP)
+  ts.visitMethodInsn(OP_INVOKESPECIAL, SB, "<init>", "()V", false)
+  append_const(ts, "(")
+  i = 0
+  while i < n {
+    if i > 0 { append_const(ts, ", ") }
+    ts.visitVarInsn(OP_ALOAD, 0)
+    ts.visitFieldInsn(OP_GETFIELD, cls, "_" ++ to_string(i), "Ljava/lang/Object;")
+    ts.visitMethodInsn(OP_INVOKESTATIC, SHOW_CLASS, "show",
+      "(Ljava/lang/Object;)Ljava/lang/String;", false)
+    ts.visitMethodInsn(OP_INVOKEVIRTUAL, SB, "append", "(Ljava/lang/String;)L" ++ SB ++ ";", false)
+    i = i + 1
+  }
+  append_const(ts, ")")
+  ts.visitMethodInsn(OP_INVOKEVIRTUAL, SB, "toString", "()Ljava/lang/String;", false)
+  ts.visitInsn(OP_ARETURN)
+  ts.visitMaxs(0, 0)
+  ts.visitEnd()
+  cw.visitEnd()
+  cw.toByteArray().expect("bytes")
+}
+
+## The synthetic superclass table for COMPUTE_FRAMES (the Kotlin adtSupers),
+## as "child super" pairs for the shared writer.
+pub fn supers_of(adts: Adts, all_ids: List[Int]) -> List[String] = {
+  var out: List[String] = []
+  for aid in all_ids {
+    let a = adt_of(adts, aid)
+    let base = adt_jvm_name(a)
+    out = out ++ [base ++ " " ++ obj()]
+    if not a.is_record {
+      for c in a.ctors { out = out ++ [ctor_jvm_name(adts, c) ++ " " ++ base] }
+    }
+  }
+  var n = 2
+  while n <= 8 {
+    out = out ++ [tuple_class(n) ++ " " ++ obj()]
+    n = n + 1
+  }
+  out
+}
+
+pub const BYTES_CLASS: String = "dawn/rt/Bytes"
+
+pub const IO_CLASS: String = "dawn/rt/Io"
+
+pub const STRINGS_CLASS: String = "dawn/rt/Strings"
+
+## The class a `List` is at run time: the record at the root of the Dawn
+## vector in std/pvec. Same reasoning as HAMT_CLASS below.
+pub const PVEC_CLASS: String = "std/pvec\$Vec"
+
+## The module class its functions are static methods of.
+pub const PVEC_MOD: String = "std/pvec"
+
+## The class a `Map` or a `Set` is at run time: the record at the root of the
+## Dawn trie in std/hamt, emitted like any other ADT. There is no runtime
+## module behind Map/Set any more -- the trie is std source, and the only
+## collection the backend implements is `Array`.
+##
+## Spelled rather than looked up because it is a fixed name (`adt_jvm_name` of
+## a std ADT is `<module>$<type>`), and `desc_of` is asked it often enough that
+## scanning the ADT table for it would show.
+pub const HAMT_CLASS: String = "std/hamt\$Hamt"
+
+pub const FN_CMP_CLASS: String = "dawn/rt/FnComparator"
+
+## dawn/rt/Bytes: the byte-string runtime — concat (backs `Bytes ++ Bytes`) plus
+## the bytes_* primitives std/bytes writes over (utf8/decode/len/at/slice). These
+## retire the handwritten dawn.rt.StdBytes; index_of stays pure Dawn over len/at.
+## Byte values are unsigned 0..255 on the Dawn side, so -1 is a free out-of-range
+## sentinel for bytes_at (std turns it into a panic).
+pub fn gen_bytes_class(supers: List[String]) -> Bytes !io = {
+  let cw = AdtClassWriter.new(supers)
+  cw.begin(V17, ACC_PUBLIC + ACC_FINAL, BYTES_CLASS, obj())
+  let m = cw.method(ACC_PUBLIC + ACC_STATIC, "concat", "([B[B)[B").expect("mv")
+  m.visitCode()
+  m.visitVarInsn(OP_ALOAD, 0)
+  m.visitInsn(OP_ARRAYLENGTH)
+  m.visitVarInsn(OP_ISTORE, 2)
+  m.visitVarInsn(OP_ALOAD, 1)
+  m.visitInsn(OP_ARRAYLENGTH)
+  m.visitVarInsn(OP_ISTORE, 3)
+  m.visitVarInsn(OP_ALOAD, 0)
+  m.visitVarInsn(OP_ILOAD, 2)
+  m.visitVarInsn(OP_ILOAD, 3)
+  m.visitInsn(OP_IADD)
+  m.visitMethodInsn(OP_INVOKESTATIC, "java/util/Arrays", "copyOf", "([BI)[B", false)
+  m.visitVarInsn(OP_ASTORE, 4)
+  m.visitVarInsn(OP_ALOAD, 1)
+  m.visitInsn(OP_ICONST_0)
+  m.visitVarInsn(OP_ALOAD, 4)
+  m.visitVarInsn(OP_ILOAD, 2)
+  m.visitVarInsn(OP_ILOAD, 3)
+  m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/System", "arraycopy",
+    "(Ljava/lang/Object;ILjava/lang/Object;II)V", false)
+  m.visitVarInsn(OP_ALOAD, 4)
+  m.visitInsn(OP_ARETURN)
+  m.visitMaxs(0, 0)
+  m.visitEnd()
+
+  # bytes_utf8(s) = s.getBytes(UTF_8)
+  let uv = open_static(cw, "bytes_utf8", "(Ljava/lang/String;)[B")
+  uv.visitVarInsn(OP_ALOAD, 0)
+  uv.visitFieldInsn(OP_GETSTATIC, "java/nio/charset/StandardCharsets", "UTF_8",
+    "Ljava/nio/charset/Charset;")
+  uv.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/String", "getBytes",
+    "(Ljava/nio/charset/Charset;)[B", false)
+  uv.visitInsn(OP_ARETURN)
+  close_mv(uv)
+
+  # bytes_len(b) = b.length
+  let lv = open_static(cw, "bytes_len", "([B)J")
+  lv.visitVarInsn(OP_ALOAD, 0)
+  lv.visitInsn(OP_ARRAYLENGTH)
+  lv.visitInsn(OP_I2L)
+  lv.visitInsn(OP_LRETURN)
+  close_mv(lv)
+
+  # bytes_at(b, i): (i < 0 || i >= len) ? -1 : (b[i] & 0xFF)
+  let av = open_static(cw, "bytes_at", "([BJ)J")
+  let at_neg = Label.new()
+  av.visitVarInsn(OP_LLOAD, 1)
+  av.visitInsn(OP_LCONST_0)
+  av.visitInsn(OP_LCMP)
+  av.visitJumpInsn(OP_IFLT, at_neg)
+  av.visitVarInsn(OP_LLOAD, 1)
+  av.visitVarInsn(OP_ALOAD, 0)
+  av.visitInsn(OP_ARRAYLENGTH)
+  av.visitInsn(OP_I2L)
+  av.visitInsn(OP_LCMP)
+  av.visitJumpInsn(OP_IFGE, at_neg)
+  av.visitVarInsn(OP_ALOAD, 0)
+  av.visitVarInsn(OP_LLOAD, 1)
+  av.visitInsn(OP_L2I)
+  av.visitInsn(OP_BALOAD)
+  av.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Byte", "toUnsignedInt", "(B)I", false)
+  av.visitInsn(OP_I2L)
+  av.visitInsn(OP_LRETURN)
+  av.visitLabel(at_neg)
+  av.visitInsn(OP_ICONST_M1)
+  av.visitInsn(OP_I2L)
+  av.visitInsn(OP_LRETURN)
+  close_mv(av)
+
+  # bytes_slice(b, start, end) = Arrays.copyOfRange over clamped [s, max(s, e))
+  let sv = open_static(cw, "bytes_slice", "([BJJ)[B")
+  let sl_fix = Label.new()
+  let sl_copy = Label.new()
+  sv.visitVarInsn(OP_ALOAD, 0)
+  sv.visitInsn(OP_ARRAYLENGTH)
+  sv.visitVarInsn(OP_ISTORE, 5)
+  sv.visitVarInsn(OP_LLOAD, 1)
+  sv.visitVarInsn(OP_ILOAD, 5)
+  sv.visitMethodInsn(OP_INVOKESTATIC, BYTES_CLASS, "bytes_clamp", "(JI)I", false)
+  sv.visitVarInsn(OP_ISTORE, 6)
+  sv.visitVarInsn(OP_LLOAD, 3)
+  sv.visitVarInsn(OP_ILOAD, 5)
+  sv.visitMethodInsn(OP_INVOKESTATIC, BYTES_CLASS, "bytes_clamp", "(JI)I", false)
+  sv.visitVarInsn(OP_ISTORE, 7)
+  sv.visitVarInsn(OP_ILOAD, 6)
+  sv.visitVarInsn(OP_ILOAD, 7)
+  sv.visitJumpInsn(OP_IF_ICMPGE, sl_fix)
+  sv.visitJumpInsn(OP_GOTO, sl_copy)
+  sv.visitLabel(sl_fix)
+  sv.visitVarInsn(OP_ILOAD, 6)
+  sv.visitVarInsn(OP_ISTORE, 7)
+  sv.visitLabel(sl_copy)
+  sv.visitVarInsn(OP_ALOAD, 0)
+  sv.visitVarInsn(OP_ILOAD, 6)
+  sv.visitVarInsn(OP_ILOAD, 7)
+  sv.visitMethodInsn(OP_INVOKESTATIC, "java/util/Arrays", "copyOfRange", "([BII)[B", false)
+  sv.visitInsn(OP_ARETURN)
+  close_mv(sv)
+
+  # bytes_clamp(v, hi) = v < 0 ? 0 : (v > hi ? hi : (int) v)
+  let cv = open_static(cw, "bytes_clamp", "(JI)I")
+  let cl_pos = Label.new()
+  let cl_ok = Label.new()
+  cv.visitVarInsn(OP_LLOAD, 0)
+  cv.visitInsn(OP_LCONST_0)
+  cv.visitInsn(OP_LCMP)
+  cv.visitJumpInsn(OP_IFGE, cl_pos)
+  cv.visitInsn(OP_ICONST_0)
+  cv.visitInsn(OP_IRETURN)
+  cv.visitLabel(cl_pos)
+  cv.visitVarInsn(OP_LLOAD, 0)
+  cv.visitVarInsn(OP_ILOAD, 2)
+  cv.visitInsn(OP_I2L)
+  cv.visitInsn(OP_LCMP)
+  cv.visitJumpInsn(OP_IFLE, cl_ok)
+  cv.visitVarInsn(OP_ILOAD, 2)
+  cv.visitInsn(OP_IRETURN)
+  cv.visitLabel(cl_ok)
+  cv.visitVarInsn(OP_LLOAD, 0)
+  cv.visitInsn(OP_L2I)
+  cv.visitInsn(OP_IRETURN)
+  close_mv(cv)
+
+  # bytes_decode_utf8(b) / bytes_decode_latin1(b): `new String(b, charset)`
+  # with the charset picked here rather than looked up from a name. No Option
+  # comes back because nothing can fail -- a Charset constant admits no
+  # UnsupportedEncodingException, and both of these charsets decode every byte
+  # string (UTF-8 by replacing what it cannot read with U+FFFD).
+  gen_bytes_decode_fixed(cw, "bytes_decode_utf8", "UTF_8")
+  gen_bytes_decode_fixed(cw, "bytes_decode_latin1", "ISO_8859_1")
+
+  gen_bytes_from_array(cw)
+
+  cw.visitEnd()
+  cw.toByteArray().expect("bytes")
+}
+
+## One of the two narrowed decoders: `new String(b, StandardCharsets.<field>)`.
+##
+## `field` is a `Charset` constant rather than a name, so the constructor that
+## takes one throws nothing and the method returns a bare String. That is the
+## whole of what dropping the charset parameter bought (audit RP-04,
+## decision C) -- the name-taking decoder it replaced returned an Option only
+## because the name could be one Java does not know.
+fn gen_bytes_decode_fixed(cw: AdtClassWriter, name: String, field: String) -> Unit !io = {
+  let mv = open_static(cw, name, "([B)Ljava/lang/String;")
+  mv.visitTypeInsn(OP_NEW, "java/lang/String")
+  mv.visitInsn(OP_DUP)
+  mv.visitVarInsn(OP_ALOAD, 0)
+  mv.visitFieldInsn(OP_GETSTATIC, "java/nio/charset/StandardCharsets", field,
+    "Ljava/nio/charset/Charset;")
+  mv.visitMethodInsn(OP_INVOKESPECIAL, "java/lang/String", "<init>",
+    "([BLjava/nio/charset/Charset;)V", false)
+  mv.visitInsn(OP_ARETURN)
+  close_mv(mv)
+}
+
+## bytes_from_array(a): the one way to make bytes that did not come from text.
+##
+## It reads the array through `array_get` rather than its fields: two emitted
+## runtime classes, and the representation stays the Array class's business.
+## Elements arrive boxed (the array is erased), so each one is a Long that I2B
+## truncates -- a value outside 0..255 is the caller's error and is stored the
+## way a byte store anywhere else would store it.
+fn gen_bytes_from_array(cw: AdtClassWriter) -> Unit !io = {
+  let fv = open_static(cw, "bytes_from_array", "(L" ++ ARRAY_CLASS ++ ";)[B")
+  let loop = Label.new()
+  let done = Label.new()
+  # n = (int) array_len(a); out = new byte[n]; i = 0
+  fv.visitVarInsn(OP_ALOAD, 0)
+  fv.visitMethodInsn(OP_INVOKESTATIC, ARRAY_CLASS, "array_len",
+    "(L" ++ ARRAY_CLASS ++ ";)J", false)
+  fv.visitInsn(OP_L2I)
+  fv.visitVarInsn(OP_ISTORE, 1)
+  fv.visitVarInsn(OP_ILOAD, 1)
+  fv.visitIntInsn(OP_NEWARRAY, T_BYTE)
+  fv.visitVarInsn(OP_ASTORE, 2)
+  fv.visitInsn(OP_ICONST_0)
+  fv.visitVarInsn(OP_ISTORE, 3)
+  fv.visitLabel(loop)
+  fv.visitVarInsn(OP_ILOAD, 3)
+  fv.visitVarInsn(OP_ILOAD, 1)
+  fv.visitJumpInsn(OP_IF_ICMPGE, done)
+  fv.visitVarInsn(OP_ALOAD, 2)
+  fv.visitVarInsn(OP_ILOAD, 3)
+  fv.visitVarInsn(OP_ALOAD, 0)
+  fv.visitVarInsn(OP_ILOAD, 3)
+  fv.visitInsn(OP_I2L)
+  fv.visitMethodInsn(OP_INVOKESTATIC, ARRAY_CLASS, "array_get",
+    "(L" ++ ARRAY_CLASS ++ ";J)Ljava/lang/Object;", false)
+  fv.visitTypeInsn(OP_CHECKCAST, "java/lang/Long")
+  fv.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/Long", "longValue", "()J", false)
+  fv.visitInsn(OP_L2I)
+  fv.visitInsn(OP_I2B)
+  fv.visitInsn(OP_BASTORE)
+  fv.visitVarInsn(OP_ILOAD, 3)
+  fv.visitInsn(OP_ICONST_1)
+  fv.visitInsn(OP_IADD)
+  fv.visitVarInsn(OP_ISTORE, 3)
+  fv.visitJumpInsn(OP_GOTO, loop)
+  fv.visitLabel(done)
+  fv.visitVarInsn(OP_ALOAD, 2)
+  fv.visitInsn(OP_ARETURN)
+  close_mv(fv)
+}
+
+## One `fn() -> T` run under a catch, its result as `Result[T, ForeignError]`.
+##
+## `caught` lists the exception types the handler claims. Several entries mean
+## several try-catch table rows onto the same handler, which is how the JVM
+## spells "catch A or B" — there is no supertype of PanicError and Exception
+## short of Throwable, and Throwable is precisely what must not be caught.
+##
+## The payload has three fields, and this is the JVM backend's half of the
+## contract that says what goes in each
+## (docs/audit/error-model-design.md A):
+##
+##   kind     `getClass().getName()` — the *binary* name, so `Result$Err` and
+##            not `Err`, and never `toString()`, which prefixes the name onto
+##            the message with a colon and is what spec 9.8 used to make
+##            callers parse.
+##   message  `getMessage()`, and the empty string where the JVM says null.
+##            Absent is not a third state worth a second `Option` here: a
+##            failure with no message reads as one with nothing to say.
+##   cause    `getCause().toString()`, or `None`. Rendered rather than nested,
+##            because a `ForeignError` holding a `ForeignError` would need
+##            this handler to recurse down a chain a caller almost never reads.
+##
+## Until 2026-07-30 this wrote a bare `Throwable.toString()` into an
+## `Err(String)` and the structured version lived beside it under a
+## transitional name; the migration that flipped the signature is over and
+## there is one handler again.
+fn gen_try_closure(cw: AdtClassWriter, name: String, caught: List[String]) -> Unit !io = {
+  let m = cw.method(ACC_PUBLIC + ACC_STATIC, name, "(L" ++ fn_iface(0) ++ ";)LResult;")
+    .expect("mv")
+  m.visitCode()
+  let try_start = Label.new()
+  let try_end = Label.new()
+  let handler = Label.new()
+  for c in caught {
+    m.visitTryCatchBlock(try_start, try_end, handler, c)
+  }
+  m.visitLabel(try_start)
+  m.visitTypeInsn(OP_NEW, "Result\$Ok")
+  m.visitInsn(OP_DUP)
+  m.visitVarInsn(OP_ALOAD, 0)
+  m.visitMethodInsn(OP_INVOKEINTERFACE, fn_iface(0), "apply", erased_apply_desc(0), true)
+  m.visitMethodInsn(OP_INVOKESPECIAL, "Result\$Ok", "<init>", "(Ljava/lang/Object;)V", false)
+  m.visitLabel(try_end)
+  m.visitInsn(OP_ARETURN)
+  m.visitLabel(handler)
+  gen_caught_err(m, 1)
+  m.visitInsn(OP_ARETURN)
+  m.visitMaxs(0, 0)
+  m.visitEnd()
+  ()
+}
+
+## `bracket(resource, release, use)`: hold a resource across one closure call
+## and let it go on every way out.
+##
+##   try { return use.apply(resource); } finally { release.apply(resource); }
+##
+## Four things about the shape are decisions rather than transcription:
+##
+## 1. **A method, not an inlined try block**, for the reason `gen_cast` gives
+##    one sentence at a time: entering a handler clears the operand stack, so a
+##    protected region that starts part way through an expression loses what
+##    was already pushed. A method starts with an empty stack by construction.
+##    This is also why no Core node stands behind the primitive
+##    (docs/core-move2-design.md 2.6): the protected region is one call, and a
+##    protect whose region is always a call is a runtime function taking a
+##    closure.
+## 2. **The resource arrives acquired**, so there is no acquire call here and
+##    nothing before the protected range that could fail with something to
+##    release. Haskell passes a thunk to close the window an asynchronous
+##    exception could arrive in; Dawn has no asynchronous failures, so the
+##    acquisition is ordinary code at the call site (types.builtins).
+## 3. **The handler catches `Throwable`**, which is the catch-all a class file
+##    can name (a zero `catch_type` means the same thing and Dawn cannot spell
+##    a null here). Catching `Throwable` is what the barriers next door must
+##    *not* do -- but they turn what they catch into a value, and this rethrows
+##    it. A release skipped because the failure was an `OutOfMemoryError` is a
+##    file handle leaked at the worst possible moment.
+## 4. **The handler does not merge with the normal path.** It stores the
+##    Throwable, calls release, and throws it again; nothing jumps past it. So
+##    the only frame `COMPUTE_FRAMES` has to invent holds a `java/lang/Throwable`
+##    on the stack, and `AdtClassWriter.getCommonSuperClass` is never asked
+##    about a pair of generated ADT classes.
+##
+## The two closures are `Fn1` at the erasure convention and the resource is an
+## `Object`, so every value crossing here is erased. The boxing is lowering's
+## `CBox`/`CUnbox` and is not repeated here -- `bracket` is declared `erased`
+## in `types.intrinsics()`, which is what puts the box on the argument and the
+## unbox at the call site.
+fn gen_bracket(cw: AdtClassWriter) -> Unit !io = {
+  let m = cw.method(ACC_PUBLIC + ACC_STATIC, "bracket",
+    "(Ljava/lang/Object;L" ++ fn_iface(1) ++ ";L" ++ fn_iface(1) ++
+      ";)Ljava/lang/Object;").expect("mv")
+  m.visitCode()
+  let try_start = Label.new()
+  let try_end = Label.new()
+  let handler = Label.new()
+  m.visitTryCatchBlock(try_start, try_end, handler, "java/lang/Throwable")
+  # the three parameters occupy 0..2; the answer is slot 3 and the caught
+  # Throwable slot 4
+  m.visitLabel(try_start)
+  m.visitVarInsn(OP_ALOAD, 2)
+  m.visitVarInsn(OP_ALOAD, 0)
+  m.visitMethodInsn(OP_INVOKEINTERFACE, fn_iface(1), "apply", erased_apply_desc(1), true)
+  m.visitVarInsn(OP_ASTORE, 3)
+  m.visitLabel(try_end)
+  # normal path: release, then hand back what `use` answered
+  m.visitVarInsn(OP_ALOAD, 1)
+  m.visitVarInsn(OP_ALOAD, 0)
+  m.visitMethodInsn(OP_INVOKEINTERFACE, fn_iface(1), "apply", erased_apply_desc(1), true)
+  m.visitInsn(OP_POP)
+  m.visitVarInsn(OP_ALOAD, 3)
+  m.visitInsn(OP_ARETURN)
+  # unwind path: release, then the same failure again -- same object, so its
+  # class, message and stack trace are the ones the caller would have seen had
+  # nothing been protected
+  m.visitLabel(handler)
+  m.visitVarInsn(OP_ASTORE, 4)
+  m.visitVarInsn(OP_ALOAD, 1)
+  m.visitVarInsn(OP_ALOAD, 0)
+  m.visitMethodInsn(OP_INVOKEINTERFACE, fn_iface(1), "apply", erased_apply_desc(1), true)
+  m.visitInsn(OP_POP)
+  m.visitVarInsn(OP_ALOAD, 4)
+  m.visitInsn(OP_ATHROW)
+  m.visitMaxs(0, 0)
+  m.visitEnd()
+  ()
+}
+
+## A handler's body: the caught `Throwable` on the stack, a `Result$Err`
+## carrying a `ForeignError` left on it. `base` is the first scratch local
+## free in the enclosing method, and six consecutive ones are used from there.
+##
+## Shared rather than copied because the field discipline documented above
+## *is* this sequence -- a second handler that spelled `getSimpleName()` or
+## `toString()` would be a second answer to a question the design fixed once.
+fn gen_caught_err(m: MethodVisitor, base: Int) -> Unit !io = {
+  # Each part is computed into a local before the record is allocated. The
+  # order matters to the verifier and not to the reader: an uninitialised
+  # `NEW` left on the stack across a branch is a stack-map shape a class file
+  # may not describe, and both the message and the cause branch.
+  m.visitVarInsn(OP_ASTORE, base)
+  m.visitVarInsn(OP_ALOAD, base)
+  m.visitMethodInsn(OP_INVOKEVIRTUAL, obj(), "getClass", "()Ljava/lang/Class;", false)
+  m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/Class", "getName",
+    "()Ljava/lang/String;", false)
+  m.visitVarInsn(OP_ASTORE, base + 1)
+  m.visitVarInsn(OP_ALOAD, base)
+  m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/Throwable", "getMessage",
+    "()Ljava/lang/String;", false)
+  m.visitVarInsn(OP_ASTORE, base + 2)
+  let has_msg = Label.new()
+  m.visitVarInsn(OP_ALOAD, base + 2)
+  m.visitJumpInsn(OP_IFNONNULL, has_msg)
+  m.visitLdcInsn(Objects.requireNonNull("").expect("non-null"))
+  m.visitVarInsn(OP_ASTORE, base + 2)
+  m.visitLabel(has_msg)
+  m.visitVarInsn(OP_ALOAD, base)
+  m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/Throwable", "getCause",
+    "()Ljava/lang/Throwable;", false)
+  m.visitVarInsn(OP_ASTORE, base + 3)
+  let no_cause = Label.new()
+  let cause_done = Label.new()
+  m.visitVarInsn(OP_ALOAD, base + 3)
+  m.visitJumpInsn(OP_IFNULL, no_cause)
+  m.visitTypeInsn(OP_NEW, "Option\$Some")
+  m.visitInsn(OP_DUP)
+  m.visitVarInsn(OP_ALOAD, base + 3)
+  m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/Throwable", "toString",
+    "()Ljava/lang/String;", false)
+  m.visitMethodInsn(OP_INVOKESPECIAL, "Option\$Some", "<init>", "(Ljava/lang/Object;)V", false)
+  m.visitVarInsn(OP_ASTORE, base + 4)
+  m.visitJumpInsn(OP_GOTO, cause_done)
+  m.visitLabel(no_cause)
+  m.visitFieldInsn(OP_GETSTATIC, "Option\$None", "INSTANCE", "LOption\$None;")
+  m.visitVarInsn(OP_ASTORE, base + 4)
+  m.visitLabel(cause_done)
+  m.visitTypeInsn(OP_NEW, FERR_CLASS)
+  m.visitInsn(OP_DUP)
+  m.visitVarInsn(OP_ALOAD, base + 1)
+  m.visitVarInsn(OP_ALOAD, base + 2)
+  m.visitVarInsn(OP_ALOAD, base + 4)
+  m.visitMethodInsn(OP_INVOKESPECIAL, FERR_CLASS, "<init>",
+    "(Ljava/lang/String;Ljava/lang/String;LOption;)V", false)
+  m.visitVarInsn(OP_ASTORE, base + 5)
+  m.visitTypeInsn(OP_NEW, "Result\$Err")
+  m.visitInsn(OP_DUP)
+  m.visitVarInsn(OP_ALOAD, base + 5)
+  m.visitMethodInsn(OP_INVOKESPECIAL, "Result\$Err", "<init>", "(Ljava/lang/Object;)V", false)
+  ()
+}
+
+## `cast(o, c)`: reclaim `o` as `c`, handing back `Ok(o)` or an `Err` carrying
+## what the failure was (docs/audit/error-model-design.md 二.B).
+##
+## Two things about the shape are decisions rather than convenience:
+##
+## 1. **A method, not an inlined try block.** The reclaim used to be one
+##    CHECKCAST written straight into the caller, and wrapping *that* in a
+##    handler cannot work: the JVM clears the operand stack when it enters one,
+##    so a `cast` part way through an expression -- `f(a, cast(x))`, with `a`
+##    already pushed -- would arrive at the merge point having lost `a`. A
+##    method has a stack of its own, which is the same reason the barriers
+##    above are methods.
+## 2. **`Class.cast`, not an `instanceof` test.** It is CHECKCAST with its
+##    operand passed in rather than baked into the instruction, so `null` is
+##    still reclaimed (as CHECKCAST reclaims it) and the exception is a real
+##    `ClassCastException` with the JVM's own message. `kind` is therefore
+##    read off a thrown exception exactly as it is in the barriers, rather
+##    than being a string literal this file made up.
+##
+## The method was called `cast_e` while step B's transitional spelling existed
+## (v0.34.0/v0.35.0). It is named after the intrinsic again, which is what
+## every other method in this class is named after -- an implementation symbol
+## outliving the surface name it was a stand-in for would leave the runtime
+## class the last place a deleted spelling survives.
+fn gen_cast(cw: AdtClassWriter) -> Unit !io = {
+  let m = cw.method(ACC_PUBLIC + ACC_STATIC, "cast",
+    "(Ljava/lang/Object;Ljava/lang/Class;)LResult;").expect("mv")
+  m.visitCode()
+  let try_start = Label.new()
+  let try_end = Label.new()
+  let handler = Label.new()
+  m.visitTryCatchBlock(try_start, try_end, handler, "java/lang/ClassCastException")
+  m.visitLabel(try_start)
+  m.visitTypeInsn(OP_NEW, "Result\$Ok")
+  m.visitInsn(OP_DUP)
+  m.visitVarInsn(OP_ALOAD, 1)
+  m.visitVarInsn(OP_ALOAD, 0)
+  m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/Class", "cast",
+    "(Ljava/lang/Object;)Ljava/lang/Object;", false)
+  m.visitMethodInsn(OP_INVOKESPECIAL, "Result\$Ok", "<init>", "(Ljava/lang/Object;)V", false)
+  m.visitLabel(try_end)
+  m.visitInsn(OP_ARETURN)
+  m.visitLabel(handler)
+  # the two parameters occupy 0 and 1, so the handler's scratch starts at 2
+  gen_caught_err(m, 2)
+  m.visitInsn(OP_ARETURN)
+  m.visitMaxs(0, 0)
+  m.visitEnd()
+  ()
+}
+
+## dawn/rt/Io: the io runtime — catch_fault/catch_panic (the Throwable barriers),
+## bracket (the one that releases and rethrows), plus
+## the io_* primitives std/io writes over (print/println/read_line/is_dir/
+## read_file/write_file/list_names). These retire the handwritten dawn.rt.StdIo.
+## The failing ones (read_file/write_file/list_names) simply throw; std wraps
+## them in a barrier, exactly as it wrapped StdIo. read_line maps Java's
+## null-or-line onto Option here rather than relying on use-java null-wrapping.
+pub fn gen_io_class(supers: List[String]) -> Bytes !io = {
+  let cw = AdtClassWriter.new(supers)
+  cw.begin(V17, ACC_PUBLIC + ACC_FINAL, IO_CLASS, obj())
+  gen_try_closure(cw, "catch_fault", ["java/lang/Exception"])
+  # catch_panic catches a Dawn panic and the exceptions a caller can survive —
+  # not `Throwable`. Catching Throwable also caught OutOfMemoryError,
+  # StackOverflowError and the rest of VirtualMachineError, turned each into a
+  # `String`, and let the process carry on — a web server rendering a 500 from
+  # an exhausted heap while every other thread fails the same way. Resource
+  # exhaustion is not a value; it propagates. (The C backend agrees for free:
+  # native failure kinds have no VM-error arm at all.)
+  gen_try_closure(cw, "catch_panic", [PANIC_CLASS, "java/lang/Exception"])
+
+  # The third of the family, and the one that catches nothing: it releases on
+  # both ways out and rethrows.
+  gen_bracket(cw)
+
+  # Not an io primitive and not a barrier: `cast` is pure. It lives here
+  # because this is the class that owns the one translation from a Throwable
+  # to a `ForeignError`, and a second copy of that translation is exactly
+  # what the design forbids.
+  gen_cast(cw)
+
+  # a single shared reader: a fresh BufferedReader per call would let one call's
+  # buffer swallow input the next call should see. Lazily initialised in io_read_line.
+  cw.field(ACC_PRIVATE + ACC_STATIC, "stdin", "Ljava/io/BufferedReader;")
+
+  # io_print(s) = System.out.print(s)
+  let pv = open_static(cw, "io_print", "(Ljava/lang/String;)L" ++ UNIT_CLASS ++ ";")
+  pv.visitFieldInsn(OP_GETSTATIC, "java/lang/System", "out", "Ljava/io/PrintStream;")
+  pv.visitVarInsn(OP_ALOAD, 0)
+  pv.visitMethodInsn(OP_INVOKEVIRTUAL, "java/io/PrintStream", "print",
+    "(Ljava/lang/String;)V", false)
+  return_unit(pv)
+  close_mv(pv)
+
+  # io_println(s) = System.out.println(s)
+  let plv = open_static(cw, "io_println", "(Ljava/lang/String;)L" ++ UNIT_CLASS ++ ";")
+  plv.visitFieldInsn(OP_GETSTATIC, "java/lang/System", "out", "Ljava/io/PrintStream;")
+  plv.visitVarInsn(OP_ALOAD, 0)
+  plv.visitMethodInsn(OP_INVOKEVIRTUAL, "java/io/PrintStream", "println",
+    "(Ljava/lang/String;)V", false)
+  return_unit(plv)
+  close_mv(plv)
+
+  # io_read_line(): lazily open stdin (UTF-8), one line or None at EOF
+  let rlv = open_static(cw, "io_read_line", "()LOption;")
+  let rl_have = Label.new()
+  let rl_none = Label.new()
+  rlv.visitFieldInsn(OP_GETSTATIC, IO_CLASS, "stdin", "Ljava/io/BufferedReader;")
+  rlv.visitJumpInsn(OP_IFNONNULL, rl_have)
+  rlv.visitTypeInsn(OP_NEW, "java/io/BufferedReader")
+  rlv.visitInsn(OP_DUP)
+  rlv.visitTypeInsn(OP_NEW, "java/io/InputStreamReader")
+  rlv.visitInsn(OP_DUP)
+  rlv.visitFieldInsn(OP_GETSTATIC, "java/lang/System", "in", "Ljava/io/InputStream;")
+  rlv.visitFieldInsn(OP_GETSTATIC, "java/nio/charset/StandardCharsets", "UTF_8",
+    "Ljava/nio/charset/Charset;")
+  rlv.visitMethodInsn(OP_INVOKESPECIAL, "java/io/InputStreamReader", "<init>",
+    "(Ljava/io/InputStream;Ljava/nio/charset/Charset;)V", false)
+  rlv.visitMethodInsn(OP_INVOKESPECIAL, "java/io/BufferedReader", "<init>",
+    "(Ljava/io/Reader;)V", false)
+  rlv.visitFieldInsn(OP_PUTSTATIC, IO_CLASS, "stdin", "Ljava/io/BufferedReader;")
+  rlv.visitLabel(rl_have)
+  rlv.visitFieldInsn(OP_GETSTATIC, IO_CLASS, "stdin", "Ljava/io/BufferedReader;")
+  rlv.visitMethodInsn(OP_INVOKEVIRTUAL, "java/io/BufferedReader", "readLine",
+    "()Ljava/lang/String;", false)
+  rlv.visitVarInsn(OP_ASTORE, 0)
+  rlv.visitVarInsn(OP_ALOAD, 0)
+  rlv.visitJumpInsn(OP_IFNULL, rl_none)
+  rlv.visitTypeInsn(OP_NEW, "Option\$Some")
+  rlv.visitInsn(OP_DUP)
+  rlv.visitVarInsn(OP_ALOAD, 0)
+  rlv.visitMethodInsn(OP_INVOKESPECIAL, "Option\$Some", "<init>", "(Ljava/lang/Object;)V", false)
+  rlv.visitInsn(OP_ARETURN)
+  rlv.visitLabel(rl_none)
+  rlv.visitFieldInsn(OP_GETSTATIC, "Option\$None", "INSTANCE", "LOption\$None;")
+  rlv.visitInsn(OP_ARETURN)
+  close_mv(rlv)
+
+  # io_eprint/io_eprintln(s) = System.err.print/println(s). `System.err` is a
+  # static field, which the `use java` interop does not reach (spec §9.1 --
+  # methods only), so reaching it from Dawn took a method handle and a module
+  # of its own. Here it is one GETSTATIC.
+  for e in [("io_eprint", "print"), ("io_eprintln", "println")] {
+    let (dawn_name, java_name) = e
+    let ev = open_static(cw, dawn_name, "(Ljava/lang/String;)L" ++ UNIT_CLASS ++ ";")
+    ev.visitFieldInsn(OP_GETSTATIC, "java/lang/System", "err", "Ljava/io/PrintStream;")
+    ev.visitVarInsn(OP_ALOAD, 0)
+    ev.visitMethodInsn(OP_INVOKEVIRTUAL, "java/io/PrintStream", java_name,
+      "(Ljava/lang/String;)V", false)
+    return_unit(ev)
+    close_mv(ev)
+  }
+
+  # io_exit(code) = System.exit((int) code)
+  let exv = open_static(cw, "io_exit", "(J)L" ++ UNIT_CLASS ++ ";")
+  exv.visitVarInsn(OP_LLOAD, 0)
+  exv.visitInsn(OP_L2I)
+  exv.visitMethodInsn(OP_INVOKESTATIC, "java/lang/System", "exit", "(I)V", false)
+  return_unit(exv)
+  close_mv(exv)
+
+  # io_exists(path) = new File(path).exists()
+  let exsv = open_static(cw, "io_exists", "(Ljava/lang/String;)Z")
+  exsv.visitTypeInsn(OP_NEW, "java/io/File")
+  exsv.visitInsn(OP_DUP)
+  exsv.visitVarInsn(OP_ALOAD, 0)
+  exsv.visitMethodInsn(OP_INVOKESPECIAL, "java/io/File", "<init>", "(Ljava/lang/String;)V", false)
+  exsv.visitMethodInsn(OP_INVOKEVIRTUAL, "java/io/File", "exists", "()Z", false)
+  exsv.visitInsn(OP_IRETURN)
+  close_mv(exsv)
+
+  # io_mkdirs(path): Files.createDirectories — throws on failure, and unlike
+  # File.mkdirs it also fails loudly when the path exists as a file
+  let mkv = open_static(cw, "io_mkdirs", "(Ljava/lang/String;)L" ++ UNIT_CLASS ++ ";")
+  mkv.visitTypeInsn(OP_NEW, "java/io/File")
+  mkv.visitInsn(OP_DUP)
+  mkv.visitVarInsn(OP_ALOAD, 0)
+  mkv.visitMethodInsn(OP_INVOKESPECIAL, "java/io/File", "<init>", "(Ljava/lang/String;)V", false)
+  mkv.visitMethodInsn(OP_INVOKEVIRTUAL, "java/io/File", "toPath", "()Ljava/nio/file/Path;", false)
+  mkv.visitInsn(OP_ICONST_0)
+  mkv.visitTypeInsn(OP_ANEWARRAY, "java/nio/file/attribute/FileAttribute")
+  mkv.visitMethodInsn(OP_INVOKESTATIC, "java/nio/file/Files", "createDirectories",
+    "(Ljava/nio/file/Path;[Ljava/nio/file/attribute/FileAttribute;)Ljava/nio/file/Path;", false)
+  mkv.visitInsn(OP_POP)
+  return_unit(mkv)
+  close_mv(mkv)
+
+  # io_is_dir(path) = new File(path).isDirectory()
+  let idv = open_static(cw, "io_is_dir", "(Ljava/lang/String;)Z")
+  idv.visitTypeInsn(OP_NEW, "java/io/File")
+  idv.visitInsn(OP_DUP)
+  idv.visitVarInsn(OP_ALOAD, 0)
+  idv.visitMethodInsn(OP_INVOKESPECIAL, "java/io/File", "<init>", "(Ljava/lang/String;)V", false)
+  idv.visitMethodInsn(OP_INVOKEVIRTUAL, "java/io/File", "isDirectory", "()Z", false)
+  idv.visitInsn(OP_IRETURN)
+  close_mv(idv)
+
+  # io_read_file(path) = Files.readString(new File(path).toPath()) — throws on failure
+  let rfv = open_static(cw, "io_read_file", "(Ljava/lang/String;)Ljava/lang/String;")
+  rfv.visitTypeInsn(OP_NEW, "java/io/File")
+  rfv.visitInsn(OP_DUP)
+  rfv.visitVarInsn(OP_ALOAD, 0)
+  rfv.visitMethodInsn(OP_INVOKESPECIAL, "java/io/File", "<init>", "(Ljava/lang/String;)V", false)
+  rfv.visitMethodInsn(OP_INVOKEVIRTUAL, "java/io/File", "toPath", "()Ljava/nio/file/Path;", false)
+  rfv.visitMethodInsn(OP_INVOKESTATIC, "java/nio/file/Files", "readString",
+    "(Ljava/nio/file/Path;)Ljava/lang/String;", false)
+  rfv.visitInsn(OP_ARETURN)
+  close_mv(rfv)
+
+  # io_write_file(path, content): mkdirs parents, then Files.writeString — throws on failure
+  let wfv =
+    open_static(cw, "io_write_file", "(Ljava/lang/String;Ljava/lang/String;)L" ++ UNIT_CLASS ++ ";")
+  let wf_skip = Label.new()
+  wfv.visitTypeInsn(OP_NEW, "java/io/File")
+  wfv.visitInsn(OP_DUP)
+  wfv.visitVarInsn(OP_ALOAD, 0)
+  wfv.visitMethodInsn(OP_INVOKESPECIAL, "java/io/File", "<init>", "(Ljava/lang/String;)V", false)
+  wfv.visitVarInsn(OP_ASTORE, 2)
+  wfv.visitVarInsn(OP_ALOAD, 2)
+  wfv.visitMethodInsn(OP_INVOKEVIRTUAL, "java/io/File", "getParentFile", "()Ljava/io/File;", false)
+  wfv.visitVarInsn(OP_ASTORE, 3)
+  wfv.visitVarInsn(OP_ALOAD, 3)
+  wfv.visitJumpInsn(OP_IFNULL, wf_skip)
+  wfv.visitVarInsn(OP_ALOAD, 3)
+  wfv.visitMethodInsn(OP_INVOKEVIRTUAL, "java/io/File", "mkdirs", "()Z", false)
+  wfv.visitInsn(OP_POP)
+  wfv.visitLabel(wf_skip)
+  wfv.visitVarInsn(OP_ALOAD, 2)
+  wfv.visitMethodInsn(OP_INVOKEVIRTUAL, "java/io/File", "toPath", "()Ljava/nio/file/Path;", false)
+  wfv.visitVarInsn(OP_ALOAD, 1)
+  wfv.visitInsn(OP_ICONST_0)
+  wfv.visitTypeInsn(OP_ANEWARRAY, "java/nio/file/OpenOption")
+  wfv.visitMethodInsn(OP_INVOKESTATIC, "java/nio/file/Files", "writeString",
+    "(Ljava/nio/file/Path;Ljava/lang/CharSequence;[Ljava/nio/file/OpenOption;)Ljava/nio/file/Path;",
+    false)
+  wfv.visitInsn(OP_POP)
+  return_unit(wfv)
+  close_mv(wfv)
+
+  # io_list_names(path): entry names in the OS's order, or throw if the dir
+  # cannot be listed. No sort here: std/io sorts (code-point order, the
+  # language's own Ord[String]) so both backends agree by construction --
+  # Arrays.sort would be UTF-16 unit order, which disagrees on astral names.
+  let lnv = open_static(cw, "io_list_names", "(Ljava/lang/String;)Ljava/util/List;")
+  let ln_ok = Label.new()
+  lnv.visitTypeInsn(OP_NEW, "java/io/File")
+  lnv.visitInsn(OP_DUP)
+  lnv.visitVarInsn(OP_ALOAD, 0)
+  lnv.visitMethodInsn(OP_INVOKESPECIAL, "java/io/File", "<init>", "(Ljava/lang/String;)V", false)
+  lnv.visitMethodInsn(OP_INVOKEVIRTUAL, "java/io/File", "list", "()[Ljava/lang/String;", false)
+  lnv.visitVarInsn(OP_ASTORE, 1)
+  lnv.visitVarInsn(OP_ALOAD, 1)
+  lnv.visitJumpInsn(OP_IFNONNULL, ln_ok)
+  lnv.visitTypeInsn(OP_NEW, "java/io/IOException")
+  lnv.visitInsn(OP_DUP)
+  lnv.visitVarInsn(OP_ALOAD, 0)
+  lnv.visitMethodInsn(OP_INVOKESPECIAL, "java/io/IOException", "<init>",
+    "(Ljava/lang/String;)V", false)
+  lnv.visitInsn(OP_ATHROW)
+  lnv.visitLabel(ln_ok)
+  lnv.visitVarInsn(OP_ALOAD, 1)
+  lnv.visitMethodInsn(OP_INVOKESTATIC, "java/util/Arrays", "asList",
+    "([Ljava/lang/Object;)Ljava/util/List;", false)
+  lnv.visitInsn(OP_ARETURN)
+  close_mv(lnv)
+
+  gen_io_env(cw)
+  gen_io_bytes_files(cw)
+  gen_io_stdin(cw)
+  gen_io_run(cw)
+
+  cw.visitEnd()
+  cw.toByteArray().expect("bytes")
+}
+
+## The process's view of the world: working directory and environment.
+fn gen_io_env(cw: AdtClassWriter) -> Unit !io = {
+  # io_cwd() = System.getProperty("user.dir")
+  let cv = open_static(cw, "io_cwd", "()Ljava/lang/String;")
+  cv.visitLdcInsn("user.dir")
+  cv.visitMethodInsn(OP_INVOKESTATIC, "java/lang/System", "getProperty",
+    "(Ljava/lang/String;)Ljava/lang/String;", false)
+  cv.visitInsn(OP_ARETURN)
+  close_mv(cv)
+
+  # io_getenv(name): the null-or-value onto Option, like io_read_line
+  let gv = open_static(cw, "io_getenv", "(Ljava/lang/String;)LOption;")
+  let g_none = Label.new()
+  gv.visitVarInsn(OP_ALOAD, 0)
+  gv.visitMethodInsn(OP_INVOKESTATIC, "java/lang/System", "getenv",
+    "(Ljava/lang/String;)Ljava/lang/String;", false)
+  gv.visitVarInsn(OP_ASTORE, 1)
+  gv.visitVarInsn(OP_ALOAD, 1)
+  gv.visitJumpInsn(OP_IFNULL, g_none)
+  gv.visitTypeInsn(OP_NEW, "Option\$Some")
+  gv.visitInsn(OP_DUP)
+  gv.visitVarInsn(OP_ALOAD, 1)
+  gv.visitMethodInsn(OP_INVOKESPECIAL, "Option\$Some", "<init>", "(Ljava/lang/Object;)V", false)
+  gv.visitInsn(OP_ARETURN)
+  gv.visitLabel(g_none)
+  gv.visitFieldInsn(OP_GETSTATIC, "Option\$None", "INSTANCE", "LOption\$None;")
+  gv.visitInsn(OP_ARETURN)
+  close_mv(gv)
+}
+
+## `new File(local).toPath()`, the opening move of every filesystem primitive here.
+fn push_path(m: MethodVisitor, local: Int) -> Unit !io = {
+  m.visitTypeInsn(OP_NEW, "java/io/File")
+  m.visitInsn(OP_DUP)
+  m.visitVarInsn(OP_ALOAD, local)
+  m.visitMethodInsn(OP_INVOKESPECIAL, "java/io/File", "<init>", "(Ljava/lang/String;)V", false)
+  m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/io/File", "toPath", "()Ljava/nio/file/Path;", false)
+}
+
+## An empty varargs array of `cls` — the trailing argument java.nio.file takes.
+fn push_empty_options(m: MethodVisitor, cls: String) -> Unit !io = {
+  m.visitInsn(OP_ICONST_0)
+  m.visitTypeInsn(OP_ANEWARRAY, cls)
+}
+
+## The binary halves of read_file/write_file, plus delete/rename/temp_dir/is_symlink.
+fn gen_io_bytes_files(cw: AdtClassWriter) -> Unit !io = {
+  # io_read_bytes(path) = Files.readAllBytes(path) — throws on failure
+  let rv = open_static(cw, "io_read_bytes", "(Ljava/lang/String;)[B")
+  push_path(rv, 0)
+  rv.visitMethodInsn(OP_INVOKESTATIC, "java/nio/file/Files", "readAllBytes",
+    "(Ljava/nio/file/Path;)[B", false)
+  rv.visitInsn(OP_ARETURN)
+  close_mv(rv)
+
+  # io_write_bytes(path, content): mkdirs parents, then Files.write — throws on failure
+  let wv = open_static(cw, "io_write_bytes", "(Ljava/lang/String;[B)L" ++ UNIT_CLASS ++ ";")
+  let w_skip = Label.new()
+  wv.visitTypeInsn(OP_NEW, "java/io/File")
+  wv.visitInsn(OP_DUP)
+  wv.visitVarInsn(OP_ALOAD, 0)
+  wv.visitMethodInsn(OP_INVOKESPECIAL, "java/io/File", "<init>", "(Ljava/lang/String;)V", false)
+  wv.visitVarInsn(OP_ASTORE, 2)
+  wv.visitVarInsn(OP_ALOAD, 2)
+  wv.visitMethodInsn(OP_INVOKEVIRTUAL, "java/io/File", "getParentFile", "()Ljava/io/File;", false)
+  wv.visitVarInsn(OP_ASTORE, 3)
+  wv.visitVarInsn(OP_ALOAD, 3)
+  wv.visitJumpInsn(OP_IFNULL, w_skip)
+  wv.visitVarInsn(OP_ALOAD, 3)
+  wv.visitMethodInsn(OP_INVOKEVIRTUAL, "java/io/File", "mkdirs", "()Z", false)
+  wv.visitInsn(OP_POP)
+  wv.visitLabel(w_skip)
+  wv.visitVarInsn(OP_ALOAD, 2)
+  wv.visitMethodInsn(OP_INVOKEVIRTUAL, "java/io/File", "toPath", "()Ljava/nio/file/Path;", false)
+  wv.visitVarInsn(OP_ALOAD, 1)
+  push_empty_options(wv, "java/nio/file/OpenOption")
+  wv.visitMethodInsn(OP_INVOKESTATIC, "java/nio/file/Files", "write",
+    "(Ljava/nio/file/Path;[B[Ljava/nio/file/OpenOption;)Ljava/nio/file/Path;", false)
+  wv.visitInsn(OP_POP)
+  return_unit(wv)
+  close_mv(wv)
+
+  # io_delete(path) = new File(path).delete() — false for a missing path, and
+  # for a non-empty directory. `Files.deleteIfExists` would throw on the second,
+  # which C's remove(3) does not; this is the shape both backends can hold.
+  let dv = open_static(cw, "io_delete", "(Ljava/lang/String;)Z")
+  dv.visitTypeInsn(OP_NEW, "java/io/File")
+  dv.visitInsn(OP_DUP)
+  dv.visitVarInsn(OP_ALOAD, 0)
+  dv.visitMethodInsn(OP_INVOKESPECIAL, "java/io/File", "<init>", "(Ljava/lang/String;)V", false)
+  dv.visitMethodInsn(OP_INVOKEVIRTUAL, "java/io/File", "delete", "()Z", false)
+  dv.visitInsn(OP_IRETURN)
+  close_mv(dv)
+
+  # io_rename(src, dst) = Files.move(src, dst, ATOMIC_MOVE) — the JVM spelling of
+  # rename(2): replaces the destination, or throws when the two are not on one
+  # filesystem. Nothing weaker would do; the caller is publishing under a hash.
+  let mv = open_static(cw, "io_rename",
+    "(Ljava/lang/String;Ljava/lang/String;)L" ++ UNIT_CLASS ++ ";")
+  push_path(mv, 0)
+  push_path(mv, 1)
+  mv.visitInsn(OP_ICONST_1)
+  mv.visitTypeInsn(OP_ANEWARRAY, "java/nio/file/CopyOption")
+  mv.visitInsn(OP_DUP)
+  mv.visitInsn(OP_ICONST_0)
+  mv.visitFieldInsn(OP_GETSTATIC, "java/nio/file/StandardCopyOption", "ATOMIC_MOVE",
+    "Ljava/nio/file/StandardCopyOption;")
+  mv.visitInsn(OP_AASTORE)
+  mv.visitMethodInsn(OP_INVOKESTATIC, "java/nio/file/Files", "move",
+    "(Ljava/nio/file/Path;Ljava/nio/file/Path;[Ljava/nio/file/CopyOption;)Ljava/nio/file/Path;",
+    false)
+  mv.visitInsn(OP_POP)
+  return_unit(mv)
+  close_mv(mv)
+
+  # io_temp_dir(parent, prefix): an empty parent means the system temp directory,
+  # resolved here so there is one call shape rather than two.
+  let tv = open_static(cw, "io_temp_dir",
+    "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;")
+  let t_have = Label.new()
+  tv.visitVarInsn(OP_ALOAD, 0)
+  tv.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/String", "isEmpty", "()Z", false)
+  tv.visitJumpInsn(OP_IFEQ, t_have)
+  tv.visitLdcInsn("java.io.tmpdir")
+  tv.visitMethodInsn(OP_INVOKESTATIC, "java/lang/System", "getProperty",
+    "(Ljava/lang/String;)Ljava/lang/String;", false)
+  tv.visitVarInsn(OP_ASTORE, 0)
+  tv.visitLabel(t_have)
+  push_path(tv, 0)
+  tv.visitVarInsn(OP_ALOAD, 1)
+  push_empty_options(tv, "java/nio/file/attribute/FileAttribute")
+  tv.visitMethodInsn(OP_INVOKESTATIC, "java/nio/file/Files", "createTempDirectory",
+    "(Ljava/nio/file/Path;Ljava/lang/String;[Ljava/nio/file/attribute/FileAttribute;)" ++
+      "Ljava/nio/file/Path;", false)
+  tv.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/Object", "toString",
+    "()Ljava/lang/String;", false)
+  tv.visitInsn(OP_ARETURN)
+  close_mv(tv)
+
+  # io_is_symlink(path) = Files.isSymbolicLink(path) — does not follow the link
+  let sv = open_static(cw, "io_is_symlink", "(Ljava/lang/String;)Z")
+  push_path(sv, 0)
+  sv.visitMethodInsn(OP_INVOKESTATIC, "java/nio/file/Files", "isSymbolicLink",
+    "(Ljava/nio/file/Path;)Z", false)
+  sv.visitInsn(OP_IRETURN)
+  close_mv(sv)
+}
+
+## io_read_stdin(n): exactly n bytes, short only at end of input. `System.in` is
+## a static field, so this is the same story as `System.err` — a channel the
+## interop cannot name, which is why it belongs in the contract and not in a
+## module of method handles.
+##
+## It reads the raw stream, while io_read_line reads a BufferedReader over it.
+## Mixing the two in one process loses whatever the reader has buffered; nothing
+## does, and a language server frames its own messages precisely to avoid it.
+fn gen_io_stdin(cw: AdtClassWriter) -> Unit !io = {
+  let rv = open_static(cw, "io_read_stdin", "(J)[B")
+  rv.visitFieldInsn(OP_GETSTATIC, "java/lang/System", "in", "Ljava/io/InputStream;")
+  rv.visitVarInsn(OP_LLOAD, 0)
+  rv.visitInsn(OP_L2I)
+  rv.visitMethodInsn(OP_INVOKEVIRTUAL, "java/io/InputStream", "readNBytes", "(I)[B", false)
+  rv.visitInsn(OP_ARETURN)
+  close_mv(rv)
+}
+
+const PB: String = "java/lang/ProcessBuilder"
+
+const REDIRECT: String = "java/lang/ProcessBuilder\$Redirect"
+
+## `pb.redirect<Which>(path.isEmpty() ? INHERIT : new File(path))`, with the
+## builder pushed inside each arm rather than before the branch: the two arms
+## call different overloads, so there is nothing to merge at the join.
+fn gen_redirect(m: MethodVisitor, which: String, pb_local: Int, path_local: Int) -> Unit !io = {
+  let to_file = Label.new()
+  let done = Label.new()
+  m.visitVarInsn(OP_ALOAD, path_local)
+  m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/String", "isEmpty", "()Z", false)
+  m.visitJumpInsn(OP_IFEQ, to_file)
+  m.visitVarInsn(OP_ALOAD, pb_local)
+  m.visitFieldInsn(OP_GETSTATIC, REDIRECT, "INHERIT", "L" ++ REDIRECT ++ ";")
+  m.visitMethodInsn(OP_INVOKEVIRTUAL, PB, which, "(L" ++ REDIRECT ++ ";)L" ++ PB ++ ";", false)
+  m.visitInsn(OP_POP)
+  m.visitJumpInsn(OP_GOTO, done)
+  m.visitLabel(to_file)
+  m.visitVarInsn(OP_ALOAD, pb_local)
+  m.visitTypeInsn(OP_NEW, "java/io/File")
+  m.visitInsn(OP_DUP)
+  m.visitVarInsn(OP_ALOAD, path_local)
+  m.visitMethodInsn(OP_INVOKESPECIAL, "java/io/File", "<init>", "(Ljava/lang/String;)V", false)
+  m.visitMethodInsn(OP_INVOKEVIRTUAL, PB, which, "(Ljava/io/File;)L" ++ PB ++ ";", false)
+  m.visitInsn(OP_POP)
+  m.visitLabel(done)
+}
+
+## io_run(argv, out_path, err_path): spawn, wait, answer the exit status.
+## `start()` throws when there is no such program; std wraps it in a barrier.
+fn gen_io_run(cw: AdtClassWriter) -> Unit !io = {
+  let rv = open_static(cw, "io_run",
+    "(Ljava/util/List;Ljava/lang/String;Ljava/lang/String;)J")
+  rv.visitTypeInsn(OP_NEW, PB)
+  rv.visitInsn(OP_DUP)
+  rv.visitVarInsn(OP_ALOAD, 0)
+  rv.visitMethodInsn(OP_INVOKESPECIAL, PB, "<init>", "(Ljava/util/List;)V", false)
+  rv.visitVarInsn(OP_ASTORE, 3)
+  gen_redirect(rv, "redirectOutput", 3, 1)
+  gen_redirect(rv, "redirectError", 3, 2)
+  rv.visitVarInsn(OP_ALOAD, 3)
+  rv.visitMethodInsn(OP_INVOKEVIRTUAL, PB, "start", "()Ljava/lang/Process;", false)
+  rv.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/Process", "waitFor", "()I", false)
+  rv.visitInsn(OP_I2L)
+  rv.visitInsn(OP_LRETURN)
+  close_mv(rv)
+}
+
+pub const ARRAYLIST: String = "java/util/ArrayList"
+
+pub const ARRAY_CLASS: String = "dawn/rt/Array"
+
+pub const ATOMIC_INT: String = "java/util/concurrent/atomic/AtomicInteger"
+
+## The smallest backing store a copy hands out, so the first few pushes onto a
+## fresh array do not each reallocate.
+const ARRAY_MIN_CAP: Int = 8
+
+fn array_ctor_desc() -> String = "([Ljava/lang/Object;L" ++ ATOMIC_INT ++ ";I)V"
+
+## `new dawn/rt/Array(a, used, len)` from three values already on the stack in
+## that order -- factored out because push builds one on each of its two paths.
+fn array_wrap_desc() -> String = "L" ++ ARRAY_CLASS ++ ";"
+
+## Throw a PanicError whose message is `prefix ++ i ++ " out of bounds for
+## length " ++ v.len`, with the array in local 0 and the index in local `ivar`.
+fn array_bounds_panic(m: MethodVisitor, prefix: String, ivar: Int) -> Unit !io = {
+  m.visitTypeInsn(OP_NEW, PANIC_CLASS)
+  m.visitInsn(OP_DUP)
+  m.visitTypeInsn(OP_NEW, SB)
+  m.visitInsn(OP_DUP)
+  m.visitMethodInsn(OP_INVOKESPECIAL, SB, "<init>", "()V", false)
+  append_const(m, prefix)
+  m.visitVarInsn(OP_LLOAD, ivar)
+  m.visitMethodInsn(OP_INVOKEVIRTUAL, SB, "append", "(J)L" ++ SB ++ ";", false)
+  append_const(m, " out of bounds for length ")
+  m.visitVarInsn(OP_ALOAD, 0)
+  m.visitFieldInsn(OP_GETFIELD, ARRAY_CLASS, "len", "I")
+  m.visitMethodInsn(OP_INVOKEVIRTUAL, SB, "append", "(I)L" ++ SB ++ ";", false)
+  m.visitMethodInsn(OP_INVOKEVIRTUAL, SB, "toString", "()Ljava/lang/String;", false)
+  m.visitMethodInsn(OP_INVOKESPECIAL, PANIC_CLASS, "<init>", "(Ljava/lang/String;)V", false)
+  m.visitInsn(OP_ATHROW)
+  ()
+}
+
+## dawn/rt/Array: the whole collection contract a backend owes the language
+## (docs/native-backend-plan.md D1). std builds List/Map/Set on top of this, so
+## a second backend implements one immutable vector rather than ~20 collection
+## intrinsics.
+##
+## A value is a window `a[0, len)` over a backing store that neighbouring
+## versions share; `used` counts the slots claimed across every version sharing
+## `a`. That is DawnList's representation, and it is here for DawnList's reason:
+## `array_push` may extend in place exactly when this version ends where the
+## shared region ends, which is the one-owner-at-a-time case an accumulation
+## loop produces (measured 99.1% of the compiler's appends,
+## docs/collections-dejava-research.md §9.5). Losing the CAS costs a copy, not
+## correctness -- a published array never changes, whatever its successors do.
+##
+## `array_with` always copies, and that asymmetry is the point: slot `i < len`
+## has already been handed to this version and possibly others, so no
+## watermark can tell whether anyone still reads it. Only a backend that knows
+## the value is uniquely owned may write it in place -- which on native is
+## Perceus' rc==1, and on the JVM is nothing. The append path is where the 12x
+## lives, so this is a cost the measurements say we can pay.
+pub fn gen_array_class(supers: List[String]) -> Bytes !io = {
+  let cw = AdtClassWriter.new(supers)
+  cw.begin(V17, ACC_PUBLIC + ACC_FINAL, ARRAY_CLASS, obj())
+  cw.field(ACC_PRIVATE + ACC_FINAL, "a", "[Ljava/lang/Object;")
+  cw.field(ACC_PRIVATE + ACC_FINAL, "used", "L" ++ ATOMIC_INT ++ ";")
+  cw.field(ACC_PRIVATE + ACC_FINAL, "len", "I")
+
+  let init = cw.method(ACC_PRIVATE, "<init>", array_ctor_desc()).expect("mv")
+  init.visitCode()
+  init.visitVarInsn(OP_ALOAD, 0)
+  init.visitMethodInsn(OP_INVOKESPECIAL, obj(), "<init>", "()V", false)
+  init.visitVarInsn(OP_ALOAD, 0)
+  init.visitVarInsn(OP_ALOAD, 1)
+  init.visitFieldInsn(OP_PUTFIELD, ARRAY_CLASS, "a", "[Ljava/lang/Object;")
+  init.visitVarInsn(OP_ALOAD, 0)
+  init.visitVarInsn(OP_ALOAD, 2)
+  init.visitFieldInsn(OP_PUTFIELD, ARRAY_CLASS, "used", "L" ++ ATOMIC_INT ++ ";")
+  init.visitVarInsn(OP_ALOAD, 0)
+  init.visitVarInsn(OP_ILOAD, 3)
+  init.visitFieldInsn(OP_PUTFIELD, ARRAY_CLASS, "len", "I")
+  init.visitInsn(OP_RETURN)
+  close_mv(init)
+
+  # array_new() -> the empty array
+  let nv = open_static(cw, "array_new", "()" ++ array_wrap_desc())
+  nv.visitTypeInsn(OP_NEW, ARRAY_CLASS)
+  nv.visitInsn(OP_DUP)
+  nv.visitInsn(OP_ICONST_0)
+  nv.visitTypeInsn(OP_ANEWARRAY, obj())
+  gen_new_watermark(nv, OP_ICONST_0)
+  nv.visitInsn(OP_ICONST_0)
+  nv.visitMethodInsn(OP_INVOKESPECIAL, ARRAY_CLASS, "<init>", array_ctor_desc(), false)
+  nv.visitInsn(OP_ARETURN)
+  close_mv(nv)
+
+  # array_len(v) = v.len
+  let lv = open_static(cw, "array_len", "(" ++ array_wrap_desc() ++ ")J")
+  lv.visitVarInsn(OP_ALOAD, 0)
+  lv.visitFieldInsn(OP_GETFIELD, ARRAY_CLASS, "len", "I")
+  lv.visitInsn(OP_I2L)
+  lv.visitInsn(OP_LRETURN)
+  close_mv(lv)
+
+  gen_array_get(cw)
+  gen_array_push(cw)
+  gen_array_with(cw)
+  gen_array_java(cw)
+
+  # popcount(n) = Long.bitCount(n)
+  let pc = open_static(cw, "popcount", "(J)J")
+  pc.visitVarInsn(OP_LLOAD, 0)
+  pc.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Long", "bitCount", "(J)I", false)
+  pc.visitInsn(OP_I2L)
+  pc.visitInsn(OP_LRETURN)
+  close_mv(pc)
+
+  cw.visitEnd()
+  cw.toByteArray().expect("bytes")
+}
+
+## `new AtomicInteger(<the int the given opcode pushes>)`, left on the stack.
+fn gen_new_watermark(m: MethodVisitor, push_op: Int) -> Unit !io = {
+  m.visitTypeInsn(OP_NEW, ATOMIC_INT)
+  m.visitInsn(OP_DUP)
+  m.visitInsn(push_op)
+  m.visitMethodInsn(OP_INVOKESPECIAL, ATOMIC_INT, "<init>", "(I)V", false)
+  ()
+}
+
+## The two directions across the host boundary, both by copy.
+##
+## Since S3 a Dawn List is a Dawn value the JVM has no name for, so the handful
+## of places where one still meets `java.util.List` -- a `use java` parameter,
+## and the four host primitives that produce or consume a list of strings or
+## code points -- convert through `Array`, which is the backend's own type.
+## Keeping the boundary here rather than teaching each of those places about
+## the vector is what stopped the flip from rewriting five hand-written methods.
+fn gen_array_java(cw: AdtClassWriter) -> Unit !io = {
+  let jlist = "java/util/List"
+  let jcoll = "java/util/Collection"
+
+  # array_of_java(List) -> Array: push each element, so the result is an
+  # ordinary array with an ordinary watermark
+  let ov = open_static(cw, "array_of_java", "(L" ++ jlist ++ ";)" ++ array_wrap_desc())
+  ov.visitMethodInsn(OP_INVOKESTATIC, ARRAY_CLASS, "array_new", "()" ++ array_wrap_desc(),
+    false)
+  ov.visitVarInsn(OP_ASTORE, 1)
+  ov.visitInsn(OP_ICONST_0)
+  ov.visitVarInsn(OP_ISTORE, 2)
+  let o_loop = Label.new()
+  let o_done = Label.new()
+  ov.visitLabel(o_loop)
+  ov.visitVarInsn(OP_ILOAD, 2)
+  ov.visitVarInsn(OP_ALOAD, 0)
+  ov.visitMethodInsn(OP_INVOKEINTERFACE, jlist, "size", "()I", true)
+  ov.visitJumpInsn(OP_IF_ICMPGE, o_done)
+  ov.visitVarInsn(OP_ALOAD, 1)
+  ov.visitVarInsn(OP_ALOAD, 0)
+  ov.visitVarInsn(OP_ILOAD, 2)
+  ov.visitMethodInsn(OP_INVOKEINTERFACE, jlist, "get", "(I)Ljava/lang/Object;", true)
+  ov.visitMethodInsn(OP_INVOKESTATIC, ARRAY_CLASS, "array_push",
+    "(" ++ array_wrap_desc() ++ "Ljava/lang/Object;)" ++ array_wrap_desc(), false)
+  ov.visitVarInsn(OP_ASTORE, 1)
+  ov.visitIincInsn(2, 1)
+  ov.visitJumpInsn(OP_GOTO, o_loop)
+  ov.visitLabel(o_done)
+  ov.visitVarInsn(OP_ALOAD, 1)
+  ov.visitInsn(OP_ARETURN)
+  close_mv(ov)
+
+  # array_to_java(Array) -> List: an unmodifiable view over a copy of the
+  # window, so handing one to Java cannot be used to write through it
+  let tv = open_static(cw, "array_to_java", "(" ++ array_wrap_desc() ++ ")L" ++ jlist ++ ";")
+  tv.visitTypeInsn(OP_NEW, ARRAYLIST)
+  tv.visitInsn(OP_DUP)
+  tv.visitMethodInsn(OP_INVOKESPECIAL, ARRAYLIST, "<init>", "()V", false)
+  tv.visitVarInsn(OP_ASTORE, 1)
+  tv.visitInsn(OP_ICONST_0)
+  tv.visitVarInsn(OP_ISTORE, 2)
+  let t_loop = Label.new()
+  let t_done = Label.new()
+  tv.visitLabel(t_loop)
+  tv.visitVarInsn(OP_ILOAD, 2)
+  tv.visitVarInsn(OP_ALOAD, 0)
+  tv.visitFieldInsn(OP_GETFIELD, ARRAY_CLASS, "len", "I")
+  tv.visitJumpInsn(OP_IF_ICMPGE, t_done)
+  tv.visitVarInsn(OP_ALOAD, 1)
+  tv.visitVarInsn(OP_ALOAD, 0)
+  tv.visitFieldInsn(OP_GETFIELD, ARRAY_CLASS, "a", "[Ljava/lang/Object;")
+  tv.visitVarInsn(OP_ILOAD, 2)
+  tv.visitInsn(OP_AALOAD)
+  tv.visitMethodInsn(OP_INVOKEINTERFACE, jcoll, "add", "(Ljava/lang/Object;)Z", true)
+  tv.visitInsn(OP_POP)
+  tv.visitIincInsn(2, 1)
+  tv.visitJumpInsn(OP_GOTO, t_loop)
+  tv.visitLabel(t_done)
+  tv.visitVarInsn(OP_ALOAD, 1)
+  tv.visitMethodInsn(OP_INVOKESTATIC, "java/util/Collections", "unmodifiableList",
+    "(L" ++ jlist ++ ";)L" ++ jlist ++ ";", false)
+  tv.visitInsn(OP_ARETURN)
+  close_mv(tv)
+}
+
+## array_get(v, i) -> v.a[i], panicking out of bounds like `xs[i]` does.
+fn gen_array_get(cw: AdtClassWriter) -> Unit !io = {
+  let gv = open_static(cw, "array_get", "(" ++ array_wrap_desc() ++ "J)Ljava/lang/Object;")
+  let bad = Label.new()
+  gv.visitVarInsn(OP_LLOAD, 1)
+  gv.visitInsn(OP_LCONST_0)
+  gv.visitInsn(OP_LCMP)
+  gv.visitJumpInsn(OP_IFLT, bad)
+  gv.visitVarInsn(OP_LLOAD, 1)
+  gv.visitVarInsn(OP_ALOAD, 0)
+  gv.visitFieldInsn(OP_GETFIELD, ARRAY_CLASS, "len", "I")
+  gv.visitInsn(OP_I2L)
+  gv.visitInsn(OP_LCMP)
+  gv.visitJumpInsn(OP_IFGE, bad)
+  gv.visitVarInsn(OP_ALOAD, 0)
+  gv.visitFieldInsn(OP_GETFIELD, ARRAY_CLASS, "a", "[Ljava/lang/Object;")
+  gv.visitVarInsn(OP_LLOAD, 1)
+  gv.visitInsn(OP_L2I)
+  gv.visitInsn(OP_AALOAD)
+  gv.visitInsn(OP_ARETURN)
+  gv.visitLabel(bad)
+  array_bounds_panic(gv, "array index ", 1)
+  close_mv(gv)
+}
+
+## array_push(v, x) -> v with x appended. Extends in place when this version
+## ends at the shared watermark and the store has room; otherwise copies into a
+## store with slack, so the *next* push is cheap either way.
+fn gen_array_push(cw: AdtClassWriter) -> Unit !io = {
+  let pv = open_static(cw, "array_push",
+    "(" ++ array_wrap_desc() ++ "Ljava/lang/Object;)" ++ array_wrap_desc())
+  let slow = Label.new()
+  pv.visitVarInsn(OP_ALOAD, 0)
+  pv.visitFieldInsn(OP_GETFIELD, ARRAY_CLASS, "len", "I")
+  pv.visitVarInsn(OP_ISTORE, 2)
+
+  # room in the store?
+  pv.visitVarInsn(OP_ALOAD, 0)
+  pv.visitFieldInsn(OP_GETFIELD, ARRAY_CLASS, "a", "[Ljava/lang/Object;")
+  pv.visitInsn(OP_ARRAYLENGTH)
+  pv.visitVarInsn(OP_ILOAD, 2)
+  pv.visitJumpInsn(OP_IF_ICMPLE, slow)
+  # claim slot len for this thread alone
+  pv.visitVarInsn(OP_ALOAD, 0)
+  pv.visitFieldInsn(OP_GETFIELD, ARRAY_CLASS, "used", "L" ++ ATOMIC_INT ++ ";")
+  pv.visitVarInsn(OP_ILOAD, 2)
+  pv.visitVarInsn(OP_ILOAD, 2)
+  pv.visitInsn(OP_ICONST_1)
+  pv.visitInsn(OP_IADD)
+  pv.visitMethodInsn(OP_INVOKEVIRTUAL, ATOMIC_INT, "compareAndSet", "(II)Z", false)
+  pv.visitJumpInsn(OP_IFEQ, slow)
+  pv.visitVarInsn(OP_ALOAD, 0)
+  pv.visitFieldInsn(OP_GETFIELD, ARRAY_CLASS, "a", "[Ljava/lang/Object;")
+  pv.visitVarInsn(OP_ILOAD, 2)
+  pv.visitVarInsn(OP_ALOAD, 1)
+  pv.visitInsn(OP_AASTORE)
+  pv.visitTypeInsn(OP_NEW, ARRAY_CLASS)
+  pv.visitInsn(OP_DUP)
+  pv.visitVarInsn(OP_ALOAD, 0)
+  pv.visitFieldInsn(OP_GETFIELD, ARRAY_CLASS, "a", "[Ljava/lang/Object;")
+  pv.visitVarInsn(OP_ALOAD, 0)
+  pv.visitFieldInsn(OP_GETFIELD, ARRAY_CLASS, "used", "L" ++ ATOMIC_INT ++ ";")
+  pv.visitVarInsn(OP_ILOAD, 2)
+  pv.visitInsn(OP_ICONST_1)
+  pv.visitInsn(OP_IADD)
+  pv.visitMethodInsn(OP_INVOKESPECIAL, ARRAY_CLASS, "<init>", array_ctor_desc(), false)
+  pv.visitInsn(OP_ARETURN)
+
+  pv.visitLabel(slow)
+  pv.visitIntInsn(OP_BIPUSH, ARRAY_MIN_CAP)
+  pv.visitVarInsn(OP_ILOAD, 2)
+  pv.visitInsn(OP_ICONST_1)
+  pv.visitInsn(OP_IADD)
+  pv.visitInsn(OP_ICONST_2)
+  pv.visitInsn(OP_IMUL)
+  pv.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Math", "max", "(II)I", false)
+  pv.visitTypeInsn(OP_ANEWARRAY, obj())
+  pv.visitVarInsn(OP_ASTORE, 3)
+  pv.visitVarInsn(OP_ALOAD, 0)
+  pv.visitFieldInsn(OP_GETFIELD, ARRAY_CLASS, "a", "[Ljava/lang/Object;")
+  pv.visitInsn(OP_ICONST_0)
+  pv.visitVarInsn(OP_ALOAD, 3)
+  pv.visitInsn(OP_ICONST_0)
+  pv.visitVarInsn(OP_ILOAD, 2)
+  pv.visitMethodInsn(OP_INVOKESTATIC, "java/lang/System", "arraycopy",
+    "(Ljava/lang/Object;ILjava/lang/Object;II)V", false)
+  pv.visitVarInsn(OP_ALOAD, 3)
+  pv.visitVarInsn(OP_ILOAD, 2)
+  pv.visitVarInsn(OP_ALOAD, 1)
+  pv.visitInsn(OP_AASTORE)
+  pv.visitTypeInsn(OP_NEW, ARRAY_CLASS)
+  pv.visitInsn(OP_DUP)
+  pv.visitVarInsn(OP_ALOAD, 3)
+  pv.visitTypeInsn(OP_NEW, ATOMIC_INT)
+  pv.visitInsn(OP_DUP)
+  pv.visitVarInsn(OP_ILOAD, 2)
+  pv.visitInsn(OP_ICONST_1)
+  pv.visitInsn(OP_IADD)
+  pv.visitMethodInsn(OP_INVOKESPECIAL, ATOMIC_INT, "<init>", "(I)V", false)
+  pv.visitVarInsn(OP_ILOAD, 2)
+  pv.visitInsn(OP_ICONST_1)
+  pv.visitInsn(OP_IADD)
+  pv.visitMethodInsn(OP_INVOKESPECIAL, ARRAY_CLASS, "<init>", array_ctor_desc(), false)
+  pv.visitInsn(OP_ARETURN)
+  close_mv(pv)
+}
+
+## array_with(v, i, x) -> v with slot i replaced. Always copies on this
+## backend; see the class comment for why the watermark cannot help here.
+fn gen_array_with(cw: AdtClassWriter) -> Unit !io = {
+  let wv = open_static(cw, "array_with",
+    "(" ++ array_wrap_desc() ++ "JLjava/lang/Object;)" ++ array_wrap_desc())
+  let bad = Label.new()
+  wv.visitVarInsn(OP_ALOAD, 0)
+  wv.visitFieldInsn(OP_GETFIELD, ARRAY_CLASS, "len", "I")
+  wv.visitVarInsn(OP_ISTORE, 4)
+  wv.visitVarInsn(OP_LLOAD, 1)
+  wv.visitInsn(OP_LCONST_0)
+  wv.visitInsn(OP_LCMP)
+  wv.visitJumpInsn(OP_IFLT, bad)
+  wv.visitVarInsn(OP_LLOAD, 1)
+  wv.visitVarInsn(OP_ILOAD, 4)
+  wv.visitInsn(OP_I2L)
+  wv.visitInsn(OP_LCMP)
+  wv.visitJumpInsn(OP_IFGE, bad)
+  wv.visitVarInsn(OP_ALOAD, 0)
+  wv.visitFieldInsn(OP_GETFIELD, ARRAY_CLASS, "a", "[Ljava/lang/Object;")
+  wv.visitVarInsn(OP_ILOAD, 4)
+  wv.visitMethodInsn(OP_INVOKESTATIC, "java/util/Arrays", "copyOf",
+    "([Ljava/lang/Object;I)[Ljava/lang/Object;", false)
+  wv.visitVarInsn(OP_ASTORE, 5)
+  wv.visitVarInsn(OP_ALOAD, 5)
+  wv.visitVarInsn(OP_LLOAD, 1)
+  wv.visitInsn(OP_L2I)
+  wv.visitVarInsn(OP_ALOAD, 3)
+  wv.visitInsn(OP_AASTORE)
+  wv.visitTypeInsn(OP_NEW, ARRAY_CLASS)
+  wv.visitInsn(OP_DUP)
+  wv.visitVarInsn(OP_ALOAD, 5)
+  wv.visitTypeInsn(OP_NEW, ATOMIC_INT)
+  wv.visitInsn(OP_DUP)
+  wv.visitVarInsn(OP_ILOAD, 4)
+  wv.visitMethodInsn(OP_INVOKESPECIAL, ATOMIC_INT, "<init>", "(I)V", false)
+  wv.visitVarInsn(OP_ILOAD, 4)
+  wv.visitMethodInsn(OP_INVOKESPECIAL, ARRAY_CLASS, "<init>", array_ctor_desc(), false)
+  wv.visitInsn(OP_ARETURN)
+  wv.visitLabel(bad)
+  array_bounds_panic(wv, "array index ", 1)
+  close_mv(wv)
+}
+
+## The one parse primitive left on this backend: `parse_float`, the
+## decimal-to-binary conversion std/fmt.atod delegates after validating and
+## trimming (audit RP-05 -- the accepted *language* is fmt's EBNF, never
+## Double.parseDouble's grammar; on the validated subset parseDouble is pure
+## IEEE round-to-nearest, which is all this method is asked for). No
+## `String.strip` here any more: the input arrives trimmed by Dawn's own
+## space table. The exception net stays as a safety net, though a validated
+## string cannot trip it. `parse_int`/`parse_int_radix` are gone entirely --
+## fmt.atoi is pure Dawn source and never reaches a runtime method.
+fn gen_parse_float_method(cw: AdtClassWriter) -> Unit !io = {
+  let m = cw.method(ACC_PUBLIC + ACC_STATIC, "parse_float",
+    "(Ljava/lang/String;)LOption;").expect("mv")
+  m.visitCode()
+  let try_start = Label.new()
+  let try_end = Label.new()
+  let handler = Label.new()
+  m.visitTryCatchBlock(try_start, try_end, handler, "java/lang/NumberFormatException")
+  m.visitLabel(try_start)
+  m.visitTypeInsn(OP_NEW, "Option\$Some")
+  m.visitInsn(OP_DUP)
+  m.visitVarInsn(OP_ALOAD, 0)
+  m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Double", "parseDouble",
+    "(Ljava/lang/String;)D", false)
+  m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Double", "valueOf",
+    "(D)Ljava/lang/Double;", false)
+  m.visitMethodInsn(OP_INVOKESPECIAL, "Option\$Some", "<init>", "(Ljava/lang/Object;)V", false)
+  m.visitLabel(try_end)
+  m.visitInsn(OP_ARETURN)
+  m.visitLabel(handler)
+  m.visitInsn(OP_POP)
+  m.visitFieldInsn(OP_GETSTATIC, "Option\$None", "INSTANCE", "LOption\$None;")
+  m.visitInsn(OP_ARETURN)
+  m.visitMaxs(0, 0)
+  m.visitEnd()
+  ()
+}
+
+## The `int[]` the Unicode tables are decoded into: three slots per range for
+## the case maps (first, last, what the first maps to), two for the sets.
+const CASE_UPPER: String = "CASE_UPPER"
+
+const CASE_LOWER: String = "CASE_LOWER"
+
+const CLASS_LETTER: String = "CLASS_LETTER"
+
+const CLASS_DIGIT: String = "CLASS_DIGIT"
+
+const CLASS_UPPER: String = "CLASS_UPPER"
+
+const CLASS_LOWER: String = "CLASS_LOWER"
+
+const CLASS_SPACE: String = "CLASS_SPACE"
+
+## dawn/rt/Strings: the string runtime — join, cmp, parse_float,
+## code_points/from_code_points, the cursor family, the Unicode classifiers and
+## case folding. What is left after std/str took over everything expressible as
+## a walk (docs/native-backend-plan.md 14.12): the representation boundary and
+## the Unicode tables, and nothing vendored in handwritten Java.
+pub fn gen_strings_class(supers: List[String], u: TableUse) -> Bytes !io = {
+  let jstr = "java/lang/String"
+  let jlist = "java/util/List"
+  let cw = AdtClassWriter.new(supers)
+  cw.begin(V17, ACC_PUBLIC + ACC_FINAL, STRINGS_CLASS, obj())
+
+  let jn = cw.method(ACC_PUBLIC + ACC_STATIC, "join",
+    "(Ljava/util/List;Ljava/lang/String;)Ljava/lang/String;").expect("mv")
+  jn.visitCode()
+  jn.visitTypeInsn(OP_NEW, SB)
+  jn.visitInsn(OP_DUP)
+  jn.visitMethodInsn(OP_INVOKESPECIAL, SB, "<init>", "()V", false)
+  jn.visitVarInsn(OP_ASTORE, 2)
+  jn.visitInsn(OP_ICONST_0)
+  jn.visitVarInsn(OP_ISTORE, 3)
+  let j_loop = Label.new()
+  let j_done = Label.new()
+  let j_no_sep = Label.new()
+  jn.visitLabel(j_loop)
+  jn.visitVarInsn(OP_ILOAD, 3)
+  jn.visitVarInsn(OP_ALOAD, 0)
+  jn.visitMethodInsn(OP_INVOKEINTERFACE, jlist, "size", "()I", true)
+  jn.visitJumpInsn(OP_IF_ICMPGE, j_done)
+  jn.visitVarInsn(OP_ILOAD, 3)
+  jn.visitJumpInsn(OP_IFEQ, j_no_sep)
+  jn.visitVarInsn(OP_ALOAD, 2)
+  jn.visitVarInsn(OP_ALOAD, 1)
+  jn.visitMethodInsn(OP_INVOKEVIRTUAL, SB, "append", "(Ljava/lang/String;)L" ++ SB ++ ";", false)
+  jn.visitInsn(OP_POP)
+  jn.visitLabel(j_no_sep)
+  jn.visitVarInsn(OP_ALOAD, 2)
+  jn.visitVarInsn(OP_ALOAD, 0)
+  jn.visitVarInsn(OP_ILOAD, 3)
+  jn.visitMethodInsn(OP_INVOKEINTERFACE, jlist, "get", "(I)Ljava/lang/Object;", true)
+  jn.visitTypeInsn(OP_CHECKCAST, jstr)
+  jn.visitMethodInsn(OP_INVOKEVIRTUAL, SB, "append", "(Ljava/lang/String;)L" ++ SB ++ ";", false)
+  jn.visitInsn(OP_POP)
+  jn.visitIincInsn(3, 1)
+  jn.visitJumpInsn(OP_GOTO, j_loop)
+  jn.visitLabel(j_done)
+  jn.visitVarInsn(OP_ALOAD, 2)
+  jn.visitMethodInsn(OP_INVOKEVIRTUAL, SB, "toString", "()Ljava/lang/String;", false)
+  jn.visitInsn(OP_ARETURN)
+  jn.visitMaxs(0, 0)
+  jn.visitEnd()
+
+  gen_parse_float_method(cw)
+
+  # code_points(String) -> List[Int]: one Long-boxed code point per element
+  let cp = cw.method(ACC_PUBLIC + ACC_STATIC, "code_points",
+    "(Ljava/lang/String;)Ljava/util/List;").expect("mv")
+  cp.visitCode()
+  cp.visitTypeInsn(OP_NEW, ARRAYLIST)
+  cp.visitInsn(OP_DUP)
+  cp.visitMethodInsn(OP_INVOKESPECIAL, ARRAYLIST, "<init>", "()V", false)
+  cp.visitVarInsn(OP_ASTORE, 1)
+  cp.visitInsn(OP_ICONST_0)
+  cp.visitVarInsn(OP_ISTORE, 2)
+  let c_loop = Label.new()
+  let c_done = Label.new()
+  cp.visitLabel(c_loop)
+  cp.visitVarInsn(OP_ILOAD, 2)
+  cp.visitVarInsn(OP_ALOAD, 0)
+  cp.visitMethodInsn(OP_INVOKEVIRTUAL, jstr, "length", "()I", false)
+  cp.visitJumpInsn(OP_IF_ICMPGE, c_done)
+  cp.visitVarInsn(OP_ALOAD, 0)
+  cp.visitVarInsn(OP_ILOAD, 2)
+  cp.visitMethodInsn(OP_INVOKEVIRTUAL, jstr, "codePointAt", "(I)I", false)
+  cp.visitVarInsn(OP_ISTORE, 3)
+  cp.visitVarInsn(OP_ALOAD, 1)
+  cp.visitVarInsn(OP_ILOAD, 3)
+  cp.visitInsn(OP_I2L)
+  cp.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Long", "valueOf", "(J)Ljava/lang/Long;", false)
+  cp.visitMethodInsn(OP_INVOKEVIRTUAL, ARRAYLIST, "add", "(Ljava/lang/Object;)Z", false)
+  cp.visitInsn(OP_POP)
+  cp.visitVarInsn(OP_ILOAD, 2)
+  cp.visitVarInsn(OP_ILOAD, 3)
+  cp.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Character", "charCount", "(I)I", false)
+  cp.visitInsn(OP_IADD)
+  cp.visitVarInsn(OP_ISTORE, 2)
+  cp.visitJumpInsn(OP_GOTO, c_loop)
+  cp.visitLabel(c_done)
+  cp.visitVarInsn(OP_ALOAD, 1)
+  cp.visitInsn(OP_ARETURN)
+  cp.visitMaxs(0, 0)
+  cp.visitEnd()
+
+  # from_code_points(List[Int]) -> String
+  let fc = cw.method(ACC_PUBLIC + ACC_STATIC, "from_code_points",
+    "(Ljava/util/List;)Ljava/lang/String;").expect("mv")
+  fc.visitCode()
+  fc.visitTypeInsn(OP_NEW, SB)
+  fc.visitInsn(OP_DUP)
+  fc.visitMethodInsn(OP_INVOKESPECIAL, SB, "<init>", "()V", false)
+  fc.visitVarInsn(OP_ASTORE, 1)
+  fc.visitInsn(OP_ICONST_0)
+  fc.visitVarInsn(OP_ISTORE, 2)
+  let f_loop = Label.new()
+  let f_done = Label.new()
+  fc.visitLabel(f_loop)
+  fc.visitVarInsn(OP_ILOAD, 2)
+  fc.visitVarInsn(OP_ALOAD, 0)
+  fc.visitMethodInsn(OP_INVOKEINTERFACE, jlist, "size", "()I", true)
+  fc.visitJumpInsn(OP_IF_ICMPGE, f_done)
+  fc.visitVarInsn(OP_ALOAD, 1)
+  fc.visitVarInsn(OP_ALOAD, 0)
+  fc.visitVarInsn(OP_ILOAD, 2)
+  fc.visitMethodInsn(OP_INVOKEINTERFACE, jlist, "get", "(I)Ljava/lang/Object;", true)
+  fc.visitTypeInsn(OP_CHECKCAST, "java/lang/Long")
+  fc.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/Long", "intValue", "()I", false)
+  # An out-of-range code point is the caller's error, so it panics -- the way
+  # a bad index does. Left to `appendCodePoint` it came out as
+  # `IllegalArgumentException`, and that is an `Exception`: `catch_fault` caught
+  # it, so the io barrier turned an argument error into an `Err` that reads
+  # like a missing file. The one place a host exception still escaped
+  # (catch_kinds.dawn).
+  fc.visitInsn(OP_DUP)
+  fc.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Character", "isValidCodePoint",
+    "(I)Z", false)
+  let f_ok = Label.new()
+  fc.visitJumpInsn(OP_IFNE, f_ok)
+  fc.visitTypeInsn(OP_NEW, PANIC_CLASS)
+  fc.visitInsn(OP_DUP)
+  fc.visitLdcInsn(
+    Objects.requireNonNull("from_code_points: not a valid code point").expect("non-null"))
+  fc.visitMethodInsn(OP_INVOKESPECIAL, PANIC_CLASS, "<init>",
+    "(Ljava/lang/String;)V", false)
+  fc.visitInsn(OP_ATHROW)
+  fc.visitLabel(f_ok)
+  fc.visitMethodInsn(OP_INVOKEVIRTUAL, SB, "appendCodePoint", "(I)L" ++ SB ++ ";", false)
+  fc.visitInsn(OP_POP)
+  fc.visitIincInsn(2, 1)
+  fc.visitJumpInsn(OP_GOTO, f_loop)
+  fc.visitLabel(f_done)
+  fc.visitVarInsn(OP_ALOAD, 1)
+  fc.visitMethodInsn(OP_INVOKEVIRTUAL, SB, "toString", "()Ljava/lang/String;", false)
+  fc.visitInsn(OP_ARETURN)
+  fc.visitMaxs(0, 0)
+  fc.visitEnd()
+
+  # cmp(a, b): Ord[String] -- *code point* order, sign only (-1/0/1), spec
+  # 3.5 (RP-06). Not String.compareTo: that is UTF-16 code unit order, which
+  # disagrees with code point order exactly when one side's first differing
+  # unit is a surrogate and the other's is in [U+E000, U+FFFF]. The walk
+  # compares code units until the first difference -- equal prefixes cannot
+  # split a surrogate pair unevenly, so at the first differing index both
+  # sides sit on the same kind of boundary and codePointAt reads the right
+  # thing -- and only there pays for codePointAt. A shared prefix leaves the
+  # shorter string smaller in either currency, so lengths settle that case.
+  let cm = open_static(cw, "cmp", "(Ljava/lang/String;Ljava/lang/String;)I")
+  cm.visitVarInsn(OP_ALOAD, 0)
+  cm.visitMethodInsn(OP_INVOKEVIRTUAL, jstr, "length", "()I", false)
+  cm.visitVarInsn(OP_ALOAD, 1)
+  cm.visitMethodInsn(OP_INVOKEVIRTUAL, jstr, "length", "()I", false)
+  cm.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Math", "min", "(II)I", false)
+  cm.visitVarInsn(OP_ISTORE, 2)
+  cm.visitInsn(OP_ICONST_0)
+  cm.visitVarInsn(OP_ISTORE, 3)
+  let m_loop = Label.new()
+  let m_prefix = Label.new()
+  let m_differ = Label.new()
+  let m_zero = Label.new()
+  let m_neg = Label.new()
+  cm.visitLabel(m_loop)
+  cm.visitVarInsn(OP_ILOAD, 3)
+  cm.visitVarInsn(OP_ILOAD, 2)
+  cm.visitJumpInsn(OP_IF_ICMPGE, m_prefix)
+  cm.visitVarInsn(OP_ALOAD, 0)
+  cm.visitVarInsn(OP_ILOAD, 3)
+  cm.visitMethodInsn(OP_INVOKEVIRTUAL, jstr, "charAt", "(I)C", false)
+  cm.visitVarInsn(OP_ALOAD, 1)
+  cm.visitVarInsn(OP_ILOAD, 3)
+  cm.visitMethodInsn(OP_INVOKEVIRTUAL, jstr, "charAt", "(I)C", false)
+  cm.visitJumpInsn(OP_IF_ICMPNE, m_differ)
+  cm.visitIincInsn(3, 1)
+  cm.visitJumpInsn(OP_GOTO, m_loop)
+  cm.visitLabel(m_prefix)
+  cm.visitVarInsn(OP_ALOAD, 0)
+  cm.visitMethodInsn(OP_INVOKEVIRTUAL, jstr, "length", "()I", false)
+  cm.visitVarInsn(OP_ALOAD, 1)
+  cm.visitMethodInsn(OP_INVOKEVIRTUAL, jstr, "length", "()I", false)
+  cm.visitJumpInsn(OP_IF_ICMPEQ, m_zero)
+  cm.visitVarInsn(OP_ALOAD, 0)
+  cm.visitMethodInsn(OP_INVOKEVIRTUAL, jstr, "length", "()I", false)
+  cm.visitVarInsn(OP_ALOAD, 1)
+  cm.visitMethodInsn(OP_INVOKEVIRTUAL, jstr, "length", "()I", false)
+  cm.visitJumpInsn(OP_IF_ICMPLT, m_neg)
+  cm.visitInsn(OP_ICONST_1)
+  cm.visitInsn(OP_IRETURN)
+  cm.visitLabel(m_differ)
+  cm.visitVarInsn(OP_ALOAD, 0)
+  cm.visitVarInsn(OP_ILOAD, 3)
+  cm.visitMethodInsn(OP_INVOKEVIRTUAL, jstr, "codePointAt", "(I)I", false)
+  cm.visitVarInsn(OP_ALOAD, 1)
+  cm.visitVarInsn(OP_ILOAD, 3)
+  cm.visitMethodInsn(OP_INVOKEVIRTUAL, jstr, "codePointAt", "(I)I", false)
+  cm.visitJumpInsn(OP_IF_ICMPLT, m_neg)
+  cm.visitInsn(OP_ICONST_1)
+  cm.visitInsn(OP_IRETURN)
+  cm.visitLabel(m_zero)
+  cm.visitInsn(OP_ICONST_0)
+  cm.visitInsn(OP_IRETURN)
+  cm.visitLabel(m_neg)
+  cm.visitInsn(OP_ICONST_M1)
+  cm.visitInsn(OP_IRETURN)
+  close_mv(cm)
+
+  # ---- cursors ----
+  # A cursor is a UTF-16 offset into `s`, handed to Dawn as an opaque Int (a JVM
+  # long). These were vendored on `dawn.rt.StdStrings`; emitting them here keeps
+  # every string primitive backend-local (no handwritten Java in the chain), so
+  # the cursor_* builtins and code_points now share one owner. The semantics are
+  # StdStrings' verbatim, character-boundary and surrogate handling included.
+  let jchar = "java/lang/Character"
+
+  # cursor_start(s) = 0
+  let csv = open_static(cw, "cursor_start", "(Ljava/lang/String;)J")
+  csv.visitInsn(OP_LCONST_0)
+  csv.visitInsn(OP_LRETURN)
+  close_mv(csv)
+
+  # cursor_end(s) = (long) s.length()
+  let cev = open_static(cw, "cursor_end", "(Ljava/lang/String;)J")
+  cev.visitVarInsn(OP_ALOAD, 0)
+  cev.visitMethodInsn(OP_INVOKEVIRTUAL, jstr, "length", "()I", false)
+  cev.visitInsn(OP_I2L)
+  cev.visitInsn(OP_LRETURN)
+  close_mv(cev)
+
+  # cursor_done(s, c) = c < 0 || c >= s.length()
+  let cdv = open_static(cw, "cursor_done", "(Ljava/lang/String;J)Z")
+  let cd_true = Label.new()
+  cdv.visitVarInsn(OP_LLOAD, 1)
+  cdv.visitInsn(OP_LCONST_0)
+  cdv.visitInsn(OP_LCMP)
+  cdv.visitJumpInsn(OP_IFLT, cd_true)
+  cdv.visitVarInsn(OP_LLOAD, 1)
+  cdv.visitVarInsn(OP_ALOAD, 0)
+  cdv.visitMethodInsn(OP_INVOKEVIRTUAL, jstr, "length", "()I", false)
+  cdv.visitInsn(OP_I2L)
+  cdv.visitInsn(OP_LCMP)
+  cdv.visitJumpInsn(OP_IFGE, cd_true)
+  cdv.visitInsn(OP_ICONST_0)
+  cdv.visitInsn(OP_IRETURN)
+  cdv.visitLabel(cd_true)
+  cdv.visitInsn(OP_ICONST_1)
+  cdv.visitInsn(OP_IRETURN)
+  close_mv(cdv)
+
+  # cursor_char(s, c) = (c < 0 || c >= len) ? -1 : s.codePointAt((int) c)
+  let ccv = open_static(cw, "cursor_char", "(Ljava/lang/String;J)J")
+  let cc_neg = Label.new()
+  ccv.visitVarInsn(OP_LLOAD, 1)
+  ccv.visitInsn(OP_LCONST_0)
+  ccv.visitInsn(OP_LCMP)
+  ccv.visitJumpInsn(OP_IFLT, cc_neg)
+  ccv.visitVarInsn(OP_LLOAD, 1)
+  ccv.visitVarInsn(OP_ALOAD, 0)
+  ccv.visitMethodInsn(OP_INVOKEVIRTUAL, jstr, "length", "()I", false)
+  ccv.visitInsn(OP_I2L)
+  ccv.visitInsn(OP_LCMP)
+  ccv.visitJumpInsn(OP_IFGE, cc_neg)
+  ccv.visitVarInsn(OP_ALOAD, 0)
+  ccv.visitVarInsn(OP_LLOAD, 1)
+  ccv.visitInsn(OP_L2I)
+  ccv.visitMethodInsn(OP_INVOKEVIRTUAL, jstr, "codePointAt", "(I)I", false)
+  ccv.visitInsn(OP_I2L)
+  ccv.visitInsn(OP_LRETURN)
+  ccv.visitLabel(cc_neg)
+  ccv.visitInsn(OP_ICONST_M1)
+  ccv.visitInsn(OP_I2L)
+  ccv.visitInsn(OP_LRETURN)
+  close_mv(ccv)
+
+  # cursor_next(s, c): c<0 -> 0; c>=len -> len; else c + charCount(codePointAt(c))
+  let cnv = open_static(cw, "cursor_next", "(Ljava/lang/String;J)J")
+  let cn_zero = Label.new()
+  let cn_len = Label.new()
+  cnv.visitVarInsn(OP_LLOAD, 1)
+  cnv.visitInsn(OP_LCONST_0)
+  cnv.visitInsn(OP_LCMP)
+  cnv.visitJumpInsn(OP_IFLT, cn_zero)
+  cnv.visitVarInsn(OP_LLOAD, 1)
+  cnv.visitVarInsn(OP_ALOAD, 0)
+  cnv.visitMethodInsn(OP_INVOKEVIRTUAL, jstr, "length", "()I", false)
+  cnv.visitInsn(OP_I2L)
+  cnv.visitInsn(OP_LCMP)
+  cnv.visitJumpInsn(OP_IFGE, cn_len)
+  cnv.visitVarInsn(OP_LLOAD, 1)
+  cnv.visitVarInsn(OP_ALOAD, 0)
+  cnv.visitVarInsn(OP_LLOAD, 1)
+  cnv.visitInsn(OP_L2I)
+  cnv.visitMethodInsn(OP_INVOKEVIRTUAL, jstr, "codePointAt", "(I)I", false)
+  cnv.visitMethodInsn(OP_INVOKESTATIC, jchar, "charCount", "(I)I", false)
+  cnv.visitInsn(OP_I2L)
+  cnv.visitInsn(OP_LADD)
+  cnv.visitInsn(OP_LRETURN)
+  cnv.visitLabel(cn_zero)
+  cnv.visitInsn(OP_LCONST_0)
+  cnv.visitInsn(OP_LRETURN)
+  cnv.visitLabel(cn_len)
+  cnv.visitVarInsn(OP_ALOAD, 0)
+  cnv.visitMethodInsn(OP_INVOKEVIRTUAL, jstr, "length", "()I", false)
+  cnv.visitInsn(OP_I2L)
+  cnv.visitInsn(OP_LRETURN)
+  close_mv(cnv)
+
+  # cursor_prev(s, c): c<=0 -> 0; at = c>len ? len : (int)c; s.offsetByCodePoints(at, -1)
+  let cpv = open_static(cw, "cursor_prev", "(Ljava/lang/String;J)J")
+  let cp_zero = Label.new()
+  let cp_uselen = Label.new()
+  let cp_haveat = Label.new()
+  cpv.visitVarInsn(OP_LLOAD, 1)
+  cpv.visitInsn(OP_LCONST_0)
+  cpv.visitInsn(OP_LCMP)
+  cpv.visitJumpInsn(OP_IFLE, cp_zero)
+  cpv.visitVarInsn(OP_ALOAD, 0)
+  cpv.visitVarInsn(OP_LLOAD, 1)
+  cpv.visitVarInsn(OP_ALOAD, 0)
+  cpv.visitMethodInsn(OP_INVOKEVIRTUAL, jstr, "length", "()I", false)
+  cpv.visitInsn(OP_I2L)
+  cpv.visitInsn(OP_LCMP)
+  cpv.visitJumpInsn(OP_IFGT, cp_uselen)
+  cpv.visitVarInsn(OP_LLOAD, 1)
+  cpv.visitInsn(OP_L2I)
+  cpv.visitJumpInsn(OP_GOTO, cp_haveat)
+  cpv.visitLabel(cp_uselen)
+  cpv.visitVarInsn(OP_ALOAD, 0)
+  cpv.visitMethodInsn(OP_INVOKEVIRTUAL, jstr, "length", "()I", false)
+  cpv.visitLabel(cp_haveat)
+  cpv.visitInsn(OP_ICONST_M1)
+  cpv.visitMethodInsn(OP_INVOKEVIRTUAL, jstr, "offsetByCodePoints", "(II)I", false)
+  cpv.visitInsn(OP_I2L)
+  cpv.visitInsn(OP_LRETURN)
+  cpv.visitLabel(cp_zero)
+  cpv.visitInsn(OP_LCONST_0)
+  cpv.visitInsn(OP_LRETURN)
+  close_mv(cpv)
+
+  # splits_pair(s, at) = at>0 && at<len && isLowSurrogate(s.charAt((int)at))
+  let spv = open_static(cw, "splits_pair", "(Ljava/lang/String;J)Z")
+  let sp_false = Label.new()
+  spv.visitVarInsn(OP_LLOAD, 1)
+  spv.visitInsn(OP_LCONST_0)
+  spv.visitInsn(OP_LCMP)
+  spv.visitJumpInsn(OP_IFLE, sp_false)
+  spv.visitVarInsn(OP_LLOAD, 1)
+  spv.visitVarInsn(OP_ALOAD, 0)
+  spv.visitMethodInsn(OP_INVOKEVIRTUAL, jstr, "length", "()I", false)
+  spv.visitInsn(OP_I2L)
+  spv.visitInsn(OP_LCMP)
+  spv.visitJumpInsn(OP_IFGE, sp_false)
+  spv.visitVarInsn(OP_ALOAD, 0)
+  spv.visitVarInsn(OP_LLOAD, 1)
+  spv.visitInsn(OP_L2I)
+  spv.visitMethodInsn(OP_INVOKEVIRTUAL, jstr, "charAt", "(I)C", false)
+  spv.visitMethodInsn(OP_INVOKESTATIC, jchar, "isLowSurrogate", "(C)Z", false)
+  spv.visitInsn(OP_IRETURN)
+  spv.visitLabel(sp_false)
+  spv.visitInsn(OP_ICONST_0)
+  spv.visitInsn(OP_IRETURN)
+  close_mv(spv)
+
+  # cursor_slice(s, from, to): null when out of range or a cursor splits a pair,
+  # else s.substring((int)from, (int)to). from=slot1, to=slot3 (each a long).
+  let cslv = open_static(cw, "cursor_slice", "(Ljava/lang/String;JJ)Ljava/lang/String;")
+  let csl_null = Label.new()
+  cslv.visitVarInsn(OP_LLOAD, 1)
+  cslv.visitInsn(OP_LCONST_0)
+  cslv.visitInsn(OP_LCMP)
+  cslv.visitJumpInsn(OP_IFLT, csl_null)
+  cslv.visitVarInsn(OP_LLOAD, 1)
+  cslv.visitVarInsn(OP_LLOAD, 3)
+  cslv.visitInsn(OP_LCMP)
+  cslv.visitJumpInsn(OP_IFGT, csl_null)
+  cslv.visitVarInsn(OP_LLOAD, 3)
+  cslv.visitVarInsn(OP_ALOAD, 0)
+  cslv.visitMethodInsn(OP_INVOKEVIRTUAL, jstr, "length", "()I", false)
+  cslv.visitInsn(OP_I2L)
+  cslv.visitInsn(OP_LCMP)
+  cslv.visitJumpInsn(OP_IFGT, csl_null)
+  cslv.visitVarInsn(OP_ALOAD, 0)
+  cslv.visitVarInsn(OP_LLOAD, 1)
+  cslv.visitMethodInsn(OP_INVOKESTATIC, STRINGS_CLASS, "splits_pair", "(Ljava/lang/String;J)Z", false)
+  cslv.visitJumpInsn(OP_IFNE, csl_null)
+  cslv.visitVarInsn(OP_ALOAD, 0)
+  cslv.visitVarInsn(OP_LLOAD, 3)
+  cslv.visitMethodInsn(OP_INVOKESTATIC, STRINGS_CLASS, "splits_pair", "(Ljava/lang/String;J)Z", false)
+  cslv.visitJumpInsn(OP_IFNE, csl_null)
+  cslv.visitVarInsn(OP_ALOAD, 0)
+  cslv.visitVarInsn(OP_LLOAD, 1)
+  cslv.visitInsn(OP_L2I)
+  cslv.visitVarInsn(OP_LLOAD, 3)
+  cslv.visitInsn(OP_L2I)
+  cslv.visitMethodInsn(OP_INVOKEVIRTUAL, jstr, "substring", "(II)Ljava/lang/String;", false)
+  cslv.visitInsn(OP_ARETURN)
+  cslv.visitLabel(csl_null)
+  cslv.visitInsn(OP_ACONST_NULL)
+  cslv.visitInsn(OP_ARETURN)
+  close_mv(cslv)
+
+  # ---- what a walk cannot answer: the Unicode tables ----
+  #
+  # Length, trimming and the four searches used to be here as well, each a
+  # hand-written body with a second one in the C runtime and no shared
+  # definition. std/str writes them over the cursor walk now, so what is left
+  # is the two operations whose answer is a table rather than a derivation
+  # (docs/native-backend-plan.md 14.12): simple case mapping, and the six
+  # classifications.
+  #
+  # Both used to be `java/lang/Character` calls, so this backend answered from
+  # *the running JDK's* Unicode release while the C runtime answered from a
+  # generated header (case) or gave up above U+007F (classification). Unicode
+  # 15 and 16 differ by 18 cased code points and nothing said so. The tables
+  # are the compiler's now -- selfhost/src/{case,class}_table.dawn -- and both
+  # backends receive them, so a program's answer stops depending on which JDK
+  # compiled it.
+  #
+  # `String.toUpperCase` is *full* mapping, which is not a function a second
+  # backend could implement from a table at all: it is locale- and
+  # context-sensitive, and it does not preserve the code-point count (a sharp s
+  # uppercases to two letters). That belongs in a library taking a locale.
+  # Which rows ride is the caller's answer (reach.dawn): a program that never
+  # reaches case folding does not pay the mapping rows, one that never
+  # classifies skips the sets. A pruned method is absent, not stubbed -- the
+  # JVM resolves constant-pool entries lazily, so nothing notices unless the
+  # pruning was wrong, and then it is a NoSuchMethodError naming the method
+  # rather than a wrong answer. `char_is_alnum` forces letter and digit in
+  # (it calls both). The parse family stopped touching tables when the
+  # parsers became std/fmt source (audit RP-05).
+  let want_letter = u.is_letter || u.is_alnum
+  let want_digit = u.is_digit || u.is_alnum
+  var tables: List[(String, String)] = []
+  if u.str_upper { tables = tables ++ [(CASE_UPPER, case_payload(case_table.upper()))] }
+  if u.str_lower { tables = tables ++ [(CASE_LOWER, case_payload(case_table.lower()))] }
+  if want_letter { tables = tables ++ [(CLASS_LETTER, class_payload(class_table.letters()))] }
+  if want_digit { tables = tables ++ [(CLASS_DIGIT, class_payload(class_table.digits()))] }
+  if u.is_upper { tables = tables ++ [(CLASS_UPPER, class_payload(class_table.uppers()))] }
+  if u.is_lower { tables = tables ++ [(CLASS_LOWER, class_payload(class_table.lowers()))] }
+  if u.is_space { tables = tables ++ [(CLASS_SPACE, class_payload(class_table.spaces()))] }
+  for t in tables {
+    let (field, _) = t
+    cw.field(ACC_PRIVATE + ACC_STATIC + ACC_FINAL, field, "[I")
+  }
+  if len(tables) > 0 {
+    gen_decode_table(cw)
+    let ci = cw.method(ACC_STATIC, "<clinit>", "()V").expect("mv")
+    ci.visitCode()
+    for t in tables {
+      let (field, payload) = t
+      ci.visitLdcInsn(payload)
+      ci.visitMethodInsn(OP_INVOKESTATIC, STRINGS_CLASS, "decode_table",
+        "(Ljava/lang/String;)[I", false)
+      ci.visitFieldInsn(OP_PUTSTATIC, STRINGS_CLASS, field, "[I")
+    }
+    ci.visitInsn(OP_RETURN)
+    close_mv(ci)
+  }
+  if u.str_upper || u.str_lower { gen_case_lookup(cw) }
+  if want_letter || want_digit || u.is_upper || u.is_lower || u.is_space {
+    gen_class_lookup(cw)
+  }
+  if u.str_lower { gen_case_method(cw, "str_lower", CASE_LOWER) }
+  if u.str_upper { gen_case_method(cw, "str_upper", CASE_UPPER) }
+
+  # char_is_*(c): is this code point in the table's set?
+  var preds: List[(String, String)] = []
+  if want_letter { preds = preds ++ [("char_is_letter", CLASS_LETTER)] }
+  if want_digit { preds = preds ++ [("char_is_digit", CLASS_DIGIT)] }
+  if u.is_upper { preds = preds ++ [("char_is_upper", CLASS_UPPER)] }
+  if u.is_lower { preds = preds ++ [("char_is_lower", CLASS_LOWER)] }
+  if u.is_space { preds = preds ++ [("char_is_space", CLASS_SPACE)] }
+  for e in preds {
+    let (dawn_name, field) = e
+    let cv = open_static(cw, dawn_name, "(J)Z")
+    cv.visitVarInsn(OP_LLOAD, 0)
+    cv.visitInsn(OP_L2I)
+    cv.visitFieldInsn(OP_GETSTATIC, STRINGS_CLASS, field, "[I")
+    cv.visitMethodInsn(OP_INVOKESTATIC, STRINGS_CLASS, "in_ranges", "(I[I)Z", false)
+    cv.visitInsn(OP_IRETURN)
+    close_mv(cv)
+  }
+
+  # alnum has no table of its own: Java defines isLetterOrDigit as isLetter ||
+  # isDigit and the C runtime does the same, so storing a third set would be a
+  # third thing to keep in agreement with the other two.
+  if u.is_alnum {
+    let anv = open_static(cw, "char_is_alnum", "(J)Z")
+    let alnum_yes = Label.new()
+    anv.visitVarInsn(OP_LLOAD, 0)
+    anv.visitMethodInsn(OP_INVOKESTATIC, STRINGS_CLASS, "char_is_letter", "(J)Z", false)
+    anv.visitJumpInsn(OP_IFNE, alnum_yes)
+    anv.visitVarInsn(OP_LLOAD, 0)
+    anv.visitMethodInsn(OP_INVOKESTATIC, STRINGS_CLASS, "char_is_digit", "(J)Z", false)
+    anv.visitInsn(OP_IRETURN)
+    anv.visitLabel(alnum_yes)
+    anv.visitInsn(OP_ICONST_1)
+    anv.visitInsn(OP_IRETURN)
+    close_mv(anv)
+  }
+
+  cw.visitEnd()
+  cw.toByteArray().expect("bytes")
+}
+
+const CASE_HEX: String = "0123456789abcdef"
+
+## One range as the class file carries it: six hex digits each for the first
+## code point, the last, and what the first maps to. Fixed width, so the
+## decoder has no delimiter to scan; the target rather than the offset, so
+## every field is an unsigned code point and needs no sign convention.
+fn case_payload(rs: List[(Int, Int, Int)]) -> String = {
+  var parts: List[String] = []
+  for r in rs {
+    let (lo, hi, delta) = r
+    parts = parts ++ [hex6(lo), hex6(hi), hex6(lo + delta)]
+  }
+  join(parts, "")
+}
+
+## One classification range: the same fixed width, two fields instead of three.
+fn class_payload(rs: List[(Int, Int)]) -> String = {
+  var parts: List[String] = []
+  for r in rs {
+    let (lo, hi) = r
+    parts = parts ++ [hex6(lo), hex6(hi)]
+  }
+  join(parts, "")
+}
+
+fn hex6(n: Int) -> String = {
+  var s = ""
+  var v = n
+  for _i in 0 ..6 {
+    s = str.substring(CASE_HEX, v % 16, v % 16 + 1) ++ s
+    v = v / 16
+  }
+  s
+}
+
+## The static initializer's half: a payload into one flat int[]. A slice of the
+## constant is parsed in place — `Integer.parseInt(CharSequence, …)` takes
+## bounds — so this allocates the array and nothing else. Fields are the same
+## width in every table, so one decoder serves all of them; only the stride the
+## readers use differs.
+##
+## Locals: 0 the payload, 1 the field count, 2 the array, 3 the field index,
+## 4 where that field starts.
+fn gen_decode_table(cw: AdtClassWriter) -> Unit !io = {
+  let m = open_static(cw, "decode_table", "(Ljava/lang/String;)[I")
+  m.visitVarInsn(OP_ALOAD, 0)
+  m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/String", "length", "()I", false)
+  m.visitIntInsn(OP_BIPUSH, 6)
+  m.visitInsn(OP_IDIV)
+  m.visitVarInsn(OP_ISTORE, 1)
+  m.visitVarInsn(OP_ILOAD, 1)
+  m.visitIntInsn(OP_NEWARRAY, T_INT)
+  m.visitVarInsn(OP_ASTORE, 2)
+  m.visitInsn(OP_ICONST_0)
+  m.visitVarInsn(OP_ISTORE, 3)
+  let again = Label.new()
+  let out = Label.new()
+  m.visitLabel(again)
+  m.visitVarInsn(OP_ILOAD, 3)
+  m.visitVarInsn(OP_ILOAD, 1)
+  m.visitJumpInsn(OP_IF_ICMPGE, out)
+  m.visitVarInsn(OP_ILOAD, 3)
+  m.visitIntInsn(OP_BIPUSH, 6)
+  m.visitInsn(OP_IMUL)
+  m.visitVarInsn(OP_ISTORE, 4)
+  m.visitVarInsn(OP_ALOAD, 2)
+  m.visitVarInsn(OP_ILOAD, 3)
+  m.visitVarInsn(OP_ALOAD, 0)
+  m.visitVarInsn(OP_ILOAD, 4)
+  m.visitVarInsn(OP_ILOAD, 4)
+  m.visitIntInsn(OP_BIPUSH, 6)
+  m.visitInsn(OP_IADD)
+  m.visitIntInsn(OP_BIPUSH, 16)
+  m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Integer", "parseInt",
+    "(Ljava/lang/CharSequence;III)I", false)
+  m.visitInsn(OP_IASTORE)
+  m.visitIincInsn(3, 1)
+  m.visitJumpInsn(OP_GOTO, again)
+  m.visitLabel(out)
+  m.visitVarInsn(OP_ALOAD, 2)
+  m.visitInsn(OP_ARETURN)
+  close_mv(m)
+}
+
+## The range holding a code point, by binary search over the flat table: three
+## slots per range, sorted and disjoint. A code point in no range maps to
+## itself, which is most of them.
+##
+## Locals: 0 the code point, 1 the table, 2 and 3 the search bounds, 4 the
+## midpoint range, 5 where it starts in the array.
+fn gen_case_lookup(cw: AdtClassWriter) -> Unit !io = {
+  let m = open_static(cw, "case_cp", "(I[I)I")
+  m.visitInsn(OP_ICONST_0)
+  m.visitVarInsn(OP_ISTORE, 2)
+  m.visitVarInsn(OP_ALOAD, 1)
+  m.visitInsn(OP_ARRAYLENGTH)
+  m.visitInsn(OP_ICONST_3)
+  m.visitInsn(OP_IDIV)
+  m.visitVarInsn(OP_ISTORE, 3)
+  let again = Label.new()
+  let out = Label.new()
+  let above = Label.new()
+  let hit = Label.new()
+  m.visitLabel(again)
+  m.visitVarInsn(OP_ILOAD, 2)
+  m.visitVarInsn(OP_ILOAD, 3)
+  m.visitJumpInsn(OP_IF_ICMPGE, out)
+  m.visitVarInsn(OP_ILOAD, 2)
+  m.visitVarInsn(OP_ILOAD, 3)
+  m.visitInsn(OP_IADD)
+  m.visitInsn(OP_ICONST_2)
+  m.visitInsn(OP_IDIV)
+  m.visitVarInsn(OP_ISTORE, 4)
+  m.visitVarInsn(OP_ILOAD, 4)
+  m.visitInsn(OP_ICONST_3)
+  m.visitInsn(OP_IMUL)
+  m.visitVarInsn(OP_ISTORE, 5)
+  # below the range: search the left half
+  m.visitVarInsn(OP_ILOAD, 0)
+  m.visitVarInsn(OP_ALOAD, 1)
+  m.visitVarInsn(OP_ILOAD, 5)
+  m.visitInsn(OP_IALOAD)
+  m.visitJumpInsn(OP_IF_ICMPGE, above)
+  m.visitVarInsn(OP_ILOAD, 4)
+  m.visitVarInsn(OP_ISTORE, 3)
+  m.visitJumpInsn(OP_GOTO, again)
+  m.visitLabel(above)
+  # past its end: search the right half
+  m.visitVarInsn(OP_ILOAD, 0)
+  m.visitVarInsn(OP_ALOAD, 1)
+  m.visitVarInsn(OP_ILOAD, 5)
+  m.visitInsn(OP_ICONST_1)
+  m.visitInsn(OP_IADD)
+  m.visitInsn(OP_IALOAD)
+  m.visitJumpInsn(OP_IF_ICMPLE, hit)
+  m.visitVarInsn(OP_ILOAD, 4)
+  m.visitInsn(OP_ICONST_1)
+  m.visitInsn(OP_IADD)
+  m.visitVarInsn(OP_ISTORE, 2)
+  m.visitJumpInsn(OP_GOTO, again)
+  m.visitLabel(hit)
+  # inside it: the same offset from the range's start as from its target
+  m.visitVarInsn(OP_ILOAD, 0)
+  m.visitVarInsn(OP_ALOAD, 1)
+  m.visitVarInsn(OP_ILOAD, 5)
+  m.visitInsn(OP_IALOAD)
+  m.visitInsn(OP_ISUB)
+  m.visitVarInsn(OP_ALOAD, 1)
+  m.visitVarInsn(OP_ILOAD, 5)
+  m.visitInsn(OP_ICONST_2)
+  m.visitInsn(OP_IADD)
+  m.visitInsn(OP_IALOAD)
+  m.visitInsn(OP_IADD)
+  m.visitInsn(OP_IRETURN)
+  m.visitLabel(out)
+  m.visitVarInsn(OP_ILOAD, 0)
+  m.visitInsn(OP_IRETURN)
+  close_mv(m)
+}
+
+## Whether a code point is in a set, by binary search over the flat table: two
+## slots per range, sorted and disjoint. Same shape as `case_cp` with the third
+## slot and the arithmetic taken out.
+##
+## Locals: 0 the code point, 1 the table, 2 and 3 the search bounds, 4 the
+## midpoint range, 5 where it starts in the array.
+fn gen_class_lookup(cw: AdtClassWriter) -> Unit !io = {
+  let m = open_static(cw, "in_ranges", "(I[I)Z")
+  m.visitInsn(OP_ICONST_0)
+  m.visitVarInsn(OP_ISTORE, 2)
+  m.visitVarInsn(OP_ALOAD, 1)
+  m.visitInsn(OP_ARRAYLENGTH)
+  m.visitInsn(OP_ICONST_2)
+  m.visitInsn(OP_IDIV)
+  m.visitVarInsn(OP_ISTORE, 3)
+  let again = Label.new()
+  let miss = Label.new()
+  let hit = Label.new()
+  let above = Label.new()
+  m.visitLabel(again)
+  m.visitVarInsn(OP_ILOAD, 2)
+  m.visitVarInsn(OP_ILOAD, 3)
+  m.visitJumpInsn(OP_IF_ICMPGE, miss)
+  m.visitVarInsn(OP_ILOAD, 2)
+  m.visitVarInsn(OP_ILOAD, 3)
+  m.visitInsn(OP_IADD)
+  m.visitInsn(OP_ICONST_2)
+  m.visitInsn(OP_IDIV)
+  m.visitVarInsn(OP_ISTORE, 4)
+  m.visitVarInsn(OP_ILOAD, 4)
+  m.visitInsn(OP_ICONST_2)
+  m.visitInsn(OP_IMUL)
+  m.visitVarInsn(OP_ISTORE, 5)
+  # below the range: search the left half
+  m.visitVarInsn(OP_ILOAD, 0)
+  m.visitVarInsn(OP_ALOAD, 1)
+  m.visitVarInsn(OP_ILOAD, 5)
+  m.visitInsn(OP_IALOAD)
+  m.visitJumpInsn(OP_IF_ICMPGE, above)
+  m.visitVarInsn(OP_ILOAD, 4)
+  m.visitVarInsn(OP_ISTORE, 3)
+  m.visitJumpInsn(OP_GOTO, again)
+  m.visitLabel(above)
+  # past its end: search the right half; otherwise it is inside this one
+  m.visitVarInsn(OP_ILOAD, 0)
+  m.visitVarInsn(OP_ALOAD, 1)
+  m.visitVarInsn(OP_ILOAD, 5)
+  m.visitInsn(OP_ICONST_1)
+  m.visitInsn(OP_IADD)
+  m.visitInsn(OP_IALOAD)
+  m.visitJumpInsn(OP_IF_ICMPLE, hit)
+  m.visitVarInsn(OP_ILOAD, 4)
+  m.visitInsn(OP_ICONST_1)
+  m.visitInsn(OP_IADD)
+  m.visitVarInsn(OP_ISTORE, 2)
+  m.visitJumpInsn(OP_GOTO, again)
+  m.visitLabel(hit)
+  m.visitInsn(OP_ICONST_1)
+  m.visitInsn(OP_IRETURN)
+  m.visitLabel(miss)
+  m.visitInsn(OP_ICONST_0)
+  m.visitInsn(OP_IRETURN)
+  close_mv(m)
+}
+
+## One of the two case foldings, as a walk mapping each code point through
+## `field` -- the *simple* mapping, out of the compiler's table.
+##
+## Locals: 0 the string, 1 the builder, 2 the UTF-16 offset, 3 the code point.
+fn gen_case_method(cw: AdtClassWriter, name: String, field: String) -> Unit !io = {
+  let jstr = "java/lang/String"
+  let m = open_static(cw, name, "(Ljava/lang/String;)Ljava/lang/String;")
+  m.visitTypeInsn(OP_NEW, SB)
+  m.visitInsn(OP_DUP)
+  m.visitMethodInsn(OP_INVOKESPECIAL, SB, "<init>", "()V", false)
+  m.visitVarInsn(OP_ASTORE, 1)
+  m.visitInsn(OP_ICONST_0)
+  m.visitVarInsn(OP_ISTORE, 2)
+  let again = Label.new()
+  let out = Label.new()
+  m.visitLabel(again)
+  m.visitVarInsn(OP_ILOAD, 2)
+  m.visitVarInsn(OP_ALOAD, 0)
+  m.visitMethodInsn(OP_INVOKEVIRTUAL, jstr, "length", "()I", false)
+  m.visitJumpInsn(OP_IF_ICMPGE, out)
+  m.visitVarInsn(OP_ALOAD, 0)
+  m.visitVarInsn(OP_ILOAD, 2)
+  m.visitMethodInsn(OP_INVOKEVIRTUAL, jstr, "codePointAt", "(I)I", false)
+  m.visitVarInsn(OP_ISTORE, 3)
+  m.visitVarInsn(OP_ALOAD, 1)
+  m.visitVarInsn(OP_ILOAD, 3)
+  m.visitFieldInsn(OP_GETSTATIC, STRINGS_CLASS, field, "[I")
+  m.visitMethodInsn(OP_INVOKESTATIC, STRINGS_CLASS, "case_cp", "(I[I)I", false)
+  m.visitMethodInsn(OP_INVOKEVIRTUAL, SB, "appendCodePoint", "(I)L" ++ SB ++ ";", false)
+  m.visitInsn(OP_POP)
+  m.visitVarInsn(OP_ILOAD, 2)
+  m.visitVarInsn(OP_ILOAD, 3)
+  m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Character", "charCount", "(I)I", false)
+  m.visitInsn(OP_IADD)
+  m.visitVarInsn(OP_ISTORE, 2)
+  m.visitJumpInsn(OP_GOTO, again)
+  m.visitLabel(out)
+  m.visitVarInsn(OP_ALOAD, 1)
+  m.visitMethodInsn(OP_INVOKEVIRTUAL, SB, "toString", "()Ljava/lang/String;", false)
+  m.visitInsn(OP_ARETURN)
+  close_mv(m)
+}
+
+fn open_static(cw: AdtClassWriter, name: String, desc: String) -> MethodVisitor !io = {
+  let m = cw.method(ACC_PUBLIC + ACC_STATIC, name, desc).expect("mv")
+  m.visitCode()
+  m
+}
+
+pub fn close_mv(m: MethodVisitor) -> Unit !io = {
+  m.visitMaxs(0, 0)
+  m.visitEnd()
+  ()
+}
+
+## Push the Unit singleton. There is one of them, so this is how a Unit value
+## comes into existence anywhere on the JVM.
+pub fn push_unit(m: MethodVisitor) -> Unit !io = {
+  m.visitFieldInsn(OP_GETSTATIC, UNIT_CLASS, "INSTANCE", "L" ++ UNIT_CLASS ++ ";")
+  ()
+}
+
+## `return ()` for a hand-assembled runtime static whose Dawn signature says
+## `-> Unit`: the call site asks `method_desc` for the descriptor, so these
+## have to hand back a reference like every other Unit-returning body.
+fn return_unit(m: MethodVisitor) -> Unit !io = {
+  push_unit(m)
+  m.visitInsn(OP_ARETURN)
+  ()
+}
+
+## The per-trait dictionary interface name: dawn/tr/<owner$…$>Name.
+pub fn owner_prefix(owner: Option[String]) -> String =
+  match owner {
+    Some(o) -> join(str.split(o, "/"), "$") ++ "$"
+    None -> ""
+  }
+
+pub fn tr_iface(owner: Option[String], name: String) -> String =
+  "dawn/tr/" ++ owner_prefix(owner) ++ name
+
+## A java.util.Comparator over a Dawn two-argument cmp function; emit_cmp
+## receives (source, a, b) on the stack and leaves the long comparison result.
+fn gen_comparator_class(
+  supers: List[String],
+  cls: String,
+  src_desc: String,
+  emit_cmp: fn(MethodVisitor) -> Unit !io
+) -> Bytes !io = {
+  let cw = AdtClassWriter.new(supers)
+  cw.beginWithInterface(V17, ACC_PUBLIC + ACC_FINAL, cls, obj(), "java/util/Comparator")
+  cw.field(ACC_PRIVATE + ACC_FINAL, "src", src_desc)
+  let init = cw.method(ACC_PUBLIC, "<init>", "(" ++ src_desc ++ ")V").expect("mv")
+  init.visitCode()
+  init.visitVarInsn(OP_ALOAD, 0)
+  init.visitMethodInsn(OP_INVOKESPECIAL, obj(), "<init>", "()V", false)
+  init.visitVarInsn(OP_ALOAD, 0)
+  init.visitVarInsn(OP_ALOAD, 1)
+  init.visitFieldInsn(OP_PUTFIELD, cls, "src", src_desc)
+  init.visitInsn(OP_RETURN)
+  init.visitMaxs(0, 0)
+  init.visitEnd()
+  let m = cw.method(ACC_PUBLIC, "compare", "(Ljava/lang/Object;Ljava/lang/Object;)I").expect("mv")
+  m.visitCode()
+  m.visitVarInsn(OP_ALOAD, 0)
+  m.visitFieldInsn(OP_GETFIELD, cls, "src", src_desc)
+  m.visitVarInsn(OP_ALOAD, 1)
+  m.visitVarInsn(OP_ALOAD, 2)
+  emit_cmp(m)
+  m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Long", "signum", "(J)I", false)
+  m.visitInsn(OP_IRETURN)
+  m.visitMaxs(0, 0)
+  m.visitEnd()
+  cw.visitEnd()
+  cw.toByteArray().expect("bytes")
+}
+
+pub fn gen_fn_comparator(supers: List[String]) -> Bytes !io =
+  gen_comparator_class(supers, FN_CMP_CLASS, "L" ++ fn_iface(2) ++ ";", (m: MethodVisitor) => {
+    m.visitMethodInsn(OP_INVOKEINTERFACE, fn_iface(2), "apply", erased_apply_desc(2), true)
+    m.visitTypeInsn(OP_CHECKCAST, "java/lang/Long")
+    m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/Long", "longValue", "()J", false)
+    ()
+  })
+
+## The prelude Ord trait interface (one erased cmp method).
+pub fn gen_ord_interface(supers: List[String]) -> Bytes !io = {
+  let cw = AdtClassWriter.new(supers)
+  cw.begin(V17, ACC_PUBLIC + ACC_ABSTRACT + ACC_INTERFACE, tr_iface(None, "Ord"), obj())
+  let m = cw.method(ACC_PUBLIC + ACC_ABSTRACT, "cmp",
+    "(Ljava/lang/Object;Ljava/lang/Object;)J").expect("mv")
+  m.visitEnd()
+  cw.visitEnd()
+  cw.toByteArray().expect("bytes")
+}
