@@ -238,6 +238,12 @@ pub type Ty =
 # order and rendering. The only thing `id` buys is that outside the declaring
 # module the checker refuses to confuse the two.
   | TyOpaque(id: Int, name: String, owner: String, target: Ty)
+# a projection `T.Item` (docs/assoc-types-design.md): an associated type read
+# off the impl chosen for `subject`. Canonical-form invariant: a ground type
+# never contains one -- reduction is eager (D3), so a projection only survives
+# over a rigid type variable. Everything downstream of reduction (dict keys,
+# descriptors, C reprs) panics on this variant rather than handling it.
+  | TyAssoc(subject: Ty, trait_id: Int, name: String)
   | TyTuple(elems: List[Ty])
   | TyFn(params: List[Ty], ret: Ty, eff: Eff)
 
@@ -294,6 +300,9 @@ pub fn is_ref_ty(t: Ty) -> Bool =
     TySet(_) -> true
     TyArray(_) -> true
     TyJava(_, _) -> true
+    # only alive over a rigid subject (canonical-form invariant), where it is
+    # an erased reference slot exactly like the TyVar it projects from
+    TyAssoc(_, _, _) -> true
   }
 
 ## The ADT id lowering's `dict_ty()` stamps on dictionary values: no real ADT
@@ -390,6 +399,7 @@ pub fn ty_show(adts: Adts, t: Ty) -> String =
     TyFn(params, ret, eff) ->
       "fn(" ++ join(map(params, x => ty_show(adts, x)), ", ") ++ ") -> " ++
       ty_show(adts, ret) ++ eff_suffix(eff)
+    TyAssoc(s, _, n) -> ty_show(adts, s) ++ "." ++ n
   }
 
 ## Render a constructor like Kotlin CtorInfo.render (used in diagnostics).
@@ -424,6 +434,10 @@ pub fn subst(t: Ty, m: Map[Int, Ty], em: Map[Int, Eff]) -> Ty =
     TyArray(e) -> TyArray(subst(e, m, em))
     TyTuple(elems) -> TyTuple(map(elems, x => subst(x, m, em)))
     TyOpaque(id, n, ow, tgt) -> TyOpaque(id, n, ow, subst(tgt, m, em))
+    # substitution is structural only: a subject that just became concrete is
+    # reduced by the checker's reduce_assoc at the instantiation choke point,
+    # because reduction needs the impl table this module does not have
+    TyAssoc(s, tid, n) -> TyAssoc(subst(s, m, em), tid, n)
     TyFn(params, ret, eff) ->
       TyFn(map(params, x => subst(x, m, em)), subst(ret, m, em), subst_eff(eff, em))
     # nothing to walk into. Spelled out rather than left to a wildcard: a new
@@ -533,7 +547,11 @@ pub type TraitI = {
   owner: Option[String],
   src_path: Option[String],
   # methods by name, in declaration order
-  methods: List[(String, MethodSig)]
+  methods: List[(String, MethodSig)],
+  # associated type members, in declaration order (bare names: no bounds, no
+  # defaults -- docs/assoc-types-design.md D1). The name has no module-level
+  # identity; `T.Item` is the only way to reach it.
+  assoc: List[String]
 }
 
 ## What an impl is indexed by: the outermost type constructor of its subject,
@@ -703,7 +721,12 @@ pub type ImplI = {
   derived: Bool,
   owner: Option[String],
   src_path: Option[String],
-  provided: List[String]
+  provided: List[String],
+  # `type Item = X` bindings, one per associated type the trait declares
+  # (checked for exactly-once coverage at registration). The RHS is resolved
+  # in the scope of `tparams`; reduction instantiates it with the same
+  # substitution the witness gets (docs/assoc-types-design.md D4/D5).
+  assoc_bindings: List[(String, Ty)]
 }
 
 pub alias Traits = Map[Int, TraitI]
@@ -897,7 +920,8 @@ fn prelude_trait(tid: Int, name: String, tv: Ty, m: String, sig: Sig) -> TraitI 
     is_pub: true,
     owner: None,
     src_path: None,
-    methods: [(m, MethodSig { sig: sig, has_default: false })]
+    methods: [(m, MethodSig { sig: sig, has_default: false })],
+    assoc: []
   }
 
 ## The prelude traits: Ord (id 0) whose `cmp` backs `< <= > >=` beyond scalars,
@@ -925,7 +949,8 @@ pub fn prelude_traits() -> Traits = {
     is_pub: true,
     owner: None,
     src_path: None,
-    methods: [("cmp", MethodSig { sig: cmp_sig, has_default: false })]
+    methods: [("cmp", MethodSig { sig: cmp_sig, has_default: false })],
+    assoc: []
   }
   let ev = TyVar("T", -14)
   let eq = prelude_trait(EQ_ID, "Eq", ev, "eq",
@@ -950,7 +975,8 @@ fn prelude_impl(tid: Int, t: Ty) -> ImplI =
     derived: false,
     owner: None,
     src_path: None,
-    provided: []
+    provided: [],
+    assoc_bindings: []
   }
 
 ## A conditional prelude impl: `impl[T: tid] tid[Head[T]]`, one bound per
@@ -970,7 +996,8 @@ fn prelude_cond_impl(tid: Int, subject: Ty, tps: List[Ty]) -> ImplI = {
     derived: true,
     owner: None,
     src_path: None,
-    provided: []
+    provided: [],
+    assoc_bindings: []
   }
 }
 

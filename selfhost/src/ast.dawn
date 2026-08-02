@@ -17,6 +17,11 @@ pub type TypeRef =
 # a module-qualified type: `m.T[...]` where `m` is a `use ... as m` alias
 # (LANG-06; the alias namespace is separate from values, spec §10.3)
   | TQual(qual: String, name: String, args: List[TypeRef], lo: Int, hi: Int)
+# a projection `T.Item` (docs/assoc-types-design.md D2): both names uppercase,
+# which no other type form starts with, so the shape is unambiguous. The
+# subject is a bare name -- the checker requires it to resolve to a type
+# parameter whose bounds declare `name`.
+  | TAssoc(subject: String, name: String, lo: Int, hi: Int)
   | TTuple(elems: List[TypeRef], lo: Int, hi: Int)
   | TFn(params: List[TypeRef], ret: TypeRef, effs: List[String], lo: Int, hi: Int)
 
@@ -277,6 +282,14 @@ pub type Stmt =
 
 # ---- declarations ----
 
+## `type Item` in a trait body: a bare associated type declaration
+## (docs/assoc-types-design.md D1 -- no bounds, no default).
+pub type AssocDecl = { name: String, lo: Int, hi: Int, nlo: Int, nhi: Int }
+
+## `type Item = X` in an impl body: the binding an impl owes for each
+## associated type its trait declares.
+pub type AssocBind = { name: String, tref: TypeRef, lo: Int, hi: Int, nlo: Int, nhi: Int }
+
 pub type TraitMethod = {
   name: String,
   params: List[Param],
@@ -364,6 +377,7 @@ pub type Decl =
     tplo: Int,
     tphi: Int,
     methods: List[TraitMethod],
+    assoc: List[AssocDecl],
     is_pub: Bool,
     lo: Int,
     hi: Int,
@@ -378,6 +392,7 @@ pub type Decl =
     thi: Int,
     subject: TypeRef,
     methods: List[FnDecl],
+    assoc: List[AssocBind],
     lo: Int,
     hi: Int
   )
@@ -463,6 +478,7 @@ pub fn t_lo(t: TypeRef) -> Int =
   match t {
     TNamed(_, _, lo, _) -> lo
     TQual(_, _, _, lo, _) -> lo
+    TAssoc(_, _, lo, _) -> lo
     TTuple(_, lo, _) -> lo
     TFn(_, _, _, lo, _) -> lo
   }
@@ -471,6 +487,7 @@ pub fn t_hi(t: TypeRef) -> Int =
   match t {
     TNamed(_, _, _, hi) -> hi
     TQual(_, _, _, _, hi) -> hi
+    TAssoc(_, _, _, hi) -> hi
     TTuple(_, _, hi) -> hi
     TFn(_, _, _, _, hi) -> hi
   }
@@ -571,6 +588,7 @@ pub type TraitView = {
   tplo: Int,
   tphi: Int,
   methods: List[TraitMethod],
+  assoc: List[AssocDecl],
   is_pub: Bool,
   lo: Int,
   hi: Int,
@@ -582,13 +600,14 @@ pub fn module_traits(m: Module) -> List[TraitView] = {
   var out: List[TraitView] = []
   for d in m.decls {
     match d {
-      DTrait(name, tp, tplo, tphi, methods, is_pub, lo, hi, nlo, nhi) -> {
+      DTrait(name, tp, tplo, tphi, methods, assoc, is_pub, lo, hi, nlo, nhi) -> {
         out = out ++ [TraitView {
           name: name,
           tp: tp,
           tplo: tplo,
           tphi: tphi,
           methods: methods,
+          assoc: assoc,
           is_pub: is_pub,
           lo: lo,
           hi: hi,
@@ -609,6 +628,7 @@ pub type ImplView = {
   thi: Int,
   subject: TypeRef,
   methods: List[FnDecl],
+  assoc: List[AssocBind],
   lo: Int,
   hi: Int
 }
@@ -617,7 +637,7 @@ pub fn module_impls(m: Module) -> List[ImplView] = {
   var out: List[ImplView] = []
   for d in m.decls {
     match d {
-      DImpl(tparams, trait_name, tlo, thi, subject, methods, lo, hi) -> {
+      DImpl(tparams, trait_name, tlo, thi, subject, methods, assoc, lo, hi) -> {
         out = out ++ [ImplView {
           tparams: tparams,
           trait_name: trait_name,
@@ -625,6 +645,7 @@ pub fn module_impls(m: Module) -> List[ImplView] = {
           thi: thi,
           subject: subject,
           methods: methods,
+          assoc: assoc,
           lo: lo,
           hi: hi
         }]

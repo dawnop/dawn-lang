@@ -18,7 +18,7 @@ use std/set
 use types.{
   intr_at, Rt, RtStrings, RtBytes, RtArray, RtIo, peel_opaque, cast_target,
   Ty, TyInt, TyFloat, TyBool, TyString, TyBytes, TyUnit, TyNever,
-  TyError, TyVar, TyAdt, TyList, TyMap, TySet, TyArray, TyJava, TyTuple, TyFn,
+  TyError, TyVar, TyAssoc, TyAdt, TyList, TyMap, TySet, TyArray, TyJava, TyTuple, TyFn,
   Adts, AdtI, CtorI, FieldI, adt_of, adt_jvm_name, ctor_jvm_name,
   Sym, Sig, Eff, eff_labels, Traits, TraitI, MethodSig, ImplI, trait_of, ORD_ID, EQ_ID, HASH_ID,
   builtins,
@@ -255,8 +255,9 @@ fn unerase(g: Gen, t: Ty) -> Unit !io = {
     TyJava(fqcn, _) -> { m.visitTypeInsn(OP_CHECKCAST, internal_of(fqcn)) }
     TyFn(params, _, _) -> { m.visitTypeInsn(OP_CHECKCAST, fn_iface(len(params))) }
     TyUnit -> { m.visitTypeInsn(OP_CHECKCAST, UNIT_CLASS) }
-    # TyVar is already erased, and the two bottom types carry no value
-    TyVar(_, _) | TyNever | TyError -> ()
+    # TyVar (and a projection over one) is already erased, and the two
+    # bottom types carry no value
+    TyVar(_, _) | TyAssoc(_, _, _) | TyNever | TyError -> ()
   }
   ()
 }
@@ -289,7 +290,7 @@ fn unerase_class(adts: Adts, t: Ty) -> String =
     TyJava(fqcn, _) -> internal_of(fqcn)
     TyFn(params, _, _) -> fn_iface(len(params))
     TyUnit -> UNIT_CLASS
-    TyVar(_, _) | TyNever | TyError -> obj()
+    TyVar(_, _) | TyAssoc(_, _, _) | TyNever | TyError -> obj()
   }
 
 fn pop_value(g: Gen, t: Ty) -> Unit !io = {
@@ -424,6 +425,7 @@ fn subst_subject(tr: TraitI, s: Sig, subject: Ty) -> Sig = {
 fn subst_tvar(t: Ty, vid: Int, to: Ty) -> Ty =
   match t {
     TyVar(_, v) -> if v == vid { to } else { t }
+    TyAssoc(s, tid, n) -> TyAssoc(subst_tvar(s, vid, to), tid, n)
     TyOpaque(id, n, ow, tgt) -> TyOpaque(id, n, ow, subst_tvar(tgt, vid, to))
     TyList(e) -> TyList(subst_tvar(e, vid, to))
     TyMap(k, v2) -> TyMap(subst_tvar(k, vid, to), subst_tvar(v2, vid, to))

@@ -29,7 +29,8 @@ use token.{
   keyword
 }
 use ast.{
-  TypeRef, TNamed, TQual, TTuple, TFn, Bound, TypeParamDecl, Param, LambdaParam,
+  TypeRef, TNamed, TQual, TAssoc, TTuple, TFn, Bound, TypeParamDecl, Param, LambdaParam,
+  AssocDecl, AssocBind,
   FieldDecl, CtorDecl, ImportName, StrPart, SPText, SPInterp,
   BinOp, OpAdd, OpSub, OpMul, OpDiv, OpMod, OpConcat, OpEq, OpNeq, OpLt, OpLe,
   OpGt, OpGe, OpAnd, OpOr, OpBand, OpBor, OpBxor, OpShl, OpShr, OpUshr,
@@ -708,17 +709,46 @@ fn trait_decl(p: P, st: St, is_pub: Bool) -> PR[Decl] = {
   let (st7, _) = want(p, st6, LBRACE, "`{` (the trait body)")?
   var st8 = skip_nl(p, st7)
   var methods: List[TraitMethod] = []
+  var assoc: List[AssocDecl] = []
   while not at_kind(p, st8, RBRACE) && not at_kind(p, st8, EOF) {
-    let (st9, m) = trait_method(p, st8)?
-    methods = methods ++ [m]
-    st8 = want_sep(p, st9)?
+    if at_kind(p, st8, TYPE) {
+      let (st9, a) = trait_assoc(p, st8)?
+      assoc = assoc ++ [a]
+      st8 = want_sep(p, st9)?
+    } else {
+      let (st9, m) = trait_method(p, st8)?
+      methods = methods ++ [m]
+      st8 = want_sep(p, st9)?
+    }
   }
   let (st10, close) = want(p, st8, RBRACE, "`}`")?
   if len(methods) == 0 {
     return Err((st10, pd("a trait must declare at least one method", kw.lo, close.hi)))
   }
-  Ok((st10, DTrait(name.text, tp.text, tp.lo, tp.hi, methods, is_pub,
+  Ok((st10, DTrait(name.text, tp.text, tp.lo, tp.hi, methods, assoc, is_pub,
     kw.lo, close.hi, name.lo, name.hi)))
+}
+
+## `type Item` -- an associated type member, bare on purpose: no bounds, no
+## default (assoc-types-design.md D1).
+fn trait_assoc(p: P, st: St) -> PR[AssocDecl] = {
+  let (st1, kw) = want(p, st, TYPE, "`type`")?
+  let (st2, name_tok) = want(p, st1, TYPEIDENT, "an associated type name (uppercase)")?
+  if at_kind(p, st2, COLON) {
+    return Err((st2, perr_h(p, st2, "an associated type cannot declare bounds",
+      "`type " ++ name_tok.text ++ "` is the whole declaration; the impl chooses the type")))
+  }
+  if at_kind(p, st2, EQ) {
+    return Err((st2, perr_h(p, st2, "an associated type has no default",
+      "the `= Type` binding belongs in each impl, not in the trait")))
+  }
+  Ok((st2, AssocDecl {
+    name: name_tok.text,
+    lo: kw.lo,
+    hi: name_tok.hi,
+    nlo: name_tok.lo,
+    nhi: name_tok.hi
+  }))
 }
 
 ## fn cmp(a: T, b: T) -> Int [!io] [= default-body]
@@ -850,17 +880,42 @@ fn impl_decl(p: P, st: St) -> PR[Decl] = {
   let (st7, _) = want(p, st6, LBRACE, "`{` (the impl body)")?
   var st8 = skip_nl(p, st7)
   var methods: List[FnDecl] = []
+  var assoc: List[AssocBind] = []
   while not at_kind(p, st8, RBRACE) && not at_kind(p, st8, EOF) {
     if at_kind(p, st8, PUB) {
       return Err((st8, perr(p, st8, "impl methods cannot be pub (their visibility follows the trait)")))
     }
-    let (st9, m) = fn_decl(p, st8, false, true)?
-    methods = methods ++ [m]
-    st8 = want_sep(p, st9)?
+    if at_kind(p, st8, TYPE) {
+      let (st9, a) = impl_assoc(p, st8)?
+      assoc = assoc ++ [a]
+      st8 = want_sep(p, st9)?
+    } else {
+      let (st9, m) = fn_decl(p, st8, false, true)?
+      methods = methods ++ [m]
+      st8 = want_sep(p, st9)?
+    }
   }
   let (st10, close) = want(p, st8, RBRACE, "`}`")?
   Ok((st10, DImpl(tparams, trait_tok.text, trait_tok.lo, trait_tok.hi, subject, methods,
-    kw.lo, close.hi)))
+    assoc, kw.lo, close.hi)))
+}
+
+## `type Item = X` -- the binding an impl owes for each associated type its
+## trait declares. The RHS is resolved in the scope of the impl's own tparams.
+fn impl_assoc(p: P, st: St) -> PR[AssocBind] = {
+  let (st1, kw) = want(p, st, TYPE, "`type`")?
+  let (st2, name_tok) = want(p, st1, TYPEIDENT, "an associated type name (uppercase)")?
+  let (st3, _) = want(p, st2, EQ,
+    "`=` (an impl binds each associated type: type " ++ name_tok.text ++ " = Int)")?
+  let (st4, tref) = type_ref(p, st3)?
+  Ok((st4, AssocBind {
+    name: name_tok.text,
+    tref: tref,
+    lo: kw.lo,
+    hi: t_hi(tref),
+    nlo: name_tok.lo,
+    nhi: name_tok.hi
+  }))
 }
 
 # ---- type references ----
@@ -879,8 +934,22 @@ fn type_ref(p: P, st: St) -> PR[TypeRef] = {
     return Ok((stq3, TQual(q.text, t.text, args, q.lo, hi)))
   }
   let (st1, t) = want(p, st, TYPEIDENT, "a type name (uppercase)")?
+  # `T.Item` -- a projection (assoc-types-design.md D2). Only a bare uppercase
+  # name may be the subject; after `Foo[..]` a `.` is refused here rather than
+  # parsed, so the restriction is visible at the spelling and not two passes
+  # later.
+  if at_kind(p, st1, DOT) {
+    let st2 = adv1(p, st1)
+    let (st3, mem) = want(p, st2, TYPEIDENT, "an associated type name (uppercase)")?
+    return Ok((st3, TAssoc(t.text, mem.text, t.lo, mem.hi)))
+  }
   let (st2, pr) = type_args(p, st1, t.hi)?
   let (args, hi) = pr
+  if at_kind(p, st2, DOT) && len(args) > 0 {
+    return Err((st2, perr_h(p, st2, "a projection's subject must be a bare type parameter",
+      "write `T.Item` where `T` carries the trait bound; `" ++ t.text ++
+        "[..].Item` is not supported")))
+  }
   if len(args) == 0 {
     Ok((st2, TNamed(t.text, [], t.lo, t.hi)))
   } else {
