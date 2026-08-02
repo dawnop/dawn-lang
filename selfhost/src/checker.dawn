@@ -11,7 +11,6 @@ use std/str
 use std/list
 use std/map
 use std/set
-use token.{Diag}
 use ast.{
   TypeRef, TNamed, TQual, TAssoc, TTuple, TFn, Bound, TypeParamDecl, Module,
   module_java_uses, module_fns, module_types, module_consts, module_traits,
@@ -52,8 +51,8 @@ use types.{
   adt_of, trait_of, ty_show, ctor_render, sig_render, subst, subst_eff, eff_show,
   reduce_via_bindings,
   ty_named, is_numeric, is_errorish, peel_opaque,
-  prelude_adts, prelude_traits, prelude_impls, bounds_of,
-  prelude_trait_ids, prelude_trait_names, is_prelude_trait_name, first_minted_id,
+  prelude_traits, prelude_impls, bounds_of,
+  prelude_trait_ids, prelude_trait_names, is_prelude_trait_name,
   builtins, opt_ty, result_ty, OPTION_ID, RESULT_ID, FOREIGN_ERROR_ID,
   ORD_ID, EQ_ID, HASH_ID, SHOW_ID, ITER_ID, INDEX_ID,
   eq_scalars, hash_scalars,
@@ -67,38 +66,18 @@ use exhaustive.{
 }
 use cx.{
   AliasE, Cx, LambdaCx, ModExports, Origin, OPrelude, OImport, OLocal,
-  cx_new, test_cx
+  cx_new, test_cx,
+  cerr, cerr_h, cerr_o, fresh, alias_shadow, effect_of, resolve_eff_at,
+  resolve_alias_target, resolve_type, is_const_serializable, no_sig
 }
 use suggest
 use parser
 
-# ---- diagnostics ----
-
-pub fn cerr(cx: Cx, msg: String, lo: Int, hi: Int) -> Cx =
-  Cx { ..cx, diags: cx.diags ++ [Diag { msg: msg, lo: lo, hi: hi, hint: "" }] }
-
-pub fn cerr_h(cx: Cx, msg: String, lo: Int, hi: Int, hint: String) -> Cx =
-  Cx { ..cx, diags: cx.diags ++ [Diag { msg: msg, lo: lo, hi: hi, hint: hint }] }
-
-## An error with an optional hint (the Kotlin `sink.error(msg, span, hint?)`).
-pub fn cerr_o(cx: Cx, msg: String, lo: Int, hi: Int, hint: Option[String]) -> Cx =
-  match hint {
-    Some(h) -> cerr_h(cx, msg, lo, hi, h)
-    None -> cerr(cx, msg, lo, hi)
-  }
-
 # ---- fresh ids ----
-
-pub fn fresh(cx: Cx) -> (Cx, Int) = (Cx { ..cx, next_id: cx.next_id + 1 }, cx.next_id)
 
 pub fn fresh_tvar(cx: Cx, name: String) -> (Cx, Ty) = {
   let (cx1, id) = fresh(cx)
   (cx1, TyVar(name, id))
-}
-
-pub fn fresh_effvar(cx: Cx, name: String) -> (Cx, Eff) = {
-  let (cx1, id) = fresh(cx)
-  (cx1, EffVar(name, id))
 }
 
 # ---- scopes and symbols ----
@@ -155,14 +134,6 @@ pub fn local_names(cx: Cx) -> List[String] = {
   for sc in cx.scopes { out = out ++ map.keys(sc) }
   out
 }
-
-## A local declaration may not shadow a whole-module alias (spec §10.3).
-pub fn alias_shadow(cx: Cx, name: String, lo: Int, hi: Int) -> Cx =
-  match map.get(cx.module_aliases, name) {
-    None -> cx
-    Some(mod_path) -> cerr_h(cx, "`" ++ name ++ "` shadows the imported module `" ++ mod_path ++ "`",
-      lo, hi, "an imported module's alias and your names share one namespace; rename one")
-  }
 
 ## Was a top-level name already shadowing an alias / clashing with an import?
 pub fn alias_shadows(cx: Cx, name: String) -> Bool = map.has(cx.module_aliases, name)
@@ -357,23 +328,12 @@ pub fn record_effect(cx: Cx, e: Eff, lo: Int, hi: Int, name: String) -> Cx = {
   }
 }
 
-## The declared effect behind an id (the table is grafted across modules the
-## way the ADT table is).
-pub fn effect_of(cx: Cx, id: Int) -> EffectI =
-  match map.get(cx.effect_infos, id) {
-    Some(e) -> e
-    None -> panic("unknown effect id: ${id}")
-  }
-
 ## The name of the local that carries an effect's evidence. It is minted from
 ## the id, not just the name, so two modules declaring the same effect name
 ## cannot shadow each other's evidence; `$` keeps it unspellable, so nothing a
 ## user writes can bind or read it.
 pub fn ev_local_name(cx: Cx, id: Int) -> String =
   "ev\$" ++ to_string(id) ++ "\$" ++ effect_of(cx, id).name
-
-## A row carrying exactly one declared effect.
-pub fn label_eff(cx: Cx, id: Int) -> Eff = ELabeled(EPure, [(id, effect_of(cx, id).name)])
 
 ## Resolve parsed effect atoms into a normalized Eff, interning variables per
 ## signature (the Kotlin resolveEff over currentEffVars).
@@ -385,43 +345,6 @@ pub fn label_eff(cx: Cx, id: Int) -> Eff = ELabeled(EPure, [(id, effect_of(cx, i
 ## variable named `Ask`, which is never what the author meant, so it reports.
 pub fn resolve_eff(cx: Cx, atoms: List[String]) -> (Cx, Eff) =
   resolve_eff_at(cx, atoms, 0, 0)
-
-pub fn resolve_eff_at(cx: Cx, atoms: List[String], lo: Int, hi: Int) -> (Cx, Eff) = {
-  var cx1 = cx
-  var effs: List[Eff] = []
-  for a in atoms {
-    if a == "io" {
-      effs = effs ++ [EIo]
-    } else {
-      match map.get(cx1.effects, a) {
-        Some(eid) -> { effs = effs ++ [label_eff(cx1, eid)] }
-        None ->
-          if is_upper_name(a) {
-            cx1 = cerr_h(cx1, "unknown effect `" ++ a ++ "`", lo, hi,
-              "declare it with `effect " ++ a ++ " { ... }` (or import it); " ++
-                "effect variables are lowercase")
-          } else {
-            match map.get(cx1.current_eff_vars, a) {
-              Some(v) -> { effs = effs ++ [v] }
-              None -> {
-                let (cx2, v) = fresh_effvar(cx1, a)
-                cx1 = Cx { ..cx2, current_eff_vars: map.insert(cx2.current_eff_vars, a, v) }
-                effs = effs ++ [v]
-              }
-            }
-          }
-      }
-    }
-  }
-  (cx1, eff_union(effs))
-}
-
-fn is_upper_name(s: String) -> Bool = {
-  for c in code_points(s) {
-    return char_is_upper(c)
-  }
-  false
-}
 
 ## The first declared effect a resolved signature carries anywhere inside it,
 ## or "". Trait and impl methods use it the way `leaked` is used for effect
@@ -460,9 +383,6 @@ fn sig_label_ty(ts: List[Ty]) -> String = {
   }
   ""
 }
-
-pub fn builtin_type_names() -> List[String] =
-  ["Int", "Float", "Bool", "String", "Bytes", "Unit", "List", "Map", "Set"]
 
 # ---- type resolution ----
 
@@ -525,49 +445,6 @@ pub fn refuse_decl_effvar(cx: Cx, ref: TypeRef) -> (Cx, Bool) =
     None -> (cx, false)
   }
 
-## Resolve an alias target once, memoized; TyError (and an error) on a cycle.
-fn resolve_alias_target(cx: Cx, al: AliasE, use_lo: Int, use_hi: Int) -> (Cx, Ty) !io = {
-  match map.get(cx.alias_resolved, al.name) {
-    Some(t) -> return (cx, t)
-    None -> ()
-  }
-  let ref = match al.target {
-    None -> {
-      let cx1 = Cx { ..cx, alias_resolved: map.insert(cx.alias_resolved, al.name, TyError) }
-      return (cx1, TyError)
-    }
-    Some(r) -> r
-  }
-  if set.has(cx.alias_resolving, al.name) {
-    var cx1 = cerr_h(cx, "type alias `" ++ al.name ++ "` refers to itself", use_lo, use_hi,
-      "aliases are transparent and cannot be recursive")
-    cx1 = Cx { ..cx1, alias_resolved: map.insert(cx1.alias_resolved, al.name, TyError) }
-    return (cx1, TyError)
-  }
-  var tp: Map[String, Ty] = map.empty()
-  for v in al.tparams {
-    match v {
-      TyVar(n, _) -> { tp = map.insert(tp, n, v) }
-      _ -> ()
-    }
-  }
-  var cx1 = Cx { ..cx, alias_resolving: set.insert(cx.alias_resolving, al.name) }
-  # the alias target resolves with its own type parameters and a throwaway
-  # effect-variable table (effect variables are rejected at declaration)
-  let saved_tp = cx1.current_tparams
-  let saved_ev = cx1.current_eff_vars
-  let empty_ev: Map[String, Eff] = map.empty()
-  cx1 = Cx { ..cx1, current_tparams: tp, current_eff_vars: empty_ev }
-  let (cx2, t) = resolve_type(cx1, ref)
-  var cx3 = Cx { ..cx2, current_tparams: saved_tp, current_eff_vars: saved_ev }
-  cx3 = Cx {
-    ..cx3,
-    alias_resolving: set.remove(cx3.alias_resolving, al.name),
-    alias_resolved: map.insert(cx3.alias_resolved, al.name, t)
-  }
-  (cx3, t)
-}
-
 ## `m.NAME` read as a qualified constant: Some((declaring module, its type))
 ## when `target` is a whole-module alias that exports a constant called
 ## `fname`. A miss is not an error here -- the caller has a Java-static-field
@@ -605,77 +482,6 @@ fn qual_ctor(cx: Cx, target: Expr, fname: String) -> Option[(Int, Int)] = {
   }
 }
 
-## Resolve a parsed type reference against the current scope (the Kotlin
-## resolveType with tparams/effVars defaulted to the current ones).
-pub fn resolve_type(cx: Cx, ref: TypeRef) -> (Cx, Ty) !io =
-  match ref {
-    TTuple(elems, lo, hi) -> {
-      var cx1 = cx
-      var out: List[Ty] = []
-      var i = 0
-      for e in elems {
-        let (cx2, t) = resolve_type(cx1, e)
-        cx1 = cx2
-        out = out ++ [t]
-        i = i + 1
-      }
-      (cx1, TyTuple(out))
-    }
-    TFn(params, ret, effs, lo, hi) -> {
-      let (cx1, eff) = resolve_eff_at(cx, effs, lo, hi)
-      var cx2 = cx1
-      var ps: List[Ty] = []
-      for p in params {
-        let (cx3, t) = resolve_type(cx2, p)
-        cx2 = cx3
-        ps = ps ++ [t]
-      }
-      let (cx4, rt) = resolve_type(cx2, ret)
-      (cx4, TyFn(ps, rt, eff))
-    }
-    TNamed(name, targs, lo, hi) -> resolve_named(cx, name, targs, lo, hi)
-    TQual(q, name, targs, lo, hi) -> resolve_qual(cx, q, name, targs, lo, hi)
-    TAssoc(subj, name, lo, hi) -> resolve_assoc(cx, subj, name, lo, hi)
-  }
-
-## `T.Item` -- the subject must be a type parameter in scope, and exactly one
-## of its bounds must declare `name` (assoc-types-design.md D2). Zero declarers
-## and ambiguity are both errors here; nothing is deferred.
-fn resolve_assoc(cx: Cx, subj: String, name: String, lo: Int, hi: Int) -> (Cx, Ty) =
-  match map.get(cx.current_tparams, subj) {
-    None ->
-      (cerr_h(cx, "a projection's subject must be a type parameter in scope, and `" ++
-          subj ++ "` is not one", lo, hi,
-        "write `T." ++ name ++ "` where `T` is a `[T: SomeTrait]` parameter whose trait " ++
-          "declares `type " ++ name ++ "`"), TyError)
-    Some(v) -> {
-      let vid = match v {
-        TyVar(_, id) -> id
-        _ -> -1
-      }
-      let bs = match map.get(cx.current_tparam_bounds, vid) {
-        Some(x) -> x
-        None -> []
-      }
-      var owners: List[Int] = []
-      for tid in bs {
-        for an in trait_of(cx.traits, tid).assoc {
-          if an == name && not list.contains(owners, tid) { owners = owners ++ [tid] }
-        }
-      }
-      if len(owners) == 0 {
-        (cerr_h(cx, "no trait bound on `" ++ subj ++ "` declares an associated type `" ++
-            name ++ "`", lo, hi,
-          "the trait in the bound needs a `type " ++ name ++ "` member"), TyError)
-      } else if len(owners) > 1 {
-        (cerr_h(cx, "`" ++ subj ++ "." ++ name ++ "` is ambiguous: more than one bound declares `" ++
-            name ++ "`", lo, hi, "rename the associated type in one of the traits"), TyError)
-      } else {
-        (cx, TyAssoc(v, owners[0], name))
-      }
-    }
-  }
-
 fn t_lo2(t: TypeRef) -> Int =
   match t {
     TNamed(_, _, lo, _) -> lo
@@ -693,217 +499,6 @@ fn t_hi2(t: TypeRef) -> Int =
     TTuple(_, _, hi) -> hi
     TFn(_, _, _, _, hi) -> hi
   }
-
-## `m.T` — a type qualified by a whole-module alias (LANG-06). Resolution
-## reads the exporter's surface: a pub alias means what the declaring module
-## resolved it to, a pub ADT is its (grafted) id. The alias namespace is
-## separate from values (spec §10.3), so a lowercase name in type position
-## can only be one of these.
-fn resolve_qual(
-  cx: Cx,
-  q: String,
-  name: String,
-  targs: List[TypeRef],
-  lo: Int,
-  hi: Int
-) -> (Cx, Ty) !io = {
-  let exp = match map.get(cx.module_exports, q) {
-    None ->
-      return (cerr_h(cx, "unknown module alias `" ++ q ++ "` in a type position", lo, hi,
-        "a qualified type needs a whole-module import in scope: `use <path> as " ++ q ++ "`"),
-        TyError)
-    Some(e) -> e
-  }
-  match map.get(exp.aliases, name) {
-    Some(al) -> {
-      if len(targs) != len(al.tparams) {
-        return (cerr(cx, "`" ++ al.name ++ "` takes " ++ to_string(len(al.tparams)) ++
-            " type parameter(s), got " ++ to_string(len(targs)), lo, hi), TyError)
-      }
-      # imported aliases carry their declaring module's resolution; nothing
-      # here re-resolves the target against this module's scope
-      let target = match map.get(exp.alias_resolved, name) {
-        Some(t) -> t
-        None -> TyError
-      }
-      if target == TyError { return (cx, TyError) }
-      if len(al.tparams) == 0 { return (cx, wrap_opaque(al, target)) }
-      var cx2 = cx
-      var m2: Map[Int, Ty] = map.empty()
-      var i = 0
-      for v in al.tparams {
-        match v {
-          TyVar(_, id) -> {
-            let (cx3, at) = resolve_type(cx2, targs[i])
-            cx2 = cx3
-            m2 = map.insert(m2, id, at)
-          }
-          _ -> ()
-        }
-        i = i + 1
-      }
-      let em: Map[Int, Eff] = map.empty()
-      return (cx2, wrap_opaque(al, subst(target, m2, em)))
-    }
-    None -> ()
-  }
-  match map.get(exp.types_by_name, name) {
-    Some(aid) -> {
-      let info = adt_of(cx.adts, aid)
-      if len(targs) != len(info.tparams) {
-        return (cerr(cx, "`" ++ info.name ++ "` takes " ++ to_string(len(info.tparams)) ++
-            " type parameter(s), got " ++ to_string(len(targs)), lo, hi), TyError)
-      }
-      var cx1 = cx
-      var args: List[Ty] = []
-      for a in targs {
-        let (cx2, t) = resolve_type(cx1, a)
-        cx1 = cx2
-        args = args ++ [t]
-      }
-      (cx1, TyAdt(aid, args))
-    }
-    None -> {
-      let pool = map.keys(exp.types_by_name) ++ map.keys(exp.aliases)
-      let hint = match suggest.hint(name, pool) {
-        Some(h) -> h
-        None ->
-          if len(pool) == 0 {
-            "module `" ++ exp.mod_path ++ "` exports no types"
-          } else {
-            "exported types: " ++ join(sort(pool), ", ")
-          }
-      }
-      (cerr_h(cx, "module `" ++ exp.mod_path ++ "` has no exported type `" ++ name ++ "`",
-        lo, hi, hint), TyError)
-    }
-  }
-}
-
-fn resolve_named(cx: Cx, name: String, targs: List[TypeRef], lo: Int, hi: Int) -> (Cx, Ty) !io = {
-  # type parameters shadow everything
-  match map.get(cx.current_tparams, name) {
-    Some(v) -> {
-      if len(targs) > 0 {
-        return (cerr(cx, "type parameter `" ++ name ++ "` cannot take type arguments", lo, hi),
-          TyError)
-      }
-      return (cx, v)
-    }
-    None -> ()
-  }
-  match map.get(cx.aliases, name) {
-    Some(al) -> {
-      if len(targs) != len(al.tparams) {
-        return (cerr(cx, "`" ++ al.name ++ "` takes " ++ to_string(len(al.tparams)) ++
-            " type parameter(s), got " ++ to_string(len(targs)), lo, hi), TyError)
-      }
-      let (cx1, target) = resolve_alias_target(cx, al, lo, hi)
-      if target == TyError { return (cx1, TyError) }
-      if len(al.tparams) == 0 { return (cx1, wrap_opaque(al, target)) }
-      var cx2 = cx1
-      var m: Map[Int, Ty] = map.empty()
-      var i = 0
-      for v in al.tparams {
-        match v {
-          TyVar(_, id) -> {
-            let (cx3, at) = resolve_type(cx2, targs[i])
-            cx2 = cx3
-            m = map.insert(m, id, at)
-          }
-          _ -> ()
-        }
-        i = i + 1
-      }
-      let em: Map[Int, Eff] = map.empty()
-      return (cx2, wrap_opaque(al, subst(target, m, em)))
-    }
-    None -> ()
-  }
-  if name == "List" {
-    if len(targs) != 1 {
-      return (cerr(cx, "List takes exactly one type argument: List[T]", lo, hi), TyError)
-    }
-    let (cx1, e) = resolve_type(cx, targs[0])
-    return (cx1, TyList(e))
-  }
-  if name == "Map" {
-    if len(targs) != 2 {
-      return (cerr(cx, "Map takes exactly two type arguments: Map[K, V]", lo, hi), TyError)
-    }
-    let (cx1, k) = resolve_type(cx, targs[0])
-    let (cx2, v) = resolve_type(cx1, targs[1])
-    return (cx2, TyMap(k, v))
-  }
-  # Array is the backend's collection primitive, not part of the language's
-  # surface: only std may name it, so outside std the name falls through to the
-  # ordinary lookups and a user type called `Array` still means their own.
-  if name == "Array" && cx.is_std_module {
-    if len(targs) != 1 {
-      return (cerr(cx, "Array takes exactly one type argument: Array[T]", lo, hi), TyError)
-    }
-    let (cx1, e) = resolve_type(cx, targs[0])
-    return (cx1, TyArray(e))
-  }
-  if name == "Set" {
-    if len(targs) != 1 {
-      return (cerr(cx, "Set takes exactly one type argument: Set[T]", lo, hi), TyError)
-    }
-    let (cx1, e) = resolve_type(cx, targs[0])
-    return (cx1, TySet(e))
-  }
-  match ty_named(name) {
-    Some(t) -> {
-      if len(targs) > 0 {
-        return (cerr(cx, "`" ++ name ++ "` is not generic", lo, hi), TyError)
-      }
-      return (cx, t)
-    }
-    None -> ()
-  }
-  match map.get(cx.java_classes, name) {
-    Some(fqcn) -> {
-      if len(targs) > 0 {
-        return (cerr(cx, "Java types take no type arguments (generics are erased)", lo, hi),
-          TyError)
-      }
-      # Reflecting on a class is honestly !io, and an `unsafe_pure` here used
-      # to say otherwise -- vouching not for one static call but for a whole
-      # recursive subsystem. Resolving a type reads the host's class path, so
-      # the pass chain above says !io too; check_module already did.
-      let j = cx.jsig.class_info(fqcn)
-      return (cx, TyJava(fqcn, j.display))
-    }
-    None -> ()
-  }
-  match map.get(cx.adts_by_name, name) {
-    None -> {
-      let pool = map.keys(cx.adts_by_name) ++ map.keys(cx.aliases) ++
-        map.keys(cx.java_classes) ++ builtin_type_names()
-      let hint = match suggest.hint(name, pool) {
-        Some(h) -> h
-        None -> "builtin types: Int, Float, Bool, String, Unit, List — or declare `type " ++
-          name ++ " = ...`"
-      }
-      (cerr_h(cx, "unknown type: " ++ name, lo, hi, hint), TyError)
-    }
-    Some(aid) -> {
-      let info = adt_of(cx.adts, aid)
-      if len(targs) != len(info.tparams) {
-        return (cerr(cx, "`" ++ info.name ++ "` takes " ++ to_string(len(info.tparams)) ++
-            " type parameter(s), got " ++ to_string(len(targs)), lo, hi), TyError)
-      }
-      var cx1 = cx
-      var args: List[Ty] = []
-      for a in targs {
-        let (cx2, t) = resolve_type(cx1, a)
-        cx1 = cx2
-        args = args ++ [t]
-      }
-      (cx1, TyAdt(aid, args))
-    }
-  }
-}
 
 # ---- tests ----
 
@@ -986,11 +581,6 @@ test "declare and lookup with scope discipline" {
 }
 
 # ---- assignability, unification, printability ----
-
-## An `alias` resolves to its target; an `opaque type` resolves to itself,
-## carrying the target for the backends and `owner` for the check below.
-pub fn wrap_opaque(al: AliasE, target: Ty) -> Ty =
-  if al.is_opaque { TyOpaque(al.id, al.name, al.owner, target) } else { target }
 
 ## The declaring module -- and only it -- may convert between an opaque type
 ## and its target. This is the whole of opacity: one line of checking, no
@@ -1487,57 +1077,6 @@ fn derived_field_ok(cx: Cx, tid: Int, own: List[Ty], t: Ty) -> Bool =
       }
   }
 
-## Can the compiler rebuild this value at class-init time? Int/Float/Bool/
-## String/Unit and List/tuple/record/ADT built from them, plus an opaque type
-## wherever its target qualifies (spec §7.2).
-pub fn is_const_serializable(cx: Cx, t: Ty, visited: Set[Int]) -> Bool =
-  match t {
-    TyInt | TyFloat | TyBool | TyString -> true
-    # One value, so the constant is the singleton. Refusing it was a
-    # representation objection, and #51 removed the representation.
-    TyUnit -> true
-    # Serializability is a question about the representation, so an opaque
-    # type is exactly as serializable as its target.
-    TyOpaque(_, _, _, tgt) -> is_const_serializable(cx, tgt, visited)
-    TyList(e) -> is_const_serializable(cx, e, visited)
-    TyTuple(elems) -> {
-      for e in elems {
-        if not is_const_serializable(cx, e, visited) { return false }
-      }
-      true
-    }
-    TyAdt(aid, targs) -> {
-      # recursive types terminate here
-      if set.has(visited, aid) { return true }
-      let v2 = set.insert(visited, aid)
-      let a = adt_of(cx.adts, aid)
-      var m: Map[Int, Ty] = map.empty()
-      var i = 0
-      for tp in a.tparams {
-        match tp {
-          TyVar(_, id) ->
-            match get(targs, i) {
-              Some(arg) -> { m = map.insert(m, id, arg) }
-              None -> ()
-            }
-          _ -> ()
-        }
-        i = i + 1
-      }
-      for a2 in targs {
-        if not is_const_serializable(cx, a2, v2) { return false }
-      }
-      let em: Map[Int, Eff] = map.empty()
-      for c in a.ctors {
-        for f in c.fields {
-          if not is_const_serializable(cx, subst(f.ty, m, em), v2) { return false }
-        }
-      }
-      true
-    }
-    _ -> false
-  }
-
 # ---- tests (slice 2) ----
 
 test "assignability admits pure where io is wanted" {
@@ -1660,26 +1199,6 @@ test "a `use java` declaration is refused when no oracle is wired" {
   assert len(cx1.diags) == 1
   assert str.contains(cx1.diags[0].msg, "`use java` is not available in this compiler")
   assert str.contains(cx1.diags[0].hint, "java.lang.Math")
-}
-
-test "the shared counter starts past every prelude id" {
-  # ADTs and traits draw from one counter but live in separate id spaces, so
-  # a minted id equal to a prelude id of the *other* kind is fine -- equal to
-  # one of its own kind is a silent map overwrite. This walks both tables
-  # rather than naming the ids: the earlier version listed ForeignError and
-  # Show by hand, so when Iter took trait id 4 the counter was left standing
-  # on Iter's id and nothing said a word. A prelude entity added to either
-  # table is covered here the moment it is added.
-  let cx = test_cx()
-  for aid in map.keys(prelude_adts()) {
-    assert cx.next_id > aid
-  }
-  for tid in map.keys(prelude_traits()) {
-    assert cx.next_id > tid
-  }
-  # and it is still derived: a literal put back here would pass the loops above
-  # for exactly as long as it happened to be large enough
-  assert cx.next_id == first_minted_id()
 }
 
 test "prelude seeding wires names to ids" {
@@ -6208,8 +5727,6 @@ fn check_expr_at(cx: Cx, e: Expr, expected: Option[Ty]) -> (Cx, Ty, TExpr) !io =
 fn no_expected() -> Option[Ty] = None
 
 fn no_texpr() -> Option[TExpr] = None
-
-fn no_sig() -> Option[Sig] = None
 
 ## The panic message for `expr!` (the Kotlin unwrapMsg): names the producing
 ## call and the site, since codegen has neither source text nor line numbers.

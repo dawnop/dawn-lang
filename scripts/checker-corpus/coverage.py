@@ -5,7 +5,8 @@ The goldens next door pin the diagnostics some program produces. They cannot
 say anything about a diagnostic no case produces -- and a message nothing
 reaches is exactly the one a refactor can reword, misplace or delete unseen.
 This walks the other way: from every `cerr` / `cerr_h` / `cerr_o` call site in
-the checker to the recorded goldens, and reports the ones with no case.
+the checker's modules (SOURCES below) to the recorded goldens, and reports the
+ones with no case.
 
 ## How a site is matched
 
@@ -29,7 +30,8 @@ Two consequences, both deliberate:
 both directions: a newly unreached site fails the build, and so does a site
 that became reachable without being struck off. Sites are keyed by their
 message signature rather than by line, so moving code between files -- which is
-the refactor this corpus exists for -- does not churn the list.
+the refactor this corpus exists for -- does not churn the list, as long as the
+destination file is in SOURCES.
 """
 import glob
 import os
@@ -37,7 +39,10 @@ import re
 import sys
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")
-SOURCES = "selfhost/src/checker*.dawn"
+# The checker's own modules, in the order docs/arch-split-design.md §2.1 puts
+# them: `cerr` and the resolvers it reports from now live in the base module,
+# and a site that leaves this glob leaves the ratchet with it.
+SOURCES = ("selfhost/src/cx.dawn", "selfhost/src/checker*.dawn")
 CASES = "scripts/checker-corpus/cases"
 UNCOVERED = "scripts/checker-corpus/uncovered.txt"
 
@@ -178,7 +183,10 @@ def patterns(lits, expr):
 
 def collect_sites():
     sites = []
-    for path in sorted(glob.glob(os.path.join(ROOT, SOURCES))):
+    paths = []
+    for pat in SOURCES:
+        paths += glob.glob(os.path.join(ROOT, pat))
+    for path in sorted(paths):
         text = read(path)
         rel = os.path.relpath(path, ROOT)
         # local `let x = ...` / `var x = ...` and same-file `fn f(...) = ...`
@@ -342,7 +350,7 @@ def main():
     return 0
 
 
-HEADER = """# `cerr` call sites in selfhost/src/checker*.dawn that no corpus case reaches.
+HEADER = """# `cerr` call sites in the checker's modules that no corpus case reaches.
 # Regenerate with `./scripts/checker-corpus/run.sh --record`; the reason column
 # is kept across regenerations, so write it once.
 #
