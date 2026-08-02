@@ -26,7 +26,7 @@ use types.{
   DICT_ADT_ID,
   Sym, Sig, EPure, Traits, TraitI, ImplI, MethodSig,
   Adts, AdtI, CtorI, adt_of, trait_of, prelude_adts,
-  OPTION_ID, RESULT_ID, ORD_ID, EQ_ID, HASH_ID, SHOW_ID,
+  OPTION_ID, RESULT_ID, ORD_ID, EQ_ID, HASH_ID, SHOW_ID, ITER_ID,
   is_eq_scalar, is_ord_scalar, is_hash_scalar, builtins, Impls, impl_at, has_impl_at,
   is_ground, expandable, type_args_of, sub_goals
 }
@@ -2756,7 +2756,7 @@ fn lower_stmt(st: LSt, s: TStmt) -> (LSt, List[CStmt]) =
         None, TyUnit)
       (LSt { ..st3, cur_loop: st.cur_loop }, [CSLoop(lid, inner, None)])
     }
-    TSFor(sym, _, from, to, body, _, _, _) -> {
+    TSFor(sym, _, from, to, wit, body, _, _, _) -> {
       match to {
         Some(hi) -> {
           let (st1, lid) = fresh_loop(st)
@@ -2782,7 +2782,13 @@ fn lower_stmt(st: LSt, s: TStmt) -> (LSt, List[CStmt]) =
             CSLoop(lid, inner, Some(CBlock([step], None, TyUnit)))
           ])
         }
-        None -> lower_for_list(st, sym, from, body)
+        None ->
+          match wit {
+            Some(w) -> lower_for_iter(st, sym, from, w, body)
+            # unreachable on a checked program: the checker refuses a
+            # witnessless for..in before lowering runs
+            None -> panic("lower: for..in without an Iter witness")
+          }
       }
     }
     TSLetPat(pat, init, _, _) -> {
@@ -2802,61 +2808,73 @@ fn lower_stmt(st: LSt, s: TStmt) -> (LSt, List[CStmt]) =
     }
   }
 
-## `for x in xs` over a list: a cursor walk over `std/list`'s four iteration
-## functions. The language only iterates lists, maps and sets, and the latter
-## two go through `map.entries` first, so a list is the only thing that
-## reaches here.
+## `for x in xs`: a cursor walk over the Iter trait's four methods, through
+## the witness the checker resolved (#44 knife 2). A concrete subject
+## devirtualises to the impl's own methods -- for a List, the same direct
+## static calls the retired std/list quartet compiled to -- and a rigid one
+## dispatches through the forwarded dictionary, which is what makes `for`
+## inside a `[C: Iter]` function possible at all.
 ##
-## It used to be an index loop -- `len` and `list_index` intrinsics, straight
-## against java.util.List. That hardwired iteration to "this collection can be
-## randomly indexed", which costs nothing on a flat representation and O(log n)
-## on the tree D3 replaces it with. Behind these four the representation can
-## change without this function learning its new shape; the cursor type is
-## whatever `iter_start` returns, read from the signature rather than assumed.
-##
-## No `Iter` trait is involved and none is needed: `for` iterates exactly one
-## type, so there is nothing here to be polymorphic over.
-fn lower_for_list(st: LSt, sym: Int, from: TExpr, body: TExpr) -> (LSt, List[CStmt]) = {
+## The four calls go through lower_trait_call on synthetic XLocal nodes, so a
+## `for` cannot disagree with a source-level `iter_get(xs, k)` about boxing,
+## dictionaries or devirtualisation: same door, same answer.
+fn lower_for_iter(
+  st: LSt,
+  sym: Int,
+  from: TExpr,
+  w: WitRef,
+  body: TExpr
+) -> (LSt, List[CStmt]) = {
   let ct = tex_ty(from)
-  let et =
-    match ct {
-      TyList(e) -> e
-      _ -> sym_ty(st, sym, TyError)
-    }
-  let start = iter_sig(st, "iter_start")
-  let done = iter_sig(st, "iter_done")
-  let next = iter_sig(st, "iter_next")
-  let getf = iter_sig(st, "iter_get")
-  let cur_t = start.ret
+  # the loop variable's type: the checker already reduced the impl's `Item`
+  let et = sym_ty(st, sym, TyError)
+  let cur_t = iter_cur_ty(st, w, ct)
   let (st1, lid) = fresh_loop(st)
   let (st2, coll) = lower_expr(st1, from)
   let (st3, csym) = fresh_sym(st2)
   let (st4, isym) = fresh_sym(st3)
-  let (st5, b) = lower_expr(LSt { ..st4, cur_loop: lid }, body)
-  let cv = CLocal(csym, ct)
-  let iv = CLocal(isym, cur_t)
-  let elem = adapt_out(iter_call(getf, "iter_get", [cv, iv], ct, cur_t), getf.ret, et)
+  let cv: TExpr = XLocal(csym, "for$" ++ "xs", 0, 0, ct)
+  let iv: TExpr = XLocal(isym, "for$" ++ "cur", 0, 0, cur_t)
+  let (st5, start_v) = lower_trait_call(st4, ITER_ID, "iter_start", [cv], [w], cur_t)
+  let (st6, done_v) = lower_trait_call(st5, ITER_ID, "iter_done", [cv, iv], [w], TyBool)
+  let (st7, get_v) = lower_trait_call(st6, ITER_ID, "iter_get", [cv, iv], [w], et)
+  let (st8, next_v) = lower_trait_call(st7, ITER_ID, "iter_next", [cv, iv], [w], cur_t)
+  let (st9, b) = lower_expr(LSt { ..st8, cur_loop: lid }, body)
   let inner = CBlock(
-    [CSIf(iter_call(done, "iter_done", [cv, iv], ct, cur_t), CBreak(lid), None),
-      CSLet(sym, et, elem),
+    [CSIf(done_v, CBreak(lid), None),
+      CSLet(sym, et, get_v),
       CSDiscard(b)],
     None, TyUnit)
-  let step = CSAssign(isym, iter_call(next, "iter_next", [cv, iv], ct, cur_t))
-  (LSt { ..st5, cur_loop: st.cur_loop }, [
+  # the step lives on the loop node rather than at the end of the body so
+  # that `continue` runs it -- see core.CSLoop
+  let step = CSAssign(isym, next_v)
+  (LSt { ..st9, cur_loop: st.cur_loop }, [
     CSLet(csym, ct, coll),
-    CSLet(isym, cur_t, iter_call(start, "iter_start", [cv], ct, cur_t)),
+    CSLet(isym, cur_t, start_v),
     CSLoop(lid, inner, Some(CBlock([step], None, TyUnit)))
   ])
 }
 
-## std/list is bundled into every program (its class is emitted even for a
-## `println` one-liner), so a missing signature is a broken build, not a
-## program the user could have written.
-fn iter_sig(st: LSt, name: String) -> Sig =
-  match sig_of(st, "std/list", name) {
-    Some(sg) -> sg
-    None -> panic("lower: std/list." ++ name ++ " is missing")
+## The cursor local's Core type. For a known impl it is the `Cur` binding
+## verbatim -- the callee-ABI shape subst_subject computes, so the local
+## neither boxes an Int cursor nor unboxes a structural one. For a forwarded
+## witness the subject is rigid and the projection stays: an erased slot,
+## exactly what the dictionary's bridge traffics in.
+fn iter_cur_ty(st: LSt, w: WitRef, ct: Ty) -> Ty =
+  match w {
+    WForward(_) -> TyAssoc(ct, ITER_ID, "Cur")
+    WConcrete(_, subject) -> iter_cur_binding(st, subject)
+    WApply(_, subject, _) -> iter_cur_binding(st, subject)
   }
+
+fn iter_cur_binding(st: LSt, subject: Ty) -> Ty = {
+  for pr in impl_for(st, ITER_ID, subject).assoc_bindings {
+    let (bn, bt) = pr
+    if bn == "Cur" { return bt }
+  }
+  # registration refuses an impl that leaves a declared assoc type unbound
+  panic("lower: impl Iter[" ++ ty_key_inst(subject) ++ "] has no `Cur` binding")
+}
 
 ## Which function on the Dawn trie a Map/Set primitive is.
 ##
@@ -2904,20 +2922,6 @@ fn hamt_call(
   let (st1, vs) = lower_args_to(st, args, sg.param_tys)
   let (st2, ds) = witness_values(st1, wits)
   (st2, adapt_out(CCall(CDirect("std/hamt", fname), vs ++ ds, sg.ret), sg.ret, ty))
-}
-
-## The list argument is erased at the callee (`xs: List[T]` over a type
-## variable is not, but the element is), so each argument goes in through the
-## same adapt every other call site uses.
-fn iter_call(sg: Sig, name: String, args: List[CExpr], ct: Ty, cur_t: Ty) -> CExpr = {
-  var vs: List[CExpr] = []
-  var i = 0
-  for a in args {
-    let actual = if i == 0 { ct } else { cur_t }
-    vs = vs ++ [adapt_in(a, actual, sg.param_tys[i])]
-    i = i + 1
-  }
-  CCall(CDirect("std/list", name), vs, sg.ret)
 }
 
 # ---- functions and modules ----

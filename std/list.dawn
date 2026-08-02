@@ -16,8 +16,10 @@
 # ---- iteration ----
 #
 # Everything that walks a whole list, here and in the compiler, goes through
-# these four. `for x in xs` lowers to them (lower.dawn's `lower_for_list`)
-# rather than to an index loop, and so does every sequential helper below.
+# the impl below. `for x in xs` desugars to the same four methods (lower.dawn's
+# lower_for_iter, #44 knife 2) rather than to an index loop, and so does every
+# sequential helper in this file — the unqualified `iter_*` calls resolve to
+# the prelude trait's methods and devirtualise straight back here.
 #
 # The difference is not style: an index walk hardwires "this collection can be
 # randomly indexed", which costs nothing on today's flat representation and
@@ -26,19 +28,18 @@
 #
 # A cursor is an index today because the representation is flat. When it stops
 # being flat, `Cur` and these four bodies change and nothing else does.
-#
-# Not `pub`: user code has no business holding one, and the compiler does not
-# need it exported — an ordinary function is emitted public static either way.
 
 alias Cur = Int
 
-fn iter_start[T](xs: List[T]) -> Cur = 0
+impl[T] Iter[List[T]] {
+  type Cur = Int
+  type Item = T
 
-fn iter_done[T](xs: List[T], c: Cur) -> Bool = c >= len(xs)
-
-fn iter_next[T](xs: List[T], c: Cur) -> Cur = c + 1
-
-fn iter_get[T](xs: List[T], c: Cur) -> T = xs[c]
+  fn iter_start(xs: List[T]) -> Int = 0
+  fn iter_done(xs: List[T], c: Int) -> Bool = c >= len(xs)
+  fn iter_next(xs: List[T], c: Int) -> Int = c + 1
+  fn iter_get(xs: List[T], c: Int) -> T = xs[c]
+}
 
 # ---- queries ----
 

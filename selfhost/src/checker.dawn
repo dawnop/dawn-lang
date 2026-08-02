@@ -54,7 +54,7 @@ use types.{
   ty_named, is_numeric, is_errorish, peel_opaque,
   prelude_adts, prelude_traits, prelude_impls, bounds_of,
   builtins, opt_ty, result_ty, OPTION_ID, RESULT_ID, FOREIGN_ERROR_ID,
-  ORD_ID, EQ_ID, HASH_ID, SHOW_ID,
+  ORD_ID, EQ_ID, HASH_ID, SHOW_ID, ITER_ID,
   eq_scalars, hash_scalars,
   Impls, Head, head_of, impl_at, has_impl_at, insert_impl,
   is_eq_scalar, is_ground, expandable, type_args_of, sub_goals
@@ -1591,7 +1591,7 @@ pub fn seed_prelude(cx: Cx) -> Cx = {
   # prelude traits: methods enter the fn namespace
   var tbn = cx1.traits_by_name
   var fns2 = cx1.fns
-  for tid in [ORD_ID, EQ_ID, HASH_ID, SHOW_ID] {
+  for tid in [ORD_ID, EQ_ID, HASH_ID, SHOW_ID, ITER_ID] {
     let tr = trait_of(cx1.traits, tid)
     tbn = map.insert(tbn, tr.name, tid)
     for entry in tr.methods {
@@ -7073,16 +7073,31 @@ fn check_stmt(cx: Cx, s: Stmt) -> (Cx, TStmt) !io =
       cx1 = cxa
       var loop_t = TyError
       var tx_to: Option[TExpr] = None
+      var wit: Option[WitRef] = None
       match to_opt {
         None -> {
-          loop_t = match ft {
-            TyList(el) -> el
-            _ -> {
-              if not is_errorish(ft) {
-                cx1 = cerr(cx1, "for..in iterates a List or an integer range a..b, got " ++
-                    ty_show(cx1.adts, ft), e_lo(from), e_hi(from))
+          # `for x in xs` is a use of the Iter trait: resolve the witness the
+          # way any bound does (rigid parameter forwards the caller's
+          # dictionary, concrete subject devirtualises), and the loop
+          # variable's type is the impl's `Item` -- reduced when the subject
+          # is concrete, a rigid projection when it is not (generic for).
+          if not is_errorish(ft) {
+            if ft == TyInt {
+              # the common slip deserves the range answer, not "no impl"
+              cx1 = cerr_h(cx1, "for..in needs a range to iterate integers",
+                e_lo(from), e_hi(from),
+                "write `for x in a..b`, or iterate a value whose type implements `Iter`")
+            } else {
+              let (cxw, w) = resolve_witness(cx1, ITER_ID, ft, e_lo(from), e_hi(from),
+                "for..in")
+              cx1 = cxw
+              match w {
+                Some(_) -> {
+                  wit = w
+                  loop_t = reduce_assoc(cx1, TyAssoc(ft, ITER_ID, "Item"))
+                }
+                None -> ()
               }
-              TyError
             }
           }
         }
@@ -7115,7 +7130,7 @@ fn check_stmt(cx: Cx, s: Stmt) -> (Cx, TStmt) !io =
           e_lo(body), e_hi(body))
       }
       cx1 = pop_scope(cx1)
-      (cx1, TSFor(sid, name, fx, tx_to, bx, hj, lo, hi))
+      (cx1, TSFor(sid, name, fx, tx_to, wit, bx, hj, lo, hi))
     }
   }
 
@@ -10699,10 +10714,11 @@ test "a jump out of a `with` region names the sugar, not a lambda" {
   assert str.contains(cx1.diags[0].hint, "drop the `return`")
 
   # break reaching a loop outside the region: the generic "crosses a lambda"
-  # message would be a lie about what is on the page
+  # message would be a lie about what is on the page. A while loop, not for:
+  # test_cx has no std, and `for..in` now needs std/list's Iter impl.
   let bad_break = head ++
     "fn go(xs: List[Int]) -> Int = {\n" ++
-    "  for i in xs {\n" ++
+    "  while len(xs) > 0 {\n" ++
     "    with x <- hold(1)\n" ++
     "    break\n" ++
     "  }\n" ++
@@ -10719,7 +10735,7 @@ test "a jump out of a `with` region names the sugar, not a lambda" {
   let ok_break = head ++
     "fn go(xs: List[Int]) -> Int = {\n" ++
     "  with x <- hold(1)\n" ++
-    "  for i in xs { break }\n" ++
+    "  while len(xs) > 0 { break }\n" ++
     "  x\n" ++
     "}\n"
   let (m3, pd3) = parser.parse_module(ok_break)
@@ -10731,7 +10747,7 @@ test "a jump out of a `with` region names the sugar, not a lambda" {
   let inner = head ++
     "fn go(xs: List[Int]) -> Int = {\n" ++
     "  with x <- hold(1)\n" ++
-    "  for i in xs {\n" ++
+    "  while len(xs) > 0 {\n" ++
     "    let f = (k: Int) => { break }\n" ++
     "    ()\n" ++
     "  }\n" ++

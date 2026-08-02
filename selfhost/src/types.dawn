@@ -846,6 +846,14 @@ pub const HASH_ID: Int = 2
 ## the ADT plus an instanceof chain only the JVM has.
 pub const SHOW_ID: Int = 3
 
+## Iteration: what `for x in xs` desugars to (#44 knife 2). Four methods
+## mirroring std/list's retired cursor quartet -- start/done/next/get over an
+## associated `Cur`, yielding an associated `Item` -- so a step allocates
+## nothing a given impl's cursor doesn't. The impls live in std (List, String,
+## Bytes, Map, Set); the trait is prelude because the *language* consumes it:
+## `for` needs the witness the way `==` needs Eq's, without an import.
+pub const ITER_ID: Int = 4
+
 pub fn opt_ty(t: Ty) -> Ty = TyAdt(OPTION_ID, [t])
 
 pub fn result_ty(t: Ty, e: Ty) -> Ty = TyAdt(RESULT_ID, [t, e])
@@ -1005,7 +1013,40 @@ pub fn prelude_traits() -> Traits = {
   let sv = TyVar("T", -16)
   let show = prelude_trait(SHOW_ID, "Show", sv, "show",
     prelude_method(SHOW_ID, sv, "show", [sv], ["x"], TyString))
-  map.from([(ORD_ID, ord), (EQ_ID, eq), (HASH_ID, hash), (SHOW_ID, show)])
+  # Iter: four methods over two associated types. The projections are built
+  # directly -- TyAssoc over the trait's own tvar is exactly what resolving
+  # `C.Cur` in a declared trait would produce.
+  let iv = TyVar("T", -17)
+  let icur = TyAssoc(iv, ITER_ID, "Cur")
+  let iitem = TyAssoc(iv, ITER_ID, "Item")
+  let iter = TraitI {
+    id: ITER_ID,
+    name: "Iter",
+    tvar: iv,
+    is_pub: true,
+    owner: None,
+    src_path: None,
+    methods: [
+      ("iter_start", MethodSig {
+        sig: prelude_method(ITER_ID, iv, "iter_start", [iv], ["c"], icur),
+        has_default: false
+      }),
+      ("iter_done", MethodSig {
+        sig: prelude_method(ITER_ID, iv, "iter_done", [iv, icur], ["c", "k"], TyBool),
+        has_default: false
+      }),
+      ("iter_next", MethodSig {
+        sig: prelude_method(ITER_ID, iv, "iter_next", [iv, icur], ["c", "k"], icur),
+        has_default: false
+      }),
+      ("iter_get", MethodSig {
+        sig: prelude_method(ITER_ID, iv, "iter_get", [iv, icur], ["c", "k"], iitem),
+        has_default: false
+      })
+    ],
+    assoc: ["Cur", "Item"]
+  }
+  map.from([(ORD_ID, ord), (EQ_ID, eq), (HASH_ID, hash), (SHOW_ID, show), (ITER_ID, iter)])
 }
 
 fn prelude_impl(tid: Int, t: Ty) -> ImplI =
