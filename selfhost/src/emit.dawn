@@ -292,12 +292,12 @@ fn unerase_class(adts: Adts, t: Ty) -> String =
     TyVar(_, _) | TyAssoc(_, _, _) | TyNever | TyError -> obj()
   }
 
-fn pop_value(g: Gen, t: Ty) -> Unit !io = {
+fn pop_value(m: MethodVisitor, t: Ty) -> Unit !io = {
   let n = slots_of(t)
   if n == 2 {
-    g.mv.visitInsn(OP_POP2)
+    m.visitInsn(OP_POP2)
   } else if n == 1 {
-    g.mv.visitInsn(OP_POP)
+    m.visitInsn(OP_POP)
   }
   ()
 }
@@ -636,30 +636,30 @@ fn tyfn_parts(t: Ty) -> (List[Ty], Ty) =
 ## hash_of gives: this is the JVM's implementation of the `cmp` contract, and
 ## a type with no order here has to say so instead of being handed the
 ## nearest available answer.
-fn emit_scalar_cmp(g: Gen, t: Ty) -> Unit !io = {
-  emit_scalar_cmp_at(g, t)
-  g.mv.visitInsn(OP_I2L)
+fn emit_scalar_cmp(m: MethodVisitor, t: Ty) -> Unit !io = {
+  emit_scalar_cmp_at(m, t)
+  m.visitInsn(OP_I2L)
   ()
 }
 
 ## The comparison itself, leaving an int: recursion through an opaque type
 ## must not widen once per layer.
-fn emit_scalar_cmp_at(g: Gen, t: Ty) -> Unit !io = {
+fn emit_scalar_cmp_at(m: MethodVisitor, t: Ty) -> Unit !io = {
   match t {
-    TyInt -> { g.mv.visitInsn(OP_LCMP) }
+    TyInt -> { m.visitInsn(OP_LCMP) }
     TyFloat -> {
       # the total order, which disagrees with `<` on NaN and -0.0 on purpose
-      g.mv.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Double", "compare", "(DD)I", false)
+      m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Double", "compare", "(DD)I", false)
     }
     TyString -> {
       # code point order, sign only -- not String.compareTo, which is UTF-16
       # code unit order and hands back a unit difference (spec 3.5, RP-06)
-      g.mv.visitMethodInsn(OP_INVOKESTATIC, STRINGS_CLASS, "cmp",
+      m.visitMethodInsn(OP_INVOKESTATIC, STRINGS_CLASS, "cmp",
         "(Ljava/lang/String;Ljava/lang/String;)I", false)
     }
     # opacity hides a representation from other modules, not from the language:
     # the value on the stack is the target, so its order is the target's
-    TyOpaque(_, _, _, tgt) -> emit_scalar_cmp_at(g, tgt)
+    TyOpaque(_, _, _, tgt) -> emit_scalar_cmp_at(m, tgt)
     _ -> panic("codegen: no scalar order for " ++ ty_key(t))
   }
   ()
@@ -697,65 +697,65 @@ fn rt_intrinsic_class(name: String) -> Option[String] =
     None -> None
   }
 
-fn push_cmp_result(g: Gen, jump_if_true: Int) -> Unit !io = {
+fn push_cmp_result(m: MethodVisitor, jump_if_true: Int) -> Unit !io = {
   let true_l = Label.new()
   let end = Label.new()
-  g.mv.visitJumpInsn(jump_if_true, true_l)
-  g.mv.visitInsn(OP_ICONST_0)
-  g.mv.visitJumpInsn(OP_GOTO, end)
-  g.mv.visitLabel(true_l)
-  g.mv.visitInsn(OP_ICONST_1)
-  g.mv.visitLabel(end)
+  m.visitJumpInsn(jump_if_true, true_l)
+  m.visitInsn(OP_ICONST_0)
+  m.visitJumpInsn(OP_GOTO, end)
+  m.visitLabel(true_l)
+  m.visitInsn(OP_ICONST_1)
+  m.visitLabel(end)
   ()
 }
 
 ## Stack: a b (both long). Panic when b == 0 (spec §8.2 — must pass catch_fault).
-fn emit_div_zero_check(g: Gen, op: String) -> Unit !io = {
+fn emit_div_zero_check(m: MethodVisitor, op: String) -> Unit !io = {
   let ok = Label.new()
-  g.mv.visitInsn(OP_DUP2)
-  g.mv.visitInsn(OP_LCONST_0)
-  g.mv.visitInsn(OP_LCMP)
-  g.mv.visitJumpInsn(OP_IFNE, ok)
-  g.mv.visitTypeInsn(OP_NEW, PANIC_CLASS)
-  g.mv.visitInsn(OP_DUP)
-  ldc_str(g.mv, "Int " ++ op ++ " by zero")
-  g.mv.visitMethodInsn(OP_INVOKESPECIAL, PANIC_CLASS, "<init>", "(Ljava/lang/String;)V", false)
-  g.mv.visitInsn(OP_ATHROW)
-  g.mv.visitLabel(ok)
+  m.visitInsn(OP_DUP2)
+  m.visitInsn(OP_LCONST_0)
+  m.visitInsn(OP_LCMP)
+  m.visitJumpInsn(OP_IFNE, ok)
+  m.visitTypeInsn(OP_NEW, PANIC_CLASS)
+  m.visitInsn(OP_DUP)
+  ldc_str(m, "Int " ++ op ++ " by zero")
+  m.visitMethodInsn(OP_INVOKESPECIAL, PANIC_CLASS, "<init>", "(Ljava/lang/String;)V", false)
+  m.visitInsn(OP_ATHROW)
+  m.visitLabel(ok)
   ()
 }
 
-fn gen_equality(g: Gen, t: Ty, op: TBinOp) -> Unit !io = {
+fn gen_equality(m: MethodVisitor, t: Ty, op: TBinOp) -> Unit !io = {
   if t == TyBytes {
-    g.mv.visitMethodInsn(OP_INVOKESTATIC, "java/util/Arrays", "equals", "([B[B)Z", false)
+    m.visitMethodInsn(OP_INVOKESTATIC, "java/util/Arrays", "equals", "([B[B)Z", false)
     match op {
       BNeq -> {
-        g.mv.visitInsn(OP_ICONST_1)
-        g.mv.visitInsn(OP_IXOR)
+        m.visitInsn(OP_ICONST_1)
+        m.visitInsn(OP_IXOR)
       }
       _ -> ()
     }
   } else if is_ref(t) {
-    g.mv.visitMethodInsn(OP_INVOKEVIRTUAL, obj(), "equals", "(Ljava/lang/Object;)Z", false)
+    m.visitMethodInsn(OP_INVOKEVIRTUAL, obj(), "equals", "(Ljava/lang/Object;)Z", false)
     match op {
       BNeq -> {
-        g.mv.visitInsn(OP_ICONST_1)
-        g.mv.visitInsn(OP_IXOR)
+        m.visitInsn(OP_ICONST_1)
+        m.visitInsn(OP_IXOR)
       }
       _ -> ()
     }
   } else if t == TyBool {
-    g.mv.visitInsn(OP_IXOR)
+    m.visitInsn(OP_IXOR)
     match op {
       BEq -> {
-        g.mv.visitInsn(OP_ICONST_1)
-        g.mv.visitInsn(OP_IXOR)
+        m.visitInsn(OP_ICONST_1)
+        m.visitInsn(OP_IXOR)
       }
       _ -> ()
     }
   } else {
-    g.mv.visitInsn(if t == TyFloat { OP_DCMPL } else { OP_LCMP })
-    push_cmp_result(g, match op {
+    m.visitInsn(if t == TyFloat { OP_DCMPL } else { OP_LCMP })
+    push_cmp_result(m, match op {
       BEq -> OP_IFEQ
       _ -> OP_IFNE
     })
@@ -763,13 +763,13 @@ fn gen_equality(g: Gen, t: Ty, op: TBinOp) -> Unit !io = {
   ()
 }
 
-fn gen_ordering(g: Gen, t: Ty, op: TBinOp) -> Unit !io = {
+fn gen_ordering(m: MethodVisitor, t: Ty, op: TBinOp) -> Unit !io = {
   if t == TyInt {
-    g.mv.visitInsn(OP_LCMP)
+    m.visitInsn(OP_LCMP)
   } else if t == TyString {
     # `<` and `cmp` are the same comparison on String (spec 4.3): code point
     # order, via the runtime's cmp rather than compareTo's UTF-16 unit order
-    g.mv.visitMethodInsn(OP_INVOKESTATIC, STRINGS_CLASS, "cmp",
+    m.visitMethodInsn(OP_INVOKESTATIC, STRINGS_CLASS, "cmp",
       "(Ljava/lang/String;Ljava/lang/String;)I", false)
   } else {
     let use_g = match op {
@@ -777,9 +777,9 @@ fn gen_ordering(g: Gen, t: Ty, op: TBinOp) -> Unit !io = {
       BLe -> true
       _ -> false
     }
-    g.mv.visitInsn(if use_g { OP_DCMPG } else { OP_DCMPL })
+    m.visitInsn(if use_g { OP_DCMPG } else { OP_DCMPL })
   }
-  push_cmp_result(g, ord_jump(op))
+  push_cmp_result(m, ord_jump(op))
   ()
 }
 
@@ -791,16 +791,16 @@ fn ord_jump(op: TBinOp) -> Int =
     _ -> OP_IFGE
   }
 
-fn adapt_java_arg(g: Gen, dawn_ty: Ty, param_cls: String) -> Unit !io = {
+fn adapt_java_arg(m: MethodVisitor, dawn_ty: Ty, param_cls: String) -> Unit !io = {
   if dawn_ty == TyInt && param_cls == "int" {
-    g.mv.visitInsn(OP_L2I)
+    m.visitInsn(OP_L2I)
   } else if dawn_ty == TyFloat && param_cls == "float" {
-    g.mv.visitInsn(OP_D2F)
+    m.visitInsn(OP_D2F)
   } else {
     match dawn_ty {
       TyJava(fqcn, _) ->
         if not is_prim_name(param_cls) && not jreflect.is_assignable(param_cls, fqcn) {
-          g.mv.visitTypeInsn(OP_CHECKCAST, internal_of(param_cls))
+          m.visitTypeInsn(OP_CHECKCAST, internal_of(param_cls))
         }
       _ -> ()
     }
@@ -809,15 +809,15 @@ fn adapt_java_arg(g: Gen, dawn_ty: Ty, param_cls: String) -> Unit !io = {
 }
 
 ## `new C[n]` for a component class — n is already on the stack.
-fn new_array(g: Gen, component: String) -> Unit !io = {
+fn new_array(m: MethodVisitor, component: String) -> Unit !io = {
   if is_prim_name(component) {
     let t = if component == "long" { 11 } else if component == "int" { 10 }
     else if component == "double" { 7 } else if component == "float" { 6 }
     else if component == "boolean" { 4 } else if component == "short" { 9 }
     else if component == "byte" { 8 } else { 5 }
-    g.mv.visitIntInsn(OP_NEWARRAY, t)
+    m.visitIntInsn(OP_NEWARRAY, t)
   } else {
-    g.mv.visitTypeInsn(OP_ANEWARRAY, internal_of(component))
+    m.visitTypeInsn(OP_ANEWARRAY, internal_of(component))
   }
   ()
 }
@@ -848,10 +848,10 @@ fn is_list_bridge(call: TJavaCall, i: Int) -> Bool = {
 ## which Java has no name for, so it crosses as `Array` -- the backend's own
 ## type, and the only shape both sides can talk about. The result is still
 ## unmodifiable: `array_to_java` copies the window and wraps it.
-fn emit_list_bridge(g: Gen) -> Unit !io = {
-  g.mv.visitMethodInsn(OP_INVOKESTATIC, "std/pvec", "to_array",
+fn emit_list_bridge(m: MethodVisitor) -> Unit !io = {
+  m.visitMethodInsn(OP_INVOKESTATIC, "std/pvec", "to_array",
     "(L" ++ PVEC_CLASS ++ ";)L" ++ ARRAY_CLASS ++ ";", false)
-  g.mv.visitMethodInsn(OP_INVOKESTATIC, ARRAY_CLASS, "array_to_java",
+  m.visitMethodInsn(OP_INVOKESTATIC, ARRAY_CLASS, "array_to_java",
     "(L" ++ ARRAY_CLASS ++ ";)Ljava/util/List;", false)
   ()
 }
@@ -893,9 +893,9 @@ fn adapt_one_java_arg(g: Gen, call: TJavaCall, i: Int, aty: Ty, param: String) -
     Some(conv) -> emit_sam_conversion(g, conv, aty)
     None -> {
       if is_list_bridge(call, i) {
-        emit_list_bridge(g)
+        emit_list_bridge(g.mv)
       } else {
-        adapt_java_arg(g, aty, param)
+        adapt_java_arg(g.mv, aty, param)
       }
       g
     }
@@ -927,7 +927,7 @@ fn gen_java_args(g: Gen, jc: CJava) -> (Gen, Bool) !io = {
         None -> panic("variadic parameter is not an array")
       }
       push_int(g1.mv, len(jc.args) - pack)
-      new_array(g1, component)
+      new_array(g1.mv, component)
       let store = array_store_op(component)
       var k = pack
       while k < len(jc.args) {
@@ -1742,7 +1742,7 @@ fn gen_cif(
   let (g1, _) = gen_cexpr(g, cond, false)
   g1.mv.visitJumpInsn(OP_IFEQ, else_l)
   let (g2, then_falls) = gen_cexpr(g1, thn, tail)
-  if discard && then_falls { pop_value(g2, cex_ty(thn)) }
+  if discard && then_falls { pop_value(g2.mv, cex_ty(thn)) }
   match els {
     None -> {
       # An else-less `if` is typed `Unit` (or `Never`), so producing the
@@ -1761,7 +1761,7 @@ fn gen_cif(
       if then_falls { g2.mv.visitJumpInsn(OP_GOTO, end) }
       g2.mv.visitLabel(else_l)
       let (g3, else_falls) = gen_cexpr(g2, eb, tail)
-      if discard && else_falls { pop_value(g3, cex_ty(eb)) }
+      if discard && else_falls { pop_value(g3.mv, cex_ty(eb)) }
       g3.mv.visitLabel(end)
       (g3, then_falls || else_falls)
     }
@@ -2118,14 +2118,14 @@ fn gen_cbinary(g: Gen, op: CBinOp, l: CExpr, r: CExpr, ty: Ty) -> (Gen, Bool) !i
     CMul -> { g1.mv.visitInsn(if t == TyInt { OP_LMUL } else { OP_DMUL }) }
     CDiv ->
       if t == TyInt {
-        emit_div_zero_check(g1, "division")
+        emit_div_zero_check(g1.mv, "division")
         g1.mv.visitInsn(OP_LDIV)
       } else {
         g1.mv.visitInsn(OP_DDIV)
       }
     CMod ->
       if t == TyInt {
-        emit_div_zero_check(g1, "modulo")
+        emit_div_zero_check(g1.mv, "modulo")
         g1.mv.visitInsn(OP_LREM)
       } else {
         g1.mv.visitInsn(OP_DREM)
@@ -2146,12 +2146,12 @@ fn gen_cbinary(g: Gen, op: CBinOp, l: CExpr, r: CExpr, ty: Ty) -> (Gen, Bool) !i
             "(Ljava/lang/String;)Ljava/lang/String;", false)
         }
       }
-    CEq -> { gen_equality(g1, t, BEq) }
-    CNe -> { gen_equality(g1, t, BNeq) }
-    CLt -> { gen_ordering(g1, t, BLt) }
-    CLe -> { gen_ordering(g1, t, BLe) }
-    CGt -> { gen_ordering(g1, t, BGt) }
-    CGe -> { gen_ordering(g1, t, BGe) }
+    CEq -> { gen_equality(g1.mv, t, BEq) }
+    CNe -> { gen_equality(g1.mv, t, BNeq) }
+    CLt -> { gen_ordering(g1.mv, t, BLt) }
+    CLe -> { gen_ordering(g1.mv, t, BLe) }
+    CGt -> { gen_ordering(g1.mv, t, BGt) }
+    CGe -> { gen_ordering(g1.mv, t, BGe) }
     CBand -> { g1.mv.visitInsn(OP_LAND) }
     CBor -> { g1.mv.visitInsn(OP_LOR) }
     CBxor -> { g1.mv.visitInsn(OP_LXOR) }
@@ -2189,7 +2189,7 @@ fn gen_cstmt(g: Gen, s: CStmt) -> Gen !io =
     # the node that exists because a dropped value is not a dropped effect
     CSDiscard(e) -> {
       let (g1, falls) = gen_cexpr(g, e, false)
-      if falls { pop_value(g1, cex_ty(e)) }
+      if falls { pop_value(g1.mv, cex_ty(e)) }
       g1
     }
     # `discard` rather than a pop afterwards: each branch drops its own value,
@@ -2209,7 +2209,7 @@ fn gen_cstmt(g: Gen, s: CStmt) -> Gen !io =
       g1 = g2
       # the body is an expression in statement position, exactly like
       # CSDiscard's -- and a Unit body now leaves a value behind
-      if body_falls { pop_value(g1, cex_ty(body)) }
+      if body_falls { pop_value(g1.mv, cex_ty(body)) }
       # the continue target is the step, so `continue` runs it -- the whole
       # reason CSLoop carries one
       g1.mv.visitLabel(cont)
@@ -2217,7 +2217,7 @@ fn gen_cstmt(g: Gen, s: CStmt) -> Gen !io =
         Some(sv) -> {
           let (g3, falls) = gen_cexpr(g1, sv, false)
           g1 = g3
-          if falls { pop_value(g1, cex_ty(sv)) }
+          if falls { pop_value(g1.mv, cex_ty(sv)) }
         }
         None -> ()
       }
@@ -2402,7 +2402,7 @@ fn gen_cintrinsic(g: Gen, name: String, args: List[CExpr], ty: Ty) -> (Gen, Bool
     # the prelude Ord over a scalar, the other half of the same contract
     let at = cex_ty(args[0])
     let g1 = gen_cargs(g, args)
-    emit_scalar_cmp(g1, at)
+    emit_scalar_cmp(g1.mv, at)
     return (g1, true)
   }
   if name == "expect" {
