@@ -45,7 +45,10 @@ selfhost/src/jvmops.dawn        137 行   115 个 const，零函数（07-30 的�
 「GENERATED -- do not edit」），两个后端都读。把它们算进 ARCH-02 的盘子是口径错误。
 
 **ARCH-02 的真实盘子 = `codegen.dawn` 3,425 + `emit.dawn` 2,534 = 5,959 行，
-其中 2,680 行（78%）连 `Gen` 的影子都没有**（§2.2）。
+其中 `codegen.dawn` 那 3,425 行（占盘子 57%）连一处 `Gen` 引用都没有**
+（`grep -cE '\bg\.' codegen.dawn` = 0；唯一的 `Gen` 命中是一句提到 `CodeGen.kt` 的注释）。
+A1 从中搬走 2,680 行（占该文件 78%），剩下的也不含 `Gen`——所以后端第一刀是搬叶子，
+不是给 `Gen` 分层（§2.2）。
 
 ### 1.2 被复测推翻的三个数字
 
@@ -557,7 +560,7 @@ done
 | D16 | B2 的 `changed` 集怎么定 | **先在丢弃分支上实测，再写进提交信息** | 9 个 importer 里哪些的 Core 真会变，事前不可推断 |
 | D17 | 归一化不变量要不要进门禁脚本 | **否，本批以临时命令跑** | 在门禁正当门禁的时候改门禁 |
 | D18 | 给 A1 开「先于 v0.47.0」的特例吗 | **否** | 一个批次两套开工规则，评审时记不住 |
-| D19 | `lowered-ir-design.md` 说的「前提是先有 lowered IR」还成立吗 | **已满足，前提解除** | Core IR 随 native 计划 Phase 0 落地，三处漏进 emit 的 lowering 已于 `77d7aa4` 逐行关闭（`core-move2-design.md:36-60`）。emit 残余的 TAST 依赖是「关于**类**的问题」（方法名/描述符），不流经 `Cx`（`emit.dawn:1408-1412`） |
+| D19 | `lowered-ir-design.md` 说的「前提是先有 lowered IR」还成立吗 | **已满足，前提解除** | Core IR 随 native 计划 Phase 0 落地，三处漏进 emit 的 lowering 已全部关闭——逐行核对见 `core-move2-design.md:35-60`（该核对做在 `77d7aa4` 这个基线上，`77d7aa4` 本身是种子推进提交，不是关闭它们的提交）。emit 残余的 TAST 依赖是「关于**类**的问题」（方法名/描述符），不流经 `Cx`（`emit.dawn:1408-1412`） |
 
 ## 8. 收尾：文档校正清单
 
@@ -573,7 +576,7 @@ C1（开工前，把数字改对）与 C2（收尾，把结论回填）两刀。
 | `docs/audit/README.md` | :150 表 | 「ARCH-01 ──► ARCH-02」串行 → **无技术依赖，可并行**（D12），并指向本文 |
 | `docs/audit/lowered-ir-design.md` | §3.2 | 整节标注「**被 `arch-split-design.md` 取代**」；`46 字段` → 47；删 `DiagSink` 里的 **`reported_key_types`**（该字段已不存在） |
 | `docs/audit/lowered-ir-design.md` | §七 E/F 行 | 指向本文 |
-| `docs/audit/re-audit-2026-07-30.md` | :389 | `pass_register_impls` `388 行` → **463 行**（`:2780-3242`） |
+| `docs/audit/re-audit-2026-07-30.md` | :389 | `pass_register_impls` `388 行` → **461 行**（`:2780-3240`；`:3241` 是空行、`:3242` 已是下一个函数的文档注释） |
 | `docs/README.md` | 索引 | 新增本文一行（`docs/audit/` 那组的邻居，状态 proposed） |
 | `docs/runtime-intrinsics-design.md` | :3 | 状态头写「规划中，未实现」与 `docs/README.md:30` 标的 `current` 冲突，顺路统一（可选） |
 
