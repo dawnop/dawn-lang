@@ -20,7 +20,7 @@ use types.{
   intr_at,
   subst,
   peel_opaque,
-  Ty, TyInt, TyFloat, TyBool, TyString, TyUnit, TyNever, TyError, TyVar,
+  Ty, TyInt, TyFloat, TyBool, TyString, TyUnit, TyNever, TyError, TyVar, TyAssoc,
   TyAdt, TyList, TyTuple, TyFn, TyBytes, TyMap, TySet, TyArray, TyJava,
   DICT_ADT_ID,
   Sym, Sig, EPure, Traits, TraitI, ImplI, MethodSig,
@@ -155,11 +155,13 @@ fn fresh_loop(st: LSt) -> (LSt, Int) =
 ## decides it once, here.
 fn adapt_in(e: CExpr, actual: Ty, declared: Ty) -> CExpr =
   # peeled on both sides: whether a slot is erased is a question about the
-  # representation, and an opaque type's representation is its target's
+  # representation, and an opaque type's representation is its target's.
+  # A projection over a rigid subject is an erased slot exactly like the
+  # TyVar it projects from (assoc-types-design.md 4.1).
   match peel_opaque(declared) {
-    TyVar(_, _) ->
+    TyVar(_, _) | TyAssoc(_, _, _) ->
       match peel_opaque(actual) {
-        TyVar(_, _) -> e
+        TyVar(_, _) | TyAssoc(_, _, _) -> e
         _ -> CBox(e, actual)
       }
     _ -> e
@@ -189,9 +191,9 @@ fn erased_builtin_sig(name: String) -> Option[Sig] =
 
 fn adapt_out(e: CExpr, declared: Ty, actual: Ty) -> CExpr =
   match peel_opaque(declared) {
-    TyVar(_, _) ->
+    TyVar(_, _) | TyAssoc(_, _, _) ->
       match peel_opaque(actual) {
-        TyVar(_, _) -> e
+        TyVar(_, _) | TyAssoc(_, _, _) -> e
         _ -> CUnbox(e, actual)
       }
     _ -> e

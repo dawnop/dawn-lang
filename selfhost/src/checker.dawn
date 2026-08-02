@@ -13,7 +13,7 @@ use std/map
 use std/set
 use token.{Diag}
 use ast.{
-  TypeRef, TNamed, TQual, TTuple, TFn, Bound, TypeParamDecl, Module,
+  TypeRef, TNamed, TQual, TAssoc, TTuple, TFn, Bound, TypeParamDecl, Module,
   module_java_uses, module_fns, module_types, module_consts, module_traits,
   module_impls, module_tests, module_uses,
   DType, TypeDeclR, CtorDecl, FieldDecl, DTrait, TraitMethod, Param, Expr,
@@ -45,7 +45,7 @@ use tast.{
 use types.{
   intrinsics, intr_at,
   adt_self_ty, Ty, TyInt, TyFloat, TyBool, TyString, TyBytes, TyUnit, TyNever,
-  TyError, TyVar, TyAdt, TyList, TyMap, TySet, TyArray, TyJava, TyTuple, TyFn, TyOpaque,
+  TyError, TyVar, TyAssoc, TyAdt, TyList, TyMap, TySet, TyArray, TyJava, TyTuple, TyFn, TyOpaque,
   Eff, EPure, EIo, EffVar, EUnion, ELabeled, eff_union, lub_eff, eff_subsumes, eff_suffix,
   eff_base, eff_labels, eff_with_labels, EffectI, Effects, ev_record_name,
   Adts, AdtI, CtorI, FieldI, Traits, TraitI, ImplI, Sym, Sig, MethodSig,
@@ -131,6 +131,11 @@ pub type Cx = {
   eff_witness: Map[Eff, (Int, Int, String)],
   current_eff_vars: Map[String, Eff],
   current_tparams: Map[String, Ty],
+  # bounds of the type parameters in scope, keyed by the TyVar's id (not its
+  # name: fresh ids are never reused, so a stale entry can never be reached
+  # through a fresh current_tparams and no save/restore is needed). Feeds
+  # `T.Item` resolution (assoc-types-design.md D2).
+  current_tparam_bounds: Map[Int, List[Int]],
   current_sig: Option[Sig],
   # (tvar id, trait id) → dictionary symbol id
   dict_syms: Map[(Int, Int), Int],
@@ -206,6 +211,7 @@ pub fn cx_new(owner_class: Option[String], src_path: Option[String]) -> Cx = {
     eff_witness: map.empty(),
     current_eff_vars: map.empty(),
     current_tparams: map.empty(),
+    current_tparam_bounds: map.empty(),
     current_sig: None,
     dict_syms: map.empty(),
     lambda_stack: [],
@@ -457,6 +463,7 @@ pub fn builtin_type_names() -> List[String] =
 ## The span of the first effect variable inside a type reference, if any.
 pub fn effvar_span(ref: TypeRef) -> Option[(Int, Int)] =
   match ref {
+    TAssoc(_, _, _, _) -> None
     TFn(params, ret, effs, lo, hi) -> {
       for a in effs {
         if a != "io" { return Some((lo, hi)) }
@@ -622,12 +629,90 @@ pub fn resolve_type(cx: Cx, ref: TypeRef) -> (Cx, Ty) !io =
     }
     TNamed(name, targs, lo, hi) -> resolve_named(cx, name, targs, lo, hi)
     TQual(q, name, targs, lo, hi) -> resolve_qual(cx, q, name, targs, lo, hi)
+    TAssoc(subj, name, lo, hi) -> resolve_assoc(cx, subj, name, lo, hi)
+  }
+
+## Rewrite `subject.name` projections to an impl's own bindings -- used while
+## that impl's methods are being checked, before it has entered the table.
+## Everything else walks structurally.
+fn reduce_via_bindings(t: Ty, tid: Int, subject: Ty, bindings: List[(String, Ty)]) -> Ty =
+  match t {
+    TyAssoc(s0, t0, n) -> {
+      let s2 = reduce_via_bindings(s0, tid, subject, bindings)
+      if t0 == tid && s2 == subject {
+        var out = TyAssoc(s2, t0, n)
+        for pr in bindings {
+          let (bn, bt) = pr
+          if bn == n { out = bt }
+        }
+        out
+      } else {
+        TyAssoc(s2, t0, n)
+      }
+    }
+    TyAdt(aid, targs) ->
+      if len(targs) == 0 { t } else {
+        TyAdt(aid, map(targs, x => reduce_via_bindings(x, tid, subject, bindings)))
+      }
+    TyList(e) -> TyList(reduce_via_bindings(e, tid, subject, bindings))
+    TyMap(k, v) ->
+      TyMap(reduce_via_bindings(k, tid, subject, bindings),
+        reduce_via_bindings(v, tid, subject, bindings))
+    TySet(e) -> TySet(reduce_via_bindings(e, tid, subject, bindings))
+    TyArray(e) -> TyArray(reduce_via_bindings(e, tid, subject, bindings))
+    TyTuple(elems) -> TyTuple(map(elems, x => reduce_via_bindings(x, tid, subject, bindings)))
+    TyOpaque(id, n2, ow, tgt) -> TyOpaque(id, n2, ow, reduce_via_bindings(tgt, tid, subject, bindings))
+    TyFn(params, ret, eff) ->
+      TyFn(map(params, x => reduce_via_bindings(x, tid, subject, bindings)),
+        reduce_via_bindings(ret, tid, subject, bindings), eff)
+    TyVar(_, _) -> t
+    TyInt | TyFloat | TyBool | TyString | TyBytes -> t
+    TyUnit | TyNever | TyError | TyJava(_, _) -> t
+  }
+
+## `T.Item` -- the subject must be a type parameter in scope, and exactly one
+## of its bounds must declare `name` (assoc-types-design.md D2). Zero declarers
+## and ambiguity are both errors here; nothing is deferred.
+fn resolve_assoc(cx: Cx, subj: String, name: String, lo: Int, hi: Int) -> (Cx, Ty) =
+  match map.get(cx.current_tparams, subj) {
+    None ->
+      (cerr_h(cx, "a projection's subject must be a type parameter in scope, and `" ++
+          subj ++ "` is not one", lo, hi,
+        "write `T." ++ name ++ "` where `T` is a `[T: SomeTrait]` parameter whose trait " ++
+          "declares `type " ++ name ++ "`"), TyError)
+    Some(v) -> {
+      let vid = match v {
+        TyVar(_, id) -> id
+        _ -> -1
+      }
+      let bs = match map.get(cx.current_tparam_bounds, vid) {
+        Some(x) -> x
+        None -> []
+      }
+      var owners: List[Int] = []
+      for tid in bs {
+        for an in trait_of(cx.traits, tid).assoc {
+          if an == name && not list.contains(owners, tid) { owners = owners ++ [tid] }
+        }
+      }
+      if len(owners) == 0 {
+        (cerr_h(cx, "no trait bound on `" ++ subj ++ "` declares an associated type `" ++
+            name ++ "`", lo, hi,
+          "the trait in the bound needs a `type " ++ name ++ "` member"), TyError)
+      } else if len(owners) > 1 {
+        (cerr_h(cx, "`" ++ subj ++ "." ++ name ++ "` is ambiguous: more than one bound declares `" ++
+            name ++ "`", lo, hi, "rename the associated type in one of the traits"), TyError)
+      } else {
+        (cx, TyAssoc(v, owners[0], name))
+      }
+    }
   }
 
 fn t_lo2(t: TypeRef) -> Int =
   match t {
     TNamed(_, _, lo, _) -> lo
     TQual(_, _, _, lo, _) -> lo
+    TAssoc(_, _, lo, _) -> lo
     TTuple(_, lo, _) -> lo
     TFn(_, _, _, lo, _) -> lo
   }
@@ -636,6 +721,7 @@ fn t_hi2(t: TypeRef) -> Int =
   match t {
     TNamed(_, _, _, hi) -> hi
     TQual(_, _, _, _, hi) -> hi
+    TAssoc(_, _, _, hi) -> hi
     TTuple(_, _, hi) -> hi
     TFn(_, _, _, _, hi) -> hi
   }
@@ -983,6 +1069,70 @@ pub fn unify_branches(cx: Cx, a: Ty, b: Ty, lo: Int, hi: Int, what: String) -> (
 ## Structural unification of a declared type against an actual argument type,
 ## accumulating bindings (var id → type / effect). Returns the updated maps and
 ## whether the shapes agreed.
+## Reduce projections through the impl table (assoc-types-design.md 4.2):
+## `T.Item` whose subject has a concrete head reads the binding off the same
+## impl a witness would use (D5) -- one door, one answer. An opaque subject
+## answers for itself first and then through its target, mirroring
+## resolve_witness. A projection over a still-rigid subject stays put: the
+## canonical-form invariant only bans it from ground types.
+pub fn reduce_assoc(cx: Cx, t: Ty) -> Ty =
+  match t {
+    TyAssoc(s0, tid, n) -> {
+      let s = reduce_assoc(cx, s0)
+      let keep = TyAssoc(s, tid, n)
+      match head_of(s) {
+        None -> keep
+        Some(_) ->
+          match assoc_impl_of(cx, tid, s) {
+            None -> keep
+            Some(ii) -> {
+              var bound: Option[Ty] = None
+              for pr in ii.assoc_bindings {
+                let (bn, bt) = pr
+                if bn == n { bound = Some(bt) }
+              }
+              match bound {
+                # a missing binding already errored at the impl; stay put
+                None -> keep
+                Some(bt) -> {
+                  let e0: Map[Int, Ty] = map.empty()
+                  let ee0: Map[Int, Eff] = map.empty()
+                  let (m2, em2, ok) = unify_into(cx, ii.subject, s, e0, ee0)
+                  if ok { reduce_assoc(cx, subst(bt, m2, em2)) } else { keep }
+                }
+              }
+            }
+          }
+      }
+    }
+    TyAdt(aid, targs) ->
+      if len(targs) == 0 { t } else { TyAdt(aid, map(targs, x => reduce_assoc(cx, x))) }
+    TyList(e) -> TyList(reduce_assoc(cx, e))
+    TyMap(k, v) -> TyMap(reduce_assoc(cx, k), reduce_assoc(cx, v))
+    TySet(e) -> TySet(reduce_assoc(cx, e))
+    TyArray(e) -> TyArray(reduce_assoc(cx, e))
+    TyTuple(elems) -> TyTuple(map(elems, x => reduce_assoc(cx, x)))
+    TyOpaque(id, n2, ow, tgt) -> TyOpaque(id, n2, ow, reduce_assoc(cx, tgt))
+    TyFn(params, ret, eff) ->
+      TyFn(map(params, x => reduce_assoc(cx, x)), reduce_assoc(cx, ret), eff)
+    TyVar(_, _) -> t
+    TyInt | TyFloat | TyBool | TyString | TyBytes -> t
+    TyUnit | TyNever | TyError | TyJava(_, _) -> t
+  }
+
+## The impl a projection reduces through: the subject's own, or -- for an
+## opaque subject with no impl of its own -- its target's, the order
+## resolve_witness uses.
+fn assoc_impl_of(cx: Cx, tid: Int, s: Ty) -> Option[ImplI] =
+  match impl_at(cx.impl_table, tid, s) {
+    Some(ii) -> Some(ii)
+    None ->
+      match s {
+        TyOpaque(_, _, _, tgt) -> assoc_impl_of(cx, tid, tgt)
+        _ -> None
+      }
+  }
+
 pub fn unify_into(
   cx: Cx,
   declared: Ty,
@@ -1015,6 +1165,16 @@ pub fn unify_into(
         None -> (map.insert(m, id, actual), em, true)
         Some(bound) -> (m, em, bound == actual)
       }
+    # a projection reduces first if what is known so far (m) makes its
+    # subject concrete; a still-rigid one unifies only with the same
+    # projection (assoc-types-design.md D7)
+    TyAssoc(_, _, _) -> {
+      let d2 = reduce_assoc(cx, subst(declared, m, em))
+      match d2 {
+        TyAssoc(_, _, _) -> (m, em, d2 == actual)
+        _ -> unify_into(cx, d2, actual, m, em)
+      }
+    }
     TyAdt(aid, dargs) ->
       match actual {
         TyAdt(aid2, aargs) -> {
@@ -2198,6 +2358,39 @@ pub fn pass_register_traits(cx: Cx, m: Module) -> Cx !io = {
     let (cx2, tvar) = fresh_tvar(cx1, d.tp)
     let (cx3, tid) = fresh(cx2)
     cx1 = cx3
+    # associated types register before the methods, and the trait enters the
+    # table provisionally with them, so a method signature can already project
+    # its own trait (`C.Item` in resolve_assoc reads t.assoc by id)
+    var assoc_names: List[String] = []
+    for a in d.assoc {
+      if list.contains(assoc_names, a.name) {
+        cx1 = cerr(cx1, "associated type `" ++ a.name ++ "` is declared twice in trait `" ++
+            d.name ++ "`", a.nlo, a.nhi)
+      } else {
+        assoc_names = assoc_names ++ [a.name]
+      }
+    }
+    cx1 = Cx {
+      ..cx1,
+      traits: map.insert(cx1.traits, tid, TraitI {
+        id: tid,
+        name: d.name,
+        tvar: tvar,
+        is_pub: d.is_pub,
+        owner: cx1.owner_class,
+        src_path: cx1.src_path,
+        methods: [],
+        assoc: assoc_names
+      })
+    }
+    let tvid = match tvar {
+      TyVar(_, id) -> id
+      _ -> -1
+    }
+    cx1 = Cx {
+      ..cx1,
+      current_tparam_bounds: map.insert(cx1.current_tparam_bounds, tvid, [tid])
+    }
     var methods: List[(String, MethodSig)] = []
     var tp: Map[String, Ty] = map.empty()
     tp = map.insert(tp, d.tp, tvar)
@@ -2290,7 +2483,8 @@ pub fn pass_register_traits(cx: Cx, m: Module) -> Cx !io = {
       is_pub: d.is_pub,
       owner: cx1.owner_class,
       src_path: cx1.src_path,
-      methods: methods
+      methods: methods,
+      assoc: assoc_names
     }
     cx1 = Cx {
       ..cx1,
@@ -2317,7 +2511,7 @@ test "trait registration puts methods in the fn namespace" {
     hi: 38,
     nlo: 17,
     nhi: 20
-  }], false, 0, 40, 6, 9)] }
+  }], [], false, 0, 40, 6, 9)] }
   var cx = seed_prelude(test_cx())
   cx = pass_register_traits(cx, m)
   assert len(cx.diags) == 0
@@ -2338,7 +2532,7 @@ test "trait registration puts methods in the fn namespace" {
     hi: 38,
     nlo: 17,
     nhi: 20
-  }], false, 0, 40, 6, 9)] }
+  }], [], false, 0, 40, 6, 9)] }
   let cx2 = pass_register_traits(cx, m2)
   assert len(cx2.diags) == 1
   assert str.contains(cx2.diags[0].msg, "already a method of trait `Eq2`")
@@ -2465,7 +2659,8 @@ pub fn pass_register_impls(
         derived: true,
         owner: cx1.owner_class,
         src_path: cx1.src_path,
-        provided: []
+        provided: [],
+        assoc_bindings: []
       }
       cx1 = Cx {
         ..cx1,
@@ -2512,6 +2707,19 @@ pub fn pass_register_impls(
     cx1 = Cx { ..cx1, current_tparams: tp_scope, current_eff_vars: empty_ev }
     let (cxbnd, iconstraints) = resolve_bounds(cx1, d.tparams)
     cx1 = cxbnd
+    var ibd = cx1.current_tparam_bounds
+    var ibi = 0
+    for v in itvars {
+      match v {
+        TyVar(_, ivid) -> {
+          ibd = map.insert(ibd, ivid,
+            if ibi < len(iconstraints) { iconstraints[ibi] } else { [] })
+        }
+        _ -> ()
+      }
+      ibi = ibi + 1
+    }
+    cx1 = Cx { ..cx1, current_tparam_bounds: ibd }
     let (cx2, subject) = resolve_type(cx1, d.subject)
     cx1 = cx2
     if subject == TyError {
@@ -2573,6 +2781,45 @@ pub fn pass_register_impls(
     }
     if tid == EQ_ID || tid == HASH_ID {
       eq_hash_impls = eq_hash_impls ++ [(tid, subject, d.tlo, d.thi)]
+    }
+    # `type Item = X` bindings: each associated type the trait declares,
+    # exactly once. The RHS resolves in the impl's own tparam scope and may
+    # not itself be a projection (assoc-types-design.md D4/D6).
+    var assoc_bindings: List[(String, Ty)] = []
+    var bound_ns: List[String] = []
+    for ab in d.assoc {
+      if not list.contains(tr.assoc, ab.name) {
+        cx1 = cerr_h(cx1, "trait `" ++ tr.name ++ "` does not declare an associated type `" ++
+            ab.name ++ "`", ab.nlo, ab.nhi,
+          if len(tr.assoc) == 0 {
+            "the trait declares no associated types"
+          } else {
+            "it declares: " ++ join(tr.assoc, ", ")
+          })
+        continue
+      }
+      if list.contains(bound_ns, ab.name) {
+        cx1 = cerr(cx1, "associated type `" ++ ab.name ++ "` is bound twice in this impl",
+          ab.nlo, ab.nhi)
+        continue
+      }
+      bound_ns = bound_ns ++ [ab.name]
+      let (cxab, bt) = resolve_type(cx1, ab.tref)
+      cx1 = cxab
+      match bt {
+        TyAssoc(_, _, _) -> {
+          cx1 = cerr_h(cx1, "an associated type binding cannot be a projection", ab.nlo, ab.nhi,
+            "bind `" ++ ab.name ++ "` to a concrete type or an impl parameter")
+        }
+        _ -> { assoc_bindings = assoc_bindings ++ [(ab.name, bt)] }
+      }
+    }
+    for an in tr.assoc {
+      if not list.contains(bound_ns, an) {
+        cx1 = cerr_h(cx1, "impl `" ++ tr.name ++ "[" ++ ty_show(cx1.adts, subject) ++
+            "]` is missing `type " ++ an ++ "`", d.tlo, d.thi,
+          "bind it: `type " ++ an ++ " = <type>`")
+      }
     }
     var inst: Map[Int, Ty] = map.empty()
     match tr.tvar {
@@ -2660,8 +2907,14 @@ pub fn pass_register_impls(
       }
       let inst2 = inst
       let adts2 = cx1.adts
-      let want = map(msv.sig.param_tys, t => subst(t, inst2, em0))
-      let want_ret = subst(msv.sig.ret, inst2, em0)
+      # the impl is not in the table yet, so a `C.Item` in the trait's
+      # signature reduces through this impl's own bindings, not impl_at
+      let ab2 = assoc_bindings
+      let tid2 = tid
+      let subject2 = subject
+      let want = map(msv.sig.param_tys,
+        t => reduce_via_bindings(subst(t, inst2, em0), tid2, subject2, ab2))
+      let want_ret = reduce_via_bindings(subst(msv.sig.ret, inst2, em0), tid2, subject2, ab2)
       let want_render = "fn " ++ me.name ++ "(" ++
         join(map(want, t => ty_show(adts2, t)), ", ") ++ ") -> " ++
         ty_show(cx1.adts, want_ret) ++ eff_suffix(msv.sig.eff)
@@ -2736,7 +2989,8 @@ pub fn pass_register_impls(
       derived: false,
       owner: cx1.owner_class,
       src_path: cx1.src_path,
-      provided: provided
+      provided: provided,
+      assoc_bindings: assoc_bindings
     }
     cx1 = Cx {
       ..cx1,
@@ -2854,9 +3108,9 @@ test "impl registration enforces coherence and signature matching" {
     hi: 13,
     nlo: 0,
     nhi: 3
-  }], lo, lo + 20)
+  }], [], lo, lo + 20)
   let m = Module { decls: [
-    DTrait("Eq4", "T", 10, 11, [tm], false, 0, 40, 6, 9),
+    DTrait("Eq4", "T", 10, 11, [tm], [], false, 0, 40, 6, 9),
     good_impl(50),
     good_impl(80)
   ] }
@@ -2870,8 +3124,8 @@ test "impl registration enforces coherence and signature matching" {
   assert len(cx.local_impls) == 1
   # a missing method reports with the expected render
   let m2 = Module { decls: [
-    DTrait("Eq5", "T", 10, 11, [TraitMethod { ..tm, name: "eq5" }], false, 0, 40, 6, 9),
-    DImpl([], "Eq5", 50, 53, TNamed("Int", [], 54, 57), no_fn_decls(), 50, 70)
+    DTrait("Eq5", "T", 10, 11, [TraitMethod { ..tm, name: "eq5" }], [], false, 0, 40, 6, 9),
+    DImpl([], "Eq5", 50, 53, TNamed("Int", [], 54, 57), no_fn_decls(), [], 50, 70)
   ] }
   var cx2 = seed_prelude(test_cx())
   cx2 = pass_register_traits(cx2, m2)
@@ -2949,6 +3203,23 @@ pub fn pass_fn_signatures(cx: Cx, m: Module) -> (Cx, List[Sig], List[Map[String,
     let saved_ev = cx1.current_eff_vars
     let empty_ev: Map[String, Eff] = map.empty()
     cx1 = Cx { ..cx1, current_tparams: tp_scope, current_eff_vars: empty_ev }
+    # bounds resolve before the parameter types, so a `T.Item` in one can
+    # find its trait (assoc-types-design.md D2)
+    let (cxbd, constraints) = resolve_bounds(cx1, d.tparams)
+    cx1 = cxbd
+    var fbd = cx1.current_tparam_bounds
+    var fbi = 0
+    for v in tvars {
+      match v {
+        TyVar(_, fvid) -> {
+          fbd = map.insert(fbd, fvid,
+            if fbi < len(constraints) { constraints[fbi] } else { [] })
+        }
+        _ -> ()
+      }
+      fbi = fbi + 1
+    }
+    cx1 = Cx { ..cx1, current_tparam_bounds: fbd }
     let (cx3, eff) = resolve_eff_at(cx1, d.effs, d.nlo, d.nhi)
     cx1 = cx3
     let inferring = match d.ret {
@@ -2966,8 +3237,6 @@ pub fn pass_fn_signatures(cx: Cx, m: Module) -> (Cx, List[Sig], List[Map[String,
       None -> (cx1, TyError)
     }
     cx1 = cx5
-    let (cx6, constraints) = resolve_bounds(cx1, d.tparams)
-    cx1 = cx6
     let ev = cx1.current_eff_vars
     cx1 = Cx { ..cx1, current_tparams: saved_tp, current_eff_vars: saved_ev }
     # until the body is checked, an unannotated fn assumes the worst effect
@@ -7130,7 +7399,7 @@ fn check_call(
       }
       let skip = round == 0 && needs_expected(cx1, a)
       if not done && not skip {
-        let substd = subst(s.param_tys[i], m, em)
+        let substd = reduce_assoc(cx1, subst(s.param_tys[i], m, em))
         # lambdas only need their parameter types, and function values unify
         # piecewise — a partially concrete expected type still helps
         let exp2: Option[Ty] =
@@ -7144,7 +7413,7 @@ fn check_call(
         em = em3
         if not ok {
           cx1 = cerr_h(cx1, "argument type mismatch: expected " ++
-              ty_show(cx1.adts, subst(s.param_tys[i], m, em)) ++ ", got " ++
+              ty_show(cx1.adts, reduce_assoc(cx1, subst(s.param_tys[i], m, em))) ++ ", got " ++
               ty_show(cx1.adts, at), e_lo(a), e_hi(a),
             "signature: " ++ sig_render(cx1.adts, cx1.traits, s))
         }
@@ -7226,7 +7495,9 @@ fn check_call(
   # instantiate the callee's effect: an unbound effect variable means pure
   let callee_eff = instantiate_eff(s.eff, em)
   cx1 = record_effect(cx1, callee_eff, clo, chi, callee)
-  let ret = subst(s.ret, m, em)
+  # the one instantiation choke point: a projection whose subject just became
+  # concrete reduces here, so no ground type ever carries one (D3)
+  let ret = reduce_assoc(cx1, subst(s.ret, m, em))
   var txs2: List[TExpr] = []
   for sl in tx_slots {
     match sl {
@@ -9234,13 +9505,25 @@ fn dict_sym_list(cx: Cx, s: Sig) -> List[Int] = {
 ## dictionaries, fresh effect record, one root scope.
 fn enter_fn(cx: Cx, s: Sig, ev: Map[String, Eff], nlo: Int, nhi: Int) -> Cx = {
   var tp: Map[String, Ty] = map.empty()
+  var bd = cx.current_tparam_bounds
+  var ti = 0
   for tv in s.tparams {
     match tv {
-      TyVar(tn, _) -> { tp = map.insert(tp, tn, tv) }
+      TyVar(tn, tvid) -> {
+        tp = map.insert(tp, tn, tv)
+        bd = map.insert(bd, tvid, bounds_of(s, ti))
+      }
       _ -> ()
     }
+    ti = ti + 1
   }
-  var cx1 = Cx { ..cx, current_tparams: tp, current_eff_vars: ev, current_sig: Some(s) }
+  var cx1 = Cx {
+    ..cx,
+    current_tparams: tp,
+    current_tparam_bounds: bd,
+    current_eff_vars: ev,
+    current_sig: Some(s)
+  }
   cx1 = bind_dicts(cx1, s, nlo, nhi)
   let empty_w: Map[Eff, (Int, Int, String)] = map.empty()
   cx1 = Cx {

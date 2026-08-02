@@ -37,7 +37,7 @@
 use tast.{TJavaCall}
 use types.{
   Ty, TyInt, TyFloat, TyBool, TyString, TyUnit, TyNever, TyError, TyAdt,
-  TyVar, TyList, TyMap, TySet, TyArray, TyTuple, TyFn, TyBytes, TyJava
+  TyVar, TyList, TyMap, TySet, TyArray, TyTuple, TyFn, TyBytes, TyJava, TyAssoc
 }
 
 ## Where a call goes. Dawn is dictionary-passing, not monomorphising, so
@@ -350,6 +350,9 @@ pub fn ty_key(t: Ty) -> String =
     # it, and an impl at each has to get its own name
     TyOpaque(id, _, _, tgt) -> "Op" ++ to_string(id) ++ "_" ++ ty_key(tgt)
     TyVar(_, id) -> "Var" ++ to_string(id)
+    # never a key: reduction is eager and projections cannot be impl subjects,
+    # so a projection reaching a symbol name is a compiler bug, not a program
+    TyAssoc(_, _, _) -> panic("unreduced projection in ty_key")
     TyList(e) -> "List_" ++ ty_key(e)
     TyMap(k, v) -> "Map_" ++ ty_key(k) ++ "_" ++ ty_key(v)
     TySet(e) -> "Set_" ++ ty_key(e)

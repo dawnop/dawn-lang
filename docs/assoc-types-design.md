@@ -1,6 +1,6 @@
 # 关联类型设计 — trait 的 `type Item` 与投影 `T.Item`
 
-> 状态：proposed（2026-08-02，实施未开始；D1/D2/D11 已由用户定案）
+> 状态：current（刀 1 已落地 2026-08-02，全门禁绿；刀 2 = std Iter + for 去特判，等发布 + 种子推进后开）
 >
 > 任务 #44。勘察备忘录（2026-08-02，基线 6dfc34b）先行，本文所有 file:line 均对该基线；
 > 用户裁决三项合同级决策于 2026-08-02（§2）。运算符 trait 的前置。
@@ -145,8 +145,10 @@ witness 同门，D5）→ 取该 impl 的 `assoc_bindings[n]`，用 impl 的 tpa
 - **RX-10-B（效果参数进类型参数表）**：正交；`type Item` 是类型轴成员，效果轴另说。
 - **comptime/interp**：类型层特性，interp 无感。
 - **doc/fmt/LSP**（勘察 §7）：doc.dawn trait 渲染加 assoc 数组（形状照 #115 的 effects
-  先例）；fmt 的 trait 体成员对齐加 TYPE 分支；LSP 补全在类型位 `T.` 后补关联类型名。
-  三件都在刀 1 内（doc 的输出变化带 `Emit-Change(doc *)` 声明）。
+  先例）；fmt 免费正确（词法级，`type` 行与 `T.Item` 实测幂等，零改动）。LSP：实施时
+  发现补全对**任何** `.` 后位置都返回空（lspc.dawn:226，模块成员也不补）——「`T.` 后补
+  关联类型名」没有可搭的机制，会是第一套点号补全，超出本刀；投影随既有基线，
+  点号补全整体另立项。doc 的输出变化带 `Emit-Change(doc *)` 声明。
 
 ## 5. spec 落点
 
