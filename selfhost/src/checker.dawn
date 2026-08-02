@@ -3164,10 +3164,17 @@ pub fn pass_register_impls(
     }
     impl_sigs = impl_sigs ++ [msigs]
   }
-  # the derived field checks, after every impl is known -- which is why they
-  # are here and not with the declaration passes: what a field needs is an
-  # impl, and the module's own are registered just above
-  di = 0
+  cx1 = check_derived_fields(cx1, m, shells)
+  cx1 = check_eq_hash_pairs(cx1, eq_hash_impls)
+  (cx1, impl_sigs)
+}
+
+## The derived-field checks for `Ord`/`Show`, run once every impl is known --
+## which is why they are not with the declaration passes: what a field needs is
+## an impl, and the module's own are registered by the caller just above.
+fn check_derived_fields(cx: Cx, m: Module, shells: List[Option[Shell]]) -> Cx = {
+  var cx1 = cx
+  var di = 0
   for d in module_types(m) {
     let sh = match shells[di] {
       None -> {
@@ -3210,11 +3217,16 @@ pub fn pass_register_impls(
     }
     di = di + 1
   }
-  # Eq and Hash have to be overridden together. The JVM materialises the two
-  # dictionaries as the class's equals/hashCode, and every container reaches
-  # the relation through that pair; overriding one leaves `a == b` and
-  # `map.get(m, b)` answering differently. The orphan rule keeps both impls in
-  # the subject's own module, so this module sees the pair or the gap.
+  cx1
+}
+
+## Eq and Hash have to be overridden together. The JVM materialises the two
+## dictionaries as the class's equals/hashCode, and every container reaches
+## the relation through that pair; overriding one leaves `a == b` and
+## `map.get(m, b)` answering differently. The orphan rule keeps both impls in
+## the subject's own module, so this module sees the pair or the gap.
+fn check_eq_hash_pairs(cx: Cx, eq_hash_impls: List[(Int, Ty, Int, Int)]) -> Cx = {
+  var cx1 = cx
   for pr in eq_hash_impls {
     let (tid, subject, plo, phi) = pr
     let other = if tid == EQ_ID { HASH_ID } else { EQ_ID }
@@ -3236,7 +3248,7 @@ pub fn pass_register_impls(
         "equal values must hash alike, or the type breaks as a Map/Set key")
     }
   }
-  (cx1, impl_sigs)
+  cx1
 }
 
 ## Render a concrete effect for the impl-method error text ("io").
