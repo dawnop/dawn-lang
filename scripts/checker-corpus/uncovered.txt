@@ -1,0 +1,15 @@
+# `cerr` call sites in selfhost/src/checker*.dawn that no corpus case reaches.
+# Regenerate with `./scripts/checker-corpus/run.sh --record`; the reason column
+# is kept across regenerations, so write it once.
+#
+# A ratchet in both directions (see coverage.py): a new unreached site fails
+# the build, and so does a listed site that became reachable.
+#
+# 240 sites, 235 reached, 5 here.
+#
+#   <message expression>	<why no case reaches it>
+  "Array takes exactly one type argument: Array[T]"	guarded by `cx.is_std_module`: outside std the name falls through to the ordinary lookups, so a user file gets `unknown type: Array` instead. Only a std module can reach it, and std has no wrong-arity `Array[...]`.
+  "`use java` is not available in this compiler"	fires when `cx.jsig` is the refusing default, which is the native driver. `dawn check` runs on the JVM with `jsig_real()`, so no case run by this corpus can reach it.
+  "unsafe_pure cannot mask the effect variable !" ++ eff_show(p) ++ " — it only vouches that a concrete io effect is absent"	behind the `not cx.is_std_module` early return in check_unsafe_pure: user code is refused before the body is inspected. Only a std module reaches this branch.
+  "redundant unsafe_pure: the block is already pure"	same early return as the line above -- std-only.
+  "`" ++ name ++ "` is not a function; import it with `use " ++ ex.mod_path ++ ".{" ++ name ++ "}`"	suspected dead. It needs `alias.name(...)` to reach check_module_call with `name` in the module's types or consts, but type names are UpperCamel and const names are SCREAMING_SNAKE, and neither spelling routes there -- `lib.Shown()` reports `undefined variable: lib`, `lib.OPEN()` reports `cannot call a value of type Int`. No reachable spelling found; not a change this knife makes.

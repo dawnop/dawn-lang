@@ -1,0 +1,49 @@
+# checker.dawn: the closure `with` synthesizes refuses return/break/continue,
+# refuses assignment to an outer var, and refuses to capture one
+effect Ask { fn get() -> Int }
+
+fn bracketish(a: Int, k: fn(Int) -> Int) -> Int = k(a)
+
+pub fn returns() -> Int = {
+  with x <- bracketish(1)
+  return x
+}
+
+pub fn breaks() -> Unit = {
+  var i = 0
+  while i < 3 {
+    with x <- bracketish(1)
+    break
+  }
+}
+
+pub fn arm_returns() -> Int = {
+  with handle Ask {
+    get() => return 1
+  }
+  2
+}
+
+pub fn arm_assigns() -> Int = {
+  var n = 0
+  with handle Ask {
+    get() => {
+      n = 1
+      2
+    }
+  }
+  n
+}
+
+pub fn arm_captures_var() -> Int = {
+  var n = 0
+  with handle Ask {
+    get() => n
+  }
+  n
+}
+
+fn qmark(x: Option[Int]) = {
+  with y <- bracketish(1)
+  x?
+}
