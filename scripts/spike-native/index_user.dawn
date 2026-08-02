@@ -1,0 +1,63 @@
+# A user type with `[]`, which is the whole point of knife 2.
+#
+# docs/operator-traits-design.md §4.6. Before the `Index` trait this file
+# could not exist: the checker matched the subject of `[]` against a two-arm
+# list of the types it had heard of, and `Grid` was never going to be on it.
+# The reason to buy the trait was not "the compiler loses two arms" -- they
+# moved to lowering rather than disappearing -- it was this file compiling.
+#
+# Nothing here is special-cased. `impl Index[Grid]` registers, checks its
+# associated bindings and is found by the same `resolve_witness` a `[T: Eq]`
+# bound uses; `g[p]` devirtualises to a direct call on the impl method, the
+# ordinary route for an impl that has a body. What the prelude does for List
+# and Map (mint an impl with no body and let `prim_relation` be the body) is
+# the *unusual* route, and a user type never takes it.
+#
+# `Idx = (Int, Int)` is deliberate. A tuple index falls out of the shape --
+# `Idx` is a type, not a list of parameters -- so two-dimensional subscripting
+# needs no support of its own. `Idx = String` on the second type says the
+# index is not obliged to be integral either.
+use std/io
+use std/map
+
+pub type Grid = { w: Int, cells: List[Int] }
+
+impl Index[Grid] {
+  type Idx = (Int, Int)
+  type Item = Int
+  fn index(g: Grid, p: (Int, Int)) -> Int = {
+    let (x, y) = p
+    g.cells[y * g.w + x]
+  }
+}
+
+## An index type that is not a position at all, over a type whose `Item` is
+## itself a container -- so `env["a"][1]` chains a user impl into a prelude one.
+pub type Env = { entries: Map[String, List[Int]] }
+
+impl Index[Env] {
+  type Idx = String
+  type Item = List[Int]
+  fn index(e: Env, k: String) -> List[Int] = e.entries[k]
+}
+
+fn s(x: String) -> String !io = x
+
+pub fn main() -> Unit !io = {
+  let g = Grid { w: 3, cells: [1, 2, 3, 4, 5, 6] }
+  println("-- a user type, indexed by a tuple --")
+  println(to_string(g[(0, 0)]))
+  println(to_string(g[(2, 1)]))
+  println(to_string(g[(1, 0)] + g[(1, 1)]))
+
+  println("-- an index that is a String, and an item that is a List --")
+  let e = Env { entries: map.from([("xs", [7, 8, 9]), ("ys", [1])]) }
+  println(to_string(e["xs"][2]))
+  println(to_string(e[s("ys")][0]))
+
+  println("-- the impl method is an ordinary body: it may index in turn --")
+  let rows = [g[(0, 1)], g[(1, 1)], g[(2, 1)]]
+  for r in rows {
+    println(to_string(r))
+  }
+}

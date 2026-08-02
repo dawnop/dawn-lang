@@ -1,0 +1,107 @@
+# `[]` behind a `[C: Index]` bound: the dictionary track.
+#
+# This file is not optional and index_ok.dawn says why. Every other subscript
+# in the corpus devirtualises -- the subject is known at the call, so lowering
+# spells the relation out and no dictionary is ever built. A bounded generic
+# is the one shape that cannot: `first` is compiled once, and which relation
+# `c[i]` means arrives as a dictionary argument. Filling that dictionary slot
+# for a prelude impl goes through `make_prim_slot`, which had been wrong for
+# `Index` from the moment the trait existed:
+#
+#   for gt in sg.param_tys { args ++ [adapt_out(CLocal(sym, gt), gt, subject)] }
+#
+# -- every parameter adapted to the subject type. True of Eq, Ord, Hash and
+# Show, whose parameters are all the subject; false of `index`, whose second
+# parameter is `C.Idx`. At `C = List[Int]` that unboxes the Int index as a
+# `std/pvec$Vec`, and the JVM refuses the class:
+#
+#   VerifyError: Bad type on operand stack
+#     Location: prim$5$List_Int$index(...)
+#     Reason: Type 'std/pvec$Vec' is not assignable to long_2nd
+#
+# The same hole, in the same function, escaped knife 1 of the associated-types
+# work (assoc-types-design.md §6, "现场发现 1") for the same reason: the corpus
+# only covered the devirtualised shape. Twice is enough to write the rule down
+# -- a trait whose parameters are not all the subject needs a corpus file that
+# reaches the dictionary.
+#
+# Three instantiations, three routes to a slot:
+#
+#   List[Int]           a prelude impl with no bounds -- the dictionary is a
+#                       constant, and the slot is `prim_relation` inlined
+#   Map[String, Int]    a prelude impl bounded on K -- the dictionary is built
+#                       from Eq/Hash/Show's and the slot reads them back out
+#   Grid                a user impl with a body -- the slot is a bridge that
+#                       unboxes into the impl method's own signature
+use std/io
+use std/map
+
+pub type Grid = { w: Int, cells: List[Int] }
+
+impl Index[Grid] {
+  type Idx = (Int, Int)
+  type Item = Int
+  fn index(g: Grid, p: (Int, Int)) -> Int = {
+    let (x, y) = p
+    g.cells[y * g.w + x]
+  }
+}
+
+## The generic consumer. `C` is fixed by parameter 0, which is not a
+## projection; `C.Idx` and `C.Item` only participate in checking (#119 D6).
+fn first[C: Index](c: C, i: C.Idx) -> C.Item = c[i]
+
+## ...and one that never indexes anything itself, so its witness is forwarded
+## rather than resolved: the dictionary crosses one more call boundary.
+fn relay[C: Index](c: C, i: C.Idx) -> C.Item = first(c, i)
+
+## The same, through a closure, so the dictionary is captured rather than
+## passed -- lambdas capture witnesses like any other hidden argument.
+fn through_lambda[C: Index](c: C, i: C.Idx) -> C.Item = {
+  let f = (x: C) => first(x, i)
+  f(c)
+}
+
+## Two subscripts of *different* types in one body: the two dictionaries have
+## to stay apart, which they do because a dictionary is keyed by (trait,
+## subject) and not by the type parameter's name.
+##
+## The pair comes back out rather than being rendered here, because it cannot
+## be rendered here: `${first(a, ai)}` wants `Show[A.Item]` and there is no
+## way to ask for it -- a bound applies to a type parameter, and `A.Item` is a
+## projection. Interpolation happens at the call, where both are concrete.
+fn both[A: Index, B: Index](a: A, ai: A.Idx, b: B, bi: B.Idx) -> (A.Item, B.Item) =
+  (first(a, ai), first(b, bi))
+
+pub fn main() -> Unit !io = {
+  let g = Grid { w: 3, cells: [1, 2, 3, 4, 5, 6] }
+  let xs = [10, 20, 30]
+  let ms: Map[String, Int] = map.from([("a", 1), ("b", 2)])
+  let ss = ["p", "q"]
+
+  println("-- a bound, at three different subjects --")
+  println(to_string(first(xs, 1)))
+  println(to_string(first(ms, "b")))
+  println(to_string(first(g, (2, 1))))
+
+  println("-- forwarded one call further --")
+  println(to_string(relay(xs, 2)))
+  println(to_string(relay(ms, "a")))
+  println(to_string(relay(g, (0, 1))))
+
+  println("-- captured by a closure --")
+  println(to_string(through_lambda(xs, 0)))
+  println(to_string(through_lambda(ms, "b")))
+  println(to_string(through_lambda(g, (1, 1))))
+
+  println("-- two bounds in one body --")
+  let (p1, p2) = both(xs, 2, ms, "a")
+  println("${p1} / ${p2}")
+  let (p3, p4) = both(g, (1, 0), ss, 1)
+  println("${p3} / ${p4}")
+
+  println("-- an item that is not an Int --")
+  println(first(ss, 0))
+  let mv: Map[String, List[Int]] = map.from([("k", [4, 5, 6])])
+  println(to_string(first(mv, "k")[1]))
+}

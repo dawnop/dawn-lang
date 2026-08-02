@@ -10199,6 +10199,85 @@ pub fn check_module(cx: Cx, m: Module, env: Map[String, ModExports]) -> (Cx, TMo
   (cx1, TModule { fns: fns_out, consts: tconsts, tests: ttests, syms: cx1.syms })
 }
 
+## The diagnostics of one source, in order.
+fn msgs_of(src: String) -> List[String] !io = {
+  let (m, pdiags) = parser.parse_module(src)
+  if len(pdiags) > 0 { panic("the source does not parse: " ++ pdiags[0].msg) }
+  let env: Map[String, ModExports] = map.empty()
+  let (cx, _) = check_module(seed_prelude(test_cx()), m, env)
+  map(cx.diags, d => d.msg)
+}
+
+fn hints_of(src: String) -> List[String] !io = {
+  let (m, _) = parser.parse_module(src)
+  let env: Map[String, ModExports] = map.empty()
+  let (cx, _) = check_module(seed_prelude(test_cx()), m, env)
+  map(cx.diags, d => d.hint)
+}
+
+test "`[]` names the subject it could not index, whatever shape it is" {
+  # The requirer is built from the actual subject rather than being a fixed
+  # phrase, so it says which Map -- and, more to the point, it says things
+  # about types the compiler has never heard of. That is the difference the
+  # trait buys: the old message enumerated the subjects it knew, and a user
+  # type could not be one of them.
+  #
+  # One row per shape in docs/operator-traits-design.md D6.
+
+  # a rigid key: three sub-goals of the conditional impl, all at the `[]`
+  let ms = msgs_of("pub fn look[K](m: Map[K, Int], k: K) -> Int = m[k]\n")
+  assert ms == ["indexing a Map[K, Int] requires `Eq[K]`, but `K` has no such bound",
+    "indexing a Map[K, Int] requires `Hash[K]`, but `K` has no such bound",
+    "indexing a Map[K, Int] requires `Show[K]`, but `K` has no such bound"]
+  assert hints_of("pub fn look[K](m: Map[K, Int], k: K) -> Int = m[k]\n")[0] ==
+    "add the bound: [K: Eq]"
+
+  # a user type with an impl: it reaches the message at all, which is new
+  let grid = "type Grid = { w: Int }\n" ++
+    "impl Index[Grid] {\n  type Idx = Int\n  type Item = Int\n" ++
+    "  fn index(g: Grid, i: Int) -> Int = g.w + i\n}\n"
+  assert len(msgs_of(grid ++ "pub fn f(g: Grid) -> Int = g[1]\n")) == 0
+  assert msgs_of(grid ++ "pub fn f(g: Grid) -> Int = g[\"x\"]\n") ==
+    ["this index must be `Int`, got `String`"]
+
+  # an opaque subject falls through to its target's impl, so the requirer
+  # reports the *identity* (the opaque name, which is all the caller sees)
+  # while the trait and type report the gap inside the target
+  let opq = "opaque type M[K] = Map[K, Int]\n" ++
+    "pub fn f[K](m: M[K], k: K) -> Int = m[k]\n"
+  assert msgs_of(opq) == ["indexing a M requires `Eq[K]`, but `K` has no such bound",
+    "indexing a M requires `Hash[K]`, but `K` has no such bound",
+    "indexing a M requires `Show[K]`, but `K` has no such bound"]
+
+  # a ground gap inside the target does NOT read as the requirer: a missing
+  # impl at a concrete type is `resolve_witness`'s own message, which never
+  # mentions who asked. Pinned because docs/operator-traits-design.md D6
+  # predicted otherwise.
+  assert msgs_of("type Foo = { v: Int }\n" ++
+      "opaque type Keyed = Map[Foo, Int]\n" ++
+      "pub fn g(m: Keyed, k: Foo) -> Int = m[k]\n") ==
+    ["no impl of `Show` for `Foo`"]
+
+  # a bare rigid parameter: the bound it is missing is `Index` itself
+  assert msgs_of("pub fn f[C](c: C, i: Int) -> Int = c[i]\n") ==
+    ["indexing a C requires `Index[C]`, but `C` has no such bound"]
+  assert hints_of("pub fn f[C](c: C, i: Int) -> Int = c[i]\n")[0] ==
+    "add the bound: [C: Index]"
+}
+
+test "a ground subject with no `Index` impl keeps the message that points at get" {
+  # `resolve_witness` would answer "no impl of `Index` for `Bool`", which is
+  # true and drops the only part of this diagnostic anyone acts on: that
+  # absence has an answer and it is `get`.
+  let ms = msgs_of("pub fn f() -> Int = {\n  let b = true\n  b[0]\n}\n")
+  assert ms == ["`[]` needs an `Index` impl for `Bool`"]
+  assert hints_of("pub fn f() -> Int = {\n  let b = true\n  b[0]\n}\n")[0] ==
+    "List and Map have one; when absence is a normal case, use get(xs, i) / map.get(m, k)"
+  # a tuple has no head, so no impl could be written for it either
+  assert msgs_of("pub fn f(p: (Int, Int)) -> Int = p[0]\n") ==
+    ["`[]` needs an `Index` impl for `(Int, Int)`"]
+}
+
 test "an Eq impl must come with a Hash impl" {
   let eq_impl = "type P = { x: Int }\n" ++
     "impl Eq[P] {\n  fn eq(a: P, b: P) -> Bool = a.x == b.x\n}\n"

@@ -1,30 +1,34 @@
-# An opaque type over a List or a Map: what it gets for free today, and what
-# it does not.
+# An opaque type over a List or a Map: what it gets for free.
 #
-# This file pins a state that is about to change on purpose. Knife 2 of
-# docs/operator-traits-design.md routes `[]` through `resolve_witness`, and
-# that resolver already falls through an opaque subject to its target
-# (checker.dawn:1266-1277) -- so `v[0]` starts compiling, with no new machinery
-# and no way to decline it. Design D2 is the decision to accept that. It is an
-# observable widening of the accepted set, which is exactly the kind of change
-# that should be visible as a corpus edit in the commit that makes it, rather
-# than discovered later.
+# `==`, `${...}`, `for..in` and -- since knife 2 of
+# docs/operator-traits-design.md -- `[]` all resolve their witness through the
+# opaque and land on the target's impl. That fall-through is one branch in
+# `resolve_witness` (checker.dawn:5738-5745), mirrored by `assoc_impl_of` for
+# projections (checker.dawn:1266-1277), and `[]` joined the list by being
+# routed through the resolver rather than by anything being added for it.
 #
-# So: the lines below are the ones that work *today*. `==`, `${...}` and
-# `for..in` all resolve their witness through the opaque and land on the
-# target's, and each of them is the same fall-through `[]` is about to join.
-# `v[0]` and `e["a"]` are the ones that do not, and they cannot be written
-# here at all -- a rejected program has no output to compare, so what they
-# currently say is written down instead:
+# Knife 1 pinned the state before, where `v[0]` was
 #
 #   error: `[]` indexes a List or Map, got Vec
-#     = hint: when absence is a normal case, use get(xs, i) / map_get(m, k) instead
-#   error: cannot infer type parameter(s) T for `to_string`
 #
-# (the second is cascade noise off the first; `XError` leaves `to_string` with
-# nothing to infer `T` from). Knife 2 deletes that paragraph, adds the two
-# subscripts to `main`, and says in its commit message that the accepted set
-# grew.
+# and could not appear in this file at all. Design D2 is the decision to
+# accept the widening; the two subscripts in `main` are what it bought, and
+# they are here rather than in a note because an accepted set is a thing a
+# corpus can hold.
+#
+# The direction matters, and the two halves of `main` show both. An opaque as
+# the *subject* of `[]` falls through to its target. An opaque as the *index*
+# does not: with `opaque type Key = String` and `m: Map[Key, Int]`, `m["b"]`
+# is refused --
+#
+#   error: this index must be `Key`, got `String`
+#
+# -- even inside the declaring module, exactly as `v == [1, 2, 4]` is refused
+# below. Nothing is inconsistent about that. The subject position asks "which
+# impl", and impl lookup falls through; the index position asks "do these two
+# types match", and an opaque binds rather than converts wherever a type has
+# to match. `Env`'s `Idx` reduces through the opaque to `String`, so `e["a"]`
+# works -- the opacity there is on the container, not on the key.
 #
 # opaque.dawn next door covers opaque *scalars* -- that an opaque has no
 # representation of its own at run time. This one is about witness
@@ -72,4 +76,12 @@ pub fn main() -> Unit !io = {
   println(to_string(e == mke()))
   println(to_string(e == other_e()))
   println("${e}")
+
+  println("-- and the subscript, which knife 2 added --")
+  println(to_string(v[0]))
+  println(to_string(v[2]))
+  println(to_string(e["a"]))
+  for x in v {
+    println(to_string(v[x - 1]))
+  }
 }

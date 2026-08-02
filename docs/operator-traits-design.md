@@ -84,6 +84,18 @@ checker 挪到 lower，挪了一个文件，没挪进 std。这句写在这里�
 （checker.dawn:1266-1277）都已经「先查 opaque 自己的 impl，没有就落到 target」。
 本刀只要让 `[]` 走 `resolve_witness`，穿透就是白送的。
 
+**穿透只在主体位，索引位不穿透（落地实测，答用户问）**：
+
+| 写法 | 结果 |
+|---|---|
+| `opaque type Env = Map[String, Int]`，`e["a"]` | **通**。`Env.Idx` 经 `reduce_assoc` 穿透到目标后归约成 `String`，索引位要的就是 `String` |
+| `opaque type Key = String`，`m: Map[Key, Int]`，`m[k]`（`k: Key`） | **通** |
+| 同上，`m["b"]` | **拒**：`this index must be \`Key\`, got \`String\``，**即使在声明模块内** |
+
+第三行与 `v == [1, 2, 4]` 被拒是同一件事，不是不一致：**主体位问的是「哪个 impl」，
+impl 查找穿透；索引位问的是「两个类型是否相同」，而 opaque 在任何要求类型相同的位置
+都是绑定而不是转换**。语料注释里写了同一段（`index_opaque.dawn` 头注）。
+
 **但 assoc-types-design.md 的 D9 措辞与落地代码不符**：D9 写着「先查 opaque 自己的
 impl，无则**不**穿透到 target……witness 不穿透，投影也不穿透」，而
 checker.dawn:1266-1268 的注释写的是「or -- for an opaque subject with no impl of its own
@@ -203,8 +215,17 @@ checker.dawn:5757-5767：条件 impl 的 `sub_goals` 循环把**同一个 `lo, h
 |---|---|---|
 | `fn look[K](m: Map[K,Int], k: K) = m[k]` | `indexing a Map requires \`Eq[K]\`, but \`K\` has no such bound`（三条，hint 各自 `add the bound: [K: Eq]`） | `indexing a Map[K, Int] requires \`Eq[K]\`, …`（三条，hint 不变）——**比今天准**，说出了是哪一个 Map |
 | `impl Index[Grid]` 后 `fn g[T](x: Grid, k: T) = x[k]` 之类 | 说不出来（`Grid` 根本到不了这条路） | `indexing a Grid requires …`——**新类型白送**，零特判 |
-| `opaque type Vec = Map[String, Foo]`，`Foo` 无 `Show` | 说不出来 | `indexing a Vec requires \`Show[Foo]\`, …`——requirer 位报**身份**（opaque 名），trait 位报**真正的缺口**（穿透后的目标里那个类型），两个位置各说各的事 |
+| `opaque type M[K] = Map[K, Int]`，`K` 无 bound | 说不出来 | `indexing a M requires \`Eq[K]\`, …`——requirer 位报**身份**（opaque 名），trait 位报**真正的缺口**（穿透后的目标里那个类型），两个位置各说各的事 |
 | `fn f[C](c: C, i: Int) = c[i]` | `\`[]\` indexes a List or Map, got C` | `indexing a C requires \`Index[C]\`, but \`C\` has no such bound` + hint `add the bound: [C: Index]` |
+
+> **第三行订正（落地实测）**：原文举的例子是 `opaque type Vec = Map[String, Foo]`、
+> `Foo` 无 `Show`，预期出 `indexing a Vec requires \`Show[Foo]\``。**不成立，两处**：
+> (a) `Map` 的三条 bound 落在**键**上，例子里 `Foo` 是值，根本不产生 goal；
+> (b) 就算把 `Foo` 挪到键位，**具体类型缺 impl 走的是 `resolve_witness` 自己那条
+> `no impl of \`Show\` for \`Foo\``——那条分支压根不用 `requirer`**。requirer 只在
+> 「刚性类型参数没有 bound」和结构式缺口两条路上出现。要看到 requirer 报 opaque 身份，
+> 缺口必须落在**类型参数**上，于是例子换成泛型 opaque（表已改）。两种形状都有内联 test
+> 钉住（checker.dawn，`\`[]\` names the subject it could not index`）。
 
 第四行有一处**刻意留下的冗余**：主体是裸的刚性类型参数时，requirer 里的类型与缺的
 bound 是同一个（`indexing a C requires \`Index[C]\``）。判为留着——它只在这一种形状出现，
@@ -555,7 +576,7 @@ for gt in sg.param_tys {
 ### 4.6 表达力兑现后能写什么
 
 ```dawn
-type Grid = Grid(w: Int, cells: List[Int])
+type Grid = { w: Int, cells: List[Int] }
 
 impl Index[Grid] {
   type Idx = (Int, Int)
@@ -645,7 +666,7 @@ ABI 洞就是「语料只覆盖了 devirtualise 的形状」漏出来的，assoc
 
 | 判据 | 怎么验 | 预期 | 为什么足够 |
 |---|---|---|---|
-| **Core 逐字节** | `selfhost-core-diff.sh` | **13 个 flat golden（3 个程序 + 10 个 std 模块）与 71 行 `selfhost.sha` 全部不变** | 本刀的整个安全论证：`[]` 在 List/Map 上必须降成与今天**同一个** Core 节点。`std.map.core` 与 `std.set.core` 各 4 个 `list_index`、`std.list.core` 1 个、`std.hamt.core` 的 `hamt.index` 调用——一个都不许动 |
+| **Core 逐字节** | `selfhost-core-diff.sh` | **13 个 flat golden（3 个程序 + 10 个 std 模块）逐字节不变**；71 行 `selfhost.sha` 只许动**本刀改过源码的那几个模块**（实测：checker/doc/lower/main/tast/types 六个，外加五个 ADT-id 漂移） | 本刀的整个安全论证：`[]` 在 List/Map 上必须降成与今天**同一个** Core 节点。`std.map.core` 与 `std.set.core` 各 4 个 `list_index`、`std.list.core` 1 个、`std.hamt.core` 的 `hamt.index` 调用——一个都不许动 |
 | **`calc.core` 尤其** | 同上 | 它的 2 个 `list_index` 不变 | 它们来自**列表模式** `[..init, Num(v)]`（calc.dawn:47 → lower.dawn:411/423），与 `[]` 无关。`calc.core` 变了 = 碰了不该碰的 |
 | 运行输出 | `selfhost-run-diff.sh` | **全绿** | 语义不变。这条红了本刀就是错的，没有可声明的余地 |
 | 格式化 | `selfhost-fmt-diff.sh` | 全绿 | 不动 fmt |
@@ -657,6 +678,12 @@ ABI 洞就是「语料只覆盖了 devirtualise 的形状」漏出来的，assoc
 
 > 验收纪律（引自 #110 与 #119 的同一条教训）：差分脚本在**未 `git add`** 的树上跑等于
 > 没跑。两刀的差分一律在 add 之后跑。
+>
+> **`selfhost.sha` 那半句要读准（刀 2 落地时订正）**：刀 1 零编译器改动，所以它整份不变；
+> 刀 2 改了编译器源码，编译器自己的 Core 当然会动，要求它不变是自相矛盾的。真正的判据是
+> **动的模块恰好是改过源码的那几个**——如果 `[]` 的降级形变了，52 个模块会全线翻红
+> （每个模块自己都在写 `xs[i]`）。这条比「全不变」更强也更可测。13 个 flat golden 才是
+> 「不许动」的那一半，而它们确实一字未动。
 
 **种子**：不需要三期两发布。无新表面语法、std 源不变、`selfhost/src` 源不变，
 N−1 的特性纪律自动满足。发布一版即可，`Emit-Change` 两条随提交信息带上。
@@ -685,3 +712,8 @@ N−1 的特性纪律自动满足。发布一版即可，`Emit-Change` 两条随
 7. **`Index` 的 impl 可否带默认体 / 条件 bound**。今天 prelude 的两条是编译器铸的，用户的
    走普通 impl 路径，两边都够用。若将来 `impl[T: Index] Index[Wrapper[T]]` 有真需求，
    条件 impl 的机器已经在（`sub_goals` + `WApply`），只需语料。
+8. **投影位写不出 bound**（刀 2 写 `index_dict.dawn` 时撞到）：`fn f[C: Index](c: C, i: C.Idx)`
+   的函数体里 `"${c[i]}"` 报 `no impl of \`Show\` for \`C.Item\``，而**没有办法要求它**——
+   bound 挂在类型参数上，`C.Item` 是投影。于是泛型消费者只能把 `C.Item` 原样传出去，
+   由调用点（那里已经具体）去渲染。这是关联类型 bound / where 子句那件事，不是本刀的；
+   语料里把这条写在 `both` 的注释上。
