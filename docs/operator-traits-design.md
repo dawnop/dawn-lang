@@ -56,6 +56,14 @@ types.dawn:1177），impl 体不写在 std，而是 `lower.dawn` 的 `prim_relat
    becoming calls in lowering… Keeping the primitive in Core keeps
    `const B: List[Int] = [A, 4]` working」。走路 ①（`get(xs, i).expect(…)`）会把 `[]`
    变成对 `std/pvec` 的调用，comptime 就得解释 `array_*`，而它拒绝 `array_*`。
+
+   > **脚注（刀 2 实测补，2026-08-02）**：理由①引的那句里「这条 const 能工作」
+   > **只对 JVM 成立**。`dawn __emitc` 对同一份源报
+   > `emitc: const `B` folded to a structured value (List_Int), which native cannot
+   > rebuild yet`——native 后端今天重建不了折叠出来的结构化常量。这是**先于本刀**的
+   > native 缺口（刀 1 的语料期就复现过），不是刀 2 弄坏的：Core 层面的判据仍然成立，
+   > `list_index` 留在 Core 里 comptime 才折得动，走路 ① 一样折不动而且两个后端都折不动。
+   > 只是别把那句话读成「今天两个后端都能编这条 const」。
 2. **不触发 std 模块序死结**。`std/modules.txt` 把 `hamt`/`pvec` 排在最后（「Nothing in
    std imports this module and nothing should」，std/hamt.dawn 头注），而它们正是 `[]` 的
    实现载体，且它们自己也用 `[]`（std/set.dawn:46/59/70/99、std/map.dawn:75/92/106/147）。
@@ -151,6 +159,13 @@ doc.dawn:434 的 `prelude_traits()` 只当 `sig_render` 的查表用，doc.dawn:
 都不会出现**。用户想知道怎么给自己的类型实现 `[]`，只能查 spec §4.8。这与
 prelude-namespace §6 记的「prelude trait 方法做 doc 渲染是『标准库发现性』那件事」同一笔账
 （`stdlib-discovery-docs` 备忘录），本刀不做，但 spec §4.8 必须自带 impl 示例，见 §5。
+
+> **订正（刀 2 落地时实测）**：上面这条只对 `dawn doc <模块>` 成立。`dawn doc --stdlib`
+> 走的是另一条路——`doc.dawn` 的 `prelude_traits_json` **遍历 `prelude_trait_ids()`**，
+> 把每个 prelude trait 的名字、关联类型、方法签名与一段手写散文渲染进 stdlib 参考。
+> 于是加第六个 prelude trait 会**让一条内联 test 变红**（`prelude_trait_doc` 找不到
+> 散文就 panic），这也正是它抓住的东西。`Index` 因此在 `--stdlib` 里是有条目的；
+> §4.5 的手工同步清单补一行。
 
 ### D6 Map 三个 witness 的迁移 = 诊断位置**不变**，只有措辞变
 
@@ -527,6 +542,7 @@ for gt in sg.param_tys {
 | 9 | **main.dawn:105-111 `want_iface`** | 改读 `prelude_trait_ids()` 减 `ORD_ID`（D9） | **运行期 `NoClassDefFoundError`**，不是编译错误 |
 | 10 | lower.dawn:842-849 `prim_relation` | `INDEX_ID` 臂 | `panic("lower: no primitive relation …")` |
 | 11 | lower.dawn:859-880 `make_prim_slot` | 形参逐个按归约签名适配（§4.4） | 字典轨上 `NoSuchMethodError`（JVM） |
+| 12 | **doc.dawn 的 `prelude_trait_docs()`** | 加一段散文 | **内联 test 红**（`prelude_trait_doc` panic）——`--stdlib` 遍历 `prelude_trait_ids()`，见 D5 的订正 |
 | — | lspc.dawn:261-266 | 白送（已读 `prelude_trait_ids()`） | 补全多出 `Index` 一项 → lsp-diff 红 |
 | — | doc.dawn:434 | 白送（只当查表用） | 无输出变化 |
 | — | checker.dawn 的 `is_prelude_trait_name` | 白送（从表派生） | 无 |

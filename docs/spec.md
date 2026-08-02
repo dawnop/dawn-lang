@@ -413,11 +413,13 @@ fn sort2[T: Ord2](xs: List[T]) -> List[T] = ...   # 约束：[T: Trait (+ Trait)
 
 - trait 恰有一个类型参数；方法进入模块函数命名空间（可直呼、可 UFCS、可管道）。
 - **注入是逐 trait 的属性**：一个 trait 的方法名是否占据函数命名空间由该 trait 决定。
-  今天 `trait` 声明恒注入，五个预置 trait 也全部注入；由运算符独占消费的 trait
-  （如 `[]` 背后的那个）不注入，其方法名只在 impl 体、文档与错误消息里出现。
-- **预置 trait 五个**：`Ord`（`cmp`，背后是 `<`/`<=` 之外的排序）、`Eq`（`eq`，
+  今天 `trait` 声明恒注入，`Ord`/`Eq`/`Hash`/`Show`/`Iter` 五个预置 trait 也注入；
+  由运算符独占消费的 trait（`Index`，§4.8）不注入，其方法名只在 impl 体、文档与
+  错误消息里出现。
+- **预置 trait 六个**：`Ord`（`cmp`，背后是 `<`/`<=` 之外的排序）、`Eq`（`eq`，
   背后是 `==`/`!=`）、`Hash`（`hash`）、`Show`（`show`，背后是 `to_string` 与
-  `${...}`）、`Iter`（背后是 `for..in`，§4.7）。标量的 impl 随语言提供；
+  `${...}`）、`Iter`（背后是 `for..in`，§4.7）、`Index`（背后是 `[]`，§4.8）。
+  标量的 impl 随语言提供；
   `derive Ord` / `derive Show` 铸的是普通 impl，泛型类型上铸的是条件 impl。
   元组没有 head，写不出 impl，前四者对元组由编译器按结构合成。
 - **`Iter`** 声明两个关联类型与四个方法（关联类型见本节下方）：
@@ -428,6 +430,12 @@ fn sort2[T: Ord2](xs: List[T]) -> List[T] = ...   # 约束：[T: Trait (+ Trait)
   `Map`/`Set` 各提供一个 impl（元素分别是 `T`/单字符 `String`/`Int` 字节/
   `(K, V)`/`T`）；用户类型实现 `Iter` 即可被 `for` 迭代。四个方法名随 prelude
   注入函数命名空间，与其余 prelude 名同待遇——**可被本模块的声明遮蔽**（§10.3）。
+- **`Index`** 声明两个关联类型与一个方法：
+  `trait Index[C] { type Idx  type Item  fn index(c: C, i: C.Idx) -> C.Item }`。
+  语言为 `List`（`Idx = Int`）与 `Map`（`Idx = 键类型`）提供 impl；用户类型实现
+  `Index` 即可用 `[]`（示例见 §4.8）。方法名 `index` **不**进入函数命名空间
+  （见上条注入规则），只在 impl 体、文档与错误消息里出现。一个类型只有一个索引
+  类型——`Index` 是单参数 trait，写不出同一容器的第二种下标（如切片）。
 - **一致性**：全程序每个「trait × 类型」至多一个 impl；**孤儿规则**：impl 只能
   写在 trait 或主体类型的声明模块。impl 全局生效，不需要 `use`。
 - **主体形状**：一个类型构造器，作用在**互不相同的类型变量**上，而那些变量恰好是
@@ -749,9 +757,33 @@ let c = rows[1][0]   # 可链式、可与 ?/./() 组合
 
 - **`[]` 是断言，get 家族是问询**：`xs[i]` 用于「下标必然合法，越界是 bug」的场合
   （panic 语义，同 Rust）；越界/缺键是正常分支时用 `get(xs, i)` / `map.get(m, k)`（返回 `Option`）。
-- 下标只作用于 `List`（下标为 `Int`）与 `Map`（下标为键类型），其余类型是编译错误。
+- 下标由预置 trait **`Index`** 求解（§3.5）：`List`（`Idx = Int`）与 `Map`
+  （`Idx = 键类型`）的 impl 随语言提供，**用户类型写一个 `impl Index` 即可支持 `[]`**；
+  没有 impl 的类型是编译错误。`opaque type` 沿用其目标类型的 impl（同 `==`/`${…}`/`for..in`）。
 - comptime 中支持 `List` 下标（越界为编译错误）。
-- 只读——列表与映射是不可变的，没有 `xs[i] = v`。
+- **只读**——没有 `xs[i] = v`，`Index` 也没有对应的写方法。列表与映射不可变；
+  用户类型即使可变也不经 `[]` 写入。
+- 比较运算符 `<`/`==` 不经 trait 路由到标量的 native 实现（见 §4.3）——`Index` 只管 `[]`。
+
+用户类型的 impl：
+
+```dawn
+type Grid = { w: Int, cells: List[Int] }
+
+impl Index[Grid] {
+  type Idx = (Int, Int)
+  type Item = Int
+  fn index(g: Grid, p: (Int, Int)) -> Int = {
+    let (x, y) = p
+    g.cells[y * g.w + x]
+  }
+}
+
+let g = Grid { w: 3, cells: [1, 2, 3, 4, 5, 6] }
+let v = g[(2, 1)]                                 # 6
+
+fn first[C: Index](c: C, i: C.Idx) -> C.Item = c[i]   # 泛型消费者
+```
 
 **越界三判据**。语言只承诺三条越界策略，每个带下标/区间参数的操作（本节的 `[]` 与
 §11 的库函数）恰属其一，按参数的**含义**归类而不是逐函数各定各的：
@@ -1164,7 +1196,7 @@ let base = HttpRequest.newBuilder()!.uri(uri)!  # 而不是 .expect("b") / .expe
   `x! != v` 中 `!=` 仍是一个 token（先按最长匹配切分），比较的是解包后的值。
 - **确有话要说**时仍用 `expect(o, "原因")`——它就是为此存在。
 
-`get`/`map.get` 返回 `Option`（问询）；下标 `xs[i]`/`m[k]` 越界/缺键 panic（断言，§4.8）；
+`get`/`map.get` 返回 `Option`（问询）；下标 `c[i]` 越界/缺键 panic（断言，§4.8；语义由该类型的 `Index` impl 定，`List`/`Map` 如上）；
 `Int` 除零（`/` 与 `%`）panic——是 panic 故 `catch_fault` 不拦（§4.3 数值边缘语义）。
 
 ---
@@ -1875,7 +1907,7 @@ let (a, b) = pair                acc = acc + 1
 if x > 0 { "pos" } else { "non-pos" }
 match opt { Some(v) -> v, None -> fallback }
 xs |> filter(x => x > 0) |> map(x => to_string(x)) |> join(", ")
-xs[0]                            # 下标：越界 panic；问询用 get（§4.8）
+xs[0]                            # 下标：走 Index trait；越界 panic，问询用 get（§4.8）
 read_file(path)?                 # Result 传播
 if n < 0 { return "negative" }   # 提前返回（§4.9）
 xs.each fn(x) => println("$x")   # 尾闭包：最后一个实参（§4.3）

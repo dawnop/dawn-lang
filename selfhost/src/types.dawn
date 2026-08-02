@@ -861,6 +861,20 @@ pub const SHOW_ID: Int = 3
 ## `for` needs the witness the way `==` needs Eq's, without an import.
 pub const ITER_ID: Int = 4
 
+## Subscripting: what `c[i]` resolves to (#44 knife 3). Two associated types --
+## `Idx` for what goes in the brackets, `Item` for what comes out -- and one
+## method. `[]` used to enumerate its own legal subjects in the checker, two
+## arms wide, which is a list a user type can never be added to; now the
+## question is the impl table's.
+##
+## The `List` and `Map` impls are minted by the prelude and their bodies are
+## `prim_relation`'s, the same division of labour Eq/Ord/Hash/Show already
+## have: the language keeps `list_index` a Core intrinsic (comptime folds it)
+## and keeps `m[k]` off a std module that itself indexes. A user type takes
+## the ordinary route -- write `impl Index[Grid]`, and nothing about it is
+## special-cased.
+pub const INDEX_ID: Int = 5
+
 pub fn opt_ty(t: Ty) -> Ty = TyAdt(OPTION_ID, [t])
 
 pub fn result_ty(t: Ty, e: Ty) -> Ty = TyAdt(RESULT_ID, [t, e])
@@ -1056,14 +1070,40 @@ pub fn prelude_traits() -> Traits = {
     assoc: ["Cur", "Item"],
     injects: true
   }
-  map.from([(ORD_ID, ord), (EQ_ID, eq), (HASH_ID, hash), (SHOW_ID, show), (ITER_ID, iter)])
+  # Index: the subject in parameter 0 so it is a non-projection position and
+  # inference has something to work from, exactly as Iter's four methods do.
+  # `injects: false` keeps `index` out of every module's function namespace --
+  # the name is consumed by an operator, so it is only ever written in an impl
+  # body, in `dawn doc`, and in an error message.
+  let xv = TyVar("T", -18)
+  let xidx = TyAssoc(xv, INDEX_ID, "Idx")
+  let xitem = TyAssoc(xv, INDEX_ID, "Item")
+  let index = TraitI {
+    id: INDEX_ID,
+    name: "Index",
+    tvar: xv,
+    is_pub: true,
+    owner: None,
+    src_path: None,
+    methods: [
+      ("index", MethodSig {
+        sig: prelude_method(INDEX_ID, xv, "index", [xv, xidx], ["c", "i"], xitem),
+        has_default: false
+      })
+    ],
+    assoc: ["Idx", "Item"],
+    injects: false
+  }
+  map.from([(ORD_ID, ord), (EQ_ID, eq), (HASH_ID, hash), (SHOW_ID, show), (ITER_ID, iter),
+    (INDEX_ID, index)])
 }
 
 ## The prelude trait ids, in id order. Everything that needs to know "which
 ## traits does the prelude bring" reads this -- the seeding loop, the
 ## redefinition guard, LSP completion -- so the set lives in one place instead
 ## of being transcribed per call site (docs/prelude-namespace-design.md §4.3).
-pub fn prelude_trait_ids() -> List[Int] = [ORD_ID, EQ_ID, HASH_ID, SHOW_ID, ITER_ID]
+pub fn prelude_trait_ids() -> List[Int] =
+  [ORD_ID, EQ_ID, HASH_ID, SHOW_ID, ITER_ID, INDEX_ID]
 
 ## The prelude trait names, derived from the table rather than transcribed.
 pub fn prelude_trait_names() -> List[String] = {
@@ -1130,6 +1170,39 @@ fn prelude_cond_impl(tid: Int, subject: Ty, tps: List[Ty]) -> ImplI = {
     assoc_bindings: []
   }
 }
+
+## A prelude impl that binds associated types, with the bounds spelled out per
+## parameter rather than derived from the trait.
+##
+## `prelude_cond_impl` above puts the *same* trait on every parameter, which is
+## what `Show[Option[T]]` needs and what `Index` needs on neither of its two
+## subjects: `Index[List[T]]` bounds nothing, and `Index[Map[K, V]]` bounds
+## three traits on `K` and none on `V`. `constraints` is indexed by parameter,
+## so those two lists line up with `type_args_of(subject)` and `sub_goals`
+## reads the pairing straight off.
+fn prelude_assoc_impl(
+  tid: Int,
+  subject: Ty,
+  tps: List[Ty],
+  cs: List[List[Int]],
+  bindings: List[(String, Ty)]
+) -> ImplI =
+  ImplI {
+    trait_id: tid,
+    subject: subject,
+    tparams: tps,
+    constraints: cs,
+    lo: 0,
+    hi: 1,
+    # No body anywhere: `primitive_subject` reads `derived || provided == []`
+    # and sends the call to `prim_relation`, the same route the scalar Eq/Ord
+    # impls take.
+    derived: true,
+    owner: None,
+    src_path: None,
+    provided: [],
+    assoc_bindings: bindings
+  }
 
 ## The scalars the backends compare for equality natively.
 pub fn eq_scalars() -> List[Ty] = [TyInt, TyFloat, TyBool, TyString, TyBytes]
@@ -1207,13 +1280,28 @@ pub fn prelude_impls() -> List[ImplI] = {
   let ot = TyVar("T", -11)
   let rt = TyVar("T", -12)
   let re = TyVar("E", -13)
+  let lt = TyVar("T", -19)
+  let mk = TyVar("K", -20)
+  let mv = TyVar("V", -21)
   out ++ [
     prelude_cond_impl(SHOW_ID, TyAdt(OPTION_ID, [ot]), [ot]),
     prelude_cond_impl(SHOW_ID, TyAdt(RESULT_ID, [rt, re]), [rt, re]),
     # `ForeignError` takes no parameters, so its `derive Show` is the same
     # mint with nothing to constrain -- the fields are String/String/
     # Option[String] and each already shows.
-    prelude_cond_impl(SHOW_ID, foreign_error_ty(), [])
+    prelude_cond_impl(SHOW_ID, foreign_error_ty(), []),
+    # `xs[i]`: an Int in, the element out, and nothing asked of the element.
+    prelude_assoc_impl(INDEX_ID, TyList(lt), [lt], [[]],
+      [("Idx", TyInt), ("Item", lt)]),
+    # `m[k]`: Eq and Hash to find the entry, and Show only to name the key in
+    # the panic when there is none -- the one bound of the three that is not
+    # about finding it (std/hamt.dawn:262-266 says the same thing at the other
+    # end). They sit on `K` because `constraints` is indexed by parameter, and
+    # they used to be resolved by hand at the `[]`; a conditional impl's
+    # sub-goals carry the same span and the same requirer, so the three
+    # diagnostics still land on the subscript.
+    prelude_assoc_impl(INDEX_ID, TyMap(mk, mv), [mk, mv],
+      [[EQ_ID, HASH_ID, SHOW_ID], []], [("Idx", mk), ("Item", mv)])
   ]
 }
 
@@ -1843,9 +1931,13 @@ test "prelude shapes" {
   assert trait_of(traits, EQ_ID).name == "Eq"
   assert trait_of(traits, HASH_ID).name == "Hash"
   assert trait_of(traits, SHOW_ID).name == "Show"
+  assert trait_of(traits, ITER_ID).name == "Iter"
+  assert trait_of(traits, INDEX_ID).name == "Index"
+  # `[]` is the only operator whose trait does not inject its method name
+  assert not trait_of(traits, INDEX_ID).injects
   # each trait over its own list -- one table per question, which is the point
   assert len(prelude_impls()) == len(ord_scalars()) + len(eq_scalars()) +
-    len(hash_scalars()) + len(show_scalars()) + 3
+    len(hash_scalars()) + len(show_scalars()) + 5
   # the three lists differ, and each difference is a decision (spec 4.3)
   assert not is_ord_scalar(TyFloat)
   assert is_eq_scalar(TyFloat)

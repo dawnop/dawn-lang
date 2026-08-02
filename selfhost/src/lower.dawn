@@ -26,7 +26,7 @@ use types.{
   DICT_ADT_ID,
   Sym, Sig, EPure, Traits, TraitI, ImplI, MethodSig,
   Adts, AdtI, CtorI, adt_of, trait_of, prelude_adts,
-  OPTION_ID, RESULT_ID, ORD_ID, EQ_ID, HASH_ID, SHOW_ID, ITER_ID,
+  OPTION_ID, RESULT_ID, ORD_ID, EQ_ID, HASH_ID, SHOW_ID, ITER_ID, INDEX_ID,
   is_eq_scalar, is_ord_scalar, is_hash_scalar, builtins, Impls, impl_at, has_impl_at,
   is_ground, expandable, type_args_of, sub_goals
 }
@@ -844,8 +844,36 @@ fn prim_relation(st: LSt, tid: Int, subject: Ty, args: List[CExpr]) -> (LSt, CEx
   if tid == HASH_ID { return hash_at(st, args[0], subject) }
   if tid == ORD_ID { return cmp_at(st, args[0], args[1], subject) }
   if tid == SHOW_ID { return show_at(st, args[0], subject) }
+  if tid == INDEX_ID { return index_at(st, args[0], args[1], subject) }
   panic("lower: no primitive relation for trait " ++ to_string(tid))
 }
+
+## What `prim_relation` actually takes and returns at one subject, as opposed
+## to the erased slot signature the trait declares.
+##
+## Every crossing between the two is a box or an unbox, so both sides have to
+## be spelled. Eq/Ord/Hash/Show take the subject in every parameter and answer
+## with a scalar, which is why one `subject` used to stand in for the whole
+## signature. `Index` is the first prelude relation for which that is false:
+## parameter 1 is `C.Idx`, and adapting it as if it were `C` casts an Int to a
+## List. Asked here rather than read off the impl because the impl's binding
+## RHS is verbatim (`Item = T`, the impl's own parameter) -- right for a real
+## callee's ABI, wrong for a relation spelled out at the instantiated subject.
+fn prim_param_ty(tid: Int, subject: Ty, i: Int) -> Ty =
+  if tid == INDEX_ID && i == 1 { index_idx_ty(subject) } else { subject }
+
+fn prim_ret_ty(tid: Int, subject: Ty) -> Ty =
+  if tid == EQ_ID {
+    TyBool
+  } else if tid == HASH_ID || tid == ORD_ID {
+    TyInt
+  } else if tid == SHOW_ID {
+    TyString
+  } else if tid == INDEX_ID {
+    index_item_ty(subject)
+  } else {
+    panic("lower: no primitive relation for trait " ++ to_string(tid))
+  }
 
 ## Wrap `prim_relation` in a top-level function with the trait method's own
 ## (erased) signature, so it can sit in a dictionary slot like any other.
@@ -872,11 +900,16 @@ fn make_prim_slot(
   var st1 = st
   var ps: List[CParam] = []
   var args: List[CExpr] = []
+  var i = 0
   for gt in sg.param_tys {
     let (st2, sym) = fresh_sym(st1)
     st1 = st2
     ps = ps ++ [CParam { sym: sym, ty: gt, mode: COwned }]
-    args = args ++ [adapt_out(CLocal(sym, gt), gt, subject)]
+    # Per parameter, not `subject` for all of them: see `prim_param_ty`. For
+    # Eq/Ord/Hash/Show every parameter *is* the subject, so this is the same
+    # expression it always was.
+    args = args ++ [adapt_out(CLocal(sym, gt), gt, prim_param_ty(tid, subject, i))]
+    i = i + 1
   }
   let (st3, dsym) = fresh_sym(st1)
   st1 = st3
@@ -890,7 +923,10 @@ fn make_prim_slot(
     }
     ai = ai + 1
   }
-  let (st4, body) = prim_relation(LSt { ..st1, dict_env: env }, tid, subject, args)
+  let (st4, body0) = prim_relation(LSt { ..st1, dict_env: env }, tid, subject, args)
+  # ...and the result crosses back out the same way. A scalar answer needs no
+  # box, which is every relation but `Index`.
+  let body = adapt_in(body0, prim_ret_ty(tid, subject), sg.ret)
   let f = CFun {
     name: name,
     owner: st4.owner,
@@ -2396,23 +2432,12 @@ pub fn lower_expr(st0: LSt, e: TExpr) -> (LSt, CExpr) = {
         }
       }
     XConstRef(owner, name, _, _, ty) -> (st, CConstRef(owner, name, ty))
-    XIndex(target, index, on_map, wits, _, _, ty) -> {
-      let (st1, tv) = lower_expr(st, target)
-      let (st2, iv) = lower_expr(st1, index)
-      # indexing yields an erased element, so the unbox is explicit
-      let erased = TyVar("E", 0)
-      if on_map {
-        # `m[k]` is `hamt.index`, which needs the key's Eq, Hash and Show --
-        # the last only to name the key it could not find, which is why the
-        # message survives without every lookup paying to build one.
-        let sg = hamt_sig(st2, "index")
-        let (st3, ds) = witness_values(st2, wits)
-        let call = CCall(CDirect("std/hamt", "index"),
-          [tv, adapt_in(iv, tex_ty(index), sg.param_tys[1])] ++ ds, sg.ret)
-        return (st3, adapt_out(call, sg.ret, ty))
-      }
-      (st2, adapt_out(CIntrinsic("list_index", [tv, iv], erased), erased, ty))
-    }
+    # `c[i]` is a trait method call like any other: devirtualised where the
+    # subject is known (which for List and Map means `index_at` inline, since
+    # the prelude impls have no body), dispatched through the dictionary where
+    # it is a rigid `[C: Index]`.
+    XIndex(target, index, wit, _, _, ty) ->
+      lower_trait_call(st, INDEX_ID, "index", [target, index], [wit], ty)
     XCtorValue(adt, ci, _, _, ty) -> lift_ctor_value(st, adt, ci, ty)
     XCallDyn(sym, _, args, _, _, ty) ->
       if is_self_sym(st, sym) {
@@ -2924,6 +2949,57 @@ fn hamt_call(
   (st2, adapt_out(CCall(CDirect("std/hamt", fname), vs ++ ds, sg.ret), sg.ret, ty))
 }
 
+# ---- indexing (docs/operator-traits-design.md §4.4) ----
+#
+# `c[i]` reaches here through `Index`, which the prelude implements for List
+# and Map with no body -- so this is the body, the same way `eq_at` is the
+# body of the scalar `Eq` impls. A user type's `impl Index` never comes here;
+# it has a method, and a method is called.
+#
+# Both arms have to emit exactly what `XIndex` emitted directly before the
+# trait existed. That is not a nicety: `list_index` staying a Core intrinsic
+# is what keeps `const B: List[Int] = [A, 4]` foldable at comptime, and every
+# golden Core dump in the tree pins the shape.
+
+## `C.Idx` at a subject the language indexes: the position for a List, the key
+## type for a Map.
+fn index_idx_ty(subject: Ty) -> Ty =
+  match peel_opaque(subject) {
+    TyList(_) -> TyInt
+    TyMap(k, _) -> k
+    _ -> panic("lower: no indexing for " ++ ty_key_inst(subject))
+  }
+
+## `C.Item` at the same subjects.
+fn index_item_ty(subject: Ty) -> Ty =
+  match peel_opaque(subject) {
+    TyList(el) -> el
+    TyMap(_, v) -> v
+    _ -> panic("lower: no indexing for " ++ ty_key_inst(subject))
+  }
+
+fn index_at(st: LSt, c: CExpr, i: CExpr, subject: Ty) -> (LSt, CExpr) =
+  match peel_opaque(subject) {
+    TyList(el) -> {
+      # indexing yields an erased element, so the unbox is explicit
+      let erased = TyVar("E", 0)
+      (st, adapt_out(CIntrinsic("list_index", [c, i], erased), erased, el))
+    }
+    TyMap(k, v) -> {
+      # `m[k]` is `hamt.index`, which needs the key's Eq, Hash and Show -- the
+      # last only to name the key it could not find, which is why the message
+      # survives without every lookup paying to build one. The three used to
+      # be resolved at the `[]` and passed down; they are now the sub-goals of
+      # `Index[Map[K, V]]`, which `lower_trait_call` has already put in scope.
+      let sg = hamt_sig(st, "index")
+      let (st1, ds) = goal_dicts(st, sub_goals(st.impls, INDEX_ID, subject))
+      let call = CCall(CDirect("std/hamt", "index"),
+        [c, adapt_in(i, k, sg.param_tys[1])] ++ ds, sg.ret)
+      (st1, adapt_out(call, sg.ret, v))
+    }
+    _ -> panic("lower: no indexing for " ++ ty_key_inst(subject))
+  }
+
 # ---- functions and modules ----
 
 ## `continue` inside a lowered `for` must run the step before jumping, but
@@ -3374,6 +3450,6 @@ fn node_name(e: TExpr) -> String =
     XLambda(_, _, _, _, _, _, _) -> "XLambda"
     XCtorValue(_, _, _, _, _) -> "XCtorValue"
     XConstRef(_, _, _, _, _) -> "XConstRef"
-    XIndex(_, _, _, _, _, _, _) -> "XIndex"
+    XIndex(_, _, _, _, _, _) -> "XIndex"
     _ -> "an unhandled node"
   }

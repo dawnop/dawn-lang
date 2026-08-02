@@ -55,7 +55,7 @@ use types.{
   prelude_adts, prelude_traits, prelude_impls, bounds_of,
   prelude_trait_ids, prelude_trait_names, is_prelude_trait_name, first_minted_id,
   builtins, opt_ty, result_ty, OPTION_ID, RESULT_ID, FOREIGN_ERROR_ID,
-  ORD_ID, EQ_ID, HASH_ID, SHOW_ID, ITER_ID,
+  ORD_ID, EQ_ID, HASH_ID, SHOW_ID, ITER_ID, INDEX_ID,
   eq_scalars, hash_scalars,
   Impls, Head, head_of, impl_at, has_impl_at, insert_impl,
   is_eq_scalar, is_ground, expandable, type_args_of, sub_goals
@@ -4321,37 +4321,14 @@ pub fn check_unwrap_typed(cx: Cx, ot: Ty, operand: TExpr, msg: String, lo: Int, 
   }
 }
 
-## xs[i] / m[k] — the asserting variants (spec §4.8). The index expression is
-## checked by the caller against the wanted type this returns.
-pub fn index_wanted(cx: Cx, tt: Ty, lo: Int, hi: Int) -> (Cx, Option[(Ty, Ty, Bool)]) =
-  match tt {
-    TyList(elem) -> (cx, Some((TyInt, elem, false)))
-    TyMap(k, v) -> (cx, Some((k, v, true)))
-    _ ->
-      if is_errorish(tt) {
-        (cx, None)
-      } else {
-        (cerr_h(cx, "`[]` indexes a List or Map, got " ++ ty_show(cx.adts, tt), lo, hi,
-          "when absence is a normal case, use get(xs, i) / map_get(m, k) instead"), None)
-      }
+## Does `t` -- or, if it is opaque and has none of its own, its target -- have
+## an `Index` impl? The same order `resolve_witness` and `reduce_assoc` use, so
+## the message below cannot refuse what they would have accepted.
+fn has_index_impl(cx: Cx, t: Ty) -> Bool =
+  match assoc_impl_of(cx, INDEX_ID, t) {
+    Some(_) -> true
+    None -> false
   }
-
-## The three witnesses `m[k]` needs: `Eq` and `Hash` to find the entry, `Show`
-## to name the key when there is none. A missing one is reported here, at the
-## `[]`, rather than surfacing as a gap while lowering.
-fn index_wits(cx: Cx, key_t: Ty, lo: Int, hi: Int) -> (Cx, List[WitRef]) = {
-  var cx1 = cx
-  var out: List[WitRef] = []
-  for tid in [EQ_ID, HASH_ID, SHOW_ID] {
-    let (cx2, w) = resolve_witness(cx1, tid, key_t, lo, hi, "indexing a Map")
-    cx1 = cx2
-    match w {
-      Some(wr) -> { out = out ++ [wr] }
-      None -> ()
-    }
-  }
-  (cx1, out)
-}
 
 ## Record field access p.x — resolve against the record's single constructor.
 pub fn check_field_access_typed(
@@ -4429,17 +4406,12 @@ pub fn check_field_access_typed(
   }
 }
 
-test "unwrap, index, and field access resolve their shapes" {
+test "unwrap and field access resolve their shapes" {
   let cx = test_cx()
   let (cx1, t1, _) = check_unwrap_typed(cx, opt_ty(TyInt), XError(0, 1), "m", 0, 2)
   assert t1 == TyInt
   let (cx2, t2, _) = check_unwrap_typed(cx, result_ty(TyInt, TyString), XError(0, 1), "m", 0, 2)
   assert str.contains(cx2.diags[0].hint, "on a Result use `?`")
-  let (cx3, w) = index_wanted(cx, TyMap(TyString, TyInt), 0, 4)
-  assert w == Some((TyString, TyInt, true))
-  let (cx4, w2) = index_wanted(cx, TyBool, 0, 4)
-  assert w2 == None
-  assert str.contains(cx4.diags[0].msg, "indexes a List or Map")
 }
 
 test "field access follows record shape with substitution" {
@@ -6281,35 +6253,46 @@ fn check_expr_at(cx: Cx, e: Expr, expected: Option[Ty]) -> (Cx, Ty, TExpr) !io =
       let msg = unwrap_msg(cx1, operand, lo, hi)
       check_unwrap_typed(cx1, ot, ox, msg, lo, hi)
     }
+    # `c[i]` (spec §4.8). The subject used to be matched against a two-arm
+    # list of the types the compiler had heard of; now it is one witness, so a
+    # user type joins by writing `impl Index`. `Idx` and `Item` are read off
+    # the same impl the witness names -- reduced when the subject is concrete,
+    # left as projections when it is a rigid parameter, which is exactly what
+    # a projection in a parameter position is for (#119 D6).
     EIndex(target, index, lo, hi) -> {
       let (cx1, tt, tx) = check_expr(cx, target, no_expected())
-      let (cx2, wanted) = index_wanted(cx1, tt, lo, hi)
-      match wanted {
+      if is_errorish(tt) {
+        let (cx2, _, _) = check_expr(cx1, index, no_expected())
+        return (cx2, TyError, XError(lo, hi))
+      }
+      # A ground subject with no impl keeps its own message. The general one
+      # ("no impl of `Index` for `Bool`") is true but drops the hint that
+      # matters most here -- that absence has an answer, and it is `get`.
+      if is_ground(tt) && not has_index_impl(cx1, tt) {
+        let cx2 = cerr_h(cx1,
+          "`[]` needs an `Index` impl for `" ++ ty_show(cx1.adts, tt) ++ "`", lo, hi,
+          "List and Map have one; when absence is a normal case, " ++
+            "use get(xs, i) / map.get(m, k)")
+        let (cx3, _, _) = check_expr(cx2, index, no_expected())
+        return (cx3, TyError, XError(lo, hi))
+      }
+      let (cx2, w) = resolve_witness(cx1, INDEX_ID, tt, lo, hi,
+        "indexing a " ++ ty_show(cx1.adts, tt))
+      match w {
         None -> {
-          let (cx3, _, ix) = check_expr(cx2, index, no_expected())
+          let (cx3, _, _) = check_expr(cx2, index, no_expected())
           (cx3, TyError, XError(lo, hi))
         }
-        Some(w) -> {
-          let (want_idx, result, on_map) = w
+        Some(wr) -> {
+          let want_idx = reduce_assoc(cx2, TyAssoc(tt, INDEX_ID, "Idx"))
+          let result = reduce_assoc(cx2, TyAssoc(tt, INDEX_ID, "Item"))
           let (cx3, it, ix) = check_expr(cx2, index, Some(want_idx))
-          var cx4 = cx3
           if it != want_idx && not is_errorish(it) {
-            if on_map {
-              cx4 = cerr(cx4, "this Map has keys of type " ++ ty_show(cx4.adts, want_idx) ++
-                  ", got " ++ ty_show(cx4.adts, it), e_lo(index), e_hi(index))
-            } else {
-              cx4 = cerr(cx4, "a List index must be Int, got " ++ ty_show(cx4.adts, it),
-                e_lo(index), e_hi(index))
-            }
-            (cx4, TyError, XError(lo, hi))
-          } else if on_map {
-            # `m[k]` hashes the key, compares it, and names it if it is
-            # absent -- three relations the key type owns, so three witnesses
-            # resolved here rather than assumed by the backend.
-            let (cx5, ws) = index_wits(cx4, want_idx, lo, hi)
-            (cx5, result, XIndex(tx, ix, on_map, ws, lo, hi, result))
+            (cerr(cx3, "this index must be `" ++ ty_show(cx3.adts, want_idx) ++
+                "`, got `" ++ ty_show(cx3.adts, it) ++ "`",
+              e_lo(index), e_hi(index)), TyError, XError(lo, hi))
           } else {
-            (cx4, result, XIndex(tx, ix, on_map, [], lo, hi, result))
+            (cx3, result, XIndex(tx, ix, wr, lo, hi, result))
           }
         }
       }

@@ -63,8 +63,16 @@ std 现有顶层函数。落地形状是 `iter_start/iter_done/iter_next/iter_ge
   `T.Item` 这一种到达方式。导出随 `trait_infos` 走（ModExports 合并，
   checker.dawn:4720-4735）——投影在导出签名里随 Sig 序列化，不需要新导出件。
 - **D9 opaque 主体 = 镜像 resolve_witness 的顺序**（checker.dawn:5272-5278）：先查
-  opaque 自己的 impl，无则**不**穿透到 target——opaque 的判据是「它就是它的目标」用于
-  表示、「先身份」用于语义查找；witness 不穿透，投影也不穿透。
+  opaque 自己的 impl，无则~~**不**穿透到 target~~**穿透到 target**——opaque 的判据是
+  「它就是它的目标」用于表示、「先身份」用于语义查找。
+
+  > **勘误（2026-08-02，运算符 trait 刀 2 收口）**：这条的措辞与落地代码相反，删线处
+  > 是错的。`resolve_witness`（checker.dawn:5722-5733）与 `assoc_impl_of`
+  > （checker.dawn:1266-1277）都是「先查 opaque 自己的 impl，**没有就落到 target**」，
+  > 后者的注释还写明了「the order resolve_witness uses」。**witness 穿透，投影也穿透**，
+  > 一直如此。opaque 因此自动获得目标类型的 `==`/`${}`/`for..in`，2026-08-02 起也自动
+  > 获得 `[]`（`docs/operator-traits-design.md` D2）。所谓「先身份」管的是**类型匹配**
+  > （`v == [1,2,4]` 仍被拒，两边必须同为 `Vec`），不是 impl 查找。
 - **D10 刀与种子计划**：见 §6。trait-v2 §5 记录过的错误（「刀 1 让语法能 parse 但注册
   报错 = 把种子锁在门外」）在这里的教训是：**刀 1 必须端到端完整**（parse→注册→归约→
   两后端语料），发布后种子才推进；selfhost/std 在刀 2（种子已认识语法）才允许使用。

@@ -132,11 +132,11 @@ pub type TExpr =
   | XTupleLit(elems: List[TExpr], lo: Int, hi: Int, ty: Ty)
   | XPropagate(operand: TExpr, lo: Int, hi: Int, ty: Ty)
   | XUnwrap(operand: TExpr, msg: String, lo: Int, hi: Int, ty: Ty)
-# `xs[i]` and `m[k]`. A map index carries the key's witnesses: reaching the
-# entry means hashing and comparing it, and which relations those are is the
-# key type's answer, resolved here like any other bound.
-  | XIndex(target: TExpr, index: TExpr, on_map: Bool, wits: List[WitRef],
-    lo: Int, hi: Int, ty: Ty)
+# `c[i]`. One witness, for `Index[C]` -- there is no `on_map` flag any more
+# because there is no list of subjects to be on one of. A map's three
+# witnesses did not disappear: they are the sub-witnesses of this one, since
+# `Index[Map[K, V]]` is a conditional impl bounded on `K`.
+  | XIndex(target: TExpr, index: TExpr, wit: WitRef, lo: Int, hi: Int, ty: Ty)
   | XReturn(v: Option[TExpr], lo: Int, hi: Int)
   | XBreak(lo: Int, hi: Int)
   | XContinue(lo: Int, hi: Int)
@@ -288,7 +288,7 @@ pub fn x_lo(e: TExpr) -> Int =
     XTupleLit(_, lo, _, _) -> lo
     XPropagate(_, lo, _, _) -> lo
     XUnwrap(_, _, lo, _, _) -> lo
-    XIndex(_, _, _, _, lo, _, _) -> lo
+    XIndex(_, _, _, lo, _, _) -> lo
     XReturn(_, lo, _) -> lo
     XBreak(lo, _) -> lo
     XContinue(lo, _) -> lo
@@ -325,7 +325,7 @@ pub fn x_hi(e: TExpr) -> Int =
     XTupleLit(_, _, hi, _) -> hi
     XPropagate(_, _, hi, _) -> hi
     XUnwrap(_, _, _, hi, _) -> hi
-    XIndex(_, _, _, _, _, hi, _) -> hi
+    XIndex(_, _, _, _, hi, _) -> hi
     XReturn(_, _, hi) -> hi
     XBreak(_, hi) -> hi
     XContinue(_, hi) -> hi
@@ -363,7 +363,7 @@ pub fn tex_ty(e: TExpr) -> Ty =
     XTupleLit(_, _, _, ty) -> ty
     XPropagate(_, _, _, ty) -> ty
     XUnwrap(_, _, _, _, ty) -> ty
-    XIndex(_, _, _, _, _, _, ty) -> ty
+    XIndex(_, _, _, _, _, ty) -> ty
     XReturn(_, _, _) -> TyNever
     XBreak(_, _) -> TyNever
     XContinue(_, _) -> TyNever

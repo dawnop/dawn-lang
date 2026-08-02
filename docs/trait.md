@@ -68,6 +68,8 @@ impl Ord[Point] {
   同 `use` 引入方式）。UFCS 免费获得：`a.cmp(b)`。prelude trait 的方法名
   可被本模块的声明遮蔽（spec §10.3/§10.6），遮蔽的只是拼写——impl 与运算符
   按 trait 找 impl，不经这个名字。
+  **例外是 `Index`**（`[]` 背后那个，spec §4.8）：它建成不注入，`index` 这个名字
+  不进任何模块的函数命名空间，只出现在 impl 体、`dawn doc` 与错误消息里。
 - impl 无名字、不能重叠；`pub` 跟随 trait（impl 本身无可见性——见 3.3）。
 
 ### 3.2 约束与消解

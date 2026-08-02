@@ -45,7 +45,8 @@ use codegen.{
 }
 use types.{
   prelude_adts, adt_of, adt_jvm_name, trait_of, OPTION_ID, RESULT_ID,
-  FOREIGN_ERROR_ID, EQ_ID, HASH_ID, SHOW_ID, ITER_ID, bounds_of,
+  FOREIGN_ERROR_ID, EQ_ID, HASH_ID, SHOW_ID, ITER_ID, ORD_ID,
+  prelude_trait_ids, bounds_of,
   Ty, Sig, Traits, ImplI, Adts, Impls
 }
 use emit.{emit_module, gen_trait_interface}
@@ -102,8 +103,19 @@ fn own_trait_ids(traits: Traits, cls: String) -> List[Int] = {
 ## Add a prelude trait to the set whose interface the program needs. Ord is
 ## unconditional and its methods are reached by name, so it is never wanted
 ## here; a user trait's interface comes from the module that declares it.
+##
+## Read off `prelude_trait_ids()` rather than transcribed. The transcription
+## was the sixth copy of the prelude set and the one #119 missed when it
+## collapsed the other five, which is a worse miss than it looks: forgetting a
+## trait here is not a compile error but a `NoClassDefFoundError` at run time,
+## because the dictionary class implements an interface nobody emitted.
 fn want_iface(wants: List[Int], tid: Int) -> List[Int] = {
-  if tid != EQ_ID && tid != HASH_ID && tid != SHOW_ID && tid != ITER_ID { return wants }
+  if tid == ORD_ID { return wants }
+  var prelude = false
+  for p in prelude_trait_ids() {
+    if p == tid { prelude = true }
+  }
+  if not prelude { return wants }
   for w in wants {
     if w == tid { return wants }
   }
