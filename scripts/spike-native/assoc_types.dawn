@@ -1,0 +1,49 @@
+# Associated types, knife 1 (#44): `type Item` in a trait, `type Item = X`
+# in an impl, `T.Item` in signatures, eager reduction at call sites.
+#
+# What this pins, on both backends:
+#   - a generic consumer (`head_or`) whose parameter and result are `C.Item`:
+#     the erased slot boxes and unboxes correctly (adapt_in/out grew the
+#     TyAssoc arm -- this file is what catches a backend that forgets)
+#   - reduction picks the right impl and the right binding: List[T] binds
+#     Item = T, Pair binds Item = String, and the two answers differ
+#   - a projection instantiated at two different element types in one
+#     program (Int and String) -- two dictionaries, one generic body
+use std/io
+use std/list
+
+trait Iter[C] {
+  type Item
+  fn first(c: C) -> Option[C.Item]
+}
+
+type Pair = { a: String, b: String }
+
+impl[T] Iter[List[T]] {
+  type Item = T
+  fn first(c: List[T]) -> Option[T] = get(c, 0)
+}
+
+impl Iter[Pair] {
+  type Item = String
+  fn first(c: Pair) -> Option[String] = Some(c.a)
+}
+
+fn head_or[C: Iter](c: C, d: C.Item) -> C.Item =
+  match first(c) {
+    Some(x) -> x
+    None -> d
+  }
+
+pub fn main() -> Unit !io = {
+  io.println(to_string(head_or([1, 2, 3], 9)))
+  io.println(head_or(["a", "b"], "z"))
+  let e: List[Int] = []
+  io.println(to_string(head_or(e, 42)))
+  io.println(head_or(Pair { a: "left", b: "right" }, "none"))
+  # direct (non-generic) use: the impl method called on the concrete type
+  io.println(to_string(match first([7]) {
+    Some(n) -> n
+    None -> -1
+  }))
+}

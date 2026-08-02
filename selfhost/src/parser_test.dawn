@@ -560,3 +560,30 @@ test "effect atoms stack, and a declared effect is spelled with its own name" {
   let out2 = rendered("fn f() -> Int !(io | Ask) = 1")
   assert str.contains(out2, "eff=io,Ask")
 }
+
+test "a trait declares associated types beside its methods" {
+  let out = rendered("trait Iter[C] {\n  type Item\n  fn first(c: C) -> Option[C.Item]\n}")
+  assert str.contains(out, "Assoc Item")
+  assert str.contains(out, "TAssoc C.Item")
+  # bounds and defaults are refused where they are written, not two passes
+  # on; the declaration then resyncs, so later cascade diags may follow --
+  # the first message is the one that matters
+  let (_, ds) = parse_module("trait T[C] {\n  type Item: Ord\n  fn f(c: C) -> Int\n}")
+  assert str.contains(ds[0].msg, "cannot declare bounds")
+  let (_, ds2) = parse_module("trait T[C] {\n  type Item = Int\n  fn f(c: C) -> Int\n}")
+  assert str.contains(ds2[0].msg, "no default")
+}
+
+test "an impl binds an associated type with `type Item = X`" {
+  let out = rendered("impl Iter[Int] {\n  type Item = String\n  fn first(c: Int) -> Option[String] = None\n}")
+  assert str.contains(out, "AssocBind Item")
+  assert str.contains(out, "TNamed String")
+  # the binding form requires the `=`
+  let (_, ds) = parse_module("impl Iter[Int] {\n  type Item\n}")
+  assert str.contains(ds[0].msg, "`=`")
+}
+
+test "a projection's subject is a bare name; an applied head is refused" {
+  let (_, ds) = parse_module("fn f[C: Iter](c: C) -> List[Int].Item = panic(\"x\")")
+  assert str.contains(ds[0].msg, "bare type parameter")
+}

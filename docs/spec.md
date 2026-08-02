@@ -429,6 +429,34 @@ fn sort2[T: Ord2](xs: List[T]) -> List[T] = ...   # 约束：[T: Trait (+ Trait)
   `Eq[List[Int]]` 这样的具体目标在编译期解成常量字典，`Eq[List[T]]`（`T` 刚性）
   则在运行期由 `Eq[T]` 构造。无 dyn、无 supertrait、无特化（不问「哪个更特化」）。
   trait 方法效果只能是纯或 `!io`，impl 的效果 ⊑ trait 声明。
+- **关联类型**（设计与裁决见
+  [assoc-types-design.md](assoc-types-design.md)）：trait 体可声明裸 `type Item`
+  成员（无 bound、无默认），impl 对每个声明**恰绑定一次** `type Item = X`
+  （X 在 impl 自己的参数作用域解析，且不得又是投影）；漏绑、多绑、绑 trait
+  没有的名字，各是编译错误。方法签名以 `T.Item` **投影**它——主体必须是带该
+  trait bound 的类型参数（恰一个 bound 声明该名字；零个与歧义都是错误），
+  `List[Int].Item` 这样的具体主体不支持。
+  - **归约是急切的**：调用点实例化让主体落到具体头时，投影立即经该主体的
+    impl（与字典选择同一扇门）换成绑定值——具体类型里**不存在**未归约投影。
+    刚性主体（泛型体内的 `T`）上的投影保持原样，只与逐字相同的投影相互统一。
+  - 关联类型名**只活在 trait 作用域内**，不进模块类型命名空间；`T.Item` 是
+    唯一到达方式。opaque 主体先查自己的 impl，无则落到 target 的（与 witness
+    同序）。运行期零表示：类型照常擦除，字典不多一个槽位。
+
+```dawn
+trait Iter[C] {
+  type Item
+  fn first(c: C) -> Option[C.Item]
+}
+
+impl[T] Iter[List[T]] {
+  type Item = T
+  fn first(c: List[T]) -> Option[T] = get(c, 0)
+}
+
+fn head_or[C: Iter](c: C, d: C.Item) -> C.Item =   # 投影随实例化归约
+  match first(c) { Some(x) -> x  None -> d }        # head_or([1], 9) 是 Int
+```
 - 预置 `trait Ord[T] { fn cmp(a: T, b: T) -> Int }` 及 `Int`/`String` 的 impl
   （**`Float` 没有**，NaN 下无全序可给——拒绝理由见 §4.3 数值边缘语义，2026-07-26
   撤销了此前照 `Double.compare` 给的那份）。
