@@ -47,7 +47,7 @@ use types.{
   adt_self_ty, Ty, TyInt, TyFloat, TyBool, TyString, TyBytes, TyUnit, TyNever,
   TyError, TyVar, TyAssoc, TyAdt, TyList, TyMap, TySet, TyArray, TyJava, TyTuple, TyFn, TyOpaque,
   Eff, EPure, EIo, EffVar, EUnion, ELabeled, eff_union, lub_eff, eff_subsumes, eff_suffix,
-  eff_base, eff_labels, eff_with_labels, EffectI, Effects, ev_record_name,
+  eff_base, eff_labels, eff_with_labels, EffectI, ev_record_name,
   Adts, AdtI, CtorI, FieldI, Traits, TraitI, ImplI, Sym, Sig, MethodSig,
   adt_of, trait_of, ty_show, ctor_render, sig_render, subst, subst_eff, eff_show,
   reduce_via_bindings,
@@ -57,7 +57,7 @@ use types.{
   builtins, opt_ty, result_ty, OPTION_ID, RESULT_ID, FOREIGN_ERROR_ID,
   ORD_ID, EQ_ID, HASH_ID, SHOW_ID, ITER_ID, INDEX_ID,
   eq_scalars, hash_scalars,
-  Impls, Head, head_of, impl_at, has_impl_at, insert_impl,
+  Head, head_of, impl_at, has_impl_at, insert_impl,
   is_eq_scalar, is_ground, expandable, type_args_of, sub_goals
 }
 use jsig.{JClass, JMethod, JCtor, JField, Jsig, jsig_refused}
@@ -65,177 +65,12 @@ use exhaustive.{
   LitV, LInt, LFloat, LBool, LStr, SPat, SWild, SCtor, SLit, STuple, SList,
   useful, missing_list_patterns
 }
+use cx.{
+  AliasE, Cx, LambdaCx, ModExports, Origin, OPrelude, OImport, OLocal,
+  cx_new, test_cx
+}
 use suggest
 use parser
-
-## An alias entry: the Kotlin AliasInfo without its mutable resolution slots
-## (resolution results live in Cx.alias_resolved, the in-flight set in
-## Cx.alias_resolving).
-pub type AliasE = {
-  name: String,
-  tparams: List[Ty],
-  # the unresolved target in the declaring module; None on imported aliases
-  target: Option[TypeRef],
-  # `opaque type` rather than `alias`: resolving the name yields a TyOpaque
-  # instead of the target, and only `owner` may convert between the two.
-  # `id` is minted from the same counter as ADT ids so the two never collide
-  # in `ty_key`, which names dictionaries and impl methods.
-  is_opaque: Bool,
-  id: Int,
-  owner: String,
-  nlo: Int,
-  nhi: Int
-}
-
-## The checker state: every mutable member of the Kotlin Checker class.
-pub type Cx = {
-  diags: List[Diag],
-  next_id: Int,
-  adts: Adts,
-  traits: Traits,
-  # name-keyed views of the current module's scope
-  fns: Map[String, Sig],
-  # where each `fns` entry came from, maintained in step with it by bind_fn --
-  # the precedence rule reads this and nothing else (design §4.1)
-  fn_origin: Map[String, Origin],
-  # the bundled std's implicit surface (PRELUDE names); local decls shadow it
-  std_fns: Map[String, Sig],
-  adts_by_name: Map[String, Int],
-  aliases: Map[String, AliasE],
-  alias_resolved: Map[String, Ty],
-  alias_resolving: Set[String],
-  ctors_by_name: Map[String, (Int, Int)],
-  traits_by_name: Map[String, Int],
-  local_traits: List[String],
-  local_impls: List[ImplI],
-  impl_table: Impls,
-  module_aliases: Map[String, String],
-  # (alias, fn name) → the imported module's signature (for qualified calls)
-  module_fn_sigs: Map[(String, String), Sig],
-  imported_names: Map[String, String],
-  # constants: declared type by name, in declaration order
-  consts: Map[String, Ty],
-  const_order: List[String],
-  all_const_names: Set[String],
-  const_cutoff: Option[Set[String]],
-  # `use java` imports: simple name → fqcn
-  java_classes: Map[String, String],
-  # the host's Java signature oracle; jsig_refused() unless the driver wires
-  # jreflect's (the native form of `use java` is a refusal, plan §14.10)
-  jsig: Jsig,
-  # lexical scopes, innermost last; each maps name → symbol id
-  scopes: List[Map[String, Int]],
-  # symbol table: id → symbol
-  syms: Map[Int, Sym],
-  # declared effects visible here: name -> effect id, which is also the id of
-  # the synthesised evidence record (docs/effects-design.md §5.1)
-  effects: Map[String, Int],
-  effect_infos: Effects,
-  # effect bookkeeping for the body being checked
-  used_effects: List[Eff],
-  eff_witness: Map[Eff, (Int, Int, String)],
-  current_eff_vars: Map[String, Eff],
-  current_tparams: Map[String, Ty],
-  # bounds of the type parameters in scope, keyed by the TyVar's id (not its
-  # name: fresh ids are never reused, so a stale entry can never be reached
-  # through a fresh current_tparams and no save/restore is needed). Feeds
-  # `T.Item` resolution (assoc-types-design.md D2).
-  current_tparam_bounds: Map[Int, List[Int]],
-  current_sig: Option[Sig],
-  # (tvar id, trait id) → dictionary symbol id
-  dict_syms: Map[(Int, Int), Int],
-  lambda_stack: List[LambdaCx],
-  loop_stack: List[Int],
-  in_test: Bool,
-  # inside a comptime block or a const initializer: no effect of any kind may
-  # cross, and v1 refuses declared effects there outright (design §4.5)
-  isolated: Bool,
-  is_std_module: Bool,
-  owner_class: Option[String],
-  src_path: Option[String],
-  # code-point offsets of line starts in the current source (set by the driver)
-  line_starts: List[Int],
-  # removed-name → where-it-went hints (populated by the std loader)
-  moved: Map[String, String],
-  # whole-module imports: alias → the exporter's surface (for call diagnostics)
-  module_exports: Map[String, ModExports],
-  # loop-stack indices that saw a break/continue (drives TSWhile/TSFor has_jumps)
-  loop_jumps: Set[Int]
-}
-
-## One lambda's frame. `sugar` says the parser synthesized this lambda from a
-## `with` statement (ast.dawn), which changes nothing about how it is checked
-## and everything about how a `return`/`break`/`?` inside it is reported.
-## `arm` narrows `sugar`: the closure is a `with handle` arm rather than the
-## remainder of a `with` block. Both are code the author did not spell as a
-## lambda, and each has to be named as what it is when a jump tries to leave it.
-pub type LambdaCx =
-  { boundary: Int, expected_ret: Option[Ty], captures: List[Int], sugar: Bool, arm: Bool }
-
-## A fresh checker state for one module.
-pub fn cx_new(owner_class: Option[String], src_path: Option[String]) -> Cx = {
-  let is_std = match owner_class {
-    Some(o) -> o == "std" || str.starts_with(o, "std/")
-    None -> false
-  }
-  Cx {
-    diags: [],
-    # One counter feeds the prelude ADT ids (Option/Result/ForeignError) and
-    # the prelude trait ids (Ord/Eq/Hash/Show/Iter) alike, so minting has to
-    # open past all of them. Twice it did not: when Show arrived the literal
-    # here stayed at 3, and when Iter arrived it stayed at 4 -- the same number
-    # Iter itself now holds. Neither collided, and both times for the same
-    # non-reason: a trait declaration mints its type variable before its trait
-    # id, so the first user trait steps over the counter's opening value.
-    # first_minted_id reads the tables instead, and the test below walks them.
-    next_id: first_minted_id(),
-    adts: prelude_adts(),
-    traits: prelude_traits(),
-    fns: map.empty(),
-    fn_origin: map.empty(),
-    std_fns: map.empty(),
-    adts_by_name: map.empty(),
-    aliases: map.empty(),
-    alias_resolved: map.empty(),
-    alias_resolving: set.empty(),
-    ctors_by_name: map.empty(),
-    traits_by_name: map.empty(),
-    local_traits: [],
-    local_impls: [],
-    impl_table: map.empty(),
-    module_aliases: map.empty(),
-    module_fn_sigs: map.empty(),
-    imported_names: map.empty(),
-    effects: map.empty(),
-    effect_infos: map.empty(),
-    consts: map.empty(),
-    const_order: [],
-    all_const_names: set.empty(),
-    const_cutoff: None,
-    java_classes: map.empty(),
-    jsig: jsig_refused(),
-    scopes: [],
-    syms: map.empty(),
-    used_effects: [],
-    eff_witness: map.empty(),
-    current_eff_vars: map.empty(),
-    current_tparams: map.empty(),
-    current_tparam_bounds: map.empty(),
-    current_sig: None,
-    dict_syms: map.empty(),
-    lambda_stack: [],
-    loop_stack: [],
-    in_test: false,
-    isolated: false,
-    is_std_module: is_std,
-    owner_class: owner_class,
-    src_path: src_path,
-    line_starts: [],
-    moved: map.empty(),
-    module_exports: map.empty(),
-    loop_jumps: set.empty()
-  }
-}
 
 # ---- diagnostics ----
 
@@ -342,19 +177,6 @@ pub fn import_clash(cx: Cx, name: String, lo: Int, hi: Int, kind: String) -> Cx 
 pub fn import_clashes(cx: Cx, name: String) -> Bool = map.has(cx.imported_names, name)
 
 # ---- the function namespace ----
-
-## Where a name in the module's function namespace came from. The pass order --
-## seed_prelude, then pass_imports, then the module's own declarations -- is
-## already a precedence order; this type is that order made sayable, so the
-## rule for who may overwrite whom lives in one place instead of being
-## re-derived at each write site (docs/prelude-namespace-design.md §4.1).
-pub type Origin =
-  | OPrelude
-# the module path spelled in the `use` that brought the name
-  | OImport(from: String)
-# how the declaration is named in diagnostics: "function", "trait method"
-# or "operation"
-  | OLocal(kind: String)
 
 ## The effect an operation belongs to, by name. `None` for anything that is not
 ## an operation, which is what the "imported more than once" hint keys off.
@@ -1084,8 +906,6 @@ fn resolve_named(cx: Cx, name: String, targs: List[TypeRef], lo: Int, hi: Int) -
 }
 
 # ---- tests ----
-
-fn test_cx() -> Cx = cx_new(None, None)
 
 test "scalar and container types resolve" {
   let cx = test_cx()
@@ -5065,32 +4885,6 @@ test "name refs walk every call position" {
 fn no_lparams() -> List[LambdaParam] = []
 
 # ---- module exports and imports (spec §10) ----
-
-## The pub surface of one checked module (the Kotlin ModuleExports): carried by
-## value, with the ADT/trait table fragments an importer grafts into its own
-## id tables. `all_names` lets an importer tell "private" apart from "unknown".
-pub type ModExports = {
-  mod_path: String,
-  class_name: String,
-  fns: Map[String, Sig],
-  types_by_name: Map[String, Int],
-  aliases: Map[String, AliasE],
-  # pub aliases as resolved in the declaring module (imports consume this;
-  # re-resolving the target against the importer's scope would fail)
-  alias_resolved: Map[String, Ty],
-  ctors: Map[String, (Int, Int)],
-  consts: Map[String, Ty],
-  all_names: List[String],
-  src_path: Option[String],
-  traits_by_name: Map[String, Int],
-  # declared effects by name, and the whole id-keyed table (grafted like the
-  # ADT table is: an effect id has to mean the same thing in every module)
-  effects: Map[String, Int],
-  effect_infos: Effects,
-  impls: List[ImplI],
-  adt_infos: Map[Int, AdtI],
-  trait_infos: Map[Int, TraitI]
-}
 
 ## The bundled modules that exist to hold a representation, not to be called:
 ## `Map`/`Set` are `std/hamt` and `List` is `std/pvec`. They are `pub` because
