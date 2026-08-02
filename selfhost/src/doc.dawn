@@ -13,8 +13,8 @@ use ast.{
   Module, module_fns, module_types, module_consts, module_traits, module_effects
 }
 use analyze.{Program, CheckedMod}
-use checker.{Cx, ModExports}
-use stdlib.{StdCtx}
+use checker.{Cx, ModExports, internal_std_modules}
+use stdlib.{StdCtx, load_std}
 use types.{
   Adts, Traits, AdtI, CtorI, ImplI, Sig, adt_of, trait_of, ty_show, sig_render,
   prelude_traits, builtins
@@ -463,6 +463,10 @@ pub fn builtins_json(std: StdCtx) -> String = {
   }
   for sm in std.srcs {
     let (mod_path, text, m) = sm
+    # std/hamt and std/pvec are Map/Set/List's representation, and `use` on
+    # either is a compile error outside std (spec §10.6). A reference that
+    # lists them teaches an API nobody may write, so they stay out of it.
+    if list.contains(internal_std_modules(), mod_path) { continue }
     let ds = doc_src_of(text)
     let exp = match map.get(std.exports, mod_path) {
       Some(e) -> e
@@ -522,4 +526,22 @@ pub fn builtins_json(std: StdCtx) -> String = {
   w = close_arr(w, true)
   w = close_obj(w)
   w_done(w)
+}
+
+test "the reference leaves out the representation modules" {
+  # std/hamt and std/pvec used to get a section each, and a reader who
+  # followed one got `use std/hamt` -- a compile error outside std. The
+  # published reference is the API a program may write, so the filter is
+  # the same list the checker refuses `use` against.
+  let std = match load_std("std") {
+    Ok(s) -> s
+    Err(e) -> panic("std: " ++ e)
+  }
+  let j = builtins_json(std)
+  for internal in internal_std_modules() {
+    assert not str.contains(j, quote(internal))
+  }
+  # the modules that stayed are still there
+  assert str.contains(j, quote("std/map"))
+  assert str.contains(j, quote("std/str"))
 }
