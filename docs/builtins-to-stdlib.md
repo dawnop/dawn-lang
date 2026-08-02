@@ -255,7 +255,8 @@ to_string          # → Show trait（已有 derive Show）
 - [ghc-prim: GHC primitives (Hackage)](https://hackage.haskell.org/package/ghc-prim) —— 不可约 primop 的边界
 - [core::intrinsics (Rust)](https://doc.rust-lang.org/core/intrinsics/index.html) —— intrinsic 藏在库函数背后
 - [Rust Tidbits: What Is a Lang Item?](https://manishearth.github.io/blog/2017/01/11/rust-tidbits-what-is-a-lang-item/) —— 运算符 desugar 成 trait
-- 本仓 `docs/package-design.md`（项目B / 源码包）、`docs/trait.md`（trait 现状）、`docs/spec.md` §11（builtin 清单）
+- 本仓 `docs/package-design.md`（项目B / 源码包）、`docs/trait.md`（trait 现状）、
+  `docs/spec.md` §11（语义与判据；名字清单已交给站点的 `/stdlib`，由 `dawn doc --stdlib` 生成）
 
 ## 补记（2026-07-22）：cursor 家族回迁内建——方向的第一个有据例外
 

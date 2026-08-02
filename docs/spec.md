@@ -1626,11 +1626,13 @@ std 一起捆绑、在 std 内部互相引用，但 **std 之外 `use std/hamt` 
 **prelude** 是其中隐式可用、无需 `use` 的高频核：`List`/`Option`/`Result` 的构造器、
 `println`/`print`、`map`/`filter`/`fold`、`sort` 族（std/list）、内建的 `len`/`get`/`range`/
 `to_string`/`join`/`parse_*`/`panic`/`todo`/`expect`/`unwrap_or`/`cast`/
-`catch_fault`/`catch_panic`/`bracket`/`args` 等一屏以内（全集见 `dawn doc --builtins`）。
+`catch_fault`/`catch_panic`/`bracket`/`args` 等一屏以内
+（全集见[标准库参考](https://dawn-lang.dawnop.com/stdlib.html)，由 `dawn doc --stdlib` 生成）。
 
 **顶层声明可以遮蔽 builtin/std 函数名**（§10.3，Rust 式）：解析序是本模块声明 →
 std → 内建，std 模块自己的 `pub fn len` 正是靠这一条合法。**prelude trait 的方法名
-同待遇**：它们随 prelude 进入函数命名空间（哪些名字，见 §3.5 五个预置 trait 的方法），
+同待遇**：它们随 prelude 进入函数命名空间（哪些名字，见
+[标准库参考](https://dawn-lang.dawnop.com/stdlib.html)的「预置 trait」一节，规范定义在 §3.5），
 **可被本模块的声明遮蔽**，不是声明期错误。被遮蔽的只是那个拼写，trait 本身照旧——
 `impl Show[T]` 照常声明与被找到，`${...}`、`==`、`for..in` 照常按 trait 找 impl（§10.3）。
 
@@ -1644,197 +1646,140 @@ std → 内建，std 模块自己的 `pub fn len` 正是靠这一条合法。**p
 
 ---
 
-## 11. 标准库草案（v0.1 范围）
+## 11. 标准库（语义与判据）
 
-> **实现位置对使用者不可见。** 本节的名字有两个来源：编译器内建表，以及**随编译器捆绑的
+> **本节不列清单。** 有哪些函数、签名长什么样、每个怎么用——全集在
+> [标准库参考](https://dawn-lang.dawnop.com/stdlib.html)，由 `dawn doc --stdlib` 从编译器
+> 直接生成，因而不会与实现脱节。手抄一份到规范里只会烂：本节留下的是清单答不了的
+> 那半边——**接受什么输入、边界怎么办、为什么是这个取舍**。
+>
+> **实现位置对使用者不可见。** 这些名字有两个来源：编译器内建表，以及**随编译器捆绑的
 > `std/` 模块（Dawn 源码，§10.6）**。prelude 名隐式可见；其余以 `use std/x` 引入、
 > `x.fn(...)` 限定调用。哪边实现（内建 or std 包装）不影响拼写与语义
-> （[`docs/builtins-to-stdlib.md`](builtins-to-stdlib.md)）。`dawn doc --builtins` 输出全集。
+> （[`docs/builtins-to-stdlib.md`](builtins-to-stdlib.md)）。
 
-- `core/list`：`map filter fold len get range ...`；排序与极值（元素/键类型须具
-  `Ord`，见 §3.5；全部稳定、平局取第一个）：
-  - `sort[T: Ord](xs) -> List[T]` — 升序稳定排序
-  - `sort_by(xs, cmp: fn(T, T) -> Int) -> List[T]` — 自定义比较函数
-  - `max/min[T: Ord](xs) -> Option[T]` — 极值；空列表 `None`
-  - `max_by/min_by[T, K: Ord](xs, key: fn(T) -> K) -> Option[T]` — 按键取极值
+**数字的文本形式。** `parse_int` / `parse_float` / `parse_int_radix` 的**接受语言是这段
+EBNF**，由 `std/fmt` 自己的扫描器实施（两后端不再各自委托宿主解析器的文法；宿主只在
+`parse_float` 通过校验后做十进制→二进制的**正确舍入**，IEEE 754 最近偶数——在该子集上
+`strtod` 与 `Double.parseDouble` 是同一个函数）。首尾空白先按 **Dawn 自己的空白表**修剪
+（与 `str.trim` 同一张 `char_is_space` 表，不是宿主的）：
 
-  成员与量词（都在 **`std/list`**，都**短路**——用 `fold` 假冒的 `any`/`all` 是一趟全走）：
-  - `list.any(xs, f) / list.all(xs, f) -> Bool` — 存在 / 全称；空列表分别为 `false` / `true`
-  - `list.contains[T: Eq](xs, x) -> Bool`、`list.index_of[T: Eq](xs, x) -> Option[Int]`
-    （判据 2，货币同 `str.index_of`，不发 `-1`）
-  - `list.unique[T: Eq + Hash](xs) -> List[T]` — 去重且保序（每个值留在首次出现的位置）。
-    这一条比其余多要一个 `Hash`：只有 `Eq` 的去重是二次的，而 `Set` 的插入序恰好就是
-    这里要的顺序
-  - `list.is_empty(xs) -> Bool` — 判空。问游标而非比长度，故表示换成长度不是 O(1) 的
-    结构时它仍是 O(1)
-- **字符串**：prelude 里有 `join parse_int parse_float to_string`（字符串转数字是
-  `parse_int(s) -> Option[Int]`——没有重载，`to_int`/`to_float` 只做 Int↔Float 转换）。
+```
+int    = [ "+" | "-" ] digit { digit }                    (* digit 仅 ASCII 0-9 *)
+float  = [ "+" | "-" ] mant [ exp ] | "Infinity" | "-Infinity" | "NaN"
+mant   = digit { digit } [ "." { digit } ] | "." digit { digit }
+exp    = ( "e" | "E" ) [ "+" | "-" ] digit { digit }
+radix  = [ "+" | "-" ] rdigit { rdigit }
+```
 
-  **`parse_int` / `parse_float` / `parse_int_radix` 的接受语言是这段 EBNF**，由
-  `std/fmt` 自己的扫描器实施（两后端不再各自委托宿主解析器的文法；宿主只在
-  `parse_float` 通过校验后做十进制→二进制的**正确舍入**，IEEE 754 最近偶数——
-  在该子集上 `strtod` 与 `Double.parseDouble` 是同一个函数）。首尾空白先按
-  **Dawn 自己的空白表**修剪（与 `str.trim` 同一张 `char_is_space` 表，不是宿主的）：
+`parse_int_radix` 用 `radix` 产生式：`rdigit` ∈ `0-9 a-z A-Z`（值 = 10..35，大小写同值），
+数字值 ≥ radix 拒绝；radix 不在 2..36 内答 `None`。整数超出 64 位范围是 `None` 不是环绕。
+**有意排除**（今天的宿主解析器有的收、Dawn 一律拒绝）：下划线、`0x` 前缀与十六进制浮点
+（`0x1p3`）、`f/F/d/D` 后缀、`inf`/`nan` 等小写变体、带符号的 `NaN` 与 `+Infinity`
+（合法特殊拼写恰是 `to_string` 能输出的三个，见 §4.3 的往返闭合）、全角与阿拉伯-印度等
+非 ASCII 数字（宿主的 `Character.digit` 收它们，Dawn 的数字集是 ASCII 封闭的）。
 
-  ```
-  int    = [ "+" | "-" ] digit { digit }                    (* digit 仅 ASCII 0-9 *)
-  float  = [ "+" | "-" ] mant [ exp ] | "Infinity" | "-Infinity" | "NaN"
-  mant   = digit { digit } [ "." { digit } ] | "." digit { digit }
-  exp    = ( "e" | "E" ) [ "+" | "-" ] digit { digit }
-  radix  = [ "+" | "-" ] rdigit { rdigit }
-  ```
+**大小写映射。** `str.to_lower`/`str.to_upper` 是 **Unicode 简单(1:1)大小写映射**：一个码点
+进、一个码点出，无 locale、无上下文，故**码点数不变**。这排除了完整映射的三类特例——长度
+会变的（`ß` → `SS`）、locale 相关的（土耳其语的 `i`）、上下文相关的（希腊语词尾 sigma）。
+取简单映射不是为了省事：完整映射不是一个后端能从一张表实现的函数，而 Dawn 要求一个原语
+在每个后端上是同一个函数。需要完整映射的场合属于能接收 locale 的库。
 
-  `parse_int_radix` 用 `radix` 产生式：`rdigit` ∈ `0-9 a-z A-Z`（值 = 10..35，
-  大小写同值），数字值 ≥ radix 拒绝；radix 不在 2..36 内答 `None`。整数超出
-  64 位范围是 `None` 不是环绕。**有意排除**（今天的宿主解析器有的收、Dawn 一律
-  拒绝）：下划线、`0x` 前缀与十六进制浮点（`0x1p3`）、`f/F/d/D` 后缀、`inf`/`nan`
-  等小写变体、带符号的 `NaN` 与 `+Infinity`（合法特殊拼写恰是 `to_string` 能输出的
-  三个，见 §4.3 的往返闭合）、全角与阿拉伯-印度等非 ASCII 数字（宿主的
-  `Character.digit` 收它们，Dawn 的数字集是 ASCII 封闭的）。
+那张表是**编译器的**（`selfhost/src/case_table.dawn`，生成物，记着生成它的 JDK），两个后端
+各自领走一份：JVM 写进 `dawn/rt/Strings`，native 写进发出来的 C。所以 `str.to_upper` 的答案
+**不随宿主 JDK 的 Unicode 版本变**——升级到新 Unicode 是重新生成这张表这一件明确的事，
+而不是换台机器编译就悄悄换了答案。分类（`char_is_*`）同理，表在 `selfhost/src/class_table.dawn`。
 
-  其余在 **`std/str`**：`str.len str.is_empty str.trim str.trim_start str.trim_end
-  str.to_lower str.to_upper str.contains str.starts_with str.ends_with
-  str.strip_prefix str.strip_suffix str.index_of str.last_index_of
-  str.repeat str.substring str.take str.drop str.at str.pad_start str.pad_end
-  str.reverse str.chars str.split str.replace str.from_char`。
+**字符即码点。** `code_points(s) -> List[Int]` 拆成码点（增补平面的代理对合并为一个码点）、
+`from_code_points` 由码点组装；`str.len` 是码点数，`str.at` 回**码点 `Int`**，回 `List[String]`
+的是 `str.chars`。字符串的下标一律是码点下标，不是 UTF-16 码元。
 
-  `strip_prefix`/`strip_suffix` 回 `Option[String]`：判定与剥离一次完成，故调用方
-  不必自己算偏移（判据 2）。`take`/`drop` 是 `substring` 的两个单端写法、同样钳位
-  （判据 3），`truncate` 就是 `take`，不另设一个名字。`at(s, i)` 回**码点 `Int`**、
-  越界 panic（判据 1）——字符即码点是本语言的既定货币（`code_points`/`from_char`/
-  `cursor.char` 都是它），回 `List[String]` 的是 `chars`。
+三条判据（§4.8）在字符串族上的落点：`str.at(s, i)` 越界 **panic**（判据 1，`i` 是调用方声称
+存在的位置，同 `xs[i]` 与 `bytes.at`）；`str.strip_prefix`/`strip_suffix` 回 `Option`
+（判据 2，判定与剥离一次完成，调用方不必自己算偏移）；`str.substring`/`take`/`drop` 与
+`bytes.slice` 两端**钳位**、`from > to` 得空串（判据 3，范围参数选取一段，不断言端点存在）。
+`truncate` 就是 `take`，不另设一个名字。
 
-  `to_lower`/`to_upper` 是 **Unicode 简单(1:1)大小写映射**：一个码点进、一个码点出，
-  无 locale、无上下文，故**码点数不变**。这排除了完整映射的三类特例——长度会变的
-  （`ß` → `SS`）、locale 相关的（土耳其语的 `i`）、上下文相关的（希腊语词尾 sigma）。
-  取简单映射不是为了省事：完整映射不是一个后端能从一张表实现的函数，而 Dawn 要求
-  一个原语在每个后端上是同一个函数。需要完整映射的场合属于能接收 locale 的库。
+**字节与文本编码。** 语言承诺的字符集只有两个，且**函数名即定义域**：`bytes.decode_utf8`
+与 `bytes.decode_latin1`，没有字符集注册表（审计 RP-04 裁决 C）。带 charset 参数的旧
+`bytes.decode` 与它底下的原语都已删除——没有 charset 参数就没有「不认识的字符集」这个
+失败面，故它们返回裸 `String` 而非 `Option`。
 
-  那张表是**编译器的**（`selfhost/src/case_table.dawn`，生成物，记着生成它的 JDK），
-  两个后端各自领走一份：JVM 写进 `dawn/rt/Strings`，native 写进发出来的 C。所以
-  `str.to_upper` 的答案**不随宿主 JDK 的 Unicode 版本变**——升级到新 Unicode 是重新生成
-  这张表这一件明确的事，而不是换台机器编译就悄悄换了答案。分类（`char_is_*`）同理，
-  表在 `selfhost/src/class_table.dawn`。
-- **`std/bytes`**（一等 `Bytes`，§9.5.1）：`bytes.utf8(s) -> Bytes`（字符串的 UTF-8 字节）、
-  `bytes.decode_utf8(b) -> String` 与 `bytes.decode_latin1(b) -> String`（解码；语言承诺的
-  字符集就这两个，**函数名即定义域**，没有字符集注册表——审计 RP-04 裁决 C。
-  带 charset 参数的旧 `bytes.decode` 与它底下的 `bytes_decode` 原语都已删除：
-  运行期原语是 `bytes_decode_utf8(b) -> String` 与 `bytes_decode_latin1(b) -> String`，
-  两个后端各实现一份——没有 charset 参数就没有「不认识的字符集」这个失败面，
-  故返回裸 `String` 而非 `Option`）、
-  `bytes.len(b) -> Int`、`bytes.is_empty(b) -> Bool`、`bytes.at(b, i) -> Int`（0..255，越界 panic）、
-  `bytes.slice(b, start, end) -> Bytes`（`[start,end)`，下标 clamp）、
-  `bytes.index_of(b, needle, from) -> Option[Int]`（字节下标首次出现）。
-  构造侧是 `bytes.buf()`/`put`/`put_bytes`/`get`/`size`/`freeze`（§9.5.1 的 `Buf`）。
-  这里的 `size` 是「长度只叫 `len`」那条规则的**唯一具名例外**：`bytes.len` 已经是成品
-  `Bytes` 的长度，语言又无重载，故写入游标只能另取一名（CONTRIBUTING「命名族」）。
+hex 与 base64 是纯 Dawn 字节算术（无 `use java`，故两后端同一份定义），规则是规范性的：
+`to_hex` 每字节两位、**小写**为规范拼写，`from_hex` 大小写皆收、其余一概不收；`to_base64`
+用 RFC 4648 §4 标准字母表并以 `=` 补齐，`to_base64_url` 用 §5 的 url/文件名安全字母表且
+**不补 `=`**；两个解码器各只认自己的字母表（猜字母表会把拼错的输入变成错的字节），padding
+可有可无，但末组的空余低位必须为零——否则同一串字节会有多个拼写。四个解码器都属判据 2：
+外来文本是要校验的，不是要断言的。
 
-  **文本编码**（纯 Dawn 字节算术，无 `use java`，故两个后端同一份定义）：
-  `bytes.to_hex(b) -> String`（每字节两位、**小写**为规范拼写）与
-  `bytes.from_hex(s) -> Option[Bytes]`（大小写皆收，其余一概不收）；
-  `bytes.to_base64(b) -> String`（RFC 4648 §4 标准字母表，`=` 补齐）与
-  `bytes.to_base64_url(b) -> String`（§5 的 url/文件名安全字母表，**不补 `=`**），
-  两个解码器 `bytes.from_base64` / `bytes.from_base64_url -> Option[Bytes]`
-  各只认自己的字母表（猜字母表会把拼错的输入变成错的字节），padding 可有可无，
-  但末组的空余低位必须为零——否则同一串字节会有多个拼写。
-  四个解码器都属判据 2（§4.8）：外来文本是要校验的，不是要断言的。
+`Bytes` 与 `Buf` 见 §9.5.1；另有操作符 `Bytes ++ Bytes` 与按内容的 `==`/`!=`。二进制请求体
+（multipart 上传、WebDAV PUT）、crypto/签名、HTTP 收发都直接走 `Bytes`，不再借道 latin-1
+字符串。
 
-  prelude 里另有 `cast(x) -> Result[T, ForeignError]`（把擦除泛型的不透明 `Object` 认领为
-  具体引用类型 T，T 取自期望类型，§9.5）。
-  另有操作符 `Bytes ++ Bytes` 与按内容的 `==`/`!=`。二进制请求体（multipart 上传、WebDAV PUT）、
-  crypto/签名、HTTP 收发都直接走 `Bytes`，不再借道 latin-1 字符串。
-- `Result` **没有**配套的库函数（无 `map_err`、无 `ok`）。`match` 和 `?` 够用，
-  跨错误类型见 §8.1 的本地 helper；把 `Result` 转成 `Option` 在 4 万行 Dawn 里
-  一次都没出现过（32 个 `-> None` 臂无一对着 `Err`），且丢错误与本语言取向相反
-- **码点 / 字符**（§1.5、§2.1 的补充；字符即码点 `Int`）：
-  - `code_points(s: String) -> List[Int]` — 拆成码点（增补平面的代理对合并为一个码点）
-  - `from_code_points(cs: List[Int]) -> String` — 由码点组装（接受增补码点）
-  - `str.from_char(c: Int) -> String` — 单码点转字符串（非法码点 panic）
-  - `str.len(s: String) -> Int` — 码点数（区别于 `str.chars` 返回的 `List[String]`）
-  - `str.substring(s: String, from: Int, to: Int) -> String` — 按**码点下标**切片，
-    两端 clamp 进范围、`from > to` 得空串（§4.8 判据 3，与 `bytes.slice` 同策略）
-- **`std/cursor`**——上面这些**按码点下标**的函数，每次调用都要从串首数到那个下标，
-  即单次 O(n)、放进循环就是 O(n²)。游标是**位置**而非计数，故每步恒定开销：
-  - `cursor.start(s) / cursor.end(s) -> Cursor` — 串首 / 串尾游标
-  - `cursor.done(s, c) -> Bool`、`cursor.char(s, c) -> Int`（到尾返回 -1）
-  - `cursor.next(s, c) / cursor.prev(s, c) -> Cursor` — 进 / 退一个字符（宽度非恒定，故不能用加减）
-  - `cursor.slice(s, from, to) -> String` — 按游标切，不做下标换算；非法区间 panic
-  - `cursor.skip(s, c, sub) -> Cursor` — 越过一处已知出现的 `sub`（它恰是 `sub` 宽）——
-    **唯一被认可的「游标前进已知宽度」**，替代 `i + len` 式算术
-  - `cursor.find(s, sub, from) -> Option[Cursor]` — 游标进、游标出，故沿串反复查找整体仍线性
-  - `cursor.at(s, i) -> Cursor` / `cursor.offset(s, c) -> Int` — 两套位置货币之间的桥：
-    前者从串首走 `i` 个字符（钳位，判据 3：负数得串首、超长得串尾），后者一趟数出
-    `c` 之前有几个字符。各一趟 O(n)，用在**边界**上（外面来的 `Int` 下标进来、
-    位置要报给外面时）；放进循环就变回它要消灭的 O(n²)
+**命名族。** 长度只有 `len` 一个名字，判空只有 `is_empty` 一个名字——`str`/`list`/`map`/
+`set`/`bytes` 五处同拼写。**唯一具名例外是 `bytes.size(b: Buf)`**：`bytes.len` 已经是成品
+`Bytes` 的长度，而语言无重载，故写入游标只能另取一名（判据与例外见 CONTRIBUTING「命名族」）。
+返回位置的搜索一律回 `Option`，**不发 `-1`**（`str.index_of`、`list.index_of` 同一货币）。
 
-  游标是**位置**而非计数：从这些函数取得、传回、比较（`==` 与 `< <= > >=`——**同一
-  字符串内**位置的先后是位置类型的合法操作）、存进容器/record 供回溯（它是普通值，
-  回溯不需要额外机制）。**不要对它做算术**——只有算术能凭空造出落在代理对中间的非法位置。
+**排序与极值。** `sort` 族要求元素/键类型具 `Ord`（§3.5），全部**稳定**、平局取第一个。
+`list.any`/`list.all` **短路**（用 `fold` 假冒的那两个是一趟全走）；空列表分别为 `false` /
+`true`。`list.unique` 比其余多要一个 `Hash`：只有 `Eq` 的去重是二次的，而 `Set` 的插入序
+恰好就是去重要的顺序。
 
-  **算术与凭空铸造都是编译错误**：`Cursor` 是 `std/cursor` 用 §2.7 的
-  `pub opaque type Cursor = Int` 声明的，只有那个模块能把它看成 `Int`。
-  要在类型位置写出 `Cursor`，除 `use std/cursor` 外还要
-  `use std/cursor.{Cursor}`（前者绑模块别名、后者绑名字，是两件事）。
+**`Result` 没有配套的库函数**（无 `map_err`、无 `ok`）。`match` 和 `?` 够用，跨错误类型见
+§8.1 的本地 helper；把 `Result` 转成 `Option` 在 4 万行 Dawn 里一次都没出现过（32 个
+`-> None` 臂无一对着 `Err`），且丢错误与本语言取向相反。
 
-  > 它曾是编译器铸造的不透明标量——`Ty` 的一个变体、`Head` 的一支、
-  > eq/hash 标量表里各一行、七个文件里各一条 arm。同样的保证，现在没有自己的机制。
-  > 顺带修掉一处自相矛盾：从前 `a < b` 编得过而 `list.sort` 报 Cursor 无序，
-  > 因为回答这两个问题的是两张表；现在 `impl Ord[Cursor]` 一处回答两个。
-  单串一次调用用下标版没问题，**循环里必须用游标版**——`docs/seq6-research.md` §五之补有实测。
-- `core/option` / `core/result`：`map unwrap_or expect and_then ...`
-- **`Map` / `Set`**（§2.2 的内建持久容器）——操作在 **`std/map`** 与 **`std/set`**：
+**位置：`Cursor`。** 按码点下标的函数每次调用都要从串首数到那个下标，即单次 O(n)、放进
+循环就是 O(n²)。游标是**位置**而非计数，故每步恒定开销。位置只能从 `std/cursor` 的函数
+取得、传回、比较（`==` 与 `< <= > >=`——**同一字符串内**位置的先后是位置类型的合法操作）、
+存进容器/record 供回溯（它是普通值，回溯不需要额外机制）。**不要对它做算术**——只有算术
+能凭空造出落在代理对中间的非法位置。
 
-  ```
-  map.empty[K, V]() -> Map[K, V]              set.empty[T]() -> Set[T]
-  map.from(entries: List[(K, V)]) -> Map[K, V]   set.from(xs: List[T]) -> Set[T]
-  map.insert(m, k, v) -> Map[K, V]            set.insert(s, x) -> Set[T]
-  map.remove(m, k) -> Map[K, V]               set.remove(s, x) -> Set[T]
-  map.get(m, k) -> Option[V]                  set.has(s, x) -> Bool
-  map.has(m, k) -> Bool                        set.len(s) -> Int
-  map.len(m) -> Int                           set.is_empty(s) -> Bool
-  map.is_empty(m) -> Bool                     set.to_list(s) -> List[T]
-  map.keys(m) -> List[K]
-  map.values(m) -> List[V]
-  map.entries(m) -> List[(K, V)]
-  ```
+**算术与凭空铸造都是编译错误**：`Cursor` 是 `std/cursor` 用 §2.7 的
+`pub opaque type Cursor = Int` 声明的，只有那个模块能把它看成 `Int`。要在类型位置写出
+`Cursor`，除 `use std/cursor` 外还要 `use std/cursor.{Cursor}`（前者绑模块别名、后者绑名字，
+是两件事）。`cursor.at` / `cursor.offset` 是两套位置货币之间的桥，各一趟 O(n)，用在**边界**
+上（外面来的 `Int` 下标进来、位置要报给外面时）；放进循环就变回它要消灭的 O(n²)。
+单串一次调用用下标版没问题，**循环里必须用游标版**——`docs/seq6-research.md` §五之补有实测。
 
-  **长度只有 `len` 一个名字，判空只有 `is_empty` 一个名字**——`str`/`list`/`map`/`set`/
-  `bytes` 五处同拼写（`bytes.size(b: Buf)` 是唯一例外：`bytes.len` 已经是成品字节串的
-  长度，而语言无重载；判据与例外见 CONTRIBUTING「命名族」）。
+> 它曾是编译器铸造的不透明标量——`Ty` 的一个变体、`Head` 的一支、eq/hash 标量表里各一行、
+> 七个文件里各一条 arm。同样的保证，现在没有自己的机制。顺带修掉一处自相矛盾：从前
+> `a < b` 编得过而 `list.sort` 报 Cursor 无序，因为回答这两个问题的是两张表；现在
+> `impl Ord[Cursor]` 一处回答两个。
 
-  两者的**表示**是纯 Dawn 的 `std/hamt`（持久 HAMT）与 `std/pvec`（持久向量），它们是
-  **内部模块**：`use std/hamt` / `use std/pvec` 在 std 之外是编译错误，诊断指回
-  `std/map`/`std/set`/`std/list`。表示要能换，而能换的前提是没人依赖它。
+**容器的表示。** `Map`/`Set` 的表示是纯 Dawn 的 `std/hamt`（持久 HAMT）、`List` 的是
+`std/pvec`（持久向量），它们是**内部模块**：`use std/hamt` / `use std/pvec` 在 std 之外是
+编译错误，诊断指回 `std/map`/`std/set`/`std/list`（§10.6）。表示要能换，而能换的前提是
+没人依赖它——[标准库参考](https://dawn-lang.dawnop.com/stdlib.html)因此也不列这两个模块。
+容器的语义（持久接口、键须 `Eq + Hash`、迭代按插入序、相等与顺序无关）在 §2.2。
 
-- `core/math`：`abs min max sin cos sqrt pow to_float to_int ...`（纯——
-  内部以 `unsafe_pure` 包装 `java.lang.Math`；`@trusted_pure` 是该逃生门的旧名，已废弃）
-- **`std/io`**：`io.read_line io.read_file io.write_file io.list_dir io.is_dir`（全部 `!io`；
-  `println`/`print` 同住此模块但由 prelude 直呼，`args`/`catch_fault` 是内建）
-  - 会失败的那些一律 `Result[T, ForeignError]`（§9.8.1）——`mkdirs` / `read_file` /
-    `write_file` / `read_bytes` / `write_bytes` / `rename` / `temp_dir` / `list_dir` /
-    `run`。到 v0.32.0 为止是 `Result[T, String]`，装的是屏障渲染好的那句话；换成
-    结构化载荷，是因为「止在 std 门口」等于把这次要消灭的东西留给每一个调用方
-  - `io.write_file(path, content) -> Result[Unit, ForeignError]` — **自动创建缺失的父目录**。
-    `Ok` 不带值:曾返回 `String.length()`(UTF-16 码元,既不是字符数也不是字节数),
-    2026-07-19 去掉——没有调用点读它
-  - `io.list_dir(path) -> Result[List[String], ForeignError]` — **码点序**排序的条目名。
-    排序在 std 层做（`list.sort` 走语言自己的 `Ord[String]`），`io_list_names` 原语
-    不承诺顺序——各后端不再各排各的（JVM 曾用 `Arrays.sort`，UTF-16 码元序，
-    astral 文件名会排在 U+E000..U+FFFF 之前）。path 不是
-    目录时 `Err`，`kind` 是 `"io.not_a_directory"`——std 自己铸的唯一一个 kind，
-    其余都是后端给的
-  - `io.is_dir(path) -> Bool` — 不存在或出错都视为 `false`
-  - **读进来的字节不是 UTF-8 时**：操作系统给的字节没有任何东西保证它是 UTF-8，
-    故每个把字节变成 `String` 的读取原语都必须表态。分两类，且**两个后端一致**：
-    - `io.read_file` **失败**（`Err`，即屏障接得住的 fault）。读文本读回来的却不是
-      盘上那段文本，正是这条规则要挡的事；输入本来就不是文本时该用 `io.read_file`
-      的字节孪生 `io.read_bytes`，它一个字节都不看
-    - `io.read_line` / `io.cwd` / `io.getenv` / `io.list_dir` / `io.temp_dir` / `args`
-      **替换**：非法序列换成 U+FFFD，规则逐字沿用 `bytes.decode_utf8`（§11 的
-      「文本编码」，一个非法序列一个 U+FFFD，不是一个字节一个）。文件名不是 UTF-8
-      仍然是个文件名，拒绝它等于让程序连目录都列不了
-    - 由此得一条不变式：**`String` 里没有非良构的 UTF-8**。这不是修辞——`c0 af`
-      原样进了字符串，下游走码点的那些原语会把它当成 `/`（#112 / #113）
+**IO 的表态。** `std/io` 全部 `!io`，会失败的一律回 `Result[T, ForeignError]`（§9.8.1）。
+到 v0.32.0 为止是 `Result[T, String]`，装的是屏障渲染好的那句话；换成结构化载荷，是因为
+「止在 std 门口」等于把这次要消灭的东西留给每一个调用方。另有三条规范性行为：
+
+- `io.write_file(path, content)` **自动创建缺失的父目录**。`Ok` 不带值：曾返回
+  `String.length()`（UTF-16 码元，既不是字符数也不是字节数），2026-07-19 去掉——没有调用点读它
+- `io.list_dir(path)` 的条目名按**码点序**排序。排序在 std 层做（`list.sort` 走语言自己的
+  `Ord[String]`），`io_list_names` 原语不承诺顺序——各后端不再各排各的（JVM 曾用
+  `Arrays.sort`，UTF-16 码元序，astral 文件名会排在 U+E000..U+FFFF 之前）。path 不是目录时
+  `Err`，`kind` 是 `"io.not_a_directory"`——std 自己铸的唯一一个 kind，其余都是后端给的
+- `io.is_dir(path)` 不存在或出错都视为 `false`
+
+- **读进来的字节不是 UTF-8 时**：操作系统给的字节没有任何东西保证它是 UTF-8，故每个把字节
+  变成 `String` 的读取原语都必须表态。分两类，且**两个后端一致**：
+  - `io.read_file` **失败**（`Err`，即屏障接得住的 fault）。读文本读回来的却不是盘上那段
+    文本，正是这条规则要挡的事；输入本来就不是文本时该用 `io.read_file` 的字节孪生
+    `io.read_bytes`，它一个字节都不看
+  - `io.read_line` / `io.cwd` / `io.getenv` / `io.list_dir` / `io.temp_dir` / `args`
+    **替换**：非法序列换成 U+FFFD，规则逐字沿用 `bytes.decode_utf8`（一个非法序列一个
+    U+FFFD，不是一个字节一个）。文件名不是 UTF-8 仍然是个文件名，拒绝它等于让程序连目录
+    都列不了
+  - 由此得一条不变式：**`String` 里没有非良构的 UTF-8**。这不是修辞——`c0 af` 原样进了
+    字符串，下游走码点的那些原语会把它当成 `/`（#112 / #113）
+
+**数学**（`abs min max sin cos sqrt pow to_float to_int ...`）是纯的——内部以 `unsafe_pure`
+包装 `java.lang.Math`；`@trusted_pure` 是该逃生门的旧名，已废弃。
 
 实现策略：能薄包 Java 就薄包（`String` 直接是 `java.lang.String`），持久 `List`/`Map`/`Set`
 全部是**纯 Dawn 源**（`List` = `std/pvec` 持久向量，`Map`/`Set` = `std/hamt` 持久 HAMT，
