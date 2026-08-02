@@ -412,6 +412,9 @@ fn sort2[T: Ord2](xs: List[T]) -> List[T] = ...   # 约束：[T: Trait (+ Trait)
 ```
 
 - trait 恰有一个类型参数；方法进入模块函数命名空间（可直呼、可 UFCS、可管道）。
+- **注入是逐 trait 的属性**：一个 trait 的方法名是否占据函数命名空间由该 trait 决定。
+  今天 `trait` 声明恒注入，五个预置 trait 也全部注入；由运算符独占消费的 trait
+  （如 `[]` 背后的那个）不注入，其方法名只在 impl 体、文档与错误消息里出现。
 - **预置 trait 五个**：`Ord`（`cmp`，背后是 `<`/`<=` 之外的排序）、`Eq`（`eq`，
   背后是 `==`/`!=`）、`Hash`（`hash`）、`Show`（`show`，背后是 `to_string` 与
   `${...}`）、`Iter`（背后是 `for..in`，§4.7）。标量的 impl 随语言提供；
@@ -424,8 +427,7 @@ fn sort2[T: Ord2](xs: List[T]) -> List[T] = ...   # 约束：[T: Trait (+ Trait)
   一步不强制任何分配（游标形状由 impl 定）。std 为 `List`/`String`/`Bytes`/
   `Map`/`Set` 各提供一个 impl（元素分别是 `T`/单字符 `String`/`Int` 字节/
   `(K, V)`/`T`）；用户类型实现 `Iter` 即可被 `for` 迭代。四个方法名随 prelude
-  注入函数命名空间，**顶层 `fn` 不得重名**（同其余 prelude trait 方法；
-  「遮蔽 builtin/std」的 §10.3 规则不适用于 trait 方法名）。
+  注入函数命名空间，与其余 prelude 名同待遇——**可被本模块的声明遮蔽**（§10.3）。
 - **一致性**：全程序每个「trait × 类型」至多一个 impl；**孤儿规则**：impl 只能
   写在 trait 或主体类型的声明模块。impl 全局生效，不需要 `use`。
 - **主体形状**：一个类型构造器，作用在**互不相同的类型变量**上，而那些变量恰好是
@@ -451,6 +453,10 @@ fn sort2[T: Ord2](xs: List[T]) -> List[T] = ...   # 约束：[T: Trait (+ Trait)
   - 关联类型名**只活在 trait 作用域内**，不进模块类型命名空间；`T.Item` 是
     唯一到达方式。opaque 主体先查自己的 impl，无则落到 target 的（与 witness
     同序）。运行期零表示：类型照常擦除，字典不多一个槽位。
+  - **投影出现在参数位时不参与推断**：类型参数由**非投影**的参数位定下，投影随后
+    按该主体的 impl 绑定归约、再与实参比对。推论：类型参数只出现在投影里的方法
+    按名字不可调用（报「无法推断」）；trait 作者应把主体放进参数表——`Iter`
+    四个方法都把 `c: C` 放在第 0 位，正是这个原因。
 
 ```dawn
 trait Iter[C] {
@@ -1574,9 +1580,13 @@ use java "java.lang.Math"      # Java 互操作（§9），形式不变
   arity、spread、泛型实例化的行为完全一致。
 - 选择性引入一个 `type` 同时引入其**全部构造器**（与 `pub type` 导出构造器+字段的规则一致）。
 - 选择性引入的名字与本模块顶层声明或其他引入冲突 → 错误。**与 prelude 名冲突**：
-  选择性引入**可以**遮蔽 prelude（你逐字要来的名字，意图明确）；**顶层 fn / trait 方法**
-  也可以遮蔽 builtin/std 的**函数**名（Rust 式）——解析序是本模块声明 → std → 内建，
-  故遮蔽在本模块内是全量的：被遮蔽的拼写在该模块不可达，这是声明者自己的选择。
+  选择性引入**可以**遮蔽 prelude 名（你逐字要来的名字，意图明确），**包括 prelude
+  trait 的方法名**；**顶层 fn / trait 方法 / 效果操作**也可以遮蔽 builtin、std 与
+  **prelude trait 方法**（Rust 式）——解析序是本模块声明 → std → 内建。
+  遮蔽只作用于**这个拼写**：被遮蔽的拼写在该模块不可达，这是声明者自己的选择。
+  运算符与糖（`==`、`${...}`、`for..in`）按 trait 找 impl、**不经名字**，因此
+  **不受遮蔽影响**——遮蔽 `show` 不会改变 `${x}` 的输出，遮蔽 `iter_next` 不会
+  改变 `for..in` 的行为。
   但内建与 prelude 的**类型 / trait** 名（`Map`/`Option`/`Ord`…）仍不可重定义。
 
 ### 10.4 可见性
@@ -1620,9 +1630,13 @@ std 一起捆绑、在 std 内部互相引用，但 **std 之外 `use std/hamt` 
 
 **顶层声明可以遮蔽 builtin/std 函数名**（§10.3，Rust 式）：解析序是本模块声明 →
 std → 内建，std 模块自己的 `pub fn len` 正是靠这一条合法。**prelude trait 的方法名
-除外**：`cmp`/`eq`/`hash`/`show` 与 `iter_start`/`iter_done`/`iter_next`/`iter_get`
-随 prelude 进入函数命名空间，顶层 `fn` 重名是声明期错误（trait 方法共享函数命名空间，
-§3.5）。
+同待遇**：它们随 prelude 进入函数命名空间（哪些名字，见 §3.5 五个预置 trait 的方法），
+**可被本模块的声明遮蔽**，不是声明期错误。被遮蔽的只是那个拼写，trait 本身照旧——
+`impl Show[T]` 照常声明与被找到，`${...}`、`==`、`for..in` 照常按 trait 找 impl（§10.3）。
+
+> **prelude 追加是兼容的**：往 prelude 加名字不会让任何已通过检查的程序失败——
+> 新名要么没被用到，要么被本模块的声明遮蔽。这条是 prelude 可以演进的前提
+> （[`prelude-namespace-design.md`](prelude-namespace-design.md)）。
 
 > **历史（v0.4.0 → v0.5.0）**：模块化之前的平铺拼写（`map_insert`、`str_len`、
 > `trim` 的隐式可见等）在 v0.4.0 保留了一版并逐处警告，v0.5.0 已从公开命名空间

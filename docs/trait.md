@@ -65,7 +65,9 @@ impl Ord[Point] {
 - **默认方法**：trait 里可带 `= body` 的方法，impl 可不提供（字典里填默认实现）。
   默认方法体内可调用同 trait 的其他方法。
 - 方法名进入 trait 所在模块的**函数命名空间**（与顶层 fn 同域、同冲突规则、
-  同 `use` 引入方式）。UFCS 免费获得：`a.cmp(b)`。
+  同 `use` 引入方式）。UFCS 免费获得：`a.cmp(b)`。prelude trait 的方法名
+  可被本模块的声明遮蔽（spec §10.3/§10.6），遮蔽的只是拼写——impl 与运算符
+  按 trait 找 impl，不经这个名字。
 - impl 无名字、不能重叠；`pub` 跟随 trait（impl 本身无可见性——见 3.3）。
 
 ### 3.2 约束与消解

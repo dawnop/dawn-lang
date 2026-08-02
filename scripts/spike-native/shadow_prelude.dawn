@@ -1,0 +1,82 @@
+# A module that takes all eight prelude trait method names for itself.
+#
+# Adding a trait to the prelude used to be able to break a program that
+# compiled yesterday: the method names went into the module's function
+# namespace and a top-level `fn` of the same name was a declaration-time
+# error. It is a silent shadow now (docs/prelude-namespace-design.md D1), and
+# the promise that makes it safe is the one this program is here to check --
+# shadowing a *name* changes nothing about the *trait*.
+#
+# Every prelude trait is consumed by an operator or a piece of sugar that
+# reaches its impl by trait id, never through the function namespace. So with
+# all eight names bound to local functions of the wrong arity and the wrong
+# meaning, `==` still compares, `${...}` still renders, `for..in` still
+# iterates, `sort` still orders, and a `Map` still keys -- while the bare
+# names answer to this module's own functions. The two halves have to be read
+# together: either half alone would pass with the other half broken.
+use std/io
+use std/list
+use std/map
+
+pub type P = { x: Int }
+
+impl Show[P] {
+  fn show(p: P) -> String = "P<" ++ to_string(p.x) ++ ">"
+}
+
+impl Eq[P] {
+  fn eq(a: P, b: P) -> Bool = a.x == b.x
+}
+
+impl Hash[P] {
+  fn hash(p: P) -> Int = p.x
+}
+
+# the eight shadows: one parameter each, where every prelude method of that
+# name takes two or more, so nothing here could be mistaken for an override
+fn cmp(x: Int) -> Int = x * 10
+fn eq(x: Int) -> Int = x * 11
+fn hash(x: Int) -> Int = x * 12
+fn show(x: Int) -> Int = x * 13
+fn iter_start(x: Int) -> Int = x * 14
+fn iter_done(x: Int) -> Int = x * 15
+fn iter_next(x: Int) -> Int = x * 16
+fn iter_get(x: Int) -> Int = x * 17
+
+## The shadowed names, reached the two ways a name can be reached: called
+## outright and through UFCS, which is the same door (`x.f(a)` rewrites to
+## `f(x, a)` before resolution).
+fn names() -> String =
+  to_string(cmp(1)) ++ " " ++ to_string(eq(1)) ++ " " ++ to_string(hash(1)) ++ " " ++
+  to_string(show(1)) ++ " " ++ to_string(2.iter_start()) ++ " " ++
+  to_string(2.iter_done()) ++ " " ++ to_string(2.iter_next()) ++ " " ++ to_string(2.iter_get())
+
+pub fn main() -> Unit !io = {
+  println(names())
+
+  println("-- Show: interpolation and to_string reach impl Show[P] --")
+  let p = P { x: 3 }
+  println("${p}")
+  println(to_string(p))
+  println(to_string([p, P { x: 4 }]))
+
+  println("-- Eq: `==` and `!=` reach impl Eq[P] --")
+  println(to_string(P { x: 1 } == P { x: 1 }))
+  println(to_string(P { x: 1 } != P { x: 2 }))
+
+  println("-- Iter: `for..in` over a List and a String --")
+  var total = 0
+  for v in [1, 2, 3] { total = total + v }
+  println(to_string(total))
+  var chars = ""
+  for c in "abc" { chars = chars ++ c ++ "." }
+  println(chars)
+
+  println("-- Ord: sort and the comparisons --")
+  println(to_string(list.sort([3, 1, 2])))
+  println(to_string(1 < 2))
+
+  println("-- Hash: P keys a Map through impl Hash[P] --")
+  let m = map.from([(P { x: 7 }, "seven")])
+  println(map.get(m, P { x: 7 }).unwrap_or("missing"))
+}

@@ -419,7 +419,9 @@ fn import_dup(
 
 ## "This name is already taken in this module." Three declaration sites used to
 ## spell three variants of one rule; which wording applies depends on what is
-## being declared and on what is already bound.
+## being declared and on what is already bound. Only a local declaration can be
+## the "already": a prelude method is shadowed, not collided with, so `prev`
+## here is never a prelude trait's method.
 fn redeclared(cx: Cx, name: String, kind: String, lo: Int, hi: Int) -> Cx = {
   if kind == "operation" {
     return cerr_h(cx, "operation `" ++ name ++ "` is already a function in this module",
@@ -479,7 +481,12 @@ fn bind_local(cx: Cx, name: String, sig: Sig, kind: String, lo: Int, hi: Int) ->
         # check above answers this first; the arm keeps the rule whole
         OImport(pf) -> cerr_h(cx, kind ++ " `" ++ name ++ "` conflicts with a name imported from `" ++
             pf ++ "`", lo, hi, "drop the import or rename this " ++ kind)
-        _ -> redeclared(cx, name, kind, lo, hi)
+        # a declaration shadows a prelude trait method exactly as it shadows a
+        # builtin or a std function: silently, and only in this module. The
+        # trait itself is untouched -- operators and sugar reach an impl by
+        # trait id, never through this table (design D1, D3, §4.4)
+        OPrelude -> bind_raw(cx, name, sig, OLocal(kind))
+        OLocal(_) -> redeclared(cx, name, kind, lo, hi)
       }
   }
 }
@@ -490,12 +497,15 @@ fn bind_local(cx: Cx, name: String, sig: Sig, kind: String, lo: Int, hi: Int) ->
 ##
 ##   existing \ incoming    OImport                   OLocal
 ##   (none)                 bind                      bind
-##   OPrelude               shadow, silently          error (blade C flips this)
+##   OPrelude               shadow, silently          shadow, silently
 ##   OImport                imported more than once   conflicts with an import
 ##   OLocal                 unreachable (pass order)  defined twice / a method
 ##
 ## `OPrelude` only ever arrives while the table is still empty, so its row of
 ## the incoming axis needs no case of its own.
+##
+## The `OPrelude` row is why adding a name to the prelude cannot break a
+## program that checks today: the new name is either unused or shadowed.
 pub fn bind_fn(cx: Cx, name: String, sig: Sig, org: Origin, lo: Int, hi: Int) -> Cx =
   match org {
     OPrelude -> bind_raw(cx, name, sig, org)
@@ -3400,7 +3410,8 @@ pub fn pass_fn_signatures(cx: Cx, m: Module) -> (Cx, List[Sig], List[Map[String,
     }
     sigs = sigs ++ [sig]
     evs = evs ++ [ev]
-    # a top-level fn may shadow a builtin or std name (spec §10.6)
+    # a top-level fn may shadow a builtin, a std name, or a prelude trait
+    # method (spec §10.6)
     cx1 = bind_fn(cx1, d.name, sig, OLocal("function"), d.nlo, d.nhi)
   }
   (cx1, sigs, evs)
@@ -10812,6 +10823,101 @@ test "a local declaration collides with an imported operation as an import" {
   let (cx, _) = check_module(cx_new(Some("m"), None), m, env)
   assert len(cx.diags) == 1
   assert cx.diags[0].msg == "function `ask` conflicts with a name imported from `a`"
+}
+
+## Every method name the prelude traits put in the function namespace, derived
+## from the trait table rather than transcribed -- a trait added to the prelude
+## extends the shadowing tests below without anyone remembering to.
+fn prelude_method_names() -> List[String] = {
+  let ts = prelude_traits()
+  var out: List[String] = []
+  for tid in prelude_trait_ids() {
+    let tr = trait_of(ts, tid)
+    if tr.injects {
+      for entry in tr.methods {
+        let (n, _) = entry
+        out = out ++ [n]
+      }
+    }
+  }
+  out
+}
+
+test "a local declaration shadows a prelude trait method rather than colliding" {
+  # This used to be a declaration-time error, and the error cascaded: `cx.fns`
+  # still held the prelude signature, so the body was checked against the wrong
+  # arity. `fn iter_next(x: Int) -> Int` measured three diagnostics for one
+  # mistake that was not one (docs/prelude-namespace-design.md §3.4,
+  # measurement 1). Adding a name to the prelude may not break a program that
+  # checks today; shadowing is how that promise is kept.
+  let env: Map[String, ModExports] = map.empty()
+  assert len(prelude_method_names()) == 8
+  for n in prelude_method_names() {
+    # arity 1, where every prelude method of that name takes two or more
+    let src = "fn " ++ n ++ "(x: Int) -> Int = x + 1\n" ++
+      "pub fn f() -> Int = " ++ n ++ "(41)\n"
+    let (m, pdiags) = parser.parse_module(src)
+    assert len(pdiags) == 0
+    let (cx, tm) = check_module(seed_prelude(test_cx()), m, env)
+    assert len(cx.diags) == 0
+    # the name now answers to the local function, not to the trait method
+    let s = map.get(cx.fns, n).expect("the local declaration is bound")
+    assert s.trait_id == None
+    assert len(s.param_tys) == 1
+    # and the call site went to it: no trait id means no dictionary dispatch
+    for tf in tm.fns {
+      if tf.name == "f" {
+        match tf.body {
+          XCallFn(_, cn, _, _, _, tid, _, _, _) -> {
+            assert cn == n
+            assert tid == None
+          }
+          _ -> panic("the body of `f` should be a direct call")
+        }
+      }
+    }
+  }
+}
+
+test "shadowing the prelude method names does not reach the operators or the sugar" {
+  # Design §4.4 argument 2, mechanised: every prelude trait is consumed by an
+  # operator or a piece of sugar that finds its impl by trait id, never through
+  # the function namespace. So a module may take all eight names for itself and
+  # still have `==`, `${...}`, `for..in` and its own impls behave exactly as
+  # before -- what it gives up is the ability to spell those methods, and only
+  # inside this module (argument 1).
+  #
+  # `for..in` is the one consumer missing here: `Iter` has no impl the compiler
+  # supplies, so a checker fixture without std cannot iterate anything. It is
+  # covered end to end, on both backends, by
+  # scripts/spike-native/shadow_prelude.dawn.
+  var shadows = ""
+  for n in prelude_method_names() {
+    shadows = shadows ++ "fn " ++ n ++ "(x: Int) -> Int = x + 1\n"
+  }
+  let src = shadows ++
+    "type P = { x: Int }\n" ++
+    "impl Show[P] {\n  fn show(p: P) -> String = \"P!\"\n}\n" ++
+    "impl Eq[P] {\n  fn eq(a: P, b: P) -> Bool = a.x == b.x\n}\n" ++
+    "impl Hash[P] {\n  fn hash(p: P) -> Int = p.x\n}\n" ++
+    "fn f(a: P, b: P) -> Bool = a == b\n" ++
+    "fn render(p: P) -> String = \"\${p}\" ++ to_string(p)\n" ++
+    "fn local(x: Int) -> Int = show(x)\n"
+  let (m, pdiags) = parser.parse_module(src)
+  assert len(pdiags) == 0
+  let env: Map[String, ModExports] = map.empty()
+  let (cx, _) = check_module(seed_prelude(test_cx()), m, env)
+  assert len(cx.diags) == 0
+  # argument 3: the impls declare and are found, with `show` pointing elsewhere
+  let ptv = map.get(cx.adts_by_name, "P").expect("P")
+  assert has_impl_at(cx.impl_table, SHOW_ID, TyAdt(ptv, []))
+  assert has_impl_at(cx.impl_table, EQ_ID, TyAdt(ptv, []))
+  # `==` still asks the solver and still gets the Eq impl, name or no name
+  assert eq_wit_of(src) == Some(WConcrete(EQ_ID, TyAdt(ptv, [])))
+  # while the bare name is the local function: one parameter, no trait
+  let s = map.get(cx.fns, "show").expect("show is bound")
+  assert s.trait_id == None
+  assert len(s.param_tys) == 1
 }
 
 ## Every XConstRef owner inside an expression, left to right (test helper).
