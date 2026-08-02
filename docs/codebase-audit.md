@@ -92,11 +92,13 @@ Playground 都有可运行测试，错误恢复、持久集合、效果多态、
    timeout，即「编译不可信源码」这个唯一在跑的场景已经收口。）
 3. **编译器已超过最初“小而直接”的架构预算。** 7,924 行的 checker、3,531 行的 emitter、
    大型状态记录、直接 TAST→ASM 和二进制运行时续传，使维护成本与文档里的原始论证明显脱节。
-   （**待办（ARCH-01/02/04/05）+ 已修文档**：`design.md` 已标明「6–8 千行 Kotlin 预算」
-   等前提已被推翻，不再读作现状。重构本身不在本次范围。
+   （**ARCH-01/02 已做**、ARCH-04/05 让位 + 已修文档：`design.md` 已标明
+   「6–8 千行 Kotlin 预算」等前提已被推翻，不再读作现状。重构本身不在本次范围。
    **2026-08-03 复测**：checker 已是 **11,308** 行；emitter 反而降到 **2,534** 行——
-   lowering 搬进了 Core，那部分不是消失是换了地方。拆分方案见
-   [arch-split-design.md](arch-split-design.md)。）
+   lowering 搬进了 Core，那部分不是消失是换了地方。拆分**当日落地**（#88）：
+   checker **8,203**、codegen **706**、emit **2,309**，另有 `cx` / `passes` /
+   `rtclasses` / `jvmhelp` 四个新模块。见 [arch-split-design.md](arch-split-design.md) §10。
+   注意**总行数几乎没变（+220）**——拆分买到的是模块边界与状态收窄，不是代码变少。）
 4. **几个对外包存在确定的协议错误。** JSON 会丢失大整数精度并能输出非法 JSON；Web body limit
    在完整读入后才检查；query/form、CORS、响应体和错误模型也有明显接口缺陷。
    （**大部分已修**：JSON-01/02/03、WEB-01/02/05/08 都已修并加了回归测试。响应体与错误
@@ -188,7 +190,7 @@ TAST、codegen、LSP、spec 和历史文档之间的同步税。
 | WEB-01 | P1 | body limit 在 `readAllBytes` 之后执行，无法阻止内存型 DoS | **已修** |
 | PKG-01 | P1 | 包下载/解压无体积、条目数、膨胀率和超时限制 | **已修** |
 | CLI-01 | P1 | `write_class` 吞掉目录创建和文件写入错误 | **已修** |
-| ARCH-01 | P1 | checker/emitter 已形成大型单体和超宽状态对象 | **待办**（方案已出：[arch-split-design.md](arch-split-design.md)，任务 #88） |
+| ARCH-01 | P1 | checker/emitter 已形成大型单体和超宽状态对象 | **已处置**（ARCH-01/02 同批，2026-08-03：[arch-split-design.md](arch-split-design.md) 十二刀落地，任务 #88） |
 | ERR-01 | P1 | `catch_panic` 捕获全部 `Throwable`，会吞下 JVM 致命错误 | **已修** |
 | DOC-01 | P1 | 权威 spec、EBNF 和当前实现存在多处可执行语法冲突 | **已修**（EBNF 除外，见 SYN-04） |
 
@@ -608,7 +610,31 @@ type-only cycle。建议把“全仓 lint/test”与“构建当前入口闭包�
 
 ### ARCH-01（P1）checker 是 God module
 
-> **【待办 —— 认可】**
+> **【已处置 —— 认可，2026-08-03 落地】**
+>
+> 方案与落地结果 = [arch-split-design.md](arch-split-design.md)（任务 #88），
+> 十二刀从 `4ae6b61` 到 `94109b7`。checker 侧的结果：
+> `checker.dawn` **11,308 → 8,203 行**，拆成 `cx.dawn`(753) → `passes.dawn`(2,492)
+> → `checker.dawn` 的三层 DAG；`Cx` **47 字段 → 40 + `Frame`(8)**。
+> 12 个注册期 pass 与 body 检查那半边确实是调用图上的一刀干净的割
+> （交集 = 19 个共享 helper，已下沉到 `cx.dawn`）。
+> 全程**零 `Emit-Change`**，五个外部语料 465 个 class 文件逐字节零差异。
+>
+> **这条被否决的部分要一起记下来**（否则下一轮审查会重新提一遍）：
+> 下面「拆成符号环境 / 类型推断状态 / … 六个组件」的建议**判为不执行**，
+> 见该文 §6.1——`check_fn` 家族五个入口的传递可达字段是 41/47，body 检查是一个整体，
+> 切成六份不会让任何一个入口少收一个字段；而 `DiagSink` 想要的漏斗
+> （诊断只从 `cerr`/`cerr_h`/`cerr_o` 三个写点进）**今天已经存在**。
+> 同样判为不做的还有：checker 的 Java 簇（`check_java_call` 在 19 函数 SCC 里面）、
+> `Gen` 三分、`mv` 整体移出 `Gen`。
+>
+> **留了一笔账**：`enter_isolated`/`leave_isolated` 的**恢复集正确性全仓没有任何门禁
+> 能验证**——实测把这两个函数改成「什么都不恢复」，诊断语料与 295 个内联 test 仍然
+> 全绿（该文 §5.4）。补语料 = **#126**。
+>
+> ---
+>
+> **【原裁决：待办 —— 认可】**
 >
 > 最尖锐的一句是「不可变记录线程化只是把『一个可变大对象』变成『每步复制/更新一个
 > 不可变大对象』，没有真正降低耦合」——这条批评成立，不可变性在这里买到的是
@@ -633,7 +659,8 @@ type-only cycle。建议把“全仓 lint/test”与“构建当前入口闭包�
 `selfhost/src/checker.dawn` 有 11,308 行、249 个函数 + 88 个内联 test。
 `Cx` 在 `selfhost/src/checker.dawn:91` 到 `selfhost/src/checker.dawn:164`
 包含 47 个字段（以上为 2026-08-03 在 `86b1cec` 上的复测值；审查当日记的是
-7,924 行 / `:76-132` / 44 字段——**没修之前只会更大**），混合了：
+7,924 行 / `:76-132` / 44 字段——**没修之前只会更大**；#88 落地后是
+8,203 行 / `Cx` 40 字段 + `Frame`(8)，定义已移到 `cx.dawn`），混合了：
 
 - 名字与作用域；
 - ADT/alias/trait/impl；
@@ -650,7 +677,23 @@ type-only cycle。建议把“全仓 lint/test”与“构建当前入口闭包�
 
 ### ARCH-02（P1）emitter 状态和职责同样过宽
 
-> **【待办 —— 认可】**——同 ARCH-01。「排在 lowered IR 之后」这个前提也同 ARCH-01
+> **【已处置 —— 认可，2026-08-03 落地】**——与 ARCH-01 同批，两条 lane 并行。
+>
+> 后端侧的结果：`codegen.dawn` **3,425 → 706 行**（`dawn/rt/*` 的字节码写手抬成叶子模块
+> `rtclasses.dawn`，2,745 行）；`emit.dawn` **2,534 → 2,309 行**（无状态 helper 抬成
+> `jvmhelp.dawn`，279 行）；`Gen` **21 字段 → 12 可变 + `GenCtx`(8 只读)**。
+> 落地结果见 [arch-split-design.md](arch-split-design.md) §10。
+>
+> **被否决的部分**（同样要记，见该文 §2.5/§6.2）：`Gen` **不三分**——只读的那半边不进
+> 返回值，元数才不涨；三分会让 `gen_load_const`/`emit_sam_conversion`/`gen_ccall`
+> 返回三元组而换不到任何签名收窄。`mv` **不整体移出 `Gen`**（266 处读、39 个函数，
+> 收益只是删掉一个 `scratch_mv()`）。`slots`/`syms` **不改成每方法清空**。
+> `consts`/`blocks` **不抽跨后端共享模块**。`emit_module` 的位置对齐**不碰**
+> （会改方法进 class 的顺序 = 改字节）。
+>
+> ---
+>
+> **【原裁决：待办 —— 认可】**——同 ARCH-01。「排在 lowered IR 之后」这个前提也同 ARCH-01
 > 已满足（Core IR 的 Phase 0 已落地）。
 >
 > **本条的方案 = [arch-split-design.md](arch-split-design.md)**（任务 #88）。两件口径要更正：
@@ -667,7 +710,8 @@ type-only cycle。建议把“全仓 lint/test”与“构建当前入口闭包�
 
 `selfhost/src/emit.dawn` 2,534 行；`Gen` 在 `selfhost/src/emit.dawn:92` 到 `:128`
 有 21 个字段（2026-08-03 复测；审查当日记的是 3,531 行 / `:159` / 30 余字段——
-`emit.dawn` 变短是因为 lowering 已经搬进 Core），
+`emit.dawn` 变短是因为 lowering 已经搬进 Core；#88 落地后是 2,309 行 /
+`Gen` 12 字段 + `GenCtx` 8 字段），
 同时管理 JVM 栈槽、闭包、SAM、函数值桥、构造器桥、trait witness、常量字段和控制流 label
 （下面这份职责清单也是审查当日的：`pending_lambdas`/`lambda_ctr`/`pending_fnval`/
 `pending_bi`/`pending_ctorb`/`emitted_*`/`fn_start` 已随 lowering 一起离开 `Gen`，
@@ -1961,12 +2005,17 @@ README 示例、tutorial、grammar 和 spec 的错误都没有被测试发现。
 
 ### 第三阶段：重构编译器
 
-1. 拆 checker 的环境和 pass。—— **待办**（ARCH-01。Core IR 已落地，前提解除；
-   方案见 [arch-split-design.md](arch-split-design.md)，仍要排在 native 计划的 Phase 5 之前）
+1. 拆 checker 的环境和 pass。—— **已做**（ARCH-01，2026-08-03。
+   [arch-split-design.md](arch-split-design.md) §10：`checker.dawn` 11,308 → 8,203 行，
+   `cx.dawn` / `passes.dawn` 两个新模块，`Cx` 47 → 40 + `Frame`(8)）
 2. 引入小型 lowered IR，统一所有 call/control-flow/FFI。—— **已让位**（ARCH-04
    → [native-backend-plan.md](native-backend-plan.md) 的 Phase 0。这条判断本身是对的
    ——它确实是 1、3、5 的共同前提——只是那条线的方案更全，见台账 §3.2）
-3. 拆 emitter 的 method、closure、trait、constant 子系统。—— **待办**（ARCH-02，同 1）
+3. 拆 emitter 的 method、closure、trait、constant 子系统。—— **已做，但形状不是这个**
+   （ARCH-02，同 1）：`codegen.dawn` 3,425 → 706 行、`emit.dawn` 2,534 → 2,309 行，
+   分出的是 `rtclasses.dawn` / `jvmhelp.dawn` 两个叶子模块与 `GenCtx`，
+   **不是按 method/closure/trait/constant 四个子系统切**——那样切会让三个函数返回
+   三元组而换不到任何签名收窄，理由见 [arch-split-design.md](arch-split-design.md) §2.4
 4. 把普通 runtime 逻辑从手写 ASM 移到可测试源码。—— **已让位**（ARCH-05 前两条
    → Phase 2 集合纯 Dawn 化；建议三「opcode/descriptor 收进一个后端模块」仍待办）
 5. 去掉 512MB host stack 依赖。—— **待办**（ARCH-06，**且只能去掉一半**：
@@ -2032,7 +2081,7 @@ Dawn 当前最大的风险不是“功能少”，而是**项目对自己的承�
 | 编号 | 题目 | 设计文档 | 排期 |
 |---|---|---|---|
 | LANG-01（P0）+ ARCH-06 | `unsafe_pure` 的边界、comptime allowlist、trampoline evaluator | [purity-boundary](audit/purity-boundary-design.md) | 步 1–2 做／**步 3 冻结**（等 R6） |
-| ARCH-01/02（+ARCH-03/04） | 小型 lowered IR，及靠它拆 checker/emitter | [arch-split-design.md](arch-split-design.md)（**取代** [lowered-ir](audit/lowered-ir-design.md) §3.2 的六组件方案，后者已降级为补充材料） | Core IR 已落地，**前提解除**；拆 `Cx`/`Gen` 排上（#88），两条 lane 无技术依赖、可并行 |
+| ~~ARCH-01/02~~（+ARCH-03/04） | 小型 lowered IR，及靠它拆 checker/emitter | [arch-split-design.md](arch-split-design.md)（**取代** [lowered-ir](audit/lowered-ir-design.md) §3.2 的六组件方案，后者已降级为补充材料） | **ARCH-01/02 已落地**（#88，2026-08-03，十二刀，见该文 §10）。余下的账：**#126** 补 `enter/leave_isolated` 恢复路径的诊断语料 |
 | ERR-02 / ERR-03 / LANG-02 | `ForeignError`、`bracket`、`cast` 返回 Result | [error-model](audit/error-model-design.md) | A、B **已落地**（v0.32.0–v0.35.0）／**C2 关档不做**（07-31，`bracket` 改走运行时 intrinsic，v0.39.0） |
 | LANG-04 / LANG-05 | `Char` 不透明类型、`type X = new T` | [nominal-types](audit/nominal-types-design.md) | 步 1–3 做／**步 4 冻结**（并入 Phase 6） |
 | LANG-06 / LANG-07 | `m.T`/`m.C`/`m.CONST`、`--closure` | [module-access](audit/module-access-design.md) | **做**（不重合） |
@@ -2059,7 +2108,7 @@ WEB-03、WEB-04、WEB-06、WEB-07、WEB-09、WEB-10 —— 一次做完，`packa
 | TEST-01 | classfile 过 `CheckClassAdapter` | 最便宜的一条，emit 时多包一层。native 计划采纳了它的论证，没采纳这个动作项 |
 | TEST-04 | 文档 CI（fenced block 执行、链接检查、grammar corpus） | 独立一套工作 |
 | DOC-10 | 每篇 front matter、`docs/history/` | 30 余个文件的机械改动，会淹掉本次改动。native 那条线还在加文档，越晚越贵 |
-| ARCH-01/02 | 先把 opcode/descriptor 统一到一个后端模块 | **已做（2026-07-30）**：`selfhost/src/jvmops.dawn`，116 个常量一处，8 个曾有两份定义的 opcode 收成一份；发射字节逐字节不变。拆 `Cx`/`Gen` 本身仍待做 |
+| ARCH-01/02 | 先把 opcode/descriptor 统一到一个后端模块 | **已做（2026-07-30）**：`selfhost/src/jvmops.dawn`，116 个常量一处，8 个曾有两份定义的 opcode 收成一份；发射字节逐字节不变。**拆 `Cx`/`Gen` 也已做（#88，2026-08-03）** |
 
 **审查漏掉的一条**（登记在台账 §四）：`==` 硬连线 `BEq`、hash 是自动派生的结构
 `hashCode`，于是「任意值能不能比较/哈希」不由 trait 决定。native 计划把它列为

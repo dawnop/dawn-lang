@@ -1,6 +1,8 @@
 # 拆 God module —— checker 的 `Cx` 与后端的 `Gen`
 
-> 状态：proposed（任务 #88，`docs/codebase-audit.md` 的 **ARCH-01 + ARCH-02**）。
+> 状态：**已落地**（2026-08-03，任务 #88，`docs/codebase-audit.md` 的 **ARCH-01 + ARCH-02**）。
+> 十二刀从 `4ae6b61` 到 `94109b7`，结果回填在 **§10**；被落地推翻的预测就地订正，
+> 订正处都标了是哪一刀测出来的。
 > 四条前提由用户定案，见 §0，本文不再讨论；D1–D18 是本文的裁决，可推翻。
 >
 > 勘察基线 **4ae6b61**，文中 file:line 与实测输出均对该提交，已逐条复核——两份勘察
@@ -9,7 +11,6 @@
 > （本文**取代**它的 `Cx`/`Gen` 拆分方案，并回答它留下的验收条）、
 > [bootstrap.md](bootstrap.md)（种子纪律与 prev-diff 的角色）、
 > [core-move2-design.md](core-move2-design.md)（Core IR 的结账盘点，本文的前置条件）。
-> 落地后回填 §7 与 §8 的文档校正清单。
 
 ## 0. 前提（已定，不再讨论）
 
@@ -56,7 +57,7 @@ A1 从中搬走 2,680 行（占该文件 78%），剩下的也不含 `Gen`——
 |---|---|---|
 | ARCH-01 勘察备忘录 事实 3 | 拆分须声明 `Emit-Change(emit selfhost)` | **不须**。它把「刀前 vs 刀后」当成了 prev-diff。prev-diff 是**同一份源码、两个编译器**（`selfhost-prev-diff.sh:62-63`），模块拆分在两侧同时出现，差不了。ARCH-02 备忘录 F1 已在真实拆分上实测 prev-diff 全绿 |
 | ARCH-02 勘察备忘录 F4 | 21 个函数「只用 `g.mv`」，改签名是零风险第一刀 | **是 10 个**。另外 11 个全部返回 `(Gen, Bool)` 并调用 `gen_cexpr`（整棵表达式生成器），结构上不可能收裸 `MethodVisitor`。备忘录把「**调用**了 mv-only helper」当成了「**是** mv-only」——`gen_cbinary`(:2080) 正是那四个真 helper 的调用方 |
-| ARCH-02 勘察备忘录 F5 | codegen 的 rt-class 写手可以直接抬成新模块（「免费刀」） | **刀是真的，但边界不在 :270**。天真地切 :270/:2949 会造出 Dawn **硬禁**的模块环：region 用 head 的 `obj`/`fn_iface`/`tuple_class`/`erased_apply_desc`（:33-42），head 又用 region 的 `UNIT_CLASS`/`PVEC_CLASS`/`HAMT_CLASS`/`ARRAY_CLASS`。**把 :33-42 那 10 行一起搬走，环就消失**（§2.2） |
+| ARCH-02 勘察备忘录 F5 | codegen 的 rt-class 写手可以直接抬成新模块（「免费刀」） | **刀是真的，但边界不在 :270**。天真地切 :270/:2949 会造出 Dawn **硬禁**的模块环：region 用 head 的 `obj`/`fn_iface`/`tuple_class`/`erased_apply_desc`（:33-43），head 又用 region 的 `UNIT_CLASS`/`PVEC_CLASS`/`HAMT_CLASS`/`ARRAY_CLASS`。**把 :33-43 那 11 行一起搬走，环就消失**（§2.2） |
 
 另外三处文档数字全线过期，本批同批校正（§8）：checker 7,924→**11,308**、
 `Cx` 44/46→**47**、`emit.dawn` 3,531→**2,534**、`Gen` `:159`/30 余字段→**`:92`/21 字段**、
@@ -101,8 +102,8 @@ A1 从中搬走 2,680 行（占该文件 78%），剩下的也不含 `Gen`——
 
 | 模块 | 装什么 |
 |---|---|
-| **`cx.dawn`**（新） | `Cx`(:91) `AliasE`(:74) `LambdaCx`(:172) `Origin`(:351) `ModExports`(:5060) `Frame`(新，§2.3) + `cx_new` + `test_cx`(:1088) + **两侧共享的 19 个 helper（481 行）**：`cerr`/`cerr_h`/`cerr_o`(:242-256)、`fresh`/`fresh_effvar`、`resolve_type` 解析器族（`resolve_named` :961-1087 / `resolve_qual` :880-960 / `resolve_assoc` / `resolve_alias_target` / `resolve_eff_at` / `wrap_opaque`）、`is_const_serializable`(:1673-1722)、`no_sig`(:6406) |
-| **`passes.dawn`**（新） | 12 个注册期 pass + 48 个 pass 专属 helper（1,938 行）+ `Shell`(:1899) + 它们相邻的 ~495 行 test。`use cx`、`use suggest`、`use parser`（只 test 用；parser 不依赖 checker，无环） |
+| **`cx.dawn`**（新） | `Cx`(:91) `AliasE`(:74) `LambdaCx`(:172) `Origin`(:351) `ModExports`(:5060) `Frame`(新，§2.3) + `cx_new` + `test_cx`(:1088) + **两侧共享的 19 个 helper**：`cerr`/`cerr_h`/`cerr_o`(:242-256)、`fresh`/`fresh_effvar`、`resolve_type` 解析器族（`resolve_named` :961-1087 / `resolve_qual` :880-960 / `resolve_assoc` / `resolve_alias_target` / `resolve_eff_at` / `wrap_opaque`）、`is_const_serializable`(:1673-1722)、`no_sig`(:6406)，外加本文原先漏点名的 `alias_shadow` / `effect_of` / `label_eff` / `is_upper_name` / `builtin_type_names`（**B3 订正：本文原先只点了 19 个里的 14 个，读起来像是清单，其实是举例。以调用图的交集为准，B3 的移动清单是权威**）|
+| **`passes.dawn`**（新） | 12 个注册期 pass + **45** 个 pass 专属 helper + `Shell`(:1899) + 它们相邻的 12 个 test。`use cx`、`use suggest`、`use parser`（只 test 用；parser 不依赖 checker，无环）。（**B4 订正：本文原写「48 个 helper」，那是「67 个闭包 − B3 的 19 个」，既把 12 个 pass 算进了 helper、又漏了只被搬走的 test 调用的那几个。按调用图重算是 12 + 45**）|
 | **`checker.dawn`**（余） | body 检查的 19 函数 SCC + ~150 个被调函数、`EffFrame`(:5322)、`check_module`、`exports_of`、`visible_bins`，以及**两个搬不走的 test**（`:1832` 与 `:3593`，它们调 `check_module`） |
 
 **这个 DAG 只有一条真代价：`Cx` 必须离开 `checker.dawn`。** 9 个下游模块全部从
@@ -130,8 +131,9 @@ A1 从中搬走 2,680 行（占该文件 78%），剩下的也不含 `Gen`——
   main.dawn · testrun.dawn
 ```
 
-**`rtclasses.dawn`** = `codegen.dawn` 的 `:33-42`（4 个命名 helper，**必须一起搬，
-否则成环**）+ `:270-2949`（`# ---- shared runtime classes ----`，26 个 const + 49 个函数，
+**`rtclasses.dawn`** = `codegen.dawn` 的 `:33-43`（4 个命名 helper，**必须一起搬，
+否则成环**；**A1 订正：本文原写 `:33-42`，差一行——`:43` 是 `erased_apply_desc`
+的闭括号**）+ `:270-2949`（`# ---- shared runtime classes ----`，26 个 const + 49 个函数，
 `dawn/rt/{Fn,PanicError,Unit,Show,TupleN,Bytes,Io,Array,Strings,FnCmp,Ord}` 的字节码写手）
 + 唯一测到这块的 test（`:249-265`）。搬完 `codegen.dawn` 只剩 ADT 类合成（`:2951-3425`）
 与描述符/槽位映射（`:59-172`），约 730 行。
@@ -196,6 +198,20 @@ Cx { ..cx1, frame: saved }
 `Cx` 顶层 47→40；**代价**是 ~86 处读加一层 `.frame.`、~67 处写加一层嵌套。
 这就是「无 `&mut`」在本批的全部真实成本：**写入端一分钱都省不掉，省的只在恢复端**。
 
+> **★ 落地实测（B5）：这一刀是净增行，不是净省行。**
+> `checker.dawn` 8,192 → 8,203（+11）、`cx.dawn` 732 → 753（+21），**合计 +32 行**。
+> 恢复端确实 9 行变 1 行、`EffFrame` 确实删了，但那点收益被 ~67 处写点各多出的
+> 一层 `Frame { ..cx.frame, … }` 嵌套吃光还倒贴。上面「代价」一栏没错，错的是
+> 把它算成净收益的那个直觉。
+>
+> **`changed` 也不是本文预测的 2 个模块，是 6 个**：`analyze` `cdriver` `checker`
+> `cx` `passes` `stdlib`。多出来的四个不是行为变化——`Cx` 少了七个顶层字段，
+> 于是 `jsig` 之后的**字段索引整体重编号**，凡是写 `Cx { ..cx, … }` 的模块，
+> 它的 Core 里 `field Cx/Cx.N` / `dup` / `local vN : Cx` 那几行就跟着变。
+> 全部 diff 只有这三类行。**这是「改记录形状」这类刀的固有爆炸半径**：
+> 它比「改了谁的代码」大，界限是「谁提到了这个记录」。
+> 13 份 flat dump 与五语料仍逐字节不变。
+
 ### 2.4 `Gen` 的 21 个字段怎么分
 
 | 字段 | 裁决 |
@@ -252,17 +268,17 @@ diff 最大、人眼评审最弱）。
 | 刀 | 动什么 | 预期 `changed` 模块集 | 可与谁并行 |
 |---|---|---|---|
 | **C1** | 文档校正（§8 的过期数字与过期待办；含 P7 顺路项） | —（不动 `.dawn`） | 全部 |
-| **A1** | `codegen.dawn:33-42` + `:270-2949` + test `:249-265` → 新叶子 `rtclasses.dawn`；三个 importer 改 `use` | `rtclasses` `codegen` `emit` `main` `testrun` | 全部 B 刀、A2 |
+| **A1** | `codegen.dawn:33-43` + `:270-2949` + test `:249-265` → 新叶子 `rtclasses.dawn`；三个 importer 改 `use` | `rtclasses` `codegen` `emit` `main`（**实测：`testrun` 不在内——它只导入了一个 const，`use` 变了而 Core 逐字节不变，见 §5.2 的第一条盲区**）| 全部 B 刀、A2 |
 | **A2** | 删死字段 `Gen.own_fns`（字段 + 形参 + `main.dawn` 两处实参） | `emit` `main` | 全部 B 刀、A1 |
 | **A3** | 10 个 mv-only 函数改收 `m: MethodVisitor`（21 处调用点，全在 emit.dawn 内） | `emit` | 全部 B 刀 |
 | **A4** | A3 的 10 个 + 既有无状态 helper（`:151-201`）→ 新叶子 `jvmhelp.dawn` | `emit` `jvmhelp` | 全部 B 刀 |
-| **A5** | `Gen` 二分：`GenCtx`（只读 8）+ `Gen`（可变 12） | `emit` `main` | 全部 B 刀 |
+| **A5** | `Gen` 二分：`GenCtx`（只读 8）+ `Gen`（可变 12） | `emit`（**实测：`main` 不在内。这里的 `main` 是从 A2 那行抄来的——A5 一个签名都没动到 `main.dawn` 导入的两个名字（`emit_module`/`gen_trait_interface`），`main.dawn` 逐字节未变**）| 全部 B 刀 |
 | **B1** | `pass_register_impls` 尾部两个整模块循环（`:3171-3212`、`:3218-3238`）提成两个顶层函数 | `checker` | 全部 A 刀 |
 | **B2** | 新建 `cx.dawn`：`Cx` + `AliasE` + `LambdaCx` + `Origin` + `ModExports` + `cx_new` + `test_cx`；**9 个 importer 改 `use`** | `checker` `cx` + 9 个 importer 中 Core 真变了的那些（**须先实测再写进提交信息**，D16） | 全部 A 刀 |
 | **B3** | 19 个共享 helper（481 行）搬进 `cx.dawn` | `checker` `cx` | 全部 A 刀 |
-| **B4** | 新建 `passes.dawn`：12 个 pass + 48 个 helper + `Shell` + ~495 行 test；`analyze`/`doc` 改 `use` | `checker` `passes` `analyze` `doc` | 全部 A 刀 |
-| **B5** | `Frame`（8 字段）子记录，删 `EffFrame` | `checker` `cx` | 全部 A 刀 |
-| **C2** | 收尾：回填结果、把 `docs/README.md` 的索引补上、本文状态行改「已落地」 | — | — |
+| **B4** | 新建 `passes.dawn`：12 个 pass + **45** 个 helper + `Shell` + 12 个 test；`analyze`/`doc` 改 `use` | `checker` `passes` `doc`（**实测：`analyze` 不在内——它对那十个 pass 的 `use` 是死导入，函数体里一次都没调过，第三个「`use` ≠ Core」的成因**）| 全部 A 刀 |
+| **B5** | `Frame`（8 字段）子记录，删 `EffFrame` | `checker` `cx` **+ `analyze` `cdriver` `passes` `stdlib`**（实测 6 个，`Cx` 字段索引重编号所致，见 §2.3）| 全部 A 刀 |
+| **C2** | 收尾：回填结果（§10）、订正被落地推翻的预测、本文状态行改「已落地」 | — | — |
 
 ### 3.2 顺序依赖与并行
 
@@ -362,7 +378,7 @@ git diff scripts/core-golden/selfhost.sha scripts/core-golden/selfhost.norm.sha
 
 | 刀 | 步 3（五语料零字节差异） | 步 5 的归一化不变量 | 额外 |
 |---|---|---|---|
-| A1 | 必须 | **必须零差异**（搬家映射 `s/\brtclasses\./codegen./g`） | 编译器自己会挡住模块环——若报 `circular module dependency`，说明 `:33-42` 没一起搬 |
+| A1 | 必须 | **必须零差异**（搬家映射 `s/\brtclasses\./codegen./g`） | 编译器自己会挡住模块环——若报 `circular module dependency`，说明 `:33-43` 没一起搬 |
 | A2 | 必须 | 不适用（删了东西） | `grep -rn own_fns selfhost/` 必须归零 |
 | A3 | 必须 | 不适用（改签名） | diff 里每个 `f(g` → `f(g.mv` 都要能一眼对上，21 处 |
 | A4 | 必须 | **必须零差异**（`s/\bjvmhelp\./emit./g`） | |
@@ -531,24 +547,72 @@ local fn（`enter_fn:9724-9731` 会写 `current_tparams`/`current_tparam_bounds`
 行为就变了。
 
 **而这个变化只影响诊断，不影响发射的字节**——五个 emit 语料、13 份 flat dump、
-fixpoint、classfile-verify **全部看不见它**。能看见它的只有刀 0 的语料（如果语料恰好
-写到了这条路径）和 88 个内联 test 里的那一个（`:5401`）。
+fixpoint、classfile-verify **全部看不见它**。
+
+> **★★ 本文原先接着写：「能看见它的只有刀 0 的语料（如果语料恰好写到了这条路径）
+> 和 88 个内联 test 里的那一个（`:5401`）。」B5 落地时把这句实测了，两个都看不见。
+> 准确的事实是：全仓没有任何门禁能发现恢复集是否正确。**
+>
+> **证据一，drop-restore 矩阵。** 对 `leave_isolated` 恢复的八个字段逐个做「唯独这一个
+> 不恢复」的变异，每次都跑完整的诊断语料（71 例 / 277 条）与全部内联 test（295 个）——
+> **八次全绿**。
+>
+> **证据二，极大对照。** 把 `leave_isolated` 结尾的 `Cx { ..cx1, frame: frame }`
+> 换成 `cx1`，即**什么都不恢复**——语料与内联 test **仍然全绿**
+> （`295 test(s) passed`；`OK: checker corpus -- 71 cases, 277 diagnostics in the
+> recorded order`）。C2 收尾时在 `94109b7` 上复跑过这一条，同样的输出。
+> 单个字段的矩阵是分辨率，这一条是量程：**连整个恢复动作都不是任何门禁在测的东西。**
+>
+> **被点名的那个内联 test 是退化的。** 它先把外层 `used_effects` 设成 `[EIo]`，
+> 隔离体内部记录的又是 `EIo`，于是「恢复回外层的 `[EIo]`」和「留着体内记的 `[EIo]`」
+> 是同一个答案，`assert cx3.frame.used_effects == [EIo]` 两条路都过。
+> 它真正测的是「隔离体里用了效果会报错」，不是「帧被恢复了」。
+> **一个把两个分支写成同一个期望值的 test，看起来像门禁，其实是装饰。**
+>
+> **B5 做了的缓解**：恢复集不再是 `enter_isolated`/`leave_isolated` 两端各手抄八行，
+> 而是两端共读同一个 `Frame` 类型声明；`enter_isolated` 写的是**不带 `..spread` 的
+> 完整字面量**，所以给 `Frame` 加第九个字段会在那里**编译报错**，而不是静默泄漏进
+> 隔离体。**但那防的是今后的漂移，证明不了今天这八个字段是对的。**
+> 今天这八个的依据是「与 `EffFrame` 逐字段核对相等」——人眼核对，不是门禁。
+>
+> **补账 = 任务 #126**，三件：
+> 1. 写**真正走恢复路径**的诊断语料——关键是让隔离体内外对同一个字段持**不同**的值，
+>    恢复与否才分得开；今天的语料做不到这一点，所以它对这条路径的覆盖率是 0 而不是低。
+> 2. 把 `:5401`（今 `checker.dawn:2280`）那个退化 test 改成能区分的形状。
+> 3. **验收就用 drop-restore 矩阵**：八个变异必须各自至少让一条语料或一个 test 变红。
+>    全绿不代表通过，代表还没写到。
 
 **这就是 §2.3 把 `Frame` 定死成 8 个字段的原因**——`Frame` 的字段集必须逐字等于
 `EffFrame` 今天的 8 个，一个不多。同理 `loop_jumps`/`in_test` 判为留在 `Cx` 顶层：
-它们按概念属于帧，但今天不在保存-恢复集合里。
+它们按概念属于帧，但今天不在保存-恢复集合里。**上面那两条实测让这条纪律从
+「谨慎」升级成「唯一的防线」**：既然多装一个字段不会有任何门禁报警，那么
+「逐字等于今天的 8 个」就不是保守选项，而是本刀能提供的全部正确性论证。
 
-**早期信号（机械可查）**：B5 的 diff 里，`enter_isolated` 与 `leave_isolated` 提到的
-字段名**多重集必须不变**：
+**早期信号（机械可查）**：`Frame` 的字段集必须逐字等于旧 `EffFrame` **保存的那组 `Cx`
+字段**，且 `enter_isolated` 必须用不带 `..` 的完整字面量构造它。
 
 ```bash
-for f in isolated used_effects eff_witness current_sig dict_syms scopes lambda_stack loop_stack \
-         current_tparams current_tparam_bounds current_eff_vars loop_jumps in_test; do
-  echo "$f $(sed -n '5334,5380p' <bef>/selfhost/src/checker.dawn | grep -c "\b$f\b") \
-           $(sed -n '/pub fn enter_isolated/,/^## Does this/p' selfhost/src/checker.dawn | grep -c "\b$f\b")"
-done
+# 1) 字段集相等（旧 EffFrame 的字段【名】被改过，所以比的是它读的 cx.<field>，不是它自己的字段名）
+diff <(sed -n '/^pub type Frame = {/,/^}/p' selfhost/src/cx.dawn \
+         | grep -oE '^  [a-z_]+:' | tr -d ' :' | LC_ALL=C sort) \
+     <(sed -n '/let frame = EffFrame {/,/^  }/p' <bef>/selfhost/src/checker.dawn \
+         | grep -oE 'cx\.[a-z_]+' | cut -d. -f2 | LC_ALL=C sort)
+
+# 2) 没有 spread：加第九个字段必须在这里编译报错，而不是静默泄漏进隔离体
+sed -n '/^pub fn enter_isolated/,/^}/p' selfhost/src/checker.dawn \
+  | sed -n '/frame: Frame {/,/^    }/p' | grep -c '\.\.'   # 必须是 0
 ```
-两列不等就停。
+
+两条都在 `94109b7` 上实跑通过（第 1 条无输出、第 2 条为 `0`）。
+
+> **★ 原先这里写的检查在正确实现上就会报警**，和 A5 那条 `grep "GenCtx" | grep "->"`
+> 是同一个毛病（`b392680` 修的那条）。原检查数的是两个函数体里各字段名出现的**次数**，
+> 而 B5 的全部意义就是改变这些名字的拼写与出现次数——恢复端 8 行塌成 1 行，
+> 被恢复字段的名字就从 `leave_isolated` 里消失了。在落地后的树上实跑，13 行里有 **8 行**
+> 报 DIFF。**一条在正确实现上就变红的检查比没有检查更糟**：第一个跑它的人会以为刀坏了。
+>
+> 写这类「早期信号」时的判据：**先在你预期正确的那棵树上跑一遍，看它是不是绿的。**
+> 本文两次违反了它，两次都是把「读起来合理」当成了「验证过」。
 
 **其余风险，按降序**：
 
@@ -558,7 +622,7 @@ done
 | B1 提取尾循环时改变了它相对 `(cx1, impl_sigs)` 的位置 | 同上。**B1 是刀 0 的第一次实弹**，故意排在最前 | 同上 |
 | A5 的 `GenCtx` 混进了返回类型（三分蜕变） | `grep -nE '\->[^=]*\bGenCtx\b' selfhost/src/emit.dawn` 必须零命中 | 一条 grep |
 | ↑ **原先写的 `grep "GenCtx" \| grep "\->"` 是错的**（A5 实测）：每一行签名都含 `->`，所以在**正确**的实现上它返回 44 行。一条在正确实现上就报警的检查比没有检查更糟——第一个跑它的人会以为刀坏了 | | |
-| A1 的模块环（`:33-42` 没一起搬） | 编译器直接报 `error: circular module dependency` | **响亮**，编译期 |
+| A1 的模块环（`:33-43` 没一起搬） | 编译器直接报 `error: circular module dependency` | **响亮**，编译期 |
 | B2/B4 漏改某个 `use`（Dawn 无 re-export） | `module 'checker' has no exported name 'Cx'` | **响亮**，编译期 |
 | B2 的 `changed` 集比预期大（9 个 importer 里哪些的 Core 真变了，事前不知道） | 步 5 的列表 ≠ 声明 | 会红，但要求**先在丢弃分支上实测再写提交信息**（D16） |
 | A3 的 21 处调用点漏改一处 | 类型错误（`Gen` vs `MethodVisitor`） | **响亮**，编译期 |
@@ -567,6 +631,16 @@ done
 **诊断变化（静默，只有刀 0 看得见）**。发射字节的变化几乎不可能悄悄发生，因为
 五个外部语料 + 13 份 flat dump 从两个角度盯着它。所以刀 0 的语料覆盖率
 **就是本批的真实安全边际**。
+
+> **★ 最后这句要加一个限定：它对 `enter_isolated`/`leave_isolated` 这条代码路径
+> 不成立。**（B5 实测，见本节开头）那里的安全边际不是「刀 0 的覆盖率」，是**零**——
+> 恢复集的正确性连刀 0 都看不见，全批唯一的守卫是人眼逐字段核对，加上 B5 之后
+> 那个防漂移的类型声明。这条路径的补账在 #126。
+>
+> 措辞上的教训也记一笔：「**能看见它的只有 X**」这种句子读起来像是给了一条防线，
+> 其实是**没有验证过的乐观归因**——它假定了 X 看得见。本文原句里的两个 X
+> 事后都被证明看不见。要么去实测，要么就写成「不知道有没有东西看得见」。
+> 除这条路径之外的诊断变化，上面那句仍然成立。
 
 ## 6. 不做的（记录理由）
 
@@ -659,15 +733,15 @@ C1（开工前，把数字改对）与 C2（收尾，把结论回填）两刀。
 | `docs/README.md` | 索引 | 新增本文一行（`docs/audit/` 那组的邻居，状态 proposed） |
 | `docs/runtime-intrinsics-design.md` | :3 | 状态头写「规划中，未实现」与 `docs/README.md:30` 标的 `current` 冲突，顺路统一（可选） |
 
-**C2 —— 收尾回填**
+**C2 —— 收尾回填**（已做，2026-08-03）
 
-- 本文状态行 proposed → 已落地，并在各节末尾记落地与设计的偏差（体例同
-  `prelude-namespace-design.md` §6）。
-- `docs/codebase-audit.md` 的 ARCH-01/ARCH-02 由「待办 —— 认可」改成「已处置」，
-  指向本文；把本文 §6 判为不做的几条原样记进去（它们是审查建议的**否决**，
+- ~~本文状态行 proposed → 已落地~~，偏差就地记在各节（`★` 段），汇总见 **§10**。
+- ~~`docs/codebase-audit.md` 的 ARCH-01/ARCH-02 由「待办 —— 认可」改成「已处置」~~，
+  指向本文；本文 §6 判为不做的几条原样记了进去（它们是审查建议的**否决**，
   不写下来下一轮审查会重新提一遍）。
-- `docs/audit/README.md` 第 3 批表里划掉 ARCH-01/ARCH-02。
-- 按 CONTRIBUTING §四，若刀数最终超出本文预估，另开 progress 文档回填提交哈希。
+- ~~`docs/audit/README.md` 第 3 批表里划掉 ARCH-01/ARCH-02~~。
+- 刀数没超预估（表里 11 刀 + 刀 0 = 12，逐刀提交哈希见 §10），故**不开** progress 文档。
+- 新立 **#126**：补恢复路径的诊断语料（§5.4）。
 
 ## 9. 附：本文引用的实测
 
@@ -682,3 +756,93 @@ C1（开工前，把数字改对）与 C2（收尾，把结论回填）两刀。
 | prev-diff 对模块拆分不可见 | ARCH-02 勘察在真实拆分源上跑 `selfhost-prev-diff.sh`，全绿，`jvmhelp.class` 两侧都有 |
 | `EffFrame` 是 `Frame` 的手工同义词 | `checker.dawn:5322-5380` 直读 |
 | `Emit-Change(emit *)` 正在生效 | 在 4ae6b61 上跑 prev-diff，六条 emit 全 `NOTE` |
+
+## 10. 落地结果（2026-08-03）
+
+十二刀：**刀 0**（诊断语料）+ 表里的 **C1 A1–A5 B1–B5**，从 `4ae6b61` 到 `94109b7`，
+全部合入 main。C2（本节）不动代码。
+
+| 刀 | 提交 | 一句话 |
+|---|---|---|
+| C1 | `9f482fb` `5d6b3a7` | 文档数字复测 + 退休已关的待办 |
+| 刀 0 | `99e1f3e` | 71 例诊断 golden，按 `cerr` 追加的顺序钉住 |
+| B1 | `c7abac3` | `pass_register_impls` 尾部两个整模块循环提成顶层函数 |
+| A1 | `1a505bf` | `dawn/rt/*` 字节码写手 → `rtclasses.dawn` |
+| B2 | `5197431` | `Cx` 等类型 → `cx.dawn`，9 个 importer 改 `use` |
+| A2 | `b46407c` | 删死字段 `Gen.own_fns` |
+| A3 | `8aaa48c` | 10 个 mv-only 发射器改收 `MethodVisitor` |
+| A4 | `11d97da` | 那 10 个 + 既有无状态 helper → `jvmhelp.dawn` |
+| B3 | `6d6ac8a` | 19 个两侧共享 helper → `cx.dawn` |
+| A5 | `0cefe06` | `Gen` 二分出只读的 `GenCtx` |
+| B4 | `24b5a41` | 12 个注册期 pass + 45 个 helper → `passes.dawn` |
+| B5 | `94109b7` | 8 个恢复字段装进 `Frame`，删 `EffFrame` |
+
+另外 10 个提交不算刀：`49c4983` 是本文本身；`5d2cdd2` `5c9df2f` 是 P3 要的 v0.47.0
+发布与种子推进；`151ad81` `f64d736` `9f1eb3e` `94fbff9` `b392680` `800a9f7` 是各刀
+实测后回填本文的订正；`53b6493` 给两份 Core golden 加 `.gitattributes` 守卫，
+拦住两条 lane 合并时 git 逐行 auto-merge 它们（§4 步 5 的那条纪律，改成机器执行）。
+
+### 10.1 盘子
+
+| 文件 | 起点 `4ae6b61` | 现在 `94109b7` |
+|---|---:|---:|
+| `checker.dawn` | 11,308 | **8,203** |
+| `codegen.dawn` | 3,425 | **706** |
+| `emit.dawn` | 2,534 | **2,309** |
+| `cx.dawn` | — | **753** |
+| `passes.dawn` | — | **2,492** |
+| `rtclasses.dawn` | — | **2,745** |
+| `jvmhelp.dawn` | — | **279** |
+| **合计** | **17,267** | **17,487** |
+| `Cx` | 47 字段 | **40 + `Frame`(8)** |
+| `Gen` | 21 字段 | **12 可变 + `GenCtx`(8 只读)** |
+
+合计 **+220 行**。拆分在 Dawn 里不是免费的（每个新模块要一份 `use` 头，B5 的
+子记录还给 ~67 个写点各加一层嵌套），但代价是行数，不是签名——**没有一个函数因为
+拆分多收了一个参数**，`GenCtx` 那 32 个是 A5 有意的二分，不是拆模块的税。
+
+三个原目标里两个达成得比预估好（`codegen.dawn` 预估留 ~730 行、实际 706；
+`checker.dawn` 预估留 ~8,280、实际 8,203），一个超出（`rtclasses.dawn` 预估 ~2,695、
+实际 2,745；`jvmhelp.dawn` 预估 ~150、实际 279——A3 让变干净的那 10 个函数比预估长）。
+
+### 10.2 证明
+
+- **零 `Emit-Change`**。`4ae6b61..94109b7` 的 23 个提交里，`Emit-Change` 开头的
+  trailer **一条都没有**（机器核对）。这正是 P3 要的结果：v0.47.0 把通配声明移出
+  比对窗口之后，prev-diff 的每一条 `NOTE` 都还回了信号身份，而本批一条都没触发。
+- **五语料逐字节零差异，批次级别也成立**。逐刀的对拍各刀自己记在提交信息里；
+  C2 另做了一次**端到端**对拍——在同一个目录里先用 `94109b7` 的源码、再 `git checkout`
+  回 `4ae6b61` 的源码，各编译一次 `site` / `playground` / `packages/web` /
+  `packages/json` / `examples/calc.dawn`：**465 个 class 文件，`diff -rq` 零差异**。
+  十二刀的累积效果 = 恒等。
+- 13 份 flat dump 全程逐字节不变；`selfhost-fixpoint.sh` 每刀 B == C；
+  诊断语料 71 例 / 277 条全程零差异，`cerr` 覆盖 235/240（五个未达点未变）。
+
+### 10.3 落地推翻的预测（就地已改，此处只列索引）
+
+| 处 | 原写 | 实际 | 谁测的 |
+|---|---|---|---|
+| §2.2 §3.1 §4 §5.4 | `codegen.dawn:33-42` | **`:33-43`**（`:43` 是闭括号） | A1 |
+| §3.1 A1 行 | `changed` 含 `testrun` | 不含（const 不进 Core） | A1 |
+| §3.1 A5 行 | `changed` = {`emit`, `main`} | **{`emit`}** | A5 |
+| §3.1 B4 行 | `changed` 含 `analyze` | 不含（死导入） | B4 |
+| §3.1 B5 行 / §2.3 | `changed` = 2 个模块 | **6 个**（`Cx` 字段索引重编号） | B5 |
+| §2.3 | B5 净省行 | **净增 32 行** | B5 |
+| §2.1 | passes 的「48 个 helper」 | **45**（原数把 12 个 pass 算了进去） | B4 |
+| §2.1 | cx 的 19 个 helper 清单 | 只点名了 14 个，补齐 | B3 |
+| §5.4 | 恢复集出错「刀 0 的语料与那个内联 test 看得见」 | **两个都看不见**；全仓无门禁 → #126 | B5 |
+| §5.4 | `enter/leave_isolated` 字段多重集检查 | 在正确实现上 13 行报 8 行 DIFF，已换 | C2 |
+| §5.4 | A5 的 `grep "GenCtx" \| grep "->"` | 同上，在正确实现上返回 44 行 | A5（`b392680`） |
+| §5.2 | 「纯搬运 ⇒ 归一化零差异」 | 要先排除**合成定义**（`dict` / `prim$…$eq` / `structeq$` / `structhash$` / `bridge$`），并把 **lambda id** 与 ADT id 一样归一 | A4 / B3 / B4 |
+
+### 10.4 留给下一个人的三条
+
+1. **`use` ≠ Core**，三个成因都实测到了：const 不进 Core（A1）、test 块不进 Core（B2）、
+   死导入（B4）。声明 `changed` 永远按「Core 真的变了」算。
+2. **归一化不变量量的是作者写的代码**，不是模块簿记。判据是「0 删除，新增全部限于
+   合成定义」；两个 agent 在两棵不同的树上、用两套 shim 定义都落到 376,929 行，
+   这才让「排除 shim」从权宜之计变成规则。
+3. **诊断这半边的门禁比看起来薄**。刀 0 把它从「88 个内联 test」抬到了「71 例语料 +
+   295 个 test」，但 §5.4 那条实测说明：**没被语料写到的路径，覆盖率是 0 而不是低**，
+   而「哪些路径没被写到」今天只能靠变异测试问出来。`cerr` 覆盖率（235/240）量的是
+   **报错点**被不被走到，不是**状态恢复**对不对——后者一个点都没量。

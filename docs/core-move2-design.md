@@ -22,7 +22,7 @@
 
 1. **Move 2 的账已经结了**：`match` 决策树、`for`/`while`、`?`/`!`、字符串插值、自尾调用重写、
    lambda 捕获、装箱决策，全部在 `lower.dawn` 里，`emit.dawn` 与 `emitc.dawn` 各自只剩「这台机器
-   的事」。原方案担心的「match 编译不想写两遍」**没有发生**：C 后端 1598 行里没有一行 pattern 代码。
+   的事」。原方案担心的「match 编译不想写两遍」**没有发生**：`emitc.dawn` 里没有一行 pattern 代码。
 2. **残余是一个节点**，不是一批：`CSProtect`（C2 写作 `LProtect`）——「无论怎么退出都执行 release」。
    它是 Core 里唯一一个**两个后端都有本地机制、而 Core 没有词汇**的控制流形状。
 3. **而它多半不该被建出来。** C2 冻结时的论证（「codegen intrinsic 会把 bracket 绑死在 JVM 上」）
@@ -68,7 +68,9 @@
 
 ### 1.3 减法减出来的边界：`emit.dawn` 残余是什么
 
-`emit.dawn` 从 4353 行降到 **2506 行**，且它自己的文件头把这次减法写成了验收标准：
+`emit.dawn` 从 4353 行降到 **2506 行**（本文写作当时；此后 #88 又把无状态 helper 抬进
+`jvmhelp.dawn`，2026-08-03 复测为 2,309 行——**这里记的是那次减法的幅度，不是现状**），
+且它自己的文件头把这次减法写成了验收标准：
 
 > This file used to consume TAST directly and was twice this size. What is gone -- the match
 > decision tree, `for`/`while` shape, `?`/`!`, string interpolation, lambda capture analysis,
@@ -86,7 +88,7 @@ descriptor、操作数栈纪律、`invokedynamic`、`use java`——没有一样
 ### 1.4 `emitc.dawn` 的「平行臂」不存在
 
 Move 2 的存在理由之一是「杀掉 emitc 的平行臂」。**那批平行臂从来没长出来**：`emitc.dawn` 是
-Core→C，1598 行，文件头说得很直白——
+Core→C（1,661 行，2026-08-03 复测；本文写作当时记的是 1598），文件头说得很直白——
 
 > Everything structural is already gone by the time Core arrives -- `match` is discriminant
 > tests and binds, `for` is a loop with an explicit step, `?` is a test against a constructor,
@@ -602,8 +604,10 @@ C2 冻结时的反对论证（「绑死 JVM」）针对的是 codegen 特例，�
 
 1. **[`runtime-intrinsics-design.md`](runtime-intrinsics-design.md) §8 的三步 Move 表**：
    Move 2 与 Move 3 都已落地，落在 `native-backend-plan.md` 的 Phase 0 里，且 Move 3 先于 Move 2 完成。
-   §8 那三个行号（`emit.dawn:764,1026,1456`）指向的是 3568 行时代的文件，今天 2506 行、
-   那三处不存在。
+   §8 那三个行号（`emit.dawn:764,1026,1456`）指向的是 3568 行时代的文件，**那三处不存在**。
+   （原文这里还写着「今天 2506 行」。删掉了：这句话要成立只需要「那三处不存在」，
+   行数是装饰，而**没带日期的「今天 N 行」已经烂过两次**——lowering 搬进 Core 之后是 2,534，
+   #88 把无状态 helper 抬进 `jvmhelp.dawn` 之后是 2,309。要写行数就带上测的日子。）
 2. **[`audit/error-model-design.md`](audit/error-model-design.md) §二.C 的「C2 冻结，等 Core IR」**：
    Core IR 到了，冻结解除；但解除之后看到的第一件事是它**可能不需要被建**（§2.6），
    而它的返回类型签名与它自己的描述矛盾（决策 2）。

@@ -50,9 +50,10 @@
 [audit/module-access-design.md](audit/module-access-design.md)（LANG-06/07）·
 [audit/lsp-robustness-design.md](audit/lsp-robustness-design.md)（LSP-01/02/04）·
 [audit/package-integrity-design.md](audit/package-integrity-design.md)（PKG-02/04）·
-[audit/web-api-v2-design.md](audit/web-api-v2-design.md)（WEB-03/04/06/07/09/10）·
-[arch-split-design.md](arch-split-design.md)（ARCH-01 拆 `Cx` + ARCH-02 拆 `Gen`，**取代
-lowered-ir-design.md §3.2 的六组件方案**）
+[audit/web-api-v2-design.md](audit/web-api-v2-design.md)（WEB-03/04/06/07/09/10）
+
+（[arch-split-design.md](arch-split-design.md) 曾在此列，**2026-08-03 已落地**，
+移到下一节。）
 
 ## 设计方案（已落地，作为特性的「为什么」）
 
@@ -69,6 +70,13 @@ lowered-ir-design.md §3.2 的六组件方案**）
 
 状态一律 historical：写作当时的取舍成立，文中的行数、性能数字和「现在是什么样」
 的描述**不保证仍然准确**。特性本身的权威描述在 spec.md。
+
+**例外，仍值得读**：[arch-split-design.md](arch-split-design.md)
+（ARCH-01 拆 `Cx` + ARCH-02 拆 `Gen`，**取代 lowered-ir-design.md §3.2 的六组件方案**；
+2026-08-03 十二刀落地）。它不只是「为什么这么拆」，还是一份**怎么在没有行为门禁的
+地方证明重构是恒等变换**的作业记录：归一化全量 Core 不变量、五语料逐字节对拍、
+以及 §5.4 那条「我们以为有门禁看着、实测两个都看不见」的自我更正。
+下一次动编译器大结构之前读它的 §5 与 §10。
 
 ## 调研
 
