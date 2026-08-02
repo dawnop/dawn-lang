@@ -543,7 +543,8 @@ done
 |---|---|---|
 | B4 把某个 pass 相对 `check_module:10024-10039` 的执行顺序挪动了 → 诊断顺序变（`cerr` 是 `++ [...]` 追加语义） | 刀 0 语料出现差异 | 只有刀 0 看得见 |
 | B1 提取尾循环时改变了它相对 `(cx1, impl_sigs)` 的位置 | 同上。**B1 是刀 0 的第一次实弹**，故意排在最前 | 同上 |
-| A5 的 `GenCtx` 混进了返回类型（三分蜕变） | `grep -n "GenCtx" selfhost/src/emit.dawn \| grep "\->"` 必须零命中 | 一条 grep |
+| A5 的 `GenCtx` 混进了返回类型（三分蜕变） | `grep -nE '\->[^=]*\bGenCtx\b' selfhost/src/emit.dawn` 必须零命中 | 一条 grep |
+| ↑ **原先写的 `grep "GenCtx" \| grep "\->"` 是错的**（A5 实测）：每一行签名都含 `->`，所以在**正确**的实现上它返回 44 行。一条在正确实现上就报警的检查比没有检查更糟——第一个跑它的人会以为刀坏了 | | |
 | A1 的模块环（`:33-42` 没一起搬） | 编译器直接报 `error: circular module dependency` | **响亮**，编译期 |
 | B2/B4 漏改某个 `use`（Dawn 无 re-export） | `module 'checker' has no exported name 'Cx'` | **响亮**，编译期 |
 | B2 的 `changed` 集比预期大（9 个 importer 里哪些的 Core 真变了，事前不知道） | 步 5 的列表 ≠ 声明 | 会红，但要求**先在丢弃分支上实测再写提交信息**（D16） |
