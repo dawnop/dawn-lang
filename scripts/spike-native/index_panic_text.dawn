@@ -1,0 +1,89 @@
+# What the two subscript panics actually say, word for word.
+#
+# Knife 1 of docs/operator-traits-design.md, and the piece the design's
+# three-file list does not cover. The harness compares stderr *between* the
+# backends and has no `.expect-err`: index_oob.dawn and index_missing_key.dawn
+# therefore certify that the two backends fail identically, not that either of
+# them says the right thing. Two backends can agree on a changed message
+# forever. Bringing the message back as a value puts it in a `.expect` file,
+# which is the only check in this harness nobody derived from a backend.
+#
+# Why it is worth a file. Knife 2 rewrites how `[]` reaches these panics, and
+# the message is the whole observable difference between the checked reader
+# and the unchecked one:
+#
+#   `std/pvec.index`  panics, naming the index and the length
+#   `std/pvec.at`     masks the index into a legal slot and answers wrong
+#   `std/hamt.index`  panics, naming the key *through Show*
+#   `std/hamt.get`    answers `None`
+#
+# The Map line is the one that earns its keep. Show is the third of the three
+# witnesses `m[k]` asks for, and the only one that is not used to find the
+# entry -- it is there so the key can be printed here. If knife 2 moves those
+# witnesses to `impl[K: Eq + Hash + Show] Index[Map[K, V]]` and loses the Show
+# bound, everything still compiles and everything still finds its keys; the
+# only thing that changes is this line. So this is where it is checked, with
+# both a String key (Show quotes it, `to_string` would not) and an ADT key
+# (Show renders the constructor).
+#
+# `index_panic_text.leaks-on-catch` rides along: a barrier that is actually
+# taken leaks the discarded C frames by design on native, which is the
+# documented cost of `longjmp` and not a counting hole. See the header of
+# run.sh.
+use std/io
+use std/map
+
+pub type Key =
+  | Alpha(n: Int)
+  | Beta
+derive Show
+
+## Through `!io` so the subscript is a run-time one: folded, an out-of-range
+## const is a compile error and this program would not build.
+fn n(i: Int) -> Int !io = i
+
+fn s(x: String) -> String !io = x
+
+fn key(k: Key) -> Key !io = k
+
+## The empty list, which has no element to answer with at any index.
+fn nothing() -> List[Int] !io = []
+
+## The panic's own words, or the answer when there was no panic -- a
+## subscript that stopped failing prints `no panic: ...` where a message was
+## expected, which the .expect diff reads as a red just the same.
+##
+## `catch_panic` hands back a `ForeignError`, and
+## `message` is the portable field of it -- `kind` is backend-specific by
+## contract (types.dawn's ForeignError comment), so it is not printed.
+fn said(f: fn() -> Int !io) -> String !io =
+  match catch_panic(f) {
+    Ok(v) -> "no panic: " ++ to_string(v)
+    Err(e) -> e.message
+  }
+
+fn said_str(f: fn() -> String !io) -> String !io =
+  match catch_panic(f) {
+    Ok(v) -> "no panic: " ++ v
+    Err(e) -> e.message
+  }
+
+pub fn main() -> Unit !io = {
+  let xs = [10, 20, 30]
+
+  println("-- List --")
+  println(said(() => xs[n(3)]))
+  println(said(() => xs[n(9)]))
+  println(said(() => xs[n(0 - 1)]))
+  println(said(() => nothing()[n(0)]))
+
+  println("-- Map: the key is rendered by Show --")
+  let ms: Map[String, Int] = map.from([("a", 1)])
+  println(said(() => ms[s("nope")]))
+  let mk: Map[Key, String] = map.from([(Alpha(1), "alpha")])
+  println(said_str(() => mk[key(Alpha(2))]))
+  println(said_str(() => mk[key(Beta)]))
+
+  println("-- and the barrier is not swallowing successes --")
+  println(said(() => xs[n(1)]))
+}

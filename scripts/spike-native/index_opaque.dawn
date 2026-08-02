@@ -1,0 +1,75 @@
+# An opaque type over a List or a Map: what it gets for free today, and what
+# it does not.
+#
+# This file pins a state that is about to change on purpose. Knife 2 of
+# docs/operator-traits-design.md routes `[]` through `resolve_witness`, and
+# that resolver already falls through an opaque subject to its target
+# (checker.dawn:1266-1277) -- so `v[0]` starts compiling, with no new machinery
+# and no way to decline it. Design D2 is the decision to accept that. It is an
+# observable widening of the accepted set, which is exactly the kind of change
+# that should be visible as a corpus edit in the commit that makes it, rather
+# than discovered later.
+#
+# So: the lines below are the ones that work *today*. `==`, `${...}` and
+# `for..in` all resolve their witness through the opaque and land on the
+# target's, and each of them is the same fall-through `[]` is about to join.
+# `v[0]` and `e["a"]` are the ones that do not, and they cannot be written
+# here at all -- a rejected program has no output to compare, so what they
+# currently say is written down instead:
+#
+#   error: `[]` indexes a List or Map, got Vec
+#     = hint: when absence is a normal case, use get(xs, i) / map_get(m, k) instead
+#   error: cannot infer type parameter(s) T for `to_string`
+#
+# (the second is cascade noise off the first; `XError` leaves `to_string` with
+# nothing to infer `T` from). Knife 2 deletes that paragraph, adds the two
+# subscripts to `main`, and says in its commit message that the accepted set
+# grew.
+#
+# opaque.dawn next door covers opaque *scalars* -- that an opaque has no
+# representation of its own at run time. This one is about witness
+# resolution through one, which is a different mechanism and the one `[]` is
+# moving onto.
+#
+# Single-module on purpose: the conversions between `Vec` and `List[Int]` are
+# only legal inside the declaring module, and none of the lines below relies
+# on one -- `v` is used as a `Vec` throughout. A line like `get(v, 0)` would
+# compile today too, but through the opaque *conversion* rather than through a
+# witness, and pinning that here would say nothing about `[]`.
+use std/io
+use std/map
+
+opaque type Vec = List[Int]
+
+opaque type Env = Map[String, Int]
+
+fn mkv() -> Vec = [1, 2, 3]
+
+fn mke() -> Env = map.from([("a", 1)])
+
+## The other side of an inequality has to be a `Vec` too: `v == [1, 2, 4]` is
+## rejected even inside the declaring module (`== requires both sides to have
+## the same type: Vec vs List[Int]`). The opaque converts on the way into a
+## parameter or a return, and *binds* everywhere a type has to match -- so
+## `==` sees two `Vec`s and resolves one witness, which is the whole subject
+## here.
+fn other_v() -> Vec = [1, 2, 4]
+
+fn other_e() -> Env = map.from([("a", 2)])
+
+pub fn main() -> Unit !io = {
+  let v = mkv()
+  println("-- opaque over List --")
+  println(to_string(v == mkv()))
+  println(to_string(v == other_v()))
+  println("${v}")
+  for x in v {
+    println(to_string(x))
+  }
+
+  let e = mke()
+  println("-- opaque over Map --")
+  println(to_string(e == mke()))
+  println(to_string(e == other_e()))
+  println("${e}")
+}

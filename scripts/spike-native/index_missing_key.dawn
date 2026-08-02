@@ -1,0 +1,32 @@
+# `m[k]` on a key the Map does not hold ends the run, on both backends.
+#
+# The Map half of index_oob.dawn, and not a copy of it: the List arm is an
+# intrinsic with a bounds test in `std/pvec.index`, the Map arm is a call into
+# `std/hamt.index` carrying three dictionaries. Only one of the three is
+# needed to decide the key is absent -- Eq and Hash find nothing -- and the
+# third, Show, exists for no other reason than to name the key in the message
+# it then panics with (hamt.dawn:262-266 says so). Knife 2 moves those three
+# witnesses from a hardcoded `index_wits` to the bounds of a conditional
+# `impl[K: Eq + Hash + Show] Index[Map[K, V]]`, and Show is the one with
+# nothing but this panic to justify it -- so it is the one most easily dropped
+# by accident. index_panic_text.dawn is where that is checked by reading the
+# rendered key back; here it only has to make the run end.
+#
+# Marker file `index_missing_key.exits-nonzero`; see the header of run.sh and
+# of index_oob.dawn.
+use std/io
+use std/map
+
+## Through `!io` so the lookup is a run-time one.
+fn s(x: String) -> String !io = x
+
+pub fn main() -> Unit !io = {
+  let m: Map[String, Int] = map.from([("a", 1), ("b", 2)])
+  println("present")
+  println(to_string(m[s("a")]))
+  println(to_string(m[s("b")]))
+  println("absent")
+  let v = m[s("nope")]
+  # Unreachable. A Map that answered for a key it does not hold says so here.
+  println("WRONG: the subscript answered " ++ to_string(v))
+}

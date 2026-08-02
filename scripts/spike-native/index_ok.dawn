@@ -1,0 +1,104 @@
+# What `xs[i]` and `m[k]` answer when the index is there.
+#
+# Knife 1 of docs/operator-traits-design.md. Knife 2 replaces the entire
+# lowering path of `[]` -- two hardcoded checker arms become a prelude `Index`
+# trait -- and until this file existed no program in the corpus ever ran a
+# subscript. What is being bought here is a net to change under.
+#
+# What was pinned before, and what was not: the two panic strings are in the
+# Core golden already (`scripts/core-golden/std.pvec.core` carries
+# `str " out of bounds for length "`, `std.hamt.core` carries
+# `str "key not found: "`). That certifies the constants still get compiled
+# into std, and says nothing about whether `[]` still reaches them. The
+# runtime half is in the three files next to this one: index_oob.dawn and
+# index_missing_key.dawn let the panic end the run, index_panic_text.dawn
+# reads the messages back out.
+#
+# `[]` is two different mechanisms underneath and both are here. On a List it
+# is `CIntrinsic("list_index", ..)`, which is also what the comptime
+# interpreter folds -- so `const A: Int = XS[1]` below is not decoration, it
+# is the reason knife 2 keeps the intrinsic rather than calling `std/pvec`
+# (design D1, reason 1): comptime refuses `array_*`, so a `[]` that became a
+# pvec call could not be folded at all. On a Map it is a call to
+# `std/hamt.index` carrying three dictionaries -- Eq and Hash to find the
+# entry, Show only so a missing key can be named in the panic.
+#
+# One shape is deliberately absent, because it cannot be written today: a
+# generic consumer, `fn first[C: Index](c: C, i: C.Idx) -> C.Item = c[i]`.
+# There is no `Index` trait to bound `C` by until knife 2 declares one, and
+# the bounded-generic path is the only one that reaches `make_prim_slot`
+# (design §4.4), where the existing per-parameter adaptation is wrong for a
+# trait whose first parameter is not the subject type. That corpus file --
+# `index_dict.dawn` -- is knife 2's to write, and it is not optional there:
+# the same ABI hole in the assoc-types work escaped precisely because the
+# corpus only covered the devirtualised shape.
+use std/io
+use std/map
+
+pub type Key =
+  | Alpha(n: Int)
+  | Beta
+derive Show
+
+## Nothing indexed through this folds: a comptime fold and a runtime subscript
+## are different code (interp.dawn against the two emitters), and this file
+## wants each of them pinned on its own.
+fn n(i: Int) -> Int !io = i
+
+fn key(k: Key) -> Key !io = k
+
+fn str_of(s: String) -> String !io = s
+
+const XS: List[Int] = [10, 20, 30]
+
+## A subscript folded by interp.dawn against the same Core the two backends
+## consume. spec §4.8 promises comptime List indexing; emit.dawn:2235-2247
+## writes down why the primitive stays in Core, and this is the line that
+## stops working if `[]` ever becomes a call.
+##
+## The example that comment actually gives -- `const B: List[Int] = [A, 4]` --
+## cannot be pinned here: it compiles and runs on the JVM, and `dawn __emitc`
+## refuses it outright with `emitc: const `B` folded to a structured value
+## (List_Int), which native cannot rebuild yet`. So a *scalar* out of a folded
+## subscript is as far as this corpus reaches; the structured case is a native
+## gap that predates this file and belongs to whoever closes it.
+const A: Int = XS[1]
+
+pub fn main() -> Unit !io = {
+  println("-- List, index in range --")
+  let xs = [10, 20, 30]
+  println(to_string(xs[0]))
+  println(to_string(xs[2]))
+  println(to_string(xs[n(1)]))
+  println(to_string(xs[len(xs) - 1]))
+
+  println("-- nested --")
+  let rows = [[1, 2], [3, 4], [5, 6]]
+  println(to_string(rows[1][0]))
+  println(to_string(rows[n(2)][n(1)]))
+
+  println("-- an element that is not an Int --")
+  let ss = ["a", "b"]
+  println(ss[n(1)])
+
+  println("-- folded at compile time --")
+  println(to_string(A))
+
+  println("-- Map, key present --")
+  let ms: Map[String, Int] = map.from([("a", 1), ("b", 2)])
+  println(to_string(ms["a"]))
+  println(to_string(ms[str_of("b")]))
+  let mi: Map[Int, String] = map.from([(1, "one"), (2, "two")])
+  println(mi[n(2)])
+
+  println("-- keys with structure: Eq, Hash and Show all have to hold --")
+  let mt: Map[(Int, String), Int] = map.from([((1, "x"), 7), ((2, "y"), 8)])
+  println(to_string(mt[(1, "x")]))
+  let mk: Map[Key, String] = map.from([(Alpha(1), "alpha"), (Beta, "beta")])
+  println(mk[key(Alpha(1))])
+  println(mk[key(Beta)])
+
+  println("-- one subscript feeding another --")
+  let mv: Map[String, List[Int]] = map.from([("xs", [4, 5, 6])])
+  println(to_string(mv["xs"][n(2)]))
+}

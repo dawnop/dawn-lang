@@ -1,0 +1,39 @@
+# `xs[i]` past the end ends the run, and ends it the same way on both
+# backends.
+#
+# Knife 1 of docs/operator-traits-design.md, and the half of it that could not
+# live in index_ok.dawn: a program about the end of the run has no output
+# after the failure to compare. So this one declares itself with the marker
+# file `index_oob.exits-nonzero`, and what is checked is the stdout up to the
+# failure (against .expect) plus the stderr and the exit code, compared
+# between the two backends. See the header of run.sh.
+#
+# What this catches that .expect alone cannot: a knife 2 that routed `[]`
+# somewhere with no bounds check would come back with `at`'s answer instead --
+# `std/pvec.at` masks the index back onto a legal slot and hands over some
+# other element (pvec.dawn:150-159 records that exact defect and why `at` is
+# not public). That failure prints a number and exits 0. Here it prints the
+# WRONG line below, and the exit check turns 1-against-0 into a red.
+#
+# The message itself is not pinned here -- the harness compares stderr between
+# the backends and has no way to say what it should read. index_panic_text.dawn
+# is where the text is written down.
+use std/io
+
+## The index goes through `!io` so nothing folds: comptime out-of-bounds is a
+## compile error (`error: comptime: index 9 out of bounds for length 3`), which
+## is a different claim, belongs to a checker test, and would stop this program
+## from being built at all.
+fn n(i: Int) -> Int !io = i
+
+pub fn main() -> Unit !io = {
+  let xs = [10, 20, 30]
+  println("in range")
+  println(to_string(xs[n(0)]))
+  println(to_string(xs[n(2)]))
+  println("past the end")
+  let v = xs[n(3)]
+  # Unreachable. A backend that answered instead of panicking says so here
+  # rather than passing quietly.
+  println("WRONG: the subscript answered " ++ to_string(v))
+}
