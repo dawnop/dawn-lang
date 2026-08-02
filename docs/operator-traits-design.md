@@ -166,20 +166,57 @@ checker.dawn:5757-5767：条件 impl 的 `sub_goals` 循环把**同一个 `lo, h
 `Map[K,V]` 的 args 是 `[K, V]`，于是子目标恰好是 `(Eq,K) (Hash,K) (Show,K)`——**顺序也与
 今天 `index_wits` 的 `for tid in [EQ_ID, HASH_ID, SHOW_ID]` 一致**。
 
-**新措辞**：`resolve_witness` 的 requirer 参数今天是 `"indexing a Map"`。迁移后只有一个
-调用点，requirer 不能再按类型分档（那正是本刀要退休的特判），定为 **`"indexing"`**。
-可观测变化就是少了「a Map」两个字：
+**新措辞**（用户定案 2026-08-02）：`resolve_witness` 的 requirer 参数今天是硬编码字符串
+`"indexing a Map"`。迁移后只有一个调用点，requirer 定为
+
+```dawn
+"indexing a " ++ ty_show(cx.adts, tt)
+```
+
+**这一条就是本刀的中心思想在诊断上的体现，要把区分说清楚**：
+
+- 本刀要退休的是「**按类型分档的特判**」——`match tt { TyList -> … TyMap -> … _ -> 错 }`
+  这种由编译器把合法主体逐个列举出来的结构。它的毛病是**封闭**：用户类型永远不在名单上。
+- 本刀**不**要退休「诊断里出现类型名」。恰恰相反：把实际主体渲染出来是**通用手段**
+  （一次 `ty_show`，对任何主体都成立，包括编译器没听说过的用户类型），
+  拿到的信息比今天的固定字符串**更多**。
+
+所以「纯度」和「信息量」在这里不冲突，两头都变好。曾经担心的取舍不存在：变糊的那个
+方案（光秃秃的 `"indexing"`）是**误解**了要退休的东西是什么。
 
 | | 今天 | 改后 |
 |---|---|---|
-| `fn look[K](m: Map[K,Int], k: K) = m[k]` | `indexing a Map requires \`Eq[K]\`, but \`K\` has no such bound`（三条，hint 各自 `add the bound: [K: Eq]`） | `indexing requires \`Eq[K]\`, …`（三条，hint 不变） |
-| `fn f[C](c: C, i: Int) = c[i]` | `\`[]\` indexes a List or Map, got C` | `indexing requires \`Index[C]\`, but \`C\` has no such bound` + hint `add the bound: [C: Index]` |
+| `fn look[K](m: Map[K,Int], k: K) = m[k]` | `indexing a Map requires \`Eq[K]\`, but \`K\` has no such bound`（三条，hint 各自 `add the bound: [K: Eq]`） | `indexing a Map[K, Int] requires \`Eq[K]\`, …`（三条，hint 不变）——**比今天准**，说出了是哪一个 Map |
+| `impl Index[Grid]` 后 `fn g[T](x: Grid, k: T) = x[k]` 之类 | 说不出来（`Grid` 根本到不了这条路） | `indexing a Grid requires …`——**新类型白送**，零特判 |
+| `opaque type Vec = Map[String, Foo]`，`Foo` 无 `Show` | 说不出来 | `indexing a Vec requires \`Show[Foo]\`, …`——requirer 位报**身份**（opaque 名），trait 位报**真正的缺口**（穿透后的目标里那个类型），两个位置各说各的事 |
+| `fn f[C](c: C, i: Int) = c[i]` | `\`[]\` indexes a List or Map, got C` | `indexing a C requires \`Index[C]\`, but \`C\` has no such bound` + hint `add the bound: [C: Index]` |
 
-第二行是白捡的改善——今天那条消息对一个类型参数是纯误导。
+第四行有一处**刻意留下的冗余**：主体是裸的刚性类型参数时，requirer 里的类型与缺的
+bound 是同一个（`indexing a C requires \`Index[C]\``）。判为留着——它只在这一种形状出现，
+读起来啰嗦但完全清楚且可操作，而消掉它就要一条「主体是 TyVar 就换句话」的分支，
+那正是本刀在削的东西。第三行的 `==` 今天也是同款：`\`==\` requires \`Eq[T]\`, but \`T\`
+has no such bound`。
+
+**requirer 的格式约定，核实结果（动手前的必查项）**：**没有冲突，可以放心动态拼。**
+
+- `requirer` 全仓只在**一处**被拼进文本：checker.dawn:5739，句式
+  `` <requirer> ++ " requires `" ++ tr.name ++ "[" ++ ts ++ "]`, but `" ++ ts ++ "` has no such bound" ``，
+  hint 是 `add the bound: [<T>: <Trait>]`（不含 requirer）。约束因此只有一条：
+  **requirer 必须读作一个能接 ` requires` 的名词短语**。`indexing a Map[K, Int]` 满足。
+- 其余四处出现全是**原样透传**：opaque 落到 target（5729）、条件 impl 的 sub_goals
+  （5760）、结构式展开 `solved_structurally`（5884）、元组的 `show_tuple_witness`（5832）。
+  没有第二个句式，没有拼接，没有长度/标点假设。
+- **动态构造已有先例**：checker.dawn:7677 的调用点就是拼出来的
+  （`"\`" ++ callee ++ "\`"`）。所以「requirer 必须是字面量」这条约定**从来不存在**。
+- 现存的五个值（`` `==` ``、`indexing a Map`、`interpolation`、`for..in`、
+  `` `<callee>` ``）没有一个依赖 requirer 恒定；本刀也不改它们。
+- **透传语义要写明**：requirer 沿递归**不变**，所以它命名的永远是**最外层**那个「为什么
+  会走到这里」，而 trait 与类型名命名「缺的是什么」。上表第三行就是这条规则的样子——
+  两个位置各说各的事，不是同一个东西说了两遍。
 
 checker.dawn:4327-4329 的注释迁到 `prelude_impls()` 里那条 Map impl 旁边，改写成
 「Show 只为把缺的键印进 panic 文本，这是三条 bound 里唯一不是为了找到条目的那条」——
-`std/hamt.dawn:264-266` 已经有同样的话，两处指同一件事。
+`std/hamt.dawn:262-266` 已经有同样的话，两处指同一件事。
 
 ### D7 `[]` 用在不可索引类型上的诊断 = 保留专属措辞，不落到通用的 `no impl of`
 
@@ -422,7 +459,8 @@ ImplI { trait_id: INDEX_ID, subject: TyMap(mk, mv), tparams: [mk, mv],
 
 1. 检查主体，得 `tt`；`is_errorish` 早退（不变）。
 2. **主体是 ground 且 `impl_at`（含 opaque 穿透）无 `Index` impl** → D7 的专属诊断，早退。
-3. `resolve_witness(cx, INDEX_ID, tt, lo, hi, "indexing")` → `wr`。
+3. `resolve_witness(cx, INDEX_ID, tt, lo, hi, "indexing a " ++ ty_show(cx.adts, tt))`
+   → `wr`（requirer 的形状与核实结果见 D6）。
 4. `want_idx = reduce_assoc(cx, TyAssoc(tt, INDEX_ID, "Idx"))`，
    `result = reduce_assoc(cx, TyAssoc(tt, INDEX_ID, "Item"))`。
    主体是刚性类型参数时二者保持未归约（D3 的急切归约纪律允许 `TyAssoc` 以刚性主体存活），
@@ -598,7 +636,7 @@ ABI 洞就是「语料只覆盖了 devirtualise 的形状」漏出来的，assoc
 | N−1 编译 HEAD | `selfhost-prev-diff.sh` 第一段 | 绿 | HEAD selfhost 不使用任何新语法（D10） |
 | 字节码 | `selfhost-prev-diff.sh` 的 `emit *` | **红，声明 `Emit-Change(emit *)`** | 每个 jar 多一个 `Index` 接口类：`main.dawn:286-295` 对**表里每个条件 impl** 调 `want_iface`，而 prelude 的 `Index[Map[K,V]]` 恒在表里（`Show[Option[T]]` 与 `Iter[List[T]]` 今天就是这样）。以实测为准，若 prev-diff 意外全绿则删掉声明 |
 | LSP | `selfhost-lsp-diff.sh` | **红，声明 `Emit-Change(lsp)`** | lspc.dawn:261-266 遍历 `prelude_trait_ids()`，补全多出 `Index` 一项 |
-| 诊断文本 | 内联 test + 新语料 | 三条变化，逐条列在 D6/D7 | 除这三条外任何诊断变化都是意外 |
+| 诊断文本 | 内联 test + 新语料 | 三族变化，逐条列在 D6（requirer 改成渲染实际主体）与 D7（`[]` 无 impl 的专属措辞） | 除这三族外任何诊断变化都是意外。D6 的那族要**逐个主体形状**验：`Map[K,V]`、用户 ADT、opaque、裸类型参数（D6 表四行各一条内联 test） |
 | 表达力 | `index_user` / `index_dict` / `index_opaque` | 从「2 errors」变「跑得出答案」 | §3.3 的实测就是它的反面 |
 
 > 验收纪律（引自 #110 与 #119 的同一条教训）：差分脚本在**未 `git add`** 的树上跑等于
