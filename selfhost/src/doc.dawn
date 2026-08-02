@@ -8,6 +8,7 @@ use std/list
 use std/map
 use std/io
 use lexer
+use parser
 use token.{Token}
 use ast.{
   Module, module_fns, module_types, module_consts, module_traits, module_effects
@@ -15,9 +16,11 @@ use ast.{
 use analyze.{Program, CheckedMod}
 use checker.{Cx, ModExports, internal_std_modules}
 use stdlib.{StdCtx, load_std}
+use tast.{TModule}
+use interp.{CtOut}
 use types.{
   Adts, Traits, AdtI, CtorI, ImplI, Sig, adt_of, trait_of, ty_show, sig_render,
-  prelude_traits, builtins
+  prelude_traits, prelude_trait_ids, builtins
 }
 
 # ---- the JSON writer (JsonWriter, as a threaded record) ----
@@ -169,6 +172,48 @@ fn doc_of(ds: DocSrc, lo: Int) -> Option[String] = {
   if len(acc) == 0 { None } else { Some(join(list.reverse(acc), "\n")) }
 }
 
+## The 1-based line every declaration starts on.
+fn decl_lines(m: Module, starts: List[Int]) -> List[Int] = {
+  var out: List[Int] = []
+  for fd in module_fns(m) { out = out ++ [line_of(starts, fd.lo)] }
+  for td in module_types(m) { out = out ++ [line_of(starts, td.lo)] }
+  for cd in module_consts(m) { out = out ++ [line_of(starts, cd.lo)] }
+  for td in module_traits(m) { out = out ++ [line_of(starts, td.lo)] }
+  for ed in module_effects(m) { out = out ++ [line_of(starts, ed.lo)] }
+  out
+}
+
+## The module's own doc: the `##` block that opens the file. It is the one doc
+## comment `doc_of` cannot reach — that one reads upward from a declaration,
+## and a module has no `lo` to read up from.
+##
+## The block belongs to the module only if nothing is declared on the line
+## right after it. A file that opens with a documented declaration
+## (`## Answer questions.` then `pub effect Ask`) has a first-declaration doc,
+## not a module doc, and the two must not be the same comment read twice.
+fn module_doc_of(ds: DocSrc, m: Module) -> Option[String] = {
+  var line = 1
+  var acc: List[String] = []
+  var go = true
+  while go {
+    match map.get(ds.by_line, line) {
+      Some(t) ->
+        if str.starts_with(t.text, "##") {
+          acc = acc ++ [strip_doc_prefix(t.text)]
+          line = line + 1
+        } else {
+          go = false
+        }
+      None -> { go = false }
+    }
+  }
+  if len(acc) == 0 || list.contains(decl_lines(m, ds.starts), line) {
+    None
+  } else {
+    Some(join(acc, "\n"))
+  }
+}
+
 # ---- project JSON ----
 
 fn adt_by_name(adts: Adts, owner: String, name: String) -> Option[AdtI] = {
@@ -211,6 +256,12 @@ fn trait_methods_json(w: W, cx: Cx, owner: String, name: String) -> W = {
 fn module_json(w: W, cm: CheckedMod, ds: DocSrc) -> W = {
   var w1 = open_obj(w)
   w1 = w_field(w1, "path", cm.mod_path)
+  # written only when the module has one, so a project of files that open with
+  # a plain `#` header emits exactly the bytes it did before module docs existed
+  match module_doc_of(ds, cm.m) {
+    Some(d) -> { w1 = w_field(w1, "doc", d) }
+    None -> ()
+  }
   w1 = w_key(w1, "fns")
   w1 = open_arr(w1)
   var any = false
@@ -429,13 +480,12 @@ fn builtin_groups() -> List[(String, List[(String, String)])] = [
 ## builtin table (falling back to the std prelude, where functions migrate),
 ## and each std module contributes a group named after itself with prose from
 ## its `##` doc comments.
-pub fn builtins_json(std: StdCtx) -> String = {
+## The hand-written groups, resolved against the builtin table (falling back to
+## the std prelude, where functions migrate). Shared by both output modes so
+## the two references cannot drift into two answers.
+fn builtin_groups_json(w0: W, std: StdCtx, traits: Traits) -> W = {
   let bi = builtins()
-  let traits = prelude_traits()
-  var w = w_new()
-  w = open_obj(w)
-  w = w_key(w, "groups")
-  w = open_arr(w)
+  var w = w0
   for grp in builtin_groups() {
     let (gname, fns) = grp
     w = open_obj(w)
@@ -461,6 +511,16 @@ pub fn builtins_json(std: StdCtx) -> String = {
     w = close_arr(w, len(fns) > 0)
     w = close_obj(w)
   }
+  w
+}
+
+pub fn builtins_json(std: StdCtx) -> String = {
+  let traits = prelude_traits()
+  var w = w_new()
+  w = open_obj(w)
+  w = w_key(w, "groups")
+  w = open_arr(w)
+  w = builtin_groups_json(w, std, traits)
   for sm in std.srcs {
     let (mod_path, text, m) = sm
     # std/hamt and std/pvec are Map/Set/List's representation, and `use` on
@@ -528,6 +588,106 @@ pub fn builtins_json(std: StdCtx) -> String = {
   w_done(w)
 }
 
+# ---- the standard library reference (`--stdlib`) ----
+
+## The prelude traits carry no doc comments: they are a Dawn literal in
+## types.dawn, not a declaration in any module, so there is nowhere to write
+## one. The prose lives here, next to the hand-written builtin groups, for the
+## same reason theirs does.
+fn prelude_trait_docs() -> List[(String, String)] = [
+  ("Ord",
+    "total order. `cmp(a, b)` answers negative / zero / positive, and is what `<` `<=` `>` `>=` mean past the scalars; `sort` and the extremes ask for it"),
+  ("Eq", "equality, behind `==` and `!=`"),
+  ("Hash",
+    "a value's hash, asked for alongside `Eq` by `Map` keys and `Set` elements (`[K: Eq + Hash]`)"),
+  ("Show", "how `to_string` and string interpolation render a value"),
+  ("Iter",
+    "what `for x in c` walks: a cursor type, an item type, and the four moves over them")
+]
+
+fn prelude_trait_doc(name: String) -> String = {
+  for pr in prelude_trait_docs() {
+    let (n, d) = pr
+    if n == name { return d }
+  }
+  panic("a prelude trait has no prose here: " ++ name)
+}
+
+fn prelude_traits_json(w0: W, adts: Adts, traits: Traits) -> W = {
+  var w = w0
+  for tid in prelude_trait_ids() {
+    let t = trait_of(traits, tid)
+    w = open_obj(w)
+    w = w_field(w, "name", t.name)
+    w = w_field(w, "typeParam", ty_show(adts, t.tvar))
+    w = w_key(w, "assoc")
+    w = open_arr(w)
+    for a in t.assoc { w = w_str(w, a) }
+    w = close_arr(w, len(t.assoc) > 0)
+    w = w_key(w, "methods")
+    w = open_arr(w)
+    for pr in t.methods {
+      let (mname, ms) = pr
+      w = open_obj(w)
+      w = w_field(w, "name", mname)
+      w = w_field(w, "sig", sig_render(adts, traits, ms.sig))
+      w = w_field_bool(w, "hasDefault", ms.has_default)
+      w = close_obj(w)
+    }
+    w = close_arr(w, len(t.methods) > 0)
+    w = w_field(w, "doc", prelude_trait_doc(t.name))
+    w = close_obj(w)
+  }
+  w
+}
+
+## std is checked by `load_std` with `cx_new(Some(mod_path), None)`, so a std
+## ADT or trait carries its module path as its owner — which is exactly what
+## `module_json` matches `class_name` against. `path` is unused here: the
+## source text is already in hand, so nothing re-reads the file.
+fn std_checked_mod(mp: String, cx: Cx, tm: TModule, ct: CtOut, m: Module) -> CheckedMod =
+  CheckedMod { mod_path: mp, class_name: mp, path: "", m: m, cx: cx, tm: tm, ct: ct }
+
+## The full standard library reference: the prelude's own names, the prelude
+## traits, and every user-visible std module with its types, traits, consts and
+## impls — not just its functions, which is all `--builtins` could ever show.
+##
+## The split into `groups` and `modules` is where a name is *implemented*, and
+## the published page deliberately does not organise itself that way: a reader
+## wants `sort` under lists, not under "builtin". What the split does carry is
+## how a name is *written* — `groups` are visible with no `use`, `modules` are
+## qualified — and that is a difference the reader has to know.
+pub fn stdlib_json(std: StdCtx) -> String = {
+  let traits = prelude_traits()
+  var w = w_new()
+  w = open_obj(w)
+  w = w_key(w, "groups")
+  w = open_arr(w)
+  w = builtin_groups_json(w, std, traits)
+  w = close_arr(w, true)
+  w = w_key(w, "traits")
+  w = open_arr(w)
+  w = prelude_traits_json(w, std.adts, traits)
+  w = close_arr(w, true)
+  w = w_key(w, "modules")
+  w = open_arr(w)
+  var any = false
+  for i in range(0, len(std.mods)) {
+    let (mp, cx, tm, ct) = std.mods[i]
+    let (sp, text, m) = std.srcs[i]
+    # the two lists are filled in the same loop, in the same order; if that
+    # ever stops being true the reference would silently describe one module
+    # with another's source
+    if mp != sp { panic("std module lists out of step: " ++ mp ++ " vs " ++ sp) }
+    if list.contains(internal_std_modules(), mp) { continue }
+    any = true
+    w = module_json(w, std_checked_mod(mp, cx, tm, ct, m), doc_src_of(text))
+  }
+  w = close_arr(w, any)
+  w = close_obj(w)
+  w_done(w)
+}
+
 test "the reference leaves out the representation modules" {
   # std/hamt and std/pvec used to get a section each, and a reader who
   # followed one got `use std/hamt` -- a compile error outside std. The
@@ -544,4 +704,52 @@ test "the reference leaves out the representation modules" {
   # the modules that stayed are still there
   assert str.contains(j, quote("std/map"))
   assert str.contains(j, quote("std/str"))
+}
+
+test "the standard library reference carries what --builtins cannot" {
+  let std = match load_std("std") {
+    Ok(s) -> s
+    Err(e) -> panic("std: " ++ e)
+  }
+  let j = stdlib_json(std)
+  # the prelude's own names, unqualified
+  assert str.contains(j, quote("catch_fault"))
+  # the prelude traits and their methods, which live in no module at all
+  assert str.contains(j, quote("Iter"))
+  assert str.contains(j, quote("iter_start"))
+  # a std module's types and impls -- the two `--builtins` has no room for
+  assert str.contains(j, quote("Cursor"))
+  assert str.contains(j, quote("Ord[Cursor]"))
+  # every user-visible module documents itself
+  for sm in std.srcs {
+    let (mp, text, m) = sm
+    if list.contains(internal_std_modules(), mp) { continue }
+    assert str.contains(j, quote(mp))
+    if module_doc_of(doc_src_of(text), m) == None {
+      println("std module without a doc comment: " ++ mp)
+      assert false
+    }
+  }
+  # and the representation modules stay out of this one too
+  for internal in internal_std_modules() {
+    assert not str.contains(j, quote(internal))
+  }
+}
+
+test "a documented first declaration is not also the module's doc" {
+  # the two readings collide on line 1: `doc_of` reads upward from the
+  # declaration and `module_doc_of` reads downward from the top of the file,
+  # and without the declaration check they would both claim this comment.
+  let attached = "## Answer questions from ambient context.\n" ++
+    "pub effect Ask {\n  fn ask(prompt: String) -> Int\n}\n"
+  let (m1, d1) = parser.parse_module(attached)
+  assert len(d1) == 0
+  assert module_doc_of(doc_src_of(attached), m1) == None
+
+  # detached by a blank line, the same comment is the module's
+  let detached = "## What this module is for.\n\n" ++
+    "pub effect Ask {\n  fn ask(prompt: String) -> Int\n}\n"
+  let (m2, d2) = parser.parse_module(detached)
+  assert len(d2) == 0
+  assert module_doc_of(doc_src_of(detached), m2) == Some("What this module is for.")
 }

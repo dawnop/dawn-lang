@@ -406,6 +406,8 @@ fn usage() -> String = join([
   "  dawn fmt <file.dawn | dir>...        format files in place (a dir formats all .dawn under it)",
   "  dawn fmt --check <target>...         report files that are not formatted (exit 1 if any)",
   "  dawn doc <target>                    emit the pub API (## doc comments) as JSON on stdout",
+  "  dawn doc --stdlib                    emit the standard library reference (the prelude, its",
+  "                                       traits, and every std module) as JSON",
   "  dawn doc --builtins                  emit the builtin function reference as JSON",
   "  dawn add <spec> [--subdir <p>] [--as <alias>] [--dir <project>]",
   "  dawn cache verify                    re-hash every cached package against its name",
@@ -1208,6 +1210,7 @@ fn run_fmt(rest: List[String]) -> Unit !io = {
 fn run_doc(rest: List[String]) -> Unit !io = {
   var std_dir = "std"
   var builtins_mode = false
+  var stdlib_mode = false
   var target = ""
   var i = 0
   while i < len(rest) {
@@ -1216,6 +1219,11 @@ fn run_doc(rest: List[String]) -> Unit !io = {
       i = i + 2
     } else if rest[i] == "--builtins" {
       builtins_mode = true
+      i = i + 1
+    } else if rest[i] == "--stdlib" {
+      # not `--std`: that spelling is taken, and by five bootstrap scripts at
+      # that (it names the std *source directory*)
+      stdlib_mode = true
       i = i + 1
     } else {
       target = rest[i]
@@ -1226,12 +1234,17 @@ fn run_doc(rest: List[String]) -> Unit !io = {
     Ok(sc) -> sc
     Err(e) -> panic("cannot load std from " ++ std_dir ++ ": " ++ e)
   }
+  if stdlib_mode {
+    print(doc.stdlib_json(std))
+    return
+  }
   if builtins_mode {
     print(doc.builtins_json(std))
     return
   }
   if target == "" {
-    return cli_error("usage: dawn doc <file.dawn | project-dir> | dawn doc --builtins")
+    return cli_error(
+      "usage: dawn doc <file.dawn | project-dir> | dawn doc --stdlib | dawn doc --builtins")
   }
   if not io.exists(target) {
     return cli_error("no such file or directory: " ++ target)
