@@ -53,7 +53,7 @@ use types.{
   reduce_via_bindings,
   ty_named, is_numeric, is_errorish, peel_opaque,
   prelude_adts, prelude_traits, prelude_impls, bounds_of,
-  prelude_trait_ids, prelude_trait_names, is_prelude_trait_name,
+  prelude_trait_ids, prelude_trait_names, is_prelude_trait_name, first_minted_id,
   builtins, opt_ty, result_ty, OPTION_ID, RESULT_ID, FOREIGN_ERROR_ID,
   ORD_ID, EQ_ID, HASH_ID, SHOW_ID, ITER_ID,
   eq_scalars, hash_scalars,
@@ -180,12 +180,15 @@ pub fn cx_new(owner_class: Option[String], src_path: Option[String]) -> Cx = {
   }
   Cx {
     diags: [],
-    # 0/1/2 are the prelude ADT ids (Option/Result/ForeignError) and 0/1/2/3
-    # the prelude trait ids (Ord/Eq/Hash/Show); one counter feeds both, so
-    # minting starts past all of them. When Show arrived the counter stayed at
-    # 3, and no user trait collided with it only because a trait declaration
-    # mints its type variable first -- an ordering nothing asserted.
-    next_id: 4,
+    # One counter feeds the prelude ADT ids (Option/Result/ForeignError) and
+    # the prelude trait ids (Ord/Eq/Hash/Show/Iter) alike, so minting has to
+    # open past all of them. Twice it did not: when Show arrived the literal
+    # here stayed at 3, and when Iter arrived it stayed at 4 -- the same number
+    # Iter itself now holds. Neither collided, and both times for the same
+    # non-reason: a trait declaration mints its type variable before its trait
+    # id, so the first user trait steps over the counter's opening value.
+    # first_minted_id reads the tables instead, and the test below walks them.
+    next_id: first_minted_id(),
     adts: prelude_adts(),
     traits: prelude_traits(),
     fns: map.empty(),
@@ -1842,12 +1845,21 @@ test "a `use java` declaration is refused when no oracle is wired" {
 test "the shared counter starts past every prelude id" {
   # ADTs and traits draw from one counter but live in separate id spaces, so
   # a minted id equal to a prelude id of the *other* kind is fine -- equal to
-  # one of its own kind is a silent map overwrite. When Show took trait id 3
-  # the counter stayed at 3, and the first user trait missed it only because
-  # a trait declaration mints its type variable first.
+  # one of its own kind is a silent map overwrite. This walks both tables
+  # rather than naming the ids: the earlier version listed ForeignError and
+  # Show by hand, so when Iter took trait id 4 the counter was left standing
+  # on Iter's id and nothing said a word. A prelude entity added to either
+  # table is covered here the moment it is added.
   let cx = test_cx()
-  assert cx.next_id > FOREIGN_ERROR_ID
-  assert cx.next_id > SHOW_ID
+  for aid in map.keys(prelude_adts()) {
+    assert cx.next_id > aid
+  }
+  for tid in map.keys(prelude_traits()) {
+    assert cx.next_id > tid
+  }
+  # and it is still derived: a literal put back here would pass the loops above
+  # for exactly as long as it happened to be large enough
+  assert cx.next_id == first_minted_id()
 }
 
 test "prelude seeding wires names to ids" {
