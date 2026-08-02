@@ -95,6 +95,9 @@ pub type Cx = {
   traits: Traits,
   # name-keyed views of the current module's scope
   fns: Map[String, Sig],
+  # where each `fns` entry came from, maintained in step with it by bind_fn --
+  # the precedence rule reads this and nothing else (design §4.1)
+  fn_origin: Map[String, Origin],
   # the bundled std's implicit surface (PRELUDE names); local decls shadow it
   std_fns: Map[String, Sig],
   adts_by_name: Map[String, Int],
@@ -186,6 +189,7 @@ pub fn cx_new(owner_class: Option[String], src_path: Option[String]) -> Cx = {
     adts: prelude_adts(),
     traits: prelude_traits(),
     fns: map.empty(),
+    fn_origin: map.empty(),
     std_fns: map.empty(),
     adts_by_name: map.empty(),
     aliases: map.empty(),
@@ -333,6 +337,171 @@ pub fn import_clash(cx: Cx, name: String, lo: Int, hi: Int, kind: String) -> Cx 
   }
 
 pub fn import_clashes(cx: Cx, name: String) -> Bool = map.has(cx.imported_names, name)
+
+# ---- the function namespace ----
+
+## Where a name in the module's function namespace came from. The pass order --
+## seed_prelude, then pass_imports, then the module's own declarations -- is
+## already a precedence order; this type is that order made sayable, so the
+## rule for who may overwrite whom lives in one place instead of being
+## re-derived at each write site (docs/prelude-namespace-design.md §4.1).
+pub type Origin =
+  | OPrelude
+# the module path spelled in the `use` that brought the name
+  | OImport(from: String)
+# how the declaration is named in diagnostics: "function", "trait method"
+# or "operation"
+  | OLocal(kind: String)
+
+## The effect an operation belongs to, by name. `None` for anything that is not
+## an operation, which is what the "imported more than once" hint keys off.
+fn op_effect(cx: Cx, s: Option[Sig]) -> Option[String] =
+  match s {
+    Some(sg) ->
+      match sg.op_of {
+        Some(pair) -> {
+          let (eid, _) = pair
+          match map.get(cx.effect_infos, eid) {
+            Some(e) -> Some(e.name)
+            None -> None
+          }
+        }
+        None -> None
+      }
+    None -> None
+  }
+
+## The default alias of a module path: its last segment, which is what a plain
+## `use a/b` binds (ast.dawn's module_uses).
+fn mod_alias(path: String) -> String = {
+  let segs = str.split(path, "/")
+  segs[len(segs) - 1]
+}
+
+## Did `name` reach this module as an effect operation riding on `use m.{E}`
+## rather than being spelled in the `use` list itself?
+fn rode_in_as_op(cx: Cx, name: String, from: String) -> Bool =
+  map.get(cx.fn_origin, name) == Some(OImport(from)) &&
+  op_effect(cx, map.get(cx.fns, name)) != None
+
+## Two `use` lines brought the same name. An operation gets a pointed hint: it
+## was never spelled in either `use` list, it rode in on an effect, so the bare
+## message leaves the author hunting for a line that says `ask`.
+fn import_dup(
+  cx: Cx,
+  name: String,
+  prev_from: String,
+  from: String,
+  incoming: Option[Sig],
+  lo: Int,
+  hi: Int
+) -> Cx = {
+  let msg = "`" ++ name ++ "` is imported more than once (from `" ++ prev_from ++
+    "` and `" ++ from ++ "`)"
+  let a = op_effect(cx, map.get(cx.fns, name))
+  let b = op_effect(cx, incoming)
+  let owner = match a {
+    Some(x) ->
+      match b {
+        Some(y) -> "an operation of both `" ++ x ++ "` and `" ++ y ++ "`"
+        None -> "an operation of `" ++ x ++ "`"
+      }
+    None ->
+      match b {
+        Some(y) -> "an operation of `" ++ y ++ "`"
+        None -> ""
+      }
+  }
+  if owner == "" { return cerr(cx, msg, lo, hi) }
+  cerr_h(cx, msg, lo, hi, "`" ++ name ++ "` is " ++ owner ++ "; import one, or qualify it as `" ++
+      mod_alias(prev_from) ++ "." ++ name ++ "(...)`")
+}
+
+## "This name is already taken in this module." Three declaration sites used to
+## spell three variants of one rule; which wording applies depends on what is
+## being declared and on what is already bound.
+fn redeclared(cx: Cx, name: String, kind: String, lo: Int, hi: Int) -> Cx = {
+  if kind == "operation" {
+    return cerr_h(cx, "operation `" ++ name ++ "` is already a function in this module",
+      lo, hi, "operations and functions share one namespace; rename one")
+  }
+  let prev = map.get(cx.fns, name).expect("a bound name has a signature")
+  match prev.trait_id {
+    Some(ptid) -> cerr(cx, "`" ++ name ++ "` is already a method of trait `" ++
+        trait_of(cx.traits, ptid).name ++ "` (trait methods share the function namespace)", lo, hi)
+    None ->
+      if kind == "trait method" {
+        cerr(cx, "trait method `" ++ name ++ "` collides with a function of the same name", lo, hi)
+      } else {
+        cerr(cx, "function `" ++ name ++ "` is defined twice", lo, hi)
+      }
+  }
+}
+
+fn bind_raw(cx: Cx, name: String, sig: Sig, org: Origin) -> Cx =
+  Cx {
+    ..cx,
+    fns: map.insert(cx.fns, name, sig),
+    fn_origin: map.insert(cx.fn_origin, name, org)
+  }
+
+fn bind_import(cx: Cx, name: String, sig: Sig, from: String, lo: Int, hi: Int) -> Cx = {
+  if alias_shadows(cx, name) { return alias_shadow(cx, name, lo, hi) }
+  match map.get(cx.fn_origin, name) {
+    None -> bind_raw(cx, name, sig, OImport(from))
+    Some(prev) ->
+      match prev {
+        # a selective import may shadow a prelude name (spec §10.3)
+        OPrelude -> bind_raw(cx, name, sig, OImport(from))
+        OImport(pf) ->
+          # the same name from the same module is redundant, not ambiguous:
+          # `use m.{E, op}` spells an operation that `use m.{E}` already brought
+          if pf == from && map.get(cx.fns, name) == Some(sig) {
+            bind_raw(cx, name, sig, OImport(from))
+          } else {
+            import_dup(cx, name, pf, from, Some(sig), lo, hi)
+          }
+        # imports are resolved before any local declaration is registered
+        OLocal(_) -> panic("bind_fn: `${name}` imported after a local declaration")
+      }
+  }
+}
+
+fn bind_local(cx: Cx, name: String, sig: Sig, kind: String, lo: Int, hi: Int) -> Cx = {
+  if alias_shadows(cx, name) { return alias_shadow(cx, name, lo, hi) }
+  # a name imported into any namespace, not only this one, is a clash
+  if import_clashes(cx, name) { return import_clash(cx, name, lo, hi, kind) }
+  match map.get(cx.fn_origin, name) {
+    None -> bind_raw(cx, name, sig, OLocal(kind))
+    Some(prev) ->
+      match prev {
+        # an imported operation is registered in imported_names too, so the
+        # check above answers this first; the arm keeps the rule whole
+        OImport(pf) -> cerr_h(cx, kind ++ " `" ++ name ++ "` conflicts with a name imported from `" ++
+            pf ++ "`", lo, hi, "drop the import or rename this " ++ kind)
+        _ -> redeclared(cx, name, kind, lo, hi)
+      }
+  }
+}
+
+## The one door into the module's function namespace, in place of six write
+## sites that each had their own idea of what to check first. The rule reads
+## the two origins and nothing else:
+##
+##   existing \ incoming    OImport                   OLocal
+##   (none)                 bind                      bind
+##   OPrelude               shadow, silently          error (blade C flips this)
+##   OImport                imported more than once   conflicts with an import
+##   OLocal                 unreachable (pass order)  defined twice / a method
+##
+## `OPrelude` only ever arrives while the table is still empty, so its row of
+## the incoming axis needs no case of its own.
+pub fn bind_fn(cx: Cx, name: String, sig: Sig, org: Origin, lo: Int, hi: Int) -> Cx =
+  match org {
+    OPrelude -> bind_raw(cx, name, sig, org)
+    OImport(from) -> bind_import(cx, name, sig, from, lo, hi)
+    OLocal(kind) -> bind_local(cx, name, sig, kind, lo, hi)
+  }
 
 # ---- effect bookkeeping ----
 
@@ -1589,30 +1758,32 @@ pub fn seed_prelude(cx: Cx) -> Cx = {
       i = i + 1
     }
   }
-  # prelude traits: methods enter the fn namespace
   var tbn = cx1.traits_by_name
-  var fns2 = cx1.fns
   for tid in prelude_trait_ids() {
-    let tr = trait_of(cx1.traits, tid)
-    tbn = map.insert(tbn, tr.name, tid)
-    if tr.injects {
-      for entry in tr.methods {
-        let (mname, ms) = entry
-        fns2 = map.insert(fns2, mname, ms.sig)
-      }
-    }
+    tbn = map.insert(tbn, trait_of(cx1.traits, tid).name, tid)
   }
   # prelude impls over the native scalars
   var it = cx1.impl_table
   for i in prelude_impls() { it = insert_impl(it, i) }
-  Cx {
+  var cx2 = Cx {
     ..cx1,
     adts_by_name: abn,
     ctors_by_name: cbn,
     traits_by_name: tbn,
-    fns: fns2,
     impl_table: it
   }
+  # prelude traits: methods enter the fn namespace. Nothing is bound yet, so
+  # this is the one caller of bind_fn that cannot collide (design §4.1).
+  for tid in prelude_trait_ids() {
+    let tr = trait_of(cx2.traits, tid)
+    if tr.injects {
+      for entry in tr.methods {
+        let (mname, ms) = entry
+        cx2 = bind_fn(cx2, mname, ms.sig, OPrelude, 0, 0)
+      }
+    }
+  }
+  cx2
 }
 
 ## Pass 0.5: `use java` imports, resolved against the host's signature oracle
@@ -2247,16 +2418,7 @@ pub fn pass_effects(cx: Cx, m: Module) -> Cx !io = {
         op_of: Some((eid, idx)),
         inferring: false
       }
-      if alias_shadows(cx1, op.name) {
-        cx1 = alias_shadow(cx1, op.name, op.nlo, op.nhi)
-      } else if import_clashes(cx1, op.name) {
-        cx1 = import_clash(cx1, op.name, op.nlo, op.nhi, "operation")
-      } else if map.has(cx1.fns, op.name) {
-        cx1 = cerr_h(cx1, "operation `" ++ op.name ++ "` is already a function in this module",
-          op.nlo, op.nhi, "operations and functions share one namespace; rename one")
-      } else {
-        cx1 = Cx { ..cx1, fns: map.insert(cx1.fns, op.name, sig) }
-      }
+      cx1 = bind_fn(cx1, op.name, sig, OLocal("operation"), op.nlo, op.nhi)
     }
     let rec_name = ev_record_name(d.name)
     let info = AdtI {
@@ -2431,28 +2593,12 @@ pub fn pass_register_traits(cx: Cx, m: Module) -> Cx !io = {
         None -> false
       }
       # a non-injecting trait takes no slot in the fn namespace, so none of the
-      # collision checks apply to it
+      # collision checks apply to it. A method the door refused is not a method
+      # of this trait either -- the name it would answer to belongs elsewhere.
       if injects {
-        # like top-level fns, a trait method may shadow a builtin/std name
-        if alias_shadows(cx1, me.name) {
-          cx1 = alias_shadow(cx1, me.name, me.nlo, me.nhi)
-          continue
-        }
-        if import_clashes(cx1, me.name) {
-          cx1 = import_clash(cx1, me.name, me.nlo, me.nhi, "trait method")
-          continue
-        }
-        if map.has(cx1.fns, me.name) {
-          let prev = map.get(cx1.fns, me.name).expect("present")
-          let msg = match prev.trait_id {
-            Some(ptid) -> "`" ++ me.name ++ "` is already a method of trait `" ++
-              trait_of(cx1.traits, ptid).name ++ "` (trait methods share the function namespace)"
-            None -> "trait method `" ++ me.name ++ "` collides with a function of the same name"
-          }
-          cx1 = cerr(cx1, msg, me.nlo, me.nhi)
-          continue
-        }
-        cx1 = Cx { ..cx1, fns: map.insert(cx1.fns, me.name, sig) }
+        let before = len(cx1.diags)
+        cx1 = bind_fn(cx1, me.name, sig, OLocal("trait method"), me.nlo, me.nhi)
+        if len(cx1.diags) > before { continue }
       }
       methods = methods ++ [(me.name, MethodSig { sig: sig, has_default: has_default })]
     }
@@ -3255,21 +3401,7 @@ pub fn pass_fn_signatures(cx: Cx, m: Module) -> (Cx, List[Sig], List[Map[String,
     sigs = sigs ++ [sig]
     evs = evs ++ [ev]
     # a top-level fn may shadow a builtin or std name (spec §10.6)
-    if alias_shadows(cx1, d.name) {
-      cx1 = alias_shadow(cx1, d.name, d.nlo, d.nhi)
-    } else if import_clashes(cx1, d.name) {
-      cx1 = import_clash(cx1, d.name, d.nlo, d.nhi, "function")
-    } else if map.has(cx1.fns, d.name) {
-      let prev = map.get(cx1.fns, d.name).expect("present")
-      let msg = match prev.trait_id {
-        Some(ptid) -> "`" ++ d.name ++ "` is already a method of trait `" ++
-          trait_of(cx1.traits, ptid).name ++ "` (trait methods share the function namespace)"
-        None -> "function `" ++ d.name ++ "` is defined twice"
-      }
-      cx1 = cerr(cx1, msg, d.nlo, d.nhi)
-    } else {
-      cx1 = Cx { ..cx1, fns: map.insert(cx1.fns, d.name, sig) }
-    }
+    cx1 = bind_fn(cx1, d.name, sig, OLocal("function"), d.nlo, d.nhi)
   }
   (cx1, sigs, evs)
 }
@@ -5067,14 +5199,19 @@ fn inject_selective(
       lo, hi, suggest.hint(name, pool))
   }
   match map.get(cx1.imported_names, name) {
-    Some(prev) ->
-      return cerr(cx1, "`" ++ name ++ "` is imported more than once (from `" ++ prev ++
-          "` and `" ++ from_path ++ "`)", lo, hi)
+    Some(prev) -> {
+      # an operation registered by `use m.{E}` (design D8) may also be named in
+      # that same `use` list: redundant, not a second import
+      let redundant = prev == from_path && rode_in_as_op(cx1, name, prev)
+      if not redundant {
+        return import_dup(cx1, name, prev, from_path, f, lo, hi)
+      }
+    }
     None -> ()
   }
   cx1 = Cx { ..cx1, imported_names: map.insert(cx1.imported_names, name, from_path) }
   match f {
-    Some(sig) -> { cx1 = Cx { ..cx1, fns: map.insert(cx1.fns, name, sig) } }
+    Some(sig) -> { cx1 = bind_fn(cx1, name, sig, OImport(from_path), lo, hi) }
     None -> ()
   }
   # a type brings its constructors (spec §10.3); a ctor may also be named directly
@@ -5132,7 +5269,16 @@ fn inject_selective(
       cx1 = Cx { ..cx1, effects: map.insert(cx1.effects, name, eid) }
       for op in effect_of(cx1, eid).ops {
         match map.get(exp.fns, op) {
-          Some(sg) -> { cx1 = Cx { ..cx1, fns: map.insert(cx1.fns, op, sg) } }
+          Some(sg) -> {
+            cx1 = bind_fn(cx1, op, sg, OImport(from_path), lo, hi)
+            # an operation is a name this module can now say, so every other
+            # namespace's clash check has to see it the way it sees a spelled
+            # import. Without this, `use a.{A}` + `use b.{B}` differed only by
+            # line order and said nothing (design D8, §3.4 measurement 3).
+            if not map.has(cx1.imported_names, op) {
+              cx1 = Cx { ..cx1, imported_names: map.insert(cx1.imported_names, op, from_path) }
+            }
+          }
           None -> ()
         }
       }
@@ -9678,6 +9824,9 @@ pub fn check_fn_inferred(cx: Cx, d: FnDecl, s: Sig, ev: Map[String, Eff]) -> (Cx
   let dsyms = dict_sym_list(cx1, s)
   let esyms = ev_sym_list(cx1, s)
   var cx3 = pop_scope(cx1)
+  # Not a binding, so not a bind_fn caller: the guard says this name already
+  # resolves to exactly this signature, and sealing the inferred return type
+  # replaces it in place. The origin it was bound under does not move.
   if map.get(cx3.fns, d.name) == Some(s) {
     cx3 = Cx { ..cx3, fns: map.insert(cx3.fns, d.name, sealed) }
   }
@@ -10612,6 +10761,57 @@ test "exports_of exposes the pub surface, and imports consume it" {
   let (m3, _) = parser.parse_module(src3)
   let (cx3, _) = check_module(cx_new(Some("use_site"), None), m3, env)
   assert cx3.diags[0].msg == "`hidden` is private to module `geom`"
+}
+
+## Two modules, each exporting an effect whose single operation is `ask` (test
+## helper for the import-collision tests below).
+fn two_ask_effects() -> Map[String, ModExports] !io = {
+  let (ma, pda) = parser.parse_module("pub effect A { fn ask() -> Int }\n")
+  let (mb, pdb) = parser.parse_module("pub effect B { fn ask() -> Int }\n")
+  let env0: Map[String, ModExports] = map.empty()
+  let (cxa, _) = check_module(cx_new(Some("a"), None), ma, env0)
+  # the id counter runs across modules the way the driver runs it (analyze.dawn),
+  # or the two effects mint the same id and the grafted tables collide
+  let (cxb, _) = check_module(Cx { ..cx_new(Some("b"), None), next_id: cxa.next_id }, mb, env0)
+  if len(pda) + len(pdb) + len(cxa.diags) + len(cxb.diags) > 0 {
+    panic("two_ask_effects: the fixture modules should check clean")
+  }
+  map.from([("a", exports_of(cxa, ma, "a", "a")), ("b", exports_of(cxb, mb, "b", "b"))])
+}
+
+test "an operation imported from two effects is refused, whichever `use` is first" {
+  # The operation name is never spelled in either `use` list, so it used to
+  # miss `imported_names` entirely: the second import silently overwrote the
+  # first and the program's meaning was decided by line order, with no
+  # diagnostic either way (docs/prelude-namespace-design.md §3.4, measurement 3).
+  let env = two_ask_effects()
+  let (m_ab, _) = parser.parse_module("use a.{A}\nuse b.{B}\n")
+  let (cx_ab, _) = check_module(cx_new(Some("m"), None), m_ab, env)
+  assert len(cx_ab.diags) == 1
+  assert cx_ab.diags[0].msg == "`ask` is imported more than once (from `a` and `b`)"
+  assert str.contains(cx_ab.diags[0].hint, "an operation of both `A` and `B`")
+  # the mirror image says the same thing, with the two modules the other way up
+  let (m_ba, _) = parser.parse_module("use b.{B}\nuse a.{A}\n")
+  let (cx_ba, _) = check_module(cx_new(Some("m"), None), m_ba, env)
+  assert len(cx_ba.diags) == 1
+  assert cx_ba.diags[0].msg == "`ask` is imported more than once (from `b` and `a`)"
+  assert str.contains(cx_ba.diags[0].hint, "an operation of both `B` and `A`")
+  # naming the operation beside its own effect is redundant, not a second
+  # import: the name and the module it came from are both the same
+  let (m_same, _) = parser.parse_module("use a.{A, ask}\n")
+  let (cx_same, _) = check_module(cx_new(Some("m"), None), m_same, env)
+  assert len(cx_same.diags) == 0
+}
+
+test "a local declaration collides with an imported operation as an import" {
+  # This said "function `ask` is defined twice" about a file that defines it
+  # once (design §3.4, measurement 4): the operation sat in `fns` without being
+  # in `imported_names`, so the least fitting of the three wordings won.
+  let env = two_ask_effects()
+  let (m, _) = parser.parse_module("use a.{A}\nfn ask() -> Int = 9\n")
+  let (cx, _) = check_module(cx_new(Some("m"), None), m, env)
+  assert len(cx.diags) == 1
+  assert cx.diags[0].msg == "function `ask` conflicts with a name imported from `a`"
 }
 
 ## Every XConstRef owner inside an expression, left to right (test helper).
