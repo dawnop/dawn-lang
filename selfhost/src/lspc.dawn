@@ -8,7 +8,7 @@
 use std/str
 use std/map
 use std/set
-use types.{ty_show, sig_render, adt_of}
+use types.{ty_show, sig_render, adt_of, trait_of, prelude_traits, prelude_trait_ids}
 use lspq.{QCx, locals_at}
 use lexer.{SourceView, view_of, slice_cp}
 use ast.{module_traits}
@@ -257,7 +257,14 @@ pub fn completions_at(qc: QCx, text: String, offset: Int) -> List[CItem] = {
   for tv in module_traits(qc.entry.m) {
     it = add(it, tv.name, 8, Some("trait " ++ tv.name ++ "[" ++ tv.tp ++ "]"), "1")
   }
-  it = add(it, "Ord", 8, Some("trait Ord[T]"), "2")
+  # every prelude trait, read off the one table so a new one shows up here
+  # without a second transcription (docs/prelude-namespace-design.md §4.3)
+  let pts = prelude_traits()
+  for tid in prelude_trait_ids() {
+    let ptr = trait_of(pts, tid)
+    it = add(it, ptr.name, 8,
+      Some("trait " ++ ptr.name ++ "[" ++ ty_show(qc.entry.cx.adts, ptr.tvar) ++ "]"), "2")
+  }
   # Both tables: a migrated function is still part of the implicitly-visible
   # surface, and users cannot tell which side it lives on.
   for pr in map.entries(qc.bins) {

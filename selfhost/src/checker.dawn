@@ -53,6 +53,7 @@ use types.{
   reduce_via_bindings,
   ty_named, is_numeric, is_errorish, peel_opaque,
   prelude_adts, prelude_traits, prelude_impls, bounds_of,
+  prelude_trait_ids, prelude_trait_names, is_prelude_trait_name,
   builtins, opt_ty, result_ty, OPTION_ID, RESULT_ID, FOREIGN_ERROR_ID,
   ORD_ID, EQ_ID, HASH_ID, SHOW_ID, ITER_ID,
   eq_scalars, hash_scalars,
@@ -1591,12 +1592,14 @@ pub fn seed_prelude(cx: Cx) -> Cx = {
   # prelude traits: methods enter the fn namespace
   var tbn = cx1.traits_by_name
   var fns2 = cx1.fns
-  for tid in [ORD_ID, EQ_ID, HASH_ID, SHOW_ID, ITER_ID] {
+  for tid in prelude_trait_ids() {
     let tr = trait_of(cx1.traits, tid)
     tbn = map.insert(tbn, tr.name, tid)
-    for entry in tr.methods {
-      let (mname, ms) = entry
-      fns2 = map.insert(fns2, mname, ms.sig)
+    if tr.injects {
+      for entry in tr.methods {
+        let (mname, ms) = entry
+        fns2 = map.insert(fns2, mname, ms.sig)
+      }
     }
   }
   # prelude impls over the native scalars
@@ -2310,7 +2313,7 @@ pub fn pass_register_traits(cx: Cx, m: Module) -> Cx !io = {
         continue
       }
     if map.has(cx1.traits_by_name, d.name) {
-      let msg = if d.name == "Ord" || d.name == "Eq" || d.name == "Hash" {
+      let msg = if is_prelude_trait_name(d.name) {
         "`" ++ d.name ++ "` is a prelude trait and cannot be redefined"
       } else {
         "trait `" ++ d.name ++ "` is defined twice"
@@ -2343,7 +2346,10 @@ pub fn pass_register_traits(cx: Cx, m: Module) -> Cx !io = {
         owner: cx1.owner_class,
         src_path: cx1.src_path,
         methods: [],
-        assoc: assoc_names
+        assoc: assoc_names,
+        # a declared trait always injects: there is no surface syntax for
+        # opting out (docs/prelude-namespace-design.md §4.2)
+        injects: true
       })
     }
     let tvid = match tvar {
@@ -2355,6 +2361,9 @@ pub fn pass_register_traits(cx: Cx, m: Module) -> Cx !io = {
       current_tparam_bounds: map.insert(cx1.current_tparam_bounds, tvid, [tid])
     }
     var methods: List[(String, MethodSig)] = []
+    # whether this trait's method names take a slot in the fn namespace; a
+    # declared trait is always injecting, so the guards below never fire today
+    let injects = trait_of(cx1.traits, tid).injects
     var tp: Map[String, Ty] = map.empty()
     tp = map.insert(tp, d.tp, tvar)
     let saved_tp = cx1.current_tparams
@@ -2417,27 +2426,35 @@ pub fn pass_register_traits(cx: Cx, m: Module) -> Cx !io = {
         op_of: None,
         inferring: false
       }
-      # like top-level fns, a trait method may shadow a builtin/std name
-      if alias_shadows(cx1, me.name) {
-        cx1 = alias_shadow(cx1, me.name, me.nlo, me.nhi)
-      } else if import_clashes(cx1, me.name) {
-        cx1 = import_clash(cx1, me.name, me.nlo, me.nhi, "trait method")
-      } else if map.has(cx1.fns, me.name) {
-        let prev = map.get(cx1.fns, me.name).expect("present")
-        let msg = match prev.trait_id {
-          Some(ptid) -> "`" ++ me.name ++ "` is already a method of trait `" ++
-            trait_of(cx1.traits, ptid).name ++ "` (trait methods share the function namespace)"
-          None -> "trait method `" ++ me.name ++ "` collides with a function of the same name"
-        }
-        cx1 = cerr(cx1, msg, me.nlo, me.nhi)
-      } else {
-        cx1 = Cx { ..cx1, fns: map.insert(cx1.fns, me.name, sig) }
-        let has_default = match me.body {
-          Some(_) -> true
-          None -> false
-        }
-        methods = methods ++ [(me.name, MethodSig { sig: sig, has_default: has_default })]
+      let has_default = match me.body {
+        Some(_) -> true
+        None -> false
       }
+      # a non-injecting trait takes no slot in the fn namespace, so none of the
+      # collision checks apply to it
+      if injects {
+        # like top-level fns, a trait method may shadow a builtin/std name
+        if alias_shadows(cx1, me.name) {
+          cx1 = alias_shadow(cx1, me.name, me.nlo, me.nhi)
+          continue
+        }
+        if import_clashes(cx1, me.name) {
+          cx1 = import_clash(cx1, me.name, me.nlo, me.nhi, "trait method")
+          continue
+        }
+        if map.has(cx1.fns, me.name) {
+          let prev = map.get(cx1.fns, me.name).expect("present")
+          let msg = match prev.trait_id {
+            Some(ptid) -> "`" ++ me.name ++ "` is already a method of trait `" ++
+              trait_of(cx1.traits, ptid).name ++ "` (trait methods share the function namespace)"
+            None -> "trait method `" ++ me.name ++ "` collides with a function of the same name"
+          }
+          cx1 = cerr(cx1, msg, me.nlo, me.nhi)
+          continue
+        }
+        cx1 = Cx { ..cx1, fns: map.insert(cx1.fns, me.name, sig) }
+      }
+      methods = methods ++ [(me.name, MethodSig { sig: sig, has_default: has_default })]
     }
     let info = TraitI {
       id: tid,
@@ -2447,7 +2464,8 @@ pub fn pass_register_traits(cx: Cx, m: Module) -> Cx !io = {
       owner: cx1.owner_class,
       src_path: cx1.src_path,
       methods: methods,
-      assoc: assoc_names
+      assoc: assoc_names,
+      injects: injects
     }
     cx1 = Cx {
       ..cx1,
@@ -2499,6 +2517,17 @@ test "trait registration puts methods in the fn namespace" {
   let cx2 = pass_register_traits(cx, m2)
   assert len(cx2.diags) == 1
   assert str.contains(cx2.diags[0].msg, "already a method of trait `Eq2`")
+}
+
+test "every prelude trait name is refused as a redefinition" {
+  # the guard used to name three of the five by hand, so `trait Show` and
+  # `trait Iter` came out as "defined twice" on a file that declares them once
+  for name in prelude_trait_names() {
+    let m = Module { decls: [DTrait(name, "T", 10, 11, [], [], false, 0, 40, 6, 9)] }
+    let cx = pass_register_traits(seed_prelude(test_cx()), m)
+    assert len(cx.diags) == 1
+    assert cx.diags[0].msg == "`" ++ name ++ "` is a prelude trait and cannot be redefined"
+  }
 }
 
 ## The subject-shape restriction (trait-v2-design §3.2, Haskell 98's instance
@@ -10519,10 +10548,14 @@ pub fn exports_of(cx: Cx, m: Module, mod_path: String, class_name: String) -> Mo
       match map.get(cx.traits_by_name, d.name) {
         Some(tid) -> {
           traits2 = map.insert(traits2, d.name, tid)
-          # a pub trait's methods are importable like pub fns
-          for entry in trait_of(cx.traits, tid).methods {
-            let (mname, ms) = entry
-            fns2 = map.insert(fns2, mname, ms.sig)
+          let ti = trait_of(cx.traits, tid)
+          # a pub trait's methods are importable like pub fns -- unless the
+          # trait does not put them in a function namespace to begin with
+          if ti.injects {
+            for entry in ti.methods {
+              let (mname, ms) = entry
+              fns2 = map.insert(fns2, mname, ms.sig)
+            }
           }
         }
         None -> ()

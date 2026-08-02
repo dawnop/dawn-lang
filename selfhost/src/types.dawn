@@ -595,7 +595,13 @@ pub type TraitI = {
   # associated type members, in declaration order (bare names: no bounds, no
   # defaults -- docs/assoc-types-design.md D1). The name has no module-level
   # identity; `T.Item` is the only way to reach it.
-  assoc: List[String]
+  assoc: List[String],
+  # Do this trait's method names occupy the module function namespace? True for
+  # every trait a user can declare; false is reserved for compiler-built traits
+  # whose sole consumer is an operator (docs/prelude-namespace-design.md D1).
+  # Three injection paths read this field -- prelude seeding, local `trait`
+  # registration, and `pub trait` export -- so they cannot drift apart.
+  injects: Bool
 }
 
 ## What an impl is indexed by: the outermost type constructor of its subject,
@@ -973,7 +979,8 @@ fn prelude_trait(tid: Int, name: String, tv: Ty, m: String, sig: Sig) -> TraitI 
     owner: None,
     src_path: None,
     methods: [(m, MethodSig { sig: sig, has_default: false })],
-    assoc: []
+    assoc: [],
+    injects: true
   }
 
 ## The prelude traits: Ord (id 0) whose `cmp` backs `< <= > >=` beyond scalars,
@@ -1002,7 +1009,8 @@ pub fn prelude_traits() -> Traits = {
     owner: None,
     src_path: None,
     methods: [("cmp", MethodSig { sig: cmp_sig, has_default: false })],
-    assoc: []
+    assoc: [],
+    injects: true
   }
   let ev = TyVar("T", -14)
   let eq = prelude_trait(EQ_ID, "Eq", ev, "eq",
@@ -1044,10 +1052,28 @@ pub fn prelude_traits() -> Traits = {
         has_default: false
       })
     ],
-    assoc: ["Cur", "Item"]
+    assoc: ["Cur", "Item"],
+    injects: true
   }
   map.from([(ORD_ID, ord), (EQ_ID, eq), (HASH_ID, hash), (SHOW_ID, show), (ITER_ID, iter)])
 }
+
+## The prelude trait ids, in id order. Everything that needs to know "which
+## traits does the prelude bring" reads this -- the seeding loop, the
+## redefinition guard, LSP completion -- so the set lives in one place instead
+## of being transcribed per call site (docs/prelude-namespace-design.md §4.3).
+pub fn prelude_trait_ids() -> List[Int] = [ORD_ID, EQ_ID, HASH_ID, SHOW_ID, ITER_ID]
+
+## The prelude trait names, derived from the table rather than transcribed.
+pub fn prelude_trait_names() -> List[String] = {
+  let ts = prelude_traits()
+  map(prelude_trait_ids(), tid => trait_of(ts, tid).name)
+}
+
+## Is `n` the name of a prelude trait? A local `trait` of that name is a
+## redefinition, not a shadowing: trait names live in the type namespace and
+## the prelude traits have no module to qualify them with.
+pub fn is_prelude_trait_name(n: String) -> Bool = list.contains(prelude_trait_names(), n)
 
 fn prelude_impl(tid: Int, t: Ty) -> ImplI =
   ImplI {
