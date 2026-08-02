@@ -43,6 +43,36 @@ pub type AliasE = {
   nhi: Int
 }
 
+## The part of the checker state that an isolated body -- a comptime block, a
+## const initializer, an unsafe_pure -- saves on the way in and restores on the
+## way out. `enter_isolated` hands the old frame back and `leave_isolated` puts
+## it back with one field write, where both used to copy eight fields by hand
+## through a twin record called EffFrame.
+##
+## These eight are exactly the ones that twin listed: the type is the restore
+## set, so a ninth field added here silently widens what an isolated body
+## restores, and that change is invisible to every byte-level gate in the tree
+## (docs/arch-split-design.md D9 and §5.4). Fields that look like they belong --
+## `current_tparams`, `current_tparam_bounds`, `current_eff_vars`, `loop_jumps`,
+## `in_test` -- stay on `Cx` because today they are not restored, and `enter_fn`
+## writes the first three from inside an isolated body whenever it holds a
+## local fn.
+pub type Frame = {
+  # lexical scopes, innermost last; each maps name → symbol id
+  scopes: List[Map[String, Int]],
+  # effect bookkeeping for the body being checked
+  used_effects: List[Eff],
+  eff_witness: Map[Eff, (Int, Int, String)],
+  current_sig: Option[Sig],
+  # (tvar id, trait id) → dictionary symbol id
+  dict_syms: Map[(Int, Int), Int],
+  lambda_stack: List[LambdaCx],
+  loop_stack: List[Int],
+  # inside a comptime block or a const initializer: no effect of any kind may
+  # cross, and v1 refuses declared effects there outright (design §4.5)
+  isolated: Bool
+}
+
 ## The checker state: every mutable member of the Kotlin Checker class.
 pub type Cx = {
   diags: List[Diag],
@@ -79,17 +109,14 @@ pub type Cx = {
   # the host's Java signature oracle; jsig_refused() unless the driver wires
   # jreflect's (the native form of `use java` is a refusal, plan §14.10)
   jsig: Jsig,
-  # lexical scopes, innermost last; each maps name → symbol id
-  scopes: List[Map[String, Int]],
+  # the save/restore set of an isolated body, in one box (see Frame)
+  frame: Frame,
   # symbol table: id → symbol
   syms: Map[Int, Sym],
   # declared effects visible here: name -> effect id, which is also the id of
   # the synthesised evidence record (docs/effects-design.md §5.1)
   effects: Map[String, Int],
   effect_infos: Effects,
-  # effect bookkeeping for the body being checked
-  used_effects: List[Eff],
-  eff_witness: Map[Eff, (Int, Int, String)],
   current_eff_vars: Map[String, Eff],
   current_tparams: Map[String, Ty],
   # bounds of the type parameters in scope, keyed by the TyVar's id (not its
@@ -97,15 +124,7 @@ pub type Cx = {
   # through a fresh current_tparams and no save/restore is needed). Feeds
   # `T.Item` resolution (assoc-types-design.md D2).
   current_tparam_bounds: Map[Int, List[Int]],
-  current_sig: Option[Sig],
-  # (tvar id, trait id) → dictionary symbol id
-  dict_syms: Map[(Int, Int), Int],
-  lambda_stack: List[LambdaCx],
-  loop_stack: List[Int],
   in_test: Bool,
-  # inside a comptime block or a const initializer: no effect of any kind may
-  # cross, and v1 refuses declared effects there outright (design §4.5)
-  isolated: Bool,
   is_std_module: Bool,
   owner_class: Option[String],
   src_path: Option[String],
@@ -170,19 +189,21 @@ pub fn cx_new(owner_class: Option[String], src_path: Option[String]) -> Cx = {
     const_cutoff: None,
     java_classes: map.empty(),
     jsig: jsig_refused(),
-    scopes: [],
+    frame: Frame {
+      scopes: [],
+      used_effects: [],
+      eff_witness: map.empty(),
+      current_sig: None,
+      dict_syms: map.empty(),
+      lambda_stack: [],
+      loop_stack: [],
+      isolated: false
+    },
     syms: map.empty(),
-    used_effects: [],
-    eff_witness: map.empty(),
     current_eff_vars: map.empty(),
     current_tparams: map.empty(),
     current_tparam_bounds: map.empty(),
-    current_sig: None,
-    dict_syms: map.empty(),
-    lambda_stack: [],
-    loop_stack: [],
     in_test: false,
-    isolated: false,
     is_std_module: is_std,
     owner_class: owner_class,
     src_path: src_path,
