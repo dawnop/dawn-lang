@@ -1,0 +1,279 @@
+# Stateless JVM emission helpers: the ones whose whole input is a
+# `MethodVisitor` plus a type, an opcode or a Java class name. None of them
+# reads the module being compiled, so each is a fixed instruction sequence and
+# the file sits below emit.dawn as a leaf instead of inside it.
+#
+# Knife A4 of docs/arch-split-design.md. Seven were already stateless; ten
+# became stateless in A3, when they stopped taking the whole `Gen` for the sake
+# of `g.mv`; three more -- `ord_jump`, `is_prim_name` and `internal_of` --
+# travel with them because the ten call them and leaving them behind would make
+# a module cycle, which Dawn refuses.
+
+use std/str
+use types.{Ty, TyInt, TyFloat, TyBool, TyString, TyBytes, TyJava}
+use tast.{TBinOp, BEq, BNeq, BLt, BLe, BGt}
+use core.{ty_key}
+use codegen.{jvm_repr, RLong, RDouble, RBool, RRef, RBottom, slots_of, is_ref}
+use rtclasses.{obj, PANIC_CLASS, STRINGS_CLASS, PVEC_CLASS, ARRAY_CLASS}
+use jreflect
+use java "org.objectweb.asm.MethodVisitor"
+use java "org.objectweb.asm.Label"
+use java "org.objectweb.asm.Type"
+use java "java.util.Objects"
+use java "java.lang.Long"
+use java "java.lang.Integer"
+use java "java.lang.Double"
+use jvmops.{
+  OP_ANEWARRAY, OP_ASTORE, OP_ATHROW, OP_BIPUSH, OP_CHECKCAST, OP_D2F, OP_DCMPG, OP_DCMPL,
+  OP_DSTORE, OP_DUP, OP_DUP2, OP_GOTO, OP_I2L, OP_ICONST_0, OP_ICONST_1, OP_IFEQ, OP_IFGE,
+  OP_IFGT, OP_IFLE, OP_IFLT, OP_IFNE, OP_INVOKESPECIAL, OP_INVOKESTATIC, OP_INVOKEVIRTUAL,
+  OP_ISTORE, OP_IXOR, OP_L2I, OP_LCMP, OP_LCONST_0, OP_LSTORE, OP_NEW, OP_NEWARRAY, OP_POP,
+  OP_POP2
+}
+
+# ---- small emission helpers (output is byte-stable against the previous
+# release; the Kotlin original is archived at kotlin-final) ----
+
+pub fn ldc_str(m: MethodVisitor, s: String) -> Unit !io = {
+  m.visitLdcInsn(Objects.requireNonNull(s).expect("non-null"))
+  ()
+}
+
+## A class constant. ASM spells one as a `Type` handed to `visitLdcInsn`; the
+## JVM resolves it at first execution, which is why `cast` can be given its
+## target as a value without the emitter knowing anything the CHECKCAST would
+## not have known.
+pub fn ldc_class(m: MethodVisitor, internal: String) -> Unit !io = {
+  m.visitLdcInsn(Type.getObjectType(internal).expect("class constant"))
+  ()
+}
+
+pub fn ldc_long(m: MethodVisitor, v: Int) -> Unit !io = {
+  m.visitLdcInsn(Long.valueOf(v).expect("boxed"))
+  ()
+}
+
+pub fn ldc_double(m: MethodVisitor, v: Float) -> Unit !io = {
+  m.visitLdcInsn(Double.valueOf(v).expect("boxed"))
+  ()
+}
+
+fn ldc_jint(m: MethodVisitor, v: Int) -> Unit !io = {
+  m.visitLdcInsn(Integer.valueOf(v).expect("boxed"))
+  ()
+}
+
+## Kotlin pushInt: ICONST for -1..5, BIPUSH for a byte, else an int LDC.
+pub fn push_int(m: MethodVisitor, v: Int) -> Unit !io = {
+  if v >= -1 && v <= 5 {
+    m.visitInsn(3 + v)
+  } else if v >= -128 && v <= 127 {
+    m.visitIntInsn(OP_BIPUSH, v)
+  } else {
+    ldc_jint(m, v)
+  }
+  ()
+}
+
+pub fn store_slot(m: MethodVisitor, t: Ty, slot: Int) -> Unit !io = {
+  match jvm_repr(t) {
+    RLong -> { m.visitVarInsn(OP_LSTORE, slot) }
+    RDouble -> { m.visitVarInsn(OP_DSTORE, slot) }
+    RBool -> { m.visitVarInsn(OP_ISTORE, slot) }
+    RRef -> { m.visitVarInsn(OP_ASTORE, slot) }
+    RBottom -> ()
+  }
+  ()
+}
+
+pub fn pop_value(m: MethodVisitor, t: Ty) -> Unit !io = {
+  let n = slots_of(t)
+  if n == 2 {
+    m.visitInsn(OP_POP2)
+  } else if n == 1 {
+    m.visitInsn(OP_POP)
+  }
+  ()
+}
+
+## Class name → internal name (arrays keep their descriptor form, like ASM).
+pub fn internal_of(cls: String) -> String =
+  if str.starts_with(cls, "[") { join(str.split(cls, "."), "/") }
+  else { join(str.split(cls, "."), "/") }
+
+fn is_prim_name(cls: String) -> Bool =
+  cls == "int" || cls == "long" || cls == "short" || cls == "byte" || cls == "char" ||
+  cls == "boolean" || cls == "float" || cls == "double" || cls == "void"
+
+## Two same-typed orderable scalars on the stack -> their cmp, widened to a
+## long because Dawn's Int is one.
+##
+## Spelled out per type rather than defaulted to String, for the reason
+## hash_of gives: this is the JVM's implementation of the `cmp` contract, and
+## a type with no order here has to say so instead of being handed the
+## nearest available answer.
+pub fn emit_scalar_cmp(m: MethodVisitor, t: Ty) -> Unit !io = {
+  emit_scalar_cmp_at(m, t)
+  m.visitInsn(OP_I2L)
+  ()
+}
+
+## The comparison itself, leaving an int: recursion through an opaque type
+## must not widen once per layer.
+fn emit_scalar_cmp_at(m: MethodVisitor, t: Ty) -> Unit !io = {
+  match t {
+    TyInt -> { m.visitInsn(OP_LCMP) }
+    TyFloat -> {
+      # the total order, which disagrees with `<` on NaN and -0.0 on purpose
+      m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Double", "compare", "(DD)I", false)
+    }
+    TyString -> {
+      # code point order, sign only -- not String.compareTo, which is UTF-16
+      # code unit order and hands back a unit difference (spec 3.5, RP-06)
+      m.visitMethodInsn(OP_INVOKESTATIC, STRINGS_CLASS, "cmp",
+        "(Ljava/lang/String;Ljava/lang/String;)I", false)
+    }
+    # opacity hides a representation from other modules, not from the language:
+    # the value on the stack is the target, so its order is the target's
+    TyOpaque(_, _, _, tgt) -> emit_scalar_cmp_at(m, tgt)
+    _ -> panic("codegen: no scalar order for " ++ ty_key(t))
+  }
+  ()
+}
+
+fn push_cmp_result(m: MethodVisitor, jump_if_true: Int) -> Unit !io = {
+  let true_l = Label.new()
+  let end = Label.new()
+  m.visitJumpInsn(jump_if_true, true_l)
+  m.visitInsn(OP_ICONST_0)
+  m.visitJumpInsn(OP_GOTO, end)
+  m.visitLabel(true_l)
+  m.visitInsn(OP_ICONST_1)
+  m.visitLabel(end)
+  ()
+}
+
+## Stack: a b (both long). Panic when b == 0 (spec §8.2 — must pass catch_fault).
+pub fn emit_div_zero_check(m: MethodVisitor, op: String) -> Unit !io = {
+  let ok = Label.new()
+  m.visitInsn(OP_DUP2)
+  m.visitInsn(OP_LCONST_0)
+  m.visitInsn(OP_LCMP)
+  m.visitJumpInsn(OP_IFNE, ok)
+  m.visitTypeInsn(OP_NEW, PANIC_CLASS)
+  m.visitInsn(OP_DUP)
+  ldc_str(m, "Int " ++ op ++ " by zero")
+  m.visitMethodInsn(OP_INVOKESPECIAL, PANIC_CLASS, "<init>", "(Ljava/lang/String;)V", false)
+  m.visitInsn(OP_ATHROW)
+  m.visitLabel(ok)
+  ()
+}
+
+pub fn gen_equality(m: MethodVisitor, t: Ty, op: TBinOp) -> Unit !io = {
+  if t == TyBytes {
+    m.visitMethodInsn(OP_INVOKESTATIC, "java/util/Arrays", "equals", "([B[B)Z", false)
+    match op {
+      BNeq -> {
+        m.visitInsn(OP_ICONST_1)
+        m.visitInsn(OP_IXOR)
+      }
+      _ -> ()
+    }
+  } else if is_ref(t) {
+    m.visitMethodInsn(OP_INVOKEVIRTUAL, obj(), "equals", "(Ljava/lang/Object;)Z", false)
+    match op {
+      BNeq -> {
+        m.visitInsn(OP_ICONST_1)
+        m.visitInsn(OP_IXOR)
+      }
+      _ -> ()
+    }
+  } else if t == TyBool {
+    m.visitInsn(OP_IXOR)
+    match op {
+      BEq -> {
+        m.visitInsn(OP_ICONST_1)
+        m.visitInsn(OP_IXOR)
+      }
+      _ -> ()
+    }
+  } else {
+    m.visitInsn(if t == TyFloat { OP_DCMPL } else { OP_LCMP })
+    push_cmp_result(m, match op {
+      BEq -> OP_IFEQ
+      _ -> OP_IFNE
+    })
+  }
+  ()
+}
+
+pub fn gen_ordering(m: MethodVisitor, t: Ty, op: TBinOp) -> Unit !io = {
+  if t == TyInt {
+    m.visitInsn(OP_LCMP)
+  } else if t == TyString {
+    # `<` and `cmp` are the same comparison on String (spec 4.3): code point
+    # order, via the runtime's cmp rather than compareTo's UTF-16 unit order
+    m.visitMethodInsn(OP_INVOKESTATIC, STRINGS_CLASS, "cmp",
+      "(Ljava/lang/String;Ljava/lang/String;)I", false)
+  } else {
+    let use_g = match op {
+      BLt -> true
+      BLe -> true
+      _ -> false
+    }
+    m.visitInsn(if use_g { OP_DCMPG } else { OP_DCMPL })
+  }
+  push_cmp_result(m, ord_jump(op))
+  ()
+}
+
+fn ord_jump(op: TBinOp) -> Int =
+  match op {
+    BLt -> OP_IFLT
+    BLe -> OP_IFLE
+    BGt -> OP_IFGT
+    _ -> OP_IFGE
+  }
+
+pub fn adapt_java_arg(m: MethodVisitor, dawn_ty: Ty, param_cls: String) -> Unit !io = {
+  if dawn_ty == TyInt && param_cls == "int" {
+    m.visitInsn(OP_L2I)
+  } else if dawn_ty == TyFloat && param_cls == "float" {
+    m.visitInsn(OP_D2F)
+  } else {
+    match dawn_ty {
+      TyJava(fqcn, _) ->
+        if not is_prim_name(param_cls) && not jreflect.is_assignable(param_cls, fqcn) {
+          m.visitTypeInsn(OP_CHECKCAST, internal_of(param_cls))
+        }
+      _ -> ()
+    }
+  }
+  ()
+}
+
+## `new C[n]` for a component class — n is already on the stack.
+pub fn new_array(m: MethodVisitor, component: String) -> Unit !io = {
+  if is_prim_name(component) {
+    let t = if component == "long" { 11 } else if component == "int" { 10 }
+    else if component == "double" { 7 } else if component == "float" { 6 }
+    else if component == "boolean" { 4 } else if component == "short" { 9 }
+    else if component == "byte" { 8 } else { 5 }
+    m.visitIntInsn(OP_NEWARRAY, t)
+  } else {
+    m.visitTypeInsn(OP_ANEWARRAY, internal_of(component))
+  }
+  ()
+}
+
+## A Dawn List handed to Java (spec §9.6). Since S3 a List is a Dawn vector,
+## which Java has no name for, so it crosses as `Array` -- the backend's own
+## type, and the only shape both sides can talk about. The result is still
+## unmodifiable: `array_to_java` copies the window and wraps it.
+pub fn emit_list_bridge(m: MethodVisitor) -> Unit !io = {
+  m.visitMethodInsn(OP_INVOKESTATIC, "std/pvec", "to_array",
+    "(L" ++ PVEC_CLASS ++ ";)L" ++ ARRAY_CLASS ++ ";", false)
+  m.visitMethodInsn(OP_INVOKESTATIC, ARRAY_CLASS, "array_to_java",
+    "(L" ++ ARRAY_CLASS ++ ";)Ljava/util/List;", false)
+  ()
+}
