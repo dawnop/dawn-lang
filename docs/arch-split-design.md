@@ -294,10 +294,15 @@ C1 ──┬──► Lane A:   A1 ─┐
 **照抄，一条不漏，任一红就地停。** 顺序即执行顺序（便宜的先跑）。
 
 ```bash
-# 0) 准备：每条 lane 占两个 worktree
-#    - <bef>  停在本刀的父提交，用来出「刀前」产物
-#    - <work> 工作树
-#    两边都先 ./bin/dawn --version 把编译器建出来（约 18s）
+# 0) 准备：★ 在【同一个目录】里出刀前/刀后两份产物，不要用两个 worktree
+#    git stash → 重建 → 出「刀前」 → stash pop → 重建 → 出「刀后」
+#    （每次重建约 19s）
+#
+#    【B1 实测教训，别再踩】两个 worktree 的做法有假阳性：路径依赖会被解析成
+#    【绝对路径】，而它会出现在 `unwrapped None` 的 panic 字符串里、进而进入
+#    发射出的 class。于是 playground（它把 packages/web 当路径依赖）会仅仅因为
+#    两棵树在不同路径上就报差异。单目录法从构造上没有这个洞。
+#    （两棵树各自都是确定性的——bef-vs-bef、aft-vs-aft 都已验证过。）
 
 # 1) 格式（能抓机械搬运留下的脏——勘察实测抓到过一个多余空行）
 ./bin/dawn fmt selfhost/src --check
@@ -317,10 +322,23 @@ done
 
 # 5) Core：爆炸半径 + （纯搬运刀）归一化全量不变量
 ./scripts/selfhost-core-diff.sh
-#    → changed / ADT-shifted 列表必须【恰好等于】提交信息里声明的模块集，多一个算事故
+#    → 【changed】列表必须恰好等于声明的模块集，多一个算事故
+#    → 【ADT-shifted】列表是漂移，不算事故，也【不要】把它并进上一条
+#      （B1 实测：本文原先把两个桶合并，写成了一条不可满足的判据。脚本自己
+#       :103-112 就把它们分开，并注明任何改动早期模块的刀都会让 ADT id 漂移
+#       ——inference 变量与 ADT 声明共用一个 next_id 计数器。核对方式：
+#       s/Adt[0-9]+/AdtN/g 之后各模块哈希须与基线相同，即纯重编号。）
+#    → 声明的模块集 = 【Core 真的变了的模块】，不是【改了 use 行的文件】。
+#      后者是前者的超集：A1 实测 testrun.dawn 改了 use 但 testrun.core 逐字节不变，
+#      因为 Core 打印 const 引用【不带模块前缀】、且 Core dump 里【没有 const 定义】。
 #    → 纯搬运刀（A1 A4 B2 B3 B4）另跑 §5.2 的归一化不变量，必须零差异
 ./scripts/selfhost-core-diff.sh --record
-git diff scripts/core-golden/selfhost.sha    # ★ 贴进提交信息/PR，人工核对
+git diff scripts/core-golden/selfhost.sha scripts/core-golden/selfhost.norm.sha
+#    ★ 贴进提交信息/PR，人工核对。norm.sha 是脚本自带的归一化伴生 golden，
+#      比 §5.2 的临时命令更省事也更可信（它来自门禁而非一次性脚本）。
+#
+# ★★ 两条 lane 各自 --record 过 golden 时，合并前【必须重录】，
+#    绝不能让 git 逐行 auto-merge 这两个文件——拼接出来的 golden 不是构建产物。
 
 # 6) 自举没断
 ./scripts/selfhost-fixpoint.sh               # OK: B == C
@@ -415,6 +433,22 @@ diff <(norm /tmp/coreA '') <(norm /tmp/coreB 's/\bjvmhelp\./emit./g')
   也拆掉。本批以**临时命令**跑，输出贴进提交信息。批次结束后若还想常设化，另行立项。
 - 兜底纪律：无论有没有不变量，**`git diff scripts/core-golden/selfhost.sha` 每刀都要
   贴出来人工核对**，且只能含本刀声明的模块。
+- **脚本自带 `selfhost.norm.sha`**（归一化伴生 golden，一行一模块）。B1 实测它给出的
+  「除此之外什么都没动」收据与本节的临时命令同强度，却来自门禁本身——**优先用它**，
+  临时命令留给需要声明搬家映射的纯搬运刀。
+
+> **★ 两份 Core 收据都看不见 const。**（A1 实测，被它自己的负控抓出来）
+> Core 打印 const 引用**不带模块前缀**（`constref UNIT_CLASS : String`），且 Core dump 里
+> **根本没有 const 定义**。后果有两条：
+> 1. 一个模块只导入了被搬走的 const 时，它的 `use` 行变了、`.core` 却逐字节不变——
+>    所以**声明的模块集要按「Core 真的变了」算，不是按「改了 `use`」算**（A1 的 `testrun`）。
+> 2. **改掉一个 const 的值，两份收据都是零差异**。A1 的第一次负控就撞在这上面：把
+>    `ARRAY_MIN_CAP: Int = 8` 改成 `9`，归一化不变量返回 0；换成改函数体里的字面量才得到
+>    预期的 4 行。
+>
+> 所以搬 const 的刀（A1 搬了 26 个，B2 的 `cx.dawn` 也会搬），**const 那部分只由五语料
+> 逐字节比对覆盖**。写这类刀时要确认：被搬的 const 确实被那五个语料实际用到；否则它们
+> 处在全部门禁的盲区里。
 
 ### 5.3 v0.47.0 为什么是开工前提（P3 的理由）
 
