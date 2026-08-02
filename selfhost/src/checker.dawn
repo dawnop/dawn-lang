@@ -4050,6 +4050,37 @@ pub fn with_cross_msg(kw: String) -> String =
   "`" ++ kw ++ "` cannot cross the closure `with` introduced: the statements " ++
   "after `with` are that closure's body"
 
+## A capture refusal, as (message, hint), in the words of whichever closure the
+## name has to cross. Same rule as the jump diagnostics above, applied one frame
+## at a time: `with` makes two closures the author never spelled -- an arm and
+## the block remainder -- so saying "lambda" points at code that is not on the
+## screen (docs/effects-design.md §7.1).
+pub fn assign_across_msg(lc: LambdaCx, name: String) -> (String, String) =
+  if lc.arm {
+    ("cannot assign to `" ++ name ++ "` from inside a `with handle` arm",
+      "an arm is a closure and captures by value; hand the value back as the " ++
+        "operation's result instead")
+  } else if lc.sugar {
+    ("cannot assign to `" ++ name ++ "` from inside the closure `with` introduced",
+      "the statements after `with` are that closure's body, and a closure " ++
+        "captures by value")
+  } else {
+    ("cannot assign to `" ++ name ++ "` from inside a lambda",
+      "lambdas capture by value; use the result of the lambda instead")
+  }
+
+pub fn capture_var_msg(lc: LambdaCx) -> (String, String) =
+  if lc.arm {
+    ("a `with handle` arm cannot capture `var` bindings (capture is by value)",
+      "bind it to a let before the handler, or pass it in as an operation parameter")
+  } else if lc.sugar {
+    ("the closure `with` introduced cannot capture `var` bindings (capture is by value)",
+      "bind it to a let before the `with`, or pass it as a parameter")
+  } else {
+    ("lambdas cannot capture `var` bindings (capture is by value)",
+      "bind it to a let before the lambda, or pass it as a parameter")
+  }
+
 ## return / return expr — early return from the enclosing fn (or lambda).
 ## The value is checked by the caller (recursion lives there); this decides the
 ## target type or errors. Returns Some(target) when a value should be checked
@@ -6477,12 +6508,12 @@ pub fn resolve_local(
         for lc in cx1.lambda_stack {
           if i < lc.boundary {
             if for_assign {
-              cx1 = cerr_h(cx1, "cannot assign to `" ++ name ++ "` from inside a lambda", lo, hi,
-                "lambdas capture by value; use the result of the lambda instead")
+              let (msg, hint) = assign_across_msg(lc, name)
+              cx1 = cerr_h(cx1, msg, lo, hi, hint)
               stack = stack ++ [lc]
             } else if sym.mutable {
-              cx1 = cerr_h(cx1, "lambdas cannot capture `var` bindings (capture is by value)",
-                lo, hi, "bind it to a let before the lambda, or pass it as a parameter")
+              let (msg, hint) = capture_var_msg(lc)
+              cx1 = cerr_h(cx1, msg, lo, hi, hint)
               stack = stack ++ [lc]
             } else {
               var caps = lc.captures
@@ -6636,9 +6667,20 @@ fn check_lambda(
     }
     _ -> ()
   }
-  if have_exp && len(eps) != len(params) {
-    cx1 = cerr(cx1, "this lambda takes " ++ to_string(len(params)) ++ " parameter(s), but " ++
-        ty_show(cx1.adts, TyFn(eps, eret, eeff)) ++ " is expected", lo, hi)
+  # An arm's arity is checked against the operation it answers, and `check_handle`
+  # has already said so in those terms; a second line naming "this lambda" would
+  # point at a closure the author did not write.
+  if have_exp && len(eps) != len(params) && not arm {
+    let want = ty_show(cx1.adts, TyFn(eps, eret, eeff))
+    let n = to_string(len(params))
+    if sugar {
+      cx1 = cerr_h(cx1, "the closure `with` introduced takes " ++ n ++ " parameter(s), but " ++
+          want ++ " is expected", lo, hi,
+        "`with` binds the names before `<-`, one per parameter")
+    } else {
+      cx1 = cerr(cx1, "this lambda takes " ++ n ++ " parameter(s), but " ++ want ++
+          " is expected", lo, hi)
+    }
   }
   var ptys: List[Ty] = []
   var i = 0
@@ -10586,6 +10628,40 @@ fn arm_cx() -> Cx =
     }]
   }
 
+test "a capture refused inside a handler arm names the arm, not a lambda" {
+  # writing an enclosing `var` from an arm is the collecting-handler shape that
+  # dogfood measured (docs/effects-design.md §7.1); the refusal stands, but it
+  # has to name the arm the author wrote
+  let cx = eff_check("fn f() -> Int = {\n  var n = 0\n" ++
+      "  with handle Ask {\n    ask() => {\n      n = 1\n      2\n    }\n  }\n  ask()\n}\n")
+  assert len(cx.diags) == 1
+  assert cx.diags[0].msg == "cannot assign to `n` from inside a `with handle` arm"
+  assert str.contains(cx.diags[0].hint, "the operation's result")
+  # reading one is refused in the arm's words too
+  let cx2 = eff_check("fn f() -> Int = {\n  var n = 0\n" ++
+      "  with handle Ask { ask() => n + 1 }\n  ask()\n}\n")
+  assert len(cx2.diags) == 1
+  assert cx2.diags[0].msg ==
+    "a `with handle` arm cannot capture `var` bindings (capture is by value)"
+  assert str.contains(cx2.diags[0].hint, "before the handler")
+  # a lambda the author *did* write, inside an arm, keeps the old message: the
+  # frame that the name crosses is the one that gets named
+  let cx3 = eff_check("fn ap(f: fn(Int) -> Int) -> Int = f(1)\n" ++
+      "fn f() -> Int = {\n" ++
+      "  with handle Ask {\n    ask() => {\n      var k = 0\n" ++
+      "      ap((j: Int) => j + k)\n    }\n  }\n  ask()\n}\n")
+  assert len(cx3.diags) == 1
+  assert cx3.diags[0].msg == "lambdas cannot capture `var` bindings (capture is by value)"
+  # an arm's arity is the handler's to report, and it says so once
+  let cx4 = eff_check("fn f() -> Int = {\n  with handle Ask { ask(x) => 1 }\n  ask()\n}\n")
+  var said_lambda = false
+  for d in cx4.diags {
+    if str.contains(d.msg, "this lambda takes") { said_lambda = true }
+  }
+  assert not said_lambda
+  assert str.contains(cx4.diags[0].msg, "arm `ask` takes 1 parameter(s)")
+}
+
 test "a parameter declared !io does not accept a labelled closure" {
   # io is the top of the base axis only: nothing at the call site could supply
   # the evidence the closure would need
@@ -11102,6 +11178,39 @@ test "a jump out of a `with` region names the sugar, not a lambda" {
   let (cx4, _) = check_module(test_cx(), m4, env)
   assert len(cx4.diags) > 0
   assert str.contains(cx4.diags[0].msg, "cannot cross a lambda boundary")
+}
+
+test "a capture refused inside a `with` region names the sugar, not a lambda" {
+  let head = "fn hold(r: Int, f: fn(Int) -> Int) -> Int = f(r)\n"
+  let env: Map[String, ModExports] = map.empty()
+  # assigning to a `var` from the block remainder
+  let bad_assign = head ++
+    "fn go() -> Int = {\n  var n = 0\n  with x <- hold(1)\n  n = x\n  0\n}\n"
+  let (m1, pd1) = parser.parse_module(bad_assign)
+  assert len(pd1) == 0
+  let (cx1, _) = check_module(test_cx(), m1, env)
+  assert len(cx1.diags) == 1
+  assert cx1.diags[0].msg == "cannot assign to `n` from inside the closure `with` introduced"
+  assert str.contains(cx1.diags[0].hint, "that closure's body")
+  # and reading one
+  let bad_read = head ++ "fn go() -> Int = {\n  var n = 0\n  with x <- hold(1)\n  x + n\n}\n"
+  let (m2, pd2) = parser.parse_module(bad_read)
+  assert len(pd2) == 0
+  let (cx2, _) = check_module(test_cx(), m2, env)
+  assert len(cx2.diags) == 1
+  assert cx2.diags[0].msg ==
+    "the closure `with` introduced cannot capture `var` bindings (capture is by value)"
+  assert str.contains(cx2.diags[0].hint, "before the `with`")
+  # binding the wrong number of names: the count is the `with` header's, so the
+  # message counts what is written after `with`, not a lambda's parameters
+  let bad_arity = "fn two(f: fn(Int, Int) -> Int) -> Int = f(1, 2)\n" ++
+    "fn go() -> Int = {\n  with x <- two()\n  x\n}\n"
+  let (m3, pd3) = parser.parse_module(bad_arity)
+  assert len(pd3) == 0
+  let (cx3, _) = check_module(test_cx(), m3, env)
+  assert cx3.diags[0].msg ==
+    "the closure `with` introduced takes 1 parameter(s), but fn(Int, Int) -> Int is expected"
+  assert str.contains(cx3.diags[0].hint, "one per parameter")
 }
 
 ## `?` composes through `with` (docs/core-move2-design.md §6): the synthesized
