@@ -1,0 +1,314 @@
+# site/build/stdlib.json (from `dawn doc --stdlib`) -> stdlib.html.
+#
+# The standard library as a caller meets it: the names visible with no `use`,
+# the traits the prelude brings, then one section per std module with its
+# functions, its types and the impls it registers. Where a name is implemented
+# — the compiler's builtin table or bundled Dawn source — is not a heading
+# here, because it is not something a caller can observe (spec §11). What is a
+# heading is how the name is *written*, which is the difference that matters.
+#
+# Two parsers are in scope and they are not the same one: `parse` reads the
+# JSON the compiler emitted, and `parser.parse` (md/parser) reads Markdown —
+# the intro page, and every doc comment, which are Markdown prose and were
+# rendered as flat escaped text for as long as this page was a table.
+
+use std/str
+use std/map
+use std/io
+use json/parser.{parse}
+use json/value.{Json, JNull, JBool, JStr, JArr, JObj}
+use md/parser
+use html/escape.{escape_html}
+use html/page.{page_with_toc}
+use html/render.{render_doc, TocEntry}
+use hl/dawn.{highlight_dawn}
+use gen/common.{must_read, write_page, map_doc_url, doc_files}
+
+# ---- reading the compiler's JSON ----
+
+fn jget(j: Json, key: String) -> Json =
+  match j {
+    JObj(entries) -> unwrap_or(map.get(entries, key), JNull)
+    _ -> JNull
+  }
+
+fn jstr(j: Json) -> String =
+  match j {
+    JStr(s) -> s
+    _ -> ""
+  }
+
+fn jbool(j: Json) -> Bool =
+  match j {
+    JBool(b) -> b
+    _ -> false
+  }
+
+fn jarr(j: Json) -> List[Json] =
+  match j {
+    JArr(items) -> items
+    _ -> []
+  }
+
+fn field(j: Json, key: String) -> String = jstr(jget(j, key))
+
+# ---- pieces of the page ----
+
+## A module path as an HTML id fragment: `std/str` -> `std-str`.
+fn slug(path: String) -> String = str.replace(path, "/", "-")
+
+## A doc comment, rendered as the Markdown it is. Multi-line prose used to be
+## escaped whole and flattened into one table cell; paragraphs, bullets and
+## `code` spans all survive this way.
+##
+## An unparsable doc comment is a hard error, like every other Markdown this
+## generator reads: the site build is the lint.
+fn prose(docs: List[String], text: String) -> String =
+  if str.trim(text) == "" {
+    ""
+  } else {
+    match parser.parse(text) {
+      Ok(bs) -> render_doc(bs, u => map_doc_url(".", docs, u)).html
+      Err(e) -> panic("a doc comment is not Markdown: $e\n---\n$text")
+    }
+  }
+
+## One documented entry: its qualified spelling as the anchor, the declaration
+## exactly as the compiler renders it, then the prose.
+fn entry(docs: List[String], title: String, id: String, sig: String, doc: String) -> String =
+  """<div class="api-item" id="$id">""" ++ "\n" ++
+  """<h3 class="api-name"><a href="#$id">""" ++ escape_html(title) ++ "</a></h3>\n" ++
+  """<pre class="dawn api-sig"><code>""" ++ highlight_dawn(sig) ++ "</code></pre>\n" ++
+  """<div class="api-doc">""" ++ "\n" ++ prose(docs, doc) ++ "</div>\n</div>"
+
+fn qualify(qual: String, name: String) -> String = if qual == "" { name } else { "$qual.$name" }
+
+fn fn_entry(docs: List[String], qual: String, id_base: String, f: Json) -> String =
+  entry(docs, qualify(qual, field(f, "name")), id_base ++ "-" ++ field(f, "name"),
+    field(f, "sig"), field(f, "doc"))
+
+fn ctor_decl(c: Json) -> String = {
+  let fs = map(jarr(jget(c, "fields")), f => field(f, "name") ++ ": " ++ field(f, "type"))
+  if len(fs) == 0 { field(c, "name") } else { field(c, "name") ++ "(" ++ join(fs, ", ") ++ ")" }
+}
+
+fn record_decl(head: String, c: Json) -> String = {
+  let fs = map(jarr(jget(c, "fields")), f => field(f, "name") ++ ": " ++ field(f, "type"))
+  "type $head = { " ++ join(fs, ", ") ++ " }"
+}
+
+## The declaration, reassembled from what the compiler reported. A type with no
+## constructors keeps its representation to itself — `pub opaque type Cursor`
+## is the whole point of `Cursor` — and that absence is the documentation.
+fn type_decl(t: Json) -> String = {
+  let ps = map(jarr(jget(t, "typeParams")), p => jstr(p))
+  let name = field(t, "name")
+  let head = if len(ps) == 0 { name } else { name ++ "[" ++ join(ps, ", ") ++ "]" }
+  let ctors = jarr(jget(t, "ctors"))
+  match get(ctors, 0) {
+    None -> "type $head"
+    Some(first) ->
+      if jbool(jget(t, "record")) {
+        record_decl(head, first)
+      } else {
+        "type $head = " ++ join(map(ctors, c => ctor_decl(c)), " | ")
+      }
+  }
+}
+
+## `-type-` in the anchor, not just the name: `std/bytes` has both a `Buf`
+## type and a `buf()` function, and ids that differ only in case are one
+## careless lowercase away from colliding.
+fn type_entry(docs: List[String], id_base: String, t: Json) -> String =
+  entry(docs, field(t, "name"), id_base ++ "-type-" ++ field(t, "name"), type_decl(t),
+    field(t, "doc"))
+
+fn const_entry(docs: List[String], qual: String, id_base: String, c: Json) -> String = {
+  let name = field(c, "name")
+  entry(docs, qualify(qual, name), "$id_base-$name", "const $name: " ++ field(c, "type"),
+    field(c, "doc"))
+}
+
+fn trait_entry(docs: List[String], id_base: String, t: Json) -> String = {
+  let name = field(t, "name")
+  let tp = field(t, "typeParam")
+  var body = ""
+  for a in jarr(jget(t, "assoc")) {
+    body = body ++ "\n  type " ++ jstr(a)
+  }
+  for m in jarr(jget(t, "methods")) {
+    body = body ++ "\n  " ++ field(m, "sig")
+  }
+  entry(docs, name, "$id_base-trait-$name", "trait $name[$tp] {$body\n}", field(t, "doc"))
+}
+
+## Dead for every std module today — nothing there declares a `pub effect` yet
+## — and here so that the day one appears it lands on the page instead of
+## silently missing, which is the same reason `doc` emits the empty array.
+fn effect_entry(docs: List[String], id_base: String, e: Json) -> String = {
+  let name = field(e, "name")
+  var body = ""
+  for op in jarr(jget(e, "ops")) {
+    body = body ++ "\n  " ++ field(op, "sig")
+  }
+  entry(docs, name, "$id_base-effect-$name", "effect $name {$body\n}", field(e, "doc"))
+}
+
+## The impls a module registers. Coherence is program-wide — it does not ask
+## who wrote the `use` — so a reader needs to see that `==` on a `Map` is
+## answered here even though no function in the list says so.
+fn impls_html(m: Json) -> String = {
+  let names = map(jarr(jget(m, "impls")), i => "<code>" ++ escape_html(jstr(i)) ++ "</code>")
+  if len(names) == 0 {
+    ""
+  } else {
+    """<p class="api-impls">本模块登记的 impl（全程序可见，不必 use）：""" ++
+      join(names, "、") ++ "</p>\n"
+  }
+}
+
+fn section(id: String, title: String, intro: String, body: String) -> String =
+  """<h2 id="$id">""" ++ escape_html(title) ++ "</h2>\n" ++ intro ++ body
+
+fn sub(id: String, title: String) -> String =
+  """<h3 class="api-group" id="$id">""" ++ escape_html(title) ++ "</h3>\n"
+
+# ---- the three generated sections ----
+
+fn prelude_html(docs: List[String], root: Json) -> (String, List[TocEntry]) = {
+  var html = ""
+  var toc: List[TocEntry] = []
+  for g in jarr(jget(root, "groups")) {
+    let name = field(g, "name")
+    let gid = "g-$name"
+    toc = toc ++ [TocEntry { level: 3, id: gid, text: name }]
+    html = html ++ sub(gid, name)
+    for f in jarr(jget(g, "fns")) {
+      html = html ++ fn_entry(docs, "", "p", f) ++ "\n"
+    }
+  }
+  (html, toc)
+}
+
+fn traits_html(docs: List[String], root: Json) -> String = {
+  var html = ""
+  for t in jarr(jget(root, "traits")) {
+    html = html ++ trait_entry(docs, "prelude", t) ++ "\n"
+  }
+  html
+}
+
+fn modules_html(docs: List[String], root: Json) -> (String, List[TocEntry]) = {
+  var html = ""
+  var toc: List[TocEntry] = []
+  for m in jarr(jget(root, "modules")) {
+    let path = field(m, "path")
+    let id = "m-" ++ slug(path)
+    # the call-site alias is the file's own name: `use std/str` binds `str`
+    let qual = unwrap_or(str.strip_prefix(path, "std/"), path)
+    toc = toc ++ [TocEntry { level: 3, id: id, text: path }]
+    html = html ++ sub(id, path) ++ prose(docs, field(m, "doc")) ++ impls_html(m)
+    for t in jarr(jget(m, "types")) {
+      html = html ++ type_entry(docs, slug(path), t) ++ "\n"
+    }
+    for t in jarr(jget(m, "traits")) {
+      html = html ++ trait_entry(docs, slug(path), t) ++ "\n"
+    }
+    for c in jarr(jget(m, "consts")) {
+      html = html ++ const_entry(docs, qual, slug(path), c) ++ "\n"
+    }
+    for e in jarr(jget(m, "effects")) {
+      html = html ++ effect_entry(docs, slug(path), e) ++ "\n"
+    }
+    for f in jarr(jget(m, "fns")) {
+      html = html ++ fn_entry(docs, qual, slug(path), f) ++ "\n"
+    }
+  }
+  (html, toc)
+}
+
+# ---- the page ----
+
+pub fn gen_stdlib(out: String) -> Unit !io = {
+  let text =
+    match io.read_file("site/build/stdlib.json") {
+      Ok(t) -> t
+      Err(_) ->
+        panic("site/build/stdlib.json missing — run site/build.sh (it runs dawn doc --stdlib)")
+    }
+  let root =
+    match parse(text) {
+      Ok(v) -> v
+      Err(e) -> panic("stdlib.json: $e")
+    }
+  let docs = doc_files()
+  let intro =
+    match parser.parse(must_read("site/pages/stdlib.md")) {
+      Ok(bs) -> render_doc(bs, u => map_doc_url(".", docs, u))
+      Err(e) -> panic("site/pages/stdlib.md: $e")
+    }
+  let (pre, pre_toc) = prelude_html(docs, root)
+  let (mods, mod_toc) = modules_html(docs, root)
+  let pre_title = "prelude：不必 use 的名字"
+  let body = intro.html ++
+    section("prelude", pre_title,
+      "<p>下面这些名字隐式可见，直接写就是了。分组只为好找，不代表实现位置；" ++
+        "其中在 std 模块里也有一份的（<code>sort</code>、<code>println</code> 等）" ++
+        "会在下面「模块」一节里以限定拼写再出现一次——同一个函数，两种写法。</p>\n",
+      pre) ++
+    section("prelude-traits", "预置 trait",
+      "<p>随 prelude 而来的五个 trait。它们的方法名同样进入函数命名空间，" ++
+        `可被本模块的顶层声明遮蔽（<a href="spec.html#s10-6">规范 §10.6</a>）。</p>` ++ "\n",
+      traits_html(docs, root)) ++
+    section("modules", "模块",
+      "<p>以 <code>use std/x</code> 引入，再限定调用；" ++
+        "也可以选择性引入单个名字（<code>use std/str.{trim}</code>）。</p>\n", mods)
+  let toc = intro.toc ++
+    [TocEntry { level: 2, id: "prelude", text: pre_title }] ++ pre_toc ++
+    [TocEntry { level: 2, id: "prelude-traits", text: "预置 trait" }] ++
+    [TocEntry { level: 2, id: "modules", text: "模块" }] ++ mod_toc
+  write_page("$out/stdlib.html",
+    page_with_toc("${intro.title} — Dawn", ".", "stdlib", toc, body))
+}
+
+fn jobj(entries: List[(String, Json)]) -> Json = JObj(map.from(entries))
+
+test "module paths become id fragments and call-site aliases" {
+  assert slug("std/str") == "std-str"
+  assert qualify("str", "trim") == "str.trim"
+  # the prelude's names have no module to qualify them with
+  assert qualify("", "println") == "println"
+}
+
+test "a type with no constructors keeps its representation to itself" {
+  let opaque = jobj([("name", JStr("Cursor")), ("record", JBool(false)),
+    ("typeParams", JArr([])), ("ctors", JArr([]))])
+  assert type_decl(opaque) == "type Cursor"
+}
+
+test "records and sums reassemble into their declarations" {
+  let field_of = (n: String, t: String) =>
+    jobj([("name", JStr(n)), ("type", JStr(t))])
+  let rec = jobj([("name", JStr("Pair")), ("record", JBool(true)),
+    ("typeParams", JArr([JStr("A"), JStr("B")])),
+    ("ctors", JArr([jobj([("name", JStr("Pair")),
+      ("fields", JArr([field_of("a", "A"), field_of("b", "B")]))])]))])
+  assert type_decl(rec) == "type Pair[A, B] = { a: A, b: B }"
+
+  let sum = jobj([("name", JStr("Shape")), ("record", JBool(false)),
+    ("typeParams", JArr([])),
+    ("ctors", JArr([
+      jobj([("name", JStr("Circle")), ("fields", JArr([field_of("r", "Float")]))]),
+      jobj([("name", JStr("Dot")), ("fields", JArr([]))])
+    ]))])
+  assert type_decl(sum) == "type Shape = Circle(r: Float) | Dot"
+}
+
+test "a doc comment is rendered as Markdown, not escaped whole" {
+  let html = prose([], "First line, `code` and *em*.\n\nA second paragraph.")
+  assert str.contains(html, "<code>code</code>")
+  assert str.contains(html, "<em>em</em>")
+  assert str.contains(html, "<p>A second paragraph.</p>")
+  # an empty doc contributes nothing at all
+  assert prose([], "") == ""
+}

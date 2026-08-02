@@ -35,7 +35,7 @@ site/
 | `/design.html` | 设计笔记（D1–D7 决策 + 里程碑） | `docs/design.md` |
 | `/examples/index.html` | 示例陈列页 | `examples/**` |
 | `/examples/{name}.html` | 每例一页：高亮源码（+ 多文件项目按模块列出） | 同上 |
-| `/api.html` | 标准库参考：内建函数按类分组，签名 + 描述 | `dawn doc --builtins --json` |
+| `/stdlib.html` | 标准库 API 参考 + 侧栏 TOC：内建类型、prelude、预置 trait、每个 std 模块（函数 / 类型 / impl），文档注释按 Markdown 渲染 | `site/pages/stdlib.md` + `dawn doc --stdlib` |
 | `/playground.html` | 占位页（「二期开发中」） | 模板 |
 
 ## 渲染约定
@@ -71,9 +71,9 @@ site/
 ## 构建
 
 ```bash
-site/build.sh          # dawn doc --builtins → 清空 dist → dawn run site
+site/build.sh          # dawn doc --stdlib → 清空 dist → dawn run site
 # 或手动：
-./bin/dawn doc --builtins > site/build/builtins.json
+./bin/dawn doc --stdlib > site/build/stdlib.json
 ./bin/dawn run site    # 生成 site/dist/（从仓库根运行）
 ./bin/dawn test site   # 生成器测试
 ```

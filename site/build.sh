@@ -4,7 +4,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 mkdir -p site/build
-./bin/dawn doc --builtins > site/build/builtins.json
+./bin/dawn doc --stdlib > site/build/stdlib.json
 
 # The Playground editor bundle (CodeMirror 6 + Dawn mode). Built locally with
 # node; the server never runs node — it only receives site/dist. Skipped with a
