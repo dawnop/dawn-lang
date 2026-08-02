@@ -13,11 +13,16 @@ OUT=${TMPDIR:-/tmp}/selfhost-run-diff.$$
 mkdir -p "$OUT"
 trap 'rm -rf "$OUT"' EXIT
 
-# the reference CLI = the previous release's jar, wrapped as one executable
+# the reference CLI = the previous release's jar, wrapped as one executable.
+# It runs from a seed_root: the repo with std/ swapped for the seed's own
+# released std (seedjar.sh), because subcommands read `std` off the cwd and
+# today's std may be one generation ahead of the seed's checker. Relative
+# targets resolve through the symlinks unchanged.
 SEEDJAR="$(seed_jar)"
+seed_root "$OUT/seed-root"
 printf '#!/bin/sh
-exec java -Xss512m -jar "%s" "$@"
-' "$SEEDJAR" > "$OUT/seed-cli"
+cd "%s" && exec java -Xss512m -jar "%s" "$@"
+' "$OUT/seed-root" "$SEEDJAR" > "$OUT/seed-cli"
 chmod +x "$OUT/seed-cli"
 DAWN=${DAWN_BIN:-"$OUT/seed-cli"}
 SH=(./bin/dawn)

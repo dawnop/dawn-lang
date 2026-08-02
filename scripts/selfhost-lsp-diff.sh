@@ -13,8 +13,14 @@ ROOT=$(pwd)
 SELF=./bin/dawn
 OUT=${TMPDIR:-/tmp}/selfhost-lsp-diff.$$
 mkdir -p "$OUT/proj/src"
+# the seed's lsp reads `std` off the cwd and takes no --std flag, so the
+# wrapper runs from a seed_root: the repo with std/ swapped for the seed's
+# own released std (seedjar.sh). Session documents are absolute paths under
+# $OUT, unaffected by the cwd move.
 SEEDJAR="$(seed_jar)"
-printf '#!/bin/sh\nexec java -Xss512m -jar "%s" "$@"\n' "$SEEDJAR" > "$OUT/seed-cli"
+seed_root "$OUT/seed-root"
+printf '#!/bin/sh\ncd "%s" && exec java -Xss512m -jar "%s" "$@"\n' \
+  "$OUT/seed-root" "$SEEDJAR" > "$OUT/seed-cli"
 chmod +x "$OUT/seed-cli"
 REF=${DAWN_BIN:-"$OUT/seed-cli"}
 if [ -z "${KEEP:-}" ]; then trap 'rm -rf "$OUT"' EXIT; fi

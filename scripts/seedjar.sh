@@ -80,3 +80,43 @@ seed_jar() {
   fi
   echo "$_sj_cache/seed.jar"
 }
+
+## The std the pinned seed released with, extracted from its git tag and
+## cached beside the jar. The seed pairs with the std it shipped: since #44
+## knife 2 the repo's std may use prelude machinery (the Iter trait) that is
+## one generation ahead of the seed's checker, so handing the seed today's
+## std/ is handing it modules it cannot check. The released pair is also the
+## honest reference — it is the combination that release's gates actually ran.
+seed_std_dir() {
+  _ss_tag=$(tr -d ' \n' < "$ROOT/scripts/seed-release.txt")
+  _ss_dir=${DAWN_SEED_CACHE:-$ROOT/.dawn/seeds}/std-$_ss_tag
+  if [ ! -f "$_ss_dir/modules.txt" ]; then
+    mkdir -p "$_ss_dir.tmp"
+    git -C "$ROOT" archive "$_ss_tag" std | tar -x -C "$_ss_dir.tmp" || {
+      echo "error: cannot extract std/ from tag $_ss_tag (the seed's released std)" >&2
+      exit 1
+    }
+    rm -rf "$_ss_dir"
+    mv "$_ss_dir.tmp/std" "$_ss_dir"
+    rm -rf "$_ss_dir.tmp"
+  fi
+  echo "$_ss_dir"
+}
+
+## A working root for seed subcommands that read `std` from the cwd and take
+## no --std flag (lsp) or take many shapes of argument (the run-diff sweep):
+## every top-level repo entry symlinked in place, except std, which is the
+## seed's released std. Relative targets resolve unchanged; only the std the
+## seed sees moves back one generation.
+seed_root() {
+  _sr_dir=$1
+  _sr_std=$(seed_std_dir)
+  mkdir -p "$_sr_dir"
+  for _sr_e in "$ROOT"/* "$ROOT"/.dawn; do
+    [ -e "$_sr_e" ] || continue
+    _sr_b=$(basename "$_sr_e")
+    [ "$_sr_b" = "std" ] && continue
+    [ -e "$_sr_dir/$_sr_b" ] || ln -s "$_sr_e" "$_sr_dir/$_sr_b"
+  done
+  ln -s "$_sr_std" "$_sr_dir/std"
+}

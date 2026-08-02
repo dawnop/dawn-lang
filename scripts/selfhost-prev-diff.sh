@@ -22,13 +22,19 @@ ROOT=$(pwd)
 . scripts/seedjar.sh
 TAG=$(tr -d ' \n' < scripts/seed-release.txt)
 PREV=(java -Xss512m -jar "$(seed_jar)")
+# the seed compiles against the std it released with, not today's std/ --
+# the repo std may use prelude machinery one generation ahead of the seed's
+# checker (seedjar.sh seed_std_dir). Std-source changes therefore show up in
+# the emit diffs below like any other emit change, and are declared the same
+# way.
+PREV_STD=(--std "$(seed_std_dir)")
 
 OUT=${TMPDIR:-/tmp}/selfhost-prev-diff.$$
 mkdir -p "$OUT"
 trap 'rm -rf "$OUT"' EXIT
 
 # feature discipline: the previous release must compile today's selfhost
-"${PREV[@]}" build selfhost -o "$OUT/head-by-prev.jar" > /dev/null
+"${PREV[@]}" build selfhost "${PREV_STD[@]}" -o "$OUT/head-by-prev.jar" > /dev/null
 echo "OK   $TAG compiles HEAD selfhost (seed feature discipline)"
 
 # HEAD toolchain (bin/dawn builds it on demand)
@@ -53,7 +59,7 @@ report_diff() { # check label, e.g. "emit selfhost"
 
 for t in site playground packages/web packages/json selfhost examples/calc.dawn; do
   mkdir -p "$OUT/prev/$t" "$OUT/head/$t"
-  "${PREV[@]}" __emit "$t" -o "$OUT/prev/$t" > /dev/null
+  "${PREV[@]}" __emit "${PREV_STD[@]}" "$t" -o "$OUT/prev/$t" > /dev/null
   "${HEAD_BIN[@]}" __emit "$t" -o "$OUT/head/$t" > /dev/null
   if diff -rq "$OUT/prev/$t" "$OUT/head/$t" > /dev/null; then
     echo "OK   emit $t"
