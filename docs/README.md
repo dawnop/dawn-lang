@@ -50,7 +50,9 @@
 [audit/module-access-design.md](audit/module-access-design.md)（LANG-06/07）·
 [audit/lsp-robustness-design.md](audit/lsp-robustness-design.md)（LSP-01/02/04）·
 [audit/package-integrity-design.md](audit/package-integrity-design.md)（PKG-02/04）·
-[audit/web-api-v2-design.md](audit/web-api-v2-design.md)（WEB-03/04/06/07/09/10）
+[audit/web-api-v2-design.md](audit/web-api-v2-design.md)（WEB-03/04/06/07/09/10）·
+[arch-split-design.md](arch-split-design.md)（ARCH-01 拆 `Cx` + ARCH-02 拆 `Gen`，**取代
+lowered-ir-design.md §3.2 的六组件方案**）
 
 ## 设计方案（已落地，作为特性的「为什么」）
 
