@@ -4,12 +4,13 @@
 # table (Map[Int, AdtI]) instead of holding a cyclic object reference, and
 # display strings are rendered on demand (ty_show needs the table for names).
 #
-# Fixed prelude ids (never minted by the checker's counter, which starts at 3):
-#   ADTs:  Option = 0, Result = 1, ForeignError = 2
-#                                        traits: Ord = 0, Eq = 1, Hash = 2
-#   type vars: builtin-signature T/U/A/K/V = -1..-5, Ord's T = -10,
+# Fixed prelude ids (never minted by the checker's counter, which opens past
+# all of them -- see first_minted_id):
+#   ADTs:   Option = 0, Result = 1, ForeignError = 2
+#   traits: Ord = 0, Eq = 1, Hash = 2, Show = 3, Iter = 4
+#   type vars: builtin-signature T/U/A/K/V/B = -1..-6, Ord's T = -10,
 #              Option's T = -11, Result's T/E = -12/-13, Eq's T = -14,
-#              Hash's T = -15
+#              Hash's T = -15, Show's T = -16, Iter's T = -17
 #   effect vars: the builtin signatures' `e` = -1
 #
 # ADT ids and trait ids are separate namespaces (Option and Ord are both 0) that
@@ -1074,6 +1075,24 @@ pub fn prelude_trait_names() -> List[String] = {
 ## redefinition, not a shadowing: trait names live in the type namespace and
 ## the prelude traits have no module to qualify them with.
 pub fn is_prelude_trait_name(n: String) -> Bool = list.contains(prelude_trait_names(), n)
+
+## The first id the checker's counter may hand out: one past the largest id any
+## prelude entity already holds.
+##
+## Read off the two tables rather than written down beside them. The checker
+## used to open its counter at a literal, and the literal is exactly the kind
+## of thing that does not get revisited: it stayed at 3 when Show took trait
+## id 3, and stayed at 4 when Iter took trait id 4. Neither collided, but only
+## because a trait declaration mints its type variable before its trait id --
+## an accident of ordering, not a rule. Adding a prelude trait now moves this
+## on its own.
+pub fn first_minted_id() -> Int = {
+  let held = map.keys(prelude_adts()) ++ map.keys(prelude_traits())
+  match list.max(held) {
+    Some(top) -> top + 1
+    None -> 0
+  }
+}
 
 fn prelude_impl(tid: Int, t: Ty) -> ImplI =
   ImplI {
