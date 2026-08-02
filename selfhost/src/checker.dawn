@@ -50,10 +50,11 @@ use types.{
   eff_base, eff_labels, eff_with_labels, EffectI, Effects, ev_record_name,
   Adts, AdtI, CtorI, FieldI, Traits, TraitI, ImplI, Sym, Sig, MethodSig,
   adt_of, trait_of, ty_show, ctor_render, sig_render, subst, subst_eff, eff_show,
+  reduce_via_bindings,
   ty_named, is_numeric, is_errorish, peel_opaque,
   prelude_adts, prelude_traits, prelude_impls, bounds_of,
   builtins, opt_ty, result_ty, OPTION_ID, RESULT_ID, FOREIGN_ERROR_ID,
-  ORD_ID, EQ_ID, HASH_ID, SHOW_ID,
+  ORD_ID, EQ_ID, HASH_ID, SHOW_ID, ITER_ID,
   eq_scalars, hash_scalars,
   Impls, Head, head_of, impl_at, has_impl_at, insert_impl,
   is_eq_scalar, is_ground, expandable, type_args_of, sub_goals
@@ -630,44 +631,6 @@ pub fn resolve_type(cx: Cx, ref: TypeRef) -> (Cx, Ty) !io =
     TNamed(name, targs, lo, hi) -> resolve_named(cx, name, targs, lo, hi)
     TQual(q, name, targs, lo, hi) -> resolve_qual(cx, q, name, targs, lo, hi)
     TAssoc(subj, name, lo, hi) -> resolve_assoc(cx, subj, name, lo, hi)
-  }
-
-## Rewrite `subject.name` projections to an impl's own bindings -- used while
-## that impl's methods are being checked, before it has entered the table.
-## Everything else walks structurally.
-fn reduce_via_bindings(t: Ty, tid: Int, subject: Ty, bindings: List[(String, Ty)]) -> Ty =
-  match t {
-    TyAssoc(s0, t0, n) -> {
-      let s2 = reduce_via_bindings(s0, tid, subject, bindings)
-      if t0 == tid && s2 == subject {
-        var out = TyAssoc(s2, t0, n)
-        for pr in bindings {
-          let (bn, bt) = pr
-          if bn == n { out = bt }
-        }
-        out
-      } else {
-        TyAssoc(s2, t0, n)
-      }
-    }
-    TyAdt(aid, targs) ->
-      if len(targs) == 0 { t } else {
-        TyAdt(aid, map(targs, x => reduce_via_bindings(x, tid, subject, bindings)))
-      }
-    TyList(e) -> TyList(reduce_via_bindings(e, tid, subject, bindings))
-    TyMap(k, v) ->
-      TyMap(reduce_via_bindings(k, tid, subject, bindings),
-        reduce_via_bindings(v, tid, subject, bindings))
-    TySet(e) -> TySet(reduce_via_bindings(e, tid, subject, bindings))
-    TyArray(e) -> TyArray(reduce_via_bindings(e, tid, subject, bindings))
-    TyTuple(elems) -> TyTuple(map(elems, x => reduce_via_bindings(x, tid, subject, bindings)))
-    TyOpaque(id, n2, ow, tgt) -> TyOpaque(id, n2, ow, reduce_via_bindings(tgt, tid, subject, bindings))
-    TyFn(params, ret, eff) ->
-      TyFn(map(params, x => reduce_via_bindings(x, tid, subject, bindings)),
-        reduce_via_bindings(ret, tid, subject, bindings), eff)
-    TyVar(_, _) -> t
-    TyInt | TyFloat | TyBool | TyString | TyBytes -> t
-    TyUnit | TyNever | TyError | TyJava(_, _) -> t
   }
 
 ## `T.Item` -- the subject must be a type parameter in scope, and exactly one
@@ -1628,7 +1591,7 @@ pub fn seed_prelude(cx: Cx) -> Cx = {
   # prelude traits: methods enter the fn namespace
   var tbn = cx1.traits_by_name
   var fns2 = cx1.fns
-  for tid in [ORD_ID, EQ_ID, HASH_ID, SHOW_ID] {
+  for tid in [ORD_ID, EQ_ID, HASH_ID, SHOW_ID, ITER_ID] {
     let tr = trait_of(cx1.traits, tid)
     tbn = map.insert(tbn, tr.name, tid)
     for entry in tr.methods {
@@ -2604,6 +2567,11 @@ fn head_owner(h: Head) -> Option[String] =
     HList -> Some("std/list")
     HMap -> Some("std/map")
     HSet -> Some("std/set")
+    # claimed for the same reason (#44 knife 2): `impl Iter[String]` lives in
+    # std/str and `impl Iter[Bytes]` in std/bytes, and these two lines are
+    # what makes each legal rather than an orphan
+    HString -> Some("std/str")
+    HBytes -> Some("std/bytes")
     _ -> None
   }
 
@@ -7110,16 +7078,31 @@ fn check_stmt(cx: Cx, s: Stmt) -> (Cx, TStmt) !io =
       cx1 = cxa
       var loop_t = TyError
       var tx_to: Option[TExpr] = None
+      var wit: Option[WitRef] = None
       match to_opt {
         None -> {
-          loop_t = match ft {
-            TyList(el) -> el
-            _ -> {
-              if not is_errorish(ft) {
-                cx1 = cerr(cx1, "for..in iterates a List or an integer range a..b, got " ++
-                    ty_show(cx1.adts, ft), e_lo(from), e_hi(from))
+          # `for x in xs` is a use of the Iter trait: resolve the witness the
+          # way any bound does (rigid parameter forwards the caller's
+          # dictionary, concrete subject devirtualises), and the loop
+          # variable's type is the impl's `Item` -- reduced when the subject
+          # is concrete, a rigid projection when it is not (generic for).
+          if not is_errorish(ft) {
+            if ft == TyInt {
+              # the common slip deserves the range answer, not "no impl"
+              cx1 = cerr_h(cx1, "for..in needs a range to iterate integers",
+                e_lo(from), e_hi(from),
+                "write `for x in a..b`, or iterate a value whose type implements `Iter`")
+            } else {
+              let (cxw, w) = resolve_witness(cx1, ITER_ID, ft, e_lo(from), e_hi(from),
+                "for..in")
+              cx1 = cxw
+              match w {
+                Some(_) -> {
+                  wit = w
+                  loop_t = reduce_assoc(cx1, TyAssoc(ft, ITER_ID, "Item"))
+                }
+                None -> ()
               }
-              TyError
             }
           }
         }
@@ -7152,7 +7135,7 @@ fn check_stmt(cx: Cx, s: Stmt) -> (Cx, TStmt) !io =
           e_lo(body), e_hi(body))
       }
       cx1 = pop_scope(cx1)
-      (cx1, TSFor(sid, name, fx, tx_to, bx, hj, lo, hi))
+      (cx1, TSFor(sid, name, fx, tx_to, wit, bx, hj, lo, hi))
     }
   }
 
@@ -10736,10 +10719,11 @@ test "a jump out of a `with` region names the sugar, not a lambda" {
   assert str.contains(cx1.diags[0].hint, "drop the `return`")
 
   # break reaching a loop outside the region: the generic "crosses a lambda"
-  # message would be a lie about what is on the page
+  # message would be a lie about what is on the page. A while loop, not for:
+  # test_cx has no std, and `for..in` now needs std/list's Iter impl.
   let bad_break = head ++
     "fn go(xs: List[Int]) -> Int = {\n" ++
-    "  for i in xs {\n" ++
+    "  while len(xs) > 0 {\n" ++
     "    with x <- hold(1)\n" ++
     "    break\n" ++
     "  }\n" ++
@@ -10756,7 +10740,7 @@ test "a jump out of a `with` region names the sugar, not a lambda" {
   let ok_break = head ++
     "fn go(xs: List[Int]) -> Int = {\n" ++
     "  with x <- hold(1)\n" ++
-    "  for i in xs { break }\n" ++
+    "  while len(xs) > 0 { break }\n" ++
     "  x\n" ++
     "}\n"
   let (m3, pd3) = parser.parse_module(ok_break)
@@ -10768,7 +10752,7 @@ test "a jump out of a `with` region names the sugar, not a lambda" {
   let inner = head ++
     "fn go(xs: List[Int]) -> Int = {\n" ++
     "  with x <- hold(1)\n" ++
-    "  for i in xs {\n" ++
+    "  while len(xs) > 0 {\n" ++
     "    let f = (k: Int) => { break }\n" ++
     "    ()\n" ++
     "  }\n" ++

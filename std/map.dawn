@@ -119,3 +119,31 @@ impl[K: Show, V: Show] Show[Map[K, V]] {
   fn show(m: Map[K, V]) -> String =
     "map.from([" ++ show_go(entries(m), 0, len(m), "") ++ "])"
 }
+
+# ---- iteration (prelude Iter, #44 knife 2) ----
+
+## `for e in m` yields `(K, V)` pairs in `entries`' order. The cursor
+## materialises `entries(m)` once up front and walks it by index: the trie
+## has no public "next entry" today, the list's random access is O(1), and
+## `map_size` is a stored count -- one allocation at the start, O(1) per
+## step. If std/hamt ever grows a real cursor, `Cur` changes here and no
+## caller does. Doneness asks the map, not the list: `len`/`get` are this
+## module's map operations, and the entry count is the same number.
+impl[K: Eq + Hash, V] Iter[Map[K, V]] {
+  type Cur = (List[(K, V)], Int)
+  type Item = (K, V)
+
+  fn iter_start(m: Map[K, V]) -> (List[(K, V)], Int) = (entries(m), 0)
+  fn iter_done(m: Map[K, V], c: (List[(K, V)], Int)) -> Bool = {
+    let (_es, i) = c
+    i >= map_size(m)
+  }
+  fn iter_next(m: Map[K, V], c: (List[(K, V)], Int)) -> (List[(K, V)], Int) = {
+    let (es, i) = c
+    (es, i + 1)
+  }
+  fn iter_get(m: Map[K, V], c: (List[(K, V)], Int)) -> (K, V) = {
+    let (es, i) = c
+    es[i]
+  }
+}

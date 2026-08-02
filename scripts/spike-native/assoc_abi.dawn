@@ -1,0 +1,72 @@
+# Associated types, the call ABI (#44 knife 2 groundwork): a projection bound
+# to a *primitive* in parameter and return position. Knife 1's corpus only
+# pinned always-ref shapes (`Option[C.Item]`), which let the trait-side and
+# impl-side signatures agree by luck; a `Cur = Int` binding is where they
+# diverge, and this file is what catches a backend (or lowering) that spells
+# a devirtualised call against the erased trait signature while the impl
+# method was emitted against its own concrete one.
+#
+# What this pins, on both backends:
+#   - devirtualised concrete call (`w_start([10,20,30])`): the cursor slot is
+#     an unboxed Int in and out, the element slot stays erased
+#   - the same impl reached at a rigid subject (`count` over List[T]): the
+#     WApply-shaped witness devirtualises to the same concrete signature
+#   - the dictionary path (`sum_walk`, `[C: Walk]`): the bridge unboxes the
+#     erased cursor into the impl's Int slot and boxes the result back
+use std/io
+use std/str
+
+trait Walk[C] {
+  type Cur
+  type Item
+  fn w_start(c: C) -> C.Cur
+  fn w_done(c: C, k: C.Cur) -> Bool
+  fn w_next(c: C, k: C.Cur) -> C.Cur
+  fn w_get(c: C, k: C.Cur) -> C.Item
+}
+
+impl[T] Walk[List[T]] {
+  type Cur = Int
+  type Item = T
+  fn w_start(c: List[T]) -> Int = 0
+  fn w_done(c: List[T], k: Int) -> Bool = k >= len(c)
+  fn w_next(c: List[T], k: Int) -> Int = k + 1
+  fn w_get(c: List[T], k: Int) -> T = c[k]
+}
+
+# the dictionary path: a rigid subject, every call through the slot's bridge
+fn sum_walk[C: Walk](c: C, f: fn(C.Item) -> Int) -> Int = {
+  var acc = 0
+  var k = w_start(c)
+  while not w_done(c, k) {
+    acc = acc + f(w_get(c, k))
+    k = w_next(c, k)
+  }
+  acc
+}
+
+# the WApply path: List[T] is not ground here, but the impl is settled, so
+# the calls still devirtualise -- with the same concrete cursor slots
+fn count[T](xs: List[T]) -> Int = {
+  var n = 0
+  var k = w_start(xs)
+  while not w_done(xs, k) {
+    n = n + 1
+    k = w_next(xs, k)
+  }
+  n
+}
+
+pub fn main() -> Unit !io = {
+  # devirtualised: concrete List[Int]
+  let xs = [10, 20, 30]
+  var k = w_start(xs)
+  var total = 0
+  while not w_done(xs, k) {
+    total = total + w_get(xs, k)
+    k = w_next(xs, k)
+  }
+  io.println(to_string(total))
+  io.println(to_string(sum_walk(["a", "bb", "ccc"], s => str.len(s))))
+  io.println(to_string(count([true, false])))
+}

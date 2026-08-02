@@ -1,6 +1,7 @@
 # 关联类型设计 — trait 的 `type Item` 与投影 `T.Item`
 
-> 状态：current（刀 1 已落地 2026-08-02，全门禁绿；刀 2 = std Iter + for 去特判，等发布 + 种子推进后开）
+> 状态：current（刀 1 落地 2026-08-02；刀 2 也已落地 2026-08-02：prelude Iter +
+> 五个 std impl + for..in 去特判，决策与偏差记录见 §6）
 >
 > 任务 #44。勘察备忘录（2026-08-02，基线 6dfc34b）先行，本文所有 file:line 均对该基线；
 > 用户裁决三项合同级决策于 2026-08-02（§2）。运算符 trait 的前置。
@@ -8,8 +9,12 @@
 ## 1. 目标与非目标
 
 **目标**：trait 可以声明一个由 impl 指定的类型成员，方法签名可以引用它。
-最小闭环 = `trait Iter[C] { type Item  fn next(...) }` + `impl Iter[List[T]] { type Item = T ... }`
-+ 首个消费者（std 的 `Iter` trait 与 `for..in` 去特判）。
+最小闭环 = `trait Iter[C] { type Cur  type Item  fn iter_start(...) ... }` +
+`impl[T] Iter[List[T]] { type Cur = Int  type Item = T ... }`
++ 首个消费者（prelude 的 `Iter` trait 与 `for..in` 去特判）。
+（§3 的示意曾用短名 `fn next`——那与「存量逐字节不变」自相矛盾：短名会撞掉
+std 现有顶层函数。落地形状是 `iter_start/iter_done/iter_next/iter_get` 四方法
+双关联类型，镜像 std/list 的游标四件套，见 §6 刀 2 记录。）
 
 **非目标**：
 - 关联类型上的 bound（`type Item: Ord`）——bound 表示是现在不存在的机器（勘察缺件 8），
@@ -167,11 +172,41 @@ witness 同门，D5）→ 取该 impl 的 `assoc_bindings[n]`，用 impl 的 tpa
    语料，std 不动）。**selfhost/src 与 std 不得使用新语法**。存量语料零 Emit-Change
    （类型擦除，prev-diff 实测确认）；doc 输出变化按标签声明。
 2. **发布 + 种子推进**。
-3. **刀 2（消费者批）**：std 提供 `Iter` trait（`type Item` 首个 in-tree 使用者）+
-   List/Map/Set/Bytes/str 游标的 impl；`for..in` 从「只认 TyList 的特判 +
-   按名字找四个非 pub 函数」改为对 `Iter` bound 的普通脱糖（checker.dawn:6846-6853、
-   lower.dawn:2806-2837 两处特判退休）。for 的 lowering 形状变化预期带
-   `Emit-Change(emit *)`，存量程序行为逐字节不变是验收判据。
+3. **刀 2（消费者批）——已落地（2026-08-02）**。原计划「std 提供 `Iter` trait」，
+   落地时三项定案 + 两项现场发现：
+   - **Iter 是第 5 个 prelude trait**（ITER_ID = 4），不是 std trait：`for` 要它
+     的 witness 就像 `==` 要 Eq 的，不能系于 import。方法注入 cx.fns 照旧
+     （不注入的长期方案归 #119）。
+   - **方法名 `iter_start/iter_done/iter_next/iter_get`**：撞名勘察证明短名
+     start/done/next/get 会把 std 编译坏（7 个 std 顶层 fn 声明期报错 + builtin
+     get 静默改绑）。四个名字随 prelude 注入成为保留名（spec §10.6/§11）。
+   - **五个 impl 全落**：List（Cur = Int，原四件套收进 impl）、String（Cur =
+     cursor.Cursor，Item = 单字符 String，对齐 `chars` 的元素形状）、Bytes
+     （Cur = Int，Item = Int）、Map/Set（**物化游标**：iter_start 物化
+     entries/to_list，Cur = (List, Int)——trie 今天没有公开游标，列表随机访问
+     O(1)、count 是存量字段，起步一次分配、每步 O(1)；将来 std/hamt 长出真游标
+     只改 Cur 与四个方法体）。head_owner 增补 HString→std/str、HBytes→std/bytes
+     （不然两个 impl 是 orphan）；modules.txt 里 list 提到 bytes 之前（bytes 自己
+     的 for 现在需要已注册的 impl）。
+   - **现场发现 1（刀 1 的 ABI 洞）**：devirtualized 调用与字典桥按 trait 侧签名
+     拼 callee 形状，投影一律按擦除槽——绑定是基元时（`Cur = Int`）与 impl 方法
+     自己的声明签名（校验钉死的那个形状）分道，JVM 直接 NoSuchMethodError。刀 1
+     语料只覆盖了 `Option[C.Item]` 这类恒引用形状所以没暴露。修法 = subst_subject
+     （lower 与 emit）跑注册校验用的同一个 reduce_via_bindings（搬进 types.dawn，
+     一份定义三处读）；**绑定 RHS 原样代入**——`Item = T` 必须保持擦除槽，实例化
+     它与不归约同样是错。语料 assoc_abi.dawn 钉住三条路径。
+   - **现场发现 2（自举力学偏差）**：D10/施工单设「种子已认识语法，std 可放心用
+     新语法」——对 *prelude* trait 不成立：种子 parse 得了 `impl Iter[...]` 却
+     check 不了（它的 prelude 没有 Iter），而它的 lower_for_list 又按名字要那四个
+     自由函数。同一份 std 源无法同时满足两代编译器。解法不是过渡垫片而是修自举
+     契约：**N−1 侧一律与它发布时的 std 配对**（seedjar.sh 的 seed_std_dir /
+     seed_root，bin/dawn stage 1、fixpoint A 段、prev-diff、run/lsp 转写全部收口）。
+     种子特性纪律不变——N−1 jar 仍须编译 HEAD selfhost/src（prev-diff 那行从来
+     没传过 --std）。
+   for 的 lowering 走 lower_trait_call 的合成调用（与源代码级 trait 调用同一扇门），
+   `continue` 先跑 step 的语义靠 CSLoop 第三参保持。泛型 `for`（`[C: Iter]` 函数体内
+   对 rigid 主体迭代）是新表达力。带 `Emit-Change(emit *)`；存量程序行为逐字节不变
+   由 run-diff 验收。
 4. **刀 3（可选，另行立项）**：运算符 trait（`xs[i]` 的 index_wanted 特判退休，
    checker.dawn:3874）——等刀 2 落地后按 #110 的立项纪律单开。
 

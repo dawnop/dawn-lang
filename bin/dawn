@@ -127,8 +127,12 @@ if [ "$needs_build" = 1 ]; then
   STAGE1="$ROOT/build/dawn-selfhost.stage1.jar"
   echo "dawn: rebuilding the selfhost toolchain (sources changed)..." >&2
   mkdir -p "$ROOT/build"
+  # stage 1 pairs the seed with the std it released with (seed_std_dir), not
+  # today's std/: since #44 knife 2 the repo std may use prelude machinery one
+  # generation ahead of the seed's checker. Stage 2 checks today's std with
+  # today's compiler, so nothing in the final jar escapes the current checker.
   "$JAVA" -Xss512m -jar "$SEED" build "$ROOT/selfhost" -o "$STAGE1" \
-    --std "$STD" \
+    --std "$(seed_std_dir)" \
     --vendor dawn/tool --vendor org/objectweb/asm --vendor coursierapi > /dev/null
   "$JAVA" -Xss512m -jar "$STAGE1" build "$ROOT/selfhost" -o "$SJAR.tmp" \
     --std "$STD" \

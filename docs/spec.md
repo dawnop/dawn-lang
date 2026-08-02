@@ -412,11 +412,20 @@ fn sort2[T: Ord2](xs: List[T]) -> List[T] = ...   # 约束：[T: Trait (+ Trait)
 ```
 
 - trait 恰有一个类型参数；方法进入模块函数命名空间（可直呼、可 UFCS、可管道）。
-- **预置 trait 四个**：`Ord`（`cmp`，背后是 `<`/`<=` 之外的排序）、`Eq`（`eq`，
+- **预置 trait 五个**：`Ord`（`cmp`，背后是 `<`/`<=` 之外的排序）、`Eq`（`eq`，
   背后是 `==`/`!=`）、`Hash`（`hash`）、`Show`（`show`，背后是 `to_string` 与
-  `${...}`）。标量的 impl 随语言提供；`derive Ord` / `derive Show` 铸的是普通
-  impl，泛型类型上铸的是条件 impl。元组没有 head，写不出 impl，四者对元组由
-  编译器按结构合成。
+  `${...}`）、`Iter`（背后是 `for..in`，§4.7）。标量的 impl 随语言提供；
+  `derive Ord` / `derive Show` 铸的是普通 impl，泛型类型上铸的是条件 impl。
+  元组没有 head，写不出 impl，前四者对元组由编译器按结构合成。
+- **`Iter`** 声明两个关联类型与四个方法（关联类型见本节下方）：
+  `trait Iter[C] { type Cur  type Item  fn iter_start(c: C) -> C.Cur
+  fn iter_done(c: C, k: C.Cur) -> Bool  fn iter_next(c: C, k: C.Cur) -> C.Cur
+  fn iter_get(c: C, k: C.Cur) -> C.Item }`——游标式四方法而非返回配对的 `next`，
+  一步不强制任何分配（游标形状由 impl 定）。std 为 `List`/`String`/`Bytes`/
+  `Map`/`Set` 各提供一个 impl（元素分别是 `T`/单字符 `String`/`Int` 字节/
+  `(K, V)`/`T`）；用户类型实现 `Iter` 即可被 `for` 迭代。四个方法名随 prelude
+  注入函数命名空间，**顶层 `fn` 不得重名**（同其余 prelude trait 方法；
+  「遮蔽 builtin/std」的 §10.3 规则不适用于 trait 方法名）。
 - **一致性**：全程序每个「trait × 类型」至多一个 impl；**孤儿规则**：impl 只能
   写在 trait 或主体类型的声明模块。impl 全局生效，不需要 `use`。
 - **主体形状**：一个类型构造器，作用在**互不相同的类型变量**上，而那些变量恰好是
@@ -715,7 +724,12 @@ while queue.non_empty() { ... }
   无标签形式——需要多层跳出请提取函数用 `return`。comptime 循环同样支持。
   `with` 之后的语句也是一个闭包的体（§4.10），所以那里的 `break` 同样够不到外面的
   循环——诊断会点名 `with`，而不是说一个作者没写的 lambda。
-- `for x in a..b` 支持右开区间的整数范围。
+- **`for x in e` 迭代任何实现了 `Iter` 的类型**（预置 trait，§3.5）：脱糖为对
+  `iter_start/iter_done/iter_next/iter_get` 的普通 trait 调用，元素类型是该 impl
+  的 `Item`。std 的五个容器（`List`/`String`/`Bytes`/`Map`/`Set`）开箱可迭代；
+  泛型函数里 `[C: Iter]` 的参数同样可 `for`（字典转发）。迭代序即 impl 的游标序
+  （`String` 按码点、`Map`/`Set` 同 `entries`/`to_list`）。
+- `for x in a..b` 支持右开区间的整数范围（不经 `Iter`）。
 
 惯用风格优先 `map`/`filter`/`fold`；循环是给性能敏感处和口味用的。
 
@@ -1603,7 +1617,10 @@ std 一起捆绑、在 std 内部互相引用，但 **std 之外 `use std/hamt` 
 `catch_fault`/`catch_panic`/`bracket`/`args` 等一屏以内（全集见 `dawn doc --builtins`）。
 
 **顶层声明可以遮蔽 builtin/std 函数名**（§10.3，Rust 式）：解析序是本模块声明 →
-std → 内建，std 模块自己的 `pub fn len` 正是靠这一条合法。
+std → 内建，std 模块自己的 `pub fn len` 正是靠这一条合法。**prelude trait 的方法名
+除外**：`cmp`/`eq`/`hash`/`show` 与 `iter_start`/`iter_done`/`iter_next`/`iter_get`
+随 prelude 进入函数命名空间，顶层 `fn` 重名是声明期错误（trait 方法共享函数命名空间，
+§3.5）。
 
 > **历史（v0.4.0 → v0.5.0）**：模块化之前的平铺拼写（`map_insert`、`str_len`、
 > `trim` 的隐式可见等）在 v0.4.0 保留了一版并逐处警告，v0.5.0 已从公开命名空间
