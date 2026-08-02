@@ -1,0 +1,81 @@
+# The Iter trait as `for..in`'s desugar (#44 knife 2): every std impl, on
+# both backends.
+#
+# What this pins:
+#   - for over List / String / Bytes / Map / Set: each impl's element shape
+#     (T / one-char String / byte Int / (K, V) / T) and iteration order
+#     (list order, code-point order, byte order, entries order, to_list order)
+#   - a `for` inside a `[C: Iter]` generic function -- the loop dispatches
+#     through the forwarded dictionary, which no for could do before
+#   - `continue` still runs the step first (the 1-skipping sum)
+#   - a non-ASCII string walks by code point, not by UTF-8 byte
+use std/io
+use std/str
+use std/map
+use std/set
+use std/bytes
+
+fn join_for(c: List[String]) -> String = {
+  var out = ""
+  for s in c {
+    if out != "" { out = out ++ "," }
+    out = out ++ s
+  }
+  out
+}
+
+# generic: the same loop over anything Iter, rendered by the caller
+fn render_all[C: Iter](c: C, show1: fn(C.Item) -> String) -> String = {
+  var out = ""
+  for x in c {
+    if out != "" { out = out ++ "," }
+    out = out ++ show1(x)
+  }
+  out
+}
+
+pub fn main() -> Unit !io = {
+  # List
+  var sum = 0
+  for n in [1, 2, 3, 4] {
+    if n == 2 { continue }
+    sum = sum + n
+  }
+  io.println(to_string(sum))
+  # String: code points, one-char String elements
+  var upped = ""
+  for ch in "aé中🎉" {
+    upped = upped ++ ch ++ "."
+  }
+  io.println(upped)
+  # Bytes: Ints
+  var bs = ""
+  for b in bytes.utf8("é") {
+    if bs != "" { bs = bs ++ " " }
+    bs = bs ++ to_string(b)
+  }
+  io.println(bs)
+  # Map: (K, V) in entries order
+  let m = map.from([(1, "one"), (2, "two"), (3, "three")])
+  var pairs = ""
+  for e in m {
+    let (k, v) = e
+    if pairs != "" { pairs = pairs ++ " " }
+    pairs = pairs ++ to_string(k) ++ "=" ++ v
+  }
+  io.println(pairs)
+  # Set: elements in to_list order
+  var total = 0
+  for x in set.from([10, 20, 30, 20]) {
+    total = total + x
+  }
+  io.println(to_string(total))
+  # generic for, instantiated at three different impls
+  io.println(join_for(["a", "b"]))
+  io.println(render_all([5, 6, 7], n => to_string(n)))
+  io.println(render_all("xy", s => s))
+  io.println(render_all(m, e => {
+    let (k, _v) = e
+    to_string(k)
+  }))
+}

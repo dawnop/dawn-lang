@@ -75,3 +75,27 @@ fn show_go[T: Show](xs: List[T], i: Int, n: Int, acc: String) -> String =
 impl[T: Show] Show[Set[T]] {
   fn show(s: Set[T]) -> String = "set.from([" ++ show_go(to_list(s), 0, len(s), "") ++ "])"
 }
+
+# ---- iteration (prelude Iter, #44 knife 2) ----
+
+## `for x in s` yields elements in `to_list`'s order (first-occurrence
+## insertion order, like every set walk). Same materialised cursor as the
+## Map impl, for the same reasons -- see std/map.
+impl[T: Eq + Hash] Iter[Set[T]] {
+  type Cur = (List[T], Int)
+  type Item = T
+
+  fn iter_start(s: Set[T]) -> (List[T], Int) = (to_list(s), 0)
+  fn iter_done(s: Set[T], c: (List[T], Int)) -> Bool = {
+    let (_es, i) = c
+    i >= set_size(s)
+  }
+  fn iter_next(s: Set[T], c: (List[T], Int)) -> (List[T], Int) = {
+    let (es, i) = c
+    (es, i + 1)
+  }
+  fn iter_get(s: Set[T], c: (List[T], Int)) -> T = {
+    let (es, i) = c
+    es[i]
+  }
+}
