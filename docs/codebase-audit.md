@@ -822,6 +822,16 @@ closure、trait witness 和 FFI，再从该层生成 JVM。
 > 这个需求就自动消失了，那才是正解。
 >
 > 关联：TEST-02（这些结构没有直接测试）同样待办，且同样应由那条线一并解决。
+>
+> **2026-08-03 补记 —— 另一件续传二进制 `dawn/tool/AdtClassWriter` 已关闭。**
+> 它不是本条正文说的集合运行时，但落在同一句指控里（「续传的 class 本身仍无独立
+> checksum」）。K-A0.5 先给它记了哈希（缓解），K-A4 让它的危险那一半不可达
+> （**按用户裁决仍记缓解，不记关闭**——不可达是关于当天调用点的论断，不是文件的性质），
+> K-A7 期 2+3 才真的拿掉：五个适配器改由 `rtclasses.dawn` 发射成 `dawn/rt/Asm`，
+> `dawn/tool` 退出 `--vendor` 与 `vendor_trust`，`unzip -l` 里已经没有它
+> （docs/jvm-base-plan.md §5.7）。**剩下的是**：第 N 代 jar 里的 `dawn/rt/Asm` 由第
+> N−1 代发射——那是自举常态、DDC 处理得了，与「源码不存在」两回事；
+> `org/objectweb/asm` 与 `coursierapi` 一个字节没动。
 
 
 `selfhost/src/vendor.dawn:3` 明确 `DawnList/DawnMap/DawnSet` 的源码只在

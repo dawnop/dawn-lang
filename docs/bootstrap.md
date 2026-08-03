@@ -13,10 +13,15 @@
 **现行形态（M8 后）**：种子 = `scripts/seed-release.txt` 钉住的上一 release 的
 `dawn-selfhost.jar`。`bin/dawn` 首次运行自动下载到 `.dawn/seeds/` 并用它编译
 HEAD 工具链（`DAWN_SEED=<jar>` 指本地 jar 逃生）。种子 jar 自带一切：编译器类、
-`--embed-std` 嵌入的 std 源、vendored 的 `dawn.tool` shim / ASM / coursier
-interface——这三样二进制自 `kotlin-final` 起像 OCaml 的 `boot/` 一样**随种子
-逐代续传**（vendor 从当前运行 jar 的类路径拷出），不再有对应的在库源码
-（`dawn.tool` 的 Kotlin 源在 `kotlin-final` tag 里）。
+`--embed-std` 嵌入的 std 源、vendored 的 ASM / coursier interface——这两样二进制
+像 OCaml 的 `boot/` 一样**随种子逐代续传**（vendor 从当前运行 jar 的类路径拷出），
+在库没有对应源码。
+
+> 曾经是三样：`dawn.tool` 的 `AdtClassWriter` shim 也在里面，源码只在 `kotlin-final`
+> tag。**2026-08-03（v0.49.0 之后）它退出了**——那五个 null 适配器改由 `rtclasses.dawn`
+> 发射成 `dawn/rt/Asm`，`dawn/tool` 从 `--vendor` 和 `vendor_trust` 里删掉
+> （docs/jvm-base-plan.md §5.7 K-A7）。它现在是**由上一代编译器发射**的类，而不是
+> 无源逐字节抄的二进制——前者是自举常态、DDC 能处理，后者不能。
 
 **信任链根**：学 Go 保留 go1.4，Kotlin 版编译器 v0.6.0 冻结为 bootstrap 根。
 v0.6.0–v0.8.0 的 release jar 永久保存；`kotlin-final` tag 保有 Kotlin 全源，
@@ -83,7 +88,7 @@ v0.6.0–v0.8.0 的 release jar 永久保存；`kotlin-final` tag 保有 Kotlin 
 ./scripts/selfhost-fixpoint.sh
 
 # 手工展开（release.yml 的祝圣即此链，B 是上传的那份）：
-V="--std std --embed-std std --vendor dawn/tool --vendor org/objectweb/asm --vendor coursierapi"
+V="--std std --embed-std std --vendor org/objectweb/asm --vendor coursierapi"
 java -Xss512m -jar seed.jar build selfhost -o a.jar $V
 java -Xss512m -jar a.jar    build selfhost -o b.jar $V
 java -Xss512m -jar b.jar    build selfhost -o c.jar $V
@@ -97,9 +102,10 @@ cmp b.jar c.jar
 
 codegen 是确定性的：同一份源经同一实现必出同字节。**帧已经不算了**——发射的 class
 是版本 49，那以下 JVM 用推断式校验器、不要 `StackMapTable`，写入器是 COMPUTE_MAXS
-（docs/jvm-base-plan.md K-A4）。vendored 的 `dawn.tool.AdtClassWriter` 仍随种子逐代
-续传、从不重编，但只当五个静态 null 适配器用（ASM 的 `visit*` 要 null，Dawn 源码拼不出），
-它那半公共超类解析已不可达。历史上的跨实现验收（Kotlin vs selfhost 的 `__lex/__parse/__check/
+（docs/jvm-base-plan.md K-A4）。那五个静态 null 适配器（ASM 的 `visit*` 要 null，
+Dawn 源码拼不出）现在是编译器自己发射的 `dawn/rt/Asm`；`dawn.tool.AdtClassWriter`
+曾经随种子逐代续传、从不重编，K-A7 之后已退出（jvm-base-plan.md §5.7）。
+历史上的跨实现验收（Kotlin vs selfhost 的 `__lex/__parse/__check/
 __emit` 全仓逐字节对拍）已随 `kotlin-final` 完成使命；现行 oracle 是
 **N vs N−1**（`selfhost-prev-diff.sh`：上一 release 与 HEAD 编同一语料 +
 backend-dawn 生态扫描，未声明的字节差异红灯）加 CLI/格式化/LSP 三条转写差分

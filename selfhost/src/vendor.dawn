@@ -239,26 +239,15 @@ pub type VendorTrust =
 ## seed's copy of a vendored class is still caught, because stage 1 carries
 ## that copy forward and stage 2's build hashes it.
 fn vendor_trust(prefix: String) -> Option[VendorTrust] =
-  # dawn/tool: one class, AdtClassWriter, 5,148 bytes. The only handwritten
-  # Java left in the toolchain, and its source is not in this tree -- it is at
-  # `kotlin-final:compiler/src/main/java/dawn/tool/AdtClassWriter.java` and has
-  # been byte-propagated from seed to seed ever since.
-  #
-  # Since K-A4 nothing constructs it: the emitters take a plain ASM
-  # ClassWriter and reach this class only for its five static methods, which
-  # pass the nulls ASM's visit signatures want and Dawn cannot spell. The
-  # half that wrote frames -- both constructors, the supers map, chain(),
-  # the getCommonSuperClass override -- is unreachable now.
-  #
-  # Unreachable is not gone. The bytes are still here, still unbuildable
-  # from this tree, and reachability is an argument about today's call sites,
-  # not a property of the file: reflection does not respect it and the next
-  # edit can undo it. This stays a mitigation until the adapters are emitted
-  # from source (docs/jvm-base-plan.md K-A7), which is what would actually
-  # retire the digest below.
-  if prefix == "dawn/tool" {
-    Some(Digest("916e397cc4a2451671925ea31b89faf2a5097ab3f1e652667eaa31f0cafb6601"))
-  } else if prefix == "org/objectweb/asm" {
+  # `dawn/tool` used to be listed here: one class, AdtClassWriter, 5,148
+  # bytes, the only handwritten Java in the toolchain, source only at
+  # `kotlin-final:compiler/src/main/java/dawn/tool/AdtClassWriter.java` and
+  # byte-propagated from seed to seed. K-A4 made it unreachable and K-A7
+  # replaced it: `dawn/rt/Asm` is emitted from `rtclasses.dawn` and every call
+  # site names it, so the package left `--vendor` entirely and there is
+  # nothing here to hold to a digest. Recording it as a hash was a mitigation;
+  # not copying it at all is the removal.
+  if prefix == "org/objectweb/asm" {
     # 38 classes, 253,894 bytes: the other bytecode writer with no source here.
     # Hashing it costs ~36 ms per vendor pass (measured: this SHA-256 runs at
     # ~7 MB/s, from timing 5 KB / 254 KB / 10 MB inputs through it), which is
@@ -331,8 +320,8 @@ fn check_vendored(prefix: String, pairs: List[(String, Bytes)]) -> Unit = {
 ## Every .class under package path `prefix` (e.g. "org/objectweb/asm") found
 ## on java.class.path, as (class name, bytes) pairs sorted by name. The first
 ## class-path entry providing a class wins, like the class loader. This is how
-## `selfhost build` packs the compiler-jar residents (the dawn.tool shim, ASM)
-## into a standalone jar.
+## `selfhost build` packs the compiler-jar residents (ASM, the coursier
+## interface) into a standalone jar.
 ##
 ## Every `--vendor` in the repository goes through here -- bin/dawn's two build
 ## stages, selfhost-fixpoint.sh, replay-bootstrap.sh, selfhost-bench.sh -- so
@@ -407,7 +396,7 @@ test "an empty package is not silently the same as any other" {
 }
 
 test "every declared vendor package carries a usable decision" {
-  for p in ["dawn/tool", "org/objectweb/asm", "coursierapi"] {
+  for p in ["org/objectweb/asm", "coursierapi"] {
     match vendor_trust(p) {
       None -> panic("undeclared vendor package in the repository's own build: " ++ p)
       Some(Exempt(why)) -> { assert str.len(why) > 0 }
@@ -419,6 +408,9 @@ test "every declared vendor package carries a usable decision" {
       }
     }
   }
-  # the prefixes bin/dawn actually passes are declared; anything else is not
+  # the prefixes bin/dawn actually passes are declared; anything else is not.
+  # `dawn/tool` is in this list on purpose: K-A7 retired it, and a vendor pass
+  # that starts copying it again must be refused rather than silently trusted.
   assert vendor_trust("dawn/rt") == None
+  assert vendor_trust("dawn/tool") == None
 }

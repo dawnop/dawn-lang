@@ -18,9 +18,13 @@ JVM 后端的**可信底座**里有三样东西不是从这棵树里构建出来
 
 | 东西 | 体量 | 源码在哪 | 它干什么 |
 |---|---|---|---|
-| `dawn/tool/AdtClassWriter` | 1 个类，5,148 B | **不在工作树**，只在 `kotlin-final` tag | **写 class 文件** |
+| ~~`dawn/tool/AdtClassWriter`~~ | ~~1 个类，5,148 B~~ | ~~**不在工作树**，只在 `kotlin-final` tag~~ | ~~**写 class 文件**~~ |
 | `org/objectweb/asm` | 38 个类，253,894 B | 第三方（Maven） | **写 class 文件** |
 | `coursierapi` | 2,409 个类，10,057,897 B | 第三方（Maven） | 解析/下载依赖 |
+
+> 第一行已于 2026-08-03 **划掉**：K-A7 期 2/3 把那五个适配器换成从 `rtclasses.dawn`
+> 发射的 `dawn/rt/Asm`，`dawn/tool` 退出 `--vendor` 与 `vendor_trust`，那个类不再
+> 进任何 jar（§5.7 期 2+3 落地记）。**另外两行原封不动。**
 
 三者都靠 `--vendor` 从**正在跑的编译器自己的 classpath**（也就是上一代种子 jar）
 按字节抄进新 jar，代代相传。`selfhost-fixpoint.sh` 的 B==C 对此完全失明：
@@ -287,7 +291,7 @@ bootstrap 只用了 `LambdaMetafactory.metafactory` 一种（无 `altMetafactory
 | **K-A3** | 闭包下降：`emit.dawn:1494` + `emit.dawn:656` → 显式类；81 处零捕获做单例。**仍在 V61 + COMPUTE_FRAMES 下做** | **Emit-Change，不可逆** | **已做**（§5.5） |
 | **K-A5** | 门禁：发射的常量池不得出现 tag 15/16/17/18 | 只加门禁 | **已做**（随 K-A3） |
 | **K-A4** | `jvmops.dawn` `V17 = 61` → `V49 = 49`；改走 `AdtClassWriter.plain(COMPUTE_MAXS)` 的静态适配器；删 `rtclasses.supers_of` 与整条 `supers` 参数链 | **Emit-Change**，D5 承诺点 | **已做**（§5.6） |
-| **K-A7** | **让 Dawn 自己发射那五个 null 适配器**（`dawn/rt/Asm`），`dawn/tool` 整体退出 `--vendor` | 三期种子纪律，可回退 | **期 1 已做**（§5.7），期 2/3 各等一次发布 + 推进种子 |
+| **K-A7** | **让 Dawn 自己发射那五个 null 适配器**（`dawn/rt/Asm`），`dawn/tool` 整体退出 `--vendor` | 三期种子纪律，可回退 | **全部已做**（§5.7）：期 1 一次发布，期 2+3 合并在 v0.49.0 之后一次落地 |
 | **K-A6** | 端到端重测 §3.3 的启动数（那两个数是微基准加减） | 只测量 | **已做**（随 K-A4，见 §3.3） |
 
 **K-A2（用 Dawn 重写 `AdtClassWriter`）已取消。** 见 §5.1：K-A4 之后没有 classfile
@@ -561,6 +565,10 @@ ASM `ClassWriter`**，再用那五个**静态**适配器（`beginOn` / `beginOnW
 BOOT-01 的状态照此；`selfhost/src/vendor.dawn` 的 `vendor_trust` 注释里也写了同一句话。
 真正关门的是 **K-A7**（§5.7），不是本刀。
 
+> 后续（2026-08-03）：K-A7 期 2+3 落地，那个类已不在 jar 里，本段的「缓解」到那时才
+> 转为「关闭」。这一段留着，因为它记录的是**为什么不可达不等于消失**——这个判据本身
+> 没有过期。
+
 （顺带排除掉另一条路：**能不能绕开这个适配器直接从 Dawn 调 ASM**？`plain` 可以——它只是
 构造器包装，Dawn 写 `ClassWriter.new(1)` 就够。另外四个不行：`visit`/`visitField`/
 `visitMethod` 的 `signature`/`interfaces`/`value` 形参要 null，**Dawn 源码拼不出 null**。
@@ -819,6 +827,159 @@ label 在**全部六个语料**上一直盲到下次推进种子；按需发射�
 **这一刀没有关掉什么**（别把它读成 BOOT-01 已收）：`dawn/tool/AdtClassWriter.class`
 仍然在 jar 里、仍然是全部调用点的目标、仍然是 5,148 字节。期 1 只是把**下一代种子的
 classpath 备好**。真正的减法在期 3。
+
+#### 期 2 + 期 3 落地记（v0.49.0 之后，2026-08-03）
+
+**期 3 折进了期 2，省掉一次发布。** §5.7 原本排了三次发布，这里改正它：**测出来
+只需要两次** `[实测]`。
+
+原文把「期 3 要等一次发布 + 推进种子」当成前提写死了。实际前提只有一条——
+**种子的 classpath 上要有 `dawn/rt/Asm`**，而那正是 v0.49.0 供上的；期 3 自己的
+前提是「没有源码再引用 `dawn/tool`」，这在期 2 的同一个提交里就已成立。链条走一遍：
+种子（期 1 那代）带 `dawn/rt/Asm` → 它编期 2 的源码得 A，`use java "dawn.rt.Asm"`
+对着种子的 classpath 解析通过，A 的 jar 里的 `dawn/rt/Asm` 是**种子发射**的
+（A 仍 import `ClassWriter`，`program_has_asm` 仍为真）→ A 编出 B、B 编出 C，各自
+对着上一代的 classpath 解析。**不是论证，是跑出来的**：`selfhost-fixpoint.sh`
+**B == C**、`native-fixpoint.sh` **B == C**，两条都在 `--vendor dawn/tool` 已删掉
+之后跑的 `[实测]`。
+
+**期 2 做了什么**：`use java "dawn.rt.Asm"` 进四个发射器，`AdtClassWriter.` 前缀
+在 `emit`/`codegen`/`rtclasses`/`testrun` 里替换掉，`gen_asm_class` 自己也改用 `Asm`
+——这一代用 N−1 代的适配器写新适配器。源码调用点 **114 处**，与 §5.7 预告的
+发射调用点数**恰好相同** `[实测]`（`emit` 27 / `codegen` 22 / `rtclasses` 60 /
+`testrun` 5）。顺手把 `scratch_mv` 那个一次性写入器的名字从 `dawn/tool/Scratch`
+改成 `dawn/rt/Scratch`：它从不落盘，但留着会让「没有源码再提 `dawn/tool`」这句话
+在 grep 下不成立。
+
+**期 3 做了什么**：`--vendor dawn/tool` 从 `bin/dawn`（两个构建阶段）、
+`scripts/selfhost-fixpoint.sh`、`scripts/replay-bootstrap.sh`、
+`scripts/selfhost-bench.sh`、`.github/workflows/release.yml` 里删掉；
+`vendor.dawn` 的 `vendor_trust` 去掉 `dawn/tool` 分支和那个 digest。
+`vendor.dawn` 的测试里**新加一条 `assert vendor_trust("dawn/tool") == None`**——
+退休了的前缀要是哪天又被 `--vendor` 抄进来，走的是「未登记 → panic」那条路，
+而不是被默默信任。
+
+**调用点真的移了：**`[扫描]`**。** 这是本刀最容易假绿的地方：两个适配器**行为完全
+一致**（`asm-adapter-contract` 证的就是这个），所以只要 `dawn/tool` 还在 classpath
+上，一处都没改的编译器**照样构建、照样自举、门禁照样全绿**。
+新门禁 `scripts/adapter-callsites.py` 读发射出来的常量池直接回答：
+
+```
+scanned 1048 class files in 1 directory
+  name dawn/rt/Asm:  5 classes
+  name dawn/tool/*: 0 references
+OK: the adapter surface is reached, and only at dawn/rt/Asm
+```
+
+`javap -c` 独立复核（1048 个类的反汇编按成员名计数）`[实测]`：
+
+| | `methodOn` | `plain` | `beginOn` | `fieldOn` | `beginOnWithInterface` | 合计 |
+|---|---|---|---|---|---|---|
+| `dawn/rt/Asm` | 54 | 22 | 18 | 16 | 4 | **114** |
+| `dawn/tool/AdtClassWriter` | 0 | 0 | 0 | 0 | 0 | **0** |
+
+**两条断言缺一不可**，因为各自单独都是可满足的。「没有 `dawn/tool` 引用」在空目录上
+恒真——拿 `site` 语料（没有 ASM）实跑一遍就能看见 `[实测]`：
+
+```
+scanned 177 class files in 1 directory
+  name dawn/rt/Asm:  0 classes
+  name dawn/tool/*: 0 references
+FAIL: nothing names dawn/rt/Asm -- the adapters are not reached at all
+```
+
+**新门禁的红演示 + 负控** `[实测]`。变异体 M1：`codegen.dawn` 里**一处**调用点改回
+`AdtClassWriter.methodOn`（连带补回 `use java`），退出码 1，且指得出是哪个类：
+
+```
+scanned 1048 class files in 1 directory
+  name dawn/rt/Asm:  5 classes
+  name dawn/tool/*: 1 references
+FAIL: 1 reference(s) to the vendored adapter remain
+      /tmp/ka7-emit/codegen.class: dawn/tool/AdtClassWriter
+```
+
+负控 M2：把 `scratch_mv` 的名字**改回** `"dawn/tool/Scratch"`——一个真实落在字节里的
+改动（`emit.class` 前后 `cmp` 不同，实测确认它落地了），而这道门禁**照旧绿**。
+这就是负控要证的事：它读的是常量池里的 `CONSTANT_Class`，不是「文本里出现过
+`dawn/tool`」，所以它不是个「什么都变红」的报警器。两个变异体的输出不同、且都与
+正确版本不同，门禁因此是有判别力的。
+
+**`dawn/tool` 出 jar 了** `[实测]`：
+
+```
+$ unzip -l build/dawn-selfhost.jar | grep -E "dawn/tool|dawn/rt/Asm"
+     1225  2020-01-01 00:00   dawn/rt/Asm.class
+```
+
+（`dawn/tool/AdtClassWriter.class` 无匹配。）编译器照常工作：`dawn --version`、
+`dawn test selfhost` 299 项、`classfile-verify` selfhost 语料仍 1048 个类
+**0 illegal / 0 not initializable**——`not initializable` 为 0 说明 `dawn/rt/Asm`
+真的链得上，不是躺着的死类。
+
+**`asm-adapter-contract` 的参照换了源，红演示重跑过。** 期 3 之后 jar 里没有
+`dawn.tool.AdtClassWriter` 了，`Class.forName(REF)` 无处可取。参照改成**从
+`kotlin-final` tag 的 Java 源现编**（`git show` + `javac`）——这比读 jar 里那份
+二进制更好：它是那份二进制的来源，而且不会随二进制一起消失。门禁日志里打出参照
+的 code source（`from file:.../ref/`），换没换一眼可见。
+
+改了门禁就要重跑它的红演示。变异体 2（`beginOn` 把 `name` 当 `signature` 传）
+**复现出与期 1 逐字相同的形状** `[实测]`——2 红 5 绿，红的恰是走 `beginOn` 的两项：
+
+```
+FAIL  beginOn/fieldOn/methodOn produce identical class files
+PASS  beginOnWithInterface produces an identical class file
+FAIL  plain(0) produces an identical class file
+PASS  the probe is flag-sensitive (COMPUTE_MAXS differs from 0)
+PASS  the emitted adapter forwards its flag
+PASS  the emitted adapter's class links and runs (square(7) == 49)
+PASS  the interface form declares its interface
+FAIL: 2 adapter difference(s); dawn/rt/Asm is not a drop-in for dawn.tool.AdtClassWriter
+```
+
+**变异体 1（`plain` 不转发 flag）的红变了形状，这是期 2 带来的真实变化** `[实测]`。
+期 1 里 `gen_asm_class` 用参照适配器写这个类，所以写出来的类**本身是良构的**，只是
+`plain` 的方法体不对，门禁能跑完七项报 5 红。期 2 之后它**用自己写自己**，同一个缺陷
+自我作用：写出来的 `dawn/rt/Asm.class` 连 `maxLocals` 都不对，加载即
+`ClassFormatError`，后面一项也比不了。红更早更狠，但**判别信息变少了**。为此给
+`Diff.java` 加了一层：把加载失败报成一条 FAIL 行而不是裸栈：
+
+```
+FAIL  the emitted dawn.rt.Asm is a loadable class file
+      java.lang.ClassFormatError: Arguments can't fit into locals in class file dawn/rt/Asm
+FAIL: the emitted adapter does not load; no entry point could be compared
+```
+
+改回来即刻回到 7 项全绿。
+
+**BOOT-01 的状态：`dawn/tool` 这一项从「缓解」转为「关闭」，但要说清楚剩下什么。**
+按用户的裁决——「如果结论是『留着但不可达』，那记成缓解措施而不是关闭」——K-A4 当时
+只能记缓解，因为那 5,148 字节还在 jar 里，不可达只是个关于当天调用点的论断。现在
+**它不在 jar 里了，也不在 `vendor_trust` 里，也不在任何 `--vendor` 的调用里**，
+所以这一项可以记成关闭。
+
+**关闭的是「无源二进制」这个性质，不是「不依赖上一代」**：第 N 代 jar 里的
+`dawn/rt/Asm` 仍然是第 N−1 代发射的。那是编译器自举的常态、也正是 DDC
+（diverse double-compiling）能处理的形状，与「源码不存在、只能逐字节抄」是两回事——
+后者 DDC 无从下手。另外 **`org/objectweb/asm`（38 类 / 253,894 B）与
+`coursierapi`（2,409 类 / 10,057,897 B）原封不动**，两者都还在 `--vendor` 和
+`vendor_trust` 里（前者记哈希、后者按成本豁免）。§0 那张表现在少了第一行，另外两行
+一个字没动。
+
+**V49 这条线拆掉的是二进制里危险的那一半**——写 class 文件的那个手写 Java 没了源码
+问题。jar 体积那类副产品不是这一刀的论点，别让它爬到叙述前面来。
+
+**门禁**（本次逐条跑过，全绿）：`dawn fmt --check`、`dawn test selfhost` 299 项、
+`dawn test site`、五个包的测试、JSON 套件、`classfile-verify`（八语料 1948 类，
+0 illegal / 0 not initializable，含常量池 tag 15/16/17/18 扫描）、
+`asm-adapter-contract` 7/7、**`adapter-callsites`（新）**、`selfhost-fixpoint` B == C、
+`native-fixpoint` B == C、`spike-native`、`native-cli-diff`、`core-diff`
+（`changed` 桶两次都恰好是我改的模块：期 2 是 `codegen`/`emit`/`main`/`rtclasses`/
+`testrun`，期 3 是 `vendor` 一个；**无 ADT-shifted 桶、无余数**，两次都 `--record`
+重录、没有手动合并）、`selfhost-prev-diff` 六语料 + 生态三项、`run-diff`、`fmt-diff`、
+`lsp-diff`、`doc-check`、`intrinsic-parity`、`opaque-twin`、
+array/hamt/pvec/path/inflate/unicode/error/rc 八个契约、`table-freight`、
+`grammar-corpus`、`checker-corpus`、`lock --check`。
 
 ### 5.8 V49 未必是单向门：一半成立，一半已被实验证伪（§4 第 17 条）
 

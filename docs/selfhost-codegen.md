@@ -217,6 +217,6 @@ Kotlin CodeGen 从 checked AST 读的注解，逐一映射到 TAST：
   确定性——manifest 在先、时间戳钉死，同类表必出同字节）。`--vendor` 用
   vendor.classpath_package 从 java.class.path 按包前缀拷类（首个命中的
   class-path 条目赢，同类加载器语义）；打 selfhost 自身时 vendor 进
-  dawn/tool（AdtClassWriter shim）+ org/objectweb/asm，产物单独可跑。
+  org/objectweb/asm（K-A7 之前还有 dawn/tool 的 AdtClassWriter shim），产物单独可跑。
   验收 `scripts/selfhost-standalone.sh`（CI）：独立性（只挂 standalone jar
   重发射 calc 逐字节一致）+ 闭包（standalone jar 重建自身逐字节一致）。

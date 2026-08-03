@@ -62,7 +62,7 @@ mkdir -p "$OUT"
 trap 'rm -rf "$OUT"' EXIT
 
 VENDOR=(--std std
-  --vendor dawn/tool --vendor org/objectweb/asm --vendor coursierapi)
+  --vendor org/objectweb/asm --vendor coursierapi)
 
 SEED="$(seed_jar)"
 seed_tag=$(tr -d ' \n' < "$ROOT/scripts/seed-release.txt")

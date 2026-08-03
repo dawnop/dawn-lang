@@ -16,11 +16,11 @@ mkdir -p "$OUT"
 trap 'rm -rf "$OUT"' EXIT
 
 VENDOR=(--std std
-  --vendor dawn/tool --vendor org/objectweb/asm --vendor coursierapi)
+  --vendor org/objectweb/asm --vendor coursierapi)
 # the seed builds A against its own released std (it may not be able to check
 # today's std/ -- see seedjar.sh seed_std_dir); B and C use today's std
 SEED_VENDOR=(--std "$(seed_std_dir)"
-  --vendor dawn/tool --vendor org/objectweb/asm --vendor coursierapi)
+  --vendor org/objectweb/asm --vendor coursierapi)
 
 SEED="$(seed_jar)"
 java -Xss512m -jar "$SEED" build selfhost -o "$OUT/a.jar" "${SEED_VENDOR[@]}" > /dev/null

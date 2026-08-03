@@ -7,8 +7,9 @@
 #     seed = a jar path, or a release tag like v0.7.0 (downloads its jar)
 #
 # Both seed shapes work unchanged: a Kotlin dawn.jar and a selfhost
-# dawn-selfhost.jar both answer `build selfhost`, and both carry ASM plus the
-# dawn.tool frame-writer shim — which is all the class-path tail must supply.
+# dawn-selfhost.jar both answer `build selfhost`, and both carry ASM — which
+# since K-A7 is all the class-path tail must supply (the null adapters used to
+# come from a vendored dawn.tool shim; the compiler emits them now).
 # The seed must be at or above the seed floor recorded in docs/bootstrap.md
 # (selfhost/src only uses features the current seed already has).
 #
@@ -41,7 +42,7 @@ cd "$(dirname "$0")/.."
 # --std std explicitly: an old seed's *default* std is its embedded copy, but
 # the replay must compile today's sources against today's std
 VENDOR=(--std std
-  --vendor dawn/tool --vendor org/objectweb/asm --vendor coursierapi)
+  --vendor org/objectweb/asm --vendor coursierapi)
 
 # 1) the seed compiles today's selfhost sources
 java -Xss512m -jar "$SEED" build selfhost -o "$OUT/boot.jar" --std std > /dev/null

@@ -378,8 +378,9 @@ stage0（Kotlin）发射 selfhost → stage1；selfhost 发射自己（432 类�
 
 独立 jar 也已补上（2026-07-22）：`selfhost build <t> -o out.jar [--vendor <pkg>]…`
 （jarw.dawn 确定性写 jar + vendor.classpath_package 从 class path 拷包）。
-`--vendor dawn/tool --vendor org/objectweb/asm` 把 frame-writer shim 和 ASM
-一并打进产物，`java -jar` 单独可跑。两道验收进 CI（`scripts/selfhost-standalone.sh`）：
+`--vendor org/objectweb/asm` 把 ASM 打进产物，`java -jar` 单独可跑
+（K-A7 之前还要 `--vendor dawn/tool` 带上 frame-writer shim；那五个适配器现在由
+编译器自己发射成 `dawn/rt/Asm`，见 jvm-base-plan.md §5.7）。两道验收进 CI（`scripts/selfhost-standalone.sh`）：
 独立性（只挂 standalone jar 重发射 calc 逐字节一致）与闭包（standalone jar
 重建自身，两个 jar 逐字节一致）。
 Kotlin 版已冻结为 bootstrap 种子（2026-07-22，自 v0.6.0；学 Go 保留 go1.4）——

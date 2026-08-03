@@ -135,7 +135,21 @@ public class Diff {
 
   public static void main(String[] args) throws Exception {
     Class<?> ref = Class.forName(REF);
-    Class<?> now = Class.forName(NEW);
+    // Since phase 2 `gen_asm_class` writes the adapter *with* the adapter, so
+    // a defect in it can make the emitted class file malformed rather than
+    // merely wrong -- and then nothing below can run. Say which class failed
+    // to load instead of letting a raw ClassFormatError be the whole report.
+    Class<?> now;
+    try {
+      now = Class.forName(NEW);
+    } catch (Throwable t) {
+      check("the emitted " + NEW + " is a loadable class file", false);
+      System.out.println("      " + t);
+      System.err.println("FAIL: the emitted adapter does not load; no entry point could be "
+          + "compared");
+      System.exit(1);
+      return;
+    }
     System.out.println("reference " + ref.getName() + " from " + where(ref));
     System.out.println("emitted   " + now.getName() + " from " + where(now));
 
