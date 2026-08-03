@@ -43,16 +43,23 @@ pub type AliasE = {
   nhi: Int
 }
 
-## The part of the checker state that an isolated body -- a comptime block, a
-## const initializer, an unsafe_pure -- saves on the way in and restores on the
-## way out. `enter_isolated` hands the old frame back and `leave_isolated` puts
-## it back with one field write, where both used to copy eight fields by hand
-## through a twin record called EffFrame.
+## The part of the checker state that an isolated body -- a comptime block or a
+## const initializer, which are `enter_isolated`'s only two callers -- saves on
+## the way in and restores on the way out. `enter_isolated` hands the old frame
+## back and `leave_isolated` puts it back with one field write, where both used
+## to copy eight fields by hand through a twin record called EffFrame.
+## (`unsafe_pure` is *not* one of them, though this comment used to say it was:
+## `check_unsafe_pure` hand-saves `used_effects` and `eff_witness` and nothing
+## else, and never goes through here.)
 ##
 ## These eight are exactly the ones that twin listed: the type is the restore
 ## set, so a ninth field added here silently widens what an isolated body
 ## restores, and that change is invisible to every byte-level gate in the tree
-## (docs/arch-split-design.md D9 and §5.4). Fields that look like they belong --
+## (docs/arch-split-design.md D9 and §5.4). What does see it is the eight
+## `isolated_*` cases in scripts/checker-corpus/ plus the inline test beside
+## `leave_isolated`; the acceptance rule for both is the drop-restore matrix in
+## §5.4 -- drop one field from the restore and at least one of them must go red.
+## Fields that look like they belong --
 ## `current_tparams`, `current_tparam_bounds`, `current_eff_vars`, `loop_jumps`,
 ## `in_test` -- stay on `Cx` because today they are not restored, and `enter_fn`
 ## writes the first three from inside an isolated body whenever it holds a

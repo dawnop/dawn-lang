@@ -584,6 +584,57 @@ fixpoint、classfile-verify **全部看不见它**。
 > 3. **验收就用 drop-restore 矩阵**：八个变异必须各自至少让一条语料或一个 test 变红。
 >    全绿不代表通过，代表还没写到。
 
+> **★ #126 已结账（2026-08-03）。** 这条路径的安全边际不再是零。
+>
+> **现在守它的是三件**：`scripts/checker-corpus/cases/isolated_*.dawn` 八条语料
+> （`scopes` / `effects` / `sig` / `dicts` / `lambda` / `loop` / `flag` / `const`）、
+> `leave_isolated` 旁边那个内联 test（已重写：八个字段的**进**与**出**都断言），
+> 以及**验收纪律本身**——drop-restore 矩阵九行（八个字段各漏一个 + 什么都不恢复的
+> 极大对照）必须九行全红。九行都实跑过，都红。八条语料**每条的基线 golden 都非空**：
+> 一条 golden 为空的 case 在「一切正常」和「根本没跑到」两种情况下都是绿的，
+> 那正是它要替换掉的那个 test 犯的错。
+>
+> **副产品一：两个调用点不等重。** `enter_fn`（`checker.dawn:6651-6684`）在检查下一个
+> 函数体之前，会把八个字段里的**七个**重新写一遍：`current_sig` 直接写，
+> `dict_syms` 由 `bind_dicts`（`:6590`）**先清空再按新铸的 `vid` 重填**（两条分支都清，
+> 包括「这个签名没有任何约束」的提前返回那条），`used_effects`/`eff_witness`/
+> `lambda_stack`/`loop_stack`/`scopes` 在 `bind_dicts` 之后被整体重置。
+> 所以 **const initializer 那个站点的下游只有 `isolated` 可观察**，另外七个的恢复
+> 在那里是死重（它们的意义全在 comptime 那个站点，那里隔离体嵌在活着的函数中段）。
+> 这正是 `isolated_const` 这条语料只在 `drop isolated` 一行变红、别的行都不动的原因。
+>
+> **副产品二：`isolated` 恰好是 `enter_fn` 唯一不重置的字段。** 于是一个泄漏了它的
+> const initializer 会让**本模块后面每一个函数都哑掉**——`evidence_args:4704` 在
+> `isolated` 为真时抑制 `unhandled_effect`。八个字段里它的爆炸半径最大，而它又是最不像
+> 「状态」的那一个（一个 Bool）。
+>
+> **顺手修掉的一处注释谎言**：`cx.dawn` 原先说 `unsafe_pure` 也是保存这个帧的隔离体之一。
+> 不是。`enter_isolated` 全仓只有两个调用点（`:3280` comptime 块、`:6951` const
+> initializer）；`check_unsafe_pure`（`:3504`，手存在 `:3512-3521`）只存
+> `used_effects` + `eff_witness` 两个字段，根本不走这里。
+>
+> **一条关于本文自身的更正**：#126 的提交曾在提交信息里写「inline tests lower with the
+> module」，据此重录了 `selfhost.sha` 里的 `checker.core`。**那是错的，且方向与 B2 的实测
+> 相反**——实测：只出现在 test 块里的字面量 `'<not restored>'` 在 `checker.core` 里
+> **0 次命中**，而同一批里写在顶层 helper 函数中的 `outer_io` 命中 1 次。test 块**不下降到
+> Core**；当时动了 `checker.core` 的是那个顶层 helper。helper 挪进 test 块后
+> `checker.core` 与 `selfhost.norm.sha` 都**与 main 逐字节相同**。
+>
+> **但 test 块也不是完全免费的**：它虽不下降，却**要过类型检查**，而检查会从全局 id
+> 计数器取号。实测（在 pristine main 上逐级加码）：`test { assert 1 == 1 }` 是
+> **id 中性**的，而只要加一行 `let m: Map[String, Int] = map.insert(map.empty(), ...)`
+> 就会让 `emit`/`emitc`/`interp`/`reach` 四个模块的 `AdtNNNN` 字面量整体平移
+> （即 #122 那条 nid 链，指令一条没变）。所以**任何有内容的 test 改动都会让
+> `selfhost.sha` 的这四行变**，而 `selfhost.norm.sha` 不变。
+> 判据因此是：**看 `norm.sha`，不看 `sha`**——前者零差异才是「什么都没变」的证明。
+> 本次实测的两头：`checker.dawn` 末尾追加 `test { assert 1 == 1 }` 让**零个**模块
+> 移动；把同一个 test 换成一行 `let m: Map[String, Int] = ...` 就让**同样这四个**移动。
+>
+> **但「漂移」不等于「不用管」**：`selfhost-core-diff.sh` 对漂移照样 `exit 1`，
+> 只是把它归到 `ADT ids shifted in these, with no instruction changed` 那一桶
+> （对照另一桶 `Core IR of the compiler changed in these modules`）。两个桶分开报
+> 是 #88 的纪律，不是免检——`selfhost.sha` 该重录还得重录。
+
 **这就是 §2.3 把 `Frame` 定死成 8 个字段的原因**——`Frame` 的字段集必须逐字等于
 `EffFrame` 今天的 8 个，一个不多。同理 `loop_jumps`/`in_test` 判为留在 `Cx` 顶层：
 它们按概念属于帧，但今天不在保存-恢复集合里。**上面那两条实测让这条纪律从
@@ -638,6 +689,8 @@ sed -n '/^pub fn enter_isolated/,/^}/p' selfhost/src/checker.dawn \
 > 不成立。**（B5 实测，见本节开头）那里的安全边际不是「刀 0 的覆盖率」，是**零**——
 > 恢复集的正确性连刀 0 都看不见，全批唯一的守卫是人眼逐字段核对，加上 B5 之后
 > 那个防漂移的类型声明。这条路径的补账在 #126。
+> **（#126 已于 2026-08-03 结账：刀 0 现在看得见了，因为给它补了八条专门走恢复路径的
+> 语料——见本节开头那条结账记录。这段话描述的是 B5 当时的事实，保留原样。）**
 >
 > 措辞上的教训也记一笔：「**能看见它的只有 X**」这种句子读起来像是给了一条防线，
 > 其实是**没有验证过的乐观归因**——它假定了 X 看得见。本文原句里的两个 X

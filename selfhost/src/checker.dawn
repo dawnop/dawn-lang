@@ -2277,18 +2277,74 @@ pub fn leave_isolated(cx: Cx, frame: Frame, what: String, blo: Int, bhi: Int) ->
   Cx { ..cx1, frame: frame }
 }
 
-test "isolated contexts capture and report their effects" {
+test "an isolated context reports its own effects, then restores all eight fields" {
   var cx = test_cx()
-  cx = Cx { ..cx, frame: Frame { ..cx.frame, used_effects: [EIo] } }
+  # The outer frame this enters an isolated context from. Every field differs
+  # from what `enter_isolated` installs, including the ones the body then
+  # writes -- otherwise "restored" and "left as the body had it" are the same
+  # answer and the assertions below pass either way. The predecessor of this
+  # test set `used_effects` to `[EIo]` and had the body record `EIo`, which is
+  # exactly that degenerate shape (docs/arch-split-design.md §5.4). It is built
+  # here rather than in a helper because a top-level fn would lower into the
+  # module's Core and a test block does not.
+  let outer_scope: Map[String, Int] = map.insert(map.empty(), "outer", 61)
+  let outer_wit: Map[Eff, (Int, Int, String)] =
+    map.insert(map.empty(), EIo, (1, 2, "outer_io"))
+  let outer_dicts: Map[(Int, Int), Int] = map.insert(map.empty(), (900, EQ_ID), 77)
+  cx = Cx {
+    ..cx,
+    frame: Frame {
+      scopes: [outer_scope],
+      # not EIo: the body below records EIo, and an outer record that already
+      # held it could not tell restoring from keeping the body's
+      used_effects: [EffVar("outer_e", 42)],
+      # keyed on EIo *because* the body writes that key -- restoring gives back
+      # the outer witness, not restoring leaves the body's
+      eff_witness: outer_wit,
+      current_sig: Some(Sig {
+        name: "outer", param_tys: [], param_names: [], ret: TyInt,
+        eff: EPure, is_builtin: false, tparams: [], constraints: [],
+        owner: None, trait_id: None, op_of: None, inferring: false
+      }),
+      dict_syms: outer_dicts,
+      lambda_stack: [LambdaCx {
+        boundary: 3, expected_ret: None, captures: [], sugar: false, arm: false
+      }],
+      loop_stack: [7],
+      isolated: false
+    }
+  }
   let (cx1, frame) = enter_isolated(cx)
+  # nothing of the outer frame reaches the body
+  assert len(cx1.frame.scopes) == 1
+  assert map.get(cx1.frame.scopes[0], "outer") == None
   assert len(cx1.frame.used_effects) == 0
-  # the body records io
+  assert map.get(cx1.frame.eff_witness, EIo) == None
+  assert cx1.frame.current_sig == None
+  assert map.get(cx1.frame.dict_syms, (900, EQ_ID)) == None
+  assert len(cx1.frame.lambda_stack) == 0
+  assert len(cx1.frame.loop_stack) == 0
+  assert cx1.frame.isolated
+  # the body records io of its own, at its own span, and that is what is reported
   let cx2 = record_effect(cx1, EIo, 5, 8, "println")
   let cx3 = leave_isolated(cx2, frame, "const initializers", 0, 10)
   assert len(cx3.diags) == 1
   assert cx3.diags[0].msg == "const initializers must be pure, but `println` is !io"
-  # the outer effect record is restored
-  assert cx3.frame.used_effects == [EIo]
+  assert cx3.diags[0].lo == 5
+  # ... and every one of the eight fields comes back as the outer context left it
+  assert map.get(cx3.frame.scopes[0], "outer") == Some(61)
+  assert cx3.frame.used_effects == [EffVar("outer_e", 42)]
+  assert map.get(cx3.frame.eff_witness, EIo) == Some((1, 2, "outer_io"))
+  let sig_name = match cx3.frame.current_sig {
+    Some(s) -> s.name
+    None -> "<not restored>"
+  }
+  assert sig_name == "outer"
+  assert map.get(cx3.frame.dict_syms, (900, EQ_ID)) == Some(77)
+  assert len(cx3.frame.lambda_stack) == 1
+  assert cx3.frame.lambda_stack[0].boundary == 3
+  assert cx3.frame.loop_stack == [7]
+  assert not cx3.frame.isolated
 }
 
 ## Does this expression need an expected type to check at all? (drives the
