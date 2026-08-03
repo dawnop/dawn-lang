@@ -48,11 +48,17 @@
 #    An assertion that nothing changed is not a declaration: leave the line out
 #    and say it in prose.
 #
-# 3. An unparseable declaration is an error, not a rule that quietly matches
-#    nothing. `Emit-Change(cli error (doc*): the usage line names --stdlib`
-#    once sat in a window with its parentheses unbalanced; the old `[^)]*`
-#    scope reader took the scope to be the literal `cli error (doc*` and
-#    accepted it in silence.
+# 3. An unparseable declaration is an error rather than something silently
+#    reinterpreted. `Emit-Change(cli error (doc*): the usage line names
+#    --stdlib` once sat in a window with its parentheses unbalanced; the old
+#    `[^)]*` scope reader took the scope to be the literal `cli error (doc*`
+#    and said nothing. Replayed, that scope did match two labels -- so the
+#    author got an approval, just not the one they wrote. The genuinely
+#    never-matching ones were `Emit-Change(lsp *)` and `Emit-Change(core *)`,
+#    both in 5d45b1e: `lsp *` needs the prefix "lsp " and the only label is
+#    `lsp`, and no differential prints a `core ...` label at all. Two
+#    declarations that an author believed they had made, silently worth
+#    nothing. Whichever way it goes wrong, the fix is the same: say so.
 #
 # 4. A label scripts/emit-labels.txt does not know is an error. The tension is
 #    real -- a strict check like this could red when a label is added or
