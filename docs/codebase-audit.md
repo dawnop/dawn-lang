@@ -1949,7 +1949,8 @@ Content-Length，204/304/HEAD 也会进入 body 路径。建议由 ResponseBody 
 >   做判定——**不是重写 JVMS 5.4.4，而是让 JVM 自己答**（nest mate、protected 子类、
 >   runtime package 这些规则手写必错）。
 >
-> 代价：8 个语料 1948 个类、43229 条引用，整条门禁 12.3s → 13.9s（+1.65s，13%）。
+> 代价：8 个语料 1948 个类、43229 条引用，整条门禁 12.3s → 14.3s（+2.1s，17%；
+> 其中 pass 2 本身 +0.6s，两个变异体 +1.6s）。
 >
 > 「实际编译一个真语料」那条路线（K-A3 就是这么冒出来的）没有采用为**主**手段：
 > 解析是惰性的，跑一遍只覆盖跑到的调用点，而 8 个语料里只有 selfhost 会被当编译器
@@ -1963,12 +1964,19 @@ Content-Length，204/304/HEAD 也会进入 body 路径。建议由 ResponseBody 
 > 的那个演示，现在由 run.sh 每次自动重跑。
 >
 > fixture 只证明检查器本身能红，**不证明它在真语料上非空**——这正是上次那个 bug
-> （parent-first 委派）的形状：它是**语料相关**的，玩具包名 jar 里没有，所以碰不到。
-> 所以另做了一次一次性验收：把真发射出来的 selfhost 语料里 `dawn/rt/Strings.join`
-> 的 `ACC_PUBLIC` 翻成 `ACC_PRIVATE`（**这个类 jar 里也有一份**，于是同时验了
-> child-first 还活着），新门禁报 40+ 条 `ACCESS FAIL`、退出 1；同一份被改坏的语料，
-> HEAD 那版门禁照样打印 `1048 classes verified, 0 illegal`、退出 0。未改动的同一语料
-> 是负控：`27162 references resolved, 0 unknown, 0 inaccessible`。
+> （parent-first 委派）的形状：它是**语料相关**的，`pkgA`/`pkgB` 这种玩具包名 jar 里
+> 没有，无论委派顺序怎么变都只能从被测目录里找到，所以 fixture 全红也照样漏。
+> 于是**第二个变异体也进了 run.sh**（`privatise.py`，跑在 8 个语料之后）：把已经发射
+> 在盘上的 selfhost 语料里 `dawn/rt/Strings.join` 的 `ACC_PUBLIC` 翻成 `ACC_PRIVATE`
+> ——**这个类 jar 里也有一份**，所以它同时验「访问检查会红」和「child-first 还活着、
+> 读的确实是被测目录」。门禁要求它必须红，不红就判整条门禁的绿无信息量并退出 1。
+> 两个变异体回答两个不同的问题：selftest 问「能不能红」，语料变异体问「看没看」；
+> 这道门禁两个问题上各空过一次，所以都不能省。复用已在盘上的语料，代价 +0.3s。
+>
+> 一次性实测（现已固化成上面那条）：新门禁在被改坏的语料上报 40+ 条 `ACCESS FAIL`、
+> 退出 1；同一份被改坏的语料，b66f1d7 那版门禁照样打印
+> `1048 classes verified, 0 illegal`、退出 0。未改动的同一语料是负控：
+> `27162 references resolved, 0 unknown, 0 inaccessible`。
 >
 > 仍然没覆盖的（header 里也照实写了——「只说自己强在哪」的覆盖声明正是这道门禁反复栽的跟头）：
 > 一切与**指令**有关的判定，因为常量池条目本身不记录是哪条指令引用了它，于是

@@ -28,7 +28,15 @@
 # invisible until the instruction runs (#129, and K-A3's closure lowering
 # before it). Measured on this branch: the old gate reported "1946 classes,
 # 0 illegal" over a mutant that dies with IllegalAccessError on its first
-# call. selftest.sh keeps that mutant runnable.
+# call.
+#
+# Two mutants ride along, and they answer different questions. selftest.sh
+# (before anything is emitted) asks whether the checks can fail at all.
+# The corpus mutant (after the loop) asks whether they are looking at the
+# emitted directory -- its fixtures deliberately carry names the toolchain jar
+# also holds, which is the only way to catch a return to parent-first
+# delegation. Neither is optional: this gate has been vacuous twice, once per
+# question.
 #
 # What it still does not cover, stated because a coverage claim that is only
 # accurate about its strengths is the defect this gate keeps having:
@@ -75,5 +83,23 @@ if [ "$fail" != 0 ]; then
   exit 1
 fi
 echo "OK: every emitted class links, and every reference it names resolves and is reachable"
+
+# The second mutant, and the one selftest.sh cannot be. Its fixtures live in
+# pkgA/pkgB, names the toolchain jar does not carry, so they would have stayed
+# red right through this gate's actual bug -- parent-first delegation, under
+# which the whole selfhost corpus resolved out of the jar and the directory
+# under test was never opened. Only a mutant on a name the jar ALSO holds
+# separates "found nothing" from "read nothing", so flip a method of the
+# emitted dawn/rt/Strings and require a red. Costs one more pass over a corpus
+# that is already on disk.
+mut="$work/corpus-mutant"
+cp -r "$work/emit/selfhost" "$mut"
+scripts/classfile-verify/privatise.py "$mut/dawn/rt/Strings.class" join
+if java -cp "$work:$root/build/dawn-selfhost.jar" Verify "$mut" > /dev/null 2>&1; then
+  echo "FAIL: the gate passed a corpus with a private dawn/rt/Strings.join in it," >&2
+  echo "      so its verdict on the real corpora carries no information" >&2
+  exit 1
+fi
+echo "OK: corpus mutant -- the gate reds on a private reference in the emitted selfhost corpus"
 
 scripts/constpool-scan.py "$work/emit"
