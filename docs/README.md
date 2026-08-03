@@ -35,6 +35,7 @@
 | [audit/README.md](audit/README.md) | current | 上面那份审查剩下 28 条待办的**作业计划**：九份设计文档的索引 + 修复顺序。 |
 | [audit/native-plan-overlap.md](audit/native-plan-overlap.md) | current | 上面那批待办与 native-backend-plan.md 的**撞车登记**：谁让位、谁冻结、谁要改写。动 `audit/` 里任何一份之前先读它。 |
 | [native-backend-plan.md](native-backend-plan.md) | current | native 后端的分阶段计划（Phase −1 → 6）与决策总表。**Phase 6（native 自举）已于 2026-07-30 达成**（§14.23，`scripts/native-fixpoint.sh` B==C），后面的 S 批仍在走。 |
+| [native-driver-plan.md](native-driver-plan.md) | current | **B 线**：native 驱动补全 + 把后端契约摆到明面上——K-B 刀表、「5,373 行零 `use java`」的核对、以及那条最重要的更正：`selfhost-fmt-diff.sh`/`selfhost-run-diff.sh`/`selfhost-lsp-diff.sh` 的被测方全是写死的 `./bin/dawn`，**接上线不会自动覆盖 native**。K-B1/K-B2 已落地，含三组红演示与阴性对照。 |
 | [jvm-base-plan.md](jvm-base-plan.md) | proposed | **A 线**：收缩 JVM 后端的可信底座——三个没有主干源码的 vendored 包、V49（classfile major 61 → 49）可行性审计的结论与三个代价数、九条被推翻的预设、K-A0…K-A6 刀表。K-A0/K-A0.5 已落地。 |
 
 ## 待办的设计方案（`docs/audit/`，全部 proposed）
