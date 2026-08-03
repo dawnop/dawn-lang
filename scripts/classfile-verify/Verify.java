@@ -1,12 +1,33 @@
 // The classfile gate's loader (TEST-01): force-link every emitted class so
 // the JVM's bytecode verifier sees every method body now, not at first use.
 //
+// Read the coverage claim narrowly. Forcing a class to link runs the bytecode
+// verifier over its method bodies -- that and only that. It is not a check
+// that the class would run: the JVM resolves a symbolic reference when the
+// instruction naming it first executes, so nothing here says the members a
+// body reaches for exist or may be reached. AccessCheck.java, run as pass 2
+// from main below, is what covers that; this file's number covers structural
+// legality of the bytes.
+//
+// The gap was not theoretical. K-A3 emitted hoisted lambda bodies ACC_PRIVATE
+// and this gate printed "1946 classes, 0 illegal" over a corpus whose first
+// real run died of IllegalAccessError inside std.io.read_file. The header
+// this replaces said the gate covered link-time errors, and a reader had no
+// way to tell that "link" here meant verification and not resolution.
+//
 // Why this shape: differential testing proves the two backends agree, not
 // that either is legal -- and lazy linking means a class no test touches is
 // never verified at all. CheckClassAdapter would be the emission-time
 // equivalent, but the vendored ASM carries only the core writer (asm-util's
 // verifier is a separate artifact, and AdtClassWriter's source is archived
 // with kotlin-final), while the real verifier ships in every JVM.
+//
+// The -Xverify family is not an alternative and was measured, not assumed: on
+// JDK 21 -Xverify:all, :none (deprecated, still accepted) and :remote all
+// leave the private-member mutant green, because verification is a different
+// phase from resolution. jdeps has no access mode left either -- the old
+// hidden -verify:access is gone, and `jdeps -v` reports the pkgB -> pkgA edge
+// with exit 0.
 //
 // Class.forName with initialize=true is what forces linking; a Dawn class's
 // static initializer only materialises comptime constants, so initialising
@@ -40,6 +61,11 @@
 // looked at anything print the same output, and no amount of green
 // distinguishes them. Only a mutant does. So when this gate is changed,
 // re-run the red demo; its passing count proves nothing on its own.
+//
+// That rule is no longer a note to the reader: selftest.sh holds the mutants
+// and run.sh executes it before it emits anything, so the demo is re-run by
+// construction. It also pins the blind spot above -- one of its four fixtures
+// asserts that pass 1 still calls the private-member mutant legal.
 import java.net.URL;
 import java.net.URLClassLoader;
 import java.nio.file.Files;
@@ -111,7 +137,22 @@ public class Verify {
     }
     System.out.println(linked + " classes verified, " + skipped + " not initializable, "
         + bad + " illegal");
-    if (bad > 0) {
+
+    // Pass 2. Linking is not resolution: the references inside a method body
+    // are checked when that instruction first runs, so pass 1 above says
+    // nothing about them. See AccessCheck's header for what this covers.
+    AccessCheck.Result r = new AccessCheck.Result();
+    AccessCheck.scan(dir, cl, names, r);
+    for (String note : r.unknownNotes) {
+      System.err.println("note " + note);
+    }
+    for (String f : r.failures) {
+      System.err.println(f);
+    }
+    System.out.println(r.classesScanned + " classes scanned, " + r.refsChecked
+        + " references resolved, " + r.pruned + " freight-pruned, " + r.unknown + " unknown, "
+        + r.failures.size() + " inaccessible");
+    if (bad > 0 || !r.failures.isEmpty()) {
       System.exit(1);
     }
   }

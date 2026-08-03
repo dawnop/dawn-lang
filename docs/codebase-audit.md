@@ -1894,6 +1894,58 @@ Content-Length，204/304/HEAD 也会进入 body 路径。建议由 ResponseBody 
 
 ### TEST-01（P1）差分测试会把旧 bug 固化成正确行为
 
+> **【再追修 —— 2026-08-04，#129】** 上一条追修写的「强制链接直接堵根源」堵住的
+> 只有一半：**链接不等于解析**。`Class.forName(initialize=true)` 逼 JVM 把每个类的
+> 方法体过一遍字节码 verifier，但符号引用（Methodref/Fieldref/Class）是**执行到那条
+> 指令时**才解析并做访问检查的，所以「A 类的方法体引用 B 类的私有成员」这一整类错误
+> 它一个都看不见。这不是假想：K-A3 闭包下沉把提升出来的 lambda 体发成 `ACC_PRIVATE`，
+> invokedynamic 时代无所谓（`LambdaMetafactory` 拿到的是 private-access 的 `Lookup`），
+> 一旦变成独立类，第一次真跑就死在 `std.io.read_file`——编译器读不了自己的第一个文件；
+> 而门禁那时打印的是 `1946 classes, 0 illegal`。**是真编译了一次东西才发现的。**
+>
+> 本次实测了三条候选路线，只有第三条成立：
+>
+> - **`-Xverify` 家族**：JDK 21 上 `all` / `none`（已 deprecated 但仍接受）/ `remote`
+>   对私有引用变异体**全绿**——校验和解析是两个阶段，加什么 flag 都不会变；
+> - **`jdeps`**：历史上的隐藏选项 `-verify:access` 在 JDK 21 已删（`unknown option`），
+>   `jdeps -v` 只报出 `pkgB -> pkgA` 这条边、退出码 0，不判可达性；
+> - **常量池逐条解析 + JVM 自己的访问检查**（采用）：`AccessCheck.java` 手写常量池
+>   读取器（同 `constpool-scan.py` 的理由：用发射器自己的库去查发射器自己的输出，
+>   库错在哪就瞎在哪），取出每条 Fieldref/Methodref/InterfaceMethodref/Class，
+>   按 JVMS 5.4.3.2/5.4.3.3 沿父类与接口找到成员，再用
+>   `MethodHandles.privateLookupIn(引用方, lookup())` 的 `unreflect` / `accessClass`
+>   做判定——**不是重写 JVMS 5.4.4，而是让 JVM 自己答**（nest mate、protected 子类、
+>   runtime package 这些规则手写必错）。
+>
+> 代价：8 个语料 1948 个类、43229 条引用，整条门禁 12.3s → 13.9s（+1.65s，13%）。
+>
+> 「实际编译一个真语料」那条路线（K-A3 就是这么冒出来的）没有采用为**主**手段：
+> 解析是惰性的，跑一遍只覆盖跑到的调用点，而 8 个语料里只有 selfhost 会被当编译器
+> 真跑，其余七个发射完从不执行——覆盖面说不清楚，就不算「已声明的性质」。
+>
+> **绿本身不是证据**：门禁现在自带变异体（`selftest.sh`，run.sh 发射任何东西之前先跑，
+> 1.3s）。四个 fixture 各钉一条主张：合法版必须绿**且引用计数非零**（否则「什么都没找到」
+> 和「什么都没看」输出一样）；私有成员变异体必须红，**并且第一趟必须仍然绿**——把盲区
+> 本身钉成断言而不是一段回忆；包级类变异体走 CONSTANT_Class 路径；把一条可达指令换成
+> `athrow`（`mutate.py`）必须被 verifier 红——这就是旧 header 要求「改了门禁就重跑红演示」
+> 的那个演示，现在由 run.sh 每次自动重跑。
+>
+> fixture 只证明检查器本身能红，**不证明它在真语料上非空**——这正是上次那个 bug
+> （parent-first 委派）的形状：它是**语料相关**的，玩具包名 jar 里没有，所以碰不到。
+> 所以另做了一次一次性验收：把真发射出来的 selfhost 语料里 `dawn/rt/Strings.join`
+> 的 `ACC_PUBLIC` 翻成 `ACC_PRIVATE`（**这个类 jar 里也有一份**，于是同时验了
+> child-first 还活着），新门禁报 40+ 条 `ACCESS FAIL`、退出 1；同一份被改坏的语料，
+> HEAD 那版门禁照样打印 `1048 classes verified, 0 illegal`、退出 0。未改动的同一语料
+> 是负控：`27162 references resolved, 0 unknown, 0 inaccessible`。
+>
+> 仍然没覆盖的（header 里也照实写了——「只说自己强在哪」的覆盖声明正是这道门禁反复栽的跟头）：
+> 一切与**指令**有关的判定，因为常量池条目本身不记录是哪条指令引用了它，于是
+> IncompatibleClassChangeError 那一族（对实例方法用 invokestatic、对静态字段用 putfield）
+> 和 protected 访问的接收者类型子句都在范围外；freight 剪枝剪多了导致的 `NoSuchMethodError`
+> （归 `scripts/table-freight`，本门禁把 `dawn/rt/*` 的缺失成员单列为 `freight-pruned`
+> 计数而不报错，因为 `reach.dawn` 明确写了「pruned method is absent, not stubbed」
+> 并有意依赖惰性解析）；以及合法字节算出错答案。发射出来的类在这里**从不执行**。
+>
 > **【追修 —— 2026-07-30】** classfile 那项也做了：`scripts/classfile-verify/run.sh`
 > 把 8 个语料发射出的全部类（~1386 个）逐个强制链接过 **JVM 自带 verifier**，进 CI
 > （gates.yml「classfile verification」）。用 JVM verifier 而非 CheckClassAdapter：
