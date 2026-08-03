@@ -1,5 +1,5 @@
 # Function-body code generation (spec §12.2): Core IR → JVM bytecode through
-# the shared AdtClassWriter. State lives in the Gen record, threaded exactly
+# an ASM ClassWriter. State lives in the Gen record, threaded exactly
 # like the checker's Cx. Every gen_* returns (Gen, Bool): the Bool is "falls
 # through" (false = control already transferred).
 #
@@ -15,8 +15,8 @@
 # are ordinary classes now (docs/jvm-base-plan.md K-A3): a class per closure
 # site implementing `dawn/rt/FnN`, with the captures in fields. The reason is
 # not speed -- it is that a method-handle constant in the pool is a hard
-# parse error below class-file version 50, so nothing else in this file can
-# move to an older version until these are gone.
+# parse error below class-file version 50, and that is where these classes
+# emit now (K-A4). scripts/constpool-scan.py keeps the pool clear of them.
 
 use std/str
 use std/list
@@ -39,7 +39,7 @@ use codegen.{
   dict_arg_field, dict_ctor_desc, EqOverride, no_override, singleton_scaffold, subject_name
 }
 use rtclasses.{
-  obj, fn_iface, tuple_class, erased_apply_desc, push_unit, supers_of, tr_iface, append_const,
+  obj, fn_iface, tuple_class, erased_apply_desc, push_unit, tr_iface, append_const,
   PANIC_CLASS, UNIT_CLASS, SB, SHOW_CLASS, BYTES_CLASS, IO_CLASS, STRINGS_CLASS, HAMT_CLASS,
   PVEC_CLASS, PVEC_MOD, FN_CMP_CLASS, ARRAYLIST, ARRAY_CLASS
 }
@@ -64,12 +64,13 @@ use core.{
 use lower.{LMod}
 use jreflect
 use java "dawn.tool.AdtClassWriter"
+use java "org.objectweb.asm.ClassWriter"
 use java "org.objectweb.asm.MethodVisitor"
 use java "org.objectweb.asm.Label"
 use java "java.lang.System"
 use jvmops.{
   ACC_ABSTRACT, ACC_FINAL, ACC_INTERFACE, ACC_PRIVATE, ACC_PROTECTED, ACC_PUBLIC, ACC_STATIC,
-  OP_AASTORE, OP_ACC_SYNTHETIC, OP_ACONST_NULL, OP_ALOAD, OP_ARETURN, OP_ARRAYLENGTH, OP_ASTORE,
+  COMPUTE_MAXS, OP_AASTORE, OP_ACC_SYNTHETIC, OP_ACONST_NULL, OP_ALOAD, OP_ARETURN, OP_ARRAYLENGTH, OP_ASTORE,
   OP_ATHROW, OP_BASTORE, OP_CASTORE, OP_CHECKCAST, OP_D2F, OP_D2L, OP_DADD, OP_DASTORE, OP_DDIV,
   OP_DLOAD, OP_DMUL, OP_DNEG, OP_DREM, OP_DRETURN, OP_DSUB, OP_DUP, OP_DUP_X1, OP_F2D, OP_FASTORE, OP_FLOAD,
   OP_FRETURN, OP_GETFIELD, OP_GETSTATIC, OP_GOTO, OP_I2L, OP_IADD, OP_IASTORE,
@@ -79,7 +80,7 @@ use jvmops.{
   OP_IRETURN, OP_ISUB, OP_IXOR, OP_L2D, OP_L2I, OP_LADD, OP_LAND, OP_LASTORE, OP_LCMP,
   OP_LCONST_1, OP_LDIV, OP_LLOAD, OP_LMUL, OP_LNEG, OP_LOR, OP_LREM, OP_LRETURN, OP_LSHL, OP_LSHR,
   OP_LSTORE, OP_LSUB, OP_LUSHR, OP_LXOR, OP_NEW, OP_POP, OP_PUTFIELD, OP_PUTSTATIC, OP_RETURN,
-  OP_SASTORE, OP_SWAP, V17
+  OP_SASTORE, OP_SWAP, V49
 }
 
 # ---- the emitted program's own names ----
@@ -583,12 +584,12 @@ fn construct_value(gx: GenCtx, m: MethodVisitor, v: CValue, boxed: Bool) -> Unit
   ()
 }
 
-fn gen_const_fields(gx: GenCtx, g: Gen, cw: AdtClassWriter) -> Unit !io = {
+fn gen_const_fields(gx: GenCtx, g: Gen, cw: ClassWriter) -> Unit !io = {
   if len(g.const_fields) == 0 { return () }
   for f in g.const_fields {
-    cw.field(ACC_PUBLIC + ACC_STATIC + ACC_FINAL, f.fname, desc_of(gx.adts, f.ty))
+    AdtClassWriter.fieldOn(cw, ACC_PUBLIC + ACC_STATIC + ACC_FINAL, f.fname, desc_of(gx.adts, f.ty))
   }
-  let cl = cw.method(ACC_STATIC, "<clinit>", "()V").expect("mv")
+  let cl = AdtClassWriter.methodOn(cw, ACC_STATIC, "<clinit>", "()V").expect("mv")
   cl.visitCode()
   for f in g.const_fields {
     construct_value(gx, cl, f.v, false)
@@ -739,12 +740,12 @@ fn emit_sam_conversion(
 
 ## One SAM adapter class: a field holding the `FnN`, and the interface method
 ## forwarding to the bridge that was already being emitted next to it.
-fn gen_sam_class(supers: List[String], s: SamC) -> (String, Bytes) !io = {
+fn gen_sam_class(s: SamC) -> (String, Bytes) !io = {
   let fnd = "L" ++ fn_iface(s.arity) ++ ";"
-  let cw = AdtClassWriter.new(supers)
-  cw.beginWithInterface(V17, ACC_PUBLIC + ACC_FINAL, s.cls, obj(), s.iface)
-  cw.field(ACC_PRIVATE + ACC_FINAL, capture_field(0), fnd)
-  let init = cw.method(ACC_PUBLIC, "<init>", "(" ++ fnd ++ ")V").expect("mv")
+  let cw = AdtClassWriter.plain(COMPUTE_MAXS).expect("writer")
+  AdtClassWriter.beginOnWithInterface(cw, V49, ACC_PUBLIC + ACC_FINAL, s.cls, obj(), s.iface)
+  AdtClassWriter.fieldOn(cw, ACC_PRIVATE + ACC_FINAL, capture_field(0), fnd)
+  let init = AdtClassWriter.methodOn(cw, ACC_PUBLIC, "<init>", "(" ++ fnd ++ ")V").expect("mv")
   init.visitCode()
   init.visitVarInsn(OP_ALOAD, 0)
   init.visitMethodInsn(OP_INVOKESPECIAL, obj(), "<init>", "()V", false)
@@ -757,7 +758,8 @@ fn gen_sam_class(supers: List[String], s: SamC) -> (String, Bytes) !io = {
   var pdescs = ""
   for p in s.sam_params { pdescs = pdescs ++ jdesc(p) }
   let rd = jdesc(s.sam_ret)
-  let m = cw.method(ACC_PUBLIC, s.sam_name, "(" ++ pdescs ++ ")" ++ rd).expect("mv")
+  let m = AdtClassWriter.methodOn(cw, ACC_PUBLIC, s.sam_name,
+    "(" ++ pdescs ++ ")" ++ rd).expect("mv")
   m.visitCode()
   m.visitVarInsn(OP_ALOAD, 0)
   m.visitFieldInsn(OP_GETFIELD, s.cls, capture_field(0), fnd)
@@ -934,14 +936,15 @@ fn gen_java_call(gx: GenCtx, g: Gen, jc: CJava, ty: Ty) -> (Gen, Bool) !io = {
 
 ## static <samRet> dawn$sam$N(FnN f, <sam params>): null-check references,
 ## box to the erased Fn convention, invoke, adapt the result (§9.4).
-fn gen_sam_bridge(g: Gen, cw: AdtClassWriter, b: SamB) -> Gen !io = {
+fn gen_sam_bridge(g: Gen, cw: ClassWriter, b: SamB) -> Gen !io = {
   let n = len(b.sam_params)
   var pdescs = ""
   for p in b.sam_params { pdescs = pdescs ++ jdesc(p) }
   let desc = "(L" ++ fn_iface(n) ++ ";" ++ pdescs ++ ")" ++ jdesc(b.sam_ret)
   # public for the same reason a hoisted body is: the adapter class that
   # calls this bridge is a separate class file (gen_sam_class)
-  let m = cw.method(ACC_PUBLIC + ACC_STATIC + OP_ACC_SYNTHETIC, b.name, desc).expect("mv")
+  let m = AdtClassWriter.methodOn(cw, ACC_PUBLIC + ACC_STATIC + OP_ACC_SYNTHETIC,
+    b.name, desc).expect("mv")
   m.visitCode()
   m.visitVarInsn(OP_ALOAD, 0)
   var slot = 1
@@ -1049,7 +1052,7 @@ fn gen_sam_bridge(g: Gen, cw: AdtClassWriter, b: SamB) -> Gen !io = {
 fn gen_fn(
   gx: GenCtx,
   g: Gen,
-  cw: AdtClassWriter,
+  cw: ClassWriter,
   cf: CFun,
   lifts: List[CFun],
   name: String,
@@ -1114,7 +1117,7 @@ fn lifted_desc(gx: GenCtx, g: Gen, name: String) -> String =
 fn gen_cbody(
   gx: GenCtx,
   g: Gen,
-  cw: AdtClassWriter,
+  cw: ClassWriter,
   cf: CFun,
   name: String,
   desc: String,
@@ -1132,7 +1135,7 @@ fn gen_cbody(
     } else {
       ACC_PUBLIC + ACC_STATIC + OP_ACC_SYNTHETIC
     }
-  let m = cw.method(acc, name, desc).expect("mv")
+  let m = AdtClassWriter.methodOn(cw, acc, name, desc).expect("mv")
   m.visitCode()
   var g1 = Gen {
     ..g,
@@ -1172,7 +1175,7 @@ fn gen_cbody(
 
 ## Emit the bridges a `use java` argument queued. Lambdas no longer queue:
 ## lowering lifts them, so they are emitted with the function they came from.
-fn drain_lambdas(g: Gen, cw: AdtClassWriter) -> Gen !io = {
+fn drain_lambdas(g: Gen, cw: ClassWriter) -> Gen !io = {
   var g1 = g
   while len(g1.pending_sam) > 0 {
     let b = g1.pending_sam[0]
@@ -1183,8 +1186,9 @@ fn drain_lambdas(g: Gen, cw: AdtClassWriter) -> Gen !io = {
 }
 
 ## JVM entry wrapper: catch PanicError → stderr + exit 1 (spec §8.2).
-fn gen_jvm_main(gx: GenCtx, cw: AdtClassWriter) -> Unit !io = {
-  let m = cw.method(ACC_PUBLIC + ACC_STATIC, "main", "([Ljava/lang/String;)V").expect("mv")
+fn gen_jvm_main(gx: GenCtx, cw: ClassWriter) -> Unit !io = {
+  let m = AdtClassWriter.methodOn(cw, ACC_PUBLIC + ACC_STATIC, "main",
+    "([Ljava/lang/String;)V").expect("mv")
   m.visitCode()
   let try_start = Label.new()
   let try_end = Label.new()
@@ -1223,12 +1227,13 @@ fn gen_jvm_main(gx: GenCtx, cw: AdtClassWriter) -> Unit !io = {
 }
 
 ## The per-trait dictionary interface: one erased method per trait method.
-pub fn gen_trait_interface(supers: List[String], adts: Adts, tr: TraitI) -> Bytes !io = {
-  let cw = AdtClassWriter.new(supers)
-  cw.begin(V17, ACC_PUBLIC + ACC_ABSTRACT + ACC_INTERFACE, tr_iface(tr.owner, tr.name), obj())
+pub fn gen_trait_interface(adts: Adts, tr: TraitI) -> Bytes !io = {
+  let cw = AdtClassWriter.plain(COMPUTE_MAXS).expect("writer")
+  AdtClassWriter.beginOn(cw, V49, ACC_PUBLIC + ACC_ABSTRACT + ACC_INTERFACE,
+    tr_iface(tr.owner, tr.name), obj())
   for entry in tr.methods {
     let (mn, ms) = entry
-    let m = cw.method(ACC_PUBLIC + ACC_ABSTRACT, mn,
+    let m = AdtClassWriter.methodOn(cw, ACC_PUBLIC + ACC_ABSTRACT, mn,
       method_desc(adts, ms.sig.param_tys, ms.sig.ret)).expect("mv")
     m.visitEnd()
   }
@@ -1259,7 +1264,7 @@ fn emit_return_of(m: MethodVisitor, t: Ty) -> Unit !io = {
 fn gen_test(
   gx: GenCtx,
   g: Gen,
-  cw: AdtClassWriter,
+  cw: ClassWriter,
   cf: CFun,
   lifts: List[CFun],
   idx: Int
@@ -1270,7 +1275,7 @@ fn gen_test(
 ## method opens (the record field is non-optional by design).
 fn scratch_mv() -> MethodVisitor !io = {
   let cw = AdtClassWriter.plain(0).expect("writer")
-  AdtClassWriter.beginOn(cw, V17, ACC_PUBLIC, "dawn/tool/Scratch", obj())
+  AdtClassWriter.beginOn(cw, V49, ACC_PUBLIC, "dawn/tool/Scratch", obj())
   AdtClassWriter.methodOn(cw, ACC_PUBLIC + ACC_STATIC, "scratch", "()V").expect("mv")
 }
 
@@ -1308,7 +1313,6 @@ fn owner_or_default(o: Option[String], fallback: String) -> String =
 ## derived. Those are questions about a *class*, not about a witness, and
 ## Core does not carry them.
 pub fn emit_module(
-  supers: List[String],
   adts: Adts,
   traits: Traits,
   impl_table: Impls,
@@ -1329,16 +1333,16 @@ pub fn emit_module(
 ) -> List[(String, Bytes)] !io = {
   var out: List[(String, Bytes)] = []
   for aid in own_adt_ids {
-    out = out ++ gen_adt(supers, adts, adt_of(adts, aid),
+    out = out ++ gen_adt(adts, adt_of(adts, aid),
       eq_override(impl_table, class_name, TyAdt(aid, adt_of(adts, aid).tparams)))
   }
   for tid in own_trait_ids {
     let tr = trait_of(traits, tid)
-    out = out ++ [(tr_iface(tr.owner, tr.name), gen_trait_interface(supers, adts, tr))]
+    out = out ++ [(tr_iface(tr.owner, tr.name), gen_trait_interface(adts, tr))]
   }
-  let cw = AdtClassWriter.new(supers)
-  cw.begin(V17, ACC_PUBLIC + ACC_FINAL, class_name, obj())
-  cw.field(ACC_PUBLIC + ACC_STATIC, ARGS_FIELD, "[Ljava/lang/String;")
+  let cw = AdtClassWriter.plain(COMPUTE_MAXS).expect("writer")
+  AdtClassWriter.beginOn(cw, V49, ACC_PUBLIC + ACC_FINAL, class_name, obj())
+  AdtClassWriter.fieldOn(cw, ACC_PUBLIC + ACC_STATIC, ARGS_FIELD, "[Ljava/lang/String;")
   let no_slots: Map[Int, Int] = map.empty()
   let no_ckey: Map[String, String] = map.empty()
   let gx = GenCtx {
@@ -1426,16 +1430,16 @@ pub fn emit_module(
   # carries no Eq machinery -- the same property the old whole-program scan
   # in main.dawn was there to preserve, now a consequence rather than a rule.
   for dd in gx.dicts {
-    out = out ++ [gen_dict_class(gx, supers, dd)]
+    out = out ++ [gen_dict_class(gx, dd)]
   }
   # the classes that stand where an invokedynamic used to. Emitted here
   # rather than as they are met, because each is a whole class file and the
   # module's own writer is open until the line above.
   for b in g.closures {
-    out = out ++ [gen_closure_class(gx, supers, g, b)]
+    out = out ++ [gen_closure_class(gx, g, b)]
   }
   for s in g.sam_classes {
-    out = out ++ [gen_sam_class(supers, s)]
+    out = out ++ [gen_sam_class(s)]
   }
   out ++ [(class_name, cw.toByteArray().expect("bytes"))]
 }
@@ -1446,12 +1450,12 @@ pub fn emit_module(
 ## plus the dictionary -- whether lowering filled it with a bridge to an
 ## impl, a trait default, or a synthesised primitive. So this forwards, and
 ## knows nothing about which of the three it is.
-fn gen_dict_class(gx: GenCtx, supers: List[String], dd: CDictDef) -> (String, Bytes) !io = {
+fn gen_dict_class(gx: GenCtx, dd: CDictDef) -> (String, Bytes) !io = {
   let tr = trait_of(gx.traits, dd.trait_id)
   let cls = dict_class(gx.class_name, dd.key)
   let iface = tr_iface(tr.owner, tr.name)
-  let cw = AdtClassWriter.new(supers)
-  cw.beginWithInterface(V17, ACC_PUBLIC + ACC_FINAL, cls, obj(), iface)
+  let cw = AdtClassWriter.plain(COMPUTE_MAXS).expect("writer")
+  AdtClassWriter.beginOnWithInterface(cw, V49, ACC_PUBLIC + ACC_FINAL, cls, obj(), iface)
   # A dictionary the compiler can build once is a singleton; one that is a
   # function of its arguments is an ordinary object with those arguments in
   # fields. Only the scaffold differs -- the forwarding below is the same
@@ -1465,7 +1469,7 @@ fn gen_dict_class(gx: GenCtx, supers: List[String], dd: CDictDef) -> (String, By
   var i = 0
   for entry in tr.methods {
     let (mname, ms) = entry
-    let m = cw.method(ACC_PUBLIC, mname,
+    let m = AdtClassWriter.methodOn(cw, ACC_PUBLIC, mname,
       method_desc(gx.adts, ms.sig.param_tys, ms.sig.ret)).expect("mv")
     m.visitCode()
     var slot = 1
@@ -1667,9 +1671,9 @@ fn gen_cclosure(gx: GenCtx, g: Gen, name: String, owner: String, caps: List[CExp
 ## That adaptation is the whole of what LambdaMetafactory did here. It is the
 ## mirror of `gen_cdynamic`, which boxes arguments before an `apply` and
 ## unerases the result after it -- the same two helpers, the other way round.
-fn gen_closure_class(gx: GenCtx, supers: List[String], g: Gen, b: ClosB) -> (String, Bytes) !io = {
-  let cw = AdtClassWriter.new(supers)
-  cw.beginWithInterface(V17, ACC_PUBLIC + ACC_FINAL, b.cls, obj(), b.iface)
+fn gen_closure_class(gx: GenCtx, g: Gen, b: ClosB) -> (String, Bytes) !io = {
+  let cw = AdtClassWriter.plain(COMPUTE_MAXS).expect("writer")
+  AdtClassWriter.beginOnWithInterface(cw, V49, ACC_PUBLIC + ACC_FINAL, b.cls, obj(), b.iface)
   var caps_desc = ""
   for ct in b.cap_tys { caps_desc = caps_desc ++ desc_of(gx.adts, ct) }
   if len(b.cap_tys) == 0 {
@@ -1677,10 +1681,11 @@ fn gen_closure_class(gx: GenCtx, supers: List[String], g: Gen, b: ClosB) -> (Str
   } else {
     var i = 0
     for ct in b.cap_tys {
-      cw.field(ACC_PRIVATE + ACC_FINAL, capture_field(i), desc_of(gx.adts, ct))
+      AdtClassWriter.fieldOn(cw, ACC_PRIVATE + ACC_FINAL, capture_field(i), desc_of(gx.adts, ct))
       i = i + 1
     }
-    let init = cw.method(ACC_PUBLIC, "<init>", "(" ++ caps_desc ++ ")V").expect("mv")
+    let init = AdtClassWriter.methodOn(cw, ACC_PUBLIC, "<init>",
+      "(" ++ caps_desc ++ ")V").expect("mv")
     init.visitCode()
     init.visitVarInsn(OP_ALOAD, 0)
     init.visitMethodInsn(OP_INVOKESPECIAL, obj(), "<init>", "()V", false)
@@ -1697,7 +1702,7 @@ fn gen_closure_class(gx: GenCtx, supers: List[String], g: Gen, b: ClosB) -> (Str
     init.visitMaxs(0, 0)
     init.visitEnd()
   }
-  let m = cw.method(ACC_PUBLIC, "apply", erased_apply_desc(b.arity)).expect("mv")
+  let m = AdtClassWriter.methodOn(cw, ACC_PUBLIC, "apply", erased_apply_desc(b.arity)).expect("mv")
   m.visitCode()
   var k = 0
   for ct in b.cap_tys {

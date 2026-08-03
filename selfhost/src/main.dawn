@@ -39,7 +39,7 @@ use codegen.{
 }
 use rtclasses.{
   fn_iface, tuple_class, gen_fn_interface, gen_tuple_class, gen_panic_class, gen_unit_class,
-  supers_of, gen_bytes_class, gen_io_class, gen_fn_comparator, gen_ord_interface, tr_iface,
+  gen_bytes_class, gen_io_class, gen_fn_comparator, gen_ord_interface, tr_iface,
   gen_show_class, gen_strings_class, gen_array_class, PANIC_CLASS, UNIT_CLASS, BYTES_CLASS,
   IO_CLASS, FN_CMP_CLASS, SHOW_CLASS, STRINGS_CLASS, ARRAY_CLASS
 }
@@ -212,7 +212,6 @@ fn collect_program(
       }
     }
   }
-  let sup = supers_of(adts, sort(map.keys(adts)))
   var n = 0
   while n <= 8 {
     classes = classes ++ [(fn_iface(n), gen_fn_interface(n))]
@@ -220,22 +219,22 @@ fn collect_program(
   }
   n = 2
   while n <= 8 {
-    classes = classes ++ [(tuple_class(n), gen_tuple_class(sup, n))]
+    classes = classes ++ [(tuple_class(n), gen_tuple_class(n))]
     n = n + 1
   }
   classes = classes ++ [(PANIC_CLASS, gen_panic_class())]
   classes = classes ++ [(UNIT_CLASS, gen_unit_class())]
-  classes = classes ++ [(SHOW_CLASS, gen_show_class(sup))]
+  classes = classes ++ [(SHOW_CLASS, gen_show_class())]
   # dawn/rt/Strings is emitted further down: which Unicode tables it carries
   # depends on what the user's modules can reach, and answering that needs
   # the program tables built below
-  classes = classes ++ [(BYTES_CLASS, gen_bytes_class(sup))]
-  classes = classes ++ [(ARRAY_CLASS, gen_array_class(sup))]
-  classes = classes ++ [(IO_CLASS, gen_io_class(sup))]
-  classes = classes ++ [(tr_iface(None, "Ord"), gen_ord_interface(sup))]
-  classes = classes ++ [(FN_CMP_CLASS, gen_fn_comparator(sup))]
+  classes = classes ++ [(BYTES_CLASS, gen_bytes_class())]
+  classes = classes ++ [(ARRAY_CLASS, gen_array_class())]
+  classes = classes ++ [(IO_CLASS, gen_io_class())]
+  classes = classes ++ [(tr_iface(None, "Ord"), gen_ord_interface())]
+  classes = classes ++ [(FN_CMP_CLASS, gen_fn_comparator())]
   for aid in [OPTION_ID, RESULT_ID, FOREIGN_ERROR_ID] {
-    classes = classes ++ gen_adt(sup, adts, adt_of(adts, aid), no_override())
+    classes = classes ++ gen_adt(adts, adt_of(adts, aid), no_override())
   }
   # program-wide tables for module emission: traits/impls/fn sigs unioned
   # over std and user modules (ids are unique program-wide)
@@ -307,7 +306,7 @@ fn collect_program(
   }
   for tid in wants {
     let tr = trait_of(traits, tid)
-    classes = classes ++ [(tr_iface(None, tr.name), gen_trait_interface(sup, adts, tr))]
+    classes = classes ++ [(tr_iface(None, tr.name), gen_trait_interface(adts, tr))]
   }
 
   # Every module's Core, lowered once. `reach` reads it below and emit_module
@@ -343,7 +342,7 @@ fn collect_program(
     }
     tuse = reach.table_use(cmods, reach_roots)
   }
-  classes = classes ++ [(STRINGS_CLASS, gen_strings_class(sup, tuse))]
+  classes = classes ++ [(STRINGS_CLASS, gen_strings_class(tuse))]
 
   # const values by declaring module, so importers can materialize them
   var const_vals: Map[String, Map[String, CValue]] = map.empty()
@@ -356,7 +355,7 @@ fn collect_program(
   var si = 0
   for sm in std_mods {
     let (cls, cx, tm, ct) = sm
-    classes = classes ++ emit_module(sup, adts, traits, impl_table, prog_fns, cls,
+    classes = classes ++ emit_module(adts, traits, impl_table, prog_fns, cls,
       own_trait_ids(cx.traits, cls), own_adts_of(cx.adts, cls, seen),
       tm, std_lm[si], ct, cdriver.merged_consts(cx, ct, const_vals))
     si = si + 1
@@ -368,7 +367,7 @@ fn collect_program(
   var tests_info: List[(String, String, List[String])] = []
   var ui = 0
   for cm in mods {
-    classes = classes ++ emit_module(sup, adts, traits, impl_table, prog_fns,
+    classes = classes ++ emit_module(adts, traits, impl_table, prog_fns,
       cm.class_name, own_trait_ids(cm.cx.traits, cm.class_name),
       own_adts_of(cm.cx.adts, cm.class_name, seen), cm.tm, user_lm[ui], cm.ct,
       cdriver.merged_consts(cm.cx, cm.ct, const_vals))

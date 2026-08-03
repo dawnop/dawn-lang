@@ -242,8 +242,20 @@ fn vendor_trust(prefix: String) -> Option[VendorTrust] =
   # dawn/tool: one class, AdtClassWriter, 5,148 bytes. The only handwritten
   # Java left in the toolchain, and its source is not in this tree -- it is at
   # `kotlin-final:compiler/src/main/java/dawn/tool/AdtClassWriter.java` and has
-  # been byte-propagated from seed to seed ever since. It writes class files,
-  # so it is both the smallest and the most load-bearing thing here.
+  # been byte-propagated from seed to seed ever since.
+  #
+  # Since K-A4 nothing constructs it: the emitters take a plain ASM
+  # ClassWriter and reach this class only for its five static methods, which
+  # pass the nulls ASM's visit signatures want and Dawn cannot spell. The
+  # half that wrote frames -- both constructors, the supers map, chain(),
+  # the getCommonSuperClass override -- is unreachable now.
+  #
+  # Unreachable is not gone. The bytes are still here, still unbuildable
+  # from this tree, and reachability is an argument about today's call sites,
+  # not a property of the file: reflection does not respect it and the next
+  # edit can undo it. This stays a mitigation until the adapters are emitted
+  # from source (docs/jvm-base-plan.md K-A7), which is what would actually
+  # retire the digest below.
   if prefix == "dawn/tool" {
     Some(Digest("916e397cc4a2451671925ea31b89faf2a5097ab3f1e652667eaa31f0cafb6601"))
   } else if prefix == "org/objectweb/asm" {

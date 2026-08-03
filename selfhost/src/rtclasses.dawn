@@ -15,11 +15,13 @@ use reach.{TableUse}
 use case_table
 use class_table
 use java "dawn.tool.AdtClassWriter"
+use java "org.objectweb.asm.ClassWriter"
 use java "org.objectweb.asm.MethodVisitor"
 use java "org.objectweb.asm.Label"
 use java "java.util.Objects"
 use jvmops.{
-  ACC_ABSTRACT, ACC_FINAL, ACC_INTERFACE, ACC_PRIVATE, ACC_PUBLIC, ACC_STATIC, OP_AALOAD,
+  ACC_ABSTRACT, ACC_FINAL, ACC_INTERFACE, ACC_PRIVATE, ACC_PUBLIC, ACC_STATIC, COMPUTE_MAXS,
+  OP_AALOAD,
   OP_AASTORE, OP_ACONST_NULL, OP_ALOAD, OP_ANEWARRAY, OP_ARETURN, OP_ARRAYLENGTH, OP_ASTORE,
   OP_ATHROW, OP_BALOAD, OP_BASTORE, OP_BIPUSH, OP_CHECKCAST, OP_DUP, OP_GETFIELD, OP_GETSTATIC,
   OP_GOTO, OP_I2B, OP_I2L, OP_IADD, OP_IALOAD, OP_IASTORE, OP_ICONST_0, OP_ICONST_1, OP_ICONST_2,
@@ -28,7 +30,7 @@ use jvmops.{
   OP_IF_ICMPNE, OP_ILOAD, OP_IMUL, OP_INSTANCEOF, OP_INVOKEINTERFACE, OP_INVOKESPECIAL,
   OP_INVOKESTATIC, OP_INVOKEVIRTUAL, OP_IRETURN, OP_ISTORE, OP_ISUB, OP_L2I, OP_LADD, OP_LCMP,
   OP_LCONST_0, OP_LLOAD, OP_LRETURN, OP_NEW, OP_NEWARRAY, OP_POP, OP_PUTFIELD, OP_PUTSTATIC,
-  OP_RETURN, T_BYTE, T_INT, V17
+  OP_RETURN, T_BYTE, T_INT, V49
 }
 
 # ---- naming (must match the Kotlin side byte for byte) ----
@@ -83,7 +85,7 @@ pub const SHOW_CLASS: String = "dawn/rt/Show"
 ## dawn/rt/FnN: the erased function interface (ClassWriter(0), like Kotlin).
 pub fn gen_fn_interface(arity: Int) -> Bytes !io = {
   let cw = AdtClassWriter.plain(0).expect("writer")
-  AdtClassWriter.beginOn(cw, V17, ACC_PUBLIC + ACC_ABSTRACT + ACC_INTERFACE, fn_iface(arity), obj())
+  AdtClassWriter.beginOn(cw, V49, ACC_PUBLIC + ACC_ABSTRACT + ACC_INTERFACE, fn_iface(arity), obj())
   let m = AdtClassWriter.methodOn(cw, ACC_PUBLIC + ACC_ABSTRACT, "apply", erased_apply_desc(arity))
     .expect("mv")
   m.visitEnd()
@@ -94,7 +96,7 @@ pub fn gen_fn_interface(arity: Int) -> Bytes !io = {
 ## dawn/rt/PanicError: an Error subclass carrying the panic message.
 pub fn gen_panic_class() -> Bytes !io = {
   let cw = AdtClassWriter.plain(0).expect("writer")
-  AdtClassWriter.beginOn(cw, V17, ACC_PUBLIC + ACC_FINAL, PANIC_CLASS, "java/lang/Error")
+  AdtClassWriter.beginOn(cw, V49, ACC_PUBLIC + ACC_FINAL, PANIC_CLASS, "java/lang/Error")
   let ctor = AdtClassWriter.methodOn(cw, ACC_PUBLIC, "<init>", "(Ljava/lang/String;)V").expect("mv")
   ctor.visitCode()
   ctor.visitVarInsn(OP_ALOAD, 0)
@@ -110,8 +112,9 @@ pub fn gen_panic_class() -> Bytes !io = {
 ## dawn/rt/Unit: the Unit singleton (materialized only in erased Object slots).
 pub fn gen_unit_class() -> Bytes !io = {
   let cw = AdtClassWriter.plain(0).expect("writer")
-  AdtClassWriter.beginOn(cw, V17, ACC_PUBLIC + ACC_FINAL, UNIT_CLASS, obj())
-  AdtClassWriter.fieldOn(cw, ACC_PUBLIC + ACC_STATIC + ACC_FINAL, "INSTANCE", "L" ++ UNIT_CLASS ++ ";")
+  AdtClassWriter.beginOn(cw, V49, ACC_PUBLIC + ACC_FINAL, UNIT_CLASS, obj())
+  AdtClassWriter.fieldOn(cw, ACC_PUBLIC + ACC_STATIC + ACC_FINAL, "INSTANCE",
+    "L" ++ UNIT_CLASS ++ ";")
   let ctor = AdtClassWriter.methodOn(cw, ACC_PRIVATE, "<init>", "()V").expect("mv")
   ctor.visitCode()
   ctor.visitVarInsn(OP_ALOAD, 0)
@@ -162,7 +165,7 @@ pub fn append_const(m: MethodVisitor, s: String) -> Unit !io = {
 ## String.valueOf, which finds the ADT `toString` below. It is not the
 ## language's answer to "how does this render"; it is what a panic message can
 ## say about a value whose type was thrown away.
-pub fn gen_show_class(supers: List[String]) -> Bytes !io = {
+pub fn gen_show_class() -> Bytes !io = {
   let jstr = "java/lang/String"
   let jlist = "java/util/List"
   let jmap = "java/util/Map"
@@ -170,11 +173,11 @@ pub fn gen_show_class(supers: List[String]) -> Bytes !io = {
   let iter = "java/util/Iterator"
   let entry = "java/util/Map\$Entry"
   let obj_to_str = "(Ljava/lang/Object;)Ljava/lang/String;"
-  let cw = AdtClassWriter.new(supers)
-  cw.begin(V17, ACC_PUBLIC + ACC_FINAL, SHOW_CLASS, obj())
+  let cw = AdtClassWriter.plain(COMPUTE_MAXS).expect("writer")
+  AdtClassWriter.beginOn(cw, V49, ACC_PUBLIC + ACC_FINAL, SHOW_CLASS, obj())
 
   # static String show(Object o): the instanceof chain
-  let sh = cw.method(ACC_PUBLIC + ACC_STATIC, "show", obj_to_str).expect("mv")
+  let sh = AdtClassWriter.methodOn(cw, ACC_PUBLIC + ACC_STATIC, "show", obj_to_str).expect("mv")
   sh.visitCode()
   let not_string = Label.new()
   let not_list = Label.new()
@@ -239,7 +242,7 @@ pub fn gen_show_class(supers: List[String]) -> Bytes !io = {
   sh.visitEnd()
 
   # static String quote(String s): source-literal escaping, backslash first
-  let q = cw.method(ACC_PUBLIC + ACC_STATIC, "quote",
+  let q = AdtClassWriter.methodOn(cw, ACC_PUBLIC + ACC_STATIC, "quote",
     "(Ljava/lang/String;)Ljava/lang/String;").expect("mv")
   q.visitCode()
   q.visitTypeInsn(OP_NEW, SB)
@@ -264,7 +267,7 @@ pub fn gen_show_class(supers: List[String]) -> Bytes !io = {
   q.visitEnd()
 
   # static String showList(List xs): "[e0, e1, ...]" with elements shown
-  let sl = cw.method(ACC_PUBLIC + ACC_STATIC, "showList",
+  let sl = AdtClassWriter.methodOn(cw, ACC_PUBLIC + ACC_STATIC, "showList",
     "(Ljava/util/List;)Ljava/lang/String;").expect("mv")
   sl.visitCode()
   sl.visitTypeInsn(OP_NEW, SB)
@@ -312,7 +315,7 @@ pub fn gen_show_class(supers: List[String]) -> Bytes !io = {
   # static String showMap(Map m): "map.from([(k, v), ...])" (spec §2.2 shape).
   # The same spelling std/map's `Show` impl writes -- the public one, because a
   # rendering that reads like source has to be pasteable (audit RD-14).
-  let sm = cw.method(ACC_PUBLIC + ACC_STATIC, "showMap",
+  let sm = AdtClassWriter.methodOn(cw, ACC_PUBLIC + ACC_STATIC, "showMap",
     "(Ljava/util/Map;)Ljava/lang/String;").expect("mv")
   sm.visitCode()
   sm.visitTypeInsn(OP_NEW, SB)
@@ -377,7 +380,7 @@ pub fn gen_show_class(supers: List[String]) -> Bytes !io = {
   sm.visitEnd()
 
   # static String showSet(Set s): "set.from([e0, e1, ...])"
-  let ss = cw.method(ACC_PUBLIC + ACC_STATIC, "showSet",
+  let ss = AdtClassWriter.methodOn(cw, ACC_PUBLIC + ACC_STATIC, "showSet",
     "(Ljava/util/Set;)Ljava/lang/String;").expect("mv")
   ss.visitCode()
   ss.visitTypeInsn(OP_NEW, SB)
@@ -429,19 +432,19 @@ pub fn gen_show_class(supers: List[String]) -> Bytes !io = {
 
 ## dawn/rt/TupleN: N public final Object fields + structural equals/hashCode +
 ## Show-rendering toString (the Kotlin genTupleClass; frame-computing writer).
-pub fn gen_tuple_class(supers: List[String], n: Int) -> Bytes !io = {
+pub fn gen_tuple_class(n: Int) -> Bytes !io = {
   let cls = tuple_class(n)
-  let cw = AdtClassWriter.new(supers)
-  cw.begin(V17, ACC_PUBLIC + ACC_FINAL, cls, obj())
+  let cw = AdtClassWriter.plain(COMPUTE_MAXS).expect("writer")
+  AdtClassWriter.beginOn(cw, V49, ACC_PUBLIC + ACC_FINAL, cls, obj())
   var i = 0
   while i < n {
-    cw.field(ACC_PUBLIC + ACC_FINAL, "_" ++ to_string(i), "Ljava/lang/Object;")
+    AdtClassWriter.fieldOn(cw, ACC_PUBLIC + ACC_FINAL, "_" ++ to_string(i), "Ljava/lang/Object;")
     i = i + 1
   }
   var ps = ""
   for _k in 0 ..n { ps = ps ++ "Ljava/lang/Object;" }
   let ctor_desc = "(" ++ ps ++ ")V"
-  let init = cw.method(ACC_PUBLIC, "<init>", ctor_desc).expect("mv")
+  let init = AdtClassWriter.methodOn(cw, ACC_PUBLIC, "<init>", ctor_desc).expect("mv")
   init.visitCode()
   init.visitVarInsn(OP_ALOAD, 0)
   init.visitMethodInsn(OP_INVOKESPECIAL, obj(), "<init>", "()V", false)
@@ -455,7 +458,7 @@ pub fn gen_tuple_class(supers: List[String], n: Int) -> Bytes !io = {
   init.visitInsn(OP_RETURN)
   init.visitMaxs(0, 0)
   init.visitEnd()
-  let eq = cw.method(ACC_PUBLIC, "equals", "(Ljava/lang/Object;)Z").expect("mv")
+  let eq = AdtClassWriter.methodOn(cw, ACC_PUBLIC, "equals", "(Ljava/lang/Object;)Z").expect("mv")
   eq.visitCode()
   let yes = Label.new()
   let no = Label.new()
@@ -486,7 +489,7 @@ pub fn gen_tuple_class(supers: List[String], n: Int) -> Bytes !io = {
   eq.visitInsn(OP_IRETURN)
   eq.visitMaxs(0, 0)
   eq.visitEnd()
-  let hc = cw.method(ACC_PUBLIC, "hashCode", "()I").expect("mv")
+  let hc = AdtClassWriter.methodOn(cw, ACC_PUBLIC, "hashCode", "()I").expect("mv")
   hc.visitCode()
   hc.visitInsn(OP_ICONST_1)
   i = 0
@@ -502,7 +505,7 @@ pub fn gen_tuple_class(supers: List[String], n: Int) -> Bytes !io = {
   hc.visitInsn(OP_IRETURN)
   hc.visitMaxs(0, 0)
   hc.visitEnd()
-  let ts = cw.method(ACC_PUBLIC, "toString", "()Ljava/lang/String;").expect("mv")
+  let ts = AdtClassWriter.methodOn(cw, ACC_PUBLIC, "toString", "()Ljava/lang/String;").expect("mv")
   ts.visitCode()
   ts.visitTypeInsn(OP_NEW, SB)
   ts.visitInsn(OP_DUP)
@@ -525,26 +528,6 @@ pub fn gen_tuple_class(supers: List[String], n: Int) -> Bytes !io = {
   ts.visitEnd()
   cw.visitEnd()
   cw.toByteArray().expect("bytes")
-}
-
-## The synthetic superclass table for COMPUTE_FRAMES (the Kotlin adtSupers),
-## as "child super" pairs for the shared writer.
-pub fn supers_of(adts: Adts, all_ids: List[Int]) -> List[String] = {
-  var out: List[String] = []
-  for aid in all_ids {
-    let a = adt_of(adts, aid)
-    let base = adt_jvm_name(a)
-    out = out ++ [base ++ " " ++ obj()]
-    if not a.is_record {
-      for c in a.ctors { out = out ++ [ctor_jvm_name(adts, c) ++ " " ++ base] }
-    }
-  }
-  var n = 2
-  while n <= 8 {
-    out = out ++ [tuple_class(n) ++ " " ++ obj()]
-    n = n + 1
-  }
-  out
 }
 
 pub const BYTES_CLASS: String = "dawn/rt/Bytes"
@@ -577,10 +560,10 @@ pub const FN_CMP_CLASS: String = "dawn/rt/FnComparator"
 ## retire the handwritten dawn.rt.StdBytes; index_of stays pure Dawn over len/at.
 ## Byte values are unsigned 0..255 on the Dawn side, so -1 is a free out-of-range
 ## sentinel for bytes_at (std turns it into a panic).
-pub fn gen_bytes_class(supers: List[String]) -> Bytes !io = {
-  let cw = AdtClassWriter.new(supers)
-  cw.begin(V17, ACC_PUBLIC + ACC_FINAL, BYTES_CLASS, obj())
-  let m = cw.method(ACC_PUBLIC + ACC_STATIC, "concat", "([B[B)[B").expect("mv")
+pub fn gen_bytes_class() -> Bytes !io = {
+  let cw = AdtClassWriter.plain(COMPUTE_MAXS).expect("writer")
+  AdtClassWriter.beginOn(cw, V49, ACC_PUBLIC + ACC_FINAL, BYTES_CLASS, obj())
+  let m = AdtClassWriter.methodOn(cw, ACC_PUBLIC + ACC_STATIC, "concat", "([B[B)[B").expect("mv")
   m.visitCode()
   m.visitVarInsn(OP_ALOAD, 0)
   m.visitInsn(OP_ARRAYLENGTH)
@@ -725,7 +708,7 @@ pub fn gen_bytes_class(supers: List[String]) -> Bytes !io = {
 ## whole of what dropping the charset parameter bought (audit RP-04,
 ## decision C) -- the name-taking decoder it replaced returned an Option only
 ## because the name could be one Java does not know.
-fn gen_bytes_decode_fixed(cw: AdtClassWriter, name: String, field: String) -> Unit !io = {
+fn gen_bytes_decode_fixed(cw: ClassWriter, name: String, field: String) -> Unit !io = {
   let mv = open_static(cw, name, "([B)Ljava/lang/String;")
   mv.visitTypeInsn(OP_NEW, "java/lang/String")
   mv.visitInsn(OP_DUP)
@@ -745,7 +728,7 @@ fn gen_bytes_decode_fixed(cw: AdtClassWriter, name: String, field: String) -> Un
 ## Elements arrive boxed (the array is erased), so each one is a Long that I2B
 ## truncates -- a value outside 0..255 is the caller's error and is stored the
 ## way a byte store anywhere else would store it.
-fn gen_bytes_from_array(cw: AdtClassWriter) -> Unit !io = {
+fn gen_bytes_from_array(cw: ClassWriter) -> Unit !io = {
   let fv = open_static(cw, "bytes_from_array", "(L" ++ ARRAY_CLASS ++ ";)[B")
   let loop = Label.new()
   let done = Label.new()
@@ -813,8 +796,9 @@ fn gen_bytes_from_array(cw: AdtClassWriter) -> Unit !io = {
 ## `Err(String)` and the structured version lived beside it under a
 ## transitional name; the migration that flipped the signature is over and
 ## there is one handler again.
-fn gen_try_closure(cw: AdtClassWriter, name: String, caught: List[String]) -> Unit !io = {
-  let m = cw.method(ACC_PUBLIC + ACC_STATIC, name, "(L" ++ fn_iface(0) ++ ";)LResult;")
+fn gen_try_closure(cw: ClassWriter, name: String, caught: List[String]) -> Unit !io = {
+  let m = AdtClassWriter.methodOn(cw, ACC_PUBLIC + ACC_STATIC, name,
+    "(L" ++ fn_iface(0) ++ ";)LResult;")
     .expect("mv")
   m.visitCode()
   let try_start = Label.new()
@@ -866,18 +850,19 @@ fn gen_try_closure(cw: AdtClassWriter, name: String, caught: List[String]) -> Un
 ##    it. A release skipped because the failure was an `OutOfMemoryError` is a
 ##    file handle leaked at the worst possible moment.
 ## 4. **The handler does not merge with the normal path.** It stores the
-##    Throwable, calls release, and throws it again; nothing jumps past it. So
-##    the only frame `COMPUTE_FRAMES` has to invent holds a `java/lang/Throwable`
-##    on the stack, and `AdtClassWriter.getCommonSuperClass` is never asked
-##    about a pair of generated ADT classes.
+##    Throwable, calls release, and throws it again; nothing jumps past it,
+##    so the verifier reaches it with a single known stack shape. That was
+##    what kept ASM's frame computation off the generated ADT hierarchy back
+##    when frames were computed at all; at class-file 49 nothing computes
+##    them and the inference verifier walks this shape directly.
 ##
 ## The two closures are `Fn1` at the erasure convention and the resource is an
 ## `Object`, so every value crossing here is erased. The boxing is lowering's
 ## `CBox`/`CUnbox` and is not repeated here -- `bracket` is declared `erased`
 ## in `types.intrinsics()`, which is what puts the box on the argument and the
 ## unbox at the call site.
-fn gen_bracket(cw: AdtClassWriter) -> Unit !io = {
-  let m = cw.method(ACC_PUBLIC + ACC_STATIC, "bracket",
+fn gen_bracket(cw: ClassWriter) -> Unit !io = {
+  let m = AdtClassWriter.methodOn(cw, ACC_PUBLIC + ACC_STATIC, "bracket",
     "(Ljava/lang/Object;L" ++ fn_iface(1) ++ ";L" ++ fn_iface(1) ++
       ";)Ljava/lang/Object;").expect("mv")
   m.visitCode()
@@ -1003,8 +988,8 @@ fn gen_caught_err(m: MethodVisitor, base: Int) -> Unit !io = {
 ## every other method in this class is named after -- an implementation symbol
 ## outliving the surface name it was a stand-in for would leave the runtime
 ## class the last place a deleted spelling survives.
-fn gen_cast(cw: AdtClassWriter) -> Unit !io = {
-  let m = cw.method(ACC_PUBLIC + ACC_STATIC, "cast",
+fn gen_cast(cw: ClassWriter) -> Unit !io = {
+  let m = AdtClassWriter.methodOn(cw, ACC_PUBLIC + ACC_STATIC, "cast",
     "(Ljava/lang/Object;Ljava/lang/Class;)LResult;").expect("mv")
   m.visitCode()
   let try_start = Label.new()
@@ -1037,9 +1022,9 @@ fn gen_cast(cw: AdtClassWriter) -> Unit !io = {
 ## The failing ones (read_file/write_file/list_names) simply throw; std wraps
 ## them in a barrier, exactly as it wrapped StdIo. read_line maps Java's
 ## null-or-line onto Option here rather than relying on use-java null-wrapping.
-pub fn gen_io_class(supers: List[String]) -> Bytes !io = {
-  let cw = AdtClassWriter.new(supers)
-  cw.begin(V17, ACC_PUBLIC + ACC_FINAL, IO_CLASS, obj())
+pub fn gen_io_class() -> Bytes !io = {
+  let cw = AdtClassWriter.plain(COMPUTE_MAXS).expect("writer")
+  AdtClassWriter.beginOn(cw, V49, ACC_PUBLIC + ACC_FINAL, IO_CLASS, obj())
   gen_try_closure(cw, "catch_fault", ["java/lang/Exception"])
   # catch_panic catches a Dawn panic and the exceptions a caller can survive —
   # not `Throwable`. Catching Throwable also caught OutOfMemoryError,
@@ -1062,7 +1047,7 @@ pub fn gen_io_class(supers: List[String]) -> Bytes !io = {
 
   # a single shared reader: a fresh BufferedReader per call would let one call's
   # buffer swallow input the next call should see. Lazily initialised in io_read_line.
-  cw.field(ACC_PRIVATE + ACC_STATIC, "stdin", "Ljava/io/BufferedReader;")
+  AdtClassWriter.fieldOn(cw, ACC_PRIVATE + ACC_STATIC, "stdin", "Ljava/io/BufferedReader;")
 
   # io_print(s) = System.out.print(s)
   let pv = open_static(cw, "io_print", "(Ljava/lang/String;)L" ++ UNIT_CLASS ++ ";")
@@ -1255,7 +1240,7 @@ pub fn gen_io_class(supers: List[String]) -> Bytes !io = {
 }
 
 ## The process's view of the world: working directory and environment.
-fn gen_io_env(cw: AdtClassWriter) -> Unit !io = {
+fn gen_io_env(cw: ClassWriter) -> Unit !io = {
   # io_cwd() = System.getProperty("user.dir")
   let cv = open_static(cw, "io_cwd", "()Ljava/lang/String;")
   cv.visitLdcInsn("user.dir")
@@ -1300,7 +1285,7 @@ fn push_empty_options(m: MethodVisitor, cls: String) -> Unit !io = {
 }
 
 ## The binary halves of read_file/write_file, plus delete/rename/temp_dir/is_symlink.
-fn gen_io_bytes_files(cw: AdtClassWriter) -> Unit !io = {
+fn gen_io_bytes_files(cw: ClassWriter) -> Unit !io = {
   # io_read_bytes(path) = Files.readAllBytes(path) — throws on failure
   let rv = open_static(cw, "io_read_bytes", "(Ljava/lang/String;)[B")
   push_path(rv, 0)
@@ -1410,7 +1395,7 @@ fn gen_io_bytes_files(cw: AdtClassWriter) -> Unit !io = {
 ## It reads the raw stream, while io_read_line reads a BufferedReader over it.
 ## Mixing the two in one process loses whatever the reader has buffered; nothing
 ## does, and a language server frames its own messages precisely to avoid it.
-fn gen_io_stdin(cw: AdtClassWriter) -> Unit !io = {
+fn gen_io_stdin(cw: ClassWriter) -> Unit !io = {
   let rv = open_static(cw, "io_read_stdin", "(J)[B")
   rv.visitFieldInsn(OP_GETSTATIC, "java/lang/System", "in", "Ljava/io/InputStream;")
   rv.visitVarInsn(OP_LLOAD, 0)
@@ -1451,7 +1436,7 @@ fn gen_redirect(m: MethodVisitor, which: String, pb_local: Int, path_local: Int)
 
 ## io_run(argv, out_path, err_path): spawn, wait, answer the exit status.
 ## `start()` throws when there is no such program; std wraps it in a barrier.
-fn gen_io_run(cw: AdtClassWriter) -> Unit !io = {
+fn gen_io_run(cw: ClassWriter) -> Unit !io = {
   let rv = open_static(cw, "io_run",
     "(Ljava/util/List;Ljava/lang/String;Ljava/lang/String;)J")
   rv.visitTypeInsn(OP_NEW, PB)
@@ -1526,14 +1511,14 @@ fn array_bounds_panic(m: MethodVisitor, prefix: String, ivar: Int) -> Unit !io =
 ## the value is uniquely owned may write it in place -- which on native is
 ## Perceus' rc==1, and on the JVM is nothing. The append path is where the 12x
 ## lives, so this is a cost the measurements say we can pay.
-pub fn gen_array_class(supers: List[String]) -> Bytes !io = {
-  let cw = AdtClassWriter.new(supers)
-  cw.begin(V17, ACC_PUBLIC + ACC_FINAL, ARRAY_CLASS, obj())
-  cw.field(ACC_PRIVATE + ACC_FINAL, "a", "[Ljava/lang/Object;")
-  cw.field(ACC_PRIVATE + ACC_FINAL, "used", "L" ++ ATOMIC_INT ++ ";")
-  cw.field(ACC_PRIVATE + ACC_FINAL, "len", "I")
+pub fn gen_array_class() -> Bytes !io = {
+  let cw = AdtClassWriter.plain(COMPUTE_MAXS).expect("writer")
+  AdtClassWriter.beginOn(cw, V49, ACC_PUBLIC + ACC_FINAL, ARRAY_CLASS, obj())
+  AdtClassWriter.fieldOn(cw, ACC_PRIVATE + ACC_FINAL, "a", "[Ljava/lang/Object;")
+  AdtClassWriter.fieldOn(cw, ACC_PRIVATE + ACC_FINAL, "used", "L" ++ ATOMIC_INT ++ ";")
+  AdtClassWriter.fieldOn(cw, ACC_PRIVATE + ACC_FINAL, "len", "I")
 
-  let init = cw.method(ACC_PRIVATE, "<init>", array_ctor_desc()).expect("mv")
+  let init = AdtClassWriter.methodOn(cw, ACC_PRIVATE, "<init>", array_ctor_desc()).expect("mv")
   init.visitCode()
   init.visitVarInsn(OP_ALOAD, 0)
   init.visitMethodInsn(OP_INVOKESPECIAL, obj(), "<init>", "()V", false)
@@ -1603,7 +1588,7 @@ fn gen_new_watermark(m: MethodVisitor, push_op: Int) -> Unit !io = {
 ## code points -- convert through `Array`, which is the backend's own type.
 ## Keeping the boundary here rather than teaching each of those places about
 ## the vector is what stopped the flip from rewriting five hand-written methods.
-fn gen_array_java(cw: AdtClassWriter) -> Unit !io = {
+fn gen_array_java(cw: ClassWriter) -> Unit !io = {
   let jlist = "java/util/List"
   let jcoll = "java/util/Collection"
 
@@ -1670,7 +1655,7 @@ fn gen_array_java(cw: AdtClassWriter) -> Unit !io = {
 }
 
 ## array_get(v, i) -> v.a[i], panicking out of bounds like `xs[i]` does.
-fn gen_array_get(cw: AdtClassWriter) -> Unit !io = {
+fn gen_array_get(cw: ClassWriter) -> Unit !io = {
   let gv = open_static(cw, "array_get", "(" ++ array_wrap_desc() ++ "J)Ljava/lang/Object;")
   let bad = Label.new()
   gv.visitVarInsn(OP_LLOAD, 1)
@@ -1697,7 +1682,7 @@ fn gen_array_get(cw: AdtClassWriter) -> Unit !io = {
 ## array_push(v, x) -> v with x appended. Extends in place when this version
 ## ends at the shared watermark and the store has room; otherwise copies into a
 ## store with slack, so the *next* push is cheap either way.
-fn gen_array_push(cw: AdtClassWriter) -> Unit !io = {
+fn gen_array_push(cw: ClassWriter) -> Unit !io = {
   let pv = open_static(cw, "array_push",
     "(" ++ array_wrap_desc() ++ "Ljava/lang/Object;)" ++ array_wrap_desc())
   let slow = Label.new()
@@ -1778,7 +1763,7 @@ fn gen_array_push(cw: AdtClassWriter) -> Unit !io = {
 
 ## array_with(v, i, x) -> v with slot i replaced. Always copies on this
 ## backend; see the class comment for why the watermark cannot help here.
-fn gen_array_with(cw: AdtClassWriter) -> Unit !io = {
+fn gen_array_with(cw: ClassWriter) -> Unit !io = {
   let wv = open_static(cw, "array_with",
     "(" ++ array_wrap_desc() ++ "JLjava/lang/Object;)" ++ array_wrap_desc())
   let bad = Label.new()
@@ -1829,8 +1814,8 @@ fn gen_array_with(cw: AdtClassWriter) -> Unit !io = {
 ## space table. The exception net stays as a safety net, though a validated
 ## string cannot trip it. `parse_int`/`parse_int_radix` are gone entirely --
 ## fmt.atoi is pure Dawn source and never reaches a runtime method.
-fn gen_parse_float_method(cw: AdtClassWriter) -> Unit !io = {
-  let m = cw.method(ACC_PUBLIC + ACC_STATIC, "parse_float",
+fn gen_parse_float_method(cw: ClassWriter) -> Unit !io = {
+  let m = AdtClassWriter.methodOn(cw, ACC_PUBLIC + ACC_STATIC, "parse_float",
     "(Ljava/lang/String;)LOption;").expect("mv")
   m.visitCode()
   let try_start = Label.new()
@@ -1878,13 +1863,13 @@ const CLASS_SPACE: String = "CLASS_SPACE"
 ## case folding. What is left after std/str took over everything expressible as
 ## a walk (docs/native-backend-plan.md 14.12): the representation boundary and
 ## the Unicode tables, and nothing vendored in handwritten Java.
-pub fn gen_strings_class(supers: List[String], u: TableUse) -> Bytes !io = {
+pub fn gen_strings_class(u: TableUse) -> Bytes !io = {
   let jstr = "java/lang/String"
   let jlist = "java/util/List"
-  let cw = AdtClassWriter.new(supers)
-  cw.begin(V17, ACC_PUBLIC + ACC_FINAL, STRINGS_CLASS, obj())
+  let cw = AdtClassWriter.plain(COMPUTE_MAXS).expect("writer")
+  AdtClassWriter.beginOn(cw, V49, ACC_PUBLIC + ACC_FINAL, STRINGS_CLASS, obj())
 
-  let jn = cw.method(ACC_PUBLIC + ACC_STATIC, "join",
+  let jn = AdtClassWriter.methodOn(cw, ACC_PUBLIC + ACC_STATIC, "join",
     "(Ljava/util/List;Ljava/lang/String;)Ljava/lang/String;").expect("mv")
   jn.visitCode()
   jn.visitTypeInsn(OP_NEW, SB)
@@ -1927,7 +1912,7 @@ pub fn gen_strings_class(supers: List[String], u: TableUse) -> Bytes !io = {
   gen_parse_float_method(cw)
 
   # code_points(String) -> List[Int]: one Long-boxed code point per element
-  let cp = cw.method(ACC_PUBLIC + ACC_STATIC, "code_points",
+  let cp = AdtClassWriter.methodOn(cw, ACC_PUBLIC + ACC_STATIC, "code_points",
     "(Ljava/lang/String;)Ljava/util/List;").expect("mv")
   cp.visitCode()
   cp.visitTypeInsn(OP_NEW, ARRAYLIST)
@@ -1966,7 +1951,7 @@ pub fn gen_strings_class(supers: List[String], u: TableUse) -> Bytes !io = {
   cp.visitEnd()
 
   # from_code_points(List[Int]) -> String
-  let fc = cw.method(ACC_PUBLIC + ACC_STATIC, "from_code_points",
+  let fc = AdtClassWriter.methodOn(cw, ACC_PUBLIC + ACC_STATIC, "from_code_points",
     "(Ljava/util/List;)Ljava/lang/String;").expect("mv")
   fc.visitCode()
   fc.visitTypeInsn(OP_NEW, SB)
@@ -2320,11 +2305,11 @@ pub fn gen_strings_class(supers: List[String], u: TableUse) -> Bytes !io = {
   if u.is_space { tables = tables ++ [(CLASS_SPACE, class_payload(class_table.spaces()))] }
   for t in tables {
     let (field, _) = t
-    cw.field(ACC_PRIVATE + ACC_STATIC + ACC_FINAL, field, "[I")
+    AdtClassWriter.fieldOn(cw, ACC_PRIVATE + ACC_STATIC + ACC_FINAL, field, "[I")
   }
   if len(tables) > 0 {
     gen_decode_table(cw)
-    let ci = cw.method(ACC_STATIC, "<clinit>", "()V").expect("mv")
+    let ci = AdtClassWriter.methodOn(cw, ACC_STATIC, "<clinit>", "()V").expect("mv")
     ci.visitCode()
     for t in tables {
       let (field, payload) = t
@@ -2426,7 +2411,7 @@ fn hex6(n: Int) -> String = {
 ##
 ## Locals: 0 the payload, 1 the field count, 2 the array, 3 the field index,
 ## 4 where that field starts.
-fn gen_decode_table(cw: AdtClassWriter) -> Unit !io = {
+fn gen_decode_table(cw: ClassWriter) -> Unit !io = {
   let m = open_static(cw, "decode_table", "(Ljava/lang/String;)[I")
   m.visitVarInsn(OP_ALOAD, 0)
   m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/String", "length", "()I", false)
@@ -2473,7 +2458,7 @@ fn gen_decode_table(cw: AdtClassWriter) -> Unit !io = {
 ##
 ## Locals: 0 the code point, 1 the table, 2 and 3 the search bounds, 4 the
 ## midpoint range, 5 where it starts in the array.
-fn gen_case_lookup(cw: AdtClassWriter) -> Unit !io = {
+fn gen_case_lookup(cw: ClassWriter) -> Unit !io = {
   let m = open_static(cw, "case_cp", "(I[I)I")
   m.visitInsn(OP_ICONST_0)
   m.visitVarInsn(OP_ISTORE, 2)
@@ -2549,7 +2534,7 @@ fn gen_case_lookup(cw: AdtClassWriter) -> Unit !io = {
 ##
 ## Locals: 0 the code point, 1 the table, 2 and 3 the search bounds, 4 the
 ## midpoint range, 5 where it starts in the array.
-fn gen_class_lookup(cw: AdtClassWriter) -> Unit !io = {
+fn gen_class_lookup(cw: ClassWriter) -> Unit !io = {
   let m = open_static(cw, "in_ranges", "(I[I)Z")
   m.visitInsn(OP_ICONST_0)
   m.visitVarInsn(OP_ISTORE, 2)
@@ -2612,7 +2597,7 @@ fn gen_class_lookup(cw: AdtClassWriter) -> Unit !io = {
 ## `field` -- the *simple* mapping, out of the compiler's table.
 ##
 ## Locals: 0 the string, 1 the builder, 2 the UTF-16 offset, 3 the code point.
-fn gen_case_method(cw: AdtClassWriter, name: String, field: String) -> Unit !io = {
+fn gen_case_method(cw: ClassWriter, name: String, field: String) -> Unit !io = {
   let jstr = "java/lang/String"
   let m = open_static(cw, name, "(Ljava/lang/String;)Ljava/lang/String;")
   m.visitTypeInsn(OP_NEW, SB)
@@ -2651,8 +2636,8 @@ fn gen_case_method(cw: AdtClassWriter, name: String, field: String) -> Unit !io 
   close_mv(m)
 }
 
-fn open_static(cw: AdtClassWriter, name: String, desc: String) -> MethodVisitor !io = {
-  let m = cw.method(ACC_PUBLIC + ACC_STATIC, name, desc).expect("mv")
+fn open_static(cw: ClassWriter, name: String, desc: String) -> MethodVisitor !io = {
+  let m = AdtClassWriter.methodOn(cw, ACC_PUBLIC + ACC_STATIC, name, desc).expect("mv")
   m.visitCode()
   m
 }
@@ -2692,15 +2677,15 @@ pub fn tr_iface(owner: Option[String], name: String) -> String =
 ## A java.util.Comparator over a Dawn two-argument cmp function; emit_cmp
 ## receives (source, a, b) on the stack and leaves the long comparison result.
 fn gen_comparator_class(
-  supers: List[String],
   cls: String,
   src_desc: String,
   emit_cmp: fn(MethodVisitor) -> Unit !io
 ) -> Bytes !io = {
-  let cw = AdtClassWriter.new(supers)
-  cw.beginWithInterface(V17, ACC_PUBLIC + ACC_FINAL, cls, obj(), "java/util/Comparator")
-  cw.field(ACC_PRIVATE + ACC_FINAL, "src", src_desc)
-  let init = cw.method(ACC_PUBLIC, "<init>", "(" ++ src_desc ++ ")V").expect("mv")
+  let cw = AdtClassWriter.plain(COMPUTE_MAXS).expect("writer")
+  AdtClassWriter.beginOnWithInterface(cw, V49, ACC_PUBLIC + ACC_FINAL, cls, obj(),
+    "java/util/Comparator")
+  AdtClassWriter.fieldOn(cw, ACC_PRIVATE + ACC_FINAL, "src", src_desc)
+  let init = AdtClassWriter.methodOn(cw, ACC_PUBLIC, "<init>", "(" ++ src_desc ++ ")V").expect("mv")
   init.visitCode()
   init.visitVarInsn(OP_ALOAD, 0)
   init.visitMethodInsn(OP_INVOKESPECIAL, obj(), "<init>", "()V", false)
@@ -2710,7 +2695,8 @@ fn gen_comparator_class(
   init.visitInsn(OP_RETURN)
   init.visitMaxs(0, 0)
   init.visitEnd()
-  let m = cw.method(ACC_PUBLIC, "compare", "(Ljava/lang/Object;Ljava/lang/Object;)I").expect("mv")
+  let m = AdtClassWriter.methodOn(cw, ACC_PUBLIC, "compare",
+    "(Ljava/lang/Object;Ljava/lang/Object;)I").expect("mv")
   m.visitCode()
   m.visitVarInsn(OP_ALOAD, 0)
   m.visitFieldInsn(OP_GETFIELD, cls, "src", src_desc)
@@ -2725,8 +2711,8 @@ fn gen_comparator_class(
   cw.toByteArray().expect("bytes")
 }
 
-pub fn gen_fn_comparator(supers: List[String]) -> Bytes !io =
-  gen_comparator_class(supers, FN_CMP_CLASS, "L" ++ fn_iface(2) ++ ";", (m: MethodVisitor) => {
+pub fn gen_fn_comparator() -> Bytes !io =
+  gen_comparator_class(FN_CMP_CLASS, "L" ++ fn_iface(2) ++ ";", (m: MethodVisitor) => {
     m.visitMethodInsn(OP_INVOKEINTERFACE, fn_iface(2), "apply", erased_apply_desc(2), true)
     m.visitTypeInsn(OP_CHECKCAST, "java/lang/Long")
     m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/Long", "longValue", "()J", false)
@@ -2734,10 +2720,11 @@ pub fn gen_fn_comparator(supers: List[String]) -> Bytes !io =
   })
 
 ## The prelude Ord trait interface (one erased cmp method).
-pub fn gen_ord_interface(supers: List[String]) -> Bytes !io = {
-  let cw = AdtClassWriter.new(supers)
-  cw.begin(V17, ACC_PUBLIC + ACC_ABSTRACT + ACC_INTERFACE, tr_iface(None, "Ord"), obj())
-  let m = cw.method(ACC_PUBLIC + ACC_ABSTRACT, "cmp",
+pub fn gen_ord_interface() -> Bytes !io = {
+  let cw = AdtClassWriter.plain(COMPUTE_MAXS).expect("writer")
+  AdtClassWriter.beginOn(cw, V49, ACC_PUBLIC + ACC_ABSTRACT + ACC_INTERFACE,
+    tr_iface(None, "Ord"), obj())
+  let m = AdtClassWriter.methodOn(cw, ACC_PUBLIC + ACC_ABSTRACT, "cmp",
     "(Ljava/lang/Object;Ljava/lang/Object;)J").expect("mv")
   m.visitEnd()
   cw.visitEnd()
