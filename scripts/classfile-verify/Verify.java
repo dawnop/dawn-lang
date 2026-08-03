@@ -14,6 +14,16 @@
 // noise (a class referencing an optional dependency that is not on this
 // class path) is reported but not fatal -- absence of a jar is not illegal
 // bytecode.
+//
+// The loader is child-first, and that is not a detail. The toolchain jar has
+// to be on the parent class path (selfhost's own classes reference vendored
+// ASM and coursier types), but the selfhost corpus emits classes with exactly
+// the names that jar already holds -- `std.cursor`, `emit`, `main`. Under the
+// default parent-first delegation every one of them resolved out of the jar
+// and the directory this gate was pointed at was never read: for that corpus
+// the check could not fail no matter what `__emit` wrote. Demonstrated by
+// corrupting one reachable instruction in an emitted class -- parent-first
+// passed it, child-first reports the VerifyError.
 import java.net.URL;
 import java.net.URLClassLoader;
 import java.nio.file.Files;
@@ -23,10 +33,41 @@ import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 public class Verify {
+  /** Prefers the emitted directory over the parent, except for the JDK itself. */
+  static final class EmittedFirst extends URLClassLoader {
+    EmittedFirst(URL[] urls, ClassLoader parent) {
+      super(urls, parent);
+    }
+
+    @Override
+    protected Class<?> loadClass(String name, boolean resolve) throws ClassNotFoundException {
+      synchronized (getClassLoadingLock(name)) {
+        Class<?> c = findLoadedClass(name);
+        if (c == null
+            && !name.startsWith("java.")
+            && !name.startsWith("jdk.")
+            && !name.startsWith("sun.")) {
+          try {
+            c = findClass(name);
+          } catch (ClassNotFoundException notEmitted) {
+            // vendored ASM, coursier, anything else: the parent has it
+          }
+        }
+        if (c == null) {
+          c = super.loadClass(name, false);
+        }
+        if (resolve) {
+          resolveClass(c);
+        }
+        return c;
+      }
+    }
+  }
+
   public static void main(String[] args) throws Exception {
     Path dir = Path.of(args[0]);
-    URLClassLoader cl =
-        new URLClassLoader(new URL[] {dir.toUri().toURL()}, Verify.class.getClassLoader());
+    EmittedFirst cl =
+        new EmittedFirst(new URL[] {dir.toUri().toURL()}, Verify.class.getClassLoader());
     List<String> names;
     try (Stream<Path> walk = Files.walk(dir)) {
       names = walk.filter(p -> p.toString().endsWith(".class"))
