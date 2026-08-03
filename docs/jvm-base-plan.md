@@ -1,6 +1,6 @@
 # A 线：收缩 JVM 后端的可信底座
 
-> 状态：**proposed**（2026-08-03 立项，任务 #127）。本文是 A 线的动工前设计：
+> 状态：**in progress**（2026-08-03 立项，任务 #127；K-A0/K-A0.5/K-A1/K-A3/K-A5 已落地，下一刀 K-A4）。本文是 A 线的动工前设计：
 > 它把一次 V49 可行性审计的结论、量出来的代价、被推翻的预设，和刀表与顺序落进仓库。
 >
 > **为什么在这儿而不在别处**：这批证据原先躺在 `/tmp` 的备忘录里，已经因为一次 WSL
@@ -88,7 +88,8 @@ JDK 26 上跑，**两个 JVM 上都是 0 illegal**。
    CLDC 老格式的 `StackMap` 属性，**比 `StackMapTable` 还大**（同一方法 147 B vs
    140 B vs 无帧 113 B），JVM 在 V49 下直接忽略它。必须同时把 `ClassWriter(2)`
    改成 `ClassWriter(1)`（COMPUTE_MAXS）——**而那正好在没有源码的那个类里**（§0）。
-   这是 A 线两件事必须一起做的原因。
+   （§5.1 复验并收窄了这条：要改的只是构造器传给 `super()` 的 flag，**不需要**先把
+   那个类重写一遍，所以「两件事必须一起做」只对 K-A4 内部成立，不构成对 K-A3 的前置。）
 
 ### 2.2 校验器真的在跑
 
@@ -127,6 +128,15 @@ bootstrap 只用了 `LambdaMetafactory.metafactory` 一种（无 `altMetafactory
 捕获元数直方图 `{0:81, 1:32, 2:18, 3:11, 4:4, 5:1, 6:1, 7:1}`——**81/149 零捕获**，
 可做成单例静态字段。
 
+> **K-A3 落地后的实测**：预测全中。selfhost 发射出 **149 个 `dawn/fn/` 类**，其中
+> **81 个零捕获单例、68 个带字段**——与上面这份直方图逐项对上。`dawn/sam/` **0 个**，
+> 也与「selfhost 里 0 处是 SAM bridge」一致（SAM 路径由 `packages/web` 等语料覆盖）。
+> `examples/calc.dawn` 68 → **85** 个类，正是 +17。
+>
+> 类数从 **895 → 1046（+151）**，比 149 多两个：`emit$ClosB`/`emit$SamC` 两个新记录
+> 类型。另有一个字典类因 ADT id 位移改名（`…$Adt15729` → `…$Adt15768`）——**changed
+> 与 ADT-shifted 是两个桶**，这一个属于后者。全部 +151 已逐个交代，没有余数。
+
 ### 3.2 jar 体积：**净赚 −13.3%**
 
 `[实测]` 目录级真实字节 + `[估算]` 闭包类那 61 KB（用 javac 编出的等形状类按捕获
@@ -139,6 +149,18 @@ bootstrap 只用了 `LambdaMetafactory.metafactory` 一种（无 `altMetafactory
 | **净值**（再加 149 个闭包类） | **2,708,681 (−13.3%)** | **~1,288,668 (−4.7%)** |
 
 单 `StackMapTable` 一项就占 478,044 B = **15.3% 的类字节**（2,292 个属性）。
+
+> **K-A3 落地后的实测**（非 vendor 类，`build/dawn-selfhost.jar`）：
+>
+> | | 类数 | raw | zipped |
+> |---|---|---|---|
+> | K-A3 前（V61 + indy） | 895 | 3,126,865 | 1,241,633 |
+> | **K-A3 后**（V61 + 显式闭包类） | **1046** | **3,188,303** (+2.0%) | **1,276,789** (+2.8%) |
+>
+> **闭包类那 61 KB 的估算是准的**：实测 +61,438 B / 151 个类 = **407 B/类**，
+> 估算值是 410 B/类。上表「净值 −13.3%」里唯一的估算成分因此可以按实测收紧——
+> 但**剩下的 −15.2% 要等 K-A4**，今天还在 V61，`StackMapTable` 一个字节都没省。
+> 换句话说这一刀单独看是 **+2.0%**，收益全部押在下一刀。
 
 ### 3.3 启动时间：**基本对冲**
 
@@ -165,6 +187,23 @@ bootstrap 只用了 `LambdaMetafactory.metafactory` 一种（无 `altMetafactory
 750.2 ms 的 ~3%）。这是**两个独立微基准的加减，不是端到端实测**；真实值大概率
 优于此估计，因为全量强制链接是最坏情况。**实装后必须端到端重测**。
 
+> **K-A3 落地后：(b) 已是端到端实测**，(a) 仍要等 K-A4。同一台机器、GraalVM 21、
+> `java -jar` 直调（绕开 `bin/dawn` 的时间戳检查），两个 jar 只差这一刀：
+>
+> | | K-A3 前 | K-A3 后 | 差 |
+> |---|---|---|---|
+> | `dawn --version`（n=11） | 54 ms | 58 ms | **+4 ms (+7%)** |
+> | `dawn build examples/calc.dawn`（n=9） | 724 ms | 694 ms | **−30 ms (−4.1%)** |
+>
+> **两个方向相反，而这不是噪声，是两种负载**：`--version` 几乎不求值闭包，省不到
+> LMF 的引导，只白付了 151 个新条目的 jar 目录与类加载开销；真实编译负载里闭包用得
+> 密，LMF 引导省下来就压过了。**微基准的 −18.8 ms 因此偏保守**——端到端量到 −30 ms。
+>
+> 一并纠正上面括号里的基线：`dawn --version` 在本机是 **54 ms** 而非 106.2 ms，
+> `dawn build examples/calc.dawn` 是 **724 ms** 而非 750.2 ms。差别在审计走 `bin/dawn`
+> 包装脚本（含时间戳检查与一次 shell 启动），本表直调 `java -jar`。**同一份对比里
+> 两边用同一种调法**，所以差值仍然可比。
+
 ## 4. 被推翻的预设
 
 这一节是本文最该先读的部分。以下每条都曾被当成事实写在文档或备忘录里。
@@ -186,8 +225,10 @@ bootstrap 只用了 `LambdaMetafactory.metafactory` 一种（无 `altMetafactory
 | 12 | 刀表把「捞回/重写 `AdtClassWriter`」（K-A1/K-A2）排在闭包下降 K-A3 **之前** | 顺序错，且 K-A2 整刀取消。要改的只是构造器传给 `super()` 的 flag，K-A3 完全不碰它；重写一个 K-A4 之后就不存在的 classfile writer 是白做。§5 | `[实测]` |
 | 13 | （无人提过）COMPUTE_FRAMES 与 COMPUTE_MAXS 只差算不算帧 | 还差**死代码改写**：前者把不可达代码换成 `nop; athrow`，后者原样保留。V49 推断式校验器只走可达代码，故无害——但这是 K-A4 独有的风险面 | `[实测]` |
 
+| 14 | （无人提过）「闭包下降 = 把 indy 换成等价的类」 | 漏了**访问权限**：提升出来的 lambda 体是 `private`，LMF 拿的是带私有权限的 `Lookup` 够得着，独立类文件够不着。改完编译器读自己第一个文件就 `IllegalAccessError`。**`classfile-verify` 对此失明**——权限是链接期解析才查的，`Class.forName(initialize=true)` 强制不到方法体里的符号引用。§5.5 | `[实测]` |
+
 第 6/7/8/9/10 条已随 K-A0 改掉（见 §6）。第 11/12/13 条是 K-A3 动工前复验刀序时测出来的，
-已改进 §5。
+已改进 §5；第 14 条是 K-A3 落地时撞上的，记在 §5.5。
 
 **这批过期陈述的共同根因**：`scripts/doc-check.py` 只检查 `docs/` 下的状态标记、
 链接与锚点，**不检查任何源文件头的事实陈述**。第 8 条能在一个自举成功的后端里
@@ -200,8 +241,8 @@ bootstrap 只用了 `LambdaMetafactory.metafactory` 一种（无 `altMetafactory
 | **K-A0** | 文档校正 + 本文 | 不碰发射的字节 | 本次 |
 | **K-A0.5** | 给无源二进制上 checksum | 只加门禁 | 本次 |
 | **K-A1** | 从 `kotlin-final` 捞回 `AdtClassWriter.java`，**先只当参照读**，不进主干 | 不改代码 | **已做**（§5.1） |
-| **K-A3** | 闭包下降：`emit.dawn:1494` + `emit.dawn:656` → 显式类；81 处零捕获做单例。**仍在 V61 + COMPUTE_FRAMES 下做** | **Emit-Change，不可逆** | 待 |
-| **K-A5** | 门禁：发射的常量池不得出现 tag 15/16/17/18 | 只加门禁 | 随 K-A3 |
+| **K-A3** | 闭包下降：`emit.dawn:1494` + `emit.dawn:656` → 显式类；81 处零捕获做单例。**仍在 V61 + COMPUTE_FRAMES 下做** | **Emit-Change，不可逆** | **已做**（§5.5） |
+| **K-A5** | 门禁：发射的常量池不得出现 tag 15/16/17/18 | 只加门禁 | **已做**（随 K-A3） |
 | **K-A4** | `jvmops.dawn:26` `V17 = 61` → `49`；`ClassWriter(2)` → `(1)`；删 `getCommonSuperClass` 覆写与 `rtclasses.dawn:530` 的 adtSupers 表 | **Emit-Change**，D5 承诺点 | 待 |
 | **K-A4b** | `dawn/tool` 收成静态 null 适配器（`extends ClassWriter` 与覆写一起删） | 换实现，可回退 | 待 |
 | **K-A6** | 端到端重测 §3.3 的启动数（那两个数是微基准加减） | 只测量 | 待 |
@@ -313,6 +354,50 @@ StackMapTable」，JDK 26 上实测仍然如此。
 **但风险不是零**：推断式校验器是 OpenJDK 想甩掉的历史包袱；`javac` 早已不能产出
 < 52。一旦 Dawn 走 V49，它会成为**极少数**仍在生产 v49 的现代工具，生态上是孤岛。
 这条要写进决策，不要装作不存在。
+
+### 5.5 K-A3 落地记（闭包下降）
+
+**做了什么**：`gen_cclosure` 与 `emit_sam_conversion` 不再发 `invokedynamic`。
+前者发 `dawn/fn/<模块>$<n>`——`implements dawn/rt/FnN`，捕获进字段，`apply` 里
+`unerase` 参数 → 调提升出来的静态体 → `box_ty` 返回值；零捕获走 `singleton_scaffold`
+的 `INSTANCE`。后者发 `dawn/sam/<模块>$<n>`，只转发给本来就在发的桥。
+`ClassWriter` 的 flag、classfile 版本、帧，**一律没碰**。
+
+**LMF 干的适配就是 `unerase`/`box_ty` 这一对**，而且它已经在仓库里了——`gen_cdynamic`
+在调用侧反着写同一对（先 `box_ty` 参数、后 `unerase` 结果）。这一刀没有新增类型逻辑，
+只是把同一份适配挪到被调用侧。
+
+**三件实测教训**：
+
+1. **`private` 是这一刀唯一的真 bug，而且门禁抓不到它**。提升出来的 lambda 体与 SAM 桥
+   一直是 `ACC_PRIVATE + ACC_STATIC`：LMF 拿到的是**带私有权限的 `Lookup`**，它 spin 出
+   的类够得着；独立的类文件够不着。改完第一次跑就是
+   `IllegalAccessError: class dawn.fn.std$io$1 tried to access private method std.io.lambda$1`
+   ——**栈顶是 `std.io.read_file`，编译器读自己的第一个文件就炸**。
+   值得记的是：**`classfile-verify` 对此完全失明**。访问权限是**链接期解析**才检查的，
+   而它 `Class.forName(initialize=true)` 只强制到类初始化，不强制解析每个方法体里的
+   符号引用。抓住它的是「跑一次真的编译」，不是任何静态门禁。
+2. **`new` 得在捕获求值之前压栈**（构造器要接收者在实参底下）。原来 indy 是把捕获当
+   实参、指令在最后，顺序天然对；换成 `new/dup` 就得提前。捕获类型是 `cex_ty` 的纯函数，
+   所以能在发射任何字节之前算出来，这一步才成立。SAM 那边受值已经在栈上，
+   用 `NEW/DUP_X1/SWAP` 把未初始化引用穿到它下面（全是单字，无需 DUP2 族）。
+3. **`core-diff` 是这一刀最好的正确性证据**：changed 集合**只有 `emit` 一个模块**
+   （我改的那个）。这一刀在 Core 之后，所以「别的模块 Core 一个字节没动」是可机器验证的
+   「语义没变」。另有一个字典类因 ADT id 位移改名，属 **ADT-shifted 桶，不并进 changed**。
+
+**行为对拍**（逐字节 diff 必红——形状变了——所以证明换成行为）：
+`dawn test selfhost` 298 项、`selfhost-fixpoint` B==C、`native-fixpoint` B==C、
+`selfhost-run-diff`、`classfile-verify` 八语料 1946 类 0 illegal、`selfhost-prev-diff`
+（`Emit-Change(emit *)` 声明覆盖六个语料）、`fmt-diff`/`lsp-diff`、以及十余个 contract 门禁
+全绿。
+
+**K-A5 的红演示**（门禁没红过就不算门禁）：`scripts/constpool-scan.py` 在**未改动的
+HEAD** 上跑，`34 of 963 emitted classes name a method-handle constant`，exit 1；
+同一条命令在 K-A3 之后 `1131 emitted classes, no constant-pool tag 15/16/17/18`，exit 0。
+它挂在 `classfile-verify/run.sh` 末尾，复用那里已经发射好的语料。
+
+**留给 K-A4 的**：版本降到 49、`ClassWriter(2)`→`(1)`、删覆写与 `supers_of`。
+§3.2 的 −15.2% 与 §3.3 的 (a) 都在那一刀里，本刀单独看是 **jar +2.0%、真实编译 −4.1%**。
 
 ## 6. 本次落地（K-A0 / K-A0.5）
 
