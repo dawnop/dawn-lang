@@ -8,6 +8,13 @@
 # `build` shells out to the system C compiler: emitting C *is* this
 # backend's codegen, and cc is its assembler. Subcommands are a subset of
 # the JVM driver's on purpose; `test` and the rest arrive in later knives.
+#
+# `fmt`, `doc` and `add` are wired here as second implementations of the JVM
+# driver's argument handling rather than as calls into a shared one, and that
+# is deliberate: `scripts/native-cli-diff.sh` holds the two byte for byte, and
+# a differential over one shared function proves nothing. The *work* is shared
+# (fmt.format, doc.*_json, add.run_add are the same modules); only the driver
+# plumbing is doubled.
 
 use std/io
 use std/str
@@ -19,6 +26,9 @@ use jsig.{jsig_refused}
 use analyze.{Program, LocDiag, load_directory, load_file, analyze_program}
 use cdriver
 use version.{VERSION}
+use fmt
+use doc
+use add
 
 fn usage() -> String =
   join([
@@ -29,6 +39,10 @@ fn usage() -> String =
     "  dawnc build [--std <dir>] <target> [-o out] compile to a native binary via cc",
     "  dawnc emitc [--std <dir>] <target> [-o out] emit the C translation unit",
     "  dawnc run   [--std <dir>] <target>          compile and run",
+    "  dawnc fmt [--check] <file.dawn | dir>...    format files in place",
+    "  dawnc doc <target> | --stdlib | --builtins  emit the API reference as JSON",
+    "  dawnc add <spec> [--subdir <p>] [--as <alias>] [--dir <project>]",
+    "                                              add a dependency to dawn.toml",
     "  dawnc version                               print the version",
     "",
     "A <target> is a single .dawn file or a project directory (src/main.dawn entry).",
@@ -50,8 +64,21 @@ fn fail_compile(diags: List[LocDiag]) -> Unit !io = {
   ()
 }
 
+## The JVM driver's CLI error shape, exit code included: this used to exit 1
+## while `main.dawn` exited 2 for the same class of mistake (a missing target,
+## a file with the wrong suffix). Nothing compared the two drivers, so the
+## divergence sat there; `scripts/native-cli-diff.sh` compares them now.
 fn cli_error(msg: String) -> Unit !io = {
   io.eprintln("error: " ++ msg)
+  let _ = io.exit(2)
+  ()
+}
+
+## Diagnostics without the count line, exit 1 -- `doc`'s failure shape.
+fn fail_doc(diags: List[LocDiag]) -> Unit !io = {
+  var pairs: List[(String, Diag)] = []
+  for ld in diags { pairs = pairs ++ [(ld.path, ld.d)] }
+  io.eprint(diag.render_all(pairs))
   let _ = io.exit(1)
   ()
 }
@@ -211,6 +238,122 @@ fn cmd_run(rest: List[String]) -> Unit !io = {
   }
 }
 
+## Every .dawn file under `dir`, recursively; paths are `dir`-prefixed.
+##
+## The order `io.list_dir` returns is not the same on both backends (#114: the
+## C reader does not sort), so the caller sorts the flat result -- which is
+## also what the JVM driver does, for the same reason one layer down.
+fn dawn_files_under(dir: String) -> List[String] !io = {
+  var out: List[String] = []
+  match io.list_dir(dir) {
+    Ok(files) -> {
+      for f in files {
+        let p = dir ++ "/" ++ f
+        if io.is_dir(p) {
+          out = out ++ dawn_files_under(p)
+        } else if str.ends_with(f, ".dawn") {
+          out = out ++ [p]
+        }
+      }
+    }
+    Err(e) -> panic("cannot list " ++ dir ++ ": " ++ e.message)
+  }
+  out
+}
+
+## `dawnc fmt [--check] <file.dawn | dir>...` -- reformat in place, or report
+## unformatted files and exit 1.
+fn cmd_fmt(rest: List[String]) -> Unit !io = {
+  var check = false
+  var paths: List[String] = []
+  for a in rest {
+    if a == "--check" { check = true } else { paths = paths ++ [a] }
+  }
+  if len(paths) == 0 { return cli_error("usage: dawn fmt [--check] <file.dawn | dir>...") }
+  var files: List[String] = []
+  for p in paths {
+    if not io.exists(p) { return cli_error("no such file or directory: " ++ p) }
+    if io.is_dir(p) {
+      files = files ++ sort(dawn_files_under(p))
+    } else {
+      files = files ++ [p]
+    }
+  }
+  var unformatted = 0
+  for f in files {
+    match io.read_file(f) {
+      Ok(original) -> {
+        let formatted = fmt.format(original)
+        if formatted != original {
+          if check {
+            println(f)
+            unformatted = unformatted + 1
+          } else {
+            match io.write_file(f, formatted) {
+              Ok(_) -> println("formatted " ++ f)
+              Err(e) -> panic("cannot write " ++ f ++ ": " ++ e.message)
+            }
+          }
+        }
+      }
+      Err(e) -> panic("cannot read " ++ f ++ ": " ++ e.message)
+    }
+  }
+  if check && unformatted > 0 { let _ = io.exit(1) }
+}
+
+## `dawnc doc <target>` / `--stdlib` / `--builtins`.
+##
+## The JVM driver hands `analyze_program` the reflecting `use java` hook; this
+## one hands it the refusing hook, as every other native subcommand does. For a
+## target without `use java` the two produce the same JSON, and a target with
+## it is not a program this backend compiles at all.
+fn cmd_doc(rest: List[String]) -> Unit !io = {
+  var std_dir = "std"
+  var builtins_mode = false
+  var stdlib_mode = false
+  var target = ""
+  var i = 0
+  while i < len(rest) {
+    if rest[i] == "--std" && i + 1 < len(rest) {
+      std_dir = rest[i + 1]
+      i = i + 2
+    } else if rest[i] == "--builtins" {
+      builtins_mode = true
+      i = i + 1
+    } else if rest[i] == "--stdlib" {
+      stdlib_mode = true
+      i = i + 1
+    } else {
+      target = rest[i]
+      i = i + 1
+    }
+  }
+  let std = match load_std(std_dir) {
+    Ok(sc) -> sc
+    Err(e) -> panic("cannot load std from " ++ std_dir ++ ": " ++ e)
+  }
+  if stdlib_mode {
+    print(doc.stdlib_json(std))
+    return
+  }
+  if builtins_mode {
+    print(doc.builtins_json(std))
+    return
+  }
+  if target == "" {
+    return cli_error(
+      "usage: dawn doc <file.dawn | project-dir> | dawn doc --stdlib | dawn doc --builtins")
+  }
+  if not io.exists(target) {
+    return cli_error("no such file or directory: " ++ target)
+  }
+  let loaded = if io.is_dir(target) { load_directory(target) } else { load_file(target) }
+  let prog = analyze_program(loaded, std, ct_default(), jsig_refused())
+  if len(prog.diags) > 0 { fail_doc(prog.diags) }
+  print(doc.project_json(prog))
+}
+
 pub fn main() -> Unit !io = {
   match args() {
     [] -> fail_usage()
@@ -223,6 +366,15 @@ pub fn main() -> Unit !io = {
         cmd_emitc(rest)
       } else if mode == "run" {
         cmd_run(rest)
+      } else if mode == "fmt" {
+        cmd_fmt(rest)
+      } else if mode == "doc" {
+        cmd_doc(rest)
+      } else if mode == "add" {
+        match add.run_add(rest) {
+          Ok(s) -> println(s)
+          Err(e) -> cli_error(e)
+        }
       } else if mode == "version" || mode == "--version" {
         println("dawnc " ++ VERSION ++ " (native)")
       } else {
