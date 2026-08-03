@@ -2421,11 +2421,12 @@ fn ctor_pat(p: P, st: St) -> PR[Pattern] = {
       let (st4, arg_name) = adv(p, st2)
       let st5 = skip_nl(p, adv1(p, st4))
       let (st6, pt) = pattern_p(p, st5)?
-      args = args ++ [PatArg { name: Some(arg_name.text), pat: pt }]
+      args = args ++ [PatArg { name: Some(arg_name.text), nlo: arg_name.lo, nhi: arg_name.hi,
+        pat: pt }]
       st2 = st6
     } else {
       let (st7, pt) = pattern_p(p, st2)?
-      args = args ++ [PatArg { name: None, pat: pt }]
+      args = args ++ [PatArg { name: None, nlo: pat_lo(pt), nhi: pat_hi(pt), pat: pt }]
       st2 = st7
     }
     st2 = skip_nl(p, st2)
@@ -2454,11 +2455,12 @@ fn record_pat(p: P, st: St, name: Token) -> PR[Pattern] = {
     if at_kind(p, st3, COLON) {
       let st4 = skip_nl(p, adv1(p, st3))
       let (st5, sub) = pattern_p(p, st4)?
-      args = args ++ [PatArg { name: Some(f.text), pat: sub }]
+      args = args ++ [PatArg { name: Some(f.text), nlo: f.lo, nhi: f.hi, pat: sub }]
       st1 = st5
     } else {
       # shorthand { x } binds field x to x
-      args = args ++ [PatArg { name: Some(f.text), pat: PBind(f.text, f.lo, f.hi) }]
+      args = args ++ [PatArg { name: Some(f.text), nlo: f.lo, nhi: f.hi,
+        pat: PBind(f.text, f.lo, f.hi) }]
       st1 = st3
     }
     st1 = skip_nl(p, st1)

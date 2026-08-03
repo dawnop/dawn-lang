@@ -199,6 +199,44 @@ fn qual_const(cx: Cx, target: Expr, fname: String) -> Option[(String, Ty)] = {
   }
 }
 
+## Is `q` a value this module can name? Asked of the name before a `.`, where
+## the alternative reading is a whole-module alias.
+fn resolves_to_value(cx: Cx, q: String) -> Bool =
+  lookup(cx, q) != None || lookup_fn_sig(cx, q) != None ||
+  map.has(cx.ctors_by_name, q) || map.has(cx.consts, q) || map.has(cx.java_classes, q)
+
+## `q.x` where `q` names nothing at all. Before a `.` a bare name can be a
+## value or a whole-module alias (spec §10.3), and this used to be reported by
+## checking `q` as if only the first reading existed -- "undefined variable",
+## in the one position where a missing `use ... as q` is just as likely. The
+## type and pattern positions have said "module alias" all along.
+fn undefined_qualifier_err(cx: Cx, q: String, lo: Int, hi: Int) -> Cx =
+  cerr_h(cx, "undefined variable or module alias: " ++ q, lo, hi,
+    match moved_or_suggest(cx, q, local_names(cx) ++ fn_pool(cx)) {
+      Some(h) -> h
+      None -> "a qualified access needs a whole-module import in scope: `use <path> as " ++
+        q ++ "`"
+    })
+
+## `m.x` where `m` IS a whole-module alias but `x` is none of the values it
+## exports. Falling through to the value path reported the alias itself as an
+## undefined variable, which is worse than inconsistent: `m` is defined.
+fn qual_value_err(cx: Cx, exp: ModExports, fname: String, lo: Int, hi: Int) -> Cx = {
+  let msg = "module `" ++ exp.mod_path ++ "` has no exported value `" ++ fname ++ "`"
+  # a name it does export, as a type, is worth saying so: otherwise the author
+  # reads "no exported value `Shown`", finds `pub type Shown` and stops there
+  match map.get(exp.types_by_name, fname) {
+    Some(aid) -> {
+      var cs: List[String] = []
+      for c in adt_of(exp.adt_infos, aid).ctors { cs = cs ++ [c.name] }
+      return cerr_h(cx, msg, lo, hi, "`" ++ fname ++
+          "` is a type there; a value of it comes from: " ++ join(cs, ", "))
+    }
+    None -> ()
+  }
+  cerr_o(cx, msg, lo, hi, suggest.hint(fname, map.keys(exp.consts) ++ map.keys(exp.ctors)))
+}
+
 ## `m.C` read as a qualified constructor: the (adt id, slot) the alias exports
 ## under `fname`, or None (LANG-06).
 fn qual_ctor(cx: Cx, target: Expr, fname: String) -> Option[(Int, Int)] = {
@@ -1995,7 +2033,7 @@ fn check_ctor_pattern_at(
             None -> "constructor: " ++ ctor_render(cx1.adts, ci)
           }
           cx1 = cerr_h(cx1, "`" ++ ci.name ++ "` has no field `" ++ an ++ "`",
-            pat_lo(a.pat), pat_hi(a.pat), hint)
+            a.nlo, a.nhi, hint)
           let (cx2, _) = check_pattern(cx1, a.pat, TyError, mutable)
           cx1 = cx2
           i = i + 1
@@ -2063,7 +2101,8 @@ fn no_tpat() -> Option[TPat] = None
 test "patterns bind, refute, and lower" {
   var cx = seed_prelude(push_scope(test_cx()))
   # Some(x) against Option[Int] binds x: Int
-  let p = PCtor("Some", [PatArg { name: None, pat: PBind("x", 5, 6) }], false, true, 0, 4, 0, 7)
+  let p = PCtor("Some", [PatArg { name: None, nlo: 5, nhi: 6, pat: PBind("x", 5, 6) }],
+    false, true, 0, 4, 0, 7)
   let (cx1, tp) = check_pattern(cx, p, opt_ty(TyInt), false)
   assert len(cx1.diags) == 0
   assert sym_of(cx1, lookup(cx1, "x").expect("bound")).ty == TyInt
@@ -2087,17 +2126,19 @@ test "patterns bind, refute, and lower" {
 test "ctor pattern field discipline" {
   var cx = seed_prelude(push_scope(test_cx()))
   # Ok(v: x, ..) on Result[Int, String]; then a missing-field case
-  let good = PCtor("Ok", [PatArg { name: Some("value"), pat: PBind("x", 5, 6) }],
-    false, true, 0, 2, 0, 7)
+  let good = PCtor("Ok", [PatArg { name: Some("value"), nlo: 3, nhi: 8, pat: PBind("x", 10, 11) }],
+    false, true, 0, 2, 0, 12)
   let (cx1, _) = check_pattern(cx, good, result_ty(TyInt, TyString), false)
   assert len(cx1.diags) == 0
   let bare = PCtor("Ok", no_pargs(), false, false, 0, 2, 0, 2)
   let (cx2, _) = check_pattern(cx, bare, result_ty(TyInt, TyString), false)
   assert str.contains(cx2.diags[0].msg, "a bare name does not match it")
-  let wrong = PCtor("Ok", [PatArg { name: Some("nope"), pat: PWild(5, 6) }],
-    false, true, 0, 2, 0, 7)
+  let wrong = PCtor("Ok", [PatArg { name: Some("nope"), nlo: 3, nhi: 7, pat: PWild(9, 10) }],
+    false, true, 0, 2, 0, 11)
   let (cx3, _) = check_pattern(cx, wrong, result_ty(TyInt, TyString), false)
   assert cx3.diags[0].msg == "`Ok` has no field `nope`"
+  # the caret is on the field name, not on the sub-pattern it was written for
+  assert (cx3.diags[0].lo, cx3.diags[0].hi) == (3, 7)
   assert str.contains(cx3.diags[1].msg, "does not mention: value")
 }
 
@@ -3325,6 +3366,24 @@ fn check_expr_at(cx: Cx, e: Expr, expected: Option[Ty]) -> (Cx, Ty, TExpr) !io =
                 # expression
                 Some(fq) -> check_java_static_field(cx, fq, fname, flo, fhi, lo, hi)
                 None -> {
+                  # a bare name that is not a value: the module readings, which
+                  # the value path below can only call an undefined variable
+                  match target {
+                    EVar(q, qlo, qhi) ->
+                      if not resolves_to_value(cx, q) {
+                        match map.get(cx.module_exports, q) {
+                          Some(exp) ->
+                            return (qual_value_err(cx, exp, fname, flo, fhi),
+                              TyError, XError(lo, hi))
+                          None ->
+                            if not map.has(cx.module_aliases, q) {
+                              return (undefined_qualifier_err(cx, q, qlo, qhi),
+                                TyError, XError(lo, hi))
+                            }
+                        }
+                      }
+                    _ -> ()
+                  }
                   let (cx1, tt, tx) = check_expr(cx, target, no_expected())
                   check_field_access_typed(cx1, tt, tx, fname, flo, fhi, lo, hi)
                 }
@@ -3875,19 +3934,54 @@ fn named_arg_msg(cx: Cx, target: Expr) -> String =
 ## Argument names name a constructor's fields, so every other callee rejects
 ## them. One report per call, at the first named argument: repeating the same
 ## sentence once per argument is noise, not information.
-fn reject_named_args(cx: Cx, target: Expr, args: List[Arg]) -> Cx =
+##
+## And neither is going on. The names already said the callee cannot be what
+## this call needs it to be, so typing the call anyway reports the same mistake
+## a second time in different words -- `Integer.MAX_VALUE(cap: 1)` used to say
+## both "Java member, not a constructor" and "cannot call a value of type Int".
+## Hence Some(result), which the caller returns; the argument subtrees are
+## still visited, so their own errors surface.
+fn reject_named_args(
+  cx: Cx,
+  target: Expr,
+  args: List[Arg],
+  lo: Int,
+  hi: Int
+) -> Option[(Cx, Ty, TExpr)] !io =
   match first_named(args) {
-    None -> cx
-    Some(a) -> cerr_h(cx, named_arg_msg(cx, target), a.lo, a.hi, named_arg_hint())
+    None -> None
+    Some(a) -> {
+      var cx1 = cerr_h(cx, named_arg_msg(cx, target), a.lo, a.hi, named_arg_hint())
+      for e in arg_exprs(args) {
+        let (cxa, _, _) = check_expr(cx1, e, no_expected())
+        cx1 = cxa
+      }
+      Some((cx1, TyError, XError(lo, hi)))
+    }
   }
 
 ## The same rejection for a dot call: `x.f(a: 1)`. Its callee is a name, so it
 ## can be quoted; whether it resolves to UFCS, a module function, a fn-typed
-## field or a Java method, none of them has parameter names to write.
-fn reject_named_method_args(cx: Cx, name: String, args: List[Arg]) -> Cx =
+## field or a Java method, none of them has parameter names to write. It stops
+## for the same reason the paren form does -- `xs.len(n: 1)` went on to count
+## the receiver and the named argument and report an arity of 2.
+fn reject_named_method_args(
+  cx: Cx,
+  name: String,
+  args: List[Arg],
+  lo: Int,
+  hi: Int
+) -> Option[(Cx, Ty, TExpr)] !io =
   match first_named(args) {
-    None -> cx
-    Some(a) -> cerr_h(cx, fn_named_arg_msg(name), a.lo, a.hi, named_arg_hint())
+    None -> None
+    Some(a) -> {
+      var cx1 = cerr_h(cx, fn_named_arg_msg(name), a.lo, a.hi, named_arg_hint())
+      for e in arg_exprs(args) {
+        let (cxa, _, _) = check_expr(cx1, e, no_expected())
+        cx1 = cxa
+      }
+      Some((cx1, TyError, XError(lo, hi)))
+    }
   }
 
 ## `callee(args)` — the one application node, and the four things it can mean
@@ -3930,13 +4024,16 @@ fn check_apply(
     _ -> ()
   }
   # everything below is a call, and a call has no argument names to give
-  let cx_n = reject_named_args(cx, target, args0)
+  match reject_named_args(cx, target, args0, lo, hi) {
+    Some(r) -> return r
+    None -> ()
+  }
   let args = arg_exprs(args0)
   # a name: `f(x)`. check_call keeps the split a name has always had -- a local
   # holding a function value calls dynamically, anything else statically.
   match target {
     EVar(name, vlo, vhi) ->
-      return check_call(cx_n, name, args, expected, None, no_sig(), vlo, vhi, lo, hi)
+      return check_call(cx, name, args, expected, None, no_sig(), vlo, vhi, lo, hi)
     _ -> ()
   }
   # piping into an unannotated lambda: the arguments determine its parameter types
@@ -3952,7 +4049,7 @@ fn check_apply(
     }
     _ -> ()
   }
-  var cx1 = cx_n
+  var cx1 = cx
   var pre: Option[List[Ty]] = None
   var pre_txs: List[TExpr] = []
   var ft = TyError
@@ -4029,8 +4126,9 @@ fn check_apply(
         let (cxa, at, ax) = check_expr(cx1, a, Some(pt))
         cx1 = cxa
         if not assignable(cx1, at, pt) {
-          cx1 = cerr(cx1, "argument type mismatch: expected " ++ ty_show(cx1.adts, pt) ++
-              ", got " ++ ty_show(cx1.adts, at), e_lo(a), e_hi(a))
+          cx1 = cerr_h(cx1, "argument type mismatch: expected " ++ ty_show(cx1.adts, pt) ++
+              ", got " ++ ty_show(cx1.adts, at), e_lo(a), e_hi(a),
+            "type: " ++ ty_show(cx1.adts, ft))
         }
         txs = txs ++ [ax]
         i = i + 1
@@ -4040,8 +4138,9 @@ fn check_apply(
       var i = 0
       for at in ats {
         if not assignable(cx1, at, fps[i]) {
-          cx1 = cerr(cx1, "argument type mismatch: expected " ++ ty_show(cx1.adts, fps[i]) ++
-              ", got " ++ ty_show(cx1.adts, at), e_lo(args[i]), e_hi(args[i]))
+          cx1 = cerr_h(cx1, "argument type mismatch: expected " ++ ty_show(cx1.adts, fps[i]) ++
+              ", got " ++ ty_show(cx1.adts, at), e_lo(args[i]), e_hi(args[i]),
+            "type: " ++ ty_show(cx1.adts, ft))
         }
         i = i + 1
       }
@@ -4414,6 +4513,43 @@ fn check_args_plain(cx: Cx, args: List[Expr], pre0: Option[(Ty, TExpr)]) -> (Cx,
   (cx1, txs)
 }
 
+## Does `t` mention the type variable `vid`? Answered by substituting for it:
+## the result differs from the input exactly when the variable occurs.
+fn mentions_tvar(t: Ty, vid: Int) -> Bool = {
+  var m: Map[Int, Ty] = map.empty()
+  m = map.insert(m, vid, TyNever)
+  let em: Map[Int, Eff] = map.empty()
+  subst(t, m, em) != t
+}
+
+## Where a failed trait bound belongs. The bound is on a type parameter, and
+## the argument that stands in for it is the thing the author can change --
+## the callee name is the same for every bound the call has, so `Float has no
+## hash` used to point at `insert` rather than at the `1.0` it is about.
+##
+## A parameter that IS the variable names that value directly; one that merely
+## contains it (`Map[K, V]`) is a container, and blaming it would put the
+## caret on `map.empty()`. So exact matches are preferred, containers are the
+## fallback, and the callee remains the last resort.
+fn bound_arg_span(s: Sig, args: List[Expr], tp: Ty, clo: Int, chi: Int) -> (Int, Int) = {
+  let vid = match tp {
+    TyVar(_, v) -> v
+    _ -> return (clo, chi)
+  }
+  let n = if len(args) < len(s.param_tys) { len(args) } else { len(s.param_tys) }
+  var i = 0
+  while i < n {
+    if s.param_tys[i] == tp { return (e_lo(args[i]), e_hi(args[i])) }
+    i = i + 1
+  }
+  i = 0
+  while i < n {
+    if mentions_tvar(s.param_tys[i], vid) { return (e_lo(args[i]), e_hi(args[i])) }
+    i = i + 1
+  }
+  (clo, chi)
+}
+
 ## A named call f(args) (the Kotlin checkCall): a local fn value, else a
 ## top-level / std / builtin signature with two-round argument inference,
 ## trait witnesses and effect instantiation. `resolved_sig` bypasses locals
@@ -4479,8 +4615,9 @@ fn check_call(
         let (cxa, at, ax) = check_arg_at(cx1, a, i, pre0, Some(pt))
         cx1 = cxa
         if not assignable(cx1, at, pt) {
-          cx1 = cerr(cx1, "argument type mismatch: expected " ++ ty_show(cx1.adts, pt) ++
-              ", got " ++ ty_show(cx1.adts, at), e_lo(a), e_hi(a))
+          cx1 = cerr_h(cx1, "argument type mismatch: expected " ++ ty_show(cx1.adts, pt) ++
+              ", got " ++ ty_show(cx1.adts, at), e_lo(a), e_hi(a),
+            "type: " ++ ty_show(cx1.adts, lt))
         }
         txs = txs ++ [ax]
         i = i + 1
@@ -4604,8 +4741,9 @@ fn check_call(
     var ws: List[WitRef] = []
     var i2 = 0
     for tp in s.tparams {
+      let (blo, bhi) = bound_arg_span(s, args, tp, clo, chi)
       for tr_id in bounds_of(s, i2) {
-        let (cxa, w) = resolve_witness(cx1, tr_id, subst(tp, m, em), clo, chi,
+        let (cxa, w) = resolve_witness(cx1, tr_id, subst(tp, m, em), blo, bhi,
           "`" ++ callee ++ "`")
         cx1 = cxa
         match w {
@@ -4991,8 +5129,13 @@ fn check_ctor_call(
       fi2 = fi2 + 1
     }
     if len(cargs) > n {
-      cx1 = cerr_h(cx1, "`" ++ ci.name ++ "` takes " ++ to_string(n) ++ " field(s), got " ++
-          to_string(len(cargs)), lo, hi, "constructor: " ++ ctor_render(cx1.adts, ci))
+      # TyError, not the constructed type: the construction was rejected, and
+      # letting it stand as a Sum made `fn f() -> Int = Zero(1)` report the
+      # arity once and then the return type as a second sentence about the
+      # same mistake. Every other early exit from this function does the same.
+      return (cerr_h(cx1, "`" ++ ci.name ++ "` takes " ++ to_string(n) ++ " field(s), got " ++
+          to_string(len(cargs)), lo, hi, "constructor: " ++ ctor_render(cx1.adts, ci)),
+        TyError, XError(lo, hi))
     } else if len(missing) > 0 && not has_spread {
       cx1 = cerr_h(cx1, "missing field(s) in `" ++ ci.name ++ "`: " ++ join(missing, ", "),
         lo, hi, "constructor: " ++ ctor_render(cx1.adts, ci))
@@ -5778,10 +5921,18 @@ fn check_module_call(
               nlo, nhi, "add `pub` to its declaration in " ++ ex.mod_path),
               TyError, XError(lo, hi))
           }
-          if map.has(ex.types_by_name, name) || map.has(ex.consts, name) {
-            return (cerr(cx1, "`" ++ name ++ "` is not a function; import it with `use " ++
-                ex.mod_path ++ ".{" ++ name ++ "}`", nlo, nhi), TyError, XError(lo, hi))
-          }
+          # There used to be a branch here for `name` in the module's types or
+          # constants ("not a function; import it with `use m.{X}`"). It could
+          # not run, twice over. A type or constant name is TYPEIDENT by
+          # declaration (parser: `a type name (uppercase)`, `a constant name
+          # (SCREAMING_SNAKE_CASE)`), and `postfix_expr` turns `.` + TYPEIDENT
+          # into EFieldAcc, never EMethod -- and EMethod is the only way into
+          # this function. Even hoisted above the `in_all` guard it never
+          # fired: `lib.Shown()` still reported `undefined variable: lib`.
+          # And `exports_of` puts every declared name into `all_names` before
+          # it decides whether the declaration is pub, so anything in
+          # `types_by_name` or `consts` is in `all_names` too and the guard
+          # above would have returned first regardless.
           (cerr_o(cx1, "module `" ++ ex.mod_path ++ "` has no exported function `" ++ name ++ "`",
             nlo, nhi, suggest.hint(name, map.keys(ex.fns))), TyError, XError(lo, hi))
         }
@@ -5808,13 +5959,32 @@ fn check_method_call(
 ) -> (Cx, Ty, TExpr) !io = {
   # a dot call is a call: `x.f(a: 1)` parses (every argument list takes the
   # `name: value` shape, SYN-03) and is rejected here, by type
-  var cx1 = reject_named_method_args(cx, name, args0)
+  match reject_named_method_args(cx, name, args0, lo, hi) {
+    Some(r) -> return r
+    None -> ()
+  }
+  var cx1 = cx
   let args = arg_exprs(args0)
   # module-qualified call: alias.fn(args), where alias is a whole-module import
   match target {
     EVar(rname, _, _) ->
       if lookup(cx1, rname) == None && map.has(cx1.module_aliases, rname) {
         return check_module_call(cx1, rname, name, args, expected, nlo, nhi, lo, hi)
+      }
+    _ -> ()
+  }
+  # a bare name that is neither a value nor an alias: both readings of `q.f()`
+  # fail, and the value path below would report only one of them
+  match target {
+    EVar(rname, rlo, rhi) ->
+      if not resolves_to_value(cx1, rname) && not map.has(cx1.module_aliases, rname) &&
+      not map.has(cx1.module_exports, rname) {
+        var cxe = undefined_qualifier_err(cx1, rname, rlo, rhi)
+        for a in args {
+          let (cxa, _, _) = check_expr(cxe, a, no_expected())
+          cxe = cxa
+        }
+        return (cxe, TyError, XError(lo, hi))
       }
     _ -> ()
   }
@@ -5910,8 +6080,9 @@ fn check_method_call(
                 let (cxa, at, ax) = check_expr(cx1, a, Some(pt))
                 cx1 = cxa
                 if not assignable(cx1, at, pt) {
-                  cx1 = cerr(cx1, "argument type mismatch: expected " ++ ty_show(cx1.adts, pt) ++
-                      ", got " ++ ty_show(cx1.adts, at), e_lo(a), e_hi(a))
+                  cx1 = cerr_h(cx1, "argument type mismatch: expected " ++
+                      ty_show(cx1.adts, pt) ++ ", got " ++ ty_show(cx1.adts, at),
+                    e_lo(a), e_hi(a), "field type: " ++ ty_show(cx1.adts, ftype))
                 }
                 txs = txs ++ [ax]
                 ai = ai + 1
@@ -6327,7 +6498,7 @@ test "match checks arms, unifies results and demands exhaustiveness" {
   cx = push_scope(cx)
   let (cxo, _) = declare(cx, "o", opt_ty(TyInt), false, 0, 1)
   let arm = MatchArm {
-    pats: [PCtor("Some", [PatArg { name: None, pat: PBind("v", 10, 11) }],
+    pats: [PCtor("Some", [PatArg { name: None, nlo: 10, nhi: 11, pat: PBind("v", 10, 11) }],
       false, true, 5, 9, 5, 12)],
     guard: None,
     body: EVar("v", 16, 17),
