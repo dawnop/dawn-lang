@@ -25,6 +25,8 @@
 use std/str
 use std/list
 use std/io
+use std/bytes
+use sha2/sha256
 use java "java.io.File"
 use java "java.lang.ClassLoader"
 use java "java.net.URL"
@@ -207,11 +209,124 @@ fn jar_classes(jf: JarFile, prefix: String, seen: List[String]) -> List[(String,
   out
 }
 
+## How a vendored package's bytes are held to account.
+##
+## `Digest` is the recorded hash of the whole package; `Exempt` is a package
+## deliberately left unhashed, carrying the reason. There is no third case on
+## purpose: a `--vendor` prefix that appears in neither is refused, because the
+## mechanism's whole job is to copy binaries that have no source in this tree,
+## and one entering the trusted base without a decision written down is the
+## thing being prevented.
+pub type VendorTrust =
+  | Digest(sha: String)
+  | Exempt(why: String)
+
+## The recorded state of every package `--vendor` may copy.
+##
+## These are byte-identical across every selfhost seed from v0.8.0 (the first)
+## to v0.47.0 -- measured by extracting each package from every cached seed jar
+## and hashing it. That is what makes a literal here the right home rather than
+## a line in `scripts/seed-checksums.txt`: that file records one hash per
+## release and is bumped at every release, so a constant living in it would
+## look like something to re-derive, and re-deriving from the jar in hand is
+## precisely the check being skipped. Here it is a constant that no seed
+## advance touches, and it is compiled into the compiler, so it travels the
+## seed chain and applies wherever a released jar runs -- neither of which a
+## repo-relative data file can do.
+##
+## Note the check runs one generation behind: stage 1 is built by the seed,
+## whose copy of this function is the previous release's. Tampering with the
+## seed's copy of a vendored class is still caught, because stage 1 carries
+## that copy forward and stage 2's build hashes it.
+fn vendor_trust(prefix: String) -> Option[VendorTrust] =
+  # dawn/tool: one class, AdtClassWriter, 5,148 bytes. The only handwritten
+  # Java left in the toolchain, and its source is not in this tree -- it is at
+  # `kotlin-final:compiler/src/main/java/dawn/tool/AdtClassWriter.java` and has
+  # been byte-propagated from seed to seed ever since. It writes class files,
+  # so it is both the smallest and the most load-bearing thing here.
+  if prefix == "dawn/tool" {
+    Some(Digest("916e397cc4a2451671925ea31b89faf2a5097ab3f1e652667eaa31f0cafb6601"))
+  } else if prefix == "org/objectweb/asm" {
+    # 38 classes, 253,894 bytes: the other bytecode writer with no source here.
+    # Hashing it costs ~36 ms per vendor pass (measured: this SHA-256 runs at
+    # ~7 MB/s, from timing 5 KB / 254 KB / 10 MB inputs through it), which is
+    # ~0.3% of a toolchain rebuild.
+    Some(Digest("5d77f9cbe60b78a82a15c1ed444dd9843fc6477982542ee77daf0833745e2084"))
+  } else if prefix == "coursierapi" {
+    # 2,409 classes, 10,057,897 bytes -- 40x the rest put together. At ~7 MB/s
+    # that is ~1.4 s per vendor pass and ~2.9 s on a two-stage toolchain
+    # rebuild, against a 10.7 s baseline: +27% on every rebuild, to guard the
+    # one vendored package that does not write bytecode (it resolves and
+    # downloads dependencies) and the one whose upstream artifact is a
+    # published Maven Central release with its own checksums. Exempt on cost,
+    # not on principle -- if this hash gets cheap, record it.
+    Some(Exempt("10 MB; ~1.4 s per vendor pass; resolver, not a bytecode writer"))
+  } else {
+    None
+  }
+
+## The canonical hash of a vendored package: the `d1` shape pkgfetch already
+## uses for source trees -- name, NUL, length, NUL, content, per entry in the
+## sorted order `classpath_package` returns. Names and lengths are in the
+## digest, not just the bytes, so a renamed or re-split class cannot collide
+## with the recorded value.
+fn package_digest(pairs: List[(String, Bytes)]) -> String = {
+  var d = sha256.new()
+  for p in pairs {
+    let (nm, bs) = p
+    d = sha256.update(d, bytes.utf8(nm))
+    d = sha256.update(d, zero_byte())
+    d = sha256.update(d, bytes.utf8(to_string(bytes.len(bs))))
+    d = sha256.update(d, zero_byte())
+    d = sha256.update(d, bs)
+  }
+  sha256.finish(d)
+}
+
+fn zero_byte() -> Bytes = bytes.utf8(str.from_char(0))
+
+## Hold a package's copied bytes against `vendor_trust`, or stop.
+##
+## A mismatch exits rather than warns: at that point the bytes about to be
+## copied into every program this compiler builds are not the bytes that were
+## reviewed, and there is no version of continuing that is better than not.
+fn check_vendored(prefix: String, pairs: List[(String, Bytes)]) -> Unit = {
+  match vendor_trust(prefix) {
+    Some(Exempt(_)) -> ()
+    Some(Digest(want)) -> {
+      let got = package_digest(pairs)
+      if got != want {
+        panic("vendored package `" ++ prefix ++ "` does not match its recorded hash\n" ++
+            "  expected " ++ want ++ "\n" ++
+            "  actual   " ++ got ++ "\n" ++
+            "  " ++ to_string(len(pairs)) ++ " class(es) off java.class.path\n" ++
+            "  These bytes get copied verbatim into every program this compiler\n" ++
+            "  builds, and they have no source in this tree to rebuild them from.\n" ++
+            "  If you changed them on purpose, update vendor_trust in\n" ++
+            "  selfhost/src/vendor.dawn; otherwise your class path is not the one\n" ++
+            "  this compiler was reviewed against.")
+      }
+    }
+    None ->
+      panic("vendored package `" ++ prefix ++ "` is not declared in vendor_trust\n" ++
+          "  (selfhost/src/vendor.dawn). `--vendor` copies handwritten binaries\n" ++
+          "  that have no source in this tree into every built program, so each\n" ++
+          "  one needs a recorded hash or a written reason for not having one.\n" ++
+          "  Its current hash is " ++ package_digest(pairs))
+  }
+}
+
 ## Every .class under package path `prefix` (e.g. "org/objectweb/asm") found
 ## on java.class.path, as (class name, bytes) pairs sorted by name. The first
 ## class-path entry providing a class wins, like the class loader. This is how
 ## `selfhost build` packs the compiler-jar residents (the dawn.tool shim, ASM)
 ## into a standalone jar.
+##
+## Every `--vendor` in the repository goes through here -- bin/dawn's two build
+## stages, selfhost-fixpoint.sh, replay-bootstrap.sh, selfhost-bench.sh -- so
+## this is where the bytes are checked. Putting it in the shell callers instead
+## would mean four copies of the same check and a fifth caller arriving without
+## one.
 pub fn classpath_package(prefix: String) -> List[(String, Bytes)] !io = {
   let cp = match System.getProperty("java.class.path") {
     Some(s) -> s
@@ -249,5 +364,49 @@ pub fn classpath_package(prefix: String) -> List[(String, Bytes)] !io = {
   }
   var out: List[(String, Bytes)] = []
   for nm in sort(names) { out = out ++ [(nm, lookup_bytes(found, nm))] }
+  check_vendored(prefix, out)
   out
+}
+
+# ---- tests ----
+
+test "the package digest covers names and lengths, not just bytes" {
+  let a = bytes.utf8("alpha")
+  let b = bytes.utf8("beta")
+  # the same bytes under different names must not hash the same, or a class
+  # could be renamed into another's slot without moving the recorded value
+  assert package_digest([("p/A", a)]) != package_digest([("p/B", a)])
+  # it is a sequential hash, so order is part of the value -- which is why
+  # `classpath_package` sorts before it gets here, and why a class path that
+  # yields the same set in another order must not be able to pass silently
+  assert package_digest([("p/A", a), ("p/B", b)]) !=
+    package_digest([("p/B", b), ("p/A", a)])
+  # and concatenation must not be ambiguous: "alpha"+"beta" split two ways
+  assert package_digest([("p/A", bytes.utf8("alphabeta"))]) !=
+    package_digest([("p/A", a), ("p/A", b)])
+}
+
+test "an empty package is not silently the same as any other" {
+  # vendoring nothing is a real failure mode (wrong class path, wrong prefix),
+  # so the empty digest has to be a value the table can be held against rather
+  # than a pass
+  assert package_digest([]) ==
+    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+}
+
+test "every declared vendor package carries a usable decision" {
+  for p in ["dawn/tool", "org/objectweb/asm", "coursierapi"] {
+    match vendor_trust(p) {
+      None -> panic("undeclared vendor package in the repository's own build: " ++ p)
+      Some(Exempt(why)) -> { assert str.len(why) > 0 }
+      Some(Digest(sha)) -> {
+        # 64 lowercase hex digits: a truncated or upper-cased paste would
+        # otherwise only show up as a mismatch at build time
+        assert str.len(sha) == 64
+        assert sha == str.to_lower(sha)
+      }
+    }
+  }
+  # the prefixes bin/dawn actually passes are declared; anything else is not
+  assert vendor_trust("dawn/rt") == None
 }
