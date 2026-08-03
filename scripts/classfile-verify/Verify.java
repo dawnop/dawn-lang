@@ -24,6 +24,22 @@
 // the check could not fail no matter what `__emit` wrote. Demonstrated by
 // corrupting one reachable instruction in an emitted class -- parent-first
 // passed it, child-first reports the VerifyError.
+//
+// How that was found is worth keeping, because reading this file will not
+// find it: nobody reviewed the delegation order. The mutation was built for
+// an unrelated question (does the pre-50 verifier walk unreachable code?),
+// and the mutant that was supposed to fail -- one reachable instruction
+// replaced by athrow -- came back green. The gate, not the mutation, was
+// the bug.
+//
+// And the counter-intuitive part, for whoever reads the fix in git history
+// and asks why a repaired gate caught nothing new: after the switch to
+// child-first the corpora still report 1946 classes, 0 illegal. Exactly the
+// numbers from before. That is not a disappointing fix, it is the evidence
+// -- a gate that has never let anything through and a gate that has never
+// looked at anything print the same output, and no amount of green
+// distinguishes them. Only a mutant does. So when this gate is changed,
+// re-run the red demo; its passing count proves nothing on its own.
 import java.net.URL;
 import java.net.URLClassLoader;
 import java.nio.file.Files;
