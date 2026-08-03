@@ -49,11 +49,20 @@
 # `git fetch` of the tag failing is the *lucky* outcome: it is loud. The
 # dangerous edits are the ones that leave this script green.
 #
-# Two of the three are checked by machine, and the checks are demonstrated red
-# in §5.7; the third (2) is checked only in the sense that Diff.java asserts the
-# reference still carries the members this compiler does not emit. See §5.7 for
-# what that does and does not cover -- no gate can assert its own independence,
-# and the comment above is doing real work.
+# How much of that is machine-checked, exactly (§5.7 has the red demos):
+#
+#   (2) yes -- Diff.java's `referenceIsForeign` asserts the reference still
+#       carries the members this compiler does not emit, so a reference that
+#       became our own artifact fails. Repoint it at the emitted class and all
+#       fourteen differential checks still pass; only that one goes red.
+#   (3) yes -- the guard below, for a Java copy landing in the tree.
+#   (1) only in part. (2) proves the reference is not something we built, not
+#       that it came from *this* tag; an identical javac build from somewhere
+#       else would satisfy it. (3) closes the one concrete way that happens.
+#
+# No gate can assert its own independence -- all three checks are one delete
+# away from gone, and nothing detects that. The prose above is not decoration;
+# it is the part of the mitigation a machine cannot carry.
 #
 # Red demo (2026-08-04): see docs/jvm-base-plan.md §5.7. Every check below has
 # been shown to go red, each against a discriminating negative control.
