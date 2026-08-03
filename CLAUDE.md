@@ -18,8 +18,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 - `.dawn` 源码（`selfhost/`、`site/`、`playground/`、`packages/`、`std/`）注释全英文；
   报错信息、CLI 输出全英文。
-- `docs/` 43 篇、12000+ 行，全中文（索引与状态分层见 [docs/README.md](docs/README.md)）。
-  README 中文。提交信息 `type(scope): 中文摘要`。
+- `docs/` 全中文（索引与状态分层见 [docs/README.md](docs/README.md)）。README 中文。
+  （篇数不在这里复述——`scripts/doc-check.py` 每次跑都会报，那才是不会过期的计数。）
+- **提交信息也是英文**，一行祈使句主题。这里曾长期写着 `type(scope): 中文摘要`——
+  摘要用中文这条**自 2026-07-25 起再没出现过**（`git log --format='%s' -200` 里 0 条中文，
+  历史上 126 条）；`type(scope):` 前缀也基本退了（近 200 条里 4 条）。以 `git log` 为准。
+  正文写什么见文末「重要约定」。
 
 写代码时别把 docs 的语言带进去，反之亦然。
 
@@ -71,17 +75,30 @@ docs/              设计文档（中文）
 examples/          示例
 ```
 
-codegen 的**运行时 intrinsic 契约**(string/list/map/io 那半边)集中在 `emit.dawn` 的
-`rt_intrinsic_target` 表——每个 builtin 的 `(class, method)`,descriptor 由 `method_desc(签名)`
-派生、装箱走 `adapt_to`。这是**运行时 intrinsic 那半边**唯一要重指向的地方；背景与分期见
+codegen 的**运行时 intrinsic 契约**声明在 `selfhost/src/types.dawn`（`Rt` / `Intr` /
+`intrinsics()`，约 1645–1806 行）：语言只说一个 primitive 归哪个**运行时模块**
+（`RtStrings`/`RtBytes`/`RtArray`/`RtIo`），由各后端自己决定那是什么——JVM 后端在
+`emit.dawn` 用 `rt_class`/`rt_intrinsic_class`（586/598 行）映到类名，native 后端映到
+C 翻译单元。背景与分期见
 [docs/runtime-intrinsics-design.md](docs/runtime-intrinsics-design.md)。
 
-> 别把这句读成「接第二后端只改这张表」——它曾经就是这么写的，而那不成立：
-> `tast.dawn` 的 `TJavaCall` 直接携带 JVM 类名、descriptor、SAM 与 List bridge；
-> checker 靠 Java 反射解析 `use java`；`emit.dawn`/`codegen.dawn` 遍布 ASM opcode、
-> JVM descriptor、LambdaMetafactory 与 CHECKCAST；运行时表示、擦除、装箱和异常
-> 也都写死 JVM。真要第二后端，得先有 backend-neutral 的 lowered IR 与 FFI capability
-> ——调研见 [docs/llvm-backend-research.md](docs/llvm-backend-research.md)、
+> 这段以前写的是「`emit.dawn` 的 `rt_intrinsic_target` 表」。那张表**已经不存在**了——
+> 它记的是 `(class, method)`，也就是把一个后端的命名习惯放进共享表里，第二个后端
+> 根本读不了（理由就写在 `types.dawn:1657` 的注释里）。今天表里只剩「哪个模块」。
+
+> **第二后端已经在跑了。** native 后端（Core IR → C）自 2026-07-30 起自举，
+> `scripts/native-fixpoint.sh` 验 B==C。所以这里曾经写的「真要第二后端，得先有
+> backend-neutral 的 lowered IR 与 FFI capability」两个前置都已被事实推翻：
+> 共享 IR 就是 Core IR，已经在用；**FFI capability 根本不是前置**——全仓 `use c`
+> 至今 0 处，native 后端靠**拒绝** `use java`（`emitc.dawn:575` 的 `CForeign` 分支）
+> 加二十来个 io intrinsic 就走完了自举。
+>
+> 仍然成立的是**工作量**那半边：`tast.dawn` 的 `TJavaCall` 直接携带 JVM 类名、
+> descriptor、SAM 与 List bridge；checker 靠 Java 反射解析 `use java`；
+> `emit.dawn`/`codegen.dawn` 遍布 ASM opcode、JVM descriptor、LambdaMetafactory 与
+> CHECKCAST。这些是 JVM 后端**自己**的内脏，不是共享层的债。
+> 计划见 [docs/native-backend-plan.md](docs/native-backend-plan.md)，调研见
+> [docs/llvm-backend-research.md](docs/llvm-backend-research.md)、
 > [docs/collections-dejava-research.md](docs/collections-dejava-research.md)，
 > 现状记录在 docs/codebase-audit.md 的 ARCH-03/ARCH-04。
 

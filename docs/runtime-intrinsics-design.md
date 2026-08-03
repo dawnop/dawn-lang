@@ -8,6 +8,12 @@
 > §8 的三步 Move 表已被 [core-move2-design.md](core-move2-design.md) 更正并结账。
 > 未落地的只剩 §11 里仍标着开放的几项(契约边界画多细、ASM/AdtClassWriter 算不算范围)。
 >
+> **读到 `rt_intrinsic_target` 请当旧名**:全文(§10/§11 的落地记)提到的这张
+> 「`emit.dawn` 的 `(class, method)` 表」今天不存在。契约声明在
+> `selfhost/src/types.dawn`(`Rt`/`Intr`/`intrinsics()`,约 1645–1806 行),只说模块不说类名;
+> JVM 后端的映射收在 `emit.dawn` 的 `rt_class`/`rt_intrinsic_class`(586/598 行)。
+> 为什么表里不该有名字,见 §12.1。
+>
 > 本文把两个看似独立的诉求——① 去掉编译器里手写的 Java 运行时代码、
 > ② 将来能接一个非 JVM(如 LLVM/native)后端——收敛成**同一件事**:在语言核心与后端之间立一层
 > **显式的运行时 intrinsic 契约**,把所有 `java.*` 关进 JVM 后端对该契约的实现里。
@@ -277,7 +283,11 @@ JVM-锁死。LLVM 后端一看 std 里全是 `java.lang.String.codePointCount`,�
   塌成一个后端原语 `Array[T]`(new/get/len/`with`),`list_*/map_*/set_*` intrinsic 全删、集合变纯 Dawn ADT;迭代靠语言
   侧 `Iter` trait 不进后端契约。换后端 = 实现一个数组类型。
 - **ASM/AdtClassWriter**:算不算这轮范围。ASM 是第三方(可当外部依赖),AdtClassWriter 是我们写的但
-  绑死 ASM——彻底零手写 Java 要连它一起换(Dawn 写的字节码+栈帧写入器,`jarw.dawn` 是同类先例)。
+  绑死 ASM——彻底零手写 Java 要连它一起换(Dawn 写的字节码+栈帧写入器)。
+  **先例更正(2026-08-03)**:这里原本举 `jarw.dawn` 当「Dawn 写二进制写入器」的先例,那是错的——
+  `jarw.dawn:10` 用的是 `java.util.zip.ZipOutputStream`,它是**调 Java 写二进制**,恰恰是要摆脱的那种。
+  真正的先例是 [`packages/inflate`](../packages/inflate)(728 行纯 Dawn 的 gzip/zip,`use java` 0 处,
+  `pkgfetch.dawn:16-17` 已在用)——那才是「格式规范照着实现,零宿主服务」。
 - **LLVM 侧**:字符串 native 表示(UTF-8/16)、内存管理选型(RC/region/GC)。→ 这几项已在
   [llvm-backend-research.md](llvm-backend-research.md) §4 深挖并给出推荐(UTF-8 / Perceus 式 RC / 先发 C)。
 

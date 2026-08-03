@@ -27,14 +27,15 @@
 |---|---|---|
 | [bootstrap.md](bootstrap.md) | current | 自举链：种子 → A → B → C、固定点、种子推进协议。 |
 | [package-design.md](package-design.md) | current | 源码包（`[deps]`）与 Maven 依赖（`[java-deps]`）的清单与解析。 |
-| [runtime-intrinsics-design.md](runtime-intrinsics-design.md) | current | `emit.dawn` 的 `rt_intrinsic_target` 契约——运行时 intrinsic 落到哪个类哪个方法。**§8 的三步 Move 表已被 [core-move2-design.md](core-move2-design.md) 更正**。 |
+| [runtime-intrinsics-design.md](runtime-intrinsics-design.md) | current | 运行时 intrinsic 契约——每个 primitive 归哪个运行时模块。**表已从 `emit.dawn` 的 `(class, method)` 收成 `types.dawn` 的 `Rt`/`Intr`（文中的 `rt_intrinsic_target` 是旧名，已不存在）；§8 的三步 Move 表已被 [core-move2-design.md](core-move2-design.md) 更正**。 |
 | [core-move2-design.md](core-move2-design.md) | current | 上面那张表里「Move 2 控制流/match」的**结账盘点**：主体已随 Core IR Phase 0 落地，残余只剩 `CSProtect`（error-model 的 C2），并论证它多半不必被建出来。 |
 | [trait.md](trait.md) | current | trait/impl/derive 与 `Ord`。§落地记录里 Float 比较那段已被实现取代（见文内标注）。 |
 | [tutorial.md](tutorial.md) | current | 上手教程。代码块目前**人工维护**——机械校验随 Kotlin 侧 `TutorialTest` 一起归档了。 |
 | [codebase-audit.md](codebase-audit.md) | current | 2026-07-25 的全仓审查，76 条逐条带处置结论（已修 / 驳回 / 待办）。 |
 | [audit/README.md](audit/README.md) | current | 上面那份审查剩下 28 条待办的**作业计划**：九份设计文档的索引 + 修复顺序。 |
 | [audit/native-plan-overlap.md](audit/native-plan-overlap.md) | current | 上面那批待办与 native-backend-plan.md 的**撞车登记**：谁让位、谁冻结、谁要改写。动 `audit/` 里任何一份之前先读它。 |
-| [native-backend-plan.md](native-backend-plan.md) | current | 从今天到 native 自举的分阶段计划（Phase −1 → 6）与决策总表。 |
+| [native-backend-plan.md](native-backend-plan.md) | current | native 后端的分阶段计划（Phase −1 → 6）与决策总表。**Phase 6（native 自举）已于 2026-07-30 达成**（§14.23，`scripts/native-fixpoint.sh` B==C），后面的 S 批仍在走。 |
+| [jvm-base-plan.md](jvm-base-plan.md) | proposed | **A 线**：收缩 JVM 后端的可信底座——三个没有主干源码的 vendored 包、V49（classfile major 61 → 49）可行性审计的结论与三个代价数、九条被推翻的预设、K-A0…K-A6 刀表。K-A0/K-A0.5 已落地。 |
 
 ## 待办的设计方案（`docs/audit/`，全部 proposed）
 
@@ -83,8 +84,8 @@
 | 文档 | 说明 |
 |---|---|
 | [seq6-research.md](seq6-research.md) | 字符串/序列性能，`Cursor` 的由来。CONTRIBUTING 拿它当「调研推翻原前提也是成果」的范例。 |
-| [collections-dejava-research.md](collections-dejava-research.md) | 集合去 Java 化的 A/B/C 三案，推荐 C。 |
-| [llvm-backend-research.md](llvm-backend-research.md) | 第二后端调研。 |
+| [collections-dejava-research.md](collections-dejava-research.md) | 集合去 Java 化的 A/B/C 三案，推荐 C。**已落地**（S3，2026-07-27）：三个容器都是纯 Dawn。 |
+| [llvm-backend-research.md](llvm-backend-research.md) | 第二后端**的调研**，读作历史——那个后端已经建成并自举了（native，Core IR → C，`scripts/native-fixpoint.sh` 验 B==C）。现状与计划看 [native-backend-plan.md](native-backend-plan.md)。 |
 
 ## 历史：里程碑与自举过程
 
