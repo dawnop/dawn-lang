@@ -182,7 +182,12 @@ bootstrap 只用了 `LambdaMetafactory.metafactory` 一种（无 `altMetafactory
 | 9 | `runtime-intrinsics-design.md` §11 举 `jarw.dawn` 当「Dawn 写二进制写入器」的先例 | 半错：`jarw.dawn:10` 用的是 `java.util.zip.ZipOutputStream`。真正的先例是 `packages/inflate`（728 行纯 Dawn gzip/zip，`use java` 0 处） | `[grep]` |
 | 10 | `CLAUDE.md`「提交信息 `type(scope): 中文摘要`」 | 这条是**写本文时自己撞上的**：照它写会写出一个 2026-07-25 之后再没出现过的格式。`git log --format='%s' -200` 里中文摘要 0 条（历史上 126 条），`type(scope):` 前缀近 200 条里 4 条。实际是英文祈使句一行 | `[实测]` |
 
-第 6/7/8/9/10 条已随 K-A0 改掉（见 §6）。
+| 11 | 「不需要覆写 → 不需要 `AdtClassWriter` 这个子类 → 它直接消失」 | **半错**。子类确实消失（`extends ClassWriter` 与覆写一起删），但类不消失：它另有一半跟帧无关的 null 适配器，因为 **Dawn 没有 null** 而 ASM 的 `signature`/`interfaces` 可空。§5.1 | `[实测]`+`[grep]` |
+| 12 | 刀表把「捞回/重写 `AdtClassWriter`」（K-A1/K-A2）排在闭包下降 K-A3 **之前** | 顺序错，且 K-A2 整刀取消。要改的只是构造器传给 `super()` 的 flag，K-A3 完全不碰它；重写一个 K-A4 之后就不存在的 classfile writer 是白做。§5 | `[实测]` |
+| 13 | （无人提过）COMPUTE_FRAMES 与 COMPUTE_MAXS 只差算不算帧 | 还差**死代码改写**：前者把不可达代码换成 `nop; athrow`，后者原样保留。V49 推断式校验器只走可达代码，故无害——但这是 K-A4 独有的风险面 | `[实测]` |
+
+第 6/7/8/9/10 条已随 K-A0 改掉（见 §6）。第 11/12/13 条是 K-A3 动工前复验刀序时测出来的，
+已改进 §5。
 
 **这批过期陈述的共同根因**：`scripts/doc-check.py` 只检查 `docs/` 下的状态标记、
 链接与锚点，**不检查任何源文件头的事实陈述**。第 8 条能在一个自举成功的后端里
@@ -194,29 +199,78 @@ bootstrap 只用了 `LambdaMetafactory.metafactory` 一种（无 `altMetafactory
 |---|---|---|---|
 | **K-A0** | 文档校正 + 本文 | 不碰发射的字节 | 本次 |
 | **K-A0.5** | 给无源二进制上 checksum | 只加门禁 | 本次 |
-| **K-A1** | 从 `kotlin-final` 捞回 `AdtClassWriter.java`，**先只当参照读**，不进主干 | 不改代码 | 待 |
-| **K-A2** | 用 Dawn 重写 `AdtClassWriter`（它只有 115 行，且 COMPUTE_MAXS 下还要更短，见 §5.1） | 换实现，可回退 | 待 |
-| **K-A3** | 闭包下降：`emit.dawn:1494` + `emit.dawn:656` → 显式类；81 处零捕获做单例 | **Emit-Change，不可逆** | 待 |
-| **K-A4** | `jvmops.dawn:26` `V17 = 61` → `49`；`ClassWriter(2)` → `(1)`；删 `getCommonSuperClass` 覆写与 `rtclasses.dawn:530` 的 adtSupers 表 | **Emit-Change** | 待 |
-| **K-A5** | CI 断言：发射的常量池不得出现 tag 15/16/17/18 | 只加门禁 | 待 |
+| **K-A1** | 从 `kotlin-final` 捞回 `AdtClassWriter.java`，**先只当参照读**，不进主干 | 不改代码 | **已做**（§5.1） |
+| **K-A3** | 闭包下降：`emit.dawn:1494` + `emit.dawn:656` → 显式类；81 处零捕获做单例。**仍在 V61 + COMPUTE_FRAMES 下做** | **Emit-Change，不可逆** | 待 |
+| **K-A5** | 门禁：发射的常量池不得出现 tag 15/16/17/18 | 只加门禁 | 随 K-A3 |
+| **K-A4** | `jvmops.dawn:26` `V17 = 61` → `49`；`ClassWriter(2)` → `(1)`；删 `getCommonSuperClass` 覆写与 `rtclasses.dawn:530` 的 adtSupers 表 | **Emit-Change**，D5 承诺点 | 待 |
+| **K-A4b** | `dawn/tool` 收成静态 null 适配器（`extends ClassWriter` 与覆写一起删） | 换实现，可回退 | 待 |
 | **K-A6** | 端到端重测 §3.3 的启动数（那两个数是微基准加减） | 只测量 | 待 |
+
+**K-A2（用 Dawn 重写 `AdtClassWriter`）已取消。** 见 §5.1：K-A4 之后没有 classfile
+writer 可重写——`AdtClassWriter` 里跟写 classfile 有关的部分整块消失，剩下的是个
+null 适配器（K-A4b），那是另一件小得多的事。
 
 **版本下降（K-A4）为什么排在闭包下降（K-A3）之后**：因为 §2.1.1——先降版本、
 后清 indy，中间那个状态是硬 `ClassFormatError`，仓库会处在编不出东西的状态。
 反过来先清 indy 再降版本，每一步都留在可运行状态。
 
-> ⚠️ **`[推论]`**：「版本下降放在 K-A3 边界上」是主会话读了审计之后的**排序判断**，
-> 不是审计员测出来的结论。审计给的顺序（§8）是「先捞 AdtClassWriter → 再闭包
-> 下降 → 再改版本与 flag」，本表在它前面插了 K-A0/K-A0.5 两刀、并把「捞源码」
-> 拆成 K-A1/K-A2 两半。**动工前请自行复核这个顺序。**
+**为什么 K-A1/K-A2 不再排在 K-A3 之前**（原表的顺序，已推翻）：那个顺序假设
+「要拿到体积收益，得先把 `AdtClassWriter` 弄进主干」。§5.1 的实测把这个前置拆了——
+需要改的只是**构造器传给 `super()` 的那个 flag**，而 K-A3 完全不碰它。把捞源码/重写
+排在闭包下降之前，是在为一件后来不需要做的事阻塞主线。
 
-### 5.1 V49 路线是净删代码
+### 5.1 `AdtClassWriter` 会消失多少：实测复验 `[实测]`
 
-`AdtClassWriter` 今天两个构造器都是 `ClassWriter(2)` = COMPUTE_FRAMES `[实测 javap]`。
-改成 COMPUTE_MAXS 之后，`getCommonSuperClass` 覆写、以及 `rtclasses.dawn:530`
-那张「给 COMPUTE_FRAMES 用的合成超类表」（adtSupers）**都不再需要**。
+原文的推论链是：`getCommonSuperClass` 只被 COMPUTE_FRAMES 调用 → V49 不要
+`StackMapTable` → COMPUTE_MAXS 就够 → 不需要覆写 → **`AdtClassWriter` 整个消失**。
+**前四环成立，最后一环不成立。**
 
-这也是不选另一条路的理由：
+**复验方法**：ASM 9.7.1（仓库钉的同一版，`selfhost/dawn.toml:10`）直接生成一个类，
+方法里有 (a) 两个**不在 classpath 上**的引用类型在分支汇合点合流（逼出公共超类求解）、
+(b) 一个带回边的 int 循环（逼 COMPUTE_MAXS 真干活）。`getCommonSuperClass` 覆写成
+只记账再委托。四个组合各生成一次，再用裸 `DataInputStream` 读常量池与属性名
+（不经 ASM，避免用被测对象验被测对象），最后 `Class.forName(initialize=true)` 强制链接。
+
+| flag | major | `getCommonSuperClass` 调用 | 帧属性 | 字节 | 链接 |
+|---|---|---|---|---|---|
+| COMPUTE_FRAMES | 61 | **1** | `StackMapTable` 7+7 B | 399 | ✅ |
+| COMPUTE_MAXS | 61 | **0** | 无 | 320 | ❌ `VerifyError: Expecting a stackmap frame at branch target 14` |
+| COMPUTE_FRAMES | 49 | **1** | `StackMap`(CLDC) 19+18 B | 417 | ✅ |
+| **COMPUTE_MAXS** | **49** | **0** | **无** | **320** | ✅ |
+
+GraalVM 21 与 JDK 26 上结果逐字相同，`pick`/`loop` 都跑出正确值。
+
+四条读数：
+
+1. **`getCommonSuperClass` 在 COMPUTE_MAXS 下调用 0 次**，跟 major 无关。覆写确实是死重。
+2. **V49+COMPUTE_FRAMES 的 CLDC `StackMap` 比 V61 的 `StackMapTable` 大**（19+18 vs 7+7）
+   —— §2.1.3 复现。
+3. **V49+COMPUTE_MAXS 一个帧属性都不写**，且与 V61+COMPUTE_MAXS **字节数相同**（320）：
+   两者只差版本号那两个字节，帧的省略是 flag 干的，不是版本干的。
+4. **`M61` 是负控**：同一份 COMPUTE_MAXS 字节在 V61 下 `VerifyError`。没有它，「V49 能过」
+   只能证明这个类太简单，证明不了帧真的被省掉了。
+
+**顺带测掉一条没人提过的差异**：COMPUTE_FRAMES 会把不可达代码改写成 `nop; athrow`，
+COMPUTE_MAXS 不会（实测 `javap`：前者 `nop/athrow`，后者原样保留 `iload_0; areturn`
+这个类型错误的死代码）。V49 的推断式校验器只走可达代码，两个 JVM 上都放行 `[实测]`。
+→ 这条差异在 V49 下无害，但它是 K-A4 独有的风险面，记在这里免得将来当成新 bug 查。
+
+**最后一环为什么断**：`AdtClassWriter` 干**两件**事，只有一件跟帧有关。
+
+- 死掉的一半：`supers` 字段、两个构造器、`chain()`、`getCommonSuperClass()` 覆写，
+  连同 `rtclasses.dawn:532` 的 `supers_of`（就是 Kotlin 的 adtSupers）——**这一半是净删**。
+- **活下来的一半**：`begin`/`beginWithInterface`/`field`/`method` 四个实例方法与
+  `plain`/`beginOn`/`beginOnWithInterface`/`fieldOn`/`methodOn` 五个静态方法。它们存在的
+  理由写在类的 javadoc 里，和帧毫无关系：**Dawn 没有 null**，而 ASM 的 `visit`/
+  `visitField`/`visitMethod` 的 `signature`/`interfaces` 形参是可空的。
+
+所以准确的说法是：**「一行 classfile writer 都不用写」成立**（K-A2 因此取消），
+**「`AdtClassWriter` 直接消失」不成立**。K-A4 之后它不再 `extends ClassWriter`、不再覆写
+任何东西，收成一个纯静态的 null 适配器——`rtclasses.dawn` 今天走的已经是这条静态路径
+（`AdtClassWriter.plain(0)` + `beginOn`/`methodOn`）。那仍是一份无源码的手写 Java 待在
+可信底座里，只是小得多。要让它彻底归零，得先让 Dawn 能跨 FFI 传 null，那是另一条线。
+
+这一半的净删也是不选另一条路的理由：
 
 ### 5.2 为什么不自己算 StackMapTable
 
@@ -332,4 +386,7 @@ StackMapTable」，JDK 26 上实测仍然如此。
   Java 重新变成要维护的东西，而 A 线的方向是让它消失。K-A1 只把它捞出来当参照读。
 - **不给 `coursierapi` 记哈希**（§6，成本）。
 - **不自己算 StackMapTable**（§5.2）。
+- **不用 Dawn 重写 `AdtClassWriter`**（原 K-A2，已取消）。K-A4 之后没有 classfile writer
+  可重写，剩下的 null 适配器是另一件事（K-A4b）。§5.1
+- **K-A3 不碰 classfile 版本**。版本下降是 K-A4 独立一刀，也是 D5 的不可逆承诺点。
 - **K-A0/K-A0.5 不碰发射的任何字节**。两刀都没有 `Emit-Change`。
