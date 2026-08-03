@@ -690,10 +690,17 @@ N−1 的特性纪律自动满足。发布一版即可，`Emit-Change` 两条随
 
 ## 7. 开放问题（不阻塞，留档）
 
-1. **`stdlib.dawn:174` 的 `var nid = 2`**（§3.5）。与 `INDEX_ID` 无因果，但同族且更深：
-   2 就是 `FOREIGN_ERROR_ID`。修它要平移每个 ADT id → 每个生成符号名 → 全仓
-   `Emit-Change(emit *)` + Core golden 重录。单独立案，判据是「一条断言，不是一个新的
-   魔数」。
+1. **`stdlib.dawn:174` 的 `var nid = 2`**（§3.5）。**已结（2026-08-04）**：`load_std`
+   改读 `first_minted_id()`。判据（「一条断言，不是一个新的魔数」）兑现成 stdlib 的内联
+   test「the loader's id counter opens past every prelude id」——它自带一份一模块 std，
+   第一条声明是普通和类型（会认领 ADT id 的那种），所以断言不再依赖 std/cursor 的声明
+   顺序；把 `nid` 改回 2，300 条测试里只有它一条红，这是这条守卫**能**红的证明。
+   实测代价比这里预估的大一档：`INDEX_ID` 落地后 `first_minted_id()` 是 6 而不是 5，
+   每个 ADT id 平移 4（`structeq$Adt1121` → `structeq$Adt1125`）。13 个 flat golden 里
+   只有 3 个动（calc/eqhash/traits；10 个 `std.*.core` 一个 `Adt<n>` 符号名都不含，
+   逐字节不变），`selfhost.sha` 的 75 个模块动 22 个，而 `selfhost.norm.sha` 只动
+   stdlib 一行——即本次源码改动本身，其余 21 个是纯 id 漂移，无一条指令不同。
+   声明不能再写 `Emit-Change(emit *)`（#124 起是硬错），六个 emit 语料逐个点名，六行。
 2. **`want_iface` 的第二个循环过于保守**（main.dawn:286-295）。它按「表里有条件 impl」
    而不是「本程序真会造这个字典」判断，于是 `Show`/`Iter`/`Index` 的接口类进每一个 jar。
    收紧它是可测的净减（每个 jar 少若干个类），但它自己就是一次 `Emit-Change(emit *)`，
