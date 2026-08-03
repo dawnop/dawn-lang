@@ -808,9 +808,10 @@ Emit-Change(emit selfhost): dawn/rt/Asm, the five ASM null adapters, is now emit
 label 在**全部六个语料**上一直盲到下次推进种子；按需发射顺带把这个声明收窄成了一个语料。
 
 **门禁**（本次逐条跑过，全绿）：`dawn test selfhost` 299 项、`dawn fmt … --check`、
-`classfile-verify` 八语料 **1947 类 0 illegal / 0 not initializable**（selfhost 语料
-1046→**1047**，多的就是它；`not initializable` 为 0 说明它在有 ASM 的 classpath 上真的链得上，
-不是躺在那儿的死类）、`constpool-scan` 1947 类无 tag 15/16/17/18、`selfhost-fixpoint`
+`classfile-verify` 八语料 **0 illegal / 0 not initializable**（selfhost 语料
+**+1 类**，多的就是它——本刀单独测时 1046→1047，并入 main 后是 1048、八语料合计 1948；
+`not initializable` 为 0 说明它在有 ASM 的 classpath 上真的链得上，不是躺在那儿的死类）、
+`constpool-scan` 无 tag 15/16/17/18、`selfhost-fixpoint`
 **B == C**、`native-fixpoint` **B == C**、`core-diff` 的 `changed` 桶**恰好是
 `main` + `rtclasses` 两个我改的模块**（无 ADT-shifted 桶、无余数；三个程序 golden 未动），
 `selfhost-prev-diff` / `run-diff` / `fmt-diff` / `lsp-diff` / `spike-native` / `doc-check`。
