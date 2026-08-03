@@ -5,12 +5,24 @@
 # a two-module project + a standalone buffer) runs against both toolchains
 # and every JSON message must agree after normalization (parsed and re-serialized with sorted keys — key order and
 # whitespace are transport detail, values and message order are not).
+#
+# Two knobs, and they are not the same knob:
+#
+#   DAWN_BIN   the *oracle* -- what this session is compared against. Defaults
+#              to the N-1 release, unpacked into a seed_root.
+#   DAWN_SELF  the *subject* -- the toolchain under test. Defaults to
+#              ./bin/dawn, the JVM one.
+#
+# The subject used to be hardcoded, which meant that wiring `lsp` into the
+# native driver would have left this gate green while executing not one native
+# byte -- the same shape scripts/classfile-verify was caught in. K-B3 made it
+# switchable; scripts/native-cli-diff.sh sets it to the native binary.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 ROOT=$(pwd)
 . scripts/seedjar.sh
-SELF=./bin/dawn
+SELF=${DAWN_SELF:-./bin/dawn}
 OUT=${TMPDIR:-/tmp}/selfhost-lsp-diff.$$
 mkdir -p "$OUT/proj/src"
 # the seed's lsp reads `std` off the cwd and takes no --std flag, so the
@@ -247,4 +259,4 @@ else
     || { head -30 "$OUT/diff.txt"; exit 1; }
 fi
 n=$(wc -l < "$OUT/kotlin.txt")
-echo "OK: lsp transcripts agree over $n messages"
+echo "OK: $SELF agrees with the previous release over $n lsp messages"

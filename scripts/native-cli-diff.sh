@@ -10,8 +10,9 @@
 # Two legs, two different oracles:
 #
 #   fmt   the N-1 release, by running selfhost-fmt-diff.sh with DAWN_SELF
-#         pointed at the native binary. Same corpus (327 tracked .dawn files
-#         plus mangled copies), same oracle, other backend.
+#   lsp   pointed at the native binary. Same corpus (327 tracked .dawn files
+#         plus mangled copies for fmt; the scripted LSP session for lsp), same
+#         oracle, other backend.
 #   doc   HEAD's JVM driver, byte for byte. There is no N-1 native driver to
 #   add   diff against — these subcommands did not exist on this backend
 #         before — and the JVM side is itself pinned to N-1 by
@@ -200,5 +201,45 @@ printf 'schema = 1\nname = "x\nver = 1.5.2\n' > "$BADTOML/dawn.toml"
 printf 'pub fn main() -> Unit !io = println("hi")\n' > "$BADTOML/src/main.dawn"
 pair "add (invalid manifest)" add ../nowhere --dir "$BADTOML"
 
+# ---- leg 4: lsp, against the previous release ----
+# Same shape as leg 1: the whole scripted session, the N-1 oracle, the subject
+# swapped for the native binary. Every message of that session is produced by
+# lsp/lspq/lspc running on the C backend.
+echo "== lsp vs N-1, native backend =="
+DAWN_SELF="$DAWNC" ./scripts/selfhost-lsp-diff.sh
+
+# ---- leg 5: lsp answers a client that has not closed the connection ----
+# selfhost-lsp-diff.sh writes the whole session, closes stdin and reads the
+# transcript at EOF, so it cannot see *when* a byte left the server — and a
+# server that only flushes at exit produces a byte-identical transcript while
+# hanging every real editor. That is what the native backend did when `lsp`
+# was first wired: stdout is block-buffered there and nothing flushed, so the
+# initialize response sat in a 64 KiB buffer forever. The runtime now copies
+# System.out's autoflush rule; this is the check that says so.
+echo "== lsp responds before end of input, both backends =="
+if python3 - "$DAWNC" <<'PYEOF'
+import json, select, subprocess, sys, time
+body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                   "params": {"processId": None, "rootUri": None, "capabilities": {}}}).encode()
+bad = 0
+for label, cmd in [("jvm", ["./bin/dawn", "lsp"]), ("native", [sys.argv[1], "lsp"])]:
+    p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                         stderr=subprocess.DEVNULL)
+    p.stdin.write(b"Content-Length: %d\r\n\r\n%s" % (len(body), body))
+    p.stdin.flush()  # and leave it open, the way a client holds the session
+    t0 = time.time()
+    ready = select.select([p.stdout], [], [], 60.0)[0]
+    head = p.stdout.read(16) if ready else b""
+    p.kill()
+    p.wait()
+    if head.startswith(b"Content-Length:"):
+        print("OK   lsp %s answered in %.2fs with stdin still open" % (label, time.time() - t0))
+    else:
+        print("FAIL: lsp %s wrote nothing in 60s with stdin still open" % label)
+        bad = 1
+sys.exit(bad)
+PYEOF
+then :; else fail=1; fi
+
 [ "$fail" = 0 ] || { echo "FAIL: the native driver and the JVM driver disagree"; exit 1; }
-echo "OK: fmt/doc/add agree across both backends, and native fmt matches the previous release"
+echo "OK: fmt/doc/add/lsp agree across both backends, native fmt/lsp match the previous release, and both lsp servers answer mid-session"

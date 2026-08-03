@@ -15,6 +15,13 @@
 # a differential over one shared function proves nothing. The *work* is shared
 # (fmt.format, doc.*_json, add.run_add are the same modules); only the driver
 # plumbing is doubled.
+#
+# `lsp` is one call either way -- there is no argument handling to double --
+# and the only thing this driver decides is the `Jsig` the server analyses
+# with. The JVM main passes jreflect's, so an editor there resolves `use java`
+# imports; this one passes the refusal, which is the same answer this backend
+# gives that program under `check`. `scripts/selfhost-lsp-diff.sh` takes
+# DAWN_SELF and runs the whole scripted session against this binary.
 
 use std/io
 use std/str
@@ -29,6 +36,7 @@ use version.{VERSION}
 use fmt
 use doc
 use add
+use lsp
 
 fn usage() -> String =
   join([
@@ -43,6 +51,7 @@ fn usage() -> String =
     "  dawnc doc <target> | --stdlib | --builtins  emit the API reference as JSON",
     "  dawnc add <spec> [--subdir <p>] [--as <alias>] [--dir <project>]",
     "                                              add a dependency to dawn.toml",
+    "  dawnc lsp                                   speak LSP over stdin/stdout",
     "  dawnc version                               print the version",
     "",
     "A <target> is a single .dawn file or a project directory (src/main.dawn entry).",
@@ -375,6 +384,8 @@ pub fn main() -> Unit !io = {
           Ok(s) -> println(s)
           Err(e) -> cli_error(e)
         }
+      } else if mode == "lsp" {
+        lsp.run_lsp("std", jsig_refused())
       } else if mode == "version" || mode == "--version" {
         println("dawnc " ++ VERSION ++ " (native)")
       } else {

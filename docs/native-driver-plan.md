@@ -1,6 +1,6 @@
 # B 线：native 驱动补全 + 把后端契约摆到明面上
 
-> 状态：**in progress**（2026-08-03 立项，任务 #128；K-B1/K-B2 已落地，下一刀 K-B3）。
+> 状态：**in progress**（2026-08-03 立项，任务 #128；K-B1/K-B2/K-B3 已落地，下一刀 K-B4）。
 > 本文是 B 线的落地记录 + 后续刀表。
 >
 > **为什么在这儿而不在别处**：B 线原来的备忘录只存在于任务 #128 的描述里，仓库中没有
@@ -38,7 +38,7 @@ B 线的驱动是**能力补全，不是纯洁性**：不是「把 java 赶出�
 |---|---|---|---|
 | **K-B1** | intrinsic 契约表 + `scripts/intrinsic-parity.py` 构建期门禁 | 只加门禁 | **已做** |
 | **K-B2** | 把 `fmt` / `doc` / `add` 接进 native 驱动，并让差分门禁真的覆盖 native | 加能力 + 加门禁 | **已做**（§4–§7） |
-| **K-B3** | `lsp`（`lsp.dawn` + `lspq.dawn` + `lspc.dawn`，2,877 行） | 加能力 | 待 |
+| **K-B3** | `lsp`（`lsp.dawn` + `lspq.dawn` + `lspc.dawn`，2,877 行），并让 lsp 差分真的覆盖 native | 加能力 + 加门禁 | **已做**（§11–§15） |
 | **K-B4** | `test`（`testrun.dawn`；JVM 侧靠生成一个 test main 类，native 侧要另一条路） | 加能力 | 待 |
 
 > 刀表的**内容**来自任务 #128 的描述。原始 issue body 在写这份文档时取不到
@@ -135,10 +135,10 @@ scripts/selfhost-lsp-diff.sh:  SELF=./bin/dawn
 |---|---|---|
 | `selfhost-fmt-diff.sh` | 只 JVM | JVM（默认）+ native（`DAWN_SELF`，由 `native-cli-diff.sh` 调用） |
 | `selfhost-run-diff.sh`（含 `doc`/`add`） | 只 JVM | **仍只 JVM**——native 侧由 `native-cli-diff.sh` 单独覆盖 |
-| `selfhost-lsp-diff.sh` | 只 JVM | 仍只 JVM（native 还没有 `lsp`，K-B3） |
+| `selfhost-lsp-diff.sh` | 只 JVM | 仍只 JVM（native 还没有 `lsp`；K-B3 已补，见 §12） |
 | `native-fixpoint.sh` | native（只 `emitc`/`run`） | native（同前；TU 变大了，见 §7） |
 | `spike-native/run.sh` | 两后端（跑用户程序） | 同前 |
-| `native-cli-diff.sh` | **不存在** | **两后端**：`fmt`/`doc`/`add` |
+| `native-cli-diff.sh` | **不存在** | **两后端**：`fmt`/`doc`/`add`（K-B3 加了 `lsp` 两条腿） |
 | `doc-check.py` | —— | **它不测 `dawn doc`**，见下 |
 
 > **`scripts/doc-check.py` 与 `dawn doc` 没有关系** `[实测]`。名字像，实际是
@@ -322,9 +322,200 @@ ADT id 漂移而是真加了指令——一次驱动接线**应该**长这个样
 
 ## 10. 下一刀
 
-- **K-B3（`lsp`）**：`lsp.dawn` + `lspq.dawn` + `lspc.dawn` = 2,877 行，零 `use java`
-  `[实测]`。接线之后 `selfhost-lsp-diff.sh` **同样不会自动覆盖 native**——它的 `SELF`
-  也是写死的 `./bin/dawn`（§5）。照 §5.1 的形状给它加 `DAWN_SELF` 即可。
 - **K-B4（`test`）**：不是接线活。JVM 侧靠 `testrun.gen_test_main` 生成一个 test main
   类再在同一个 JVM 里跑；native 侧没有「生成一个类塞进去」这回事，得走另一条路
   （最直白的是把 test 块编进那个 C 翻译单元，由 `nmain` 直接调用）`[推论]`。
+
+---
+
+## 11. K-B3 的前提核对：lsp 这一族也是零 `use java`
+
+侦察给的数字（§4）里 `lsp.dawn 853 + lspq.dawn 1736 + lspc.dawn 288 = 2,877` 行，
+零 `use java`。**自己重核了一遍，结论成立** `[实测]`+`[扫描]`：
+
+- 这三个文件里 `use java` 只命中两处，都不是 import：`lspq.dawn:354` 是补全项的
+  **字符串字面量**（文档里真写了 `use java "..."` 声明时把它整行提供为补全），
+  `lsp.dawn:426` 是一句**注释**。
+- **传递闭包也核了**，不是只看这三个文件。自写扫描器从 `lsp` 出发按 `use` 边闭包，
+  得到 **45 个模块**（`analyze ast checker core cx diag exhaustive fmt fspath interp
+  jsig json/* lexer lower lspc lspq manifest manifestv parser passes pkgfetch sha2/*
+  inflate/* std/* stdlib stdsrc suggest tast token toml types` 等），其中 `^use java`
+  命中数 = **0**。整个编译器里带真 `use java` 的是 `emit / codegen / jreflect /
+  jvmhelp / jarw / jfold / maven / vendor / rtclasses / testrun / main`——**一个都不在
+  这个闭包里**。
+
+所以 K-B3 和 K-B2 一样是纯接线：`nmain.dawn` 加一行 `use lsp`、一行 usage、一个
+dispatch 分支。JVM 驱动传 `jsig_real()`（编辑器里 `use java` 能解析），native 驱动传
+`jsig_refused()`——这与该后端 `check` 给同一份源码的答案一致，是**有意的**唯一差别。
+
+## 12. 让 lsp 差分真的跑到 native
+
+§5 那条发现对 `selfhost-lsp-diff.sh` 同样成立，而且 K-B2 修 `selfhost-fmt-diff.sh`
+时**没有一并修它**：
+
+```
+scripts/selfhost-lsp-diff.sh:  SELF=./bin/dawn      # K-B3 之前
+```
+
+`DAWN_BIN` 换的是**参照方**（N−1 种子），被测方写死。于是「把 `lsp` 接进 `nmain.dawn`
+然后看 `selfhost-lsp-diff.sh` 变绿」会**一个 native 字节都不执行**——`classfile-verify`
+那次的同一个形状。K-B3 做了两件事：
+
+1. `selfhost-lsp-diff.sh`：`SELF=${DAWN_SELF:-./bin/dawn}`，并在脚本头把两个旋钮
+   （`DAWN_BIN` = oracle、`DAWN_SELF` = subject）写清楚；结尾那行也改成打印被测方是谁。
+2. `native-cli-diff.sh` 加**第 4 条腿**：`DAWN_SELF=<native> ./scripts/selfhost-lsp-diff.sh`。
+   与 `fmt` 那条腿同形——同一份脚本化会话、同一个 N−1 oracle、换个后端。
+   `native-cli-diff.sh` 本来就在 CI 的 gates.yml 里，所以这条腿是白拿的 CI 覆盖。
+
+**接上线之后一次就绿** `[实测]`：native 的 `lsp/lspq/lspc` 与 v0.49.0 种子逐条一致，
+**50 条消息**（hover 20、definition 9、completion 9、documentSymbol、didChange 后的
+hover、独立 buffer 的 hover/definition、formatting、shutdown，以及两条
+publishDiagnostics）。
+
+## 13. 红演示与阴性对照 `[实测]`
+
+> 全仓规矩：**一个从没被证明能变红的绿，不携带信息**。而且一个门禁要回答**两个**独立
+> 问题——「它会失败吗」和「它看的是不是我以为的那个东西」——每个问题各要一个变异体。
+
+变异体只改 `nmain.dawn` 的 lsp 分支（native 驱动独有的那几行），JVM 驱动碰不到它：
+`lsp.run_lsp(...)` 之前多打一帧 `Content-Length: 2\r\n\r\n{}`。
+
+| 运行 | 结果 |
+|---|---|
+| 变异 + `DAWN_SELF=<native>` | **RED**，`exit=1` |
+| 变异 + 默认（JVM） | GREEN，`exit=0` ← 证明 `DAWN_SELF` 真换了二进制，且变异只在 native 侧 |
+| 还原 + `DAWN_SELF=<native>` | GREEN，`exit=0`，50 条 |
+
+```
+######## STEP 1 (mutant, native under test) -- expect RED
+FAIL lsp differs (1 lines) and no commit since the tag declares it
+     (declare it with 'Emit-Change(<label>): why' — this label is 'lsp')
+0a1
+> {}
+==> exit=1
+
+######## STEP 2 (mutant tree, JVM under test, default invocation) -- expect GREEN
+OK   lsp
+OK: ./bin/dawn agrees with the previous release over 50 lsp messages
+==> exit=0
+
+######## STEP 3 (unmutated, native under test) -- expect GREEN
+OK   lsp
+OK: .../nat/dawnc agrees with the previous release over 50 lsp messages
+==> exit=0
+```
+
+**缺席探针**（回答第二个问题的另一半：它看的是被测方的 `lsp` 吗）：把 `DAWN_SELF`
+指向 **K-B3 之前**那版 native 驱动（`lsp` 没接线，`dawnc lsp` 走 `fail_usage`，stdout 为空），
+门禁红，`1,50d0`——50 条全缺。所以「没接线」这件事门禁能看见，不是接了线才恰好绿。
+
+**「语料/被测源是不是真被看见了」也核了**：`selfhost-lsp-diff.sh` 的会话文档是脚本
+现写的（不走 `git ls-files`），被测方则由 `bin/dawn __emitc` 从**工作树**编出来。上面
+STEP 1 那个变异**从未 `git add`**，门禁照样红了——这就是那条证明。另外本刀没有新增
+`.dawn` 文件（被跟踪 327、未跟踪 0），所以 `fmt` 那条腿的语料也没有 effects-handler
+那批的「代理假绿」风险。
+
+## 14. 挖出来的分歧：native 的 stdout 永远不 flush
+
+K-B2 挖到 `cli_error` 退出码 1 vs 2。这一刀挖到的更硬：**接上线之后的 `dawnc lsp`
+能通过差分门禁，却挂死任何真实编辑器** `[实测]`。
+
+- `dawn_rt_init` 把 stdout 设成 `_IOFBF`（64 KiB 块缓冲），`dawn_io_print` /
+  `dawn_io_println` **从不 flush**；只有 `eprint`/panic/退出才会冲。
+- JVM 侧 `System.out` 是 autoFlush 的 `PrintStream`：`print` 在写入内容含换行时冲，
+  `println` 总是冲。`lsp.send` 写的是 `Content-Length: N\r\n\r\n{...}`，含换行 → JVM 冲，
+  native 不冲。
+- 实测（发一条 `initialize`、**不关 stdin**，等 20 秒）：
+
+```
+JVM   ./bin/dawn lsp: responded after 0.57s -> b'Content-Length: 257\r\n\r\n{"jsonrpc":"2.0",'
+native dawnc lsp  : NO BYTES after 20s with stdin still open (client would hang)
+```
+
+**差分门禁对这件事是结构性失明的**：它把整个会话一次写完、关掉 stdin、在 EOF 处读
+transcript——一个只在退出时冲的服务器产出的字节**逐字节相同**。
+
+裁决 D4 是「与 JVM 驱动等价」，一个只有批处理 harness 用得了的语言服务器不算等价，
+所以修了，修的是**运行时**而不是 lsp 那一层：`dawn_io_print` 在写入含 `\n` 时 flush、
+`dawn_io_println` 总是 flush——照抄 `PrintStream` 的 autoFlush 规则。选它而不是加一个
+`io.flush()` 原语，是因为后者要动语言表面（std API + 两个后端的 intrinsic），而新原语
+要走种子纪律的三期两发布；这里要的只是把**后端契约**对齐，不是加 API。
+`runtime/c/` 改了就得 `python3 scripts/gen-rtsrc.py` 重生成 `selfhost/src/rtsrc.dawn`
+（cdriver 里有 staleness 测试盯着）。
+
+代价实测：20 万次 `println` 打进管道，**0.040 s → 0.11 s**（每行 0.35 µs）。批量输出
+不受影响——一次 `print` 打出整个 C 翻译单元仍然只冲一次。这也正是 JVM 后端一直在付的
+价钱，这是**契约，不是调优旋钮**。
+
+### 14.1 于是 `native-cli-diff.sh` 加了第 5 条腿
+
+差分看不见的事，得有别的东西看。第 5 条腿：对两个后端各起一个 `lsp`，发一条
+`initialize`，**stdin 保持打开**，要求 60 秒内出第一帧。
+
+它自己的红演示 `[实测]`——同一个驱动二进制、链上 **HEAD 那版没有 flush 的运行时**：
+
+```
+== lsp vs N-1, native backend ==
+OK   lsp
+OK: .../noflush/dawnc agrees with the previous release over 50 lsp messages
+== lsp responds before end of input, both backends ==
+OK   lsp jvm answered in 0.59s with stdin still open
+FAIL: lsp native wrote nothing in 60s with stdin still open
+FAIL: the native driver and the JVM driver disagree
+```
+
+同一次运行里，**差分绿、第 5 条腿红**——这一屏同时证明了两件事：差分确实对 flush
+失明，以及新加的那条腿确实补上了它。
+
+### 14.2 其余 CLI 形状：无分歧
+
+逐条对过 `[实测]`：`lsp` / `lsp --stdio` / `lsp bogus extra args`（两边都忽略尾部参数）
+/ 空 stdin（EOF 即退，exit 0）/ 一帧坏 JSON（都回 `-32700 Parse error` 且**不退出**）——
+stdout 逐字节相同、退出码相同。
+
+## 15. K-B3 的代价与门禁清单
+
+同机、同 flag `[实测]`：
+
+| | K-B3 前 | K-B3 后 | 差 |
+|---|---|---|---|
+| `nmain.c` 行数 | 166,524 | 181,282 | +14,758（+8.9%） |
+| `dawnc` 二进制 | 2,669,936 B | 2,846,104 B | +176,168 B（+6.6%） |
+| `cc -O2` 单次 | 11.1 s | 12.2 s | +1.1 s |
+| `__emitc` 单次 | —— | 4.1–4.5 s | —— |
+| `native-cli-diff.sh` 冷启动（5 条腿） | 45.9 s | 49 s | +3 s |
+
+跑过的门禁：`selfhost-fixpoint` (B==C) · `native-fixpoint` (B==C + 冒烟，52 s) ·
+`selfhost-prev-diff` · `selfhost-fmt-diff` · `selfhost-run-diff` · `selfhost-lsp-diff`
+（JVM 与 native 各一遍）· `native-cli-diff`（冷启动，5 条腿）· `lsp_smoke.sh` ·
+`spike-native` · `classfile-verify`（1948 类 + 语料变异体）· `doc-check.py`（61 篇）·
+`intrinsic-parity.py` · `emitchange-selftest.sh`（27 例）· `dawn test selfhost`（300 项）·
+`dawn fmt selfhost site packages --check` · `dawn lock --check selfhost` —— **全绿**。
+
+`selfhost-core-diff` 一开始红，`changed` 桶里**恰好两个模块**：`nmain`（接线，真加指令）
+与 `rtsrc`（`gen-rtsrc.py` 重生成，嵌入的运行时字符串常量变了）。没有第三个模块漂进来，
+`selfhost.norm.sha` 里也是同两行——已 `--record` 重录（两个文件各动两行）。
+
+**没有 Emit-Change 声明**：`lsp` 的 50 条消息一个字节没变，flush 改的是**字节何时离开
+进程**、不是哪些字节；`prev-diff` 里那几条 `NOTE` 是 id-counter 那一批留在窗口里的，
+不是本刀的。
+
+## 16. 这条 lsp 门禁不证明什么
+
+1. **它对「共享的 lsp 代码本身改了」是失明的吗？不是——但只因为 oracle 是 N−1。**
+   `lsp.dawn/lspq.dawn/lspc.dawn` 两个驱动共用，改一行两侧同样地变；如果这条腿是
+   「JVM vs native」跨后端比较（像 `doc`/`add` 那样），它就会全绿——**这正是 §9.1
+   记的那个盲点**。这条腿之所以躲开了它，是因为它比的是 **N−1 发布**，而不是另一个
+   后端。代价是另一头：**它每次发布都要重新对齐**，而 §9.1 那条链（native == JVM == N−1）
+   在这里退化成一段——一旦 `selfhost-lsp-diff.sh` 的默认 JVM 那遍被从 CI 里拿掉，
+   native 这遍照样绿，但「JVM 也没变」这半句就没人证了。
+2. **它不证明两个驱动的 `Jsig` 选择是对的。** JVM 传 `jsig_real()`、native 传
+   `jsig_refused()`，而会话语料**刻意不含 `use java`**（含了就是 native 该给的拒绝，
+   会变成一条永久的假分歧）。所以把 native 侧改成 `jsig_real()`（如果它存在）或把
+   JVM 侧改成 `jsig_refused()`，这条门禁**都不会红** `[推论]`。真要盯住它，得有一份
+   带 `use java` 的语料和两份不同的期望——那是另一把刀。
+3. **它不证明时序、并发或增量性。** 会话是一次写完、顺序读回的；服务器的响应**延迟**、
+   didChange 的重算成本、两条请求交错时的行为，都不在比较范围内。§14 那件事就是从这个
+   缺口漏出去的——补它的是第 5 条腿，而第 5 条腿只检查**第一帧**是否在 stdin 关闭前
+   到达，不检查后续每一帧。
+4. **它不覆盖 stderr。** 两个驱动的 `lsp` 都不往 stderr 写东西，但没有任何断言这么说。
