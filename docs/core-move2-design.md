@@ -203,11 +203,13 @@ after:
 2. **release 发两遍。** javac 现代版本也是复制 finally 体（JSR/RET 早已废弃）。**代价由 I2 兜住**：
    release 是一次调用，复制的是一条 INVOKE，不是一棵树。lowering 本来就会把 release 的 lambda
    提升成顶层函数（`LSt.lifted`），所以 I2 是白拿的。
-3. **栈图由 ASM 算。** `AdtClassWriter` 是 `COMPUTE_FRAMES`（`super(COMPUTE_FRAMES)`），handler
-   的帧不用手写。**但**它覆写了 `getCommonSuperClass`，未知配对会 `super.getCommonSuperClass`
-   走类加载——handler 的栈是 `java/lang/Throwable`，JDK 类，能加载。这条进 §4 的风险登记。
+3. **栈图根本不用算了。**（本条已被 K-A4 取代，原文是：写入器是 `COMPUTE_FRAMES`，
+   handler 的帧不用手写，但 `getCommonSuperClass` 覆写对未知配对会走类加载。）发射的
+   class 现在是版本 49，那以下 JVM 用推断式校验器、**不要 `StackMapTable`**，写入器是
+   COMPUTE_MAXS——handler 的帧既不写也不算，公共超类解析整条不再执行。
+   见 docs/jvm-base-plan.md K-A4。
 4. **`exc` 与 `result` 各占一个槽。** `alloc(g, n)` 只增不减（`next_slot` 单调），所以两个槽是
-   净增，不与任何别的绑定冲突。方法的 `maxLocals` 由 `COMPUTE_FRAMES` 一并算。
+   净增，不与任何别的绑定冲突。方法的 `maxLocals` 由 COMPUTE_MAXS 一并算。
 
 ### 2.5 native 渲染
 
@@ -480,10 +482,9 @@ is a name no dispatcher should have an arm for, which is how the three dead arms
   而 lowering 对逃逸边的改写（先跑 release 再跳）会改 `?` 与 `return` 的发射形状。
   **这不是 output-preserving 的改动**，它是 Emit-Change，而且是**范围广**的那种。
   **这条改变该刀的发布纪律**：按 CONTRIBUTING §六走 tag + 种子推进，不能夹在别的刀里。
-- `getCommonSuperClass` 覆写 + `COMPUTE_FRAMES`：handler 帧的合流若牵出未登记的类对，
-  会走类加载。JDK 类没问题，**Dawn 自己生成的 ADT 类若在 handler 后合流则要看 supers 表**。
-  缓解：handler 分支只做 ASTORE/调用/ATHROW，**不与正常路径合流**（§2.4 的形状就是这样，
-  `after:` 只有正常路径到达）。
+- ~~`getCommonSuperClass` 覆写 + `COMPUTE_FRAMES`：handler 帧的合流若牵出未登记的类对，
+  会走类加载。~~ **这条风险已随 K-A4 消失**：版本 49 不写帧，没有合流要求解。§2.4 那个
+  「handler 不与正常路径合流」的形状仍然是对的写法，只是不再由这条理由支撑。
 - **操作数栈**：I3 由 `CStmt` 保证，但**若谁把它改成 `CExpr` 就地垮掉**——§2.1 引的那段话
   一字不差地适用。这条要写进 `core.dawn` 的节点注释里，因为文档会过期而注释在现场。
 

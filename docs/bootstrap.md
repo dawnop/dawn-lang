@@ -95,9 +95,11 @@ cmp b.jar c.jar
 
 ## 为什么字节级一致做得到
 
-codegen 是确定性的：同一份源经同一实现必出同字节；frame 计算走 vendored 的
-`dawn.tool.AdtClassWriter`（COMPUTE_FRAMES 的公共超类解析），随种子逐代续传、
-从不重编。历史上的跨实现验收（Kotlin vs selfhost 的 `__lex/__parse/__check/
+codegen 是确定性的：同一份源经同一实现必出同字节。**帧已经不算了**——发射的 class
+是版本 49，那以下 JVM 用推断式校验器、不要 `StackMapTable`，写入器是 COMPUTE_MAXS
+（docs/jvm-base-plan.md K-A4）。vendored 的 `dawn.tool.AdtClassWriter` 仍随种子逐代
+续传、从不重编，但只当五个静态 null 适配器用（ASM 的 `visit*` 要 null，Dawn 源码拼不出），
+它那半公共超类解析已不可达。历史上的跨实现验收（Kotlin vs selfhost 的 `__lex/__parse/__check/
 __emit` 全仓逐字节对拍）已随 `kotlin-final` 完成使命；现行 oracle 是
 **N vs N−1**（`selfhost-prev-diff.sh`：上一 release 与 HEAD 编同一语料 +
 backend-dawn 生态扫描，未声明的字节差异红灯）加 CLI/格式化/LSP 三条转写差分
