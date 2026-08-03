@@ -15,7 +15,10 @@ use std/map
 use std/set
 use token.{Diag}
 use ast.{Module}
-use types.{Sig, Adts, Impls}
+use types.{
+  Sig, Adts, Impls, first_minted_id, adt_of,
+  OPTION_ID, RESULT_ID, FOREIGN_ERROR_ID
+}
 use tast.{TFun, TModule}
 use cx.{ModExports, cx_new, Cx}
 use checker.{check_module, exports_of}
@@ -172,7 +175,13 @@ pub fn load_std(dir: String) -> Result[StdCtx, String] !io = {
   var adts: Adts = map.empty()
   var impls: Impls = map.empty()
   var last_cx: Option[Cx] = None
-  var nid = 2
+  # The id counter carried across std's modules. It opens where `cx_new` opens
+  # it -- one past every prelude id -- rather than at a literal: this one said
+  # 2 from before `ForeignError` took ADT id 2, and it is the copy the
+  # production path actually reads, so the first id-claiming declaration in the
+  # first std module would have been handed `ForeignError`'s slot and silently
+  # replaced it.
+  var nid = first_minted_id()
   var mods: List[(String, Cx, TModule, CtOut)] = []
   var srcs: List[(String, String, Module)] = []
   for n in names {
@@ -252,6 +261,14 @@ pub fn load_std(dir: String) -> Result[StdCtx, String] !io = {
   })
 }
 
+# ---- tests ----
+
+fn put(p: String, text: String) -> Unit !io =
+  match io.write_file(p, text) {
+    Ok(_) -> ()
+    Err(e) -> panic("test setup: " ++ e.message)
+  }
+
 test "the embedded std matches std/ on disk" {
   # the staleness gate for the generated stdsrc.dawn: an edit under std/
   # that forgot to regenerate fails here, in every `dawn test selfhost`
@@ -279,6 +296,44 @@ test "the embedded std matches std/ on disk" {
       }
     }
   }
+}
+
+test "the loader's id counter opens past every prelude id" {
+  # `load_std` used to open its counter at the literal 2, which is
+  # `ForeignError`'s ADT id, and it is the counter the production path
+  # actually reads. Nothing ever fired, for a reason that is not a
+  # guarantee: std/cursor is first in modules.txt and its first declaration
+  # is an `opaque type`, which claims no ADT id, so the opening value went to
+  # a type variable instead -- a separate id space where a collision is
+  # harmless. Reorder std, or give cursor a sum type, and the first minted ADT
+  # id would land on `ForeignError`'s entry and replace it. A map insert has no
+  # opinion about what was there, so the first symptom was several files away:
+  # `e.message` on a `catch_fault` result, reported as a field access on
+  # whatever the new ADT 2 happened to be.
+  #
+  # So this does not read the real std, whose declaration order is the very
+  # thing not to depend on. It supplies a one-module std whose first
+  # declaration is a plain sum type -- the case that does claim an id -- and
+  # asks what the loader did with the prelude's ADT table.
+  let root = "/tmp/dawn-selfhost-stdlib/idprobe"
+  let _ = io.mkdirs(root)
+  put(root ++ "/modules.txt", "idprobe\n")
+  put(root ++ "/idprobe.dawn", "pub type IdProbe = | IpA | IpB\n")
+  let probe = match load_std(root) {
+    Ok(sc) -> sc
+    Err(e) -> panic("probe std: " ++ e)
+  }
+  # the prelude ADTs came through unreplaced
+  assert adt_of(probe.adts, OPTION_ID).name == "Option"
+  assert adt_of(probe.adts, RESULT_ID).name == "Result"
+  assert adt_of(probe.adts, FOREIGN_ERROR_ID).name == "ForeignError"
+  # and the probe was minted an id of its own, past every prelude id
+  var probe_id = -1
+  for pr in map.entries(probe.adts) {
+    let (i, a) = pr
+    if a.name == "IdProbe" { probe_id = i }
+  }
+  assert probe_id >= first_minted_id()
 }
 
 test "float rendering and parsing fold through std/fmt, not the host" {
