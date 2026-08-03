@@ -18,6 +18,7 @@ use std/map
 use std/str
 use types.{
   intr_at,
+  intrinsics,
   subst,
   reduce_via_bindings,
   peel_opaque,
@@ -511,10 +512,11 @@ fn lit_eq(subj: CExpr, v: LitV, t: Ty) -> CExpr =
 
 ## The intrinsic names Core carries that `types.intrinsics()` does not declare.
 ##
-## A different contract from the user builtins: one of those may be missing
-## from a backend (emitc has no collections yet, honestly), but every name here
-## is something lowering hands over on a path that has no alternative, so a
-## backend that does not implement one is broken rather than incomplete.
+## A different contract from the user builtins in where the name comes from --
+## nobody can write one -- but not in what a backend owes: every name here is
+## something lowering hands over on a path that has no alternative, and
+## `inline_intrinsics` below says the same of the builtins that survive
+## lowering. Both are checked together, by the test under those lists.
 ##
 ## This was a comment until 2026-07-30, and a comment cannot be checked: it
 ## still listed `map_index`, which stopped being emitted when `m[k]` became a
@@ -558,6 +560,165 @@ pub fn internal_intrinsics() -> List[String] = [
   "str_of_int", "str_of_bool", "str_of_bytes",
   "list_index", "list_slice", "null_ref"
 ]
+
+# ---- who implements a primitive ----
+#
+# `types.Intr.rt` answers this for the primitives a runtime module owns, and
+# both emitters read that one field: a runtime-owned primitive cannot be
+# implemented on one backend and missing on the other, because neither backend
+# gets to have an opinion about which ones they are.
+#
+# `rt == None` answered nothing at all. It covered three unrelated groups --
+# written inline, written inline on one backend only, removed before any
+# backend sees it -- and the only record of which was which was the
+# `name == "..."` chain inside each emitter. So "this backend is short one
+# primitive" and "no backend owes this primitive" were the same observation
+# from inside an emitter, and the difference between them surfaced as a
+# `panic` in the *user's* compile, on whichever backend was short, and only if
+# something reached that name. scripts/spike-native/known-red.txt says the
+# same thing about itself: an empty file means the corpus stopped catching
+# these, not that the native backend is complete.
+#
+# The three groups are declared below and they partition the intrinsic
+# universe -- `types.builtins()` plus `internal_intrinsics()` above. The test
+# at the end of this section checks the partition; scripts/intrinsic-parity.py
+# checks that each emitter's chain has exactly the arms the groups say it
+# should, which is the half no test can reach (an arm is instructions, not a
+# value).
+#
+# What is deliberately *not* declared here: the value representation and the
+# reference-counting ABI -- `dawn_adt_new`, `dawn_box_int`, `dawn_rc_dup` and
+# the rest of runtime/c/dawn_rt.h. Those are not intrinsics; no Dawn name
+# reaches them and no JVM counterpart exists. `dawn_adt_new` takes a field
+# mask, which is a C memory layout: hoisting it into a table both backends
+# read would be putting one backend's habit in the shared layer and calling
+# the layer neutral, the failure docs/runtime-intrinsics-design.md §8 names.
+# The note on `Intr.rt` in types.dawn records this table committing exactly
+# that once already, when it carried a `(class, method)` pair the second
+# backend could not read.
+
+## The primitives every backend writes the instructions for itself.
+##
+## Spelled out rather than derived from `internal_intrinsics()` and the
+## builtins, because a derivation is only as good as the thing it derives
+## from and this list is what the parity gate reads. The partition test below
+## is what keeps it honest: drop a name here and the name lands in no group.
+pub fn inline_intrinsics() -> List[String] = [
+  # lowering's own vocabulary, all of it but the two host ones below
+  "cmp", "hash", "show", "quote",
+  "str_of_int", "str_of_bool", "str_of_bytes",
+  "list_index", "list_slice", "null_ref",
+  # neither of these returns, so both are instructions rather than a call
+  "panic", "todo",
+  # one instruction each: the JVM's L2D and D2L, and native's saturating
+  # counterpart for the second (C's cast is undefined where D2L saturates)
+  "to_float", "to_int",
+  # the list primitives, which each backend turns into a call on the Dawn
+  # vector in std/pvec -- one definition, compiled twice. They stay Core
+  # intrinsics because the comptime interpreter implements them on its own
+  # value representation (gen_list_intrinsic says why at length)
+  "len", "get", "range", "sort_by",
+  # an Option opened without a runtime call, so the failure is a panic raised
+  # where the caller stands, and the reclaim, whose result shape each backend
+  # builds itself
+  "expect", "unwrap_or", "cast",
+  # settled by lowering; a residual one is a lowering bug and both backends
+  # refuse it in the same words. An arm all the same -- the refusal names the
+  # operand type, which the generic "no mapping" panic cannot
+  "to_string",
+  # the ones that traffic in lists: each reaches a runtime function through a
+  # List↔Array conversion the emitter wraps around the call, so the plain
+  # table entry would promise a call neither emitter can make
+  "join", "code_points", "from_code_points", "io_list_names", "io_run",
+  # the range check belongs to the emitter on both backends, for opposite
+  # reasons -- the JVM runtime answers null and this turns it into the panic,
+  # the native runtime panics itself
+  "cursor_slice",
+  # argv arrives differently on each: a static field on the class here, a
+  # runtime call there
+  "args"
+]
+
+## The two only the JVM owes an arm for.
+##
+## Both take a value that came from the host, and `use java` is the only thing
+## that produces one -- a node emitc refuses outright. So this is a fact about
+## the backends rather than a gap in one of them, and emitc's generic refusal
+## is the right answer if either ever reaches it.
+pub fn jvm_only_intrinsics() -> List[String] = ["java_eq", "java_hash"]
+
+## The builtins no backend ever sees: lowering rewrites each into something
+## else, so an arm for one of these is dead code rather than an implementation.
+##
+## Map and Set become calls on the Dawn trie in std/hamt
+## (collections-dejava-research §5.1); `parse_int`/`parse_int_radix` become
+## calls on std/fmt, which is why `parse_float` is the only numeric parser
+## left with a runtime method (audit RP-05).
+##
+## Written down because "nobody owes this" and "one backend is short" are
+## indistinguishable from inside an emitter: both are `rt == None` with no
+## case. Three arms of exactly this kind were found dead in the interpreter
+## on 2026-07-30 (audit RC-09) and there was no equivalent check here.
+pub fn lowered_intrinsics() -> List[String] = {
+  var out = ["parse_int", "parse_int_radix"]
+  for op in ["empty", "from", "insert", "remove", "get", "has", "size", "keys", "values",
+    "entries"] {
+    out = out ++ ["map_" ++ op]
+  }
+  for op in ["empty", "from", "insert", "remove", "has", "size", "to_list"] {
+    out = out ++ ["set_" ++ op]
+  }
+  out
+}
+
+test "every intrinsic is owned by a runtime module, written inline, or removed by lowering" {
+  let inline = inline_intrinsics()
+  let host = jvm_only_intrinsics()
+  let gone = lowered_intrinsics()
+  let it = intrinsics()
+  let internal = internal_intrinsics()
+
+  # 1. the four groups partition the universe. This is what makes a new
+  #    primitive impossible to forget: added to `types.builtins()` and to none
+  #    of the groups, it lands nowhere and this fails by name.
+  for n in map.keys(it) ++ internal {
+    var groups = 0
+    match map.get(it, n) {
+      Some(i) ->
+        match i.rt {
+          Some(_) -> { groups = groups + 1 }
+          None -> ()
+        }
+      None -> ()
+    }
+    if list.contains(inline, n) { groups = groups + 1 }
+    if list.contains(host, n) { groups = groups + 1 }
+    if list.contains(gone, n) { groups = groups + 1 }
+    if groups != 1 {
+      panic("`" ++ n ++ "` is in " ++ to_string(groups) ++ " of the four " ++
+          "implementation groups; every intrinsic belongs to exactly one")
+    }
+  }
+
+  # 2. nothing on a list is outside the universe. This is the direction that
+  #    rotted in the interpreter's copy -- arms outliving their producers --
+  #    and a name misspelled here would otherwise read as a group of one.
+  for n in inline ++ host ++ gone {
+    if not (map.has(it, n) || list.contains(internal, n)) {
+      panic("`" ++ n ++ "` is classified but is not an intrinsic")
+    }
+  }
+
+  # 3. the sizes the comments above quote. A count written in prose is what
+  #    went wrong in `internal_intrinsics`, whose comment gave two different
+  #    answers for the same list in the same paragraph.
+  assert len(inline) == 29
+  assert len(host) == 2
+  assert len(gone) == 19
+  # and the four groups account for all 101 names, with none left over
+  assert len(map.keys(it)) == 89
+  assert len(internal) == 12
+}
 
 # ---- trait witnesses ----
 
