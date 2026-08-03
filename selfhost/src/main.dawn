@@ -40,8 +40,8 @@ use codegen.{
 use rtclasses.{
   fn_iface, tuple_class, gen_fn_interface, gen_tuple_class, gen_panic_class, gen_unit_class,
   gen_bytes_class, gen_io_class, gen_fn_comparator, gen_ord_interface, tr_iface,
-  gen_show_class, gen_strings_class, gen_array_class, PANIC_CLASS, UNIT_CLASS, BYTES_CLASS,
-  IO_CLASS, FN_CMP_CLASS, SHOW_CLASS, STRINGS_CLASS, ARRAY_CLASS
+  gen_show_class, gen_strings_class, gen_array_class, gen_asm_class, PANIC_CLASS, UNIT_CLASS,
+  BYTES_CLASS, IO_CLASS, FN_CMP_CLASS, SHOW_CLASS, STRINGS_CLASS, ARRAY_CLASS, ASM_CLASS
 }
 use types.{
   prelude_adts, adt_of, adt_jvm_name, trait_of, OPTION_ID, RESULT_ID,
@@ -120,6 +120,35 @@ fn want_iface(wants: List[Int], tid: Int) -> List[Int] = {
     if w == tid { return wants }
   }
   wants ++ [tid]
+}
+
+## Whether any module of the program imports the named Java class.
+fn imports_java(cx0: Cx, fqcn: String) -> Bool = {
+  for pr in map.entries(cx0.java_classes) {
+    let (_simple, name) = pr
+    if name == fqcn { return true }
+  }
+  false
+}
+
+## Whether ASM will be on the built program's class path.
+##
+## `dawn/rt/Asm` names `org/objectweb/asm/ClassWriter`, which no ordinary
+## program has -- and emitting a class that references an absent type into
+## every program is a cost paid by everyone for a class only the compiler
+## itself can use. A module that imports `ClassWriter` is exactly a program
+## whose class path carries ASM, because `use java` does not resolve
+## otherwise. The compiler is such a program (emit/codegen/rtclasses/testrun
+## all import it), which is the only case phase 1 needs.
+fn program_has_asm(std_mods: List[(String, Cx, TModule, CtOut)], mods: List[CheckedMod]) -> Bool = {
+  for sm in std_mods {
+    let (_cls, cx0, _tm, _ct) = sm
+    if imports_java(cx0, "org.objectweb.asm.ClassWriter") { return true }
+  }
+  for cm in mods {
+    if imports_java(cm.cx, "org.objectweb.asm.ClassWriter") { return true }
+  }
+  false
 }
 
 ## The platform's class-path separator — ':' on Unix, ';' on Windows.
@@ -231,6 +260,12 @@ fn collect_program(
   classes = classes ++ [(BYTES_CLASS, gen_bytes_class())]
   classes = classes ++ [(ARRAY_CLASS, gen_array_class())]
   classes = classes ++ [(IO_CLASS, gen_io_class())]
+  # The five ASM null adapters, from tree source. Nobody calls them yet: this
+  # generation emits the class so the next seed carries it (jvm-base-plan §5.7
+  # phase 1). Conditional because it names ASM types -- see program_has_asm.
+  if program_has_asm(std_mods, mods) {
+    classes = classes ++ [(ASM_CLASS, gen_asm_class())]
+  }
   classes = classes ++ [(tr_iface(None, "Ord"), gen_ord_interface())]
   classes = classes ++ [(FN_CMP_CLASS, gen_fn_comparator())]
   for aid in [OPTION_ID, RESULT_ID, FOREIGN_ERROR_ID] {

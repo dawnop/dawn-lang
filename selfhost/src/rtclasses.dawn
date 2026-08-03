@@ -2730,3 +2730,108 @@ pub fn gen_ord_interface() -> Bytes !io = {
   cw.visitEnd()
   cw.toByteArray().expect("bytes")
 }
+
+pub const ASM_CLASS: String = "dawn/rt/Asm"
+
+## dawn/rt/Asm: the five null adapters that drive an ASM `ClassWriter`, built
+## from tree source instead of copied forward as bytes.
+##
+## `dawn.tool.AdtClassWriter` carries these same five statics and is the last
+## handwritten Java in the trusted base (docs/jvm-base-plan.md §5.7, BOOT-01):
+## its source lives only in the `kotlin-final` tag, and `--vendor` copies the
+## class file from one seed to the next, forever. The adapters exist because
+## ASM's `visit`/`visitField`/`visitMethod` take nullable
+## `signature`/`interfaces`/`value` arguments and Dawn *source* cannot spell
+## `null` -- but the emitter can, and already does: `OP_ACONST_NULL` below is
+## the instruction it writes for user code every day.
+##
+## Nothing calls this yet. Generation N emits it so generation N+1's seed
+## carries it on its class path, which is what lets `use java "dawn.rt.Asm"`
+## resolve; the call sites move over in phase 2 and `dawn/tool` leaves
+## `--vendor` in phase 3. Emitted only for a program that imports
+## `org.objectweb.asm.ClassWriter` (main.dawn), since it names ASM types and
+## no ordinary program has ASM on its class path.
+pub fn gen_asm_class() -> Bytes !io = {
+  let cwc = "org/objectweb/asm/ClassWriter"
+  let cwd = "L" ++ cwc ++ ";"
+  let s = "Ljava/lang/String;"
+  let visit_desc = "(II" ++ s ++ s ++ s ++ "[" ++ s ++ ")V"
+  let field_desc = "(I" ++ s ++ s ++ s ++ "Ljava/lang/Object;)Lorg/objectweb/asm/FieldVisitor;"
+  let method_desc = "(I" ++ s ++ s ++ s ++ "[" ++ s ++ ")Lorg/objectweb/asm/MethodVisitor;"
+
+  let cw = AdtClassWriter.plain(COMPUTE_MAXS).expect("writer")
+  AdtClassWriter.beginOn(cw, V49, ACC_PUBLIC + ACC_FINAL, ASM_CLASS, obj())
+
+  # plain(flags) = new ClassWriter(flags)
+  let p = open_static(cw, "plain", "(I)" ++ cwd)
+  p.visitTypeInsn(OP_NEW, cwc)
+  p.visitInsn(OP_DUP)
+  p.visitVarInsn(OP_ILOAD, 0)
+  p.visitMethodInsn(OP_INVOKESPECIAL, cwc, "<init>", "(I)V", false)
+  p.visitInsn(OP_ARETURN)
+  close_mv(p)
+
+  # beginOn(cw, version, access, name, super)
+  #   = cw.visit(version, access, name, null, super, null)
+  let b = open_static(cw, "beginOn", "(" ++ cwd ++ "II" ++ s ++ s ++ ")V")
+  b.visitVarInsn(OP_ALOAD, 0)
+  b.visitVarInsn(OP_ILOAD, 1)
+  b.visitVarInsn(OP_ILOAD, 2)
+  b.visitVarInsn(OP_ALOAD, 3)
+  b.visitInsn(OP_ACONST_NULL)
+  b.visitVarInsn(OP_ALOAD, 4)
+  b.visitInsn(OP_ACONST_NULL)
+  b.visitMethodInsn(OP_INVOKEVIRTUAL, cwc, "visit", visit_desc, false)
+  b.visitInsn(OP_RETURN)
+  close_mv(b)
+
+  # beginOnWithInterface(cw, version, access, name, super, iface)
+  #   = cw.visit(version, access, name, null, super, new String[] { iface })
+  let bi = open_static(cw, "beginOnWithInterface",
+    "(" ++ cwd ++ "II" ++ s ++ s ++ s ++ ")V")
+  bi.visitVarInsn(OP_ALOAD, 0)
+  bi.visitVarInsn(OP_ILOAD, 1)
+  bi.visitVarInsn(OP_ILOAD, 2)
+  bi.visitVarInsn(OP_ALOAD, 3)
+  bi.visitInsn(OP_ACONST_NULL)
+  bi.visitVarInsn(OP_ALOAD, 4)
+  bi.visitInsn(OP_ICONST_1)
+  bi.visitTypeInsn(OP_ANEWARRAY, "java/lang/String")
+  bi.visitInsn(OP_DUP)
+  bi.visitInsn(OP_ICONST_0)
+  bi.visitVarInsn(OP_ALOAD, 5)
+  bi.visitInsn(OP_AASTORE)
+  bi.visitMethodInsn(OP_INVOKEVIRTUAL, cwc, "visit", visit_desc, false)
+  bi.visitInsn(OP_RETURN)
+  close_mv(bi)
+
+  # fieldOn(cw, access, name, desc)
+  #   = cw.visitField(access, name, desc, null, null).visitEnd()
+  let f = open_static(cw, "fieldOn", "(" ++ cwd ++ "I" ++ s ++ s ++ ")V")
+  f.visitVarInsn(OP_ALOAD, 0)
+  f.visitVarInsn(OP_ILOAD, 1)
+  f.visitVarInsn(OP_ALOAD, 2)
+  f.visitVarInsn(OP_ALOAD, 3)
+  f.visitInsn(OP_ACONST_NULL)
+  f.visitInsn(OP_ACONST_NULL)
+  f.visitMethodInsn(OP_INVOKEVIRTUAL, cwc, "visitField", field_desc, false)
+  f.visitMethodInsn(OP_INVOKEVIRTUAL, "org/objectweb/asm/FieldVisitor", "visitEnd", "()V", false)
+  f.visitInsn(OP_RETURN)
+  close_mv(f)
+
+  # methodOn(cw, access, name, desc) = cw.visitMethod(access, name, desc, null, null)
+  let m = open_static(cw, "methodOn", "(" ++ cwd ++ "I" ++ s ++ s ++ ")" ++
+      "Lorg/objectweb/asm/MethodVisitor;")
+  m.visitVarInsn(OP_ALOAD, 0)
+  m.visitVarInsn(OP_ILOAD, 1)
+  m.visitVarInsn(OP_ALOAD, 2)
+  m.visitVarInsn(OP_ALOAD, 3)
+  m.visitInsn(OP_ACONST_NULL)
+  m.visitInsn(OP_ACONST_NULL)
+  m.visitMethodInsn(OP_INVOKEVIRTUAL, cwc, "visitMethod", method_desc, false)
+  m.visitInsn(OP_ARETURN)
+  close_mv(m)
+
+  cw.visitEnd()
+  cw.toByteArray().expect("bytes")
+}

@@ -1,6 +1,6 @@
 # A 线：收缩 JVM 后端的可信底座
 
-> 状态：**in progress**（2026-08-03 立项，任务 #127；K-A0/K-A0.5/K-A1/K-A3/K-A5/K-A4 已落地，下一刀 K-A7）。本文是 A 线的动工前设计：
+> 状态：**in progress**（2026-08-03 立项，任务 #127；K-A0/K-A0.5/K-A1/K-A3/K-A5/K-A4 已落地，K-A7 期 1 已落地，下一步是发布 + 推进种子后做 K-A7 期 2）。本文是 A 线的动工前设计：
 > 它把一次 V49 可行性审计的结论、量出来的代价、被推翻的预设，和刀表与顺序落进仓库。
 >
 > **为什么在这儿而不在别处**：这批证据原先躺在 `/tmp` 的备忘录里，已经因为一次 WSL
@@ -287,7 +287,7 @@ bootstrap 只用了 `LambdaMetafactory.metafactory` 一种（无 `altMetafactory
 | **K-A3** | 闭包下降：`emit.dawn:1494` + `emit.dawn:656` → 显式类；81 处零捕获做单例。**仍在 V61 + COMPUTE_FRAMES 下做** | **Emit-Change，不可逆** | **已做**（§5.5） |
 | **K-A5** | 门禁：发射的常量池不得出现 tag 15/16/17/18 | 只加门禁 | **已做**（随 K-A3） |
 | **K-A4** | `jvmops.dawn` `V17 = 61` → `V49 = 49`；改走 `AdtClassWriter.plain(COMPUTE_MAXS)` 的静态适配器；删 `rtclasses.supers_of` 与整条 `supers` 参数链 | **Emit-Change**，D5 承诺点 | **已做**（§5.6） |
-| **K-A7** | **让 Dawn 自己发射那五个 null 适配器**（`dawn/rt/Asm`），`dawn/tool` 整体退出 `--vendor` | 三期种子纪律，可回退 | 待（§5.7） |
+| **K-A7** | **让 Dawn 自己发射那五个 null 适配器**（`dawn/rt/Asm`），`dawn/tool` 整体退出 `--vendor` | 三期种子纪律，可回退 | **期 1 已做**（§5.7），期 2/3 各等一次发布 + 推进种子 |
 | **K-A6** | 端到端重测 §3.3 的启动数（那两个数是微基准加减） | 只测量 | **已做**（随 K-A4，见 §3.3） |
 
 **K-A2（用 Dawn 重写 `AdtClassWriter`）已取消。** 见 §5.1：K-A4 之后没有 classfile
@@ -695,6 +695,129 @@ selfhost 发射出的类名（`std.cursor`、`emit`、`main` …）与 jar 里**
 
 **为什么这一刀不在 K-A4 里做**：它跨三个 release，而 K-A4 是一个提交。硬塞进来会让
 一个不可逆的 Emit-Change 和一条三期链条互相扣住。
+
+#### 期 1 落地记（本次）
+
+**做了什么**：`rtclasses.dawn` 多了一个 `gen_asm_class()`，发射 `dawn/rt/Asm`——五个
+public static 适配器，与 `dawn.tool.AdtClassWriter` 的五个静态成员同名同描述符。
+`main.dawn` 在 `collect_program` 的 rt 类清单里加了一行（带条件，见下）。
+**没有任何调用点改动**：四个发射器仍然调 `dawn.tool.AdtClassWriter`。
+
+**那五个入口点确实只有五个** `[实测]`。参照源从 `kotlin-final` tag 捞回
+（`compiler/src/main/java/dawn/tool/AdtClassWriter.java`，115 行），与
+`.dawn/seeds/v0.48.0/seed.jar` 里那份 5,148 B 的二进制 `javap -c -p` 逐个核对
+（全类 269 行输出，其中五个静态方法占 51 行）。再扫一遍 HEAD 发射出来的 selfhost
+语料（1047 个类的 `javap -c`，按成员名计数）：
+
+| 成员 | 调用点数 |
+|---|---|
+| `methodOn` / `plain` / `beginOn` / `fieldOn` / `beginOnWithInterface` | 54 / 22 / 18 / 16 / 4 |
+| `<init>` / `getCommonSuperClass` / `begin` / `beginWithInterface` / `field` / `method` | **各 0** |
+
+（`plain` 与 `beginOn` 比 §5.6 的表各多 1，就是 `gen_asm_class` 自己写这个类时用掉的。）
+→ 要复现的表面就是这五个，一个不多。
+
+**逐行可审：61 行，界是 ~115 行** `[实测]`。发射出来的 `dawn/rt/Asm.class` 是 **1,225 字节**，
+`javap -c -p` **61 行**（对照：参照 Java 源 115 行、参照 class 的 `javap` 269 行）。
+五个方法体里有四个与参照**逐条指令相同**；只有 `fieldOn` 少两条——参照把 `visitField`
+的返回值 `astore`/`aload` 走了一趟再调 `visitEnd`，这里直接在返回值上调。
+
+**设计点一（§5.7 只标了没定）：按需发射，不是过渡态。** 触发条件是
+**「被编译的程序 import 了 `org.objectweb.asm.ClassWriter`」**（`main.dawn` 的
+`program_has_asm`）。理由：`use java` 解析不了的类不可能被 import，所以「import 了
+ClassWriter」恰好等价于「这个程序的 classpath 上有 ASM」；编译器自己是这样的程序
+（`emit`/`codegen`/`rtclasses`/`testrun` 四个模块都 import 它），而这正是期 1 唯一需要的
+那个程序。实测三个语料 `[实测]`：`__emit selfhost` 有 `dawn/rt/Asm.class`，
+`__emit site`、`__emit examples/calc.dawn` 都没有。
+
+**这个触发器期 2 不用换**——期 2 的调用点改成 `Asm.plain(...)`，返回值仍是 `ClassWriter`，
+那四个模块仍然 import 它。（真要收得更紧，期 2 可以改判「程序 import 了 `dawn.rt.Asm`」，
+那是个自指但收敛的条件；不是必须。）**期 2 必须动的是**：`use java "dawn.rt.Asm"` 加进
+四个发射器、把 `AdtClassWriter.` 前缀替换掉（发射出来的字节码里 114 处调用 `[实测]`，
+源码站点数另算），`rtclasses.dawn` 里
+`gen_asm_class` 自己也要改成用 `Asm`（自举：这一代用旧适配器写新适配器，下一代用新的写新的）。
+**期 3 必须动的是**：`main.dawn` 的 `--vendor dawn/tool` 说明、`vendor.dawn:410` 的
+`vendor_trust` 前缀表、`scripts/selfhost-fixpoint.sh` 等脚本里的 `--vendor dawn/tool`。
+
+**它确实进了编译器自己的 jar** `[实测]`：
+`java -jar build/dawn-selfhost.jar build selfhost -o self2.jar --vendor …` 后
+`unzip -l` 里 `dawn/rt/Asm.class` 1,225 B 与 `dawn/tool/AdtClassWriter.class` 5,148 B 并存。
+期 2 要的就是下一个种子里有前者。
+
+**差分测试（本刀的核心证据）**：`scripts/asm-adapter-contract/`（已接进 `gates.yml`）。
+期 1 里没人调这个类——**发射一个空类，其它门禁一样全绿**。所以另立一道能看见的：反射拿到
+两个类的五个入口（`getDeclaredMethod` 精确参数类型 + public/static 断言，这一步本身就是
+表面对拍），各驱动一遍造出一个 probe 类，**比较造出来的 class 文件字节**。比比较返回值强：
+`beginOn` 必须传 `null` 的 `signature`（传别的会多出 Signature 属性）、
+`beginOnWithInterface` 必须造长度 1 的数组、`plain` 必须**转发**它的 flag
+（COMPUTE_MAXS vs 0 体现为 maxStack/maxLocals）——全都落在字节里。7 项全绿 `[实测]`：
+
+```
+PASS  beginOn/fieldOn/methodOn produce identical class files
+PASS  beginOnWithInterface produces an identical class file
+PASS  plain(0) produces an identical class file
+PASS  the probe is flag-sensitive (COMPUTE_MAXS differs from 0)
+PASS  the emitted adapter forwards its flag
+PASS  the emitted adapter's class links and runs (square(7) == 49)
+PASS  the interface form declares its interface
+OK: the emitted dawn/rt/Asm matches dawn.tool.AdtClassWriter on all five entry points
+```
+
+**红演示：两个变异体，都改的是发射器源码（`gen_asm_class`），不是产物** `[实测]`。
+
+变异体 1——`plain` 里 `iload_0` 改成 `iconst_0`（flag 不转发，写死 0），退出码 1：
+
+```
+FAIL  beginOn/fieldOn/methodOn produce identical class files
+FAIL  beginOnWithInterface produces an identical class file
+PASS  plain(0) produces an identical class file
+PASS  the probe is flag-sensitive (COMPUTE_MAXS differs from 0)
+FAIL  the emitted adapter forwards its flag
+      java.lang.ClassFormatError: Arguments can't fit into locals in class file probe/P
+FAIL  the emitted adapter's class links and runs (square(7) == 49)
+      java.lang.ClassFormatError: Arguments can't fit into locals in class file probe/P
+FAIL  the interface form declares its interface
+FAIL: 5 adapter difference(s); dawn/rt/Asm is not a drop-in for dawn.tool.AdtClassWriter
+```
+
+变异体 2——`beginOn` 把 `name` 当 `signature` 传（`ACONST_NULL` 改成再 `ALOAD 3`），退出码 1：
+
+```
+FAIL  beginOn/fieldOn/methodOn produce identical class files
+PASS  beginOnWithInterface produces an identical class file
+FAIL  plain(0) produces an identical class file
+PASS  the probe is flag-sensitive (COMPUTE_MAXS differs from 0)
+PASS  the emitted adapter forwards its flag
+PASS  the emitted adapter's class links and runs (square(7) == 49)
+PASS  the interface form declares its interface
+FAIL: 2 adapter difference(s); dawn/rt/Asm is not a drop-in for dawn.tool.AdtClassWriter
+```
+
+**两个变异体都不是全红**，这是负控：变异体 1 里 `plain(0)` 那项照旧绿（flag 写死 0 时两侧
+本来就该一致），变异体 2 里只有走 `beginOn` 的两项红、走 `beginOnWithInterface` 的那项绿
+——门禁不只会喊红，它指得出是哪个入口点。改回来立刻回到 7 项全绿。
+
+**Emit-Change 只声明一个语料**：
+
+```
+Emit-Change(emit selfhost): dawn/rt/Asm, the five ASM null adapters, is now emitted
+```
+
+六个 emit 语料里只有 `selfhost` 变了（其余五个不 import ClassWriter，按需触发器不给它们
+发这个类）——所以这里**没有**用 `emit *`。任务 #124 记的就是通配声明会把 `emit` 这个
+label 在**全部六个语料**上一直盲到下次推进种子；按需发射顺带把这个声明收窄成了一个语料。
+
+**门禁**（本次逐条跑过，全绿）：`dawn test selfhost` 299 项、`dawn fmt … --check`、
+`classfile-verify` 八语料 **1947 类 0 illegal / 0 not initializable**（selfhost 语料
+1046→**1047**，多的就是它；`not initializable` 为 0 说明它在有 ASM 的 classpath 上真的链得上，
+不是躺在那儿的死类）、`constpool-scan` 1947 类无 tag 15/16/17/18、`selfhost-fixpoint`
+**B == C**、`native-fixpoint` **B == C**、`core-diff` 的 `changed` 桶**恰好是
+`main` + `rtclasses` 两个我改的模块**（无 ADT-shifted 桶、无余数；三个程序 golden 未动），
+`selfhost-prev-diff` / `run-diff` / `fmt-diff` / `lsp-diff` / `spike-native` / `doc-check`。
+
+**这一刀没有关掉什么**（别把它读成 BOOT-01 已收）：`dawn/tool/AdtClassWriter.class`
+仍然在 jar 里、仍然是全部调用点的目标、仍然是 5,148 字节。期 1 只是把**下一代种子的
+classpath 备好**。真正的减法在期 3。
 
 ### 5.8 V49 未必是单向门：一半成立，一半已被实验证伪（§4 第 17 条）
 
