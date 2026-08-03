@@ -137,13 +137,24 @@ jobs:
       - name: classfile verification
         run: ./scripts/classfile-verify/run.sh
 
-      # K-A7 phase 1: the compiler emits `dawn/rt/Asm`, the five null adapters
-      # that are today's last handwritten Java in the trusted base. Nothing
-      # calls it yet -- the call sites move a release later -- so every other
-      # gate here is green whatever it contains, including nothing. This one
-      # drives both surfaces and compares the class files they produce.
+      # K-A7: the compiler emits `dawn/rt/Asm`, the five null adapters that
+      # used to be the last handwritten Java in the trusted base. Every other
+      # gate here is green whatever that class contains, including nothing --
+      # this one drives both surfaces and compares the class files they
+      # produce, against the reference Java source from `kotlin-final`.
       - name: ASM adapter contract (emitted dawn/rt/Asm vs dawn.tool.AdtClassWriter)
         run: ./scripts/asm-adapter-contract/run.sh
+
+      # K-A7 phase 2, the other half: the contract above says the two adapters
+      # are interchangeable, which is exactly why nothing else can tell whether
+      # the 114 call sites moved. This reads the emitted constant pools and
+      # answers it -- no `dawn/tool` reference left, and `dawn/rt/Asm` actually
+      # reached (either assertion alone passes on an empty directory).
+      - name: adapter call sites (emitted compiler names dawn/rt/Asm only)
+        run: |
+          rm -rf /tmp/gate-emit && mkdir -p /tmp/gate-emit
+          ./bin/dawn __emit selfhost -o /tmp/gate-emit > /dev/null
+          ./scripts/adapter-callsites.py /tmp/gate-emit
 
       # Spec 2.7 promises an opaque type *is* its target at run time, and that
       # promise is one a script can hold: run each case twice, once with

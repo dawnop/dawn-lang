@@ -8,7 +8,7 @@
 use rtclasses.{
   UNIT_CLASS
 }
-use java "dawn.tool.AdtClassWriter"
+use java "dawn.rt.Asm"
 use java "org.objectweb.asm.ClassWriter"
 use java "org.objectweb.asm.MethodVisitor"
 use java "org.objectweb.asm.Label"
@@ -27,7 +27,7 @@ fn println_top(mv: MethodVisitor) -> Unit !io =
 
 ## static pass(label): println("PASS  " + label)
 fn gen_pass(cw: ClassWriter) -> Unit !io = {
-  let mv = AdtClassWriter.methodOn(cw, ACC_PUBLIC + ACC_STATIC, "pass",
+  let mv = Asm.methodOn(cw, ACC_PUBLIC + ACC_STATIC, "pass",
     "(Ljava/lang/String;)V").expect("mv")
   mv.visitCode()
   push_out(mv)
@@ -49,7 +49,7 @@ use jvmops.{
 ## static fail(label, t): println("FAIL  " + label), then each line of
 ## t.getMessage() (when present) indented six spaces — the Kotlin cmdTest shape.
 fn gen_fail(cw: ClassWriter) -> Unit !io = {
-  let mv = AdtClassWriter.methodOn(cw, ACC_PUBLIC + ACC_STATIC, "fail",
+  let mv = Asm.methodOn(cw, ACC_PUBLIC + ACC_STATIC, "fail",
     "(Ljava/lang/String;Ljava/lang/Throwable;)V").expect("mv")
   mv.visitCode()
   push_out(mv)
@@ -98,7 +98,7 @@ fn gen_fail(cw: ClassWriter) -> Unit !io = {
 ## main: per-test try/catch, then the summary. `total` is a generation-time
 ## constant, so the all-passed line is a single LDC.
 fn gen_runner_main(cw: ClassWriter, tests: List[(String, Int, String)]) -> Unit !io = {
-  let mv = AdtClassWriter.methodOn(cw, ACC_PUBLIC + ACC_STATIC, "main",
+  let mv = Asm.methodOn(cw, ACC_PUBLIC + ACC_STATIC, "main",
     "([Ljava/lang/String;)V").expect("mv")
   mv.visitCode()
   mv.visitInsn(OP_ICONST_0)
@@ -154,8 +154,8 @@ fn gen_runner_main(cw: ClassWriter, tests: List[(String, Int, String)]) -> Unit 
 ## order; labels are prefixed with the module path by the caller when more
 ## than one module has tests, mirroring cmdTest.
 pub fn gen_test_main(tests: List[(String, Int, String)]) -> Bytes !io = {
-  let cw = AdtClassWriter.plain(COMPUTE_MAXS).expect("writer")
-  AdtClassWriter.beginOn(cw, V49, ACC_PUBLIC + ACC_FINAL, TESTMAIN_CLASS, "java/lang/Object")
+  let cw = Asm.plain(COMPUTE_MAXS).expect("writer")
+  Asm.beginOn(cw, V49, ACC_PUBLIC + ACC_FINAL, TESTMAIN_CLASS, "java/lang/Object")
   gen_pass(cw)
   gen_fail(cw)
   gen_runner_main(cw, tests)

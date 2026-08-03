@@ -63,7 +63,7 @@ use core.{
 }
 use lower.{LMod}
 use jreflect
-use java "dawn.tool.AdtClassWriter"
+use java "dawn.rt.Asm"
 use java "org.objectweb.asm.ClassWriter"
 use java "org.objectweb.asm.MethodVisitor"
 use java "org.objectweb.asm.Label"
@@ -587,9 +587,9 @@ fn construct_value(gx: GenCtx, m: MethodVisitor, v: CValue, boxed: Bool) -> Unit
 fn gen_const_fields(gx: GenCtx, g: Gen, cw: ClassWriter) -> Unit !io = {
   if len(g.const_fields) == 0 { return () }
   for f in g.const_fields {
-    AdtClassWriter.fieldOn(cw, ACC_PUBLIC + ACC_STATIC + ACC_FINAL, f.fname, desc_of(gx.adts, f.ty))
+    Asm.fieldOn(cw, ACC_PUBLIC + ACC_STATIC + ACC_FINAL, f.fname, desc_of(gx.adts, f.ty))
   }
-  let cl = AdtClassWriter.methodOn(cw, ACC_STATIC, "<clinit>", "()V").expect("mv")
+  let cl = Asm.methodOn(cw, ACC_STATIC, "<clinit>", "()V").expect("mv")
   cl.visitCode()
   for f in g.const_fields {
     construct_value(gx, cl, f.v, false)
@@ -742,10 +742,10 @@ fn emit_sam_conversion(
 ## forwarding to the bridge that was already being emitted next to it.
 fn gen_sam_class(s: SamC) -> (String, Bytes) !io = {
   let fnd = "L" ++ fn_iface(s.arity) ++ ";"
-  let cw = AdtClassWriter.plain(COMPUTE_MAXS).expect("writer")
-  AdtClassWriter.beginOnWithInterface(cw, V49, ACC_PUBLIC + ACC_FINAL, s.cls, obj(), s.iface)
-  AdtClassWriter.fieldOn(cw, ACC_PRIVATE + ACC_FINAL, capture_field(0), fnd)
-  let init = AdtClassWriter.methodOn(cw, ACC_PUBLIC, "<init>", "(" ++ fnd ++ ")V").expect("mv")
+  let cw = Asm.plain(COMPUTE_MAXS).expect("writer")
+  Asm.beginOnWithInterface(cw, V49, ACC_PUBLIC + ACC_FINAL, s.cls, obj(), s.iface)
+  Asm.fieldOn(cw, ACC_PRIVATE + ACC_FINAL, capture_field(0), fnd)
+  let init = Asm.methodOn(cw, ACC_PUBLIC, "<init>", "(" ++ fnd ++ ")V").expect("mv")
   init.visitCode()
   init.visitVarInsn(OP_ALOAD, 0)
   init.visitMethodInsn(OP_INVOKESPECIAL, obj(), "<init>", "()V", false)
@@ -758,7 +758,7 @@ fn gen_sam_class(s: SamC) -> (String, Bytes) !io = {
   var pdescs = ""
   for p in s.sam_params { pdescs = pdescs ++ jdesc(p) }
   let rd = jdesc(s.sam_ret)
-  let m = AdtClassWriter.methodOn(cw, ACC_PUBLIC, s.sam_name,
+  let m = Asm.methodOn(cw, ACC_PUBLIC, s.sam_name,
     "(" ++ pdescs ++ ")" ++ rd).expect("mv")
   m.visitCode()
   m.visitVarInsn(OP_ALOAD, 0)
@@ -943,7 +943,7 @@ fn gen_sam_bridge(g: Gen, cw: ClassWriter, b: SamB) -> Gen !io = {
   let desc = "(L" ++ fn_iface(n) ++ ";" ++ pdescs ++ ")" ++ jdesc(b.sam_ret)
   # public for the same reason a hoisted body is: the adapter class that
   # calls this bridge is a separate class file (gen_sam_class)
-  let m = AdtClassWriter.methodOn(cw, ACC_PUBLIC + ACC_STATIC + OP_ACC_SYNTHETIC,
+  let m = Asm.methodOn(cw, ACC_PUBLIC + ACC_STATIC + OP_ACC_SYNTHETIC,
     b.name, desc).expect("mv")
   m.visitCode()
   m.visitVarInsn(OP_ALOAD, 0)
@@ -1135,7 +1135,7 @@ fn gen_cbody(
     } else {
       ACC_PUBLIC + ACC_STATIC + OP_ACC_SYNTHETIC
     }
-  let m = AdtClassWriter.methodOn(cw, acc, name, desc).expect("mv")
+  let m = Asm.methodOn(cw, acc, name, desc).expect("mv")
   m.visitCode()
   var g1 = Gen {
     ..g,
@@ -1187,7 +1187,7 @@ fn drain_lambdas(g: Gen, cw: ClassWriter) -> Gen !io = {
 
 ## JVM entry wrapper: catch PanicError → stderr + exit 1 (spec §8.2).
 fn gen_jvm_main(gx: GenCtx, cw: ClassWriter) -> Unit !io = {
-  let m = AdtClassWriter.methodOn(cw, ACC_PUBLIC + ACC_STATIC, "main",
+  let m = Asm.methodOn(cw, ACC_PUBLIC + ACC_STATIC, "main",
     "([Ljava/lang/String;)V").expect("mv")
   m.visitCode()
   let try_start = Label.new()
@@ -1228,12 +1228,12 @@ fn gen_jvm_main(gx: GenCtx, cw: ClassWriter) -> Unit !io = {
 
 ## The per-trait dictionary interface: one erased method per trait method.
 pub fn gen_trait_interface(adts: Adts, tr: TraitI) -> Bytes !io = {
-  let cw = AdtClassWriter.plain(COMPUTE_MAXS).expect("writer")
-  AdtClassWriter.beginOn(cw, V49, ACC_PUBLIC + ACC_ABSTRACT + ACC_INTERFACE,
+  let cw = Asm.plain(COMPUTE_MAXS).expect("writer")
+  Asm.beginOn(cw, V49, ACC_PUBLIC + ACC_ABSTRACT + ACC_INTERFACE,
     tr_iface(tr.owner, tr.name), obj())
   for entry in tr.methods {
     let (mn, ms) = entry
-    let m = AdtClassWriter.methodOn(cw, ACC_PUBLIC + ACC_ABSTRACT, mn,
+    let m = Asm.methodOn(cw, ACC_PUBLIC + ACC_ABSTRACT, mn,
       method_desc(adts, ms.sig.param_tys, ms.sig.ret)).expect("mv")
     m.visitEnd()
   }
@@ -1274,9 +1274,9 @@ fn gen_test(
 ## A throwaway MethodVisitor so Gen can be constructed before the first real
 ## method opens (the record field is non-optional by design).
 fn scratch_mv() -> MethodVisitor !io = {
-  let cw = AdtClassWriter.plain(0).expect("writer")
-  AdtClassWriter.beginOn(cw, V49, ACC_PUBLIC, "dawn/tool/Scratch", obj())
-  AdtClassWriter.methodOn(cw, ACC_PUBLIC + ACC_STATIC, "scratch", "()V").expect("mv")
+  let cw = Asm.plain(0).expect("writer")
+  Asm.beginOn(cw, V49, ACC_PUBLIC, "dawn/rt/Scratch", obj())
+  Asm.methodOn(cw, ACC_PUBLIC + ACC_STATIC, "scratch", "()V").expect("mv")
 }
 
 ## One checked module → its classes: ADTs, trait interfaces, impl
@@ -1340,9 +1340,9 @@ pub fn emit_module(
     let tr = trait_of(traits, tid)
     out = out ++ [(tr_iface(tr.owner, tr.name), gen_trait_interface(adts, tr))]
   }
-  let cw = AdtClassWriter.plain(COMPUTE_MAXS).expect("writer")
-  AdtClassWriter.beginOn(cw, V49, ACC_PUBLIC + ACC_FINAL, class_name, obj())
-  AdtClassWriter.fieldOn(cw, ACC_PUBLIC + ACC_STATIC, ARGS_FIELD, "[Ljava/lang/String;")
+  let cw = Asm.plain(COMPUTE_MAXS).expect("writer")
+  Asm.beginOn(cw, V49, ACC_PUBLIC + ACC_FINAL, class_name, obj())
+  Asm.fieldOn(cw, ACC_PUBLIC + ACC_STATIC, ARGS_FIELD, "[Ljava/lang/String;")
   let no_slots: Map[Int, Int] = map.empty()
   let no_ckey: Map[String, String] = map.empty()
   let gx = GenCtx {
@@ -1454,8 +1454,8 @@ fn gen_dict_class(gx: GenCtx, dd: CDictDef) -> (String, Bytes) !io = {
   let tr = trait_of(gx.traits, dd.trait_id)
   let cls = dict_class(gx.class_name, dd.key)
   let iface = tr_iface(tr.owner, tr.name)
-  let cw = AdtClassWriter.plain(COMPUTE_MAXS).expect("writer")
-  AdtClassWriter.beginOnWithInterface(cw, V49, ACC_PUBLIC + ACC_FINAL, cls, obj(), iface)
+  let cw = Asm.plain(COMPUTE_MAXS).expect("writer")
+  Asm.beginOnWithInterface(cw, V49, ACC_PUBLIC + ACC_FINAL, cls, obj(), iface)
   # A dictionary the compiler can build once is a singleton; one that is a
   # function of its arguments is an ordinary object with those arguments in
   # fields. Only the scaffold differs -- the forwarding below is the same
@@ -1469,7 +1469,7 @@ fn gen_dict_class(gx: GenCtx, dd: CDictDef) -> (String, Bytes) !io = {
   var i = 0
   for entry in tr.methods {
     let (mname, ms) = entry
-    let m = AdtClassWriter.methodOn(cw, ACC_PUBLIC, mname,
+    let m = Asm.methodOn(cw, ACC_PUBLIC, mname,
       method_desc(gx.adts, ms.sig.param_tys, ms.sig.ret)).expect("mv")
     m.visitCode()
     var slot = 1
@@ -1672,8 +1672,8 @@ fn gen_cclosure(gx: GenCtx, g: Gen, name: String, owner: String, caps: List[CExp
 ## mirror of `gen_cdynamic`, which boxes arguments before an `apply` and
 ## unerases the result after it -- the same two helpers, the other way round.
 fn gen_closure_class(gx: GenCtx, g: Gen, b: ClosB) -> (String, Bytes) !io = {
-  let cw = AdtClassWriter.plain(COMPUTE_MAXS).expect("writer")
-  AdtClassWriter.beginOnWithInterface(cw, V49, ACC_PUBLIC + ACC_FINAL, b.cls, obj(), b.iface)
+  let cw = Asm.plain(COMPUTE_MAXS).expect("writer")
+  Asm.beginOnWithInterface(cw, V49, ACC_PUBLIC + ACC_FINAL, b.cls, obj(), b.iface)
   var caps_desc = ""
   for ct in b.cap_tys { caps_desc = caps_desc ++ desc_of(gx.adts, ct) }
   if len(b.cap_tys) == 0 {
@@ -1681,10 +1681,10 @@ fn gen_closure_class(gx: GenCtx, g: Gen, b: ClosB) -> (String, Bytes) !io = {
   } else {
     var i = 0
     for ct in b.cap_tys {
-      AdtClassWriter.fieldOn(cw, ACC_PRIVATE + ACC_FINAL, capture_field(i), desc_of(gx.adts, ct))
+      Asm.fieldOn(cw, ACC_PRIVATE + ACC_FINAL, capture_field(i), desc_of(gx.adts, ct))
       i = i + 1
     }
-    let init = AdtClassWriter.methodOn(cw, ACC_PUBLIC, "<init>",
+    let init = Asm.methodOn(cw, ACC_PUBLIC, "<init>",
       "(" ++ caps_desc ++ ")V").expect("mv")
     init.visitCode()
     init.visitVarInsn(OP_ALOAD, 0)
@@ -1702,7 +1702,7 @@ fn gen_closure_class(gx: GenCtx, g: Gen, b: ClosB) -> (String, Bytes) !io = {
     init.visitMaxs(0, 0)
     init.visitEnd()
   }
-  let m = AdtClassWriter.methodOn(cw, ACC_PUBLIC, "apply", erased_apply_desc(b.arity)).expect("mv")
+  let m = Asm.methodOn(cw, ACC_PUBLIC, "apply", erased_apply_desc(b.arity)).expect("mv")
   m.visitCode()
   var k = 0
   for ct in b.cap_tys {
