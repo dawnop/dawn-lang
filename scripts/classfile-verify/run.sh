@@ -6,6 +6,13 @@
 # the backends agree, never that the bytes are legal, and the three JSON bugs
 # it opens with all lived under a green differential.
 #
+# It also runs the constant-pool gate (K-A5, docs/jvm-base-plan.md §2.1.1)
+# over the same emitted classes, because the corpus is already on disk here
+# and emitting it a second time in a gate of its own would double the slowest
+# part for one struct-module scan. The verifier cannot stand in for it: a
+# method-handle constant is legal at version 61, so the check it needs is
+# about what the pool names, not about whether the class links.
+#
 #   ./scripts/classfile-verify/run.sh
 set -euo pipefail
 cd "$(dirname "$0")/../.."
@@ -38,3 +45,5 @@ if [ "$fail" != 0 ]; then
   exit 1
 fi
 echo "OK: every emitted class passes the JVM verifier"
+
+scripts/constpool-scan.py "$work/emit"

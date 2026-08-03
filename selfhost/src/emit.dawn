@@ -9,7 +9,14 @@
 # call rewrite -- did not move to another JVM file: it moved to lower.dawn,
 # where the C backend reads it too. What is left is the part that is
 # genuinely about this machine: slots, descriptors, stack discipline,
-# invokedynamic, and `use java`.
+# closure classes, and `use java`.
+#
+# Function values used to be an `invokedynamic` over LambdaMetafactory. They
+# are ordinary classes now (docs/jvm-base-plan.md K-A3): a class per closure
+# site implementing `dawn/rt/FnN`, with the captures in fields. The reason is
+# not speed -- it is that a method-handle constant in the pool is a hard
+# parse error below class-file version 50, so nothing else in this file can
+# move to an older version until these are gone.
 
 use std/str
 use std/list
@@ -59,22 +66,20 @@ use jreflect
 use java "dawn.tool.AdtClassWriter"
 use java "org.objectweb.asm.MethodVisitor"
 use java "org.objectweb.asm.Label"
-use java "org.objectweb.asm.Handle"
-use java "org.objectweb.asm.Type"
 use java "java.lang.System"
 use jvmops.{
   ACC_ABSTRACT, ACC_FINAL, ACC_INTERFACE, ACC_PRIVATE, ACC_PROTECTED, ACC_PUBLIC, ACC_STATIC,
   OP_AASTORE, OP_ACC_SYNTHETIC, OP_ACONST_NULL, OP_ALOAD, OP_ARETURN, OP_ARRAYLENGTH, OP_ASTORE,
   OP_ATHROW, OP_BASTORE, OP_CASTORE, OP_CHECKCAST, OP_D2F, OP_D2L, OP_DADD, OP_DASTORE, OP_DDIV,
-  OP_DLOAD, OP_DMUL, OP_DNEG, OP_DREM, OP_DRETURN, OP_DSUB, OP_DUP, OP_F2D, OP_FASTORE, OP_FLOAD,
-  OP_FRETURN, OP_GETFIELD, OP_GETSTATIC, OP_GOTO, OP_H_INVOKESTATIC, OP_I2L, OP_IADD, OP_IASTORE,
+  OP_DLOAD, OP_DMUL, OP_DNEG, OP_DREM, OP_DRETURN, OP_DSUB, OP_DUP, OP_DUP_X1, OP_F2D, OP_FASTORE, OP_FLOAD,
+  OP_FRETURN, OP_GETFIELD, OP_GETSTATIC, OP_GOTO, OP_I2L, OP_IADD, OP_IASTORE,
   OP_ICONST_0, OP_ICONST_1, OP_ICONST_M1, OP_IFEQ, OP_IFNE, OP_IFNONNULL, OP_IFNULL, OP_IF_ACMPEQ,
   OP_IF_ACMPNE, OP_IF_ICMPEQ, OP_IF_ICMPGE, OP_IF_ICMPLT, OP_IF_ICMPNE, OP_ILOAD, OP_IMUL,
   OP_INSTANCEOF, OP_INVOKEINTERFACE, OP_INVOKESPECIAL, OP_INVOKESTATIC, OP_INVOKEVIRTUAL,
   OP_IRETURN, OP_ISUB, OP_IXOR, OP_L2D, OP_L2I, OP_LADD, OP_LAND, OP_LASTORE, OP_LCMP,
   OP_LCONST_1, OP_LDIV, OP_LLOAD, OP_LMUL, OP_LNEG, OP_LOR, OP_LREM, OP_LRETURN, OP_LSHL, OP_LSHR,
   OP_LSTORE, OP_LSUB, OP_LUSHR, OP_LXOR, OP_NEW, OP_POP, OP_PUTFIELD, OP_PUTSTATIC, OP_RETURN,
-  OP_SASTORE, V17
+  OP_SASTORE, OP_SWAP, V17
 }
 
 # ---- the emitted program's own names ----
@@ -86,6 +91,43 @@ pub const ARGS_FIELD: String = "dawn\$args"
 
 ## A SAM bridge to emit: (arg idx, iface fqcn, sam name, sam params, sam ret).
 pub type SamB = { name: String, iface: String, sam_name: String, sam_params: List[String], sam_ret: String }
+
+## A closure class to emit, one per `CClosure` site.
+##
+## This is what LambdaMetafactory used to spin at run time and now is not:
+## a class implementing `FnN`, holding the captures in fields, whose `apply`
+## unerases its arguments, calls the hoisted body and boxes the result. The
+## adaptation LMF performed between the erased `(Object..)Object` and the
+## body's concrete signature is exactly the `unerase`/`box_ty` pair the
+## dynamic-call path (`gen_cdynamic`) already spells in the other direction.
+pub type ClosB = {
+  cls: String,
+  iface: String,
+  arity: Int,
+  cap_tys: List[Ty],
+  fps: List[Ty],
+  fret: Ty,
+  owner: String,
+  target: String,
+  impl_desc: String
+}
+
+## A SAM adapter class: the same substitution on the `use java` path.
+##
+## Simpler than `ClosB` because the bridge already does every conversion --
+## LMF was handed the same method type twice here (sam == instantiated), so
+## the adapter only forwards.
+pub type SamC = {
+  cls: String,
+  iface: String,
+  sam_name: String,
+  sam_params: List[String],
+  sam_ret: String,
+  arity: Int,
+  bridge_owner: String,
+  bridge: String,
+  bridge_desc: String
+}
 
 pub type ConstF = { fname: String, v: CValue, ty: Ty }
 
@@ -140,6 +182,13 @@ pub type Gen = {
   cloops: List[(Int, Label, Label)],
   sam_ctr: Int,
   pending_sam: List[SamB],
+  # the classes that replaced the two invokedynamic sites. They are whole
+  # class files rather than methods on the module's writer, so unlike
+  # `pending_sam` they are not drained into `cw` -- `emit_module` appends
+  # them to its own result, next to the dictionary classes.
+  clos_ctr: Int,
+  closures: List[ClosB],
+  sam_classes: List[SamC],
   const_fields: List[ConstF],
   const_by_key: Map[String, String]
 }
@@ -302,26 +351,9 @@ fn impl_method_name(gx: GenCtx, trait_name: String, subject: Ty, m: String) -> S
 fn default_method_name(trait_name: String, m: String) -> String =
   "dawn\$default\$" ++ trait_name ++ "\$" ++ m
 
-## The boxed JVM type of a concrete Dawn type (LMF instantiatedMethodType).
-fn boxed_desc_of(gx: GenCtx, t: Ty) -> String =
-  match jvm_repr(t) {
-    RLong -> "Ljava/lang/Long;"
-    RDouble -> "Ljava/lang/Double;"
-    RBool -> "Ljava/lang/Boolean;"
-    RBottom -> "Ljava/lang/Object;"
-    RRef -> desc_of(gx.adts, t)
-  }
-
-fn instantiated_type(gx: GenCtx, params: List[Ty], ret: Ty) -> Type !io = {
-  var ps = ""
-  for p in params { ps = ps ++ boxed_desc_of(gx, p) }
-  Type.getMethodType(ps2desc(ps, boxed_desc_of(gx, ret))).expect("method type")
-}
-
-fn ps2desc(ps: String, ret: String) -> String = "(" ++ ps ++ ")" ++ ret
-
 ## impl-method descriptor for lambdas/bridges: concrete types, but a bottom
-## return (Never) becomes Object so LMF can adapt it.
+## return (Never) becomes Object, because the erased `apply` has to return
+## something and a body that never returns names no type of its own.
 fn impl_desc_of(gx: GenCtx, params: List[Ty], ret: Ty) -> String = {
   var ps = ""
   for p in params { ps = ps ++ desc_of(gx.adts, p) }
@@ -329,13 +361,38 @@ fn impl_desc_of(gx: GenCtx, params: List[Ty], ret: Ty) -> String = {
   "(" ++ ps ++ ")" ++ r
 }
 
-## The LambdaMetafactory bootstrap handle.
-fn lmf_bsm() -> Handle !io =
-  Handle.new(OP_H_INVOKESTATIC, "java/lang/invoke/LambdaMetafactory", "metafactory",
-    "(Ljava/lang/invoke/MethodHandles\$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;" ++
-      "Ljava/lang/invoke/MethodType;Ljava/lang/invoke/MethodHandle;Ljava/lang/invoke/MethodType;)" ++
-      "Ljava/lang/invoke/CallSite;",
-    false)
+# ---- the classes that replaced invokedynamic ----
+
+## Where a generated closure or SAM adapter class lives. Same shape as
+## `dict_class`: one namespace for compiler-synthesised classes, with the
+## owning module flattened into the name so two modules cannot collide.
+fn closure_class(owner: String, idx: Int) -> String =
+  "dawn/fn/" ++ join(str.split(owner, "/"), "\$") ++ "\$" ++ to_string(idx)
+
+fn sam_class(owner: String, idx: Int) -> String =
+  "dawn/sam/" ++ join(str.split(owner, "/"), "\$") ++ "\$" ++ to_string(idx)
+
+fn capture_field(idx: Int) -> String = "c" ++ to_string(idx)
+
+## The load opcode and slot width for a JVM descriptor, for the one place
+## that has descriptors rather than `Ty`s: a SAM adapter forwards Java types
+## it was handed by reflection and never had a Dawn type for.
+fn jload_of(desc: String) -> (Int, Int) =
+  if str.starts_with(desc, "J") { (OP_LLOAD, 2) }
+  else if str.starts_with(desc, "D") { (OP_DLOAD, 2) }
+  else if str.starts_with(desc, "F") { (OP_FLOAD, 1) }
+  else if str.starts_with(desc, "L") || str.starts_with(desc, "[") { (OP_ALOAD, 1) }
+# the rest of the JVM's primitives -- int, short, byte, char, boolean --
+# all live in an int-sized slot and load the same way
+else { (OP_ILOAD, 1) }
+
+fn jreturn_of(desc: String) -> Int =
+  if str.starts_with(desc, "J") { OP_LRETURN }
+  else if str.starts_with(desc, "D") { OP_DRETURN }
+  else if str.starts_with(desc, "F") { OP_FRETURN }
+  else if str.starts_with(desc, "V") { OP_RETURN }
+  else if str.starts_with(desc, "L") || str.starts_with(desc, "[") { OP_ARETURN }
+  else { OP_IRETURN }
 
 # ---- witness / signature lookup ----
 
@@ -649,15 +706,76 @@ fn emit_sam_conversion(
       sam_ret: sam_ret
     }]
   }
-  let sam_type = Type.getMethodType(jmethod_desc(sam_params, sam_ret)).expect("mt")
   var pdescs = ""
   for p in sam_params { pdescs = pdescs ++ jdesc(p) }
   let bridge_desc = "(L" ++ fn_iface(n) ++ ";" ++ pdescs ++ ")" ++ jdesc(sam_ret)
-  g1.mv.visitInvokeDynamicInsn(sam_name, "(L" ++ fn_iface(n) ++ ";)" ++ jdesc(iface),
-    lmf_bsm(), sam_type,
-    Handle.new(OP_H_INVOKESTATIC, gx.class_name, bridge, bridge_desc, false),
-    sam_type)
-  g1
+  let cls = sam_class(gx.class_name, g.sam_ctr)
+  let g2 = Gen {
+    ..g1,
+    sam_classes: g1.sam_classes ++ [SamC {
+      cls: cls,
+      iface: internal_of(iface),
+      sam_name: sam_name,
+      sam_params: sam_params,
+      sam_ret: sam_ret,
+      arity: n,
+      bridge_owner: gx.class_name,
+      bridge: bridge,
+      bridge_desc: bridge_desc
+    }]
+  }
+  # the `FnN` this wraps is already on the stack, put there by the argument
+  # that is being adapted. `new` cannot go under it without moving it, so the
+  # uninitialised reference is threaded past it instead: NEW, DUP_X1, SWAP
+  # leaves (cls, cls, fn) with both copies of the receiver below the argument,
+  # which is what `<init>` wants. One word each, so no DUP2 forms are needed.
+  g2.mv.visitTypeInsn(OP_NEW, cls)
+  g2.mv.visitInsn(OP_DUP_X1)
+  g2.mv.visitInsn(OP_SWAP)
+  g2.mv.visitMethodInsn(OP_INVOKESPECIAL, cls, "<init>",
+    "(L" ++ fn_iface(n) ++ ";)V", false)
+  g2
+}
+
+## One SAM adapter class: a field holding the `FnN`, and the interface method
+## forwarding to the bridge that was already being emitted next to it.
+fn gen_sam_class(supers: List[String], s: SamC) -> (String, Bytes) !io = {
+  let fnd = "L" ++ fn_iface(s.arity) ++ ";"
+  let cw = AdtClassWriter.new(supers)
+  cw.beginWithInterface(V17, ACC_PUBLIC + ACC_FINAL, s.cls, obj(), s.iface)
+  cw.field(ACC_PRIVATE + ACC_FINAL, capture_field(0), fnd)
+  let init = cw.method(ACC_PUBLIC, "<init>", "(" ++ fnd ++ ")V").expect("mv")
+  init.visitCode()
+  init.visitVarInsn(OP_ALOAD, 0)
+  init.visitMethodInsn(OP_INVOKESPECIAL, obj(), "<init>", "()V", false)
+  init.visitVarInsn(OP_ALOAD, 0)
+  init.visitVarInsn(OP_ALOAD, 1)
+  init.visitFieldInsn(OP_PUTFIELD, s.cls, capture_field(0), fnd)
+  init.visitInsn(OP_RETURN)
+  init.visitMaxs(0, 0)
+  init.visitEnd()
+  var pdescs = ""
+  for p in s.sam_params { pdescs = pdescs ++ jdesc(p) }
+  let rd = jdesc(s.sam_ret)
+  let m = cw.method(ACC_PUBLIC, s.sam_name, "(" ++ pdescs ++ ")" ++ rd).expect("mv")
+  m.visitCode()
+  m.visitVarInsn(OP_ALOAD, 0)
+  m.visitFieldInsn(OP_GETFIELD, s.cls, capture_field(0), fnd)
+  # LMF was handed the same method type as both sam and instantiated type
+  # here, so there is nothing to adapt: the parameters go to the bridge in
+  # the shape they arrived in, and the bridge does every conversion.
+  var slot = 1
+  for p in s.sam_params {
+    let (op, w) = jload_of(jdesc(p))
+    m.visitVarInsn(op, slot)
+    slot = slot + w
+  }
+  m.visitMethodInsn(OP_INVOKESTATIC, s.bridge_owner, s.bridge, s.bridge_desc, false)
+  m.visitInsn(jreturn_of(rd))
+  m.visitMaxs(0, 0)
+  m.visitEnd()
+  cw.visitEnd()
+  (s.cls, cw.toByteArray().expect("bytes"))
 }
 
 fn adapt_one_java_arg(gx: GenCtx, g: Gen, call: TJavaCall, i: Int, aty: Ty, param: String) -> Gen !io = {
@@ -821,7 +939,9 @@ fn gen_sam_bridge(g: Gen, cw: AdtClassWriter, b: SamB) -> Gen !io = {
   var pdescs = ""
   for p in b.sam_params { pdescs = pdescs ++ jdesc(p) }
   let desc = "(L" ++ fn_iface(n) ++ ";" ++ pdescs ++ ")" ++ jdesc(b.sam_ret)
-  let m = cw.method(ACC_PRIVATE + ACC_STATIC + OP_ACC_SYNTHETIC, b.name, desc).expect("mv")
+  # public for the same reason a hoisted body is: the adapter class that
+  # calls this bridge is a separate class file (gen_sam_class)
+  let m = cw.method(ACC_PUBLIC + ACC_STATIC + OP_ACC_SYNTHETIC, b.name, desc).expect("mv")
   m.visitCode()
   m.visitVarInsn(OP_ALOAD, 0)
   var slot = 1
@@ -1001,13 +1121,16 @@ fn gen_cbody(
   lifted: Bool
 ) -> Gen !io = {
   let slot_body = lifted && is_slot_target(gx, name)
+  # A hoisted body used to be able to stay private: LambdaMetafactory was
+  # handed a Lookup with private access, so the class it spun could reach it.
+  # The closure class this compiler writes instead is an ordinary class in
+  # the same package, and `private` would make every call an
+  # IllegalAccessError at first use rather than at build time.
   let acc =
     if not lifted {
       ACC_PUBLIC + ACC_STATIC
-    } else if slot_body {
-      ACC_PUBLIC + ACC_STATIC + OP_ACC_SYNTHETIC
     } else {
-      ACC_PRIVATE + ACC_STATIC + OP_ACC_SYNTHETIC
+      ACC_PUBLIC + ACC_STATIC + OP_ACC_SYNTHETIC
     }
   let m = cw.method(acc, name, desc).expect("mv")
   m.visitCode()
@@ -1242,6 +1365,9 @@ pub fn emit_module(
     cloops: [],
     sam_ctr: 0,
     pending_sam: [],
+    clos_ctr: 0,
+    closures: [],
+    sam_classes: [],
     const_fields: [],
     const_by_key: no_ckey
   }
@@ -1301,6 +1427,15 @@ pub fn emit_module(
   # in main.dawn was there to preserve, now a consequence rather than a rule.
   for dd in gx.dicts {
     out = out ++ [gen_dict_class(gx, supers, dd)]
+  }
+  # the classes that stand where an invokedynamic used to. Emitted here
+  # rather than as they are met, because each is a whole class file and the
+  # module's own writer is open until the line above.
+  for b in g.closures {
+    out = out ++ [gen_closure_class(gx, supers, g, b)]
+  }
+  for s in g.sam_classes {
+    out = out ++ [gen_sam_class(supers, s)]
   }
   out ++ [(class_name, cw.toByteArray().expect("bytes"))]
 }
@@ -1477,26 +1612,117 @@ fn gen_cdynamic(gx: GenCtx, g: Gen, args: List[CExpr], ft: Ty, ret_static: Ty) -
 }
 
 fn gen_cclosure(gx: GenCtx, g: Gen, name: String, owner: String, caps: List[CExpr], ty: Ty) -> Gen !io = {
-  var g1 = g
+  # the capture types are a property of the expressions, not of emitting
+  # them, so they can be read before anything is written -- which is what
+  # lets `new` go on the stack first (below).
   var cap_tys: List[Ty] = []
+  for c in caps { cap_tys = cap_tys ++ [cex_ty(c)] }
+  let (fps, fret) = tyfn_parts(ty)
+  let arity = len(fps)
+  let iface = fn_iface(arity)
+  let cls = closure_class(gx.class_name, g.clos_ctr)
+  let g0 = Gen {
+    ..g,
+    clos_ctr: g.clos_ctr + 1,
+    closures: g.closures ++ [ClosB {
+      cls: cls,
+      iface: iface,
+      arity: arity,
+      cap_tys: cap_tys,
+      fps: fps,
+      fret: fret,
+      owner: owner,
+      target: name,
+      # lowering already hoisted the body to a top-level static, so this
+      # names a method that exists rather than one to be emitted
+      impl_desc: impl_desc_of(gx, cap_tys ++ fps, fret)
+    }]
+  }
+  if len(caps) == 0 {
+    # nothing to close over, so one instance serves every evaluation of this
+    # site. 81 of the compiler's own 149 closures are this shape.
+    g0.mv.visitFieldInsn(OP_GETSTATIC, cls, "INSTANCE", "L" ++ iface ++ ";")
+    return g0
+  }
+  # `new` before the captures rather than after: the constructor wants the
+  # receiver underneath its arguments, and the captures are locals and
+  # nested closures, never a branch, so nothing merges while the
+  # uninitialised reference is live.
+  g0.mv.visitTypeInsn(OP_NEW, cls)
+  g0.mv.visitInsn(OP_DUP)
+  var g1 = g0
   for c in caps {
     let (g2, _) = gen_cexpr(gx, g1, c, false)
     g1 = g2
-    cap_tys = cap_tys ++ [cex_ty(c)]
   }
-  let (fps, fret) = tyfn_parts(ty)
-  let impl_desc = impl_desc_of(gx, cap_tys ++ fps, fret)
   var caps_desc = ""
   for ct in cap_tys { caps_desc = caps_desc ++ desc_of(gx.adts, ct) }
-  # lowering already hoisted the body to a top-level function, so this is
-  # just an indy site over an existing static method -- there is no pending
-  # lambda queue on this path
-  g1.mv.visitInvokeDynamicInsn("apply",
-    "(" ++ caps_desc ++ ")L" ++ fn_iface(len(fps)) ++ ";", lmf_bsm(),
-    Type.getMethodType(erased_apply_desc(len(fps))).expect("mt"),
-    Handle.new(OP_H_INVOKESTATIC, owner, name, impl_desc, false),
-    instantiated_type(gx, fps, fret))
+  g1.mv.visitMethodInsn(OP_INVOKESPECIAL, cls, "<init>", "(" ++ caps_desc ++ ")V", false)
   g1
+}
+
+## One closure class: the captures in fields, and an erased `apply` that
+## unerases its arguments, calls the hoisted body and boxes what comes back.
+##
+## That adaptation is the whole of what LambdaMetafactory did here. It is the
+## mirror of `gen_cdynamic`, which boxes arguments before an `apply` and
+## unerases the result after it -- the same two helpers, the other way round.
+fn gen_closure_class(gx: GenCtx, supers: List[String], g: Gen, b: ClosB) -> (String, Bytes) !io = {
+  let cw = AdtClassWriter.new(supers)
+  cw.beginWithInterface(V17, ACC_PUBLIC + ACC_FINAL, b.cls, obj(), b.iface)
+  var caps_desc = ""
+  for ct in b.cap_tys { caps_desc = caps_desc ++ desc_of(gx.adts, ct) }
+  if len(b.cap_tys) == 0 {
+    singleton_scaffold(cw, b.cls, b.iface)
+  } else {
+    var i = 0
+    for ct in b.cap_tys {
+      cw.field(ACC_PRIVATE + ACC_FINAL, capture_field(i), desc_of(gx.adts, ct))
+      i = i + 1
+    }
+    let init = cw.method(ACC_PUBLIC, "<init>", "(" ++ caps_desc ++ ")V").expect("mv")
+    init.visitCode()
+    init.visitVarInsn(OP_ALOAD, 0)
+    init.visitMethodInsn(OP_INVOKESPECIAL, obj(), "<init>", "()V", false)
+    var slot = 1
+    var j = 0
+    for ct in b.cap_tys {
+      init.visitVarInsn(OP_ALOAD, 0)
+      load_slot(init, ct, slot)
+      init.visitFieldInsn(OP_PUTFIELD, b.cls, capture_field(j), desc_of(gx.adts, ct))
+      slot = slot + slots_of(ct)
+      j = j + 1
+    }
+    init.visitInsn(OP_RETURN)
+    init.visitMaxs(0, 0)
+    init.visitEnd()
+  }
+  let m = cw.method(ACC_PUBLIC, "apply", erased_apply_desc(b.arity)).expect("mv")
+  m.visitCode()
+  var k = 0
+  for ct in b.cap_tys {
+    m.visitVarInsn(OP_ALOAD, 0)
+    m.visitFieldInsn(OP_GETFIELD, b.cls, capture_field(k), desc_of(gx.adts, ct))
+    k = k + 1
+  }
+  # the erased apply takes Objects, so every parameter is one word and sits
+  # at 1 + its index whatever the Dawn type underneath is
+  var p = 0
+  let mg = Gen { ..g, mv: m }
+  for pt in b.fps {
+    m.visitVarInsn(OP_ALOAD, p + 1)
+    unerase(gx, mg, pt)
+    p = p + 1
+  }
+  m.visitMethodInsn(OP_INVOKESTATIC, b.owner, b.target, b.impl_desc, false)
+  # a bottom return already left Object on the stack (impl_desc_of said so),
+  # and `box_ty` emits nothing for it -- both spellings end at areturn
+  box_ty(m, b.fret)
+  m.visitInsn(OP_ARETURN)
+  m.visitMaxs(0, 0)
+  m.visitEnd()
+  cw.visitEnd()
+  (b.cls, cw.toByteArray().expect("bytes"))
 }
 
 ## `ty` is the if's own type and `discard` says the value is not wanted.
