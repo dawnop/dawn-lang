@@ -1,0 +1,45 @@
+# checker.dawn: what an arity error leaves behind for the surrounding context.
+#
+# A wrong argument count does not destroy the knowledge of what the call
+# returns, so both call forms hand that type back and let the context judge the
+# body separately. The pairs below are the discriminating inputs: in each `_ok`
+# case the declared return type already matches, so the policy is invisible; in
+# each `_bad` case it does not, and the second diagnostic is the one at stake.
+# Every `_bad` second sentence survives fixing the arity error on its own, which
+# is why it is reported rather than suppressed.
+#
+# The two `g_` cases are the exception and the reason `check_call` tests
+# `len(s.tparams) == 0`: with the wrong number of arguments a generic signature
+# has nothing to infer from, so its return type is genuinely unknown and only
+# the arity error is reported. Dropping that test puts an unbound `T` in the
+# second sentence.
+
+type Sum = Zero | One(x: Int)
+
+pub fn plain(a: Int, b: Int) -> Int = a + b
+
+pub fn ident[T](x: T) -> T = x
+
+# constructor, too many fields, declared return type already correct
+pub fn c_ok() -> Sum = One(1, 2)
+
+# constructor, too many fields, declared return type genuinely wrong
+pub fn c_bad() -> Int = Zero(1)
+
+# constructor, too few fields, declared return type genuinely wrong
+pub fn c_missing_bad() -> Int = One()
+
+# function, wrong argument count, declared return type already correct
+pub fn f_ok() -> Int = plain(1)
+
+# function, wrong argument count, declared return type genuinely wrong
+pub fn f_bad() -> String = plain(1)
+
+# function value, wrong argument count, declared return type genuinely wrong
+pub fn v_bad(f: fn(Int) -> Int) -> String = f(1, 2)
+
+# generic function, wrong argument count: the return type is unknown, so the
+# arity error is the only thing reported
+pub fn g_ok() -> Int = ident(1, 2)
+
+pub fn g_bad() -> String = ident(1, 2)

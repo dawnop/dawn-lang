@@ -4646,6 +4646,12 @@ fn check_call(
     let cxb = cerr_h(cxa, "`" ++ callee ++ "` takes " ++ to_string(len(s.param_tys)) ++
         " argument(s), got " ++ to_string(len(args)), lo, hi,
       "signature: " ++ sig_render(cxa.adts, cxa.traits, s))
+    # The declared return type survives a wrong argument count, so hand it back
+    # and let the context judge the body on its own (see check_ctor_call). For a
+    # generic signature it does not survive: inference is seeded from the
+    # arguments, and with the wrong number of them `s.ret` still mentions type
+    # variables nothing bound -- returning it puts a bare `T` in the next
+    # diagnostic ("declares return type String but its body is T").
     let rt = if len(s.tparams) == 0 { s.ret } else { TyError }
     return (cxb, rt, XError(lo, hi))
   }
@@ -5128,14 +5134,19 @@ fn check_ctor_call(
       if not filled { missing = missing ++ [f.name] }
       fi2 = fi2 + 1
     }
+    # Wrong arity does not destroy the knowledge of what is being constructed,
+    # so this keeps reporting and returns the constructed type below -- the same
+    # rule `check_call` follows for a wrong-arity function call. The knowledge
+    # really is gone when a type parameter could not be inferred, and that case
+    # is already handled: the `unbound` check further down returns TyError.
+    #
+    # It is tempting to return TyError here so that `fn f() -> Int = Zero(1)`
+    # reports the arity and stops. But the second sentence there survives fixing
+    # the first (`fn f() -> Int = Zero` still does not return an Int), so it is a
+    # separate mistake, not a cascade -- suppressing it only defers it a rebuild.
     if len(cargs) > n {
-      # TyError, not the constructed type: the construction was rejected, and
-      # letting it stand as a Sum made `fn f() -> Int = Zero(1)` report the
-      # arity once and then the return type as a second sentence about the
-      # same mistake. Every other early exit from this function does the same.
-      return (cerr_h(cx1, "`" ++ ci.name ++ "` takes " ++ to_string(n) ++ " field(s), got " ++
-          to_string(len(cargs)), lo, hi, "constructor: " ++ ctor_render(cx1.adts, ci)),
-        TyError, XError(lo, hi))
+      cx1 = cerr_h(cx1, "`" ++ ci.name ++ "` takes " ++ to_string(n) ++ " field(s), got " ++
+          to_string(len(cargs)), lo, hi, "constructor: " ++ ctor_render(cx1.adts, ci))
     } else if len(missing) > 0 && not has_spread {
       cx1 = cerr_h(cx1, "missing field(s) in `" ++ ci.name ++ "`: " ++ join(missing, ", "),
         lo, hi, "constructor: " ++ ctor_render(cx1.adts, ci))
