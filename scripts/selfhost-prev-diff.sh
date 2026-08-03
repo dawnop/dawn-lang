@@ -8,9 +8,12 @@
 #                compilers; backend-dawn (the production ecosystem corpus) is
 #                swept with lex/parse dumps and the formatter, which need no
 #                third-party class path
-#   declaring  — an intentional output change lands with an `Emit-Change:`
-#                line in its commit message; the script scans the commits
-#                since the N-1 tag and turns a declared diff into a pass
+#   declaring  — an intentional output change lands with an
+#                `Emit-Change(<label>):` line in its commit message, one line
+#                per check label it moves; the script scans the commits since
+#                the N-1 tag and turns a declared diff into a pass. The
+#                declaration language, and what it refuses, is documented at
+#                the top of scripts/emitchange.sh
 #
 # The N-1 jar downloads from the GitHub release named in
 # scripts/seed-release.txt (dawn-selfhost.jar preferred, the Kotlin dawn.jar
@@ -42,19 +45,14 @@ echo "OK   $TAG compiles HEAD selfhost (seed feature discipline)"
 HEAD_BIN=(./bin/dawn)
 
 . scripts/emitchange.sh
+# read and validate every declaration in the window up front: a gate that
+# cannot parse its own exemptions has no business granting them, and finding
+# that out before the first diff keeps the message legible
+emitchange_load
 
 fail=0
-report_diff() { # check label, e.g. "emit selfhost"
-  local decls
-  decls=$(declared_for "$1")
-  if [ -n "$decls" ]; then
-    echo "NOTE $1 differs vs $TAG — declared since the tag:"
-    echo "$decls" | sed 's/^/       /'
-  else
-    echo "FAIL $1 differs vs $TAG and no commit since the tag declares it"
-    echo "     (declare it with 'Emit-Change(<label glob>): why' — this label is '$1')"
-    fail=1
-  fi
+gate() { # label, differs (0 identical, 1 differs)
+  emit_gate "$1" "$2" || fail=1
 }
 
 for t in site playground packages/web packages/json selfhost examples/calc.dawn; do
@@ -62,9 +60,9 @@ for t in site playground packages/web packages/json selfhost examples/calc.dawn;
   "${PREV[@]}" __emit "${PREV_STD[@]}" "$t" -o "$OUT/prev/$t" > /dev/null
   "${HEAD_BIN[@]}" __emit "$t" -o "$OUT/head/$t" > /dev/null
   if diff -rq "$OUT/prev/$t" "$OUT/head/$t" > /dev/null; then
-    echo "OK   emit $t"
+    gate "emit $t" 0
   else
-    report_diff "emit $t"
+    gate "emit $t" 1
   fi
 done
 
@@ -77,20 +75,20 @@ if git clone --depth 1 https://github.com/dawnop/dawnop-site "$ECO" > /dev/null 
   "${PREV[@]}" __lex $files > "$OUT/eco-lex-prev.txt"
   # shellcheck disable=SC2086
   "${HEAD_BIN[@]}" __lex $files > "$OUT/eco-lex-head.txt"
-  diff "$OUT/eco-lex-prev.txt" "$OUT/eco-lex-head.txt" > /dev/null \
-    && echo "OK   lex backend-dawn" || report_diff "lex backend-dawn"
+  if diff "$OUT/eco-lex-prev.txt" "$OUT/eco-lex-head.txt" > /dev/null
+  then gate "lex backend-dawn" 0; else gate "lex backend-dawn" 1; fi
   # shellcheck disable=SC2086
   "${PREV[@]}" __parse $files > "$OUT/eco-parse-prev.txt"
   # shellcheck disable=SC2086
   "${HEAD_BIN[@]}" __parse $files > "$OUT/eco-parse-head.txt"
-  diff "$OUT/eco-parse-prev.txt" "$OUT/eco-parse-head.txt" > /dev/null \
-    && echo "OK   parse backend-dawn" || report_diff "parse backend-dawn"
+  if diff "$OUT/eco-parse-prev.txt" "$OUT/eco-parse-head.txt" > /dev/null
+  then gate "parse backend-dawn" 0; else gate "parse backend-dawn" 1; fi
   cp -r "$ECO/backend-dawn/src" "$OUT/fmt-prev"
   cp -r "$ECO/backend-dawn/src" "$OUT/fmt-head"
   "${PREV[@]}" fmt "$OUT/fmt-prev" > /dev/null
   "${HEAD_BIN[@]}" fmt "$OUT/fmt-head" > /dev/null
-  diff -r "$OUT/fmt-prev" "$OUT/fmt-head" > /dev/null \
-    && echo "OK   fmt backend-dawn" || report_diff "fmt backend-dawn"
+  if diff -r "$OUT/fmt-prev" "$OUT/fmt-head" > /dev/null
+  then gate "fmt backend-dawn" 0; else gate "fmt backend-dawn" 1; fi
 else
   # never let a network hiccup read as coverage
   echo "SKIP backend-dawn corpus (clone failed — no network?)"

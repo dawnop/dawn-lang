@@ -1248,6 +1248,38 @@ tag 的确能绕过 main CI，因此 release 应复用同一个 required workflo
 > 时机正是台账 §3.8 说的那个：第二个后端（native fixpoint）当天出现。
 > 「golden 快照进仓库」那半仍如下文所记，先记着。
 >
+> **【通配这一半的补修 —— 2026-08-04，#124】** 上面留的两个口子都是「任意匹配即放行」：
+> glob 与裸声明。实际后果测到过——`1b8ee7f` 带 `Emit-Change(emit *)`，那之后整个种子
+> 窗口里 `selfhost-prev-diff.sh` 六项 emit **全打 NOTE、一项 OK 都没有**，脚本照样
+> 打印 "undeclared-diff check passed"；而那正是一次大改后端的窗口。
+>
+> 现在的规则：scope 必须是**一个** label，逐字出现在 `scripts/emit-labels.txt`；
+> 不接受 glob、不接受裸 `Emit-Change:`、解析不了或 label 不认识一律报错。
+> 三个数据决定了取舍：
+>
+> - **通配的成本可测**：REL-02 之后共 60 条声明，29 条用了 glob，其中 4 条
+>   （`lsp*` ×2、`lsp *`、`doc --builtins*`）指向的本来就只有**一个** label，`*` 纯属噪声；
+>   1 条 `core *` 指向**零个** label——没有任何差分脚本打 `core ...`，它从落地那天起
+>   就是一条永远匹配不上的规则，而旧解析器一声不吭地收下了。
+> - **禁掉通配的成本也可测**：`7de5bd64` 改 class-file 版本、六个 emit 语料全动，
+>   就是老老实实写了六行。代价是六行提交信息（`docs/jvm-base-plan.md` K-A4 已记）。
+> - **裸声明比 glob 更糟**：它最常见的历史写法是 `Emit-Change: none (docs only)`，
+>   作者的意思是「什么都没变」，旧解析器的行为却是放行所有差分的所有 label。
+>
+> 推翻掉的两条候选，理由记在 `scripts/emitchange.sh` 头部：给通配配「预期变更集」
+> （label 粒度上就等于逐条列举；文件粒度上写不出来——改 class-file 版本动的是语料里
+> 每一个类，而 `fmt`/`lsp`/`run ...` 根本没有文件集），以及让通配「只对声明它的那个
+> commit 生效」（不成立——差分比的是上个 release 与 HEAD，被批准的差异在 HEAD 依然
+> 在，这样写会从下一个 commit 起一路红）。
+>
+> 「label 必须已知」这条的张力（加 label / 改名会不会误红）用**双向校验**解掉：
+> `emit_gate` 对**每一次**检查都跑，label 不在注册表里就红并打印该补的那一行，所以
+> 注册表不可能落后于脚本，"unknown label" 永远意味着声明写错了。
+>
+> 解析器自己也有门禁：`scripts/emitchange-selftest.sh`，27 条 accept/refuse/gate 用例，
+> 不需要 JVM、不需要种子。门禁的绿只有在能变红时才有信息量，这个解析器的失效方式
+> 恰好是静默的（读不懂 → 永不匹配；太宽 → 全都匹配），所以它必须被喂进应当失败的输入。
+>
 > 原判定：**【待办 —— 认可】**
 >
 > 「一行 `Emit-Change:` 放行所有 target 的任意差异」确实过宽，而且本次处置正好

@@ -1,0 +1,75 @@
+# Every check label the four differential gates print, and the only strings an
+# `Emit-Change(...)` declaration may name (scripts/emitchange.sh).
+#
+# This file is not a hand-kept copy of the scripts. Every differential calls
+# `emit_gate` for every check it runs -- passing or failing -- and `emit_gate`
+# fails when the label it is handed is missing from here. Adding or renaming a
+# label without editing this file therefore reds the same gate that reads it,
+# in the same run, printing the exact line to add. That is what makes "unknown
+# label" always mean the declaration is wrong and never that this file is
+# stale.
+#
+# Labels are compared literally (grep -Fx). Blank lines and lines starting
+# with `#` are comments.
+#
+# selfhost-core-diff.sh is deliberately absent: Core drift is re-recorded with
+# `--record` into scripts/core-golden/, never declared. `Emit-Change(core ...)`
+# has never matched anything and is now an error.
+
+# ---- scripts/selfhost-prev-diff.sh ----
+emit site
+emit playground
+emit packages/web
+emit packages/json
+emit selfhost
+emit examples/calc.dawn
+lex backend-dawn
+parse backend-dawn
+fmt backend-dawn
+
+# ---- scripts/selfhost-fmt-diff.sh ----
+fmt
+
+# ---- scripts/selfhost-lsp-diff.sh ----
+lsp
+
+# ---- scripts/selfhost-run-diff.sh ----
+run calc (args)
+run calc (usage)
+test site
+test playground (with [deps])
+test url dep (aliased; fetched cache, selfhost reads it)
+test url dep (selfhost fetches a cold cache)
+__pkghash
+__pkghash (error path)
+add (local path dep)
+add (maven coordinate)
+add (url dep, aliased)
+add (bad coordinate errors)
+test failing fixture
+doc --builtins
+doc site
+doc traits example
+doc (pub effect)
+run (compile errors render)
+doc (compile errors, no count line)
+build (invalid manifest renders)
+doc (loader reports manifest diagnostics)
+run (toml syntax errors render)
+add (invalid manifest renders twice-parsed diags)
+build (url dep validation)
+build (duplicate java-deps coordinates)
+# the CliError sweep. $TMP stands for the run's scratch directory, which the
+# script substitutes into the label so the label is a constant.
+cli error (run $TMP/nomain)
+cli error (build $TMP/nomain)
+cli error (test $TMP/notest.dawn)
+cli error (run $TMP/nope)
+cli error (run $TMP/plain.txt)
+cli error (fmt $TMP/nope)
+cli error (doc $TMP/nope)
+cli error (run)
+cli error (test)
+cli error (build)
+cli error (fmt)
+cli error (doc)

@@ -39,16 +39,11 @@ done < <(git ls-files '*.dawn')
 "$DAWN" fmt "$OUT/k" > /dev/null
 "$SELF" fmt "$OUT/d" > /dev/null
 
-if ! diff -r "$OUT/k" "$OUT/d" > "$OUT/diff.txt" 2>&1; then
-  . scripts/emitchange.sh
-  decls=$(declared_for "fmt")
-  if [ -n "$decls" ]; then
-    echo "NOTE formatter differs vs the seed — declared since the tag:"
-    echo "$decls" | sed 's/^/       /'
-  else
-    head -40 "$OUT/diff.txt"
-    echo "FAIL: formatter output differs vs the seed and no commit declares it"
-    exit 1
-  fi
+. scripts/emitchange.sh
+emitchange_load
+if diff -r "$OUT/k" "$OUT/d" > "$OUT/diff.txt" 2>&1; then
+  emit_gate "fmt" 0
+else
+  emit_gate "fmt" 1 || { head -40 "$OUT/diff.txt"; exit 1; }
 fi
 echo "OK: $SELF agrees with the previous release over $i files (plus mangled copies)"

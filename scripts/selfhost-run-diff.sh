@@ -30,23 +30,17 @@ SH=(./bin/dawn)
 ./bin/dawn --version > /dev/null
 
 . scripts/emitchange.sh
+emitchange_load
 
 fail=0
 check() { # name ref-exit head-exit
+  local differs=0
   if [ "$2" != "$3" ] || ! diff "$OUT/k.txt" "$OUT/d.txt" > "$OUT/check-diff.txt"; then
-    local decls
-    decls=$(declared_for "$1")
-    if [ -n "$decls" ]; then
-      echo "NOTE $1 differs vs the seed — declared since the tag:"
-      echo "$decls" | sed 's/^/       /'
-    else
-      echo "FAIL: $1 differs (exits $2 vs $3)"
-      echo "      (declare it with 'Emit-Change(<label glob>): why' — this label is '$1')"
-      head -20 "$OUT/check-diff.txt"
-      fail=1
-    fi
-  else
-    echo "OK   $1"
+    differs=1
+  fi
+  if ! emit_gate "$1" "$differs" "exits $2 vs $3"; then
+    head -20 "$OUT/check-diff.txt"
+    fail=1
   fi
 }
 
@@ -286,8 +280,10 @@ for case in "run $NOMAIN" "build $NOMAIN" "test $OUT/notest.dawn" \
   "$DAWN" $case > "$OUT/k.txt" 2>&1 && k=0 || k=$?
   # shellcheck disable=SC2086
   "${SH[@]}" $case > "$OUT/d.txt" 2>&1 && d=0 || d=$?
-  check "cli error ($case)" "$k" "$d"
+  # $OUT carries this run's pid, so spell it $TMP in the label: a label that
+  # changes every run cannot be registered and cannot be declared
+  check "cli error (${case//$OUT/\$TMP})" "$k" "$d"
 done
 
-[ "$fail" = 0 ] || { echo "FAIL: transcripts differ vs the seed with no declaration"; exit 1; }
+[ "$fail" = 0 ] || { echo "FAIL: see the FAIL lines above (an undeclared difference, or a label this script prints that scripts/emit-labels.txt does not list)"; exit 1; }
 echo "OK: selfhost run/test/doc/add/__pkghash and every error path agree with the previous release"

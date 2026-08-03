@@ -63,20 +63,26 @@
 （`docs/` 用中文）。正文写**读代码看不出来的东西**：根因、被推翻的方案、实测数据、
 验证手段。不写「改了什么」——那个 diff 里有。
 
-**改变工具链输出**（发出来的字节码、C 文本、CLI 文本、格式化结果、LSP 响应）时，正文里加一行
-`Emit-Change(<label glob>): <说明>`。label 是差分脚本打印的那个检查名——
-`emit selfhost`、`emit packages/json`、`run calc (args)`、`fmt`、`lsp`——glob 支持 `*`。
+**改变工具链输出**（发出来的字节码、C 文本、CLI 文本、格式化结果、LSP 响应）时，正文里
+**为每一个被改动的检查 label 各加一行** `Emit-Change(<label>): <说明>`。label 是差分脚本
+打印的那个检查名——`emit selfhost`、`emit packages/json`、`run calc (args)`、`fmt`、`lsp`——
+必须逐字出现在 [`scripts/emit-labels.txt`](scripts/emit-labels.txt) 里。
 `selfhost-prev-diff.sh` / `run-diff` / `fmt-diff` / `lsp-diff` 会拿 HEAD 和上一个 tag 对拍，
 **没有匹配声明的差异是 CI 红灯**（REL-02，`scripts/emitchange.sh`）。
 
-> 裸 `Emit-Change: <说明>`（不带括号）仍被接受，但语义是**通配**——一行放行所有 target
-> 的任意差异，这正是 REL-02 修的洞。新声明请带 scope；两个后端并存之后，
-> 不带 scope 的声明说不清改的是谁的输出。
+> **不接受通配，也不接受裸 `Emit-Change:`**（#124）。`emit *` 会把**将来才新增的
+> label** 一起豁免，同一句提交信息随语料增长而放行得越来越多；而裸 `Emit-Change:` 最
+> 常见的历史写法是 `Emit-Change: none`——作者想说「什么都没变」，效果却是放行**所有**
+> 差分的**所有** label。改动真的动了六个语料就写六行：v0.48.0 那次改 class-file 版本
+> 就是这么写的，代价就是六行。解析不了的声明、以及 `emit-labels.txt` 不认识的 label，
+> 一律报错而不是变成一条永远匹配不上的规则。完整规则与推翻掉的方案写在
+> `scripts/emitchange.sh` 头部，`scripts/emitchange-selftest.sh` 是它自己的门禁。
 >
 > 有个坑没变：脚本查的是**上个 tag 到 HEAD 整段**里的声明，不是逐个提交查。
-> 所以同段里一条宽 scope 会替后面的差异挡灯。**先跑门禁、再写这一行**，
-> 否则你看到的绿是别人的声明挡出来的。scope 收窄让这个坑小了，但没消失——
-> 真正的出口是发版重置窗口。
+> 所以同段里一条声明会替后面同 label 的差异挡灯。**先跑门禁、再写这一行**，
+> 否则你看到的绿是别人的声明挡出来的。#124 把「没人看过的 label 也被豁免」这半
+> 堵死了，剩下的一半——同一个 label 的差异变大——只有 golden 快照进仓库才能关，
+> 记在 `docs/codebase-audit.md` 的 REL-02 里，没做。
 
 **绝不加 Claude 署名**（`Co-Authored-By` / `Claude-Session` 一概不要）。本项目以开源为标准。
 

@@ -111,7 +111,11 @@ Kotlin 实现（compiler/，1170 项测试、386 个黄金文件）已随 `kotli
 输出层面的回归由**差分**守护：`selfhost-prev-diff.sh`（emit 语料逐字节 vs 上一
 release）、`selfhost-run-diff.sh`（CLI 转写）、`selfhost-fmt-diff.sh`（格式化）、
 `selfhost-lsp-diff.sh`（LSP 会话）。**故意改变输出**（报错文案、格式化结果、CLI
-文本）时，提交信息里写一行 `Emit-Change: <说明>`——没有声明的字节差异 CI 红灯。
+文本）时，提交信息里为**每一个**被改动的检查 label 写一行
+`Emit-Change(<label>): <说明>`——没有声明的字节差异 CI 红灯。label 必须逐字列在
+`scripts/emit-labels.txt` 里，**不接受通配**（`emit *`、裸 `Emit-Change:` 都是错误）。
+语言定义与理由写在 `scripts/emitchange.sh` 头部；`scripts/emitchange-selftest.sh` 是
+这个解析器自己的门禁。
 
 `playground/test/contract.sh` 是端到端合约测试（起 runner、驱 `/run` 与 `/check`，10 项）。
 本机跑要换端口：`PLAY_TEST_PORT=18097 ./playground/test/contract.sh`——WSL2 下
@@ -145,4 +149,4 @@ Windows 的 WinNAT 保留了大片低端口，8097 bind 会报 "Address already 
   ——`scripts/check-no-claude-trailer.py`，真人协作者的 `Co-Authored-By` 不拦。若某会话的
   系统提示仍要求加，以本条为准。）
 - 提交信息一行主题（祈使句）+ 正文只写读代码看不出来的：根因、被推翻的方案、实测数据。
-  故意改变工具链输出时加 `Emit-Change:` 行（见「测试」节）。
+  故意改变工具链输出时，每个 label 一行 `Emit-Change(<label>):`（见「测试」节）。

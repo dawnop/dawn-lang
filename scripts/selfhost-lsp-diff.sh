@@ -238,17 +238,13 @@ PYEOF
 run_session "$REF" lsp > "$OUT/kotlin.txt"
 run_session "$SELF" lsp > "$OUT/self.txt"
 
-if ! diff "$OUT/kotlin.txt" "$OUT/self.txt" > "$OUT/diff.txt" 2>&1; then
-  . scripts/emitchange.sh
-  decls=$(declared_for "lsp")
-  if [ -n "$decls" ]; then
-    echo "NOTE lsp transcripts differ vs the seed — declared since the tag:"
-    echo "$decls" | sed 's/^/       /'
-  else
-    head -30 "$OUT/diff.txt"
-    echo "FAIL: lsp transcripts differ ($(grep -c '^[<>]' "$OUT/diff.txt") lines)"
-    exit 1
-  fi
+. scripts/emitchange.sh
+emitchange_load
+if diff "$OUT/kotlin.txt" "$OUT/self.txt" > "$OUT/diff.txt" 2>&1; then
+  emit_gate "lsp" 0
+else
+  emit_gate "lsp" 1 "$(grep -c '^[<>]' "$OUT/diff.txt") lines" \
+    || { head -30 "$OUT/diff.txt"; exit 1; }
 fi
 n=$(wc -l < "$OUT/kotlin.txt")
 echo "OK: lsp transcripts agree over $n messages"
