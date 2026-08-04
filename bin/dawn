@@ -42,13 +42,31 @@ fi
 SJAR="$ROOT/build/dawn-selfhost.jar"
 STD="$ROOT/std"
 
+# Heap: pinned, not left to JVM ergonomics. With no -Xmx the ceiling is
+# MaxRAMPercentage=25% of the HOST's RAM, which makes "how much memory does a
+# build need" a property of the machine instead of a property of the workload.
+# Measured 2026-08-05: the same build got a 3.79 GiB ceiling on a 16 GiB box
+# and 5.87 GiB on a 24 GiB one -- the latter is 98% of the 6 GiB cgroup builds
+# run in here, leaving ~160 MiB for metaspace, code cache and the 512m stacks.
+# UseContainerSupport is on but does NOT see that cgroup: MaxHeapSize measured
+# identical inside and outside it, so the cgroup is not a backstop either.
+#
+# 2g is roughly 10x what a full selfhost build needs. Measured on 57 files /
+# 54,179 lines: it completes at -Xmx192m with 577 MB peak RSS, and peak RSS
+# tracks the ceiling rather than the workload (1.89 GiB at the default ceiling,
+# 1.24 GiB at 2g, 829 MB at 768m) -- a smaller heap was also consistently
+# faster. Deliberately not pinned near that floor: a limit set where it barely
+# passes goes red on the next corpus growth, and reads as a compiler bug.
+# Override for the genuinely heavy scripts, e.g. DAWN_JVM_OPTS="-Xss512m -Xmx6g".
+DAWN_JVM_OPTS="${DAWN_JVM_OPTS:--Xss512m -Xmx2g}"
+
 # deployed form: no sources, no seed resolver — run the shipped jar as-is
 if [ ! -f "$ROOT/scripts/seedjar.sh" ]; then
   if [ ! -f "$SJAR" ]; then
     echo "error: $SJAR not found (deployments must ship build/dawn-selfhost.jar)" >&2
     exit 2
   fi
-  exec "$JAVA" -Xss512m -jar "$SJAR" "$@"
+  exec "$JAVA" $DAWN_JVM_OPTS -jar "$SJAR" "$@"
 fi
 
 . "$ROOT/scripts/seedjar.sh"
@@ -136,10 +154,10 @@ if [ "$needs_build" = 1 ]; then
   # helper's failure is swallowed and the seed silently builds with --std ''.
   # As an assignment, set -e makes the failure fatal here too.
   SEED_STD=$(seed_std_dir)
-  "$JAVA" -Xss512m -jar "$SEED" build "$ROOT/selfhost" -o "$STAGE1" \
+  "$JAVA" $DAWN_JVM_OPTS -jar "$SEED" build "$ROOT/selfhost" -o "$STAGE1" \
     --std "$SEED_STD" \
     --vendor org/objectweb/asm --vendor coursierapi > /dev/null
-  "$JAVA" -Xss512m -jar "$STAGE1" build "$ROOT/selfhost" -o "$SJAR.tmp" \
+  "$JAVA" $DAWN_JVM_OPTS -jar "$STAGE1" build "$ROOT/selfhost" -o "$SJAR.tmp" \
     --std "$STD" \
     --vendor org/objectweb/asm --vendor coursierapi > /dev/null
   rm -f "$STAGE1"
@@ -148,4 +166,4 @@ if [ "$needs_build" = 1 ]; then
   printf '%s\n' "$WANT" > "$STAMP"
 fi
 
-exec "$JAVA" -Xss512m -jar "$SJAR" "$@"
+exec "$JAVA" $DAWN_JVM_OPTS -jar "$SJAR" "$@"
