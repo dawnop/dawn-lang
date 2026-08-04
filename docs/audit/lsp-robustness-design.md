@@ -238,7 +238,8 @@ debounce 会在数据已经到齐时开跑分析，**debounce 恰好被它打败
 
 选错的后果是**服务器空转或挂死**，两者都不会在单元测试里出现——所以在写原语之前
 先把能抓住这两种失效的实验建出来，并用**故意写错的实现**打红过。
-（2026-08-04 实测；脚本形态见 §六，本轮留在 scratchpad，落地时收进 `scripts/`。）
+（2026-08-04 实测；本节是 stand-in 循环上的那一轮，已收进 `scripts/lsp-liveness.py`，
+见 §2.2.3——**换了被测对象之后阈值和变异体都重新定过一遍**。）
 
 - **挂断实验**：客户端关掉写端后，服务器必须在限期内退出。断言退出时延 < 2s。
 - **空转实验**：客户端保持连接但静默 N 秒，服务器 CPU 时间
@@ -255,13 +256,56 @@ debounce 会在数据已经到齐时开跑分析，**debounce 恰好被它打败
 
 两个实验各由**一个**变异体单独打红，互不掩护——这正是要的：`hang` 只红挂断，
 `spin` 只红空转。今天的 `bin/dawn lsp`（还没有 debounce，纯阻塞读）两项都绿
-（退出 0.06s、6s 静默窗口 0.00s CPU），那是 debounce 落地后必须守住的基线。
+（退出 0.06s、6s 静默窗口 0.01–0.08s CPU），那是 debounce 落地后必须守住的基线。
 
 **空转实验自带一个盲点，已经补上**：它分不清「因为守规矩所以安静」与
 「因为压根没干活所以安静」——拿 `sh -c 'cat >/dev/null'` 当服务器，空转实验
 照样 PASS。所以实验多要一条存活断言（静默窗口开始前 stdout 必须已出现
 `publishDiagnostics`）；加上之后同一个 `cat` 变异体转红。
 门禁的绿不构成证据，直到证明它能红。
+
+### 2.2.3 门禁：`scripts/lsp-liveness.py`（§六 2a，已落地）
+
+上一节的红是在 stand-in 循环上取得的。收进仓库后被测对象变成真的 `bin/dawn lsp`，
+**红的能力不能继承**，所以三条断言各自被重新打红了一遍（2026-08-04）。
+
+三条断言各自独立报 PASS/FAIL，阈值与出处：
+
+| 断言 | 上界 | 实测出处 |
+|---|---|---|
+| `hangup` 客户端关掉 stdin 后退出 | **5.0s** | `bin/dawn lsp` 实测 0.06s（四次一致），stand-in 0.00 / 0.02s；留 ~80× |
+| `idle` 6s 静默窗口内的 utime+stime | **0.5s** | `bin/dawn lsp` 实测 0.01–0.08s（六次）；`spin` 变异体 6.23s ≈ 103% 单核。上下各 ~6–12× |
+| `liveness` 静默窗口开始前 stdout 见过 `publishDiagnostics` | 60s 内 | 实测 0.91–1.01s；上界抄 `native-cli-diff.sh` leg 5 的同一个等待 |
+
+三个变异体，都打在真服务器上：
+
+| 变异体 | hangup | liveness | idle |
+|---|---|---|---|
+| `Eof -> { running = true }`（EOF 不退出） | **FAIL 5.00s 仍存活** | PASS | PASS 0.01s |
+| didChange 后忙等（见下） | PASS 0.06s | PASS | **FAIL 6.23s，103.8% 单核** |
+| `sh -c 'cat >/dev/null'` | PASS 0.00s | **FAIL 60s 无 `publishDiagnostics`** | PASS 0.00s |
+
+第三行就是「门禁的绿没有信息量」的实例：`cat` 把 hangup 和 idle 两条都拿了满分。
+
+落地过程推翻的三件（都写进脚本注释了）：
+
+1. **静默前的等待不能是定长**。初版在见到第一条 `publishDiagnostics` 后固定等 1.0s
+   就开窗，结果健康的服务器被判 FAIL——三条 didChange 还有三次分析没跑完，
+   **0.54s 合法的活漏进了窗口**。改成「等 stdout 静止 1.5s」：debounce 落地后
+   三条 didChange 只答一次，定长等待在那一侧同样错。空转仍抓得住，因为空转的特征
+   恰好是 stdout 静而 CPU 响。
+2. **`bin/dawn lsp` 的静默窗口 CPU 不是 0.00s**，是 0.01–0.08s（JVM 的后台开销）。
+   §2.2.2 记的 0.00s 是 stand-in 的数，别拿它当上界。
+3. **整数累加循环在真服务器上烧不动 CPU**：`spin = spin + i` 跑 2×10¹⁰ 次，
+   在 1 秒内返回了**算术上正确的溢出结果** `-8446744083709551616`——JIT 把它折了。
+   空转变异体只好改成字符串活（`to_string(i) ++ "x"`，5×10⁸ 次 ≈ 9s）。
+   记一笔：任何拿空循环当计时器的地方都是假的。
+
+还有一件是刻意的：**hangup 实验只发握手、不发 didChange**，idle 实验才发。
+挂断断言问的是读循环的 end-of-input 那条路，最短的会话就是最强的形式；
+而这条分工正是空转变异体没有连带打红 hangup 的原因——今天的服务器只有一个阻塞点，
+一个真正「静默期烧 CPU 又仍能响应挂断」的变异体在**就绪原语存在之前根本写不出来**
+（那正是 2c 的理由）。
 
 `$/cancelRequest` 在这个模型下可以直接**回一个 `RequestCancelled` 错误**——
 因为没有真的在跑的请求可以取消，请求要么还没开始要么已经完成。这是合规的。
@@ -322,7 +366,7 @@ LSP-04 的验收不在这条线上：`selfhost-lsp-diff.sh` 比的是**输出字
 |---|---|---|
 | 0 | `scripts/selfhost-lsp-diff.sh` 语料加畸形 URI | 记录旧行为 |
 | 1 | `selfhost/src/lsp.dawn`：`uri_to_path`/`path_to_uri` 改 JDK；删 `utf8_decode`/`utf8_bytes`/percent-decode | lsp 内联 test：Windows drive、UNC、非法 UTF-8、`%2F` |
-| 2a | `scripts/lsp-liveness.py`：挂断 + 空转两个实验进仓库 | 先拿 §2.2.2 的四个变异体各打红一遍，再指向真服务器 |
+| 2a ✅ | `scripts/lsp-liveness.py`：挂断 / 存活 / 空转三条断言进仓库，进 `gates.yml` 的 `test` job | **已完成**（2026-08-04）。三条在真 `bin/dawn lsp` 上各被变异体单独打红过，阈值与实测见 §2.2.3 |
 | 2b | `runtime/c/dawn_rt.c`：`io_read_stdin` 从 `fread` 换成 `read(2)`（`io_read_line` 同步） | 前置，否则就绪查询看不见 stdio 缓冲；`rtsrc.dawn` 随 `gen-rtsrc.py` 重生成 |
 | 2c | 新 intrinsic `io_stdin_ready(timeout_ms) -> Bool !io`，9 个落地点（§2.2.1 末） | `scripts/intrinsic-parity.py` + `lower.dawn` 的分组测试 |
 | 2d | `selfhost/src/lsp.dawn`：`read_message` 加 `Idle`；主循环 debounce + generation + **无事可做时阻塞读**那一支 | 「连续 5 次 didChange 只分析 1 次」＋ 2a 的两个实验 |

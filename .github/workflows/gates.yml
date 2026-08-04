@@ -248,6 +248,17 @@ jobs:
       - name: playground contract
         run: ./playground/test/contract.sh
 
+      # The language server's *scheduling*, which nothing else here can see:
+      # selfhost-lsp-diff.sh compares output bytes, and a server that spins a
+      # core or never notices its client left is byte-identical to a
+      # well-behaved one. Three assertions -- exits after hangup, publishes
+      # diagnostics, stays near-zero CPU while silent -- recorded before the
+      # debounced read loop of docs/audit/lsp-robustness-design.md §2.2 lands,
+      # so the change has a baseline to be held to. Each was made to fail on
+      # its own first (§2.2.2); the liveness one is why `cat` cannot pass.
+      - name: lsp liveness (hangup, diagnostics, idle CPU)
+        run: ./scripts/lsp-liveness.py
+
       - name: site builds end-to-end (incl. the Playground editor bundle)
         run: ./site/build.sh
 
