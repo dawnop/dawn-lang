@@ -1,20 +1,55 @@
 # checker.dawn: what an arity error leaves behind for the surrounding context.
 #
 # A wrong argument count does not destroy the knowledge of what the call
-# returns, so both call forms hand that type back and let the context judge the
-# body separately. The pairs below are the discriminating inputs: in each `_ok`
-# case the declared return type already matches, so the policy is invisible; in
-# each `_bad` case it does not, and the second diagnostic is the one at stake.
-# Every `_bad` second sentence survives fixing the arity error on its own, which
-# is why it is reported rather than suppressed.
+# returns, so every call form hands that type back and lets the context judge
+# the body separately. The pairs below are the discriminating inputs: in each
+# `_ok` case the declared return type already matches, so the policy is
+# invisible; in each `_bad` case it does not, and the second diagnostic is the
+# one at stake. Every `_bad` second sentence survives fixing the arity error on
+# its own, which is why it is reported rather than suppressed.
+#
+# Five call forms reach that policy and this file is the only place any of them
+# is discriminated. `calls`, `call_expr` and `fn_field` all reach four of the
+# five, but every one of their callers declares a return type that already
+# matches, so returning TyError there changes nothing they record. Measured, not
+# assumed: flipping the two sites `e_bad` and `fld_bad` now cover back to
+# TyError -- the exact edit this corpus exists to catch -- left all 80 cases and
+# all 298 diagnostics byte for byte identical before those two cases existed.
 #
 # The two `g_` cases are the exception and the reason `check_call` tests
 # `len(s.tparams) == 0`: with the wrong number of arguments a generic signature
 # has nothing to infer from, so its return type is genuinely unknown and only
 # the arity error is reported. Dropping that test puts an unbound `T` in the
 # second sentence.
+#
+# `blk_bad` and `ret_only` are why "two diagnostics on one span" is not treated
+# as a defect of these paths. The span the two share is the function body, so
+# they coincide only when the body *is* the call: move the same call into a
+# block and they separate on their own. And the second span comes from the one
+# line in `check_fn` that every return-type mismatch in the language shares --
+# `ret_only` has no arity error anywhere and lands on the same span rule. So
+# there is nothing arity-shaped to retarget; the coincidence is a property of
+# expression bodies.
+#
+# The `gc_` cases record the one pair here that really is a cascade, and they
+# record it as it is rather than as it should be. With a field missing, a
+# generic constructor reports `cannot infer type parameter(s)` on top of the
+# arity error, and that sentence does NOT survive fixing the arity error --
+# `B(1)` needs no annotation -- so its hint asks for one that fixes nothing.
+# `gc_missing_seeded` is the input that shows the cause: bind the parameter from
+# the expected type and the second sentence goes away by itself. `gc_phantom` is
+# the discriminator that stops the obvious fix from being a blanket one: there
+# `T` is unbound for a reason the missing field has nothing to do with, and
+# `gc_phantom_ok` shows the sentence outliving the arity error, so it has to
+# stay. A fix has to filter per parameter, not per call.
 
 type Sum = Zero | One(x: Int)
+
+type FnRec = { g: fn(Int) -> Int }
+
+type Box[T] = B(x: T)
+
+type Ph[T] = P(x: Int)
 
 pub fn plain(a: Int, b: Int) -> Int = a + b
 
@@ -38,8 +73,40 @@ pub fn f_bad() -> String = plain(1)
 # function value, wrong argument count, declared return type genuinely wrong
 pub fn v_bad(f: fn(Int) -> Int) -> String = f(1, 2)
 
+# expression callee, wrong argument count, declared return type genuinely wrong
+pub fn e_bad(r: FnRec) -> String = (r.g)(1, 2)
+
+# fn-typed field, wrong argument count, declared return type genuinely wrong
+pub fn fld_bad(r: FnRec) -> String = r.g(1, 2)
+
 # generic function, wrong argument count: the return type is unknown, so the
 # arity error is the only thing reported
 pub fn g_ok() -> Int = ident(1, 2)
 
 pub fn g_bad() -> String = ident(1, 2)
+
+# the same wrong call one line deeper: the arity error stays on the call and the
+# return-type mismatch moves to the block, so nothing looks duplicated
+pub fn blk_bad() -> String = {
+  let k = 1
+  plain(k)
+}
+
+# no arity error at all, same span rule for the mismatch
+pub fn ret_only() -> String = 1
+
+# generic constructor, too few fields: `cannot infer T` is a cascade of the
+# missing field and is reported anyway -- recorded as it is, see the header
+pub fn gc_missing() -> Int = B()
+
+# the same call with `T` bound from the expected type: the arity error alone
+pub fn gc_missing_seeded() -> Box[Int] = B()
+
+# a type parameter no field mentions, so its inference failure is not a cascade
+pub fn gc_phantom() -> Int = P()
+
+pub fn gc_phantom_ok() -> Int = P(1)
+
+# generic constructor, too many fields: the type argument still binds from the
+# arguments that are there, so the constructed type survives
+pub fn gc_extra() -> Int = B(1, 2)
