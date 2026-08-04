@@ -1,7 +1,8 @@
 # site/ — Dawn 语言网站（M5）
 
 静态站点，**生成器用 Dawn 写**（dogfood M4 的模块系统 / Map / 字符串 API）。
-产物纯 HTML + CSS，**零 JS**（代码高亮在构建期完成）；nginx 托管，零后端。
+产物是 HTML + CSS（代码高亮在构建期完成，内容页零 JS）；nginx 托管。唯一的例外是
+Playground——它带一份编辑器 bundle，并需要后端的 `/api/run`、`/api/check`。
 
 - 域名：`https://dawn-lang.dawnop.com`（与 GitHub 仓库名一致）
 - 验收：站点上线，且生成它的程序是 Dawn 写的；生成器 JVM 与 native 跑出的
@@ -17,7 +18,8 @@ site/
 │   ├── hl/         # Dawn 语法高亮 tokenizer（构建期）
 │   └── html/       # 转义、模板壳、TOC、slug
 ├── assets/         # style.css 等文本资产（原样拷入 dist/assets/）
-├── pages/          # 站点专属内容（index.md 等）
+├── pages/          # 站点专属内容（index.md、首页样例与特性卡的 .dawn）
+├── play-ui/        # Playground 编辑器（TS + CodeMirror 6，npm 构建）
 ├── sample/         # 手写验收样张 —— 渲染以此为准绳（验收样例先行）
 └── dist/           # 产物（gitignore）
 ```
@@ -36,7 +38,7 @@ site/
 | `/examples/index.html` | 示例陈列页 | `examples/**` |
 | `/examples/{name}.html` | 每例一页：高亮源码（+ 多文件项目按模块列出） | 同上 |
 | `/stdlib.html` | 标准库 API 参考 + 侧栏 TOC：内建类型、prelude、预置 trait、每个 std 模块（函数 / 类型 / impl），文档注释按 Markdown 渲染 | `site/pages/stdlib.md` + `dawn doc --stdlib` |
-| `/playground.html` | 占位页（「二期开发中」） | 模板 |
+| `/playground.html` | 在线编辑器：CodeMirror 6 + Dawn 高亮、实时诊断、补全；运行/检查打后端 | `site/play-ui/`（npm 构建，产物由 `gen_assets` 搬进 `dist/assets`） |
 
 ## 渲染约定
 
