@@ -150,9 +150,9 @@ impl 一致性是全程序唯一映射）与 `[java-deps]`（coursier 解析 Mav
 **从 v0.50.0 起**，每个 release 还挂着 **`dawnc-linux-x86_64`**：C 后端编出来的单文件静态
 可执行程序（约 3.6 MB），std 与 C 运行时都嵌在里面，不需要这个仓库、也不需要 JVM。
 
-子命令是 `check|emitc|run|test|fmt|doc|add|lsp`；`run`/`build` 会调用机器上的 `cc`（`$CC`
-可覆盖），其余的不碰 C 工具链。它**拒绝 `use java`**——那是这个后端的答案，不是缺陷；
-`build`-to-jar、`lock`、`cache` 需要 JVM，故不在它的子命令里。只有 linux-x86_64 一个目标，理由见
+子命令是 `check|emitc|build|run|test|fmt|doc|add|lsp`；`build`/`run` 会调用机器上的 `cc`
+（`$CC` 可覆盖），其余的不碰 C 工具链。它**拒绝 `use java`**——那是这个后端的答案，不是缺陷；
+打包成 jar、`lock`、`cache` 需要 JVM，故不在它的子命令里。只有 linux-x86_64 一个目标，理由见
 [docs/native-driver-plan.md](docs/native-driver-plan.md) §22.1。
 
 **说准一点**：「用 Dawn 可以完全不碰 JVM」成立——从编译器到产物有一条完整的路径；但
