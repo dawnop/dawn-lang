@@ -447,6 +447,31 @@ pub fn subst(t: Ty, m: Map[Int, Ty], em: Map[Int, Eff]) -> Ty =
     TyUnit | TyNever | TyError | TyJava(_, _) -> t
   }
 
+## Does `t` mention the type variable `id`? The question `subst` answers by
+## doing; asking it separately is what lets a caller tell "this parameter could
+## have been learned from here" from "it could not".
+##
+## Walks exactly where `subst` walks, and is spelled out for the same reason: a
+## new *parameterised* variant landing on a wildcard would answer `false` for a
+## type that does mention the variable, and the caller would read that as
+## "nothing here could bind it".
+pub fn ty_mentions_var(t: Ty, id: Int) -> Bool =
+  match t {
+    TyVar(_, vid) -> vid == id
+    TyAdt(_, targs) -> list.any(targs, x => ty_mentions_var(x, id))
+    TyList(e) -> ty_mentions_var(e, id)
+    TyMap(k, v) -> ty_mentions_var(k, id) || ty_mentions_var(v, id)
+    TySet(e) -> ty_mentions_var(e, id)
+    TyArray(e) -> ty_mentions_var(e, id)
+    TyTuple(elems) -> list.any(elems, x => ty_mentions_var(x, id))
+    TyOpaque(_, _, _, tgt) -> ty_mentions_var(tgt, id)
+    TyAssoc(s, _, _) -> ty_mentions_var(s, id)
+    TyFn(params, ret, _) ->
+      list.any(params, x => ty_mentions_var(x, id)) || ty_mentions_var(ret, id)
+    TyInt | TyFloat | TyBool | TyString | TyBytes -> false
+    TyUnit | TyNever | TyError | TyJava(_, _) -> false
+  }
+
 ## Rewrite `subject.name` projections to an impl's own bindings -- everything
 ## else walks structurally. Two callers, one shape: the checker uses it while
 ## an impl's methods are being checked (before the impl has entered the
@@ -1905,6 +1930,29 @@ test "substitution reaches every position" {
   assert subst(opt_ty(t), m, em) == opt_ty(TyInt)
   assert subst(TyFn([t], t, EPure), m, em) == TyFn([TyInt], TyInt, EPure)
   assert subst(TyTuple([t, TyBool]), m, em) == TyTuple([TyInt, TyBool])
+}
+
+test "mentioning a type variable reaches every position substitution does" {
+  let t = TyVar("T", 5)
+  let u = TyVar("U", 6)
+  assert ty_mentions_var(t, 5)
+  assert not ty_mentions_var(t, 6)
+  assert ty_mentions_var(TyList(t), 5)
+  assert ty_mentions_var(TyMap(TyInt, TySet(t)), 5)
+  assert ty_mentions_var(TyArray(t), 5)
+  assert ty_mentions_var(opt_ty(t), 5)
+  assert ty_mentions_var(TyFn([TyInt], t, EPure), 5)
+  assert ty_mentions_var(TyFn([t], TyInt, EPure), 5)
+  assert ty_mentions_var(TyTuple([TyBool, t]), 5)
+  assert ty_mentions_var(TyOpaque(0, "N", "m", TyList(t)), 5)
+  assert ty_mentions_var(TyAssoc(t, ITER_ID, "Item"), 5)
+  # the same shapes with the other variable: a walk that answered `true`
+  # everywhere would pass the block above and fail here
+  assert not ty_mentions_var(TyList(u), 5)
+  assert not ty_mentions_var(TyMap(TyInt, TySet(u)), 5)
+  assert not ty_mentions_var(TyFn([u], u, EPure), 5)
+  assert not ty_mentions_var(TyTuple([TyBool, u]), 5)
+  assert not ty_mentions_var(TyString, 5)
 }
 
 test "effect substitution collapses unions" {

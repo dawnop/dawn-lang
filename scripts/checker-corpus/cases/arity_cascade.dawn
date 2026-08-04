@@ -31,17 +31,33 @@
 # there is nothing arity-shaped to retarget; the coincidence is a property of
 # expression bodies.
 #
-# The `gc_` cases record the one pair here that really is a cascade, and they
-# record it as it is rather than as it should be. With a field missing, a
-# generic constructor reports `cannot infer type parameter(s)` on top of the
+# The `gc_` cases are the one thing here that really is a cascade, and they now
+# record the fix rather than the symptom. With a field missing, a generic
+# constructor used to report `cannot infer type parameter(s)` on top of the
 # arity error, and that sentence does NOT survive fixing the arity error --
-# `B(1)` needs no annotation -- so its hint asks for one that fixes nothing.
-# `gc_missing_seeded` is the input that shows the cause: bind the parameter from
-# the expected type and the second sentence goes away by itself. `gc_phantom` is
-# the discriminator that stops the obvious fix from being a blanket one: there
-# `T` is unbound for a reason the missing field has nothing to do with, and
-# `gc_phantom_ok` shows the sentence outliving the arity error, so it has to
-# stay. A fix has to filter per parameter, not per call.
+# `B(1)` needs no annotation -- so its hint asked for one that fixes nothing.
+# `gc_missing_seeded` is the input that showed the cause: bind the parameter
+# from the expected type and the second sentence goes away by itself.
+#
+# The suppression is per parameter, not per call: a parameter is dropped only
+# when the fields the call left out are the *whole* source of information about
+# it. The cases below are the discriminators for that rule, not illustrations
+# of it: breaking either half of the predicate, or the trigger that gates it,
+# reds one of them and only that one -- measured, three mutants, three reds.
+# `gc_phantom` / `gc_phantom_ok` stop it from being a blanket suppression: `T`
+# there is mentioned by no field at all, so the missing field has nothing to do
+# with its being unbound, and `gc_phantom_ok` -- which has no arity error --
+# shows the sentence standing on its own. `gc_mixed` holds both answers in one
+# sentence: `T` comes only from the missing fields and goes, `U` is mentioned
+# nowhere and stays. `gc_shared` is the other edge: a field that *was* supplied
+# mentions `T` and still failed to bind it, so the missing field is not the
+# whole story and the sentence stays. `gc_extra` has no missing field at all,
+# so nothing is suppressed there whatever the predicate says. `gc_wrongname`
+# pins the other half of the trigger: the suppression only fires for the
+# `missing field(s)` diagnostic it is the echo of, so an unfilled field that
+# was reported some other way keeps its cascade. That is a second, still-open
+# cascade recorded as it is -- and the case is here so that widening the
+# trigger cannot happen silently.
 
 type Sum = Zero | One(x: Int)
 
@@ -50,6 +66,10 @@ type FnRec = { g: fn(Int) -> Int }
 type Box[T] = B(x: T)
 
 type Ph[T] = P(x: Int)
+
+type Mix[T, U] = M(a: T, b: Int)
+
+type Half[T] = H(a: List[T], b: T)
 
 pub fn plain(a: Int, b: Int) -> Int = a + b
 
@@ -96,7 +116,7 @@ pub fn blk_bad() -> String = {
 pub fn ret_only() -> String = 1
 
 # generic constructor, too few fields: `cannot infer T` is a cascade of the
-# missing field and is reported anyway -- recorded as it is, see the header
+# missing field, so only the missing field is reported
 pub fn gc_missing() -> Int = B()
 
 # the same call with `T` bound from the expected type: the arity error alone
@@ -106,6 +126,20 @@ pub fn gc_missing_seeded() -> Box[Int] = B()
 pub fn gc_phantom() -> Int = P()
 
 pub fn gc_phantom_ok() -> Int = P(1)
+
+# one parameter of each kind in one call: `T` is reachable only through the
+# missing fields and is dropped, `U` is mentioned by no field and survives
+pub fn gc_mixed() -> Int = M()
+
+# `T` is mentioned by the field that WAS supplied and still did not bind, so
+# the missing field is not the whole story and the sentence stays
+pub fn gc_shared() -> Int = H([])
+
+# a misspelled field name leaves `x` unfilled too, and `cannot infer T` is just
+# as much an echo of it -- but the diagnostic reported is a different one, and
+# nothing here suppresses the echo of an error it did not report. Recorded as
+# it is: a second cascade, of the wrong-field-name error, still open
+pub fn gc_wrongname() -> Int = B(y: 1)
 
 # generic constructor, too many fields: the type argument still binds from the
 # arguments that are there, so the constructed type survives

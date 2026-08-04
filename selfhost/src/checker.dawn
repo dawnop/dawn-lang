@@ -49,6 +49,7 @@ use types.{
   eff_base, eff_labels, eff_with_labels,
   Adts, AdtI, CtorI, FieldI, Traits, ImplI, Sym, Sig,
   adt_of, trait_of, ty_show, ctor_render, sig_render, subst, subst_eff, eff_show,
+  ty_mentions_var,
   is_numeric, is_errorish,
   prelude_traits, bounds_of,
   prelude_trait_ids,
@@ -4867,6 +4868,37 @@ fn unhandled_effect(cx: Cx, eid: Int, lo: Int, hi: Int) -> Cx = {
       " { ... }`")
 }
 
+## Is `vid`'s inference failure nothing but an echo of the fields the call left
+## out? True only when the fields that are missing are the *whole* story: `vid`
+## is mentioned by at least one of them and by none of the fields that were
+## supplied, so the constructor had no other place to learn it from.
+##
+## Why per parameter and not per call: `type Ph[T] = P(x: Int)` mentions `T` in
+## no field at all, so `P()` still has to say `T` cannot be inferred -- and
+## `P(1)`, which has no arity error, proves that sentence stands on its own.
+## Why a supplied field disqualifies: an argument *was* given in a position
+## mentioning `vid` and still did not bind it, so filling in the missing fields
+## is not the only thing wrong and the annotation hint is not misleading.
+##
+## The expected type is the other source, and it does not need testing here: the
+## caller already tried it (`unbound_any` above), so a parameter still unbound
+## is one the context could not supply either.
+fn infer_blocked_by_missing(ci: CtorI, slots: List[Option[Int]], vid: Int) -> Bool = {
+  var in_missing = false
+  var in_present = false
+  var i = 0
+  for f in ci.fields {
+    if ty_mentions_var(f.ty, vid) {
+      match slots[i] {
+        Some(_) -> { in_present = true }
+        None -> { in_missing = true }
+      }
+    }
+    i = i + 1
+  }
+  in_missing && not in_present
+}
+
 ## Ctor(args) / Record { fields } / bare Name (the Kotlin checkCtorCall): also
 ## the landing site for SCREAMING_SNAKE constant references.
 ## `pre` is the constructor already resolved by the caller -- how a qualified
@@ -5123,6 +5155,7 @@ fn check_ctor_call(
       j = j + 1
     }
   }
+  var missing_reported = false
   if not args_broken {
     var missing: List[String] = []
     var fi2 = 0
@@ -5150,6 +5183,7 @@ fn check_ctor_call(
     } else if len(missing) > 0 && not has_spread {
       cx1 = cerr_h(cx1, "missing field(s) in `" ++ ci.name ++ "`: " ++ join(missing, ", "),
         lo, hi, "constructor: " ++ ctor_render(cx1.adts, ci))
+      missing_reported = true
     }
   }
   # instantiate the type arguments; fall back to the expected type (bare None etc.)
@@ -5170,10 +5204,24 @@ fn check_ctor_call(
       None -> ()
     }
   }
+  # A parameter whose only possible source of information was a field the call
+  # left out is dropped from the sentence: it is an echo of the arity error
+  # above, and its hint asks for an annotation that leaves the real mistake in
+  # place. Per parameter, not per call -- see `infer_blocked_by_missing`. The
+  # return type stays TyError whenever anything is unbound, reported or not:
+  # the constructed type genuinely is unknown, and handing back a `Box[T]` with
+  # a free `T` is what put a bare `T` in the next diagnostic.
   var unbound: List[String] = []
+  var unbound_all = false
   for tp in ad.tparams {
     match tp {
-      TyVar(nm, vid) -> if not map.has(m, vid) { unbound = unbound ++ [nm] }
+      TyVar(nm, vid) ->
+        if not map.has(m, vid) {
+          unbound_all = true
+          if not (missing_reported && infer_blocked_by_missing(ci, slots, vid)) {
+            unbound = unbound ++ [nm]
+          }
+        }
       _ -> ()
     }
   }
@@ -5183,6 +5231,7 @@ fn check_ctor_call(
       "add a type annotation, e.g. let x: " ++ ad.name ++ "[...] = " ++ ci.name),
       TyError, XError(lo, hi))
   }
+  if unbound_all { return (cx1, TyError, XError(lo, hi)) }
   var written: List[TExpr] = []
   for sl in atx {
     match sl {
