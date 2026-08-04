@@ -1,7 +1,7 @@
 # B 线：native 驱动补全 + 把后端契约摆到明面上
 
-> 状态：**in progress**（2026-08-03 立项，任务 #128；K-B1 到 K-B5 全部落地，刀表见 §2）。
-> 本文是 B 线的落地记录 + 后续刀表。
+> 状态：**七刀已结**（2026-08-03 立项，任务 #128；K-B1–K-B5 与 K-B7 落地，K-B6 明确推迟，
+> 刀表见 §2）。本文是 B 线的落地记录 + 刀表。
 >
 > **为什么在这儿而不在别处**：B 线原来的备忘录只存在于任务 #128 的描述里，仓库中没有
 > 任何一份 B 线文档；A 线（[jvm-base-plan.md](jvm-base-plan.md)）的备忘录已经因为一次
@@ -41,11 +41,25 @@ B 线的驱动是**能力补全，不是纯洁性**：不是「把 java 赶出�
 | **K-B3** | `lsp`（`lsp.dawn` + `lspq.dawn` + `lspc.dawn`，2,877 行），并让 lsp 差分真的覆盖 native | 加能力 + 加门禁 | **已做**（§11–§15） |
 | **K-B4** | `test`（`testrun.dawn`；JVM 侧靠生成一个 test main 类，native 侧要另一条路） | 加能力 + 加门禁 | **已做**（§18–§21） |
 | **K-B5** | 结构化 comptime 常量落到 native（`emitc.const_literal` 原来直接 panic） | 加能力 + 加门禁 | **已做**（§17） |
+| **K-B6** | `use c` FFI（native 侧的 java FFI 对位物） | 加语法 | **推迟**（裁决 D7=(b)，理由见下） |
+| **K-B7** | native 二进制进 release artifact | 加产物 + 加门禁 | **已做**（§22） |
 
 > 刀表的**内容**来自任务 #128 的描述。原始 issue body 在写这份文档时取不到
 > （`api.github.com/repos/dawnop/dawn-lang/issues/128` 回 404，本仓 issue 不公开），
 > 所以上表是照任务简报转录的，**不是从 issue 原文抄的** `[推论]`。K-B3/K-B4 的行数是
 > `wc -l` 实测。
+
+> **这张表以前只有五行，而且五行全是「已做」**——读起来就是「B 线已完成」。K-B6/K-B7
+> 两行是 2026-08-04 补的。同一张表还犯过更糟的：某一版写着「K-B4 已完成」并附了一段
+> 章节号区间，而那些小节当时**根本不存在**。指向不存在证据的前向引用不会让任何门禁变红，只会让下一个
+> 读表的人以为有据可查——所以往这张表里写章节号，写完请点开验它存在。
+
+**裁决 D7（K-B6 的形态）= (b) 明确推迟。** `use c` 是新语法，落地即
+`Emit-Change(parse *)`，而签名/语法变更要走种子纪律的三期两发布（`docs/bootstrap.md`）。
+今天没有任何真实 native 程序需要它：native 后端**拒绝** `use java`（`jsig_refused`），
+但整个编译器闭包与 `packages/` 都不需要 C 侧的外部函数，`pkgfetch` 要下载就 spawn
+`curl`（§4）。为一个假想需求预付三期两发布的成本，是把契约面积扩大到没人用的地方。
+等到出现第一个真的够不着的 native 程序，再按那时的形状定语法。
 
 裁决 **D4（K-B2 的形态）= (a)**：与 JVM 驱动**等价**——同样的 flag、同样的参数处理、
 同样的输出、同样的退出码。不做缩水版。
@@ -505,9 +519,9 @@ stdout 逐字节相同、退出码相同。
 
 1. **它对「共享的 lsp 代码本身改了」是失明的吗？不是——但只因为 oracle 是 N−1。**
    `lsp.dawn/lspq.dawn/lspc.dawn` 两个驱动共用，改一行两侧同样地变；如果这条腿是
-   「JVM vs native」跨后端比较（像 `doc`/`add` 那样），它就会全绿——**这正是 §9.1
+   「JVM vs native」跨后端比较（像 `doc`/`add` 那样），它就会全绿——**这正是 §9 第 1 条
    记的那个盲点**。这条腿之所以躲开了它，是因为它比的是 **N−1 发布**，而不是另一个
-   后端。代价是另一头：**它每次发布都要重新对齐**，而 §9.1 那条链（native == JVM == N−1）
+   后端。代价是另一头：**它每次发布都要重新对齐**，而 §9 第 1 条那条链（native == JVM == N−1）
    在这里退化成一段——一旦 `selfhost-lsp-diff.sh` 的默认 JVM 那遍被从 CI 里拿掉，
    native 这遍照样绿，但「JVM 也没变」这半句就没人证了。
 2. **它不证明两个驱动的 `Jsig` 选择是对的。** JVM 传 `jsig_real()`、native 传
@@ -730,3 +744,220 @@ stderr 和退出码。第 7 条腿的两次调用在 :427 与 :429，第 8 条�
 5. **第 8 条腿只看前两条报告。** 它说的是「报告是边跑边落盘的」，不是「每一行都单独
    flush」——后者今天成立（`dawn_io_println` 每行一次 `fflush`），但这条腿分不出「每行
    flush」和「每两行 flush」。
+
+## 22. K-B7：native 二进制进 release artifact
+
+在这一刀之前，一个 tag 只发布一件东西：`dawn-selfhost.jar`，跑它要有 JVM。native 后端
+2026-07-30 起就能编译整个编译器（`scripts/native-fixpoint.sh` B==C），驱动的命令行也在
+K-B2–K-B5 补齐了，所以有了第二件值得交到使用者手里的东西：**一个自带 std 与运行时的
+单文件可执行程序**。
+
+落地物是 `scripts/release-native.sh`（构建 + 四道检查 + sha256），`release.yml` 在 tag 上
+调它并把产物挂进 release，`gates.yml` 的 `prev-diff` job **每次 push 都调同一个脚本**。
+
+### 22.1 三项裁决
+
+**裁决 A（产哪些平台/架构）= 只产 `linux-x86_64`，静态链接。**
+
+`.github/workflows/` 里今天**只有 `ubuntu-latest` 一种 runner**（`ci.yml:17`、
+`gates.yml:21,265`、`release.yml:29`，`grep runs-on` 实测四处全是它）。不做交叉编译，
+理由不是懒：**验收要求「真跑它并断言输出」（§22.2 检查 3），而交叉编译出来的二进制在同一个
+job 里跑不了**——那就等于发一件没人执行过的产物，正是这一刀要防的失效形态本身。
+加 `ubuntu-*-arm` / `macos-*` 矩阵要付的不只是一个 runner：每个 runner 得先把 jar 那条
+seed→A→B 链重跑一遍，而 macOS 上的 `runtime/c` 从来没有人编过、更没有人跑过。
+
+**缺什么，写在这儿**：`darwin-arm64`、`linux-arm64`、任何 musl/Windows 目标都没有产物。
+补它们的门槛是「先让 `runtime/c` 在那个平台上过 `spike-native` 和 `native-fixpoint`」，
+不是「加一行 matrix」。
+
+**静态链接（`-static`）**是同一条理由的延续 `[实测]`：动态链接的产物在 runner 的 glibc 上
+建、也只在那个 glibc 上验过，换台老一点的机器**起都起不来**——而这个失效在 CI 这一侧
+永远看不见，因为 CI 的 glibc 恒等于它编译时用的那个。实测代价：2,888,200 B →
+3,654,600 B（+26.6%），链接时间 15.26 s → 15.34 s（无差别），**零链接告警**——运行时不碰
+NSS/dlopen（`grep -E "getaddrinfo|getpwnam|dlopen|gethostby|nss" runtime/c/*.c` 零命中）。
+
+> **产物自带 std 与运行时源码，但 `run`/`build` 仍要机器上有 `cc`** `[grep]`：
+> `nmain.cc_build` 把嵌入的 `dawn_rt.c/.h` 写到临时目录、然后 spawn `$CC`（默认 `cc`）。
+> 所以「自包含」的准确含义是**不需要 Dawn 仓库、不需要 JVM**，不是「不需要 C 工具链」。
+> `emitc` / `check` / `fmt` / `doc` / `lsp` / `add` 不碰 `cc`。
+
+**裁决 B（与 jar 种子的关系）= 纯附加，种子纪律零牵动。**
+
+引导种子是且只是 jar：`scripts/seed-release.txt` 点名 tag，`scripts/seedjar.sh` 只下载
+`dawn-selfhost.jar`、只拿 `scripts/seed-checksums.txt` 校验它，`bin/dawn` 也只找 jar。
+**没有任何东西读这个二进制**，所以 `seed-release.txt` / `seed-checksums.txt` 一个字节都不用动，
+也不存在「N 代发射、N+1 代消费」的新链条。产物旁边那份 `.sha256` 是**下载完整性**，
+不是种子校验和——`release.yml` 的注释里写死了这句话，免得下一次升种子的人把它填进
+`seed-checksums.txt`。
+
+要不要让 native 二进制也成为一种种子？**不。** 那等于开第二条引导血脉：它要有自己的
+校验和表、自己的平台矩阵，而 native 今天的引导方式（每次由 JVM 工具链现编，
+`native-fixpoint.sh`）既便宜又不需要信任任何历史产物。这条不在 B 线的范围里。
+
+**裁决 C（CI 预算）= 每次 push 净增约 15 秒，不设成里程碑门禁。**
+
+先量 `[实测]`（本机，`cc -std=c11 -O2 -fwrapv -fno-strict-aliasing -pthread -static`）：
+
+| 步骤 | 秒 |
+|---|---|
+| `bin/dawn __emitc selfhost/src/nmain.dawn`（JVM 发射 182,841 行 C） | 5.85 |
+| `cc -O2 -static` | 15.34 |
+| 检查 2（`dawnc version`） | ~0 |
+| 检查 3（裸目录 `run hello.dawn`，含它自己 spawn 的 `cc`） | 2.40 |
+| 检查 4（`dawnc emitc nmain.dawn`，即 A==B） | 12.49 |
+| **`release-native.sh` 整条**（jar 已在） | **35.4** |
+
+关键在于**它不是净增 35 秒**：`native-cli-diff.sh` 本来就在 `prev-diff` job 里自己编一个
+native 驱动（`:44–51`，同样是 `__emitc` + `cc`）。现在 `gates.yml` 先跑
+`release-native.sh`，再用 `DAWNC_BIN=` 把产物交给它，那份构建不再付第二遍。
+端到端直接量了两遍 `[实测]`：
+
+| `prev-diff` 里这一段 | 秒 |
+|---|---|
+| 改之前：`native-cli-diff.sh`（自己编驱动，8 条腿全绿） | 99.5 |
+| 改之后：`release-native.sh` 35.4 + `DAWNC_BIN=… native-cli-diff.sh` 70.5（自己不编了，8 条腿全绿） | 105.9 |
+| **净增** | **+6.4** |
+
+六秒，落在一个本来就要跑三条 N−1 差分的 job 上。
+
+顺带得到一件比省时间更值钱的事：**八条差分腿从此跑在「真要发布的那个二进制」上**，
+而不是一个用同样配方另编的。tag 那侧则是 `release.yml` 多 35 秒，相对它本来就要建三个 jar
+的链条可以忽略。
+
+所以**不**把它设成里程碑门禁 —— 恰恰相反，把它放进每次 push 才是重点：
+**只在 tag 上跑的步骤是全仓最少被执行的代码，也就最可能在真要用它的那天是坏的。**
+
+### 22.2 `release-native.sh` 的四道检查，以及每道为什么不被上一道蕴含
+
+发布流水线是「绿不携带信息」最纯的形式：下面每一种失效，**流水线都照样报成功**。
+
+| # | 检查 | 它单独拦住的失效 |
+|---|---|---|
+| 1 | 产物存在、非空、可执行 | 打包步骤静默什么都没做；`\|\| true` 吞掉失败；`-o` 写去了别处 |
+| 2 | 跑得起来，且 `dawnc <VERSION> (native)` 与**本棵树的** `version.dawn` 一致（`release.yml` 另传 `--expect ${GITHUB_REF_NAME#v}`，把 tag 也钉进来） | 起不来的二进制（缺共享库、架构不对）与没人试过的二进制在「文件存在」下一模一样；上一次发布留下的产物也是一个普通文件 |
+| 3 | 从**只有一个 `.dawn` 文件的裸目录**编译并运行一个程序，输出对**写死的期望** | 检查 1 与 2 一个会 echo 版本号的 shell 脚本全能满足。这一道才是「它是个编译器」 |
+| 4 | 它对编译器自己的源码发射出的 C，与**建它的那套工具链**逐字节相同（`native-fixpoint.sh` 的 A==B 腿） | 发布路径上本来没有任何门禁跑 A==B（`native-fixpoint.sh` 不在 `gates.yml` 里） |
+
+**检查 4 是 A-vs-B，因此对「两边同样地变」天生失明**——驱动自己的源码改一行，jar 发射的 C
+和二进制发射的 C 会同样地变。接住这一类的是**单侧不变式**：检查 2 和 3 的 oracle 写在
+脚本里，不从另一侧读。§22.3 的 M4 就是这条的实证。
+
+还有一行不是检查、却是上面全部的前提：**先删后建**（`rm -f "$OUT" "$OUT.sha256"`，在
+`cc` 之前）。发布的必须是这一次产出的东西。M1b 量了它的分量。
+
+### 22.3 红演示与阴性对照 `[实测]`（2026-08-04）
+
+> 全仓规矩：**一个从没被证明能变红的绿，不携带信息**。
+
+| 变异体 | 改哪儿 | 谁红 | 谁不红（判别力） |
+|---|---|---|---|
+| **M1** 产物根本没生成 | `cc … -o "$OUT"` → `-o "$OUT.tmp"`（一处像样的打包笔误） | 检查 1 | —— |
+| **M1b** 同一个笔误 + **去掉「先删后建」那一行** | 同上，再删 `rm -f "$OUT" …` | **谁都不红：四道全绿、`exit=0`** | 这一屏证明的是**那行 `rm -f` 才是承重墙**，不是四道检查 |
+| **M2** 产物在、也答版本，但不是编译器 | `cc` 之后把 `$OUT` 覆盖成 `#!/bin/sh; echo "dawnc 0.49.0 (native)"` | 检查 3、检查 4 | **检查 1、2 全绿**——「文件存在」和「答得出版本」分不出它 |
+| **M3** 产物是陈旧的 | 脚本加一句「`$OUT` 已存在就复用」（一个像样的缓存优化）；盘上是 0.49.0 的构建，树 bump 成 0.49.1 | 检查 2 | **检查 3 绿**——陈旧的二进制仍是个能用的编译器，只有版本断言分得出 |
+| **M4** 驱动源码改了：**两侧同样地变** | `nmain.cmd_run` 开头加 `println("dawnc: running")` | 检查 3 | **检查 4（A==B）绿**——跨侧比较对这一类失明，这正是单侧不变式的立论 |
+
+```
+######## M1 (cc -o writes a name nothing publishes) -- expect RED
+building dawnc-linux-x86_64 (0.49.0) from selfhost/src/nmain.dawn...
+FAIL: /tmp/.../art/dawnc-linux-x86_64 was not produced (or is empty / not executable)
+==> exit=1
+
+######## M1b (same typo, but without the 'delete first' line) -- expect GREEN, i.e. it would ship yesterday's binary
+building dawnc-linux-x86_64 (0.49.0) from selfhost/src/nmain.dawn...
+OK   the artifact exists (3654600 bytes)
+OK   it runs and reports 0.49.0
+OK   it built and ran a program from a bare directory (embedded std + runtime)
+OK   it emits the same C as the toolchain that built it (A == B)
+77124e48600d575e4a84bcb30866e9f596aab5973310bc61dca90652a68235f4  dawnc-linux-x86_64
+OK: dawnc-linux-x86_64 is a 0.49.0 compiler, built and checked here
+==> exit=0            ← 这一次什么都没编译。四道检查全在夸奖上一次的产物。
+
+######## M2 (the published file is not the binary: a stub that answers 'version') -- expect checks 1+2 GREEN, 3+4 RED
+building dawnc-linux-x86_64 (0.49.0) from selfhost/src/nmain.dawn...
+OK   the artifact exists (39 bytes)
+OK   it runs and reports 0.49.0
+FAIL: the artifact ran the smoke program wrong
+1,2c1
+< 1,2,3
+< RELEASE
+---
+> dawnc 0.49.0 (native)
+FAIL: the artifact emits different C than the toolchain that built it
+diff: /tmp/tmp.IjV42Fy2ZB/self.c: No such file or directory
+FAIL: the native release artifact did not check out
+==> exit=1
+
+######## M3 (a 'reuse the existing artifact' cache; the file on disk is a 0.49.0 build, the tree is 0.49.1) -- expect RED
+reusing dawnc-linux-x86_64
+OK   the artifact exists (3654600 bytes)
+FAIL: the artifact says 'dawnc 0.49.0 (native)', this tree says 'dawnc 0.49.1 (native)'
+OK   it built and ran a program from a bare directory (embedded std + runtime)
+FAIL: the artifact emits different C than the toolchain that built it
+diff: /tmp/tmp.uj5KQV8nge/nmain.c: No such file or directory
+FAIL: the native release artifact did not check out
+==> exit=1
+
+######## M4 (the driver itself changed: both the jar's C and the binary carry it) -- expect check 4 GREEN, check 3 RED
+building dawnc-linux-x86_64 (0.49.0) from selfhost/src/nmain.dawn...
+OK   the artifact exists (3654672 bytes)
+OK   it runs and reports 0.49.0
+FAIL: the artifact ran the smoke program wrong
+0a1
+> dawnc: running
+OK   it emits the same C as the toolchain that built it (A == B)
+FAIL: the native release artifact did not check out
+==> exit=1
+```
+
+阴性对照 `[实测]`：
+
+```
+######## 未变异的树 + 未变异的脚本 -- expect GREEN
+OK   the artifact exists (3654600 bytes)
+OK   it runs and reports 0.49.0
+OK   it built and ran a program from a bare directory (embedded std + runtime)
+OK   it emits the same C as the toolchain that built it (A == B)
+77124e48600d575e4a84bcb30866e9f596aab5973310bc61dca90652a68235f4  dawnc-linux-x86_64
+==> exit=0
+
+######## M3 的阴性对照：同一棵 0.49.1 的树、盘上同一个陈旧文件、未变异的脚本
+building dawnc-linux-x86_64 (0.49.1) from selfhost/src/nmain.dawn...
+OK   it runs and reports 0.49.1
+5d8b81151a51ba8a81e1704ec6ac366155255e2e90355698ce0b1f402509db12  dawnc-linux-x86_64
+==> exit=0            ← 版本一变，产物跟着变（sha 也变了）
+
+######## --expect 与树不一致（一个不指向这个 VERSION 的 tag）
+error: --expect 0.50.0 but selfhost/src/version.dawn says 0.49.1
+==> exit=1            ← 在编译任何东西之前就拒绝
+```
+
+**M1b 是这一节的立论**，也是全仓那条规律在发布产物上的形态：四行 `OK` 和一个 `exit=0`，
+而这次运行**一个字节都没有编译**。检查全对，被检查的东西是上一次留下的。
+
+顺带一件量出来的事：同一棵树连续三次构建，产物 sha256 恒为 `77124e48…`——`cc` 在这台机器上
+是**可复现的**。这不是承诺（没有门禁盯着它），只是记下来。
+
+### 22.4 这一刀挖出来的：`set -o pipefail` 会把汇总吃掉
+
+`diff a b | head -20` 在 `set -euo pipefail` 下是**致命的**：`diff` 回 1，`head` 回 0，
+管道取 `diff` 的 1，`set -e` 当场杀掉脚本——于是那句「FAIL: 产物没通过检查」的汇总行
+**永远不会打印**，而退出码碰巧还是 1，所以看起来一切正常。是 M2 的第一次运行把它照出来的
+（输出停在 diff 那几行，第 4 道检查和汇总行都不见了）。修法是两处 `| head -20 || true`。
+
+写下来是因为它是这一刀的教训的一个小号版本：**变异体不只证明门禁能红，它还顺手证明门禁
+红得对不对。**
+
+### 22.5 这套东西不证明什么
+
+1. **它不证明产物在别的机器上能跑。** 静态链接把 glibc 版本这一类拿掉了，但没有任何
+   门禁在第二台机器上执行过这个二进制 `[推论]`。真要这句话，得有一个 runner 矩阵。
+2. **它不覆盖 `linux-x86_64` 以外的任何目标**（裁决 A），也不覆盖没有 `cc` 的机器上的
+   `run`/`build`。
+3. **它不证明 release 页面上真的挂上了两个文件。** `gh release create` 逐个点名文件
+   （不用 glob，所以「glob 没匹配到」这条路被堵死了），文件缺失会让那一步失败——但
+   「上传成功」这件事只有 tag 那次真跑才知道，本机复现不了 `[推论]`。
+4. **检查 4 不是防陈旧的主力。** 一个从别的树来的二进制，只要它的 codegen 与今天一致，
+   A==B 照样绿；防陈旧靠的是「先删后建」加检查 2 的版本断言（M1b 与 M3 分别是这两条的
+   证明）。
+5. **它不说产物是可复现构建。** §22.3 末尾那个恒定的 sha 是一次观察，不是被断言的性质。

@@ -6,6 +6,12 @@ name: release
 # (docs/bootstrap.md, 种子推进协议). The Kotlin implementation is archived at
 # the kotlin-final tag; releases before v0.8.0 shipped its dawn.jar too.
 #
+# Since K-B7 it also publishes dawnc-linux-x86_64, the native compiler as a
+# single static executable. That one is additive and nothing bootstraps from
+# it: its .sha256 is download integrity, not a seed checksum — the only file
+# scripts/seedjar.sh ever verifies against scripts/seed-checksums.txt is the
+# jar.
+#
 # Releasing is: bump VERSION in selfhost/src/version.dawn, commit, then
 #   git tag v0.9.0 && git push --tags
 on:
@@ -68,6 +74,18 @@ jobs:
             *) echo "::error::--version said '$OUT' (bump selfhost/src/version.dawn)"; exit 1 ;;
           esac
 
+      # K-B7: a second artifact, for consumers who would rather not install a
+      # JVM. It is *additive* — the bootstrap seed is still the jar
+      # (scripts/seed-release.txt, seedjar.sh), nothing reads this binary, and
+      # scripts/seed-checksums.txt is untouched. Built from the jar published
+      # above, so it is that jar's own output; scripts/release-native.sh is the
+      # same script gates.yml runs on every push, and its header says what each
+      # of its four checks catches that the previous one does not.
+      - name: the native binary
+        run: |
+          ./scripts/release-native.sh -o dawnc-linux-x86_64 \
+            --jar dawn-selfhost.jar --expect "${GITHUB_REF_NAME#v}"
+
       # Every release jar is the next repo's bootstrap seed, and seedjar.sh
       # verifies each seed against scripts/seed-checksums.txt before using it.
       # Publishing the digest next to the jar is what lets the *next* bump fill
@@ -80,6 +98,12 @@ jobs:
           echo "::notice::$(cut -d' ' -f1 dawn-selfhost.jar.sha256)  $GITHUB_REF_NAME"
 
       # gh is preinstalled on runners — no third-party action in the release path.
+      #
+      # Every asset is named, never globbed: a glob that matches nothing
+      # publishes a release with one file missing and says nothing about it,
+      # while a named file that is absent fails the step. The binary's own
+      # existence check (release-native.sh) is the first line; this is the
+      # second.
       - name: publish
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -87,5 +111,7 @@ jobs:
           gh release create "$GITHUB_REF_NAME" \
             dawn-selfhost.jar \
             dawn-selfhost.jar.sha256 \
+            dawnc-linux-x86_64 \
+            dawnc-linux-x86_64.sha256 \
             --title "$GITHUB_REF_NAME" \
             --generate-notes

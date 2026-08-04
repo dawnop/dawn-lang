@@ -290,15 +290,27 @@ jobs:
       - name: formatter vs N-1
         run: ./scripts/selfhost-fmt-diff.sh
 
+      # K-B7: the executable a release publishes, built and checked by the
+      # same script release.yml runs. A step that only runs on tags is the
+      # least-executed code in the repo; this is what keeps it honest, and it
+      # costs +6.4s measured (99.5s -> 105.9s for these two steps) because the
+      # differential below reuses the binary instead of building a second one.
+      - name: the native release artifact
+        run: ./scripts/release-native.sh -o dawnc-linux-x86_64
+
       # The same transcripts on the other backend (K-B2, extended by K-B3).
       # Every step above runs ./bin/dawn, which is the JVM toolchain and only
       # that — the differentials read as "the CLI is checked" and checked one
-      # backend. This builds the native driver and holds fmt/doc/add to the
-      # JVM's bytes, re-runs the formatter *and language server* differentials
-      # with the native binary as the toolchain under test, and checks that
-      # both servers answer a client that has not closed the connection.
+      # backend. This holds fmt/doc/add to the JVM's bytes, re-runs the
+      # formatter *and language server* differentials with the native binary as
+      # the toolchain under test, and checks that both servers answer a client
+      # that has not closed the connection.
+      #
+      # DAWNC_BIN points it at the artifact above rather than letting it build
+      # its own: the binary these eight legs exercise is then literally the one
+      # a tag would publish, not one built beside it with the same recipe.
       - name: driver subcommands on the native backend
-        run: ./scripts/native-cli-diff.sh
+        run: DAWNC_BIN=dawnc-linux-x86_64 ./scripts/native-cli-diff.sh
 
       - name: lsp transcript vs N-1
         run: ./scripts/selfhost-lsp-diff.sh

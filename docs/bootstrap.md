@@ -49,8 +49,12 @@ v0.6.0–v0.8.0 的 release jar 永久保存；`kotlin-final` tag 保有 Kotlin 
 ## 种子推进协议（2026-07-23 立法，M8 阶段一）
 
 1. **种子形态**：v0.8.0 双发 `dawn.jar`（最后一个 Kotlin jar）与
-   **`dawn-selfhost.jar`**（首个 selfhost 种子）；自 v0.9.0 起只发
+   **`dawn-selfhost.jar`**（首个 selfhost 种子）；自 v0.9.0 起**种子只有**
    `dawn-selfhost.jar`。v0.6.0 起的历史 release 永久保留，构成可重放的信任链。
+   自 K-B7（`docs/native-driver-plan.md` §22）起 release 页面上还挂着
+   `dawnc-linux-x86_64`（native 编译器的静态可执行文件）与它的 `.sha256`，
+   但**那不是种子**：`scripts/seedjar.sh` 只下载、只校验 jar，
+   `scripts/seed-checksums.txt` 里也只有 jar 的摘要。
 2. **祝圣仪式（机器强制）**：`release.yml` 在 tag 上重建整条链
    种子→A→B→C（B = HEAD 编 HEAD，即要上传的那份字节），验证 `cmp B C` 闭包
    与版本一致——任一红则 release 不出。push CI（ci.yml）的全金样绿是前置。

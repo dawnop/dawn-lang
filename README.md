@@ -71,6 +71,13 @@ pub fn main() -> Unit !io =
 ./bin/dawn lsp                                # LSP 服务器（stdio，编辑器用）
 ```
 
+不想装 JVM 的话，每个 release 还挂着 **`dawnc-linux-x86_64`**：native 后端编出来的
+单文件静态可执行程序，std 与运行时都嵌在里面，不需要这个仓库。
+`check`/`emitc`/`fmt`/`doc`/`add`/`lsp`/`test` 直接可用；`run`/`build` 会调用机器上的
+`cc`（可用 `$CC` 覆盖）。它**拒绝 `use java`**——那是这个后端的答案，不是缺陷。
+只有 linux-x86_64 一个目标，理由与缺什么见
+[docs/native-driver-plan.md](docs/native-driver-plan.md) §22.1。
+
 ## 编辑器支持
 
 内置 LSP 服务器（`dawn lsp`）：实时诊断、悬停（类型/签名）、跳转定义、文档大纲。
