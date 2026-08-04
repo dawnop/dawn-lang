@@ -98,6 +98,9 @@
 发布：改 `selfhost/src/version.dawn` 的 `VERSION` → 提交 → `git tag v0.9.0 && git push --tags`，
 发布后 bump `scripts/seed-release.txt`（种子推进协议见 docs/bootstrap.md）。
 `release.yml` 会校验 tag 与 version 一致、跑全量测试、把 `dawn.jar` 传上 Release。
+`doc-check.py` 会把文档里声称「当前工具链是几」的那几处也一起校到 `version.dawn`，
+所以改完 `VERSION` 那一趟 CI 会点名剩下没跟上的行——README 那句曾经落后 38 个小版本，
+靠人读发现的。
 
 ## 七、命名族：std 的准入判据
 

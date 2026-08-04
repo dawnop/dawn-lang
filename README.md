@@ -84,7 +84,7 @@ pub fn main() -> Unit !io =
 编译器前端做了完整的错误恢复——文件残缺时其余部分照常分析，一次报出全部错误。
 VS Code 扩展与 Neovim / Helix 配置见 [editors/](editors/)。
 
-状态：**M0–M8 已实现**，当前工具链 0.11.0。M5–M8 的短版本：trait/impl/derive
+状态：**M0–M8 已实现**，当前工具链 0.49.0。M5–M8 的短版本：trait/impl/derive
 （[docs/trait.md](docs/trait.md)）、`Bytes` 与流式响应、`Cursor` 与字符串性能
 （[docs/seq6-research.md](docs/seq6-research.md)）、源码包与 Maven 依赖
 （[docs/package-design.md](docs/package-design.md)）、以及 **M8：淘汰 Kotlin 实现，
