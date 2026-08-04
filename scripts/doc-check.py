@@ -127,8 +127,16 @@ DOCS = sorted(
 # only thing the marker check reads: delete it and a check that exists only in
 # the file it checks stops existing. With the registry, deleting the marker is
 # a failure.
+#
+# Scope, decided rather than drifted into: the outward-facing layer only --
+# the README and the website's front page. docs/ is 61 documents of design
+# notes, plans and a specification whose reader is the author; translating
+# them would produce 61 more documents to keep level, and a half-translated
+# corpus is worse than an honestly monolingual one. Both faces of the site say
+# so in their own closing paragraph.
 TRANSLATIONS = {
     "README.zh-CN.md": "README.md",
+    "site/pages/home.zh.md": "site/pages/home.md",
 }
 
 VERSION_SRC = ROOT / "selfhost" / "src" / "version.dawn"
@@ -526,7 +534,7 @@ def translation_digest(text: str) -> str:
     return hashlib.sha256(body.encode("utf-8")).hexdigest()[:16]
 
 
-def check_translations(texts: dict) -> tuple[list[str], int]:
+def check_translations() -> tuple[list[str], int]:
     """Every translation carries the digest of the original it was made from.
 
     The failure this exists for is not mistranslation, it is drift: a document
@@ -539,7 +547,12 @@ def check_translations(texts: dict) -> tuple[list[str], int]:
     be wrong in a way that is invisible to every reader of the original.
 
     So the original's digest is written into the translation, and moving the
-    original turns this red until a human re-registers it."""
+    original turns this red until a human re-registers it.
+
+    Files are read here rather than taken from the DOCS index: a translated
+    document is not necessarily a document under docs/ -- the front page's copy
+    lives in site/pages/ -- and a check that could only see one directory would
+    have to be extended every time the scope moved."""
     bad: list[str] = []
     seen = 0
     for rel_tr, rel_src in sorted(TRANSLATIONS.items()):
@@ -551,10 +564,12 @@ def check_translations(texts: dict) -> tuple[list[str], int]:
         if not src.exists():
             bad.append(f"{rel_tr}: translates {rel_src}, which does not exist")
             continue
-        marks = [m for m in map(TRANSLATION_MARKER.match, texts[tr].split("\n")) if m]
+        tr_text = tr.read_text(encoding="utf-8")
+        src_text = src.read_text(encoding="utf-8")
+        marks = [m for m in map(TRANSLATION_MARKER.match, tr_text.split("\n")) if m]
         if not marks:
             bad.append(f"{rel_tr}: no `<!-- doc-check: translation-of {rel_src} @ "
-                       f"{translation_digest(texts[src])} -->` marker "
+                       f"{translation_digest(src_text)} -->` marker "
                        f"(it is what says which revision of {rel_src} this was "
                        f"translated from)")
             continue
@@ -568,7 +583,7 @@ def check_translations(texts: dict) -> tuple[list[str], int]:
             bad.append(f"{rel_tr}: marker says it translates {named}, but "
                        f"doc-check.py registers it against {rel_src}")
             continue
-        want = translation_digest(texts[src])
+        want = translation_digest(src_text)
         if got != want:
             bad.append(
                 f"{rel_tr}: registered against {rel_src} @ {got}, but {rel_src} "
@@ -652,7 +667,7 @@ def main() -> None:
     problems += bad
     bad, pages_seen = check_site_pages()
     problems += bad
-    bad, transl_seen = check_translations(texts)
+    bad, transl_seen = check_translations()
     problems += bad
 
     with tempfile.TemporaryDirectory() as tmp:

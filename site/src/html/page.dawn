@@ -1,19 +1,66 @@
 # Page shells: <head>, top navigation, footer. Triple-quoted templates keep
 # the attribute quotes unescaped; $-interpolation fills the holes.
+#
+# Every shell takes its language explicitly. There is no defaulted overload on
+# purpose: the site's default language is English and its long documents are
+# Chinese, so a wrapper that quietly picked one would be wrong on most of the
+# pages whichever one it picked.
 
 use std/str
 use html/render.{TocEntry}
 use html/escape.{escape_html}
 
+## Which language a page is written in. English is the site's default and
+## lives at `/`; the Chinese front page lives at `/zh/`. The long-form
+## documents (tutorial, spec, design, stdlib) are Chinese and are not
+## translated -- site/pages/home.md's closing section says so on the page
+## itself, rather than leaving a reader to discover it by clicking.
+pub type Lang =
+  | En
+  | Zh
+derive Show
+
+## The `lang` attribute for <html>.
+pub fn lang_code(lang: Lang) -> String =
+  match lang {
+    En -> "en"
+    Zh -> "zh-CN"
+  }
+
+fn other(lang: Lang) -> Lang =
+  match lang {
+    En -> Zh
+    Zh -> En
+  }
+
+## What the link to the other language says -- written in the language it
+## leads to, which is the only way it is readable to the person who needs it.
+fn lang_switch_label(lang: Lang) -> String =
+  match lang {
+    En -> "中文"
+    Zh -> "English"
+  }
+
 ## site navigation: (key, label, path-from-root)
-fn nav_items() -> List[(String, String, String)] = [
-  ("tutorial", "教程", "tutorial/index.html"),
-  ("spec", "规范", "spec.html"),
-  ("examples", "示例", "examples/index.html"),
-  ("stdlib", "标准库", "stdlib.html"),
-  ("design", "设计", "design.html"),
-  ("playground", "Playground", "playground.html"),
-]
+fn nav_items(lang: Lang) -> List[(String, String, String)] =
+  match lang {
+    En -> [
+      ("tutorial", "Tutorial", "tutorial/index.html"),
+      ("spec", "Spec", "spec.html"),
+      ("examples", "Examples", "examples/index.html"),
+      ("stdlib", "Stdlib", "stdlib.html"),
+      ("design", "Design", "design.html"),
+      ("playground", "Playground", "playground.html"),
+    ]
+    Zh -> [
+      ("tutorial", "教程", "tutorial/index.html"),
+      ("spec", "规范", "spec.html"),
+      ("examples", "示例", "examples/index.html"),
+      ("stdlib", "标准库", "stdlib.html"),
+      ("design", "设计", "design.html"),
+      ("playground", "Playground", "playground.html"),
+    ]
+  }
 
 fn nav_link(root: String, active: String, item: (String, String, String)) -> String = {
   let (key, label, path) = item
@@ -21,16 +68,45 @@ fn nav_link(root: String, active: String, item: (String, String, String)) -> Str
   """<a$cls href="$root/$path">$label</a>"""
 }
 
-fn nav_html(root: String, active: String) -> String =
-  join(map(nav_items(), it => nav_link(root, active, it)), "\n")
+fn nav_html(lang: Lang, root: String, active: String) -> String =
+  join(map(nav_items(lang), it => nav_link(root, active, it)), "\n")
 
-## The full page around an already-rendered <main>/<div> body.
-pub fn shell(title: String, root: String, active: String, body: String) -> String =
-  shell_ext(title, root, active, "", body)
+## The alternate-language <link>s, emitted only on the pages that really have
+## a twin. Absolute, because that is what hreflang wants; the pair is the same
+## on both members of it, with x-default pointing at the English original.
+fn alternates(alt: String) -> String =
+  if alt == "" {
+    ""
+  } else {
+    `<link rel="alternate" hreflang="en" href="https://dawn-lang.dawnop.com/">` ++ "\n" ++
+      `<link rel="alternate" hreflang="zh-CN" href="https://dawn-lang.dawnop.com/zh/">` ++ "\n" ++
+      `<link rel="alternate" hreflang="x-default" href="https://dawn-lang.dawnop.com/">`
+  }
+
+fn lang_switch(lang: Lang, alt: String) -> String =
+  if alt == "" {
+    ""
+  } else {
+    """<a class="lang" href="$alt" hreflang="${lang_code(other(lang))}">${lang_switch_label(lang)}</a>"""
+  }
+
+## The full page around an already-rendered <main>/<div> body. `alt` is the
+## href of this same page in the other language, or "" when there is none.
+pub fn shell(
+  lang: Lang,
+  alt: String,
+  title: String,
+  root: String,
+  active: String,
+  body: String,
+) -> String =
+  shell_ext(lang, alt, title, root, active, "", body)
 
 ## Like [shell], but with extra markup injected into <head> (e.g. the Playground
 ## page's stylesheet + module script).
 pub fn shell_ext(
+  lang: Lang,
+  alt: String,
   title: String,
   root: String,
   active: String,
@@ -38,10 +114,13 @@ pub fn shell_ext(
   body: String,
 ) -> String = {
   let esc_title = escape_html(title)
-  let nav = nav_html(root, active)
+  let nav = nav_html(lang, root, active)
+  let code = lang_code(lang)
+  let alts = alternates(alt)
+  let switch = lang_switch(lang, alt)
   """
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="$code">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -51,6 +130,7 @@ pub fn shell_ext(
 <meta property="og:title" content="$esc_title">
 <meta property="og:image" content="https://dawn-lang.dawnop.com/assets/logo-512.png">
 <link rel="stylesheet" href="$root/assets/style.css">
+$alts
 $head_extra
 </head>
 <body>
@@ -58,6 +138,7 @@ $head_extra
 <nav>
 <a class="brand" href="$root/index.html"><img class="brand-logo" src="$root/assets/apple-touch-icon.png" alt="">Dawn</a>
 $nav
+$switch
 <a class="gh" href="https://github.com/dawnop/dawn-lang">GitHub</a>
 </nav>
 </header>
@@ -70,23 +151,30 @@ $body
 """
 }
 
-## A plain content page.
-pub fn page(title: String, root: String, active: String, inner: String) -> String =
-  shell(title, root, active, `<main class="content">` ++ "\n" ++ inner ++ "\n</main>")
+## A plain content page. These have no twin in the other language: the
+## documents they render are Chinese and are not translated.
+pub fn page(lang: Lang, title: String, root: String, active: String, inner: String) -> String =
+  shell(lang, "", title, root, active, `<main class="content">` ++ "\n" ++ inner ++ "\n</main>")
 
 ## A page with the sticky TOC sidebar (the spec and design pages).
 pub fn page_with_toc(
+  lang: Lang,
   title: String,
   root: String,
   active: String,
   toc: List[TocEntry],
   article: String,
 ) -> String = {
-  let side = "<aside class=\"toc\">\n<nav>\n<div class=\"toc-title\">目录</div>\n" ++
+  let heading =
+    match lang {
+      En -> "Contents"
+      Zh -> "目录"
+    }
+  let side = "<aside class=\"toc\">\n<nav>\n<div class=\"toc-title\">" ++ heading ++ "</div>\n" ++
     toc_list(toc) ++ "\n</nav>\n</aside>"
   let body = `<div class="with-toc">` ++ "\n" ++ side ++ "\n" ++
     `<article class="doc">` ++ "\n" ++ article ++ "\n</article>\n</div>"
-  shell(title, root, active, body)
+  shell(lang, "", title, root, active, body)
 }
 
 ## Nested <ul> for h2/h3 toc entries.
@@ -117,17 +205,38 @@ pub fn toc_list(entries: List[TocEntry]) -> String = {
 }
 
 test "nav marks the active page and roots the links" {
-  let n = nav_html("..", "spec")
+  let n = nav_html(Zh, "..", "spec")
   assert str.contains(n, `<a class="active" href="../spec.html">规范</a>`)
   assert str.contains(n, `<a href="../tutorial/index.html">教程</a>`)
 }
 
+test "the nav is labelled in the page's own language" {
+  assert str.contains(nav_html(En, ".", ""), `<a href="./tutorial/index.html">Tutorial</a>`)
+  assert str.contains(nav_html(Zh, ".", ""), `<a href="./tutorial/index.html">教程</a>`)
+}
+
 test "shell carries title, css root, body" {
-  let p = page("测试页 — Dawn", ".", "stdlib", "<p>x</p>")
+  let p = page(Zh, "测试页 — Dawn", ".", "stdlib", "<p>x</p>")
   assert str.contains(p, "<title>测试页 — Dawn</title>")
   assert str.contains(p, `href="./assets/style.css"`)
   assert str.contains(p, `<main class="content">`)
   assert str.contains(p, "Built by a generator written in Dawn")
+}
+
+test "only a page with a twin advertises one" {
+  # the English front page: lang=en, a switch to the Chinese one, hreflang pair
+  let home = shell(En, "./zh/index.html", "Dawn", ".", "", "<p>x</p>")
+  assert str.contains(home, `<html lang="en">`)
+  assert str.contains(home, `<a class="lang" href="./zh/index.html" hreflang="zh-CN">中文</a>`)
+  assert str.contains(home, `hreflang="x-default" href="https://dawn-lang.dawnop.com/"`)
+  # the Chinese one points back, and says so in the language it leads to
+  let zh = shell(Zh, "../index.html", "Dawn", "..", "", "<p>x</p>")
+  assert str.contains(zh, `<html lang="zh-CN">`)
+  assert str.contains(zh, `<a class="lang" href="../index.html" hreflang="en">English</a>`)
+  # a document page has no twin: no switch, no alternates
+  let doc = page(Zh, "规范 — Dawn", ".", "spec", "<p>x</p>")
+  assert not str.contains(doc, `class="lang"`)
+  assert not str.contains(doc, "hreflang")
 }
 
 test "toc nests h3 under its h2" {

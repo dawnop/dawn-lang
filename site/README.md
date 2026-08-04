@@ -19,11 +19,12 @@ Playground——它带一份编辑器 bundle，并需要后端的 `/api/run`、`
 site/
 ├── src/            # 生成器（纯 Dawn，dawn run site 直接跑）
 │   ├── main.dawn   # 组装：读 docs/ + examples/ → 写 dist/
+│   ├── gen/copy.dawn  # 首页文案（`## key` 分节的 Markdown），不再是 Dawn 里的字符串字面量
 │   ├── md/         # Markdown 子集解析器
 │   ├── hl/         # Dawn 语法高亮 tokenizer（构建期）
 │   └── html/       # 转义、模板壳、TOC、slug
 ├── assets/         # style.css 等文本资产（原样拷入 dist/assets/）
-├── pages/          # 站点专属内容（index.md；首页样例与特性卡的 .dawn + 实测输出 .out）
+├── pages/          # 站点专属内容（home.md 正本 / home.zh.md 译本；首页样例与特性卡的 .dawn + 实测输出 .out）
 ├── play-ui/        # Playground 编辑器（TS + CodeMirror 6，npm 构建）
 ├── sample/         # 手写验收样张 —— 渲染以此为准绳（验收样例先行）
 └── dist/           # 产物（gitignore）
@@ -31,11 +32,28 @@ site/
 
 内容单一来源 = 仓库根的 `docs/*.md` 与 `examples/**`，**不复制不搬家**。
 
+## 语言：英文是默认，中文是译本
+
+**站点默认语言是英文**：`/` 出英文，中文首页在 `/zh/`，两页互挂 `hreflang`（`x-default`
+指英文）、导航条上有互跳入口。除首页外的长文档（教程 / 规范 / 设计 / 标准库）**只有中文**，
+不翻译——两版首页的收尾段都把这件事写在页面上，不留给读者点进去才发现。
+
+方向是刻意反过来的：**派生的那一份才会腐烂**，而对外那一层的读者大多不读中文。让英文当
+派生物，等于把腐烂藏在最多人看、最没人校对的那一面。反过来腐烂落在中文上，而中文的读者
+是作者本人。
+
+配套是机器强制的：首页文案从 `site/src/gen/pages.dawn` 的字符串字面量搬进了
+`site/pages/home.md`（正本）与 `home.zh.md`（译本），译本头上带
+`<!-- doc-check: translation-of site/pages/home.md @ <digest> -->`；英文一改、中文没跟，
+`scripts/doc-check.py` 就红。摘要怎么算（重排不算改、代码块逐行算改、版本号不算）
+写在那个脚本的 `translation_digest` 里。**改文案先改英文。**
+
 ## 信息架构（URL 映射）
 
 | 路径 | 内容 | 来源 |
 |------|------|------|
-| `/` | 首页：定位一句话 + 高亮样例 + 特性栏 + 各区入口 | `site/pages/index.md` + `hero/feat-*.dawn` 与同名 `.out` |
+| `/` | **首页（英文，正本）**：定位一句话 + 高亮样例 + 特性栏 + 各区入口 | `site/pages/home.md` + `hero/feat-*.dawn` 与同名 `.out` |
+| `/zh/index.html` | 首页（中文译本）：内容同上 | `site/pages/home.zh.md` + 同一批 `.dawn`/`.out` |
 | `/tutorial/{01..17}.html` | 教程 17 章，每章一页，带上一章 / 下一章 | `docs/tutorial.md` 按 `##` 切分 |
 | `/tutorial/index.html` | 教程目录页 | 同上（章标题清单） |
 | `/spec.html` | 语言规范单页 + 侧栏 TOC | `docs/spec.md` |

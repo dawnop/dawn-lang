@@ -1,0 +1,103 @@
+# Front-page copy, read out of a Markdown file instead of out of this program.
+#
+# The front page exists in two languages now (English at `/`, Chinese at
+# `/zh/`), and the copy used to be string literals in gen/pages.dawn with raw
+# HTML spliced into them. Two languages of prose in that shape is where a
+# translation stops matching without anybody noticing: nothing reads the pair,
+# so nothing can say they have parted company. As content files they get the
+# treatment every other translated document in this repository gets --
+# `home.zh.md` registers a digest of `home.md`, and scripts/doc-check.py is
+# what says so.
+#
+# The format is deliberately the smallest thing that works: `## key` starts a
+# section, everything above the first one is prose about the file. Lookup is
+# linear over a dozen sections, so there is no index to keep.
+#
+# Missing sections are fatal rather than empty. A front page that renders with
+# a blank lede is the failure this file's whole shape exists to avoid: it looks
+# like a page.
+
+use std/str
+use md/ast.{Block, Heading, Para}
+use md/parser.{parse}
+use html/render.{inline_run, inline_text, render_doc}
+use gen/common.{must_read}
+
+pub type Copy = { path: String, sections: List[(String, List[Block])] }
+
+## Read a copy file and split it on its `## key` headings.
+pub fn load_copy(path: String) -> Copy !io = {
+  let blocks =
+    match parse(must_read(path)) {
+      Ok(bs) -> bs
+      Err(e) -> panic("$path: $e")
+    }
+  var out: List[(String, List[Block])] = []
+  var key = ""
+  var cur: List[Block] = []
+  for b in blocks {
+    var is_key = false
+    match b {
+      Heading(lvl, items) -> {
+        if lvl == 2 {
+          is_key = true
+          if key != "" {
+            out = out ++ [(key, cur)]
+          }
+          key = str.trim(inline_text(items))
+          cur = []
+        }
+      }
+      _ -> {
+        is_key = false
+      }
+    }
+    if not is_key && key != "" {
+      cur = cur ++ [b]
+    }
+  }
+  if key != "" {
+    out = out ++ [(key, cur)]
+  }
+  Copy { path: path, sections: out }
+}
+
+fn section(c: Copy, key: String) -> List[Block] = {
+  var found: List[Block] = []
+  var ok = false
+  for e in c.sections {
+    let (k, bs) = e
+    if k == key {
+      found = bs
+      ok = true
+    }
+  }
+  if not ok {
+    panic("${c.path}: no `## $key` section — the front page needs one")
+  }
+  found
+}
+
+## A one-paragraph section, as inline HTML with no `<p>` around it: headline
+## copy that the template wraps in its own element.
+pub fn line(c: Copy, key: String, map_url: fn(String) -> String) -> String =
+  match section(c, key) {
+    [Para(items)] -> inline_run(items, map_url)
+    _ -> panic("${c.path}: `## $key` must be exactly one paragraph")
+  }
+
+## A section as block HTML: prose that keeps its own `<p>`, lists and links.
+pub fn body(c: Copy, key: String, map_url: fn(String) -> String) -> String =
+  render_doc(section(c, key), map_url).html
+
+fn keep_url(u: String) -> String = u
+
+test "sections split on ## and prose above the first one is dropped" {
+  let c = load_copy("site/pages/home.md")
+  assert line(c, "eyebrow", keep_url) == "type · match · effect · !io"
+  assert str.contains(line(c, "cta-primary", keep_url), "tutorial")
+  # inline code in the copy becomes markup, which is why the copy is Markdown
+  assert str.contains(line(c, "feature-effects-body", keep_url), "<code>!io</code>")
+  # a multi-paragraph section keeps its own <p>
+  assert str.contains(body(c, "closing", keep_url), "<p>")
+}
