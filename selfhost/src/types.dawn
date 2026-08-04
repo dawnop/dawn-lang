@@ -1596,6 +1596,21 @@ pub fn builtins() -> Map[String, Sig] = {
     # EOF signal. stdin is a channel like stderr, and for the same reason it
     # cannot be reached through the interop: `System.in` is a static field.
     eff1(bsig("io_read_stdin", [TyInt], ["n"], TyBytes), EIo),
+    # `true` iff at least one byte of standard input can be read right now.
+    #
+    # End of input is **not** readiness: it is reported by the blocking read
+    # above, which stays the only reader. That is the one shape both backends
+    # can implement without a thread -- a "the read will not block" reading
+    # would have to answer `true` at end of input, and the JVM cannot tell
+    # that state from a silent-but-open one (`available()` is 0 for both).
+    # Measured both ways in docs/audit/lsp-robustness-design.md 2.2.1.
+    #
+    # `timeout_ms` is an upper bound and not a lower one: an early `false` is
+    # always allowed, because the only thing a caller may do with `false` is
+    # stop waiting and block. A loop driven by readiness *alone* therefore
+    # spins at end of input; the loop is expected to block when it has nothing
+    # else to do, which is what selfhost/src/lsp.dawn does.
+    eff1(bsig("io_stdin_ready", [TyInt], ["timeout_ms"], TyBool), EIo),
     # Spawn `argv[0]` (found on PATH), wait, and answer its exit status.
     #
     # Both streams go to files rather than back through a pipe, and that is
@@ -1746,7 +1761,7 @@ pub fn intrinsics() -> Map[String, Intr] = {
   }
   let io_in_rt = ["print", "println", "eprint", "eprintln", "read_line", "is_dir", "read_file",
     "write_file", "exit", "exists", "mkdirs", "cwd", "getenv", "read_bytes", "write_bytes",
-    "delete", "rename", "temp_dir", "is_symlink", "read_stdin"]
+    "delete", "rename", "temp_dir", "is_symlink", "read_stdin", "stdin_ready"]
   for op in io_in_rt {
     rt_of = map.insert(rt_of, "io_" ++ op, RtIo)
   }
@@ -2024,7 +2039,7 @@ test "builtin table renders signatures" {
     }
     None -> { assert false }
   }
-  assert map_size2(bs) == 89
+  assert map_size2(bs) == 90
 }
 
 test "the reclaim's failure is a value, under the one name left" {

@@ -7,8 +7,11 @@
 > 原语上。LSP-01 的落地形态与本文原方案相反：不换 JDK（缝 1 之后 `lsp.dawn` 是零 `use java`
 > 的共享前端），而是把手写 decoder 改成校验的。LSP-04 的设计题已于 2026-08-04 用两个探针
 > 答完（`io_stdin_ready(timeout_ms) -> Bool !io`，语义 B），验收实验 `scripts/lsp-liveness.py`
-> 的三条断言已进 CI 并被变异体逐条打红；欠的是 §五落地表的 2c（新 intrinsic 的九个落地点）
-> 与它的前置（C 后端 `io_read_stdin` 从 stdio 换 `read(2)`）。
+> 的三条断言已进 CI 并被变异体逐条打红。**2b 与 2c 已于 2026-08-05 落地**：C 后端两个
+> stdin 读取器都改走 `read(2)`（不再有 stdio 缓冲挡在就绪查询前面），`io_stdin_ready` 进了
+> 原语表并在两个后端上答出同一张真值表。**只剩 2d（debounce 本身）**，它卡在种子代际上——
+> `selfhost/src` 只准用当前种子已支持的特性，所以 `lsp.dawn` 要等 2b/2c 发一个 release
+> 并 bump 种子之后才能调用 `io.stdin_ready`。
 > 台账见 [native-plan-overlap.md](native-plan-overlap.md) §3.7——其「换 JDK」处方已作废。
 
 
@@ -34,6 +37,11 @@
 > **2026-08-04 实测收口**：设计题已经用探针答完，形状定了（语义 B 的 `Bool`），
 > 验收实验也已建出并用变异体打红过——见 §2.2.1 与 §2.2.2。落地还欠一件前置：
 > C 后端的 `io_read_stdin` 得先从 stdio 换成 `read(2)`。本轮不写任何代码。
+>
+> **2026-08-05 落地（2b + 2c）**：前置与原语都进了树。实测两个后端在五种 stdin 状态
+> （管道有数据 / 管道静默 / 管道 EOF / 有数据且 EOF / 常规文件）上**每一格布尔值都相同**；
+> 时延照契约分岔且都在「至多」这一侧——EOF 那格 native 立刻回 `false`、JVM 耗满窗口。
+> 落地点的真实清单与逐点变异体记在 §2.2.1 末（原表 9 条错 1 条、漏 4 处）。
 ## 一、问题
 
 ### 1.1 手写 UTF-8 decoder 不校验（LSP-01）
@@ -237,6 +245,37 @@ debounce 会在数据已经到齐时开跑分析，**debounce 恰好被它打败
 `std/io.dawn` + `stdsrc.dawn`（`gen-stdsrc.py` 重生成）、两个 emitter 的 arm
 （`scripts/intrinsic-parity.py` 会验）、`docs/spec.md` §11。
 
+#### 落地后的实际清单（2026-08-05，逐点用变异体核过）
+
+上面那张表**第 8 条是错的**，还**漏了 4 处**。实际落地是下面这些，右列是「漏掉它会红在
+哪」——逐条打过变异体，没打红的照实记着。
+
+| 落点 | 漏掉它会怎样 |
+|---|---|
+| `types.dawn` `builtins()` 签名 | 名字不存在，`std/io.dawn` 编不过 |
+| `types.dawn` `io_in_rt` 列表（一张表同时管 rt 归属与 std-only） | **停在 stage 2**：`panic: codegen: Core intrinsic without a JVM mapping: io_stdin_ready` |
+| `stdlib.dawn` 「不是语言表面」提示表 | **全绿**。304 个测试一个不红，只是诊断从「`io_stdin_ready` is not a builtin; use std/io, then io.stdin_ready(...)」退化成「undefined function: io_stdin_ready」。本轮唯一一处无门禁的落点 |
+| `interp.dawn` `comptime_rejects()` | interp 的划分测试按名字红（`assert a \|\| r`），不是只靠计数 |
+| `rtclasses.dawn` JVM 字节码 | **2c 单独落地时全绿**：`classfile-verify` 只解析语料里真出现的引用，而那时仓库里没有调用点，于是 0 unknown 通过；只有跑到那个名字的程序才 `NoSuchMethodError`。**2d 之后 `lsp.dawn` 就是那个调用点**，洞随之关上 |
+| `runtime/c/dawn_rt.{c,h}` | 链接期 `undefined reference to 'dawn_io_stdin_ready'` |
+| `rtsrc.dawn`（`gen-rtsrc.py` 重生成） | `cdriver :: the embedded C runtime matches runtime/c on disk` |
+| `std/io.dawn` + `stdsrc.dawn`（`gen-stdsrc.py` 重生成） | `stdlib :: the embedded std matches std/ on disk` |
+| `docs/spec.md` §11 | 无门禁。而且 §11 **没有原语清单**（开篇就写「本节不列清单」），落点是「IO 的表态」那段散文 |
+| ➕ `lower.dawn` 划分测试的计数 | `assert len(map.keys(it)) == 89` 红 |
+| ➕ `types.dawn` 自测的计数 | `assert map_size2(bs) == 89` 红 |
+| ➕ `interp.dawn` 自测的计数 | `assert len(rejects) == 61` 红 |
+| ➕ `scripts/core-golden/` 重录 | Core golden 红。差异全是 `structeq$AdtN` 的 id 整体 +1（NORM 里已备案的噪声）加上 `std.io.core` 多出这个函数 |
+
+**第 8 条（两个 emitter 的 arm）不成立，而且照做会红**：`io_stdin_ready` 由运行时模块
+（`RtIo`）拥有，`emit.dawn` 只按 `Rt → class` 查表、`emitc.dawn` 的 `rt_symbol` 直接拼
+`dawn_ ++ name`，两边都不按名字写 arm。真给它加一条，`intrinsic-parity.py` 会以「有 arm
+却不在 `lower.dawn` 任何名单上」判红。也就是说这个门禁**根本不覆盖这个 intrinsic**——它只
+读 `inline_intrinsics()` 与 `jvm_only_intrinsics()`。
+
+不是落点但绕不开的一件：`selfhost-prev-diff.sh` 的六个 `emit *` 与 `selfhost-run-diff.sh`
+的 `doc --builtins` 都会差（生成符号名里的 ADT id 整体位移），要七条 `Emit-Change`——
+glob 是禁的。
+
 ### 2.2.2 验收：两个实验，先证明它们能红
 
 选错的后果是**服务器空转或挂死**，两者都不会在单元测试里出现——所以在写原语之前
@@ -370,9 +409,9 @@ LSP-04 的验收不在这条线上：`selfhost-lsp-diff.sh` 比的是**输出字
 | 0 | `scripts/selfhost-lsp-diff.sh` 语料加畸形 URI | 记录旧行为 |
 | 1 | `selfhost/src/lsp.dawn`：`uri_to_path`/`path_to_uri` 改 JDK；删 `utf8_decode`/`utf8_bytes`/percent-decode | lsp 内联 test：Windows drive、UNC、非法 UTF-8、`%2F` |
 | 2a ✅ | `scripts/lsp-liveness.py`：挂断 / 存活 / 空转三条断言进仓库，进 `gates.yml` 的 `test` job | **已完成**（2026-08-04）。三条在真 `bin/dawn lsp` 上各被变异体单独打红过，阈值与实测见 §2.2.3 |
-| 2b | `runtime/c/dawn_rt.c`：`io_read_stdin` 从 `fread` 换成 `read(2)`（`io_read_line` 同步） | 前置，否则就绪查询看不见 stdio 缓冲；`rtsrc.dawn` 随 `gen-rtsrc.py` 重生成 |
-| 2c | 新 intrinsic `io_stdin_ready(timeout_ms) -> Bool !io`，9 个落地点（§2.2.1 末） | `scripts/intrinsic-parity.py` + `lower.dawn` 的分组测试 |
-| 2d | `selfhost/src/lsp.dawn`：`read_message` 加 `Idle`；主循环 debounce + generation + **无事可做时阻塞读**那一支 | 「连续 5 次 didChange 只分析 1 次」＋ 2a 的两个实验 |
+| 2b ✅ | `runtime/c/dawn_rt.c`：`io_read_stdin` 从 `fread` 换成 `read(2)`（`io_read_line` 同步） | **已完成**（2026-08-05）。变异体：换回 `fread` 后，6 字节输入读掉 5 字节，就绪查询答 `false`，而第 6 字节确实还在（下一次读拿得到）——正是设计预言的那一格 |
+| 2c ✅ | 新 intrinsic `io_stdin_ready(timeout_ms) -> Bool !io` | **已完成**（2026-08-05）。落地点的实际清单与逐点变异体见 §2.2.1 末；9 处里 1 处是错的、另有 4 处漏记。`intrinsic-parity.py` 不覆盖它 |
+| 2d | `selfhost/src/lsp.dawn`：主循环 debounce + **无事可做时阻塞读**那一支 | 「连续 N 次 didChange 只分析 1 次」＋ 2a 的三条断言。**卡在种子代际**：`selfhost/src` 只准用当前种子已支持的特性（docs/bootstrap.md §种子推进协议 3），而 2c 的 intrinsic 要等 2b/2c 发一个 release、bump `scripts/seed-release.txt` 之后才能自用 |
 | 3 | `selfhost/src/lsp.dawn`：`$/cancelRequest` 回 `RequestCancelled` | 协议合规 |
 | 4 | 实测 debounce 窗口，把 150ms 换成有出处的数字 | 记录 harness 与数据 |
 

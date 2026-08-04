@@ -1801,6 +1801,16 @@ hex 与 base64 是纯 Dawn 字节算术（无 `use java`，故两后端同一份
   `Arrays.sort`，UTF-16 码元序，astral 文件名会排在 U+E000..U+FFFF 之前）。path 不是目录时
   `Err`，`kind` 是 `"io.not_a_directory"`——std 自己铸的唯一一个 kind，其余都是后端给的
 - `io.is_dir(path)` 不存在或出错都视为 `false`
+- `io.stdin_ready(timeout_ms)` 只答一件事：**此刻是否至少有一字节可读**。
+  **输入结束不算就绪**——写端已关和「连着但静默」给同一个 `false`，两者的区别由
+  `io.read_stdin` 报告，它仍是唯一的读者。故**只靠它驱动的循环会在输入结束后空转**：
+  没活干的时候必须去做那次阻塞读（`selfhost/src/lsp.dawn` 的读循环是这个形状）。
+  `timeout_ms` 是**上界**不是下界：提早回 `false` 一律合法（常规文件到达末尾会立刻回），
+  因为拿到 `false` 的调用方唯一能做的就是别等了；`true` 才是不许猜的那个。
+  取这个形状是因为它是**两个后端都不起线程就能实现的唯一一个**：「读不会阻塞」那种读法要
+  在输入结束时答 `true`，而 JVM 分不出那个状态与静默（`available()` 两边都是 0），
+  起后台读线程又会替继承了 stdin 的子进程把字节吃掉（实测见
+  [`docs/audit/lsp-robustness-design.md`](audit/lsp-robustness-design.md) §2.2.1）
 
 - **读进来的字节不是 UTF-8 时**：操作系统给的字节没有任何东西保证它是 UTF-8，故每个把字节
   变成 `String` 的读取原语都必须表态。分两类，且**两个后端一致**：

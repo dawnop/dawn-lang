@@ -118,6 +118,27 @@ pub fn is_symlink(path: String) -> Bool !io = io_is_symlink(path)
 ## buffered; pick one.
 pub fn read_stdin(n: Int) -> Bytes !io = io_read_stdin(n)
 
+## Whether at least one byte of standard input can be read right now, waiting
+## up to `timeout_ms` for one to arrive.
+##
+## **End of input is not readiness.** When the writer has gone away this
+## answers `false`, exactly as a silent-but-open stream does; the difference
+## is reported by `read_stdin`, which stays the only reader. A loop driven by
+## this alone would therefore spin once its input ended -- the third branch is
+## not optional:
+##
+##     if have_work_pending {
+##       if stdin_ready(window) { read a message } else { do the work }
+##     } else {
+##       read a message          # nothing to do, so blocking is the right thing
+##     }
+##
+## `timeout_ms` is an upper bound, not a lower one. Returning `false` early is
+## always allowed -- a regular file at end of input answers immediately -- and
+## it is safe because the only thing a caller may do with `false` is stop
+## waiting. `true` is the answer that is never given on a guess.
+pub fn stdin_ready(timeout_ms: Int) -> Bool !io = io_stdin_ready(timeout_ms)
+
 ## The entry names directly under `path`, sorted in code-point order.
 ## A non-directory is reported as an `Err`, not a panic, and — matching the old
 ## behaviour — is checked before anything is read, so a missing path and a plain

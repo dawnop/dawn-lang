@@ -430,6 +430,10 @@ dawn_unit dawn_io_rename(dawn_str *src, dawn_str *dst); /* rename(2): atomic or 
 dawn_str *dawn_io_temp_dir(dawn_str *parent, dawn_str *prefix); /* "" parent = $TMPDIR */
 bool dawn_io_is_symlink(dawn_str *path);
 dawn_bytes *dawn_io_read_stdin(int64_t n); /* short only at end of input */
+/* At least one byte readable now; end of input is not readiness. Both stdin
+ * readers above go straight to read(2) so this can ask the kernel and be
+ * believed -- see the note above dawn_io_read_line. */
+bool dawn_io_stdin_ready(int64_t timeout_ms);
 /* argv holds boxed dawn_str and is CONSUMED (an emitter crossing temp, like
  * `from_code_points`); an empty path inherits this process's stream */
 int64_t dawn_io_run(dawn_array *argv, dawn_str *out_path, dawn_str *err_path);

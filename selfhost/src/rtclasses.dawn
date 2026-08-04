@@ -29,7 +29,8 @@ use jvmops.{
   OP_IFNONNULL, OP_IFNULL, OP_IF_ACMPEQ, OP_IF_ICMPEQ, OP_IF_ICMPGE, OP_IF_ICMPLE, OP_IF_ICMPLT,
   OP_IF_ICMPNE, OP_ILOAD, OP_IMUL, OP_INSTANCEOF, OP_INVOKEINTERFACE, OP_INVOKESPECIAL,
   OP_INVOKESTATIC, OP_INVOKEVIRTUAL, OP_IRETURN, OP_ISTORE, OP_ISUB, OP_L2I, OP_LADD, OP_LCMP,
-  OP_LCONST_0, OP_LLOAD, OP_LRETURN, OP_NEW, OP_NEWARRAY, OP_POP, OP_PUTFIELD, OP_PUTSTATIC,
+  OP_LCONST_0, OP_LCONST_1, OP_LLOAD, OP_LRETURN, OP_LSTORE, OP_LSUB, OP_NEW, OP_NEWARRAY,
+  OP_POP, OP_PUTFIELD, OP_PUTSTATIC,
   OP_RETURN, T_BYTE, T_INT, V49
 }
 
@@ -1403,6 +1404,97 @@ fn gen_io_stdin(cw: ClassWriter) -> Unit !io = {
   rv.visitMethodInsn(OP_INVOKEVIRTUAL, "java/io/InputStream", "readNBytes", "(I)[B", false)
   rv.visitInsn(OP_ARETURN)
   close_mv(rv)
+  gen_io_stdin_ready(cw)
+}
+
+## io_stdin_ready(timeout_ms): `true` iff a byte can be read right now.
+##
+##     long deadline = System.currentTimeMillis() + timeoutMs;
+##     for (;;) {
+##       try { if (System.in.available() > 0) return true; }
+##       catch (IOException e) { return false; }
+##       if (deadline - System.currentTimeMillis() <= 0) return false;
+##       try { Thread.sleep(1L); } catch (InterruptedException e) { return false; }
+##     }
+##
+## `available()` and not a read with a timeout: `System.in` is a
+## `BufferedInputStream`, and `available()` counts what that buffer already
+## holds as well as what the OS has -- so it stays truthful after a partial
+## read, which is the property the native side had to be rewritten to get
+## (docs/audit/lsp-robustness-design.md 2.2.1, the second overturned claim).
+##
+## End of input is 0 here, indistinguishable from a connected-but-silent
+## stream, and that is the whole reason the contract says end of input is not
+## readiness: this backend cannot answer any other question without a thread,
+## and a background reader on stdin would eat bytes belonging to a child
+## process that inherited it (measured, same section).
+##
+## Polling at 1 ms rather than blocking: there is no interruptible wait on an
+## `InputStream` without one. The cost is bounded by the window a caller asks
+## for, and a caller with nothing to do is expected to block on the read
+## instead -- so this does not run during an idle session, which is what
+## scripts/lsp-liveness.py's idle assertion measures.
+fn gen_io_stdin_ready(cw: ClassWriter) -> Unit !io = {
+  let m = open_static(cw, "io_stdin_ready", "(J)Z")
+  let avail_try = Label.new()
+  let avail_end = Label.new()
+  let avail_catch = Label.new()
+  let sleep_try = Label.new()
+  let sleep_end = Label.new()
+  let sleep_catch = Label.new()
+  let loop = Label.new()
+  let not_yet = Label.new()
+  let no_time = Label.new()
+  m.visitTryCatchBlock(avail_try, avail_end, avail_catch, "java/io/IOException")
+  m.visitTryCatchBlock(sleep_try, sleep_end, sleep_catch, "java/lang/InterruptedException")
+
+  # deadline = currentTimeMillis() + timeout_ms, in slot 2
+  m.visitVarInsn(OP_LLOAD, 0)
+  m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/System", "currentTimeMillis", "()J", false)
+  m.visitInsn(OP_LADD)
+  m.visitVarInsn(OP_LSTORE, 2)
+
+  m.visitLabel(loop)
+  m.visitLabel(avail_try)
+  m.visitFieldInsn(OP_GETSTATIC, "java/lang/System", "in", "Ljava/io/InputStream;")
+  m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/io/InputStream", "available", "()I", false)
+  m.visitLabel(avail_end)
+  m.visitJumpInsn(OP_IFLE, not_yet)
+  m.visitInsn(OP_ICONST_1)
+  m.visitInsn(OP_IRETURN)
+
+  # a closed tty answers `available()` with an IOException rather than 0
+  # (measured); nothing is readable there either, so it is the same `false`.
+  m.visitLabel(avail_catch)
+  m.visitInsn(OP_POP)
+  m.visitInsn(OP_ICONST_0)
+  m.visitInsn(OP_IRETURN)
+
+  m.visitLabel(not_yet)
+  m.visitVarInsn(OP_LLOAD, 2)
+  m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/System", "currentTimeMillis", "()J", false)
+  m.visitInsn(OP_LSUB)
+  m.visitInsn(OP_LCONST_0)
+  m.visitInsn(OP_LCMP)
+  m.visitJumpInsn(OP_IFLE, no_time)
+
+  # the remaining window is at least 1 ms, so a 1 ms sleep cannot overshoot it
+  m.visitLabel(sleep_try)
+  m.visitInsn(OP_LCONST_1)
+  m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Thread", "sleep", "(J)V", false)
+  m.visitLabel(sleep_end)
+  m.visitJumpInsn(OP_GOTO, loop)
+
+  # an interrupt ends the wait; returning early is inside the contract
+  m.visitLabel(sleep_catch)
+  m.visitInsn(OP_POP)
+  m.visitInsn(OP_ICONST_0)
+  m.visitInsn(OP_IRETURN)
+
+  m.visitLabel(no_time)
+  m.visitInsn(OP_ICONST_0)
+  m.visitInsn(OP_IRETURN)
+  close_mv(m)
 }
 
 const PB: String = "java/lang/ProcessBuilder"

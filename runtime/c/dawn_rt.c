@@ -8,6 +8,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <pthread.h>
 #include <setjmp.h>
 #include <spawn.h>
@@ -15,6 +16,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -1618,16 +1620,38 @@ dawn_str *dawn_bytes_decode_latin1(const dawn_bytes *b) {
 
 /* ---- io ---- */
 
+/* Standard input is read through `read(2)` and never through stdio.
+ *
+ * That is an invariant of this file, not a style choice: `dawn_io_stdin_ready`
+ * answers by asking the *kernel* what is queued on fd 0, and a buffer between
+ * the two lies to it. Both readers below used stdio until 2026-08-05, and the
+ * measurement that ended it is in docs/audit/lsp-robustness-design.md 2.2.1:
+ * after `fread(1)` on a 20-byte frame, `poll` timed out and `FIONREAD` said 0
+ * while 19 bytes sat in glibc's buffer. A debounced language server built on
+ * that would start analysing while its next message was already in hand.
+ *
+ * The price is one syscall per byte in `io_read_line`, which reads until a
+ * newline it cannot know the position of in advance. That is the honest cost
+ * of "no buffer": a buffer fast enough to matter here would have to be
+ * consulted by the readiness query too, and then the invariant is a pair of
+ * things that must agree rather than a fact. `io_read_stdin` -- the one the
+ * language server uses -- reads its whole frame in one call and pays nothing.
+ * Neither reader may consume a byte the caller did not ask for. */
 dawn_adt *dawn_io_read_line(void) {
   size_t cap = 128;
   size_t n = 0;
   char *buf = (char *)dawn_alloc(cap);
-  int c = fgetc(stdin);
-  if (c == EOF) {
-    free(buf);
-    return dawn_none();
-  }
-  while (c != EOF && c != '\n') {
+  bool any = false;
+  for (;;) {
+    char c;
+    ssize_t k = read(0, &c, 1);
+    if (k < 0) {
+      if (errno == EINTR) continue;
+      k = 0; /* an error the caller sees as end of input, as ferror did */
+    }
+    if (k == 0) break;
+    any = true;
+    if (c == '\n') break;
     if (n == cap) {
       char *bigger = (char *)dawn_alloc(cap * 2);
       memcpy(bigger, buf, n);
@@ -1635,8 +1659,13 @@ dawn_adt *dawn_io_read_line(void) {
       buf = bigger;
       cap *= 2;
     }
-    buf[n++] = (char)c;
-    c = fgetc(stdin);
+    buf[n++] = c;
+  }
+  /* end of input before a single byte is None; a last line without a
+   * terminator is still a line, as BufferedReader.readLine has it */
+  if (!any) {
+    free(buf);
+    return dawn_none();
   }
   /* BufferedReader.readLine keeps neither terminator */
   if (n > 0 && buf[n - 1] == '\r') n--;
@@ -1936,17 +1965,67 @@ bool dawn_io_is_symlink(dawn_str *path) {
   return yes;
 }
 
+/* Exactly `n` bytes, short only at end of input. See the note on
+ * `dawn_io_read_line` for why this is `read(2)` and not `fread`. */
 dawn_bytes *dawn_io_read_stdin(int64_t n) {
   /* an owned empty buffer, not a static "": drop frees `p` now */
   if (n <= 0) return dawn_bytes_of((unsigned char *)dawn_alloc(1), 0);
   unsigned char *buf = (unsigned char *)dawn_alloc((size_t)n);
   size_t got = 0;
   while (got < (size_t)n) {
-    size_t step = fread(buf + got, 1, (size_t)n - got, stdin);
-    if (step == 0) break; /* end of input, or an error the caller sees as one */
-    got += step;
+    ssize_t step = read(0, buf + got, (size_t)n - got);
+    if (step < 0) {
+      if (errno == EINTR) continue;
+      break; /* an error the caller sees as end of input, as ferror did */
+    }
+    if (step == 0) break; /* end of input */
+    got += (size_t)step;
   }
   return dawn_bytes_of(buf, (int64_t)got);
+}
+
+/* True when at least one byte can be read from standard input right now.
+ *
+ * End of input is deliberately *not* readiness: it is reported by the
+ * blocking read, which stays the only reader. So a loop driven by this alone
+ * would spin at end of input -- the third branch of the read loop in
+ * selfhost/src/lsp.dawn (block when there is nothing else to do) is what
+ * closes that, and it is the shape the design argues for rather than a patch.
+ *
+ * `timeout_ms` is an upper bound and not a lower one: a regular file at end of
+ * input answers `false` in microseconds, and every `false` here is safe to
+ * return early because the only thing a caller may do with it is stop waiting
+ * and block. A `true` that is wrong would not be safe -- the caller would read
+ * and hang -- so every uncertain answer below is `false`.
+ *
+ * `poll` alone cannot answer it. A pipe whose writer is gone reports POLLHUP
+ * with no POLLIN, but a *regular file* at end of input reports POLLIN forever
+ * (it is always readable; the read just returns 0). So the count comes from
+ * the kernel via FIONREAD, and POLLIN is only the wake-up. Measured, both
+ * rows, in docs/audit/lsp-robustness-design.md 2.2.1. */
+bool dawn_io_stdin_ready(int64_t timeout_ms) {
+  int ms;
+  if (timeout_ms <= 0) {
+    ms = 0;
+  } else if (timeout_ms > 2147483647) {
+    ms = 2147483647;
+  } else {
+    ms = (int)timeout_ms;
+  }
+  struct pollfd p;
+  p.fd = 0;
+  p.events = POLLIN;
+  p.revents = 0;
+  int r = poll(&p, 1, ms);
+  /* EINTR is not retried: waiting less than asked is inside the contract, and
+   * a retry with the full window back would put it outside. */
+  if (r <= 0) return false;
+  if ((p.revents & POLLIN) == 0) return false; /* POLLHUP alone: end of input */
+  int queued = 0;
+  /* ENOTTY on /dev/null and anything else that does not implement the count.
+   * `false` there is right rather than merely safe: there is nothing to read. */
+  if (ioctl(0, FIONREAD, &queued) != 0) return false;
+  return queued > 0;
 }
 
 /* Spawn and wait. `posix_spawnp` rather than fork+exec: fork duplicates the
