@@ -35,7 +35,98 @@ fn starts_block(s: String) -> Bool =
   is_quote(s) || is_marker_ul(s) || marker_ol(s) > 0
 
 ## Parse a whole document.
-pub fn parse(src: String) -> Result[List[Block], String] = parse_blocks(str.split(src, "\n"))
+pub fn parse(src: String) -> Result[List[Block], String] =
+  parse_blocks(strip_comments(str.split(src, "\n")))
+
+fn opens_comment(cs: List[Int], i: Int) -> Bool =
+  cp_at(cs, i) == '<' && cp_at(cs, i + 1) == '!' &&
+  cp_at(cs, i + 2) == '-' && cp_at(cs, i + 3) == '-'
+
+fn closes_comment(cs: List[Int], i: Int) -> Bool =
+  cp_at(cs, i) == '-' && cp_at(cs, i + 1) == '-' && cp_at(cs, i + 2) == '>'
+
+## Strip the HTML comments out of one line. `carry` says a comment was left
+## open by an earlier line; the returned flag says one is still open here.
+## Fenced code never reaches this function, and an inline code span keeps its
+## `<!--` verbatim — a doc that *talks about* a marker still shows it.
+fn strip_line_comments(line: String, carry: Bool) -> (String, Bool) = {
+  let cs = code_points(line)
+  let n = len(cs)
+  var out: List[Int] = []
+  var in_comment = carry
+  var in_code = false
+  var i = 0
+  while i < n {
+    let c = cp_at(cs, i)
+    if in_comment {
+      if closes_comment(cs, i) {
+        in_comment = false
+        i = i + 3
+        # "a <!-- c --> b" must not leave a double space where the comment was
+        if len(out) > 0 && cp_at(out, len(out) - 1) == ' ' && cp_at(cs, i) == ' ' {
+          i = i + 1
+        }
+      } else {
+        i = i + 1
+      }
+    } else if c == '`' {
+      in_code = not in_code
+      out = out ++ [c]
+      i = i + 1
+    } else if not in_code && opens_comment(cs, i) {
+      in_comment = true
+      i = i + 4
+    } else {
+      out = out ++ [c]
+      i = i + 1
+    }
+  }
+  (from_code_points(out), in_comment)
+}
+
+## Drop HTML comments before the block scan. The subset has no raw HTML, so a
+## comment left in place would be escaped and printed at the reader — and
+## docs/ carries machine markers written that way (`<!-- doc-check: version -->`).
+## A comment may end a line or span several. A line that is nothing but comment
+## disappears entirely rather than turning blank, so a paragraph wrapped around
+## one does not get split in two.
+fn strip_comments(lines: List[String]) -> List[String] = {
+  let n = len(lines)
+  var out: List[String] = []
+  var in_fence = false
+  var in_comment = false
+  var i = 0
+  while i < n {
+    let line = line_at(lines, i)
+    # a fence marker may be indented (inside a list item), so trim before asking
+    let fence = is_fence(str.trim(line))
+    if in_fence {
+      out = out ++ [line]
+      if fence {
+        in_fence = false
+      }
+    } else if fence && not in_comment {
+      out = out ++ [line]
+      in_fence = true
+    } else {
+      let carry = in_comment
+      let (rest, still) = strip_line_comments(line, carry)
+      in_comment = still
+      if rest == line {
+        out = out ++ [line]
+      } else {
+        # only the seam left by the comment is trimmed; a line that resumed
+        # mid-comment also loses the indent the comment used to hold
+        let kept = if carry { str.trim(rest) } else { str.trim_end(rest) }
+        if kept != "" {
+          out = out ++ [kept]
+        }
+      }
+    }
+    i = i + 1
+  }
+  out
+}
 
 fn parse_blocks(lines: List[String]) -> Result[List[Block], String] = {
   let n = len(lines)
@@ -358,6 +449,37 @@ test "tables split on pipes but not inside inline code" {
 test "quotes reparse their body" {
   assert parse("> 引用 **加粗**\n") ==
     Ok([Quote([Para([Text("引用 "), Bold([Text("加粗")])])])])
+}
+
+test "html comments are dropped, never printed" {
+  # the shape docs/spec.md uses: a machine marker at the end of a sentence
+  assert parse("状态：**权威**。<!-- doc-check: version -->\n") ==
+    Ok([Para([Text("状态："), Bold([Text("权威")]), Text("。")])])
+  # a comment on its own line leaves no blank line behind, so the paragraph
+  # around it stays one paragraph
+  assert parse("第一行\n<!-- 注释 -->\n第二行\n") == Ok([Para([Text("第一行\n第二行")])])
+  # ... and the same when the comment spans lines
+  assert parse("前\n<!-- 一\n二\n三 -->\n后\n") == Ok([Para([Text("前\n后")])])
+  # opening and closing mid-line, without leaving a double space
+  assert parse("甲 <!-- x --> 乙\n") == Ok([Para([Text("甲 乙")])])
+  # a comment opened mid-line and closed on the next one
+  assert parse("甲 <!-- x\ny --> 乙\n") == Ok([Para([Text("甲\n乙")])])
+  # a lone comment between paragraphs does not merge them
+  assert parse("一\n\n<!-- c -->\n\n二\n") == Ok([Para([Text("一")]), Para([Text("二")])])
+}
+
+test "only comments are dropped; other angle brackets are still text" {
+  # a bare `<` is not a comment opener; it stays for the renderer to escape
+  assert parse("a < b 且 c > d\n") == Ok([Para([Text("a < b 且 c > d")])])
+  assert parse("<p>不是注释</p>\n") == Ok([Para([Text("<p>不是注释</p>")])])
+  # a doc that talks about a marker keeps it: inline code is verbatim
+  assert parse("它带 `<!-- doc-check: version -->` 标记\n") ==
+    Ok([Para([Text("它带 "), Code("<!-- doc-check: version -->"), Text(" 标记")])])
+  # so is fenced code, including a fence indented under a list item
+  assert parse("```\n<!-- 代码里的注释 -->\n```\n") ==
+    Ok([CodeBlock("", "<!-- 代码里的注释 -->")])
+  assert parse("- 条目：\n\n  ```\n  <!-- 也是代码 -->\n  ```\n") ==
+    Ok([UList([[Para([Text("条目：")]), CodeBlock("", "<!-- 也是代码 -->")]])])
 }
 
 test "subset violations are loud" {
