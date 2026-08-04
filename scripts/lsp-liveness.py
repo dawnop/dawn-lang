@@ -41,10 +41,12 @@ import time
 # (which never exits at all) is caught by a mile.
 HANGUP_LIMIT_S = 5.0
 
-# Silent window and its CPU budget: 0.00s measured over 6s of silence. A loop
-# that polls instead of waiting burns a whole core -- the `spin` stand-in
-# measured 4.00s CPU over a 4s window, ~100%. 0.5s over 6s is 8% of one core:
-# 12x above the observed floor and 12x below a real spin.
+# Silent window and its CPU budget: 0.01-0.08s measured over six 6s windows.
+# (The stand-ins answered 0.00s; the real server does not, so do not take that
+# number as the floor.) A loop that polls instead of waiting burns a whole core
+# -- a `spin` mutant of ./bin/dawn lsp measured 6.23s CPU over this window,
+# 103.8%. 0.5s over 6s is 8% of one core: ~6x above the observed ceiling and
+# ~12x below a real spin.
 IDLE_WINDOW_S = 6.0
 IDLE_CPU_LIMIT_S = 0.5
 
