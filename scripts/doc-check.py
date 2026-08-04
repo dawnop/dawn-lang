@@ -7,7 +7,7 @@ and the EBNF disagreed with the parser in several places -- all found by a
 human reading, none by a test. This script is the part of that gap a script
 can close.
 
-Eight checks, each unambiguous on purpose (a doc lint with false positives
+Nine checks, each unambiguous on purpose (a doc lint with false positives
 gets disabled, and then it protects nothing):
 
   links     every relative Markdown link resolves to a file in the repo
@@ -24,6 +24,8 @@ gets disabled, and then it protects nothing):
   status    every document under docs/ opens with a `> 状态：…` line
   count     every claim about how many documents docs/ holds equals how many
             it holds, and every one of them is linked from docs/README.md
+  transl    every translated document registers the digest of the original it
+            was translated from, and that digest is still the original's
 
 Blocks are opt-in rather than opt-out: most examples in the spec are
 fragments -- a type declaration, three lines of a match -- and demanding
@@ -74,6 +76,15 @@ check whose blind spot is undocumented gets mistaken for a check:
   * status: the *presence* of the line, never its truth. Nothing here can
     tell `> 状态：current` from `> 状态：动工计划`, on a plan that shipped a
     week ago, and pretending otherwise would be worse than the gap.
+  * transl: whether the marker was *earned*. Re-registering the digest
+    without touching a word of the translation makes this green, and nothing
+    here can tell that from a real re-translation -- the marker is a human
+    assertion, and every scheme of this shape has that escape. What it does
+    remove is the failure that actually happens: the original moving and
+    nobody noticing. Note also the direction. English is the original and
+    Chinese the translation, so rot lands on the Chinese side, whose reader is
+    the author. The other arrangement puts the rot on the side everybody
+    reads and nobody proofreads.
   * count: the number is read only off lines carrying the
     `<!-- doc-check: doc-count -->` marker, for the same reason version does
     not match a bare semver -- most numbers in this corpus are counts of
@@ -88,6 +99,7 @@ gone blind, and this repository has been bitten by that difference.
   ./scripts/doc-check.py
 """
 
+import hashlib
 import pathlib
 import re
 import subprocess
@@ -97,11 +109,27 @@ import tempfile
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 DAWN = ROOT / "bin" / "dawn"
 
-# every tracked Markdown file, including the top-level ones
+# every tracked Markdown file, including the top-level ones. Globbed rather
+# than listed: README.zh-CN.md joined the top level in 2026-08-05 and a
+# hand-kept list is the thing that would not have noticed.
 DOCS = sorted(
-    [p for p in (ROOT / "docs").rglob("*.md")]
-    + [ROOT / "README.md", ROOT / "CLAUDE.md", ROOT / "CONTRIBUTING.md"]
+    [p for p in (ROOT / "docs").rglob("*.md")] + list(ROOT.glob("*.md"))
 )
+
+# --- translations ----------------------------------------------------------
+# Which documents are translations, and of what. English is the original: the
+# repository's outward-facing layer is read mostly by people who do not read
+# Chinese, and a derived document rots. Putting the derived one on the side
+# nobody proofreads is the arrangement where the rot is invisible; this way it
+# lands on the Chinese text, whose reader is the author.
+#
+# The pairing lives here and not only in the marker, because a marker is the
+# only thing the marker check reads: delete it and a check that exists only in
+# the file it checks stops existing. With the registry, deleting the marker is
+# a failure.
+TRANSLATIONS = {
+    "README.zh-CN.md": "README.md",
+}
 
 VERSION_SRC = ROOT / "selfhost" / "src" / "version.dawn"
 
@@ -119,6 +147,13 @@ FENCE = re.compile(r"^```(dawn(?:\s+\w+)?)\s*$(.*?)^```\s*$", re.M | re.S)
 VERSION_DECL = re.compile(r'\bVERSION\s*:\s*String\s*=\s*"([^"]+)"')
 VERSION_MARKER = "<!-- doc-check: version -->"
 SEMVER = re.compile(r"\bv?(\d+\.\d+\.\d+)\b")
+
+# --- translation markers ---------------------------------------------------
+# `<!-- doc-check: translation-of README.md @ 0123456789abcdef -->`
+TRANSLATION_MARKER = re.compile(
+    r"^[ \t]*<!--[ \t]*doc-check:[ \t]*translation-of[ \t]+(\S+)[ \t]*@"
+    r"[ \t]*([0-9a-f]+)[ \t]*-->[ \t]*$")
+FENCE_LINE = re.compile(r"^[ \t]*```")
 
 # --- status line, and the count of documents carrying one -------------------
 # Anchored on the blockquote a status line actually is. The substring `状态`
@@ -432,6 +467,116 @@ def check_index_coverage(texts: dict) -> tuple[list[str], int]:
     return bad, seen
 
 
+def translation_digest(text: str) -> str:
+    """What a translation has to be kept level with.
+
+    Not the file's bytes. A digest over raw bytes goes red when a paragraph is
+    re-wrapped, and a check that is wrong about a third of the time is switched
+    off inside a week -- this file argues that about three other checks and it
+    applies here too. So the boundary is drawn at what a translator would have
+    to mirror:
+
+      * outside fenced code, a paragraph is unwrapped to one line and interior
+        whitespace runs collapse. Re-flowing English prose is invisible;
+        Chinese wraps at different columns anyway, so a line break is not
+        something a translation mirrors.
+      * inside fenced code, lines are kept verbatim. Whitespace is the program
+        there, and a code sample IS mirrored line for line.
+      * doc-check's own markers are stripped, so that re-registering a digest
+        does not change the digest.
+      * `1.2.3` and `v1.2.3` are masked. This is the only exclusion that is
+        about frequency rather than about meaning: README states the current
+        toolchain version, so every release would otherwise force a
+        re-registration -- for a fact check_version already holds both
+        documents to independently, off version.dawn. The residual hole is
+        named rather than papered over: an edit that changes *only* a
+        historical version number in the original (`git tag v0.9.0` in an
+        example) will not ask for the translation to follow.
+
+    What is deliberately NOT excluded: wording, punctuation, links, headings,
+    list items, code. All of those are content a translation is answerable
+    for, and all of them turn the digest over."""
+    out: list[str] = []
+    para: list[str] = []
+    in_fence = False
+
+    def flush() -> None:
+        if para:
+            out.append(" ".join(para))
+            para.clear()
+
+    for line in text.split("\n"):
+        if FENCE_LINE.match(line):
+            flush()
+            in_fence = not in_fence
+            out.append(line.rstrip())
+            continue
+        if in_fence:
+            out.append(line.rstrip())
+            continue
+        if TRANSLATION_MARKER.match(line):
+            continue
+        stripped = " ".join(line.replace(VERSION_MARKER, "").split())
+        if not stripped:
+            flush()
+            continue
+        para.append(stripped)
+    flush()
+    body = SEMVER.sub("<version>", "\n".join(out))
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()[:16]
+
+
+def check_translations(texts: dict) -> tuple[list[str], int]:
+    """Every translation carries the digest of the original it was made from.
+
+    The failure this exists for is not mistranslation, it is drift: a document
+    that is a copy of another one goes stale for free, because nothing builds
+    from it and nothing runs it. On 2026-08-04 an audit of this repository
+    found 21 of 58 documents carrying a status line that had stopped being
+    true, a spec claiming to describe 0.11.0 while the toolchain was at 0.49.0,
+    and a README advertising a release artifact that no release carried -- and
+    those are documents somebody at least reads. A translation is worse: it can
+    be wrong in a way that is invisible to every reader of the original.
+
+    So the original's digest is written into the translation, and moving the
+    original turns this red until a human re-registers it."""
+    bad: list[str] = []
+    seen = 0
+    for rel_tr, rel_src in sorted(TRANSLATIONS.items()):
+        tr, src = ROOT / rel_tr, ROOT / rel_src
+        if not tr.exists():
+            bad.append(f"{rel_tr}: registered in doc-check.py as a translation "
+                       f"of {rel_src}, but does not exist")
+            continue
+        if not src.exists():
+            bad.append(f"{rel_tr}: translates {rel_src}, which does not exist")
+            continue
+        marks = [m for m in map(TRANSLATION_MARKER.match, texts[tr].split("\n")) if m]
+        if not marks:
+            bad.append(f"{rel_tr}: no `<!-- doc-check: translation-of {rel_src} @ "
+                       f"{translation_digest(texts[src])} -->` marker "
+                       f"(it is what says which revision of {rel_src} this was "
+                       f"translated from)")
+            continue
+        if len(marks) > 1:
+            bad.append(f"{rel_tr}: {len(marks)} translation-of markers; "
+                       f"a document translates one original")
+            continue
+        seen += 1
+        named, got = marks[0].group(1), marks[0].group(2)
+        if named != rel_src:
+            bad.append(f"{rel_tr}: marker says it translates {named}, but "
+                       f"doc-check.py registers it against {rel_src}")
+            continue
+        want = translation_digest(texts[src])
+        if got != want:
+            bad.append(
+                f"{rel_tr}: registered against {rel_src} @ {got}, but {rel_src} "
+                f"is now @ {want}. {rel_src} is the original: update the "
+                f"translation to match it, then re-register the digest.")
+    return bad, seen
+
+
 def check_blocks(path: pathlib.Path, text: str, work: pathlib.Path) -> list[str]:
     bad = []
     for i, (info, body) in enumerate(FENCE.findall(text)):
@@ -491,11 +636,11 @@ def check_site_pages() -> tuple[list[str], int]:
 def main() -> None:
     problems: list[str] = []
     blocks = anchors_seen = sections_seen = claims_seen = 0
-    status_seen = counts_seen = indexed_seen = pages_seen = 0
+    status_seen = counts_seen = indexed_seen = pages_seen = transl_seen = 0
     version = toolchain_version()
     # What docs/README.md's opening sentence counts: the Markdown documents
-    # under docs/, which is DOCS minus the three top-level files it does not
-    # index (README, CLAUDE, CONTRIBUTING).
+    # under docs/, which is DOCS minus the top-level files it does not index
+    # (README, README.zh-CN, CLAUDE, CONTRIBUTING).
     doc_total = sum(1 for p in DOCS if p.is_relative_to(ROOT / "docs"))
 
     # Both cross-document checks need every document's headings before any
@@ -506,6 +651,8 @@ def main() -> None:
     bad, indexed_seen = check_index_coverage(texts)
     problems += bad
     bad, pages_seen = check_site_pages()
+    problems += bad
+    bad, transl_seen = check_translations(texts)
     problems += bad
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -540,8 +687,8 @@ def main() -> None:
           f"{pages_seen} front-page program(s); "
           f"{anchors_seen} anchor(s), {sections_seen} § reference(s), "
           f"{claims_seen} version claim(s), {status_seen} status line(s), "
-          f"{indexed_seen} index entr(ies) and {counts_seen} document count(s) "
-          f"resolved, 0 unknown")
+          f"{indexed_seen} index entr(ies), {counts_seen} document count(s) "
+          f"and {transl_seen} translation(s) resolved, 0 unknown")
 
 
 if __name__ == "__main__":

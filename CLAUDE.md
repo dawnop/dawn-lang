@@ -18,8 +18,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 - `.dawn` 源码（`selfhost/`、`site/`、`playground/`、`packages/`、`std/`）注释全英文；
   报错信息、CLI 输出全英文。
-- `docs/` 全中文（索引与状态分层见 [docs/README.md](docs/README.md)）。README 中文。
+- `docs/` 全中文（索引与状态分层见 [docs/README.md](docs/README.md)）。
   （篇数不在这里复述——`scripts/doc-check.py` 每次跑都会报，那才是不会过期的计数。）
+- **对外那一层反过来：英文是正本，中文是译本。** `README.md` 是英文原文，
+  `README.zh-CN.md` 是它的译本。**改对外文案时先改英文，再改中文译本**——
+  译本头部的 `<!-- doc-check: translation-of ... @ <digest> -->` 记着原文的摘要，
+  英文一动、中文没跟，`scripts/doc-check.py` 就红（登记表在该脚本的 `TRANSLATIONS`）。
+  方向是这么定的：谁是派生物，腐烂就落在谁身上；对外层的读者大多不读中文，
+  把英文做成派生物等于把腐烂藏在最多人看、最没人校对的那一面。
 - **提交信息也是英文**，一行祈使句主题。这里曾长期写着 `type(scope): 中文摘要`——
   摘要用中文这条**自 2026-07-25 起再没出现过**（`git log --format='%s' -200` 里 0 条中文，
   历史上 126 条）；`type(scope):` 前缀也基本退了（近 200 条里 4 条）。以 `git log` 为准。

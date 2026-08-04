@@ -1,10 +1,15 @@
 # Dawn
 
-一门**小而优雅的函数式语言**：不可变数据、代数数据类型与穷尽的模式匹配、把效果写进
-类型签名。语言小，实现也小——标准库 10 个模块 3,300 行、**零 `use java`**；编译器
-**已自举且只此一套**（`selfhost/`，用 Dawn 写的 5.4 万行，最初的 Kotlin 实现归档在
-`kotlin-final` tag）。两个**平级**后端：**JVM 字节码**与 **C**（再交给 `cc`）；同一份源码
-在两边给出同一个答案，这件事由门禁机器管着，不是一句承诺。
+*[中文版](README.zh-CN.md)*
+
+A **small, elegant functional language**: immutable data, algebraic data types with
+exhaustive pattern matching, effects written into the type signature. The language is
+small and so is the implementation — a standard library of 10 modules and 3,300 lines
+with **zero `use java`**; a compiler that is **self-hosted, and the only one there is**
+(`selfhost/`, 54,000 lines of Dawn; the original Kotlin implementation is archived at
+the `kotlin-final` tag). Two **peer** backends: **JVM bytecode** and **C** (handed on
+to `cc`). That the same source gives the same answer on both is held true by a gate,
+not by a promise.
 
 ```dawn run
 type Shape =
@@ -24,22 +29,25 @@ pub fn main() -> Unit !io =
     |> t => println("total: $t")
 ```
 
-## 特别在哪儿
+## What is different about it
 
-每条后面括号里是**能去核对的东西**：一条门禁、一份实测、一节规范。
+Each item names, in parentheses, **something you can go and check**: a gate, a
+measurement, a section of the spec.
 
-### 一、效果进类型，而且不止两级
+### 1. Effects are in the type, and there are more than two of them
 
-函数默认纯，碰 IO 必须标 `!io`——看签名即知它碰不碰外界，纯函数测试零 mock。这是基轴。另一条
-轴是**用户自己声明的具名效果**：`effect` 声明操作、`with handle` 就地应答，标签随签名传播，
-只在 handle 这一个语法节点上被减掉。
+Functions are pure by default; touching IO requires the `!io` label — the signature
+tells you whether it reaches outside, so testing a pure function needs no mocks. That
+is the base axis. The other axis is **named effects you declare yourself**: `effect`
+declares the operations, `with handle` answers them on the spot, the label propagates
+along signatures and is subtracted at exactly one syntactic node — the handler.
 
 ```dawn run
 effect Ask {
   fn ask() -> Int
 }
 
-## 纯函数。签名上写着它要问，但没说去哪儿问。
+## Pure. The signature says it asks; it does not say whom.
 fn total() -> Int !Ask = ask() + ask()
 
 pub fn main() -> Unit !io = {
@@ -48,130 +56,180 @@ pub fn main() -> Unit !io = {
 }
 ```
 
-这一档是**尾恢复**：handler 臂就是普通闭包，没有延续捕获，于是两个后端不必为它各造一套栈
-魔法；代价是不支持多次恢复与非尾恢复。std 与编译器自身**还没**改用具名效果，这个特性是纯
-加法。（[docs/spec.md](docs/spec.md) §6.5；对拍语料 `scripts/spike-native/effect_handler.dawn`。）
+This tier is **tail resumption**: a handler arm is an ordinary closure, no continuation
+is captured, and so neither backend needs its own stack magic for it. The price is that
+multi-shot and non-tail resumption are not supported. Neither `std` nor the compiler
+itself uses named effects yet — the feature is purely additive.
+([docs/spec.md](docs/spec.md) §6.5; differential corpus
+`scripts/spike-native/effect_handler.dawn`.)
 
-### 二、两个后端，一个答案，机器保证
+### 2. Two backends, one answer, machine-enforced
 
-多后端语言普遍带着一份「已知分歧」清单。这里没有，因为分歧会红灯：
+Multi-backend languages usually ship a list of known divergences. There is no such
+list here, because a divergence is a red build:
 
-- `scripts/spike-native/run.sh`——59 个语料程序两边编、两边跑，比 **stdout、stderr、
-  退出码**，外加一档 AddressSanitizer。
-- `scripts/intrinsic-parity.py`——走原语表，任何 primitive 只在一个后端有实现就红。
-- `scripts/native-cli-diff.sh`——把 native 二进制的 `fmt`/`doc`/`add`/`lsp` 输出按**字节**
-  钉在 JVM 工具链的输出上。
-- 以上每次 push 都跑，另有 `unicode`/`array`/`hamt`/`pvec`/`path`/`inflate`/`error`/`rc`
-  八份契约同行。太贵而不进每次 push 的是 `scripts/native-fixpoint.sh`——**整个编译器**：
-  JVM 发的 C == native 自己发的 C == 再发一次的 C。
+- `scripts/spike-native/run.sh` — 59 corpus programs compiled and run on both sides,
+  comparing **stdout, stderr and exit code**, plus an AddressSanitizer leg.
+- `scripts/intrinsic-parity.py` — walks the primitive table; any primitive implemented
+  on only one backend is red.
+- `scripts/native-cli-diff.sh` — pins the native binary's `fmt`/`doc`/`add`/`lsp`
+  output **byte for byte** to the JVM toolchain's.
+- All of the above run on every push, alongside eight contracts:
+  `unicode`/`array`/`hamt`/`pvec`/`path`/`inflate`/`error`/`rc`. Too expensive for
+  every push is `scripts/native-fixpoint.sh` — **the whole compiler**: the C the JVM
+  emits == the C the native binary emits == the C it emits again.
 
-规范把它写成了承诺（[docs/spec.md](docs/spec.md) §12.1）。
+The spec writes this down as a promise ([docs/spec.md](docs/spec.md) §12.1).
 
-### 三、native 侧既没有 GC，也没有 malloc/free
+### 3. On the native side there is neither a GC nor malloc/free
 
-所有权由编译器推导，走 Perceus 引用计数 + 复用分析（`rc == 1` 就地改写）。用户代码里没有任何
-内存管理原语。整个编译器前端跑 `checker.dawn` 的实测，在字符串也入账之后：**峰值 RSS
-1.46 GB → 81 MB（−94%）**、墙钟 2.77s → 2.10s（−24%）、**LSan 出口不可达 2.46 亿字节 → 0**。
-复用分析在整个编译器上就地率 73.8%。（[docs/perceus-design.md](docs/perceus-design.md) §5.7；
-门禁 `scripts/rc-contract` 与 spike-native 常开的 `detect_leaks=1`。）
+Ownership is inferred by the compiler, via Perceus reference counting plus reuse
+analysis (rewrite in place when `rc == 1`). User code contains no memory-management
+primitive at all. Measured on the whole compiler front end running `checker.dawn`,
+after strings were brought into the accounting too: **peak RSS 1.46 GB → 81 MB
+(−94%)**, wall clock 2.77s → 2.10s (−24%), **LSan unreachable-at-exit 246 million
+bytes → 0**. Reuse analysis rewrites in place 73.8% of the time across the whole
+compiler. ([docs/perceus-design.md](docs/perceus-design.md) §5.7; gates
+`scripts/rc-contract` and spike-native's always-on `detect_leaks=1`.)
 
-### 四、语义不借宿主
+### 4. The semantics do not borrow from the host
 
-答案不该随宿主的版本变，所以有数据的地方语言自己带数据：
+An answer should not change with the host's version, so wherever there is data the
+language carries its own:
 
-- **Unicode 大小写表与分类表是编译器的**（`selfhost/src/case_table.dawn`、`class_table.dawn`），
-  codegen 写进 `dawn/rt/Strings`、`__emitc` 写进生成的 C，两边领同一份表。从前是一边
-  `Character.toUpperCase`、另一边生成的头文件——那只在两个 JDK 的 Unicode 版本恰好相同时才是
-  「一个答案」。（`scripts/unicode-contract`，每次 push。）
-- **`Float` 渲染是纯 Dawn 的 Schubfach**（`std/fmt.dawn`），规则由规范拥有，宿主换算法也不跟。
-- **UTF-8 解码器是自己的严格 walker**（`runtime/c/dawn_rt.c`）：拒 overlong 形式、代理半区、
-  超出 U+10FFFF，畸形输入答 U+FFFD 并报告吃掉几个字节。
-- `Ord[String]` 是**码点序**，`cmp` 只承诺 `-1`/`0`/`1`（[docs/spec.md](docs/spec.md) §3.5）。
+- **The Unicode case and classification tables belong to the compiler**
+  (`selfhost/src/case_table.dawn`, `class_table.dawn`); codegen writes them into
+  `dawn/rt/Strings` and `__emitc` writes them into the generated C, so both backends
+  carry the same table. It used to be `Character.toUpperCase` on one side and a
+  generated header on the other — which is "one answer" only while two JDKs happen to
+  agree on their Unicode version. (`scripts/unicode-contract`, every push.)
+- **`Float` rendering is Schubfach in pure Dawn** (`std/fmt.dawn`): the rule is owned
+  by the spec and does not follow the host if the host changes algorithm.
+- **The UTF-8 decoder is our own strict walker** (`runtime/c/dawn_rt.c`): it rejects
+  overlong forms, surrogate halves and anything past U+10FFFF, answers U+FFFD on
+  malformed input and reports how many bytes it consumed.
+- `Ord[String]` is **code-point order**, and `cmp` promises only `-1`/`0`/`1`
+  ([docs/spec.md](docs/spec.md) §3.5).
 
-### 五、trait 有条件 impl 和关联类型，集合是 Dawn 写的
+### 5. Traits have conditional impls and associated types; the collections are written in Dawn
 
-单参数、名义式的 typeclass，字典传递。条件 impl（`impl[T: Eq] Eq[List[T]]`）与关联类型
-（`type Item`，`C.Item` 投影随实例化归约）都在；六个预置 trait 里有四个背着语法：
-`Eq`→`==`、`Show`→`${...}`、`Iter`→`for..in`、`Index`→`[]`，用户类型写个 impl 就能用。
-没有单态化——**具体类型的调用点不走字典，直接静态调用**，字典只在泛型边界出现。
+Single-parameter, nominal typeclasses with dictionary passing. Conditional impls
+(`impl[T: Eq] Eq[List[T]]`) and associated types (`type Item`, with `C.Item`
+projections reduced at instantiation) are both in. Four of the six built-in traits
+carry syntax on their back: `Eq`→`==`, `Show`→`${...}`, `Iter`→`for..in`, `Index`→`[]`
+— write an impl for your type and the syntax works. There is no monomorphization:
+**a call site at a concrete type does not go through a dictionary, it is a direct
+static call**; dictionaries appear only at generic boundaries.
 
-`Map`/`Set` 是 32 路 HAMT、持久 `List` 是 pvec，都在 `std/` 里用纯 Dawn 写。后端要实现的
-集合原语只有 `Array` 的五个操作加一个 `popcount`——所以新后端把全部容器白拿。
-（[docs/spec.md](docs/spec.md) §3.5、§4.8；[docs/trait.md](docs/trait.md)；
-门禁 `hamt-contract`/`pvec-contract`/`array-contract`。）
+`Map`/`Set` are 32-way HAMTs and the persistent `List` is a pvec, all written in pure
+Dawn under `std/`. The only collection primitives a backend owes are five `Array`
+operations and a `popcount` — so a new backend gets every container for free.
+([docs/spec.md](docs/spec.md) §3.5, §4.8; [docs/trait.md](docs/trait.md); gates
+`hamt-contract`/`pvec-contract`/`array-contract`.)
 
-### 六、自举，而且种子纪律是机器强制的
+### 6. Self-hosted, with the seed discipline enforced by machine
 
-链条是 种子 → A → B → C，`cmp B C` 必须逐字节相等；tag 上 `release.yml` 重跑整条链，任一环红
-则 release 不出。`selfhost/src` 只准用**当前种子已支持**的语言特性——种子编不动 HEAD 直接红。
-日常的 oracle 是 `scripts/selfhost-prev-diff.sh`：上一 release 与 HEAD 编同一语料，**未声明的
-字节差异红灯**。（[docs/bootstrap.md](docs/bootstrap.md)。）
+The chain is seed → A → B → C, and `cmp B C` must be byte-identical; on a tag
+`release.yml` re-runs the entire chain, and a red link anywhere means no release.
+`selfhost/src` may only use language features **the current seed already supports** —
+a seed that cannot compile HEAD is red immediately. The day-to-day oracle is
+`scripts/selfhost-prev-diff.sh`: the previous release and HEAD compile the same corpus,
+and **an undeclared byte difference is red**. ([docs/bootstrap.md](docs/bootstrap.md).)
 
-## 同样重要的是没有什么
+## What is just as important: what is absent
 
-没有 null、没有继承、没有宏（要编译期计算就写 `comptime { ... }`，结果烧进常量池）、
-没有 async、没有**用户自定义**运算符（运算符集固定，其中四个经上面那些 trait 分派到你的
-类型）、没有可变引用。理由见 [docs/design.md](docs/design.md)。
+No null, no inheritance, no macros (for compile-time computation write
+`comptime { ... }` and the result is burned into the constant pool), no async, no
+**user-defined** operators (the operator set is fixed; four of them dispatch to your
+types through the traits above), no mutable references. The reasoning is in
+[docs/design.md](docs/design.md).
 
-**「没有异常」要说准**：Dawn 没有 `throw`/`catch`，可恢复失败一律走 `Result` + `?`。
-但 `use java` 调用抛出的异常仍会**穿透** Dawn 栈并终止程序（等同 panic 语义）——边界上有
-两个屏障，都返回 `Result[T, ForeignError]`：`catch_fault` 拦外部失败、放 panic 穿透，
-`catch_panic` 是隔离点（单个请求 panic 变 500，而不是掀翻进程）。`bracket` 谁也不拦，只
-保证 release 在每条退出路径上恰好跑一次。`cast` 已经**不抛**了：它签名为纯，失败是一个值。
-这条分工与后端无关——native 没有异常，失败带一个种类走同一条 `longjmp`。
-（[docs/spec.md](docs/spec.md) §9.8。）
+**"No exceptions" needs stating precisely**: Dawn has no `throw`/`catch`, and every
+recoverable failure goes through `Result` + `?`. But an exception thrown by a
+`use java` call still **passes through** the Dawn stack and terminates the program
+(panic semantics). There are two barriers at that boundary, both returning
+`Result[T, ForeignError]`: `catch_fault` intercepts foreign failure and lets panics
+through, and `catch_panic` is an isolation point (one request's panic becomes a 500
+instead of taking down the process). `bracket` intercepts nothing; it only guarantees
+that release runs exactly once on every exit path. `cast` no longer **throws**: its
+signature is pure and failure is a value. This division of labour is
+backend-independent — native has no exceptions, and a failure carries a kind along the
+same `longjmp`. ([docs/spec.md](docs/spec.md) §9.8.)
 
-## 工具链
+## The toolchain
 
-`<target>` 可以是单个 `.dawn` 文件，也可以是项目目录（`src/main.dawn` 为入口）。
+`<target>` may be a single `.dawn` file or a project directory (with `src/main.dawn`
+as the entry point).
 
 ```bash
-# 需要 JDK 21。首次运行自动下载种子（上一 release 的 dawn-selfhost.jar）并用它编译 HEAD。
-./bin/dawn run examples/m4/hello_mod        # 编译并运行（单文件或多模块项目）
-./bin/dawn test <target>                    # 跑源码里内联的 test 块（构建时剥除）
-./bin/dawn build <target> -o app.jar        # JVM 后端：可执行 jar
-./bin/dawn build <target> --native -o app   # 上一步 + GraalVM native-image
-./bin/dawn fmt <target>                     # 就地格式化（--check 供 CI 校验）
-./bin/dawn doc <target>                     # pub API 导出为 JSON；add 保格式编辑 dawn.toml
-./bin/dawn lsp                              # LSP 服务器（stdio，编辑器用）
+# Needs JDK 21. The first run downloads the seed (the previous release's
+# dawn-selfhost.jar) automatically and compiles HEAD with it.
+./bin/dawn run examples/m4/hello_mod        # compile and run (single file or multi-module project)
+./bin/dawn test <target>                    # run the test blocks inlined in the source (stripped at build)
+./bin/dawn build <target> -o app.jar        # JVM backend: an executable jar
+./bin/dawn build <target> --native -o app   # the above, plus GraalVM native-image
+./bin/dawn fmt <target>                     # format in place (--check for CI)
+./bin/dawn doc <target>                     # export the pub API as JSON; `add` edits dawn.toml format-preservingly
+./bin/dawn lsp                              # the LSP server (stdio, for editors)
 ```
 
-依赖有两种：源码包（`url` + `hash` 内容寻址，MVS 选版本——单版本对 Dawn 不是便利而是承重墙，
-impl 一致性是全程序唯一映射）与 `[java-deps]`（coursier 解析 Maven 传递依赖，只在 JVM 后端
-有意义），见 [docs/package-design.md](docs/package-design.md)。注意 `--native` 走的是
-**GraalVM native-image**（拿上一步的 jar 去编），跟下面那个 C 后端是两条不同的路。
+Dependencies come in two kinds: source packages (`url` + `hash`, content-addressed,
+version selection by MVS — a single version is not a convenience for Dawn but a
+load-bearing wall, since impl coherence is a whole-program unique mapping) and
+`[java-deps]` (coursier resolves the transitive Maven closure; meaningful on the JVM
+backend only). See [docs/package-design.md](docs/package-design.md). Note that
+`--native` goes through **GraalVM native-image** (compiling the jar from the previous
+step), which is a different road from the C backend below.
 
-内置 LSP 服务器两个后端各有一份、输出逐字节对齐：实时诊断、悬停、跳转定义、文档大纲；
-前端做了完整的错误恢复，文件残缺时一次报出全部错误。VS Code / Neovim / Helix 配置见
-[editors/](editors/)。
+The built-in LSP server exists once per backend with byte-aligned output: live
+diagnostics, hover, go-to-definition, document outline. The front end does full error
+recovery, so a broken file reports all of its errors at once. VS Code / Neovim / Helix
+configuration is in [editors/](editors/).
 
-### 不装 JVM 的那条路
+### The road without a JVM
 
-**从 v0.50.0 起**，每个 release 还挂着 **`dawnc-linux-x86_64`**：C 后端编出来的单文件静态
-可执行程序（约 3.6 MB），std 与 C 运行时都嵌在里面，不需要这个仓库、也不需要 JVM。
+**As of v0.50.0**, every release also carries **`dawnc-linux-x86_64`**: a single-file
+static executable produced by the C backend (about 3.6 MB), with `std` and the C
+runtime embedded. It needs neither this repository nor a JVM.
 
-子命令是 `check|emitc|build|run|test|fmt|doc|add|lsp`；`build`/`run` 会调用机器上的 `cc`
-（`$CC` 可覆盖），其余的不碰 C 工具链。它**拒绝 `use java`**——那是这个后端的答案，不是缺陷；
-打包成 jar、`lock`、`cache` 需要 JVM，故不在它的子命令里。只有 linux-x86_64 一个目标，理由见
-[docs/native-driver-plan.md](docs/native-driver-plan.md) §22.1。
+Its subcommands are `check|emitc|build|run|test|fmt|doc|add|lsp`; `build`/`run` invoke
+the machine's `cc` (overridable with `$CC`) and the rest do not touch a C toolchain at
+all. It **refuses `use java`** — that is this backend's answer, not a defect. Packaging
+a jar, `lock` and `cache` need a JVM and are therefore not among its subcommands.
+There is one target, linux-x86_64; the reasoning is in
+[docs/native-driver-plan.md](docs/native-driver-plan.md) §22.1.
 
-**说准一点**：「用 Dawn 可以完全不碰 JVM」成立——从编译器到产物有一条完整的路径；但
-**自举种子仍然是 jar**（`scripts/seed-release.txt`），`bin/dawn` 仍是 JVM 工具链，JVM
-后端仍是一等目标。
+**Precisely stated**: "you can use Dawn without ever touching a JVM" holds — there is a
+complete path from compiler to artifact. But the **bootstrap seed is still a jar**
+(`scripts/seed-release.txt`), `bin/dawn` is still the JVM toolchain, and the JVM
+backend is still a first-class target.
 
-## 文档
+## Documentation
 
-- [docs/tutorial.md](docs/tutorial.md) — 上手教程
-- [docs/design.md](docs/design.md) — 设计目标与决策记录（为什么是这样而不是那样）
-- [docs/spec.md](docs/spec.md) — 语言规范（权威定义）
-- [docs/bootstrap.md](docs/bootstrap.md) — 自举链与种子推进协议
-- [docs/README.md](docs/README.md) — 全部设计文档的索引，每份都标了状态；示例在 [examples/](examples/)
+The documentation under `docs/` is **written in Chinese**, deliberately and for the
+time being: its reader is the author, and prose that has to be translated before it can
+be written is prose that does not get written. What is translated is the outward-facing
+layer — this README (`README.md` is the original, [README.zh-CN.md](README.zh-CN.md)
+the translation) and the website's front page.
 
-## 状态
+- [docs/tutorial.md](docs/tutorial.md) — the tutorial (Chinese)
+- [docs/design.md](docs/design.md) — design goals and decision records: why this and
+  not that (Chinese)
+- [docs/spec.md](docs/spec.md) — the language specification, the authoritative
+  definition (Chinese)
+- [docs/bootstrap.md](docs/bootstrap.md) — the bootstrap chain and the seed-advance
+  protocol (Chinese)
+- [docs/README.md](docs/README.md) — the index of every design document, each with a
+  status; examples are in [examples/](examples/)
 
-当前工具链 0.51.0，M0–M8 已实现。此后的主线（C 后端与 native 自举、Perceus、trait v2、
-效果处理器、包管理）落地记录在 `docs/` 各自的设计文档里。
+## Status
 
-## 许可证
+Current toolchain 0.51.0, M0–M8 implemented. <!-- doc-check: version --> The lines of
+work since then — the C backend and native bootstrap, Perceus, trait v2, effect
+handlers, package management — are recorded in their own design documents under
+`docs/`.
 
-[Apache-2.0](LICENSE)。`dawn` fat jar 打包的第三方代码及其各自的许可证见 [NOTICE](NOTICE)。
+## License
+
+[Apache-2.0](LICENSE). Third-party code packaged into the `dawn` fat jar, and their
+respective licenses, are listed in [NOTICE](NOTICE).
