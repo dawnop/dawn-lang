@@ -7,7 +7,8 @@
 #
 # `build` shells out to the system C compiler: emitting C *is* this
 # backend's codegen, and cc is its assembler. Subcommands are a subset of
-# the JVM driver's on purpose; `test` and the rest arrive in later knives.
+# the JVM driver's on purpose; what is missing is what needs a JVM
+# (`build`-to-jar, `lock`, `cache`, `--vendor`).
 #
 # `fmt`, `doc` and `add` are wired here as second implementations of the JVM
 # driver's argument handling rather than as calls into a shared one, and that
@@ -47,6 +48,7 @@ fn usage() -> String =
     "  dawnc build [--std <dir>] <target> [-o out] compile to a native binary via cc",
     "  dawnc emitc [--std <dir>] <target> [-o out] emit the C translation unit",
     "  dawnc run   [--std <dir>] <target>          compile and run",
+    "  dawnc test  [--std <dir>] <target>          compile the test blocks and run them",
     "  dawnc fmt [--check] <file.dawn | dir>...    format files in place",
     "  dawnc doc <target> | --stdlib | --builtins  emit the API reference as JSON",
     "  dawnc add <spec> [--subdir <p>] [--as <alias>] [--dir <project>]",
@@ -363,6 +365,103 @@ fn cmd_doc(rest: List[String]) -> Unit !io = {
   print(doc.project_json(prog))
 }
 
+## `dawnc test [--std <dir>] <target>` -- the native mirror of `dawn test`.
+##
+## The JVM driver emits every test block as a `dawn$test$i` method and then
+## generates one more class, `dawn$TestMain`, to call them (testrun.dawn).
+## There is no "generate one more class" on this backend, so the test bodies
+## are compiled into the same translation unit as everything else and a
+## generated C runner becomes its `main` (ctestrun.dawn). The report, the
+## labels and the exit code are the JVM runner's.
+##
+## `--cp` is validated exactly as `main.extract_cp` validates it, and then the
+## jars are dropped. They can only ever matter to a `use java` program, which
+## this backend refuses at `check` -- so ignoring their contents is observable
+## nowhere, while rejecting the flag outright would make `dawn test`'s argv
+## toolchain-specific for no gain.
+##
+## The one thing that cannot be mirrored is where the separator comes from:
+## `main.path_sep()` is `File.pathSeparator`, a java call, and a backend with
+## no classpath has nothing to ask. `:` is the same POSIX assumption
+## `default_out` above already makes by splitting paths on `/`.
+##
+## The comptime flags (`--comptime-fuel`, `--comptime-ffi`, `--closure`) are
+## not taken here because no subcommand of this driver takes them; that gap is
+## the driver's, not this subcommand's.
+fn cmd_test(rest: List[String]) -> Unit !io = {
+  var std_dir = "std"
+  var target = ""
+  var i = 0
+  while i < len(rest) {
+    var spec = ""
+    if rest[i] == "--std" && i + 1 < len(rest) {
+      std_dir = rest[i + 1]
+      i = i + 2
+    } else if rest[i] == "--cp" && i + 1 < len(rest) {
+      spec = rest[i + 1]
+      i = i + 2
+    } else if rest[i] == "--cp" {
+      cli_error("--cp needs a path")
+      i = i + 1
+    } else if str.starts_with(rest[i], "--cp=") {
+      spec = str.strip_prefix(rest[i], "--cp=").unwrap_or(rest[i])
+      i = i + 1
+    } else {
+      target = rest[i]
+      i = i + 1
+    }
+    if spec != "" {
+      for pth in str.split(spec, ":") {
+        if pth != "" && not io.exists(pth) { cli_error("--cp entry not found: " ++ pth) }
+      }
+    }
+  }
+  if target == "" {
+    return cli_error("usage: dawn test [--cp jars] <file.dawn | project-dir>")
+  }
+  let std = load_or_die(std_dir)
+  let prog = analyzed(std, target)
+  # the module path prefixes a label only when more than one module has tests
+  # -- run_test's rule, so that the two reports read the same
+  var bearing = 0
+  for cm in prog.modules {
+    if len(cm.tm.tests) > 0 { bearing = bearing + 1 }
+  }
+  if bearing == 0 { return cli_error(target ++ " has no test blocks") }
+  var runner_tests: List[(String, Int, String)] = []
+  for cm in prog.modules {
+    var idx = 0
+    for tf in cm.tm.tests {
+      let label = if bearing > 1 { cm.mod_path ++ " :: " ++ tf.name } else { tf.name }
+      runner_tests = runner_tests ++ [(cm.class_name, idx, label)]
+      idx = idx + 1
+    }
+  }
+  let ctext = match cdriver.c_test_text(std, prog, runner_tests) {
+    Ok(s) -> s
+    Err(e) -> {
+      cli_error(e ++ " in " ++ target)
+      ""
+    }
+  }
+  let work = match io.temp_dir("", "dawnc-test") {
+    Ok(d) -> d
+    Err(e) -> {
+      cli_error("cannot make a scratch directory: " ++ e.message)
+      return ()
+    }
+  }
+  let bin = work ++ "/tests"
+  cc_build(ctext, bin)
+  match io.run([bin], "", "") {
+    Ok(code) -> {
+      let _ = io.exit(code)
+      ()
+    }
+    Err(e) -> cli_error("cannot run the built tests: " ++ e.message)
+  }
+}
+
 pub fn main() -> Unit !io = {
   match args() {
     [] -> fail_usage()
@@ -375,6 +474,8 @@ pub fn main() -> Unit !io = {
         cmd_emitc(rest)
       } else if mode == "run" {
         cmd_run(rest)
+      } else if mode == "test" {
+        cmd_test(rest)
       } else if mode == "fmt" {
         cmd_fmt(rest)
       } else if mode == "doc" {

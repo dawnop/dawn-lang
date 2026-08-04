@@ -9,7 +9,7 @@
 
 use std/io
 use std/map
-use core.{CValue, CModule}
+use core.{CValue, CFun, CModule}
 use types.{Adts, Traits, Impls, Sig, prelude_adts}
 use cx.{Cx}
 use interp.{CtOut}
@@ -18,8 +18,10 @@ use analyze.{CheckedMod, Program}
 use lower
 use rc
 use reach
+use reach.{TableUse}
 use emitc
 use emitc.{EmitMod}
+use ctestrun
 use rtsrc
 
 ## The program-wide tables codegen reads: every module's ADTs, traits, impls
@@ -120,11 +122,41 @@ pub fn merged_consts(
   out
 }
 
-## An analyzed program as one C translation unit, or Err when it has no
-## `main`. std goes in first: a C translation unit needs a definition for
-## everything it calls, and after S3 the collections *are* std -- `[1, 2]`
-## calls `std/pvec.from_array`.
-pub fn c_text(std: StdCtx, prog: Program) -> Result[String, String] !io = {
+## Test bodies renamed to the symbol the generated runner will call, and
+## demoted to ordinary functions.
+##
+## A test's Core name is its description string, so it cannot be mangled the
+## way a function is -- two descriptions differing only in punctuation
+## sanitize to one symbol. Renaming here rather than special-casing `is_test`
+## in the emitter also means the emitter needs no case at all: it skips
+## `is_test`, and after this pass there is nothing left for it to skip.
+##
+## The index counts tests within *this* module, which is what makes it the
+## same number the JVM's `dawn$test$i` carries.
+fn named_tests(m: CModule) -> CModule = {
+  var fns: List[CFun] = []
+  var i = 0
+  for f in m.fns {
+    if f.is_test {
+      fns = fns ++ [CFun { ..f, name: emitc.test_name(i), is_test: false }]
+      i = i + 1
+    } else {
+      fns = fns ++ [f]
+    }
+  }
+  CModule { ..m, fns: fns }
+}
+
+## Every module of the program, std first, lowered and reference-counted.
+## `with_tests` is `dawn test`'s: the test bodies ride along, and so do the
+## dictionaries only a test asks for (`lower.emitted_core`). std's tests never
+## do, which is the JVM path's answer too -- `collect_program` reports test
+## blocks out of the program's modules only.
+fn build_units(
+  std: StdCtx,
+  prog: Program,
+  with_tests: Bool
+) -> (List[EmitMod], String, Adts) !io = {
   let (adts, traits, impl_table, prog_fns) = program_tables(std, prog.modules)
   # const values by declaring module, the same view the JVM path builds: a
   # const is named by its simple name and imported by it
@@ -148,10 +180,16 @@ pub fn c_text(std: StdCtx, prog: Program) -> Result[String, String] !io = {
     ]
   }
   for cm in prog.modules {
+    let core =
+      if with_tests {
+        named_tests(lower.emitted_core(lower.lower_module_full(cm.class_name, cm.tm, traits,
+          impl_table, adts, prog_fns, true)))
+      } else {
+        lower.lower_module(cm.class_name, cm.tm, traits, impl_table, adts, prog_fns)
+      }
     units = units ++ [
       EmitMod {
-        m: rc.rc_module(lower.lower_module(cm.class_name, cm.tm, traits, impl_table, adts,
-          prog_fns)),
+        m: rc.rc_module(core),
         consts: merged_consts(cm.cx, cm.ct, const_vals),
         blocks: cm.ct.blocks
       }
@@ -162,15 +200,47 @@ pub fn c_text(std: StdCtx, prog: Program) -> Result[String, String] !io = {
       }
     }
   }
-  if entry == "" { return Err("no pub fn main() -> Unit !io, nothing to compile") }
-  # same question, same answer as the JVM path: which Unicode tables ride.
-  # The units are already lowered (rc included; the walk ignores CDup/CSDrop),
-  # so reach reads them as they are.
+  # `adts` rides back out: the emitter needs it to rebuild a structured
+  # comptime constant, and recomputing `program_tables` at the call site would
+  # be a second answer to a question already answered here
+  (units, entry, adts)
+}
+
+## Which Unicode tables ride: the same question, and the same answer, as the
+## JVM path. The units are already lowered (rc included; the walk ignores
+## CDup/CSDrop), so reach reads them as they are.
+fn tables(units: List[EmitMod], prog: Program) -> TableUse = {
   var reach_mods: List[CModule] = []
   for u2 in units { reach_mods = reach_mods ++ [u2.m] }
   var reach_roots: List[String] = []
   for cm in prog.modules { reach_roots = reach_roots ++ [cm.class_name] }
-  Ok(emitc.emit_program(units, entry, reach.table_use(reach_mods, reach_roots), adts))
+  reach.table_use(reach_mods, reach_roots)
+}
+
+## An analyzed program as one C translation unit, or Err when it has no
+## `main`. std goes in first: a C translation unit needs a definition for
+## everything it calls, and after S3 the collections *are* std -- `[1, 2]`
+## calls `std/pvec.from_array`.
+pub fn c_text(std: StdCtx, prog: Program) -> Result[String, String] !io = {
+  let (units, entry, adts) = build_units(std, prog, false)
+  if entry == "" { return Err("no pub fn main() -> Unit !io, nothing to compile") }
+  Ok(emitc.emit_program(units, entry, tables(units, prog), adts))
+}
+
+## The same translation unit with the test blocks compiled in and a generated
+## runner for its `main` -- `dawn test` on this backend. A test target needs no
+## `pub fn main`, so nothing here asks for an entry.
+##
+## `tests` is (owning module class, index within that module, label) in run
+## order: the triple `testrun.gen_test_main` takes on the JVM, built the same
+## way by the driver so that the two reports carry the same labels.
+pub fn c_test_text(
+  std: StdCtx,
+  prog: Program,
+  tests: List[(String, Int, String)]
+) -> Result[String, String] !io = {
+  let (units, _entry, adts) = build_units(std, prog, true)
+  Ok(emitc.emit_headless(units, tables(units, prog), adts) ++ ctestrun.runner(tests))
 }
 
 ## The embedded C runtime file `name`, for the native driver's `build` to

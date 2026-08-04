@@ -380,8 +380,7 @@ fn str_lit(s: String) -> String =
 ## immediately on the header if one does reach them.
 fn emit_str_static(st: CSt, v: String) -> (CSt, String) = {
   let (st1, t) = fresh(st)
-  let st2 = line(st1, "static dawn_str " ++ t ++ "_lit = {{DAWN_IMMORTAL, DAWN_K_STR}, " ++
-      to_string(bytes.len(bytes.utf8(v))) ++ ", \"" ++ c_escape(v) ++ "\"};")
+  let st2 = line(st1, str_static_def(t ++ "_lit", v))
   (st2, "(&" ++ t ++ "_lit)")
 }
 
@@ -1644,7 +1643,31 @@ fn emit_cp_table(st0: CSt, name: String, rs: List[(Int, Int)], want: Bool) -> CS
   line(st, "const int64_t " ++ name ++ "_n = " ++ to_string(len(rs)) ++ ";")
 }
 
-pub fn emit_program(units: List[EmitMod], entry: String, u: TableUse, adts: Adts) -> String = {
+## A named block-scope `dawn_str` static, for a generator that writes C beside
+## this emitter's output (`ctestrun.dawn`); `emit_str_static` above is the same
+## definition under a name it invents. Escaping and the byte length are this
+## module's answer to give -- a second copy of `c_escape` somewhere else is how
+## the two would come to disagree about a `"` in a test description.
+pub fn str_static_def(name: String, v: String) -> String =
+  "static dawn_str " ++ name ++ " = {{DAWN_IMMORTAL, DAWN_K_STR}, " ++
+  to_string(bytes.len(bytes.utf8(v))) ++ ", \"" ++ c_escape(v) ++ "\"};"
+
+## The C symbol a test block gets. A test body is not a Dawn-callable
+## function and its Core name is the description string, so it cannot be
+## mangled the way a function is: two tests whose descriptions differ only in
+## punctuation would sanitize to one symbol. The lowering path renames each to
+## `test_name(i)` before this emitter sees it, mirroring the JVM's
+## `dawn$test$i`; this is where that name is written down, so the generated
+## runner (`ctestrun.dawn`) and the emitter cannot drift apart.
+pub fn test_name(idx: Int) -> String = "dawn\$test\$" ++ to_string(idx)
+
+pub fn test_symbol(owner: String, idx: Int) -> String = mangle(owner, test_name(idx))
+
+## Everything the translation unit needs except an entry point: the tables,
+## the declarations, the dictionaries and every function body. Two callers
+## finish it differently -- `emit_program` writes the program's own `main`,
+## and `dawn test` on this backend appends a generated runner instead.
+fn emit_units(units: List[EmitMod], u: TableUse, adts: Adts) -> CSt = {
   var st = CSt {
     out: [],
     tmp: 0,
@@ -1763,6 +1786,11 @@ pub fn emit_program(units: List[EmitMod], entry: String, u: TableUse, adts: Adts
   }
   st = CSt { ..st, out: head ++ st.cdefs ++ st.out }
 
+  st
+}
+
+pub fn emit_program(units: List[EmitMod], entry: String, u: TableUse, adts: Adts) -> String = {
+  var st = emit_units(units, u, adts)
   # The program body runs on the runtime's own stack, not the OS default one
   # (dawn_rt.h, "the program's stack"). The thunk exists because the entry's
   # C return type follows its Dawn one, and `dawn_rt_main` takes one shape;
@@ -1780,6 +1808,13 @@ pub fn emit_program(units: List[EmitMod], entry: String, u: TableUse, adts: Adts
   st = line(st, "}")
   join(st.out, "")
 }
+
+## The same translation unit with no `int main` in it: whoever calls this owes
+## one. `cdriver.c_test_text` is the only caller, and it appends the runner
+## `ctestrun.dawn` generates -- the C mirror of the JVM path, where
+## `testrun.dawn` synthesises a `dawn$TestMain` class beside the emitted ones.
+pub fn emit_headless(units: List[EmitMod], u: TableUse, adts: Adts) -> String =
+  join(emit_units(units, u, adts).out, "")
 
 # ---- tests ----
 

@@ -241,5 +241,294 @@ sys.exit(bad)
 PYEOF
 then :; else fail=1; fi
 
+# ---- leg 6: test, against HEAD's JVM driver ----
+# Unlike doc/add, the thing under comparison here is *not* shared code. A test
+# block is not Dawn-callable, so neither backend can write the runner in Dawn:
+# the JVM synthesises a dawn$TestMain class with ASM (testrun.dawn) and native
+# generates C (ctestrun.dawn). Two independent implementations of one report,
+# so this leg is double-entry on the report shape rather than a check that one
+# implementation was reached twice. The other half of the chain is
+# selfhost-run-diff.sh, which already pins the JVM's `dawn test` to N-1
+# (green suite, failing fixture, no-test error, usage).
+#
+# A test runner is the one gate where "green" is least informative: a runner
+# that executes nothing prints the same thing as a runner where everything
+# passed. That is not a worry, it is measured — a mutant whose thunk never
+# calls the test body left `test (multi-module package)` and
+# `test (single-module package)` GREEN, summary count and all, and was caught
+# only by the two failing fixtures below.
+#
+# So: **the failing fixtures are the load-bearing cases of this leg.** A
+# report that names a failure and its assertion text cannot have been produced
+# without running the test; "6 test(s) passed" can. Do not delete them, and do
+# not let this leg become an all-green corpus.
+#
+# Three things beyond byte equality are checked here, one per way a runner can
+# be vacuous. `pair_report` holds the report to its own count; `test
+# (assertions are evaluated)` puts the side effects outside the report
+# entirely; and the flush check says the report exists before the process
+# does.
+echo "== test, JVM vs native =="
+
+## `pair`, and then: each backend's report has to account for itself.
+##
+## The summary line is not evidence of execution. "N test(s) passed" is a
+## generation-time constant on both backends — an LDC on the JVM, a static
+## dawn_str in the generated C — so a runner that called nothing prints the
+## same summary as a runner where everything passed. The PASS/FAIL lines are
+## the part that costs one call each, so they are counted and held to the
+## summary's number, and the failure count is held to the FAIL lines.
+##
+## This runs on both transcripts separately, not on the diff: two runners that
+## both print a summary and no report lines agree with each other perfectly.
+pair_report() { # label args...
+  pair "$@"
+  label=$1
+  for side in j n; do
+    if python3 - "$OUT/$side.txt" "$label" "$side" <<'PYEOF'
+import re, sys
+text = open(sys.argv[1], encoding="utf-8", errors="replace").read().splitlines()
+label, side = sys.argv[2], sys.argv[3]
+reported = sum(1 for ln in text if ln.startswith("PASS  "))
+failed = sum(1 for ln in text if ln.startswith("FAIL  "))
+passed_re = re.compile(r"^(\d+) test\(s\) passed$")
+failed_re = re.compile(r"^(\d+) of (\d+) test\(s\) failed$")
+summary = [ln for ln in text if passed_re.match(ln) or failed_re.match(ln)]
+if len(summary) != 1:
+    print("FAIL: %s (%s) has %d summary lines, want 1" % (label, side, len(summary)))
+    sys.exit(1)
+m = passed_re.match(summary[0])
+if m:
+    total, want_failed = int(m.group(1)), 0
+else:
+    m = failed_re.match(summary[0])
+    want_failed, total = int(m.group(1)), int(m.group(2))
+if total == 0:
+    print("FAIL: %s (%s) claims a suite of 0 tests" % (label, side))
+    sys.exit(1)
+if reported + failed != total:
+    print("FAIL: %s (%s) reported %d PASS + %d FAIL lines, summary says %d"
+          % (label, side, reported, failed, total))
+    sys.exit(1)
+if failed != want_failed:
+    print("FAIL: %s (%s) printed %d FAIL lines, summary says %d failed"
+          % (label, side, failed, want_failed))
+    sys.exit(1)
+print("OK   %s (%s accounts for all %d)" % (label, side, total))
+PYEOF
+    then :; else fail=1; fi
+  done
+}
+
+# a multi-module suite (labels get the `mod :: name` prefix) and a single one
+pair_report "test (multi-module package)" test packages/json
+pair_report "test (single-module package)" test packages/sha2
+# --cp names host jars. The native driver validates the entries the way the
+# JVM one does and then drops them: they can only matter to a `use java`
+# program, which this backend refuses at `check`. Both spellings, both
+# outcomes — an entry that exists, and one that does not.
+pair "test (--cp, entry exists)" test --cp "$ROOT/runtime/c" packages/sha2
+pair "test (--cp=, entry exists)" test "--cp=$ROOT/runtime/c" packages/sha2
+pair "test (--cp entry not found)" test --cp /nonexistent.jar packages/sha2
+pair "test (--cp needs a path)" test packages/sha2 --cp
+
+# the failing path: report shape, six-space message indentation, the count
+# line and exit 1. `selfhost-run-diff.sh` has the same fixture against N-1.
+cat > "$OUT/failing.dawn" <<'EOF'
+fn double(x: Int) -> Int = x * 2
+
+test "doubling four" {
+  assert double(4) == 8
+}
+
+test "a deliberate failure" {
+  assert double(3) == 7
+}
+EOF
+pair_report "test (a failing fixture)" test "$OUT/failing.dawn"
+
+# a panic message with newlines and a quote in it: the JVM splits on "\n" and
+# indents each line, and the C runner walks the bytes to the same effect. The
+# quote is there because the label and the message travel through two
+# different escapers (LDC on one side, a C string literal on the other).
+#
+# Every message here stays under 512 bytes on purpose: the native runtime
+# truncates a caught failure at DAWN_FAILURE_MAX (dawn_rt.c) and the JVM does
+# not, so a longer one is a real divergence — recorded in
+# docs/native-driver-plan.md, and catch_fault's rather than this runner's.
+cat > "$OUT/messages.dawn" <<'EOF'
+pub fn lines() -> Int = panic("first line\nsecond line\nthird")
+
+pub fn quoted() -> Int = panic("a \"quoted\" message")
+
+pub fn blank() -> Int = panic("")
+
+test "a multi-line message is indented a line at a time" {
+  assert lines() == 1
+}
+
+test "a quote survives both escapers" {
+  assert quoted() == 1
+}
+
+test "an empty message is still one line" {
+  assert blank() == 1
+}
+EOF
+pair_report "test (failure message shapes)" test "$OUT/messages.dawn"
+
+# error paths, the run-diff set restricted to what this backend can be asked
+printf 'fn g() -> Int = 2\n' > "$OUT/notest.dawn"
+printf 'hello\n' > "$OUT/plain.txt"
+pair "test (no test blocks)" test "$OUT/notest.dawn"
+pair "test (missing target)" test "$OUT/nowhere"
+pair "test (wrong suffix)" test "$OUT/plain.txt"
+pair "test (usage)" test
+
+# ---- leg 7: the assertions are evaluated, not just reported on ----
+# Every check above reads the runner's own report, and a report is what a
+# vacuous runner is best at producing. This fixture puts the evidence outside
+# it: each assertion goes through `note`, which drops a file named after its
+# tag. The files are counted after the run, in a directory each backend gets
+# to itself, so "the assertion ran" is answered by the filesystem rather than
+# by the thing under test.
+#
+# The middle test fails on its *second* assertion, which pins two more things
+# an all-green fixture cannot: the first assertion of a failing test still
+# runs, and a failure does not stop the suite (`d` is dropped by the test
+# after it).
+echo "== test, the assertions really run =="
+cat > "$OUT/sidefx.dawn" <<'EOF'
+use std/io
+
+pub fn note(tag: String) -> Bool !io = {
+  println("  side effect: " ++ tag)
+  let _ = io.write_file("MARK-" ++ tag, tag)
+  true
+}
+
+test "the first test's assertion is evaluated" {
+  assert note("a")
+}
+
+test "the second test evaluates both of its assertions, then fails" {
+  assert note("b")
+  assert note("c") && false
+}
+
+test "a third test runs even though the second one failed" {
+  assert note("d")
+}
+EOF
+# --std is absolute because each side runs from its own directory; the argv
+# stays identical across the two, which is what makes this a differential
+rm -rf "$OUT/sfx-j" "$OUT/sfx-n"
+mkdir -p "$OUT/sfx-j" "$OUT/sfx-n"
+(cd "$OUT/sfx-j" && "$ROOT/bin/dawn" test --std "$ROOT/std" "$OUT/sidefx.dawn") \
+  > "$OUT/j.txt" 2>&1 && jx=0 || jx=$?
+(cd "$OUT/sfx-n" && "$DAWNC" test --std "$ROOT/std" "$OUT/sidefx.dawn") \
+  > "$OUT/n.txt" 2>&1 && nx=0 || nx=$?
+jm=$(cd "$OUT/sfx-j" && ls | tr '\n' ' ')
+nm=$(cd "$OUT/sfx-n" && ls | tr '\n' ' ')
+if [ "$jx" != 1 ] || [ "$nx" != 1 ]; then
+  echo "FAIL: the side-effect fixture must exit 1 on both (jvm=$jx native=$nx)"
+  fail=1
+elif [ "$jm" != "MARK-a MARK-b MARK-c MARK-d " ] || [ "$nm" != "$jm" ]; then
+  echo "FAIL: assertions were skipped (jvm left [$jm], native left [$nm])"
+  fail=1
+elif ! diff "$OUT/j.txt" "$OUT/n.txt" > "$OUT/d.txt"; then
+  echo "FAIL: test (assertions are evaluated) differs between backends"
+  head -20 "$OUT/d.txt"
+  fail=1
+else
+  echo "OK   test (assertions are evaluated: both left $jm, exit 1)"
+fi
+
+# ---- leg 8: the report reaches stdout before the process ends ----
+# The same hazard leg 5 caught in `lsp`, in the form it takes here. The C
+# runtime block-buffers stdout (dawn_rt_init, 64 KiB), and every check above
+# reads the transcript after the process is gone — so a runner that only
+# flushed at exit would be byte-identical to one that reports as it goes,
+# while showing a user watching a hung suite nothing at all. A suite that
+# hangs or is killed is exactly when the report matters most.
+#
+# Two tests report, the third does not return, both backends get SIGKILLed.
+# What is on stdout at that point is the whole answer: `dawn_io_println`
+# flushes per line (the fix leg 5 forced), so it is the two PASS lines.
+echo "== test, the report is flushed as it goes =="
+cat > "$OUT/hang.dawn" <<'EOF'
+fn spin(n: Int) -> Int = {
+  var i = 0
+  var acc = 0
+  while i < n {
+    acc = (acc + i) % 1000003
+    i = i + 1
+  }
+  acc
+}
+
+test "one reports before the hang" {
+  assert spin(10) == 45
+}
+
+test "two reports before the hang" {
+  assert spin(10) == 45
+}
+
+test "three never finishes" {
+  assert spin(1000000000000000) == -1
+}
+EOF
+# Read the pipe while the runner is still alive rather than after a fixed
+# timeout: the native side compiles the program before it runs it, and a
+# budget large enough for that build would be a budget the check could pass by
+# waiting rather than by flushing. The window starts when the first byte
+# arrives.
+if python3 - "$DAWNC" "$ROOT" "$OUT/hang.dawn" <<'PYEOF'
+import select, subprocess, sys, time
+dawnc, root, fixture = sys.argv[1], sys.argv[2], sys.argv[3]
+bad = 0
+got = {}
+for label, cmd in [("jvm", [root + "/bin/dawn"]), ("native", [dawnc])]:
+    p = subprocess.Popen(cmd + ["test", "--std", root + "/std", fixture],
+                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    # Five minutes for the first byte, because the native side compiles the
+    # program before it runs it (measured at well under one). Then 30 seconds
+    # to see the rest of what a hung suite is supposed to have said. A runner
+    # that never flushes spends the whole first budget, so a red here is slow
+    # on purpose rather than by accident.
+    seen, deadline, t0 = b"", time.time() + 300.0, None
+    while time.time() < deadline:
+        if not select.select([p.stdout], [], [], deadline - time.time())[0]:
+            break
+        chunk = p.stdout.read1(4096)
+        if not chunk:
+            break
+        if t0 is None:
+            t0, deadline = time.time(), time.time() + 30.0
+        seen += chunk
+        if seen.count(b"PASS  ") >= 2:
+            break
+    p.kill()
+    p.wait()
+    got[label] = seen.decode("utf-8", "replace")
+    n = got[label].count("PASS  ")
+    if n == 2:
+        print("OK   test %s printed both reports %.2fs into a run that never ends"
+              % (label, time.time() - t0))
+    else:
+        print("FAIL: test %s had %d reports on stdout when it was killed, want 2"
+              % (label, n))
+        print(got[label])
+        bad = 1
+if got["jvm"] != got["native"]:
+    print("FAIL: what survived the kill differs between backends")
+    print("jvm:    %r" % got["jvm"])
+    print("native: %r" % got["native"])
+    bad = 1
+sys.exit(bad)
+PYEOF
+then :; else fail=1; fi
+
 [ "$fail" = 0 ] || { echo "FAIL: the native driver and the JVM driver disagree"; exit 1; }
-echo "OK: fmt/doc/add/lsp agree across both backends, native fmt/lsp match the previous release, and both lsp servers answer mid-session"
+echo "OK: fmt/doc/add/lsp/test agree across both backends, native fmt/lsp match the previous release, both lsp servers answer mid-session, and the test reports account for themselves"

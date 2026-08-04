@@ -1,6 +1,6 @@
 # B 线：native 驱动补全 + 把后端契约摆到明面上
 
-> 状态：**in progress**（2026-08-03 立项，任务 #128；K-B1/K-B2/K-B3/K-B5 已落地，下一刀 K-B4）。
+> 状态：**in progress**（2026-08-03 立项，任务 #128；K-B1 到 K-B5 全部落地，刀表见 §2）。
 > 本文是 B 线的落地记录 + 后续刀表。
 >
 > **为什么在这儿而不在别处**：B 线原来的备忘录只存在于任务 #128 的描述里，仓库中没有
@@ -39,7 +39,7 @@ B 线的驱动是**能力补全，不是纯洁性**：不是「把 java 赶出�
 | **K-B1** | intrinsic 契约表 + `scripts/intrinsic-parity.py` 构建期门禁 | 只加门禁 | **已做** |
 | **K-B2** | 把 `fmt` / `doc` / `add` 接进 native 驱动，并让差分门禁真的覆盖 native | 加能力 + 加门禁 | **已做**（§4–§7） |
 | **K-B3** | `lsp`（`lsp.dawn` + `lspq.dawn` + `lspc.dawn`，2,877 行），并让 lsp 差分真的覆盖 native | 加能力 + 加门禁 | **已做**（§11–§15） |
-| **K-B4** | `test`（`testrun.dawn`；JVM 侧靠生成一个 test main 类，native 侧要另一条路） | 加能力 | 待 |
+| **K-B4** | `test`（`testrun.dawn`；JVM 侧靠生成一个 test main 类，native 侧要另一条路） | 加能力 + 加门禁 | **已做**（§18–§21） |
 | **K-B5** | 结构化 comptime 常量落到 native（`emitc.const_literal` 原来直接 panic） | 加能力 + 加门禁 | **已做**（§17） |
 
 > 刀表的**内容**来自任务 #128 的描述。原始 issue body 在写这份文档时取不到
@@ -623,3 +623,110 @@ opaque 包 List、以及一个 `comptime { … }` 块（走的是同一条发射
   运动量在语料里。这不是缺陷，是事实，写在这里免得把自举的绿当成这条路径的证据。
 - **跨模块不共享。** 同一个常量被两个模块引用会生成两个 builder。JVM 也是这样
   （缓存是类上的字段表），Dawn 又没有引用相等，所以这是等价的、不是缺口。
+
+## 18. K-B4：`dawn test` 落到 native 驱动
+
+JVM 侧的 `dawn test` 是这样做的（`selfhost/src/testrun.dawn`）：每个 `test` 块被发射成
+所属类上的一个 `dawn$test$i` 方法，然后**再生成一个类** `dawn$TestMain`，它的 `main`
+逐个 try/catch 调用这些方法、打印报告、有失败就 `System.exit(1)`。
+
+native 侧没有「再生成一个类」这回事——整个程序是**一个翻译单元**。所以这一刀的形状是：
+test 块和其它函数一起编译进那个翻译单元，再把一段生成的 C 接在后面当它的 `main`
+（`selfhost/src/ctestrun.dawn`）。
+
+### 18.1 三个非平凡的接缝
+
+1. **test 块的符号名。** 一个 test 的 Core 名字**就是它的描述字符串**，没法像函数名那样
+   mangle：`"a, b"` 和 `"a; b"` 会 sanitize 成同一个符号。所以在 lowering 之后、发射之前
+   把它们改名成 `emitc.test_name(i)`（= `dawn$test$i`，和 JVM 那边**同一个拼写**，写在
+   `emitc.dawn` 里，让生成器和发射器不可能各写一份），并把 `is_test` 摘掉——发射器本来就
+   跳过 `is_test`，改名之后它一个特例都不需要（`cdriver.named_tests`）。
+   索引是**模块内**的序号，这正是 JVM 的 `dawn$test$i` 携带的那个数。
+
+2. **哪些模块带 test。** `cdriver.build_units(std, prog, with_tests)` 多了一个开关：
+   `dawn test` 走 `lower.emitted_core(lower_module_full(…, true))`，于是 test 体、以及
+   **只有 test 用得到的字典**一起进来。std 永远不带——`collect_program` 那边也是这样
+   （它只从 program 的模块里报告 test 块），两边同一个答案。
+
+3. **报告的形状。** `PASS  ` / `FAIL  `（两个空格）、失败消息**每行缩进六个空格**、
+   `N test(s) passed` 或 `K of N test(s) failed`、失败退出 1。C 侧的失败捕获走
+   `dawn_catch_panic`，它 panic 和 fault 都接——这正是 JVM 那边 `catch (Throwable)` 的
+   语义；它交回来的 `Result[_, ForeignError]` 的 `message` 字段就是 `getMessage()`。
+
+`--cp` 按 `main.extract_cp` 的规矩校验（两种拼写、条目必须存在），然后**丢掉**：它只对
+`use java` 的程序有意义，而这个后端在 `check` 就拒绝 `use java`。分隔符写死 `:`——
+`main.path_sep()` 是 `File.pathSeparator`，一个 java 调用，没有 classpath 的后端无处可问。
+
+## 19. 让差分门禁真的跑到 native 的 `test`
+
+`scripts/native-cli-diff.sh` 加了三条腿（第 6/7/8 条）。被测者和前五条一样是 native 二进制：
+`pair()`（:60）第 62 行跑 `./bin/dawn`（神谕），第 63 行跑 `"$DAWNC"`（被测者），比 stdout、
+stderr 和退出码。第 7 条腿的两次调用在 :427 与 :429，第 8 条腿在 :492 的 `[("jvm", …),
+("native", [dawnc])]`——`dawnc` 是脚本第 44–51 行现编出来的那个 native 二进制。
+
+**和 doc/add 那两条腿不同的是：这里比的两边不是同一份代码。** test 块不是 Dawn 可调用的
+函数，所以两个后端都写不出 Dawn 版的 runner——一边 ASM 写字节码，一边写 C 文本。所以第 6
+条腿是**对同一份报告的复式记账**，不是「同一个实现被走到了两次」的检查。链条的另一半是
+`selfhost-run-diff.sh`，它已经把 JVM 的 `dawn test` 钉在 N-1 上。
+
+### 19.1 为什么这条腿需要另外三种检查
+
+**测试运行器是「绿最没有信息量」这条规律最纯的形式：一个什么都没跑就报成功的 runner，
+和一个全部通过的 runner，输出一模一样。** 所以除了逐字节比对，另加三样，每样对应一种
+「空转」的形态：
+
+1. **报告要为自己结账**（`pair_report`，:284）。汇总行**不是执行的证据**：`N test(s)
+   passed` 两边都是生成期常量（JVM 一条 LDC，C 一个 static `dawn_str`），一个一次都没调
+   的 runner 打出来的汇总和全绿的 runner 一模一样。而 `PASS`/`FAIL` 行是每条各花一次调用
+   的那部分，于是数它们，并钉死到汇总的数上（失败数钉到 FAIL 行数上）。
+   **这个检查跑在两边各自的 transcript 上，不是跑在 diff 上**——两个都只打汇总、什么都不
+   报告的 runner，彼此之间是完全一致的。
+
+2. **断言真的被求值**（第 7 条腿，:388）。上面每一条读的都是 runner 自己的报告，而报告
+   正是一个空转 runner 最擅长生产的东西。这条腿把证据放到报告之外：每个断言经过 `note`，
+   它落一个以 tag 命名的文件；跑完之后**数文件**，两个后端各在自己的目录里跑。
+   中间那条 test 在它的**第二个**断言上失败，于是还钉住两件全绿语料钉不住的事：失败的
+   test 的第一个断言照样跑，以及一次失败不会终止整个 suite。
+
+3. **报告在进程结束之前就已落盘**（第 8 条腿，:447）。这是第 5 条腿在 `lsp` 上抓到的那个
+   坑在这里的形态：C 运行时的 stdout 是 64 KiB 块缓冲（`dawn_rt_init`），而上面每一条检查
+   都是等进程没了之后读 transcript——一个只在退出时 flush 的 runner 会和边跑边报的 runner
+   **逐字节相同**，同时让一个盯着卡住的 suite 的人什么都看不到。而 suite 卡住或被杀，正是
+   报告最要紧的时候。做法：两个 test 报告完之后第三个不返回，两边都 SIGKILL，看那一刻
+   stdout 上有什么。窗口从**第一个字节到达**时才开始计时，因为 native 侧要先编译——一个大
+   到装得下那次编译的固定超时，会变成一个「靠等」而不是「靠 flush」通过的检查。
+
+## 20. 红演示与阴性对照 `[实测]`（2026-08-04）
+
+| 变异体 | 改哪儿 | 谁红 | 谁不红（阴性对照） |
+|---|---|---|---|
+| M1 thunk 不调用 test 体 | `ctestrun.one_test` 的 `dawn_box_unit(sym())` → `dawn_box_unit(DAWN_UNIT)` | `test (a failing fixture)` 与 `test (failure message shapes)`（`exits jvm=1 native=0`）、第 7 条腿、第 8 条腿 | **两个全绿包全绿**——`test (multi-module package)` / `(single-module package)` 的逐字节比对**和 `pair_report` 的计数**都没看见它（`n accounts for all 6`） |
+| M2 两边都不打 PASS 行 | `ctestrun` 去掉 `dawn_io_println(pass)`；`testrun.gen_pass` 去掉那次 println | `pair_report`：`reported 0 PASS + 0 FAIL lines, summary says 6` | **`pair` 的每一条全绿**——两个后端被同样地改坏，逐字节比对无话可说 |
+| M3 退出码被丢掉 | `nmain.cmd_test` 不调 `io.exit(code)` | `test (a failing fixture)`、`test (failure message shapes)`（`exits jvm=1 native=0`）、第 7 条腿 | 全绿包、`pair_report`、第 8 条腿都不红 |
+| M4 运行时不再逐行 flush | `runtime/c/dawn_rt.c` 的 `dawn_io_println` 去掉 `fflush`，`gen-rtsrc.py` 重生成 | **只有第 8 条腿**：`test native had 0 reports on stdout when it was killed, want 2` | **上面二十条逐字节比较全绿**，连第 5 条腿（lsp 中途应答）都绿——`dawn_io_print` 的 flush 没被动 |
+
+四个变异体互相是对方的阴性对照，而且各自证明了一件不同的事：
+
+- **M1 是这条腿的立论。** 它精确复现了「绿没有信息量」：全绿语料整条通过，连数得出 6 条
+  PASS 行的计数检查也通过——因为 6 条 PASS 行确实被打了，只是没有一条 test 跑过。
+  **所以失败语料是这条腿的承重墙**，一份点名了失败和断言原文的报告，不可能在没跑 test 的
+  情况下产出。
+- **M2 是 `pair_report` 的立论。** 两边同样改坏之后，`pair` 这个门禁**整条腿全绿**，只有
+  「报告为自己结账」红。这就是为什么那个检查跑在两份 transcript 各自身上而不是跑在 diff 上。
+- **M4 是第 8 条腿的立论**，也是 K-B3 那个教训的复演：批量重放拿到逐字节相同的输出，真实
+  使用一个字都拿不到。
+
+## 21. 这条 test 门禁不证明什么
+
+1. **它不证明 native 的 `test` 和 JVM 的 `test` 在编译语义上等价**，只证明这十几条 argv
+   下两边打出同样的字节。真正把「编译对不对」钉住的是 `spike-native/run.sh` 和
+   `native-fixpoint.sh`，不是这里。
+2. **它不覆盖 `--comptime-fuel` / `--comptime-ffi` / `--closure`。** 这个驱动的**任何**
+   子命令都不收这几个 flag，所以那是驱动的缺口，不是这个子命令的。
+3. **它不覆盖超过 512 字节的失败消息。** native 运行时在 `DAWN_FAILURE_MAX`
+   （`dawn_rt.c`）处截断一条被捕获的失败消息，JVM 不截断，所以更长的消息是**真分歧**——
+   属于 `catch_fault` 的，不属于这个 runner。语料里每条消息都刻意留在 512 字节以下。
+4. **它不覆盖并发。** 两个 runner 都是顺序执行，没有任何断言这么说。
+5. **第 8 条腿只看前两条报告。** 它说的是「报告是边跑边落盘的」，不是「每一行都单独
+   flush」——后者今天成立（`dawn_io_println` 每行一次 `fflush`），但这条腿分不出「每行
+   flush」和「每两行 flush」。

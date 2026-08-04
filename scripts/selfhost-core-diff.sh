@@ -31,9 +31,9 @@
 #                        at the top of each file.
 #   golden/selfhost.sha  one line per module of the compiler itself. Answers
 #                        *whether* anything changed across every module there
-#                        is -- 75 of them today, and the file is the count, so
-#                        do not restate it here -- without carrying 7MB in the
-#                        repository. Regenerate locally to see the content.
+#                        is -- the file is the count, so it is not restated
+#                        here -- without carrying 7MB in the repository.
+#                        Regenerate locally to see the content.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 ROOT=$(pwd)
