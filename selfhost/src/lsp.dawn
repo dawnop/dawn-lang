@@ -2,7 +2,9 @@
 # disconnects. lsp4j is replaced by a hand-rolled JSON-RPC layer over
 # packages/json — Content-Length framing (bytes, UTF-8), requests answered in
 # order, publishDiagnostics pushed on every document update. One open document
-# = text + line index + fresh analysis, rebuilt on every change.
+# = text + line index + fresh analysis, rebuilt on every *settled* change: the
+# read loop debounces document syncs, so a burst of keystrokes is analysed once
+# (LSP-04, docs/audit/lsp-robustness-design.md §2.2).
 
 use std/io
 use std/str
@@ -432,22 +434,124 @@ pub fn run_lsp(std_dir: String, js: Jsig) -> Unit !io = {
     Err(e) -> panic("cannot load std from " ++ std_dir ++ ": " ++ e)
   }
   var st = LspState { std: std, bins: builtins(), docs: map.empty(), jsig: js }
+  # The newest text of the one document whose analysis has not run yet.
+  #
+  # At most one, and that is what makes deferring the work invisible: an
+  # update naming a *different* document flushes the one already waiting, so
+  # analyses still happen in the order the client asked for. Only repeats of
+  # the same document coalesce — which is the whole point, since `didChange`
+  # is Full sync and each one supersedes the last.
+  var pending: Option[(String, String)] = None
   var running = true
   while running {
-    match read_message() {
-      Eof -> { running = false }
-      Message(msg) -> { st = handle(st, msg) }
-      # A bad frame is not end of input. This used to collapse into the same
-      # `None` as EOF, so one malformed message — a truncated header from a
-      # crashing client, a stray write into the pipe — made the server exit
-      # without a word, and the editor showed a language server that had simply
-      # stopped. JSON-RPC 2.0 §4.2 asks for an error response instead; the read
-      # is resynchronised on a frame boundary, so the session continues.
-      Malformed(code, why) -> {
-        send(jobj([("jsonrpc", JStr("2.0")), ("id", JNull),
-          ("error", jobj([("code", JInt(code)), ("message", JStr(why))]))]))
-      }
+    # Three branches, and the third is what makes the second safe. Readiness
+    # never reports end of input (std/io.stdin_ready says why), so a loop that
+    # only ever waited on it would spin the moment its client went away. With
+    # nothing pending there is nothing to wait for and blocking is the right
+    # thing to do — and the blocking read is what reports end of input.
+    let take = match pending {
+      Some(_) -> io.stdin_ready(DEBOUNCE_MS)
+      None -> true
     }
+    if take {
+      match read_message() {
+        Eof -> { running = false }
+        Message(msg) ->
+          match update_of(msg) {
+            Some(u) -> {
+              let (uri, text) = u
+              match pending {
+                Some(p0) -> {
+                  let (uri0, _) = p0
+                  if uri0 != uri { st = flush(st, pending) }
+                }
+                None -> ()
+              }
+              pending = Some((uri, text))
+            }
+            # Anything else may read the analysed program or write about it,
+            # so the deferred work has to have happened first. That is also
+            # why the deferral is not observable: every answer about a
+            # document passes this point.
+            None -> {
+              st = flush(st, pending)
+              pending = None
+              st = handle(st, msg)
+            }
+          }
+        # A bad frame is not end of input. This used to collapse into the same
+        # `None` as EOF, so one malformed message — a truncated header from a
+        # crashing client, a stray write into the pipe — made the server exit
+        # without a word, and the editor showed a language server that had simply
+        # stopped. JSON-RPC 2.0 §4.2 asks for an error response instead; the read
+        # is resynchronised on a frame boundary, so the session continues.
+        Malformed(code, why) -> {
+          st = flush(st, pending)
+          pending = None
+          send(jobj([("jsonrpc", JStr("2.0")), ("id", JNull),
+            ("error", jobj([("code", JInt(code)), ("message", JStr(why))]))]))
+        }
+      }
+    } else {
+      # The window elapsed with nothing arriving: the client has stopped
+      # typing, so analyse the newest text it sent.
+      st = flush(st, pending)
+      pending = None
+    }
+  }
+}
+
+## How long standard input must stay quiet before a pending edit is analysed.
+##
+## The wait happens inside `io.stdin_ready`, which sleeps rather than polls, so
+## a session that is merely idle costs nothing — scripts/lsp-liveness.py's
+## `idle` assertion measures exactly that, and its `debounce` assertion
+## measures the coalescing this number buys.
+##
+## 150 ms is the design's placeholder and has no measurement behind it yet
+## (docs/audit/lsp-robustness-design.md §六 step 4 is the job of finding one:
+## time `didChange` → published diagnostics while typing into selfhost's own
+## 31k lines). It is stated here rather than inlined so that step has one place
+## to land.
+const DEBOUNCE_MS: Int = 150
+
+## Run the analysis a document sync deferred, if there is one.
+fn flush(st: LspState, pending: Option[(String, String)]) -> LspState !io =
+  match pending {
+    Some(p) -> {
+      let (uri, text) = p
+      update_doc(st, uri, text)
+    }
+    None -> st
+  }
+
+## The (uri, text) a document-sync notification carries, or `None` when the
+## message is anything else.
+##
+## A sync notification with no text in it — `didChange` with an empty
+## `contentChanges` — is `None` too, and lands in `handle` where it has always
+## been ignored. There is nothing to defer about an update that carries no
+## document.
+fn update_of(msg: Json) -> Option[(String, String)] = {
+  let method = ostr(msg, "method")
+  let params = match oget(msg, "params") {
+    Some(j) -> j
+    None -> JNull
+  }
+  let td = get_or_null(params, "textDocument")
+  if method == "textDocument/didOpen" {
+    Some((ostr(td, "uri"), ostr(td, "text")))
+  } else if method == "textDocument/didChange" {
+    match oget(params, "contentChanges") {
+      Some(JArr(changes)) ->
+        match get(changes, 0) {
+          Some(c) -> Some((ostr(td, "uri"), ostr(c, "text")))
+          None -> None
+        }
+      _ -> None
+    }
+  } else {
+    None
   }
 }
 
@@ -544,19 +648,11 @@ fn handle(st0: LspState, msg: Json) -> LspState !io = {
     ]))]))
   } else if method == "initialized" {
     ()
-  } else if method == "textDocument/didOpen" {
-    let td = get_or_null(params, "textDocument")
-    st = update_doc(st, ostr(td, "uri"), ostr(td, "text"))
-  } else if method == "textDocument/didChange" {
-    let td = get_or_null(params, "textDocument")
-    match oget(params, "contentChanges") {
-      Some(JArr(changes)) ->
-        match get(changes, 0) {
-          Some(c) -> { st = update_doc(st, ostr(td, "uri"), ostr(c, "text")) }
-          None -> ()
-        }
-      _ -> ()
-    }
+  } else if method == "textDocument/didOpen" || method == "textDocument/didChange" {
+    # `update_of` claimed every sync notification that carried a document, so
+    # what reaches here is one that carried none — nothing to analyse, which
+    # is what this arm did with it before the read loop debounced.
+    ()
   } else if method == "textDocument/didClose" {
     let td = get_or_null(params, "textDocument")
     let uri = ostr(td, "uri")

@@ -7,11 +7,14 @@
 > 原语上。LSP-01 的落地形态与本文原方案相反：不换 JDK（缝 1 之后 `lsp.dawn` 是零 `use java`
 > 的共享前端），而是把手写 decoder 改成校验的。LSP-04 的设计题已于 2026-08-04 用两个探针
 > 答完（`io_stdin_ready(timeout_ms) -> Bool !io`，语义 B），验收实验 `scripts/lsp-liveness.py`
-> 的三条断言已进 CI 并被变异体逐条打红。**2b 与 2c 已于 2026-08-05 落地**：C 后端两个
-> stdin 读取器都改走 `read(2)`（不再有 stdio 缓冲挡在就绪查询前面），`io_stdin_ready` 进了
-> 原语表并在两个后端上答出同一张真值表。**只剩 2d（debounce 本身）**，它卡在种子代际上——
-> `selfhost/src` 只准用当前种子已支持的特性，所以 `lsp.dawn` 要等 2b/2c 发一个 release
-> 并 bump 种子之后才能调用 `io.stdin_ready`。
+> 的三条断言已进 CI 并被变异体逐条打红。**2b / 2c / 2d 已于 2026-08-05 全部落地**：C 后端
+> 两个 stdin 读取器都改走 `read(2)`（不再有 stdio 缓冲挡在就绪查询前面），`io_stdin_ready`
+> 进了原语表并在两个后端上答出同一张真值表，`lsp.dawn` 的读循环 debounce 了。
+> **LSP-04 至此关账**（§六的 3 与 4 是尾款：`$/cancelRequest` 与窗口取值的实测）。
+>
+> **2d 的落地被种子代际隔在 2b/2c 之后一代**：`selfhost/src` 只准用当前种子已支持的特性
+> （docs/bootstrap.md §种子推进协议 3），所以 `lsp.dawn` 调 `io.stdin_ready` 必须等 2b/2c
+> 发一个 release、bump `scripts/seed-release.txt` 之后才编得动。
 > 台账见 [native-plan-overlap.md](native-plan-overlap.md) §3.7——其「换 JDK」处方已作废。
 
 
@@ -352,6 +355,80 @@ glob 是禁的。
 `$/cancelRequest` 在这个模型下可以直接**回一个 `RequestCancelled` 错误**——
 因为没有真的在跑的请求可以取消，请求要么还没开始要么已经完成。这是合规的。
 
+### 2.2.4 debounce 落地（§六 2d，2026-08-05）
+
+**形状与 §2.2 原方案有一处不同**：没有给 `read_message` 加 `Idle`，就绪查询放在**主循环**
+里。三支照旧，只是第一支的条件改成「有待分析的文本」：
+
+```
+loop:
+  take = if 有 pending { io.stdin_ready(150) } else { true }   # 无事可做 → 阻塞读
+  if take: 读一帧
+             ├─ didOpen/didChange → 只记进 pending（同一 uri 覆盖，不同 uri 先冲掉旧的）
+             └─ 其它任何东西      → 先 flush pending，再 handle
+  else:    窗口走完没等到东西 → flush pending
+```
+
+**关键的一条是「其它任何东西先 flush」**，它让「推迟」在协议上完全不可观测：所有读分析结果
+的答复（hover / definition / completion / symbols / formatting）和所有关于文档的输出都要
+过这一点。实测的后果是 `selfhost-lsp-diff.sh` 的 50 条消息**逐字节不变**（两个后端各跑一
+遍），因此**没有 `Emit-Change(lsp)`**——转录里没有连着两条同 uri 的更新，唯一能被合并的地方
+不存在。
+
+**generation 计数没有做，因为不需要**：单线程 + 「至多一个 pending」已经让「旧分析盖新状态」
+无从发生。计数是用来在并发下辨认过期结果的，这里没有并发。
+
+#### 两条新断言与它们的变异体（`scripts/lsp-liveness.py`）
+
+| 断言 | 真服务器 | 变异体 | 变异体实测 |
+|---|---|---|---|
+| `debounce` 分析次数 < 编辑次数 | PASS `1 analyses for 5 edits 60ms apart` | `DEBOUNCE_MS = 0` | **FAIL `5 analyses for 5 edits`** |
+| `freshness` 最后那次分析是最新文本 | PASS `the last diagnostics name zzz_5` | pending「先到的赢」而不是「后到的覆盖」 | **FAIL `they name [1] -- the analysis that ran was of an edit the client had already replaced`** |
+
+两个变异体互不掩护：`DEBOUNCE_MS = 0` 的 `freshness` 是 PASS 的（它把每一次都分析了，最后
+一次自然最新），「先到的赢」的 `debounce` 是 PASS 的（确实只分析了一次）。这正是把它们分成两
+条而不是一条的理由。
+
+**实验的 gap 是整个实验**，两条地板都是量出来的，不是估的：
+
+- **gap = 0（一次性灌进管道）时，两个变异体都合并成 1 次**——帧在循环发问之前就已经躺在
+  管道里，窗口多大都无所谓。**一个没有间隔的 debounce 实验什么也证明不了**，这条值得单独记。
+- **gap ≥ 20ms** 时 `DEBOUNCE_MS = 0` 才稳定回到 5/5；再小，第 k 次分析还没跑完第 k+1 次
+  编辑就到了，变异体会「碰巧」合并。
+- gap 必须 < 窗口，否则真服务器**本来就该**每次都发。
+
+取 60ms：高于地板 3 倍、低于窗口 2.5 倍，也差不多是快手打字的间隔。
+
+#### 2a 的窗口定义在 debounce 之后仍然成立
+
+`lsp-liveness.py` 用的是「等 stdout 静止 1.5s」而不是定长等待。落地后跑过：`liveness` 与
+`idle` 都 PASS（`idle` 0.01–0.03s CPU / 6s 窗口），说明静默窗口确实开得出来。定长在这一侧
+会错的原因和它在另一侧会错的原因是同一个——**debounce 之后三条 didChange 只答一次**，
+定长会把窗口开在还没答的时候。
+
+#### 顺带量出来的：`hangup` 从 0.06s 变成 0.21s（JVM）/ 0.02s（native）
+
+多出来的是那一次被推迟的分析：客户端关掉 stdin 之后，`stdin_ready` 立刻回 `false`（管道
+POLLHUP、无 POLLIN），循环先把 pending 分析完，再去做那次阻塞读，读到 0 字节才退出。
+上界 5s，留了 20 倍以上。
+
+#### 「JVM 那条 arm 没门禁」这个洞，2d 关上了
+
+§2.2.1 末的表里记着：2c 单独落地时，删掉 `rtclasses.dawn` 的 `gen_io_stdin_ready`
+**全绿**——`classfile-verify` 对**已发出的 `dawn/rt` 类缺成员**是「计数不判红」的
+（`reach.dawn` 会有意裁剪，那笔账归 `scripts/table-freight`），而那时也没有调用点。
+2d 之后 `lsp.dawn` 就是调用点，同一个变异体实测：
+
+```
+hangup:    PASS -- exited 0.00s ...          ← 又一次「绿没有信息量」：崩了的进程退得最快
+liveness:  FAIL -- no publishDiagnostics in 60s
+idle:      FAIL -- server was gone before the window opened
+debounce:  FAIL / freshness: FAIL
+```
+
+抓住它的是 `lsp-liveness.py`（五条里红四条）与 `selfhost-lsp-diff.sh`，**不是**
+`classfile-verify`。
+
 ### 2.3 缓存留到第二步
 
 `analyze_document` 每次重跑 lex/parse/module graph。缓存它们需要失效判定
@@ -411,7 +488,7 @@ LSP-04 的验收不在这条线上：`selfhost-lsp-diff.sh` 比的是**输出字
 | 2a ✅ | `scripts/lsp-liveness.py`：挂断 / 存活 / 空转三条断言进仓库，进 `gates.yml` 的 `test` job | **已完成**（2026-08-04）。三条在真 `bin/dawn lsp` 上各被变异体单独打红过，阈值与实测见 §2.2.3 |
 | 2b ✅ | `runtime/c/dawn_rt.c`：`io_read_stdin` 从 `fread` 换成 `read(2)`（`io_read_line` 同步） | **已完成**（2026-08-05）。变异体：换回 `fread` 后，6 字节输入读掉 5 字节，就绪查询答 `false`，而第 6 字节确实还在（下一次读拿得到）——正是设计预言的那一格 |
 | 2c ✅ | 新 intrinsic `io_stdin_ready(timeout_ms) -> Bool !io` | **已完成**（2026-08-05）。落地点的实际清单与逐点变异体见 §2.2.1 末；9 处里 1 处是错的、另有 4 处漏记。`intrinsic-parity.py` 不覆盖它 |
-| 2d | `selfhost/src/lsp.dawn`：主循环 debounce + **无事可做时阻塞读**那一支 | 「连续 N 次 didChange 只分析 1 次」＋ 2a 的三条断言。**卡在种子代际**：`selfhost/src` 只准用当前种子已支持的特性（docs/bootstrap.md §种子推进协议 3），而 2c 的 intrinsic 要等 2b/2c 发一个 release、bump `scripts/seed-release.txt` 之后才能自用 |
+| 2d ✅ | `selfhost/src/lsp.dawn`：主循环 debounce + **无事可做时阻塞读**那一支 | **已完成**（2026-08-05）。`lsp-liveness.py` 增两条断言（`debounce` / `freshness`），各有自己的变异体；两个后端的 lsp 转录仍与 v0.50.0 **逐字节相同**。见 §2.2.4 |
 | 3 | `selfhost/src/lsp.dawn`：`$/cancelRequest` 回 `RequestCancelled` | 协议合规 |
 | 4 | 实测 debounce 窗口，把 150ms 换成有出处的数字 | 记录 harness 与数据 |
 

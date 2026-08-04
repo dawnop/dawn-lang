@@ -1,23 +1,28 @@
 #!/usr/bin/env python3
-"""Three assertions about the language server's *scheduling*, which every other
+"""Five assertions about the language server's *scheduling*, which every other
 LSP gate is blind to.
 
 scripts/selfhost-lsp-diff.sh compares output bytes; a server that answers
 correctly and then spins a core, or one that never notices its client left, is
 byte-identical to a well-behaved one. Those are the two failure modes a
 debounced read loop can introduce (docs/audit/lsp-robustness-design.md §2.2),
-so the experiments exist *before* the loop changes, recording today's numbers as
-the baseline the change has to hold.
+so the first three experiments existed *before* the loop changed, recording the
+undebounced numbers as the baseline the change had to hold.
 
-  hangup   after the client closes its end, the server exits within a limit.
-  liveness before the silent window starts, the server has already published
-           diagnostics.
-  idle     over the silent window, the server's CPU time stays near zero.
+  hangup    after the client closes its end, the server exits within a limit.
+  liveness  before the silent window starts, the server has already published
+            diagnostics.
+  idle      over the silent window, the server's CPU time stays near zero.
+  debounce  a burst of edits is analysed fewer times than it has edits.
+  freshness the one analysis it does run is of the *newest* text.
 
-The three are reported separately and on purpose. `liveness` is load-bearing
-rather than decorative: `sh -c 'cat >/dev/null'` passes `hangup` and `idle`
-outright, because doing nothing is both prompt and cheap. Only `liveness`
-separates "quiet because well-behaved" from "quiet because it never worked".
+They are reported separately and on purpose, because each is red for its own
+reason and none of them covers another. `liveness` is load-bearing rather than
+decorative: `sh -c 'cat >/dev/null'` passes `hangup` and `idle` outright,
+because doing nothing is both prompt and cheap. `debounce` and `freshness`
+split the same way -- a loop that coalesced by keeping the *first* pending edit
+instead of the last would pass `debounce` and publish stale diagnostics
+forever.
 
 Usage:  scripts/lsp-liveness.py [server command...]      (default ./bin/dawn lsp)
 
@@ -65,9 +70,43 @@ STARTUP_LIMIT_S = 60.0
 # CPU, which is exactly the pair the idle assertion looks at.
 STDOUT_QUIET_S = 1.5
 
+# ---- the debounce experiment's numbers ------------------------------------
+#
+# EDITS keystrokes, KEYSTROKE_GAP_S apart, against a DEBOUNCE_MS window that
+# lsp.dawn currently sets to 150.
+#
+# The gap is the whole experiment, and it has to sit between two floors that
+# were measured (2026-08-05, ./bin/dawn lsp on this box) rather than guessed:
+#
+#   gap 0 (one burst)  every variant answers once, debounced or not -- the
+#                      frames are already in the pipe when the loop asks, so
+#                      the size of the window cannot matter. A gapless
+#                      experiment proves nothing.
+#   gap >= 0.02        a `DEBOUNCE_MS = 0` mutant publishes 5 of 5 again;
+#                      the debounced server still publishes 1. Below that the
+#                      analysis of edit k is still running when edit k+1
+#                      lands, so the mutant coalesces by accident.
+#   gap < window       otherwise the real server is *supposed* to publish
+#                      every time and this asserts the wrong thing.
+#
+# 60 ms is 3x above the floor and 2.5x below the window, and it is also about
+# what a fast typist actually does.
+EDITS = 5
+KEYSTROKE_GAP_S = 0.06
+
+# How long to let the coalesced analysis land after the last edit. The window
+# plus one analysis; 3s is ~10x the observed total.
+DEBOUNCE_SETTLE_S = 3.0
+
 TICKS = os.sysconf("SC_CLK_TCK")
 DOC_URI = "file:///tmp/dawn-lsp-liveness.dawn"
 DOC_TEXT = "pub fn main() -> Unit = ()\\n"
+
+# The edit texts carry a marker each, so the *content* of the surviving
+# analysis is checkable and not just its count: version k names `zzz_k`, which
+# comes back as an undefined-function diagnostic naming it.
+def edit_text(version):
+    return "pub fn main() -> Unit = zzz_%d()\\n" % version
 
 
 def frame(body):
@@ -83,11 +122,11 @@ HANDSHAKE = (
 )
 
 
-def did_change(version):
+def did_change(version, text=DOC_TEXT):
     return frame('{"jsonrpc":"2.0","method":"textDocument/didChange","params":'
                  '{"textDocument":{"uri":"%s","version":%d},'
                  '"contentChanges":[{"text":"%s"}]}}'
-                 % (DOC_URI, version, DOC_TEXT))
+                 % (DOC_URI, version, text))
 
 
 def cpu_seconds(pid):
@@ -269,6 +308,73 @@ def exp_idle(cmd, results):
         srv.kill()
 
 
+def exp_debounce(cmd, results):
+    """A burst of edits, and what the server does with it.
+
+    Two assertions off one session, and they fail for opposite reasons:
+
+      debounce   fewer analyses than edits. Red when the loop answers every
+                 keystroke -- which is what the server did before LSP-04, and
+                 what a `DEBOUNCE_MS = 0` mutant of it does again (5 of 5,
+                 measured).
+      freshness  the surviving analysis is of the last edit. Red when the loop
+                 coalesces toward the *oldest* pending text instead of the
+                 newest -- a mutant that keeps `debounce` perfectly green
+                 while pinning the editor's diagnostics to a text the user
+                 left several keystrokes ago.
+
+    Counting starts after the first publishDiagnostics rather than from the
+    process start, so `didOpen`'s own analysis (and any warm-up before it) is
+    outside the measurement: what is being counted is edits-to-analyses.
+    """
+    srv = Server(cmd)
+    try:
+        srv.send(HANDSHAKE)
+        if srv.await_output(b"publishDiagnostics", STARTUP_LIMIT_S) is None:
+            for name in ("debounce", "freshness"):
+                results.append((name, False,
+                                "no publishDiagnostics in %.0fs -- the server "
+                                "never got as far as the edits"
+                                % STARTUP_LIMIT_S, head_of_stdout(srv)))
+            return
+        before = srv.stdout_bytes().count(b"publishDiagnostics")
+        for v in range(1, EDITS + 1):
+            srv.send(did_change(v, edit_text(v)))
+            time.sleep(KEYSTROKE_GAP_S)
+        time.sleep(DEBOUNCE_SETTLE_S)
+
+        data = srv.stdout_bytes()
+        published = data.count(b"publishDiagnostics") - before
+        ok = published < EDITS
+        results.append(("debounce", ok,
+                        "%d analyses for %d edits %.0fms apart"
+                        % (published, EDITS, KEYSTROKE_GAP_S * 1000),
+                        None if ok else head_of_stdout(srv)))
+
+        # the diagnostics of the last frame the server wrote
+        last = data.rfind(b"publishDiagnostics")
+        tail = data[last:].decode("utf-8", "replace")
+        newest = "zzz_%d" % EDITS
+        if published == 0:
+            results.append(("freshness", False,
+                            "nothing was published after the edits, so there "
+                            "is no analysis to be fresh", head_of_stdout(srv)))
+        elif newest in tail:
+            results.append(("freshness", True,
+                            "the last diagnostics name `%s`, the newest edit"
+                            % newest, None))
+        else:
+            stale = [k for k in range(0, EDITS) if ("zzz_%d" % k) in tail]
+            results.append(("freshness", False,
+                            "the last diagnostics do not mention `%s`; they "
+                            "name %s -- the analysis that ran was of an edit "
+                            "the client had already replaced"
+                            % (newest, stale or "no edit at all"),
+                            "        stdout: " + tail[:400].replace("\n", " ")))
+    finally:
+        srv.kill()
+
+
 def main():
     if not os.path.exists("/proc/self/stat"):
         print("lsp-liveness: needs /proc (Linux); the idle assertion has no "
@@ -283,6 +389,7 @@ def main():
     results = []
     exp_hangup(cmd, results)
     exp_idle(cmd, results)
+    exp_debounce(cmd, results)
     for name, ok, why, detail in results:
         print("%-9s %s -- %s" % (name + ":", "PASS" if ok else "FAIL", why))
         if detail:
@@ -291,7 +398,7 @@ def main():
     if bad:
         print("lsp-liveness: FAILED (%s)" % ", ".join(bad))
         return 1
-    print("lsp-liveness: OK (hangup, liveness, idle)")
+    print("lsp-liveness: OK (hangup, liveness, idle, debounce, freshness)")
     return 0
 
 
