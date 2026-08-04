@@ -17,7 +17,8 @@
 > 动码前的**调研与方案**，不是设计定稿。
 > 覆盖 codebase-audit.md 的 **PKG-02（P1，源码包那一半）** 与 **PKG-04（P2）**。
 > （种子 jar 的 checksum、下载与解压的资源上限已于 2026-07-25 落地。）
-> 状态：proposed，两半都可做，但**PKG-02 优先于 PKG-04**——理由见下。
+> 写作当时的状态是「proposed，两半都可做，PKG-02 优先于 PKG-04」，理由见下；
+> 两半都已落地，现状以文首那行为准。
 >
 > [`../native-backend-plan.md`](../native-backend-plan.md) §1 定了 native 上
 > `[java-deps]`/coursier **直接报不支持**，拉包 shell 出去调 `curl`。两个后果：

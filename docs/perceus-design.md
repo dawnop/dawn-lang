@@ -1,6 +1,10 @@
 # Perceus 设计（S4 Phase 4）
 
-> 状态：**current** —— native 的内存管理设计，五刀已全部落地（§14.x 有关账记录），仍是该子系统的权威说明。
+> 状态：**current** —— native 的内存管理设计，五刀（1 / 2 / 2b / 3 / 4）已全部落地，
+> 关账记在 **§8 的刀表**（补充实测在 §5.7 字符串入账、§6.1 落地形状、§6.3 `CBorrowed` 了结）。
+> 仍是该子系统的权威说明。
+> （这行原本把关账记指到「§14.x」——本文只有 §1–§9，带 §14.x 的是
+> [native-backend-plan.md](native-backend-plan.md)。）
 >
 > 对应 [`native-backend-plan.md`](native-backend-plan.md) §4 Phase 4。那里三段话定了
 > 方向（精确 RC + 复用分析、非原子、无环回收器、必配 `--rc=leak`）；这份是动码前的设计，

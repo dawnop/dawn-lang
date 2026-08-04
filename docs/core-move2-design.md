@@ -1,6 +1,10 @@
 # Core Move 2：控制流 / match lowering 的提取——结账与残余
 
-> 状态：**current** —— 本文是一次**盘点**，不是一份待做的方案。
+> 状态：**historical —— 已结账**。本文起初是一次**盘点**（Move 2 的主体已随 Core IR
+> Phase 0 落地），它盘出来的那笔残余也已经结掉：三条开放决策于 2026-07-31 全部裁决，
+> `defer` / `CSProtect` **关档不做**，替代形态（`bracket` intrinsic + `with` 语句 +
+> `fn` 尾闭包）随 v0.39.0 / v0.40.0 发布，落地记在 §6，语义条文进了 spec。
+> §2.3–2.5 的图纸存档备用，推翻需新证据。
 >
 > [`runtime-intrinsics-design.md`](runtime-intrinsics-design.md) §8 把「把 emit 里的
 > lowering 抽成 tast→tast pass」排成三步 Move，Move 2 是控制流 + match。写下那三步的

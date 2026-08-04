@@ -4,16 +4,18 @@
 > 但实测发现它的前提错了——**在现有效果系统下，写不出一个纯的 FFI 包装函数**。本文补上那个
 > 缺失的地基（纯 FFI），并给出 `unsafe_pure` 的设计与整条迁移的实施计划。
 >
-> **状态（2026-07-18）**：**阶段1 + 阶段2 已实现并全绿（1197 测试，含 §9.2 spike）**。
+> **状态：historical** —— 四个阶段全部实现，整条迁移于 **2026-07-22 关账**
+> （§十四的「终局数字修订」+ `args` 收口判词），2026-07-27 的 S2.4 收束（§十八）是最后一笔。
 > 阶段1 = `unsafe_pure` 表达式块（效果屏蔽 / 拒效果变量 / 多余 lint / codegen 透明），spec §6.4 已改写；
-> 阶段2 = std 打进 jar 资源 + 隐式可见 + 类随 shared 一起出（`dawn run`/`dawn build` 实测链得上）。
-> **阶段3 已实现**（route C = 反射执行被担保的 Java 调用 + Comptime 接上 std），**阶段4 已开工**
-> （批 A 首枪 `substring`，§十）。于是「纯 ⟺ 可 comptime 折叠」在迁移中得以保持，String 组余下的
-> 不再被 comptime 阻塞。
+> 阶段2 = std 打进 jar 资源 + 隐式可见 + 类随 shared 一起出；阶段3 = route C（反射执行被担保的
+> Java 调用 + Comptime 接上 std）；阶段4 = 批 A（String 组）/ 批 B（高阶列表）/ 批 C（io 半边 +
+> 排序族）逐批迁移，每批的实测在 §十起的施工日志里。
 >
-> **修订（2026-07-27，S2.4）**：route C 现在需要 `--comptime-ffi`，默认关；`unsafe_pure` 在
-> 全生态已零使用点。§十八 记了勘察、三个方向的证伪与落地的三刀——**先读那节**，本文前面
-> 关于「std 靠 unsafe_pure 转发」的写法都已被 intrinsic 契约取代。
+> **先读 §十八**：route C 今天要 `--comptime-ffi`、默认关，`unsafe_pure` 在全生态已零使用点；
+> 本文前面关于「std 靠 unsafe_pure 转发」的写法都已被 intrinsic 契约取代
+> （[`runtime-intrinsics-design.md`](runtime-intrinsics-design.md)）。§十四那句「现表 46，
+> 且到达端态」是 2026-07-22 的计数，端态那半已被后续推翻——今天的数与推翻它的三个提交
+> 见 [`builtins-to-stdlib.md`](builtins-to-stdlib.md) 文首。
 
 ## 一、结论（TL;DR）
 

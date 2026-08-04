@@ -2,8 +2,11 @@
 
 > 动码前的**调研与方案**，不是设计定稿。
 > 覆盖 codebase-audit.md 的 **LANG-06（P2）** 与 **LANG-07（P2，加载范围那一半）**。
-> 状态：**proposed，可做**——与 [`../native-backend-plan.md`](../native-backend-plan.md)
-> 完全不重合（纯 checker 前端的事，不碰 emit、不碰运行时）。
+> 状态：**已落地（proposed → done，2026-07-30 当日结清）**。LANG-06 的四个位置
+> ——类型 `ee9bb0a`、模式 `6011d81`、常量 `61ce3a0`、表达式位构造器 `5a58abc`（提交标题
+> 就是 "LANG-06 is complete"）——与 LANG-07 的 `--closure`（`19c2a73`）同日发出；
+> 规范条文进了 spec §10.3 与 §10.4，双后端语料 `scripts/spike-native/qual_const`、
+> `qual_ctor` 钉住。落地与本文的偏离记在 §一末尾。§四「不做的」四条未复议，仍有效。
 > 台账见 [native-plan-overlap.md](native-plan-overlap.md)。
 
 两条都在问「模块这个边界到底管什么」：一条是**引用**模块里的东西时能写什么，

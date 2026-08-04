@@ -3,10 +3,13 @@
 > 动码前的**调研与方案**，不是设计定稿。
 > 覆盖 codebase-audit.md 的 **LSP-01（P1）**、**LSP-02（P1）**、**LSP-04（P2）**。
 > （LSP-03「畸形 frame 让服务器静默退出」已于 2026-07-25 修复。）
-> 状态：**proposed，可做**——改法与
-> [`../native-backend-plan.md`](../native-backend-plan.md) 不重合，
-> 但 §四里「不留 fallback」那条的**理由**被它作废了，已改写。
-> 台账见 [native-plan-overlap.md](native-plan-overlap.md) §3.7。
+> 状态：**LSP-01 / LSP-02 已落地（2026-07-30），LSP-04 未落地**——它卡在一个缺失的运行时
+> 原语上。LSP-01 的落地形态与本文原方案相反：不换 JDK（缝 1 之后 `lsp.dawn` 是零 `use java`
+> 的共享前端），而是把手写 decoder 改成校验的。LSP-04 的设计题已于 2026-08-04 用两个探针
+> 答完（`io_stdin_ready(timeout_ms) -> Bool !io`，语义 B），验收实验 `scripts/lsp-liveness.py`
+> 的三条断言已进 CI 并被变异体逐条打红；欠的是 §五落地表的 2c（新 intrinsic 的九个落地点）
+> 与它的前置（C 后端 `io_read_stdin` 从 stdio 换 `read(2)`）。
+> 台账见 [native-plan-overlap.md](native-plan-overlap.md) §3.7——其「换 JDK」处方已作废。
 
 
 > **2026-07-30 改判后落地（LSP-01 的 UTF-8 半）**：台账 §3.7 的「换 JDK」处方被当日

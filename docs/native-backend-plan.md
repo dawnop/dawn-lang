@@ -1,7 +1,15 @@
 # native 后端计划
 
-> 状态：**动工计划(2026-07-25 定稿)**。上游决策见
-> [llvm-backend-research.md](llvm-backend-research.md) §10、
+> 状态：**current —— 计划 2026-07-25 定稿，Phase −1…6 已全部完成**，本文现在是它的落地
+> 日志（进度表在 §7，逐阶段的关账记在 §14.x）。**Phase 6（native 自举）于 2026-07-30 达成**
+> ——§14.23，提交 `83def2d`，门禁 `scripts/native-fixpoint.sh`（A==B、B==C，外加一次裸目录
+> smoke）。重排后的 S0–S4 也已全部结清（§11.4）。
+>
+> 仍开着的只有两件：Phase 5 的 `use c` FFI（**明确推迟**，判词见
+> [native-driver-plan.md](native-driver-plan.md) §2 的 K-B6）与 S5「std 收口」
+> （见 [std-audit.md](std-audit.md)）。
+>
+> 上游决策见 [llvm-backend-research.md](llvm-backend-research.md) §10、
 > [runtime-intrinsics-design.md](runtime-intrinsics-design.md)、
 > [collections-dejava-research.md](collections-dejava-research.md) §9。
 > 本文只回答一件事:**从今天到 native 自举，按什么顺序做、每步怎么验。**

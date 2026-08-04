@@ -10,7 +10,9 @@
 > 终局只有一对屏障，载荷是 `ForeignError`，不保留 String 版本。
 > **B 步也已完成——三期全部合并**（阶段 1 `cast_e` 过渡内建、阶段 2 调用点迁移 +
 > 表项翻转、阶段 3 调用点迁回并删除过渡拼法），`cast` 的失败从此是值，
-> 分期见 §6.10、收尾见 §6.12；C2 步冻结。**
+> 分期见 §6.10、收尾见 §6.12；**C2 步已于 2026-07-31 关档「不做」**——`bracket` 改以运行时
+> intrinsic 落地（v0.39.0），冻结时那句「codegen intrinsic 会把 `bracket` 绑死在 JVM 上」
+> 在 `catch_fault` 之后不成立，见 §6.12 与 [`../core-move2-design.md`](../core-move2-design.md)。**
 > 分期理由与每期内容见下方 §六「落地分期」——**那一节是现状，第二节是意图**，
 > 两者冲突时以第六节为准。第二、五节里几处与代码对不上的说法，第六节开头逐条记了。
 > [`../native-backend-plan.md`](../native-backend-plan.md) §1 定了 native 的 panic 是

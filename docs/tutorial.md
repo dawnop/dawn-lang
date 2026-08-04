@@ -6,9 +6,10 @@
 native-image 直接得到。本教程带你从第一个程序走到调 Java。
 
 > 本文的 `dawn` 围栏代码块曾由 Kotlin 侧的 `TutorialTest` 机械抽取、编译、运行并核对
-> `output`。那套测试随 Kotlin 实现一起归档在 `kotlin-final` tag，**当前 CI 没有等价门禁**
-> ——所以这些代码块现在是人工维护的，可能落后于语言。发现不对请开 issue。
-> （恢复这个门禁列在 docs/codebase-audit.md 的 TEST-04。）
+> `output`；那套测试随 Kotlin 实现一起归档在 `kotlin-final` tag。**门禁已经补回来了**
+> （docs/codebase-audit.md 的 TEST-04）：`scripts/doc-check.py` 是 CI 的一个 job，
+> 把本文标了 ```` ```dawn run ```` 的块逐个真编真跑。**没标 `run` 的块仍是人工维护的**，
+> 可能落后于语言——正确性重要的示例请自己标上。
 
 ---
 

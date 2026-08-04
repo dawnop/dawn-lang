@@ -1,6 +1,9 @@
 # 给标量一个自己的身份：`Char` 与 newtype
 
-> 状态：**驳回（proposed → rejected）** —— 见文首 2026-07-30 重判：机制已由 `opaque type` 提供。
+> 状态：**步 1–3 驳回（proposed → rejected）** —— 见文首 2026-07-30 重判：机制已由
+> `opaque type` 提供。**但 LANG-04 本身还是活账**：`'a'` 仍是 `Int`，
+> `opaque type Char = Int` 与 `char_of` 全仓零命中；它等的 Phase 6 已于 2026-07-30 出口，
+> 前提解除、活没干（步 4，见文末）。
 >
 > 动码前的**调研与方案**，不是设计定稿。
 > 覆盖 codebase-audit.md 的 **LANG-04（P2）** 与 **LANG-05（P2）**。

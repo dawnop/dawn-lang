@@ -1,9 +1,26 @@
 # std 审计:交付方式调研、优雅性判据、现状体检与 S5 开题
 
-> 状态:**开题记录,未排期**。写于 2026-07-30,S4(native 自举)进行中。
+> 状态:**S5 已开工并完成大半;本文降为判据与欠账台账**。写于 2026-07-30(S4 进行中),
+> 那句「动手等 S4 落地后排期」的等待条件**当日就到期了**(native fixpoint B==C)。
+> §4 骨架五条的今天:**4.1 分层已做**(`bf87ef4` fspath 降成 `packages/fspath`;
+> `b346e7b` 用 `internal_std_modules` 拦住 hamt/pvec)、**4.2 迭代协议已 trait 化**
+> (`5d45b1e` + `05ff60c`,`Iter` 成第五个 prelude trait,按名解析的 `iter_sig` 退休)、
+> **4.5 缝 3 已做**(`b72eabd`)、**4.4 做了一半**(`912a984` 的 `dawn doc --stdlib` 已出,
+> std 的 go-to-def 未修——根因仍是 `lspq.dawn` 的 `module_ast_by_class` 交回
+> `def_path=None`)、**4.3 io 表面设计整条未动**,而它现在挡着 LSP-04
+> ([audit/lsp-robustness-design.md](audit/lsp-robustness-design.md) 要的
+> `io_stdin_ready` 正是这条该产出的东西)。
+>
+> **另有一批 std API 补件已于 2026-07-31–08-02 落地,走的是 re-audit 的 RD 通道
+> (§六 triage 的 C 批并入 #78),不是本文 §4 的条目**:spec §4.8 的断言/问询/钳位三判据
+> (`fd5e0bf`)、str 词缀族(`575076b`)、list 量词层(`4f74cba`)、bytes hex + base64
+> (`4f7f4d3`)、cursor↔Int 桥(`677762b`)、fspath 四函数(`604c879`),另新增 `std/fmt`
+> (`b6cb9808`)。**仍在册的欠账**:§4.3 整条、§4.4 的 go-to-def、§4.5 记的「`--std` 目录
+> 优先」skew 口子,以及等破坏窗口的 RD-06 命名族与 RD-09 参数序。
+> §5 的两条纪律仍生效;§6「为什么现在不动手」整节已成历史。
+>
 > 起因是缝 3(「native 编译器怎么拿到 std」,native-backend-plan §14.10)的调研,
 > 调研出的判据回头照了一遍自己的 std,照出的东西够格开一个 S5。
-> **本文先立判据、记欠账;动手等 S4 落地后排期**(理由见 §5)。
 
 ## 1. 调研:其他语言的编译器怎么拿到 std
 

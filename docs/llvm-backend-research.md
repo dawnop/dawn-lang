@@ -1,7 +1,10 @@
 # LLVM / native 后端调研
 
-> 状态：**已从调研转入动工准备(2026-07-25)**。主线目标已定为**开搭 native 后端**,de-Java(集合)降级成它的
-> 子任务。§10 记录了这一轮拍板的全部决策与当前动作。本文其余部分是原调研——对现有代码的量化盘点 + 硬决策
+> 状态：**historical —— 调研记录(2026-07-25)**。§10 拍下的板已全部执行完,那一轮的「当前动作」
+> 早已结束:codegen 目标选的是**发 C**（不是 LLVM IR，全仓没有 LLVM 发射器），后端已建成并自举
+> ——发射器 `selfhost/src/emitc.dawn`、运行时 `runtime/c/dawn_rt.c`、驱动 `selfhost/src/nmain.dawn`
+> （即 `dawnc`），`scripts/native-fixpoint.sh` 验 B==C。**现状与计划看
+> [native-backend-plan.md](native-backend-plan.md)**;本文读作调研——对当时代码的量化盘点 + 硬决策
 > 的带推荐结论;`§4` 三个决策（发 C vs LLVM IR、RC vs region、UTF-8）是那一轮的重点深挖。
 > 相关:[runtime-intrinsics-design.md](runtime-intrinsics-design.md)(intrinsic 契约=后端接缝)、
 > [seq6-research.md](seq6-research.md)(装箱/物化实测)、[spec.md](spec.md)(语义)、[bootstrap.md](bootstrap.md)(种子)。

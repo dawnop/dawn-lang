@@ -1,7 +1,15 @@
 # 审查待办：设计文档索引与修复顺序
 
 > 状态：**current**。这是 2026-07-25 那次全仓审查（[../codebase-audit.md](../codebase-audit.md)）
-> 剩下的 28 条待办的作业计划。审查本身已经处置了 40 条、驳回 8 条。
+> 遗留待办的作业计划。审查本身已经处置了 40 条、驳回 8 条。
+>
+> **这行不再报待办总数。**「28 条」是 07-25 那天的定格（`../codebase-audit.md` §0 自己写明
+> 不重新计数），而 07-30 的第二轮复审又带进 53 条走另一套 ID 空间的发现——一个数字说不清
+> 读者该看哪个池子，只会年久失修。**今天真正没动的是三条线**：`packages/web` 2.0
+> （WEB-03/04/06/07/10 + WEB-09 的破坏半，[web-api-v2-design.md](web-api-v2-design.md)，
+> 本目录唯一仍是 proposed 的方案）、LSP-04 的 debounce（卡在缺失的 `io_stdin_ready` 原语上，
+> 验收已先进 CI）、LANG-04 的 `'a'` → `Char`（Phase 6 已出口，前提解除、活没干）。
+> 其余或已落地、或经重估裁决不做，逐条见 §一的表。**表与文档头部冲突时以文档头部为准。**
 >
 > **2026-07-30 合并与解冻**：分支于当日选择性合入 main（合并提交 `fa2a85f`，
 > 逐条对着已前进 30+ 提交的主线重判——保留仍成立的、按今日形状重实现的、
@@ -14,8 +22,10 @@
 > 闸）覆盖大半，重判后再动。
 >
 > 本文回答两个问题：**每条待办的方案在哪份文档里**，以及**按什么顺序做**。
-> 每份设计文档都是 proposed 状态——按 CONTRIBUTING.md 第一条，动码前先写下来，
+> 这些文档当初都是 proposed——按 CONTRIBUTING.md 第一条，动码前先写下来，
 > 因为写下来会杀死一批方案，而在编辑器里杀死方案比在 4000 行 diff 之后便宜。
+> **今天它们已不是清一色的 proposed**：只剩 web-api-v2 一份没动过，其余分别是已落地、
+> 已驳回、已裁决不做、或降级为过程记录与补充材料。逐份见 §一的表。
 
 > **动手前先读 [native-plan-overlap.md](native-plan-overlap.md)。**
 > [`../native-backend-plan.md`](../native-backend-plan.md)（07-25 在 main 上定稿）
@@ -27,23 +37,24 @@
 > 高危论断已逐条独立复核。含 triage：立即可做的正确性小刀 / 待裁决契约件 /
 > 并入已立项任务的侧面 / 独立排期的结构清理 / 等窗口的破坏性变更。
 
-## 一、十份设计文档 + 一份台账
+## 一、十三份文档：方案、台账、裁决与过程记录
 
 | 文档 | 覆盖 | 破坏性 | 状态 |
 |---|---|---|---|
-| [re-audit-2026-07-30.md](re-audit-2026-07-30.md) | 第二轮复审：RP/RX/RC/RD 共 53 条 | 分级见其 §六 | **current（发现记录）** |
+| [re-audit-2026-07-30.md](re-audit-2026-07-30.md) | 第二轮复审：RP/RX/RC/RD 共 53 条 | 分级见其 §六 | **current（发现记录）**，§六已 triage 并逐批消化 |
+| [re-audit-b-decisions.md](re-audit-b-decisions.md) | 复审 B 批八条契约件的一页纸（裁决，非方案） | — | **已裁决（07-31，全部按建议）**，降为过程记录 |
 | [native-plan-overlap.md](native-plan-overlap.md) | 撞车登记（台账，非方案） | — | current |
-| [purity-boundary-design.md](purity-boundary-design.md) | **LANG-01(P0)** ARCH-06 | 是（语言收窄） | 步 1–2 已落地／**步 3 不做** |
+| [purity-boundary-design.md](purity-boundary-design.md) | **LANG-01(P0)** ARCH-06 | 是（语言收窄） | **已关账**：步 1 已落地／步 2 被吞并／**步 3 不做** |
 | [ceval-trampoline-verdict.md](ceval-trampoline-verdict.md) | purity-boundary 步 3 的收益重估（裁决，非方案） | — | **current（不做，07-31）** |
 | [lowered-ir-design.md](lowered-ir-design.md) | ARCH-04 ARCH-01 ARCH-02 ARCH-03 | 否（输出必须逐字节不变） | **整篇降级为补充材料**——§3.2/§3.3 的 `Cx`/`Gen` 方案已被 [../arch-split-design.md](../arch-split-design.md) 复测取代 |
 | [../arch-split-design.md](../arch-split-design.md) | **ARCH-01 ARCH-02**（任务 #88） | 否（发射字节必须逐字节不变） | **已落地**（2026-08-03，十二刀，`4ae6b61`→`94109b7`，见该文 §10）｜余账 **#126** |
 | [error-model-design.md](error-model-design.md) | ERR-02 ERR-03 LANG-02 | 是 | A、B 已落地／**C2 不做**（07-31 关档） |
 | [application-syntax-design.md](application-syntax-design.md) | SYN-02 SYN-03 | 否（语法放宽） | **已落地**（2026-07-30 加法 + 07-31 统一） |
-| [nominal-types-design.md](nominal-types-design.md) | LANG-04 LANG-05 | 部分 | 步 1–3 可做／**步 4 冻结** |
-| [module-access-design.md](module-access-design.md) | LANG-06 LANG-07 | 否 | **可做**（不重合） |
-| [lsp-robustness-design.md](lsp-robustness-design.md) | LSP-01 LSP-02 LSP-04 | 否 | **可做**（理由已改，见台账 §3.7） |
-| [package-integrity-design.md](package-integrity-design.md) | PKG-02 PKG-04 | 否 | **可做**，PKG-02 优先 |
-| [web-api-v2-design.md](web-api-v2-design.md) | WEB-03/04/06/07/09/10 | **是**（packages/web 2.0） | **可做**（native 计划 §7 明确划到范围外） |
+| [nominal-types-design.md](nominal-types-design.md) | LANG-04 LANG-05 | 部分 | 步 1–3 **驳回**（机制已由 `opaque type` 提供）／**LANG-04 仍是活账**，前提已解除 |
+| [module-access-design.md](module-access-design.md) | LANG-06 LANG-07 | 否 | **已落地**（2026-07-30 当日全部发出，spec §10.3/§10.4） |
+| [lsp-robustness-design.md](lsp-robustness-design.md) | LSP-01 LSP-02 LSP-04 | 否 | LSP-01/02 **已落地**（07-30，形态与原方案相反）／**LSP-04 未落地**，卡缺失的 `io_stdin_ready` |
+| [package-integrity-design.md](package-integrity-design.md) | PKG-02 PKG-04 | 否 | **两半均已落地**（`dawn cache verify` + `dawn lock --check`） |
+| [web-api-v2-design.md](web-api-v2-design.md) | WEB-03/04/06/07/09/10 | **是**（packages/web 2.0） | **proposed，未动**（只发了 WEB-09 的不破坏半）——本目录唯一 |
 
 **不需要设计文档的四条**，直接做（见 §三·第 0 批）：
 TEST-01（classfile 过 CheckClassAdapter）、TEST-04（文档 CI）、

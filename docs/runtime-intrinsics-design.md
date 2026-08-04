@@ -1,12 +1,14 @@
 # 运行时 intrinsic 契约：去 Java 与后端可移植的统一重构
 
-> 状态：**current —— 契约已立,分期计划走到第 4 步**(2026-08-03 更正;此处曾长期写着
-> 「规划中,未实现」,与 [docs/README.md](README.md) 的 `current` 冲突,且被文内自己的落地记推翻)。
-> §10 的五步:1(契约显式化)、2(JVM 后端实现契约)、3(std over-intrinsic)**已落地**;
+> 状态：**current —— 契约已立,§10 的五步全部走完**(2026-08-04 更正;此处先写「规划中,未实现」、
+> 后写「走到第 4 步」,两次都被文内自己的落地记推翻——第二次尤其无理由,同一段状态行的下一句
+> 就在说第 5 步已达成)。五步:1(契约显式化)、2(JVM 后端实现契约)、3(std over-intrinsic)**已落地**;
 > 4(非 JVM 后端)由 C 后端完成——§12 就是「契约有了第二份实现」之后被证伪/坐实的清单;
 > 5(native 自举)已于 2026-07-30 达成([native-backend-plan.md](native-backend-plan.md) §14.23,fixpoint B==C)。
 > §8 的三步 Move 表已被 [core-move2-design.md](core-move2-design.md) 更正并结账。
-> 未落地的只剩 §11 里仍标着开放的几项(契约边界画多细、ASM/AdtClassWriter 算不算范围)。
+> §11 的开放决策里,「ASM/AdtClassWriter 算不算范围」已由 A 线关掉——`dawn/tool` 随 `b66f1d7`
+> 退出 jar 与可信底座,见 [jvm-base-plan.md](jvm-base-plan.md);仍开着的只有「契约边界画多细」
+> 这一条倾向性判断。
 >
 > **读到 `rt_intrinsic_target` 请当旧名**:全文(§10/§11 的落地记)提到的这张
 > 「`emit.dawn` 的 `(class, method)` 表」今天不存在。契约声明在

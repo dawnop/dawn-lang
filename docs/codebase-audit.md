@@ -2127,10 +2127,11 @@ README 示例、tutorial、grammar 和 spec 的错误都没有被测试发现。
 
 1. 先修 spec 和 EBNF，再修 README/tutorial。—— **spec/README/tutorial 已修**
    （DOC-01/02/03）；**EBNF 标 historical 而非逐条修**（SYN-04）
-2. 建文档索引、状态和 superseded 机制。—— **索引与状态已修**（`docs/README.md`）；
-   **每篇 front matter 待办**（DOC-10）
+2. 建文档索引、状态和 superseded 机制。—— **已修**（`docs/README.md` 的索引 +
+   每篇文件头的 `> 状态：…` 行，由 `scripts/doc-check.py` 强制；DOC-10 三件事全部落地）
 3. 历史 Kotlin 链接固定到 `kotlin-final` tag。—— **已修**（DOC-06）
-4. 给文档代码、链接、版本和语法 corpus 加 CI。—— **待办**（TEST-04）
+4. 给文档代码、链接、版本和语法 corpus 加 CI。—— **已修**（TEST-04）：
+   `scripts/doc-check.py` 与 `scripts/grammar-corpus/run.sh` 都在 `gates.yml` 里
 
 ## 14. 最终判断
 
@@ -2208,8 +2209,8 @@ WEB-03、WEB-04、WEB-06、WEB-07、WEB-09、WEB-10 —— 一次做完，`packa
 |---|---|---|
 | REL-02 | `Emit-Change` 绑定 target 与 digest | 对差分体系的结构性改动。**现已升为第一优先**——两后端平权之后，不标 target 就说不清改的是谁的输出（台账 §3.8） |
 | TEST-01 | classfile 过 `CheckClassAdapter` | 最便宜的一条，emit 时多包一层。native 计划采纳了它的论证，没采纳这个动作项 |
-| TEST-04 | 文档 CI（fenced block 执行、链接检查、grammar corpus） | 独立一套工作 |
-| DOC-10 | 每篇 front matter、`docs/history/` | 30 余个文件的机械改动，会淹掉本次改动。native 那条线还在加文档，越晚越贵 |
+| TEST-04 | 文档 CI（fenced block 执行、链接检查、grammar corpus） | **已做**：`scripts/doc-check.py`（七项检查）+ `scripts/grammar-corpus/run.sh`，都在 `gates.yml` |
+| DOC-10 | 每篇 front matter、`docs/history/` | **已做**：`docs/history/` 已建；front matter 换成文件头的 `> 状态：…` 行 + 门禁，理由见 `docs/README.md` |
 | ARCH-01/02 | 先把 opcode/descriptor 统一到一个后端模块 | **已做（2026-07-30）**：`selfhost/src/jvmops.dawn`，116 个常量一处，8 个曾有两份定义的 opcode 收成一份；发射字节逐字节不变。**拆 `Cx`/`Gen` 也已做（#88，2026-08-03）** |
 
 **审查漏掉的一条**（登记在台账 §四）：`==` 硬连线 `BEq`、hash 是自动派生的结构

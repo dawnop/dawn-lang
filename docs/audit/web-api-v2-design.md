@@ -4,7 +4,13 @@
 > 覆盖 codebase-audit.md 的 **WEB-03（P1）**、**WEB-04（P2）**、**WEB-06（P2）**、
 > **WEB-07（P2）**、**WEB-09（P2）**、**WEB-10（P2）**。
 > （WEB-01/02/05/08 的安全与协议 bug 已于 2026-07-25 落地。）
-> 状态：**proposed，可做**。**这是一次破坏性 API 变更，按 CONTRIBUTING §六先发 tag。**
+> 状态：**proposed，未动（步 0 除外）**——这是 `docs/audit/` 里唯一还名副其实是 proposed
+> 的方案。2026-07-30 只发了 §2.4 里 WEB-09 的不破坏半（`6a2b8f9`，`router.dawn` 的
+> `validate_routes` + 七条内联 test）；§六落地表的步 1–6 一行未写：`types.dawn` 的
+> `Response` 仍是六字段三路互斥、`server.dawn` 仍拿解码后的 path 派单、header 仍是单值
+> `Map`、仍只有 `serve_app` 没有 `ServerHandle`。此后 `packages/web` 的多次改动全是上游
+> 语言变更（裸箭头 lambda、error-model A/B、charset、`bracket`）扫过来的机械跟随。
+> **这是一次破坏性 API 变更，按 CONTRIBUTING §六先发 tag。**
 > 与 [`../native-backend-plan.md`](../native-backend-plan.md) 不重合——那份的 §7
 > 明确把 `packages/web` 划到 native 范围外（web 需要 C 写的 HTTP 栈 + socket 层）。
 > 台账见 [native-plan-overlap.md](native-plan-overlap.md)。

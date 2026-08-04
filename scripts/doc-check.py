@@ -7,7 +7,7 @@ and the EBNF disagreed with the parser in several places -- all found by a
 human reading, none by a test. This script is the part of that gap a script
 can close.
 
-Six checks, each unambiguous on purpose (a doc lint with false positives
+Seven checks, each unambiguous on purpose (a doc lint with false positives
 gets disabled, and then it protects nothing):
 
   links     every relative Markdown link resolves to a file in the repo
@@ -19,7 +19,9 @@ gets disabled, and then it protects nothing):
             equals `selfhost/src/version.dawn`
   blocks    every fenced block marked ```dawn run / ```dawn compile is
             compiled (and run) by the toolchain
-  status    every document under docs/ declares its status near the top
+  status    every document under docs/ opens with a `> 状态：…` line
+  count     every claim about how many documents docs/ holds equals how many
+            it holds, and every one of them is linked from docs/README.md
 
 Blocks are opt-in rather than opt-out: most examples in the spec are
 fragments -- a type declaration, three lines of a match -- and demanding
@@ -60,6 +62,15 @@ check whose blind spot is undocumented gets mistaken for a check:
     a lint that is wrong one time in three gets switched off within a week.
     The 119 references that do name their target are checked; the rest are
     counted as skipped, not silently counted as passing.
+  * status: the *presence* of the line, never its truth. Nothing here can
+    tell `> 状态：current` from `> 状态：动工计划`, on a plan that shipped a
+    week ago, and pretending otherwise would be worse than the gap.
+  * count: the number is read only off lines carrying the
+    `<!-- doc-check: doc-count -->` marker, for the same reason version does
+    not match a bare semver -- most numbers in this corpus are counts of
+    something else. The coverage half needs no marker: docs/README.md is the
+    index, and a document it does not link is a document with no status
+    anybody can find.
 
 Each check prints how many references it *resolved*, not just how many it
 rejected: "0 rejected" reads the same whether the check is working or has
@@ -93,6 +104,14 @@ FENCE = re.compile(r"^```(dawn(?:\s+\w+)?)\s*$(.*?)^```\s*$", re.M | re.S)
 VERSION_DECL = re.compile(r'\bVERSION\s*:\s*String\s*=\s*"([^"]+)"')
 VERSION_MARKER = "<!-- doc-check: version -->"
 SEMVER = re.compile(r"\bv?(\d+\.\d+\.\d+)\b")
+
+# --- status line, and the count of documents carrying one -------------------
+# Anchored on the blockquote a status line actually is. The substring `状态`
+# alone matched a `## 状态总览` heading and a sentence with `状态` in the middle
+# of it, and let three status-less documents through; see check_status.
+STATUS_LINE = re.compile(r"^\s*>\s*\**\s*状态")
+DOC_COUNT_MARKER = "<!-- doc-check: doc-count -->"
+INTEGER = re.compile(r"\b(\d+)\b")
 # Phrases that assert *the current toolchain version*, as opposed to naming a
 # release in a landing log or a tag in an example command. Measured over the
 # whole repository before being written down: they match one site, and that
@@ -325,19 +344,77 @@ def check_version(path: pathlib.Path, text: str, version: str) -> tuple[list[str
     return bad, claims
 
 
-def check_status(path: pathlib.Path, text: str) -> list[str]:
+def check_status(path: pathlib.Path, text: str) -> tuple[list[str], int]:
     """DOC-10: a reader must be able to tell whether a document still applies
     without reading it. 28 documents had accumulated by the audit -- plans,
     surveys, landing logs, specs and runbooks in one pile -- and the fix is a
     status line, in the form this repository already uses (`> 状态：…` right
     under the H1) rather than YAML front matter the site renderer would print
-    as prose. A convention nothing checks decays, so it is checked."""
+    as prose. A convention nothing checks decays, so it is checked.
+
+    The match is anchored on the blockquote, not on the substring: for the
+    first three months this check only asked whether `状态` occurred anywhere
+    in the first twelve lines, and three documents passed it without having a
+    status line at all -- one on a heading called `## 状态总览`, one on the
+    index's own `**状态取值**` legend, one on a sentence that happened to
+    contain `被当日状态吞并`. All three were found by hand on 2026-08-04,
+    which is the failure mode this file's own docstring warns about: a check
+    that is running but not looking."""
     if "docs/" not in str(path):
-        return []
-    if "状态" in "\n".join(text.split("\n")[:12]):
-        return []
+        return [], 0
+    if any(STATUS_LINE.match(line) for line in text.split("\n")[:12]):
+        return [], 1
     return [f"{path.relative_to(ROOT)}: no `> 状态：…` line in the first 12 lines "
-            f"(normative / current / historical / proposed -- see docs/README.md)"]
+            f"(normative / current / historical / proposed -- see docs/README.md)"], 0
+
+
+def check_doc_count(path: pathlib.Path, text: str, total: int) -> tuple[list[str], int]:
+    """docs/README.md opens by saying how many documents docs/ holds. It said
+    43 while the directory held 58, and there is no way for a reader to notice
+    -- which is the same shape as the version claim this file already reads
+    from source, so it is settled the same way: the number stays in the prose,
+    the marker hands it to a machine, and adding a document turns the gate red
+    until the sentence is corrected."""
+    bad: list[str] = []
+    claims = 0
+    for n, line in enumerate(text.split("\n"), 1):
+        if DOC_COUNT_MARKER not in line:
+            continue
+        for m in INTEGER.finditer(line.replace(DOC_COUNT_MARKER, "")):
+            claims += 1
+            if int(m.group(1)) != total:
+                bad.append(f"{path.relative_to(ROOT)}:{n}: claims docs/ holds "
+                           f"{m.group(1)} document(s), but it holds {total}")
+    return bad, claims
+
+
+def check_index_coverage(texts: dict) -> tuple[list[str], int]:
+    """Every document under docs/ is linked from docs/README.md.
+
+    The index is where this repository keeps each document's status, so a
+    document missing from it has, in effect, no status: twelve were, when this
+    was written, including three the index's own prose referred to. The count
+    check alone would not have found them -- 58 documents and 46 index entries
+    both read as "some number" to a human, and the number was 43."""
+    index = ROOT / "docs" / "README.md"
+    linked = set()
+    for target in LINK.findall(prose_only(texts[index])):
+        t = target.strip().split("#", 1)[0]
+        if not t or t.startswith(("http://", "https://", "mailto:")):
+            continue
+        if re.search(r"[\s\[\]]", t):
+            continue
+        linked.add((index.parent / t).resolve())
+    bad = []
+    seen = 0
+    for path in texts:
+        if path == index or not path.is_relative_to(ROOT / "docs"):
+            continue
+        seen += 1
+        if path not in linked:
+            bad.append(f"{path.relative_to(ROOT)}: not linked from docs/README.md "
+                       f"(the index is where a document's status is registered)")
+    return bad, seen
 
 
 def check_blocks(path: pathlib.Path, text: str, work: pathlib.Path) -> list[str]:
@@ -360,13 +437,20 @@ def check_blocks(path: pathlib.Path, text: str, work: pathlib.Path) -> list[str]
 def main() -> None:
     problems: list[str] = []
     blocks = anchors_seen = sections_seen = claims_seen = 0
+    status_seen = counts_seen = indexed_seen = 0
     version = toolchain_version()
+    # What docs/README.md's opening sentence counts: the Markdown documents
+    # under docs/, which is DOCS minus the three top-level files it does not
+    # index (README, CLAUDE, CONTRIBUTING).
+    doc_total = sum(1 for p in DOCS if p.is_relative_to(ROOT / "docs"))
 
     # Both cross-document checks need every document's headings before any
     # document can be judged, so the indexes are built in one pass first.
     texts = {p: p.read_text(encoding="utf-8") for p in DOCS}
     anchors = {p: anchor_index(t) for p, t in texts.items()}
     sections = {p: section_index(t) for p, t in texts.items()}
+    bad, indexed_seen = check_index_coverage(texts)
+    problems += bad
 
     with tempfile.TemporaryDirectory() as tmp:
         work = pathlib.Path(tmp)
@@ -380,7 +464,12 @@ def main() -> None:
             bad, n = check_version(path, text, version)
             problems += bad
             claims_seen += n
-            problems += check_status(path, text)
+            bad, n = check_status(path, text)
+            problems += bad
+            status_seen += n
+            bad, n = check_doc_count(path, text, doc_total)
+            problems += bad
+            counts_seen += n
             for info, _ in FENCE.findall(text):
                 if len(info.split()) > 1 and info.split()[1] in ("run", "compile"):
                     blocks += 1
@@ -392,8 +481,10 @@ def main() -> None:
         print(f"FAIL: {len(problems)} documentation problem(s)", file=sys.stderr)
         sys.exit(1)
     print(f"OK: {len(DOCS)} documents, {blocks} checked block(s); "
-          f"{anchors_seen} anchor(s), {sections_seen} § reference(s) and "
-          f"{claims_seen} version claim(s) resolved, 0 unknown")
+          f"{anchors_seen} anchor(s), {sections_seen} § reference(s), "
+          f"{claims_seen} version claim(s), {status_seen} status line(s), "
+          f"{indexed_seen} index entr(ies) and {counts_seen} document count(s) "
+          f"resolved, 0 unknown")
 
 
 if __name__ == "__main__":
