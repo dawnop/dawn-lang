@@ -1,10 +1,10 @@
 # Dawn
 
-一门刻意小的静态类型语言：编译到 JVM 字节码，native 可执行文件由 GraalVM
-native-image 直接获得——语言对两个目标零感知。编译器**已自举且只此一套**：
-`selfhost/` 是用 Dawn 写的编译器，从上一个 release 的种子 jar 自举、能独立
-打包并逐字节重建自身；最初的 Kotlin 实现已归档在 `kotlin-final` tag
-（[docs/bootstrap.md](docs/bootstrap.md)）。
+一门**小而优雅的函数式语言**：不可变数据、代数数据类型与穷尽的模式匹配、把效果写进
+类型签名。语言小，实现也小——标准库 10 个模块 3,300 行、**零 `use java`**；编译器
+**已自举且只此一套**（`selfhost/`，用 Dawn 写的 5.4 万行，最初的 Kotlin 实现归档在
+`kotlin-final` tag）。两个**平级**后端：**JVM 字节码**与 **C**（再交给 `cc`）；同一份源码
+在两边给出同一个答案，这件事由门禁机器管着，不是一句承诺。
 
 ```dawn run
 type Shape =
@@ -24,111 +24,153 @@ pub fn main() -> Unit !io =
     |> t => println("total: $t")
 ```
 
-## 三个立身特性
+## 特别在哪儿
 
-1. **两级效果系统**——函数默认纯，碰 IO 必须标 `!io`，编译器推导并检查。
-   看签名即知函数是否碰外界；纯函数测试零 mock。
-2. **comptime**——`comptime { ... }` 在编译期由解释器执行，结果烧进常量池。
-   查找表、预计算、配置校验都在这里做。没有宏。
-3. **Java 单向互操作**——`use java "..."` 直接调 Java 类，标准库几乎白拿；
-   所有 Java 调用自动视为 `!io`，null 进不了语言（自动包 `Option`）。
+每条后面括号里是**能去核对的东西**：一条门禁、一份实测、一节规范。
+
+### 一、效果进类型，而且不止两级
+
+函数默认纯，碰 IO 必须标 `!io`——看签名即知它碰不碰外界，纯函数测试零 mock。这是基轴。另一条
+轴是**用户自己声明的具名效果**：`effect` 声明操作、`with handle` 就地应答，标签随签名传播，
+只在 handle 这一个语法节点上被减掉。
+
+```dawn run
+effect Ask {
+  fn ask() -> Int
+}
+
+## 纯函数。签名上写着它要问，但没说去哪儿问。
+fn total() -> Int !Ask = ask() + ask()
+
+pub fn main() -> Unit !io = {
+  with handle Ask { ask() => 21 }
+  println("${total()}")
+}
+```
+
+这一档是**尾恢复**：handler 臂就是普通闭包，没有延续捕获，于是两个后端不必为它各造一套栈
+魔法；代价是不支持多次恢复与非尾恢复。std 与编译器自身**还没**改用具名效果，这个特性是纯
+加法。（[docs/spec.md](docs/spec.md) §6.5；对拍语料 `scripts/spike-native/effect_handler.dawn`。）
+
+### 二、两个后端，一个答案，机器保证
+
+多后端语言普遍带着一份「已知分歧」清单。这里没有，因为分歧会红灯：
+
+- `scripts/spike-native/run.sh`——59 个语料程序两边编、两边跑，比 **stdout、stderr、
+  退出码**，外加一档 AddressSanitizer。
+- `scripts/intrinsic-parity.py`——走原语表，任何 primitive 只在一个后端有实现就红。
+- `scripts/native-cli-diff.sh`——把 native 二进制的 `fmt`/`doc`/`add`/`lsp` 输出按**字节**
+  钉在 JVM 工具链的输出上。
+- 以上每次 push 都跑，另有 `unicode`/`array`/`hamt`/`pvec`/`path`/`inflate`/`error`/`rc`
+  八份契约同行。太贵而不进每次 push 的是 `scripts/native-fixpoint.sh`——**整个编译器**：
+  JVM 发的 C == native 自己发的 C == 再发一次的 C。
+
+规范把它写成了承诺（[docs/spec.md](docs/spec.md) §12.1）。
+
+### 三、native 侧既没有 GC，也没有 malloc/free
+
+所有权由编译器推导，走 Perceus 引用计数 + 复用分析（`rc == 1` 就地改写）。用户代码里没有任何
+内存管理原语。整个编译器前端跑 `checker.dawn` 的实测，在字符串也入账之后：**峰值 RSS
+1.46 GB → 81 MB（−94%）**、墙钟 2.77s → 2.10s（−24%）、**LSan 出口不可达 2.46 亿字节 → 0**。
+复用分析在整个编译器上就地率 73.8%。（[docs/perceus-design.md](docs/perceus-design.md) §5.7；
+门禁 `scripts/rc-contract` 与 spike-native 常开的 `detect_leaks=1`。）
+
+### 四、语义不借宿主
+
+答案不该随宿主的版本变，所以有数据的地方语言自己带数据：
+
+- **Unicode 大小写表与分类表是编译器的**（`selfhost/src/case_table.dawn`、`class_table.dawn`），
+  codegen 写进 `dawn/rt/Strings`、`__emitc` 写进生成的 C，两边领同一份表。从前是一边
+  `Character.toUpperCase`、另一边生成的头文件——那只在两个 JDK 的 Unicode 版本恰好相同时才是
+  「一个答案」。（`scripts/unicode-contract`，每次 push。）
+- **`Float` 渲染是纯 Dawn 的 Schubfach**（`std/fmt.dawn`），规则由规范拥有，宿主换算法也不跟。
+- **UTF-8 解码器是自己的严格 walker**（`runtime/c/dawn_rt.c`）：拒 overlong 形式、代理半区、
+  超出 U+10FFFF，畸形输入答 U+FFFD 并报告吃掉几个字节。
+- `Ord[String]` 是**码点序**，`cmp` 只承诺 `-1`/`0`/`1`（[docs/spec.md](docs/spec.md) §3.5）。
+
+### 五、trait 有条件 impl 和关联类型，集合是 Dawn 写的
+
+单参数、名义式的 typeclass，字典传递。条件 impl（`impl[T: Eq] Eq[List[T]]`）与关联类型
+（`type Item`，`C.Item` 投影随实例化归约）都在；六个预置 trait 里有四个背着语法：
+`Eq`→`==`、`Show`→`${...}`、`Iter`→`for..in`、`Index`→`[]`，用户类型写个 impl 就能用。
+没有单态化——**具体类型的调用点不走字典，直接静态调用**，字典只在泛型边界出现。
+
+`Map`/`Set` 是 32 路 HAMT、持久 `List` 是 pvec，都在 `std/` 里用纯 Dawn 写。后端要实现的
+集合原语只有 `Array` 的五个操作加一个 `popcount`——所以新后端把全部容器白拿。
+（[docs/spec.md](docs/spec.md) §3.5、§4.8；[docs/trait.md](docs/trait.md)；
+门禁 `hamt-contract`/`pvec-contract`/`array-contract`。）
+
+### 六、自举，而且种子纪律是机器强制的
+
+链条是 种子 → A → B → C，`cmp B C` 必须逐字节相等；tag 上 `release.yml` 重跑整条链，任一环红
+则 release 不出。`selfhost/src` 只准用**当前种子已支持**的语言特性——种子编不动 HEAD 直接红。
+日常的 oracle 是 `scripts/selfhost-prev-diff.sh`：上一 release 与 HEAD 编同一语料，**未声明的
+字节差异红灯**。（[docs/bootstrap.md](docs/bootstrap.md)。）
 
 ## 同样重要的是没有什么
 
-没有 null、没有继承、没有宏、没有 async、没有自定义运算符。
-理由见 [docs/design.md](docs/design.md)。
+没有 null、没有继承、没有宏（要编译期计算就写 `comptime { ... }`，结果烧进常量池）、
+没有 async、没有**用户自定义**运算符（运算符集固定，其中四个经上面那些 trait 分派到你的
+类型）、没有可变引用。理由见 [docs/design.md](docs/design.md)。
 
-两处需要说准：
-
-- **trait 有**。`trait`/`impl`/`derive` 与 `Ord` 全部实现（[docs/trait.md](docs/trait.md)）；
-  "没有 trait（v0.1）" 是 M1 之前的话。
-- **"没有异常" 是语法，不是运行时保证**。Dawn 没有 `throw`/`catch`，可恢复失败一律走
-  `Result` + `?`。但 JVM 异常会**穿透** Dawn 栈：`cast` 失败抛 `ClassCastException`，
-  任何 `use java` 方法都可能抛。边界工具是 `catch_fault`（拦 `Exception`）与 `catch_panic`
-  （拦 panic + `Exception`，不拦 `OutOfMemoryError` 这类不该恢复的 `Error`），见 spec §8.2、§9。
-
-## 文档
-
-- [docs/tutorial.md](docs/tutorial.md) — 上手教程（从第一个程序到调 Java，代码块均经编译校验）
-- [docs/design.md](docs/design.md) — 设计目标、决策记录（为什么是这样而不是那样）
-- [docs/spec.md](docs/spec.md) — 语言规范（词法、语法、类型、效果、comptime、互操作、编译模型）
-- [docs/grammar.ebnf](docs/grammar.ebnf) — EBNF 语法
-- [docs/bootstrap.md](docs/bootstrap.md) — 自举链（种子 → 固定点 → 独立 jar 闭包）与冻结政策
-- [examples/](examples/) — 示例程序
+**「没有异常」要说准**：Dawn 没有 `throw`/`catch`，可恢复失败一律走 `Result` + `?`。
+但 `use java` 调用抛出的异常仍会**穿透** Dawn 栈并终止程序（等同 panic 语义）——边界上有
+两个屏障，都返回 `Result[T, ForeignError]`：`catch_fault` 拦外部失败、放 panic 穿透，
+`catch_panic` 是隔离点（单个请求 panic 变 500，而不是掀翻进程）。`bracket` 谁也不拦，只
+保证 release 在每条退出路径上恰好跑一次。`cast` 已经**不抛**了：它签名为纯，失败是一个值。
+这条分工与后端无关——native 没有异常，失败带一个种类走同一条 `longjmp`。
+（[docs/spec.md](docs/spec.md) §9.8。）
 
 ## 工具链
 
 `<target>` 可以是单个 `.dawn` 文件，也可以是项目目录（`src/main.dawn` 为入口）。
 
 ```bash
-# 需要 JDK 21（native 编译需要 GraalVM）。首次运行自动下载种子
-# （上一 release 的 dawn-selfhost.jar）并用它编译 HEAD 工具链。
-./bin/dawn run examples/m0/fizzbuzz.dawn      # 编译并运行单文件（JVM）
-./bin/dawn run examples/m4/hello_mod          # 编译并运行多模块项目
-./bin/dawn build <target> -o app.jar          # 产出可执行 jar
-./bin/dawn build <target> --native -o app     # 产出独立 native 二进制
-./bin/dawn fmt <target>                       # 就地格式化（--check 供 CI 校验）
-./bin/dawn lsp                                # LSP 服务器（stdio，编辑器用）
+# 需要 JDK 21。首次运行自动下载种子（上一 release 的 dawn-selfhost.jar）并用它编译 HEAD。
+./bin/dawn run examples/m4/hello_mod        # 编译并运行（单文件或多模块项目）
+./bin/dawn test <target>                    # 跑源码里内联的 test 块（构建时剥除）
+./bin/dawn build <target> -o app.jar        # JVM 后端：可执行 jar
+./bin/dawn build <target> --native -o app   # 上一步 + GraalVM native-image
+./bin/dawn fmt <target>                     # 就地格式化（--check 供 CI 校验）
+./bin/dawn doc <target>                     # pub API 导出为 JSON；add 保格式编辑 dawn.toml
+./bin/dawn lsp                              # LSP 服务器（stdio，编辑器用）
 ```
 
-不想装 JVM 的话，每个 release 还挂着 **`dawnc-linux-x86_64`**：native 后端编出来的
-单文件静态可执行程序，std 与运行时都嵌在里面，不需要这个仓库。
-`check`/`emitc`/`fmt`/`doc`/`add`/`lsp`/`test` 直接可用；`run`/`build` 会调用机器上的
-`cc`（可用 `$CC` 覆盖）。它**拒绝 `use java`**——那是这个后端的答案，不是缺陷。
-只有 linux-x86_64 一个目标，理由与缺什么见
+依赖有两种：源码包（`url` + `hash` 内容寻址，MVS 选版本——单版本对 Dawn 不是便利而是承重墙，
+impl 一致性是全程序唯一映射）与 `[java-deps]`（coursier 解析 Maven 传递依赖，只在 JVM 后端
+有意义），见 [docs/package-design.md](docs/package-design.md)。注意 `--native` 走的是
+**GraalVM native-image**（拿上一步的 jar 去编），跟下面那个 C 后端是两条不同的路。
+
+内置 LSP 服务器两个后端各有一份、输出逐字节对齐：实时诊断、悬停、跳转定义、文档大纲；
+前端做了完整的错误恢复，文件残缺时一次报出全部错误。VS Code / Neovim / Helix 配置见
+[editors/](editors/)。
+
+### 不装 JVM 的那条路
+
+**从 v0.50.0 起**，每个 release 还挂着 **`dawnc-linux-x86_64`**：C 后端编出来的单文件静态
+可执行程序（约 3.6 MB），std 与 C 运行时都嵌在里面，不需要这个仓库、也不需要 JVM。
+
+子命令是 `check|emitc|run|test|fmt|doc|add|lsp`；`run`/`build` 会调用机器上的 `cc`（`$CC`
+可覆盖），其余的不碰 C 工具链。它**拒绝 `use java`**——那是这个后端的答案，不是缺陷；
+`build`-to-jar、`lock`、`cache` 需要 JVM，故不在它的子命令里。只有 linux-x86_64 一个目标，理由见
 [docs/native-driver-plan.md](docs/native-driver-plan.md) §22.1。
 
-## 编辑器支持
+**说准一点**：「用 Dawn 可以完全不碰 JVM」成立——从编译器到产物有一条完整的路径；但
+**自举种子仍然是 jar**（`scripts/seed-release.txt`），`bin/dawn` 仍是 JVM 工具链，JVM
+后端仍是一等目标。
 
-内置 LSP 服务器（`dawn lsp`）：实时诊断、悬停（类型/签名）、跳转定义、文档大纲。
-编译器前端做了完整的错误恢复——文件残缺时其余部分照常分析，一次报出全部错误。
-VS Code 扩展与 Neovim / Helix 配置见 [editors/](editors/)。
+## 文档
 
-状态：**M0–M8 已实现**，当前工具链 0.49.0。M5–M8 的短版本：trait/impl/derive
-（[docs/trait.md](docs/trait.md)）、`Bytes` 与流式响应、`Cursor` 与字符串性能
-（[docs/seq6-research.md](docs/seq6-research.md)）、源码包与 Maven 依赖
-（[docs/package-design.md](docs/package-design.md)）、以及 **M8：淘汰 Kotlin 实现，
-编译器只剩自举的一套**（[docs/m8-selfhost-only.md](docs/history/m8-selfhost-only.md)）。
-下面按里程碑展开的是 M0–M4；M5 之后的落地记录在 `docs/` 各自的设计文档里。
+- [docs/tutorial.md](docs/tutorial.md) — 上手教程
+- [docs/design.md](docs/design.md) — 设计目标与决策记录（为什么是这样而不是那样）
+- [docs/spec.md](docs/spec.md) — 语言规范（权威定义）
+- [docs/bootstrap.md](docs/bootstrap.md) — 自举链与种子推进协议
+- [docs/README.md](docs/README.md) — 全部设计文档的索引，每份都标了状态；示例在 [examples/](examples/)
 
-验收样例 [examples/shapes.dawn](examples/shapes.dawn)、[examples/calc.dawn](examples/calc.dawn)
-与多模块 [examples/m4/json](examples/m4/json) 原样通过 `dawn run` 与 `dawn test`，
-JVM 与 native 输出一致。
+## 状态
 
-- M0：Int/Float/Bool/String、函数、match、`!io` 效果检查、自递归尾调用消除、
-  字符串插值、`dawn run` / `dawn build --native`。
-- M1：**ADT** + 嵌套构造器模式 + 基于 usefulness 算法（Maranget）的**穷尽性检查**
-  （缺分支精确列出缺失构造器）；**record**（字面量/简写/函数式更新 `{ ..p, x: 3.0 }`/字段访问/模式）；
-  **泛型**（调用点自动推导、擦除 + 装箱）+ prelude `Option`/`Result` + 内建 `List`
-  （字面量、`++`、`len`/`get`/`range`、for-in）；**lambda 与效果多态**
-  （按值捕获、函数类型 `fn(A) -> B !e`、效果变量随调用点实例化，
-  LambdaMetafactory 在 native-image 下免配置已实测）；**`?` 传播**；
-  **test 块**（`assert` 失败报两侧值，`dawn test` 执行、构建剥除）。
-- M2：**comptime**（编译期求值纯 Dawn 代码，fuel 预算，结果嵌入常量池/静态字段）
-  与顶层 **const**；**`use java` 互操作**（编译期反射读签名、重载打分消解、
-  null 在边界包成 `Option`、全部 `!io`）；**stdlib core**（字符串函数、
-  `read_file`/`write_file`/`args`、`expect`/`unwrap_or`）；**元组** + let/var
-  模式解构；**列表模式** `[x, ..rest]`/`[..init, last]`（穷尽性按长度精确检查）；
-  三引号多行字符串；点调用糖 `x.f(a)`；函数/内建作一等值（泛型按期望类型实例化）。
-- M3：**报错打磨**（did-you-mean 建议 + 可执行 hint，golden 测试锁住每条消息）；
-  **`dawn fmt`**（token 流重排器，保 token/保注释/幂等，含 `--check` 与 LSP 格式化）；
-  **构造器作函数值** `map(xs, Some)`；**效果并 `!(e1|e2)`**（规范化，`compose` 可表达）；
-  **`derive Show`**（用户类型 `to_string`/插值，渲染成合法 Dawn 源码形状）；
-  **教程** [docs/tutorial.md](docs/tutorial.md)（代码块经编译校验）。
-- M4：**模块系统**（多文件项目、`src/` 根约定、整模块 / 选择性 `use`、`pub` 可见性、
-  禁环、拓扑序，`dawn run/test/build/fmt` 吃项目目录）；**`Map`/`Set`**（内建持久容器，
-  保插入序）；**char**（`'a'` 即码点 `Int`，配 `code_points`/`substring` 等码点 API）；
-  验收物 [examples/m4/json](examples/m4/json)——纯 Dawn 多模块 JSON 库，跑 JSONTestSuite
-  的 318 个 fixture：283 个强制 `y_`/`n_` 全过，另 35 个 `i_`（实现自定）13 接受 / 22 拒绝。
-  这条由 `scripts/json-suite.sh` 在 CI 每次执行（它还对每个 `y_` 加跑
-  parse→render→parse 往返），不再是一次手工结论。解析器本身是 `packages/json`——
-  示例经 `[deps]` 消费它，不再各留一份。
-
-详见 [docs/design.md](docs/design.md) 里程碑。编译器为 Dawn 自举实现
-（`selfhost/`，词法到 codegen 全部 Dawn，ASM 经 vendored 类驱动帧计算），
-`./bin/dawn test selfhost` 163 项 + 全仓金样在 CI。最初的 Kotlin 实现
-（1170 项测试）随 `kotlin-final` tag 归档，v0.6.0–v0.8.0 的 release jar
-构成可重放的信任链。`dawn build --native` 经 GraalVM 产出独立二进制。
+当前工具链 0.49.0，M0–M8 已实现。此后的主线（C 后端与 native 自举、Perceus、trait v2、
+效果处理器、包管理）落地记录在 `docs/` 各自的设计文档里。
 
 ## 许可证
 
