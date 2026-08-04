@@ -1,10 +1,12 @@
 # `cast[T]`：统一的 interop 认领原语
 
 > 状态：**historical** —— 泛型 `cast` 已落地，本文是当时的动码前设计。
-> 其中「失败抛 `ClassCastException`」这一条已被 LANG-02 改掉：`cast` 现在返回
-> `Result[T, ForeignError]`，失败是值。本文余下关于**抛异常**的段落（三、五、六）
-> 因此是史料，别照着写新代码。
+> 其中「失败抛 `ClassCastException`」这一条已被 LANG-02 改掉：**今天的签名是
+> `cast[T](x) -> Result[T, ForeignError]`，纯，失败是值**。凡本文写过失败行为的地方
+> （§二的签名行、§三的「失败行为」与「纯度」、§4.1 的命名理由）都已就地改到现状，
+> 并保留当时的选择作对照——设计推演本身没被推翻，只有出口变了。
 > 见 [`audit/error-model-design.md`](audit/error-model-design.md) §6.10 与 `spec.md` §9.5。
+> §五的落地点表是 **Kotlin 编译器**时期的文件路径，那套实现已归档（M8），读作史料。
 >
 > 语言层设计，**先文档、后实现**。目标：把「从擦除的 Java `Object` 认领回具体类型」从
 > **一类型一 builtin**（`as_bytes`、将来的 `as_input_stream`…）收敛成**一个泛型内建 `cast`**
@@ -36,7 +38,8 @@ FnSig("as_bytes", listOf(Type.TJava("java.lang.Object", …)), listOf("x"),
 ## 二、结论：一个泛型 `cast` 取代所有 `as_XXX`
 
 ```
-cast(x: <opaque Object>) -> T             # T 由期望类型定；Pure；失败抛 ClassCastException（可被 java_try 接住）
+cast(x: <opaque Object>) -> T             # 当时的设计：T 由期望类型定；Pure；失败抛 ClassCastException
+# 今天：cast(x) -> Result[T, ForeignError]  仍然 Pure，但失败是 Err，不再抛（LANG-02）
 ```
 
 **v1 surface = 期望类型驱动**：**不写显式 `[T]`**，T 从调用点的**期望类型**（let 注解 / 字段类型 /
@@ -79,10 +82,18 @@ Dawn 已有**同构先例**：`map_empty`、`set_empty`、`java_try`、`catch_pa
     —— 编译期报错，提示「cast 的目标必须是具体引用类型」。
   - Dawn ADT 作为目标：技术上可 CHECKCAST 到其生成类，但**首版不开**（用例都是 Java 互操作类型），
     需要时再放开。
-- **失败行为**：类型不符时 CHECKCAST 抛 `ClassCastException`——**loud failure**，和现有 `as_bytes`
-  的语义一致（「像任何不透明窄化一样大声失败」）。它是 JVM 运行时异常，可被 `java_try`/`catch_panic`
-  收成 `Result`。**不是内存 unsafe**（是受检 checkcast，干净抛异常，非 UB）。
-- **纯度**：`Pure`，同 `as_bytes`（CHECKCAST 无副作用；抛异常不算效果，与 `panic` 同类）。
+- **失败行为**（**已被改掉，见下**）：当时定的是「类型不符时 CHECKCAST 抛
+  `ClassCastException`——**loud failure**，和现有 `as_bytes` 的语义一致，可被
+  `java_try`/`catch_panic` 收成 `Result`」。**不是内存 unsafe**（是受检 checkcast，非 UB）
+  这半仍然成立。
+
+  > **现状（LANG-02，2026-07-30 起）**：`cast` 返回 `Result[T, ForeignError]`，
+  > 类型不符是 `Err`（JVM 上 `kind` = `java.lang.ClassCastException`），不再穿透。
+  > 推翻理由一句话：**签名为纯的函数不该能用宿主异常退出**——上一条「抛异常不算效果」
+  > 正是那个漏洞的自辩。调用方从「裹一层 `java_try`」变成「`?` 或 match」，见
+  > `spec.md` §9.5、§9.8.1。
+- **纯度**：`Pure`——这一条没变，变的是纯的含义兑现了：今天它不带任何非局部出口。
+  （当时给的理由「抛异常不算效果，与 `panic` 同类」已作废，见上。）
 
 ## 四、命名与 surface：叫 `cast`、v1 期望类型驱动（已定，记录理由）
 
@@ -94,9 +105,10 @@ Dawn 已有**同构先例**：`map_empty`、`set_empty`、`java_try`、`catch_pa
   cast 只出现在 interop 胶水的个位数调用点。Scala 甚至**故意**把它做成又长又丑的方法
   `asInstanceOf[T]`，就是要让 cast 显眼、少用——terse 的 `as` 关键字反诱导滥用。
 - **和 `as_bytes` 同类**：本来就在泛化一个**函数**，`cast` 心智模型不跳类别。
-- **命名取舍**：不用 `unsafe_cast`/`checkcast`——它不是内存 unsafe（是受检 CHECKCAST、干净抛异常）、
-  且总裹在 `java_try` 里危险已收敛，`unsafe_` 言过其实。取 **`cast`**：诚实（确是一次运行时 checked cast）、
-  风格对齐现有内建。
+- **命名取舍**：不用 `unsafe_cast`/`checkcast`——它不是内存 unsafe（是受检 CHECKCAST），
+  `unsafe_` 言过其实。取 **`cast`**：诚实（确是一次运行时 checked cast）、风格对齐现有内建。
+  （当时这条还有半句「且总裹在 `java_try` 里危险已收敛」——今天不必裹了，失败本身就是
+  `Result`，结论反而更硬。）
 
 ### 4.2 v1 为何期望类型驱动 `cast(x)`，而非显式 `cast[T](x)`
 

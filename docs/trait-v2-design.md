@@ -1,6 +1,8 @@
 # trait v2 最小切片：设计
 
-> 状态：**historical** —— trait v2 八刀已全部落地；权威描述在 spec §7 与 `docs/trait.md`。
+> 状态：**historical** —— trait v2 八刀已全部落地；权威描述在
+> [spec.md](spec.md) §3.5（trait 与 impl）与 `docs/trait.md`。（本行原先指的是 spec §7，
+> 那是 comptime，不是 trait。）
 >
 > 对应 [`native-backend-plan.md`](native-backend-plan.md) §11.4 的 S2.1。
 > v1 的设计定稿在 [`trait.md`](trait.md)，S1 的在

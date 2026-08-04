@@ -178,16 +178,25 @@ fn largest[T: Ord + Show](xs: List[T]) -> String = ...
 | 孤儿规则 + 程序级查重 | dyn/trait 对象（ADT/record-of-fns 惯用法顶住） |
 |  | 多参数 trait、关联类型、supertrait |
 
-**右列现状（2026-07-26）**：
+**右列现状（末次核对 2026-08-04）**：
 
 | 当时写的 | 现在 |
 |---|---|
 | 条件 impl（v2） | **已做**，v0.13.0 起可写 |
 | `==`→Eq | **已做**：`==` 与 `[T: Eq]` 走同一个求解器 |
 | derive 用户自定义 trait | 未做；`derive Ord` 已对泛型类型解禁 |
-| 迭代器协议 | 未做（S2.2） |
-| 单态化 / dyn / 多参数 trait / 关联类型 / supertrait | 未做，也没排期 |
+| 关联类型 | **已做**（2026-08-02）：trait 里写 `type Item`，方法签名里写投影 `T.Item`；设计与偏差记录见 [`assoc-types-design.md`](assoc-types-design.md) |
+| 迭代器协议 | **已做**：prelude 多了 `Iter` trait（关联类型的首个消费者），std 给 `List`/`Map`/`Set`/`String`/`Bytes` 各写一个 impl，`for..in` 因此不再对内建容器特判 |
+| 单态化 / dyn / 多参数 trait / supertrait | 未做，也没排期 |
 | `+`→Num | 未做 |
+
+§5 的表没预见到的那一项：**`[]` 也成了 trait**（2026-08-02）。prelude 的 `Index`
+（[`operator-traits-design.md`](operator-traits-design.md)）取代了 checker 里穷举合法主体类型的
+`index_wanted`，用户类型写一个 `impl Index` 就能用 `[]`。
+
+单态化那一格值得单说：§5 左列写的「字典传递 + 具体调用去虚化」至今是**唯一**的实现路线，
+没有第二条编译期特化的路。上面这几项加进来的都是新 trait 与新约束形式，走的还是同一条
+字典轨。
 
 ## 6. 验收样例（先行，`examples/traits/`）
 

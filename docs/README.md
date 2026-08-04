@@ -19,7 +19,7 @@
 | 文档 | 状态 | 说明 |
 |---|---|---|
 | [spec.md](spec.md) | **normative** | 语言的权威定义（词法、类型、效果、comptime、互操作、编译模型）。 |
-| [grammar.ebnf](grammar.ebnf) | historical | 机器可读语法，**已落后于 parser**，见 codebase-audit.md 的 SYN-02/03/04。以 spec.md 与 `selfhost/src/parser.dawn` 为准。 |
+| [grammar.ebnf](grammar.ebnf) | historical | 机器可读语法，**已落后于 parser**（2026-08-04 复核仍成立：缺 `use … as`、要求所有函数写 `-> type`、用未定义的 `UPPER_IDENT`、`. IDENT` 不覆盖 `Class.FIELD`）。以 spec.md 与 `selfhost/src/parser.dawn` 为准；可执行的那份期望是 `scripts/grammar-corpus/`（CI 门禁），文法的分叉现在以一个失败用例出现。SYN-02/SYN-03 已从**另一头**关掉——本文件写对了，是实现补上了它，逐条见文件头部。 |
 
 ## 当前架构与流程
 

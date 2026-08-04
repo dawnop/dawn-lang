@@ -1,13 +1,15 @@
 # Dawn 语言规范
 
-> 状态：**normative（权威）**。适用版本：0.11.0（`selfhost/src/version.dawn` 的 `VERSION`）。
+> 状态：**normative（权威）**。适用版本：0.49.0（`selfhost/src/version.dawn` 的 `VERSION`）。<!-- doc-check: version -->
 > 实现与本文冲突时，以本文为准并把实现当 bug——除非本文某条被显式标注为「已被 X 取代」。
 >
-> 标题曾长期写「v0.1 草案」，而工具链已到 0.11：一份自称草案的文档没法充当裁判，
+> 标题曾长期写「v0.1 草案」，改掉它那天工具链已经到 0.11：一份自称草案的文档没法充当裁判，
 > 而这是仓库里唯一有资格裁判语义争议的文档。版本号跟 `VERSION` 走，不再单独编号。
 
-本文是语法与语义的权威定义。设计动机见 [design.md](design.md)，
-机器可读语法见 [grammar.ebnf](grammar.ebnf)。
+本文是语法与语义的权威定义。设计动机见 [design.md](design.md)。
+[grammar.ebnf](grammar.ebnf) 是一份**历史**的机器可读语法，**已落后于 parser**
+（它自己头部列了已知不符）——当参考读，别当裁判；文法有争议时以本文与
+`selfhost/src/parser.dawn` 为准，可执行的那份期望在 `scripts/grammar-corpus/`。
 
 规范用词：**必须**（违反即编译错误）、**保证**（实现承诺的行为）、
 **未定义**（v0.1 不承诺，勿依赖）。
@@ -55,13 +57,15 @@
 ```
 fn let var type alias const use java pub
 match if else for in while with
+return break continue
 comptime unsafe_pure test assert
-trait impl
+trait impl effect
 true false not
 ```
 
-关键字不可用作标识符。`panic`、`todo` 是预置函数而非关键字；`derive` 是
-上下文关键字（只出现在 `type` 声明尾部）。
+关键字不可用作标识符。`panic`、`todo` 是预置函数而非关键字。**上下文关键字**另有三个，
+它们在别处仍是普通标识符：`derive`（只出现在 `type` 声明尾部）、`as`（只出现在
+`use` 的重命名位，§10.2）、`handle`（`with` 之后且下一个 token 不是 `<-` 时，§6.5）。
 
 **符号 token 取最长匹配**（同 `>>>`/`>=`/`->`/`|>`）。`with` 语句的绑定箭头
 `<-`（§4.10）也照这条：`a<-b` 读作 `a <- b`，不是 `a < (-b)`。写了空格的
@@ -1823,13 +1827,37 @@ hex 与 base64 是纯 Dawn 字节算术（无 `use java`，故两后端同一份
 
 ### 12.1 产物
 
+有**两个后端**，各有一个驱动。`dawn` 是 JVM 工具链（发字节码），`dawnc` 是 C 后端
+（发 C11 源码，再交给 `cc`）。两者不是同一条路：`dawn build --native` 仍然是 JVM 后端，
+只是把上一步的 jar 交给 GraalVM `native-image`（§12.3）；`dawnc` 根本不产生字节码。
+
+**JVM 工具链 `dawn`**（本章其余部分若不点名，说的都是它）：
+
 | 命令 | 产物 |
 |------|------|
 | `dawn run <file.dawn 或 dir>` | 编译到内存/临时目录，起 JVM 执行 |
 | `dawn build <file 或 dir> -o app.jar` | 可执行 jar（`Main-Class: main` 已设） |
-| `dawn build ... --native -o app` | 前一步 + `native-image`，独立二进制 |
+| `dawn build ... --native -o app` | 前一步 + GraalVM `native-image`，独立二进制（§12.3） |
 | `dawn test <file 或 dir>` | 编译含 test 块的变体并执行（目录模式聚合全部模块的 test） |
 | `dawn fmt <file 或 dir>...` | 格式化（目录模式递归全部 `.dawn`） |
+| `dawn __emitc <file 或 dir> -o out.c` | C 翻译单元。隐藏子命令：这是 JVM 工具链上的 C 后端入口，`dawnc` 的自举与差分都经它 |
+
+**C 后端驱动 `dawnc`**（单文件静态可执行程序，随 release 发布；不需要 JVM，也不需要
+本仓库）：
+
+| 命令 | 产物 |
+|------|------|
+| `dawnc check <target>` | 只做类型检查，报诊断 |
+| `dawnc emitc <target> [-o out.c]` | C 翻译单元（配 `runtime/c/` 的运行时一起编） |
+| `dawnc build <target> [-o out]` | 前一步 + 调 `cc`（`$CC` 可覆盖），独立可执行文件 |
+| `dawnc run <target>` | 同上，编完直接执行 |
+| `dawnc test <target>` | 编译含 test 块的变体并执行 |
+| `dawnc fmt` / `doc` / `add` / `lsp` | 与 `dawn` 的同名子命令输出**逐字节一致**（`scripts/native-cli-diff.sh` 把这四件钉在 JVM 的字节上） |
+| `dawnc version` | 版本号（自报 `(native)`，故不与 `dawn --version` 逐字相同） |
+
+`dawnc` 少的那几个子命令不是缺口，是后端的边界：**它拒绝 `use java`**（Java 互操作是
+JVM 后端的能力，§9），`build`-to-jar、`lock`、`cache` 同理只在 JVM 侧有意义。
+两个驱动都接受 `--std <dir>` 换标准库源。
 
 **参数可为单文件或工程目录**（§10.1）：目录模式加载 `src/` 全部模块，入口
 `src/main.dawn`；单文件模式向上找 `src` 祖先为根。jar 收全部模块类，`Main-Class` = 入口
@@ -1846,7 +1874,9 @@ native-image，责任在库，见 §12.3）。
 无依赖解析——只接受单 jar、零传递依赖的库」，那是 `[java-deps]` 出现之前的事实，
 与 §10.1 直接冲突。
 
-**保证**：同一程序在 JVM 与 native 下行为一致（除启动时间与内存占用）。
+**保证**：同一程序在三种产物下行为一致——JVM 上跑的字节码、`--native` 出的 native-image
+二进制、C 后端出的可执行文件（除启动时间与内存占用）。带 `use java` 的程序只有前两种
+产物，那是它自己声明的边界，不是不一致。
 
 ### 12.2 字节码映射
 
@@ -1869,12 +1899,18 @@ native-image，责任在库，见 §12.3）。
 运行时支持类（`dawn/rt/Lists`、`Strings`、`Io`、`Show`、`Maps`、`Tuple*`、`Fn*` 等）
 每个程序生成一份，被全部模块类共享。
 
-### 12.3 native-image 契约
+### 12.3 提前编译：native-image 契约与 C 后端
 
-语言构造**保证**不产生：反射调用、自定义 indy bootstrap、动态类加载、
-JNI（Java 互操作走普通 invoke）。因此 `--native` 构建不需要
-reachability 配置。若引入的 Java 库自身用反射，责任在库——错误信息会提示
-这超出 Dawn 的保证范围。
+两条路都能得到不依赖 JVM 的可执行文件，但它们在**编译栈的哪一层**分岔，决定了各自的约束。
+
+**`dawn build --native`（GraalVM native-image）**：走完整个 JVM 后端，拿 jar 去做封闭世界
+分析。语言构造**保证**不产生：反射调用、自定义 indy bootstrap、动态类加载、
+JNI（Java 互操作走普通 invoke）。因此 `--native` 构建不需要 reachability 配置。
+若引入的 Java 库自身用反射，责任在库——错误信息会提示这超出 Dawn 的保证范围。
+
+**`dawnc`（C 后端）**：在 Core 之后分岔，不经过字节码，因此上面那份契约对它无意义——
+没有类要被分析，也没有 native-image 参与。代价是它**没有 Java**：`use java` 直接拒绝
+（§12.1）。产物是 `cc` 编出来的普通可执行文件，运行时在 `runtime/c/`。
 
 ### 12.4 尾调用
 

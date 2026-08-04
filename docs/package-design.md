@@ -1,7 +1,10 @@
 # 包管理设计（草案）
 
-> 状态：设计已定，分两个项目落地。**项目 A（Maven 依赖）✅ 已完成**（dawn-lang 全量 1170 测试通过，
-> backend-dawn 已切换）；项目 B（Dawn 源码包）待启动。
+> 状态：设计已定，**两个项目都已落地**。项目 A（Maven 依赖）完成于 v1 那一轮；
+> 项目 B（Dawn 源码包）分四批走完——v1 路径包 → url + hash 版本化 → backend-dawn 迁移 →
+> 小件收官（2026-07-22），
+> 逐批的落地记录在下面同名的几节里。（本行长期写着「项目 B 待启动」，而它下面就是项目 B 的
+> 四份落地记录。）
 > 本文是调研结论 + 设计决策的单一事实源。调研过程见文末「附录：调研依据」。
 
 ## 一、为什么现在做
@@ -549,8 +552,8 @@ tar.gz（zip 够用，JDK 免依赖）。（→ 已全部落地，见「小件�
   按语法自辨；url 形态**抓取→解包→算 d1→读包 manifest 取 name/version**，用户
   永远不手算 hash（`fetchAndHash` 顺手把内容按实际哈希入缓存——内容寻址下这
   总是对的）。CST 保格式编辑兑现 §4.2 当初手写 TOML 解析器的理由：注释、空行、
-  键序原样保留；同 key 重复 add = 原位更新，即版本 bump 的日常操作。仅 Kotlin
-  CLI（抓取分工）。
+  键序原样保留；同 key 重复 add = 原位更新，即版本 bump 的日常操作。**当时仅 Kotlin
+  CLI 有**（沿用下一条的抓取分工）。
 - **tar.gz**：按 magic 字节分派（gzip `1f 8b`），手写 ustar 读取器（GNU `L` 长名、
   pax `x` path 覆盖、拒 symlink/hardlink、zip-slip 守卫复用），仍零新依赖。
 
@@ -559,3 +562,14 @@ tar.gz（zip 够用，JDK 免依赖）。（→ 已全部落地，见「小件�
 E2E 改为**别名形态**对拍双编译器）；spec §10.1 的 manifest 示例补上 `[deps]`
 两种形态。批 C 的 `args` 同日判词：不做全局载体（pure-ffi-design.md 终局数字
 修订），包管理线与 builtin 瘦身线双双收口。
+
+> **上面三节写的「Kotlin CLI」分工已经全部作废（末次核对 2026-08-04）**。Kotlin 实现在
+> M8 归档，今天没有 Kotlin CLI 可分工：
+>
+> - **抓取与哈希**：selfhost 自己抓、自己验，冷缓存不再需要谁预热
+>   （`scripts/selfhost-run-diff.sh` 的检查 `test url dep (selfhost fetches a cold cache)`
+>   就是这一条的门禁）。「run the Kotlin dawn once」那句诊断已不存在。
+> - **`dawn add`**：两个驱动都有——JVM 工具链 `dawn add`，C 后端 `dawnc add`，输出由
+>   `scripts/native-cli-diff.sh` 逐字节钉住（`b3cc9f9`）。
+> - **Maven / `[java-deps]`**：这一条**没**变，仍然只有 JVM 侧解析（coursier），
+>   `dawnc` 不碰，见 [spec.md](spec.md) §12.1。
