@@ -481,6 +481,20 @@ diff <(norm /tmp/coreA '') <(norm /tmp/coreB 's/\bjvmhelp\./emit./g')
 > 搬动只被 test 块引用的东西时，唯一的守卫是 295 个内联 test 本身——所以那一刀不能同时
 > 改动 test 的内容，否则守卫和被守卫的东西一起变了。
 
+> **★ `norm.sha` 曾经也看得见行号——已修（#143，2026-08-04）。**
+> `e!` 下降成 `panic(msg)`，而 `msg` 是检查器烘好的
+> `"unwrapped None[ from f()] at <path>:<line>"`（`checker.dawn` 的 `unwrap_msg`）。
+> 那是**字符串常量**，字符串常量进 Core，于是任何 `e!` 下方的行位移都会同时移动
+> `sha` 与 `norm.sha`。实测：给 `selfhost/src/main.dawn` 只加两行注释，
+> `main.core` 的 diff 只有一行 `main.dawn:164` → `main.dawn:166`，两份哈希都动。
+> 危险不是噪声本身，是它训练出的习惯——**纯搬运的刀正是最需要 norm.sha 当恒等证明的场合**，
+> 而几十行行号漂移里混一条真指令变化，重录的人不会发现。
+> 现在 `NORM`（脚本顶部，两个读者共用一份）把 `" at <path>.dawn:<行>"` 里的**行号**抹掉，
+> **路径保留**（站点换文件是真信息）。`sha` 仍然逐字节敏感。
+> `?`（`EPropagate`）不带消息、`assert` 烘源文本但不烘行号，所以这是唯一的形状。
+> 承重的验收是第二条：**行位移 + 一条不改行数的真指令变化（改函数体里的字面量）⇒
+> 两份哈希都动**——归一化不能顺手把真变化也抹掉。
+
 > **★ 「纯搬运 ⇒ 归一化后逐行为零」有一个例外：拆模块会【合法地新造 Core】。**（A4 实测）
 > lowering **按模块合成结构化相等**——一个模块只要比较某个 ADT，就会得到自己的
 > `structeq$AdtN` 与配套 `prim$…$eq`。A4 把比较 `Ty` 的函数搬进 `jvmhelp` 后，
@@ -631,7 +645,7 @@ fixpoint、classfile-verify **全部看不见它**。
 > 移动；把同一个 test 换成一行 `let m: Map[String, Int] = ...` 就让**同样这四个**移动。
 >
 > **但「漂移」不等于「不用管」**：`selfhost-core-diff.sh` 对漂移照样 `exit 1`，
-> 只是把它归到 `ADT ids shifted in these, with no instruction changed` 那一桶
+> 只是把它归到 `Only ids and panic-site lines shifted in these -- no instruction changed` 那一桶
 > （对照另一桶 `Core IR of the compiler changed in these modules`）。两个桶分开报
 > 是 #88 的纪律，不是免检——`selfhost.sha` 该重录还得重录。
 

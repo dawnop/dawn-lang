@@ -33,7 +33,13 @@
 #                        *whether* anything changed across every module there
 #                        is -- the file is the count, so it is not restated
 #                        here -- without carrying 7MB in the repository.
-#                        Regenerate locally to see the content.
+#                        Regenerate locally to see the content. Exact: it moves
+#                        for anything at all, noise included.
+#   golden/selfhost.norm.sha
+#                        the same, with the compiler's own noise filtered out
+#                        (see NORM below). This is the one that means "not one
+#                        instruction differs", so it is the one to trust when a
+#                        refactor claims to have moved code without changing it.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 ROOT=$(pwd)
@@ -41,6 +47,56 @@ ROOT=$(pwd)
 golden="$ROOT/scripts/core-golden"
 mode=check
 [ "${1:-}" = "--record" ] && mode=record
+
+# ## The noise filter -- one definition, both readers
+#
+# `selfhost.sha` is exact. `selfhost.norm.sha` is the same hashes over content
+# with everything below erased, and it is the one that carries the claim "not
+# one instruction differs". Anything added here is a claim that a difference in
+# it cannot change what runs, so the list is short and each entry is argued.
+# The `*.core` diff below runs the same program over its changed lines, so the
+# filter and the verdict it licenses cannot drift apart.
+#
+#   Adt[0-9]+   The id embedded in a generated symbol name (structeq$Adt307,
+#               and its cmp/show siblings). Type inference allocates from the
+#               same counter ADT declarations do, so adding a function to
+#               types.dawn shifts every id after it. Measured 2026-07-26: one
+#               added function to types.dawn moves 6 of 52 modules and 5 of the
+#               6 are that. Splitting the counter would rename every generated
+#               symbol in the language -- a far larger Emit-Change than the
+#               noise it removes, so the answer is to name the noise rather
+#               than to stop making it.
+#
+#   at F.dawn:N `e!` lowers to `panic(<message>)` and the checker builds that
+#               message with the site baked in: "unwrapped None[ from f()] at
+#               <path>:<line>" (checker.dawn unwrap_msg). A *string constant*,
+#               so it is Core, so every line below an `e!` moves both hashes.
+#               Added 2026-08-04 (#143), on this measurement: two comment lines
+#               added to selfhost/src/main.dawn, nothing else --
+#
+#                 582c582
+#                 <   str "unwrapped None at selfhost/src/main.dawn:164"
+#                 ---
+#                 >   str "unwrapped None at selfhost/src/main.dawn:166"
+#
+#               -- and both hashes moved. The danger is not the noise, it is
+#               the habit: pure code movement is exactly when this golden is
+#               the identity proof, and a reviewer trained to skim past line
+#               numbers will skim past the one real instruction in with them.
+#               The line goes; the *path* stays, because a site moving between
+#               files is real. `?` does not do this (EPropagate carries no
+#               message) and `assert` bakes the source text but not the line,
+#               so this is the only shape -- confirmed by grepping every
+#               selfhost dump for a `<file>:<line>` literal: 3 hits, all this
+#               one. The pattern is anchored on " at " rather than on ".dawn:"
+#               alone so that a `.dawn:12` occurring inside embedded source
+#               text (stdsrc/rtsrc carry whole std files as constants) is
+#               still compared exactly.
+#
+# Both are noise the *compiler chooses to make*. Neither is a reason to stop
+# checking; a filter here is cheaper than the alternative, which is renaming
+# every generated symbol / dropping the panic site from the message.
+NORM='s/Adt[0-9]+/AdtN/g; s/ at ([^" ]*\.dawn):[0-9]+/ at \1:L/g'
 
 # Programs chosen for coverage, not size: calc has closures, `?` and list
 # work; traits has dictionaries with both slot kinds and a derived Ord; eqhash
@@ -96,20 +152,12 @@ if ! grep -q ', 0 failed' "$OUT/self.log"; then
   exit 1
 fi
 ( cd "$OUT/self" && sha256sum ./*.core | sort -k2 ) > "$OUT/selfhost.sha"
-# The same hashes over content with every ADT id erased. A module whose exact
-# hash moved but whose normalised hash did not changed only in the id embedded
-# in a generated symbol name (structeq$Adt307, and its cmp/show siblings): no
-# instruction differs. That happens on any edit to an early module, because
-# type inference allocates from the same counter ADT declarations do, so adding
-# a function to types.dawn shifts every id after it.
-#
-# Measured 2026-07-26: one added function to types.dawn moves 6 of 52 modules
-# and 5 of the 6 are drift. Splitting the counter would rename every generated
-# symbol in the language -- a far larger Emit-Change than the noise it removes,
-# so the answer is to name the noise rather than to stop making it.
+# The same hashes over content with the two known noise sources erased -- see
+# NORM below. A module whose exact hash moved but whose normalised hash did not
+# carries no instruction difference.
 norm_sha() {
   ( cd "$1" && for f in ./*.core; do
-      printf '%s  %s\n' "$(sed -E 's/Adt[0-9]+/AdtN/g' "$f" | sha256sum | cut -d' ' -f1)" "$f"
+      printf '%s  %s\n' "$(sed -E "$NORM" "$f" | sha256sum | cut -d' ' -f1)" "$f"
     done | sort -k2 )
 }
 norm_sha "$OUT/self" > "$OUT/selfhost.norm.sha"
@@ -131,12 +179,12 @@ fi
 
 fail=0
 if ! diff -ru "$golden" "$OUT/flat" -x 'selfhost*.sha' > "$OUT/d.txt"; then
-  # every changed line, with ADT ids erased: if the two sides then agree, the
-  # only thing that moved is an id inside a generated name
-  added=$(grep -E '^\+' "$OUT/d.txt" | grep -v '^+++' | sed -E 's/Adt[0-9]+/AdtN/g')
-  removed=$(grep -E '^-' "$OUT/d.txt" | grep -v '^---' | sed -E 's/Adt[0-9]+/AdtN/g')
+  # every changed line, through the same filter norm.sha uses: if the two sides
+  # then agree, nothing that runs moved
+  added=$(grep -E '^\+' "$OUT/d.txt" | grep -v '^+++' | sed -E "$NORM")
+  removed=$(grep -E '^-' "$OUT/d.txt" | grep -v '^---' | sed -E "$NORM")
   if [ -n "$added" ] && [ "${added#+}" = "${removed#-}" ]; then
-    echo "Core IR changed, but only in ADT ids -- no instruction differs:"
+    echo "Core IR changed, but only in ids and panic-site lines -- no instruction differs:"
     grep -E '^[+-]' "$OUT/d.txt" | grep -Ev '^(\+\+\+|---)' | head -6
     echo "  (re-record with --record; see the note in this script)"
   else
@@ -169,10 +217,22 @@ if ! diff -u "$golden/selfhost.sha" "$OUT/selfhost.sha" > "$OUT/s.txt"; then
     for m in $changed; do echo "  $m"; done
   fi
   if [ -n "$drifted" ]; then
-    echo "ADT ids shifted in these, with no instruction changed:"
+    echo "Only ids and panic-site lines shifted in these -- no instruction changed:"
     for m in $drifted; do echo "  $m"; done
   fi
   echo "  (rerun with --dump to see the content: bin/dawn __lower --dump <dir> selfhost)"
+  fail=1
+elif ! diff -q "$golden/selfhost.norm.sha" "$OUT/selfhost.norm.sha" > /dev/null; then
+  # The normalised hashes are only *read* when the exact ones moved, so a
+  # golden recorded under a different NORM sits there unnoticed and answers
+  # every future question wrongly -- it would put a really-changed module in
+  # the drifted bucket. They can only disagree while the exact ones agree if
+  # NORM itself changed, so say exactly that. (Proved red 2026-08-04 by the
+  # #143 commit before its re-record: same tree, new filter.)
+  echo
+  echo "selfhost.norm.sha is stale: the exact hashes all agree, so nothing the"
+  echo "  compiler emits moved -- the noise filter (NORM) changed since the"
+  echo "  golden was recorded. Re-record."
   fail=1
 fi
 
