@@ -143,7 +143,18 @@ mkdir -p "$OUT/flat"
 cp "$OUT/$first"/std.*.core "$OUT/flat/"
 for p in "${PROGS[@]}"; do cp "$OUT/$p/$p.core" "$OUT/flat/"; done
 
-# the compiler itself: hashes only
+# the compiler itself: hashes only.
+#
+# `selfhost` here is relative, and must stay relative: NORM keeps the *path* in
+# a baked panic site (see above) and the driver bakes whatever path it was
+# handed. Measured 2026-08-04 -- `__lower --dump D /abs/path/to/selfhost` puts
+#
+#   str "unwrapped None at /home/dawn/workspace/dawn-lang/selfhost/src/main.dawn:164"
+#
+# in main.core where the relative form puts `selfhost/src/main.dawn:164`, so
+# "$ROOT/selfhost" would make this golden differ on every machine and in every
+# worktree. (`bin/dawn build` does hand an absolute root, which is why the
+# built jar carries the absolute string and two worktrees' class files differ.)
 mkdir -p "$OUT/self"
 "$ROOT/bin/dawn" __lower --dump "$OUT/self" selfhost > "$OUT/self.log"
 if ! grep -q ', 0 failed' "$OUT/self.log"; then
