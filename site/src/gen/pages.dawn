@@ -2,13 +2,12 @@
 
 use std/str
 use std/io
-use java "java.io.FileInputStream"
-use java "java.io.FileOutputStream"
 use md/ast.{Block}
 use md/parser.{parse}
 use html/render.{render_doc}
 use html/page.{page, page_with_toc, shell, shell_ext}
 use hl/dawn.{highlight_dawn}
+use html/escape.{escape_html}
 use gen/common.{must_read, write_page, map_doc_url, doc_files}
 
 fn parsed(path: String) -> List[Block] !io =
@@ -19,16 +18,24 @@ fn parsed(path: String) -> List[Block] !io =
 
 # Byte-for-byte copy for binary assets (icons). read_file/write_file are
 # UTF-8 string APIs and would corrupt PNG/ICO bytes.
+#
+# This was a pair of `use java` streams until 2026-08-05, and those two lines
+# cost more than they looked: one `use java` anywhere in a program makes the
+# whole thing uncompilable on the C backend ("`use java` cannot be compiled to
+# native"), so the generator quietly stopped having a second backend at all --
+# and with it the JVM-vs-native comparison site/README.md calls a project
+# tradition. std's byte IO is on both backends; scripts/site-dist-diff.sh is
+# what now says so.
 fn copy_bin(src: String, dst: String) -> Unit !io = {
-  with i <- bracket(FileInputStream.new(src), close_in)
-  with o <- bracket(FileOutputStream.new(dst), close_out)
-  i.transferTo(o)
-  ()
+  let content = match io.read_bytes(src) {
+    Ok(b) -> b
+    Err(e) -> panic("cannot read $src: $e")
+  }
+  match io.write_bytes(dst, content) {
+    Ok(_) -> ()
+    Err(e) -> panic("cannot write $dst: $e")
+  }
 }
-
-fn close_in(i: FileInputStream) -> Unit !io = i.close()
-
-fn close_out(o: FileOutputStream) -> Unit !io = o.close()
 
 pub fn gen_assets(out: String) -> Unit !io = {
   write_page("$out/assets/style.css", str.trim(must_read("site/assets/style.css")))
@@ -55,8 +62,22 @@ fn copy_or_stub(src: String, dst: String, stub: String) -> Unit !io =
     }
   }
 
+# A front-page program: its source, highlighted, and the stdout it really
+# produces. `<stem>.out` is not decoration -- scripts/doc-check.py runs
+# `<stem>.dawn` and holds it to these exact bytes, so a snippet that stopped
+# compiling, or one that still compiles and now prints something else, turns
+# the gate red. Reading it with must_read is the other half: a card cannot be
+# added without an expectation, because the build dies without the file.
+fn card_source(base: String) -> String !io =
+  highlight_dawn(str.trim(must_read("$base.dawn")))
+
+fn card_output(base: String) -> String !io =
+  `<pre class="output"><code>` ++ escape_html(str.trim(must_read("$base.out"))) ++
+  "</code></pre>"
+
 fn hero_html() -> String !io = {
-  let hl = highlight_dawn(str.trim(must_read("site/pages/hero.dawn")))
+  let hl = card_source("site/pages/hero")
+  let out = card_output("site/pages/hero")
   """
 <section class="hero">
 <div class="hero-copy">
@@ -71,20 +92,23 @@ fn hero_html() -> String !io = {
 <figure class="code-window">
 <figcaption class="code-window__bar"><span class="fname">main.dawn</span><span class="run">dawn run</span></figcaption>
 <pre class="dawn"><code>$hl</code></pre>
+$out
 </figure>
 </section>
 """
 }
 
-fn feature_block(title: String, desc: String, path: String) -> String !io = {
-  let hl = highlight_dawn(str.trim(must_read(path)))
+fn feature_block(title: String, desc: String, base: String) -> String !io = {
+  let hl = card_source(base)
+  let out = card_output(base)
   """
 <article class="feature">
 <div class="feature-text">
 <h3>$title</h3>
 <p>$desc</p>
 </div>
-<div class="feature-code"><pre class="dawn"><code>$hl</code></pre></div>
+<div class="feature-code"><pre class="dawn"><code>$hl</code></pre>
+$out</div>
 </article>
 """
 }
@@ -93,15 +117,15 @@ fn feature_section() -> String !io = {
   let f1 = feature_block(
     "效果进类型，而且不止两级",
     `函数默认是纯的，碰 IO 必须在签名标 <code>!io</code>——看签名即知它碰不碰外界，纯函数测试零 mock。另一条轴是你自己声明的<strong>具名效果</strong>：<code>effect</code> 声明操作、<code>with handle</code> 就地应答，标签随签名传播，只在 handle 这一个语法节点上被减掉。`,
-    "site/pages/feat-effects.dawn")
+    "site/pages/feat-effects")
   let f2 = feature_block(
     "编译期求值：comptime",
     `<code>comptime { ... }</code> 在编译期由解释器执行，结果直接烧进常量池。没有宏系统，也不需要——普通函数就能在编译期跑。`,
-    "site/pages/feat-comptime.dawn")
+    "site/pages/feat-comptime")
   let f3 = feature_block(
     "两个后端，一个答案",
     `JVM 字节码与 C（再交给 <code>cc</code>）是<strong>平级</strong>的两条路。最容易分叉的地方语言自己拥有：<code>Float</code> 渲染是纯 Dawn 的 Schubfach、Unicode 大小写表是编译器的、<code>Map</code> 迭代顺序按插入定死。59 个语料程序每次 push 两边编两边跑，比 stdout、stderr、退出码——分歧会红灯。`,
-    "site/pages/feat-parity.dawn")
+    "site/pages/feat-parity")
   "<h2>核心特性</h2>\n" ++ `<div class="feature-list">` ++ "\n" ++ f1 ++ f2 ++ f3 ++ "</div>"
 }
 

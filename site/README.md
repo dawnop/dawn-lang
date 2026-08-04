@@ -6,7 +6,12 @@ Playground——它带一份编辑器 bundle，并需要后端的 `/api/run`、`
 
 - 域名：`https://dawn-lang.dawnop.com`（与 GitHub 仓库名一致）
 - 验收：站点上线，且生成它的程序是 Dawn 写的；生成器 JVM 与 native 跑出的
-  `dist/` **逐字节一致**（项目传统）。
+  `dist/` **逐字节一致**——由 `scripts/site-dist-diff.sh` 管着（进了 CI）。
+  这一条曾经只是一句话：2026-08-05 之前没有任何东西跑它，而人手跑的 `diff -r`
+  直接读工作树，分不清「两个后端不一致」和「两次构建之间输入被改了」——2026-08-04
+  真把后者报成了前者。现在两个后端都跑在**同一份输入快照**上，工作树怎么动都进不来。
+  同期发现：生成器里两行 `use java`（favicon 那次带进来的）让它**根本无法编到 native**，
+  于是这条「传统」有一个里程碑是空的；那两行已换成 `io.read_bytes`/`write_bytes`。
 
 ## 目录
 
@@ -18,7 +23,7 @@ site/
 │   ├── hl/         # Dawn 语法高亮 tokenizer（构建期）
 │   └── html/       # 转义、模板壳、TOC、slug
 ├── assets/         # style.css 等文本资产（原样拷入 dist/assets/）
-├── pages/          # 站点专属内容（index.md、首页样例与特性卡的 .dawn）
+├── pages/          # 站点专属内容（index.md；首页样例与特性卡的 .dawn + 实测输出 .out）
 ├── play-ui/        # Playground 编辑器（TS + CodeMirror 6，npm 构建）
 ├── sample/         # 手写验收样张 —— 渲染以此为准绳（验收样例先行）
 └── dist/           # 产物（gitignore）
@@ -30,8 +35,8 @@ site/
 
 | 路径 | 内容 | 来源 |
 |------|------|------|
-| `/` | 首页：定位一句话 + 高亮样例 + 特性栏 + 各区入口 | `site/pages/index.md` |
-| `/tutorial/{01..14}.html` | 教程 14 章，每章一页，带上一章 / 下一章 | `docs/tutorial.md` 按 `##` 切分 |
+| `/` | 首页：定位一句话 + 高亮样例 + 特性栏 + 各区入口 | `site/pages/index.md` + `hero/feat-*.dawn` 与同名 `.out` |
+| `/tutorial/{01..17}.html` | 教程 17 章，每章一页，带上一章 / 下一章 | `docs/tutorial.md` 按 `##` 切分 |
 | `/tutorial/index.html` | 教程目录页 | 同上（章标题清单） |
 | `/spec.html` | 语言规范单页 + 侧栏 TOC | `docs/spec.md` |
 | `/design.html` | 设计笔记（D1–D7 决策 + 里程碑） | `docs/design.md` |
@@ -54,8 +59,9 @@ site/
 - **高亮类名**（GitHub Light 配色）：`k` 关键字、`t` 类型/构造器（大写首字母）、
   `f` 定义名（`fn` 后的标识符）、`s` 字符串、`i` 字符串内 `$` 插值、`n` 数字/布尔、
   `c` 注释。函数**调用**不着色（tokenizer 保持行级简单）。
-- **资产全文本**：CSS/SVG 用 `read_file`/`write_file` 原样搬运，站点不放光栅图
-  （不给 String IO 开二进制洞）。
+- **资产搬运**：CSS 等文本用 `read_file`/`write_file`；favicon / 触摸图标 / og:image
+  这类光栅图用 `io.read_bytes`/`write_bytes` 逐字节拷（曾经是 `use java` 的
+  `FileInputStream`，那让整个生成器编不到 native，见开头的验收条）。
 - 生成后扫一遍内部 `href`，断链即失败退出。
 
 ## 分刀进度
@@ -67,7 +73,8 @@ site/
 - [x] 刀 4：Dawn 语法高亮器（Dawn）——中途顺手给语言加了反引号 raw string（0ae0a75）
 - [x] 刀 5：HTML 渲染 + 模板 + CSS（Dawn）
 - [x] 刀 6：main 组装 + 全量生成 + 断链自检（32 页 / 318 内链）
-- [x] 刀 7：验证（31 个 test 块绿；`fmt --check` 干净；**JVM 与 native 产物逐字节一致**）
+- [x] 刀 7：验证（31 个 test 块绿；`fmt --check` 干净；**JVM 与 native 产物逐字节一致**——
+      当时是人手跑的，2026-08-05 才变成门禁 `scripts/site-dist-diff.sh`）
 - [ ] 刀 8：部署 `dawn-lang.dawnop.com`（nginx + 通配符证书 + redeploy.sh）
 
 ## 构建
@@ -78,4 +85,9 @@ site/build.sh          # dawn doc --stdlib → 清空 dist → dawn run site
 ./bin/dawn doc --stdlib > site/build/stdlib.json
 ./bin/dawn run site    # 生成 site/dist/（从仓库根运行）
 ./bin/dawn test site   # 生成器测试
+
+# 首页那四段代码（hero + 三张特性卡）真的编译、真的跑，输出对着同名 .out 比：
+./scripts/doc-check.py
+# 两个后端的 dist 逐字节对拍（输入先快照，工作树动了也进不来）：
+./scripts/site-dist-diff.sh
 ```

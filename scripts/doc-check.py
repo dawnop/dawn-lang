@@ -7,7 +7,7 @@ and the EBNF disagreed with the parser in several places -- all found by a
 human reading, none by a test. This script is the part of that gap a script
 can close.
 
-Seven checks, each unambiguous on purpose (a doc lint with false positives
+Eight checks, each unambiguous on purpose (a doc lint with false positives
 gets disabled, and then it protects nothing):
 
   links     every relative Markdown link resolves to a file in the repo
@@ -19,6 +19,8 @@ gets disabled, and then it protects nothing):
             equals `selfhost/src/version.dawn`
   blocks    every fenced block marked ```dawn run / ```dawn compile is
             compiled (and run) by the toolchain
+  pages     every program on the website's front page runs and prints exactly
+            the output printed beside it (site/pages/*.dawn vs *.out)
   status    every document under docs/ opens with a `> 状态：…` line
   count     every claim about how many documents docs/ holds equals how many
             it holds, and every one of them is linked from docs/README.md
@@ -27,6 +29,13 @@ Blocks are opt-in rather than opt-out: most examples in the spec are
 fragments -- a type declaration, three lines of a match -- and demanding
 that they be whole modules would either mangle the prose or drown the check
 in exemptions. A block whose correctness matters says so in its info string.
+
+Pages are opt-out-less for the opposite reason: site/pages/ holds four whole
+programs, they are the four most-read pieces of Dawn in the project, and
+nothing compiled them until 2026-08-05. Being whole programs, they can be
+held to their *output* as well -- which is the half that matters, because a
+snippet that compiles and prints something other than what the page claims
+is worse than one that does not compile.
 
 Three of these exist because a human found, on 2026-08-04, three documents
 whose numbers nothing was reading: README claimed toolchain 0.11.0 while
@@ -95,6 +104,12 @@ DOCS = sorted(
 )
 
 VERSION_SRC = ROOT / "selfhost" / "src" / "version.dawn"
+
+# The website's front page: one whole program per card, and the stdout the page
+# prints beside it. site/src/gen/pages.dawn reads both, so the pairing is not a
+# convention this script invented -- a card without a recorded output fails the
+# site build too.
+SITE_PAGES = ROOT / "site" / "pages"
 
 LINK = re.compile(r"\[[^\]]*\]\(([^)]+)\)")
 HEADING = re.compile(r"^#{1,6}\s+(.*?)\s*$", re.M)
@@ -434,10 +449,49 @@ def check_blocks(path: pathlib.Path, text: str, work: pathlib.Path) -> list[str]
     return bad
 
 
+def check_site_pages() -> tuple[list[str], int]:
+    """The front page's programs, run and held to the output printed beside
+    them.
+
+    These four snippets -- the hero and the three feature cards -- are the
+    first Dawn anybody sees, and until 2026-08-05 nothing in this repository
+    compiled them. `dawn run` alone would only be half the check: the cards
+    now print their result, so a snippet that still compiles while quietly
+    answering something else is exactly the failure a reader cannot detect and
+    a compiler gate would not either. stdout is compared byte for byte.
+
+    stderr is deliberately not compared. None of these programs writes to it,
+    and a non-zero exit is reported with the first line of whatever they did
+    write, which is the diagnostic a reader needs."""
+    bad: list[str] = []
+    seen = 0
+    for src in sorted(SITE_PAGES.glob("*.dawn")):
+        seen += 1
+        rel = src.relative_to(ROOT)
+        expected_file = src.with_suffix(".out")
+        if not expected_file.exists():
+            bad.append(f"{rel}: no {expected_file.name} beside it (a front-page "
+                       f"program records the output the page shows)")
+            continue
+        r = subprocess.run([str(DAWN), "run", str(src)], capture_output=True,
+                           text=True, cwd=ROOT)
+        if r.returncode != 0:
+            head = (r.stderr or r.stdout).strip().splitlines()
+            detail = head[0] if head else f"exit {r.returncode}"
+            bad.append(f"{rel}: does not run: {detail}")
+            continue
+        expected = expected_file.read_text(encoding="utf-8")
+        if r.stdout != expected:
+            bad.append(f"{rel}: printed {r.stdout!r}, but "
+                       f"{expected_file.relative_to(ROOT)} (which the front page "
+                       f"shows) says {expected!r}")
+    return bad, seen
+
+
 def main() -> None:
     problems: list[str] = []
     blocks = anchors_seen = sections_seen = claims_seen = 0
-    status_seen = counts_seen = indexed_seen = 0
+    status_seen = counts_seen = indexed_seen = pages_seen = 0
     version = toolchain_version()
     # What docs/README.md's opening sentence counts: the Markdown documents
     # under docs/, which is DOCS minus the three top-level files it does not
@@ -450,6 +504,8 @@ def main() -> None:
     anchors = {p: anchor_index(t) for p, t in texts.items()}
     sections = {p: section_index(t) for p, t in texts.items()}
     bad, indexed_seen = check_index_coverage(texts)
+    problems += bad
+    bad, pages_seen = check_site_pages()
     problems += bad
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -480,7 +536,8 @@ def main() -> None:
             print(p, file=sys.stderr)
         print(f"FAIL: {len(problems)} documentation problem(s)", file=sys.stderr)
         sys.exit(1)
-    print(f"OK: {len(DOCS)} documents, {blocks} checked block(s); "
+    print(f"OK: {len(DOCS)} documents, {blocks} checked block(s), "
+          f"{pages_seen} front-page program(s); "
           f"{anchors_seen} anchor(s), {sections_seen} § reference(s), "
           f"{claims_seen} version claim(s), {status_seen} status line(s), "
           f"{indexed_seen} index entr(ies) and {counts_seen} document count(s) "
