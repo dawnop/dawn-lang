@@ -1,0 +1,122 @@
+# A comptime constant that folded to a *structured* value, and what its
+# lifetime has to be.
+#
+# `const_fold.dawn` is about the folded value being right. This one is about
+# what happens to it afterwards, which is a separate question with a separate
+# oracle: the printed lines here would look identical whether the constant is
+# shared, rebuilt, or freed under the program's feet -- until the run that
+# reuses the block. The check that sees it at the moment it happens is `asan`
+# (leak detection on), and this file is written to give it something to see.
+#
+# What the native backend does with such a constant: a generated builder
+# function with a static pointer, run once, and the whole graph handed to
+# `dawn_immortal`. The JVM equivalent is a `static final` field filled by
+# `<clinit>`. Three properties follow, and each has a section below.
+#
+#   1. It survives being read. Reading it a thousand times must not churn a
+#      count down to zero -- the loop below is the shape that turns a
+#      one-per-read imbalance into a use-after-free rather than a slow leak.
+#   2. It survives being *consumed*. `++`, `sort`, `reverse` and a function
+#      taking the list by value all consume their argument, and the constant
+#      has to still be there afterwards. BIG is 40 elements on purpose -- past
+#      WIDTH, so `++` walks into the trie and not only the tail.
+#   3. It is not rebuilt per reference. Two reads must be the same value, and
+#      `==` is structural so it cannot say so; what it can say is that
+#      nothing observable changed, which is what the reprints are for.
+#
+# What this file does *not* see, measured rather than assumed: marking only
+# the constant's outermost header immortal and leaving its children counted
+# leaves every program here green. `dawn_array_with` is the only in-place
+# rewrite in the runtime, `std/pvec.push_tail` is the only route to it from
+# Dawn, and the RC pass dups the array before that call -- so the children's
+# counts never decide anything. That property belongs to
+# scripts/rc-contract/rc_test.c, which calls `dawn_array_with` directly.
+use std/io
+use std/list
+use std/str
+
+pub type Pair = { a: Int, b: String } derive Show
+pub type Shape = | Dot | Seg(from: Int, to: Int) derive Show
+
+const XS: List[Int] = [1, 2, 3]
+const NAMES: List[String] = ["ann", "bo"]
+const TUP: (Int, String) = (7, "seven")
+const PAIR: Pair = Pair { a: 1, b: "one" }
+const SEG: Shape = Seg(2, 5)
+const NEST: List[(Int, List[String])] = [(1, ["x"]), (2, [])]
+const BIG: List[Int] = [
+  0, 1, 2, 3, 4, 5, 6, 7, 8, 9,
+  10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
+  20, 21, 22, 23, 24, 25, 26, 27, 28, 29,
+  30, 31, 32, 33, 34, 35, 36, 37, 38, 39
+]
+
+## Takes the list by value, so the call is a consuming use of whatever is
+## handed to it.
+fn total(ns: List[Int]) -> Int = fold(ns, 0, (acc, n) => acc + n)
+
+## The constant read from a second function, which on the JVM is a second
+## class and therefore a second static field. Whether the two share one object
+## is not observable in Dawn -- there is no reference equality -- so this asks
+## only that the value is the same.
+fn elsewhere() -> String = to_string(XS) ++ "/" ++ to_string(TUP)
+
+pub fn main() -> Unit !io = {
+  println("-- the folded shapes --")
+  println("xs    = ${to_string(XS)}")
+  println("names = ${to_string(NAMES)}")
+  println("tup   = ${to_string(TUP)}")
+  println("pair  = ${to_string(PAIR)}")
+  println("seg   = ${to_string(SEG)}")
+  println("nest  = ${to_string(NEST)}")
+  println("big0  = ${to_string(BIG)}")
+
+  println("-- read many times, then read again --")
+  var acc = 0
+  var i = 0
+  while i < 1000 {
+    acc = acc + total(XS) + len(NAMES) + len(BIG)
+    i = i + 1
+  }
+  println("acc   = ${acc}")
+  println("xs    = ${to_string(XS)}")
+  println("big1  = ${to_string(BIG)}")
+
+  println("-- consumed, then read again --")
+  println("app   = ${to_string(XS ++ [4])}")
+  println("xs    = ${to_string(XS)}")
+  println("srt   = ${to_string(sort(XS))}")
+  println("xs    = ${to_string(XS)}")
+  println("rev   = ${to_string(list.reverse(NAMES))}")
+  println("names = ${to_string(NAMES)}")
+  println("bigap = ${to_string(BIG ++ [40])}")
+  println("big2  = ${to_string(BIG)}")
+  println("mapd  = ${to_string(map(XS, x => x * 10))}")
+  println("xs    = ${to_string(XS)}")
+  println("tot   = ${total(XS)}")
+  println("xs    = ${to_string(XS)}")
+
+  println("-- put inside things that then die --")
+  var j = 0
+  while j < 100 {
+    let held = [XS, XS]
+    let boxed = Some(NAMES)
+    let tupled = (XS, NAMES, TUP)
+    let (t0, t1, _t2) = tupled
+    acc = acc + len(held) + len(t0) + len(t1) +
+      match boxed { Some(ns) -> len(ns), None -> 0 }
+    j = j + 1
+  }
+  println("acc2  = ${acc}")
+  println("xs    = ${to_string(XS)}")
+  println("names = ${to_string(NAMES)}")
+
+  println("-- captured by a closure --")
+  let f = () => total(XS) + str.len(to_string(TUP))
+  println("cap   = ${f() + f()}")
+  println("xs    = ${to_string(XS)}")
+
+  println("-- read from another function --")
+  println("else  = ${elsewhere()}")
+  println("else  = ${elsewhere()}")
+}

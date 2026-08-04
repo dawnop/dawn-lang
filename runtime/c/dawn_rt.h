@@ -303,6 +303,35 @@ void *dawn_dup(void *p);
 void dawn_drop(void *p);
 bool dawn_is_unique(const void *p);
 
+/* Take a freshly built object graph out of the ledger for good: every node
+ * reachable from `p` gets an immortal header, so dup and drop return
+ * immediately on all of them and `dawn_is_unique` is false everywhere in it.
+ *
+ * The one caller is a comptime constant. The JVM backend puts a folded
+ * structured value in a `static final` field that `<clinit>` builds once; C
+ * has no <clinit>, so the emitter writes a builder function with a static
+ * pointer instead, and this is what makes the result behave like that field:
+ * built once, shared by every reference, never released.
+ *
+ * The *whole graph*, not just the root. `dawn_array_with` is the one place
+ * that asks `dawn_is_unique` and then writes in place, and a root-only mark
+ * would leave every node under the root at rc 1 -- so whether a constant can
+ * be overwritten through its own buffer would rest on every call site duping
+ * first, rather than on anything true of the object. Marking the graph makes
+ * "a constant is not unique" a fact instead of a convention.
+ *
+ * Today the convention also holds: measured 2026-08-04, the only route from
+ * Dawn to `dawn_array_with` is `std/pvec.push_tail`, the RC pass dups the
+ * array before the call, and a constant appended to therefore copies under
+ * both markings. So this is a hedge, and the check that can tell the two
+ * apart is scripts/rc-contract/rc_test.c's `test_immortal_graph`, which calls
+ * `dawn_array_with` itself -- no corpus program sees the difference.
+ *
+ * Acyclic by construction (a folded value is a tree of literals), and an
+ * already-immortal node stops the walk -- string literals are static and
+ * carry no children. */
+void dawn_immortal(void *p);
+
 /* THE CALLING CONVENTION FOR EVERY PRIMITIVE BELOW: arguments are BORROWED,
  * and anything a primitive keeps it dups for itself. So `array_push` counts
  * both the element it stores and the buffer it goes on sharing, and the

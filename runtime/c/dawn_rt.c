@@ -335,6 +335,64 @@ static void dawn_ws_free(dawn_ws *s) {
   }
 }
 
+/* See dawn_rt.h. The same traversal `dawn_drop` does, minus the freeing: one
+ * work list, the same per-kind child rules, so a kind that gains children has
+ * one place to gain them in both walks. `dawn_rc_leak` is not consulted --
+ * that mode turns releases off, and this is not a release; the constant has to
+ * be immortal in both modes or `dawn_is_unique` answers differently in one of
+ * them. */
+void dawn_immortal(void *p) {
+  dawn_ws s;
+  dawn_ws_init(&s);
+  dawn_ws_push(&s, p);
+  while (s.len > 0) {
+    void *q = s.items[--s.len];
+    dawn_hdr *h = (dawn_hdr *)q;
+    if (h->rc == DAWN_IMMORTAL) {
+      continue; /* already out of the ledger; string literals end here */
+    }
+    h->rc = DAWN_IMMORTAL;
+    switch (h->kind) {
+      case DAWN_K_ADT: {
+        dawn_adt *a = (dawn_adt *)q;
+        for (int32_t i = 0; i < a->nfields; i++) {
+          if (dawn_mask_bit(&a->ptrmask, a->nfields, i)) {
+            dawn_ws_push(&s, a->fields[i].p);
+          }
+        }
+        break;
+      }
+      case DAWN_K_CLO: {
+        dawn_clo *c = (dawn_clo *)q;
+        for (int32_t i = 0; i < c->ncap; i++) {
+          if (dawn_mask_bit(&c->capmask, c->ncap, i)) {
+            dawn_ws_push(&s, c->caps[i].p);
+          }
+        }
+        break;
+      }
+      case DAWN_K_ARRAY:
+        dawn_ws_push(&s, ((dawn_array *)q)->buf);
+        break;
+      case DAWN_K_ARRAY_BUF: {
+        dawn_array_buf *b = (dawn_array_buf *)q;
+        for (int32_t i = 0; i < b->high; i++) {
+          dawn_ws_push(&s, b->data[i]);
+        }
+        break;
+      }
+      case DAWN_K_BOX:
+      case DAWN_K_BYTES:
+      case DAWN_K_STR:
+        break; /* no counted children */
+      default:
+        fprintf(stderr, "dawn: immortal of an unheaded pointer (kind %d)\n", h->kind);
+        exit(1);
+    }
+  }
+  dawn_ws_free(&s);
+}
+
 void dawn_drop(void *p) {
   if (dawn_rc_leak || p == NULL) {
     return;

@@ -57,13 +57,13 @@ types.dawn:1177），impl 体不写在 std，而是 `lower.dawn` 的 `prim_relat
    `const B: List[Int] = [A, 4]` working」。走路 ①（`get(xs, i).expect(…)`）会把 `[]`
    变成对 `std/pvec` 的调用，comptime 就得解释 `array_*`，而它拒绝 `array_*`。
 
-   > **脚注（刀 2 实测补，2026-08-02）**：理由①引的那句里「这条 const 能工作」
-   > **只对 JVM 成立**。`dawn __emitc` 对同一份源报
+   > **脚注（刀 2 实测补，2026-08-02；2026-08-04 结清）**：理由①引的那句里
+   > 「这条 const 能工作」当时**只对 JVM 成立**——`dawn __emitc` 对同一份源报
    > `emitc: const `B` folded to a structured value (List_Int), which native cannot
-   > rebuild yet`——native 后端今天重建不了折叠出来的结构化常量。这是**先于本刀**的
-   > native 缺口（刀 1 的语料期就复现过），不是刀 2 弄坏的：Core 层面的判据仍然成立，
-   > `list_index` 留在 Core 里 comptime 才折得动，走路 ① 一样折不动而且两个后端都折不动。
-   > 只是别把那句话读成「今天两个后端都能编这条 const」。
+   > rebuild yet`。那是**先于本刀**的 native 缺口（刀 1 的语料期就复现过），不是刀 2
+   > 弄坏的：Core 层面的判据一直成立。缺口已由 K-B5 补上（emitc 的 `const_builder`，
+   > 见 [native-driver-plan.md](native-driver-plan.md) §17），
+   > 现在两个后端都编得了这条 const。
 2. **不触发 std 模块序死结**。`std/modules.txt` 把 `hamt`/`pvec` 排在最后（「Nothing in
    std imports this module and nothing should」，std/hamt.dawn 头注），而它们正是 `[]` 的
    实现载体，且它们自己也用 `[]`（std/set.dawn:46/59/70/99、std/map.dawn:75/92/106/147）。

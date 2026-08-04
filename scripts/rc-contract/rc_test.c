@@ -156,6 +156,83 @@ static void test_immortal(void) {
   free(a); /* by hand: drop would never have */
 }
 
+/* `dawn_immortal` takes a whole object graph out of the ledger, which is what
+ * a comptime constant needs: the emitter builds one once behind a static
+ * pointer and never releases it (emitc's `const_builder`).
+ *
+ * The checks below are what says it marks the graph rather than the root: a
+ * child left at rc 1 is a *unique* value, and `dawn_array_with` writes a
+ * unique array in place, so the constant would be overwritten through its own
+ * buffer.
+ *
+ * This file is the only place that can say so. Root-only marking was tried
+ * against the whole native corpus on 2026-08-04 and every program stayed
+ * green, including a 1100-element constant appended to -- the smallest shape
+ * that reaches `array_with` from Dawn at all -- because the RC pass dups the
+ * array before the call and `dawn_is_unique` then answers no either way. So
+ * the property is checked here, against `dawn_array_with` directly, or it is
+ * checked nowhere.
+ *
+ * The graph here is the shape a folded list really has: an array, its buffer,
+ * and boxed elements -- three kinds, reached through three different child
+ * rules. */
+
+/* What keeps the graph reachable, for the same reason the emitter's builder
+ * keeps a constant in a static: an immortal graph is never freed, and
+ * LeakSanitizer's question is reachability, not liveness. External linkage on
+ * purpose -- a `static` whose only use is a store is a store the optimiser may
+ * delete, and at -O1 it did: the subject was then reported as a leak by the
+ * very check it exists to satisfy. */
+void *dawn_rc_test_immortal_root;
+
+static void test_immortal_graph(void) {
+  dawn_array *xs = dawn_array_new();
+  for (int i = 0; i < 8; i++) {
+    dawn_box *e = dawn_box_int(i);
+    dawn_array *n = dawn_array_push(xs, e);
+    dawn_drop(e);
+    dawn_drop(xs);
+    xs = n;
+  }
+  dawn_adt *holder = dawn_adt_new(0, 1, MASK1);
+  holder->fields[0].p = xs;
+  dawn_rc_test_immortal_root = holder;
+
+  dawn_immortal(holder);
+  check(holder->h.rc == DAWN_IMMORTAL, "the root is immortal");
+  check(xs->h.rc == DAWN_IMMORTAL, "so is the array it holds");
+  check(xs->buf->h.rc == DAWN_IMMORTAL, "and the array's buffer");
+  check(((dawn_box *)dawn_array_get(xs, 3))->h.rc == DAWN_IMMORTAL,
+    "and every boxed element");
+  check(!dawn_is_unique(xs), "nothing inside is unique any more");
+  check(!dawn_is_unique(xs->buf), "the buffer included");
+
+  /* drop the graph as often as anything could: it must survive all of it */
+  for (int i = 0; i < 100; i++) {
+    dawn_dup(holder);
+    dawn_drop(holder);
+    dawn_drop(holder);
+  }
+  check(((dawn_box *)dawn_array_get(xs, 3))->val.i == 3, "and still reads back");
+
+  /* The property root-only marking would lose. `array_with` is handed the
+   * constant's own array with no dup in front of it -- which is exactly what
+   * the RC pass emits for an immortal operand, and the reason an immortal
+   * operand is safe to hand over at all. Marked graph-wide, the array is not
+   * unique and `array_with` copies. Marked root-only it is unique, and
+   * `array_with` writes the constant's buffer in place: the value of a `const`
+   * changes underneath the program, and nothing before this line notices. */
+  uint64_t inplace0 = dawn_array_with_inplace;
+  uint64_t copied0 = dawn_array_with_copied;
+  dawn_box *replacement = dawn_box_int(99);
+  dawn_array *ys = dawn_array_with(xs, 3, replacement);
+  check(dawn_array_with_copied == copied0 + 1, "a rebuild copies an immortal array");
+  check(dawn_array_with_inplace == inplace0, "it does not write one in place");
+  check(((dawn_box *)dawn_array_get(xs, 3))->val.i == 3, "the constant is unchanged");
+  check(((dawn_box *)dawn_array_get(ys, 3))->val.i == 99, "the copy has the new value");
+  dawn_drop(ys);
+}
+
 /* --rc=leak. Nothing is freed, so this runs last and the harness turns the
  * leak check off for it -- the leaks are the point. */
 static void test_leak_mode(void) {
@@ -182,6 +259,7 @@ int main(int argc, char **argv) {
     test_array_with();
     test_deep_chain();
     test_immortal();
+    test_immortal_graph();
   }
 
   if (failures > 0) {

@@ -296,10 +296,16 @@ Dawn 函数不能照搬——**刀 4 的出口条件要求它是 owned**：
 这也正是 `CDup` 必须是表达式而不是语句的原因——`f(p.x)` 里要计数的是 `p.x`，
 它没有名字。
 
-> `CConstRef` / `CComptime` 不在这张表里，查过了：C 侧 `const_literal`
-> 只认标量，结构化常量直接 panic「native cannot rebuild yet」。所以到得了 C 后端的
-> 常量一定是标量，`is_ref_ty` 一定是 false，怎么归类都不会 dup。等结构化常量能落地时
-> 这条要重看。
+> `CConstRef` / `CComptime` 不在这张表里。原因写在 2026-08-02：那时 C 侧
+> `const_literal` 只认标量，结构化常量直接 panic，所以到得了 C 后端的常量一定是标量、
+> `is_ref_ty` 一定 false，怎么归类都不会 dup。
+>
+> **2026-08-04 重看（K-B5）**：结构化常量落地了，结论不变但理由换了一条。emitc 的
+> `const_builder` 把折叠值建一次、放进函数内的 static 指针，整张图交给
+> `dawn_immortal`——于是它和字符串字面量同类：dup/drop 在它身上是空操作。所以
+> `rc.dawn` 的 `lit_immortal` 现在对**所有**类型的 `CConstRef`/`CComptime` 返回
+> true，不再只对 `TyString`。两边必须同时改：只要发射端不再标 immortal 而这边还说
+> immortal，第一次消费性使用就会释放掉 static 指针仍指着的那个常量。
 
 这条规则的正确性不需要活跃性分析：
 

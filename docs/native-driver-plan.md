@@ -1,6 +1,6 @@
 # B 线：native 驱动补全 + 把后端契约摆到明面上
 
-> 状态：**in progress**（2026-08-03 立项，任务 #128；K-B1/K-B2/K-B3 已落地，下一刀 K-B4）。
+> 状态：**in progress**（2026-08-03 立项，任务 #128；K-B1/K-B2/K-B3/K-B5 已落地，下一刀 K-B4）。
 > 本文是 B 线的落地记录 + 后续刀表。
 >
 > **为什么在这儿而不在别处**：B 线原来的备忘录只存在于任务 #128 的描述里，仓库中没有
@@ -40,6 +40,7 @@ B 线的驱动是**能力补全，不是纯洁性**：不是「把 java 赶出�
 | **K-B2** | 把 `fmt` / `doc` / `add` 接进 native 驱动，并让差分门禁真的覆盖 native | 加能力 + 加门禁 | **已做**（§4–§7） |
 | **K-B3** | `lsp`（`lsp.dawn` + `lspq.dawn` + `lspc.dawn`，2,877 行），并让 lsp 差分真的覆盖 native | 加能力 + 加门禁 | **已做**（§11–§15） |
 | **K-B4** | `test`（`testrun.dawn`；JVM 侧靠生成一个 test main 类，native 侧要另一条路） | 加能力 | 待 |
+| **K-B5** | 结构化 comptime 常量落到 native（`emitc.const_literal` 原来直接 panic） | 加能力 + 加门禁 | **已做**（§17） |
 
 > 刀表的**内容**来自任务 #128 的描述。原始 issue body 在写这份文档时取不到
 > （`api.github.com/repos/dawnop/dawn-lang/issues/128` 回 404，本仓 issue 不公开），
@@ -519,3 +520,106 @@ stdout 逐字节相同、退出码相同。
    缺口漏出去的——补它的是第 5 条腿，而第 5 条腿只检查**第一帧**是否在 stdin 关闭前
    到达，不检查后续每一帧。
 4. **它不覆盖 stderr。** 两个驱动的 `lsp` 都不往 stderr 写东西，但没有任何断言这么说。
+
+## 17. K-B5：结构化 comptime 常量落到 native
+
+`emitc.const_literal` 原来对折叠出来的结构化值直接 panic：
+
+```
+emitc: const `B` folded to a structured value (List_Int), which native cannot rebuild yet
+```
+
+即 spec 7.2 允许一个 `const` 折成 List / 元组 / 记录 / 构造子（以及它们的嵌套与
+opaque 包装），JVM 把它放进 `<clinit>` 填的 `static final` 字段，而 C 没有
+`<clinit>` 可填。本刀补的就是这个。
+
+### 17.1 C 侧怎么表示
+
+**一个生成的 builder 函数 + 函数内 static 指针**，每个常量一个：
+
+```c
+static void* dawn_const_0(void) {
+  static void* c = NULL;
+  if (c == NULL) {
+    /* 按 emit_const_value 的配方把值建出来 */
+    c = (void*)(...);
+    dawn_immortal(c);
+  }
+  return c;
+}
+```
+
+三个决定各有理由：
+
+1. **是函数不是初始化好的静态数据。** 元组和构造子*可以*写成静态初始化数据——布局是
+   emitc 自己的。List 不行：`[1, 2, 3]` 是 `std/pvec.from_array` 作用在一个 Array 上，
+   而持久向量的形状属于 std、是用 Dawn 写的。把它抄进后端等于把 std 的内部结构硬编码
+   进 C 生成器，std 一动就静默错。既然 List 必须建，而元组能装 List，一套机制覆盖三种。
+2. **惰性，不是 `main` 前的 init。** 一个 init 函数得挑一个没人有理由挑的顺序；而这里
+   根本没有顺序可言——comptime 求值已经把常量读到的每一个常量都内联了，折出来的值是一棵
+   闭合的字面量树，不会引用另一个常量。首次使用时建，比 `<clinit>` 做得还少，且不可观测
+   （建它是纯的）。Dawn 程序只跑在一条线程上（运行时里只有一次 `pthread_create`，就是
+   程序自己的栈线程），所以惰性 static 没有竞争。
+3. **建完离开账本。** `dawn_immortal(c)` 把整张图标成不朽，于是 dup/drop 在它上面是空
+   操作、`dawn_is_unique` 在它内部处处为假——和字符串字面量自 2026-07-29 入账以来的待遇
+   一样。`rc.dawn` 的 `lit_immortal` 是这个决定的另一半，两边必须同时说同一句话。
+
+值本身的重建走的是**发射器对同一形状的字面量已经在用的那条配方**（List 走
+`CListLit` 的 Array + `from_array`，元组和构造子走 `emit_alloc` 的同一套
+`dawn_adt_new` + 槽位 + ptrmask），而不是第二套会漂移的布局叙述。构造子的字段按
+**声明类型**取槽位——折叠值身上没有 lowering 插的 `CBox`，所以类型变量位上的标量要在
+这里装箱，和 JVM 的 `construct_value` 读 `gx.adts` 是同一个理由。
+
+缓存键是 `模块 ++ "|" ++ 常量键`。JVM 不需要模块那一段，因为它的缓存是类上的字段表、
+而一个类就是一个模块；C 是一整个翻译单元，`std/pvec` 的 `MASK` 和 `std/hamt` 的 `MASK`
+在里面同名。
+
+### 17.2 为什么标整张图而不只标根
+
+`dawn_array_with` 是运行时里唯一一处「问 `dawn_is_unique`，然后原地写」。只标根会把
+根以下每个节点留在 rc 1 上——那么「常量会不会被人从它自己的 buffer 里改掉」就取决于
+每一个调用点先 dup，而不取决于这个对象本身的任何事实。标整张图把「常量不是唯一的」
+从惯例变成事实。
+
+**但今天惯例也成立，这点是量出来的**（2026-08-04）：从 Dawn 走到 `dawn_array_with`
+的唯一路径是 `std/pvec.push_tail`，而 RC pass 在那次调用前会 dup 那个 Array，所以两种
+标法下 `dawn_is_unique` 都答否。实测：把标法改成只标根，整个 native 语料全绿，包括
+专门造的「1100 元素的常量再 append」——那是从 Dawn 够得着 `array_with` 的最小形状。
+所以这是一道保险，而**能把两种标法分开的检查只有一个**：
+`scripts/rc-contract/rc_test.c` 的 `test_immortal_graph`，它直接调
+`dawn_array_with`。语料里没有任何程序看得见这个差别，`const_struct.dawn` 的头注写了
+这句话，免得下一个人把语料的绿读成这条性质的证据。
+
+### 17.3 红演示与阴性对照 `[实测]`
+
+| 变异体 | 改哪儿 | 谁红 | 谁不红（阴性对照） |
+|---|---|---|---|
+| M1 只标根 | `dawn_immortal` 里 `h->rc = DAWN_IMMORTAL;` 后加 `continue` | `rc-contract` 8 条断言 | 整个 native 语料**全绿**——见 §17.2 |
+| M2 不标 | `const_builder` 不发 `dawn_immortal(c);` | `const_fold`/`const_struct` 的 `asan`（heap-use-after-free）+ `native` + `diff` + `stderr` + `exit` | —— |
+| M3 构造子 tag 恒 0 | `emit_const_adt(st1, ci, …)` → `…, 0, …` | `const_fold` 的 `asan` + `native` + `diff` + `exit` | **`const_fold:jvm` 绿**——同一次运行里同一份 `.expect`，所以被测者确实是 native |
+| M4 篡改期望 | `const_struct.expect` 改一行 | `const_struct` 的 `jvm` 与 `native` 两条腿 | —— |
+
+M3 是回答「门禁看得见 native 吗」的那一条：`scripts/spike-native/run.sh` 的
+`__emitc`（:194）→ `cc`（:211）→ 跑二进制（:226）→ 和 `.expect` 比（:260），四步都在
+native 这一侧，而 `jvm` 那条腿读的是同一个 `.expect` 且没有变红。
+
+### 17.4 语料
+
+`const_fold.dawn` 补了结构化那一半：List（含空、含字符串、含嵌套 List）、二元/三元组、
+记录、无字段构造子、带字段构造子、类型变量位上的 Int 与 String、`Option`/`Result`、
+opaque 包 List、以及一个 `comptime { … }` 块（走的是同一条发射路径，只是键是 span 不是
+名字）。每一条都和**运行期写同一份字面量**的结果并排打印——这才是「常量被建得和字面量
+不一样」能被抓住的地方。
+
+`const_struct.dawn` 是新的，问的是另一个问题：常量活多久。读一千次、被 `++`/`sort`/
+`reverse`/按值传参消费、装进会死掉的容器、被闭包捕获、从另一个函数读——打印出来的行在
+「共享」「每次重建」「被释放」三种实现下长得一模一样，所以它的 oracle 是 `asan`
+（开泄漏检测），不是 stdout。
+
+### 17.5 剩下的
+
+- **编译器自己不走这条路。** 全仓（`selfhost/src`、`std`、`packages`）今天没有一个
+  结构化 `const`，所以 native 自举、`native-cli-diff` 都不经过 `const_builder`；唯一的
+  运动量在语料里。这不是缺陷，是事实，写在这里免得把自举的绿当成这条路径的证据。
+- **跨模块不共享。** 同一个常量被两个模块引用会生成两个 builder。JVM 也是这样
+  （缓存是类上的字段表），Dawn 又没有引用相等，所以这是等价的、不是缺口。

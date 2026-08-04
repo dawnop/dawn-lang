@@ -60,6 +60,55 @@ const A_SPLIT: String = join(str.split(ASTRAL, "𝄞"), "|")
 const A_TRIM: String = str.trim("  a𝄞中b𝄞  ")
 const A_ENDS: Bool = str.ends_with(ASTRAL, "𝄞")
 
+## The constants above all fold to a *scalar*, which both backends inline as a
+## literal. These fold to a value with storage -- spec 7.2's serializable set
+## past the scalars: List, tuple, record, sum constructor, an opaque type over
+## any of them, and those nested in each other. The JVM puts each in a
+## `static final` field that `<clinit>` fills; C has no <clinit>, so the
+## native backend writes a builder function per constant and runs it once.
+##
+## They belong in *this* file rather than only in a differential one for the
+## reason at the top: a folded value is folded on both targets by the same
+## interpreter, so if the fold is wrong the two backends agree with each other
+## and only the written-down expectation disagrees. Each is printed beside the
+## same expression evaluated at run time, which is the other half -- that pair
+## is what catches a constant that is *built* differently from the way the
+## same literal is built.
+pub type Item = { sku: String, qty: Int } derive Show
+
+pub type Shape =
+  | Dot
+  | Seg(from: Int, to: Int)
+derive Show
+
+pub type Wrap[T] = | Wrap(v: T) derive Show
+
+pub opaque type Tags = List[String]
+
+const C_LIST: List[Int] = [1, 2, 3]
+const C_LIST_STR: List[String] = ["x", "y"]
+const C_LIST_EMPTY: List[Int] = []
+const C_TUP: (Int, String) = (1, "one")
+const C_TUP3: (Int, Float, Bool) = (1, 2.5, true)
+const C_REC: Item = Item { sku: "a\nb", qty: 2 }
+const C_NULLARY: Shape = Dot
+const C_CTOR: Shape = Seg(2, 5)
+## An erased field: the JVM boxes at a type variable and so does this, which
+## is the difference between `Wrap(7)` and `Wrap("g")` at the same slot.
+const C_GEN_INT: Wrap[Int] = Wrap(7)
+const C_GEN_STR: Wrap[String] = Wrap("g")
+const C_OPT: Option[Int] = Some(9)
+const C_OPT_NONE: Option[Int] = None
+const C_RESULT: Result[Int, String] = Ok(3)
+const C_NEST: List[(Int, List[String])] = [(1, ["x"]), (2, [])]
+const C_LIST_LIST: List[List[Int]] = [[1], [2, 3]]
+## Opaque is serializable exactly as its target is (spec 7.2), so this must
+## rebuild as the List it is.
+const C_OPAQUE: Tags = ["p", "q"]
+## A comptime block, which reaches the same emitter path under a different key
+## -- a span rather than a name.
+const C_BLOCK: (Int, List[String]) = comptime { (1 + 1, ["u", "v"]) }
+
 pub fn main() -> Unit !io = {
   println("-- scalars fold --")
   println("N     = ${N}")
@@ -107,4 +156,59 @@ pub fn main() -> Unit !io = {
   println("runtime trim  = [${str.trim("  a𝄞中b𝄞  ")}]")
   println("const   ends  = ${A_ENDS}")
   println("runtime ends  = ${str.ends_with(ASTRAL, "𝄞")}")
+
+  println("-- structured constants, folded vs the same literal at run time --")
+  println("const   list  = ${to_string(C_LIST)}")
+  println("runtime list  = ${to_string([1, 2, 3])}")
+  println("const   lstrs = ${to_string(C_LIST_STR)}")
+  println("runtime lstrs = ${to_string(["x", "y"])}")
+  println("const   empty = ${to_string(C_LIST_EMPTY)}")
+  println("runtime empty = ${to_string(empty_int())}")
+  println("const   tup   = ${to_string(C_TUP)}")
+  println("runtime tup   = ${to_string((1, "one"))}")
+  println("const   tup3  = ${to_string(C_TUP3)}")
+  println("runtime tup3  = ${to_string((1, 2.5, true))}")
+  println("const   rec   = ${to_string(C_REC)}")
+  println("runtime rec   = ${to_string(Item { sku: "a\nb", qty: 2 })}")
+  println("const   dot   = ${to_string(C_NULLARY)}")
+  println("runtime dot   = ${to_string(Dot)}")
+  println("const   seg   = ${to_string(C_CTOR)}")
+  println("runtime seg   = ${to_string(Seg(2, 5))}")
+  println("const   wrapi = ${to_string(C_GEN_INT)}")
+  println("runtime wrapi = ${to_string(Wrap(7))}")
+  println("const   wraps = ${to_string(C_GEN_STR)}")
+  println("runtime wraps = ${to_string(Wrap("g"))}")
+  println("const   opt   = ${to_string(C_OPT)}")
+  println("runtime opt   = ${to_string(Some(9))}")
+  println("const   none  = ${to_string(C_OPT_NONE)}")
+  println("runtime none  = ${to_string(none_int())}")
+  println("const   res   = ${to_string(C_RESULT)}")
+  println("runtime res   = ${to_string(ok_int())}")
+  println("const   nest  = ${to_string(C_NEST)}")
+  println("runtime nest  = ${to_string([(1, ["x"]), (2, [])])}")
+  println("const   ll    = ${to_string(C_LIST_LIST)}")
+  println("runtime ll    = ${to_string([[1], [2, 3]])}")
+  println("const   opaq  = ${to_string(untag(C_OPAQUE))}")
+  println("runtime opaq  = ${to_string(untag(tag(["p", "q"])))}")
+  println("const   block = ${to_string(C_BLOCK)}")
+  println("runtime block = ${to_string((1 + 1, ["u", "v"]))}")
+
+  # Reading one twice is what says it is a value and not a one-shot: the
+  # native backend hands back the same immortal object both times, and a
+  # constant that had been released by the first read would be read here.
+  println("const   list  = ${to_string(C_LIST)}")
+  println("const   nest  = ${to_string(C_NEST)}")
 }
+
+## `None`/`Ok` need somewhere to take their type from, and a bare annotation
+## at the interpolation is not a place. Ordinary functions, so the runtime
+## side of those two pairs really is evaluated at run time.
+fn none_int() -> Option[Int] = None
+
+fn empty_int() -> List[Int] = []
+
+fn ok_int() -> Result[Int, String] = Ok(3)
+
+fn tag(xs: List[String]) -> Tags = xs
+
+fn untag(t: Tags) -> List[String] = t

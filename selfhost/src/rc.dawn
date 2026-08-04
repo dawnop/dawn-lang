@@ -41,7 +41,7 @@ use core.{
   CDynamic, CDirect, CBinOp, CAnd, COr, CInt, CFloat, CBool, CStr, CUnit, COwned,
   cex_ty, diverges
 }
-use types.{Ty, TyInt, TyBool, TyString, TyList, TyTuple, TyUnit, TyNever, TyArray,
+use types.{Ty, TyInt, TyBool, TyList, TyTuple, TyUnit, TyNever, TyArray,
   is_ref_ty, intr_owned_args }
 use std/list
 use std/set
@@ -526,14 +526,19 @@ fn dictish(st: RSt, e: CExpr) -> Bool =
 ## only as an operand is it exempt from counting, because hoisting one into
 ## a temporary would be pure noise.
 ##
-## A folded constant of any *other* reference type cannot reach this backend
-## -- emitc's `const_literal` refuses structured values -- so String is the
-## only type the `CConstRef`/`CComptime` arms have to mean.
+## A folded constant is immortal at *every* type, not only String. A scalar
+## one is not counted anyway (`counted` asks `is_ref_ty` first); a structured
+## one is built once by a generated builder and handed to `dawn_immortal`,
+## which takes the whole graph out of the ledger (emitc's `const_builder`).
+## These two have to agree: if this said "counted" the pass would emit dup and
+## drop on an immortal header, which is merely wasted instructions -- but if
+## the emitter stopped marking while this still said "immortal", the first
+## consuming use would free a constant the static pointer still names.
 fn lit_immortal(e: CExpr) -> Bool =
   match e {
     CStr(_) -> true
-    CConstRef(_, _, ty) -> ty == TyString
-    CComptime(_, _, ty) -> ty == TyString
+    CConstRef(_, _, _) -> true
+    CComptime(_, _, _) -> true
     _ -> false
   }
 
