@@ -27,6 +27,10 @@
 > EOF 怎么表达、native 上的信号语义）比 debounce 本身大——**不该顺手塞进 LSP 改动里**，
 > 半设计好的原语进语言表面比不做更糟。debounce 的其余部分（generation 计数、
 > `$/cancelRequest` 直接回 RequestCancelled）都在那个原语之后才有意义。
+>
+> **2026-08-04 实测收口**：设计题已经用探针答完，形状定了（语义 B 的 `Bool`），
+> 验收实验也已建出并用变异体打红过——见 §2.2.1 与 §2.2.2。落地还欠一件前置：
+> C 后端的 `io_read_stdin` 得先从 stdio 换成 `read(2)`。本轮不写任何代码。
 ## 一、问题
 
 ### 1.1 手写 UTF-8 decoder 不校验（LSP-01）
@@ -127,19 +131,137 @@ URI 解码是**基础设施**，正确性早有定义、JDK 早有实现。
 `N` 取多少：暂定 150ms，**没有实测出处，落地时要测**（CONTRIBUTING §二）。
 测法：记录 `didChange` 到诊断发布的墙钟时间，在 selfhost 自身（31k 行）上连续输入。
 
-> **就绪原语的关键分叉（2026-07-30 侦察，尚未动手）**：形状应取
-> `io_stdin_ready(timeout_ms: Int) -> Bool`（就绪查询，不读字节；阻塞读仍是唯一读者，
-> 于是 EOF 语义不被搅动）——而不是「带超时的读」，后者会把超时与 EOF 混成同一个短读，
-> 而 LSP 的帧协议已经把短读判成 EOF。
->
-> **但两个后端对「EOF 时是否就绪」天然不同答**：POSIX 的 `poll` 在 EOF 时报 `POLLIN`
-> 就绪（读不会阻塞，返回 0），而 Java 的 `InputStream.available()` 在 EOF 时返回 0，
-> 即「不就绪」。契约必须选一个，而**必须选 POSIX 那个**：若 EOF 算不就绪，一个关掉管道的
-> 客户端会让服务器永远等一个不会到来的就绪信号——空转而非退出。代价是 JVM 侧
-> `available()` 单独答不出这个（它分不清「暂时没有」与「永远没有」），要么裹
-> `PushbackInputStream` 预读一字节（而预读本身会阻塞，正是要避免的），要么另起一条读线程。
-> **这就是这把刀真正的设计题**，也是它不该被顺手塞进任何别的改动的原因：选错的后果是
-> 服务器空转或挂死，而两者都不会在单元测试里出现。
+### 2.2.1 就绪原语：实测真值表与裁决
+
+> 2026-07-30 记了一段侦察（`d4359c0`），当时**没跑过任何东西**，靠的是对 `poll` 与
+> `available()` 的先验印象。2026-08-04 用两个独立探针（一个 C 一个 Java，各自被真实
+> 管道 / 真实文件 / 真实 pty 驱动）把四种状态逐格量了一遍，**结论与那段侦察在三处相反**。
+> 下面凡标「实测」的格子都有探针出处，标「推断」的没有。
+
+#### 真值表（实测，Linux 6.18 WSL2 / glibc 2.39 / GraalVM 21.0.2）
+
+状态：**a** 有数据待读、写端开着；**b** 写端开着但静默；**c** 写端已关（EOF、无数据）；
+**d** 静默一段后才写；**e** 有数据且写端已关。
+（payload 有 5 字节 `hello` 与 6 字节 `hello\n` 两种——tty 的 canonical 模式不给不带换行的输入，
+所以补了后者；表里 5 与 6 的差别只是这个，不承载别的意思。）
+
+| stdin | 状态 | C：`poll(POLLIN, 200ms)` | C：`FIONREAD` | JVM：`available()` | 随后阻塞读 |
+|---|---|---|---|---|---|
+| pipe | a | `ret=1 revents=POLLIN`，1µs | 5 | 6 | 全部字节 |
+| pipe | b | `ret=0 revents=0`，**200.2ms**（超时真生效） | 0 | 0（300ms 内 59 次全 0） | 阻塞不返回 |
+| pipe | **c** | `ret=1` **`revents=POLLHUP`**（**没有 POLLIN**） | 0 | **0**（与 b 逐字节相同） | `read`→0 / `read()`→−1 |
+| pipe | d | 200ms 超时后下一次调用命中 | 0→5 | 0→6（5ms 粒度，226ms 命中） | 拿到数据 |
+| pipe | e | `revents=POLLIN\|POLLHUP` | 5 | 5 | 5 字节 |
+| file | a | `ret=1 revents=POLLIN` | 5 | 5 | 5 字节 |
+| file | **c** | `ret=1` **`revents=POLLIN`**（常规文件恒可读） | **0** | **0** | 0 字节 |
+| tty | a | `ret=1 revents=POLLIN` | 6 | 6 | 6 字节 |
+| tty | b | `ret=0`，200.2ms | 0 | 0 | 阻塞不返回 |
+| tty | c（挂断） | `revents=POLLIN\|POLLERR\|POLLHUP` | `-1 errno=EIO` | **抛 `IOException: Illegal seek`** | 0 / −1 |
+
+`select` 与 `poll` 在每一格答案相同（也实测了），不构成第三种选择。
+tty 的 a/d 首轮实测「永不就绪」是探针自造的：pty 默认 canonical 模式，不带换行的
+payload 不投递——补上 `\n` 后与 pipe 一致。同理首轮 JVM 矩阵的多处超时是
+`readNBytes(n)` **必须凑满 n 字节才返回**（正是 `io_read_stdin` 的语义），不是 Java 的性质。
+
+#### 被实测推翻的三条
+
+1. **「POSIX 在 EOF 报 `POLLIN`」是错的**。Linux 上管道写端关闭且无数据时
+   `revents` 只有 `POLLHUP`，有数据时是 `POLLIN|POLLHUP`。于是
+   **C 端能区分「有数据」与「EOF」**，而侦察假设它不能——这正是当时说
+   「契约必须选 POSIX 那个」的全部依据，依据没了。
+2. **「JVM 是难的那一半」是反的**。`System.in` 是 `BufferedInputStream`，
+   `available()` **把自己的缓冲算进去**：读掉 20 字节里的 1 字节后仍答 19（实测）。
+   而 C 后端的 `dawn_io_read_stdin` 走 **stdio `fread`**，`poll`/`FIONREAD`
+   **看不见 stdio 的缓冲**：同一实验里 `fread(1)` 之后 `FIONREAD=0`、
+   `poll` 老老实实超时 200ms，而 19 字节就躺在 glibc 的缓冲里。
+   **在 C 后端，基于 `poll` 的就绪原语在今天的 `io_read_stdin` 之上是错的。**
+3. **「EOF 算不就绪 → 服务器空转不退出」不是原语的性质，是循环形状的性质**。
+   见下。
+
+#### 形状裁决
+
+| 形状 | C 能否实现 | JVM 能否不起线程实现 |
+|---|---|---|
+| `-> Bool`，语义 A「读不会阻塞」（EOF 也算就绪） | 能（`ret>0`） | **不能**——EOF 时 `available()=0`，与状态 b 逐字节相同（实测 pipe/b vs pipe/c） |
+| `-> Bool`，语义 B「至少有一字节可读」（EOF 不算就绪） | 能（`poll` + `FIONREAD>0`） | **能**（`available()>0`） |
+| `-> Int` 三态（有数据 / 超时 / EOF） | **能**（超时→0；`FIONREAD>0`→1；否则→−1；tty 挂断的 `EIO` 也归 −1） | **不能**，理由同语义 A |
+
+于是**语义 B 的 `Bool` 是两个后端都能不起线程实现的唯一形状**，推荐它：
+
+```
+io_stdin_ready(timeout_ms: Int) -> Bool !io
+## true 当且仅当此刻至少有一字节可以立即读到。
+## EOF 不是就绪：EOF 由既有的阻塞读报告，它仍是唯一的读者。
+## timeout_ms 是**上界**而非下界：常规文件到达 EOF 时 C 端会立刻返回 false
+## （实测 1µs），JVM 端会耗满窗口（实测 300ms）。契约只承诺「至多」。
+```
+
+语义 B 曾被判死刑的那条理由（客户端关掉管道后服务器等一个永不到来的就绪信号）
+**只在「循环完全由就绪驱动」时成立**。把循环写成——
+
+```
+loop:
+  if ready(N):        读一帧（此时不会阻塞）；EOF 由这次读报告
+  else if 有待分析:    跑分析，清空
+  else:               什么都不用做 → 直接做一次阻塞读   ← 关键的第三支
+```
+
+——EOF 就总在有限步内被那次阻塞读撞上：待分析的活先跑完，下一轮无事可做，阻塞读返回 0。
+两个后端的 stand-in 实测退出时延 **0.00s / 0.02s**（见下）。第三支不是补丁，它是对的：
+**没有活干的时候，阻塞正是应该做的事**。
+
+三态形状虽然 C 端做得出（真值表里每格都能答），但 JVM 端要它就得起后台读线程，
+而线程的代价不是一条线程：**阻塞读只能有一个所有者**，于是 `read_stdin` 与
+`read_line` 都必须改走那个队列，且线程从进程启动就开始吞字节。
+实测过一个具体后果：起了读线程的 JVM 进程再 spawn 一个继承 stdin 的子进程，
+子进程读到空（`child-got:[]`），不起线程时读到 `line-for-child`。
+（`io.run` 今天在 C 侧继承 fd 0、在 JVM 侧走 ProcessBuilder 默认的 PIPE，两侧本就不同答，
+是另一笔账；这里只用它证明「读线程会替别人吃掉字节」。）
+
+#### 落地前置（这是本轮挖出来的新账）
+
+**C 后端的 `io_read_stdin` 必须先从 stdio 换成 `read(2)`**，否则就绪原语是假的：
+今天 `dawn_io_read_stdin` 用 `fread`、`io_read_line` 用 `fgetc`，两者彼此自洽，
+但 `poll` 对它们的缓冲一无所知。而 LSP 的 `read_message` 逐字节读 header
+（`io.read_stdin(1)`），glibc 一次就把整帧吸进缓冲——就绪查询会答「没数据」，
+debounce 会在数据已经到齐时开跑分析，**debounce 恰好被它打败**。
+这不是今天的 bug（今天没人问 `poll`），是原语的前置条件。
+
+新增一个 intrinsic 的落地点（照 `io_read_stdin` 现有分布点出来的，共 9 处）：
+`types.dawn` 的签名表 + std-only 名单、`stdlib.dawn` 的「不是语言表面」提示表、
+`interp.dawn` 的 comptime 拒绝名单、`rtclasses.dawn` 的 JVM 字节码生成、
+`runtime/c/dawn_rt.{c,h}`、`selfhost/src/rtsrc.dawn`（`gen-rtsrc.py` 重生成）、
+`std/io.dawn` + `stdsrc.dawn`（`gen-stdsrc.py` 重生成）、两个 emitter 的 arm
+（`scripts/intrinsic-parity.py` 会验）、`docs/spec.md` §11。
+
+### 2.2.2 验收：两个实验，先证明它们能红
+
+选错的后果是**服务器空转或挂死**，两者都不会在单元测试里出现——所以在写原语之前
+先把能抓住这两种失效的实验建出来，并用**故意写错的实现**打红过。
+（2026-08-04 实测；脚本形态见 §六，本轮留在 scratchpad，落地时收进 `scripts/`。）
+
+- **挂断实验**：客户端关掉写端后，服务器必须在限期内退出。断言退出时延 < 2s。
+- **空转实验**：客户端保持连接但静默 N 秒，服务器 CPU 时间
+  （`/proc/<pid>/stat` 的 utime+stime）必须近零。断言 < 0.25s。
+
+四个变异体，两个后端各跑一遍（stand-in 循环，不是真 `lsp.dawn`）：
+
+| 变异体 | 挂断 | 空转 |
+|---|---|---|
+| `good`（语义 B + 上面那个第三支） | PASS 0.00s / 0.02s | PASS 0.00s（0.0% 单核） |
+| `good-posix`（语义 A，仅 C 端可行） | PASS 0.00s | PASS 0.00s |
+| `hang`（EOF 不算就绪 **且没有第三支**） | **FAIL 2.00s 仍存活** | PASS 0.00–0.05s |
+| `spin`（超时靠反复重问而不是靠等） | PASS | **FAIL 4.00s / 4.99s CPU，≈100% 单核** |
+
+两个实验各由**一个**变异体单独打红，互不掩护——这正是要的：`hang` 只红挂断，
+`spin` 只红空转。今天的 `bin/dawn lsp`（还没有 debounce，纯阻塞读）两项都绿
+（退出 0.06s、6s 静默窗口 0.00s CPU），那是 debounce 落地后必须守住的基线。
+
+**空转实验自带一个盲点，已经补上**：它分不清「因为守规矩所以安静」与
+「因为压根没干活所以安静」——拿 `sh -c 'cat >/dev/null'` 当服务器，空转实验
+照样 PASS。所以实验多要一条存活断言（静默窗口开始前 stdout 必须已出现
+`publishDiagnostics`）；加上之后同一个 `cat` 变异体转红。
+门禁的绿不构成证据，直到证明它能红。
 
 `$/cancelRequest` 在这个模型下可以直接**回一个 `RequestCancelled` 错误**——
 因为没有真的在跑的请求可以取消，请求要么还没开始要么已经完成。这是合规的。
@@ -190,14 +312,23 @@ LSP 的输出受 `scripts/selfhost-lsp-diff.sh` 逐字节守护。本文的改�
 
 这个顺序（先补语料记录旧行为，再改）是这类改动唯一能证明自己没改坏东西的办法。
 
+LSP-04 的验收不在这条线上：`selfhost-lsp-diff.sh` 比的是**输出字节**，
+而 debounce 改的是**时间与 CPU**，逐字节相同的输出对空转和挂死完全失明。
+它的验收是 §2.2.2 的两个实验，且两个都已经被变异体打红过。
+
 ## 六、落地点
 
 | 步 | 文件 | 测试 |
 |---|---|---|
 | 0 | `scripts/selfhost-lsp-diff.sh` 语料加畸形 URI | 记录旧行为 |
 | 1 | `selfhost/src/lsp.dawn`：`uri_to_path`/`path_to_uri` 改 JDK；删 `utf8_decode`/`utf8_bytes`/percent-decode | lsp 内联 test：Windows drive、UNC、非法 UTF-8、`%2F` |
-| 2 | `selfhost/src/lsp.dawn`：`read_message` 加 `Idle`；主循环 debounce + generation | 「连续 5 次 didChange 只分析 1 次」 |
+| 2a | `scripts/lsp-liveness.py`：挂断 + 空转两个实验进仓库 | 先拿 §2.2.2 的四个变异体各打红一遍，再指向真服务器 |
+| 2b | `runtime/c/dawn_rt.c`：`io_read_stdin` 从 `fread` 换成 `read(2)`（`io_read_line` 同步） | 前置，否则就绪查询看不见 stdio 缓冲；`rtsrc.dawn` 随 `gen-rtsrc.py` 重生成 |
+| 2c | 新 intrinsic `io_stdin_ready(timeout_ms) -> Bool !io`，9 个落地点（§2.2.1 末） | `scripts/intrinsic-parity.py` + `lower.dawn` 的分组测试 |
+| 2d | `selfhost/src/lsp.dawn`：`read_message` 加 `Idle`；主循环 debounce + generation + **无事可做时阻塞读**那一支 | 「连续 5 次 didChange 只分析 1 次」＋ 2a 的两个实验 |
 | 3 | `selfhost/src/lsp.dawn`：`$/cancelRequest` 回 `RequestCancelled` | 协议合规 |
 | 4 | 实测 debounce 窗口，把 150ms 换成有出处的数字 | 记录 harness 与数据 |
 
-无破坏性变更（LSP 是工具，不是语言表面）。
+无破坏性变更（LSP 是工具，不是语言表面）。2b/2c 动的是运行时契约与 intrinsic 表，
+但只加不改：`io_read_stdin` 的**可观察**语义（恰好 n 字节，短读即 EOF）不变，
+换掉的是它底下的缓冲层。
