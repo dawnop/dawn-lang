@@ -53,8 +53,10 @@ v0.6.0–v0.8.0 的 release jar 永久保存；`kotlin-final` tag 保有 Kotlin 
    `dawn-selfhost.jar`。v0.6.0 起的历史 release 永久保留，构成可重放的信任链。
    K-B7（`docs/native-driver-plan.md` §22）给 `release.yml` 加了第二件产物
    `dawnc-linux-x86_64`（native 编译器的静态可执行文件）与它的 `.sha256`，
-   但那一步落在 `v0.49.0` 的 tag 之后——**已发布的 release 页面上还没有它，
-   从 v0.50.0 起才会挂**。它也**不是种子**：`scripts/seedjar.sh` 只下载、只校验 jar，
+   但那一步落在 `v0.49.0` 的 tag 之后，所以 **v0.46–v0.49 的 release 页面上没有它；
+   v0.50.0 是第一个真的挂上它的 release**（四件产物齐全，下载下来的二进制核过
+   `.sha256`、报 0.50.0、并在只有一个 `.dawn` 文件的裸目录里编译运行通过）。
+   它也**不是种子**：`scripts/seedjar.sh` 只下载、只校验 jar，
    `scripts/seed-checksums.txt` 里也只有 jar 的摘要。
 2. **祝圣仪式（机器强制）**：`release.yml` 在 tag 上重建整条链
    种子→A→B→C（B = HEAD 编 HEAD，即要上传的那份字节），验证 `cmp B C` 闭包
