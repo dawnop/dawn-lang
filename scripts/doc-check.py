@@ -7,7 +7,7 @@ and the EBNF disagreed with the parser in several places -- all found by a
 human reading, none by a test. This script is the part of that gap a script
 can close.
 
-Nine checks, each unambiguous on purpose (a doc lint with false positives
+Ten checks, each unambiguous on purpose (a doc lint with false positives
 gets disabled, and then it protects nothing):
 
   links     every relative Markdown link resolves to a file in the repo
@@ -18,7 +18,10 @@ gets disabled, and then it protects nothing):
   version   every documented claim about the *current* toolchain version
             equals `selfhost/src/version.dawn`
   blocks    every fenced block marked ```dawn run / ```dawn compile is
-            compiled (and run) by the toolchain
+            compiled (and run) by the toolchain, and wherever an ```output
+            fence follows a ```dawn run block, stdout equals it byte for byte
+  fences    every ```dawn fence in the tutorial declares which of the three
+            kinds it is, and every exemption states its reason
   pages     every whole program the website ships runs and prints exactly the
             output recorded beside it (site/pages/ and site/play-ui/samples/,
             *.dawn vs *.out)
@@ -32,6 +35,38 @@ Blocks are opt-in rather than opt-out: most examples in the spec are
 fragments -- a type declaration, three lines of a match -- and demanding
 that they be whole modules would either mangle the prose or drown the check
 in exemptions. A block whose correctness matters says so in its info string.
+
+The tutorial is where that rule is inverted, and the three kinds are written
+down here so that a second reader classifies a new block the way the first
+one did. Without a written criterion "it is only illustrative" is an
+exemption that grows to fit whatever stopped compiling, and a gate whose
+exemption is unbounded is a gate with no lower bound on its coverage.
+
+  ```dawn run        A whole program: it has a `pub fn main`, the toolchain
+                     runs it, and the ```output fence immediately after it
+                     records what it printed. The criterion is mechanical and
+                     the obligation runs one way -- a block that CAN be a
+                     whole program MUST be one, and MUST record its output.
+                     29 of the tutorial's 31 dawn fences are this.
+  ```dawn skip-check A block that cannot be a whole program for a reason in
+                     the language rather than in the author's effort. Both of
+                     today's two are one file of a two-file project, shown
+                     because §13 explains `use` and a module example needs two
+                     files to be an example at all. The reason is written in a
+                     `<!-- doc-check: skip-check ... -->` marker above the
+                     fence: the exemption costs a sentence, and the whole set
+                     of exemptions can be audited by reading the markers.
+  ```dawn            Not available in the tutorial. Elsewhere a bare fence
+                     means "fragment, not checked", which is the right default
+                     for a spec; in the one document a newcomer copies line by
+                     line it would be the exemption with no name and no
+                     reason, so a bare fence is rejected there.
+
+Nothing marks "this block must FAIL to compile". The tutorial has no such
+block -- measured rather than assumed: no ```output fence in it holds a
+diagnostic. Adding the mode anyway would create a rule with zero call sites,
+which is the one thing this file must not grow, since a check that matches
+nothing is green for exactly the same reason a working check is green.
 
 Pages are opt-out-less for the opposite reason: site/pages/ holds four whole
 programs, site/play-ui/samples/ five more, and between them they are the
@@ -168,7 +203,21 @@ SITE_PROGRAMS = [
 
 LINK = re.compile(r"\[[^\]]*\]\(([^)]+)\)")
 HEADING = re.compile(r"^#{1,6}\s+(.*?)\s*$", re.M)
-FENCE = re.compile(r"^```(dawn(?:\s+\w+)?)\s*$(.*?)^```\s*$", re.M | re.S)
+# Every fenced block, in order, not just the dawn ones: the tutorial's contract
+# is a *pair* -- a ```dawn run block and the ```output fence right after it --
+# and "right after" can only be decided by something that sees the blocks in
+# between. Info strings are compared word by word, never as whole strings, so
+# that a new verb does not silently fall through to "not checked".
+FENCE = re.compile(r"^```([^\n]*)\n(.*?)^```[ \t]*$", re.M | re.S)
+
+# The tutorial holds every ```output fence in the repository, and is the only
+# document a reader is expected to retype rather than consult. That is what
+# earns it the stricter rule; a set rather than a constant so that adding a
+# second such document is a one-line change with a visible diff.
+STRICT_FENCE_DOCS = {"docs/tutorial.md"}
+# `<!-- doc-check: skip-check 多文件项目的一半，单独编不了 -->`
+SKIP_REASON = re.compile(
+    r"^[ \t]*<!--[ \t]*doc-check:[ \t]*skip-check[ \t]+(\S[^>]*?)[ \t]*-->[ \t]*$")
 
 # --- version ---------------------------------------------------------------
 VERSION_DECL = re.compile(r'\bVERSION\s*:\s*String\s*=\s*"([^"]+)"')
@@ -611,12 +660,36 @@ def check_translations() -> tuple[list[str], int]:
     return bad, seen
 
 
-def check_blocks(path: pathlib.Path, text: str, work: pathlib.Path) -> list[str]:
-    bad = []
-    for i, (info, body) in enumerate(FENCE.findall(text)):
-        mode = info.split()[1] if len(info.split()) > 1 else None
+def fences(text: str) -> list[tuple[str, str, int]]:
+    """(info string, body, 1-based line the opening fence sits on)."""
+    return [(m.group(1).strip(), m.group(2), text[:m.start()].count("\n") + 1)
+            for m in FENCE.finditer(text)]
+
+
+def check_blocks(path: pathlib.Path, text: str,
+                 work: pathlib.Path) -> tuple[list[str], int, int]:
+    """Compile (and run) the marked blocks, and hold the run ones to the output
+    the document prints beside them.
+
+    Exit code alone was the whole check until 2026-08-05, and it is the half
+    that matters least: a tutorial whose example still compiles while printing
+    something other than what the page below it claims teaches the reader a
+    falsehood and passes the gate. All 29 of the tutorial's recorded outputs
+    were correct when the comparison was added -- which is the expected result
+    and not evidence the comparison is unnecessary, since nothing had been
+    reading them and nothing would have said so if they had drifted."""
+    bad: list[str] = []
+    checked = recorded = 0
+    blocks = fences(text)
+    rel = path.relative_to(ROOT)
+    for i, (info, body, line) in enumerate(blocks):
+        words = info.split()
+        if not words or words[0] != "dawn":
+            continue
+        mode = words[1] if len(words) > 1 else None
         if mode not in ("run", "compile"):
             continue
+        checked += 1
         src = work / f"{path.stem}_{i}.dawn"
         src.write_text(body, encoding="utf-8")
         cmd = [str(DAWN), "run" if mode == "run" else "check", str(src)]
@@ -624,8 +697,63 @@ def check_blocks(path: pathlib.Path, text: str, work: pathlib.Path) -> list[str]
         if r.returncode != 0:
             head = (r.stderr or r.stdout).strip().splitlines()
             detail = head[0] if head else f"exit {r.returncode}"
-            bad.append(f"{path.relative_to(ROOT)}: ```{info} block does not {mode}: {detail}")
-    return bad
+            bad.append(f"{rel}:{line}: ```{info} block does not {mode}: {detail}")
+            continue
+        nxt = blocks[i + 1] if i + 1 < len(blocks) else None
+        if mode != "run" or nxt is None or nxt[0] != "output":
+            continue
+        recorded += 1
+        if r.stdout != nxt[1]:
+            bad.append(f"{rel}:{line}: ```dawn run block printed {r.stdout!r}, "
+                       f"but the ```output fence at line {nxt[2]} (which the "
+                       f"reader is shown) says {nxt[1]!r}")
+    return bad, checked, recorded
+
+
+def check_fence_policy(path: pathlib.Path, text: str) -> tuple[list[str], int]:
+    """In the tutorial, every dawn fence declares its kind and every exemption
+    states its reason. See the module docstring for the three kinds."""
+    rel = path.relative_to(ROOT).as_posix()
+    if rel not in STRICT_FENCE_DOCS:
+        return [], 0
+    lines = text.split("\n")
+    bad: list[str] = []
+    seen = 0
+    blocks = fences(text)
+    for i, (info, _body, line) in enumerate(blocks):
+        words = info.split()
+        if words[:1] == ["output"]:
+            prev = blocks[i - 1][0].split() if i else []
+            if prev[:2] != ["dawn", "run"]:
+                bad.append(f"{rel}:{line}: ```output fence records the output of "
+                           f"nothing -- it must follow a ```dawn run block")
+            continue
+        if words[:1] != ["dawn"]:
+            continue
+        seen += 1
+        mode = words[1] if len(words) > 1 else None
+        if mode == "run":
+            nxt = blocks[i + 1][0] if i + 1 < len(blocks) else None
+            if nxt != "output":
+                bad.append(f"{rel}:{line}: ```dawn run block has no ```output "
+                           f"fence after it -- a runnable example in the tutorial "
+                           f"records what it prints, so the two can be compared")
+            continue
+        if mode != "skip-check":
+            bad.append(f"{rel}:{line}: ```{info} -- a dawn fence in the tutorial "
+                       f"is either ```dawn run (a whole program, with its output "
+                       f"recorded beside it) or ```dawn skip-check with a written "
+                       f"reason. A bare fence is an exemption with no name.")
+            continue
+        j = line - 2
+        while j >= 0 and lines[j].strip() == "":
+            j -= 1
+        if j < 0 or not SKIP_REASON.match(lines[j]):
+            bad.append(f"{rel}:{line}: ```dawn skip-check with no reason above it. "
+                       f"Write `<!-- doc-check: skip-check <why it cannot be a "
+                       f"whole program> -->`, so the exemption costs a sentence "
+                       f"and the set of them can be audited by reading markers.")
+    return bad, seen
 
 
 def check_site_pages() -> tuple[list[str], int]:
@@ -674,8 +802,9 @@ def check_site_pages() -> tuple[list[str], int]:
 
 def main() -> None:
     problems: list[str] = []
-    blocks = anchors_seen = sections_seen = claims_seen = 0
+    blocks = anchors_seen = sections_seen = claims_seen = recorded = 0
     status_seen = counts_seen = indexed_seen = pages_seen = transl_seen = 0
+    fences_seen = 0
     version = toolchain_version()
     # What docs/README.md's opening sentence counts: the Markdown documents
     # under docs/, which is DOCS minus the top-level files it does not index
@@ -712,18 +841,22 @@ def main() -> None:
             bad, n = check_doc_count(path, text, doc_total)
             problems += bad
             counts_seen += n
-            for info, _ in FENCE.findall(text):
-                if len(info.split()) > 1 and info.split()[1] in ("run", "compile"):
-                    blocks += 1
-            problems += check_blocks(path, text, work)
+            bad, n = check_fence_policy(path, text)
+            problems += bad
+            fences_seen += n
+            bad, n, m = check_blocks(path, text, work)
+            problems += bad
+            blocks += n
+            recorded += m
 
     if problems:
         for p in problems:
             print(p, file=sys.stderr)
         print(f"FAIL: {len(problems)} documentation problem(s)", file=sys.stderr)
         sys.exit(1)
-    print(f"OK: {len(DOCS)} documents, {blocks} checked block(s), "
-          f"{pages_seen} site program(s); "
+    print(f"OK: {len(DOCS)} documents, {blocks} checked block(s) "
+          f"({recorded} held to a recorded output), {fences_seen} tutorial "
+          f"fence(s), {pages_seen} site program(s); "
           f"{anchors_seen} anchor(s), {sections_seen} § reference(s), "
           f"{claims_seen} version claim(s), {status_seen} status line(s), "
           f"{indexed_seen} index entr(ies), {counts_seen} document count(s) "

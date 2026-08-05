@@ -457,6 +457,7 @@ myapp/
 
 `src/util/math.dawn`：
 
+<!-- doc-check: skip-check 两文件项目的被引入的那一半，没有 main，单文件编不成程序 -->
 ```dawn skip-check
 pub fn double(x: Int) -> Int = x * 2
 
@@ -468,6 +469,7 @@ pub type Shape =
 
 `src/main.dawn`：
 
+<!-- doc-check: skip-check 同一项目的入口那一半，use util/math 要求上面那个文件同时在场 -->
 ```dawn skip-check
 use util/math
 use util/math.{Shape, Circle, Square}
