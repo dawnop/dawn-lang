@@ -308,6 +308,21 @@ test "unterminated string in an interpolation-free file recovers" {
   assert ds[0].msg == "unterminated string"
 }
 
+test "recovery stops at every keyword a declaration can start with" {
+  # `x = 1` is not a declaration, so top_decl errors and sync_decl skips to the
+  # next anchor. The anchor set has to be the set top_decl dispatches on: `use`
+  # and `test` were missing from it, so the skip ran straight past them to the
+  # `fn` and one bad line cost the module its import and its test block.
+  let src = "x = 1\nuse std/str\ntest \"t\" {\n  assert true\n}\nfn f() -> Int = 1"
+  let (m, ds) = parse_module(src)
+  assert len(ds) > 0
+  assert len(m.decls) == 3
+  match m.decls[0] {
+    DUseModule(_, _, _, _, _, _, _) -> ()
+    _ -> { assert false }
+  }
+}
+
 test "a conditional impl carries its own type parameters" {
   let (m, ds) = parse_module("impl[T: Eq] Eq[List[T]] {\n  fn eq(a: List[T], b: List[T]) -> Bool = true\n}")
   assert len(ds) == 0

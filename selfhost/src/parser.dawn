@@ -135,8 +135,6 @@ fn is_blank_str(v: String) -> Bool = {
   true
 }
 
-fn no_diags2() -> List[Diag] = []
-
 ## Does this module need the source view at all? A module without `assert` never
 ## slices its own text, and decoding it would be pure waste.
 fn has_assert(toks: List[Token]) -> Bool = {
@@ -174,12 +172,18 @@ pub fn parse_module(text: String) -> (Module, List[Diag]) = {
 }
 
 ## After a broken declaration: skip forward to the next plausible declaration start.
+##
+## The anchors are exactly the keywords `top_decl` dispatches on. They were not:
+## `use` and `test` were missing, so a broken declaration followed by either one
+## swallowed it and everything up to the next `fn` -- one bad line reported as
+## a file with no imports.
 fn sync_decl(p: P, st: St) -> St = {
   var s = st
   if not at_kind(p, s, EOF) { s = adv1(p, s) }
   while not at_kind(p, s, EOF) && not at_kind(p, s, FN) && not at_kind(p, s, PUB) &&
     not at_kind(p, s, TYPE) && not at_kind(p, s, ALIAS) && not at_kind(p, s, CONST) &&
-    not at_kind(p, s, TRAIT) && not at_kind(p, s, IMPL) && not at_kind(p, s, EFFECT) {
+    not at_kind(p, s, TRAIT) && not at_kind(p, s, IMPL) && not at_kind(p, s, EFFECT) &&
+    not at_kind(p, s, USE) && not at_kind(p, s, TEST) {
       s = adv1(p, s)
     }
   s
@@ -234,7 +238,8 @@ fn top_decl(p: P, st: St) -> PR[Decl] = {
     }
   } else {
     Err((st0, perr(p, st0,
-      "only declarations (fn, type, alias, const, trait, impl, test) are allowed at module top level")))
+      "only declarations (use, fn, type, alias, const, trait, impl, effect, test) " ++
+        "are allowed at module top level")))
   }
 }
 
