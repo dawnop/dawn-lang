@@ -17,8 +17,8 @@ use java "java.lang.String"
 use java "java.util.Iterator"
 use java "java.io.File"
 use java "java.io.FileOutputStream"
-use types.{Request, Response, HttpError, Handler, Middleware, RouteMeta, http_error, error_response, streaming}
-use router.{Route, Dispatch, Found, NoPath, WrongMethod, dispatch, route_meta, validate_routes}
+use types.{Request, Response, ResponseBody, Empty, Text, Binary, Stream, HttpError, Handler, Middleware, RouteMeta, http_error, error_response, streaming, text, binary}
+use router.{Route, Dispatch, Found, NoPath, WrongMethod, dispatch, route_meta, validate_routes, route_get}
 use java "java.io.InputStream"
 use java "java.io.OutputStream"
 use java "java.net.URI"
@@ -28,6 +28,11 @@ use java "java.net.http.HttpRequest"
 use java "java.net.http.HttpRequest.BodyPublisher"
 use java "java.net.http.HttpRequest.BodyPublishers"
 use java "java.net.http.HttpResponse.BodyHandlers"
+use java "java.net.URL"
+use java "java.net.URLConnection"
+use java "java.net.HttpURLConnection"
+use java "java.io.ByteArrayInputStream"
+use java "java.util.ArrayList"
 
 ## Close an upstream stream, swallowing a close failure (non-fatal — the
 ## response is already committed, or was never sent). Called after pumping a
@@ -85,43 +90,89 @@ fn read_body(ex: HttpExchange, limit: Int) -> Result[(String, Bytes), HttpError]
   }
 }
 
-# Write a response. Length 0 selects chunked transfer encoding, so we never
-# need the byte count up front; the Writer handles UTF-8.
+# The length write_response hands to sendResponseHeaders, in jdk.httpserver's
+# convention: n > 0 is an exact Content-Length, 0 selects chunked transfer
+# encoding, -1 means no body at all. The body kind picks the framing
+# (WEB-06/07): Text is its UTF-8 byte count, Binary its byte length, and only
+# Stream — whose length is unknown up front — stays chunked. An empty
+# Text/Binary maps to -1, because 0 would mean chunked; the JDK then emits
+# Content-Length: 0 itself. A 204/304 never carries a body no matter what the
+# handler built (RFC 9110 §6.4.1/§15.4.5; the JDK would force this anyway,
+# with a logged warning).
+fn body_length(status: Int, body: ResponseBody) -> Int =
+  if status == 204 || status == 304 {
+    -1
+  } else {
+    match body {
+      Empty -> -1
+      Text(s) -> exact_length(bytes.len(bytes.utf8(s)))
+      Binary(b) -> exact_length(bytes.len(b))
+      Stream(_) -> 0
+    }
+  }
+
+fn exact_length(n: Int) -> Int = if n == 0 { -1 } else { n }
+
+## Close a streaming body that is never pumped (HEAD, 204/304): the upstream
+## connection must free even though no bytes move. The other kinds hold no
+## resource.
+fn drop_body(body: ResponseBody) -> Unit !io =
+  match body {
+    Stream(s) -> close_stream(s)
+    _ -> ()
+  }
+
+# Write a response. The body kind decides the framing (see body_length). A
+# HEAD request gets the status and headers its GET produced — including the
+# exact Content-Length when the length is known — but no body bytes (RFC 9110
+# §9.3.2). jdk.httpserver's documented way to answer HEAD is to set
+# Content-Length manually and pass -1, which is what the HEAD branch does.
 fn write_response(ex: HttpExchange, r: Response) -> Unit !io = {
   with x <- bracket(ex, close_exchange)
   let headers = x.getResponseHeaders()!
   headers.set("Content-Type", r.content_type)
   set_extra_headers(headers, r.headers)
-  x.sendResponseHeaders(r.status, 0)
-  with out <- bracket(x.getResponseBody()!, close_body)
-  match r.stream {
-    # streaming body: pump the upstream InputStream straight to the socket, 8KB at a
-    # time — constant memory, first byte out immediately. transferTo can throw if the
-    # client disconnects mid-download; the bracket is the finally, so the upstream
-    # stream is closed and the HttpClient connection frees either way. The
-    # catch_panic outside it keeps a mid-download disconnect from being an error:
-    # the response is already committed, there is nothing left to say. Close
-    # failure is non-fatal too (close_stream swallows it).
-    Some(s) -> {
-      let _ = catch_panic(() => {
-        with up <- bracket(s, close_stream)
-        up.transferTo(out)
-      })
-      ()
+  let length = body_length(r.status, r.body)
+  if x.getRequestMethod()! == "HEAD" {
+    if length > 0 {
+      headers.set("Content-Length", to_string(length))
     }
-    None ->
-      match r.bin {
-        Some(raw) -> {
-          # binary body: write the raw Bytes verbatim (Bytes -> Java byte[] param)
-          out.write(raw)
-          out.flush()
-        }
-        None -> {
-          with writer <- bracket(OutputStreamWriter.new(out, "UTF-8"), close_writer)
-          writer.write(r.body)
-          writer.flush()
-        }
+    x.sendResponseHeaders(r.status, -1)
+    drop_body(r.body)
+  } else if length == -1 {
+    x.sendResponseHeaders(r.status, -1)
+    drop_body(r.body)
+  } else {
+    x.sendResponseHeaders(r.status, length)
+    with out <- bracket(x.getResponseBody()!, close_body)
+    match r.body {
+      # unreachable: an empty body maps to length -1 above
+      Empty -> ()
+      Text(s) -> {
+        with writer <- bracket(OutputStreamWriter.new(out, "UTF-8"), close_writer)
+        writer.write(s)
+        writer.flush()
       }
+      Binary(b) -> {
+        # binary body: write the raw Bytes verbatim (Bytes -> Java byte[] param)
+        out.write(b)
+        out.flush()
+      }
+      # streaming body: pump the upstream InputStream straight to the socket, 8KB
+      # at a time — constant memory, first byte out immediately. transferTo can
+      # throw if the client disconnects mid-download; the bracket is the finally,
+      # so the upstream stream is closed and the HttpClient connection frees
+      # either way. The catch_panic outside it keeps a mid-download disconnect
+      # from being an error: the response is already committed, there is nothing
+      # left to say. Close failure is non-fatal too (close_stream swallows it).
+      Stream(s) -> {
+        let _ = catch_panic(() => {
+          with up <- bracket(s, close_stream)
+          up.transferTo(out)
+        })
+        ()
+      }
+    }
   }
 }
 
@@ -424,6 +475,127 @@ fn test_fetch_bytes(url: String) -> (Int, Bytes) !io = {
     Ok(b) -> (resp.statusCode(), b)
     Err(e) -> panic("test_fetch_bytes: body is not a byte[]: " ++ e.message)
   }
+}
+
+# Test-only: an HttpURLConnection with `method` to `url`. openConnection
+# returns the base URLConnection, and Java subtyping does not enter Dawn
+# signatures, so the value goes through an ArrayList round-trip — the widening
+# `add(Object)` accepts, the erased `get` returns the Object `cast` takes (the
+# scripts/error-contract idiom). Stopping on a mismatch is the same policy as
+# test_fetch_stream above.
+fn test_connect(method: String, url: String) -> HttpURLConnection !io = {
+  let xs = ArrayList.new()
+  xs.add(URL.new(url).openConnection()!)
+  let got: Result[HttpURLConnection, ForeignError] = cast(xs.get(0).expect("connection"))
+  match got {
+    Ok(c) -> {
+      c.setRequestMethod(method)
+      c
+    }
+    Err(e) -> panic("test_connect: not an HttpURLConnection: " ++ e.message)
+  }
+}
+
+# Test-only: Bytes as an InputStream (same round-trip as above).
+fn test_stream_of(b: Bytes) -> InputStream !io = {
+  let xs = ArrayList.new()
+  xs.add(ByteArrayInputStream.new(b))
+  let got: Result[InputStream, ForeignError] = cast(xs.get(0).expect("stream"))
+  match got {
+    Ok(s) -> s
+    Err(e) -> panic("test_stream_of: not an InputStream: " ++ e.message)
+  }
+}
+
+fn hello_handler(_req: Request) -> Result[Response, HttpError] !io = Ok(text(200, "hello"))
+
+fn no_content_handler(_req: Request) -> Result[Response, HttpError] !io = Ok(text(204, ""))
+
+test "body_length: -1 for no body, exact bytes for text/binary, 0 (chunked) for streams" {
+  assert body_length(200, Empty) == -1
+  assert body_length(200, Text("hello")) == 5
+  # UTF-8 bytes, not code points
+  assert body_length(200, Text("中文")) == 6
+  # an exact 0 cannot pass through sendResponseHeaders (0 = chunked there)
+  assert body_length(200, Text("")) == -1
+  assert body_length(200, Binary(bytes.utf8("abcd"))) == 4
+  assert body_length(200, Binary(bytes.utf8(""))) == -1
+  assert body_length(200, Stream(test_stream_of(bytes.utf8("x")))) == 0
+  # a 204/304 never carries a body, whatever the handler built
+  assert body_length(204, Text("hello")) == -1
+  assert body_length(304, Binary(bytes.utf8("x"))) == -1
+}
+
+test "Content-Length is exact per body kind on the wire; only streams are chunked" {
+  let srv = HttpServer.create(InetSocketAddress.new("127.0.0.1", 0), 0)!
+  srv.createContext("/text", ex => write_response(ex, text(200, "hello")))
+  srv.createContext("/cjk", ex => write_response(ex, text(200, "中文")))
+  srv.createContext("/empty", ex => write_response(ex, text(200, "")))
+  srv.createContext("/bin", ex => write_response(ex, binary(200, "application/octet-stream", bytes.utf8("abcd"))))
+  srv.createContext("/stream", ex =>
+      write_response(ex, streaming(200, "application/octet-stream", test_stream_of(bytes.utf8("streamed")))))
+  srv.start()
+  let base = "http://127.0.0.1:${srv.getAddress()!.getPort()}"
+  let t = test_connect("GET", base ++ "/text")
+  assert t.getResponseCode() == 200
+  assert t.getHeaderField("Content-Length") == Some("5")
+  assert t.getInputStream()!.readAllBytes()! == bytes.utf8("hello")
+  # the length counts UTF-8 bytes, not code points
+  let c = test_connect("GET", base ++ "/cjk")
+  assert c.getHeaderField("Content-Length") == Some("6")
+  assert c.getInputStream()!.readAllBytes()! == bytes.utf8("中文")
+  # an empty text body has an exact zero length, not chunked framing
+  let e = test_connect("GET", base ++ "/empty")
+  assert e.getResponseCode() == 200
+  assert e.getHeaderField("Content-Length") == Some("0")
+  assert e.getHeaderField("Transfer-encoding") == None
+  let b = test_connect("GET", base ++ "/bin")
+  assert b.getHeaderField("Content-Length") == Some("4")
+  assert b.getInputStream()!.readAllBytes()! == bytes.utf8("abcd")
+  # a stream's length is unknown: chunked, no Content-Length
+  let s = test_connect("GET", base ++ "/stream")
+  assert s.getHeaderField("Content-Length") == None
+  assert s.getHeaderField("Transfer-encoding") == Some("chunked")
+  assert s.getInputStream()!.readAllBytes()! == bytes.utf8("streamed")
+  srv.stop(0)
+}
+
+test "204 sends no body, no Content-Length, no chunked framing" {
+  let srv = HttpServer.create(InetSocketAddress.new("127.0.0.1", 0), 0)!
+  srv.createContext("/", ex => write_response(ex, text(204, "")))
+  srv.start()
+  let r = test_connect("GET", "http://127.0.0.1:${srv.getAddress()!.getPort()}/")
+  assert r.getResponseCode() == 204
+  assert r.getHeaderField("Content-Length") == None
+  assert r.getHeaderField("Transfer-encoding") == None
+  assert bytes.len(r.getInputStream()!.readAllBytes()!) == 0
+  srv.stop(0)
+}
+
+test "HEAD is served by the GET route: status and length, but no body bytes" {
+  # full server path — dispatch (HEAD falls through to GET) + write_response
+  let routes = [route_get("/hello", hello_handler), route_get("/gone", no_content_handler)]
+  let srv = HttpServer.create(InetSocketAddress.new("127.0.0.1", 0), 0)!
+  srv.createContext("/", ex => handle(routes, [], DEFAULT_MAX_BODY, ex))
+  srv.start()
+  let base = "http://127.0.0.1:${srv.getAddress()!.getPort()}"
+  let h = test_connect("HEAD", base ++ "/hello")
+  assert h.getResponseCode() == 200
+  # the length the GET would have had...
+  assert h.getHeaderField("Content-Length") == Some("5")
+  # ...but none of its body
+  assert bytes.len(h.getInputStream()!.readAllBytes()!) == 0
+  # the GET itself is unaffected
+  let g = test_connect("GET", base ++ "/hello")
+  assert g.getInputStream()!.readAllBytes()! == bytes.utf8("hello")
+  # a HEAD of a 204 route is still a bare 204
+  let n = test_connect("HEAD", base ++ "/gone")
+  assert n.getResponseCode() == 204
+  assert n.getHeaderField("Content-Length") == None
+  # unrouted HEAD is a 404 like the GET would be (body suppressed by the HEAD branch)
+  let m = test_connect("HEAD", base ++ "/nope")
+  assert m.getResponseCode() == 404
+  srv.stop(0)
 }
 
 test "write_response pumps an upstream stream to the client byte-exact (>8KB, multi-chunk)" {

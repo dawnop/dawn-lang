@@ -7,7 +7,7 @@ use std/bytes
 use std/list
 use std/map
 use java "java.lang.System"
-use types.{Request, Response, HttpError, Handler, with_header, text, header}
+use types.{Request, Response, HttpError, Handler, with_header, text, header, http_error}
 
 # One access-log line per request: method, path, status, wall time.
 pub fn with_logging(next: Handler) -> Handler =
@@ -49,7 +49,7 @@ fn route_has_tag(req: Request, tag: String) -> Bool =
 pub fn with_body_limit(limit: Int, next: Handler) -> Handler =
   req =>
   if route_has_tag(req, "raw-body") == false && bytes.len(req.raw) > limit {
-    Err(HttpError { status: 413, message: "request body exceeds $limit bytes" })
+    Err(http_error(413, "request body exceeds $limit bytes"))
   } else {
     next(req)
   }

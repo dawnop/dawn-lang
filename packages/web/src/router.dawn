@@ -8,7 +8,7 @@
 # captures, matched segment-exact.
 use std/str
 use std/map
-use types.{Request, Response, HttpError, Handler, RouteMeta}
+use types.{Request, Response, HttpError, Handler, RouteMeta, text}
 
 pub type Route = {
   method: String,
@@ -254,9 +254,17 @@ pub fn validate_routes(routes: List[Route]) -> Result[Unit, String] = {
   Ok(())
 }
 
-# Pick the route for (method, path). First match in table order wins.
-pub fn dispatch(routes: List[Route], method: String, path: String) -> Dispatch =
-  dispatch_from(routes, method, path, 0, false)
+# Pick the route for (method, path). First match in table order wins. A HEAD
+# request with no route of its own is served by the GET route (RFC 9110
+# §9.3.2) — the server writes that route's status and headers and suppresses
+# the body (see web/server.write_response). An explicit HEAD route still wins.
+pub fn dispatch(routes: List[Route], method: String, path: String) -> Dispatch = {
+  let d = dispatch_from(routes, method, path, 0, false)
+  match d {
+    Found(_, _) -> d
+    _ -> if method == "HEAD" { dispatch_from(routes, "GET", path, 0, false) } else { d }
+  }
+}
 
 fn dispatch_from(routes: List[Route], method: String, path: String, i: Int, path_seen: Bool) -> Dispatch =
   if i == len(routes) {
@@ -315,7 +323,35 @@ test "Method route dispatches an arbitrary verb" {
 }
 
 fn dummy(req: Request) -> Result[Response, HttpError] !io =
-  Ok(Response { status: 200, content_type: "text/plain", headers: [], body: "", bin: None, stream: None })
+  Ok(text(200, ""))
+
+test "HEAD dispatches against GET routes, explicit HEAD route wins" {
+  let routes = [route_get("/a/{id}", dummy), route_post("/run", dummy)]
+  # falls through to the GET route, captures intact
+  match dispatch(routes, "HEAD", "/a/7") {
+    Found(r, params) -> {
+      assert r.method == "GET"
+      assert map.get(params, "id") == Some("7")
+    }
+    _ -> { assert false }
+  }
+  # no GET route either: still a 404
+  match dispatch(routes, "HEAD", "/nope") {
+    NoPath -> { assert true }
+    _ -> { assert false }
+  }
+  # the path exists only under POST: 405, same as a GET would get
+  match dispatch(routes, "HEAD", "/run") {
+    WrongMethod -> { assert true }
+    _ -> { assert false }
+  }
+  # an explicit HEAD route takes precedence over the GET fallback
+  let both = [route_method_of("HEAD", "/h", dummy), route_get("/h", dummy)]
+  match dispatch(both, "HEAD", "/h") {
+    Found(r, _) -> { assert r.method == "HEAD" }
+    _ -> { assert false }
+  }
+}
 
 test "dispatch: found, 404, and 405 are distinguished" {
   let routes = [route_get("/a/{id}", dummy), route_post("/run", dummy)]
