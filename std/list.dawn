@@ -329,3 +329,177 @@ fn show_go[T: Show](xs: List[T], c: Cur, first: Bool, acc: String) -> String =
 impl[T: Show] Show[List[T]] {
   fn show(xs: List[T]) -> String = "[" ++ show_go(xs, iter_start(xs), true, "") ++ "]"
 }
+
+# ---- tests ----
+#
+# The promises above, at the edges that a walk written the obvious way gets
+# wrong: the empty list, an index outside the list, and a tie.
+#
+# Short-circuiting is checked by making the predicate `panic` on the elements a
+# short-circuiting walk must never reach. A counter would need a `var` the
+# closure could write; a panic needs nothing, and it fails loudly in the one
+# direction that matters -- a full walk cannot pass.
+
+test "is_empty asks the cursor rather than comparing a count" {
+  let e: List[Int] = []
+  assert is_empty(e)
+  assert not is_empty([0])
+  assert not is_empty([1, 2, 3])
+}
+
+test "the quantifiers are vacuous on the empty list and stop at the answer" {
+  let e: List[Int] = []
+  assert not any(e, x => x > 0)
+  assert all(e, x => x > 0)
+  assert any([1, 2, 3], x => x == 2)
+  assert not any([1, 2, 3], x => x == 9)
+  assert all([1, 2, 3], x => x > 0)
+  assert not all([1, 2, 3], x => x > 1)
+  # `any` stops at the first element that satisfies it: reaching the second
+  # would panic, so passing is the proof it stopped
+  assert any([1, 2, 3], x => if x == 1 { true } else { panic("any walked past the answer") })
+  # and `all` stops at the first that fails
+  assert not all([1, 2, 3], x => if x == 1 { false } else { panic("all walked past the answer") })
+}
+
+test "index_of and contains answer about the first match, never with a sentinel" {
+  assert index_of([10, 20, 30, 20], 20).unwrap_or(0 - 1) == 1
+  assert index_of([10, 20], 10).unwrap_or(0 - 1) == 0
+  assert index_of([10, 20], 99) == None
+  let e: List[Int] = []
+  assert index_of(e, 1) == None
+  assert contains([10, 20], 20)
+  assert not contains([10, 20], 99)
+  assert not contains(e, 1)
+  assert contains(["a", "b"], "b")
+}
+
+test "take, drop and slice clamp their bounds instead of panicking" {
+  let xs = [1, 2, 3, 4, 5]
+  let e: List[Int] = []
+  assert take(xs, 2) == [1, 2]
+  assert take(xs, 0) == e
+  assert take(xs, 99) == xs
+  assert take(xs, 0 - 1) == e
+  assert take(e, 3) == e
+  assert drop(xs, 2) == [3, 4, 5]
+  assert drop(xs, 0) == xs
+  assert drop(xs, 99) == e
+  assert drop(xs, 0 - 1) == xs
+  assert drop(e, 3) == e
+  assert slice(xs, 1, 3) == [2, 3]
+  assert slice(xs, 0, 5) == xs
+  assert slice(xs, 3, 1) == e
+  assert slice(xs, 2, 2) == e
+  assert slice(xs, 0 - 4, 2) == [1, 2]
+  assert slice(xs, 3, 99) == [4, 5]
+  assert slice(xs, 99, 200) == e
+}
+
+test "reverse copies, and leaves the input alone" {
+  let xs = [1, 2, 3]
+  let e: List[Int] = []
+  assert reverse(xs) == [3, 2, 1]
+  assert xs == [1, 2, 3]
+  assert reverse(e) == e
+  assert reverse([1]) == [1]
+  assert reverse(reverse(xs)) == xs
+}
+
+test "max_by and min_by answer None on the empty list and keep the first extreme" {
+  let e: List[Int] = []
+  assert max_by(e, x => x) == None
+  assert min_by(e, x => x) == None
+  assert max(e) == None
+  assert min(e) == None
+  assert max_by([3, 1, 4, 1], x => x).unwrap_or(0) == 4
+  assert min_by([3, 1, 4, 1], x => x).unwrap_or(0) == 1
+  assert max([3, 1, 4]).unwrap_or(0) == 4
+  assert min([3, 1, 4]).unwrap_or(0) == 1
+  assert max([7]).unwrap_or(0) == 7
+  # a tie goes to the first: only a strictly better key replaces the champion,
+  # and both directions inherit that from the one walk underneath. The key
+  # collides deliberately -- with distinct keys there is no tie to observe.
+  assert max_by([1, 2, 3], x => x % 2).unwrap_or(0) == 1
+  assert min_by([2, 4, 1], x => x % 2).unwrap_or(0) == 2
+  # the key decides, not the element
+  assert max_by([1, 2, 3], x => 0 - x).unwrap_or(0) == 1
+}
+
+test "sort is ascending, and sort_by is stable" {
+  let e: List[Int] = []
+  assert sort([3, 1, 2]) == [1, 2, 3]
+  assert sort(e) == e
+  assert sort([1]) == [1]
+  assert sort([2, 2, 1]) == [1, 2, 2]
+  assert sort(["b", "a", "c"]) == ["a", "b", "c"]
+  # equal keys come back in the order they went in
+  assert sort_by([32, 21, 2, 11], (a, b) => cmp(a % 10, b % 10)) == [21, 11, 32, 2]
+}
+
+test "unique keeps every value once, at its first occurrence" {
+  let e: List[Int] = []
+  assert unique([3, 1, 3, 2, 1]) == [3, 1, 2]
+  assert unique(e) == e
+  assert unique([1, 1, 1]) == [1]
+  assert unique(["b", "a", "b"]) == ["b", "a"]
+}
+
+test "map, filter, fold and find walk in order" {
+  let e: List[Int] = []
+  assert map([1, 2, 3], x => x * 2) == [2, 4, 6]
+  assert map(e, x => x * 2) == e
+  assert map([1, 2], x => show(x)) == ["1", "2"]
+  assert filter([1, 2, 3, 4], x => x % 2 == 0) == [2, 4]
+  assert filter(e, x => true) == e
+  assert filter([1, 2], x => false) == e
+  assert fold([1, 2, 3], 0, (a, x) => a + x) == 6
+  assert fold(e, 7, (a, x) => a + x) == 7
+  # left to right, which only a non-commutative step can show
+  assert fold(["a", "b", "c"], "", (a, x) => a ++ x) == "abc"
+  assert find([1, 2, 3], x => x > 1).unwrap_or(0) == 2
+  assert find([1, 2, 3], x => x > 9) == None
+  assert find(e, x => true) == None
+}
+
+test "Eq, Ord, Hash and Show on List say what the container means" {
+  let e: List[Int] = []
+  assert [1, 2] == [1, 2]
+  assert not ([1, 2] == [2, 1])
+  assert not ([1, 2] == [1, 2, 3])
+  assert e == e
+  assert not (e == [1])
+  assert [[1], [2]] == [[1], [2]]
+  assert not ([[1], [2]] == [[1], [3]])
+  # lexicographic, and a prefix is less than what extends it
+  assert cmp([1, 2], [1, 3]) < 0
+  assert cmp([1, 2], [1, 2]) == 0
+  assert cmp([2], [1, 9]) > 0
+  assert cmp(e, [1]) < 0
+  assert cmp([1], e) > 0
+  assert cmp(e, e) == 0
+  assert sort([[2], [1, 9], [1]]) == [[1], [1, 9], [2]]
+  # equal lists hash equal -- the runtime buckets by this
+  assert hash([1, 2]) == hash([1, 2])
+  assert hash(e) == hash(e)
+  # a String element is shown in its nested (quoted) form, the list is not
+  assert show([1, 2]) == "[1, 2]"
+  assert show(e) == "[]"
+  assert show(["a", "b"]) == "[\"a\", \"b\"]"
+  assert show([[1], [2]]) == "[[1], [2]]"
+}
+
+test "for over a List walks every element once, in order" {
+  var seen = ""
+  var n = 0
+  for x in [10, 20, 30] {
+    seen = seen ++ show(x) ++ ";"
+    n = n + 1
+  }
+  assert n == 3
+  assert seen == "10;20;30;"
+  let e: List[Int] = []
+  var empty = 0
+  for _x in e { empty = empty + 1 }
+  assert empty == 0
+}
