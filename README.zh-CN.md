@@ -177,7 +177,7 @@ impl 一致性是全程序唯一映射）与 `[java-deps]`（coursier 解析 Mav
 
 ## 状态
 
-当前工具链 0.52.0，M0–M8 已实现。此后的主线（C 后端与 native 自举、Perceus、trait v2、
+当前工具链 0.53.0，M0–M8 已实现。此后的主线（C 后端与 native 自举、Perceus、trait v2、
 效果处理器、包管理）落地记录在 `docs/` 各自的设计文档里。
 
 ## 许可证
