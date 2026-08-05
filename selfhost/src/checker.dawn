@@ -346,13 +346,24 @@ fn sees_through(cx: Cx, owner: String) -> Bool =
 
 ## Can `t` be used where `target` is expected? (Never/TyError as anything;
 ## a pure fn where an io fn is wanted.)
+##
+## The effect side is `eff_subsumes`, which is also what `unify_eff` answers
+## with -- the two used to disagree. This gate said `te == EIo` was enough,
+## `unify_eff`'s io arm additionally required the actual to carry no labels,
+## and the disagreement was reachable: a labelled closure refused as a call
+## argument (that goes through unify) was accepted by a `let`, a `return` or an
+## assignment with the same declared type (those come here). One judgement, so
+## the doors cannot answer differently again.
+##
+## Parameters stay strict equality. Unification recurses there because it is
+## binding inference variables; here there are none to bind, and a function's
+## parameters are the one position where being lenient is unsound.
 pub fn assignable(cx: Cx, t: Ty, target: Ty) -> Bool = {
   if t == target || is_errorish(t) || target == TyError { return true }
   match t {
     TyFn(ps, r, e) ->
       match target {
-        TyFn(tps, tr, te) ->
-          ps == tps && assignable(cx, r, tr) && (te == EIo || e == EPure || e == te)
+        TyFn(tps, tr, te) -> ps == tps && assignable(cx, r, tr) && eff_subsumes(te, e)
         _ -> false
       }
     TyOpaque(_, _, ow, tgt) ->
@@ -595,8 +606,13 @@ pub fn unify_into(
 ## `list.map`.
 pub fn unify_eff(declared: Eff, actual: Eff, em: Map[Int, Eff]) -> (Map[Int, Eff], Bool) =
   match declared {
-    EPure -> (em, actual == EPure)
-    EIo -> (em, len(eff_labels(actual)) == 0)
+    # `eff_subsumes` is the whole answer for a declaration with nothing to
+    # infer, and it is what `assignable` asks too -- see its header for what
+    # the two disagreeing about io cost. Spelled out here rather than hoisted
+    # above the match because the two arms below have something to add: a
+    # variable binds, and a label's base may be one.
+    EPure -> (em, eff_subsumes(EPure, actual))
+    EIo -> (em, eff_subsumes(EIo, actual))
     EffVar(_, id) -> {
       let prev = match map.get(em, id) {
         Some(p) -> p
@@ -7933,6 +7949,46 @@ test "a parameter declared !io does not accept a labelled closure" {
   let cx2 = eff_check("fn run(f: fn() -> Int !e) -> Int !e = f()\n" ++
       "fn f() -> Int !Ask = run(() => ask())\n")
   assert len(cx2.diags) == 0
+}
+
+test "a labelled closure does not escape through a let, a return or an assignment" {
+  # The same refusal as the argument position above, at the other door. These
+  # go through `assignable`, which used to accept anything at all when the
+  # target said !io -- so a closure that could not be *passed* to an `!io`
+  # parameter could still be bound, returned or stored as one, and from there
+  # called with nothing to supply its evidence.
+  let cx = eff_check("fn f() -> Int !Ask = {\n" ++
+      "  let g: fn() -> Int !io = () => ask()\n" ++
+      "  g()\n}\n")
+  var saw_let = false
+  for d in cx.diags {
+    if str.contains(d.msg, "annotated type is") { saw_let = true }
+  }
+  assert saw_let
+
+  let cx2 = eff_check("alias IoFn = fn() -> Int !io\n" ++
+      "fn f() -> IoFn = () => ask()\n")
+  var saw_ret = false
+  for d in cx2.diags {
+    if str.contains(d.msg, "declares return type fn() -> Int !io") { saw_ret = true }
+  }
+  assert saw_ret
+
+  let cx3 = eff_check("fn f() -> Int !Ask = {\n" ++
+      "  var g: fn() -> Int !io = () => 1\n" ++
+      "  g = () => ask()\n" ++
+      "  g()\n}\n")
+  var saw_assign = false
+  for d in cx3.diags {
+    if str.contains(d.msg, "cannot assign fn() -> Int !Ask") { saw_assign = true }
+  }
+  assert saw_assign
+
+  # and the pure-into-io direction is untouched: that is what the io arm is for
+  let cx4 = eff_check("fn f() -> Int !io = {\n" ++
+      "  let g: fn() -> Int !io = () => 1\n" ++
+      "  g()\n}\n")
+  assert len(cx4.diags) == 0
 }
 
 test "a declared effect crosses a module boundary with its operations" {
