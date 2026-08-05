@@ -191,10 +191,18 @@ fi
 fail=0
 if ! diff -ru "$golden" "$OUT/flat" -x 'selfhost*.sha' > "$OUT/d.txt"; then
   # every changed line, through the same filter norm.sha uses: if the two sides
-  # then agree, nothing that runs moved
-  added=$(grep -E '^\+' "$OUT/d.txt" | grep -v '^+++' | sed -E "$NORM")
-  removed=$(grep -E '^-' "$OUT/d.txt" | grep -v '^---' | sed -E "$NORM")
-  if [ -n "$added" ] && [ "${added#+}" = "${removed#-}" ]; then
+  # then agree, nothing that runs moved.
+  #
+  # The diff marker comes off *per line*, inside the same sed. It used to come
+  # off the joined string with `${added#+}`, which strips one character from the
+  # front of the whole variable -- so lines 2..n kept their `+` and `-` and the
+  # two sides could never compare equal past the first. Every multi-line
+  # ids-only change was therefore reported as "Core IR changed", the reading
+  # that costs a re-record its explanation. (Both branches fail the gate; what
+  # was wrong is which of the two the reader was told.)
+  added=$(grep -E '^\+' "$OUT/d.txt" | grep -v '^+++' | sed -E "s/^\+//; $NORM")
+  removed=$(grep -E '^-' "$OUT/d.txt" | grep -v '^---' | sed -E "s/^-//; $NORM")
+  if [ -n "$added" ] && [ "$added" = "$removed" ]; then
     echo "Core IR changed, but only in ids and panic-site lines -- no instruction differs:"
     grep -E '^[+-]' "$OUT/d.txt" | grep -Ev '^(\+\+\+|---)' | head -6
     echo "  (re-record with --record; see the note in this script)"
