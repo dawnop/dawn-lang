@@ -17,7 +17,7 @@ use java "java.lang.String"
 use java "java.util.Iterator"
 use java "java.io.File"
 use java "java.io.FileOutputStream"
-use types.{Request, Response, ResponseBody, Empty, Text, Binary, Stream, HttpError, Handler, Middleware, RouteMeta, http_error, error_response, streaming, text, binary, header, headers_all}
+use types.{Request, Response, ResponseBody, Empty, Text, Binary, Stream, HttpError, ErrorFormat, Handler, Middleware, RouteMeta, http_error, default_errors, error_response_with, streaming, text, binary, header, headers_all}
 use router.{Route, Dispatch, Found, NoPath, WrongMethod, dispatch_segs, route_meta, validate_routes, route_get}
 use java "java.net.Socket"
 use java "java.io.InputStream"
@@ -283,6 +283,9 @@ fn has_dot_segment(raw_path: String) -> Bool !io = {
 # "a=1&b=x" -> [("a","1"),("b","x")], over the *raw* (still encoded) string.
 # A value may itself contain '=', so only the first one splits — and since the
 # split happens first, an encoded '=' in a value stays part of that value.
+## Split a query string into pairs, decoding each key and value separately —
+## an encoded separator (`%26`) stays inside its value instead of minting a
+## second parameter. A parameter with no `=` yields an empty value.
 pub fn parse_query(q: String) -> List[(String, String)] !io =
   map(filter(str.split(q, "&"), pair => pair != ""), pair => {
     let parts = str.split(pair, "=")
@@ -293,6 +296,8 @@ pub fn parse_query(q: String) -> List[(String, String)] !io =
 # the same decoding as a query string — this used to replace '+' with a space
 # and stop there, so every percent escape in a form field reached the handler
 # still encoded (`%40` for '@' in an email, and so on).
+## An `application/x-www-form-urlencoded` body as a map (last value wins for a
+## repeated name).
 pub fn parse_form(body: String) -> Map[String, String] !io = map.from(parse_query(body))
 
 fn tail(xs: List[String]) -> List[String] =
@@ -401,7 +406,7 @@ fn meta_of(d: Dispatch) -> Option[RouteMeta] =
     WrongMethod -> None
   }
 
-fn handle(routes: List[Route], middleware: List[Middleware], max_body: Int, ex: HttpExchange) -> Unit !io = {
+fn handle(routes: List[Route], middleware: List[Middleware], max_body: Int, errors: ErrorFormat, ex: HttpExchange) -> Unit !io = {
   # a handler panic is isolated to this request: catch_panic turns it into a 500
   # instead of resetting the connection or leaking the virtual thread (spec §9.8).
   let outcome = catch_panic(() => {
@@ -412,7 +417,7 @@ fn handle(routes: List[Route], middleware: List[Middleware], max_body: Int, ex: 
     # middleware runs: there is no Request yet.
     if has_dot_segment(raw_path) {
       println("${ex.getRequestMethod()!} $raw_path -> 400 (dot segment)")
-      error_response(http_error(400, "path contains a dot segment"))
+      error_response_with(errors, http_error(400, "path contains a dot segment"))
     } else {
       # Dispatch BEFORE touching the body: method and path come from the request
       # line, and the matched route's tags decide how the body is read at all
@@ -430,7 +435,7 @@ fn handle(routes: List[Route], middleware: List[Middleware], max_body: Int, ex: 
       match build_request(ex, meta_of(d), max_body) {
         Err(e) -> {
           println("${ex.getRequestMethod()!} ${ex.getRequestURI()!.getPath()!} -> ${e.status} (${e.message})")
-          error_response(e)
+          error_response_with(errors, e)
         }
         Ok(req) -> {
           # first middleware in the list is outermost: [a, b] runs a(b(core)). Middleware
@@ -444,10 +449,10 @@ fn handle(routes: List[Route], middleware: List[Middleware], max_body: Int, ex: 
           let served = catch_panic(() => app(held))
           match served {
             Ok(Ok(r)) -> r
-            Ok(Err(e)) -> error_response(e)
+            Ok(Err(e)) -> error_response_with(errors, e)
             Err(m) -> {
               println("request panicked: ${m.message}")
-              error_response(http_error(500, "服务器内部错误"))
+              error_response_with(errors, http_error(500, errors.internal_message))
             }
           }
         }
@@ -458,7 +463,7 @@ fn handle(routes: List[Route], middleware: List[Middleware], max_body: Int, ex: 
     Ok(r) -> r
     Err(m) -> {
       println("request panicked: ${m.message}")
-      error_response(http_error(500, "服务器内部错误"))
+      error_response_with(errors, http_error(500, errors.internal_message))
     }
   }
   write_response(ex, response)
@@ -469,14 +474,17 @@ fn handle(routes: List[Route], middleware: List[Middleware], max_body: Int, ex: 
 # concurrent requests could use to exhaust a heap. Routes that legitimately take
 # more opt out with the "raw-body" tag (nginx bounds those) or the "stream-body"
 # tag (those never touch the heap at all).
+## The default ceiling on a request body read into memory, in bytes (8 MiB).
 pub const DEFAULT_MAX_BODY: Int = 8388608
 
 # ---- server lifecycle (WEB-10) ----
 
-## Where the server listens and the in-memory body ceiling its requests get.
-## port 0 asks the OS for a free port; the ServerHandle reports the one
-## actually bound.
-pub type ServerConfig = { host: String, port: Int, max_body: Int }
+## Where the server listens, the in-memory body ceiling its requests get, and
+## the wording of the errors it renders itself. port 0 asks the OS for a free
+## port; the ServerHandle reports the one actually bound. `default_errors()` is
+## the neutral wording — an application whose clients expect another error
+## shape states it here (web/types.ErrorFormat).
+pub type ServerConfig = { host: String, port: Int, max_body: Int, errors: ErrorFormat }
 
 ## A running server. `port` is the real bound port — the point of port 0.
 ## `done` is what lets join/stop compose over jdk.httpserver, which has a stop
@@ -489,6 +497,10 @@ pub type ServerHandle = { server: HttpServer, port: Int, done: CountDownLatch }
 # immediately with the handle. The caller decides what the rest of the
 # program does — join() for the classic block-forever server, stop() from
 # wherever shutdown is decided.
+## Bind cfg.host:cfg.port, serve requests on virtual threads, and return at
+## once with the handle — the caller decides what the program does next
+## (`join` to block, `stop` from wherever shutdown is decided). A broken route
+## table panics here, before the socket is bound.
 pub fn start(cfg: ServerConfig, routes: List[Route], middleware: List[Middleware]) -> ServerHandle !io = {
   # WEB-09: a broken table fails here, at startup, with the two routes named —
   # not at runtime as a silent 404 on the route its author believes exists
@@ -498,7 +510,7 @@ pub fn start(cfg: ServerConfig, routes: List[Route], middleware: List[Middleware
   }
   let addr = InetSocketAddress.new(cfg.host, cfg.port)
   let server = HttpServer.create(addr, 0)!
-  server.createContext("/", ex => handle(routes, middleware, cfg.max_body, ex))
+  server.createContext("/", ex => handle(routes, middleware, cfg.max_body, cfg.errors, ex))
   server.setExecutor(Executors.newVirtualThreadPerTaskExecutor()!)
   server.start()
   # No println here: start is a library call and the handle reports the port.
@@ -520,16 +532,24 @@ pub fn stop(h: ServerHandle, grace_secs: Int) -> Unit !io = {
   h.done.countDown()
 }
 
-# The old shape, kept: start + join on 127.0.0.1. Most programs want exactly
-# this.
+## The old shape, kept: start + join on 127.0.0.1, default body ceiling,
+## default error wording. Most programs want exactly this.
 pub fn serve_app(port: Int, routes: List[Route], middleware: List[Middleware]) -> Unit !io =
   serve_app_bounded(port, DEFAULT_MAX_BODY, routes, middleware)
 
-# Same, with the in-memory body ceiling chosen explicitly (0 = unbounded, which
-# is what this framework did before the ceiling existed).
-pub fn serve_app_bounded(port: Int, max_body: Int, routes: List[Route], middleware: List[Middleware]) -> Unit !io = {
-  let h = start(ServerConfig { host: "127.0.0.1", port: port, max_body: max_body }, routes, middleware)
-  println("listening on http://127.0.0.1:${h.port}")
+## Same, with the in-memory body ceiling chosen explicitly (0 = unbounded, which
+## is what this framework did before the ceiling existed).
+pub fn serve_app_bounded(port: Int, max_body: Int, routes: List[Route], middleware: List[Middleware]) -> Unit !io =
+  serve_app_with(
+    ServerConfig { host: "127.0.0.1", port: port, max_body: max_body, errors: default_errors() },
+    routes, middleware)
+
+## start + announce + join under a config the caller owns — the entry point for
+## a program that configures anything (host, error wording) and still wants
+## main() to end by blocking.
+pub fn serve_app_with(cfg: ServerConfig, routes: List[Route], middleware: List[Middleware]) -> Unit !io = {
+  let h = start(cfg, routes, middleware)
+  println("listening on http://${cfg.host}:${h.port}")
   join(h)
 }
 
@@ -647,6 +667,10 @@ fn hello_handler(_req: Request) -> Result[Response, HttpError] !io = Ok(text(200
 
 fn no_content_handler(_req: Request) -> Result[Response, HttpError] !io = Ok(text(204, ""))
 
+# Test-only: a handler that is a bug — the 500 path below is what the server
+# renders for it.
+fn boom_handler(_req: Request) -> Result[Response, HttpError] !io = panic("boom")
+
 fn echo_name(req: Request) -> Result[Response, HttpError] !io =
   match map.get(req.params, "name") {
     Some(v) -> Ok(text(200, v))
@@ -721,7 +745,7 @@ test "HEAD is served by the GET route: status and length, but no body bytes" {
   # full server path — dispatch (HEAD falls through to GET) + write_response
   let routes = [route_get("/hello", hello_handler), route_get("/gone", no_content_handler)]
   let srv = HttpServer.create(InetSocketAddress.new("127.0.0.1", 0), 0)!
-  srv.createContext("/", ex => handle(routes, [], DEFAULT_MAX_BODY, ex))
+  srv.createContext("/", ex => handle(routes, [], DEFAULT_MAX_BODY, default_errors(), ex))
   srv.start()
   let base = "http://127.0.0.1:${srv.getAddress()!.getPort()}"
   let h = test_connect("HEAD", base ++ "/hello")
@@ -803,7 +827,7 @@ test "dot segment detection covers raw and encoded spellings" {
 test "%2F stays inside its segment: /files/a%2Fb reaches /files/{name} as a/b" {
   let routes = [route_get("/files/{name}", echo_name), route_get("/a/b", hello_handler)]
   let srv = HttpServer.create(InetSocketAddress.new("127.0.0.1", 0), 0)!
-  srv.createContext("/", ex => handle(routes, [], DEFAULT_MAX_BODY, ex))
+  srv.createContext("/", ex => handle(routes, [], DEFAULT_MAX_BODY, default_errors(), ex))
   srv.start()
   let base = "http://127.0.0.1:${srv.getAddress()!.getPort()}"
   # the old decoded-path dispatch saw /files/a/b here: three segments, a 404
@@ -823,7 +847,7 @@ test "%2F stays inside its segment: /files/a%2Fb reaches /files/{name} as a/b" {
 test "dot segments are 400 before routing, on routed and unrouted paths alike" {
   let routes = [route_get("/b", hello_handler)]
   let srv = HttpServer.create(InetSocketAddress.new("127.0.0.1", 0), 0)!
-  srv.createContext("/", ex => handle(routes, [], DEFAULT_MAX_BODY, ex))
+  srv.createContext("/", ex => handle(routes, [], DEFAULT_MAX_BODY, default_errors(), ex))
   srv.start()
   let port = srv.getAddress()!.getPort()
   # would normalize to the routed /b — refused instead, which proves the check
@@ -842,7 +866,7 @@ test "dot segments are 400 before routing, on routed and unrouted paths alike" {
 test "two Cookie headers both arrive: header() the first, headers_all both" {
   let routes = [route_get("/c", echo_cookies)]
   let srv = HttpServer.create(InetSocketAddress.new("127.0.0.1", 0), 0)!
-  srv.createContext("/", ex => handle(routes, [], DEFAULT_MAX_BODY, ex))
+  srv.createContext("/", ex => handle(routes, [], DEFAULT_MAX_BODY, default_errors(), ex))
   srv.start()
   let resp = raw_http(srv.getAddress()!.getPort(),
     "GET /c HTTP/1.1\r\nHost: t\r\nCookie: a=1\r\nCookie: b=2\r\nConnection: close\r\n\r\n")
@@ -852,7 +876,7 @@ test "two Cookie headers both arrive: header() the first, headers_all both" {
 }
 
 test "lifecycle: port 0 binds a real port, serves, and join returns after stop" {
-  let cfg = ServerConfig { host: "127.0.0.1", port: 0, max_body: DEFAULT_MAX_BODY }
+  let cfg = ServerConfig { host: "127.0.0.1", port: 0, max_body: DEFAULT_MAX_BODY, errors: default_errors() }
   let h = start(cfg, [route_get("/hello", hello_handler)], [])
   # the OS picked the port; the handle reports the real one, and it works
   assert h.port > 0
@@ -873,7 +897,7 @@ test "lifecycle: port 0 binds a real port, serves, and join returns after stop" 
 }
 
 test "start refuses a broken route table before binding a socket" {
-  let cfg = ServerConfig { host: "127.0.0.1", port: 0, max_body: DEFAULT_MAX_BODY }
+  let cfg = ServerConfig { host: "127.0.0.1", port: 0, max_body: DEFAULT_MAX_BODY, errors: default_errors() }
   let r = catch_panic(() => start(cfg, [route_get("/a/{unclosed", hello_handler)], []))
   match r {
     Ok(_) -> {
@@ -883,4 +907,32 @@ test "start refuses a broken route table before binding a socket" {
       assert str.contains(m.message, "route table")
     }
   }
+}
+
+test "a panic is a 500 the application words: default, then configured" {
+  let routes = [route_get("/boom", boom_handler)]
+  # default: neutral English under the neutral key
+  let a = HttpServer.create(InetSocketAddress.new("127.0.0.1", 0), 0)!
+  a.createContext("/", ex => handle(routes, [], DEFAULT_MAX_BODY, default_errors(), ex))
+  a.start()
+  let ra = raw_http(a.getAddress()!.getPort(), get_line("/boom"))
+  assert str.starts_with(ra, "HTTP/1.1 500")
+  assert str.contains(ra, "{\"error\":\"internal server error\"}")
+  a.stop(0)
+  # configured: the bytes this framework used to emit unconditionally, which
+  # one application's frontend reads (FastAPI's key, its own 500 text)
+  let fastapi = ErrorFormat {
+    detail_key: "detail", internal_message: "服务器内部错误", param_separator: "：",
+  }
+  let b = HttpServer.create(InetSocketAddress.new("127.0.0.1", 0), 0)!
+  b.createContext("/", ex => handle(routes, [], DEFAULT_MAX_BODY, fastapi, ex))
+  b.start()
+  let rb = raw_http(b.getAddress()!.getPort(), get_line("/boom"))
+  assert str.starts_with(rb, "HTTP/1.1 500")
+  assert str.contains(rb, "{\"detail\":\"服务器内部错误\"}")
+  # a 404 the server renders itself takes the same key
+  let r404 = raw_http(b.getAddress()!.getPort(), get_line("/nope"))
+  assert str.starts_with(r404, "HTTP/1.1 404")
+  assert str.contains(r404, "\"detail\"")
+  b.stop(0)
 }

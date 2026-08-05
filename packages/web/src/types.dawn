@@ -10,16 +10,19 @@ use json/value.{Json, JStr, JObj}
 use json/render.{render}
 use java "java.io.InputStream"
 
-# The matched route's metadata, handed to middleware so they can dispatch on
-# `tags` instead of hardcoding paths. No handler field, so it derives Show and
-# can travel inside a Request. `None` on a Request means no route matched (404/
-# 405) — middleware treats an absent route as "no tags".
+# No handler field, so it derives Show and can travel inside a Request.
+## The matched route's metadata, handed to middleware so they can dispatch on
+## `tags` instead of hardcoding paths. `None` on a Request means no route
+## matched (404/405) — middleware treats an absent route as "no tags".
 pub type RouteMeta = {
   method: String,
   pattern: String,
   tags: List[String],
 } derive Show
 
+## One request, as the server parsed it off the wire. Read it with the
+## accessors below (`param`, `query`, `header`) rather than by hand: they carry
+## the lookup rules (case-insensitive names, first value of a repeated one).
 pub type Request = {
   method: String,
   # the decoded path, kept for logs and display; routing does not use it
@@ -65,12 +68,18 @@ pub type Request = {
 # Text/Binary get an exact Content-Length, only Stream is chunked (WEB-07, see
 # web/server.body_length). An opaque InputStream isn't printable, so neither
 # this nor Response derives Show (docs/streaming-response-design.md §三).
+## What a Response carries: nothing, text, bytes, or a live upstream stream.
+## The kind also decides the framing — Text and Binary get an exact
+## Content-Length, only Stream is chunked.
 pub type ResponseBody =
   | Empty
   | Text(value: String)
   | Binary(value: Bytes)
   | Stream(value: InputStream)
 
+## One response: status, content type, extra headers in emission order, and a
+## body kind. Build it with the constructors below (`text`, `json_ok`, `raw`,
+## `binary`, `streaming`) and add headers with `with_header`.
 pub type Response = {
   status: Int,
   content_type: String,
@@ -84,6 +93,9 @@ pub type Response = {
 # rendered error response — a 401 is not a compliant challenge without
 # WWW-Authenticate (RFC 9110 §11.6.1). `http_error` fills both empty, so plain
 # call sites are untouched.
+## The Err branch of a handler: the status the server will render, the message
+## it will carry, an optional machine-readable `code`, and headers that ride
+## onto the rendered response (a 401's WWW-Authenticate challenge).
 pub type HttpError = {
   status: Int,
   message: String,
@@ -91,11 +103,16 @@ pub type HttpError = {
   headers: List[(String, String)],
 } derive Show
 
-# The two shapes the whole framework is written in terms of. Aliases are
-# transparent — these are documentation, not new types.
+## What every route's function is: a request in, a response or an HttpError
+## out. Aliases are transparent — this is documentation, not a new type.
 pub alias Handler = fn(Request) -> Result[Response, HttpError] !io
+
+## A handler transformer. `serve_app` composes a list of them with the first
+## element outermost.
 pub alias Middleware = fn(Handler) -> Handler
 
+## An HttpError with no `code` and no headers — the shape almost every call
+## site wants.
 pub fn http_error(status: Int, message: String) -> HttpError =
   HttpError { status: status, message: message, code: None, headers: [] }
 
@@ -115,6 +132,8 @@ pub fn http_error(status: Int, message: String) -> HttpError =
 # `status` is a parameter rather than one function per code because the call
 # sites use four (500 x57, 422 x19, 502 x9, 401 x1) and they differ in nothing
 # else.
+## Lift a repository/infrastructure `Result[T, String]` into a handler's
+## `Result[T, HttpError]` under one status, so `?` can cross the layer.
 pub fn as_http[T](r: Result[T, String], status: Int) -> Result[T, HttpError] =
   match r {
     Ok(v) -> Ok(v)
@@ -125,6 +144,8 @@ pub fn as_http[T](r: Result[T, String], status: Int) -> Result[T, HttpError] =
 # are client errors in disguise (a bad page reference, a duplicate slug) and the
 # only thing that distinguishes them is the text, so those call sites pass a
 # classifier instead of a fixed code.
+## The same lift with the status chosen from the message, for repository
+## errors that are client errors in disguise (a duplicate slug is a 409).
 pub fn as_http_with[T](r: Result[T, String], f: fn(String) -> HttpError) -> Result[T, HttpError] =
   match r {
     Ok(v) -> Ok(v)
@@ -133,27 +154,29 @@ pub fn as_http_with[T](r: Result[T, String], f: fn(String) -> HttpError) -> Resu
 
 # ---- response constructors ----
 
+## A `text/plain; charset=utf-8` response.
 pub fn text(status: Int, body: String) -> Response =
   Response { status: status, content_type: "text/plain; charset=utf-8", headers: [], body: Text(body) }
 
+## A rendered JSON response (`application/json; charset=utf-8`) at any status.
 pub fn json_response(status: Int, j: Json) -> Response =
   Response { status: status, content_type: "application/json; charset=utf-8", headers: [], body: Text(render(j)) }
 
+## `json_response` at 200 — the ordinary success shape of a JSON API.
 pub fn json_ok(j: Json) -> Response = json_response(200, j)
 
-# A raw pre-rendered body (any content type) — escape hatch for services with
-# their own wire format.
+## A raw pre-rendered text body under any content type — the escape hatch for
+## a wire format this module has no constructor for (XML, HTML, WebDAV).
 pub fn raw(status: Int, content_type: String, body: String) -> Response =
   Response { status: status, content_type: content_type, headers: [], body: Text(body) }
 
-# A binary body: raw Bytes written verbatim (fm content proxy).
+## A binary body: raw Bytes written verbatim, with an exact Content-Length.
 pub fn binary(status: Int, content_type: String, raw: Bytes) -> Response =
   Response { status: status, content_type: content_type, headers: [], body: Binary(raw) }
 
-# A streaming body: a live InputStream pumped to the socket in constant memory
-# (fm content proxy / WebDAV serve_file for large media). Streams use chunked
-# framing — the length is unknown up front. The server closes the stream after
-# pumping (see web/server.write_response).
+## A streaming body: a live InputStream pumped to the socket in constant
+## memory, chunked (the length is unknown up front). The server closes the
+## stream after pumping, including when the client disconnects mid-download.
 pub fn streaming(status: Int, content_type: String, stream: InputStream) -> Response =
   Response { status: status, content_type: content_type, headers: [], body: Stream(stream) }
 
@@ -170,6 +193,9 @@ pub fn streaming(status: Int, content_type: String, stream: InputStream) -> Resp
 # legal this is the identity, and for the rest no encoding would have
 # transmitted them anyway. SP and HTAB stay (both are field-content); the other
 # C0 controls and DEL go.
+## Strip what may not appear in a header field value: CR, LF and the other C0
+## controls plus DEL (SP and HTAB stay). Every header this framework emits goes
+## through it, so response splitting is not reachable from request input.
 pub fn header_value(v: String) -> String = {
   let cs = code_points(v)
   var out: List[Int] = []
@@ -204,13 +230,12 @@ fn header_name(n: String) -> String = {
   from_code_points(out)
 }
 
-# Append one response header (records are immutable — returns a new Response).
-# Every header the framework emits goes through here, which is why the guard
-# lives here and not at each call site.
+## Append one response header, sanitizing both name and value (see
+## `header_value`). Records are immutable — this returns a new Response.
 pub fn with_header(r: Response, name: String, value: String) -> Response =
   Response { ..r, headers: r.headers ++ [(header_name(name), header_value(value))] }
 
-# A redirect: status (301/302/303/307) plus a Location header, empty body.
+## A redirect: status (301/302/303/307) plus a Location header, empty body.
 pub fn redirect(status: Int, location: String) -> Response =
   with_header(raw(status, "text/plain; charset=utf-8", ""), "Location", location)
 
@@ -269,34 +294,68 @@ fn ascii_filename(name: String) -> String = {
 # `filename*=` carries UTF-8 and is what every current client reads. The old
 # one-parameter form spliced the name in raw, so a `"` ended the parameter, a
 # `;` added new ones, and a non-ASCII name arrived mangled.
+## Force a download with a given filename: Content-Disposition with both
+## `filename=` (quoted ASCII) and `filename*=` (RFC 5987 UTF-8), so a name with
+## quotes or non-ASCII characters arrives intact and cannot inject parameters.
 pub fn attachment(content_type: String, filename: String, body: String) -> Response =
   with_header(raw(200, content_type, body), "Content-Disposition",
     "attachment; filename=\"" ++ ascii_filename(filename) ++ "\"; filename*=UTF-8''" ++
       pct_encode(filename))
 
-# The server's rendering of the Err branch and of its own 404/405.
-# backend-dawn divergence (M6): the key is "detail" to match FastAPI's error
-# body {"detail": ...}, which the frontend reads as error.response.data.detail.
-# The error's own headers ride along (through the with_header guard), so a 401
-# can carry its WWW-Authenticate challenge.
-pub fn error_response(e: HttpError) -> Response = {
-  let base = json_response(e.status, JObj(map.from([("detail", JStr(e.message))])))
+# The three strings below were hardcoded to what one consumer (dawnop-site,
+# whose frontend was written against FastAPI) needed: the key "detail", a
+# Chinese 500 message, and a fullwidth colon copied from pydantic. A framework
+# does not get to word another application's error bodies, and the wording was
+# invisible from the outside — the module header above has always claimed the
+# key was "error". So they are configuration now, with neutral English
+# defaults, and an application that wants the old bytes states them.
+## How the framework words the errors it renders itself. `detail_key` is the
+## JSON object key its error body uses ({"error": message}); `internal_message`
+## is the body of the 500 it renders when a handler panics; `param_separator`
+## goes between a parameter's name and the complaint in a 422 from
+## `query_int_bounded`.
+pub type ErrorFormat = {
+  detail_key: String,
+  internal_message: String,
+  param_separator: String,
+} derive Show
+
+## The neutral defaults: {"error": ...} bodies, "internal server error" for a
+## panic, and "name: Input should be ..." for a rejected query parameter.
+pub fn default_errors() -> ErrorFormat =
+  ErrorFormat {
+    detail_key: "error",
+    internal_message: "internal server error",
+    param_separator: ": ",
+  }
+
+## The server's rendering of the Err branch and of its own 404/405, worded by
+## `fmt`. The error's own headers ride along (through the with_header guard),
+## so a 401 can carry its WWW-Authenticate challenge.
+pub fn error_response_with(fmt: ErrorFormat, e: HttpError) -> Response = {
+  let base = json_response(e.status, JObj(map.from([(fmt.detail_key, JStr(e.message))])))
   fold(e.headers, base, (r, h) => {
     let (k, v) = h
     with_header(r, k, v)
   })
 }
 
+## `error_response_with` under the default wording — what a handler that
+## renders an HttpError itself should call unless the application configured
+## something else.
+pub fn error_response(e: HttpError) -> Response = error_response_with(default_errors(), e)
+
 # ---- request accessors ----
 
-# A path parameter captured by a `{name}` pattern segment. Missing means the
-# route table and the handler disagree — a programming error, hence 500.
+## A path parameter captured by a `{name}` pattern segment. Missing means the
+## route table and the handler disagree — a programming error, hence 500.
 pub fn param(req: Request, name: String) -> Result[String, HttpError] =
   match map.get(req.params, name) {
     Some(v) -> Ok(v)
     None -> Err(http_error(500, "missing path parameter: $name"))
   }
 
+## `param` parsed as an integer; a non-numeric capture is a 400.
 pub fn param_int(req: Request, name: String) -> Result[Int, HttpError] = {
   let raw = param(req, name)?
   match parse_int(raw) {
@@ -305,51 +364,58 @@ pub fn param_int(req: Request, name: String) -> Result[Int, HttpError] = {
   }
 }
 
-# A path parameter as an Option rather than a Result: handlers that word their
-# own 422 ("tag_id must be an integer") need the failure back as data, not as a
-# ready-made HttpError. `param_int` above is the version that picks the message.
+## A path parameter as an Option rather than a Result, for handlers that word
+## their own error instead of taking the one `param_int` picks.
 pub fn opt_param_int(req: Request, name: String) -> Option[Int] =
   match map.get(req.params, name) {
     Some(v) -> parse_int(v)
     None -> None
   }
 
+## One query-string parameter, exactly as it was decoded; None when absent.
 pub fn query(req: Request, name: String) -> Option[String] = map.get(req.query, name)
 
-# Strict pagination reader matching FastAPI's Query(ge=lo, le=hi): an absent
-# param yields the default; a present one that is non-integer or out of [lo, hi]
-# is a 422 whose {"detail"} reproduces pydantic's message byte-for-byte (the
-# FastAPI error handler joins loc and msg with a fullwidth colon). hi < 0 means
-# no upper bound (FastAPI's `page` is ge=1 with no le).
-pub fn query_int_bounded(req: Request, name: String, default: Int, lo: Int, hi: Int) -> Result[Int, HttpError] =
+## Strict pagination reader in the shape of FastAPI's Query(ge=lo, le=hi): an
+## absent param yields the default; a present one that is non-integer or out of
+## [lo, hi] is a 422. hi < 0 means no upper bound (FastAPI's `page` is ge=1 with
+## no le). `fmt.param_separator` joins the parameter's name to the complaint —
+## FastAPI's own error handler uses a fullwidth colon there, which is why the
+## separator is configurable rather than written in.
+pub fn query_int_bounded_with(fmt: ErrorFormat, req: Request, name: String, default: Int, lo: Int, hi: Int) -> Result[Int, HttpError] =
   match map.get(req.query, name) {
     None -> Ok(default)
-    Some(s) ->
+    Some(s) -> {
+      let at = name ++ fmt.param_separator
       match parse_int(s) {
-        None -> Err(http_error(422, "${name}：Input should be a valid integer, unable to parse string as an integer"))
+        None -> Err(http_error(422, "${at}Input should be a valid integer, unable to parse string as an integer"))
         Some(n) ->
           if n < lo {
-            Err(http_error(422, "${name}：Input should be greater than or equal to ${to_string(lo)}"))
+            Err(http_error(422, "${at}Input should be greater than or equal to ${to_string(lo)}"))
           } else if hi >= 0 && n > hi {
-            Err(http_error(422, "${name}：Input should be less than or equal to ${to_string(hi)}"))
+            Err(http_error(422, "${at}Input should be less than or equal to ${to_string(hi)}"))
           } else {
             Ok(n)
           }
       }
+    }
   }
 
-# A request header, looked up case-insensitively (the name is lowercased here;
-# the server lowercases keys when building the map). Of a repeated name this
-# is the *first* value — exactly what the old single-value map always held,
-# so every existing call site keeps its meaning.
+## `query_int_bounded_with` under the default wording ("size: Input should be
+## less than or equal to 100").
+pub fn query_int_bounded(req: Request, name: String, default: Int, lo: Int, hi: Int) -> Result[Int, HttpError] =
+  query_int_bounded_with(default_errors(), req, name, default, lo, hi)
+
+## A request header, looked up case-insensitively (the name is lowercased
+## here; the server lowercases keys when building the map). Of a repeated name
+## this is the *first* value.
 pub fn header(req: Request, name: String) -> Option[String] =
   match map.get(req.headers, str.to_lower(name)) {
     Some(vs) -> get(vs, 0)
     None -> None
   }
 
-# Every value of a repeated header, in wire order; [] when the name is absent.
-# Same case-insensitive lookup as `header`.
+## Every value of a repeated header, in wire order; [] when the name is absent.
+## Same case-insensitive lookup as `header`.
 pub fn headers_all(req: Request, name: String) -> List[String] =
   match map.get(req.headers, str.to_lower(name)) {
     Some(vs) -> vs
@@ -536,4 +602,48 @@ test "http_error fills the new fields empty; error_response carries error header
   assert r.headers == [("WWW-Authenticate", "Basic realm=\"dawn\"")]
   # a plain error adds no headers
   assert error_response(e).headers == []
+}
+
+test "the error body's key is the default one, and configurable" {
+  let e = http_error(404, "nope")
+  # default wording: the neutral {"error": ...}
+  assert error_response(e).body == Text("{\"error\":\"nope\"}")
+  # an application whose clients read {"detail": ...} (FastAPI's shape, which
+  # this used to be hardcoded to) states it
+  let fastapi = ErrorFormat { ..default_errors(), detail_key: "detail" }
+  assert error_response_with(fastapi, e).body == Text("{\"detail\":\"nope\"}")
+  # the configured rendering is otherwise the same response
+  assert error_response_with(fastapi, e).status == 404
+  assert error_response_with(fastapi, e).content_type == "application/json; charset=utf-8"
+}
+
+test "the 422 wording separates name from complaint, by configuration" {
+  let h: Map[String, List[String]] = map.empty()
+  let mk = (q: Map[String, String]) => Request {
+    method: "GET", path: "/a", raw_path: "/a", params: map.empty(), query: q, headers: h,
+    body: "", raw: bytes.utf8(""), body_file: None, route: None,
+  }
+  let over = mk(map.from([("size", "999")]))
+  # default: an ASCII colon and a space
+  match query_int_bounded(over, "size", 10, 1, 50) {
+    Err(e) -> { assert e.message == "size: Input should be less than or equal to 50" }
+    Ok(_) -> { assert false }
+  }
+  # pydantic's own joiner is a fullwidth colon with no space; an application
+  # reproducing FastAPI byte-for-byte configures that
+  let pydantic = ErrorFormat { ..default_errors(), param_separator: "：" }
+  match query_int_bounded_with(pydantic, over, "size", 10, 1, 50) {
+    Err(e) -> { assert e.message == "size：Input should be less than or equal to 50" }
+    Ok(_) -> { assert false }
+  }
+  match query_int_bounded_with(pydantic, mk(map.from([("page", "abc")])), "page", 1, 1, -1) {
+    Err(e) -> {
+      assert e.message == "page：Input should be a valid integer, unable to parse string as an integer"
+    }
+    Ok(_) -> { assert false }
+  }
+  match query_int_bounded_with(pydantic, mk(map.from([("page", "0")])), "page", 1, 1, -1) {
+    Err(e) -> { assert e.message == "page：Input should be greater than or equal to 1" }
+    Ok(_) -> { assert false }
+  }
 }

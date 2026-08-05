@@ -27,3 +27,46 @@ single-value map held — and `headers_all(req, name)` returns them all. Both
 lowercase the name they are given, and the server lowercases keys when it
 builds the map; that pair of lowercasings is the whole case-insensitivity
 contract.
+
+## CORS and OPTIONS (2.1)
+
+`with_cors` answers a **preflight** itself and lets everything else through to
+the routes. A preflight is an `OPTIONS` carrying *both* `Origin` and
+`Access-Control-Request-Method` — the pair the Fetch standard says a browser
+sends before a non-simple cross-origin request. Either header alone names
+something else: a bare `OPTIONS` is a client asking what the server supports (a
+WebDAV client reading `DAV`/`Allow`, `curl -X OPTIONS`), and `Origin` without
+the request-method header is an ordinary cross-origin `OPTIONS`. Both reach the
+application's own `OPTIONS` route and are stamped like any other response.
+
+Until 2.1 every untagged `OPTIONS` was answered with a `204` and the handler was
+never called, so an application's `OPTIONS` route was unreachable unless it
+opted out of CORS entirely (the `no-cors` tag, which also drops the
+`Access-Control-*` stamping).
+
+## Error wording (2.1)
+
+The framework renders three strings of its own: the JSON key of an error body,
+the `500` it writes when a handler panics, and the separator between a
+parameter's name and the complaint in `query_int_bounded`'s `422`. They are
+`ErrorFormat`, defaulting to neutral English:
+
+```
+{"error": "..."}      "internal server error"      "size: Input should be ..."
+```
+
+An application that must reproduce another server's bytes states them once:
+
+```dawn
+let fastapi = ErrorFormat {
+  detail_key: "detail", internal_message: "...", param_separator: "：",
+}
+serve_app_with(ServerConfig { host: "127.0.0.1", port: 8001, max_body: DEFAULT_MAX_BODY, errors: fastapi },
+  routes, middleware)
+```
+
+and passes the same value to `error_response_with` / `query_int_bounded_with`
+where it renders errors itself. Before 2.1 those three strings were hardcoded to
+what one consumer (dawnop-site, whose frontend was written against FastAPI)
+needed — including a Chinese `500` message and pydantic's fullwidth colon — and
+`ServerConfig` had no `errors` field.
