@@ -23,8 +23,29 @@ case "$WORKDIR" in
   *) echo "run-sandboxed: refusing workdir $WORKDIR" >&2; exit 3 ;;
 esac
 
+# The compiler's heap ceiling, set here because this is the only layer that can
+# set it: systemd-run starts the unit with a clean environment, so nothing the
+# runner exports reaches the compile phase.
+#
+# It has to be said explicitly because neither of the two things that look like
+# they would cap it actually does. `bin/dawn` pins -Xmx2g (a build-box default,
+# 4x this unit's MemoryMax), and the JVM does not see the cgroup: measured
+# 2026-08-05, MaxHeapSize is byte-identical inside and outside a 512M scope
+# despite UseContainerSupport=true, so ergonomics would aim at a quarter of
+# *host* RAM. Either way the JVM aims past MemoryMax and the kernel kills it --
+# contained, but as an opaque SIGKILL rather than a diagnostic.
+#
+# Below MemoryMax on purpose: a limit the JVM enforces itself surfaces as an
+# OutOfMemoryError the runner can report, and the cgroup stays a backstop
+# instead of the mechanism. Measured on hello-world: 466 MB peak RSS at 256m
+# against 542 MB at 2g -- the second already over this unit's ceiling.
+# -Xss is left alone: stack is reserved address space, not resident pages, and
+# shrinking it would fail deeply nested programs the parser handles today.
+SANDBOX_JVM_OPTS="-Xss512m -Xmx256m"
+
 exec systemd-run \
   --quiet --wait --pipe --collect \
+  --setenv="DAWN_JVM_OPTS=$SANDBOX_JVM_OPTS" \
   --property=DynamicUser=yes \
   --property=PrivateNetwork=yes \
   --property=PrivateDevices=yes \
