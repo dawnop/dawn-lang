@@ -1076,7 +1076,7 @@ pub fn check_binary_typed(
       }
       (cerr_h(cx, "`++` concatenates Strings, Bytes or Lists, got " ++ ty_show(cx.adts, lt) ++
           " ++ " ++ ty_show(cx.adts, rt), olo, ohi,
-        "use + for numbers; interpolation \"{x}{y}\" also builds strings"), TyError,
+        "use + for numbers; interpolation \"\${x}\${y}\" also builds strings"), TyError,
         node(no_wit(), TyError))
     }
     OpEq | OpNeq -> {
@@ -2791,7 +2791,15 @@ pub fn resolve_witness(
             "define `impl " ++ tr.name ++ "[" ++ ts ++ "] { ... }` in the module declaring `" ++
               tr.name ++ "`"
           } else {
-            "v1 impl subjects are named non-generic types and Int/Float/Bool/String"
+            # Not "named non-generic types and the scalars" any more: trait v2
+            # made a generic subject the ordinary case, so the old hint sent
+            # the reader looking for a restriction the checker stopped having.
+            # Same wording as impl_shape_bad, which is what would judge the
+            # impl they write next.
+            "a subject is a type constructor applied to the impl's own " ++
+              "parameters, as in `impl[T: " ++ tr.name ++ "] " ++ tr.name ++
+              "[List[T]]`; write it in the module declaring `" ++ tr.name ++
+              "` or the type"
           }
           (cerr_h(cx, "no impl of `" ++ tr.name ++ "` for `" ++ ts ++ "`", lo, hi, hint), no_wit())
         }
