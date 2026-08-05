@@ -212,11 +212,16 @@ fn parse_blocks(lines: List[String]) -> Result[List[Block], String] = {
   if err == "" { Ok(out) } else { Err(err) }
 }
 
-## ``` fenced code; "dawn skip-check" (a tutorial test marker) renders as dawn.
+## ``` fenced code. The info string's first word is the language; any further
+## words are markers for doc-check ("dawn run", "dawn skip-check") and are not
+## the renderer's business. Matching the whole string was the bug: only
+## "dawn skip-check" was special-cased, so the tutorial's 29 "dawn run" blocks
+## -- every example a newcomer reads -- fell through to the unhighlighted
+## branch, while the 2 exempted fragments were highlighted. Exactly backwards.
 fn scan_fence(lines: List[String], start: Int) -> Result[(Block, Int), String] = {
   let first = line_at(lines, start)
   let raw = str.trim(str.drop(first, 3))
-  let lang = if raw == "dawn skip-check" { "dawn" } else { raw }
+  let lang = match str.split(raw, " ") { [w, ..] -> w, _ -> raw }
   let n = len(lines)
   var body: List[String] = []
   var i = start + 1
@@ -399,6 +404,9 @@ test "fenced code keeps its body verbatim" {
   assert parse("```dawn\nfn main() -> Unit\n```\n") ==
     Ok([CodeBlock("dawn", "fn main() -> Unit")])
   assert parse("```dawn skip-check\nx\n```\n") == Ok([CodeBlock("dawn", "x")])
+  # the tutorial's 29 examples are all "dawn run"; a whole-string match sent
+  # every one of them to the unhighlighted branch
+  assert parse("```dawn run\nx\n```\n") == Ok([CodeBlock("dawn", "x")])
   assert parse("```\n# not a heading\n```\n") == Ok([CodeBlock("", "# not a heading")])
   match parse("```dawn\nnever closed\n") {
     Ok(_) -> {
