@@ -28,10 +28,11 @@ use types.{
   Ty, TyInt, TyFloat, TyBool, TyString, TyUnit, TyNever, TyError, TyVar, TyAssoc,
   TyAdt, TyTuple, TyFn, TyBytes, TyList, TyMap, TySet, TyArray, TyJava, peel_opaque,
   intr_at, Adts, adt_of, prelude_adts, OPTION_ID, RESULT_ID, cast_target,
-  is_ref_ty, Eff, EPure
+  is_ref_ty, Eff, EPure, hash_scalars, ord_scalars
 }
 use reach.{TableUse}
 use case_table
+use rtsrc
 use class_table
 use core.{
   CValue, VInt, VFloat, VBool, VStr, VUnit, VList, VTuple, VAdt, VClosure, VDict,
@@ -1141,7 +1142,13 @@ fn dict_line(d: CDictDef) -> String = {
 fn scalar_rt(prefix: String, t: Ty, what: String) -> String =
   match t {
     TyInt -> prefix ++ "_int"
-    TyFloat -> prefix ++ "_float"
+    # No TyFloat arm. It named `dawn_hash_float` and `dawn_cmp_float`, neither
+    # of which the runtime has ever defined -- and it could say so for as long
+    # as it did because nothing reaches it: `hash_scalars` dropped Float in
+    # 2026-07-26 (two equal keys, different buckets) and `ord_scalars` never
+    # had it (NaN is unordered). An arm naming a symbol that does not exist is
+    # a link error waiting for the first caller; the gap below is the honest
+    # answer, and it is the same one Cursor gets.
     TyString -> prefix ++ "_str"
     # Bool and Bytes have an Eq and a Hash but no order, so only one of the two
     # prefixes reaches them; the other falls through to the gap below
@@ -1886,6 +1893,45 @@ test "a primitive its module owns needs no arm in the emitter" {
   assert rt_symbol("expect") == None
   assert rt_symbol("code_points") == None
 }
+
+test "every scalar relation the emitter names is one the runtime defines" {
+  # `scalar_rt` writes a symbol name into the emitted C, and nothing else in
+  # the compiler ever links against it -- so a name for a function the runtime
+  # does not have is a link error in the *user's* build, arriving as an
+  # undefined reference to a symbol they never wrote. That is what
+  # `dawn_hash_float` / `dawn_cmp_float` were: named here, absent from
+  # dawn_rt.c since Float left hash_scalars and ord_scalars.
+  #
+  # The runtime header travels with the compiler (rtsrc, for the standalone
+  # native toolchain), so the declaration is right here to check against. The
+  # subjects are exactly the two tables in types.dawn, which is what keeps
+  # this from turning into a second hand-kept list.
+  let header = rtsrc.source("dawn_rt.h").expect("the embedded runtime header")
+  for t in hash_scalars() {
+    assert str.contains(header, scalar_rt("dawn_hash", t, "hash") ++ "(")
+  }
+  for t in ord_scalars() {
+    assert str.contains(header, scalar_rt("dawn_cmp", t, "cmp") ++ "(")
+  }
+  # and the other direction, which is the one that was broken: a type in
+  # neither table must reach the gap rather than a name. Float had an arm here
+  # naming symbols the runtime does not declare, and could keep it for as long
+  # as nothing called it.
+  assert not str.contains(header, "dawn_hash_float")
+  assert not str.contains(header, "dawn_cmp_float")
+  assert gaps("dawn_hash", TyFloat)
+  assert gaps("dawn_cmp", TyFloat)
+  assert gaps("dawn_cmp", TyBool)
+  assert gaps("dawn_cmp", TyBytes)
+}
+
+## `scalar_rt` refuses this pair -- the test above wants the refusal, and
+## `no_rt` is a panic, so it has to be caught to be asserted.
+fn gaps(prefix: String, t: Ty) -> Bool !io =
+  match catch_panic(() => scalar_rt(prefix, t, "the test")) {
+    Ok(_) -> false
+    Err(_) -> true
+  }
 
 test "a non-finite Float is written as C, not as its spelling" {
   # #111. Spec §11 renders these `Infinity`, `-Infinity` and `NaN`; none of
