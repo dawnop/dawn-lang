@@ -1,9 +1,44 @@
 # Post-generation link check: every internal href must resolve to a file we
-# actually wrote. Broken links fail the build.
+# actually wrote, *and* every `#fragment` must name an element that file
+# actually has. Broken links fail the build.
+#
+# The fragment half was missing until 2026-08-05, and missing in both
+# directions at once: `resolve` threw the fragment away before comparing, and
+# `is_external` classified a bare `#frag` as external -- i.e. as somebody
+# else's problem. Between them, all 281 fragments on this site went
+# unexamined (272 same-page, 9 cross-page; the cross-page ones had their file
+# half checked and their fragment dropped). The summary line meanwhile said
+# every href resolved, which was true of the 474 file halves it still looked
+# at and said nothing about the fragments -- a count that is honest about its
+# own subject and silent about the one nobody had noticed was missing.
+#
+# The check comes in two parts because existence alone is not enough here.
+# Heading ids are POSITIONAL, not derived from the heading text
+# (html/render.dawn assigns `s$h2-$h3` from running counters), while the
+# number a reader sees is typed into the heading by hand. `#s3-5` therefore
+# means "§3.5" only while those two agree, and nothing but check_heading
+# numbers forces them to: insert a `###` into the middle of a spec chapter
+# and renumber nothing after it, and every id from there on names the section
+# before the one it prints. Every link still resolves. That is why the
+# numbering half exists, and it is the half the mutant proved -- breaking the
+# fragments is caught by existence, but this failure is invisible to it.
+#
+# Still not caught, so that the next reader does not assume otherwise: a link
+# whose fragment resolves to a correctly-numbered heading that is simply not
+# the section the author meant. The id carries no evidence of intent, so no
+# check here can recover it.
+#
+# scripts/doc-check.py has an anchor check of the same shape over docs/*.md.
+# That one is sound -- both its halves fail on a bad fragment when one is
+# planted -- and has been matching zero references since the day it was
+# written, because docs/ prose links to whole files and never to fragments.
+# Every fragment in this repository is here, in the generated site, which is
+# why the check had to be here too.
 
 use std/str
 use std/io
 use std/set
+use std/map
 use md/text.{cp_at, seg}
 use gen/common.{must_read, must_list, take_n}
 
@@ -43,10 +78,10 @@ fn find_sub(cs: List[Int], from: Int, pat: List[Int]) -> Int = {
   found
 }
 
-## All href="..." values in an HTML page.
-fn hrefs_of(html: String) -> List[String] = {
+## Every value of one quoted attribute, given its `name="` opener.
+fn attr_values(html: String, opener: String) -> List[String] = {
   let cs = code_points(html)
-  let pat = code_points("href=\"")
+  let pat = code_points(opener)
   var out: List[String] = []
   var i = 0
   var going = true
@@ -67,18 +102,107 @@ fn hrefs_of(html: String) -> List[String] = {
   out
 }
 
+## All href="..." values in an HTML page.
+fn hrefs_of(html: String) -> List[String] = attr_values(html, "href=\"")
+
+## Every id this page offers as a link target. The opener carries its leading
+## space so that `data-id="` and friends cannot be mistaken for an id.
+fn ids_of(html: String) -> List[String] = attr_values(html, " id=\"")
+
+## Each `<hN id="...">text...` on the page, as (id, text-before-any-markup).
+## The text stops at the first tag, which is enough: what this is read for is
+## the section number, and that is always the first thing in a heading.
+fn headings_at(html: String, lvl: Int) -> List[(String, String)] = {
+  let cs = code_points(html)
+  let open = code_points("<h$lvl id=\"")
+  var out: List[(String, String)] = []
+  var i = 0
+  var going = true
+  while going {
+    let at = find_sub(cs, i, open)
+    if at < 0 {
+      going = false
+    } else {
+      let s = at + len(open)
+      var e = s
+      while e < len(cs) && cp_at(cs, e) != '"' {
+        e = e + 1
+      }
+      var t = e
+      while t < len(cs) && cp_at(cs, t) != '>' {
+        t = t + 1
+      }
+      var te = t + 1
+      while te < len(cs) && cp_at(cs, te) != '<' {
+        te = te + 1
+      }
+      out = out ++ [(seg(cs, s, e), seg(cs, t + 1, te))]
+      i = te
+    }
+  }
+  out
+}
+
+fn headings_of(html: String) -> List[(String, String)] =
+  headings_at(html, 2) ++ headings_at(html, 3) ++ headings_at(html, 4)
+
+## The section number an id claims: `s9-8-1` -> `9.8.1`. Empty if the id is
+## not of that shape.
+fn id_number(id: String) -> String =
+  if str.starts_with(id, "s") {
+    let rest = seg(code_points(id), 1, len(code_points(id)))
+    var ok = rest != ""
+    for part in str.split(rest, "-") {
+      if part == "" {
+        ok = false
+      }
+      for c in code_points(part) {
+        if c < '0' || c > '9' {
+          ok = false
+        }
+      }
+    }
+    if ok { join(str.split(rest, "-"), ".") } else { "" }
+  } else {
+    ""
+  }
+
+## The dotted number a heading prints, or empty: `9.8.1 载荷` -> `9.8.1`,
+## `6. 效果系统` -> `6` (the trailing dot is punctuation, not a level), and
+## `安装` -> `` (this page does not number its headings).
+fn leading_number(text: String) -> String = {
+  let cs = code_points(text)
+  var i = 0
+  while i < len(cs) && ((cp_at(cs, i) >= '0' && cp_at(cs, i) <= '9') || cp_at(cs, i) == '.') {
+    i = i + 1
+  }
+  let raw = seg(cs, 0, i)
+  if str.ends_with(raw, ".") { seg(cs, 0, i - 1) } else { raw }
+}
+
 fn is_external(u: String) -> Bool =
-  str.starts_with(u, "http://") || str.starts_with(u, "https://") || str.starts_with(u, "mailto:") ||
-  str.starts_with(u, "#")
+  str.starts_with(u, "http://") || str.starts_with(u, "https://") || str.starts_with(u, "mailto:")
+
+## The path half of an href, i.e. everything before the `#`. Empty when the
+## href is a bare fragment, which names the page it is written on.
+fn path_of(href: String) -> String =
+  match str.split(href, "#") {
+    [path] -> path
+    [path, _] -> path
+    _ -> href
+  }
+
+## The fragment half, without the `#`. Empty when there is none.
+fn frag_of(href: String) -> String =
+  match str.split(href, "#") {
+    [_] -> ""
+    [_, frag] -> frag
+    _ -> ""
+  }
 
 ## Resolve href against the page's directory and normalize . / .. segments.
 fn resolve(dir: String, href: String) -> String = {
-  let no_anchor =
-    match str.split(href, "#") {
-      [path] -> path
-      [path, _] -> path
-      _ -> href
-    }
+  let no_anchor = path_of(href)
   let raw = if dir == "" { no_anchor } else { "$dir/$no_anchor" }
   var stack: List[String] = []
   for part in str.split(raw, "/") {
@@ -98,18 +222,68 @@ fn dir_of(rel: String) -> String = {
 
 pub fn check_links(out: String) -> Unit !io = {
   let files = set.from(files_under(out, ""))
+  # Every page's ids, indexed before any page is judged: a fragment is checked
+  # against the page it points AT, which for the cross-page ones is not the
+  # page it is written on.
+  var id_entries: List[(String, Set[String])] = []
+  for f in set.to_list(files) {
+    if str.ends_with(f, ".html") {
+      id_entries = id_entries ++ [(f, set.from(ids_of(must_read("$out/$f"))))]
+    }
+  }
+  let ids = map.from(id_entries)
   var broken: List[String] = []
   var pages = 0
   var checked = 0
+  var anchors = 0
+  var numbered = 0
   for f in set.to_list(files) {
     if str.ends_with(f, ".html") {
       pages = pages + 1
+      # The half an existence check cannot reach. `#s3-5` resolving proves
+      # only that *an* element is called s3-5; it is worth linking to only
+      # because the id's number and the number the heading prints are the
+      # same number. Nothing forces them to be -- the id is a counter, the
+      # printed number is typed by hand -- so insert one `###` into the middle
+      # of a spec chapter without renumbering the rest and every later link
+      # keeps resolving while naming the section before the one it means.
+      # That is the failure this catches and the previous paragraph's check
+      # cannot. A heading whose text prints no number is skipped, not
+      # guessed at: 25 of them are unnumbered on purpose.
+      for h in headings_of(must_read("$out/$f")) {
+        let (hid, htext) = h
+        let want = id_number(hid)
+        let got = leading_number(htext)
+        if want != "" && got != "" {
+          numbered = numbered + 1
+          if want != got {
+            broken = broken ++ ["$f: id \"$hid\" claims §$want but the heading prints §$got"]
+          }
+        }
+      }
       for href in hrefs_of(must_read("$out/$f")) {
         if not is_external(href) {
-          checked = checked + 1
-          let target = resolve(dir_of(f), href)
-          if not set.has(files, target) {
-            broken = broken ++ ["$f -> $href (resolved: $target)"]
+          let path = path_of(href)
+          let frag = frag_of(href)
+          # A bare `#frag` names this page; anything else names the page the
+          # path resolves to.
+          let target = if path == "" { f } else { resolve(dir_of(f), path) }
+          var target_exists = true
+          if path != "" {
+            checked = checked + 1
+            target_exists = set.has(files, target)
+            if not target_exists {
+              broken = broken ++ ["$f -> $href (resolved: $target)"]
+            }
+          }
+          # Only .html has ids to check against, and a target we already
+          # reported as missing is not reported twice.
+          if frag != "" && target_exists && str.ends_with(target, ".html") {
+            anchors = anchors + 1
+            let page_ids = unwrap_or(map.get(ids, target), set.empty())
+            if not set.has(page_ids, frag) {
+              broken = broken ++ ["$f -> $href (no id \"$frag\" in $target)"]
+            }
           }
         }
       }
@@ -121,7 +295,9 @@ pub fn check_links(out: String) -> Unit !io = {
     }
     panic("${len(broken)} broken links")
   }
-  println("  link check: $checked internal hrefs across $pages pages, all resolve")
+  println(
+    "  link check: $checked internal hrefs, $anchors #fragment(s) and $numbered numbered "
+      ++ "heading id(s) across $pages pages, all resolve")
 }
 
 test "resolution normalizes relative segments" {
@@ -133,4 +309,46 @@ test "resolution normalizes relative segments" {
 
 test "href extraction" {
   assert hrefs_of(`<a href="a.html">x</a> <link href="b.css">`) == ["a.html", "b.css"]
+}
+
+test "id extraction" {
+  assert ids_of(`<h2 id="s3">t</h2><h3 id="s3-1">u</h3>`) == ["s3", "s3-1"]
+  # The leading space in the opener is what keeps these out.
+  assert ids_of(`<div data-id="x"></div><p aria-id="y">`) == []
+}
+
+## A bare `#frag` is a link into this page, not somebody else's page. Calling
+## it external is how 272 of them went unchecked.
+test "a same-page fragment is not an external link" {
+  assert not is_external("#s2-3")
+  assert is_external("https://example.com/#s2-3")
+  assert path_of("#s2-3") == ""
+  assert frag_of("#s2-3") == "s2-3"
+}
+
+test "an href splits into path and fragment" {
+  assert path_of("../spec.html#s9-5-1") == "../spec.html"
+  assert frag_of("../spec.html#s9-5-1") == "s9-5-1"
+  assert path_of("spec.html") == "spec.html"
+  assert frag_of("spec.html") == ""
+}
+
+test "an id states the section number it claims" {
+  assert id_number("s9-8-1") == "9.8.1"
+  assert id_number("s6") == "6"
+  # Not a heading counter: the stdlib page ids names, not numbers.
+  assert id_number("str-split") == ""
+  assert id_number("s") == ""
+}
+
+test "a heading's printed number is read off its text" {
+  assert leading_number("9.8.1 载荷") == "9.8.1"
+  assert leading_number("6. 效果系统") == "6"
+  assert leading_number("安装") == ""
+}
+
+## The pairing the whole numbering check rests on.
+test "headings pair their id with their text" {
+  let html = `<h2 id="s6">6. 效果系统</h2><h3 id="s6-5">6.5 具名效果与 <code>with</code></h3>`
+  assert headings_of(html) == [("s6", "6. 效果系统"), ("s6-5", "6.5 具名效果与 ")]
 }
