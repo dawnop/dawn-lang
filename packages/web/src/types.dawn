@@ -22,11 +22,22 @@ pub type RouteMeta = {
 
 pub type Request = {
   method: String,
+  # the decoded path, kept for logs and display; routing does not use it
   path: String,
+  # the path exactly as it came off the wire (URI.getRawPath). Routing splits
+  # *this* on "/" and decodes each segment on its own, so an encoded slash
+  # (%2F) stays inside its segment instead of minting a route boundary (WEB-03).
+  raw_path: String,
   params: Map[String, String],
   query: Map[String, String],
-  # request headers, keys lowercased for case-insensitive lookup (use `header`)
-  headers: Map[String, String],
+  # request headers as a lowercase-keyed multimap: every value of a repeated
+  # name (Cookie, Forwarded, ...) survives in wire order (WEB-04). The
+  # case-insensitivity contract is one rule applied at both ends: the server
+  # lowercases keys when it builds this map, and `header`/`headers_all`
+  # lowercase the name they look up. The JDK's own Title-Case normalization
+  # inside Headers is deliberately not relied on — a Request built by hand in
+  # a test must behave exactly like one built from the wire.
+  headers: Map[String, List[String]],
   body: String,
   # the request body as raw Bytes: binary handlers (multipart upload) parse
   # structure and recover exact file bytes from here, no latin-1 detour.
@@ -328,15 +339,28 @@ pub fn query_int_bounded(req: Request, name: String, default: Int, lo: Int, hi: 
   }
 
 # A request header, looked up case-insensitively (the name is lowercased here;
-# the server lowercases keys when building the map).
+# the server lowercases keys when building the map). Of a repeated name this
+# is the *first* value — exactly what the old single-value map always held,
+# so every existing call site keeps its meaning.
 pub fn header(req: Request, name: String) -> Option[String] =
-  map.get(req.headers, str.to_lower(name))
+  match map.get(req.headers, str.to_lower(name)) {
+    Some(vs) -> get(vs, 0)
+    None -> None
+  }
+
+# Every value of a repeated header, in wire order; [] when the name is absent.
+# Same case-insensitive lookup as `header`.
+pub fn headers_all(req: Request, name: String) -> List[String] =
+  match map.get(req.headers, str.to_lower(name)) {
+    Some(vs) -> vs
+    None -> []
+  }
 
 test "param reads captures and flags missing ones" {
-  let h: Map[String, String] = map.empty()
+  let h: Map[String, List[String]] = map.empty()
   let q: Map[String, String] = map.empty()
   let req = Request {
-    method: "GET", path: "/a/42",
+    method: "GET", path: "/a/42", raw_path: "/a/42",
     params: map.from([("id", "42")]), query: q, headers: h, body: "", raw: bytes.utf8(""), body_file: None,
     route: None,
   }
@@ -349,9 +373,9 @@ test "param reads captures and flags missing ones" {
 }
 
 test "query_int_bounded: absent uses default, out-of-range and non-int are 422" {
-  let h: Map[String, String] = map.empty()
+  let h: Map[String, List[String]] = map.empty()
   let mk = (q: Map[String, String]) => Request {
-    method: "GET", path: "/a", params: map.empty(), query: q, headers: h, body: "", raw: bytes.utf8(""), body_file: None,
+    method: "GET", path: "/a", raw_path: "/a", params: map.empty(), query: q, headers: h, body: "", raw: bytes.utf8(""), body_file: None,
     route: None,
   }
   # absent -> default
@@ -378,10 +402,10 @@ test "query_int_bounded: absent uses default, out-of-range and non-int are 422" 
 }
 
 test "param_int rejects non-numbers as a client error" {
-  let h: Map[String, String] = map.empty()
+  let h: Map[String, List[String]] = map.empty()
   let q: Map[String, String] = map.empty()
   let req = Request {
-    method: "GET", path: "/a/x",
+    method: "GET", path: "/a/x", raw_path: "/a/x",
     params: map.from([("id", "x")]), query: q, headers: h, body: "", raw: bytes.utf8(""), body_file: None,
     route: None,
   }
@@ -393,14 +417,29 @@ test "param_int rejects non-numbers as a client error" {
 
 test "header lookup is case-insensitive" {
   let req = Request {
-    method: "GET", path: "/", params: map.empty(), query: map.empty(),
-    headers: map.from([("authorization", "Bearer xyz"), ("content-type", "application/json")]),
+    method: "GET", path: "/", raw_path: "/", params: map.empty(), query: map.empty(),
+    headers: map.from([("authorization", ["Bearer xyz"]), ("content-type", ["application/json"])]),
     body: "", raw: bytes.utf8(""), body_file: None,
     route: None,
   }
   assert header(req, "Authorization") == Some("Bearer xyz")
   assert header(req, "CONTENT-TYPE") == Some("application/json")
   assert header(req, "missing") == None
+}
+
+test "repeated request headers keep every value" {
+  let req = Request {
+    method: "GET", path: "/", raw_path: "/", params: map.empty(), query: map.empty(),
+    headers: map.from([("cookie", ["a=1", "b=2"])]),
+    body: "", raw: bytes.utf8(""), body_file: None,
+    route: None,
+  }
+  # header() is the single-value view: the first, as it always was
+  assert header(req, "Cookie") == Some("a=1")
+  assert headers_all(req, "Cookie") == ["a=1", "b=2"]
+  # headers_all shares header()'s case-insensitivity
+  assert headers_all(req, "COOKIE") == ["a=1", "b=2"]
+  assert headers_all(req, "missing") == []
 }
 
 test "response header helpers" {

@@ -17,8 +17,9 @@ use java "java.lang.String"
 use java "java.util.Iterator"
 use java "java.io.File"
 use java "java.io.FileOutputStream"
-use types.{Request, Response, ResponseBody, Empty, Text, Binary, Stream, HttpError, Handler, Middleware, RouteMeta, http_error, error_response, streaming, text, binary}
-use router.{Route, Dispatch, Found, NoPath, WrongMethod, dispatch, route_meta, validate_routes, route_get}
+use types.{Request, Response, ResponseBody, Empty, Text, Binary, Stream, HttpError, Handler, Middleware, RouteMeta, http_error, error_response, streaming, text, binary, header, headers_all}
+use router.{Route, Dispatch, Found, NoPath, WrongMethod, dispatch_segs, route_meta, validate_routes, route_get}
+use java "java.net.Socket"
 use java "java.io.InputStream"
 use java "java.io.OutputStream"
 use java "java.net.URI"
@@ -183,20 +184,34 @@ fn set_extra_headers(headers: Headers, hs: List[(String, String)]) -> Unit !io =
   }
 }
 
-# Collect request headers into a lowercase-keyed map (first value per name;
-# multi-valued request headers are rare in this API and the first wins). The
-# key set is a Java collection, so it is walked with an iterator.
-fn read_headers(ex: HttpExchange) -> Map[String, String] !io = {
+# Collect request headers into a lowercase-keyed multimap: every value of a
+# repeated name (Cookie, Forwarded, ...) survives, in wire order (WEB-04).
+# Normalization contract: keys are lowercased exactly once, here, and
+# `header`/`headers_all` lowercase the name they are given — one rule at both
+# ends. The JDK's Headers has its own Title-Case normalization inside the
+# exchange, which is deliberately not leaned on: a Request built by hand in a
+# test must behave like one built from the wire. The key set is a Java
+# collection, so it is walked with an iterator.
+fn read_headers(ex: HttpExchange) -> Map[String, List[String]] !io = {
   let headers = ex.getRequestHeaders()!
   let it = headers.keySet()!.iterator()!
   collect_headers(headers, it, map.empty())
 }
 
-fn collect_headers(headers: Headers, it: Iterator, acc: Map[String, String]) -> Map[String, String] !io =
+fn collect_headers(headers: Headers, it: Iterator, acc: Map[String, List[String]]) -> Map[String, List[String]] !io =
   if it.hasNext() {
     let name = String.valueOf(it.next()!)!
-    let v = headers.getFirst(name)!
-    collect_headers(headers, it, map.insert(acc, str.to_lower(name), v))
+    let vs = string_values(headers.get(name)!.iterator()!, [])
+    collect_headers(headers, it, map.insert(acc, str.to_lower(name), vs))
+  } else {
+    acc
+  }
+
+# Drain a Java Iterator of strings into a Dawn list (Headers.get hands back a
+# java.util.List of every value the name arrived with).
+fn string_values(it: Iterator, acc: List[String]) -> List[String] !io =
+  if it.hasNext() {
+    string_values(it, acc ++ [String.valueOf(it.next()!)!])
   } else {
     acc
   }
@@ -223,6 +238,47 @@ fn pct_decode(s: String) -> String !io =
     Ok(v) -> v
     Err(_) -> s
   }
+
+# ---- raw-path routing (WEB-03) ----
+
+# Split a raw request path into routing segments: the leading empty piece
+# (absolute paths start with "/") and one trailing empty piece (a trailing
+# slash is tolerated, as the router always has) are dropped, but *interior*
+# empty segments (/a//b) are kept — merging them would be path rewriting,
+# which belongs to the application, not the framework. See the package README
+# for the full policy table.
+fn raw_segs(raw_path: String) -> List[String] = {
+  let parts = str.split(raw_path, "/")
+  let n = len(parts)
+  let lo = if n > 0 && parts[0] == "" { 1 } else { 0 }
+  let hi = if n > lo && parts[n - 1] == "" { n - 1 } else { n }
+  map(range(lo, hi), i => parts[i])
+}
+
+# Percent-decode one *path* segment. Path semantics, not form semantics: a
+# '+' in a path is a literal plus, so it is shielded as %2B before URLDecoder
+# (which speaks application/x-www-form-urlencoded and would turn it into a
+# space). A malformed escape leaves the segment as written — same policy as
+# pct_decode above.
+fn decode_path_seg(s: String) -> String !io =
+  match catch_fault(() => URLDecoder.decode(str.replace(s, "+", "%2B"), "UTF-8")!) {
+    Ok(v) -> v
+    Err(_) -> s
+  }
+
+fn is_dot_seg(s: String) -> Bool = s == "." || s == ".."
+
+# True when any raw segment is "." or ".." in either spelling — as written or
+# after decoding (%2e%2e decodes to "..", the classic normalization bypass).
+# `handle` refuses such a path with 400 *before* dispatch, so the check covers
+# every request, 404 paths included: this framework never normalizes a path,
+# it rejects the ones that would need it.
+fn has_dot_segment(raw_path: String) -> Bool !io = {
+  for s in raw_segs(raw_path) {
+    if is_dot_seg(s) || is_dot_seg(decode_path_seg(s)) { return true }
+  }
+  false
+}
 
 # "a=1&b=x" -> [("a","1"),("b","x")], over the *raw* (still encoded) string.
 # A value may itself contain '=', so only the first one splits — and since the
@@ -267,6 +323,7 @@ fn build_request(ex: HttpExchange, meta: Option[RouteMeta], max_body: Int) -> Re
   Ok(Request {
     method: ex.getRequestMethod()!,
     path: uri.getPath()!,
+    raw_path: uri.getRawPath()!,
     params: no_query,
     query: q,
     headers: read_headers(ex),
@@ -338,36 +395,50 @@ fn handle(routes: List[Route], middleware: List[Middleware], max_body: Int, ex: 
   # a handler panic is isolated to this request: catch_panic turns it into a 500
   # instead of resetting the connection or leaking the virtual thread (spec §9.8).
   let outcome = catch_panic(() => {
-    # Dispatch BEFORE touching the body: method and path come from the request
-    # line, and the matched route's tags decide how the body is read at all
-    # ("stream-body" spills it to disk instead of into memory). The same decision
-    # is executed by run_dispatch below — no second table walk.
-    let d = dispatch(routes, ex.getRequestMethod()!, ex.getRequestURI()!.getPath()!)
-    # An oversized body is refused before it is read, which also means before any
-    # middleware runs: there is no Request to hand them. That costs the 413 its
-    # access-log line and its CORS headers, and is the price of the refusal
-    # happening early enough to be worth anything.
-    match build_request(ex, meta_of(d), max_body) {
-      Err(e) -> {
-        println("${ex.getRequestMethod()!} ${ex.getRequestURI()!.getPath()!} -> ${e.status} (${e.message})")
-        error_response(e)
-      }
-      Ok(req) -> {
-        # first middleware in the list is outermost: [a, b] runs a(b(core)). Middleware
-        # still wraps the core, so CORS preflight and logging cover unmatched requests.
-        let app = fold(rev(middleware), (rq: Request) => run_dispatch(d, rq), (h, m) => m(h))
-        # the temp body file lives exactly as long as the handler call, and the
-        # bracket is what makes that true on every way out — including the ones
-        # the catch_panic below does not see, such as a panic while rendering
-        # the 500 for a panic.
-        with held <- bracket(req, drop_body_file)
-        let served = catch_panic(() => app(held))
-        match served {
-          Ok(Ok(r)) -> r
-          Ok(Err(e)) -> error_response(e)
-          Err(m) -> {
-            println("request panicked: ${m.message}")
-            error_response(http_error(500, "服务器内部错误"))
+    let raw_path = ex.getRequestURI()!.getRawPath()!
+    # WEB-03: a dot segment ("." / "..", raw or percent-encoded) is refused
+    # here, before dispatch — so the 400 covers every route, including paths
+    # nothing would match. Like the 413 below, this happens before any
+    # middleware runs: there is no Request yet.
+    if has_dot_segment(raw_path) {
+      println("${ex.getRequestMethod()!} $raw_path -> 400 (dot segment)")
+      error_response(http_error(400, "path contains a dot segment"))
+    } else {
+      # Dispatch BEFORE touching the body: method and path come from the request
+      # line, and the matched route's tags decide how the body is read at all
+      # ("stream-body" spills it to disk instead of into memory). The same decision
+      # is executed by run_dispatch below — no second table walk.
+      #
+      # WEB-03: routing runs on the *raw* path, split on "/" first, each segment
+      # percent-decoded on its own — an encoded slash (%2F) stays inside its
+      # segment instead of minting a route boundary.
+      let d = dispatch_segs(routes, ex.getRequestMethod()!, map(raw_segs(raw_path), s => decode_path_seg(s)))
+      # An oversized body is refused before it is read, which also means before any
+      # middleware runs: there is no Request to hand them. That costs the 413 its
+      # access-log line and its CORS headers, and is the price of the refusal
+      # happening early enough to be worth anything.
+      match build_request(ex, meta_of(d), max_body) {
+        Err(e) -> {
+          println("${ex.getRequestMethod()!} ${ex.getRequestURI()!.getPath()!} -> ${e.status} (${e.message})")
+          error_response(e)
+        }
+        Ok(req) -> {
+          # first middleware in the list is outermost: [a, b] runs a(b(core)). Middleware
+          # still wraps the core, so CORS preflight and logging cover unmatched requests.
+          let app = fold(rev(middleware), (rq: Request) => run_dispatch(d, rq), (h, m) => m(h))
+          # the temp body file lives exactly as long as the handler call, and the
+          # bracket is what makes that true on every way out — including the ones
+          # the catch_panic below does not see, such as a panic while rendering
+          # the 500 for a panic.
+          with held <- bracket(req, drop_body_file)
+          let served = catch_panic(() => app(held))
+          match served {
+            Ok(Ok(r)) -> r
+            Ok(Err(e)) -> error_response(e)
+            Err(m) -> {
+              println("request panicked: ${m.message}")
+              error_response(http_error(500, "服务器内部错误"))
+            }
           }
         }
       }
@@ -507,9 +578,35 @@ fn test_stream_of(b: Bytes) -> InputStream !io = {
   }
 }
 
+# Test-only: one raw HTTP exchange over a plain socket, returned as text.
+# The only client that will send `/a/../b` or a repeated header verbatim —
+# HttpClient and HttpURLConnection normalize dot segments away before the
+# bytes leave, which is exactly the behavior these tests must not inherit.
+fn raw_http(port: Int, request: String) -> String !io = {
+  let s = Socket.new("127.0.0.1", port)
+  let out = s.getOutputStream()!
+  out.write(bytes.utf8(request))
+  out.flush()
+  let resp = bytes.decode_utf8(s.getInputStream()!.readAllBytes()!)
+  s.close()
+  resp
+}
+
+fn get_line(path: String) -> String =
+  "GET " ++ path ++ " HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n"
+
 fn hello_handler(_req: Request) -> Result[Response, HttpError] !io = Ok(text(200, "hello"))
 
 fn no_content_handler(_req: Request) -> Result[Response, HttpError] !io = Ok(text(204, ""))
+
+fn echo_name(req: Request) -> Result[Response, HttpError] !io =
+  match map.get(req.params, "name") {
+    Some(v) -> Ok(text(200, v))
+    None -> Ok(text(500, "missing capture"))
+  }
+
+fn echo_cookies(req: Request) -> Result[Response, HttpError] !io =
+  Ok(text(200, unwrap_or(header(req, "Cookie"), "-") ++ "|" ++ join(headers_all(req, "cookie"), ";")))
 
 test "body_length: -1 for no body, exact bytes for text/binary, 0 (chunked) for streams" {
   assert body_length(200, Empty) == -1
@@ -626,4 +723,82 @@ test "write_response pumps an upstream stream to the client byte-exact (>8KB, mu
   assert got == payload
   up.stop(0)
   dn.stop(0)
+}
+
+test "raw path split: interior empties stay, lead and one trailing drop" {
+  assert raw_segs("/a//b") == ["a", "", "b"]
+  assert raw_segs("/a/b/") == ["a", "b"]
+  assert raw_segs("/health") == ["health"]
+  assert raw_segs("/") == []
+}
+
+test "path segments decode individually, with path (not form) semantics" {
+  assert decode_path_seg("a%2Fb") == "a/b"
+  assert decode_path_seg("%E4%B8%AD%E6%96%87") == "中文"
+  # '+' is a literal plus in a path, not a space
+  assert decode_path_seg("c++") == "c++"
+  # a malformed escape leaves the segment as written
+  assert decode_path_seg("%zz") == "%zz"
+}
+
+test "dot segment detection covers raw and encoded spellings" {
+  assert has_dot_segment("/a/../b")
+  assert has_dot_segment("/a/./b")
+  assert has_dot_segment("/%2e%2e/b")
+  assert has_dot_segment("/a/%2E")
+  assert not has_dot_segment("/a/b")
+  # dots inside a segment are data, not navigation
+  assert not has_dot_segment("/a..b/c")
+  assert not has_dot_segment("/...")
+}
+
+test "%2F stays inside its segment: /files/a%2Fb reaches /files/{name} as a/b" {
+  let routes = [route_get("/files/{name}", echo_name), route_get("/a/b", hello_handler)]
+  let srv = HttpServer.create(InetSocketAddress.new("127.0.0.1", 0), 0)!
+  srv.createContext("/", ex => handle(routes, [], DEFAULT_MAX_BODY, ex))
+  srv.start()
+  let base = "http://127.0.0.1:${srv.getAddress()!.getPort()}"
+  # the old decoded-path dispatch saw /files/a/b here: three segments, a 404
+  let (st, body) = test_fetch_bytes(base ++ "/files/a%2Fb")
+  assert st == 200
+  assert body == bytes.utf8("a/b")
+  # an ordinary encoded segment still decodes into its capture
+  let (st2, b2) = test_fetch_bytes(base ++ "/files/%E4%B8%AD%E6%96%87")
+  assert st2 == 200
+  assert b2 == bytes.utf8("中文")
+  # a duplicate slash is a real (empty) segment: /a//b is not /a/b
+  let (st3, _) = test_fetch_bytes(base ++ "/a//b")
+  assert st3 == 404
+  srv.stop(0)
+}
+
+test "dot segments are 400 before routing, on routed and unrouted paths alike" {
+  let routes = [route_get("/b", hello_handler)]
+  let srv = HttpServer.create(InetSocketAddress.new("127.0.0.1", 0), 0)!
+  srv.createContext("/", ex => handle(routes, [], DEFAULT_MAX_BODY, ex))
+  srv.start()
+  let port = srv.getAddress()!.getPort()
+  # would normalize to the routed /b — refused instead, which proves the check
+  # sits before routing (a normalizer would 200, plain routing would 404)
+  assert str.starts_with(raw_http(port, get_line("/a/../b")), "HTTP/1.1 400")
+  # the encoded spelling is the classic normalization bypass
+  assert str.starts_with(raw_http(port, get_line("/%2e%2e/b")), "HTTP/1.1 400")
+  assert str.starts_with(raw_http(port, get_line("/a/./b")), "HTTP/1.1 400")
+  # a path no route matches is still refused with 400, not 404
+  assert str.starts_with(raw_http(port, get_line("/zzz/../q")), "HTTP/1.1 400")
+  # sanity: the clean path still routes
+  assert str.starts_with(raw_http(port, get_line("/b")), "HTTP/1.1 200")
+  srv.stop(0)
+}
+
+test "two Cookie headers both arrive: header() the first, headers_all both" {
+  let routes = [route_get("/c", echo_cookies)]
+  let srv = HttpServer.create(InetSocketAddress.new("127.0.0.1", 0), 0)!
+  srv.createContext("/", ex => handle(routes, [], DEFAULT_MAX_BODY, ex))
+  srv.start()
+  let resp = raw_http(srv.getAddress()!.getPort(),
+    "GET /c HTTP/1.1\r\nHost: t\r\nCookie: a=1\r\nCookie: b=2\r\nConnection: close\r\n\r\n")
+  assert str.starts_with(resp, "HTTP/1.1 200")
+  assert str.contains(resp, "a=1|a=1;b=2")
+  srv.stop(0)
 }

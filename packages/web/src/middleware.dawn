@@ -111,9 +111,9 @@ fn cors_headers(origin: Option[String], r: Response) -> Response = {
 
 # A bare request with the given method and headers; the fields these middleware
 # never read stay empty.
-fn req_of(method: String, headers: Map[String, String]) -> Request =
+fn req_of(method: String, headers: Map[String, List[String]]) -> Request =
   Request {
-    method: method, path: "/x", params: map.empty(), query: map.empty(),
+    method: method, path: "/x", raw_path: "/x", params: map.empty(), query: map.empty(),
     headers: headers, body: "", raw: bytes.utf8(""), body_file: None, route: None,
   }
 
@@ -121,7 +121,7 @@ fn ok_handler(_req: Request) -> Result[Response, HttpError] !io = Ok(text(200, "
 
 test "CORS sends no Allow-Origin to an origin that is not allow-listed" {
   let app = with_cors("https://a.example, https://b.example", ok_handler)
-  let denied = app(req_of("GET", map.from([("origin", "https://evil.example")])))
+  let denied = app(req_of("GET", map.from([("origin", ["https://evil.example"])])))
   match denied {
     Ok(r) -> {
       # it used to answer with the *first configured* origin, which a shared
@@ -140,7 +140,7 @@ test "CORS sends no Allow-Origin to an origin that is not allow-listed" {
 
 test "CORS echoes an allow-listed origin, and always varies on Origin" {
   let app = with_cors("https://a.example, https://b.example", ok_handler)
-  match app(req_of("GET", map.from([("origin", "https://b.example")]))) {
+  match app(req_of("GET", map.from([("origin", ["https://b.example"])]))) {
     Ok(r) -> {
       assert list.find(r.headers, h => h == ("Access-Control-Allow-Origin", "https://b.example")) != None
       assert list.find(r.headers, h => h == ("Access-Control-Allow-Credentials", "true")) != None
