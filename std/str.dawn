@@ -314,3 +314,237 @@ impl Iter[String] {
   fn iter_next(s: String, c: Cursor) -> Cursor = cursor.next(s, c)
   fn iter_get(s: String, c: Cursor) -> String = cursor.slice(s, c, cursor.next(s, c))
 }
+
+# ---- tests ----
+#
+# Behaviour, not implementation: every assertion below is a promise one of the
+# doc comments above makes, and the ones about code points are made twice --
+# once with a BMP character and once with an astral one. `中` is a single
+# UTF-16 unit, so a walk written in units agrees with a walk written in code
+# points about it and the test says nothing; `😀` (U+1F600) is a surrogate
+# pair, and it is the character that tells the two apart.
+
+test "len and is_empty count code points, not UTF-16 units" {
+  assert len("") == 0
+  assert is_empty("")
+  assert not is_empty(" ")
+  assert len("abc") == 3
+  assert len("中文字") == 3
+  assert len("😀") == 1
+  assert len("a中😀z") == 4
+}
+
+test "the affix predicates ask about the ends, and the empty affix is at both" {
+  assert starts_with("abcdef", "abc")
+  assert starts_with("abc", "abc")
+  assert starts_with("abc", "")
+  assert not starts_with("abcdef", "bcd")
+  assert not starts_with("ab", "abc")
+  assert ends_with("abcdef", "def")
+  assert ends_with("abc", "abc")
+  assert ends_with("abc", "")
+  assert not ends_with("abcdef", "cde")
+  assert not ends_with("ab", "abc")
+  assert starts_with("", "")
+  assert ends_with("", "")
+  assert not starts_with("", "a")
+  assert not ends_with("", "a")
+  # the walk back is by character, not by unit: half a surrogate pair is not
+  # a suffix of anything
+  assert ends_with("a😀", "😀")
+  assert not ends_with("a😀", "a")
+  assert starts_with("😀a", "😀")
+}
+
+test "strip_prefix and strip_suffix peel, or answer None" {
+  assert strip_prefix("dawn.lang", "dawn.").unwrap_or("!") == "lang"
+  assert strip_prefix("abc", "").unwrap_or("!") == "abc"
+  assert strip_prefix("abc", "abc").unwrap_or("!") == ""
+  assert strip_prefix("dawn.lang", "lang") == None
+  assert strip_prefix("ab", "abc") == None
+  assert strip_suffix("main.dawn", ".dawn").unwrap_or("!") == "main"
+  assert strip_suffix("abc", "").unwrap_or("!") == "abc"
+  assert strip_suffix("abc", "abc").unwrap_or("!") == ""
+  assert strip_suffix("main.dawn", ".x") == None
+  assert strip_suffix("ab", "abc") == None
+  assert strip_prefix("😀ok", "😀").unwrap_or("!") == "ok"
+  assert strip_suffix("ok😀", "😀").unwrap_or("!") == "ok"
+}
+
+test "index_of and last_index_of answer in code points, and find the empty string" {
+  assert index_of("abcabc", "b").unwrap_or(0 - 1) == 1
+  assert last_index_of("abcabc", "b").unwrap_or(0 - 1) == 4
+  assert index_of("abc", "abc").unwrap_or(0 - 1) == 0
+  assert index_of("abc", "z") == None
+  assert last_index_of("abc", "z") == None
+  # an empty needle is at the start, and last is at the end -- which is len,
+  # a position no character occupies
+  assert index_of("abc", "").unwrap_or(0 - 1) == 0
+  assert last_index_of("abc", "").unwrap_or(0 - 1) == 3
+  assert index_of("", "").unwrap_or(0 - 1) == 0
+  assert index_of("", "a") == None
+  # a code-point index, so the astral character before the needle counts once
+  assert index_of("😀x", "x").unwrap_or(0 - 1) == 1
+  assert last_index_of("x😀x", "x").unwrap_or(0 - 1) == 2
+  assert contains("abcdef", "cd")
+  assert contains("abc", "")
+  assert not contains("abc", "cb")
+}
+
+test "split yields one more piece than there were separators" {
+  assert join(split("a,b,c", ","), "|") == "a|b|c"
+  # a separator that is not there leaves one piece, which is the whole string
+  assert join(split("abc", ","), "|") == "abc"
+  # adjacent, leading and trailing separators each yield an empty piece
+  assert join(split("a,,b", ","), "|") == "a||b"
+  assert join(split(",a,", ","), "|") == "|a|"
+  assert join(split(",", ","), "|") == "|"
+  assert join(split("", ","), "|") == ""
+  # a multi-character separator matches as a whole, and overlapping runs of it
+  # are consumed left to right without backtracking
+  assert join(split("a--b---c", "--"), "|") == "a|b|-c"
+  # the empty separator is `chars`
+  assert join(split("a中😀", ""), "|") == "a|中|😀"
+  assert join(split("", ""), "|") == ""
+}
+
+test "replace is split then join, and an empty needle splices between characters" {
+  assert replace("a,b,c", ",", ";") == "a;b;c"
+  assert replace("aaa", "a", "bb") == "bbbbbb"
+  assert replace("abc", "z", "!") == "abc"
+  assert replace("a,b", ",", "") == "ab"
+  assert replace("", "a", "b") == ""
+  # non-overlapping, left to right: the second `aa` starts after the first ends
+  assert replace("aaaa", "aa", "x") == "xx"
+  assert replace("aaa", "aa", "x") == "xa"
+  assert replace("ab", "", "-") == "a-b"
+}
+
+test "substring, take and drop clamp their ends instead of panicking" {
+  assert substring("abcdef", 1, 4) == "bcd"
+  assert substring("abcdef", 0, 6) == "abcdef"
+  assert substring("abcdef", 4, 1) == ""
+  assert substring("abcdef", 3, 3) == ""
+  assert substring("abcdef", 0 - 5, 2) == "ab"
+  assert substring("abcdef", 4, 99) == "ef"
+  assert substring("abcdef", 99, 200) == ""
+  assert substring("", 0, 5) == ""
+  assert take("abcdef", 2) == "ab"
+  assert take("abcdef", 0) == ""
+  assert take("abcdef", 99) == "abcdef"
+  assert take("abcdef", 0 - 1) == ""
+  assert drop("abcdef", 2) == "cdef"
+  assert drop("abcdef", 0) == "abcdef"
+  assert drop("abcdef", 99) == ""
+  assert drop("abcdef", 0 - 1) == "abcdef"
+  # the cut is between characters: an astral one is never halved
+  assert take("a😀z", 2) == "a😀"
+  assert drop("a😀z", 1) == "😀z"
+  assert substring("a😀z", 1, 2) == "😀"
+}
+
+test "at asserts the index exists -- it is the one that panics" {
+  assert at("abc", 0) == 97
+  assert at("abc", 2) == 99
+  assert at("😀", 0) == 0x1F600
+  assert at("a😀z", 2) == 122
+  # spec 4.8 criterion 1: `i` is a position the caller says exists, so a miss
+  # is a broken invariant and not a branch. `substring`/`take`/`drop` above are
+  # criterion 3 and clamp; this one does not, and that difference is the pin.
+  match catch_panic(() => at("abc", 3)) {
+    Ok(_) -> { assert false }
+    Err(_) -> ()
+  }
+  match catch_panic(() => at("abc", 0 - 1)) {
+    Ok(_) -> { assert false }
+    Err(_) -> ()
+  }
+  match catch_panic(() => at("", 0)) {
+    Ok(_) -> { assert false }
+    Err(_) -> ()
+  }
+}
+
+test "pad_start and pad_end land exactly on width, or hand the string back" {
+  assert pad_start("7", 3, "0") == "007"
+  assert pad_end("7", 3, "0") == "700"
+  # already wide enough, and wider than asked: unchanged, never truncated
+  assert pad_start("abcd", 4, "0") == "abcd"
+  assert pad_start("abcd", 2, "0") == "abcd"
+  assert pad_end("abcd", 2, "0") == "abcd"
+  # an empty filler cannot reach the width, so it hands the string back
+  assert pad_start("ab", 8, "") == "ab"
+  assert pad_end("ab", 8, "") == "ab"
+  assert pad_start("", 3, "x") == "xxx"
+  # a multi-character filler cycles and is cut mid-cycle to hit the width
+  assert pad_start("x", 6, "ab") == "ababax"
+  assert pad_end("x", 6, "ab") == "xababa"
+  assert pad_start("x", 4, "ab") == "abax"
+  # width is in code points, so an astral filler counts one per character
+  assert pad_start("x", 3, "😀") == "😀😀x"
+  assert len(pad_start("x", 3, "😀")) == 3
+}
+
+test "trim removes whitespace at the ends and nothing in the middle" {
+  assert trim("  ab  ") == "ab"
+  assert trim_start("  ab  ") == "ab  "
+  assert trim_end("  ab  ") == "  ab"
+  assert trim("ab") == "ab"
+  assert trim("") == ""
+  assert trim("   ") == ""
+  assert trim_start("   ") == ""
+  assert trim_end("   ") == ""
+  assert trim(" a b ") == "a b"
+  assert trim("\t\n ab \r\n") == "ab"
+  # not whitespace: an astral character at either end survives
+  assert trim(" 😀 ") == "😀"
+}
+
+test "case mapping is simple and 1:1 -- the code-point count never moves" {
+  assert to_lower("ABC") == "abc"
+  assert to_upper("abc") == "ABC"
+  assert to_lower("AbC1!") == "abc1!"
+  assert to_upper("") == ""
+  # the documented refusal: full mapping would make this "SS", and full
+  # mapping is locale- and context-sensitive, so it is not this function
+  assert to_upper("ß") == "ß"
+  assert len(to_upper("ß")) == 1
+  # a script without case passes through
+  assert to_upper("中文") == "中文"
+  assert to_lower("中文") == "中文"
+  assert to_upper("😀") == "😀"
+}
+
+test "chars, reverse and repeat keep a surrogate pair whole" {
+  assert join(chars("abc"), "|") == "a|b|c"
+  assert join(chars(""), "|") == ""
+  assert join(chars("a中😀"), "|") == "a|中|😀"
+  assert reverse("abc") == "cba"
+  assert reverse("") == ""
+  assert reverse("a") == "a"
+  # reversed by character: the pair moves as one, and is still one character
+  assert len(reverse("a😀z")) == 3
+  assert reverse("a😀z") == "z😀a"
+  assert repeat("ab", 3) == "ababab"
+  assert repeat("ab", 1) == "ab"
+  assert repeat("ab", 0) == ""
+  assert repeat("ab", 0 - 2) == ""
+  assert repeat("", 5) == ""
+  assert from_char(0x1F600) == "😀"
+  assert from_char(97) == "a"
+  assert at(from_char(0x4E2D), 0) == 0x4E2D
+}
+
+test "for over a String walks it one code point at a time" {
+  var seen = ""
+  var n = 0
+  for ch in "a中😀" {
+    seen = seen ++ "[" ++ ch ++ "]"
+    n = n + 1
+  }
+  assert n == 3
+  assert seen == "[a][中][😀]"
+  var empty = 0
+  for _ch in "" { empty = empty + 1 }
+  assert empty == 0
+}
