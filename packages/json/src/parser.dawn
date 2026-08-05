@@ -13,6 +13,8 @@ use std/cursor.{Cursor}
 use lexer.{peek, skip_ws, is_digit, scan_string, scan_number, err_at}
 use value.{Json, JNull, JBool, JNum, JInt, JStr, JArr, JObj}
 
+## How deeply arrays and objects may nest before `parse` gives up. Deeper input
+## is a plain error, not a blown stack.
 pub const MAX_DEPTH: Int = 512
 
 # true when the number literal is an integer (no fraction, no exponent)
@@ -166,6 +168,10 @@ fn parse_value(src: String, i0: Cursor, depth: Int) -> Result[(Json, Cursor), St
   }
 }
 
+## Parse one complete JSON document (RFC 8259). `Err` carries a message ending
+## in the code-point offset it was noticed at; anything but whitespace after the
+## value is an error. Never panics. An integer literal becomes `JInt`, any other
+## number `JNum`; out-of-range literals are refused rather than rounded.
 pub fn parse(input: String) -> Result[Json, String] = {
   let (v, j) = parse_value(input, cursor.start(input), 0)?
   let k = skip_ws(input, j)

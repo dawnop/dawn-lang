@@ -10,6 +10,10 @@ use std/str
 use std/map
 use types.{Request, Response, HttpError, Handler, RouteMeta, text}
 
+## One route in a table: the HTTP method it answers, the path pattern it matches
+## (literal segments plus `{name}` / trailing `{name*}` captures), the tags
+## middleware read, and the handler to run. Build one with `route_get` and
+## friends, or `route_method_of` for an arbitrary verb.
 pub type Route = {
   method: String,
   pattern: String,
@@ -19,37 +23,42 @@ pub type Route = {
   handler: Handler,
 }
 
+## A GET route for `pattern`, with no tags.
 pub fn route_get(pattern: String, handler: Handler) -> Route =
   Route { method: "GET", pattern: pattern, tags: [], handler: handler }
 
+## A POST route for `pattern`, with no tags.
 pub fn route_post(pattern: String, handler: Handler) -> Route =
   Route { method: "POST", pattern: pattern, tags: [], handler: handler }
 
+## A PUT route for `pattern`, with no tags.
 pub fn route_put(pattern: String, handler: Handler) -> Route =
   Route { method: "PUT", pattern: pattern, tags: [], handler: handler }
 
+## A DELETE route for `pattern`, with no tags.
 pub fn route_delete(pattern: String, handler: Handler) -> Route =
   Route { method: "DELETE", pattern: pattern, tags: [], handler: handler }
 
-# Any HTTP verb (OPTIONS/PROPFIND/MKCOL/MOVE/COPY/LOCK/... for WebDAV). The verb
-# is compared uppercase-exact, same as the sugar constructors above.
+## A route for any HTTP verb (OPTIONS/PROPFIND/MKCOL/MOVE/COPY/LOCK/... for
+## WebDAV), with no tags. The verb is compared uppercase-exact, same as the
+## sugar constructors above.
 pub fn route_method_of(verb: String, pattern: String, handler: Handler) -> Route =
   Route { method: verb, pattern: pattern, tags: [], handler: handler }
 
-# Attach tags to a route (records are immutable — returns a new Route). Tags
-# accumulate, so `tagged(tagged(r, ["a"]), ["b"])` carries both.
+## Attach tags to a route (records are immutable — returns a new Route). Tags
+## accumulate, so `tagged(tagged(r, ["a"]), ["b"])` carries both.
 pub fn tagged(r: Route, tags: List[String]) -> Route =
   Route { ..r, tags: r.tags ++ tags }
 
-# The metadata the server hands middleware for the matched route (no handler,
-# so it can derive Show and travel inside a Request).
+## The metadata the server hands middleware for the matched route (no handler,
+## so it can derive Show and travel inside a Request).
 pub fn route_meta(r: Route) -> RouteMeta =
   RouteMeta { method: r.method, pattern: r.pattern, tags: r.tags }
 
-# The dispatch decision: the matched route plus captured params, no path match at
-# all, or a path that exists but not under this method (404 vs 405). Found carries
-# the whole Route so the server can both execute (route.handler) and expose its
-# metadata to middleware without a second lookup.
+## The dispatch decision: the matched route plus captured params, no path match at
+## all, or a path that exists but not under this method (404 vs 405). Found carries
+## the whole Route so the server can both execute (route.handler) and expose its
+## metadata to middleware without a second lookup.
 pub type Dispatch =
   | Found(route: Route, params: Map[String, String])
   | NoPath
@@ -69,18 +78,18 @@ fn is_tail(seg: String) -> Bool =
 
 fn tail_name(seg: String) -> String = str.substring(seg, 1, str.len(seg) - 2)
 
-# Match one pattern against one path string, split with the legacy
-# empty-dropping rule. The server does not route through this any more — it
-# splits the *raw* path itself and calls match via dispatch_segs (WEB-03).
+## Match one pattern against one path string, split with the legacy
+## empty-dropping rule. The server does not route through this any more — it
+## splits the *raw* path itself and calls match via dispatch_segs (WEB-03).
 pub fn match_path(pattern: String, path: String) -> Option[List[(String, String)]] =
   match_segs(pattern, segs(path))
 
-# Match one pattern against already-split path segments; Some(captures) on
-# success. The caller owns the split — the server hands in raw-split,
-# per-segment-decoded segments, so an encoded slash never minted a boundary
-# here. An interior empty segment is a real segment: a capture accepts it, a
-# literal does not. A trailing `{name*}` captures all remaining segments
-# (possibly empty) as one joined value.
+## Match one pattern against already-split path segments; Some(captures) on
+## success. The caller owns the split — the server hands in raw-split,
+## per-segment-decoded segments, so an encoded slash never minted a boundary
+## here. An interior empty segment is a real segment: a capture accepts it, a
+## literal does not. A trailing `{name*}` captures all remaining segments
+## (possibly empty) as one joined value.
 pub fn match_segs(pattern: String, xs: List[String]) -> Option[List[(String, String)]] = {
   let ps = segs(pattern)
   let n = len(ps)
@@ -263,16 +272,16 @@ pub fn validate_routes(routes: List[Route]) -> Result[Unit, String] = {
   Ok(())
 }
 
-# Pick the route for (method, path string), splitting with the legacy
-# empty-dropping rule — kept for direct callers and tests; the server routes
-# through dispatch_segs.
+## Pick the route for (method, path string), splitting with the legacy
+## empty-dropping rule — kept for direct callers and tests; the server routes
+## through dispatch_segs.
 pub fn dispatch(routes: List[Route], method: String, path: String) -> Dispatch =
   dispatch_segs(routes, method, segs(path))
 
-# Pick the route for (method, segments). First match in table order wins. A
-# HEAD request with no route of its own is served by the GET route (RFC 9110
-# §9.3.2) — the server writes that route's status and headers and suppresses
-# the body (see web/server.write_response). An explicit HEAD route still wins.
+## Pick the route for (method, segments). First match in table order wins. A
+## HEAD request with no route of its own is served by the GET route (RFC 9110
+## §9.3.2) — the server writes that route's status and headers and suppresses
+## the body (see web/server.write_response). An explicit HEAD route still wins.
 pub fn dispatch_segs(routes: List[Route], method: String, xs: List[String]) -> Dispatch = {
   let d = dispatch_from(routes, method, xs, 0, false)
   match d {
