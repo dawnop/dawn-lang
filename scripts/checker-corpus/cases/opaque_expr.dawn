@@ -1,0 +1,32 @@
+# checker.dawn: the declaring module does not see through inside an expression
+#
+# Not a defect: spec 2.7 puts the conversion at the assignability positions --
+# assignment, argument, return -- and nowhere else, so that opacity is one
+# judgement rather than a special case in every rule ("本模块里 `u + 1` 仍是
+# 错的"). A field access and a match scrutinee are expression-internal, so they
+# get the same refusal `+` does, and the way through is the same: bind to the
+# target first, as `bound` does below.
+#
+# This is also why the case is here and not in scripts/opaque-twin: that gate
+# requires the `alias` spelling to produce the same output, and here it
+# deliberately does not.
+pub type Rec = { a: Int }
+
+pub type Sum = A | B(v: Int)
+
+pub opaque type ORec = Rec
+
+pub opaque type OSum = Sum
+
+pub fn field(o: ORec) -> Int = o.a
+
+pub fn scrutinee(o: OSum) -> Int =
+  match o {
+    A -> 0
+    B(v) -> v
+  }
+
+pub fn bound(o: ORec) -> Int = {
+  let r: Rec = o
+  r.a
+}
