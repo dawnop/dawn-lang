@@ -704,7 +704,7 @@ int64_t dawn_cmp_str(dawn_str *a, dawn_str *b) {
 
 int64_t dawn_idiv(int64_t a, int64_t b) {
   if (b == 0) {
-    dawn_panic(dawn_str_lit("/ by zero", 9));
+    dawn_panic(DAWN_LIT("/ by zero"));
   }
   /* INT64_MIN / -1 overflows and is UB in C; the JVM defines it as
    * wrapping back to INT64_MIN. */
@@ -714,7 +714,7 @@ int64_t dawn_idiv(int64_t a, int64_t b) {
 
 int64_t dawn_imod(int64_t a, int64_t b) {
   if (b == 0) {
-    dawn_panic(dawn_str_lit("/ by zero", 9));
+    dawn_panic(DAWN_LIT("/ by zero"));
   }
   if (a == INT64_MIN && b == -1) return 0;
   return a % b;
@@ -931,7 +931,7 @@ static bool dawn_cp_in(int64_t c, const dawn_cp_range *rs, size_t n) {
   /* n == 0 is not an empty set -- no real table is empty. It is the emitter
    * saying nothing reachable reads this one (reach.dawn), so getting here
    * means the pruning was wrong; answer loudly rather than "false". */
-  if (n == 0) dawn_panic(dawn_str_lit("unicode table pruned but reached", 32));
+  if (n == 0) dawn_panic(DAWN_LIT("unicode table pruned but reached"));
   size_t lo = 0, hi = n;
   while (lo < hi) {
     size_t mid = lo + (hi - lo) / 2;
@@ -1012,7 +1012,7 @@ int64_t dawn_array_len(const dawn_array *a) { return (int64_t)a->len; }
  * wild read costs, and native has no verifier to catch it. */
 void *dawn_array_get(const dawn_array *a, int64_t i) {
   if (i < 0 || i >= (int64_t)a->len) {
-    dawn_panic(dawn_str_lit("Array index out of bounds", 24));
+    dawn_panic(DAWN_LIT("Array index out of bounds"));
   }
   return a->buf->data[i];
 }
@@ -1064,7 +1064,7 @@ uint64_t dawn_array_with_copied = 0;
  * version whose slots these are too. */
 dawn_array *dawn_array_with(dawn_array *a, int64_t i, void *x) {
   if (i < 0 || i >= (int64_t)a->len) {
-    dawn_panic(dawn_str_lit("Array index out of bounds", 24));
+    dawn_panic(DAWN_LIT("Array index out of bounds"));
   }
   if (!dawn_rc_leak && dawn_is_unique(a) && dawn_is_unique(a->buf)) {
     dawn_array_with_inplace++;
@@ -1376,7 +1376,7 @@ int64_t dawn_cursor_prev(dawn_str *s, int64_t c) {
 dawn_str *dawn_cursor_slice(dawn_str *s, int64_t from, int64_t to) {
   if (from < 0 || to > s->len || from > to ||
       !dawn_utf8_boundary(s, from) || !dawn_utf8_boundary(s, to)) {
-    dawn_panic(dawn_str_lit("cursor_slice: invalid cursor range", 34));
+    dawn_panic(DAWN_LIT("cursor_slice: invalid cursor range"));
   }
   return dawn_str_copy(s->p + from, to - from);
 }
@@ -1419,7 +1419,7 @@ static dawn_str *dawn_case(dawn_str *s, bool up) {
   size_t rn = (size_t)(up ? dawn_upper_ranges_n : dawn_lower_ranges_n);
   /* same contract as dawn_cp_in: a zero-length table is the emitter's claim
    * that this call cannot run (reach.dawn), not a mapping with no rows */
-  if (rn == 0) dawn_panic(dawn_str_lit("unicode table pruned but reached", 32));
+  if (rn == 0) dawn_panic(DAWN_LIT("unicode table pruned but reached"));
   int64_t out = 0;
   for (int64_t i = 0; i < s->len;) {
     int64_t n;
@@ -1494,7 +1494,7 @@ dawn_str *dawn_from_code_points(dawn_array *cps) {
   for (int64_t i = 0; i < n; i++) {
     int64_t cp = ((dawn_box *)dawn_array_get(cps, i))->val.i;
     if (cp < 0 || cp > 0x10FFFF) {
-      dawn_panic(dawn_str_lit("from_code_points: not a valid code point", 39));
+      dawn_panic(DAWN_LIT("from_code_points: not a valid code point"));
     }
     at += dawn_utf8_put(buf + at, (uint32_t)cp);
   }
@@ -1762,11 +1762,11 @@ dawn_unit dawn_io_mkdirs(dawn_str *path) {
     if (stat(p, &st) == 0) {
       if (!S_ISDIR(st.st_mode)) {
         free(p);
-        dawn_fault(dawn_str_lit("io_mkdirs: path exists and is not a directory", 44));
+        dawn_fault(DAWN_LIT("io_mkdirs: path exists and is not a directory"));
       }
     } else if (mkdir(p, 0777) != 0) {
       free(p);
-      dawn_fault(dawn_str_lit("io_mkdirs: cannot create directory", 34));
+      dawn_fault(DAWN_LIT("io_mkdirs: cannot create directory"));
     }
     p[i] = saved;
   }
@@ -1779,14 +1779,14 @@ dawn_str *dawn_io_read_file(dawn_str *path) {
   FILE *f = fopen(p, "rb");
   free(p);
   if (f == NULL) {
-    dawn_fault(dawn_str_lit("io_read_file: cannot open file", 30));
+    dawn_fault(DAWN_LIT("io_read_file: cannot open file"));
   }
   size_t n = 0;
   bool bad = false;
   unsigned char *buf = dawn_slurp(f, &n, &bad);
   fclose(f);
   if (bad) {
-    dawn_fault(dawn_str_lit("io_read_file: read failed", 25));
+    dawn_fault(DAWN_LIT("io_read_file: read failed"));
   }
   /* The one reader that refuses. `Files.readString` decodes with
    * `CodingErrorAction.REPORT` and throws a `MalformedInputException`, so a
@@ -1801,7 +1801,7 @@ dawn_str *dawn_io_read_file(dawn_str *path) {
    * `io_mkdirs`. */
   if (!dawn_utf8_valid(buf, (int64_t)n)) {
     free(buf);
-    dawn_fault(dawn_str_lit("io_read_file: malformed UTF-8", 29));
+    dawn_fault(DAWN_LIT("io_read_file: malformed UTF-8"));
   }
   dawn_str *s = dawn_str_copy((const char *)buf, (int64_t)n);
   free(buf);
@@ -1814,13 +1814,13 @@ dawn_unit dawn_io_write_file(dawn_str *path, dawn_str *content) {
   FILE *f = fopen(p, "wb");
   free(p);
   if (f == NULL) {
-    dawn_fault(dawn_str_lit("io_write_file: cannot open file", 31));
+    dawn_fault(DAWN_LIT("io_write_file: cannot open file"));
   }
   bool bad = content->len > 0 &&
              fwrite(content->p, 1, (size_t)content->len, f) != (size_t)content->len;
   if (fclose(f) != 0) bad = true;
   if (bad) {
-    dawn_fault(dawn_str_lit("io_write_file: write failed", 27));
+    dawn_fault(DAWN_LIT("io_write_file: write failed"));
   }
   return DAWN_UNIT;
 }
@@ -1830,7 +1830,7 @@ dawn_array *dawn_io_list_names(dawn_str *path) {
   DIR *d = opendir(p);
   free(p);
   if (d == NULL) {
-    dawn_fault(dawn_str_lit("io_list_names: cannot open directory", 36));
+    dawn_fault(DAWN_LIT("io_list_names: cannot open directory"));
   }
   /* readdir order, deliberately: the intrinsic's order is unspecified, and
    * std/io's list_dir sorts (code-point order) so every backend agrees. */
@@ -1858,7 +1858,7 @@ dawn_str *dawn_io_cwd(void) {
     }
     free(buf);
     if (errno != ERANGE) {
-      dawn_fault(dawn_str_lit("io_cwd: cannot read the working directory", 40));
+      dawn_fault(DAWN_LIT("io_cwd: cannot read the working directory"));
     }
     cap *= 2;
   }
@@ -1877,14 +1877,14 @@ dawn_bytes *dawn_io_read_bytes(dawn_str *path) {
   FILE *f = fopen(p, "rb");
   free(p);
   if (f == NULL) {
-    dawn_fault(dawn_str_lit("io_read_bytes: cannot open file", 31));
+    dawn_fault(DAWN_LIT("io_read_bytes: cannot open file"));
   }
   size_t n = 0;
   bool bad = false;
   unsigned char *buf = dawn_slurp(f, &n, &bad);
   fclose(f);
   if (bad) {
-    dawn_fault(dawn_str_lit("io_read_bytes: read failed", 26));
+    dawn_fault(DAWN_LIT("io_read_bytes: read failed"));
   }
   return dawn_bytes_of(buf, (int64_t)n);
 }
@@ -1895,13 +1895,13 @@ dawn_unit dawn_io_write_bytes(dawn_str *path, const dawn_bytes *content) {
   FILE *f = fopen(p, "wb");
   free(p);
   if (f == NULL) {
-    dawn_fault(dawn_str_lit("io_write_bytes: cannot open file", 32));
+    dawn_fault(DAWN_LIT("io_write_bytes: cannot open file"));
   }
   bool bad = content->len > 0 &&
              fwrite(content->p, 1, (size_t)content->len, f) != (size_t)content->len;
   if (fclose(f) != 0) bad = true;
   if (bad) {
-    dawn_fault(dawn_str_lit("io_write_bytes: write failed", 28));
+    dawn_fault(DAWN_LIT("io_write_bytes: write failed"));
   }
   return DAWN_UNIT;
 }
@@ -1922,7 +1922,7 @@ dawn_unit dawn_io_rename(dawn_str *src, dawn_str *dst) {
   free(a);
   free(b);
   if (bad) {
-    dawn_fault(dawn_str_lit("io_rename: cannot rename (not one filesystem?)", 45));
+    dawn_fault(DAWN_LIT("io_rename: cannot rename (not one filesystem?)"));
   }
   return DAWN_UNIT;
 }
@@ -1949,7 +1949,7 @@ dawn_str *dawn_io_temp_dir(dawn_str *parent, dawn_str *prefix) {
   free(pbuf);
   if (mkdtemp(tmpl) == NULL) {
     free(tmpl);
-    dawn_fault(dawn_str_lit("io_temp_dir: cannot create a temporary directory", 47));
+    dawn_fault(DAWN_LIT("io_temp_dir: cannot create a temporary directory"));
   }
   /* `prefix` was already a string, but the base may be `$TMPDIR` */
   dawn_str *s = dawn_str_from_os(tmpl, (int64_t)strlen(tmpl));
@@ -2037,7 +2037,7 @@ extern char **environ;
 int64_t dawn_io_run(dawn_array *argv, dawn_str *out_path, dawn_str *err_path) {
   int64_t n = dawn_array_len(argv);
   if (n <= 0) {
-    dawn_fault(dawn_str_lit("io_run: argv is empty", 21));
+    dawn_fault(DAWN_LIT("io_run: argv is empty"));
   }
   char **args = (char **)dawn_alloc(sizeof(char *) * (size_t)(n + 1));
   for (int64_t i = 0; i < n; i++) {
@@ -2065,12 +2065,12 @@ int64_t dawn_io_run(dawn_array *argv, dawn_str *out_path, dawn_str *err_path) {
   for (int64_t i = 0; i < n; i++) free(args[i]);
   free(args);
   if (rc != 0) {
-    dawn_fault(dawn_str_lit("io_run: cannot start the program", 32));
+    dawn_fault(DAWN_LIT("io_run: cannot start the program"));
   }
   int status = 0;
   while (waitpid(pid, &status, 0) < 0) {
     if (errno != EINTR) {
-      dawn_fault(dawn_str_lit("io_run: waiting for the child failed", 36));
+      dawn_fault(DAWN_LIT("io_run: waiting for the child failed"));
     }
   }
   dawn_drop(argv);

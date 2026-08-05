@@ -15,6 +15,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 /* The Unicode tables are `extern` in the runtime and emitted by the compiler
  * alongside the program (emitc's `emit_case_table`). Nothing here touches
@@ -146,6 +147,47 @@ static void test_deep_chain(void) {
   dawn_drop(head);
 }
 
+/* The runtime's own messages, checked whole. `dawn_str` carries an explicit
+ * length and is not NUL-terminated, so a literal whose length was written one
+ * short does not fail -- it truncates, and the only reader is a human staring
+ * at a panic that says "out of bound". Seven of the twenty-six were wrong that
+ * way until DAWN_LIT took the counting away from the author; this pins the
+ * shortest path from a raise to the bytes a program can read back, so a
+ * hand-written length that creeps back in is a failing check and not a typo
+ * nobody sees.
+ *
+ * Reached through `dawn_catch_panic` rather than by reading the literal: the
+ * literal is what the fix changed, and a test that read it would pass on the
+ * definition it is meant to be checking. */
+/* Outside the closure on purpose: a taken unwind path leaks what the
+ * discarded C frames held (see `dawn_bracket`'s header), and LeakSanitizer is
+ * on for this run. The subject is therefore owned by the caller, which still
+ * has a frame after the raise. */
+static dawn_array *panic_subject;
+
+static void *panic_out_of_bounds(dawn_clo *f) {
+  (void)f;
+  return dawn_array_get(panic_subject, 0);
+}
+
+static void test_panic_message(void) {
+  static const char want[] = "Array index out of bounds";
+  panic_subject = dawn_array_new();
+  dawn_clo *c = dawn_clo_new((void *)panic_out_of_bounds, 0, 0);
+  dawn_adt *r = dawn_catch_panic(c);
+  check(r->tag == DAWN_TAG_ERR, "an out-of-bounds read raises a panic");
+  dawn_adt *err = (dawn_adt *)r->fields[0].p;
+  dawn_str *msg = (dawn_str *)err->fields[1].p;
+  check(msg->len == (int64_t)sizeof(want) - 1, "the panic message is not truncated");
+  check(msg->len == (int64_t)sizeof(want) - 1 &&
+            memcmp(msg->p, want, sizeof(want) - 1) == 0,
+        "the panic message is the whole literal");
+  dawn_drop(r);
+  dawn_drop(c);
+  dawn_drop(panic_subject);
+  panic_subject = NULL;
+}
+
 static void test_immortal(void) {
   dawn_adt *a = dawn_adt_new(0, 0, 0);
   a->h.rc = DAWN_IMMORTAL;
@@ -258,6 +300,7 @@ int main(int argc, char **argv) {
     test_array();
     test_array_with();
     test_deep_chain();
+    test_panic_message();
     test_immortal();
     test_immortal_graph();
   }

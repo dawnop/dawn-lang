@@ -85,6 +85,16 @@ typedef struct {
 #define dawn_str_lit(s, n) \
   (&(dawn_str){{DAWN_IMMORTAL, DAWN_K_STR}, (int64_t)(n), (s)})
 
+/* The same thing with the length taken from the literal instead of written
+ * next to it. A `dawn_str` is not NUL-terminated and `len` is authoritative,
+ * so a length one short does not fail: it silently truncates the message, and
+ * the only reader is a human looking at a panic. Seven of the runtime's
+ * twenty-six messages were off by one that way -- among them "Array index out
+ * of bounds" printing as "Array index out of bound" -- which is the whole
+ * argument for not letting a human count bytes. Only for string literals:
+ * `sizeof` on a `const char *` is the pointer's size. */
+#define DAWN_LIT(s) dawn_str_lit((s), sizeof(s) - 1)
+
 extern dawn_str dawn_str_empty_obj;
 #define dawn_str_empty (&dawn_str_empty_obj)
 
