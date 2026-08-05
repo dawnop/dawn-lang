@@ -73,7 +73,24 @@ by hand, with the server reachable.
 
 ```sh
 playground/deploy/redeploy.sh      # build jar, rsync, restart, health-check
+scripts/play-live-check.py         # then verify what is actually deployed
 ```
+
+`redeploy.sh` does **not** install `dawn-play.service`; when that file changes,
+copy it to `/etc/systemd/system/`, `daemon-reload` and restart by hand.
+
+**Order matters when the samples change.** The starter samples in
+`site/play-ui/samples/` are compiled by the deployed runner, so ship the runner
+*before* `site/redeploy.sh`. Backwards, the sidebar offers a program its own
+runner rejects — which is the state the v0.51.0 upgrade had to unwind, the
+runner having sat thirteen days behind the tree with each half self-consistent.
+
+`play-live-check.py` is the check that would have caught it: it runs every
+sample against the deployed `/api/run`, compares stdout byte-for-byte with the
+`.out` beside it, asserts the compiler version in both directions (the retired
+`fn(c) =>` lambda rejected *and* the bare arrow accepted), and confirms the
+bundle nginx serves carries the current spelling. Health checks cannot see any
+of that — the old runner answered `/health` with `ok` the whole time.
 
 ## Rollback
 

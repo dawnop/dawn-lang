@@ -17,6 +17,19 @@ WorkingDirectory=/opt/dawn
 
 # /opt/dawn/bin/dawn is the launcher; it uses JAVA_HOME (apt JRE 21).
 Environment=JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64
+# Heap ceiling for the broker, kept under MemoryMax below. `dawn run` compiles
+# the runner in-process at startup, and bin/dawn's default -Xmx2g is twice that
+# cap on a box with 3.4G total and no swap -- the JVM would aim past the cgroup
+# and be SIGKILLed mid-startup. Measured 2026-08-05: that startup compile peaks
+# at 606 MB RSS, and the runner boots and serves fine at 512m.
+#
+# Quoted because the value contains a space: systemd splits `Environment=` on
+# whitespace, so the unquoted form assigns DAWN_JVM_OPTS=-Xss512m and discards
+# the rest with "Invalid environment assignment, ignoring: -Xmx512m" in the
+# journal. The service starts either way and looks healthy -- the cap is simply
+# absent. (Shipped that way for one restart on 2026-08-05; caught by reading
+# -Xmx off the running process rather than trusting the unit file.)
+Environment="DAWN_JVM_OPTS=-Xss512m -Xmx512m"
 Environment=DAWN_BIN=/opt/dawn/bin/dawn
 Environment=PLAY_JAVA=/usr/bin/java
 Environment=PLAY_PORT=8087

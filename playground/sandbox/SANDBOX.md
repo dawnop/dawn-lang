@@ -39,12 +39,43 @@ dawn-play (unprivileged service user)
 | Privilege          | `NoNewPrivileges`, `CapabilityBoundingSet=` (empty) |
 | Syscalls           | `SystemCallFilter=@system-service` minus privileged |
 | Memory             | `MemoryMax=512M`, `MemorySwapMax=0`                 |
+| Compiler heap      | `DAWN_JVM_OPTS=-Xss512m -Xmx256m` via `--setenv`    |
 | Fork bomb          | `TasksMax=64` (the JVM itself needs a few dozen)    |
 | CPU                | `CPUQuota=200%` (two cores)                          |
 | Wall clock         | `RuntimeMaxSec=15` (a hard backstop over the runner's own `PLAY_TIMEOUT`) |
 
 The runner's `PLAY_TIMEOUT` (default 10s) kills the child first for a clean
 "timeout" response; `RuntimeMaxSec` is the belt-and-braces kill if that fails.
+
+## The environment inside the unit (2026-08-05)
+
+`systemd-run` starts the unit with a **clean environment** — nothing the runner
+exports reaches either phase. Two consequences that are easy to get wrong:
+
+- **`java` is found on systemd's default `PATH`**
+  (`/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/snap/bin`), not through
+  `JAVA_HOME`. On the server that resolves to `/usr/bin/java`, the apt JRE 21.
+  A JDK under `$HOME` cannot work: `ProtectHome=yes` hides it. This is why
+  `bin/dawn`'s `JAVA_HOME` probe is irrelevant here and the launcher falls
+  through to plain `java`.
+- **Heap ceilings must be passed with `--setenv`**, which is what the
+  `DAWN_JVM_OPTS` line above does. Neither thing that looks like a cap is one:
+  `bin/dawn` pins `-Xmx2g` (a build-box default, 4× this unit's `MemoryMax`),
+  and the JVM does **not** see the cgroup — measured on both boxes,
+  `MaxHeapSize` is byte-identical inside and outside a 512M scope despite
+  `UseContainerSupport=true`, so ergonomics aim at a quarter of *host* RAM
+  (6.3 GB on the dev box). Left alone, the compile JVM aims past `MemoryMax`
+  and the kernel SIGKILLs it — contained, but as an opaque kill rather than a
+  diagnostic. At `-Xmx256m` it stays inside and reports an `OutOfMemoryError`
+  the runner can render.
+
+The **run** phase (`java -jar prog.jar`) still gets no explicit `-Xmx`, so the
+user program's JVM aims at ~25% of host RAM and is contained by the cgroup
+rather than by its own ceiling. That is the pre-existing behaviour validated in
+the checklist below (item 3), and it is contained — but ungraceful. Giving it
+its own ceiling means changing the argv the runner builds in `play/exec.dawn`;
+`JAVA_TOOL_OPTIONS` is not an option because `redirectErrorStream(true)` merges
+its "Picked up …" banner into the program's own output.
 
 ## Cross-uid work dir — resolved on first deploy (2026-07-12)
 
@@ -113,3 +144,32 @@ permit even when body panics").
    `.env` / `shadow` / other services' data are not world-readable, and the app
    data dirs are hidden via `InaccessiblePaths`.
 8. Huge output → truncated at 64 KB ✓
+
+### Results — revalidation on the v0.51.0 upgrade (2026-08-05)
+
+The runner had been serving `dawn 0.8.0` since 2026-07-23. Re-checked after the
+jump, because a sandbox is only known to hold for the compiler it was tested
+with:
+
+- **Compatibility**: unchanged. The invocation shape the sandbox depends on —
+  `bin/dawn build <src> -o <jar>`, the work-dir layout, `BindReadOnlyPaths=/opt/dawn`,
+  `java` off the default `PATH` — is the same at v0.51.0, and the jar is still
+  self-contained (no `std/` on disk: std is embedded as a generated module since
+  `b72eabd`). No script change was needed for the upgrade itself; the
+  `DAWN_JVM_OPTS` line above was added because `bin/dawn` started pinning
+  `-Xmx2g`.
+- **`MemoryMax=512M` bites, and bites locally**: `dd` of 300 MiB into the
+  private tmpfs succeeds; 900 MiB is killed with
+  `constraint=CONSTRAINT_MEMCG, oom_memcg=/system.slice/run-uNNNN.service`,
+  and systemd records `Failed with result 'oom-kill'`. The kill is scoped to
+  the transient unit — the blog backend on the same 3.4 GB box stayed `active`
+  and answering 200 throughout, which is the whole point of capping here rather
+  than trusting the host to have room.
+- **Timeout**: an infinite loop still comes back as `phase:"timeout"` (~11 s).
+- **Headroom**: two concurrent `/run`s (the `MAX_CONCURRENT=2` ceiling) moved
+  available memory by ~150 MB, from 2297 MB to 2146 MB. Worst case for the
+  whole Playground is bounded by construction at broker 1 GB + 2 × 512 MB.
+
+`scripts/play-live-check.py` re-runs the functional half of this against a
+deployed instance (samples byte-compared with their `.out`, plus a compiler
+version discriminant in both directions).
