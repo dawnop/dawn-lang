@@ -286,7 +286,7 @@ fn has_dot_segment(raw_path: String) -> Bool !io = {
 pub fn parse_query(q: String) -> List[(String, String)] !io =
   map(filter(str.split(q, "&"), pair => pair != ""), pair => {
     let parts = str.split(pair, "=")
-    (pct_decode(parts[0]), pct_decode(join(tail(parts), "=")))
+    (pct_decode(parts[0]), pct_decode(join_with(tail(parts), "=")))
   })
 
 # Parse an application/x-www-form-urlencoded body into a map. Same grammar and
@@ -297,6 +297,16 @@ pub fn parse_form(body: String) -> Map[String, String] !io = map.from(parse_quer
 
 fn tail(xs: List[String]) -> List[String] =
   map(range(1, len(xs)), i => xs[i])
+
+# The prelude's join, reimplemented: the public `join(handle)` below shadows
+# the builtin module-wide (there is no qualified spelling for a prelude name),
+# so the module's own string-joining goes through this.
+fn join_with(xs: List[String], sep: String) -> String =
+  if len(xs) == 0 {
+    ""
+  } else {
+    fold(tail(xs), xs[0], (acc, s) => acc ++ sep ++ s)
+  }
 
 fn rev[T](xs: List[T]) -> List[T] =
   map(range(0, len(xs)), i => xs[len(xs) - 1 - i])
@@ -461,29 +471,62 @@ fn handle(routes: List[Route], middleware: List[Middleware], max_body: Int, ex: 
 # tag (those never touch the heap at all).
 pub const DEFAULT_MAX_BODY: Int = 8388608
 
-# Start on 127.0.0.1:port and block forever (main() returning would let the
-# JVM exit out from under the request threads).
-pub fn serve_app(port: Int, routes: List[Route], middleware: List[Middleware]) -> Unit !io =
-  serve_app_bounded(port, DEFAULT_MAX_BODY, routes, middleware)
+# ---- server lifecycle (WEB-10) ----
 
-# Same, with the in-memory body ceiling chosen explicitly (0 = unbounded, which
-# is what this framework did before the ceiling existed).
-pub fn serve_app_bounded(port: Int, max_body: Int, routes: List[Route], middleware: List[Middleware]) -> Unit !io = {
+## Where the server listens and the in-memory body ceiling its requests get.
+## port 0 asks the OS for a free port; the ServerHandle reports the one
+## actually bound.
+pub type ServerConfig = { host: String, port: Int, max_body: Int }
+
+## A running server. `port` is the real bound port — the point of port 0.
+## `done` is what lets join/stop compose over jdk.httpserver, which has a stop
+## but no join: join awaits the latch, stop opens it after stopping the JDK
+## server. (The design sketched the handle as server + port only; without the
+## latch there is nothing for join to block on.)
+pub type ServerHandle = { server: HttpServer, port: Int, done: CountDownLatch }
+
+# Bind cfg.host:cfg.port, serve requests on virtual threads, and return
+# immediately with the handle. The caller decides what the rest of the
+# program does — join() for the classic block-forever server, stop() from
+# wherever shutdown is decided.
+pub fn start(cfg: ServerConfig, routes: List[Route], middleware: List[Middleware]) -> ServerHandle !io = {
   # WEB-09: a broken table fails here, at startup, with the two routes named —
   # not at runtime as a silent 404 on the route its author believes exists
   match validate_routes(routes) {
     Err(e) -> panic("route table: " ++ e)
     Ok(_) -> ()
   }
-  let addr = InetSocketAddress.new("127.0.0.1", port)
+  let addr = InetSocketAddress.new(cfg.host, cfg.port)
   let server = HttpServer.create(addr, 0)!
-  server.createContext("/", ex => handle(routes, middleware, max_body, ex))
+  server.createContext("/", ex => handle(routes, middleware, cfg.max_body, ex))
   server.setExecutor(Executors.newVirtualThreadPerTaskExecutor()!)
   server.start()
-  println("listening on http://127.0.0.1:$port")
-  let latch = CountDownLatch.new(1)
-  latch.await()
+  let bound = server.getAddress()!.getPort()
+  println("listening on http://${cfg.host}:$bound")
+  ServerHandle { server: server, port: bound, done: CountDownLatch.new(1) }
 }
+
+## Block until stop() releases this handle. A server's main() usually ends
+## here — returning would let the JVM exit out from under the request threads.
+pub fn join(h: ServerHandle) -> Unit !io = h.done.await()
+
+## Stop the server: the listening socket closes at once, in-flight exchanges
+## get up to grace_secs to finish (the JDK's stop blocks for that), and then
+## every join() blocked on this handle returns.
+pub fn stop(h: ServerHandle, grace_secs: Int) -> Unit !io = {
+  h.server.stop(grace_secs)
+  h.done.countDown()
+}
+
+# The old shape, kept: start + join on 127.0.0.1. Most programs want exactly
+# this.
+pub fn serve_app(port: Int, routes: List[Route], middleware: List[Middleware]) -> Unit !io =
+  serve_app_bounded(port, DEFAULT_MAX_BODY, routes, middleware)
+
+# Same, with the in-memory body ceiling chosen explicitly (0 = unbounded, which
+# is what this framework did before the ceiling existed).
+pub fn serve_app_bounded(port: Int, max_body: Int, routes: List[Route], middleware: List[Middleware]) -> Unit !io =
+  join(start(ServerConfig { host: "127.0.0.1", port: port, max_body: max_body }, routes, middleware))
 
 test "query strings parse, including empty and embedded =" {
   assert parse_query("a=1&b=x") == [("a", "1"), ("b", "x")]
@@ -606,7 +649,7 @@ fn echo_name(req: Request) -> Result[Response, HttpError] !io =
   }
 
 fn echo_cookies(req: Request) -> Result[Response, HttpError] !io =
-  Ok(text(200, unwrap_or(header(req, "Cookie"), "-") ++ "|" ++ join(headers_all(req, "cookie"), ";")))
+  Ok(text(200, unwrap_or(header(req, "Cookie"), "-") ++ "|" ++ join_with(headers_all(req, "cookie"), ";")))
 
 test "body_length: -1 for no body, exact bytes for text/binary, 0 (chunked) for streams" {
   assert body_length(200, Empty) == -1
@@ -699,7 +742,7 @@ test "write_response pumps an upstream stream to the client byte-exact (>8KB, mu
   # The full realistic path: upstream HTTP -> ofInputStream + cast -> streaming() ->
   # write_response's stream branch -> transferTo pumps the InputStream to the socket
   # -> close. 12000 bytes forces transferTo's 8KB buffer across more than one chunk.
-  let payload = bytes.utf8(join(map(range(0, 1200), i => "0123456789"), ""))
+  let payload = bytes.utf8(join_with(map(range(0, 1200), i => "0123456789"), ""))
   # upstream: serves the payload
   let up = HttpServer.create(InetSocketAddress.new("127.0.0.1", 0), 0)!
   up.createContext("/", ex => {
@@ -801,4 +844,38 @@ test "two Cookie headers both arrive: header() the first, headers_all both" {
   assert str.starts_with(resp, "HTTP/1.1 200")
   assert str.contains(resp, "a=1|a=1;b=2")
   srv.stop(0)
+}
+
+test "lifecycle: port 0 binds a real port, serves, and join returns after stop" {
+  let cfg = ServerConfig { host: "127.0.0.1", port: 0, max_body: DEFAULT_MAX_BODY }
+  let h = start(cfg, [route_get("/hello", hello_handler)], [])
+  # the OS picked the port; the handle reports the real one, and it works
+  assert h.port > 0
+  let (st, body) = test_fetch_bytes("http://127.0.0.1:${h.port}/hello")
+  assert st == 200
+  assert body == bytes.utf8("hello")
+  stop(h, 0)
+  # stop released the latch: join returns instead of blocking forever
+  join(h)
+  # and the listener really closed — a fresh connection is refused
+  match catch_fault(() => Socket.new("127.0.0.1", h.port)) {
+    Ok(s) -> {
+      s.close()
+      assert false
+    }
+    Err(_) -> ()
+  }
+}
+
+test "start refuses a broken route table before binding a socket" {
+  let cfg = ServerConfig { host: "127.0.0.1", port: 0, max_body: DEFAULT_MAX_BODY }
+  let r = catch_panic(() => start(cfg, [route_get("/a/{unclosed", hello_handler)], []))
+  match r {
+    Ok(_) -> {
+      assert false
+    }
+    Err(m) -> {
+      assert str.contains(m.message, "route table")
+    }
+  }
 }
