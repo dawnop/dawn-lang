@@ -1,5 +1,26 @@
-// Curated starter programs, shown as "files" in the explorer sidebar. Each
-// must compile and run as-is under `dawn run`.
+// Curated starter programs, shown as "files" in the explorer sidebar.
+//
+// The code lives in ../samples/*.dawn, as real files, and is inlined here at
+// build time by Vite's `?raw`. That is the point of the arrangement rather than
+// a detail of it: these programs used to be TypeScript template literals, and a
+// template literal is invisible to every tool that finds Dawn by looking for
+// `.dawn`. The `fn`-prefixed lambda retired in v0.43.0 was migrated at ~323 call
+// sites and missed here, so the sidebar shipped a program the compiler had
+// rejected for eight releases -- caught in 2026-08-05 by hand, not by a gate.
+// As files they are reached by `dawn fmt site --check` and by doc-check's
+// samples check, which runs each one and compares stdout with the recorded
+// .out beside it.
+//
+// The escaping trap goes away with them: in a template literal every Dawn
+// `${...}` interpolation had to be written `\${...}`, so the sidebar's text and
+// the source differed by an escape that only the sample with string
+// interpolation ever needed.
+import hello from '../samples/hello.dawn?raw'
+import shapes from '../samples/shapes.dawn?raw'
+import comptime from '../samples/comptime.dawn?raw'
+import effects from '../samples/effects.dawn?raw'
+import traits from '../samples/traits.dawn?raw'
+
 export interface Sample {
   label: string
   file: string
@@ -7,92 +28,9 @@ export interface Sample {
 }
 
 export const SAMPLES: Sample[] = [
-  {
-    label: 'Hello',
-    file: 'hello.dawn',
-    code: `pub fn main() -> Unit !io = {
-  let name = "Dawn"
-  println("hello from $name")
-}
-`,
-  },
-  {
-    label: 'ADT + match',
-    file: 'shapes.dawn',
-    code: `type Shape =
-  | Circle(r: Float)
-  | Rect(w: Float, h: Float)
-
-fn area(s: Shape) -> Float =
-  match s {
-    Circle(r) -> 3.14159 * r * r
-    Rect(w, h) -> w * h
-  }
-
-pub fn main() -> Unit !io = {
-  println(to_string(area(Circle(2.0))))
-  println(to_string(area(Rect(3.0, 4.0))))
-}
-`,
-  },
-  {
-    label: 'comptime',
-    file: 'comptime.dawn',
-    code: `fn fib(n: Int) -> Int =
-  if n < 2 { n } else { fib(n - 1) + fib(n - 2) }
-
-# evaluated at compile time, baked into the constant pool
-const FIB10: Int = comptime { fib(10) }
-
-pub fn main() -> Unit !io = println(to_string(FIB10))
-`,
-  },
-  {
-    label: 'effects',
-    file: 'effects.dawn',
-    code: `# pure: no !io in the signature
-fn double(n: Int) -> Int = n * 2
-
-# touches IO, so the signature must say !io
-fn shout(s: String) -> Unit !io = println("$s!")
-
-pub fn main() -> Unit !io = {
-  shout(to_string(double(21)))
-}
-`,
-  },
-  {
-    label: 'traits',
-    file: 'traits.dawn',
-    code: `# traits: constrained generics + operator bridging (docs/trait.md)
-type Card = { rank: Int, name: String } derive Show, Ord
-
-trait Describe[T] {
-  fn describe(x: T) -> String
-  fn loud(x: T) -> String = describe(x) ++ "!"  # default method
-}
-
-impl Describe[Card] {
-  fn describe(c: Card) -> String = "\${c.name} (rank \${c.rank})"
-}
-
-fn best[T: Ord + Describe](xs: List[T]) -> String =
-  match max(xs) {
-    Some(x) -> x.loud()
-    None -> "nothing"
-  }
-
-pub fn main() -> Unit !io = {
-  let hand = [
-    Card { rank: 3, name: "queen" },
-    Card { rank: 1, name: "pawn" },
-    Card { rank: 2, name: "rook" },
-  ]
-  # derive Ord compares fields in order, so < and sort just work
-  println(to_string(hand[1] < hand[0]))
-  println(to_string(map(sort(hand), fn(c) => c.name)))
-  println(best(hand))
-}
-`,
-  },
+  { label: 'Hello', file: 'hello.dawn', code: hello },
+  { label: 'ADT + match', file: 'shapes.dawn', code: shapes },
+  { label: 'comptime', file: 'comptime.dawn', code: comptime },
+  { label: 'effects', file: 'effects.dawn', code: effects },
+  { label: 'traits', file: 'traits.dawn', code: traits },
 ]

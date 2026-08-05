@@ -26,6 +26,10 @@ site/
 ├── assets/         # style.css 等文本资产（原样拷入 dist/assets/）
 ├── pages/          # 站点专属内容（home.md 正本 / home.zh.md 译本；首页样例与特性卡的 .dawn + 实测输出 .out）
 ├── play-ui/        # Playground 编辑器（TS + CodeMirror 6，npm 构建）
+│   └── samples/    # 侧边栏的起手程序：真 .dawn + 实测 .out，由 samples.ts 用
+│                   # Vite `?raw` 内联。以前是 TS 模板字符串里的代码，任何按 .dawn
+│                   # 找的工具都看不见它——v0.43.0 退役 fn lambda 时就漏了这里，
+│                   # 八个版本里侧边栏一直发着编不过的程序。现在 doc-check 跑它们
 ├── sample/         # 手写验收样张 —— 渲染以此为准绳（验收样例先行）
 └── dist/           # 产物（gitignore）
 ```
