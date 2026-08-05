@@ -323,6 +323,12 @@ PYEOF
 # a multi-module suite (labels get the `mod :: name` prefix) and a single one
 pair_report "test (multi-module package)" test packages/json
 pair_report "test (single-module package)" test packages/sha2
+# the bundled std's own suite. This is the only place the native backend runs
+# it: gates.yml calls `./bin/dawn test --stdlib`, which is the JVM and only
+# the JVM, and std is where "both backends answer the same" is least optional
+# -- the case tables, the cursor walk and the surrogate-pair arithmetic are
+# each written once per backend.
+pair_report "test (the bundled std)" test --stdlib
 # --cp names host jars. The native driver validates the entries the way the
 # JVM one does and then drops them: they can only matter to a `use java`
 # program, which this backend refuses at `check`. Both spellings, both
