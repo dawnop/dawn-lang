@@ -104,10 +104,23 @@ check whose blind spot is undocumented gets mistaken for a check:
     differs from its slug only in runs of hyphens (this repository's titles
     are full of `——`, which GitHub turns into consecutive hyphens) is
     accepted leniently -- see anchor_index. Errs toward accepting.
-    Read the count this prints: as of 2026-08-04 it is *zero*. Not one of
-    the 519 Markdown links in this repository carries a `#fragment`, so
-    both halves of the anchor check are guarding a door nobody uses yet.
-    That is a fact about the corpus, not about the check.
+    Read the count this prints: it is *zero*, and it has been zero since
+    the day the check was written. Measured, not inferred -- running the
+    2026-07-30 check over the 2026-07-30 corpus finds 357 links and no
+    fragment among them, and the same at 291e248, which added the cross-file
+    half. Neither half has ever adjudicated anything.
+    What that is NOT is a fact about the repository, which is what this
+    paragraph claimed until 2026-08-05: the repository holds 281 fragment
+    references. They are all in the generated site -- 272 same-page TOC
+    links, 9 written by hand in site/pages/stdlib.md and
+    site/src/gen/stdlib.dawn -- and DOCS globs docs/ plus the top level, so
+    not one of them was ever in scope here. site/src/gen/links.dawn checks
+    them now, against the built HTML, which is the artifact that has to be
+    right; it also had both halves of this blind spot until then.
+    So this check keeps running over docs/, where prose links to whole
+    files and never to fragments. It is kept rather than deleted because it
+    is the trap for the first docs/ link that does carry one, and the
+    printed zero is what stops that being mistaken for coverage.
   * sections: only references whose target document is written down --
     `[x](y.md) §3`, `y.md §3`, `本文 §3`, or a sibling in a `§3/§4` run.
     A bare `§3` is skipped, because in this corpus prose refers to other
