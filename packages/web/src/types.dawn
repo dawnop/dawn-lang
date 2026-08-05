@@ -22,11 +22,22 @@ pub type RouteMeta = {
 
 pub type Request = {
   method: String,
+  # the decoded path, kept for logs and display; routing does not use it
   path: String,
+  # the path exactly as it came off the wire (URI.getRawPath). Routing splits
+  # *this* on "/" and decodes each segment on its own, so an encoded slash
+  # (%2F) stays inside its segment instead of minting a route boundary (WEB-03).
+  raw_path: String,
   params: Map[String, String],
   query: Map[String, String],
-  # request headers, keys lowercased for case-insensitive lookup (use `header`)
-  headers: Map[String, String],
+  # request headers as a lowercase-keyed multimap: every value of a repeated
+  # name (Cookie, Forwarded, ...) survives in wire order (WEB-04). The
+  # case-insensitivity contract is one rule applied at both ends: the server
+  # lowercases keys when it builds this map, and `header`/`headers_all`
+  # lowercase the name they look up. The JDK's own Title-Case normalization
+  # inside Headers is deliberately not relied on — a Request built by hand in
+  # a test must behave exactly like one built from the wire.
+  headers: Map[String, List[String]],
   body: String,
   # the request body as raw Bytes: binary handlers (multipart upload) parse
   # structure and recover exact file bytes from here, no latin-1 detour.
@@ -44,24 +55,41 @@ pub type Request = {
   route: Option[RouteMeta],
 } derive Show
 
-# Response can carry a binary body — first-class Bytes (spec §9.5.1) for the fm
-# proxy endpoints. `bin` = None means a text body (`body`). `stream` = Some means a
-# live upstream stream pumped to the socket instead (ignores body/bin).
+# What a Response carries on the wire, as a sum: exactly one of no body, a text
+# body, a binary body (first-class Bytes, spec §9.5.1, for the fm proxy
+# endpoints), or a live upstream stream pumped straight to the socket (constant
+# memory, first byte out immediately — fm content proxy / WebDAV serve_file for
+# large media). This replaces the old body/bin/stream field triple whose
+# "stream wins, then bin" rule lived in a comment (WEB-06): the impossible
+# combinations no longer typecheck. The kind also decides the wire framing —
+# Text/Binary get an exact Content-Length, only Stream is chunked (WEB-07, see
+# web/server.body_length). An opaque InputStream isn't printable, so neither
+# this nor Response derives Show (docs/streaming-response-design.md §三).
+pub type ResponseBody =
+  | Empty
+  | Text(value: String)
+  | Binary(value: Bytes)
+  | Stream(value: InputStream)
+
 pub type Response = {
   status: Int,
   content_type: String,
   # extra response headers in emission order (Location, Content-Disposition, ...)
   headers: List[(String, String)],
-  body: String,
-  bin: Option[Bytes],
-  # A live upstream stream pumped straight to the socket: constant memory, first
-  # byte out immediately (fm content proxy / WebDAV serve_file for large media).
-  # Some => body/bin are ignored. An opaque InputStream isn't printable, so Response
-  # drops `derive Show` — nothing consumed it (docs/streaming-response-design.md §三).
-  stream: Option[InputStream],
+  body: ResponseBody,
 }
 
-pub type HttpError = { status: Int, message: String } derive Show
+# `code` is a machine-readable tag for clients that dispatch on more than the
+# status (None when the message is the whole story); `headers` travel onto the
+# rendered error response — a 401 is not a compliant challenge without
+# WWW-Authenticate (RFC 9110 §11.6.1). `http_error` fills both empty, so plain
+# call sites are untouched.
+pub type HttpError = {
+  status: Int,
+  message: String,
+  code: Option[String],
+  headers: List[(String, String)],
+} derive Show
 
 # The two shapes the whole framework is written in terms of. Aliases are
 # transparent — these are documentation, not new types.
@@ -69,7 +97,7 @@ pub alias Handler = fn(Request) -> Result[Response, HttpError] !io
 pub alias Middleware = fn(Handler) -> Handler
 
 pub fn http_error(status: Int, message: String) -> HttpError =
-  HttpError { status: status, message: message }
+  HttpError { status: status, message: message, code: None, headers: [] }
 
 # Lift a repository/infrastructure result into a handler result.
 #
@@ -106,28 +134,28 @@ pub fn as_http_with[T](r: Result[T, String], f: fn(String) -> HttpError) -> Resu
 # ---- response constructors ----
 
 pub fn text(status: Int, body: String) -> Response =
-  Response { status: status, content_type: "text/plain; charset=utf-8", headers: [], body: body, bin: None, stream: None }
+  Response { status: status, content_type: "text/plain; charset=utf-8", headers: [], body: Text(body) }
 
 pub fn json_response(status: Int, j: Json) -> Response =
-  Response { status: status, content_type: "application/json; charset=utf-8", headers: [], body: render(j), bin: None, stream: None }
+  Response { status: status, content_type: "application/json; charset=utf-8", headers: [], body: Text(render(j)) }
 
 pub fn json_ok(j: Json) -> Response = json_response(200, j)
 
 # A raw pre-rendered body (any content type) — escape hatch for services with
 # their own wire format.
 pub fn raw(status: Int, content_type: String, body: String) -> Response =
-  Response { status: status, content_type: content_type, headers: [], body: body, bin: None, stream: None }
+  Response { status: status, content_type: content_type, headers: [], body: Text(body) }
 
 # A binary body: raw Bytes written verbatim (fm content proxy).
 pub fn binary(status: Int, content_type: String, raw: Bytes) -> Response =
-  Response { status: status, content_type: content_type, headers: [], body: "", bin: Some(raw), stream: None }
+  Response { status: status, content_type: content_type, headers: [], body: Binary(raw) }
 
 # A streaming body: a live InputStream pumped to the socket in constant memory
-# (fm content proxy / WebDAV serve_file for large media). v1 uses chunked framing,
-# like the binary path; Some(stream) makes the server ignore body/bin. The server
-# closes the stream after pumping (see web/server.write_response).
+# (fm content proxy / WebDAV serve_file for large media). Streams use chunked
+# framing — the length is unknown up front. The server closes the stream after
+# pumping (see web/server.write_response).
 pub fn streaming(status: Int, content_type: String, stream: InputStream) -> Response =
-  Response { status: status, content_type: content_type, headers: [], body: "", bin: None, stream: Some(stream) }
+  Response { status: status, content_type: content_type, headers: [], body: Stream(stream) }
 
 # ---- header hygiene ----
 #
@@ -249,8 +277,15 @@ pub fn attachment(content_type: String, filename: String, body: String) -> Respo
 # The server's rendering of the Err branch and of its own 404/405.
 # backend-dawn divergence (M6): the key is "detail" to match FastAPI's error
 # body {"detail": ...}, which the frontend reads as error.response.data.detail.
-pub fn error_response(e: HttpError) -> Response =
-  json_response(e.status, JObj(map.from([("detail", JStr(e.message))])))
+# The error's own headers ride along (through the with_header guard), so a 401
+# can carry its WWW-Authenticate challenge.
+pub fn error_response(e: HttpError) -> Response = {
+  let base = json_response(e.status, JObj(map.from([("detail", JStr(e.message))])))
+  fold(e.headers, base, (r, h) => {
+    let (k, v) = h
+    with_header(r, k, v)
+  })
+}
 
 # ---- request accessors ----
 
@@ -304,15 +339,28 @@ pub fn query_int_bounded(req: Request, name: String, default: Int, lo: Int, hi: 
   }
 
 # A request header, looked up case-insensitively (the name is lowercased here;
-# the server lowercases keys when building the map).
+# the server lowercases keys when building the map). Of a repeated name this
+# is the *first* value — exactly what the old single-value map always held,
+# so every existing call site keeps its meaning.
 pub fn header(req: Request, name: String) -> Option[String] =
-  map.get(req.headers, str.to_lower(name))
+  match map.get(req.headers, str.to_lower(name)) {
+    Some(vs) -> get(vs, 0)
+    None -> None
+  }
+
+# Every value of a repeated header, in wire order; [] when the name is absent.
+# Same case-insensitive lookup as `header`.
+pub fn headers_all(req: Request, name: String) -> List[String] =
+  match map.get(req.headers, str.to_lower(name)) {
+    Some(vs) -> vs
+    None -> []
+  }
 
 test "param reads captures and flags missing ones" {
-  let h: Map[String, String] = map.empty()
+  let h: Map[String, List[String]] = map.empty()
   let q: Map[String, String] = map.empty()
   let req = Request {
-    method: "GET", path: "/a/42",
+    method: "GET", path: "/a/42", raw_path: "/a/42",
     params: map.from([("id", "42")]), query: q, headers: h, body: "", raw: bytes.utf8(""), body_file: None,
     route: None,
   }
@@ -325,9 +373,9 @@ test "param reads captures and flags missing ones" {
 }
 
 test "query_int_bounded: absent uses default, out-of-range and non-int are 422" {
-  let h: Map[String, String] = map.empty()
+  let h: Map[String, List[String]] = map.empty()
   let mk = (q: Map[String, String]) => Request {
-    method: "GET", path: "/a", params: map.empty(), query: q, headers: h, body: "", raw: bytes.utf8(""), body_file: None,
+    method: "GET", path: "/a", raw_path: "/a", params: map.empty(), query: q, headers: h, body: "", raw: bytes.utf8(""), body_file: None,
     route: None,
   }
   # absent -> default
@@ -354,10 +402,10 @@ test "query_int_bounded: absent uses default, out-of-range and non-int are 422" 
 }
 
 test "param_int rejects non-numbers as a client error" {
-  let h: Map[String, String] = map.empty()
+  let h: Map[String, List[String]] = map.empty()
   let q: Map[String, String] = map.empty()
   let req = Request {
-    method: "GET", path: "/a/x",
+    method: "GET", path: "/a/x", raw_path: "/a/x",
     params: map.from([("id", "x")]), query: q, headers: h, body: "", raw: bytes.utf8(""), body_file: None,
     route: None,
   }
@@ -369,14 +417,29 @@ test "param_int rejects non-numbers as a client error" {
 
 test "header lookup is case-insensitive" {
   let req = Request {
-    method: "GET", path: "/", params: map.empty(), query: map.empty(),
-    headers: map.from([("authorization", "Bearer xyz"), ("content-type", "application/json")]),
+    method: "GET", path: "/", raw_path: "/", params: map.empty(), query: map.empty(),
+    headers: map.from([("authorization", ["Bearer xyz"]), ("content-type", ["application/json"])]),
     body: "", raw: bytes.utf8(""), body_file: None,
     route: None,
   }
   assert header(req, "Authorization") == Some("Bearer xyz")
   assert header(req, "CONTENT-TYPE") == Some("application/json")
   assert header(req, "missing") == None
+}
+
+test "repeated request headers keep every value" {
+  let req = Request {
+    method: "GET", path: "/", raw_path: "/", params: map.empty(), query: map.empty(),
+    headers: map.from([("cookie", ["a=1", "b=2"])]),
+    body: "", raw: bytes.utf8(""), body_file: None,
+    route: None,
+  }
+  # header() is the single-value view: the first, as it always was
+  assert header(req, "Cookie") == Some("a=1")
+  assert headers_all(req, "Cookie") == ["a=1", "b=2"]
+  # headers_all shares header()'s case-insensitivity
+  assert headers_all(req, "COOKIE") == ["a=1", "b=2"]
+  assert headers_all(req, "missing") == []
 }
 
 test "response header helpers" {
@@ -425,4 +488,52 @@ test "attachment quotes and encodes the filename" {
 test "redirect targets cannot inject headers either" {
   let r = redirect(302, "/ok\r\nX-Evil: 1")
   assert r.headers == [("Location", "/okX-Evil: 1")]
+}
+
+test "constructors keep their shapes: status, content type, body kind" {
+  let t = text(201, "made")
+  assert t.status == 201
+  assert t.content_type == "text/plain; charset=utf-8"
+  assert t.headers == []
+  match t.body {
+    Text(s) -> { assert s == "made" }
+    _ -> { assert false }
+  }
+  let j = json_ok(JStr("hi"))
+  assert j.status == 200
+  assert j.content_type == "application/json; charset=utf-8"
+  match j.body {
+    Text(s) -> { assert s == "\"hi\"" }
+    _ -> { assert false }
+  }
+  let r = raw(418, "text/csv", "a,b")
+  assert r.content_type == "text/csv"
+  match r.body {
+    Text(s) -> { assert s == "a,b" }
+    _ -> { assert false }
+  }
+  let b = binary(200, "application/octet-stream", bytes.utf8("\u{0}\u{1}"))
+  assert b.status == 200
+  match b.body {
+    Binary(bb) -> { assert bb == bytes.utf8("\u{0}\u{1}") }
+    _ -> { assert false }
+  }
+}
+
+test "http_error fills the new fields empty; error_response carries error headers" {
+  let e = http_error(404, "nope")
+  assert e.status == 404
+  assert e.message == "nope"
+  assert e.code == None
+  assert e.headers == []
+  # a literal-built error can carry a challenge, and error_response emits it
+  let ch = HttpError {
+    status: 401, message: "auth", code: Some("auth_required"),
+    headers: [("WWW-Authenticate", "Basic realm=\"dawn\"")],
+  }
+  let r = error_response(ch)
+  assert r.status == 401
+  assert r.headers == [("WWW-Authenticate", "Basic realm=\"dawn\"")]
+  # a plain error adds no headers
+  assert error_response(e).headers == []
 }

@@ -17,8 +17,9 @@ use java "java.lang.String"
 use java "java.util.Iterator"
 use java "java.io.File"
 use java "java.io.FileOutputStream"
-use types.{Request, Response, HttpError, Handler, Middleware, RouteMeta, http_error, error_response, streaming}
-use router.{Route, Dispatch, Found, NoPath, WrongMethod, dispatch, route_meta, validate_routes}
+use types.{Request, Response, ResponseBody, Empty, Text, Binary, Stream, HttpError, Handler, Middleware, RouteMeta, http_error, error_response, streaming, text, binary, header, headers_all}
+use router.{Route, Dispatch, Found, NoPath, WrongMethod, dispatch_segs, route_meta, validate_routes, route_get}
+use java "java.net.Socket"
 use java "java.io.InputStream"
 use java "java.io.OutputStream"
 use java "java.net.URI"
@@ -28,6 +29,11 @@ use java "java.net.http.HttpRequest"
 use java "java.net.http.HttpRequest.BodyPublisher"
 use java "java.net.http.HttpRequest.BodyPublishers"
 use java "java.net.http.HttpResponse.BodyHandlers"
+use java "java.net.URL"
+use java "java.net.URLConnection"
+use java "java.net.HttpURLConnection"
+use java "java.io.ByteArrayInputStream"
+use java "java.util.ArrayList"
 
 ## Close an upstream stream, swallowing a close failure (non-fatal — the
 ## response is already committed, or was never sent). Called after pumping a
@@ -85,43 +91,89 @@ fn read_body(ex: HttpExchange, limit: Int) -> Result[(String, Bytes), HttpError]
   }
 }
 
-# Write a response. Length 0 selects chunked transfer encoding, so we never
-# need the byte count up front; the Writer handles UTF-8.
+# The length write_response hands to sendResponseHeaders, in jdk.httpserver's
+# convention: n > 0 is an exact Content-Length, 0 selects chunked transfer
+# encoding, -1 means no body at all. The body kind picks the framing
+# (WEB-06/07): Text is its UTF-8 byte count, Binary its byte length, and only
+# Stream — whose length is unknown up front — stays chunked. An empty
+# Text/Binary maps to -1, because 0 would mean chunked; the JDK then emits
+# Content-Length: 0 itself. A 204/304 never carries a body no matter what the
+# handler built (RFC 9110 §6.4.1/§15.4.5; the JDK would force this anyway,
+# with a logged warning).
+fn body_length(status: Int, body: ResponseBody) -> Int =
+  if status == 204 || status == 304 {
+    -1
+  } else {
+    match body {
+      Empty -> -1
+      Text(s) -> exact_length(bytes.len(bytes.utf8(s)))
+      Binary(b) -> exact_length(bytes.len(b))
+      Stream(_) -> 0
+    }
+  }
+
+fn exact_length(n: Int) -> Int = if n == 0 { -1 } else { n }
+
+## Close a streaming body that is never pumped (HEAD, 204/304): the upstream
+## connection must free even though no bytes move. The other kinds hold no
+## resource.
+fn drop_body(body: ResponseBody) -> Unit !io =
+  match body {
+    Stream(s) -> close_stream(s)
+    _ -> ()
+  }
+
+# Write a response. The body kind decides the framing (see body_length). A
+# HEAD request gets the status and headers its GET produced — including the
+# exact Content-Length when the length is known — but no body bytes (RFC 9110
+# §9.3.2). jdk.httpserver's documented way to answer HEAD is to set
+# Content-Length manually and pass -1, which is what the HEAD branch does.
 fn write_response(ex: HttpExchange, r: Response) -> Unit !io = {
   with x <- bracket(ex, close_exchange)
   let headers = x.getResponseHeaders()!
   headers.set("Content-Type", r.content_type)
   set_extra_headers(headers, r.headers)
-  x.sendResponseHeaders(r.status, 0)
-  with out <- bracket(x.getResponseBody()!, close_body)
-  match r.stream {
-    # streaming body: pump the upstream InputStream straight to the socket, 8KB at a
-    # time — constant memory, first byte out immediately. transferTo can throw if the
-    # client disconnects mid-download; the bracket is the finally, so the upstream
-    # stream is closed and the HttpClient connection frees either way. The
-    # catch_panic outside it keeps a mid-download disconnect from being an error:
-    # the response is already committed, there is nothing left to say. Close
-    # failure is non-fatal too (close_stream swallows it).
-    Some(s) -> {
-      let _ = catch_panic(() => {
-        with up <- bracket(s, close_stream)
-        up.transferTo(out)
-      })
-      ()
+  let length = body_length(r.status, r.body)
+  if x.getRequestMethod()! == "HEAD" {
+    if length > 0 {
+      headers.set("Content-Length", to_string(length))
     }
-    None ->
-      match r.bin {
-        Some(raw) -> {
-          # binary body: write the raw Bytes verbatim (Bytes -> Java byte[] param)
-          out.write(raw)
-          out.flush()
-        }
-        None -> {
-          with writer <- bracket(OutputStreamWriter.new(out, "UTF-8"), close_writer)
-          writer.write(r.body)
-          writer.flush()
-        }
+    x.sendResponseHeaders(r.status, -1)
+    drop_body(r.body)
+  } else if length == -1 {
+    x.sendResponseHeaders(r.status, -1)
+    drop_body(r.body)
+  } else {
+    x.sendResponseHeaders(r.status, length)
+    with out <- bracket(x.getResponseBody()!, close_body)
+    match r.body {
+      # unreachable: an empty body maps to length -1 above
+      Empty -> ()
+      Text(s) -> {
+        with writer <- bracket(OutputStreamWriter.new(out, "UTF-8"), close_writer)
+        writer.write(s)
+        writer.flush()
       }
+      Binary(b) -> {
+        # binary body: write the raw Bytes verbatim (Bytes -> Java byte[] param)
+        out.write(b)
+        out.flush()
+      }
+      # streaming body: pump the upstream InputStream straight to the socket, 8KB
+      # at a time — constant memory, first byte out immediately. transferTo can
+      # throw if the client disconnects mid-download; the bracket is the finally,
+      # so the upstream stream is closed and the HttpClient connection frees
+      # either way. The catch_panic outside it keeps a mid-download disconnect
+      # from being an error: the response is already committed, there is nothing
+      # left to say. Close failure is non-fatal too (close_stream swallows it).
+      Stream(s) -> {
+        let _ = catch_panic(() => {
+          with up <- bracket(s, close_stream)
+          up.transferTo(out)
+        })
+        ()
+      }
+    }
   }
 }
 
@@ -132,20 +184,34 @@ fn set_extra_headers(headers: Headers, hs: List[(String, String)]) -> Unit !io =
   }
 }
 
-# Collect request headers into a lowercase-keyed map (first value per name;
-# multi-valued request headers are rare in this API and the first wins). The
-# key set is a Java collection, so it is walked with an iterator.
-fn read_headers(ex: HttpExchange) -> Map[String, String] !io = {
+# Collect request headers into a lowercase-keyed multimap: every value of a
+# repeated name (Cookie, Forwarded, ...) survives, in wire order (WEB-04).
+# Normalization contract: keys are lowercased exactly once, here, and
+# `header`/`headers_all` lowercase the name they are given — one rule at both
+# ends. The JDK's Headers has its own Title-Case normalization inside the
+# exchange, which is deliberately not leaned on: a Request built by hand in a
+# test must behave like one built from the wire. The key set is a Java
+# collection, so it is walked with an iterator.
+fn read_headers(ex: HttpExchange) -> Map[String, List[String]] !io = {
   let headers = ex.getRequestHeaders()!
   let it = headers.keySet()!.iterator()!
   collect_headers(headers, it, map.empty())
 }
 
-fn collect_headers(headers: Headers, it: Iterator, acc: Map[String, String]) -> Map[String, String] !io =
+fn collect_headers(headers: Headers, it: Iterator, acc: Map[String, List[String]]) -> Map[String, List[String]] !io =
   if it.hasNext() {
     let name = String.valueOf(it.next()!)!
-    let v = headers.getFirst(name)!
-    collect_headers(headers, it, map.insert(acc, str.to_lower(name), v))
+    let vs = string_values(headers.get(name)!.iterator()!, [])
+    collect_headers(headers, it, map.insert(acc, str.to_lower(name), vs))
+  } else {
+    acc
+  }
+
+# Drain a Java Iterator of strings into a Dawn list (Headers.get hands back a
+# java.util.List of every value the name arrived with).
+fn string_values(it: Iterator, acc: List[String]) -> List[String] !io =
+  if it.hasNext() {
+    string_values(it, acc ++ [String.valueOf(it.next()!)!])
   } else {
     acc
   }
@@ -173,13 +239,54 @@ fn pct_decode(s: String) -> String !io =
     Err(_) -> s
   }
 
+# ---- raw-path routing (WEB-03) ----
+
+# Split a raw request path into routing segments: the leading empty piece
+# (absolute paths start with "/") and one trailing empty piece (a trailing
+# slash is tolerated, as the router always has) are dropped, but *interior*
+# empty segments (/a//b) are kept — merging them would be path rewriting,
+# which belongs to the application, not the framework. See the package README
+# for the full policy table.
+fn raw_segs(raw_path: String) -> List[String] = {
+  let parts = str.split(raw_path, "/")
+  let n = len(parts)
+  let lo = if n > 0 && parts[0] == "" { 1 } else { 0 }
+  let hi = if n > lo && parts[n - 1] == "" { n - 1 } else { n }
+  map(range(lo, hi), i => parts[i])
+}
+
+# Percent-decode one *path* segment. Path semantics, not form semantics: a
+# '+' in a path is a literal plus, so it is shielded as %2B before URLDecoder
+# (which speaks application/x-www-form-urlencoded and would turn it into a
+# space). A malformed escape leaves the segment as written — same policy as
+# pct_decode above.
+fn decode_path_seg(s: String) -> String !io =
+  match catch_fault(() => URLDecoder.decode(str.replace(s, "+", "%2B"), "UTF-8")!) {
+    Ok(v) -> v
+    Err(_) -> s
+  }
+
+fn is_dot_seg(s: String) -> Bool = s == "." || s == ".."
+
+# True when any raw segment is "." or ".." in either spelling — as written or
+# after decoding (%2e%2e decodes to "..", the classic normalization bypass).
+# `handle` refuses such a path with 400 *before* dispatch, so the check covers
+# every request, 404 paths included: this framework never normalizes a path,
+# it rejects the ones that would need it.
+fn has_dot_segment(raw_path: String) -> Bool !io = {
+  for s in raw_segs(raw_path) {
+    if is_dot_seg(s) || is_dot_seg(decode_path_seg(s)) { return true }
+  }
+  false
+}
+
 # "a=1&b=x" -> [("a","1"),("b","x")], over the *raw* (still encoded) string.
 # A value may itself contain '=', so only the first one splits — and since the
 # split happens first, an encoded '=' in a value stays part of that value.
 pub fn parse_query(q: String) -> List[(String, String)] !io =
   map(filter(str.split(q, "&"), pair => pair != ""), pair => {
     let parts = str.split(pair, "=")
-    (pct_decode(parts[0]), pct_decode(join(tail(parts), "=")))
+    (pct_decode(parts[0]), pct_decode(join_with(tail(parts), "=")))
   })
 
 # Parse an application/x-www-form-urlencoded body into a map. Same grammar and
@@ -190,6 +297,16 @@ pub fn parse_form(body: String) -> Map[String, String] !io = map.from(parse_quer
 
 fn tail(xs: List[String]) -> List[String] =
   map(range(1, len(xs)), i => xs[i])
+
+# The prelude's join, reimplemented: the public `join(handle)` below shadows
+# the builtin module-wide (there is no qualified spelling for a prelude name),
+# so the module's own string-joining goes through this.
+fn join_with(xs: List[String], sep: String) -> String =
+  if len(xs) == 0 {
+    ""
+  } else {
+    fold(tail(xs), xs[0], (acc, s) => acc ++ sep ++ s)
+  }
 
 fn rev[T](xs: List[T]) -> List[T] =
   map(range(0, len(xs)), i => xs[len(xs) - 1 - i])
@@ -216,6 +333,7 @@ fn build_request(ex: HttpExchange, meta: Option[RouteMeta], max_body: Int) -> Re
   Ok(Request {
     method: ex.getRequestMethod()!,
     path: uri.getPath()!,
+    raw_path: uri.getRawPath()!,
     params: no_query,
     query: q,
     headers: read_headers(ex),
@@ -287,36 +405,50 @@ fn handle(routes: List[Route], middleware: List[Middleware], max_body: Int, ex: 
   # a handler panic is isolated to this request: catch_panic turns it into a 500
   # instead of resetting the connection or leaking the virtual thread (spec §9.8).
   let outcome = catch_panic(() => {
-    # Dispatch BEFORE touching the body: method and path come from the request
-    # line, and the matched route's tags decide how the body is read at all
-    # ("stream-body" spills it to disk instead of into memory). The same decision
-    # is executed by run_dispatch below — no second table walk.
-    let d = dispatch(routes, ex.getRequestMethod()!, ex.getRequestURI()!.getPath()!)
-    # An oversized body is refused before it is read, which also means before any
-    # middleware runs: there is no Request to hand them. That costs the 413 its
-    # access-log line and its CORS headers, and is the price of the refusal
-    # happening early enough to be worth anything.
-    match build_request(ex, meta_of(d), max_body) {
-      Err(e) -> {
-        println("${ex.getRequestMethod()!} ${ex.getRequestURI()!.getPath()!} -> ${e.status} (${e.message})")
-        error_response(e)
-      }
-      Ok(req) -> {
-        # first middleware in the list is outermost: [a, b] runs a(b(core)). Middleware
-        # still wraps the core, so CORS preflight and logging cover unmatched requests.
-        let app = fold(rev(middleware), (rq: Request) => run_dispatch(d, rq), (h, m) => m(h))
-        # the temp body file lives exactly as long as the handler call, and the
-        # bracket is what makes that true on every way out — including the ones
-        # the catch_panic below does not see, such as a panic while rendering
-        # the 500 for a panic.
-        with held <- bracket(req, drop_body_file)
-        let served = catch_panic(() => app(held))
-        match served {
-          Ok(Ok(r)) -> r
-          Ok(Err(e)) -> error_response(e)
-          Err(m) -> {
-            println("request panicked: ${m.message}")
-            error_response(http_error(500, "服务器内部错误"))
+    let raw_path = ex.getRequestURI()!.getRawPath()!
+    # WEB-03: a dot segment ("." / "..", raw or percent-encoded) is refused
+    # here, before dispatch — so the 400 covers every route, including paths
+    # nothing would match. Like the 413 below, this happens before any
+    # middleware runs: there is no Request yet.
+    if has_dot_segment(raw_path) {
+      println("${ex.getRequestMethod()!} $raw_path -> 400 (dot segment)")
+      error_response(http_error(400, "path contains a dot segment"))
+    } else {
+      # Dispatch BEFORE touching the body: method and path come from the request
+      # line, and the matched route's tags decide how the body is read at all
+      # ("stream-body" spills it to disk instead of into memory). The same decision
+      # is executed by run_dispatch below — no second table walk.
+      #
+      # WEB-03: routing runs on the *raw* path, split on "/" first, each segment
+      # percent-decoded on its own — an encoded slash (%2F) stays inside its
+      # segment instead of minting a route boundary.
+      let d = dispatch_segs(routes, ex.getRequestMethod()!, map(raw_segs(raw_path), s => decode_path_seg(s)))
+      # An oversized body is refused before it is read, which also means before any
+      # middleware runs: there is no Request to hand them. That costs the 413 its
+      # access-log line and its CORS headers, and is the price of the refusal
+      # happening early enough to be worth anything.
+      match build_request(ex, meta_of(d), max_body) {
+        Err(e) -> {
+          println("${ex.getRequestMethod()!} ${ex.getRequestURI()!.getPath()!} -> ${e.status} (${e.message})")
+          error_response(e)
+        }
+        Ok(req) -> {
+          # first middleware in the list is outermost: [a, b] runs a(b(core)). Middleware
+          # still wraps the core, so CORS preflight and logging cover unmatched requests.
+          let app = fold(rev(middleware), (rq: Request) => run_dispatch(d, rq), (h, m) => m(h))
+          # the temp body file lives exactly as long as the handler call, and the
+          # bracket is what makes that true on every way out — including the ones
+          # the catch_panic below does not see, such as a panic while rendering
+          # the 500 for a panic.
+          with held <- bracket(req, drop_body_file)
+          let served = catch_panic(() => app(held))
+          match served {
+            Ok(Ok(r)) -> r
+            Ok(Err(e)) -> error_response(e)
+            Err(m) -> {
+              println("request panicked: ${m.message}")
+              error_response(http_error(500, "服务器内部错误"))
+            }
           }
         }
       }
@@ -339,29 +471,62 @@ fn handle(routes: List[Route], middleware: List[Middleware], max_body: Int, ex: 
 # tag (those never touch the heap at all).
 pub const DEFAULT_MAX_BODY: Int = 8388608
 
-# Start on 127.0.0.1:port and block forever (main() returning would let the
-# JVM exit out from under the request threads).
-pub fn serve_app(port: Int, routes: List[Route], middleware: List[Middleware]) -> Unit !io =
-  serve_app_bounded(port, DEFAULT_MAX_BODY, routes, middleware)
+# ---- server lifecycle (WEB-10) ----
 
-# Same, with the in-memory body ceiling chosen explicitly (0 = unbounded, which
-# is what this framework did before the ceiling existed).
-pub fn serve_app_bounded(port: Int, max_body: Int, routes: List[Route], middleware: List[Middleware]) -> Unit !io = {
+## Where the server listens and the in-memory body ceiling its requests get.
+## port 0 asks the OS for a free port; the ServerHandle reports the one
+## actually bound.
+pub type ServerConfig = { host: String, port: Int, max_body: Int }
+
+## A running server. `port` is the real bound port — the point of port 0.
+## `done` is what lets join/stop compose over jdk.httpserver, which has a stop
+## but no join: join awaits the latch, stop opens it after stopping the JDK
+## server. (The design sketched the handle as server + port only; without the
+## latch there is nothing for join to block on.)
+pub type ServerHandle = { server: HttpServer, port: Int, done: CountDownLatch }
+
+# Bind cfg.host:cfg.port, serve requests on virtual threads, and return
+# immediately with the handle. The caller decides what the rest of the
+# program does — join() for the classic block-forever server, stop() from
+# wherever shutdown is decided.
+pub fn start(cfg: ServerConfig, routes: List[Route], middleware: List[Middleware]) -> ServerHandle !io = {
   # WEB-09: a broken table fails here, at startup, with the two routes named —
   # not at runtime as a silent 404 on the route its author believes exists
   match validate_routes(routes) {
     Err(e) -> panic("route table: " ++ e)
     Ok(_) -> ()
   }
-  let addr = InetSocketAddress.new("127.0.0.1", port)
+  let addr = InetSocketAddress.new(cfg.host, cfg.port)
   let server = HttpServer.create(addr, 0)!
-  server.createContext("/", ex => handle(routes, middleware, max_body, ex))
+  server.createContext("/", ex => handle(routes, middleware, cfg.max_body, ex))
   server.setExecutor(Executors.newVirtualThreadPerTaskExecutor()!)
   server.start()
-  println("listening on http://127.0.0.1:$port")
-  let latch = CountDownLatch.new(1)
-  latch.await()
+  let bound = server.getAddress()!.getPort()
+  println("listening on http://${cfg.host}:$bound")
+  ServerHandle { server: server, port: bound, done: CountDownLatch.new(1) }
 }
+
+## Block until stop() releases this handle. A server's main() usually ends
+## here — returning would let the JVM exit out from under the request threads.
+pub fn join(h: ServerHandle) -> Unit !io = h.done.await()
+
+## Stop the server: the listening socket closes at once, in-flight exchanges
+## get up to grace_secs to finish (the JDK's stop blocks for that), and then
+## every join() blocked on this handle returns.
+pub fn stop(h: ServerHandle, grace_secs: Int) -> Unit !io = {
+  h.server.stop(grace_secs)
+  h.done.countDown()
+}
+
+# The old shape, kept: start + join on 127.0.0.1. Most programs want exactly
+# this.
+pub fn serve_app(port: Int, routes: List[Route], middleware: List[Middleware]) -> Unit !io =
+  serve_app_bounded(port, DEFAULT_MAX_BODY, routes, middleware)
+
+# Same, with the in-memory body ceiling chosen explicitly (0 = unbounded, which
+# is what this framework did before the ceiling existed).
+pub fn serve_app_bounded(port: Int, max_body: Int, routes: List[Route], middleware: List[Middleware]) -> Unit !io =
+  join(start(ServerConfig { host: "127.0.0.1", port: port, max_body: max_body }, routes, middleware))
 
 test "query strings parse, including empty and embedded =" {
   assert parse_query("a=1&b=x") == [("a", "1"), ("b", "x")]
@@ -426,11 +591,158 @@ fn test_fetch_bytes(url: String) -> (Int, Bytes) !io = {
   }
 }
 
+# Test-only: an HttpURLConnection with `method` to `url`. openConnection
+# returns the base URLConnection, and Java subtyping does not enter Dawn
+# signatures, so the value goes through an ArrayList round-trip — the widening
+# `add(Object)` accepts, the erased `get` returns the Object `cast` takes (the
+# scripts/error-contract idiom). Stopping on a mismatch is the same policy as
+# test_fetch_stream above.
+fn test_connect(method: String, url: String) -> HttpURLConnection !io = {
+  let xs = ArrayList.new()
+  xs.add(URL.new(url).openConnection()!)
+  let got: Result[HttpURLConnection, ForeignError] = cast(xs.get(0).expect("connection"))
+  match got {
+    Ok(c) -> {
+      c.setRequestMethod(method)
+      c
+    }
+    Err(e) -> panic("test_connect: not an HttpURLConnection: " ++ e.message)
+  }
+}
+
+# Test-only: Bytes as an InputStream (same round-trip as above).
+fn test_stream_of(b: Bytes) -> InputStream !io = {
+  let xs = ArrayList.new()
+  xs.add(ByteArrayInputStream.new(b))
+  let got: Result[InputStream, ForeignError] = cast(xs.get(0).expect("stream"))
+  match got {
+    Ok(s) -> s
+    Err(e) -> panic("test_stream_of: not an InputStream: " ++ e.message)
+  }
+}
+
+# Test-only: one raw HTTP exchange over a plain socket, returned as text.
+# The only client that will send `/a/../b` or a repeated header verbatim —
+# HttpClient and HttpURLConnection normalize dot segments away before the
+# bytes leave, which is exactly the behavior these tests must not inherit.
+fn raw_http(port: Int, request: String) -> String !io = {
+  let s = Socket.new("127.0.0.1", port)
+  let out = s.getOutputStream()!
+  out.write(bytes.utf8(request))
+  out.flush()
+  let resp = bytes.decode_utf8(s.getInputStream()!.readAllBytes()!)
+  s.close()
+  resp
+}
+
+fn get_line(path: String) -> String =
+  "GET " ++ path ++ " HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n"
+
+fn hello_handler(_req: Request) -> Result[Response, HttpError] !io = Ok(text(200, "hello"))
+
+fn no_content_handler(_req: Request) -> Result[Response, HttpError] !io = Ok(text(204, ""))
+
+fn echo_name(req: Request) -> Result[Response, HttpError] !io =
+  match map.get(req.params, "name") {
+    Some(v) -> Ok(text(200, v))
+    None -> Ok(text(500, "missing capture"))
+  }
+
+fn echo_cookies(req: Request) -> Result[Response, HttpError] !io =
+  Ok(text(200, unwrap_or(header(req, "Cookie"), "-") ++ "|" ++ join_with(headers_all(req, "cookie"), ";")))
+
+test "body_length: -1 for no body, exact bytes for text/binary, 0 (chunked) for streams" {
+  assert body_length(200, Empty) == -1
+  assert body_length(200, Text("hello")) == 5
+  # UTF-8 bytes, not code points
+  assert body_length(200, Text("中文")) == 6
+  # an exact 0 cannot pass through sendResponseHeaders (0 = chunked there)
+  assert body_length(200, Text("")) == -1
+  assert body_length(200, Binary(bytes.utf8("abcd"))) == 4
+  assert body_length(200, Binary(bytes.utf8(""))) == -1
+  assert body_length(200, Stream(test_stream_of(bytes.utf8("x")))) == 0
+  # a 204/304 never carries a body, whatever the handler built
+  assert body_length(204, Text("hello")) == -1
+  assert body_length(304, Binary(bytes.utf8("x"))) == -1
+}
+
+test "Content-Length is exact per body kind on the wire; only streams are chunked" {
+  let srv = HttpServer.create(InetSocketAddress.new("127.0.0.1", 0), 0)!
+  srv.createContext("/text", ex => write_response(ex, text(200, "hello")))
+  srv.createContext("/cjk", ex => write_response(ex, text(200, "中文")))
+  srv.createContext("/empty", ex => write_response(ex, text(200, "")))
+  srv.createContext("/bin", ex => write_response(ex, binary(200, "application/octet-stream", bytes.utf8("abcd"))))
+  srv.createContext("/stream", ex =>
+      write_response(ex, streaming(200, "application/octet-stream", test_stream_of(bytes.utf8("streamed")))))
+  srv.start()
+  let base = "http://127.0.0.1:${srv.getAddress()!.getPort()}"
+  let t = test_connect("GET", base ++ "/text")
+  assert t.getResponseCode() == 200
+  assert t.getHeaderField("Content-Length") == Some("5")
+  assert t.getInputStream()!.readAllBytes()! == bytes.utf8("hello")
+  # the length counts UTF-8 bytes, not code points
+  let c = test_connect("GET", base ++ "/cjk")
+  assert c.getHeaderField("Content-Length") == Some("6")
+  assert c.getInputStream()!.readAllBytes()! == bytes.utf8("中文")
+  # an empty text body has an exact zero length, not chunked framing
+  let e = test_connect("GET", base ++ "/empty")
+  assert e.getResponseCode() == 200
+  assert e.getHeaderField("Content-Length") == Some("0")
+  assert e.getHeaderField("Transfer-encoding") == None
+  let b = test_connect("GET", base ++ "/bin")
+  assert b.getHeaderField("Content-Length") == Some("4")
+  assert b.getInputStream()!.readAllBytes()! == bytes.utf8("abcd")
+  # a stream's length is unknown: chunked, no Content-Length
+  let s = test_connect("GET", base ++ "/stream")
+  assert s.getHeaderField("Content-Length") == None
+  assert s.getHeaderField("Transfer-encoding") == Some("chunked")
+  assert s.getInputStream()!.readAllBytes()! == bytes.utf8("streamed")
+  srv.stop(0)
+}
+
+test "204 sends no body, no Content-Length, no chunked framing" {
+  let srv = HttpServer.create(InetSocketAddress.new("127.0.0.1", 0), 0)!
+  srv.createContext("/", ex => write_response(ex, text(204, "")))
+  srv.start()
+  let r = test_connect("GET", "http://127.0.0.1:${srv.getAddress()!.getPort()}/")
+  assert r.getResponseCode() == 204
+  assert r.getHeaderField("Content-Length") == None
+  assert r.getHeaderField("Transfer-encoding") == None
+  assert bytes.len(r.getInputStream()!.readAllBytes()!) == 0
+  srv.stop(0)
+}
+
+test "HEAD is served by the GET route: status and length, but no body bytes" {
+  # full server path — dispatch (HEAD falls through to GET) + write_response
+  let routes = [route_get("/hello", hello_handler), route_get("/gone", no_content_handler)]
+  let srv = HttpServer.create(InetSocketAddress.new("127.0.0.1", 0), 0)!
+  srv.createContext("/", ex => handle(routes, [], DEFAULT_MAX_BODY, ex))
+  srv.start()
+  let base = "http://127.0.0.1:${srv.getAddress()!.getPort()}"
+  let h = test_connect("HEAD", base ++ "/hello")
+  assert h.getResponseCode() == 200
+  # the length the GET would have had...
+  assert h.getHeaderField("Content-Length") == Some("5")
+  # ...but none of its body
+  assert bytes.len(h.getInputStream()!.readAllBytes()!) == 0
+  # the GET itself is unaffected
+  let g = test_connect("GET", base ++ "/hello")
+  assert g.getInputStream()!.readAllBytes()! == bytes.utf8("hello")
+  # a HEAD of a 204 route is still a bare 204
+  let n = test_connect("HEAD", base ++ "/gone")
+  assert n.getResponseCode() == 204
+  assert n.getHeaderField("Content-Length") == None
+  # unrouted HEAD is a 404 like the GET would be (body suppressed by the HEAD branch)
+  let m = test_connect("HEAD", base ++ "/nope")
+  assert m.getResponseCode() == 404
+  srv.stop(0)
+}
+
 test "write_response pumps an upstream stream to the client byte-exact (>8KB, multi-chunk)" {
   # The full realistic path: upstream HTTP -> ofInputStream + cast -> streaming() ->
   # write_response's stream branch -> transferTo pumps the InputStream to the socket
   # -> close. 12000 bytes forces transferTo's 8KB buffer across more than one chunk.
-  let payload = bytes.utf8(join(map(range(0, 1200), i => "0123456789"), ""))
+  let payload = bytes.utf8(join_with(map(range(0, 1200), i => "0123456789"), ""))
   # upstream: serves the payload
   let up = HttpServer.create(InetSocketAddress.new("127.0.0.1", 0), 0)!
   up.createContext("/", ex => {
@@ -454,4 +766,116 @@ test "write_response pumps an upstream stream to the client byte-exact (>8KB, mu
   assert got == payload
   up.stop(0)
   dn.stop(0)
+}
+
+test "raw path split: interior empties stay, lead and one trailing drop" {
+  assert raw_segs("/a//b") == ["a", "", "b"]
+  assert raw_segs("/a/b/") == ["a", "b"]
+  assert raw_segs("/health") == ["health"]
+  assert raw_segs("/") == []
+}
+
+test "path segments decode individually, with path (not form) semantics" {
+  assert decode_path_seg("a%2Fb") == "a/b"
+  assert decode_path_seg("%E4%B8%AD%E6%96%87") == "中文"
+  # '+' is a literal plus in a path, not a space
+  assert decode_path_seg("c++") == "c++"
+  # a malformed escape leaves the segment as written
+  assert decode_path_seg("%zz") == "%zz"
+}
+
+test "dot segment detection covers raw and encoded spellings" {
+  assert has_dot_segment("/a/../b")
+  assert has_dot_segment("/a/./b")
+  assert has_dot_segment("/%2e%2e/b")
+  assert has_dot_segment("/a/%2E")
+  assert not has_dot_segment("/a/b")
+  # dots inside a segment are data, not navigation
+  assert not has_dot_segment("/a..b/c")
+  assert not has_dot_segment("/...")
+}
+
+test "%2F stays inside its segment: /files/a%2Fb reaches /files/{name} as a/b" {
+  let routes = [route_get("/files/{name}", echo_name), route_get("/a/b", hello_handler)]
+  let srv = HttpServer.create(InetSocketAddress.new("127.0.0.1", 0), 0)!
+  srv.createContext("/", ex => handle(routes, [], DEFAULT_MAX_BODY, ex))
+  srv.start()
+  let base = "http://127.0.0.1:${srv.getAddress()!.getPort()}"
+  # the old decoded-path dispatch saw /files/a/b here: three segments, a 404
+  let (st, body) = test_fetch_bytes(base ++ "/files/a%2Fb")
+  assert st == 200
+  assert body == bytes.utf8("a/b")
+  # an ordinary encoded segment still decodes into its capture
+  let (st2, b2) = test_fetch_bytes(base ++ "/files/%E4%B8%AD%E6%96%87")
+  assert st2 == 200
+  assert b2 == bytes.utf8("中文")
+  # a duplicate slash is a real (empty) segment: /a//b is not /a/b
+  let (st3, _) = test_fetch_bytes(base ++ "/a//b")
+  assert st3 == 404
+  srv.stop(0)
+}
+
+test "dot segments are 400 before routing, on routed and unrouted paths alike" {
+  let routes = [route_get("/b", hello_handler)]
+  let srv = HttpServer.create(InetSocketAddress.new("127.0.0.1", 0), 0)!
+  srv.createContext("/", ex => handle(routes, [], DEFAULT_MAX_BODY, ex))
+  srv.start()
+  let port = srv.getAddress()!.getPort()
+  # would normalize to the routed /b — refused instead, which proves the check
+  # sits before routing (a normalizer would 200, plain routing would 404)
+  assert str.starts_with(raw_http(port, get_line("/a/../b")), "HTTP/1.1 400")
+  # the encoded spelling is the classic normalization bypass
+  assert str.starts_with(raw_http(port, get_line("/%2e%2e/b")), "HTTP/1.1 400")
+  assert str.starts_with(raw_http(port, get_line("/a/./b")), "HTTP/1.1 400")
+  # a path no route matches is still refused with 400, not 404
+  assert str.starts_with(raw_http(port, get_line("/zzz/../q")), "HTTP/1.1 400")
+  # sanity: the clean path still routes
+  assert str.starts_with(raw_http(port, get_line("/b")), "HTTP/1.1 200")
+  srv.stop(0)
+}
+
+test "two Cookie headers both arrive: header() the first, headers_all both" {
+  let routes = [route_get("/c", echo_cookies)]
+  let srv = HttpServer.create(InetSocketAddress.new("127.0.0.1", 0), 0)!
+  srv.createContext("/", ex => handle(routes, [], DEFAULT_MAX_BODY, ex))
+  srv.start()
+  let resp = raw_http(srv.getAddress()!.getPort(),
+    "GET /c HTTP/1.1\r\nHost: t\r\nCookie: a=1\r\nCookie: b=2\r\nConnection: close\r\n\r\n")
+  assert str.starts_with(resp, "HTTP/1.1 200")
+  assert str.contains(resp, "a=1|a=1;b=2")
+  srv.stop(0)
+}
+
+test "lifecycle: port 0 binds a real port, serves, and join returns after stop" {
+  let cfg = ServerConfig { host: "127.0.0.1", port: 0, max_body: DEFAULT_MAX_BODY }
+  let h = start(cfg, [route_get("/hello", hello_handler)], [])
+  # the OS picked the port; the handle reports the real one, and it works
+  assert h.port > 0
+  let (st, body) = test_fetch_bytes("http://127.0.0.1:${h.port}/hello")
+  assert st == 200
+  assert body == bytes.utf8("hello")
+  stop(h, 0)
+  # stop released the latch: join returns instead of blocking forever
+  join(h)
+  # and the listener really closed — a fresh connection is refused
+  match catch_fault(() => Socket.new("127.0.0.1", h.port)) {
+    Ok(s) -> {
+      s.close()
+      assert false
+    }
+    Err(_) -> ()
+  }
+}
+
+test "start refuses a broken route table before binding a socket" {
+  let cfg = ServerConfig { host: "127.0.0.1", port: 0, max_body: DEFAULT_MAX_BODY }
+  let r = catch_panic(() => start(cfg, [route_get("/a/{unclosed", hello_handler)], []))
+  match r {
+    Ok(_) -> {
+      assert false
+    }
+    Err(m) -> {
+      assert str.contains(m.message, "route table")
+    }
+  }
 }
