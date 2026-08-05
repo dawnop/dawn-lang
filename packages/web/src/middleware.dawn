@@ -7,9 +7,9 @@ use std/bytes
 use std/list
 use std/map
 use java "java.lang.System"
-use types.{Request, Response, HttpError, Handler, with_header, text, header, http_error}
+use types.{Request, Response, HttpError, Handler, Text, with_header, text, header, http_error}
 
-# One access-log line per request: method, path, status, wall time.
+## One access-log line per request: method, path, status, wall time.
 pub fn with_logging(next: Handler) -> Handler =
   req => {
     let started = System.nanoTime()
@@ -46,6 +46,10 @@ fn route_has_tag(req: Request, tag: String) -> Bool =
 # It also measures `raw`, the bytes, rather than `str.len(body)`, which counts
 # code points. The message always said "bytes" while the check counted
 # characters, so a body of CJK or emoji got up to 3-4x the stated budget.
+## Reject bodies over a byte budget (the bytes, not the code points) before
+## the handler sees them. Routes tagged "raw-body" opt out — an upload is
+## bounded in front, by nginx. A policy check, not a memory guard: the server's
+## own ceiling (`server.DEFAULT_MAX_BODY`) is what bounds the allocation.
 pub fn with_body_limit(limit: Int, next: Handler) -> Handler =
   req =>
   if route_has_tag(req, "raw-body") == false && bytes.len(req.raw) > limit {
@@ -54,24 +58,42 @@ pub fn with_body_limit(limit: Int, next: Handler) -> Handler =
     next(req)
   }
 
-# CORS: answer preflight OPTIONS directly, and stamp Access-Control-* on every
-# response. `origins` is a comma-separated allow-list; the request's Origin is
+# `origins` is a comma-separated allow-list; the request's Origin is
 # echoed when it is in the list (browsers require an exact echo, not "*", with
 # credentials), matching FastAPI's CORSMiddleware — so both http://localhost:5173
 # and http://127.0.0.1:5173 work in dev. Allow-Credentials is sent (FastAPI has
 # allow_credentials=True). Routes tagged "no-cors" (WebDAV) are not browser
-# traffic: their own OPTIONS (DAV headers) passes through and nothing is stamped.
+# traffic: nothing is stamped and every method, OPTIONS included, reaches the
+# route.
+## CORS: answer a browser preflight directly, and stamp Access-Control-* on
+## every other response. Only a real preflight is answered here; any other
+## OPTIONS is an ordinary request and reaches the application's routes.
 pub fn with_cors(origins: String, next: Handler) -> Handler =
   req => {
     let origin = pick_origin(req, cors_list(origins))
     if route_has_tag(req, "no-cors") {
       next(req)
-    } else if req.method == "OPTIONS" {
+    } else if is_preflight(req) {
       Ok(cors_headers(origin, text(204, "")))
     } else {
       Ok(cors_headers(origin, next(req)?))
     }
   }
+
+# A CORS preflight is an OPTIONS carrying *both* Origin and
+# Access-Control-Request-Method — the two headers the Fetch standard says a
+# browser sends before a non-simple cross-origin request. Both are required
+# because either alone names something else: a bare OPTIONS is a client asking
+# the server what it supports (a WebDAV client reading DAV/Allow, `curl -X
+# OPTIONS`), and an OPTIONS with Origin but no request-method header is an
+# ordinary cross-origin OPTIONS, not the preflight of one.
+#
+# This middleware used to answer *every* untagged OPTIONS with a 204 and never
+# call the handler, so an application's own OPTIONS route was unreachable
+# unless it opted out of CORS entirely.
+fn is_preflight(req: Request) -> Bool =
+  req.method == "OPTIONS" && header(req, "origin") != None &&
+  header(req, "access-control-request-method") != None
 
 fn cors_list(csv: String) -> List[String] = filter(map(str.split(csv, ","), s => str.trim(s)), s => s != "")
 
@@ -156,6 +178,44 @@ test "CORS echoes an allow-listed origin, and always varies on Origin" {
         k == "Access-Control-Allow-Origin"
       }) == None
       assert list.find(r.headers, h => h == ("Vary", "Origin")) != None
+    }
+    Err(_) -> { assert false }
+  }
+}
+
+test "CORS answers a real preflight and lets every other OPTIONS through" {
+  let app = with_cors("https://a.example", ok_handler)
+  # both headers present: a browser preflight, answered here with 204 and the
+  # Access-Control-* set — the handler is never reached (it answers 200 "ok")
+  let pre = app(req_of("OPTIONS", map.from([
+    ("origin", ["https://a.example"]),
+    ("access-control-request-method", ["PUT"]),
+  ])))
+  match pre {
+    Ok(r) -> {
+      assert r.status == 204
+      assert list.find(r.headers, h => h == ("Access-Control-Allow-Origin", "https://a.example")) != None
+      assert list.find(r.headers, h => h == ("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")) != None
+    }
+    Err(_) -> { assert false }
+  }
+  # a bare OPTIONS is a client asking what the server supports (WebDAV clients
+  # read DAV/Allow off one); it used to be swallowed by the 204 above
+  match app(req_of("OPTIONS", map.empty())) {
+    Ok(r) -> {
+      assert r.status == 200
+      assert r.body == Text("ok")
+    }
+    Err(_) -> { assert false }
+  }
+  # Origin without Access-Control-Request-Method is an ordinary cross-origin
+  # OPTIONS, not a preflight: it reaches the route and is stamped like any
+  # other response
+  match app(req_of("OPTIONS", map.from([("origin", ["https://a.example"])]))) {
+    Ok(r) -> {
+      assert r.status == 200
+      assert r.body == Text("ok")
+      assert list.find(r.headers, h => h == ("Access-Control-Allow-Origin", "https://a.example")) != None
     }
     Err(_) -> { assert false }
   }
