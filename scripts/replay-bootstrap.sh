@@ -24,6 +24,20 @@ OUT=${TMPDIR:-/tmp}/replay-bootstrap.$$
 mkdir -p "$OUT"
 trap 'rm -rf "$OUT"' EXIT
 
+# resolved against the caller's cwd, which the cd below leaves
+LOCAL_SEED=$(readlink -f "$SEED_ARG" 2>/dev/null || true)
+
+cd "$(dirname "$0")/.."
+# shellcheck disable=SC2034  # read by the sourced seedjar.sh
+ROOT=$(pwd)
+# seed_verify and the checksum table it reads, relative to ROOT. This script's
+# whole subject is the trust root, so a downloaded seed it did not check would
+# be the sharpest possible place to skip the check: the chain below would then
+# reproduce, byte for byte and with every "OK" printed, whatever compiler the
+# download happened to be.
+# shellcheck disable=SC1091
+. scripts/seedjar.sh
+
 case "$SEED_ARG" in
   v[0-9]*)
     SEED="$OUT/seed.jar"
@@ -31,14 +45,24 @@ case "$SEED_ARG" in
     echo "fetching seed for $SEED_ARG ..."
     curl -fsSL -o "$SEED" "$base/dawn-selfhost.jar" 2>/dev/null \
       || curl -fsSL -o "$SEED" "$base/dawn.jar"
+    # A tag with no recorded digest warns and passes: v0.7.0 and earlier
+    # published the Kotlin `dawn.jar` and are deliberately absent from
+    # scripts/seed-checksums.txt, so replaying from the trust root still works
+    # — it just says out loud that nothing checked it.
+    seed_verify "$SEED" "$SEED_ARG"
     ;;
   *)
-    SEED="$(readlink -f "$SEED_ARG")"
-    [ -f "$SEED" ] || { echo "error: seed jar not found: $SEED_ARG" >&2; exit 2; }
+    SEED=$LOCAL_SEED
+    if [ -z "$SEED" ] || [ ! -f "$SEED" ]; then
+      echo "error: seed jar not found: $SEED_ARG" >&2
+      exit 2
+    fi
+    # The escape hatch, worded as seedjar.sh words DAWN_SEED: a jar pointed at
+    # by hand is not the pinned release, so there is nothing to check it
+    # against. Say so rather than let it pass as if it had been verified.
+    echo "warning: using local seed $SEED (unverified)" >&2
     ;;
 esac
-
-cd "$(dirname "$0")/.."
 # --std std explicitly: an old seed's *default* std is its embedded copy, but
 # the replay must compile today's sources against today's std
 VENDOR=(--std std

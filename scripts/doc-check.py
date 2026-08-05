@@ -214,6 +214,30 @@ SITE_PROGRAMS = [
     ROOT / "site" / "play-ui" / "samples",
 ]
 
+# --- running an example ----------------------------------------------------
+# Every example here is a whole program somebody wrote, and a program that
+# loops or reads stdin does not fail -- it waits. Unbounded, the gate waits
+# with it until the CI job's own limit kills the runner, and the transcript
+# ends mid-check saying nothing about which document did it. A bound turns that
+# into a named failing check.
+#
+# 120s is a hang detector, not a performance budget: the slowest example
+# measured is a couple of seconds, and the toolchain is already built by the
+# time this runs (gates.yml builds it first, and bin/dawn caches).
+EXAMPLE_TIMEOUT = 120
+
+
+def run_example(cmd: list[str], **kw):
+    """Run one example under EXAMPLE_TIMEOUT. `None` means it timed out; the
+    caller reports it, because only the caller knows which document it came
+    from."""
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True,
+                              timeout=EXAMPLE_TIMEOUT, **kw)
+    except subprocess.TimeoutExpired:
+        return None
+
+
 LINK = re.compile(r"\[[^\]]*\]\(([^)]+)\)")
 HEADING = re.compile(r"^#{1,6}\s+(.*?)\s*$", re.M)
 # Every fenced block, in order, not just the dawn ones: the tutorial's contract
@@ -706,7 +730,12 @@ def check_blocks(path: pathlib.Path, text: str,
         src = work / f"{path.stem}_{i}.dawn"
         src.write_text(body, encoding="utf-8")
         cmd = [str(DAWN), "run" if mode == "run" else "check", str(src)]
-        r = subprocess.run(cmd, capture_output=True, text=True)
+        r = run_example(cmd)
+        if r is None:
+            bad.append(f"{rel}:{line}: ```{info} block did not finish within "
+                       f"{EXAMPLE_TIMEOUT}s (an example that loops or waits on "
+                       f"stdin hangs this gate rather than failing it)")
+            continue
         if r.returncode != 0:
             head = (r.stderr or r.stdout).strip().splitlines()
             detail = head[0] if head else f"exit {r.returncode}"
@@ -798,8 +827,11 @@ def check_site_pages() -> tuple[list[str], int]:
                 bad.append(f"{rel}: no {expected_file.name} beside it (a program "
                            f"the website ships records the output it prints)")
                 continue
-            r = subprocess.run([str(DAWN), "run", str(src)], capture_output=True,
-                               text=True, cwd=ROOT)
+            r = run_example([str(DAWN), "run", str(src)], cwd=ROOT)
+            if r is None:
+                bad.append(f"{rel}: did not finish within {EXAMPLE_TIMEOUT}s "
+                           f"(a program the website ships must terminate)")
+                continue
             if r.returncode != 0:
                 head = (r.stderr or r.stdout).strip().splitlines()
                 detail = head[0] if head else f"exit {r.returncode}"
