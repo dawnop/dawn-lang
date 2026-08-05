@@ -92,6 +92,11 @@ WAIT="${DCAP_WAIT:-1800}"
 
 [ $# -gt 0 ] || { echo "dcap: nothing to run" >&2; exit 2; }
 mkdir -p "$STATE"
+# Payloads deliberately kept from signal-killed runs (see the end of this file)
+# are the only files that outlive a run. Prune them, or this becomes the same
+# litter pile the old script left in /tmp -- 213 scripts, which is itself an
+# invitation to `rm /tmp/dawn*` and thereby to the lock-deletion bug above.
+find "$STATE" -maxdepth 1 -name 'run.*.sh' -mtime +7 -delete 2>/dev/null || true
 
 # --- the slice must exist and must be capped -------------------------------
 # A missing slice is a silent downgrade to "no total budget", which looks
