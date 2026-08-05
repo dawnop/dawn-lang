@@ -189,25 +189,33 @@ fn write_class(dir: String, name: String, bs: Bytes) -> Result[Unit, String] !io
 
 ## Full program emission — shared runtime, prelude ADTs, every std and user
 ## module class, vendored rt — in a stable order, plus the entry class name
-## ("" when no user module declares `fn main`) and, per user module with test
+## ("" when no user module declares `fn main`) and, per module with test
 ## blocks, (class name, module path, test names) in run order. Without a
 ## target: the runtime subset only.
+##
+## `std_tests` is `dawn test --stdlib`: the bundled std's own test blocks are
+## lowered and emitted, and they are what gets reported. It is off everywhere
+## else, so a `dawn build` of a user program carries no std test body — the
+## std modules are lowered without them, exactly as before.
 fn collect_program(
   target: String,
   std_dir: String,
   opts: CtOpts,
-  closure: Bool
+  closure: Bool,
+  std_tests: Bool
 ) -> (List[(String, Bytes)], String, List[(String, String, List[String])]) !io = {
   var classes: List[(String, Bytes)] = []
   var adts = prelude_adts()
   var mods: List[CheckedMod] = []
   var std_mods: List[(String, Cx, TModule, CtOut)] = []
-  if target != "" {
-    if not io.exists(target) {
-      cli_error("no such file or directory: " ++ target)
-    }
-    if io.exists(target) && not io.is_dir(target) && not str.ends_with(target, ".dawn") {
-      cli_error("source files must end in .dawn: " ++ target)
+  if target != "" || std_tests {
+    if target != "" {
+      if not io.exists(target) {
+        cli_error("no such file or directory: " ++ target)
+      }
+      if io.exists(target) && not io.is_dir(target) && not str.ends_with(target, ".dawn") {
+        cli_error("source files must end in .dawn: " ++ target)
+      }
     }
     let std = match load_std(std_dir) {
       Ok(sc) -> sc
@@ -222,21 +230,23 @@ fn collect_program(
     # loading everything under src/ (module-access-design 2.2). The full-load
     # default stays: unreferenced modules still check, which is bit-rot
     # protection worth keeping as the default.
-    let loaded =
-      if closure && io.is_dir(target) {
-        let entry_file = target ++ "/src/main.dawn"
-        if not io.exists(entry_file) {
-          cli_error("--closure needs an entry module (expected " ++ entry_file ++ ")")
+    if target != "" {
+      let loaded =
+        if closure && io.is_dir(target) {
+          let entry_file = target ++ "/src/main.dawn"
+          if not io.exists(entry_file) {
+            cli_error("--closure needs an entry module (expected " ++ entry_file ++ ")")
+          }
+          load_file(entry_file)
+        } else if io.is_dir(target) {
+          load_directory(target)
+        } else {
+          load_file(target)
         }
-        load_file(entry_file)
-      } else if io.is_dir(target) {
-        load_directory(target)
-      } else {
-        load_file(target)
-      }
-    let prog = analyze_program(loaded, std, opts, jsig_real())
-    if len(prog.diags) > 0 { fail_compile(prog.diags) }
-    mods = prog.modules
+      let prog = analyze_program(loaded, std, opts, jsig_real())
+      if len(prog.diags) > 0 { fail_compile(prog.diags) }
+      mods = prog.modules
+    }
     for cm in mods {
       for pr in map.entries(cm.cx.adts) {
         let (k, v) = pr
@@ -350,12 +360,14 @@ fn collect_program(
   # Every module's Core, lowered once. `reach` reads it below and emit_module
   # reads it further down -- the same value, not two lowerings that are
   # asserted to agree (docs/audit/re-audit-2026-07-30.md RC-04). Test blocks
-  # ride along for the user's modules only, because only those are emitted.
+  # ride along for the user's modules only, because only those are emitted --
+  # unless `dawn test --stdlib` asked for std's, in which case there is no
+  # user module and std's are the whole program.
   var std_lm: List[lower.LMod] = []
   for sm in std_mods {
     let (cls, _cx2, tm2, _ct2) = sm
     std_lm = std_lm ++
-      [lower.lower_module_full(cls, tm2, traits, impl_table, adts, prog_fns, false)]
+      [lower.lower_module_full(cls, tm2, traits, impl_table, adts, prog_fns, std_tests)]
   }
   var user_lm: List[lower.LMod] = []
   for cm in mods {
@@ -403,6 +415,16 @@ fn collect_program(
   }
   var entry = ""
   var tests_info: List[(String, String, List[String])] = []
+  if std_tests {
+    for sm in std_mods {
+      let (cls, _cx3, tm3, _ct3) = sm
+      if len(tm3.tests) > 0 {
+        var names: List[String] = []
+        for tf in tm3.tests { names = names ++ [tf.name] }
+        tests_info = tests_info ++ [(cls, cls, names)]
+      }
+    }
+  }
   var ui = 0
   for cm in mods {
     classes = classes ++ emit_module(adts, traits, impl_table, prog_fns,
@@ -471,6 +493,7 @@ fn usage() -> String = join([
   "usage:",
   "  dawn run <target>                    compile and run (in-process JVM)",
   "  dawn test <target>                   compile with test blocks and run them",
+  "  dawn test --stdlib                   run the bundled standard library's own test blocks",
   "  dawn build <target> [-o out.jar]     produce an executable jar (tests stripped)",
   "  dawn build <target> --native [-o out]",
   "                                       produce a standalone native binary (needs native-image)",
@@ -898,7 +921,7 @@ fn run_run(rest0: List[String]) -> Unit !io = {
   if target == "" {
     return cli_error("usage: dawn run [--cp jars] <file.dawn | project-dir>")
   }
-  let (classes, entry, _) = collect_program(target, std_dir, opts, closure)
+  let (classes, entry, _) = collect_program(target, std_dir, opts, closure, false)
   if entry == "" {
     return cli_error(target ++ " has no pub fn main() -> Unit !io, nothing to run")
   }
@@ -909,10 +932,17 @@ fn run_run(rest0: List[String]) -> Unit !io = {
 
 ## `selfhost test [--std <dir>] <target>` — mirror of `dawn test`: emit with
 ## test blocks plus a synthesized dawn$TestMain runner, and run it.
+##
+## `--stdlib` runs the bundled std's own test blocks instead of a target's,
+## the way `dawn doc --stdlib` documents it instead of a target. std is not a
+## project — its modules see the intrinsics no user module may name, and its
+## `impl Iter[String]` is an orphan anywhere else — so `dawn test std/str.dawn`
+## cannot be made to work, and a flag is the whole mechanism.
 fn run_test(rest0: List[String]) -> Unit !io = {
   let (_, rest1) = extract_cp(rest0)
   let (opts, restb) = extract_ct_opts(rest1)
-  let (closure2, rest) = extract_flag(restb, "--closure")
+  let (closure2, restc) = extract_flag(restb, "--closure")
+  let (std_tests, rest) = extract_flag(restc, "--stdlib")
   var target = ""
   var std_dir = "std"
   var i = 0
@@ -926,11 +956,18 @@ fn run_test(rest0: List[String]) -> Unit !io = {
       i = i + 1
     }
   }
-  if target == "" {
-    return cli_error("usage: dawn test [--cp jars] <file.dawn | project-dir>")
+  if std_tests && target != "" {
+    return cli_error("dawn test --stdlib takes no target: " ++ target)
   }
-  let (classes, _, tests_info) = collect_program(target, std_dir, opts, closure2)
-  if len(tests_info) == 0 { return cli_error(target ++ " has no test blocks") }
+  if target == "" && not std_tests {
+    return cli_error(
+      "usage: dawn test [--cp jars] <file.dawn | project-dir> | dawn test --stdlib")
+  }
+  let (classes, _, tests_info) = collect_program(target, std_dir, opts, closure2, std_tests)
+  if len(tests_info) == 0 {
+    return cli_error(if std_tests { std_dir ++ " has no test blocks" }
+    else { target ++ " has no test blocks" })
+  }
   var runner_tests: List[(String, Int, String)] = []
   for mi in tests_info {
     let (cls, mod_path, names) = mi
@@ -970,7 +1007,7 @@ fn run_emitrt(rest: List[String]) -> Unit !io = {
   if out == "" {
     return cli_error("usage: dawn __emit <file.dawn | project-dir> -o <dir>")
   }
-  let (classes, _, _) = collect_program(target, std_dir, ct_default(), false)
+  let (classes, _, _) = collect_program(target, std_dir, ct_default(), false, false)
   var seen: Set[String] = set.empty()
   var n = 0
   for pair in classes {
@@ -1183,7 +1220,7 @@ fn run_build(rest0: List[String]) -> Unit !io = {
   } else {
     stem ++ ".jar"
   }
-  let (classes, entry, _) = collect_program(target, std_dir, opts, closure)
+  let (classes, entry, _) = collect_program(target, std_dir, opts, closure, false)
   if entry == "" {
     return cli_error(target ++ " has no pub fn main() -> Unit !io to use as an entry point")
   }

@@ -32,6 +32,7 @@ use stdlib.{StdCtx, load_std}
 use interp.{ct_default}
 use jsig.{jsig_refused}
 use analyze.{Program, LocDiag, load_directory, load_file, analyze_program}
+use tast.{TModule}
 use cdriver
 use version.{VERSION}
 use fmt
@@ -49,6 +50,7 @@ fn usage() -> String =
     "  dawnc emitc [--std <dir>] <target> [-o out] emit the C translation unit",
     "  dawnc run   [--std <dir>] <target>          compile and run",
     "  dawnc test  [--std <dir>] <target>          compile the test blocks and run them",
+    "  dawnc test  [--std <dir>] --stdlib          run the bundled std's own test blocks",
     "  dawnc fmt [--check] <file.dawn | dir>...    format files in place",
     "  dawnc doc <target> | --stdlib | --builtins  emit the API reference as JSON",
     "  dawnc add <spec> [--subdir <p>] [--as <alias>] [--dir <project>]",
@@ -365,7 +367,8 @@ fn cmd_doc(rest: List[String]) -> Unit !io = {
   print(doc.project_json(prog))
 }
 
-## `dawnc test [--std <dir>] <target>` -- the native mirror of `dawn test`.
+## `dawnc test [--std <dir>] <target> | --stdlib` -- the native mirror of
+## `dawn test`.
 ##
 ## The JVM driver emits every test block as a `dawn$test$i` method and then
 ## generates one more class, `dawn$TestMain`, to call them (testrun.dawn).
@@ -391,12 +394,16 @@ fn cmd_doc(rest: List[String]) -> Unit !io = {
 fn cmd_test(rest: List[String]) -> Unit !io = {
   var std_dir = "std"
   var target = ""
+  var std_tests = false
   var i = 0
   while i < len(rest) {
     var spec = ""
     if rest[i] == "--std" && i + 1 < len(rest) {
       std_dir = rest[i + 1]
       i = i + 2
+    } else if rest[i] == "--stdlib" {
+      std_tests = true
+      i = i + 1
     } else if rest[i] == "--cp" && i + 1 < len(rest) {
       spec = rest[i + 1]
       i = i + 2
@@ -416,28 +423,48 @@ fn cmd_test(rest: List[String]) -> Unit !io = {
       }
     }
   }
-  if target == "" {
-    return cli_error("usage: dawn test [--cp jars] <file.dawn | project-dir>")
+  if std_tests && target != "" {
+    return cli_error("dawn test --stdlib takes no target: " ++ target)
+  }
+  if target == "" && not std_tests {
+    return cli_error(
+      "usage: dawn test [--cp jars] <file.dawn | project-dir> | dawn test --stdlib")
   }
   let std = load_or_die(std_dir)
-  let prog = analyzed(std, target)
+  let prog = if std_tests { Program { modules: [], diags: [] } } else { analyzed(std, target) }
+  # the modules whose test blocks are being run: the target's, or std's own
+  # under --stdlib
+  var suite: List[(String, String, TModule)] = []
+  if std_tests {
+    for sm in std.mods {
+      let (cls, _cx, tm, _ct) = sm
+      suite = suite ++ [(cls, cls, tm)]
+    }
+  } else {
+    for cm in prog.modules { suite = suite ++ [(cm.class_name, cm.mod_path, cm.tm)] }
+  }
   # the module path prefixes a label only when more than one module has tests
   # -- run_test's rule, so that the two reports read the same
   var bearing = 0
-  for cm in prog.modules {
-    if len(cm.tm.tests) > 0 { bearing = bearing + 1 }
+  for s in suite {
+    let (_c, _p, tm) = s
+    if len(tm.tests) > 0 { bearing = bearing + 1 }
   }
-  if bearing == 0 { return cli_error(target ++ " has no test blocks") }
+  if bearing == 0 {
+    return cli_error(if std_tests { std_dir ++ " has no test blocks" }
+    else { target ++ " has no test blocks" })
+  }
   var runner_tests: List[(String, Int, String)] = []
-  for cm in prog.modules {
+  for s in suite {
+    let (cls, mod_path, tm) = s
     var idx = 0
-    for tf in cm.tm.tests {
-      let label = if bearing > 1 { cm.mod_path ++ " :: " ++ tf.name } else { tf.name }
-      runner_tests = runner_tests ++ [(cm.class_name, idx, label)]
+    for tf in tm.tests {
+      let label = if bearing > 1 { mod_path ++ " :: " ++ tf.name } else { tf.name }
+      runner_tests = runner_tests ++ [(cls, idx, label)]
       idx = idx + 1
     }
   }
-  let ctext = match cdriver.c_test_text(std, prog, runner_tests) {
+  let ctext = match cdriver.c_test_text(std, prog, runner_tests, std_tests) {
     Ok(s) -> s
     Err(e) -> {
       cli_error(e ++ " in " ++ target)

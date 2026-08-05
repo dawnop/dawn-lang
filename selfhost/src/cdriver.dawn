@@ -149,13 +149,14 @@ fn named_tests(m: CModule) -> CModule = {
 
 ## Every module of the program, std first, lowered and reference-counted.
 ## `with_tests` is `dawn test`'s: the test bodies ride along, and so do the
-## dictionaries only a test asks for (`lower.emitted_core`). std's tests never
-## do, which is the JVM path's answer too -- `collect_program` reports test
-## blocks out of the program's modules only.
+## dictionaries only a test asks for (`lower.emitted_core`). std's tests ride
+## only under `std_tests` (`dawn test --stdlib`), which is the JVM path's
+## answer too -- `collect_program` takes the same pair of flags.
 fn build_units(
   std: StdCtx,
   prog: Program,
-  with_tests: Bool
+  with_tests: Bool,
+  std_tests: Bool
 ) -> (List[EmitMod], String, Adts) !io = {
   let (adts, traits, impl_table, prog_fns) = program_tables(std, prog.modules)
   # const values by declaring module, the same view the JVM path builds: a
@@ -171,9 +172,16 @@ fn build_units(
   var entry = ""
   for sm in std.mods {
     let (cls, cx, tm, ct) = sm
+    let core =
+      if std_tests {
+        named_tests(lower.emitted_core(lower.lower_module_full(cls, tm, traits,
+          impl_table, adts, prog_fns, true)))
+      } else {
+        lower.lower_module(cls, tm, traits, impl_table, adts, prog_fns)
+      }
     units = units ++ [
       EmitMod {
-        m: rc.rc_module(lower.lower_module(cls, tm, traits, impl_table, adts, prog_fns)),
+        m: rc.rc_module(core),
         consts: merged_consts(cx, ct, const_vals),
         blocks: ct.blocks
       }
@@ -209,7 +217,12 @@ fn build_units(
 ## Which Unicode tables ride: the same question, and the same answer, as the
 ## JVM path. The units are already lowered (rc included; the walk ignores
 ## CDup/CSDrop), so reach reads them as they are.
-fn tables(units: List[EmitMod], prog: Program) -> TableUse = {
+##
+## `dawn test --stdlib` has no user module to root the walk at, so it carries
+## everything -- again the JVM path's answer, whose targetless `collect_program`
+## reaches for `all_tables` for the same reason.
+fn tables(units: List[EmitMod], prog: Program, std_tests: Bool) -> TableUse = {
+  if std_tests { return reach.all_tables() }
   var reach_mods: List[CModule] = []
   for u2 in units { reach_mods = reach_mods ++ [u2.m] }
   var reach_roots: List[String] = []
@@ -222,9 +235,9 @@ fn tables(units: List[EmitMod], prog: Program) -> TableUse = {
 ## everything it calls, and after S3 the collections *are* std -- `[1, 2]`
 ## calls `std/pvec.from_array`.
 pub fn c_text(std: StdCtx, prog: Program) -> Result[String, String] !io = {
-  let (units, entry, adts) = build_units(std, prog, false)
+  let (units, entry, adts) = build_units(std, prog, false, false)
   if entry == "" { return Err("no pub fn main() -> Unit !io, nothing to compile") }
-  Ok(emitc.emit_program(units, entry, tables(units, prog), adts))
+  Ok(emitc.emit_program(units, entry, tables(units, prog, false), adts))
 }
 
 ## The same translation unit with the test blocks compiled in and a generated
@@ -234,13 +247,18 @@ pub fn c_text(std: StdCtx, prog: Program) -> Result[String, String] !io = {
 ## `tests` is (owning module class, index within that module, label) in run
 ## order: the triple `testrun.gen_test_main` takes on the JVM, built the same
 ## way by the driver so that the two reports carry the same labels.
+##
+## `std_tests` is `--stdlib`: the tests being run are std's own, and `prog`
+## carries no modules at all.
 pub fn c_test_text(
   std: StdCtx,
   prog: Program,
-  tests: List[(String, Int, String)]
+  tests: List[(String, Int, String)],
+  std_tests: Bool
 ) -> Result[String, String] !io = {
-  let (units, _entry, adts) = build_units(std, prog, true)
-  Ok(emitc.emit_headless(units, tables(units, prog), adts) ++ ctestrun.runner(tests))
+  let (units, _entry, adts) = build_units(std, prog, true, std_tests)
+  Ok(emitc.emit_headless(units, tables(units, prog, std_tests), adts) ++
+      ctestrun.runner(tests))
 }
 
 ## The embedded C runtime file `name`, for the native driver's `build` to
