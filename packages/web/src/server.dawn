@@ -501,9 +501,11 @@ pub fn start(cfg: ServerConfig, routes: List[Route], middleware: List[Middleware
   server.createContext("/", ex => handle(routes, middleware, cfg.max_body, ex))
   server.setExecutor(Executors.newVirtualThreadPerTaskExecutor()!)
   server.start()
-  let bound = server.getAddress()!.getPort()
-  println("listening on http://${cfg.host}:$bound")
-  ServerHandle { server: server, port: bound, done: CountDownLatch.new(1) }
+  # No println here: start is a library call and the handle reports the port.
+  # (A port-0 test transcript with a random port in it broke run-diff, which
+  # rightly treats test stdout as a deterministic artifact.) The classic
+  # entry points below keep the message.
+  ServerHandle { server: server, port: server.getAddress()!.getPort(), done: CountDownLatch.new(1) }
 }
 
 ## Block until stop() releases this handle. A server's main() usually ends
@@ -525,8 +527,11 @@ pub fn serve_app(port: Int, routes: List[Route], middleware: List[Middleware]) -
 
 # Same, with the in-memory body ceiling chosen explicitly (0 = unbounded, which
 # is what this framework did before the ceiling existed).
-pub fn serve_app_bounded(port: Int, max_body: Int, routes: List[Route], middleware: List[Middleware]) -> Unit !io =
-  join(start(ServerConfig { host: "127.0.0.1", port: port, max_body: max_body }, routes, middleware))
+pub fn serve_app_bounded(port: Int, max_body: Int, routes: List[Route], middleware: List[Middleware]) -> Unit !io = {
+  let h = start(ServerConfig { host: "127.0.0.1", port: port, max_body: max_body }, routes, middleware)
+  println("listening on http://127.0.0.1:${h.port}")
+  join(h)
+}
 
 test "query strings parse, including empty and embedded =" {
   assert parse_query("a=1&b=x") == [("a", "1"), ("b", "x")]
