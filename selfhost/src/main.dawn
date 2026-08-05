@@ -431,6 +431,25 @@ fn collect_program(
   (classes, entry, tests_info)
 }
 
+## The JVM this process is running on, not whatever `java` PATH resolves to.
+##
+## Both spawns below continue this run -- one re-execs the same invocation with
+## more class path, the other runs the classes this process just emitted -- so
+## the JVM that answers should be the one the build chose. It was not: it was
+## whatever came first on PATH, which on a machine with a newer JDK installed
+## beside the one JAVA_HOME names is a different runtime, silently. That gap is
+## measurable rather than theoretical -- a JDK 21 and a JDK 26 disagree about
+## 18 code points, which is why the case tables were moved into the compiler in
+## the first place (dawn_rt.h's note on dawn_case_range).
+##
+## `java.home` is the running JVM's own home and is always set, so there is no
+## fallback worth arguing about: with it missing the process is not on a JVM.
+fn host_java() -> String !io =
+  match System.getProperty("java.home") {
+    Some(h) -> h ++ "/bin/java"
+    None -> "java"
+  }
+
 fn host_classpath() -> String !io =
   match System.getProperty("java.class.path") {
     Some(s) -> s
@@ -576,6 +595,19 @@ fn fail_doc(diags: List[LocDiag]) -> Unit !io = {
 }
 
 ## Print the Kotlin CLI's error shape and exit 2.
+## Refuse a second bare positional.
+##
+## `target = rest[i]` in a bare `else` made every one of these subcommands take
+## the *last* target on the line and say nothing about the others, so a typo'd
+## flag (`dawn build proj -0 out`) built `out` -- a real directory name to the
+## loop -- and reported success. run takes a second positional on purpose (it
+## forwards the rest to the program), which is why it is not here.
+fn refuse_second_target(cmd: String, have: String, got: String) -> Unit !io =
+  if have != "" {
+    cli_error(cmd ++ " takes one target, got `" ++ have ++ "` and `" ++ got ++
+        "`; a bare word after the target is not a flag this subcommand knows")
+  }
+
 fn cli_error(msg: String) -> Unit !io = {
   io.eprintln("error: " ++ msg)
   let _ = io.exit(2)
@@ -800,7 +832,7 @@ fn maybe_with_deps(mode: String, rest: List[String]) -> Unit !io = {
   var cp = host_classpath()
   for j in jars { cp = cp ++ path_sep() ++ j }
   for j in cpjars { cp = cp ++ path_sep() ++ j }
-  var cmd: List[String] = ["java", "-Xss512m", "-cp", cp, "main", mode]
+  var cmd: List[String] = [host_java(), "-Xss512m", "-cp", cp, "main", mode]
   cmd = cmd ++ rest
   let pb = ProcessBuilder.new(cmd)
   let env = pb.environment().expect("env")
@@ -833,7 +865,7 @@ fn write_temp_classes(classes: List[(String, Bytes)]) -> String !io = {
 
 ## Spawn `java -Xss512m -cp <cp> <cls> <args...>` inheriting stdio; the exit code.
 fn spawn_java(cp: String, cls: String, args: List[String]) -> Int !io = {
-  var cmd: List[String] = ["java", "-Xss512m", "-cp", cp, cls]
+  var cmd: List[String] = [host_java(), "-Xss512m", "-cp", cp, cls]
   cmd = cmd ++ args
   let pb = ProcessBuilder.new(cmd)
   let _ = pb.inheritIO()
@@ -889,6 +921,7 @@ fn run_test(rest0: List[String]) -> Unit !io = {
       std_dir = rest[i + 1]
       i = i + 2
     } else {
+      refuse_second_target("dawn test", target, rest[i])
       target = rest[i]
       i = i + 1
     }
@@ -929,6 +962,7 @@ fn run_emitrt(rest: List[String]) -> Unit !io = {
       std_dir = rest[i + 1]
       i = i + 2
     } else {
+      refuse_second_target("dawn __emit", target, rest[i])
       target = rest[i]
       i = i + 1
     }
@@ -1130,6 +1164,7 @@ fn run_build(rest0: List[String]) -> Unit !io = {
       native = true
       i = i + 1
     } else {
+      refuse_second_target("dawn build", target, rest[i])
       target = rest[i]
       i = i + 1
     }
@@ -1279,6 +1314,7 @@ fn run_doc(rest: List[String]) -> Unit !io = {
       stdlib_mode = true
       i = i + 1
     } else {
+      refuse_second_target("dawn doc", target, rest[i])
       target = rest[i]
       i = i + 1
     }
