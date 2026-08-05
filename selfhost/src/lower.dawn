@@ -2629,7 +2629,6 @@ pub fn lower_expr(st0: LSt, e: TExpr) -> (LSt, CExpr) = {
       lift_fn_value(st, o, name, is_builtin, ty)
     }
     XJava(call, _, _, ty) -> lower_java(st, call, ty)
-    _ -> panic("lower: expression not lowered yet: " ++ node_name(e))
   }
 }
 
@@ -3594,6 +3593,12 @@ test "emitted_core carries the test bodies and what they hoisted" {
 }
 
 ## The flat shape on its own, for the consumers that want nothing else.
+##
+## (There was a `node_name` below this, for a "not lowered yet" panic arm at
+## the end of `lower_expr`. Every TExpr variant has an arm now, so the arm was
+## unreachable and the four names it could print were all handled -- and an
+## unreachable panic is worse than nothing, because it reads as a guard.
+## Exhaustiveness is the guard; a variant added later is a compile error.)
 pub fn lower_module(
   owner: String,
   tm: TModule,
@@ -3603,14 +3608,3 @@ pub fn lower_module(
   prog_fns: Map[(String, String), Sig]
 ) -> CModule =
   lower_module_full(owner, tm, traits, impls, adts, prog_fns, false).m
-
-# ---- diagnostics ----
-
-fn node_name(e: TExpr) -> String =
-  match e {
-    XLambda(_, _, _, _, _, _, _) -> "XLambda"
-    XCtorValue(_, _, _, _, _) -> "XCtorValue"
-    XConstRef(_, _, _, _, _) -> "XConstRef"
-    XIndex(_, _, _, _, _, _) -> "XIndex"
-    _ -> "an unhandled node"
-  }

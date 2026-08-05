@@ -396,7 +396,24 @@ fn jumps(e: CExpr, lid: Int, brk: Bool, cont: Bool) -> Bool =
         Some(x) -> jumps(x, lid, brk, cont)
       },
     CDup(x, _) -> jumps(x, lid, brk, cont)
-    _ -> false
+    # The rest, enumerated for fv_expr's reason: a node added later must come
+    # back here as a compile error. A jump wrongly reported absent is an
+    # `unloop` that flattens an arm still holding a break.
+    CInt(_) -> false
+    CFloat(_) -> false
+    CBool(_) -> false
+    CStr(_) -> false
+    CUnit -> false
+    CLocal(_, _) -> false
+    CFnRef(_, _, _) -> false
+    CDictRef(_, _, _, _) -> false
+    CConstRef(_, _, _) -> false
+    CComptime(_, _, _) -> false
+    # not walked into, and the omission is deliberate rather than inherited
+    # from the wildcard: a `use java` argument can hold a jump, but this pass
+    # runs for the native backend, which refuses CForeign outright (emitc's
+    # CForeign arm). Walking it would be dead code with no way to test it.
+    CForeign(_, _) -> false
   }
 
 fn jumps_list(es: List[CExpr], lid: Int, brk: Bool, cont: Bool) -> Bool = {
@@ -1017,7 +1034,27 @@ fn rw(st: RSt, e: CExpr, consume: Bool, after: Set[Int]) -> (RSt, CExpr) = {
     # only ever exist on the path this pass does not run on.
     CForeign(_, _) -> (st, e)
 
-    _ -> (st, e)
+    # Everything left produces its own reference or is not counted at all, so
+    # the rewrite is the identity. Enumerated rather than swept up: the
+    # wildcard's answer for a node added later would be "no counting needed",
+    # which is the direction that costs a use-after-free.
+    CInt(_) -> (st, e)
+    CFloat(_) -> (st, e)
+    CBool(_) -> (st, e)
+    CStr(_) -> (st, e)
+    CUnit -> (st, e)
+    # a literal, a lifted function, a folded constant and a comptime value are
+    # all immortal: the emitter builds each once behind a static
+    CFnRef(_, _, _) -> (st, e)
+    CConstRef(_, _, _) -> (st, e)
+    CComptime(_, _, _) -> (st, e)
+    # dictionaries are not counted (`dictish`), and neither are the
+    # dictionaries a parameterised one is built from or read out of
+    CDictRef(_, _, _, _) -> (st, e)
+    CDictApply(_, _, _) -> (st, e)
+    CDictArg(_, _, _, _, _) -> (st, e)
+    # this pass is what puts CDup in; nothing it is handed holds one yet
+    CDup(_, _) -> (st, e)
   }
 }
 
@@ -1431,7 +1468,22 @@ fn chk_walk(c: Chk, e: CExpr, k: Bool) -> Chk =
     CTuple(elems, _) -> chk_list(c, elems, true)
     CListLit(elems, _) -> chk_list(c, elems, true)
     CClosure(_, _, caps, _) -> chk_list(c, caps, true)
-    _ -> c
+    # The leaves and the uncounted, enumerated for the reason fv_expr is: this
+    # walk is the pass's own oracle, so a node it silently skips is a hole in
+    # the check rather than a wrong answer anyone would see.
+    CInt(_) -> c
+    CFloat(_) -> c
+    CBool(_) -> c
+    CStr(_) -> c
+    CUnit -> c
+    CFnRef(_, _, _) -> c
+    CConstRef(_, _, _) -> c
+    CComptime(_, _, _) -> c
+    CDictRef(_, _, _, _) -> c
+    CDictApply(_, _, _) -> c
+    CDictArg(_, _, _, _, _) -> c
+    # inert here for the same reason `rw` leaves it alone
+    CForeign(_, _) -> c
   }
 
 fn chk_list(c: Chk, es: List[CExpr], k: Bool) -> Chk = {
