@@ -1,0 +1,25 @@
+# Total memory budget for every build/gate run started by scripts/dcap.
+#
+# Install:  sudo install -m 644 scripts/dawn.slice /etc/systemd/system/dawn.slice
+#           sudo systemctl daemon-reload
+#
+# The per-run cap (DCAP_MEM, default 6G) bounds ONE runaway. This bounds their
+# SUM, so a run that slipped past dcap's mutex costs throughput rather than the
+# machine. With a single run the scope's own 6G cap binds first and this does
+# nothing -- it is dormant until concurrency happens.
+#
+# Why 8G: it must be >= the largest legitimate single build (6G) with enough
+# headroom that slice pressure never kills a lone build earlier than its own
+# scope cap would, and small enough that dcap's total plus a normal agent
+# harness stays under the VM ceiling (~/.wslconfig, 16GiB). It cannot prevent
+# every global OOM -- the harness alone reached 13.8GiB on 2026-08-04 and is
+# not in this slice -- but it does bound dcap's contribution to one.
+#
+# Raise it deliberately and temporarily, never by editing this file in place:
+#   sudo systemctl set-property --runtime dawn.slice MemoryMax=12G
+[Unit]
+Description=Dawn build sandbox -- total memory budget for all dcap scopes
+
+[Slice]
+MemoryMax=8G
+MemorySwapMax=0
