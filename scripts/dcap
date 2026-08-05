@@ -1,0 +1,232 @@
+#!/usr/bin/env bash
+# Run a build/gate command under three guards, always:
+#   1. a mutex          -- only one dcap runs on this box at a time
+#   2. a child scope    -- MemoryMax, so one runaway dies alone
+#   3. a parent slice   -- MemoryMax, so N runaways still die alone
+#
+# Why every invocation and not just "heavy" ones: bin/dawn silently does a
+# two-stage self-rebuild whenever sources changed (bin/dawn:139,142), so
+# `./bin/dawn --version` is a full compiler build. There is no such thing as a
+# cheap bin/dawn call.
+#
+# ---------------------------------------------------------------- layering ---
+# Why a CHILD scope and not a cap on init.scope: everything -- the agent
+# harness, your shell -- lives in /init.scope. Capping it makes memory pressure
+# kill an arbitrary process there instead of the runaway. A child scope
+# contains the kill. (Learned 2026-08-04: capping init.scope at 12G converted a
+# VM-killing global OOM into a session-killing cgroup OOM. The receipt is still
+# in /var/log/kern.log: `oom_memcg=/init.scope, task=python3, pid=2154`.)
+#
+# Why a SLICE on top of the scope: the scope caps one run. Nothing capped the
+# sum. N concurrent runs cost N * DCAP_MEM, which can exceed the VM no matter
+# how correct each individual cap is. dawn.slice caps the sum, so bypassing the
+# mutex costs throughput instead of the machine. In the normal single-run case
+# the scope cap binds first and the slice changes nothing.
+#
+# The same lesson one level up, in ~/.wslconfig: raising the VM ceiling to make
+# a spike "survivable" moved the kill from Linux (contained, logged) to the
+# Windows host (uncontained, silent). A cap in the wrong place converts a
+# contained kill into an uncontained one -- in both directions.
+#
+# ------------------------------------------------------------------ mutexes ---
+# Two independent interlocks, because the file lock has a failure mode that is
+# silent on both sides:
+#
+#   flock locks an INODE, not a path. Delete /tmp/dawn-build.lock while a run
+#   holds it and the next dcap creates a fresh file, locks the new inode, and
+#   proceeds -- both runs succeed, neither prints anything. Reproduced
+#   2026-08-05: two scopes overlapped for 4s, both exit 0.
+#   Two things delete it: `systemd-tmpfiles-clean.timer` is active here with
+#   `D /tmp 1777 root root 30d`, and flock never updates the file's mtime, so
+#   an in-use lock ages out and is removed on a long-lived boot; and /tmp
+#   accumulates enough litter to invite a manual `rm /tmp/dawn*`.
+#
+# So: (1) the lock lives under ~/.cache, which no tmpfiles rule touches, and
+# (2) the scope carries a FIXED unit name. systemd refuses to start a second
+# unit with a name already in use, which is a mutex with no path to delete and
+# no inode to swap. It is checked by pid 1, not by a cooperating client, so it
+# also holds against a run that overrode DCAP_LOCK.
+#
+# A fixed unit name has one failure mode that is worse than the bug it fixes,
+# so it is not optional to handle: a scope whose payload dies by signal parks
+# the unit in ActiveState=failed, and the name stays taken FOREVER -- every
+# later dcap on the box blocks. Ctrl-C on a build is enough to trigger it.
+# `--collect` makes systemd unload the unit even when it failed; measured
+# 2026-08-05, without it the next run got "Unit dawn-build.scope was already
+# loaded" until someone ran reset-failed by hand, with it the unit goes to
+# LoadState=not-found and the next run is clean.
+#
+# The unit-name interlock needs a retry loop, not a one-shot failure: scope
+# teardown is ASYNC, so back-to-back runs can briefly collide with a unit that
+# has already exited. Retry distinguishes collision from payload failure via a
+# sentinel file, because "systemd-run refused" and "your command exited 1" are
+# both rc=1 otherwise -- and silently reporting a run that never happened as a
+# result is exactly the class of bug this script exists to prevent.
+#
+# -------------------------------------------------------------------- trace ---
+# A run killed by the OOM killer leaves no EXIT trap, so the record of WHAT it
+# was running has to be written before it dies, by something that outlives it:
+#   - `--description` puts the command in systemd's own log line, which pid 1
+#     writes to /var/log/syslog: "Started dawn-build.scope - dcap: <cmd>".
+#     Root-owned, rotated, survives SIGKILL and reboot.
+#   - $DCAP_LOG gets an append-only line before launch, with cwd and full argv.
+# The old script left neither: it passed the scope a `/tmp/dcap.XXXXXX.sh` path
+# as its description, and /tmp is wiped at boot -- i.e. the name expired at
+# exactly the reboot that a crash causes. On 2026-08-04 syslog recorded
+# "Started run-r791b8....scope - /tmp/dcap.cfr1hb.sh" and that file was gone by
+# the time anyone read the line.
+#
+# Usage:  dcap ./bin/dawn build ...          # default 6G
+#         DCAP_MEM=8G dcap ./scripts/native-fixpoint.sh
+# Setup:  scripts/dawn.slice must be installed; dcap tells you how if it isn't.
+set -euo pipefail
+
+MEM="${DCAP_MEM:-6G}"
+SLICE="${DCAP_SLICE:-dawn.slice}"
+UNIT="${DCAP_UNIT:-dawn-build.scope}"
+STATE="${DCAP_STATE:-${XDG_CACHE_HOME:-$HOME/.cache}/dawn}"
+LOCK="${DCAP_LOCK:-$STATE/build.lock}"
+LOG="${DCAP_LOG:-$STATE/dcap.log}"
+WAIT="${DCAP_WAIT:-1800}"
+: "${JAVA_HOME:=$HOME/tools/graalvm-community-openjdk-21.0.2+13.1}"
+
+[ $# -gt 0 ] || { echo "dcap: nothing to run" >&2; exit 2; }
+mkdir -p "$STATE"
+
+# --- the slice must exist and must be capped -------------------------------
+# A missing slice is a silent downgrade to "no total budget", which looks
+# exactly like a working guard. Fail instead.
+to_bytes() {
+  case "$1" in
+    infinity|max) echo infinity; return 0 ;;
+    *[!0-9KkMmGgTt]* | '') return 1 ;;
+  esac
+  local n="${1%[KkMmGgTt]}" u="${1#"${1%[KkMmGgTt]}"}"
+  case "$u" in
+    '')  echo "$n" ;;
+    K|k) echo $(( n * 1024 )) ;;
+    M|m) echo $(( n * 1024 * 1024 )) ;;
+    G|g) echo $(( n * 1024 * 1024 * 1024 )) ;;
+    T|t) echo $(( n * 1024 * 1024 * 1024 * 1024 )) ;;
+  esac
+}
+mem_bytes=$(to_bytes "$MEM") || { echo "dcap: DCAP_MEM=$MEM is not a size" >&2; exit 2; }
+if [ "$(systemctl show "$SLICE" -p LoadState --value 2>/dev/null || true)" != loaded ]; then
+  cat >&2 <<EOF
+dcap: $SLICE is not installed, so nothing would bound the TOTAL memory of
+      concurrent runs -- the guard this script advertises would be absent while
+      still appearing to work. Install it:
+
+        sudo install -m 644 $(dirname "$0")/dawn.slice /etc/systemd/system/dawn.slice
+        sudo systemctl daemon-reload
+EOF
+  exit 78
+fi
+slice_max=$(systemctl show "$SLICE" -p MemoryMax --value 2>/dev/null || echo infinity)
+if [ "$slice_max" = infinity ]; then
+  echo "dcap: $SLICE has MemoryMax=infinity -- the total budget is not capped." >&2
+  echo "      Fix /etc/systemd/system/dawn.slice, then: sudo systemctl daemon-reload" >&2
+  exit 78
+fi
+if [ "$mem_bytes" != infinity ] && [ "$mem_bytes" -gt "$slice_max" ]; then
+  cat >&2 <<EOF
+dcap: DCAP_MEM=$MEM exceeds $SLICE's MemoryMax ($slice_max bytes), so the run
+      would be capped lower than you asked for and die early for a reason that
+      is not in its own log. Raise the total budget deliberately:
+
+        sudo systemctl set-property --runtime $SLICE MemoryMax=$MEM
+
+      (--runtime reverts on reboot. This box's VM ceiling is set in
+      ~/.wslconfig; a build budget near it trades a contained cgroup kill for
+      an uncontained host-side one.)
+EOF
+  exit 78
+fi
+
+# --- the payload script ----------------------------------------------------
+# The command must reach the scope as a script file: this box's PATH contains
+# Windows entries with parentheses, so it cannot be passed as a shell one-liner.
+# It lives under $STATE, not /tmp, so a tmp cleaner cannot delete it mid-run.
+RUN=$(mktemp "$STATE/run.XXXXXX.sh")
+STARTED="$RUN.started"
+trap 'rm -f "$RUN" "$STARTED"' EXIT
+# Forward the caller's whole exported environment. Without this, `FOO=1 dcap
+# ./gate.sh` silently loses FOO -- the gate runs with a different config than
+# you asked for and reports success. (Learned 2026-08-04: DAWNC_BIN=... was
+# dropped, the gate rebuilt its own subject, and looked green.) dcap must be
+# transparent to everything except the cgroup.
+{ printf '#!/usr/bin/env bash\nset -euo pipefail\n'
+  printf ': > %q\n' "$STARTED"
+  export -p | grep -Ev '^declare -x (SHELLOPTS|BASHOPTS|UID|EUID|PPID|BASH_VERSINFO)=' || true
+  printf 'cd %q\n' "$PWD"
+  printf 'exec'; printf ' %q' "$@"; printf '\n'
+} > "$RUN"
+chmod +x "$RUN"
+
+# --- trace, written before anything can kill us ----------------------------
+cmd_str=$(printf '%s ' "$@"); cmd_str=${cmd_str% }
+desc="dcap: $cmd_str"
+[ "${#desc}" -le 200 ] || desc="${desc:0:197}..."
+if [ -f "$LOG" ] && [ "$(stat -c %s "$LOG" 2>/dev/null || echo 0)" -gt 2000000 ]; then
+  mv -f "$LOG" "$LOG.1"
+fi
+printf '%s pid=%s unit=%s slice=%s mem=%s cwd=%s run=%s cmd=%s\n' \
+  "$(date -Is)" "$$" "$UNIT" "$SLICE" "$MEM" "$PWD" "$RUN" "$cmd_str" >> "$LOG"
+
+# --- interlock 1: the file lock --------------------------------------------
+# Held on a fixed fd by THIS process for its whole life. dcap must therefore
+# not exec itself away -- which also restores the EXIT trap the old `exec
+# flock ...` silently disabled (it had leaked 213 scripts into /tmp).
+exec 9>"$LOCK"
+flock -x 9
+
+# --- interlock 2: the unit name, plus the run ------------------------------
+uid=$(id -u); gid=$(id -g)
+# Clear a unit left failed by a previous run before trying, not after failing to
+# start: the recovery works either way, but doing it here keeps the common
+# "Ctrl-C a build, run it again" path silent and immediate.
+if [ "$(systemctl show "$UNIT" -p ActiveState --value 2>/dev/null || true)" = failed ]; then
+  sudo -n systemctl reset-failed "$UNIT" 2>/dev/null || true
+fi
+start=$(date +%s)
+deadline=$(( start + WAIT ))
+rc=0
+while :; do
+  rc=0
+  sudo -n systemd-run --scope --quiet --collect \
+    --unit="$UNIT" --slice="$SLICE" --description="$desc" \
+    -p MemoryMax="$MEM" -p MemorySwapMax=0 \
+    --uid="$uid" --gid="$gid" \
+    -E HOME="$HOME" -E JAVA_HOME="$JAVA_HOME" -E PATH="$PATH" \
+    "$RUN" || rc=$?
+  # Sentinel present => the payload really ran, so rc is the payload's.
+  [ -e "$STARTED" ] && break
+  # Absent => the scope never started. Either $UNIT is still being torn down
+  # from the previous run (teardown is async) or another run is holding it.
+  # A third case, which turns this interlock into a self-inflicted outage:
+  # ActiveState=failed with no processes left. --collect above prevents systemd
+  # from parking a unit there, but it cannot help when systemd-run ITSELF is
+  # killed (Ctrl-C, a harness timeout) -- it dies before it can deregister the
+  # scope, and the name stays taken forever. Clear that case; it is unambiguous,
+  # because a scope holding live processes is active or abandoned, never failed.
+  if [ "$(systemctl show "$UNIT" -p ActiveState --value 2>/dev/null || true)" = failed ]; then
+    # Fall through to the deadline check rather than looping straight back: if
+    # reset-failed cannot clear it, retrying immediately is a busy loop.
+    sudo -n systemctl reset-failed "$UNIT" 2>/dev/null || true
+  fi
+  if [ "$(date +%s)" -ge "$deadline" ]; then
+    echo "dcap: $UNIT still busy after ${WAIT}s -- inspect: systemctl status $UNIT" >&2
+    printf '%s pid=%s exit=blocked waited=%ss\n' "$(date -Is)" "$$" "$WAIT" >> "$LOG"
+    exit 75
+  fi
+  sleep 2
+done
+
+printf '%s pid=%s exit=%s elapsed=%ss\n' "$(date -Is)" "$$" "$rc" "$(( $(date +%s) - start ))" >> "$LOG"
+# Keep the payload script when the run was killed by a signal: at that point it
+# is the only copy of what was about to run, and it costs one file.
+if [ "$rc" -ge 128 ]; then
+  trap - EXIT; rm -f "$STARTED"
+  echo "dcap: killed by signal $(( rc - 128 )); payload kept at $RUN" >&2
+fi
+exit "$rc"
