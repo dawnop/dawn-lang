@@ -83,6 +83,14 @@ fn compute(n: Int) -> Int = {
   }
 }
 
+pub fn destructured(ps: (Int, Int)) -> Int = {
+  let (lo, hi) = ps
+  let mid = lo + hi
+  match ps {
+    (a, b) -> a + b + mid
+  }
+}
+
 fn main() -> Unit !io = {
   println(to_string(compute(LIMIT)))
 }
@@ -186,6 +194,10 @@ req("textDocument/completion", at(app_uri, app_text, "total} of", 1, 3))
 req("textDocument/completion", at(app_uri, app_text, "fn main", 1, 3))
 req("textDocument/completion", at(app_uri, app_text, "use util.{Shape", 1, 4))
 req("textDocument/completion", at(app_uri, app_text, "compute(LIMIT)", 1, 4))
+# the two positions where a binding arrives by pattern rather than by name:
+# after a destructuring let, and inside a match arm
+req("textDocument/completion", at(app_uri, app_text, "lo + hi", 1, 0))
+req("textDocument/completion", at(app_uri, app_text, "a + b + mid", 1, 0))
 
 req("textDocument/documentSymbol", tdoc(app_uri))
 

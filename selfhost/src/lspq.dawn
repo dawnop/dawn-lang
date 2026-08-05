@@ -1392,6 +1392,60 @@ pub fn locals_at(qc: QCx, pos: Int) -> List[(String, Option[String])] = {
   out
 }
 
+## The binders a pattern introduces, off the *typed* pattern: TPBind and
+## TPList's rest carry the symbol, and the symbol table carries both the name
+## and the type, so this is one walk rather than a parallel walk of the source
+## pattern for names and the typed one for types.
+##
+## Nothing collected these, so `match x { Some(v) -> <here> }` and
+## `let (a, b) = p` offered no completion for v, a or b -- the two places in
+## the language where a binding is introduced by a pattern instead of by a
+## name, which is exactly the set that was missing.
+fn collect_tpat(
+  qc: QCx,
+  acc0: List[(String, Option[String])],
+  tp: TPat
+) -> List[(String, Option[String])] = {
+  var acc = acc0
+  match tp {
+    TPBind(sym, _) -> { acc = collect_sym(qc, acc, sym) }
+    TPTuple(elems) -> {
+      for e in elems { acc = collect_tpat(qc, acc, e) }
+    }
+    TPList(pre, _, rest_sym, post) -> {
+      for e in pre { acc = collect_tpat(qc, acc, e) }
+      match rest_sym {
+        Some(sid) -> { acc = collect_sym(qc, acc, sid) }
+        None -> ()
+      }
+      for e in post { acc = collect_tpat(qc, acc, e) }
+    }
+    TPCtor(_, _, field_pats) -> {
+      for fp in field_pats {
+        match fp {
+          Some(e) -> { acc = collect_tpat(qc, acc, e) }
+          None -> ()
+        }
+      }
+    }
+    TPWild -> ()
+    TPLit(_) -> ()
+  }
+  acc
+}
+
+## The name a pattern bound comes from the symbol table rather than from the
+## TPBind, because TPList's rest carries only the symbol.
+fn collect_sym(
+  qc: QCx,
+  acc: List[(String, Option[String])],
+  sid: Int
+) -> List[(String, Option[String])] =
+  match sym_get(qc, sid) {
+    Some(sym) -> acc ++ [(sym.name, Some(show_ty(qc, sym.ty)))]
+    None -> acc
+  }
+
 fn collect_e(
   qc: QCx,
   acc0: List[(String, Option[String])],
@@ -1451,9 +1505,19 @@ fn collect_e(
       }
       var i = 0
       for arm in arms {
-        let tb: Option[TExpr] = match get(tarms, i) {
-          Some(a) -> Some(a.body)
-          None -> None
+        let (tb, tpats) = match get(tarms, i) {
+          Some(a) -> (Some(a.body), a.pats)
+          None -> {
+            let n: Option[TExpr] = None
+            let none: List[TPat] = []
+            (n, none)
+          }
+        }
+        # an arm's binders belong to that arm, so unlike the binders in a block
+        # they are offered only from inside it -- `before` is between the arm's
+        # first token and its last
+        if arm.lo < before && before <= arm.hi {
+          for tp in tpats { acc = collect_tpat(qc, acc, tp) }
         }
         acc = collect_e(qc, acc, arm.body, tb, before)
         i = i + 1
@@ -1624,6 +1688,48 @@ fn collect_e(
         }
         None -> ()
       }
+    # An interpolation holds an arbitrary expression, lambdas included, so a
+    # cursor inside `"${ ... }"` was the one position where the walk stopped
+    # short of itself. Same for the two block-shaped wrappers and a field
+    # target: the sibling walk_e already goes into all four.
+    EStr(parts, _, _) -> {
+      let no_parts: List[Option[TExpr]] = []
+      let tparts = match te {
+        Some(XStr(tp, _, _)) -> interp_texprs(tp)
+        _ -> no_parts
+      }
+      var i = 0
+      for p in parts {
+        match p {
+          SPInterp(e) -> {
+            acc = collect_e(qc, acc, e, opt_get2(tparts, i), before)
+            i = i + 1
+          }
+          SPText(_) -> ()
+        }
+      }
+    }
+    EComptime(body, _, _) -> {
+      let tb: Option[TExpr] = match te {
+        Some(XComptime(t, _, _, _)) -> Some(t)
+        _ -> None
+      }
+      acc = collect_e(qc, acc, body, tb, before)
+    }
+    EUnsafePure(body, _, _) -> {
+      let tb: Option[TExpr] = match te {
+        Some(XUnsafePure(t, _, _, _)) -> Some(t)
+        _ -> None
+      }
+      acc = collect_e(qc, acc, body, tb, before)
+    }
+    EFieldAcc(target, _, _, _, _, _) -> {
+      let tt: Option[TExpr] = match te {
+        Some(XField(t, _, _, _, _)) -> Some(t)
+        _ -> None
+      }
+      acc = collect_e(qc, acc, target, tt, before)
+    }
     _ -> ()
   }
   acc
@@ -1678,10 +1784,21 @@ fn collect_s(
       }
       acc = collect_e(qc, acc, body, tbody, before)
     }
-    SLetPat(_, _, init, _, _) -> {
-      let tinit: Option[TExpr] = match ts {
-        Some(TSLetPat(_, ti, _, _)) -> Some(ti)
-        _ -> None
+    SLetPat(_, _, init, lo, _) -> {
+      let (tpat, tinit) = match ts {
+        Some(TSLetPat(tp, ti, _, _)) -> (Some(tp), Some(ti))
+        _ -> {
+          let n1: Option[TPat] = None
+          let n2: Option[TExpr] = None
+          (n1, n2)
+        }
+      }
+      # same rule as SLet: in scope for everything after the statement
+      if lo < before {
+        match tpat {
+          Some(tp) -> { acc = collect_tpat(qc, acc, tp) }
+          None -> ()
+        }
       }
       acc = collect_e(qc, acc, init, tinit, before)
     }
