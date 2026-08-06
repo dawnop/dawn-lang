@@ -567,7 +567,6 @@ fn call_default(
   icx: ICx,
   st: ESt,
   env: Env,
-  _owner: String,
   tid: Int,
   method: String,
   args: List[CValue]
@@ -1109,9 +1108,9 @@ fn ceval(icx: ICx, st0: ESt, env0: Env, e: CExpr) -> ER !io = {
                   } else {
                     match dd.slots[idx] {
                       CSlotFn(o, n) -> call_named(icx, st2, env2, o, n, vals ++ [dv])
-                      CSlotDefault(o, _) ->
+                      CSlotDefault(_, _) ->
                         match map.get(icx.traits, dd.trait_id) {
-                          Some(_) -> call_default(icx, st2, env2, o, dd.trait_id, m, vals ++ [dv])
+                          Some(_) -> call_default(icx, st2, env2, dd.trait_id, m, vals ++ [dv])
                           None -> cerr(st2, env2, "unknown trait behind `" ++ m ++ "`")
                         }
                     }
@@ -1126,7 +1125,7 @@ fn ceval(icx: ICx, st0: ESt, env0: Env, e: CExpr) -> ER !io = {
           let no_caps: Map[Int, CValue] = map.empty()
           call_cfun(icx, st2, env1, cf, no_caps, vals)
         }
-        CDefault(_, tid, m) -> call_default(icx, st1, env1, "", tid, m, vals)
+        CDefault(_, tid, m) -> call_default(icx, st1, env1, tid, m, vals)
       }
     }
     CIntrinsic(name, args, _) -> {
