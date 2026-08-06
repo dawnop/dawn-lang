@@ -1,4 +1,4 @@
-/* See dawn_rt.h. Phase -1 scope only. */
+/* See dawn_rt.h. */
 
 /* stat/opendir/readdir are POSIX, and -std=c11 hides them without this. */
 #define _POSIX_C_SOURCE 200809L

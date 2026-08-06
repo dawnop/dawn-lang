@@ -26,8 +26,9 @@
 #                     means a backend cannot forget.
 #   * CDup/CSDrop -- reference-count operations, inserted by `rc.dawn` on the
 #                     way into the C backend and nowhere else: the JVM has a
-#                     collector, so counting there is pure overhead. Both
-#                     backends pass them through until Phase 4's knife 3.
+#                     collector, so counting there is pure overhead. The C
+#                     emitter turns them into dawn_dup/dawn_drop; the JVM
+#                     emitter walks past them.
 #
 # What Core deliberately keeps structured: blocks, `if`, and loops. Both
 # targets are structured (the JVM emitter builds labels anyway, C has native
@@ -171,8 +172,8 @@ pub type CExpr =
 # Take a reference to `inner` and hand it back -- `dawn_dup` in the C runtime,
 # ignored by every other consumer. An expression rather than a statement
 # because what needs counting is often not a binding: `let y = p.x` hands over
-# a projection, and there is no symbol to name until after the let. Unused
-# until Phase 4 (docs/perceus-design.md 5).
+# a projection, and there is no symbol to name until after the let. Built only
+# by `rc.dawn` (docs/perceus-design.md 5).
   | CDup(inner: CExpr, ty: Ty)
 
 pub type CStmt =
@@ -192,7 +193,7 @@ pub type CStmt =
   | CSIf(cond: CExpr, thn: CExpr, els: Option[CExpr])
 # Release a reference at a scope's exit. A drop always names a binding, which
 # is why this one is a statement and takes a symbol -- unlike CDup, which has
-# to sit wherever a value is handed over. Unused until Phase 4; the JVM
+# to sit wherever a value is handed over. Built only by `rc.dawn`; the JVM
 # backend ignores it.
   | CSDrop(sym: Int)
 

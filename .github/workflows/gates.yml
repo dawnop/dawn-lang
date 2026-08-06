@@ -111,8 +111,9 @@ jobs:
 
       # `__emit` compares bytes, which covers Core only where a shipping
       # backend reads it. CModule.dicts has no shipping reader at all, and
-      # CParam.mode / CSDup / CSDrop are emitted as nothing until Perceus --
-      # all three can be rewritten with every other gate staying green. This
+      # CParam.mode / CDup / CSDrop are emitted as nothing by `__emit`, which
+      # is the JVM emitter -- all three can be rewritten with every other gate
+      # staying green (the counting nodes reach only the C backend). This
       # is what sees them, and it is the "Core unchanged" evidence R4 rests on.
       - name: Core IR golden
         run: ./scripts/selfhost-core-diff.sh
@@ -259,9 +260,9 @@ jobs:
       - name: Error model contract
         run: ./scripts/error-contract/run.sh
 
-      # Reference counting, checked in C: until the Core pass lands, nothing
-      # emitted calls dup or drop, so no Dawn program can reach them. The
-      # oracle is AddressSanitizer -- a drop that fails to recurse is a leak,
+      # Reference counting, checked in C: `rc.dawn` decides where every dup and
+      # drop goes, and this drives the runtime half of that contract directly.
+      # The oracle is AddressSanitizer -- a drop that fails to recurse is a leak,
       # one that recurses twice is a double free -- plus a small-stack run,
       # because drop walks a 200k-node chain and must not do it by recursing.
       - name: RC contract

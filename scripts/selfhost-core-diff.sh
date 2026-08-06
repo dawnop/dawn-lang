@@ -9,11 +9,13 @@
 # Change Core and the class files change -- for the parts a shipping backend
 # reads. Two parts it does not:
 #
-#   * `CParam.mode` -- always COwned until Perceus, and ignored by both.
-#   * `CSDup` / `CSDrop` -- never emitted until Perceus, and ignored by both.
+#   * `CParam.mode` -- still always COwned after Perceus, and ignored by both
+#     (knife 4 went the other way: `types.intr_owned_args`, not `CBorrowed`).
+#   * `CDup` / `CSDrop` -- built by `rc.dawn` on the way into the C backend
+#     only, so `__emit`, which is the JVM emitter, walks past both.
 #
-# Those are what Phase 4 will change first. A golden that predates the change
-# is what makes "Perceus touched nothing else" checkable.
+# Those were what Perceus changed first, and this golden predating it is what
+# made "Perceus touched nothing else" checkable.
 #
 # `CModule.dicts` was the third, and the reason this golden exists: the JVM
 # emitter re-derived dictionary class names from the checker's `impl_table`,
