@@ -1811,7 +1811,8 @@ hex 与 base64 是纯 Dawn 字节算术（无 `use java`，故两后端同一份
 - `io.write_file(path, content)` **自动创建缺失的父目录**。`Ok` 不带值
 - `io.list_dir(path)` 的条目名按**码点序**排序。排序在 std 层做（`list.sort` 走语言自己的
   `Ord[String]`），`io_list_names` 原语不承诺顺序——各后端不再各排各的。path 不是目录时
-  `Err`，`kind` 是 `"io.not_a_directory"`——std 自己铸的唯一一个 kind，其余都是后端给的
+  `Err`，`kind` 是 `"io.not_a_directory"`——它与 `io.run` 的 `"io.no_program"` 是 std
+  自己铸的两个 kind，其余都是后端给的
 - `io.is_dir(path)` 不存在或出错都视为 `false`
 - `io.stdin_ready(timeout_ms)` 只答一件事：**此刻是否至少有一字节可读**。
   **输入结束不算就绪**——写端已关和「连着但静默」给同一个 `false`，两者的区别由
