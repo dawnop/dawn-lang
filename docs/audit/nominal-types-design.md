@@ -303,7 +303,8 @@ opaque 沿用目标类型的 impl（spec §2.7、§4.8），所以 `Char` 的 `S
 2. **`selfhost/src` 在 v0.55.0 里还 `use` 不了 `std/char`。** `bin/dawn` 的 stage 1 用
    **种子自带的那份 std** 编译今天的 selfhost，而 v0.54.0 的 std 里没有 char 这个模块。
    所以 selfhost 只能调**内建**（`char_is_*` 是内建，永远在）；`char.code` / `char.of`
-   要等种子推到 v0.55.0 之后、即 v0.56.0 那一轮才轮得到 selfhost 用。
+   要等种子推到有 `std/char` 的那一版之后才轮得到 selfhost 用——本条当时把那一版
+   写成 v0.56.0，而 v0.55.0 并没有发出 `std/char`，所以真正的那一版是 v0.57.0（7.7）。
 3. **`std/str` 拿不到 `Char`。** 它的 `trim` 走 `cursor.char`（回 `Int` 且带 `-1` 哨兵，
    7.3 定的），却要喂给已经改成收 `Char` 的 `char_is_space`。std/str 不是 `Char` 的 owner，
    看不穿，造不出来。
