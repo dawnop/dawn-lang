@@ -813,6 +813,15 @@ pub fn is_ground(t: Ty) -> Bool =
     TyFn(ps, r, _) -> all_ground(ps) && is_ground(r)
     TyInt | TyFloat | TyBool | TyString | TyBytes -> true
     TyUnit | TyNever | TyError | TyJava(_, _) -> true
+    # A projection that survived reduction stands over a rigid subject (D3),
+    # so it mentions a type parameter by construction and the canonical-form
+    # invariant at TyAssoc's declaration says a ground type never contains
+    # one. Spelled out because the `_` below answered the opposite: it asks
+    # `type_args_of`, which has no arm for TyAssoc either, and an empty list
+    # is vacuously all-ground -- so `C.Item` came back ground and every
+    # caller that treats ground as "the relation is decided here" believed
+    # it.
+    TyAssoc(_, _, _) -> false
     _ -> all_ground(type_args_of(t))
   }
 

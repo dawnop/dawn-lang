@@ -223,7 +223,15 @@ witness 同门，D5）→ 取该 impl 的 `assoc_bindings[n]`，用 impl 的 tpa
 1. **投影主体放宽到任意类型**（`List[Int].Item`）：需要 resolve_type 之后的第二次
    归约机会或 pass 重排——等消费者。
 2. **关联类型 bound**（`type Item: Ord`）：缺件 8 的表示 + impl 校验；运算符 trait
-   若需要（如 `Index` 的 `Output: Sized` 类比）再谈。
+   若需要（如 `Index` 的 `Output: Sized` 类比）再谈。**#123 裁决：本体搁置**，
+   但它留下的四处不一致已在 #123 缺陷批修平——`C.Item` 上要 Show / Ord / Eq / Hash
+   一律在检查期拒绝、同一句措辞、同一条 hint（`assoc_witness_err`）。修之前
+   Eq/Hash 是**检查期放行、lower 期编译器 panic**（`unreduced projection in
+   ty_key`），根因是 `structural_gap` 无 TyAssoc 臂、且 `is_ground(TyAssoc)`
+   与 §4.1 的规范形不变式相反地答 true。今天的出路只有一条，hint 就指它：
+   把投影原样传出，在调用点（已归约成具体类型的地方）做那件事——
+   `scripts/spike-native/index_dict.dawn` 的 `both` 是活的例子。
+   语料在 `scripts/checker-corpus/cases/projection_witness.dawn`。
 3. **多 bound 撞成员名的消歧语法**：首批报错要求换名；真撞了再给全限定形
    （勘察 D2 选项 c 的语法预留着）。
 4. **`Map[Ty,…]` 键含投影**：规范形不变式下 ground 键不含投影；若未来放宽 D6，

@@ -1,0 +1,21 @@
+# checker.dawn: the prelude relations asked for a projection subject (#123)
+#
+# `C.Item` is not a type parameter, so no bound can carry a witness for it, and
+# it has no head, so no impl can be written for it either. All four relations
+# have to say so here, in one wording. Eq and Hash used to accept the goal and
+# crash lowering instead (`panic: unreduced projection in ty_key`).
+use std/map
+
+pub fn render[C: Index](c: C, i: C.Idx) -> String = "${c[i]}"
+
+pub fn equal[C: Index](c: C, i: C.Idx, j: C.Idx) -> Bool = c[i] == c[j]
+
+pub fn less[C: Index](c: C, i: C.Idx, j: C.Idx) -> Bool = c[i] < c[j]
+
+pub fn keyed[C: Index](c: C, i: C.Idx) -> Map[C.Item, Int] = map.from([(c[i], 1)])
+
+# inside a container, where the structural walk finds it rather than the goal
+pub fn paired[C: Index](c: C, i: C.Idx, j: C.Idx) -> Bool = (c[i], 1) == (c[j], 1)
+
+# indexing one: the same shape, through the witness `[]` resolves for itself
+pub fn nested[C: Index](c: C, i: C.Idx, k: Int) -> Int = c[i][k]

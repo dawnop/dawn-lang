@@ -759,6 +759,14 @@ pub fn structural_gap(cx: Cx, tid: Int, t: Ty, seen: Set[String]) -> Option[Ty] 
       # type, so without this arm a `(Celsius, Int)` key walked past the Float
       # ban that `(Float, Int)` is caught by.
       TyOpaque(_, _, _, tgt) -> structural_gap(cx, tid, tgt, seen)
+      # A projection is a gap, and unlike a type parameter it is one nothing
+      # can close: a bound applies to a type parameter, and `C.Item` is not
+      # one. Without this arm the `_` below called it "no gap", the goal was
+      # accepted, and lowering then asked for its dictionary key -- where
+      # `ty_key` panics on exactly this variant. That is the whole of #123:
+      # `c[i] == c[j]` under `[C: Index]` passed the checker and crashed the
+      # compiler, directly and inside a tuple.
+      TyAssoc(_, _, _) -> Some(t)
       # A rigid type parameter is not a gap in the structure -- whether `T`
       # answers is the instantiation's business, and `resolve_witness` asks it
       # there, where the bound either is or is not in scope.
@@ -789,6 +797,11 @@ pub fn structural_gap_err(cx: Cx, tid: Int, t: Ty, bad: Ty, lo: Int, hi: Int) ->
       ("`" ++ ty_show(cx.adts, bad) ++ "` has no " ++ rel ++ ": an Array is held by identity, " ++
           "not by content",
         "use the List it backs instead")
+    # Same head as the fallback, different way out: a projection has no
+    # contents to derive an answer from, so it gets the one hint every
+    # relation gives for this shape rather than one that cannot be followed.
+    TyAssoc(_, _, _) -> ("`" ++ ty_show(cx.adts, bad) ++ "` has no " ++ rel,
+      assoc_witness_hint(cx, bad))
     _ -> ("`" ++ ty_show(cx.adts, bad) ++ "` has no " ++ rel,
       "derive the answer from its contents instead")
   }
@@ -799,6 +812,29 @@ pub fn structural_gap_err(cx: Cx, tid: Int, t: Ty, bad: Ty, lo: Int, hi: Int) ->
   }
   cerr_h(cx, msg, lo, hi, hint)
 }
+
+## One wording for "the subject of this goal is a projection", shared by every
+## relation that can be asked for one.
+##
+## A projection is the shape no bound reaches. A bound applies to a type
+## parameter, and `C.Item` is not one -- it is read off whichever impl the
+## caller picks. Nor can the reader write the impl the other hints send them
+## to: a projection has no head, and an impl is registered by its subject's
+## head (`insert_impl` panics on a headless one). So the four prelude
+## relations used to say four different things here, one of them instructing
+## the reader to write an impl the compiler would refuse to accept.
+##
+## What does work is in `scripts/spike-native/index_dict.dawn`: hand the value
+## back and do the work at the call site, where the projection has already
+## been reduced to a concrete type.
+pub fn assoc_witness_hint(cx: Cx, t: Ty) -> String =
+  "a bound applies to a type parameter, and `" ++ ty_show(cx.adts, t) ++
+  "` is not one -- it is read off whichever impl the caller picks; return the value " ++
+  "and do this at the call site, where its type is concrete"
+
+pub fn assoc_witness_err(cx: Cx, trait_name: String, t: Ty, lo: Int, hi: Int) -> Cx =
+  cerr_h(cx, "no `" ++ trait_name ++ "` for the projection `" ++ ty_show(cx.adts, t) ++ "`",
+    lo, hi, assoc_witness_hint(cx, t))
 
 # ---- tests (slice 2) ----
 
@@ -969,6 +1005,13 @@ fn ord_subject(cx: Cx, t: Ty) -> Ty =
 
 pub fn resolve_ord_witness(cx: Cx, t: Ty, lo: Int, hi: Int) -> (Cx, Option[WitRef]) = {
   if is_errorish(t) { return (cx, no_wit()) }
+  # The same first question `resolve_witness` asks, and for the same reason:
+  # `<` is the one relation with its own resolver, so the projection wording
+  # had to be stated twice or Ord would keep its own.
+  match t {
+    TyAssoc(_, _, _) -> { return (assoc_witness_err(cx, "Ord", t, lo, hi), no_wit()) }
+    _ -> ()
+  }
   # An opaque type answers for itself if it has its own impl, and otherwise
   # falls back to its target -- the same clause `resolve_witness` states for
   # every other trait, and the reason `'a' < 'b'` is Int's `<`. This path is
@@ -2706,6 +2749,14 @@ pub fn resolve_witness(
 ) -> (Cx, Option[WitRef]) = {
   if is_errorish(t) { return (cx, no_wit()) }
   let tr = trait_of(cx.traits, trait_id)
+  # A projection is answered here, before any of the per-trait paths below,
+  # because all of them would answer it wrong: the impl lookup cannot hit (no
+  # head), the structural default has nothing to walk, and the leftover hint
+  # would tell the reader to write an impl whose subject the compiler rejects.
+  match t {
+    TyAssoc(_, _, _) -> { return (assoc_witness_err(cx, tr.name, t, lo, hi), no_wit()) }
+    _ -> ()
+  }
   # An opaque type answers for itself if it has its own impl, and otherwise
   # falls back to its target. Opacity hides a representation from other
   # modules; it does not give the value a second equality, hash or order --
