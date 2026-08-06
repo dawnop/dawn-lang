@@ -222,6 +222,9 @@ builtin/std 函数名改为 Rust 式合法**（解析序本就是本模块声明
     确定（JVM/native 一致）；平铺内建 API；为作键给 ADT/元组/record 生成配套 `hashCode`。
   - char：走 **Go 的 rune 路线**——`'a'` 是等于码点的 `Int` 字面量（词法层搞定，类型系统零改），
     配 `code_points`/`from_code_points`/`str_len`/`substring`/`char_to_string`。**bytes 推迟**。
+    （**已推翻**：v0.57.0 起 `'a'` 的类型是 `Char`，`Int` 上的 opaque type，
+    见 spec §1.5 与 [audit/nominal-types-design.md](audit/nominal-types-design.md) §7。
+    表示仍是码点，所以「零开销」那半仍然成立。）
   - `dawn run/test/build/fmt` 吃项目目录；LSP 多文件支持（`analyzeDocument` 从磁盘解析 use；
     跨文件跳转：FnSig/AdtInfo/FieldInfo/ConstDecl 带 `srcPath`，导入的函数/类型/构造器/常量、
     `alias.fn` 调用与 `use` 行条目都能跳到定义所在文件）。

@@ -55,7 +55,7 @@ pub fn trim_end(s: String) -> String = {
 }
 
 fn skip_space(s: String, c: Cursor) -> Cursor =
-  if cursor.done(s, c) || not char_is_space(cursor.char(s, c)) {
+  if cursor.done(s, c) || not char_is_space(char_unchecked(cursor.char(s, c))) {
     c
   } else {
     skip_space(s, cursor.next(s, c))
@@ -69,7 +69,7 @@ fn last_kept(s: String, c: Cursor, best: Cursor) -> Cursor =
     best
   } else {
     let n = cursor.next(s, c)
-    last_kept(s, n, if char_is_space(cursor.char(s, c)) { best } else { n })
+    last_kept(s, n, if char_is_space(char_unchecked(cursor.char(s, c))) { best } else { n })
   }
 
 ## `s` lowercased by simple (1:1) Unicode mapping: one code point in, one out,
@@ -157,8 +157,10 @@ fn last_idx(s: String, sub: String, c: Cursor, i: Int, best: Option[Int]) -> Opt
   if cursor.done(s, c) { seen } else { last_idx(s, sub, cursor.next(s, c), i + 1, seen) }
 }
 
-## The single-code-point string for `c`. Panics when `c` is not a valid code point.
-pub fn from_char(c: Int) -> String = from_code_points([c])
+## The one-character string for `c`. This is how a `Char` becomes text:
+## `"${c}"` renders the code point as a number, because an opaque type shows
+## the way its target does (spec §2.7).
+pub fn from_char(c: Char) -> String = from_code_points([c])
 
 ## `s` repeated `n` times; n <= 0 yields the empty string.
 ##
@@ -208,7 +210,7 @@ pub fn slice(s: String, from: Int, to: Int) -> String = {
   if f >= t {
     ""
   } else {
-    let acc: List[Int] = []
+    let acc: List[Char] = []
     from_code_points(slice_cps(code_points(s), f, t, acc))
   }
 }
@@ -229,24 +231,26 @@ pub fn take(s: String, n: Int) -> String = slice(s, 0, n)
 ## `slice(x, i, str.len(x))`.
 pub fn drop(s: String, n: Int) -> String = slice(s, n, len(s))
 
-## The code point at `i`. Panics when `i` is out of range -- `i` is a position
+## The character at `i`. Panics when `i` is out of range -- `i` is a position
 ## the caller says exists, exactly like `xs[i]` and `bytes.at`
 ## (spec §4.8, criterion 1); `get`-style inquiry about a character is
 ## `cursor.char` on a position you already hold.
 ##
-## A code point, not a one-character string: `Int` is the currency
-## `code_points`, `from_char` and `cursor.char` already trade in, and `chars`
-## is the function that answers with strings.
-pub fn at(s: String, i: Int) -> Int = {
+## A `Char`, not a one-character string: it is the currency `code_points` and
+## `from_char` trade in, and `chars` is the function that answers with strings.
+## `cursor.char` stays an `Int` one layer down, because it answers `-1` past
+## the end and a sentinel cannot live in a type whose every value is a
+## character (spec §4.8).
+pub fn at(s: String, i: Int) -> Char = {
   let c = cursor.seek(s, i)
   if i < 0 || cursor.done(s, c) {
     panic("str.at: index out of range")
   } else {
-    cursor.char(s, c)
+    char_unchecked(cursor.char(s, c))
   }
 }
 
-fn slice_cps(cps: List[Int], i: Int, to: Int, acc: List[Int]) -> List[Int] =
+fn slice_cps(cps: List[Char], i: Int, to: Int, acc: List[Char]) -> List[Char] =
   if i >= to { acc } else { slice_cps(cps, i + 1, to, acc ++ [get(cps, i).expect("in range")]) }
 
 ## `s` left-padded with `pad` until it is `width` code points wide. Returns `s`
@@ -257,12 +261,12 @@ pub fn pad_start(s: String, width: Int, pad: String) -> String = {
   if have >= width || pad == "" {
     s
   } else {
-    let acc: List[Int] = []
+    let acc: List[Char] = []
     from_code_points(pad_fill(code_points(pad), len(pad), width - have, 0, acc)) ++ s
   }
 }
 
-fn pad_fill(pad: List[Int], plen: Int, need: Int, i: Int, acc: List[Int]) -> List[Int] =
+fn pad_fill(pad: List[Char], plen: Int, need: Int, i: Int, acc: List[Char]) -> List[Char] =
   if i >= need { acc }
   else { pad_fill(pad, plen, need, i + 1, acc ++ [get(pad, i % plen).expect("cycle in range")]) }
 
@@ -275,18 +279,18 @@ pub fn pad_end(s: String, width: Int, pad: String) -> String = {
   if have >= width || pad == "" {
     s
   } else {
-    let acc: List[Int] = []
+    let acc: List[Char] = []
     s ++ from_code_points(pad_fill(code_points(pad), len(pad), width - have, 0, acc))
   }
 }
 
 ## `s` with its code points in reverse order (surrogate pairs stay intact).
 pub fn reverse(s: String) -> String = {
-  let acc: List[Int] = []
+  let acc: List[Char] = []
   from_code_points(rev_cps(code_points(s), len(s) - 1, acc))
 }
 
-fn rev_cps(cps: List[Int], i: Int, acc: List[Int]) -> List[Int] =
+fn rev_cps(cps: List[Char], i: Int, acc: List[Char]) -> List[Char] =
   if i < 0 { acc } else { rev_cps(cps, i - 1, acc ++ [get(cps, i).expect("in range")]) }
 
 # ---- cursors ----
@@ -480,10 +484,10 @@ test "slice, take and drop clamp their ends instead of panicking" {
 }
 
 test "at asserts the index exists -- it is the one that panics" {
-  assert at("abc", 0) == 97
-  assert at("abc", 2) == 99
-  assert at("😀", 0) == 0x1F600
-  assert at("a😀z", 2) == 122
+  assert at("abc", 0) == 'a'
+  assert at("abc", 2) == 'c'
+  assert at("😀", 0) == '😀'
+  assert at("a😀z", 2) == 'z'
   # spec 4.8 criterion 1: `i` is a position the caller says exists, so a miss
   # is a broken invariant and not a branch. `slice`/`take`/`drop` above are
   # criterion 3 and clamp; this one does not, and that difference is the pin.
@@ -574,9 +578,9 @@ test "chars, reverse and repeat keep a surrogate pair whole" {
   assert repeat("x", 8) == "xxxxxxxx"
   assert repeat("😀", 3) == "😀😀😀"
   assert len(repeat("😀", 3)) == 3
-  assert from_char(0x1F600) == "😀"
-  assert from_char(97) == "a"
-  assert at(from_char(0x4E2D), 0) == 0x4E2D
+  assert from_char('😀') == "😀"
+  assert from_char('a') == "a"
+  assert at(from_char('中'), 0) == '中'
 }
 
 test "repeat needs no stack, at a count that used to exhaust it" {

@@ -315,24 +315,29 @@ pub fn is_numeric(t: Ty) -> Bool = t == TyInt || t == TyFloat
 
 pub fn is_errorish(t: Ty) -> Bool = t == TyError || t == TyNever
 
+## `Char`'s opaque id. Reserved and negative, like `DICT_ADT_ID`, because this
+## is the one opaque type with no declaration site to mint an id for it.
+##
+## Why the compiler mints the type rather than `std/char` declaring it: `'a'`
+## is syntax, so the checker needs this type while typing a literal -- before,
+## and regardless of, any module being in scope. A name `ty_named` answers to
+## also cannot be declared in std, because `is_builtin_name` reads `ty_named`
+## and would call the declaration a redefinition. The mechanism is still
+## `opaque type` (spec §2.7): no `Ty` variant, no `Head`, no row in the four
+## scalar tables -- `peel_opaque` carries it to `Int`'s implementations, which
+## is what 2026-07-30 decided when it deleted `Cursor`'s variant. The owner is
+## `std/char`, so that module (and only it) sees through, and `char.of` /
+## `char.code` are two ordinary functions needing no intrinsic.
+pub const CHAR_OPAQUE_ID: Int = -2
+
+## The type of a character literal: `Char`, an opaque `Int`.
+pub fn ty_char() -> Ty = TyOpaque(CHAR_OPAQUE_ID, "Char", "std/char", TyInt)
+
 ## The builtin scalar for a name, or None.
-##
-## `Char` is a spelling of `Int` for exactly one release, and then stops being
-## one. It is here so that the compiler which compiles the flip already knows
-## the name: seed discipline (docs/bootstrap.md) lets selfhost and std use only
-## what the pinned seed supports, so the release that makes `Char` a distinct
-## type cannot also be the release that first teaches the name. Landing the
-## name a release early -- transparent, so no existing program can tell -- lets
-## the next one annotate std and selfhost with `Char` and flip `'a'` from `Int`
-## to `Char` in a single commit, which is the only way that change can be made:
-## half-flipped, the type of `'a'` is not a thing anyone can state.
-##
-## The same shape as the one-generation forwarder RD-06's renames used, applied
-## to a type name instead of a function name.
 pub fn ty_named(name: String) -> Option[Ty] =
   match name {
     "Int" -> Some(TyInt)
-    "Char" -> Some(TyInt)
+    "Char" -> Some(ty_char())
     "Float" -> Some(TyFloat)
     "Bool" -> Some(TyBool)
     "String" -> Some(TyString)
@@ -1496,8 +1501,8 @@ pub fn builtins() -> Map[String, Sig] = {
     tp1(bsig("unwrap_or", [opt_ty(t), t], ["o", "fallback"], t), t),
     tp1b(bsig("to_string", [t], ["x"], TyString), t, SHOW_ID),
     bsig("join", [TyList(TyString), TyString], ["xs", "sep"], TyString),
-    bsig("code_points", [TyString], ["s"], TyList(TyInt)),
-    bsig("from_code_points", [TyList(TyInt)], ["cs"], TyString),
+    bsig("code_points", [TyString], ["s"], TyList(ty_char())),
+    bsig("from_code_points", [TyList(ty_char())], ["cs"], TyString),
     bsig("parse_int", [TyString], ["s"], opt_ty(TyInt)),
     bsig("parse_float", [TyString], ["s"], opt_ty(TyFloat)),
     bsig("cursor_start", [TyString], ["s"], TyInt),
@@ -1513,17 +1518,28 @@ pub fn builtins() -> Map[String, Sig] = {
     # (std/str, docs/native-backend-plan.md 14.12).
     bsig("str_lower", [TyString], ["s"], TyString),
     bsig("str_upper", [TyString], ["s"], TyString),
-    # char_* intrinsics: Unicode classification of one code point. Same reason
+    # char_* intrinsics: Unicode classification of one character. Same reason
     # the str_* ones exist -- the answer is a property of the Unicode tables,
     # not something Dawn source can compute -- and every backend needs them
     # regardless, so they belong in the contract rather than in each program's
-    # `use java`. A code point is an Int here as everywhere else.
-    bsig("char_is_letter", [TyInt], ["c"], TyBool),
-    bsig("char_is_digit", [TyInt], ["c"], TyBool),
-    bsig("char_is_alnum", [TyInt], ["c"], TyBool),
-    bsig("char_is_upper", [TyInt], ["c"], TyBool),
-    bsig("char_is_lower", [TyInt], ["c"], TyBool),
-    bsig("char_is_space", [TyInt], ["c"], TyBool),
+    # `use java`. They take `Char`, so a caller holding an `Int` has to say
+    # which integers it believes are characters (std/char.of), which is the
+    # whole point of the type.
+    bsig("char_is_letter", [ty_char()], ["c"], TyBool),
+    bsig("char_is_digit", [ty_char()], ["c"], TyBool),
+    bsig("char_is_alnum", [ty_char()], ["c"], TyBool),
+    bsig("char_is_upper", [ty_char()], ["c"], TyBool),
+    bsig("char_is_lower", [ty_char()], ["c"], TyBool),
+    bsig("char_is_space", [ty_char()], ["c"], TyBool),
+    # The Int -> Char bridge for std's hot paths, where the caller has already
+    # established that the integer is a code point and an `Option` would be an
+    # allocation per step. Internal, because an unchecked constructor should
+    # not be public (audit RD-01); `std/char.of` is the checked one everyone
+    # else uses. `std/str.trim` is why it exists: it walks with `cursor.char`,
+    # which answers `Int` and `-1` at the end (spec §4.8), and feeds
+    # `char_is_space`. Identity at every level below the checker -- lower.dawn
+    # rewrites the call to its argument, so neither backend learns the name.
+    bsig("char_unchecked", [TyInt], ["n"], ty_char()),
     # parse_int in a base other than 10; None when the text is not a numeral in
     # that base, so a caller needs no exception bridge to read one.
     bsig("parse_int_radix", [TyString, TyInt], ["s", "radix"], opt_ty(TyInt)),
@@ -1924,6 +1940,10 @@ pub fn intrinsics() -> Map[String, Intr] = {
   for op in ["start", "end", "done", "char", "next", "prev", "slice"] {
     internal = set.insert(internal, "cursor_" ++ op)
   }
+  # The unchecked Int -> Char bridge: internal for the reason RD-01 removed
+  # pvec's public unchecked reader, and with no `rt` because it never reaches
+  # a backend -- lowering replaces the call with its argument.
+  internal = set.insert(internal, "char_unchecked")
 
   var out: Map[String, Intr] = map.empty()
   for n in map.keys(bs) {
@@ -2248,7 +2268,7 @@ test "builtin table renders signatures" {
     }
     None -> { assert false }
   }
-  assert map_size2(bs) == 90
+  assert map_size2(bs) == 91
 }
 
 test "the reclaim's failure is a value, under the one name left" {

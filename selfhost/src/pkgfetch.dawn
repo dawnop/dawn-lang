@@ -7,6 +7,7 @@
 # Nothing here reaches the host any more. What is left of the outside world is
 # `curl`, spawned like any other program, and the filesystem through std/io.
 
+use std/char
 use std/str
 use std/bytes
 use std/list
@@ -33,7 +34,7 @@ pub fn cache_dir(hash: String) -> String !io = cache_root() ++ "/" ++ str.replac
 
 # ---- d1: SHA-256 over the sorted file tree, `relpath \0 size \0 bytes` ----
 
-fn zero_byte() -> Bytes = bytes.utf8(str.from_char(0))
+fn zero_byte() -> Bytes = bytes.utf8(str.from_char('\u{0000}'))
 
 fn read_bytes(path: String) -> Result[Bytes, String] !io =
   match io.read_bytes(path) {
@@ -356,7 +357,7 @@ fn untar(gz: Bytes, dest: String) -> Result[Unit, String] !io = {
     # type bytes: 'L' 76, 'x' 120, 'g' 103, '5' 53, '0' 48, NUL 0, '7' 55, links 49/50
     if tchar == 76 {
       let long_name = bytes.decode_utf8(bytes.slice(raw, data_start, data_start + size))
-      pending = Some(match str.index_of(long_name, str.from_char(0)) {
+      pending = Some(match str.index_of(long_name, str.from_char('\u{0000}')) {
         Some(i) -> str.take(long_name, i)
         None -> long_name
       })
@@ -385,7 +386,8 @@ fn untar(gz: Bytes, dest: String) -> Result[Unit, String] !io = {
       return Err("link in tar archive: " ++ name ++
           "\n  the d1 hash refuses links — they do not survive archives portably")
     } else {
-      return Err("unsupported tar entry type `" ++ str.from_char(tchar) ++ "`: " ++ name)
+      return Err("unsupported tar entry type `" ++
+          str.from_char(char.of(tchar).unwrap_or('?')) ++ "`: " ++ name)
     }
     off = data_start + padded
   }
@@ -520,7 +522,7 @@ pub fn ensure_cached(url: String, hash: String) -> Result[String, String] !io = 
 }
 
 test "tar octal and pax records parse" {
-  let b = bytes.utf8("0000644" ++ str.from_char(0))
+  let b = bytes.utf8("0000644" ++ str.from_char('\u{0000}'))
   assert tar_octal(b, 0, 8) == Ok(420)
   # the length field counts the whole record, its own digits included
   assert pax_path("32 path=some/very/long/name.txt\n") == Some("some/very/long/name.txt")

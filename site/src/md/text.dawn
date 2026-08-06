@@ -1,13 +1,19 @@
 # Shared code-point level text helpers for the Markdown parser.
 
-## The code point at i, or -1 past the end.
 use std/str
 
-pub fn cp_at(cs: List[Int], i: Int) -> Int = unwrap_or(get(cs, i), -1)
+## The character at i, or NUL past the end.
+##
+## The sentinel used to be -1, which stopped being spellable when a character
+## became its own type: `Char` has no value outside the code points, which is
+## the whole of what the type says. NUL works here because nothing ever asks
+## whether the answer *is* the sentinel -- every caller compares it against a
+## markup character, and NUL is none of them.
+pub fn cp_at(cs: List[Char], i: Int) -> Char = unwrap_or(get(cs, i), '\u{0000}')
 
 ## The substring [from, to) of a code point list.
-pub fn seg(cs: List[Int], from: Int, to: Int) -> String = {
-  var out: List[Int] = []
+pub fn seg(cs: List[Char], from: Int, to: Int) -> String = {
+  var out: List[Char] = []
   var i = from
   while i < to {
     out = out ++ [cp_at(cs, i)]

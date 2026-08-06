@@ -15,12 +15,18 @@
 # Written without a list literal on purpose: this corpus is about
 # classification, not about containers.
 
-fn show6(c: Int) -> String =
+use std/char
+
+fn show6(c: Char) -> String =
   to_string(char_is_letter(c)) ++ to_string(char_is_digit(c)) ++
   to_string(char_is_alnum(c)) ++ to_string(char_is_upper(c)) ++
   to_string(char_is_lower(c)) ++ to_string(char_is_space(c))
 
-fn line(c: Int) -> String = to_string(c) ++ " " ++ show6(c)
+fn line(c: Char) -> String = to_string(char.code(c)) ++ " " ++ show6(c)
+
+## The same line for a code point given as a number: `char.of` is the checked
+## bridge, and every value below is a scalar.
+fn line_at(cp: Int) -> String = line(char.of(cp).expect("a scalar value"))
 
 pub fn main() -> Unit !io = {
   println(line('A'))
@@ -32,19 +38,19 @@ pub fn main() -> Unit !io = {
   println(line('\n'))
   println(line('~'))
   # latin-1: cased letters that the ASCII rules called neither
-  println(line(0x00C9))
-  println(line(0x00E9))
+  println(line_at(0x00C9))
+  println(line_at(0x00E9))
   # a sharp s is lowercase and has no uppercase -- the same fact
   # strings_case.dawn asks about the mapping
-  println(line(0x00DF))
+  println(line_at(0x00DF))
   # a space character that is not whitespace, and one that is
-  println(line(0x00A0))
-  println(line(0x3000))
+  println(line_at(0x00A0))
+  println(line_at(0x3000))
   # uncased script: a letter that is neither upper nor lower
-  println(line(0x4E2D))
+  println(line_at(0x4E2D))
   # a digit that is not an ASCII digit
-  println(line(0x0660))
+  println(line_at(0x0660))
   # above the BMP, where one code point is two UTF-16 units
-  println(line(0x10400))
-  println(line(0x10428))
+  println(line_at(0x10400))
+  println(line_at(0x10428))
 }

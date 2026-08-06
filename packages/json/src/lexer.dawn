@@ -11,11 +11,25 @@
 # already used, so end-of-input handling did not have to change at all.
 # No panics — malformed input becomes an Err.
 
+use std/char
 use std/cursor
 use std/str
 use std/cursor.{Cursor}
 
+## The code point at `i`, or -1 at the end of the document.
+##
+## An `Int` and not a `Char`: the end-of-input answer is a sentinel, and a
+## sentinel that is not a character cannot live in a type whose every value is
+## one (spec §4.8). So this scanner compares code points, and spells the
+## constants it compares against as `char.code('x')` -- the character is what
+## is readable, the Int is what is being compared.
 pub fn peek(src: String, i: Cursor) -> Int = cursor.char(src, i)
+
+## A code point the scanner has already validated, as the character it names.
+## Outside std the Int -> Char bridge is the checked one, so every call site
+## here has to have excluded the surrogate range first -- which each has, since
+## that is what JSON's `\uD800` handling is about.
+fn char_of_code(n: Int) -> Char = char.of(n).expect("a Unicode scalar value")
 
 # ---- error positions ----
 
@@ -32,26 +46,27 @@ pub fn offset(src: String, i: Cursor) -> Int =
 pub fn err_at(src: String, i: Cursor, msg: String) -> String =
   msg ++ " at offset " ++ to_string(offset(src, i))
 
-pub fn is_digit(c: Int) -> Bool = c >= '0' && c <= '9'
+pub fn is_digit(c: Int) -> Bool = c >= char.code('0') && c <= char.code('9')
 
 pub fn skip_ws(src: String, i: Cursor) -> Cursor = {
   let c = peek(src, i)
-  if c == ' ' || c == '\t' || c == '\n' || c == 13 {
-    skip_ws(src, cursor.next(src, i))
-  } else {
-    i
-  }
+  if c == char.code(' ') || c == char.code('\t') || c == char.code('\n') ||
+    c == char.code('\r') {
+      skip_ws(src, cursor.next(src, i))
+    } else {
+      i
+    }
 }
 
 # ---- strings ----
 
 fn hex_digit(c: Int) -> Int =
-  if c >= '0' && c <= '9' {
-    c - '0'
-  } else if c >= 'a' && c <= 'f' {
-    c - 'a' + 10
-  } else if c >= 'A' && c <= 'F' {
-    c - 'A' + 10
+  if c >= char.code('0') && c <= char.code('9') {
+    c - char.code('0')
+  } else if c >= char.code('a') && c <= char.code('f') {
+    c - char.code('a') + 10
+  } else if c >= char.code('A') && c <= char.code('F') {
+    c - char.code('A') + 10
   } else {
     -1
   }
@@ -75,26 +90,26 @@ fn read_hex4(src: String, i: Cursor) -> Option[(Int, Cursor)] = {
   }
 }
 
-fn simple_escape(e: Int) -> Option[Int] =
+fn simple_escape(e: Char) -> Option[Char] =
   match e {
     '"' -> Some('"')
     '\\' -> Some('\\')
     '/' -> Some('/')
-    'b' -> Some(8)
-    'f' -> Some(12)
+    'b' -> Some('\u{0008}')
+    'f' -> Some('\u{000C}')
     'n' -> Some('\n')
-    'r' -> Some(13)
+    'r' -> Some('\r')
     't' -> Some('\t')
     _ -> None
   }
 
 # `start` is the opening quote; returns (decoded string, cursor past the closing
-# quote). The accumulator stays a List[Int] on purpose: it holds the *decoded*
-# characters of one string, which escapes make genuinely different from any span
-# of the source, and its size is that string's, not the document's.
+# quote). The accumulator holds the *decoded* characters of one string, which
+# escapes make genuinely different from any span of the source, and its size is
+# that string's, not the document's.
 pub fn scan_string(src: String, start: Cursor) -> Result[(String, Cursor), String] = {
   var i = cursor.next(src, start)
-  var acc: List[Int] = []
+  var acc: List[Char] = []
   var status = 0
   var errmsg = ""
   while status == 0 {
@@ -102,13 +117,13 @@ pub fn scan_string(src: String, start: Cursor) -> Result[(String, Cursor), Strin
     if c == -1 {
       status = 2
       errmsg = err_at(src, i, "unterminated string")
-    } else if c == '"' {
+    } else if c == char.code('"') {
       i = cursor.next(src, i)
       status = 1
-    } else if c == '\\' {
+    } else if c == char.code('\\') {
       let ie = cursor.next(src, i)
       let e = peek(src, ie)
-      if e == 'u' {
+      if e == char.code('u') {
         match read_hex4(src, cursor.next(src, ie)) {
           None -> {
             status = 2
@@ -117,7 +132,7 @@ pub fn scan_string(src: String, start: Cursor) -> Result[(String, Cursor), Strin
           Some((code, after)) -> {
             if code >= 55296 && code <= 56319 {
               let iu = cursor.next(src, after)
-              if peek(src, after) == '\\' && peek(src, iu) == 'u' {
+              if peek(src, after) == char.code('\\') && peek(src, iu) == char.code('u') {
                 match read_hex4(src, cursor.next(src, iu)) {
                   None -> {
                     status = 2
@@ -125,29 +140,35 @@ pub fn scan_string(src: String, start: Cursor) -> Result[(String, Cursor), Strin
                   }
                   Some((low, after2)) -> {
                     if low >= 56320 && low <= 57343 {
-                      acc = acc ++ [65536 + (code - 55296) * 1024 + (low - 56320)]
+                      acc = acc ++
+                        [char_of_code(65536 + (code - 55296) * 1024 + (low - 56320))]
                       i = after2
                     } else {
-                      acc = acc ++ [65533]
+                      acc = acc ++ [char_of_code(65533)]
                       i = after
                     }
                   }
                 }
               } else {
-                acc = acc ++ [65533]
+                acc = acc ++ [char_of_code(65533)]
                 i = after
               }
             } else if code >= 56320 && code <= 57343 {
-              acc = acc ++ [65533]
+              acc = acc ++ [char_of_code(65533)]
               i = after
             } else {
-              acc = acc ++ [code]
+              acc = acc ++ [char_of_code(code)]
               i = after
             }
           }
         }
       } else {
-        match simple_escape(e) {
+        # `char.of` also rejects the end of input, where `peek` answers -1
+        let esc = match char.of(e) {
+          Some(ec) -> simple_escape(ec)
+          None -> None
+        }
+        match esc {
           Some(cp) -> {
             acc = acc ++ [cp]
             i = cursor.next(src, ie)
@@ -162,7 +183,7 @@ pub fn scan_string(src: String, start: Cursor) -> Result[(String, Cursor), Strin
       status = 2
       errmsg = err_at(src, i, "control character in string")
     } else {
-      acc = acc ++ [c]
+      acc = acc ++ [char_of_code(c)]
       i = cursor.next(src, i)
     }
   }
@@ -179,16 +200,16 @@ fn skip_digits(src: String, i: Cursor) -> Cursor =
   if is_digit(peek(src, i)) { skip_digits(src, cursor.next(src, i)) } else { i }
 
 fn scan_int_part(src: String, i: Cursor) -> Result[Cursor, String] =
-  if peek(src, i) == '0' {
+  if peek(src, i) == char.code('0') {
     Ok(cursor.next(src, i))
-  } else if peek(src, i) >= '1' && peek(src, i) <= '9' {
+  } else if peek(src, i) >= char.code('1') && peek(src, i) <= char.code('9') {
     Ok(skip_digits(src, cursor.next(src, i)))
   } else {
     Err(err_at(src, i, "invalid number: expected a digit"))
   }
 
 fn scan_frac(src: String, i: Cursor) -> Result[Cursor, String] =
-  if peek(src, i) == '.' {
+  if peek(src, i) == char.code('.') {
     let i1 = cursor.next(src, i)
     let j = skip_digits(src, i1)
     if j == i1 {
@@ -201,9 +222,14 @@ fn scan_frac(src: String, i: Cursor) -> Result[Cursor, String] =
   }
 
 fn scan_exp(src: String, i: Cursor) -> Result[Cursor, String] =
-  if peek(src, i) == 'e' || peek(src, i) == 'E' {
+  if peek(src, i) == char.code('e') || peek(src, i) == char.code('E') {
     let i1 = cursor.next(src, i)
-    let i2 = if peek(src, i1) == '+' || peek(src, i1) == '-' { cursor.next(src, i1) } else { i1 }
+    let i2 =
+      if peek(src, i1) == char.code('+') || peek(src, i1) == char.code('-') {
+        cursor.next(src, i1)
+      } else {
+        i1
+      }
     let j = skip_digits(src, i2)
     if j == i2 {
       Err(err_at(src, i2, "invalid number: digits expected in exponent"))
@@ -223,7 +249,7 @@ fn scan_exp(src: String, i: Cursor) -> Result[Cursor, String] =
 # ...992. Only the caller knows whether this literal is an Int or a Float, so
 # only the caller can pick a lossless conversion — see `number_of` in parser.
 pub fn scan_number(src: String, start: Cursor) -> Result[(String, Cursor), String] = {
-  let i0 = if peek(src, start) == '-' { cursor.next(src, start) } else { start }
+  let i0 = if peek(src, start) == char.code('-') { cursor.next(src, start) } else { start }
   let i1 = scan_int_part(src, i0)?
   let i2 = scan_frac(src, i1)?
   let i3 = scan_exp(src, i2)?

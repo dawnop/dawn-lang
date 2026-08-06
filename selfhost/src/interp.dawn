@@ -24,6 +24,7 @@
 # The Kotlin interpreter ran on a dedicated 64MB thread; this one recurses on
 # the host stack, so the selfhost JVM is launched with -Xss512m instead.
 
+use std/char
 use std/str
 use std/fmt
 use std/list
@@ -213,6 +214,13 @@ fn as_int(v: CValue) -> Int =
     _ -> panic("comptime interpreter bug: expected an Int")
   }
 
+## A `Char` argument, which is a `VInt` here: `Char` is opaque over `Int`, so
+## it has no runtime representation of its own and the interpreter's value
+## domain needs no variant for it. Whatever produced the value has been
+## through the checker, so a non-scalar integer is a compiler bug.
+fn as_char(v: CValue) -> Char =
+  char.of(as_int(v)).expect("comptime interpreter bug: not a code point")
+
 fn as_bool(v: CValue) -> Bool =
   match v {
     VBool(b) -> b
@@ -292,7 +300,7 @@ fn quote_str(s: String) -> String = {
   out = str.replace(out, "\"", "\\\"")
   out = str.replace(out, "\n", "\\n")
   out = str.replace(out, "\t", "\\t")
-  out = str.replace(out, str.from_char(13), "\\r")
+  out = str.replace(out, str.from_char('\r'), "\\r")
   "\"" ++ out ++ "\""
 }
 
@@ -696,6 +704,12 @@ fn comptime_rejects() -> List[String] = {
   # that: there is still no host object to reclaim, and an `Err` here would be
   # a fabricated answer rather than a fold.
   out = out ++ ["cast"]
+  # `char_unchecked` never gets here at all: lowering rewrites the call to its
+  # argument (lower.lowered_intrinsics), because `Char`'s representation is
+  # `Int`. It is listed as refused rather than given an arm for the reason
+  # check 2 below exists -- an arm no producer can reach is the dead code that
+  # rotted in this table before.
+  out = out ++ ["char_unchecked"]
   # Map/Set/Array: `CValue` has no representation for any of the three, so
   # `const M = map.from([...])` does not fold. This is the group spec §7.2.2
   # names, and it is the smaller half of what is actually refused.
@@ -863,7 +877,7 @@ fn call_builtin(icx: ICx, st: ESt, env: Env, name: String, args: List[CValue]) -
     if c < 0 || c >= str.len(s) {
       Ok((st, env, VInt(-1)))
     } else {
-      Ok((st, env, VInt(get(code_points(s), c).expect("in range"))))
+      Ok((st, env, VInt(char.code(get(code_points(s), c).expect("in range")))))
     }
   } else if name == "cursor_next" {
     let n = str.len(as_str(args[0]))
@@ -893,24 +907,24 @@ fn call_builtin(icx: ICx, st: ESt, env: Env, name: String, args: List[CValue]) -
     # intrinsics is what asked the question.
   } else if name == "code_points" {
     var out: List[CValue] = []
-    for cp in code_points(as_str(args[0])) { out = out ++ [VInt(cp)] }
+    for cp in code_points(as_str(args[0])) { out = out ++ [VInt(char.code(cp))] }
     Ok((st, env, VList(out)))
   } else if name == "from_code_points" {
-    var cps: List[Int] = []
-    for v in as_list(args[0]) { cps = cps ++ [as_int(v)] }
+    var cps: List[Char] = []
+    for v in as_list(args[0]) { cps = cps ++ [as_char(v)] }
     Ok((st, env, VStr(from_code_points(cps))))
   } else if name == "char_is_letter" {
-    Ok((st, env, VBool(char_is_letter(as_int(args[0])))))
+    Ok((st, env, VBool(char_is_letter(as_char(args[0])))))
   } else if name == "char_is_digit" {
-    Ok((st, env, VBool(char_is_digit(as_int(args[0])))))
+    Ok((st, env, VBool(char_is_digit(as_char(args[0])))))
   } else if name == "char_is_alnum" {
-    Ok((st, env, VBool(char_is_alnum(as_int(args[0])))))
+    Ok((st, env, VBool(char_is_alnum(as_char(args[0])))))
   } else if name == "char_is_upper" {
-    Ok((st, env, VBool(char_is_upper(as_int(args[0])))))
+    Ok((st, env, VBool(char_is_upper(as_char(args[0])))))
   } else if name == "char_is_lower" {
-    Ok((st, env, VBool(char_is_lower(as_int(args[0])))))
+    Ok((st, env, VBool(char_is_lower(as_char(args[0])))))
   } else if name == "char_is_space" {
-    Ok((st, env, VBool(char_is_space(as_int(args[0])))))
+    Ok((st, env, VBool(char_is_space(as_char(args[0])))))
   } else if name == "str_lower" {
     Ok((st, env, VStr(str.to_lower(as_str(args[0])))))
   } else if name == "str_upper" {
@@ -1895,7 +1909,7 @@ test "the comptime interpreter covers every intrinsic, or refuses it by name" {
   #    "thirteen more" and "all twelve" in the same paragraph -- so the two
   #    numbers this file states are asserted rather than asserted-by-nobody.
   assert len(arms) == 40
-  assert len(rejects) == 62
+  assert len(rejects) == 63
 }
 
 test "consts evaluate in declaration order and fold across references" {

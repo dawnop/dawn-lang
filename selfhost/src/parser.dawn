@@ -17,7 +17,7 @@ use std/str
 use std/list
 use token.{
   Token, TokKind, Seg, SText, SCode, Diag,
-  INT, FLOAT, STRING, IDENT, TYPEIDENT, UNDERSCORE, NEWLINE, EOF,
+  INT, CHAR, FLOAT, STRING, IDENT, TYPEIDENT, UNDERSCORE, NEWLINE, EOF,
   FN, LET, VAR, TYPE, ALIAS, CONST, USE, JAVA, PUB, TRAIT, IMPL, EFFECT,
   MATCH, IF, ELSE, FOR, IN, WHILE, RETURN, BREAK, CONTINUE,
   COMPTIME, UNSAFE_PURE, TEST, ASSERT, WITH, TRUE, FALSE, NOT,
@@ -35,7 +35,7 @@ use ast.{
   BinOp, OpAdd, OpSub, OpMul, OpDiv, OpMod, OpConcat, OpEq, OpNeq, OpLt, OpLe,
   OpGt, OpGe, OpAnd, OpOr, OpBand, OpBor, OpBxor, OpShl, OpShr, OpUshr,
   UnOp, OpNeg, OpNot, OpBnot,
-  Arg, pos_arg, MatchArm, Expr, EInt, EFloat, EBool, EUnit, EStr, EVar,
+  Arg, pos_arg, MatchArm, Expr, EInt, EChar, EFloat, EBool, EUnit, EStr, EVar,
   EApply, EMethod, ELambda, ECtor, EFieldAcc, EListLit, ETupleLit, EPropagate,
   EUnwrap, EIndex, EReturn, EBreak, EContinue, EComptime, EUnsafePure,
   EBinary, EUnary, EIf, EMatch, EBlock, EHandle, HandlerArm,
@@ -1621,6 +1621,8 @@ fn primary_expr(p: P, st: St, ns: Bool) -> PR[Expr] = {
   let k = t.kind
   if k == INT {
     Ok((adv1(p, st), EInt(t.ival, t.lo, t.hi)))
+  } else if k == CHAR {
+    Ok((adv1(p, st), EChar(t.ival, t.lo, t.hi)))
   } else if k == FLOAT {
     Ok((adv1(p, st), EFloat(t.fval, t.lo, t.hi)))
   } else if k == TRUE {
@@ -2184,7 +2186,7 @@ fn sync_stmt(p: P, st: St) -> St = {
 ## (e.g. `=`) means the body stopped early.
 fn can_start_pattern(k: TokKind) -> Bool =
   match k {
-    UNDERSCORE | INT | FLOAT | MINUS | TRUE | FALSE | STRING |
+    UNDERSCORE | INT | CHAR | FLOAT | MINUS | TRUE | FALSE | STRING |
     IDENT | TYPEIDENT | LPAREN | LBRACKET -> true
     _ -> false
   }
@@ -2279,6 +2281,8 @@ fn pattern_p(p: P, st: St) -> PR[Pattern] = {
     Ok((adv1(p, st), PWild(t.lo, t.hi)))
   } else if k == INT {
     Ok((adv1(p, st), PLit(EInt(t.ival, t.lo, t.hi), t.lo, t.hi)))
+  } else if k == CHAR {
+    Ok((adv1(p, st), PLit(EChar(t.ival, t.lo, t.hi), t.lo, t.hi)))
   } else if k == FLOAT {
     Ok((adv1(p, st), PLit(EFloat(t.fval, t.lo, t.hi), t.lo, t.hi)))
   } else if k == MINUS {

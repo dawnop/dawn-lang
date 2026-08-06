@@ -20,6 +20,7 @@
 # walks code points, which agrees with UTF-16 for everything but astral
 # characters (manifests are ASCII).
 
+use std/char
 use std/str
 use std/list
 use std/cursor
@@ -53,10 +54,12 @@ fn line_text(l: TLine) -> String =
   }
 
 ## The character at `c` as a one-character string, or "" at the end of `s`.
-fn char_at(s: String, c: Cursor) -> String = {
-  let cp = cursor.char(s, c)
-  if cp < 0 { "" } else { str.from_char(cp) }
-}
+##
+## Cut out of the string rather than rebuilt from a code point: `cursor.char`
+## answers an `Int` with a `-1` sentinel past the end (spec §4.8), and turning
+## that back into a character would be a bridge this module does not need.
+fn char_at(s: String, c: Cursor) -> String =
+  if cursor.done(s, c) { "" } else { cursor.slice(s, c, cursor.next(s, c)) }
 
 fn is_bare_key(s: String) -> Bool = {
   if str.is_empty(s) { return false }
@@ -75,7 +78,7 @@ fn is_digit(c: String) -> Bool = str.contains("0123456789", c)
 ## UTF-16 length of `s` — the offset currency line starts accumulate in.
 fn u16_len(s: String) -> Int = {
   var n = 0
-  for c in code_points(s) { n = n + if c >= 65536 { 2 } else { 1 } }
+  for c in code_points(s) { n = n + if char.code(c) >= 65536 { 2 } else { 1 } }
   n
 }
 
@@ -94,7 +97,7 @@ type Scan = { line: String, pos: Cursor, end: Cursor, base: Int }
 
 fn scan_of(line: String, base: Int) -> Scan = {
   let last = cursor.end(line)
-  let e = if str.ends_with(line, str.from_char(13)) { cursor.prev(line, last) } else { last }
+  let e = if str.ends_with(line, str.from_char('\r')) { cursor.prev(line, last) } else { last }
   Scan { line: line, pos: cursor.start(line), end: e, base: base }
 }
 
@@ -157,7 +160,7 @@ fn parse_string_at(s0: Scan) -> Result[(String, Scan), Diag] = {
       } else if e == "t" {
         out = out ++ "\t"
       } else if e == "r" {
-        out = out ++ str.from_char(13)
+        out = out ++ str.from_char('\r')
       } else if e == "u" {
         var q = p
         var got = 0
@@ -181,7 +184,13 @@ fn parse_string_at(s0: Scan) -> Result[(String, Scan), Diag] = {
           return Err(diag("invalid `\\u` escape `\\u" ++ hex ++ "`",
             abs(s0, p) - 2, abs(s0, p) + 4, "use four hex digits, e.g. `\\u00e9`"))
         }
-        out = out ++ str.from_char(code)
+        match char.of(code) {
+          Some(ch) -> { out = out ++ str.from_char(ch) }
+          None ->
+            return Err(diag("invalid `\\u` escape `\\u" ++ hex ++ "`",
+              abs(s0, p) - 2, abs(s0, p) + 4,
+              "a surrogate half or a value above U+10FFFF is not a character"))
+        }
         p = q
       } else {
         return Err(diag("unsupported escape `\\" ++ e ++ "`", abs(s0, p) - 2, abs(s0, p),
@@ -575,7 +584,7 @@ fn quote(s: String) -> String = {
       out = out ++ "\\n"
     } else if c == "\t" {
       out = out ++ "\\t"
-    } else if c == str.from_char(13) {
+    } else if c == str.from_char('\r') {
       out = out ++ "\\r"
     } else {
       out = out ++ c

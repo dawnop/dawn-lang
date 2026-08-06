@@ -3,6 +3,7 @@
 # — the Ok branch is a rendered response, the Err branch is mapped to an HTTP
 # status by the server (JSON body {"error": message}). No exceptions anywhere:
 # panics are bugs, expected failures travel in Result.
+use std/char
 use std/str
 use std/bytes
 use std/map
@@ -198,11 +199,11 @@ pub fn streaming(status: Int, content_type: String, stream: InputStream) -> Resp
 ## through it, so response splitting is not reachable from request input.
 pub fn header_value(v: String) -> String = {
   let cs = code_points(v)
-  var out: List[Int] = []
+  var out: List[Char] = []
   var i = 0
   while i < len(cs) {
-    let c = unwrap_or(get(cs, i), 0)
-    if c == '\t' || (c >= 32 && c != 127) {
+    let c = unwrap_or(get(cs, i), ' ')
+    if c == '\t' || (c >= ' ' && c != '\u{007F}') {
       out = out ++ [c]
     }
     i = i + 1
@@ -214,10 +215,10 @@ pub fn header_value(v: String) -> String = {
 # controls. Anything else would let a name carry its own `:` and inject a field.
 fn header_name(n: String) -> String = {
   let cs = code_points(n)
-  var out: List[Int] = []
+  var out: List[Char] = []
   var i = 0
   while i < len(cs) {
-    let c = unwrap_or(get(cs, i), 0)
+    let c = unwrap_or(get(cs, i), ' ')
     let alnum = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
     let punct = c == '!' || c == '#' || c == '$' || c == '%' || c == '&' || c == '\'' ||
       c == '*' || c == '+' || c == '-' || c == '.' || c == '^' || c == '_' || c == '`' ||
@@ -249,12 +250,18 @@ fn pct_encode(s: String) -> String = {
   var out = ""
   var i = 0
   while i < bytes.len(b) {
+    # a byte, not a character: the encoding is defined over the UTF-8 bytes,
+    # so the ASCII constants are compared as the code points they are
     let c = bytes.at(b, i)
-    let alnum = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
-    let safe = c == '!' || c == '#' || c == '$' || c == '&' || c == '+' || c == '-' ||
-      c == '.' || c == '^' || c == '_' || c == '`' || c == '|' || c == '~'
+    let alnum = (c >= char.code('a') && c <= char.code('z')) ||
+      (c >= char.code('A') && c <= char.code('Z')) ||
+      (c >= char.code('0') && c <= char.code('9'))
+    let safe = c == char.code('!') || c == char.code('#') || c == char.code('$') ||
+      c == char.code('&') || c == char.code('+') || c == char.code('-') ||
+      c == char.code('.') || c == char.code('^') || c == char.code('_') ||
+      c == char.code('`') || c == char.code('|') || c == char.code('~')
     if alnum || safe {
-      out = out ++ str.from_char(c)
+      out = out ++ str.from_char(char.of(c).expect("an ASCII byte"))
     } else {
       out = out ++ "%" ++ str.to_upper(str.pad_start(to_hex(c), 2, "0"))
     }
@@ -276,10 +283,10 @@ fn ascii_filename(name: String) -> String = {
   var out = ""
   var i = 0
   while i < len(cs) {
-    let c = unwrap_or(get(cs, i), 0)
+    let c = unwrap_or(get(cs, i), ' ')
     if c == '"' || c == '\\' {
       out = out ++ "\\" ++ str.from_char(c)
-    } else if c >= 32 && c < 127 {
+    } else if c >= ' ' && c < '\u{007F}' {
       out = out ++ str.from_char(c)
     }
     i = i + 1

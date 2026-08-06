@@ -522,30 +522,37 @@ true
 
 ## 15. 字符与码点
 
-Dawn 没有独立的字符类型，走 Go 的 rune 路线：字符字面量 `'a'` 就是等于它**码点**的
-`Int`（`'a' == 97`）。于是它在 `match` 里就是普通整数模式，字符串按码点处理。
+字符字面量 `'a'` 的类型是 `Char`：一个 Unicode 标量值，表示就是它的码点。它是
+`Int` 上的 opaque type（§2.7），所以 `==`、`<`、哈希、`match` 里的字面量模式全都
+是 `Int` 那一份——但它不是 `Int`，`'a' + 1` 不成立，两者互转要经 `std/char`：
+`char.code(c)` 拿码点，`char.of(n)` 从码点造字符（不是标量值就 `None`）。
 
 ```dawn run
+use std/char
 use std/str
 
-fn is_digit(c: Int) -> Bool = c >= '0' && c <= '9'
+fn is_digit(c: Char) -> Bool = c >= '0' && c <= '9'
 
 pub fn main() -> Unit !io = {
   println(to_string(is_digit('7')))
+  println(to_string(char.code('a')))
   println(to_string(str.len("héllo 🙂")))
   println(str.slice("世界你好", 0, 2))
-  println(from_code_points([104, 105]))
+  println(from_code_points(['h', 'i']))
 }
 ```
 ```output
 true
+97
 7
 世界
 hi
 ```
 
-`code_points`/`from_code_points` 在字符串与码点列表间往返（含增补平面的 emoji），
-`str.len` 数码点，`str.slice` 按码点下标切片，`str.from_char` 把一个码点变成字符串。
+`code_points`/`from_code_points` 在字符串与 `List[Char]` 间往返（含增补平面的
+emoji），`str.len` 数码点，`str.slice` 按码点下标切片，`str.at` 取一个 `Char`，
+`str.from_char` 把一个 `Char` 变成字符串。`"${c}"` 渲染成码点数字，因为 opaque
+type 的 `Show` 就是目标类型的那一份。
 
 按码点**下标**的函数每次都要从串首数起（单次 O(n)，循环里就是 O(n²)）。扫描字符串
 用 `std/cursor`：**游标**是不透明的位置，每步恒定开销；对它做算术是编译错误，
@@ -566,7 +573,9 @@ pub fn main() -> Unit !io = {
 🎈b
 ```
 
-一步就是一个字符：emoji 的代理对不会被拆开。`cursor.find(s, sub, from)` 返回
+一步就是一个字符：emoji 的代理对不会被拆开。`cursor.char` 回的是 `Int` 不是
+`Char`，因为它到尾要答 `-1`——一个不是字符的哨兵住不进「每个值都是字符」的类型里
+（spec §4.8）。`cursor.find(s, sub, from)` 返回
 `Option[Cursor]`，`cursor.skip(s, c, sub)` 跳过一段已知出现的字面量。
 
 ---

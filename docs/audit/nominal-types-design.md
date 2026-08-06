@@ -1,6 +1,6 @@
 # 给标量一个自己的身份：`Char` 与 newtype
 
-> 状态：**步 1–3 驳回（proposed → rejected）；步 4 施工中（2026-08-06 起）** ——
+> 状态：**步 1–3 驳回（proposed → rejected）；步 4 完结（v0.57.0，2026-08-06）** ——
 > 见文首 2026-07-30 重判：机制已由 `opaque type` 提供。LANG-04 于 2026-08-06 开工，
 > 分两个 release 落地，**落地形状与分期见文末第七节（设计补充）**——那一节补的是
 > 本文没答的三件事：Char 由谁铸造、分期的接缝落在哪、`cursor.char` 的哨兵怎么办。
@@ -222,7 +222,8 @@ pub fn code(c: Char) -> Int
 
 ## 七、2026-08-06 设计补充：步骤 4 的落地形状
 
-> 状态：**步骤 4 施工中**。本节是动码时补的裁决，补的是原文没答的三件事。
+> 状态：**步骤 4 完结**（v0.57.0）。本节是动码时补的裁决，补的是原文没答的三件事；
+> 落地之后知道的六件事在 7.8。
 > 原文写在 `'a'` 的类型这件事被真正排期之前，所以它给了机制（`opaque type Char = Int`）
 > 却没给**分期**——而分期是这件事唯一难的部分。
 
@@ -414,3 +415,53 @@ fn probe_to_int(c: Char) -> Int = char.code(c)
 对照组在同一天同一台机器上：`char_unchecked` 作为**新内建**加在 `types.dawn` 里、
 被 `lexer.dawn` 调用，stage 1 报 `undefined function`。**两个探针一正一反**，
 出路 1 与出路 4 的差别就是这两行输出。
+
+### 7.8 期 2 落地：翻转做完之后知道的六件事
+
+> 状态：**LANG-04 完结**（v0.57.0，2026-08-06）。`'a'` 的类型是 `Char`，全仓迁完，
+> 门禁全绿。本节记的是 7.1–7.7 没预见、只有动手才知道的东西。
+
+**一、真正的工作量确实不是字面量，但也不是「码点算术」，是三处签名。**
+7.6 预估 675 处字面量 + 34 个文件的 `code_points`。实际上把
+`Src.cps` / `SourceView.cps` 改成 `List[Char]`、`str.at` 改成回 `Char`、
+`char_is_*` 改成收 `Char` 之后，**绝大多数字面量比较原样通过**——两边都成了 `Char`。
+剩下的错误集中在两类边界：拿 `cursor.char`（回 `Int` 带 `-1`）去比字符字面量的地方，
+以及对码点做加减的数字表（hex / base64 / UTF-8 编解码）。前者的答案是
+`char.code('x')` 留在 `Int` 面比较，后者是进出各转一次。
+
+**二、`char_unchecked` 该在 lowering 消失，不该进后端。**
+7.5 说「两个后端各加一条直通的 case」。不必：`Char` 的表示就是 `Int`，所以
+`lower_expr` 把 `char_unchecked(x)` 直接换成 `x`，两个后端都不认识这个名字，
+`lowered_intrinsics` 里多一行就说清了这件事。
+
+**三、std 的模块顺序被这次改动推动了一次。**
+`std/fmt` 与 `std/bytes` 都扫 ASCII 数字表，都需要 `char.code`，而两者在
+`modules.txt` 里都排在 `char` 前面。于是 `char` 上移到 `str` 之后，
+它自己测「字符可以当 Map 键」的那条断言搬进 `std/map` 的测试——那里本来就有 Map。
+
+**四、翻转撞出了三个与 `Char` 无关的既有缺口**，都是「opaque 在某条路上没被剥开」：
+
+| 缺口 | 症状 | 修法 |
+|---|---|---|
+| `unify_into` 的 TyVar 已绑定分支 | owner 模块里 `Some(n)` 对不上 `Option[Char]` | 绑定侧是 opaque 且看得穿时剥到目标 |
+| `resolve_ord_witness` | `'a' < 'b'` 报「values of type Char cannot be ordered」 | 与 `resolve_witness` 同款：自有 impl 优先，否则落到目标 |
+| 比较运算符的 native fast path | `'0' <= c` 降级成 `cmp(a, b) <= 0` 一次调用 | `ord_subject` 剥开无自有 impl 的 opaque，`eq_subject` 同理 |
+
+前两条是硬错误（不修就编不过），第三条只是慢——**而它只被 `core-golden` 抓到**，
+测试全绿。这是「门禁的绿没有信息量」的又一个实例：正确性门禁看不见指令选择。
+
+**五、`match` 的剥开是不对称的，而这条不对称有判据。**
+标量剥、结构不剥：字面量模式是一次相等判断，opaque 本来就继承目标的相等；
+构造子 / 元组 / 列表模式是在拆表示，那正是 opacity 藏起来的东西。
+一开始两边都剥，`checker-corpus` 的 `opaque_expr` 立刻变了诊断——语料替设计做了决定。
+
+**六、`\u{D800}` 现在是词法错误。** 这是翻转顺带的收紧（7.7 预告过）：
+`lex_unicode` 的范围检查换成 `char.of`，代理半区随之被拒。语料没覆盖到它，
+所以是新加的 `lexer` 测试钉住的，不是既有门禁抓到的。
+
+**门禁账**：`opaque-twin` 补了 `char` 一例——它是仓里第一个没有声明点的 opaque，
+`sed 's/^opaque type /alias /'` 换不动它，所以那一例改成**在同一次运行里**把
+`Char` 的四种关系与它目标的答案逐条比对、不一致就 `panic`（只打印答案的话，
+两边一起错就是空 diff，正是 run.sh 开头警告的那个洞）。
+`unicode-contract` 的分类扫描从此跳过代理半区——「U+D800 是不是字母」不再是
+这门语言问得出的问题。

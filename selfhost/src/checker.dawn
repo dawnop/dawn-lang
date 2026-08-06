@@ -16,7 +16,7 @@ use ast.{
   module_fns, module_types, module_consts, module_traits,
   module_impls, module_tests,
   TraitMethod, Expr,
-  FnDecl, EBool, EVar, EInt,
+  FnDecl, EBool, EVar, EInt, EChar,
   BinOp, UnOp, OpAdd, OpSub, OpMul, OpDiv, OpMod, OpConcat, OpEq, OpNeq, OpLt,
   OpLe, OpGt, OpGe, OpAnd, OpOr, OpBand, OpBor, OpBxor, OpShl, OpShr, OpUshr,
   OpNeg, OpNot, OpBnot,
@@ -30,7 +30,7 @@ use ast.{
   EHandle, HandlerArm, DEffect, EffectDeclR, EffectOp, module_effects
 }
 use tast.{
-  TExpr, XInt, XFloat, XBool, XUnit, XStr, XLocal, XFnValue, XCallDyn,
+  TExpr, XInt, XChar, XFloat, XBool, XUnit, XStr, XLocal, XFnValue, XCallDyn,
   XCallBuiltin, XCallFn, XApply, XJava, XLambda, XCtor, XConstRef, XCtorValue, XField,
   XListLit, XTupleLit, XPropagate, XUnwrap, XIndex, XReturn, XBreak, XContinue,
   XComptime, XUnsafePure, XBinary, XUnary, XIf, XMatch, XBlock, XError,
@@ -51,7 +51,7 @@ use types.{
   adt_of, trait_of, ty_show, ctor_render, sig_render, subst, subst_eff, eff_show,
   ty_mentions_var, ty_map_children, ty_any_child,
   SlotAt, SlotNoField, SlotAfterNamed, SlotOverflow, SlotTaken, ctor_slots,
-  is_numeric, is_errorish,
+  is_numeric, is_errorish, ty_char, peel_opaque,
   prelude_traits, bounds_of,
   prelude_trait_ids,
   builtins, opt_ty, result_ty, OPTION_ID, RESULT_ID,
@@ -472,7 +472,27 @@ pub fn unify_into(
     TyVar(_, id) ->
       match map.get(m, id) {
         None -> (map.insert(m, id, actual), em, true)
-        Some(bound) -> (m, em, bound == actual)
+        Some(bound) ->
+          if bound == actual {
+            (m, em, true)
+          } else {
+            # The variable is already bound to an opaque type, and the actual
+            # is that type's target, inside the module declaring it: `Some(n)`
+            # against `Option[Char]` in std/char, where the expected type bound
+            # `T` before the argument was checked. The peel at the top of this
+            # function is the mirror case (an opaque *actual*); without this
+            # one the conversion held everywhere except under a type
+            # constructor, which is where a checked constructor puts it.
+            match bound {
+              TyOpaque(_, _, ow, tgt) ->
+                if sees_through(cx, ow) {
+                  unify_into(cx, tgt, actual, m, em)
+                } else {
+                  (m, em, false)
+                }
+              _ -> (m, em, false)
+            }
+          }
       }
     # a projection reduces first if what is known so far (m) makes its
     # subject concrete; a still-rigid one unifies only with the same
@@ -937,8 +957,30 @@ fn capture_witness(cx: Cx, sym: Int) -> Cx = {
 ## resolves through the impl table; the caller's own rigid type parameter
 ## forwards the caller's dictionary (which every enclosing lambda captures).
 ## Returns the witness for the typed node.
+## The type an ordering is really taken at: an opaque type with no `impl Ord`
+## of its own is its target (spec §2.7). One definition, so the operator's fast
+## path and the witness below cannot disagree about which type answers.
+fn ord_subject(cx: Cx, t: Ty) -> Ty =
+  match t {
+    TyOpaque(_, _, _, tgt) ->
+      if has_impl_at(cx.impl_table, ORD_ID, t) { t } else { ord_subject(cx, tgt) }
+    _ -> t
+  }
+
 pub fn resolve_ord_witness(cx: Cx, t: Ty, lo: Int, hi: Int) -> (Cx, Option[WitRef]) = {
   if is_errorish(t) { return (cx, no_wit()) }
+  # An opaque type answers for itself if it has its own impl, and otherwise
+  # falls back to its target -- the same clause `resolve_witness` states for
+  # every other trait, and the reason `'a' < 'b'` is Int's `<`. This path is
+  # the specialised one the `<` family takes, so it needed saying twice.
+  match t {
+    TyOpaque(_, _, _, tgt) ->
+      match impl_at(cx.impl_table, ORD_ID, t) {
+        None -> { return resolve_ord_witness(cx, tgt, lo, hi) }
+        Some(_) -> ()
+      }
+    _ -> ()
+  }
   match t {
     TyVar(_, vid) ->
       match map.get(cx.frame.dict_syms, (vid, ORD_ID)) {
@@ -1082,8 +1124,13 @@ pub fn check_binary_typed(
             ty_show(cx.adts, lt) ++ " vs " ++ ty_show(cx.adts, rt), olo, ohi), TyError,
           node(no_wit(), TyError))
       }
-      # native fast path
-      if lt == TyInt || lt == TyFloat || lt == TyString {
+      # Native fast path, and an opaque type over one of these takes it too:
+      # with no `impl Ord` of its own it *is* its target at run time
+      # (spec §2.7), which is what `resolve_ord_witness` peels to anyway.
+      # Without the peel `'0' <= c` on a `Char` lowered to `cmp(a, b) <= 0` --
+      # a call, where the same comparison one layer down is one instruction.
+      let ol = ord_subject(cx, lt)
+      if ol == TyInt || ol == TyFloat || ol == TyString {
         return (cx, TyBool, node(no_wit(), TyBool))
       }
       let (cx1, w) = resolve_ord_witness(cx, lt, olo, ohi)
@@ -1873,6 +1920,9 @@ fn check_lit_pattern(cx: Cx, lit: Expr, scrut: Ty, lo: Int, hi: Int) -> (Cx, TPa
   # the literal's own type; string patterns are interpolation-free (parser ensured)
   let (lt, lv) = match lit {
     EInt(v, _, _) -> (TyInt, LInt(v))
+    # a char literal is its code point: the same LInt every consumer already
+    # handles, because a literal pattern lowers to an equality test on an Int
+    EChar(v, _, _) -> (ty_char(), LInt(v))
     EFloat(v, _, _) -> (TyFloat, LFloat(v))
     EBool(v, _, _) -> (TyBool, LBool(v))
     EStr(parts, _, _) -> {
@@ -3058,6 +3108,7 @@ fn see_through_expected(cx: Cx, e: Expr, expected: Option[Ty]) -> Option[Ty] =
 fn check_expr_at(cx: Cx, e: Expr, expected: Option[Ty]) -> (Cx, Ty, TExpr) !io =
   match e {
     EInt(v, lo, hi) -> (cx, TyInt, XInt(v, lo, hi))
+    EChar(v, lo, hi) -> (cx, ty_char(), XChar(v, lo, hi))
     EFloat(v, lo, hi) -> (cx, TyFloat, XFloat(v, lo, hi))
     EBool(v, lo, hi) -> (cx, TyBool, XBool(v, lo, hi))
     EUnit(lo, hi) -> (cx, TyUnit, XUnit(lo, hi))
@@ -6195,7 +6246,16 @@ fn check_match(
 ) -> (Cx, Ty, TExpr) !io = {
   let (cx0, st, sx) = check_expr(cx, scrut, no_expected())
   var cx1 = cx0
-  let scrut_ok = st == TyInt || st == TyFloat || st == TyString || st == TyBool ||
+  # The scalars peel and the structures do not, and the line between them is
+  # what a pattern of each kind does. A literal pattern is an equality test,
+  # and an opaque type inherits its target's equality (spec §2.7) -- so
+  # `match c { 'a' -> .. }` on a `Char` is the same test as on the Int, and
+  # refusing it while allowing `match char.code(c)` would be a wall rather than
+  # a type. A constructor, tuple or list pattern takes the value apart, which
+  # is exactly the representation opacity hides, so those keep asking about the
+  # opaque type itself and get refused outside the declaring module.
+  let sp = peel_opaque(st)
+  let scrut_ok = sp == TyInt || sp == TyFloat || sp == TyString || sp == TyBool ||
     is_adt(st) || is_tuple_ty(st) || is_list_ty(st)
   if not scrut_ok && not is_errorish(st) {
     cx1 = cerr(cx1, "match supports Int/Float/String/Bool, tuples, lists and user-defined types, got " ++

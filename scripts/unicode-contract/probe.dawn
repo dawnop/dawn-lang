@@ -32,6 +32,7 @@
 # Only the oracle half needs a JDK to agree with us, and that is the point: a
 # program's answer is the table's, and the oracle is consulted when the table
 # is made rather than every time a string is folded.
+use std/char
 use std/io
 use std/list
 use std/str
@@ -65,9 +66,10 @@ fn classify(cp: Int, which: String) -> Bool !io =
 
 fn class_names() -> List[String] = ["letters", "digits", "uppers", "lowers", "spaces"]
 
-fn one(cp: Int) -> String = from_code_points([cp])
+fn one(cp: Int) -> String =
+  from_code_points([char.of(cp).expect("the sweep skips the surrogates")])
 
-fn only_cp(s: String) -> Int = get(code_points(s), 0).expect("one code point")
+fn only_cp(s: String) -> Int = char.code(get(code_points(s), 0).expect("one code point"))
 
 fn jdk_version() -> String !io =
   match System.getProperty("java.version") {
@@ -372,6 +374,15 @@ fn check_class(text: String) -> (Int, Int) !io = {
   var isp = 0
   var cp = 0
   while cp <= LAST {
+    # The surrogate halves drop out of this sweep, and not because they are
+    # awkward: since v0.57.0 `char_is_*` takes a `Char`, which by construction
+    # is a Unicode scalar value, so "is U+D800 a letter" stopped being a
+    # question the language can be asked. The case sweep above skips them too,
+    # for the older reason that they have no case mapping.
+    if is_surrogate(cp) {
+      cp = cp + 1
+      continue
+    }
     il = seek2(letters, il, cp)
     idg = seek2(digits, idg, cp)
     iu = seek2(uppers, iu, cp)
@@ -384,16 +395,17 @@ fn check_class(text: String) -> (Int, Int) !io = {
     let s = holds_at(spaces, isp, cp)
     if l || d || u || w || s || cp % 1009 == 0 {
       seen = seen + 1
-      if char_is_letter(cp) != l || char_is_digit(cp) != d || char_is_upper(cp) != u ||
-        char_is_lower(cp) != w || char_is_space(cp) != s ||
-        char_is_alnum(cp) != (l || d) {
+      let c = char.of(cp).expect("not a surrogate, skipped above")
+      if char_is_letter(c) != l || char_is_digit(c) != d || char_is_upper(c) != u ||
+        char_is_lower(c) != w || char_is_space(c) != s ||
+        char_is_alnum(c) != (l || d) {
         bad = bad + 1
         if bad < 12 {
           io.println("class " ++ cp_lit(cp) ++ " table " ++ to_string(l) ++ to_string(d) ++
             to_string(l || d) ++ to_string(u) ++ to_string(w) ++ to_string(s) ++
-            " backend " ++ to_string(char_is_letter(cp)) ++ to_string(char_is_digit(cp)) ++
-            to_string(char_is_alnum(cp)) ++ to_string(char_is_upper(cp)) ++
-            to_string(char_is_lower(cp)) ++ to_string(char_is_space(cp)))
+            " backend " ++ to_string(char_is_letter(c)) ++ to_string(char_is_digit(c)) ++
+            to_string(char_is_alnum(c)) ++ to_string(char_is_upper(c)) ++
+            to_string(char_is_lower(c)) ++ to_string(char_is_space(c)))
         }
       }
     }

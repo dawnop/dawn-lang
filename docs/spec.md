@@ -83,25 +83,30 @@ true false not
 | `()` | `Unit` | 唯一值 |
 | `[1, 2, 3]` | `List[Int]` | 允许尾逗号 |
 | `(1, "a")` | `(Int, String)` | 元组，2 至 8 元 |
-| `'a'`, `'\n'`, `'世'`, `'\u{1F600}'` | `Int` | 字符字面量 = **码点**（见下） |
+| `'a'`, `'\n'`, `'世'`, `'\u{1F600}'` | `Char` | 字符字面量（见下） |
 
-**字符字面量走 Go 的 rune 路线**：`'x'` 不是独立类型，而是等于该字符**码点**的 `Int`
-字面量（`'a' == 97`）。因此 match 里它就是普通 `Int` 模式，类型系统零改动。单引号内是
-单个码点：转义与字符串相同（`\n \t \r \\ \u{...}`）另加 `\'`；空字面量或含多个码点 → 词法错误。
-按码点处理字符串的函数见 §11（`code_points`/`from_code_points`/`str.len`/`str.slice`）。
+**字符是自己的类型 `Char`**：一个 Unicode 标量值（`0..0x10FFFF`，不含 `D800..DFFF`
+的代理半区）。它是 `Int` 上的 **opaque type**（§2.7），owner 是 `std/char`——表示就是
+码点，故零开销，且 `==`、`<`、哈希、`match` 里的字面量模式全部沿用 `Int` 的那一份，
+`"${c}"` 也照 `Int` 渲染（要一个字符的字符串用 `str.from_char(c)`）。但它**不是**
+`Int`：`'a' + 1` 不成立，两者互转经 `std/char`——`char.code(c) -> Int` 拿码点、
+`char.of(n) -> Option[Char]` 从码点造字符（不是标量值就 `None`）。
+单引号内是单个码点：转义与字符串相同（`\n \t \r \\ \u{...}`）另加 `\'`；
+空字面量、含多个码点、或 `\u{...}` 不是标量值 → 词法错误。
+按码点处理字符串的函数见 §11（`code_points -> List[Char]`/`from_code_points`/
+`str.len`/`str.slice`/`str.at`）。
 **注意**：运行期存储是 `java.lang.String`（UTF-16 码元下标），故「按码点下标随机访问」需要
 O(n) 换算——实测与设计取舍见 [`seq6-research.md`](seq6-research.md) 附录。**逐字符遍历请用
 §11 的游标（`std/cursor`）**，它每步恒定开销；下标版留给单次调用。
-没有独立字符类型（Go/Rune 模型使其无必要）。
 
-> **过渡中（v0.54.0 起）**：类型名 `Char` 从 v0.54.0 起可以写、`std/char` 模块从 v0.56.0
-> 起可以 `use`，但 `Char` 现在**就是 `Int` 的另一个拼法**——完全互换，写了它不会多一分安全，
-> `char.code(c)` 也就是恒等函数。两件都提前落地只为一件事：把 `'a'` 的类型从 `Int` 改成
-> `Char` 是破坏性变更，而按种子纪律（`docs/bootstrap.md`），编译那一次改动的编译器
-> 必须已经认识这个**名字**——类型名要认识，selfhost 的 lexer 要用来造 `Char` 的那个
-> **std 模块**也要认识（stage 1 用的是种子发布时的那份 std）。翻转发生在 v0.57.0：
-> `Char` 变成名义类型、`'a'` 随之改型，本节这段话届时整段重写。
-> **别依赖 `Char` 与 `Int` 可换**——那是过渡态，不是承诺。分期与实测见
+> **`cursor.char` 是例外，回 `Int` 不回 `Char`**：它到尾答 `-1`（§4.8 具名例外），
+> 而一个不是码点的哨兵住不进「每个值都是码点」的类型里。Char 面是 `str.at`、
+> `str.chars`、`code_points`；`cursor.char` 是它们下面的原语。
+>
+> **沿革**：`'a'` 在 v0.56.0 及以前是 `Int`（Go 的 rune 路线）。类型名 `Char` 在
+> v0.54.0、`std/char` 模块在 v0.56.0 各提前一版落地成 `Int` 的透明拼法，只为满足种子
+> 纪律（`docs/bootstrap.md`）：编译翻转那一版的编译器必须已经认识这个名字和那个模块。
+> 翻转在 v0.57.0 一次做完。分期、实测与被否掉的几条出路见
 > [`audit/nominal-types-design.md`](audit/nominal-types-design.md) §7。
 
 ### 1.6 字符串与插值
@@ -1738,9 +1743,11 @@ radix  = [ "+" | "-" ] rdigit { rdigit }
 **不随宿主 JDK 的 Unicode 版本变**——升级到新 Unicode 是重新生成这张表这一件明确的事，
 而不是换台机器编译就悄悄换了答案。分类（`char_is_*`）同理，表在 `selfhost/src/class_table.dawn`。
 
-**字符即码点。** `code_points(s) -> List[Int]` 拆成码点（增补平面的代理对合并为一个码点）、
-`from_code_points` 由码点组装；`str.len` 是码点数，`str.at` 回**码点 `Int`**，回 `List[String]`
-的是 `str.chars`。字符串的下标一律是码点下标，不是 UTF-16 码元。
+**字符即码点。** `code_points(s) -> List[Char]` 拆成字符（增补平面的代理对合并为一个码点）、
+`from_code_points(cs: List[Char])` 由字符组装；`str.len` 是码点数，`str.at` 回一个
+**`Char`**，回 `List[String]` 的是 `str.chars`。字符串的下标一律是码点下标，不是
+UTF-16 码元。`char_is_letter`/`_digit`/`_alnum`/`_upper`/`_lower`/`_space` 收 `Char`，
+`std/char` 的 `is_*` 是它们的公开拼法。
 
 三条判据（§4.8）在字符串族上的落点：`str.at(s, i)` 越界 **panic**（判据 1，`i` 是调用方声称
 存在的位置，同 `xs[i]` 与 `bytes.at`）；`str.strip_prefix`/`strip_suffix` 回 `Option`

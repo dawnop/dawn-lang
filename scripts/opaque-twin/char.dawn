@@ -1,0 +1,59 @@
+# `Char`, the one opaque type in the repository with no declaration site: the
+# compiler mints it (types.ty_char) because `'a'` is syntax and the checker
+# needs the type before any module is in scope. So `sed 's/^opaque type /alias /'`
+# has nothing to flip here, and this case would otherwise be the only opaque
+# type the twin gate never looks at.
+#
+# It earns its place two ways:
+#
+#   * `Twin` is declared, so the substitution still runs and this file still
+#     participates in the property the gate is named for;
+#   * every claim about `Char` below is checked *against the Int it is over*,
+#     inside one run. A `Char` that grew its own `Show`, `Eq`, `Ord` or `Hash`
+#     would make one of these comparisons false and `panic`, which the gate
+#     reads as "does not compile and run" rather than as agreement. Printing
+#     the answers alone would not: a wrong answer on both sides is an empty
+#     diff, which is exactly the hole the header of run.sh describes.
+use std/char
+use std/io
+use std/map
+use std/set
+
+opaque type Twin = Int
+
+fn same(what: String, a: String, b: String) -> Unit =
+  if a != b { panic("Char disagrees with Int about " ++ what ++ ": " ++ a ++ " vs " ++ b) } else { () }
+
+pub fn main() -> Unit !io = {
+  let a = 'a'
+  let b = 'b'
+  let t: Twin = 97
+
+  println("-- rendering is the target's, so a character shows as a number --")
+  same("to_string", to_string(a), to_string(char.code(a)))
+  same("interpolation", "${a}", "${char.code(a)}")
+  same("show", show(a), show(char.code(a)))
+  println(to_string(a))
+  println("${t}")
+
+  println("-- equality and order are the target's --")
+  same("eq", to_string(a == a), to_string(char.code(a) == char.code(a)))
+  same("neq", to_string(a == b), to_string(char.code(a) == char.code(b)))
+  same("lt", to_string(a < b), to_string(char.code(a) < char.code(b)))
+  same("cmp", to_string(cmp(b, a)), to_string(cmp(char.code(b), char.code(a))))
+  same("sort", to_string(sort([b, a])), to_string(sort([char.code(b), char.code(a)])))
+  println(to_string(sort([b, a])))
+
+  println("-- hash, through a key --")
+  let ka: Map[Char, Int] = map.from([(a, 1)])
+  same("map key", to_string(map.get(ka, a)), to_string(map.get(map.from([(char.code(a), 1)]), 97)))
+  println(to_string(map.get(ka, a)))
+  let sa: Set[Char] = set.from([a, b, a])
+  println(to_string(set.has(sa, b)))
+  println(to_string(set.len(sa)))
+
+  println("-- the declared twin beside it --")
+  let kt: Map[Twin, Int] = map.from([(t, 1)])
+  println(to_string(map.get(kt, t)))
+  println(to_string(t == t))
+}

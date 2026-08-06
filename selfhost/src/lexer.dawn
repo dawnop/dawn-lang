@@ -10,11 +10,12 @@
 # `Err(Diag)` — the main loop resynchronizes at end of line. Inline failures
 # (bad numeric literals, stray characters) ride beside the token, as diagnostics.
 
+use std/char
 use std/str
 use std/list
 use token.{
   TokKind, Token, Seg, SText, SCode, Diag, keyword, kind_name,
-  INT, FLOAT, STRING, IDENT, TYPEIDENT, UNDERSCORE, NEWLINE, EOF, COMMENT,
+  INT, CHAR, FLOAT, STRING, IDENT, TYPEIDENT, UNDERSCORE, NEWLINE, EOF, COMMENT,
   LPAREN, RPAREN, LBRACE, RBRACE, LBRACKET, RBRACKET,
   COMMA, COLON, DOT, DOTDOT, QUESTION, ARROW, LARROW, FATARROW,
   EQ, EQEQ, NEQ, LT, LE, GT, GE,
@@ -31,7 +32,7 @@ use token.{
 # pair of indices into it. UTF-16 — the LSP wire encoding — is reconstructed only
 # at the LSP boundary (lsp.dawn) from a `SourceView`, so it never leaks inward.
 
-type Src = { cps: List[Int], n: Int, base: Int }
+type Src = { cps: List[Char], n: Int, base: Int }
 
 fn src_of(text: String, base: Int) -> Src = {
   let cps = code_points(text)
@@ -40,11 +41,11 @@ fn src_of(text: String, base: Int) -> Src = {
 
 fn off(s: Src, i: Int) -> Int = s.base + i
 
-## The code point at `i`, or a space past the end (the Kotlin `peek` default).
-fn cp_at(s: Src, i: Int) -> Int = if i < s.n { s.cps[i] } else { ' ' }
+## The character at `i`, or a space past the end (the Kotlin `peek` default).
+fn cp_at(s: Src, i: Int) -> Char = if i < s.n { s.cps[i] } else { ' ' }
 
 fn text_of(s: Src, a: Int, b: Int) -> String = {
-  var out: List[Int] = []
+  var out: List[Char] = []
   var i = a
   while i < b {
     out = out ++ [s.cps[i]]
@@ -55,7 +56,7 @@ fn text_of(s: Src, a: Int, b: Int) -> String = {
 
 # ---- small helpers ----
 
-fn is_ident_part(c: Int) -> Bool = char_is_alnum(c) || c == '_'
+fn is_ident_part(c: Char) -> Bool = char_is_alnum(c) || c == '_'
 
 fn is_blank(v: String) -> Bool = {
   for c in code_points(v) {
@@ -80,7 +81,7 @@ fn no_toks() -> List[Token] = []
 
 fn no_segs() -> List[Seg] = []
 
-fn no_cps() -> List[Int] = []
+fn no_cps() -> List[Char] = []
 
 fn tok(k: TokKind, text: String, lo: Int, hi: Int) -> Token =
   Token { kind: k, text: text, lo: lo, hi: hi, ival: 0, fval: 0.0, segs: no_segs() }
@@ -145,14 +146,14 @@ fn lex_go(text: String, base: Int, collect: Bool) -> (List[Token], List[Token], 
         toks = toks ++ [tok(NEWLINE, "\\n", off(s, i), off(s, i) + 1)]
       }
       i = i + 1
-    } else if c == ' ' || c == '\t' || c == 13 {
+    } else if c == ' ' || c == '\t' || c == '\r' {
       i = i + 1
     } else if c == '#' {
       let i0 = i
       while i < s.n && s.cps[i] != '\n' { i = i + 1 }
       if collect {
         var e = i
-        while e > i0 && (s.cps[e - 1] == ' ' || s.cps[e - 1] == '\t' || s.cps[e - 1] == 13) {
+        while e > i0 && (s.cps[e - 1] == ' ' || s.cps[e - 1] == '\t' || s.cps[e - 1] == '\r') {
           e = e - 1
         }
         # slice the pre-decoded code-point array (O(len)); utf16_slice would
@@ -214,7 +215,7 @@ fn lex_go(text: String, base: Int, collect: Bool) -> (List[Token], List[Token], 
 ## the total UTF-16 length), and that total. Spans are code-point indices, so
 ## `slice_cp` covers all internal slicing; `offs` exists only to map code-point
 ## positions to UTF-16 columns when talking to an editor (lsp.dawn).
-pub type SourceView = { cps: List[Int], offs: List[Int], u16len: Int }
+pub type SourceView = { cps: List[Char], offs: List[Int], u16len: Int }
 
 pub fn view_of(text: String) -> SourceView = {
   let cps = code_points(text)
@@ -222,7 +223,7 @@ pub fn view_of(text: String) -> SourceView = {
   var o = 0
   for c in cps {
     offs = offs ++ [o]
-    o = o + (if c >= 65536 { 2 } else { 1 })
+    o = o + (if char.code(c) >= 65536 { 2 } else { 1 })
   }
   offs = offs ++ [o]
   SourceView { cps: cps, offs: offs, u16len: o }
@@ -231,7 +232,7 @@ pub fn view_of(text: String) -> SourceView = {
 ## Slice `[a, b)` by code-point index — O(b - a). The one string-slicing API:
 ## every span in the front end is a pair of code-point indices.
 pub fn slice_cp(v: SourceView, a: Int, b: Int) -> String = {
-  var out: List[Int] = []
+  var out: List[Char] = []
   var i = a
   while i < b {
     out = out ++ [v.cps[i]]
@@ -259,7 +260,7 @@ fn lex_number(s: Src, start: Int) -> (Int, Token, List[Diag]) =
   if s.cps[start] == '0' && (cp_at(s, start + 1) == 'x' || cp_at(s, start + 1) == 'b') {
     let radix = if cp_at(s, start + 1) == 'x' { 16 } else { 2 }
     var i = start + 2
-    var ds: List[Int] = []
+    var ds: List[Char] = []
     while i < s.n && (char_is_alnum(s.cps[i]) || s.cps[i] == '_') {
       if s.cps[i] != '_' { ds = ds ++ [s.cps[i]] }
       i = i + 1
@@ -275,7 +276,7 @@ fn lex_number(s: Src, start: Int) -> (Int, Token, List[Diag]) =
     }
   } else {
     var i = start
-    var ds: List[Int] = []
+    var ds: List[Char] = []
     while i < s.n && (char_is_digit(s.cps[i]) || s.cps[i] == '_') {
       if s.cps[i] != '_' { ds = ds ++ [s.cps[i]] }
       i = i + 1
@@ -335,7 +336,7 @@ fn lex_string(s: Src, start: Int) -> Result[(Int, Token), (Int, Diag)] =
   } else {
     var i = start + 1
     var segs: List[Seg] = []
-    var buf: List[Int] = []
+    var buf: List[Char] = []
     while true {
       if i >= s.n || s.cps[i] == '\n' {
         return Err((i, mk_diag("unterminated string", off(s, start), off(s, i))))
@@ -368,8 +369,8 @@ fn lex_dollar(
   s: Src,
   at: Int,
   segs: List[Seg],
-  buf: List[Int]
-) -> Result[(Int, List[Seg], List[Int]), (Int, Diag)] = {
+  buf: List[Char]
+) -> Result[(Int, List[Seg], List[Char]), (Int, Diag)] = {
   let next = cp_at(s, at + 1)
   if next == '{' {
     let (j, sg) = lex_brace_interp(s, at)?
@@ -384,7 +385,7 @@ fn lex_dollar(
   }
 }
 
-fn flush(segs: List[Seg], buf: List[Int]) -> List[Seg] =
+fn flush(segs: List[Seg], buf: List[Char]) -> List[Seg] =
   if len(buf) == 0 { segs } else { segs ++ [SText(from_code_points(buf))] }
 
 ## On entry `at` is the `$` of `${`; scans to the matching `}`. Nested strings
@@ -427,8 +428,8 @@ fn skip_inner(s: Src, at: Int) -> Int = {
   i
 }
 
-## On entry `at` is the backslash; returns (position after the escape, code point).
-fn lex_escape(s: Src, at: Int) -> Result[(Int, Int), (Int, Diag)] = {
+## On entry `at` is the backslash; returns (position after the escape, character).
+fn lex_escape(s: Src, at: Int) -> Result[(Int, Char), (Int, Diag)] = {
   let i = at + 1
   let e = cp_at(s, i)
   if e == 'n' {
@@ -436,8 +437,7 @@ fn lex_escape(s: Src, at: Int) -> Result[(Int, Int), (Int, Diag)] = {
   } else if e == 't' {
     Ok((i + 1, '\t'))
   } else if e == 'r' {
-    # carriage return (code point 13) — no '\r' char literal to spell it with
-    Ok((i + 1, 13))
+    Ok((i + 1, '\r'))
   } else if e == '\\' {
     Ok((i + 1, '\\'))
   } else if e == '"' {
@@ -455,8 +455,8 @@ fn lex_escape(s: Src, at: Int) -> Result[(Int, Int), (Int, Diag)] = {
   }
 }
 
-## On entry `u` is the `u` of `\u{...}`; returns (position past the `}`, code point).
-fn lex_unicode(s: Src, u: Int) -> Result[(Int, Int), (Int, Diag)] = {
+## On entry `u` is the `u` of `\u{...}`; returns (position past the `}`, character).
+fn lex_unicode(s: Src, u: Int) -> Result[(Int, Char), (Int, Diag)] = {
   if cp_at(s, u + 1) != '{' {
     return Err((u, mk_diag("\\u must be followed by {codepoint}", off(s, u), off(s, u) + 2)))
   }
@@ -472,20 +472,22 @@ fn lex_unicode(s: Src, u: Int) -> Result[(Int, Int), (Int, Diag)] = {
   match parse_int_radix(hex, 16) {
     None -> Err((i, bad))
     Some(code) ->
-      if code < 0 || code > 1114111 {
-        # out of Unicode range; the Kotlin side rejects these the same way
-        Err((i, bad))
-      } else {
-        Ok((i + 1, code))
+      # `char.of` is the range check: not negative, not above U+10FFFF, and not
+      # a surrogate half. The last of those is new -- `\u{D800}` used to lex to
+      # a code point that is not a character, which is exactly the value `Char`
+      # exists to exclude.
+      match char.of(code) {
+        None -> Err((i, bad))
+        Some(c) -> Ok((i + 1, c))
       }
   }
 }
 
-## Character literal 'x' (spec §1.5): a single code point, lexed as an INT whose
-## value is the code point.
+## Character literal 'x' (spec §1.5): a single code point, lexed as a CHAR whose
+## `ival` is that code point.
 fn lex_char(s: Src, start: Int) -> Result[(Int, Token), (Int, Diag)] = {
   var i = start + 1
-  var cp = 0
+  var cp = ' '
   if i >= s.n || s.cps[i] == '\n' {
     return Err((i, mk_diag(
       "unterminated character literal",
@@ -517,11 +519,11 @@ fn lex_char(s: Src, start: Int) -> Result[(Int, Token), (Int, Diag)] = {
   }
   i = i + 1
   Ok((i, Token {
-    kind: INT,
+    kind: CHAR,
     text: text_of(s, start, i),
     lo: off(s, start),
     hi: off(s, i),
-    ival: cp,
+    ival: char.code(cp),
     fval: 0.0,
     segs: no_segs()
   }))
@@ -533,7 +535,7 @@ fn lex_char(s: Src, start: Int) -> Result[(Int, Token), (Int, Diag)] = {
 fn lex_triple(s: Src, start: Int) -> Result[(Int, Token), (Int, Diag)] = {
   var i = start + 3
   var segs: List[Seg] = []
-  var buf: List[Int] = []
+  var buf: List[Char] = []
   while true {
     if i >= s.n {
       return Err((i, mk_diag("unterminated \"\"\" string", off(s, start), off(s, start) + 3)))
@@ -674,7 +676,7 @@ fn strip_triple_indent(segs_in: List[Seg]) -> List[Seg] = {
         out = out ++ [p]
       }
       SText(v) -> {
-        var sb: List[Int] = []
+        var sb: List[Char] = []
         for ch in code_points(v) {
           if at2 && drop_n > 0 && (ch == ' ' || ch == '\t') {
             drop_n = drop_n - 1
@@ -701,7 +703,7 @@ fn strip_triple_indent(segs_in: List[Seg]) -> List[Seg] = {
 ## every other pair here gets: `a<-b` reads as `a <- b`, not `a < (-b)`. Spaced
 ## code (`a < -b`) is untouched, and `dawn fmt` puts spaces around every binary
 ## operator, so no formatted source can reach the second reading (spec §1.4).
-fn two_kind(c: Int, c1: Int) -> Option[TokKind] =
+fn two_kind(c: Char, c1: Char) -> Option[TokKind] =
   if c == '<' && c1 == '<' { Some(SHL) }
   else if c == '>' && c1 == '>' { Some(SHR) }
   else if c == '-' && c1 == '>' { Some(ARROW) }
@@ -718,7 +720,7 @@ fn two_kind(c: Int, c1: Int) -> Option[TokKind] =
   else if c == '.' && c1 == '.' { Some(DOTDOT) }
   else { None }
 
-fn one_kind(c: Int) -> Option[TokKind] =
+fn one_kind(c: Char) -> Option[TokKind] =
   match c {
     '(' -> Some(LPAREN)
     ')' -> Some(RPAREN)
@@ -837,14 +839,19 @@ test "an int before a range stays an int" {
   assert kinds("1..3") == ["INT", "DOTDOT", "INT", "NEWLINE", "EOF"]
 }
 
-test "char literals are ints" {
+test "char literals carry their code point" {
   let (toks, ds) = lex("'a' '\\n' '🎈'")
+  assert toks[0].kind == CHAR
   assert toks[0].ival == 97
   assert toks[1].ival == 10
   assert toks[2].ival == 127880
   # spans are code-point indices: 🎈 is one code point, so '🎈' spans 3 (the two
   # quotes plus the one code point) — not the 4 its surrogate pair would give.
   assert toks[2].hi - toks[2].lo == 3
+  # its own token kind, not INT: `'a'` is a `Char` and `97` is an `Int`, and
+  # the parser cannot tell them apart from the value alone
+  let (its, _ids) = lex("97")
+  assert its[0].kind == INT
 }
 
 test "string with interpolation segments" {
@@ -860,7 +867,7 @@ test "escapes in strings" {
 test "carriage return escape" {
   let (toks, ds) = lex("\"a\\rb\"")
   assert len(ds) == 0
-  assert toks[0].segs == [SText(from_code_points([97, 13, 98]))]
+  assert toks[0].segs == [SText(from_code_points(['a', '\r', 'b']))]
   let (ct, cds) = lex("'\\r'")
   assert ct[0].ival == 13
 }
@@ -924,6 +931,21 @@ test "invalid numeric literals are diagnostics" {
   assert d3[0].msg == "integer literal out of 64-bit range: 99999999999999999999"
   let (t4, d4) = lex("\"\\u{FFFFFF}\"")
   assert d4[0].msg == "invalid unicode codepoint: FFFFFF"
+}
+
+test "a surrogate half is not a code point, in a string or in a char literal" {
+  # tightened when `'a'` became a `Char` (v0.57.0): `\u{D800}` used to lex to the
+  # integer 0xD800, which is half of a UTF-16 pair and stands for no character.
+  # `char.of` is the range check now, and it refuses exactly this hole.
+  let (t1, d1) = lex("\"\\u{D800}\"")
+  assert d1[0].msg == "invalid unicode codepoint: D800"
+  let (t2, d2) = lex("\"\\u{DFFF}\"")
+  assert d2[0].msg == "invalid unicode codepoint: DFFF"
+  let (t3, d3) = lex("'\\u{DC00}'")
+  assert d3[0].msg == "invalid unicode codepoint: DC00"
+  # and the code points on either side of the hole still lex
+  let (t4, d4) = lex("\"\\u{D7FF}\\u{E000}\"")
+  assert len(d4) == 0
 }
 
 test "unrecognized character" {

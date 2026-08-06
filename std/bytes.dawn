@@ -16,6 +16,8 @@
 #
 # `Bytes ++ Bytes` is an operator, not a function, and stays in the compiler.
 
+use std/char
+
 # ---- building bytes ----
 
 ## A byte buffer under construction.
@@ -155,15 +157,21 @@ fn matches_at(b: Bytes, needle: Bytes, nlen: Int, i: Int, k: Int) -> Bool =
 # constant string costs a code-point walk per digit, and the ranges are
 # contiguous in ASCII anyway.
 
-fn hex_char(v: Int) -> Int = if v < 10 { '0' + v } else { 'a' + (v - 10) }
+# The digits are characters, and arithmetic on them is not: `Char` is opaque
+# over `Int` outside std/char (spec §2.7), so a table walked by adding an
+# offset says `char.code` on the way in and `char_unchecked` on the way out.
+# Both directions are safe here by construction -- the offsets are bounded by
+# the radix, so every result is an ASCII digit or letter.
+fn hex_char(v: Int) -> Char =
+  char_unchecked(if v < 10 { char.code('0') + v } else { char.code('a') + (v - 10) })
 
-fn hex_val(c: Int) -> Int =
+fn hex_val(c: Char) -> Int =
   if c >= '0' && c <= '9' {
-    c - '0'
+    char.code(c) - char.code('0')
   } else if c >= 'a' && c <= 'f' {
-    c - 'a' + 10
+    char.code(c) - char.code('a') + 10
   } else if c >= 'A' && c <= 'F' {
-    c - 'A' + 10
+    char.code(c) - char.code('A') + 10
   } else {
     -1
   }
@@ -172,7 +180,7 @@ fn hex_val(c: Int) -> Int =
 ## between them. Lower case, which is the canonical spelling this library
 ## produces -- `from_hex` reads either case, `to_hex` writes one.
 pub fn to_hex(b: Bytes) -> String = {
-  var out: List[Int] = []
+  var out: List[Char] = []
   var i = 0
   let n = bytes_len(b)
   while i < n {
@@ -215,26 +223,26 @@ pub fn from_hex(s: String) -> Option[Bytes] = {
 # `url` picks `-_` over `+/` (RFC 4648 §5) and `pad` decides whether the
 # output is rounded up to a multiple of four with `=`.
 
-fn b64_char(v: Int, url: Bool) -> Int =
+fn b64_char(v: Int, url: Bool) -> Char =
   if v < 26 {
-    'A' + v
+    char_unchecked(char.code('A') + v)
   } else if v < 52 {
-    'a' + (v - 26)
+    char_unchecked(char.code('a') + (v - 26))
   } else if v < 62 {
-    '0' + (v - 52)
+    char_unchecked(char.code('0') + (v - 52))
   } else if v == 62 {
     if url { '-' } else { '+' }
   } else {
     if url { '_' } else { '/' }
   }
 
-fn b64_val(c: Int, url: Bool) -> Int =
+fn b64_val(c: Char, url: Bool) -> Int =
   if c >= 'A' && c <= 'Z' {
-    c - 'A'
+    char.code(c) - char.code('A')
   } else if c >= 'a' && c <= 'z' {
-    c - 'a' + 26
+    char.code(c) - char.code('a') + 26
   } else if c >= '0' && c <= '9' {
-    c - '0' + 52
+    char.code(c) - char.code('0') + 52
   } else if c == (if url { '-' } else { '+' }) {
     62
   } else if c == (if url { '_' } else { '/' }) {
@@ -244,7 +252,7 @@ fn b64_val(c: Int, url: Bool) -> Int =
   }
 
 fn b64_encode(b: Bytes, url: Bool, pad: Bool) -> String = {
-  var out: List[Int] = []
+  var out: List[Char] = []
   let n = bytes_len(b)
   var i = 0
   while i + 3 <= n {

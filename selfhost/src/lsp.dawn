@@ -6,6 +6,7 @@
 # read loop debounces document syncs, so a burst of keystrokes is analysed once
 # (LSP-04, docs/audit/lsp-robustness-design.md §2.2).
 
+use std/char
 use std/io
 use std/str
 use std/map
@@ -31,7 +32,13 @@ use ast.{
 use token.{Diag}
 use fmt
 
-fn crlf() -> String = from_code_points([13, 10])
+fn crlf() -> String = from_code_points(['\r', '\n'])
+
+## An ASCII code point as the character it names. Every call site below has
+## already bounded the value (a byte read from a header, a nibble turned into a
+## hex digit), so a failure here is a broken invariant and not an input.
+## `char.of` is the checked bridge outside std; the unchecked one is internal.
+fn char_of_code(n: Int) -> Char = char.of(n).expect("ASCII code point")
 
 # ---- position mapping (offsets are UTF-16 code units, LSP's encoding) ----
 
@@ -144,13 +151,13 @@ fn echo_id(id: Json) -> Json =
 
 # ---- uri ↔ path ----
 
-fn hex_val(c: Int) -> Int =
+fn hex_val(c: Char) -> Int =
   if c >= '0' && c <= '9' {
-    c - '0'
+    char.code(c) - char.code('0')
   } else if c >= 'a' && c <= 'f' {
-    c - 'a' + 10
+    char.code(c) - char.code('a') + 10
   } else if c >= 'A' && c <= 'F' {
-    c - 'A' + 10
+    char.code(c) - char.code('A') + 10
   } else {
     -1
   }
@@ -275,7 +282,9 @@ fn utf8_decode(bs: List[Int]) -> String = {
         i = i + 1
       }
   }
-  from_code_points(cps)
+  # every branch above has already established its value is a scalar -- the
+  # overlong, surrogate and out-of-range cases are the ones that become U+FFFD
+  from_code_points(list.map(cps, c => char_of_code(c)))
 }
 
 fn is_cont(b: Int) -> Bool = b >= 128 && b <= 191
@@ -300,15 +309,15 @@ test "file URIs: authority, query, fragment and drive letters (LSP-02)" {
   assert path_to_uri("/tmp/a.dawn") == "file:///tmp/a.dawn"
   assert path_to_uri("C:/src/a.dawn") == "file:///C:/src/a.dawn"
   # and both directions compose, drive letter included
-  let accented = "/tmp/caf" ++ from_code_points([233]) ++ ".dawn"
+  let accented = "/tmp/caf" ++ from_code_points(['\u{00E9}']) ++ ".dawn"
   assert uri_to_path(path_to_uri(accented)) == Some(accented)
 }
 
 test "uri decoding validates utf-8 instead of trusting it" {
-  let fffd = from_code_points([65533])
+  let fffd = from_code_points(['\u{FFFD}'])
   # the happy path: percent-encoded multibyte decodes exactly (U+00E9)
   assert uri_to_path("file:///tmp/caf%C3%A9.dawn") ==
-    Some("/tmp/caf" ++ from_code_points([233]) ++ ".dawn")
+    Some("/tmp/caf" ++ from_code_points(['\u{00E9}']) ++ ".dawn")
   # a continuation byte that never comes: C3 '(' is malformed, becomes U+FFFD
   assert uri_to_path("file:///a%C3%28b") == Some("/a" ++ fffd ++ "(b")
   # overlong '/' (C0 AF) must not decode to '/': two malformed bytes
@@ -319,7 +328,8 @@ test "uri decoding validates utf-8 instead of trusting it" {
   assert uri_to_path("file:///l%80r") == Some("/l" ++ fffd ++ "r")
 }
 
-fn utf8_bytes(cp: Int) -> List[Int] =
+fn utf8_bytes(c: Char) -> List[Int] = {
+  let cp = char.code(c)
   if cp < 128 {
     [cp]
   } else if cp < 2048 {
@@ -329,8 +339,9 @@ fn utf8_bytes(cp: Int) -> List[Int] =
   } else {
     [240 + cp / 262144, 128 + cp / 4096 % 64, 128 + cp / 64 % 64, 128 + cp % 64]
   }
+}
 
-fn uri_ok(c: Int) -> Bool =
+fn uri_ok(c: Char) -> Bool =
   (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
   c == '/' || c == '-' || c == '_' || c == '.' || c == '~' ||
   # ':' is a legal path character (RFC 3986 pchar) and has to survive
@@ -355,7 +366,7 @@ fn drive_path(p: String) -> String = {
 ## the leading slash it needs -- without it the drive letter would parse as the
 ## authority, and the URI would name a host called `C:`.
 pub fn path_to_uri(path: String) -> String = {
-  var out: List[Int] = []
+  var out: List[Char] = []
   for c in code_points(path) {
     if uri_ok(c) {
       out = out ++ [c]
@@ -370,7 +381,8 @@ pub fn path_to_uri(path: String) -> String = {
   "file://" ++ rooted
 }
 
-fn hex_digit(v: Int) -> Int = if v < 10 { '0' + v } else { 'A' + v - 10 }
+fn hex_digit(v: Int) -> Char =
+  char_of_code(if v < 10 { char.code('0') + v } else { char.code('A') + v - 10 })
 
 # ---- one open document ----
 
@@ -572,22 +584,22 @@ fn read_message() -> Frame !io = {
       let b = bytes.at(one, 0)
       header = header ++ [b]
       # CR LF CR LF
-      if state == 0 && b == 13 {
+      if state == 0 && b == char.code('\r') {
         state = 1
-      } else if state == 1 && b == 10 {
+      } else if state == 1 && b == char.code('\n') {
         state = 2
-      } else if state == 2 && b == 13 {
+      } else if state == 2 && b == char.code('\r') {
         state = 3
-      } else if state == 3 && b == 10 {
+      } else if state == 3 && b == char.code('\n') {
         state = 4
       } else {
-        state = if b == 13 { 1 } else { 0 }
+        state = if b == char.code('\r') { 1 } else { 0 }
       }
     }
   }
   if eof { return Eof }
-  # header bytes are ASCII
-  let htext = from_code_points(header)
+  # header bytes are ASCII, so each byte is its own code point
+  let htext = from_code_points(list.map(header, b => char_of_code(b)))
   var clen = -1
   for line in str.split(htext, "\n") {
     let t = str.trim(line)

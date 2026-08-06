@@ -18,7 +18,9 @@
 # before they are shifted, so there is no sign bit in them to propagate.
 
 use std/bytes
+use std/char
 use std/list
+use std/str
 
 const MASK: Int = 0xFFFFFFFF
 
@@ -158,8 +160,13 @@ fn word_hex(w: Int) -> String = {
   out
 }
 
-fn digit(v: Int) -> String =
-  if v < 10 { from_code_points(['0' + v]) } else { from_code_points(['a' + v - 10]) }
+# `char.code` in, `char.of` out: `Char` is opaque over `Int` outside std/char,
+# so a digit table walked by adding an offset converts at both ends. `v` is a
+# nibble, so the answer is always one of `0-9a-f`.
+fn digit(v: Int) -> String = {
+  let n = if v < 10 { char.code('0') + v } else { char.code('a') + v - 10 }
+  str.from_char(char.of(n).expect("a hex digit"))
+}
 
 # The known answers are FIPS 180-2's own examples, not another implementation's
 # output: an oracle that is a second implementation can only certify agreement.

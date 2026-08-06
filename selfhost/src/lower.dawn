@@ -34,7 +34,7 @@ use types.{
 use tast.{
   TExpr, TStmt, TPat, TArm, TStrPart, TFun, TModule, TBinOp, TUnOp, TJavaCall,
   tex_ty,
-  XInt, XFloat, XBool, XUnit, XStr, XLocal, XFnValue, XCallDyn, XCallBuiltin,
+  XInt, XChar, XFloat, XBool, XUnit, XStr, XLocal, XFnValue, XCallDyn, XCallBuiltin,
   XCallFn, XApply, XJava, XLambda, XCtor, XConstRef, XCtorValue, XField,
   XListLit, XTupleLit, XPropagate, XUnwrap, XIndex, XReturn, XBreak, XContinue,
   XComptime, XUnsafePure, XBinary, XUnary, XIf, XMatch, XBlock, XError,
@@ -659,8 +659,11 @@ pub fn jvm_only_intrinsics() -> List[String] = ["java_eq", "java_hash"]
 ## indistinguishable from inside an emitter: both are `rt == None` with no
 ## case. Three arms of exactly this kind were found dead in the interpreter
 ## on 2026-07-30 (audit RC-09) and there was no equivalent check here.
+## `char_unchecked` joins them for the plainest reason of all: `Char`'s
+## representation is `Int`, so the bridge is the identity and lowering drops
+## it. A backend never learns the name.
 pub fn lowered_intrinsics() -> List[String] = {
-  var out = ["parse_int", "parse_int_radix"]
+  var out = ["parse_int", "parse_int_radix", "char_unchecked"]
   for op in ["empty", "from", "insert", "remove", "get", "has", "size", "keys", "values",
     "entries"] {
     out = out ++ ["map_" ++ op]
@@ -714,9 +717,9 @@ test "every intrinsic is owned by a runtime module, written inline, or removed b
   #    answers for the same list in the same paragraph.
   assert len(inline) == 29
   assert len(host) == 2
-  assert len(gone) == 19
-  # and the four groups account for all 102 names, with none left over
-  assert len(map.keys(it)) == 90
+  assert len(gone) == 20
+  # and the four groups account for all 103 names, with none left over
+  assert len(map.keys(it)) == 91
   assert len(internal) == 12
 }
 
@@ -1200,6 +1203,15 @@ fn conj_or_true(acc: Option[CExpr]) -> CExpr =
 ## the first two were separate pipelines from the language's first day -- the
 ## operator never consulted a witness at all -- which is the first cause of
 ## the relation having had several definitions.
+## The type an equality is really taken at: an opaque type with no `impl Eq`
+## of its own is its target (spec §2.7), which is the peel `eq_at` does below.
+fn eq_subject(st: LSt, t: Ty) -> Ty =
+  match t {
+    TyOpaque(_, _, _, tgt) ->
+      if has_impl_at(st.impls, EQ_ID, t) { t } else { eq_subject(st, tgt) }
+    _ -> t
+  }
+
 fn eq_at(st: LSt, a: CExpr, b: CExpr, t: Ty) -> (LSt, CExpr) = {
   # the scalars a backend compares natively. From here on `CBinary(CEq, ..)`
   # means this and nothing else.
@@ -2402,6 +2414,9 @@ pub fn lower_expr(st0: LSt, e: TExpr) -> (LSt, CExpr) = {
   let st = LSt { ..st0, tail: false }
   match e {
     XInt(v, _, _) -> (st, CInt(v))
+    # `Char` is opaque over Int, so a character literal is its code point --
+    # exactly what XInt lowers to, and the reason no backend learns the node
+    XChar(v, _, _) -> (st, CInt(v))
     XFloat(v, _, _) -> (st, CFloat(v))
     XBool(v, _, _) -> (st, CBool(v))
     XUnit(_, _) -> (st, CUnit)
@@ -2442,7 +2457,10 @@ pub fn lower_expr(st0: LSt, e: TExpr) -> (LSt, CExpr) = {
           # A scalar keeps its own node -- `CNe` is a relation both backends
           # implement directly, and routing it through `not (a == b)` would
           # cost a node for nothing.
-          if is_eq_op(op) && not is_eq_scalar(tex_ty(l)) {
+          # `eq_subject`, not the operand type: an opaque over a scalar has
+          # no equality of its own (`eq_at` peels to the target), so it keeps
+          # the scalar's node here too rather than becoming `not (a == b)`.
+          if is_eq_op(op) && not is_eq_scalar(eq_subject(st, tex_ty(l))) {
             let (st1, lv) = lower_expr(st, l)
             let (st2, rv) = lower_expr(st1, r)
             let (st3, c) = eq_at(st2, lv, rv, tex_ty(l))
@@ -2519,6 +2537,14 @@ pub fn lower_expr(st0: LSt, e: TExpr) -> (LSt, CExpr) = {
       (st1, CListLit(vs, ty))
     }
     XCallBuiltin(name, args, wits, _, _, ty) -> {
+      # `char_unchecked` is the Int -> Char bridge, and `Char`'s representation
+      # *is* `Int` -- so it disappears here rather than becoming a primitive
+      # each backend would have to implement as a no-op. The check it skips was
+      # the caller's to make; the checker already refused the name to anyone
+      # outside std.
+      if name == "char_unchecked" {
+        return lower_expr(st, args[0])
+      }
       # `to_string` is the surface spelling of a rendering, and rendering is
       # type-directed: it is settled here rather than left for each backend to
       # switch on the operand type (which is how they came to disagree).

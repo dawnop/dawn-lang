@@ -5,14 +5,14 @@
 use html/escape.{escape_html}
 use md/text.{cp_at, seg}
 
-fn is_digit(c: Int) -> Bool = c >= '0' && c <= '9'
+fn is_digit(c: Char) -> Bool = c >= '0' && c <= '9'
 
-fn is_upper(c: Int) -> Bool = c >= 'A' && c <= 'Z'
+fn is_upper(c: Char) -> Bool = c >= 'A' && c <= 'Z'
 
-fn is_ident_start(c: Int) -> Bool =
+fn is_ident_start(c: Char) -> Bool =
   (c >= 'a' && c <= 'z') || is_upper(c) || c == '_'
 
-fn is_ident_cp(c: Int) -> Bool = is_ident_start(c) || is_digit(c)
+fn is_ident_cp(c: Char) -> Bool = is_ident_start(c) || is_digit(c)
 
 fn is_keyword(w: String) -> Bool =
   w == "fn" || w == "let" || w == "var" || w == "type" || w == "const" ||
@@ -25,7 +25,7 @@ fn is_keyword(w: String) -> Bool =
 fn span(cls: String, text: String) -> String =
   "<span class=\"$cls\">" ++ escape_html(text) ++ "</span>"
 
-fn line_end(cs: List[Int], from: Int) -> Int = {
+fn line_end(cs: List[Char], from: Int) -> Int = {
   var i = from
   while i < len(cs) && cp_at(cs, i) != '\n' {
     i = i + 1
@@ -33,7 +33,7 @@ fn line_end(cs: List[Int], from: Int) -> Int = {
   i
 }
 
-fn ident_end(cs: List[Int], from: Int) -> Int = {
+fn ident_end(cs: List[Char], from: Int) -> Int = {
   var i = from
   while i < len(cs) && is_ident_cp(cp_at(cs, i)) {
     i = i + 1
@@ -41,7 +41,7 @@ fn ident_end(cs: List[Int], from: Int) -> Int = {
   i
 }
 
-fn number_end(cs: List[Int], from: Int) -> Int = {
+fn number_end(cs: List[Char], from: Int) -> Int = {
   var i = from
   if cp_at(cs, from) == '0' && (cp_at(cs, from + 1) == 'x' || cp_at(cs, from + 1) == 'b') {
     i = from + 2
@@ -72,7 +72,7 @@ fn number_end(cs: List[Int], from: Int) -> Int = {
 }
 
 ## Index just past a char literal starting at the ' in from.
-fn char_end(cs: List[Int], from: Int) -> Int = {
+fn char_end(cs: List[Char], from: Int) -> Int = {
   var i = from + 1
   var done = false
   while not done && i < len(cs) {
@@ -92,7 +92,7 @@ fn char_end(cs: List[Int], from: Int) -> Int = {
 }
 
 ## Index just past a string starting at the " in from ("..." or """...""").
-fn string_end(cs: List[Int], from: Int) -> Int = {
+fn string_end(cs: List[Char], from: Int) -> Int = {
   let triple = cp_at(cs, from + 1) == '"' && cp_at(cs, from + 2) == '"'
   var i = if triple { from + 3 } else { from + 1 }
   var done = false
@@ -116,7 +116,7 @@ fn string_end(cs: List[Int], from: Int) -> Int = {
 }
 
 ## A string token [from, to) rendered with $name / ${expr} marked as class i.
-fn string_html(cs: List[Int], from: Int, to: Int) -> String = {
+fn string_html(cs: List[Char], from: Int, to: Int) -> String = {
   var out = ""
   var start = from
   var i = from

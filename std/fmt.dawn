@@ -24,6 +24,7 @@
 # here would be a self-call. Ints are fine (`str_of_int` is a backend
 # intrinsic, not this module).
 
+use std/char
 use std/str
 use std/cursor
 use std/cursor.{Cursor}
@@ -928,17 +929,21 @@ pub fn dtoa(v: Float) -> String = {
 
 # ---- parsing (spec §11's EBNF, scanned here, never by a host grammar) ----
 
-fn is_ascii_digit(c: Int) -> Bool = c >= '0' && c <= '9'
+# This scanner works in code points, not characters: `cursor.char` answers an
+# Int and a `-1` past the end (spec §4.8), so a sentinel that is not a
+# character rules `Char` out one layer down. `char.code` names an ASCII bound
+# without leaving that currency.
+fn is_ascii_digit(c: Int) -> Bool = c >= char.code('0') && c <= char.code('9')
 
 ## Digit value for radix parsing: ASCII `0-9a-zA-Z` and nothing else — no
 ## Unicode digits, no full-width forms (spec §11). -1 for a non-digit.
 fn digit_val(c: Int) -> Int =
-  if c >= '0' && c <= '9' {
-    c - '0'
-  } else if c >= 'a' && c <= 'z' {
-    c - 'a' + 10
-  } else if c >= 'A' && c <= 'Z' {
-    c - 'A' + 10
+  if c >= char.code('0') && c <= char.code('9') {
+    c - char.code('0')
+  } else if c >= char.code('a') && c <= char.code('z') {
+    c - char.code('a') + 10
+  } else if c >= char.code('A') && c <= char.code('Z') {
+    c - char.code('A') + 10
   } else {
     -1
   }
@@ -969,8 +974,8 @@ fn atoi_radix(s: String, radix: Int) -> Option[Int] = {
   }
   var neg = false
   let c0 = cursor.char(t, cur)
-  if c0 == '+' || c0 == '-' {
-    neg = c0 == '-'
+  if c0 == char.code('+') || c0 == char.code('-') {
+    neg = c0 == char.code('-')
     cur = cursor.next(t, cur)
   }
   if cursor.done(t, cur) {
@@ -1006,7 +1011,7 @@ fn float_shape(t: String) -> Bool = {
     return false
   }
   let c0 = cursor.char(t, cur)
-  if c0 == '+' || c0 == '-' {
+  if c0 == char.code('+') || c0 == char.code('-') {
     cur = cursor.next(t, cur)
   }
   var ipart = 0
@@ -1015,7 +1020,7 @@ fn float_shape(t: String) -> Bool = {
     cur = cursor.next(t, cur)
   }
   var fpart = 0
-  if not cursor.done(t, cur) && cursor.char(t, cur) == '.' {
+  if not cursor.done(t, cur) && cursor.char(t, cur) == char.code('.') {
     cur = cursor.next(t, cur)
     while not cursor.done(t, cur) && is_ascii_digit(cursor.char(t, cur)) {
       fpart = fpart + 1
@@ -1028,13 +1033,13 @@ fn float_shape(t: String) -> Bool = {
   }
   if not cursor.done(t, cur) {
     let ce = cursor.char(t, cur)
-    if ce != 'e' && ce != 'E' {
+    if ce != char.code('e') && ce != char.code('E') {
       return false
     }
     cur = cursor.next(t, cur)
     if not cursor.done(t, cur) {
       let cs = cursor.char(t, cur)
-      if cs == '+' || cs == '-' {
+      if cs == char.code('+') || cs == char.code('-') {
         cur = cursor.next(t, cur)
       }
     }

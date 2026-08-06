@@ -1,35 +1,44 @@
 # Serialize a Json value back to compact JSON text (used for round-trip tests).
+use std/char
 use std/map
 use value.{Json, JNull, JBool, JNum, JInt, JStr, JArr, JObj}
 
-fn hex_cp(v: Int) -> Int = if v < 10 { '0' + v } else { 'a' + (v - 10) }
+# A hex digit as a character. `char.code` on the way in and `char.of` on the
+# way out: `Char` is opaque over `Int` outside std/char, so the offset
+# arithmetic happens in code points and the answer is converted back. `v` is a
+# nibble, so the result is always one of `0-9a-f`.
+fn hex_cp(v: Int) -> Char = {
+  let n = if v < 10 { char.code('0') + v } else { char.code('a') + (v - 10) }
+  char.of(n).expect("a hex digit")
+}
 
 # RFC 8259 §7 requires *every* code point below U+0020 to be escaped. Five have
 # short forms; the rest only have \u00XX. The earlier version handled quote,
 # backslash, LF, CR and TAB and passed the other 27 through verbatim, so a
 # document containing a literal \b — which this package's own lexer decodes from
 # `\b` — rendered back out as a raw 0x08 and was no longer parseable JSON.
-fn escape_cps(cs: List[Int]) -> List[Int] = {
-  var out: List[Int] = []
+fn escape_cps(cs: List[Char]) -> List[Char] = {
+  var out: List[Char] = []
   var i = 0
   while i < len(cs) {
-    let c = unwrap_or(get(cs, i), 0)
+    let c = unwrap_or(get(cs, i), ' ')
     if c == '"' {
       out = out ++ ['\\', '"']
     } else if c == '\\' {
       out = out ++ ['\\', '\\']
-    } else if c == 8 {
+    } else if c == '\u{0008}' {
       out = out ++ ['\\', 'b']
-    } else if c == 12 {
+    } else if c == '\u{000C}' {
       out = out ++ ['\\', 'f']
     } else if c == '\n' {
       out = out ++ ['\\', 'n']
     } else if c == '\t' {
       out = out ++ ['\\', 't']
-    } else if c == 13 {
+    } else if c == '\r' {
       out = out ++ ['\\', 'r']
-    } else if c < 32 {
-      out = out ++ ['\\', 'u', '0', '0', hex_cp(c / 16), hex_cp(c % 16)]
+    } else if c < ' ' {
+      let n = char.code(c)
+      out = out ++ ['\\', 'u', '0', '0', hex_cp(n / 16), hex_cp(n % 16)]
     } else {
       out = out ++ [c]
     }
@@ -69,11 +78,12 @@ pub fn render(j: Json) -> String =
 
 test "every C0 control is escaped" {
   # the five with short forms
-  assert render(JStr(from_code_points([8, 12, 10, 13, 9]))) == "\"\\b\\f\\n\\r\\t\""
+  assert render(JStr(from_code_points(
+    ['\u{0008}', '\u{000C}', '\n', '\r', '\t']))) == "\"\\b\\f\\n\\r\\t\""
   # and the rest as \u00XX, lower-case hex, always four digits
-  assert render(JStr(from_code_points([0]))) == "\"\\u0000\""
-  assert render(JStr(from_code_points([1, 31]))) == "\"\\u0001\\u001f\""
-  assert render(JStr(from_code_points([27]))) == "\"\\u001b\""
+  assert render(JStr(from_code_points(['\u{0000}']))) == "\"\\u0000\""
+  assert render(JStr(from_code_points(['\u{0001}', '\u{001F}']))) == "\"\\u0001\\u001f\""
+  assert render(JStr(from_code_points(['\u{001B}']))) == "\"\\u001b\""
   # U+0020 and up are literal
   assert render(JStr(" ~")) == "\" ~\""
   assert render(JStr("a\"b\\c")) == "\"a\\\"b\\\\c\""
