@@ -10,7 +10,18 @@ fn line_at(lines: List[String], i: Int) -> String = unwrap_or(get(lines, i), "")
 
 fn is_blank(s: String) -> Bool = str.trim(s) == ""
 
-fn is_fence(s: String) -> Bool = str.starts_with(s, "```")
+## An opening (or closing) code fence. The info string may not contain a
+## backtick, which is CommonMark's rule and is the whole of what tells a fence
+## apart from a code span written with three of them: ```` ```x``` ```` is a
+## paragraph, not a block that never closes.
+##
+## Without the second half, any line *starting* with a triple-backtick span
+## opened a fence that then ran to the end of the enclosing block and failed
+## the build with "unclosed code fence". A blockquote is where that shows up,
+## because `> ` is stripped before the body is reparsed, so a span that began
+## the quoted line begins a line.
+fn is_fence(s: String) -> Bool =
+  str.starts_with(s, "```") && not str.contains(str.drop(s, 3), "`")
 
 fn is_hr(s: String) -> Bool = str.trim(s) == "---"
 
@@ -416,6 +427,31 @@ test "fenced code keeps its body verbatim" {
       assert str.contains(e, "unclosed")
     }
   }
+}
+
+## The failure this fixes was a hard Err, i.e. a site build that died on a
+## document nothing was wrong with. The middle two are the shapes that produced
+## it: a quoted line begins with a triple-backtick code span, and `> ` comes off
+## before the body is reparsed.
+test "a triple-backtick code span is not a fence" {
+  # what the span renders as is md/inline's business; what is asserted here is
+  # that the line is a paragraph at all, rather than a fence with no end
+  let para = (src: String) =>
+    match parse(src) {
+      Ok([Para(_)]) -> true
+      _ -> false
+    }
+  let quoted_para = (src: String) =>
+    match parse(src) {
+      Ok([Quote([Para(_)])]) -> true
+      _ -> false
+    }
+  assert para("```x``` 是行内码\n")
+  assert quoted_para("> ```x``` 是行内码\n")
+  assert quoted_para("> 甲\n> ```y``` 乙\n")
+  # a real fence still opens: nothing after the marker is a backtick
+  assert parse("```dawn run\nx\n```\n") == Ok([CodeBlock("dawn", "x")])
+  assert parse("> ```\n> x\n> ```\n") == Ok([Quote([CodeBlock("", "x")])])
 }
 
 test "unordered lists nest by indentation" {
