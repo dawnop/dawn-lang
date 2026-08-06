@@ -1072,3 +1072,217 @@ pub fn atod(s: String) -> Option[Float] = {
   }
   parse_float(t)
 }
+
+# The three parsers below had no test of their own. `dtoa` is pinned byte for
+# byte by scripts/dtoa-contract, which is why nothing here re-renders floats;
+# the direction that reads text was checked only by whatever happened to call
+# it, and what it *refuses* was checked by nothing at all. Refusal is most of
+# the promise: spec §11 fixes an accepted language precisely so a host parser's
+# extensions -- hex floats, `1.5f`, `inf`, Unicode digits -- cannot leak in
+# through whichever runtime is underneath.
+
+test "atoi takes a sign and ASCII decimal digits, and nothing around them" {
+  assert atoi("0") == Some(0)
+  assert atoi("42") == Some(42)
+  assert atoi("+42") == Some(42)
+  assert atoi("-42") == Some(-42)
+  assert atoi("007") == Some(7)
+  assert atoi("-0") == Some(0)
+  # trimmed first, by Dawn's own space table -- so the pad is outside the number
+  assert atoi("  -5  ") == Some(-5)
+  assert atoi("\t\n 7 \r\n") == Some(7)
+  # ... and only outside it: a space the trim cannot reach is a non-digit
+  assert atoi("4 2") == None
+  assert atoi("- 5") == None
+  # nothing left after the sign is not a number
+  assert atoi("") == None
+  assert atoi("   ") == None
+  assert atoi("+") == None
+  assert atoi("-") == None
+  assert atoi("--5") == None
+  # the whole string or nothing: no prefix parse, and no host spellings
+  assert atoi("12abc") == None
+  assert atoi("0x10") == None
+  assert atoi("1.0") == None
+  assert atoi("1e3") == None
+  # ASCII digits, not "characters with a digit property"
+  assert atoi("４") == None
+  # and Dawn's space table, not Unicode's: U+00A0 is not whitespace to `trim`
+  assert atoi("\u{00A0}42") == None
+}
+
+test "atoi answers None at the edge of Int instead of wrapping" {
+  # the magnitude of the minimum has no positive Int, which is why the
+  # accumulator runs negated -- the case that shape exists for
+  assert atoi("-9223372036854775808") == Some(-9223372036854775807 - 1)
+  assert atoi("9223372036854775807") == Some(9223372036854775807)
+  # one past each end, and far past
+  assert atoi("9223372036854775808") == None
+  assert atoi("-9223372036854775809") == None
+  assert atoi("99999999999999999999999") == None
+  # There are two overflow guards and they catch different inputs. The three
+  # above are all stopped by the second one (`acc * radix` still fits, the
+  # digit is what does not), so a broken first guard survives them. These
+  # reach `multmin` itself: the running value is exactly one step from
+  # overflowing on the multiply, and nothing later would notice the wrap.
+  assert atoi("922337203685477581") == Some(922337203685477581)
+  assert atoi("9223372036854775810") == None
+  assert atoi("9223372036854775819") == None
+  assert atoi("9223372036854775900") == None
+  assert atoi("-9223372036854775810") == None
+  assert atoi("-9223372036854775900") == None
+  assert atoi("9999999999999999999") == None
+  # the asymmetry is real: the positive limit is one short of the negative one
+  assert atoi("-9223372036854775807") == Some(-9223372036854775807)
+}
+
+test "atoi_radix refuses a radix outside 2..36 and cuts the digits at it" {
+  # a radix is a value the caller must get right, and 0 and 1 name no
+  # positional system -- so this is inquiry (spec 4.8 criterion 2), not a clamp
+  assert atoi_radix("1", 0) == None
+  assert atoi_radix("1", 1) == None
+  assert atoi_radix("1", 37) == None
+  assert atoi_radix("1", 0 - 2) == None
+  # both ends of the accepted range work
+  assert atoi_radix("1011", 2) == Some(11)
+  assert atoi_radix("z", 36) == Some(35)
+  assert atoi_radix("10", 36) == Some(36)
+  # the digit set is cut at the radix, not at the alphabet
+  assert atoi_radix("102", 2) == None
+  assert atoi_radix("z", 35) == None
+  assert atoi_radix("y", 35) == Some(34)
+  # case is not significant above 9, over the whole alphabet and not just the
+  # hex letters -- 'G'..'Z' is the stretch a hex-shaped digit table stops at
+  assert atoi_radix("ff", 16) == Some(255)
+  assert atoi_radix("FF", 16) == Some(255)
+  assert atoi_radix("fF", 16) == Some(255)
+  assert atoi_radix("Z", 36) == Some(35)
+  assert atoi_radix("G", 36) == Some(16)
+  assert atoi_radix("Y", 35) == Some(34)
+  assert atoi_radix("HELLO", 36) == Some(29234652)
+  assert atoi_radix("HELLO", 36) == atoi_radix("hello", 36)
+  # the gap between '9' and 'A' in ASCII is not a digit
+  assert atoi_radix(":", 16) == None
+  assert atoi_radix("@", 16) == None
+  # sign and trim work the same at every radix
+  assert atoi_radix("-ff", 16) == Some(-255)
+  assert atoi_radix("  +11  ", 2) == Some(3)
+  # the range is the radix's, so it moves with it
+  assert atoi_radix("111111111111111111111111111111111111111111111111111111111111111", 2)
+    == Some(9223372036854775807)
+  assert atoi_radix("1111111111111111111111111111111111111111111111111111111111111111", 2)
+    == None
+  assert atoi_radix("1y2p0ij32e8e7", 36) == Some(9223372036854775807)
+  assert atoi_radix("1y2p0ij32e8e8", 36) == None
+  # atoi is this function at ten
+  assert atoi_radix("42", 10) == atoi("42")
+  assert atoi_radix("0x10", 10) == atoi("0x10")
+}
+
+test "atod accepts the shape spec 11 writes down, and refuses the near misses" {
+  assert atod("0") == Some(0.0)
+  assert atod("1") == Some(1.0)
+  assert atod("-1") == Some(-1.0)
+  assert atod("+1") == Some(1.0)
+  assert atod("1.5") == Some(1.5)
+  assert atod("+1.5") == Some(1.5)
+  assert atod("00.50") == Some(0.5)
+  # a mantissa needs a digit somewhere, but not on both sides of the point
+  assert atod(".5") == Some(0.5)
+  assert atod("-.5") == Some(-0.5)
+  assert atod("1.") == Some(1.0)
+  assert atod("1.e2") == Some(100.0)
+  assert atod(".") == None
+  assert atod("-.") == None
+  # the exponent, both cases and all three sign spellings
+  assert atod("1e5") == Some(100000.0)
+  assert atod("1E5") == Some(100000.0)
+  assert atod("1e+5") == Some(100000.0)
+  assert atod("1e-5") == Some(0.00001)
+  assert atod(".5e1") == Some(5.0)
+  assert atod("0e0") == Some(0.0)
+  # an `e` with no digits after it is not an exponent
+  assert atod("1e") == None
+  assert atod("1e+") == None
+  assert atod("1e-") == None
+  assert atod("e5") == None
+  # trimmed at the ends, refused in the middle
+  assert atod("  1.5  ") == Some(1.5)
+  assert atod("1 5") == None
+  assert atod("1 . 5") == None
+  # nothing at all
+  assert atod("") == None
+  assert atod("   ") == None
+  assert atod("-") == None
+  assert atod("+") == None
+  assert atod("--1") == None
+  assert atod("1.2.3") == None
+  # the host spellings this refusal exists to keep out
+  assert atod("0x10") == None
+  assert atod("1.5f") == None
+  assert atod("1d5") == None
+  assert atod("1_000") == None
+  assert atod("٤") == None
+}
+
+test "atod knows exactly the three spellings dtoa emits, and no synonyms" {
+  # the pair that closes: these are the only non-numeric strings dtoa produces
+  assert dtoa(1.0 / 0.0) == "Infinity"
+  assert dtoa(-1.0 / 0.0) == "-Infinity"
+  assert dtoa(0.0 / 0.0) == "NaN"
+  assert atod("Infinity") == Some(1.0 / 0.0)
+  assert atod("-Infinity") == Some(-1.0 / 0.0)
+  assert atod("  Infinity  ") == Some(1.0 / 0.0)
+  # NaN is not equal to itself, so it is asked about rather than compared
+  let nan_is_nan = match atod("NaN") {
+    Some(v) -> v != v
+    None -> false
+  }
+  assert nan_is_nan
+  # every neighbouring spelling a host parser would have taken
+  assert atod("inf") == None
+  assert atod("Inf") == None
+  assert atod("INF") == None
+  assert atod("infinity") == None
+  assert atod("INFINITY") == None
+  assert atod("nan") == None
+  assert atod("NAN") == None
+  # dtoa never writes these two, so atod does not read them
+  assert atod("+Infinity") == None
+  assert atod("-NaN") == None
+}
+
+test "atod saturates at the ends of Float rather than answering None" {
+  # out of range is not a shape error: the conversion is IEEE, and IEEE says
+  # overflow is an infinity and underflow is a zero
+  assert atod("1e400") == Some(1.0 / 0.0)
+  assert atod("-1e400") == Some(-1.0 / 0.0)
+  assert atod("1e309") == Some(1.0 / 0.0)
+  assert atod("1e-400") == Some(0.0)
+  # ... and the last representable value on each side is not saturated
+  assert atod("1e308") == Some(1.0e308)
+  assert atod("4.9e-324") == Some(4.9e-324)
+  # more digits than a Float holds is a rounding, not a refusal
+  assert atod("123456789012345678901234567890") == Some(1.2345678901234568e29)
+  assert atod("0.1") == Some(0.1)
+
+  # dtoa's output is always readable by atod, which is the promise that makes
+  # the two a pair rather than two independent functions. Written out rather
+  # than looped: `for` needs `Iter[List[T]]`, and that impl lives in std/list,
+  # which this module does not import.
+  assert atod(dtoa(0.0)) == Some(0.0)
+  assert atod(dtoa(1.5)) == Some(1.5)
+  assert atod(dtoa(-1.5)) == Some(-1.5)
+  assert atod(dtoa(3.141592653589793)) == Some(3.141592653589793)
+  assert atod(dtoa(1.0e300)) == Some(1.0e300)
+  assert atod(dtoa(1.0e-300)) == Some(1.0e-300)
+  assert atod(dtoa(42.0)) == Some(42.0)
+  assert atod(dtoa(0.1)) == Some(0.1)
+  # negative zero survives the trip, and `==` cannot see it -- 1/x can
+  assert dtoa(-0.0) == "-0.0"
+  let keeps_the_sign = match atod("-0.0") {
+    Some(v) -> 1.0 / v == -1.0 / 0.0
+    None -> false
+  }
+  assert keeps_the_sign
+}
