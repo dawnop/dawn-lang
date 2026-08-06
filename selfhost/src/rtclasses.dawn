@@ -20,7 +20,8 @@ use java "org.objectweb.asm.MethodVisitor"
 use java "org.objectweb.asm.Label"
 use java "java.util.Objects"
 use jvmops.{
-  ACC_ABSTRACT, ACC_FINAL, ACC_INTERFACE, ACC_PRIVATE, ACC_PUBLIC, ACC_STATIC, COMPUTE_MAXS,
+  ACC_ABSTRACT, ACC_FINAL, ACC_INTERFACE, ACC_PRIVATE, ACC_PUBLIC, ACC_STATIC, ACC_VOLATILE,
+  COMPUTE_MAXS,
   OP_AALOAD,
   OP_AASTORE, OP_ACONST_NULL, OP_ALOAD, OP_ANEWARRAY, OP_ARETURN, OP_ARRAYLENGTH, OP_ASTORE,
   OP_ATHROW, OP_BALOAD, OP_BASTORE, OP_BIPUSH, OP_CHECKCAST, OP_DUP, OP_GETFIELD, OP_GETSTATIC,
@@ -1009,9 +1010,14 @@ fn gen_cast(cw: ClassWriter) -> Unit !io = {
 ## The failing ones (read_file/write_file/list_names) simply throw; std wraps
 ## them in a barrier, exactly as it wrapped StdIo. read_line maps Java's
 ## null-or-line onto Option here rather than relying on use-java null-wrapping.
+##
+## It implements Runnable for one reason, and it is the whole of why the class
+## has an instance at all: `io_run` registers a shutdown hook, and a hook is a
+## Thread, and a Thread needs a Runnable. See gen_io_reaper.
 pub fn gen_io_class() -> Bytes !io = {
   let cw = Asm.plain(COMPUTE_MAXS).expect("writer")
-  Asm.beginOn(cw, V49, ACC_PUBLIC + ACC_FINAL, IO_CLASS, obj())
+  Asm.beginOnWithInterface(cw, V49, ACC_PUBLIC + ACC_FINAL, IO_CLASS, obj(),
+    "java/lang/Runnable")
   gen_try_closure(cw, "catch_fault", ["java/lang/Exception"])
   # catch_panic catches a Dawn panic and the exceptions a caller can survive —
   # not `Throwable`. Catching Throwable also caught OutOfMemoryError,
@@ -1512,11 +1518,90 @@ fn gen_redirect(m: MethodVisitor, which: String, pb_local: Int, path_local: Int)
   m.visitLabel(done)
 }
 
+## The child `io_run` is currently waiting on, and the shutdown hook that
+## destroys it -- the JVM half of the C runtime's `dawn_run_child` and
+## `dawn_run_forward` (runtime/c/dawn_rt.c). Without it a program that spawns
+## and waits answered SIGTERM by dying and leaving the child running: measured
+## as a `sleep` reparented to init after the program was gone.
+##
+## One slot rather than a table, for the reason the C runtime gives: a Dawn
+## program has one thread, so there is never a second `io_run` in flight. It is
+## `volatile` all the same, because the *hook* runs on a thread the JVM starts.
+##
+## One hook rather than one per call, and never removed. The alternative --
+## register before the wait, remove after it -- has to cope with
+## `removeShutdownHook` throwing once shutdown has begun, which is precisely
+## the case this exists for. Arming a slot instead makes the ordinary exit path
+## a hook that finds `null` and does nothing, and costs one Thread object for
+## the life of a program that runs subprocesses at all. It is registered
+## lazily, inside `io_run`, so a program that never spawns anything neither
+## allocates the thread nor lengthens its own shutdown.
+##
+## `destroy` is SIGTERM on POSIX, whatever signal actually arrived: a hook
+## cannot ask which one it is running for. The C runtime forwards the real
+## signal. The two agree on what a caller sees -- `Process.waitFor` reports
+## 128+signal for a child killed by one, the same number `WIFSIGNALED` yields
+## there -- and disagree on what happens next: the C program resumes after the
+## call and may still exit 0, while here the JVM is already shutting down.
+fn gen_io_reaper(cw: ClassWriter) -> Unit !io = {
+  Asm.fieldOn(cw, ACC_PRIVATE + ACC_STATIC + ACC_VOLATILE, "runChild",
+    "Ljava/lang/Process;")
+  Asm.fieldOn(cw, ACC_PRIVATE + ACC_STATIC, "runHook", "Ljava/lang/Thread;")
+
+  # the private no-arg constructor: the hook's Runnable is an Io with no state
+  # of its own, since what it reads is the static slot above
+  let ctor = Asm.methodOn(cw, ACC_PRIVATE, "<init>", "()V").expect("mv")
+  ctor.visitCode()
+  ctor.visitVarInsn(OP_ALOAD, 0)
+  ctor.visitMethodInsn(OP_INVOKESPECIAL, obj(), "<init>", "()V", false)
+  ctor.visitInsn(OP_RETURN)
+  close_mv(ctor)
+
+  # run(): destroy whatever child is armed. `destroy` on an exited process is a
+  # no-op, which is what makes the ordinary exit path harmless.
+  let m = Asm.methodOn(cw, ACC_PUBLIC, "run", "()V").expect("mv")
+  m.visitCode()
+  let none = Label.new()
+  m.visitFieldInsn(OP_GETSTATIC, IO_CLASS, "runChild", "Ljava/lang/Process;")
+  m.visitVarInsn(OP_ASTORE, 1)
+  m.visitVarInsn(OP_ALOAD, 1)
+  m.visitJumpInsn(OP_IFNULL, none)
+  m.visitVarInsn(OP_ALOAD, 1)
+  m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/Process", "destroy", "()V", false)
+  m.visitLabel(none)
+  m.visitInsn(OP_RETURN)
+  close_mv(m)
+}
+
 ## io_run(argv, out_path, err_path): spawn, wait, answer the exit status.
 ## `start()` throws when there is no such program; std wraps it in a barrier.
+##
+## The hook is armed before the spawn, not after: a signal arriving while
+## `start` is inside the kernel must find a hook already registered. What stays
+## uncovered is the instant between `start` returning and the store below,
+## which is the same window the C runtime documents, and SIGKILL, which no
+## handler anywhere ever sees.
 fn gen_io_run(cw: ClassWriter) -> Unit !io = {
+  gen_io_reaper(cw)
   let rv = open_static(cw, "io_run",
     "(Ljava/util/List;Ljava/lang/String;Ljava/lang/String;)J")
+  let armed = Label.new()
+  rv.visitFieldInsn(OP_GETSTATIC, IO_CLASS, "runHook", "Ljava/lang/Thread;")
+  rv.visitJumpInsn(OP_IFNONNULL, armed)
+  rv.visitTypeInsn(OP_NEW, "java/lang/Thread")
+  rv.visitInsn(OP_DUP)
+  rv.visitTypeInsn(OP_NEW, IO_CLASS)
+  rv.visitInsn(OP_DUP)
+  rv.visitMethodInsn(OP_INVOKESPECIAL, IO_CLASS, "<init>", "()V", false)
+  rv.visitMethodInsn(OP_INVOKESPECIAL, "java/lang/Thread", "<init>",
+    "(Ljava/lang/Runnable;)V", false)
+  rv.visitFieldInsn(OP_PUTSTATIC, IO_CLASS, "runHook", "Ljava/lang/Thread;")
+  rv.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Runtime", "getRuntime",
+    "()Ljava/lang/Runtime;", false)
+  rv.visitFieldInsn(OP_GETSTATIC, IO_CLASS, "runHook", "Ljava/lang/Thread;")
+  rv.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/Runtime", "addShutdownHook",
+    "(Ljava/lang/Thread;)V", false)
+  rv.visitLabel(armed)
   rv.visitTypeInsn(OP_NEW, PB)
   rv.visitInsn(OP_DUP)
   rv.visitVarInsn(OP_ALOAD, 0)
@@ -1526,7 +1611,11 @@ fn gen_io_run(cw: ClassWriter) -> Unit !io = {
   gen_redirect(rv, "redirectError", 3, 2)
   rv.visitVarInsn(OP_ALOAD, 3)
   rv.visitMethodInsn(OP_INVOKEVIRTUAL, PB, "start", "()Ljava/lang/Process;", false)
+  rv.visitInsn(OP_DUP)
+  rv.visitFieldInsn(OP_PUTSTATIC, IO_CLASS, "runChild", "Ljava/lang/Process;")
   rv.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/Process", "waitFor", "()I", false)
+  rv.visitInsn(OP_ACONST_NULL)
+  rv.visitFieldInsn(OP_PUTSTATIC, IO_CLASS, "runChild", "Ljava/lang/Process;")
   rv.visitInsn(OP_I2L)
   rv.visitInsn(OP_LRETURN)
   close_mv(rv)

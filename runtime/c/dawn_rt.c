@@ -2054,12 +2054,12 @@ static volatile sig_atomic_t dawn_run_child = 0;
  * that ignores the signal keeps this process waiting, which is the same
  * bargain `Process.destroy` makes on the JVM.
  *
- * This is the C runtime's `io_run` only. The JVM one (rtclasses.dawn,
- * gen_io_run) is a bare ProcessBuilder wait with no equivalent, so a JVM
- * program that spawns and waits still dies alone; the JVM *driver* covers
- * itself one layer up instead (main.dawn, wait_reaped). Closing that at the
- * intrinsic would mean generating a Runnable in the runtime, and it is not
- * what this fix is for.
+ * The JVM `io_run` answers the same question with the lever that backend has:
+ * a shutdown hook destroying the armed child (rtclasses.dawn, gen_io_reaper).
+ * The two agree on the number a caller reads back -- 128+signal -- and differ
+ * after it: forwarding leaves this program running, a shutdown hook means the
+ * JVM is already on its way out. A hook is also told nothing about which
+ * signal it runs for, so it can only send SIGTERM.
  *
  * Only `kill`, `signal` and `raise` are called here, all async-signal-safe;
  * `errno` is saved because the syscall this interrupts sets it afterwards.
