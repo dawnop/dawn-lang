@@ -25,7 +25,8 @@ gets disabled, and then it protects nothing):
   pages     every whole program the website ships runs and prints exactly the
             output recorded beside it (site/pages/ and site/play-ui/samples/,
             *.dawn vs *.out)
-  status    every document under docs/ opens with a `> 状态：…` line
+  status    every document under docs/ opens with a `> 状态：…` (or
+            `> Status: …`) line
   count     every claim about how many documents docs/ holds equals how many
             it holds, and every one of them is linked from docs/README.md
   transl    every translated document registers the digest of the original it
@@ -122,7 +123,8 @@ check whose blind spot is undocumented gets mistaken for a check:
     is the trap for the first docs/ link that does carry one, and the
     printed zero is what stops that being mistaken for coverage.
   * sections: only references whose target document is written down --
-    `[x](y.md) §3`, `y.md §3`, `本文 §3`, or a sibling in a `§3/§4` run.
+    `[x](y.md) §3`, `y.md §3`, `本文 §3`, `§3 of y.md`, or a sibling in a
+    `§3/§4` run.
     A bare `§3` is skipped, because in this corpus prose refers to other
     documents by nickname (`native 计划 §7`, `台账 §3.7`, `那份 §七`) far
     more often than one would guess: assuming "bare means this file" was
@@ -149,6 +151,17 @@ check whose blind spot is undocumented gets mistaken for a check:
     something else. The coverage half needs no marker: docs/README.md is the
     index, and a document it does not link is a document with no status
     anybody can find.
+
+Three of the checks read prose rather than syntax -- status, version and
+sections -- and until 2026-08-07 the prose they read could only be Chinese.
+That is a trap rather than a limitation: a document written in English would
+either fail a check it satisfies (status: no `> 状态：` line, because it says
+`> Status:`) or pass one it violates (version and sections: the phrase that
+selects a claim never matches, so nothing is adjudicated and the count that
+would have shown it goes up by zero). Both halves are silent. So each of the
+three patterns names its English spelling beside its Chinese one, and the
+Chinese side is left byte-identical -- measured, not asserted: every printed
+count is the same over this corpus before and after.
 
 Each check prints how many references it *resolved*, not just how many it
 rejected: "0 rejected" reads the same whether the check is working or has
@@ -290,7 +303,11 @@ FENCE_LINE = re.compile(r"^[ \t]*```")
 # Anchored on the blockquote a status line actually is. The substring `状态`
 # alone matched a `## 状态总览` heading and a sentence with `状态` in the middle
 # of it, and let three status-less documents through; see check_status.
-STATUS_LINE = re.compile(r"^\s*>\s*\**\s*状态")
+#
+# `Status` carries a \b and `状态` does not: the English word is a prefix of
+# ordinary words (`Statuses`), the Chinese one is not a prefix of anything the
+# blockquote anchor would let through.
+STATUS_LINE = re.compile(r"^\s*>\s*\**\s*(?:状态|Status\b)")
 DOC_COUNT_MARKER = "<!-- doc-check: doc-count -->"
 INTEGER = re.compile(r"\b(\d+)\b")
 # Phrases that assert *the current toolchain version*, as opposed to naming a
@@ -298,7 +315,18 @@ INTEGER = re.compile(r"\b(\d+)\b")
 # whole repository before being written down: they match one site, and that
 # site was the wrong one. A bare \d+\.\d+\.\d+ cannot be used -- 261 of them
 # live under docs/ and nearly all are deliberately historical.
-CURRENCY_PHRASES = "当前工具链|当前版本|最新版本|当前发布|目前版本|工具链版本"
+#
+# The English list is the Chinese one word for word, not a wider net: a phrase
+# that means something slightly different in only one language would make the
+# check's coverage depend on which language a document happens to be in, which
+# is the failure this whole widening exists to remove. Case-folded through a
+# scoped (?i:) group rather than a flag on the whole pattern, so that the `v?`
+# below keeps rejecting `V1.2.3` exactly as it did.
+CURRENCY_PHRASES_ZH = "当前工具链|当前版本|最新版本|当前发布|目前版本|工具链版本"
+CURRENCY_PHRASES_EN = (
+    "current toolchain|current version|latest version|current release"
+    "|toolchain version")
+CURRENCY_PHRASES = CURRENCY_PHRASES_ZH + "|(?i:" + CURRENCY_PHRASES_EN + ")"
 VERSION_CLAIM = re.compile(
     "(?:" + CURRENCY_PHRASES + r")[^\n]{0,14}?\bv?(\d+\.\d+\.\d+)\b")
 
@@ -309,10 +337,25 @@ HEADING_CJK = re.compile(r"^([一二三四五六七八九十]+)\s*[、.]")
 # `§3`, `§9.5.1`, `§六`. Not `§3.A`: a label with a non-numeric tail names an
 # item inside a section, not a heading, so it is skipped, not truncated.
 SECTION_REF = re.compile(r"§\s*(\d+(?:\.\d+)*|[一二三四五六七八九十]+)(?!\d)")
-# The three ways this corpus writes down which document a `§N` belongs to.
-REF_VIA_LINK = re.compile(r"\]\(([^)\s]+\.md)\)\s*(?:的\s*)?$")
-REF_VIA_NAME = re.compile(r"(?:^|[\s（(【「』」，。、|>*])([\w./-]+\.md)\s*(?:的\s*)?$")
-REF_VIA_SELF = re.compile(r"(?:本文|本节|本篇)\s*(?:的\s*)?$")
+# The ways this corpus writes down which document a `§N` belongs to. All but
+# the last look at the text *before* the reference; GENITIVE is the connector
+# that sits between the document and the `§` there (`spec.md 的 §3`,
+# `spec.md's §3`).
+#
+# REF_VIA_OF looks *after* it instead, because that is where English puts the
+# document: the of-genitive reverses the order (`§3 of spec.md`), so no amount
+# of widening the leading patterns can reach it. Only the `.md` spelling is
+# accepted -- `§11 of design doc` names a document by nickname, and this file
+# already argues at length (see `sections` above) why guessing at nicknames is
+# how a lint earns being switched off.
+GENITIVE = r"(?:的|'s|’s)"
+REF_VIA_LINK = re.compile(r"\]\(([^)\s]+\.md)\)\s*(?:" + GENITIVE + r"\s*)?$")
+REF_VIA_NAME = re.compile(
+    r"(?:^|[\s（(【「』」，。、,;:\"'|>*])([\w./-]+\.md)\s*(?:" + GENITIVE + r"\s*)?$")
+REF_VIA_SELF = re.compile(
+    r"(?:本文|本节|本篇|(?i:this document|this section|this doc))"
+    r"\s*(?:" + GENITIVE + r"\s*)?$")
+REF_VIA_OF = re.compile(r"^\s*of\s+(?:\[[^\]]*\]\()?([\w./-]+\.md)", re.I)
 # `§10.1/§10.2`, `§1.5、§2.6、§11`: the later reference inherits the earlier
 # one's document, because nothing but a separator stands between them.
 REF_SEPARATOR = re.compile(r"[/、,，]")
@@ -477,11 +520,14 @@ def check_sections(path: pathlib.Path, text: str, sections: dict) -> tuple[list[
             carry = None          # `§2.A` names an item, not a heading
             continue
         line = text[text.rfind("\n", 0, m.start()) + 1:m.start()]
+        nl = text.find("\n", m.end())
+        rest = text[m.end():] if nl < 0 else text[m.end():nl]
         target = None
         link = REF_VIA_LINK.search(line)
         name = None if link else REF_VIA_NAME.search(line)
-        if link or name:
-            hit = (path.parent / (link or name).group(1)).resolve()
+        of = None if (link or name) else REF_VIA_OF.match(rest)
+        if link or name or of:
+            hit = (path.parent / (link or name or of).group(1)).resolve()
             target = hit if hit in sections else None
         elif REF_VIA_SELF.search(line):
             target = path
@@ -514,9 +560,16 @@ def check_version(path: pathlib.Path, text: str, version: str) -> tuple[list[str
     bad: list[str] = []
     claims = 0
     for n, line in enumerate(text.split("\n"), 1):
-        found = [m.group(1) for m in VERSION_CLAIM.finditer(line)]
+        # The marker already claims every semver on its line, so a line that
+        # carries one is read that way and not also through the phrase list --
+        # otherwise README's "Current toolchain 0.57.0 <!-- doc-check: version
+        # -->" would be one claim counted twice, and the printed count is the
+        # only thing that says this check is awake.
         if VERSION_MARKER in line:
-            found += [m.group(1) for m in SEMVER.finditer(line.replace(VERSION_MARKER, ""))]
+            found = [m.group(1)
+                     for m in SEMVER.finditer(line.replace(VERSION_MARKER, ""))]
+        else:
+            found = [m.group(1) for m in VERSION_CLAIM.finditer(line)]
         for got in found:
             claims += 1
             if got != version:
@@ -540,12 +593,18 @@ def check_status(path: pathlib.Path, text: str) -> tuple[list[str], int]:
     index's own `**状态取值**` legend, one on a sentence that happened to
     contain `被当日状态吞并`. All three were found by hand on 2026-08-04,
     which is the failure mode this file's own docstring warns about: a check
-    that is running but not looking."""
+    that is running but not looking.
+
+    `> Status: …` counts too. Everything under docs/ is Chinese today, so that
+    branch adjudicates nothing yet -- it is here so that the first English
+    document under docs/ fails for the reason it deserves rather than for its
+    language."""
     if "docs/" not in str(path):
         return [], 0
     if any(STATUS_LINE.match(line) for line in text.split("\n")[:12]):
         return [], 1
-    return [f"{path.relative_to(ROOT)}: no `> 状态：…` line in the first 12 lines "
+    return [f"{path.relative_to(ROOT)}: no `> 状态：…` / `> Status: …` line in the "
+            f"first 12 lines "
             f"(normative / current / historical / proposed -- see docs/README.md)"], 0
 
 
