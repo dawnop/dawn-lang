@@ -5,6 +5,9 @@
 > **2026-07-30：§2.1 已落地**（`ensure_cached` 命中即重算 d1 对比目录名 +
 > `dawn cache verify` 全量扫描；内容寻址使 marker 文件可省——目录名就是声明，
 > 重算即全部校验。实测 7MB 树 ~0.9s、典型源码包毫秒级，默认校验成立）。
+> **2026-08-07 更正**：「命中即重算」只对 `ensure_cached` 成立，而构建路径热命中
+> 不经过它（`analyze.url_pkg_root` 直接 return），所以每次构建的自动校验实际不存在，
+> 只剩 `dawn cache verify` 手动扫描。详见 codebase-audit.md 的 PKG-02 更正条。
 > **§2.2 也已落地（同日）**，但形状与本文所写有一处诚实的偏离：lock 记录的是
 > **整个解析闭包的字节**（`artifact <sha256>  <basename>` + 直依赖坐标），不是
 > 每条 artifact 的 coord/url——coursier 的 `Fetch` 交回文件而不是坐标，从缓存路径
