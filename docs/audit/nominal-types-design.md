@@ -313,3 +313,34 @@ lowering 是恒等（`Char` 的表示就是 `Int`，两个后端各加一条直�
   否，理由是 7.3：那样 `-1` 就成了一个 `Char`，而「每个值都是码点」正是这个类型的全部内容。
 - **`std/char` 出一个 pub 的无检查构造函数**。否，RD-01 刚把 pvec 的公开无检查读取器拿掉，
   再开一个是往回走；判据一致：无检查的东西不该是 pub 的。
+
+### 7.6 期 2 的第四条约束：selfhost 也造 `Char`，而它够不着 std 的桥
+
+7.5 数了三条约束就收口，桥定成一个 **internal**（只有 std 能写）的 `char_unchecked`。
+2026-08-06 复核 `selfhost/src/lexer.dawn` 时发现**第四条**，它推翻那个收口：
+
+**`selfhost/src` 自己就要从 `Int` 造 `Char`，而它不是 std。**
+`lex_unicode` 把 `\u{...}` 的十六进制位算成一个码点（`cp = cp * 16 + d`），算完要塞进
+`buf: List[Char]`（`code_points` 改签名后 `Src.cps`、`SourceView.cps` 全线是 `List[Char]`）。
+7.5 的第 2 条已经证明 selfhost 在 v0.55.0 **不能 `use std/char`**（stage 1 用种子那份 std）；
+而 `char_unchecked` 若是 internal builtin，`internal_builtins` 按 `cx.is_std_module` 过滤，
+selfhost 同样看不见。两条一夹，**期 2 的 selfhost 无法构造任何 `Char`**——除非桥是一个
+对用户代码可见的内建。
+
+三条出路，未裁决（下一个人先定这个，再动码）：
+
+1. **两个内建**：`char_of(n: Int) -> Option[Char]` 公开且**受检**（故不违反 RD-01——
+   被否的是「无检查的 pub」，不是「pub」），加 internal 的 `char_unchecked` 供 std 热路径
+   （7.5 第 3 条的 `str.trim` 走 `cursor.char` 那条）。lexer 用受检那个：转义本来就要
+   拒绝非法码点，`None` 正好是那条诊断，比现在的写法更严。`std/char.of` 降为一行转发。
+2. **只要 `char_of`**（受检，公开），std 热路径吃一次 `Option` 分配。要先量 `str.trim`
+   的代价，别凭感觉。
+3. **selfhost 的翻转推迟到 v0.56.0**。看着像「再分一期」，实际不成立：`s.cps[i] == '\n'`
+   在 `code_points` 改签名的那一刻两边类型就对不上，而 `code_points` 是 selfhost 取码点的
+   唯一入口。半翻转的 selfhost 编不过——这正是 7.2 说的那个「说不出 `'a'` 是什么类型」的
+   中间状态，只是搬到了别的名字上。
+
+> 顺带记两个期 2 施工前该先量的数：`'x'` 字面量 675 处（std 61 / selfhost 341 /
+> packages 164 / site 101 / scripts 8，另 backend-dawn 19），`code_points` 调用点 34 个
+> 文件——但真正的工作量不是字面量，是 `List[Int] → List[Char]` 沿 lexer / json / md /
+> site 的类型传播，以及每一处对码点做算术的地方（opaque 在 owner 之外不能算术）。
