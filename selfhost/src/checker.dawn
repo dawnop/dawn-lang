@@ -1123,24 +1123,6 @@ test "binary checking covers the operator families" {
   assert cx6.diags[0].msg == "functions cannot be compared"
 }
 
-## Builtins with no public spelling (docs/stdlib-naming.md): the container and
-## cursor families are implementation detail behind std/map, std/set and
-## std/cursor — visible when checking std itself, hidden from user code.
-## `intr_at` rebuilds the whole intrinsic table for one lookup, so asking it
-## per key rebuilt it once per intrinsic -- quadratic, on a path `builtin_sig`
-## walks for every builtin name it resolves. One table, then read it.
-pub fn internal_builtins() -> Set[String] = {
-  let it = intrinsics()
-  var out: Set[String] = set.empty()
-  for n in map.keys(it) {
-    match map.get(it, n) {
-      Some(i) -> if i.internal { out = set.insert(out, n) }
-      None -> ()
-    }
-  }
-  out
-}
-
 ## The rule itself, in one place: everything that decides whether a builtin
 ## name exists here goes through it -- resolution, the "did you mean" pool, and
 ## the language server's tables. When they disagreed, the server offered names
@@ -1150,12 +1132,19 @@ pub fn builtin_visible(cx: Cx, hidden: Set[String], name: String) -> Bool =
 
 ## The builtin table as visible from this module: user-code resolution skips
 ## the internal intrinsics (the Kotlin `builtin(name)`).
+##
+## Both tables come off `cx`, built once by `cx_new`. They used to be built
+## here: every name this function was asked about rebuilt the 90-entry builtin
+## map, and `internal_builtins` rebuilt the intrinsic table on top of it --
+## which is a third build of the same map, since the intrinsic table starts
+## from `builtins()`. Three tables per unresolved name, on the path every name
+## in a module walks.
 pub fn builtin_sig(cx: Cx, name: String) -> Option[Sig] = {
-  let sig = match map.get(builtins(), name) {
+  let sig = match map.get(cx.bins, name) {
     None -> return None
     Some(s) -> s
   }
-  if builtin_visible(cx, internal_builtins(), name) { Some(sig) } else { None }
+  if builtin_visible(cx, cx.hidden_bins, name) { Some(sig) } else { None }
 }
 
 ## `bins` keeping only what `cx`'s module may name. The language server builds
@@ -1163,7 +1152,7 @@ pub fn builtin_sig(cx: Cx, name: String) -> Option[Sig] = {
 ## completion -- reads it, so filtering here is what keeps them all honest.
 pub fn visible_bins(bins: Map[String, Sig], cx: Cx) -> Map[String, Sig] = {
   if cx.is_std_module { return bins }
-  let hidden = internal_builtins()
+  let hidden = cx.hidden_bins
   var out: Map[String, Sig] = map.empty()
   for pr in map.entries(bins) {
     let (n, s) = pr
@@ -1191,9 +1180,8 @@ pub fn fn_pool(cx: Cx) -> List[String] =
 
 pub fn visible_builtin_names(cx: Cx) -> List[String] = {
   var out: List[String] = []
-  let hidden = internal_builtins()
-  for n in map.keys(builtins()) {
-    if builtin_visible(cx, hidden, n) { out = out ++ [n] }
+  for n in map.keys(cx.bins) {
+    if builtin_visible(cx, cx.hidden_bins, n) { out = out ++ [n] }
   }
   out
 }

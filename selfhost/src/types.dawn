@@ -1850,6 +1850,25 @@ pub fn intrinsics() -> Map[String, Intr] = {
 
 pub fn intr_at(name: String) -> Option[Intr] = map.get(intrinsics(), name)
 
+## Builtins with no public spelling (docs/stdlib-naming.md): the container and
+## cursor families are implementation detail behind std/map, std/set and
+## std/cursor — visible when checking std itself, hidden from user code.
+## `intr_at` rebuilds the whole intrinsic table for one lookup, so asking it
+## per key rebuilt it once per intrinsic -- quadratic, on a path name
+## resolution walks for every builtin name it resolves. One table, then read
+## it; and the checker reads this one once per module, into `Cx.hidden_bins`.
+pub fn internal_builtins() -> Set[String] = {
+  let it = intrinsics()
+  var out: Set[String] = set.empty()
+  for n in map.keys(it) {
+    match map.get(it, n) {
+      Some(i) -> if i.internal { out = set.insert(out, n) }
+      None -> ()
+    }
+  }
+  out
+}
+
 ## The reuse-analysis exceptions (docs/perceus-design.md 6): argument
 ## positions the native runtime consumes rather than borrows. `array_with`
 ## takes its array owned because uniqueness is only decidable after the caller

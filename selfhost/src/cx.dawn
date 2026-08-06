@@ -19,6 +19,7 @@ use types.{
   TyList, TyMap, TySet, TyArray, TyJava, TyTuple, TyFn, TyOpaque,
   EPure, EIo, EffVar, ELabeled, eff_union,
   adt_of, trait_of, subst, ty_named,
+  builtins, internal_builtins,
   prelude_adts, prelude_traits, first_minted_id
 }
 use jsig.{Jsig, jsig_refused}
@@ -93,6 +94,13 @@ pub type Cx = {
   fn_origin: Map[String, Origin],
   # the bundled std's implicit surface (PRELUDE names); local decls shadow it
   std_fns: Map[String, Sig],
+  # the builtin signature table, and the subset of it no user module may name.
+  # Constant for the life of a Cx and built once by cx_new: both used to be
+  # rebuilt inside the resolver, so every name a module mentions paid for a
+  # 90-entry map -- twice, because the hidden set is derived from the
+  # intrinsic table, which is itself derived from the builtin one.
+  bins: Map[String, Sig],
+  hidden_bins: Set[String],
   adts_by_name: Map[String, Int],
   aliases: Map[String, AliasE],
   alias_resolved: Map[String, Ty],
@@ -176,6 +184,8 @@ pub fn cx_new(owner_class: Option[String], src_path: Option[String]) -> Cx = {
     fns: map.empty(),
     fn_origin: map.empty(),
     std_fns: map.empty(),
+    bins: builtins(),
+    hidden_bins: internal_builtins(),
     adts_by_name: map.empty(),
     aliases: map.empty(),
     alias_resolved: map.empty(),
