@@ -50,6 +50,7 @@ use types.{
   Adts, AdtI, CtorI, FieldI, Traits, ImplI, Sym, Sig,
   adt_of, trait_of, ty_show, ctor_render, sig_render, subst, subst_eff, eff_show,
   ty_mentions_var, ty_map_children, ty_any_child,
+  SlotAt, SlotNoField, SlotAfterNamed, SlotOverflow, SlotTaken, ctor_slots,
   is_numeric, is_errorish,
   prelude_traits, bounds_of,
   prelude_trait_ids,
@@ -640,10 +641,11 @@ pub fn is_concrete(cx: Cx, t: Ty) -> Bool =
     # subject is the shape reduction is allowed to leave standing (D3), so
     # calling it unknown would put every `T.Item` parameter back in round two.
     #
-    # Not a wildcard, and not the kernel: both used to reach `_ -> true` by
-    # accident of arm order, which is also how `TyOpaque` was missed once --
-    # `Pair[T]` at a rigid T looked concrete, and the expected result type then
-    # bound the callee's type parameters before its arguments could.
+    # Written out rather than left to the `_` below, because that is how
+    # `TyOpaque` was missed once: it had no arm either, so it fell through to
+    # the same wildcard and `Pair[T]` at a rigid T looked concrete, and the
+    # expected result type then bound the callee's type parameters before its
+    # arguments could. A stop has to be a decision, not an omission.
     TyFn(_, _, _) -> true
     TyAssoc(_, _, _) -> true
     _ -> not ty_any_child(t, x => not is_concrete(cx, x))
@@ -1999,66 +2001,48 @@ fn check_ctor_pattern_at(
   }
   var slots: List[Option[TPat]] = []
   for _i in 0 ..n { slots = slots ++ [no_tpat()] }
-  var saw_named = false
+  # which field each sub-pattern is for: the same decision the call side makes
+  # (types.ctor_slots). What is left here is the pattern half of it -- the
+  # wording, the caret, and binding the sub-pattern against the field's type.
+  # A sub-pattern with no field of its own is still checked, against TyError,
+  # so the names it binds exist for the rest of the arm.
+  var pnames: List[Option[String]] = []
+  for a in pargs { pnames = pnames ++ [a.name] }
+  let picks = ctor_slots(ci.fields, pnames)
   var i = 0
   for a in pargs {
     var idx = -1
-    match a.name {
-      Some(an) -> {
-        saw_named = true
-        var j = 0
-        for f in ci.fields {
-          if f.name == an { idx = j }
-          j = j + 1
+    match picks[i] {
+      SlotAt(at) -> { idx = at }
+      SlotNoField(an) -> {
+        var fnames: List[String] = []
+        for f in ci.fields { fnames = fnames ++ [f.name] }
+        let hint = match suggest.hint(an, fnames) {
+          Some(h) -> h
+          None -> "constructor: " ++ ctor_render(cx1.adts, ci)
         }
-        if idx < 0 {
-          var fnames: List[String] = []
-          for f in ci.fields { fnames = fnames ++ [f.name] }
-          let hint = match suggest.hint(an, fnames) {
-            Some(h) -> h
-            None -> "constructor: " ++ ctor_render(cx1.adts, ci)
-          }
-          cx1 = cerr_h(cx1, "`" ++ ci.name ++ "` has no field `" ++ an ++ "`",
-            a.nlo, a.nhi, hint)
-          let (cx2, _) = check_pattern(cx1, a.pat, TyError, mutable)
-          cx1 = cx2
-          i = i + 1
-          continue
-        }
+        cx1 = cerr_h(cx1, "`" ++ ci.name ++ "` has no field `" ++ an ++ "`",
+          a.nlo, a.nhi, hint)
       }
-      None -> {
-        if saw_named {
-          cx1 = cerr(cx1, "positional patterns cannot follow named patterns",
-            pat_lo(a.pat), pat_hi(a.pat))
-          let (cx2, _) = check_pattern(cx1, a.pat, TyError, mutable)
-          cx1 = cx2
-          i = i + 1
-          continue
-        }
-        idx = i
-        if idx >= n {
-          let (cx2, _) = check_pattern(cx1, a.pat, TyError, mutable)
-          cx1 = cx2
-          i = i + 1
-          continue
-        }
+      SlotAfterNamed -> {
+        cx1 = cerr(cx1, "positional patterns cannot follow named patterns",
+          pat_lo(a.pat), pat_hi(a.pat))
+      }
+      # counted below, as a whole
+      SlotOverflow -> ()
+      SlotTaken(at) -> {
+        cx1 = cerr(cx1, "field `" ++ ci.fields[at].name ++ "` is matched twice",
+          pat_lo(a.pat), pat_hi(a.pat))
       }
     }
-    let already = match slots[idx] {
-      Some(_) -> true
-      None -> false
-    }
-    if already {
-      cx1 = cerr(cx1, "field `" ++ ci.fields[idx].name ++ "` is matched twice",
-        pat_lo(a.pat), pat_hi(a.pat))
+    if idx < 0 {
       let (cx2, _) = check_pattern(cx1, a.pat, TyError, mutable)
       cx1 = cx2
-      i = i + 1
-      continue
+    } else {
+      let (cx3, tp) = check_pattern(cx1, a.pat, field_tys[idx], mutable)
+      cx1 = cx3
+      slots = list.take(slots, idx) ++ [Some(tp)] ++ list.drop(slots, idx + 1)
     }
-    let (cx3, tp) = check_pattern(cx1, a.pat, field_tys[idx], mutable)
-    cx1 = cx3
-    slots = list.take(slots, idx) ++ [Some(tp)] ++ list.drop(slots, idx + 1)
     i = i + 1
   }
   if len(pargs) > n {
@@ -5031,80 +5015,56 @@ fn check_ctor_call(
     }
     None -> ()
   }
-  # resolve the argument → field mapping (positional prefix, then named)
+  # resolve the argument → field mapping (positional prefix, then named) --
+  # types.ctor_slots, the same decision the pattern side makes. What is left
+  # here is the call half: the wording, and that an argument with no field of
+  # its own is checked now, with no expected type, so its own errors are
+  # reported and `atx` holds something for the emitter. An argument that *did*
+  # land on a field is checked in the two rounds below instead, where the
+  # field's type is known.
   var slots: List[Option[Int]] = []
   for _k in 0 ..n { slots = slots ++ [no_int()] }
   var idx_of: List[Int] = []
   for _k in 0 ..len(cargs) { idx_of = idx_of ++ [-1] }
   var atx: List[Option[TExpr]] = []
   for _k in 0 ..len(cargs) { atx = atx ++ [no_texpr()] }
-  var saw_named = false
+  var anames: List[Option[String]] = []
+  for a in cargs { anames = anames ++ [a.name] }
+  let picks = ctor_slots(ci.fields, anames)
   var args_broken = false
   var i = 0
   for a in cargs {
     var idx = -1
-    var skip = false
-    match a.name {
-      Some(an) -> {
-        saw_named = true
-        var found = -1
-        var fi = 0
-        for f in ci.fields {
-          if found < 0 && f.name == an { found = fi }
-          fi = fi + 1
+    match picks[i] {
+      SlotAt(at) -> { idx = at }
+      SlotNoField(an) -> {
+        var fnames: List[String] = []
+        for f in ci.fields { fnames = fnames ++ [f.name] }
+        let h = match suggest.hint(an, fnames) {
+          Some(hh) -> hh
+          None -> "constructor: " ++ ctor_render(cx1.adts, ci)
         }
-        if found < 0 {
-          var fnames: List[String] = []
-          for f in ci.fields { fnames = fnames ++ [f.name] }
-          let h = match suggest.hint(an, fnames) {
-            Some(hh) -> hh
-            None -> "constructor: " ++ ctor_render(cx1.adts, ci)
-          }
-          cx1 = cerr_h(cx1, "`" ++ ci.name ++ "` has no field `" ++ an ++ "`", a.lo, a.hi, h)
-          args_broken = true
-          let (cxa, _, ax) = check_expr(cx1, a.e, no_expected())
-          cx1 = cxa
-          atx = list.take(atx, i) ++ [Some(ax)] ++ list.drop(atx, i + 1)
-          skip = true
-        } else {
-          idx = found
-        }
+        cx1 = cerr_h(cx1, "`" ++ ci.name ++ "` has no field `" ++ an ++ "`", a.lo, a.hi, h)
+        args_broken = true
       }
-      None -> {
-        if saw_named {
-          cx1 = cerr(cx1, "positional arguments cannot follow named arguments", a.lo, a.hi)
-          args_broken = true
-          let (cxa, _, ax) = check_expr(cx1, a.e, no_expected())
-          cx1 = cxa
-          atx = list.take(atx, i) ++ [Some(ax)] ++ list.drop(atx, i + 1)
-          skip = true
-        } else {
-          idx = i
-          if idx >= n {
-            # counted below
-            let (cxa, _, ax) = check_expr(cx1, a.e, no_expected())
-            cx1 = cxa
-            atx = list.take(atx, i) ++ [Some(ax)] ++ list.drop(atx, i + 1)
-            skip = true
-          }
-        }
+      SlotAfterNamed -> {
+        cx1 = cerr(cx1, "positional arguments cannot follow named arguments", a.lo, a.hi)
+        args_broken = true
+      }
+      # counted below
+      SlotOverflow -> ()
+      SlotTaken(at) -> {
+        cx1 = cerr(cx1, "field `" ++ ci.fields[at].name ++ "` is given twice", a.lo, a.hi)
+        args_broken = true
       }
     }
-    if not skip {
-      let taken = match slots[idx] {
-        Some(_) -> true
-        None -> false
-      }
-      if taken {
-        cx1 = cerr(cx1, "field `" ++ ci.fields[idx].name ++ "` is given twice", a.lo, a.hi)
-        args_broken = true
-        let (cxa, _, ax) = check_expr(cx1, a.e, no_expected())
-        cx1 = cxa
-        atx = list.take(atx, i) ++ [Some(ax)] ++ list.drop(atx, i + 1)
-      } else {
-        slots = list.take(slots, idx) ++ [Some(i)] ++ list.drop(slots, idx + 1)
-        idx_of = list.take(idx_of, i) ++ [idx] ++ list.drop(idx_of, i + 1)
-      }
+    if idx < 0 {
+      let (cxa, _, ax) = check_expr(cx1, a.e, no_expected())
+      cx1 = cxa
+      atx = list.take(atx, i) ++ [Some(ax)] ++ list.drop(atx, i + 1)
+    } else {
+      slots = list.take(slots, idx) ++ [Some(i)] ++ list.drop(slots, idx + 1)
+      idx_of = list.take(idx_of, i) ++ [idx] ++ list.drop(idx_of, i + 1)
     }
     i = i + 1
   }

@@ -417,6 +417,78 @@ pub fn ctor_render(adts: Adts, c: CtorI) -> String = {
   }
 }
 
+# ---- argument-to-field decision ----
+
+## Which field one argument fills, or why it fills none.
+pub type SlotPick =
+  # fills the field at this index
+  | SlotAt(idx: Int)
+# named, and the constructor has no field of that name
+  | SlotNoField(name: String)
+# positional, and a named argument came before it
+  | SlotAfterNamed
+# positional, and past the last field
+  | SlotOverflow
+# the field at this index was already filled
+  | SlotTaken(idx: Int)
+
+## Which field each of `names` fills, in order: the positional prefix takes
+## fields left to right, a name takes the field it names, and the four ways an
+## argument can fail to land on one are answered rather than reported.
+##
+## One rule, two spellings. `C(x, y)` in a pattern and `C(x, y)` in an
+## expression pick their fields the same way, and until this existed they did
+## so through two copies of the loop -- which had already drifted: one took the
+## first field of a given name and the other the last. (Unobservable, as it
+## happens: a constructor with two fields of one name keeps only the first,
+## and the duplicate is a declaration error. Which is the point -- the copies
+## were free to differ and nothing said so.)
+##
+## What stays at the call sites is what they do with the answer: one binds a
+## sub-pattern and one checks an expression, and their diagnostics say
+## "pattern"/"matched twice" against "argument"/"given twice", at different
+## spans.
+pub fn ctor_slots(fields: List[FieldI], names: List[Option[String]]) -> List[SlotPick] = {
+  var out: List[SlotPick] = []
+  var filled: Set[Int] = set.empty()
+  var saw_named = false
+  var i = 0
+  for nm in names {
+    var pick = SlotOverflow
+    match nm {
+      Some(an) -> {
+        saw_named = true
+        match field_index(fields, an) {
+          None -> { pick = SlotNoField(an) }
+          Some(idx) -> { pick = if set.has(filled, idx) { SlotTaken(idx) } else { SlotAt(idx) } }
+        }
+      }
+      None ->
+        if saw_named {
+          pick = SlotAfterNamed
+        } else if i < len(fields) {
+          pick = if set.has(filled, i) { SlotTaken(i) } else { SlotAt(i) }
+        }
+    }
+    match pick {
+      SlotAt(idx) -> { filled = set.insert(filled, idx) }
+      _ -> ()
+    }
+    out = out ++ [pick]
+    i = i + 1
+  }
+  out
+}
+
+fn field_index(fields: List[FieldI], name: String) -> Option[Int] = {
+  var i = 0
+  for f in fields {
+    if f.name == name { return Some(i) }
+    i = i + 1
+  }
+  None
+}
+
 # ---- structural traversal ----
 #
 # Every walk over a type's structure is one of the two functions below with a
@@ -1962,6 +2034,37 @@ test "effect rendering" {
   assert eff_suffix(EIo) == " !io"
   assert eff_suffix(EffVar("e", 7)) == " !e"
   assert eff_show(EUnion([(2, "b"), (1, "a")])) == "(a|b)"
+}
+
+## The rule the pattern side and the call side now share, stated once. Both
+## used to hold a copy of this loop, and a copy is only as good as the case
+## that reaches it: the five answers below are each an error message on one
+## side and a different one on the other, so an outcome this test does not name
+## is one the two spellings are free to drift apart on again.
+test "an argument lands on the field its position or its name says" {
+  let fs = [FieldI { name: "a", ty: TyInt }, FieldI { name: "b", ty: TyBool }]
+  let some: fn(String) -> Option[String] = n => Some(n)
+  let pos: Option[String] = None
+
+  # the positional prefix takes fields left to right
+  assert ctor_slots(fs, [pos, pos]) == [SlotAt(0), SlotAt(1)]
+  assert ctor_slots(fs, []) == []
+  # a name takes the field it names, in any order, and may follow a position
+  assert ctor_slots(fs, [some("b"), some("a")]) == [SlotAt(1), SlotAt(0)]
+  assert ctor_slots(fs, [pos, some("b")]) == [SlotAt(0), SlotAt(1)]
+  # but a position may not follow a name -- and the refusal does not fill the
+  # field it would have taken, so the "missing field" count stays honest
+  assert ctor_slots(fs, [some("a"), pos]) == [SlotAt(0), SlotAfterNamed]
+  # a name with no field, a position past the last field, and a field filled
+  # twice by either spelling
+  assert ctor_slots(fs, [some("zz")]) == [SlotNoField("zz")]
+  assert ctor_slots(fs, [pos, pos, pos]) == [SlotAt(0), SlotAt(1), SlotOverflow]
+  assert ctor_slots(fs, [some("a"), some("a")]) == [SlotAt(0), SlotTaken(0)]
+  assert ctor_slots(fs, [pos, some("a")]) == [SlotAt(0), SlotTaken(0)]
+  # a constructor with no fields has nothing for a positional argument to take
+  let none_fs: List[FieldI] = []
+  assert ctor_slots(none_fs, [pos]) == [SlotOverflow]
+  assert ctor_slots(none_fs, [some("a")]) == [SlotNoField("a")]
 }
 
 test "type rendering" {
