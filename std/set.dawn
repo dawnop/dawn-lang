@@ -100,3 +100,110 @@ impl[T: Eq + Hash] Iter[Set[T]] {
     es[i]
   }
 }
+
+# The insertion-order clause is the one with a caller depending on it:
+# `list.unique` is `set`'s ordering, observed from outside, and its promise
+# ("every value once, at its first occurrence") is only true while this one is.
+# std/list cannot see this module to say so, so it is said here.
+#
+# As in std/map, `len` is this module's, so the blocks compare whole lists
+# rather than asking one for its length.
+
+test "has and remove answer about an element; an absent one is fine" {
+  let s: Set[String] = from(["a", "b"])
+  assert has(s, "a")
+  assert has(s, "b")
+  assert not has(s, "zz")
+  assert len(s) == 2
+  assert not is_empty(s)
+  let e: Set[String] = empty()
+  assert not has(e, "a")
+  assert len(e) == 0
+  assert is_empty(e)
+  # removing something that is not there answers an equal set, not an error
+  assert remove(s, "zz") == s
+  assert len(remove(s, "zz")) == 2
+  assert remove(e, "a") == e
+  assert len(remove(s, "a")) == 1
+  assert not has(remove(s, "a"), "a")
+  # persistent: the original is untouched
+  assert has(s, "a")
+  assert len(s) == 2
+}
+
+test "insertion order is first occurrence, and insert and remove keep it" {
+  # This is what list.unique's promise rests on. Not sorted and not hash
+  # order: the order the elements first arrived in.
+  let s: Set[String] = from(["b", "a", "c"])
+  assert to_list(s) == ["b", "a", "c"]
+  # a duplicate collapses onto the *first* occurrence's position, so the
+  # earlier arrival is what survives in the ordering
+  assert to_list(from(["b", "a", "b", "c", "a"])) == ["b", "a", "c"]
+  assert len(from(["b", "a", "b", "c", "a"])) == 3
+  # re-inserting an element already there does not move it to the end
+  assert to_list(insert(s, "b")) == ["b", "a", "c"]
+  assert len(insert(s, "b")) == 3
+  # a genuinely new element does go on the end
+  assert to_list(insert(s, "d")) == ["b", "a", "c", "d"]
+  # removing one leaves the others in their order
+  assert to_list(remove(s, "a")) == ["b", "c"]
+  assert to_list(remove(s, "b")) == ["a", "c"]
+  # ... but a removed element that comes back has lost its place
+  assert to_list(insert(remove(s, "b"), "b")) == ["a", "c", "b"]
+  let e: Set[String] = empty()
+  assert to_list(e) == []
+  let nothing: List[String] = []
+  assert to_list(from(nothing)) == []
+  assert to_list(insert(e, "only")) == ["only"]
+  # numbers order by arrival too, not by value
+  assert to_list(from([3, 1, 2])) == [3, 1, 2]
+}
+
+test "Eq and Hash are about membership, not about arrival order" {
+  let a: Set[String] = from(["x", "y"])
+  let b: Set[String] = from(["y", "x"])
+  let c: Set[String] = remove(from(["x", "y", "z"]), "z")
+  assert a == b
+  assert a == c
+  assert hash(a) == hash(b)
+  assert hash(a) == hash(c)
+  # ... while each keeps its own walk order
+  assert to_list(a) == ["x", "y"]
+  assert to_list(b) == ["y", "x"]
+  # size counts, so neither a subset nor a superset is equal
+  assert not (a == from(["x"]))
+  assert not (a == from(["x", "y", "z"]))
+  assert not (a == from(["x", "z"]))
+  let e1: Set[String] = empty()
+  let nothing: List[String] = []
+  let e2: Set[String] = from(nothing)
+  assert e1 == e2
+  assert hash(e1) == hash(e2)
+  assert not (e1 == a)
+}
+
+test "Show names the call that rebuilds it" {
+  let s: Set[String] = from(["b", "a"])
+  assert show(s) == "set.from([\"b\", \"a\"])"
+  let e: Set[String] = empty()
+  assert show(e) == "set.from([])"
+  assert show(from(["only"])) == "set.from([\"only\"])"
+  assert show(from([2, 1])) == "set.from([2, 1])"
+}
+
+test "for over a Set yields every element once, in to_list's order" {
+  let s: Set[String] = from(["b", "a", "c"])
+  var seen: List[String] = []
+  var n = 0
+  for x in s {
+    seen = seen ++ [x]
+    n = n + 1
+  }
+  assert n == 3
+  assert seen == to_list(s)
+  assert seen == ["b", "a", "c"]
+  let e: Set[String] = empty()
+  var empty_steps = 0
+  for _x in e { empty_steps = empty_steps + 1 }
+  assert empty_steps == 0
+}

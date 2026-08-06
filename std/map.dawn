@@ -148,3 +148,133 @@ impl[K: Eq + Hash, V] Iter[Map[K, V]] {
     es[i]
   }
 }
+
+# `len` in this module is the map's, so the blocks below never ask a list for
+# its length -- they compare whole lists instead, which is the stronger
+# assertion anyway: it pins the order at the same time as the contents.
+#
+# Insertion order is the thing most worth pinning here. Nothing in the type
+# says a hash trie has one, three of the four functions below promise it in
+# prose, and a rewrite that lost it would leave every gate green.
+
+test "get and has answer about a key; a missing one is a branch, not a panic" {
+  let m: Map[String, Int] = from([("a", 1), ("b", 2)])
+  assert get(m, "a") == Some(1)
+  assert get(m, "b") == Some(2)
+  assert has(m, "a")
+  # spec 4.8 criterion 2: asking about a key that is not there is what this
+  # function is for, so the answer is None and never a panic
+  assert get(m, "zz") == None
+  assert not has(m, "zz")
+  let e: Map[String, Int] = empty()
+  assert get(e, "a") == None
+  assert not has(e, "a")
+  assert len(e) == 0
+  assert is_empty(e)
+  assert not is_empty(m)
+  assert len(m) == 2
+  # a key whose value is itself absent-looking is still a present key
+  let o: Map[String, Option[Int]] = from([("a", None)])
+  assert has(o, "a")
+  assert get(o, "a") == Some(None)
+}
+
+test "insert replaces in place; remove of an absent key changes nothing" {
+  let m: Map[String, Int] = from([("a", 1), ("b", 2), ("c", 3)])
+  # an existing key keeps its insertion position -- the value moves, not the key
+  let m2 = insert(m, "a", 9)
+  assert get(m2, "a") == Some(9)
+  assert keys(m2) == ["a", "b", "c"]
+  assert len(m2) == 3
+  # a new key goes on the end
+  assert keys(insert(m, "d", 4)) == ["a", "b", "c", "d"]
+  # removing and re-adding is not the same as replacing: the key loses its place
+  assert keys(insert(remove(m, "a"), "a", 1)) == ["b", "c", "a"]
+  # absent removals are fine, and answer an equal map
+  assert remove(m, "zz") == m
+  assert len(remove(m, "zz")) == 3
+  let e: Map[String, Int] = empty()
+  assert remove(e, "a") == e
+  assert len(remove(m, "a")) == 2
+  assert get(remove(m, "a"), "a") == None
+  # persistent: the old map is untouched by either
+  assert get(m, "a") == Some(1)
+  assert keys(m) == ["a", "b", "c"]
+  # `from` takes the last value for a repeated key, and the first position
+  let dup = from([("a", 1), ("b", 2), ("a", 3)])
+  assert get(dup, "a") == Some(3)
+  assert keys(dup) == ["a", "b"]
+  assert len(dup) == 2
+}
+
+test "keys, values and entries are one order, and it is insertion order" {
+  let m: Map[String, Int] = from([("b", 2), ("a", 1), ("c", 3)])
+  # not sorted, not hash order -- the order the keys arrived in
+  assert keys(m) == ["b", "a", "c"]
+  assert values(m) == [2, 1, 3]
+  assert entries(m) == [("b", 2), ("a", 1), ("c", 3)]
+  let e: Map[String, Int] = empty()
+  assert keys(e) == []
+  assert values(e) == []
+  assert entries(e) == []
+  # the three agree with each other, not merely with a literal
+  assert entries(m) == [(keys(m)[0], values(m)[0]), (keys(m)[1], values(m)[1]),
+    (keys(m)[2], values(m)[2])]
+  # and they survive a round trip through `from`
+  assert from(entries(m)) == m
+  assert keys(from(entries(m))) == keys(m)
+}
+
+test "Eq and Hash are about the entries, not the shape holding them" {
+  # the same entries in a different order, and with a removal in between, are
+  # a different trie and the same map
+  let a: Map[String, Int] = from([("x", 1), ("y", 2)])
+  let b: Map[String, Int] = from([("y", 2), ("x", 1)])
+  let c: Map[String, Int] = remove(from([("x", 1), ("y", 2), ("z", 3)]), "z")
+  assert a == b
+  assert a == c
+  assert hash(a) == hash(b)
+  assert hash(a) == hash(c)
+  # ... while the order they come *out* in is still each one's own
+  assert keys(a) == ["x", "y"]
+  assert keys(b) == ["y", "x"]
+  # size is part of it, so a subset is not equal
+  assert not (a == from([("x", 1)]))
+  assert not (a == from([("x", 1), ("y", 2), ("z", 3)]))
+  # and so is every value
+  assert not (a == from([("x", 1), ("y", 99)]))
+  assert not (a == from([("x", 1), ("z", 2)]))
+  let e1: Map[String, Int] = empty()
+  let no_entries: List[(String, Int)] = []
+  let e2: Map[String, Int] = from(no_entries)
+  assert e1 == e2
+  assert hash(e1) == hash(e2)
+  assert not (e1 == a)
+}
+
+test "Show names the call that rebuilds it" {
+  let m: Map[String, Int] = from([("a", 1), ("b", 2)])
+  assert show(m) == "map.from([(\"a\", 1), (\"b\", 2)])"
+  let e: Map[String, Int] = empty()
+  assert show(e) == "map.from([])"
+  assert show(from([("a", 1)])) == "map.from([(\"a\", 1)])"
+  # the rendering follows the same order everything else here does
+  assert show(from([("b", 2), ("a", 1)])) == "map.from([(\"b\", 2), (\"a\", 1)])"
+}
+
+test "for over a Map yields every entry once, in entries' order" {
+  let m: Map[String, Int] = from([("b", 2), ("a", 1), ("c", 3)])
+  var seen: List[(String, Int)] = []
+  var n = 0
+  for kv in m {
+    seen = seen ++ [kv]
+    n = n + 1
+  }
+  assert n == 3
+  assert seen == entries(m)
+  assert seen == [("b", 2), ("a", 1), ("c", 3)]
+  let e: Map[String, Int] = empty()
+  var empty_steps = 0
+  for _kv in e { empty_steps = empty_steps + 1 }
+  assert empty_steps == 0
+}

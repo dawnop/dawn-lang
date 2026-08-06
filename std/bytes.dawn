@@ -345,3 +345,251 @@ impl Iter[Bytes] {
   fn iter_next(b: Bytes, c: Int) -> Int = c + 1
   fn iter_get(b: Bytes, c: Int) -> Int = at(b, c)
 }
+
+# Nothing in this module had a test of its own. What that left uncovered is
+# mostly the refusals: `from_hex` and the two `from_base64` are inquiry
+# functions (spec §4.8 criterion 2) whose whole job is to answer None for text
+# that is not what it claims to be, and every caller of them is parsing
+# something that arrived from outside.
+#
+# The Base64 vectors below are RFC 4648 §10's, not a round trip through this
+# encoder. A round trip proves the two directions are inverses and says nothing
+# about whether either is Base64; these say it is.
+
+test "a Buf appends, reads back, and truncates what will not fit in a byte" {
+  assert size(buf()) == 0
+  assert to_hex(freeze(buf())) == ""
+  assert is_empty(freeze(buf()))
+  let b = put(put(put(buf(), 0x00), 0x41), 0xFF)
+  assert size(b) == 3
+  assert get(b, 0) == 0x00
+  assert get(b, 1) == 0x41
+  assert get(b, 2) == 0xFF
+  assert to_hex(freeze(b)) == "0041ff"
+  assert len(freeze(b)) == 3
+  # a byte store keeps the low eight bits, and says so rather than panicking.
+  # Asserted through `get` and not only through `freeze`: freezing narrows to
+  # bytes as well, so a `put` that stopped masking would still hex the same and
+  # only an unfrozen read can tell -- which is also where `get`'s own promise
+  # ("as 0..255") would be broken.
+  assert get(put(buf(), 0x141), 0) == 0x41
+  assert get(put(buf(), 256), 0) == 0x00
+  assert get(put(buf(), -1), 0) == 0xFF
+  assert get(put(buf(), -256), 0) == 0x00
+  assert to_hex(freeze(put(buf(), 0x141))) == "41"
+  assert to_hex(freeze(put(buf(), 256))) == "00"
+  assert to_hex(freeze(put(buf(), -1))) == "ff"
+  assert to_hex(freeze(put(buf(), -256))) == "00"
+  # put_bytes is the same append, in bulk
+  assert to_hex(freeze(put_bytes(buf(), utf8("AB")))) == "4142"
+  assert to_hex(freeze(put_bytes(put(buf(), 0x41), utf8("B")))) == "4142"
+  assert to_hex(freeze(put_bytes(buf(), utf8("")))) == ""
+  # `get` is `at`'s clause, on the builder: a read past the frontier is a bug
+  match catch_panic(() => get(b, 3)) {
+    Ok(_) -> { assert false }
+    Err(_) -> ()
+  }
+  match catch_panic(() => get(buf(), 0)) {
+    Ok(_) -> { assert false }
+    Err(_) -> ()
+  }
+}
+
+test "at asserts the index exists; slice names a stretch and clamps" {
+  let b = utf8("abcdef")
+  assert len(b) == 6
+  assert at(b, 0) == 0x61
+  assert at(b, 5) == 0x66
+  assert is_empty(utf8(""))
+  assert not is_empty(b)
+  assert len(utf8("")) == 0
+  # spec 4.8 criterion 1 -- the same split str.at and str.substring have
+  match catch_panic(() => at(b, 6)) {
+    Ok(_) -> { assert false }
+    Err(_) -> ()
+  }
+  match catch_panic(() => at(b, -1)) {
+    Ok(_) -> { assert false }
+    Err(_) -> ()
+  }
+  match catch_panic(() => at(utf8(""), 0)) {
+    Ok(_) -> { assert false }
+    Err(_) -> ()
+  }
+  # criterion 3: both ends clamp, and a reversed range is empty, never a panic
+  assert to_hex(slice(b, 0, 3)) == "616263"
+  assert to_hex(slice(b, 3, 6)) == "646566"
+  assert to_hex(slice(b, -5, 3)) == "616263"
+  assert to_hex(slice(b, 3, 99)) == "646566"
+  assert to_hex(slice(b, 0, 99)) == to_hex(b)
+  assert to_hex(slice(b, 4, 2)) == ""
+  assert to_hex(slice(b, 99, 99)) == ""
+  assert to_hex(slice(b, -9, -3)) == ""
+  assert to_hex(slice(b, 2, 2)) == ""
+  assert to_hex(slice(utf8(""), 0, 5)) == ""
+  # a byte is a byte, not a code point: one astral character is four of them
+  assert len(utf8("😀")) == 4
+  assert to_hex(utf8("😀")) == "f09f9880"
+}
+
+test "index_of answers a byte offset, and an empty needle is at every one" {
+  let b = utf8("abcabc")
+  assert index_of(b, utf8("abc"), 0) == Some(0)
+  assert index_of(b, utf8("abc"), 1) == Some(3)
+  assert index_of(b, utf8("c"), 0) == Some(2)
+  assert index_of(b, utf8("c"), 3) == Some(5)
+  assert index_of(b, utf8("c"), 6) == None
+  assert index_of(b, utf8("zz"), 0) == None
+  # a needle longer than what is left is a miss, not a partial match
+  assert index_of(utf8("ab"), utf8("abc"), 0) == None
+  assert index_of(b, utf8("abc"), 4) == None
+  # `from` is clamped up to 0, so a negative one reads as "from the start"
+  assert index_of(b, utf8("abc"), -5) == Some(0)
+  assert index_of(b, utf8(""), -3) == Some(0)
+  # the empty needle is at every position including the end -- but not past it,
+  # which is the one place this differs from "always Some"
+  assert index_of(b, utf8(""), 0) == Some(0)
+  assert index_of(b, utf8(""), 3) == Some(3)
+  assert index_of(b, utf8(""), 6) == Some(6)
+  assert index_of(b, utf8(""), 7) == None
+  assert index_of(utf8(""), utf8(""), 0) == Some(0)
+  assert index_of(utf8(""), utf8("a"), 0) == None
+}
+
+test "to_hex writes one case and from_hex reads both, or refuses" {
+  assert to_hex(utf8("")) == ""
+  assert to_hex(utf8("AB")) == "4142"
+  assert to_hex(freeze(put(put(buf(), 0x0F), 0xF0))) == "0ff0"
+  # lower case is what this library produces -- the pin is on the case, since
+  # both spellings read back the same and only one is written
+  assert to_hex(freeze(put(buf(), 0xAB))) == "ab"
+  assert from_hex("") == Some(utf8(""))
+  assert from_hex("41") == Some(utf8("A"))
+  assert from_hex("4142") == Some(utf8("AB"))
+  assert from_hex("AbCd") == from_hex("abcd")
+  assert to_hex(unwrap_or(from_hex("AbCd"), utf8(""))) == "abcd"
+  # an odd digit count leaves half a byte, which is not a byte string
+  assert from_hex("4") == None
+  assert from_hex("414") == None
+  # and nothing else is a hex digit, not even the separators that usually are
+  assert from_hex("4G") == None
+  assert from_hex("41 42") == None
+  assert from_hex("41\n") == None
+  assert from_hex("0x41") == None
+  assert from_hex("-1") == None
+  # the round trip, in the direction that has a canonical answer
+  assert from_hex(to_hex(utf8("hello"))) == Some(utf8("hello"))
+}
+
+test "base64 answers RFC 4648's vectors, in both of its alphabets" {
+  # §10's test vectors. These are the assertions that say this is Base64 and
+  # not merely a self-consistent pair of functions.
+  assert to_base64(utf8("")) == ""
+  assert to_base64(utf8("f")) == "Zg=="
+  assert to_base64(utf8("fo")) == "Zm8="
+  assert to_base64(utf8("foo")) == "Zm9v"
+  assert to_base64(utf8("foob")) == "Zm9vYg=="
+  assert to_base64(utf8("fooba")) == "Zm9vYmE="
+  assert to_base64(utf8("foobar")) == "Zm9vYmFy"
+  assert from_base64("Zg==") == Some(utf8("f"))
+  assert from_base64("Zm8=") == Some(utf8("fo"))
+  assert from_base64("Zm9v") == Some(utf8("foo"))
+  assert from_base64("Zm9vYg==") == Some(utf8("foob"))
+  assert from_base64("Zm9vYmE=") == Some(utf8("fooba"))
+  assert from_base64("Zm9vYmFy") == Some(utf8("foobar"))
+  # the url-safe encoder writes the same characters and omits the padding
+  assert to_base64_url(utf8("")) == ""
+  assert to_base64_url(utf8("f")) == "Zg"
+  assert to_base64_url(utf8("fo")) == "Zm8"
+  assert to_base64_url(utf8("foo")) == "Zm9v"
+  assert to_base64_url(utf8("foobar")) == "Zm9vYmFy"
+  # the two alphabets differ in exactly the last two symbols, which 0xFB 0xFF
+  # is chosen to reach: it encodes to values 62 and 63
+  let high = freeze(put(put(buf(), 0xFB), 0xFF))
+  assert to_base64(high) == "+/8="
+  assert to_base64_url(high) == "-_8"
+  assert from_base64("+/8=") == Some(high)
+  assert from_base64_url("-_8") == Some(high)
+  assert from_base64_url("-_8=") == Some(high)
+  # which alphabet a string is in is the caller's claim, so neither decoder
+  # guesses -- a mismatch is None rather than different bytes
+  assert from_base64("-_8=") == None
+  assert from_base64_url("+/8=") == None
+}
+
+test "from_base64 refuses everything that is not one spelling of some bytes" {
+  # padding is optional on the way in, because the url-safe encoder omits it
+  assert from_base64("AQ==") == from_base64("AQ")
+  assert from_base64("Zm9vYg") == Some(utf8("foob"))
+  assert from_base64("") == Some(utf8(""))
+  # ... but the amount of it is not free: a group of two takes two `=`
+  assert from_base64("AQ=") == None
+  assert from_base64("AQ===") == None
+  assert from_base64("Zm9vYg=") == None
+  assert from_base64("Zm9vYg===") == None
+  assert from_base64("=") == None
+  assert from_base64("====") == None
+  assert from_base64("AAAA=") == None
+  # a leftover group of one character encodes no byte at all
+  assert from_base64("A") == None
+  assert from_base64("ZZZZA") == None
+  # nothing may follow the padding
+  assert from_base64("A=B") == None
+  assert from_base64("AQ==A") == None
+  # This is the clause that makes decoding injective. `AB` and `AQ` both have
+  # two characters and would both be one byte, but only one of them has zero
+  # in the bits the byte does not reach -- without the check they would decode
+  # to the same 0x01 and no encoder could ever produce `AB`.
+  assert from_base64("AQ") == Some(freeze(put(buf(), 0x01)))
+  assert from_base64("AA") == Some(freeze(put(buf(), 0x00)))
+  assert from_base64("AB") == None
+  assert from_base64("AC==") == None
+  assert from_base64("AAB") == None
+  assert from_base64("AAA") == Some(freeze(put(put(buf(), 0x00), 0x00)))
+  # whitespace is not ignored the way some decoders ignore it
+  assert from_base64("Zm 9v") == None
+  assert from_base64("Zm9v\n") == None
+  assert from_base64(" Zm9v") == None
+  # and neither is anything else outside the alphabet
+  assert from_base64("Zm9*") == None
+  assert from_base64("Zm9v.") == None
+}
+
+test "decode_latin1 is one code point per byte; decode_utf8 substitutes" {
+  let high = freeze(put(put(buf(), 0x80), 0xFF))
+  # Latin-1 cannot fail: every byte names a code point, including the 0x80..0xFF
+  # half that is not valid UTF-8
+  assert decode_latin1(high) == "\u{0080}\u{00FF}"
+  assert decode_latin1(utf8("")) == ""
+  assert decode_latin1(utf8("abc")) == "abc"
+  # so the two decoders disagree on exactly those bytes, which is the point of
+  # having both
+  assert decode_utf8(high) == "\u{FFFD}\u{FFFD}"
+  assert decode_utf8(utf8("")) == ""
+  assert decode_utf8(utf8("a中😀")) == "a中😀"
+  assert utf8(decode_utf8(utf8("a中😀"))) == utf8("a中😀")
+  # a byte the Latin-1 round trip does not lose
+  assert utf8(decode_latin1(high)) == freeze(put_bytes(put_bytes(buf(),
+    utf8("\u{0080}")), utf8("\u{00FF}")))
+}
+
+test "for over Bytes yields each byte once, as 0..255" {
+  var seen: List[Int] = []
+  var n = 0
+  for x in utf8("AB") {
+    seen = seen ++ [x]
+    n = n + 1
+  }
+  assert n == 2
+  assert seen == [0x41, 0x42]
+  # the currency is `at`'s, so the high half arrives unsigned rather than as
+  # the negative byte a host `byte[]` would hand over
+  var high: List[Int] = []
+  for x in freeze(put(put(buf(), 0x80), 0xFF)) {
+    high = high ++ [x]
+  }
+  assert high == [128, 255]
+  var empty = 0
+  for _x in utf8("") { empty = empty + 1 }
+  assert empty == 0
+}
