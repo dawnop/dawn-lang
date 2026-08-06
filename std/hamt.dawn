@@ -416,3 +416,231 @@ pub fn sfrom[T: Eq + Hash](xs: List[T]) -> Hamt[T, Bool] = {
   }
   s
 }
+
+# scripts/hamt-contract is a differential against the builtin Map: random
+# assoc/dissoc traffic, compared step by step. It is the right shape for
+# "these two agree" and the wrong one for everything below, which is why none
+# of it is repeated here. What it never calls at all: `index`, `from`, `sadd`,
+# `sfrom` -- the whole set surface -- and it never looks at a `Node`.
+#
+# These blocks look at the trie. `Node` and `Hamt` are ordinary types, so the
+# shape after an operation is observable, and the shapes are where the
+# interesting clauses live: which node a collision produces, which removals
+# collapse a branch and which do not.
+#
+# Int keys are the lever. `hash32` is `hash(k) & 0xFFFFFFFF` and `hash(Int)` is
+# `lo32(v) XOR hi32(v)`, so for `0 <= k < 2^31` the hash *is* the key and the
+# trie shape is a function of the literal. It also makes collisions cheap to
+# write: `k` and `-(k+1)` always collide, because `-(k+1)` is `~k`, whose low
+# half is `0xFFFFFFFF - k` and whose high half is `0xFFFFFFFF`. The contract
+# script's collision family is the "Aa"/"BB" String one; these are the Int
+# ones, and unlike the String family they come in every arity.
+
+test "empty is the trie's zero, and every reader agrees about it" {
+  let e: Hamt[Int, String] = empty()
+  assert count(e) == 0
+  assert get(e, 0) == None
+  assert not has(e, 0)
+  assert keys(e) == []
+  assert values(e) == []
+  assert entries(e) == []
+  match e.root {
+    NEmpty -> ()
+    _ -> { assert false }
+  }
+  assert e.nseq == 0
+  # removing from nothing is not an error, and does not move the counter
+  let d = dissoc(e, 7)
+  assert count(d) == 0
+  assert d.nseq == 0
+  match d.root {
+    NEmpty -> ()
+    _ -> { assert false }
+  }
+  let none_at_all: List[(Int, String)] = []
+  assert count(from(none_at_all)) == 0
+  let no_elems: List[Int] = []
+  assert count(sfrom(no_elems)) == 0
+}
+
+test "index panics with the key it was given; get is the question form" {
+  let m: Hamt[Int, String] = from([(1, "one"), (2, "two")])
+  assert index(m, 1) == "one"
+  assert index(m, 2) == "two"
+  assert get(m, 1) == Some("one")
+  assert get(m, 99) == None
+  assert has(m, 1)
+  assert not has(m, 99)
+  # spec 4.8: `index` is criterion 1 and `get` is criterion 2, over the same
+  # question. The message renders the key with `show`, which is why `index`
+  # is the one function here that asks for it.
+  match catch_panic(() => index(m, 99)) {
+    Ok(_) -> { assert false }
+    Err(er) -> { assert er.message == "key not found: 99" }
+  }
+  match catch_panic(() => index(m, 0 - 1)) {
+    Ok(_) -> { assert false }
+    Err(er) -> { assert er.message == "key not found: -1" }
+  }
+  # a String key is shown quoted, because that is what `show` does to one
+  let s: Hamt[String, Int] = from([("a", 1)])
+  assert index(s, "a") == 1
+  match catch_panic(() => index(s, "zz")) {
+    Ok(_) -> { assert false }
+    Err(er) -> { assert er.message == "key not found: \"zz\"" }
+  }
+  let e: Hamt[Int, String] = empty()
+  match catch_panic(() => index(e, 0)) {
+    Ok(_) -> { assert false }
+    Err(er) -> { assert er.message == "key not found: 0" }
+  }
+}
+
+test "keys that share a hash land in one collision node, and it shrinks back" {
+  # 0 and -1 have the same hash32, so a branch cannot separate them
+  let two: Hamt[Int, String] = from([(0, "a"), (-1, "b")])
+  assert count(two) == 2
+  assert get(two, 0) == Some("a")
+  assert get(two, -1) == Some("b")
+  assert keys(two) == [0, -1]
+  match two.root {
+    NColl(_h, kids) -> { assert array_len(kids) == 2 }
+    _ -> { assert false }
+  }
+  # a wider family: three keys, one hash. The String family the contract
+  # script uses only comes in powers of two, so an odd arity is new here.
+  let three: Hamt[Int, String] = from([(0, "a"), (-1, "b"), (4294967297, "c")])
+  assert count(three) == 3
+  assert get(three, 0) == Some("a")
+  assert get(three, -1) == Some("b")
+  assert get(three, 4294967297) == Some("c")
+  match three.root {
+    NColl(_h, kids) -> { assert array_len(kids) == 3 }
+    _ -> { assert false }
+  }
+  # rebinding inside a collision node neither widens it nor moves the key
+  let rebound = assoc(three, -1, "B")
+  assert count(rebound) == 3
+  assert get(rebound, -1) == Some("B")
+  assert keys(rebound) == [0, -1, 4294967297]
+  match rebound.root {
+    NColl(_h, kids) -> { assert array_len(kids) == 3 }
+    _ -> { assert false }
+  }
+  # removing narrows it, and the last removal collapses it to a plain leaf
+  let narrowed = dissoc(three, 0)
+  assert count(narrowed) == 2
+  assert get(narrowed, 0) == None
+  match narrowed.root {
+    NColl(_h, kids) -> { assert array_len(kids) == 2 }
+    _ -> { assert false }
+  }
+  let collapsed = dissoc(narrowed, 4294967297)
+  assert count(collapsed) == 1
+  match collapsed.root {
+    NLeaf(_h, k, v, _s) -> {
+      assert k == -1
+      assert v == "b"
+    }
+    _ -> { assert false }
+  }
+  # and the one after that empties the trie
+  match dissoc(collapsed, -1).root {
+    NEmpty -> ()
+    _ -> { assert false }
+  }
+}
+
+test "a rebound key keeps its position; one that left and came back does not" {
+  let m: Hamt[Int, String] = from([(0, "a"), (1, "b"), (2, "c")])
+  assert keys(m) == [0, 1, 2]
+  assert entries(m) == [(0, "a"), (1, "b"), (2, "c")]
+  assert values(m) == ["a", "b", "c"]
+  # spec 2.2: rebinding moves the value, not the key. The counter does not
+  # move either, which is the mechanism.
+  let rebound = assoc(m, 0, "z")
+  assert keys(rebound) == [0, 1, 2]
+  assert get(rebound, 0) == Some("z")
+  assert count(rebound) == 3
+  assert rebound.nseq == m.nseq
+  # a genuinely new key goes on the end and takes the next position
+  let grown = assoc(m, 9, "d")
+  assert keys(grown) == [0, 1, 2, 9]
+  assert grown.nseq == m.nseq + 1
+  # `dissoc` keeps the counter where it is, so a key that leaves and returns
+  # is a new key and lands at the end
+  let gone = dissoc(m, 0)
+  assert keys(gone) == [1, 2]
+  assert gone.nseq == m.nseq
+  assert keys(assoc(gone, 0, "z")) == [1, 2, 0]
+  # removing something absent changes nothing at all
+  let same = dissoc(m, 99)
+  assert count(same) == 3
+  assert keys(same) == [0, 1, 2]
+  assert same.nseq == m.nseq
+  # `from` takes the last value and the first position
+  assert entries(from([(1, "a"), (2, "b"), (1, "c")])) == [(1, "c"), (2, "b")]
+  # the set surface says the same thing about elements
+  assert keys(sfrom([3, 1, 3, 2])) == [3, 1, 2]
+  assert count(sfrom([3, 1, 3, 2])) == 3
+  let s = sadd(sadd(sfrom([3, 1]), 2), 3)
+  assert keys(s) == [3, 1, 2]
+  assert count(s) == 3
+  assert has(s, 3)
+  assert not has(s, 9)
+}
+
+test "the trie separates by five bits, and dissoc collapses only a sibling" {
+  # 0 and 1 differ in the lowest five bits, so one branch separates them
+  let flat: Hamt[Int, String] = from([(0, "a"), (1, "b")])
+  match flat.root {
+    NBranch(bm, kids) -> {
+      assert bm == 3
+      assert array_len(kids) == 2
+    }
+    _ -> { assert false }
+  }
+  # removing one of two leaf children collapses the branch to the survivor
+  match dissoc(flat, 1).root {
+    NLeaf(_h, k, _v, _s) -> { assert k == 0 }
+    _ -> { assert false }
+  }
+  # 0 and 32 agree in the low five and differ in the next, so the trie needs
+  # a second level
+  let deep: Hamt[Int, String] = from([(0, "a"), (32, "b")])
+  assert get(deep, 0) == Some("a")
+  assert get(deep, 32) == Some("b")
+  match deep.root {
+    NBranch(bm, kids) -> {
+      assert bm == 1
+      assert array_len(kids) == 1
+    }
+    _ -> { assert false }
+  }
+  # Recorded, not fixed. Collapsing is only checked where a *sibling* was
+  # removed; a child that collapsed on its own leaves its parent a
+  # one-child branch. So this answers a branch holding one leaf, where the
+  # two-key case above answers the leaf itself -- the same map, two shapes.
+  match dissoc(deep, 32).root {
+    NBranch(bm, kids) -> {
+      assert bm == 1
+      assert array_len(kids) == 1
+    }
+    _ -> { assert false }
+  }
+  assert count(dissoc(deep, 32)) == 1
+  assert get(dissoc(deep, 32), 0) == Some("a")
+  # the deepest the trie ever goes: 0 and 2^30 agree in the low thirty bits,
+  # which is the last level `idx_at` can distinguish
+  let deepest: Hamt[Int, String] = from([(0, "a"), (1073741824, "b")])
+  assert count(deepest) == 2
+  assert get(deepest, 0) == Some("a")
+  assert get(deepest, 1073741824) == Some("b")
+  # a key whose hash has the sign bit set: `hash` is a 32-bit signed value, so
+  # this one is negative until `hash32` masks it back. Nothing else covers it.
+  let signed: Hamt[Int, String] = from([(2147483648, "a"), (0, "b")])
+  assert count(signed) == 2
+  assert get(signed, 2147483648) == Some("a")
+  assert get(signed, 0) == Some("b")
+  assert keys(signed) == [2147483648, 0]
+}

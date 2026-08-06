@@ -284,3 +284,307 @@ fn msort[T](a: Array[T], cmp: fn(T, T) -> Int !e) -> Array[T] !e = {
 ## Stable ascending sort by `cmp`.
 pub fn sort_by[T](v: Vec[T], cmp: fn(T, T) -> Int !e) -> Vec[T] !e =
   from_array(msort(to_array(v), cmp))
+
+# scripts/pvec-contract drives `push`/`get`/`nth` at twelve sizes and compares
+# against the builtin List. What it never touches: `range` (nothing in the tree
+# calls it), `index` by name, both panic message strings, `slice` outside the
+# range its caller promised, and the sizes where the trie gains a level -- its
+# size list steps from 1025 straight to 32768, and the growth point is 1057.
+#
+# `Vec` and `VNode` are ordinary types, so the shape is observable, and the
+# shape is where the tail/trie split lives. There is no `Eq[Vec[T]]` -- an
+# `Array` is held by identity, so `==` on two vectors does not compile -- which
+# is why everything below compares element by element.
+
+test "empty, and the tail that holds everything until the trie starts" {
+  let e: Vec[Int] = empty()
+  assert count(e) == 0
+  assert get(e, 0) == None
+  assert get(e, 0 - 1) == None
+  # not a leaf and not nothing: an empty branch, at the shallowest shift
+  match e.root {
+    VBranch(kids) -> { assert array_len(kids) == 0 }
+    VLeaf(_items) -> { assert false }
+  }
+  assert e.shift == 5
+  assert array_len(e.tail) == 0
+
+  # up to and including 32 elements the trie is still empty -- the tail holds
+  # the lot, and the first spill is at 33
+  var v: Vec[Int] = empty()
+  var i = 0
+  while i < 32 {
+    v = push(v, i)
+    i = i + 1
+  }
+  let at32 = v
+  assert count(at32) == 32
+  assert array_len(at32.tail) == 32
+  match at32.root {
+    VBranch(kids) -> { assert array_len(kids) == 0 }
+    VLeaf(_items) -> { assert false }
+  }
+  let at33 = push(at32, 32)
+  assert count(at33) == 33
+  assert array_len(at33.tail) == 1
+  match at33.root {
+    VBranch(kids) -> { assert array_len(kids) == 1 }
+    VLeaf(_items) -> { assert false }
+  }
+  # and every element is still where it was put, on both sides of the split
+  assert nth(at33, 0) == 0
+  assert nth(at33, 31) == 31
+  assert nth(at33, 32) == 32
+  # persistent: pushing did not disturb the vector that was pushed onto
+  assert count(at32) == 32
+  assert get(at32, 32) == None
+}
+
+test "index and nth are one function, and it names the bounds it refused" {
+  var v: Vec[Int] = empty()
+  var i = 0
+  while i < 100 {
+    v = push(v, i * 10)
+    i = i + 1
+  }
+  let vv = v
+  assert count(vv) == 100
+  assert index(vv, 0) == 0
+  assert index(vv, 99) == 990
+  # `nth` is `index` under another name, deliberately: there is no unchecked
+  # public reader, so the two cannot disagree
+  assert nth(vv, 0) == index(vv, 0)
+  assert nth(vv, 63) == index(vv, 63)
+  assert nth(vv, 99) == index(vv, 99)
+  # the tail/trie split is at 96 here, and it is invisible from outside
+  assert nth(vv, 95) == 950
+  assert nth(vv, 96) == 960
+  # spec 4.8 criterion 1. The message is asserted, not just the panic: it is
+  # the only place either string is checked, and it carries both numbers.
+  match catch_panic(() => nth(vv, 100)) {
+    Ok(_) -> { assert false }
+    Err(er) -> { assert er.message == "index 100 out of bounds for length 100" }
+  }
+  match catch_panic(() => nth(vv, 0 - 1)) {
+    Ok(_) -> { assert false }
+    Err(er) -> { assert er.message == "index -1 out of bounds for length 100" }
+  }
+  match catch_panic(() => index(vv, 1000)) {
+    Ok(_) -> { assert false }
+    Err(er) -> { assert er.message == "index 1000 out of bounds for length 100" }
+  }
+  # The RD-01 regression, from the other side: 130 masks to 2 inside the tail,
+  # so an unchecked reader would answer element 98 rather than refuse.
+  match catch_panic(() => nth(vv, 130)) {
+    Ok(_) -> { assert false }
+    Err(er) -> { assert er.message == "index 130 out of bounds for length 100" }
+  }
+  let e: Vec[Int] = empty()
+  match catch_panic(() => nth(e, 0)) {
+    Ok(_) -> { assert false }
+    Err(er) -> { assert er.message == "index 0 out of bounds for length 0" }
+  }
+  # `get` is the same question, answered rather than asserted
+  assert get(vv, 0) == Some(0)
+  assert get(vv, 99) == Some(990)
+  assert get(vv, 100) == None
+  assert get(vv, 130) == None
+  assert get(vv, 0 - 1) == None
+}
+
+test "the trie gains a level at 1057, and not at 1056" {
+  # The size list in scripts/pvec-contract steps from 1025 to 32768, so the
+  # boundary is between two of its entries and nothing sits on it. `push`
+  # deepens when `(cnt >>> 5) > (1 << shift)`, which first holds at 1056
+  # elements already stored -- so 1056 is still one level and 1057 is two.
+  var v: Vec[Int] = empty()
+  var i = 0
+  while i < 1058 {
+    v = push(v, i)
+    i = i + 1
+  }
+  let big = v
+  assert count(big) == 1058
+  assert slice(big, 0, 1055).shift == 5
+  assert slice(big, 0, 1056).shift == 5
+  assert slice(big, 0, 1057).shift == 10
+  assert slice(big, 0, 1058).shift == 10
+  assert big.shift == 10
+  # a full root at one level: 1025 elements is 32 leaves plus one in the tail
+  assert slice(big, 0, 1025).shift == 5
+  match slice(big, 0, 1025).root {
+    VBranch(kids) -> { assert array_len(kids) == 32 }
+    VLeaf(_items) -> { assert false }
+  }
+  # and reading still agrees with what was pushed, across the new level
+  assert nth(big, 0) == 0
+  assert nth(big, 1023) == 1023
+  assert nth(big, 1024) == 1024
+  assert nth(big, 1056) == 1056
+  assert nth(big, 1057) == 1057
+  assert get(big, 1058) == None
+}
+
+test "range is half-open, and empty whenever it is not" {
+  # Nothing in the tree calls this function, so this block is all of its
+  # coverage.
+  let r = range(0, 5)
+  assert count(r) == 5
+  assert nth(r, 0) == 0
+  assert nth(r, 4) == 4
+  assert get(r, 5) == None
+  # negative bounds are ordinary
+  let neg = range(0 - 3, 3)
+  assert count(neg) == 6
+  assert nth(neg, 0) == -3
+  assert nth(neg, 3) == 0
+  assert nth(neg, 5) == 2
+  # backwards and degenerate ranges are empty rather than errors
+  assert count(range(5, 3)) == 0
+  assert count(range(0, 0)) == 0
+  assert count(range(3, 3)) == 0
+  assert count(range(0 - 1, 0 - 1)) == 0
+  assert count(range(0, 1)) == 1
+  assert nth(range(0, 1), 0) == 0
+  # and it crosses the tail boundary like anything else
+  assert count(range(0, 33)) == 33
+  assert nth(range(0, 33), 32) == 32
+}
+
+test "slice and concat at their edges, and slice's unchecked reader" {
+  var v: Vec[Int] = empty()
+  var i = 0
+  while i < 100 {
+    v = push(v, i)
+    i = i + 1
+  }
+  let vv = v
+  let e: Vec[Int] = empty()
+  assert count(slice(vv, 0, 100)) == 100
+  assert nth(slice(vv, 0, 100), 99) == 99
+  assert count(slice(vv, 10, 20)) == 10
+  assert nth(slice(vv, 10, 20), 0) == 10
+  assert nth(slice(vv, 10, 20), 9) == 19
+  # straddling the tail/trie split at 96
+  assert count(slice(vv, 90, 100)) == 10
+  assert nth(slice(vv, 90, 100), 0) == 90
+  assert nth(slice(vv, 90, 100), 9) == 99
+  # backwards and degenerate slices are empty
+  assert count(slice(vv, 5, 3)) == 0
+  assert count(slice(vv, 0, 0)) == 0
+  assert count(slice(vv, 100, 100)) == 0
+  assert count(slice(e, 0, 0)) == 0
+
+  # Recorded, not fixed. `slice`'s doc says "the caller has already clamped the
+  # ends", and nothing enforces it: it reads through the private unchecked
+  # reader. Past the end the index is masked back into the tail, so this
+  # answers three real elements instead of refusing -- exactly the shape audit
+  # RD-01 took out of `nth`, still live behind this function. The assertion
+  # exists so that a fix has to come here and change it.
+  let past = slice(vv, 128, 131)
+  assert count(past) == 3
+  assert nth(past, 0) == 96
+  assert nth(past, 1) == 97
+  assert nth(past, 2) == 98
+  # and one step further out it is not a wrong answer but the array layer's
+  # panic, which is a third behaviour for one function.
+  #
+  # Only that it panics, deliberately. The two backends word this one
+  # differently -- the JVM builds "array index 4 out of bounds for length 4"
+  # and the C runtime says "Array index out of bounds" with no numbers in it
+  # (runtime/c/dawn_rt.c, dawn_array_get) -- so the text is not a promise the
+  # language keeps yet. The messages asserted above are pvec's own, written in
+  # Dawn, and those do agree; this one comes from below the language.
+  match catch_panic(() => slice(vv, 0, 101)) {
+    Ok(_) -> { assert false }
+    Err(_) -> ()
+  }
+
+  # `concat(a, empty())` is `a` itself; the other way round rebuilds
+  assert count(concat(vv, e)) == 100
+  assert count(concat(e, vv)) == 100
+  assert nth(concat(e, vv), 0) == 0
+  assert nth(concat(e, vv), 99) == 99
+  let pair = concat(slice(vv, 0, 30), slice(vv, 30, 40))
+  assert count(pair) == 40
+  assert nth(pair, 0) == 0
+  assert nth(pair, 29) == 29
+  assert nth(pair, 30) == 30
+  assert nth(pair, 39) == 39
+  # crossing the tail boundary in the middle of a concat
+  let crossed = concat(slice(vv, 0, 30), slice(vv, 30, 70))
+  assert count(crossed) == 70
+  assert nth(crossed, 32) == 32
+  assert nth(crossed, 69) == 69
+  assert count(concat(e, e)) == 0
+}
+
+test "sort_by is stable, and the degenerate inputs are not special cases" {
+  let e: Vec[Int] = empty()
+  assert count(sort_by(e, (a, b) => a - b)) == 0
+  let one = push(e, 42)
+  assert count(sort_by(one, (a, b) => a - b)) == 1
+  assert nth(sort_by(one, (a, b) => a - b), 0) == 42
+  # two elements, both orders
+  let asc = push(push(e, 1), 2)
+  let desc = push(push(e, 2), 1)
+  assert nth(sort_by(asc, (a, b) => a - b), 0) == 1
+  assert nth(sort_by(asc, (a, b) => a - b), 1) == 2
+  assert nth(sort_by(desc, (a, b) => a - b), 0) == 1
+  assert nth(sort_by(desc, (a, b) => a - b), 1) == 2
+  # already sorted, reversed, and all equal
+  let rev = range(0, 40)
+  let backwards = sort_by(rev, (a, b) => b - a)
+  assert nth(backwards, 0) == 39
+  assert nth(backwards, 39) == 0
+  let forwards = sort_by(backwards, (a, b) => a - b)
+  assert nth(forwards, 0) == 0
+  assert nth(forwards, 39) == 39
+  assert count(forwards) == 40
+  var flat: Vec[Int] = empty()
+  var i = 0
+  while i < 40 {
+    flat = push(flat, 7)
+    i = i + 1
+  }
+  let same = sort_by(flat, (a, b) => a - b)
+  assert count(same) == 40
+  assert nth(same, 0) == 7
+  assert nth(same, 39) == 7
+
+  # Stability: the comparator sees only the first component, so equal keys must
+  # come out in the order they went in. Crossing the 32-element tail boundary,
+  # because a merge sort's blocks and the vector's blocks are different things.
+  var pairs: Vec[(Int, Int)] = empty()
+  var j = 0
+  while j < 40 {
+    pairs = push(pairs, (j % 3, j))
+    j = j + 1
+  }
+  let sorted = sort_by(pairs, (a, b) => {
+    let (ka, _va) = a
+    let (kb, _vb) = b
+    ka - kb
+  })
+  assert count(sorted) == 40
+  var prev_key = -1
+  var prev_val = -1
+  var k = 0
+  while k < 40 {
+    let (key, val) = nth(sorted, k)
+    assert key >= prev_key
+    if key == prev_key {
+      assert val > prev_val
+    }
+    prev_key = key
+    prev_val = val
+    k = k + 1
+  }
+  # the first group is every j with j % 3 == 0, in ascending j
+  let (k0, v0) = nth(sorted, 0)
+  assert k0 == 0
+  assert v0 == 0
+  let (k1, v1) = nth(sorted, 1)
+  assert k1 == 0
+  assert v1 == 3
+}
