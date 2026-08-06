@@ -3,7 +3,7 @@
 > 状态：**current** —— 全目录的分层索引与状态登记处。**每篇文档的权威状态在它自己的
 > 文件头**；这张索引与文件头冲突时以文件头为准，并请顺手改这里。
 
-`docs/` 下现有 58 篇文档 <!-- doc-check: doc-count -->，按时间叠加，混着**规范、调研、
+`docs/` 下现有 59 篇文档 <!-- doc-check: doc-count -->，按时间叠加，混着**规范、调研、
 设计方案、落地日志、复盘和运维说明**。读者无从判断哪几段还成立——`design.md` 说实现语言
 是 Kotlin，`bootstrap.md` 说 LSP 还在 Kotlin，两者都是当时的事实、现在都不是。
 这份索引把它们分层，并给每篇标状态。**篇数与「每篇都在索引里」这两件事都由
@@ -44,6 +44,7 @@
 | [jvm-base-plan.md](jvm-base-plan.md) | current | **A 线**：收缩 JVM 后端的可信底座——V49（classfile major 61 → 49）可行性审计的结论与三个代价数、九条被推翻的预设、K-A 刀表。**已 done**：K-A0/K-A0.5/K-A1/K-A3/K-A5/K-A4/K-A6 与 K-A7 期 1/2/3 全部落地，K-A2 取消，`dawn/tool` 已退出 jar 与可信底座（`b66f1d7`）。 |
 | [perceus-design.md](perceus-design.md) | current | native 的内存管理（精确 RC + 复用分析）。五刀已全部落地，关账在其 §8；仍是该子系统的权威说明。 |
 | [std-audit.md](std-audit.md) | current | std 的交付方式、优雅性判据与欠账台账（S5）。骨架五条已做掉大半，仍在册的欠账逐条写在它的状态行里。 |
+| [stdlib-impl-notes.md](stdlib-impl-notes.md) | current | std 里几个函数**为什么长成这样**：被否掉的写法、实测数字、逼出今天形状的两后端分歧。std 的 `##` 注释只留契约，这些话从那里搬来。 |
 
 ## 审查待办的设计方案（`docs/audit/`）
 

@@ -69,8 +69,7 @@ pub fn read_file(path: String) -> Result[String, ForeignError] !io =
   catch_fault(() => io_read_file(path))
 
 ## Write a string to a file, creating missing parent directories.
-## `Ok` carries nothing: the only count worth returning would be bytes on disk,
-## and what this used to return was UTF-16 units. Nobody read it.
+## `Ok` carries nothing: the only count worth returning would be bytes on disk.
 pub fn write_file(path: String, content: String) -> Result[Unit, ForeignError] !io =
   catch_fault(() => io_write_file(path, content))
 
@@ -146,17 +145,13 @@ pub fn stdin_ready(timeout_ms: Int) -> Bool !io = io_stdin_ready(timeout_ms)
 ##
 ## The sort happens here, not in the backends: the `io_list_names` intrinsic
 ## answers whatever order the OS gave, and one `list.sort` over the language's
-## own `Ord[String]` is what makes every backend agree. Sorting below the
-## barrier would have meant one sort per backend — the JVM's used to be
-## `Arrays.sort`, which is UTF-16 unit order and puts astral names before
-## U+E000..U+FFFF ones.
+## own `Ord[String]` is what makes every backend agree.
 ##
 ## Its `kind` is `"io.not_a_directory"`, one of the two failure kinds std mints
 ## itself (`run`'s `io.no_program` is the other): every other one in this module
 ## is whatever the backend called it, and this failure never reaches a backend,
-## because the check happens first. It is
-## spelled as a name rather than a sentence for the same reason every other
-## `kind` is — a caller may match on it.
+## because the check happens first. It is spelled as a name rather than a
+## sentence for the same reason every other `kind` is — a caller may match on it.
 pub fn list_dir(path: String) -> Result[List[String], ForeignError] !io =
   if is_dir(path) {
     match catch_fault(() => io_list_names(path)) {
@@ -181,13 +176,7 @@ pub fn list_dir(path: String) -> Result[List[String], ForeignError] !io =
 ##
 ## An empty `argv` is `"io.no_program"`, the second failure kind std mints
 ## itself, and for `list_dir`'s reason: the check happens first, so the failure
-## never reaches a backend and every backend words it the same. It had to be
-## minted because the two did not agree — the JVM handed `ProcessBuilder` an
-## empty list and leaked `java.lang.ArrayIndexOutOfBoundsException` with
-## "Index 0 out of bounds for length 0" as the `kind` a caller would match on,
-## while the C runtime already checked and said `io_run: argv is empty`. There
-## is no `argv[0]` to name, which is a question about the argument and not
-## about the host.
+## never reaches a backend and every backend words it the same.
 pub fn run(argv: List[String], out_path: String, err_path: String) -> Result[Int, ForeignError] !io =
   if len(argv) == 0 {
     Err(ForeignError {

@@ -111,12 +111,10 @@ pub fn back(s: String, c: Cursor, n: Int) -> Cursor =
 ## between the halves of a surrogate pair, and walking `i` characters cannot.
 ##
 ## Named `seek` and not `at` because those two words are the language's two
-## out-of-range policies, and one name cannot hold both: `at` is criterion 1
+## out-of-range policies and one name cannot hold both: `at` is criterion 1
 ## (`str.at`, `bytes.at`, `xs[i]` -- the caller asserts the position exists and
-## a miss panics), this is criterion 3 (it clamps and never panics). It was
-## `cursor.at` until v0.54.0, which made the difference between `str.at(s, 9)`
-## on a 3-character string -- a panic -- and `cursor.at(s, 9)` -- the end --
-## a matter of which module the reader happened to be in.
+## a miss panics), this is criterion 3. Spelled `cursor.at` until v0.54.0;
+## rationale in `docs/stdlib-naming.md`.
 ##
 ## O(i). Use it once, at the point where an `Int` index arrives from outside;
 ## a loop that calls it per character is the O(n^2) it exists to remove.
@@ -138,12 +136,8 @@ fn offset_go(s: String, p: Cursor, c: Cursor, n: Int) -> Int = {
   if x >= y || done(s, p) { n } else { offset_go(s, next(s, p), c, n + 1) }
 }
 
-## Positions in one string are ordered, and that order is the Int's.
-##
-## It used to come from a row in the compiler's scalar tables, and only half
-## of one: `a < b` was allowed while `list.sort` reported Cursor unordered,
-## because two different tables answered the two questions. One impl answers
-## both.
+## Positions in one string are ordered, and that order is the Int's. One impl
+## answers every question about that order -- `<` and `list.sort` alike.
 impl Ord[Cursor] {
   fn cmp(a: Cursor, b: Cursor) -> Int = {
     let x: Int = a

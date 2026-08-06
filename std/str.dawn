@@ -164,20 +164,8 @@ pub fn from_char(c: Char) -> String = from_code_points([c])
 
 ## `s` repeated `n` times; n <= 0 yields the empty string.
 ##
-## Doubling rather than the plain accumulation loop the rest of this module
-## uses, because both of the obvious shapes are defects at large `n`. The
-## recursion this replaced was `s ++ repeat(s, n - 1)`: depth `n`, which
-## overflows the stack somewhere past n = 4000 under a default `-Xss` -- the
-## repo never saw it because every route that runs a Dawn program passes
-## `-Xss512m`, and `java -jar` on a built jar does not. Accumulating
-## `out = out ++ s` in a `while` fixes the stack and costs a quadratic: `++`
-## is `String.concat`, so the JVM copies the answer once per iteration
-## (measured, n = 100000: 0.6s, and 4x that at n = 200000; the C backend's
-## refcount lets it append in place, so it is linear there and the JVM would
-## have carried this alone).
-##
-## Halving `n` copies each partial answer once, which is O(len(s) * n) total on
-## both backends and needs no stack at all.
+## Doubling: O(len(s) * n) on both backends, and stack-safe at any `n`. Why the
+## two obvious shapes are not, in `docs/stdlib-impl-notes.md`.
 pub fn repeat(s: String, n: Int) -> String = {
   var out = ""
   var chunk = s
@@ -199,10 +187,7 @@ pub fn repeat(s: String, n: Int) -> String = {
 ## yields the empty string, so this never panics — a range parameter selects
 ## a stretch, it does not assert its endpoints exist (spec §4.8).
 ##
-## Spelled `substring` until v0.54.0, and renamed under CONTRIBUTING's "one
-## concept, one name": `list.slice` and `bytes.slice` already spell this, all
-## three clamp both ends, and the odd one out was the one that named a
-## *sub-string* rather than the operation.
+## Spelled `substring` until v0.54.0; rationale in `docs/stdlib-naming.md`.
 pub fn slice(s: String, from: Int, to: Int) -> String = {
   let n = len(s)
   let f = clamp_cp(from, n)
