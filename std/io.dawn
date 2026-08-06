@@ -179,3 +179,276 @@ pub fn list_dir(path: String) -> Result[List[String], ForeignError] !io =
 ## Files rather than pipes: see the note on the `io_run` intrinsic.
 pub fn run(argv: List[String], out_path: String, err_path: String) -> Result[Int, ForeignError] !io =
   catch_fault(() => io_run(argv, out_path, err_path))
+
+# What these blocks may and may not assert is decided by one fact: `kind` is
+# whatever the backend called the failure. On the JVM a missing file is
+# `java.nio.file.NoSuchFileException`; a second backend has no reason to spell
+# it the same, and `dawn test --stdlib` is run under both with the reports
+# compared byte for byte (scripts/native-cli-diff.sh). So a failure that
+# reaches a backend is asserted to *be* an `Err` and nothing more.
+#
+# The exception is `list_dir`'s `io.not_a_directory`, which std mints itself
+# above the barrier and is the same string on every backend -- and being
+# match-able is the whole reason it is a name rather than a sentence, so it is
+# the one `kind` worth pinning.
+#
+# `Unit` has no equality, so `Result[Unit, ForeignError]` cannot be compared
+# with `==` and the blocks below carry a local `ok` lambda instead of a
+# module-level helper -- a private `fn` here would be dead code in every build
+# that is not `dawn test --stdlib`, and would show up in std/io's own Core.
+#
+# Each block makes its own temp directory and takes it away again. Nothing here
+# reads the repository: a test that depends on the tree it is run from breaks
+# when the tree moves, and these run from wherever the runner was started.
+
+test "temp_dir makes a fresh directory, and a file round trips through it" {
+  let ok = (r: Result[Unit, ForeignError]) => match r {
+    Ok(_) -> true
+    Err(_) -> false
+  }
+  let made = (r: Result[String, ForeignError]) => match r {
+    Ok(p) -> p
+    Err(_) -> ""
+  }
+  let d = made(temp_dir("", "dawn-std-test-"))
+  assert d != ""
+  assert exists(d)
+  assert is_dir(d)
+  # fresh: a second call is a different directory, not the same one again
+  let d2 = made(temp_dir("", "dawn-std-test-"))
+  assert d2 != ""
+  assert d != d2
+  # and `parent` is honoured, so a caller can stage on one filesystem
+  let inner = made(temp_dir(d, "inner-"))
+  assert inner != ""
+  assert is_dir(inner)
+
+  let f = d ++ "/hello.txt"
+  assert not exists(f)
+  assert ok(write_file(f, "hello"))
+  assert exists(f)
+  assert not is_dir(f)
+  assert read_file(f) == Ok("hello")
+  # overwriting is not appending
+  assert ok(write_file(f, "again"))
+  assert read_file(f) == Ok("again")
+  assert ok(write_file(f, ""))
+  assert read_file(f) == Ok("")
+  # missing parents are created on the way
+  let nested = d ++ "/a/b/c.txt"
+  assert ok(write_file(nested, "deep"))
+  assert read_file(nested) == Ok("deep")
+  assert is_dir(d ++ "/a/b")
+
+  assert delete(f)
+  assert delete(nested)
+  assert delete(d ++ "/a/b")
+  assert delete(d ++ "/a")
+  assert delete(inner)
+  assert delete(d)
+  assert delete(d2)
+  assert not exists(d)
+}
+
+test "a path that is not there is an Err, and never a panic" {
+  let made = (r: Result[String, ForeignError]) => match r {
+    Ok(p) -> p
+    Err(_) -> ""
+  }
+  let d = made(temp_dir("", "dawn-std-test-"))
+  # spec 9.8.1: the outside world saying no is a value, so every one of these
+  # is a branch the caller takes. Which failure it was is the backend's word
+  # and is not asserted here -- on the JVM these are java.nio names, and a
+  # second backend has no reason to spell them the same.
+  match read_file(d ++ "/nope.txt") {
+    Ok(_) -> { assert false }
+    Err(_) -> ()
+  }
+  match read_bytes(d ++ "/nope.bin") {
+    Ok(_) -> { assert false }
+    Err(_) -> ()
+  }
+  match rename(d ++ "/nope", d ++ "/x") {
+    Ok(_) -> { assert false }
+    Err(_) -> ()
+  }
+  # a directory is not a file, in both directions
+  match read_file(d) {
+    Ok(_) -> { assert false }
+    Err(_) -> ()
+  }
+  match write_file(d, "x") {
+    Ok(_) -> { assert false }
+    Err(_) -> ()
+  }
+  # ... and the queries that answer Bool rather than Result just say no
+  assert not exists(d ++ "/nope")
+  assert not is_dir(d ++ "/nope")
+  assert not is_symlink(d ++ "/nope")
+  assert not delete(d ++ "/nope")
+  assert getenv("DAWN_STD_TEST_DEFINITELY_UNSET_VARIABLE") == None
+  # cwd is somewhere, and it is a directory
+  assert cwd() != ""
+  assert is_dir(cwd())
+  assert delete(d)
+}
+
+test "list_dir sorts by code point, and names a non-directory itself" {
+  let ok = (r: Result[Unit, ForeignError]) => match r {
+    Ok(_) -> true
+    Err(_) -> false
+  }
+  let made = (r: Result[String, ForeignError]) => match r {
+    Ok(p) -> p
+    Err(_) -> ""
+  }
+  let d = made(temp_dir("", "dawn-std-test-"))
+  let nothing: List[String] = []
+  assert list_dir(d) == Ok(nothing)
+  assert ok(write_file(d ++ "/zeta", "1"))
+  assert ok(write_file(d ++ "/Alpha", "1"))
+  assert ok(write_file(d ++ "/mid", "1"))
+  # not the order the OS handed over, and not case-insensitive: 'A' is 65
+  assert list_dir(d) == Ok(["Alpha", "mid", "zeta"])
+  assert delete(d ++ "/zeta")
+  assert delete(d ++ "/Alpha")
+  assert delete(d ++ "/mid")
+
+  # The clause the sort exists for. In code-point order U+FFFD (65533) comes
+  # before U+1F600 (128512); in UTF-16 unit order it does not, because the
+  # astral name begins with the surrogate 0xD83D (55357). A backend sorting
+  # its own way -- `Arrays.sort` is UTF-16 units -- answers these two the
+  # other way round, which is why the sort is in std and not below it.
+  assert ok(write_file(d ++ "/\u{1F600}", "1"))
+  assert ok(write_file(d ++ "/\u{FFFD}", "1"))
+  assert list_dir(d) == Ok(["\u{FFFD}", "\u{1F600}"])
+  assert delete(d ++ "/\u{1F600}")
+  assert delete(d ++ "/\u{FFFD}")
+
+  # the one kind std mints, so the one a caller may match on
+  assert ok(write_file(d ++ "/plain.txt", "1"))
+  match list_dir(d ++ "/plain.txt") {
+    Ok(_) -> { assert false }
+    Err(e) -> { assert e.kind == "io.not_a_directory" }
+  }
+  # a missing path is the same answer as a plain file: the check happens before
+  # anything is read, so the two are deliberately not told apart
+  match list_dir(d ++ "/nope") {
+    Ok(_) -> { assert false }
+    Err(e) -> { assert e.kind == "io.not_a_directory" }
+  }
+  assert delete(d ++ "/plain.txt")
+  assert delete(d)
+}
+
+test "mkdirs is idempotent on a directory; delete says what it removed" {
+  let ok = (r: Result[Unit, ForeignError]) => match r {
+    Ok(_) -> true
+    Err(_) -> false
+  }
+  let made = (r: Result[String, ForeignError]) => match r {
+    Ok(p) -> p
+    Err(_) -> ""
+  }
+  let d = made(temp_dir("", "dawn-std-test-"))
+  # every missing directory above it, in one call
+  assert ok(mkdirs(d ++ "/m1/m2"))
+  assert is_dir(d ++ "/m1")
+  assert is_dir(d ++ "/m1/m2")
+  # an existing directory is not a failure
+  assert ok(mkdirs(d ++ "/m1/m2"))
+  assert ok(mkdirs(d))
+  # an existing *file* is
+  assert ok(write_file(d ++ "/f.txt", "x"))
+  assert not ok(mkdirs(d ++ "/f.txt"))
+
+  # `delete` answers whether there was something to delete, and refuses to
+  # empty a directory on the caller's behalf
+  assert not delete(d ++ "/nope")
+  assert not delete(d ++ "/m1")
+  assert is_dir(d ++ "/m1")
+  assert delete(d ++ "/m1/m2")
+  assert delete(d ++ "/m1")
+  assert not exists(d ++ "/m1")
+  assert delete(d ++ "/f.txt")
+  assert delete(d)
+}
+
+test "rename replaces the destination; bytes survive what a String need not" {
+  let ok = (r: Result[Unit, ForeignError]) => match r {
+    Ok(_) -> true
+    Err(_) -> false
+  }
+  let made = (r: Result[String, ForeignError]) => match r {
+    Ok(p) -> p
+    Err(_) -> ""
+  }
+  let d = made(temp_dir("", "dawn-std-test-"))
+  assert ok(write_file(d ++ "/src.txt", "moved"))
+  assert ok(rename(d ++ "/src.txt", d ++ "/dst.txt"))
+  assert not exists(d ++ "/src.txt")
+  assert read_file(d ++ "/dst.txt") == Ok("moved")
+  # onto an existing destination: replaced, not refused
+  assert ok(write_file(d ++ "/src.txt", "second"))
+  assert ok(rename(d ++ "/src.txt", d ++ "/dst.txt"))
+  assert read_file(d ++ "/dst.txt") == Ok("second")
+  assert not exists(d ++ "/src.txt")
+  assert not ok(rename(d ++ "/nope", d ++ "/dst.txt"))
+
+  # the byte pair is the point: 0x00 0xFF is not UTF-8, so this round trip is
+  # one `read_file`/`write_file` could not make
+  let raw = bytes_from_array(array_push(array_push(array_new(), 0x00), 0xFF))
+  assert ok(write_bytes(d ++ "/raw.bin", raw))
+  assert read_bytes(d ++ "/raw.bin") == Ok(raw)
+  let none_at_all = bytes_from_array(array_new())
+  assert ok(write_bytes(d ++ "/empty.bin", none_at_all))
+  assert read_bytes(d ++ "/empty.bin") == Ok(none_at_all)
+  # and the two halves see the same file
+  assert ok(write_file(d ++ "/text.txt", "abc"))
+  assert read_bytes(d ++ "/text.txt") == Ok(bytes_utf8("abc"))
+
+  assert delete(d ++ "/dst.txt")
+  assert delete(d ++ "/raw.bin")
+  assert delete(d ++ "/empty.bin")
+  assert delete(d ++ "/text.txt")
+  assert delete(d)
+}
+
+test "run answers the exit status; a program that cannot start is an Err" {
+  let ok = (r: Result[Unit, ForeignError]) => match r {
+    Ok(_) -> true
+    Err(_) -> false
+  }
+  let made = (r: Result[String, ForeignError]) => match r {
+    Ok(p) -> p
+    Err(_) -> ""
+  }
+  let d = made(temp_dir("", "dawn-std-test-"))
+  # `sh` rather than a coreutil, because POSIX guarantees it is on PATH
+  assert run(["sh", "-c", "exit 0"], "", "") == Ok(0)
+  # a non-zero status is the answer, not a failure -- the distinction this
+  # signature exists to make
+  assert run(["sh", "-c", "exit 3"], "", "") == Ok(3)
+  assert run(["sh", "-c", "exit 1"], "", "") == Ok(1)
+  # not being able to start it at all is the failure
+  match run(["dawn-no-such-program-anywhere-on-this-path"], "", "") {
+    Ok(_) -> { assert false }
+    Err(_) -> ()
+  }
+  # each stream goes to the file named, truncating it
+  let out = d ++ "/out.txt"
+  assert run(["sh", "-c", "printf first"], out, "") == Ok(0)
+  assert read_file(out) == Ok("first")
+  assert run(["sh", "-c", "printf second"], out, "") == Ok(0)
+  assert read_file(out) == Ok("second")
+  # stdout and stderr are separated
+  let err = d ++ "/err.txt"
+  assert run(["sh", "-c", "printf out; printf err 1>&2"], out, err) == Ok(0)
+  assert read_file(out) == Ok("out")
+  assert read_file(err) == Ok("err")
+  assert ok(write_file(d ++ "/keep.txt", "x"))
+  assert delete(d ++ "/keep.txt")
+  assert delete(out)
+  assert delete(err)
+  assert delete(d)
+}
