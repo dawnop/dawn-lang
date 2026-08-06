@@ -1,0 +1,25 @@
+# checker.dawn: the std names that stopped being exported in v0.55.0. A
+# module-qualified call never reads `cx.moved` (that table is keyed by the flat
+# builtin spelling), so without `renamed_std_fn` the first three would answer
+# with a levenshtein guess and the last three with "add `pub` to its
+# declaration in std/fmt" -- advice to edit the standard library.
+#
+# Each result is bound with an annotation so the only diagnostic per line is
+# the rename itself: an unannotated `to_string(<error>)` adds an inference
+# cascade that says nothing about this table.
+use std/str
+use std/cursor
+use std/cursor.{Cursor}
+use std/bytes
+use std/fmt
+
+pub fn main() -> Unit !io = {
+  let a: String = str.substring("abcdef", 1, 4)
+  let b: Cursor = cursor.at("abc", 2)
+  let c: Int = bytes.get(bytes.buf(), 0)
+  let d: Option[Int] = fmt.atoi("42")
+  let e: Option[Int] = fmt.atoi_radix("ff", 16)
+  let f: Option[Float] = fmt.atod("1.5")
+  println(a ++ to_string(cursor.offset("abc", b)) ++ to_string(c))
+  println(to_string(d) ++ to_string(e) ++ to_string(f))
+}

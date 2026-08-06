@@ -27,6 +27,7 @@ use core.{VStr, VBool}
 use parser
 use lexer
 use stdsrc
+use lower.{parser_impl}
 
 ## Everything user-module analysis needs from std.
 pub type StdCtx = {
@@ -333,6 +334,33 @@ test "the loader's id counter opens past every prelude id" {
     if a.name == "IdProbe" { probe_id = i }
   }
   assert probe_id >= first_minted_id()
+}
+
+test "the numeric parsers still have somewhere to land" {
+  # `lower` rewrites `parse_int(s)` into a direct call to std/fmt.atoi. Since
+  # v0.55.0 those three are not exported, so no call site names them and no
+  # export check sees them: rename one inside std/fmt and every gate stays
+  # green until something actually parses a number at run time, which is a
+  # NoSuchMethod in a program compiled by a compiler that built fine. The
+  # coupling is one table (`lower.parser_impl`) and this is the other end.
+  let std = match load_std("std") {
+    Ok(s) -> s
+    Err(e) -> panic("std: " ++ e)
+  }
+  let own = match map.get(std.by_owner, "std/fmt") {
+    Some(o) -> o
+    None -> panic("std/fmt is not a loaded module")
+  }
+  for b in ["parse_int", "parse_int_radix", "parse_float"] {
+    let target = match parser_impl(b) {
+      Some(f) -> f
+      None -> panic("lower has no std/fmt target for the builtin `" ++ b ++ "`")
+    }
+    assert map.has(own, target)
+  }
+  # and the builtins that must NOT be routed there
+  assert parser_impl("to_string") == None
+  assert parser_impl("atoi") == None
 }
 
 test "float rendering and parsing fold through std/fmt, not the host" {

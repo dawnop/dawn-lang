@@ -533,7 +533,7 @@ fn is_digit(c: Int) -> Bool = c >= '0' && c <= '9'
 pub fn main() -> Unit !io = {
   println(to_string(is_digit('7')))
   println(to_string(str.len("héllo 🙂")))
-  println(str.substring("世界你好", 0, 2))
+  println(str.slice("世界你好", 0, 2))
   println(from_code_points([104, 105]))
 }
 ```
@@ -545,7 +545,7 @@ hi
 ```
 
 `code_points`/`from_code_points` 在字符串与码点列表间往返（含增补平面的 emoji），
-`str.len` 数码点，`str.substring` 按码点下标切片，`str.from_char` 把一个码点变成字符串。
+`str.len` 数码点，`str.slice` 按码点下标切片，`str.from_char` 把一个码点变成字符串。
 
 按码点**下标**的函数每次都要从串首数起（单次 O(n)，循环里就是 O(n²)）。扫描字符串
 用 `std/cursor`：**游标**是不透明的位置，每步恒定开销；对它做算术是编译错误，

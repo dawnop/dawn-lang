@@ -2535,16 +2535,14 @@ pub fn lower_expr(st0: LSt, e: TExpr) -> (LSt, CExpr) = {
       # validated, trimmed string to the raw backend primitive for the
       # decimal-to-binary conversion, and that call must stay an intrinsic or
       # it would loop.
-      if name == "parse_int" || name == "parse_int_radix" ||
-        (name == "parse_float" && st.owner != "std/fmt") {
-          let fname = match name {
-            "parse_int" -> "atoi"
-            "parse_int_radix" -> "atoi_radix"
-            _ -> "atod"
+      match parser_impl(name) {
+        Some(fname) ->
+          if name != "parse_float" || st.owner != "std/fmt" {
+            let (st1, vs) = lower_all(st, args)
+            return (st1, CCall(CDirect("std/fmt", fname), vs, ty))
           }
-          let (st1, vs) = lower_all(st, args)
-          return (st1, CCall(CDirect("std/fmt", fname), vs, ty))
-        }
+        None -> ()
+      }
       match hamt_fn(name) {
         Some(fname) -> return hamt_call(st, name, fname, args, wits, ty)
         None -> ()
@@ -3068,6 +3066,23 @@ fn iter_cur_binding(st: LSt, subject: Ty) -> Ty = {
 ## backend intrinsic any more: since S3 the only collection a backend
 ## implements is `Array`, and everything above it is std source
 ## (docs/collections-dejava-research.md §5.1).
+## The std/fmt function each numeric-parser builtin lowers to (audit RP-05).
+##
+## Public because it is the whole reference to those three names from outside
+## the module that owns them: since v0.55.0 they are not `pub` in std/fmt --
+## `parse_int` is the only spelling user code has -- so nothing else in the
+## repository mentions them, and a rename inside std/fmt would leave this
+## lowering emitting a call to a function that is not there. `stdlib`'s
+## "the numeric parsers still have somewhere to land" test reads this table
+## and looks the names up in the std it loads.
+pub fn parser_impl(name: String) -> Option[String] =
+  match name {
+    "parse_int" -> Some("atoi")
+    "parse_int_radix" -> Some("atoi_radix")
+    "parse_float" -> Some("atod")
+    _ -> None
+  }
+
 fn hamt_fn(name: String) -> Option[String] =
   match name {
     "map_empty" -> Some("empty")

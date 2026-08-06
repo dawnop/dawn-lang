@@ -5889,6 +5889,36 @@ fn check_java_static_field(
 
 # ---- method calls (x.f(a)) ----
 
+## The std names that stopped being exported, and how to write them now.
+##
+## `cx.moved` cannot answer this. That table is keyed by the FLAT builtin
+## spelling (`str_len`, `map_insert`) and is read only where a bare name fails
+## to resolve; a module-qualified call is looked up by (alias, name) and, when
+## that misses, reports "no exported function" without ever consulting it. So
+## the release that deleted `str.substring` would have answered `str.slice`'s
+## own call sites with nothing but a levenshtein guess -- and for the three
+## `std/fmt` parsers, which are still there but no longer pub, with "add `pub`
+## to its declaration", which is advice to edit the standard library.
+##
+## Keyed by module path rather than alias: `use std/str as s` renames the
+## alias, not the module, and the hint is about the module.
+fn renamed_std_fn(mod_path: String, name: String) -> Option[String] =
+  if mod_path == "std/str" && name == "substring" {
+    Some("renamed in v0.55.0: write `str.slice(s, from, to)`")
+  } else if mod_path == "std/cursor" && name == "at" {
+    Some("renamed in v0.55.0: write `cursor.seek(s, i)`")
+  } else if mod_path == "std/bytes" && name == "get" {
+    Some("renamed in v0.55.0: write `bytes.buf_at(b, i)`")
+  } else if mod_path == "std/fmt" && name == "atoi" {
+    Some("std-internal since v0.55.0: write the builtin `parse_int(s)`")
+  } else if mod_path == "std/fmt" && name == "atoi_radix" {
+    Some("std-internal since v0.55.0: write the builtin `parse_int_radix(s, radix)`")
+  } else if mod_path == "std/fmt" && name == "atod" {
+    Some("std-internal since v0.55.0: write the builtin `parse_float(s)`")
+  } else {
+    None
+  }
+
 ## alias.fn(args): a call to a pub function of an imported module (spec §10.3).
 fn check_module_call(
   cx: Cx,
@@ -5913,6 +5943,14 @@ fn check_module_call(
       let mod_path = match map.get(cx1.module_aliases, al) {
         Some(p) -> p
         None -> al
+      }
+      # before the "private" and "did you mean" branches below, both of which
+      # would answer a rename with something worse than silence
+      match renamed_std_fn(mod_path, name) {
+        Some(h) ->
+          return (cerr_h(cx1, "module `" ++ mod_path ++ "` has no exported function `" ++
+              name ++ "`", nlo, nhi, h), TyError, XError(lo, hi))
+        None -> ()
       }
       match map.get(cx1.module_exports, al) {
         Some(ex) -> {

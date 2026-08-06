@@ -196,6 +196,11 @@ pub fn repeat(s: String, n: Int) -> String = {
 ## (a negative index reads as 0, one past the end as `len`) and `from > to`
 ## yields the empty string, so this never panics — a range parameter selects
 ## a stretch, it does not assert its endpoints exist (spec §4.8).
+##
+## Spelled `substring` until v0.54.0, and renamed under CONTRIBUTING's "one
+## concept, one name": `list.slice` and `bytes.slice` already spell this, all
+## three clamp both ends, and the odd one out was the one that named a
+## *sub-string* rather than the operation.
 pub fn slice(s: String, from: Int, to: Int) -> String = {
   let n = len(s)
   let f = clamp_cp(from, n)
@@ -207,14 +212,6 @@ pub fn slice(s: String, from: Int, to: Int) -> String = {
     from_code_points(slice_cps(code_points(s), f, t, acc))
   }
 }
-
-## Renamed to `slice`. Kept for one release so the seed that compiles the
-## rename still has the name it was built with; removed in the next one.
-##
-## The rename is CONTRIBUTING's "one concept, one name": `list.slice` and
-## `bytes.slice` already spell this, all three clamp both ends, and the odd one
-## out was the one that named a *sub-string* rather than the operation.
-pub fn substring(s: String, from: Int, to: Int) -> String = slice(s, from, to)
 
 fn clamp_cp(i: Int, n: Int) -> Int = if i < 0 { 0 } else if i > n { n } else { i }
 
@@ -480,8 +477,6 @@ test "slice, take and drop clamp their ends instead of panicking" {
   assert take("a😀z", 2) == "a😀"
   assert drop("a😀z", 1) == "😀z"
   assert slice("a😀z", 1, 2) == "😀"
-  # the name it had until v0.54.0, kept for one release and then removed
-  assert substring("abcdef", 1, 4) == slice("abcdef", 1, 4)
 }
 
 test "at asserts the index exists -- it is the one that panics" {

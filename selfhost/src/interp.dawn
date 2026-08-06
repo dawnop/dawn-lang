@@ -880,7 +880,7 @@ fn call_builtin(icx: ICx, st: ESt, env: Env, name: String, args: List[CValue]) -
     if from < 0 || to > str.len(s) || from > to {
       cerr(st, env, "panicked: cursor_slice: invalid cursor range")
     } else {
-      Ok((st, env, VStr(str.substring(s, from, to))))
+      Ok((st, env, VStr(str.slice(s, from, to))))
     }
     # case folding is a Unicode table rather than a walk, so it stays a backend
     # primitive -- but calling it is not reflecting into one: this is the same
@@ -888,7 +888,7 @@ fn call_builtin(icx: ICx, st: ESt, env: Env, name: String, args: List[CValue]) -
     # compiler itself runs on.
     # code_points/from_code_points and the Unicode classifiers. These had no
     # arm at all until 2026-07-28: nothing reached them, because `substring`
-    # and `trim` were intrinsics, so `const X = str.substring(...)` had never
+    # and `trim` were intrinsics, so `const X = str.slice(...)` had never
     # been written down anywhere that would run it. Moving std off the
     # intrinsics is what asked the question.
   } else if name == "code_points" {
@@ -916,16 +916,18 @@ fn call_builtin(icx: ICx, st: ESt, env: Env, name: String, args: List[CValue]) -
   } else if name == "str_upper" {
     Ok((st, env, VStr(str.to_upper(as_str(args[0])))))
   } else if name == "parse_int" {
-    # fmt.atoi, not the builtin: the builtin's own lowering routes there for
-    # every program this compiler emits, and calling it here through the
-    # *seed's* lowering would fold with the seed host's grammar for one
-    # generation (audit RP-05; same bootstrap rule as `stringify`'s Float arm)
-    match fmt.atoi(as_str(args[0])) {
+    # The builtin spelling, which lowering routes to std/fmt.atoi -- so this
+    # arm interprets the program's own std Core rather than a host grammar
+    # (audit RP-05; same bootstrap rule as `stringify`'s Float arm). It said
+    # `fmt.atoi` until v0.55.0, back when the builtin still had a host
+    # primitive behind it in the seed; since RP-05 there is one route and the
+    # two spellings emit the same call, and `atoi` is no longer pub.
+    match parse_int(as_str(args[0])) {
       Some(n) -> Ok((st, env, some_v(VInt(n))))
       None -> Ok((st, env, none_v()))
     }
   } else if name == "parse_float" {
-    match fmt.atod(as_str(args[0])) {
+    match parse_float(as_str(args[0])) {
       Some(f) -> Ok((st, env, some_v(VFloat(f))))
       None -> Ok((st, env, none_v()))
     }

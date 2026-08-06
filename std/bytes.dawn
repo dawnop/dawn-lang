@@ -79,10 +79,6 @@ pub fn size(b: Buf) -> Int = array_len(b)
 ## the call sites; moving a right name to make room for a wrong one is backwards.
 pub fn buf_at(b: Buf, i: Int) -> Int = array_get(b, i)
 
-## Renamed to `buf_at`. Kept for one release so the seed that compiles the
-## rename still has the name it was built with; removed in the next one.
-pub fn get(b: Buf, i: Int) -> Int = buf_at(b, i)
-
 ## The finished bytes.
 pub fn freeze(b: Buf) -> Bytes = bytes_from_array(b)
 
@@ -382,9 +378,9 @@ test "a Buf appends, reads back, and truncates what will not fit in a byte" {
   assert is_empty(freeze(buf()))
   let b = put(put(put(buf(), 0x00), 0x41), 0xFF)
   assert size(b) == 3
-  assert get(b, 0) == 0x00
-  assert get(b, 1) == 0x41
-  assert get(b, 2) == 0xFF
+  assert buf_at(b, 0) == 0x00
+  assert buf_at(b, 1) == 0x41
+  assert buf_at(b, 2) == 0xFF
   assert to_hex(freeze(b)) == "0041ff"
   assert len(freeze(b)) == 3
   # a byte store keeps the low eight bits, and says so rather than panicking.
@@ -392,10 +388,10 @@ test "a Buf appends, reads back, and truncates what will not fit in a byte" {
   # bytes as well, so a `put` that stopped masking would still hex the same and
   # only an unfrozen read can tell -- which is also where `get`'s own promise
   # ("as 0..255") would be broken.
-  assert get(put(buf(), 0x141), 0) == 0x41
-  assert get(put(buf(), 256), 0) == 0x00
-  assert get(put(buf(), -1), 0) == 0xFF
-  assert get(put(buf(), -256), 0) == 0x00
+  assert buf_at(put(buf(), 0x141), 0) == 0x41
+  assert buf_at(put(buf(), 256), 0) == 0x00
+  assert buf_at(put(buf(), -1), 0) == 0xFF
+  assert buf_at(put(buf(), -256), 0) == 0x00
   assert to_hex(freeze(put(buf(), 0x141))) == "41"
   assert to_hex(freeze(put(buf(), 256))) == "00"
   assert to_hex(freeze(put(buf(), -1))) == "ff"
@@ -405,11 +401,11 @@ test "a Buf appends, reads back, and truncates what will not fit in a byte" {
   assert to_hex(freeze(put_bytes(put(buf(), 0x41), utf8("B")))) == "4142"
   assert to_hex(freeze(put_bytes(buf(), utf8("")))) == ""
   # `get` is `at`'s clause, on the builder: a read past the frontier is a bug
-  match catch_panic(() => get(b, 3)) {
+  match catch_panic(() => buf_at(b, 3)) {
     Ok(_) -> { assert false }
     Err(_) -> ()
   }
-  match catch_panic(() => get(buf(), 0)) {
+  match catch_panic(() => buf_at(buf(), 0)) {
     Ok(_) -> { assert false }
     Err(_) -> ()
   }

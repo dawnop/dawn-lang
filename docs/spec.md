@@ -88,7 +88,7 @@ true false not
 **字符字面量走 Go 的 rune 路线**：`'x'` 不是独立类型，而是等于该字符**码点**的 `Int`
 字面量（`'a' == 97`）。因此 match 里它就是普通 `Int` 模式，类型系统零改动。单引号内是
 单个码点：转义与字符串相同（`\n \t \r \\ \u{...}`）另加 `\'`；空字面量或含多个码点 → 词法错误。
-按码点处理字符串的函数见 §11（`code_points`/`from_code_points`/`str.len`/`str.substring`）。
+按码点处理字符串的函数见 §11（`code_points`/`from_code_points`/`str.len`/`str.slice`）。
 **注意**：运行期存储是 `java.lang.String`（UTF-16 码元下标），故「按码点下标随机访问」需要
 O(n) 换算——实测与设计取舍见 [`seq6-research.md`](seq6-research.md) 附录。**逐字符遍历请用
 §11 的游标（`std/cursor`）**，它每步恒定开销；下标版留给单次调用。
@@ -499,7 +499,7 @@ fn head_or[C: Iter](c: C, d: C.Item) -> C.Item =   # 投影随实例化归约
   - **`Ord[String]` 是码点序**：逐码点比较，首个不同的码点定大小，前缀相同时短者小。
     UTF-8 的字节序与码点序等价（编码的设计属性）；哈希的货币仍是 UTF-16 码元
     （见下文哈希叶子），**有意不跟走**——哈希只须与 `==` 一致，不必与序同货币。
-    语言其余各处（`str.len`/`substring`/`chars`/`code_points`/游标）本就以码点为货币，
+    语言其余各处（`str.len`/`slice`/`chars`/`code_points`/游标）本就以码点为货币，
     序是最后一处对齐的（2026-07-31，此前是 UTF-16 码元序，只在增补平面字符上可观测）。
 
   `derive Ord` 生成字段字典序比较
@@ -806,8 +806,8 @@ fn first[C: Index](c: C, i: C.Idx) -> C.Item = c[i]   # 泛型消费者
    `strip_suffix` 的不匹配、`bytes.from_hex`/`from_base64` 与 `fspath.extension`(包)的
    格式不合）→ **`Option`**（或 `Bool`）。
 3. **钳位**——参数是一个**区间**，说的是「要这一段里有的部分」，不断言端点存在：
-   `list.take`/`drop`/`slice`、`bytes.slice`、`str.substring`/`take`/`drop`、
-   `cursor.next`/`prev`/`back`/`at` → 两端各自夹进
+   `list.take`/`drop`/`slice`、`bytes.slice`、`str.slice`/`take`/`drop`、
+   `cursor.next`/`prev`/`back`/`seek` → 两端各自夹进
    `[0, len]`（负数取 `0`、超长取 `len`），`from > to` 得空序列，**永不 panic**。
 
 **唯一具名例外**：`cursor.char(s, c)` 到尾返回哨兵 `-1` 而非 `Option`（§11「std/cursor」）。
@@ -1657,9 +1657,10 @@ use java "java.lang.Math"      # Java 互操作（§9），形式不变
 另有两个**内部模块** `std/hamt` 与 `std/pvec`——`Map`/`Set`/`List` 的表示（§11）。它们随
 std 一起捆绑、在 std 内部互相引用，但 **std 之外 `use std/hamt` / `use std/pvec` 是编译
 错误**：表示要能整体换掉，而能换的前提是没有程序依赖它。
-（`std/fmt` 是数字渲染与解析的实现处——`fmt.dtoa` 即 `to_string(Float)`（§4.3），
-`fmt.atoi`/`fmt.atod`/`fmt.atoi_radix` 即三个 `parse_*`（§11 的 EBNF）；用户写内建
-拼写即可，模块名存在是因为实现是一份普通的 Dawn 源码而非某个后端的宿主方法。）
+（`std/fmt` 是数字渲染与解析的实现处——`fmt.dtoa` 即 `to_string(Float)`（§4.3）；三个
+`parse_*`（§11 的 EBNF）的实现自 v0.55.0 起**不再导出**，只有内建拼写这一种写法，
+`fmt.atoi`/`fmt.atod`/`fmt.atoi_radix` 已不是可写的名字。模块名存在是因为实现是一份
+普通的 Dawn 源码而非某个后端的宿主方法，不是因为它是一层 API。）
 `use std/x` 命中编译器 jar 内的资源而非磁盘（磁盘上 `src/std/` 路径**保留**，落文件报错）；
 之后与普通模块引入完全一致——限定访问 `map.insert(m, k, v)`、选择性引入
 `use std/list.{find}`（§10.2/§10.3）。同名短名跨模块共存（`str.len` / `bytes.len`），
@@ -1738,7 +1739,7 @@ radix  = [ "+" | "-" ] rdigit { rdigit }
 
 三条判据（§4.8）在字符串族上的落点：`str.at(s, i)` 越界 **panic**（判据 1，`i` 是调用方声称
 存在的位置，同 `xs[i]` 与 `bytes.at`）；`str.strip_prefix`/`strip_suffix` 回 `Option`
-（判据 2，判定与剥离一次完成，调用方不必自己算偏移）；`str.substring`/`take`/`drop` 与
+（判据 2，判定与剥离一次完成，调用方不必自己算偏移）；`str.slice`/`take`/`drop` 与
 `bytes.slice` 两端**钳位**、`from > to` 得空串（判据 3，范围参数选取一段，不断言端点存在）。
 `truncate` 就是 `take`，不另设一个名字。
 
@@ -1781,7 +1782,7 @@ hex 与 base64 是纯 Dawn 字节算术（无 `use java`，故两后端同一份
 **算术与凭空铸造都是编译错误**：`Cursor` 是 `std/cursor` 用 §2.7 的
 `pub opaque type Cursor = Int` 声明的，只有那个模块能把它看成 `Int`。要在类型位置写出
 `Cursor`，除 `use std/cursor` 外还要 `use std/cursor.{Cursor}`（前者绑模块别名、后者绑名字，
-是两件事）。`cursor.at` / `cursor.offset` 是两套位置货币之间的桥，各一趟 O(n)，用在**边界**
+是两件事）。`cursor.seek` / `cursor.offset` 是两套位置货币之间的桥，各一趟 O(n)，用在**边界**
 上（外面来的 `Int` 下标进来、位置要报给外面时）；放进循环就变回它要消灭的 O(n²)。
 单串一次调用用下标版没问题，**循环里必须用游标版**——`docs/seq6-research.md` §五之补有实测。
 
