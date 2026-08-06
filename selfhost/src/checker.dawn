@@ -5894,11 +5894,14 @@ fn check_java_static_field(
 ## `cx.moved` cannot answer this. That table is keyed by the FLAT builtin
 ## spelling (`str_len`, `map_insert`) and is read only where a bare name fails
 ## to resolve; a module-qualified call is looked up by (alias, name) and, when
-## that misses, reports "no exported function" without ever consulting it. So
-## the release that deleted `str.substring` would have answered `str.slice`'s
-## own call sites with nothing but a levenshtein guess -- and for the three
-## `std/fmt` parsers, which are still there but no longer pub, with "add `pub`
-## to its declaration", which is advice to edit the standard library.
+## that misses, reports "no exported function" without ever consulting it.
+##
+## Both halves measured by deleting the entries again (2026-08-06): without
+## this table `str.substring` answers with an empty hint -- `suggest.hint` does
+## not reach `slice` from `substring` -- and `fmt.atoi`, which is still there
+## and merely no longer pub, answers "add `pub` to its declaration in std/fmt",
+## which is advice to edit the standard library. That second one is also why
+## the lookup goes *before* the private branch rather than after it.
 ##
 ## Keyed by module path rather than alias: `use std/str as s` renames the
 ## alias, not the module, and the hint is about the module.

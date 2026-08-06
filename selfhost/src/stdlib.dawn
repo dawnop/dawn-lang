@@ -339,10 +339,18 @@ test "the loader's id counter opens past every prelude id" {
 test "the numeric parsers still have somewhere to land" {
   # `lower` rewrites `parse_int(s)` into a direct call to std/fmt.atoi. Since
   # v0.55.0 those three are not exported, so no call site names them and no
-  # export check sees them: rename one inside std/fmt and every gate stays
-  # green until something actually parses a number at run time, which is a
-  # NoSuchMethod in a program compiled by a compiler that built fine. The
-  # coupling is one table (`lower.parser_impl`) and this is the other end.
+  # export check sees them; the coupling is one table (`lower.parser_impl`) and
+  # this is the other end.
+  #
+  # What this adds, measured rather than assumed (a rename of `atod` inside
+  # std/fmt, tests and comments included, 2026-08-06): codegen already refuses
+  # a `CDirect` to a name it cannot find -- `panic: codegen: unknown fn
+  # std/fmt.atod` -- so the coupling is NOT silent, and the first claim written
+  # here, that it stayed green until a NoSuchMethod at run time, was wrong.
+  # What that panic depends on is somebody compiling a `parse_*` call, and
+  # today that is only true because the compiler happens to use all three
+  # (pkgfetch, lexer, interp). This test is what makes it true on purpose, and
+  # it names the two ends instead of printing a mangled symbol.
   let std = match load_std("std") {
     Ok(s) -> s
     Err(e) -> panic("std: " ++ e)
