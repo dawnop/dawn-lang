@@ -125,6 +125,16 @@ fn all_go[T](xs: List[T], f: fn(T) -> Bool !e, c: Cur) -> Bool !e =
 ## Short-circuits at the first element that fails, as `any` does.
 pub fn all[T](xs: List[T], f: fn(T) -> Bool !e) -> Bool !e = all_go(xs, f, iter_start(xs))
 
+## Whether `f` holds for no element. `true` for the empty list.
+## Short-circuits at the first element that satisfies `f`, as `any` does.
+##
+## The third of the three quantifiers, and the one a caller otherwise spells
+## `not any(xs, f)` -- which reads as a negated question rather than as the
+## question it is, and puts the negation where a reader has to unwind it.
+## Defined as that negation, so the short-circuit and the empty-list answer are
+## `any`'s by construction rather than by a second walk agreeing with it.
+pub fn none[T](xs: List[T], f: fn(T) -> Bool !e) -> Bool !e = not any(xs, f)
+
 fn index_go[T: Eq](xs: List[T], x: T, c: Cur, i: Int) -> Option[Int] =
   if iter_done(xs, c) { None }
   else if eq(iter_get(xs, c), x) { Some(i) }
@@ -351,15 +361,25 @@ test "the quantifiers are vacuous on the empty list and stop at the answer" {
   let e: List[Int] = []
   assert not any(e, x => x > 0)
   assert all(e, x => x > 0)
+  assert none(e, x => x > 0)
   assert any([1, 2, 3], x => x == 2)
   assert not any([1, 2, 3], x => x == 9)
   assert all([1, 2, 3], x => x > 0)
   assert not all([1, 2, 3], x => x > 1)
+  assert none([1, 2, 3], x => x == 9)
+  assert none([1, 2, 3], x => x > 99)
+  assert not none([1, 2, 3], x => x == 2)
+  # all three agree on the same predicate, which is what makes them one family
+  assert none([1, 2, 3], x => x > 9) == not any([1, 2, 3], x => x > 9)
+  assert none([1, 2, 3], x => x > 1) == not any([1, 2, 3], x => x > 1)
+  assert none([1, 2, 3], x => x > 0) == not all([1, 2, 3], x => x > 0)
   # `any` stops at the first element that satisfies it: reaching the second
   # would panic, so passing is the proof it stopped
   assert any([1, 2, 3], x => if x == 1 { true } else { panic("any walked past the answer") })
   # and `all` stops at the first that fails
   assert not all([1, 2, 3], x => if x == 1 { false } else { panic("all walked past the answer") })
+  # `none` inherits the short circuit rather than re-implementing it
+  assert not none([1, 2, 3], x => if x == 1 { true } else { panic("none walked past the answer") })
 }
 
 test "index_of and contains answer about the first match, never with a sentinel" {
