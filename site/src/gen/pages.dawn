@@ -160,21 +160,30 @@ pub fn gen_index(out: String, lang: Lang) -> Unit !io = {
   write_page(dst, shell(lang, alt, title, root, "", page_body))
 }
 
-pub fn gen_spec(out: String) -> Unit !io = {
+## The spec and the design notes, each one document rendered whole.
+##
+## `lang` is what the page is *written in*, and it is a parameter rather than a
+## constant so that this generator stops being the thing that decides. What it
+## does not yet decide is where the page lands: the output path and the `root`
+## below are still fixed at the Chinese layout, so a caller passing `En` today
+## would write over the Chinese page rather than beside it. Wiring that is the
+## job of whoever writes the English document, who is also the only one who
+## knows what to call it.
+pub fn gen_spec(out: String, lang: Lang) -> Unit !io = {
   let docs = doc_files()
   let doc = render_doc(parsed("docs/spec.md"), u => map_doc_url(".", docs, u))
   write_page("$out/spec.html",
-    page_with_toc(Zh, "${doc.title} — Dawn", ".", "spec", doc.toc, doc.html))
+    page_with_toc(lang, "", "${doc.title} — Dawn", ".", "spec", doc.toc, doc.html))
 }
 
-pub fn gen_design(out: String) -> Unit !io = {
+pub fn gen_design(out: String, lang: Lang) -> Unit !io = {
   let docs = doc_files()
   let doc = render_doc(parsed("docs/design.md"), u => map_doc_url(".", docs, u))
   write_page("$out/design.html",
-    page_with_toc(Zh, "${doc.title} — Dawn", ".", "design", doc.toc, doc.html))
+    page_with_toc(lang, "", "${doc.title} — Dawn", ".", "design", doc.toc, doc.html))
 }
 
-pub fn gen_playground(out: String) -> Unit !io = {
+pub fn gen_playground(out: String, lang: Lang) -> Unit !io = {
   # full-width IDE page: the editor frame IS the page (no heading, no reading
   # column) — .dp-page/.dp-ide layout comes with the editor bundle's css
   let mount = `<div id="dawn-playground" data-endpoint="/api/run"></div>`
@@ -183,5 +192,5 @@ pub fn gen_playground(out: String) -> Unit !io = {
   let head = `<link rel="stylesheet" href="./assets/playground.css">` ++ "\n" ++
     `<script type="module" src="./assets/playground.js"></script>`
   write_page("$out/playground.html",
-    shell_ext(Zh, "", "Playground — Dawn", ".", "playground", head, mount_body))
+    shell_ext(lang, "", "Playground — Dawn", ".", "playground", head, mount_body))
 }

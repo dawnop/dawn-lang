@@ -19,10 +19,68 @@ use json/parser.{parse}
 use json/value.{Json, JNull, JBool, JStr, JArr, JObj}
 use md/parser
 use html/escape.{escape_html}
-use html/page.{Zh, page_with_toc}
+use html/page.{Lang, En, Zh, page_with_toc}
 use html/render.{render_doc, TocEntry}
 use hl/dawn.{highlight_dawn}
 use gen/common.{must_read, write_page, map_doc_url, doc_files}
+
+# ---- the page's own words ----
+#
+# Everything on this page except these eight strings is generated from
+# `dawn doc --stdlib`, so they are the whole of what a translator has to touch.
+# They live in one record rather than as literals down in the code that emits
+# them: a table has the property the literals did not, which is that the two
+# languages sit on adjacent lines and a missing one is a compile error instead
+# of a page that renders half in each.
+
+type Chrome = {
+  impls_lead: String,
+  impls_sep: String,
+  prelude_title: String,
+  prelude_intro: String,
+  traits_title: String,
+  traits_intro: String,
+  modules_title: String,
+  modules_intro: String,
+}
+
+fn chrome(lang: Lang) -> Chrome =
+  match lang {
+    En -> Chrome {
+      impls_lead: "impls registered by this module (visible program-wide, no use needed): ",
+      impls_sep: ", ",
+      prelude_title: "prelude: the names that need no use",
+      prelude_intro: "<p>These names are in scope implicitly — just write them. " ++
+        "The groups are there to make things findable and say nothing about where " ++
+        "a name is implemented; the ones that also live in a std module " ++
+        "(<code>sort</code>, <code>println</code> and so on) appear once more under " ++
+        "Modules below in their qualified spelling — the same function, two ways of " ++
+        "writing it.</p>\n",
+      traits_title: "Prelude traits",
+      traits_intro: "<p>The five traits the prelude brings. Their method names " ++
+        "enter the function namespace as well, and a top-level declaration in the " ++
+        `calling module shadows them (<a href="spec.html#s10-6">spec §10.6</a>).` ++
+        "</p>\n",
+      modules_title: "Modules",
+      modules_intro: "<p>Brought in with <code>use std/x</code> and then called " ++
+        "qualified; single names can be imported on their own " ++
+        "(<code>use std/str.{trim}</code>).</p>\n",
+    }
+    Zh -> Chrome {
+      impls_lead: "本模块登记的 impl（全程序可见，不必 use）：",
+      impls_sep: "、",
+      prelude_title: "prelude：不必 use 的名字",
+      prelude_intro: "<p>下面这些名字隐式可见，直接写就是了。分组只为好找，不代表实现位置；" ++
+        "其中在 std 模块里也有一份的（<code>sort</code>、<code>println</code> 等）" ++
+        "会在下面「模块」一节里以限定拼写再出现一次——同一个函数，两种写法。</p>\n",
+      traits_title: "预置 trait",
+      traits_intro: "<p>随 prelude 而来的五个 trait。它们的方法名同样进入函数命名空间，" ++
+        `可被本模块的顶层声明遮蔽（<a href="spec.html#s10-6">规范 §10.6</a>）。</p>` ++ "\n",
+      modules_title: "模块",
+      modules_intro: "<p>以 <code>use std/x</code> 引入，再限定调用；" ++
+        "也可以选择性引入单个名字（<code>use std/str.{trim}</code>）。</p>\n",
+    }
+  }
 
 # ---- reading the compiler's JSON ----
 
@@ -157,13 +215,12 @@ fn effect_entry(docs: List[String], id_base: String, e: Json) -> String = {
 ## The impls a module registers. Coherence is program-wide — it does not ask
 ## who wrote the `use` — so a reader needs to see that `==` on a `Map` is
 ## answered here even though no function in the list says so.
-fn impls_html(m: Json) -> String = {
+fn impls_html(c: Chrome, m: Json) -> String = {
   let names = map(jarr(jget(m, "impls")), i => "<code>" ++ escape_html(jstr(i)) ++ "</code>")
   if len(names) == 0 {
     ""
   } else {
-    """<p class="api-impls">本模块登记的 impl（全程序可见，不必 use）：""" ++
-      join(names, "、") ++ "</p>\n"
+    """<p class="api-impls">""" ++ c.impls_lead ++ join(names, c.impls_sep) ++ "</p>\n"
   }
 }
 
@@ -198,7 +255,7 @@ fn traits_html(docs: List[String], root: Json) -> String = {
   html
 }
 
-fn modules_html(docs: List[String], root: Json) -> (String, List[TocEntry]) = {
+fn modules_html(c: Chrome, docs: List[String], root: Json) -> (String, List[TocEntry]) = {
   var html = ""
   var toc: List[TocEntry] = []
   for m in jarr(jget(root, "modules")) {
@@ -207,7 +264,7 @@ fn modules_html(docs: List[String], root: Json) -> (String, List[TocEntry]) = {
     # the call-site alias is the file's own name: `use std/str` binds `str`
     let qual = unwrap_or(str.strip_prefix(path, "std/"), path)
     toc = toc ++ [TocEntry { level: 3, id: id, text: path }]
-    html = html ++ sub(id, path) ++ prose(docs, field(m, "doc")) ++ impls_html(m)
+    html = html ++ sub(id, path) ++ prose(docs, field(m, "doc")) ++ impls_html(c, m)
     for t in jarr(jget(m, "types")) {
       html = html ++ type_entry(docs, slug(path), t) ++ "\n"
     }
@@ -229,7 +286,11 @@ fn modules_html(docs: List[String], root: Json) -> (String, List[TocEntry]) = {
 
 # ---- the page ----
 
-pub fn gen_stdlib(out: String) -> Unit !io = {
+## The standard library reference. `lang` is the chrome's language: the entries
+## themselves come from the compiler and their doc comments are English. As in
+## [gen_spec] the output path is still the Chinese layout's.
+pub fn gen_stdlib(out: String, lang: Lang) -> Unit !io = {
+  let c = chrome(lang)
   let text =
     match io.read_file("site/build/stdlib.json") {
       Ok(t) -> t
@@ -248,27 +309,17 @@ pub fn gen_stdlib(out: String) -> Unit !io = {
       Err(e) -> panic("site/pages/stdlib.md: $e")
     }
   let (pre, pre_toc) = prelude_html(docs, root)
-  let (mods, mod_toc) = modules_html(docs, root)
-  let pre_title = "prelude：不必 use 的名字"
+  let (mods, mod_toc) = modules_html(c, docs, root)
   let body = intro.html ++
-    section("prelude", pre_title,
-      "<p>下面这些名字隐式可见，直接写就是了。分组只为好找，不代表实现位置；" ++
-        "其中在 std 模块里也有一份的（<code>sort</code>、<code>println</code> 等）" ++
-        "会在下面「模块」一节里以限定拼写再出现一次——同一个函数，两种写法。</p>\n",
-      pre) ++
-    section("prelude-traits", "预置 trait",
-      "<p>随 prelude 而来的五个 trait。它们的方法名同样进入函数命名空间，" ++
-        `可被本模块的顶层声明遮蔽（<a href="spec.html#s10-6">规范 §10.6</a>）。</p>` ++ "\n",
-      traits_html(docs, root)) ++
-    section("modules", "模块",
-      "<p>以 <code>use std/x</code> 引入，再限定调用；" ++
-        "也可以选择性引入单个名字（<code>use std/str.{trim}</code>）。</p>\n", mods)
+    section("prelude", c.prelude_title, c.prelude_intro, pre) ++
+    section("prelude-traits", c.traits_title, c.traits_intro, traits_html(docs, root)) ++
+    section("modules", c.modules_title, c.modules_intro, mods)
   let toc = intro.toc ++
-    [TocEntry { level: 2, id: "prelude", text: pre_title }] ++ pre_toc ++
-    [TocEntry { level: 2, id: "prelude-traits", text: "预置 trait" }] ++
-    [TocEntry { level: 2, id: "modules", text: "模块" }] ++ mod_toc
+    [TocEntry { level: 2, id: "prelude", text: c.prelude_title }] ++ pre_toc ++
+    [TocEntry { level: 2, id: "prelude-traits", text: c.traits_title }] ++
+    [TocEntry { level: 2, id: "modules", text: c.modules_title }] ++ mod_toc
   write_page("$out/stdlib.html",
-    page_with_toc(Zh, "${intro.title} — Dawn", ".", "stdlib", toc, body))
+    page_with_toc(lang, "", "${intro.title} — Dawn", ".", "stdlib", toc, body))
 }
 
 fn jobj(entries: List[(String, Json)]) -> Json = JObj(map.from(entries))

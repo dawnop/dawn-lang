@@ -41,6 +41,15 @@ fn lang_switch_label(lang: Lang) -> String =
     Zh -> "English"
   }
 
+## "Contents": the heading over the sticky TOC, and the label on the link a
+## tutorial chapter carries back to the table of contents. One definition
+## because they are one word -- two would be two things to keep level.
+pub fn contents_label(lang: Lang) -> String =
+  match lang {
+    En -> "Contents"
+    Zh -> "目录"
+  }
+
 ## site navigation: (key, label, path-from-root)
 fn nav_items(lang: Lang) -> List[(String, String, String)] =
   match lang {
@@ -151,14 +160,26 @@ $body
 """
 }
 
-## A plain content page. These have no twin in the other language: the
-## documents they render are Chinese and are not translated.
-pub fn page(lang: Lang, title: String, root: String, active: String, inner: String) -> String =
-  shell(lang, "", title, root, active, `<main class="content">` ++ "\n" ++ inner ++ "\n</main>")
+## A plain content page. `alt` is the href of this same page in the other
+## language, or "" when there is none -- which is what every caller passes
+## today, because the documents these render are Chinese and untranslated. The
+## parameter is here rather than hard-coded so that translating one of them is
+## an edit at its own call site instead of a change to this shell.
+pub fn page(
+  lang: Lang,
+  alt: String,
+  title: String,
+  root: String,
+  active: String,
+  inner: String,
+) -> String =
+  shell(lang, alt, title, root, active, `<main class="content">` ++ "\n" ++ inner ++ "\n</main>")
 
-## A page with the sticky TOC sidebar (the spec and design pages).
+## A page with the sticky TOC sidebar (the spec and design pages). `alt` as in
+## [page].
 pub fn page_with_toc(
   lang: Lang,
+  alt: String,
   title: String,
   root: String,
   active: String,
@@ -174,7 +195,7 @@ pub fn page_with_toc(
     toc_list(toc) ++ "\n</nav>\n</aside>"
   let body = `<div class="with-toc">` ++ "\n" ++ side ++ "\n" ++
     `<article class="doc">` ++ "\n" ++ article ++ "\n</article>\n</div>"
-  shell(lang, "", title, root, active, body)
+  shell(lang, alt, title, root, active, body)
 }
 
 ## Nested <ul> for h2/h3 toc entries.
@@ -216,7 +237,7 @@ test "the nav is labelled in the page's own language" {
 }
 
 test "shell carries title, css root, body" {
-  let p = page(Zh, "测试页 — Dawn", ".", "stdlib", "<p>x</p>")
+  let p = page(Zh, "", "测试页 — Dawn", ".", "stdlib", "<p>x</p>")
   assert str.contains(p, "<title>测试页 — Dawn</title>")
   assert str.contains(p, `href="./assets/style.css"`)
   assert str.contains(p, `<main class="content">`)
@@ -234,9 +255,12 @@ test "only a page with a twin advertises one" {
   assert str.contains(zh, `<html lang="zh-CN">`)
   assert str.contains(zh, `<a class="lang" href="../index.html" hreflang="en">English</a>`)
   # a document page has no twin: no switch, no alternates
-  let doc = page(Zh, "规范 — Dawn", ".", "spec", "<p>x</p>")
+  let doc = page(Zh, "", "规范 — Dawn", ".", "spec", "<p>x</p>")
   assert not str.contains(doc, `class="lang"`)
   assert not str.contains(doc, "hreflang")
+  # ...and one that is given a twin advertises it through the same shell
+  let paired = page(Zh, "../spec.html", "规范 — Dawn", ".", "spec", "<p>x</p>")
+  assert str.contains(paired, `<a class="lang" href="../spec.html" hreflang="en">English</a>`)
 }
 
 test "toc nests h3 under its h2" {

@@ -3,10 +3,18 @@
 use md/ast.{Inline, Block, Heading}
 use md/parser.{parse}
 use html/render.{render_doc, inline_text}
-use html/page.{Zh, page}
+use html/page.{Lang, En, Zh, page, contents_label}
 use gen/common.{must_read, write_page, map_doc_url, doc_files, pad2, drop_trailing_rule}
 
 type Chapter = { title: List[Inline], body: List[Block] }
+
+## What the tutorial is called on its own pages: the index's <title>, and the
+## suffix each chapter's <title> carries. One entry, because they are one name.
+fn tutorial_name(lang: Lang) -> String =
+  match lang {
+    En -> "Dawn Tutorial"
+    Zh -> "Dawn 教程"
+  }
 
 fn split_chapters(blocks: List[Block]) -> (List[Block], List[Chapter]) = {
   var intro: List[Block] = []
@@ -52,13 +60,13 @@ fn chapter_title(chapters: List[Chapter], i: Int) -> String =
     None -> ""
   }
 
-fn chapter_nav(chapters: List[Chapter], i: Int) -> String = {
+fn chapter_nav(chapters: List[Chapter], i: Int, lang: Lang) -> String = {
   let n = len(chapters)
   let prev =
     if i > 0 {
       """<a class="prev" href="${pad2(i)}.html">← ${chapter_title(chapters, i - 1)}</a>"""
     } else {
-      """<a class="prev" href="index.html">← 目录</a>"""
+      """<a class="prev" href="index.html">← ${contents_label(lang)}</a>"""
     }
   let next =
     if i + 1 < n {
@@ -69,7 +77,10 @@ fn chapter_nav(chapters: List[Chapter], i: Int) -> String = {
   `<nav class="chapter-nav">` ++ "\n" ++ prev ++ "\n" ++ next ++ "\n</nav>"
 }
 
-pub fn gen_tutorial(out: String) -> Unit !io = {
+## The tutorial: an index page plus one page per `##` chapter. `lang` is what
+## the document is written in; as in [gen_spec] the output paths are still the
+## Chinese layout's, so passing `En` today writes over the Chinese pages.
+pub fn gen_tutorial(out: String, lang: Lang) -> Unit !io = {
   let blocks =
     match parse(must_read("docs/tutorial.md")) {
       Ok(bs) -> bs
@@ -84,10 +95,10 @@ pub fn gen_tutorial(out: String) -> Unit !io = {
     match get(chapters, i) {
       Some(c) -> {
         let doc = render_doc([Heading(1, c.title)] ++ c.body, u => map_doc_url("..", docs, u))
-        let html = doc.html ++ chapter_nav(chapters, i)
+        let html = doc.html ++ chapter_nav(chapters, i, lang)
         let title = inline_text(c.title)
         write_page("$out/tutorial/${pad2(i + 1)}.html",
-          page(Zh, "$title — Dawn 教程", "..", "tutorial", html))
+          page(lang, "", "$title — ${tutorial_name(lang)}", "..", "tutorial", html))
       }
       None -> {
         panic("unreachable chapter index")
@@ -104,5 +115,5 @@ pub fn gen_tutorial(out: String) -> Unit !io = {
   }
   let listing = "<ul class=\"chapter-list\">" ++ items ++ "\n</ul>"
   write_page("$out/tutorial/index.html",
-    page(Zh, "Dawn 教程", "..", "tutorial", intro_doc.html ++ listing))
+    page(lang, "", tutorial_name(lang), "..", "tutorial", intro_doc.html ++ listing))
 }
