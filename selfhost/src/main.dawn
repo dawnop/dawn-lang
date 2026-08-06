@@ -35,6 +35,8 @@ use testrun.{TESTMAIN_CLASS, gen_test_main}
 use java "java.lang.System"
 use java "java.lang.ProcessBuilder"
 use java "java.lang.Process"
+use java "java.lang.Runtime"
+use java "java.lang.Thread"
 use std/set
 use codegen.{
   no_override, gen_adt
@@ -861,12 +863,53 @@ fn maybe_with_deps(mode: String, rest: List[String]) -> Unit !io = {
   let env = pb.environment().expect("env")
   let _ = env.put("DAWN_SELFHOST_CP", join(jars, path_sep()))
   let _ = pb.inheritIO()
-  let code = pb.start().expect("java process").waitFor()
+  let code = wait_reaped(pb.start().expect("java process"), "")
   let _ = io.exit(code)
   ()
 }
 
-## Emit `classes` under a fresh temp directory and return its path.
+## Arrange for `child` to be destroyed -- and for `scratch` (empty for none) to
+## be removed -- if this driver is terminated before it has finished with them.
+##
+## This driver never runs a program itself: `run`, `test`, the re-exec above and
+## `--native` each hand the work to a child process and do nothing but wait. So
+## a SIGTERM to the driver -- what `timeout` sends, and what any gate that
+## bounds a hang sends -- used to kill the waiter and leave the child running:
+## measured at 101% CPU, reparented to init, long after the driver was gone. A
+## shutdown hook is where the JVM lets a program answer that signal (it runs for
+## SIGTERM/SIGINT/SIGHUP and for every ordinary exit), so the destroy rides the
+## path that already unwinds the driver. SIGKILL has no handler anywhere, on
+## purpose; killing the process *group* is the only answer to it, and that is
+## the caller's half of this (scripts/native-cli-diff.sh, scripts/doc-check.py).
+##
+## The hook is never removed. It does not need to be: each caller spawns exactly
+## one child and the command is over when that child is, so there is nothing to
+## accumulate, and both of its actions are idempotent -- `destroy` on an exited
+## process and a delete of an already-deleted tree are no-ops, which is what
+## makes running it again on the ordinary exit path harmless. Removing it would
+## also have to cope with `removeShutdownHook` throwing once shutdown has begun,
+## which is precisely the case this exists for.
+fn reap_on_exit(child: Process, scratch: String) -> Unit !io = {
+  let rt = Runtime.getRuntime().expect("runtime")
+  let _ = rt.addShutdownHook(Thread.new(() => {
+    let _ = child.destroy()
+    if scratch != "" { pkgfetch.delete_tree(scratch) }
+    ()
+  }))
+  ()
+}
+
+## `reap_on_exit` and then wait; the child's exit code.
+fn wait_reaped(child: Process, scratch: String) -> Int !io = {
+  reap_on_exit(child, scratch)
+  child.waitFor()
+}
+
+## Emit `classes` under a fresh temp directory and return its path. The caller
+## owns it: it removes the tree once the child it hands it to has finished, and
+## `wait_reaped` removes it if the driver is terminated before that. Nothing
+## else ever would -- the directories used to survive every ordinary run, and
+## 3384 of them holding 2.9G had piled up in /tmp by the time anyone looked.
 fn write_temp_classes(classes: List[(String, Bytes)]) -> String !io = {
   let dir =
     match io.temp_dir("", "selfhost-run") {
@@ -886,13 +929,15 @@ fn write_temp_classes(classes: List[(String, Bytes)]) -> String !io = {
   dir
 }
 
-## Spawn `java -Xss512m -cp <cp> <cls> <args...>` inheriting stdio; the exit code.
-fn spawn_java(cp: String, cls: String, args: List[String]) -> Int !io = {
+## Spawn `java -Xss512m -cp <cp> <cls> <args...>` inheriting stdio; the exit
+## code. `scratch` is the directory the classes were written to, which the
+## reaping wait removes if this driver is terminated mid-run.
+fn spawn_java(cp: String, cls: String, args: List[String], scratch: String) -> Int !io = {
   var cmd: List[String] = [host_java(), "-Xss512m", "-cp", cp, cls]
   cmd = cmd ++ args
   let pb = ProcessBuilder.new(cmd)
   let _ = pb.inheritIO()
-  pb.start().expect("java process").waitFor()
+  wait_reaped(pb.start().expect("java process"), scratch)
 }
 
 ## `selfhost run [--std <dir>] <target> [args...]` — mirror of `dawn run`,
@@ -926,7 +971,8 @@ fn run_run(rest0: List[String]) -> Unit !io = {
     return cli_error(target ++ " has no pub fn main() -> Unit !io, nothing to run")
   }
   let dir = write_temp_classes(classes)
-  let code = spawn_java(dir ++ path_sep() ++ host_classpath(), entry, args2)
+  let code = spawn_java(dir ++ path_sep() ++ host_classpath(), entry, args2, dir)
+  pkgfetch.delete_tree(dir)
   if code != 0 { let _ = io.exit(code) }
 }
 
@@ -980,7 +1026,8 @@ fn run_test(rest0: List[String]) -> Unit !io = {
   }
   let all = classes ++ [(TESTMAIN_CLASS, gen_test_main(runner_tests))]
   let dir = write_temp_classes(all)
-  let code = spawn_java(dir ++ path_sep() ++ host_classpath(), TESTMAIN_CLASS, [])
+  let code = spawn_java(dir ++ path_sep() ++ host_classpath(), TESTMAIN_CLASS, [], dir)
+  pkgfetch.delete_tree(dir)
   if code != 0 { let _ = io.exit(code) }
 }
 
@@ -1152,6 +1199,10 @@ fn run_native_image(
   let pb = ProcessBuilder.new(cmd)
   let _ = pb.redirectErrorStream(true)
   let proc = pb.start().expect("native-image process")
+  # before the read, not just before the wait: the read is where this blocks
+  # for the minute or two native-image takes, so it is where a terminated
+  # driver would otherwise abandon it
+  reap_on_exit(proc, "")
   let outs = proc.getInputStream().expect("stream")
   let all = outs.readAllBytes().expect("output")
   for line in str.split(bytes.decode_utf8(all), "\n") {

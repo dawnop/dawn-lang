@@ -39,6 +39,7 @@ use fmt
 use doc
 use add
 use lsp
+use pkgfetch
 
 fn usage() -> String =
   join([
@@ -198,8 +199,13 @@ fn cc_build(ctext: String, out: String) -> Unit !io = {
     "-I", work,
     "-o", out, work ++ "/main.c", work ++ "/dawn_rt.c", "-lm"
   ]
+  # cc is done with the staging directory the moment it succeeds, and nothing
+  # else ever removed it: 125 of them, a megabyte each (the emitted C plus the
+  # embedded runtime), had accumulated in /tmp here. A cc that *failed* keeps
+  # its directory on purpose -- the C it choked on is the only thing left to
+  # look at, and the error names an exit code, not a file.
   match io.run(argv, "", "") {
-    Ok(0) -> ()
+    Ok(0) -> pkgfetch.delete_tree(work)
     Ok(code) -> cli_error(cc ++ " failed (exit code " ++ "${code}" ++ ")")
     Err(e) -> cli_error("cannot run " ++ cc ++ ": " ++ e.message)
   }
@@ -248,12 +254,20 @@ fn build_and_exec(ctext: String, dir_prefix: String, bin_name: String, what: Str
   }
   let bin = work ++ "/" ++ bin_name
   cc_build(ctext, bin)
+  # The scratch tree goes before the exit, not after it: `io.exit` has no stack
+  # to unwind, so a release placed on the way out is a release that never runs.
+  # A build that failed keeps its directory -- `cc_build` reports and exits from
+  # inside, and the emitted C is the only thing left to look at.
   match io.run([bin], "", "") {
     Ok(code) -> {
+      pkgfetch.delete_tree(work)
       let _ = io.exit(code)
       ()
     }
-    Err(e) -> cli_error("cannot run the built " ++ what ++ ": " ++ e.message)
+    Err(e) -> {
+      pkgfetch.delete_tree(work)
+      cli_error("cannot run the built " ++ what ++ ": " ++ e.message)
+    }
   }
 }
 

@@ -11,6 +11,7 @@
 #include <poll.h>
 #include <pthread.h>
 #include <setjmp.h>
+#include <signal.h>
 #include <spawn.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -2034,6 +2035,59 @@ bool dawn_io_stdin_ready(int64_t timeout_ms) {
  * at all -- see the note on `io_run` in types.dawn. */
 extern char **environ;
 
+/* The child `io_run` is currently waiting on, so the handler below can reach
+ * it. One slot, not a table: the runtime is single threaded -- the one thread
+ * it creates is the deep main stack (`dawn_stack_thread`), which the original
+ * thread only joins -- so there is never a second `io_run` in flight.
+ * `sig_atomic_t` because a handler may read nothing else. */
+static volatile sig_atomic_t dawn_run_child = 0;
+
+/* Pass the signal on to the child and go back to waiting for it.
+ *
+ * Without this, a program whose whole job is to spawn something and wait --
+ * which is what the native driver's `run` and `test` are (nmain.dawn,
+ * build_and_exec) -- answered SIGTERM by dying and leaving the child behind,
+ * measured at 99.9% CPU and reparented to init after `timeout` had given up on
+ * the driver. Forwarding means the child gets the signal the caller meant for
+ * the work, the `waitpid` below reports how it died, and `io.run` answers
+ * 128+signal, which is the number the shell would have printed anyway. A child
+ * that ignores the signal keeps this process waiting, which is the same
+ * bargain `Process.destroy` makes on the JVM.
+ *
+ * This is the C runtime's `io_run` only. The JVM one (rtclasses.dawn,
+ * gen_io_run) is a bare ProcessBuilder wait with no equivalent, so a JVM
+ * program that spawns and waits still dies alone; the JVM *driver* covers
+ * itself one layer up instead (main.dawn, wait_reaped). Closing that at the
+ * intrinsic would mean generating a Runnable in the runtime, and it is not
+ * what this fix is for.
+ *
+ * Only `kill`, `signal` and `raise` are called here, all async-signal-safe;
+ * `errno` is saved because the syscall this interrupts sets it afterwards.
+ *
+ * With no child recorded the handler is not wanted at all, so it puts the
+ * default back and re-raises: the disposition is installed just before the
+ * spawn (a window where nothing is running yet, but one that no thread may
+ * spend taking the default action, or the parent would die and orphan the
+ * child that was about to start). What remains uncovered is the instant
+ * between `posix_spawnp` returning and the store below, and SIGKILL, which no
+ * handler ever sees -- that one is the caller's process-group kill (#167). */
+static void dawn_run_forward(int sig) {
+  int saved = errno;
+  pid_t p = (pid_t)dawn_run_child;
+  if (p > 0) {
+    kill(p, sig);
+  } else {
+    signal(sig, SIG_DFL);
+    raise(sig);
+  }
+  errno = saved;
+}
+
+/* SIGINT is in the set even though a terminal already delivers it to the whole
+ * foreground group: `kill -INT <driver>` does not, and this is what makes the
+ * two agree. */
+static const int DAWN_RUN_SIGNALS[3] = {SIGTERM, SIGINT, SIGHUP};
+
 int64_t dawn_io_run(dawn_array *argv, dawn_str *out_path, dawn_str *err_path) {
   int64_t n = dawn_array_len(argv);
   if (n <= 0) {
@@ -2063,22 +2117,49 @@ int64_t dawn_io_run(dawn_array *argv, dawn_str *out_path, dawn_str *err_path) {
     ep = dawn_cpath(err_path);
     posix_spawn_file_actions_addopen(&fa, 2, ep, O_WRONLY | O_CREAT | O_TRUNC, 0644);
   }
+  /* Armed before the spawn and disarmed after the wait; `dawn_run_child` is
+   * what tells the handler which of the two it is in. SA_RESTART keeps the
+   * `waitpid` below from having to distinguish "a signal we forwarded" from a
+   * real failure -- it simply resumes waiting. */
+  struct sigaction sa;
+  struct sigaction old[3];
+  memset(&sa, 0, sizeof sa);
+  sa.sa_handler = dawn_run_forward;
+  sigemptyset(&sa.sa_mask);
+  sa.sa_flags = SA_RESTART;
+  dawn_run_child = 0;
+  for (int i = 0; i < 3; i++) sigaction(DAWN_RUN_SIGNALS[i], &sa, &old[i]);
+
   pid_t pid = 0;
   int rc = posix_spawnp(&pid, args[0], &fa, NULL, args, environ);
+  /* Guarded, and before the tidying below rather than after it: what is stored
+   * here is a signal's target, so a failed spawn -- where POSIX leaves `pid`
+   * unspecified -- must not reach it, and every instruction between the spawn
+   * and the store is one where a signal would find no child to forward to. */
+  if (rc == 0) dawn_run_child = (sig_atomic_t)pid;
   posix_spawn_file_actions_destroy(&fa);
   free(op);
   free(ep);
   for (int64_t i = 0; i < n; i++) free(args[i]);
   free(args);
   if (rc != 0) {
+    /* Restore first: a fault is not the end of the process (`catch_fault`
+     * resumes), and leaving this program's signal dispositions rewritten
+     * behind a failed spawn would outlive the call that set them. */
+    dawn_run_child = 0;
+    for (int i = 0; i < 3; i++) sigaction(DAWN_RUN_SIGNALS[i], &old[i], NULL);
     dawn_fault(DAWN_LIT("io_run: cannot start the program"));
   }
   int status = 0;
   while (waitpid(pid, &status, 0) < 0) {
     if (errno != EINTR) {
+      dawn_run_child = 0;
+      for (int i = 0; i < 3; i++) sigaction(DAWN_RUN_SIGNALS[i], &old[i], NULL);
       dawn_fault(DAWN_LIT("io_run: waiting for the child failed"));
     }
   }
+  dawn_run_child = 0;
+  for (int i = 0; i < 3; i++) sigaction(DAWN_RUN_SIGNALS[i], &old[i], NULL);
   /* The two numbers the JVM's Process.exitValue() also reports on POSIX. */
   if (WIFEXITED(status)) return (int64_t)WEXITSTATUS(status);
   if (WIFSIGNALED(status)) return (int64_t)(128 + WTERMSIG(status));
