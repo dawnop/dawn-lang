@@ -396,3 +396,21 @@ selfhost 同样看不见。两条一夹，**期 2 的 selfhost 无法构造任�
 
 > 一句话记住这条：**种子纪律管的不只是语法，还有名字**——语言特性、内建名、std 模块名，
 > 凡是 `selfhost/src` 要拼出来的，都得在上一版的产物里能被解析。
+
+**期 1.5 的收口不是「看着应该行」，是跑过的**（2026-08-06，v0.56.0 发布前）：
+把 v0.55.0 的种子 std 复制一份、只加进 `char.dawn` 与新的 `modules.txt`
+（也就是造出一个 v0.56.0 形状的 std），再给 `selfhost/src/lexer.dawn` 加上
+
+```dawn
+use std/char
+fn probe_to_char(n: Int) -> Char = char.of(n).expect("checked above")
+fn probe_to_int(c: Char) -> Int = char.code(c)
+```
+
+然后用 **v0.55.0 的编译器**跑 stage 1。**过了**。这正是 v0.57.0 的 stage 1 会发生的事
+（那时的种子是 v0.56.0，比这次模拟的还新），所以「翻转那一版 selfhost 造得出 Char」
+这件事已经有收据，不必等到动 675 处字面量之后才发现造不出来。
+
+对照组在同一天同一台机器上：`char_unchecked` 作为**新内建**加在 `types.dawn` 里、
+被 `lexer.dawn` 调用，stage 1 报 `undefined function`。**两个探针一正一反**，
+出路 1 与出路 4 的差别就是这两行输出。
