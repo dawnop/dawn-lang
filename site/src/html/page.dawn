@@ -2,19 +2,20 @@
 # the attribute quotes unescaped; $-interpolation fills the holes.
 #
 # Every shell takes its language explicitly. There is no defaulted overload on
-# purpose: the site's default language is English and its long documents are
-# Chinese, so a wrapper that quietly picked one would be wrong on most of the
-# pages whichever one it picked.
+# purpose: the site's default language is English and most of its long
+# documents are Chinese, so a wrapper that quietly picked one would be wrong on
+# most of the pages whichever one it picked.
 
 use std/str
 use html/render.{TocEntry}
 use html/escape.{escape_html}
 
 ## Which language a page is written in. English is the site's default and
-## lives at `/`; the Chinese front page lives at `/zh/`. The long-form
-## documents (tutorial, spec, design, stdlib) are Chinese and are not
-## translated -- site/pages/home.md's closing section says so on the page
-## itself, rather than leaving a reader to discover it by clicking.
+## lives at `/`; its Chinese twin lives at the same path under `/zh/`. Two
+## documents are paired that way -- the front page and the tutorial. The rest
+## (spec, design, stdlib, examples) are Chinese and untranslated, and
+## site/pages/home.md's closing section says so on the page itself rather than
+## leaving a reader to discover it by clicking.
 pub type Lang =
   | En
   | Zh
@@ -80,42 +81,70 @@ fn nav_link(root: String, active: String, item: (String, String, String)) -> Str
 fn nav_html(lang: Lang, root: String, active: String) -> String =
   join(map(nav_items(lang), it => nav_link(root, active, it)), "\n")
 
+## Where a paired page lives, given `pair` -- its path in the DEFAULT layout,
+## e.g. "index.html" or "tutorial/01.html". The Chinese twin is that same path
+## under `/zh/`, which is the site's one layout rule, and stating it once here
+## is what lets a caller name the pair with a single string instead of writing
+## two hrefs and letting one of them rot. A trailing "index.html" comes off, so
+## the front page keeps advertising itself as `/` and `/zh/`.
+fn site_url(prefix: String, pair: String) -> String = {
+  let clean = str.strip_suffix(pair, "index.html").unwrap_or(pair)
+  "https://dawn-lang.dawnop.com/" ++ prefix ++ clean
+}
+
 ## The alternate-language <link>s, emitted only on the pages that really have
 ## a twin. Absolute, because that is what hreflang wants; the pair is the same
 ## on both members of it, with x-default pointing at the English original.
-fn alternates(alt: String) -> String =
-  if alt == "" {
+##
+## These used to be three constants naming the front page, which was right
+## while the front page was the only paired document and became a lie the
+## moment a second one appeared -- every tutorial chapter would have declared
+## its twin to be the home page. Derived from `pair` now, so the pair is
+## whatever page is being written.
+fn alternates(pair: String) -> String =
+  if pair == "" {
     ""
   } else {
-    `<link rel="alternate" hreflang="en" href="https://dawn-lang.dawnop.com/">` ++ "\n" ++
-      `<link rel="alternate" hreflang="zh-CN" href="https://dawn-lang.dawnop.com/zh/">` ++ "\n" ++
-      `<link rel="alternate" hreflang="x-default" href="https://dawn-lang.dawnop.com/">`
+    let en = site_url("", pair)
+    let zh = site_url("zh/", pair)
+    """<link rel="alternate" hreflang="en" href="$en">""" ++ "\n" ++
+      """<link rel="alternate" hreflang="zh-CN" href="$zh">""" ++ "\n" ++
+      """<link rel="alternate" hreflang="x-default" href="$en">"""
   }
 
-fn lang_switch(lang: Lang, alt: String) -> String =
-  if alt == "" {
+## The switch link in the header, relative because it is a link the reader
+## clicks rather than a URL a crawler indexes.
+fn lang_switch(lang: Lang, root: String, pair: String) -> String =
+  if pair == "" {
     ""
   } else {
-    """<a class="lang" href="$alt" hreflang="${lang_code(other(lang))}">${lang_switch_label(lang)}</a>"""
+    let href =
+      match lang {
+        En -> "$root/zh/$pair"
+        Zh -> "$root/$pair"
+      }
+    """<a class="lang" href="$href" hreflang="${lang_code(other(lang))}">${lang_switch_label(lang)}</a>"""
   }
 
-## The full page around an already-rendered <main>/<div> body. `alt` is the
-## href of this same page in the other language, or "" when there is none.
+## The full page around an already-rendered <main>/<div> body. `pair` is this
+## page's path in the default layout when the page has a twin in the other
+## language -- "index.html", "tutorial/01.html" -- and "" when it has none.
+## One string rather than two hrefs: see [site_url].
 pub fn shell(
   lang: Lang,
-  alt: String,
+  pair: String,
   title: String,
   root: String,
   active: String,
   body: String,
 ) -> String =
-  shell_ext(lang, alt, title, root, active, "", body)
+  shell_ext(lang, pair, title, root, active, "", body)
 
 ## Like [shell], but with extra markup injected into <head> (e.g. the Playground
 ## page's stylesheet + module script).
 pub fn shell_ext(
   lang: Lang,
-  alt: String,
+  pair: String,
   title: String,
   root: String,
   active: String,
@@ -125,8 +154,8 @@ pub fn shell_ext(
   let esc_title = escape_html(title)
   let nav = nav_html(lang, root, active)
   let code = lang_code(lang)
-  let alts = alternates(alt)
-  let switch = lang_switch(lang, alt)
+  let alts = alternates(pair)
+  let switch = lang_switch(lang, root, pair)
   """
 <!DOCTYPE html>
 <html lang="$code">
@@ -160,26 +189,26 @@ $body
 """
 }
 
-## A plain content page. `alt` is the href of this same page in the other
-## language, or "" when there is none -- which is what every caller passes
-## today, because the documents these render are Chinese and untranslated. The
-## parameter is here rather than hard-coded so that translating one of them is
-## an edit at its own call site instead of a change to this shell.
+## A plain content page. `pair` as in [shell]: the tutorial's pages pass their
+## own path and the rest pass "", because the documents they render are Chinese
+## and untranslated. The parameter is here rather than hard-coded so that
+## translating one of them is an edit at its own call site instead of a change
+## to this shell.
 pub fn page(
   lang: Lang,
-  alt: String,
+  pair: String,
   title: String,
   root: String,
   active: String,
   inner: String,
 ) -> String =
-  shell(lang, alt, title, root, active, `<main class="content">` ++ "\n" ++ inner ++ "\n</main>")
+  shell(lang, pair, title, root, active, `<main class="content">` ++ "\n" ++ inner ++ "\n</main>")
 
-## A page with the sticky TOC sidebar (the spec and design pages). `alt` as in
-## [page].
+## A page with the sticky TOC sidebar (the spec and design pages). `pair` as in
+## [shell].
 pub fn page_with_toc(
   lang: Lang,
-  alt: String,
+  pair: String,
   title: String,
   root: String,
   active: String,
@@ -195,7 +224,7 @@ pub fn page_with_toc(
     toc_list(toc) ++ "\n</nav>\n</aside>"
   let body = `<div class="with-toc">` ++ "\n" ++ side ++ "\n" ++
     `<article class="doc">` ++ "\n" ++ article ++ "\n</article>\n</div>"
-  shell(lang, alt, title, root, active, body)
+  shell(lang, pair, title, root, active, body)
 }
 
 ## Nested <ul> for h2/h3 toc entries.
@@ -246,21 +275,39 @@ test "shell carries title, css root, body" {
 
 test "only a page with a twin advertises one" {
   # the English front page: lang=en, a switch to the Chinese one, hreflang pair
-  let home = shell(En, "./zh/index.html", "Dawn", ".", "", "<p>x</p>")
+  let home = shell(En, "index.html", "Dawn", ".", "", "<p>x</p>")
   assert str.contains(home, `<html lang="en">`)
   assert str.contains(home, `<a class="lang" href="./zh/index.html" hreflang="zh-CN">中文</a>`)
   assert str.contains(home, `hreflang="x-default" href="https://dawn-lang.dawnop.com/"`)
   # the Chinese one points back, and says so in the language it leads to
-  let zh = shell(Zh, "../index.html", "Dawn", "..", "", "<p>x</p>")
+  let zh = shell(Zh, "index.html", "Dawn", "..", "", "<p>x</p>")
   assert str.contains(zh, `<html lang="zh-CN">`)
   assert str.contains(zh, `<a class="lang" href="../index.html" hreflang="en">English</a>`)
   # a document page has no twin: no switch, no alternates
   let doc = page(Zh, "", "规范 — Dawn", ".", "spec", "<p>x</p>")
   assert not str.contains(doc, `class="lang"`)
   assert not str.contains(doc, "hreflang")
-  # ...and one that is given a twin advertises it through the same shell
-  let paired = page(Zh, "../spec.html", "规范 — Dawn", ".", "spec", "<p>x</p>")
-  assert str.contains(paired, `<a class="lang" href="../spec.html" hreflang="en">English</a>`)
+}
+
+## The half a single-pair site could not distinguish: with the front page the
+## only paired document, "the twin of this page" and "the home page" were the
+## same three URLs, and the constants that used to stand here passed either
+## reading. A tutorial chapter tells them apart.
+test "a paired page names its own twin, not the home page" {
+  let en = page(En, "tutorial/03.html", "x — Dawn Tutorial", "..", "tutorial", "<p>x</p>")
+  assert str.contains(en, `<a class="lang" href="../zh/tutorial/03.html" hreflang="zh-CN">中文</a>`)
+  assert str.contains(en,
+    `hreflang="en" href="https://dawn-lang.dawnop.com/tutorial/03.html"`)
+  assert str.contains(en,
+    `hreflang="zh-CN" href="https://dawn-lang.dawnop.com/zh/tutorial/03.html"`)
+  # the twin, two directories deeper, points back at the same pair
+  let zh = page(Zh, "tutorial/03.html", "x — Dawn 教程", "../..", "tutorial", "<p>x</p>")
+  assert str.contains(zh, `<a class="lang" href="../../tutorial/03.html" hreflang="en">English</a>`)
+  assert str.contains(zh,
+    `hreflang="en" href="https://dawn-lang.dawnop.com/tutorial/03.html"`)
+  # an index is advertised as its directory, so the front page stays / and /zh/
+  assert str.contains(page(En, "tutorial/index.html", "t", "..", "tutorial", ""),
+    `hreflang="zh-CN" href="https://dawn-lang.dawnop.com/zh/tutorial/"`)
 }
 
 test "toc nests h3 under its h2" {

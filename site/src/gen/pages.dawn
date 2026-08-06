@@ -145,19 +145,21 @@ fn feature_section(c: Copy, mu: fn(String) -> String) -> String !io = {
 ## translation digest says when it has.
 pub fn gen_index(out: String, lang: Lang) -> Unit !io = {
   let docs = doc_files()
-  let (src, dst, root, alt, title) =
+  let (src, dst, root, title) =
     match lang {
-      En -> ("site/pages/home.md", "$out/index.html", ".", "./zh/index.html",
+      En -> ("site/pages/home.md", "$out/index.html", ".",
         "Dawn — a small, elegant functional language")
-      Zh -> ("site/pages/home.zh.md", "$out/zh/index.html", "..", "../index.html",
-        "Dawn 语言")
+      Zh -> ("site/pages/home.zh.md", "$out/zh/index.html", "..", "Dawn 语言")
     }
   let c = load_copy(src)
   let mu = (u: String) => map_doc_url(root, docs, u)
   let page_body = `<main class="home">` ++ "\n" ++ hero_html(c, mu, root) ++ "\n</main>\n" ++
     `<section class="features">` ++ "\n" ++ feature_section(c, mu) ++ "\n" ++
     body(c, "closing", mu) ++ "\n</section>"
-  write_page(dst, shell(lang, alt, title, root, "", page_body))
+  # `index.html` is the pair's path in the default layout; the shell derives
+  # both the switch link and the hreflang URLs from it, so neither branch above
+  # has to spell out where the other one lives.
+  write_page(dst, shell(lang, "index.html", title, root, "", page_body))
 }
 
 ## The spec and the design notes, each one document rendered whole.

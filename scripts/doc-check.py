@@ -30,7 +30,8 @@ gets disabled, and then it protects nothing):
   count     every claim about how many documents docs/ holds equals how many
             it holds, and every one of them is linked from docs/README.md
   transl    every translated document registers the digest of the original it
-            was translated from, and that digest is still the original's
+            was translated from, that digest is still the original's, and its
+            fenced blocks line up one-for-one with the original's
 
 Blocks are opt-in rather than opt-out: most examples in the spec are
 fragments -- a type declaration, three lines of a match -- and demanding
@@ -145,6 +146,14 @@ check whose blind spot is undocumented gets mistaken for a check:
     Chinese the translation, so rot lands on the Chinese side, whose reader is
     the author. The other arrangement puts the rot on the side everybody
     reads and nobody proofreads.
+    The fence half is a *shape* check, not a byte comparison, and the reason
+    is measured: README.zh-CN.md translates the comments inside its ```dawn
+    and ```bash blocks, which is the convention here -- the code is the same
+    program, the prose wrapped around and inside it is translated. So what is
+    compared is the sequence of info strings, which is what says the two
+    documents show the same examples in the same order. A fence added, dropped
+    or retyped on one side only is caught; a comment translated inside one is
+    not, and must not be.
   * count: the number is read only off lines carrying the
     `<!-- doc-check: doc-count -->` marker, for the same reason version does
     not match a bare semver -- most numbers in this corpus are counts of
@@ -202,13 +211,16 @@ DOCS = sorted(
 # a failure.
 #
 # Scope, decided rather than drifted into: the outward-facing layer only --
-# the README and the website's front page. docs/ is 61 documents of design
-# notes, plans and a specification whose reader is the author; translating
-# them would produce 61 more documents to keep level, and a half-translated
-# corpus is worse than an honestly monolingual one. Both faces of the site say
-# so in their own closing paragraph.
+# the README, the website's front page, and the tutorial. Those are the three
+# documents whose reader is a stranger. The rest of docs/ is design notes,
+# plans and a specification whose reader is the author; translating them would
+# produce fifty-odd more documents to keep level, and a half-translated corpus
+# is worse than an honestly monolingual one. Every face of the site says so in
+# its own closing paragraph, so a reader is told rather than left to find out
+# by clicking.
 TRANSLATIONS = {
     "README.zh-CN.md": "README.md",
+    "docs/tutorial.zh-CN.md": "docs/tutorial.md",
     "site/pages/home.zh.md": "site/pages/home.md",
 }
 
@@ -282,7 +294,13 @@ FENCE = re.compile(r"^```([^\n]*)\n(.*?)^```[ \t]*$", re.M | re.S)
 # document a reader is expected to retype rather than consult. That is what
 # earns it the stricter rule; a set rather than a constant so that adding a
 # second such document is a one-line change with a visible diff.
-STRICT_FENCE_DOCS = {"docs/tutorial.md"}
+#
+# Its translation is held to the same rule rather than riding on the original's
+# compliance: the two files' fences are the same *shape* (check_translations
+# says so) but not the same bytes -- the comments inside them are translated --
+# so the translation's blocks are its own to get right, and check_blocks runs
+# them as its own.
+STRICT_FENCE_DOCS = {"docs/tutorial.md", "docs/tutorial.zh-CN.md"}
 # `<!-- doc-check: skip-check 多文件项目的一半，单独编不了 -->`
 SKIP_REASON = re.compile(
     r"^[ \t]*<!--[ \t]*doc-check:[ \t]*skip-check[ \t]+(\S[^>]*?)[ \t]*-->[ \t]*$")
@@ -771,7 +789,42 @@ def check_translations() -> tuple[list[str], int]:
                 f"{rel_tr}: registered against {rel_src} @ {got}, but {rel_src} "
                 f"is now @ {want}. {rel_src} is the original: update the "
                 f"translation to match it, then re-register the digest.")
+            continue
+        bad += fence_shape_mismatch(rel_tr, tr_text, rel_src, src_text)
     return bad, seen
+
+
+def fence_shape_mismatch(rel_tr: str, tr_text: str,
+                         rel_src: str, src_text: str) -> list[str]:
+    """The two documents show the same examples, in the same order.
+
+    The digest above is computed over the *original* alone: it says which
+    revision the translator worked from and nothing at all about what came out.
+    So a fence dropped from the translation, or a ```dawn run block that lost
+    its ```output fence on one side only, is invisible to it -- and in the
+    tutorial, where two thirds of the page is fenced, that is most of the
+    document.
+
+    Info strings, not bodies. README.zh-CN.md translates the comments inside
+    its blocks and that is the convention this repository already had before
+    the tutorial joined it: the same program, with the prose in it translated.
+    Demanding equal bytes would forbid that, and a lint that forbids the
+    correct thing gets switched off. What the info strings pin down is the one
+    property a reader can be hurt by -- the two pages showing a different
+    number of examples, or a different kind of example in the same place."""
+    src_fences = [info for info, _body, _line in fences(src_text)]
+    tr_fences = [info for info, _body, _line in fences(tr_text)]
+    if src_fences == tr_fences:
+        return []
+    if len(src_fences) != len(tr_fences):
+        return [f"{rel_tr}: {len(tr_fences)} fenced block(s), but {rel_src} has "
+                f"{len(src_fences)}. A translation shows the same examples as "
+                f"the original, in the same order."]
+    for i, (want, got) in enumerate(zip(src_fences, tr_fences)):
+        if want != got:
+            return [f"{rel_tr}: fenced block #{i + 1} is ```{got}, but the one in "
+                    f"the same place in {rel_src} is ```{want}."]
+    return []
 
 
 def fences(text: str) -> list[tuple[str, str, int]]:

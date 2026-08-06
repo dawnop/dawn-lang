@@ -77,14 +77,31 @@ fn chapter_nav(chapters: List[Chapter], i: Int, lang: Lang) -> String = {
   `<nav class="chapter-nav">` ++ "\n" ++ prev ++ "\n" ++ next ++ "\n</nav>"
 }
 
-## The tutorial: an index page plus one page per `##` chapter. `lang` is what
-## the document is written in; as in [gen_spec] the output paths are still the
-## Chinese layout's, so passing `En` today writes over the Chinese pages.
+## Which file this language's tutorial is written in, where its pages go, and
+## how far it is from the site root. English is the original and takes the
+## default layout; the translation sits under `/zh/`, the same place the
+## Chinese front page does.
+fn tutorial_source(out: String, lang: Lang) -> (String, String, String) =
+  match lang {
+    En -> ("docs/tutorial.md", "$out/tutorial", "..")
+    Zh -> ("docs/tutorial.zh-CN.md", "$out/zh/tutorial", "../..")
+  }
+
+## The tutorial: an index page plus one page per `##` chapter. Called once per
+## language, and `lang` picks all three of the source document, the output
+## directory and the depth every relative link is written from -- so the two
+## runs land beside each other instead of on top of each other.
+##
+## Every page here is paired, and the pair is named by its path in the default
+## layout (`tutorial/03.html`) rather than by a pair of hrefs; html/page.dawn's
+## [site_url] turns that into the switch link and the hreflang URLs, which
+## differ between the two runs only in `root`.
 pub fn gen_tutorial(out: String, lang: Lang) -> Unit !io = {
+  let (src, dir, root) = tutorial_source(out, lang)
   let blocks =
-    match parse(must_read("docs/tutorial.md")) {
+    match parse(must_read(src)) {
       Ok(bs) -> bs
-      Err(e) -> panic("docs/tutorial.md: $e")
+      Err(e) -> panic("$src: $e")
     }
   let (intro, chapters) = split_chapters(blocks)
   let n = len(chapters)
@@ -94,11 +111,12 @@ pub fn gen_tutorial(out: String, lang: Lang) -> Unit !io = {
   for i in range(0, n) {
     match get(chapters, i) {
       Some(c) -> {
-        let doc = render_doc([Heading(1, c.title)] ++ c.body, u => map_doc_url("..", docs, u))
+        let doc = render_doc([Heading(1, c.title)] ++ c.body, u => map_doc_url(root, docs, u))
         let html = doc.html ++ chapter_nav(chapters, i, lang)
         let title = inline_text(c.title)
-        write_page("$out/tutorial/${pad2(i + 1)}.html",
-          page(lang, "", "$title — ${tutorial_name(lang)}", "..", "tutorial", html))
+        write_page("$dir/${pad2(i + 1)}.html",
+          page(lang, "tutorial/${pad2(i + 1)}.html",
+            "$title — ${tutorial_name(lang)}", root, "tutorial", html))
       }
       None -> {
         panic("unreachable chapter index")
@@ -107,13 +125,19 @@ pub fn gen_tutorial(out: String, lang: Lang) -> Unit !io = {
   }
 
   # index: the intro plus a chapter list
-  let intro_doc = render_doc(intro, u => map_doc_url("..", docs, u))
+  let intro_doc = render_doc(intro, u => map_doc_url(root, docs, u))
   var items = ""
   for i in range(0, n) {
     items = items ++ "\n" ++
       """<li><a href="${pad2(i + 1)}.html">${chapter_title(chapters, i)}</a></li>"""
   }
   let listing = "<ul class=\"chapter-list\">" ++ items ++ "\n</ul>"
-  write_page("$out/tutorial/index.html",
-    page(lang, "", tutorial_name(lang), "..", "tutorial", intro_doc.html ++ listing))
+  write_page("$dir/index.html",
+    page(lang, "tutorial/index.html", tutorial_name(lang), root, "tutorial",
+      intro_doc.html ++ listing))
+}
+
+test "each language's tutorial reads its own file and lands in its own place" {
+  assert tutorial_source("d", En) == ("docs/tutorial.md", "d/tutorial", "..")
+  assert tutorial_source("d", Zh) == ("docs/tutorial.zh-CN.md", "d/zh/tutorial", "../..")
 }
