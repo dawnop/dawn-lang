@@ -857,7 +857,7 @@ pub fn check_unary(
   match op {
     OpNot -> {
       if t != TyBool && not is_errorish(t) {
-        let cx1 = cerr(cx, "not expects Bool, got " ++ ty_show(cx.adts, t), olo, ohi)
+        let cx1 = cerr(cx, "`not` expects Bool, got " ++ ty_show(cx.adts, t), olo, ohi)
         (cx1, TyError, XError(lo, hi))
       } else {
         (cx, TyBool, XUnary(UNot, operand, lo, hi, TyBool))
@@ -1018,7 +1018,7 @@ pub fn check_binary_typed(
       }
       if lt != rt {
         let hint: Option[String] = if is_numeric(rt) {
-          Some("there are no implicit conversions; use to_float() (M1) or unify the literal types")
+          Some("there are no implicit conversions; use to_float() or unify the literal types")
         } else {
           None
         }
@@ -1429,7 +1429,7 @@ pub fn check_propagate_typed(cx: Cx, ot: Ty, operand: TExpr, lo: Int, hi: Int) -
             if rargs[1] != targs[1] {
               return (cerr_h(cx, "`?` error types differ: " ++ ty_show(cx.adts, ot) ++ " vs " ++
                   ty_show(cx.adts, sig_ret), lo, hi,
-                "v0.1 has no automatic error conversion; match and rewrap the error"),
+                "there is no automatic error conversion; match and rewrap the error"),
                 TyError, XError(lo, hi))
             }
             return (cx, targs[0], node(targs[0]))
@@ -4271,7 +4271,7 @@ fn check_stmt(cx: Cx, s: Stmt) -> (Cx, TStmt) !io =
       let (cxa, ct, cnx) = check_expr(cx1, cond, no_expected())
       cx1 = cxa
       if ct != TyBool && not is_errorish(ct) {
-        cx1 = cerr(cx1, "assert expects Bool, got " ++ ty_show(cx1.adts, ct), e_lo(cond), e_hi(cond))
+        cx1 = cerr(cx1, "`assert` expects Bool, got " ++ ty_show(cx1.adts, ct), e_lo(cond), e_hi(cond))
       }
       (cx1, TSAssert(cnx, src, lo, hi))
     }
@@ -5590,7 +5590,7 @@ fn map_java_return(cx: Cx, rc: String, nlo: Int, nhi: Int) -> (Cx, Ty) !io =
   } else if rc == "boolean" {
     (cx, TyBool)
   } else if rc == "char" {
-    (cerr_h(cx, "`char` returns are not supported in v0.1", nlo, nhi,
+    (cerr_h(cx, "`char` returns are not supported", nlo, nhi,
       "there is no char type; wrap the call in the standard library instead"), TyError)
   } else if rc == "java.lang.String" {
     (cx, opt_ty(TyString))
@@ -5750,7 +5750,7 @@ fn check_java_call(
     }
     let stat = if is_static { "static " } else { "" }
     return (cerr_h(cx1, "`" ++ cls.fqcn ++ "` has no " ++ stat ++ "method `" ++ name ++ "`",
-      nlo, nhi, "Java calls are " ++ shape ++ "; fields are not supported in v0.1"),
+      nlo, nhi, "Java calls are " ++ shape ++ "; a public static field is read as `Class.FIELD`, and no other field is readable"),
       TyError, XError(lo, hi))
   }
   var bph = -1
