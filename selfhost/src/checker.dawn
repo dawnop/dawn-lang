@@ -49,7 +49,7 @@ use types.{
   eff_base, eff_labels, eff_with_labels,
   Adts, AdtI, CtorI, FieldI, Traits, ImplI, Sym, Sig,
   adt_of, trait_of, ty_show, ctor_render, sig_render, subst, subst_eff, eff_show,
-  ty_mentions_var,
+  ty_mentions_var, ty_map_children, ty_any_child,
   is_numeric, is_errorish,
   prelude_traits, bounds_of,
   prelude_trait_ids,
@@ -425,19 +425,7 @@ pub fn reduce_assoc(cx: Cx, t: Ty) -> Ty =
           }
       }
     }
-    TyAdt(aid, targs) ->
-      if len(targs) == 0 { t } else { TyAdt(aid, map(targs, x => reduce_assoc(cx, x))) }
-    TyList(e) -> TyList(reduce_assoc(cx, e))
-    TyMap(k, v) -> TyMap(reduce_assoc(cx, k), reduce_assoc(cx, v))
-    TySet(e) -> TySet(reduce_assoc(cx, e))
-    TyArray(e) -> TyArray(reduce_assoc(cx, e))
-    TyTuple(elems) -> TyTuple(map(elems, x => reduce_assoc(cx, x)))
-    TyOpaque(id, n2, ow, tgt) -> TyOpaque(id, n2, ow, reduce_assoc(cx, tgt))
-    TyFn(params, ret, eff) ->
-      TyFn(map(params, x => reduce_assoc(cx, x)), reduce_assoc(cx, ret), eff)
-    TyVar(_, _) -> t
-    TyInt | TyFloat | TyBool | TyString | TyBytes -> t
-    TyUnit | TyNever | TyError | TyJava(_, _) -> t
+    _ -> ty_map_children(t, x => reduce_assoc(cx, x))
   }
 
 ## The impl a projection reduces through: the subject's own, or -- for an
@@ -645,27 +633,20 @@ pub fn is_concrete(cx: Cx, t: Ty) -> Bool =
       }
       false
     }
-    TyAdt(_, targs) -> {
-      for a in targs {
-        if not is_concrete(cx, a) { return false }
-      }
-      true
-    }
-    TyList(e) -> is_concrete(cx, e)
-    TyMap(k, v) -> is_concrete(cx, k) && is_concrete(cx, v)
-    TySet(e) -> is_concrete(cx, e)
-    TyArray(e) -> is_concrete(cx, e)
-    # an opaque type's arguments live in its target, so concreteness does too --
-    # missing this makes `Pair[T]` at a rigid T look concrete, and the expected
-    # result type then binds the callee's type parameters before its arguments can
-    TyOpaque(_, _, _, tgt) -> is_concrete(cx, tgt)
-    TyTuple(elems) -> {
-      for a in elems {
-        if not is_concrete(cx, a) { return false }
-      }
-      true
-    }
-    _ -> true
+    # The two variants this walk stops at rather than descending into. A
+    # function type is concrete as a *value*: what an expected `fn(T) -> T`
+    # licenses is passing a lambda, and a still-rigid T in it is the lambda's
+    # to close over, not a hole in the expectation. A projection over a rigid
+    # subject is the shape reduction is allowed to leave standing (D3), so
+    # calling it unknown would put every `T.Item` parameter back in round two.
+    #
+    # Not a wildcard, and not the kernel: both used to reach `_ -> true` by
+    # accident of arm order, which is also how `TyOpaque` was missed once --
+    # `Pair[T]` at a rigid T looked concrete, and the expected result type then
+    # bound the callee's type parameters before its arguments could.
+    TyFn(_, _, _) -> true
+    TyAssoc(_, _, _) -> true
+    _ -> not ty_any_child(t, x => not is_concrete(cx, x))
   }
 
 ## The first part of `t` that `tid` has no answer for, or None.

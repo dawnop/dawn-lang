@@ -533,24 +533,7 @@ pub fn reduce_via_bindings(t: Ty, tid: Int, subject: Ty, bindings: List[(String,
         TyAssoc(s2, t0, n)
       }
     }
-    TyAdt(aid, targs) ->
-      if len(targs) == 0 { t } else {
-        TyAdt(aid, map(targs, x => reduce_via_bindings(x, tid, subject, bindings)))
-      }
-    TyList(e) -> TyList(reduce_via_bindings(e, tid, subject, bindings))
-    TyMap(k, v) ->
-      TyMap(reduce_via_bindings(k, tid, subject, bindings),
-        reduce_via_bindings(v, tid, subject, bindings))
-    TySet(e) -> TySet(reduce_via_bindings(e, tid, subject, bindings))
-    TyArray(e) -> TyArray(reduce_via_bindings(e, tid, subject, bindings))
-    TyTuple(elems) -> TyTuple(map(elems, x => reduce_via_bindings(x, tid, subject, bindings)))
-    TyOpaque(id, n2, ow, tgt) -> TyOpaque(id, n2, ow, reduce_via_bindings(tgt, tid, subject, bindings))
-    TyFn(params, ret, eff) ->
-      TyFn(map(params, x => reduce_via_bindings(x, tid, subject, bindings)),
-        reduce_via_bindings(ret, tid, subject, bindings), eff)
-    TyVar(_, _) -> t
-    TyInt | TyFloat | TyBool | TyString | TyBytes -> t
-    TyUnit | TyNever | TyError | TyJava(_, _) -> t
+    _ -> ty_map_children(t, x => reduce_via_bindings(x, tid, subject, bindings))
   }
 
 ## Substitution walks the normal form component by component: the base axis
