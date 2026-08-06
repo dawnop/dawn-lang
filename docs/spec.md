@@ -1668,8 +1668,8 @@ use java "java.lang.Math"      # Java 互操作（§9），形式不变
 std 一起捆绑、在 std 内部互相引用，但 **std 之外 `use std/hamt` / `use std/pvec` 是编译
 错误**：表示要能整体换掉，而能换的前提是没有程序依赖它。
 （`std/fmt` 是数字渲染与解析的实现处——`fmt.dtoa` 即 `to_string(Float)`（§4.3）；三个
-`parse_*`（§11 的 EBNF）的实现自 v0.55.0 起**不再导出**，只有内建拼写这一种写法，
-`fmt.atoi`/`fmt.atod`/`fmt.atoi_radix` 已不是可写的名字。模块名存在是因为实现是一份
+`parse_*`（§11 的 EBNF）的实现**不导出**，只有内建拼写这一种写法，
+`fmt.atoi`/`fmt.atod`/`fmt.atoi_radix` 不是可写的名字。模块名存在是因为实现是一份
 普通的 Dawn 源码而非某个后端的宿主方法，不是因为它是一层 API。）
 `use std/x` 命中编译器 jar 内的资源而非磁盘（磁盘上 `src/std/` 路径**保留**，落文件报错）；
 之后与普通模块引入完全一致——限定访问 `map.insert(m, k, v)`、选择性引入
@@ -1693,9 +1693,9 @@ std → 内建，std 模块自己的 `pub fn len` 正是靠这一条合法。**p
 > 新名要么没被用到，要么被本模块的声明遮蔽。这条是 prelude 可以演进的前提
 > （[`prelude-namespace-design.md`](prelude-namespace-design.md)）。
 
-> **历史（v0.4.0 → v0.5.0）**：模块化之前的平铺拼写（`map_insert`、`str_len`、
-> `trim` 的隐式可见等）在 v0.4.0 保留了一版并逐处警告，v0.5.0 已从公开命名空间
-> 移除——只剩 prelude 与模块限定两条路；旧拼写的报错会提示它搬去了哪个模块。
+> 模块化之前的**平铺拼写**（`map_insert`、`str_len` 等）已不在公开命名空间里——
+> 只剩 prelude 与模块限定两条路；写出旧拼写，报错会提示它搬去了哪个模块。
+> 沿革见 [`stdlib-naming.md`](stdlib-naming.md)。
 
 ---
 
@@ -1756,9 +1756,9 @@ UTF-16 码元。`char_is_letter`/`_digit`/`_alnum`/`_upper`/`_lower`/`_space` �
 `truncate` 就是 `take`，不另设一个名字。
 
 **字节与文本编码。** 语言承诺的字符集只有两个，且**函数名即定义域**：`bytes.decode_utf8`
-与 `bytes.decode_latin1`，没有字符集注册表（审计 RP-04 裁决 C）。带 charset 参数的旧
-`bytes.decode` 与它底下的原语都已删除——没有 charset 参数就没有「不认识的字符集」这个
-失败面，故它们返回裸 `String` 而非 `Option`。
+与 `bytes.decode_latin1`，没有字符集注册表。没有 charset 参数就没有「不认识的字符集」
+这个失败面，故它们返回裸 `String` 而非 `Option`（沿革见
+[`stdlib-impl-notes.md`](stdlib-impl-notes.md)）。
 
 hex 与 base64 是纯 Dawn 字节算术（无 `use java`，故两后端同一份定义），规则是规范性的：
 `to_hex` 每字节两位、**小写**为规范拼写，`from_hex` 大小写皆收、其余一概不收；`to_base64`
@@ -1798,26 +1798,19 @@ hex 与 base64 是纯 Dawn 字节算术（无 `use java`，故两后端同一份
 上（外面来的 `Int` 下标进来、位置要报给外面时）；放进循环就变回它要消灭的 O(n²)。
 单串一次调用用下标版没问题，**循环里必须用游标版**——`docs/seq6-research.md` §五之补有实测。
 
-> 它曾是编译器铸造的不透明标量——`Ty` 的一个变体、`Head` 的一支、eq/hash 标量表里各一行、
-> 七个文件里各一条 arm。同样的保证，现在没有自己的机制。顺带修掉一处自相矛盾：从前
-> `a < b` 编得过而 `list.sort` 报 Cursor 无序，因为回答这两个问题的是两张表；现在
-> `impl Ord[Cursor]` 一处回答两个。
-
 **容器的表示。** `Map`/`Set` 的表示是纯 Dawn 的 `std/hamt`（持久 HAMT）、`List` 的是
 `std/pvec`（持久向量），它们是**内部模块**：`use std/hamt` / `use std/pvec` 在 std 之外是
 编译错误，诊断指回 `std/map`/`std/set`/`std/list`（§10.6）。表示要能换，而能换的前提是
 没人依赖它——[标准库参考](https://dawn-lang.dawnop.com/stdlib.html)因此也不列这两个模块。
 容器的语义（持久接口、键须 `Eq + Hash`、迭代按插入序、相等与顺序无关）在 §2.2。
 
-**IO 的表态。** `std/io` 全部 `!io`，会失败的一律回 `Result[T, ForeignError]`（§9.8.1）。
-到 v0.32.0 为止是 `Result[T, String]`，装的是屏障渲染好的那句话；换成结构化载荷，是因为
-「止在 std 门口」等于把这次要消灭的东西留给每一个调用方。另有三条规范性行为：
+**IO 的表态。** `std/io` 全部 `!io`，会失败的一律回 `Result[T, ForeignError]`（§9.8.1）——
+结构化载荷而非屏障渲染好的那句话，理由见
+[`audit/error-model-design.md`](audit/error-model-design.md)。另有三条规范性行为：
 
-- `io.write_file(path, content)` **自动创建缺失的父目录**。`Ok` 不带值：曾返回
-  `String.length()`（UTF-16 码元，既不是字符数也不是字节数），2026-07-19 去掉——没有调用点读它
+- `io.write_file(path, content)` **自动创建缺失的父目录**。`Ok` 不带值
 - `io.list_dir(path)` 的条目名按**码点序**排序。排序在 std 层做（`list.sort` 走语言自己的
-  `Ord[String]`），`io_list_names` 原语不承诺顺序——各后端不再各排各的（JVM 曾用
-  `Arrays.sort`，UTF-16 码元序，astral 文件名会排在 U+E000..U+FFFF 之前）。path 不是目录时
+  `Ord[String]`），`io_list_names` 原语不承诺顺序——各后端不再各排各的。path 不是目录时
   `Err`，`kind` 是 `"io.not_a_directory"`——std 自己铸的唯一一个 kind，其余都是后端给的
 - `io.is_dir(path)` 不存在或出错都视为 `false`
 - `io.stdin_ready(timeout_ms)` 只答一件事：**此刻是否至少有一字节可读**。
@@ -1840,11 +1833,12 @@ hex 与 base64 是纯 Dawn 字节算术（无 `use java`，故两后端同一份
     **替换**：非法序列换成 U+FFFD，规则逐字沿用 `bytes.decode_utf8`（一个非法序列一个
     U+FFFD，不是一个字节一个）。文件名不是 UTF-8 仍然是个文件名，拒绝它等于让程序连目录
     都列不了
-  - 由此得一条不变式：**`String` 里没有非良构的 UTF-8**。这不是修辞——`c0 af` 原样进了
-    字符串，下游走码点的那些原语会把它当成 `/`（#112 / #113）
+  - 由此得一条不变式：**`String` 里没有非良构的 UTF-8**。这不是修辞——它挡的是
+    overlong 编码顺流而下、被下游按码点走的原语当成真字符
+    （[`stdlib-impl-notes.md`](stdlib-impl-notes.md)）
 
 **数学**（`abs min max sin cos sqrt pow to_float to_int ...`）是纯的——内部以 `unsafe_pure`
-包装 `java.lang.Math`；`@trusted_pure` 是该逃生门的旧名，已废弃。
+包装 `java.lang.Math`。
 
 实现策略：能薄包 Java 就薄包（`String` 直接是 `java.lang.String`），持久 `List`/`Map`/`Set`
 全部是**纯 Dawn 源**（`List` = `std/pvec` 持久向量，`Map`/`Set` = `std/hamt` 持久 HAMT，
