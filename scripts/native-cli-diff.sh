@@ -218,20 +218,36 @@ DAWN_SELF="$DAWNC" ./scripts/selfhost-lsp-diff.sh
 # System.out's autoflush rule; this is the check that says so.
 echo "== lsp responds before end of input, both backends =="
 if python3 - "$DAWNC" <<'PYEOF'
-import json, select, subprocess, sys, time
+import json, os, select, signal, subprocess, sys, time
 body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize",
                    "params": {"processId": None, "rootUri": None, "capabilities": {}}}).encode()
+
+
+def reap(p):
+    """Kill the process GROUP, not the process.
+
+    ./bin/dawn is a launcher that rebuilds the toolchain in a child JVM before
+    it execs the driver, so a kill landing mid-rebuild reaps the wrapper and
+    leaves the compile running. Same rule as leg 8 and scripts/lsp-liveness.py:
+    what was spawned as a session gets killed as a session."""
+    try:
+        os.killpg(os.getpgid(p.pid), signal.SIGKILL)
+    except OSError:
+        p.kill()
+    p.wait()
+
+
 bad = 0
 for label, cmd in [("jvm", ["./bin/dawn", "lsp"]), ("native", [sys.argv[1], "lsp"])]:
+    # own session, so `reap` below has a group to aim at
     p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                         stderr=subprocess.DEVNULL)
+                         stderr=subprocess.DEVNULL, start_new_session=True)
     p.stdin.write(b"Content-Length: %d\r\n\r\n%s" % (len(body), body))
     p.stdin.flush()  # and leave it open, the way a client holds the session
     t0 = time.time()
     ready = select.select([p.stdout], [], [], 60.0)[0]
     head = p.stdout.read(16) if ready else b""
-    p.kill()
-    p.wait()
+    reap(p)
     if head.startswith(b"Content-Length:"):
         print("OK   lsp %s answered in %.2fs with stdin still open" % (label, time.time() - t0))
     else:
@@ -491,13 +507,43 @@ EOF
 # waiting rather than by flushing. The window starts when the first byte
 # arrives.
 if python3 - "$DAWNC" "$ROOT" "$OUT/hang.dawn" <<'PYEOF'
-import select, subprocess, sys, time
+import os, select, signal, subprocess, sys, time
 dawnc, root, fixture = sys.argv[1], sys.argv[2], sys.argv[3]
+
+
+def reap(p):
+    """Kill the process GROUP, not the process.
+
+    Neither driver runs the tests itself: the JVM one spawns `java
+    dawn$TestMain` over freshly emitted classes and waits (main.dawn,
+    spawn_java), and the native one builds a binary under /tmp/dawnc-test.*
+    and runs it (nmain.dawn, build_and_exec). A SIGKILL to the driver cannot
+    be caught -- no shutdown hook, no `finally` -- so it takes the waiter and
+    leaves the grandchild, which is the one process here that never returns by
+    construction. Measured: `p.kill()` left a dawn$TestMain and a
+    /tmp/dawnc-test.*/tests burning a core each, long after this script had
+    printed OK and exited; several accumulated over a few gate runs, and the
+    native ones also kept dcap's fixed-name build scope alive (its cgroup is
+    non-empty until they die), blocking every later build on the box.
+
+    So the kill has to reach whatever the driver started. Both drivers spawn
+    without touching the process group, so start_new_session plus killpg is
+    exactly the whole subtree -- the rule scripts/lsp-liveness.py already
+    follows for the same reason."""
+    try:
+        os.killpg(os.getpgid(p.pid), signal.SIGKILL)
+    except OSError:
+        p.kill()
+    p.wait()
+
+
 bad = 0
 got = {}
 for label, cmd in [("jvm", [root + "/bin/dawn"]), ("native", [dawnc])]:
+    # own session, so `reap` below has a group to aim at
     p = subprocess.Popen(cmd + ["test", "--std", root + "/std", fixture],
-                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                         start_new_session=True)
     # Five minutes for the first byte, because the native side compiles the
     # program before it runs it (measured at well under one). Then 30 seconds
     # to see the rest of what a hung suite is supposed to have said. A runner
@@ -515,8 +561,7 @@ for label, cmd in [("jvm", [root + "/bin/dawn"]), ("native", [dawnc])]:
         seen += chunk
         if seen.count(b"PASS  ") >= 2:
             break
-    p.kill()
-    p.wait()
+    reap(p)
     got[label] = seen.decode("utf-8", "replace")
     n = got[label].count("PASS  ")
     if n == 2:

@@ -158,8 +158,10 @@ gone blind, and this repository has been bitten by that difference.
 """
 
 import hashlib
+import os
 import pathlib
 import re
+import signal
 import subprocess
 import sys
 import tempfile
@@ -230,12 +232,28 @@ EXAMPLE_TIMEOUT = 120
 def run_example(cmd: list[str], **kw):
     """Run one example under EXAMPLE_TIMEOUT. `None` means it timed out; the
     caller reports it, because only the caller knows which document it came
-    from."""
+    from.
+
+    Spawned as its own session and killed as one. `dawn run` does not run the
+    program: it emits classes to a temp directory, spawns a child JVM over them
+    and waits (selfhost/src/main.dawn, spawn_java). subprocess.run's timeout
+    handling kills the direct child only -- so the looping example this bound
+    exists to catch would keep looping after the gate had named it and exited,
+    one orphan per hang, each burning a core until somebody noticed. The bound
+    has to reap what it bounded; same rule as scripts/native-cli-diff.sh and
+    scripts/lsp-liveness.py."""
+    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                         text=True, start_new_session=True, **kw)
     try:
-        return subprocess.run(cmd, capture_output=True, text=True,
-                              timeout=EXAMPLE_TIMEOUT, **kw)
+        out, err = p.communicate(timeout=EXAMPLE_TIMEOUT)
     except subprocess.TimeoutExpired:
+        try:
+            os.killpg(os.getpgid(p.pid), signal.SIGKILL)
+        except OSError:
+            p.kill()
+        p.communicate()
         return None
+    return subprocess.CompletedProcess(cmd, p.returncode, out, err)
 
 
 LINK = re.compile(r"\[[^\]]*\]\(([^)]+)\)")

@@ -228,6 +228,40 @@ while :; do
 done
 
 printf '%s pid=%s exit=%s elapsed=%ss\n' "$(date -Is)" "$$" "$rc" "$(( $(date +%s) - start ))" >> "$LOG"
+
+# --- interlock 2, the other half: the payload is done, so the unit must go ---
+# A scope stays ACTIVE while its cgroup is non-empty, and it is not systemd-run
+# that keeps it there -- systemd-run exits with the payload and systemd marks
+# the scope abandoned, still holding the name. So one process that outlived the
+# payload takes $UNIT hostage for as long as it runs, and because the name IS
+# the mutex, every later dcap on this box blocks on it. Observed 2026-08-05: a
+# gate that SIGKILLed a test driver left the grandchild spinning, and the next
+# dcap spent 317 retries and its whole WAIT budget on "Failed to start
+# transient scope unit" for a run that had finished hours earlier.
+#
+# That leak is fixed at its source (scripts/native-cli-diff.sh reaps the
+# process group now), but "no gate ever leaks a child again" is not a property
+# this script gets to assume, and the cost of assuming it wrongly is every
+# build on the box. So: the run is over, therefore the scope is over. Anything
+# still in that cgroup is by definition not the payload, and stopping the unit
+# kills it.
+#
+# The grace loop is there because scope teardown is async -- a perfectly clean
+# run can still read active for a moment, and reporting that as a leak would
+# make this warning noise instead of signal.
+for _ in 1 2 3 4 5 6; do
+  [ "$(systemctl show "$UNIT" -p ActiveState --value 2>/dev/null || true)" = active ] || break
+  sleep 0.5
+done
+if [ "$(systemctl show "$UNIT" -p ActiveState --value 2>/dev/null || true)" = active ]; then
+  leaked=$(systemctl show "$UNIT" -p TasksCurrent --value 2>/dev/null || echo '?')
+  echo "dcap: $UNIT still holds $leaked task(s) after the payload exited -- something" >&2
+  echo "      leaked a child. Stopping the scope; report it rather than just retrying." >&2
+  printf '%s pid=%s leaked_tasks=%s cmd=%s\n' "$(date -Is)" "$$" "$leaked" "$cmd_str" >> "$LOG"
+  sudo -n systemctl stop "$UNIT" 2>/dev/null || true
+  sudo -n systemctl reset-failed "$UNIT" 2>/dev/null || true
+fi
+
 # Keep the payload script when the run was killed by a signal: at that point it
 # is the only copy of what was about to run, and it costs one file.
 if [ "$rc" -ge 128 ]; then
