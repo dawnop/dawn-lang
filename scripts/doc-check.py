@@ -211,17 +211,24 @@ DOCS = sorted(
 # a failure.
 #
 # Scope, decided rather than drifted into: the outward-facing layer only --
-# the README, the website's front page, and the tutorial. Those are the three
-# documents whose reader is a stranger. The rest of docs/ is design notes,
-# plans and a specification whose reader is the author; translating them would
-# produce fifty-odd more documents to keep level, and a half-translated corpus
-# is worse than an honestly monolingual one. Every face of the site says so in
+# the README, the website's front page, the tutorial, and the prose that
+# introduces the standard library reference. Those are the documents whose
+# reader is a stranger. The rest of docs/ is design notes, plans and a
+# specification whose reader is the author; translating them would produce
+# fifty-odd more documents to keep level, and a half-translated corpus is
+# worse than an honestly monolingual one. Every face of the site says so in
 # its own closing paragraph, so a reader is told rather than left to find out
 # by clicking.
+#
+# Not on this list and not an oversight: the standard library's entries. They
+# are the compiler's doc comments, and this repository's code is English --
+# both /stdlib.html and /zh/stdlib.html show the same English signatures under
+# their own introductions.
 TRANSLATIONS = {
     "README.zh-CN.md": "README.md",
     "docs/tutorial.zh-CN.md": "docs/tutorial.md",
     "site/pages/home.zh.md": "site/pages/home.md",
+    "site/pages/stdlib.zh.md": "site/pages/stdlib.md",
 }
 
 VERSION_SRC = ROOT / "selfhost" / "src" / "version.dawn"

@@ -11,11 +11,11 @@ use html/render.{TocEntry}
 use html/escape.{escape_html}
 
 ## Which language a page is written in. English is the site's default and
-## lives at `/`; its Chinese twin lives at the same path under `/zh/`. Two
-## documents are paired that way -- the front page and the tutorial. The rest
-## (spec, design, stdlib, examples) are Chinese and untranslated, and
-## site/pages/home.md's closing section says so on the page itself rather than
-## leaving a reader to discover it by clicking.
+## lives at `/`; its Chinese twin lives at the same path under `/zh/`. Three
+## documents are paired that way -- the front page, the tutorial and the
+## standard library reference. The rest (spec, design, examples) are Chinese
+## and untranslated, and site/pages/home.md's closing section says so on the
+## page itself rather than leaving a reader to discover it by clicking.
 pub type Lang =
   | En
   | Zh
@@ -51,7 +51,20 @@ pub fn contents_label(lang: Lang) -> String =
     Zh -> "目录"
   }
 
+## Where a page lives in `lang`'s layout, given its path in the default one.
+## The default layout is the English site; the Chinese twin of any paired page
+## is that same path under `/zh/`. One rule, stated once, so that a caller
+## naming a page names it once instead of writing two paths and letting one rot.
+pub fn lang_path(lang: Lang, pair: String) -> String =
+  match lang {
+    En -> pair
+    Zh -> "zh/$pair"
+  }
+
 ## site navigation: (key, label, path-from-root)
+##
+## A paired entry points at the language's own copy, which is not the same path
+## on both sides; the unpaired ones exist once and both navs name that one file.
 fn nav_items(lang: Lang) -> List[(String, String, String)] =
   match lang {
     En -> [
@@ -66,7 +79,7 @@ fn nav_items(lang: Lang) -> List[(String, String, String)] =
       ("tutorial", "教程", "tutorial/index.html"),
       ("spec", "规范", "spec.html"),
       ("examples", "示例", "examples/index.html"),
-      ("stdlib", "标准库", "stdlib.html"),
+      ("stdlib", "标准库", "zh/stdlib.html"),
       ("design", "设计", "design.html"),
       ("playground", "Playground", "playground.html"),
     ]
@@ -263,6 +276,17 @@ test "nav marks the active page and roots the links" {
 test "the nav is labelled in the page's own language" {
   assert str.contains(nav_html(En, ".", ""), `<a href="./tutorial/index.html">Tutorial</a>`)
   assert str.contains(nav_html(Zh, ".", ""), `<a href="./tutorial/index.html">教程</a>`)
+}
+
+## What a labels-only nav could not do. Both languages named the same six paths
+## while every one of the six existed once; a paired page has two, and a reader
+## clicking 标准库 has to land on the Chinese one.
+test "a paired nav entry points at the language's own copy" {
+  assert str.contains(nav_html(En, ".", ""), `href="./stdlib.html"`)
+  assert str.contains(nav_html(Zh, ".", ""), `href="./zh/stdlib.html"`)
+  # the unpaired ones exist once, and both navs name that one file
+  assert str.contains(nav_html(En, ".", ""), `href="./spec.html"`)
+  assert str.contains(nav_html(Zh, ".", ""), `href="./spec.html"`)
 }
 
 test "shell carries title, css root, body" {

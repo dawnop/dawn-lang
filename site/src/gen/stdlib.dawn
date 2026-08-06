@@ -26,12 +26,17 @@ use gen/common.{must_read, write_page, map_doc_url, doc_files}
 
 # ---- the page's own words ----
 #
-# Everything on this page except these eight strings is generated from
-# `dawn doc --stdlib`, so they are the whole of what a translator has to touch.
-# They live in one record rather than as literals down in the code that emits
-# them: a table has the property the literals did not, which is that the two
-# languages sit on adjacent lines and a missing one is a compile error instead
-# of a page that renders half in each.
+# Everything on this page except these eight strings and site/pages/stdlib.md
+# is generated from `dawn doc --stdlib`, so the two of them together are the
+# whole of what a translator has to touch. The strings live in one record
+# rather than as literals down in the code that emits them: a table has the
+# property the literals did not, which is that the two languages sit on
+# adjacent lines and a missing one is a compile error instead of a page that
+# renders half in each.
+#
+# The entries themselves are NOT translated and are not meant to be: a doc
+# comment on a std function is English on both pages, because it is the
+# compiler's own text and this repository's code is English throughout.
 
 type Chrome = {
   impls_lead: String,
@@ -44,7 +49,7 @@ type Chrome = {
   modules_intro: String,
 }
 
-fn chrome(lang: Lang) -> Chrome =
+fn chrome(lang: Lang, root: String) -> Chrome =
   match lang {
     En -> Chrome {
       impls_lead: "impls registered by this module (visible program-wide, no use needed): ",
@@ -59,7 +64,7 @@ fn chrome(lang: Lang) -> Chrome =
       traits_title: "Prelude traits",
       traits_intro: "<p>The five traits the prelude brings. Their method names " ++
         "enter the function namespace as well, and a top-level declaration in the " ++
-        `calling module shadows them (<a href="spec.html#s10-6">spec §10.6</a>).` ++
+        """calling module shadows them (<a href="$root/spec.html#s10-6">spec §10.6</a>).""" ++
         "</p>\n",
       modules_title: "Modules",
       modules_intro: "<p>Brought in with <code>use std/x</code> and then called " ++
@@ -75,7 +80,8 @@ fn chrome(lang: Lang) -> Chrome =
         "会在下面「模块」一节里以限定拼写再出现一次——同一个函数，两种写法。</p>\n",
       traits_title: "预置 trait",
       traits_intro: "<p>随 prelude 而来的五个 trait。它们的方法名同样进入函数命名空间，" ++
-        `可被本模块的顶层声明遮蔽（<a href="spec.html#s10-6">规范 §10.6</a>）。</p>` ++ "\n",
+        """可被本模块的顶层声明遮蔽（<a href="$root/spec.html#s10-6">规范 §10.6</a>）。</p>""" ++
+        "\n",
       modules_title: "模块",
       modules_intro: "<p>以 <code>use std/x</code> 引入，再限定调用；" ++
         "也可以选择性引入单个名字（<code>use std/str.{trim}</code>）。</p>\n",
@@ -286,43 +292,68 @@ fn modules_html(c: Chrome, docs: List[String], root: Json) -> (String, List[TocE
 
 # ---- the page ----
 
-## The standard library reference. `lang` is the chrome's language: the entries
-## themselves come from the compiler and their doc comments are English. As in
-## [gen_spec] the output path is still the Chinese layout's.
+## Which file this language's intro is written in, where the page goes, and how
+## far it is from the site root. English is the original and takes the default
+## layout; the translation sits under `/zh/`, like every other paired page.
+fn stdlib_source(out: String, lang: Lang) -> (String, String, String) =
+  match lang {
+    En -> ("site/pages/stdlib.md", "$out/stdlib.html", ".")
+    Zh -> ("site/pages/stdlib.zh.md", "$out/zh/stdlib.html", "..")
+  }
+
+## The standard library reference. `lang` picks the intro document, the chrome
+## and the output path; the entries between them are the same in both runs,
+## because they come from the compiler and its doc comments are English.
 pub fn gen_stdlib(out: String, lang: Lang) -> Unit !io = {
-  let c = chrome(lang)
+  let (src, dst, root) = stdlib_source(out, lang)
+  let c = chrome(lang, root)
   let text =
     match io.read_file("site/build/stdlib.json") {
       Ok(t) -> t
       Err(_) ->
         panic("site/build/stdlib.json missing — run site/build.sh (it runs dawn doc --stdlib)")
     }
-  let root =
+  # `api`, not `root`: `root` is this page's distance from the site root, which
+  # the two runs disagree about and every relative link on the page needs.
+  let api =
     match parse(text) {
       Ok(v) -> v
       Err(e) -> panic("stdlib.json: $e")
     }
   let docs = doc_files()
   let intro =
-    match parser.parse(must_read("site/pages/stdlib.md")) {
-      Ok(bs) -> render_doc(bs, u => map_doc_url(".", docs, u))
-      Err(e) -> panic("site/pages/stdlib.md: $e")
+    match parser.parse(must_read(src)) {
+      Ok(bs) -> render_doc(bs, u => map_doc_url(root, docs, u))
+      Err(e) -> panic("$src: $e")
     }
-  let (pre, pre_toc) = prelude_html(docs, root)
-  let (mods, mod_toc) = modules_html(c, docs, root)
+  let (pre, pre_toc) = prelude_html(docs, api)
+  let (mods, mod_toc) = modules_html(c, docs, api)
   let body = intro.html ++
     section("prelude", c.prelude_title, c.prelude_intro, pre) ++
-    section("prelude-traits", c.traits_title, c.traits_intro, traits_html(docs, root)) ++
+    section("prelude-traits", c.traits_title, c.traits_intro, traits_html(docs, api)) ++
     section("modules", c.modules_title, c.modules_intro, mods)
   let toc = intro.toc ++
     [TocEntry { level: 2, id: "prelude", text: c.prelude_title }] ++ pre_toc ++
     [TocEntry { level: 2, id: "prelude-traits", text: c.traits_title }] ++
     [TocEntry { level: 2, id: "modules", text: c.modules_title }] ++ mod_toc
-  write_page("$out/stdlib.html",
-    page_with_toc(lang, "", "${intro.title} — Dawn", ".", "stdlib", toc, body))
+  write_page(dst,
+    page_with_toc(lang, "stdlib.html", "${intro.title} — Dawn", root, "stdlib", toc, body))
 }
 
 fn jobj(entries: List[(String, Json)]) -> Json = JObj(map.from(entries))
+
+test "each language's intro reads its own file and lands in its own place" {
+  assert stdlib_source("d", En) == ("site/pages/stdlib.md", "d/stdlib.html", ".")
+  assert stdlib_source("d", Zh) == ("site/pages/stdlib.zh.md", "d/zh/stdlib.html", "..")
+}
+
+## The chrome's one link is written from the page, so it moves with the page.
+## A constant `spec.html` was right for as long as this page only ever sat at
+## the site root, and would 404 from `/zh/` the day the twin appeared.
+test "the chrome's spec link is relative to the page that carries it" {
+  assert str.contains(chrome(En, ".").traits_intro, `href="./spec.html#s10-6"`)
+  assert str.contains(chrome(Zh, "..").traits_intro, `href="../spec.html#s10-6"`)
+}
 
 test "module paths become id fragments and call-site aliases" {
   assert slug("std/str") == "std-str"

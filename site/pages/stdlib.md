@@ -1,49 +1,67 @@
-# 标准库
+<!-- The original. Rendered as the intro to /stdlib.html; the translation is
+     stdlib.zh.md, which registers a digest of this file. Change this one
+     first -- scripts/doc-check.py goes red when the two part company. -->
 
-这一页是 Dawn 标准库的完整 API 参考，由 `dawn doc --stdlib` 从编译器直接生成：
-下面每一条签名和每一段说明，都是编译器此刻真正持有的那一份。
+# Standard library
 
-标准库的名字有两个来源——编译器内建表，和随编译器捆绑的 `std/` 模块（Dawn 源码）。
-**实现位置对使用者不可见**：哪边实现不影响拼写、类型与语义，所以这一页不按「内建 / std」
-分组，而按你写代码时怎么用它分组。
+This page is the complete API reference for the Dawn standard library,
+generated straight from the compiler by `dawn doc --stdlib`: every signature
+and every paragraph below is the one the compiler holds right now.
 
-怎么读：
+The names come from two places — the compiler's builtin table, and the `std/`
+modules bundled with it (Dawn source). **Which of the two implements a name is
+not something a caller can observe**: it changes neither the spelling nor the
+type nor the semantics. So this page is not grouped by builtin/std, but by how
+the name is written.
 
-- **prelude** 里的名字隐式可见，不必 `use`，直接写 `println("hi")`、`sort(xs)`。
-- 其余以 `use std/x` 引入，再限定调用：`use std/str` 之后写 `str.trim(s)`；
-  常用的名字也可以选择性引入（`use std/str.{trim}`）。
-- 同一个函数在「prelude」和它所属模块里各出现一次是正常的：`sort(xs)` 与
-  `list.sort(xs)` 是同一个函数的两种写法。
-- 签名里 `[T: Ord]` 是类型参数与它的约束（[规范 §3.5](spec.html#s3-5)），
-  `!io` 是效果（[规范 §6](spec.html#s6)），`!e` 是效果变量——该函数的效果由传进去的
-  闭包决定。
-- 会失败的操作回 `Result`，可能没有答案的回 `Option`；何时断言、何时问询、何时钳位，
-  判据在[规范 §4.8](spec.html#s4-8)。
+How to read it:
 
-## 内建类型
+- Names in the **prelude** are in scope implicitly. No `use` — just write
+  `println("hi")`, `sort(xs)`.
+- The rest come in with `use std/x` and are then called qualified: after
+  `use std/str`, write `str.trim(s)`. A single name can be imported on its own
+  (`use std/str.{trim}`).
+- A function appearing once under "prelude" and once under its module is
+  normal: `sort(xs)` and `list.sort(xs)` are two ways of writing the same
+  function.
+- In a signature, `[T: Ord]` is a type parameter and its bound
+  ([spec §3.5](spec.html#s3-5)), `!io` is an effect ([spec §6](spec.html#s6)),
+  and `!e` is an effect variable — the function's effects are whatever the
+  closure handed to it has.
+- What can fail returns `Result`; what may have no answer returns `Option`.
+  When to assert, when to ask and when to clamp is decided in
+  [spec §4.8](spec.html#s4-8).
 
-这些类型是语言本身的一部分，不需要 `use`，也没有 std 源码可查。语义定义在规范里，
-这里只给一句话的索引。
+The specification those links lead to is **written in Chinese**. This page,
+the tutorial and the examples come in both languages.
 
-| 类型 | 一句话 |
+## Built-in types
+
+These types are part of the language itself. They need no `use` and have no
+std source to read; their semantics are defined in the specification, and what
+follows is a one-line index.
+
+| Type | In one line |
 | --- | --- |
-| `Int` | 64 位有符号整数 |
-| `Float` | 双精度浮点；渲染与解析由 `std/fmt` 定死，不随宿主变（[§4.3](spec.html#s4-3)） |
+| `Int` | 64-bit signed integer |
+| `Float` | double precision; rendering and parsing are pinned by `std/fmt` and do not follow the host ([§4.3](spec.html#s4-3)) |
 | `Bool` | `true` / `false` |
-| `String` | 不可变字符串，按**码点**计量；里面没有非良构的 UTF-8 |
-| `Unit` | 唯一值 `()`，一等值，能出现在任何值能出现的位置 |
-| `List[T]` | 不可变持久列表（32 叉 trie + 尾块）；`acc ++ [x]` 的累积是线性的 |
-| `Option[T]` | `Some(T)` 或 `None`；语言没有 null |
-| `Result[T, E]` | `Ok(T)` 或 `Err(E)`；`?` 对它有语法支持（[§8.1](spec.html#s8-1)） |
-| `ForeignError` | 外部失败的结构化载荷：`kind` 与人读的一句话（[§9.8.1](spec.html#s9-8-1)） |
-| `Map[K, V]` | 不可变持久映射，迭代按插入序；键需 `Eq + Hash`（[§2.2](spec.html#s2-2)） |
-| `Set[T]` | 不可变持久集合，同上 |
-| `Bytes` | 不可变字节串，按内容相等；二进制数据走它而不借道字符串（[§9.5.1](spec.html#s9-5-1)） |
-| `Buf` | `Bytes` 的写入游标：`bytes.buf()` 造、`bytes.freeze()` 收 |
-| `Cursor` | `String` 里的位置，不是下标；由 `std/cursor` 声明为不透明类型 |
-| `(A, B, ...)` | 元组 |
-| `fn(A, B) -> C !e` | 函数类型；`!e` 可省略，表示纯 |
+| `String` | immutable string, measured in **code points**; there is no ill-formed UTF-8 inside one |
+| `Unit` | the single value `()`, first class, allowed wherever a value is |
+| `List[T]` | immutable persistent list (32-way trie + tail block); accumulating with `acc ++ [x]` is linear |
+| `Option[T]` | `Some(T)` or `None`; the language has no null |
+| `Result[T, E]` | `Ok(T)` or `Err(E)`; `?` has syntax for it ([§8.1](spec.html#s8-1)) |
+| `ForeignError` | the structured payload of a foreign failure: a `kind` and one human-readable line ([§9.8.1](spec.html#s9-8-1)) |
+| `Map[K, V]` | immutable persistent map, iterated in insertion order; keys need `Eq + Hash` ([§2.2](spec.html#s2-2)) |
+| `Set[T]` | immutable persistent set, likewise |
+| `Bytes` | immutable byte string, equal by content; binary data goes through it instead of borrowing a string ([§9.5.1](spec.html#s9-5-1)) |
+| `Buf` | a write cursor onto `Bytes`: `bytes.buf()` opens one, `bytes.freeze()` closes it |
+| `Cursor` | a position in a `String`, not an index; declared opaque by `std/cursor` |
+| `(A, B, ...)` | tuple |
+| `fn(A, B) -> C !e` | function type; `!e` may be left off, which means pure |
 
-`Map` / `Set` 底下的持久 HAMT 与 `List` 底下的持久向量都是纯 Dawn 源码
-（`std/hamt`、`std/pvec`）。它们是**内部模块**——表示要能整体换掉，而能换的前提是
-没有程序依赖它，所以在 std 之外 `use` 它们是编译错误，这一页也不列它们。
+The persistent HAMT under `Map` / `Set` and the persistent vector under `List`
+are pure Dawn source (`std/hamt`, `std/pvec`). They are **internal modules** —
+the representation has to be replaceable, and replaceable means no program
+depends on it, so `use`-ing them outside std is a compile error and this page
+does not list them.
