@@ -250,9 +250,32 @@ fn url_pkg_root(
 ) -> (Option[String], List[LocDiag], Set[String]) !io = {
   let entry = pkgfetch.cache_dir(r.hash)
   let root = if r.subdir == "" { entry } else { entry ++ "/" ++ r.subdir }
-  if io.is_dir(root) { return (Some(root), [], failed0) }
   let fkey = r.hash ++ ":" ++ r.subdir
   if set.has(failed0, fkey) { return (None, [], failed0) }
+  # A warm entry returns without `ensure_cached` ever running, so the url/hash
+  # guard has to be asked here too — this is the path a manifest that bumped
+  # `url` and kept `hash` takes, and the only one it takes.
+  #
+  # Its failures are remembered per archive rather than per dependency: one
+  # tag archive commonly serves several packages by `subdir` (backend-dawn
+  # takes `web` and `json` out of one), and re-asking would re-download the
+  # whole archive for each of them to reach the same answer.
+  let okey = "origin:" ++ r.hash
+  if set.has(failed0, okey) { return (None, [], failed0) }
+  if io.is_dir(root) {
+    match pkgfetch.check_origin(r.url, r.hash) {
+      Ok(_) -> return (Some(root), [], failed0)
+      Err(e) -> {
+        let d = [LocDiag { path: r.mf_path, d: Diag {
+          msg: "package `" ++ name ++ "` " ++ r.version ++ ": " ++ e,
+          lo: 0,
+          hi: 0,
+          hint: ""
+        } }]
+        return (None, d, set.insert(failed0, okey))
+      }
+    }
+  }
   match pkgfetch.ensure_cached(r.url, r.hash) {
     Ok(_) -> {
       if io.is_dir(root) { return (Some(root), [], failed0) }

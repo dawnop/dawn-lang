@@ -32,6 +32,62 @@ pub fn cache_root() -> String !io =
 
 pub fn cache_dir(hash: String) -> String !io = cache_root() ++ "/" ++ str.replace(hash, ":", "-")
 
+# ---- origin records: which urls were seen to produce which hash ----
+#
+# The cache is addressed by content, so `url` is consulted on a miss and never
+# again. That is right for reproducibility and wrong for the one mistake this
+# scheme invites: bump `[deps.x] url` to a new tag, forget `hash`, and the
+# build resolves the *old* tree out of the cache and goes green with nothing
+# to read. Only a warm cache can do this — a cold one fetches the new url and
+# the hash mismatch is already caught — so the record lives with the cache,
+# per machine, and needs no lockfile.
+#
+# The record is a sibling of the entry, never a file inside it: the entry's
+# name is the d1 hash of its own tree, so anything added under it would make
+# `verify_cached` fail. `.origins` also stays out of `dawn cache verify`'s
+# `d1-` sweep.
+
+fn origins_dir(root: String) -> String = root ++ "/.origins"
+
+fn origins_file(root: String, hash: String) -> String =
+  origins_dir(root) ++ "/" ++ str.replace(hash, ":", "-")
+
+## One url per line, blanks ignored.
+fn origins_parse(text: String) -> List[String] = {
+  var out: List[String] = []
+  for line in str.split(text, "\n") {
+    let u = str.trim(line)
+    if u != "" { out = out ++ [u] }
+  }
+  out
+}
+
+fn origins_render(urls: List[String]) -> String = {
+  var out = ""
+  for u in urls { out = out ++ u ++ "\n" }
+  out
+}
+
+## The urls recorded for `hash` under cache root `root`. A missing record is
+## an empty list, not an error: the entry may predate this file or have been
+## copied in by hand.
+pub fn recorded_origins(root: String, hash: String) -> List[String] !io =
+  match io.read_file(origins_file(root, hash)) {
+    Ok(t) -> origins_parse(t)
+    Err(_) -> []
+  }
+
+## Add `url` to `hash`'s record. A failed write is dropped on purpose: the
+## record is an optimization over re-fetching, so losing it costs one download
+## and never a build. Concurrent writers can lose an entry the same way.
+pub fn record_origin(root: String, hash: String, url: String) -> Unit !io = {
+  let have = recorded_origins(root, hash)
+  for u in have { if u == url { return () } }
+  mkdirs(origins_dir(root))
+  let _ = io.write_file(origins_file(root, hash), origins_render(have ++ [url]))
+  ()
+}
+
 # ---- d1: SHA-256 over the sorted file tree, `relpath \0 size \0 bytes` ----
 
 fn zero_byte() -> Bytes = bytes.utf8(str.from_char('\u{0000}'))
@@ -444,7 +500,15 @@ pub fn fetch_and_hash(url: String) -> Result[(String, String), String] !io = {
     Err(e) -> return Err("cannot create a temp directory under " ++ cache_root() ++ ": " ++ e.message)
   }
   with work <- bracket(staged, delete_tree)
-  fetch_into(url, work)
+  let got = fetch_into(url, work)
+  match got {
+    Ok(pr) -> {
+      let (_, actual) = pr
+      record_origin(cache_root(), actual, url)
+    }
+    Err(_) -> ()
+  }
+  got
 }
 
 ## The body of the fetch. Still its own function, but no longer *because* of
@@ -494,16 +558,62 @@ pub fn verify_cached(dir: String, hash: String) -> Result[Unit, String] !io =
       }
   }
 
+## The url/hash guard, for a cache entry that is already there: has *this* url
+## ever been seen to produce `hash` on this machine? If it has, the entry is
+## the right one and nothing happens. If it has not, the question is answered
+## the only way it can be — fetch the url and hash what comes back:
+##
+##   - same hash: a new source for the same bytes (a mirror, a moved tag, an
+##     entry that predates this record or was pre-seeded by hand). Recorded,
+##     so it costs one download once and nothing afterwards.
+##   - different hash: `url` moved and `hash` did not. This is the bug the
+##     record exists for, and it is now the same hard error a cold cache
+##     would have given.
+##
+## An entry with no record is verified rather than adopted. Adopting would be
+## cheaper and would let exactly one bump through — the first one after this
+## code ships, which is the occurrence it was written for.
+pub fn check_origin(url: String, hash: String) -> Result[Unit, String] !io = {
+  let root = cache_root()
+  for u in recorded_origins(root, hash) { if u == url { return Ok(()) } }
+  match fetch_and_hash(url) {
+    Err(e) -> Err(e)
+    Ok(pr) -> {
+      let (_, actual) = pr
+      # fetch_and_hash records `url -> actual` itself: that is the one moment
+      # a url is ever observed to produce a hash, so it is the only place the
+      # record is written, and `actual == hash` makes it this hash's record
+      if actual == hash { Ok(()) } else {
+        Err("url changed but hash did not: " ++ url ++
+            "\n  declared:  " ++ hash ++ "\n  this url:  " ++ actual ++
+            "\n  the cache already holds the declared hash from a different url, so the build" ++
+            " would have used the old package; copy the actual value into `hash`")
+      }
+    }
+  }
+}
+
 ## The unpacked archive for `hash`, fetching from `url` on a cache miss.
 ## A hit is re-verified every time (PKG-02): fetch-time verification alone
 ## means a later modification of the local copy is trusted forever — the
 ## seed jars had the same hole until scripts/seed-checksums.txt. Re-hashing
 ## costs one read of the package's bytes (measured ~0.9s for a 7MB tree,
 ## milliseconds for typical source packages).
+##
+## "Every time" is narrower than it reads, and has been since before that
+## claim was written: the resolver returns a warm entry without calling this
+## at all (analyze.url_pkg_root), so on the build path a hit reaches here only
+## when the entry exists and the `subdir` inside it does not. The url/hash
+## guard therefore hangs off the resolver as well; extending PKG-02's re-hash
+## to every warm build is a separate decision with a per-build price tag.
 pub fn ensure_cached(url: String, hash: String) -> Result[String, String] !io = {
   let target = cache_dir(hash)
   if io.is_dir(target) {
     match verify_cached(target, hash) {
+      Ok(_) -> ()
+      Err(e) -> return Err(e)
+    }
+    match check_origin(url, hash) {
       Ok(_) -> return Ok(target)
       Err(e) -> return Err(e)
     }
@@ -521,6 +631,36 @@ pub fn ensure_cached(url: String, hash: String) -> Result[String, String] !io = 
     }
     Err(e) -> Err(e)
   }
+}
+
+test "origin records round-trip and accumulate urls" {
+  let h = "d1:" ++ str.repeat("a", 64)
+  let root = match io.temp_dir("", "dawn-origins-") {
+    Ok(d) -> d
+    Err(e) -> panic("temp dir: " ++ e.message)
+  }
+  with r <- bracket(root, delete_tree)
+  # an entry nobody fetched has no record, which is what makes check_origin
+  # verify it instead of trusting it
+  assert recorded_origins(r, h) == []
+  record_origin(r, h, "file:///one.zip")
+  assert recorded_origins(r, h) == ["file:///one.zip"]
+  # a second url for the same bytes (a mirror) joins the first, and neither
+  # url nor a repeat of it is written twice
+  record_origin(r, h, "file:///one.zip")
+  record_origin(r, h, "https://mirror/two.zip")
+  assert recorded_origins(r, h) == ["file:///one.zip", "https://mirror/two.zip"]
+  # the record is a sibling of the entry, never a file under it: the entry's
+  # name is the d1 hash of its own tree, so a file inside would fail verify
+  assert not io.exists(r ++ "/d1-" ++ str.repeat("a", 64))
+  assert io.exists(r ++ "/.origins/d1-" ++ str.repeat("a", 64))
+}
+
+test "origin records ignore blank lines" {
+  assert origins_parse("") == []
+  assert origins_parse("\n  \n") == []
+  assert origins_parse("a\nb\n") == ["a", "b"]
+  assert origins_render(["a", "b"]) == "a\nb\n"
 }
 
 test "tar octal and pax records parse" {
