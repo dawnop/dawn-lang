@@ -10,6 +10,8 @@
 # the Kotlin front end's convention; a wrong statement about the span currency
 # is worse than no statement, because every consumer of a span depends on it.
 
+use std/str
+
 # ---- type references ----
 
 pub type TypeRef =
@@ -675,25 +677,12 @@ pub fn module_tests(m: Module) -> List[TestView] = {
 
 pub type JavaUseView = { fqcn: String, simple: String, lo: Int, hi: Int, nlo: Int, nhi: Int }
 
-fn simple_of(fqcn: String) -> String = {
-  var cut = 0
-  var i = 0
-  for c in code_points(fqcn) {
-    if c == '.' { cut = i + 1 }
-    i = i + 1
+## The last dot-separated segment, or the whole name when there is no dot.
+fn simple_of(fqcn: String) -> String =
+  match str.last_index_of(fqcn, ".") {
+    Some(i) -> str.substring(fqcn, i + 1, str.len(fqcn))
+    None -> fqcn
   }
-  from_code_points(list_from2(code_points(fqcn), cut))
-}
-
-fn list_from2(xs: List[Int], from: Int) -> List[Int] = {
-  var out: List[Int] = []
-  var i = from
-  while i < len(xs) {
-    out = out ++ [xs[i]]
-    i = i + 1
-  }
-  out
-}
 
 pub fn module_java_uses(m: Module) -> List[JavaUseView] = {
   var out: List[JavaUseView] = []

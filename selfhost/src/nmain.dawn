@@ -231,24 +231,35 @@ fn cmd_build(rest: List[String]) -> Unit !io = {
   cc_build(emitted(std_dir, target), out)
 }
 
-fn cmd_run(rest: List[String]) -> Unit !io = {
-  let (std_dir, _out, target) = parse_tail(rest)
-  let work = match io.temp_dir("", "dawnc-run") {
+## Build `ctext` into a scratch directory and become it: the process ends with
+## the built program's own exit status, so nothing after the call runs.
+##
+## `dir_prefix`, `bin_name` and `what` are parameters rather than a shared
+## spelling because the two callers' messages are compared byte for byte
+## against the JVM driver's (scripts/native-cli-diff.sh); what is shared is the
+## staging, not the wording.
+fn build_and_exec(ctext: String, dir_prefix: String, bin_name: String, what: String) -> Unit !io = {
+  let work = match io.temp_dir("", dir_prefix) {
     Ok(d) -> d
     Err(e) -> {
       cli_error("cannot make a scratch directory: " ++ e.message)
       return ()
     }
   }
-  let bin = work ++ "/program"
-  cc_build(emitted(std_dir, target), bin)
+  let bin = work ++ "/" ++ bin_name
+  cc_build(ctext, bin)
   match io.run([bin], "", "") {
     Ok(code) -> {
       let _ = io.exit(code)
       ()
     }
-    Err(e) -> cli_error("cannot run the built program: " ++ e.message)
+    Err(e) -> cli_error("cannot run the built " ++ what ++ ": " ++ e.message)
   }
+}
+
+fn cmd_run(rest: List[String]) -> Unit !io = {
+  let (std_dir, _out, target) = parse_tail(rest)
+  build_and_exec(emitted(std_dir, target), "dawnc-run", "program", "program")
 }
 
 ## Every .dawn file under `dir`, recursively; paths are `dir`-prefixed.
@@ -471,22 +482,7 @@ fn cmd_test(rest: List[String]) -> Unit !io = {
       ""
     }
   }
-  let work = match io.temp_dir("", "dawnc-test") {
-    Ok(d) -> d
-    Err(e) -> {
-      cli_error("cannot make a scratch directory: " ++ e.message)
-      return ()
-    }
-  }
-  let bin = work ++ "/tests"
-  cc_build(ctext, bin)
-  match io.run([bin], "", "") {
-    Ok(code) -> {
-      let _ = io.exit(code)
-      ()
-    }
-    Err(e) -> cli_error("cannot run the built tests: " ++ e.message)
-  }
+  build_and_exec(ctext, "dawnc-test", "tests", "tests")
 }
 
 pub fn main() -> Unit !io = {

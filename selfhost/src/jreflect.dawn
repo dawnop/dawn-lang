@@ -11,6 +11,7 @@
 
 use std/str
 use std/list
+use std/set
 use jsig.{JClass, JMethod, JCtor, JField, Jsig}
 use java "java.lang.Object"
 use java "java.lang.Class"
@@ -235,34 +236,32 @@ pub fn is_assignable(sup: String, sub: String) -> Bool !io =
       }
   }
 
-## equals/hashCode/toString redeclared abstract on an interface don't count as
-## the SAM (the Kotlin isObjectMethod probe via Object.getMethod).
-fn is_object_method(m: JMethod) -> Bool !io = {
-  let obj = find_class_raw("java.lang.Object").expect("Object")
-  let all = methods_of("java.lang.Object")
-  for om in all {
-    if om.name == m.name && om.param_cls == m.param_cls { return true }
-  }
-  false
-}
+## What makes two methods the same overload: the name and the parameter list.
+## A class name cannot contain a comma, so joining them is a faithful key.
+fn sig_key(m: JMethod) -> String = m.name ++ "(" ++ join(m.param_cls, ",") ++ ")"
 
 ## The single abstract method of a functional interface, or None (spec §9.4).
+##
+## equals/hashCode/toString redeclared abstract on an interface do not count as
+## the SAM, and a method declared on both an interface and its parent is one
+## method. Both are set membership. They used to be linear scans inside the
+## loop -- and the first of them re-enumerated `java.lang.Object`'s methods
+## reflectively on every candidate, so a wide interface paid for Object once
+## per method it declares.
 pub fn sam_of(fqcn: String) -> Option[JMethod] !io = {
   let j = class_info(fqcn)
   if not j.is_interface { return None }
+  var from_object: Set[String] = set.empty()
+  for om in methods_of("java.lang.Object") {
+    from_object = set.insert(from_object, sig_key(om))
+  }
   var found: List[JMethod] = []
-  var seen: List[String] = []
+  var seen: Set[String] = set.empty()
   for m in methods_of(fqcn) {
-    if m.is_abstract && not is_object_method(m) {
-      let key = m.name ++ "(" ++ join(m.param_cls, ",") ++ ")"
-      var dup = false
-      for s in seen {
-        if s == key { dup = true }
-      }
-      if not dup {
-        seen = seen ++ [key]
-        found = found ++ [m]
-      }
+    let key = sig_key(m)
+    if m.is_abstract && not set.has(from_object, key) && not set.has(seen, key) {
+      seen = set.insert(seen, key)
+      found = found ++ [m]
     }
   }
   if len(found) == 1 { Some(found[0]) } else { None }

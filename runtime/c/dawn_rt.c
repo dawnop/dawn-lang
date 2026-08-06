@@ -2037,6 +2037,7 @@ extern char **environ;
 int64_t dawn_io_run(dawn_array *argv, dawn_str *out_path, dawn_str *err_path) {
   int64_t n = dawn_array_len(argv);
   if (n <= 0) {
+    dawn_drop(argv);
     dawn_fault(DAWN_LIT("io_run: argv is empty"));
   }
   char **args = (char **)dawn_alloc(sizeof(char *) * (size_t)(n + 1));
@@ -2044,6 +2045,11 @@ int64_t dawn_io_run(dawn_array *argv, dawn_str *out_path, dawn_str *err_path) {
     args[i] = dawn_cpath((dawn_str *)dawn_array_get(argv, i));
   }
   args[n] = NULL;
+  /* Released here rather than on the way out: `args` holds copies, so argv is
+   * dead from this line on, and every path below it can fault. A fault is not
+   * the end of the process -- `catch_fault` resumes -- so a drop placed after
+   * the spawn leaks the list on exactly the paths a caller can observe. */
+  dawn_drop(argv);
 
   posix_spawn_file_actions_t fa;
   posix_spawn_file_actions_init(&fa);
@@ -2073,7 +2079,6 @@ int64_t dawn_io_run(dawn_array *argv, dawn_str *out_path, dawn_str *err_path) {
       dawn_fault(DAWN_LIT("io_run: waiting for the child failed"));
     }
   }
-  dawn_drop(argv);
   /* The two numbers the JVM's Process.exitValue() also reports on POSIX. */
   if (WIFEXITED(status)) return (int64_t)WEXITSTATUS(status);
   if (WIFSIGNALED(status)) return (int64_t)(128 + WTERMSIG(status));

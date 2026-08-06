@@ -14,20 +14,12 @@ use std/str
 use std/list
 use std/io
 use toml.{TomlDoc, parse, render, set_string, remove, remove_table}
-use manifestv.{validate, mcoord_parse, mcoord_show, ManifestV, SemV, semv_show}
+use manifestv.{validate, mcoord_parse, mcoord_show, ManifestV, SemV, semv_show, bad_subdir}
 use token.{Diag}
 use diag.{render_manifest}
 use pkgfetch
 
 const USAGE: String = "usage: dawn add <spec> [--subdir <p>] [--as <as_name>] [--dir <project>]"
-
-fn bad_subdir(s: String) -> Bool = {
-  if str.starts_with(s, "/") { return true }
-  for part in str.split(s, "/") {
-    if part == ".." || part == "" { return true }
-  }
-  false
-}
 
 ## The added package's manifest, validated with rendered diagnostics.
 fn read_pkg(dir: String) -> Result[ManifestV, String] !io = {
@@ -231,11 +223,4 @@ test "maven coordinate errors mirror the Kotlin messages" {
     Ok(c) -> { assert c.artifact == "asm" }
     Err(_) -> { assert false }
   }
-}
-
-test "subdir sanity mirrors the Kotlin rule" {
-  assert bad_subdir("/abs")
-  assert bad_subdir("a/../b")
-  assert bad_subdir("a//b")
-  assert not bad_subdir("packages/web")
 }

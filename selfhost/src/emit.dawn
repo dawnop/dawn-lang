@@ -39,7 +39,7 @@ use codegen.{
   dict_arg_field, dict_ctor_desc, EqOverride, no_override, singleton_scaffold, subject_name
 }
 use rtclasses.{
-  obj, fn_iface, tuple_class, erased_apply_desc, push_unit, tr_iface, append_const,
+  obj, fn_iface, tuple_class, erased_apply_desc, push_unit, tr_iface, append_const, close_mv,
   PANIC_CLASS, UNIT_CLASS, SB, SHOW_CLASS, BYTES_CLASS, IO_CLASS, STRINGS_CLASS, HAMT_CLASS,
   PVEC_CLASS, PVEC_MOD, FN_CMP_CLASS, ARRAYLIST, ARRAY_CLASS
 }
@@ -596,8 +596,7 @@ fn gen_const_fields(gx: GenCtx, g: Gen, cw: ClassWriter) -> Unit !io = {
     cl.visitFieldInsn(OP_PUTSTATIC, gx.class_name, f.fname, desc_of(gx.adts, f.ty))
   }
   cl.visitInsn(OP_RETURN)
-  cl.visitMaxs(0, 0)
-  cl.visitEnd()
+  close_mv(cl)
   ()
 }
 
@@ -753,8 +752,7 @@ fn gen_sam_class(s: SamC) -> (String, Bytes) !io = {
   init.visitVarInsn(OP_ALOAD, 1)
   init.visitFieldInsn(OP_PUTFIELD, s.cls, capture_field(0), fnd)
   init.visitInsn(OP_RETURN)
-  init.visitMaxs(0, 0)
-  init.visitEnd()
+  close_mv(init)
   var pdescs = ""
   for p in s.sam_params { pdescs = pdescs ++ jdesc(p) }
   let rd = jdesc(s.sam_ret)
@@ -774,8 +772,7 @@ fn gen_sam_class(s: SamC) -> (String, Bytes) !io = {
   }
   m.visitMethodInsn(OP_INVOKESTATIC, s.bridge_owner, s.bridge, s.bridge_desc, false)
   m.visitInsn(jreturn_of(rd))
-  m.visitMaxs(0, 0)
-  m.visitEnd()
+  close_mv(m)
   cw.visitEnd()
   (s.cls, cw.toByteArray().expect("bytes"))
 }
@@ -1038,8 +1035,7 @@ fn gen_sam_bridge(g: Gen, cw: ClassWriter, b: SamB) -> Gen !io = {
     m.visitTypeInsn(OP_CHECKCAST, internal_of(rc))
     m.visitInsn(OP_ARETURN)
   }
-  m.visitMaxs(0, 0)
-  m.visitEnd()
+  close_mv(m)
   g
 }
 
@@ -1168,8 +1164,7 @@ fn gen_cbody(
   }
   let (g3, falls) = gen_cexpr(gx, g1, cf.body, false)
   if falls { emit_method_return(g3) }
-  m.visitMaxs(0, 0)
-  m.visitEnd()
+  close_mv(m)
   g3
 }
 
@@ -1221,8 +1216,7 @@ fn gen_jvm_main(gx: GenCtx, cw: ClassWriter) -> Unit !io = {
   m.visitInsn(OP_ICONST_1)
   m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/System", "exit", "(I)V", false)
   m.visitInsn(OP_RETURN)
-  m.visitMaxs(0, 0)
-  m.visitEnd()
+  close_mv(m)
   ()
 }
 
@@ -1484,8 +1478,7 @@ fn gen_dict_class(gx: GenCtx, dd: CDictDef) -> (String, Bytes) !io = {
     m.visitMethodInsn(OP_INVOKESTATIC, owner, target,
       sig_desc_with_dicts(gx.adts, ms.sig), false)
     emit_return_of(m, ms.sig.ret)
-    m.visitMaxs(0, 0)
-    m.visitEnd()
+    close_mv(m)
     i = i + 1
   }
   cw.visitEnd()
@@ -1699,8 +1692,7 @@ fn gen_closure_class(gx: GenCtx, g: Gen, b: ClosB) -> (String, Bytes) !io = {
       j = j + 1
     }
     init.visitInsn(OP_RETURN)
-    init.visitMaxs(0, 0)
-    init.visitEnd()
+    close_mv(init)
   }
   let m = Asm.methodOn(cw, ACC_PUBLIC, "apply", erased_apply_desc(b.arity)).expect("mv")
   m.visitCode()
@@ -1724,8 +1716,7 @@ fn gen_closure_class(gx: GenCtx, g: Gen, b: ClosB) -> (String, Bytes) !io = {
   # and `box_ty` emits nothing for it -- both spellings end at areturn
   box_ty(m, b.fret)
   m.visitInsn(OP_ARETURN)
-  m.visitMaxs(0, 0)
-  m.visitEnd()
+  close_mv(m)
   cw.visitEnd()
   (b.cls, cw.toByteArray().expect("bytes"))
 }

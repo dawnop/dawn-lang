@@ -6,7 +6,13 @@
 # the failure counter in a local.
 
 use rtclasses.{
-  UNIT_CLASS
+  UNIT_CLASS, close_mv
+}
+use jvmops.{
+  ACC_FINAL, ACC_PUBLIC, ACC_STATIC, COMPUTE_MAXS, OP_AALOAD, OP_ALOAD, OP_ARRAYLENGTH, OP_ASTORE,
+  OP_GETSTATIC, OP_GOTO, OP_ICONST_0, OP_ICONST_1, OP_ICONST_M1, OP_IFNE, OP_IFNULL,
+  OP_IF_ICMPGE, OP_ILOAD, OP_INVOKESTATIC, OP_INVOKEVIRTUAL, OP_ISTORE, OP_POP, OP_RETURN,
+  V49
 }
 use java "dawn.rt.Asm"
 use java "org.objectweb.asm.ClassWriter"
@@ -36,16 +42,8 @@ fn gen_pass(cw: ClassWriter) -> Unit !io = {
   mv.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/String", "concat", CONCAT, false)
   println_top(mv)
   mv.visitInsn(OP_RETURN)
-  mv.visitMaxs(0, 0)
-  mv.visitEnd()
+  close_mv(mv)
 }
-use jvmops.{
-  ACC_FINAL, ACC_PUBLIC, ACC_STATIC, COMPUTE_MAXS, OP_AALOAD, OP_ALOAD, OP_ARRAYLENGTH, OP_ASTORE,
-  OP_GETSTATIC, OP_GOTO, OP_ICONST_0, OP_ICONST_1, OP_ICONST_M1, OP_IFNE, OP_IFNULL,
-  OP_IF_ICMPGE, OP_ILOAD, OP_INVOKESTATIC, OP_INVOKEVIRTUAL, OP_ISTORE, OP_POP, OP_RETURN,
-  V49
-}
-
 ## static fail(label, t): println("FAIL  " + label), then each line of
 ## t.getMessage() (when present) indented six spaces — the Kotlin cmdTest shape.
 fn gen_fail(cw: ClassWriter) -> Unit !io = {
@@ -91,8 +89,7 @@ fn gen_fail(cw: ClassWriter) -> Unit !io = {
   mv.visitJumpInsn(OP_GOTO, l_loop)
   mv.visitLabel(l_end)
   mv.visitInsn(OP_RETURN)
-  mv.visitMaxs(0, 0)
-  mv.visitEnd()
+  close_mv(mv)
 }
 
 ## main: per-test try/catch, then the summary. `total` is a generation-time
@@ -146,8 +143,7 @@ fn gen_runner_main(cw: ClassWriter, tests: List[(String, Int, String)]) -> Unit 
   mv.visitInsn(OP_ICONST_1)
   mv.visitMethodInsn(OP_INVOKESTATIC, "java/lang/System", "exit", "(I)V", false)
   mv.visitInsn(OP_RETURN)
-  mv.visitMaxs(0, 0)
-  mv.visitEnd()
+  close_mv(mv)
 }
 
 ## The runner class bytes. `tests` = (module class, test index, label) in run

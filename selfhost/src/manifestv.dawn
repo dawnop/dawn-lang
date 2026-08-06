@@ -61,6 +61,18 @@ pub type MCoord = { group: String, artifact: String, version: String, aname: Str
 
 pub fn mcoord_show(c: MCoord) -> String = c.group ++ ":" ++ c.artifact ++ ":" ++ c.version
 
+## Whether `s` is refused as a `subdir`: it must be a relative path inside the
+## archive, so no leading `/`, no `..` segment and no empty one. `dawn add`
+## checks the flag it was handed with this before it ever writes the manifest
+## this module then validates -- one rule, so the two answers cannot drift.
+pub fn bad_subdir(s: String) -> Bool = {
+  if str.starts_with(s, "/") { return true }
+  for part in str.split(s, "/") {
+    if part == ".." || part == "" { return true }
+  }
+  false
+}
+
 ## A validated `[deps]` entry. The aname is the consumer's local spelling;
 ## spans point at the path value / the `[deps.<aname>]` header name.
 pub type VDep =
@@ -231,11 +243,7 @@ fn parse_url_dep(
             hash = Some(v)
           }
         } else if key == "subdir" {
-          var bad = str.starts_with(v, "/")
-          for part in str.split(v, "/") {
-            if part == ".." || part == "" { bad = true }
-          }
-          if bad {
+          if bad_subdir(v) {
             errs = errs ++ [diag("invalid subdir `" ++ v ++ "`", vlo, vhi,
               "a relative path inside the archive, no `..`, e.g. `packages/web`")]
           } else {
@@ -658,4 +666,11 @@ test "dependency aliases: case, duplication across forms" {
     }
     Ok(_) -> { assert false }
   }
+}
+
+test "a subdir is a relative path inside the archive" {
+  assert bad_subdir("/abs")
+  assert bad_subdir("a/../b")
+  assert bad_subdir("a//b")
+  assert not bad_subdir("packages/web")
 }

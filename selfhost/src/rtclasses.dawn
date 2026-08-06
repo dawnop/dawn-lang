@@ -239,8 +239,7 @@ pub fn gen_show_class() -> Bytes !io = {
   sh.visitVarInsn(OP_ALOAD, 0)
   sh.visitMethodInsn(OP_INVOKESTATIC, jstr, "valueOf", obj_to_str, false)
   sh.visitInsn(OP_ARETURN)
-  sh.visitMaxs(0, 0)
-  sh.visitEnd()
+  close_mv(sh)
 
   # static String quote(String s): source-literal escaping, backslash first
   let q = Asm.methodOn(cw, ACC_PUBLIC + ACC_STATIC, "quote",
@@ -264,8 +263,7 @@ pub fn gen_show_class() -> Bytes !io = {
   append_const(q, "\"")
   q.visitMethodInsn(OP_INVOKEVIRTUAL, SB, "toString", "()Ljava/lang/String;", false)
   q.visitInsn(OP_ARETURN)
-  q.visitMaxs(0, 0)
-  q.visitEnd()
+  close_mv(q)
 
   # static String showList(List xs): "[e0, e1, ...]" with elements shown
   let sl = Asm.methodOn(cw, ACC_PUBLIC + ACC_STATIC, "showList",
@@ -310,8 +308,7 @@ pub fn gen_show_class() -> Bytes !io = {
   append_const(sl, "]")
   sl.visitMethodInsn(OP_INVOKEVIRTUAL, SB, "toString", "()Ljava/lang/String;", false)
   sl.visitInsn(OP_ARETURN)
-  sl.visitMaxs(0, 0)
-  sl.visitEnd()
+  close_mv(sl)
 
   # static String showMap(Map m): "map.from([(k, v), ...])" (spec §2.2 shape).
   # The same spelling std/map's `Show` impl writes -- the public one, because a
@@ -377,8 +374,7 @@ pub fn gen_show_class() -> Bytes !io = {
   append_const(sm, "])")
   sm.visitMethodInsn(OP_INVOKEVIRTUAL, SB, "toString", "()Ljava/lang/String;", false)
   sm.visitInsn(OP_ARETURN)
-  sm.visitMaxs(0, 0)
-  sm.visitEnd()
+  close_mv(sm)
 
   # static String showSet(Set s): "set.from([e0, e1, ...])"
   let ss = Asm.methodOn(cw, ACC_PUBLIC + ACC_STATIC, "showSet",
@@ -424,8 +420,7 @@ pub fn gen_show_class() -> Bytes !io = {
   append_const(ss, "])")
   ss.visitMethodInsn(OP_INVOKEVIRTUAL, SB, "toString", "()Ljava/lang/String;", false)
   ss.visitInsn(OP_ARETURN)
-  ss.visitMaxs(0, 0)
-  ss.visitEnd()
+  close_mv(ss)
 
   cw.visitEnd()
   cw.toByteArray().expect("bytes")
@@ -457,8 +452,7 @@ pub fn gen_tuple_class(n: Int) -> Bytes !io = {
     i = i + 1
   }
   init.visitInsn(OP_RETURN)
-  init.visitMaxs(0, 0)
-  init.visitEnd()
+  close_mv(init)
   let eq = Asm.methodOn(cw, ACC_PUBLIC, "equals", "(Ljava/lang/Object;)Z").expect("mv")
   eq.visitCode()
   let yes = Label.new()
@@ -488,8 +482,7 @@ pub fn gen_tuple_class(n: Int) -> Bytes !io = {
   eq.visitLabel(no)
   eq.visitInsn(OP_ICONST_0)
   eq.visitInsn(OP_IRETURN)
-  eq.visitMaxs(0, 0)
-  eq.visitEnd()
+  close_mv(eq)
   let hc = Asm.methodOn(cw, ACC_PUBLIC, "hashCode", "()I").expect("mv")
   hc.visitCode()
   hc.visitInsn(OP_ICONST_1)
@@ -504,8 +497,7 @@ pub fn gen_tuple_class(n: Int) -> Bytes !io = {
     i = i + 1
   }
   hc.visitInsn(OP_IRETURN)
-  hc.visitMaxs(0, 0)
-  hc.visitEnd()
+  close_mv(hc)
   let ts = Asm.methodOn(cw, ACC_PUBLIC, "toString", "()Ljava/lang/String;").expect("mv")
   ts.visitCode()
   ts.visitTypeInsn(OP_NEW, SB)
@@ -525,8 +517,7 @@ pub fn gen_tuple_class(n: Int) -> Bytes !io = {
   append_const(ts, ")")
   ts.visitMethodInsn(OP_INVOKEVIRTUAL, SB, "toString", "()Ljava/lang/String;", false)
   ts.visitInsn(OP_ARETURN)
-  ts.visitMaxs(0, 0)
-  ts.visitEnd()
+  close_mv(ts)
   cw.visitEnd()
   cw.toByteArray().expect("bytes")
 }
@@ -587,8 +578,7 @@ pub fn gen_bytes_class() -> Bytes !io = {
     "(Ljava/lang/Object;ILjava/lang/Object;II)V", false)
   m.visitVarInsn(OP_ALOAD, 4)
   m.visitInsn(OP_ARETURN)
-  m.visitMaxs(0, 0)
-  m.visitEnd()
+  close_mv(m)
 
   # bytes_utf8(s) = s.getBytes(UTF_8)
   let uv = open_static(cw, "bytes_utf8", "(Ljava/lang/String;)[B")
@@ -819,8 +809,7 @@ fn gen_try_closure(cw: ClassWriter, name: String, caught: List[String]) -> Unit 
   m.visitLabel(handler)
   gen_caught_err(m, 1)
   m.visitInsn(OP_ARETURN)
-  m.visitMaxs(0, 0)
-  m.visitEnd()
+  close_mv(m)
   ()
 }
 
@@ -897,8 +886,7 @@ fn gen_bracket(cw: ClassWriter) -> Unit !io = {
   m.visitInsn(OP_POP)
   m.visitVarInsn(OP_ALOAD, 4)
   m.visitInsn(OP_ATHROW)
-  m.visitMaxs(0, 0)
-  m.visitEnd()
+  close_mv(m)
   ()
 }
 
@@ -1011,8 +999,7 @@ fn gen_cast(cw: ClassWriter) -> Unit !io = {
   # the two parameters occupy 0 and 1, so the handler's scratch starts at 2
   gen_caught_err(m, 2)
   m.visitInsn(OP_ARETURN)
-  m.visitMaxs(0, 0)
-  m.visitEnd()
+  close_mv(m)
   ()
 }
 
@@ -1929,8 +1916,7 @@ fn gen_parse_float_method(cw: ClassWriter) -> Unit !io = {
   m.visitInsn(OP_POP)
   m.visitFieldInsn(OP_GETSTATIC, "Option\$None", "INSTANCE", "LOption\$None;")
   m.visitInsn(OP_ARETURN)
-  m.visitMaxs(0, 0)
-  m.visitEnd()
+  close_mv(m)
   ()
 }
 
@@ -1998,8 +1984,7 @@ pub fn gen_strings_class(u: TableUse) -> Bytes !io = {
   jn.visitVarInsn(OP_ALOAD, 2)
   jn.visitMethodInsn(OP_INVOKEVIRTUAL, SB, "toString", "()Ljava/lang/String;", false)
   jn.visitInsn(OP_ARETURN)
-  jn.visitMaxs(0, 0)
-  jn.visitEnd()
+  close_mv(jn)
 
   gen_parse_float_method(cw)
 
@@ -2039,8 +2024,7 @@ pub fn gen_strings_class(u: TableUse) -> Bytes !io = {
   cp.visitLabel(c_done)
   cp.visitVarInsn(OP_ALOAD, 1)
   cp.visitInsn(OP_ARETURN)
-  cp.visitMaxs(0, 0)
-  cp.visitEnd()
+  close_mv(cp)
 
   # from_code_points(List[Int]) -> String
   let fc = Asm.methodOn(cw, ACC_PUBLIC + ACC_STATIC, "from_code_points",
@@ -2092,8 +2076,7 @@ pub fn gen_strings_class(u: TableUse) -> Bytes !io = {
   fc.visitVarInsn(OP_ALOAD, 1)
   fc.visitMethodInsn(OP_INVOKEVIRTUAL, SB, "toString", "()Ljava/lang/String;", false)
   fc.visitInsn(OP_ARETURN)
-  fc.visitMaxs(0, 0)
-  fc.visitEnd()
+  close_mv(fc)
 
   # cmp(a, b): Ord[String] -- *code point* order, sign only (-1/0/1), spec
   # 3.5 (RP-06). Not String.compareTo: that is UTF-16 code unit order, which
@@ -2785,8 +2768,7 @@ fn gen_comparator_class(
   init.visitVarInsn(OP_ALOAD, 1)
   init.visitFieldInsn(OP_PUTFIELD, cls, "src", src_desc)
   init.visitInsn(OP_RETURN)
-  init.visitMaxs(0, 0)
-  init.visitEnd()
+  close_mv(init)
   let m = Asm.methodOn(cw, ACC_PUBLIC, "compare",
     "(Ljava/lang/Object;Ljava/lang/Object;)I").expect("mv")
   m.visitCode()
@@ -2797,8 +2779,7 @@ fn gen_comparator_class(
   emit_cmp(m)
   m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Long", "signum", "(J)I", false)
   m.visitInsn(OP_IRETURN)
-  m.visitMaxs(0, 0)
-  m.visitEnd()
+  close_mv(m)
   cw.visitEnd()
   cw.toByteArray().expect("bytes")
 }
