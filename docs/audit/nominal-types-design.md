@@ -258,9 +258,14 @@ pub fn code(c: Char) -> Int
 | 期 | release | `Char` 是什么 | `'a'` 是什么 | selfhost/std 用不用 `Char` |
 |---|---|---|---|---|
 | 1 | v0.54.0 | `Int` 的透明拼法（`ty_named` 一行） | `Int` | 不用 |
-| 2 | v0.55.0 | 名义（7.1 的 opaque） | **`Char`** | 全线用 |
+| 1.5 | v0.56.0 | 同上 | `Int` | 只有 `std/char` 这个模块先落地（7.7） |
+| 2 | v0.57.0 | 名义（7.1 的 opaque） | **`Char`** | 全线用 |
 
-**期 2 的种子相容性证明**：种子是 v0.54.0，它眼里 `Char ≡ Int`、`'a' : Int`。
+> 这张表原本只有两行、期 2 排在 v0.55.0。中间多出来的一行是 2026-08-06 实测出来的：
+> 接缝不止「类型名」一件，还有「谁能造出一个 `Char`」那件——**桥所在的模块也必须
+> 提前一版进种子**。理由、量法与收口见 7.6/7.7。
+
+**期 2 的种子相容性证明**：种子眼里 `Char ≡ Int`、`'a' : Int`。
 期 2 的源码里每一处 `Char` 标注，在种子看来都是 `Int` 标注，每一个 `'a'` 都是
 `Int` 字面量，两边都过；HEAD 眼里它们全是 `Char`，也过。**两种定型都成立，
 且擦除后是同一份字节**（Char 的表示就是 Int）。语义等价，因为种子给
@@ -287,3 +292,106 @@ opaque 沿用目标类型的 impl（spec §2.7、§4.8），所以 `Char` 的 `S
 `"${c}"` 出 `97` 而不是 `a`。**这是刻意的**，改它要给 Char 单独写一份 `Show`，
 而那会让它不再「就是它的目标」，`opaque-twin` 那条判据也就不成立了。
 要一个字符的字符串，`str.from_char(c)` 就是那个函数。
+
+### 7.5 谁能造出一个 `Char`：三处约束把桥的位置定死了
+
+期 2 施工时撞出来的，写在这里免得下一个人再推一遍。三条约束同时成立：
+
+1. **`char_is_*` 必须改成收 `Char`。** lexer 手里的 `s.cps[i]` 是 `Char`（`code_points`
+   随之变成 `List[Char]`，否则 `s.cps[i] == '\n'` 两边类型对不上）。如果判词还收 `Int`，
+   lexer 就得先把 `Char` 拆回 `Int`，而拆的那个函数在 std/char 里——见第 2 条。
+2. **`selfhost/src` 在 v0.55.0 里还 `use` 不了 `std/char`。** `bin/dawn` 的 stage 1 用
+   **种子自带的那份 std** 编译今天的 selfhost，而 v0.54.0 的 std 里没有 char 这个模块。
+   所以 selfhost 只能调**内建**（`char_is_*` 是内建，永远在）；`char.code` / `char.of`
+   要等种子推到 v0.55.0 之后、即 v0.56.0 那一轮才轮得到 selfhost 用。
+3. **`std/str` 拿不到 `Char`。** 它的 `trim` 走 `cursor.char`（回 `Int` 且带 `-1` 哨兵，
+   7.3 定的），却要喂给已经改成收 `Char` 的 `char_is_space`。std/str 不是 `Char` 的 owner，
+   看不穿，造不出来。
+
+三条一夹，桥只能是**一个内建**：`char_unchecked(n: Int) -> Char`，internal（只有 std 能写），
+lowering 是恒等（`Char` 的表示就是 `Int`，两个后端各加一条直通的 case，同
+`cursor_slice` 那种「发射器内联写掉」的先例）。它不必进种子——std 是 stage 2 用**今天的**
+编译器编的，所以与它同一个 release 引入即可用。
+
+被否掉的两条替代：
+- **让 `cursor.char` 直接回 `Char`**（内建签名一改就成，不需要任何模块去构造）。
+  否，理由是 7.3：那样 `-1` 就成了一个 `Char`，而「每个值都是码点」正是这个类型的全部内容。
+- **`std/char` 出一个 pub 的无检查构造函数**。否，RD-01 刚把 pvec 的公开无检查读取器拿掉，
+  再开一个是往回走；判据一致：无检查的东西不该是 pub 的。
+
+### 7.6 期 2 的第四条约束：selfhost 也造 `Char`，而它够不着 std 的桥
+
+7.5 数了三条约束就收口，桥定成一个 **internal**（只有 std 能写）的 `char_unchecked`。
+2026-08-06 复核 `selfhost/src/lexer.dawn` 时发现**第四条**，它推翻那个收口：
+
+**`selfhost/src` 自己就要从 `Int` 造 `Char`，而它不是 std。**
+`lex_unicode` 把 `\u{...}` 的十六进制位算成一个码点（`cp = cp * 16 + d`），算完要塞进
+`buf: List[Char]`（`code_points` 改签名后 `Src.cps`、`SourceView.cps` 全线是 `List[Char]`）。
+7.5 的第 2 条已经证明 selfhost 在 v0.55.0 **不能 `use std/char`**（stage 1 用种子那份 std）；
+而 `char_unchecked` 若是 internal builtin，`internal_builtins` 按 `cx.is_std_module` 过滤，
+selfhost 同样看不见。两条一夹，**期 2 的 selfhost 无法构造任何 `Char`**——除非桥是一个
+对用户代码可见的内建。
+
+三条出路（2026-08-06 裁决：**三条都不选，选第四条**，见 7.7）：
+
+1. **两个内建**：`char_of(n: Int) -> Option[Char]` 公开且**受检**（故不违反 RD-01——
+   被否的是「无检查的 pub」，不是「pub」），加 internal 的 `char_unchecked` 供 std 热路径
+   （7.5 第 3 条的 `str.trim` 走 `cursor.char` 那条）。lexer 用受检那个：转义本来就要
+   拒绝非法码点，`None` 正好是那条诊断，比现在的写法更严。`std/char.of` 降为一行转发。
+2. **只要 `char_of`**（受检，公开），std 热路径吃一次 `Option` 分配。要先量 `str.trim`
+   的代价，别凭感觉。
+3. **selfhost 的翻转推迟到 v0.56.0**。看着像「再分一期」，实际不成立：`s.cps[i] == '\n'`
+   在 `code_points` 改签名的那一刻两边类型就对不上，而 `code_points` 是 selfhost 取码点的
+   唯一入口。半翻转的 selfhost 编不过——这正是 7.2 说的那个「说不出 `'a'` 是什么类型」的
+   中间状态，只是搬到了别的名字上。
+
+> 顺带记两个期 2 施工前该先量的数：`'x'` 字面量 675 处（std 61 / selfhost 341 /
+> packages 164 / site 101 / scripts 8，另 backend-dawn 19），`code_points` 调用点 34 个
+> 文件——但真正的工作量不是字面量，是 `List[Int] → List[Char]` 沿 lexer / json / md /
+> site 的类型传播，以及每一处对码点做算术的地方（opaque 在 owner 之外不能算术）。
+
+### 7.7 裁决：出路 1 也够不着种子，桥要提前一版进 std
+
+7.6 的三条出路里，出路 1（新增 `char_of` 内建）看着最干净，**它编不过**。
+原因和 7.5 第 2 条是同一条，只是那里没推到底：
+
+> `bin/dawn` 的 stage 1 = **种子的编译器** 编今天的 `selfhost/src`，`--std` 指的是
+> **种子那一版发布时的 std**（`scripts/seedjar.sh` 的 `seed_std_dir`，从种子的 git tag 里
+> `git archive std` 取）。
+
+于是 selfhost 能用的东西，必须**在上一个 release 的产物里就存在**。这对新内建和新 std 模块
+一视同仁——内建表 `builtins()` 是编译进种子 jar 的一段代码，不是读今天的 `types.dawn`。
+
+**实测（不是推理）**，v0.55.0 种子 + 今天的 selfhost：
+
+| 变异 | 结果 |
+|---|---|
+| `types.dawn` 加 `bsig("char_unchecked", ...)`，`lexer.dawn` 调它 | stage 1 红：`error: undefined function: char_unchecked --> selfhost/src/lexer.dawn` |
+| `ls .dawn/seeds/std-v0.55.0/` | 11 个模块，**没有 `char.dawn`** |
+
+两行合起来：**期 2 那一版的 selfhost，既调不到新内建，也 `use` 不了新 std 模块。**
+出路 1 与出路 2 都假设了「新内建当版可用」，两条一起失效；出路 3（推迟 selfhost）
+7.6 已自证不成立。
+
+**出路 4：把桥所在的 std 模块提前一版发出去。** 也就是 7.2 表里新加的期 1.5：
+
+- **v0.56.0**：`Char` 仍然透明，`'a'` 仍然是 `Int`，只多一个 `std/char` 模块
+  （`code` / `of` / 六个 `is_*`）。此版里 `code(c: Char) -> Int` 是恒等、
+  `of(n) -> Option[Char]` 是一次范围判断，**没有任何现存程序能看出区别**——
+  这正是 7.2 给类型名用过的那条论证，原样用在模块上。
+- **v0.57.0**：原子翻转。selfhost `use std/char`，`char.code` 供
+  `Token.ival` 那一处 Char→Int、`char.of(cp)` 供 `lex_unicode` 那一处 Int→Char
+  （顺带把 `\u{...}` 的校验收紧到「代理区也拒」，那是 7.6 说的「比现在更严」）。
+
+**为什么桥是 std 模块而不是内建**：7.5 当初推出内建，是因为它数的三条约束里
+第 2 条把 `std/char` 排除了——而排除的理由是「v0.55.0 的 std 里没有 char 模块」。
+那不是模块这条路走不通，那是**它没被提前发**。发了就通，且回到 7.1 原本要的形状：
+`char.code` / `char.of` 是 owner 模块里的两行普通函数，零内建、零 lowering、
+两个后端都不用改。
+
+**仍然要一个 internal 内建**：7.5 第 3 条（`std/str.trim` 走 `cursor.char` 拿 `Int`，
+要喂给收 `Char` 的 `char_is_space`）不受影响——**std 由今天的编译器在 stage 2 检查**，
+所以 `char_unchecked` 与翻转同版引入即可用。只有 `selfhost/src` 受种子约束，std 不受。
+
+> 一句话记住这条：**种子纪律管的不只是语法，还有名字**——语言特性、内建名、std 模块名，
+> 凡是 `selfhost/src` 要拼出来的，都得在上一版的产物里能被解析。

@@ -94,11 +94,15 @@ O(n) 换算——实测与设计取舍见 [`seq6-research.md`](seq6-research.md)
 §11 的游标（`std/cursor`）**，它每步恒定开销；下标版留给单次调用。
 没有独立字符类型（Go/Rune 模型使其无必要）。
 
-> **过渡中（v0.54.0）**：类型名 `Char` 从本版起可以写，但它现在**就是 `Int` 的另一个拼法**
-> ——完全互换，写了它不会多一分安全。它提前一版落地只为一件事：把 `'a'` 的类型从 `Int`
-> 改成 `Char` 是破坏性变更，而按种子纪律（`docs/bootstrap.md`），编译那一次改动的编译器
-> 必须已经认识这个名字。下一版 `Char` 变成名义类型、`'a'` 随之改型，本节这段话届时整段
-> 重写。**别在 v0.54.0 里依赖 `Char` 与 `Int` 可换**——那是过渡态，不是承诺。
+> **过渡中（v0.54.0 起）**：类型名 `Char` 从 v0.54.0 起可以写、`std/char` 模块从 v0.56.0
+> 起可以 `use`，但 `Char` 现在**就是 `Int` 的另一个拼法**——完全互换，写了它不会多一分安全，
+> `char.code(c)` 也就是恒等函数。两件都提前落地只为一件事：把 `'a'` 的类型从 `Int` 改成
+> `Char` 是破坏性变更，而按种子纪律（`docs/bootstrap.md`），编译那一次改动的编译器
+> 必须已经认识这个**名字**——类型名要认识，selfhost 的 lexer 要用来造 `Char` 的那个
+> **std 模块**也要认识（stage 1 用的是种子发布时的那份 std）。翻转发生在 v0.57.0：
+> `Char` 变成名义类型、`'a'` 随之改型，本节这段话届时整段重写。
+> **别依赖 `Char` 与 `Int` 可换**——那是过渡态，不是承诺。分期与实测见
+> [`audit/nominal-types-design.md`](audit/nominal-types-design.md) §7。
 
 ### 1.6 字符串与插值
 
@@ -1653,7 +1657,8 @@ use java "java.lang.Math"      # Java 互操作（§9），形式不变
 ### 10.6 捆绑标准库与 prelude
 
 标准库以 **Dawn 源码随编译器捆绑**，组织为真模块（[`stdlib-naming.md`](stdlib-naming.md)）：
-`std/str`、`std/fmt`、`std/bytes`、`std/io`、`std/list`、`std/map`、`std/set`、`std/cursor`。
+`std/str`、`std/fmt`、`std/bytes`、`std/io`、`std/list`、`std/map`、`std/set`、`std/cursor`、
+`std/char`。
 另有两个**内部模块** `std/hamt` 与 `std/pvec`——`Map`/`Set`/`List` 的表示（§11）。它们随
 std 一起捆绑、在 std 内部互相引用，但 **std 之外 `use std/hamt` / `use std/pvec` 是编译
 错误**：表示要能整体换掉，而能换的前提是没有程序依赖它。
