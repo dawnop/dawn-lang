@@ -151,9 +151,10 @@ pub fn stdin_ready(timeout_ms: Int) -> Bool !io = io_stdin_ready(timeout_ms)
 ## `Arrays.sort`, which is UTF-16 unit order and puts astral names before
 ## U+E000..U+FFFF ones.
 ##
-## Its `kind` is `"io.not_a_directory"`, the one failure kind std mints itself:
-## every other one in this module is whatever the backend called it, and this
-## failure never reaches a backend, because the check happens first. It is
+## Its `kind` is `"io.not_a_directory"`, one of the two failure kinds std mints
+## itself (`run`'s `io.no_program` is the other): every other one in this module
+## is whatever the backend called it, and this failure never reaches a backend,
+## because the check happens first. It is
 ## spelled as a name rather than a sentence for the same reason every other
 ## `kind` is — a caller may match on it.
 pub fn list_dir(path: String) -> Result[List[String], ForeignError] !io =
@@ -177,8 +178,26 @@ pub fn list_dir(path: String) -> Result[List[String], ForeignError] !io =
 ## Each stream goes to the file named by its path, truncating it, and an empty
 ## path leaves that stream pointing wherever this process's already points.
 ## Files rather than pipes: see the note on the `io_run` intrinsic.
+##
+## An empty `argv` is `"io.no_program"`, the second failure kind std mints
+## itself, and for `list_dir`'s reason: the check happens first, so the failure
+## never reaches a backend and every backend words it the same. It had to be
+## minted because the two did not agree — the JVM handed `ProcessBuilder` an
+## empty list and leaked `java.lang.ArrayIndexOutOfBoundsException` with
+## "Index 0 out of bounds for length 0" as the `kind` a caller would match on,
+## while the C runtime already checked and said `io_run: argv is empty`. There
+## is no `argv[0]` to name, which is a question about the argument and not
+## about the host.
 pub fn run(argv: List[String], out_path: String, err_path: String) -> Result[Int, ForeignError] !io =
-  catch_fault(() => io_run(argv, out_path, err_path))
+  if len(argv) == 0 {
+    Err(ForeignError {
+      kind: "io.no_program",
+      message: "io.run: argv is empty, so there is no program to run",
+      cause: None
+    })
+  } else {
+    catch_fault(() => io_run(argv, out_path, err_path))
+  }
 
 # What these blocks may and may not assert is decided by one fact: `kind` is
 # whatever the backend called the failure. On the JVM a missing file is
@@ -187,10 +206,10 @@ pub fn run(argv: List[String], out_path: String, err_path: String) -> Result[Int
 # compared byte for byte (scripts/native-cli-diff.sh). So a failure that
 # reaches a backend is asserted to *be* an `Err` and nothing more.
 #
-# The exception is `list_dir`'s `io.not_a_directory`, which std mints itself
-# above the barrier and is the same string on every backend -- and being
-# match-able is the whole reason it is a name rather than a sentence, so it is
-# the one `kind` worth pinning.
+# The exceptions are `list_dir`'s `io.not_a_directory` and `run`'s
+# `io.no_program`, which std mints itself above the barrier and which are the
+# same string on every backend -- and being match-able is the whole reason they
+# are names rather than sentences, so they are the `kind`s worth pinning.
 #
 # `Unit` has no equality, so `Result[Unit, ForeignError]` cannot be compared
 # with `==` and the blocks below carry a local `ok` lambda instead of a
@@ -434,6 +453,13 @@ test "run answers the exit status; a program that cannot start is an Err" {
   match run(["dawn-no-such-program-anywhere-on-this-path"], "", "") {
     Ok(_) -> { assert false }
     Err(_) -> ()
+  }
+  # no argv[0] to run. std mints this one, so unlike every other kind here it
+  # is the same string on both backends and is worth pinning -- it is what the
+  # JVM used to answer with `java.lang.ArrayIndexOutOfBoundsException`.
+  match run([], "", "") {
+    Ok(_) -> { assert false }
+    Err(e) -> { assert e.kind == "io.no_program" }
   }
   # each stream goes to the file named, truncating it
   let out = d ++ "/out.txt"

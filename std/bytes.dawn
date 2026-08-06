@@ -30,7 +30,7 @@
 ## mutating it -- and it inherits `array_push`'s clause: the backend extends in
 ## place exactly when the version it is handed is the only one that could be
 ## reading the frontier, so building a megabyte is linear and not quadratic.
-## `get` is here because the callers that need this are decompressors, and an
+## `buf_at` is here because the callers that need this are decompressors, and an
 ## LZ77 back-reference reads output that was written a moment ago.
 pub opaque type Buf = Array[Int]
 
@@ -63,8 +63,25 @@ pub fn put_bytes(b: Buf, src: Bytes) -> Buf = {
 ## reading back what they just wrote (audit RD-06).
 pub fn size(b: Buf) -> Int = array_len(b)
 
-## The byte at `i`, as 0..255. Out of range panics, as `at` does.
-pub fn get(b: Buf, i: Int) -> Int = array_get(b, i)
+## The byte at `i`, as 0..255. Out of range panics, exactly as `at(b: Bytes, i)`
+## does — it is the same question asked of the half-built buffer.
+##
+## `buf_at` and not `at` for the reason `size` is not `len`, and not `get` for a
+## worse one: `get` is criterion 2's word (`list.get`, `map.get` — inquiry,
+## answering `Option`), and this function panics. It was the one place in std
+## where a `get` asserted, which is the defect the name records. `at` is the
+## right word and `at(b: Bytes, i)` above already holds it, so the builder takes
+## the qualified spelling — the second named exception to one-concept-one-name,
+## and for the same cause as the first: no overloading (CONTRIBUTING §naming).
+##
+## Renaming `at(b: Bytes, i)` instead was the alternative. It was rejected
+## because that name is already the correct one under §4.8 criterion 1 and has
+## the call sites; moving a right name to make room for a wrong one is backwards.
+pub fn buf_at(b: Buf, i: Int) -> Int = array_get(b, i)
+
+## Renamed to `buf_at`. Kept for one release so the seed that compiles the
+## rename still has the name it was built with; removed in the next one.
+pub fn get(b: Buf, i: Int) -> Int = buf_at(b, i)
 
 ## The finished bytes.
 pub fn freeze(b: Buf) -> Bytes = bytes_from_array(b)
@@ -97,9 +114,12 @@ pub fn at(b: Bytes, i: Int) -> Int = {
 ## `start > end` yields empty, so this never panics.
 pub fn slice(b: Bytes, start: Int, end: Int) -> Bytes = bytes_slice(b, start, end)
 
-## Byte index of the first occurrence of `needle` at or after `from`, or `None`.
-## An empty needle matches at the (non-negative) start. Pure Dawn over
-## bytes_len/bytes_at — the search loop is not an intrinsic.
+## Where the first occurrence of `needle` at or after `from` begins, or `None`.
+##
+## A *position* in `[0, len]` counted in bytes, not the index of an element: an
+## empty needle matches at the (non-negative) start, and `len(b)` is a legal
+## answer though no byte lives there. Pure Dawn over bytes_len/bytes_at — the
+## search loop is not an intrinsic.
 pub fn index_of(b: Bytes, needle: Bytes, from: Int) -> Option[Int] = {
   let hlen = bytes_len(b)
   let nlen = bytes_len(needle)

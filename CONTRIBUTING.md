@@ -109,9 +109,28 @@
 新加一个 std 或包的 pub 名字时对着看，不是历史记录。
 
 - **一个概念一个名字。** 长度是 `len`，判空是 `is_empty`，`str`/`list`/`map`/`set`/`bytes`
-  五处逐字相同。唯一具名例外是 `bytes.size(b: Buf)`：`bytes.len` 已经是成品字节串的
-  长度，而 Dawn 无重载，所以写入游标只能另取一名——例外要**在代码里写明为什么**，
-  否则下一个人会照抄成惯例。
+  五处逐字相同。具名例外只有两个，都出在 `Buf` 上、都是同一个原因（Dawn 无重载，
+  而 `Bytes` 那一侧先占住了对的名字）：`bytes.size(b: Buf)` 让开 `bytes.len(b: Bytes)`，
+  `bytes.buf_at(b: Buf, i)` 让开 `bytes.at(b: Bytes, i)`。例外要**在代码里写明为什么**，
+  否则下一个人会照抄成惯例。让路的方向也是判据的一部分：**把对的名字挪走给错的名字腾地方
+  是反的**——`bytes.at` 按下面的三判据已经叫对了，所以改名的是 `Buf` 那一侧。
+- **名字要说出越界时会发生什么（spec §4.8 三判据）。** 这是 v0.54.0/v0.55.0 那批改名的
+  唯一依据，`at` / `get` / 区间函数各归其一：
+  - **判据 1（断言，panic）** 的词是 `at` 与 `[]`：参数是一个**位置**，调用方声称它存在，
+    越界是 bug。`str.at`、`bytes.at`、`pvec.index`/`nth`。
+  - **判据 2（问询，`Option`/`Bool`）** 的词是 `get`：越界/缺席是调用方要分的正常分支。
+    `list.get`、`map.get`、`index_of` 族。
+  - **判据 3（钳位，永不 panic）** 是区间函数：`slice`、`take`、`drop`、`seek`。参数是
+    一个**区间或落点**，说的是「要这一段里有的部分」，不断言端点存在。
+  一个名字**不能同时扛两条政策**。`cursor.at` 曾经是钳位的、`str.at` 是 panic 的，
+  同一个词的含义取决于读者当时在哪个模块里——那不是取舍，是缺陷；解法是改名
+  （`cursor.at` → `cursor.seek`），不是把两者统一到一条政策上，因为两者各自都是对的。
+  `bytes.get(b: Buf, i)` 是同一类缺陷的另一面：它 panic，却用了判据 2 的词。
+- **改破坏性的名字走「一代转发器」。** 新名字与旧名字同期上线，旧的降为一行转发器并在
+  文档注释里写明「下一版删除」；下一个 release 才删旧名、迁调用点。理由是机器的：
+  `bin/dawn` 的 stage 1 用**种子自带的那份 std**编译今天的 `selfhost/src`（见脚本里的
+  注释），所以 selfhost 的调用点**必须晚一代**才能改；一期做完的改名会在自举第一步就红。
+  先例：RD-06 的 `of_array`、本批的 `str.slice`/`cursor.seek`/`bytes.buf_at`。
 - **转换是 `to_X` / `from_X`。** `to_hex`/`from_hex`、`to_base64`/`from_base64`、
   `to_array`/`from_array`、`to_list`。领域动词只在**名字本身承载语义**时留下：
   `bytes.freeze` 是「结束 `Buf` 的扩展契约」，不是「转成 Bytes」；`bytes.utf8` 点名的是

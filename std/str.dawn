@@ -107,7 +107,7 @@ pub fn ends_with(s: String, suffix: String) -> Bool = {
 ##
 ## Inquiry (spec §4.8, criterion 2): "no such prefix" is a branch the caller
 ## takes, not a bug. Testing and peeling in one call is the point -- the pair
-## `starts_with` plus a hand-computed `substring(s, 16, len(s))` is what put
+## `starts_with` plus a hand-computed `slice(s, 16, len(s))` is what put
 ## magic offsets in 33 call sites, and an offset that is one out still compiles.
 ## No arithmetic happens here either: `cursor.skip` walks past the prefix.
 pub fn strip_prefix(s: String, prefix: String) -> Option[String] =
@@ -126,10 +126,14 @@ pub fn strip_suffix(s: String, suffix: String) -> Option[String] =
     None
   }
 
-## The code-point index of the first occurrence of `sub`, or `None`.
+## Where the first occurrence of `sub` begins, in code points, or `None`.
 ##
-## A code-point index, not a position: `cursor.find` is the one that answers
-## with something you can slice at.
+## The answer is a *position* in `[0, len]`, not the index of an element: an
+## empty `sub` occurs at position 0 of the empty string, and `len(s)` is a
+## legal answer here (see `last_index_of`) though no character lives there.
+## "Index" in the name is the unit it counts in -- code points, not UTF-16
+## units and not bytes -- and `cursor.find` is the one that answers with a
+## position you can slice at directly.
 pub fn index_of(s: String, sub: String) -> Option[Int] = idx(s, sub, cursor.start(s), 0)
 
 fn idx(s: String, sub: String, c: Cursor, i: Int) -> Option[Int] =
@@ -141,8 +145,10 @@ fn idx(s: String, sub: String, c: Cursor, i: Int) -> Option[Int] =
     idx(s, sub, cursor.next(s, c), i + 1)
   }
 
-## The code-point index of the last occurrence of `sub`, or `None`. An empty
-## `sub` is found at the end, which is `len(s)`.
+## Where the last occurrence of `sub` begins, in code points, or `None`. A
+## position in `[0, len]`: an empty `sub` is found at the end, which is
+## `len(s)` -- past the last character, which is why the answer is a position
+## and not an element index.
 pub fn last_index_of(s: String, sub: String) -> Option[Int] =
   last_idx(s, sub, cursor.start(s), 0, None)
 
@@ -190,7 +196,7 @@ pub fn repeat(s: String, n: Int) -> String = {
 ## (a negative index reads as 0, one past the end as `len`) and `from > to`
 ## yields the empty string, so this never panics — a range parameter selects
 ## a stretch, it does not assert its endpoints exist (spec §4.8).
-pub fn substring(s: String, from: Int, to: Int) -> String = {
+pub fn slice(s: String, from: Int, to: Int) -> String = {
   let n = len(s)
   let f = clamp_cp(from, n)
   let t = clamp_cp(to, n)
@@ -202,21 +208,29 @@ pub fn substring(s: String, from: Int, to: Int) -> String = {
   }
 }
 
+## Renamed to `slice`. Kept for one release so the seed that compiles the
+## rename still has the name it was built with; removed in the next one.
+##
+## The rename is CONTRIBUTING's "one concept, one name": `list.slice` and
+## `bytes.slice` already spell this, all three clamp both ends, and the odd one
+## out was the one that named a *sub-string* rather than the operation.
+pub fn substring(s: String, from: Int, to: Int) -> String = slice(s, from, to)
+
 fn clamp_cp(i: Int, n: Int) -> Int = if i < 0 { 0 } else if i > n { n } else { i }
 
 ## The first `n` characters, or all of them when there are fewer. `n` is
 ## clamped into `[0, len]`, so this never panics: it names a stretch rather
 ## than asserting that position `n` exists (spec §4.8, criterion 3), the same
-## way `substring` and `list.take` do.
+## way `slice` and `list.take` do.
 ##
 ## `truncate` would be this function under another name, so there is no
 ## `truncate`.
-pub fn take(s: String, n: Int) -> String = substring(s, 0, n)
+pub fn take(s: String, n: Int) -> String = slice(s, 0, n)
 
 ## Everything after the first `n` characters; `n` is clamped into `[0, len]`,
 ## so this never panics. This is the "the rest of it" that 50 call sites spell
-## `substring(x, i, str.len(x))`.
-pub fn drop(s: String, n: Int) -> String = substring(s, n, len(s))
+## `slice(x, i, str.len(x))`.
+pub fn drop(s: String, n: Int) -> String = slice(s, n, len(s))
 
 ## The code point at `i`. Panics when `i` is out of range -- `i` is a position
 ## the caller says exists, exactly like `xs[i]` and `bytes.at`
@@ -227,7 +241,7 @@ pub fn drop(s: String, n: Int) -> String = substring(s, n, len(s))
 ## `code_points`, `from_char` and `cursor.char` already trade in, and `chars`
 ## is the function that answers with strings.
 pub fn at(s: String, i: Int) -> Int = {
-  let c = cursor.at(s, i)
+  let c = cursor.seek(s, i)
   if i < 0 || cursor.done(s, c) {
     panic("str.at: index out of range")
   } else {
@@ -445,15 +459,15 @@ test "replace is split then join, and an empty needle splices between characters
   assert replace("ab", "", "-") == "a-b"
 }
 
-test "substring, take and drop clamp their ends instead of panicking" {
-  assert substring("abcdef", 1, 4) == "bcd"
-  assert substring("abcdef", 0, 6) == "abcdef"
-  assert substring("abcdef", 4, 1) == ""
-  assert substring("abcdef", 3, 3) == ""
-  assert substring("abcdef", 0 - 5, 2) == "ab"
-  assert substring("abcdef", 4, 99) == "ef"
-  assert substring("abcdef", 99, 200) == ""
-  assert substring("", 0, 5) == ""
+test "slice, take and drop clamp their ends instead of panicking" {
+  assert slice("abcdef", 1, 4) == "bcd"
+  assert slice("abcdef", 0, 6) == "abcdef"
+  assert slice("abcdef", 4, 1) == ""
+  assert slice("abcdef", 3, 3) == ""
+  assert slice("abcdef", 0 - 5, 2) == "ab"
+  assert slice("abcdef", 4, 99) == "ef"
+  assert slice("abcdef", 99, 200) == ""
+  assert slice("", 0, 5) == ""
   assert take("abcdef", 2) == "ab"
   assert take("abcdef", 0) == ""
   assert take("abcdef", 99) == "abcdef"
@@ -465,7 +479,9 @@ test "substring, take and drop clamp their ends instead of panicking" {
   # the cut is between characters: an astral one is never halved
   assert take("a😀z", 2) == "a😀"
   assert drop("a😀z", 1) == "😀z"
-  assert substring("a😀z", 1, 2) == "😀"
+  assert slice("a😀z", 1, 2) == "😀"
+  # the name it had until v0.54.0, kept for one release and then removed
+  assert substring("abcdef", 1, 4) == slice("abcdef", 1, 4)
 }
 
 test "at asserts the index exists -- it is the one that panics" {
@@ -474,7 +490,7 @@ test "at asserts the index exists -- it is the one that panics" {
   assert at("😀", 0) == 0x1F600
   assert at("a😀z", 2) == 122
   # spec 4.8 criterion 1: `i` is a position the caller says exists, so a miss
-  # is a broken invariant and not a branch. `substring`/`take`/`drop` above are
+  # is a broken invariant and not a branch. `slice`/`take`/`drop` above are
   # criterion 3 and clamp; this one does not, and that difference is the pin.
   match catch_panic(() => at("abc", 3)) {
     Ok(_) -> { assert false }
@@ -598,7 +614,7 @@ test "repeat needs no stack, at a count that used to exhaust it" {
   assert len(big) == 200000
   assert take(big, 6) == "ababab"
   assert drop(big, 199994) == "ababab"
-  assert substring(big, 99999, 100003) == "baba"
+  assert slice(big, 99999, 100003) == "baba"
   assert repeat("ab", 100000) == repeat("ab", 99999) ++ "ab"
 }
 

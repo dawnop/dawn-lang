@@ -110,14 +110,26 @@ pub fn back(s: String, c: Cursor, n: Int) -> Cursor =
 ## here -- the guarantee `Cursor` carries is that arithmetic cannot land you
 ## between the halves of a surrogate pair, and walking `i` characters cannot.
 ##
+## Named `seek` and not `at` because those two words are the language's two
+## out-of-range policies, and one name cannot hold both: `at` is criterion 1
+## (`str.at`, `bytes.at`, `xs[i]` -- the caller asserts the position exists and
+## a miss panics), this is criterion 3 (it clamps and never panics). It was
+## `cursor.at` until v0.54.0, which made the difference between `str.at(s, 9)`
+## on a 3-character string -- a panic -- and `cursor.at(s, 9)` -- the end --
+## a matter of which module the reader happened to be in.
+##
 ## O(i). Use it once, at the point where an `Int` index arrives from outside;
 ## a loop that calls it per character is the O(n^2) it exists to remove.
-pub fn at(s: String, i: Int) -> Cursor = at_go(s, start(s), i)
+pub fn seek(s: String, i: Int) -> Cursor = seek_go(s, start(s), i)
 
-fn at_go(s: String, c: Cursor, i: Int) -> Cursor =
-  if i <= 0 || done(s, c) { c } else { at_go(s, next(s, c), i - 1) }
+fn seek_go(s: String, c: Cursor, i: Int) -> Cursor =
+  if i <= 0 || done(s, c) { c } else { seek_go(s, next(s, c), i - 1) }
 
-## How many characters lie before `c`: the code-point index `at` would take.
+## Renamed to `seek`. Kept for one release so the seed that compiles the rename
+## still has the name it was built with; removed in the next one.
+pub fn at(s: String, i: Int) -> Cursor = seek(s, i)
+
+## How many characters lie before `c`: the code-point index `seek` would take.
 ##
 ## One pass, counting forward from the start, rather than the two-scan version
 ## `packages/json` wrote for itself. `c` must be a position in `s`; a cursor
@@ -146,7 +158,7 @@ impl Ord[Cursor] {
 
 # ---- tests ----
 #
-# The bridge functions (`at` / `offset`) and the walks around them, checked at
+# The bridge functions (`seek` / `offset`) and the walks around them, checked at
 # the boundaries: both ends of the string, and the one character whose UTF-16
 # representation is two units. `😀` is U+1F600, a surrogate pair, so every
 # clause below that says "by character" is only tested by it -- a BMP character
@@ -198,18 +210,18 @@ test "back walks n characters and clamps at the start" {
 
 test "at and offset are the two directions of one bridge, and at clamps" {
   let s = "a中😀z"
-  assert offset(s, at(s, 0)) == 0
-  assert offset(s, at(s, 2)) == 2
-  assert offset(s, at(s, 4)) == 4
+  assert offset(s, seek(s, 0)) == 0
+  assert offset(s, seek(s, 2)) == 2
+  assert offset(s, seek(s, 4)) == 4
   # spec 4.8 criterion 3: an index outside the string is clamped, not refused
-  assert offset(s, at(s, 0 - 5)) == 0
-  assert offset(s, at(s, 99)) == 4
-  assert char(s, at(s, 1)) == 0x4E2D
-  assert char(s, at(s, 2)) == 0x1F600
-  assert char(s, at(s, 4)) == 0 - 1
+  assert offset(s, seek(s, 0 - 5)) == 0
+  assert offset(s, seek(s, 99)) == 4
+  assert char(s, seek(s, 1)) == 0x4E2D
+  assert char(s, seek(s, 2)) == 0x1F600
+  assert char(s, seek(s, 4)) == 0 - 1
   # the index counts characters, so the astral one advances it by one
-  assert slice(s, at(s, 1), at(s, 3)) == "中😀"
-  assert slice(s, at(s, 2), at(s, 3)) == "😀"
+  assert slice(s, seek(s, 1), seek(s, 3)) == "中😀"
+  assert slice(s, seek(s, 2), seek(s, 3)) == "😀"
   assert offset(s, start(s)) == 0
   assert offset(s, end(s)) == 4
   assert offset("", start("")) == 0
@@ -219,15 +231,15 @@ test "at and offset are the two directions of one bridge, and at clamps" {
 test "starts_at matches at a position, and the empty string is at every one" {
   let s = "abcabc"
   assert starts_at(s, start(s), "abc")
-  assert starts_at(s, at(s, 3), "abc")
-  assert not starts_at(s, at(s, 1), "abc")
+  assert starts_at(s, seek(s, 3), "abc")
+  assert not starts_at(s, seek(s, 1), "abc")
   # running off the end is a miss, not a match on what is left
-  assert not starts_at(s, at(s, 4), "abc")
+  assert not starts_at(s, seek(s, 4), "abc")
   assert starts_at(s, start(s), "")
   assert starts_at(s, end(s), "")
   assert starts_at("", start(""), "")
   assert not starts_at("", start(""), "a")
-  assert starts_at("a😀", at("a😀", 1), "😀")
+  assert starts_at("a😀", seek("a😀", 1), "😀")
 }
 
 test "find answers with a position at or after where it was told to look" {
@@ -236,7 +248,7 @@ test "find answers with a position at or after where it was told to look" {
     Some(c) -> { assert offset(s, c) == 1 }
     None -> { assert false }
   }
-  match find(s, "bc", at(s, 2)) {
+  match find(s, "bc", seek(s, 2)) {
     Some(c) -> { assert offset(s, c) == 4 }
     None -> { assert false }
   }
@@ -245,7 +257,7 @@ test "find answers with a position at or after where it was told to look" {
     None -> ()
   }
   # the empty needle is found where the search began, including at the end
-  match find(s, "", at(s, 3)) {
+  match find(s, "", seek(s, 3)) {
     Some(c) -> { assert offset(s, c) == 3 }
     None -> { assert false }
   }
@@ -268,9 +280,11 @@ test "skip advances past an occurrence it is told is there" {
 
 test "positions in one string are ordered, and the order is the walk's" {
   let s = "abcd"
-  assert cmp(at(s, 0), at(s, 1)) < 0
-  assert cmp(at(s, 2), at(s, 2)) == 0
+  assert cmp(seek(s, 0), seek(s, 1)) < 0
+  assert cmp(seek(s, 2), seek(s, 2)) == 0
   assert cmp(end(s), start(s)) > 0
-  assert cmp(start(s), at(s, 0)) == 0
-  assert cmp(at(s, 99), end(s)) == 0
+  assert cmp(start(s), seek(s, 0)) == 0
+  assert cmp(seek(s, 99), end(s)) == 0
+  # the name it had until v0.54.0, kept for one release and then removed
+  assert cmp(at(s, 2), seek(s, 2)) == 0
 }
