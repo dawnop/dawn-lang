@@ -1,0 +1,127 @@
+## Characters: the type `'a'` has, and the questions worth asking about one
+## (spec §1.5, §11).
+#
+# Short names, module-qualified at the call site: `use std/char`, then
+# `char.code(c)` / `char.is_digit(c)`.
+#
+# `Char` is declared nowhere. It is the one opaque type the compiler mints
+# itself (`types.ty_char`), because `'a'` is syntax and a literal's type cannot
+# wait for a module to be checked; this module is named as its owner, which is
+# what lets the two functions below be two lines instead of two intrinsics.
+# Everything else about it is ordinary `opaque type` (spec §2.7): the
+# representation is `Int`, so there is no cost, and `==`, `<`, hashing and
+# `${...}` are the Int's -- including the last one, so `"${c}"` renders a code
+# point and `str.from_char(c)` is still how you get a one-character string.
+#
+# The predicates are `char_is_*` intrinsics underneath, table-driven from the
+# compiler's own Unicode class table (selfhost/src/class_table.dawn), so the
+# answers do not move when the host JDK does.
+
+use std/cursor
+use std/map
+use std/str
+
+## The code point `c` stands for.
+pub fn code(c: Char) -> Int = c
+
+## The character with code point `n`, or `None` when `n` is not one.
+##
+## `Option` rather than a panic because "is this integer a character" is a
+## question with a legitimate negative answer -- it is exactly what a parser
+## reading a `\u` escape needs to ask (spec §4.8, criterion 2). The bulk
+## conversion `from_code_points` is not asking, and keeps its panic.
+##
+## Not a Unicode scalar value: negative, above U+10FFFF, or in the surrogate
+## range D800..DFFF. Those last are halves of a UTF-16 pair and never stand for
+## a character on their own, which is the whole reason `Cursor` exists.
+pub fn of(n: Int) -> Option[Char] =
+  if n < 0 || n > 0x10FFFF || (n >= 0xD800 && n <= 0xDFFF) { None } else { Some(n) }
+
+## Whether `c` is a letter.
+pub fn is_letter(c: Char) -> Bool = char_is_letter(c)
+
+## Whether `c` is a decimal digit.
+pub fn is_digit(c: Char) -> Bool = char_is_digit(c)
+
+## Whether `c` is a letter or a digit.
+pub fn is_alnum(c: Char) -> Bool = char_is_alnum(c)
+
+## Whether `c` is an upper-case letter.
+pub fn is_upper(c: Char) -> Bool = char_is_upper(c)
+
+## Whether `c` is a lower-case letter.
+pub fn is_lower(c: Char) -> Bool = char_is_lower(c)
+
+## Whether `c` is whitespace.
+pub fn is_space(c: Char) -> Bool = char_is_space(c)
+
+# ---- tests ----
+
+test "of admits the scalar values and refuses the rest" {
+  assert code(of(97).expect("a")) == 97
+  assert code(of(0).expect("nul")) == 0
+  assert code(of(0x10FFFF).expect("max")) == 0x10FFFF
+  assert of(0 - 1) == None
+  assert of(0x110000) == None
+  # the surrogate halves: legal UTF-16 units, never characters
+  assert of(0xD800) == None
+  assert of(0xDBFF) == None
+  assert of(0xDC00) == None
+  assert of(0xDFFF) == None
+  # and the code points on either side of that hole are fine
+  assert of(0xD7FF) != None
+  assert of(0xE000) != None
+}
+
+test "a literal is a Char, and code is the way back to Int" {
+  assert code('a') == 97
+  assert code('\n') == 10
+  assert code('中') == 0x4E2D
+  assert code('😀') == 0x1F600
+  assert of(97) == Some('a')
+  # equality, ordering and hashing are the Int's, which is what an opaque type
+  # over Int means -- and what lets a Char be a Map key
+  assert 'a' == 'a'
+  assert 'a' != 'b'
+  assert 'a' < 'b'
+  let m = map.insert(map.empty(), 'a', 1)
+  assert map.get(m, 'a') == Some(1)
+  # match on a Char is match on its target
+  let name = match 'x' {
+    'x' -> "ex"
+    _ -> "other"
+  }
+  assert name == "ex"
+}
+
+test "the predicates read the compiler's Unicode table, not the host's" {
+  assert is_letter('a')
+  assert is_letter('中')
+  assert not is_letter('1')
+  assert is_digit('7')
+  assert not is_digit('a')
+  assert is_alnum('a')
+  assert is_alnum('7')
+  assert not is_alnum(' ')
+  assert is_upper('A')
+  assert not is_upper('a')
+  assert is_lower('a')
+  assert not is_lower('A')
+  assert is_space(' ')
+  assert is_space('\t')
+  assert is_space('\n')
+  assert not is_space('a')
+}
+
+test "the walk over a string hands out Chars" {
+  let s = "a中😀"
+  assert str.at(s, 0) == 'a'
+  assert str.at(s, 1) == '中'
+  assert str.at(s, 2) == '😀'
+  assert code_points(s) == ['a', '中', '😀']
+  assert from_code_points(['a', 'b']) == "ab"
+  # cursor.char stays an Int: it answers -1 at the end, and a sentinel that is
+  # not a code point cannot live in a type whose every value is one (spec §4.8)
+  assert cursor.char(s, cursor.start(s)) == 97
+  assert cursor.char(s, cursor.end(s)) == 0 - 1
+}

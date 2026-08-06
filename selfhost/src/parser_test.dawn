@@ -7,7 +7,7 @@ use std/str
 use parser.{parse_module}
 use astdump.{render_module}
 use ast.{
-  Expr, EInt, EVar, EApply, EBinary, ECtor, EBlock,
+  Expr, EInt, EChar, EVar, EApply, EBinary, ECtor, EBlock,
   BinOp, OpAdd, OpMul,
   Stmt, SWhile,
   Decl, DFn, DConst, DUseModule, DImpl, Module,
@@ -29,6 +29,22 @@ test "a function declaration parses to one decl" {
       assert len(f.params) == 1
       assert f.params[0].name == "x"
     }
+    _ -> { assert false }
+  }
+}
+
+test "a character literal parses to its own node, not an Int" {
+  let (m, ds) = parse_module("fn f() = 'a'")
+  assert len(ds) == 0
+  match m.decls[0] {
+    DFn(f) ->
+      match f.body {
+        EChar(v, lo, hi) -> {
+          assert v == 97
+          assert hi - lo == 3
+        }
+        _ -> { assert false }
+      }
     _ -> { assert false }
   }
 }

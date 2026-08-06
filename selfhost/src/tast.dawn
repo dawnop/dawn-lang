@@ -9,7 +9,9 @@
 # diagnostics (see ast.dawn — the front end has one span currency, and it is not
 # UTF-16).
 
-use types.{Ty, Sig, Eff, Sym, TyInt, TyFloat, TyBool, TyString, TyUnit, TyNever, TyError}
+use types.{
+  Ty, Sig, Eff, Sym, TyInt, TyFloat, TyBool, TyString, TyUnit, TyNever, TyError, ty_char
+}
 use exhaustive.{LitV}
 
 pub type TStrPart =
@@ -69,6 +71,9 @@ pub type TJavaCall = {
 
 pub type TExpr =
   | XInt(v: Int, lo: Int, hi: Int)
+# a character literal: an Int code point typed `Char`, so it needs its own node
+# even though it lowers to exactly what XInt does (tex_ty is by constructor)
+  | XChar(v: Int, lo: Int, hi: Int)
   | XFloat(v: Float, lo: Int, hi: Int)
   | XBool(v: Bool, lo: Int, hi: Int)
   | XUnit(lo: Int, hi: Int)
@@ -268,6 +273,7 @@ pub type TModule = {
 pub fn x_lo(e: TExpr) -> Int =
   match e {
     XInt(_, lo, _) -> lo
+    XChar(_, lo, _) -> lo
     XFloat(_, lo, _) -> lo
     XBool(_, lo, _) -> lo
     XUnit(lo, _) -> lo
@@ -305,6 +311,7 @@ pub fn x_lo(e: TExpr) -> Int =
 pub fn x_hi(e: TExpr) -> Int =
   match e {
     XInt(_, _, hi) -> hi
+    XChar(_, _, hi) -> hi
     XFloat(_, _, hi) -> hi
     XBool(_, _, hi) -> hi
     XUnit(_, hi) -> hi
@@ -343,6 +350,7 @@ pub fn x_hi(e: TExpr) -> Int =
 pub fn tex_ty(e: TExpr) -> Ty =
   match e {
     XInt(_, _, _) -> TyInt
+    XChar(_, _, _) -> ty_char()
     XFloat(_, _, _) -> TyFloat
     XBool(_, _, _) -> TyBool
     XUnit(_, _) -> TyUnit

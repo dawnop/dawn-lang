@@ -16,7 +16,7 @@ use ast.{
   module_fns, module_types, module_consts, module_traits,
   module_impls, module_tests,
   TraitMethod, Expr,
-  FnDecl, EBool, EVar, EInt,
+  FnDecl, EBool, EVar, EInt, EChar,
   BinOp, UnOp, OpAdd, OpSub, OpMul, OpDiv, OpMod, OpConcat, OpEq, OpNeq, OpLt,
   OpLe, OpGt, OpGe, OpAnd, OpOr, OpBand, OpBor, OpBxor, OpShl, OpShr, OpUshr,
   OpNeg, OpNot, OpBnot,
@@ -30,7 +30,7 @@ use ast.{
   EHandle, HandlerArm, DEffect, EffectDeclR, EffectOp, module_effects
 }
 use tast.{
-  TExpr, XInt, XFloat, XBool, XUnit, XStr, XLocal, XFnValue, XCallDyn,
+  TExpr, XInt, XChar, XFloat, XBool, XUnit, XStr, XLocal, XFnValue, XCallDyn,
   XCallBuiltin, XCallFn, XApply, XJava, XLambda, XCtor, XConstRef, XCtorValue, XField,
   XListLit, XTupleLit, XPropagate, XUnwrap, XIndex, XReturn, XBreak, XContinue,
   XComptime, XUnsafePure, XBinary, XUnary, XIf, XMatch, XBlock, XError,
@@ -51,7 +51,7 @@ use types.{
   adt_of, trait_of, ty_show, ctor_render, sig_render, subst, subst_eff, eff_show,
   ty_mentions_var, ty_map_children, ty_any_child,
   SlotAt, SlotNoField, SlotAfterNamed, SlotOverflow, SlotTaken, ctor_slots,
-  is_numeric, is_errorish,
+  is_numeric, is_errorish, ty_char, peel_opaque,
   prelude_traits, bounds_of,
   prelude_trait_ids,
   builtins, opt_ty, result_ty, OPTION_ID, RESULT_ID,
@@ -1873,6 +1873,9 @@ fn check_lit_pattern(cx: Cx, lit: Expr, scrut: Ty, lo: Int, hi: Int) -> (Cx, TPa
   # the literal's own type; string patterns are interpolation-free (parser ensured)
   let (lt, lv) = match lit {
     EInt(v, _, _) -> (TyInt, LInt(v))
+    # a char literal is its code point: the same LInt every consumer already
+    # handles (a literal pattern lowers to an equality test on an Int)
+    EChar(v, _, _) -> (ty_char(), LInt(v))
     EFloat(v, _, _) -> (TyFloat, LFloat(v))
     EBool(v, _, _) -> (TyBool, LBool(v))
     EStr(parts, _, _) -> {
@@ -3058,6 +3061,7 @@ fn see_through_expected(cx: Cx, e: Expr, expected: Option[Ty]) -> Option[Ty] =
 fn check_expr_at(cx: Cx, e: Expr, expected: Option[Ty]) -> (Cx, Ty, TExpr) !io =
   match e {
     EInt(v, lo, hi) -> (cx, TyInt, XInt(v, lo, hi))
+    EChar(v, lo, hi) -> (cx, ty_char(), XChar(v, lo, hi))
     EFloat(v, lo, hi) -> (cx, TyFloat, XFloat(v, lo, hi))
     EBool(v, lo, hi) -> (cx, TyBool, XBool(v, lo, hi))
     EUnit(lo, hi) -> (cx, TyUnit, XUnit(lo, hi))
@@ -6154,8 +6158,13 @@ fn check_match(
 ) -> (Cx, Ty, TExpr) !io = {
   let (cx0, st, sx) = check_expr(cx, scrut, no_expected())
   var cx1 = cx0
-  let scrut_ok = st == TyInt || st == TyFloat || st == TyString || st == TyBool ||
-    is_adt(st) || is_tuple_ty(st) || is_list_ty(st)
+  # peeled: an opaque type matches on whatever its target matches on, the same
+  # clause that gives it its `==` and its `Show` (spec §2.7). Without the peel
+  # `match c { 'a' -> .. }` on a `Char` was refused while `match code(c)` was
+  # allowed, which is the difference between a type and a wall.
+  let sp = peel_opaque(st)
+  let scrut_ok = sp == TyInt || sp == TyFloat || sp == TyString || sp == TyBool ||
+    is_adt(sp) || is_tuple_ty(sp) || is_list_ty(sp)
   if not scrut_ok && not is_errorish(st) {
     cx1 = cerr(cx1, "match supports Int/Float/String/Bool, tuples, lists and user-defined types, got " ++
         ty_show(cx1.adts, st), e_lo(scrut), e_hi(scrut))

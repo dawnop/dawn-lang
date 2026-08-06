@@ -315,24 +315,29 @@ pub fn is_numeric(t: Ty) -> Bool = t == TyInt || t == TyFloat
 
 pub fn is_errorish(t: Ty) -> Bool = t == TyError || t == TyNever
 
+## `Char`'s opaque id. Reserved and negative, like `DICT_ADT_ID`, because this
+## is the one opaque type with no declaration site to mint one for it.
+##
+## Why the compiler mints it rather than `std/char` declaring it: `'a'` is
+## syntax, so the checker needs this type while typing a literal -- before, and
+## regardless of, any module being in scope. A name `ty_named` answers to also
+## cannot be declared in std, because `is_builtin_name` reads `ty_named` and
+## would call the declaration a redefinition. The mechanism is still
+## `opaque type` (spec §2.7): no `Ty` variant, no `Head`, no row in the four
+## scalar tables -- `peel_opaque` carries it to `Int`'s implementations, which
+## is what 2026-07-30 decided when it deleted `Cursor`'s variant. Owner is
+## `std/char`, so that module (and only it) sees through, and `char.of` /
+## `char.code` are two ordinary functions needing no intrinsic.
+pub const CHAR_OPAQUE_ID: Int = -2
+
+## The type of a character literal: `Char`, an opaque `Int`.
+pub fn ty_char() -> Ty = TyOpaque(CHAR_OPAQUE_ID, "Char", "std/char", TyInt)
+
 ## The builtin scalar for a name, or None.
-##
-## `Char` is a spelling of `Int` for exactly one release, and then stops being
-## one. It is here so that the compiler which compiles the flip already knows
-## the name: seed discipline (docs/bootstrap.md) lets selfhost and std use only
-## what the pinned seed supports, so the release that makes `Char` a distinct
-## type cannot also be the release that first teaches the name. Landing the
-## name a release early -- transparent, so no existing program can tell -- lets
-## the next one annotate std and selfhost with `Char` and flip `'a'` from `Int`
-## to `Char` in a single commit, which is the only way that change can be made:
-## half-flipped, the type of `'a'` is not a thing anyone can state.
-##
-## The same shape as the one-generation forwarder RD-06's renames used, applied
-## to a type name instead of a function name.
 pub fn ty_named(name: String) -> Option[Ty] =
   match name {
     "Int" -> Some(TyInt)
-    "Char" -> Some(TyInt)
+    "Char" -> Some(ty_char())
     "Float" -> Some(TyFloat)
     "Bool" -> Some(TyBool)
     "String" -> Some(TyString)

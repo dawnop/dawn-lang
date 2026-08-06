@@ -287,3 +287,29 @@ opaque 沿用目标类型的 impl（spec §2.7、§4.8），所以 `Char` 的 `S
 `"${c}"` 出 `97` 而不是 `a`。**这是刻意的**，改它要给 Char 单独写一份 `Show`，
 而那会让它不再「就是它的目标」，`opaque-twin` 那条判据也就不成立了。
 要一个字符的字符串，`str.from_char(c)` 就是那个函数。
+
+### 7.5 谁能造出一个 `Char`：三处约束把桥的位置定死了
+
+期 2 施工时撞出来的，写在这里免得下一个人再推一遍。三条约束同时成立：
+
+1. **`char_is_*` 必须改成收 `Char`。** lexer 手里的 `s.cps[i]` 是 `Char`（`code_points`
+   随之变成 `List[Char]`，否则 `s.cps[i] == '\n'` 两边类型对不上）。如果判词还收 `Int`，
+   lexer 就得先把 `Char` 拆回 `Int`，而拆的那个函数在 std/char 里——见第 2 条。
+2. **`selfhost/src` 在 v0.55.0 里还 `use` 不了 `std/char`。** `bin/dawn` 的 stage 1 用
+   **种子自带的那份 std** 编译今天的 selfhost，而 v0.54.0 的 std 里没有 char 这个模块。
+   所以 selfhost 只能调**内建**（`char_is_*` 是内建，永远在）；`char.code` / `char.of`
+   要等种子推到 v0.55.0 之后、即 v0.56.0 那一轮才轮得到 selfhost 用。
+3. **`std/str` 拿不到 `Char`。** 它的 `trim` 走 `cursor.char`（回 `Int` 且带 `-1` 哨兵，
+   7.3 定的），却要喂给已经改成收 `Char` 的 `char_is_space`。std/str 不是 `Char` 的 owner，
+   看不穿，造不出来。
+
+三条一夹，桥只能是**一个内建**：`char_unchecked(n: Int) -> Char`，internal（只有 std 能写），
+lowering 是恒等（`Char` 的表示就是 `Int`，两个后端各加一条直通的 case，同
+`cursor_slice` 那种「发射器内联写掉」的先例）。它不必进种子——std 是 stage 2 用**今天的**
+编译器编的，所以与它同一个 release 引入即可用。
+
+被否掉的两条替代：
+- **让 `cursor.char` 直接回 `Char`**（内建签名一改就成，不需要任何模块去构造）。
+  否，理由是 7.3：那样 `-1` 就成了一个 `Char`，而「每个值都是码点」正是这个类型的全部内容。
+- **`std/char` 出一个 pub 的无检查构造函数**。否，RD-01 刚把 pvec 的公开无检查读取器拿掉，
+  再开一个是往回走；判据一致：无检查的东西不该是 pub 的。
