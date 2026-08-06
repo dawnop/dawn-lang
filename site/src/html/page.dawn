@@ -11,11 +11,12 @@ use html/render.{TocEntry}
 use html/escape.{escape_html}
 
 ## Which language a page is written in. English is the site's default and
-## lives at `/`; its Chinese twin lives at the same path under `/zh/`. Three
-## documents are paired that way -- the front page, the tutorial and the
-## standard library reference. The rest (spec, design, examples) are Chinese
-## and untranslated, and site/pages/home.md's closing section says so on the
-## page itself rather than leaving a reader to discover it by clicking.
+## lives at `/`; its Chinese twin lives at the same path under `/zh/`. Paired
+## that way: the front page, the tutorial, the standard library reference, the
+## example gallery and the Playground. What is not is the spec and the design
+## notes -- they are Chinese and untranslated, the nav says so beside their
+## labels on the English side, and site/pages/home.md's closing section says
+## why on the page itself rather than leaving a reader to find out by clicking.
 pub type Lang =
   | En
   | Zh
@@ -63,25 +64,30 @@ pub fn lang_path(lang: Lang, pair: String) -> String =
 
 ## site navigation: (key, label, path-from-root)
 ##
-## A paired entry points at the language's own copy, which is not the same path
-## on both sides; the unpaired ones exist once and both navs name that one file.
+## Each language's nav points at that language's pages -- which is not the same
+## list of paths, because five of the six are paired and two of those five are
+## only reachable through [lang_path]. The spec and the design notes are the
+## exception: they exist once, in Chinese, so both navs name the same file and
+## the English labels say what a reader is about to get. That is the same thing
+## site/pages/home.md's closing section says in prose; here it has to fit in a
+## nav item, so it is the two characters that carry the whole of it.
 fn nav_items(lang: Lang) -> List[(String, String, String)] =
   match lang {
     En -> [
       ("tutorial", "Tutorial", "tutorial/index.html"),
-      ("spec", "Spec", "spec.html"),
+      ("spec", "Spec (中文)", "spec.html"),
       ("examples", "Examples", "examples/index.html"),
       ("stdlib", "Stdlib", "stdlib.html"),
-      ("design", "Design", "design.html"),
+      ("design", "Design (中文)", "design.html"),
       ("playground", "Playground", "playground.html"),
     ]
     Zh -> [
-      ("tutorial", "教程", "tutorial/index.html"),
+      ("tutorial", "教程", "zh/tutorial/index.html"),
       ("spec", "规范", "spec.html"),
-      ("examples", "示例", "examples/index.html"),
+      ("examples", "示例", "zh/examples/index.html"),
       ("stdlib", "标准库", "zh/stdlib.html"),
       ("design", "设计", "design.html"),
-      ("playground", "Playground", "playground.html"),
+      ("playground", "Playground", "zh/playground.html"),
     ]
   }
 
@@ -166,6 +172,9 @@ pub fn shell_ext(
 ) -> String = {
   let esc_title = escape_html(title)
   let nav = nav_html(lang, root, active)
+  # the brand mark goes to this language's front page, not to the English one:
+  # a reader on /zh/ who clicks the logo is not asking to change language
+  let home = lang_path(lang, "index.html")
   let code = lang_code(lang)
   let alts = alternates(pair)
   let switch = lang_switch(lang, root, pair)
@@ -187,7 +196,7 @@ $head_extra
 <body>
 <header class="site-header">
 <nav>
-<a class="brand" href="$root/index.html"><img class="brand-logo" src="$root/assets/apple-touch-icon.png" alt="">Dawn</a>
+<a class="brand" href="$root/$home"><img class="brand-logo" src="$root/assets/apple-touch-icon.png" alt="">Dawn</a>
 $nav
 $switch
 <a class="gh" href="https://github.com/dawnop/dawn-lang">GitHub</a>
@@ -202,11 +211,11 @@ $body
 """
 }
 
-## A plain content page. `pair` as in [shell]: the tutorial's pages pass their
-## own path and the rest pass "", because the documents they render are Chinese
-## and untranslated. The parameter is here rather than hard-coded so that
-## translating one of them is an edit at its own call site instead of a change
-## to this shell.
+## A plain content page. `pair` as in [shell]: a paired page passes its own
+## path in the default layout, and the spec and the design notes pass "",
+## because they exist once and in Chinese. The parameter is here rather than
+## hard-coded so that translating one of them is an edit at its own call site
+## instead of a change to this shell.
 pub fn page(
   lang: Lang,
   pair: String,
@@ -270,23 +279,34 @@ pub fn toc_list(entries: List[TocEntry]) -> String = {
 test "nav marks the active page and roots the links" {
   let n = nav_html(Zh, "..", "spec")
   assert str.contains(n, `<a class="active" href="../spec.html">规范</a>`)
-  assert str.contains(n, `<a href="../tutorial/index.html">教程</a>`)
+  assert str.contains(n, `<a href="../zh/tutorial/index.html">教程</a>`)
 }
 
 test "the nav is labelled in the page's own language" {
   assert str.contains(nav_html(En, ".", ""), `<a href="./tutorial/index.html">Tutorial</a>`)
-  assert str.contains(nav_html(Zh, ".", ""), `<a href="./tutorial/index.html">教程</a>`)
+  assert str.contains(nav_html(Zh, ".", ""), `<a href="./zh/tutorial/index.html">教程</a>`)
 }
 
-## What a labels-only nav could not do. Both languages named the same six paths
-## while every one of the six existed once; a paired page has two, and a reader
-## clicking 标准库 has to land on the Chinese one.
-test "a paired nav entry points at the language's own copy" {
-  assert str.contains(nav_html(En, ".", ""), `href="./stdlib.html"`)
-  assert str.contains(nav_html(Zh, ".", ""), `href="./zh/stdlib.html"`)
-  # the unpaired ones exist once, and both navs name that one file
-  assert str.contains(nav_html(En, ".", ""), `href="./spec.html"`)
-  assert str.contains(nav_html(Zh, ".", ""), `href="./spec.html"`)
+## The half a labels-only nav could not do. Both languages used to name the
+## same six paths, which was right while five of the six existed once; now a
+## Chinese reader clicking 标准库 has to land on the Chinese one, and the
+## label alone cannot say that.
+test "each language's nav points at that language's pages" {
+  let en = nav_html(En, ".", "")
+  let zh = nav_html(Zh, ".", "")
+  assert str.contains(en, `href="./stdlib.html"`)
+  assert str.contains(zh, `href="./zh/stdlib.html"`)
+  assert str.contains(en, `href="./examples/index.html"`)
+  assert str.contains(zh, `href="./zh/examples/index.html"`)
+  # the two that exist once, in Chinese: one path, and the English label says so
+  assert str.contains(en, `<a href="./spec.html">Spec (中文)</a>`)
+  assert str.contains(zh, `<a href="./spec.html">规范</a>`)
+}
+
+## Clicking the logo is not a request to change language.
+test "the brand mark leads to this page's own front page" {
+  assert str.contains(shell(En, "", "t", ".", "", ""), `class="brand" href="./index.html"`)
+  assert str.contains(shell(Zh, "", "t", "..", "", ""), `class="brand" href="../zh/index.html"`)
 }
 
 test "shell carries title, css root, body" {

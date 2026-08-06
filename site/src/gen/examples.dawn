@@ -106,25 +106,43 @@ fn example_page(ex: Example) -> String !io = {
   "<h1><code>${ex.slug}</code></h1>\n<p>" ++ escape_html(desc) ++ "</p>" ++ sections
 }
 
+## Where this language's gallery goes and how far it is from the site root.
+## English takes the default layout; the translation sits under `/zh/`, like
+## every other paired page.
+fn gallery_dir(out: String, lang: Lang) -> (String, String) =
+  match lang {
+    En -> ("$out/examples", "..")
+    Zh -> ("$out/zh/examples", "../..")
+  }
+
 ## The example gallery. `lang` is the chrome's language only: the programs and
 ## the descriptions lifted from their header comments are English in both, like
-## the rest of the code in this repository. As in [gen_spec] the output paths
-## are still the Chinese layout's.
+## the rest of the code in this repository -- so the two runs differ in the
+## heading, the lede, the <title> suffix and nothing else a reader would call
+## content. Paired all the same, because a reader who switches language on some
+## other page and then clicks Examples should not be thrown back across.
 pub fn gen_examples(out: String, lang: Lang) -> Unit !io = {
   let c = chrome(lang)
+  let (dir, root) = gallery_dir(out, lang)
   let units = collect_examples()
   var items = ""
   for ex in units {
     let first = ex.files[0]
     let desc = description(must_read(first))
-    write_page("$out/examples/${ex.slug}.html",
-      page(lang, "", "${ex.slug} — ${c.suffix}", "..", "examples", example_page(ex)))
+    write_page("$dir/${ex.slug}.html",
+      page(lang, "examples/${ex.slug}.html", "${ex.slug} — ${c.suffix}", root, "examples",
+        example_page(ex)))
     items = items ++ "\n" ++
       """<li><a href="${ex.slug}.html"><code>${ex.slug}</code></a> — """ ++ escape_html(desc) ++ "</li>"
   }
   let body = "<h1>${c.heading}</h1>\n" ++
     "<p>${c.lede}</p>\n" ++
     "<ul class=\"example-list\">" ++ items ++ "\n</ul>"
-  write_page("$out/examples/index.html",
-    page(lang, "", "${c.heading} — Dawn", "..", "examples", body))
+  write_page("$dir/index.html",
+    page(lang, "examples/index.html", "${c.heading} — Dawn", root, "examples", body))
+}
+
+test "each language's gallery lands in its own place" {
+  assert gallery_dir("d", En) == ("d/examples", "..")
+  assert gallery_dir("d", Zh) == ("d/zh/examples", "../..")
 }

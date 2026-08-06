@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of site/pages/home.md @ 66dc673370eddb73 -->
+<!-- doc-check: translation-of site/pages/home.md @ 7be074d53d4c4caa -->
 
 # 首页文案 —— 中文译本
 
@@ -54,6 +54,6 @@ JVM 字节码与 C（再交给 `cc`）是**平级**的两条路。最容易分�
 
 ## closing
 
-从[教程](tutorial/index.html)开始上手；语言细节的权威定义在[规范](spec.html)；[示例](examples/index.html)都能直接 `dawn run`；标准库 API 参考见[标准库](zh/stdlib.html)；每个设计取舍的「为什么」写在[设计笔记](design.html)。
+从[教程](zh/tutorial/index.html)开始上手；语言细节的权威定义在[规范](spec.html)；[示例](zh/examples/index.html)都能直接 `dawn run`；标准库 API 参考见[标准库](zh/stdlib.html)；每个设计取舍的「为什么」写在[设计笔记](design.html)。
 
-教程与标准库参考都有中英两版。示例、规范与设计笔记**是中文的**，这是有意为之：它的读者是作者本人，一段要先翻译才能写出来的话，就是一段写不出来的话。翻译的只有本页、教程、标准库那篇导语与项目的 [README](https://github.com/dawnop/dawn-lang)。代码、编译器诊断与标准库文档注释则一律英文——标准库页上那些条目正文也在其内，它们是编译器自己的文本。
+教程、示例与标准库参考都有中英两版。规范与设计笔记**是中文的**，这是有意为之：它的读者是作者本人，一段要先翻译才能写出来的话，就是一段写不出来的话。翻译的只有本页、教程、标准库那篇导语与项目的 [README](https://github.com/dawnop/dawn-lang)。代码、编译器诊断与标准库文档注释则一律英文——标准库页上那些条目正文也在其内，它们是编译器自己的文本。

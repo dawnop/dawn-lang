@@ -5,7 +5,7 @@ use std/io
 use md/ast.{Block}
 use md/parser.{parse}
 use html/render.{render_doc}
-use html/page.{Lang, En, Zh, page_with_toc, shell, shell_ext}
+use html/page.{Lang, En, Zh, page_with_toc, shell, shell_ext, lang_path}
 use hl/dawn.{highlight_dawn}
 use html/escape.{escape_html}
 use gen/common.{must_read, write_page, map_doc_url, doc_files}
@@ -76,13 +76,16 @@ fn card_output(base: String) -> String !io =
   `<pre class="output"><code>` ++ escape_html(str.trim(must_read("$base.out"))) ++
   "</code></pre>"
 
-fn hero_html(c: Copy, mu: fn(String) -> String, root: String) -> String !io = {
+fn hero_html(c: Copy, mu: fn(String) -> String, lang: Lang, root: String) -> String !io = {
   let hl = card_source("site/pages/hero")
   let out = card_output("site/pages/hero")
   let eyebrow = line(c, "eyebrow", mu)
   let lede = line(c, "lede", mu)
   let cta1 = line(c, "cta-primary", mu)
   let cta2 = line(c, "cta-secondary", mu)
+  # both buttons stay in the language of the page they are on
+  let tut = lang_path(lang, "tutorial/index.html")
+  let exs = lang_path(lang, "examples/index.html")
   """
 <section class="hero">
 <div class="hero-copy">
@@ -90,8 +93,8 @@ fn hero_html(c: Copy, mu: fn(String) -> String, root: String) -> String !io = {
 <h1 class="wordmark">Dawn</h1>
 <p class="lede">$lede</p>
 <div class="cta-row">
-<a class="btn btn-primary" href="$root/tutorial/index.html">$cta1</a>
-<a class="btn btn-ghost" href="$root/examples/index.html">$cta2</a>
+<a class="btn btn-primary" href="$root/$tut">$cta1</a>
+<a class="btn btn-ghost" href="$root/$exs">$cta2</a>
 </div>
 </div>
 <figure class="code-window">
@@ -153,7 +156,7 @@ pub fn gen_index(out: String, lang: Lang) -> Unit !io = {
     }
   let c = load_copy(src)
   let mu = (u: String) => map_doc_url(root, docs, u)
-  let page_body = `<main class="home">` ++ "\n" ++ hero_html(c, mu, root) ++ "\n</main>\n" ++
+  let page_body = `<main class="home">` ++ "\n" ++ hero_html(c, mu, lang, root) ++ "\n</main>\n" ++
     `<section class="features">` ++ "\n" ++ feature_section(c, mu) ++ "\n" ++
     body(c, "closing", mu) ++ "\n</section>"
   # `index.html` is the pair's path in the default layout; the shell derives
@@ -185,14 +188,27 @@ pub fn gen_design(out: String, lang: Lang) -> Unit !io = {
     page_with_toc(lang, "", "${doc.title} — Dawn", ".", "design", doc.toc, doc.html))
 }
 
+## The Playground, in one language. The page itself has no prose at all -- the
+## body is a mount point and everything a reader sees inside it is drawn by the
+## editor bundle, whose own strings are English on both sides. So the twin is
+## the shell around it: nav, footer and the language switch, which is the whole
+## reason it is paired. Translating the editor is a job in site/play-ui and has
+## nothing to do with this generator.
 pub fn gen_playground(out: String, lang: Lang) -> Unit !io = {
+  let (dst, root) =
+    match lang {
+      En -> ("$out/playground.html", ".")
+      Zh -> ("$out/zh/playground.html", "..")
+    }
   # full-width IDE page: the editor frame IS the page (no heading, no reading
   # column) — .dp-page/.dp-ide layout comes with the editor bundle's css
   let mount = `<div id="dawn-playground" data-endpoint="/api/run"></div>`
   let mount_body = `<main class="dp-page">` ++ "\n" ++ mount ++ "\n</main>"
-  # the editor bundle (built from site/play-ui, copied into assets by build.sh)
-  let head = `<link rel="stylesheet" href="./assets/playground.css">` ++ "\n" ++
-    `<script type="module" src="./assets/playground.js"></script>`
-  write_page("$out/playground.html",
-    shell_ext(lang, "", "Playground — Dawn", ".", "playground", head, mount_body))
+  # the editor bundle (built from site/play-ui, copied into assets by build.sh);
+  # one copy, reached from wherever the page sits
+  let head = """<link rel="stylesheet" href="$root/assets/playground.css">""" ++ "\n" ++
+    """<script type="module" src="$root/assets/playground.js"></script>"""
+  write_page(dst,
+    shell_ext(lang, "playground.html", "Playground — Dawn", root, "playground", head,
+      mount_body))
 }
