@@ -155,7 +155,32 @@ fn last_idx(s: String, sub: String, c: Cursor, i: Int, best: Option[Int]) -> Opt
 pub fn from_char(c: Int) -> String = from_code_points([c])
 
 ## `s` repeated `n` times; n <= 0 yields the empty string.
-pub fn repeat(s: String, n: Int) -> String = if n <= 0 { "" } else { s ++ repeat(s, n - 1) }
+##
+## Doubling rather than the plain accumulation loop the rest of this module
+## uses, because both of the obvious shapes are defects at large `n`. The
+## recursion this replaced was `s ++ repeat(s, n - 1)`: depth `n`, which
+## overflows the stack somewhere past n = 4000 under a default `-Xss` -- the
+## repo never saw it because every route that runs a Dawn program passes
+## `-Xss512m`, and `java -jar` on a built jar does not. Accumulating
+## `out = out ++ s` in a `while` fixes the stack and costs a quadratic: `++`
+## is `String.concat`, so the JVM copies the answer once per iteration
+## (measured, n = 100000: 0.6s, and 4x that at n = 200000; the C backend's
+## refcount lets it append in place, so it is linear there and the JVM would
+## have carried this alone).
+##
+## Halving `n` copies each partial answer once, which is O(len(s) * n) total on
+## both backends and needs no stack at all.
+pub fn repeat(s: String, n: Int) -> String = {
+  var out = ""
+  var chunk = s
+  var k = n
+  while k > 0 {
+    if k % 2 == 1 { out = out ++ chunk }
+    k = k / 2
+    if k > 0 { chunk = chunk ++ chunk }
+  }
+  out
+}
 
 # The code-point helpers below recurse over `code_points(s)` with an explicit
 # index because `len` here is str.len (String → code points) and so shadows the
@@ -526,13 +551,55 @@ test "chars, reverse and repeat keep a surrogate pair whole" {
   assert len(reverse("a😀z")) == 3
   assert reverse("a😀z") == "z😀a"
   assert repeat("ab", 3) == "ababab"
+  assert repeat("ab", 2) == "abab"
   assert repeat("ab", 1) == "ab"
   assert repeat("ab", 0) == ""
   assert repeat("ab", 0 - 2) == ""
   assert repeat("", 5) == ""
+  # the odd/even split of the doubling loop, at every arity a carry can reach
+  assert repeat("x", 5) == "xxxxx"
+  assert repeat("x", 6) == "xxxxxx"
+  assert repeat("x", 7) == "xxxxxxx"
+  assert repeat("x", 8) == "xxxxxxxx"
+  assert repeat("😀", 3) == "😀😀😀"
+  assert len(repeat("😀", 3)) == 3
   assert from_char(0x1F600) == "😀"
   assert from_char(97) == "a"
   assert at(from_char(0x4E2D), 0) == 0x4E2D
+}
+
+test "repeat needs no stack, at a count that used to exhaust it" {
+  # The count here is chosen against the stack, and is the only assertion in
+  # this block the old implementation fails. `s ++ repeat(s, n - 1)` is one
+  # frame per repetition: it dies past n = 4000 under a default -Xss, but the
+  # test runner forks programs with -Xss512m, where it survives to about 8.2
+  # million. So a count that catches it has to clear that, and 9 million does --
+  # measured, on both backends. A one-character unit keeps it affordable: 0.1s
+  # and 9 MB, against 1.8s for the same count of "ab".
+  #
+  # First in the block on purpose. The implementation it guards against is also
+  # quadratic, so putting the cheaper assertions ahead of this one would make a
+  # reverted `repeat` grind through them for minutes before reaching the
+  # assertion that actually indicts it.
+  #
+  # If a future runtime gets deeper stacks this stops distinguishing the two
+  # implementations, but it degrades into an ordinary large-input test rather
+  # than into a false red.
+  let deep = repeat("a", 9000000)
+  assert len(deep) == 9000000
+  assert take(deep, 3) == "aaa"
+  assert drop(deep, 8999997) == "aaa"
+
+  # Content at scale, with a two-character unit so the assertions can see the
+  # repetitions line up rather than just counting characters. Asserted through
+  # the length and three windows -- comparing the whole 200000-character answer
+  # would put it in the failure report.
+  let big = repeat("ab", 100000)
+  assert len(big) == 200000
+  assert take(big, 6) == "ababab"
+  assert drop(big, 199994) == "ababab"
+  assert substring(big, 99999, 100003) == "baba"
+  assert repeat("ab", 100000) == repeat("ab", 99999) ++ "ab"
 }
 
 test "for over a String walks it one code point at a time" {
