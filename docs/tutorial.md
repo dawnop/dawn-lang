@@ -840,8 +840,9 @@ The full rules are in [spec.md](spec.md) §6.5 and the design trade-offs in
 
 ---
 
-That is every core feature of Dawn. The deeper reference is [spec.md](spec.md) and the
-design trade-offs are in [design.md](design.md). Those two, like the rest of `docs/`,
-are **written in Chinese**: their reader is the author, and prose that has to be
-translated before it can be written is prose that does not get written. This tutorial is
-the exception, because its reader is not.
+That is every core feature of Dawn. The deeper reference is [spec.en.md](spec.en.md) and
+the design trade-offs are in [design.en.md](design.en.md). Those two are **written in
+Chinese and translated**: they are living documents, edited in Chinese by every change to
+the language, so the Chinese half is the original and the English half is registered
+against it. The rest of `docs/` is monolingual — its reader is the author, and prose that
+has to be translated before it can be written is prose that does not get written.

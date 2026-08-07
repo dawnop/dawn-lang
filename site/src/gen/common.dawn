@@ -60,13 +60,15 @@ pub fn doc_files() -> List[String] !io = {
   out
 }
 
-## Map a docs/-relative Markdown link onto the site. The four rendered docs get
+## Map a docs/-relative Markdown link onto the site. The six rendered docs get
 ## site pages; any other file that REALLY EXISTS under docs/ goes to its source on
 ## GitHub; a link to a file that does not exist is a lint error.
 ##
-## The tutorial is two of the four: the two halves link to each other by
-## filename, which is what a reader on GitHub needs, and on the site those two
-## links have to land on the two rendered pages rather than back on GitHub.
+## Three of the six are one document in two languages -- the tutorial, the
+## spec, the design notes. Each pair's halves link to each other by filename,
+## which is what a reader on GitHub needs, and on the site those links have to
+## land on the two rendered pages rather than back on GitHub. English sits at
+## the site root and Chinese under `/zh/`, whichever half is the original.
 ##
 ## `docs` is a list rather than a hardcoded whitelist on purpose: the whitelist
 ## version silently rotted the moment a doc was added (design.md gained a link to
@@ -77,10 +79,14 @@ pub fn map_doc_url(root: String, docs: List[String], u: String) -> String = {
   let f = str.strip_prefix(u, "docs/").unwrap_or(u)
   if str.starts_with(u, "http://") || str.starts_with(u, "https://") || str.starts_with(u, "#") {
     u
-  } else if f == "spec.md" {
+  } else if f == "spec.en.md" {
     "$root/spec.html"
-  } else if f == "design.md" {
+  } else if f == "spec.md" {
+    "$root/zh/spec.html"
+  } else if f == "design.en.md" {
     "$root/design.html"
+  } else if f == "design.md" {
+    "$root/zh/design.html"
   } else if f == "tutorial.md" {
     "$root/tutorial/index.html"
   } else if f == "tutorial.zh-CN.md" {
@@ -98,12 +104,15 @@ pub fn map_doc_url(root: String, docs: List[String], u: String) -> String = {
 pub fn pad2(i: Int) -> String = if i < 10 { "0$i" } else { "$i" }
 
 test "doc links map onto the site" {
-  let docs = ["spec.md", "design.md", "tutorial.md", "tutorial.zh-CN.md", "trait.md",
-    "grammar.ebnf", "history/m6-retro.md"]
-  assert map_doc_url("..", docs, "spec.md") == "../spec.html"
-  assert map_doc_url(".", docs, "design.md") == "./design.html"
+  let docs = ["spec.md", "spec.en.md", "design.md", "design.en.md", "tutorial.md",
+    "tutorial.zh-CN.md", "trait.md", "grammar.ebnf", "history/m6-retro.md"]
+  assert map_doc_url("..", docs, "spec.en.md") == "../spec.html"
+  assert map_doc_url(".", docs, "design.en.md") == "./design.html"
+  # the Chinese half of each pair is the one under /zh/, original or not
+  assert map_doc_url("..", docs, "spec.md") == "../zh/spec.html"
+  assert map_doc_url(".", docs, "design.md") == "./zh/design.html"
   # the docs/ prefix is equivalent — design.md writes it both ways
-  assert map_doc_url(".", docs, "docs/spec.md") == "./spec.html"
+  assert map_doc_url(".", docs, "docs/spec.md") == "./zh/spec.html"
   assert map_doc_url(".", docs, "tutorial/index.html") == "./tutorial/index.html"
   # the two halves of the tutorial, each onto its own rendered page
   assert map_doc_url("..", docs, "tutorial.zh-CN.md") == "../zh/tutorial/index.html"

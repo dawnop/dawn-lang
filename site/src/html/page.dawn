@@ -11,12 +11,12 @@ use html/render.{TocEntry}
 use html/escape.{escape_html}
 
 ## Which language a page is written in. English is the site's default and
-## lives at `/`; its Chinese twin lives at the same path under `/zh/`. Paired
-## that way: the front page, the tutorial, the standard library reference, the
-## example gallery and the Playground. What is not is the spec and the design
-## notes -- they are Chinese and untranslated, the nav says so beside their
-## labels on the English side, and site/pages/home.md's closing section says
-## why on the page itself rather than leaving a reader to find out by clicking.
+## lives at `/`; its Chinese twin lives at the same path under `/zh/`. Every
+## page of this site is paired that way: the front page, the tutorial, the
+## specification, the design notes, the standard library reference, the example
+## gallery and the Playground. The spec and the design notes were the last two
+## to join (2026-08-07) and are the one pair whose *original* is the Chinese
+## one -- which the layout does not care about, and neither does anything here.
 pub type Lang =
   | En
   | Zh
@@ -65,28 +65,27 @@ pub fn lang_path(lang: Lang, pair: String) -> String =
 ## site navigation: (key, label, path-from-root)
 ##
 ## Each language's nav points at that language's pages -- which is not the same
-## list of paths, because five of the six are paired and two of those five are
-## only reachable through [lang_path]. The spec and the design notes are the
-## exception: they exist once, in Chinese, so both navs name the same file and
-## the English labels say what a reader is about to get. That is the same thing
-## site/pages/home.md's closing section says in prose; here it has to fit in a
-## nav item, so it is the two characters that carry the whole of it.
+## list of paths, because all six are paired and the Chinese half of each lives
+## under `/zh/`. Two of them used to be the exception, named the same file from
+## both navs and labelled `Spec (中文)` on the English side; the spec and the
+## design notes were translated on 2026-08-07 and the exception is gone with
+## them.
 fn nav_items(lang: Lang) -> List[(String, String, String)] =
   match lang {
     En -> [
       ("tutorial", "Tutorial", "tutorial/index.html"),
-      ("spec", "Spec (中文)", "spec.html"),
+      ("spec", "Spec", "spec.html"),
       ("examples", "Examples", "examples/index.html"),
       ("stdlib", "Stdlib", "stdlib.html"),
-      ("design", "Design (中文)", "design.html"),
+      ("design", "Design", "design.html"),
       ("playground", "Playground", "playground.html"),
     ]
     Zh -> [
       ("tutorial", "教程", "zh/tutorial/index.html"),
-      ("spec", "规范", "spec.html"),
+      ("spec", "规范", "zh/spec.html"),
       ("examples", "示例", "zh/examples/index.html"),
       ("stdlib", "标准库", "zh/stdlib.html"),
-      ("design", "设计", "design.html"),
+      ("design", "设计", "zh/design.html"),
       ("playground", "Playground", "zh/playground.html"),
     ]
   }
@@ -212,10 +211,11 @@ $body
 }
 
 ## A plain content page. `pair` as in [shell]: a paired page passes its own
-## path in the default layout, and the spec and the design notes pass "",
-## because they exist once and in Chinese. The parameter is here rather than
-## hard-coded so that translating one of them is an edit at its own call site
-## instead of a change to this shell.
+## path in the default layout, and a page with no twin passes "". The parameter
+## is here rather than hard-coded, which is what made translating the spec and
+## the design notes an edit at their own call site instead of a change to this
+## shell -- there is no page left that passes "", and the branch stays for the
+## next one that has no twin.
 pub fn page(
   lang: Lang,
   pair: String,
@@ -278,7 +278,7 @@ pub fn toc_list(entries: List[TocEntry]) -> String = {
 
 test "nav marks the active page and roots the links" {
   let n = nav_html(Zh, "..", "spec")
-  assert str.contains(n, `<a class="active" href="../spec.html">规范</a>`)
+  assert str.contains(n, `<a class="active" href="../zh/spec.html">规范</a>`)
   assert str.contains(n, `<a href="../zh/tutorial/index.html">教程</a>`)
 }
 
@@ -298,9 +298,10 @@ test "each language's nav points at that language's pages" {
   assert str.contains(zh, `href="./zh/stdlib.html"`)
   assert str.contains(en, `href="./examples/index.html"`)
   assert str.contains(zh, `href="./zh/examples/index.html"`)
-  # the two that exist once, in Chinese: one path, and the English label says so
-  assert str.contains(en, `<a href="./spec.html">Spec (中文)</a>`)
-  assert str.contains(zh, `<a href="./spec.html">规范</a>`)
+  # the last two to be paired: no `(中文)` on the English label any more, and
+  # the Chinese nav names the Chinese page rather than the shared one
+  assert str.contains(en, `<a href="./spec.html">Spec</a>`)
+  assert str.contains(zh, `<a href="./zh/design.html">设计</a>`)
 }
 
 ## Clicking the logo is not a request to change language.

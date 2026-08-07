@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/tutorial.md @ 43c6859d12829c64 -->
+<!-- doc-check: translation-of docs/tutorial.md @ 9d5d1b1ada24876d -->
 
 # Dawn 教程
 
@@ -786,6 +786,6 @@ pub fn main() -> Unit !io = {
 ---
 
 至此你已见过 Dawn 的全部核心特性。更深的规范见
-[spec.md](spec.md)，设计取舍见 [design.md](design.md)。这两篇和 `docs/` 里其余文档
-一样**只有中文**：它们的读者是作者本人，一段要先翻译才能写出来的话，就是一段写不出来的话。
-本教程是例外，因为它的读者不是。
+[spec.md](spec.md)，设计取舍见 [design.md](design.md)。这两篇**先写中文再翻译**：
+它们是活文档，每次改语言都在中文里改，所以中文是正本、英文按它登记。`docs/` 其余文档
+仍**只有中文**：它们的读者是作者本人，一段要先翻译才能写出来的话，就是一段写不出来的话。

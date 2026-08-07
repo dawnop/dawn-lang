@@ -165,27 +165,37 @@ pub fn gen_index(out: String, lang: Lang) -> Unit !io = {
   write_page(dst, shell(lang, "index.html", title, root, "", page_body))
 }
 
-## The spec and the design notes, each one document rendered whole.
+## The spec and the design notes, each one document rendered whole, and each
+## one a pair since 2026-08-07: the Chinese is the original and the English is
+## its translation, registered against it in scripts/doc-check.py.
 ##
-## `lang` is what the page is *written in*, and it is a parameter rather than a
-## constant so that this generator stops being the thing that decides. What it
-## does not yet decide is where the page lands: the output path and the `root`
-## below are still fixed at the Chinese layout, so a caller passing `En` today
-## would write over the Chinese page rather than beside it. Wiring that is the
-## job of whoever writes the English document, who is also the only one who
-## knows what to call it.
-pub fn gen_spec(out: String, lang: Lang) -> Unit !io = {
+## `lang` picks which of the two files is read AND where the page lands, in one
+## `match`, so a page cannot be written in one language and filed under the
+## other. The default layout is the English site, the Chinese twin sits under
+## `/zh/` -- the same rule the front page, the tutorial and the rest follow.
+fn doc_source(base: String, out: String, lang: Lang) -> (String, String, String) =
+  match lang {
+    En -> ("docs/$base.en.md", "$out/$base.html", ".")
+    Zh -> ("docs/$base.md", "$out/zh/$base.html", "..")
+  }
+
+fn gen_doc_page(out: String, lang: Lang, base: String) -> Unit !io = {
   let docs = doc_files()
-  let doc = render_doc(parsed("docs/spec.md"), u => map_doc_url(".", docs, u))
-  write_page("$out/spec.html",
-    page_with_toc(lang, "", "${doc.title} — Dawn", ".", "spec", doc.toc, doc.html))
+  let (src, dst, root) = doc_source(base, out, lang)
+  let doc = render_doc(parsed(src), u => map_doc_url(root, docs, u))
+  write_page(dst,
+    page_with_toc(lang, "$base.html", "${doc.title} — Dawn", root, base, doc.toc, doc.html))
 }
 
-pub fn gen_design(out: String, lang: Lang) -> Unit !io = {
-  let docs = doc_files()
-  let doc = render_doc(parsed("docs/design.md"), u => map_doc_url(".", docs, u))
-  write_page("$out/design.html",
-    page_with_toc(lang, "", "${doc.title} — Dawn", ".", "design", doc.toc, doc.html))
+pub fn gen_spec(out: String, lang: Lang) -> Unit !io = gen_doc_page(out, lang, "spec")
+
+pub fn gen_design(out: String, lang: Lang) -> Unit !io = gen_doc_page(out, lang, "design")
+
+test "each language's document is read from its own file and lands in its own place" {
+  assert doc_source("spec", "d", En) == ("docs/spec.en.md", "d/spec.html", ".")
+  assert doc_source("spec", "d", Zh) == ("docs/spec.md", "d/zh/spec.html", "..")
+  assert doc_source("design", "d", En) == ("docs/design.en.md", "d/design.html", ".")
+  assert doc_source("design", "d", Zh) == ("docs/design.md", "d/zh/design.html", "..")
 }
 
 ## The Playground, in one language. The page itself has no prose at all -- the
