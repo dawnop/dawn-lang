@@ -8,7 +8,7 @@
 > [`history/m7-progress.md`](history/m7-progress.md) 记的是 **M6 复盘**的修复清单（序 1–6），那张表只剩序 6。
 > 但那不是**自举**的清单——自举有它自己的坎，本文件是把 Kotlin 编译器实际用到的构造
 > 逐条拿去问「Dawn 写得出来吗」得出的。所有计数都是 grep 实数，所有耗时都可用
-> `scripts/bench-map.dawn` 复跑。
+> `scripts/bench_map.dawn` 复跑。
 
 ## 一、结论先行
 
@@ -35,7 +35,7 @@
 `CodeGen.kt:265` 的注释自陈：内建 Map「Backed by LinkedHashMap/LinkedHashSet with
 **copy-on-write**」——持久接口配复制实现，单次插入 O(n)。
 
-`scripts/bench-map.dawn`（GraalVM 21 / WSL2）：
+`scripts/bench_map.dawn`（GraalVM 21 / WSL2）：
 
 **① 一个持续增长的 map，对照已线性化的 List**
 
@@ -78,7 +78,7 @@ entries/size/index/show）**一字未改**；只有 empty/insert/remove/from 六
 持久原语。插入序靠每个活键的 `seq` 保留（更新复用旧 `seq`→保位），相等继承 `AbstractMap`
 的顺序无关语义（spec §2.2 全项对齐）。
 
-同一支 `bench-map.dawn`，换实现后：
+同一支 `bench_map.dawn`，换实现后：
 
 | 项 | copy-on-write | HAMT |
 |---|---|---|

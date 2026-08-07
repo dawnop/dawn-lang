@@ -58,7 +58,7 @@ site/
 
 | 路径 | 内容 | 来源 |
 |------|------|------|
-| `/` | **首页（英文，正本）**：定位一句话 + 高亮样例 + 特性栏 + 各区入口 | `site/pages/home.md` + `hero/feat-*.dawn` 与同名 `.out` |
+| `/` | **首页（英文，正本）**：定位一句话 + 高亮样例 + 特性栏 + 各区入口 | `site/pages/home.md` + `hero/feat_*.dawn` 与同名 `.out` |
 | `/zh/index.html` | 首页（中文译本）：内容同上 | `site/pages/home.zh.md` + 同一批 `.dawn`/`.out` |
 | `/tutorial/{01..17}.html` | 教程 17 章，每章一页，带上一章 / 下一章 | `docs/tutorial.md` 按 `##` 切分 |
 | `/tutorial/index.html` | 教程目录页 | 同上（章标题清单） |
