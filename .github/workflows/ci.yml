@@ -3,10 +3,30 @@ name: ci
 # Why this exists: the site generator was broken for a whole milestone without
 # anyone noticing — docs drifted past a hardcoded lint and nothing ever built the
 # site on push. The compiler suite runs in seconds, so there is no reason not to.
+#
+# `branches:` on a push trigger matches branch pushes only, so `git push --tags`
+# does not start a run here — the tag's gates are release.yml's `gates` job,
+# which `uses:` the same gates.yml this does. A release still shows two full
+# gate runs at one sha (f96fd45 on 2026-08-07 is an instance): one for the
+# version-bump commit landing on main, one for the tag pushed at it seconds
+# later. Those are two events, not a duplicated trigger, and neither is the one
+# to drop — main's run is the branch's own verdict, and release.yml re-running
+# the gates on a tag that could point anywhere is the whole reason gates.yml
+# exists as one file.
 on:
   push:
     branches: [main]
   pull_request:
+
+# One run per ref. A second push while the first is still going supersedes it:
+# the older run is testing a tree nobody will look at again, and on a 4-vCPU
+# public runner it is also holding a slot the new one wants. The cost is that
+# an intermediate commit on main can end without a verdict, which is the right
+# trade here and the wrong one for a release — release.yml deliberately has no
+# `concurrency` block, so a publishing run cannot be cancelled by anything.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   # The ssh login name and the site's real IP must not enter this public repo:

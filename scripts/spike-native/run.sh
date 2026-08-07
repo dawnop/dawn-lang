@@ -4,6 +4,15 @@
 #
 #   ./scripts/spike-native/run.sh                  # every corpus file
 #   ./scripts/spike-native/run.sh prog.dawn ...    # just these
+#   SPIKE_JOBS=1 ./scripts/spike-native/run.sh     # one at a time
+#
+# Corpus entries are independent -- each one compiles and runs a program of its
+# own -- so they run in parallel, min(nproc, 4) at a time. That is scheduling
+# only: every entry still runs every check it ran serially, the transcript is
+# replayed in corpus order rather than completion order, and an entry that
+# fails still fails the run by name. See the driver at the bottom for how the
+# per-entry statuses are collected, and why a worker that is *killed* counts as
+# a failure rather than as nothing.
 #
 # This is the first of the three acceptance gates in
 # docs/native-backend-plan.md 5.
@@ -71,53 +80,7 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 here="$root/scripts/spike-native"
 cc_bin="${CC:-cc}"
 known="$here/known-red.txt"
-
-if [ "$#" -gt 0 ]; then
-  progs=("$@")
-else
-  # A corpus entry is a single file, or a project directory when it needs a
-  # dependency -- `dawn run` and `__emitc` both take either, and a project is
-  # the only way to drive a real package (see json_lib).
-  progs=("$here"/*.dawn)
-  # written as an `if` rather than `[ -f ] && progs+=`: under `set -e` a
-  # failing test as the body's last command takes the script with it
-  for d in "$here"/*/; do
-    if [ -f "$d/dawn.toml" ]; then progs+=("${d%/}"); fi
-  done
-fi
-
-work="$(mktemp -d)"
-
-# Whether this machine's cc can build with AddressSanitizer. Probed once,
-# because a corpus of 23 programs would otherwise ask 23 times, and reported
-# as `blocked` rather than as a failure: a missing sanitizer is no evidence
-# either way.
-asan_ok=1
-printf 'int main(void){return 0;}\n' >"$work/asan_probe.c"
-if ! "$cc_bin" -fsanitize=address -o "$work/asan_probe" "$work/asan_probe.c" \
-  >/dev/null 2>&1; then
-  asan_ok=0
-  echo "note: $cc_bin cannot build with -fsanitize=address; asan checks skipped"
-fi
-trap 'rm -rf "$work"' EXIT
-
-# warm the toolchain before any output is captured: bin/dawn announces a
-# rebuild on stderr, and stderr is compared now
-"$root/bin/dawn" --version > /dev/null
-
-# std, plus stdext/raw.dawn -- the backend primitives std wraps, under names a
-# corpus program may write. `io_*`, `bytes_at` and the decoders are std-only
-# (types.dawn's `internal` set), and this corpus is the one caller that wants
-# the primitive rather than the wrapper: `catch_kinds` asks which barrier takes
-# a *fault*, and with `use java` refused on native nothing else can raise one.
-# Same arrangement as scripts/array-contract, which reaches `array_*` this way.
-# It costs nothing: `--std` reads from disk what the embedded copy would have
-# supplied, so a corpus run is no slower for it.
-stdcopy="$work/std"
-mkdir -p "$stdcopy"
-cp "$root"/std/*.dawn "$root/std/modules.txt" "$stdcopy/"
-cp "$here/stdext/raw.dawn" "$stdcopy/"
-echo raw >> "$stdcopy/modules.txt"
+self="$here/run.sh"
 
 fail=0
 known_hit=0
@@ -152,7 +115,16 @@ verdict() {
 # never a ratchet trip: there is no evidence either way.
 blocked() { printf '  %-28s blocked\n' "$1"; }
 
-for prog in "${progs[@]}"; do
+# One corpus entry, start to finish.
+#
+# The driver runs these in parallel (see the worker branch below), so nothing
+# in here may depend on another entry: every file it writes is keyed by $name
+# under $work, and the two tallies it moves -- `fail` and `known_hit` -- are
+# this process's own copies, handed back to the driver through $work/logs
+# rather than shared. `continue` was a `for` body's early exit; it is `return`
+# now, and means the same thing.
+run_corpus() {
+  local prog="$1" name expect jvm_rc jvm_ran fatal_ok nat_rc asan_rc leaks c
   name="$(basename "$prog" .dawn)"
   expect="$here/$name.expect"
   echo "$name"
@@ -197,7 +169,7 @@ for prog in "${progs[@]}"; do
   else
     verdict "$name:emitc" bad "$(cat "$work/$name.emitc")"
     for c in cc native diff stderr exit; do blocked "$name:$c"; done
-    continue
+    return 0
   fi
 
   # -fwrapv: Dawn's Int wraps like the JVM's long, and signed overflow is
@@ -219,7 +191,7 @@ for prog in "${progs[@]}"; do
   else
     verdict "$name:cc" bad "$(cat "$work/$name.cc")"
     for c in native diff stderr exit; do blocked "$name:$c"; done
-    continue
+    return 0
   fi
 
   nat_rc=0
@@ -268,7 +240,7 @@ for prog in "${progs[@]}"; do
   # the only ones a failed JVM run has anything to say about
   if [ "$jvm_ran" -eq 0 ]; then
     for c in diff stderr exit; do blocked "$name:$c"; done
-    continue
+    return 0
   fi
 
   if diff -q "$work/$name.jvm" "$work/$name.native" >/dev/null; then
@@ -290,7 +262,132 @@ for prog in "${progs[@]}"; do
   else
     verdict "$name:exit" bad "jvm exit $jvm_rc, native exit $nat_rc"
   fi
+  return 0
+}
+
+# ---------------------------------------------------------------- worker mode
+#
+# `SPIKE_WORKER=1 run.sh <entry>`: one corpus entry, in its own process, for
+# the xargs pool below. Not a user-facing mode -- the setup a corpus run needs
+# (the std copy, the AddressSanitizer probe, the toolchain warm) has already
+# happened in the driver and arrives in the environment, so invoking this by
+# hand does not work and is not meant to.
+#
+# Everything it has to say goes to $work/logs/<name>.log, and the two numbers
+# the driver has to add up go to <name>.rc and <name>.known. .rc is written
+# last, and only by a worker that got to the end; its *absence* is a failure to
+# the driver, which is what makes a worker killed outright -- the OOM killer, a
+# signal, `set -e` on a bug in this harness -- fail the run rather than vanish
+# from the tally.
+if [ "${SPIKE_WORKER:-}" = 1 ]; then
+  work="$SPIKE_WORK"
+  stdcopy="$work/std"
+  asan_ok="$SPIKE_ASAN"
+  wname="$(basename "$1" .dawn)"
+  exec >"$work/logs/$wname.log" 2>&1
+  run_corpus "$1"
+  printf '%s\n' "$known_hit" >"$work/logs/$wname.known"
+  printf '%s\n' "$fail" >"$work/logs/$wname.rc"
+  exit "$fail"
+fi
+
+# -------------------------------------------------------------- driver
+if [ "$#" -gt 0 ]; then
+  progs=("$@")
+else
+  # A corpus entry is a single file, or a project directory when it needs a
+  # dependency -- `dawn run` and `__emitc` both take either, and a project is
+  # the only way to drive a real package (see json_lib).
+  progs=("$here"/*.dawn)
+  # written as an `if` rather than `[ -f ] && progs+=`: under `set -e` a
+  # failing test as the body's last command takes the script with it
+  for d in "$here"/*/; do
+    if [ -f "$d/dawn.toml" ]; then progs+=("${d%/}"); fi
+  done
+fi
+
+work="$(mktemp -d)"
+mkdir -p "$work/logs"
+
+# Whether this machine's cc can build with AddressSanitizer. Probed once,
+# because a corpus of 23 programs would otherwise ask 23 times, and reported
+# as `blocked` rather than as a failure: a missing sanitizer is no evidence
+# either way.
+asan_ok=1
+printf 'int main(void){return 0;}\n' >"$work/asan_probe.c"
+if ! "$cc_bin" -fsanitize=address -o "$work/asan_probe" "$work/asan_probe.c" \
+  >/dev/null 2>&1; then
+  asan_ok=0
+  echo "note: $cc_bin cannot build with -fsanitize=address; asan checks skipped"
+fi
+trap 'rm -rf "$work"' EXIT
+
+# warm the toolchain before any output is captured: bin/dawn announces a
+# rebuild on stderr, and stderr is compared now. It is also what keeps the
+# pool below from racing: `bin/dawn` rebuilds when the source stamp moved, and
+# N workers starting on a cold build/ would all rebuild into the same jar.
+"$root/bin/dawn" --version > /dev/null
+
+# std, plus stdext/raw.dawn -- the backend primitives std wraps, under names a
+# corpus program may write. `io_*`, `bytes_at` and the decoders are std-only
+# (types.dawn's `internal` set), and this corpus is the one caller that wants
+# the primitive rather than the wrapper: `catch_kinds` asks which barrier takes
+# a *fault*, and with `use java` refused on native nothing else can raise one.
+# Same arrangement as scripts/array-contract, which reaches `array_*` this way.
+# It costs nothing: `--std` reads from disk what the embedded copy would have
+# supplied, so a corpus run is no slower for it.
+stdcopy="$work/std"
+mkdir -p "$stdcopy"
+cp "$root"/std/*.dawn "$root/std/modules.txt" "$stdcopy/"
+cp "$here/stdext/raw.dawn" "$stdcopy/"
+echo raw >> "$stdcopy/modules.txt"
+
+# How wide to run. A ceiling, written down, rather than however many cores the
+# host happens to have: each worker forks a JVM that bin/dawn gives a 2 GiB
+# heap ceiling, and peak RSS tracks that ceiling rather than the workload (see
+# bin/dawn's note), so the memory bill is jobs x ~1.2 GiB and nothing else
+# caps it. Four is the public runner's width and about 5 GiB here; a 16-core
+# laptop asking for 16 would be asking for ~19 GiB. SPIKE_JOBS overrides, and
+# SPIKE_JOBS=1 is the serial harness this used to be -- useful when a failure
+# has to be read without other workers' output around it.
+jobs="${SPIKE_JOBS:-}"
+if [ -z "$jobs" ]; then
+  jobs="$( (nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 1) )"
+  # an `if`, not `[ ... ] && jobs=4`: as the last command of this block a
+  # false test would be the block's status, and `set -e` would take the script
+  if [ "$jobs" -gt 4 ]; then jobs=4; fi
+fi
+echo "corpus: ${#progs[@]} entries, $jobs at a time"
+
+# Order is restored below, so this only has to finish; it does not have to
+# finish in sequence. xargs' own status is a second net under the per-entry
+# .rc files -- 123 when a worker exited 1-125, 125 when one was killed by a
+# signal -- and neither replaces the other: xargs cannot say *which* entry,
+# and the .rc scan cannot see a worker that never started.
+export SPIKE_WORKER=1 SPIKE_WORK="$work" SPIKE_ASAN="$asan_ok"
+xargs_rc=0
+printf '%s\0' "${progs[@]}" |
+  xargs -0 -n1 -P "$jobs" "$self" || xargs_rc=$?
+unset SPIKE_WORKER SPIKE_WORK SPIKE_ASAN
+
+# Replay in corpus order: the transcript a reader compares against the last one
+# must not depend on which worker finished first.
+for prog in "${progs[@]}"; do
+  name="$(basename "$prog" .dawn)"
+  if [ -f "$work/logs/$name.log" ]; then cat "$work/logs/$name.log"; fi
+  if [ -f "$work/logs/$name.rc" ] && [ -f "$work/logs/$name.known" ]; then
+    [ "$(cat "$work/logs/$name.rc")" = 0 ] || fail=1
+    known_hit=$((known_hit + $(cat "$work/logs/$name.known")))
+  else
+    printf '  %-28s FAIL -- worker did not finish (killed?)\n' "$name"
+    fail=1
+  fi
 done
+
+if [ "$xargs_rc" -ne 0 ] && [ "$fail" -eq 0 ]; then
+  echo "xargs exited $xargs_rc but every entry reported success -- treating as a failure"
+  fail=1
+fi
 
 echo
 if [ "$fail" -ne 0 ]; then

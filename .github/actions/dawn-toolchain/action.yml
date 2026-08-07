@@ -1,0 +1,61 @@
+name: dawn toolchain
+description: >
+  GraalVM, the cached bootstrap seed, and the selfhost toolchain built from it.
+  gates.yml is six jobs now rather than two, and this is the setup all of them
+  share -- written once, because six hand-kept copies of it drift the way the
+  gate list itself once drifted between ci.yml and release.yml.
+
+inputs:
+  github-token:
+    description: passed to setup-graalvm so its downloads are not rate-limited
+    required: true
+  build:
+    description: >
+      build the selfhost toolchain up front. The N-vs-N-1 jobs answer 'false':
+      their scripts drive the seed and build what they need themselves, so a
+      toolchain built here would only be built again.
+    required: false
+    default: 'true'
+
+runs:
+  using: composite
+  steps:
+    - uses: graalvm/setup-graalvm@v1
+      with:
+        java-version: '21'
+        distribution: 'graalvm-community'
+        github-token: ${{ inputs.github-token }}
+
+    # Keep the seed jar across runs -- it only changes when
+    # scripts/seed-release.txt bumps.
+    #
+    # seed-checksums.txt is in the key as well, so a corrected digest for an
+    # unchanged tag misses rather than hits. It would not be unsafe either way
+    # (seedjar.sh verifies the jar on every cache hit, not merely after a
+    # download), but a miss re-fetches and a hit would simply refuse to run.
+    - name: cache the bootstrap seed
+      uses: actions/cache@v4
+      with:
+        path: .dawn/seeds
+        key: dawn-seed-${{ hashFiles('scripts/seed-release.txt', 'scripts/seed-checksums.txt') }}
+
+    # [java-deps] resolution, so six jobs do not each ask Maven Central for the
+    # same asm jar. dawn.lock is the key because it *is* the resolved closure;
+    # `dawn lock --check selfhost` still runs in the test job, so a cache that
+    # somehow held a different closure fails there rather than passing quietly.
+    - name: cache resolved java-deps
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/coursier
+        key: coursier-${{ hashFiles('selfhost/dawn.lock') }}
+        restore-keys: coursier-
+
+    # bin/dawn fetches the previous release's dawn-selfhost.jar (the bootstrap
+    # seed, scripts/seed-release.txt) and rebuilds the toolchain from HEAD
+    # sources -- in two stages, so the jar's runtime classes come from HEAD too
+    # (see the note in bin/dawn). Every `./bin/dawn` step in gates.yml exercises
+    # selfhost.
+    - name: build the selfhost toolchain
+      if: inputs.build == 'true'
+      shell: bash
+      run: ./bin/dawn --version

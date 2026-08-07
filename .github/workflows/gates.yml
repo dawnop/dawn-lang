@@ -13,49 +13,44 @@ name: gates
 # gate in one place now adds it everywhere, which is the only arrangement
 # that stays true. (The audit-fixes branch proposed this shape on 2026-07-25;
 # the content below is the gate set as of the merge, not that snapshot.)
+#
+# The gates are spread over six jobs rather than run in one. That is
+# scheduling and nothing else — no gate was dropped, weakened or made
+# conditional, and a job boundary is drawn only where the steps on either side
+# share nothing but the toolchain. Three steps were 70% of the wall clock
+# (2026-08-07, run 31158133138: the native differential 390s of the test job's
+# 860s, the checker corpus 104s, the documentation checks 105s), and each of
+# them waited on the other two for no reason. The setup they now each repeat
+# is ~40s and comes out of .github/actions/dawn-toolchain, which exists so
+# that six copies of it cannot drift.
 on:
   workflow_call:
 
 jobs:
   test:
     runs-on: ubuntu-latest
-    # Sized from the run this was added against: 12.8 min for this job, 5.3 for
-    # prev-diff (2026-08-05, run 31038195806). Roughly 3x that, so a gate that
-    # got slower says so by failing rather than by being edited, and a gate that
-    # hangs is killed in half an hour instead of burning the 6h default -- which
-    # is what "no timeout-minutes" means, on a runner nobody is watching.
-    timeout-minutes: 35
+    # Sized from the run this was split against: 860s for the whole test job,
+    # of which these steps are ~260 (2026-08-07, run 31158133138). Roughly 3x
+    # the remainder, so a gate that got slower says so by failing rather than
+    # by being edited, and a gate that hangs is killed in twenty minutes
+    # instead of burning the 6h default -- which is what "no timeout-minutes"
+    # means, on a runner nobody is watching.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
-      - uses: graalvm/setup-graalvm@v1
-        with:
-          java-version: '21'
-          distribution: 'graalvm-community'
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-
       # site/build.sh builds the Playground editor bundle, so CI needs npm.
+      # This job is the only one that builds the site, so it is the only one
+      # that sets up node.
       - uses: actions/setup-node@v4
         with:
           node-version: 'lts/*'
           cache: npm
           cache-dependency-path: site/play-ui/package-lock.json
 
-      # keep the seed jar across runs — it only changes when
-      # scripts/seed-release.txt bumps
-      - name: cache the bootstrap seed
-        uses: actions/cache@v4
+      - uses: ./.github/actions/dawn-toolchain
         with:
-          path: .dawn/seeds
-          key: dawn-seed-${{ hashFiles('scripts/seed-release.txt') }}
-
-      # bin/dawn fetches the previous release's dawn-selfhost.jar (the
-      # bootstrap seed, scripts/seed-release.txt) and rebuilds the toolchain
-      # from HEAD sources -- in two stages, so the jar's runtime classes come
-      # from HEAD too (see the note in bin/dawn). Every `./bin/dawn` step below
-      # exercises selfhost.
-      - name: build the selfhost toolchain
-        run: ./bin/dawn --version
+          github-token: ${{ secrets.GITHUB_TOKEN }}
 
       # The bundled standard library's own inline test blocks (`dawn test
       # --stdlib`). std had none at all until 2026-08-06: the contract scripts
@@ -96,19 +91,6 @@ jobs:
       - name: selfhost fixed point (B == C)
         run: ./scripts/selfhost-fixpoint.sh
 
-      # Acceptance gate 1 of docs/native-backend-plan.md: the same program
-      # compiled by both backends must print the same bytes, and both must
-      # match a written-down expectation. It also guards the parts of
-      # lowering that only show up at runtime -- the spec §12.4 self-tail-call
-      # rewrite is a stack overflow, not a wrong answer, so no amount of byte
-      # comparison catches it.
-      #
-      # Six checks are red today and listed in known-red.txt. That file is a
-      # ratchet in both directions: an unlisted failure fails the build, and
-      # so does a listed check that starts passing.
-      - name: native differential (both backends, plus written expectations)
-        run: ./scripts/spike-native/run.sh
-
       # `__emit` compares bytes, which covers Core only where a shipping
       # backend reads it. CModule.dicts has no shipping reader at all, and
       # CParam.mode / CDup / CSDrop are emitted as nothing by `__emit`, which
@@ -126,24 +108,6 @@ jobs:
       - name: grammar corpus
         run: ./scripts/grammar-corpus/run.sh
 
-      # The same idea one layer up: the checker's diagnostics, recorded in the
-      # order `cerr` appends them. Nothing else sees them -- grammar-corpus
-      # stops at the parser, spike-native compares program output, and the Core
-      # golden compares the IR, so the wording, the span and above all the
-      # *order* of 277 diagnostics could all move with every gate green. The
-      # ratchet in uncovered.txt is the other half: it fails when a `cerr` no
-      # case reaches appears, so coverage cannot quietly regress either.
-      - name: checker diagnostic corpus
-        run: ./scripts/checker-corpus/run.sh
-
-      # TEST-04: the documentation's own examples, links and anchors. The
-      # audit found a wrong README example, an install command that did not
-      # run and an EBNF out of step with the parser -- all by human reading.
-      # Marking the front-page example `dawn run` failed on the first run
-      # (it called a `sum` that does not exist), which is the whole argument.
-      - name: documentation checks
-        run: ./scripts/doc-check.py
-
       # #124: the parser that decides whether an emit difference is approved.
       # It fails silently in both directions -- a declaration it cannot read
       # becomes a rule matching nothing, one that is too broad becomes a rule
@@ -154,7 +118,9 @@ jobs:
 
       # PKG-04: the resolved [java-deps] closure must still match dawn.lock --
       # a moved transitive version or a mirror answering with different bytes
-      # is a reproducibility break, and this is where it surfaces.
+      # is a reproducibility break, and this is where it surfaces. It is also
+      # what stands behind the coursier cache in the setup action: a cache
+      # holding a different closure fails here.
       - name: java-deps lock
         run: ./bin/dawn lock --check selfhost
 
@@ -318,6 +284,70 @@ jobs:
       - name: formatting
         run: ./bin/dawn fmt std site selfhost packages --check
 
+  # Acceptance gate 1 of docs/native-backend-plan.md 5. Its own job because it
+  # was 390s of the 860s test job (2026-08-07) and shares nothing with the rest
+  # of that list but the toolchain.
+  native-diff:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # The same program compiled by both backends must print the same bytes,
+      # and both must match a written-down expectation. It also guards the
+      # parts of lowering that only show up at runtime -- the spec §12.4
+      # self-tail-call rewrite is a stack overflow, not a wrong answer, so no
+      # amount of byte comparison catches it.
+      #
+      # Six checks are red today and listed in known-red.txt. That file is a
+      # ratchet in both directions: an unlisted failure fails the build, and
+      # so does a listed check that starts passing.
+      #
+      # The corpus entries run four at a time (run.sh's driver). No entry lost
+      # a check to that: the transcript is replayed in corpus order and a
+      # worker that is killed rather than failing is counted as a failure,
+      # because a parallel harness that swallows an exit code is a green light
+      # that means nothing.
+      - name: native differential (both backends, plus written expectations)
+        run: ./scripts/spike-native/run.sh
+
+  # The checker's diagnostics, recorded in the order `cerr` appends them.
+  # Nothing else here can see them -- grammar-corpus stops at the parser,
+  # spike-native compares program output, and the Core golden compares the IR,
+  # so the wording, the span and above all the *order* of 277 diagnostics could
+  # all move with every gate green. The ratchet in uncovered.txt is the other
+  # half: it fails when a `cerr` no case reaches appears, so coverage cannot
+  # quietly regress either.
+  checker-corpus:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: checker diagnostic corpus
+        run: ./scripts/checker-corpus/run.sh
+
+  # TEST-04: the documentation's own examples, links and anchors. The audit
+  # found a wrong README example, an install command that did not run and an
+  # EBNF out of step with the parser -- all by human reading. Marking the
+  # front-page example `dawn run` failed on the first run (it called a `sum`
+  # that does not exist), which is the whole argument.
+  docs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: documentation checks
+        run: ./scripts/doc-check.py
+
   # N vs N-1 (scripts/selfhost-prev-diff.sh): the previous release and HEAD
   # compile the same corpus and any byte difference must be declared in a
   # commit message. This is the oracle now that the Kotlin reference is
@@ -334,17 +364,12 @@ jobs:
           # the declared-change scan walks commits since the N-1 tag
           fetch-depth: 0
 
-      - uses: graalvm/setup-graalvm@v1
+      # build: false — every script below drives the seed and builds what it
+      # needs itself, so a toolchain built up front would only be built again.
+      - uses: ./.github/actions/dawn-toolchain
         with:
-          java-version: '21'
-          distribution: 'graalvm-community'
           github-token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: cache the bootstrap seed
-        uses: actions/cache@v4
-        with:
-          path: .dawn/seeds
-          key: dawn-seed-${{ hashFiles('scripts/seed-release.txt') }}
+          build: 'false'
 
       - name: N vs N-1 differential
         run: ./scripts/selfhost-prev-diff.sh
@@ -355,6 +380,27 @@ jobs:
       - name: formatter vs N-1
         run: ./scripts/selfhost-fmt-diff.sh
 
+      - name: lsp transcript vs N-1
+        run: ./scripts/selfhost-lsp-diff.sh
+
+  # The native half of the same comparison, split off because it is the longer
+  # one (172s of prev-diff's 314s on 2026-08-07) and because the two steps in
+  # it are joined to each other and to nothing else: the differential reuses
+  # the binary the release step built.
+  prev-diff-native:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # native-cli-diff.sh reaches the N-1 tag through selfhost-fmt-diff.sh
+          fetch-depth: 0
+
+      - uses: ./.github/actions/dawn-toolchain
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          build: 'false'
+
       # K-B7: the executable a release publishes, built and checked by the
       # same script release.yml runs. A step that only runs on tags is the
       # least-executed code in the repo; this is what keeps it honest, and it
@@ -364,9 +410,9 @@ jobs:
         run: ./scripts/release-native.sh -o dawnc-linux-x86_64
 
       # The same transcripts on the other backend (K-B2, extended by K-B3).
-      # Every step above runs ./bin/dawn, which is the JVM toolchain and only
-      # that — the differentials read as "the CLI is checked" and checked one
-      # backend. This holds fmt/doc/add to the JVM's bytes, re-runs the
+      # Every step in prev-diff runs ./bin/dawn, which is the JVM toolchain and
+      # only that — the differentials read as "the CLI is checked" and checked
+      # one backend. This holds fmt/doc/add to the JVM's bytes, re-runs the
       # formatter *and language server* differentials with the native binary as
       # the toolchain under test, and checks that both servers answer a client
       # that has not closed the connection.
@@ -376,6 +422,3 @@ jobs:
       # a tag would publish, not one built beside it with the same recipe.
       - name: driver subcommands on the native backend
         run: DAWNC_BIN=dawnc-linux-x86_64 ./scripts/native-cli-diff.sh
-
-      - name: lsp transcript vs N-1
-        run: ./scripts/selfhost-lsp-diff.sh
