@@ -1680,12 +1680,12 @@ std 一起捆绑、在 std 内部互相引用，但 **std 之外 `use std/hamt` 
 `println`/`print`、`map`/`filter`/`fold`、`sort` 族（std/list）、内建的 `len`/`get`/`range`/
 `to_string`/`join`/`parse_*`/`panic`/`todo`/`expect`/`unwrap_or`/`cast`/
 `catch_fault`/`catch_panic`/`bracket`/`args` 等一屏以内
-（全集见[标准库参考](https://dawn-lang.dawnop.com/stdlib.html)，由 `dawn doc --stdlib` 生成）。
+（全集见[标准库参考](https://dawn-lang.dawnop.com/zh/stdlib.html)，由 `dawn doc --stdlib` 生成）。
 
 **顶层声明可以遮蔽 builtin/std 函数名**（§10.3，Rust 式）：解析序是本模块声明 →
 std → 内建，std 模块自己的 `pub fn len` 正是靠这一条合法。**prelude trait 的方法名
 同待遇**：它们随 prelude 进入函数命名空间（哪些名字，见
-[标准库参考](https://dawn-lang.dawnop.com/stdlib.html)的「预置 trait」一节，规范定义在 §3.5），
+[标准库参考](https://dawn-lang.dawnop.com/zh/stdlib.html)的「预置 trait」一节，规范定义在 §3.5），
 **可被本模块的声明遮蔽**，不是声明期错误。被遮蔽的只是那个拼写，trait 本身照旧——
 `impl Show[T]` 照常声明与被找到，`${...}`、`==`、`for..in` 照常按 trait 找 impl（§10.3）。
 
@@ -1702,7 +1702,7 @@ std → 内建，std 模块自己的 `pub fn len` 正是靠这一条合法。**p
 ## 11. 标准库（语义与判据）
 
 > **本节不列清单。** 有哪些函数、签名长什么样、每个怎么用——全集在
-> [标准库参考](https://dawn-lang.dawnop.com/stdlib.html)，由 `dawn doc --stdlib` 从编译器
+> [标准库参考](https://dawn-lang.dawnop.com/zh/stdlib.html)，由 `dawn doc --stdlib` 从编译器
 > 直接生成，因而不会与实现脱节。手抄一份到规范里只会烂：本节留下的是清单答不了的
 > 那半边——**接受什么输入、边界怎么办、为什么是这个取舍**。
 >
@@ -1801,7 +1801,7 @@ hex 与 base64 是纯 Dawn 字节算术（无 `use java`，故两后端同一份
 **容器的表示。** `Map`/`Set` 的表示是纯 Dawn 的 `std/hamt`（持久 HAMT）、`List` 的是
 `std/pvec`（持久向量），它们是**内部模块**：`use std/hamt` / `use std/pvec` 在 std 之外是
 编译错误，诊断指回 `std/map`/`std/set`/`std/list`（§10.6）。表示要能换，而能换的前提是
-没人依赖它——[标准库参考](https://dawn-lang.dawnop.com/stdlib.html)因此也不列这两个模块。
+没人依赖它——[标准库参考](https://dawn-lang.dawnop.com/zh/stdlib.html)因此也不列这两个模块。
 容器的语义（持久接口、键须 `Eq + Hash`、迭代按插入序、相等与顺序无关）在 §2.2。
 
 **IO 的表态。** `std/io` 全部 `!io`，会失败的一律回 `Result[T, ForeignError]`（§9.8.1）——
