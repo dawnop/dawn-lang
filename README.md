@@ -206,17 +206,22 @@ backend is still a first-class target.
 
 ## Documentation
 
-The documentation under `docs/` is **written in Chinese**, deliberately and for the
-time being: its reader is the author, and prose that has to be translated before it can
-be written is prose that does not get written. What is translated is the outward-facing
-layer — this README (`README.md` is the original, [README.zh-CN.md](README.zh-CN.md)
-the translation) and the website's front page.
+Everything the website renders comes in both languages: this README (`README.md` is the
+original, [README.zh-CN.md](README.zh-CN.md) the translation), the front page, the
+tutorial, the standard library reference, the specification and the design notes. The
+last two are the pair whose original is the Chinese one — every change to the language
+edits them, in Chinese, so that is where the text is written and the English half is
+registered against it. The rest of `docs/` is design notes, plans and landing logs and is
+**written in Chinese**, deliberately and for the time being: its reader is the author,
+and prose that has to be translated before it can be written is prose that does not get
+written.
 
-- [docs/tutorial.md](docs/tutorial.md) — the tutorial (Chinese)
-- [docs/design.md](docs/design.md) — design goals and decision records: why this and
-  not that (Chinese)
-- [docs/spec.md](docs/spec.md) — the language specification, the authoritative
-  definition (Chinese)
+- [docs/tutorial.md](docs/tutorial.md) — the tutorial (also in
+  [Chinese](docs/tutorial.zh-CN.md))
+- [docs/design.en.md](docs/design.en.md) — design goals and decision records: why this
+  and not that (translated from [docs/design.md](docs/design.md))
+- [docs/spec.en.md](docs/spec.en.md) — the language specification, the authoritative
+  definition (translated from [docs/spec.md](docs/spec.md))
 - [docs/bootstrap.md](docs/bootstrap.md) — the bootstrap chain and the seed-advance
   protocol (Chinese)
 - [docs/README.md](docs/README.md) — the index of every design document, each with a

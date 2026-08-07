@@ -38,13 +38,15 @@ site/
 
 ## 语言：英文是默认，中文是译本
 
-**站点默认语言是英文**：`/` 出英文，中文首页在 `/zh/`，两页互挂 `hreflang`（`x-default`
-指英文）、导航条上有互跳入口。除首页外的长文档（教程 / 规范 / 设计 / 标准库）**只有中文**，
-不翻译——两版首页的收尾段都把这件事写在页面上，不留给读者点进去才发现。
+**站点默认语言是英文**：`/` 出英文，同一路径的中文版在 `/zh/`，两页互挂 `hreflang`
+（`x-default` 指英文）、导航条上有互跳入口。**每一页都成对**：首页、教程、示例、标准库、
+规范、设计、Playground。
 
-方向是刻意反过来的：**派生的那一份才会腐烂**，而对外那一层的读者大多不读中文。让英文当
-派生物，等于把腐烂藏在最多人看、最没人校对的那一面。反过来腐烂落在中文上，而中文的读者
-是作者本人。
+多数对子里英文是正本，方向是刻意反过来的：**派生的那一份才会腐烂**，而对外那一层的读者
+大多不读中文。让英文当派生物，等于把腐烂藏在最多人看、最没人校对的那一面。反过来腐烂落在
+中文上，而中文的读者是作者本人。**规范与设计笔记是唯一的例外**（2026-08-07）：它们是活
+文档，每次改语言都在中文里改，所以中文是正本、`spec.en.md`/`design.en.md` 是译本——摘要
+门禁两个方向都一样盯。
 
 配套是机器强制的：首页文案从 `site/src/gen/pages.dawn` 的字符串字面量搬进了
 `site/pages/home.md`（正本）与 `home.zh.md`（译本），译本头上带
@@ -60,8 +62,10 @@ site/
 | `/zh/index.html` | 首页（中文译本）：内容同上 | `site/pages/home.zh.md` + 同一批 `.dawn`/`.out` |
 | `/tutorial/{01..17}.html` | 教程 17 章，每章一页，带上一章 / 下一章 | `docs/tutorial.md` 按 `##` 切分 |
 | `/tutorial/index.html` | 教程目录页 | 同上（章标题清单） |
-| `/spec.html` | 语言规范单页 + 侧栏 TOC | `docs/spec.md` |
-| `/design.html` | 设计笔记（D1–D7 决策 + 里程碑） | `docs/design.md` |
+| `/spec.html` | 语言规范单页 + 侧栏 TOC | `docs/spec.en.md` |
+| `/zh/spec.html` | 同上（中文正本） | `docs/spec.md` |
+| `/design.html` | 设计笔记（D1–D7 决策 + 里程碑） | `docs/design.en.md` |
+| `/zh/design.html` | 同上（中文正本） | `docs/design.md` |
 | `/examples/index.html` | 示例陈列页 | `examples/**` |
 | `/examples/{name}.html` | 每例一页：高亮源码（+ 多文件项目按模块列出） | 同上 |
 | `/stdlib.html` | 标准库 API 参考 + 侧栏 TOC：内建类型、prelude、预置 trait、每个 std 模块（函数 / 类型 / impl），文档注释按 Markdown 渲染 | `site/pages/stdlib.md` + `dawn doc --stdlib` |

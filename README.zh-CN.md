@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of README.md @ 962075f7df3d4c1a -->
+<!-- doc-check: translation-of README.md @ 8d561ee2d5537da1 -->
 
 # Dawn
 
@@ -165,13 +165,16 @@ impl 一致性是全程序唯一映射）与 `[java-deps]`（coursier 解析 Mav
 
 ## 文档
 
-`docs/` 下的文档**是中文的**，这是有意为之、且暂时不变：它的读者是作者本人，一段要先翻译
-才能写出来的话，就是一段写不出来的话。翻译的只有对外那一层——本 README（[README.md](README.md)
-是正本，本文是译本）与站点首页。
+站点渲染的每一篇都有中英两版：本 README（[README.md](README.md) 是正本，本文是译本）、
+站点首页、教程、标准库参考、规范与设计笔记。最后那两篇是其中唯一以中文为正本的一对——
+每次改语言都在中文里改它们，所以正文写在那边，英文按它登记。`docs/` 其余部分是设计方案、
+计划与落地日志，**仍然是中文的**，这是有意为之、且暂时不变：它的读者是作者本人，一段要先
+翻译才能写出来的话，就是一段写不出来的话。
 
-- [docs/tutorial.md](docs/tutorial.md) — 上手教程（中文）
-- [docs/design.md](docs/design.md) — 设计目标与决策记录（为什么是这样而不是那样，中文）
-- [docs/spec.md](docs/spec.md) — 语言规范（权威定义，中文）
+- [docs/tutorial.md](docs/tutorial.md) — 上手教程（另有[中文版](docs/tutorial.zh-CN.md)）
+- [docs/design.en.md](docs/design.en.md) — 设计目标与决策记录（为什么是这样而不是那样；
+  正本是 [docs/design.md](docs/design.md)）
+- [docs/spec.en.md](docs/spec.en.md) — 语言规范（权威定义；正本是 [docs/spec.md](docs/spec.md)）
 - [docs/bootstrap.md](docs/bootstrap.md) — 自举链与种子推进协议（中文）
 - [docs/README.md](docs/README.md) — 全部设计文档的索引，每份都标了状态；示例在 [examples/](examples/)
 
