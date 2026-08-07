@@ -753,14 +753,15 @@ K-B2–K-B5 补齐了，所以有了第二件值得交到使用者手里的东�
 单文件可执行程序**。
 
 落地物是 `scripts/release-native.sh`（构建 + 四道检查 + sha256），`release.yml` 在 tag 上
-调它并把产物挂进 release，`gates.yml` 的 `prev-diff` job **每次 push 都调同一个脚本**。
+调它并把产物挂进 release，`gates.yml` 的 `prev-diff-native` job **每次 push 都调同一个
+脚本**（2026-08-07 之前这条腿在 `prev-diff` 里，拆并行时随 native-cli-diff 一起搬走）。
 
 ### 22.1 三项裁决
 
 **裁决 A（产哪些平台/架构）= 只产 `linux-x86_64`，静态链接。**
 
-`.github/workflows/` 里今天**只有 `ubuntu-latest` 一种 runner**（`ci.yml:17`、
-`gates.yml:21,265`、`release.yml:29`，`grep runs-on` 实测四处全是它）。不做交叉编译，
+`.github/workflows/` 里今天**只有 `ubuntu-latest` 一种 runner**（`grep runs-on` 实测
+八处全是它——`ci.yml`、`release.yml`，与 `gates.yml` 拆并行后的六个 job）。不做交叉编译，
 理由不是懒：**验收要求「真跑它并断言输出」（§22.2 检查 3），而交叉编译出来的二进制在同一个
 job 里跑不了**——那就等于发一件没人执行过的产物，正是这一刀要防的失效形态本身。
 加 `ubuntu-*-arm` / `macos-*` 矩阵要付的不只是一个 runner：每个 runner 得先把 jar 那条
