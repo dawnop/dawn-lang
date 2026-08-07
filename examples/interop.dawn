@@ -5,6 +5,7 @@
 use java "java.nio.file.Path"
 use java "java.util.List"
 use java "java.lang.String"
+use java "java.util.regex.Pattern"
 
 # A static method declared on an interface is called with `invokestatic` against
 # an `InterfaceMethodref`, a constant the class-file format admits only from
@@ -61,4 +62,14 @@ test "List.of keeps its elements and their order" {
 
 test "the classpath is the jars, in order, colon separated" {
   assert classpath("/p") == "/p/lexer/build/lexer.jar:/p/parser/build/parser.jar"
+}
+
+test "an array already in hand fills the varargs slot as it stands" {
+  # `Pattern.split` hands back a `String[]`, and `join(CharSequence, CharSequence...)`
+  # *is* `join(CharSequence, CharSequence[])`: phase 1 takes the array whole, so
+  # nothing is repacked. Phase 2 would wrap it in a `String[][]` and match no
+  # candidate, which is why this line resolving at all is the evidence.
+  let comma = Pattern.compile(",")!
+  let parts = comma.split("a,b,c")!
+  assert String.join("-", parts)! == "a-b-c"
 }

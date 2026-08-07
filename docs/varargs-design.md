@@ -100,6 +100,16 @@ push count; NEWARRAY/ANEWARRAY component
    > 这批单测当年落在 `compiler/src/test/kotlin/dawn/VarargsTest.kt`，随 Kotlin 编译器
    > 一起归档进 `kotlin-final`，之后有一整年没有替代品。K-A8.3（2026-08-07）补回**前三条**：
    > `examples/interop.dawn` 的内联 test 块，以及 spec §9.3 那个 doc-check 会执行、
-   > 输出被逐字节比对的 fence。**后三条仍无自动化覆盖**——相位优先、现成数组直传、
-   > 消解失败的错误信息都只在编译器里，没有语料在问它们。
+   > 输出被逐字节比对的 fence。2026-08-08 补回两条：**现成数组直传**是
+   > `examples/interop.dawn` 里「an array already in hand fills the varargs slot as it
+   > stands」——`Pattern.split` 交出 `String[]`，`String.join` 的相位 1 整个接走；相位 2
+   > 会把它包成 `String[][]`、匹配不上任何候选，所以这行编得过本身就是证据。**消解失败的
+   > 错误信息**是 `scripts/checker-corpus/cases/java_varargs.dawn`，golden 逐字钉住消息、
+   > 它看到的实参类型和候选列表。
+   >
+   > **只剩「相位 1 优先于相位 2」挂账**，而且大概率会一直挂着：要让两个相位给出**不同的
+   > 可观测结果**，得有一对像 `foo(String,String)` / `foo(String,Object...)` 的重载，而
+   > `Object...` 收不了 Dawn 的值（§5「不做装箱」）；JDK 里 Dawn 够得着的那一对
+   > `List.of(E,E)` 与 `List.of(E...)`，两条路造出的是同一个值。要区分只能问**调用点选了
+   > 哪个方法**，那是字节码层面的事实，全仓没有门禁在看。
 3. 全量 1135+ 测试绿；backend-dawn 59 测试绿；100MB PUT 生产复验内存仍平。
