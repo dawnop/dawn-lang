@@ -22,6 +22,38 @@ pub type Lang =
   | Zh
 derive Show
 
+## The file names, inside /assets/, of the shared files a page links to.
+##
+## Not constants, because they are not constant: gen/fingerprint puts a hash of
+## each file's content into its name, so that the one-year `immutable` cache
+## header the server sends is a promise the URL can keep. gen_assets writes the
+## files and hands back the names it wrote; a shell links to what it is given
+## and knows nothing about how the names were chosen.
+##
+## A record rather than a name->name map: a typo in a field is a compile error,
+## where a typo in a lookup key is a link to nothing that only the link check
+## would catch, and only after the whole site had been written.
+pub type Assets = {
+  style: String,
+  favicon: String,
+  touch_icon: String,
+  og_image: String,
+  play_css: String,
+  play_js: String,
+}
+
+## The names the files have in site/assets, before any hashing. What the tests
+## in this repository link to, so that they read as the markup a browser gets.
+pub fn plain_assets() -> Assets =
+  Assets {
+    style: "style.css",
+    favicon: "favicon.ico",
+    touch_icon: "apple-touch-icon.png",
+    og_image: "logo-512.png",
+    play_css: "playground.css",
+    play_js: "playground.js",
+  }
+
 ## The `lang` attribute for <html>.
 pub fn lang_code(lang: Lang) -> String =
   match lang {
@@ -149,6 +181,7 @@ fn lang_switch(lang: Lang, root: String, pair: String) -> String =
 ## language -- "index.html", "tutorial/01.html" -- and "" when it has none.
 ## One string rather than two hrefs: see [site_url].
 pub fn shell(
+  a: Assets,
   lang: Lang,
   pair: String,
   title: String,
@@ -156,11 +189,12 @@ pub fn shell(
   active: String,
   body: String,
 ) -> String =
-  shell_ext(lang, pair, title, root, active, "", body)
+  shell_ext(a, lang, pair, title, root, active, "", body)
 
 ## Like [shell], but with extra markup injected into <head> (e.g. the Playground
 ## page's stylesheet + module script).
 pub fn shell_ext(
+  a: Assets,
   lang: Lang,
   pair: String,
   title: String,
@@ -177,6 +211,10 @@ pub fn shell_ext(
   let code = lang_code(lang)
   let alts = alternates(pair)
   let switch = lang_switch(lang, root, pair)
+  let css = a.style
+  let ico = a.favicon
+  let touch = a.touch_icon
+  let og = a.og_image
   """
 <!DOCTYPE html>
 <html lang="$code">
@@ -184,18 +222,18 @@ pub fn shell_ext(
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>$esc_title</title>
-<link rel="icon" href="$root/assets/favicon.ico" sizes="32x32">
-<link rel="apple-touch-icon" href="$root/assets/apple-touch-icon.png">
+<link rel="icon" href="$root/assets/$ico" sizes="32x32">
+<link rel="apple-touch-icon" href="$root/assets/$touch">
 <meta property="og:title" content="$esc_title">
-<meta property="og:image" content="https://dawn-lang.dawnop.com/assets/logo-512.png">
-<link rel="stylesheet" href="$root/assets/style.css">
+<meta property="og:image" content="https://dawn-lang.dawnop.com/assets/$og">
+<link rel="stylesheet" href="$root/assets/$css">
 $alts
 $head_extra
 </head>
 <body>
 <header class="site-header">
 <nav>
-<a class="brand" href="$root/$home"><img class="brand-logo" src="$root/assets/apple-touch-icon.png" alt="">Dawn</a>
+<a class="brand" href="$root/$home"><img class="brand-logo" src="$root/assets/$touch" alt="">Dawn</a>
 $nav
 $switch
 <a class="gh" href="https://github.com/dawnop/dawn-lang">GitHub</a>
@@ -217,6 +255,7 @@ $body
 ## shell -- there is no page left that passes "", and the branch stays for the
 ## next one that has no twin.
 pub fn page(
+  a: Assets,
   lang: Lang,
   pair: String,
   title: String,
@@ -224,11 +263,12 @@ pub fn page(
   active: String,
   inner: String,
 ) -> String =
-  shell(lang, pair, title, root, active, `<main class="content">` ++ "\n" ++ inner ++ "\n</main>")
+  shell(a, lang, pair, title, root, active, `<main class="content">` ++ "\n" ++ inner ++ "\n</main>")
 
 ## A page with the sticky TOC sidebar (the spec and design pages). `pair` as in
 ## [shell].
 pub fn page_with_toc(
+  a: Assets,
   lang: Lang,
   pair: String,
   title: String,
@@ -246,7 +286,7 @@ pub fn page_with_toc(
     toc_list(toc) ++ "\n</nav>\n</aside>"
   let body = `<div class="with-toc">` ++ "\n" ++ side ++ "\n" ++
     `<article class="doc">` ++ "\n" ++ article ++ "\n</article>\n</div>"
-  shell(lang, pair, title, root, active, body)
+  shell(a, lang, pair, title, root, active, body)
 }
 
 ## Nested <ul> for h2/h3 toc entries.
@@ -306,12 +346,12 @@ test "each language's nav points at that language's pages" {
 
 ## Clicking the logo is not a request to change language.
 test "the brand mark leads to this page's own front page" {
-  assert str.contains(shell(En, "", "t", ".", "", ""), `class="brand" href="./index.html"`)
-  assert str.contains(shell(Zh, "", "t", "..", "", ""), `class="brand" href="../zh/index.html"`)
+  assert str.contains(shell(plain_assets(), En, "", "t", ".", "", ""), `class="brand" href="./index.html"`)
+  assert str.contains(shell(plain_assets(), Zh, "", "t", "..", "", ""), `class="brand" href="../zh/index.html"`)
 }
 
 test "shell carries title, css root, body" {
-  let p = page(Zh, "", "测试页 — Dawn", ".", "stdlib", "<p>x</p>")
+  let p = page(plain_assets(), Zh, "", "测试页 — Dawn", ".", "stdlib", "<p>x</p>")
   assert str.contains(p, "<title>测试页 — Dawn</title>")
   assert str.contains(p, `href="./assets/style.css"`)
   assert str.contains(p, `<main class="content">`)
@@ -320,16 +360,16 @@ test "shell carries title, css root, body" {
 
 test "only a page with a twin advertises one" {
   # the English front page: lang=en, a switch to the Chinese one, hreflang pair
-  let home = shell(En, "index.html", "Dawn", ".", "", "<p>x</p>")
+  let home = shell(plain_assets(), En, "index.html", "Dawn", ".", "", "<p>x</p>")
   assert str.contains(home, `<html lang="en">`)
   assert str.contains(home, `<a class="lang" href="./zh/index.html" hreflang="zh-CN">中文</a>`)
   assert str.contains(home, `hreflang="x-default" href="https://dawn-lang.dawnop.com/"`)
   # the Chinese one points back, and says so in the language it leads to
-  let zh = shell(Zh, "index.html", "Dawn", "..", "", "<p>x</p>")
+  let zh = shell(plain_assets(), Zh, "index.html", "Dawn", "..", "", "<p>x</p>")
   assert str.contains(zh, `<html lang="zh-CN">`)
   assert str.contains(zh, `<a class="lang" href="../index.html" hreflang="en">English</a>`)
   # a document page has no twin: no switch, no alternates
-  let doc = page(Zh, "", "规范 — Dawn", ".", "spec", "<p>x</p>")
+  let doc = page(plain_assets(), Zh, "", "规范 — Dawn", ".", "spec", "<p>x</p>")
   assert not str.contains(doc, `class="lang"`)
   assert not str.contains(doc, "hreflang")
 }
@@ -339,19 +379,19 @@ test "only a page with a twin advertises one" {
 ## same three URLs, and the constants that used to stand here passed either
 ## reading. A tutorial chapter tells them apart.
 test "a paired page names its own twin, not the home page" {
-  let en = page(En, "tutorial/03.html", "x — Dawn Tutorial", "..", "tutorial", "<p>x</p>")
+  let en = page(plain_assets(), En, "tutorial/03.html", "x — Dawn Tutorial", "..", "tutorial", "<p>x</p>")
   assert str.contains(en, `<a class="lang" href="../zh/tutorial/03.html" hreflang="zh-CN">中文</a>`)
   assert str.contains(en,
     `hreflang="en" href="https://dawn-lang.dawnop.com/tutorial/03.html"`)
   assert str.contains(en,
     `hreflang="zh-CN" href="https://dawn-lang.dawnop.com/zh/tutorial/03.html"`)
   # the twin, two directories deeper, points back at the same pair
-  let zh = page(Zh, "tutorial/03.html", "x — Dawn 教程", "../..", "tutorial", "<p>x</p>")
+  let zh = page(plain_assets(), Zh, "tutorial/03.html", "x — Dawn 教程", "../..", "tutorial", "<p>x</p>")
   assert str.contains(zh, `<a class="lang" href="../../tutorial/03.html" hreflang="en">English</a>`)
   assert str.contains(zh,
     `hreflang="en" href="https://dawn-lang.dawnop.com/tutorial/03.html"`)
   # an index is advertised as its directory, so the front page stays / and /zh/
-  assert str.contains(page(En, "tutorial/index.html", "t", "..", "tutorial", ""),
+  assert str.contains(page(plain_assets(), En, "tutorial/index.html", "t", "..", "tutorial", ""),
     `hreflang="zh-CN" href="https://dawn-lang.dawnop.com/zh/tutorial/"`)
 }
 

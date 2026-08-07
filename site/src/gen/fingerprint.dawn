@@ -1,0 +1,129 @@
+# Content fingerprints for asset file names.
+#
+# Everything under /assets/ is served with `Cache-Control: max-age=31536000,
+# public, immutable`. That header is a promise about the URL: whatever these
+# bytes are, they are what this URL means, forever. The site was making that
+# promise about `style.css` -- a name whose bytes change every time the
+# stylesheet does. So a returning visitor kept the copy they already had, and
+# a fix landed for new visitors only; 2026-08-07's Output-badge fix would have
+# reached everyone else some time in 2027.
+#
+# The name is the fix. `style.css` becomes `style.<hash8>.css`, where the hash
+# is of the content, so changing a byte changes the URL and the cached copy is
+# never asked for again. Nothing about the header changes -- under a
+# fingerprinted name it is finally true.
+#
+# Eight hex digits of SHA-256, not the full 64: this is a cache key, not an
+# integrity check. The population is a handful of files, so a collision needs
+# two of six assets to agree in 32 bits, and the failure it would cause is a
+# stale stylesheet -- the thing that already happens today, unconditionally.
+#
+# The hash must be a pure function of the bytes and of nothing else:
+# scripts/site-dist-diff.sh holds the JVM and the C backend to a byte-identical
+# site/dist, and a name derived from a timestamp, a path or a build counter
+# would put the two legs permanently at odds. sha2 is arithmetic over bytes,
+# and the same arithmetic on both.
+
+use std/str
+use std/list
+use std/bytes
+use sha2/sha256
+
+## How much of the digest goes into the name.
+fn hash_len() -> Int = 8
+
+## `style.css` and its bytes -> `style.<hash8>.css`.
+##
+## The extension is the part after the LAST dot, so `dawn.min.css` keeps
+## `dawn.min` as its stem rather than growing a hash in the middle. A name with
+## no dot at all gets the hash appended, which is the only reading available.
+pub fn fingerprint(name: String, content: Bytes) -> String = {
+  let h = str.slice(sha256.hex(content), 0, hash_len())
+  match str.last_index_of(name, ".") {
+    Some(i) -> {
+      let stem = str.slice(name, 0, i)
+      let ext = str.slice(name, i + 1, str.len(name))
+      "$stem.$h.$ext"
+    }
+    None -> "$name.$h"
+  }
+}
+
+## Whether a name already carries a fingerprint, i.e. `<stem>.<8 hex>.<ext>`.
+##
+## Read by the shared-asset check, which walks dist/assets and would otherwise
+## see each asset twice -- once under its fingerprinted name and once under the
+## plain alias kept for visitors holding older HTML.
+pub fn is_fingerprinted(name: String) -> Bool = {
+  let parts = str.split(name, ".")
+  # <stem>.<hash>.<ext> is at least three parts, and the hash is the one
+  # before the extension.
+  if len(parts) < 3 {
+    false
+  } else {
+    is_hash(parts[len(parts) - 2])
+  }
+}
+
+## `style.<hash8>.css` -> `style.css`; anything else unchanged.
+pub fn plain_name(name: String) -> String =
+  if is_fingerprinted(name) {
+    let parts = str.split(name, ".")
+    join(list.take(parts, len(parts) - 2) ++ [parts[len(parts) - 1]], ".")
+  } else {
+    name
+  }
+
+fn is_hash(s: String) -> Bool = {
+  var ok = str.len(s) == hash_len()
+  for c in str.chars(s) {
+    if not str.contains("0123456789abcdef", c) {
+      ok = false
+    }
+  }
+  ok
+}
+
+## The digest is of the content and nothing else, so the same bytes name the
+## same file on every machine, on both backends, on every run. That is what
+## lets site-dist-diff.sh keep comparing two builds byte for byte.
+test "the name follows the bytes" {
+  let a = fingerprint("style.css", bytes.utf8("a{b:c}"))
+  assert a == fingerprint("style.css", bytes.utf8("a{b:c}"))
+  assert a != fingerprint("style.css", bytes.utf8("a{b:d}"))
+  # a known vector, so that a change of hash function is a change of test:
+  # sha256("") = e3b0c442 98fc1c14 ...
+  assert fingerprint("style.css", bytes.utf8("")) == "style.e3b0c442.css"
+}
+
+test "the hash goes before the last extension" {
+  let b = bytes.utf8("")
+  assert fingerprint("playground.js", b) == "playground.e3b0c442.js"
+  assert fingerprint("dawn.min.css", b) == "dawn.min.e3b0c442.css"
+  assert fingerprint("apple-touch-icon.png", b) == "apple-touch-icon.e3b0c442.png"
+  # nowhere to put it but the end
+  assert fingerprint("LICENSE", b) == "LICENSE.e3b0c442"
+}
+
+test "a fingerprinted name is told from its plain alias" {
+  assert is_fingerprinted(fingerprint("style.css", bytes.utf8("x")))
+  assert not is_fingerprinted("style.css")
+  assert not is_fingerprinted("playground.js")
+  # right shape, wrong alphabet / wrong length
+  assert not is_fingerprinted("style.E3B0C442.css")
+  assert not is_fingerprinted("style.e3b0c44.css")
+  assert not is_fingerprinted("style.e3b0c4423.css")
+  assert not is_fingerprinted("logo-512.png")
+}
+
+## The alias check in gen/assets pairs the two names off, and it can only do
+## that if this is the exact inverse of [fingerprint].
+test "the plain name is the fingerprinted name with the hash taken out" {
+  let b = bytes.utf8("x")
+  for n in ["style.css", "playground.js", "dawn.min.css", "apple-touch-icon.png"] {
+    assert plain_name(fingerprint(n, b)) == n
+  }
+  # not fingerprinted: nothing to take out
+  assert plain_name("style.css") == "style.css"
+  assert plain_name("logo-512.png") == "logo-512.png"
+}

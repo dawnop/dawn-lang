@@ -21,10 +21,11 @@ site/
 │   ├── main.dawn   # 组装：读 docs/ + examples/ → 写 dist/
 │   ├── gen/copy.dawn  # 首页文案（`## key` 分节的 Markdown），不再是 Dawn 里的字符串字面量
 │   ├── gen/assets.dawn  # 共用资产的语言检查：CSS `content:` 注入的字，两棵树各一份
+│   ├── gen/fingerprint.dawn  # 资产文件名里的内容哈希（sha2），配 /assets/ 的 immutable 头
 │   ├── md/         # Markdown 子集解析器
 │   ├── hl/         # Dawn 语法高亮 tokenizer（构建期）
 │   └── html/       # 转义、模板壳、TOC、slug
-├── assets/         # style.css 等文本资产（原样拷入 dist/assets/）
+├── assets/         # style.css 等文本资产（内容不变，名字带哈希后拷入 dist/assets/）
 ├── pages/          # 站点专属内容（home.md 正本 / home.zh.md 译本；首页样例与特性卡的 .dawn + 实测输出 .out）
 ├── play-ui/        # Playground 编辑器（TS + CodeMirror 6，npm 构建）
 │   └── samples/    # 侧边栏的起手程序：真 .dawn + 实测 .out，由 samples.ts 用
@@ -60,6 +61,27 @@ site/
 一直到 2026-08-08（读者报的）。现在默认写英文、中文由 `html[lang="zh-CN"]` 覆盖，
 `site/src/gen/assets.dawn` 在每次构建里盯三条：未限定的 `content:` 不许带中文；
 选择器只能钉站点真发得出的 `lang`；带字的 `content:` 必须每种语言各有一份。
+
+## 资产缓存
+
+`/assets/` 由 nginx 发 `Cache-Control: max-age=31536000, public, immutable`——这句话是对
+**URL** 的承诺：这个地址的字节永不改变。而站点一直把它挂在 `style.css` 这种名字上，于是
+改样式对老访客等于没改：他们手上那份要到 2027 年才过期。2026-08-07 修的输出块角标就是
+这么被卡住的。
+
+改的是名字，不是响应头。`gen_assets` 把每个资产按内容算 sha256、取前 8 位嵌进文件名
+（`style.<hash8>.css`），页面只链这个名字；字节一变名字就变，缓存里的旧副本再也不会被
+请求，而 `immutable` 从此是真话。哈希只依赖字节，所以 `scripts/site-dist-diff.sh` 的
+JVM/native 逐字节对拍照旧成立。
+
+每个资产**同时**再写一份原名（`style.css`）。这是过渡件不是第二份资产：HTML 每次访问都
+回源校验，一两次访问后没人再问原名了；但改动上线那一刻，手里还揣着旧 HTML 的访客问的
+正是原名，而 `redeploy.sh` 用 `rsync --delete`——少了这份别名他们拿到的是 404 和一张
+没有样式的页面。等旧 HTML 不再可能留在任何缓存里，这份别名就可以删。
+
+两道门禁盯着这件事，各盯一个方向：`gen/assets.dawn` 的别名配对（丢了原名 → 老访客 404；
+丢了哈希名 → 又回到不带版本的 URL），`gen/links.dawn` 的链接检查（页面链进 `assets/` 的
+每个引用都必须带哈希——只查存在与否是查不出来的，两个名字都在盘上）。
 
 ## 信息架构（URL 映射）
 

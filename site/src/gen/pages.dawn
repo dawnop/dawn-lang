@@ -2,14 +2,16 @@
 
 use std/str
 use std/io
+use std/bytes
 use md/ast.{Block}
 use md/parser.{parse}
 use html/render.{render_doc}
-use html/page.{Lang, En, Zh, page_with_toc, shell, shell_ext, lang_path}
+use html/page.{Assets, Lang, En, Zh, page_with_toc, shell, shell_ext, lang_path}
 use hl/dawn.{highlight_dawn}
 use html/escape.{escape_html}
 use gen/common.{must_read, write_page, map_doc_url, doc_files}
 use gen/copy.{Copy, load_copy, line, body}
+use gen/fingerprint.{fingerprint}
 
 fn parsed(path: String) -> List[Block] !io =
   match parse(must_read(path)) {
@@ -17,8 +19,9 @@ fn parsed(path: String) -> List[Block] !io =
     Err(e) -> panic("$path: $e")
   }
 
-# Byte-for-byte copy for binary assets (icons). read_file/write_file are
-# UTF-8 string APIs and would corrupt PNG/ICO bytes.
+# Byte IO for the assets. read_file/write_file are UTF-8 string APIs and would
+# corrupt PNG/ICO bytes; the text assets go through here too, because what gets
+# hashed has to be the bytes that get written and nothing near them.
 #
 # This was a pair of `use java` streams until 2026-08-05, and those two lines
 # cost more than they looked: one `use java` anywhere in a program makes the
@@ -27,39 +30,77 @@ fn parsed(path: String) -> List[Block] !io =
 # and with it the JVM-vs-native comparison site/README.md calls a project
 # tradition. std's byte IO is on both backends; scripts/site-dist-diff.sh is
 # what now says so.
-fn copy_bin(src: String, dst: String) -> Unit !io = {
-  let content = match io.read_bytes(src) {
+fn read_bin(src: String) -> Bytes !io =
+  match io.read_bytes(src) {
     Ok(b) -> b
     Err(e) -> panic("cannot read $src: $e")
   }
+
+fn write_bin(dst: String, content: Bytes) -> Unit !io =
   match io.write_bytes(dst, content) {
-    Ok(_) -> ()
+    Ok(_) -> println("  wrote $dst")
     Err(e) -> panic("cannot write $dst: $e")
   }
+
+## Write one asset and answer the name the pages must link to.
+##
+## Two files, one content. The fingerprinted name is the one every page links
+## to: /assets/ is served with a one-year `immutable` header, and that header
+## is only honest about a URL whose bytes cannot change under it (see
+## gen/fingerprint).
+##
+## The plain name is written as well, and this is a transition affordance
+## rather than a second asset. HTML is revalidated on every visit, so within a
+## visit or two nobody is asking for `/assets/style.css` any more -- but a
+## visitor holding a page cached from before this change still is, and
+## site/redeploy.sh rsyncs with `--delete`, which would turn that request into
+## a 404 and the page into unstyled HTML. The alias carries the same bytes,
+## fix included, so it is not a stale copy either. It can be dropped once no
+## pre-fingerprint HTML is plausibly still in a cache.
+fn emit_asset(out: String, name: String, content: Bytes) -> String !io = {
+  let fp = fingerprint(name, content)
+  write_bin("$out/assets/$fp", content)
+  write_bin("$out/assets/$name", content)
+  fp
 }
 
-pub fn gen_assets(out: String) -> Unit !io = {
-  write_page("$out/assets/style.css", str.trim(must_read("site/assets/style.css")))
+## Text assets keep the trailing newline write_page used to add, so that the
+## bytes on disk -- and therefore the hash -- do not depend on which helper
+## wrote them.
+fn emit_text(out: String, name: String, text: String) -> String !io =
+  emit_asset(out, name, bytes.utf8(text ++ "\n"))
+
+pub fn gen_assets(out: String) -> Assets !io = {
+  let style = emit_text(out, "style.css", str.trim(must_read("site/assets/style.css")))
   # the dawn-sunrise mark: favicon + touch icon (doubles as the nav brand
   # mark) + og:image (links emitted by html/page)
-  for f in ["favicon.ico", "apple-touch-icon.png", "logo-512.png"] {
-    copy_bin("site/assets/$f", "$out/assets/$f")
-  }
+  let favicon = emit_asset(out, "favicon.ico", read_bin("site/assets/favicon.ico"))
+  let touch = emit_asset(out, "apple-touch-icon.png",
+    read_bin("site/assets/apple-touch-icon.png"))
+  let og = emit_asset(out, "logo-512.png", read_bin("site/assets/logo-512.png"))
   # Vendor the Playground editor bundle (built from site/play-ui). Copy it if
   # present; otherwise write placeholders so the link checker still passes and
   # the rest of the site builds — the Playground page just won't have an editor.
-  copy_or_stub("site/play-ui/dist/playground.js", "$out/assets/playground.js",
+  let play_js = emit_or_stub(out, "playground.js", "site/play-ui/dist/playground.js",
     "console.warn('dawn-play: editor bundle missing; run site/play-ui build')")
-  copy_or_stub("site/play-ui/dist/playground.css", "$out/assets/playground.css",
+  let play_css = emit_or_stub(out, "playground.css", "site/play-ui/dist/playground.css",
     "/* dawn-play: editor bundle missing */")
+  Assets {
+    style: style,
+    favicon: favicon,
+    touch_icon: touch,
+    og_image: og,
+    play_css: play_css,
+    play_js: play_js,
+  }
 }
 
-fn copy_or_stub(src: String, dst: String, stub: String) -> Unit !io =
+fn emit_or_stub(out: String, name: String, src: String, stub: String) -> String !io =
   match io.read_file(src) {
-    Ok(bytes) -> write_page(dst, bytes)
+    Ok(text) -> emit_text(out, name, text)
     Err(_) -> {
-      println("  warning: $src missing — writing placeholder $dst")
-      write_page(dst, stub)
+      println("  warning: $src missing — writing placeholder $name")
+      emit_text(out, name, stub)
     }
   }
 
@@ -146,7 +187,7 @@ fn feature_section(c: Copy, mu: fn(String) -> String) -> String !io = {
 ## the face that everybody sees and nobody proofreads. This way it lands on
 ## the Chinese text, whose reader is the author, and doc-check.py's
 ## translation digest says when it has.
-pub fn gen_index(out: String, lang: Lang) -> Unit !io = {
+pub fn gen_index(out: String, a: Assets, lang: Lang) -> Unit !io = {
   let docs = doc_files()
   let (src, dst, root, title) =
     match lang {
@@ -162,7 +203,7 @@ pub fn gen_index(out: String, lang: Lang) -> Unit !io = {
   # `index.html` is the pair's path in the default layout; the shell derives
   # both the switch link and the hreflang URLs from it, so neither branch above
   # has to spell out where the other one lives.
-  write_page(dst, shell(lang, "index.html", title, root, "", page_body))
+  write_page(dst, shell(a, lang, "index.html", title, root, "", page_body))
 }
 
 ## The spec and the design notes, each one document rendered whole, and each
@@ -179,17 +220,19 @@ fn doc_source(base: String, out: String, lang: Lang) -> (String, String, String)
     Zh -> ("docs/$base.md", "$out/zh/$base.html", "..")
   }
 
-fn gen_doc_page(out: String, lang: Lang, base: String) -> Unit !io = {
+fn gen_doc_page(out: String, a: Assets, lang: Lang, base: String) -> Unit !io = {
   let docs = doc_files()
   let (src, dst, root) = doc_source(base, out, lang)
   let doc = render_doc(parsed(src), u => map_doc_url(root, docs, u))
   write_page(dst,
-    page_with_toc(lang, "$base.html", "${doc.title} — Dawn", root, base, doc.toc, doc.html))
+    page_with_toc(a, lang, "$base.html", "${doc.title} — Dawn", root, base, doc.toc, doc.html))
 }
 
-pub fn gen_spec(out: String, lang: Lang) -> Unit !io = gen_doc_page(out, lang, "spec")
+pub fn gen_spec(out: String, a: Assets, lang: Lang) -> Unit !io =
+  gen_doc_page(out, a, lang, "spec")
 
-pub fn gen_design(out: String, lang: Lang) -> Unit !io = gen_doc_page(out, lang, "design")
+pub fn gen_design(out: String, a: Assets, lang: Lang) -> Unit !io =
+  gen_doc_page(out, a, lang, "design")
 
 test "each language's document is read from its own file and lands in its own place" {
   assert doc_source("spec", "d", En) == ("docs/spec.en.md", "d/spec.html", ".")
@@ -204,7 +247,7 @@ test "each language's document is read from its own file and lands in its own pl
 ## the shell around it: nav, footer and the language switch, which is the whole
 ## reason it is paired. Translating the editor is a job in site/play-ui and has
 ## nothing to do with this generator.
-pub fn gen_playground(out: String, lang: Lang) -> Unit !io = {
+pub fn gen_playground(out: String, a: Assets, lang: Lang) -> Unit !io = {
   let (dst, root) =
     match lang {
       En -> ("$out/playground.html", ".")
@@ -216,9 +259,11 @@ pub fn gen_playground(out: String, lang: Lang) -> Unit !io = {
   let mount_body = `<main class="dp-page">` ++ "\n" ++ mount ++ "\n</main>"
   # the editor bundle (built from site/play-ui, copied into assets by build.sh);
   # one copy, reached from wherever the page sits
-  let head = """<link rel="stylesheet" href="$root/assets/playground.css">""" ++ "\n" ++
-    """<script type="module" src="$root/assets/playground.js"></script>"""
+  let pcss = a.play_css
+  let pjs = a.play_js
+  let head = """<link rel="stylesheet" href="$root/assets/$pcss">""" ++ "\n" ++
+    """<script type="module" src="$root/assets/$pjs"></script>"""
   write_page(dst,
-    shell_ext(lang, "playground.html", "Playground — Dawn", root, "playground", head,
+    shell_ext(a, lang, "playground.html", "Playground — Dawn", root, "playground", head,
       mount_body))
 }

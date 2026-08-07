@@ -3,7 +3,7 @@
 use md/ast.{Inline, Block, Heading}
 use md/parser.{parse}
 use html/render.{render_doc, inline_text}
-use html/page.{Lang, En, Zh, page, contents_label}
+use html/page.{Assets, Lang, En, Zh, page, contents_label}
 use gen/common.{must_read, write_page, map_doc_url, doc_files, pad2, drop_trailing_rule}
 
 type Chapter = { title: List[Inline], body: List[Block] }
@@ -96,7 +96,7 @@ fn tutorial_source(out: String, lang: Lang) -> (String, String, String) =
 ## layout (`tutorial/03.html`) rather than by a pair of hrefs; html/page.dawn's
 ## [site_url] turns that into the switch link and the hreflang URLs, which
 ## differ between the two runs only in `root`.
-pub fn gen_tutorial(out: String, lang: Lang) -> Unit !io = {
+pub fn gen_tutorial(out: String, a: Assets, lang: Lang) -> Unit !io = {
   let (src, dir, root) = tutorial_source(out, lang)
   let blocks =
     match parse(must_read(src)) {
@@ -115,7 +115,7 @@ pub fn gen_tutorial(out: String, lang: Lang) -> Unit !io = {
         let html = doc.html ++ chapter_nav(chapters, i, lang)
         let title = inline_text(c.title)
         write_page("$dir/${pad2(i + 1)}.html",
-          page(lang, "tutorial/${pad2(i + 1)}.html",
+          page(a, lang, "tutorial/${pad2(i + 1)}.html",
             "$title — ${tutorial_name(lang)}", root, "tutorial", html))
       }
       None -> {
@@ -133,7 +133,7 @@ pub fn gen_tutorial(out: String, lang: Lang) -> Unit !io = {
   }
   let listing = "<ul class=\"chapter-list\">" ++ items ++ "\n</ul>"
   write_page("$dir/index.html",
-    page(lang, "tutorial/index.html", tutorial_name(lang), root, "tutorial",
+    page(a, lang, "tutorial/index.html", tutorial_name(lang), root, "tutorial",
       intro_doc.html ++ listing))
 }
 

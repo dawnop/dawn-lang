@@ -41,6 +41,7 @@ use std/set
 use std/map
 use md/text.{cp_at, seg}
 use gen/common.{must_read, must_list, take_n}
+use gen/fingerprint.{is_fingerprinted}
 
 fn files_under(base: String, rel: String) -> List[String] !io = {
   let path = if rel == "" { base } else { "$base/$rel" }
@@ -102,8 +103,17 @@ fn attr_values(html: String, opener: String) -> List[String] = {
   out
 }
 
-## All href="..." values in an HTML page.
-fn hrefs_of(html: String) -> List[String] = attr_values(html, "href=\"")
+## Every URL on the page that the browser will go and fetch: `href` for the
+## links and the stylesheet, `src` for the brand mark and the Playground's
+## module script.
+##
+## `src` was outside this check until 2026-08-08, which cost nothing while the
+## two of them were spelled by hand in one template and never changed. Asset
+## names are now derived from the content (gen/fingerprint), so a name that
+## does not exist is a thing the generator can produce -- and the two
+## references it can produce it for were exactly the two nobody was looking at.
+fn hrefs_of(html: String) -> List[String] =
+  attr_values(html, "href=\"") ++ attr_values(html, "src=\"")
 
 ## Every id this page offers as a link target. The opener carries its leading
 ## space so that `data-id="` and friends cannot be mistaken for an id.
@@ -215,6 +225,12 @@ fn resolve(dir: String, href: String) -> String = {
   join(stack, "/")
 }
 
+## The file name at the end of a path.
+fn last_segment(rel: String) -> String = {
+  let parts = str.split(rel, "/")
+  unwrap_or(get(parts, len(parts) - 1), rel)
+}
+
 fn dir_of(rel: String) -> String = {
   let parts = str.split(rel, "/")
   join(take_n(parts, len(parts) - 1), "/")
@@ -235,6 +251,7 @@ pub fn check_links(out: String) -> Unit !io = {
   var broken: List[String] = []
   var pages = 0
   var checked = 0
+  var assets = 0
   var anchors = 0
   var numbered = 0
   for f in set.to_list(files) {
@@ -275,6 +292,22 @@ pub fn check_links(out: String) -> Unit !io = {
             if not target_exists {
               broken = broken ++ ["$f -> $href (resolved: $target)"]
             }
+            # A page must reach the shared assets by their fingerprinted names.
+            # Existence cannot see this one: both names are on disk, so a page
+            # that went back to linking `assets/style.css` resolves, passes,
+            # and quietly puts the one-year `immutable` header back on a URL
+            # whose bytes change -- which is the bug the fingerprints were
+            # added to fix. The plain copies are the alias older cached HTML
+            # asks for; nothing this generator writes may ask for them.
+            if str.starts_with(target, "assets/") {
+              assets = assets + 1
+              let name = last_segment(target)
+              if not is_fingerprinted(name) {
+                broken = broken
+                  ++ ["$f -> $href: assets/$name carries no content hash, so its URL "
+                      ++ "cannot change when its bytes do"]
+              }
+            }
           }
           # Only .html has ids to check against, and a target we already
           # reported as missing is not reported twice.
@@ -296,8 +329,9 @@ pub fn check_links(out: String) -> Unit !io = {
     panic("${len(broken)} broken links")
   }
   println(
-    "  link check: $checked internal hrefs, $anchors #fragment(s) and $numbered numbered "
-      ++ "heading id(s) across $pages pages, all resolve")
+    "  link check: $checked internal href/src(s), $anchors #fragment(s) and $numbered numbered "
+      ++ "heading id(s) across $pages pages, all resolve; $assets of them reach assets/ "
+      ++ "and every one is content-hashed")
 }
 
 test "resolution normalizes relative segments" {
@@ -309,6 +343,13 @@ test "resolution normalizes relative segments" {
 
 test "href extraction" {
   assert hrefs_of(`<a href="a.html">x</a> <link href="b.css">`) == ["a.html", "b.css"]
+}
+
+## The fetched-URL half a stylesheet link and an <img> do not share.
+test "src is fetched too, so it is checked too" {
+  assert hrefs_of(`<img src="assets/logo.png"><script src="assets/p.js"></script>`)
+    == ["assets/logo.png", "assets/p.js"]
+  assert hrefs_of(`<a href="a.html"><img src="b.png"></a>`) == ["a.html", "b.png"]
 }
 
 test "id extraction" {

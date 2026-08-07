@@ -41,6 +41,7 @@ use std/str
 use std/list
 use md/text.{cp_at}
 use gen/common.{must_read, must_list, take_n}
+use gen/fingerprint.{is_fingerprinted, plain_name}
 use html/page.{En, Zh, lang_code}
 
 ## One `content:` declaration that puts words on a page: which file it is in,
@@ -255,15 +256,59 @@ fn default_code() -> String = lang_code(En)
 
 fn override_codes() -> List[String] = [lang_code(Zh)]
 
+## Every asset is written twice: once as `<stem>.<hash8>.<ext>`, which is what
+## the pages link to and what the one-year `immutable` header is honest about,
+## and once under its plain name, which is what a visitor holding HTML cached
+## from before 2026-08-08 still asks for. Neither half is optional.
+##
+## Losing the plain copy gives those visitors a 404 for the stylesheet -- an
+## unstyled page, and `rsync --delete` would do it the moment the alias stopped
+## being written. Losing the fingerprint is the bug this whole thing is here to
+## fix, and it is the quieter of the two: every page would still link to a file
+## that exists, the link check would still pass, and nothing but this would
+## notice that the URLs had gone back to being unversioned.
+fn check_alias_pairs(names: List[String]) -> List[String] = {
+  var bad: List[String] = []
+  for name in names {
+    if is_fingerprinted(name) {
+      if not list.contains(names, plain_name(name)) {
+        bad = bad
+          ++ ["assets/$name: no plain-name alias — a visitor whose cached HTML "
+              ++ "still asks for ${plain_name(name)} gets a 404"]
+      }
+    } else {
+      var found = false
+      for other in names {
+        if is_fingerprinted(other) && plain_name(other) == name {
+          found = true
+        }
+      }
+      if not found {
+        bad = bad
+          ++ ["assets/$name: shipped under its plain name only, so its URL does not "
+              ++ "change when its bytes do — the `immutable` header will hold "
+              ++ "returning visitors on the old copy"]
+      }
+    }
+  }
+  bad
+}
+
 pub fn check_assets(out: String) -> Unit !io = {
   let known = [default_code()] ++ override_codes()
-  var bad: List[String] = []
+  let names = must_list("$out/assets")
+  var bad: List[String] = check_alias_pairs(names)
   var texts: List[TextDecl] = []
   var sheets = 0
   var contents = 0
   var bundles = 0
-  for name in must_list("$out/assets") {
-    if str.ends_with(name, ".css") {
+  # The rules below are about content, and the two copies of each asset are the
+  # same content. Reading both would double every count and report every
+  # finding twice, so the fingerprinted half is left to check_alias_pairs.
+  for name in names {
+    if is_fingerprinted(name) {
+      ()
+    } else if str.ends_with(name, ".css") {
       sheets = sheets + 1
       var seen: List[String] = []
       for d in declarations(must_read("$out/assets/$name")) {
@@ -329,7 +374,8 @@ pub fn check_assets(out: String) -> Unit !io = {
   }
   println(
     "  asset lang check: $contents content declaration(s) in $sheets stylesheet(s) and "
-      ++ "$bundles shared bundle(s), all follow the page language")
+      ++ "$bundles shared bundle(s), all follow the page language; ${len(names)} file(s) "
+      ++ "in assets/, each one fingerprinted and aliased")
 }
 
 test "comments go before anything else looks at the file" {

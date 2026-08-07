@@ -5,7 +5,7 @@ use std/str
 use std/io
 use html/escape.{escape_html}
 use hl/dawn.{highlight_dawn}
-use html/page.{Lang, En, Zh, page}
+use html/page.{Assets, Lang, En, Zh, page}
 use gen/common.{must_read, must_list, write_page}
 
 type Example = { slug: String, files: List[String] }
@@ -121,7 +121,7 @@ fn gallery_dir(out: String, lang: Lang) -> (String, String) =
 ## heading, the lede, the <title> suffix and nothing else a reader would call
 ## content. Paired all the same, because a reader who switches language on some
 ## other page and then clicks Examples should not be thrown back across.
-pub fn gen_examples(out: String, lang: Lang) -> Unit !io = {
+pub fn gen_examples(out: String, a: Assets, lang: Lang) -> Unit !io = {
   let c = chrome(lang)
   let (dir, root) = gallery_dir(out, lang)
   let units = collect_examples()
@@ -130,7 +130,7 @@ pub fn gen_examples(out: String, lang: Lang) -> Unit !io = {
     let first = ex.files[0]
     let desc = description(must_read(first))
     write_page("$dir/${ex.slug}.html",
-      page(lang, "examples/${ex.slug}.html", "${ex.slug} — ${c.suffix}", root, "examples",
+      page(a, lang, "examples/${ex.slug}.html", "${ex.slug} — ${c.suffix}", root, "examples",
         example_page(ex)))
     items = items ++ "\n" ++
       """<li><a href="${ex.slug}.html"><code>${ex.slug}</code></a> — """ ++ escape_html(desc) ++ "</li>"
@@ -139,7 +139,7 @@ pub fn gen_examples(out: String, lang: Lang) -> Unit !io = {
     "<p>${c.lede}</p>\n" ++
     "<ul class=\"example-list\">" ++ items ++ "\n</ul>"
   write_page("$dir/index.html",
-    page(lang, "examples/index.html", "${c.heading} — Dawn", root, "examples", body))
+    page(a, lang, "examples/index.html", "${c.heading} — Dawn", root, "examples", body))
 }
 
 test "each language's gallery lands in its own place" {
