@@ -2,6 +2,11 @@
 #
 # Run: ./bin/dawn run scripts/bench_map.dawn
 #
+# Run it by hand. No gate does: the numbers are wall-clock and machine-bound, so
+# there is nothing for one to compare -- which is also how this file sat broken
+# (a doubled `use java`, and the retired `map_*` builtins) without anything
+# noticing.
+#
 # Map used to be copy-on-write (a LinkedHashMap cloned whole per insert), so a
 # single insert was O(n) and a growing map O(n^2). It is now a persistent HAMT
 # (dawn/rt/DawnMap, O(log32 n) insert). This benchmark measures three usage
@@ -15,8 +20,7 @@
 # fatal (100k inserts: A 10ms, C 48742ms). After the HAMT the gap is gone
 # (A ~4ms, C ~10ms), and the growing map (case 1) fell 21118ms -> ~8ms at 80k,
 # on par with the already-linear List. That fix is what unblocks self-hosting.
-use java "java.lang.System"
-use java "java.util.LinkedHashMap"
+use std/map
 use java "java.lang.System"
 use java "java.util.LinkedHashMap"
 
@@ -54,12 +58,12 @@ pub fn main() -> Unit !io = {
 
 fn grow_map(n: Int) -> Int !io = {
   let t0 = System.nanoTime()
-  var m: Map[Int, Int] = map_empty()
+  var m: Map[Int, Int] = map.empty()
   for i in 0..n {
-    m = map_insert(m, i, i)
+    m = map.insert(m, i, i)
   }
   let t1 = System.nanoTime()
-  let _g = map_size(m)
+  let _g = map.len(m)
   (t1 - t0) / 1000000
 }
 
@@ -67,12 +71,12 @@ fn grow_map(n: Int) -> Int !io = {
 # an `Object` parameter (spec 9.2), so a java Map can only be measured on Strings.
 fn grow_map_str(n: Int) -> Int !io = {
   let t0 = System.nanoTime()
-  var m: Map[String, Int] = map_empty()
+  var m: Map[String, Int] = map.empty()
   for i in 0..n {
-    m = map_insert(m, to_string(i), i)
+    m = map.insert(m, to_string(i), i)
   }
   let t1 = System.nanoTime()
-  let _g = map_size(m)
+  let _g = map.len(m)
   (t1 - t0) / 1000000
 }
 
@@ -94,11 +98,11 @@ fn scoped_maps(scopes: Int, each: Int) -> Int !io = {
   let t0 = System.nanoTime()
   var sink = 0
   for s in 0..scopes {
-    var m: Map[String, Int] = map_empty()
+    var m: Map[String, Int] = map.empty()
     for i in 0..each {
-      m = map_insert(m, to_string(i), i)
+      m = map.insert(m, to_string(i), i)
     }
-    sink = sink + map_size(m)
+    sink = sink + map.len(m)
   }
   let t1 = System.nanoTime()
   let _g = sink
