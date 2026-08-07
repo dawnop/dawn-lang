@@ -1,4 +1,4 @@
-# Eq and Hash: the prelude traits behind `==` and hashing (D0).
+# Eq and Hash: the prelude traits behind `==` and hashing.
 #
 # The point of making them traits is dispatch a backend without a universal
 # `equals`/`hashCode` can implement -- a forwarded dictionary. That is what a
@@ -7,6 +7,8 @@
 #
 # Where the subject is statically known, no dictionary is built: `eq` on a
 # scalar lowers to the same primitive comparison `==` emits.
+#
+# Run: dawn run examples/traits/eqhash.dawn
 use std/io
 use std/list
 
@@ -58,4 +60,24 @@ pub fn main() -> Unit !io = {
   println("eq(a, b) = ${eq(a, b)}    (only x counts)")
   println("a == b   = ${a == b}    (the operator now means the impl too)")
   println("hash(a)  = ${hash(a)}")
+}
+
+test "a rigid T takes its comparison from the caller" {
+  assert contains([1, 2, 3], 2)
+  assert not contains([1, 2, 3], 9)
+  assert contains(["a", "b"], "b")
+  assert contains([Red, Blue], Blue)
+}
+
+test "an overriding impl is what `==` means from then on" {
+  let a = P { x: 1, y: 2 }
+  let b = P { x: 1, y: 99 }
+  assert eq(a, b)
+  assert a == b
+  assert hash(a) == hash(b)
+}
+
+test "structural equality needs no impl at all" {
+  assert Red == Red
+  assert not (Red == Blue)
 }

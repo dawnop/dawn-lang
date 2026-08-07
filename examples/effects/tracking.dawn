@@ -1,0 +1,51 @@
+# Effect tracking: `!io` in a signature, and the compiler holding you to it.
+#
+# This is the half of the effect system that is always on. Nothing here
+# installs a handler -- that is handlers.dawn, next door. The point of keeping
+# the two apart is that they answer different questions: this file is about
+# what a signature *promises*, that one is about who *answers* it.
+#
+# Try deleting `!io` from `report` and the error names the contaminating call.
+#
+# Run: dawn run examples/effects/tracking.dawn
+
+## Pure: the same score always gives the same letter, and nothing is observed.
+fn classify(score: Int) -> String =
+  match score {
+    s if s >= 90 -> "A"
+    s if s >= 60 -> "pass"
+    _ -> "fail"
+  }
+
+## Not pure, and it has to say so: `println` is `!io` and effects travel up.
+fn report(name: String, score: Int) -> Unit !io =
+  println("$name: $score -> ${classify(score)}")
+
+## An effect *variable* is how a higher-order function stays honest without
+## picking a side: `each` is pure when `f` is pure and `!io` when `f` is not.
+## It is the reason `map` and `fold` need no io-flavoured twins.
+fn each[T](xs: List[T], f: fn(T) -> Unit !e) -> Unit !e = {
+  for x in xs {
+    f(x)
+  }
+}
+
+pub fn main() -> Unit !io = {
+  each([("alice", 95), ("bob", 61), ("carol", 3)], entry => {
+    let (name, score) = entry
+    report(name, score)
+  })
+}
+
+test "classification is a pure function, so a test needs no scaffolding" {
+  assert classify(90) == "A"
+  assert classify(89) == "pass"
+  assert classify(59) == "fail"
+}
+
+test "a pure `f` keeps `each` pure -- this block declares no effect at all" {
+  # No accumulator: a lambda captures by value, so counting things up from
+  # inside one is a compile error and `fold` is the answer to that question.
+  each([1, 2, 3], n => { assert n > 0 })
+  assert fold([1, 2, 3], 0, (a, b) => a + b) == 6
+}

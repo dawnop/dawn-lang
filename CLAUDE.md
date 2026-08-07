@@ -50,8 +50,8 @@ parser 靠首字母大小写消歧（`TYPEIDENT` 是独立 token），所以改�
 ```bash
 ./bin/dawn --version                     # 首次自动拉种子并重建工具链
 ./bin/dawn test selfhost                 # 编译器自身的测试（145 个）
-./bin/dawn run examples/shapes.dawn      # 单文件
-./bin/dawn run examples/m4/hello_mod     # 多模块项目
+./bin/dawn run examples/data/shapes.dawn      # 单文件
+./bin/dawn run examples/projects/hello_mod     # 多模块项目
 ./bin/dawn test site                     # 站点生成器的 Dawn 测试
 ./bin/dawn fmt site selfhost packages --check   # Dawn 代码格式检查
 ./site/build.sh                          # 端到端建站（含 Playground 前端 bundle）

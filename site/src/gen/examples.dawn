@@ -52,25 +52,27 @@ fn main_first(files: List[String]) -> List[String] =
   filter(files, f => str.ends_with(f, "/main.dawn")) ++
   filter(files, f => not str.ends_with(f, "/main.dawn"))
 
+## Everything under `examples/` is `examples/<group>/<unit>`, and a unit is one
+## of two shapes: a single `.dawn` file, or a directory with a `src/` in it,
+## which is a multi-module project.
+##
+## The shape is read off the tree rather than off a list of directory names.
+## The rule used to be `if name == "m4"`, which is a milestone number, and a
+## milestone number stops meaning anything the moment the milestone is over --
+## the first directory not called that would have been silently skipped.
 fn collect_examples() -> List[Example] !io = {
   var units: List[Example] = []
-  for name in must_list("examples") {
-    let path = "examples/$name"
-    if io.is_dir(path) {
-      if name == "m4" {
-        # project examples: one unit per subdirectory, sources under src/
-        for sub in must_list(path) {
-          units = units ++ [Example { slug: "m4-$sub", files: main_first(dawn_files_under("$path/$sub/src")) }]
-        }
-      } else {
-        for f in must_list(path) {
-          if str.ends_with(f, ".dawn") {
-            units = units ++ [Example { slug: "$name-${stem(f)}", files: ["$path/$f"] }]
-          }
+  for group in must_list("examples") {
+    let dir = "examples/$group"
+    if io.is_dir(dir) {
+      for name in must_list(dir) {
+        let path = "$dir/$name"
+        if io.is_dir(path) && io.is_dir("$path/src") {
+          units = units ++ [Example { slug: name, files: main_first(dawn_files_under("$path/src")) }]
+        } else if str.ends_with(name, ".dawn") {
+          units = units ++ [Example { slug: stem(name), files: [path] }]
         }
       }
-    } else if str.ends_with(name, ".dawn") {
-      units = units ++ [Example { slug: stem(name), files: [path] }]
     }
   }
   units

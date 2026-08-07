@@ -98,7 +98,7 @@ pair "fmt --check (a clean file)" fmt --check "$ROOT/selfhost/src/version.dawn"
 echo "== doc, JVM vs native =="
 pair "doc --builtins" doc --builtins
 pair "doc --stdlib" doc --stdlib
-pair "doc (traits example)" doc examples/traits.dawn
+pair "doc (traits example)" doc examples/traits/traits.dawn
 pair "doc (multi-module project)" doc packages/json
 pair "doc (single-module package)" doc packages/sha2
 

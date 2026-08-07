@@ -30,6 +30,6 @@ cmp "$OUT/b.jar" "$OUT/c.jar"
 echo "OK: fixed point — HEAD rebuilt itself byte-identically (B == C)"
 
 mkdir -p "$OUT/e"
-java -Xss512m -jar "$OUT/b.jar" emit examples/calc.dawn -o "$OUT/e" > /dev/null
+java -Xss512m -jar "$OUT/b.jar" emit examples/projects/calc.dawn -o "$OUT/e" > /dev/null
 n=$(find "$OUT/e" -name '*.class' | wc -l)
 echo "OK: standalone smoke — B emitted calc alone ($n classes)"

@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of README.md @ d9e6332c409e15f1 -->
+<!-- doc-check: translation-of README.md @ 0ad6a7309435e5eb -->
 
 # Dawn
 
@@ -131,7 +131,7 @@ pub fn main() -> Unit !io = {
 
 ```bash
 # 需要 JDK 21。首次运行自动下载种子（上一 release 的 dawn-selfhost.jar）并用它编译 HEAD。
-./bin/dawn run examples/m4/hello_mod        # 编译并运行（单文件或多模块项目）
+./bin/dawn run examples/projects/hello_mod        # 编译并运行（单文件或多模块项目）
 ./bin/dawn test <target>                    # 跑源码里内联的 test 块（构建时剥除）
 ./bin/dawn build <target> -o app.jar        # JVM 后端：可执行 jar
 ./bin/dawn build <target> --native -o app   # 上一步 + GraalVM native-image

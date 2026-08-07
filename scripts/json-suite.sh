@@ -7,7 +7,7 @@
 # 0x08 for a parsed `\b`, integers above 2^53 were silently rounded, and every
 # suite in the repo stayed green. This script is that claim made checkable.
 #
-# The harness itself is Dawn (examples/m4/json/src/suite.dawn) and reads the
+# The harness itself is Dawn (examples/projects/json/src/suite.dawn) and reads the
 # fixture directory in one process. A shell loop over `dawn run` would be 318 JVM
 # starts — minutes, which is how a check ends up not running on every push.
 #
@@ -20,5 +20,5 @@ cd "$(dirname "$0")/.."
 DAWN=${DAWN_BIN:-./bin/dawn}
 
 "$DAWN" test packages/json
-"$DAWN" test examples/m4/json
-"$DAWN" run examples/m4/json --suite examples/m4/json/suite/test_parsing
+"$DAWN" test examples/projects/json
+"$DAWN" run examples/projects/json --suite examples/projects/json/suite/test_parsing

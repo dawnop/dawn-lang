@@ -104,7 +104,14 @@ NORM='s/Adt[0-9]+/AdtN/g; s/ at ([^" ]*\.dawn):[0-9]+/ at \1:L/g'
 # work; traits has dictionaries with both slot kinds and a derived Ord; eqhash
 # has the Eq/Hash bounds, which are the only construct that forwards a
 # dictionary at runtime.
+#
+# A program is named twice: once by its module name, which is what the dump
+# file is called and therefore what the golden is called, and once by the path
+# it lives at. The two stopped coinciding when the examples were grouped by
+# topic, and the module name is the half that must not move -- renaming a
+# golden would make a reshuffle of directories look like a change in Core.
 PROGS=(calc traits eqhash)
+PROG_PATHS=(examples/projects/calc.dawn examples/traits/traits.dawn examples/traits/eqhash.dawn)
 
 OUT=${TMPDIR:-/tmp}/core-golden.$$
 mkdir -p "$OUT"
@@ -112,9 +119,10 @@ trap 'rm -rf "$OUT"' EXIT
 
 "$ROOT/bin/dawn" --version > /dev/null
 
-for p in "${PROGS[@]}"; do
+for i in "${!PROGS[@]}"; do
+  p="${PROGS[$i]}"
   mkdir -p "$OUT/$p"
-  "$ROOT/bin/dawn" __lower --dump "$OUT/$p" "examples/$p.dawn" > "$OUT/$p.log"
+  "$ROOT/bin/dawn" __lower --dump "$OUT/$p" "${PROG_PATHS[$i]}" > "$OUT/$p.log"
   if ! grep -q ', 0 failed' "$OUT/$p.log"; then
     echo "FAIL: lowering $p left gaps" >&2
     cat "$OUT/$p.log" >&2

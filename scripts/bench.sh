@@ -59,8 +59,8 @@ with open(path, "w", encoding="utf-8") as f:
 print(f"corpus: {path} ({len(rows)} rows, {round(len(open(path, 'rb').read()) / 1024)} KB)")
 PY
 
-echo "building examples/m4/json ..."
-./bin/dawn build examples/m4/json -o "$JAR" >/dev/null
+echo "building examples/projects/json ..."
+./bin/dawn build examples/projects/json -o "$JAR" >/dev/null
 
 # Bisect -Xmx. `ok` demands the expected output, not just a zero exit: a JVM that
 # dies of OutOfMemoryError inside a caught region could otherwise "succeed" while

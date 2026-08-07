@@ -1,0 +1,25 @@
+# Fibonacci two ways: naive recursion, and a tail call that becomes a loop.
+#
+# The second one never grows the stack, which is why it can be asked for
+# fib(80) and the first one cannot.
+#
+# Run: dawn run examples/basics/fib.dawn
+
+fn fib(n: Int) -> Int =
+  if n < 2 { n } else { fib(n - 1) + fib(n - 2) }
+
+fn fib_fast(n: Int, a: Int, b: Int) -> Int =
+  if n == 0 { a } else { fib_fast(n - 1, b, a + b) }
+
+pub fn main() -> Unit !io = {
+  println("naive fib(25)  = ${fib(25)}")
+  println("tail  fib(80)  = ${fib_fast(80, 0, 1)}")
+}
+
+test "both definitions agree where both are affordable" {
+  assert map(range(0, 10), fib) == map(range(0, 10), n => fib_fast(n, 0, 1))
+}
+
+test "the tail-recursive one goes where the naive one cannot" {
+  assert fib_fast(80, 0, 1) == 23416728348467685
+}

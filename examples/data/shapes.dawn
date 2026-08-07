@@ -1,0 +1,65 @@
+# Sum types and pattern matching: a Shape ADT, guards, pipes and test blocks.
+#
+# This was two files once -- an "intro" one and an "ADT demo" one that shared
+# their first twenty-five lines. What each had that the other did not is here:
+# named arguments and structural equality from one, the pipeline from the other.
+#
+# Run:  dawn run examples/data/shapes.dawn
+# Test: dawn test examples/data/shapes.dawn
+
+type Shape =
+  | Circle(r: Float)
+  | Rect(w: Float, h: Float)
+  | Point
+
+fn area(s: Shape) -> Float =
+  match s {
+    Circle(r) -> 3.14159 * r * r
+    Rect(w, h) -> w * h
+    Point -> 0.0
+  }
+
+## The first arm that matches wins, so the guarded one has to come first.
+fn describe(s: Shape) -> String =
+  match s {
+    Circle(r) if r > 100.0 -> "a huge circle"
+    Circle(r) -> "circle with r = $r"
+    Rect(w, h) -> "rect $w x $h"
+    Point -> "a point"
+  }
+
+pub fn main() -> Unit !io = {
+  let shapes = [Circle(1.0), Rect(2.0, 3.0), Point, Circle(200.0)]
+
+  for s in shapes {
+    println(describe(s))
+  }
+
+  # arguments may be named, and named ones may come in any order
+  println(describe(Rect(h: 3.0, w: 2.0)))
+
+  # equality is structural by default -- no `impl Eq`, no `derive`
+  println("equal: ${Circle(1.0) == Circle(1.0)}")
+
+  shapes
+    |> map(area)
+    |> fold(0.0, (acc, a) => acc + a)
+    |> total => println("total area: $total")
+}
+
+test "area of unit circle" {
+  assert area(Circle(1.0)) == 3.14159
+}
+
+test "point has no area" {
+  assert area(Point) == 0.0
+}
+
+test "a guard picks the arm, not the constructor" {
+  assert describe(Circle(1.0)) == "circle with r = 1.0"
+  assert describe(Circle(200.0)) == "a huge circle"
+}
+
+test "named arguments name the fields, in any order" {
+  assert Rect(h: 3.0, w: 2.0) == Rect(2.0, 3.0)
+}

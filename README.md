@@ -164,7 +164,7 @@ as the entry point).
 ```bash
 # Needs JDK 21. The first run downloads the seed (the previous release's
 # dawn-selfhost.jar) automatically and compiles HEAD with it.
-./bin/dawn run examples/m4/hello_mod        # compile and run (single file or multi-module project)
+./bin/dawn run examples/projects/hello_mod        # compile and run (single file or multi-module project)
 ./bin/dawn test <target>                    # run the test blocks inlined in the source (stripped at build)
 ./bin/dawn build <target> -o app.jar        # JVM backend: an executable jar
 ./bin/dawn build <target> --native -o app   # the above, plus GraalVM native-image
