@@ -95,7 +95,7 @@ JVM/native 逐字节对拍照旧成立。
 | `/zh/spec.html` | 同上（中文正本） | `docs/spec.md` |
 | `/design.html` | 设计笔记（D1–D7 决策 + 里程碑） | `docs/design.en.md` |
 | `/zh/design.html` | 同上（中文正本） | `docs/design.md` |
-| `/examples/index.html` | 示例陈列页 | `examples/**` |
+| `/examples/index.html` | 示例陈列页：按 `examples/<组>/` 分组，每例一句描述（取自文件头注释的第一段） | `examples/**` + `gen/examples.dawn` 的分组表 |
 | `/examples/{name}.html` | 每例一页：高亮源码（+ 多文件项目按模块列出） | 同上 |
 | `/stdlib.html` | 标准库 API 参考 + 侧栏 TOC：内建类型、prelude、预置 trait、每个 std 模块（函数 / 类型 / impl），文档注释按 Markdown 渲染 | `site/pages/stdlib.md` + `dawn doc --stdlib` |
 | `/playground.html` | 在线编辑器：CodeMirror 6 + Dawn 高亮、实时诊断、补全；运行/检查打后端 | `site/play-ui/`（npm 构建，产物由 `gen_assets` 搬进 `dist/assets`） |

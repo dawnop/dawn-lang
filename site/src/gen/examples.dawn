@@ -8,7 +8,7 @@ use hl/dawn.{highlight_dawn}
 use html/page.{Assets, Lang, En, Zh, page}
 use gen/common.{must_read, must_list, write_page}
 
-type Example = { slug: String, files: List[String] }
+type Example = { slug: String, group: String, files: List[String] }
 
 ## The gallery's own words: its <h1>, the line under it, and the name each
 ## example page carries in its <title>. Kept as one table so that the two
@@ -31,7 +31,42 @@ fn chrome(lang: Lang) -> Chrome =
     }
   }
 
+## One row per directory under examples/, in the order the gallery shows them
+## -- which is a reading order, not the alphabetical one list_dir hands back.
+##
+## `id` is the directory name, so this table is also the registration: a
+## directory with no row here, or a row here with no directory, stops the build
+## and says which (see `registration_gaps`). The alternative was what the page
+## did before, which was to render whatever the walk found in whatever order
+## the filesystem offered, and a new group would have appeared unannounced at
+## the bottom of one flat list.
+type Group = { id: String, en: String, zh: String }
+
+fn groups() -> List[Group] = [
+  Group { id: "basics", en: "Basics", zh: "入门" },
+  Group { id: "data", en: "Modelling data", zh: "数据建模" },
+  Group { id: "text", en: "Text and characters", zh: "文本与字符" },
+  Group { id: "traits", en: "Traits", zh: "trait" },
+  Group { id: "effects", en: "Effects", zh: "效果" },
+  Group { id: "errors", en: "Failure", zh: "失败处理" },
+  Group { id: "interop", en: "Java interop", zh: "Java 互操作" },
+  Group { id: "projects", en: "Whole programs", zh: "完整程序" },
+]
+
+fn group_title(g: Group, lang: Lang) -> String =
+  match lang {
+    En -> g.en
+    Zh -> g.zh
+  }
+
 fn stem(name: String) -> String = str.strip_suffix(name, ".dawn").unwrap_or(name)
+
+fn has(xs: List[String], x: String) -> Bool = {
+  for y in xs {
+    if y == x { return true }
+  }
+  false
+}
 
 fn dawn_files_under(path: String) -> List[String] !io =
   if io.is_dir(path) {
@@ -68,9 +103,10 @@ fn collect_examples() -> List[Example] !io = {
       for name in must_list(dir) {
         let path = "$dir/$name"
         if io.is_dir(path) && io.is_dir("$path/src") {
-          units = units ++ [Example { slug: name, files: main_first(dawn_files_under("$path/src")) }]
+          units = units ++
+            [Example { slug: name, group: group, files: main_first(dawn_files_under("$path/src")) }]
         } else if str.ends_with(name, ".dawn") {
-          units = units ++ [Example { slug: stem(name), files: [path] }]
+          units = units ++ [Example { slug: stem(name), group: group, files: [path] }]
         }
       }
     }
@@ -78,18 +114,68 @@ fn collect_examples() -> List[Example] !io = {
   units
 }
 
-## The leading # comment block of a source file, as a one-line description.
-fn description(text: String) -> String = {
-  var out: List[String] = []
-  var stop = false
-  for line in str.split(text, "\n") {
-    if not stop && str.starts_with(line, "#") {
-      out = out ++ [str.trim(str.drop(line, 1))]
-    } else {
-      stop = true
+## The two ways the table and the tree can disagree, both named rather than
+## counted: a directory nobody registered, and a row that matched nothing.
+fn registration_gaps(table: List[String], found: List[String]) -> List[String] = {
+  var gaps: List[String] = []
+  for d in found {
+    if not has(table, d) {
+      gaps = gaps ++ ["examples/$d has no row in the group table of site/src/gen/examples.dawn"]
     }
   }
+  for id in table {
+    if not has(found, id) {
+      gaps = gaps ++ ["the group table has a row for `$id`, but examples/$id holds no examples"]
+    }
+  }
+  gaps
+}
+
+## A slug is a URL, and two examples with one slug means one page silently
+## overwrites the other. It could not happen while the slug carried the
+## directory name; it can now, and a name collision that shows up as a missing
+## page is the kind of thing nobody looks for.
+fn duplicate_slugs(slugs: List[String]) -> List[String] = {
+  var dups: List[String] = []
+  var seen: List[String] = []
+  for s in slugs {
+    if has(seen, s) && not has(dups, s) { dups = dups ++ [s] }
+    seen = seen ++ [s]
+  }
+  dups
+}
+
+## The first paragraph of a file's leading `#` comment block.
+##
+## The whole block used to be the description, joined with spaces. That is how
+## the json example reached the index page as ninety words and calc's ended in
+## a shell invocation, and it is why hello_mod, which had no header comment at
+## all, rendered as an em dash followed by nothing. A paragraph is the unit an
+## author can see: the first one is the sentence, and the blank `#` line under
+## it is where the reasoning starts.
+fn description(text: String) -> String = {
+  var out: List[String] = []
+  for line in str.split(text, "\n") {
+    let t = str.trim(line)
+    if not str.starts_with(t, "#") { break }
+    let rest = str.trim(str.drop(t, 1))
+    if rest == "" { break }
+    out = out ++ [rest]
+  }
   join(out, " ")
+}
+
+## The description, or a stop. An example is here to be read, and one the
+## gallery cannot introduce is worse than one that is missing: the entry looks
+## deliberate. gen/copy.dawn makes the same call for the front page and gives
+## the same reason.
+fn must_describe(ex: Example) -> String !io = {
+  let desc = description(must_read(ex.files[0]))
+  if desc == "" {
+    panic("${ex.files[0]} opens with no `#` comment, so the gallery has nothing " ++
+        "to say about `${ex.slug}`")
+  }
+  desc
 }
 
 fn file_section(path: String) -> String !io = {
@@ -99,13 +185,11 @@ fn file_section(path: String) -> String !io = {
 }
 
 fn example_page(ex: Example) -> String !io = {
-  let first = ex.files[0]
-  let desc = description(must_read(first))
   var sections = ""
   for f in ex.files {
     sections = sections ++ "\n" ++ file_section(f)
   }
-  "<h1><code>${ex.slug}</code></h1>\n<p>" ++ escape_html(desc) ++ "</p>" ++ sections
+  "<h1><code>${ex.slug}</code></h1>\n<p>" ++ escape_html(must_describe(ex)) ++ "</p>" ++ sections
 }
 
 ## Where this language's gallery goes and how far it is from the site root.
@@ -117,29 +201,40 @@ fn gallery_dir(out: String, lang: Lang) -> (String, String) =
     Zh -> ("$out/zh/examples", "../..")
   }
 
-## The example gallery. `lang` is the chrome's language only: the programs and
-## the descriptions lifted from their header comments are English in both, like
-## the rest of the code in this repository -- so the two runs differ in the
-## heading, the lede, the <title> suffix and nothing else a reader would call
-## content. Paired all the same, because a reader who switches language on some
-## other page and then clicks Examples should not be thrown back across.
+## The example gallery. `lang` is the chrome's language only: the programs, and
+## the descriptions lifted from their header comments, are English in both,
+## like the rest of the code in this repository -- so the two runs differ in
+## the heading, the lede, the group names, the <title> suffix and nothing else
+## a reader would call content. Paired all the same, because a reader who
+## switches language on some other page and then clicks Examples should not be
+## thrown back across.
 pub fn gen_examples(out: String, a: Assets, lang: Lang) -> Unit !io = {
   let c = chrome(lang)
   let (dir, root) = gallery_dir(out, lang)
   let units = collect_examples()
-  var items = ""
-  for ex in units {
-    let first = ex.files[0]
-    let desc = description(must_read(first))
-    write_page("$dir/${ex.slug}.html",
-      page(a, lang, "examples/${ex.slug}.html", "${ex.slug} — ${c.suffix}", root, "examples",
-        example_page(ex)))
-    items = items ++ "\n" ++
-      """<li><a href="${ex.slug}.html"><code>${ex.slug}</code></a> — """ ++ escape_html(desc) ++ "</li>"
+
+  for gap in registration_gaps(map(groups(), g => g.id), map(units, u => u.group)) {
+    panic(gap)
   }
-  let body = "<h1>${c.heading}</h1>\n" ++
-    "<p>${c.lede}</p>\n" ++
-    "<ul class=\"example-list\">" ++ items ++ "\n</ul>"
+  for dup in duplicate_slugs(map(units, u => u.slug)) {
+    panic("two examples both want the slug `$dup`, so one page would overwrite the other")
+  }
+
+  var body = "<h1>${c.heading}</h1>\n<p>${c.lede}</p>"
+  for g in groups() {
+    var items = ""
+    for ex in filter(units, u => u.group == g.id) {
+      write_page("$dir/${ex.slug}.html",
+        page(a, lang, "examples/${ex.slug}.html", "${ex.slug} — ${c.suffix}", root, "examples",
+          example_page(ex)))
+      items = items ++ "\n" ++
+        """<li><a href="${ex.slug}.html"><code>${ex.slug}</code></a> — """ ++
+        escape_html(must_describe(ex)) ++ "</li>"
+    }
+    body = body ++ "\n<h2>${escape_html(group_title(g, lang))}</h2>\n" ++
+      "<ul class=\"example-list\">" ++ items ++ "\n</ul>"
+  }
+
   write_page("$dir/index.html",
     page(a, lang, "examples/index.html", "${c.heading} — Dawn", root, "examples", body))
 }
@@ -147,4 +242,33 @@ pub fn gen_examples(out: String, a: Assets, lang: Lang) -> Unit !io = {
 test "each language's gallery lands in its own place" {
   assert gallery_dir("d", En) == ("d/examples", "..")
   assert gallery_dir("d", Zh) == ("d/zh/examples", "../..")
+}
+
+test "a description is the first paragraph, not the whole header" {
+  let header = "# The sentence.\n# Still the sentence.\n#\n# The reasoning.\nuse std/io\n"
+  assert description(header) == "The sentence. Still the sentence."
+}
+
+test "a file that opens with code has no description at all" {
+  assert description("use greet/words\n\nfn main() = ()\n") == ""
+}
+
+test "every group carries both languages" {
+  for g in groups() {
+    assert group_title(g, En) != ""
+    assert group_title(g, Zh) != ""
+  }
+}
+
+test "the table and the tree have to agree, and the gap says which way" {
+  assert registration_gaps(["basics"], ["basics"]) == []
+  assert registration_gaps(["basics"], ["basics", "basics", "surprise"]) ==
+    ["examples/surprise has no row in the group table of site/src/gen/examples.dawn"]
+  assert registration_gaps(["basics", "empty"], ["basics"]) ==
+    ["the group table has a row for `empty`, but examples/empty holds no examples"]
+}
+
+test "two examples cannot share one URL" {
+  assert duplicate_slugs(["a", "b", "c"]) == []
+  assert duplicate_slugs(["a", "b", "a", "a"]) == ["a"]
 }
