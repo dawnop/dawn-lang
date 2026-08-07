@@ -37,12 +37,14 @@
 // second pass is redundant by construction -- and running it anyway is the
 // difference between discrimination that works and discrimination that is
 // dormant behind a branch nobody takes.
+import java.lang.reflect.Constructor;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Arrays;
+import java.util.List;
 import org.objectweb.asm.ClassWriter;
 import org.objectweb.asm.Label;
 import org.objectweb.asm.MethodVisitor;
@@ -51,9 +53,12 @@ import org.objectweb.asm.Opcodes;
 public class Diff {
   static final String REF = "dawn.tool.AdtClassWriter";
   static final String NEW = "dawn.rt.Asm";
+  static final String WRITER = "dawn.rt.AsmWriter";
 
   static final int V49 = 49;
+  static final int V52 = 52;
   static final int COMPUTE_MAXS = 1;
+  static final int COMPUTE_FRAMES = 2;
   static final int PUBLIC_FINAL = Opcodes.ACC_PUBLIC | Opcodes.ACC_FINAL;
   static final int PUBLIC_STATIC = Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC;
 
@@ -162,8 +167,11 @@ public class Diff {
    * fields, no constructor, no superclass. The tagged source is a `ClassWriter`
    * subclass with a `supers` map, two constructors, an override of
    * `getCommonSuperClass`, and the four instance helpers §5.7 measured at zero
-   * call sites -- precisely the parts `gen_asm_class` deliberately does not
-   * re-emit. Repoint this gate's reference at anything our own build produced
+   * call sites -- none of which `gen_asm_class` writes. (K-A8.1 brought the
+   * frame half back, but as a *second* emitted class, `dawn/rt/AsmWriter`; the
+   * reference stays one class carrying both halves, so this assertion is
+   * unaffected and the instance helpers remain members nothing here emits.)
+   * Repoint this gate's reference at anything our own build produced
    * and every clause below fails, which is the point: that refactor keeps all
    * seven differential checks green while destroying what they mean.
    */
@@ -243,15 +251,191 @@ public class Diff {
         }));
   }
 
+  // ------------------------------------------------------------------------
+  // The frame half: dawn/rt/AsmWriter (K-A8.1, docs/jvm-base-plan.md §5.7)
+  // ------------------------------------------------------------------------
+  //
+  // COMPUTE_FRAMES names the type at every merge point, and for two classes
+  // this compilation is about to write, ASM's own answer -- `Class.forName` --
+  // cannot work. `AdtClassWriter` carried the override; K-A4 stranded it and
+  // K-A7 deleted it with the binary. It is back as an emitted class, and the
+  // reference for it is the *same* archived Java source, so the differential
+  // below is the same diverse-double-compiling argument as the one above.
+  //
+  // The emitter never asks the oracle anything today (V49 + COMPUTE_MAXS
+  // computes no frames), so without this the class could answer nonsense --
+  // or nothing -- with every gate green. That is the K-A7 phase-1 situation
+  // again, and the answer is the same: drive it.
+
+  /** A hierarchy of the shape `supers_of` builds: ADT bases and their ctors,
+   * plus the JDK exception edges the emitted `Io.catch_fault` table needs. */
+  static final List<String> SUPERS = List.of(
+      "p/Base java/lang/Object",
+      "p/Sub p/Base",
+      "p/Other p/Base",
+      "dawn/rt/PanicError java/lang/Error",
+      "java/lang/Error java/lang/Throwable",
+      "java/lang/Exception java/lang/Throwable",
+      "java/lang/Throwable java/lang/Object");
+
+  /** Questions whose answer is the table's, on both sides. Every pair has at
+   * least one member in SUPERS, which is the branch `AdtClassWriter` answers
+   * from its map; a pair with neither is the one place the two deliberately
+   * differ (the reference delegates to `Class.forName`, the emitted writer
+   * says Object -- see gen_asm_writer_class), so `x/A | y/B` is here with two
+   * names no class loader can resolve, where the reference's delegation ends
+   * at Object as well. */
+  static final String[][] QUESTIONS = {
+    {"p/Sub", "p/Sub"}, {"p/Sub", "p/Base"}, {"p/Base", "p/Sub"},
+    {"p/Sub", "p/Other"}, {"p/Sub", "java/lang/Object"}, {"p/Base", "x/A"},
+    {"dawn/rt/PanicError", "java/lang/Exception"}, {"x/A", "y/B"},
+  };
+
+  static Method oracleOf(Class<?> c) throws Exception {
+    Method m = c.getDeclaredMethod("getCommonSuperClass", String.class, String.class);
+    m.setAccessible(true);
+    return m;
+  }
+
+  /** `AsmWriter.of(flags, supers)` -- declared to return the *supertype*, which
+   * is what lets a Dawn call site keep its `ClassWriter` plumbing. */
+  static ClassWriter writer(Class<?> w, int flags) throws Exception {
+    Method of = entry(w, "of", int.class, List.class);
+    if (of.getReturnType() != ClassWriter.class) {
+      throw new AssertionError(WRITER + ".of returns " + of.getReturnType() + ", not ClassWriter");
+    }
+    return (ClassWriter) of.invoke(null, flags, SUPERS);
+  }
+
+  /** A class whose only interesting property is being a subclass of `Base`. */
+  static byte[] plainClass(String name, String superName) {
+    ClassWriter cw = new ClassWriter(COMPUTE_MAXS);
+    cw.visit(V52, Opcodes.ACC_PUBLIC, name, null, superName, null);
+    cw.visitEnd();
+    return cw.toByteArray();
+  }
+
+  /** `static Base pick(boolean f, Sub s, Base b) { return f ? s : b; }` in a
+   * writer that computes frames: the merge is the only thing that asks the
+   * oracle, and the declared return type is what makes a wrong answer a
+   * `VerifyError` rather than a class nobody notices is wrong. */
+  static byte[] frameProbe(ClassWriter cw) {
+    cw.visit(V52, PUBLIC_FINAL, "p/P", null, "java/lang/Object", null);
+    MethodVisitor m =
+        cw.visitMethod(PUBLIC_STATIC, "pick", "(ZLp/Sub;Lp/Base;)Lp/Base;", null, null);
+    m.visitCode();
+    Label other = new Label();
+    Label join = new Label();
+    m.visitVarInsn(Opcodes.ILOAD, 0);
+    m.visitJumpInsn(Opcodes.IFEQ, other);
+    m.visitVarInsn(Opcodes.ALOAD, 1);
+    m.visitJumpInsn(Opcodes.GOTO, join);
+    m.visitLabel(other);
+    m.visitVarInsn(Opcodes.ALOAD, 2);
+    m.visitLabel(join);
+    m.visitInsn(Opcodes.ARETURN);
+    m.visitMaxs(0, 0);
+    m.visitEnd();
+    cw.visitEnd();
+    return cw.toByteArray();
+  }
+
+  /** Define `p/Base`, `p/Sub` and the probe in one loader and link the probe.
+   * Returns null when it links, the linkage failure otherwise. */
+  static Throwable linkProbe(byte[] probe) {
+    try {
+      Bytes ld = new Bytes();
+      ld.define("p.Base", plainClass("p/Base", "java/lang/Object"));
+      ld.define("p.Sub", plainClass("p/Sub", "p/Base"));
+      Class<?> p = ld.define("p.P", probe);
+      // defineClass does not verify; resolving the method does.
+      p.getDeclaredMethod("pick", boolean.class, ld.loadClass("p.Sub"), ld.loadClass("p.Base"));
+      java.lang.invoke.MethodHandles.lookup().ensureInitialized(p);
+      return null;
+    } catch (Throwable t) {
+      return t;
+    }
+  }
+
+  /** A writer with the oracle deliberately wrong in the only direction a table
+   * can be wrong: too wide. Without it, the frame probe's green would not
+   * distinguish "the oracle answered" from "the probe cannot tell". */
+  static final class Widest extends ClassWriter {
+    Widest() {
+      super(COMPUTE_FRAMES);
+    }
+
+    @Override
+    protected String getCommonSuperClass(String a, String b) {
+      return "java/lang/Object";
+    }
+  }
+
+  static void oracle(String tag, Class<?> ref, byte[] subject) throws Exception {
+    System.out.println("-- " + tag + " --");
+    Class<?> now;
+    try {
+      now = new Bytes().define(WRITER, subject);
+    } catch (Throwable t) {
+      check("the emitted " + WRITER + " is a loadable class file", false);
+      System.out.println("      " + t);
+      return;
+    }
+    if (now.getSuperclass() != ClassWriter.class) {
+      check("the emitted " + WRITER + " extends ClassWriter", false);
+      return;
+    }
+
+    Constructor<?> refCtor = ref.getConstructor(List.class);
+    Object refWriter = refCtor.newInstance(SUPERS);
+    Method refAsk = oracleOf(ref);
+    Method nowAsk = oracleOf(now);
+    Object nowWriter = writer(now, COMPUTE_MAXS);
+
+    StringBuilder disagreed = new StringBuilder();
+    for (String[] q : QUESTIONS) {
+      Object r = refAsk.invoke(refWriter, q[0], q[1]);
+      Object n = nowAsk.invoke(nowWriter, q[0], q[1]);
+      if (!r.equals(n)) {
+        disagreed.append("\n      ").append(q[0]).append(" | ").append(q[1])
+            .append(": reference ").append(r).append(", emitted ").append(n);
+      }
+    }
+    check("the oracle answers " + QUESTIONS.length + " questions as the reference does",
+        disagreed.length() == 0);
+    if (disagreed.length() > 0) {
+      System.out.println("     " + disagreed);
+    }
+
+    // The positive control K-A8.1 exists for: the writer under the flag and the
+    // version it was put back for. Nothing in the compiler runs this
+    // combination yet, which is exactly why the gate has to.
+    check("at (V52, COMPUTE_FRAMES) the writer produces a linkable class",
+        attempt(() -> linkProbe(frameProbe(writer(now, COMPUTE_FRAMES))) == null));
+    Throwable why = linkProbe(frameProbe(writer(now, COMPUTE_FRAMES)));
+    if (why != null) {
+      System.out.println("      " + why);
+    }
+
+    // ... and the control for that control. A frame probe that links whatever
+    // the oracle says would make the check above decoration.
+    check("the frame probe rejects a too-wide oracle (java/lang/Object)",
+        linkProbe(frameProbe(new Widest())) instanceof VerifyError);
+  }
+
   public static void main(String[] args) throws Exception {
     byte[] self = Files.readAllBytes(Path.of(args[0]));
     byte[] ddc = Files.readAllBytes(Path.of(args[1]));
     byte[] canary = Files.readAllBytes(Path.of(args[2]));
+    byte[] selfWriter = Files.readAllBytes(Path.of(args[3]));
+    byte[] ddcWriter = Files.readAllBytes(Path.of(args[4]));
 
     Class<?> ref = Class.forName(REF);
     System.out.println("reference " + ref.getName() + " from " + where(ref));
     System.out.printf("subject   self-emitted      %d B%n", self.length);
     System.out.printf("subject   reference-emitted %d B%n", ddc.length);
+    System.out.printf("subject   %s self-emitted %d B, reference-emitted %d B%n", WRITER,
+        selfWriter.length, ddcWriter.length);
 
     check("the reference carries the members this compiler does not emit",
         referenceIsForeign(ref));
@@ -275,17 +459,21 @@ public class Diff {
     // previous generation -- is not.
     check("self-emitted and reference-emitted adapters are byte-identical",
         Arrays.equals(self, ddc));
+    check("self-emitted and reference-emitted writers are byte-identical",
+        Arrays.equals(selfWriter, ddcWriter));
 
     differential("self-emitted", ref, self);
     differential("reference-emitted", ref, ddc);
+    oracle("self-emitted writer", ref, selfWriter);
+    oracle("reference-emitted writer", ref, ddcWriter);
 
     if (failures > 0) {
-      System.err.println("FAIL: " + failures + " adapter difference(s); dawn/rt/Asm is not a "
-          + "drop-in for dawn.tool.AdtClassWriter");
+      System.err.println("FAIL: " + failures + " difference(s); the emitted dawn/rt classes are "
+          + "not a drop-in for dawn.tool.AdtClassWriter");
       System.exit(1);
     }
     System.out.println("OK: the emitted dawn/rt/Asm matches dawn.tool.AdtClassWriter on all "
-        + "five entry points");
+        + "five entry points, and dawn/rt/AsmWriter on the common-superclass oracle");
   }
 
   static String where(Class<?> c) {

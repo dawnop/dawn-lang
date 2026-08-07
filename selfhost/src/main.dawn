@@ -44,8 +44,10 @@ use codegen.{
 use rtclasses.{
   fn_iface, tuple_class, gen_fn_interface, gen_tuple_class, gen_panic_class, gen_unit_class,
   gen_bytes_class, gen_io_class, gen_fn_comparator, gen_ord_interface, tr_iface,
-  gen_show_class, gen_strings_class, gen_array_class, gen_asm_class, PANIC_CLASS, UNIT_CLASS,
-  BYTES_CLASS, IO_CLASS, FN_CMP_CLASS, SHOW_CLASS, STRINGS_CLASS, ARRAY_CLASS, ASM_CLASS
+  gen_show_class, gen_strings_class, gen_array_class, gen_asm_class, gen_asm_writer_class,
+  PANIC_CLASS, UNIT_CLASS,
+  BYTES_CLASS, IO_CLASS, FN_CMP_CLASS, SHOW_CLASS, STRINGS_CLASS, ARRAY_CLASS, ASM_CLASS,
+  ASM_WRITER_CLASS
 }
 use types.{
   prelude_adts, adt_of, adt_jvm_name, trait_of, OPTION_ID, RESULT_ID,
@@ -280,6 +282,12 @@ fn collect_program(
   # class names ASM types -- see program_has_asm.
   if program_has_asm(std_mods, mods) {
     classes = classes ++ [(ASM_CLASS, gen_asm_class())]
+    # The frame half of the same story: a ClassWriter subclass answering the
+    # common-superclass question from the compiler's own hierarchy, which is
+    # what COMPUTE_FRAMES needs and what Dawn source cannot express. Nothing
+    # calls it at V49 (K-A8.1); the gate that keeps it honest is
+    # scripts/asm-adapter-contract.
+    classes = classes ++ [(ASM_WRITER_CLASS, gen_asm_writer_class())]
   }
   classes = classes ++ [(tr_iface(None, "Ord"), gen_ord_interface())]
   classes = classes ++ [(FN_CMP_CLASS, gen_fn_comparator())]

@@ -20,7 +20,8 @@ use java "org.objectweb.asm.MethodVisitor"
 use java "org.objectweb.asm.Label"
 use java "java.util.Objects"
 use jvmops.{
-  ACC_ABSTRACT, ACC_FINAL, ACC_INTERFACE, ACC_PRIVATE, ACC_PUBLIC, ACC_STATIC, ACC_VOLATILE,
+  ACC_ABSTRACT, ACC_FINAL, ACC_INTERFACE, ACC_PRIVATE, ACC_PROTECTED, ACC_PUBLIC, ACC_STATIC,
+  ACC_VOLATILE,
   COMPUTE_MAXS,
   OP_AALOAD,
   OP_AASTORE, OP_ACONST_NULL, OP_ALOAD, OP_ANEWARRAY, OP_ARETURN, OP_ARRAYLENGTH, OP_ASTORE,
@@ -2992,6 +2993,211 @@ pub fn gen_asm_class() -> Bytes !io = {
   m.visitMethodInsn(OP_INVOKEVIRTUAL, cwc, "visitMethod", method_desc, false)
   m.visitInsn(OP_ARETURN)
   close_mv(m)
+
+  cw.visitEnd()
+  cw.toByteArray().expect("bytes")
+}
+
+pub const ASM_WRITER_CLASS: String = "dawn/rt/AsmWriter"
+
+## dawn/rt/AsmWriter: a `ClassWriter` that can answer the common-superclass
+## question about classes that do not exist yet.
+##
+## COMPUTE_FRAMES has to name the type at a merge point, and for a merge of two
+## classes *this compilation is about to emit* it asks `getCommonSuperClass`.
+## ASM's own answer goes through `Class.forName`, which cannot work here: the
+## classes are being written, not loaded. Every writer that computes frames
+## therefore needs an override, and the override needs the hierarchy the
+## compiler already knows -- `rtclasses.supers_of`, one "child super" pair per
+## line, which is what the constructor takes.
+##
+## This is the frame half of `dawn.tool.AdtClassWriter` (kotlin-final tag),
+## which K-A4 stranded as unreachable code and K-A7 deleted with the rest of
+## that binary. It comes back here as tree source, emitted the way `dawn/rt/Asm`
+## is and under the same trigger, because a `ClassWriter` subclass is another
+## thing Dawn *source* cannot spell -- `use java` imports a class, it does not
+## extend one. docs/jvm-base-plan.md §5.7.
+##
+## **Nothing calls it at V49 + COMPUTE_MAXS**: `getCommonSuperClass` is a
+## frame-computation callback and the emitter computes no frames (K-A4, §5.7's
+## measurement is zero call sites). It is here so that raising the version is a
+## flag change rather than a subsystem, and so that the oracle is exercised by a
+## gate today rather than written blind on the day it is needed
+## (scripts/asm-adapter-contract).
+##
+## **The answer never leaves the table, deliberately.** Two roads were open for
+## a pair the table cannot join -- delegate to `super.getCommonSuperClass`
+## (ASM's `Class.forName` walk), or fall back to `java/lang/Object`. This takes
+## the second:
+##
+##   - Delegating puts the *emitted bytes* at the mercy of the compiler's own
+##     class path. Two machines with different JDKs could then disagree about a
+##     frame, and byte-for-byte reproducibility across machines is the property
+##     the whole bootstrap argument rests on (docs/bootstrap.md).
+##   - A table answer can only be *too wide*, and too wide is what the verifier
+##     rejects: §5.8 forced 72,408 frame entries to `java/lang/Object` and 16.4%
+##     of the classes carrying frames stopped linking. So a gap in the table is
+##     a `VerifyError` at gate time, not a wrong program.
+##
+## The one JDK-to-JDK question the corpus actually asks -- `dawn/rt/PanicError`
+## against `java/lang/Exception`, from the hand-assembled exception table in
+## `gen_io_class` -- is answered by declaring those edges in `supers_of` like
+## any other. A JDK pair the table does not cover answers `java/lang/Object`.
+pub fn gen_asm_writer_class() -> Bytes !io = {
+  let cwc = "org/objectweb/asm/ClassWriter"
+  let lst = "Ljava/util/List;"
+  let s = "Ljava/lang/String;"
+  let jls = "java/lang/String"
+  let ctor_desc = "(I" ++ lst ++ ")V"
+  let ask_desc = "(" ++ s ++ s ++ ")" ++ s
+
+  let cw = Asm.plain(COMPUTE_MAXS).expect("writer")
+  Asm.beginOn(cw, V49, ACC_PUBLIC + ACC_FINAL, ASM_WRITER_CLASS, cwc)
+  Asm.fieldOn(cw, ACC_PRIVATE + ACC_FINAL, "supers", lst)
+
+  # private AsmWriter(int flags, java.util.List supers)
+  let ct = Asm.methodOn(cw, ACC_PRIVATE, "<init>", ctor_desc).expect("mv")
+  ct.visitCode()
+  ct.visitVarInsn(OP_ALOAD, 0)
+  ct.visitVarInsn(OP_ILOAD, 1)
+  ct.visitMethodInsn(OP_INVOKESPECIAL, cwc, "<init>", "(I)V", false)
+  ct.visitVarInsn(OP_ALOAD, 0)
+  ct.visitVarInsn(OP_ALOAD, 2)
+  ct.visitFieldInsn(OP_PUTFIELD, ASM_WRITER_CLASS, "supers", lst)
+  ct.visitInsn(OP_RETURN)
+  close_mv(ct)
+
+  # public static ClassWriter of(int flags, java.util.List supers)
+  #
+  # Declared to return `ClassWriter`, not `AsmWriter`: Dawn does not apply Java
+  # subtyping to a `use java` signature, so a call site holding an `AsmWriter`
+  # could not pass it to anything typed `ClassWriter`. Returning the supertype
+  # is what keeps every emitter's plumbing unchanged -- the same trick `plain`
+  # plays in dawn/rt/Asm.
+  let of = open_static(cw, "of", "(I" ++ lst ++ ")L" ++ cwc ++ ";")
+  of.visitTypeInsn(OP_NEW, ASM_WRITER_CLASS)
+  of.visitInsn(OP_DUP)
+  of.visitVarInsn(OP_ILOAD, 0)
+  of.visitVarInsn(OP_ALOAD, 1)
+  of.visitMethodInsn(OP_INVOKESPECIAL, ASM_WRITER_CLASS, "<init>", ctor_desc, false)
+  of.visitInsn(OP_ARETURN)
+  close_mv(of)
+
+  # private static String superOf(java.util.List supers, String child)
+  #
+  # A linear scan over "child super" pairs. Linear because the table is a few
+  # hundred entries and each question walks a chain of two or three: the map the
+  # Java original built up front cost more to build than the scans it saved.
+  # Locals: 0 the table, 1 the child, 2 its size, 3 the cursor, 4 the entry,
+  # 5 the space that splits it.
+  let so = Asm.methodOn(cw, ACC_PRIVATE + ACC_STATIC, "superOf",
+    "(" ++ lst ++ s ++ ")" ++ s).expect("mv")
+  so.visitCode()
+  let scan = Label.new()
+  let next = Label.new()
+  let miss = Label.new()
+  so.visitVarInsn(OP_ALOAD, 0)
+  so.visitMethodInsn(OP_INVOKEINTERFACE, "java/util/List", "size", "()I", true)
+  so.visitVarInsn(OP_ISTORE, 2)
+  so.visitInsn(OP_ICONST_0)
+  so.visitVarInsn(OP_ISTORE, 3)
+  so.visitLabel(scan)
+  so.visitVarInsn(OP_ILOAD, 3)
+  so.visitVarInsn(OP_ILOAD, 2)
+  so.visitJumpInsn(OP_IF_ICMPGE, miss)
+  so.visitVarInsn(OP_ALOAD, 0)
+  so.visitVarInsn(OP_ILOAD, 3)
+  so.visitMethodInsn(OP_INVOKEINTERFACE, "java/util/List", "get",
+    "(I)Ljava/lang/Object;", true)
+  so.visitTypeInsn(OP_CHECKCAST, jls)
+  so.visitVarInsn(OP_ASTORE, 4)
+  so.visitVarInsn(OP_ALOAD, 4)
+  so.visitIntInsn(OP_BIPUSH, 32)
+  so.visitMethodInsn(OP_INVOKEVIRTUAL, jls, "indexOf", "(I)I", false)
+  so.visitVarInsn(OP_ISTORE, 5)
+  so.visitVarInsn(OP_ALOAD, 4)
+  so.visitInsn(OP_ICONST_0)
+  so.visitVarInsn(OP_ILOAD, 5)
+  so.visitMethodInsn(OP_INVOKEVIRTUAL, jls, "substring", "(II)" ++ s, false)
+  so.visitVarInsn(OP_ALOAD, 1)
+  so.visitMethodInsn(OP_INVOKEVIRTUAL, jls, "equals", "(Ljava/lang/Object;)Z", false)
+  so.visitJumpInsn(OP_IFEQ, next)
+  so.visitVarInsn(OP_ALOAD, 4)
+  so.visitVarInsn(OP_ILOAD, 5)
+  so.visitInsn(OP_ICONST_1)
+  so.visitInsn(OP_IADD)
+  so.visitMethodInsn(OP_INVOKEVIRTUAL, jls, "substring", "(I)" ++ s, false)
+  so.visitInsn(OP_ARETURN)
+  so.visitLabel(next)
+  so.visitVarInsn(OP_ILOAD, 3)
+  so.visitInsn(OP_ICONST_1)
+  so.visitInsn(OP_IADD)
+  so.visitVarInsn(OP_ISTORE, 3)
+  so.visitJumpInsn(OP_GOTO, scan)
+  so.visitLabel(miss)
+  so.visitInsn(OP_ACONST_NULL)
+  so.visitInsn(OP_ARETURN)
+  close_mv(so)
+
+  # protected String getCommonSuperClass(String a, String b)
+  #
+  # The nearest ancestor of `a` that also stands above `b`: walk a's chain
+  # outward and, for each step, walk b's whole chain. The Java original built
+  # both chains into lists and appended `java/lang/Object` to each; falling out
+  # of both loops to `java/lang/Object` is the same answer without the lists,
+  # since an appended Object can only ever be reached when nothing else matched.
+  # Locals: 0 this, 1 a, 2 b, 3 the cursor into a's chain, 4 into b's.
+  let ask = Asm.methodOn(cw, ACC_PROTECTED, "getCommonSuperClass", ask_desc).expect("mv")
+  ask.visitCode()
+  let differ = Label.new()
+  let outer = Label.new()
+  let inner = Label.new()
+  let up_b = Label.new()
+  let up_a = Label.new()
+  let none = Label.new()
+  ask.visitVarInsn(OP_ALOAD, 1)
+  ask.visitVarInsn(OP_ALOAD, 2)
+  ask.visitMethodInsn(OP_INVOKEVIRTUAL, jls, "equals", "(Ljava/lang/Object;)Z", false)
+  ask.visitJumpInsn(OP_IFEQ, differ)
+  ask.visitVarInsn(OP_ALOAD, 1)
+  ask.visitInsn(OP_ARETURN)
+  ask.visitLabel(differ)
+  ask.visitVarInsn(OP_ALOAD, 1)
+  ask.visitVarInsn(OP_ASTORE, 3)
+  ask.visitLabel(outer)
+  ask.visitVarInsn(OP_ALOAD, 3)
+  ask.visitJumpInsn(OP_IFNULL, none)
+  ask.visitVarInsn(OP_ALOAD, 2)
+  ask.visitVarInsn(OP_ASTORE, 4)
+  ask.visitLabel(inner)
+  ask.visitVarInsn(OP_ALOAD, 4)
+  ask.visitJumpInsn(OP_IFNULL, up_a)
+  ask.visitVarInsn(OP_ALOAD, 3)
+  ask.visitVarInsn(OP_ALOAD, 4)
+  ask.visitMethodInsn(OP_INVOKEVIRTUAL, jls, "equals", "(Ljava/lang/Object;)Z", false)
+  ask.visitJumpInsn(OP_IFEQ, up_b)
+  ask.visitVarInsn(OP_ALOAD, 3)
+  ask.visitInsn(OP_ARETURN)
+  ask.visitLabel(up_b)
+  ask.visitVarInsn(OP_ALOAD, 0)
+  ask.visitFieldInsn(OP_GETFIELD, ASM_WRITER_CLASS, "supers", lst)
+  ask.visitVarInsn(OP_ALOAD, 4)
+  ask.visitMethodInsn(OP_INVOKESTATIC, ASM_WRITER_CLASS, "superOf",
+    "(" ++ lst ++ s ++ ")" ++ s, false)
+  ask.visitVarInsn(OP_ASTORE, 4)
+  ask.visitJumpInsn(OP_GOTO, inner)
+  ask.visitLabel(up_a)
+  ask.visitVarInsn(OP_ALOAD, 0)
+  ask.visitFieldInsn(OP_GETFIELD, ASM_WRITER_CLASS, "supers", lst)
+  ask.visitVarInsn(OP_ALOAD, 3)
+  ask.visitMethodInsn(OP_INVOKESTATIC, ASM_WRITER_CLASS, "superOf",
+    "(" ++ lst ++ s ++ ")" ++ s, false)
+  ask.visitVarInsn(OP_ASTORE, 3)
+  ask.visitJumpInsn(OP_GOTO, outer)
+  ask.visitLabel(none)
+  ask.visitLdcInsn(Objects.requireNonNull(obj()).expect("non-null"))
+  ask.visitInsn(OP_ARETURN)
+  close_mv(ask)
 
   cw.visitEnd()
   cw.toByteArray().expect("bytes")

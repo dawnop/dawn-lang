@@ -5,6 +5,14 @@
 #
 #   ./scripts/asm-adapter-contract/run.sh
 #
+# K-A8.1 added the other half of the same reference: `dawn/rt/AsmWriter`, the
+# `ClassWriter` subclass that answers the common-superclass question frame
+# computation asks. Nothing in the compiler calls it -- V49 computes no frames
+# -- so it is in exactly the position `dawn/rt/Asm` was in during phase 1: every
+# other gate is green whatever it contains. It rides here because it is emitted
+# by the same three adapters (`plain`/`beginOn`/`methodOn`) and answers to the
+# same archived reference, so the class-path shadow below decouples it too.
+#
 # In phase 1 nothing called the emitted class, so every other gate was green
 # whatever `gen_asm_class` wrote, including nothing at all. Since phase 2 the
 # call sites name it -- and the reason this gate still matters is the mirror
@@ -142,10 +150,12 @@ emit() { # emit <outdir> <prefix-of-classpath-or-empty>
   mkdir -p "$1"
   java -Xss512m -cp "${2:+$2:}$root/build/dawn-selfhost.jar" main \
     __emit selfhost -o "$1" > /dev/null
-  if [ ! -f "$1/dawn/rt/Asm.class" ]; then
-    echo "FAIL: the compiler emitted no dawn/rt/Asm for the selfhost corpus" >&2
-    exit 1
-  fi
+  for c in Asm AsmWriter; do
+    if [ ! -f "$1/dawn/rt/$c.class" ]; then
+      echo "FAIL: the compiler emitted no dawn/rt/$c for the selfhost corpus" >&2
+      exit 1
+    fi
+  done
 }
 emit "$work/self" ""
 emit "$work/ddc" "$work/shadow"
@@ -158,4 +168,6 @@ javac -cp "$root/build/dawn-selfhost.jar" -d "$work" scripts/asm-adapter-contrac
 java -cp "$work:$work/ref:$root/build/dawn-selfhost.jar" Diff \
   "$work/self/dawn/rt/Asm.class" \
   "$work/ddc/dawn/rt/Asm.class" \
-  "$work/canary-emit/dawn/rt/Asm.class"
+  "$work/canary-emit/dawn/rt/Asm.class" \
+  "$work/self/dawn/rt/AsmWriter.class" \
+  "$work/ddc/dawn/rt/AsmWriter.class"
