@@ -27,24 +27,30 @@ pub const ACC_VOLATILE: Int = 64
 
 ## The major version every emitted class carries.
 ##
-## 49 is deliberate and it is a floor, not a preference (docs/jvm-base-plan.md
-## K-A4). Below major 50 the JVM verifies by type inference and asks for no
-## StackMapTable at all, which is how the frames disappear; at 50 and above
-## they are mandatory. Below 49 `ldc` of a class constant is not allowed, and
-## `cast` emits one. So 49 is the only version that buys the frames back.
+## 52 is Java 8, and it is a floor for the same kind of reason 49 was
+## (docs/jvm-base-plan.md K-A4, K-A8.2): a static method on an interface is a
+## `ClassFormatError` below it, and the trait dictionaries put static methods
+## on interfaces. K-A4 ran at 49 to make StackMapTable optional -- below major
+## 50 the JVM verifies by type inference and asks for no frames at all -- and
+## K-A8 gives that up deliberately. Frames come back, computed by
+## `dawn/rt/AsmWriter` (COMPUTE_FRAMES) answering merge points from the
+## compiler's own class hierarchy rather than from a class loader, which is
+## what makes the emitted bytes independent of the JDK the compiler runs on.
 ##
-## Nothing else here may exceed it: a method-handle or method-type entry in
-## the constant pool is a parse error at this version even when unreachable,
-## which is why the closure classes came first (K-A3) and why
-## scripts/constpool-scan.py guards the pool.
-pub const V49: Int = 49
+## Nothing else here needs to exceed it: `invokedynamic`'s method-handle and
+## method-type constants are legal from 51 on, but the compiler emits neither
+## (the closure classes of K-A3 are the alternative it took), and
+## scripts/constpool-scan.py holds that as a policy rather than as the parse
+## error it used to be.
+pub const V52: Int = 52
 
-## The ClassWriter flag that goes with it: COMPUTE_MAXS, not COMPUTE_FRAMES.
+## The ClassWriter flag that goes with it: COMPUTE_FRAMES.
 ##
-## The version alone saves nothing. Asked to compute frames at 49, ASM writes
-## the pre-StackMapTable `StackMap` attribute instead, which is larger than
-## what it replaces and which the JVM then ignores. Only this flag stops it.
-pub const COMPUTE_MAXS: Int = 1
+## At 52 a StackMapTable is mandatory wherever control flow merges, so the
+## writer has to produce one. It cannot stay COMPUTE_MAXS: a branch with no
+## frame is a `VerifyError` at class load, which is what a negative control
+## demonstrated on the way in (§5.11).
+pub const COMPUTE_FRAMES: Int = 2
 
 # ---- newarray atype codes (JVMS 6.5) ----
 pub const T_BYTE: Int = 8

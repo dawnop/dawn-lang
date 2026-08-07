@@ -7,11 +7,11 @@
 #
 # K-A8.1 added the other half of the same reference: `dawn/rt/AsmWriter`, the
 # `ClassWriter` subclass that answers the common-superclass question frame
-# computation asks. Nothing in the compiler calls it -- V49 computes no frames
-# -- so it is in exactly the position `dawn/rt/Asm` was in during phase 1: every
-# other gate is green whatever it contains. It rides here because it is emitted
-# by the same three adapters (`plain`/`beginOn`/`methodOn`) and answers to the
-# same archived reference, so the class-path shadow below decouples it too.
+# computation asks. K-A8.2 switched every writer to (V52, COMPUTE_FRAMES), so
+# the compiler now calls it on every class it emits -- but only against its own
+# emitted copy. It rides here because it is emitted by the same three adapters
+# (`plain`/`beginOn`/`methodOn`) and answers to the same archived reference, so
+# the class-path shadow below decouples it too.
 #
 # In phase 1 nothing called the emitted class, so every other gate was green
 # whatever `gen_asm_class` wrote, including nothing at all. Since phase 2 the

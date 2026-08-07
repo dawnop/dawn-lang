@@ -296,6 +296,7 @@ bootstrap 只用了 `LambdaMetafactory.metafactory` 一种（无 `altMetafactory
 | **K-A7** | **让 Dawn 自己发射那五个 null 适配器**（`dawn/rt/Asm`），`dawn/tool` 整体退出 `--vendor` | 三期种子纪律，可回退 | **全部已做**（§5.7）：期 1 一次发布，期 2+3 合并在 v0.49.0 之后一次落地 |
 | **K-A6** | 端到端重测 §3.3 的启动数（那两个数是微基准加减） | 只测量 | **已做**（随 K-A4，见 §3.3） |
 | **K-A8.1** | 把 `getCommonSuperClass` oracle 装回来：`dawn/rt/AsmWriter` 从树内源发射，`supers_of` 与整条 `supers` 参数链恢复，17 处写入器改走它。**版本仍 V49、flag 仍 COMPUTE_MAXS，发射字节逐字节不变** | 两期种子纪律，可回退 | **已做**（§5.10）：期 1 发 v0.58.0，期 2 零 Emit-Change |
+| **K-A8.2** | `jvmops.dawn` `V49 = 49` → `V52 = 52`、`COMPUTE_MAXS` → `COMPUTE_FRAMES`，全部写入器跟随；`constpool-scan.py` 降级为政策门禁 | **Emit-Change 六条**，改回去也是六条 | **已做**（§5.11）：+17.7% 语料字节，44,395 帧 |
 
 **K-A2（用 Dawn 重写 `AdtClassWriter`）已取消。** 见 §5.1：K-A4 之后没有 classfile
 writer 可重写——`AdtClassWriter` 里跟写 classfile 有关的部分整块不再被调用，剩下的是个
@@ -1456,6 +1457,174 @@ PASS  the frame probe rejects a too-wide oracle (java/lang/Object)           ←
 外加 §5.7 那四处 `Asm.plain(0)` 与 `gen_asm_class`/`gen_asm_writer_class` 自己要不要跟着走。
 **§5.9 那条「循环头要跑第二遍」不适用**：它说的是**自己算帧**的发射器，而这里算帧的仍然是
 ASM，定点由它负责，我们只欠它一个 oracle——这一刀就是把这笔欠账结清。
+
+（下面 §5.11 是它的落地记。）
+
+### 5.11 K-A8.2 落地记（版本上升 + 全量翻转，2026-08-07）
+
+**一句话**：发射的 classfile major 从 49 回到 **52**，全部写入器从 `COMPUTE_MAXS` 翻到
+**`COMPUTE_FRAMES`**，帧由 K-A8.1 装回来的 `dawn/rt/AsmWriter` 算——**代价 +17.7% 语料字节，
+换回来的是 52 以上才合法的接口静态方法，以及一个不再是孤岛的版本号**。
+
+**这一刀是 K-A4 的反向**。K-A4 把版本降到 49 是为了让 `StackMapTable` 可选；K-A8 把这条
+让回去。别把它读成「回退」——回退是原样退回去，而这里退回去的是版本号，`supers_of` /
+`AsmWriter` / 契约门禁那一整套是 K-A4 时不存在的。
+
+#### 改了什么
+
+| 处 | 改动 |
+|---|---|
+| `jvmops.dawn` | `V49: Int = 49` → `V52: Int = 52`；`COMPUTE_MAXS: Int = 1` → `COMPUTE_FRAMES: Int = 2`。两条 doc 注释的**理由**一起改，不只是数字 |
+| 22 处 `Asm.beginOn*` | 常量改名机械跟随 |
+| 16 处 `AsmWriter.of(COMPUTE_MAXS, supers)` | 翻成 `COMPUTE_FRAMES`，这一刀的主体 |
+| 2 处 `Asm.plain(COMPUTE_MAXS)` | 同上（`gen_asm_class` / `gen_asm_writer_class`） |
+| 4 处 `Asm.plain(0)` | 逐个裁决，见下 |
+| `scripts/asm-adapter-contract` | 探针从 (49, COMPUTE_MAXS) 改成 (52, COMPUTE_FRAMES)；负控见下 |
+| `scripts/constpool-scan.py` | 从正确性门禁降级为**政策**门禁，见下 |
+
+#### 四处 `Asm.plain(0)` 与影子路径：逐个裁决
+
+倾向是「统一路径，少一种特例」，四处全部翻到 `COMPUTE_FRAMES`，理由各自成立：
+
+| 站点 | 裁决 | 依据 |
+|---|---|---|
+| `rtclasses.gen_fn_interface` | `Asm.plain(COMPUTE_FRAMES)` | 全抽象接口，一个方法体都没有：flag 在这里是惰性的，翻它只为让「每个写入器都算帧」这句话没有例外 |
+| `rtclasses.gen_panic_class` | 同上，并把手写的 `visitMaxs(2, 2)` 换成 `close_mv` | 直线构造器。**手写的 maxs 从此被忽略**，留着就是个谎——这是 flag `0` 与 `COMPUTE_*` 的实质差别，别当成排版 |
+| `rtclasses.gen_unit_class` | 同上，三处 `visitMaxs` 全换 `close_mv` | 同上 |
+| `emit.scratch_mv` | 翻，无它 | 这个写入器的 `toByteArray` 从不被调用，字节不存在，flag 不可观测。翻它的成本是零，而让读者停下来想「为什么这个不一样」的成本不是 |
+
+**构造函数的选择（`Asm.plain` vs `AsmWriter.of`）全部保持不变**，两类理由：
+
+- **前三处不需要 oracle**：`getCommonSuperClass` 只在**合流点**被问，而这三个类里一条分支都
+  没有。给它们穿一张 `supers` 表，是给一个不可能触发的回调铺管道。
+- **`gen_asm_class` / `gen_asm_writer_class` 不能改**，这是 K-A8.1 刻意留下的：
+  `scripts/asm-adapter-contract` 靠**把 javac 编出来的参照适配器放在 classpath 最前**解耦
+  自我应用，而它遮蔽的是 `dawn.rt.Asm`。写入器必须**由适配器构造**，影子才够得着构造这一步；
+  改走 `AsmWriter.of` 就把构造重新塞回我们自己发射的类里，正是那道门禁存在的理由被抽掉。
+  按「classpath 影子解耦 DDC 对比」的原意，这两处留在 `Asm.plain` 是**要求**，不是遗漏。
+
+#### D6：现成的判别性负控（先红后绿）`[实测]`
+
+`scripts/asm-adapter-contract/Diff.java` 的探针原来在 (V49, COMPUTE_MAXS) 下拼一个带分支的
+`square(int)`。**先只把版本 bump 到 52、flag 暂留 COMPUTE_MAXS**，重跑门禁：
+
+```
+PASS  the emitted adapter forwards its flag
+      java.lang.VerifyError: Expecting a stackmap frame at branch target 8
+      Exception Details:
+        Location:   probe/P.square(I)I @1: ifeq
+        Reason:     Expected stackmap frame at this location.
+        Bytecode:   0000000: 1a99 0007 1a1a 68ac 03ac
+FAIL  the emitted adapter's class links and runs (square(7) == 49)
+...
+FAIL: 2 difference(s)
+```
+
+两个主体（自发射 / 参照发射）各红一次，exit 1。接上 `COMPUTE_FRAMES` 后 21 项全绿。
+
+**这条负控值钱在它是判别性的**：红的只有「链接并运行」那一项，字节比对、flag 敏感性、接口
+形式全部照绿——门禁指得出是**校验器**拒绝，不是适配器写错了。它也顺手把「52 下帧是强制的」
+从文档断言变成了本仓的一次实测；`square` 的 doc 注释现在写着这件事，免得有人把 flag 当成
+只影响 `maxStack` 的调优项再翻回去。
+
+#### 代价：量出来的数 `[实测]`
+
+同一份 selfhost 语料（1,070 个类），`__emit` 出来逐类扫属性表：
+
+| | K-A8.1（V49 + COMPUTE_MAXS） | K-A8.2（V52 + COMPUTE_FRAMES） | 差 |
+|---|---|---|---|
+| 类字节合计 | 2,883,991 | 3,393,299 | **+509,308（+17.66%）** |
+| `StackMapTable` 字节 | 0 | 497,972 | 占增量的 **97.8%** |
+| 帧条目 | 0 | 44,395 | — |
+| `dawn-selfhost.jar` | 5,652,724 | 5,762,042 | +109,318（**+1.93%**） |
+
+勘察预估「+17% 量级」，实测 +17.66%。**jar 只涨 1.93%** 有两个原因，别把它当成体积没问题的
+证据：帧属性重复度高、deflate 压得动；而且 jar 里一大半是 vendored `coursierapi`，分母被稀释。
+剩下 2.2% 的增量是常量池里多出来的帧类型名。
+
+`dawn/rt/AsmWriter` 自己也从 946 B 涨到 1,011 B——它的 `superOf`/`getCommonSuperClass` 有循环，
+现在得带自己的帧。
+
+**帧覆盖**：`classfile-verify` 八语料 2,102 个类全部 `Class.forName(initialize=true)` 通过，
+0 illegal。**52 下校验器真的在验帧**（上面那条 `VerifyError` 就是证据），所以这个绿不是
+K-A4 时代那种「推断式校验器只走可达代码」的弱绿。
+
+#### 换回来的是什么：端到端 `[实测]`
+
+一个临时程序（不入库，语料是 K-A8.3 的活），三个入口全是**声明在接口上的静态方法**——
+`invokestatic` 指向 `InterfaceMethodref`，49 下连常量池都解析不过：
+
+```dawn
+use java "java.nio.file.Path"
+use java "java.util.List"
+use java "java.lang.String"
+
+pub fn main() -> Unit !io = {
+  let p = Path.of("etc", "hosts")!
+  io.println("path: " ++ p.toString()!)
+  let xs = List.of("a", "b", "c")!
+  io.println("size: " ++ to_string(xs.size()))
+  io.println("join: " ++ String.join("-", xs)!)
+}
+```
+
+HEAD（V52）：
+
+```
+path: etc/hosts
+size: 3
+join: a-b-c
+```
+
+同一份源，交给 v0.58.0 的种子 jar（V49 编译器）——**判别性负控**：
+
+```
+Error: Unable to initialize main class iface_static
+Caused by: java.lang.VerifyError: (class: iface_static, method: main
+  signature: ()Ldawn/rt/Unit;) Illegal type in constant pool
+```
+
+所以「52 买回了接口静态方法」不是从 JVMS 抄来的一句话，是这一对红绿。它也说明 K-A4
+那段时间里 `use java` 有一块 JDK 面是**静默不可达**的：报错发生在类加载，不在类型检查——
+写得出来、编得过、跑不起来。
+
+#### D2：方向反转，正面写
+
+§5.6 给 K-A4 的成果表述是：
+
+> **V49 这条线拆掉的是二进制里危险的那一半**——写 class 文件的那个手写 Java 没了源码问题。
+
+**这句话今天已经不成立了，而且不是因为这一刀。** K-A7 把 `dawn.tool.AdtClassWriter` 整个删了
+（§5.7），那份「写帧的无源二进制」已经不存在——V49 拆掉的那半，早在 K-A8 之前就被另一条路
+拆干净了。所以「回到 52 = 把那个危险的二进制请回来」是**错的对仗**：今天写帧的代码在
+`org/objectweb/asm`，那是 `dawn.toml` 钉版本、`vendor_trust` 记哈希、上游有源的第三方库。
+**信任面的性质不同**——`AdtClassWriter` 是「源码只在一个 tag 里、逐代抄字节」，vendored ASM
+是「有源、钉版、可复现取回」。§0 那张表把这两类分开列，本来就是这个意思。
+
+把它写在这里而不是悄悄改掉那句话，是因为**K-A4 的论证曾经是对的**：它是在
+`AdtClassWriter` 还在的世界里说的。推翻它的是 K-A7，不是 K-A8.2。留着痕迹，下一个人才不用
+把这条推理再走一遍。
+
+#### `constpool-scan.py` 降级为政策门禁
+
+49 下 tag 15/16/18（MethodHandle / MethodType / InvokeDynamic）是**解析期** `ClassFormatError`，
+所以那道扫描是正确性门禁。**52 下它们全部合法**（15/16/18 从 51 起、17 (Dynamic/condy) 要 55），
+门禁本身一行代码没改，但它现在说的是**政策**：K-A3 那批显式闭包类是本编译器唯一的闭包机制，
+不走 `LambdaMetafactory`——那是 `java.lang.invoke` 的引导方法调用，正是
+`docs/full-selfhost-residual-java.md` 要收缩的 JDK 面，而且 LLVM 后端没有对应物可下降。
+tag 17 仍然是硬约束（要 55）。脚本头 :6-13 的理由已按此重写；`jvmops.dawn` 里那份副本同批改。
+
+#### 门禁（本次逐条跑过）
+
+`classfile-verify`（八语料 2,102 类，0 illegal / 0 not initializable，含常量池扫描）、
+`asm-adapter-contract`（负控红 → 21 项全绿）、`adapter-callsites`（`dawn/rt/Asm` 5 类、
+`dawn/rt/AsmWriter` 4 类、`dawn/tool/*` 0 引用）、`dawn test selfhost` 314 项、
+`dawn test --stdlib` 79 项、`dawn test site` 61 项、`selfhost-fixpoint` B == C、
+`spike-native`、`native-fixpoint` B == C、`selfhost-prev-diff`（六语料差异，六条
+Emit-Change 逐条声明）、`run-diff` / `fmt-diff` / `lsp-diff` 零差异、`core-diff`
+（`changed` 桶恰是我改的四个模块 `codegen`/`emit`/`rtclasses`/`testrun`，三个程序 dump
+一字未动——**用户程序的 Core 没动，动的只有编译器自己的源**，已 `--record` 重录）、
+`doc-check`、`dawn fmt --check`、`lock --check`。
 
 ## 6. 本次落地（K-A0 / K-A0.5）
 

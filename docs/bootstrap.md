@@ -107,14 +107,15 @@ cmp b.jar c.jar
 
 ## 为什么字节级一致做得到
 
-codegen 是确定性的：同一份源经同一实现必出同字节。**帧已经不算了**——发射的 class
-是版本 49，那以下 JVM 用推断式校验器、不要 `StackMapTable`，写入器是 COMPUTE_MAXS
-（docs/jvm-base-plan.md K-A4）。那五个静态 null 适配器（ASM 的 `visit*` 要 null，
-Dawn 源码拼不出）现在是编译器自己发射的 `dawn/rt/Asm`；`dawn.tool.AdtClassWriter`
-曾经随种子逐代续传、从不重编，K-A7 之后已退出（jvm-base-plan.md §5.7）。同一家的第六个类
-`dawn/rt/AsmWriter`（K-A8.1）是 `ClassWriter` 子类，帧计算要问的公共超类型由它回答——**只查
-编译当下那张 `supers_of` 表，不走 `Class.forName`**，正是为了不让发射的字节取决于编译器
-碰巧跑在哪个 JDK 上（§5.10 的 D4）。
+codegen 是确定性的：同一份源经同一实现必出同字节。**帧是算出来的，而且只从树内的表算**——
+发射的 class 是版本 52，那以上 `StackMapTable` 是强制的，写入器是 COMPUTE_FRAMES
+（docs/jvm-base-plan.md K-A8.2；K-A4 那阵曾降到 49 免帧，K-A8 把这条让了回去）。
+那五个静态 null 适配器（ASM 的 `visit*` 要 null，Dawn 源码拼不出）现在是编译器自己发射的
+`dawn/rt/Asm`；`dawn.tool.AdtClassWriter` 曾经随种子逐代续传、从不重编，K-A7 之后已退出
+（jvm-base-plan.md §5.7）。同一家的第六个类 `dawn/rt/AsmWriter`（K-A8.1）是 `ClassWriter`
+子类，帧计算要问的公共超类型由它回答——**只查编译当下那张 `supers_of` 表，不走
+`Class.forName`**，正是为了不让发射的字节取决于编译器碰巧跑在哪个 JDK 上（§5.10 的 D4）。
+帧回来了，这一条从「备着的性质」变成了字节级一致的**前提**。
 历史上的跨实现验收（Kotlin vs selfhost 的 `__lex/__parse/__check/
 __emit` 全仓逐字节对拍）已随 `kotlin-final` 完成使命；现行 oracle 是
 **N vs N−1**（`selfhost-prev-diff.sh`：上一 release 与 HEAD 编同一语料 +

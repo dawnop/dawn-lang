@@ -23,7 +23,7 @@ use java "java.util.Objects"
 use jvmops.{
   ACC_ABSTRACT, ACC_FINAL, ACC_INTERFACE, ACC_PRIVATE, ACC_PROTECTED, ACC_PUBLIC, ACC_STATIC,
   ACC_VOLATILE,
-  COMPUTE_MAXS,
+  COMPUTE_FRAMES,
   OP_AALOAD,
   OP_AASTORE, OP_ACONST_NULL, OP_ALOAD, OP_ANEWARRAY, OP_ARETURN, OP_ARRAYLENGTH, OP_ASTORE,
   OP_ATHROW, OP_BALOAD, OP_BASTORE, OP_BIPUSH, OP_CHECKCAST, OP_DUP, OP_GETFIELD, OP_GETSTATIC,
@@ -34,7 +34,7 @@ use jvmops.{
   OP_INVOKESTATIC, OP_INVOKEVIRTUAL, OP_IRETURN, OP_ISTORE, OP_ISUB, OP_L2I, OP_LADD, OP_LCMP,
   OP_LCONST_0, OP_LCONST_1, OP_LLOAD, OP_LRETURN, OP_LSTORE, OP_LSUB, OP_NEW, OP_NEWARRAY,
   OP_POP, OP_PUTFIELD, OP_PUTSTATIC,
-  OP_RETURN, T_BYTE, T_INT, V49
+  OP_RETURN, T_BYTE, T_INT, V52
 }
 
 # ---- naming (must match the Kotlin side byte for byte) ----
@@ -86,10 +86,15 @@ pub const SB: String = "java/lang/StringBuilder"
 
 pub const SHOW_CLASS: String = "dawn/rt/Show"
 
-## dawn/rt/FnN: the erased function interface (ClassWriter(0), like Kotlin).
+## dawn/rt/FnN: the erased function interface.
+##
+## `Asm.plain` and not `AsmWriter.of` here and in the two below: the oracle
+## answers merge points, and these three classes have no branch in them at all
+## (an all-abstract interface, and two straight-line constructors). Handing
+## them a table would be plumbing for a callback that cannot fire.
 pub fn gen_fn_interface(arity: Int) -> Bytes !io = {
-  let cw = Asm.plain(0).expect("writer")
-  Asm.beginOn(cw, V49, ACC_PUBLIC + ACC_ABSTRACT + ACC_INTERFACE, fn_iface(arity), obj())
+  let cw = Asm.plain(COMPUTE_FRAMES).expect("writer")
+  Asm.beginOn(cw, V52, ACC_PUBLIC + ACC_ABSTRACT + ACC_INTERFACE, fn_iface(arity), obj())
   let m = Asm.methodOn(cw, ACC_PUBLIC + ACC_ABSTRACT, "apply", erased_apply_desc(arity))
     .expect("mv")
   m.visitEnd()
@@ -99,24 +104,23 @@ pub fn gen_fn_interface(arity: Int) -> Bytes !io = {
 
 ## dawn/rt/PanicError: an Error subclass carrying the panic message.
 pub fn gen_panic_class() -> Bytes !io = {
-  let cw = Asm.plain(0).expect("writer")
-  Asm.beginOn(cw, V49, ACC_PUBLIC + ACC_FINAL, PANIC_CLASS, "java/lang/Error")
+  let cw = Asm.plain(COMPUTE_FRAMES).expect("writer")
+  Asm.beginOn(cw, V52, ACC_PUBLIC + ACC_FINAL, PANIC_CLASS, "java/lang/Error")
   let ctor = Asm.methodOn(cw, ACC_PUBLIC, "<init>", "(Ljava/lang/String;)V").expect("mv")
   ctor.visitCode()
   ctor.visitVarInsn(OP_ALOAD, 0)
   ctor.visitVarInsn(OP_ALOAD, 1)
   ctor.visitMethodInsn(OP_INVOKESPECIAL, "java/lang/Error", "<init>", "(Ljava/lang/String;)V", false)
   ctor.visitInsn(OP_RETURN)
-  ctor.visitMaxs(2, 2)
-  ctor.visitEnd()
+  close_mv(ctor)
   cw.visitEnd()
   cw.toByteArray().expect("bytes")
 }
 
 ## dawn/rt/Unit: the Unit singleton (materialized only in erased Object slots).
 pub fn gen_unit_class() -> Bytes !io = {
-  let cw = Asm.plain(0).expect("writer")
-  Asm.beginOn(cw, V49, ACC_PUBLIC + ACC_FINAL, UNIT_CLASS, obj())
+  let cw = Asm.plain(COMPUTE_FRAMES).expect("writer")
+  Asm.beginOn(cw, V52, ACC_PUBLIC + ACC_FINAL, UNIT_CLASS, obj())
   Asm.fieldOn(cw, ACC_PUBLIC + ACC_STATIC + ACC_FINAL, "INSTANCE",
     "L" ++ UNIT_CLASS ++ ";")
   let ctor = Asm.methodOn(cw, ACC_PRIVATE, "<init>", "()V").expect("mv")
@@ -124,8 +128,7 @@ pub fn gen_unit_class() -> Bytes !io = {
   ctor.visitVarInsn(OP_ALOAD, 0)
   ctor.visitMethodInsn(OP_INVOKESPECIAL, obj(), "<init>", "()V", false)
   ctor.visitInsn(OP_RETURN)
-  ctor.visitMaxs(1, 1)
-  ctor.visitEnd()
+  close_mv(ctor)
   # A Unit can now reach an erased slot that gets rendered -- a tuple element,
   # a `List[Unit]` -- where the default would print dawn.rt.Unit@1b6d. `()` is
   # what Core's own rendering says (lower.dawn, CStr("()")).
@@ -133,8 +136,7 @@ pub fn gen_unit_class() -> Bytes !io = {
   ts.visitCode()
   ts.visitLdcInsn("()")
   ts.visitInsn(OP_ARETURN)
-  ts.visitMaxs(1, 1)
-  ts.visitEnd()
+  close_mv(ts)
   let cl = Asm.methodOn(cw, ACC_STATIC, "<clinit>", "()V").expect("mv")
   cl.visitCode()
   cl.visitTypeInsn(OP_NEW, UNIT_CLASS)
@@ -142,8 +144,7 @@ pub fn gen_unit_class() -> Bytes !io = {
   cl.visitMethodInsn(OP_INVOKESPECIAL, UNIT_CLASS, "<init>", "()V", false)
   cl.visitFieldInsn(OP_PUTSTATIC, UNIT_CLASS, "INSTANCE", "L" ++ UNIT_CLASS ++ ";")
   cl.visitInsn(OP_RETURN)
-  cl.visitMaxs(2, 0)
-  cl.visitEnd()
+  close_mv(cl)
   cw.visitEnd()
   cw.toByteArray().expect("bytes")
 }
@@ -177,8 +178,8 @@ pub fn gen_show_class(supers: List[String]) -> Bytes !io = {
   let iter = "java/util/Iterator"
   let entry = "java/util/Map\$Entry"
   let obj_to_str = "(Ljava/lang/Object;)Ljava/lang/String;"
-  let cw = AsmWriter.of(COMPUTE_MAXS, supers).expect("writer")
-  Asm.beginOn(cw, V49, ACC_PUBLIC + ACC_FINAL, SHOW_CLASS, obj())
+  let cw = AsmWriter.of(COMPUTE_FRAMES, supers).expect("writer")
+  Asm.beginOn(cw, V52, ACC_PUBLIC + ACC_FINAL, SHOW_CLASS, obj())
 
   # static String show(Object o): the instanceof chain
   let sh = Asm.methodOn(cw, ACC_PUBLIC + ACC_STATIC, "show", obj_to_str).expect("mv")
@@ -432,8 +433,8 @@ pub fn gen_show_class(supers: List[String]) -> Bytes !io = {
 ## Show-rendering toString (the Kotlin genTupleClass; frame-computing writer).
 pub fn gen_tuple_class(supers: List[String], n: Int) -> Bytes !io = {
   let cls = tuple_class(n)
-  let cw = AsmWriter.of(COMPUTE_MAXS, supers).expect("writer")
-  Asm.beginOn(cw, V49, ACC_PUBLIC + ACC_FINAL, cls, obj())
+  let cw = AsmWriter.of(COMPUTE_FRAMES, supers).expect("writer")
+  Asm.beginOn(cw, V52, ACC_PUBLIC + ACC_FINAL, cls, obj())
   var i = 0
   while i < n {
     Asm.fieldOn(cw, ACC_PUBLIC + ACC_FINAL, "_" ++ to_string(i), "Ljava/lang/Object;")
@@ -605,8 +606,8 @@ pub const FN_CMP_CLASS: String = "dawn/rt/FnComparator"
 ## Byte values are unsigned 0..255 on the Dawn side, so -1 is a free out-of-range
 ## sentinel for bytes_at (std turns it into a panic).
 pub fn gen_bytes_class(supers: List[String]) -> Bytes !io = {
-  let cw = AsmWriter.of(COMPUTE_MAXS, supers).expect("writer")
-  Asm.beginOn(cw, V49, ACC_PUBLIC + ACC_FINAL, BYTES_CLASS, obj())
+  let cw = AsmWriter.of(COMPUTE_FRAMES, supers).expect("writer")
+  Asm.beginOn(cw, V52, ACC_PUBLIC + ACC_FINAL, BYTES_CLASS, obj())
   let m = Asm.methodOn(cw, ACC_PUBLIC + ACC_STATIC, "concat", "([B[B)[B").expect("mv")
   m.visitCode()
   m.visitVarInsn(OP_ALOAD, 0)
@@ -1067,8 +1068,8 @@ fn gen_cast(cw: ClassWriter) -> Unit !io = {
 ## has an instance at all: `io_run` registers a shutdown hook, and a hook is a
 ## Thread, and a Thread needs a Runnable. See gen_io_reaper.
 pub fn gen_io_class(supers: List[String]) -> Bytes !io = {
-  let cw = AsmWriter.of(COMPUTE_MAXS, supers).expect("writer")
-  Asm.beginOnWithInterface(cw, V49, ACC_PUBLIC + ACC_FINAL, IO_CLASS, obj(),
+  let cw = AsmWriter.of(COMPUTE_FRAMES, supers).expect("writer")
+  Asm.beginOnWithInterface(cw, V52, ACC_PUBLIC + ACC_FINAL, IO_CLASS, obj(),
     "java/lang/Runnable")
   gen_try_closure(cw, "catch_fault", ["java/lang/Exception"])
   # catch_panic catches a Dawn panic and the exceptions a caller can survive —
@@ -1731,8 +1732,8 @@ fn array_bounds_panic(m: MethodVisitor, prefix: String, ivar: Int) -> Unit !io =
 ## Perceus' rc==1, and on the JVM is nothing. The append path is where the 12x
 ## lives, so this is a cost the measurements say we can pay.
 pub fn gen_array_class(supers: List[String]) -> Bytes !io = {
-  let cw = AsmWriter.of(COMPUTE_MAXS, supers).expect("writer")
-  Asm.beginOn(cw, V49, ACC_PUBLIC + ACC_FINAL, ARRAY_CLASS, obj())
+  let cw = AsmWriter.of(COMPUTE_FRAMES, supers).expect("writer")
+  Asm.beginOn(cw, V52, ACC_PUBLIC + ACC_FINAL, ARRAY_CLASS, obj())
   Asm.fieldOn(cw, ACC_PRIVATE + ACC_FINAL, "a", "[Ljava/lang/Object;")
   Asm.fieldOn(cw, ACC_PRIVATE + ACC_FINAL, "used", "L" ++ ATOMIC_INT ++ ";")
   Asm.fieldOn(cw, ACC_PRIVATE + ACC_FINAL, "len", "I")
@@ -2084,8 +2085,8 @@ const CLASS_SPACE: String = "CLASS_SPACE"
 pub fn gen_strings_class(supers: List[String], u: TableUse) -> Bytes !io = {
   let jstr = "java/lang/String"
   let jlist = "java/util/List"
-  let cw = AsmWriter.of(COMPUTE_MAXS, supers).expect("writer")
-  Asm.beginOn(cw, V49, ACC_PUBLIC + ACC_FINAL, STRINGS_CLASS, obj())
+  let cw = AsmWriter.of(COMPUTE_FRAMES, supers).expect("writer")
+  Asm.beginOn(cw, V52, ACC_PUBLIC + ACC_FINAL, STRINGS_CLASS, obj())
 
   let jn = Asm.methodOn(cw, ACC_PUBLIC + ACC_STATIC, "join",
     "(Ljava/util/List;Ljava/lang/String;)Ljava/lang/String;").expect("mv")
@@ -2897,8 +2898,8 @@ fn gen_comparator_class(
   src_desc: String,
   emit_cmp: fn(MethodVisitor) -> Unit !io
 ) -> Bytes !io = {
-  let cw = AsmWriter.of(COMPUTE_MAXS, supers).expect("writer")
-  Asm.beginOnWithInterface(cw, V49, ACC_PUBLIC + ACC_FINAL, cls, obj(),
+  let cw = AsmWriter.of(COMPUTE_FRAMES, supers).expect("writer")
+  Asm.beginOnWithInterface(cw, V52, ACC_PUBLIC + ACC_FINAL, cls, obj(),
     "java/util/Comparator")
   Asm.fieldOn(cw, ACC_PRIVATE + ACC_FINAL, "src", src_desc)
   let init = Asm.methodOn(cw, ACC_PUBLIC, "<init>", "(" ++ src_desc ++ ")V").expect("mv")
@@ -2935,8 +2936,8 @@ pub fn gen_fn_comparator(supers: List[String]) -> Bytes !io =
 
 ## The prelude Ord trait interface (one erased cmp method).
 pub fn gen_ord_interface(supers: List[String]) -> Bytes !io = {
-  let cw = AsmWriter.of(COMPUTE_MAXS, supers).expect("writer")
-  Asm.beginOn(cw, V49, ACC_PUBLIC + ACC_ABSTRACT + ACC_INTERFACE,
+  let cw = AsmWriter.of(COMPUTE_FRAMES, supers).expect("writer")
+  Asm.beginOn(cw, V52, ACC_PUBLIC + ACC_ABSTRACT + ACC_INTERFACE,
     tr_iface(None, "Ord"), obj())
   let m = Asm.methodOn(cw, ACC_PUBLIC + ACC_ABSTRACT, "cmp",
     "(Ljava/lang/Object;Ljava/lang/Object;)J").expect("mv")
@@ -2965,6 +2966,14 @@ pub const ASM_CLASS: String = "dawn/rt/Asm"
 ## `org.objectweb.asm.ClassWriter` (main.dawn), since it names ASM types and
 ## no ordinary program has ASM on its class path -- so the class travels the
 ## seed chain in the compiler's own jar and nowhere else.
+##
+## This and `gen_asm_writer_class` are the two writers K-A8.2 left on
+## `Asm.plain`. `scripts/asm-adapter-contract` decouples the self-application
+## above by putting javac's build of the archived source first on the class
+## path, and what it shadows is `dawn.rt.Asm` -- so the writer has to be
+## *constructed* by an adapter for the shadow to reach the construction step.
+## `AsmWriter.of` would route it through a class of our own emission again,
+## which is the differential the gate exists to keep.
 pub fn gen_asm_class() -> Bytes !io = {
   let cwc = "org/objectweb/asm/ClassWriter"
   let cwd = "L" ++ cwc ++ ";"
@@ -2973,8 +2982,8 @@ pub fn gen_asm_class() -> Bytes !io = {
   let field_desc = "(I" ++ s ++ s ++ s ++ "Ljava/lang/Object;)Lorg/objectweb/asm/FieldVisitor;"
   let method_desc = "(I" ++ s ++ s ++ s ++ "[" ++ s ++ ")Lorg/objectweb/asm/MethodVisitor;"
 
-  let cw = Asm.plain(COMPUTE_MAXS).expect("writer")
-  Asm.beginOn(cw, V49, ACC_PUBLIC + ACC_FINAL, ASM_CLASS, obj())
+  let cw = Asm.plain(COMPUTE_FRAMES).expect("writer")
+  Asm.beginOn(cw, V52, ACC_PUBLIC + ACC_FINAL, ASM_CLASS, obj())
 
   # plain(flags) = new ClassWriter(flags)
   let p = open_static(cw, "plain", "(I)" ++ cwd)
@@ -3070,12 +3079,13 @@ pub const ASM_WRITER_CLASS: String = "dawn/rt/AsmWriter"
 ## thing Dawn *source* cannot spell -- `use java` imports a class, it does not
 ## extend one. docs/jvm-base-plan.md §5.7.
 ##
-## **Every emitter builds one, and none of them ever asks it anything.**
-## `getCommonSuperClass` is a frame-computation callback, and at V49 +
-## COMPUTE_MAXS no frames are computed (K-A4). The call sites are here so that
-## raising the version is a flag change rather than a subsystem; the answers are
-## checked by `scripts/asm-adapter-contract`, because a gate is the only thing
-## that runs this code until the day it is switched on.
+## **Every emitter builds one, and since K-A8.2 they all ask it.** At V52 a
+## StackMapTable is mandatory, so `getCommonSuperClass` runs wherever two
+## constructor classes meet -- which is every `match` arm join in the corpus.
+## K-A8.1 landed this class a knife early, driven only by
+## `scripts/asm-adapter-contract`; that gate is still the only thing that
+## compares its answers against the archived reference, which no amount of
+## compiling can do.
 ##
 ## **The answer never leaves the table, deliberately.** Two roads were open for
 ## a pair the table cannot join -- delegate to `super.getCommonSuperClass`
@@ -3103,8 +3113,8 @@ pub fn gen_asm_writer_class() -> Bytes !io = {
   let ctor_desc = "(I" ++ lst ++ ")V"
   let ask_desc = "(" ++ s ++ s ++ ")" ++ s
 
-  let cw = Asm.plain(COMPUTE_MAXS).expect("writer")
-  Asm.beginOn(cw, V49, ACC_PUBLIC + ACC_FINAL, ASM_WRITER_CLASS, cwc)
+  let cw = Asm.plain(COMPUTE_FRAMES).expect("writer")
+  Asm.beginOn(cw, V52, ACC_PUBLIC + ACC_FINAL, ASM_WRITER_CLASS, cwc)
   Asm.fieldOn(cw, ACC_PRIVATE + ACC_FINAL, "supers", lst)
 
   # private AsmWriter(int flags, java.util.List supers)

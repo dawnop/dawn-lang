@@ -2,8 +2,8 @@
 # module → class of statics; Int → long, Float → double, Bool → boolean,
 # String → java.lang.String, Unit → void; ADT → abstract base + final ctor
 # subclasses (nullary = singletons); match → instanceof chains; self tail
-# calls → goto. The class writer is a plain ASM ClassWriter in COMPUTE_MAXS,
-# driven through dawn.rt.Asm's static adapters because ASM's
+# calls → goto. The class writer is dawn.rt.AsmWriter in COMPUTE_FRAMES, driven
+# through dawn.rt.Asm's static adapters because ASM's
 # visit signatures take nulls and Dawn has none — golden = byte-identical
 # .class files (docs/selfhost-codegen.md).
 
@@ -27,13 +27,13 @@ use java "org.objectweb.asm.Label"
 use java "org.objectweb.asm.Opcodes"
 
 use jvmops.{
-  ACC_ABSTRACT, ACC_FINAL, ACC_PRIVATE, ACC_PROTECTED, ACC_PUBLIC, ACC_STATIC, COMPUTE_MAXS,
+  ACC_ABSTRACT, ACC_FINAL, ACC_PRIVATE, ACC_PROTECTED, ACC_PUBLIC, ACC_STATIC, COMPUTE_FRAMES,
   OP_ALOAD,
   OP_ARETURN, OP_ASTORE, OP_BIPUSH, OP_CHECKCAST, OP_DCMPL, OP_DLOAD, OP_DNEG, OP_DRETURN,
   OP_DSTORE, OP_DUP, OP_DUP2, OP_GETFIELD, OP_IADD, OP_ICONST_0, OP_ICONST_1, OP_IFEQ, OP_IFNE,
   OP_IF_ACMPEQ, OP_IF_ICMPNE, OP_ILOAD, OP_IMUL, OP_INSTANCEOF, OP_INVOKESPECIAL, OP_INVOKESTATIC,
   OP_INVOKEVIRTUAL, OP_IRETURN, OP_IXOR, OP_L2I, OP_LCMP, OP_LCONST_1, OP_LLOAD, OP_LNEG,
-  OP_LSTORE, OP_LXOR, OP_NEW, OP_POP2, OP_PUTFIELD, OP_PUTSTATIC, OP_RETURN, V49
+  OP_LSTORE, OP_LXOR, OP_NEW, OP_POP2, OP_PUTFIELD, OP_PUTSTATIC, OP_RETURN, V52
 }
 use rtclasses.{
   obj, fn_iface, tuple_class, erased_apply_desc, append_const, close_mv, UNIT_CLASS, SB,
@@ -214,9 +214,9 @@ test "an impl is named by its head" {
 test "the ASM interop spike: a class assembles through the shared writer" {
   # the spike just proves Dawn can drive a ClassWriter through the static
   # null adapters + MethodVisitor end to end
-  let cw = Asm.plain(COMPUTE_MAXS).expect("writer")
+  let cw = Asm.plain(COMPUTE_FRAMES).expect("writer")
   # ACC_PUBLIC|ACC_FINAL = 0x11
-  Asm.beginOn(cw, V49, 17, "spike/Empty", "java/lang/Object")
+  Asm.beginOn(cw, V52, 17, "spike/Empty", "java/lang/Object")
   let m = Asm.methodOn(cw, 9, "id", "(J)J").expect("method visitor")
   m.visitCode()
   # LLOAD 0; LRETURN
@@ -487,8 +487,8 @@ pub fn gen_ctor_class(
   ov: EqOverride
 ) -> Bytes !io = {
   let sub = ctor_jvm_name(adts, ci)
-  let cw = AsmWriter.of(COMPUTE_MAXS, supers).expect("writer")
-  Asm.beginOn(cw, V49, ACC_PUBLIC + ACC_FINAL, sub, base)
+  let cw = AsmWriter.of(COMPUTE_FRAMES, supers).expect("writer")
+  Asm.beginOn(cw, V52, ACC_PUBLIC + ACC_FINAL, sub, base)
   let singleton = len(ci.fields) == 0
   for f in ci.fields {
     Asm.fieldOn(cw, ACC_PUBLIC + ACC_FINAL, f.name, desc_of(adts, f.ty))
@@ -562,8 +562,8 @@ pub fn gen_adt(
     }
     return [(base, gen_ctor_class(supers, adts, obj(), ci, ov))]
   }
-  let bw = AsmWriter.of(COMPUTE_MAXS, supers).expect("writer")
-  Asm.beginOn(bw, V49, ACC_PUBLIC + ACC_ABSTRACT, base, obj())
+  let bw = AsmWriter.of(COMPUTE_FRAMES, supers).expect("writer")
+  Asm.beginOn(bw, V52, ACC_PUBLIC + ACC_ABSTRACT, base, obj())
   let bc = Asm.methodOn(bw, ACC_PROTECTED, "<init>", "()V").expect("mv")
   bc.visitCode()
   bc.visitVarInsn(OP_ALOAD, 0)

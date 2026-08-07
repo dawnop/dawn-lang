@@ -4,13 +4,24 @@
 No emitted class may carry a MethodHandle, MethodType, Dynamic or
 InvokeDynamic constant -- tags 15, 16, 17, 18.
 
-The reason is a JVM parse-time rule, not a style preference: the class file
-version gate on these tags is checked while the constant pool is read, before
-anything asks whether an entry is reachable. A class that no longer executes
-an `invokedynamic` but still names one in its pool is a hard ClassFormatError
-under a version that predates them, so "drop the instruction now, clean the
-pool later" is not a state the repo can pass through. This gate is what keeps
-the pool clean once the closures stop going through LambdaMetafactory.
+At K-A5 this was a correctness gate. Emitting at major 49 made every one of
+these tags a parse-time ClassFormatError -- the version gate on them is checked
+while the constant pool is read, before anything asks whether an entry is
+reachable, so a class that no longer executes an `invokedynamic` but still
+names one in its pool would not load at all.
+
+K-A8.2 raised the version to 52 and that stopped being true for three of the
+four: MethodHandle, MethodType and InvokeDynamic are legal from 51 on, and this
+gate now states a *policy* about them rather than a JVM rule. The policy is
+that the closure classes of K-A3 stay the compiler's only closure mechanism:
+LambdaMetafactory is a bootstrap-method call into java.lang.invoke, which is
+exactly the kind of JDK surface docs/full-selfhost-residual-java.md is trying
+to shrink, and an LLVM backend has no equivalent to lower it to.
+
+Tag 17 (Dynamic, i.e. condy) is still a hard rule -- it needs major 55 -- and
+so is the general shape of the argument: the tags are checked at parse time,
+which is why "drop the instruction now, clean the pool later" is not a state
+the repo can pass through in either regime.
 
 Reads the constant pool with the struct module rather than through ASM: a
 scanner that used the emitter's own library to check the emitter's own output

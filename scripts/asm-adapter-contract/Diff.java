@@ -15,8 +15,8 @@
 // (a non-null one adds a Signature attribute), `beginOnWithInterface` has to
 // build a one-element array (a wrong length or a null element changes the
 // interfaces table), and `plain` has to forward its flag rather than pick one
-// (COMPUTE_MAXS vs 0 is visible as maxStack/maxLocals). All of that lands in
-// the bytes.
+// (COMPUTE_FRAMES vs 0 is visible as maxStack/maxLocals and a StackMapTable).
+// All of that lands in the bytes.
 //
 // The adapters are reached by reflection, deliberately: the reflection is
 // itself the surface check. `getDeclaredMethod` with exact parameter types
@@ -55,7 +55,6 @@ public class Diff {
   static final String NEW = "dawn.rt.Asm";
   static final String WRITER = "dawn.rt.AsmWriter";
 
-  static final int V49 = 49;
   static final int V52 = 52;
   static final int COMPUTE_MAXS = 1;
   static final int COMPUTE_FRAMES = 2;
@@ -83,10 +82,10 @@ public class Diff {
     if (withInterface) {
       entry(a, "beginOnWithInterface", ClassWriter.class, int.class, int.class, String.class,
               String.class, String.class)
-          .invoke(null, cw, V49, PUBLIC_FINAL, "probe/P", "java/lang/Object", "java/lang/Runnable");
+          .invoke(null, cw, V52, PUBLIC_FINAL, "probe/P", "java/lang/Object", "java/lang/Runnable");
     } else {
       entry(a, "beginOn", ClassWriter.class, int.class, int.class, String.class, String.class)
-          .invoke(null, cw, V49, PUBLIC_FINAL, "probe/P", "java/lang/Object");
+          .invoke(null, cw, V52, PUBLIC_FINAL, "probe/P", "java/lang/Object");
     }
 
     entry(a, "fieldOn", ClassWriter.class, int.class, String.class, String.class)
@@ -114,7 +113,10 @@ public class Diff {
   }
 
   /** `static int square(int n) { return n == 0 ? 0 : n * n; }` -- a branch, so
-   * COMPUTE_MAXS has real work to do and the flag `plain` forwards shows up. */
+   * the flag `plain` forwards has real work to do and shows up in the bytes.
+   * At major 52 the branch also makes the class unverifiable without a frame,
+   * so `plain` dropping the flag is a `VerifyError` here and not just a
+   * different maxStack (demonstrated 2026-08-07, docs/jvm-base-plan.md §5.11). */
   static void square(MethodVisitor m) {
     Label zero = new Label();
     m.visitCode();
@@ -215,13 +217,13 @@ public class Diff {
       return;
     }
 
-    byte[] refPlain = probe(ref, COMPUTE_MAXS, false);
-    byte[] nowPlain = probe(now, COMPUTE_MAXS, false);
+    byte[] refPlain = probe(ref, COMPUTE_FRAMES, false);
+    byte[] nowPlain = probe(now, COMPUTE_FRAMES, false);
     check("beginOn/fieldOn/methodOn produce identical class files",
         Arrays.equals(refPlain, nowPlain));
 
-    byte[] refIface = probe(ref, COMPUTE_MAXS, true);
-    byte[] nowIface = probe(now, COMPUTE_MAXS, true);
+    byte[] refIface = probe(ref, COMPUTE_FRAMES, true);
+    byte[] nowIface = probe(now, COMPUTE_FRAMES, true);
     check("beginOnWithInterface produces an identical class file",
         Arrays.equals(refIface, nowIface));
 
@@ -231,7 +233,7 @@ public class Diff {
 
     // The control for the control: if the probe could not see the flag, the
     // three comparisons above would agree no matter what `plain` forwarded.
-    check("the probe is flag-sensitive (COMPUTE_MAXS differs from 0)",
+    check("the probe is flag-sensitive (COMPUTE_FRAMES differs from 0)",
         !Arrays.equals(refPlain, refRaw));
     check("the emitted adapter forwards its flag", !Arrays.equals(nowPlain, nowRaw));
 
@@ -262,10 +264,11 @@ public class Diff {
   // reference for it is the *same* archived Java source, so the differential
   // below is the same diverse-double-compiling argument as the one above.
   //
-  // The emitter never asks the oracle anything today (V49 + COMPUTE_MAXS
-  // computes no frames), so without this the class could answer nonsense --
-  // or nothing -- with every gate green. That is the K-A7 phase-1 situation
-  // again, and the answer is the same: drive it.
+  // Since K-A8.2 the emitter does ask it: every writer is (V52,
+  // COMPUTE_FRAMES) and every `match` on an ADT is a merge. This block is no
+  // longer the only thing driving the oracle -- but it is still the only thing
+  // that drives it against the *reference*, which is the half `dawn test`
+  // cannot do.
 
   /** A hierarchy of the shape `supers_of` builds: ADT bases and their ctors,
    * plus the JDK exception edges the emitted `Io.catch_fault` table needs. */
@@ -408,8 +411,10 @@ public class Diff {
     }
 
     // The positive control K-A8.1 exists for: the writer under the flag and the
-    // version it was put back for. Nothing in the compiler runs this
-    // combination yet, which is exactly why the gate has to.
+    // version it was put back for. Since K-A8.2 the compiler runs this
+    // combination on every class it emits; the check stays because it names
+    // the property (a merge of two unloadable classes links) that the corpus
+    // only exercises by accident.
     check("at (V52, COMPUTE_FRAMES) the writer produces a linkable class",
         attempt(() -> linkProbe(frameProbe(writer(now, COMPUTE_FRAMES))) == null));
     Throwable why = linkProbe(frameProbe(writer(now, COMPUTE_FRAMES)));

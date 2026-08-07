@@ -71,7 +71,7 @@ use java "org.objectweb.asm.Label"
 use java "java.lang.System"
 use jvmops.{
   ACC_ABSTRACT, ACC_FINAL, ACC_INTERFACE, ACC_PRIVATE, ACC_PROTECTED, ACC_PUBLIC, ACC_STATIC,
-  COMPUTE_MAXS, OP_AASTORE, OP_ACC_SYNTHETIC, OP_ACONST_NULL, OP_ALOAD, OP_ARETURN, OP_ARRAYLENGTH, OP_ASTORE,
+  COMPUTE_FRAMES, OP_AASTORE, OP_ACC_SYNTHETIC, OP_ACONST_NULL, OP_ALOAD, OP_ARETURN, OP_ARRAYLENGTH, OP_ASTORE,
   OP_ATHROW, OP_BASTORE, OP_CASTORE, OP_CHECKCAST, OP_D2F, OP_D2L, OP_DADD, OP_DASTORE, OP_DDIV,
   OP_DLOAD, OP_DMUL, OP_DNEG, OP_DREM, OP_DRETURN, OP_DSUB, OP_DUP, OP_DUP_X1, OP_F2D, OP_FASTORE, OP_FLOAD,
   OP_FRETURN, OP_GETFIELD, OP_GETSTATIC, OP_GOTO, OP_I2L, OP_IADD, OP_IASTORE,
@@ -81,7 +81,7 @@ use jvmops.{
   OP_IRETURN, OP_ISUB, OP_IXOR, OP_L2D, OP_L2I, OP_LADD, OP_LAND, OP_LASTORE, OP_LCMP,
   OP_LCONST_1, OP_LDIV, OP_LLOAD, OP_LMUL, OP_LNEG, OP_LOR, OP_LREM, OP_LRETURN, OP_LSHL, OP_LSHR,
   OP_LSTORE, OP_LSUB, OP_LUSHR, OP_LXOR, OP_NEW, OP_POP, OP_PUTFIELD, OP_PUTSTATIC, OP_RETURN,
-  OP_SASTORE, OP_SWAP, V49
+  OP_SASTORE, OP_SWAP, V52
 }
 
 # ---- the emitted program's own names ----
@@ -742,8 +742,8 @@ fn emit_sam_conversion(
 ## forwarding to the bridge that was already being emitted next to it.
 fn gen_sam_class(supers: List[String], s: SamC) -> (String, Bytes) !io = {
   let fnd = "L" ++ fn_iface(s.arity) ++ ";"
-  let cw = AsmWriter.of(COMPUTE_MAXS, supers).expect("writer")
-  Asm.beginOnWithInterface(cw, V49, ACC_PUBLIC + ACC_FINAL, s.cls, obj(), s.iface)
+  let cw = AsmWriter.of(COMPUTE_FRAMES, supers).expect("writer")
+  Asm.beginOnWithInterface(cw, V52, ACC_PUBLIC + ACC_FINAL, s.cls, obj(), s.iface)
   Asm.fieldOn(cw, ACC_PRIVATE + ACC_FINAL, capture_field(0), fnd)
   let init = Asm.methodOn(cw, ACC_PUBLIC, "<init>", "(" ++ fnd ++ ")V").expect("mv")
   init.visitCode()
@@ -1223,8 +1223,8 @@ fn gen_jvm_main(gx: GenCtx, cw: ClassWriter) -> Unit !io = {
 
 ## The per-trait dictionary interface: one erased method per trait method.
 pub fn gen_trait_interface(supers: List[String], adts: Adts, tr: TraitI) -> Bytes !io = {
-  let cw = AsmWriter.of(COMPUTE_MAXS, supers).expect("writer")
-  Asm.beginOn(cw, V49, ACC_PUBLIC + ACC_ABSTRACT + ACC_INTERFACE,
+  let cw = AsmWriter.of(COMPUTE_FRAMES, supers).expect("writer")
+  Asm.beginOn(cw, V52, ACC_PUBLIC + ACC_ABSTRACT + ACC_INTERFACE,
     tr_iface(tr.owner, tr.name), obj())
   for entry in tr.methods {
     let (mn, ms) = entry
@@ -1268,9 +1268,14 @@ fn gen_test(
 
 ## A throwaway MethodVisitor so Gen can be constructed before the first real
 ## method opens (the record field is non-optional by design).
+##
+## The flag is the same one every other writer carries, though nothing here can
+## observe it: `toByteArray` is never called on this writer, so the class it
+## would have written does not exist. Matching the rest is cheaper than a
+## reader wondering why this one differs.
 fn scratch_mv() -> MethodVisitor !io = {
-  let cw = Asm.plain(0).expect("writer")
-  Asm.beginOn(cw, V49, ACC_PUBLIC, "dawn/rt/Scratch", obj())
+  let cw = Asm.plain(COMPUTE_FRAMES).expect("writer")
+  Asm.beginOn(cw, V52, ACC_PUBLIC, "dawn/rt/Scratch", obj())
   Asm.methodOn(cw, ACC_PUBLIC + ACC_STATIC, "scratch", "()V").expect("mv")
 }
 
@@ -1336,8 +1341,8 @@ pub fn emit_module(
     let tr = trait_of(traits, tid)
     out = out ++ [(tr_iface(tr.owner, tr.name), gen_trait_interface(supers, adts, tr))]
   }
-  let cw = AsmWriter.of(COMPUTE_MAXS, supers).expect("writer")
-  Asm.beginOn(cw, V49, ACC_PUBLIC + ACC_FINAL, class_name, obj())
+  let cw = AsmWriter.of(COMPUTE_FRAMES, supers).expect("writer")
+  Asm.beginOn(cw, V52, ACC_PUBLIC + ACC_FINAL, class_name, obj())
   Asm.fieldOn(cw, ACC_PUBLIC + ACC_STATIC, ARGS_FIELD, "[Ljava/lang/String;")
   let no_slots: Map[Int, Int] = map.empty()
   let no_ckey: Map[String, String] = map.empty()
@@ -1450,8 +1455,8 @@ fn gen_dict_class(gx: GenCtx, supers: List[String], dd: CDictDef) -> (String, By
   let tr = trait_of(gx.traits, dd.trait_id)
   let cls = dict_class(gx.class_name, dd.key)
   let iface = tr_iface(tr.owner, tr.name)
-  let cw = AsmWriter.of(COMPUTE_MAXS, supers).expect("writer")
-  Asm.beginOnWithInterface(cw, V49, ACC_PUBLIC + ACC_FINAL, cls, obj(), iface)
+  let cw = AsmWriter.of(COMPUTE_FRAMES, supers).expect("writer")
+  Asm.beginOnWithInterface(cw, V52, ACC_PUBLIC + ACC_FINAL, cls, obj(), iface)
   # A dictionary the compiler can build once is a singleton; one that is a
   # function of its arguments is an ordinary object with those arguments in
   # fields. Only the scaffold differs -- the forwarding below is the same
@@ -1667,8 +1672,8 @@ fn gen_cclosure(gx: GenCtx, g: Gen, name: String, owner: String, caps: List[CExp
 ## mirror of `gen_cdynamic`, which boxes arguments before an `apply` and
 ## unerases the result after it -- the same two helpers, the other way round.
 fn gen_closure_class(gx: GenCtx, supers: List[String], g: Gen, b: ClosB) -> (String, Bytes) !io = {
-  let cw = AsmWriter.of(COMPUTE_MAXS, supers).expect("writer")
-  Asm.beginOnWithInterface(cw, V49, ACC_PUBLIC + ACC_FINAL, b.cls, obj(), b.iface)
+  let cw = AsmWriter.of(COMPUTE_FRAMES, supers).expect("writer")
+  Asm.beginOnWithInterface(cw, V52, ACC_PUBLIC + ACC_FINAL, b.cls, obj(), b.iface)
   var caps_desc = ""
   for ct in b.cap_tys { caps_desc = caps_desc ++ desc_of(gx.adts, ct) }
   if len(b.cap_tys) == 0 {
