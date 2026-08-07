@@ -155,10 +155,18 @@ C 侧因此用 `goto` 而不是 `break` 实现。语料 `adt.dawn:first_shape_ov
 定长十六进制),转义后的部件里出不来 `__`,所以 `__` 成了谁也伪造不了的分隔符,符号能拆回部件。
 语料 `mod_paths` 压这一条。
 
-## 已知的不对等(有意留下)
+## 已知的不对等
 
-- **Float 的 `to_string` 不逐字节等于 Java**。Java 出的是最短往返形式,`%.17g` 不是。语料因此不含
-  Float 打印;真发射器要带一个 dtoa。
-- **不释放内存**。`dawn_str_concat` 每次 malloc,永不 free。Perceus 是 Phase 4 的事,
-  现在猜一个方案只会白猜。
-- **`panic` 直接 `exit(1)`**,没有 setjmp/longjmp,所以 `catch_panic` 不存在。Phase 3 补。
+一条不剩。这里曾列着三条「有意留下」的,三条都已关账,各自换成了一份压着它的语料——
+所以现在写在这儿的是它们**在哪被压着**,而不是它们还欠着什么:
+
+- **Float 的 `to_string`**。曾经 C 侧答 `%.17g`、JVM 答 `Double.toString`,语料因此绕开
+  Float 打印。渲染与解析已由语言自领(`std/fmt` 的最短往返 dtoa),两个后端编的是同一份,
+  `float_edges` 就是那份差分——连「同一个二进制里编译期折叠与运行期调用要打出同样的字节」
+  也在里面。
+- **释放内存**。Perceus RC 已落地,`dawn_str` 也是计数对象。`run.sh` 把每个语料再用
+  `-fsanitize=address` 编一遍、以 `detect_leaks=1` 跑,所以「不 free」在这里是红的;
+  有意泄漏的(取过 fault 屏障的那些)必须放一个 `<name>.leaks-on-catch` 显式豁免。
+- **`panic` 与两道屏障**。运行时有 setjmp/longjmp,`catch_panic` 与 `catch_fault` 都在,
+  且是**两个**函数——io 屏障不吞 panic。`catch_kinds` 逐条压这个分类。`panic` 仍然以
+  退出码 1 结束进程,但两个后端一致,所以那不是不对等。
