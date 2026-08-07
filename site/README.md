@@ -130,7 +130,8 @@ JVM/native 逐字节对拍照旧成立。
 - [x] 刀 6：main 组装 + 全量生成 + 断链自检（32 页 / 318 内链）
 - [x] 刀 7：验证（31 个 test 块绿；`fmt --check` 干净；**JVM 与 native 产物逐字节一致**——
       当时是人手跑的，2026-08-05 才变成门禁 `scripts/site-dist-diff.sh`）
-- [ ] 刀 8：部署 `dawn-lang.dawnop.com`（nginx + 通配符证书 + redeploy.sh）
+- [x] 刀 8：部署 `dawn-lang.dawnop.com`（nginx + 通配符证书 + `redeploy.sh`）——
+      2026-07 上线，此后一直在跑
 
 ## 构建
 
@@ -146,3 +147,7 @@ site/build.sh          # dawn doc --stdlib → 清空 dist → dawn run site
 # 两个后端的 dist 逐字节对拍（输入先快照，工作树动了也进不来）：
 ./scripts/site-dist-diff.sh
 ```
+
+站点的内容源是 `docs/**` 与 `examples/**`：**改了它们的提交一合进 main，就得跑一次
+`site/redeploy.sh`**——CI 只重建 `dist/` 用来对拍，不发布。2026-08-07 漏了这一步，
+线上的规范页旧了两天。
