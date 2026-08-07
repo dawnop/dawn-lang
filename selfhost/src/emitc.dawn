@@ -189,23 +189,79 @@ fn emit_mask_arg(st: CSt, tmp: String, bits: List[Bool]) -> (CSt, String, Bool) 
 
 # ---- names ----
 
-fn sanitize(s: String) -> String = {
+## One code point as six hex digits. Fixed width, and that is the load-bearing
+## part: a variable-length escape would need a terminator, the terminator would
+## have to be `_`, and `escape_part` below owes the rest of this section an
+## output in which `_` is never the *last* character of an escape.
+fn esc_hex(cp: Char) -> String = {
+  var digits = ""
+  var n = char.code(cp)
+  var i = 0
+  while i < 6 {
+    digits = str.slice(C_HEX, n % 16, n % 16 + 1) ++ digits
+    n = n / 16
+    i = i + 1
+  }
+  digits
+}
+
+## One part of a C symbol -- a module path, a function name, a dictionary key
+## -- spelled in `[A-Za-z0-9_]`.
+##
+##   [A-Za-z0-9] -> itself      _ -> _1      / -> _2      $ -> _3
+##   anything else -> _0 followed by six hex digits of the code point
+##
+## This has to be **injective**, and folding every other character to a plain
+## `_` was not: modules `a/b` and `a_b` are both spellable, both usable by one
+## program, and both used to mangle to `dawn_a_b__f` -- one C symbol defined
+## twice, so `cc` refused a program the JVM backend runs. The scheme is JNI's,
+## cut down to the three characters Dawn actually spells symbols with (`/`
+## between module path segments, `$` in the names lowering synthesises) plus a
+## general escape so the function is total.
+##
+## Injective because it is decodable: scanning left to right, anything but `_`
+## stands for itself, and a `_` is followed by exactly one selector that says
+## what to take. Two different inputs therefore cannot decode from one string.
+##
+## The second guarantee is that `__` never occurs *inside* a part: a `_` is
+## always immediately followed by a selector digit, and the hex is fixed width
+## so no escape can end in one. `__` is thus a separator no part can forge,
+## which is what lets a symbol be split back into its parts -- see `mangle`.
+fn escape_part(s: String) -> String = {
   var out = ""
   for cp in code_points(s) {
-    let ok =
-      (cp >= 'a' && cp <= 'z') || (cp >= 'A' && cp <= 'Z') ||
-      (cp >= '0' && cp <= '9') || cp == '_'
-    if ok {
+    let plain =
+      (cp >= 'a' && cp <= 'z') || (cp >= 'A' && cp <= 'Z') || (cp >= '0' && cp <= '9')
+    if plain {
       out = out ++ from_code_points([cp])
+    } else if cp == '_' {
+      out = out ++ "_1"
+    } else if cp == '/' {
+      out = out ++ "_2"
+    } else if cp == '$' {
+      out = out ++ "_3"
     } else {
-      out = out ++ "_"
+      out = out ++ "_0" ++ esc_hex(cp)
     }
   }
   out
 }
 
+## Every C symbol minted from names the *program* chose is `dawn_` followed by
+## escaped parts joined with `__`, and the number of parts says which family it
+## belongs to: one part is a dictionary (`dict_symbol`), two a function, three
+## a closure adapter (`adapter_name`). Since `dawn_` is a fixed-length prefix
+## and no part contains `__`, the parts -- and so the family -- come back out
+## of the symbol, which is the whole no-collision argument: distinct families
+## have distinct part counts, and within a family `escape_part` is injective.
+##
+## The names the *emitter* invents (`dawn_const_N`, `dawn_program_entry`) sit
+## outside that grammar. Neither has two parts or three, having no `__`; and
+## neither is the one-part family, because a dictionary key always begins with
+## the literal `dict$` (`lower.dict_key`), so every dictionary symbol begins
+## `dawn_dict_3`.
 fn mangle(owner: String, name: String) -> String =
-  "dawn_" ++ sanitize(owner) ++ "__" ++ sanitize(name)
+  "dawn_" ++ escape_part(owner) ++ "__" ++ escape_part(name)
 
 fn local_name(sym: Int) -> String = "v" ++ to_string(sym)
 
@@ -824,6 +880,9 @@ fn cap_counted(st: CSt, c: CExpr) -> Bool =
     _ -> is_ref_ty(cex_ty(c))
   }
 
+## The three-part family of `mangle`'s grammar. `clo` is spelled literally
+## because it escapes to itself; a part it could collide with would have to be
+## a third part, and only an adapter has one.
 fn adapter_name(owner: String, name: String) -> String =
   mangle(owner, name) ++ "__clo"
 
@@ -1094,7 +1153,9 @@ fn emit_call(st: CSt, callee: CCallee, args: List[CExpr], ty: Ty) -> (CSt, Strin
 
 # ---- trait dictionaries ----
 
-fn dict_symbol(key: String) -> String = "dawn_" ++ sanitize(key)
+## The one-part family of `mangle`'s grammar: no `__`, so it can be neither a
+## function nor a closure adapter however the key is spelled.
+fn dict_symbol(key: String) -> String = "dawn_" ++ escape_part(key)
 
 fn impl_symbol(owner: String, tid: Int, subject: Ty, method: String) -> String =
   mangle(owner, "impl$" ++ to_string(tid) ++ "$" ++ subject_key(subject) ++ "$" ++ method)
@@ -1662,11 +1723,12 @@ pub fn str_static_def(name: String, v: String) -> String =
 
 ## The C symbol a test block gets. A test body is not a Dawn-callable
 ## function and its Core name is the description string, so it cannot be
-## mangled the way a function is: two tests whose descriptions differ only in
-## punctuation would sanitize to one symbol. The lowering path renames each to
-## `test_name(i)` before this emitter sees it, mirroring the JVM's
-## `dawn$test$i`; this is where that name is written down, so the generated
-## runner (`ctestrun.dawn`) and the emitter cannot drift apart.
+## named the way a function is: the generated runner has to write the symbol
+## down, and all it knows is which test this is, not what it was called. The
+## lowering path renames each to `test_name(i)` before this emitter sees it,
+## mirroring the JVM's `dawn$test$i`; this is where that name is written down,
+## so the generated runner (`ctestrun.dawn`) and the emitter cannot drift
+## apart.
 pub fn test_name(idx: Int) -> String = "dawn\$test\$" ++ to_string(idx)
 
 pub fn test_symbol(owner: String, idx: Int) -> String = mangle(owner, test_name(idx))
@@ -1802,7 +1864,8 @@ pub fn emit_program(units: List[EmitMod], entry: String, u: TableUse, adts: Adts
   # The program body runs on the runtime's own stack, not the OS default one
   # (dawn_rt.h, "the program's stack"). The thunk exists because the entry's
   # C return type follows its Dawn one, and `dawn_rt_main` takes one shape;
-  # the name has a single underscore, so no mangled name can collide with it.
+  # the name sits outside `mangle`'s grammar, so nothing minted from a name
+  # the program chose can collide with it (see `mangle`).
   st = line(st, "static void dawn_program_entry(void) {")
   st = push(st)
   st = line(st, "(void)" ++ mangle(entry, "main") ++ "();")
@@ -1825,6 +1888,61 @@ pub fn emit_headless(units: List[EmitMod], u: TableUse, adts: Adts) -> String =
   join(emit_units(units, u, adts).out, "")
 
 # ---- tests ----
+
+test "escaping a symbol part is injective and never spells the separator" {
+  # Exhaustive over every string up to length three drawn from the characters
+  # that used to fold together, which is enough to catch a scheme that maps
+  # two of them the same way -- the old one fails on the first pair.
+  let alpha = ["a", "_", "/", "\$", "-"]
+  var seen: Set[String] = set.empty()
+  var words = [""]
+  var n = 0
+  while n < 3 {
+    var next: List[String] = []
+    for w in words {
+      for c in alpha { next = next ++ [w ++ c] }
+    }
+    words = next
+    for w in words {
+      let e = escape_part(w)
+      assert not str.contains(e, "__")
+      assert not set.has(seen, e)
+      seen = set.insert(seen, e)
+    }
+    n = n + 1
+  }
+  assert set.len(seen) == 155
+}
+
+test "a C symbol determines the names it was minted from" {
+  # `a/b` and `a_b` are two modules one program may use at once, and folding
+  # every non-identifier character to `_` gave both of them `dawn_a_b__f`:
+  # one symbol defined twice, so `cc` refused a program the JVM backend runs
+  # (scripts/spike-native/mod_paths is the end-to-end form of this).
+  #
+  # The last owner pair is the same collision one layer up: a package's modules
+  # are owned by `dawn$pkg$<name>/<path>` (analyze.dawn), which folded onto the
+  # plain module of the corresponding underscore spelling.
+  let owners = [
+    "a/b", "a_b", "a__b", "a\$b", "std/pvec",
+    "dawn\$pkg\$json/lexer", "dawn_pkg_json/lexer"
+  ]
+  let names = ["f", "f__clo", "impl\$1\$Int\$eq", test_name(0)]
+  var seen: Set[String] = set.empty()
+  for o in owners {
+    for nm in names {
+      for s in [mangle(o, nm), adapter_name(o, nm), dict_symbol(o ++ nm)] {
+        assert not set.has(seen, s)
+        seen = set.insert(seen, s)
+      }
+    }
+  }
+  assert set.len(seen) == 84
+  # the families are told apart by how many parts the symbol has, so the
+  # invented names -- which have none -- stay outside the grammar
+  assert not str.contains("dawn_program_entry", "__")
+  assert str.starts_with(dict_symbol("dict\$1\$Int"), "dawn_dict_3")
+}
 
 test "a slot member and the ref classification agree about every repr" {
   # These two disagreed about Unit: `dawn_unit` is a byte, but `slot_of` filed
