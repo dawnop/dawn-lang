@@ -647,6 +647,15 @@ fn read_over(over: Map[String, String], c: String, f: String) -> Result[String, 
     None -> io.read_file(f)
   }
 
+## The project directory a source root belongs to: `<proj>/src` → `<proj>`;
+## a root that is not called `src` is its own project (file mode falls back to
+## the file's own directory, which has no `src` above it to strip).
+fn proj_of_root(root: String) -> String =
+  match str.last_index_of(root, "/") {
+    Some(i) -> if str.drop(root, i + 1) == "src" { str.take(root, i) } else { root }
+    None -> root
+  }
+
 ## File mode: root = nearest `src` ancestor, else the file's own directory;
 ## loads the entry plus its transitive use-closure.
 pub fn load_file(file: String) -> LoadResult !io = {
@@ -657,10 +666,7 @@ pub fn load_file(file: String) -> LoadResult !io = {
 ## `load_file` with editor-buffer overrides.
 pub fn load_file_over(file: String, over: Map[String, String]) -> LoadResult !io = {
   let root = nearest_src_root(file)
-  let proj = match str.last_index_of(root, "/") {
-    Some(i) -> if str.drop(root, i + 1) == "src" { str.take(root, i) } else { root }
-    None -> root
-  }
+  let proj = proj_of_root(root)
   let no_mfc: Map[String, Option[ManifestLite]] = map.empty()
   let (url_resolved, url_names, sdiags, mfc) = select_url_deps(proj, no_mfc)
   let no_cache: Map[String, Option[PkgR]] = map.empty()
@@ -1103,7 +1109,88 @@ fn has_module_use(text: String) -> Bool = {
 fn is_ws(cp: Char) -> Bool =
   cp == ' ' || cp == '\t' || cp == '\n' || cp == '\u{000B}' || cp == '\u{000C}' || cp == '\r'
 
+## Every `.dawn` file under `root`, as `prefix` ++ its module path → the file.
+## `std/...` is skipped wherever it comes from: the prefix is reserved for the
+## bundled library, and `resolve` rejects a project module that claims it.
+fn add_tree(
+  out0: Map[String, String],
+  root: String,
+  prefix: String
+) -> Map[String, String] !io = {
+  var out = out0
+  for f in walk_dawn(root) {
+    let mp = prefix ++ module_path_of(root, f)
+    if len(bad_segments(mp)) == 0 && mp != "std" && not str.starts_with(mp, "std/") {
+      out = map.insert(out, mp, f)
+    }
+  }
+  out
+}
+
+## Every module path a `use` in `file` could name, mapped to the file behind
+## it: the project's own modules under the nearest `src` root, plus each
+## `[deps]` package's modules under the alias the manifest spells it with.
+##
+## The loader runs this relation forward -- `use a/b` names `<root>/a/b.dawn`
+## -- and completion needs it backward. That has to be a directory walk and
+## cannot be a read of what the program already loaded: the language server
+## analyses one buffer and follows only the `use` edges that buffer already
+## has, so the module being completed is by construction not among them.
+##
+## std is deliberately absent. It is bundled rather than on disk beside the
+## project, and its exports are already in the server's hand (StdCtx), which
+## is a better source than a path that may not exist.
+##
+## Dependency resolution is the loader's own, so a cold url dep is fetched
+## here the way `dawn check` would fetch it. In the editor the buffer's own
+## analysis has just run the same resolution, so the cache is warm and this
+## costs the walk only.
+pub fn use_candidates(file: String) -> Map[String, String] !io = {
+  var out: Map[String, String] = map.empty()
+  # a buffer with no file behind it (`<lsp>`) has no tree to walk, and canon()
+  # would resolve that placeholder against the server's own directory
+  if not str.ends_with(file, ".dawn") { return out }
+  let root = canon(nearest_src_root(file))
+  out = add_tree(out, root, "")
+  let proj = proj_of_root(root)
+  let no_mfc: Map[String, Option[ManifestLite]] = map.empty()
+  let (url_resolved, url_names, _, mfc) = select_url_deps(proj, no_mfc)
+  let no_cache: Map[String, Option[PkgR]] = map.empty()
+  let no_names: Map[String, String] = map.empty()
+  let (pkgs, _, _, _, _) =
+    resolve_src_deps(proj, no_cache, set.empty(), url_resolved, url_names, no_names, mfc)
+  for key in map.keys(pkgs) {
+    let p = map.get(pkgs, key).expect("resolved dep")
+    out = add_tree(out, p.root, key ++ "/")
+  }
+  out
+}
+
+## The module path a file's *name* alone would give it: the basename minus
+## `.dawn`. None for a buffer with no file behind it (`<lsp>`, an editor's
+## untitled document) -- there is no name to judge.
+fn entry_name_of(path: String) -> Option[String] = {
+  if not str.ends_with(path, ".dawn") { return None }
+  let base = match str.last_index_of(path, "/") {
+    Some(i) -> str.drop(path, i + 1)
+    None -> path
+  }
+  Some(str.strip_suffix(base, ".dawn").unwrap_or(base))
+}
+
 ## Analyze one buffer without project context (the Kotlin `analyze(text)`).
+##
+## The entry's name is checked here for the same reason `resolve` checks its
+## seeds: a module path IS a class name, and this is the other way a file name
+## reaches class-name derivation. `mod_path` stays "main" rather than becoming
+## the file's name -- a buffer analysed alone is not a module in any program,
+## and its identity is nobody's to see -- so the check is the only thing this
+## borrows from the loader. Without it the editor silently accepted a file
+## `dawn check` refuses to compile.
+##
+## Unlike `resolve`, which skips the seed, the buffer is still analysed: the
+## name is wrong, the contents are still worth checking, and an editor can
+## show both at once.
 pub fn analyze_standalone(
   path: String,
   text: String,
@@ -1112,6 +1199,19 @@ pub fn analyze_standalone(
   js: Jsig
 ) -> Program !io = {
   let (m, pdiags) = parser.parse_module(text)
+  var diags: List[LocDiag] = []
+  match entry_name_of(path) {
+    Some(nm) -> {
+      let bad = bad_segments(nm)
+      if len(bad) > 0 {
+        diags = diags ++ [synthetic(path,
+          "`" ++ bad[0] ++ "` is not a valid module path segment",
+          "a source file's name is its module path: rename it so every " ++
+            "segment is a lowercase identifier ([a-z_][a-z0-9_]*)")]
+      }
+    }
+    None -> ()
+  }
   let mf = LoadedModule {
     mod_path: "main",
     class_name: "main",
@@ -1121,7 +1221,7 @@ pub fn analyze_standalone(
     pdiags: pdiags,
     pkg: None
   }
-  analyze_program(LoadResult { modules: [mf], diags: [] }, std, opts, js)
+  analyze_program(LoadResult { modules: [mf], diags: diags }, std, opts, js)
 }
 
 ## Analyze the file behind an editor buffer (the Kotlin `analyzeDocument`):
@@ -1361,6 +1461,58 @@ test "a file whose name is not a path segment is refused, not folded" {
   assert len(good.modules) == 1
   assert good.modules[0].mod_path == "ok_name2"
   assert good.modules[0].class_name == "ok_name2"
+}
+
+test "the editor's standalone path judges the buffer's name too" {
+  # The asymmetry this closes (#176): `analyze_standalone` hardcodes mod_path
+  # "main", so the buffer's own file name never reached the check `resolve`
+  # runs on its seeds. The language server accepted, in silence, a file that
+  # `dawn check` refuses to compile -- and the two paths meet in the same
+  # editor, on the same file.
+  let root = "/tmp/dawn-selfhost-analyze/standalone"
+  mkdirs(root)
+  let std = match load_std("std") {
+    Ok(sc) -> sc
+    Err(e) -> panic("std: " ++ e)
+  }
+  let src = "pub fn main() -> Unit !io = ()\n"
+
+  let bad = analyze_standalone(root ++ "/a-b.dawn", src, std, ct_default(), jsig_refused())
+  assert len(bad.diags) == 1
+  assert bad.diags[0].d.msg == "`a-b` is not a valid module path segment"
+  assert bad.diags[0].path == root ++ "/a-b.dawn"
+  # and the buffer is still analysed, unlike the loader's seed: an editor can
+  # show the name complaint and the type errors at once
+  assert len(bad.modules) == 1
+
+  let good = analyze_standalone(root ++ "/ok_name2.dawn", src, std, ct_default(), jsig_refused())
+  assert len(good.diags) == 0
+
+  # an untitled buffer has no name to judge -- and `<lsp>` is not one
+  let untitled = analyze_standalone("<lsp>", src, std, ct_default(), jsig_refused())
+  assert len(untitled.diags) == 0
+}
+
+test "use_candidates enumerates the tree and its deps the way `use` spells them" {
+  let base = "/tmp/dawn-selfhost-analyze/cands"
+  mkdirs(base ++ "/app/src/deep")
+  mkdirs(base ++ "/pkg/web/src")
+  put(base ++ "/pkg/web/dawn.toml", "schema = 1\nname = \"web\"\n")
+  put(base ++ "/pkg/web/src/types.dawn", "pub fn tag() -> String = \"w\"\n")
+  put(base ++ "/app/dawn.toml", "schema = 1\nname = \"app\"\n\n[deps]\nw = \"../pkg/web\"\n")
+  put(base ++ "/app/src/main.dawn", "pub fn main() -> Unit !io = ()\n")
+  put(base ++ "/app/src/deep/util.dawn", "pub fn f() -> Int = 1\n")
+  # a file the `use` grammar cannot name is not a candidate to complete
+  put(base ++ "/app/src/bad-name.dawn", "pub fn f() -> Int = 1\n")
+
+  let c = use_candidates(base ++ "/app/src/main.dawn")
+  assert sort(map.keys(c)) == ["deep/util", "main", "w/types"]
+  # the dep appears under the alias the manifest spells, not the package's own
+  # name: `use w/types` is what this app writes, `web` is what it resolves to
+  assert str.ends_with(map.get(c, "w/types").expect("dep module"), "/web/src/types.dawn")
+
+  # a buffer with no file behind it has no tree to walk
+  assert len(map.keys(use_candidates("<lsp>"))) == 0
 }
 
 test "directory mode refuses one badly named module without losing the rest" {

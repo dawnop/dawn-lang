@@ -1,17 +1,31 @@
 # Completion (the Kotlin Completion.kt): everything nameable at the cursor —
 # locals of the enclosing function, module + imported functions, types and
 # constructors, builtins, and keywords. Suppressed where a suggestion can only
-# be noise: inside strings and comments, while naming a fresh binding, on
-# `use` lines, and after `.`. `!` completes the one builtin effect. All
-# offsets are UTF-16 code units (the LSP wire encoding).
+# be noise: inside strings and comments, while naming a fresh binding, and
+# after `.`. `!` completes the one builtin effect. All offsets are UTF-16 code
+# units (the LSP wire encoding).
+#
+# A `use` line completes too, and to something else entirely: module paths one
+# segment at a time, then the module's exported names inside `.{ }`. That is
+# the toolchain half of "the directory tree IS the namespace" (#179) -- the
+# tree is only a namespace you can navigate if something enumerates it, and
+# until now nothing did. It is also the one branch here that touches the disk,
+# because the answer is a directory listing and nothing else knows it.
 
+use std/io
 use std/str
 use std/map
 use std/set
+use std/list
 use check/types.{ty_show, sig_render, adt_of, trait_of, prelude_traits, prelude_trait_ids}
+use check/cx.{ModExports}
 use lsp/lspq.{QCx, locals_at}
 use front/lexer.{SourceView, view_of, slice_cp}
-use front/ast.{module_traits}
+use front/ast.{
+  module_traits, module_fns, module_types, module_consts, module_effects
+}
+use front/parser
+use driver/analyze.{use_candidates}
 
 ## One completion item, ready to serialize. `kind` is the LSP CompletionItemKind
 ## code (Function=3, Variable=6, Class=7, Interface=8, Keyword=14, EnumMember=20).
@@ -136,8 +150,11 @@ fn fresh_name_tail(before: List[Char]) -> Bool = {
     w == "derive" || w == "trait"
 }
 
-## `^\s*(?:pub\s+)?use\b`
-fn use_line(before: List[Char]) -> Bool = {
+## `^\s*(?:pub\s+)?use\b` — everything after the keyword, or None when the
+## cursor is not on a `use` line. The word being typed is peeled off before
+## this sees the line (the client filters on it), so the tail always ends
+## where a fresh segment or name would begin.
+fn use_tail(before: List[Char]) -> Option[List[Char]] = {
   let n = len(before)
   var i = 0
   while i < n && is_space(before[i]) { i = i + 1 }
@@ -149,9 +166,15 @@ fn use_line(before: List[Char]) -> Bool = {
     }
   }
   if i + 3 <= n && from_code_points(slice_cps(before, i, i + 3)) == "use" {
-    i + 3 == n || not is_word(before[i + 3])
+    if i + 3 == n || not is_word(before[i + 3]) {
+      var j = i + 3
+      while j < n && is_space(before[j]) { j = j + 1 }
+      Some(slice_cps(before, j, n))
+    } else {
+      None
+    }
   } else {
-    false
+    None
   }
 }
 
@@ -182,12 +205,173 @@ fn add(it: Items, name: String, kind: Int, detail: Option[String], rank: String)
   }
 }
 
+# ---- `use` lines: module paths, then the names inside `.{ }` ----
+#
+# Kinds are the LSP's, and two of them are new here: Module=9 for a module
+# path that can be imported as it stands, Folder=19 for a directory that is
+# only a step on the way to one. A directory's label carries its trailing `/`,
+# so the list reads the way the line will: `front/`, then `lexer`.
+
+fn path_char(c: Char) -> Bool = is_word(c) || c == '/'
+
+## Everything a `use` line admits at the cursor.
+fn use_completions(qc: QCx, tail: List[Char]) -> List[CItem] !io = {
+  let n = len(tail)
+  var i = 0
+  while i < n && path_char(tail[i]) { i = i + 1 }
+  let path = from_code_points(slice_cps(tail, 0, i))
+  let rest = slice_cps(tail, i, n)
+  if len(rest) == 0 { return path_items(qc, path) }
+  if rest[0] == '.' { return import_items(qc, path, slice_cps(rest, 1, len(rest))) }
+  # `use java "com.x.Y"` names a class, not a module path. The quoted name is
+  # already suppressed as a string (lex_ctx), so this is the gap before it,
+  # where a module path would go and a class name cannot be guessed.
+  if path == "java" {
+    let none: List[CItem] = []
+    return none
+  }
+  # After a whole path the grammar admits one more thing: `as <name>`. The
+  # name is the user's to pick, so once `as` is there we are done.
+  if str.trim(from_code_points(rest)) == "" && path != "" {
+    let d: Option[String] =
+      Some("`use " ++ path ++ " as <name>` — rename the module in this file")
+    return [CItem { label: "as", kind: 14, detail: d, sort_text: Some("0as") }]
+  }
+  let none2: List[CItem] = []
+  none2
+}
+
+## The next segment, for every candidate path under the segments already
+## typed. A candidate that ends here is a module; one that continues is a
+## directory, and the two can share a name (`a/b.dawn` beside `a/b/c.dawn`),
+## which is why the trailing `/` is part of the label rather than decoration.
+fn seg_items(it0: Items, prefix: List[String], paths: List[String], rank: String) -> Items = {
+  var it = it0
+  let d = len(prefix)
+  for mp in paths {
+    let segs = str.split(mp, "/")
+    if len(segs) > d && list.take(segs, d) == prefix {
+      if len(segs) == d + 1 {
+        it = add(it, segs[d], 9, Some(mp), rank)
+      } else {
+        let dir = join(list.take(segs, d + 1), "/")
+        it = add(it, segs[d] ++ "/", 19, Some(dir ++ "/…"), rank)
+      }
+    }
+  }
+  it
+}
+
+## Module paths one segment at a time. `typed` is the path so far; the segment
+## being typed was peeled off with the word, so it ends at a `/` or is empty.
+##
+## Two sources, and they are ranked apart only because the first segment is
+## where they meet: below it a path is either under `std/` or it is not, so
+## the groups never interleave again.
+fn path_items(qc: QCx, typed: String) -> List[CItem] !io = {
+  let parts = str.split(typed, "/")
+  let prefix = list.take(parts, len(parts) - 1)
+  var it = Items { out: [], seen: set.empty() }
+  it = seg_items(it, prefix, sort(map.keys(use_candidates(qc.entry.path))), "0")
+  it = seg_items(it, prefix, sort(map.keys(qc.std.exports)), "1")
+  if len(prefix) == 0 {
+    let d: Option[String] = Some("`use java \"com.x.Y\"` — import a Java class")
+    it = add(it, "java", 14, d, "2")
+  }
+  it.out
+}
+
+## The names inside `use a/b.{ }`. `after` is everything between the `.` and
+## the word being typed.
+fn import_items(qc: QCx, path: String, after: List[Char]) -> List[CItem] !io = {
+  let none: List[CItem] = []
+  let n = len(after)
+  # `use a/b.` — a selective import is the only thing a `.` can open, and it
+  # opens with `{`. A list already closed is not being added to.
+  if n == 0 || after[0] != '{' { return none }
+  var seen: Set[String] = set.empty()
+  for nm in str.split(from_code_points(slice_cps(after, 1, n)), ",") {
+    let t = str.trim(nm)
+    if t == "}" || str.contains(t, "}") { return none }
+    if t != "" { seen = set.insert(seen, t) }
+  }
+  var it = Items { out: [], seen: seen }
+  # A module already in the program has been checked, so its exports carry
+  # rendered signatures. The one being imported by the line under the cursor
+  # has not -- that `use` is what would have loaded it, and it does not parse
+  # yet -- so it is read and parsed here for its names alone.
+  match map.get(qc.exports_env, path) {
+    Some(ex) -> exported_items(qc, it, ex)
+    None ->
+      match map.get(use_candidates(qc.entry.path), path) {
+        Some(f) ->
+          match io.read_file(f) {
+            Ok(text) -> declared_items(it, text)
+            Err(_) -> none
+          }
+        None -> none
+      }
+  }
+}
+
+## A checked module's exports, with the signatures the checker rendered.
+fn exported_items(qc: QCx, it0: Items, ex: ModExports) -> List[CItem] = {
+  var it = it0
+  let adts = qc.entry.cx.adts
+  for pr in map.entries(ex.fns) {
+    let (name, sig) = pr
+    it = add(it, name, 3, Some(sig_render(adts, qc.entry.cx.traits, sig)), "0")
+  }
+  for name in map.keys(ex.types_by_name) { it = add(it, name, 7, Some("type " ++ name), "0") }
+  for name in map.keys(ex.aliases) { it = add(it, name, 7, Some("alias " ++ name), "0") }
+  for name in map.keys(ex.ctors) { it = add(it, name, 20, Some("constructor"), "0") }
+  for pr in map.entries(ex.consts) {
+    let (name, ty) = pr
+    it = add(it, name, 21, Some("const " ++ name ++ ": " ++ ty_show(adts, ty)), "0")
+  }
+  for name in map.keys(ex.traits_by_name) { it = add(it, name, 8, Some("trait " ++ name), "0") }
+  for name in map.keys(ex.effects) { it = add(it, name, 23, Some("effect " ++ name), "0") }
+  it.out
+}
+
+## The same surface read off the source instead: every `pub` declaration the
+## parser found. No signatures — nothing has checked this module — and no
+## trait methods, which become importable only once the trait is known to
+## inject them.
+fn declared_items(it0: Items, text: String) -> List[CItem] = {
+  var it = it0
+  let (m, _) = parser.parse_module(text)
+  for d in module_fns(m) {
+    if d.is_pub { it = add(it, d.name, 3, Some("fn " ++ d.name), "0") }
+  }
+  for d in module_types(m) {
+    if d.is_pub {
+      let kind = match d.alias_target {
+        Some(_) -> "alias "
+        None -> "type "
+      }
+      it = add(it, d.name, 7, Some(kind ++ d.name), "0")
+      for c in d.ctors { it = add(it, c.name, 20, Some("constructor of " ++ d.name), "0") }
+    }
+  }
+  for d in module_consts(m) {
+    if d.is_pub { it = add(it, d.name, 21, Some("const " ++ d.name), "0") }
+  }
+  for d in module_traits(m) {
+    if d.is_pub { it = add(it, d.name, 8, Some("trait " ++ d.name), "0") }
+  }
+  for d in module_effects(m) {
+    if d.is_pub { it = add(it, d.name, 23, Some("effect " ++ d.name), "0") }
+  }
+  it.out
+}
+
 pub fn keywords() -> List[String] =
   ["fn", "let", "var", "type", "alias", "const", "use", "java", "pub", "trait", "impl",
     "match", "if", "else", "for", "in", "while", "return", "break", "continue",
     "comptime", "unsafe_pure", "test", "assert", "with", "true", "false", "not"]
 
-pub fn completions_at(qc: QCx, text: String, offset: Int) -> List[CItem] = {
+pub fn completions_at(qc: QCx, text: String, offset: Int) -> List[CItem] !io = {
   let v = view_of(text)
   let cps = v.cps
   let n = len(cps)
@@ -219,9 +403,13 @@ pub fn completions_at(qc: QCx, text: String, offset: Int) -> List[CItem] = {
     let st: Option[String] = None
     return [CItem { label: "io", kind: 14, detail: d, sort_text: st }]
   }
-  if fresh_name_tail(before) || use_line(before) {
+  if fresh_name_tail(before) {
     let none: List[CItem] = []
     return none
+  }
+  match use_tail(before) {
+    Some(tail) -> return use_completions(qc, tail)
+    None -> ()
   }
   if nb > 0 && before[nb - 1] == '.' {
     let none: List[CItem] = []
@@ -285,4 +473,44 @@ pub fn completions_at(qc: QCx, text: String, offset: Int) -> List[CItem] = {
   let nd2: Option[String] = None
   it = add(it, "derive", 14, nd2, "3")
   it.out
+}
+
+# ---- tests ----
+#
+# The `use` branch's disk-reading half is checked end to end against the real
+# tree by scripts/lsp-use-completion.py -- an oracle a unit test cannot have,
+# since the answer is what is on disk. What is left here is the two pure
+# decisions it rests on: where the tail of a `use` line begins, and what one
+# `/` does to a set of paths.
+
+test "`use` lines are recognized, and everything after the keyword is the tail" {
+  fn tail_of(s: String) -> String =
+    match use_tail(code_points(s)) {
+      Some(t) -> "|" ++ from_code_points(t)
+      None -> "-"
+    }
+  assert tail_of("use ") == "|"
+  assert tail_of("  pub use ") == "|"
+  assert tail_of("use front/") == "|front/"
+  assert tail_of("use front/lexer.{view_of, ") == "|front/lexer.{view_of, "
+  # `-` = not a use line: the keyword has to be the line's first word, whole
+  assert tail_of("let used = ") == "-"
+  assert tail_of("  useful(") == "-"
+  assert tail_of("") == "-"
+}
+
+test "one `/` steps down one level, and a directory keeps its slash" {
+  fn show(items: List[CItem]) -> String =
+    join(map(items, it => it.label ++ ":" ++ to_string(it.kind)), " ")
+  let paths = ["front/lexer", "front/ast", "front/fmt/rules", "main", "check/types"]
+  let none: List[String] = []
+  let fresh = Items { out: [], seen: set.empty() }
+  # Module=9 for a path that can be imported as it stands, Folder=19 for one
+  # that is only a step -- and a directory is offered once however many
+  # modules are under it.
+  assert show(seg_items(fresh, none, paths, "0").out) == "front/:19 main:9 check/:19"
+  assert show(seg_items(fresh, ["front"], paths, "0").out) == "lexer:9 ast:9 fmt/:19"
+  assert show(seg_items(fresh, ["front", "fmt"], paths, "0").out) == "rules:9"
+  # a prefix that names nothing offers nothing, rather than everything
+  assert show(seg_items(fresh, ["nope"], paths, "0").out) == ""
 }
