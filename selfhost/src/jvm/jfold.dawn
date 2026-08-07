@@ -1,0 +1,173 @@
+## Compile-time evaluation of vouched `use java` calls -- route C of
+## docs/pure-ffi-design.md: marshal the scalar arguments, invoke the static
+## method reflectively, bring the scalar result back.
+##
+## This is the half of comptime folding that cannot exist off the JVM, split
+## out so `interp` -- and with it the native compiler's whole module closure
+## -- carries no `use java`. The interpreter keeps the policy (the
+## --comptime-ffi gate, static-only, no ctors, no fields) and reaches this
+## module only through the `jcall` hook a main wires into `CtOpts`: the JVM
+## main wires `fold_call`; a main that wires nothing gets `interp` 's
+## default, which refuses with a diagnostic instead of reflecting.
+
+use std/map
+use std/set
+use check/tast.{TJavaCall, TFun}
+use check/types.{OPTION_ID}
+use ir/core.{CValue, VInt, VFloat, VBool, VStr, VUnit, VAdt}
+use ir/interp.{eval_comptime, CtOpts, cvalue_kind}
+use jvm/jreflect
+use front/parser
+use check/cx.{ModExports, Cx, cx_new}
+use check/checker.{check_module}
+use java "java.lang.Object"
+use java "java.lang.Long"
+use java "java.lang.Integer"
+use java "java.lang.Double"
+use java "java.lang.Boolean"
+use java "java.lang.Number"
+use java "java.util.Objects"
+
+fn some_v(v: CValue) -> CValue = VAdt(OPTION_ID, 0, [v])
+
+fn none_v() -> CValue = VAdt(OPTION_ID, 1, [])
+
+fn to_java_arg(p: String, v: CValue) -> Option[Object] !io =
+  match v {
+    VInt(n) ->
+      if p == "long" {
+        Some(Objects.requireNonNull(Long.valueOf(n).expect("box")).expect("non-null"))
+      } else if p == "int" {
+        Some(Objects.requireNonNull(Integer.valueOf(n).expect("box")).expect("non-null"))
+      } else {
+        None
+      }
+    VFloat(f) ->
+      if p == "double" {
+        Some(Objects.requireNonNull(Double.valueOf(f).expect("box")).expect("non-null"))
+      } else {
+        None
+      }
+    VBool(b) ->
+      if p == "boolean" {
+        Some(Objects.requireNonNull(Boolean.valueOf(b).expect("box")).expect("non-null"))
+      } else {
+        None
+      }
+    VStr(s) ->
+      if p == "java.lang.String" {
+        Some(Objects.requireNonNull(s).expect("non-null"))
+      } else {
+        None
+      }
+    _ -> None
+  }
+
+## Java result → Dawn value; must agree with the checker's map_java_return or
+## folding would lie. Reference returns arrive wrapped in Option.
+##
+## The four reclaims are the arms of that agreement, not places a value could
+## surprise us: `rc` is the method's declared return class and the JDK boxes a
+## `long` to a `Long`. So the `Err` that `cast` now hands back (LANG-02) is a
+## broken invariant, and it stops the compiler rather than becoming an `Err` of
+## this function — that `Err` is a diagnostic about the *user's* program, and
+## turning a bug in this file into one would blame the wrong party.
+fn from_java_ret(rc: String, r: Option[Object]) -> Result[CValue, (String, String)] !io =
+  if rc == "void" {
+    Ok(VUnit)
+  } else if rc == "long" || rc == "int" || rc == "short" || rc == "byte" {
+    let o = r.expect("primitive result")
+    let got: Result[Number, ForeignError] = cast(o)
+    let n2: Number = match got {
+      Ok(v) -> v
+      Err(e) -> panic("jfold.from_java_ret: " ++ rc ++ " did not box to a Number: " ++ e.message)
+    }
+    Ok(VInt(n2.longValue()))
+  } else if rc == "double" || rc == "float" {
+    let o = r.expect("primitive result")
+    let got: Result[Number, ForeignError] = cast(o)
+    let n2: Number = match got {
+      Ok(v) -> v
+      Err(e) -> panic("jfold.from_java_ret: " ++ rc ++ " did not box to a Number: " ++ e.message)
+    }
+    Ok(VFloat(n2.doubleValue()))
+  } else if rc == "boolean" {
+    let o = r.expect("primitive result")
+    let got: Result[Boolean, ForeignError] = cast(o)
+    let b2: Boolean = match got {
+      Ok(v) -> v
+      Err(e) -> panic("jfold.from_java_ret: boolean did not box to a Boolean: " ++ e.message)
+    }
+    Ok(VBool(b2.booleanValue()))
+  } else if rc == "java.lang.String" {
+    match r {
+      None -> Ok(none_v())
+      Some(o) -> {
+        let got: Result[String, ForeignError] = cast(o)
+        let s2: String = match got {
+          Ok(v) -> v
+          Err(e) -> panic("jfold.from_java_ret: a String return was not a String: " ++ e.message)
+        }
+        Ok(some_v(VStr(s2)))
+      }
+    }
+  } else {
+    Err(("cannot bring this Java result back at compile time",
+      "route C returns Int/Float/Bool/String (and Unit) only; got " ++
+        jreflect.class_info(rc).simple))
+  }
+
+## The hook the JVM main wires into `CtOpts`. The interpreter has already
+## checked policy (--comptime-ffi, static-only, no ctors, no fields) and
+## evaluated the arguments; this does the part that needs a host JVM.
+pub fn fold_call(jc: TJavaCall, args: List[CValue]) -> Result[CValue, (String, String)] !io = {
+  var jargs: List[Object] = []
+  var i = 0
+  for p in jc.param_cls {
+    let v = args[i]
+    match to_java_arg(p, v) {
+      Some(o) -> { jargs = jargs ++ [o] }
+      None ->
+        return Err(("cannot pass this argument to Java at compile time",
+          "route C marshals Int/Float/Bool/String only; got a " ++
+            cvalue_kind(v) ++ " for a " ++ jreflect.class_info(p).simple ++
+            " parameter"))
+    }
+    i = i + 1
+  }
+  let simple = jreflect.class_info(jc.fqcn).simple
+  match jreflect.invoke_static(jc.fqcn, jc.method, jc.param_cls, jargs) {
+    Err(t) ->
+      Err(("`" ++ simple ++ "." ++ jc.method ++ "` threw " ++ t,
+        "the unsafe_pure around this call vouches that it is pure and total; " ++
+          "a throw means that promise does not hold for these arguments"))
+    Ok(r) -> from_java_ret(jc.ret_cls, r)
+  }
+}
+
+# ---- tests ----
+
+fn ffi_java_src() -> String =
+  "use java \"java.lang.Math\"\n" ++
+  "const F: Int = unsafe_pure { Math.abs(-5) }\n" ++
+  "const S: String = unsafe_pure { Long.toHexString(255) }.expect(\"hex\")\n" ++
+  "use java \"java.lang.Long\"\n"
+
+test "route C folds a vouched static Java call when the host grants it" {
+  let (m, pdiags) = parser.parse_module(ffi_java_src())
+  assert len(pdiags) == 0
+  let env: Map[String, ModExports] = map.empty()
+  # the fixture is a std module: unsafe_pure is std-only (LANG-01 step 1)
+  let cx0 = cx_new(Some("std/t"), None)
+  let (cx1, tm) = check_module(Cx { ..cx0, jsig: jreflect.jsig_real() }, m, env)
+  assert len(cx1.diags) == 0
+  let no_fns: Map[String, TFun] = map.empty()
+  let no_owner: Map[String, Map[String, TFun]] = map.empty()
+  let no_impl: Map[(Int, String, String), (String, TFun)] = map.empty()
+  let out = eval_comptime(tm, no_fns, no_owner, no_impl, set.empty(), cx1.adts,
+    cx1.traits, cx1.impl_table, "m",
+    CtOpts { fuel: 1000000, ffi: true, jcall: fold_call })
+  assert len(out.diags) == 0
+  assert map.get(out.consts, "F") == Some(VInt(5))
+  assert map.get(out.consts, "S") == Some(VStr("ff"))
+}

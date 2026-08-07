@@ -1,0 +1,170 @@
+# The `dawn test` runner for the native backend: the C mirror of
+# `testrun.dawn`, which synthesises a `dawn$TestMain` class on the JVM.
+#
+# Same job, different material. A test block is not a Dawn-callable function,
+# so neither backend can express the runner in Dawn; the JVM writes bytecode
+# with ASM and this writes C text. What both produce is the same report --
+# `PASS  <label>` / `FAIL  <label>`, the failure message indented six spaces a
+# line, then the summary -- and the same exit code.
+#
+# The two failure mechanisms line up: the JVM runner wraps each call in
+# `catch (Throwable)`, and `dawn_catch_panic` is the native handler that takes
+# both failure kinds (dawn_rt.c, `dawn_find_handler`). What it hands back is a
+# `Result[_, ForeignError]`, whose `message` field is what `getMessage()` is on
+# the other side.
+#
+# Symbol names here have no `__` in them, and every mangled Dawn name does
+# (`emitc.mangle` joins owner and name with one) -- the same argument that lets
+# `dawn_program_entry` share the translation unit with emitted code.
+
+use std/str
+use c/emitc.{str_static_def, test_symbol}
+
+## `PASS  ` / `FAIL  ` -- two spaces, as `cmdTest` has printed since Kotlin.
+fn pass_line(label: String) -> String = "PASS  " ++ label
+
+fn fail_line(label: String) -> String = "FAIL  " ++ label
+
+## The static and helper definitions every generated runner shares. Written
+## once per translation unit, ahead of the per-test material.
+fn preamble() -> List[String] =
+  [
+    "",
+    "/* ---- the `dawn test` runner (generated; selfhost/src/c/ctestrun.dawn) ---- */",
+    "",
+    str_static_def("dawn_test_indent", "      "),
+    "",
+    "static int64_t dawn_test_failed = 0;",
+    "",
+    "/* One test. `dawn_catch_panic` takes a fault as well as a panic, which is",
+    " * what `catch (Throwable)` is on the JVM side; the message it hands back",
+    " * is printed a line at a time, each indented six spaces, the way",
+    " * `String.split(\"\\n\", -1)` feeds the JVM runner's loop. The borrowed",
+    " * `dawn_str_lit` never outlives the print it is made for. */",
+    "static void dawn_test_one(dawn_str* pass, dawn_str* fail, void* thunk) {",
+    "  dawn_clo* c = dawn_clo_new(thunk, 0, 0);",
+    "  dawn_adt* r = dawn_catch_panic(c);",
+    "  if (r->tag == DAWN_TAG_OK) {",
+    "    dawn_io_println(pass);",
+    "  } else {",
+    "    dawn_io_println(fail);",
+    "    dawn_adt* fe = (dawn_adt*)r->fields[0].p;",
+    "    dawn_str* m = (dawn_str*)fe->fields[1].p;",
+    "    int64_t start = 0;",
+    "    int64_t i = 0;",
+    "    for (;;) {",
+    "      if (i == m->len || m->p[i] == '\\n') {",
+    "        dawn_io_print(&dawn_test_indent);",
+    "        dawn_io_println(dawn_str_lit(m->p + start, i - start));",
+    "        if (i == m->len) break;",
+    "        start = i + 1;",
+    "      }",
+    "      i++;",
+    "    }",
+    "    dawn_test_failed++;",
+    "  }",
+    "  dawn_drop((void*)r);",
+    "  dawn_drop((void*)c);",
+    "}",
+    ""
+  ]
+
+## The thunk and the two report lines for one test. The thunk is a closure
+## adapter with no captures: `dawn_catch_panic` calls through `dawn_clo`, and a
+## Unit-returning body still owes the erased boundary a slot.
+fn one_test(i: Int, sym: String, label: String) -> List[String] = {
+  let n = to_string(i)
+  [
+    str_static_def("dawn_test_pass_" ++ n, pass_line(label)),
+    str_static_def("dawn_test_fail_" ++ n, fail_line(label)),
+    "static void* dawn_test_thunk_" ++ n ++ "(dawn_clo* env) {",
+    "  (void)env;",
+    "  return (void*)dawn_box_unit(" ++ sym ++ "());",
+    "}",
+    ""
+  ]
+}
+
+## The runner's C, to be appended to `emitc.emit_headless`'s output. `tests`
+## is (owning module class, test index within that module, label) in run
+## order -- the same triple `testrun.gen_test_main` takes, and the labels are
+## prefixed with the module path by the caller for the same reason.
+pub fn runner(tests: List[(String, Int, String)]) -> String = {
+  var out: List[String] = preamble()
+  var calls: List[String] = []
+  var k = 0
+  for t in tests {
+    let (cls, idx, label) = t
+    out = out ++ one_test(k, test_symbol(cls, idx), label)
+    calls = calls ++
+      ["  dawn_test_one(&dawn_test_pass_" ++ to_string(k) ++ ", &dawn_test_fail_" ++
+          to_string(k) ++ ", (void*)dawn_test_thunk_" ++ to_string(k) ++ ");"]
+    k = k + 1
+  }
+  let total = to_string(len(tests))
+  out = out ++
+    [
+      str_static_def("dawn_test_all_passed", total ++ " test(s) passed"),
+      str_static_def("dawn_test_some_failed", " of " ++ total ++ " test(s) failed"),
+      "",
+      "static void dawn_test_entry(void) {"
+    ] ++ calls ++
+    [
+      "  if (dawn_test_failed == 0) {",
+      "    dawn_io_println(&dawn_test_all_passed);",
+      "    return;",
+      "  }",
+      "  /* the count, decimal, without pulling a formatter into the runtime's",
+      "   * contract; the branch guarantees at least one digit */",
+      "  {",
+      "    char buf[24];",
+      "    char rev[24];",
+      "    int64_t v = dawn_test_failed;",
+      "    int k = 0;",
+      "    int n = 0;",
+      "    do { rev[k++] = (char)('0' + (int)(v % 10)); v /= 10; } while (v > 0);",
+      "    while (k > 0) buf[n++] = rev[--k];",
+      "    dawn_io_print(dawn_str_lit(buf, n));",
+      "  }",
+      "  dawn_io_println(&dawn_test_some_failed);",
+      "  (void)dawn_io_exit(1);",
+      "}",
+      "",
+      "int main(int argc, char** argv) {",
+      "  return dawn_rt_main(argc, argv, dawn_test_entry);",
+      "}",
+      ""
+    ]
+  join(out, "\n")
+}
+
+# ---- tests ----
+
+test "every test gets its own thunk, its own two lines and one call" {
+  let c = runner([("m", 0, "first"), ("m", 1, "second")])
+  # the labels reach the report lines, escaped by the emitter's own escaper
+  assert str.contains(c, "\"PASS  first\"")
+  assert str.contains(c, "\"FAIL  second\"")
+  # index 1 is the *module's* second test; k is the program-wide position, and
+  # the two coincide only because both tests here come from one module
+  assert str.contains(c, "dawn_m__dawn_3test_31()")
+  assert str.contains(c, "dawn_test_one(&dawn_test_pass_1, &dawn_test_fail_1,")
+  assert str.contains(c, "\"2 test(s) passed\"")
+  assert str.contains(c, "\" of 2 test(s) failed\"")
+  # exactly one entry point, and the tests run on the runtime's big stack
+  assert str.contains(c, "int main(int argc, char** argv) {")
+  assert str.contains(c, "dawn_rt_main(argc, argv, dawn_test_entry)")
+}
+
+test "a description that would break the C literal is escaped, not passed through" {
+  let c = runner([("m", 0, "a \"quoted\" \\ tab\there")])
+  assert str.contains(c, "\"PASS  a \\\"quoted\\\" \\\\ tab\\there\"")
+}
+
+test "the program-wide position and the module-local index are different numbers" {
+  # two modules, each with its own test 0: the symbols must stay distinct
+  let c = runner([("alpha", 0, "a :: x"), ("beta", 0, "b :: y")])
+  assert str.contains(c, "dawn_alpha__dawn_3test_30()")
+  assert str.contains(c, "dawn_beta__dawn_3test_30()")
+  assert str.contains(c, "static void* dawn_test_thunk_1(dawn_clo* env)")
+}

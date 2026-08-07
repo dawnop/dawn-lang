@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate selfhost/src/stdsrc.dawn from std/.
+"""Generate selfhost/src/embed/stdsrc.dawn from std/.
 
 The embedded std used to ride as jar resources read back through
 ClassLoader.getSystemResourceAsStream -- a host-specific acquisition path the
@@ -18,7 +18,7 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 STD = ROOT / "std"
-OUT = ROOT / "selfhost" / "src" / "stdsrc.dawn"
+OUT = ROOT / "selfhost" / "src" / "embed" / "stdsrc.dawn"
 
 
 def index_names(text: str) -> list[str]:

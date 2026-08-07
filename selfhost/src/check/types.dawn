@@ -1,0 +1,2418 @@
+# The checker's type representation (P3b step 1; port of check/Types.kt per
+# docs/selfhost-checker.md §二). Kotlin's identity-equality objects become
+# id-carrying records: TyVar/EffVar compare by id, TyAdt points into an ADT
+# table (Map[Int, AdtI]) instead of holding a cyclic object reference, and
+# display strings are rendered on demand (ty_show needs the table for names).
+#
+# Fixed prelude ids (never minted by the checker's counter, which opens past
+# all of them -- see first_minted_id):
+#   ADTs:   Option = 0, Result = 1, ForeignError = 2
+#   traits: Ord = 0, Eq = 1, Hash = 2, Show = 3, Iter = 4
+#   type vars: builtin-signature T/U/A/K/V/B = -1..-6, Ord's T = -10,
+#              Option's T = -11, Result's T/E = -12/-13, Eq's T = -14,
+#              Hash's T = -15, Show's T = -16, Iter's T = -17
+#   effect vars: the builtin signatures' `e` = -1
+#
+# ADT ids and trait ids are separate namespaces (Option and Ord are both 0) that
+# happen to share one counter, so reserving two more trait ids costs two ADT ids.
+
+use std/map
+use std/list
+use std/set
+use std/str
+
+# ---- effects (spec §6) ----
+
+pub type Eff =
+  | EPure
+  | EIo
+  | EffVar(name: String, id: Int)
+# a normalized union: >= 2 distinct variables, no io, sorted by id
+  | EUnion(vars: List[(Int, String)])
+# The second axis (docs/effects-design.md §4.1): a base row -- one of the four
+# constructors above, never this one -- plus a non-empty, id-sorted set of
+# declared effects. Labels are a component of the normal form, not a member of
+# the base lattice: io absorbs effect variables and never absorbs a label,
+# because evidence is synthesised per label and an absorbed one has no
+# parameter to arrive through. `labels` empty is not representable: the normal
+# form is then the base alone, which is what keeps every label-free program's
+# behaviour byte-identical to what it was before labels existed.
+  | ELabeled(base: Eff, labels: List[(Int, String)])
+
+fn union_has(vs: List[(Int, String)], id: Int) -> Bool = {
+  for v in vs {
+    let (vid, _) = v
+    if vid == id { return true }
+  }
+  false
+}
+
+fn by_id(vs: List[(Int, String)]) -> List[(Int, String)] =
+  sort_by(vs, (a, b) => {
+    let (ia, _) = a
+    let (ib, _) = b
+    ia - ib
+  })
+
+## The base row: the effect with its labels taken off.
+pub fn eff_base(e: Eff) -> Eff =
+  match e {
+    ELabeled(b, _) -> b
+    _ -> e
+  }
+
+## The declared effects in this row, id-sorted (empty for a bare base).
+pub fn eff_labels(e: Eff) -> List[(Int, String)] =
+  match e {
+    ELabeled(_, ls) -> ls
+    _ -> []
+  }
+
+## The normal form of (base, labels): no labels means the base itself.
+pub fn eff_with_labels(base: Eff, labels: List[(Int, String)]) -> Eff =
+  if len(labels) == 0 { base } else { ELabeled(base, by_id(labels)) }
+
+fn merge_labels(a: List[(Int, String)], b: List[(Int, String)]) -> List[(Int, String)] = {
+  var out = a
+  for l in b {
+    let (id, _) = l
+    if not union_has(out, id) { out = out ++ [l] }
+  }
+  out
+}
+
+## The base-axis union: io absorbs everything, variables accumulate.
+fn base_union(effs: List[Eff]) -> Eff = {
+  for e in effs {
+    if e == EIo { return EIo }
+  }
+  var vars: List[(Int, String)] = []
+  for e in effs {
+    match e {
+      EffVar(n, id) -> if not union_has(vars, id) { vars = vars ++ [(id, n)] }
+      EUnion(vs) -> {
+        for v in vs {
+          let (id, n) = v
+          if not union_has(vars, id) { vars = vars ++ [v] }
+        }
+      }
+      _ -> ()
+    }
+  }
+  if len(vars) == 0 { return EPure }
+  if len(vars) == 1 {
+    let (id, n) = vars[0]
+    return EffVar(n, id)
+  }
+  EUnion(by_id(vars))
+}
+
+## Combine effects into their normalized least upper bound.
+pub fn eff_union(effs: List[Eff]) -> Eff = {
+  var bases: List[Eff] = []
+  var labels: List[(Int, String)] = []
+  var any_label = false
+  for e in effs {
+    match e {
+      ELabeled(b, ls) -> {
+        any_label = true
+        bases = bases ++ [b]
+        labels = merge_labels(labels, ls)
+      }
+      _ -> { bases = bases ++ [e] }
+    }
+  }
+  let base = base_union(bases)
+  if not any_label { return base }
+  eff_with_labels(base, labels)
+}
+
+## Least upper bound in the effect lattice.
+pub fn lub_eff(a: Eff, b: Eff) -> Eff = eff_union([a, b])
+
+fn base_subsumes(outer: Eff, inner: Eff) -> Bool =
+  if outer == EIo {
+    true
+  } else if inner == EPure {
+    true
+  } else if outer == inner {
+    true
+  } else {
+    match outer {
+      EUnion(ovs) ->
+        match inner {
+          EffVar(_, id) -> union_has(ovs, id)
+          EUnion(ivs) -> {
+            for v in ivs {
+              let (id, _) = v
+              if not union_has(ovs, id) { return false }
+            }
+            true
+          }
+          _ -> false
+        }
+      _ -> false
+    }
+  }
+
+## Does `outer` permit every effect in `inner`? io covers all of the base axis;
+## pure is its bottom. The label axis is plain set containment: `!io` does not
+## cover a declared effect, which is what makes a label something a signature
+## has to admit to rather than something io quietly swallows.
+pub fn eff_subsumes(outer: Eff, inner: Eff) -> Bool = {
+  let ols = eff_labels(outer)
+  for l in eff_labels(inner) {
+    let (id, _) = l
+    if not union_has(ols, id) { return false }
+  }
+  base_subsumes(eff_base(outer), eff_base(inner))
+}
+
+## The atoms of a row, unsorted: "io" / variable names / effect names.
+fn eff_atoms(e: Eff) -> List[String] = {
+  var names: List[String] = []
+  match eff_base(e) {
+    EPure -> ()
+    EIo -> { names = names ++ ["io"] }
+    EffVar(n, _) -> { names = names ++ [n] }
+    EUnion(vs) -> {
+      for v in vs {
+        let (_, n) = v
+        names = names ++ [n]
+      }
+    }
+    ELabeled(_, _) -> ()
+  }
+  for l in eff_labels(e) {
+    let (_, n) = l
+    names = names ++ [n]
+  }
+  names
+}
+
+## Render an effect: "", "io", "e", "Ask", "(e1|e2)" (names sorted, like Kotlin).
+pub fn eff_show(e: Eff) -> String = {
+  let names = eff_atoms(e)
+  if len(names) == 0 {
+    ""
+  } else if len(names) == 1 {
+    names[0]
+  } else {
+    "(" ++ join(sort(names), "|") ++ ")"
+  }
+}
+
+## Render as a signature suffix: "", " !io", " !e", " !(e1|e2)".
+pub fn eff_suffix(e: Eff) -> String = if e == EPure { "" } else { " !" ++ eff_show(e) }
+
+# ---- types ----
+
+pub type Ty =
+  | TyInt
+  | TyFloat
+  | TyBool
+  | TyString
+  | TyBytes
+  | TyUnit
+# bottom type: the "return type" of panic/todo; usable as any type
+  | TyNever
+# error type: produced where checking failed; compatible with everything
+  | TyError
+# a type variable, introduced by [T, U] on a declaration; compares by id
+  | TyVar(name: String, id: Int)
+# a user-defined (or prelude) sum type, possibly instantiated: Option[Int]
+  | TyAdt(adt: Int, args: List[Ty])
+  | TyList(elem: Ty)
+  | TyMap(key: Ty, value: Ty)
+  | TySet(elem: Ty)
+# the one collection primitive a backend has to implement (D1): a growable
+# immutable vector std builds List/Map/Set out of. Not part of the language's
+# surface -- only std modules may name it, only std may call `array_*`.
+  | TyArray(elem: Ty)
+# an opaque imported Java class; the display is precomputed at creation
+# (arrays need Class reflection for their readable name)
+  | TyJava(fqcn: String, display: String)
+# `opaque type N[..] = T`: a type only its declaring module may see through.
+# The target rides along the way TyJava's display does, so every mapping from
+# a type to a *representation* answers without consulting a table -- at run
+# time an opaque type simply IS its target, and so is its equality, hash,
+# order and rendering. The only thing `id` buys is that outside the declaring
+# module the checker refuses to confuse the two.
+  | TyOpaque(id: Int, name: String, owner: String, target: Ty)
+# a projection `T.Item` (docs/assoc-types-design.md): an associated type read
+# off the impl chosen for `subject`. Canonical-form invariant: a ground type
+# never contains one -- reduction is eager (D3), so a projection only survives
+# over a rigid type variable. Everything downstream of reduction (dict keys,
+# descriptors, C reprs) panics on this variant rather than handling it.
+  | TyAssoc(subject: Ty, trait_id: Int, name: String)
+  | TyTuple(elems: List[Ty])
+  | TyFn(params: List[Ty], ret: Ty, eff: Eff)
+
+## An opaque type as the language sees the *value* behind it.
+##
+## Opacity is a rule about who may name a representation, never about what the
+## value is: at run time an opaque type IS its target, so every question about
+## the value -- which machine operation, which equality, which order, which
+## rendering -- asks the target. Only the checker, and only outside the
+## declaring module, keeps the two apart.
+pub fn peel_opaque(t: Ty) -> Ty =
+  match t {
+    TyOpaque(_, _, _, tgt) -> peel_opaque(tgt)
+    _ -> t
+  }
+
+## Does a value of this type live on the heap, and therefore get counted?
+##
+## The C backend answers the same question through `c_repr` -- a reference
+## type is exactly one whose slot is `p` -- and emitc's test "the reference
+## types are the pointer slots" is the joint that holds the two together. The
+## predicate lives here rather than there because the RC pass runs on Core,
+## which cannot see a backend, and a second copy of this rule is the kind that
+## drifts apart unnoticed (docs/perceus-design.md 9 R2).
+##
+## `String` was a value type (a pointer and a length passed by value, buffer
+## leaked by contract) until strings joined the ledger: the compiler
+## concatenates by the hundred megabyte, and the by-contract leak was what
+## kept LeakSanitizer off the corpus. A counted `dawn_str*` also halves the
+## erased slot -- the inline two-word string was what held every ADT field at
+## sixteen bytes. Literals are immortal statics, so they still cost nothing.
+pub fn is_ref_ty(t: Ty) -> Bool =
+  match t {
+    TyOpaque(_, _, _, tgt) -> is_ref_ty(tgt)
+    TyInt -> false
+    TyFloat -> false
+    TyBool -> false
+    TyString -> true
+    TyUnit -> false
+    TyNever -> false
+    # DICT_ADT_ID is the dictionary pseudo-type: a static table with no
+    # header, outside the ledger entirely (rc's `dictish` is the same rule
+    # seen from the expression side). Before this arm, a closure capturing a
+    # dictionary counted it in its capture mask, and dropping the closure
+    # walked `dawn_drop` into a static -- the unheaded-pointer guard.
+    TyAdt(id, _) -> id != DICT_ADT_ID
+    TyTuple(_) -> true
+    TyFn(_, _, _) -> true
+    TyVar(_, _) -> true
+    TyError -> true
+    TyBytes -> true
+    TyList(_) -> true
+    TyMap(_, _) -> true
+    TySet(_) -> true
+    TyArray(_) -> true
+    TyJava(_, _) -> true
+    # only alive over a rigid subject (canonical-form invariant), where it is
+    # an erased reference slot exactly like the TyVar it projects from
+    TyAssoc(_, _, _) -> true
+  }
+
+## The ADT id lowering's `dict_ty()` stamps on dictionary values: no real ADT
+## can have it (minting starts at 0). One name, so "is this a dictionary"
+## has one definition wherever a type is all there is to ask.
+pub const DICT_ADT_ID: Int = -1
+
+pub fn is_numeric(t: Ty) -> Bool = t == TyInt || t == TyFloat
+
+pub fn is_errorish(t: Ty) -> Bool = t == TyError || t == TyNever
+
+## `Char`'s opaque id. Reserved and negative, like `DICT_ADT_ID`, because this
+## is the one opaque type with no declaration site to mint an id for it.
+##
+## Why the compiler mints the type rather than `std/char` declaring it: `'a'`
+## is syntax, so the checker needs this type while typing a literal -- before,
+## and regardless of, any module being in scope. A name `ty_named` answers to
+## also cannot be declared in std, because `is_builtin_name` reads `ty_named`
+## and would call the declaration a redefinition. The mechanism is still
+## `opaque type` (spec §2.7): no `Ty` variant, no `Head`, no row in the four
+## scalar tables -- `peel_opaque` carries it to `Int`'s implementations, which
+## is what 2026-07-30 decided when it deleted `Cursor`'s variant. The owner is
+## `std/char`, so that module (and only it) sees through, and `char.of` /
+## `char.code` are two ordinary functions needing no intrinsic.
+pub const CHAR_OPAQUE_ID: Int = -2
+
+## The type of a character literal: `Char`, an opaque `Int`.
+pub fn ty_char() -> Ty = TyOpaque(CHAR_OPAQUE_ID, "Char", "std/char", TyInt)
+
+## The builtin scalar for a name, or None.
+pub fn ty_named(name: String) -> Option[Ty] =
+  match name {
+    "Int" -> Some(TyInt)
+    "Char" -> Some(ty_char())
+    "Float" -> Some(TyFloat)
+    "Bool" -> Some(TyBool)
+    "String" -> Some(TyString)
+    "Bytes" -> Some(TyBytes)
+    "Unit" -> Some(TyUnit)
+    _ -> None
+  }
+
+# ---- ADT / ctor / field info (id + table; docs/selfhost-checker.md §二) ----
+
+pub type FieldI = { name: String, ty: Ty }
+
+pub type CtorI = { adt: Int, name: String, fields: List[FieldI] }
+
+pub type AdtI = {
+  id: Int,
+  name: String,
+  is_record: Bool,
+  tparams: List[Ty],
+  ctors: List[CtorI],
+  derives_show: Bool,
+  derives_ord: Bool,
+  owner: Option[String]
+}
+
+pub alias Adts = Map[Int, AdtI]
+
+pub fn adt_of(adts: Adts, id: Int) -> AdtI =
+  match map.get(adts, id) {
+    Some(a) -> a
+    None -> panic("unknown adt id: ${id}")
+  }
+
+## The declared "self type": Tree[T] inside its own declaration.
+pub fn adt_self_ty(a: AdtI) -> Ty = TyAdt(a.id, a.tparams)
+
+## JVM internal name (erased): abstract base (sum) or the single class (record).
+pub fn adt_jvm_name(a: AdtI) -> String =
+  match a.owner {
+    Some(o) -> o ++ "$" ++ a.name
+    None -> a.name
+  }
+
+pub fn ctor_jvm_name(adts: Adts, c: CtorI) -> String = {
+  let a = adt_of(adts, c.adt)
+  if a.is_record { adt_jvm_name(a) } else { adt_jvm_name(a) ++ "$" ++ c.name }
+}
+
+# ---- rendering ----
+
+pub fn ty_show(adts: Adts, t: Ty) -> String =
+  match t {
+    TyInt -> "Int"
+    TyFloat -> "Float"
+    TyBool -> "Bool"
+    TyString -> "String"
+    TyBytes -> "Bytes"
+    TyUnit -> "Unit"
+    TyNever -> "Never"
+    TyError -> "?"
+    TyVar(n, _) -> n
+    TyAdt(aid, targs) -> {
+      let name = adt_of(adts, aid).name
+      if len(targs) == 0 {
+        name
+      } else {
+        name ++ "[" ++ join(map(targs, x => ty_show(adts, x)), ", ") ++ "]"
+      }
+    }
+    TyList(e) -> "List[" ++ ty_show(adts, e) ++ "]"
+    TyMap(k, v) -> "Map[" ++ ty_show(adts, k) ++ ", " ++ ty_show(adts, v) ++ "]"
+    TySet(e) -> "Set[" ++ ty_show(adts, e) ++ "]"
+    TyArray(e) -> "Array[" ++ ty_show(adts, e) ++ "]"
+    TyJava(_, display) -> display
+    # the name, never the target: a diagnostic outside the declaring module
+    # must not leak what the module is hiding
+    TyOpaque(_, name, _, _) -> name
+    TyTuple(elems) -> "(" ++ join(map(elems, x => ty_show(adts, x)), ", ") ++ ")"
+    TyFn(params, ret, eff) ->
+      "fn(" ++ join(map(params, x => ty_show(adts, x)), ", ") ++ ") -> " ++
+      ty_show(adts, ret) ++ eff_suffix(eff)
+    TyAssoc(s, _, n) -> ty_show(adts, s) ++ "." ++ n
+  }
+
+## Render a constructor like Kotlin CtorInfo.render (used in diagnostics).
+pub fn ctor_render(adts: Adts, c: CtorI) -> String = {
+  let a = adt_of(adts, c.adt)
+  let ret = ty_show(adts, adt_self_ty(a))
+  let fields = join(map(c.fields, f => f.name ++ ": " ++ ty_show(adts, f.ty)), ", ")
+  if a.is_record {
+    c.name ++ " { " ++ fields ++ " }"
+  } else if len(c.fields) == 0 {
+    c.name ++ ": " ++ ret
+  } else {
+    c.name ++ "(" ++ fields ++ "): " ++ ret
+  }
+}
+
+# ---- argument-to-field decision ----
+
+## Which field one argument fills, or why it fills none.
+pub type SlotPick =
+  # fills the field at this index
+  | SlotAt(idx: Int)
+# named, and the constructor has no field of that name
+  | SlotNoField(name: String)
+# positional, and a named argument came before it
+  | SlotAfterNamed
+# positional, and past the last field
+  | SlotOverflow
+# the field at this index was already filled
+  | SlotTaken(idx: Int)
+
+## Which field each of `names` fills, in order: the positional prefix takes
+## fields left to right, a name takes the field it names, and the four ways an
+## argument can fail to land on one are answered rather than reported.
+##
+## One rule, two spellings. `C(x, y)` in a pattern and `C(x, y)` in an
+## expression pick their fields the same way, and until this existed they did
+## so through two copies of the loop -- which had already drifted: one took the
+## first field of a given name and the other the last. (Unobservable, as it
+## happens: a constructor with two fields of one name keeps only the first,
+## and the duplicate is a declaration error. Which is the point -- the copies
+## were free to differ and nothing said so.)
+##
+## What stays at the call sites is what they do with the answer: one binds a
+## sub-pattern and one checks an expression, and their diagnostics say
+## "pattern"/"matched twice" against "argument"/"given twice", at different
+## spans.
+pub fn ctor_slots(fields: List[FieldI], names: List[Option[String]]) -> List[SlotPick] = {
+  var out: List[SlotPick] = []
+  var filled: Set[Int] = set.empty()
+  var saw_named = false
+  var i = 0
+  for nm in names {
+    var pick = SlotOverflow
+    match nm {
+      Some(an) -> {
+        saw_named = true
+        match field_index(fields, an) {
+          None -> { pick = SlotNoField(an) }
+          Some(idx) -> { pick = if set.has(filled, idx) { SlotTaken(idx) } else { SlotAt(idx) } }
+        }
+      }
+      None ->
+        if saw_named {
+          pick = SlotAfterNamed
+        } else if i < len(fields) {
+          pick = if set.has(filled, i) { SlotTaken(i) } else { SlotAt(i) }
+        }
+    }
+    match pick {
+      SlotAt(idx) -> { filled = set.insert(filled, idx) }
+      _ -> ()
+    }
+    out = out ++ [pick]
+    i = i + 1
+  }
+  out
+}
+
+fn field_index(fields: List[FieldI], name: String) -> Option[Int] = {
+  var i = 0
+  for f in fields {
+    if f.name == name { return Some(i) }
+    i = i + 1
+  }
+  None
+}
+
+# ---- structural traversal ----
+#
+# Every walk over a type's structure is one of the two functions below with a
+# different rule at the leaves. They used to be written out six times --
+# subst, ty_mentions_var, reduce_via_bindings, reduce_assoc, is_concrete and
+# the checker's own mentions_tvar -- each ending in the same pair of arms and
+# the same comment saying why they were not a wildcard.
+#
+# That comment is now true of exactly one place. The `match` in each kernel
+# lists every Ty variant and has no `_` arm, and that is the wall: a new
+# parameterised variant fails to compile here, once, instead of silently
+# landing on a wildcard in five walks at the same time. Do not add a wildcard
+# arm to either function.
+
+## `f` applied to each of `t`'s immediate type children, with the node rebuilt
+## around the results; a type with no children comes back as itself.
+##
+## Effects ride through untouched -- an effect is not a type and this walk has
+## nothing to say about it. `subst` is the one caller that also rewrites a
+## function type's effect, so it keeps a `TyFn` arm of its own and reaches
+## here for everything else.
+pub fn ty_map_children(t: Ty, f: fn(Ty) -> Ty) -> Ty =
+  match t {
+    # a nullary head has nothing to map, and answering with `t` keeps the walk
+    # off the allocator for the commonest node in the table
+    TyAdt(aid, targs) -> if len(targs) == 0 { t } else { TyAdt(aid, map(targs, f)) }
+    TyList(e) -> TyList(f(e))
+    TyMap(k, v) -> TyMap(f(k), f(v))
+    TySet(e) -> TySet(f(e))
+    TyArray(e) -> TyArray(f(e))
+    TyTuple(elems) -> TyTuple(map(elems, f))
+    TyOpaque(id, n, ow, tgt) -> TyOpaque(id, n, ow, f(tgt))
+    # a projection's subject is a type, so it is a child like any other; what
+    # the projection itself becomes is the caller's rule, not this walk's
+    TyAssoc(s, tid, n) -> TyAssoc(f(s), tid, n)
+    TyFn(params, ret, eff) -> TyFn(map(params, f), f(ret), eff)
+    TyVar(_, _) -> t
+    TyInt | TyFloat | TyBool | TyString | TyBytes -> t
+    TyUnit | TyNever | TyError | TyJava(_, _) -> t
+  }
+
+## Does any of `t`'s immediate type children satisfy `f`? The existential
+## reading of the walk above, over exactly the same children.
+pub fn ty_any_child(t: Ty, f: fn(Ty) -> Bool) -> Bool =
+  match t {
+    TyAdt(_, targs) -> list.any(targs, f)
+    TyList(e) -> f(e)
+    TyMap(k, v) -> f(k) || f(v)
+    TySet(e) -> f(e)
+    TyArray(e) -> f(e)
+    TyTuple(elems) -> list.any(elems, f)
+    TyOpaque(_, _, _, tgt) -> f(tgt)
+    TyAssoc(s, _, _) -> f(s)
+    TyFn(params, ret, _) -> list.any(params, f) || f(ret)
+    TyVar(_, _) -> false
+    TyInt | TyFloat | TyBool | TyString | TyBytes -> false
+    TyUnit | TyNever | TyError | TyJava(_, _) -> false
+  }
+
+# ---- substitution ----
+
+## Replace type variables (and effect variables) by id.
+## Substitution is structural only: a projection whose subject just became
+## concrete is reduced by the checker's reduce_assoc at the instantiation choke
+## point, because reduction needs the impl table this module does not have.
+pub fn subst(t: Ty, m: Map[Int, Ty], em: Map[Int, Eff]) -> Ty =
+  match t {
+    TyVar(_, id) ->
+      match map.get(m, id) {
+        Some(r) -> r
+        None -> t
+      }
+    # the one arm ty_map_children cannot serve: a function type also carries an
+    # effect, and an effect is not a child of a type
+    TyFn(params, ret, eff) ->
+      TyFn(map(params, x => subst(x, m, em)), subst(ret, m, em), subst_eff(eff, em))
+    _ -> ty_map_children(t, x => subst(x, m, em))
+  }
+
+## Does `t` mention the type variable `id`? The question `subst` answers by
+## doing; asking it separately is what lets a caller tell "this parameter could
+## have been learned from here" from "it could not".
+##
+## Searches exactly the children `subst` rewrites, because it is the same walk
+## read existentially -- the two are `ty_map_children` and `ty_any_child` over
+## one set of children, and that is what keeps the answer honest.
+pub fn ty_mentions_var(t: Ty, id: Int) -> Bool =
+  match t {
+    TyVar(_, vid) -> vid == id
+    _ -> ty_any_child(t, x => ty_mentions_var(x, id))
+  }
+
+## Rewrite `subject.name` projections to an impl's own bindings -- everything
+## else walks structurally. Two callers, one shape: the checker uses it while
+## an impl's methods are being checked (before the impl has entered the
+## table), and lowering/codegen use it to spell a devirtualised call's
+## signature. The binding RHS goes in *verbatim* -- its own type variables are
+## the impl's parameters, exactly as they appear in the impl method's declared
+## signature -- because that declared signature is the callee's ABI: `Cur =
+## Int` must become an unboxed slot and `Item = T` must stay an erased one,
+## and instantiating the RHS would get the second wrong.
+pub fn reduce_via_bindings(t: Ty, tid: Int, subject: Ty, bindings: List[(String, Ty)]) -> Ty =
+  match t {
+    TyAssoc(s0, t0, n) -> {
+      let s2 = reduce_via_bindings(s0, tid, subject, bindings)
+      if t0 == tid && s2 == subject {
+        var out = TyAssoc(s2, t0, n)
+        for pr in bindings {
+          let (bn, bt) = pr
+          if bn == n { out = bt }
+        }
+        out
+      } else {
+        TyAssoc(s2, t0, n)
+      }
+    }
+    _ -> ty_map_children(t, x => reduce_via_bindings(x, tid, subject, bindings))
+  }
+
+## Substitution walks the normal form component by component: the base axis
+## substitutes as it always did, and labels ride through untouched -- a label
+## is not a variable and has nothing to be replaced by. A base that
+## substitutes *into* a labelled row merges through `eff_union`.
+pub fn subst_eff(e: Eff, em: Map[Int, Eff]) -> Eff =
+  match e {
+    EffVar(n, id) ->
+      match map.get(em, id) {
+        Some(r) -> r
+        None -> e
+      }
+    EUnion(vs) -> {
+      var effs: List[Eff] = []
+      for v in vs {
+        let (id, n) = v
+        effs = effs ++ [match map.get(em, id) {
+          Some(r) -> r
+          None -> EffVar(n, id)
+        }]
+      }
+      eff_union(effs)
+    }
+    ELabeled(b, ls) -> eff_union([subst_eff(b, em), ELabeled(EPure, ls)])
+    _ -> e
+  }
+
+# ---- symbols and signatures ----
+
+## Resolved local variable/parameter. `dict_of` is (trait id, tvar id) for a
+## hidden trait-dictionary binding.
+pub type Sym = {
+  name: String,
+  ty: Ty,
+  mutable: Bool,
+  dlo: Int,
+  dhi: Int,
+  dict_of: Option[(Int, Int)]
+}
+
+## Function signature (user functions and builtins alike).
+pub type Sig = {
+  name: String,
+  param_tys: List[Ty],
+  param_names: List[String],
+  ret: Ty,
+  eff: Eff,
+  is_builtin: Bool,
+  tparams: List[Ty],
+  # trait ids per type parameter, aligned with tparams; missing tail = unbounded
+  constraints: List[List[Int]],
+  owner: Option[String],
+  trait_id: Option[Int],
+  # (effect id, field index) when this signature is an effect *operation*
+  # rather than a function: calling it is a field read off the evidence in
+  # scope plus a closure call, never a call of a symbol that exists
+  op_of: Option[(Int, Int)],
+  # the return type (and effect) is still being inferred; ret is a placeholder
+  inferring: Bool
+}
+
+## The bounds of tparams[i], or none.
+pub fn bounds_of(s: Sig, i: Int) -> List[Int] =
+  match get(s.constraints, i) {
+    Some(bs) -> bs
+    None -> []
+  }
+
+# ---- effects ----
+
+## One declared effect. Its `id` is also the id of the synthesised evidence
+## record: the label and the record it is served by are one identity, so
+## nothing has to carry a second table from a label to its representation
+## (docs/effects-design.md §5.1).
+pub type EffectI = {
+  id: Int,
+  name: String,
+  owner: Option[String],
+  # operation names in declaration order = the evidence record's field order
+  ops: List[String]
+}
+
+pub alias Effects = Map[Int, EffectI]
+
+## The name of the evidence record an effect declaration synthesises. It is
+## unspellable on purpose -- `$` is not an identifier character -- so it shares
+## the ADT namespace with user types without ever colliding with one.
+pub fn ev_record_name(effect_name: String) -> String = "ev\$" ++ effect_name
+
+# ---- traits ----
+
+pub type MethodSig = { sig: Sig, has_default: Bool }
+
+pub type TraitI = {
+  id: Int,
+  name: String,
+  # the subject type parameter (a TyVar)
+  tvar: Ty,
+  is_pub: Bool,
+  owner: Option[String],
+  src_path: Option[String],
+  # methods by name, in declaration order
+  methods: List[(String, MethodSig)],
+  # associated type members, in declaration order (bare names: no bounds, no
+  # defaults -- docs/assoc-types-design.md D1). The name has no module-level
+  # identity; `T.Item` is the only way to reach it.
+  assoc: List[String],
+  # Do this trait's method names occupy the module function namespace? True for
+  # every trait a user can declare; false is reserved for compiler-built traits
+  # whose sole consumer is an operator (docs/prelude-namespace-design.md D1).
+  # Three injection paths read this field -- prelude seeding, local `trait`
+  # registration, and `pub trait` export -- so they cannot drift apart.
+  injects: Bool
+}
+
+## What an impl is indexed by: the outermost type constructor of its subject,
+## with the arguments dropped (trait-v2-design §3.3).
+##
+## Restricting subjects to a head applied to distinct variables (§3.2) is what
+## lets one equality answer three questions at once -- which impl matches,
+## whether two impls overlap, and whether recursive solving terminates. A type
+## with no head (a variable, a function, an error) can never be an impl
+## subject, which is why `head_of` is partial.
+##
+## Tuples are deliberately absent: they have no head name and are n-ary, so
+## they stay with the compiler-synthesised equality (§3.2, 决策 2/7).
+pub type Head =
+  | HInt
+  | HFloat
+  | HBool
+  | HString
+  | HBytes
+  | HUnit
+  | HAdt(adt: Int)
+  | HList
+  | HMap
+  | HSet
+  | HArray
+  | HJava(fqcn: String)
+  | HOpaque(id: Int)
+
+pub fn head_of(t: Ty) -> Option[Head] =
+  match t {
+    TyInt -> Some(HInt)
+    TyFloat -> Some(HFloat)
+    TyBool -> Some(HBool)
+    TyString -> Some(HString)
+    TyBytes -> Some(HBytes)
+    TyUnit -> Some(HUnit)
+    TyAdt(aid, _) -> Some(HAdt(aid))
+    TyList(_) -> Some(HList)
+    TyMap(_, _) -> Some(HMap)
+    TySet(_) -> Some(HSet)
+    TyArray(_) -> Some(HArray)
+    TyJava(fqcn, _) -> Some(HJava(fqcn))
+    # an opaque type may carry its own impl, distinct from its target's
+    TyOpaque(id, _, _, _) -> Some(HOpaque(id))
+    _ -> None
+  }
+
+## The arguments the head is applied to: the sub-goals an impl's constraints
+## land on (§3.3), and the parts a synthesised structural relation compares
+## through (§3.6). Anything without a head has none.
+pub fn type_args_of(t: Ty) -> List[Ty] =
+  match t {
+    TyAdt(_, args) -> args
+    TyTuple(elems) -> elems
+    TyList(e) -> [e]
+    TySet(e) -> [e]
+    TyArray(e) -> [e]
+    TyMap(k, v) -> [k, v]
+    _ -> []
+  }
+
+## Does this type still mention a rigid type parameter?
+##
+## This is the split trait v2 turns on (§3.8): a ground subject's dictionary is
+## known at compile time and stays a static singleton, a non-ground one's has
+## to be built at run time out of its arguments'. Lowering has always asked the
+## question; the checker asks it too now, so the two agree on which shape a
+## witness takes rather than each deciding for itself.
+pub fn is_ground(t: Ty) -> Bool =
+  match t {
+    TyVar(_, _) -> false
+    TyFn(ps, r, _) -> all_ground(ps) && is_ground(r)
+    TyInt | TyFloat | TyBool | TyString | TyBytes -> true
+    TyUnit | TyNever | TyError | TyJava(_, _) -> true
+    # A projection that survived reduction stands over a rigid subject (D3),
+    # so it mentions a type parameter by construction and the canonical-form
+    # invariant at TyAssoc's declaration says a ground type never contains
+    # one. Spelled out because the `_` below answered the opposite: it asks
+    # `type_args_of`, which has no arm for TyAssoc either, and an empty list
+    # is vacuously all-ground -- so `C.Item` came back ground and every
+    # caller that treats ground as "the relation is decided here" believed
+    # it.
+    TyAssoc(_, _, _) -> false
+    _ -> all_ground(type_args_of(t))
+  }
+
+pub fn all_ground(ts: List[Ty]) -> Bool = {
+  for t in ts {
+    if not is_ground(t) { return false }
+  }
+  true
+}
+
+## Can the compiler spell a relation out over this type's own structure?
+##
+## Records and tagged unions can: their parts are types, and the relation on
+## the whole is the relation on the parts. Containers cannot -- their element
+## walk lives in the runtime until S3 makes them Dawn -- and neither can a
+## function or a scalar. This is what decides whether a synthesised structural
+## impl has anything to do with the arguments it is given.
+pub fn expandable(t: Ty) -> Bool =
+  match t {
+    TyAdt(_, _) -> true
+    TyTuple(_) -> true
+    _ -> false
+  }
+
+pub alias Impls = Map[(Int, Head), ImplI]
+
+## Look an impl up by subject type. A subject with no head cannot have one,
+## which reads the same as the lookup missing.
+pub fn impl_at(tbl: Impls, tid: Int, t: Ty) -> Option[ImplI] =
+  match head_of(t) {
+    Some(h) -> map.get(tbl, (tid, h))
+    None -> None
+  }
+
+pub fn has_impl_at(tbl: Impls, tid: Int, t: Ty) -> Bool =
+  match impl_at(tbl, tid, t) {
+    Some(_) -> true
+    None -> false
+  }
+
+## Register an impl under its subject's head. Whoever gets here has already
+## established the subject may be one (`impl_subject_ok`, or the prelude's own
+## scalar list), so a headless subject is a compiler bug, not a user error.
+pub fn insert_impl(tbl: Impls, i: ImplI) -> Impls =
+  match head_of(i.subject) {
+    Some(h) -> map.insert(tbl, (i.trait_id, h), i)
+    None -> panic("impl subject has no head")
+  }
+
+## The sub-goals solving `Tr[t]` breaks into: one per bound the matching impl
+## puts on one of its own type parameters, in (parameter, bound) order -- the
+## same order every dictionary parameter list uses.
+##
+## With no conditional impl in the table the rule degrades to "one goal per
+## type argument, same trait", which is the compiler-synthesised structural
+## relation (trait-v2-design §3.6). Both sides of the pipeline ask this, so
+## the checker's witness arguments and lowering's dictionary parameters cannot
+## drift into different orders.
+pub fn sub_goals(tbl: Impls, tid: Int, subject: Ty) -> List[(Int, Ty)] = {
+  let args = type_args_of(subject)
+  match impl_at(tbl, tid, subject) {
+    Some(imp) ->
+      if len(imp.tparams) > 0 {
+        var out: List[(Int, Ty)] = []
+        var i = 0
+        for cons in imp.constraints {
+          for b in cons {
+            if i < len(args) { out = out ++ [(b, args[i])] }
+          }
+          i = i + 1
+        }
+        return out
+      }
+    None -> ()
+  }
+  var out: List[(Int, Ty)] = []
+  for a in args { out = out ++ [(tid, a)] }
+  out
+}
+
+pub type ImplI = {
+  trait_id: Int,
+  subject: Ty,
+  # A conditional impl's own parameters, and the bounds each one carries.
+  # `constraints` is indexed by tparam, like `Sig`'s is -- and since a subject
+  # may only apply these very parameters (trait-v2-design §3.2), every bound is
+  # a constraint on a direct argument of the head. That is what makes recursive
+  # solving terminate on term size rather than on a depth limit.
+  tparams: List[Ty],
+  constraints: List[List[Int]],
+  lo: Int,
+  hi: Int,
+  derived: Bool,
+  owner: Option[String],
+  src_path: Option[String],
+  provided: List[String],
+  # `type Item = X` bindings, one per associated type the trait declares
+  # (checked for exactly-once coverage at registration). The RHS is resolved
+  # in the scope of `tparams`; reduction instantiates it with the same
+  # substitution the witness gets (docs/assoc-types-design.md D4/D5).
+  assoc_bindings: List[(String, Ty)]
+}
+
+pub alias Traits = Map[Int, TraitI]
+
+pub fn trait_of(traits: Traits, id: Int) -> TraitI =
+  match map.get(traits, id) {
+    Some(t) -> t
+    None -> panic("unknown trait id: ${id}")
+  }
+
+pub fn impl_display(adts: Adts, traits: Traits, i: ImplI) -> String =
+  trait_of(traits, i.trait_id).name ++ "[" ++ ty_show(adts, i.subject) ++ "]"
+
+## Render a signature like Kotlin FnSig.render (used in golden dumps and docs).
+pub fn sig_render(adts: Adts, traits: Traits, s: Sig) -> String = {
+  var tp = ""
+  if len(s.tparams) > 0 {
+    var parts: List[String] = []
+    var i = 0
+    for v in s.tparams {
+      let bs = bounds_of(s, i)
+      let vname = ty_show(adts, v)
+      if len(bs) == 0 {
+        parts = parts ++ [vname]
+      } else {
+        let bnames = map(bs, b => trait_of(traits, b).name)
+        parts = parts ++ [vname ++ ": " ++ join(bnames, " + ")]
+      }
+      i = i + 1
+    }
+    tp = "[" ++ join(parts, ", ") ++ "]"
+  }
+  var ps: List[String] = []
+  var j = 0
+  for pt in s.param_tys {
+    let pn = match get(s.param_names, j) {
+      Some(n) -> n
+      None -> "_"
+    }
+    ps = ps ++ [pn ++ ": " ++ ty_show(adts, pt)]
+    j = j + 1
+  }
+  "fn " ++ s.name ++ tp ++ "(" ++ join(ps, ", ") ++ ") -> " ++ ty_show(adts, s.ret) ++
+    eff_suffix(s.eff)
+}
+
+# ---- prelude: Option / Result, Ord, builtins ----
+
+pub const OPTION_ID: Int = 0
+
+pub const RESULT_ID: Int = 1
+
+## What a foreign failure looks like once it has crossed into Dawn: the
+## payload of `catch_fault`/`catch_panic` (docs/audit/error-model-design.md
+## A). A prelude type rather than a std one, for the reason `Option` is: an
+## intrinsic returns it, so every program can name it without importing
+## anything, and std cannot declare a type the compiler already had to know.
+pub const FOREIGN_ERROR_ID: Int = 2
+
+pub const ORD_ID: Int = 0
+
+## `==` and `!=`. Unlike Ord it is not reached by a method call in source --
+## the operator is the spelling -- but it rides the same dictionary rail, which
+## is what a backend without a universal `equals` needs (docs/native-backend-plan.md §1).
+pub const EQ_ID: Int = 1
+
+## The hash half of the same identity. Nothing in the language calls it yet;
+## the pure-Dawn Map/Set of D2 will, through a `[K: Eq + Hash]` bound.
+pub const HASH_ID: Int = 2
+
+## Rendering. `to_string` and every `${...}` interpolation ask for this
+## witness, which is what makes `derive Show` an impl rather than a flag on
+## the ADT plus an instanceof chain only the JVM has.
+pub const SHOW_ID: Int = 3
+
+## Iteration: what `for x in xs` desugars to (#44 knife 2). Four methods
+## mirroring std/list's retired cursor quartet -- start/done/next/get over an
+## associated `Cur`, yielding an associated `Item` -- so a step allocates
+## nothing a given impl's cursor doesn't. The impls live in std (List, String,
+## Bytes, Map, Set); the trait is prelude because the *language* consumes it:
+## `for` needs the witness the way `==` needs Eq's, without an import.
+pub const ITER_ID: Int = 4
+
+## Subscripting: what `c[i]` resolves to (#44 knife 3). Two associated types --
+## `Idx` for what goes in the brackets, `Item` for what comes out -- and one
+## method. `[]` used to enumerate its own legal subjects in the checker, two
+## arms wide, which is a list a user type can never be added to; now the
+## question is the impl table's.
+##
+## The `List` and `Map` impls are minted by the prelude and their bodies are
+## `prim_relation`'s, the same division of labour Eq/Ord/Hash/Show already
+## have: the language keeps `list_index` a Core intrinsic (comptime folds it)
+## and keeps `m[k]` off a std module that itself indexes. A user type takes
+## the ordinary route -- write `impl Index[Grid]`, and nothing about it is
+## special-cased.
+pub const INDEX_ID: Int = 5
+
+pub fn opt_ty(t: Ty) -> Ty = TyAdt(OPTION_ID, [t])
+
+pub fn result_ty(t: Ty, e: Ty) -> Ty = TyAdt(RESULT_ID, [t, e])
+
+pub fn foreign_error_ty() -> Ty = TyAdt(FOREIGN_ERROR_ID, [])
+
+## The `T` in a `cast` call's `Result[T, ForeignError]`.
+##
+## Both emitters need it -- it is the type the reclaim is checked against --
+## and neither can read it off the argument, which is an erased `Object`. It
+## lives here rather than in one of them because a backend that peeled the
+## type differently would be checking against a different class.
+pub fn cast_target(ty: Ty) -> Ty =
+  match peel_opaque(ty) {
+    TyAdt(aid, args) ->
+      if aid == RESULT_ID && len(args) == 2 {
+        args[0]
+      } else {
+        panic("cast: not typed Result[T, ForeignError]")
+      }
+    _ -> panic("cast: not typed Result[T, ForeignError]")
+  }
+
+## The three prelude ADTs, keyed by their fixed ids.
+pub fn prelude_adts() -> Adts = {
+  let ot = TyVar("T", -11)
+  let option = AdtI {
+    id: OPTION_ID,
+    name: "Option",
+    is_record: false,
+    tparams: [ot],
+    ctors: [
+      CtorI { adt: OPTION_ID, name: "Some", fields: [FieldI { name: "value", ty: ot }] },
+      CtorI { adt: OPTION_ID, name: "None", fields: [] }
+    ],
+    derives_show: true,
+    derives_ord: false,
+    owner: None
+  }
+  let rt = TyVar("T", -12)
+  let re = TyVar("E", -13)
+  let result = AdtI {
+    id: RESULT_ID,
+    name: "Result",
+    is_record: false,
+    tparams: [rt, re],
+    ctors: [
+      CtorI { adt: RESULT_ID, name: "Ok", fields: [FieldI { name: "value", ty: rt }] },
+      CtorI { adt: RESULT_ID, name: "Err", fields: [FieldI { name: "error", ty: re }] }
+    ],
+    derives_show: true,
+    derives_ord: false,
+    owner: None
+  }
+  # A record, so a caller reads `e.kind` with no `match` in the way, and with
+  # three fields chosen for what every backend can answer:
+  #
+  #   kind     the backend's own name for the failure class -- a JVM binary
+  #            name (`getClass().getName()`), the native runtime's failure
+  #            kind. A *name*, never a rendered message: matching on a name is
+  #            a decision a compiler could one day check for typos, matching
+  #            on a message prefix (what spec 9.8 used to advise) is a
+  #            decision the JDK or libc can silently invalidate. Which names a
+  #            backend uses is backend-specific and documented as such --
+  #            portable matching is `Ok`/`Err` and nothing finer.
+  #   message  what the failure said, and nothing about its class.
+  #   cause    the failure underneath, rendered, where the backend has one.
+  #
+  # No stack: rendering `StackTraceElement[]` would be paid on every barrier,
+  # including the ones that never fail.
+  let ferr = AdtI {
+    id: FOREIGN_ERROR_ID,
+    name: "ForeignError",
+    is_record: true,
+    tparams: [],
+    ctors: [
+      CtorI {
+        adt: FOREIGN_ERROR_ID,
+        name: "ForeignError",
+        fields: [
+          FieldI { name: "kind", ty: TyString },
+          FieldI { name: "message", ty: TyString },
+          FieldI { name: "cause", ty: opt_ty(TyString) }
+        ]
+      }
+    ],
+    derives_show: true,
+    derives_ord: false,
+    owner: None
+  }
+  map.from([(OPTION_ID, option), (RESULT_ID, result), (FOREIGN_ERROR_ID, ferr)])
+}
+
+fn prelude_method(tid: Int, tv: Ty, name: String, ptys: List[Ty], pnames: List[String],
+  ret: Ty) -> Sig =
+  Sig {
+    name: name,
+    param_tys: ptys,
+    param_names: pnames,
+    ret: ret,
+    eff: EPure,
+    is_builtin: false,
+    tparams: [tv],
+    constraints: [[tid]],
+    owner: None,
+    trait_id: Some(tid),
+    op_of: None,
+    inferring: false
+  }
+
+fn prelude_trait(tid: Int, name: String, tv: Ty, m: String, sig: Sig) -> TraitI =
+  TraitI {
+    id: tid,
+    name: name,
+    tvar: tv,
+    is_pub: true,
+    owner: None,
+    src_path: None,
+    methods: [(m, MethodSig { sig: sig, has_default: false })],
+    assoc: [],
+    injects: true
+  }
+
+## The prelude traits: Ord (id 0) whose `cmp` backs `< <= > >=` beyond scalars,
+## Eq (id 1) behind `==`/`!=`, and Hash (id 2), which nothing calls yet.
+pub fn prelude_traits() -> Traits = {
+  let tv = TyVar("T", -10)
+  let cmp_sig = Sig {
+    name: "cmp",
+    param_tys: [tv, tv],
+    param_names: ["a", "b"],
+    ret: TyInt,
+    eff: EPure,
+    is_builtin: false,
+    tparams: [tv],
+    constraints: [[ORD_ID]],
+    owner: None,
+    trait_id: Some(ORD_ID),
+    op_of: None,
+    inferring: false
+  }
+  let ord = TraitI {
+    id: ORD_ID,
+    name: "Ord",
+    tvar: tv,
+    is_pub: true,
+    owner: None,
+    src_path: None,
+    methods: [("cmp", MethodSig { sig: cmp_sig, has_default: false })],
+    assoc: [],
+    injects: true
+  }
+  let ev = TyVar("T", -14)
+  let eq = prelude_trait(EQ_ID, "Eq", ev, "eq",
+    prelude_method(EQ_ID, ev, "eq", [ev, ev], ["a", "b"], TyBool))
+  let hv = TyVar("T", -15)
+  let hash = prelude_trait(HASH_ID, "Hash", hv, "hash",
+    prelude_method(HASH_ID, hv, "hash", [hv], ["x"], TyInt))
+  let sv = TyVar("T", -16)
+  let show = prelude_trait(SHOW_ID, "Show", sv, "show",
+    prelude_method(SHOW_ID, sv, "show", [sv], ["x"], TyString))
+  # Iter: four methods over two associated types. The projections are built
+  # directly -- TyAssoc over the trait's own tvar is exactly what resolving
+  # `C.Cur` in a declared trait would produce.
+  let iv = TyVar("T", -17)
+  let icur = TyAssoc(iv, ITER_ID, "Cur")
+  let iitem = TyAssoc(iv, ITER_ID, "Item")
+  let iter = TraitI {
+    id: ITER_ID,
+    name: "Iter",
+    tvar: iv,
+    is_pub: true,
+    owner: None,
+    src_path: None,
+    methods: [
+      ("iter_start", MethodSig {
+        sig: prelude_method(ITER_ID, iv, "iter_start", [iv], ["c"], icur),
+        has_default: false
+      }),
+      ("iter_done", MethodSig {
+        sig: prelude_method(ITER_ID, iv, "iter_done", [iv, icur], ["c", "k"], TyBool),
+        has_default: false
+      }),
+      ("iter_next", MethodSig {
+        sig: prelude_method(ITER_ID, iv, "iter_next", [iv, icur], ["c", "k"], icur),
+        has_default: false
+      }),
+      ("iter_get", MethodSig {
+        sig: prelude_method(ITER_ID, iv, "iter_get", [iv, icur], ["c", "k"], iitem),
+        has_default: false
+      })
+    ],
+    assoc: ["Cur", "Item"],
+    injects: true
+  }
+  # Index: the subject in parameter 0 so it is a non-projection position and
+  # inference has something to work from, exactly as Iter's four methods do.
+  # `injects: false` keeps `index` out of every module's function namespace --
+  # the name is consumed by an operator, so it is only ever written in an impl
+  # body, in `dawn doc`, and in an error message.
+  let xv = TyVar("T", -18)
+  let xidx = TyAssoc(xv, INDEX_ID, "Idx")
+  let xitem = TyAssoc(xv, INDEX_ID, "Item")
+  let index = TraitI {
+    id: INDEX_ID,
+    name: "Index",
+    tvar: xv,
+    is_pub: true,
+    owner: None,
+    src_path: None,
+    methods: [
+      ("index", MethodSig {
+        sig: prelude_method(INDEX_ID, xv, "index", [xv, xidx], ["c", "i"], xitem),
+        has_default: false
+      })
+    ],
+    assoc: ["Idx", "Item"],
+    injects: false
+  }
+  map.from([(ORD_ID, ord), (EQ_ID, eq), (HASH_ID, hash), (SHOW_ID, show), (ITER_ID, iter),
+    (INDEX_ID, index)])
+}
+
+## The prelude trait ids, in id order. Everything that needs to know "which
+## traits does the prelude bring" reads this -- the seeding loop, the
+## redefinition guard, LSP completion -- so the set lives in one place instead
+## of being transcribed per call site (docs/prelude-namespace-design.md §4.3).
+pub fn prelude_trait_ids() -> List[Int] =
+  [ORD_ID, EQ_ID, HASH_ID, SHOW_ID, ITER_ID, INDEX_ID]
+
+## The prelude trait names, derived from the table rather than transcribed.
+pub fn prelude_trait_names() -> List[String] = {
+  let ts = prelude_traits()
+  map(prelude_trait_ids(), tid => trait_of(ts, tid).name)
+}
+
+## Is `n` the name of a prelude trait? A local `trait` of that name is a
+## redefinition, not a shadowing: trait names live in the type namespace and
+## the prelude traits have no module to qualify them with.
+pub fn is_prelude_trait_name(n: String) -> Bool = list.contains(prelude_trait_names(), n)
+
+## The first id the checker's counter may hand out: one past the largest id any
+## prelude entity already holds.
+##
+## Read off the two tables rather than written down beside them. The checker
+## used to open its counter at a literal, and the literal is exactly the kind
+## of thing that does not get revisited: it stayed at 3 when Show took trait
+## id 3, and stayed at 4 when Iter took trait id 4. Neither collided, but only
+## because a trait declaration mints its type variable before its trait id --
+## an accident of ordering, not a rule. Adding a prelude trait now moves this
+## on its own.
+pub fn first_minted_id() -> Int = {
+  let held = map.keys(prelude_adts()) ++ map.keys(prelude_traits())
+  match list.max(held) {
+    Some(top) -> top + 1
+    None -> 0
+  }
+}
+
+fn prelude_impl(tid: Int, t: Ty) -> ImplI =
+  ImplI {
+    trait_id: tid,
+    subject: t,
+    tparams: [],
+    constraints: [],
+    lo: 0,
+    hi: 1,
+    derived: false,
+    owner: None,
+    src_path: None,
+    provided: [],
+    assoc_bindings: []
+  }
+
+## A conditional prelude impl: `impl[T: tid] tid[Head[T]]`, one bound per
+## parameter. `Option` and `Result` carry `derive Show` in their declaration
+## but have no module for the derive pass to walk, so their impls are minted
+## here instead.
+fn prelude_cond_impl(tid: Int, subject: Ty, tps: List[Ty]) -> ImplI = {
+  var cs: List[List[Int]] = []
+  for _tp in tps { cs = cs ++ [[tid]] }
+  ImplI {
+    trait_id: tid,
+    subject: subject,
+    tparams: tps,
+    constraints: cs,
+    lo: 0,
+    hi: 1,
+    derived: true,
+    owner: None,
+    src_path: None,
+    provided: [],
+    assoc_bindings: []
+  }
+}
+
+## A prelude impl that binds associated types, with the bounds spelled out per
+## parameter rather than derived from the trait.
+##
+## `prelude_cond_impl` above puts the *same* trait on every parameter, which is
+## what `Show[Option[T]]` needs and what `Index` needs on neither of its two
+## subjects: `Index[List[T]]` bounds nothing, and `Index[Map[K, V]]` bounds
+## three traits on `K` and none on `V`. `constraints` is indexed by parameter,
+## so those two lists line up with `type_args_of(subject)` and `sub_goals`
+## reads the pairing straight off.
+fn prelude_assoc_impl(
+  tid: Int,
+  subject: Ty,
+  tps: List[Ty],
+  cs: List[List[Int]],
+  bindings: List[(String, Ty)]
+) -> ImplI =
+  ImplI {
+    trait_id: tid,
+    subject: subject,
+    tparams: tps,
+    constraints: cs,
+    lo: 0,
+    hi: 1,
+    # No body anywhere: `primitive_subject` reads `derived || provided == []`
+    # and sends the call to `prim_relation`, the same route the scalar Eq/Ord
+    # impls take.
+    derived: true,
+    owner: None,
+    src_path: None,
+    provided: [],
+    assoc_bindings: bindings
+  }
+
+## The scalars the backends compare for equality natively.
+pub fn eq_scalars() -> List[Ty] = [TyInt, TyFloat, TyBool, TyString, TyBytes]
+
+## The scalars that *hash*, which is not the same list, and the difference is
+## `Float`.
+##
+## `Eq[Float]` is IEEE: `-0.0 == 0.0` is true and they have different bit
+## patterns, so no hash can agree with that equality and also with itself.
+## Rust reaches the same place by not implementing `Hash` for `f64`. One table
+## answered both questions until 2026-07-26, which is why `Float` could be a
+## Map key and two equal keys could land in different buckets.
+pub fn hash_scalars() -> List[Ty] = [TyInt, TyBool, TyString, TyBytes]
+
+## Is this one of the scalars whose equality the backend implements natively?
+pub fn is_eq_scalar(t: Ty) -> Bool = {
+  for s in eq_scalars() {
+    if s == t { return true }
+  }
+  false
+}
+
+pub fn is_hash_scalar(t: Ty) -> Bool = {
+  for s in hash_scalars() {
+    if s == t { return true }
+  }
+  false
+}
+
+## The subset the prelude also *orders*, and `Float` is not in it.
+##
+## `Ord` is a total order -- that is what `sort` and `derive Ord` need, and
+## what a `[T: Ord]` bound promises. Float has none: NaN is unordered against
+## everything including itself. Java's `Double.compare` and Rust's `total_cmp`
+## invent one by fiat, and Dawn used to copy that; the cost is a `cmp` whose
+## answer contradicts the `<` right next to it. So Float drops to a partial
+## order (2026-07-26), which in Dawn means *one impl fewer* rather than one
+## trait more: `<`/`<=`/`>`/`>=` on scalars never consulted a witness in the
+## first place, so they still work and still mean IEEE. What changes is that
+## `[T: Ord]` no longer accepts Float.
+pub fn ord_scalars() -> List[Ty] = [TyInt, TyString]
+
+pub fn is_ord_scalar(t: Ty) -> Bool = {
+  for s in ord_scalars() {
+    if s == t { return true }
+  }
+  false
+}
+
+## The scalars the language renders itself. `Cursor` is absent because it is
+## an opaque handle with nothing to print, and `Unit` because `()` is not a
+## value anyone asks to see -- the two ways this list differs from `eq_scalars`.
+pub fn show_scalars() -> List[Ty] = [TyInt, TyFloat, TyBool, TyString, TyBytes]
+
+pub fn is_show_scalar(t: Ty) -> Bool = {
+  for s in show_scalars() {
+    if s == t { return true }
+  }
+  false
+}
+
+## Ord over the natively ordered scalars, Eq/Hash over every scalar, Show over
+## the printable ones: the impls that ship with the language.
+pub fn prelude_impls() -> List[ImplI] = {
+  var out = map(ord_scalars(), t => prelude_impl(ORD_ID, t))
+  for t in eq_scalars() {
+    out = out ++ [prelude_impl(EQ_ID, t)]
+  }
+  for t in hash_scalars() {
+    out = out ++ [prelude_impl(HASH_ID, t)]
+  }
+  for t in show_scalars() {
+    out = out ++ [prelude_impl(SHOW_ID, t)]
+  }
+  let ot = TyVar("T", -11)
+  let rt = TyVar("T", -12)
+  let re = TyVar("E", -13)
+  let lt = TyVar("T", -19)
+  let mk = TyVar("K", -20)
+  let mv = TyVar("V", -21)
+  out ++ [
+    prelude_cond_impl(SHOW_ID, TyAdt(OPTION_ID, [ot]), [ot]),
+    prelude_cond_impl(SHOW_ID, TyAdt(RESULT_ID, [rt, re]), [rt, re]),
+    # `ForeignError` takes no parameters, so its `derive Show` is the same
+    # mint with nothing to constrain -- the fields are String/String/
+    # Option[String] and each already shows.
+    prelude_cond_impl(SHOW_ID, foreign_error_ty(), []),
+    # `xs[i]`: an Int in, the element out, and nothing asked of the element.
+    prelude_assoc_impl(INDEX_ID, TyList(lt), [lt], [[]],
+      [("Idx", TyInt), ("Item", lt)]),
+    # `m[k]`: Eq and Hash to find the entry, and Show only to name the key in
+    # the panic when there is none -- the one bound of the three that is not
+    # about finding it (std/hamt.dawn:262-266 says the same thing at the other
+    # end). They sit on `K` because `constraints` is indexed by parameter, and
+    # they used to be resolved by hand at the `[]`; a conditional impl's
+    # sub-goals carry the same span and the same requirer, so the three
+    # diagnostics still land on the subscript.
+    prelude_assoc_impl(INDEX_ID, TyMap(mk, mv), [mk, mv],
+      [[EQ_ID, HASH_ID, SHOW_ID], []], [("Idx", mk), ("Item", mv)])
+  ]
+}
+
+fn bsig(name: String, ptys: List[Ty], pnames: List[String], ret: Ty) -> Sig =
+  Sig {
+    name: name,
+    param_tys: ptys,
+    param_names: pnames,
+    ret: ret,
+    eff: EPure,
+    is_builtin: true,
+    tparams: [],
+    constraints: [],
+    owner: None,
+    trait_id: None,
+    op_of: None,
+    inferring: false
+  }
+
+fn tp1(s: Sig, v: Ty) -> Sig = Sig { ..s, tparams: [v] }
+
+## One type parameter carrying one bound: the shape `to_string` has now that
+## rendering is a trait rather than a predicate the checker applies itself.
+fn tp1b(s: Sig, v: Ty, tid: Int) -> Sig =
+  Sig { ..s, tparams: [v], constraints: [[tid]] }
+
+fn eff1(s: Sig, e: Eff) -> Sig = Sig { ..s, eff: e }
+
+## A Map/Set primitive that hashes: its key parameter carries `Eq` and `Hash`,
+## so the dictionaries reach the trie in std/hamt. Which relation decides "same
+## key" is then the key type's own, rather than whatever the host's identity
+## happened to be. The primitives that only count or list entries are
+## deliberately not in this shape -- reading a map should not need the bound.
+fn keyed2(s: Sig, kk: Ty, vv: Ty) -> Sig =
+  Sig { ..s, tparams: [kk, vv], constraints: [[EQ_ID, HASH_ID]] }
+
+fn keyed1(s: Sig, tt: Ty) -> Sig =
+  Sig { ..s, tparams: [tt], constraints: [[EQ_ID, HASH_ID]] }
+
+## The builtin function table (port of Types.kt BUILTINS, same order).
+pub fn builtins() -> Map[String, Sig] = {
+  let t = TyVar("T", -1)
+  let u = TyVar("U", -2)
+  let a = TyVar("A", -3)
+  let k = TyVar("K", -4)
+  let v = TyVar("V", -5)
+  # `bracket`'s two: the resource it holds and the answer it hands back
+  let b = TyVar("B", -6)
+  let e = EffVar("e", -1)
+  var out: Map[String, Sig] = map.empty()
+  var sigs = [
+    bsig("panic", [TyString], ["msg"], TyNever),
+    bsig("todo", [], [], TyNever),
+    bsig("to_float", [TyInt], ["n"], TyFloat),
+    bsig("to_int", [TyFloat], ["x"], TyInt),
+    tp1(bsig("len", [TyList(t)], ["xs"], TyInt), t),
+    tp1(bsig("get", [TyList(t), TyInt], ["xs", "i"], opt_ty(t)), t),
+    bsig("range", [TyInt, TyInt], ["from", "to"], TyList(TyInt)),
+    eff1(tp1(bsig("sort_by", [TyList(t), TyFn([t, t], TyInt, e)], ["xs", "cmp"], TyList(t)), t), e),
+    tp1(bsig("expect", [opt_ty(t), TyString], ["o", "msg"], t), t),
+    tp1(bsig("unwrap_or", [opt_ty(t), t], ["o", "fallback"], t), t),
+    tp1b(bsig("to_string", [t], ["x"], TyString), t, SHOW_ID),
+    bsig("join", [TyList(TyString), TyString], ["xs", "sep"], TyString),
+    bsig("code_points", [TyString], ["s"], TyList(ty_char())),
+    bsig("from_code_points", [TyList(ty_char())], ["cs"], TyString),
+    bsig("parse_int", [TyString], ["s"], opt_ty(TyInt)),
+    bsig("parse_float", [TyString], ["s"], opt_ty(TyFloat)),
+    bsig("cursor_start", [TyString], ["s"], TyInt),
+    bsig("cursor_end", [TyString], ["s"], TyInt),
+    bsig("cursor_done", [TyString, TyInt], ["s", "c"], TyBool),
+    bsig("cursor_char", [TyString, TyInt], ["s", "c"], TyInt),
+    bsig("cursor_next", [TyString, TyInt], ["s", "c"], TyInt),
+    bsig("cursor_prev", [TyString, TyInt], ["s", "c"], TyInt),
+    bsig("cursor_slice", [TyString, TyInt, TyInt], ["s", "from", "to"], TyString),
+    # str_* intrinsics: what is left once everything expressible as a walk is
+    # written as one. Case folding is a Unicode table, not a walk, so it stays
+    # here; length, trimming and the four searches used to and no longer do
+    # (std/str, docs/native-backend-plan.md 14.12).
+    bsig("str_lower", [TyString], ["s"], TyString),
+    bsig("str_upper", [TyString], ["s"], TyString),
+    # char_* intrinsics: Unicode classification of one character. Same reason
+    # the str_* ones exist -- the answer is a property of the Unicode tables,
+    # not something Dawn source can compute -- and every backend needs them
+    # regardless, so they belong in the contract rather than in each program's
+    # `use java`. They take `Char`, so a caller holding an `Int` has to say
+    # which integers it believes are characters (std/char.of), which is the
+    # whole point of the type.
+    bsig("char_is_letter", [ty_char()], ["c"], TyBool),
+    bsig("char_is_digit", [ty_char()], ["c"], TyBool),
+    bsig("char_is_alnum", [ty_char()], ["c"], TyBool),
+    bsig("char_is_upper", [ty_char()], ["c"], TyBool),
+    bsig("char_is_lower", [ty_char()], ["c"], TyBool),
+    bsig("char_is_space", [ty_char()], ["c"], TyBool),
+    # The Int -> Char bridge for std's hot paths, where the caller has already
+    # established that the integer is a code point and an `Option` would be an
+    # allocation per step. Internal, because an unchecked constructor should
+    # not be public (audit RD-01); `std/char.of` is the checked one everyone
+    # else uses. `std/str.trim` is why it exists: it walks with `cursor.char`,
+    # which answers `Int` and `-1` at the end (spec §4.8), and feeds
+    # `char_is_space`. Identity at every level below the checker -- lower.dawn
+    # rewrites the call to its argument, so neither backend learns the name.
+    bsig("char_unchecked", [TyInt], ["n"], ty_char()),
+    # parse_int in a base other than 10; None when the text is not a numeral in
+    # that base, so a caller needs no exception bridge to read one.
+    bsig("parse_int_radix", [TyString, TyInt], ["s", "radix"], opt_ty(TyInt)),
+    # bytes_* intrinsics: the byte primitives std/bytes writes over. Bytes is a
+    # JVM byte[] (crosses FFI both ways), so the JVM backend emits these into
+    # dawn/rt/Bytes; an out-of-range read comes back as the sentinel -1, which
+    # std turns into a panic. bytes_index_of stays pure Dawn over
+    # bytes_len/bytes_at.
+    bsig("bytes_utf8", [TyString], ["s"], TyBytes),
+    # Two decoders rather than one taking a charset name (audit RP-04,
+    # decision C: the two charsets the language promises are two functions,
+    # and the function name is the domain). Neither returns an Option, because
+    # with no charset to get wrong there is no failure left to report -- both
+    # charsets decode every byte string, UTF-8 by replacing what it cannot
+    # read with U+FFFD.
+    bsig("bytes_decode_utf8", [TyBytes], ["b"], TyString),
+    bsig("bytes_decode_latin1", [TyBytes], ["b"], TyString),
+    bsig("bytes_len", [TyBytes], ["b"], TyInt),
+    bsig("bytes_at", [TyBytes, TyInt], ["b", "i"], TyInt),
+    bsig("bytes_slice", [TyBytes, TyInt, TyInt], ["b", "start", "end"], TyBytes),
+    # The one way to *make* bytes that did not come from text. Without it
+    # `Bytes` is a read-only type: you can take the UTF-8 of a string, slice
+    # it and read it, but you cannot produce an arbitrary byte -- `0x80` would
+    # need a string whose UTF-8 encoding is that one byte, and there is none.
+    # Anything that decompresses has to write bytes it computed, so this is
+    # what std/bytes builds its `Buf` on. Elements outside 0..255 are the
+    # caller's error and are truncated, like a byte store anywhere else.
+    bsig("bytes_from_array", [TyArray(TyInt)], ["a"], TyBytes)
+  ]
+  sigs = sigs ++ [
+    eff1(bsig("args", [], [], TyList(TyString)), EIo),
+    # The io barrier. It catches a *fault* -- the outside world said no -- and
+    # lets a panic through, which is the split spec 9.8 is about and the one
+    # `catch_panic` is the other half of. It was called `java_try` through
+    # v0.30.0, back when the JVM's class hierarchy was the only place the split
+    # came from; native has had failure kinds since 2026-07-27
+    # (native-backend-plan.md 14.9), and the name outlived the reason.
+    #
+    # The payload is a `ForeignError` (docs/audit/error-model-design.md 六). It
+    # used to be the failure rendered as a String, which left a caller nothing
+    # to act on but the text -- the thing spec 9.8 used to advise matching on
+    # and ERR-02 was raised about.
+    #
+    # Changing it took three releases, because a builtin's *signature* is under
+    # the seed discipline the same way its name is, and more tightly: the
+    # compiler's own sources have to type-check under the previous release's
+    # table and today's at once, and no call site satisfies
+    # `Result[T, String]` and `Result[T, ForeignError]` together unless it
+    # throws the payload away. So the new shape landed under a pair of names
+    # nothing called (`catch_fault_e`/`catch_panic_e`, v0.32.0), a release
+    # taught the previous compiler both spellings, the call sites moved and
+    # these two entries were flipped at zero callers (v0.33.0), and the call
+    # sites came back here. The transitional pair is gone.
+    eff1(
+      tp1(bsig("catch_fault", [TyFn([], t, EIo)], ["f"],
+        result_ty(t, foreign_error_ty())), t),
+      EIo
+    ),
+    # The reclaim's failure is a value, not an exception thrown through a
+    # signature that says `pure` (docs/audit/error-model-design.md 二.B,
+    # LANG-02). Still pure: a `ForeignError` handed back is not an effect, and
+    # that was the whole difference -- a `cast` that missed used to leave the
+    # function by a route its type did not mention.
+    #
+    # The arithmetic step B inherited from step A (design doc 六.2): a
+    # builtin's *signature* is under the seed discipline the way its name is,
+    # and no call site satisfies `T` and `Result[T, ForeignError]` at once, so
+    # the compiler's own `cast` sites could not type-check against the seed's
+    # table and today's together. So the new shape landed under a name nothing
+    # called (`cast_e`, v0.34.0), a release taught the previous compiler, the
+    # call sites moved and this entry was flipped at zero callers -- with both
+    # emitters repointed in the same commit, because a table entry and a
+    # runtime that disagree is what step A's stage 2 left for its stage 3 to
+    # find (六.8) -- and the call sites came back here (v0.35.0). The
+    # transitional spelling is gone; see 六.10.
+    tp1(bsig("cast", [TyJava("java.lang.Object", "Object")], ["x"],
+      result_ty(t, foreign_error_ty())), t),
+    eff1(
+      tp1(bsig("catch_panic", [TyFn([], t, EIo)], ["f"],
+        result_ty(t, foreign_error_ty())), t),
+      EIo
+    ),
+    # The third member of the family, and the one that catches nothing. It runs
+    # `release` on every way out of `use` -- the value, a panic, a fault -- and
+    # then gets out of the way: the failure carries on to whatever was going to
+    # stop it, with its kind and message untouched. `finally`, not `catch`.
+    #
+    # The resource arrives as a *value*, not as an acquire thunk. Haskell's
+    # `bracket` takes the thunk because Haskell has asynchronous exceptions: a
+    # timer or another thread can interrupt between acquiring and installing
+    # the handler, so the acquisition has to happen where the handler already
+    # is. Dawn has no such thing -- a failure only ever originates in code the
+    # program itself called -- and nothing of the caller's runs between the
+    # argument evaluation and the handler this primitive installs. So the
+    # thunk would buy no window; Koka's `finally` takes the resource eagerly
+    # for the same reason. Acquisition is ordinary code before the call, where
+    # a failure needs no release because nothing was acquired.
+    #
+    # `use` is last, which is a decision about what can be built on top: a
+    # `with`-style sugar attaches the remaining block as the *last* argument,
+    # so a primitive whose use-closure sits in the middle would have to be
+    # re-spelled the day that sugar exists (docs/core-move2-design.md 6,
+    # ruling 1). With eager acquisition and that sugar a resource site carries
+    # no lambdas at all: `with f <- bracket(open(path), close)`.
+    #
+    # It returns `B` rather than a `Result` because protecting and catching are
+    # orthogonal, and every language that has both says so -- Haskell's
+    # `bracket`, Kotlin's `use`, Koka's `finally`, Go's `defer` hand back the
+    # body's own answer. A caller who wants the failure as a value writes
+    # `catch_fault(fn() => bracket(...))`, which is two primitives each doing
+    # one thing (ruling 2).
+    #
+    # No `CSProtect` node stands behind it. The protected region is exactly one
+    # closure call, so no `return`/`?`/`break` can leave it -- the language
+    # stops them at the closure boundary -- and a protect whose region is always
+    # a call is a runtime primitive taking a closure, which is what
+    # `catch_fault` already is. That is the intrinsic contract, not a second
+    # implementation (docs/core-move2-design.md 2.6).
+    eff1(
+      Sig {
+        ..bsig("bracket",
+          [a, TyFn([a], TyUnit, EIo), TyFn([a], b, EIo)],
+          ["resource", "release", "use"], b),
+        tparams: [a, b]
+      },
+      EIo
+    ),
+    # io_* intrinsics: the console/file primitives std/io writes over. All !io.
+    # The JVM backend emits them into dawn/rt/Io. read_file/write_file/list_names
+    # throw on failure; std wraps them in a barrier. read_line returns Option
+    # directly (the intrinsic maps Java's null-or-line onto it). list_names
+    # answers the OS's order; std sorts, so no backend carries a sort.
+    eff1(bsig("io_print", [TyString], ["s"], TyUnit), EIo),
+    eff1(bsig("io_println", [TyString], ["s"], TyUnit), EIo),
+    eff1(bsig("io_read_line", [], [], opt_ty(TyString)), EIo),
+    eff1(bsig("io_is_dir", [TyString], ["path"], TyBool), EIo),
+    eff1(bsig("io_read_file", [TyString], ["path"], TyString), EIo),
+    eff1(bsig("io_write_file", [TyString, TyString], ["path", "content"], TyUnit), EIo),
+    eff1(bsig("io_list_names", [TyString], ["path"], TyList(TyString)), EIo),
+    # stderr, and the process/filesystem primitives a CLI needs on any
+    # backend. The compiler reached all five through `use java`, and stderr
+    # had a module of its own for it -- `System.err` is a static field, which
+    # the interop cannot name, so `errio.dawn` went through a method handle.
+    # That module is deleted; std/io spells all five now.
+    eff1(bsig("io_eprint", [TyString], ["s"], TyUnit), EIo),
+    eff1(bsig("io_eprintln", [TyString], ["s"], TyUnit), EIo),
+    # `Unit`, not `Never`: it maps to `System.exit`, which the JVM types as
+    # void, and a Never-returning intrinsic would need the emitters to stop
+    # treating a call as falling through -- machinery `panic` has and nothing
+    # else needs.
+    eff1(bsig("io_exit", [TyInt], ["code"], TyUnit), EIo),
+    eff1(bsig("io_exists", [TyString], ["path"], TyBool), EIo),
+    # throws on failure, like read_file/write_file; std wraps it in a barrier
+    eff1(bsig("io_mkdirs", [TyString], ["path"], TyUnit), EIo),
+    # The rest of what a package manager and a language server need. Measured,
+    # not guessed: each one has a call site in the compiler that reaches it
+    # through `use java` today. Deliberately absent are the ones only the JVM
+    # side wants -- class-path properties, process spawning, `canExecute` --
+    # because a native `dawn run` will not spawn a JVM at all.
+    eff1(bsig("io_cwd", [], [], TyString), EIo),
+    eff1(bsig("io_getenv", [TyString], ["name"], opt_ty(TyString)), EIo),
+    # the binary halves of read_file/write_file; same throw-on-failure contract,
+    # and write_bytes likewise creates the parent directories
+    eff1(bsig("io_read_bytes", [TyString], ["path"], TyBytes), EIo),
+    eff1(bsig("io_write_bytes", [TyString, TyBytes], ["path", "content"], TyUnit), EIo),
+    ## `true` when something was there to delete; a missing path is not an error.
+    eff1(bsig("io_delete", [TyString], ["path"], TyBool), EIo),
+    # Atomic when src and dst share a filesystem, which is why `io_temp_dir`
+    # takes the parent: staging inside the destination's directory is what makes
+    # "download, verify, then publish under the content hash" indivisible.
+    eff1(bsig("io_rename", [TyString, TyString], ["src", "dst"], TyUnit), EIo),
+    # `parent == ""` means the system temp directory.
+    eff1(bsig("io_temp_dir", [TyString, TyString], ["parent", "prefix"], TyString), EIo),
+    eff1(bsig("io_is_symlink", [TyString], ["path"], TyBool), EIo),
+    # Exactly `n` bytes, short only at end of input -- so a short read *is* the
+    # EOF signal. stdin is a channel like stderr, and for the same reason it
+    # cannot be reached through the interop: `System.in` is a static field.
+    eff1(bsig("io_read_stdin", [TyInt], ["n"], TyBytes), EIo),
+    # `true` iff at least one byte of standard input can be read right now.
+    #
+    # End of input is **not** readiness: it is reported by the blocking read
+    # above, which stays the only reader. That is the one shape both backends
+    # can implement without a thread -- a "the read will not block" reading
+    # would have to answer `true` at end of input, and the JVM cannot tell
+    # that state from a silent-but-open one (`available()` is 0 for both).
+    # Measured both ways in docs/audit/lsp-robustness-design.md 2.2.1.
+    #
+    # `timeout_ms` is an upper bound and not a lower one: an early `false` is
+    # always allowed, because the only thing a caller may do with `false` is
+    # stop waiting and block. A loop driven by readiness *alone* therefore
+    # spins at end of input; the loop is expected to block when it has nothing
+    # else to do, which is what selfhost/src/lsp/lsp.dawn does.
+    eff1(bsig("io_stdin_ready", [TyInt], ["timeout_ms"], TyBool), EIo),
+    # Spawn `argv[0]` (found on PATH), wait, and answer its exit status.
+    #
+    # Both streams go to files rather than back through a pipe, and that is
+    # the whole design: a pipe has a finite buffer, so a caller that waits for
+    # the child before reading it deadlocks as soon as the child writes more
+    # than the buffer holds. Reading concurrently means threads on the JVM and
+    # `poll` here -- a concurrency requirement inside a primitive, to hand back
+    # bytes the caller usually wants on disk anyway. An empty path inherits
+    # this process's stream.
+    #
+    # Spawn failure (no such program) throws, like read_file; the exit status
+    # is the child's own and is not an error.
+    eff1(
+      bsig("io_run", [TyList(TyString), TyString, TyString], ["argv", "out_path", "err_path"],
+        TyInt),
+      EIo
+    ),
+    Sig { ..bsig("map_empty", [], [], TyMap(k, v)), tparams: [k, v] },
+    tp1(bsig("set_empty", [], [], TySet(t)), t),
+    keyed2(bsig("map_from", [TyList(TyTuple([k, v]))], ["entries"], TyMap(k, v)), k, v),
+    keyed1(bsig("set_from", [TyList(t)], ["xs"], TySet(t)), t),
+    keyed2(bsig("map_insert", [TyMap(k, v), k, v], ["m", "key", "value"], TyMap(k, v)), k, v),
+    keyed1(bsig("set_insert", [TySet(t), t], ["s", "x"], TySet(t)), t),
+    keyed2(bsig("map_remove", [TyMap(k, v), k], ["m", "key"], TyMap(k, v)), k, v),
+    keyed1(bsig("set_remove", [TySet(t), t], ["s", "x"], TySet(t)), t),
+    keyed2(bsig("map_get", [TyMap(k, v), k], ["m", "key"], opt_ty(v)), k, v),
+    keyed2(bsig("map_has", [TyMap(k, v), k], ["m", "key"], TyBool), k, v),
+    keyed1(bsig("set_has", [TySet(t), t], ["s", "x"], TyBool), t),
+    Sig { ..bsig("map_size", [TyMap(k, v)], ["m"], TyInt), tparams: [k, v] },
+    tp1(bsig("set_size", [TySet(t)], ["s"], TyInt), t),
+    Sig { ..bsig("map_keys", [TyMap(k, v)], ["m"], TyList(k)), tparams: [k, v] },
+    Sig { ..bsig("map_values", [TyMap(k, v)], ["m"], TyList(v)), tparams: [k, v] },
+    Sig {
+      ..bsig("map_entries", [TyMap(k, v)], ["m"], TyList(TyTuple([k, v]))),
+      tparams: [k, v]
+    },
+    tp1(bsig("set_to_list", [TySet(t)], ["s"], TyList(t)), t),
+    # array_* intrinsics: the one collection primitive a backend implements, and
+    # the whole of what std needs to build List/Map/Set on top (D1). Values, not
+    # storage: every operation returns a new array and none of them is observably
+    # destructive. `array_push` is the one that must extend in place when it can
+    # -- see the note on the fast path below.
+    tp1(bsig("array_new", [], [], TyArray(t)), t),
+    tp1(bsig("array_len", [TyArray(t)], ["a"], TyInt), t),
+    tp1(bsig("array_get", [TyArray(t), TyInt], ["a", "i"], t), t),
+    tp1(bsig("array_push", [TyArray(t), t], ["a", "x"], TyArray(t)), t),
+    tp1(bsig("array_with", [TyArray(t), TyInt, t], ["a", "i", "x"], TyArray(t)), t),
+    # HAMT bitmaps; a pure-Dawn loop would do, so this is only here because
+    # every target has the instruction (docs/runtime-intrinsics-design.md §5).
+    bsig("popcount", [TyInt], ["n"], TyInt)
+  ]
+  for s in sigs { out = map.insert(out, s.name, s) }
+  out
+}
+
+# ---- what an intrinsic is beyond its signature ----
+#
+# Three properties, and until 2026-07-26 each was re-derived from the *name*,
+# by prefix matching, in a different file: `array_` meant "arguments cross
+# erased" in lower.dawn, "dawn/rt/Array" in emit.dawn, and "std may name it"
+# in a hand-written list in checker.dawn. Nothing checked that the three
+# agreed, and the lists had to be edited in step by hand.
+#
+# They are declared here now, once, and the three consumers ask. The families
+# are still families -- `map_*` really is one group with one owner -- but the
+# grouping is stated in one place rather than guessed in three.
+
+## Which runtime module implements a primitive. The language names the module;
+## each backend maps it to whatever it emits -- a JVM class, a C translation
+## unit -- which is the point of having a contract at all
+## (runtime-intrinsics-design.md 4).
+pub type Rt =
+  | RtStrings
+  | RtBytes
+  | RtArray
+  | RtIo
+
+pub type Intr = {
+  sig: Sig,
+  ## which runtime module implements it. None = the backend writes instructions
+  ## for it inline (arithmetic, and the type-directed ones).
+  ##
+  ## The *name* is deliberately not recorded: a primitive is called by its own
+  ## name in whichever module owns it. This field used to carry one, and every
+  ## entry it held was the intrinsic's name re-spelled in Java's casing --
+  ## which made it one backend's convention living in the shared table, and
+  ## meant a second backend could not read the table at all.
+  rt: Option[Rt],
+  ## arguments and result cross at the erased type, so the declared signature
+  ## *is* the ABI and lowering puts the box and the unbox in. The container
+  ## primitives are why it exists; `bracket` is here too, for the same reason
+  ## read the other way -- it hands back a bare type variable.
+  erased: Bool,
+  ## only std may name it -- the backend contract, not language surface
+  internal: Bool
+}
+
+fn intr_of(s: Sig, o: Option[Rt], erased: Bool, internal: Bool) -> Intr =
+  Intr { sig: s, rt: o, erased: erased, internal: internal }
+
+## Every intrinsic, with the three properties declared.
+pub fn intrinsics() -> Map[String, Intr] = {
+  let bs = builtins()
+  var rt_of: Map[String, Rt] = map.empty()
+  var erased: Set[String] = set.empty()
+  var internal: Set[String] = set.empty()
+
+  # No runtime module owns a list primitive any more. Each one is a call on
+  # the Dawn vector in std/pvec, written by whichever backend is emitting --
+  # which is a backend's choice of representation, not a contract the
+  # language states. `join`/`code_points`/`from_code_points`/`io_list_names`/
+  # `io_run` are absent below for a related reason: each does reach a runtime
+  # function, but only through a List↔Array conversion the emitter wraps around
+  # it, and a plain entry here would promise a call the emitter cannot make.
+  # strings: the Unicode tables, plus the cursor walk they and std/str rest on.
+  # `cursor_slice` is absent on purpose -- the emitter writes it inline so it
+  # can check the range and panic.
+  # Of the three numeric parsers only `parse_float` still owns a runtime
+  # method: the decimal-to-binary conversion std/fmt.atod delegates after its
+  # EBNF validation (audit RP-05). `parse_int`/`parse_int_radix` lower to
+  # std/fmt source and never reach a backend.
+  rt_of = map.insert(rt_of, "parse_float", RtStrings)
+  for op in ["letter", "digit", "alnum", "upper", "lower", "space"] {
+    rt_of = map.insert(rt_of, "char_is_" ++ op, RtStrings)
+  }
+  for op in ["start", "end", "done", "char", "next", "prev"] {
+    rt_of = map.insert(rt_of, "cursor_" ++ op, RtStrings)
+  }
+  # Case folding is the table, `str.to_lower`/`str.to_upper` is the spelling.
+  # Both existed until 2026-07-30 and the intrinsic one was reachable from user
+  # code, which is two names for one operation and a second thing to keep
+  # documented (docs/audit/re-audit-2026-07-30.md RD-02).
+  for op in ["lower", "upper"] {
+    rt_of = map.insert(rt_of, "str_" ++ op, RtStrings)
+    internal = set.insert(internal, "str_" ++ op)
+  }
+  # The byte primitives are std-only for the reason std/bytes exists: their
+  # result shapes are sentinels. `bytes_at` answers -1 out of range, and
+  # turning that into a panic is the whole of what `bytes.at` does.
+  # `bytes_decode_utf8`/`bytes_decode_latin1` have no sentinel left to unwrap
+  # and are std-only for the plainer reason: std/bytes owns the byte surface,
+  # and two spellings of one operation is one too many.
+  # `bytes_from_array` also names Array, which is std-only on its own.
+  for op in ["utf8", "decode_utf8", "decode_latin1", "len", "at", "slice",
+    "from_array"] {
+    rt_of = map.insert(rt_of, "bytes_" ++ op, RtBytes)
+    internal = set.insert(internal, "bytes_" ++ op)
+  }
+  let io_in_rt = ["print", "println", "eprint", "eprintln", "read_line", "is_dir", "read_file",
+    "write_file", "exit", "exists", "mkdirs", "cwd", "getenv", "read_bytes", "write_bytes",
+    "delete", "rename", "temp_dir", "is_symlink", "read_stdin", "stdin_ready"]
+  for op in io_in_rt {
+    rt_of = map.insert(rt_of, "io_" ++ op, RtIo)
+  }
+  # Every io primitive is std-only, `list_names`/`run` included -- one list plus
+  # the two, rather than a second copy of twenty names, so an io primitive
+  # cannot be added to one of these loops and not the other.
+  #
+  # This is the error model's boundary and not a style preference:
+  # `io_read_file` raises a *fault* on failure, and std/io is where that becomes
+  # `Result[String, String]`. Called directly, the fault reaches the user as a
+  # JVM stack trace on one backend and a `longjmp` on the other -- the whole of
+  # spec 8 routed around by spelling a name (RD-02).
+  for op in io_in_rt ++ ["list_names", "run"] {
+    internal = set.insert(internal, "io_" ++ op)
+  }
+  rt_of = map.insert(rt_of, "catch_fault", RtIo)
+  rt_of = map.insert(rt_of, "catch_panic", RtIo)
+  # `bracket` joins them in the io runtime, and is `erased` for the reason the
+  # flag names rather than the container family it was introduced for: its
+  # declared signature *is* its ABI. The resource goes in at `A` and the answer
+  # comes back at `B`, both bare type variables, so lowering owes a box on the
+  # argument and an unbox on the result -- an intrinsic answering a bare type
+  # variable is the first one outside the collections, and without this the
+  # call site would read a box as whatever `B` turned out to be.
+  rt_of = map.insert(rt_of, "bracket", RtIo)
+  erased = set.insert(erased, "bracket")
+
+  # The persistent Map/Set: erased on both sides, and std-only. No runtime
+  # module owns them any more -- lowering turns each into a call on the Dawn
+  # trie in std/hamt, so a backend implements `Array` and nothing else
+  # (docs/collections-dejava-research.md §5.1).
+  for op in ["empty", "from", "insert", "remove", "get", "has", "size", "keys", "values",
+    "entries"] {
+    let n = "map_" ++ op
+    erased = set.insert(erased, n)
+    internal = set.insert(internal, n)
+  }
+  for op in ["empty", "from", "insert", "remove", "has", "size", "to_list"] {
+    let n = "set_" ++ op
+    erased = set.insert(erased, n)
+    internal = set.insert(internal, n)
+  }
+  # Array is the one collection primitive a backend must implement (D1)
+  for op in ["new", "len", "get", "push", "with"] {
+    let n = "array_" ++ op
+    rt_of = map.insert(rt_of, n, RtArray)
+    erased = set.insert(erased, n)
+    internal = set.insert(internal, n)
+  }
+  rt_of = map.insert(rt_of, "popcount", RtArray)
+  internal = set.insert(internal, "popcount")
+  # the cursor walk and the search it rests on are the representation, not
+  # surface: std/str spells the public API over them
+  for op in ["start", "end", "done", "char", "next", "prev", "slice"] {
+    internal = set.insert(internal, "cursor_" ++ op)
+  }
+  # The unchecked Int -> Char bridge: internal for the reason RD-01 removed
+  # pvec's public unchecked reader, and with no `rt` because it never reaches
+  # a backend -- lowering replaces the call with its argument.
+  internal = set.insert(internal, "char_unchecked")
+
+  var out: Map[String, Intr] = map.empty()
+  for n in map.keys(bs) {
+    let s = map.get(bs, n).expect("builtin listed")
+    out = map.insert(out, n,
+      intr_of(s, map.get(rt_of, n), set.has(erased, n), set.has(internal, n)))
+  }
+  out
+}
+
+pub fn intr_at(name: String) -> Option[Intr] = map.get(intrinsics(), name)
+
+## Builtins with no public spelling (docs/stdlib-naming.md): the container and
+## cursor families are implementation detail behind std/map, std/set and
+## std/cursor — visible when checking std itself, hidden from user code.
+## `intr_at` rebuilds the whole intrinsic table for one lookup, so asking it
+## per key rebuilt it once per intrinsic -- quadratic, on a path name
+## resolution walks for every builtin name it resolves. One table, then read
+## it; and the checker reads this one once per module, into `Cx.hidden_bins`.
+pub fn internal_builtins() -> Set[String] = {
+  let it = intrinsics()
+  var out: Set[String] = set.empty()
+  for n in map.keys(it) {
+    match map.get(it, n) {
+      Some(i) -> if i.internal { out = set.insert(out, n) }
+      None -> ()
+    }
+  }
+  out
+}
+
+## The reuse-analysis exceptions (docs/perceus-design.md 6): argument
+## positions the native runtime consumes rather than borrows. `array_with`
+## takes its array owned because uniqueness is only decidable after the caller
+## hands its reference over -- a borrowed argument keeps the caller's count on
+## it and `rc == 1` can never hold -- and takes the element owned because
+## every call site passes a freshly built value that would otherwise cross
+## through a dup/drop pair. A function rather than an `Intr` field: the rc
+## pass asks at every intrinsic node, and this answer must not cost a table.
+pub fn intr_owned_args(name: String) -> List[Int] =
+  if name == "array_with" { [0, 2] } else { [] }
+
+# ---- tests ----
+
+test "every intrinsic property is declared against a real intrinsic" {
+  let bs = builtins()
+  let it = intrinsics()
+  # the two tables cover the same names: a property declared for a name that
+  # is not an intrinsic used to be invisible, because each consumer only ever
+  # asked about names it happened to reach
+  assert len(map.keys(it)) == len(map.keys(bs))
+  for n in map.keys(it) {
+    assert map.has(bs, n)
+  }
+  # the three properties, spot-checked at the boundaries the old prefix chains
+  # got wrong: `cursor_slice` is internal but has no runtime target (the
+  # emitter writes it inline to check the range), `popcount` is owned by Array
+  # without being an `array_` name, and `len` is neither.
+  let slice = intr_at("cursor_slice").expect("cursor_slice")
+  assert slice.internal
+  assert slice.rt == None
+  let pc = intr_at("popcount").expect("popcount")
+  assert pc.internal
+  assert pc.rt == Some(RtArray)
+  assert not pc.erased
+  let ln = intr_at("len").expect("len")
+  assert not ln.internal
+  assert not ln.erased
+  assert ln.rt == None
+  # erased is the container primitives, and only those
+  assert intr_at("map_get").expect("map_get").erased
+  assert intr_at("array_push").expect("array_push").erased
+  assert not intr_at("str_upper").expect("str_upper").erased
+}
+
+test "the narrowed decoders drop the charset, and the Option with it" {
+  # audit RP-04 decision C, all three phases done: the primitives landed,
+  # std/bytes moved onto them, and the charset-taking `bytes_decode` is gone.
+  #
+  # What made this a narrowing rather than two more primitives is the shape.
+  # The retired decoder answered an Option for exactly one reason -- the
+  # charset may be a name it cannot decode -- so with the parameter gone the
+  # failure has no case left to report, and a `.expect` at every call site
+  # would be unwrapping something that cannot be `None`.
+  assert intr_at("bytes_decode") == None
+  for n in ["bytes_decode_utf8", "bytes_decode_latin1"] {
+    let i = intr_at(n).expect(n)
+    assert i.sig.param_tys == [TyBytes]
+    assert i.sig.ret == TyString
+    # std-only, like every byte primitive: std/bytes owns the surface
+    assert i.internal
+    assert i.rt == Some(RtBytes)
+    assert not i.erased
+  }
+}
+
+test "effect union normalizes" {
+  let e1 = EffVar("e1", 1)
+  let e2 = EffVar("e2", 2)
+  assert eff_union([EPure, EPure]) == EPure
+  assert eff_union([e1, EPure]) == e1
+  assert eff_union([e1, EIo]) == EIo
+  assert eff_union([e2, e1]) == EUnion([(1, "e1"), (2, "e2")])
+  assert eff_union([e1, e1]) == e1
+  assert lub_eff(EPure, EIo) == EIo
+}
+
+test "effect subsumption" {
+  let e1 = EffVar("e1", 1)
+  let e2 = EffVar("e2", 2)
+  let un = eff_union([e1, e2])
+  assert eff_subsumes(EIo, un)
+  assert eff_subsumes(un, e1)
+  assert eff_subsumes(un, EPure)
+  assert not eff_subsumes(e1, EIo)
+  assert not eff_subsumes(e1, e2)
+  assert eff_subsumes(un, un)
+}
+
+test "effect rendering" {
+  assert eff_suffix(EPure) == ""
+  assert eff_suffix(EIo) == " !io"
+  assert eff_suffix(EffVar("e", 7)) == " !e"
+  assert eff_show(EUnion([(2, "b"), (1, "a")])) == "(a|b)"
+}
+
+## The rule the pattern side and the call side now share, stated once. Both
+## used to hold a copy of this loop, and a copy is only as good as the case
+## that reaches it: the five answers below are each an error message on one
+## side and a different one on the other, so an outcome this test does not name
+## is one the two spellings are free to drift apart on again.
+test "an argument lands on the field its position or its name says" {
+  let fs = [FieldI { name: "a", ty: TyInt }, FieldI { name: "b", ty: TyBool }]
+  let some: fn(String) -> Option[String] = n => Some(n)
+  let pos: Option[String] = None
+
+  # the positional prefix takes fields left to right
+  assert ctor_slots(fs, [pos, pos]) == [SlotAt(0), SlotAt(1)]
+  assert ctor_slots(fs, []) == []
+  # a name takes the field it names, in any order, and may follow a position
+  assert ctor_slots(fs, [some("b"), some("a")]) == [SlotAt(1), SlotAt(0)]
+  assert ctor_slots(fs, [pos, some("b")]) == [SlotAt(0), SlotAt(1)]
+  # but a position may not follow a name -- and the refusal does not fill the
+  # field it would have taken, so the "missing field" count stays honest
+  assert ctor_slots(fs, [some("a"), pos]) == [SlotAt(0), SlotAfterNamed]
+  # a name with no field, a position past the last field, and a field filled
+  # twice by either spelling
+  assert ctor_slots(fs, [some("zz")]) == [SlotNoField("zz")]
+  assert ctor_slots(fs, [pos, pos, pos]) == [SlotAt(0), SlotAt(1), SlotOverflow]
+  assert ctor_slots(fs, [some("a"), some("a")]) == [SlotAt(0), SlotTaken(0)]
+  assert ctor_slots(fs, [pos, some("a")]) == [SlotAt(0), SlotTaken(0)]
+  # a constructor with no fields has nothing for a positional argument to take
+  let none_fs: List[FieldI] = []
+  assert ctor_slots(none_fs, [pos]) == [SlotOverflow]
+  assert ctor_slots(none_fs, [some("a")]) == [SlotNoField("a")]
+}
+
+test "type rendering" {
+  let adts = prelude_adts()
+  assert ty_show(adts, TyMap(TyInt, TyList(TyString))) == "Map[Int, List[String]]"
+  assert ty_show(adts, opt_ty(TyInt)) == "Option[Int]"
+  assert ty_show(adts, TyAdt(RESULT_ID, [])) == "Result"
+  assert ty_show(adts, TyTuple([TyInt, TyBool])) == "(Int, Bool)"
+  assert ty_show(adts, TyFn([TyInt], TyUnit, EIo)) == "fn(Int) -> Unit !io"
+  assert ty_show(adts, TyError) == "?"
+  assert ty_show(adts, TyJava("java.sql.Connection", "Connection")) == "Connection"
+}
+
+test "substitution reaches every position" {
+  let t = TyVar("T", 5)
+  let m: Map[Int, Ty] = map.from([(5, TyInt)])
+  let em: Map[Int, Eff] = map.empty()
+  assert subst(TyList(t), m, em) == TyList(TyInt)
+  assert subst(TyMap(t, TySet(t)), m, em) == TyMap(TyInt, TySet(TyInt))
+  assert subst(opt_ty(t), m, em) == opt_ty(TyInt)
+  assert subst(TyFn([t], t, EPure), m, em) == TyFn([TyInt], TyInt, EPure)
+  assert subst(TyTuple([t, TyBool]), m, em) == TyTuple([TyInt, TyBool])
+}
+
+test "mentioning a type variable reaches every position substitution does" {
+  let t = TyVar("T", 5)
+  let u = TyVar("U", 6)
+  assert ty_mentions_var(t, 5)
+  assert not ty_mentions_var(t, 6)
+  assert ty_mentions_var(TyList(t), 5)
+  assert ty_mentions_var(TyMap(TyInt, TySet(t)), 5)
+  assert ty_mentions_var(TyArray(t), 5)
+  assert ty_mentions_var(opt_ty(t), 5)
+  assert ty_mentions_var(TyFn([TyInt], t, EPure), 5)
+  assert ty_mentions_var(TyFn([t], TyInt, EPure), 5)
+  assert ty_mentions_var(TyTuple([TyBool, t]), 5)
+  assert ty_mentions_var(TyOpaque(0, "N", "m", TyList(t)), 5)
+  assert ty_mentions_var(TyAssoc(t, ITER_ID, "Item"), 5)
+  # the same shapes with the other variable: a walk that answered `true`
+  # everywhere would pass the block above and fail here
+  assert not ty_mentions_var(TyList(u), 5)
+  assert not ty_mentions_var(TyMap(TyInt, TySet(u)), 5)
+  assert not ty_mentions_var(TyFn([u], u, EPure), 5)
+  assert not ty_mentions_var(TyTuple([TyBool, u]), 5)
+  assert not ty_mentions_var(TyString, 5)
+}
+
+## The wall's own test. Six walks used to spell the variant list out apiece, so
+## six `match` arms had to be added for a new parameterised variant and the
+## compiler said so six times; now it says so once, and this is what says the
+## one place is complete. Every parameterised variant appears below with each
+## of its type children in turn -- adding a variant without an arm fails to
+## compile, adding an arm that drops a child fails here.
+test "the traversal kernels reach every child of every parameterised variant" {
+  let t = TyVar("T", 5)
+  let to_int: fn(Ty) -> Ty = x => if x == t { TyInt } else { x }
+  let is_t: fn(Ty) -> Bool = x => x == t
+
+  assert ty_map_children(TyList(t), to_int) == TyList(TyInt)
+  assert ty_map_children(TyMap(t, TyBool), to_int) == TyMap(TyInt, TyBool)
+  assert ty_map_children(TyMap(TyBool, t), to_int) == TyMap(TyBool, TyInt)
+  assert ty_map_children(TySet(t), to_int) == TySet(TyInt)
+  assert ty_map_children(TyArray(t), to_int) == TyArray(TyInt)
+  assert ty_map_children(TyTuple([TyBool, t]), to_int) == TyTuple([TyBool, TyInt])
+  assert ty_map_children(opt_ty(t), to_int) == opt_ty(TyInt)
+  assert ty_map_children(TyOpaque(0, "N", "m", t), to_int) == TyOpaque(0, "N", "m", TyInt)
+  assert ty_map_children(TyAssoc(t, ITER_ID, "Item"), to_int) ==
+    TyAssoc(TyInt, ITER_ID, "Item")
+  # both a function type's parameters and its result, and the effect rides
+  # through -- it is not a type and this walk has nothing to say about it
+  assert ty_map_children(TyFn([t], TyBool, EIo), to_int) == TyFn([TyInt], TyBool, EIo)
+  assert ty_map_children(TyFn([TyBool], t, EIo), to_int) == TyFn([TyBool], TyInt, EIo)
+  # a variant with no type children is itself, and a variable is a leaf here:
+  # what a type variable becomes is the caller's rule, not the walk's
+  assert ty_map_children(TyString, to_int) == TyString
+  assert ty_map_children(TyAdt(OPTION_ID, []), to_int) == TyAdt(OPTION_ID, [])
+  assert ty_map_children(t, to_int) == t
+  # immediate children only: the recursion belongs to the caller, and a kernel
+  # that recursed on its own would apply the caller's leaf rule twice
+  assert ty_map_children(TyList(TyList(t)), to_int) == TyList(TyList(t))
+
+  assert ty_any_child(TyList(t), is_t)
+  assert ty_any_child(TyMap(t, TyBool), is_t)
+  assert ty_any_child(TyMap(TyBool, t), is_t)
+  assert ty_any_child(TySet(t), is_t)
+  assert ty_any_child(TyArray(t), is_t)
+  assert ty_any_child(TyTuple([TyBool, t]), is_t)
+  assert ty_any_child(opt_ty(t), is_t)
+  assert ty_any_child(TyOpaque(0, "N", "m", t), is_t)
+  assert ty_any_child(TyAssoc(t, ITER_ID, "Item"), is_t)
+  assert ty_any_child(TyFn([t], TyBool, EIo), is_t)
+  assert ty_any_child(TyFn([TyBool], t, EIo), is_t)
+  # a walk that answered `true` everywhere would pass the block above
+  assert not ty_any_child(TyList(TyBool), is_t)
+  assert not ty_any_child(TyString, is_t)
+  assert not ty_any_child(TyAdt(OPTION_ID, []), is_t)
+  assert not ty_any_child(t, is_t)
+  assert not ty_any_child(TyList(TyList(t)), is_t)
+}
+
+test "effect substitution collapses unions" {
+  let e1 = EffVar("e1", 1)
+  let e2 = EffVar("e2", 2)
+  let un = eff_union([e1, e2])
+  let em1: Map[Int, Eff] = map.from([(1, EIo)])
+  assert subst_eff(un, em1) == EIo
+  let em2: Map[Int, Eff] = map.from([(1, EPure)])
+  assert subst_eff(un, em2) == e2
+  let em3: Map[Int, Eff] = map.from([(1, e2)])
+  assert subst_eff(un, em3) == e2
+}
+
+test "prelude shapes" {
+  let adts = prelude_adts()
+  let opt = adt_of(adts, OPTION_ID)
+  assert opt.name == "Option"
+  assert len(opt.ctors) == 2
+  assert opt.ctors[1].name == "None"
+  assert ctor_render(adts, opt.ctors[0]) == "Some(value: T): Option[T]"
+  let traits = prelude_traits()
+  assert trait_of(traits, ORD_ID).name == "Ord"
+  assert trait_of(traits, EQ_ID).name == "Eq"
+  assert trait_of(traits, HASH_ID).name == "Hash"
+  assert trait_of(traits, SHOW_ID).name == "Show"
+  assert trait_of(traits, ITER_ID).name == "Iter"
+  assert trait_of(traits, INDEX_ID).name == "Index"
+  # `[]` is the only operator whose trait does not inject its method name
+  assert not trait_of(traits, INDEX_ID).injects
+  # each trait over its own list -- one table per question, which is the point
+  assert len(prelude_impls()) == len(ord_scalars()) + len(eq_scalars()) +
+    len(hash_scalars()) + len(show_scalars()) + 5
+  # the three lists differ, and each difference is a decision (spec 4.3)
+  assert not is_ord_scalar(TyFloat)
+  assert is_eq_scalar(TyFloat)
+  assert not is_hash_scalar(TyFloat)
+}
+
+test "builtin table renders signatures" {
+  let adts = prelude_adts()
+  let traits = prelude_traits()
+  let bs = builtins()
+  match map.get(bs, "sort_by") {
+    Some(s) -> {
+      assert sig_render(adts, traits, s) ==
+        "fn sort_by[T](xs: List[T], cmp: fn(T, T) -> Int !e) -> List[T] !e"
+    }
+    None -> { assert false }
+  }
+  match map.get(bs, "catch_fault") {
+    Some(s) -> {
+      assert sig_render(adts, traits, s) ==
+        "fn catch_fault[T](f: fn() -> T !io) -> Result[T, ForeignError] !io"
+    }
+    None -> { assert false }
+  }
+  match map.get(bs, "map_entries") {
+    Some(s) -> {
+      assert sig_render(adts, traits, s) ==
+        "fn map_entries[K, V](m: Map[K, V]) -> List[(K, V)]"
+    }
+    None -> { assert false }
+  }
+  match map.get(bs, "array_with") {
+    Some(s) -> {
+      assert sig_render(adts, traits, s) ==
+        "fn array_with[T](a: Array[T], i: Int, x: T) -> Array[T]"
+    }
+    None -> { assert false }
+  }
+  assert map_size2(bs) == 91
+}
+
+test "the reclaim's failure is a value, under the one name left" {
+  # Step B of the error model (design doc 二.B): `cast` was declared pure and
+  # left by throwing a ClassCastException, which is the one thing a pure
+  # signature is supposed to rule out. It now hands the failure back.
+  #
+  # The transitional spelling is gone and its absence is asserted below:
+  # leaving it behind would leave a second way to spell one reclaim in
+  # `dawn doc --builtins` forever, and a second entry is a second thing that
+  # can drift.
+  let adts = prelude_adts()
+  let traits = prelude_traits()
+  let bs = builtins()
+  match map.get(bs, "cast") {
+    Some(s) -> {
+      assert sig_render(adts, traits, s) ==
+        "fn cast[T](x: Object) -> Result[T, ForeignError]"
+    }
+    None -> { assert false }
+  }
+  # Pure, and deliberately: the failure became a value, so there is no effect
+  # to declare. The barriers are `!io` because the thunk they run is; this one
+  # runs nothing.
+  assert intr_at("cast").expect("cast").sig.eff == EPure
+  # and the `rt` table does not carry it, although `dawn/rt/Io.cast` exists:
+  # that route emits the descriptor the *signature* names, and this call needs
+  # a second operand (the target class, which only the call site knows). Both
+  # emitters therefore write the call themselves.
+  assert intr_at("cast").expect("cast").rt == None
+  match map.get(bs, "cast_e") {
+    Some(_) -> { assert false }
+    None -> { }
+  }
+  match intr_at("cast_e") {
+    Some(_) -> { assert false }
+    None -> { }
+  }
+}
+
+test "no barrier renders its failure into a String any more" {
+  # The end of the error model's migration (design doc 六): there is one pair
+  # of barriers and its payload is structured. A String payload surviving
+  # anywhere is the regression this asserts against -- it is what a caller has
+  # to parse, and parsing it is ERR-02. The transitional `_e` spelling is gone,
+  # and its absence is asserted here too: leaving it behind would leave a
+  # second way to spell the same thing in `dawn doc --builtins` forever.
+  let adts = prelude_adts()
+  let traits = prelude_traits()
+  let bs = builtins()
+  for n in ["catch_fault", "catch_panic"] {
+    match map.get(bs, n) {
+      Some(s) -> {
+        assert sig_render(adts, traits, s) ==
+          "fn " ++ n ++ "[T](f: fn() -> T !io) -> Result[T, ForeignError] !io"
+      }
+      None -> { assert false }
+    }
+    # and each reaches the io runtime, which is where a backend implements it
+    assert intr_at(n).expect(n).rt == Some(RtIo)
+  }
+  for n in ["catch_fault_e", "catch_panic_e"] {
+    match map.get(bs, n) {
+      Some(_) -> { assert false }
+      None -> { }
+    }
+    match intr_at(n) {
+      Some(_) -> { assert false }
+      None -> { }
+    }
+  }
+}
+
+test "bracket protects a resource and hands the body's own answer back" {
+  # The third barrier-family primitive (docs/core-move2-design.md 4, knife 1).
+  # Four things about the signature are decisions, and all four are asserted
+  # here because each has an alternative that also compiles:
+  #
+  #   the resource is a VALUE, not an acquire thunk. The thunk is what Haskell
+  #   needs to close the window an asynchronous exception could arrive in;
+  #   Dawn has no asynchronous failures and nothing of the caller's runs
+  #   between the arguments and the handler, so acquisition is ordinary code
+  #   before the call;
+  #   the use-closure is LAST (Haskell's order), so a future `with`-style
+  #   sugar that attaches the remaining block as the last argument has a
+  #   primitive to attach it to -- and with the resource eager, such a site
+  #   spells no lambda at all;
+  #   the result is `B` and not a `Result`, because bracket does not catch --
+  #   the failure carries on and a caller who wants it as a value wraps the
+  #   whole thing in `catch_fault`;
+  #   `release` answers `Unit`, so nothing a caller might read can be dropped
+  #   on the floor by the unwind path.
+  let adts = prelude_adts()
+  let traits = prelude_traits()
+  let bs = builtins()
+  match map.get(bs, "bracket") {
+    Some(s) -> {
+      assert sig_render(adts, traits, s) ==
+        "fn bracket[A, B](resource: A, release: fn(A) -> Unit !io, " ++
+        "use: fn(A) -> B !io) -> B !io"
+    }
+    None -> { assert false }
+  }
+  let i = intr_at("bracket").expect("bracket")
+  # the io runtime implements it, as it implements the two barriers
+  assert i.rt == Some(RtIo)
+  # its declared signature is its ABI: the result comes back erased and
+  # lowering is what unboxes it
+  assert i.erased
+  # and it is language surface, not a std-only backend contract
+  assert not i.internal
+  assert i.sig.eff == EIo
+}
+
+test "ForeignError is a prelude record whose fields every backend can answer" {
+  let adts = prelude_adts()
+  let fe = adt_of(adts, FOREIGN_ERROR_ID)
+  assert fe.name == "ForeignError"
+  assert fe.is_record
+  assert fe.tparams == []
+  assert fe.derives_show
+  let ci = fe.ctors[0]
+  # a record's one constructor wears the type's name, as every other record does
+  assert ci.name == "ForeignError"
+  assert len(ci.fields) == 3
+  assert ci.fields[0].name == "kind"
+  assert ci.fields[0].ty == TyString
+  assert ci.fields[1].name == "message"
+  assert ci.fields[1].ty == TyString
+  # the cause is optional because only some backends have one, and rendered
+  # because a `ForeignError` inside a `ForeignError` would be a cycle in a
+  # record the emitters build by hand
+  assert ci.fields[2].name == "cause"
+  assert ci.fields[2].ty == opt_ty(TyString)
+  assert ty_show(adts, foreign_error_ty()) == "ForeignError"
+}
+
+fn map_size2(m: Map[String, Sig]) -> Int = map.len(m)

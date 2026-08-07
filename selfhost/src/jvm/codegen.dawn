@@ -1,0 +1,702 @@
+# Checked TAST → JVM bytecode via ASM (the Kotlin CodeGen.kt, spec §12.2):
+# module → class of statics; Int → long, Float → double, Bool → boolean,
+# String → java.lang.String, Unit → void; ADT → abstract base + final ctor
+# subclasses (nullary = singletons); match → instanceof chains; self tail
+# calls → goto. The class writer is dawn.rt.AsmWriter in COMPUTE_FRAMES, driven
+# through dawn.rt.Asm's static adapters because ASM's
+# visit signatures take nulls and Dawn has none — golden = byte-identical
+# .class files (docs/selfhost-codegen.md).
+
+use std/str
+use std/bytes
+use std/list
+use std/map
+use check/types.{
+  EPure, prelude_adts, opt_ty, peel_opaque,
+  Ty, TyInt, TyFloat, TyBool, TyString, TyBytes, TyUnit, TyNever,
+  TyError, TyVar, TyAssoc, TyAdt, TyList, TyMap, TySet, TyArray, TyJava, TyTuple, TyFn,
+  Adts, AdtI, CtorI, adt_of, adt_jvm_name, ctor_jvm_name, Sym, Sig, Eff
+}
+use ir/core.{subject_key}
+use jvm/jreflect
+use java "dawn.rt.Asm"
+use java "dawn.rt.AsmWriter"
+use java "org.objectweb.asm.ClassWriter"
+use java "org.objectweb.asm.MethodVisitor"
+use java "org.objectweb.asm.Label"
+use java "org.objectweb.asm.Opcodes"
+
+use jvm/jvmops.{
+  ACC_ABSTRACT, ACC_FINAL, ACC_PRIVATE, ACC_PROTECTED, ACC_PUBLIC, ACC_STATIC, COMPUTE_FRAMES,
+  OP_ALOAD,
+  OP_ARETURN, OP_ASTORE, OP_BIPUSH, OP_CHECKCAST, OP_DCMPL, OP_DLOAD, OP_DNEG, OP_DRETURN,
+  OP_DSTORE, OP_DUP, OP_DUP2, OP_GETFIELD, OP_IADD, OP_ICONST_0, OP_ICONST_1, OP_IFEQ, OP_IFNE,
+  OP_IF_ACMPEQ, OP_IF_ICMPNE, OP_ILOAD, OP_IMUL, OP_INSTANCEOF, OP_INVOKESPECIAL, OP_INVOKESTATIC,
+  OP_INVOKEVIRTUAL, OP_IRETURN, OP_IXOR, OP_L2I, OP_LCMP, OP_LCONST_1, OP_LLOAD, OP_LNEG,
+  OP_LSTORE, OP_LXOR, OP_NEW, OP_POP2, OP_PUTFIELD, OP_PUTSTATIC, OP_RETURN, V52
+}
+use jvm/rtclasses.{
+  obj, fn_iface, tuple_class, erased_apply_desc, append_const, close_mv, UNIT_CLASS, SB,
+  SHOW_CLASS, PVEC_CLASS, HAMT_CLASS, ARRAY_CLASS
+}
+
+# ---- type mapping ----
+
+## The JVM descriptor of a Dawn type (the Kotlin descOf).
+pub fn desc_of(adts: Adts, t: Ty) -> String =
+  match t {
+    # an opaque type has no representation of its own -- it IS its target
+    TyOpaque(_, _, _, tgt) -> desc_of(adts, tgt)
+    TyInt -> "J"
+    TyFloat -> "D"
+    TyBool -> "Z"
+    TyString -> "Ljava/lang/String;"
+    TyBytes -> "[B"
+    TyUnit -> "L" ++ UNIT_CLASS ++ ";"
+    # `V` is legal as a return descriptor and nowhere else, which is exactly
+    # where the bottom types can appear: an expression that does not return
+    # has no parameter, field or local to be stored in.
+    TyNever -> "V"
+    TyError -> "V"
+    # a projection over a rigid subject is erased exactly like the TyVar it
+    # projects from (assoc-types-design.md 4.1); ground types never carry one
+    TyVar(_, _) | TyAssoc(_, _, _) -> "Ljava/lang/Object;"
+    TyAdt(aid, _) -> "L" ++ adt_jvm_name(adt_of(adts, aid)) ++ ";"
+    TyList(_) -> "L" ++ PVEC_CLASS ++ ";"
+    TyMap(_, _) -> "L" ++ HAMT_CLASS ++ ";"
+    TySet(_) -> "L" ++ HAMT_CLASS ++ ";"
+    TyArray(_) -> "L" ++ ARRAY_CLASS ++ ";"
+    TyTuple(elems) -> "L" ++ tuple_class(len(elems)) ++ ";"
+    # arrays are their own descriptor ("[B"); reference classes get L…;
+    TyJava(fqcn, _) -> {
+      let internal = join(str.split(fqcn, "."), "/")
+      if str.starts_with(internal, "[") { internal } else { "L" ++ internal ++ ";" }
+    }
+    TyFn(params, _, _) -> "L" ++ fn_iface(len(params)) ++ ";"
+  }
+
+pub fn method_desc(adts: Adts, params: List[Ty], ret: Ty) -> String = {
+  var ps = ""
+  for p in params { ps = ps ++ desc_of(adts, p) }
+  "(" ++ ps ++ ")" ++ desc_of(adts, ret)
+}
+
+## How the JVM carries a value of this type.
+##
+## `desc_of` says which *class*; this says which *machine representation*, and
+## those are the only two questions the backend asks about a type that every
+## variant has to answer. Slot width, load/store opcode, boxing and hashing all
+## follow from this, so they dispatch on `JvmRepr` rather than re-deciding the
+## scalar/reference split each time.
+##
+## The line: this answers *how a value is carried*. A function whose answer
+## depends on Dawn semantics -- content equality, hashing, rendering, order --
+## must stay a `Ty` match, because there a new variant inheriting `RRef` would
+## be a wrong answer rather than a missing one.
+pub type JvmRepr =
+  | RLong # 2 slots, boxes to java.lang.Long
+  | RDouble # 2 slots, boxes to java.lang.Double
+  | RBool # 1 slot, boxes to java.lang.Boolean
+  | RRef # 1 slot, already an Object
+  | RBottom # 0 slots and no value: Never and Error
+
+## The one function that has to account for every `Ty`. Deliberately without a
+## wildcard: a new variant must fail to compile *here*, where the decision is
+## a one-liner, rather than silently inherit a default in a dozen callers.
+pub fn jvm_repr(t: Ty) -> JvmRepr =
+  match t {
+    TyOpaque(_, _, _, tgt) -> jvm_repr(tgt)
+    TyInt -> RLong
+    TyFloat -> RDouble
+    TyBool -> RBool
+    # Unit is a value like any other -- the dawn/rt/Unit singleton -- and the
+    # only reason to say otherwise would be to save a slot for a type nobody
+    # writes in a hot loop. Saying otherwise cost every position where the JVM
+    # demands a descriptor: there is no way to spell zero width in one.
+    TyUnit -> RRef
+    TyNever -> RBottom
+    TyError -> RBottom
+    TyString -> RRef
+    TyBytes -> RRef
+    TyVar(_, _) | TyAssoc(_, _, _) -> RRef
+    TyAdt(_, _) -> RRef
+    TyList(_) -> RRef
+    TyMap(_, _) -> RRef
+    TySet(_) -> RRef
+    TyArray(_) -> RRef
+    TyJava(_, _) -> RRef
+    TyTuple(_) -> RRef
+    TyFn(_, _, _) -> RRef
+  }
+
+## JVM stack/local slots of a type (J/D = 2, void = 0).
+pub fn slots_of(t: Ty) -> Int =
+  match jvm_repr(t) {
+    RLong -> 2
+    RDouble -> 2
+    RBool -> 1
+    RRef -> 1
+    RBottom -> 0
+  }
+
+pub fn is_ref(t: Ty) -> Bool =
+  match jvm_repr(t) {
+    RRef -> true
+    RLong | RDouble | RBool | RBottom -> false
+  }
+
+## No value exists at all: `Never` (this expression does not return) and the
+## error type. Ask this, not `slots_of(t) == 0`, wherever the question is
+## "is there anything on the stack" -- width and existence were the same
+## question only while Unit was zero-width, and that is what this stopped being.
+pub fn is_bottom(t: Ty) -> Bool =
+  match jvm_repr(t) {
+    RBottom -> true
+    RLong | RDouble | RBool | RRef -> false
+  }
+
+# ---- tests ----
+
+test "descriptors and slot sizes mirror the Kotlin mapping" {
+  let adts = prelude_adts()
+  assert desc_of(adts, TyInt) == "J"
+  assert desc_of(adts, TyBool) == "Z"
+  assert desc_of(adts, TyBytes) == "[B"
+  assert desc_of(adts, TyList(TyInt)) == "Lstd/pvec\$Vec;"
+  assert desc_of(adts, TyTuple([TyInt, TyBool])) == "Ldawn/rt/Tuple2;"
+  assert desc_of(adts, TyFn([TyInt], TyBool, EPure)) == "Ldawn/rt/Fn1;"
+  assert desc_of(adts, opt_ty(TyInt)) == "LOption;"
+  assert method_desc(adts, [TyInt, TyString], TyUnit) == "(JLjava/lang/String;)Ldawn/rt/Unit;"
+  assert erased_apply_desc(2) == "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;"
+  assert slots_of(TyFloat) == 2
+}
+
+test "a Unit is an ordinary reference, and only the bottom types are void" {
+  let adts = prelude_adts()
+  # every shape below was a ClassFormatError while `Unit` said `V`: `V` is a
+  # return descriptor and the JVM rejects it in a parameter or a field
+  assert desc_of(adts, TyUnit) == "Ldawn/rt/Unit;"
+  assert desc_of(adts, TyOpaque(0, "Handle", "m", TyUnit)) == "Ldawn/rt/Unit;"
+  assert method_desc(adts, [TyUnit, TyInt], TyBool) == "(Ldawn/rt/Unit;J)Z"
+  assert slots_of(TyUnit) == 1
+  assert is_ref(TyUnit)
+  assert not is_bottom(TyUnit)
+  # the pair a later reader needs to see together: `Never` did not move, and
+  # `V` is still right for it because it reaches no position but a return
+  assert desc_of(adts, TyNever) == "V"
+  assert slots_of(TyNever) == 0
+  assert is_bottom(TyNever)
+  assert is_bottom(TyError)
+}
+
+test "an impl is named by its head" {
+  # Coherence gives a head at most one impl, so `List[Int]` and `List[T]` are
+  # the same impl and both backends have to spell it the same way. They spell
+  # it differently in one respect on purpose -- a JVM method name is read by
+  # people, so an ADT contributes its declared name -- but dropping the
+  # arguments is the rule, and this is where the two are held to it.
+  #
+  # emitc used `ty_key`, which keeps a list's element. Nothing noticed while
+  # every impl subject was concrete; std's `impl[T: Show] Show[List[T]]` made
+  # the call site say `List_Int` and the definition `List_Var123`.
+  let adts = prelude_adts()
+  let it = TyList(TyInt)
+  let gen = TyList(TyVar("T", 7))
+  assert subject_name(adts, it) == subject_name(adts, gen)
+  assert subject_key(it) == subject_key(gen)
+  assert subject_name(adts, TyMap(TyInt, TyString)) == "Map"
+  assert subject_key(TyMap(TyInt, TyString)) == "Map"
+  # and a subject with no arguments is still itself
+  assert subject_name(adts, TyString) == "String"
+  assert subject_key(TyString) == "String"
+}
+
+test "the ASM interop spike: a class assembles through the shared writer" {
+  # the spike just proves Dawn can drive a ClassWriter through the static
+  # null adapters + MethodVisitor end to end
+  let cw = Asm.plain(COMPUTE_FRAMES).expect("writer")
+  # ACC_PUBLIC|ACC_FINAL = 0x11
+  Asm.beginOn(cw, V52, 17, "spike/Empty", "java/lang/Object")
+  let m = Asm.methodOn(cw, 9, "id", "(J)J").expect("method visitor")
+  m.visitCode()
+  # LLOAD 0; LRETURN
+  m.visitVarInsn(22, 0)
+  m.visitInsn(173)
+  close_mv(m)
+  cw.visitEnd()
+  let bs = cw.toByteArray().expect("bytes")
+  assert bytes.len(bs) > 0
+}
+
+# ---- ADT classes (spec §12.2) ----
+
+## Load a value of type `t` from a local slot (nothing for Never).
+pub fn load_slot(m: MethodVisitor, t: Ty, slot: Int) -> Unit !io = {
+  match jvm_repr(t) {
+    RLong -> { m.visitVarInsn(OP_LLOAD, slot) }
+    RDouble -> { m.visitVarInsn(OP_DLOAD, slot) }
+    RBool -> { m.visitVarInsn(OP_ILOAD, slot) }
+    RRef -> { m.visitVarInsn(OP_ALOAD, slot) }
+    RBottom -> ()
+  }
+  ()
+}
+
+## Consume a value of `t` on the stack, leave its int hash (values are never null).
+pub fn hash_of(m: MethodVisitor, t: Ty) -> Unit !io = {
+  # deliberately a `Ty` match and not `jvm_repr`: hashing is a question about
+  # Dawn *values*, not about machine representation, and routing it through
+  # the representation would hide the types whose answer here has to be
+  # spelled out -- `TyBytes` is one, and inheriting "it is a reference, so
+  # Object.hashCode" is how it was wrong before.
+  match t {
+    # opacity hides the representation from other modules, not from the
+    # language: an opaque Int hashes, compares and renders as that Int
+    TyOpaque(_, _, _, tgt) -> hash_of(m, tgt)
+    TyInt -> { m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Long", "hashCode", "(J)I", false) }
+    TyFloat -> {
+      m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Double", "hashCode", "(D)I", false)
+    }
+    TyBool -> {
+      m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Boolean", "hashCode", "(Z)I", false)
+    }
+    # content hash, to stay consistent with the content equality
+    # gen_equals_method now uses for a Bytes field
+    TyBytes -> {
+      m.visitMethodInsn(OP_INVOKESTATIC, "java/util/Arrays", "hashCode", "([B)I", false)
+    }
+    TyString | TyVar(_, _) | TyAssoc(_, _, _) | TyAdt(_, _) | TyJava(_, _) -> {
+      m.visitMethodInsn(OP_INVOKEVIRTUAL, obj(), "hashCode", "()I", false)
+    }
+    TyList(_) | TyMap(_, _) | TySet(_) | TyArray(_) | TyTuple(_) | TyFn(_, _, _) -> {
+      m.visitMethodInsn(OP_INVOKEVIRTUAL, obj(), "hashCode", "()I", false)
+    }
+    # Still unreachable from either caller: `Hash[Unit]` is refused, and a
+    # constructor field can be neither Unit nor bottom. Left as the wildcard
+    # had it -- for Unit that is at least consistent with equals, there being
+    # one instance to hash.
+    TyUnit | TyNever | TyError -> {
+      m.visitMethodInsn(OP_INVOKEVIRTUAL, obj(), "hashCode", "()I", false)
+    }
+  }
+  ()
+}
+
+## The ADT's `toString`: Name, Name(v0, v1), or Name { f0: v0, f1: v1 }.
+##
+## Not what `to_string` compiles to any more -- that is a Core body now. This
+## is what `String.valueOf` finds when a panic message renders an erased value,
+## and what a Java caller sees. Kept in step with the Core rendering by hand,
+## which is the price of the JVM having a universal `toString` at all.
+fn gen_to_string_method(cw: ClassWriter, adts: Adts, sub: String, ci: CtorI) -> Unit !io = {
+  let m = Asm.methodOn(cw, ACC_PUBLIC, "toString", "()Ljava/lang/String;").expect("mv")
+  m.visitCode()
+  m.visitTypeInsn(OP_NEW, SB)
+  m.visitInsn(OP_DUP)
+  m.visitMethodInsn(OP_INVOKESPECIAL, SB, "<init>", "()V", false)
+  append_const(m, ci.name)
+  if len(ci.fields) > 0 {
+    let is_record = adt_of(adts, ci.adt).is_record
+    append_const(m, if is_record { " { " } else { "(" })
+    var i = 0
+    for f in ci.fields {
+      if i > 0 { append_const(m, ", ") }
+      if is_record { append_const(m, f.name ++ ": ") }
+      m.visitVarInsn(OP_ALOAD, 0)
+      m.visitFieldInsn(OP_GETFIELD, sub, f.name, desc_of(adts, f.ty))
+      # peeled to agree with `desc_of` one line up, which peels: the field was
+      # loaded at the target's width, so it must be boxed at the target's width
+      match peel_opaque(f.ty) {
+        TyInt -> {
+          m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Long", "valueOf",
+            "(J)Ljava/lang/Long;", false)
+        }
+        TyFloat -> {
+          m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Double", "valueOf",
+            "(D)Ljava/lang/Double;", false)
+        }
+        TyBool -> {
+          m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Boolean", "valueOf",
+            "(Z)Ljava/lang/Boolean;", false)
+        }
+        _ -> ()
+      }
+      m.visitMethodInsn(OP_INVOKESTATIC, SHOW_CLASS, "show",
+        "(Ljava/lang/Object;)Ljava/lang/String;", false)
+      m.visitMethodInsn(OP_INVOKEVIRTUAL, SB, "append",
+        "(Ljava/lang/String;)L" ++ SB ++ ";", false)
+      i = i + 1
+    }
+    append_const(m, if is_record { " }" } else { ")" })
+  }
+  m.visitMethodInsn(OP_INVOKEVIRTUAL, SB, "toString", "()Ljava/lang/String;", false)
+  m.visitInsn(OP_ARETURN)
+  close_mv(m)
+  ()
+}
+
+## Structural equality (== in Dawn, spec §4.3); a matching hashCode follows.
+fn gen_equals_method(cw: ClassWriter, adts: Adts, sub: String, ci: CtorI) -> Unit !io = {
+  let m = Asm.methodOn(cw, ACC_PUBLIC, "equals", "(Ljava/lang/Object;)Z").expect("mv")
+  m.visitCode()
+  let yes = Label.new()
+  let no = Label.new()
+  m.visitVarInsn(OP_ALOAD, 0)
+  m.visitVarInsn(OP_ALOAD, 1)
+  m.visitJumpInsn(OP_IF_ACMPEQ, yes)
+  m.visitVarInsn(OP_ALOAD, 1)
+  m.visitTypeInsn(OP_INSTANCEOF, sub)
+  m.visitJumpInsn(OP_IFEQ, no)
+  m.visitVarInsn(OP_ALOAD, 1)
+  m.visitTypeInsn(OP_CHECKCAST, sub)
+  m.visitVarInsn(OP_ASTORE, 2)
+  for f in ci.fields {
+    m.visitVarInsn(OP_ALOAD, 0)
+    m.visitFieldInsn(OP_GETFIELD, sub, f.name, desc_of(adts, f.ty))
+    m.visitVarInsn(OP_ALOAD, 2)
+    m.visitFieldInsn(OP_GETFIELD, sub, f.name, desc_of(adts, f.ty))
+    # peeled for the same reason as gen_to_string_method, and this is where it
+    # cost most: an opaque-over-Int field loaded two longs and then compared
+    # them with the reference arm, which ASM rejects while computing frames --
+    # the compiler died rather than the program
+    match peel_opaque(f.ty) {
+      TyInt -> {
+        m.visitInsn(OP_LCMP)
+        m.visitJumpInsn(OP_IFNE, no)
+      }
+      TyFloat -> {
+        m.visitInsn(OP_DCMPL)
+        m.visitJumpInsn(OP_IFNE, no)
+      }
+      TyBool -> { m.visitJumpInsn(OP_IF_ICMPNE, no) }
+      # a byte[] has no content `equals` of its own, so this arm used to make
+      # a Bytes field compare by identity -- while the `==` operator on the
+      # same two values compared by content. Dawn equality no longer reaches
+      # this method (nothing but a host value reaches `java_eq` now), but Java
+      # does: it is what a Dawn value answers when a Java caller compares it.
+      # Paired with hash_of's TyBytes arm; changing one alone breaks
+      # equals/hashCode.
+      TyBytes -> {
+        m.visitMethodInsn(OP_INVOKESTATIC, "java/util/Arrays", "equals", "([B[B)Z", false)
+        m.visitJumpInsn(OP_IFEQ, no)
+      }
+      _ -> {
+        m.visitMethodInsn(OP_INVOKEVIRTUAL, obj(), "equals", "(Ljava/lang/Object;)Z", false)
+        m.visitJumpInsn(OP_IFEQ, no)
+      }
+    }
+  }
+  m.visitLabel(yes)
+  m.visitInsn(OP_ICONST_1)
+  m.visitInsn(OP_IRETURN)
+  m.visitLabel(no)
+  m.visitInsn(OP_ICONST_0)
+  m.visitInsn(OP_IRETURN)
+  close_mv(m)
+  ()
+}
+
+## hashCode consistent with the structural equals: h = 31*h + field.hash, seeded 1.
+##
+## Not what Dawn's `hash` compiles to any more -- that is a Core body, and it
+## folds the constructor tag in as well, which a per-class `hashCode` has no
+## need of (`equals` here checks the class first). This is what a Java caller
+## sees, and what a Dawn value answers inside a `java.util.HashMap`; it is
+## paired with `gen_equals_method` and changing one alone breaks that pair.
+fn gen_hash_code_method(cw: ClassWriter, adts: Adts, sub: String, ci: CtorI) -> Unit !io = {
+  let m = Asm.methodOn(cw, ACC_PUBLIC, "hashCode", "()I").expect("mv")
+  m.visitCode()
+  m.visitInsn(OP_ICONST_1)
+  for f in ci.fields {
+    m.visitIntInsn(OP_BIPUSH, 31)
+    m.visitInsn(OP_IMUL)
+    m.visitVarInsn(OP_ALOAD, 0)
+    m.visitFieldInsn(OP_GETFIELD, sub, f.name, desc_of(adts, f.ty))
+    hash_of(m, f.ty)
+    m.visitInsn(OP_IADD)
+  }
+  m.visitInsn(OP_IRETURN)
+  close_mv(m)
+  ()
+}
+
+## The static an `impl` compiles to (mirrors emit.impl_method_name).
+fn impl_static_name(adts: Adts, trait_name: String, subject: Ty, m: String) -> String =
+  "dawn\$impl\$" ++ trait_name ++ "\$" ++ subject_name(adts, subject) ++ "\$" ++ m
+
+## equals(Object) delegating to `impl Eq`: a non-instance is never equal, so
+## the type test still runs first and the impl only ever sees its own type.
+fn gen_forwarding_equals(
+  cw: ClassWriter,
+  adts: Adts,
+  sub: String,
+  owner: String,
+  subject: Ty
+) -> Unit !io = {
+  let m = Asm.methodOn(cw, ACC_PUBLIC, "equals", "(Ljava/lang/Object;)Z").expect("mv")
+  m.visitCode()
+  let no = Label.new()
+  m.visitVarInsn(OP_ALOAD, 1)
+  m.visitTypeInsn(OP_INSTANCEOF, adt_jvm_name(adt_of(adts, adt_id_of(subject))))
+  m.visitJumpInsn(OP_IFEQ, no)
+  m.visitVarInsn(OP_ALOAD, 0)
+  m.visitVarInsn(OP_ALOAD, 1)
+  m.visitTypeInsn(OP_CHECKCAST, adt_jvm_name(adt_of(adts, adt_id_of(subject))))
+  let d = desc_of(adts, subject)
+  m.visitMethodInsn(OP_INVOKESTATIC, owner, impl_static_name(adts, "Eq", subject, "eq"),
+    "(" ++ d ++ d ++ ")Z", false)
+  m.visitInsn(OP_IRETURN)
+  m.visitLabel(no)
+  m.visitInsn(OP_ICONST_0)
+  m.visitInsn(OP_IRETURN)
+  close_mv(m)
+  ()
+}
+
+## hashCode() delegating to `impl Hash`; Dawn's Int is a long, so narrow it.
+fn gen_forwarding_hash_code(
+  cw: ClassWriter,
+  adts: Adts,
+  sub: String,
+  owner: String,
+  subject: Ty
+) -> Unit !io = {
+  let m = Asm.methodOn(cw, ACC_PUBLIC, "hashCode", "()I").expect("mv")
+  m.visitCode()
+  m.visitVarInsn(OP_ALOAD, 0)
+  m.visitMethodInsn(OP_INVOKESTATIC, owner, impl_static_name(adts, "Hash", subject, "hash"),
+    "(" ++ desc_of(adts, subject) ++ ")J", false)
+  m.visitInsn(OP_L2I)
+  m.visitInsn(OP_IRETURN)
+  close_mv(m)
+  ()
+}
+
+fn adt_id_of(t: Ty) -> Int =
+  match t {
+    TyAdt(aid, _) -> aid
+    _ -> panic("impl subject is not an ADT")
+  }
+
+## One ctor class: final subclass of `base` (or the record class itself).
+pub fn gen_ctor_class(
+  supers: List[String],
+  adts: Adts,
+  base: String,
+  ci: CtorI,
+  ov: EqOverride
+) -> Bytes !io = {
+  let sub = ctor_jvm_name(adts, ci)
+  let cw = AsmWriter.of(COMPUTE_FRAMES, supers).expect("writer")
+  Asm.beginOn(cw, V52, ACC_PUBLIC + ACC_FINAL, sub, base)
+  let singleton = len(ci.fields) == 0
+  for f in ci.fields {
+    Asm.fieldOn(cw, ACC_PUBLIC + ACC_FINAL, f.name, desc_of(adts, f.ty))
+  }
+  if singleton {
+    Asm.fieldOn(cw, ACC_PUBLIC + ACC_STATIC + ACC_FINAL, "INSTANCE", "L" ++ sub ++ ";")
+    let cl = Asm.methodOn(cw, ACC_STATIC, "<clinit>", "()V").expect("mv")
+    cl.visitCode()
+    cl.visitTypeInsn(OP_NEW, sub)
+    cl.visitInsn(OP_DUP)
+    cl.visitMethodInsn(OP_INVOKESPECIAL, sub, "<init>", "()V", false)
+    cl.visitFieldInsn(OP_PUTSTATIC, sub, "INSTANCE", "L" ++ sub ++ ";")
+    cl.visitInsn(OP_RETURN)
+    cl.visitMaxs(2, 0)
+    cl.visitEnd()
+  }
+  var ps = ""
+  for f in ci.fields { ps = ps ++ desc_of(adts, f.ty) }
+  let acc = if singleton { ACC_PRIVATE } else { ACC_PUBLIC }
+  let init = Asm.methodOn(cw, acc, "<init>", "(" ++ ps ++ ")V").expect("mv")
+  init.visitCode()
+  init.visitVarInsn(OP_ALOAD, 0)
+  init.visitMethodInsn(OP_INVOKESPECIAL, base, "<init>", "()V", false)
+  var slot = 1
+  for f in ci.fields {
+    init.visitVarInsn(OP_ALOAD, 0)
+    load_slot(init, f.ty, slot)
+    init.visitFieldInsn(OP_PUTFIELD, sub, f.name, desc_of(adts, f.ty))
+    slot = slot + slots_of(f.ty)
+  }
+  init.visitInsn(OP_RETURN)
+  close_mv(init)
+  # `equals`/`hashCode` are the JVM's materialisation of the Eq/Hash
+  # dictionary: the collections and every derived field comparison reach the
+  # relation through them, so an `impl Eq` that only changed `==` would leave
+  # `a == b` and `map.get(m, b)` disagreeing. Forward them to the impl.
+  let subject = TyAdt(ci.adt, [])
+  match ov.eq_owner {
+    Some(owner) -> gen_forwarding_equals(cw, adts, sub, owner, subject)
+    None -> if not singleton { gen_equals_method(cw, adts, sub, ci) }
+  }
+  match ov.hash_owner {
+    Some(owner) -> gen_forwarding_hash_code(cw, adts, sub, owner, subject)
+    None -> if not singleton { gen_hash_code_method(cw, adts, sub, ci) }
+  }
+  # toString is always generated so nested/generic fields render uniformly via
+  # dawn/rt/Show; the type checker gates whether it may be called
+  gen_to_string_method(cw, adts, sub, ci)
+  cw.visitEnd()
+  cw.toByteArray().expect("bytes")
+}
+
+## The classes of one ADT: (name, bytes) for the base (sums) and each ctor.
+## Where a type overrides the structural default: the module class holding
+## the impl's static method, per trait. None = keep the derived body.
+pub type EqOverride = { eq_owner: Option[String], hash_owner: Option[String] }
+
+pub fn no_override() -> EqOverride = EqOverride { eq_owner: None, hash_owner: None }
+
+pub fn gen_adt(
+  supers: List[String],
+  adts: Adts,
+  a: AdtI,
+  ov: EqOverride
+) -> List[(String, Bytes)] !io = {
+  let base = adt_jvm_name(a)
+  if a.is_record {
+    let ci = match a.ctors {
+      [only] -> only
+      _ -> panic("record with " ++ to_string(len(a.ctors)) ++ " ctors")
+    }
+    return [(base, gen_ctor_class(supers, adts, obj(), ci, ov))]
+  }
+  let bw = AsmWriter.of(COMPUTE_FRAMES, supers).expect("writer")
+  Asm.beginOn(bw, V52, ACC_PUBLIC + ACC_ABSTRACT, base, obj())
+  let bc = Asm.methodOn(bw, ACC_PROTECTED, "<init>", "()V").expect("mv")
+  bc.visitCode()
+  bc.visitVarInsn(OP_ALOAD, 0)
+  bc.visitMethodInsn(OP_INVOKESPECIAL, obj(), "<init>", "()V", false)
+  bc.visitInsn(OP_RETURN)
+  bc.visitMaxs(1, 1)
+  bc.visitEnd()
+  bw.visitEnd()
+  var out = [(base, bw.toByteArray().expect("bytes"))]
+  for ci in a.ctors {
+    out = out ++ [(ctor_jvm_name(adts, ci), gen_ctor_class(supers, adts, base, ci, ov))]
+  }
+  out
+}
+
+## INSTANCE + private <init> + <clinit> (the Kotlin singletonScaffold).
+pub fn singleton_scaffold(cw: ClassWriter, cls: String, iface: String) -> Unit !io = {
+  Asm.fieldOn(cw, ACC_PUBLIC + ACC_STATIC + ACC_FINAL, "INSTANCE", "L" ++ iface ++ ";")
+  let init = Asm.methodOn(cw, ACC_PRIVATE, "<init>", "()V").expect("mv")
+  init.visitCode()
+  init.visitVarInsn(OP_ALOAD, 0)
+  init.visitMethodInsn(OP_INVOKESPECIAL, obj(), "<init>", "()V", false)
+  init.visitInsn(OP_RETURN)
+  close_mv(init)
+  let cl = Asm.methodOn(cw, ACC_STATIC, "<clinit>", "()V").expect("mv")
+  cl.visitCode()
+  cl.visitTypeInsn(OP_NEW, cls)
+  cl.visitInsn(OP_DUP)
+  cl.visitMethodInsn(OP_INVOKESPECIAL, cls, "<init>", "()V", false)
+  cl.visitFieldInsn(OP_PUTSTATIC, cls, "INSTANCE", "L" ++ iface ++ ";")
+  cl.visitInsn(OP_RETURN)
+  close_mv(cl)
+  ()
+}
+
+## The same scaffold for a dictionary that takes arguments: no INSTANCE,
+## because there is nothing to share -- one field per argument and a
+## constructor that binds them. `CDictApply` is what calls it.
+pub fn dict_arg_field(idx: Int) -> String = "a" ++ to_string(idx)
+
+pub fn dict_ctor_desc(nargs: Int) -> String = {
+  var s = "("
+  for _i in 0 ..nargs { s = s ++ "Ljava/lang/Object;" }
+  s ++ ")V"
+}
+
+pub fn parameterised_scaffold(cw: ClassWriter, cls: String, nargs: Int) -> Unit !io = {
+  for i in 0 ..nargs {
+    Asm.fieldOn(cw, ACC_PUBLIC + ACC_FINAL, dict_arg_field(i), "Ljava/lang/Object;")
+  }
+  let init = Asm.methodOn(cw, ACC_PUBLIC, "<init>", dict_ctor_desc(nargs)).expect("mv")
+  init.visitCode()
+  init.visitVarInsn(OP_ALOAD, 0)
+  init.visitMethodInsn(OP_INVOKESPECIAL, obj(), "<init>", "()V", false)
+  for i in 0 ..nargs {
+    init.visitVarInsn(OP_ALOAD, 0)
+    init.visitVarInsn(OP_ALOAD, i + 1)
+    init.visitFieldInsn(OP_PUTFIELD, cls, dict_arg_field(i), "Ljava/lang/Object;")
+  }
+  init.visitInsn(OP_RETURN)
+  close_mv(init)
+  ()
+}
+
+## The name an impl's subject contributes to the static it compiles to. The
+## one definition: `emit.impl_method_name` and `codegen.impl_static_name` both
+## spell the same name, and this used to be written out twice (a third copy,
+## inlined in gen_impl_class, was deleted with that function and had drifted --
+## it was missing Bytes and Cursor).
+pub fn subject_name(adts: Adts, t: Ty) -> String =
+  match t {
+    TyInt -> "Int"
+    TyFloat -> "Float"
+    TyBool -> "Bool"
+    TyString -> "String"
+    # not writable as an impl subject in source; the prelude Eq/Hash cover them
+    TyBytes -> "Bytes"
+    TyAdt(aid, _) -> adt_of(adts, aid).name
+    # the builtin containers, once std writes conditional impls for them.
+    # Arguments are dropped on purpose: the name identifies the *impl*, and
+    # coherence gives a head at most one.
+    TyList(_) -> "List"
+    TyMap(_, _) -> "Map"
+    TySet(_) -> "Set"
+    TyArray(_) -> "Array"
+    TyUnit -> "Unit"
+    # an opaque type is its own subject -- its impl is not its target's
+    TyOpaque(_, name, _, _) -> name
+    _ -> panic("invalid impl subject")
+  }
+
+## The class of one Core dictionary, named from the key its CDictDef carries.
+##
+## A dictionary belongs to the module that built it, so two modules
+## forwarding the same bound get a singleton each. That is the price of the
+## table being the only identity, and it is the cheaper side of the trade: a
+## second derivation is a second thing that can be wrong.
+pub fn dict_class(owner: String, key: String) -> String =
+  "dawn/dict/" ++ join(str.split(owner, "/"), "$") ++ "$" ++ key
+
+## Recover the concrete type from an erased Object on the stack (unerase).
+pub fn emit_unerase(m: MethodVisitor, adts: Adts, t: Ty) -> Unit !io = {
+  match t {
+    TyOpaque(_, _, _, tgt) -> emit_unerase(m, adts, tgt)
+    TyInt -> {
+      m.visitTypeInsn(OP_CHECKCAST, "java/lang/Long")
+      m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/Long", "longValue", "()J", false)
+    }
+    TyFloat -> {
+      m.visitTypeInsn(OP_CHECKCAST, "java/lang/Double")
+      m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/Double", "doubleValue", "()D", false)
+    }
+    TyBool -> {
+      m.visitTypeInsn(OP_CHECKCAST, "java/lang/Boolean")
+      m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/Boolean", "booleanValue", "()Z", false)
+    }
+    TyString -> { m.visitTypeInsn(OP_CHECKCAST, "java/lang/String") }
+    TyBytes -> { m.visitTypeInsn(OP_CHECKCAST, "[B") }
+    TyAdt(aid, _) -> { m.visitTypeInsn(OP_CHECKCAST, adt_jvm_name(adt_of(adts, aid))) }
+    TyList(_) -> { m.visitTypeInsn(OP_CHECKCAST, PVEC_CLASS) }
+    TyMap(_, _) -> { m.visitTypeInsn(OP_CHECKCAST, HAMT_CLASS) }
+    TySet(_) -> { m.visitTypeInsn(OP_CHECKCAST, HAMT_CLASS) }
+    TyArray(_) -> { m.visitTypeInsn(OP_CHECKCAST, ARRAY_CLASS) }
+    TyTuple(elems) -> { m.visitTypeInsn(OP_CHECKCAST, tuple_class(len(elems))) }
+    TyJava(fqcn, _) -> {
+      let internal = join(str.split(fqcn, "."), "/")
+      m.visitTypeInsn(OP_CHECKCAST, internal)
+    }
+    TyFn(params, _, _) -> { m.visitTypeInsn(OP_CHECKCAST, fn_iface(len(params))) }
+    TyUnit -> { m.visitTypeInsn(OP_CHECKCAST, UNIT_CLASS) }
+    # TyVar (and a projection over one) is already erased, and the two
+    # bottom types carry no value
+    TyVar(_, _) | TyAssoc(_, _, _) | TyNever | TyError -> ()
+  }
+  ()
+}

@@ -89,7 +89,7 @@ def names(lines, pattern, where, what):
 
 def declared():
     """`inline_intrinsics()` and `jvm_only_intrinsics()`, as literal lists."""
-    lines = read("lower.dawn")
+    lines = read("ir/lower.dawn")
     inline = names(
         body(lines, "pub fn inline_intrinsics()", "lower.dawn"),
         r'"([A-Za-z_0-9]+)"',
@@ -106,7 +106,7 @@ def declared():
 
 
 def jvm_arms():
-    lines = read("emit.dawn")
+    lines = read("jvm/emit.dawn")
     # `gen_list_intrinsic` dispatches twice: an inner `target` table for the
     # primitives that are a plain std/pvec call, then a chain for the ones
     # that need a List<->Array conversion around them.
@@ -127,7 +127,7 @@ def jvm_arms():
 
 
 def c_arms():
-    lines = read("emitc.dawn")
+    lines = read("c/emitc.dawn")
     arms = set(
         names(
             body(lines, "fn emit_intrinsic(", "emitc.dawn"),

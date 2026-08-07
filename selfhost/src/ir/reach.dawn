@@ -1,0 +1,481 @@
+# Which functions can run, starting from the user's modules, and which of the
+# Unicode-table intrinsics those functions touch.
+#
+# Both backends used to carry the Unicode tables -- simple case mapping and
+# the classification sets (#65/#66) -- into every program they emitted: 52KB
+# of a hello world's 134KB jar was those tables. The tables should exist; what
+# should not is every program paying for them. The question "does this program
+# use them" cannot be answered by scanning every lowered body, because std is
+# emitted whole and std/str.to_upper *contains* `str_upper`: the scan has to
+# start from the user's modules and follow calls, so that a wrapper nobody
+# calls is dead code rather than evidence.
+#
+# The walk is conservative on purpose:
+#
+#   * every function of every user module is a root -- they are all emitted,
+#     and any of them is an entry point as far as freight is concerned. Test
+#     blocks included, on the backend that emits them: the JVM writes a test
+#     body into every artifact, `dawn build` and `dawn test` being one code
+#     path, so `str.to_upper` called from a test alone is still a call the
+#     emitted bytes can make. What the caller hands over decides this rather
+#     than reach itself -- the JVM path passes lower.emitted_core (tests and
+#     their hoisted bodies folded in), the native path passes the plain Core
+#     because emitc drops test functions on the floor. Freight follows what is
+#     emitted, per backend;
+#   * a referenced dictionary contributes every slot it carries;
+#   * a trait default matches by (owner, name) without its trait id, so two
+#     traits sharing a method name both count.
+#
+# Overshoot costs bytes, never correctness. Undershoot is loud, not silent:
+# the JVM resolves constant-pool entries lazily, so a pruned method is a
+# NoSuchMethodError at the call that should not exist; the C runtime treats a
+# zero-length table as "the compiler said this cannot run" and panics
+# (dawn_cp_in / dawn_case) instead of answering from a table that is not
+# there.
+
+use ir/core.{
+  CModule, CFun, CExpr, CStmt, CCallee, CDictSlot, CDictDef, subject_key,
+  CInt, CFloat, CBool, CStr, CUnit, CLocal, CFnRef, CCall, CIntrinsic, CCtor,
+  CField, CIsCtor, CTagOf, CClosure, CDictRef, CDictApply, CDictArg, CTuple,
+  CTupleGet, CBox, CUnbox, CBinary, CUnary, CIf, CBlock, CListLit, CConstRef,
+  CComptime, CReturn, CBreak, CContinue, CForeign, CDup,
+  CSLet, CSAssign, CSDiscard, CSLoop, CSIf, CSDrop,
+  CDirect, CDynamic, CMethod, CImpl, CDefault,
+  CSlotFn, CSlotDefault
+}
+use check/types.{Ty, TyString, TyUnit}
+use std/map
+use std/set
+
+## The answer, one fact per gated intrinsic. Each backend folds these into its
+## own tables: the JVM pairs `str_upper`/`str_lower` with the case payloads
+## and the five predicates with the class payloads; the C emitter does the
+## same per named table.
+##
+## There is no `parse` fact any more: the numeric parsers are std/fmt source
+## (audit RP-05), which trims through `str.trim` like everything else, so the
+## space set rides on `is_space` alone. The one residual parse primitive
+## (`parse_float`, the decimal-to-binary conversion fmt.atod delegates)
+## receives a pre-trimmed string and touches no table.
+pub type TableUse = {
+  str_upper: Bool,
+  str_lower: Bool,
+  is_letter: Bool,
+  is_digit: Bool,
+  is_alnum: Bool,
+  is_upper: Bool,
+  is_lower: Bool,
+  is_space: Bool
+}
+
+## Everything on: the answer when there is no program to reason from (the
+## runtime-only jar `collect_program` builds without a target).
+pub fn all_tables() -> TableUse =
+  TableUse {
+    str_upper: true,
+    str_lower: true,
+    is_letter: true,
+    is_digit: true,
+    is_alnum: true,
+    is_upper: true,
+    is_lower: true,
+    is_space: true
+  }
+
+fn no_tables() -> TableUse =
+  TableUse {
+    str_upper: false,
+    str_lower: false,
+    is_letter: false,
+    is_digit: false,
+    is_alnum: false,
+    is_upper: false,
+    is_lower: false,
+    is_space: false
+  }
+
+## How a body names the function it calls, resolved to positions in one flat
+## function list. Plain functions (bridges and lifted lambdas included) go by
+## (owner, name); impl bodies share their plain name, so they resolve through
+## the same head-keyed identity the backends mangle with (subject_key);
+## defaults go by (owner, name) and may match more than once.
+type Idx = {
+  fns: List[CFun],
+  by_name: Map[(String, String), Int],
+  by_impl: Map[(String, Int, String, String), Int],
+  by_default: Map[(String, String), List[Int]],
+  dicts: Map[String, List[CDictSlot]]
+}
+
+type Rch = {
+  idx: Idx,
+  seen: Set[Int],
+  work: List[Int],
+  seen_dicts: Set[String],
+  u: TableUse
+}
+
+fn build_idx(mods: List[CModule]) -> Idx = {
+  var fns: List[CFun] = []
+  var by_name: Map[(String, String), Int] = map.empty()
+  var by_impl: Map[(String, Int, String, String), Int] = map.empty()
+  var by_default: Map[(String, String), List[Int]] = map.empty()
+  var dicts: Map[String, List[CDictSlot]] = map.empty()
+  var i = 0
+  for m in mods {
+    for f in m.fns {
+      fns = fns ++ [f]
+      match f.impl_of {
+        Some(pr) -> {
+          let (tid, subj) = pr
+          by_impl = map.insert(by_impl, (f.owner, tid, subject_key(subj), f.name), i)
+        }
+        None ->
+          match f.default_of {
+            Some(_) -> {
+              let k = (f.owner, f.name)
+              let cur =
+                match map.get(by_default, k) {
+                  Some(l) -> l
+                  None -> []
+                }
+              by_default = map.insert(by_default, k, cur ++ [i])
+            }
+            # only plain functions: several impls in one module all name their
+            # method `eq`, and the last inserted would shadow the rest.
+            # A test body is not one either: it is a root and never a callee,
+            # and its name is the description string, so `test "shout"` beside
+            # `fn shout` would otherwise take over the name calls resolve by.
+            None ->
+              if not f.is_test {
+                by_name = map.insert(by_name, (f.owner, f.name), i)
+              }
+          }
+      }
+      i = i + 1
+    }
+    for d in m.dicts {
+      # the same key in two modules is the same shape (emitc dedupes program
+      # dictionaries on exactly that); the first one seen is enough
+      if map.get(dicts, d.key) == None {
+        dicts = map.insert(dicts, d.key, d.slots)
+      }
+    }
+  }
+  Idx { fns: fns, by_name: by_name, by_impl: by_impl, by_default: by_default, dicts: dicts }
+}
+
+fn touch(st: Rch, oi: Option[Int]) -> Rch =
+  match oi {
+    Some(i) ->
+      if set.has(st.seen, i) {
+        st
+      } else {
+        Rch { ..st, seen: set.insert(st.seen, i), work: st.work ++ [i] }
+      }
+    None -> st
+  }
+
+fn direct(st: Rch, owner: String, name: String) -> Rch =
+  touch(st, map.get(st.idx.by_name, (owner, name)))
+
+fn impl_edge(st: Rch, owner: String, tid: Int, subj: Ty, method: String) -> Rch =
+  touch(st, map.get(st.idx.by_impl, (owner, tid, subject_key(subj), method)))
+
+fn default_edge(st0: Rch, owner: String, method: String) -> Rch = {
+  var st = st0
+  match map.get(st.idx.by_default, (owner, method)) {
+    Some(l) -> {
+      for i in l { st = touch(st, Some(i)) }
+    }
+    None -> ()
+  }
+  st
+}
+
+## A dictionary reference reaches every slot the dictionary carries: which
+## slot a CMethod call reads is a runtime fact, so all of them count.
+fn dict_edge(st0: Rch, key: String) -> Rch = {
+  if set.has(st0.seen_dicts, key) {
+    return st0
+  }
+  var st = Rch { ..st0, seen_dicts: set.insert(st0.seen_dicts, key) }
+  match map.get(st.idx.dicts, key) {
+    Some(slots) -> {
+      for s in slots {
+        st = match s {
+          CSlotFn(owner, name) -> direct(st, owner, name)
+          CSlotDefault(owner, method) -> default_edge(st, owner, method)
+        }
+      }
+    }
+    None -> ()
+  }
+  st
+}
+
+fn mark(u: TableUse, name: String) -> TableUse =
+  if name == "str_upper" {
+    TableUse { ..u, str_upper: true }
+  } else if name == "str_lower" {
+    TableUse { ..u, str_lower: true }
+  } else if name == "char_is_letter" {
+    TableUse { ..u, is_letter: true }
+  } else if name == "char_is_digit" {
+    TableUse { ..u, is_digit: true }
+  } else if name == "char_is_alnum" {
+    TableUse { ..u, is_alnum: true }
+  } else if name == "char_is_upper" {
+    TableUse { ..u, is_upper: true }
+  } else if name == "char_is_lower" {
+    TableUse { ..u, is_lower: true }
+  } else if name == "char_is_space" {
+    TableUse { ..u, is_space: true }
+  } else {
+    u
+  }
+
+fn walk_stmt(st0: Rch, s: CStmt) -> Rch =
+  match s {
+    CSLet(_, _, init) -> walk(st0, init)
+    CSAssign(_, value) -> walk(st0, value)
+    CSDiscard(e) -> walk(st0, e)
+    CSLoop(_, body, step) -> {
+      let st = walk(st0, body)
+      match step {
+        Some(e) -> walk(st, e)
+        None -> st
+      }
+    }
+    CSIf(cond, thn, els) -> {
+      var st = walk(walk(st0, cond), thn)
+      match els {
+        Some(e) -> walk(st, e)
+        None -> st
+      }
+    }
+    CSDrop(_) -> st0
+  }
+
+fn walk_list(st0: Rch, es: List[CExpr]) -> Rch = {
+  var st = st0
+  for e in es { st = walk(st, e) }
+  st
+}
+
+fn walk(st0: Rch, e: CExpr) -> Rch =
+  match e {
+    CInt(_) -> st0
+    CFloat(_) -> st0
+    CBool(_) -> st0
+    CStr(_) -> st0
+    CUnit -> st0
+    CLocal(_, _) -> st0
+    CFnRef(owner, name, _) -> direct(st0, owner, name)
+    CCall(callee, args, _) -> {
+      var st =
+        match callee {
+          CDirect(owner, name) -> direct(st0, owner, name)
+          CDynamic(target) -> walk(st0, target)
+          # the dictionary value routes the call; its slots were charged where
+          # the dictionary was referenced (dict_edge)
+          CMethod(dict, _, _, _) -> walk(st0, dict)
+          CImpl(owner, tid, subj, method) -> impl_edge(st0, owner, tid, subj, method)
+          CDefault(owner, _, method) -> default_edge(st0, owner, method)
+        }
+      walk_list(st, args)
+    }
+    CIntrinsic(name, args, _) -> {
+      let st = Rch { ..st0, u: mark(st0.u, name) }
+      walk_list(st, args)
+    }
+    CCtor(_, _, args, _) -> walk_list(st0, args)
+    CField(target, _, _, _, _) -> walk(st0, target)
+    CIsCtor(target, _, _) -> walk(st0, target)
+    CTagOf(target, _) -> walk(st0, target)
+    CClosure(fn_name, owner, captures, _) ->
+      walk_list(direct(st0, owner, fn_name), captures)
+    CDictRef(key, _, _, _) -> dict_edge(st0, key)
+    CDictApply(key, args, _) -> walk_list(dict_edge(st0, key), args)
+    CDictArg(dict, _, _, _, _) -> walk(st0, dict)
+    CTuple(elems, _) -> walk_list(st0, elems)
+    CTupleGet(target, _, _) -> walk(st0, target)
+    CBox(inner, _) -> walk(st0, inner)
+    CUnbox(inner, _) -> walk(st0, inner)
+    CBinary(_, left, right, _) -> walk(walk(st0, left), right)
+    CUnary(_, operand, _) -> walk(st0, operand)
+    CIf(cond, thn, els, _) -> {
+      var st = walk(walk(st0, cond), thn)
+      match els {
+        Some(e2) -> walk(st, e2)
+        None -> st
+      }
+    }
+    CBlock(stmts, tail, _) -> {
+      var st = st0
+      for s in stmts { st = walk_stmt(st, s) }
+      match tail {
+        Some(t) -> walk(st, t)
+        None -> st
+      }
+    }
+    CListLit(elems, _) -> walk_list(st0, elems)
+    # comptime results are constant-serializable: no function values can hide
+    # in them, so there is nothing to follow
+    CConstRef(_, _, _) -> st0
+    CComptime(_, _, _) -> st0
+    CReturn(v) ->
+      match v {
+        Some(e2) -> walk(st0, e2)
+        None -> st0
+      }
+    CBreak(_) -> st0
+    CContinue(_) -> st0
+    CForeign(j, _) -> {
+      let st =
+        match j.target {
+          Some(t) -> walk(st0, t)
+          None -> st0
+        }
+      walk_list(st, j.args)
+    }
+    CDup(inner, _) -> walk(st0, inner)
+  }
+
+## The entry point. `roots` names the user's module classes; every function
+## they own seeds the walk, and everything else -- std above all -- counts
+## only if a chain of calls from those seeds reaches it.
+pub fn table_use(mods: List[CModule], roots: List[String]) -> TableUse = {
+  let idx = build_idx(mods)
+  var rootset: Set[String] = set.empty()
+  for r in roots { rootset = set.insert(rootset, r) }
+  var st = Rch {
+    idx: idx,
+    seen: set.empty(),
+    work: [],
+    seen_dicts: set.empty(),
+    u: no_tables()
+  }
+  var i = 0
+  for f in idx.fns {
+    if set.has(rootset, f.owner) {
+      st = touch(st, Some(i))
+    }
+    i = i + 1
+  }
+  # the queue only grows; `seen` guards each position against re-entry
+  var qi = 0
+  while qi < len(st.work) {
+    let fi = st.work[qi]
+    qi = qi + 1
+    st = walk(st, st.idx.fns[fi].body)
+  }
+  st.u
+}
+
+# ---- tests ----
+
+fn tfn(owner: String, name: String, body: CExpr) -> CFun =
+  CFun {
+    name: name,
+    owner: owner,
+    captures: [],
+    params: [],
+    dicts: [],
+    evs: [],
+    ret: TyUnit,
+    body: body,
+    is_test: false,
+    impl_of: None,
+    default_of: None
+  }
+
+fn tmod(owner: String, fns: List[CFun]) -> CModule =
+  CModule { owner: owner, fns: fns, dicts: [], next_sym: 0 }
+
+fn intr(name: String) -> CExpr = CIntrinsic(name, [CStr("x")], TyString)
+
+test "a root's own intrinsic marks its table" {
+  let u = table_use([tmod("app", [tfn("app", "main", intr("str_upper"))])], ["app"])
+  assert u.str_upper
+  assert not u.str_lower
+  assert not u.is_letter
+}
+
+test "a call chain into std marks; an uncalled std body does not" {
+  let app = tmod("app", [
+    tfn("app", "main",
+      CCall(CDirect("std/str", "to_lower"), [], TyString))
+  ])
+  let std_str = tmod("std/str", [
+    tfn("std/str", "to_lower", intr("str_lower")),
+    tfn("std/str", "to_upper", intr("str_upper"))
+  ])
+  let u = table_use([app, std_str], ["app"])
+  assert u.str_lower
+  # to_upper is emitted but unreachable: this line is the whole point
+  assert not u.str_upper
+}
+
+test "a referenced dictionary charges every slot" {
+  let slot_fn = tfn("std/str", "eq_bridge", intr("char_is_letter"))
+  let dict = CDictDef {
+    key: "Eq\$String",
+    trait_id: 0,
+    subject: TyString,
+    nargs: 0,
+    slots: [CSlotFn("std/str", "eq_bridge")]
+  }
+  let std_str = CModule { owner: "std/str", fns: [slot_fn], dicts: [dict], next_sym: 0 }
+  let app = tmod("app", [
+    tfn("app", "main", CDictRef("Eq\$String", 0, TyString, TyUnit))
+  ])
+  let u = table_use([app, std_str], ["app"])
+  assert u.is_letter
+}
+
+test "the residual parse primitive marks no table" {
+  # fmt.atod's delegate gets a pre-trimmed, validated string: the space set
+  # rides on `is_space` (str.trim's char_is_space), never on parsing itself
+  let u = table_use(
+    [tmod("app", [tfn("app", "main", intr("parse_float"))])], ["app"])
+  assert not u.is_space
+}
+
+test "no roots reaches nothing" {
+  let m = tmod("std/str", [tfn("std/str", "to_upper", intr("str_upper"))])
+  let u = table_use([m], [])
+  assert not u.str_upper
+}
+
+test "a test block is a root like any other function" {
+  # what the JVM path hands over (lower.emitted_core) has the test bodies in
+  # it, and a call only a test makes still has to find its table
+  let body = CFun { ..tfn("app", "only in a test", CUnit), is_test: true }
+  let app = tmod("app", [
+    tfn("app", "shout", CStr("!")),
+    CFun { ..body, body: CCall(CDirect("std/str", "to_upper"), [], TyString) }
+  ])
+  let std_str = tmod("std/str", [tfn("std/str", "to_upper", intr("str_upper"))])
+  let u = table_use([app, std_str], ["app"])
+  assert u.str_upper
+}
+
+test "a test's description never shadows a function of the same name" {
+  # a test body is named by its description string, so `test \"shout\"` beside
+  # `fn shout` would take over the (owner, name) key calls resolve by
+  # emitted_core appends the tests, so the test is the later insert and would
+  # win the key
+  let app = tmod("app", [
+    tfn("app", "shout", CCall(CDirect("std/str", "to_lower"), [], TyString)),
+    CFun { ..tfn("app", "shout", CUnit), is_test: true }
+  ])
+  let std_str = tmod("std/str", [tfn("std/str", "to_lower", intr("str_lower"))])
+  # the real `shout` is a root either way; the caller here is a third module
+  # that only knows the name
+  let other = tmod("app2", [
+    tfn("app2", "main", CCall(CDirect("app", "shout"), [], TyString))
+  ])
+  let u = table_use([app, std_str, other], ["app2"])
+  assert u.str_lower
+}

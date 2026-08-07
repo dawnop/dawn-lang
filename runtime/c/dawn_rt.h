@@ -500,7 +500,7 @@ void *dawn_bracket(void *resource, dawn_clo *release, dawn_clo *use);
  * plus `delta`, and one in no range maps to itself.
  *
  * Defined by the *generated program*, not by this runtime, because the table
- * belongs to the compiler (selfhost/src/case_table.dawn) and the JVM backend
+ * belongs to the compiler (selfhost/src/embed/unicode_case.dawn) and the JVM backend
  * receives the same rows in dawn/rt/Strings. It lived here as a generated
  * header until 2026-07-28, which made it one mapping only while the JDK that
  * generated it was the JDK the JVM backend happened to be running -- Unicode

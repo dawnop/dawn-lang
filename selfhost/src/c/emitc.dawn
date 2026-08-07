@@ -1,0 +1,2081 @@
+# Core IR -> C. The native backend's emitter, in its first form.
+#
+# It started as the Phase -1 seam spike (TAST straight to C, trivial subset).
+# It now consumes Core IR instead, which is what makes it useful twice over:
+# it is the native backend, and it is the second consumer that keeps Core's
+# node set from silently becoming a description of the JVM backend.
+#
+# Everything structural is already gone by the time Core arrives -- `match`
+# is discriminant tests and binds, `for` is a loop with an explicit step,
+# `?` is a test against a constructor, interpolation is concat calls. What
+# is left here is genuinely target-specific: C syntax, the tagged-union
+# layout, and how a value with no name gets one.
+#
+# One node is not handled, and never will be: `CForeign`, which the native
+# backend refuses on purpose, since `use java` is exactly the part that does
+# not port. Everything else arrived -- closures in `emit_closure`, trait
+# dictionaries in `slot_shape`/`dict_line`, collections by way of `std/pvec`
+# and `std/hamt` -- and this comment went on listing them as gaps through a
+# whole self-hosting bootstrap, because `scripts/doc-check.py` reads `docs/`
+# and nothing reads the claims at the top of a source file.
+
+use std/char
+use std/str
+use std/bytes
+use std/list
+use std/map
+use std/set
+use check/types.{
+  Ty, TyInt, TyFloat, TyBool, TyString, TyUnit, TyNever, TyError, TyVar, TyAssoc,
+  TyAdt, TyTuple, TyFn, TyBytes, TyList, TyMap, TySet, TyArray, TyJava, peel_opaque,
+  intr_at, Adts, adt_of, prelude_adts, OPTION_ID, RESULT_ID, cast_target,
+  is_ref_ty, Eff, EPure, hash_scalars, ord_scalars
+}
+use ir/reach.{TableUse}
+use embed/unicode_case
+use embed/rtsrc
+use embed/unicode_class
+use ir/core.{
+  CValue, VInt, VFloat, VBool, VStr, VUnit, VList, VTuple, VAdt, VClosure, VDict,
+  diverges,
+  CExpr, CStmt, CCallee, CFun, CModule, CParam,
+  CInt, CFloat, CBool, CStr, CUnit, CLocal, CFnRef, CCall, CIntrinsic,
+  CCtor, CField, CIsCtor, CTagOf, CClosure, CTuple, CTupleGet, CBox, CUnbox,
+  CBinary, CUnary, CIf, CBlock, CListLit, CReturn, CBreak, CContinue, CForeign, CDup,
+  CSLet, CSAssign, CSDiscard, CSLoop, CSIf, CSDrop,
+  CDirect, CDynamic, CMethod, CImpl, CDefault, CDictRef, CDictApply, CDictArg,
+  CConstRef, CComptime,
+  CDictDef, CDictSlot, CSlotFn, CSlotDefault,
+  CBinOp, CUnOp,
+  CAdd, CSub, CMul, CDiv, CMod, CEq, CNe, CLt, CLe, CGt, CGe, CAnd, COr,
+  CBand, CBor, CBxor, CShl, CShr, CUshr, CConcat, CNeg, CNot, CBnot,
+  cex_ty, ty_key, subject_key
+}
+
+## A module together with the comptime values its bodies refer to. A `const`
+## is named by its simple name and resolved in the module that declares it, so
+## the two maps belong to a module rather than to the unit -- std/pvec's MASK
+## and std/hamt's MASK are two constants that happen to agree.
+pub type EmitMod = {
+  m: CModule,
+  consts: Map[String, CValue],
+  blocks: Map[(Int, Int), CValue]
+}
+
+pub type CSt = {
+  # The emitted text, in the order it was emitted, NOT joined until the end.
+  #
+  # This was one `String` that every `line` rebuilt (`st.out ++ ...`), which
+  # is a full copy of everything emitted so far per emitted line. Normally
+  # invisible: each copy dies at once, so only the newest is live. It stops
+  # being invisible on a deeply nested Core tree -- `emit_expr`/`emit_stmt`
+  # descend recursively, and every suspended frame holds its own `CSt`, so
+  # peak live memory was (nesting depth) x (output so far). A chain of `++`
+  # is the input shape that produces one nesting level per operand, and 3,200
+  # of them cost 740MB native / >400MB of JVM heap. Appending a chunk instead
+  # is O(1) and shares its history, so a held-onto older `CSt` now costs a
+  # length and a few trie nodes rather than a copy of the file.
+  out: List[String],
+  tmp: Int,
+  ind: Int,
+  consts: Map[String, CValue],
+  blocks: Map[(Int, Int), CValue],
+  # every dictionary-parameter symbol of the unit being emitted. A lifted
+  # lambda keeps its captures' original symbol ids, so this is how a capture
+  # of an enclosing function's dictionary is recognised -- its recorded type
+  # is the checker's (the tvar), and a dictionary must not be counted: the
+  # capture mask and the adapter's dup both consult this set. rc.rc_module
+  # makes the same module-wide union for the same reason.
+  dict_syms: Set[Int],
+  # Every ADT in the program, for the one job Core cannot do without a table:
+  # rebuilding a folded `VAdt` needs its constructor's *declared* field types,
+  # which decide the slot member and whether the value goes in boxed. A value
+  # is data, not a Core expression, so there is no `CBox` for lowering to have
+  # inserted and no `cex_ty` to read -- the JVM's `construct_value` reads
+  # `gx.adts` for exactly the same reason.
+  adts: Adts,
+  # The owner of the module being emitted. It qualifies the constant cache
+  # key: `st.consts` is a per-module view keyed by simple name, so std/pvec's
+  # MASK and std/hamt's MASK are two constants under one key -- and the cache
+  # spans the whole translation unit. The JVM does not need this because its
+  # cache is a field table on the class, and a class is a module.
+  cur_owner: String,
+  # Builder functions for the structured constants seen so far, in creation
+  # order, and the cache from qualified key to builder name. Spliced ahead of
+  # the function bodies by `emit_program`; see `const_builder`.
+  cdefs: List[String],
+  cmap: Map[String, String]
+}
+
+fn pad(n: Int) -> String = {
+  var s = ""
+  var i = 0
+  while i < n {
+    s = s ++ "  "
+    i = i + 1
+  }
+  s
+}
+
+fn line(st: CSt, text: String) -> CSt =
+  CSt { ..st, out: st.out ++ [pad(st.ind) ++ text ++ "\n"] }
+
+fn fresh(st: CSt) -> (CSt, String) =
+  (CSt { ..st, tmp: st.tmp + 1 }, "t" ++ to_string(st.tmp))
+
+fn push(st: CSt) -> CSt = CSt { ..st, ind: st.ind + 1 }
+
+fn pop(st: CSt) -> CSt = CSt { ..st, ind: st.ind - 1 }
+
+## Drop a value while keeping its effects. Core marks these explicitly with
+## CSDiscard, which is the fix for the bug the Phase -1 spike hit: a C
+## expression that is never written down is never evaluated, so dropping the
+## string dropped the call too.
+fn discard(st: CSt, v: String) -> CSt =
+  if v == "DAWN_UNIT" { st } else { line(st, "(void)(" ++ v ++ ");") }
+
+## An ADT layout reached through an erased position. Every union slot is
+## `void*` and every generic or opaque local is `void*`, so the C type of a
+## projection's target says nothing about what it holds -- exactly the
+## situation the JVM answers with a CHECKCAST. The cast is unconditional for
+## the same reason: `slot_of` gives `.p` for an ADT-typed field, so even a
+## target whose Dawn type is a known ADT can arrive as `void*`.
+fn adt_ref(v: String) -> String = "((dawn_adt*)(" ++ v ++ "))"
+
+## A field mask as 64-bit words, low word first, each a C literal. Built from
+## bits rather than accumulated into an Int because a mask with bit 63 set is
+## not a value Dawn's signed Int can hold.
+fn mask_words(bits: List[Bool]) -> List[String] = {
+  let n = len(bits)
+  if n == 0 {
+    return ["UINT64_C(0)"]
+  }
+  var out: List[String] = []
+  var w = 0
+  while w * 64 < n {
+    var digits = ""
+    var nib = 15
+    while nib >= 0 {
+      var v = 0
+      var b = 3
+      while b >= 0 {
+        let i = w * 64 + nib * 4 + b
+        v = v * 2 + (if i < n && bits[i] { 1 } else { 0 })
+        b = b - 1
+      }
+      digits = digits ++ str.slice(C_HEX, v, v + 1)
+      nib = nib - 1
+    }
+    out = out ++ ["UINT64_C(0x" ++ digits ++ ")"]
+    w = w + 1
+  }
+  out
+}
+
+## `dawn_adt_new`/`dawn_clo_new` take the mask inline; past 64 slots it moves
+## to a static array and the `_wide` entry point. The static is block-scoped --
+## static storage duration, no file-scope plumbing, and it sits right next to
+## the allocation it describes.
+fn emit_mask_arg(st: CSt, tmp: String, bits: List[Bool]) -> (CSt, String, Bool) = {
+  let words = mask_words(bits)
+  if len(bits) > 64 {
+    let name = tmp ++ "_mask"
+    (line(st, "static const uint64_t " ++ name ++ "[] = { " ++ join(words, ", ") ++ " };"),
+      name, true)
+  } else {
+    (st, words[0], false)
+  }
+}
+
+# ---- names ----
+
+## One code point as six hex digits. Fixed width, and that is the load-bearing
+## part: a variable-length escape would need a terminator, the terminator would
+## have to be `_`, and `escape_part` below owes the rest of this section an
+## output in which `_` is never the *last* character of an escape.
+fn esc_hex(cp: Char) -> String = {
+  var digits = ""
+  var n = char.code(cp)
+  var i = 0
+  while i < 6 {
+    digits = str.slice(C_HEX, n % 16, n % 16 + 1) ++ digits
+    n = n / 16
+    i = i + 1
+  }
+  digits
+}
+
+## One part of a C symbol -- a module path, a function name, a dictionary key
+## -- spelled in `[A-Za-z0-9_]`.
+##
+##   [A-Za-z0-9] -> itself      _ -> _1      / -> _2      $ -> _3
+##   anything else -> _0 followed by six hex digits of the code point
+##
+## This has to be **injective**, and folding every other character to a plain
+## `_` was not: modules `a/b` and `a_b` are both spellable, both usable by one
+## program, and both used to mangle to `dawn_a_b__f` -- one C symbol defined
+## twice, so `cc` refused a program the JVM backend runs. The scheme is JNI's,
+## cut down to the three characters Dawn actually spells symbols with (`/`
+## between module path segments, `$` in the names lowering synthesises) plus a
+## general escape so the function is total.
+##
+## Injective because it is decodable: scanning left to right, anything but `_`
+## stands for itself, and a `_` is followed by exactly one selector that says
+## what to take. Two different inputs therefore cannot decode from one string.
+##
+## The second guarantee is that `__` never occurs *inside* a part: a `_` is
+## always immediately followed by a selector digit, and the hex is fixed width
+## so no escape can end in one. `__` is thus a separator no part can forge,
+## which is what lets a symbol be split back into its parts -- see `mangle`.
+fn escape_part(s: String) -> String = {
+  var out = ""
+  for cp in code_points(s) {
+    let plain =
+      (cp >= 'a' && cp <= 'z') || (cp >= 'A' && cp <= 'Z') || (cp >= '0' && cp <= '9')
+    if plain {
+      out = out ++ from_code_points([cp])
+    } else if cp == '_' {
+      out = out ++ "_1"
+    } else if cp == '/' {
+      out = out ++ "_2"
+    } else if cp == '$' {
+      out = out ++ "_3"
+    } else {
+      out = out ++ "_0" ++ esc_hex(cp)
+    }
+  }
+  out
+}
+
+## Every C symbol minted from names the *program* chose is `dawn_` followed by
+## escaped parts joined with `__`, and the number of parts says which family it
+## belongs to: one part is a dictionary (`dict_symbol`), two a function, three
+## a closure adapter (`adapter_name`). Since `dawn_` is a fixed-length prefix
+## and no part contains `__`, the parts -- and so the family -- come back out
+## of the symbol, which is the whole no-collision argument: distinct families
+## have distinct part counts, and within a family `escape_part` is injective.
+##
+## The names the *emitter* invents (`dawn_const_N`, `dawn_program_entry`) sit
+## outside that grammar. Neither has two parts or three, having no `__`; and
+## neither is the one-part family, because a dictionary key always begins with
+## the literal `dict$` (`lower.dict_key`), so every dictionary symbol begins
+## `dawn_dict_3`.
+fn mangle(owner: String, name: String) -> String =
+  "dawn_" ++ escape_part(owner) ++ "__" ++ escape_part(name)
+
+fn local_name(sym: Int) -> String = "v" ++ to_string(sym)
+
+fn loop_end(id: Int) -> String = "L" ++ to_string(id) ++ "_end"
+
+fn loop_step(id: Int) -> String = "L" ++ to_string(id) ++ "_step"
+
+# ---- types ----
+
+## How the C backend carries a value of this type -- the mirror of the JVM
+## side's `JvmRepr`, and for the same reason: the C type, the zero value, the
+## `dawn_slot` member, whether a value needs boxing and whether it is a
+## pointer are five questions with one answer. Answering them separately, in
+## five if-chains the exhaustiveness checker cannot see into, is how a `Ty`
+## variant could reach the native backend and become `void*` five times over
+## without anything failing to build.
+##
+## Erased slots (type variables) and every reference type share `ROpaque`:
+## that is the uniform-boxing decision from llvm-backend-research.md 5.3, and
+## it is why a type variable needs no special case. `ROpaque` is also where
+## everything native cannot represent yet lands, so a program that actually
+## uses one fails later in `emit_intrinsic` with a name rather than here with
+## a type.
+pub type CRepr =
+  | RInt64 # int64_t
+  | RFloat64 # double
+  | RBoolean # bool
+  | RString # dawn_str* -- a counted reference, like the ADTs
+  | RUnitV # dawn_unit
+  | RAdtPtr # dawn_adt* -- ADTs and tuples share it
+  | RCloPtr # dawn_clo*
+  | ROpaque # void*
+
+## The one function in the C backend that has to account for every `Ty`.
+## Deliberately without a wildcard.
+pub fn c_repr(t: Ty) -> CRepr =
+  match t {
+    TyOpaque(_, _, _, tgt) -> c_repr(tgt)
+    TyInt -> RInt64
+    TyFloat -> RFloat64
+    TyBool -> RBoolean
+    TyString -> RString
+    TyUnit -> RUnitV
+    TyNever -> RUnitV
+    TyAdt(_, _) -> RAdtPtr
+    TyTuple(_) -> RAdtPtr
+    TyFn(_, _, _) -> RCloPtr
+    TyVar(_, _) | TyAssoc(_, _, _) -> ROpaque
+    TyError -> ROpaque
+    TyBytes -> ROpaque
+    TyList(_) -> ROpaque
+    TyMap(_, _) -> ROpaque
+    TySet(_) -> ROpaque
+    TyArray(_) -> ROpaque
+    TyJava(_, _) -> ROpaque
+  }
+
+pub fn c_type(t: Ty) -> String =
+  match c_repr(t) {
+    RInt64 -> "int64_t"
+    RFloat64 -> "double"
+    RBoolean -> "bool"
+    RString -> "dawn_str*"
+    RUnitV -> "dawn_unit"
+    RAdtPtr -> "dawn_adt*"
+    RCloPtr -> "dawn_clo*"
+    ROpaque -> "void*"
+  }
+
+fn c_zero(t: Ty) -> String =
+  match c_repr(t) {
+    RInt64 -> "0"
+    RFloat64 -> "0.0"
+    RBoolean -> "false"
+    RString -> "dawn_str_empty"
+    RUnitV -> "DAWN_UNIT"
+    RAdtPtr | RCloPtr | ROpaque -> "NULL"
+  }
+
+## An erased slot read back at a concrete type. A reference is already a
+## pointer and only needs the C type; anything else was boxed, so the slot has
+## to be dereferenced. `CUnbox` is the usual way here, and the three
+## intrinsics that read an erased position without one -- `expect`,
+## `unwrap_or`, `cast` -- take the same path rather than each writing a cast.
+fn unbox_expr(v: String, to: Ty) -> String =
+  if is_ref_ty(to) {
+    "((" ++ c_type(to) ++ ")(" ++ v ++ "))"
+  } else {
+    "(((dawn_box*)(" ++ v ++ "))->val." ++ slot_of(to) ++ ")"
+  }
+
+## The owning read for the erased call boundary. A dynamic call is erased in
+## and out, so a scalar crossing it rides in a box no Core node owns -- the RC
+## pass sees a call typed Int, not the void* underneath -- and whoever reads
+## the slot is the only party who can free the box. References just hand the
+## pointer over; the ownership story is the pass's as usual.
+fn unbox_own_expr(v: String, to: Ty) -> String =
+  if is_ref_ty(to) {
+    "((" ++ c_type(to) ++ ")(" ++ v ++ "))"
+  } else {
+    let f = match c_repr(to) {
+      RInt64 -> "dawn_unbox_int"
+      RFloat64 -> "dawn_unbox_float"
+      RBoolean -> "dawn_unbox_bool"
+      RUnitV -> "dawn_unbox_unit"
+      RString | RAdtPtr | RCloPtr | ROpaque ->
+        panic("unbox_own_expr: ref repr in the scalar arm")
+    }
+    f ++ "(" ++ v ++ ")"
+  }
+
+## Take a reference and hand the value back at its own type. `dawn_dup` is
+## typed in `void*` because it is one function for every kind of object, so
+## the cast is what puts the value back where C can use it.
+fn dup_expr(v: String, t: Ty) -> String =
+  if is_ref_ty(t) {
+    "((" ++ c_type(t) ++ ")dawn_dup(" ++ v ++ "))"
+  } else {
+    v
+  }
+
+## Which member of `dawn_slot` holds a value of this type. Reading an ADT
+## field or unboxing goes through here.
+fn slot_of(t: Ty) -> String =
+  match c_repr(t) {
+    RInt64 -> "i"
+    RFloat64 -> "f"
+    RBoolean -> "b"
+    RString -> "p"
+    # `dawn_unit` is a byte, not a pointer: filing it under `p` compiled only
+    # while nothing stored one in a slot
+    RUnitV -> "u"
+    RAdtPtr | RCloPtr | ROpaque -> "p"
+  }
+
+# ---- literals ----
+
+fn c_escape(s: String) -> String = {
+  var out = ""
+  for cp in code_points(s) {
+    if cp == '"' {
+      out = out ++ "\\\""
+    } else if cp == '\\' {
+      out = out ++ "\\\\"
+    } else if cp == '\n' {
+      out = out ++ "\\n"
+    } else if cp == '\r' {
+      out = out ++ "\\r"
+    } else if cp == '\t' {
+      out = out ++ "\\t"
+    } else if cp < ' ' {
+      out = out ++ "\\" ++ oct3(char.code(cp))
+    } else {
+      out = out ++ from_code_points([cp])
+    }
+  }
+  out
+}
+
+fn oct3(n: Int) -> String =
+  to_string((n >>> 6) & 7) ++ to_string((n >>> 3) & 7) ++ to_string(n & 7)
+
+## Borrow-only: `dawn_str_lit` is a compound literal whose header lives on the
+## stack of the enclosing block. Reserved for the panic messages this emitter
+## writes itself -- `dawn_raise` copies before it unwinds, so nothing keeps
+## the pointer. A literal the *program* names goes through `emit_str_static`,
+## because emitted code stores what it likes.
+fn str_lit(s: String) -> String =
+  "dawn_str_lit(\"" ++ c_escape(s) ++ "\", " ++ to_string(bytes.len(bytes.utf8(s))) ++ ")"
+
+## A string literal as a named block-scope static: an immortal header, `p`
+## aimed at the C literal in .rodata, no allocation and no count traffic.
+## The RC pass leaves literals alone (`immortal`), and dup/drop return
+## immediately on the header if one does reach them.
+fn emit_str_static(st: CSt, v: String) -> (CSt, String) = {
+  let (st1, t) = fresh(st)
+  let st2 = line(st1, str_static_def(t ++ "_lit", v))
+  (st2, "(&" ++ t ++ "_lit)")
+}
+
+## A value the interpreter folded, written back out as C.
+##
+## Scalars are literals, exactly as the JVM backend inlines them. Everything
+## else is a reference, and a reference has to be built: on the JVM the value
+## becomes a `static final` field that `<clinit>` fills once, and C has no
+## <clinit> to fill one in. `const_builder` is this backend's answer -- a
+## generated function with a static pointer, so the constant is still built
+## once and shared by every reference that names it.
+fn const_literal(v: CValue, ty: Ty, what: String) -> String =
+  match v {
+    VInt(x) -> "INT64_C(" ++ to_string(x) ++ ")"
+    VFloat(x) -> float_lit(x)
+    VBool(x) -> if x { "true" } else { "false" }
+    # both callers peel VStr off to `emit_str_static` first -- a stored
+    # literal needs static storage, which this signature cannot emit
+    VStr(_) -> panic("emitc: " ++ what ++ " -- a string const belongs to emit_str_static")
+    VUnit -> "DAWN_UNIT"
+    # VList/VTuple/VAdt go to `const_builder`, which needs a CSt this signature
+    # does not carry; a function value is refused by the checker's
+    # const-serializability rule, so reaching here is a checker bug and the
+    # JVM's `construct_value` says the same thing at the same point.
+    _ -> panic("emitc: " ++ what ++ " -- a function value cannot be a constant (checker bug)")
+  }
+
+## Is this folded value a scalar -- something `const_literal` writes as a C
+## literal, with no storage of its own?
+fn cv_scalar(v: CValue) -> Bool =
+  match v {
+    VInt(_) | VFloat(_) | VBool(_) | VUnit -> true
+    VStr(_) | VList(_) | VTuple(_) | VAdt(_, _, _) -> false
+    VClosure(_, _, _) | VDict(_, _) -> false
+  }
+
+## A folded value on its way into an erased (`void*`) slot. The mirror of
+## `box_call`, asking the value instead of a Core type: a folded value has no
+## `CBox` around it, because lowering never saw it.
+fn cv_box(cexpr: String, v: CValue) -> String =
+  match v {
+    VInt(_) -> "dawn_box_int(" ++ cexpr ++ ")"
+    VFloat(_) -> "dawn_box_float(" ++ cexpr ++ ")"
+    VBool(_) -> "dawn_box_bool(" ++ cexpr ++ ")"
+    VUnit -> "dawn_box_unit(" ++ cexpr ++ ")"
+    # a reference is already a pointer, strings included -- they stopped
+    # needing a box when they joined the ledger
+    _ -> "((void*)(" ++ cexpr ++ "))"
+  }
+
+## Statements that rebuild a folded value, and the C expression for the result.
+##
+## The three structured shapes the checker admits (spec 7.2: List, tuple,
+## record/ADT, over scalars and each other) get the recipe the *emitter*
+## already uses for the same shape written literally -- `CListLit` for a list,
+## `emit_alloc` for a tuple and a constructor -- rather than a second layout
+## story that could drift from it. Nothing here can reference another
+## constant: comptime evaluation already inlined every one it read, so the
+## result is a closed tree of literals and the builders need no ordering
+## between them.
+fn emit_const_value(st: CSt, v: CValue) -> (CSt, String) =
+  match v {
+    VStr(x) -> emit_str_static(st, x)
+    VList(elems) -> {
+      var st1 = st
+      let (sta, tmp) = fresh(st1)
+      st1 = line(sta, "dawn_array* " ++ tmp ++ " = dawn_array_new();")
+      for el in elems {
+        let (st2, ev) = emit_const_value(st1, el)
+        st1 = line(st2,
+          tmp ++ " = dawn_array_push_own(" ++ tmp ++ ", " ++ cv_box(ev, el) ++ ");")
+      }
+      (st1, mangle("std/pvec", "from_array") ++ "(" ++ tmp ++ ")")
+    }
+    # A tuple erases every element, exactly as `emit_alloc(erased = true)`
+    # does: `Tuple2` holds two Objects on the JVM whatever it was built from,
+    # and Core records nothing about it either way.
+    VTuple(elems) -> {
+      var st1 = st
+      var parts: List[String] = []
+      var slots: List[String] = []
+      var bits: List[Bool] = []
+      for el in elems {
+        let (st2, ev) = emit_const_value(st1, el)
+        st1 = st2
+        parts = parts ++ [cv_box(ev, el)]
+        slots = slots ++ ["p"]
+        bits = bits ++ [true]
+      }
+      emit_const_adt(st1, 0, parts, slots, bits)
+    }
+    VAdt(aid, ci, fields) -> {
+      let ctor = adt_of(st.adts, aid).ctors[ci]
+      var st1 = st
+      var parts: List[String] = []
+      var slots: List[String] = []
+      var bits: List[Bool] = []
+      var i = 0
+      for f in fields {
+        let (st2, ev) = emit_const_value(st1, f)
+        st1 = st2
+        # A field is stored at its *declared* type, so `slot_of` picks the
+        # union member and settles the rest: a `p` member is a pointer, and a
+        # scalar reaching one is at an erased position and has to be boxed --
+        # which is the same set the JVM boxes (`ty` a TyVar), reached through
+        # the one function that already owns the question.
+        let ft = ctor.fields[i].ty
+        let slot = slot_of(ft)
+        let box = slot == "p" && cv_scalar(f)
+        parts = parts ++ [if box { cv_box(ev, f) } else { ev }]
+        slots = slots ++ [slot]
+        bits = bits ++ [is_ref_ty(ft) || box]
+        i = i + 1
+      }
+      emit_const_adt(st1, ci, parts, slots, bits)
+    }
+    # the scalars, which need no storage and no statements -- and the two
+    # shapes the checker refuses, which `const_literal` names as a checker bug
+    _ -> (st, const_literal(v, TyError, "a folded constant"))
+  }
+
+## The allocation half of the two ADT-shaped cases, spelled once.
+fn emit_const_adt(
+  st: CSt,
+  tag: Int,
+  parts: List[String],
+  slots: List[String],
+  bits: List[Bool]
+) -> (CSt, String) = {
+  let (st1, tmp) = fresh(st)
+  let (st2, mask, wide) = emit_mask_arg(st1, tmp, bits)
+  var st3 = line(st2,
+    "dawn_adt* " ++ tmp ++ " = " ++ (if wide { "dawn_adt_new_wide" } else { "dawn_adt_new" }) ++
+      "(" ++ to_string(tag) ++ ", " ++ to_string(len(parts)) ++ ", " ++ mask ++ ");")
+  var i = 0
+  for p in parts {
+    st3 = line(st3, tmp ++ "->fields[" ++ to_string(i) ++ "]." ++ slots[i] ++ " = " ++ p ++ ";")
+    i = i + 1
+  }
+  (st3, tmp)
+}
+
+## The builder function for one structured constant, and the call that reads
+## it. Emitted into `st.cdefs` rather than inline, so every reference to the
+## same constant in the same module gets the same object -- what the JVM's
+## `const_by_key` buys, by the same key rule.
+##
+## Two decisions worth their reasons.
+##
+## **A builder function, not static initialised data.** A tuple or a
+## constructor *could* be written as an initialised static: the layout is this
+## file's own. A list could not -- `[1, 2, 3]` is `std/pvec.from_array` of an
+## Array, and the persistent vector's shape belongs to std, written in Dawn.
+## Spelling it out here would hard-code std's internals into the backend and
+## go quietly wrong the next time they move. Since lists have to be built, and
+## a tuple can hold a list, one mechanism covers all three.
+##
+## **Lazily, behind a static pointer, rather than in a pre-`main` init.** C
+## has no <clinit>, and the alternative -- one init function called from
+## `main` -- would have to run in an order no one has a reason to pick.
+## Nothing forces an order here: a folded value cannot name another constant.
+## Building on first use is then strictly less work than <clinit> does, and
+## unobservable, because building it is pure.
+##
+## **The result leaves the ledger.** `dawn_immortal` marks the whole graph, so
+## dup and drop are no-ops on it and `dawn_is_unique` is false everywhere
+## inside it -- the same standing string literals have had since they joined
+## the ledger. rc.dawn's `lit_immortal` is the other half of this decision and
+## has to agree with it.
+fn const_builder(st: CSt, cache_key: String, v: CValue, ty: Ty) -> (CSt, String) = {
+  let full = st.cur_owner ++ "|" ++ cache_key
+  match map.get(st.cmap, full) {
+    Some(sym) -> return (st, "((" ++ c_type(ty) ++ ")" ++ sym ++ "())")
+    None -> ()
+  }
+  let sym = "dawn_const_" ++ to_string(len(st.cdefs))
+  var b = line(CSt { ..st, out: [], ind: 1 }, "static void* c = NULL;")
+  b = push(line(b, "if (c == NULL) {"))
+  let (b1, expr) = emit_const_value(b, v)
+  var b2 = line(b1, "c = (void*)(" ++ expr ++ ");")
+  b2 = line(b2, "dawn_immortal(c);")
+  b2 = line(pop(b2), "}")
+  b2 = line(b2, "return c;")
+  let body = "static void* " ++ sym ++ "(void) {\n" ++ join(b2.out, "") ++ "}\n\n"
+  (CSt {
+    ..st,
+    tmp: b2.tmp,
+    cdefs: st.cdefs ++ [body],
+    cmap: map.insert(st.cmap, full, sym)
+  }, "((" ++ c_type(ty) ++ ")" ++ sym ++ "())")
+}
+
+## A Float as a C expression.
+##
+## `to_string` answers the spec §11 spellings, and `Infinity`, `-Infinity` and
+## `NaN` are not C tokens -- a folded non-finite constant reached `cc` as an
+## undeclared identifier (#111). The JVM backend never saw this: `ldc_double`
+## takes the value, not its rendering.
+##
+## The three replacements reproduce the exact bit pattern and need no
+## <math.h> -- the runtime header does not include it, and the C compiler
+## folds each of them at translation time. Every finite value, signed zero
+## included, already renders as a literal C reads back bit for bit.
+fn float_lit(v: Float) -> String = {
+  let inf = 1.0 / 0.0
+  # NaN is the only value unequal to itself, so this arm has to come first:
+  # NaN compares false against the infinities too, and would fall through to
+  # `to_string` and out as a bare `NaN`.
+  if v != v {
+    "(0.0/0.0)"
+  } else if v == inf {
+    "(1.0/0.0)"
+  } else if v == -1.0 / 0.0 {
+    "(-1.0/0.0)"
+  } else {
+    to_string(v)
+  }
+}
+
+# ---- operators ----
+
+fn bin_op_c(op: CBinOp) -> String =
+  match op {
+    CAdd -> "+"
+    CSub -> "-"
+    CMul -> "*"
+    CDiv -> "/"
+    CMod -> "%"
+    CEq -> "=="
+    CNe -> "!="
+    CLt -> "<"
+    CLe -> "<="
+    CGt -> ">"
+    CGe -> ">="
+    CAnd -> "&&"
+    COr -> "||"
+    CBand -> "&"
+    CBor -> "|"
+    CBxor -> "^"
+    CShl -> "<<"
+    CShr -> ">>"
+    CUshr -> ">>>"
+    CConcat -> "++"
+  }
+
+# ---- expressions ----
+
+pub fn emit_expr(st: CSt, e: CExpr) -> (CSt, String) =
+  match e {
+    CInt(v) -> (st, "INT64_C(" ++ to_string(v) ++ ")")
+    CFloat(v) -> (st, float_lit(v))
+    CBool(v) -> (st, if v { "true" } else { "false" })
+    CStr(v) -> emit_str_static(st, v)
+    CUnit -> (st, "DAWN_UNIT")
+    CLocal(sym, _) -> (st, local_name(sym))
+    CReturn(v) ->
+      match v {
+        Some(inner) -> {
+          let (st1, cv) = emit_expr(st, inner)
+          (line(st1, "return " ++ cv ++ ";"), "DAWN_UNIT")
+        }
+        None -> (line(st, "return DAWN_UNIT;"), "DAWN_UNIT")
+      }
+    # Core names the loop, so leaving a non-innermost one is a plain goto.
+    # C's own break/continue could only ever mean "innermost".
+    CBreak(id) -> (line(st, "goto " ++ loop_end(id) ++ ";"), "DAWN_UNIT")
+    CContinue(id) -> (line(st, "goto " ++ loop_step(id) ++ ";"), "DAWN_UNIT")
+    CUnary(op, operand, _) -> {
+      let (st1, v) = emit_expr(st, operand)
+      match op {
+        CNeg -> (st1, "(-(" ++ v ++ "))")
+        CNot -> (st1, "(!(" ++ v ++ "))")
+        CBnot -> (st1, "(~(" ++ v ++ "))")
+      }
+    }
+    CBinary(op, l, r, ty) -> emit_binary(st, op, l, r, ty)
+    CIf(cond, thn, els, ty) -> emit_if(st, cond, thn, els, ty)
+    CBlock(stmts, tail, _) -> {
+      var st1 = st
+      for s in stmts {
+        st1 = emit_stmt(st1, s)
+      }
+      match tail {
+        Some(t) -> emit_expr(st1, t)
+        None -> (st1, "DAWN_UNIT")
+      }
+    }
+    CCall(callee, args, ty) -> emit_call(st, callee, args, ty)
+    CIntrinsic(name, args, ty) -> emit_intrinsic(st, name, args, ty)
+    CCtor(_, ci, args, _) -> emit_alloc(st, ci, args, false)
+    CTuple(elems, _) -> emit_alloc(st, 0, elems, true)
+    CField(target, _, _, idx, ty) -> {
+      let (st1, tv) = emit_expr(st, target)
+      (st1, adt_ref(tv) ++ "->fields[" ++ to_string(idx) ++ "]." ++ slot_of(ty))
+    }
+    CTupleGet(target, idx, ty) -> {
+      # the other half of the tuple's erasure: every element went in boxed
+      let (st1, tv) = emit_expr(st, target)
+      (st1, unbox_expr(adt_ref(tv) ++ "->fields[" ++ to_string(idx) ++ "].p", ty))
+    }
+    CIsCtor(target, _, ci) -> {
+      let (st1, tv) = emit_expr(st, target)
+      (st1, "(" ++ adt_ref(tv) ++ "->tag == " ++ to_string(ci) ++ ")")
+    }
+    CTagOf(target, _) -> {
+      let (st1, tv) = emit_expr(st, target)
+      (st1, "((int64_t)" ++ adt_ref(tv) ++ "->tag)")
+    }
+    CBox(inner, from) -> {
+      let (st1, v) = emit_expr(st, inner)
+      (st1, box_call(v, from))
+    }
+    CDup(inner, ty) -> {
+      let (st1, v) = emit_expr(st, inner)
+      (st1, dup_expr(v, ty))
+    }
+    CUnbox(inner, to) -> {
+      let (st1, v) = emit_expr(st, inner)
+      (st1, unbox_expr(v, to))
+    }
+    CFnRef(_, name, _) ->
+      # lowering turns every function value into a CClosure, so a bare
+      # CFnRef reaching here means the lowering missed a case
+      panic("emitc: bare CFnRef survived lowering (" ++ name ++ ")")
+    CClosure(name, owner, caps, _) -> emit_closure(st, name, owner, caps)
+    CDictRef(key, _tid, _subj, _) -> (st, "(&" ++ dict_symbol(key) ++ ")")
+    # A dictionary with arguments is the static one's slots plus a binding,
+    # so the static stays exactly what it was and this copies it. The JVM
+    # calls a constructor for the same reason.
+    CDictApply(key, args, _) -> {
+      var st1 = st
+      var parts = ["&" ++ dict_symbol(key), to_string(len(args))]
+      for a in args {
+        let (st2, v) = emit_expr(st1, a)
+        st1 = st2
+        parts = parts ++ [v]
+      }
+      (st1, "dawn_dict_new(" ++ join(parts, ", ") ++ ")")
+    }
+    CDictArg(dv, _owner, _key, idx, _) -> {
+      let (st1, d) = emit_expr(st, dv)
+      (st1, "(((dawn_dict*)(" ++ d ++ "))->args[" ++ to_string(idx) ++ "])")
+    }
+    CConstRef(owner, name, ty) -> {
+      # same key rule as the JVM emitter: "" means this module's own view
+      let key = if owner == "" { name } else { owner ++ "." ++ name }
+      match map.get(st.consts, key) {
+        # a folded string is storable like any literal, so it gets the static
+        Some(VStr(x)) -> emit_str_static(st, x)
+        Some(v) ->
+          if cv_scalar(v) {
+            (st, const_literal(v, ty, "const `" ++ key ++ "`"))
+          } else {
+            const_builder(st, "c:" ++ key, v, ty)
+          },
+        None -> panic("emitc: no comptime value for const `" ++ key ++ "`")
+      }
+    }
+    CComptime(lo, hi, ty) ->
+      match map.get(st.blocks, (lo, hi)) {
+        Some(VStr(x)) -> emit_str_static(st, x)
+        Some(v) ->
+          if cv_scalar(v) {
+            (st, const_literal(v, ty, "comptime block"))
+          } else {
+            const_builder(st, "b:" ++ to_string(lo) ++ ":" ++ to_string(hi), v, ty)
+          },
+        None -> panic("emitc: no comptime value for block")
+      }
+    # The same recipe the JVM emits: an Array, one push per element, then
+    # `std/pvec.from_array`. It could not be written until D1-D3 landed, because
+    # before them a list literal had to name a host collection this side has
+    # no way to build. Now it names Dawn, and both backends compile the same
+    # std function.
+    CListLit(elems, _) -> {
+      var st1 = st
+      let (sta, tmp) = fresh(st1)
+      st1 = line(sta, "dawn_array* " ++ tmp ++ " = dawn_array_new();")
+      for el in elems {
+        let (st2, v) = emit_expr(st1, el)
+        # an Array's element is erased, so it goes in boxed -- the JVM's
+        # array_push takes an Object for the same reason. The owning push:
+        # elements arrive owned (the pass consumes literal elements), and the
+        # superseded header is this loop's to release.
+        st1 = line(st2,
+          tmp ++ " = dawn_array_push_own(" ++ tmp ++ ", " ++ box_call(v, cex_ty(el)) ++ ");")
+      }
+      (st1, mangle("std/pvec", "from_array") ++ "(" ++ tmp ++ ")")
+    }
+    CForeign(_, _) ->
+      # Not a gap: `use java` is the half of FFI that does not port, and
+      # refusing it here is the design (llvm-backend-research.md 9).
+      panic("emitc: `use java` cannot be compiled to native; use `use c`")
+  }
+
+fn box_call(v: String, from: Ty) -> String =
+  match c_repr(from) {
+    RInt64 -> "dawn_box_int(" ++ v ++ ")"
+    RFloat64 -> "dawn_box_float(" ++ v ++ ")"
+    RBoolean -> "dawn_box_bool(" ++ v ++ ")"
+    RUnitV -> "dawn_box_unit(" ++ v ++ ")"
+    # already a pointer -- a string too, now that it is counted
+    RString | RAdtPtr | RCloPtr | ROpaque -> "((void*)(" ++ v ++ "))"
+  }
+
+fn emit_closure(st: CSt, name: String, owner: String, caps: List[CExpr]) -> (CSt, String) = {
+  var st1 = st
+  var parts: List[String] = []
+  for c in caps {
+    let (st2, v) = emit_expr(st1, c)
+    st1 = st2
+    parts = parts ++ [v]
+  }
+  var bits: List[Bool] = []
+  for c in caps {
+    bits = bits ++ [cap_counted(st1, c)]
+  }
+  let (st3, tmp) = fresh(st1)
+  let (st3m, mask, wide) = emit_mask_arg(st3, tmp, bits)
+  var st4 = line(st3m,
+    "dawn_clo* " ++ tmp ++ " = " ++ (if wide { "dawn_clo_new_wide" } else { "dawn_clo_new" }) ++
+      "((void*)" ++ adapter_name(owner, name) ++ ", " ++ to_string(len(parts)) ++ ", " ++
+      mask ++ ");")
+  var i = 0
+  for p in parts {
+    st4 = line(st4, tmp ++ "->caps[" ++ to_string(i) ++ "]." ++
+        slot_of(cex_ty(caps[i])) ++ " = " ++ p ++ ";")
+    i = i + 1
+  }
+  (st4, tmp)
+}
+
+## Is this capture a counted reference? A dictionary is not, whatever type
+## its symbol carries (the checker types a dictionary as the tvar it
+## witnesses for).
+fn cap_counted(st: CSt, c: CExpr) -> Bool =
+  match c {
+    CLocal(s, ty) -> is_ref_ty(ty) && not set.has(st.dict_syms, s)
+    _ -> is_ref_ty(cex_ty(c))
+  }
+
+## The three-part family of `mangle`'s grammar. `clo` is spelled literally
+## because it escapes to itself; a part it could collide with would have to be
+## a third part, and only an adapter has one.
+fn adapter_name(owner: String, name: String) -> String =
+  mangle(owner, name) ++ "__clo"
+
+## A constructor's or tuple's allocation.
+##
+## `erased` is what separates the two. A constructor field is stored at its
+## *declared* type, and lowering has already put a `CBox` around any argument
+## whose field is declared at a type variable -- which is why the JVM can
+## write the declared descriptor and be handed a value that fits it.
+##
+## A tuple has no declaration to read: `Tuple2` holds two `Object`s on the JVM
+## whatever it was built from, so `(1, "one")` boxes the 1 there. Nothing in
+## Core records that, so it has to be done here too -- and storing the 1 as an
+## `int64_t` instead compiled fine and segfaulted the moment std read the
+## field back at `K`, which is what `map_from` does with every key.
+fn emit_alloc(st: CSt, tag: Int, args: List[CExpr], erased: Bool) -> (CSt, String) = {
+  var st1 = st
+  var parts: List[String] = []
+  for a in args {
+    let (st2, v) = emit_expr(st1, a)
+    st1 = st2
+    parts = parts ++ [if erased { box_call(v, cex_ty(a)) } else { v }]
+  }
+  # a tuple boxed every element, so every one of its slots is a pointer
+  var bits: List[Bool] = []
+  for a in args {
+    bits = bits ++ [if erased { true } else { is_ref_ty(cex_ty(a)) }]
+  }
+  let (st3, tmp) = fresh(st1)
+  let (st3m, mask, wide) = emit_mask_arg(st3, tmp, bits)
+  var st4 = line(st3m,
+    "dawn_adt* " ++ tmp ++ " = " ++ (if wide { "dawn_adt_new_wide" } else { "dawn_adt_new" }) ++
+      "(" ++ to_string(tag) ++ ", " ++ to_string(len(parts)) ++ ", " ++ mask ++ ");")
+  var i = 0
+  for p in parts {
+    let slot = if erased { "p" } else { slot_of(cex_ty(args[i])) }
+    st4 = line(st4, tmp ++ "->fields[" ++ to_string(i) ++ "]." ++ slot ++ " = " ++ p ++ ";")
+    i = i + 1
+  }
+  (st4, tmp)
+}
+
+## `lt`/`ty` here pick a *machine* operation, so both are peeled: this
+## function's dispatch is a chain of `== Ty...` tests that the exhaustiveness
+## checker cannot reach, and an unpeeled opaque type would silently fall
+## through to the pointer comparison at the end.
+fn emit_binary(st: CSt, op: CBinOp, l: CExpr, r: CExpr, ty0: Ty) -> (CSt, String) = {
+  let ty = peel_opaque(ty0)
+  let lt = peel_opaque(cex_ty(l))
+  # && and || must not evaluate their right side eagerly, and in Core the
+  # right side may still expand into statements -- so they lower to an if,
+  # not to C's operators. This is load-bearing for pattern tests, whose
+  # nested projections are only valid once the outer test has passed.
+  if op == CAnd || op == COr {
+    let (st1, lv) = emit_expr(st, l)
+    let (st2, tmp) = fresh(st1)
+    let st3 = line(st2, "bool " ++ tmp ++ " = " ++ lv ++ ";")
+    let guard = if op == CAnd { tmp } else { "!" ++ tmp }
+    let st4 = push(line(st3, "if (" ++ guard ++ ") {"))
+    let (st5, rv) = emit_expr(st4, r)
+    let st6 = pop(line(st5, tmp ++ " = " ++ rv ++ ";"))
+    (line(st6, "}"), tmp)
+  } else if op == CConcat {
+    # `++` joins three things and each has its own join. The JVM emitter
+    # matches on the same three; a single arm here compiled while nothing
+    # concatenated anything but a String.
+    let (st1, lv) = emit_expr(st, l)
+    let (st2, rv) = emit_expr(st1, r)
+    match lt {
+      # `std/pvec.concat` is a Dawn function and takes both sides owned; the
+      # other two are runtime primitives and borrow. See `own_args`.
+      TyList(_) ->
+        (st2, mangle("std/pvec", "concat") ++ "(" ++ dup_expr(lv, lt) ++ ", " ++
+            dup_expr(rv, lt) ++ ")")
+      TyBytes -> (st2, "dawn_bytes_concat(" ++ lv ++ ", " ++ rv ++ ")")
+      _ -> (st2, "dawn_str_concat(" ++ lv ++ ", " ++ rv ++ ")")
+    }
+  } else if (op == CEq || op == CNe) && (lt == TyString || lt == TyBytes) {
+    # Bytes compares by content (spec §9.5.1). Left to the pointer comparison
+    # below it would answer identity -- and answer it silently, which is what
+    # eq_bytes.dawn is in the corpus to catch.
+    let (st1, lv) = emit_expr(st, l)
+    let (st2, rv) = emit_expr(st1, r)
+    let f = if lt == TyBytes { "dawn_bytes_eq" } else { "dawn_str_eq" }
+    let call = f ++ "(" ++ lv ++ ", " ++ rv ++ ")"
+    (st2, if op == CEq { call } else { "(!" ++ call ++ ")" })
+  } else if (op == CLt || op == CLe || op == CGt || op == CGe) && lt == TyString {
+    # `dawn_str` is a struct, so C's relational operators do not apply to it;
+    # the order is the same code-point order `dawn_cmp_str` gives the Ord
+    # dictionary.
+    let (st1, lv) = emit_expr(st, l)
+    let (st2, rv) = emit_expr(st1, r)
+    (st2, "(dawn_cmp_str(" ++ lv ++ ", " ++ rv ++ ") " ++ bin_op_c(op) ++ " 0)")
+  } else if op == CMod && ty == TyFloat {
+    # C's `%` is integer-only. `fmod` is the IEEE remainder the JVM's DREM is.
+    let (st1, lv) = emit_expr(st, l)
+    let (st2, rv) = emit_expr(st1, r)
+    (st2, "fmod(" ++ lv ++ ", " ++ rv ++ ")")
+  } else if op == CShl || op == CShr || op == CUshr {
+    # A shift takes the low six bits of its count -- spec §4.3 states it as a
+    # guarantee, not as whatever the hardware does, because that is what the
+    # JVM's LSHL/LSHR/LUSHR do and the two backends have to answer alike.
+    #
+    # C guarantees the opposite: a count of 64 or more, or a negative one, is
+    # undefined (C11 6.5.7p3). The three arms here emitted the count raw, and
+    # the corpus stayed green because x86-64's shift instruction masks by 63
+    # in hardware -- so the emitted C happened to be right on the one
+    # architecture CI runs. AArch64's `lsl` by 64 answers 0, and `1 << -1`
+    # answers whatever the low bits of -1 select, which is `1 << 63` here and
+    # need not be there.
+    let (st1, lv) = emit_expr(st, l)
+    let (st2, rv) = emit_expr(st1, r)
+    let n = "((" ++ rv ++ ") & 63)"
+    # `<<` also goes through uint64_t: shifting a bit into (or past) the sign
+    # bit of a signed type is undefined on its own account (C11 6.5.7p4), and
+    # `1 << 63` is a value Dawn defines -- Int wraps, so it is Int.MIN.
+    # `>>` is the one that stays signed, because the sign extension *is* the
+    # arithmetic shift `>>` promises; gcc and clang both define it that way
+    # for a negative left operand, which C leaves implementation-defined.
+    (st2,
+      if op == CShr {
+        "((" ++ lv ++ ") >> " ++ n ++ ")"
+      } else {
+        let sh = if op == CShl { " << " } else { " >> " }
+        "((int64_t)((uint64_t)(" ++ lv ++ ")" ++ sh ++ n ++ "))"
+      })
+  } else if op == CDiv && ty == TyInt {
+    let (st1, lv) = emit_expr(st, l)
+    let (st2, rv) = emit_expr(st1, r)
+    (st2, "dawn_idiv(" ++ lv ++ ", " ++ rv ++ ")")
+  } else if op == CMod && ty == TyInt {
+    let (st1, lv) = emit_expr(st, l)
+    let (st2, rv) = emit_expr(st1, r)
+    (st2, "dawn_imod(" ++ lv ++ ", " ++ rv ++ ")")
+  } else {
+    let (st1, lv) = emit_expr(st, l)
+    let (st2, rv) = emit_expr(st1, r)
+    (st2, "(" ++ lv ++ " " ++ bin_op_c(op) ++ " " ++ rv ++ ")")
+  }
+}
+
+## A branch with nothing to assign: it leaves (return/break/continue) or its
+## type is Never, which is what `panic` and `todo` are.
+##
+## The JVM needs no such test -- an ATHROW does not fall through, so no store
+## follows it. C writes the assignment down whatever precedes it, and
+## `dawn_str t = DAWN_UNIT;` does not compile. Nothing in the corpus took a
+## `panic` branch at a value type until std was compiled in; std/str's
+## `substring` does it in its first line.
+fn no_value(e: CExpr) -> Bool = {
+  let t = peel_opaque(cex_ty(e))
+  if diverges(e) || t == TyNever {
+    return true
+  }
+  # A block with no tail expression is worth Unit -- unless its type says
+  # otherwise, and then nothing falls off its end to be worth anything: every
+  # path out of it returned. `emit_expr` hands back DAWN_UNIT for both, so the
+  # difference has to be read from the type here.
+  match e {
+    CBlock(_, None, _) -> t != TyUnit
+    _ -> false
+  }
+}
+
+fn emit_if(st: CSt, cond: CExpr, thn: CExpr, els: Option[CExpr], ty: Ty) -> (CSt, String) = {
+  let (st1, cv) = emit_expr(st, cond)
+  # peeled for the reason emit_binary is: an opaque type over Unit is still a
+  # Unit to the emitter, and asking by name misses it
+  let peeled = peel_opaque(ty)
+  let is_value = peeled != TyUnit && peeled != TyNever
+  let (st2, tmp) = fresh(st1)
+  let st3 =
+    if is_value {
+      line(st2, c_type(ty) ++ " " ++ tmp ++ " = " ++ c_zero(ty) ++ ";")
+    } else {
+      st2
+    }
+  let st4 = push(line(st3, "if (" ++ cv ++ ") {"))
+  let (st5, tv) = emit_expr(st4, thn)
+  let st6 =
+    if is_value && not no_value(thn) {
+      line(st5, tmp ++ " = " ++ tv ++ ";")
+    } else {
+      discard(st5, tv)
+    }
+  let st7 = pop(st6)
+  let st8 =
+    match els {
+      Some(ee) -> {
+        let sa = push(line(st7, "} else {"))
+        let (sb, ev) = emit_expr(sa, ee)
+        let sc =
+          if is_value && not no_value(ee) {
+            line(sb, tmp ++ " = " ++ ev ++ ";")
+          } else {
+            discard(sb, ev)
+          }
+        line(pop(sc), "}")
+      }
+      None -> line(st7, "}")
+    }
+  (st8, if is_value { tmp } else { "DAWN_UNIT" })
+}
+
+fn emit_call(st: CSt, callee: CCallee, args: List[CExpr], ty: Ty) -> (CSt, String) = {
+  var st1 = st
+  var cargs: List[String] = []
+  for a in args {
+    let (st2, v) = emit_expr(st1, a)
+    st1 = st2
+    cargs = cargs ++ [v]
+  }
+  match callee {
+    CDirect(owner, name) ->
+      (st1, mangle(owner, name) ++ "(" ++ join(cargs, ", ") ++ ")")
+    CImpl(owner, tid, subject, method) ->
+      (st1, impl_symbol(owner, tid, subject, method) ++ "(" ++ join(cargs, ", ") ++ ")")
+    CDefault(owner, tid, method) ->
+      (st1, default_symbol(owner, tid, method) ++ "(" ++ join(cargs, ", ") ++ ")")
+    CMethod(dict, _tid, _m, idx) -> {
+      let (st3a, dv0) = emit_expr(st1, dict)
+      # A dictionary reaches here as whatever its position carries -- a
+      # parameter at a type-variable position is `void*`, which C will not
+      # dereference. The JVM's CHECKCAST is this cast.
+      let st3 = st3a
+      let dv = "((dawn_dict*)(" ++ dv0 ++ "))"
+      # a dictionary is a flat table of function pointers; the slot index
+      # was resolved by lowering, so no trait metadata is needed here
+      # every slot has the trait's generic signature plus the dictionary as
+      # a trailing argument, so one cast shape serves every slot
+      var sigp: List[String] = []
+      for a in args {
+        sigp = sigp ++ [c_type(cex_ty(a))]
+      }
+      sigp = sigp ++ ["dawn_dict*"]
+      let cast = "(" ++ c_type(ty) ++ "(*)(" ++ join(sigp, ", ") ++ "))"
+      (st3, "((" ++ cast ++ "(" ++ dv ++ ")->slots[" ++ to_string(idx) ++ "])(" ++
+          join(cargs ++ [dv], ", ") ++ "))")
+    }
+    CDynamic(target) -> {
+      let (st3, tv) = emit_expr(st1, target)
+      # One indirect call whatever the capture count: the environment is
+      # always the first argument, and the adapter unpacks it. Erased in and
+      # out, because that is the only shape every adapter has -- see
+      # `adapter_signature`.
+      #
+      # The target reaches here as whatever its position carries: a local of
+      # function type is `dawn_clo*` already, but a record field or erased
+      # parameter is `void*`, which C will not `->fn` through. The cast is
+      # the JVM's CHECKCAST, same as the dictionary one above.
+      let cv = "((dawn_clo*)(" ++ tv ++ "))"
+      var sigp: List[String] = ["dawn_clo*"]
+      var boxed: List[String] = []
+      var i = 0
+      for a in args {
+        sigp = sigp ++ ["void*"]
+        boxed = boxed ++ [box_call(cargs[i], cex_ty(a))]
+        i = i + 1
+      }
+      let cast = "(void*(*)(" ++ join(sigp, ", ") ++ "))"
+      let call =
+        "((" ++ cast ++ "(" ++ cv ++ ")->fn)(" ++ join([cv] ++ boxed, ", ") ++ "))"
+      # the result box is the callee's gift and nobody else will free it
+      (st3, unbox_own_expr(call, ty))
+    }
+  }
+}
+
+# ---- trait dictionaries ----
+
+## The one-part family of `mangle`'s grammar: no `__`, so it can be neither a
+## function nor a closure adapter however the key is spelled.
+fn dict_symbol(key: String) -> String = "dawn_" ++ escape_part(key)
+
+fn impl_symbol(owner: String, tid: Int, subject: Ty, method: String) -> String =
+  mangle(owner, "impl$" ++ to_string(tid) ++ "$" ++ subject_key(subject) ++ "$" ++ method)
+
+fn default_symbol(owner: String, tid: Int, method: String) -> String =
+  mangle(owner, "default$" ++ to_string(tid) ++ "$" ++ method)
+
+## What fills each slot, without the module that happens to hold the copy.
+fn slot_shape(d: CDictDef) -> String = {
+  var parts: List[String] = []
+  for slot in d.slots {
+    parts = parts ++ [
+      match slot {
+        CSlotFn(_, n) -> "fn:" ++ n
+        CSlotDefault(_, m) -> "default:" ++ m
+      }
+    ]
+  }
+  join(parts, ",")
+}
+
+## A dictionary is a flat array of function pointers in the trait's
+## declaration order. The JVM backend uses an interface and a singleton
+## instead; that difference stays inside the two emitters because Core
+## already resolved which function fills each slot.
+fn dict_line(d: CDictDef) -> String = {
+  var parts: List[String] = []
+  for slot in d.slots {
+    parts = parts ++ [
+      match slot {
+        CSlotFn(owner, n) -> "(void*)" ++ mangle(owner, n)
+        CSlotDefault(owner, m) -> "(void*)" ++ default_symbol(owner, d.trait_id, m)
+      }
+    ]
+  }
+  # the argument half is written out rather than left to default
+  # initialisation: the C backend builds with -Werror=missing-field-initializers
+  "static dawn_dict " ++ dict_symbol(d.key) ++ " = { " ++
+    to_string(len(parts)) ++ ", { " ++ join(parts, ", ") ++ " }, 0, { 0 } };"
+}
+
+## The runtime entry point of a prelude relation over one scalar. Spelled out
+## per type rather than defaulted, so a type the runtime has no answer for
+## says so here instead of inheriting somebody else's answer -- which is the
+## whole subject of docs/semantics-closure-design.md.
+fn scalar_rt(prefix: String, t: Ty, what: String) -> String =
+  match t {
+    TyInt -> prefix ++ "_int"
+    # No TyFloat arm. It named `dawn_hash_float` and `dawn_cmp_float`, neither
+    # of which the runtime has ever defined -- and it could say so for as long
+    # as it did because nothing reaches it: `hash_scalars` dropped Float in
+    # 2026-07-26 (two equal keys, different buckets) and `ord_scalars` never
+    # had it (NaN is unordered). An arm naming a symbol that does not exist is
+    # a link error waiting for the first caller; the gap below is the honest
+    # answer, and it is the same one Cursor gets.
+    TyString -> prefix ++ "_str"
+    # Bool and Bytes have an Eq and a Hash but no order, so only one of the two
+    # prefixes reaches them; the other falls through to the gap below
+    TyBool -> if prefix == "dawn_hash" { prefix ++ "_bool" } else { no_rt(what, t) }
+    TyBytes -> if prefix == "dawn_hash" { prefix ++ "_bytes" } else { no_rt(what, t) }
+    # an opaque type is its target at run time, here as everywhere
+    TyOpaque(_, _, _, tgt) -> scalar_rt(prefix, tgt, what)
+    # Cursor has no native representation yet (bytes-design.md): an honest
+    # gap, not a wrong answer
+    _ -> no_rt(what, t)
+  }
+
+fn no_rt(what: String, t: Ty) -> String =
+  panic("emitc: `" ++ what ++ "` not implemented for native on " ++ ty_key(t))
+
+## The list primitive → `std/pvec` function table, the C side's copy of the
+## one `gen_list_intrinsic` keeps. Kept as two functions rather than an
+## Option-returning pair so the `else if` chain above stays flat.
+fn is_list_primitive(n: String) -> Bool =
+  n == "len" || n == "get" || n == "range" || n == "sort_by" ||
+  n == "list_index" || n == "list_slice"
+
+fn pvec_target(n: String) -> String =
+  if n == "len" {
+    "count"
+  } else if n == "list_index" {
+    "index"
+  } else if n == "list_slice" {
+    "slice"
+  } else {
+    n
+  }
+
+## The primitives that hand back something they do not own: an element still
+## inside its container, or an argument passed straight through.
+##
+## Every other primitive allocates what it returns, and the arguments it was
+## given stay the caller's (dawn_rt.h's calling convention). Core has one rule
+## for all of them -- a call's result is owned, so a binding may release it --
+## and these are where that rule would otherwise release someone else's value.
+## The reference is taken here rather than inside the runtime function because
+## the runtime calls these itself, where borrowing is what it wants.
+fn returns_borrow(n: String) -> Bool =
+  n == "array_get" || n == "expect" || n == "unwrap_or" || n == "cast"
+
+## A primitive its runtime module owns, as the C symbol that implements it.
+##
+## This is the whole of the intrinsic contract on this backend: the table says
+## a module owns the primitive, and the module calls it what the language
+## calls it. So adding a native intrinsic is writing a C function with the
+## conventional name -- the emitter needs no new case, and cannot be the thing
+## that is out of date.
+fn rt_symbol(name: String) -> Option[String] =
+  match intr_at(name) {
+    Some(i) ->
+      match i.rt {
+        Some(_) -> Some("dawn_" ++ name)
+        None -> None
+      }
+    None -> None
+  }
+
+## A Dawn list crossing to a runtime function that takes an Array, and back.
+## The four primitives that traffic in lists cross through Array for the same
+## reason the JVM backend does: it is the shape both sides can name, and it
+## keeps the list's representation std's business (collections-dejava §5.1).
+fn to_host(v: String) -> String = mangle("std/pvec", "to_array") ++ "(" ++ v ++ ")"
+
+fn of_host(v: String) -> String = mangle("std/pvec", "from_array") ++ "(" ++ v ++ ")"
+
+## Arguments for a Dawn function this emitter calls where Core wrote something
+## else -- the list operations live in `std/pvec`, and `++` on a list is one of
+## them. Core borrowed them, because Core saw an intrinsic or an operator and
+## those borrow (docs/perceus-design.md 5.1); the callee is an ordinary Dawn
+## function and releases what it was handed. So the reference is taken here.
+## Miss it and the callee's drop is the second one on that value -- which is
+## what `iter_done` did, taking the list out from under its own loop.
+fn own0(args: List[CExpr], a0: String) -> String = dup_expr(a0, cex_ty(args[0]))
+
+fn own_args(args: List[CExpr], cargs: List[String]) -> List[String] = {
+  var out: List[String] = []
+  var i = 0
+  for a in args {
+    out = out ++ [dup_expr(cargs[i], cex_ty(a))]
+    i = i + 1
+  }
+  out
+}
+
+## The tag `expect` and `unwrap_or` test for. Everywhere else a constructor
+## index reaches here inside a `CIsCtor` that lowering resolved; these two read
+## an Option with no `match` in front of them, so the index is read from the
+## table the prelude was declared with rather than written down again.
+fn option_tag(ctor: String) -> Int = {
+  let opt = adt_of(prelude_adts(), OPTION_ID)
+  var i = 0
+  for c in opt.ctors {
+    if c.name == ctor {
+      return i
+    }
+    i = i + 1
+  }
+  panic("emitc: Option has no constructor " ++ ctor)
+}
+
+## The same question for `Result`, which `cast` builds by hand.
+fn result_tag(ctor: String) -> Int = {
+  let res = adt_of(prelude_adts(), RESULT_ID)
+  var i = 0
+  for c in res.ctors {
+    if c.name == ctor {
+      return i
+    }
+    i = i + 1
+  }
+  panic("emitc: Result has no constructor " ++ ctor)
+}
+
+## The static type behind an operand that crosses erased.
+##
+## Lowering boxes a value on its way into a type-variable slot and the CBox
+## records what it came from, which is the only place that type survives:
+## `cex_ty(CBox(_, _))` is TyError, because past the box the slot's type is
+## the variable's. Used for diagnostics, where naming the type is the whole
+## difference between a message someone can act on and one they cannot.
+fn erased_from(e: CExpr) -> Ty =
+  match e {
+    CBox(_, from) -> from
+    CDup(inner, _) -> erased_from(inner)
+    _ -> cex_ty(e)
+  }
+
+fn emit_intrinsic(st: CSt, name: String, args: List[CExpr], ty: Ty) -> (CSt, String) = {
+  var st1 = st
+  var cargs: List[String] = []
+  for a in args {
+    let (st2, v) = emit_expr(st1, a)
+    st1 = st2
+    cargs = cargs ++ [v]
+  }
+  let a0 = if len(cargs) > 0 { cargs[0] } else { "" }
+  if name == "panic" {
+    (line(st1, "dawn_panic(" ++ a0 ++ ");"), "DAWN_UNIT")
+  } else if name == "todo" {
+    (line(st1, "dawn_panic(" ++ str_lit("not yet implemented") ++ ");"), "DAWN_UNIT")
+  } else if name == "str_of_int" {
+    (st1, "dawn_str_of_int(" ++ a0 ++ ")")
+  } else if name == "str_of_bool" {
+    (st1, "dawn_str_of_bool(" ++ a0 ++ ")")
+  } else if name == "str_of_bytes" {
+    (st1, "dawn_str_of_bytes(" ++ a0 ++ ")")
+  } else if name == "quote" {
+    (st1, "dawn_str_quote(" ++ a0 ++ ")")
+  } else if name == "show" {
+    # Lowering's last resort (lower.dawn's show_at): a value with a Show
+    # witness that it could neither walk nor find an impl body for, handed
+    # over *erased* for a runtime to identify. The JVM has one that can --
+    # `dawn/rt/Show.show`, an instanceof chain over what the host still knows
+    # at run time. Native does not and cannot: an erased slot here is a
+    # `void*` carrying a kind tag, and a tag says "an ADT", never which one,
+    # so the `String.valueOf` half of that chain has no counterpart.
+    #
+    # Nothing produces this today -- Bytes was the one type that reached it,
+    # and it comes through `str_of_bytes` above now. The arm is here so that
+    # if something ever does, the refusal names the type instead of the
+    # intrinsic. The box lowering wrapped the value in is the only place that
+    # type survives: `cex_ty` of a CBox is TyError.
+    panic("emitc: cannot render " ++ ty_key(erased_from(args[0])) ++
+        " for native -- `show` hands the value over erased and there is no " ++
+        "run-time type to recover it from; give the type an `impl Show`")
+  } else if name == "to_float" {
+    (st1, "((double)(" ++ a0 ++ "))")
+  } else if name == "to_int" {
+    # Not a cast. `to_int` is the JVM's D2L, which saturates -- NaN answers 0,
+    # and a value past either end answers that end (JVMS 6.5 d2l) -- while C's
+    # cast is undefined for all three (C11 6.3.1.4). x86-64 answers INT64_MIN
+    # for every one of them, so `to_int(0.0 / 0.0)` was 0 on the JVM and
+    # Int.MIN on native. The saturation is written down in the runtime rather
+    # than inline for the same reason `dawn_idiv` is: it is a branch, not an
+    # expression.
+    (st1, "dawn_int_of_float(" ++ a0 ++ ")")
+  } else if name == "null_ref" {
+    (st1, c_zero(ty))
+  } else if name == "hash" {
+    (st1, scalar_rt("dawn_hash", cex_ty(args[0]), name) ++ "(" ++ a0 ++ ")")
+  } else if name == "cmp" {
+    (st1, scalar_rt("dawn_cmp", cex_ty(args[0]), name) ++
+        "(" ++ a0 ++ ", " ++ cargs[1] ++ ")")
+  } else if is_list_primitive(name) {
+    # The list primitives stay Core intrinsics rather than becoming calls in
+    # lowering, because the comptime interpreter implements them itself on its
+    # own value representation (see gen_list_intrinsic's note on the JVM
+    # side). So each backend translates them, and both translate to the same
+    # `std/pvec` function -- one definition, compiled twice.
+    (st1, mangle("std/pvec", pvec_target(name)) ++ "(" ++ join(own_args(args, cargs), ", ") ++ ")")
+  } else if name == "join" {
+    (st1, "dawn_join(" ++ to_host(own0(args, a0)) ++ ", " ++ cargs[1] ++ ")")
+  } else if name == "from_code_points" {
+    (st1, "dawn_from_code_points(" ++ to_host(own0(args, a0)) ++ ")")
+  } else if name == "code_points" {
+    (st1, of_host("dawn_code_points(" ++ a0 ++ ")"))
+  } else if name == "io_list_names" {
+    (st1, of_host("dawn_io_list_names(" ++ a0 ++ ")"))
+  } else if name == "io_run" {
+    (st1, "dawn_io_run(" ++ to_host(own0(args, a0)) ++ ", " ++ cargs[1] ++ ", " ++ cargs[2] ++ ")")
+  } else if name == "args" {
+    (st1, of_host("dawn_args()"))
+  } else if name == "cursor_slice" {
+    # Out of the table on both backends, for opposite reasons: the JVM's
+    # runtime returns null for a range that splits a character and the
+    # emitter turns that into the panic, while here the runtime panics
+    # itself. Same observable behaviour, and neither is a plain call.
+    (st1, "dawn_cursor_slice(" ++ a0 ++ ", " ++ cargs[1] ++ ", " ++ cargs[2] ++ ")")
+  } else if name == "expect" {
+    let (sta, tmp) = fresh(st1)
+    var st2 = line(sta, "dawn_adt* " ++ tmp ++ " = " ++ a0 ++ ";")
+    st2 = line(st2, "if (" ++ tmp ++ "->tag != " ++ to_string(option_tag("Some")) ++
+        ") dawn_panic(" ++ cargs[1] ++ ");")
+    (st2, dup_expr(unbox_expr(tmp ++ "->fields[0].p", ty), ty))
+  } else if name == "unwrap_or" {
+    # Both arguments are evaluated, as they are on the JVM and as any other
+    # call would: a ternary over the raw fallback expression would make this
+    # the one intrinsic that does not.
+    let (sta, tmp) = fresh(st1)
+    let (stb, fb) = fresh(sta)
+    var st2 = line(stb, c_type(ty) ++ " " ++ fb ++ " = " ++ cargs[1] ++ ";")
+    st2 = line(st2, "dawn_adt* " ++ tmp ++ " = " ++ a0 ++ ";")
+    (st2, dup_expr("(" ++ tmp ++ "->tag == " ++ to_string(option_tag("Some")) ++ " ? " ++
+        unbox_expr(tmp ++ "->fields[0].p", ty) ++ " : " ++ fb ++ ")", ty))
+  } else if name == "cast" {
+    # The reclaim, with its failure as a value (the error model's step B). A
+    # signature that promises a `Result` and an emitter that hands back a bare
+    # value would be the disagreement step A left behind (design doc 六.8), and
+    # here it would not even be a type error -- the C backend has no verifier
+    # to catch it.
+    #
+    # On this backend the `Err` arm is unreachable, and saying so is more
+    # honest than emitting a handler for it: a cast here is a reinterpretation,
+    # not a check -- there is no runtime type to compare against -- and the
+    # only producer of the `Object` it takes is `use java`, which emit_expr
+    # refuses a few hundred lines up. So the answer is always `Ok`, wrapping
+    # exactly the value this arm used to hand back unwrapped.
+    #
+    # That is the mirror, not an invention: the reclaim can fail on the JVM
+    # because a CHECKCAST can fail there. Should native ever grow host objects,
+    # this arm grows the `Err` that its cast grows a check.
+    let t = cast_target(ty)
+    let (sta, tmp) = fresh(st1)
+    var st2 = line(sta, "dawn_adt* " ++ tmp ++ " = dawn_adt_new(" ++
+        to_string(result_tag("Ok")) ++ ", 1, 1);")
+    # a `Result`'s payload sits at a type variable, so it is boxed here as
+    # emit_alloc boxes an erased constructor field
+    st2 = line(st2, tmp ++ "->fields[0].p = " ++
+        box_call(dup_expr(unbox_expr(a0, t), t), t) ++ ";")
+    (st2, tmp)
+  } else if name == "to_string" {
+    # Core normally lowers this into str_of_*; a residual one means a type
+    # the lowering did not know how to render
+    panic("emitc: to_string survived lowering -- unsupported operand type")
+  } else {
+    match rt_symbol(name) {
+      Some(sym) -> {
+        let call = sym ++ "(" ++ join(cargs, ", ") ++ ")"
+        (st1, if returns_borrow(name) { dup_expr(call, ty) } else { call })
+      }
+      None -> panic("emitc: intrinsic not implemented for native: " ++ name)
+    }
+  }
+}
+
+# ---- statements ----
+
+pub fn emit_stmt(st: CSt, s: CStmt) -> CSt =
+  match s {
+    CSLet(sym, ty, init) -> {
+      let (st1, v) = emit_expr(st, init)
+      if no_value(init) {
+        # `let x = panic(...)` binds nothing; the declaration still has to
+        # exist because later statements name it, but it cannot be initialised
+        # from a value that was never produced
+        line(discard(st1, v), c_type(ty) ++ " " ++ local_name(sym) ++ " = " ++ c_zero(ty) ++ ";")
+      } else {
+        line(st1, c_type(ty) ++ " " ++ local_name(sym) ++ " = " ++ v ++ ";")
+      }
+    }
+    CSAssign(sym, value) -> {
+      let (st1, v) = emit_expr(st, value)
+      # Same reason the `let` above tests it: a right-hand side that leaves
+      # never reaches the store, and `emit_expr` hands back DAWN_UNIT for it,
+      # which does not assign to the variable's type.
+      if no_value(value) { discard(st1, v) } else {
+        line(st1, local_name(sym) ++ " = " ++ v ++ ";")
+      }
+    }
+    CSDiscard(e) -> {
+      let (st1, v) = emit_expr(st, e)
+      discard(st1, v)
+    }
+    CSIf(cond, thn, els) -> {
+      let (st1, _) = emit_if(st, cond, thn, els, TyUnit)
+      st1
+    }
+    CSLoop(id, body, step) -> {
+      let st1 = push(line(st, "for (;;) {"))
+      let (st2, bv) = emit_expr(st1, body)
+      let st3 = discard(st2, bv)
+      # the step label is where CContinue lands, so `continue` runs the
+      # increment -- the whole reason CSLoop carries a step
+      let st4 = line(st3, loop_step(id) ++ ": ;")
+      let st5 =
+        match step {
+          Some(sv) -> {
+            let (sa, v) = emit_expr(st4, sv)
+            discard(sa, v)
+          }
+          None -> st4
+        }
+      let st6 = line(pop(st5), "}")
+      line(st6, loop_end(id) ++ ": ;")
+    }
+    # `rc.dawn` only names a binding here when its type is a reference, so
+    # there is no test to make: a scalar would not compile, which is the loud
+    # failure and the right one.
+    CSDrop(sym) -> line(st, "dawn_drop(" ++ local_name(sym) ++ ");")
+  }
+
+# ---- functions and program ----
+
+fn fn_signature(f: CFun) -> String = {
+  var ps: List[String] = []
+  # captures are ordinary leading parameters of the lifted function; only
+  # the adapter knows they came from an environment
+  for p in f.captures {
+    ps = ps ++ [c_type(p.ty) ++ " " ++ local_name(p.sym)]
+  }
+  for p in f.params {
+    ps = ps ++ [c_type(p.ty) ++ " " ++ local_name(p.sym)]
+  }
+  # dictionaries are hidden trailing parameters, in bound order
+  for d in f.dicts {
+    ps = ps ++ ["dawn_dict* " ++ local_name(d.sym)]
+  }
+  # effect evidence follows them: an ordinary counted record, so an ordinary
+  # parameter of its own C type
+  for e in f.evs {
+    ps = ps ++ [c_type(e.ty) ++ " " ++ local_name(e.sym)]
+  }
+  let plist = if len(ps) == 0 { "void" } else { join(ps, ", ") }
+  c_type(f.ret) ++ " " ++ fn_symbol(f) ++ "(" ++ plist ++ ")"
+}
+
+## An impl method body and a trait default body are ordinary functions with
+## a derived name; the same derivation is used by whatever fills a dict slot.
+fn fn_symbol(f: CFun) -> String =
+  match f.impl_of {
+    Some(pair) -> {
+      let (tid, subject) = pair
+      impl_symbol(f.owner, tid, subject, f.name)
+    }
+    None ->
+      match f.default_of {
+        Some(tid) -> default_symbol(f.owner, tid, f.name)
+        None -> mangle(f.owner, f.name)
+      }
+  }
+
+## Whether a closure can be built over this function. Lowering only ever
+## names lifted bodies in a CClosure, and it names them `lambda$N`.
+fn is_lifted(f: CFun) -> Bool = str.starts_with(f.name, "lambda$")
+
+## The adapter: uniform `(env, args...)` on the outside, the lifted
+## function's real parameter list on the inside. Generating one per lifted
+## body is what keeps every indirect call site identical.
+## Every adapter has one shape: erased slots in, an erased slot out.
+##
+## A closure is called through a pointer, and the call site knows only the
+## *function type* it holds -- which inside `std/list.map` is `fn(T) -> U`,
+## erased. The lambda behind it has concrete types. Adapting between the two
+## is what the JVM gets free from LambdaMetafactory, whose `instantiatedMethodType`
+## boxes and unboxes at the boundary; `dawn/rt/Fn`'s own `apply` is erased for
+## exactly this reason. Here it is written out.
+##
+## Giving the adapter the lambda's concrete types instead compiles -- C casts
+## the pointer without complaint -- and then `map` over a `List[Unit]` reads an
+## `int64_t` return as a pointer. That is the crash show_containers had.
+fn adapter_signature(f: CFun) -> String = {
+  var ps: List[String] = ["dawn_clo* env"]
+  for p in f.params {
+    ps = ps ++ ["void* " ++ local_name(p.sym)]
+  }
+  "void* " ++ adapter_name(f.owner, f.name) ++ "(" ++ join(ps, ", ") ++ ")"
+}
+
+fn emit_adapter(st: CSt, f: CFun) -> CSt = {
+  let st1 = push(line(st, adapter_signature(f) ++ " {"))
+  var args: List[String] = []
+  var i = 0
+  # The closure keeps its captures; the function it forwards to takes them
+  # owned like any other parameter and will release them. Without a reference
+  # of its own, the first call would free what the closure still points at.
+  for c in f.captures {
+    let slot = "env->caps[" ++ to_string(i) ++ "]." ++ slot_of(c.ty)
+    # a captured dictionary is a static: pass it through, never dup it
+    let arg = if set.has(st.dict_syms, c.sym) { slot } else { dup_expr(slot, c.ty) }
+    args = args ++ [arg]
+    i = i + 1
+  }
+  # scalar parameters arrive in boxes the caller made for this call alone;
+  # reading one owns it (references pass straight through to the callee)
+  for p in f.params {
+    args = args ++ [unbox_own_expr(local_name(p.sym), p.ty)]
+  }
+  let call = fn_symbol(f) ++ "(" ++ join(args, ", ") ++ ")"
+  # a Unit-returning lambda still owes the caller a slot
+  let ret = box_call(call, f.ret)
+  let st2 =
+    if len(f.captures) == 0 {
+      line(line(st1, "(void)env;"), "return " ++ ret ++ ";")
+    } else {
+      line(st1, "return " ++ ret ++ ";")
+    }
+  line(pop(st2), "}")
+}
+
+fn emit_fn(st: CSt, f: CFun) -> CSt = {
+  let st1 = push(line(CSt { ..st, tmp: 0 }, fn_signature(f) ++ " {"))
+  let (st2, v) = emit_expr(st1, f.body)
+  let st3 =
+    if peel_opaque(f.ret) == TyUnit {
+      line(discard(st2, v), "return DAWN_UNIT;")
+    } else if no_value(f.body) {
+      # unreachable, and C still needs it written: the function ends in a
+      # `return` on every path, or in a panic
+      line(st2, "return " ++ c_zero(f.ret) ++ ";")
+    } else {
+      line(st2, "return " ++ v ++ ";")
+    }
+  line(pop(st3), "}")
+}
+
+const C_HEX: String = "0123456789ABCDEF"
+
+fn hex_cp(n: Int) -> String = {
+  var s = ""
+  var v = n
+  while v > 0 {
+    s = str.slice(C_HEX, v % 16, v % 16 + 1) ++ s
+    v = v / 16
+  }
+  while str.len(s) < 4 { s = "0" ++ s }
+  "0x" ++ s
+}
+
+## Simple (1:1) Unicode case mapping, as ranges sharing one offset. This is the
+## compiler's table (selfhost/src/embed/unicode_case.dawn), the same rows codegen puts
+## in dawn/rt/Strings -- which is what makes `str.upper` one mapping with two
+## implementations rather than two mappings. The runtime declares these
+## `extern` and searches them; it has no table of its own, and until 2026-07-28
+## the one it had came from a generated header whose JDK the JVM backend had no
+## reason to still be running.
+fn emit_case_table(st0: CSt, name: String, rs: List[(Int, Int, Int)], want: Bool) -> CSt = {
+  if not want {
+    return prune_table(st0, name, "dawn_case_range", "{{0, 0, 0}}")
+  }
+  var st = line(st0, "const dawn_case_range " ++ name ++ "[] = {")
+  for r in rs {
+    let (lo, hi, delta) = r
+    st = line(st, "  {" ++ hex_cp(lo) ++ ", " ++ hex_cp(hi) ++ ", " ++ to_string(delta) ++ "},")
+  }
+  st = line(st, "};")
+  line(st, "const int64_t " ++ name ++ "_n = " ++ to_string(len(rs)) ++ ";")
+}
+
+## A table nothing reachable reads (reach.dawn). One zeroed row keeps the
+## initializer legal C; the zero count is the load-bearing part -- no real
+## table is empty, so the runtime treats n == 0 as "the compiler said this
+## cannot run" and panics (dawn_cp_in / dawn_case) instead of answering from
+## rows that are not there.
+fn prune_table(st0: CSt, name: String, ctype: String, row: String) -> CSt = {
+  let st = line(st0, "const " ++ ctype ++ " " ++ name ++ "[] = " ++ row ++ "; /* pruned */")
+  line(st, "const int64_t " ++ name ++ "_n = 0;")
+}
+
+## Unicode classification, as the ranges each predicate holds at
+## (selfhost/src/embed/unicode_class.dawn). Same arrangement as the case table, and it
+## replaces the runtime's older answer: it classified ASCII and panicked above
+## U+007F, so `char_is_letter` at a Greek letter was a crash on one backend and
+## `true` on the other.
+fn emit_cp_table(st0: CSt, name: String, rs: List[(Int, Int)], want: Bool) -> CSt = {
+  if not want {
+    return prune_table(st0, name, "dawn_cp_range", "{{0, 0}}")
+  }
+  var st = line(st0, "const dawn_cp_range " ++ name ++ "[] = {")
+  for r in rs {
+    let (lo, hi) = r
+    st = line(st, "  {" ++ hex_cp(lo) ++ ", " ++ hex_cp(hi) ++ "},")
+  }
+  st = line(st, "};")
+  line(st, "const int64_t " ++ name ++ "_n = " ++ to_string(len(rs)) ++ ";")
+}
+
+## A named block-scope `dawn_str` static, for a generator that writes C beside
+## this emitter's output (`ctestrun.dawn`); `emit_str_static` above is the same
+## definition under a name it invents. Escaping and the byte length are this
+## module's answer to give -- a second copy of `c_escape` somewhere else is how
+## the two would come to disagree about a `"` in a test description.
+pub fn str_static_def(name: String, v: String) -> String =
+  "static dawn_str " ++ name ++ " = {{DAWN_IMMORTAL, DAWN_K_STR}, " ++
+  to_string(bytes.len(bytes.utf8(v))) ++ ", \"" ++ c_escape(v) ++ "\"};"
+
+## The C symbol a test block gets. A test body is not a Dawn-callable
+## function and its Core name is the description string, so it cannot be
+## named the way a function is: the generated runner has to write the symbol
+## down, and all it knows is which test this is, not what it was called. The
+## lowering path renames each to `test_name(i)` before this emitter sees it,
+## mirroring the JVM's `dawn$test$i`; this is where that name is written down,
+## so the generated runner (`ctestrun.dawn`) and the emitter cannot drift
+## apart.
+pub fn test_name(idx: Int) -> String = "dawn\$test\$" ++ to_string(idx)
+
+pub fn test_symbol(owner: String, idx: Int) -> String = mangle(owner, test_name(idx))
+
+## Everything the translation unit needs except an entry point: the tables,
+## the declarations, the dictionaries and every function body. Two callers
+## finish it differently -- `emit_program` writes the program's own `main`,
+## and `dawn test` on this backend appends a generated runner instead.
+fn emit_units(units: List[EmitMod], u: TableUse, adts: Adts) -> CSt = {
+  var st = CSt {
+    out: [],
+    tmp: 0,
+    ind: 0,
+    consts: map.empty(),
+    blocks: map.empty(),
+    dict_syms: set.empty(),
+    adts: adts,
+    cur_owner: "",
+    cdefs: [],
+    cmap: map.empty()
+  }
+  st = line(st, "/* generated by dawn __emitc -- Core IR -> C */")
+  st = line(st, "#include \"dawn_rt.h\"")
+  # `fmod`, for Float `%`. Without the declaration C would assume it returns
+  # int and truncate the answer -- a wrong result, and only a warning.
+  st = line(st, "#include <math.h>")
+  st = line(st, "")
+  # Which tables carry rows is `u`'s answer (reach.dawn). Unlike the JVM,
+  # `parse` funds the space set here: the C parsers strip leading and
+  # trailing whitespace with it (dawn_str_trim_span), where the JVM answers
+  # with `String.strip`. And `char_is_alnum` is letter-or-digit, so it funds
+  # both of those.
+  st = emit_case_table(st, "dawn_upper_ranges", unicode_case.upper(), u.str_upper)
+  st = line(st, "")
+  st = emit_case_table(st, "dawn_lower_ranges", unicode_case.lower(), u.str_lower)
+  st = line(st, "")
+  for e in [("dawn_letter_ranges", unicode_class.letters(), u.is_letter || u.is_alnum),
+    ("dawn_digit_ranges", unicode_class.digits(), u.is_digit || u.is_alnum),
+    ("dawn_upper_class_ranges", unicode_class.uppers(), u.is_upper),
+    ("dawn_lower_class_ranges", unicode_class.lowers(), u.is_lower),
+    ("dawn_space_ranges", unicode_class.spaces(), u.is_space)] {
+    let (name, rs, want) = e
+    st = emit_cp_table(st, name, rs, want)
+    st = line(st, "")
+  }
+
+  # C needs declarations before use; Dawn does not order top-level functions
+  for u in units {
+    for f in u.m.fns {
+      if not f.is_test {
+        st = line(st, fn_signature(f) ++ ";")
+        if is_lifted(f) {
+          st = line(st, adapter_signature(f) ++ ";")
+        }
+      }
+    }
+  }
+  st = line(st, "")
+
+  # One translation unit for the whole program, so a dictionary two modules
+  # both need would be defined twice under the same symbol. The JVM dedupes by
+  # the same key (emit.dawn skips one its Gen already carries), but there the
+  # scope is a class, and a class is a module -- which is why only C sees it.
+  #
+  # Every module that needs `Eq[String]` lowers its own copy of the slot
+  # function, so the two definitions are not textually equal: they differ in
+  # the owner the slot symbol is mangled from, and nothing else. Keeping the
+  # first is therefore sound, and `slot_shape` is what says so -- it drops the
+  # owner and holds the rest to being identical, so a real disagreement about
+  # what fills a slot is a panic rather than a silent choice.
+  var seen: Map[String, String] = map.empty()
+  for u in units {
+    for d in u.m.dicts {
+      let shape = slot_shape(d)
+      match map.get(seen, d.key) {
+        Some(prev) ->
+          if prev != shape {
+            panic("emitc: dictionary " ++ d.key ++ " filled two ways: " ++
+                prev ++ " vs " ++ shape)
+          }
+        None -> {
+          seen = map.insert(seen, d.key, shape)
+          st = line(st, dict_line(d))
+        }
+      }
+    }
+  }
+  st = line(st, "")
+
+  # The function bodies go into their own buffer, because a body may ask for
+  # a constant builder and C wants the builder defined first. Emitting them
+  # apart and splicing is the whole of the ordering story: `const_builder`
+  # collects into `st.cdefs` while the bodies are written, and the two are
+  # joined below in the order C needs. The alternative -- a pre-pass over
+  # every Core body to find the constants first -- would walk the program
+  # twice to learn what emitting it already says.
+  let head = st.out
+  st = CSt { ..st, out: [] }
+
+  for u in units {
+    # a const is resolved in its declaring module, so the maps travel with it;
+    # the dictionary symbols are unioned unit-wide because a lifted lambda's
+    # captures reuse the enclosing function's symbol ids
+    var udicts: Set[Int] = set.empty()
+    for f in u.m.fns {
+      for d in f.dicts { udicts = set.insert(udicts, d.sym) }
+    }
+    st = CSt {
+      ..st,
+      consts: u.consts,
+      blocks: u.blocks,
+      dict_syms: udicts,
+      cur_owner: u.m.owner
+    }
+    for f in u.m.fns {
+      if not f.is_test {
+        st = emit_fn(st, f)
+        st = line(st, "")
+        if is_lifted(f) {
+          st = emit_adapter(st, f)
+          st = line(st, "")
+        }
+      }
+    }
+  }
+  st = CSt { ..st, out: head ++ st.cdefs ++ st.out }
+
+  st
+}
+
+pub fn emit_program(units: List[EmitMod], entry: String, u: TableUse, adts: Adts) -> String = {
+  var st = emit_units(units, u, adts)
+  # The program body runs on the runtime's own stack, not the OS default one
+  # (dawn_rt.h, "the program's stack"). The thunk exists because the entry's
+  # C return type follows its Dawn one, and `dawn_rt_main` takes one shape;
+  # the name sits outside `mangle`'s grammar, so nothing minted from a name
+  # the program chose can collide with it (see `mangle`).
+  st = line(st, "static void dawn_program_entry(void) {")
+  st = push(st)
+  st = line(st, "(void)" ++ mangle(entry, "main") ++ "();")
+  st = pop(st)
+  st = line(st, "}")
+  st = line(st, "")
+  st = line(st, "int main(int argc, char** argv) {")
+  st = push(st)
+  st = line(st, "return dawn_rt_main(argc, argv, dawn_program_entry);")
+  st = pop(st)
+  st = line(st, "}")
+  join(st.out, "")
+}
+
+## The same translation unit with no `int main` in it: whoever calls this owes
+## one. `cdriver.c_test_text` is the only caller, and it appends the runner
+## `ctestrun.dawn` generates -- the C mirror of the JVM path, where
+## `testrun.dawn` synthesises a `dawn$TestMain` class beside the emitted ones.
+pub fn emit_headless(units: List[EmitMod], u: TableUse, adts: Adts) -> String =
+  join(emit_units(units, u, adts).out, "")
+
+# ---- tests ----
+
+test "escaping a symbol part is injective and never spells the separator" {
+  # Exhaustive over every string up to length three drawn from the characters
+  # that used to fold together, which is enough to catch a scheme that maps
+  # two of them the same way -- the old one fails on the first pair.
+  let alpha = ["a", "_", "/", "\$", "-"]
+  var seen: Set[String] = set.empty()
+  var words = [""]
+  var n = 0
+  while n < 3 {
+    var next: List[String] = []
+    for w in words {
+      for c in alpha { next = next ++ [w ++ c] }
+    }
+    words = next
+    for w in words {
+      let e = escape_part(w)
+      assert not str.contains(e, "__")
+      assert not set.has(seen, e)
+      seen = set.insert(seen, e)
+    }
+    n = n + 1
+  }
+  assert set.len(seen) == 155
+}
+
+test "a C symbol determines the names it was minted from" {
+  # `a/b` and `a_b` are two modules one program may use at once, and folding
+  # every non-identifier character to `_` gave both of them `dawn_a_b__f`:
+  # one symbol defined twice, so `cc` refused a program the JVM backend runs
+  # (scripts/spike-native/mod_paths is the end-to-end form of this).
+  #
+  # The last owner pair is the same collision one layer up: a package's modules
+  # are owned by `dawn$pkg$<name>/<path>` (analyze.dawn), which folded onto the
+  # plain module of the corresponding underscore spelling.
+  let owners = [
+    "a/b", "a_b", "a__b", "a\$b", "std/pvec",
+    "dawn\$pkg\$json/lexer", "dawn_pkg_json/lexer"
+  ]
+  let names = ["f", "f__clo", "impl\$1\$Int\$eq", test_name(0)]
+  var seen: Set[String] = set.empty()
+  for o in owners {
+    for nm in names {
+      for s in [mangle(o, nm), adapter_name(o, nm), dict_symbol(o ++ nm)] {
+        assert not set.has(seen, s)
+        seen = set.insert(seen, s)
+      }
+    }
+  }
+  assert set.len(seen) == 84
+  # the families are told apart by how many parts the symbol has, so the
+  # invented names -- which have none -- stay outside the grammar
+  assert not str.contains("dawn_program_entry", "__")
+  assert str.starts_with(dict_symbol("dict\$1\$Int"), "dawn_dict_3")
+}
+
+test "a slot member and the ref classification agree about every repr" {
+  # These two disagreed about Unit: `dawn_unit` is a byte, but `slot_of` filed
+  # it under the pointer member. Nothing stored a Unit in a slot, so the C
+  # never got compiled -- and the harness marks emitc `blocked` whenever the
+  # JVM run fails, which is why a whole family stayed invisible.
+  assert slot_of(TyUnit) == "u"
+  assert slot_of(TyOpaque(0, "H", "m", TyUnit)) == "u"
+  assert not is_ref_ty(TyUnit)
+  assert box_call("x", TyUnit) == "dawn_box_unit(x)"
+  assert c_type(TyUnit) == "dawn_unit"
+  # the pointer group is what is left, and Unit is no longer in it
+  assert slot_of(TyBytes) == "p"
+  assert is_ref_ty(TyBytes)
+  # String crossed the aisle when it joined the ledger (2026-07-29): counted
+  # reference, pointer slot, no box
+  assert is_ref_ty(TyString)
+  assert slot_of(TyString) == "p"
+  assert c_type(TyString) == "dawn_str*"
+  assert box_call("x", TyString) == "((void*)(x))"
+
+  # This is the joint the RC pass hangs on. `is_ref_ty` lives in types.dawn
+  # because Core cannot see a backend; `slot_of` lives here because a union
+  # member is a C fact. They have to answer the same question, and until
+  # 2026-07-29 there were three spellings of it -- `is_ref_ty`, emitc's own
+  # `is_ref_c`, and an `is_ptr_slot` added a commit earlier without noticing
+  # the other two. A field mask built from one and a drop built from another
+  # is a use-after-free that only appears for whichever type they disagree on.
+  let every: List[Ty] = [
+    TyInt, TyFloat, TyBool, TyString, TyUnit, TyNever,
+    TyError, TyBytes, TyVar("T", 0), TyAdt(0, []), TyTuple([TyInt]),
+    TyFn([], TyInt, EPure), TyList(TyInt), TyMap(TyInt, TyInt), TySet(TyInt),
+    TyArray(TyInt), TyJava("java.lang.Object", "Object"),
+    TyOpaque(0, "H", "m", TyBytes), TyOpaque(1, "I", "m", TyInt)
+  ]
+  for t in every {
+    assert is_ref_ty(t) == (slot_of(t) == "p")
+  }
+}
+
+test "the C runtime's constructor tags are the prelude's" {
+  # The runtime builds an Option (parse_float, io_getenv) and
+  # a Result (catch_fault), so DAWN_TAG_SOME and friends are written down in
+  # dawn_rt.h as well as declared here. This is the joint between the two:
+  # reorder the prelude's constructors and this fails, rather than the native
+  # backend quietly reading the wrong arm.
+  assert option_tag("Some") == 0
+  assert option_tag("None") == 1
+  # DAWN_TAG_OK / DAWN_TAG_ERR, and `cast` builds an `Ok` in emitted C
+  # without going through the runtime at all
+  assert result_tag("Ok") == 0
+  assert result_tag("Err") == 1
+}
+
+test "a primitive its module owns needs no arm in the emitter" {
+  # The point of the table: these were seven hand-written cases, and the
+  # families with none were what `emitc: intrinsic not implemented` meant.
+  assert rt_symbol("cursor_next") == Some("dawn_cursor_next")
+  assert rt_symbol("bytes_at") == Some("dawn_bytes_at")
+  assert rt_symbol("io_print") == Some("dawn_io_print")
+  assert rt_symbol("array_push") == Some("dawn_array_push")
+  # a primitive added to the table since: the emitter got no new case for it,
+  # which is the contract this test is about
+  assert rt_symbol("bytes_decode_utf8") == Some("dawn_bytes_decode_utf8")
+  # and the ones the emitter really does write itself stay out of it
+  assert rt_symbol("cursor_slice") == None
+  assert rt_symbol("expect") == None
+  assert rt_symbol("code_points") == None
+}
+
+test "every scalar relation the emitter names is one the runtime defines" {
+  # `scalar_rt` writes a symbol name into the emitted C, and nothing else in
+  # the compiler ever links against it -- so a name for a function the runtime
+  # does not have is a link error in the *user's* build, arriving as an
+  # undefined reference to a symbol they never wrote. That is what
+  # `dawn_hash_float` / `dawn_cmp_float` were: named here, absent from
+  # dawn_rt.c since Float left hash_scalars and ord_scalars.
+  #
+  # The runtime header travels with the compiler (rtsrc, for the standalone
+  # native toolchain), so the declaration is right here to check against. The
+  # subjects are exactly the two tables in types.dawn, which is what keeps
+  # this from turning into a second hand-kept list.
+  let header = rtsrc.source("dawn_rt.h").expect("the embedded runtime header")
+  for t in hash_scalars() {
+    assert str.contains(header, scalar_rt("dawn_hash", t, "hash") ++ "(")
+  }
+  for t in ord_scalars() {
+    assert str.contains(header, scalar_rt("dawn_cmp", t, "cmp") ++ "(")
+  }
+  # and the other direction, which is the one that was broken: a type in
+  # neither table must reach the gap rather than a name. Float had an arm here
+  # naming symbols the runtime does not declare, and could keep it for as long
+  # as nothing called it.
+  assert not str.contains(header, "dawn_hash_float")
+  assert not str.contains(header, "dawn_cmp_float")
+  assert gaps("dawn_hash", TyFloat)
+  assert gaps("dawn_cmp", TyFloat)
+  assert gaps("dawn_cmp", TyBool)
+  assert gaps("dawn_cmp", TyBytes)
+}
+
+## `scalar_rt` refuses this pair -- the test above wants the refusal, and
+## `no_rt` is a panic, so it has to be caught to be asserted.
+fn gaps(prefix: String, t: Ty) -> Bool !io =
+  match catch_panic(() => scalar_rt(prefix, t, "the test")) {
+    Ok(_) -> false
+    Err(_) -> true
+  }
+
+test "a non-finite Float is written as C, not as its spelling" {
+  # #111. Spec §11 renders these `Infinity`, `-Infinity` and `NaN`; none of
+  # the three is a C token, so a folded const reached `cc` as an undeclared
+  # identifier. The replacements carry the same bit pattern and need no
+  # <math.h> -- the runtime header does not include it.
+  let inf = 1.0 / 0.0
+  assert float_lit(inf) == "(1.0/0.0)"
+  assert float_lit(-1.0 / 0.0) == "(-1.0/0.0)"
+  assert float_lit(0.0 / 0.0) == "(0.0/0.0)"
+  # NaN is unequal to the infinities as well, so its arm has to come first --
+  # last, it would fall through to `to_string` and out as a bare `NaN`.
+  assert float_lit(inf - inf) == "(0.0/0.0)"
+
+  # every finite value, signed zero included, is already a literal C reads
+  # back bit for bit, so the rewrite must not touch it
+  assert float_lit(0.0) == "0.0"
+  assert float_lit(-0.0) == "-0.0"
+  assert float_lit(0.1) == "0.1"
+  assert float_lit(1.0e300) == "1.0E300"
+  assert float_lit(4.9e-324) == "4.9E-324"
+
+  # both paths that print a Float share the rewrite: the inlined `CFloat` and
+  # the interpreter's folded `VFloat`
+  assert const_literal(VFloat(inf), TyFloat, "c") == "(1.0/0.0)"
+  assert const_literal(VFloat(0.0 / 0.0), TyFloat, "c") == "(0.0/0.0)"
+  assert const_literal(VFloat(-0.0), TyFloat, "c") == "-0.0"
+}

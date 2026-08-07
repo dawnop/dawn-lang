@@ -1,0 +1,961 @@
+# The language server (the Kotlin Server.kt): LSP over stdio until the client
+# disconnects. lsp4j is replaced by a hand-rolled JSON-RPC layer over
+# packages/json — Content-Length framing (bytes, UTF-8), requests answered in
+# order, publishDiagnostics pushed on every document update. One open document
+# = text + line index + fresh analysis, rebuilt on every *settled* change: the
+# read loop debounces document syncs, so a burst of keystrokes is analysed once
+# (LSP-04, docs/audit/lsp-robustness-design.md §2.2).
+
+use std/char
+use std/io
+use std/str
+use std/map
+use std/list
+use std/bytes
+use json/parser
+use json/value.{Json, JNull, JBool, JNum, JInt, JStr, JArr, JObj}
+use json/render.{render}
+use driver/analyze.{Program, CheckedMod, analyze_document, analyze_standalone, canon}
+use ir/interp.{ct_default}
+use check/jsig.{Jsig}
+use driver/stdlib.{StdCtx, load_std}
+use check/cx.{ModExports}
+use check/checker.{exports_of, visible_bins}
+use lsp/lspq.{QCx, Target, find_target}
+use lsp/lspc.{CItem, completions_at}
+use front/lexer.{line_starts_of, view_of, SourceView}
+use front/diag.{utf16_len}
+use check/types.{Sig, builtins, sig_render}
+use front/ast.{
+  Decl, DFn, DType, DConst, DTrait, DImpl, DUseJava, DUseModule, DTest, DEffect, FnDecl
+}
+use front/token.{Diag}
+use front/fmt
+
+fn crlf() -> String = from_code_points(['\r', '\n'])
+
+## An ASCII code point as the character it names. Every call site below has
+## already bounded the value (a byte read from a header, a nibble turned into a
+## hex digit), so a failure here is a broken invariant and not an input.
+## `char.of` is the checked bridge outside std; the unchecked one is internal.
+fn char_of_code(n: Int) -> Char = char.of(n).expect("ASCII code point")
+
+# ---- position mapping (offsets are UTF-16 code units, LSP's encoding) ----
+
+fn line_of(ls: List[Int], offset: Int) -> Int = {
+  var lo = 0
+  var hi = len(ls) - 1
+  while lo < hi {
+    let mid = (lo + hi + 1) / 2
+    if ls[mid] <= offset { lo = mid } else { hi = mid - 1 }
+  }
+  lo
+}
+
+## code-point offset → (0-based line, 0-based UTF-16 column), clamped. The line
+## comes from the code-point line starts; the column is the UTF-16 distance from
+## the line start (the wire encoding), read off the view's offset table. This is
+## the only place code-point positions cross into UTF-16.
+fn lsp_position(v: SourceView, ls: List[Int], cpoff: Int) -> (Int, Int) = {
+  let n = len(v.cps)
+  let clamped = if cpoff < 0 {
+    0
+  } else if cpoff > n {
+    n
+  } else {
+    cpoff
+  }
+  let line = line_of(ls, clamped)
+  (line, v.offs[clamped] - v.offs[ls[line]])
+}
+
+## (0-based line, 0-based UTF-16 column) → code-point offset, clamped to the
+## line. The incoming UTF-16 column is resolved back to a code-point index by
+## walking the line's offset table.
+fn lsp_offset(v: SourceView, ls: List[Int], line0: Int, character: Int) -> Int = {
+  let n = len(v.cps)
+  if line0 < 0 { return 0 }
+  if line0 >= len(ls) { return n }
+  let line_start = ls[line0]
+  let line_end = if line0 + 1 < len(ls) { ls[line0 + 1] - 1 } else { n }
+  let target = v.offs[line_start] + character
+  var cp = line_start
+  while cp < line_end && v.offs[cp] < target { cp = cp + 1 }
+  cp
+}
+
+fn jrange(v: SourceView, ls: List[Int], lo: Int, hi: Int) -> Json = {
+  let (sl, sc) = lsp_position(v, ls, lo)
+  let (el, ec) = lsp_position(v, ls, hi)
+  jobj([("start", jpos(sl, sc)), ("end", jpos(el, ec))])
+}
+
+fn jpos(line: Int, ch: Int) -> Json =
+  jobj([("line", JInt(line)), ("character", JInt(ch))])
+
+test "positions bridge code-point offsets and utf-16 columns at the boundary" {
+  # "a🎈b\nx": 🎈 is one code point but two UTF-16 units. `b` is code-point
+  # offset 2; on the wire it must be UTF-16 column 3, and the round trip back
+  # must recover the same code-point offset.
+  let text = "a🎈b\nx"
+  let v = view_of(text)
+  let ls = line_starts_of(text)
+  let (l0, c0) = lsp_position(v, ls, 2)
+  assert l0 == 0
+  assert c0 == 3
+  assert lsp_offset(v, ls, 0, 3) == 2
+  let (l1, c1) = lsp_position(v, ls, 4)
+  assert l1 == 1
+  assert c1 == 0
+}
+
+# ---- json helpers ----
+
+fn jobj(entries: List[(String, Json)]) -> Json = {
+  var m: Map[String, Json] = map.empty()
+  for e in entries {
+    let (k, v) = e
+    m = map.insert(m, k, v)
+  }
+  JObj(m)
+}
+
+fn oget(j: Json, k: String) -> Option[Json] =
+  match j {
+    JObj(m) -> map.get(m, k)
+    _ -> None
+  }
+
+fn ostr(j: Json, k: String) -> String =
+  match oget(j, k) {
+    Some(JStr(s)) -> s
+    _ -> ""
+  }
+
+fn oint(j: Json, k: String) -> Int =
+  match oget(j, k) {
+    Some(JNum(f)) -> to_int(f)
+    Some(JInt(n)) -> n
+    _ -> 0
+  }
+
+## Echo a request id the way lsp4j does: integral numbers render as integers.
+fn echo_id(id: Json) -> Json =
+  match id {
+    JNum(f) -> {
+      let n = to_int(f)
+      if to_float(n) == f { JInt(n) } else { JNum(f) }
+    }
+    _ -> id
+  }
+
+# ---- uri ↔ path ----
+
+fn hex_val(c: Char) -> Int =
+  if c >= '0' && c <= '9' {
+    char.code(c) - char.code('0')
+  } else if c >= 'a' && c <= 'f' {
+    char.code(c) - char.code('a') + 10
+  } else if c >= 'A' && c <= 'F' {
+    char.code(c) - char.code('A') + 10
+  } else {
+    -1
+  }
+
+## file:// URI → filesystem path, or None for anything this process cannot
+## open as a local file (LSP-02).
+##
+## Four things the old two-line version got wrong, all of them shapes a real
+## client sends:
+##
+## * **authority**. `file://server/share/x` used to yield the *relative* path
+##   `server/share/x` -- a path that either does not exist or, worse, exists
+##   somewhere unrelated. An empty authority (`file:///x`, what every editor
+##   sends) and `localhost` mean "this machine"; any other host is a file this
+##   process cannot open, so it is `None` rather than a guess.
+## * **query and fragment**. A URI may carry `?` / `#`; a path may not. They
+##   are cut before decoding, so a percent escape inside them cannot leak into
+##   the path either.
+## * **Windows drive letters**. `file:///C:/x` decodes to `/C:/x`, which is not
+##   a path on the platform that spells it `C:/x`. A leading slash before a
+##   drive letter is dropped -- harmless on POSIX, where no such path exists.
+## * **percent-decoding is still validated** (LSP-01): a malformed sequence
+##   becomes U+FFFD, so the result is a path that does not exist rather than a
+##   path assembled from bytes nobody wrote.
+pub fn uri_to_path(uri: String) -> Option[String] = {
+  if not str.starts_with(uri, "file://") { return None }
+  var rest = str.strip_prefix(uri, "file://").unwrap_or(uri)
+  # authority: everything before the first `/` of the path
+  if not str.starts_with(rest, "/") {
+    let cut = match str.index_of(rest, "/") {
+      Some(i) -> i
+      None -> str.len(rest)
+    }
+    let authority = str.take(rest, cut)
+    if authority != "" && str.to_lower(authority) != "localhost" { return None }
+    rest = str.drop(rest, cut)
+  }
+  # a path carries neither query nor fragment
+  match str.index_of(rest, "#") {
+    Some(i) -> { rest = str.take(rest, i) }
+    None -> ()
+  }
+  match str.index_of(rest, "?") {
+    Some(i) -> { rest = str.take(rest, i) }
+    None -> ()
+  }
+  if rest == "" { return None }
+  rest = drive_path(rest)
+  # percent-decode into UTF-8 bytes, then decode
+  var bs: List[Int] = []
+  let cps = code_points(rest)
+  var i = 0
+  let n = len(cps)
+  while i < n {
+    let c = cps[i]
+    if c == '%' && i + 2 < n {
+      let h = hex_val(cps[i + 1])
+      let l = hex_val(cps[i + 2])
+      if h >= 0 && l >= 0 {
+        bs = bs ++ [h * 16 + l]
+        i = i + 3
+      } else {
+        bs = bs ++ utf8_bytes(c)
+        i = i + 1
+      }
+    } else {
+      bs = bs ++ utf8_bytes(c)
+      i = i + 1
+    }
+  }
+  Some(utf8_decode(bs))
+}
+
+## Decode UTF-8 bytes to a string (percent-decoded URI bytes), validating
+## (LSP-01): a continuation byte must be 0x80..0xBF, an overlong encoding, a
+## surrogate and anything past U+10FFFF are malformed. Each malformed
+## sequence becomes one U+FFFD and decoding resumes at the next byte — the
+## URI came from an editor, and a bad one should degrade, not crash or smuggle
+## a code point the encoder could never have produced. One pure-Dawn
+## implementation, shared by both toolchains (the JDK is not on the native
+## side, and an unvalidating decoder was not worth keeping on either).
+fn utf8_decode(bs: List[Int]) -> String = {
+  var cps: List[Int] = []
+  var i = 0
+  let n = len(bs)
+  while i < n {
+    let b0 = bs[i]
+    if b0 < 128 {
+      cps = cps ++ [b0]
+      i = i + 1
+    } else if b0 >= 194 && b0 <= 223 && i + 1 < n && is_cont(bs[i + 1]) {
+      # 0xC2..0xDF: two bytes; 0xC0/0xC1 would be overlong and fall through
+      cps = cps ++ [(b0 - 192) * 64 + (bs[i + 1] - 128)]
+      i = i + 2
+    } else if b0 >= 224 && b0 <= 239 && i + 2 < n && is_cont(bs[i + 1]) &&
+      is_cont(bs[i + 2]) {
+        let cp = (b0 - 224) * 4096 + (bs[i + 1] - 128) * 64 + (bs[i + 2] - 128)
+        # below 0x800 is overlong; D800..DFFF is a surrogate
+        if cp < 2048 || (cp >= 55296 && cp <= 57343) {
+          cps = cps ++ [65533]
+          i = i + 1
+        } else {
+          cps = cps ++ [cp]
+          i = i + 3
+        }
+      } else if b0 >= 240 && b0 <= 244 && i + 3 < n && is_cont(bs[i + 1]) &&
+      is_cont(bs[i + 2]) && is_cont(bs[i + 3]) {
+        let cp = (b0 - 240) * 262144 + (bs[i + 1] - 128) * 4096 +
+          (bs[i + 2] - 128) * 64 + (bs[i + 3] - 128)
+        # below 0x10000 is overlong; above 0x10FFFF is out of range
+        if cp < 65536 || cp > 1114111 {
+          cps = cps ++ [65533]
+          i = i + 1
+        } else {
+          cps = cps ++ [cp]
+          i = i + 4
+        }
+      } else {
+        # lone continuation, overlong lead (C0/C1), out-of-range lead (F5..FF),
+        # or a truncated sequence
+        cps = cps ++ [65533]
+        i = i + 1
+      }
+  }
+  # every branch above has already established its value is a scalar -- the
+  # overlong, surrogate and out-of-range cases are the ones that become U+FFFD
+  from_code_points(list.map(cps, c => char_of_code(c)))
+}
+
+fn is_cont(b: Int) -> Bool = b >= 128 && b <= 191
+
+test "file URIs: authority, query, fragment and drive letters (LSP-02)" {
+  # the shape every editor sends
+  assert uri_to_path("file:///tmp/a.dawn") == Some("/tmp/a.dawn")
+  # localhost means this machine; another host is a file we cannot open
+  assert uri_to_path("file://localhost/tmp/a.dawn") == Some("/tmp/a.dawn")
+  assert uri_to_path("file://server/share/a.dawn") == None
+  # a path carries neither query nor fragment
+  assert uri_to_path("file:///tmp/a.dawn?v=2") == Some("/tmp/a.dawn")
+  assert uri_to_path("file:///tmp/a.dawn#L10") == Some("/tmp/a.dawn")
+  # a drive-letter path does not begin with a separator...
+  assert uri_to_path("file:///C:/src/a.dawn") == Some("C:/src/a.dawn")
+  # ...and a single letter without a colon is not a drive
+  assert uri_to_path("file:///c/src/a.dawn") == Some("/c/src/a.dawn")
+  # non-file schemes and the empty path stay None
+  assert uri_to_path("http://x/y") == None
+  assert uri_to_path("file://") == None
+  # the other direction roots what it emits: three slashes, never two
+  assert path_to_uri("/tmp/a.dawn") == "file:///tmp/a.dawn"
+  assert path_to_uri("C:/src/a.dawn") == "file:///C:/src/a.dawn"
+  # and both directions compose, drive letter included
+  let accented = "/tmp/caf" ++ from_code_points(['\u{00E9}']) ++ ".dawn"
+  assert uri_to_path(path_to_uri(accented)) == Some(accented)
+}
+
+test "uri decoding validates utf-8 instead of trusting it" {
+  let fffd = from_code_points(['\u{FFFD}'])
+  # the happy path: percent-encoded multibyte decodes exactly (U+00E9)
+  assert uri_to_path("file:///tmp/caf%C3%A9.dawn") ==
+    Some("/tmp/caf" ++ from_code_points(['\u{00E9}']) ++ ".dawn")
+  # a continuation byte that never comes: C3 '(' is malformed, becomes U+FFFD
+  assert uri_to_path("file:///a%C3%28b") == Some("/a" ++ fffd ++ "(b")
+  # overlong '/' (C0 AF) must not decode to '/': two malformed bytes
+  assert uri_to_path("file:///x%C0%AFy") == Some("/x" ++ fffd ++ fffd ++ "y")
+  # a surrogate half is not a code point
+  assert uri_to_path("file:///s%ED%A0%80e") == Some("/s" ++ fffd ++ fffd ++ fffd ++ "e")
+  # a lone continuation byte
+  assert uri_to_path("file:///l%80r") == Some("/l" ++ fffd ++ "r")
+}
+
+fn utf8_bytes(c: Char) -> List[Int] = {
+  let cp = char.code(c)
+  if cp < 128 {
+    [cp]
+  } else if cp < 2048 {
+    [192 + cp / 64, 128 + cp % 64]
+  } else if cp < 65536 {
+    [224 + cp / 4096, 128 + cp / 64 % 64, 128 + cp % 64]
+  } else {
+    [240 + cp / 262144, 128 + cp / 4096 % 64, 128 + cp / 64 % 64, 128 + cp % 64]
+  }
+}
+
+fn uri_ok(c: Char) -> Bool =
+  (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+  c == '/' || c == '-' || c == '_' || c == '.' || c == '~' ||
+  # ':' is a legal path character (RFC 3986 pchar) and has to survive
+  # unencoded, or a Windows drive would round-trip as `%3A` -- readable to a
+  # parser, unrecognisable to a human reading the log
+  c == ':'
+
+## `/C:/x` → `C:/x`: a drive-letter path does not begin with a separator.
+## Left alone anywhere else, including `/c/x` (a single letter is not a drive
+## without the colon) and plain POSIX paths.
+fn drive_path(p: String) -> String = {
+  let cps = code_points(p)
+  if len(cps) < 3 { return p }
+  if cps[0] != '/' { return p }
+  let c = cps[1]
+  let alpha = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+  if alpha && cps[2] == ':' { str.drop(p, 1) } else { p }
+}
+
+## filesystem path → file:// URI, with the empty authority the standard asks
+## for: `file:///x`, never `file://x` (LSP-02). A Windows path (`C:/x`) gains
+## the leading slash it needs -- without it the drive letter would parse as the
+## authority, and the URI would name a host called `C:`.
+pub fn path_to_uri(path: String) -> String = {
+  var out: List[Char] = []
+  for c in code_points(path) {
+    if uri_ok(c) {
+      out = out ++ [c]
+    } else {
+      for b in utf8_bytes(c) {
+        out = out ++ ['%', hex_digit(b / 16), hex_digit(b % 16)]
+      }
+    }
+  }
+  let body = from_code_points(out)
+  let rooted = if str.starts_with(body, "/") { body } else { "/" ++ body }
+  "file://" ++ rooted
+}
+
+fn hex_digit(v: Int) -> Char =
+  char_of_code(if v < 10 { char.code('0') + v } else { char.code('A') + v - 10 })
+
+# ---- one open document ----
+
+type Doc = {
+  uri: String,
+  path: Option[String],
+  text: String,
+  view: SourceView,
+  ls: List[Int],
+  prog: Program,
+  entry: String
+}
+
+fn doc_qcx(st: LspState, d: Doc) -> Option[QCx] = {
+  let entry = list.find(d.prog.modules, cm => cm.mod_path == d.entry)
+  match entry {
+    Some(e) -> {
+      var env = st.std.exports
+      for cm in d.prog.modules {
+        env = map.insert(env, cm.mod_path, exports_of(cm.cx, cm.m, cm.mod_path, cm.class_name))
+      }
+      Some(QCx {
+        entry: e,
+        prog: d.prog,
+        std: st.std,
+        exports_env: env,
+        bins: visible_bins(st.bins, e.cx)
+      })
+    }
+    None -> None
+  }
+}
+
+## The document's own diagnostics (the Kotlin Analyzed.diagnostics).
+fn doc_diags(d: Doc) -> List[Diag] = {
+  var out: List[Diag] = []
+  match d.path {
+    Some(p) -> {
+      for ld in d.prog.diags {
+        if ld.path == p { out = out ++ [ld.d] }
+      }
+    }
+    None -> {
+      for ld in d.prog.diags { out = out ++ [ld.d] }
+    }
+  }
+  out
+}
+
+type LspState = { std: StdCtx, bins: Map[String, Sig], docs: Map[String, Doc], jsig: Jsig }
+
+# ---- the server loop ----
+
+## `js` is the driver's Java signature oracle, passed straight through to
+## analysis: the JVM main wires jreflect's, so `use java` programs check in
+## the editor exactly as they compile; a native driver would pass the refusal
+## and the editor would show the same refusal the compiler gives.
+pub fn run_lsp(std_dir: String, js: Jsig) -> Unit !io = {
+  let std = match load_std(std_dir) {
+    Ok(sc) -> sc
+    Err(e) -> panic("cannot load std from " ++ std_dir ++ ": " ++ e)
+  }
+  var st = LspState { std: std, bins: builtins(), docs: map.empty(), jsig: js }
+  # The newest text of the one document whose analysis has not run yet.
+  #
+  # At most one, and that is what makes deferring the work invisible: an
+  # update naming a *different* document flushes the one already waiting, so
+  # analyses still happen in the order the client asked for. Only repeats of
+  # the same document coalesce — which is the whole point, since `didChange`
+  # is Full sync and each one supersedes the last.
+  var pending: Option[(String, String)] = None
+  var running = true
+  while running {
+    # Three branches, and the third is what makes the second safe. Readiness
+    # never reports end of input (std/io.stdin_ready says why), so a loop that
+    # only ever waited on it would spin the moment its client went away. With
+    # nothing pending there is nothing to wait for and blocking is the right
+    # thing to do — and the blocking read is what reports end of input.
+    let take = match pending {
+      Some(_) -> io.stdin_ready(DEBOUNCE_MS)
+      None -> true
+    }
+    if take {
+      match read_message() {
+        Eof -> { running = false }
+        Message(msg) ->
+          match update_of(msg) {
+            Some(u) -> {
+              let (uri, text) = u
+              match pending {
+                Some(p0) -> {
+                  let (uri0, _) = p0
+                  if uri0 != uri { st = flush(st, pending) }
+                }
+                None -> ()
+              }
+              pending = Some((uri, text))
+            }
+            # Anything else may read the analysed program or write about it,
+            # so the deferred work has to have happened first. That is also
+            # why the deferral is not observable: every answer about a
+            # document passes this point.
+            None -> {
+              st = flush(st, pending)
+              pending = None
+              st = handle(st, msg)
+            }
+          }
+        # A bad frame is not end of input. This used to collapse into the same
+        # `None` as EOF, so one malformed message — a truncated header from a
+        # crashing client, a stray write into the pipe — made the server exit
+        # without a word, and the editor showed a language server that had simply
+        # stopped. JSON-RPC 2.0 §4.2 asks for an error response instead; the read
+        # is resynchronised on a frame boundary, so the session continues.
+        Malformed(code, why) -> {
+          st = flush(st, pending)
+          pending = None
+          send(jobj([("jsonrpc", JStr("2.0")), ("id", JNull),
+            ("error", jobj([("code", JInt(code)), ("message", JStr(why))]))]))
+        }
+      }
+    } else {
+      # The window elapsed with nothing arriving: the client has stopped
+      # typing, so analyse the newest text it sent.
+      st = flush(st, pending)
+      pending = None
+    }
+  }
+}
+
+## How long standard input must stay quiet before a pending edit is analysed.
+##
+## The wait happens inside `io.stdin_ready`, which sleeps rather than polls, so
+## a session that is merely idle costs nothing — scripts/lsp-liveness.py's
+## `idle` assertion measures exactly that, and its `debounce` assertion
+## measures the coalescing this number buys.
+##
+## 150 ms is the design's placeholder and has no measurement behind it yet
+## (docs/audit/lsp-robustness-design.md §六 step 4 is the job of finding one:
+## time `didChange` → published diagnostics while typing into selfhost's own
+## 31k lines). It is stated here rather than inlined so that step has one place
+## to land.
+const DEBOUNCE_MS: Int = 150
+
+## Run the analysis a document sync deferred, if there is one.
+fn flush(st: LspState, pending: Option[(String, String)]) -> LspState !io =
+  match pending {
+    Some(p) -> {
+      let (uri, text) = p
+      update_doc(st, uri, text)
+    }
+    None -> st
+  }
+
+## The (uri, text) a document-sync notification carries, or `None` when the
+## message is anything else.
+##
+## A sync notification with no text in it — `didChange` with an empty
+## `contentChanges` — is `None` too, and lands in `handle` where it has always
+## been ignored. There is nothing to defer about an update that carries no
+## document.
+fn update_of(msg: Json) -> Option[(String, String)] = {
+  let method = ostr(msg, "method")
+  let params = match oget(msg, "params") {
+    Some(j) -> j
+    None -> JNull
+  }
+  let td = get_or_null(params, "textDocument")
+  if method == "textDocument/didOpen" {
+    Some((ostr(td, "uri"), ostr(td, "text")))
+  } else if method == "textDocument/didChange" {
+    match oget(params, "contentChanges") {
+      Some(JArr(changes)) ->
+        match get(changes, 0) {
+          Some(c) -> Some((ostr(td, "uri"), ostr(c, "text")))
+          None -> None
+        }
+      _ -> None
+    }
+  } else {
+    None
+  }
+}
+
+## The outcome of one read: a message, clean end of input, or a frame that could
+## not be understood but left the stream positioned at the next one.
+type Frame = Eof | Message(value: Json) | Malformed(code: Int, why: String)
+
+## One framed message: headers to CRLFCRLF, then Content-Length bytes of JSON.
+fn read_message() -> Frame !io = {
+  var header: List[Int] = []
+  var state = 0
+  var eof = false
+  while state < 4 && not eof {
+    let one = io.read_stdin(1)
+    if bytes.len(one) == 0 {
+      eof = true
+    } else {
+      let b = bytes.at(one, 0)
+      header = header ++ [b]
+      # CR LF CR LF
+      if state == 0 && b == char.code('\r') {
+        state = 1
+      } else if state == 1 && b == char.code('\n') {
+        state = 2
+      } else if state == 2 && b == char.code('\r') {
+        state = 3
+      } else if state == 3 && b == char.code('\n') {
+        state = 4
+      } else {
+        state = if b == char.code('\r') { 1 } else { 0 }
+      }
+    }
+  }
+  if eof { return Eof }
+  # header bytes are ASCII, so each byte is its own code point
+  let htext = from_code_points(list.map(header, b => char_of_code(b)))
+  var clen = -1
+  for line in str.split(htext, "\n") {
+    let t = str.trim(line)
+    if str.starts_with(t, "Content-Length:") {
+      match parse_int(str.trim(str.strip_prefix(t, "Content-Length:").unwrap_or(t))) {
+        Some(n) -> { clen = n }
+        None -> ()
+      }
+    }
+  }
+  # No Content-Length: nothing to read for this frame, but the header block was
+  # consumed up to CRLFCRLF, so the stream is already at the next one.
+  if clen < 0 { return Malformed(-32600, "Invalid Request: missing Content-Length header") }
+  let body = io.read_stdin(clen)
+  # A short body is genuinely end of input — the declared bytes are not coming.
+  if bytes.len(body) < clen { return Eof }
+  match parser.parse(bytes.decode_utf8(body)) {
+    Ok(j) -> Message(j)
+    # exactly clen bytes were consumed, so the next frame starts where it should
+    Err(e) -> Malformed(-32700, "Parse error: " ++ e)
+  }
+}
+
+fn send(j: Json) -> Unit !io = {
+  let payload = render(j)
+  let n = bytes.len(bytes.utf8(payload))
+  print("Content-Length: " ++ to_string(n) ++ crlf() ++ crlf() ++ payload)
+}
+
+fn respond(id: Json, result: Json) -> Unit !io =
+  send(jobj([("jsonrpc", JStr("2.0")), ("id", echo_id(id)), ("result", result)]))
+
+fn notify(method: String, params: Json) -> Unit !io =
+  send(jobj([("jsonrpc", JStr("2.0")), ("method", JStr(method)), ("params", params)]))
+
+fn handle(st0: LspState, msg: Json) -> LspState !io = {
+  var st = st0
+  let method = ostr(msg, "method")
+  let id = match oget(msg, "id") {
+    Some(j) -> j
+    None -> JNull
+  }
+  let params = match oget(msg, "params") {
+    Some(j) -> j
+    None -> JNull
+  }
+  if method == "initialize" {
+    respond(id, jobj([("capabilities", jobj([
+      ("textDocumentSync", JInt(1)),
+      ("hoverProvider", JBool(true)),
+      ("completionProvider", jobj([
+        ("resolveProvider", JBool(false)),
+        ("triggerCharacters", JArr([JStr("!")]))
+      ])),
+      ("definitionProvider", JBool(true)),
+      ("documentSymbolProvider", JBool(true)),
+      ("documentFormattingProvider", JBool(true))
+    ]))]))
+  } else if method == "initialized" {
+    ()
+  } else if method == "textDocument/didOpen" || method == "textDocument/didChange" {
+    # `update_of` claimed every sync notification that carried a document, so
+    # what reaches here is one that carried none — nothing to analyse, which
+    # is what this arm did with it before the read loop debounced.
+    ()
+  } else if method == "textDocument/didClose" {
+    let td = get_or_null(params, "textDocument")
+    let uri = ostr(td, "uri")
+    st = LspState { ..st, docs: map.remove(st.docs, uri) }
+    notify("textDocument/publishDiagnostics",
+      jobj([("uri", JStr(uri)), ("diagnostics", JArr([]))]))
+  } else if method == "textDocument/didSave" {
+    ()
+  } else if method == "textDocument/completion" {
+    respond(id, handle_completion(st, params))
+  } else if method == "textDocument/hover" {
+    respond(id, handle_hover(st, params))
+  } else if method == "textDocument/definition" {
+    respond(id, handle_definition(st, params))
+  } else if method == "textDocument/documentSymbol" {
+    respond(id, handle_symbols(st, params))
+  } else if method == "textDocument/formatting" {
+    respond(id, handle_formatting(st, params))
+  } else if method == "shutdown" {
+    respond(id, JNull)
+  } else if method == "exit" {
+    io.exit(0)
+  } else {
+    # a request we do not implement: MethodNotFound; notifications are ignored
+    let has_id = match oget(msg, "id") {
+      Some(_) -> true
+      None -> false
+    }
+    if has_id {
+      send(jobj([("jsonrpc", JStr("2.0")), ("id", echo_id(id)),
+        ("error", jobj([
+          ("code", JInt(-32601)),
+          ("message", JStr("Unsupported request method: " ++ method))
+        ]))]))
+    }
+  }
+  st
+}
+
+fn get_or_null(j: Json, k: String) -> Json =
+  match oget(j, k) {
+    Some(v) -> v
+    None -> JNull
+  }
+
+# ---- document sync ----
+
+fn update_doc(st0: LspState, uri: String, text: String) -> LspState !io = {
+  var st = st0
+  let path = uri_to_path(uri)
+  let (prog, entry) = match path {
+    Some(p) -> analyze_document(p, text, st.std, ct_default(), st.jsig)
+    None -> (analyze_standalone("<lsp>", text, st.std, ct_default(), st.jsig), "main")
+  }
+  let d = Doc {
+    uri: uri,
+    path: path,
+    text: text,
+    view: view_of(text),
+    ls: line_starts_of(text),
+    prog: prog,
+    entry: entry
+  }
+  st = LspState { ..st, docs: map.insert(st.docs, uri, d) }
+  var diags: List[Json] = []
+  for dg in doc_diags(d) {
+    let message = if dg.hint != "" { dg.msg ++ "\nhint: " ++ dg.hint } else { dg.msg }
+    diags = diags ++ [jobj([
+      ("range", jrange(d.view, d.ls, dg.lo, dg.hi)),
+      ("severity", JInt(1)),
+      ("source", JStr("dawn")),
+      ("message", JStr(message))
+    ])]
+  }
+  notify("textDocument/publishDiagnostics",
+    jobj([("uri", JStr(uri)), ("diagnostics", JArr(diags))]))
+  st
+}
+
+fn doc_of(st: LspState, params: Json) -> Option[Doc] = {
+  let td = get_or_null(params, "textDocument")
+  map.get(st.docs, ostr(td, "uri"))
+}
+
+fn pos_offset(d: Doc, params: Json) -> Int = {
+  let p = get_or_null(params, "position")
+  lsp_offset(d.view, d.ls, oint(p, "line"), oint(p, "character"))
+}
+
+# ---- language features ----
+
+fn handle_completion(st: LspState, params: Json) -> Json !io = {
+  match doc_of(st, params) {
+    Some(d) ->
+      match doc_qcx(st, d) {
+        Some(qc) -> {
+          var items: List[Json] = []
+          for it in completions_at(qc, d.text, pos_offset(d, params)) {
+            var fields: List[(String, Json)] = [("label", JStr(it.label))]
+            fields = fields ++ [("kind", JInt(it.kind))]
+            match it.detail {
+              Some(dt) -> { fields = fields ++ [("detail", JStr(dt))] }
+              None -> ()
+            }
+            match it.sort_text {
+              Some(s2) -> { fields = fields ++ [("sortText", JStr(s2))] }
+              None -> ()
+            }
+            items = items ++ [jobj(fields)]
+          }
+          JArr(items)
+        }
+        None -> JArr([])
+      }
+    None -> JArr([])
+  }
+}
+
+fn handle_hover(st: LspState, params: Json) -> Json !io = {
+  match doc_of(st, params) {
+    Some(d) ->
+      match doc_qcx(st, d) {
+        Some(qc) ->
+          match find_target(qc, pos_offset(d, params)) {
+            Some(t) -> jobj([
+              ("contents", jobj([
+                ("kind", JStr("markdown")),
+                ("value", JStr("```dawn\n" ++ t.hover ++ "\n```"))
+              ])),
+              ("range", jrange(d.view, d.ls, t.lo, t.hi))
+            ])
+            None -> JNull
+          }
+        None -> JNull
+      }
+    None -> JNull
+  }
+}
+
+fn handle_definition(st: LspState, params: Json) -> Json !io = {
+  match doc_of(st, params) {
+    Some(d) ->
+      match doc_qcx(st, d) {
+        Some(qc) ->
+          match find_target(qc, pos_offset(d, params)) {
+            Some(t) ->
+              match t.def {
+                Some(sp) -> {
+                  let (dlo, dhi) = sp
+                  match location_of(st, d, t.def_path, dlo, dhi) {
+                    Some(loc) -> JArr([loc])
+                    None -> JArr([])
+                  }
+                }
+                None -> JArr([])
+              }
+            None -> JArr([])
+          }
+        None -> JArr([])
+      }
+    None -> JArr([])
+  }
+}
+
+## Resolve a definition site to a Location: a None def_path (or one naming the
+## requesting document) maps through the live buffer; another file maps
+## through its open buffer if the client has it open, else the text on disk.
+fn location_of(st: LspState, d: Doc, def_path: Option[String], lo: Int, hi: Int) -> Option[Json] !io = {
+  let same = match def_path {
+    None -> true
+    Some(dp) ->
+      match d.path {
+        Some(p) -> canon(dp) == canon(p)
+        None -> false
+      }
+  }
+  if same {
+    return Some(jobj([("uri", JStr(d.uri)), ("range", jrange(d.view, d.ls, lo, hi))]))
+  }
+  let dp = match def_path {
+    Some(p) -> p
+    None -> return None
+  }
+  let dc = canon(dp)
+  for pr in map.entries(st.docs) {
+    let (u2, d2) = pr
+    match d2.path {
+      Some(p2) ->
+        if canon(p2) == dc {
+          return Some(jobj([("uri", JStr(u2)), ("range", jrange(d2.view, d2.ls, lo, hi))]))
+        }
+      None -> ()
+    }
+  }
+  match io.read_file(dp) {
+    Ok(text) -> {
+      Some(jobj([
+        ("uri", JStr(path_to_uri(dp))),
+        ("range", jrange(view_of(text), line_starts_of(text), lo, hi))
+      ]))
+    }
+    Err(_) -> None
+  }
+}
+
+fn handle_symbols(st: LspState, params: Json) -> Json !io = {
+  match doc_of(st, params) {
+    Some(d) ->
+      match doc_qcx(st, d) {
+        Some(qc) -> {
+          var out: List[Json] = []
+          for dc in qc.entry.m.decls {
+            match decl_symbol(qc, d, dc) {
+              Some(j) -> { out = out ++ [j] }
+              None -> ()
+            }
+          }
+          JArr(out)
+        }
+        None -> JArr([])
+      }
+    None -> JArr([])
+  }
+}
+
+## One top-level declaration as a DocumentSymbol (Function=12, Class=5).
+fn decl_symbol(qc: QCx, d: Doc, dc: Decl) -> Option[Json] !io = {
+  let info: Option[(String, Bool, Int, Int, Int, Int)] = match dc {
+    DFn(f) -> Some((f.name, true, f.lo, f.hi, f.nlo, f.nhi))
+    DType(t) -> Some((t.name, false, t.lo, t.hi, t.nlo, t.nhi))
+    DConst(name, _, _, _, lo, hi, nlo, nhi) -> Some((name, false, lo, hi, nlo, nhi))
+    DTrait(name, _, _, _, _, _, _, lo, hi, nlo, nhi) -> Some((name, false, lo, hi, nlo, nhi))
+    DEffect(e) -> Some((e.name, false, e.lo, e.hi, e.nlo, e.nhi))
+    DImpl(_, trait_name, tlo, thi, _, _, _, lo, hi) -> Some((trait_name, false, lo, hi, tlo, thi))
+    DUseJava(fqcn, lo, hi, nlo, nhi) -> {
+      let simple = match str.last_index_of(fqcn, ".") {
+        Some(i) -> str.drop(fqcn, i + 1)
+        None -> fqcn
+      }
+      Some((simple, false, lo, hi, nlo, nhi))
+    }
+    DUseModule(segs, _, aname, lo, hi, nlo, nhi) -> {
+      let nm = match aname {
+        Some(a) -> a.name
+        None -> segs[len(segs) - 1]
+      }
+      Some((nm, false, lo, hi, nlo, nhi))
+    }
+    DTest(name, _, lo, hi, nlo, nhi) -> Some((name, false, lo, hi, nlo, nhi))
+  }
+  match info {
+    Some(k) -> {
+      let (name, is_fn, lo, hi, nlo, nhi) = k
+      var fields: List[(String, Json)] = [("name", JStr(name))]
+      if is_fn {
+        match map.get(qc.entry.cx.fns, name) {
+          Some(sig) -> {
+            fields = fields ++
+              [("detail", JStr(sig_render(qc.entry.cx.adts, qc.entry.cx.traits, sig)))]
+          }
+          None -> ()
+        }
+      }
+      fields = fields ++ [
+        ("kind", JInt(if is_fn { 12 } else { 5 })),
+        ("range", jrange(d.view, d.ls, lo, hi)),
+        ("selectionRange", jrange(d.view, d.ls, nlo, nhi))
+      ]
+      Some(jobj(fields))
+    }
+    None -> None
+  }
+}
+
+fn handle_formatting(st: LspState, params: Json) -> Json !io = {
+  match doc_of(st, params) {
+    Some(d) -> {
+      let formatted = fmt.format(d.text)
+      if formatted == d.text { return JArr([]) }
+      # replace the whole document (fmt only needs a successful lex, so this
+      # works on broken files too)
+      let lines = str.split(d.text, "\n")
+      let last = lines[len(lines) - 1]
+      JArr([jobj([
+        ("range", jobj([
+          ("start", jpos(0, 0)),
+          ("end", jpos(len(lines) - 1, utf16_len(last)))
+        ])),
+        ("newText", JStr(formatted))
+      ])])
+    }
+    None -> JArr([])
+  }
+}

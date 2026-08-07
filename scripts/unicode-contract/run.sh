@@ -25,15 +25,15 @@
 # same JDK -- the probe refuses a mismatched pair):
 #
 #   DAWN_UNICODE_EMIT=case  bin/dawn run scripts/unicode-contract/probe.dawn \
-#     > selfhost/src/case_table.dawn
+#     > selfhost/src/embed/unicode_case.dawn
 #   DAWN_UNICODE_EMIT=class bin/dawn run scripts/unicode-contract/probe.dawn \
-#     > selfhost/src/class_table.dawn
+#     > selfhost/src/embed/unicode_class.dawn
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 probe="$root/scripts/unicode-contract/probe.dawn"
 
-out="$(DAWN_UNICODE_DIR="$root/selfhost/src" "$root/bin/dawn" run "$probe")"
+out="$(DAWN_UNICODE_DIR="$root/selfhost/src/embed" "$root/bin/dawn" run "$probe")"
 
 if [ "$(printf '%s\n' "$out" | tail -n 1)" != "mismatches 0" ]; then
   printf '%s\n' "$out" >&2

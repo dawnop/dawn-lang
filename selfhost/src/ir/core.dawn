@@ -1,0 +1,481 @@
+# Core IR: the backend-neutral tree both codegens consume.
+#
+# See docs/native-backend-plan.md Phase 0. The checker already bakes the
+# backend-neutral semantics into TAST (trait dispatch as WitRef + dict_syms,
+# constructor layout as XCtor.slots, types as syms). What it does NOT do is
+# lower the sugar -- `for`/`match`/`?`/`!`/string interpolation survive into
+# emit.dawn and get inlined there, which is precisely the work a second
+# backend would otherwise repeat. Core is where that lowering lands once.
+#
+# What Core removes relative to TAST:
+#
+#   * `match`      -> explicit discriminant tests, field binds and a once-loop
+#                     (the decision tree is the crown jewel; it is written once)
+#   * `for`/`while`-> CSLoop plus explicit induction, break and continue
+#   * `?` / `!`    -> explicit tests against Option/Result constructors
+#   * interpolation-> explicit builder calls
+#   * boxing       -> explicit CBox / CUnbox nodes, decided during lowering
+#                     instead of recomputed at every argument position
+#   * intrinsics   -> one CIntrinsic node; each backend maps the name table
+#
+# What Core adds relative to TAST:
+#
+#   * CSDiscard    -- "evaluate this and drop the value". In TAST a discarded
+#                     value is implicit, which let the Phase -1 spike silently
+#                     drop a trailing println's side effect. Making it a node
+#                     means a backend cannot forget.
+#   * CDup/CSDrop -- reference-count operations, inserted by `rc.dawn` on the
+#                     way into the C backend and nowhere else: the JVM has a
+#                     collector, so counting there is pure overhead. The C
+#                     emitter turns them into dawn_dup/dawn_drop; the JVM
+#                     emitter walks past them.
+#
+# What Core deliberately keeps structured: blocks, `if`, and loops. Both
+# targets are structured (the JVM emitter builds labels anyway, C has native
+# loops), so flattening to a basic-block CFG would cost both backends work
+# and buy nothing at this stage.
+
+use check/tast.{TJavaCall}
+use check/types.{
+  Ty, TyInt, TyFloat, TyBool, TyString, TyUnit, TyNever, TyError, TyAdt,
+  TyVar, TyList, TyMap, TySet, TyArray, TyTuple, TyFn, TyBytes, TyJava, TyAssoc
+}
+
+## Where a call goes. Dawn is dictionary-passing, not monomorphising, so
+## these three cover every call form in the language.
+pub type CCallee =
+  # a statically known top-level function; owner is its module class name
+  | CDirect(owner: String, name: String)
+# a function value in a local (closure or fn-typed parameter)
+  | CDynamic(target: CExpr)
+# A trait method reached through a dictionary the caller forwarded. `idx` is
+# the method's slot in the trait's declaration order, `method` its name:
+# a table-based backend wants the index, a name-based one (the JVM, whose
+# dictionaries are interfaces) wants the name, and resolving both here means
+# neither backend consults the trait table.
+  | CMethod(dict: CExpr, trait_id: Int, method: String, idx: Int)
+# A devirtualised trait method: the witness was concrete, so the unique impl
+# is known statically and this is an ordinary direct call. Identity stays
+# structural -- (owner, trait, subject, method) -- because how that becomes a
+# symbol is each backend's mangling, not Core's business.
+# There used to be a `derived` flag here, for an impl the compiler generated
+# rather than the user writing it (`derive Ord`). It is gone because a derived
+# impl no longer produces a call to an impl at all: the compiler-written body
+# is lowered like any other relation the language defines, so what reaches a
+# backend is an ordinary CDirect.
+  | CImpl(owner: String, trait_id: Int, subject: Ty, method: String)
+# The trait's own default body, used when the impl does not provide the
+# method. It takes the dictionary as a trailing argument like any other
+# dictionary-passing call.
+  | CDefault(owner: String, trait_id: Int, method: String)
+
+## A `use java` call site. Everything describing the call -- the class, the
+## descriptor, the SAM conversions, the varargs split -- is a JVM-shaped fact
+## with nothing portable to lower it to, so the node keeps the checker's
+## TJavaCall verbatim for that. The receiver and the arguments are ordinary
+## Core expressions, though, which is what lets the JVM emitter stop walking
+## TAST entirely; `arg_tys` carries the static types the JVM's argument
+## adaptation needs, because `call.args` is no longer consulted.
+pub type CJava = {
+  call: TJavaCall,
+  target: Option[CExpr],
+  args: List[CExpr],
+  arg_tys: List[Ty]
+}
+
+pub type CExpr =
+  | CInt(v: Int)
+  | CFloat(v: Float)
+  | CBool(v: Bool)
+  | CStr(v: String)
+  | CUnit
+  | CLocal(sym: Int, ty: Ty)
+# a top-level function used as a value (already instantiated)
+  | CFnRef(owner: String, name: String, ty: Ty)
+  | CCall(callee: CCallee, args: List[CExpr], ty: Ty)
+# a runtime primitive: str_*, io_*, array_*, panic, ... Backends own the
+# name -> implementation table; Core owns only the name and the types.
+  | CIntrinsic(name: String, args: List[CExpr], ty: Ty)
+# build a constructor: args are in field order, already reordered from the
+# source's written order and spread base by lowering
+  | CCtor(adt: Int, ci: Int, args: List[CExpr], ty: Ty)
+# read field `idx` of constructor `ci`; the target is known to be that ctor
+  | CField(target: CExpr, adt: Int, ci: Int, idx: Int, ty: Ty)
+# discriminant test: is `target` built by constructor `ci`?
+  | CIsCtor(target: CExpr, adt: Int, ci: Int)
+# which constructor built `target`, as its declaration index. CIsCtor answers
+# "is it this one"; an ordering needs "which one", and asking that with a
+# chain of CIsCtor tests is quadratic in the constructor count.
+  | CTagOf(target: CExpr, adt: Int)
+# Allocate a closure: a reference to a lifted top-level function plus the
+# values of its captures, in the order that function declares them.
+  | CClosure(fn_name: String, owner: String, captures: List[CExpr], ty: Ty)
+# A reference to a statically built dictionary, by the key its CDictDef
+# carries. Only needed where a dictionary is passed as a value; a concrete
+# witness at a call site devirtualises to CImpl instead.
+# `key` names the CDictDef for a table-based backend; `trait_id`/`subject`
+# are the same identity for a backend whose dictionaries are types (the JVM
+# looks up an impl singleton). Both, for the same reason CMethod carries
+# both a slot index and a method name.
+  | CDictRef(key: String, trait_id: Int, subject: Ty, ty: Ty)
+# Build a dictionary whose subject is not ground, out of the dictionaries for
+# the subject's own type arguments (trait-v2-design §3.8). `Eq[Option[T]]`
+# cannot be a static singleton -- what it does depends on an `Eq[T]` only the
+# caller has -- so the dictionary is a value with arguments, and this is the
+# node that makes one. `key` names the same CDictDef CDictRef would name; the
+# difference is that that def carries `nargs > 0`.
+  | CDictApply(key: String, args: List[CExpr], ty: Ty)
+# Read argument `idx` back out of the dictionary a slot body was handed.
+# Every slot has the same signature (the trait method's parameters plus the
+# dictionary itself), so a parameterised dictionary reaches its arguments
+# through that trailing parameter rather than through extra ones -- which is
+# what keeps CMethod call sites uniform whether or not the callee happens to
+# be parameterised. `key` is the def whose shape `dict` has, so a backend
+# that types its dictionaries can name the field.
+  | CDictArg(dict: CExpr, owner: String, key: String, idx: Int, ty: Ty)
+  | CTuple(elems: List[CExpr], ty: Ty)
+  | CTupleGet(target: CExpr, idx: Int, ty: Ty)
+# erasure made explicit: CBox moves a value into a type-variable slot,
+# CUnbox takes it back out. Lowering decides these once, at the point where
+# the declared type is known, instead of every backend recomputing
+# "is the declared slot a TyVar" at every argument.
+  | CBox(inner: CExpr, from: Ty)
+  | CUnbox(inner: CExpr, to: Ty)
+  | CBinary(op: CBinOp, left: CExpr, right: CExpr, ty: Ty)
+  | CUnary(op: CUnOp, operand: CExpr, ty: Ty)
+  | CIf(cond: CExpr, thn: CExpr, els: Option[CExpr], ty: Ty)
+  | CBlock(stmts: List[CStmt], tail: Option[CExpr], ty: Ty)
+# a literal list/map/set, still a primitive at this stage; D2/D3 turn these
+# into ordinary constructor calls and this node goes away
+  | CListLit(elems: List[CExpr], ty: Ty)
+# A comptime-evaluated constant, by the name the checker recorded. The value
+# itself stays where the comptime interpreter put it; Core carries only the
+# reference, because materialising a value is backend-specific (the JVM
+# spills structures to static fields).
+# A folded constant. `owner` is "" when the reference was resolved in the
+# referring module's own view -- a local constant, or one a selective import
+# merged in under that name -- which is every constant a program could name
+# before LANG-06 step 3. It is the declaring module's path when the constant
+# was reached through a whole-module alias (`m.MAX`), because then the simple
+# name alone is ambiguous: the referring module may have a `MAX` of its own.
+  | CConstRef(owner: String, name: String, ty: Ty)
+# the value of a `comptime { ... }` block, keyed by its source span
+  | CComptime(lo: Int, hi: Int, ty: Ty)
+# jumps. `CBreak`/`CContinue` name their loop so lowering can nest freely.
+  | CReturn(v: Option[CExpr])
+  | CBreak(loop_id: Int)
+  | CContinue(loop_id: Int)
+# The JVM-only escape hatch. Quarantining it in one node is the point: the
+# native backend refuses this node, and `use c` will get its own, which the
+# JVM backend will refuse in turn.
+  | CForeign(j: CJava, ty: Ty)
+# Take a reference to `inner` and hand it back -- `dawn_dup` in the C runtime,
+# ignored by every other consumer. An expression rather than a statement
+# because what needs counting is often not a binding: `let y = p.x` hands over
+# a projection, and there is no symbol to name until after the let. Built only
+# by `rc.dawn` (docs/perceus-design.md 5).
+  | CDup(inner: CExpr, ty: Ty)
+
+pub type CStmt =
+  | CSLet(sym: Int, ty: Ty, init: CExpr)
+  | CSAssign(sym: Int, value: CExpr)
+# evaluate for effect, discard the value -- see the header
+  | CSDiscard(e: CExpr)
+# An unconditional loop; exits only through CBreak/CReturn. `for` and
+# `while` both lower to this, with their test made explicit as a break.
+#
+# `step` runs at the end of every iteration AND before a CContinue jumps
+# back -- exactly C's third for-clause. It exists because without it a
+# lowered `for` would have to put its increment at the bottom of the body,
+# where `continue` skips it and the loop never terminates. Making the step
+# a field of the node is what keeps that from being each backend's problem.
+  | CSLoop(loop_id: Int, body: CExpr, step: Option[CExpr])
+  | CSIf(cond: CExpr, thn: CExpr, els: Option[CExpr])
+# Release a reference at a scope's exit. A drop always names a binding, which
+# is why this one is a statement and takes a symbol -- unlike CDup, which has
+# to sit wherever a value is handed over. Built only by `rc.dawn`; the JVM
+# backend ignores it.
+  | CSDrop(sym: Int)
+
+pub type CBinOp =
+  | CAdd
+  | CSub
+  | CMul
+  | CDiv
+  | CMod
+  | CEq
+  | CNe
+  | CLt
+  | CLe
+  | CGt
+  | CGe
+  | CAnd
+  | COr
+  | CBand
+  | CBor
+  | CBxor
+  | CShl
+  | CShr
+  | CUshr
+# string concatenation; distinct from CAdd because the backends implement it
+# with a runtime call rather than an instruction
+  | CConcat
+
+pub type CUnOp =
+  | CNeg
+  | CNot
+  | CBnot
+
+## How a parameter is passed, for Perceus. Everything is marked Owned (the
+## conservative choice: the callee is responsible for the reference), and the
+## reuse analysis settled the other direction than this comment once
+## predicted: uniqueness needs *more* handing-over, not less, so knife 4
+## opened owned exceptions on the intrinsic table (`types.intr_owned_args`)
+## and `CBorrowed` has still never been constructed. It stays declared as the
+## slot a future borrowed convention would fill (a cross-module signature
+## table's business, docs/perceus-design.md 6).
+pub type CMode =
+  | COwned
+  | CBorrowed
+
+pub type CParam = { sym: Int, ty: Ty, mode: CMode }
+
+pub type CFun = {
+  name: String,
+  owner: String,
+  # Captured variables, for a function produced by lambda lifting. They are
+  # ordinary leading parameters as far as the body is concerned -- the body
+  # still refers to them by their original symbol ids, so lifting needs no
+  # substitution pass. Keeping them separate from `params` is what lets a
+  # backend build the adapter that unpacks a closure environment into them.
+  captures: List[CParam],
+  params: List[CParam],
+  # trait dictionaries, passed as hidden trailing parameters
+  dicts: List[CParam],
+  # effect evidence, passed as hidden trailing parameters *after* the
+  # dictionaries, one per declared effect in the signature and in effect-id
+  # order (docs/effects-design.md §5.2). Unlike a dictionary this is an
+  # ordinary counted value -- a record of closures over locals -- so it stays
+  # out of `dicts`, whose whole meaning is "outside the reference-count
+  # ledger".
+  evs: List[CParam],
+  ret: Ty,
+  body: CExpr,
+  is_test: Bool,
+  # set for impl method bodies and trait defaults, which the backends mangle
+  impl_of: Option[(Int, Ty)],
+  default_of: Option[Int]
+}
+
+## One statically built dictionary. `slots` is in the trait's declaration
+## order, already resolved between the impl's own method and the trait's
+## default.
+##
+## Every slot has ONE signature: the trait's generic one, plus the dictionary
+## as a trailing argument. A trait default already has that shape. An impl
+## method does not -- it takes concrete types and no dictionary -- so
+## lowering synthesises an ordinary top-level bridge and the slot names that.
+## The alternative, letting each backend generate the bridge, is how the JVM
+## backend does it today (a forwarding method on the impl singleton), and it
+## is exactly the sort of per-backend work Core exists to remove.
+pub type CDictSlot =
+  | CSlotFn(owner: String, name: String)
+  | CSlotDefault(owner: String, method: String)
+
+pub type CDictDef = {
+  key: String,
+  trait_id: Int,
+  subject: Ty,
+  # How many dictionaries this one is a function of. Zero -- every dictionary
+  # before trait v2 -- means it is a compile-time constant a backend may build
+  # once and share; anything else means CDictApply constructs it per use, and
+  # its slot bodies read those arguments back with CDictArg.
+  nargs: Int,
+  slots: List[CDictSlot]
+}
+
+## `next_sym` is the first symbol id nothing in this module uses. A pass that
+## has to name a value -- Perceus does, because a scope's drops only have a
+## place to stand once the block's tail is a binding -- would otherwise have to
+## rediscover it by walking every function, and lowering is the only thing that
+## actually knows.
+pub type CModule = { owner: String, fns: List[CFun], dicts: List[CDictDef], next_sym: Int }
+
+## A comptime value: a Core expression that has already been evaluated.
+## Function values may exist during evaluation but cannot be a result (the
+## checker enforces constant-serializability).
+##
+## It lives here rather than in `interp` because both backends read it -- a
+## folded const has to be emitted -- and `interp` is where comptime evaluation
+## of a *Java* call lives, which a backend with no host cannot have. Importing
+## the evaluator to name its result type is how `emitc`, of all modules, came
+## to depend on the one module that reaches for `java.lang.Long`.
+pub type CValue =
+  | VInt(v: Int)
+  | VFloat(v: Float)
+  | VBool(v: Bool)
+  | VStr(v: String)
+  | VUnit
+  | VList(elems: List[CValue])
+  | VTuple(elems: List[CValue])
+  | VAdt(adt: Int, ci: Int, fields: List[CValue])
+# Every function value has this one shape. Lambdas, local named functions,
+# top-level functions used as values, builtins used as values and bare
+# constructors are all lifted by lowering into a top-level function plus a
+# captured environment, so one case does what four used to.
+  | VClosure(owner: String, name: String, caps: Map[Int, CValue])
+# A trait dictionary, named by the key its CDictDef carries plus the
+# dictionaries it was built from (empty unless the impl behind it is
+# conditional). Comptime dispatches through this: the key finds the slot table
+# and `args` is what a slot body reads back out.
+  | VDict(key: String, args: List[CValue])
+
+# ---- naming ----
+
+## A spelling of a type usable inside a symbol name. It lives here rather
+## than in either backend because lowering names dictionaries with it and
+## both backends name impl methods with it: three producers, one definition,
+## so they cannot drift into naming the same impl two different things.
+pub fn ty_key(t: Ty) -> String =
+  match t {
+    TyInt -> "Int"
+    TyFloat -> "Float"
+    TyBool -> "Bool"
+    TyString -> "String"
+    TyBytes -> "Bytes"
+    TyUnit -> "Unit"
+    TyNever -> "Never"
+    TyError -> "Error"
+    TyAdt(id, _) -> "Adt" ++ to_string(id)
+    # the id alone is not enough: two instantiations of one opaque type share
+    # it, and an impl at each has to get its own name
+    TyOpaque(id, _, _, tgt) -> "Op" ++ to_string(id) ++ "_" ++ ty_key(tgt)
+    TyVar(_, id) -> "Var" ++ to_string(id)
+    # never a key: reduction is eager and projections cannot be impl subjects,
+    # so a projection reaching a symbol name is a compiler bug, not a program
+    TyAssoc(_, _, _) -> panic("unreduced projection in ty_key")
+    TyList(e) -> "List_" ++ ty_key(e)
+    TyMap(k, v) -> "Map_" ++ ty_key(k) ++ "_" ++ ty_key(v)
+    TySet(e) -> "Set_" ++ ty_key(e)
+    TyArray(e) -> "Array_" ++ ty_key(e)
+    TyTuple(es) -> "Tup" ++ to_string(len(es))
+    TyFn(ps, _, _) -> "Fn" ++ to_string(len(ps))
+    TyJava(_, _) -> "Java"
+  }
+
+## The name an impl's subject contributes to the symbol it compiles to.
+##
+## An impl is named by its subject's *head*: coherence gives a head at most one
+## impl, so `List[Int]` and `List[T]` are the same impl and have to spell the
+## same name. `ty_key` keeps a container's element -- harmless while every impl
+## subject was concrete, which its own comment says it assumed, and wrong from
+## the moment std wrote `impl[T: Show] Show[List[T]]`: the call site knows
+## `List[Int]` and the definition knows `List[T]`.
+##
+## The JVM backend answers the same question with `codegen.subject_name`, which
+## spells an ADT with its declared name because a JVM method name is read by
+## people. Dropping the arguments is the part that is the rule, and
+## codegen's test "an impl is named by its head" holds the two to it.
+pub fn subject_key(t: Ty) -> String =
+  match t {
+    TyList(_) -> "List"
+    TyMap(_, _) -> "Map"
+    TySet(_) -> "Set"
+    TyArray(_) -> "Array"
+    TyOpaque(id, _, _, tgt) -> "Op" ++ to_string(id) ++ "_" ++ subject_key(tgt)
+    _ -> ty_key(t)
+  }
+
+## The same spelling, but injective over *instantiated* types.
+##
+## `ty_key` may drop type arguments because everything it names is a v1 impl
+## subject, and those are non-generic. Lowering's synthesised structural
+## comparisons are not: there is one per instantiated type, and `Option[Int]`
+## sharing a name with `Option[String]` is not a link error, it is a wrong
+## answer that runs -- the first body built wins and casts the other's fields
+## to the wrong class.
+##
+## `ty_key` stays lossy on purpose: widening it would rename every emitted
+## impl method for no gain.
+pub fn ty_key_inst(t: Ty) -> String =
+  match t {
+    TyAdt(id, args) -> "Adt" ++ to_string(id) ++ args_key(args)
+    TyTuple(es) -> "Tup" ++ to_string(len(es)) ++ args_key(es)
+    TyList(e) -> "List_" ++ ty_key_inst(e)
+    TyMap(k, v) -> "Map_" ++ ty_key_inst(k) ++ "_" ++ ty_key_inst(v)
+    TySet(e) -> "Set_" ++ ty_key_inst(e)
+    TyArray(e) -> "Array_" ++ ty_key_inst(e)
+    TyFn(ps, r, _) -> "Fn" ++ to_string(len(ps)) ++ args_key(ps) ++ "_r" ++ ty_key_inst(r)
+    _ -> ty_key(t)
+  }
+
+fn args_key(ts: List[Ty]) -> String = {
+  if len(ts) == 0 {
+    return ""
+  }
+  var s = "\$of"
+  for t in ts {
+    s = s ++ "\$" ++ ty_key_inst(t)
+  }
+  s
+}
+
+# ---- accessors ----
+
+pub fn cex_ty(e: CExpr) -> Ty =
+  match e {
+    CInt(_) -> TyInt
+    CFloat(_) -> TyFloat
+    CBool(_) -> TyBool
+    CStr(_) -> TyString
+    CUnit -> TyUnit
+    CLocal(_, ty) -> ty
+    CFnRef(_, _, ty) -> ty
+    CCall(_, _, ty) -> ty
+    CIntrinsic(_, _, ty) -> ty
+    CCtor(_, _, _, ty) -> ty
+    CField(_, _, _, _, ty) -> ty
+    CIsCtor(_, _, _) -> TyBool
+    CTagOf(_, _) -> TyInt
+    CClosure(_, _, _, ty) -> ty
+    CDictRef(_, _, _, ty) -> ty
+    CDictApply(_, _, ty) -> ty
+    CDictArg(_, _, _, _, ty) -> ty
+    CTuple(_, ty) -> ty
+    CTupleGet(_, _, ty) -> ty
+    CBox(_, _) -> TyError
+    CUnbox(_, to) -> to
+    CBinary(_, _, _, ty) -> ty
+    CUnary(_, _, ty) -> ty
+    CIf(_, _, _, ty) -> ty
+    CBlock(_, _, ty) -> ty
+    CListLit(_, ty) -> ty
+    CConstRef(_, _, ty) -> ty
+    CComptime(_, _, ty) -> ty
+    CReturn(_) -> TyNever
+    CBreak(_) -> TyNever
+    CContinue(_) -> TyNever
+    CForeign(_, ty) -> ty
+    CDup(_, ty) -> ty
+  }
+
+## Whether evaluating this expression can transfer control away (return,
+## break, continue, or a panic that both backends implement as a jump).
+## Backends use it to decide whether code after it is reachable.
+pub fn diverges(e: CExpr) -> Bool =
+  match e {
+    CReturn(_) -> true
+    CBreak(_) -> true
+    CContinue(_) -> true
+    CBlock(_, tail, _) ->
+      match tail {
+        Some(t) -> diverges(t)
+        None -> false
+      }
+    CIf(_, thn, els, _) ->
+      match els {
+        Some(e2) -> diverges(thn) && diverges(e2)
+        None -> false
+      }
+    _ -> false
+  }

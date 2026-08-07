@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate selfhost/src/rtsrc.dawn from runtime/c/.
+"""Generate selfhost/src/embed/rtsrc.dawn from runtime/c/.
 
 The native driver's `build` writes the C runtime next to the C it emits and
 hands both to cc, so a standalone native toolchain needs the runtime the same
@@ -20,7 +20,7 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 RT = ROOT / "runtime" / "c"
-OUT = ROOT / "selfhost" / "src" / "rtsrc.dawn"
+OUT = ROOT / "selfhost" / "src" / "embed" / "rtsrc.dawn"
 FILES = ["dawn_rt.c", "dawn_rt.h"]
 LIMIT = 60000
 

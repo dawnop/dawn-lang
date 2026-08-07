@@ -1,0 +1,2494 @@
+# The checker's registration passes, in Dawn: the twelve passes that walk a
+# module's declarations before a single body is checked, and the helpers only
+# they call.
+#
+# The middle layer of the checker's module DAG (docs/arch-split-design.md
+# §2.1): above cx.dawn, below checker.dawn. The cut is the call graph's own --
+# the transitive closure of the twelve passes and the closure of body checking
+# meet only in the helpers cx.dawn already holds. checker.dawn still calls down
+# here (check_module runs the passes in order); nothing here calls back up.
+
+use std/str
+use std/list
+use std/map
+use std/set
+
+use front/ast.{
+  TypeRef, TNamed, TQual, TAssoc, TTuple, TFn, Bound, TypeParamDecl, Module,
+  module_java_uses, module_fns, module_types, module_consts, module_traits,
+  module_impls, module_uses, DType, TypeDeclR, CtorDecl, FieldDecl, DTrait, TraitMethod,
+  Param, Expr, Decl, DImpl, FnDecl, EBool, DFn, EVar, DConst, EInt, module_effects
+}
+
+use check/types.{
+  Ty, TyInt, TyFloat, TyBool, TyBytes, TyUnit, TyError, TyVar, TyAssoc, TyAdt, TyList,
+  TyMap, TySet, TyArray, TyTuple, TyFn, TyOpaque, Eff, EPure, EIo, ELabeled,
+  eff_subsumes, eff_suffix, eff_labels, EffectI, ev_record_name, AdtI, CtorI, FieldI,
+  TraitI, ImplI, Sig, MethodSig, adt_of, trait_of, ty_show, sig_render, subst,
+  reduce_via_bindings, ty_named, peel_opaque, prelude_impls, prelude_trait_ids,
+  prelude_trait_names, is_prelude_trait_name, OPTION_ID, RESULT_ID, FOREIGN_ERROR_ID,
+  ORD_ID, EQ_ID, HASH_ID, SHOW_ID, eq_scalars, hash_scalars, Head, head_of, impl_at,
+  has_impl_at, insert_impl, type_args_of, sub_goals
+}
+
+use check/cx.{
+  AliasE, Cx, ModExports, Origin, OPrelude, OImport, OLocal, cx_new, test_cx, cerr,
+  cerr_h, cerr_o, fresh, alias_shadow, effect_of, resolve_eff_at, resolve_alias_target,
+  resolve_type, is_const_serializable, no_sig
+}
+
+use front/suggest
+
+# ---- fresh ids ----
+
+pub fn fresh_tvar(cx: Cx, name: String) -> (Cx, Ty) = {
+  let (cx1, id) = fresh(cx)
+  (cx1, TyVar(name, id))
+}
+
+# ---- clashes between a declaration and an import ----
+
+## Was a top-level name already shadowing an alias / clashing with an import?
+pub fn alias_shadows(cx: Cx, name: String) -> Bool = map.has(cx.module_aliases, name)
+
+pub fn import_clash(cx: Cx, name: String, lo: Int, hi: Int, kind: String) -> Cx =
+  match map.get(cx.imported_names, name) {
+    None -> cx
+    Some(from) -> cerr_h(cx, kind ++ " `" ++ name ++ "` conflicts with a name imported from `" ++
+        from ++ "`", lo, hi, "drop the import or rename this " ++ kind)
+  }
+
+pub fn import_clashes(cx: Cx, name: String) -> Bool = map.has(cx.imported_names, name)
+
+# ---- the function namespace ----
+
+## The effect an operation belongs to, by name. `None` for anything that is not
+## an operation, which is what the "imported more than once" hint keys off.
+fn op_effect(cx: Cx, s: Option[Sig]) -> Option[String] =
+  match s {
+    Some(sg) ->
+      match sg.op_of {
+        Some(pair) -> {
+          let (eid, _) = pair
+          match map.get(cx.effect_infos, eid) {
+            Some(e) -> Some(e.name)
+            None -> None
+          }
+        }
+        None -> None
+      }
+    None -> None
+  }
+
+## The default alias of a module path: its last segment, which is what a plain
+## `use a/b` binds (ast.dawn's module_uses).
+fn mod_alias(path: String) -> String = {
+  let segs = str.split(path, "/")
+  segs[len(segs) - 1]
+}
+
+## Did `name` reach this module as an effect operation riding on `use m.{E}`
+## rather than being spelled in the `use` list itself?
+fn rode_in_as_op(cx: Cx, name: String, from: String) -> Bool =
+  map.get(cx.fn_origin, name) == Some(OImport(from)) &&
+  op_effect(cx, map.get(cx.fns, name)) != None
+
+## Two `use` lines brought the same name. An operation gets a pointed hint: it
+## was never spelled in either `use` list, it rode in on an effect, so the bare
+## message leaves the author hunting for a line that says `ask`.
+fn import_dup(
+  cx: Cx,
+  name: String,
+  prev_from: String,
+  from: String,
+  incoming: Option[Sig],
+  lo: Int,
+  hi: Int
+) -> Cx = {
+  let msg = "`" ++ name ++ "` is imported more than once (from `" ++ prev_from ++
+    "` and `" ++ from ++ "`)"
+  let a = op_effect(cx, map.get(cx.fns, name))
+  let b = op_effect(cx, incoming)
+  let owner = match a {
+    Some(x) ->
+      match b {
+        Some(y) -> "an operation of both `" ++ x ++ "` and `" ++ y ++ "`"
+        None -> "an operation of `" ++ x ++ "`"
+      }
+    None ->
+      match b {
+        Some(y) -> "an operation of `" ++ y ++ "`"
+        None -> ""
+      }
+  }
+  if owner == "" { return cerr(cx, msg, lo, hi) }
+  cerr_h(cx, msg, lo, hi, "`" ++ name ++ "` is " ++ owner ++ "; import one, or qualify it as `" ++
+      mod_alias(prev_from) ++ "." ++ name ++ "(...)`")
+}
+
+## "This name is already taken in this module." Three declaration sites used to
+## spell three variants of one rule; which wording applies depends on what is
+## being declared and on what is already bound. Only a local declaration can be
+## the "already": a prelude method is shadowed, not collided with, so `prev`
+## here is never a prelude trait's method.
+fn redeclared(cx: Cx, name: String, kind: String, lo: Int, hi: Int) -> Cx = {
+  if kind == "operation" {
+    return cerr_h(cx, "operation `" ++ name ++ "` is already a function in this module",
+      lo, hi, "operations and functions share one namespace; rename one")
+  }
+  let prev = map.get(cx.fns, name).expect("a bound name has a signature")
+  match prev.trait_id {
+    Some(ptid) -> cerr(cx, "`" ++ name ++ "` is already a method of trait `" ++
+        trait_of(cx.traits, ptid).name ++ "` (trait methods share the function namespace)", lo, hi)
+    None ->
+      if kind == "trait method" {
+        cerr(cx, "trait method `" ++ name ++ "` collides with a function of the same name", lo, hi)
+      } else {
+        cerr(cx, "function `" ++ name ++ "` is defined twice", lo, hi)
+      }
+  }
+}
+
+fn bind_raw(cx: Cx, name: String, sig: Sig, org: Origin) -> Cx =
+  Cx {
+    ..cx,
+    fns: map.insert(cx.fns, name, sig),
+    fn_origin: map.insert(cx.fn_origin, name, org)
+  }
+
+fn bind_import(cx: Cx, name: String, sig: Sig, from: String, lo: Int, hi: Int) -> Cx = {
+  if alias_shadows(cx, name) { return alias_shadow(cx, name, lo, hi) }
+  match map.get(cx.fn_origin, name) {
+    None -> bind_raw(cx, name, sig, OImport(from))
+    Some(prev) ->
+      match prev {
+        # a selective import may shadow a prelude name (spec §10.3)
+        OPrelude -> bind_raw(cx, name, sig, OImport(from))
+        OImport(pf) ->
+          # the same name from the same module is redundant, not ambiguous:
+          # `use m.{E, op}` spells an operation that `use m.{E}` already brought
+          if pf == from && map.get(cx.fns, name) == Some(sig) {
+            bind_raw(cx, name, sig, OImport(from))
+          } else {
+            import_dup(cx, name, pf, from, Some(sig), lo, hi)
+          }
+        # imports are resolved before any local declaration is registered
+        OLocal(_) -> panic("bind_fn: `${name}` imported after a local declaration")
+      }
+  }
+}
+
+fn bind_local(cx: Cx, name: String, sig: Sig, kind: String, lo: Int, hi: Int) -> Cx = {
+  if alias_shadows(cx, name) { return alias_shadow(cx, name, lo, hi) }
+  # a name imported into any namespace, not only this one, is a clash
+  if import_clashes(cx, name) { return import_clash(cx, name, lo, hi, kind) }
+  match map.get(cx.fn_origin, name) {
+    None -> bind_raw(cx, name, sig, OLocal(kind))
+    Some(prev) ->
+      match prev {
+        # an imported operation is registered in imported_names too, so the
+        # check above answers this first; the arm keeps the rule whole
+        OImport(pf) -> cerr_h(cx, kind ++ " `" ++ name ++ "` conflicts with a name imported from `" ++
+            pf ++ "`", lo, hi, "drop the import or rename this " ++ kind)
+        # a declaration shadows a prelude trait method exactly as it shadows a
+        # builtin or a std function: silently, and only in this module. The
+        # trait itself is untouched -- operators and sugar reach an impl by
+        # trait id, never through this table (design D1, D3, §4.4)
+        OPrelude -> bind_raw(cx, name, sig, OLocal(kind))
+        OLocal(_) -> redeclared(cx, name, kind, lo, hi)
+      }
+  }
+}
+
+## The one door into the module's function namespace, in place of six write
+## sites that each had their own idea of what to check first. The rule reads
+## the two origins and nothing else:
+##
+##   existing \ incoming    OImport                   OLocal
+##   (none)                 bind                      bind
+##   OPrelude               shadow, silently          shadow, silently
+##   OImport                imported more than once   conflicts with an import
+##   OLocal                 unreachable (pass order)  defined twice / a method
+##
+## `OPrelude` only ever arrives while the table is still empty, so its row of
+## the incoming axis needs no case of its own.
+##
+## The `OPrelude` row is why adding a name to the prelude cannot break a
+## program that checks today: the new name is either unused or shadowed.
+pub fn bind_fn(cx: Cx, name: String, sig: Sig, org: Origin, lo: Int, hi: Int) -> Cx =
+  match org {
+    OPrelude -> bind_raw(cx, name, sig, org)
+    OImport(from) -> bind_import(cx, name, sig, from, lo, hi)
+    OLocal(kind) -> bind_local(cx, name, sig, kind, lo, hi)
+  }
+
+# ---- signature labels ----
+
+## The first declared effect a resolved signature carries anywhere inside it,
+## or "". Trait and impl methods use it the way `leaked` is used for effect
+## variables: the two are refused in the same positions, for the same reason.
+fn sig_label(ptys: List[Ty], ret: Ty) -> String = {
+  for t in ptys ++ [ret] {
+    let n = ty_label(t)
+    if n != "" { return n }
+  }
+  ""
+}
+
+fn ty_label(t: Ty) -> String =
+  match t {
+    TyFn(ps, r, ef) -> {
+      for l in eff_labels(ef) {
+        let (_, n) = l
+        return n
+      }
+      sig_label_ty(ps ++ [r])
+    }
+    TyList(e) -> ty_label(e)
+    TySet(e) -> ty_label(e)
+    TyArray(e) -> ty_label(e)
+    TyMap(k, v) -> sig_label_ty([k, v])
+    TyTuple(es) -> sig_label_ty(es)
+    TyAdt(_, args) -> sig_label_ty(args)
+    TyOpaque(_, _, _, tgt) -> ty_label(tgt)
+    _ -> ""
+  }
+
+fn sig_label_ty(ts: List[Ty]) -> String = {
+  for t in ts {
+    let n = ty_label(t)
+    if n != "" { return n }
+  }
+  ""
+}
+
+# ---- declaration-site type checks ----
+
+## The span of the first effect variable inside a type reference, if any.
+pub fn effvar_span(ref: TypeRef) -> Option[(Int, Int)] =
+  match ref {
+    TAssoc(_, _, _, _) -> None
+    TFn(params, ret, effs, lo, hi) -> {
+      for a in effs {
+        if a != "io" { return Some((lo, hi)) }
+      }
+      for p in params {
+        match effvar_span(p) {
+          Some(s) -> return Some(s)
+          None -> ()
+        }
+      }
+      effvar_span(ret)
+    }
+    TTuple(elems, _, _) -> {
+      for e in elems {
+        match effvar_span(e) {
+          Some(s) -> return Some(s)
+          None -> ()
+        }
+      }
+      None
+    }
+    TQual(_, _, targs, _, _) -> {
+      for e in targs {
+        match effvar_span(e) {
+          Some(s) -> return Some(s)
+          None -> ()
+        }
+      }
+      None
+    }
+    TNamed(_, targs, _, _) -> {
+      for e in targs {
+        match effvar_span(e) {
+          Some(s) -> return Some(s)
+          None -> ()
+        }
+      }
+      None
+    }
+  }
+
+## Effect variables are only introduced by function signatures (spec §6.3);
+## in a type declaration -- an alias target or a record/variant constructor
+## field -- `!e` would have no binder, so both positions refuse it with the
+## same words. True in the result means the reference was refused.
+pub fn refuse_decl_effvar(cx: Cx, ref: TypeRef) -> (Cx, Bool) =
+  match effvar_span(ref) {
+    Some(sp) -> {
+      let (lo, hi) = sp
+      (cerr_h(cx, "a type declaration cannot carry effect variables", lo, hi,
+        "write !io, or leave the function type pure"), true)
+    }
+    None -> (cx, false)
+  }
+
+fn t_lo2(t: TypeRef) -> Int =
+  match t {
+    TNamed(_, _, lo, _) -> lo
+    TQual(_, _, _, lo, _) -> lo
+    TAssoc(_, _, lo, _) -> lo
+    TTuple(_, lo, _) -> lo
+    TFn(_, _, _, lo, _) -> lo
+  }
+
+fn t_hi2(t: TypeRef) -> Int =
+  match t {
+    TNamed(_, _, _, hi) -> hi
+    TQual(_, _, _, _, hi) -> hi
+    TAssoc(_, _, _, hi) -> hi
+    TTuple(_, _, hi) -> hi
+    TFn(_, _, _, _, hi) -> hi
+  }
+
+## Can a field of a `derive`d impl carry that capability?
+##
+## The impl table answers, rather than a hand-written walk over the type: the
+## derived impl carries `[T: tid]` for each of the type's own parameters, so a
+## field at one of them is covered by whatever instantiates it, and everything
+## else needs a real impl -- possibly a conditional one, whose own bounds this
+## asks about in turn. A tuple has no head to name an impl with, so it is the
+## one shape the compiler still answers for itself (trait-v2-design decision 7).
+fn derived_field_ok(cx: Cx, tid: Int, own: List[Ty], t: Ty) -> Bool =
+  match t {
+    TyVar(_, vid) -> {
+      for o in own {
+        match o {
+          TyVar(_, ovid) -> if ovid == vid { return true }
+          _ -> ()
+        }
+      }
+      false
+    }
+    _ ->
+      match impl_at(cx.impl_table, tid, t) {
+        Some(imp) ->
+          if len(imp.tparams) == 0 {
+            true
+          } else {
+            for g in sub_goals(cx.impl_table, tid, t) {
+              let (_, gty) = g
+              if not derived_field_ok(cx, tid, own, gty) { return false }
+            }
+            true
+          }
+        None ->
+          match t {
+            TyTuple(es) -> {
+              for e in es {
+                if not derived_field_ok(cx, tid, own, e) { return false }
+              }
+              true
+            }
+            # Whether a field can be rendered or ordered is a question about
+            # the value, and an opaque type's value is its target's (spec
+            # 2.7). Below the `impl_at` above, so an `impl Show[Id]` still
+            # answers for the wrapper first.
+            TyOpaque(_, _, _, tgt) -> derived_field_ok(cx, tid, own, tgt)
+            _ -> false
+          }
+      }
+  }
+
+# ---- declaration passes ----
+
+## Pass 0 (the top of the Kotlin check()): prelude ADTs with their constructors,
+## prelude traits with their methods in the fn namespace, prelude Ord impls.
+pub fn seed_prelude(cx: Cx) -> Cx = {
+  var cx1 = cx
+  # Option/Result/ForeignError and their constructors
+  var abn = cx1.adts_by_name
+  var cbn = cx1.ctors_by_name
+  for aid in [OPTION_ID, RESULT_ID, FOREIGN_ERROR_ID] {
+    let a = adt_of(cx1.adts, aid)
+    abn = map.insert(abn, a.name, aid)
+    var i = 0
+    for c in a.ctors {
+      cbn = map.insert(cbn, c.name, (aid, i))
+      i = i + 1
+    }
+  }
+  var tbn = cx1.traits_by_name
+  for tid in prelude_trait_ids() {
+    tbn = map.insert(tbn, trait_of(cx1.traits, tid).name, tid)
+  }
+  # prelude impls over the native scalars
+  var it = cx1.impl_table
+  for i in prelude_impls() { it = insert_impl(it, i) }
+  var cx2 = Cx {
+    ..cx1,
+    adts_by_name: abn,
+    ctors_by_name: cbn,
+    traits_by_name: tbn,
+    impl_table: it
+  }
+  # prelude traits: methods enter the fn namespace. Nothing is bound yet, so
+  # this is the one caller of bind_fn that cannot collide (design §4.1).
+  for tid in prelude_trait_ids() {
+    let tr = trait_of(cx2.traits, tid)
+    if tr.injects {
+      for entry in tr.methods {
+        let (mname, ms) = entry
+        cx2 = bind_fn(cx2, mname, ms.sig, OPrelude, 0, 0)
+      }
+    }
+  }
+  cx2
+}
+
+## Pass 0.5: `use java` imports, resolved against the host's signature oracle
+## (spec §9). A driver that wired no oracle refuses the declaration here, and
+## that one refusal covers everything downstream: no import resolves, so no
+## Java type ever enters the module and no other oracle query can be reached.
+pub fn pass_java_uses(cx: Cx, m: Module) -> Cx !io = {
+  var cx1 = cx
+  for d in module_java_uses(m) {
+    if not cx1.jsig.on {
+      cx1 = cerr_h(cx1, "`use java` is not available in this compiler", d.nlo, d.nhi,
+        "Java interop needs a JVM host with a class path to resolve `" ++ d.fqcn ++
+          "` against; this build has none")
+      continue
+    }
+    match cx1.jsig.find_class(d.fqcn) {
+      None -> {
+        cx1 = cerr_h(cx1, "Java class not found: " ++ d.fqcn, d.nlo, d.nhi,
+          "the JDK is always visible; third-party jars must be passed with --cp <jars>")
+      }
+      Some(j) -> {
+        if map.has(cx1.java_classes, d.simple) {
+          cx1 = cerr(cx1, "`" ++ d.simple ++ "` is already imported", d.nlo, d.nhi)
+        } else {
+          cx1 = Cx { ..cx1, java_classes: map.insert(cx1.java_classes, d.simple, j.fqcn) }
+        }
+      }
+    }
+  }
+  cx1
+}
+
+test "prelude seeding wires names to ids" {
+  let cx = seed_prelude(test_cx())
+  assert map.get(cx.adts_by_name, "Option") == Some(OPTION_ID)
+  assert map.get(cx.ctors_by_name, "Ok") == Some((RESULT_ID, 0))
+  assert map.get(cx.ctors_by_name, "None") == Some((OPTION_ID, 1))
+  assert map.get(cx.traits_by_name, "Ord") == Some(ORD_ID)
+  assert map.has(cx.fns, "cmp")
+  assert has_impl_at(cx.impl_table, ORD_ID, TyInt)
+  assert not has_impl_at(cx.impl_table, ORD_ID, TyBool)
+  # Eq/Hash/Show ride the same rail, each over its own list of scalars: the
+  # three differ, and each difference is a decision rather than an oversight
+  assert map.get(cx.traits_by_name, "Eq") == Some(EQ_ID)
+  assert map.get(cx.traits_by_name, "Hash") == Some(HASH_ID)
+  assert map.get(cx.traits_by_name, "Show") == Some(SHOW_ID)
+  assert map.has(cx.fns, "eq")
+  assert map.has(cx.fns, "hash")
+  assert map.has(cx.fns, "show")
+  for t in eq_scalars() {
+    assert has_impl_at(cx.impl_table, EQ_ID, t)
+  }
+  for t in hash_scalars() {
+    assert has_impl_at(cx.impl_table, HASH_ID, t)
+  }
+  assert not has_impl_at(cx.impl_table, ORD_ID, TyBytes)
+  # Float compares but does not order and does not hash (spec 4.3)
+  assert has_impl_at(cx.impl_table, EQ_ID, TyFloat)
+  assert not has_impl_at(cx.impl_table, ORD_ID, TyFloat)
+  assert not has_impl_at(cx.impl_table, HASH_ID, TyFloat)
+}
+
+## What pass 1 learned about one `type` declaration, for pass 2 to finish.
+## `accepted` maps parsed-ctor index → ctor slot in the ADT; `first_ok`
+## reproduces the Kotlin quirk that pass 2's tparam scope comes from the
+## FIRST parsed constructor's acceptance.
+pub type Shell = { adt: Int, accepted: List[(Int, Int)], first_ok: Bool }
+
+fn no_shell() -> Option[Shell] = None
+
+fn no_fields() -> List[FieldDecl] = []
+
+fn no_params() -> List[Param] = []
+
+fn no_tparams() -> List[TypeParamDecl] = []
+
+fn no_effs() -> List[String] = []
+
+fn no_fn_decls() -> List[FnDecl] = []
+
+fn no_params2() -> List[Param] = no_params()
+
+fn no_body() -> Option[Expr] = None
+
+fn dup_names(names: List[String]) -> Bool = {
+  var seen: Set[String] = set.empty()
+  for n in names {
+    if set.has(seen, n) { return true }
+    seen = set.insert(seen, n)
+  }
+  false
+}
+
+## Pass 1: type headers (shells only), so recursive types resolve. Returns one
+## Option[Shell] per module type declaration, aligned by index.
+pub fn pass_type_shells(cx: Cx, m: Module) -> (Cx, List[Option[Shell]]) = {
+  var cx1 = cx
+  var shells: List[Option[Shell]] = []
+  for d in module_types(m) {
+    if map.has(cx1.java_classes, d.name) {
+      cx1 = cerr(cx1, "`" ++ d.name ++ "` collides with an imported Java class", d.nlo, d.nhi)
+      shells = shells ++ [no_shell()]
+      continue
+    }
+    if alias_shadows(cx1, d.name) {
+      cx1 = alias_shadow(cx1, d.name, d.nlo, d.nhi)
+      shells = shells ++ [no_shell()]
+      continue
+    }
+    if import_clashes(cx1, d.name) {
+      cx1 = import_clash(cx1, d.name, d.nlo, d.nhi, "type")
+      shells = shells ++ [no_shell()]
+      continue
+    }
+    # `Array` is a builtin only inside std -- resolve_type gates that name on
+    # is_std_module -- so only there is redeclaring it a collision. Outside std
+    # a user type called `Array` is their own, which is the point of the gate.
+    let is_builtin_name = match ty_named(d.name) {
+      Some(_) -> true
+      None -> d.name == "List" || d.name == "Map" || d.name == "Set"
+        || (d.name == "Array" && cx1.is_std_module)
+    }
+    if is_builtin_name {
+      cx1 = cerr(cx1, "`" ++ d.name ++ "` is a builtin type and cannot be redefined", d.nlo, d.nhi)
+      shells = shells ++ [no_shell()]
+      continue
+    }
+    if map.has(cx1.adts_by_name, d.name) || map.has(cx1.aliases, d.name) {
+      let msg = if d.name == "Option" || d.name == "Result" || d.name == "ForeignError" {
+        "`" ++ d.name ++ "` is a prelude type and cannot be redefined"
+      } else {
+        "type `" ++ d.name ++ "` is defined twice"
+      }
+      cx1 = cerr(cx1, msg, d.nlo, d.nhi)
+      shells = shells ++ [no_shell()]
+      continue
+    }
+    if dup_names(d.tparams) {
+      cx1 = cerr(cx1, "duplicate type parameter names", d.nlo, d.nhi)
+    }
+    match d.alias_target {
+      Some(target) -> {
+        let (cxe, _) = refuse_decl_effvar(cx1, target)
+        cx1 = cxe
+        var tvs: List[Ty] = []
+        for tn in d.tparams {
+          let (cx2, v) = fresh_tvar(cx1, tn)
+          cx1 = cx2
+          tvs = tvs ++ [v]
+        }
+        # an opaque type is a type, so it takes an id off the same counter;
+        # a transparent alias is a spelling and needs none
+        var aid = -1
+        if d.is_opaque {
+          aid = cx1.next_id
+          cx1 = Cx { ..cx1, next_id: cx1.next_id + 1 }
+        }
+        cx1 = Cx {
+          ..cx1,
+          aliases: map.insert(cx1.aliases, d.name, AliasE {
+            name: d.name,
+            tparams: tvs,
+            target: Some(target),
+            is_opaque: d.is_opaque,
+            id: aid,
+            owner: match cx1.owner_class {
+              Some(c) -> c
+              None -> ""
+            },
+            nlo: d.nlo,
+            nhi: d.nhi
+          })
+        }
+        shells = shells ++ [no_shell()]
+        continue
+      }
+      None -> ()
+    }
+    var tvs: List[Ty] = []
+    for tn in d.tparams {
+      let (cx2, v) = fresh_tvar(cx1, tn)
+      cx1 = cx2
+      tvs = tvs ++ [v]
+    }
+    var derives_show = false
+    var derives_ord = false
+    for b in d.derives {
+      if b.name == "Show" {
+        derives_show = true
+      } else if b.name == "Ord" {
+        derives_ord = true
+      } else {
+        cx1 = cerr_h(cx1, "unknown derivable trait `" ++ b.name ++ "`", b.lo, b.hi,
+          "Show and Ord can be derived")
+      }
+    }
+    let (cx3, aid) = fresh(cx1)
+    cx1 = cx3
+    var accepted: List[(Int, Int)] = []
+    var first_ok = false
+    var ctor_infos: List[CtorI] = []
+    var slot = 0
+    var pi = 0
+    var cbn = cx1.ctors_by_name
+    for c in d.ctors {
+      let builtin_ctor = match ty_named(c.name) {
+        Some(_) -> true
+        None -> false
+      }
+      if builtin_ctor {
+        cx1 = cerr(cx1, "constructor `" ++ c.name ++ "` collides with a builtin type name",
+          c.nlo, c.nhi)
+      } else if map.has(cbn, c.name) {
+        cx1 = cerr(cx1, "constructor `" ++ c.name ++
+            "` is already defined (constructors share one module-wide namespace)", c.nlo, c.nhi)
+      } else {
+        cbn = map.insert(cbn, c.name, (aid, slot))
+        ctor_infos = ctor_infos ++ [CtorI { adt: aid, name: c.name, fields: [] }]
+        accepted = accepted ++ [(pi, slot)]
+        if pi == 0 { first_ok = true }
+        slot = slot + 1
+      }
+      pi = pi + 1
+    }
+    let info = AdtI {
+      id: aid,
+      name: d.name,
+      is_record: d.is_record,
+      tparams: tvs,
+      ctors: ctor_infos,
+      derives_show: derives_show,
+      derives_ord: derives_ord,
+      owner: cx1.owner_class
+    }
+    cx1 = Cx {
+      ..cx1,
+      ctors_by_name: cbn,
+      adts: map.insert(cx1.adts, aid, info),
+      adts_by_name: map.insert(cx1.adts_by_name, d.name, aid)
+    }
+    shells = shells ++ [Some(Shell { adt: aid, accepted: accepted, first_ok: first_ok })]
+  }
+  (cx1, shells)
+}
+
+fn accepted_slot(sh: Shell, pi: Int) -> Option[Int] = {
+  for a in sh.accepted {
+    let (p, slot) = a
+    if p == pi { return Some(slot) }
+  }
+  None
+}
+
+## Pass 2: constructor field types (may reference any type declared above).
+pub fn pass_ctor_fields(cx: Cx, m: Module, shells: List[Option[Shell]]) -> Cx !io = {
+  var cx1 = cx
+  var di = 0
+  for d in module_types(m) {
+    let sh = match shells[di] {
+      None -> {
+        di = di + 1
+        continue
+      }
+      Some(s) -> s
+    }
+    let info = adt_of(cx1.adts, sh.adt)
+    # the Kotlin quirk: the tparam scope comes from the FIRST parsed ctor's info
+    var tp: Map[String, Ty] = map.empty()
+    if sh.first_ok {
+      for v in info.tparams {
+        match v {
+          TyVar(n, _) -> { tp = map.insert(tp, n, v) }
+          _ -> ()
+        }
+      }
+    }
+    let saved_tp = cx1.current_tparams
+    cx1 = Cx { ..cx1, current_tparams: tp }
+    var new_ctors = info.ctors
+    var pi = 0
+    for c in d.ctors {
+      let slot = match accepted_slot(sh, pi) {
+        None -> {
+          pi = pi + 1
+          continue
+        }
+        Some(s) -> s
+      }
+      var fields: List[FieldI] = []
+      var fnames: Set[String] = set.empty()
+      for f in c.fields {
+        if set.has(fnames, f.name) {
+          cx1 = cerr(cx1, "field `" ++ f.name ++ "` is declared twice in `" ++ c.name ++ "`",
+            f.lo, f.hi)
+          continue
+        }
+        fnames = set.insert(fnames, f.name)
+        # same refusal as an alias target: a field's `!e` would have no binder
+        let (cxe, bad_eff) = refuse_decl_effvar(cx1, f.tref)
+        cx1 = cxe
+        if bad_eff {
+          fields = fields ++ [FieldI { name: f.name, ty: TyError }]
+          continue
+        }
+        let (cx2, ft0) = resolve_type(cx1, f.tref)
+        cx1 = cx2
+        var ft = ft0
+        # The one Unit prohibition that is about data modelling rather than
+        # about descriptors, so it outlived them: peeled, because an opaque
+        # type over Unit is the same declaration wearing a different name.
+        if peel_opaque(ft) == TyUnit {
+          cx1 = cerr_h(cx1, "constructor fields cannot be Unit", f.lo, f.hi,
+            "a no-payload case is just a bare constructor")
+          ft = TyError
+        }
+        fields = fields ++ [FieldI { name: f.name, ty: ft }]
+      }
+      let old = new_ctors[slot]
+      new_ctors = list.take(new_ctors, slot) ++ [CtorI { ..old, fields: fields }] ++
+        list.drop(new_ctors, slot + 1)
+      pi = pi + 1
+    }
+    cx1 = Cx {
+      ..cx1,
+      current_tparams: saved_tp,
+      adts: map.insert(cx1.adts, sh.adt, AdtI { ..info, ctors: new_ctors })
+    }
+    di = di + 1
+  }
+  cx1
+}
+
+test "type shells and fields build recursive types" {
+  # type Tree[T] = | Leaf | Node(v: T, kids: List[Tree[T]])
+  let m = Module { decls: [DType(TypeDeclR {
+    is_pub: false,
+    is_opaque: false,
+    name: "Tree",
+    tparams: ["T"],
+    ctors: [
+      CtorDecl { name: "Leaf", fields: no_fields(), lo: 0, hi: 4, nlo: 0, nhi: 4 },
+      CtorDecl {
+        name: "Node",
+        fields: [
+          FieldDecl { name: "v", tref: TNamed("T", [], 10, 11), lo: 8, hi: 11 },
+          FieldDecl {
+            name: "kids",
+            tref: TNamed("List", [TNamed("Tree", [TNamed("T", [], 24, 25),], 19, 26)], 13, 27),
+            lo: 13,
+            hi: 27
+          }
+        ],
+        lo: 5,
+        hi: 28,
+        nlo: 5,
+        nhi: 9
+      }
+    ],
+    is_record: false,
+    derives: [],
+    alias_target: None,
+    lo: 0,
+    hi: 28,
+    nlo: 5,
+    nhi: 9
+  })] }
+  var cx = seed_prelude(test_cx())
+  let (cx1, shells) = pass_type_shells(cx, m)
+  let cx2 = pass_ctor_fields(cx1, m, shells)
+  assert len(cx2.diags) == 0
+  let aid = map.get(cx2.adts_by_name, "Tree").expect("registered")
+  let a = adt_of(cx2.adts, aid)
+  assert len(a.ctors) == 2
+  assert a.ctors[1].fields[1].name == "kids"
+  match a.ctors[1].fields[1].ty {
+    TyList(inner) ->
+      match inner {
+        TyAdt(aid2, args) -> {
+          assert aid2 == aid
+          assert args == a.tparams
+        }
+        _ -> { assert false }
+      }
+    _ -> { assert false }
+  }
+}
+
+test "duplicate constructors and prelude clashes are caught" {
+  let mk = (name: String) => DType(TypeDeclR {
+    is_pub: false,
+    is_opaque: false,
+    name: name,
+    tparams: [],
+    ctors: [CtorDecl { name: "C" ++ name, fields: [], lo: 0, hi: 1, nlo: 0, nhi: 1 }],
+    is_record: false,
+    derives: [],
+    alias_target: None,
+    lo: 0,
+    hi: 1,
+    nlo: 0,
+    nhi: 1
+  })
+  let m = Module { decls: [mk("Option"), mk("A"), mk("A")] }
+  var cx = seed_prelude(test_cx())
+  let (cx1, shells) = pass_type_shells(cx, m)
+  assert len(cx1.diags) == 2
+  assert cx1.diags[0].msg == "`Option` is a prelude type and cannot be redefined"
+  assert cx1.diags[1].msg == "type `A` is defined twice"
+}
+
+test "redeclaring Array collides in std and nowhere else" {
+  # The name resolves to the primitive inside std, so a declaration there is a
+  # collision -- and a silent one before this check: the declaration succeeded
+  # and every *use* of the name still reached the primitive, so the module
+  # failed later with `declares return type Array[Int] but its body is
+  # Array[Int]`, two different types printing the same.
+  let decl = DType(TypeDeclR {
+    is_pub: false,
+    is_opaque: false,
+    name: "Array",
+    tparams: ["T"],
+    ctors: [CtorDecl { name: "Wrap", fields: [], lo: 0, hi: 1, nlo: 0, nhi: 1 }],
+    is_record: false,
+    derives: [],
+    alias_target: None,
+    lo: 0,
+    hi: 1,
+    nlo: 0,
+    nhi: 1
+  })
+  let m = Module { decls: [decl] }
+  let (s1, _) = pass_type_shells(seed_prelude(cx_new(Some("std/list"), None)), m)
+  assert len(s1.diags) == 1
+  assert s1.diags[0].msg == "`Array` is a builtin type and cannot be redefined"
+  # outside std the name is nobody's, so declaring it is ordinary
+  let (u1, _) = pass_type_shells(seed_prelude(test_cx()), m)
+  assert len(u1.diags) == 0
+}
+
+## Pass 2.1: resolve every alias target now, so cycles and unknown names are
+## reported at the declaration even if the alias is never used.
+pub fn pass_resolve_aliases(cx: Cx) -> Cx !io = {
+  var cx1 = cx
+  for name in map.keys(cx.aliases) {
+    let al = map.get(cx1.aliases, name).expect("alias listed")
+    let (cx2, _) = resolve_alias_target(cx1, al, al.nlo, al.nhi)
+    cx1 = cx2
+  }
+  cx1
+}
+
+test "alias cycles and derive Show violations are reported at the declaration" {
+  # alias A = B, alias B = A  → cycle; type P = { f: fn() -> Unit } derive Show → not printable
+  let m = Module { decls: [
+    DType(TypeDeclR {
+      is_pub: false,
+      is_opaque: false,
+      name: "A",
+      tparams: [],
+      ctors: [],
+      is_record: false,
+      derives: [],
+      alias_target: Some(TNamed("B", [], 10, 11)),
+      lo: 0,
+      hi: 11,
+      nlo: 6,
+      nhi: 7
+    }),
+    DType(TypeDeclR {
+      is_pub: false,
+      is_opaque: false,
+      name: "B",
+      tparams: [],
+      ctors: [],
+      is_record: false,
+      derives: [],
+      alias_target: Some(TNamed("A", [], 22, 23)),
+      lo: 12,
+      hi: 23,
+      nlo: 18,
+      nhi: 19
+    }),
+    DType(TypeDeclR {
+      is_pub: false,
+      is_opaque: false,
+      name: "P",
+      tparams: [],
+      ctors: [CtorDecl {
+        name: "P",
+        fields: [FieldDecl {
+          name: "f",
+          tref: TFn([], TNamed("Unit", [], 40, 44), [], 33, 44),
+          lo: 30,
+          hi: 44
+        }],
+        lo: 24,
+        hi: 46,
+        nlo: 29,
+        nhi: 30
+      }],
+      is_record: true,
+      derives: [Bound { name: "Show", lo: 50, hi: 54 }],
+      alias_target: None,
+      lo: 24,
+      hi: 54,
+      nlo: 29,
+      nhi: 30
+    })
+  ] }
+  var cx = seed_prelude(test_cx())
+  let (cx1, shells) = pass_type_shells(cx, m)
+  var cx2 = pass_ctor_fields(cx1, m, shells)
+  cx2 = pass_resolve_aliases(cx2)
+  # the derive check needs the impl table: what a field must have is an impl
+  let (cx3, _) = pass_register_impls(cx2, m, shells)
+  cx2 = cx3
+  var saw_cycle = false
+  var saw_show = false
+  for dg in cx2.diags {
+    if str.contains(dg.msg, "refers to itself") { saw_cycle = true }
+    if str.contains(dg.msg, "cannot derive Show for `P`") { saw_show = true }
+  }
+  assert saw_cycle
+  assert saw_show
+}
+
+## Pass 2.2: register effect declarations. Each one mints an id that is at
+## once the label's identity and the id of the evidence record synthesised for
+## it -- a plain record whose fields are the operations' function types
+## (docs/effects-design.md §5.1). The operations enter the module's function
+## namespace with a signature whose effect is the label, which is what makes
+## `use m.{ask}` and `m.ask(...)` ordinary; what a call to one *compiles to* is
+## decided in check_call, off `Sig.op_of`.
+##
+## Runs after aliases resolve (an operation may name any type) and before
+## function signatures (a signature may name the effect).
+pub fn pass_effects(cx: Cx, m: Module) -> Cx !io = {
+  var cx1 = cx
+  for d in module_effects(m) {
+    if alias_shadows(cx1, d.name) {
+      cx1 = alias_shadow(cx1, d.name, d.nlo, d.nhi)
+      continue
+    }
+    if import_clashes(cx1, d.name) {
+      cx1 = import_clash(cx1, d.name, d.nlo, d.nhi, "effect")
+      continue
+    }
+    let is_builtin_name = match ty_named(d.name) {
+      Some(_) -> true
+      None -> d.name == "List" || d.name == "Map" || d.name == "Set"
+    }
+    if is_builtin_name {
+      cx1 = cerr(cx1, "`" ++ d.name ++ "` is a builtin type and cannot be an effect name",
+        d.nlo, d.nhi)
+      continue
+    }
+    if map.has(cx1.adts_by_name, d.name) || map.has(cx1.aliases, d.name) ||
+      map.has(cx1.traits_by_name, d.name) || map.has(cx1.java_classes, d.name) {
+        cx1 = cerr_h(cx1, "effect `" ++ d.name ++ "` collides with a type of the same name",
+          d.nlo, d.nhi, "effects, traits and types share one namespace; rename one")
+        continue
+      }
+    if map.has(cx1.effects, d.name) {
+      cx1 = cerr(cx1, "effect `" ++ d.name ++ "` is defined twice", d.nlo, d.nhi)
+      continue
+    }
+    let (cx2, eid) = fresh(cx1)
+    cx1 = cx2
+    let saved_tp = cx1.current_tparams
+    let saved_ev = cx1.current_eff_vars
+    let empty_tp: Map[String, Ty] = map.empty()
+    let empty_ev: Map[String, Eff] = map.empty()
+    var fields: List[FieldI] = []
+    var op_names: List[String] = []
+    var seen: Set[String] = set.empty()
+    for op in d.ops {
+      if set.has(seen, op.name) {
+        cx1 = cerr(cx1, "operation `" ++ op.name ++ "` is declared twice in effect `" ++
+            d.name ++ "`", op.nlo, op.nhi)
+        continue
+      }
+      seen = set.insert(seen, op.name)
+      cx1 = Cx { ..cx1, current_tparams: empty_tp, current_eff_vars: empty_ev }
+      var ptys: List[Ty] = []
+      for p in op.params {
+        let (cxa, t) = resolve_type(cx1, p.tref)
+        cx1 = cxa
+        ptys = ptys ++ [t]
+      }
+      let (cxb, ret) = resolve_type(cx1, op.ret)
+      cx1 = Cx { ..cxb, current_tparams: saved_tp, current_eff_vars: saved_ev }
+      # the arm is a closure the caller reaches through evidence, so what the
+      # arm's body does is recorded where the handler is installed, never here
+      let idx = len(fields)
+      fields = fields ++ [FieldI { name: op.name, ty: TyFn(ptys, ret, EPure) }]
+      op_names = op_names ++ [op.name]
+      let sig = Sig {
+        name: op.name,
+        param_tys: ptys,
+        param_names: map(op.params, p => p.name),
+        ret: ret,
+        eff: ELabeled(EPure, [(eid, d.name)]),
+        is_builtin: false,
+        tparams: [],
+        constraints: [],
+        owner: cx1.owner_class,
+        trait_id: None,
+        op_of: Some((eid, idx)),
+        inferring: false
+      }
+      cx1 = bind_fn(cx1, op.name, sig, OLocal("operation"), op.nlo, op.nhi)
+    }
+    let rec_name = ev_record_name(d.name)
+    let info = AdtI {
+      id: eid,
+      name: rec_name,
+      is_record: true,
+      tparams: [],
+      ctors: [CtorI { adt: eid, name: rec_name, fields: fields }],
+      derives_show: false,
+      derives_ord: false,
+      owner: cx1.owner_class
+    }
+    cx1 = Cx {
+      ..cx1,
+      adts: map.insert(cx1.adts, eid, info),
+      effects: map.insert(cx1.effects, d.name, eid),
+      effect_infos: map.insert(cx1.effect_infos, eid, EffectI {
+        id: eid,
+        name: d.name,
+        owner: cx1.owner_class,
+        ops: op_names
+      })
+    }
+  }
+  cx1
+}
+
+## Pass 2.3: register trait headers and method signatures; methods enter the
+## fn namespace (the Kotlin registerTraits).
+pub fn pass_register_traits(cx: Cx, m: Module) -> Cx !io = {
+  var cx1 = cx
+  for d in module_traits(m) {
+    if alias_shadows(cx1, d.name) {
+      cx1 = alias_shadow(cx1, d.name, d.nlo, d.nhi)
+      continue
+    }
+    if import_clashes(cx1, d.name) {
+      cx1 = import_clash(cx1, d.name, d.nlo, d.nhi, "trait")
+      continue
+    }
+    let is_builtin_name = match ty_named(d.name) {
+      Some(_) -> true
+      None -> d.name == "List" || d.name == "Map" || d.name == "Set"
+    }
+    if is_builtin_name {
+      cx1 = cerr(cx1, "`" ++ d.name ++ "` is a builtin type and cannot be a trait name",
+        d.nlo, d.nhi)
+      continue
+    }
+    if map.has(cx1.adts_by_name, d.name) || map.has(cx1.aliases, d.name) ||
+      map.has(cx1.java_classes, d.name) {
+        cx1 = cerr_h(cx1, "trait `" ++ d.name ++ "` collides with a type of the same name",
+          d.nlo, d.nhi, "traits and types share one namespace; rename one")
+        continue
+      }
+    if map.has(cx1.traits_by_name, d.name) {
+      let msg = if is_prelude_trait_name(d.name) {
+        "`" ++ d.name ++ "` is a prelude trait and cannot be redefined"
+      } else {
+        "trait `" ++ d.name ++ "` is defined twice"
+      }
+      cx1 = cerr(cx1, msg, d.nlo, d.nhi)
+      continue
+    }
+    let (cx2, tvar) = fresh_tvar(cx1, d.tp)
+    let (cx3, tid) = fresh(cx2)
+    cx1 = cx3
+    # associated types register before the methods, and the trait enters the
+    # table provisionally with them, so a method signature can already project
+    # its own trait (`C.Item` in resolve_assoc reads t.assoc by id)
+    var assoc_names: List[String] = []
+    for a in d.assoc {
+      if list.contains(assoc_names, a.name) {
+        cx1 = cerr(cx1, "associated type `" ++ a.name ++ "` is declared twice in trait `" ++
+            d.name ++ "`", a.nlo, a.nhi)
+      } else {
+        assoc_names = assoc_names ++ [a.name]
+      }
+    }
+    cx1 = Cx {
+      ..cx1,
+      traits: map.insert(cx1.traits, tid, TraitI {
+        id: tid,
+        name: d.name,
+        tvar: tvar,
+        is_pub: d.is_pub,
+        owner: cx1.owner_class,
+        src_path: cx1.src_path,
+        methods: [],
+        assoc: assoc_names,
+        # a declared trait always injects: there is no surface syntax for
+        # opting out (docs/prelude-namespace-design.md §4.2)
+        injects: true
+      })
+    }
+    let tvid = match tvar {
+      TyVar(_, id) -> id
+      _ -> -1
+    }
+    cx1 = Cx {
+      ..cx1,
+      current_tparam_bounds: map.insert(cx1.current_tparam_bounds, tvid, [tid])
+    }
+    var methods: List[(String, MethodSig)] = []
+    # whether this trait's method names take a slot in the fn namespace; a
+    # declared trait is always injecting, so the guards below never fire today
+    let injects = trait_of(cx1.traits, tid).injects
+    var tp: Map[String, Ty] = map.empty()
+    tp = map.insert(tp, d.tp, tvar)
+    let saved_tp = cx1.current_tparams
+    for me in d.methods {
+      var non_io = false
+      var label = ""
+      for a in me.effs {
+        if a != "io" {
+          non_io = true
+          if map.has(cx1.effects, a) && label == "" { label = a }
+        }
+      }
+      if non_io {
+        # the fourth refusal of design §4.5: a trait method's row is pure or
+        # io, and a declared effect is neither
+        let msg = if label != "" {
+          "trait methods cannot declare the effect `" ++ label ++ "`"
+        } else {
+          "trait methods cannot declare effect variables"
+        }
+        cx1 = cerr_h(cx1, msg, me.nlo, me.nhi, "a trait method is pure or !io")
+        continue
+      }
+      let saved_ev = cx1.current_eff_vars
+      let empty_ev: Map[String, Eff] = map.empty()
+      cx1 = Cx { ..cx1, current_tparams: tp, current_eff_vars: empty_ev }
+      var ptys: List[Ty] = []
+      for p in me.params {
+        let (cx4, t) = resolve_type(cx1, p.tref)
+        cx1 = cx4
+        ptys = ptys ++ [t]
+      }
+      let (cx5, ret) = resolve_type(cx1, me.ret)
+      cx1 = cx5
+      let leaked = map.len(cx1.current_eff_vars) > 0
+      cx1 = Cx { ..cx1, current_tparams: saved_tp, current_eff_vars: saved_ev }
+      let carried = sig_label(ptys, ret)
+      if leaked || carried != "" {
+        let msg3 = if carried != "" {
+          "trait method signatures cannot carry the effect `" ++ carried ++ "`"
+        } else {
+          "trait method signatures cannot carry effect variables"
+        }
+        cx1 = cerr_h(cx1, msg3, me.nlo, me.nhi,
+          "write !io on the function type, or leave it pure")
+        continue
+      }
+      let eff = if len(me.effs) == 0 { EPure } else { EIo }
+      let sig = Sig {
+        name: me.name,
+        param_tys: ptys,
+        param_names: map(me.params, p => p.name),
+        ret: ret,
+        eff: eff,
+        is_builtin: false,
+        tparams: [tvar],
+        constraints: [[tid]],
+        owner: cx1.owner_class,
+        trait_id: Some(tid),
+        op_of: None,
+        inferring: false
+      }
+      let has_default = match me.body {
+        Some(_) -> true
+        None -> false
+      }
+      # a non-injecting trait takes no slot in the fn namespace, so none of the
+      # collision checks apply to it. A method the door refused is not a method
+      # of this trait either -- the name it would answer to belongs elsewhere.
+      if injects {
+        let before = len(cx1.diags)
+        cx1 = bind_fn(cx1, me.name, sig, OLocal("trait method"), me.nlo, me.nhi)
+        if len(cx1.diags) > before { continue }
+      }
+      methods = methods ++ [(me.name, MethodSig { sig: sig, has_default: has_default })]
+    }
+    let info = TraitI {
+      id: tid,
+      name: d.name,
+      tvar: tvar,
+      is_pub: d.is_pub,
+      owner: cx1.owner_class,
+      src_path: cx1.src_path,
+      methods: methods,
+      assoc: assoc_names,
+      injects: injects
+    }
+    cx1 = Cx {
+      ..cx1,
+      traits: map.insert(cx1.traits, tid, info),
+      traits_by_name: map.insert(cx1.traits_by_name, d.name, tid),
+      local_traits: cx1.local_traits ++ [d.name]
+    }
+  }
+  cx1
+}
+
+test "trait registration puts methods in the fn namespace" {
+  # trait Eq2[T] { fn eq2(a: T, b: T) -> Bool }
+  let m = Module { decls: [DTrait("Eq2", "T", 10, 11, [TraitMethod {
+    name: "eq2",
+    params: [
+      Param { name: "a", tref: TNamed("T", [], 22, 23), lo: 19, hi: 20 },
+      Param { name: "b", tref: TNamed("T", [], 28, 29), lo: 25, hi: 26 }
+    ],
+    ret: TNamed("Bool", [], 34, 38),
+    effs: [],
+    body: no_body(),
+    lo: 14,
+    hi: 38,
+    nlo: 17,
+    nhi: 20
+  }], [], false, 0, 40, 6, 9)] }
+  var cx = seed_prelude(test_cx())
+  cx = pass_register_traits(cx, m)
+  assert len(cx.diags) == 0
+  let tid = map.get(cx.traits_by_name, "Eq2").expect("registered")
+  let tr = trait_of(cx.traits, tid)
+  assert len(tr.methods) == 1
+  let s = map.get(cx.fns, "eq2").expect("in fn namespace")
+  assert s.trait_id == Some(tid)
+  assert sig_render(cx.adts, cx.traits, s) == "fn eq2[T: Eq2](a: T, b: T) -> Bool"
+  # a second trait with the same method name collides
+  let m2 = Module { decls: [DTrait("Eq3", "T", 10, 11, [TraitMethod {
+    name: "eq2",
+    params: no_params(),
+    ret: TNamed("Bool", [], 34, 38),
+    effs: [],
+    body: no_body(),
+    lo: 14,
+    hi: 38,
+    nlo: 17,
+    nhi: 20
+  }], [], false, 0, 40, 6, 9)] }
+  let cx2 = pass_register_traits(cx, m2)
+  assert len(cx2.diags) == 1
+  assert str.contains(cx2.diags[0].msg, "already a method of trait `Eq2`")
+}
+
+test "every prelude trait name is refused as a redefinition" {
+  # the guard used to name three of the five by hand, so `trait Show` and
+  # `trait Iter` came out as "defined twice" on a file that declares them once
+  for name in prelude_trait_names() {
+    let m = Module { decls: [DTrait(name, "T", 10, 11, [], [], false, 0, 40, 6, 9)] }
+    let cx = pass_register_traits(seed_prelude(test_cx()), m)
+    assert len(cx.diags) == 1
+    assert cx.diags[0].msg == "`" ++ name ++ "` is a prelude trait and cannot be redefined"
+  }
+}
+
+## The subject-shape restriction (trait-v2-design §3.2, Haskell 98's instance
+## head): a named type constructor applied to distinct type variables, and
+## those variables are exactly the impl's own parameters.
+##
+## One rule doing three jobs. Matching becomes head equality, so "which impl"
+## is a map lookup. Overlap becomes head equality too, so coherence is the
+## duplicate diagnostic that already existed. And every sub-goal is a proper
+## sub-term of its parent, so recursive solving terminates on term size rather
+## than on a depth limit.
+##
+## Returns the reason it is not allowed, or None.
+pub fn impl_shape_bad(cx: Cx, subject: Ty, tvars: List[Ty]) -> Option[String] = {
+  match head_of(subject) {
+    None -> return Some("`" ++ ty_show(cx.adts, subject) ++ "` has no type constructor")
+    Some(_) -> ()
+  }
+  let args = type_args_of(subject)
+  if len(args) != len(tvars) {
+    if len(tvars) == 0 {
+      return Some("`" ++ ty_show(cx.adts, subject) ++
+          "` is applied to types; an impl subject may only be applied to its own parameters")
+    }
+    return Some("the subject applies " ++ to_string(len(args)) ++
+        " argument(s) but the impl declares " ++ to_string(len(tvars)))
+  }
+  var seen: Set[Int] = set.empty()
+  for a in args {
+    match a {
+      TyVar(n, vid) -> {
+        var mine = false
+        for tv in tvars {
+          match tv {
+            TyVar(_, mid) -> if mid == vid { mine = true }
+            _ -> ()
+          }
+        }
+        if not mine {
+          return Some("`" ++ n ++ "` is not a parameter of this impl")
+        }
+        if set.has(seen, vid) {
+          return Some("`" ++ n ++ "` is used twice in the subject")
+        }
+        seen = set.insert(seen, vid)
+      }
+      _ -> return Some("`" ++ ty_show(cx.adts, a) ++
+          "` is a concrete argument; an impl subject takes only its own parameters")
+    }
+  }
+  None
+}
+
+## Which module a head belongs to, for the orphan rule (§3.9). The builtin
+## containers have no declaration to point at, so std claims them by name.
+##
+## Written as scaffolding, on the expectation that S3 would make them ordinary
+## ADTs in std and leave only the `HAdt` arm. S3 did not: `List`, `Map` and
+## `Set` are still `Ty` variants, because keeping them so is exactly what let
+## the representation change without touching a type identity (D2/D3). So this
+## is not scaffolding, it is the answer -- and it is load-bearing now in a way
+## it was not then, because `impl[T: Eq] Eq[List[T]]` lives in std/list and it
+## is these three lines that make that impl legal rather than an orphan.
+fn head_owner(h: Head) -> Option[String] =
+  match h {
+    HList -> Some("std/list")
+    HMap -> Some("std/map")
+    HSet -> Some("std/set")
+    # claimed for the same reason (#44 knife 2): `impl Iter[String]` lives in
+    # std/str and `impl Iter[Bytes]` in std/bytes, and these two lines are
+    # what makes each legal rather than an orphan
+    HString -> Some("std/str")
+    HBytes -> Some("std/bytes")
+    _ -> None
+  }
+
+## Pass 2.4: register impls — derive Ord first (so an explicit duplicate
+## reports as the duplicate), then subject rules, the orphan rule, program-wide
+## coherence, and method signature matching (the Kotlin registerImpls).
+## Also returns each impl's resolved method signatures (aligned with
+## module_impls × methods; None where registration failed), for body checking.
+pub fn pass_register_impls(
+  cx: Cx,
+  m: Module,
+  shells: List[Option[Shell]]
+) -> (Cx, List[List[Option[Sig]]]) !io = {
+  var cx1 = cx
+  var impl_sigs: List[List[Option[Sig]]] = []
+  # local ADT ids (for the orphan rule)
+  var local_adts: Set[Int] = set.empty()
+  for sh in shells {
+    match sh {
+      Some(s) -> { local_adts = set.insert(local_adts, s.adt) }
+      None -> ()
+    }
+  }
+  # the derived impls first, so an explicit duplicate reports as the duplicate
+  var di = 0
+  for d in module_types(m) {
+    let sh = match shells[di] {
+      None -> {
+        di = di + 1
+        continue
+      }
+      Some(s) -> s
+    }
+    let info = adt_of(cx1.adts, sh.adt)
+    for want in [("Ord", ORD_ID, info.derives_ord), ("Show", SHOW_ID, info.derives_show)] {
+      let (dname, tid, asked) = want
+      if not asked { continue }
+      var dlo = d.nlo
+      var dhi = d.nhi
+      for b in d.derives {
+        if b.name == dname {
+          dlo = b.lo
+          dhi = b.hi
+        }
+      }
+      let ii = ImplI {
+        trait_id: tid,
+        subject: TyAdt(sh.adt, info.tparams),
+        tparams: info.tparams,
+        constraints: derive_constraints(info.tparams, tid),
+        lo: dlo,
+        hi: dhi,
+        derived: true,
+        owner: cx1.owner_class,
+        src_path: cx1.src_path,
+        provided: [],
+        assoc_bindings: []
+      }
+      cx1 = Cx {
+        ..cx1,
+        impl_table: insert_impl(cx1.impl_table, ii),
+        local_impls: cx1.local_impls ++ [ii]
+      }
+    }
+    di = di + 1
+  }
+  # explicit impls
+  var eq_hash_impls: List[(Int, Ty, Int, Int)] = []
+  for d in module_impls(m) {
+    let tid = match map.get(cx1.traits_by_name, d.trait_name) {
+      None -> {
+        let pool = map.keys(cx1.traits_by_name)
+        let hint = match suggest.hint(d.trait_name, pool) {
+          Some(h) -> h
+          None -> "declare `trait " ++ d.trait_name ++ "[T] { ... }` or import it first"
+        }
+        cx1 = cerr_h(cx1, "unknown trait: " ++ d.trait_name, d.tlo, d.thi, hint)
+        impl_sigs = impl_sigs ++ [no_msigs(len(d.methods))]
+        continue
+      }
+      Some(t) -> t
+    }
+    let tr = trait_of(cx1.traits, tid)
+    # The impl's own parameters are in scope for the subject AND for every
+    # method signature: `impl[T: Eq] Eq[List[T]]`'s `eq` takes `List[T]`, so
+    # the scope has to outlive the subject.
+    var tpnames: List[String] = []
+    for tp in d.tparams { tpnames = tpnames ++ [tp.name] }
+    if dup_names(tpnames) {
+      cx1 = cerr(cx1, "duplicate type parameter names", d.tlo, d.thi)
+    }
+    var itvars: List[Ty] = []
+    var tp_scope: Map[String, Ty] = map.empty()
+    for tp in d.tparams {
+      let (cxv, v) = fresh_tvar(cx1, tp.name)
+      cx1 = cxv
+      itvars = itvars ++ [v]
+      tp_scope = map.insert(tp_scope, tp.name, v)
+    }
+    let empty_ev: Map[String, Eff] = map.empty()
+    cx1 = Cx { ..cx1, current_tparams: tp_scope, current_eff_vars: empty_ev }
+    let (cxbnd, iconstraints) = resolve_bounds(cx1, d.tparams)
+    cx1 = cxbnd
+    var ibd = cx1.current_tparam_bounds
+    var ibi = 0
+    for v in itvars {
+      match v {
+        TyVar(_, ivid) -> {
+          ibd = map.insert(ibd, ivid,
+            if ibi < len(iconstraints) { iconstraints[ibi] } else { [] })
+        }
+        _ -> ()
+      }
+      ibi = ibi + 1
+    }
+    cx1 = Cx { ..cx1, current_tparam_bounds: ibd }
+    let (cx2, subject) = resolve_type(cx1, d.subject)
+    cx1 = cx2
+    if subject == TyError {
+      impl_sigs = impl_sigs ++ [no_msigs(len(d.methods))]
+      continue
+    }
+    match impl_shape_bad(cx1, subject, itvars) {
+      Some(why) -> {
+        cx1 = cerr_h(cx1, "`" ++ ty_show(cx1.adts, subject) ++ "` cannot be an impl subject",
+          t_lo2(d.subject), t_hi2(d.subject),
+          why ++ "; a subject is a type constructor applied to this impl's own parameters, " ++
+            "as in `impl[T: Eq] Eq[List[T]]`")
+        impl_sigs = impl_sigs ++ [no_msigs(len(d.methods))]
+        continue
+      }
+      None -> ()
+    }
+    # orphan rule: the impl lives with the trait or with the subject type
+    var trait_local = false
+    for n in cx1.local_traits {
+      if n == d.trait_name { trait_local = true }
+    }
+    let subject_local = match subject {
+      TyOpaque(_, _, ow, _) -> Some(ow) == cx1.owner_class
+      _ ->
+        match head_of(subject) {
+          Some(HAdt(aid)) -> set.has(local_adts, aid)
+          Some(h) -> head_owner(h) == cx1.owner_class
+          None -> false
+        }
+    }
+    if not trait_local && not subject_local {
+      cx1 = cerr_h(cx1, "orphan impl: `" ++ tr.name ++ "[" ++ ty_show(cx1.adts, subject) ++
+          "]` may not live here", d.tlo, d.thi,
+        "an impl belongs to the module that declares `" ++ tr.name ++
+          "` or the one that declares `" ++ ty_show(cx1.adts, subject) ++ "`")
+      impl_sigs = impl_sigs ++ [no_msigs(len(d.methods))]
+      continue
+    }
+    # coherence: at most one impl per (trait, type) in the whole program
+    match impl_at(cx1.impl_table, tid, subject) {
+      Some(prev) -> {
+        let where2 = match prev.src_path {
+          Some(p) -> if cx1.src_path == Some(p) { "" } else { " (previous impl in " ++ p ++ ")" }
+          None -> ""
+        }
+        let hint = if prev.derived {
+          "`" ++ ty_show(cx1.adts, subject) ++ "` already derives " ++ tr.name ++
+            "; drop the derive or this impl"
+        } else {
+          "the program allows one impl per trait and type"
+        }
+        cx1 = cerr_h(cx1, "duplicate impl: `" ++ tr.name ++ "[" ++ ty_show(cx1.adts, subject) ++
+            "]` is already implemented" ++ where2, d.tlo, d.thi, hint)
+        impl_sigs = impl_sigs ++ [no_msigs(len(d.methods))]
+        continue
+      }
+      None -> ()
+    }
+    if tid == EQ_ID || tid == HASH_ID {
+      eq_hash_impls = eq_hash_impls ++ [(tid, subject, d.tlo, d.thi)]
+    }
+    # `type Item = X` bindings: each associated type the trait declares,
+    # exactly once. The RHS resolves in the impl's own tparam scope and may
+    # not itself be a projection (assoc-types-design.md D4/D6).
+    var assoc_bindings: List[(String, Ty)] = []
+    var bound_ns: List[String] = []
+    for ab in d.assoc {
+      if not list.contains(tr.assoc, ab.name) {
+        cx1 = cerr_h(cx1, "trait `" ++ tr.name ++ "` does not declare an associated type `" ++
+            ab.name ++ "`", ab.nlo, ab.nhi,
+          if len(tr.assoc) == 0 {
+            "the trait declares no associated types"
+          } else {
+            "it declares: " ++ join(tr.assoc, ", ")
+          })
+        continue
+      }
+      if list.contains(bound_ns, ab.name) {
+        cx1 = cerr(cx1, "associated type `" ++ ab.name ++ "` is bound twice in this impl",
+          ab.nlo, ab.nhi)
+        continue
+      }
+      bound_ns = bound_ns ++ [ab.name]
+      let (cxab, bt) = resolve_type(cx1, ab.tref)
+      cx1 = cxab
+      match bt {
+        TyAssoc(_, _, _) -> {
+          cx1 = cerr_h(cx1, "an associated type binding cannot be a projection", ab.nlo, ab.nhi,
+            "bind `" ++ ab.name ++ "` to a concrete type or an impl parameter")
+        }
+        _ -> { assoc_bindings = assoc_bindings ++ [(ab.name, bt)] }
+      }
+    }
+    for an in tr.assoc {
+      if not list.contains(bound_ns, an) {
+        cx1 = cerr_h(cx1, "impl `" ++ tr.name ++ "[" ++ ty_show(cx1.adts, subject) ++
+            "]` is missing `type " ++ an ++ "`", d.tlo, d.thi,
+          "bind it: `type " ++ an ++ " = <type>`")
+      }
+    }
+    var inst: Map[Int, Ty] = map.empty()
+    match tr.tvar {
+      TyVar(_, vid) -> { inst = map.insert(inst, vid, subject) }
+      _ -> ()
+    }
+    let em0: Map[Int, Eff] = map.empty()
+    var provided: List[String] = []
+    var msigs: List[Option[Sig]] = []
+    for me in d.methods {
+      var ms: Option[MethodSig] = None
+      for entry in tr.methods {
+        let (mname, msig) = entry
+        if mname == me.name { ms = Some(msig) }
+      }
+      let msv = match ms {
+        None -> {
+          var mnames: List[String] = []
+          for entry in tr.methods {
+            let (mname, _) = entry
+            mnames = mnames ++ [mname]
+          }
+          cx1 = cerr_o(cx1, "trait `" ++ tr.name ++ "` has no method `" ++ me.name ++ "`",
+            me.nlo, me.nhi, suggest.hint(me.name, mnames))
+          msigs = msigs ++ [no_sig()]
+          continue
+        }
+        Some(v) -> v
+      }
+      var already = false
+      for pn in provided {
+        if pn == me.name { already = true }
+      }
+      if already {
+        cx1 = cerr(cx1, "method `" ++ me.name ++ "` is implemented twice in this impl",
+          me.nlo, me.nhi)
+        msigs = msigs ++ [no_sig()]
+        continue
+      }
+      var non_io = false
+      var label2 = ""
+      for a in me.effs {
+        if a != "io" {
+          non_io = true
+          if map.has(cx1.effects, a) && label2 == "" { label2 = a }
+        }
+      }
+      if non_io {
+        let msg2 = if label2 != "" {
+          "impl methods cannot declare the effect `" ++ label2 ++ "`"
+        } else {
+          "impl methods cannot declare effect variables"
+        }
+        cx1 = cerr_h(cx1, msg2, me.nlo, me.nhi, "an impl method is pure or !io")
+        msigs = msigs ++ [no_sig()]
+        continue
+      }
+      let saved_ev = cx1.current_eff_vars
+      let empty_ev2: Map[String, Eff] = map.empty()
+      cx1 = Cx { ..cx1, current_eff_vars: empty_ev2 }
+      var ptys: List[Ty] = []
+      for p in me.params {
+        let (cx3, t) = resolve_type(cx1, p.tref)
+        cx1 = cx3
+        ptys = ptys ++ [t]
+      }
+      let (cx4, ret) = match me.ret {
+        Some(r) -> resolve_type(cx1, r)
+        None -> (cx1, TyError)
+      }
+      cx1 = cx4
+      let eff = if len(me.effs) == 0 { EPure } else { EIo }
+      let leaked = map.len(cx1.current_eff_vars) > 0
+      cx1 = Cx { ..cx1, current_eff_vars: saved_ev }
+      let carried2 = sig_label(ptys, ret)
+      if leaked || carried2 != "" {
+        let msg4 = if carried2 != "" {
+          "impl method signatures cannot carry the effect `" ++ carried2 ++ "`"
+        } else {
+          "impl method signatures cannot carry effect variables"
+        }
+        cx1 = cerr(cx1, msg4, me.nlo, me.nhi)
+        msigs = msigs ++ [no_sig()]
+        continue
+      }
+      let inst2 = inst
+      let adts2 = cx1.adts
+      # the impl is not in the table yet, so a `C.Item` in the trait's
+      # signature reduces through this impl's own bindings, not impl_at
+      let ab2 = assoc_bindings
+      let tid2 = tid
+      let subject2 = subject
+      let want = map(msv.sig.param_tys,
+        t => reduce_via_bindings(subst(t, inst2, em0), tid2, subject2, ab2))
+      let want_ret = reduce_via_bindings(subst(msv.sig.ret, inst2, em0), tid2, subject2, ab2)
+      let want_render = "fn " ++ me.name ++ "(" ++
+        join(map(want, t => ty_show(adts2, t)), ", ") ++ ") -> " ++
+        ty_show(cx1.adts, want_ret) ++ eff_suffix(msv.sig.eff)
+      if ptys != want || ret != want_ret {
+        cx1 = cerr_h(cx1, "`" ++ me.name ++ "` does not match the trait's signature",
+          me.nlo, me.nhi, "trait `" ++ tr.name ++ "` declares it as " ++ want_render)
+      } else if not eff_subsumes(msv.sig.eff, eff) {
+        cx1 = cerr_h(cx1, "`" ++ me.name ++ "` is declared !" ++ eff_show2(eff) ++
+            " but trait `" ++ tr.name ++ "` declares it pure", me.nlo, me.nhi,
+          "drop !" ++ eff_show2(eff) ++ " here, or declare the trait method !" ++ eff_show2(eff))
+      }
+      provided = provided ++ [me.name]
+      msigs = msigs ++ [Some(Sig {
+        name: me.name,
+        param_tys: ptys,
+        param_names: map(me.params, p => p.name),
+        ret: ret,
+        eff: eff,
+        is_builtin: false,
+        # A conditional impl's method is a generic function: it takes one
+        # dictionary per bound, exactly like a `[T: Eq]` function does, and
+        # everything downstream (descriptors, call sites, `bind_dicts` for
+        # the body) follows from saying so here.
+        tparams: itvars,
+        constraints: iconstraints,
+        owner: cx1.owner_class,
+        trait_id: None,
+        op_of: None,
+        inferring: false
+      })]
+    }
+    let no_tp: Map[String, Ty] = map.empty()
+    cx1 = Cx { ..cx1, current_tparams: no_tp }
+    var missing: List[MethodSig] = []
+    for entry in tr.methods {
+      let (mname, msig) = entry
+      var have = false
+      for pn in provided {
+        if pn == mname { have = true }
+      }
+      if not msig.has_default && not have { missing = missing ++ [msig] }
+    }
+    if len(missing) > 0 {
+      var names2: List[String] = []
+      var renders: List[String] = []
+      for msig in missing {
+        names2 = names2 ++ ["`" ++ msig.sig.name ++ "`"]
+        var ps: List[String] = []
+        var i = 0
+        for pt in msig.sig.param_tys {
+          let pn = match get(msig.sig.param_names, i) {
+            Some(n) -> n
+            None -> "_"
+          }
+          ps = ps ++ [pn ++ ": " ++ ty_show(cx1.adts, subst(pt, inst, em0))]
+          i = i + 1
+        }
+        renders = renders ++ ["fn " ++ msig.sig.name ++ "(" ++ join(ps, ", ") ++ ") -> " ++
+            ty_show(cx1.adts, subst(msig.sig.ret, inst, em0)) ++ eff_suffix(msig.sig.eff)]
+      }
+      cx1 = cerr_h(cx1, "impl `" ++ tr.name ++ "[" ++ ty_show(cx1.adts, subject) ++
+          "]` is missing " ++ join(names2, ", "), d.tlo, d.thi,
+        "provide: " ++ join(renders, "; "))
+    }
+    let info = ImplI {
+      trait_id: tid,
+      subject: subject,
+      tparams: itvars,
+      constraints: iconstraints,
+      lo: d.lo,
+      hi: d.hi,
+      derived: false,
+      owner: cx1.owner_class,
+      src_path: cx1.src_path,
+      provided: provided,
+      assoc_bindings: assoc_bindings
+    }
+    cx1 = Cx {
+      ..cx1,
+      impl_table: insert_impl(cx1.impl_table, info),
+      local_impls: cx1.local_impls ++ [info]
+    }
+    impl_sigs = impl_sigs ++ [msigs]
+  }
+  cx1 = check_derived_fields(cx1, m, shells)
+  cx1 = check_eq_hash_pairs(cx1, eq_hash_impls)
+  (cx1, impl_sigs)
+}
+
+## The derived-field checks for `Ord`/`Show`, run once every impl is known --
+## which is why they are not with the declaration passes: what a field needs is
+## an impl, and the module's own are registered by the caller just above.
+fn check_derived_fields(cx: Cx, m: Module, shells: List[Option[Shell]]) -> Cx = {
+  var cx1 = cx
+  var di = 0
+  for d in module_types(m) {
+    let sh = match shells[di] {
+      None -> {
+        di = di + 1
+        continue
+      }
+      Some(s) -> s
+    }
+    let info = adt_of(cx1.adts, sh.adt)
+    let subject = TyAdt(sh.adt, info.tparams)
+    let wanted = [
+      ("Ord", ORD_ID, info.derives_ord, "orderable"),
+      ("Show", SHOW_ID, info.derives_show, "printable")
+    ]
+    for want in wanted {
+      let (dname, tid, asked, adj) = want
+      let derived = match impl_at(cx1.impl_table, tid, subject) {
+        Some(ii) -> asked && ii.derived
+        None -> false
+      }
+      if not derived { continue }
+      var dlo = d.nlo
+      var dhi = d.nhi
+      for b in d.derives {
+        if b.name == dname {
+          dlo = b.lo
+          dhi = b.hi
+        }
+      }
+      for ci in info.ctors {
+        for f in ci.fields {
+          if not derived_field_ok(cx1, tid, info.tparams, f.ty) {
+            cx1 = cerr_h(cx1, "cannot derive " ++ dname ++ " for `" ++ info.name ++
+                "`: field `" ++ f.name ++ "` of type " ++ ty_show(cx1.adts, f.ty) ++
+                " is not " ++ adj, dlo, dhi,
+              "a field needs an `impl " ++ dname ++ "` (or one of the type's own parameters)")
+          }
+        }
+      }
+    }
+    di = di + 1
+  }
+  cx1
+}
+
+## Eq and Hash have to be overridden together. The JVM materialises the two
+## dictionaries as the class's equals/hashCode, and every container reaches
+## the relation through that pair; overriding one leaves `a == b` and
+## `map.get(m, b)` answering differently. The orphan rule keeps both impls in
+## the subject's own module, so this module sees the pair or the gap.
+fn check_eq_hash_pairs(cx: Cx, eq_hash_impls: List[(Int, Ty, Int, Int)]) -> Cx = {
+  var cx1 = cx
+  for pr in eq_hash_impls {
+    let (tid, subject, plo, phi) = pr
+    let other = if tid == EQ_ID { HASH_ID } else { EQ_ID }
+    var paired = false
+    for pr2 in eq_hash_impls {
+      let (tid2, subject2, _, _) = pr2
+      # By head, not by subject: `impl[T: Eq] Eq[List[T]]` and
+      # `impl[T: Hash] Hash[List[T]]` name different type variables, so the
+      # subjects are not equal even though the pair is exactly the one this
+      # rule wants. The two need not carry the same bounds either -- each
+      # asks for the capability it uses (trait-v2-design §3.10).
+      if tid2 == other && head_of(subject2) == head_of(subject) { paired = true }
+    }
+    if not paired {
+      let tn = trait_of(cx1.traits, tid).name
+      let on = trait_of(cx1.traits, other).name
+      cx1 = cerr_h(cx1, "`impl " ++ tn ++ "[" ++ ty_show(cx1.adts, subject) ++
+          "]` needs a matching `impl " ++ on ++ "`", plo, phi,
+        "equal values must hash alike, or the type breaks as a Map/Set key")
+    }
+  }
+  cx1
+}
+
+## Render a concrete effect for the impl-method error text ("io").
+fn eff_show2(e: Eff) -> String = if e == EIo { "io" } else { "" }
+
+test "impl registration enforces coherence and signature matching" {
+  # trait Eq4[T] { fn eq4(a: T, b: T) -> Bool }  impl Eq4[Int] twice + one bad sig
+  let tm = TraitMethod {
+    name: "eq4",
+    params: [
+      Param { name: "a", tref: TNamed("T", [], 22, 23), lo: 19, hi: 20 },
+      Param { name: "b", tref: TNamed("T", [], 28, 29), lo: 25, hi: 26 }
+    ],
+    ret: TNamed("Bool", [], 34, 38),
+    effs: [],
+    body: no_body(),
+    lo: 14,
+    hi: 38,
+    nlo: 17,
+    nhi: 20
+  }
+  fn good_impl(lo: Int) -> Decl = DImpl([], "Eq4", lo, lo + 3, TNamed("Int", [], lo + 4, lo + 7), [FnDecl {
+    is_pub: false,
+    name: "eq4",
+    tparams: no_tparams(),
+    params: [
+      Param { name: "a", tref: TNamed("Int", [], 0, 1), lo: 0, hi: 1 },
+      Param { name: "b", tref: TNamed("Int", [], 2, 3), lo: 2, hi: 3 }
+    ],
+    ret: Some(TNamed("Bool", [], 4, 8)),
+    effs: no_effs(),
+    body: EBool(true, 9, 13),
+    lo: 0,
+    hi: 13,
+    nlo: 0,
+    nhi: 3
+  }], [], lo, lo + 20)
+  let m = Module { decls: [
+    DTrait("Eq4", "T", 10, 11, [tm], [], false, 0, 40, 6, 9),
+    good_impl(50),
+    good_impl(80)
+  ] }
+  var cx = seed_prelude(test_cx())
+  cx = pass_register_traits(cx, m)
+  let none_shells: List[Option[Shell]] = []
+  let (cxri, _) = pass_register_impls(cx, m, none_shells)
+  cx = cxri
+  assert len(cx.diags) == 1
+  assert str.contains(cx.diags[0].msg, "duplicate impl: `Eq4[Int]`")
+  assert len(cx.local_impls) == 1
+  # a missing method reports with the expected render
+  let m2 = Module { decls: [
+    DTrait("Eq5", "T", 10, 11, [TraitMethod { ..tm, name: "eq5" }], [], false, 0, 40, 6, 9),
+    DImpl([], "Eq5", 50, 53, TNamed("Int", [], 54, 57), no_fn_decls(), [], 50, 70)
+  ] }
+  var cx2 = seed_prelude(test_cx())
+  cx2 = pass_register_traits(cx2, m2)
+  let (cxri2, _) = pass_register_impls(cx2, m2, none_shells)
+  cx2 = cxri2
+  assert len(cx2.diags) == 1
+  assert str.contains(cx2.diags[0].msg, "is missing `eq5`")
+  assert cx2.diags[0].hint == "provide: fn eq5(a: Int, b: Int) -> Bool"
+}
+
+## Resolve `[T: Ord + Show]` bounds against the visible traits, aligned per
+## parameter (the Kotlin resolveBounds).
+pub fn resolve_bounds(cx: Cx, tparams: List[TypeParamDecl]) -> (Cx, List[List[Int]]) = {
+  var all_empty = true
+  for tp in tparams {
+    if len(tp.bounds) > 0 { all_empty = false }
+  }
+  if all_empty {
+    let none: List[List[Int]] = []
+    return (cx, none)
+  }
+  var cx1 = cx
+  var out: List[List[Int]] = []
+  for tp in tparams {
+    var bnames: List[String] = []
+    for b in tp.bounds { bnames = bnames ++ [b.name] }
+    if dup_names(bnames) {
+      cx1 = cerr(cx1, "duplicate trait bound on `" ++ tp.name ++ "`", tp.lo, tp.hi)
+    }
+    var ids: List[Int] = []
+    for b in tp.bounds {
+      match map.get(cx1.traits_by_name, b.name) {
+        None -> {
+          let hint = match suggest.hint(b.name, map.keys(cx1.traits_by_name)) {
+            Some(h) -> h
+            None -> "declare `trait " ++ b.name ++ "[T] { ... }` or import it first"
+          }
+          cx1 = cerr_h(cx1, "unknown trait: " ++ b.name, b.lo, b.hi, hint)
+        }
+        Some(tid) -> {
+          var have = false
+          for x in ids {
+            if x == tid { have = true }
+          }
+          if not have { ids = ids ++ [tid] }
+        }
+      }
+    }
+    out = out ++ [ids]
+  }
+  (cx1, out)
+}
+
+## Pass 3: function signatures. Returns the per-decl signature list (aligned
+## with module_fns order) plus per-decl effect-variable tables for body checks.
+pub fn pass_fn_signatures(cx: Cx, m: Module) -> (Cx, List[Sig], List[Map[String, Eff]]) !io = {
+  var cx1 = cx
+  var sigs: List[Sig] = []
+  var evs: List[Map[String, Eff]] = []
+  for d in module_fns(m) {
+    var tpnames: List[String] = []
+    for tp in d.tparams { tpnames = tpnames ++ [tp.name] }
+    if dup_names(tpnames) {
+      cx1 = cerr(cx1, "duplicate type parameter names", d.nlo, d.nhi)
+    }
+    var tvars: List[Ty] = []
+    var tp_scope: Map[String, Ty] = map.empty()
+    for tp in d.tparams {
+      let (cx2, v) = fresh_tvar(cx1, tp.name)
+      cx1 = cx2
+      tvars = tvars ++ [v]
+      tp_scope = map.insert(tp_scope, tp.name, v)
+    }
+    let saved_tp = cx1.current_tparams
+    let saved_ev = cx1.current_eff_vars
+    let empty_ev: Map[String, Eff] = map.empty()
+    cx1 = Cx { ..cx1, current_tparams: tp_scope, current_eff_vars: empty_ev }
+    # bounds resolve before the parameter types, so a `T.Item` in one can
+    # find its trait (assoc-types-design.md D2)
+    let (cxbd, constraints) = resolve_bounds(cx1, d.tparams)
+    cx1 = cxbd
+    var fbd = cx1.current_tparam_bounds
+    var fbi = 0
+    for v in tvars {
+      match v {
+        TyVar(_, fvid) -> {
+          fbd = map.insert(fbd, fvid,
+            if fbi < len(constraints) { constraints[fbi] } else { [] })
+        }
+        _ -> ()
+      }
+      fbi = fbi + 1
+    }
+    cx1 = Cx { ..cx1, current_tparam_bounds: fbd }
+    let (cx3, eff) = resolve_eff_at(cx1, d.effs, d.nlo, d.nhi)
+    cx1 = cx3
+    let inferring = match d.ret {
+      Some(_) -> false
+      None -> true
+    }
+    var ptys: List[Ty] = []
+    for p in d.params {
+      let (cx4, t) = resolve_type(cx1, p.tref)
+      cx1 = cx4
+      ptys = ptys ++ [t]
+    }
+    let (cx5, ret) = match d.ret {
+      Some(r) -> resolve_type(cx1, r)
+      None -> (cx1, TyError)
+    }
+    cx1 = cx5
+    let ev = cx1.current_eff_vars
+    cx1 = Cx { ..cx1, current_tparams: saved_tp, current_eff_vars: saved_ev }
+    # until the body is checked, an unannotated fn assumes the worst effect
+    let final_eff = if inferring && len(d.effs) == 0 { EIo } else { eff }
+    let sig = Sig {
+      name: d.name,
+      param_tys: ptys,
+      param_names: map(d.params, p => p.name),
+      ret: ret,
+      eff: final_eff,
+      is_builtin: false,
+      tparams: tvars,
+      constraints: constraints,
+      owner: cx1.owner_class,
+      trait_id: None,
+      op_of: None,
+      inferring: inferring
+    }
+    sigs = sigs ++ [sig]
+    evs = evs ++ [ev]
+    # a top-level fn may shadow a builtin, a std name, or a prelude trait
+    # method (spec §10.6)
+    cx1 = bind_fn(cx1, d.name, sig, OLocal("function"), d.nlo, d.nhi)
+  }
+  (cx1, sigs, evs)
+}
+
+test "Eq and Hash resolve as bounds like any other trait" {
+  let cx = seed_prelude(test_cx())
+  let tp = (names: List[String]) => [TypeParamDecl {
+    name: "T",
+    bounds: map(names, n => Bound { name: n, lo: 0, hi: 1 }),
+    lo: 0,
+    hi: 1
+  }]
+  let (cx1, bs) = resolve_bounds(cx, tp(["Eq", "Hash"]))
+  assert len(cx1.diags) == 0
+  assert bs[0] == [EQ_ID, HASH_ID]
+  # and they compose with Ord, which shares the rail
+  let (cx2, bs2) = resolve_bounds(cx, tp(["Ord", "Eq"]))
+  assert len(cx2.diags) == 0
+  assert bs2[0] == [ORD_ID, EQ_ID]
+}
+
+test "fn signatures resolve with bounds and worst-effect inference" {
+  # fn f[T: Ord](x: T) -> T   and   fn g(x: Int) = x  (inferring → io placeholder)
+  let m = Module { decls: [
+    DFn(FnDecl {
+      is_pub: false,
+      name: "f",
+      tparams: [TypeParamDecl {
+        name: "T",
+        bounds: [Bound { name: "Ord", lo: 9, hi: 12 }],
+        lo: 6,
+        hi: 12
+      }],
+      params: [Param { name: "x", tref: TNamed("T", [], 17, 18), lo: 14, hi: 15 }],
+      ret: Some(TNamed("T", [], 23, 24)),
+      effs: no_effs(),
+      body: EVar("x", 27, 28),
+      lo: 0,
+      hi: 28,
+      nlo: 3,
+      nhi: 4
+    }),
+    DFn(FnDecl {
+      is_pub: false,
+      name: "g",
+      tparams: no_tparams(),
+      params: [Param { name: "x", tref: TNamed("Int", [], 36, 39), lo: 33, hi: 34 }],
+      ret: None,
+      effs: no_effs(),
+      body: EVar("x", 43, 44),
+      lo: 30,
+      hi: 44,
+      nlo: 33,
+      nhi: 34
+    })
+  ] }
+  var cx = seed_prelude(test_cx())
+  let (cx1, sigs, evs) = pass_fn_signatures(cx, m)
+  assert len(cx1.diags) == 0
+  assert sig_render(cx1.adts, cx1.traits, sigs[0]) == "fn f[T: Ord](x: T) -> T"
+  assert sigs[1].inferring
+  assert sigs[1].eff == EIo
+  assert map.get(cx1.fns, "g") == Some(sigs[1])
+}
+
+## Pass 3.5: constant declarations — types only (initializers run later, after
+## signature inference). The Kotlin declareConst.
+## Also returns each declared type (aligned with module_consts; None where the
+## name was skipped for alias/import clashes), for initializer checking.
+pub fn pass_const_decls(cx: Cx, m: Module) -> (Cx, List[Option[Ty]]) !io = {
+  var cx1 = cx
+  var decl_tys: List[Option[Ty]] = []
+  var all: Set[String] = set.empty()
+  for d in module_consts(m) { all = set.insert(all, d.name) }
+  cx1 = Cx { ..cx1, all_const_names: all }
+  for d in module_consts(m) {
+    if alias_shadows(cx1, d.name) {
+      cx1 = alias_shadow(cx1, d.name, d.nlo, d.nhi)
+      decl_tys = decl_tys ++ [no_ty2()]
+      continue
+    }
+    if import_clashes(cx1, d.name) {
+      cx1 = import_clash(cx1, d.name, d.nlo, d.nhi, "constant")
+      decl_tys = decl_tys ++ [no_ty2()]
+      continue
+    }
+    let empty_tp: Map[String, Ty] = map.empty()
+    let empty_ev: Map[String, Eff] = map.empty()
+    cx1 = Cx { ..cx1, current_tparams: empty_tp, current_eff_vars: empty_ev }
+    let (cx2, declared0) = resolve_type(cx1, d.ann)
+    cx1 = cx2
+    var declared = declared0
+    if not is_const_serializable(cx1, declared, set.empty()) && declared != TyError {
+      cx1 = cerr_h(cx1, "`" ++ ty_show(cx1.adts, declared) ++
+          "` is not a constant-serializable type", t_lo2(d.ann), t_hi2(d.ann),
+        "constants hold Int/Float/Bool/String/Unit and List/tuple/record/ADT values built " ++
+          "from them (spec §7.2)")
+      declared = TyError
+    }
+    # the initializer still checks against the annotation as written (the
+    # Kotlin resolvedAnn survives the constType poisoning)
+    decl_tys = decl_tys ++ [Some(declared0)]
+    if map.has(cx1.ctors_by_name, d.name) || map.has(cx1.adts_by_name, d.name) ||
+      map.has(cx1.traits_by_name, d.name) {
+        cx1 = cerr(cx1, "`" ++ d.name ++ "` collides with a type, trait, or constructor name",
+          d.nlo, d.nhi)
+      } else if map.has(cx1.consts, d.name) {
+        cx1 = cerr(cx1, "constant `" ++ d.name ++ "` is defined twice", d.nlo, d.nhi)
+      } else {
+        cx1 = Cx {
+          ..cx1,
+          consts: map.insert(cx1.consts, d.name, declared),
+          const_order: cx1.const_order ++ [d.name]
+        }
+      }
+  }
+  (cx1, decl_tys)
+}
+
+## Pass 4: the entry point check (main's shape and visibility).
+pub fn pass_main_check(cx: Cx, m: Module, sigs: List[Sig]) -> Cx = {
+  var cx1 = cx
+  var i = 0
+  for d in module_fns(m) {
+    if d.name == "main" {
+      let sig = sigs[i]
+      if len(sig.param_tys) > 0 || sig.ret != TyUnit {
+        cx1 = cerr(cx1, "main must have the signature fn main() -> Unit !io", d.nlo, d.nhi)
+      }
+      if not d.is_pub {
+        cx1 = cerr_h(cx1, "main must be pub", d.nlo, d.nhi, "write pub fn main() -> Unit !io")
+      }
+      # main is the outermost frame: there is no caller to hand it evidence,
+      # so a declared effect that reaches it is one nobody ever answered
+      # (docs/effects-design.md §4.2)
+      for l in eff_labels(sig.eff) {
+        let (_, nm) = l
+        cx1 = cerr_h(cx1, "main cannot declare the effect `" ++ nm ++ "`", d.nlo, d.nhi,
+          "nothing calls main, so nothing can answer it: install the handler inside " ++
+            "main with `with handle " ++ nm ++ " { ... }`")
+      }
+    }
+    i = i + 1
+  }
+  cx1
+}
+
+test "const declarations register in order with serializability checks" {
+  let m = Module { decls: [
+    DConst("A", false, TNamed("Int", [], 9, 12), EInt(1, 15, 16), 0, 16, 6, 7),
+    DConst("B", false,
+      TNamed("Map", [TNamed("Int", [], 30, 33), TNamed("Int", [], 35, 38)], 26, 39),
+      EInt(0, 42, 43), 20, 43, 26, 27),
+    DConst("A", false, TNamed("Int", [], 55, 58), EInt(2, 61, 62), 46, 62, 52, 53)
+  ] }
+  var cx = seed_prelude(test_cx())
+  let (cxcd, _) = pass_const_decls(cx, m)
+  cx = cxcd
+  assert cx.const_order == ["A", "B"]
+  assert map.get(cx.consts, "B") == Some(TyError)
+  assert len(cx.diags) == 2
+  assert str.contains(cx.diags[0].msg, "not a constant-serializable type")
+  assert cx.diags[1].msg == "constant `A` is defined twice"
+}
+
+test "main shape violations are reported" {
+  let m = Module { decls: [DFn(FnDecl {
+    is_pub: false,
+    name: "main",
+    tparams: no_tparams(),
+    params: no_params2(),
+    ret: Some(TNamed("Int", [], 20, 23)),
+    effs: ["io"],
+    body: EInt(0, 26, 27),
+    lo: 0,
+    hi: 27,
+    nlo: 3,
+    nhi: 7
+  })] }
+  var cx = seed_prelude(test_cx())
+  let (cx1, sigs, evs) = pass_fn_signatures(cx, m)
+  let cx2 = pass_main_check(cx1, m, sigs)
+  assert len(cx2.diags) == 2
+  assert cx2.diags[0].msg == "main must have the signature fn main() -> Unit !io"
+  assert cx2.diags[1].msg == "main must be pub"
+}
+
+# ---- expression checking (pass 5 groundwork) ----
+#
+# Each check function returns (Cx, Ty, TExpr): the type for the checker's own
+# reasoning, the typed node for comptime/codegen. Kotlin's checkExpr writes the
+# type onto the AST node; here the TExpr simply carries what it needs.
+
+# ---- module exports and imports (spec §10) ----
+
+## The bundled modules that exist to hold a representation, not to be called:
+## `Map`/`Set` are `std/hamt` and `List` is `std/pvec`. They are `pub` because
+## std/map, std/set and the lowering of a list primitive call into them, and
+## bundled std has no visibility level below `pub` — so the boundary is here
+## instead, next to `internal_builtins`, which draws the same line for the
+## `map_*`/`array_*` intrinsic names (audit RD-06).
+##
+## The point is that the representation can be replaced whole. Nothing outside
+## std may name it, so replacing it cannot break a program.
+pub fn internal_std_modules() -> List[String] = ["std/hamt", "std/pvec"]
+
+## Subject and verb together: one substrate is plural and the other is not, so
+## the sentence cannot hardcode either.
+fn substrate_of(path: String) -> String =
+  if path == "std/hamt" {
+    "`Map` and `Set` are"
+  } else {
+    "`List` is"
+  }
+
+fn substrate_use(path: String) -> String =
+  if path == "std/hamt" {
+    "use std/map or std/set"
+  } else {
+    "use std/list, or the builtin list operations"
+  }
+
+## Resolve module imports: whole-module `use` decls become aliases; selective
+## `use m.{...}` decls inject the named pub members (the Kotlin processImports).
+## `env` maps modPath → exports for every module checked before this one.
+pub fn pass_imports(cx: Cx, m: Module, env: Map[String, ModExports]) -> Cx = {
+  var cx1 = cx
+  for u in module_uses(m) {
+    if not cx.is_std_module && list.contains(internal_std_modules(), u.path) {
+      cx1 = cerr_h(cx1, "`" ++ u.path ++ "` is internal to the standard library",
+        u.nlo, u.nhi,
+        "it is how " ++ substrate_of(u.path) ++
+          " represented, not a container of its own: " ++ substrate_use(u.path))
+      continue
+    }
+    let exp = match map.get(env, u.path) {
+      None -> {
+        # std paths never reach the module loader, so unknown ones report here
+        if len(u.segs) > 0 && u.segs[0] == "std" {
+          var std_names: List[String] = []
+          for k in map.keys(env) {
+            if str.starts_with(k, "std/") { std_names = std_names ++ [k] }
+          }
+          cx1 = cerr_h(cx1, "no bundled std module `" ++ u.path ++ "`", u.nlo, u.nhi,
+            "bundled modules: " ++ join(sort(std_names), ", "))
+        }
+        continue
+      }
+      Some(e) -> e
+    }
+    # graft the exporter's table fragments into this checker's id tables
+    var adts2 = cx1.adts
+    for k in map.keys(exp.adt_infos) {
+      match map.get(exp.adt_infos, k) {
+        Some(v) -> { adts2 = map.insert(adts2, k, v) }
+        None -> ()
+      }
+    }
+    var traits2 = cx1.traits
+    for k in map.keys(exp.trait_infos) {
+      match map.get(exp.trait_infos, k) {
+        Some(v) -> { traits2 = map.insert(traits2, k, v) }
+        None -> ()
+      }
+    }
+    var effs2 = cx1.effect_infos
+    for k in map.keys(exp.effect_infos) {
+      match map.get(exp.effect_infos, k) {
+        Some(v) -> { effs2 = map.insert(effs2, k, v) }
+        None -> ()
+      }
+    }
+    cx1 = Cx { ..cx1, adts: adts2, traits: traits2, effect_infos: effs2 }
+    match u.selective {
+      None -> {
+        match map.get(cx1.module_aliases, u.alias_name) {
+          Some(prev_path) ->
+            if prev_path != exp.mod_path {
+              cx1 = cerr_h(cx1, "module alias `" ++ u.alias_name ++
+                  "` is imported from two modules (`" ++ prev_path ++ "` and `" ++
+                  exp.mod_path ++ "`)", u.nlo, u.nhi,
+                "rename with selective imports, or reorganize the modules")
+            }
+          None -> ()
+        }
+        var mfs = cx1.module_fn_sigs
+        for fname in map.keys(exp.fns) {
+          match map.get(exp.fns, fname) {
+            Some(sig) -> { mfs = map.insert(mfs, (u.alias_name, fname), sig) }
+            None -> ()
+          }
+        }
+        cx1 = Cx {
+          ..cx1,
+          module_aliases: map.insert(cx1.module_aliases, u.alias_name, exp.mod_path),
+          module_fn_sigs: mfs,
+          module_exports: map.insert(cx1.module_exports, u.alias_name, exp)
+        }
+      }
+      Some(names) -> {
+        for imp in names {
+          cx1 = inject_selective(cx1, u.path, exp, imp.name, imp.lo, imp.hi)
+        }
+      }
+    }
+  }
+  cx1
+}
+
+fn inject_selective(
+  cx: Cx,
+  from_path: String,
+  exp: ModExports,
+  name: String,
+  lo: Int,
+  hi: Int
+) -> Cx = {
+  var cx1 = cx
+  let f = map.get(exp.fns, name)
+  let ty = map.get(exp.types_by_name, name)
+  let cn = map.get(exp.consts, name)
+  let ct = map.get(exp.ctors, name)
+  let al = map.get(exp.aliases, name)
+  let tr = map.get(exp.traits_by_name, name)
+  let ef = map.get(exp.effects, name)
+  let nothing = f == None && ty == None && cn == None && ct == None && al == None &&
+    tr == None && ef == None
+  if nothing {
+    var known = false
+    for n in exp.all_names {
+      if n == name { known = true }
+    }
+    if known {
+      return cerr_h(cx1, "`" ++ name ++ "` is private to module `" ++ from_path ++ "`",
+        lo, hi, "add `pub` to its declaration in " ++ from_path)
+    }
+    let pool = map.keys(exp.fns) ++ map.keys(exp.types_by_name) ++ map.keys(exp.consts) ++
+      map.keys(exp.ctors) ++ map.keys(exp.traits_by_name) ++ map.keys(exp.effects)
+    return cerr_o(cx1, "module `" ++ from_path ++ "` has no exported name `" ++ name ++ "`",
+      lo, hi, suggest.hint(name, pool))
+  }
+  match map.get(cx1.imported_names, name) {
+    Some(prev) -> {
+      # an operation registered by `use m.{E}` (design D8) may also be named in
+      # that same `use` list: redundant, not a second import
+      let redundant = prev == from_path && rode_in_as_op(cx1, name, prev)
+      if not redundant {
+        return import_dup(cx1, name, prev, from_path, f, lo, hi)
+      }
+    }
+    None -> ()
+  }
+  cx1 = Cx { ..cx1, imported_names: map.insert(cx1.imported_names, name, from_path) }
+  match f {
+    Some(sig) -> { cx1 = bind_fn(cx1, name, sig, OImport(from_path), lo, hi) }
+    None -> ()
+  }
+  # a type brings its constructors (spec §10.3); a ctor may also be named directly
+  match ty {
+    Some(aid) -> {
+      var cbn = cx1.ctors_by_name
+      let a = adt_of(cx1.adts, aid)
+      var i = 0
+      for c in a.ctors {
+        cbn = map.insert(cbn, c.name, (aid, i))
+        i = i + 1
+      }
+      cx1 = Cx {
+        ..cx1,
+        adts_by_name: map.insert(cx1.adts_by_name, name, aid),
+        ctors_by_name: cbn
+      }
+    }
+    None -> ()
+  }
+  match al {
+    Some(ae) -> {
+      cx1 = Cx { ..cx1, aliases: map.insert(cx1.aliases, name, AliasE { ..ae, target: no_tref() }) }
+      match map.get(exp.alias_resolved, name) {
+        Some(t) -> {
+          cx1 = Cx { ..cx1, alias_resolved: map.insert(cx1.alias_resolved, name, t) }
+        }
+        None -> ()
+      }
+    }
+    None -> ()
+  }
+  match ct {
+    Some(k) -> { cx1 = Cx { ..cx1, ctors_by_name: map.insert(cx1.ctors_by_name, name, k) } }
+    None -> ()
+  }
+  match cn {
+    Some(t) -> {
+      cx1 = Cx {
+        ..cx1,
+        consts: map.insert(cx1.consts, name, t),
+        const_order: cx1.const_order ++ [name]
+      }
+    }
+    None -> ()
+  }
+  match tr {
+    Some(tid) -> { cx1 = Cx { ..cx1, traits_by_name: map.insert(cx1.traits_by_name, name, tid) } }
+    None -> ()
+  }
+  # an imported effect brings its operations, as a type brings its
+  # constructors: `use m.{Ask}` is what makes both `!Ask` and `ask()` sayable
+  match ef {
+    Some(eid) -> {
+      cx1 = Cx { ..cx1, effects: map.insert(cx1.effects, name, eid) }
+      for op in effect_of(cx1, eid).ops {
+        match map.get(exp.fns, op) {
+          Some(sg) -> {
+            cx1 = bind_fn(cx1, op, sg, OImport(from_path), lo, hi)
+            # an operation is a name this module can now say, so every other
+            # namespace's clash check has to see it the way it sees a spelled
+            # import. Without this, `use a.{A}` + `use b.{B}` differed only by
+            # line order and said nothing (design D8, §3.4 measurement 3).
+            if not map.has(cx1.imported_names, op) {
+              cx1 = Cx { ..cx1, imported_names: map.insert(cx1.imported_names, op, from_path) }
+            }
+          }
+          None -> ()
+        }
+      }
+    }
+    None -> ()
+  }
+  cx1
+}
+
+# ---- what the passes reach for last ----
+
+## `derive Ord` on a generic type: one bound per type parameter, on the trait
+## being derived. `Box[T]` orders exactly as far as `T` does, and saying so at
+## the declaration is what the error this replaces could not do.
+fn derive_constraints(tparams: List[Ty], tid: Int) -> List[List[Int]] = {
+  var out: List[List[Int]] = []
+  for _tp in tparams { out = out ++ [[tid]] }
+  out
+}
+
+fn no_tref() -> Option[TypeRef] = None
+
+fn no_ty2() -> Option[Ty] = None
+
+fn no_msigs(n: Int) -> List[Option[Sig]] = {
+  var out: List[Option[Sig]] = []
+  for _i in 0 ..n { out = out ++ [no_sig()] }
+  out
+}

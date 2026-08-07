@@ -1,0 +1,2541 @@
+# Function-body code generation (spec §12.2): Core IR → JVM bytecode through
+# an ASM ClassWriter. State lives in the Gen record, threaded exactly
+# like the checker's Cx. Every gen_* returns (Gen, Bool): the Bool is "falls
+# through" (false = control already transferred).
+#
+# This file used to consume TAST directly and was twice this size. What is
+# gone -- the match decision tree, `for`/`while` shape, `?`/`!`, string
+# interpolation, lambda capture analysis, the boxing decision, the self tail
+# call rewrite -- did not move to another JVM file: it moved to lower.dawn,
+# where the C backend reads it too. What is left is the part that is
+# genuinely about this machine: slots, descriptors, stack discipline,
+# closure classes, and `use java`.
+#
+# Function values used to be an `invokedynamic` over LambdaMetafactory. They
+# are ordinary classes now (docs/jvm-base-plan.md K-A3): a class per closure
+# site implementing `dawn/rt/FnN`, with the captures in fields. The reason is
+# not speed -- it is that a method-handle constant in the pool is a hard
+# parse error below class-file version 50, and that is where these classes
+# emit now (K-A4). scripts/constpool-scan.py keeps the pool clear of them.
+
+use std/str
+use std/list
+use std/map
+use std/set
+use check/types.{
+  intr_at, Rt, RtStrings, RtBytes, RtArray, RtIo, peel_opaque, cast_target,
+  Ty, TyInt, TyFloat, TyBool, TyString, TyBytes, TyUnit, TyNever,
+  TyError, TyVar, TyAssoc, TyAdt, TyList, TyMap, TySet, TyArray, TyJava, TyTuple, TyFn,
+  Adts, AdtI, CtorI, FieldI, adt_of, adt_jvm_name, ctor_jvm_name,
+  Sym, Sig, Eff, eff_labels, Traits, TraitI, MethodSig, ImplI, trait_of, ORD_ID, EQ_ID, HASH_ID,
+  builtins,
+  Impls, impl_at, reduce_via_bindings
+}
+use check/tast.{TJavaCall, TFun, TModule, TBinOp, BEq, BNeq, BLt, BLe, BGt, BGe}
+use ir/interp.{CtOut}
+use jvm/codegen.{
+  desc_of, method_desc, JvmRepr, jvm_repr, RLong, RDouble, RBool, RRef, RBottom, slots_of,
+  is_bottom, load_slot, hash_of, dict_class, gen_adt, gen_ctor_class, parameterised_scaffold,
+  dict_arg_field, dict_ctor_desc, EqOverride, no_override, singleton_scaffold, subject_name
+}
+use jvm/rtclasses.{
+  obj, fn_iface, tuple_class, erased_apply_desc, push_unit, tr_iface, append_const, close_mv,
+  PANIC_CLASS, UNIT_CLASS, SB, SHOW_CLASS, BYTES_CLASS, IO_CLASS, STRINGS_CLASS, HAMT_CLASS,
+  PVEC_CLASS, PVEC_MOD, FN_CMP_CLASS, ARRAYLIST, ARRAY_CLASS
+}
+use jvm/jvmhelp.{
+  ldc_str, ldc_class, ldc_long, ldc_double, push_int, store_slot, pop_value, internal_of,
+  emit_scalar_cmp, emit_div_zero_check, gen_equality, gen_ordering, adapt_java_arg, new_array,
+  emit_list_bridge
+}
+use ir/core.{
+  CValue, VInt, VFloat, VBool, VStr, VUnit, VList, VTuple, VAdt,
+  CExpr, CStmt, CCallee, CFun, CModule, CParam, CDictDef, CDictSlot,
+  CInt, CFloat, CBool, CStr, CUnit, CLocal, CFnRef, CCall, CIntrinsic,
+  CCtor, CField, CIsCtor, CTagOf, CClosure, CTuple, CTupleGet, CBox, CUnbox,
+  CBinary, CUnary, CIf, CBlock, CListLit, CConstRef, CComptime,
+  CReturn, CBreak, CContinue, CForeign, CDup, CJava, CDictRef, CDictApply, CDictArg,
+  CSLet, CSAssign, CSDiscard, CSLoop, CSIf, CSDrop,
+  CDirect, CDynamic, CMethod, CImpl, CDefault,
+  CAdd, CSub, CMul, CDiv, CMod, CEq, CNe, CLt, CLe, CGt, CGe, CAnd, COr,
+  CBand, CBor, CBxor, CShl, CShr, CUshr, CConcat, CNeg, CNot, CBnot,
+  CBinOp, CUnOp, cex_ty, CSlotFn, CSlotDefault
+}
+use ir/lower.{LMod}
+use jvm/jreflect
+use java "dawn.rt.Asm"
+use java "dawn.rt.AsmWriter"
+use java "org.objectweb.asm.ClassWriter"
+use java "org.objectweb.asm.MethodVisitor"
+use java "org.objectweb.asm.Label"
+use java "java.lang.System"
+use jvm/jvmops.{
+  ACC_ABSTRACT, ACC_FINAL, ACC_INTERFACE, ACC_PRIVATE, ACC_PROTECTED, ACC_PUBLIC, ACC_STATIC,
+  COMPUTE_FRAMES, OP_AASTORE, OP_ACC_SYNTHETIC, OP_ACONST_NULL, OP_ALOAD, OP_ARETURN, OP_ARRAYLENGTH, OP_ASTORE,
+  OP_ATHROW, OP_BASTORE, OP_CASTORE, OP_CHECKCAST, OP_D2F, OP_D2L, OP_DADD, OP_DASTORE, OP_DDIV,
+  OP_DLOAD, OP_DMUL, OP_DNEG, OP_DREM, OP_DRETURN, OP_DSUB, OP_DUP, OP_DUP_X1, OP_F2D, OP_FASTORE, OP_FLOAD,
+  OP_FRETURN, OP_GETFIELD, OP_GETSTATIC, OP_GOTO, OP_I2L, OP_IADD, OP_IASTORE,
+  OP_ICONST_0, OP_ICONST_1, OP_ICONST_M1, OP_IFEQ, OP_IFNE, OP_IFNONNULL, OP_IFNULL, OP_IF_ACMPEQ,
+  OP_IF_ACMPNE, OP_IF_ICMPEQ, OP_IF_ICMPGE, OP_IF_ICMPLT, OP_IF_ICMPNE, OP_ILOAD, OP_IMUL,
+  OP_INSTANCEOF, OP_INVOKEINTERFACE, OP_INVOKESPECIAL, OP_INVOKESTATIC, OP_INVOKEVIRTUAL,
+  OP_IRETURN, OP_ISUB, OP_IXOR, OP_L2D, OP_L2I, OP_LADD, OP_LAND, OP_LASTORE, OP_LCMP,
+  OP_LCONST_1, OP_LDIV, OP_LLOAD, OP_LMUL, OP_LNEG, OP_LOR, OP_LREM, OP_LRETURN, OP_LSHL, OP_LSHR,
+  OP_LSTORE, OP_LSUB, OP_LUSHR, OP_LXOR, OP_NEW, OP_POP, OP_PUTFIELD, OP_PUTSTATIC, OP_RETURN,
+  OP_SASTORE, OP_SWAP, V52
+}
+
+# ---- the emitted program's own names ----
+
+## The static field `main` stashes `argv` in, so `args()` can read it back.
+pub const ARGS_FIELD: String = "dawn\$args"
+
+# ---- GenCtx and Gen: the module's fixed facts, and the threaded state ----
+
+## A SAM bridge to emit: (arg idx, iface fqcn, sam name, sam params, sam ret).
+pub type SamB = { name: String, iface: String, sam_name: String, sam_params: List[String], sam_ret: String }
+
+## A closure class to emit, one per `CClosure` site.
+##
+## This is what LambdaMetafactory used to spin at run time and now is not:
+## a class implementing `FnN`, holding the captures in fields, whose `apply`
+## unerases its arguments, calls the hoisted body and boxes the result. The
+## adaptation LMF performed between the erased `(Object..)Object` and the
+## body's concrete signature is exactly the `unerase`/`box_ty` pair the
+## dynamic-call path (`gen_cdynamic`) already spells in the other direction.
+pub type ClosB = {
+  cls: String,
+  iface: String,
+  arity: Int,
+  cap_tys: List[Ty],
+  fps: List[Ty],
+  fret: Ty,
+  owner: String,
+  target: String,
+  impl_desc: String
+}
+
+## A SAM adapter class: the same substitution on the `use java` path.
+##
+## Simpler than `ClosB` because the bridge already does every conversion --
+## LMF was handed the same method type twice here (sam == instantiated), so
+## the adapter only forwards.
+pub type SamC = {
+  cls: String,
+  iface: String,
+  sam_name: String,
+  sam_params: List[String],
+  sam_ret: String,
+  arity: Int,
+  bridge_owner: String,
+  bridge: String,
+  bridge_desc: String
+}
+
+pub type ConstF = { fname: String, v: CValue, ty: Ty }
+
+## What is true of the whole module before the first method opens: `emit_module`
+## is handed all of it and nothing writes it again.
+##
+## It is split off `Gen` rather than left inside it because a value nobody
+## writes never has to be handed *back*. Every generator already returns its
+## `Gen`; adding a read-only record to the parameter list leaves every return
+## type alone, which is the whole reason the split is worth its diff. Splitting
+## the mutable half further would not have that property -- two threaded halves
+## means two of them in every result tuple.
+pub type GenCtx = {
+  class_name: String,
+  adts: Adts,
+  traits: Traits,
+  impl_table: Impls,
+  # program-wide (class name, fn name) → declared signature
+  prog_fns: Map[(String, String), Sig],
+  # the dictionaries lowering built for this class, deduplicated by key and
+  # kept in the order they were asked for. This is Core's own table: naming a
+  # dictionary from anything else is how the JVM backend spent a release not
+  # noticing the table was wrong.
+  dicts: List[CDictDef],
+  consts: Map[String, CValue],
+  blocks: Map[(Int, Int), CValue]
+}
+
+## The half that moves: a cursor into the method being written, plus the two
+## tables that accumulate across the class (`lift_descs`, the const pool).
+##
+## `slots` and `syms` are here because `gen_cbody` does not reset them -- it
+## resets `mv`, `next_slot`, `method_ret`, `rets_null`, `cloops` and nothing
+## else. They are classified by what the code does, not by what a per-method
+## cursor would ideally hold.
+pub type Gen = {
+  mv: MethodVisitor,
+  # descriptors of the bodies lowering hoisted into this class, which have no
+  # declared signature to look up. Filled in one pass before the first method
+  # is written: a body may call one that is hoisted after it, and the
+  # descriptor has to be known at the call site. Lowering already hoists each
+  # body once per module, so this table no longer doubles as "already
+  # written" the way it did when the JVM path lowered function by function.
+  lift_descs: Map[(String, String), String],
+  syms: Map[Int, Sym],
+  slots: Map[Int, Int],
+  next_slot: Int,
+  method_ret: Ty,
+  rets_null: Bool,
+  # Core names its loops, so leaving a non-innermost one is ordinary rather
+  # than impossible
+  cloops: List[(Int, Label, Label)],
+  sam_ctr: Int,
+  pending_sam: List[SamB],
+  # the classes that replaced the two invokedynamic sites. They are whole
+  # class files rather than methods on the module's writer, so unlike
+  # `pending_sam` they are not drained into `cw` -- `emit_module` appends
+  # them to its own result, next to the dictionary classes.
+  clos_ctr: Int,
+  closures: List[ClosB],
+  sam_classes: List[SamC],
+  const_fields: List[ConstF],
+  const_by_key: Map[String, String]
+}
+
+fn sym_of(g: Gen, id: Int) -> Sym =
+  match map.get(g.syms, id) {
+    Some(s) -> s
+    None -> panic("codegen: unknown symbol id ${id}")
+  }
+
+fn slot_of(g: Gen, id: Int) -> Int =
+  match map.get(g.slots, id) {
+    Some(s) -> s
+    None -> panic("codegen: symbol ${id} has no slot")
+  }
+
+fn bind_slot(g: Gen, id: Int, slot: Int) -> Gen !io =
+  Gen { ..g, slots: map.insert(g.slots, id, slot) }
+
+fn alloc(g: Gen, n: Int) -> (Gen, Int) =
+  (Gen { ..g, next_slot: g.next_slot + n }, g.next_slot)
+
+fn load_var(g: Gen, id: Int) -> Unit !io =
+  load_slot(g.mv, sym_of(g, id).ty, slot_of(g, id))
+
+fn store_var(g: Gen, id: Int) -> Unit !io =
+  store_slot(g.mv, sym_of(g, id).ty, slot_of(g, id))
+
+## Box a primitive about to sit in an erased Object position.
+fn box_ty(m: MethodVisitor, t: Ty) -> Unit !io = {
+  match jvm_repr(t) {
+    RLong -> {
+      m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Long", "valueOf", "(J)Ljava/lang/Long;", false)
+    }
+    RDouble -> {
+      m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Double", "valueOf",
+        "(D)Ljava/lang/Double;", false)
+    }
+    RBool -> {
+      m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Boolean", "valueOf",
+        "(Z)Ljava/lang/Boolean;", false)
+    }
+    # a reference is already an Object -- Unit included, it is the singleton;
+    # the bottom types have nothing on the stack to box
+    RRef | RBottom -> ()
+  }
+  ()
+}
+
+## The stack holds an erased Object; recover the concrete type.
+fn unerase(gx: GenCtx, g: Gen, t: Ty) -> Unit !io = {
+  let m = g.mv
+  match t {
+    TyOpaque(_, _, _, tgt) -> unerase(gx, g, tgt)
+    TyInt -> {
+      m.visitTypeInsn(OP_CHECKCAST, "java/lang/Long")
+      m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/Long", "longValue", "()J", false)
+    }
+    TyFloat -> {
+      m.visitTypeInsn(OP_CHECKCAST, "java/lang/Double")
+      m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/Double", "doubleValue", "()D", false)
+    }
+    TyBool -> {
+      m.visitTypeInsn(OP_CHECKCAST, "java/lang/Boolean")
+      m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/Boolean", "booleanValue", "()Z", false)
+    }
+    TyString -> { m.visitTypeInsn(OP_CHECKCAST, "java/lang/String") }
+    TyBytes -> { m.visitTypeInsn(OP_CHECKCAST, "[B") }
+    TyAdt(aid, _) -> { m.visitTypeInsn(OP_CHECKCAST, adt_jvm_name(adt_of(gx.adts, aid))) }
+    TyList(_) -> { m.visitTypeInsn(OP_CHECKCAST, PVEC_CLASS) }
+    TyMap(_, _) -> { m.visitTypeInsn(OP_CHECKCAST, HAMT_CLASS) }
+    TySet(_) -> { m.visitTypeInsn(OP_CHECKCAST, HAMT_CLASS) }
+    TyArray(_) -> { m.visitTypeInsn(OP_CHECKCAST, ARRAY_CLASS) }
+    TyTuple(elems) -> { m.visitTypeInsn(OP_CHECKCAST, tuple_class(len(elems))) }
+    TyJava(fqcn, _) -> { m.visitTypeInsn(OP_CHECKCAST, internal_of(fqcn)) }
+    TyFn(params, _, _) -> { m.visitTypeInsn(OP_CHECKCAST, fn_iface(len(params))) }
+    TyUnit -> { m.visitTypeInsn(OP_CHECKCAST, UNIT_CLASS) }
+    # TyVar (and a projection over one) is already erased, and the two
+    # bottom types carry no value
+    TyVar(_, _) | TyAssoc(_, _, _) | TyNever | TyError -> ()
+  }
+  ()
+}
+
+## The class `unerase` would check against, as a name rather than as an
+## emitted instruction. `cast` needs the same decision as a `Class` operand,
+## because its check happens inside a runtime method instead of here
+## (codegen.gen_cast), and taking it from a second table is how the two
+## would come to disagree about, say, whether a `Set` is a HAMT.
+##
+## The two places it cannot mirror an instruction: `unerase` unboxes after
+## checking a primitive's box, which a `Class` cannot express -- and does not
+## need to, since the checker refuses a primitive target for both spellings --
+## and it emits nothing for the erased types, where `Object` is the class that
+## accepts everything, which is the same answer as no check at all.
+fn unerase_class(adts: Adts, t: Ty) -> String =
+  match t {
+    TyOpaque(_, _, _, tgt) -> unerase_class(adts, tgt)
+    TyInt -> "java/lang/Long"
+    TyFloat -> "java/lang/Double"
+    TyBool -> "java/lang/Boolean"
+    TyString -> "java/lang/String"
+    TyBytes -> "[B"
+    TyAdt(aid, _) -> adt_jvm_name(adt_of(adts, aid))
+    TyList(_) -> PVEC_CLASS
+    TyMap(_, _) -> HAMT_CLASS
+    TySet(_) -> HAMT_CLASS
+    TyArray(_) -> ARRAY_CLASS
+    TyTuple(elems) -> tuple_class(len(elems))
+    TyJava(fqcn, _) -> internal_of(fqcn)
+    TyFn(params, _, _) -> fn_iface(len(params))
+    TyUnit -> UNIT_CLASS
+    TyVar(_, _) | TyAssoc(_, _, _) | TyNever | TyError -> obj()
+  }
+
+# ---- descriptor plumbing over Java class NAMES (Class.getName forms) ----
+
+## Class name → JVM descriptor: primitives map, arrays are already close
+## ("[Ljava.lang.String;" wants '/'), references get L…; .
+pub fn jdesc(cls: String) -> String =
+  if cls == "int" { "I" } else if cls == "long" { "J" } else if cls == "short" { "S" }
+  else if cls == "byte" { "B" } else if cls == "char" { "C" } else if cls == "boolean" { "Z" }
+  else if cls == "float" { "F" } else if cls == "double" { "D" } else if cls == "void" { "V" }
+  else if str.starts_with(cls, "[") { join(str.split(cls, "."), "/") }
+  else { "L" ++ join(str.split(cls, "."), "/") ++ ";" }
+
+fn jmethod_desc(param_cls: List[String], ret_cls: String) -> String = {
+  var ps = ""
+  for p in param_cls { ps = ps ++ jdesc(p) }
+  "(" ++ ps ++ ")" ++ jdesc(ret_cls)
+}
+
+# ---- signature-derived descriptors ----
+
+## fn descriptor with the hidden dictionary params appended (dicts = Object).
+fn sig_desc_with_dicts(adts: Adts, s: Sig) -> String = {
+  var ps = ""
+  for p in s.param_tys { ps = ps ++ desc_of(adts, p) }
+  var dicts = 0
+  for c in s.constraints { dicts = dicts + len(c) }
+  for _i in 0 ..dicts { ps = ps ++ "Ljava/lang/Object;" }
+  # one evidence parameter per declared effect, after the dictionaries. A
+  # label's id is its evidence record's ADT id, so the descriptor is exact --
+  # no erasure, and the field reads inside need no cast
+  for l in eff_labels(s.eff) {
+    let (eid, _) = l
+    ps = ps ++ desc_of(adts, TyAdt(eid, []))
+  }
+  "(" ++ ps ++ ")" ++ desc_of(adts, s.ret)
+}
+
+fn fn_desc_with_dicts(gx: GenCtx, s: Sig) -> String = sig_desc_with_dicts(gx.adts, s)
+
+fn trait_method_desc(gx: GenCtx, s: Sig) -> String = method_desc(gx.adts, s.param_tys, s.ret)
+
+## impl method static name: dawn$impl$<Trait>$<Subject>$<m>.
+fn impl_method_name(gx: GenCtx, trait_name: String, subject: Ty, m: String) -> String =
+  "dawn\$impl\$" ++ trait_name ++ "\$" ++ subject_name(gx.adts, subject) ++ "\$" ++ m
+
+fn default_method_name(trait_name: String, m: String) -> String =
+  "dawn\$default\$" ++ trait_name ++ "\$" ++ m
+
+## impl-method descriptor for lambdas/bridges: concrete types, but a bottom
+## return (Never) becomes Object, because the erased `apply` has to return
+## something and a body that never returns names no type of its own.
+fn impl_desc_of(gx: GenCtx, params: List[Ty], ret: Ty) -> String = {
+  var ps = ""
+  for p in params { ps = ps ++ desc_of(gx.adts, p) }
+  let r = if is_bottom(ret) { "Ljava/lang/Object;" } else { desc_of(gx.adts, ret) }
+  "(" ++ ps ++ ")" ++ r
+}
+
+# ---- the classes that replaced invokedynamic ----
+
+## Where a generated closure or SAM adapter class lives. Same shape as
+## `dict_class`: one namespace for compiler-synthesised classes, with the
+## owning module flattened into the name so two modules cannot collide.
+fn closure_class(owner: String, idx: Int) -> String =
+  "dawn/fn/" ++ join(str.split(owner, "/"), "\$") ++ "\$" ++ to_string(idx)
+
+fn sam_class(owner: String, idx: Int) -> String =
+  "dawn/sam/" ++ join(str.split(owner, "/"), "\$") ++ "\$" ++ to_string(idx)
+
+fn capture_field(idx: Int) -> String = "c" ++ to_string(idx)
+
+## The load opcode and slot width for a JVM descriptor, for the one place
+## that has descriptors rather than `Ty`s: a SAM adapter forwards Java types
+## it was handed by reflection and never had a Dawn type for.
+fn jload_of(desc: String) -> (Int, Int) =
+  if str.starts_with(desc, "J") { (OP_LLOAD, 2) }
+  else if str.starts_with(desc, "D") { (OP_DLOAD, 2) }
+  else if str.starts_with(desc, "F") { (OP_FLOAD, 1) }
+  else if str.starts_with(desc, "L") || str.starts_with(desc, "[") { (OP_ALOAD, 1) }
+# the rest of the JVM's primitives -- int, short, byte, char, boolean --
+# all live in an int-sized slot and load the same way
+else { (OP_ILOAD, 1) }
+
+fn jreturn_of(desc: String) -> Int =
+  if str.starts_with(desc, "J") { OP_LRETURN }
+  else if str.starts_with(desc, "D") { OP_DRETURN }
+  else if str.starts_with(desc, "F") { OP_FRETURN }
+  else if str.starts_with(desc, "V") { OP_RETURN }
+  else if str.starts_with(desc, "L") || str.starts_with(desc, "[") { OP_ARETURN }
+  else { OP_IRETURN }
+
+# ---- witness / signature lookup ----
+
+fn impl_of(gx: GenCtx, tid: Int, subject: Ty) -> ImplI =
+  match impl_at(gx.impl_table, tid, subject) {
+    Some(i) -> i
+    None -> panic("codegen: no impl for trait ${tid}")
+  }
+
+fn trait_method_sig(tr: TraitI, name: String) -> Sig = {
+  for entry in tr.methods {
+    let (mn, ms) = entry
+    if mn == name { return ms.sig }
+  }
+  panic("codegen: trait `" ++ tr.name ++ "` has no method `" ++ name ++ "`")
+}
+
+## The trait method's signature with the subject substituted for the tvar and
+## projections rewritten to the impl's bindings — the concrete shape of the
+## impl's provided static (checker verified match). The binding RHS goes in
+## verbatim, mirroring lower.dawn's subst_subject: the impl method's declared
+## signature is the descriptor, so `Cur = Int` is an I slot and `Item = T`
+## stays an erased Object one.
+fn subst_subject(tr: TraitI, s: Sig, subject: Ty, bindings: List[(String, Ty)]) -> Sig = {
+  let vid = match tr.tvar {
+    TyVar(_, v) -> v
+    _ -> panic("trait tvar")
+  }
+  var ps: List[Ty] = []
+  for p in s.param_tys {
+    ps = ps ++ [reduce_via_bindings(subst_tvar(p, vid, subject), tr.id, subject, bindings)]
+  }
+  Sig {
+    ..s,
+    param_tys: ps,
+    ret: reduce_via_bindings(subst_tvar(s.ret, vid, subject), tr.id, subject, bindings)
+  }
+}
+
+fn subst_tvar(t: Ty, vid: Int, to: Ty) -> Ty =
+  match t {
+    TyVar(_, v) -> if v == vid { to } else { t }
+    TyAssoc(s, tid, n) -> TyAssoc(subst_tvar(s, vid, to), tid, n)
+    TyOpaque(id, n, ow, tgt) -> TyOpaque(id, n, ow, subst_tvar(tgt, vid, to))
+    TyList(e) -> TyList(subst_tvar(e, vid, to))
+    TyMap(k, v2) -> TyMap(subst_tvar(k, vid, to), subst_tvar(v2, vid, to))
+    TySet(e) -> TySet(subst_tvar(e, vid, to))
+    TyArray(e) -> TyArray(subst_tvar(e, vid, to))
+    TyTuple(es) -> {
+      var out: List[Ty] = []
+      for e in es { out = out ++ [subst_tvar(e, vid, to)] }
+      TyTuple(out)
+    }
+    TyAdt(aid, args) -> {
+      var out: List[Ty] = []
+      for a in args { out = out ++ [subst_tvar(a, vid, to)] }
+      TyAdt(aid, out)
+    }
+    TyFn(ps, r, e) -> {
+      var out: List[Ty] = []
+      for p in ps { out = out ++ [subst_tvar(p, vid, to)] }
+      TyFn(out, subst_tvar(r, vid, to), e)
+    }
+    # the variants with no type arguments to walk into. Spelled out rather than
+    # left to a wildcard: a new *parameterised* variant landing here would
+    # silently stop substituting, which shows up as a wrong descriptor much
+    # later
+    TyInt | TyFloat | TyBool | TyString | TyBytes -> t
+    TyUnit | TyNever | TyError | TyJava(_, _) -> t
+  }
+
+fn gen_load_const(gx: GenCtx, g: Gen, v: CValue, t: Ty, key: String) -> Gen !io = {
+  match v {
+    VInt(x) -> {
+      ldc_long(g.mv, x)
+      g
+    }
+    VFloat(x) -> {
+      ldc_double(g.mv, x)
+      g
+    }
+    VBool(x) -> {
+      g.mv.visitInsn(if x { OP_ICONST_1 } else { OP_ICONST_0 })
+      g
+    }
+    VStr(x) -> {
+      ldc_str(g.mv, x)
+      g
+    }
+    # inline like the other scalars rather than through a static field: there
+    # is one Unit, so the singleton *is* the constant
+    VUnit -> {
+      push_unit(g.mv)
+      g
+    }
+    _ -> {
+      let (g1, fname) = match map.get(g.const_by_key, key) {
+        Some(f) -> (g, f)
+        None -> {
+          let f = "dawn\$const\$" ++ to_string(len(g.const_fields))
+          (Gen {
+            ..g,
+            const_fields: g.const_fields ++ [ConstF { fname: f, v: v, ty: t }],
+            const_by_key: map.insert(g.const_by_key, key, f)
+          }, f)
+        }
+      }
+      g1.mv.visitFieldInsn(OP_GETSTATIC, gx.class_name, fname, desc_of(gx.adts, t))
+      g1
+    }
+  }
+}
+
+## Emit bytecode that rebuilds a comptime value (boxed = erased position).
+fn construct_value(gx: GenCtx, m: MethodVisitor, v: CValue, boxed: Bool) -> Unit !io = {
+  match v {
+    VInt(x) -> {
+      ldc_long(m, x)
+      if boxed {
+        m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Long", "valueOf",
+          "(J)Ljava/lang/Long;", false)
+      }
+    }
+    VFloat(x) -> {
+      ldc_double(m, x)
+      if boxed {
+        m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Double", "valueOf",
+          "(D)Ljava/lang/Double;", false)
+      }
+    }
+    VBool(x) -> {
+      m.visitInsn(if x { OP_ICONST_1 } else { OP_ICONST_0 })
+      if boxed {
+        m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Boolean", "valueOf",
+          "(Z)Ljava/lang/Boolean;", false)
+      }
+    }
+    VStr(x) -> { ldc_str(m, x) }
+    # boxed or not, a Unit is the singleton -- there is nothing to widen
+    VUnit -> push_unit(m)
+    VList(elems) -> {
+      # a comptime list is materialised the way a list literal is: pushed
+      # onto an `Array` and handed to the vector
+      m.visitMethodInsn(OP_INVOKESTATIC, ARRAY_CLASS, "array_new",
+        "()L" ++ ARRAY_CLASS ++ ";", false)
+      for el in elems {
+        construct_value(gx, m, el, true)
+        m.visitMethodInsn(OP_INVOKESTATIC, ARRAY_CLASS, "array_push",
+          "(L" ++ ARRAY_CLASS ++ ";Ljava/lang/Object;)L" ++ ARRAY_CLASS ++ ";", false)
+      }
+      m.visitMethodInsn(OP_INVOKESTATIC, "std/pvec", "from_array",
+        "(L" ++ ARRAY_CLASS ++ ";)L" ++ PVEC_CLASS ++ ";", false)
+    }
+    VTuple(elems) -> {
+      let cls = tuple_class(len(elems))
+      m.visitTypeInsn(OP_NEW, cls)
+      m.visitInsn(OP_DUP)
+      for el in elems { construct_value(gx, m, el, true) }
+      var ps = ""
+      for _i in 0 ..len(elems) { ps = ps ++ "Ljava/lang/Object;" }
+      m.visitMethodInsn(OP_INVOKESPECIAL, cls, "<init>", "(" ++ ps ++ ")V", false)
+    }
+    VAdt(aid, cidx, fields) -> {
+      let a = adt_of(gx.adts, aid)
+      let ci = a.ctors[cidx]
+      let sub = ctor_jvm_name(gx.adts, ci)
+      if len(ci.fields) == 0 {
+        m.visitFieldInsn(OP_GETSTATIC, sub, "INSTANCE", "L" ++ sub ++ ";")
+      } else {
+        m.visitTypeInsn(OP_NEW, sub)
+        m.visitInsn(OP_DUP)
+        var i = 0
+        for f in fields {
+          let boxed2 = match ci.fields[i].ty {
+            TyVar(_, _) -> true
+            _ -> false
+          }
+          construct_value(gx, m, f, boxed2)
+          i = i + 1
+        }
+        var ps = ""
+        for fd in ci.fields { ps = ps ++ desc_of(gx.adts, fd.ty) }
+        m.visitMethodInsn(OP_INVOKESPECIAL, sub, "<init>", "(" ++ ps ++ ")V", false)
+      }
+    }
+    _ -> panic("a function value cannot be a constant (checker bug)")
+  }
+  ()
+}
+
+fn gen_const_fields(gx: GenCtx, g: Gen, cw: ClassWriter) -> Unit !io = {
+  if len(g.const_fields) == 0 { return () }
+  for f in g.const_fields {
+    Asm.fieldOn(cw, ACC_PUBLIC + ACC_STATIC + ACC_FINAL, f.fname, desc_of(gx.adts, f.ty))
+  }
+  let cl = Asm.methodOn(cw, ACC_STATIC, "<clinit>", "()V").expect("mv")
+  cl.visitCode()
+  for f in g.const_fields {
+    construct_value(gx, cl, f.v, false)
+    cl.visitFieldInsn(OP_PUTSTATIC, gx.class_name, f.fname, desc_of(gx.adts, f.ty))
+  }
+  cl.visitInsn(OP_RETURN)
+  close_mv(cl)
+  ()
+}
+
+## The return instruction follows the *representation*, so this asks the one
+## total function rather than testing types by hand: a chain of `t == Ty...`
+## here is unreachable by the exhaustiveness checker, and its else-branch
+## returns void -- a new variant would silently emit a method that drops its
+## own result (S0.3, and an opaque type is how that was found).
+fn emit_method_return(g: Gen) -> Unit !io = {
+  match jvm_repr(g.method_ret) {
+    RLong -> { g.mv.visitInsn(OP_LRETURN) }
+    RDouble -> { g.mv.visitInsn(OP_DRETURN) }
+    RBool -> { g.mv.visitInsn(OP_IRETURN) }
+    RRef -> { g.mv.visitInsn(OP_ARETURN) }
+    # `Never` behind an erased `apply` still has to hand something back: the
+    # body cannot fall through here, but the verifier does not know that.
+    RBottom ->
+      if g.rets_null {
+        push_unit(g.mv)
+        g.mv.visitInsn(OP_ARETURN)
+      } else {
+        g.mv.visitInsn(OP_RETURN)
+      }
+  }
+  ()
+}
+
+fn tyfn_parts(t: Ty) -> (List[Ty], Ty) =
+  match t {
+    TyFn(ps, r, _) -> (ps, r)
+    _ -> panic("expected a fn type")
+  }
+
+## The string/list/map/io half of the intrinsic contract, as one table.
+## Every entry lowers to a single INVOKESTATIC into a backend runtime class;
+## the descriptor is `method_desc` of the builtin signature and each arg is
+## adapted to its declared slot, so only the (class, method) pair varies here.
+## `None` means the builtin is not a plain runtime call — it has bespoke
+## bytecode in gen_builtin_call (panic, len, expect, cursor_slice, …). A second
+## backend re-implements these same names against its own runtime.
+## The JVM class each runtime module is. The *which module* half is declared
+## with the intrinsic (types.intrinsics); this is the only part that is the
+## JVM's business, which is what makes the same table usable by emitc.
+fn rt_class(o: Rt) -> String =
+  match o {
+    RtStrings -> STRINGS_CLASS
+    RtBytes -> BYTES_CLASS
+    RtArray -> ARRAY_CLASS
+    RtIo -> IO_CLASS
+  }
+
+## Where a primitive lives on this backend: its module's class, and its own
+## name. The name is not a lookup -- a runtime method is spelled exactly as the
+## intrinsic is, which is why `gen_strings_class` and friends read like the
+## table does.
+fn rt_intrinsic_class(name: String) -> Option[String] =
+  match intr_at(name) {
+    Some(i) ->
+      match i.rt {
+        Some(o) -> Some(rt_class(o))
+        None -> None
+      }
+    None -> None
+  }
+
+fn array_store_op(component: String) -> Int =
+  if component == "long" { OP_LASTORE } else if component == "int" { OP_IASTORE }
+  else if component == "double" { OP_DASTORE } else if component == "float" { OP_FASTORE }
+  else if component == "boolean" || component == "byte" { OP_BASTORE }
+  else if component == "short" { OP_SASTORE } else if component == "char" { OP_CASTORE }
+  else { OP_AASTORE }
+
+fn sam_conv_at(call: TJavaCall, i: Int) -> Option[(Int, String, String, List[String], String)] = {
+  for c in call.sam_convs {
+    let (idx, _, _, _, _) = c
+    if idx == i { return Some(c) }
+  }
+  None
+}
+
+fn is_list_bridge(call: TJavaCall, i: Int) -> Bool = {
+  for b in call.list_bridges {
+    if b == i { return true }
+  }
+  false
+}
+
+## A Dawn fn value → an instance of the target functional interface (§9.4).
+fn emit_sam_conversion(
+  gx: GenCtx,
+  g: Gen,
+  conv: (Int, String, String, List[String], String),
+  ft: Ty
+) -> Gen !io = {
+  let (_, iface, sam_name, sam_params, sam_ret) = conv
+  let (fps, _) = tyfn_parts(ft)
+  let n = len(fps)
+  let bridge = "dawn\$sam\$" ++ to_string(g.sam_ctr)
+  let g1 = Gen {
+    ..g,
+    sam_ctr: g.sam_ctr + 1,
+    pending_sam: g.pending_sam ++ [SamB {
+      name: bridge,
+      iface: iface,
+      sam_name: sam_name,
+      sam_params: sam_params,
+      sam_ret: sam_ret
+    }]
+  }
+  var pdescs = ""
+  for p in sam_params { pdescs = pdescs ++ jdesc(p) }
+  let bridge_desc = "(L" ++ fn_iface(n) ++ ";" ++ pdescs ++ ")" ++ jdesc(sam_ret)
+  let cls = sam_class(gx.class_name, g.sam_ctr)
+  let g2 = Gen {
+    ..g1,
+    sam_classes: g1.sam_classes ++ [SamC {
+      cls: cls,
+      iface: internal_of(iface),
+      sam_name: sam_name,
+      sam_params: sam_params,
+      sam_ret: sam_ret,
+      arity: n,
+      bridge_owner: gx.class_name,
+      bridge: bridge,
+      bridge_desc: bridge_desc
+    }]
+  }
+  # the `FnN` this wraps is already on the stack, put there by the argument
+  # that is being adapted. `new` cannot go under it without moving it, so the
+  # uninitialised reference is threaded past it instead: NEW, DUP_X1, SWAP
+  # leaves (cls, cls, fn) with both copies of the receiver below the argument,
+  # which is what `<init>` wants. One word each, so no DUP2 forms are needed.
+  g2.mv.visitTypeInsn(OP_NEW, cls)
+  g2.mv.visitInsn(OP_DUP_X1)
+  g2.mv.visitInsn(OP_SWAP)
+  g2.mv.visitMethodInsn(OP_INVOKESPECIAL, cls, "<init>",
+    "(L" ++ fn_iface(n) ++ ";)V", false)
+  g2
+}
+
+## One SAM adapter class: a field holding the `FnN`, and the interface method
+## forwarding to the bridge that was already being emitted next to it.
+fn gen_sam_class(supers: List[String], s: SamC) -> (String, Bytes) !io = {
+  let fnd = "L" ++ fn_iface(s.arity) ++ ";"
+  let cw = AsmWriter.of(COMPUTE_FRAMES, supers).expect("writer")
+  Asm.beginOnWithInterface(cw, V52, ACC_PUBLIC + ACC_FINAL, s.cls, obj(), s.iface)
+  Asm.fieldOn(cw, ACC_PRIVATE + ACC_FINAL, capture_field(0), fnd)
+  let init = Asm.methodOn(cw, ACC_PUBLIC, "<init>", "(" ++ fnd ++ ")V").expect("mv")
+  init.visitCode()
+  init.visitVarInsn(OP_ALOAD, 0)
+  init.visitMethodInsn(OP_INVOKESPECIAL, obj(), "<init>", "()V", false)
+  init.visitVarInsn(OP_ALOAD, 0)
+  init.visitVarInsn(OP_ALOAD, 1)
+  init.visitFieldInsn(OP_PUTFIELD, s.cls, capture_field(0), fnd)
+  init.visitInsn(OP_RETURN)
+  close_mv(init)
+  var pdescs = ""
+  for p in s.sam_params { pdescs = pdescs ++ jdesc(p) }
+  let rd = jdesc(s.sam_ret)
+  let m = Asm.methodOn(cw, ACC_PUBLIC, s.sam_name,
+    "(" ++ pdescs ++ ")" ++ rd).expect("mv")
+  m.visitCode()
+  m.visitVarInsn(OP_ALOAD, 0)
+  m.visitFieldInsn(OP_GETFIELD, s.cls, capture_field(0), fnd)
+  # LMF was handed the same method type as both sam and instantiated type
+  # here, so there is nothing to adapt: the parameters go to the bridge in
+  # the shape they arrived in, and the bridge does every conversion.
+  var slot = 1
+  for p in s.sam_params {
+    let (op, w) = jload_of(jdesc(p))
+    m.visitVarInsn(op, slot)
+    slot = slot + w
+  }
+  m.visitMethodInsn(OP_INVOKESTATIC, s.bridge_owner, s.bridge, s.bridge_desc, false)
+  m.visitInsn(jreturn_of(rd))
+  close_mv(m)
+  cw.visitEnd()
+  (s.cls, cw.toByteArray().expect("bytes"))
+}
+
+fn adapt_one_java_arg(gx: GenCtx, g: Gen, call: TJavaCall, i: Int, aty: Ty, param: String) -> Gen !io = {
+  match sam_conv_at(call, i) {
+    Some(conv) -> emit_sam_conversion(gx, g, conv, aty)
+    None -> {
+      if is_list_bridge(call, i) {
+        emit_list_bridge(g.mv)
+      } else {
+        adapt_java_arg(g.mv, aty, param)
+      }
+      g
+    }
+  }
+}
+
+## The arguments of one Java call (§9.3): fixed part, then the variadic pack.
+fn gen_java_args(gx: GenCtx, g: Gen, jc: CJava) -> (Gen, Bool) !io = {
+  let call = jc.call
+  let fixed = match call.varargs_pack {
+    Some(p) -> p
+    None -> len(jc.args)
+  }
+  var g1 = g
+  var i = 0
+  while i < fixed {
+    let (g2, falls) = gen_cexpr(gx, g1, jc.args[i], false)
+    g1 = g2
+    if not falls { return (g1, false) }
+    g1 = adapt_one_java_arg(gx, g1, call, i, jc.arg_tys[i], call.param_cls[i])
+    i = i + 1
+  }
+  match call.varargs_pack {
+    None -> (g1, true)
+    Some(pack) -> {
+      let last = call.param_cls[len(call.param_cls) - 1]
+      let component = match jreflect.component_of(last) {
+        Some(c) -> c
+        None -> panic("variadic parameter is not an array")
+      }
+      push_int(g1.mv, len(jc.args) - pack)
+      new_array(g1.mv, component)
+      let store = array_store_op(component)
+      var k = pack
+      while k < len(jc.args) {
+        g1.mv.visitInsn(OP_DUP)
+        push_int(g1.mv, k - pack)
+        let (g2, falls) = gen_cexpr(gx, g1, jc.args[k], false)
+        g1 = g2
+        if not falls { return (g1, false) }
+        g1 = adapt_one_java_arg(gx, g1, call, k, jc.arg_tys[k], component)
+        g1.mv.visitInsn(store)
+        k = k + 1
+      }
+      (g1, true)
+    }
+  }
+}
+
+## Type.new(args): direct construction — never null, no Option wrap.
+fn gen_java_new(gx: GenCtx, g: Gen, jc: CJava) -> (Gen, Bool) !io = {
+  let call = jc.call
+  let owner = internal_of(call.fqcn)
+  g.mv.visitTypeInsn(OP_NEW, owner)
+  g.mv.visitInsn(OP_DUP)
+  let (g1, falls) = gen_java_args(gx, g, jc)
+  if not falls { return (g1, false) }
+  g1.mv.visitMethodInsn(OP_INVOKESPECIAL, owner, "<init>",
+    jmethod_desc(call.param_cls, "void"), false)
+  (g1, true)
+}
+
+## Reference on the stack → Some(ref) / None (§9.2).
+fn wrap_nullable_in_option(g: Gen) -> Gen !io = {
+  let (ga, tmp) = alloc(g, 1)
+  let g1 = ga
+  g1.mv.visitVarInsn(OP_ASTORE, tmp)
+  let non_null = Label.new()
+  let end = Label.new()
+  g1.mv.visitVarInsn(OP_ALOAD, tmp)
+  g1.mv.visitJumpInsn(OP_IFNONNULL, non_null)
+  g1.mv.visitFieldInsn(OP_GETSTATIC, "Option\$None", "INSTANCE", "LOption\$None;")
+  g1.mv.visitTypeInsn(OP_CHECKCAST, "Option")
+  g1.mv.visitJumpInsn(OP_GOTO, end)
+  g1.mv.visitLabel(non_null)
+  g1.mv.visitTypeInsn(OP_NEW, "Option\$Some")
+  g1.mv.visitInsn(OP_DUP)
+  g1.mv.visitVarInsn(OP_ALOAD, tmp)
+  g1.mv.visitMethodInsn(OP_INVOKESPECIAL, "Option\$Some", "<init>", "(Ljava/lang/Object;)V", false)
+  g1.mv.visitTypeInsn(OP_CHECKCAST, "Option")
+  g1.mv.visitLabel(end)
+  g1
+}
+
+## Class.FIELD — GETSTATIC then the same value adaptation as a method return
+## (§9.2): small ints/floats widen, references wrap in Option (spec §9.1).
+fn gen_java_field(g: Gen, call: TJavaCall) -> (Gen, Bool) !io = {
+  let owner = internal_of(call.decl_cls)
+  g.mv.visitFieldInsn(OP_GETSTATIC, owner, call.method, jdesc(call.ret_cls))
+  var g1 = g
+  let rc = call.ret_cls
+  if rc == "int" || rc == "short" || rc == "byte" {
+    g1.mv.visitInsn(OP_I2L)
+  } else if rc == "float" {
+    g1.mv.visitInsn(OP_F2D)
+  } else if rc == "long" || rc == "double" || rc == "boolean" {
+    ()
+  } else {
+    g1 = wrap_nullable_in_option(g1)
+  }
+  (g1, true)
+}
+
+fn gen_java_call(gx: GenCtx, g: Gen, jc: CJava, ty: Ty) -> (Gen, Bool) !io = {
+  let call = jc.call
+  let owner = internal_of(call.decl_cls)
+  let itf = match jreflect.find_class(call.decl_cls) {
+    Some(j) -> j.is_interface
+    None -> false
+  }
+  var g1 = g
+  if not call.is_static {
+    match jc.target {
+      Some(t) -> {
+        let (g2, falls) = gen_cexpr(gx, g1, t, false)
+        g1 = g2
+        if not falls { return (g1, false) }
+      }
+      None -> ()
+    }
+  }
+  let (g3, falls2) = gen_java_args(gx, g1, jc)
+  g1 = g3
+  if not falls2 { return (g1, false) }
+  let opcode = if call.is_static { OP_INVOKESTATIC }
+  else if itf { OP_INVOKEINTERFACE } else { OP_INVOKEVIRTUAL }
+  g1.mv.visitMethodInsn(opcode, owner, call.method,
+    jmethod_desc(call.param_cls, call.ret_cls), itf)
+  # returns (§9.2): small ints widen, floats widen, references wrap in Option
+  let rc = call.ret_cls
+  if rc == "int" || rc == "short" || rc == "byte" {
+    g1.mv.visitInsn(OP_I2L)
+  } else if rc == "float" {
+    g1.mv.visitInsn(OP_F2D)
+  } else if rc == "void" {
+    # `void` is the one Java type with no value, and it maps to Dawn's `Unit`,
+    # which has one. The singleton is where that value comes from -- this is
+    # the boundary, not a special case in the interior.
+    push_unit(g1.mv)
+  } else if rc == "long" || rc == "double" || rc == "boolean" {
+  } else {
+    g1 = wrap_nullable_in_option(g1)
+  }
+  (g1, true)
+}
+
+## static <samRet> dawn$sam$N(FnN f, <sam params>): null-check references,
+## box to the erased Fn convention, invoke, adapt the result (§9.4).
+fn gen_sam_bridge(g: Gen, cw: ClassWriter, b: SamB) -> Gen !io = {
+  let n = len(b.sam_params)
+  var pdescs = ""
+  for p in b.sam_params { pdescs = pdescs ++ jdesc(p) }
+  let desc = "(L" ++ fn_iface(n) ++ ";" ++ pdescs ++ ")" ++ jdesc(b.sam_ret)
+  # public for the same reason a hoisted body is: the adapter class that
+  # calls this bridge is a separate class file (gen_sam_class)
+  let m = Asm.methodOn(cw, ACC_PUBLIC + ACC_STATIC + OP_ACC_SYNTHETIC,
+    b.name, desc).expect("mv")
+  m.visitCode()
+  m.visitVarInsn(OP_ALOAD, 0)
+  var slot = 1
+  var i = 0
+  for p in b.sam_params {
+    if p == "long" {
+      m.visitVarInsn(OP_LLOAD, slot)
+      slot = slot + 2
+      m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Long", "valueOf", "(J)Ljava/lang/Long;", false)
+    } else if p == "int" || p == "short" || p == "byte" {
+      m.visitVarInsn(OP_ILOAD, slot)
+      slot = slot + 1
+      m.visitInsn(OP_I2L)
+      m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Long", "valueOf", "(J)Ljava/lang/Long;", false)
+    } else if p == "double" {
+      m.visitVarInsn(OP_DLOAD, slot)
+      slot = slot + 2
+      m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Double", "valueOf",
+        "(D)Ljava/lang/Double;", false)
+    } else if p == "float" {
+      m.visitVarInsn(OP_FLOAD, slot)
+      slot = slot + 1
+      m.visitInsn(OP_F2D)
+      m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Double", "valueOf",
+        "(D)Ljava/lang/Double;", false)
+    } else if p == "boolean" {
+      m.visitVarInsn(OP_ILOAD, slot)
+      slot = slot + 1
+      m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/Boolean", "valueOf",
+        "(Z)Ljava/lang/Boolean;", false)
+    } else {
+      m.visitVarInsn(OP_ALOAD, slot)
+      slot = slot + 1
+      let ok = Label.new()
+      m.visitInsn(OP_DUP)
+      m.visitJumpInsn(OP_IFNONNULL, ok)
+      m.visitTypeInsn(OP_NEW, PANIC_CLASS)
+      m.visitInsn(OP_DUP)
+      ldc_str(m, "Java passed null to parameter " ++ to_string(i + 1) ++
+          " of a Dawn callback (" ++ b.iface ++ ")")
+      m.visitMethodInsn(OP_INVOKESPECIAL, PANIC_CLASS, "<init>", "(Ljava/lang/String;)V", false)
+      m.visitInsn(OP_ATHROW)
+      m.visitLabel(ok)
+    }
+    i = i + 1
+  }
+  m.visitMethodInsn(OP_INVOKEINTERFACE, fn_iface(n), "apply", erased_apply_desc(n), true)
+  let rc = b.sam_ret
+  if rc == "void" {
+    m.visitInsn(OP_POP)
+    m.visitInsn(OP_RETURN)
+  } else if rc == "long" {
+    m.visitTypeInsn(OP_CHECKCAST, "java/lang/Long")
+    m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/Long", "longValue", "()J", false)
+    m.visitInsn(OP_LRETURN)
+  } else if rc == "int" || rc == "short" || rc == "byte" {
+    m.visitTypeInsn(OP_CHECKCAST, "java/lang/Long")
+    m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/Long", "longValue", "()J", false)
+    let tmp = slot
+    m.visitVarInsn(OP_LSTORE, tmp)
+    let ok = Label.new()
+    m.visitVarInsn(OP_LLOAD, tmp)
+    m.visitInsn(OP_L2I)
+    m.visitInsn(OP_I2L)
+    m.visitVarInsn(OP_LLOAD, tmp)
+    m.visitInsn(OP_LCMP)
+    m.visitJumpInsn(OP_IFEQ, ok)
+    m.visitTypeInsn(OP_NEW, PANIC_CLASS)
+    m.visitInsn(OP_DUP)
+    ldc_str(m, "Dawn callback returned an Int outside Java int range")
+    m.visitMethodInsn(OP_INVOKESPECIAL, PANIC_CLASS, "<init>", "(Ljava/lang/String;)V", false)
+    m.visitInsn(OP_ATHROW)
+    m.visitLabel(ok)
+    m.visitVarInsn(OP_LLOAD, tmp)
+    m.visitInsn(OP_L2I)
+    m.visitInsn(OP_IRETURN)
+  } else if rc == "boolean" {
+    m.visitTypeInsn(OP_CHECKCAST, "java/lang/Boolean")
+    m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/Boolean", "booleanValue", "()Z", false)
+    m.visitInsn(OP_IRETURN)
+  } else if rc == "double" {
+    m.visitTypeInsn(OP_CHECKCAST, "java/lang/Double")
+    m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/Double", "doubleValue", "()D", false)
+    m.visitInsn(OP_DRETURN)
+  } else if rc == "float" {
+    m.visitTypeInsn(OP_CHECKCAST, "java/lang/Double")
+    m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/Double", "doubleValue", "()D", false)
+    m.visitInsn(OP_D2F)
+    m.visitInsn(OP_FRETURN)
+  } else {
+    m.visitTypeInsn(OP_CHECKCAST, internal_of(rc))
+    m.visitInsn(OP_ARETURN)
+  }
+  close_mv(m)
+  g
+}
+
+# ---- functions and the module class ----
+
+## Generate one static method from its lowered body, followed by the bodies
+## lowering hoisted while lowering it -- ordinary static methods beside it.
+## Everything about a method except its body -- class, name, descriptor,
+## parameter slots -- is set up here.
+fn gen_fn(
+  gx: GenCtx,
+  g: Gen,
+  cw: ClassWriter,
+  cf: CFun,
+  lifts: List[CFun],
+  name: String,
+  desc: String
+) -> Gen !io = {
+  var g0 = gen_cbody(gx, g, cw, cf, name, desc, false)
+  for lf in lifts {
+    g0 = gen_cbody(gx, g0, cw, lf, lf.name, lifted_desc(gx, g0, lf.name), true)
+  }
+  g0
+}
+
+## The descriptor of every hoisted body of this module, before any of them is
+## written: one may call another, and a call site needs the descriptor.
+fn note_lifts(gx: GenCtx, g: Gen, lifts: List[CFun]) -> Gen = {
+  var g1 = g
+  for lf in lifts {
+    var ptys: List[Ty] = []
+    for p in lf.captures { ptys = ptys ++ [p.ty] }
+    for p in lf.params { ptys = ptys ++ [p.ty] }
+    # a dictionary parameter is erased and hidden, but it is still a
+    # parameter: a bridge whose descriptor omitted it verified only because
+    # nothing on the JVM ever called one
+    for _d in lf.dicts { ptys = ptys ++ [TyVar("D", 0)] }
+    for e in lf.evs { ptys = ptys ++ [e.ty] }
+    # A dictionary slot body is called from the dictionary class against
+    # the trait method's own descriptor. Every other hoisted body sits
+    # behind an erased `apply`, where a zero-slot return still has to hand
+    # back a reference -- which is the difference impl_desc_of encodes.
+    let d =
+      if is_slot_target(gx, lf.name) {
+        method_desc(gx.adts, ptys, lf.ret)
+      } else {
+        impl_desc_of(gx, ptys, lf.ret)
+      }
+    g1 = Gen { ..g1, lift_descs: map.insert(g1.lift_descs, (gx.class_name, lf.name), d) }
+  }
+  g1
+}
+
+## Is this hoisted body the target of one of this class's dictionary slots?
+## Those are reached from the dictionary class, which lives in its own
+## package, so they can be neither private nor shaped like a lambda.
+fn is_slot_target(gx: GenCtx, name: String) -> Bool = {
+  for dd in gx.dicts {
+    for s in dd.slots {
+      match s {
+        CSlotFn(owner, n) -> if owner == gx.class_name && n == name { return true }
+        CSlotDefault(_, _) -> ()
+      }
+    }
+  }
+  false
+}
+
+fn lifted_desc(gx: GenCtx, g: Gen, name: String) -> String =
+  match map.get(g.lift_descs, (gx.class_name, name)) {
+    Some(d) -> d
+    None -> panic("codegen: no descriptor for hoisted body `" ++ name ++ "`")
+  }
+
+fn gen_cbody(
+  gx: GenCtx,
+  g: Gen,
+  cw: ClassWriter,
+  cf: CFun,
+  name: String,
+  desc: String,
+  lifted: Bool
+) -> Gen !io = {
+  let slot_body = lifted && is_slot_target(gx, name)
+  # A hoisted body used to be able to stay private: LambdaMetafactory was
+  # handed a Lookup with private access, so the class it spun could reach it.
+  # The closure class this compiler writes instead is an ordinary class in
+  # the same package, and `private` would make every call an
+  # IllegalAccessError at first use rather than at build time.
+  let acc =
+    if not lifted {
+      ACC_PUBLIC + ACC_STATIC
+    } else {
+      ACC_PUBLIC + ACC_STATIC + OP_ACC_SYNTHETIC
+    }
+  let m = Asm.methodOn(cw, acc, name, desc).expect("mv")
+  m.visitCode()
+  var g1 = Gen {
+    ..g,
+    mv: m,
+    next_slot: 0,
+    method_ret: cf.ret,
+    # a lifted body sits behind the erased `apply`, so a zero-slot return
+    # type still has to hand back a reference. A dictionary slot body does
+    # not: it is called against the trait's own descriptor.
+    rets_null: lifted && not slot_body,
+    cloops: []
+  }
+  for p in cf.captures {
+    let (g2, slot) = alloc(g1, slots_of(p.ty))
+    g1 = cbind(g2, p.sym, p.ty, slot)
+  }
+  for p in cf.params {
+    let (g2, slot) = alloc(g1, slots_of(p.ty))
+    g1 = cbind(g2, p.sym, p.ty, slot)
+  }
+  for d in cf.dicts {
+    let (g2, slot) = alloc(g1, slots_of(d.ty))
+    g1 = cbind(g2, d.sym, d.ty, slot)
+  }
+  # evidence sits behind the dictionaries, which is where `sig_desc_with_dicts`
+  # puts it in the descriptor: the two orders are one convention
+  for e in cf.evs {
+    let (g2, slot) = alloc(g1, slots_of(e.ty))
+    g1 = cbind(g2, e.sym, e.ty, slot)
+  }
+  let (g3, falls) = gen_cexpr(gx, g1, cf.body, false)
+  if falls { emit_method_return(g3) }
+  close_mv(m)
+  g3
+}
+
+## Emit the bridges a `use java` argument queued. Lambdas no longer queue:
+## lowering lifts them, so they are emitted with the function they came from.
+fn drain_lambdas(g: Gen, cw: ClassWriter) -> Gen !io = {
+  var g1 = g
+  while len(g1.pending_sam) > 0 {
+    let b = g1.pending_sam[0]
+    g1 = Gen { ..g1, pending_sam: list.drop(g1.pending_sam, 1) }
+    g1 = gen_sam_bridge(g1, cw, b)
+  }
+  g1
+}
+
+## JVM entry wrapper: catch PanicError → stderr + exit 1 (spec §8.2).
+fn gen_jvm_main(gx: GenCtx, cw: ClassWriter) -> Unit !io = {
+  let m = Asm.methodOn(cw, ACC_PUBLIC + ACC_STATIC, "main",
+    "([Ljava/lang/String;)V").expect("mv")
+  m.visitCode()
+  let try_start = Label.new()
+  let try_end = Label.new()
+  let handler = Label.new()
+  m.visitTryCatchBlock(try_start, try_end, handler, PANIC_CLASS)
+  m.visitVarInsn(OP_ALOAD, 0)
+  m.visitFieldInsn(OP_PUTSTATIC, gx.class_name, ARGS_FIELD, "[Ljava/lang/String;")
+  m.visitLabel(try_start)
+  # `main([Ljava/lang/String;)V` is the JVM's own ABI and stays void; Dawn's
+  # `main` is a Unit function like any other and hands its value back.
+  m.visitMethodInsn(OP_INVOKESTATIC, gx.class_name, "main",
+    "()" ++ desc_of(gx.adts, TyUnit), false)
+  m.visitInsn(OP_POP)
+  m.visitLabel(try_end)
+  m.visitInsn(OP_RETURN)
+  m.visitLabel(handler)
+  m.visitVarInsn(OP_ASTORE, 1)
+  m.visitFieldInsn(OP_GETSTATIC, "java/lang/System", "err", "Ljava/io/PrintStream;")
+  m.visitTypeInsn(OP_NEW, SB)
+  m.visitInsn(OP_DUP)
+  m.visitMethodInsn(OP_INVOKESPECIAL, SB, "<init>", "()V", false)
+  ldc_str(m, "panic: ")
+  m.visitMethodInsn(OP_INVOKEVIRTUAL, SB, "append", "(Ljava/lang/String;)L" ++ SB ++ ";", false)
+  m.visitVarInsn(OP_ALOAD, 1)
+  m.visitMethodInsn(OP_INVOKEVIRTUAL, PANIC_CLASS, "getMessage", "()Ljava/lang/String;", false)
+  m.visitMethodInsn(OP_INVOKEVIRTUAL, SB, "append", "(Ljava/lang/String;)L" ++ SB ++ ";", false)
+  m.visitMethodInsn(OP_INVOKEVIRTUAL, SB, "toString", "()Ljava/lang/String;", false)
+  m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/io/PrintStream", "println",
+    "(Ljava/lang/String;)V", false)
+  m.visitInsn(OP_ICONST_1)
+  m.visitMethodInsn(OP_INVOKESTATIC, "java/lang/System", "exit", "(I)V", false)
+  m.visitInsn(OP_RETURN)
+  close_mv(m)
+  ()
+}
+
+## The per-trait dictionary interface: one erased method per trait method.
+pub fn gen_trait_interface(supers: List[String], adts: Adts, tr: TraitI) -> Bytes !io = {
+  let cw = AsmWriter.of(COMPUTE_FRAMES, supers).expect("writer")
+  Asm.beginOn(cw, V52, ACC_PUBLIC + ACC_ABSTRACT + ACC_INTERFACE,
+    tr_iface(tr.owner, tr.name), obj())
+  for entry in tr.methods {
+    let (mn, ms) = entry
+    let m = Asm.methodOn(cw, ACC_PUBLIC + ACC_ABSTRACT, mn,
+      method_desc(adts, ms.sig.param_tys, ms.sig.ret)).expect("mv")
+    m.visitEnd()
+  }
+  cw.visitEnd()
+  cw.toByteArray().expect("bytes")
+}
+
+## The return instruction for a value of declared type `t` on the stack.
+##
+## Asks `jvm_repr` for the same reason `emit_method_return` does: a chain of
+## `t == Ty...` here drops through to void for anything it does not name, and
+## an opaque type over Int is exactly such a thing.
+fn emit_return_of(m: MethodVisitor, t: Ty) -> Unit !io = {
+  match jvm_repr(t) {
+    RLong -> { m.visitInsn(OP_LRETURN) }
+    RDouble -> { m.visitInsn(OP_DRETURN) }
+    RBool -> { m.visitInsn(OP_IRETURN) }
+    RRef -> { m.visitInsn(OP_ARETURN) }
+    RBottom -> { m.visitInsn(OP_RETURN) }
+  }
+  ()
+}
+
+## One test block → one public static method dawn$test$i.
+## A test block is a nullary Unit function, so it goes through the same Core
+## path as any other body -- descriptor included, which is why the runner
+## (testrun.dawn) pops what it hands back.
+fn gen_test(
+  gx: GenCtx,
+  g: Gen,
+  cw: ClassWriter,
+  cf: CFun,
+  lifts: List[CFun],
+  idx: Int
+) -> Gen !io =
+  gen_fn(gx, g, cw, cf, lifts, "dawn\$test\$" ++ to_string(idx), "()" ++ desc_of(gx.adts, TyUnit))
+
+## A throwaway MethodVisitor so Gen can be constructed before the first real
+## method opens (the record field is non-optional by design).
+##
+## The flag is the same one every other writer carries, though nothing here can
+## observe it: `toByteArray` is never called on this writer, so the class it
+## would have written does not exist. Matching the rest is cheaper than a
+## reader wondering why this one differs.
+fn scratch_mv() -> MethodVisitor !io = {
+  let cw = Asm.plain(COMPUTE_FRAMES).expect("writer")
+  Asm.beginOn(cw, V52, ACC_PUBLIC, "dawn/rt/Scratch", obj())
+  Asm.methodOn(cw, ACC_PUBLIC + ACC_STATIC, "scratch", "()V").expect("mv")
+}
+
+## One checked module → its classes: ADTs, trait interfaces, impl
+## Which of this ADT's equals/hashCode an `impl Eq`/`impl Hash` takes over.
+## Only an explicit impl counts: without one the derived structural bodies are
+## already the relation, so nothing changes and nothing is re-emitted.
+fn eq_override(
+  impl_table: Impls,
+  class_name: String,
+  subject: Ty
+) -> EqOverride = {
+  let owner_of = (tid: Int) => {
+    let none: Option[String] = None
+    match impl_at(impl_table, tid, subject) {
+      Some(imp) ->
+        if imp.derived { none } else { Some(owner_or_default(imp.owner, class_name)) }
+      None -> none
+    }
+  }
+  EqOverride { eq_owner: owner_of(EQ_ID), hash_owner: owner_of(HASH_ID) }
+}
+
+fn owner_or_default(o: Option[String], fallback: String) -> String =
+  match o {
+    Some(x) -> x
+    None -> fallback
+  }
+
+## dictionaries and the class of statics.
+##
+## `impl_table` is still a parameter, but it no longer says anything about
+## dictionaries: what survives is ADT class synthesis -- which of an ADT's
+## equals/hashCode an explicit impl takes over, and whether its Ord was
+## derived. Those are questions about a *class*, not about a witness, and
+## Core does not carry them.
+pub fn emit_module(
+  supers: List[String],
+  adts: Adts,
+  traits: Traits,
+  impl_table: Impls,
+  prog_fns: Map[(String, String), Sig],
+  class_name: String,
+  own_trait_ids: List[Int],
+  own_adt_ids: List[Int],
+  tm: TModule,
+  # this module's Core, lowered once by the caller -- the same value `reach`
+  # reads to decide what freight the program carries. The JVM path used to
+  # lower here, per function, and the two lowerings could disagree about
+  # which bodies exist (docs/audit/re-audit-2026-07-30.md RC-04).
+  lm: LMod,
+  ct: CtOut,
+  # this module's const-name → comptime value view, imported consts included
+  # (their values live in the declaring module's CtOut)
+  all_consts: Map[String, CValue]
+) -> List[(String, Bytes)] !io = {
+  var out: List[(String, Bytes)] = []
+  for aid in own_adt_ids {
+    out = out ++ gen_adt(supers, adts, adt_of(adts, aid),
+      eq_override(impl_table, class_name, TyAdt(aid, adt_of(adts, aid).tparams)))
+  }
+  for tid in own_trait_ids {
+    let tr = trait_of(traits, tid)
+    out = out ++ [(tr_iface(tr.owner, tr.name), gen_trait_interface(supers, adts, tr))]
+  }
+  let cw = AsmWriter.of(COMPUTE_FRAMES, supers).expect("writer")
+  Asm.beginOn(cw, V52, ACC_PUBLIC + ACC_FINAL, class_name, obj())
+  Asm.fieldOn(cw, ACC_PUBLIC + ACC_STATIC, ARGS_FIELD, "[Ljava/lang/String;")
+  let no_slots: Map[Int, Int] = map.empty()
+  let no_ckey: Map[String, String] = map.empty()
+  let gx = GenCtx {
+    class_name: class_name,
+    adts: adts,
+    traits: traits,
+    impl_table: impl_table,
+    prog_fns: prog_fns,
+    # every dictionary the module asked for, tests included, in the order
+    # lowering asked for them. Known up front so `is_slot_target` answers the
+    # same for a hoisted body wherever in the class it is written.
+    dicts: lm.dicts,
+    consts: all_consts,
+    blocks: ct.blocks
+  }
+  var g = Gen {
+    mv: scratch_mv(),
+    lift_descs: map.empty(),
+    syms: tm.syms,
+    slots: no_slots,
+    next_slot: 0,
+    method_ret: TyUnit,
+    rets_null: false,
+    cloops: [],
+    sam_ctr: 0,
+    pending_sam: [],
+    clos_ctr: 0,
+    closures: [],
+    sam_classes: [],
+    const_fields: [],
+    const_by_key: no_ckey
+  }
+  for pr in lm.fns {
+    let (_cf, lifts) = pr
+    g = note_lifts(gx, g, lifts)
+  }
+  for pr in lm.tests {
+    let (_cf, lifts) = pr
+    g = note_lifts(gx, g, lifts)
+  }
+  var has_main = false
+  var fi = 0
+  for f in tm.fns {
+    let (cf, lifts) = lm.fns[fi]
+    fi = fi + 1
+    # the lowered functions are this module's, in source order; a mismatch
+    # means the two lists were built from different modules
+    if cf.name != f.name {
+      panic("codegen: lowered `" ++ cf.name ++ "` where `" ++ f.name ++ "` was declared")
+    }
+    match f.impl_of {
+      Some(pair) -> {
+        let (tid, subject) = pair
+        let tr = trait_of(traits, tid)
+        g = gen_fn(gx, g, cw, cf, lifts, impl_method_name(gx, tr.name, subject, f.name),
+          fn_desc_with_dicts(gx, f.sig))
+      }
+      None ->
+        match f.default_of {
+          Some(tid) -> {
+            let tr = trait_of(traits, tid)
+            g = gen_fn(gx, g, cw, cf, lifts, default_method_name(tr.name, f.name),
+              fn_desc_with_dicts(gx, f.sig))
+          }
+          None -> {
+            if f.name == "main" { has_main = true }
+            g = gen_fn(gx, g, cw, cf, lifts, f.name, fn_desc_with_dicts(gx, f.sig))
+          }
+        }
+    }
+    g = drain_lambdas(g, cw)
+  }
+  var ti = 0
+  for pr in lm.tests {
+    let (cf, lifts) = pr
+    g = gen_test(gx, g, cw, cf, lifts, ti)
+    g = drain_lambdas(g, cw)
+    ti = ti + 1
+  }
+  if has_main { gen_jvm_main(gx, cw) }
+  gen_const_fields(gx, g, cw)
+  cw.visitEnd()
+  # exactly the dictionaries this module's Core asked for. A bound that is
+  # never forwarded builds none, which is why a program with no `[T: Eq]`
+  # carries no Eq machinery -- the same property the old whole-program scan
+  # in main.dawn was there to preserve, now a consequence rather than a rule.
+  for dd in gx.dicts {
+    out = out ++ [gen_dict_class(gx, supers, dd)]
+  }
+  # the classes that stand where an invokedynamic used to. Emitted here
+  # rather than as they are met, because each is a whole class file and the
+  # module's own writer is open until the line above.
+  for b in g.closures {
+    out = out ++ [gen_closure_class(gx, supers, g, b)]
+  }
+  for s in g.sam_classes {
+    out = out ++ [gen_sam_class(supers, s)]
+  }
+  out ++ [(class_name, cw.toByteArray().expect("bytes"))]
+}
+
+## One Core dictionary as a JVM singleton.
+##
+## Every slot has the same shape -- the trait method's own erased signature
+## plus the dictionary -- whether lowering filled it with a bridge to an
+## impl, a trait default, or a synthesised primitive. So this forwards, and
+## knows nothing about which of the three it is.
+fn gen_dict_class(gx: GenCtx, supers: List[String], dd: CDictDef) -> (String, Bytes) !io = {
+  let tr = trait_of(gx.traits, dd.trait_id)
+  let cls = dict_class(gx.class_name, dd.key)
+  let iface = tr_iface(tr.owner, tr.name)
+  let cw = AsmWriter.of(COMPUTE_FRAMES, supers).expect("writer")
+  Asm.beginOnWithInterface(cw, V52, ACC_PUBLIC + ACC_FINAL, cls, obj(), iface)
+  # A dictionary the compiler can build once is a singleton; one that is a
+  # function of its arguments is an ordinary object with those arguments in
+  # fields. Only the scaffold differs -- the forwarding below is the same
+  # either way, because a slot reaches the arguments through the dictionary
+  # it is already passed.
+  if dd.nargs > 0 {
+    parameterised_scaffold(cw, cls, dd.nargs)
+  } else {
+    singleton_scaffold(cw, cls, iface)
+  }
+  var i = 0
+  for entry in tr.methods {
+    let (mname, ms) = entry
+    let m = Asm.methodOn(cw, ACC_PUBLIC, mname,
+      method_desc(gx.adts, ms.sig.param_tys, ms.sig.ret)).expect("mv")
+    m.visitCode()
+    var slot = 1
+    for declared in ms.sig.param_tys {
+      load_slot(m, declared, slot)
+      slot = slot + slots_of(declared)
+    }
+    # the dictionary itself is the trailing argument: a default body reaches
+    # its siblings through it
+    m.visitVarInsn(OP_ALOAD, 0)
+    let (owner, target) = slot_target(tr, dd.slots[i])
+    m.visitMethodInsn(OP_INVOKESTATIC, owner, target,
+      sig_desc_with_dicts(gx.adts, ms.sig), false)
+    emit_return_of(m, ms.sig.ret)
+    close_mv(m)
+    i = i + 1
+  }
+  cw.visitEnd()
+  (cls, cw.toByteArray().expect("bytes"))
+}
+
+fn slot_target(tr: TraitI, s: CDictSlot) -> (String, String) =
+  match s {
+    CSlotFn(owner, name) -> (owner, name)
+    CSlotDefault(owner, method) -> (owner, default_method_name(tr.name, method))
+  }
+
+fn sig_of_call(gx: GenCtx, owner: String, name: String) -> Sig =
+  match map.get(gx.prog_fns, (owner, name)) {
+    Some(s) -> s
+    None -> panic("codegen: unknown fn `" ++ owner ++ "." ++ name ++ "`")
+  }
+
+## Bind a slot AND record its type. Lowering mints symbols of its own (match
+## scrutinees, `?` temporaries, lifted parameters) which the checker never
+## saw, so the Core path cannot look types up in the checker's table the way
+## the TAST path does -- Core carries the type on the binder instead.
+fn cbind(g: Gen, sym: Int, ty: Ty, slot: Int) -> Gen !io = {
+  let g1 = Gen {
+    ..g,
+    syms: map.insert(g.syms, sym,
+      Sym { name: "", ty: ty, mutable: true, dlo: 0, dhi: 0, dict_of: None })
+  }
+  bind_slot(g1, sym, slot)
+}
+
+fn cloop_of(g: Gen, id: Int) -> (Label, Label) = {
+  var i = len(g.cloops) - 1
+  while i >= 0 {
+    let (lid, cont, brk) = g.cloops[i]
+    if lid == id { return (cont, brk) }
+    i = i - 1
+  }
+  panic("codegen: no enclosing loop " ++ to_string(id))
+}
+
+fn gen_cargs(gx: GenCtx, g: Gen, args: List[CExpr]) -> Gen !io = {
+  var g1 = g
+  for a in args {
+    let (g2, _) = gen_cexpr(gx, g1, a, false)
+    g1 = g2
+  }
+  g1
+}
+
+## Core has already boxed and unboxed everything, so an argument is emitted
+## exactly as it stands -- no adapt_to at the call site.
+fn gen_ccall(gx: GenCtx, g: Gen, callee: CCallee, args: List[CExpr], ty: Ty) -> (Gen, Bool) !io =
+  match callee {
+    CDirect(owner, name) -> {
+      let g1 = gen_cargs(gx, g, args)
+      # a body lowering hoisted has no declared signature; note_lifts recorded
+      # its descriptor before the first method of this class was written
+      let d = match map.get(g1.lift_descs, (owner, name)) {
+        Some(x) -> x
+        None -> fn_desc_with_dicts(gx, sig_of_call(gx, owner, name))
+      }
+      g1.mv.visitMethodInsn(OP_INVOKESTATIC, owner, name, d, false)
+      (g1, true)
+    }
+    CImpl(owner, tid, subject, method) -> {
+      let g1 = gen_cargs(gx, g, args)
+      let tr = trait_of(gx.traits, tid)
+      let psig = subst_subject(tr, trait_method_sig(tr, method), subject,
+        impl_of(gx, tid, subject).assoc_bindings)
+      # A conditional impl's method takes a dictionary per bound. How many is
+      # readable from Core alone -- the arguments beyond the trait method's
+      # own are those dictionaries -- so this does not consult the impl table.
+      var ptys = psig.param_tys
+      for _d in 0 ..(len(args) - len(psig.param_tys)) {
+        ptys = ptys ++ [TyVar("D", 0)]
+      }
+      g1.mv.visitMethodInsn(OP_INVOKESTATIC, owner,
+        impl_method_name(gx, tr.name, subject, method),
+        method_desc(gx.adts, ptys, psig.ret), false)
+      (g1, true)
+    }
+    CDefault(owner, tid, method) -> {
+      let g1 = gen_cargs(gx, g, args)
+      let tr = trait_of(gx.traits, tid)
+      g1.mv.visitMethodInsn(OP_INVOKESTATIC, owner,
+        default_method_name(tr.name, method),
+        fn_desc_with_dicts(gx, trait_method_sig(tr, method)), false)
+      (g1, true)
+    }
+    CMethod(dict, tid, method, _idx) -> {
+      # the JVM's dictionaries are interfaces, so it dispatches by name and
+      # ignores the slot index the table-based backend uses
+      let tr = trait_of(gx.traits, tid)
+      let (g0, _) = gen_cexpr(gx, g, dict, false)
+      g0.mv.visitTypeInsn(OP_CHECKCAST, tr_iface(tr.owner, tr.name))
+      let g1 = gen_cargs(gx, g0, args)
+      g1.mv.visitMethodInsn(OP_INVOKEINTERFACE, tr_iface(tr.owner, tr.name), method,
+        trait_method_desc(gx, trait_method_sig(tr, method)), true)
+      (g1, true)
+    }
+    CDynamic(target) -> {
+      let (g1, falls) = gen_cexpr(gx, g, target, false)
+      if not falls { return (g1, false) }
+      gen_cdynamic(gx, g1, args, cex_ty(target), ty)
+    }
+  }
+
+## Invoke a function value: erased apply, then unerase to the static type.
+fn gen_cdynamic(gx: GenCtx, g: Gen, args: List[CExpr], ft: Ty, ret_static: Ty) -> (Gen, Bool) !io = {
+  let (fps, fret) = tyfn_parts(ft)
+  var g1 = g
+  var i = 0
+  for a in args {
+    let (g2, _) = gen_cexpr(gx, g1, a, false)
+    g1 = g2
+    box_ty(g1.mv, if i < len(fps) { fps[i] } else { cex_ty(a) })
+    i = i + 1
+  }
+  g1.mv.visitMethodInsn(OP_INVOKEINTERFACE, fn_iface(len(fps)), "apply",
+    erased_apply_desc(len(fps)), true)
+  if is_bottom(fret) {
+    g1.mv.visitInsn(OP_POP)
+  } else {
+    unerase(gx, g1, fret)
+  }
+  (g1, true)
+}
+
+fn gen_cclosure(gx: GenCtx, g: Gen, name: String, owner: String, caps: List[CExpr], ty: Ty) -> Gen !io = {
+  # the capture types are a property of the expressions, not of emitting
+  # them, so they can be read before anything is written -- which is what
+  # lets `new` go on the stack first (below).
+  var cap_tys: List[Ty] = []
+  for c in caps { cap_tys = cap_tys ++ [cex_ty(c)] }
+  let (fps, fret) = tyfn_parts(ty)
+  let arity = len(fps)
+  let iface = fn_iface(arity)
+  let cls = closure_class(gx.class_name, g.clos_ctr)
+  let g0 = Gen {
+    ..g,
+    clos_ctr: g.clos_ctr + 1,
+    closures: g.closures ++ [ClosB {
+      cls: cls,
+      iface: iface,
+      arity: arity,
+      cap_tys: cap_tys,
+      fps: fps,
+      fret: fret,
+      owner: owner,
+      target: name,
+      # lowering already hoisted the body to a top-level static, so this
+      # names a method that exists rather than one to be emitted
+      impl_desc: impl_desc_of(gx, cap_tys ++ fps, fret)
+    }]
+  }
+  if len(caps) == 0 {
+    # nothing to close over, so one instance serves every evaluation of this
+    # site. 81 of the compiler's own 149 closures are this shape.
+    g0.mv.visitFieldInsn(OP_GETSTATIC, cls, "INSTANCE", "L" ++ iface ++ ";")
+    return g0
+  }
+  # `new` before the captures rather than after: the constructor wants the
+  # receiver underneath its arguments, and the captures are locals and
+  # nested closures, never a branch, so nothing merges while the
+  # uninitialised reference is live.
+  g0.mv.visitTypeInsn(OP_NEW, cls)
+  g0.mv.visitInsn(OP_DUP)
+  var g1 = g0
+  for c in caps {
+    let (g2, _) = gen_cexpr(gx, g1, c, false)
+    g1 = g2
+  }
+  var caps_desc = ""
+  for ct in cap_tys { caps_desc = caps_desc ++ desc_of(gx.adts, ct) }
+  g1.mv.visitMethodInsn(OP_INVOKESPECIAL, cls, "<init>", "(" ++ caps_desc ++ ")V", false)
+  g1
+}
+
+## One closure class: the captures in fields, and an erased `apply` that
+## unerases its arguments, calls the hoisted body and boxes what comes back.
+##
+## That adaptation is the whole of what LambdaMetafactory did here. It is the
+## mirror of `gen_cdynamic`, which boxes arguments before an `apply` and
+## unerases the result after it -- the same two helpers, the other way round.
+fn gen_closure_class(gx: GenCtx, supers: List[String], g: Gen, b: ClosB) -> (String, Bytes) !io = {
+  let cw = AsmWriter.of(COMPUTE_FRAMES, supers).expect("writer")
+  Asm.beginOnWithInterface(cw, V52, ACC_PUBLIC + ACC_FINAL, b.cls, obj(), b.iface)
+  var caps_desc = ""
+  for ct in b.cap_tys { caps_desc = caps_desc ++ desc_of(gx.adts, ct) }
+  if len(b.cap_tys) == 0 {
+    singleton_scaffold(cw, b.cls, b.iface)
+  } else {
+    var i = 0
+    for ct in b.cap_tys {
+      Asm.fieldOn(cw, ACC_PRIVATE + ACC_FINAL, capture_field(i), desc_of(gx.adts, ct))
+      i = i + 1
+    }
+    let init = Asm.methodOn(cw, ACC_PUBLIC, "<init>",
+      "(" ++ caps_desc ++ ")V").expect("mv")
+    init.visitCode()
+    init.visitVarInsn(OP_ALOAD, 0)
+    init.visitMethodInsn(OP_INVOKESPECIAL, obj(), "<init>", "()V", false)
+    var slot = 1
+    var j = 0
+    for ct in b.cap_tys {
+      init.visitVarInsn(OP_ALOAD, 0)
+      load_slot(init, ct, slot)
+      init.visitFieldInsn(OP_PUTFIELD, b.cls, capture_field(j), desc_of(gx.adts, ct))
+      slot = slot + slots_of(ct)
+      j = j + 1
+    }
+    init.visitInsn(OP_RETURN)
+    close_mv(init)
+  }
+  let m = Asm.methodOn(cw, ACC_PUBLIC, "apply", erased_apply_desc(b.arity)).expect("mv")
+  m.visitCode()
+  var k = 0
+  for ct in b.cap_tys {
+    m.visitVarInsn(OP_ALOAD, 0)
+    m.visitFieldInsn(OP_GETFIELD, b.cls, capture_field(k), desc_of(gx.adts, ct))
+    k = k + 1
+  }
+  # the erased apply takes Objects, so every parameter is one word and sits
+  # at 1 + its index whatever the Dawn type underneath is
+  var p = 0
+  let mg = Gen { ..g, mv: m }
+  for pt in b.fps {
+    m.visitVarInsn(OP_ALOAD, p + 1)
+    unerase(gx, mg, pt)
+    p = p + 1
+  }
+  m.visitMethodInsn(OP_INVOKESTATIC, b.owner, b.target, b.impl_desc, false)
+  # a bottom return already left Object on the stack (impl_desc_of said so),
+  # and `box_ty` emits nothing for it -- both spellings end at areturn
+  box_ty(m, b.fret)
+  m.visitInsn(OP_ARETURN)
+  close_mv(m)
+  cw.visitEnd()
+  (b.cls, cw.toByteArray().expect("bytes"))
+}
+
+## `ty` is the if's own type and `discard` says the value is not wanted.
+##
+## Both arguments exist because a Unit is a value now. In statement position
+## (`CSIf`) the branches leave one on the stack and nobody takes it off; in
+## expression position an `if` without an `else` has to produce one on the
+## path that skipped the body. Neither was visible while a Unit was zero-wide.
+fn gen_cif(
+  gx: GenCtx,
+  g: Gen,
+  cond: CExpr,
+  thn: CExpr,
+  els: Option[CExpr],
+  ty: Ty,
+  tail: Bool,
+  discard: Bool
+) -> (Gen, Bool) !io = {
+  let else_l = Label.new()
+  let end = Label.new()
+  let (g1, _) = gen_cexpr(gx, g, cond, false)
+  g1.mv.visitJumpInsn(OP_IFEQ, else_l)
+  let (g2, then_falls) = gen_cexpr(gx, g1, thn, tail)
+  if discard && then_falls { pop_value(g2.mv, cex_ty(thn)) }
+  match els {
+    None -> {
+      # An else-less `if` is typed `Unit` (or `Never`), so producing the
+      # missing value is exactly pushing the singleton.
+      if not discard && not is_bottom(ty) {
+        if then_falls { g2.mv.visitJumpInsn(OP_GOTO, end) }
+        g2.mv.visitLabel(else_l)
+        push_unit(g2.mv)
+        g2.mv.visitLabel(end)
+      } else {
+        g2.mv.visitLabel(else_l)
+      }
+      (g2, true)
+    }
+    Some(eb) -> {
+      if then_falls { g2.mv.visitJumpInsn(OP_GOTO, end) }
+      g2.mv.visitLabel(else_l)
+      let (g3, else_falls) = gen_cexpr(gx, g2, eb, tail)
+      if discard && else_falls { pop_value(g3.mv, cex_ty(eb)) }
+      g3.mv.visitLabel(end)
+      (g3, then_falls || else_falls)
+    }
+  }
+}
+
+pub fn gen_cexpr(gx: GenCtx, g: Gen, e: CExpr, tail: Bool) -> (Gen, Bool) !io =
+  match e {
+    CInt(v) -> {
+      ldc_long(g.mv, v)
+      (g, true)
+    }
+    CFloat(v) -> {
+      ldc_double(g.mv, v)
+      (g, true)
+    }
+    CBool(v) -> {
+      g.mv.visitInsn(if v { OP_ICONST_1 } else { OP_ICONST_0 })
+      (g, true)
+    }
+    CStr(v) -> {
+      ldc_str(g.mv, v)
+      (g, true)
+    }
+    # Unit is one reference slot on the JVM (the singleton); the C backend
+    # gives it a byte. Each backend picks, which is why Core says nothing
+    # about width -- but every backend has to leave a value behind.
+    CUnit -> {
+      push_unit(g.mv)
+      (g, true)
+    }
+    CLocal(sym, _) -> {
+      load_var(g, sym)
+      (g, true)
+    }
+    CBox(inner, from) -> {
+      let (g1, falls) = gen_cexpr(gx, g, inner, false)
+      if falls { box_ty(g1.mv, from) }
+      (g1, falls)
+    }
+    CUnbox(inner, to) -> {
+      let (g1, falls) = gen_cexpr(gx, g, inner, false)
+      if falls {
+        if is_bottom(to) { g1.mv.visitInsn(OP_POP) } else { unerase(gx, g1, to) }
+      }
+      (g1, falls)
+    }
+    CIf(cond, thn, els, ty) -> gen_cif(gx, g, cond, thn, els, ty, tail, false)
+    CBlock(stmts, tl, ty) -> {
+      var g1 = g
+      for s in stmts {
+        g1 = gen_cstmt(gx, g1, s)
+      }
+      match tl {
+        Some(t) -> gen_cexpr(gx, g1, t, tail)
+        # A block with no tail expression is typed `Unit` (or `Never`) by
+        # construction, so the value it owes is the singleton.
+        None -> {
+          if not is_bottom(ty) { push_unit(g1.mv) }
+          (g1, true)
+        }
+      }
+    }
+    CReturn(vo) ->
+      match vo {
+        # a bare `return` is only legal in a Unit function, and that function
+        # owes a value now
+        None -> {
+          if not is_bottom(g.method_ret) { push_unit(g.mv) }
+          emit_method_return(g)
+          (g, false)
+        }
+        Some(v) -> {
+          let (g1, falls) = gen_cexpr(gx, g, v, false)
+          if falls { emit_method_return(g1) }
+          (g1, false)
+        }
+      }
+    CBreak(id) -> {
+      let (_, brk) = cloop_of(g, id)
+      g.mv.visitJumpInsn(OP_GOTO, brk)
+      (g, false)
+    }
+    CContinue(id) -> {
+      let (cont, _) = cloop_of(g, id)
+      g.mv.visitJumpInsn(OP_GOTO, cont)
+      (g, false)
+    }
+    CCall(callee, args, ty) -> gen_ccall(gx, g, callee, args, ty)
+    CClosure(name, owner, caps, ty) -> (gen_cclosure(gx, g, name, owner, caps, ty), true)
+    CDictRef(key, tid, _subject, _) -> {
+      # The JVM's dictionary is a singleton implementing the trait interface
+      # rather than a table of pointers, but *which* dictionary comes from
+      # Core's key either way. Deriving it from the checker's impl_table
+      # instead is what left CModule.dicts with one reader.
+      let tr = trait_of(gx.traits, tid)
+      g.mv.visitFieldInsn(OP_GETSTATIC, dict_class(gx.class_name, key),
+        "INSTANCE", "L" ++ tr_iface(tr.owner, tr.name) ++ ";")
+      (g, true)
+    }
+    CDictApply(key, args, _) -> {
+      let cls = dict_class(gx.class_name, key)
+      g.mv.visitTypeInsn(OP_NEW, cls)
+      g.mv.visitInsn(OP_DUP)
+      var g1 = g
+      for a in args {
+        let (g2, _) = gen_cexpr(gx, g1, a, false)
+        g1 = g2
+      }
+      g1.mv.visitMethodInsn(OP_INVOKESPECIAL, cls, "<init>",
+        dict_ctor_desc(len(args)), false)
+      (g1, true)
+    }
+    CDictArg(dict, owner, key, idx, _) -> {
+      let cls = dict_class(owner, key)
+      let (g1, _) = gen_cexpr(gx, g, dict, false)
+      g1.mv.visitTypeInsn(OP_CHECKCAST, cls)
+      g1.mv.visitFieldInsn(OP_GETFIELD, cls, dict_arg_field(idx), "Ljava/lang/Object;")
+      (g1, true)
+    }
+    CConstRef(owner, name, ty) -> {
+      # "" = resolved in this module's view (the shape every constant had
+      # before qualified access); otherwise the declaring module's entry, which
+      # merged_consts filed under `<module>.<NAME>`
+      let key = if owner == "" { name } else { owner ++ "." ++ name }
+      let v = match map.get(gx.consts, key) {
+        Some(cv) -> cv
+        None -> panic("codegen: no comptime value for const `" ++ key ++ "`")
+      }
+      (gen_load_const(gx, g, v, ty, "c:" ++ key), true)
+    }
+    CComptime(lo, hi, ty) -> {
+      let v = match map.get(gx.blocks, (lo, hi)) {
+        Some(cv) -> cv
+        None -> panic("codegen: no comptime value for block")
+      }
+      (gen_load_const(gx, g, v, ty, "b:" ++ to_string(lo) ++ ":" ++ to_string(hi)), true)
+    }
+    CFnRef(_, name, _) -> panic("codegen: bare CFnRef survived lowering (" ++ name ++ ")")
+    # The rest, one node per named body below. The dispatch stays in this one
+    # match so that a new Core node is a compile error here rather than a
+    # panic at run time -- it used to fall through a wildcard into a second
+    # match that ended in another wildcard.
+    CBinary(op, l, r, ty) -> gen_cbinary(gx, g, op, l, r, ty)
+    CUnary(op, operand, ty) -> gen_cunary(gx, g, op, operand, ty)
+    CCtor(adt, ci, args, _) -> gen_cctor(gx, g, adt, ci, args)
+    CField(target, adt, ci, idx, _) -> gen_cfield(gx, g, target, adt, ci, idx)
+    CIsCtor(target, adt, ci) -> gen_cisctor(gx, g, target, adt, ci)
+    CTagOf(target, adt) -> gen_ctagof(gx, g, target, adt)
+    CTuple(elems, _) -> gen_ctuple(gx, g, elems)
+    CTupleGet(target, idx, ty) -> gen_ctupleget(gx, g, target, idx, ty)
+    CListLit(elems, _) -> gen_clistlit(gx, g, elems)
+    CIntrinsic(name, args, ty) -> gen_cintrinsic(gx, g, name, args, ty)
+    CForeign(call, ty) -> gen_cforeign(gx, g, call, ty)
+    # the JVM has a collector; a count is a fact about the C runtime only
+    CDup(inner, _) -> gen_cexpr(gx, g, inner, false)
+  }
+
+fn gen_cunary(gx: GenCtx, g: Gen, op: CUnOp, operand: CExpr, ty: Ty) -> (Gen, Bool) !io = {
+  let (g1, falls) = gen_cexpr(gx, g, operand, false)
+  if not falls { return (g1, false) }
+  match op {
+    CNeg -> if ty == TyFloat { g1.mv.visitInsn(OP_DNEG) } else { g1.mv.visitInsn(OP_LNEG) }
+    CNot -> {
+      g1.mv.visitInsn(OP_ICONST_1)
+      g1.mv.visitInsn(OP_IXOR)
+    }
+    CBnot -> {
+      ldc_long(g1.mv, -1)
+      g1.mv.visitInsn(OP_LXOR)
+    }
+  }
+  (g1, true)
+}
+
+fn gen_cctor(gx: GenCtx, g: Gen, adt: Int, ci: Int, args: List[CExpr]) -> (Gen, Bool) !io = {
+  let a = adt_of(gx.adts, adt)
+  let c = a.ctors[ci]
+  let cls = ctor_jvm_name(gx.adts, c)
+  if len(c.fields) == 0 {
+    g.mv.visitFieldInsn(OP_GETSTATIC, cls, "INSTANCE", "L" ++ cls ++ ";")
+    return (g, true)
+  }
+  g.mv.visitTypeInsn(OP_NEW, cls)
+  g.mv.visitInsn(OP_DUP)
+  let g1 = gen_cargs(gx, g, args)
+  var desc = "("
+  for f in c.fields { desc = desc ++ desc_of(gx.adts, f.ty) }
+  g1.mv.visitMethodInsn(OP_INVOKESPECIAL, cls, "<init>", desc ++ ")V", false)
+  (g1, true)
+}
+
+fn gen_cfield(gx: GenCtx, g: Gen, target: CExpr, adt: Int, ci: Int, idx: Int) -> (Gen, Bool) !io = {
+  let (g1, falls) = gen_cexpr(gx, g, target, false)
+  if not falls { return (g1, false) }
+  let a = adt_of(gx.adts, adt)
+  let c = a.ctors[ci]
+  let cls = ctor_jvm_name(gx.adts, c)
+  g1.mv.visitTypeInsn(OP_CHECKCAST, cls)
+  g1.mv.visitFieldInsn(OP_GETFIELD, cls, c.fields[idx].name,
+    desc_of(gx.adts, c.fields[idx].ty))
+  (g1, true)
+}
+
+fn gen_cisctor(gx: GenCtx, g: Gen, target: CExpr, adt: Int, ci: Int) -> (Gen, Bool) !io = {
+  let (g1, falls) = gen_cexpr(gx, g, target, false)
+  if not falls { return (g1, false) }
+  let a = adt_of(gx.adts, adt)
+  let c = a.ctors[ci]
+  let cls = ctor_jvm_name(gx.adts, c)
+  if len(c.fields) == 0 {
+    # no-payload constructors are interned singletons, so identity is
+    # the discriminant -- the C backend compares a tag instead
+    let t_l = Label.new()
+    let end = Label.new()
+    g1.mv.visitFieldInsn(OP_GETSTATIC, cls, "INSTANCE", "L" ++ cls ++ ";")
+    g1.mv.visitJumpInsn(OP_IF_ACMPEQ, t_l)
+    g1.mv.visitInsn(OP_ICONST_0)
+    g1.mv.visitJumpInsn(OP_GOTO, end)
+    g1.mv.visitLabel(t_l)
+    g1.mv.visitInsn(OP_ICONST_1)
+    g1.mv.visitLabel(end)
+  } else {
+    g1.mv.visitTypeInsn(OP_INSTANCEOF, cls)
+  }
+  (g1, true)
+}
+
+## No tag field to read: an ADT's constructors are separate classes, so
+## "which one" is a chain of instanceof tests -- the same chain the derived
+## comparison used to build for itself before Core carried the node.
+fn gen_ctagof(gx: GenCtx, g: Gen, target: CExpr, adt: Int) -> (Gen, Bool) !io = {
+  let (g1, falls) = gen_cexpr(gx, g, target, false)
+  if not falls { return (g1, false) }
+  let a = adt_of(gx.adts, adt)
+  let done = Label.new()
+  var idx = 0
+  for c in a.ctors {
+    let next = Label.new()
+    g1.mv.visitInsn(OP_DUP)
+    g1.mv.visitTypeInsn(OP_INSTANCEOF, ctor_jvm_name(gx.adts, c))
+    g1.mv.visitJumpInsn(OP_IFEQ, next)
+    g1.mv.visitInsn(OP_POP)
+    ldc_long(g1.mv, idx)
+    g1.mv.visitJumpInsn(OP_GOTO, done)
+    g1.mv.visitLabel(next)
+    idx = idx + 1
+  }
+  g1.mv.visitInsn(OP_POP)
+  ldc_long(g1.mv, -1)
+  g1.mv.visitLabel(done)
+  (g1, true)
+}
+
+fn gen_ctuple(gx: GenCtx, g: Gen, elems: List[CExpr]) -> (Gen, Bool) !io = {
+  let cls = tuple_class(len(elems))
+  g.mv.visitTypeInsn(OP_NEW, cls)
+  g.mv.visitInsn(OP_DUP)
+  var g1 = g
+  for el in elems {
+    let (g2, _) = gen_cexpr(gx, g1, el, false)
+    g1 = g2
+    box_ty(g1.mv, cex_ty(el))
+  }
+  var desc = "("
+  var i = 0
+  while i < len(elems) {
+    desc = desc ++ obj_desc()
+    i = i + 1
+  }
+  g1.mv.visitMethodInsn(OP_INVOKESPECIAL, cls, "<init>", desc ++ ")V", false)
+  (g1, true)
+}
+
+fn gen_ctupleget(gx: GenCtx, g: Gen, target: CExpr, idx: Int, ty: Ty) -> (Gen, Bool) !io = {
+  let (g1, falls) = gen_cexpr(gx, g, target, false)
+  if not falls { return (g1, false) }
+  let cls = tuple_class(tuple_arity(cex_ty(target)))
+  g1.mv.visitTypeInsn(OP_CHECKCAST, cls)
+  g1.mv.visitFieldInsn(OP_GETFIELD, cls, "_" ++ to_string(idx), obj_desc())
+  if is_bottom(ty) { g1.mv.visitInsn(OP_POP) } else { unerase(gx, g1, ty) }
+  (g1, true)
+}
+
+## Lowering builds a literal out of `push` calls now, so nothing reaches
+## here. Kept correct rather than deleted because the node is still in Core
+## for the other backend, and a stale arm that quietly built a java.util.List
+## would be worse than one that is never taken.
+fn gen_clistlit(gx: GenCtx, g: Gen, elems: List[CExpr]) -> (Gen, Bool) !io = {
+  g.mv.visitMethodInsn(OP_INVOKESTATIC, ARRAY_CLASS, "array_new",
+    "()L" ++ ARRAY_CLASS ++ ";", false)
+  var g1 = g
+  for el in elems {
+    let (g2, falls) = gen_cexpr(gx, g1, el, false)
+    g1 = g2
+    if not falls { return (g1, false) }
+    g1.mv.visitMethodInsn(OP_INVOKESTATIC, ARRAY_CLASS, "array_push",
+      "(L" ++ ARRAY_CLASS ++ ";Ljava/lang/Object;)L" ++ ARRAY_CLASS ++ ";", false)
+  }
+  g1.mv.visitMethodInsn(OP_INVOKESTATIC, "std/pvec", "from_array",
+    "(L" ++ ARRAY_CLASS ++ ";)L" ++ PVEC_CLASS ++ ";", false)
+  (g1, true)
+}
+
+fn obj_desc() -> String = "Ljava/lang/Object;"
+
+fn tuple_arity(t: Ty) -> Int =
+  match t {
+    TyTuple(es) -> len(es)
+    _ -> panic("codegen: tuple projection on a non-tuple")
+  }
+
+fn gen_cbinary(gx: GenCtx, g: Gen, op: CBinOp, l: CExpr, r: CExpr, ty: Ty) -> (Gen, Bool) !io = {
+  # short-circuit first: the right side must not be evaluated eagerly.
+  # `<` on a non-scalar never reaches here -- lowering turned it into an
+  # explicit Ord.cmp call, so there is no witness on a comparison node.
+  if op == CAnd {
+    let short = Label.new()
+    let end = Label.new()
+    let (g1, _) = gen_cexpr(gx, g, l, false)
+    g1.mv.visitJumpInsn(OP_IFEQ, short)
+    let (g2, _) = gen_cexpr(gx, g1, r, false)
+    g2.mv.visitJumpInsn(OP_GOTO, end)
+    g2.mv.visitLabel(short)
+    g2.mv.visitInsn(OP_ICONST_0)
+    g2.mv.visitLabel(end)
+    return (g2, true)
+  }
+  if op == COr {
+    let short = Label.new()
+    let end = Label.new()
+    let (g1, _) = gen_cexpr(gx, g, l, false)
+    g1.mv.visitJumpInsn(OP_IFNE, short)
+    let (g2, _) = gen_cexpr(gx, g1, r, false)
+    g2.mv.visitJumpInsn(OP_GOTO, end)
+    g2.mv.visitLabel(short)
+    g2.mv.visitInsn(OP_ICONST_1)
+    g2.mv.visitLabel(end)
+    return (g2, true)
+  }
+  let (ga, _) = gen_cexpr(gx, g, l, false)
+  let (gb, _) = gen_cexpr(gx, ga, r, false)
+  var g1 = gb
+  # Peeled: every use of `t` below picks an *instruction* -- LADD or DADD,
+  # Arrays.equals or Object.equals -- and which instruction a value takes is
+  # decided by its representation, which for an opaque type is its target's.
+  # `emitc.dawn`'s emit_binary already does this; this side did not, and an
+  # `opaque type D = Bytes` compared by `==` answered `false` where the same
+  # comparison through a dictionary answered `true`.
+  let t = peel_opaque(cex_ty(l))
+  match op {
+    CAdd -> { g1.mv.visitInsn(if t == TyInt { OP_LADD } else { OP_DADD }) }
+    CSub -> { g1.mv.visitInsn(if t == TyInt { OP_LSUB } else { OP_DSUB }) }
+    CMul -> { g1.mv.visitInsn(if t == TyInt { OP_LMUL } else { OP_DMUL }) }
+    CDiv ->
+      if t == TyInt {
+        emit_div_zero_check(g1.mv, "division")
+        g1.mv.visitInsn(OP_LDIV)
+      } else {
+        g1.mv.visitInsn(OP_DDIV)
+      }
+    CMod ->
+      if t == TyInt {
+        emit_div_zero_check(g1.mv, "modulo")
+        g1.mv.visitInsn(OP_LREM)
+      } else {
+        g1.mv.visitInsn(OP_DREM)
+      }
+    CConcat ->
+      match t {
+        TyBytes -> {
+          g1.mv.visitMethodInsn(OP_INVOKESTATIC, BYTES_CLASS, "concat", "([B[B)[B", false)
+        }
+        TyList(_) -> {
+          g1.mv.visitMethodInsn(OP_INVOKESTATIC, PVEC_MOD, "concat",
+            "(L" ++ PVEC_CLASS ++ ";L" ++ PVEC_CLASS ++ ";)L" ++ PVEC_CLASS ++ ";", false)
+        }
+        # String is the only other thing `++` joins. Spelled as a wildcard
+        # rather than `TyString ->` since S0.3
+        _ -> {
+          g1.mv.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/String", "concat",
+            "(Ljava/lang/String;)Ljava/lang/String;", false)
+        }
+      }
+    CEq -> { gen_equality(g1.mv, t, BEq) }
+    CNe -> { gen_equality(g1.mv, t, BNeq) }
+    CLt -> { gen_ordering(g1.mv, t, BLt) }
+    CLe -> { gen_ordering(g1.mv, t, BLe) }
+    CGt -> { gen_ordering(g1.mv, t, BGt) }
+    CGe -> { gen_ordering(g1.mv, t, BGe) }
+    CBand -> { g1.mv.visitInsn(OP_LAND) }
+    CBor -> { g1.mv.visitInsn(OP_LOR) }
+    CBxor -> { g1.mv.visitInsn(OP_LXOR) }
+    CShl -> {
+      g1.mv.visitInsn(OP_L2I)
+      g1.mv.visitInsn(OP_LSHL)
+    }
+    CShr -> {
+      g1.mv.visitInsn(OP_L2I)
+      g1.mv.visitInsn(OP_LSHR)
+    }
+    CUshr -> {
+      g1.mv.visitInsn(OP_L2I)
+      g1.mv.visitInsn(OP_LUSHR)
+    }
+    # the two the early return above already handled, named rather than swept
+    # up: a wildcard here answers "emit nothing" for an operator added later,
+    # which is a program that verifies and computes the wrong thing
+    CAnd | COr -> ()
+  }
+  (g1, true)
+}
+
+fn gen_cstmt(gx: GenCtx, g: Gen, s: CStmt) -> Gen !io =
+  match s {
+    CSLet(sym, ty, init) -> {
+      let (g1, falls) = gen_cexpr(gx, g, init, false)
+      if not falls { return g1 }
+      let (g2, slot) = alloc(g1, slots_of(ty))
+      store_slot(g2.mv, ty, slot)
+      cbind(g2, sym, ty, slot)
+    }
+    CSAssign(sym, value) -> {
+      let (g1, falls) = gen_cexpr(gx, g, value, false)
+      if falls { store_var(g1, sym) }
+      g1
+    }
+    # the node that exists because a dropped value is not a dropped effect
+    CSDiscard(e) -> {
+      let (g1, falls) = gen_cexpr(gx, g, e, false)
+      if falls { pop_value(g1.mv, cex_ty(e)) }
+      g1
+    }
+    # `discard` rather than a pop afterwards: each branch drops its own value,
+    # so both reach the merge with the same empty stack and the else-less
+    # case owes nothing.
+    CSIf(cond, thn, els) -> {
+      let (g1, _) = gen_cif(gx, g, cond, thn, els, TyUnit, false, true)
+      g1
+    }
+    CSLoop(id, body, step) -> {
+      let top = Label.new()
+      let cont = Label.new()
+      let brk = Label.new()
+      g.mv.visitLabel(top)
+      var g1 = Gen { ..g, cloops: g.cloops ++ [(id, cont, brk)] }
+      let (g2, body_falls) = gen_cexpr(gx, g1, body, false)
+      g1 = g2
+      # the body is an expression in statement position, exactly like
+      # CSDiscard's -- and a Unit body now leaves a value behind
+      if body_falls { pop_value(g1.mv, cex_ty(body)) }
+      # the continue target is the step, so `continue` runs it -- the whole
+      # reason CSLoop carries one
+      g1.mv.visitLabel(cont)
+      match step {
+        Some(sv) -> {
+          let (g3, falls) = gen_cexpr(gx, g1, sv, false)
+          g1 = g3
+          if falls { pop_value(g1.mv, cex_ty(sv)) }
+        }
+        None -> ()
+      }
+      g1.mv.visitJumpInsn(OP_GOTO, top)
+      g1.mv.visitLabel(brk)
+      Gen { ..g1, cloops: list.take(g1.cloops, len(g1.cloops) - 1) }
+    }
+    # reference counting: Perceus emits these, the JVM has a collector
+    CSDrop(_) -> g
+  }
+
+## The list primitives, implemented by calling the Dawn vector in std/pvec.
+##
+## These stay Core intrinsics rather than becoming calls in lowering, which is
+## what Map and Set did. The reason is the comptime interpreter: it evaluates
+## Core, and it implements the list primitives itself, on its own value
+## representation. Lowering them into std calls would mean a `const` could only
+## fold a list by interpreting the vector -- which needs `array_*`, which
+## comptime refuses. Keeping the primitive in Core keeps `const B: List[Int] =
+## [A, 4]` working, and makes the representation the *backend's* choice, which
+## is what it is.
+##
+## The four host primitives that still traffic in `java.util.List` are here for
+## the other half of that: `Array` is the shape both sides can name, so each
+## crosses through it (docs/collections-dejava-research.md §5.1).
+fn gen_list_intrinsic(gx: GenCtx, g: Gen, name: String, args: List[CExpr]) -> Option[(Gen, Bool)] !io = {
+  let vec = "L" ++ PVEC_CLASS ++ ";"
+  let arr = "L" ++ ARRAY_CLASS ++ ";"
+  let jl = "Ljava/util/List;"
+  let obj = "Ljava/lang/Object;"
+
+  ## The vector call for a primitive, as (function, descriptor). One table,
+  ## so a primitive and its callee cannot drift apart silently.
+  fn target(n: String) -> Option[(String, String)] =
+    match n {
+      "len" -> Some(("count", "(" ++ vec ++ ")J"))
+      "get" -> Some(("get", "(" ++ vec ++ "J)LOption;"))
+      "range" -> Some(("range", "(JJ)" ++ vec))
+      "sort_by" -> Some(("sort_by", "(" ++ vec ++ "L" ++ fn_iface(2) ++ ";)" ++ vec))
+      "list_index" -> Some(("index", "(" ++ vec ++ "J)" ++ obj))
+      "list_slice" -> Some(("slice", "(" ++ vec ++ "JJ)" ++ vec))
+      _ -> None
+    }
+
+  match target(name) {
+    Some(t) -> {
+      let (fname, desc) = t
+      let g1 = gen_cargs(gx, g, args)
+      g1.mv.visitMethodInsn(OP_INVOKESTATIC, PVEC_MOD, fname, desc, false)
+      return Some((g1, true))
+    }
+    None -> ()
+  }
+
+  ## A Dawn list on the stack becomes a host list.
+  fn to_host(m: MethodVisitor) -> Unit !io = {
+    m.visitMethodInsn(OP_INVOKESTATIC, PVEC_MOD, "to_array", "(" ++ vec ++ ")" ++ arr, false)
+    m.visitMethodInsn(OP_INVOKESTATIC, ARRAY_CLASS, "array_to_java",
+      "(" ++ arr ++ ")" ++ jl, false)
+    ()
+  }
+
+  ## A host list on the stack becomes a Dawn list.
+  fn of_host(m: MethodVisitor) -> Unit !io = {
+    m.visitMethodInsn(OP_INVOKESTATIC, ARRAY_CLASS, "array_of_java",
+      "(" ++ jl ++ ")" ++ arr, false)
+    m.visitMethodInsn(OP_INVOKESTATIC, PVEC_MOD, "from_array", "(" ++ arr ++ ")" ++ vec, false)
+    ()
+  }
+
+  if name == "join" {
+    var g1 = gen_cargs(gx, g, [args[0]])
+    to_host(g1.mv)
+    g1 = gen_cargs(gx, g1, [args[1]])
+    g1.mv.visitMethodInsn(OP_INVOKESTATIC, STRINGS_CLASS, "join",
+      "(" ++ jl ++ "Ljava/lang/String;)Ljava/lang/String;", false)
+    return Some((g1, true))
+  }
+  if name == "from_code_points" {
+    let g1 = gen_cargs(gx, g, args)
+    to_host(g1.mv)
+    g1.mv.visitMethodInsn(OP_INVOKESTATIC, STRINGS_CLASS, "from_code_points",
+      "(" ++ jl ++ ")Ljava/lang/String;", false)
+    return Some((g1, true))
+  }
+  if name == "code_points" {
+    let g1 = gen_cargs(gx, g, args)
+    g1.mv.visitMethodInsn(OP_INVOKESTATIC, STRINGS_CLASS, "code_points",
+      "(Ljava/lang/String;)" ++ jl, false)
+    of_host(g1.mv)
+    return Some((g1, true))
+  }
+  if name == "io_list_names" {
+    let g1 = gen_cargs(gx, g, args)
+    g1.mv.visitMethodInsn(OP_INVOKESTATIC, IO_CLASS, "io_list_names",
+      "(Ljava/lang/String;)" ++ jl, false)
+    of_host(g1.mv)
+    return Some((g1, true))
+  }
+  if name == "io_run" {
+    var g1 = gen_cargs(gx, g, [args[0]])
+    to_host(g1.mv)
+    g1 = gen_cargs(gx, g1, [args[1], args[2]])
+    g1.mv.visitMethodInsn(OP_INVOKESTATIC, IO_CLASS, "io_run",
+      "(" ++ jl ++ "Ljava/lang/String;Ljava/lang/String;)J", false)
+    return Some((g1, true))
+  }
+  if name == "args" {
+    g.mv.visitFieldInsn(OP_GETSTATIC, gx.class_name, ARGS_FIELD, "[Ljava/lang/String;")
+    g.mv.visitMethodInsn(OP_INVOKESTATIC, "java/util/Arrays", "asList",
+      "([" ++ obj ++ ")" ++ jl, false)
+    of_host(g.mv)
+    return Some((g, true))
+  }
+  None
+}
+
+## Core intrinsics. The names are Core's own vocabulary, which is why some
+## do not match any TAST builtin: lowering invented `str_of_int`,
+## `list_index` and friends when it destroyed interpolation and indexing.
+fn gen_cintrinsic(gx: GenCtx, g: Gen, name: String, args: List[CExpr], ty: Ty) -> (Gen, Bool) !io = {
+  match gen_list_intrinsic(gx, g, name, args) {
+    Some(r) -> return r
+    None -> ()
+  }
+  if name == "panic" {
+    g.mv.visitTypeInsn(OP_NEW, PANIC_CLASS)
+    g.mv.visitInsn(OP_DUP)
+    let (g1, _) = gen_cexpr(gx, g, args[0], false)
+    g1.mv.visitMethodInsn(OP_INVOKESPECIAL, PANIC_CLASS, "<init>",
+      "(Ljava/lang/String;)V", false)
+    g1.mv.visitInsn(OP_ATHROW)
+    return (g1, false)
+  }
+  if name == "todo" {
+    g.mv.visitTypeInsn(OP_NEW, PANIC_CLASS)
+    g.mv.visitInsn(OP_DUP)
+    ldc_str(g.mv, "not yet implemented")
+    g.mv.visitMethodInsn(OP_INVOKESPECIAL, PANIC_CLASS, "<init>",
+      "(Ljava/lang/String;)V", false)
+    g.mv.visitInsn(OP_ATHROW)
+    return (g, false)
+  }
+  if name == "null_ref" {
+    g.mv.visitInsn(OP_ACONST_NULL)
+    return (g, true)
+  }
+  if name == "java_eq" {
+    # Equality of two values that came from the host (semantics-closure-design
+    # 3). Dawn defines none, so the runtime they came from decides, and here
+    # that is `Object.equals` -- the same instruction `==` at any other
+    # reference type compiles to.
+    #
+    # This was `struct_eq`, and it had to answer exactly what the synthesised
+    # comparison answers or `x == y` and `map.get(m, x)` would stop agreeing.
+    # That obligation is gone with the subjects: nothing Dawn defines reaches
+    # here any more.
+    let g1 = gen_cargs(gx, g, args)
+    g1.mv.visitMethodInsn(OP_INVOKEVIRTUAL, obj(), "equals", "(Ljava/lang/Object;)Z", false)
+    return (g1, true)
+  }
+  if name == "hash" {
+    # the prelude Hash over a scalar; the JVM's own hash for that type, widened
+    # because Dawn's Int is a long. Only a scalar reaches here now -- a tuple
+    # or a union is a Core body that folds its parts (lower.hash_at).
+    let at = cex_ty(args[0])
+    let g1 = gen_cargs(gx, g, args)
+    hash_of(g1.mv, at)
+    g1.mv.visitInsn(OP_I2L)
+    return (g1, true)
+  }
+  if name == "java_hash" {
+    # Hash of a value that came from the host, and `java_eq`'s twin: the
+    # runtime it came from decides, so that the two keep agreeing inside the
+    # same Map.
+    let g1 = gen_cargs(gx, g, args)
+    g1.mv.visitMethodInsn(OP_INVOKEVIRTUAL, obj(), "hashCode", "()I", false)
+    g1.mv.visitInsn(OP_I2L)
+    return (g1, true)
+  }
+  if name == "cmp" {
+    # the prelude Ord over a scalar, the other half of the same contract
+    let at = cex_ty(args[0])
+    let g1 = gen_cargs(gx, g, args)
+    emit_scalar_cmp(g1.mv, at)
+    return (g1, true)
+  }
+  if name == "expect" {
+    var g1 = gen_cargs(gx, g, args)
+    let (ga, msg_slot) = alloc(g1, 1)
+    g1 = ga
+    g1.mv.visitVarInsn(OP_ASTORE, msg_slot)
+    g1.mv.visitInsn(OP_DUP)
+    g1.mv.visitTypeInsn(OP_INSTANCEOF, "Option\$Some")
+    let ok = Label.new()
+    g1.mv.visitJumpInsn(OP_IFNE, ok)
+    g1.mv.visitTypeInsn(OP_NEW, PANIC_CLASS)
+    g1.mv.visitInsn(OP_DUP)
+    g1.mv.visitVarInsn(OP_ALOAD, msg_slot)
+    g1.mv.visitMethodInsn(OP_INVOKESPECIAL, PANIC_CLASS, "<init>",
+      "(Ljava/lang/String;)V", false)
+    g1.mv.visitInsn(OP_ATHROW)
+    g1.mv.visitLabel(ok)
+    g1.mv.visitTypeInsn(OP_CHECKCAST, "Option\$Some")
+    g1.mv.visitFieldInsn(OP_GETFIELD, "Option\$Some", "value", "Ljava/lang/Object;")
+    if is_bottom(ty) { g1.mv.visitInsn(OP_POP) } else { unerase(gx, g1, ty) }
+    return (g1, true)
+  }
+  if name == "unwrap_or" {
+    var g1 = gen_cargs(gx, g, args)
+    let (ga, fb_slot) = alloc(g1, slots_of(ty))
+    g1 = ga
+    store_slot(g1.mv, ty, fb_slot)
+    g1.mv.visitInsn(OP_DUP)
+    g1.mv.visitTypeInsn(OP_INSTANCEOF, "Option\$Some")
+    let some_l = Label.new()
+    let end = Label.new()
+    g1.mv.visitJumpInsn(OP_IFNE, some_l)
+    g1.mv.visitInsn(OP_POP)
+    load_slot(g1.mv, ty, fb_slot)
+    g1.mv.visitJumpInsn(OP_GOTO, end)
+    g1.mv.visitLabel(some_l)
+    g1.mv.visitTypeInsn(OP_CHECKCAST, "Option\$Some")
+    g1.mv.visitFieldInsn(OP_GETFIELD, "Option\$Some", "value", "Ljava/lang/Object;")
+    unerase(gx, g1, ty)
+    g1.mv.visitLabel(end)
+    return (g1, true)
+  }
+  if name == "cursor_slice" {
+    let g1 = gen_cargs(gx, g, args)
+    g1.mv.visitMethodInsn(OP_INVOKESTATIC, STRINGS_CLASS, "cursor_slice",
+      "(Ljava/lang/String;JJ)Ljava/lang/String;", false)
+    let ok = Label.new()
+    g1.mv.visitInsn(OP_DUP)
+    g1.mv.visitJumpInsn(OP_IFNONNULL, ok)
+    g1.mv.visitTypeInsn(OP_NEW, PANIC_CLASS)
+    g1.mv.visitInsn(OP_DUP)
+    ldc_str(g1.mv, "cursor_slice: invalid cursor range")
+    g1.mv.visitMethodInsn(OP_INVOKESPECIAL, PANIC_CLASS, "<init>",
+      "(Ljava/lang/String;)V", false)
+    g1.mv.visitInsn(OP_ATHROW)
+    g1.mv.visitLabel(ok)
+    return (g1, true)
+  }
+  if name == "to_string" {
+    # Core lowers this into str_of_* / std/fmt.dtoa / quote; a residual one
+    # means a type the lowering did not know how to render. Same refusal as
+    # emitc's -- this arm used to re-switch on the operand type, which was a
+    # second copy of `to_str`'s dispatch that could only ever drift.
+    panic("emit: to_string survived lowering -- unsupported operand type")
+  }
+  let g1 = gen_cargs(gx, g, args)
+  if name == "to_float" {
+    g1.mv.visitInsn(OP_L2D)
+  } else if name == "to_int" {
+    g1.mv.visitInsn(OP_D2L)
+  } else if name == "str_of_int" {
+    g1.mv.visitMethodInsn(OP_INVOKESTATIC, "java/lang/String", "valueOf",
+      "(J)Ljava/lang/String;", false)
+  } else if name == "str_of_bool" {
+    g1.mv.visitMethodInsn(OP_INVOKESTATIC, "java/lang/String", "valueOf",
+      "(Z)Ljava/lang/String;", false)
+  } else if name == "show" || name == "str_of_bytes" {
+    # `str_of_bytes` is the same instruction as the erased `show` and not by
+    # coincidence: a `byte[]` is already an Object, so the operand needed no
+    # box even when lowering erased it, and `Show.show`'s `instanceof [B` arm
+    # is where it landed either way. Naming the operand's type changed which
+    # emitter can compile it (native could not read a type off an erased slot)
+    # without changing a byte of what this one emits.
+    g1.mv.visitMethodInsn(OP_INVOKESTATIC, SHOW_CLASS, "show",
+      "(Ljava/lang/Object;)Ljava/lang/String;", false)
+  } else if name == "quote" {
+    g1.mv.visitMethodInsn(OP_INVOKESTATIC, SHOW_CLASS, "quote",
+      "(Ljava/lang/String;)Ljava/lang/String;", false)
+  } else if name == "cast" {
+    # The check moves off this stack and into a method (codegen.gen_cast says
+    # why), with the target passed along as the `Class` the CHECKCAST would
+    # have named.
+    ldc_class(g1.mv, unerase_class(gx.adts, cast_target(ty)))
+    g1.mv.visitMethodInsn(OP_INVOKESTATIC, IO_CLASS, "cast",
+      "(Ljava/lang/Object;Ljava/lang/Class;)LResult;", false)
+  } else {
+    match rt_intrinsic_class(name) {
+      Some(cls) -> {
+        let sig = builtin_sig(name)
+        g1.mv.visitMethodInsn(OP_INVOKESTATIC, cls, name,
+          method_desc(gx.adts, sig.param_tys, sig.ret), false)
+      }
+      None -> panic("codegen: Core intrinsic without a JVM mapping: " ++ name)
+    }
+  }
+  (g1, true)
+}
+
+fn builtin_sig(name: String) -> Sig =
+  match map.get(builtins(), name) {
+    Some(s) -> s
+    None -> panic("codegen: no signature for intrinsic " ++ name)
+  }
+
+## The JVM-only node (core.CJava). A `use java` site dispatches three ways --
+## a static field read, a constructor, or a method invoke. The native backend
+## refuses this node instead.
+fn gen_cforeign(gx: GenCtx, g: Gen, jc: CJava, ty: Ty) -> (Gen, Bool) !io =
+  if jc.call.is_field {
+    gen_java_field(g, jc.call)
+  } else if jc.call.is_ctor {
+    gen_java_new(gx, g, jc)
+  } else {
+    gen_java_call(gx, g, jc, ty)
+  }

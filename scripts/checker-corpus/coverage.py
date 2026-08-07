@@ -43,9 +43,9 @@ ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")
 # them: `cerr` and the resolvers it reports from now live in the base module,
 # and a site that leaves this glob leaves the ratchet with it.
 SOURCES = (
-    "selfhost/src/cx.dawn",
-    "selfhost/src/passes.dawn",
-    "selfhost/src/checker*.dawn",
+    "selfhost/src/check/cx.dawn",
+    "selfhost/src/check/passes.dawn",
+    "selfhost/src/check/checker*.dawn",
 )
 CASES = "scripts/checker-corpus/cases"
 UNCOVERED = "scripts/checker-corpus/uncovered.txt"
