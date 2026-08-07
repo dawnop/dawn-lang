@@ -488,17 +488,17 @@ fn sort2[T: Ord2](xs: List[T]) -> List[T] = ...   # 约束：[T: Trait (+ Trait)
     四个方法都把 `c: C` 放在第 0 位，正是这个原因。
 
 ```dawn
-trait Iter[C] {
+trait Head[C] {
   type Item
   fn first(c: C) -> Option[C.Item]
 }
 
-impl[T] Iter[List[T]] {
+impl[T] Head[List[T]] {
   type Item = T
   fn first(c: List[T]) -> Option[T] = get(c, 0)
 }
 
-fn head_or[C: Iter](c: C, d: C.Item) -> C.Item =   # 投影随实例化归约
+fn head_or[C: Head](c: C, d: C.Item) -> C.Item =   # 投影随实例化归约
   match first(c) { Some(x) -> x  None -> d }        # head_or([1], 9) 是 Int
 ```
 - 预置 `trait Ord[T] { fn cmp(a: T, b: T) -> Int }` 及 `Int`/`String` 的 impl
@@ -519,8 +519,10 @@ fn head_or[C: Iter](c: C, d: C.Item) -> C.Item =   # 投影随实例化归约
   （此时生成的是条件 impl：`type Box[T] = { v: T } derive Ord` 得到
   `impl[T: Ord] Ord[Box[T]]`）。`List[T]` 有 std 写的词典序 impl。
 - 预置 `trait Eq[T] { fn eq(a: T, b: T) -> Bool }` 与
-  `trait Hash[T] { fn hash(x: T) -> Int }`，`Int`/`Float`/`Bool`/`String`/`Bytes`
-  各有 impl。**没有 `derive Eq`**：`==` 本来就对每个类型结构化（§4.3），等于每个类型
+  `trait Hash[T] { fn hash(x: T) -> Int }`。`Eq` 的标量 impl 是
+  `Int`/`Float`/`Bool`/`String`/`Bytes`；`Hash` 的**没有 `Float`**（拒绝理由见 §4.3
+  数值边缘语义，同 `Ord[Float]`），故是四个。
+  **没有 `derive Eq`**：`==` 本来就对每个类型结构化（§4.3），等于每个类型
   隐式实现 Eq；写 impl 是为了**覆盖**它。
   - 覆盖后 `==` 即该 impl，容器与嵌套比较一并跟随。
   - **`impl Eq` 与 `impl Hash` 必须成对出现**（编译错误）：相等的值必须哈希相同，
@@ -891,7 +893,7 @@ bracket(FileOutputStream.new(path), s => s.close(), f => {
 match shape {
   Circle(r) if r > 100.0 -> "big circle"
   Circle(r)              -> "circle $r"
-  Rect(w, h)             -> "rect $wx$h"
+  Rect(w, h)             -> "rect ${w}x$h"
   Point                  -> "point"
 }
 ```
@@ -1402,7 +1404,7 @@ fn slurp(p: String) -> String !io = {
 若确知某个擦除泛型的不透明 `Object` 运行期是某个具体引用类型（如 `HttpResponse.body()` 配
 `BodyHandlers.ofByteArray()` 时是 `byte[]`），用泛型内建
 `cast[T](x: Object) -> Result[T, ForeignError]` 把它**认领**成该类型
-（T 取自调用点的期望类型，如 `let b: Result[Bytes, ForeignError] = cast(...)`；§9.5.1）——
+（T 取自调用点的期望类型，如 `let b: Result[Bytes, ForeignError] = cast(...)`）——
 认领处做一次运行期检查，**类型不符是 `Err` 而不是穿透的异常**，载荷见 §9.8.1
 （JVM 上 `kind` 是 `java.lang.ClassCastException`）。T 须是引用类型
 （编译期拒绝 primitive / 无期望类型）。
@@ -1431,8 +1433,8 @@ Java 形参声明为 `java.util.List` / `java.util.Collection` / `java.lang.Iter
 不能继承 Java 类；不能以**命名类**形式实现 Java 接口——函数值经 SAM 转换（§9.4）
 传出是唯一路径。只读静态字段可访问（`Class.FIELD`，§9.1）——枚举常量与静态常量直接读
 （`TimeUnit.SECONDS`、`Integer.MAX_VALUE`）；写静态字段、实例字段仍不支持。数组不可创建/索引/命名（§9.5）；
-`Map`/`Set` 不桥接、Java 集合不反向转换为 Dawn 值（§9.6）。变长参数只支持不传
-可变部分（§9.3）；`Option` 实参传 null 不支持（§9.2）。
+`Map`/`Set` 不桥接、Java 集合不反向转换为 Dawn 值（§9.6）；`Option` 实参传 null
+不支持（§9.2）。
 
 ### 9.8 外部失败屏障：`catch_fault`
 
@@ -1766,7 +1768,7 @@ hex 与 base64 是纯 Dawn 字节算术（无 `use java`，故两后端同一份
 `to_hex` 每字节两位、**小写**为规范拼写，`from_hex` 大小写皆收、其余一概不收；`to_base64`
 用 RFC 4648 §4 标准字母表并以 `=` 补齐，`to_base64_url` 用 §5 的 url/文件名安全字母表且
 **不补 `=`**；两个解码器各只认自己的字母表（猜字母表会把拼错的输入变成错的字节），padding
-可有可无，但末组的空余低位必须为零——否则同一串字节会有多个拼写。四个解码器都属判据 2：
+可有可无，但末组的空余低位必须为零——否则同一串字节会有多个拼写。这一族的解码器都属判据 2：
 外来文本是要校验的，不是要断言的。
 
 `Bytes` 与 `Buf` 见 §9.5.1；另有操作符 `Bytes ++ Bytes` 与按内容的 `==`/`!=`。二进制请求体
@@ -1808,7 +1810,7 @@ hex 与 base64 是纯 Dawn 字节算术（无 `use java`，故两后端同一份
 
 **IO 的表态。** `std/io` 全部 `!io`，会失败的一律回 `Result[T, ForeignError]`（§9.8.1）——
 结构化载荷而非屏障渲染好的那句话，理由见
-[`audit/error-model-design.md`](audit/error-model-design.md)。另有三条规范性行为：
+[`audit/error-model-design.md`](audit/error-model-design.md)。另有以下规范性行为：
 
 - `io.write_file(path, content)` **自动创建缺失的父目录**。`Ok` 不带值
 - `io.list_dir(path)` 的条目名按**码点序**排序。排序在 std 层做（`list.sort` 走语言自己的

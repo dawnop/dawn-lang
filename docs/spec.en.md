@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 58219bea46eac4de -->
+<!-- doc-check: translation-of docs/spec.md @ 29f12d9f17946792 -->
 
 # Dawn Language Specification
 
@@ -587,17 +587,17 @@ fn sort2[T: Ord2](xs: List[T]) -> List[T] = ...   # bound: [T: Trait (+ Trait)*]
     methods put `c: C` in position 0 for exactly this reason.
 
 ```dawn
-trait Iter[C] {
+trait Head[C] {
   type Item
   fn first(c: C) -> Option[C.Item]
 }
 
-impl[T] Iter[List[T]] {
+impl[T] Head[List[T]] {
   type Item = T
   fn first(c: List[T]) -> Option[T] = get(c, 0)
 }
 
-fn head_or[C: Iter](c: C, d: C.Item) -> C.Item =   # the projection reduces at instantiation
+fn head_or[C: Head](c: C, d: C.Item) -> C.Item =   # the projection reduces at instantiation
   match first(c) { Some(x) -> x  None -> d }        # head_or([1], 9) is Int
 ```
 - The built-in `trait Ord[T] { fn cmp(a: T, b: T) -> Int }` and the impls for `Int`/`String`
@@ -626,8 +626,10 @@ fn head_or[C: Iter](c: C, d: C.Item) -> C.Item =   # the projection reduces at i
   `type Box[T] = { v: T } derive Ord` gives `impl[T: Ord] Ord[Box[T]]`). `List[T]` has a
   lexicographic impl written in std.
 - The built-in `trait Eq[T] { fn eq(a: T, b: T) -> Bool }` and
-  `trait Hash[T] { fn hash(x: T) -> Int }`, with an impl each for
-  `Int`/`Float`/`Bool`/`String`/`Bytes`. **There is no `derive Eq`**: `==` is already structural
+  `trait Hash[T] { fn hash(x: T) -> Int }`. `Eq`'s scalar impls are
+  `Int`/`Float`/`Bool`/`String`/`Bytes`; `Hash` has **no `Float`** (the reason for refusing it
+  is under numeric edge semantics in §4.3, as for `Ord[Float]`), so it has four.
+  **There is no `derive Eq`**: `==` is already structural
   for every type (§4.3), which amounts to every type implementing Eq implicitly; you write an
   impl in order to **override** it.
   - After an override, `==` is that impl, and container and nested comparisons follow along.
@@ -1093,7 +1095,7 @@ bracket(FileOutputStream.new(path), s => s.close(), f => {
 match shape {
   Circle(r) if r > 100.0 -> "big circle"
   Circle(r)              -> "circle $r"
-  Rect(w, h)             -> "rect $wx$h"
+  Rect(w, h)             -> "rect ${w}x$h"
   Point                  -> "point"
 }
 ```
@@ -1719,7 +1721,7 @@ particular concrete reference type (such as `byte[]` when `HttpResponse.body()` 
 with `BodyHandlers.ofByteArray()`), use the generic builtin
 `cast[T](x: Object) -> Result[T, ForeignError]` to **claim** it as that type (T is taken
 from the expected type at the call site, e.g.
-`let b: Result[Bytes, ForeignError] = cast(...)`; §9.5.1) — the claim does one runtime
+`let b: Result[Bytes, ForeignError] = cast(...)`) — the claim does one runtime
 check, and **a type mismatch is an `Err`, not an exception passing through**; for the
 payload see §9.8.1 (on the JVM the `kind` is `java.lang.ClassCastException`). T must be a
 reference type (a primitive, or no expected type, is rejected at compile time).
@@ -1758,8 +1760,7 @@ Read-only static fields are accessible (`Class.FIELD`, §9.1) — enum constants
 constants are read directly (`TimeUnit.SECONDS`, `Integer.MAX_VALUE`); writing a static
 field, and instance fields, are still unsupported. Arrays cannot be created, indexed or
 named (§9.5); `Map`/`Set` are not bridged, and Java collections are not converted back
-into Dawn values (§9.6). Varargs only support omitting the variable part (§9.3); passing
-null for an `Option` argument is unsupported (§9.2).
+into Dawn values (§9.6); passing null for an `Option` argument is unsupported (§9.2).
 
 ### 9.8 The foreign-failure barrier: `catch_fault`
 
@@ -2194,8 +2195,8 @@ case** is the canonical spelling, `from_hex` accepts either case and nothing els
 uses the url/filename-safe alphabet of §5 and **does not pad with `=`**; the two decoders
 each recognise only their own alphabet (guessing the alphabet would turn misspelled input
 into wrong bytes), padding is optional, but the spare low bits of the final group must be
-zero — otherwise one byte string would have several spellings. All four decoders fall under
-criterion 2: text from outside is to be validated, not asserted.
+zero — otherwise one byte string would have several spellings. The decoders in this family
+all fall under criterion 2: text from outside is to be validated, not asserted.
 
 `Bytes` and `Buf` are in §9.5.1; there are also the operator `Bytes ++ Bytes` and
 content-wise `==`/`!=`. Binary request bodies (multipart upload, WebDAV PUT),
@@ -2254,8 +2255,8 @@ two modules either. The semantics of the containers (persistent interface, keys 
 **Where IO stands.** Everything in `std/io` is `!io`, and anything that can fail returns
 `Result[T, ForeignError]` (§9.8.1) — a structured payload rather than the sentence a
 barrier has already rendered; the reasoning is in
-[`audit/error-model-design.md`](audit/error-model-design.md). There are three further
-normative behaviours:
+[`audit/error-model-design.md`](audit/error-model-design.md). The further normative
+behaviours are:
 
 - `io.write_file(path, content)` **creates missing parent directories automatically**. Its
   `Ok` carries no value
