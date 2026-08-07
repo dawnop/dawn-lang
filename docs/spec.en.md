@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 32254967df4d74c5 -->
+<!-- doc-check: translation-of docs/spec.md @ 2f4b61a8922a72c4 -->
 
 # Dawn Language Specification
 
@@ -2004,8 +2004,10 @@ use json/value.{Json, render}  # selective import, used unqualified
 use java "java.lang.Math"      # Java interop (§9), form unchanged
 ```
 
-- A module can only be `use`d once (whole-module or selective, pick one); a repeated `use`
-  is an error.
+- A module's **whole-module** import and its **selective** import may each appear at most
+  once, and the two may coexist — one binds an alias, the other binds names; they are two
+  different acts. The same form twice is an error (two selective imports count even when
+  the braces name different items).
 - `use` may appear anywhere at the top level (the same as `use java`), and `dawn fmt` does
   not reorder them.
 - **`as` renaming**: a whole-module import can name its alias explicitly with
