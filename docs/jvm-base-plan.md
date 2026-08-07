@@ -1475,9 +1475,9 @@ ASM，定点由它负责，我们只欠它一个 oracle——这一刀就是把�
 | 处 | 改动 |
 |---|---|
 | `jvmops.dawn` | `V49: Int = 49` → `V52: Int = 52`；`COMPUTE_MAXS: Int = 1` → `COMPUTE_FRAMES: Int = 2`。两条 doc 注释的**理由**一起改，不只是数字 |
-| 22 处 `Asm.beginOn*` | 常量改名机械跟随 |
+| 23 处 `Asm.beginOn` / `beginOnWithInterface` | 常量改名机械跟随（写入器一共 23 个，一个一次） |
 | 16 处 `AsmWriter.of(COMPUTE_MAXS, supers)` | 翻成 `COMPUTE_FRAMES`，这一刀的主体 |
-| 2 处 `Asm.plain(COMPUTE_MAXS)` | 同上（`gen_asm_class` / `gen_asm_writer_class`） |
+| 3 处 `Asm.plain(COMPUTE_MAXS)` | 同上（`gen_asm_class`、`gen_asm_writer_class`，以及 `codegen.dawn` 那个 test 块里的 ASM 互操作 spike） |
 | 4 处 `Asm.plain(0)` | 逐个裁决，见下 |
 | `scripts/asm-adapter-contract` | 探针从 (49, COMPUTE_MAXS) 改成 (52, COMPUTE_FRAMES)；负控见下 |
 | `scripts/constpool-scan.py` | 从正确性门禁降级为**政策**门禁，见下 |
