@@ -35,6 +35,7 @@ derive Show
 ## would catch, and only after the whole site had been written.
 pub type Assets = {
   style: String,
+  logo: String,
   favicon: String,
   touch_icon: String,
   og_image: String,
@@ -47,6 +48,7 @@ pub type Assets = {
 pub fn plain_assets() -> Assets =
   Assets {
     style: "style.css",
+    logo: "logo.svg",
     favicon: "favicon.ico",
     touch_icon: "apple-touch-icon.png",
     og_image: "logo-512.png",
@@ -212,6 +214,7 @@ pub fn shell_ext(
   let alts = alternates(pair)
   let switch = lang_switch(lang, root, pair)
   let css = a.style
+  let logo = a.logo
   let ico = a.favicon
   let touch = a.touch_icon
   let og = a.og_image
@@ -233,7 +236,7 @@ $head_extra
 <body>
 <header class="site-header">
 <nav>
-<a class="brand" href="$root/$home"><img class="brand-logo" src="$root/assets/$touch" alt="">Dawn</a>
+<a class="brand" href="$root/$home"><img class="brand-logo" src="$root/assets/$logo" alt="">Dawn</a>
 $nav
 $switch
 <a class="gh" href="https://github.com/dawnop/dawn-lang">GitHub</a>
@@ -348,6 +351,17 @@ test "each language's nav points at that language's pages" {
 test "the brand mark leads to this page's own front page" {
   assert str.contains(shell(plain_assets(), En, "", "t", ".", "", ""), `class="brand" href="./index.html"`)
   assert str.contains(shell(plain_assets(), Zh, "", "t", "..", "", ""), `class="brand" href="../zh/index.html"`)
+}
+
+## The header draws the mark itself, not the icon iOS was sent. Those were one
+## file until 2026-08-08 -- the brand <img> pointed at apple-touch-icon.png, so
+## every page shipped a 180px raster to fill a 20px box, and the two could not
+## be given different croppings even though one of them wants padding for a
+## home screen and the other does not.
+test "the header brand is the vector mark" {
+  let h = shell(plain_assets(), En, "", "t", ".", "", "")
+  assert str.contains(h, `<img class="brand-logo" src="./assets/logo.svg" alt="">`)
+  assert str.contains(h, `<link rel="apple-touch-icon" href="./assets/apple-touch-icon.png">`)
 }
 
 test "shell carries title, css root, body" {

@@ -72,8 +72,23 @@ fn emit_text(out: String, name: String, text: String) -> String !io =
 
 pub fn gen_assets(out: String) -> Assets !io = {
   let style = emit_text(out, "style.css", str.trim(must_read("site/assets/style.css")))
-  # the dawn-sunrise mark: favicon + touch icon (doubles as the nav brand
-  # mark) + og:image (links emitted by html/page)
+  # The bracket-cat mark, in the four shapes the places it appears will take.
+  # The SVG is the mark; the three rasters are the same drawing rendered for
+  # formats that cannot hold a vector, and scripts/render-brand.py is what
+  # rendered them -- they are checked in rather than built, because this
+  # generator has to be able to produce site/dist with nothing but a compiler,
+  # and byte for byte the same one on both backends.
+  #
+  # The SVG goes through read_bin like the rasters even though it is text: what
+  # gets hashed has to be what gets written, and a UTF-8 decode/encode round
+  # trip is one more thing between the two.
+  #
+  # site/assets also holds logo-mono.svg and logo-white.svg -- the same mark in
+  # one flat colour, for a dark background or a print. Neither is emitted: this
+  # site has no dark chrome and no page links them, and an asset shipped for
+  # nobody is one more URL to keep alive. They are in the tree so that whoever
+  # needs one has it; the day a page wants one, it gets a line here.
+  let logo = emit_asset(out, "logo.svg", read_bin("site/assets/logo.svg"))
   let favicon = emit_asset(out, "favicon.ico", read_bin("site/assets/favicon.ico"))
   let touch = emit_asset(out, "apple-touch-icon.png",
     read_bin("site/assets/apple-touch-icon.png"))
@@ -87,6 +102,7 @@ pub fn gen_assets(out: String) -> Assets !io = {
     "/* dawn-play: editor bundle missing */")
   Assets {
     style: style,
+    logo: logo,
     favicon: favicon,
     touch_icon: touch,
     og_image: og,

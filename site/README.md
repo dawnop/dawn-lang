@@ -114,8 +114,9 @@ JVM/native 逐字节对拍照旧成立。
 - **高亮类名**（GitHub Light 配色）：`k` 关键字、`t` 类型/构造器（大写首字母）、
   `f` 定义名（`fn` 后的标识符）、`s` 字符串、`i` 字符串内 `$` 插值、`n` 数字/布尔、
   `c` 注释。函数**调用**不着色（tokenizer 保持行级简单）。
-- **资产搬运**：CSS 等文本用 `read_file`/`write_file`；favicon / 触摸图标 / og:image
-  这类光栅图用 `io.read_bytes`/`write_bytes` 逐字节拷（曾经是 `use java` 的
+- **资产搬运**：CSS 等文本用 `read_file`/`write_file`；品牌标记（`logo.svg` 与由它渲染出的
+  favicon / 触摸图标 / og:image，见 `scripts/render-brand.py`）用 `io.read_bytes`/`write_bytes`
+  逐字节拷——SVG 是文本也照拷，被哈希的必须就是被写出的那串字节（曾经是 `use java` 的
   `FileInputStream`，那让整个生成器编不到 native，见开头的验收条）。
 - 生成后扫一遍内部 `href`，断链即失败退出。
 
