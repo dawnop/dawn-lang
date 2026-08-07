@@ -73,7 +73,7 @@ STDOUT_QUIET_S = 1.5
 # ---- the debounce experiment's numbers ------------------------------------
 #
 # EDITS keystrokes, KEYSTROKE_GAP_S apart, against a DEBOUNCE_MS window that
-# lsp.dawn currently sets to 150.
+# server.dawn currently sets to 150.
 #
 # The gap is the whole experiment, and it has to sit between two floors that
 # were measured (2026-08-05, ./bin/dawn lsp on this box) rather than guessed:

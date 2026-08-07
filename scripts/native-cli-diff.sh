@@ -204,7 +204,7 @@ pair "add (invalid manifest)" add ../nowhere --dir "$BADTOML"
 # ---- leg 4: lsp, against the previous release ----
 # Same shape as leg 1: the whole scripted session, the N-1 oracle, the subject
 # swapped for the native binary. Every message of that session is produced by
-# lsp/lspq/lspc running on the C backend.
+# server/lspq/lspc running on the C backend.
 echo "== lsp vs N-1, native backend =="
 DAWN_SELF="$DAWNC" ./scripts/selfhost-lsp-diff.sh
 

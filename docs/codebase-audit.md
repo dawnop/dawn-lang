@@ -970,7 +970,7 @@ Windows 盘符会被拆坏。建议统一读取 `File.pathSeparator`，环境变
 > 而不是再写一个 decoder——LSP 该走同一条路。
 
 
-`selfhost/src/lsp/lsp.dawn:199` 的 decoder 不检查 continuation byte、overlong encoding、
+`selfhost/src/lsp/server.dawn:199` 的 decoder 不检查 continuation byte、overlong encoding、
 surrogate 和最大码点；不完整序列还会静默跳字节。URI 解码结果可能与 JVM/编辑器不同，
 甚至进入 `from_code_points` 的非法范围。
 
@@ -1008,7 +1008,7 @@ UNC、相对路径、`#`/`?` 和 URI normalization 都没有标准处理。`Path
 > 让服务器一声不吭地退出，编辑器只看到语言服务器停了。JSON-RPC 2.0 §4.2 要求回错误。
 
 
-`selfhost/src/lsp/lsp.dawn:338` 的 `read_message` 在缺 Content-Length、body 短读或 JSON 错误时返回 None；
+`selfhost/src/lsp/server.dawn:338` 的 `read_message` 在缺 Content-Length、body 短读或 JSON 错误时返回 None；
 `run_lsp` 把 None 当 EOF，直接停止。JSON-RPC 要求 parse error/invalid request 响应，至少也应记录
 错误并尝试恢复下一个 frame。
 
@@ -1022,7 +1022,7 @@ UNC、相对路径、`#`/`?` 和 URI normalization 都没有标准处理。`Path
 > 「旧诊断覆盖新状态」这个正是要防的竞态——需要设计文档而不是补丁。
 
 
-`selfhost/src/lsp/lsp.dawn:5` 明确每次 change 重建完整分析；`textDocumentSync=1` 接收全文，
+`selfhost/src/lsp/server.dawn:5` 明确每次 change 重建完整分析；`textDocumentSync=1` 接收全文，
 `update_doc` 调 `analyze_document(..., 100000000)`，主循环单线程且不处理取消。
 配合“目录加载全部模块”，项目增长后会出现输入延迟和旧诊断覆盖新状态。
 

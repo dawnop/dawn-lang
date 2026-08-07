@@ -73,14 +73,14 @@ parser 靠首字母大小写消歧（`TYPEIDENT` 是独立 token），所以改�
 selfhost/          编译器（Dawn 写 Dawn）：lexer→parser→checker→interp(comptime)→codegen→cli/lsp
 selfhost/src/      分九个目录，依赖单向向下（拓扑序即下面的顺序），入口留根：
                    embed/  生成物，不许手改（stdsrc rtsrc unicode_case unicode_class）
-                   front/  词法/语法/诊断/格式化（token lexer parser ast diag suggest fmt dump astdump）
+                   front/  词法/语法/诊断/格式化（token lexer parser ast diag suggest fmt lexdump astdump）
                    check/  类型与检查（types tast exhaustive jsig cx passes checker）
                    ir/     Core IR 及其上的 pass（core lower interp reach coredump）
-                   jvm/    JVM 后端（codegen emit jvmops jvmhelp jreflect rtclasses jarw testrun jfold）
+                   jvm/    JVM 后端（codegen emit ops help jreflect rtclasses jarw testrun jfold）
                    pkg/    包与清单（manifest manifestv maven toml pkgfetch vendor add fspath）
                    driver/ 模块图与整程序驱动（analyze stdlib checkdump）
                    c/      native 后端（emitc cdriver ctestrun rc）
-                   lsp/    语言服务（lsp lspc lspq）
+                   lsp/    语言服务（server lspc lspq）
                    根：main.dawn nmain.dawn doc.dawn version.dawn
 std/               捆绑标准库源（--embed-std 嵌进独立 jar）
 packages/          源码包（json、web），[deps] 消费

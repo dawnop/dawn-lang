@@ -9,7 +9,7 @@ use std/map
 use check/types.{Adts, adt_of, sig_render}
 use driver/analyze.{Program}
 use front/ast.{module_fns, module_consts}
-use front/dump
+use front/lexdump
 
 ## Render one comptime value for the golden (both sides must agree).
 pub fn cv_show(adts: Adts, v: CValue) -> String =
@@ -17,7 +17,7 @@ pub fn cv_show(adts: Adts, v: CValue) -> String =
     VInt(n) -> to_string(n)
     VFloat(f) -> to_string(f)
     VBool(b) -> to_string(b)
-    VStr(s) -> "\"" ++ dump.esc(s) ++ "\""
+    VStr(s) -> "\"" ++ lexdump.esc(s) ++ "\""
     VUnit -> "()"
     VList(elems) -> {
       var parts: List[String] = []
@@ -46,7 +46,7 @@ pub fn render(prog: Program) -> String = {
   var out = ""
   for ld in prog.diags {
     out = out ++ "D\t" ++ ld.path ++ "\t" ++ to_string(ld.d.lo) ++ "\t" ++
-      to_string(ld.d.hi) ++ "\t" ++ dump.esc(ld.d.msg) ++ "\t" ++ dump.esc(ld.d.hint) ++ "\n"
+      to_string(ld.d.hi) ++ "\t" ++ lexdump.esc(ld.d.msg) ++ "\t" ++ lexdump.esc(ld.d.hint) ++ "\n"
   }
   for cm in prog.modules {
     out = out ++ "M\t" ++ cm.mod_path ++ "\n"
@@ -54,7 +54,7 @@ pub fn render(prog: Program) -> String = {
       if fd.is_pub {
         match map.get(cm.cx.fns, fd.name) {
           Some(s) -> {
-            out = out ++ "F\t" ++ dump.esc(sig_render(cm.cx.adts, cm.cx.traits, s)) ++ "\n"
+            out = out ++ "F\t" ++ lexdump.esc(sig_render(cm.cx.adts, cm.cx.traits, s)) ++ "\n"
           }
           None -> ()
         }
@@ -62,7 +62,7 @@ pub fn render(prog: Program) -> String = {
     }
     for cd in module_consts(cm.m) {
       let val = match map.get(cm.ct.consts, cd.name) {
-        Some(v) -> dump.esc(cv_show(cm.cx.adts, v))
+        Some(v) -> lexdump.esc(cv_show(cm.cx.adts, v))
         None -> "!failed"
       }
       out = out ++ "C\t" ++ cd.name ++ "\t" ++ val ++ "\n"

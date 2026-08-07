@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 2f4b61a8922a72c4 -->
+<!-- doc-check: translation-of docs/spec.md @ df4a6ebea66dc714 -->
 
 # Dawn Language Specification
 
@@ -2300,7 +2300,7 @@ behaviours are:
   already closed and "connected but silent" give the same `false`, and the difference
   between them is reported by `io.read_stdin`, which is still the only reader. So **a loop
   driven by it alone will spin once input ends**: when there is nothing to do you must go
-  and make that blocking read (the read loop in `selfhost/src/lsp/lsp.dawn` has this shape).
+  and make that blocking read (the read loop in `selfhost/src/lsp/server.dawn` has this shape).
   `timeout_ms` is an **upper** bound, not a lower one: returning `false` early is always
   legal (a regular file at end of file returns immediately), because the only thing a
   caller holding a `false` can do is stop waiting; `true` is the one that must not be

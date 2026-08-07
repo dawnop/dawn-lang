@@ -185,7 +185,7 @@ nominal-types 的**步骤 1–3 是纯新增**（parser/checker/emit 支持 `typ
 > **保留手写 UTF-8 decoder 作为 fallback**——留着它就还得维护它，
 > 而它的全部价值是「JDK 不在」——JDK 一定在，Dawn 跑在 JVM 上。
 
-Phase 6 要替换 17 个模块的 99 处 `use java`，`lsp.dawn` 在其中。
+Phase 6 要替换 17 个模块的 99 处 `use java`，`lsp/server.dawn` 在其中。
 **native 上没有 `java.net.URI`。**
 
 **处理：改法不变，理由改写。** JVM 侧那个手写 decoder 确实是错的（不校验

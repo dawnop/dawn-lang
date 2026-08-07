@@ -1990,7 +1990,7 @@ dawn_bytes *dawn_io_read_stdin(int64_t n) {
  * End of input is deliberately *not* readiness: it is reported by the
  * blocking read, which stays the only reader. So a loop driven by this alone
  * would spin at end of input -- the third branch of the read loop in
- * selfhost/src/lsp/lsp.dawn (block when there is nothing else to do) is what
+ * selfhost/src/lsp/server.dawn (block when there is nothing else to do) is what
  * closes that, and it is the shape the design argues for rather than a patch.
  *
  * `timeout_ms` is an upper bound and not a lower one: a regular file at end of
