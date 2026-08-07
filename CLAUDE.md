@@ -71,6 +71,17 @@ parser 靠首字母大小写消歧（`TYPEIDENT` 是独立 token），所以改�
 
 ```
 selfhost/          编译器（Dawn 写 Dawn）：lexer→parser→checker→interp(comptime)→codegen→cli/lsp
+selfhost/src/      分九个目录，依赖单向向下（拓扑序即下面的顺序），入口留根：
+                   embed/  生成物，不许手改（stdsrc rtsrc unicode_case unicode_class）
+                   front/  词法/语法/诊断/格式化（token lexer parser ast diag suggest fmt dump astdump）
+                   check/  类型与检查（types tast exhaustive jsig cx passes checker）
+                   ir/     Core IR 及其上的 pass（core lower interp reach coredump）
+                   jvm/    JVM 后端（codegen emit jvmops jvmhelp jreflect rtclasses jarw testrun jfold）
+                   pkg/    包与清单（manifest manifestv maven toml pkgfetch vendor add fspath）
+                   driver/ 模块图与整程序驱动（analyze stdlib checkdump）
+                   c/      native 后端（emitc cdriver ctestrun rc）
+                   lsp/    语言服务（lsp lspc lspq）
+                   根：main.dawn nmain.dawn doc.dawn version.dawn
 std/               捆绑标准库源（--embed-std 嵌进独立 jar）
 packages/          源码包（json、web），[deps] 消费
 site/              用 Dawn 自己写的静态站生成器（自举）
@@ -81,7 +92,7 @@ docs/              设计文档（中文）
 examples/          示例
 ```
 
-codegen 的**运行时 intrinsic 契约**声明在 `selfhost/src/types.dawn`（`Rt` / `Intr` /
+codegen 的**运行时 intrinsic 契约**声明在 `selfhost/src/check/types.dawn`（`Rt` / `Intr` /
 `intrinsics()`，约 1645–1806 行）：语言只说一个 primitive 归哪个**运行时模块**
 （`RtStrings`/`RtBytes`/`RtArray`/`RtIo`），由各后端自己决定那是什么——JVM 后端在
 `emit.dawn` 用 `rt_class`/`rt_intrinsic_class`（586/598 行）映到类名，native 后端映到

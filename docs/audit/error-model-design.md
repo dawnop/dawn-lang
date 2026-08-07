@@ -70,7 +70,7 @@ match req.body_file { Some(p) -> delete_quietly(p); None -> () }
 
 ### 1.3 `cast` 签名是纯的，失败抛 JVM 异常（LANG-02）
 
-`selfhost/src/types.dawn` 给 `cast` 纯签名；`docs/spec.md` §9 与
+`selfhost/src/check/types.dawn` 给 `cast` 纯签名；`docs/spec.md` §9 与
 `docs/cast-interop.md` 又明确失败抛 `ClassCastException`。于是一个签名为 pure 的
 函数可以用**非 Dawn panic 的宿主异常**退出——与 `design.md`「异常破坏签名即契约」的
 论证直接冲突。
@@ -119,7 +119,7 @@ pub type ForeignError = {
 不要让它看起来可移植。
 
 **这是 intrinsic 契约的变更**：`Result[T, String]` 直接烧在
-`selfhost/src/codegen.dawn` 的 `gen_try_closure` 发射的字节码里
+`selfhost/src/jvm/codegen.dawn` 的 `gen_try_closure` 发射的字节码里
 （handler 现在调 `Throwable.toString()` 存进 `Result$Err`）。要改的是：
 
 1. `gen_try_closure` 改为构造 `ForeignError` 记录（JVM 后端的 `kind` 取
@@ -150,7 +150,7 @@ pub fn cast[T](o: Object) -> Result[T, ForeignError]   # pure，失败是值
 等于这条改动没发生。改名字反而更糟：`cast` 是所有人会先看到的那个。
 
 **调用点**（`grep cast(` 已确认）：`packages/web/src/server.dawn` 的流式响应、
-`playground`、`selfhost/src/interp.dawn` 与 `pkgfetch.dawn` 里几处。
+`playground`、`selfhost/src/ir/interp.dawn` 与 `pkgfetch.dawn` 里几处。
 都改成 `cast(x)?` 或显式 match。数量可控。
 
 **破坏性**：是。按 CONTRIBUTING §六先发 tag，dawnop-site 再 bump。
@@ -247,8 +247,8 @@ pub fn bracket[A, B](
 
 | 步 | 状态 | 文件 | 测试 |
 |---|---|---|---|
-| A | **可做** | `selfhost/src/codegen.dawn`（`gen_try_closure`）、prelude ADT 表、`std/error.dawn`、全部 `java_try` 调用点 | 现有全量 + 一个「`kind` 是二进制名而非 toString 前缀」的 test |
-| B | **进行中**（阶段 1 已落地，见 §6.10） | `selfhost/src/types.dawn`（`cast` 签名）、`docs/spec.md` §9、`docs/cast-interop.md`、各调用点 | cast 失败返回 `Err` 而非抛的 test |
+| A | **可做** | `selfhost/src/jvm/codegen.dawn`（`gen_try_closure`）、prelude ADT 表、`std/error.dawn`、全部 `java_try` 调用点 | 现有全量 + 一个「`kind` 是二进制名而非 toString 前缀」的 test |
+| B | **进行中**（阶段 1 已落地，见 §6.10） | `selfhost/src/check/types.dawn`（`cast` 签名）、`docs/spec.md` §9、`docs/cast-interop.md`、各调用点 | cast 失败返回 `Err` 而非抛的 test |
 | ~~C2~~ | **关档「不做」**（2026-07-31）——`bracket` 改以**运行时 intrinsic** 落地（v0.39.0），不建 `LProtect` 节点 | ~~降级阶段的 `LProtect` 节点 + 两个后端的发射~~、`std/resource.dawn`、三处手写惯用法改写 | 「release 在 panic 路径也执行、且原失败继续传播」的 test（随 v0.39.0 落地） |
 
 A 与 B 都是破坏性变更 → 各自先发 tag。A 会改发射的字节码 → `Emit-Change:`
@@ -266,7 +266,7 @@ A 与 B 都是破坏性变更 → 各自先发 tag。A 会改发射的字节码 
 1. **`java_try` 已在 v0.30.0→v0.31.0 之间改名 `catch_fault`**（见 stdlib.dawn 的 `moved`
    表，旧名字现在只换来一句「renamed to `catch_fault`」）。下文一律用新名。
 2. **A 步必须同时覆盖 C 后端**。第二节只点了 `gen_try_closure`——那个函数还在
-   `selfhost/src/codegen.dawn`（写的是 `dawn/rt/Io` 这类运行时类；`emit.dawn` 是用户代码的
+   `selfhost/src/jvm/codegen.dawn`（写的是 `dawn/rt/Io` 这类运行时类；`emit.dawn` 是用户代码的
    JVM 发射器，`emitc.dawn` 是 C 发射器）。但 native 后端 2026-07 已经在跑，
    `runtime/c/dawn_rt.c` 里 `dawn_catch_fault`/`dawn_catch_panic` 是一对 setjmp/longjmp
    屏障。**好消息是 C 侧不必改发射器**：intrinsic 表说某个原语归 `RtIo`，emitc 就发
@@ -322,19 +322,19 @@ selfhost 自己的源要**同时**过两张 intrinsic 表：种子那张（用�
 
 **阶段 1 的具体清单**（都在 `fix/error-model-a`）：
 
-- `selfhost/src/types.dawn`：`FOREIGN_ERROR_ID = 2`、`foreign_error_ty()`、
+- `selfhost/src/check/types.dawn`：`FOREIGN_ERROR_ID = 2`、`foreign_error_ty()`、
   `prelude_adts()` 里的 record（`kind`/`message`/`cause: Option[String]`，`derive Show`）、
   `prelude_impls()` 多一条 Show、intrinsic 表 87 → 89 条。
-- `selfhost/src/checker.dawn`：`seed_prelude` 注册类型名与构造器名（所以用户也能
+- `selfhost/src/check/checker.dawn`：`seed_prelude` 注册类型名与构造器名（所以用户也能
   自己造一个 `ForeignError { .. }`）；重定义时的报错话术把它和 `Option`/`Result` 并列；
   `visible_to_user_code()` 多两个名字。
-- `selfhost/src/codegen.dawn`：`gen_try_closure_e` 发射
+- `selfhost/src/jvm/codegen.dawn`：`gen_try_closure_e` 发射
   `dawn/rt/Io.catch_fault_e`/`catch_panic_e`，`kind` 取 `getClass().getName()`
   （**不是** `toString()`，也不是 `getSimpleName()`）。
 - `selfhost/src/main.dawn`：`ForeignError` 进无条件发射的 prelude 类列表。
 - `runtime/c/dawn_rt.{h,c}`：`dawn_catch_fault_e`/`dawn_catch_panic_e`；`dawn_raise`
   记下 `"panic"`/`"fault"`。**emitc 一行没改**——表就是契约。
-- `selfhost/src/interp.dawn`：comptime 拒绝这两个名字（和它们的原版同理由）。
+- `selfhost/src/ir/interp.dawn`：comptime 拒绝这两个名字（和它们的原版同理由）。
 - 测试：`types.dawn` 两个新 test；`scripts/spike-native/foreign_error.dawn`（两后端，
   只问可移植的：两个屏障的分工与串版逐字一致、`kind` 是名字不是渲染）；
   `scripts/error-contract/`（单后端，问 JVM 的名字逐字是什么）。
@@ -467,18 +467,18 @@ B 步受的约束与 A 步**逐字相同**，不是类比：`cast[T](o) -> T` �
 
 **阶段 1 的具体清单**：
 
-- `selfhost/src/types.dawn`：intrinsic 表多一条 `cast_e`（**纯**——失败成了值，
+- `selfhost/src/check/types.dawn`：intrinsic 表多一条 `cast_e`（**纯**——失败成了值，
   没有效应可声明，这正是这次改动的内容）；`cast_e_target()` 供两个后端读
   `Result[T, ForeignError]` 里的 T。
-- `selfhost/src/checker.dawn`：`visible_to_user_code()` 多一个名字；「目标须是引用类型」
+- `selfhost/src/check/checker.dawn`：`visible_to_user_code()` 多一个名字；「目标须是引用类型」
   那条检查两个拼法共用（`cast` 读返回类型，`cast_e` 读它的第一个类型实参）。
-- `selfhost/src/codegen.dawn`：`gen_cast_e` 往 `dawn/rt/Io` 里写一个
+- `selfhost/src/jvm/codegen.dawn`：`gen_cast_e` 往 `dawn/rt/Io` 里写一个
   `cast_e(Object, Class) -> Result`；`gen_try_closure` 的 handler 抽成 `gen_caught_err`，
   两处共用同一份 `ForeignError` 字段纪律（发射的字节逐字不变）。
-- `selfhost/src/emit.dawn`：`cast_e` 的分支把目标类当 `Class` 常量 LDC 上去再调那个方法；
+- `selfhost/src/jvm/emit.dawn`：`cast_e` 的分支把目标类当 `Class` 常量 LDC 上去再调那个方法；
   `unerase_class()` 是 `unerase` 那张表的「名字版」。
-- `selfhost/src/emitc.dawn`：`cast_e` 分支恒出 `Ok`，见下条。
-- `selfhost/src/interp.dawn`：comptime 拒绝（同 `cast` 的理由——comptime 没有宿主对象）。
+- `selfhost/src/c/emitc.dawn`：`cast_e` 分支恒出 `Ok`，见下条。
+- `selfhost/src/ir/interp.dawn`：comptime 拒绝（同 `cast` 的理由——comptime 没有宿主对象）。
 - `selfhost/src/doc.dawn`：`interop` 组多一条。
 - 测试：`types.dawn` 两处（表计数、两个拼法的签名并列）；
   `scripts/error-contract/probe.dawn` 加五条——命中带出原值、落空的 `kind` 逐字是

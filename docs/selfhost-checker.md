@@ -1,8 +1,8 @@
 # P3b：Checker 移植设计（Dawn 版类型检查器）
 
-> 状态：**historical** —— checker 的移植设计，已实现；现状看 `selfhost/src/checker.dawn`。
+> 状态：**historical** —— checker 的移植设计，已实现；现状看 `selfhost/src/check/checker.dawn`。
 >
-> P3a（Parser）已完成：`selfhost/src/parser.dawn`，全语料对拍逐字节一致。
+> P3a（Parser）已完成：`selfhost/src/front/parser.dawn`，全语料对拍逐字节一致。
 > 本文件是 Checker 半刀（`check/*.kt` ≈ 5,100 行）的移植决定，按 [`selfhost-ast.md`](selfhost-ast.md)
 > 选甲：checker 是 lowering 一刀，消费 `ast.dawn` 的纯解析树。**动码前先出草案**（序 4/5 先例）。
 
@@ -50,7 +50,7 @@ HAMT Map 性能无虞（selfhost-gaps §二）。
 ## 四、Java 互操作反射
 
 Kotlin 用 `Class.forName` / `getMethods` / SAM 检测 / 变参匹配（spec §9 整章）。
-Dawn 侧集中到 `selfhost/src/jreflect.dawn`：
+Dawn 侧集中到 `selfhost/src/jvm/jreflect.dawn`：
 
 - `use java "java.lang.Class"` 等 + `Class.forName(fqcn)`；数组返回值
   （`getMethods()` 等）用 `java.lang.reflect.Array.get/getLength` 遍历

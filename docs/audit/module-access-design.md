@@ -149,9 +149,9 @@ CI 的推荐用法写进文档：`dawn check` 守全仓，`dawn build --closure`
 
 | 步 | 文件 | 测试 |
 |---|---|---|
-| 1 | `selfhost/src/checker.dawn`：`resolveType` 认 `m.T` | 「`m.T` 解析到导出类型」「未导出的报错并说明」 |
-| 2 | `selfhost/src/checker.dawn`：构造器模式与表达式认 `m.C`、`m.CONST` | match 用 `m.C(..)`；`m.CONST` 参与 comptime |
-| 3 | `selfhost/src/parser.dawn`（若类型位置的 `.` 还没 parse） | parser 内联 test |
+| 1 | `selfhost/src/check/checker.dawn`：`resolveType` 认 `m.T` | 「`m.T` 解析到导出类型」「未导出的报错并说明」 |
+| 2 | `selfhost/src/check/checker.dawn`：构造器模式与表达式认 `m.C`、`m.CONST` | match 用 `m.C(..)`；`m.CONST` 参与 comptime |
+| 3 | `selfhost/src/front/parser.dawn`（若类型位置的 `.` 还没 parse） | parser 内联 test |
 | 4 | `selfhost/src/main.dawn`、`analyze.dawn`：`--closure` 开关 | 一个「未被 import 的坏模块，`--closure` 能过、`check` 不过」的 test |
 | 5 | `docs/spec.md` §10.1/§10.2、`CLAUDE.md` 常用命令 | — |
 

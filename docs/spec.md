@@ -11,7 +11,7 @@
 本文是语法与语义的权威定义。设计动机见 [design.md](design.md)。
 [grammar.ebnf](grammar.ebnf) 是一份**历史**的机器可读语法，**已落后于 parser**
 （它自己头部列了已知不符）——当参考读，别当裁判；文法有争议时以本文与
-`selfhost/src/parser.dawn` 为准，可执行的那份期望在 `scripts/grammar-corpus/`。
+`selfhost/src/front/parser.dawn` 为准，可执行的那份期望在 `scripts/grammar-corpus/`。
 
 规范用词：**必须**（违反即编译错误）、**保证**（实现承诺的行为）、
 **未定义**（v0.1 不承诺，勿依赖）。
@@ -1768,10 +1768,10 @@ radix  = [ "+" | "-" ] rdigit { rdigit }
 取简单映射不是为了省事：完整映射不是一个后端能从一张表实现的函数，而 Dawn 要求一个原语
 在每个后端上是同一个函数。需要完整映射的场合属于能接收 locale 的库。
 
-那张表是**编译器的**（`selfhost/src/case_table.dawn`，生成物，记着生成它的 JDK），两个后端
+那张表是**编译器的**（`selfhost/src/embed/unicode_case.dawn`，生成物，记着生成它的 JDK），两个后端
 各自领走一份：JVM 写进 `dawn/rt/Strings`，native 写进发出来的 C。所以 `str.to_upper` 的答案
 **不随宿主 JDK 的 Unicode 版本变**——升级到新 Unicode 是重新生成这张表这一件明确的事，
-而不是换台机器编译就悄悄换了答案。分类（`char_is_*`）同理，表在 `selfhost/src/class_table.dawn`。
+而不是换台机器编译就悄悄换了答案。分类（`char_is_*`）同理，表在 `selfhost/src/embed/unicode_class.dawn`。
 
 **字符即码点。** `code_points(s) -> List[Char]` 拆成字符（增补平面的代理对合并为一个码点）、
 `from_code_points(cs: List[Char])` 由字符组装；`str.len` 是码点数，`str.at` 回一个
@@ -1847,7 +1847,7 @@ hex 与 base64 是纯 Dawn 字节算术（无 `use java`，故两后端同一份
 - `io.stdin_ready(timeout_ms)` 只答一件事：**此刻是否至少有一字节可读**。
   **输入结束不算就绪**——写端已关和「连着但静默」给同一个 `false`，两者的区别由
   `io.read_stdin` 报告，它仍是唯一的读者。故**只靠它驱动的循环会在输入结束后空转**：
-  没活干的时候必须去做那次阻塞读（`selfhost/src/lsp.dawn` 的读循环是这个形状）。
+  没活干的时候必须去做那次阻塞读（`selfhost/src/lsp/lsp.dawn` 的读循环是这个形状）。
   `timeout_ms` 是**上界**不是下界：提早回 `false` 一律合法（常规文件到达末尾会立刻回），
   因为拿到 `false` 的调用方唯一能做的就是别等了；`true` 才是不许猜的那个。
   取这个形状是因为它是**两个后端都不起线程就能实现的唯一一个**：「读不会阻塞」那种读法要

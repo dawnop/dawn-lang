@@ -3,7 +3,7 @@
 #
 #   ./scripts/table-freight/run.sh
 #
-# selfhost/src/reach.dawn prunes the case and classification tables (#65/#66)
+# selfhost/src/ir/reach.dawn prunes the case and classification tables (#65/#66)
 # down to what the user's modules can reach, which is worth 52KB of a hello
 # world. It used to walk lower.LMod.m, and `m` has no test bodies in it -- but
 # the JVM emitter writes test blocks into every artifact, `dawn build` and

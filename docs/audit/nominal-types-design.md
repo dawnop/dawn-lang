@@ -204,9 +204,9 @@ pub fn code(c: Char) -> Int
 
 | 步 | 状态 | 文件 | 测试 |
 |---|---|---|---|
-| 1 | **可做** | `selfhost/src/parser.dawn`（`type X = new T`）、`ast.dawn` | parser 内联 test |
-| 2 | **可做** | `selfhost/src/checker.dawn`（名义等价、自动生成的两个转换、`derive` 转发、Map 键限制穿透） | 「`Meters` 与 `Float` 不互换」「`new Float` 不能作 Map 键」 |
-| 3 | **可做** | `selfhost/src/emit.dawn`（擦除到底层类型，零开销） | fixpoint；`new Int` 的算术与裸 `Int` 发射同样的字节码 |
+| 1 | **可做** | `selfhost/src/front/parser.dawn`（`type X = new T`）、`ast.dawn` | parser 内联 test |
+| 2 | **可做** | `selfhost/src/check/checker.dawn`（名义等价、自动生成的两个转换、`derive` 转发、Map 键限制穿透） | 「`Meters` 与 `Float` 不互换」「`new Float` 不能作 Map 键」 |
+| 3 | **可做** | `selfhost/src/jvm/emit.dawn`（擦除到底层类型，零开销） | fixpoint；`new Int` 的算术与裸 `Int` 发射同样的字节码 |
 | 4 | **冻结**，与 Phase 6 合并 | `std/char.dawn`；`'a'` 的类型改为 `Char`；`lexer.dawn`/`packages/json`/`fmt.dawn` 全部调用点 | 全量 + JSONTestSuite |
 | 5 | 随 4 | `docs/spec.md` §1.5、§2.6、§11 | — |
 
@@ -324,7 +324,7 @@ lowering 是恒等（`Char` 的表示就是 `Int`，两个后端各加一条直�
 ### 7.6 期 2 的第四条约束：selfhost 也造 `Char`，而它够不着 std 的桥
 
 7.5 数了三条约束就收口，桥定成一个 **internal**（只有 std 能写）的 `char_unchecked`。
-2026-08-06 复核 `selfhost/src/lexer.dawn` 时发现**第四条**，它推翻那个收口：
+2026-08-06 复核 `selfhost/src/front/lexer.dawn` 时发现**第四条**，它推翻那个收口：
 
 **`selfhost/src` 自己就要从 `Int` 造 `Char`，而它不是 std。**
 `lex_unicode` 把 `\u{...}` 的十六进制位算成一个码点（`cp = cp * 16 + d`），算完要塞进
@@ -368,7 +368,7 @@ selfhost 同样看不见。两条一夹，**期 2 的 selfhost 无法构造任�
 
 | 变异 | 结果 |
 |---|---|
-| `types.dawn` 加 `bsig("char_unchecked", ...)`，`lexer.dawn` 调它 | stage 1 红：`error: undefined function: char_unchecked --> selfhost/src/lexer.dawn` |
+| `types.dawn` 加 `bsig("char_unchecked", ...)`，`lexer.dawn` 调它 | stage 1 红：`error: undefined function: char_unchecked --> selfhost/src/front/lexer.dawn` |
 | `ls .dawn/seeds/std-v0.55.0/` | 11 个模块，**没有 `char.dawn`** |
 
 两行合起来：**期 2 那一版的 selfhost，既调不到新内建，也 `use` 不了新 std 模块。**
@@ -400,7 +400,7 @@ selfhost 同样看不见。两条一夹，**期 2 的 selfhost 无法构造任�
 
 **期 1.5 的收口不是「看着应该行」，是跑过的**（2026-08-06，v0.56.0 发布前）：
 把 v0.55.0 的种子 std 复制一份、只加进 `char.dawn` 与新的 `modules.txt`
-（也就是造出一个 v0.56.0 形状的 std），再给 `selfhost/src/lexer.dawn` 加上
+（也就是造出一个 v0.56.0 形状的 std），再给 `selfhost/src/front/lexer.dawn` 加上
 
 ```dawn
 use std/char

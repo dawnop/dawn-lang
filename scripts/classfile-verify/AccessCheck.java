@@ -331,7 +331,7 @@ final class AccessCheck {
         }
         if (hit == Boolean.FALSE) {
           if (ref.owner().startsWith("dawn/rt/")) {
-            // Freight pruning, not a defect: selfhost/src/reach.dawn drops the
+            // Freight pruning, not a defect: selfhost/src/ir/reach.dawn drops the
             // Unicode-table intrinsics a program cannot reach out of the
             // emitted dawn/rt classes, and leans on lazy resolution to make
             // the dangling reference from unreachable std code harmless

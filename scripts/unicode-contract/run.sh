@@ -5,8 +5,8 @@
 #
 # Two operations have no derivation -- their answer is a table: simple (1:1)
 # case mapping (`str.lower`/`str.upper`) and classification (the six
-# `char_is_*`). Those tables are the compiler's -- selfhost/src/case_table.dawn
-# and selfhost/src/class_table.dawn -- and each backend receives them: codegen
+# `char_is_*`). Those tables are the compiler's -- selfhost/src/embed/unicode_case.dawn
+# and selfhost/src/embed/unicode_class.dawn -- and each backend receives them: codegen
 # writes them into dawn/rt/Strings, `__emitc` writes them into the generated C.
 # It used to be `Character.toUpperCase`/`Character.isLetter` on one side and a
 # generated header (or a panic above U+007F) on the other, which is one answer

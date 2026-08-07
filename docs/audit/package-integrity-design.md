@@ -34,7 +34,7 @@
 
 ### 1.1 cache 命中就信任（PKG-02）
 
-`selfhost/src/pkgfetch.dawn` 的策略是明说的：**fetch 时验证一次，之后信任本地副本**。
+`selfhost/src/pkg/pkgfetch.dawn` 的策略是明说的：**fetch 时验证一次，之后信任本地副本**。
 目录存在就直接返回，不再看内容。
 
 于是用户手改、磁盘损坏、并发抓取留下的半成品，都能改变 cache 内容而不被发现。
@@ -161,10 +161,10 @@ lock 让你知道要什么，不让它凭空出现。文档里要写明这一点
 
 | 步 | 文件 | 测试 |
 |---|---|---|
-| 1 | `selfhost/src/pkgfetch.dawn`：marker 写入 + 原子 rename | 「rename 前 marker 已在临时目录」 |
+| 1 | `selfhost/src/pkg/pkgfetch.dawn`：marker 写入 + 原子 rename | 「rename 前 marker 已在临时目录」 |
 | 2 | 同上：cache 命中重算 d1 | 「手改 cache 里一个字节 → 报错并给出两个 hash」 |
 | 3 | `selfhost/src/main.dawn`：`dawn cache verify` | 遍历并报告 |
-| 4 | `selfhost/src/maven.dawn` + `manifestv.dawn`：`dawn.lock` 读写 | 「lock 与 toml 直依赖不一致 → 报错」「sha256 不匹配 → 报错」 |
+| 4 | `selfhost/src/pkg/maven.dawn` + `manifestv.dawn`：`dawn.lock` 读写 | 「lock 与 toml 直依赖不一致 → 报错」「sha256 不匹配 → 报错」 |
 | 5 | `selfhost/src/main.dawn`：`dawn lock` / `dawn lock --check` | CI 用 `--check` |
 | 6 | `docs/package-design.md`：改掉过强的可复现论证，写明 lock 覆盖什么、不覆盖什么 | — |
 

@@ -297,8 +297,8 @@ native 照抄才算"通过"。故语料要配少量**独立的期望输出**(不
 | Phase 5 `use c` / Phase A 验收 | 差分 harness 已就位并进了 CI。**`use c` 已不在关键路径**:§14.3/§14.7 的十个 io intrinsic 解决了编译器自己的 IO 需求 |
 | Phase 6 native 自举 | **完成(2026-07-30,§14.23)**:三道缝全关 + native driver `nmain` 落地,`scripts/native-fixpoint.sh` 过——native 编译器自举 B == C,裸目录 smoke 全通 |
 
-**已落地的件**:`selfhost/src/core.dawn`(IR)、`selfhost/src/lower.dawn`(TAST → Core)、
-`selfhost/src/emitc.dawn`(Core → C)、`emit.dawn`(Core → JVM)、`runtime/c/dawn_rt.{h,c}`、
+**已落地的件**:`selfhost/src/ir/core.dawn`(IR)、`selfhost/src/ir/lower.dawn`(TAST → Core)、
+`selfhost/src/c/emitc.dawn`(Core → C)、`emit.dawn`(Core → JVM)、`runtime/c/dawn_rt.{h,c}`、
 `scripts/spike-native/`(差分 harness + 五个语料,已接 CI)。
 入口:`dawn __emitc <file> -o <out.c>`(发 C)、`dawn __lower <target>`(覆盖率门禁)。
 
@@ -947,7 +947,7 @@ harness 也改了一处:两个后端的运行都把 stdin 接到 `/dev/null`。�
   建在新的 `fspath` 上。**模块叫 `fspath` 不叫 `path`**:模块别名和局部名共用一个命名空间,
   而 `path` 是这个编译器里十几个函数的形参名。这是语言的一处人体工学缺口,不是模块的问题,先绕开。
   (它当初落在 `std/fspath`;审计 RD-09 判它不该在 std,现在是 `packages/fspath` 包,
-  编译器自己另有一份只含四个函数的 `selfhost/src/fspath.dawn`——编译器不能依赖包。)
+  编译器自己另有一份只含四个函数的 `selfhost/src/pkg/fspath.dawn`——编译器不能依赖包。)
 - **`fspath` 的验收物是它替掉的那个东西**(`scripts/path-contract`,已进 CI)。写它的时候
   在文档注释里**声明了一处与 Java 的偏离**——`..` 爬过根目录——跑完发现 **Java 也是这么做的**,
   于是那三个用例从「声明的偏离」变成普通的一致性用例,注释改成记录这件事本身。
@@ -1403,7 +1403,7 @@ Unicode 版本上,两个后端读同一份数据,JDK 换了也不动。代价是
 靠脚本证明相等」,而是**编译器持有唯一一份,两个后端各自领走**。
 
 ```
-selfhost/src/case_table.dawn     ← 唯一一份(生成物,1352 条区间,记着生成它的 JDK)
+selfhost/src/embed/unicode_case.dawn     ← 唯一一份(生成物,1352 条区间,记着生成它的 JDK)
         ├── codegen  → dawn/rt/Strings 的 <clinit>:字符串常量解码成 int[],二分
         └── emitc    → 发出来的 .c 里的 dawn_upper_ranges[] / dawn_lower_ranges[]
 ```
@@ -1459,7 +1459,7 @@ C 侧那个 panic 一直被当成「声明出来的缺口」而不是分歧—�
 `char_is_letter(0x10D50)` 在 JDK 21 上是 `false`、26 上是 `true`,一个 native 都没参与的、
 纯 JVM 的程序,答案取决于谁编译的它。panic 拦不住这个,因为根本没走到 native 那边。
 
-**做法与 §14.16 同**:`selfhost/src/class_table.dawn`(生成物),五张集合表——
+**做法与 §14.16 同**:`selfhost/src/embed/unicode_class.dawn`(生成物),五张集合表——
 letter 659 / digit 64 / upper 651 / lower 671 / space 8 条区间。`alnum` **不入表**:
 Java 定义 `isLetterOrDigit = isLetter || isDigit`,存第三张集合就是第三个要维持一致的东西。
 编码是 §14.16 那套去掉第三个字段(12 位十六进制一条),解码器一个就够,只有读的步长不同。
@@ -1561,7 +1561,7 @@ Dawn 模块(字符串常量表),`stdlib.dawn` 改读它,两后端同一条路,na
 
 §14.20 拍的方向,落地了。`stdlib.dawn` 原本经 `ClassLoader.getSystemResourceAsStream`
 读回 jar 资源里的 std——宿主专属的取回路径,native 无法共享。现在
-`scripts/gen-stdsrc.py` 把 `std/modules.txt` + 11 个文件生成 `selfhost/src/stdsrc.dawn`
+`scripts/gen-stdsrc.py` 把 `std/modules.txt` + 11 个文件生成 `selfhost/src/embed/stdsrc.dawn`
 (字符串常量,68KB,入库),`std_read` 的兜底从资源换成 `stdsrc.source(name)`,
 `stdlib.dawn` 的 `use java` **归零**。
 

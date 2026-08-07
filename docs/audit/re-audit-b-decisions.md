@@ -209,7 +209,7 @@ JVM 实现 `codegen.dawn:900` 转 `new String(b, charset)`；C 实现 `dawn_rt.c
 （`dawn_charset_is`，`dawn_rt.c:1319`）。spec 对存在哪些 charset **一个字都没写**（§9.5.1:1010、§11:1262
 都只说「按字符集解码」）。
 
-**[读] 树内调用点全部是 `"UTF-8"`**：`selfhost/src/lsp.dawn:509`、`main.dawn:1028`、
+**[读] 树内调用点全部是 `"UTF-8"`**：`selfhost/src/lsp/lsp.dawn:509`、`main.dawn:1028`、
 `pkgfetch.dawn:273,359,365`、`packages/web/src/server.dawn:65,73`、
 `packages/inflate/src/zip.dawn:151`——**九处，无一例外**。没有第二个 charset 的真实用户。
 

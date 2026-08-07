@@ -40,7 +40,7 @@ ARCH-06 问「这个求值器为什么要 512MB 宿主栈」。分开写会各�
 作为普通语言语法开放，并承认它不健全。`docs/design.md` 的原始决策写的是
 「unsafe escape 不向用户代码开放」——与现状相反。
 
-`selfhost/src/checker.dawn` 的 `check_unsafe_pure` 只做一件事：把 body 里
+`selfhost/src/check/checker.dawn` 的 `check_unsafe_pure` 只做一件事：把 body 里
 具体的 `io` 效果屏蔽成 `Pure`（效果变量拒绝，完全没有 io 的 body 报「多余的戳」）。
 它**不看调用者是谁**，不区分 std 与用户代码。
 
@@ -54,7 +54,7 @@ fn now() -> Int = unsafe_pure { System.currentTimeMillis()! }
 
 ### 1.2 comptime 会在编译器进程内反射执行 Java 静态方法
 
-`selfhost/src/interp.dawn` 的 `eval_java`（route C）：只在 `unsafe_pure` 内可达、
+`selfhost/src/ir/interp.dawn` 的 `eval_java`（route C）：只在 `unsafe_pure` 内可达、
 只接受 static 方法、只跨 Int/Float/Bool/String/Unit 边界——三道限制都是真的，
 但**边界之内是任意的**。`jreflect.invoke_static(fqcn, method, param_cls, jargs)`
 对 JDK 的哪个类没有限制。
@@ -242,10 +242,10 @@ const COMPTIME_ALLOWLIST: List[String] = [
 
 | 步骤 | 状态 | 文件 | 测试 |
 |---|---|---|---|
-| 1 | **可做** | `selfhost/src/checker.dawn`（`check_unsafe_pure` 加 `is_std_module` 判定） | checker 内联 test：用户模块用 `unsafe_pure` 报错；std 模块不报 |
+| 1 | **可做** | `selfhost/src/check/checker.dawn`（`check_unsafe_pure` 加 `is_std_module` 判定） | checker 内联 test：用户模块用 `unsafe_pure` 报错；std 模块不报 |
 | 1 | **可做** | `docs/spec.md` §6.4 改写、`docs/design.md` 回填「原决策现已恢复」 | — |
-| 2 | **可做** | `selfhost/src/interp.dawn`（`eval_java` 查表） | interp 内联 test：表内类可折叠、表外类报错并给出表 |
-| 3 | **不做**（[verdict](ceval-trampoline-verdict.md)） | ~~`selfhost/src/interp.dawn`（`ceval` trampoline 化）~~ | — |
+| 2 | **可做** | `selfhost/src/ir/interp.dawn`（`eval_java` 查表） | interp 内联 test：表内类可折叠、表外类报错并给出表 |
+| 3 | **不做**（[verdict](ceval-trampoline-verdict.md)） | ~~`selfhost/src/ir/interp.dawn`（`ceval` trampoline 化）~~ | — |
 | 3 | **不做**（同上） | ~~`bin/dawn`、`selfhost/src/main.dawn`、`scripts/*.sh` 去 `-Xss512m`~~ | — |
 
 > 步骤 2 的 allowlist 在 native 上会**自然消失**——`use c` 没有反射，

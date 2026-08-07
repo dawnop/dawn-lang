@@ -98,7 +98,7 @@ An answer should not change with the host's version, so wherever there is data t
 language carries its own:
 
 - **The Unicode case and classification tables belong to the compiler**
-  (`selfhost/src/case_table.dawn`, `class_table.dawn`); codegen writes them into
+  (`selfhost/src/embed/unicode_case.dawn`, `unicode_class.dawn`); codegen writes them into
   `dawn/rt/Strings` and `__emitc` writes them into the generated C, so both backends
   carry the same table. It used to be `Character.toUpperCase` on one side and a
   generated header on the other — which is "one answer" only while two JDKs happen to

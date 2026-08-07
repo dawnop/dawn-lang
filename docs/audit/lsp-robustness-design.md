@@ -49,7 +49,7 @@
 
 ### 1.1 手写 UTF-8 decoder 不校验（LSP-01）
 
-`selfhost/src/lsp.dawn` 的 `utf8_decode` 从 percent-decode 出来的字节序列重建码点。
+`selfhost/src/lsp/lsp.dawn` 的 `utf8_decode` 从 percent-decode 出来的字节序列重建码点。
 它不检查：continuation byte 是不是真的 `10xxxxxx`、overlong encoding、
 surrogate 范围（D800–DFFF）、最大码点（> 10FFFF）。不完整序列直接跳一个字节：
 
@@ -244,7 +244,7 @@ debounce 会在数据已经到齐时开跑分析，**debounce 恰好被它打败
 新增一个 intrinsic 的落地点（照 `io_read_stdin` 现有分布点出来的，共 9 处）：
 `types.dawn` 的签名表 + std-only 名单、`stdlib.dawn` 的「不是语言表面」提示表、
 `interp.dawn` 的 comptime 拒绝名单、`rtclasses.dawn` 的 JVM 字节码生成、
-`runtime/c/dawn_rt.{c,h}`、`selfhost/src/rtsrc.dawn`（`gen-rtsrc.py` 重生成）、
+`runtime/c/dawn_rt.{c,h}`、`selfhost/src/embed/rtsrc.dawn`（`gen-rtsrc.py` 重生成）、
 `std/io.dawn` + `stdsrc.dawn`（`gen-stdsrc.py` 重生成）、两个 emitter 的 arm
 （`scripts/intrinsic-parity.py` 会验）、`docs/spec.md` §11。
 
@@ -484,12 +484,12 @@ LSP-04 的验收不在这条线上：`selfhost-lsp-diff.sh` 比的是**输出字
 | 步 | 文件 | 测试 |
 |---|---|---|
 | 0 | `scripts/selfhost-lsp-diff.sh` 语料加畸形 URI | 记录旧行为 |
-| 1 | `selfhost/src/lsp.dawn`：`uri_to_path`/`path_to_uri` 改 JDK；删 `utf8_decode`/`utf8_bytes`/percent-decode | lsp 内联 test：Windows drive、UNC、非法 UTF-8、`%2F` |
+| 1 | `selfhost/src/lsp/lsp.dawn`：`uri_to_path`/`path_to_uri` 改 JDK；删 `utf8_decode`/`utf8_bytes`/percent-decode | lsp 内联 test：Windows drive、UNC、非法 UTF-8、`%2F` |
 | 2a ✅ | `scripts/lsp-liveness.py`：挂断 / 存活 / 空转三条断言进仓库，进 `gates.yml` 的 `test` job | **已完成**（2026-08-04）。三条在真 `bin/dawn lsp` 上各被变异体单独打红过，阈值与实测见 §2.2.3 |
 | 2b ✅ | `runtime/c/dawn_rt.c`：`io_read_stdin` 从 `fread` 换成 `read(2)`（`io_read_line` 同步） | **已完成**（2026-08-05）。变异体：换回 `fread` 后，6 字节输入读掉 5 字节，就绪查询答 `false`，而第 6 字节确实还在（下一次读拿得到）——正是设计预言的那一格 |
 | 2c ✅ | 新 intrinsic `io_stdin_ready(timeout_ms) -> Bool !io` | **已完成**（2026-08-05）。落地点的实际清单与逐点变异体见 §2.2.1 末；9 处里 1 处是错的、另有 4 处漏记。`intrinsic-parity.py` 不覆盖它 |
-| 2d ✅ | `selfhost/src/lsp.dawn`：主循环 debounce + **无事可做时阻塞读**那一支 | **已完成**（2026-08-05）。`lsp-liveness.py` 增两条断言（`debounce` / `freshness`），各有自己的变异体；两个后端的 lsp 转录仍与 v0.50.0 **逐字节相同**。见 §2.2.4 |
-| 3 | `selfhost/src/lsp.dawn`：`$/cancelRequest` 回 `RequestCancelled` | 协议合规 |
+| 2d ✅ | `selfhost/src/lsp/lsp.dawn`：主循环 debounce + **无事可做时阻塞读**那一支 | **已完成**（2026-08-05）。`lsp-liveness.py` 增两条断言（`debounce` / `freshness`），各有自己的变异体；两个后端的 lsp 转录仍与 v0.50.0 **逐字节相同**。见 §2.2.4 |
+| 3 | `selfhost/src/lsp/lsp.dawn`：`$/cancelRequest` 回 `RequestCancelled` | 协议合规 |
 | 4 | 实测 debounce 窗口，把 150ms 换成有出处的数字 | 记录 harness 与数据 |
 
 无破坏性变更（LSP 是工具，不是语言表面）。2b/2c 动的是运行时契约与 intrinsic 表，

@@ -47,7 +47,7 @@
 `docs/grammar.ebnf` 把 `call_args` 写成任意 `primary_expr` 的 postfix，
 听起来函数是一等值、调用是一般后缀运算。实际不是：
 
-- `selfhost/src/parser.dawn` 的 postfix 循环只处理 `?`、`!`、`[]` 和 `.`；
+- `selfhost/src/front/parser.dawn` 的 postfix 循环只处理 `?`、`!`、`[]` 和 `.`；
 - 普通调用在 `ident_or_call` 特判——**只有「名字后面跟 `(`」这一种形状**；
 - 构造器调用另有一处特判（还是唯一支持 named argument 的地方，这就是 SYN-03）。
 
@@ -168,10 +168,10 @@ postfix 循环天然做到——这一条不产生新冲突，因为今天 `f(1,
 
 | 文件 | 改什么 |
 |---|---|
-| `selfhost/src/parser.dawn` | postfix 循环加 `(`；删 `ident_or_call` 与构造器的调用特判；跨行 `(` 不吃 |
-| `selfhost/src/ast.dawn` | 复用既有的 `EApply`（不叫 `EApplyPost`）+ `CtorArg` 改名 `Arg` |
-| `selfhost/src/checker.dawn` | `check_apply` 四分支；named argument 从语法判定改为类型判定 |
-| `selfhost/src/astdump.dawn` | AST dump 形状变化 |
+| `selfhost/src/front/parser.dawn` | postfix 循环加 `(`；删 `ident_or_call` 与构造器的调用特判；跨行 `(` 不吃 |
+| `selfhost/src/front/ast.dawn` | 复用既有的 `EApply`（不叫 `EApplyPost`）+ `CtorArg` 改名 `Arg` |
+| `selfhost/src/check/checker.dawn` | `check_apply` 四分支；named argument 从语法判定改为类型判定 |
+| `selfhost/src/front/astdump.dawn` | AST dump 形状变化 |
 | `docs/spec.md` §4.3 | 后缀表里 `()` 的说明；跨行 `(` 的规则 |
 | `docs/grammar.ebnf` | 这条修完，EBNF 的 `call_args`/`arg` 产生式**第一次变成真的** |
 

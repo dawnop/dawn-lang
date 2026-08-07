@@ -22,7 +22,7 @@
 
 ### 1.1 TAST 同时是四样东西
 
-`selfhost/src/tast.dawn` 定义的树现在承担：
+`selfhost/src/check/tast.dawn` 定义的树现在承担：
 
 1. **类型树**——checker 的输出，带类型与符号 id；
 2. **lowered tree**——desugar 之后的形态（`XPropagate`、`XUnwrap`、`XApply` 都是降级产物）；

@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ dee99b03ce7cf731 -->
+<!-- doc-check: translation-of docs/spec.md @ 32254967df4d74c5 -->
 
 # Dawn Language Specification
 
@@ -17,7 +17,7 @@ This document is the authoritative definition of the syntax and semantics. For d
 see [design.en.md](design.en.md). [grammar.ebnf](grammar.ebnf) is a **historical** machine-readable
 grammar and has **fallen behind the parser** (its own header lists the known mismatches) — read it
 as a reference, not as a judge. When the grammar is in dispute, this document and
-`selfhost/src/parser.dawn` win; the executable expectations live in `scripts/grammar-corpus/`.
+`selfhost/src/front/parser.dawn` win; the executable expectations live in `scripts/grammar-corpus/`.
 
 Wording of this specification: **must** (violating it is a compile error), **guaranteed**
 (behaviour the implementation promises), **undefined** (not promised in v0.1; do not rely on it).
@@ -2184,13 +2184,13 @@ about saving effort: full mapping is not a function a backend can implement from
 and Dawn requires a primitive to be the same function on every backend. Cases that need
 full mapping belong to a library that can take a locale.
 
-That table belongs to **the compiler** (`selfhost/src/case_table.dawn`, a generated file
+That table belongs to **the compiler** (`selfhost/src/embed/unicode_case.dawn`, a generated file
 that records the JDK which generated it), and the two backends each take a copy of their
 own: the JVM one is written into `dawn/rt/Strings`, the native one into the emitted C. So
 the answer `str.to_upper` gives **does not move with the host JDK's Unicode version** —
 upgrading to a new Unicode is the one explicit act of regenerating this table, not a silent
 change of answer because you compiled on a different machine. Classification (`char_is_*`)
-works the same way; its table is `selfhost/src/class_table.dawn`.
+works the same way; its table is `selfhost/src/embed/unicode_class.dawn`.
 
 **A character is a code point.** `code_points(s) -> List[Char]` splits into characters (a
 supplementary-plane surrogate pair merges into a single code point) and
@@ -2298,7 +2298,7 @@ behaviours are:
   already closed and "connected but silent" give the same `false`, and the difference
   between them is reported by `io.read_stdin`, which is still the only reader. So **a loop
   driven by it alone will spin once input ends**: when there is nothing to do you must go
-  and make that blocking read (the read loop in `selfhost/src/lsp.dawn` has this shape).
+  and make that blocking read (the read loop in `selfhost/src/lsp/lsp.dawn` has this shape).
   `timeout_ms` is an **upper** bound, not a lower one: returning `false` early is always
   legal (a regular file at end of file returns immediately), because the only thing a
   caller holding a `false` can do is stop waiting; `true` is the one that must not be

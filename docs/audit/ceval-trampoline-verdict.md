@@ -27,8 +27,8 @@ JVM 侧统一压成 `-Xmx700m -XX:CompressedClassSpaceSize=128m -XX:ReservedCode
 
 ## 二、trampoline 的工作量，按今天的代码数
 
-`ceval`（`selfhost/src/interp.dawn:1030–1236`）对 `CExpr` 的 **33 个构造器有 33 个臂**，
-与 `selfhost/src/core.dawn:85–176` 的 33 个构造器一一对上，没有 catch-all。分类：
+`ceval`（`selfhost/src/ir/interp.dawn:1030–1236`）对 `CExpr` 的 **33 个构造器有 33 个臂**，
+与 `selfhost/src/ir/core.dawn:85–176` 的 33 个构造器一一对上，没有 catch-all。分类：
 
 | 类 | 条数 | 臂 |
 |---|---:|---|
@@ -162,7 +162,7 @@ comptime: call depth limit (100000) exceeded
 > 本节记的是 **2026-07-31 上午**的状态，当天下午两个缺陷都关掉了——**读之前先看 §5.1**。
 
 **今天 native 没有设任何栈。** `runtime/c/dawn_rt.{c,h}`、`selfhost/src/nmain.dawn`、
-`selfhost/src/cdriver.dawn`、`selfhost/src/emitc.dawn`（发的 `int main` 在 `emitc.dawn:1504`）
+`selfhost/src/c/cdriver.dawn`、`selfhost/src/c/emitc.dawn`（发的 `int main` 在 `emitc.dawn:1504`）
 里 **没有** `pthread_attr_setstacksize`、没有 `setrlimit(RLIMIT_STACK)`、没有任何栈尺寸设置。
 `../native-backend-plan.md:166–167` 把「大主线程栈（`pthread_attr_setstacksize`）」列在
 Phase 3 的运行时其余项里——**没落地**。native 今天吃的是 OS 默认 8 MB。

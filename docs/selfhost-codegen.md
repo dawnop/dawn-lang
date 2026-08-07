@@ -1,6 +1,6 @@
 # Selfhost P4：CodeGen 移植计划与通读笔记
 
-> 状态：**historical** —— codegen 的移植设计，已实现；现状看 `selfhost/src/codegen.dawn`/`emit.dawn`。
+> 状态：**historical** —— codegen 的移植设计，已实现；现状看 `selfhost/src/jvm/codegen.dawn`/`emit.dawn`。
 >
 > P3b（checker）已于 2026-07-22 全量对拍绿（见 selfhost-checker.md §七）。本文件是
 > P4 的接力棒：目标、金标准、TAST 缺口清单、通读笔记，随移植推进持续更新。
@@ -8,7 +8,7 @@
 ## 一、目标与金标准
 
 - 把 `compiler/src/main/kotlin/dawn/codegen/CodeGen.kt`（4205 行，ASM）移植成
-  `selfhost/src/codegen.dawn`（+ 拆分文件），输出 **与 Kotlin 逐字节一致的 .class**。
+  `selfhost/src/jvm/codegen.dawn`（+ 拆分文件），输出 **与 Kotlin 逐字节一致的 .class**。
 - 金标准：`dawn __emit <target> -o <dir>`（新增 Kotlin 隐藏命令，把 generate() 的
   Map[String, ByteArray] 落盘为 <dir>/<name>.class）对 `selfhost emit <target> -o <dir>`，
   脚本 `scripts/selfhost-emit-diff.sh` 对拍两目录（diff -r 字节比较）。
@@ -190,7 +190,7 @@ Kotlin CodeGen 从 checked AST 读的注解，逐一映射到 TAST：
   2. StdCtx 加 `mods: List[(String, Cx, TModule, CtOut)]`（load_std 已 check 了每
      个 std 模块，只是丢了 per-module 三元组；std 的 className = mod_path 即
      "std/str"，'/'→'$' 只在方法名 mangle 时做）。
-  3. 新模块 selfhost/src/emit.dawn：Gen 记录线程化 Kotlin 的可变字段
+  3. 新模块 selfhost/src/jvm/emit.dawn：Gen 记录线程化 Kotlin 的可变字段
      {mv, class_name, adts, traits, impl_table, fn_sigs, syms, slots: Map[Int,Int],
      next_slot, method_ret, rets_null, fn_start: Option[Label], self_pending,
      loop_stack, lambda_ctr, sam_ctr, pending_*(队列), const_fields, cur_fn,

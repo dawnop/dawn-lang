@@ -33,15 +33,15 @@
 ### 1.1 真实盘子（本文复测，4ae6b61）
 
 ```
-selfhost/src/checker.dawn    11,308 行   Cx  47 字段 @ :91-164
-selfhost/src/codegen.dawn     3,425 行   （无 Gen，一个字段都不碰）
-selfhost/src/emit.dawn        2,534 行   Gen 21 字段 @ :92-128
-selfhost/src/emitc.dawn       1,661 行   CSt 6 字段（C 后端，已经是目标形状）
-selfhost/src/rc.dawn          1,868 行   C 专属，与本批零交集
-selfhost/src/jvmops.dawn        137 行   115 个 const，零函数（07-30 的模板刀）
+selfhost/src/check/checker.dawn    11,308 行   Cx  47 字段 @ :91-164
+selfhost/src/jvm/codegen.dawn     3,425 行   （无 Gen，一个字段都不碰）
+selfhost/src/jvm/emit.dawn        2,534 行   Gen 21 字段 @ :92-128
+selfhost/src/c/emitc.dawn       1,661 行   CSt 6 字段（C 后端，已经是目标形状）
+selfhost/src/c/rc.dawn          1,868 行   C 专属，与本批零交集
+selfhost/src/jvm/jvmops.dawn        137 行   115 个 const，零函数（07-30 的模板刀）
 ```
 
-`class_table.dawn`(2,089) 与 `case_table.dawn`(1,384) **不是后端模块**，是
+`unicode_class.dawn`(2,089) 与 `unicode_case.dawn`(1,384) **不是后端模块**，是
 `scripts/unicode-contract/probe.dawn` 生成的 Unicode 数据表（文件头写着
 「GENERATED -- do not edit」），两个后端都读。把它们算进 ARCH-02 的盘子是口径错误。
 
@@ -660,13 +660,13 @@ fixpoint、classfile-verify **全部看不见它**。
 
 ```bash
 # 1) 字段集相等（旧 EffFrame 的字段【名】被改过，所以比的是它读的 cx.<field>，不是它自己的字段名）
-diff <(sed -n '/^pub type Frame = {/,/^}/p' selfhost/src/cx.dawn \
+diff <(sed -n '/^pub type Frame = {/,/^}/p' selfhost/src/check/cx.dawn \
          | grep -oE '^  [a-z_]+:' | tr -d ' :' | LC_ALL=C sort) \
-     <(sed -n '/let frame = EffFrame {/,/^  }/p' <bef>/selfhost/src/checker.dawn \
+     <(sed -n '/let frame = EffFrame {/,/^  }/p' <bef>/selfhost/src/check/checker.dawn \
          | grep -oE 'cx\.[a-z_]+' | cut -d. -f2 | LC_ALL=C sort)
 
 # 2) 没有 spread：加第九个字段必须在这里编译报错，而不是静默泄漏进隔离体
-sed -n '/^pub fn enter_isolated/,/^}/p' selfhost/src/checker.dawn \
+sed -n '/^pub fn enter_isolated/,/^}/p' selfhost/src/check/checker.dawn \
   | sed -n '/frame: Frame {/,/^    }/p' | grep -c '\.\.'   # 必须是 0
 ```
 
@@ -687,7 +687,7 @@ sed -n '/^pub fn enter_isolated/,/^}/p' selfhost/src/checker.dawn \
 |---|---|---|
 | B4 把某个 pass 相对 `check_module:10024-10039` 的执行顺序挪动了 → 诊断顺序变（`cerr` 是 `++ [...]` 追加语义） | 刀 0 语料出现差异 | 只有刀 0 看得见 |
 | B1 提取尾循环时改变了它相对 `(cx1, impl_sigs)` 的位置 | 同上。**B1 是刀 0 的第一次实弹**，故意排在最前 | 同上 |
-| A5 的 `GenCtx` 混进了返回类型（三分蜕变） | `grep -nE '\->[^=]*\bGenCtx\b' selfhost/src/emit.dawn` 必须零命中 | 一条 grep |
+| A5 的 `GenCtx` 混进了返回类型（三分蜕变） | `grep -nE '\->[^=]*\bGenCtx\b' selfhost/src/jvm/emit.dawn` 必须零命中 | 一条 grep |
 | ↑ **原先写的 `grep "GenCtx" \| grep "\->"` 是错的**（A5 实测）：每一行签名都含 `->`，所以在**正确**的实现上它返回 44 行。一条在正确实现上就报警的检查比没有检查更糟——第一个跑它的人会以为刀坏了 | | |
 | A1 的模块环（`:33-43` 没一起搬） | 编译器直接报 `error: circular module dependency` | **响亮**，编译期 |
 | B2/B4 漏改某个 `use`（Dawn 无 re-export） | `module 'checker' has no exported name 'Cx'` | **响亮**，编译期 |

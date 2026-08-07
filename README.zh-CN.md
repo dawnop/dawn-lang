@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of README.md @ 8d561ee2d5537da1 -->
+<!-- doc-check: translation-of README.md @ d9e6332c409e15f1 -->
 
 # Dawn
 
@@ -83,7 +83,7 @@ pub fn main() -> Unit !io = {
 
 答案不该随宿主的版本变，所以有数据的地方语言自己带数据：
 
-- **Unicode 大小写表与分类表是编译器的**（`selfhost/src/case_table.dawn`、`class_table.dawn`），
+- **Unicode 大小写表与分类表是编译器的**（`selfhost/src/embed/unicode_case.dawn`、`unicode_class.dawn`），
   codegen 写进 `dawn/rt/Strings`、`__emitc` 写进生成的 C，两边领同一份表。从前是一边
   `Character.toUpperCase`、另一边生成的头文件——那只在两个 JDK 的 Unicode 版本恰好相同时才是
   「一个答案」。（`scripts/unicode-contract`，每次 push。）

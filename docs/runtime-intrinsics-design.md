@@ -12,7 +12,7 @@
 >
 > **读到 `rt_intrinsic_target` 请当旧名**:全文(§10/§11 的落地记)提到的这张
 > 「`emit.dawn` 的 `(class, method)` 表」今天不存在。契约声明在
-> `selfhost/src/types.dawn`(`Rt`/`Intr`/`intrinsics()`,约 1645–1806 行),只说模块不说类名;
+> `selfhost/src/check/types.dawn`(`Rt`/`Intr`/`intrinsics()`,约 1645–1806 行),只说模块不说类名;
 > JVM 后端的映射收在 `emit.dawn` 的 `rt_class`/`rt_intrinsic_class`(586/598 行)。
 > 为什么表里不该有名字,见 §12.1。
 >
@@ -277,7 +277,7 @@ JVM-锁死。LLVM 后端一看 std 里全是 `java.lang.String.codePointCount`,�
 - **~~集合怎么产生~~ → C 已落地作过渡态,主推 D**(2026-07-25 修订):[collections-dejava-research.md](collections-dejava-research.md)。
   A(窄 codegen `extends java`)违背无继承+仍需 java 数组;B(手搓字节码)只有扁平 DawnList 划算、DawnMap 的 HAMT
   层级超出 codegen 现有能力;**C**(=把 DawnList/Map/Set 归位成「JVM 后端对契约的实现」)**已落地**——指路牌写进
-  `selfhost/src/vendor.dawn`。**但 A/B/C 共同的隐藏前提被拆穿**:「java.util 身份不可约」只在 `==`/hash 硬编码时成立。
+  `selfhost/src/pkg/vendor.dawn`。**但 A/B/C 共同的隐藏前提被拆穿**:「java.util 身份不可约」只在 `==`/hash 硬编码时成立。
   **改判主推 D**:把 Eq/Hash 提升成可 override 的 trait(骑 Ord 现成的字典轨),集合写成纯 Dawn 持久 ADT,身份真正消除、
   两 backend 一份源。C 保留到 D 的 Map/Set 阶段完成。路线:D0 Eq/Hash trait 化(最大风险,巨型 Emit-Change)→ D1 popcount
   intrinsic → D2 Map/Set 纯 Dawn 化(4→2)→ D3 List→先严格 RB(relaxed 以后),两后端一份纯 Dawn 源(4→1)。**List 表示
@@ -335,8 +335,8 @@ Cursor 那一行是 `opaque type Cursor = Int` 挣来的:模块外做不了算�
 不是 gap(未实现),是**实现了但答案可能不同**,各自写在定义处:
 
 - ~~`str_lower`/`str_upper` 只折 ASCII~~ / ~~`char_is_*` 在 U+007F 以上 panic~~ **2026-07-28 关掉**:
-  两族都不再是偏离。**两张表整个收进了编译器**(`selfhost/src/case_table.dawn` 与
-  `class_table.dawn`)——codegen 写进 `dawn/rt/Strings`、emitc 写进发出来的 C,两个后端从
+  两族都不再是偏离。**两张表整个收进了编译器**(`selfhost/src/embed/unicode_case.dawn` 与
+  `unicode_class.dawn`)——codegen 写进 `dawn/rt/Strings`、emitc 写进发出来的 C,两个后端从
   同一处领同一份数据。在此之前 JVM 侧读的是**宿主 JDK 那一版 Unicode**,所以连「只跑 JVM
   的程序」答案都取决于谁编译的它;native 那边一个是差 18 个码点、一个是当场 panic。
   见 `docs/native-backend-plan.md` §14.15–14.17。

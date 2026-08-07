@@ -17,7 +17,7 @@
 ## 1. 度量：这件事到底要盖住什么
 
 不是估的。把 `dawn_alloc` 按调用点分类，跑一遍整编译器的前端（lex + parse + check
-`selfhost/src/checker.dawn`，296 KB 源码）：
+`selfhost/src/check/checker.dawn`，296 KB 源码）：
 
 | 类别 | 次数 | 字节 | 占比 | 均值 |
 |---|---|---|---|---|

@@ -433,7 +433,7 @@ COMPUTE_MAXS 不会（实测 `javap`：前者 `nop/athrow`，后者原样保留 
      不是一个局部槽状态机。
    成因两种，**第二种决定了这项躲不掉**：(A) **源码型**——`selfhost/src/doc.dawn:77` 在
    构造器实参位写了 `if`（同族触发者还有 `match`/`?`/`.expect()`/短路运算）；
-   (B) **编译器自插型**——`selfhost/src/interp.dawn:1376` 的 `Ok((st, env, VInt(a / b)))`
+   (B) **编译器自插型**——`selfhost/src/ir/interp.dawn:1376` 的 `Ok((st, env, VInt(a / b)))`
    源码实参**没有任何分支**，是 lowering 插的**除零保护**（`dup2/lconst_0/lcmp/ifne`）把
    分支目标放进了**三层嵌套**的未初始化窗口（offset 245 同时处在 `new Result$Ok`、
    `new dawn/rt/Tuple3`、`new core$CValue$VInt` 三个窗口内）。
@@ -586,7 +586,7 @@ ASM `ClassWriter`**，再用那五个**静态**适配器（`beginOn` / `beginOnW
 
 而且这个论断是对一个**你无法从源重建的 class** 做的——比它看上去弱。所以：
 **不要说「`AdtClassWriter` 的危险面已消除」**。准确的说法是「危险的那一半当前不可达」。
-BOOT-01 的状态照此；`selfhost/src/vendor.dawn` 的 `vendor_trust` 注释里也写了同一句话。
+BOOT-01 的状态照此；`selfhost/src/pkg/vendor.dawn` 的 `vendor_trust` 注释里也写了同一句话。
 真正关门的是 **K-A7**（§5.7），不是本刀。
 
 > 后续（2026-08-03）：K-A7 期 2+3 落地，那个类已不在 jar 里，本段的「缓解」到那时才
@@ -1142,7 +1142,7 @@ D5 与 D6 的形状不同、且都与正确版本不同，所以门禁不是个�
 `classfile-verify`（含 `constpool-scan`）、`dawn test selfhost` 299 项、
 `dawn fmt site selfhost packages --check`、`selfhost-fixpoint` **B == C**、
 `shellcheck scripts/asm-adapter-contract/run.sh`。**编译器源码一行未改**
-（`selfhost/src/rtclasses.dawn` 只在做变异体时改过，演示完即 `git checkout` 还原并重建），
+（`selfhost/src/jvm/rtclasses.dawn` 只在做变异体时改过，演示完即 `git checkout` 还原并重建），
 所以**没有 Emit-Change**，`core-diff` / `native-fixpoint` / `*-diff` 系列不涉及。
 
 ### 5.8 V49 未必是单向门：一半成立，一半已被实验证伪（§4 第 17 条）
@@ -1690,21 +1690,21 @@ Emit-Change 逐条声明）、`run-diff` / `fmt-diff` / `lsp-diff` 零差异、`
 | `CLAUDE.md` | 契约表改指 `types.dawn` 的 `Rt`/`Intr`/`intrinsics()`；「第二后端的两个前置」整段改写成「第二后端已在跑，FFI capability 不是前置」；提交信息格式（§4 第 10 条）；`docs/` 篇数不再复述 |
 | `docs/README.md` | 同族两条：`runtime-intrinsics-design.md` 的说明、`llvm-backend-research.md` 的「第二后端调研」 |
 | `docs/runtime-intrinsics-design.md` | 文首加「`rt_intrinsic_target` 是旧名」；§11 的 `jarw.dawn` 先例更正为 `packages/inflate` |
-| `selfhost/src/emitc.dawn` | 文件头的「尚未实现」清单收成只剩 `CForeign` |
+| `selfhost/src/c/emitc.dawn` | 文件头的「尚未实现」清单收成只剩 `CForeign` |
 | `scripts/selfhost-core-diff.sh:33` | 「across all 52 modules」→ 不再复述计数（今天 75，文件本身就是计数） |
 
 **判定不改的**（都是带日期或带上下文的历史测量，改了等于伪造）：
 
 - `scripts/selfhost-core-diff.sh:105`「Measured 2026-07-26: one added function to
   types.dawn moves 6 of 52 modules」——自带日期的一次测量。
-- `selfhost/src/coredump.dawn:257`「churned 19 of 52 modules」——同类，过去式测量，
+- `selfhost/src/ir/coredump.dawn:257`「churned 19 of 52 modules」——同类，过去式测量，
   只是没写日期。
 - `docs/native-backend-plan.md:674` S0.4 行的「编译器 52 模块的哈希清单」——
   落地记录表里的一行，记的是 S0.4 落地时的样子。
 
 ### K-A0.5：给无源二进制上 checksum
 
-登记在 **`selfhost/src/vendor.dawn` 的 `vendor_trust`**，不是
+登记在 **`selfhost/src/pkg/vendor.dawn` 的 `vendor_trust`**，不是
 `scripts/seed-checksums.txt`。理由三条：
 
 1. **它是常量，不是每 release 一条**。`dawn/tool` 与 `org/objectweb/asm` 的哈希

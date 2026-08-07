@@ -35,9 +35,9 @@
 
 | 件 | 说明 |
 |---|---|
-| `selfhost/src/core.dawn` | Core IR 节点集 |
-| `selfhost/src/lower.dawn` | TAST → Core(糖在这里死) |
-| `selfhost/src/emitc.dawn` | Core → C |
+| `selfhost/src/ir/core.dawn` | Core IR 节点集 |
+| `selfhost/src/ir/lower.dawn` | TAST → Core(糖在这里死) |
+| `selfhost/src/c/emitc.dawn` | Core → C |
 | `runtime/c/dawn_rt.{h,c}` | 运行时:标量、`dawn_str`(UTF-8+字节长度)、`dawn_adt`(tagged union)、装箱槽、stdout、panic |
 | `hello.dawn` | 语料一:递归/循环/break/continue/短路/位运算/字符串/Unicode |
 | `adt.dawn` | 语料二:match 决策树/守卫/嵌套模式/ADT/`?`/`!`/元组/从 match 臂里 break |
@@ -78,7 +78,7 @@ derive 出来的 impl、列表模式、解构 let、`use java`。
 
 ## `stdext/raw.dawn`:语料怎么拿到 std 包起来的那层原语
 
-`io_*` / `bytes_at` / 两个解码原语是 **std-only** 的(`selfhost/src/types.dawn` 的 `internal`
+`io_*` / `bytes_at` / 两个解码原语是 **std-only** 的(`selfhost/src/check/types.dawn` 的 `internal`
 集,见 `docs/audit/re-audit-2026-07-30.md` RD-02):io 原语失败时抛的是**fault**,`std/io` 才是
 把它变成 `Result` 的地方;`bytes_at` 越界回 `-1`,把这个哨兵变成 panic 正是 `bytes.at` 的全部
 内容。用户代码若能直呼原语,这两层就都是建议而非边界。

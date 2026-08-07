@@ -82,7 +82,7 @@
 > to lower.dawn, where the C backend reads it too. What is left is the part that is genuinely
 > about this machine: slots, descriptors, stack discipline, invokedynamic, and `use java`.
 
-机器可查的版本：`grep -c 'TArm\|XMatch\|pattern' selfhost/src/emit.dawn` → **0**。
+机器可查的版本：`grep -c 'TArm\|XMatch\|pattern' selfhost/src/jvm/emit.dawn` → **0**。
 `use tast` 只剩 `{TJavaCall, TFun, TModule, TBinOp, BEq..BGe}`——`TJavaCall` 是 `CForeign` 故意
 原样带着的 JVM 事实，其余是三个类型名和比较算子的拼写。
 
@@ -317,12 +317,12 @@ C 一节的标题就是「先给标准库函数，不给语法」。**所以在�
 **但「都是直线体」是幸存者偏差**，两条证据：
 
 1. **有人为了让 release 单出口，把体挪进了兄弟函数。**
-   `selfhost/src/pkgfetch.dawn:435` 取临时目录、调 `fetch_into(url, work)`、`delete_tree(work)`；
+   `selfhost/src/pkg/pkgfetch.dawn:435` 取临时目录、调 `fetch_into(url, work)`、`delete_tree(work)`；
    而 `fetch_into` 的体是**连着四个 `return Err(e)`**。受保护区间本来就是早退形状，
    只是被搬下去一帧，好让释放能写成直线。
 2. **没搬的地方就在漏。** `selfhost/src/main.dawn:1086` `run_build` 取了临时目录，
    紧接着一个 `return cli_error(...)`，**没有释放**；`nmain.dawn:134` `cc_build` 与 `:199` `cmd_run`
-   各取一个临时目录、各有早退、**都不释放**；`selfhost/src/vendor.dawn:96,177` 的 `JarFile`
+   各取一个临时目录、各有早退、**都不释放**；`selfhost/src/pkg/vendor.dawn:96,177` 的 `JarFile`
    在循环里 `panic` 时跳过 `jf.close()`（其中 `:177` 那处还嵌在 `for` 里，天然的 `break` 案例）；
    `jarw.dawn:72` 的 `FileOutputStream`+`ZipOutputStream` 在 `put()` 撞重名条目时两个都漏。
 

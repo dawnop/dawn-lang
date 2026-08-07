@@ -455,7 +455,7 @@ transcript——一个只在退出时冲的服务器产出的字节**逐字节�
 `dawn_io_println` 总是 flush——照抄 `PrintStream` 的 autoFlush 规则。选它而不是加一个
 `io.flush()` 原语，是因为后者要动语言表面（std API + 两个后端的 intrinsic），而新原语
 要走种子纪律的三期两发布；这里要的只是把**后端契约**对齐，不是加 API。
-`runtime/c/` 改了就得 `python3 scripts/gen-rtsrc.py` 重生成 `selfhost/src/rtsrc.dawn`
+`runtime/c/` 改了就得 `python3 scripts/gen-rtsrc.py` 重生成 `selfhost/src/embed/rtsrc.dawn`
 （cdriver 里有 staleness 测试盯着）。
 
 代价实测：20 万次 `println` 打进管道，**0.040 s → 0.11 s**（每行 0.35 µs）。批量输出
@@ -640,13 +640,13 @@ opaque 包 List、以及一个 `comptime { … }` 块（走的是同一条发射
 
 ## 18. K-B4：`dawn test` 落到 native 驱动
 
-JVM 侧的 `dawn test` 是这样做的（`selfhost/src/testrun.dawn`）：每个 `test` 块被发射成
+JVM 侧的 `dawn test` 是这样做的（`selfhost/src/jvm/testrun.dawn`）：每个 `test` 块被发射成
 所属类上的一个 `dawn$test$i` 方法，然后**再生成一个类** `dawn$TestMain`，它的 `main`
 逐个 try/catch 调用这些方法、打印报告、有失败就 `System.exit(1)`。
 
 native 侧没有「再生成一个类」这回事——整个程序是**一个翻译单元**。所以这一刀的形状是：
 test 块和其它函数一起编译进那个翻译单元，再把一段生成的 C 接在后面当它的 `main`
-（`selfhost/src/ctestrun.dawn`）。
+（`selfhost/src/c/ctestrun.dawn`）。
 
 ### 18.1 三个非平凡的接缝
 

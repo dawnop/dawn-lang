@@ -122,12 +122,12 @@ TAST、codegen、LSP、spec 和历史文档之间的同步税。
 - Dawn 源文件：95；`selfhost/`、`std/`、`packages/`、`playground/`、`site/`
   合计约 35,328 行 Dawn。
 - 主要单文件：
-  - `selfhost/src/checker.dawn`：7,924 行，约 215 个函数/test。
-  - `selfhost/src/emit.dawn`：3,531 行，约 121 个函数/test。
-  - `selfhost/src/codegen.dawn`：2,512 行。
-  - `selfhost/src/parser.dawn`：1,932 行。
-  - `selfhost/src/interp.dawn`：1,699 行。
-  - `selfhost/src/lspq.dawn`：1,671 行。
+  - `selfhost/src/check/checker.dawn`：7,924 行，约 215 个函数/test。
+  - `selfhost/src/jvm/emit.dawn`：3,531 行，约 121 个函数/test。
+  - `selfhost/src/jvm/codegen.dawn`：2,512 行。
+  - `selfhost/src/front/parser.dawn`：1,932 行。
+  - `selfhost/src/ir/interp.dawn`：1,699 行。
+  - `selfhost/src/lsp/lspq.dawn`：1,671 行。
 - `docs/` 下当前有 28 篇被跟踪的 Markdown，而 `CLAUDE.md:21` 仍写“14 篇、4000+ 行”。
   （**已修**：`CLAUDE.md` 改为「30 篇、9000+ 行」并指向新的 `docs/README.md` 索引。）
 
@@ -216,8 +216,8 @@ TAST、codegen、LSP、spec 和历史文档之间的同步税。
 
 - `docs/spec.md:27` 和 `docs/grammar.ebnf:3` 将值标识符限定为
   `[a-z][a-z0-9_]*`，类型限定为 ASCII `UpperCamelCase`。
-- `selfhost/src/lexer.dawn:59` 使用 `Character.isLetter` /
-  `Character.isLetterOrDigit`，`selfhost/src/lexer.dawn:209` 还允许 `_` 开头。
+- `selfhost/src/front/lexer.dawn:59` 使用 `Character.isLetter` /
+  `Character.isLetterOrDigit`，`selfhost/src/front/lexer.dawn:209` 还允许 `_` 开头。
 - 实测 `fn 中文(值: Int)` 和 `fn _hidden(_值: Int)` 可编译运行。
 
 **影响**
@@ -254,9 +254,9 @@ TAST、codegen、LSP、spec 和历史文档之间的同步税。
 **证据**
 
 - `docs/grammar.ebnf:89` 把 `call_args` 定义为任意 `primary_expr` 的 postfix。
-- `selfhost/src/parser.dawn:1263` 的 postfix 循环只处理 `?`、`!`、`[]` 和 `.`。
-- 普通调用只在 `selfhost/src/parser.dawn:1458` 的 `ident_or_call` 特判。
-- 构造器调用也在 `selfhost/src/parser.dawn:1390` 单独特判。
+- `selfhost/src/front/parser.dawn:1263` 的 postfix 循环只处理 `?`、`!`、`[]` 和 `.`。
+- 普通调用只在 `selfhost/src/front/parser.dawn:1458` 的 `ident_or_call` 特判。
+- 构造器调用也在 `selfhost/src/front/parser.dawn:1390` 单独特判。
 - 实测 `make()(1)` 在第二个 `(` 报语法错误。（以上均为处置前的行号与行为。）
 
 **影响**
@@ -285,8 +285,8 @@ TAST、codegen、LSP、spec 和历史文档之间的同步税。
 
 
 `docs/grammar.ebnf:96` 写所有 `arg` 都可为 `IDENT ":" expr`，但
-`selfhost/src/parser.dawn:1458` 的普通函数调用只存 `List[Expr]`；只有
-`selfhost/src/parser.dawn:1398` 的构造器参数支持名称。这会误导语法高亮器、格式化器、
+`selfhost/src/front/parser.dawn:1458` 的普通函数调用只存 `List[Expr]`；只有
+`selfhost/src/front/parser.dawn:1398` 的构造器参数支持名称。这会误导语法高亮器、格式化器、
 第三方 parser 和用户。
 
 ### SYN-04（P1）EBNF 已落后于当前语言
@@ -294,7 +294,7 @@ TAST、codegen、LSP、spec 和历史文档之间的同步税。
 > **【已修（标状态），逐条修产生式驳回】**
 >
 > `docs/README.md` 把 `grammar.ebnf` 标为 **historical**，写明「已落后于 parser，
-> 以 spec.md 与 `selfhost/src/parser.dawn` 为准」，并点名 SYN-02/03/04。
+> 以 spec.md 与 `selfhost/src/front/parser.dawn` 为准」，并点名 SYN-02/03/04。
 >
 > 不逐条修，因为修完还是**第二份近似语法**——正是审查自己说的「不要手工维护」。
 > 手工修一遍只会把它重新伪装成可信，然后在下一个特性时再次悄悄过期。
@@ -386,8 +386,8 @@ EBNF 纳入可执行 corpus 测试。
 - `docs/spec.md:553` 又把 `unsafe_pure` 作为普通语言语法开放，并在
   `docs/spec.md:576` 承认其不健全。
 - `docs/design.md:69` 的原决策却写逃生门“用户代码不开放”，与现状相反。
-- `selfhost/src/checker.dawn:4733` 仅屏蔽效果，不限制调用者模块。
-- `selfhost/src/interp.dawn:660` 到 `selfhost/src/interp.dawn:706` 会在编译器 JVM 中，
+- `selfhost/src/check/checker.dawn:4733` 仅屏蔽效果，不限制调用者模块。
+- `selfhost/src/ir/interp.dawn:660` 到 `selfhost/src/ir/interp.dawn:706` 会在编译器 JVM 中，
   通过反射执行被担保的静态 Java 方法。
 - `docs/pure-ffi-design.md:302` 也承认反射一旦进入无法打断，fuel 只收固定成本。
 
@@ -417,7 +417,7 @@ Playground 的生产 systemd sandbox 能缓解，但语言工具本身没有隔�
 > `ClassCastException`（见 LANG-03）。文档不再骗人，签名仍然骗人。
 
 
-`selfhost/src/types.dawn:563` 给 `cast` 纯签名；`docs/cast-interop.md:33` 和
+`selfhost/src/check/types.dawn:563` 给 `cast` 纯签名；`docs/cast-interop.md:33` 和
 `docs/spec.md:850` 又明确失败抛 `ClassCastException`。这使一个签名为 pure 的函数可抛出
 非 Dawn panic 的宿主异常，与 `docs/design.md:60`“异常破坏签名即契约”的论证冲突。
 
@@ -456,7 +456,7 @@ Playground 的生产 systemd sandbox 能缓解，但语言工具本身没有隔�
 > **这改变了发射的字节码**：提交需带 `Emit-Change:` 行。固定点已验证仍成立（B == C）。
 
 
-`selfhost/src/codegen.dawn:953` 的 `java_try` 捕获 `Exception`，但下一行的
+`selfhost/src/jvm/codegen.dawn:953` 的 `java_try` 捕获 `Exception`，但下一行的
 `catch_panic` 捕获 `java/lang/Throwable`。这会把 `OutOfMemoryError`、`StackOverflowError`、
 `LinkageError`、`ThreadDeath` 等不应恢复的 JVM 错误变成字符串，服务器可能在不可靠状态继续运行。
 
@@ -656,8 +656,8 @@ type-only cycle。建议把“全仓 lint/test”与“构建当前入口闭包�
 > 而 `DiagSink` 想要的漏斗（诊断只从 `cerr`/`cerr_h`/`cerr_o` 三个写点进）**今天已经存在**。
 
 
-`selfhost/src/checker.dawn` 有 11,308 行、249 个函数 + 88 个内联 test。
-`Cx` 在 `selfhost/src/checker.dawn:91` 到 `selfhost/src/checker.dawn:164`
+`selfhost/src/check/checker.dawn` 有 11,308 行、249 个函数 + 88 个内联 test。
+`Cx` 在 `selfhost/src/check/checker.dawn:91` 到 `selfhost/src/check/checker.dawn:164`
 包含 47 个字段（以上为 2026-08-03 在 `86b1cec` 上的复测值；审查当日记的是
 7,924 行 / `:76-132` / 44 字段——**没修之前只会更大**；#88 落地后是
 8,203 行 / `Cx` 40 字段 + `Frame`(8)，定义已移到 `cx.dawn`），混合了：
@@ -699,7 +699,7 @@ type-only cycle。建议把“全仓 lint/test”与“构建当前入口闭包�
 > **本条的方案 = [arch-split-design.md](arch-split-design.md)**（任务 #88）。两件口径要更正：
 >
 > 1. **ARCH-02 的真实盘子是 `codegen.dawn` 3,425 行 + `emit.dawn` 2,534 行 = 5,959 行**
->    （2026-08-03 复测）。`selfhost/src/class_table.dawn`（2,089 行）与 `case_table.dawn`
+>    （2026-08-03 复测）。`selfhost/src/embed/unicode_class.dawn`（2,089 行）与 `unicode_case.dawn`
 >    （1,384 行）**不是后端模块**——它们是 `scripts/unicode-contract/probe.dawn` 生成的
 >    Unicode 数据表（文件头写着「GENERATED … do not edit」），两个后端都读，
 >    把它们算进后端盘子是口径错误。
@@ -708,7 +708,7 @@ type-only cycle。建议把“全仓 lint/test”与“构建当前入口闭包�
 >    分层」，而是**把本来就不碰 `Gen` 的行搬成叶子模块**。见 arch-split-design.md §2.2。
 
 
-`selfhost/src/emit.dawn` 2,534 行；`Gen` 在 `selfhost/src/emit.dawn:92` 到 `:128`
+`selfhost/src/jvm/emit.dawn` 2,534 行；`Gen` 在 `selfhost/src/jvm/emit.dawn:92` 到 `:128`
 有 21 个字段（2026-08-03 复测；审查当日记的是 3,531 行 / `:159` / 30 余字段——
 `emit.dawn` 变短是因为 lowering 已经搬进 Core；#88 落地后是 2,309 行 /
 `Gen` 12 字段 + `GenCtx` 8 字段），
@@ -743,7 +743,7 @@ type-only cycle。建议把“全仓 lint/test”与“构建当前入口闭包�
 
 `CLAUDE.md:73` 声称接第二后端只需重指向 `rt_intrinsic_target`。实际：
 
-- `selfhost/src/tast.dawn:25` 的 `TJavaCall` 直接携带 JVM 类名、descriptor、SAM 和 List bridge。
+- `selfhost/src/check/tast.dawn:25` 的 `TJavaCall` 直接携带 JVM 类名、descriptor、SAM 和 List bridge。
 - checker 直接依赖 Java reflection。
 - `emit.dawn`/`codegen.dawn` 大量使用 ASM opcode、JVM descriptor、LMF、CHECKCAST。
 - runtime 表示、擦除、装箱和异常也都写死 JVM。
@@ -795,7 +795,7 @@ closure、trait witness 和 FFI，再从该层生成 JVM。
 > 因为那是确定的安全 bug，且改动面是单个函数。
 
 
-`selfhost/src/codegen.dawn` 用数千行 opcode 生成 `dawn/rt/*`。opcode 常量还分散在
+`selfhost/src/jvm/codegen.dawn` 用数千行 opcode 生成 `dawn/rt/*`。opcode 常量还分散在
 `codegen.dawn` 与 `emit.dawn`。这让普通运行时逻辑难以做源码级单测、静态分析、调试和安全审计。
 
 建议：
@@ -834,7 +834,7 @@ closure、trait witness 和 FFI，再从该层生成 JVM。
 > `org/objectweb/asm` 与 `coursierapi` 一个字节没动。
 
 
-`selfhost/src/vendor.dawn:3` 明确 `DawnList/DawnMap/DawnSet` 的源码只在
+`selfhost/src/pkg/vendor.dawn:3` 明确 `DawnList/DawnMap/DawnSet` 的源码只在
 `kotlin-final` tag，当前编译器从自身 classpath 读取 class，再复制进每个用户程序。
 
 问题包括：
@@ -860,7 +860,7 @@ closure、trait witness 和 FFI，再从该层生成 JVM。
 > trampoline / 显式 evaluator stack 是根治，属 `interp.dawn` 的重写，需要设计文档。
 
 
-`selfhost/src/interp.dawn:12` 因 evaluator 使用宿主递归而要求 512MB 线程栈；
+`selfhost/src/ir/interp.dawn:12` 因 evaluator 使用宿主递归而要求 512MB 线程栈；
 `bin/dawn:38`、`selfhost/src/main.dawn:493`、`spawn_java` 等处广泛强制该值。
 它会显著增加虚拟地址保留和容器内存压力，还把编译器实现细节泄漏给用户程序。
 
@@ -970,7 +970,7 @@ Windows 盘符会被拆坏。建议统一读取 `File.pathSeparator`，环境变
 > 而不是再写一个 decoder——LSP 该走同一条路。
 
 
-`selfhost/src/lsp.dawn:199` 的 decoder 不检查 continuation byte、overlong encoding、
+`selfhost/src/lsp/lsp.dawn:199` 的 decoder 不检查 continuation byte、overlong encoding、
 surrogate 和最大码点；不完整序列还会静默跳字节。URI 解码结果可能与 JVM/编辑器不同，
 甚至进入 `from_code_points` 的非法范围。
 
@@ -1008,7 +1008,7 @@ UNC、相对路径、`#`/`?` 和 URI normalization 都没有标准处理。`Path
 > 让服务器一声不吭地退出，编辑器只看到语言服务器停了。JSON-RPC 2.0 §4.2 要求回错误。
 
 
-`selfhost/src/lsp.dawn:338` 的 `read_message` 在缺 Content-Length、body 短读或 JSON 错误时返回 None；
+`selfhost/src/lsp/lsp.dawn:338` 的 `read_message` 在缺 Content-Length、body 短读或 JSON 错误时返回 None；
 `run_lsp` 把 None 当 EOF，直接停止。JSON-RPC 要求 parse error/invalid request 响应，至少也应记录
 错误并尝试恢复下一个 frame。
 
@@ -1022,7 +1022,7 @@ UNC、相对路径、`#`/`?` 和 URI normalization 都没有标准处理。`Path
 > 「旧诊断覆盖新状态」这个正是要防的竞态——需要设计文档而不是补丁。
 
 
-`selfhost/src/lsp.dawn:5` 明确每次 change 重建完整分析；`textDocumentSync=1` 接收全文，
+`selfhost/src/lsp/lsp.dawn:5` 明确每次 change 重建完整分析；`textDocumentSync=1` 接收全文，
 `update_doc` 调 `analyze_document(..., 100000000)`，主循环单线程且不处理取消。
 配合“目录加载全部模块”，项目增长后会出现输入延迟和旧诊断覆盖新状态。
 
@@ -1049,7 +1049,7 @@ UNC、相对路径、`#`/`?` 和 URI normalization 都没有标准处理。`Path
 > 内存效率问题，不是安全问题。
 
 
-- `selfhost/src/pkgfetch.dawn:170` 通过 `BodyHandlers.ofByteArray` 整体下载到内存。
+- `selfhost/src/pkg/pkgfetch.dawn:170` 通过 `BodyHandlers.ofByteArray` 整体下载到内存。
 - HTTP client 未设置 connect/request timeout。
 - zip 每个 entry 使用 `readAllBytes`（`pkgfetch.dawn:260`）。
 - tar.gz 先把整个解压结果 `readAllBytes` 到内存（`pkgfetch.dawn:337`）。
@@ -1083,7 +1083,7 @@ UNC、相对路径、`#`/`?` 和 URI normalization 都没有标准处理。`Path
 > 这是一个小特性，该有自己的设计文档。
 
 
-`selfhost/src/pkgfetch.dawn:482` 明确“fetch 时验证一次，之后信任本地副本”；
+`selfhost/src/pkg/pkgfetch.dawn:482` 明确“fetch 时验证一次，之后信任本地副本”；
 目录存在就直接返回。用户、磁盘损坏或并发半成品都能改变 cache 内容而不被发现。
 建议至少验证一个带版本的 marker/hash，或使用只写临时目录+原子 rename+只读权限，并提供
 `dawn cache verify`。
@@ -1101,11 +1101,11 @@ UNC、相对路径、`#`/`?` 和 URI normalization 都没有标准处理。`Path
 > 全部示例、文档和用户项目里，改名的破坏面远大于收益，而收益只是命名洁癖。
 >
 > **接受的那一半**（「在文件头和错误中明确不是通用 TOML」）是对的，
-> `selfhost/src/toml.dawn` 的文件头已经写明它是子集并列出拒绝的构造。
+> `selfhost/src/pkg/toml.dawn` 的文件头已经写明它是子集并列出拒绝的构造。
 > 用户碰到的是一条明确的错误信息，不是静默的误解析。
 
 
-`selfhost/src/toml.dawn` 807 行，另有 661 行 manifest validator；它明确拒绝标准 TOML 的
+`selfhost/src/pkg/toml.dawn` 807 行，另有 661 行 manifest validator；它明确拒绝标准 TOML 的
 literal string、float、inline table、quoted key、dotted key 等。用户会自然使用 TOML 工具和语法，
 却得到 Dawn 专用子集。
 
@@ -1870,9 +1870,9 @@ Content-Length，204/304/HEAD 也会进入 body 路径。建议由 ResponseBody 
 >   `compiler/build.gradle.kts` lock-step 注释重写（见 DOC-09）。
 
 
-- `selfhost/src/ast.dawn:3`、`selfhost/src/tast.dawn:8`、`selfhost/src/diag.dawn:4`、
-  `selfhost/src/token.dawn:87`、`checker.dawn:124` 仍说前端 span 是 UTF-16。
-- `selfhost/src/lexer.dawn:249` 和测试已经明确当前 span 是 code-point index，UTF-16 只在 LSP
+- `selfhost/src/front/ast.dawn:3`、`selfhost/src/check/tast.dawn:8`、`selfhost/src/front/diag.dawn:4`、
+  `selfhost/src/front/token.dawn:87`、`checker.dawn:124` 仍说前端 span 是 UTF-16。
+- `selfhost/src/front/lexer.dawn:249` 和测试已经明确当前 span 是 code-point index，UTF-16 只在 LSP
   边界重建。
 - 大量文件头仍以“mirror Kotlin byte for byte”描述职责，即使当前 oracle 已是 N vs N-1。
 
@@ -1887,7 +1887,7 @@ Content-Length，204/304/HEAD 也会进入 body 路径。建议由 ResponseBody 
 
 
 `docs/trait.md:228` 说 Float Ord 用 `DCMPL`，NaN 偏负；当前
-`selfhost/src/emit.dawn:1727` 调用 `Double.compare`，是 total order。spec 也按 total order
+`selfhost/src/jvm/emit.dawn:1727` 调用 `Double.compare`，是 total order。spec 也按 total order
 描述。应标记 trait.md 的落地记录已被后续实现替代。
 
 ### DOC-09（P3）selfhost manifest 注释引用不存在的 Gradle 文件
@@ -2218,7 +2218,7 @@ WEB-03、WEB-04、WEB-06、WEB-07、WEB-09、WEB-10 —— 一次做完，`packa
 | TEST-01 | classfile 过 `CheckClassAdapter` | 最便宜的一条，emit 时多包一层。native 计划采纳了它的论证，没采纳这个动作项 |
 | TEST-04 | 文档 CI（fenced block 执行、链接检查、grammar corpus） | **已做**：`scripts/doc-check.py`（七项检查）+ `scripts/grammar-corpus/run.sh`，都在 `gates.yml` |
 | DOC-10 | 每篇 front matter、`docs/history/` | **已做**：`docs/history/` 已建；front matter 换成文件头的 `> 状态：…` 行 + 门禁，理由见 `docs/README.md` |
-| ARCH-01/02 | 先把 opcode/descriptor 统一到一个后端模块 | **已做（2026-07-30）**：`selfhost/src/jvmops.dawn`，116 个常量一处，8 个曾有两份定义的 opcode 收成一份；发射字节逐字节不变。**拆 `Cx`/`Gen` 也已做（#88，2026-08-03）** |
+| ARCH-01/02 | 先把 opcode/descriptor 统一到一个后端模块 | **已做（2026-07-30）**：`selfhost/src/jvm/jvmops.dawn`，116 个常量一处，8 个曾有两份定义的 opcode 收成一份；发射字节逐字节不变。**拆 `Cx`/`Gen` 也已做（#88，2026-08-03）** |
 
 **审查漏掉的一条**（登记在台账 §四）：`==` 硬连线 `BEq`、hash 是自动派生的结构
 `hashCode`，于是「任意值能不能比较/哈希」不由 trait 决定。native 计划把它列为
