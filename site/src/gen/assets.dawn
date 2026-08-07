@@ -1,0 +1,395 @@
+# Post-generation check over the shared assets: text the BROWSER injects has
+# to follow the language of the page it lands on.
+#
+# The site is two language trees over one set of assets. Every string a reader
+# sees in the chrome comes from html/page.dawn or gen/copy.dawn, both of which
+# take the page's `Lang` explicitly, so neither can hand English prose to a
+# Chinese page. `content:` in the stylesheet is the one place text reaches a
+# reader without passing through either -- the file is copied verbatim into
+# dist/assets and linked from both trees, so whatever it says, it says on
+# every page of the site.
+#
+# It said `content: "输出"`. Every English page carried a Chinese corner badge
+# on every output block from the day the front page was translated (#172) to
+# 2026-08-08, and nothing anywhere could have noticed: the bilingual work is
+# all about strings that go through `Lang`, and this string does not exist in
+# the generator at all. Reported by a reader.
+#
+# So the rules below are about the assets rather than about the generator, and
+# they are the general ones rather than one assertion about the badge:
+#
+#   1. an unscoped `content:` may not carry Chinese -- that is the reported bug
+#   2. a selector may only pin a `lang` the site actually emits; `[lang="zh"]`
+#      matches nothing here, and an override that matches nothing is worse than
+#      no override, because it looks like one
+#   3. `content:` that is TEXT (letters, not `""` spacers) must exist once per
+#      language: an unscoped default plus an override per non-default language.
+#      This is the direction rule 1 cannot see -- delete the Chinese override
+#      and the stylesheet is entirely English, entirely unscoped, and entirely
+#      wrong on /zh/.
+#
+# Not caught, so nobody assumes otherwise: whether the two variants of a
+# string say the same thing. That is doc-check.py's department for documents,
+# and there is no digest to hang on two words in a stylesheet.
+#
+# The `.js` scan is the same rule with no scoping mechanism to check: a bundle
+# shared by both trees has no language, so any Chinese in one is Chinese on the
+# English pages. If a bundle ever reads `documentElement.lang` and picks its
+# own strings, this is the check that has to learn about it.
+
+use std/str
+use std/list
+use md/text.{cp_at}
+use gen/common.{must_read, must_list, take_n}
+use html/page.{En, Zh, lang_code}
+
+## One `content:` declaration that puts words on a page: which file it is in,
+## the selector with its language qualifier removed, and the language it is
+## for ("" for the unscoped default).
+type TextDecl = { file: String, base: String, code: String, decl: String }
+
+## CSS with its `/* ... */` comments removed. They have to go first: this
+## stylesheet is commented in Chinese, and a scan for Chinese that reads the
+## comments finds thirty of them and none of the one that matters.
+fn strip_comments(css: String) -> String = {
+  let cs = code_points(css)
+  var out: List[Char] = []
+  var i = 0
+  while i < len(cs) {
+    if cp_at(cs, i) == '/' && cp_at(cs, i + 1) == '*' {
+      var j = i + 2
+      while j < len(cs) && not (cp_at(cs, j) == '*' && cp_at(cs, j + 1) == '/') {
+        j = j + 1
+      }
+      i = j + 2
+    } else {
+      out = out ++ [cp_at(cs, i)]
+      i = i + 1
+    }
+  }
+  from_code_points(out)
+}
+
+## Every declaration in a stylesheet, paired with the selector chain it sits
+## under. Nested blocks (`@media`) join outer to inner with a space, which is
+## not a real CSS selector and does not need to be -- what is read off it is
+## whether a `lang` is pinned anywhere in the chain.
+##
+## Double-quoted strings are respected so that a `;` or `}` inside a value
+## does not end the declaration. Single-quoted ones are not: no rule in this
+## repository uses them, and the failure if one appears is a spurious red,
+## not a silent pass.
+fn declarations(css: String) -> List[(String, String)] = {
+  let cs = code_points(strip_comments(css))
+  var out: List[(String, String)] = []
+  var stack: List[String] = []
+  var buf: List[Char] = []
+  var in_str = false
+  var i = 0
+  while i < len(cs) {
+    let c = cp_at(cs, i)
+    if in_str {
+      buf = buf ++ [c]
+      if c == '"' {
+        in_str = false
+      }
+    } else if c == '"' {
+      in_str = true
+      buf = buf ++ [c]
+    } else if c == '{' {
+      stack = stack ++ [str.trim(from_code_points(buf))]
+      buf = []
+    } else if c == '}' {
+      let tail = str.trim(from_code_points(buf))
+      if tail != "" && len(stack) > 0 {
+        out = out ++ [(join(stack, " "), tail)]
+      }
+      buf = []
+      stack = take_n(stack, len(stack) - 1)
+    } else if c == ';' {
+      let decl = str.trim(from_code_points(buf))
+      if decl != "" && len(stack) > 0 {
+        out = out ++ [(join(stack, " "), decl)]
+      }
+      buf = []
+    } else {
+      buf = buf ++ [c]
+    }
+    i = i + 1
+  }
+  out
+}
+
+## A Han character. This is the narrow test: words, and nothing that is also
+## punctuation.
+fn is_han(c: Char) -> Bool =
+  (c >= '\u{3400}' && c <= '\u{4dbf}') || (c >= '\u{4e00}' && c <= '\u{9fff}')
+  || (c >= '\u{f900}' && c <= '\u{faff}')
+
+## Han plus the punctuation that only ever appears around it: the CJK marks
+## (「」、。) and the fullwidth forms. Right for a `content:` value, where every
+## code point is text a reader sees; wrong for a whole file, which is why the
+## bundle scan below uses [is_han]. The vendored CodeMirror carries
+## `"()[]{}<>«»»«［］｛｝"` as its bracket-pair table -- four fullwidth brackets
+## that are data, not words, and that made the first version of this check red
+## on a bundle with no Chinese in it at all.
+fn is_cjk(c: Char) -> Bool =
+  is_han(c) || (c >= '\u{3000}' && c <= '\u{303f}') || (c >= '\u{ff00}' && c <= '\u{ffef}')
+
+fn has_cjk(s: String) -> Bool = {
+  var found = false
+  for c in code_points(s) {
+    if is_cjk(c) {
+      found = true
+    }
+  }
+  found
+}
+
+fn has_han(s: String) -> Bool = {
+  var found = false
+  for c in code_points(s) {
+    if is_han(c) {
+      found = true
+    }
+  }
+  found
+}
+
+## Every value between `opener` and the next `closer`.
+fn values_between(s: String, opener: String, closer: String) -> List[String] = {
+  var out: List[String] = []
+  var rest = s
+  var going = true
+  while going {
+    match str.index_of(rest, opener) {
+      None -> {
+        going = false
+      }
+      Some(i) -> {
+        let after = str.drop(rest, i + str.len(opener))
+        match str.index_of(after, closer) {
+          None -> {
+            going = false
+          }
+          Some(j) -> {
+            out = out ++ [str.take(after, j)]
+            rest = str.drop(after, j)
+          }
+        }
+      }
+    }
+  }
+  out
+}
+
+## Every language a selector pins itself to, in either spelling.
+fn lang_codes_in(sel: String) -> List[String] =
+  values_between(sel, "[lang=\"", "\"") ++ values_between(sel, ":lang(", ")")
+
+fn collapse_ws(s: String) -> String = {
+  var out: List[Char] = []
+  var gap = false
+  for c in code_points(s) {
+    if c == ' ' || c == '\n' || c == '\t' || c == '\r' {
+      gap = true
+    } else {
+      if gap && len(out) > 0 {
+        out = out ++ [' ']
+      }
+      gap = false
+      out = out ++ [c]
+    }
+  }
+  from_code_points(out)
+}
+
+## What a selector selects with its language qualifier taken off, so that
+## `html[lang="zh-CN"] pre.output::before` and `pre.output::before` are one
+## group. The bare `html` left behind comes off too -- it selects the root,
+## which is every page.
+fn base_selector(sel: String) -> String = {
+  var s = sel
+  for code in lang_codes_in(sel) {
+    s = str.replace(s, "[lang=\"" ++ code ++ "\"]", "")
+    s = str.replace(s, ":lang(" ++ code ++ ")", "")
+  }
+  let t = collapse_ws(str.trim(s))
+  str.trim(str.strip_prefix(t, "html ").unwrap_or(t))
+}
+
+## The property a declaration sets.
+fn prop_of(decl: String) -> String =
+  match str.index_of(decl, ":") {
+    Some(i) -> str.trim(str.take(decl, i))
+    None -> str.trim(decl)
+  }
+
+## Does this `content:` put words on the page? `content: ""` and
+## `content: var(--x)` do not, and pairing them across languages would be
+## pairing nothing.
+fn is_page_text(decl: String) -> Bool = {
+  var found = false
+  for c in code_points(join(values_between(decl, "\"", "\""), "")) {
+    if is_cjk(c) || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') {
+      found = true
+    }
+  }
+  found
+}
+
+fn uniq(xs: List[String]) -> List[String] = {
+  var out: List[String] = []
+  for x in xs {
+    if not list.contains(out, x) {
+      out = out ++ [x]
+    }
+  }
+  out
+}
+
+## English is what a page gets when no rule claims it: the site's default
+## language lives at `/` with `<html lang="en">`. Everything else needs a rule
+## naming it.
+fn default_code() -> String = lang_code(En)
+
+fn override_codes() -> List[String] = [lang_code(Zh)]
+
+pub fn check_assets(out: String) -> Unit !io = {
+  let known = [default_code()] ++ override_codes()
+  var bad: List[String] = []
+  var texts: List[TextDecl] = []
+  var sheets = 0
+  var contents = 0
+  var bundles = 0
+  for name in must_list("$out/assets") {
+    if str.ends_with(name, ".css") {
+      sheets = sheets + 1
+      var seen: List[String] = []
+      for d in declarations(must_read("$out/assets/$name")) {
+        let (sel, decl) = d
+        if not list.contains(seen, sel) {
+          seen = seen ++ [sel]
+          for code in lang_codes_in(sel) {
+            if not list.contains(known, code) {
+              bad = bad
+                ++ ["assets/$name: `$sel` pins lang=\"$code\", which no page of "
+                    ++ "this site declares — the rule matches nothing"]
+            }
+          }
+        }
+        if prop_of(decl) == "content" {
+          contents = contents + 1
+          let codes = lang_codes_in(sel)
+          if has_cjk(decl) && len(codes) == 0 {
+            bad = bad
+              ++ ["assets/$name: `$decl` under `$sel` is not language-scoped, so it "
+                  ++ "puts Chinese on every page of the site, English ones included"]
+          }
+          if is_page_text(decl) {
+            let code = unwrap_or(get(codes, 0), "")
+            texts = texts ++ [TextDecl { file: name, base: base_selector(sel), code: code, decl: decl }]
+          }
+        }
+      }
+    } else if str.ends_with(name, ".js") {
+      bundles = bundles + 1
+      # A bundle both trees load has no language of its own to follow.
+      if has_han(must_read("$out/assets/$name")) {
+        bad = bad
+          ++ ["assets/$name: a bundle shared by both language trees contains Chinese "
+              ++ "text, which reaches the English pages too"]
+      }
+    }
+  }
+  for base in uniq(map(texts, t => t.base)) {
+    var codes: List[String] = []
+    var where = ""
+    for t in texts {
+      if t.base == base {
+        codes = codes ++ [t.code]
+        where = t.file
+      }
+    }
+    for want in known {
+      let wanted = if want == default_code() { "" } else { want }
+      if not list.contains(codes, wanted) {
+        let which = if wanted == "" { "unscoped default" } else { "lang=\"$want\" override" }
+        bad = bad
+          ++ ["assets/$where: `$base` sets text with `content:` but has no $which, so "
+              ++ "$want readers get another language's words"]
+      }
+    }
+  }
+  if len(bad) > 0 {
+    for b in bad {
+      println("ASSET LANG: $b")
+    }
+    panic("${len(bad)} shared-asset string(s) do not follow the page language")
+  }
+  println(
+    "  asset lang check: $contents content declaration(s) in $sheets stylesheet(s) and "
+      ++ "$bundles shared bundle(s), all follow the page language")
+}
+
+test "comments go before anything else looks at the file" {
+  assert strip_comments("/* 输出 */a{b:c}") == "a{b:c}"
+  assert strip_comments("a/*x*/b/*y*/c") == "abc"
+  # unterminated: everything from the opener is comment
+  assert strip_comments("a/*x") == "a"
+}
+
+test "declarations carry the selector chain they sit under" {
+  assert declarations("p{a:1;b:2}") == [("p", "a:1"), ("p", "b:2")]
+  # the last declaration in a block needs no semicolon
+  assert declarations("p{a:1}") == [("p", "a:1")]
+  assert declarations("@media (x){p{a:1}}") == [("@media (x) p", "a:1")]
+  # a brace inside a string is not a brace
+  assert declarations("p{content:\"{;}\"}") == [("p", "content:\"{;}\"")]
+}
+
+test "a selector states the language it is for" {
+  assert lang_codes_in("html[lang=\"zh-CN\"] pre.output::before") == ["zh-CN"]
+  assert lang_codes_in("html:lang(zh-CN) p") == ["zh-CN"]
+  assert lang_codes_in("pre.output::before") == []
+}
+
+test "the language qualifier comes off to leave what is really selected" {
+  assert base_selector("html[lang=\"zh-CN\"] pre.output::before") == "pre.output::before"
+  assert base_selector("pre.output::before") == "pre.output::before"
+  assert base_selector("html:lang(zh-CN) .a .b") == ".a .b"
+}
+
+test "page text is words, not spacers" {
+  assert is_page_text("content: \"Output\"")
+  assert is_page_text("content: \"输出\"")
+  assert not is_page_text("content: \"\"")
+  assert not is_page_text("content: var(--x)")
+}
+
+test "Chinese is Chinese wherever it is spelled" {
+  assert has_cjk("输出")
+  assert has_cjk("「x」")
+  assert not has_cjk("Output")
+}
+
+## The distinction the CodeMirror bracket table forced: fullwidth brackets are
+## text inside a `content:` value and data inside a bundle.
+test "a bundle is scanned for words, not for fullwidth punctuation" {
+  assert has_han("输出")
+  assert not has_han("()[]{}<>«»»«［］｛｝")
+  assert has_cjk("［］")
+}
+
+## The stylesheet in the tree, held to the rules directly -- `dawn test` says
+## so without a site build. The badge is the string that was wrong.
+test "the output badge is English by default and Chinese only under lang=zh-CN" {
+  var badge: List[(String, String)] = []
+  for d in declarations(must_read("site/assets/style.css")) {
+    let (sel, decl) = d
+    if base_selector(sel) == "pre.output::before" && prop_of(decl) == "content" {
+      badge = badge ++ [(unwrap_or(get(lang_codes_in(sel), 0), ""), decl)]
+    }
+  }
+  assert badge == [("", "content: \"Output\""), ("zh-CN", "content: \"输出\"")]
+}

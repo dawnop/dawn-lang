@@ -20,6 +20,7 @@ site/
 ├── src/            # 生成器（纯 Dawn，dawn run site 直接跑）
 │   ├── main.dawn   # 组装：读 docs/ + examples/ → 写 dist/
 │   ├── gen/copy.dawn  # 首页文案（`## key` 分节的 Markdown），不再是 Dawn 里的字符串字面量
+│   ├── gen/assets.dawn  # 共用资产的语言检查：CSS `content:` 注入的字，两棵树各一份
 │   ├── md/         # Markdown 子集解析器
 │   ├── hl/         # Dawn 语法高亮 tokenizer（构建期）
 │   └── html/       # 转义、模板壳、TOC、slug
@@ -53,6 +54,12 @@ site/
 `<!-- doc-check: translation-of site/pages/home.md @ <digest> -->`；英文一改、中文没跟，
 `scripts/doc-check.py` 就红。摘要怎么算（重排不算改、代码块逐行算改、版本号不算）
 写在那个脚本的 `translation_digest` 里。**改文案先改英文。**
+
+上面这套只管**经过 `Lang` 的字符串**。`style.css` 两棵树共用、又不经过生成器，所以
+`content:` 注入的字曾整整绕开双语化：英文页的输出块角标写着「输出」，从首页翻译那天起
+一直到 2026-08-08（读者报的）。现在默认写英文、中文由 `html[lang="zh-CN"]` 覆盖，
+`site/src/gen/assets.dawn` 在每次构建里盯三条：未限定的 `content:` 不许带中文；
+选择器只能钉站点真发得出的 `lang`；带字的 `content:` 必须每种语言各有一份。
 
 ## 信息架构（URL 映射）
 
