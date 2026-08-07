@@ -1366,19 +1366,21 @@ MUT=cmp python3 ledger.py ...seed.jar   # 负控，另有 cast / init / join
 | 期 | 提交 | 做了什么 | Emit-Change |
 |---|---|---|---|
 | 1 | `aa32c12` | `rtclasses.dawn` 发射 `dawn/rt/AsmWriter`，**没人用它**；契约门禁长出能看见它的检查 | `emit selfhost`（多一个类） |
-| — | `b237240` + v0.58.0 | 发布 + 推进种子 | — |
-| 2 | 见下 | `supers_of` 与整条 `supers` 参数链回来，17 处写入器改走 `AsmWriter.of` | **零条** |
+| — | `b237240`（发布 v0.58.0）+ `57ee346`（推进种子） | 发布 + 推进种子 | — |
+| 2 | `aea6e90` | `supers_of` 与整条 `supers` 参数链回来，17 处写入器改走 `AsmWriter.of` | **零条** |
 
-**期 2 零声明不是运气，是这一刀的验收核心**：`selfhost-prev-diff.sh` 让**上一代与 HEAD 编同一份
-源码**，所以它问的正是「编译器的行为变了没有」。六个语料**逐字节相同**——包括 selfhost
-自编译 `[实测]`：
+**期 2 零声明不是运气，是这一刀的验收核心**：`selfhost-prev-diff.sh` 让**上一代（v0.58.0，
+即期 1）与 HEAD 编同一份源码**，所以它问的正是「编译器的行为变了没有」——而不是「源码变了
+没有」。六个语料**逐字节相同**，包括 selfhost 自编译 `[实测]`：
 
 ```
-site  playground  packages/web  packages/json  selfhost  examples/calc.dawn
-                        全部 IDENTICAL
+OK   emit site          OK   emit packages/web    OK   emit selfhost
+OK   emit playground    OK   emit packages/json   OK   emit examples/calc.dawn
+OK: HEAD agrees with v0.58.0 on the corpus (undeclared-diff check passed)
 ```
 
-（对拍的两个主体是期 1 的 stage-2 jar 与期 2 的 `bin/dawn`，各自 `__emit` 六个语料后 `diff -rq`。）
+发布之前先用期 1 的 stage-2 jar 当上一代跑过同一件事（`__emit` 六个语料后 `diff -rq`，
+六个目录全 identical），所以「零声明」不是等种子发出来才知道的。
 
 #### D4：查不到的那一对答什么
 
