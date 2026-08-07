@@ -64,8 +64,18 @@ javac -d "$work" scripts/classfile-verify/Verify.java scripts/classfile-verify/A
 scripts/classfile-verify/selftest.sh "$work"
 
 fail=0
+# examples/interop.dawn is here for check 1, and it is the only corpus entry
+# that exercises it in this direction: `Path.of` and `List.of` are static
+# methods declared on JDK *interfaces*, so the call sites emit `invokestatic`
+# against an `InterfaceMethodref`, which is illegal below class-file version 52
+# and was therefore unreachable for the whole K-A4 era. This file emits five
+# such instructions; selfhost, site and calc.dawn emit none (measured
+# 2026-08-07 with `javap -c` over their emitted class files). The failure lands
+# at class *load* rather than at type check, so a corpus entry that is only
+# compiled would not see it -- which is why it is registered here and not only
+# in the emit differential.
 for t in selfhost site packages/json packages/web packages/sha2 packages/inflate \
-    playground examples/calc.dawn; do
+    playground examples/calc.dawn examples/interop.dawn; do
   out="$work/emit/${t//\//_}"
   mkdir -p "$out"
   ./bin/dawn __emit "$t" -o "$out" > /dev/null

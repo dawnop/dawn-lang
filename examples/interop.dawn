@@ -1,0 +1,64 @@
+# Java interop, worked: the JDK's own static factories, laying out a build.
+# `Path.of` and `List.of` are declared on *interfaces* and both take a varargs
+# tail (docs/spec.md §9.1, §9.3): dawn run examples/interop.dawn [project-root]
+
+use java "java.nio.file.Path"
+use java "java.util.List"
+use java "java.lang.String"
+
+# A static method declared on an interface is called with `invokestatic` against
+# an `InterfaceMethodref`, a constant the class-file format admits only from
+# major version 52 on. So this file is also the corpus that keeps that path
+# reachable rather than merely believed (docs/jvm-base-plan.md §5.11).
+
+const MODULES: List[String] = ["lexer", "parser", "codegen"]
+
+# `<root>/<module>/src`, spelled by the platform's own path joiner instead of by
+# string concatenation. The tail of `Path.of(first, more...)` is varargs, so the
+# segments after the first are packed into a `String[]`. Java methods return
+# `Option` -- null is stopped at the boundary (§9.2) -- hence the two `!`.
+fn src_dir(root: String, module: String) -> String !io = {
+  let p = Path.of(root, module, "src")!
+  p.toString()!
+}
+
+fn jar(root: String, module: String) -> String !io = {
+  let p = Path.of(root, module, "build", module ++ ".jar")!
+  p.toString()!
+}
+
+# The `-cp` a JVM would be launched with. `List.of(a, b)` resolves to the
+# fixed-arity `of(E, E)` (phase 1); a third element would pack into `of(E...)`
+# instead (phase 2). Either way `String.join` reads the elements back in the
+# order they were written.
+fn classpath(root: String) -> String !io = {
+  let jars = List.of(jar(root, "lexer"), jar(root, "parser"))!
+  String.join(":", jars)!
+}
+
+pub fn main() -> Unit !io = {
+  let root = match args().get(0) {
+    Some(r) -> r
+    None -> "."
+  }
+  for m in MODULES {
+    println(src_dir(root, m))
+  }
+  println(classpath(root))
+}
+
+test "Path.of packs the varargs tail into a String[]" {
+  let two = Path.of("a", "b")!
+  assert two.toString()! == "a/b"
+  assert src_dir("/tmp", "lexer") == "/tmp/lexer/src"
+}
+
+test "List.of keeps its elements and their order" {
+  let three = List.of("a", "b", "c")!
+  assert three.size() == 3
+  assert String.join(",", three)! == "a,b,c"
+}
+
+test "the classpath is the jars, in order, colon separated" {
+  assert classpath("/p") == "/p/lexer/build/lexer.jar:/p/parser/build/parser.jar"
+}

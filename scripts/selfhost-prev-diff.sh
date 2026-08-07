@@ -55,7 +55,8 @@ gate() { # label, differs (0 identical, 1 differs)
   emit_gate "$1" "$2" || fail=1
 }
 
-for t in site playground packages/web packages/json selfhost examples/calc.dawn; do
+for t in site playground packages/web packages/json selfhost examples/calc.dawn \
+    examples/interop.dawn; do
   mkdir -p "$OUT/prev/$t" "$OUT/head/$t"
   "${PREV[@]}" __emit "${PREV_STD[@]}" "$t" -o "$OUT/prev/$t" > /dev/null
   "${HEAD_BIN[@]}" __emit "$t" -o "$OUT/head/$t" > /dev/null
