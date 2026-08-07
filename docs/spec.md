@@ -487,7 +487,7 @@ fn sort2[T: Ord2](xs: List[T]) -> List[T] = ...   # 约束：[T: Trait (+ Trait)
     按名字不可调用（报「无法推断」）；trait 作者应把主体放进参数表——`Iter`
     四个方法都把 `c: C` 放在第 0 位，正是这个原因。
 
-```dawn
+```dawn compile
 trait Head[C] {
   type Item
   fn first(c: C) -> Option[C.Item]

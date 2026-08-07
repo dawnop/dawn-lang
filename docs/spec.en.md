@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 29f12d9f17946792 -->
+<!-- doc-check: translation-of docs/spec.md @ 58c84245b0da6982 -->
 
 # Dawn Language Specification
 
@@ -586,7 +586,7 @@ fn sort2[T: Ord2](xs: List[T]) -> List[T] = ...   # bound: [T: Trait (+ Trait)*]
     "cannot infer"); trait authors should put the subject in the parameter list — all four `Iter`
     methods put `c: C` in position 0 for exactly this reason.
 
-```dawn
+```dawn compile
 trait Head[C] {
   type Item
   fn first(c: C) -> Option[C.Item]

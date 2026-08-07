@@ -893,6 +893,22 @@ def check_blocks(path: pathlib.Path, text: str,
             detail = head[0] if head else f"exit {r.returncode}"
             bad.append(f"{rel}:{line}: ```{info} block does not {mode}: {detail}")
             continue
+        # `dawn check` is a dump command, not a compiler front end: it prints
+        # every diagnostic as a `D\t...` line and exits 0 regardless, because
+        # the diff scripts that consume it compare dumps rather than statuses.
+        # So exit code alone made `compile` a check that could not fail. Found
+        # 2026-08-07 by marking the spec's associated-type example: the block
+        # passed while a hand-run `dawn run` on the same source reported four
+        # errors. There were no compile blocks at the time, so the mode had
+        # never been exercised.
+        if mode == "compile":
+            diags = [ln for ln in r.stdout.splitlines() if ln.startswith("D\t")]
+            if diags:
+                parts = diags[0].split("\t")
+                detail = parts[4] if len(parts) > 4 else diags[0]
+                bad.append(f"{rel}:{line}: ```{info} block does not compile: "
+                           f"{detail} ({len(diags)} diagnostic(s))")
+                continue
         nxt = blocks[i + 1] if i + 1 < len(blocks) else None
         if mode != "run" or nxt is None or nxt[0] != "output":
             continue
