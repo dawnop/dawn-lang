@@ -56,6 +56,10 @@ done
 
 ## 2. V49 审计：结论
 
+> **历史记录：本节与 §3、§4 里凡以现在时说 V49 的，说的都是 K-A4 那条路。现状见 §5.11**
+> ——K-A8.2 已把发射版本升回 52、帧改由 `COMPUTE_FRAMES` 算，所以「49 是地板」「不发帧」
+> 这些句子今天描述的是历史而不是编译器。下面的实测数留着，那条路的账要有人记。
+
 > 全文与逐项证据在 `~/workspace/notes/v49-audit.md`。这里只摘可动工的结论。
 
 「V49」= 把发射的 classfile major 版本从 61（Java 17）降到 49（Java 5）。
@@ -115,6 +119,9 @@ java.lang.VerifyError: (class: Tbad, method: loop signature: (I)I)
 这条最容易被忽略的死角没被堵死。
 
 ## 3. 代价：量出来的三个数
+
+> **历史记录**：这三个数是 V49 方案的代价（§2 的标注同样适用）。今天的代价数在 §5.11：
+> 回到 52 之后语料字节 +17.7%、jar +1.93%。
 
 ### 3.1 需要新增多少个类：**149**（+16.7%）
 
@@ -246,6 +253,9 @@ bootstrap 只用了 `LambdaMetafactory.metafactory` 一种（无 `altMetafactory
 
 这一节是本文最该先读的部分。以下每条都曾被当成事实写在文档或备忘录里。
 
+> **历史记录**：涉及 V49 与免帧的几条（第 3、5、13、17、18 条）说的是 K-A4 那条路上的
+> 推翻记录。版本已由 K-A8.2 升回 52（§5.11），别把它们读成现状。
+
 | # | 曾经的说法 | 实际 | 证据 |
 |---|---|---|---|
 | 1 | 「SAM bridge 是 indy 之外的第 3 件事」 | 它**就是**一处 indy。`visitInvokeDynamicInsn` 精确 2 处：`emit.dawn:656`(SAM 转换)、`emit.dawn:1494`(闭包实例化)。备忘录给的 334/658/1497 是 `Handle.new` 的行号 | `[扫描]`+`javap` 对拍 |
@@ -297,6 +307,7 @@ bootstrap 只用了 `LambdaMetafactory.metafactory` 一种（无 `altMetafactory
 | **K-A6** | 端到端重测 §3.3 的启动数（那两个数是微基准加减） | 只测量 | **已做**（随 K-A4，见 §3.3） |
 | **K-A8.1** | 把 `getCommonSuperClass` oracle 装回来：`dawn/rt/AsmWriter` 从树内源发射，`supers_of` 与整条 `supers` 参数链恢复，17 处写入器改走它。**版本仍 V49、flag 仍 COMPUTE_MAXS，发射字节逐字节不变** | 两期种子纪律，可回退 | **已做**（§5.10）：期 1 发 v0.58.0，期 2 零 Emit-Change |
 | **K-A8.2** | `jvmops.dawn` `V49 = 49` → `V52 = 52`、`COMPUTE_MAXS` → `COMPUTE_FRAMES`，全部写入器跟随；`constpool-scan.py` 降级为政策门禁 | **Emit-Change 六条**，改回去也是六条 | **已做**（§5.11）：+17.7% 语料字节，44,395 帧 |
+| **K-A8.3** | 把 52 买回来的那件东西变成被测特性：`examples/interop.dawn` 入库并登进四道门禁，spec §9.1/§9.2/§9.3 三个 fence 改成 doc-check 会执行的形式，`varargs-design.md` 承诺的单测补回三条 | 只加语料与门禁，不动发射 | **已做**（§5.12） |
 
 **K-A2（用 Dawn 重写 `AdtClassWriter`）已取消。** 见 §5.1：K-A4 之后没有 classfile
 writer 可重写——`AdtClassWriter` 里跟写 classfile 有关的部分整块不再被调用，剩下的是个
@@ -1551,7 +1562,7 @@ K-A4 时代那种「推断式校验器只走可达代码」的弱绿。
 
 #### 换回来的是什么：端到端 `[实测]`
 
-一个临时程序（不入库，语料是 K-A8.3 的活），三个入口全是**声明在接口上的静态方法**——
+一个临时程序，三个入口全是**声明在接口上的静态方法**——
 `invokestatic` 指向 `InterfaceMethodref`，49 下连常量池都解析不过：
 
 ```dawn
@@ -1587,6 +1598,9 @@ Caused by: java.lang.VerifyError: (class: iface_static, method: main
 所以「52 买回了接口静态方法」不是从 JVMS 抄来的一句话，是这一对红绿。它也说明 K-A4
 那段时间里 `use java` 有一块 JDK 面是**静默不可达**的：报错发生在类加载，不在类型检查——
 写得出来、编得过、跑不起来。
+
+> 这个临时程序已由 K-A8.3 做成 `examples/interop.dawn` 入库并登进四道门禁（§5.12），
+> 所以上面这对红绿现在每次 push 都在跑。
 
 #### D2：方向反转，正面写
 
@@ -1625,6 +1639,45 @@ Emit-Change 逐条声明）、`run-diff` / `fmt-diff` / `lsp-diff` 零差异、`
 （`changed` 桶恰是我改的四个模块 `codegen`/`emit`/`rtclasses`/`testrun`，三个程序 dump
 一字未动——**用户程序的 Core 没动，动的只有编译器自己的源**，已 `--record` 重录）、
 `doc-check`、`dawn fmt --check`、`lock --check`。
+
+### 5.12 K-A8.3 落地记（把买回来的东西装进门禁，2026-08-07）
+
+§5.11 那段端到端 `[实测]` 是拿一个 `/tmp` 里的临时程序做的。**这刀把它变成语料。**
+理由不是整洁：K-A8.2 花了 +17.7% 的字节买接口静态方法，而**没有一个门禁在问它还在不在**——
+下一次有人为了体积把版本调回去，全套门禁会一路绿到生产。
+
+**`examples/interop.dawn`** 是那个程序的入库版，写成一个能读的小程序（用 `Path.of` /
+`List.of` / `String.join` 拼出一个项目的源码目录与 classpath），带三个内联 test 块。
+四处登记，各答一个不同的问题：
+
+| 门禁 | 它能答的 |
+|---|---|
+| `selfhost-prev-diff`（`emit examples/interop.dawn`） | 这段字节 N 与 N−1 一致 |
+| `classfile-verify` | 这些类**装得进 JVM**——V49 下正是在这一步炸的 |
+| `selfhost-run-diff`（`run` / `test interop example`） | 两代工具链跑出同一份输出 |
+| `gates.yml` 的 `example tests` | 它**答对了**（`calc.dawn` 一并登记：它带着三个 test 块，此前没有任何门禁在跑） |
+
+**只有最后一条能答对错。**变异对照：把 `Path.of` 写成 `Path.off`，`dawn test`、`__emit`、
+`classfile-verify` 三条全红；把断言里的期望值从 `a/b` 改成 `a-b`，**`__emit` 照旧 rc=0**，
+只有 `dawn test` 红。字节门禁与答案门禁不是一回事，这两次变异是它的收据。
+
+`invokestatic` 打在 `InterfaceMethodref` 上的指令数 `[实测]`（`javap -c` 扫发射产物）：
+`examples/interop.dawn` **5 条**，`selfhost` / `site` / `examples/calc.dawn` **各 0 条**。
+§2 那句「`invokestatic`/`invokespecial` 打在接口上 0 处」今天仍然成立——**除了这一个语料**，
+而它就是为了不再是 0 才存在的。
+
+**spec 的三个 fence 也跟着兑现**：§9.1（模块，无 `main`）改成 ```dawn compile，§9.2 与 §9.3
+改成 ```dawn run + ```output——`doc-check` 会跑它们并逐字节比对输出。§9.3 那个 fence 顺手
+把 `docs/varargs-design.md` §6 承诺过、随 Kotlin 编译器一起归档掉的单测补回三条
+（`Path.of("a","b")` = `a/b`、`List.of(a,b,c)` 的元素与顺序、空可变部分）；余下三条
+（相位优先、现成数组直传、消解失败的错误信息）仍无覆盖，已在那份文档里写明。
+`docs/spec.en.md` 同批改并重登 translation digest。
+
+`doc-check` 的受检块从 64 涨到 **70**，其中被逐字节比对输出的从 58 涨到 **62**。变异对照同样做了：
+把 §9.3 的 ```output 从 `a,b a,b,c 0` 改成 `... 1`，`doc-check` 立刻点名行号并红。
+
+**没有发布**：不新增语法、不动发射，四个新 gate label 全是加行（`scripts/emit-labels.txt`），
+`prev-diff` 零 Emit-Change。
 
 ## 6. 本次落地（K-A0 / K-A0.5）
 
