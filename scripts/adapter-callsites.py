@@ -21,6 +21,13 @@ Two assertions, because either one alone is satisfiable by something wrong:
 Together they say: the adapter surface is reached, and it is reached at the
 in-tree class only.
 
+K-A8.1 adds a third, for the same reason and against a sharper failure mode:
+`dawn/rt/AsmWriter`, the frame-computing writer, was emitted one release before
+anything constructed it. A writer nothing constructs is an *unreachable*
+oracle, which is the state K-A4 left the vendored one in and the state this
+whole line of work exists to get out of -- and it looks exactly like a reached
+one from outside, because at COMPUTE_MAXS the two behave identically.
+
 The pool is parsed with `struct`, not with ASM: a scanner that used the
 emitter's own library to check the emitter's own output would go blind exactly
 where the library is wrong (same reasoning as constpool-scan.py).
@@ -32,6 +39,7 @@ from pathlib import Path
 
 OLD = "dawn/tool/"
 NEW = "dawn/rt/Asm"
+WRITER = "dawn/rt/AsmWriter"
 
 # tag -> bytes to skip after it (Utf8, Long and Double are handled separately)
 FIXED = {
@@ -77,6 +85,7 @@ def main(argv):
         return 2
     old_hits = []
     new_hits = []
+    writer_hits = []
     n = 0
     for d in argv[1:]:
         for p in sorted(Path(d).rglob("*.class")):
@@ -86,9 +95,15 @@ def main(argv):
                     old_hits.append((p, nm))
                 elif nm == NEW:
                     new_hits.append(p)
+                elif nm == WRITER and p.parts[-3:] != ("dawn", "rt", "AsmWriter.class"):
+                    # its own this_class entry, and the `new` in `of`, are not
+                    # call sites -- counting them would make the assertion below
+                    # true in the release where nothing constructed it yet
+                    writer_hits.append(p)
     print(f"scanned {n} class files in {len(argv) - 1} director"
           f"{'y' if len(argv) == 2 else 'ies'}")
     print(f"  name {NEW}:  {len(set(new_hits))} classes")
+    print(f"  name {WRITER}:  {len(set(writer_hits))} classes")
     print(f"  name {OLD}*: {len(old_hits)} references")
     bad = 0
     if old_hits:
@@ -99,9 +114,15 @@ def main(argv):
     if not new_hits:
         bad = 1
         print(f"FAIL: nothing names {NEW} -- the adapters are not reached at all")
+    # Outside its own class file, a class naming AsmWriter is one that
+    # *constructs* it: `of` is the only entry point, so the reference and the
+    # call site are the same thing.
+    if not writer_hits:
+        bad = 1
+        print(f"FAIL: nothing names {WRITER} -- the oracle is emitted but unreachable")
     if bad:
         return 1
-    print(f"OK: the adapter surface is reached, and only at {NEW}")
+    print(f"OK: the adapter surface is reached at {NEW} only, and the oracle at {WRITER}")
     return 0
 
 

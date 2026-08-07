@@ -6,7 +6,7 @@
 # the failure counter in a local.
 
 use rtclasses.{
-  UNIT_CLASS, close_mv
+  UNIT_CLASS, close_mv, jdk_supers
 }
 use jvmops.{
   ACC_FINAL, ACC_PUBLIC, ACC_STATIC, COMPUTE_MAXS, OP_AALOAD, OP_ALOAD, OP_ARRAYLENGTH, OP_ASTORE,
@@ -15,6 +15,7 @@ use jvmops.{
   V49
 }
 use java "dawn.rt.Asm"
+use java "dawn.rt.AsmWriter"
 use java "org.objectweb.asm.ClassWriter"
 use java "org.objectweb.asm.MethodVisitor"
 use java "org.objectweb.asm.Label"
@@ -150,7 +151,8 @@ fn gen_runner_main(cw: ClassWriter, tests: List[(String, Int, String)]) -> Unit 
 ## order; labels are prefixed with the module path by the caller when more
 ## than one module has tests, mirroring cmdTest.
 pub fn gen_test_main(tests: List[(String, Int, String)]) -> Bytes !io = {
-  let cw = Asm.plain(COMPUTE_MAXS).expect("writer")
+  # no ADTs in the runner; only the JDK spine its per-test try/catch merges on
+  let cw = AsmWriter.of(COMPUTE_MAXS, jdk_supers()).expect("writer")
   Asm.beginOn(cw, V49, ACC_PUBLIC + ACC_FINAL, TESTMAIN_CLASS, "java/lang/Object")
   gen_pass(cw)
   gen_fail(cw)

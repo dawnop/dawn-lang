@@ -15,6 +15,7 @@ use reach.{TableUse}
 use case_table
 use class_table
 use java "dawn.rt.Asm"
+use java "dawn.rt.AsmWriter"
 use java "org.objectweb.asm.ClassWriter"
 use java "org.objectweb.asm.MethodVisitor"
 use java "org.objectweb.asm.Label"
@@ -168,7 +169,7 @@ pub fn append_const(m: MethodVisitor, s: String) -> Unit !io = {
 ## String.valueOf, which finds the ADT `toString` below. It is not the
 ## language's answer to "how does this render"; it is what a panic message can
 ## say about a value whose type was thrown away.
-pub fn gen_show_class() -> Bytes !io = {
+pub fn gen_show_class(supers: List[String]) -> Bytes !io = {
   let jstr = "java/lang/String"
   let jlist = "java/util/List"
   let jmap = "java/util/Map"
@@ -176,7 +177,7 @@ pub fn gen_show_class() -> Bytes !io = {
   let iter = "java/util/Iterator"
   let entry = "java/util/Map\$Entry"
   let obj_to_str = "(Ljava/lang/Object;)Ljava/lang/String;"
-  let cw = Asm.plain(COMPUTE_MAXS).expect("writer")
+  let cw = AsmWriter.of(COMPUTE_MAXS, supers).expect("writer")
   Asm.beginOn(cw, V49, ACC_PUBLIC + ACC_FINAL, SHOW_CLASS, obj())
 
   # static String show(Object o): the instanceof chain
@@ -429,9 +430,9 @@ pub fn gen_show_class() -> Bytes !io = {
 
 ## dawn/rt/TupleN: N public final Object fields + structural equals/hashCode +
 ## Show-rendering toString (the Kotlin genTupleClass; frame-computing writer).
-pub fn gen_tuple_class(n: Int) -> Bytes !io = {
+pub fn gen_tuple_class(supers: List[String], n: Int) -> Bytes !io = {
   let cls = tuple_class(n)
-  let cw = Asm.plain(COMPUTE_MAXS).expect("writer")
+  let cw = AsmWriter.of(COMPUTE_MAXS, supers).expect("writer")
   Asm.beginOn(cw, V49, ACC_PUBLIC + ACC_FINAL, cls, obj())
   var i = 0
   while i < n {
@@ -523,6 +524,56 @@ pub fn gen_tuple_class(n: Int) -> Bytes !io = {
   cw.toByteArray().expect("bytes")
 }
 
+## The class hierarchy `dawn/rt/AsmWriter` answers from, as "child super" pairs
+## (one space, because Dawn maps do not cross the interop boundary and lists
+## do). Every class this compilation is about to emit, plus the JDK edges the
+## emitter itself creates.
+##
+## The three groups are not interchangeable:
+##
+##   - ADT bases and their constructor classes. This is the whole reason the
+##     oracle exists: two constructor classes meeting at a `match` arm join to
+##     their base, and no class loader can be asked because neither class has
+##     been written yet.
+##   - the tuple classes, which are flat under Object.
+##   - the JDK exception spine. `gen_io_class` assembles `catch_fault`'s
+##     exception table by hand, and the merge of `dawn/rt/PanicError` with
+##     `java/lang/Exception` is the one question in the whole corpus whose two
+##     sides are not classes we emit. It is answered here rather than by
+##     delegating to ASM's class-path walk, so the emitted bytes do not depend
+##     on the JDK the compiler happens to run on -- see gen_asm_writer_class.
+##
+## Anything absent answers `java/lang/Object`, which the verifier rejects at
+## the merge point rather than accepting quietly (docs/jvm-base-plan.md §5.8).
+pub fn supers_of(adts: Adts, all_ids: List[Int]) -> List[String] = {
+  var out: List[String] = []
+  for aid in all_ids {
+    let a = adt_of(adts, aid)
+    let base = adt_jvm_name(a)
+    out = out ++ [base ++ " " ++ obj()]
+    if not a.is_record {
+      for c in a.ctors { out = out ++ [ctor_jvm_name(adts, c) ++ " " ++ base] }
+    }
+  }
+  var n = 2
+  while n <= 8 {
+    out = out ++ [tuple_class(n) ++ " " ++ obj()]
+    n = n + 1
+  }
+  out ++ jdk_supers()
+}
+
+## The third group on its own, for a class that has no ADTs in it at all (the
+## test runner). An empty table would answer `java/lang/Object` to everything,
+## which is the one answer that can be wrong.
+pub fn jdk_supers() -> List[String] = [
+  PANIC_CLASS ++ " java/lang/Error",
+  "java/lang/Error java/lang/Throwable",
+  "java/lang/Exception java/lang/Throwable",
+  "java/lang/RuntimeException java/lang/Exception",
+  "java/lang/Throwable " ++ obj(),
+]
+
 pub const BYTES_CLASS: String = "dawn/rt/Bytes"
 
 pub const IO_CLASS: String = "dawn/rt/Io"
@@ -553,8 +604,8 @@ pub const FN_CMP_CLASS: String = "dawn/rt/FnComparator"
 ## retire the handwritten dawn.rt.StdBytes; index_of stays pure Dawn over len/at.
 ## Byte values are unsigned 0..255 on the Dawn side, so -1 is a free out-of-range
 ## sentinel for bytes_at (std turns it into a panic).
-pub fn gen_bytes_class() -> Bytes !io = {
-  let cw = Asm.plain(COMPUTE_MAXS).expect("writer")
+pub fn gen_bytes_class(supers: List[String]) -> Bytes !io = {
+  let cw = AsmWriter.of(COMPUTE_MAXS, supers).expect("writer")
   Asm.beginOn(cw, V49, ACC_PUBLIC + ACC_FINAL, BYTES_CLASS, obj())
   let m = Asm.methodOn(cw, ACC_PUBLIC + ACC_STATIC, "concat", "([B[B)[B").expect("mv")
   m.visitCode()
@@ -1015,8 +1066,8 @@ fn gen_cast(cw: ClassWriter) -> Unit !io = {
 ## It implements Runnable for one reason, and it is the whole of why the class
 ## has an instance at all: `io_run` registers a shutdown hook, and a hook is a
 ## Thread, and a Thread needs a Runnable. See gen_io_reaper.
-pub fn gen_io_class() -> Bytes !io = {
-  let cw = Asm.plain(COMPUTE_MAXS).expect("writer")
+pub fn gen_io_class(supers: List[String]) -> Bytes !io = {
+  let cw = AsmWriter.of(COMPUTE_MAXS, supers).expect("writer")
   Asm.beginOnWithInterface(cw, V49, ACC_PUBLIC + ACC_FINAL, IO_CLASS, obj(),
     "java/lang/Runnable")
   gen_try_closure(cw, "catch_fault", ["java/lang/Exception"])
@@ -1679,8 +1730,8 @@ fn array_bounds_panic(m: MethodVisitor, prefix: String, ivar: Int) -> Unit !io =
 ## the value is uniquely owned may write it in place -- which on native is
 ## Perceus' rc==1, and on the JVM is nothing. The append path is where the 12x
 ## lives, so this is a cost the measurements say we can pay.
-pub fn gen_array_class() -> Bytes !io = {
-  let cw = Asm.plain(COMPUTE_MAXS).expect("writer")
+pub fn gen_array_class(supers: List[String]) -> Bytes !io = {
+  let cw = AsmWriter.of(COMPUTE_MAXS, supers).expect("writer")
   Asm.beginOn(cw, V49, ACC_PUBLIC + ACC_FINAL, ARRAY_CLASS, obj())
   Asm.fieldOn(cw, ACC_PRIVATE + ACC_FINAL, "a", "[Ljava/lang/Object;")
   Asm.fieldOn(cw, ACC_PRIVATE + ACC_FINAL, "used", "L" ++ ATOMIC_INT ++ ";")
@@ -2030,10 +2081,10 @@ const CLASS_SPACE: String = "CLASS_SPACE"
 ## case folding. What is left after std/str took over everything expressible as
 ## a walk (docs/native-backend-plan.md 14.12): the representation boundary and
 ## the Unicode tables, and nothing vendored in handwritten Java.
-pub fn gen_strings_class(u: TableUse) -> Bytes !io = {
+pub fn gen_strings_class(supers: List[String], u: TableUse) -> Bytes !io = {
   let jstr = "java/lang/String"
   let jlist = "java/util/List"
-  let cw = Asm.plain(COMPUTE_MAXS).expect("writer")
+  let cw = AsmWriter.of(COMPUTE_MAXS, supers).expect("writer")
   Asm.beginOn(cw, V49, ACC_PUBLIC + ACC_FINAL, STRINGS_CLASS, obj())
 
   let jn = Asm.methodOn(cw, ACC_PUBLIC + ACC_STATIC, "join",
@@ -2841,11 +2892,12 @@ pub fn tr_iface(owner: Option[String], name: String) -> String =
 ## A java.util.Comparator over a Dawn two-argument cmp function; emit_cmp
 ## receives (source, a, b) on the stack and leaves the long comparison result.
 fn gen_comparator_class(
+  supers: List[String],
   cls: String,
   src_desc: String,
   emit_cmp: fn(MethodVisitor) -> Unit !io
 ) -> Bytes !io = {
-  let cw = Asm.plain(COMPUTE_MAXS).expect("writer")
+  let cw = AsmWriter.of(COMPUTE_MAXS, supers).expect("writer")
   Asm.beginOnWithInterface(cw, V49, ACC_PUBLIC + ACC_FINAL, cls, obj(),
     "java/util/Comparator")
   Asm.fieldOn(cw, ACC_PRIVATE + ACC_FINAL, "src", src_desc)
@@ -2873,8 +2925,8 @@ fn gen_comparator_class(
   cw.toByteArray().expect("bytes")
 }
 
-pub fn gen_fn_comparator() -> Bytes !io =
-  gen_comparator_class(FN_CMP_CLASS, "L" ++ fn_iface(2) ++ ";", (m: MethodVisitor) => {
+pub fn gen_fn_comparator(supers: List[String]) -> Bytes !io =
+  gen_comparator_class(supers, FN_CMP_CLASS, "L" ++ fn_iface(2) ++ ";", (m: MethodVisitor) => {
     m.visitMethodInsn(OP_INVOKEINTERFACE, fn_iface(2), "apply", erased_apply_desc(2), true)
     m.visitTypeInsn(OP_CHECKCAST, "java/lang/Long")
     m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/Long", "longValue", "()J", false)
@@ -2882,8 +2934,8 @@ pub fn gen_fn_comparator() -> Bytes !io =
   })
 
 ## The prelude Ord trait interface (one erased cmp method).
-pub fn gen_ord_interface() -> Bytes !io = {
-  let cw = Asm.plain(COMPUTE_MAXS).expect("writer")
+pub fn gen_ord_interface(supers: List[String]) -> Bytes !io = {
+  let cw = AsmWriter.of(COMPUTE_MAXS, supers).expect("writer")
   Asm.beginOn(cw, V49, ACC_PUBLIC + ACC_ABSTRACT + ACC_INTERFACE,
     tr_iface(None, "Ord"), obj())
   let m = Asm.methodOn(cw, ACC_PUBLIC + ACC_ABSTRACT, "cmp",
@@ -3018,12 +3070,12 @@ pub const ASM_WRITER_CLASS: String = "dawn/rt/AsmWriter"
 ## thing Dawn *source* cannot spell -- `use java` imports a class, it does not
 ## extend one. docs/jvm-base-plan.md §5.7.
 ##
-## **Nothing calls it at V49 + COMPUTE_MAXS**: `getCommonSuperClass` is a
-## frame-computation callback and the emitter computes no frames (K-A4, §5.7's
-## measurement is zero call sites). It is here so that raising the version is a
-## flag change rather than a subsystem, and so that the oracle is exercised by a
-## gate today rather than written blind on the day it is needed
-## (scripts/asm-adapter-contract).
+## **Every emitter builds one, and none of them ever asks it anything.**
+## `getCommonSuperClass` is a frame-computation callback, and at V49 +
+## COMPUTE_MAXS no frames are computed (K-A4). The call sites are here so that
+## raising the version is a flag change rather than a subsystem; the answers are
+## checked by `scripts/asm-adapter-contract`, because a gate is the only thing
+## that runs this code until the day it is switched on.
 ##
 ## **The answer never leaves the table, deliberately.** Two roads were open for
 ## a pair the table cannot join -- delegate to `super.getCommonSuperClass`

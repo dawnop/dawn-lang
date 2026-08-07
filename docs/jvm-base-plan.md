@@ -295,6 +295,7 @@ bootstrap 只用了 `LambdaMetafactory.metafactory` 一种（无 `altMetafactory
 | **K-A4** | `jvmops.dawn` `V17 = 61` → `V49 = 49`；改走 `AdtClassWriter.plain(COMPUTE_MAXS)` 的静态适配器；删 `rtclasses.supers_of` 与整条 `supers` 参数链 | **Emit-Change**，D5 承诺点 | **已做**（§5.6） |
 | **K-A7** | **让 Dawn 自己发射那五个 null 适配器**（`dawn/rt/Asm`），`dawn/tool` 整体退出 `--vendor` | 三期种子纪律，可回退 | **全部已做**（§5.7）：期 1 一次发布，期 2+3 合并在 v0.49.0 之后一次落地 |
 | **K-A6** | 端到端重测 §3.3 的启动数（那两个数是微基准加减） | 只测量 | **已做**（随 K-A4，见 §3.3） |
+| **K-A8.1** | 把 `getCommonSuperClass` oracle 装回来：`dawn/rt/AsmWriter` 从树内源发射，`supers_of` 与整条 `supers` 参数链恢复，17 处写入器改走它。**版本仍 V49、flag 仍 COMPUTE_MAXS，发射字节逐字节不变** | 两期种子纪律，可回退 | **已做**（§5.10）：期 1 发 v0.58.0，期 2 零 Emit-Change |
 
 **K-A2（用 Dawn 重写 `AdtClassWriter`）已取消。** 见 §5.1：K-A4 之后没有 classfile
 writer 可重写——`AdtClassWriter` 里跟写 classfile 有关的部分整块不再被调用，剩下的是个
@@ -1351,6 +1352,108 @@ MUT=cmp python3 ledger.py ...seed.jar   # 负控，另有 cast / init / join
 ```
 
 本次实验**未触发任何构建、未运行 `bin/dawn`**，只读 jar。
+
+### 5.10 K-A8.1 落地记（把 oracle 装回来，2026-08-07）
+
+**一句话**：`getCommonSuperClass` 回到了 JVM 后端——**从树内源发射，不是从二进制续传**，
+而且**发射的字节一个都没变**。这一刀不动版本、不动 flag，只把 K-A4 拆掉的那半装回去，
+让 K-A8.2（`V49 → V52` + `COMPUTE_MAXS → COMPUTE_FRAMES`）变成改两个常量。
+
+**为什么必须两期**：新类要被编译器源码消费，就得先在**种子的 classpath 上**存在——
+`use java "dawn.rt.AsmWriter"` 是 checker 拿反射解析的，解析发生在**上一代编译器**的进程里。
+这与 K-A7 期 1→期 2 是同一堵墙，走法也一样：
+
+| 期 | 提交 | 做了什么 | Emit-Change |
+|---|---|---|---|
+| 1 | `aa32c12` | `rtclasses.dawn` 发射 `dawn/rt/AsmWriter`，**没人用它**；契约门禁长出能看见它的检查 | `emit selfhost`（多一个类） |
+| — | `b237240` + v0.58.0 | 发布 + 推进种子 | — |
+| 2 | 见下 | `supers_of` 与整条 `supers` 参数链回来，17 处写入器改走 `AsmWriter.of` | **零条** |
+
+**期 2 零声明不是运气，是这一刀的验收核心**：`selfhost-prev-diff.sh` 让**上一代与 HEAD 编同一份
+源码**，所以它问的正是「编译器的行为变了没有」。六个语料**逐字节相同**——包括 selfhost
+自编译 `[实测]`：
+
+```
+site  playground  packages/web  packages/json  selfhost  examples/calc.dawn
+                        全部 IDENTICAL
+```
+
+（对拍的两个主体是期 1 的 stage-2 jar 与期 2 的 `bin/dawn`，各自 `__emit` 六个语料后 `diff -rq`。）
+
+#### D4：查不到的那一对答什么
+
+两条路：**委托 `super.getCommonSuperClass`**（ASM 的 `Class.forName` 走查），或**只查表、
+查不到答 `java/lang/Object`**。选了后者，理由分两半：
+
+- **委托会把发射的字节挂到编译器自己的 classpath 上。** 两台机器的 JDK 不同就可能对同一个
+  帧给出不同答案，而「跨机器逐字节相同」是整条自举论证的地基（`docs/bootstrap.md`）。
+- **查表的错只能错在"太宽"，而太宽正是校验器拒绝的方向。** §5.8 把 72,408 个引用条目全压成
+  `java/lang/Object` 再强制链接，有帧的类里 16.4% 链不上。所以表里的缺口是**门禁期的
+  `VerifyError`**，不是跑起来才发现的错答案。
+
+**唯一一个两边都不是自己发射的类的提问**——`dawn/rt/PanicError | java/lang/Exception`，来自
+`gen_io_class` 手写的 `catch_fault` 异常表——**在表里答**：`supers_of` 末尾登记 JDK 异常脊
+（`PanicError → Error → Throwable → Object`、`RuntimeException → Exception → Throwable`），
+于是它答 `java/lang/Throwable`，与 ASM 用真 classpath 走出来的答案一致。全语料 305 次调用 /
+159 种提问里，另外 158 种两边都是 Dawn 发射类，一次 `adt_parent_of` 式查表就够（§5.9）。
+
+#### 证据：正控 + 变异体
+
+期 1 里**没人调这个类**，所以其它门禁绿不绿与它写了什么无关——K-A7 期 1 的同一个坑。
+`scripts/asm-adapter-contract` 因此长出三条针对写入器的检查，两个主体（自发射 / 参照发射）
+各跑一遍：
+
+```
+-- self-emitted writer --
+PASS  the oracle answers 8 questions as the reference does
+PASS  at (V52, COMPUTE_FRAMES) the writer produces a linkable class
+PASS  the frame probe rejects a too-wide oracle (java/lang/Object)
+```
+
+第一条是 **DDC**：参照是 `kotlin-final` tag 里那份 Java 源经 **javac** 编出来的
+`AdtClassWriter`——同一份参照的另一半，与五个 null 适配器共用一条「不经 Dawn 编译器」的链。
+第二条是这一刀存在的理由：**编译器今天不跑这个组合，所以只有门禁跑**。第三条是第二条的负控
+（探针方法的返回类型是 `p/Base`，oracle 答宽一格 `areturn` 就不合法）。
+
+**变异体（临时，不入库）**：把 `gen_asm_writer_class` 里 `ask.visitJumpInsn(OP_IFEQ, differ)`
+的目标改成 `none`——两名不同就直接答 `java/lang/Object`，即「太宽」那个失败模式。重建工具链
+后门禁 **exit 1，4 条红** `[实测]`：
+
+```
+FAIL  the oracle answers 8 questions as the reference does
+      p/Sub | p/Base: reference p/Base, emitted java/lang/Object
+      p/Sub | p/Other: reference p/Base, emitted java/lang/Object            ← 兄弟构造器，ADT 对
+      dawn/rt/PanicError | java/lang/Exception: reference java/lang/Throwable, emitted java/lang/Object
+FAIL  at (V52, COMPUTE_FRAMES) the writer produces a linkable class
+      java.lang.VerifyError: Bad return type
+        Type 'java/lang/Object' (current frame, stack[0]) is not assignable to 'p/Base'
+PASS  the frame probe rejects a too-wide oracle (java/lang/Object)           ← 负控照旧绿
+```
+
+最后那条 `PASS` 是这次变异的判别力所在：门禁指得出问题在发射器，不在探针。
+
+#### 「装回来」与「发射出来」是两件事
+
+期 1 之后 `dawn/rt/AsmWriter` 在 jar 里，但**没有任何东西构造它**。那正是 §5.6 判过的状态：
+不可达。而两个写入器在 COMPUTE_MAXS 下**行为完全一致**，所以一处调用点都没改的编译器照样
+构建、照样自举、门禁照样全绿——K-A7 期 2 踩过的同一个假绿。
+`scripts/adapter-callsites.py` 因此多一条断言：**除它自己的 class 文件外**，至少要有一个发射出来的
+类在常量池里点名 `dawn/rt/AsmWriter`。红演示就是期 1 的产物 `[实测]`：
+
+```
+期 2:  name dawn/rt/AsmWriter:  4 classes   → OK          （emit / codegen / rtclasses / testrun）
+期 1:  name dawn/rt/AsmWriter:  0 classes   → FAIL: the oracle is emitted but unreachable
+```
+
+排除自引用是必需的：`of` 里那条 `new dawn/rt/AsmWriter` 与 this_class 都在它自己的池子里，
+不排除的话这条断言在「没人用它」的那一代也是真的。
+
+#### 留给 K-A8.2 的
+
+改 `jvmops.dawn` 两个常量（`V49 = 49` → 52、`COMPUTE_MAXS = 1` → `COMPUTE_FRAMES = 2`），
+外加 §5.7 那四处 `Asm.plain(0)` 与 `gen_asm_class`/`gen_asm_writer_class` 自己要不要跟着走。
+**§5.9 那条「循环头要跑第二遍」不适用**：它说的是**自己算帧**的发射器，而这里算帧的仍然是
+ASM，定点由它负责，我们只欠它一个 oracle——这一刀就是把这笔欠账结清。
 
 ## 6. 本次落地（K-A0 / K-A0.5）
 

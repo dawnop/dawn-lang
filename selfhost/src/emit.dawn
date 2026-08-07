@@ -64,6 +64,7 @@ use core.{
 use lower.{LMod}
 use jreflect
 use java "dawn.rt.Asm"
+use java "dawn.rt.AsmWriter"
 use java "org.objectweb.asm.ClassWriter"
 use java "org.objectweb.asm.MethodVisitor"
 use java "org.objectweb.asm.Label"
@@ -739,9 +740,9 @@ fn emit_sam_conversion(
 
 ## One SAM adapter class: a field holding the `FnN`, and the interface method
 ## forwarding to the bridge that was already being emitted next to it.
-fn gen_sam_class(s: SamC) -> (String, Bytes) !io = {
+fn gen_sam_class(supers: List[String], s: SamC) -> (String, Bytes) !io = {
   let fnd = "L" ++ fn_iface(s.arity) ++ ";"
-  let cw = Asm.plain(COMPUTE_MAXS).expect("writer")
+  let cw = AsmWriter.of(COMPUTE_MAXS, supers).expect("writer")
   Asm.beginOnWithInterface(cw, V49, ACC_PUBLIC + ACC_FINAL, s.cls, obj(), s.iface)
   Asm.fieldOn(cw, ACC_PRIVATE + ACC_FINAL, capture_field(0), fnd)
   let init = Asm.methodOn(cw, ACC_PUBLIC, "<init>", "(" ++ fnd ++ ")V").expect("mv")
@@ -1221,8 +1222,8 @@ fn gen_jvm_main(gx: GenCtx, cw: ClassWriter) -> Unit !io = {
 }
 
 ## The per-trait dictionary interface: one erased method per trait method.
-pub fn gen_trait_interface(adts: Adts, tr: TraitI) -> Bytes !io = {
-  let cw = Asm.plain(COMPUTE_MAXS).expect("writer")
+pub fn gen_trait_interface(supers: List[String], adts: Adts, tr: TraitI) -> Bytes !io = {
+  let cw = AsmWriter.of(COMPUTE_MAXS, supers).expect("writer")
   Asm.beginOn(cw, V49, ACC_PUBLIC + ACC_ABSTRACT + ACC_INTERFACE,
     tr_iface(tr.owner, tr.name), obj())
   for entry in tr.methods {
@@ -1307,6 +1308,7 @@ fn owner_or_default(o: Option[String], fallback: String) -> String =
 ## derived. Those are questions about a *class*, not about a witness, and
 ## Core does not carry them.
 pub fn emit_module(
+  supers: List[String],
   adts: Adts,
   traits: Traits,
   impl_table: Impls,
@@ -1327,14 +1329,14 @@ pub fn emit_module(
 ) -> List[(String, Bytes)] !io = {
   var out: List[(String, Bytes)] = []
   for aid in own_adt_ids {
-    out = out ++ gen_adt(adts, adt_of(adts, aid),
+    out = out ++ gen_adt(supers, adts, adt_of(adts, aid),
       eq_override(impl_table, class_name, TyAdt(aid, adt_of(adts, aid).tparams)))
   }
   for tid in own_trait_ids {
     let tr = trait_of(traits, tid)
-    out = out ++ [(tr_iface(tr.owner, tr.name), gen_trait_interface(adts, tr))]
+    out = out ++ [(tr_iface(tr.owner, tr.name), gen_trait_interface(supers, adts, tr))]
   }
-  let cw = Asm.plain(COMPUTE_MAXS).expect("writer")
+  let cw = AsmWriter.of(COMPUTE_MAXS, supers).expect("writer")
   Asm.beginOn(cw, V49, ACC_PUBLIC + ACC_FINAL, class_name, obj())
   Asm.fieldOn(cw, ACC_PUBLIC + ACC_STATIC, ARGS_FIELD, "[Ljava/lang/String;")
   let no_slots: Map[Int, Int] = map.empty()
@@ -1424,16 +1426,16 @@ pub fn emit_module(
   # carries no Eq machinery -- the same property the old whole-program scan
   # in main.dawn was there to preserve, now a consequence rather than a rule.
   for dd in gx.dicts {
-    out = out ++ [gen_dict_class(gx, dd)]
+    out = out ++ [gen_dict_class(gx, supers, dd)]
   }
   # the classes that stand where an invokedynamic used to. Emitted here
   # rather than as they are met, because each is a whole class file and the
   # module's own writer is open until the line above.
   for b in g.closures {
-    out = out ++ [gen_closure_class(gx, g, b)]
+    out = out ++ [gen_closure_class(gx, supers, g, b)]
   }
   for s in g.sam_classes {
-    out = out ++ [gen_sam_class(s)]
+    out = out ++ [gen_sam_class(supers, s)]
   }
   out ++ [(class_name, cw.toByteArray().expect("bytes"))]
 }
@@ -1444,11 +1446,11 @@ pub fn emit_module(
 ## plus the dictionary -- whether lowering filled it with a bridge to an
 ## impl, a trait default, or a synthesised primitive. So this forwards, and
 ## knows nothing about which of the three it is.
-fn gen_dict_class(gx: GenCtx, dd: CDictDef) -> (String, Bytes) !io = {
+fn gen_dict_class(gx: GenCtx, supers: List[String], dd: CDictDef) -> (String, Bytes) !io = {
   let tr = trait_of(gx.traits, dd.trait_id)
   let cls = dict_class(gx.class_name, dd.key)
   let iface = tr_iface(tr.owner, tr.name)
-  let cw = Asm.plain(COMPUTE_MAXS).expect("writer")
+  let cw = AsmWriter.of(COMPUTE_MAXS, supers).expect("writer")
   Asm.beginOnWithInterface(cw, V49, ACC_PUBLIC + ACC_FINAL, cls, obj(), iface)
   # A dictionary the compiler can build once is a singleton; one that is a
   # function of its arguments is an ordinary object with those arguments in
@@ -1664,8 +1666,8 @@ fn gen_cclosure(gx: GenCtx, g: Gen, name: String, owner: String, caps: List[CExp
 ## That adaptation is the whole of what LambdaMetafactory did here. It is the
 ## mirror of `gen_cdynamic`, which boxes arguments before an `apply` and
 ## unerases the result after it -- the same two helpers, the other way round.
-fn gen_closure_class(gx: GenCtx, g: Gen, b: ClosB) -> (String, Bytes) !io = {
-  let cw = Asm.plain(COMPUTE_MAXS).expect("writer")
+fn gen_closure_class(gx: GenCtx, supers: List[String], g: Gen, b: ClosB) -> (String, Bytes) !io = {
+  let cw = AsmWriter.of(COMPUTE_MAXS, supers).expect("writer")
   Asm.beginOnWithInterface(cw, V49, ACC_PUBLIC + ACC_FINAL, b.cls, obj(), b.iface)
   var caps_desc = ""
   for ct in b.cap_tys { caps_desc = caps_desc ++ desc_of(gx.adts, ct) }
