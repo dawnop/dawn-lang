@@ -1409,6 +1409,48 @@ test "a module may be imported qualified and selectively at once" {
   assert dup
 }
 
+test "a module alias collides with an imported name in either source order" {
+  # bind_import catches `use a/b` before `use a/b.{b}` by reading the alias
+  # table as it stands. Nothing read the name table on the way in, so the same
+  # pair reversed used to pass and `b` became a binding *and* an alias (#185).
+  let std = match load_std("std") {
+    Ok(sc) -> sc
+    Err(e) -> panic("std: " ++ e)
+  }
+
+  let root = "/tmp/dawn-selfhost-analyze/alias-order"
+  mkdirs(root ++ "/src/a")
+  put(root ++ "/src/a/b.dawn", "pub fn b(x: Int) -> Int = x\npub fn make(x: Int) -> Int = x\n")
+  put(root ++ "/src/main.dawn", "use a/b.{b}\nuse a/b\npub fn main() -> Unit !io = ()\n")
+  var shadow = false
+  for ld in analyze_program(load_directory(root), std, ct_default(), jsig_refused()).diags {
+    if str.contains(ld.d.msg, "shadows the imported module") { shadow = true }
+  }
+  assert shadow
+
+  # the name and the alias need not come from the same module
+  let root2 = "/tmp/dawn-selfhost-analyze/alias-order-x"
+  mkdirs(root2 ++ "/src/a")
+  mkdirs(root2 ++ "/src/a2")
+  put(root2 ++ "/src/a/b.dawn", "pub fn make(x: Int) -> Int = x\n")
+  put(root2 ++ "/src/a2/z.dawn", "pub fn b(x: Int) -> Int = x\n")
+  put(root2 ++ "/src/main.dawn", "use a2/z.{b}\nuse a/b\npub fn main() -> Unit !io = ()\n")
+  var shadow2 = false
+  for ld in analyze_program(load_directory(root2), std, ct_default(), jsig_refused()).diags {
+    if str.contains(ld.d.msg, "shadows the imported module") { shadow2 = true }
+  }
+  assert shadow2
+
+  # and names that do not collide still coexist with the selective import first
+  let root3 = "/tmp/dawn-selfhost-analyze/alias-order-ok"
+  mkdirs(root3 ++ "/src")
+  put(root3 ++ "/src/main.dawn",
+    "use std/str.{trim}\nuse std/str\n" ++
+      "pub fn main() -> Unit !io = println(trim(str.repeat(\" a \", 1)))\n")
+  let ok = analyze_program(load_directory(root3), std, ct_default(), jsig_refused())
+  assert len(ok.diags) == 0
+}
+
 test "loader reports cycles and missing modules" {
   let root = "/tmp/dawn-selfhost-analyze/proj2"
   mkdirs(root ++ "/src")

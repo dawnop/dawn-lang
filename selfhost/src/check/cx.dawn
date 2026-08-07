@@ -323,9 +323,14 @@ pub fn fresh_effvar(cx: Cx, name: String) -> (Cx, Eff) = {
 pub fn alias_shadow(cx: Cx, name: String, lo: Int, hi: Int) -> Cx =
   match map.get(cx.module_aliases, name) {
     None -> cx
-    Some(mod_path) -> cerr_h(cx, "`" ++ name ++ "` shadows the imported module `" ++ mod_path ++ "`",
-      lo, hi, "an imported module's alias and your names share one namespace; rename one")
+    Some(mod_path) -> alias_shadow_at(cx, name, mod_path, lo, hi)
   }
+
+## The same report when the alias is the one arriving second: the module path is
+## in hand but not yet in the table, so there is nothing to look up.
+pub fn alias_shadow_at(cx: Cx, name: String, mod_path: String, lo: Int, hi: Int) -> Cx =
+  cerr_h(cx, "`" ++ name ++ "` shadows the imported module `" ++ mod_path ++ "`",
+    lo, hi, "an imported module's alias and your names share one namespace; rename one")
 
 # ---- effect bookkeeping ----
 

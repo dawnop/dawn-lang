@@ -33,8 +33,8 @@ use check/types.{
 
 use check/cx.{
   AliasE, Cx, ModExports, Origin, OPrelude, OImport, OLocal, cx_new, test_cx, cerr,
-  cerr_h, cerr_o, fresh, alias_shadow, effect_of, resolve_eff_at, resolve_alias_target,
-  resolve_type, is_const_serializable, no_sig
+  cerr_h, cerr_o, fresh, alias_shadow, alias_shadow_at, effect_of, resolve_eff_at,
+  resolve_alias_target, resolve_type, is_const_serializable, no_sig
 }
 
 use front/suggest
@@ -2316,6 +2316,19 @@ pub fn pass_imports(cx: Cx, m: Module, env: Map[String, ModExports]) -> Cx = {
     cx1 = Cx { ..cx1, adts: adts2, traits: traits2, effect_infos: effs2 }
     match u.selective {
       None -> {
+        # An earlier selective import may already have bound this very name. The
+        # reverse order is caught in bind_import, which reads module_aliases as
+        # it stands; nothing read imported_names here, so the rule used to hold
+        # in one source order only and `b` could be a binding *and* an alias at
+        # once (#185). Report and register anyway: the alias table is what the
+        # rest of the file's qualified spellings resolve through, and dropping
+        # it would bury this diagnostic under cascades.
+        match map.get(cx1.imported_names, u.alias_name) {
+          Some(_) -> {
+            cx1 = alias_shadow_at(cx1, u.alias_name, exp.mod_path, u.nlo, u.nhi)
+          }
+          None -> ()
+        }
         match map.get(cx1.module_aliases, u.alias_name) {
           Some(prev_path) ->
             if prev_path != exp.mod_path {
