@@ -96,4 +96,10 @@ push count; NEWARRAY/ANEWARRAY component
 2. 单测：`List.of(a,b,c)` 元素与顺序正确；`Path.of("a","b")` 拼出 `a/b`；
    空可变部分行为不变（回归）；相位 1 优先于相位 2（`foo(String,String)` vs `foo(String,Object...)`）；
    传现成数组走相位 1 不重新打包；分量类型不匹配时报错且列出候选。
+
+   > 这批单测当年落在 `compiler/src/test/kotlin/dawn/VarargsTest.kt`，随 Kotlin 编译器
+   > 一起归档进 `kotlin-final`，之后有一整年没有替代品。K-A8.3（2026-08-07）补回**前三条**：
+   > `examples/interop.dawn` 的内联 test 块，以及 spec §9.3 那个 doc-check 会执行、
+   > 输出被逐字节比对的 fence。**后三条仍无自动化覆盖**——相位优先、现成数组直传、
+   > 消解失败的错误信息都只在编译器里，没有语料在问它们。
 3. 全量 1135+ 测试绿；backend-dawn 59 测试绿；100MB PUT 生产复验内存仍平。

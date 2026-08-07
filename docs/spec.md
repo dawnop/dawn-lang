@@ -1228,7 +1228,7 @@ let base = HttpRequest.newBuilder()!.uri(uri)!  # 而不是 .expect("b") / .expe
 
 ### 9.1 引入与调用
 
-```dawn
+```dawn compile
 use java "java.nio.file.Files"
 use java "java.nio.file.Path"
 use java "java.lang.StringBuilder"
@@ -1282,9 +1282,20 @@ fn build() -> String !io = {
 **Java 方法返回引用类型一律为 `Option[T]`**——null 在边界处被拦下。用 `!` 解包（§8.2）
 或 `match` 处理：
 
-```dawn
-let uri = URI.create(url)!          # 方法：包 Option，解包
-let sb = StringBuilder.new()        # 构造子：不包，直接是对象
+```dawn run
+use java "java.net.URI"
+use java "java.lang.StringBuilder"
+
+pub fn main() -> Unit !io = {
+  let uri = URI.create("https://dawn-lang.org/spec")!   # 方法：包 Option，解包
+  let sb = StringBuilder.new()                          # 构造子：不包，直接是对象
+  sb.append(uri.getHost()!)
+  println(sb.toString()!)
+}
+```
+
+```output
+dawn-lang.org
 ```
 
 **为什么方法包、构造子不包**——这不是两套随意的规则，而是各有依据：
@@ -1310,14 +1321,29 @@ Dawn `List` 实参可匹配 `List`/`Collection`/`Iterable` 形参（§9.6）；�
 （相位 2）；**相位优先于分数**——分数是逐参求和、随实参个数增长，不分相位会让打包
 候选反超精确匹配。可变部分内联铺开，与 Java 写法一致：
 
-```dawn
-let p = Path.of("a", "b", "c")!                  # 打包成 String[]，得 a/b/c
-let l = List.of("a", "b")!                       # 相位 1 胜：选 of(E, E)
-let e = List.of()!                               # 不传可变部分 = 打包 0 个 = 空数组
-let b = BodyPublishers.concat(head, file, tail)! # 可变部分可放 Java 引用
+```dawn run
+use java "java.nio.file.Path"
+use java "java.util.List"
+use java "java.lang.String"
+
+pub fn main() -> Unit !io = {
+  let p = Path.of("a", "b")!                     # 可变部分 1 段：打包成 String[1]
+  let q = Path.of("a", "b", "c")!                # 同一相位，String[2]
+  let l = List.of("a", "b")!                     # 相位 1 胜：选 of(E, E)
+  let m = List.of("a", "b", "c")!                # 相位 2：打包成 E[]
+  let e = List.of()!                             # 不传可变部分 = 打包 0 个 = 空数组
+  println("${p.toString()!} ${q.toString()!}")
+  println("${String.join(",", l)!} ${String.join(",", m)!} ${to_string(e.size())}")
+}
 ```
 
-尾部实参逐个对**数组分量类型**打分，规则同普通形参，故 SAM 转换（§9.4）与 List 桥
+```output
+a/b a/b/c
+a,b a,b,c 0
+```
+
+可变部分同样收 Java 引用（`BodyPublishers.concat(head, file, tail)!`）。尾部实参逐个对
+**数组分量类型**打分，规则同普通形参，故 SAM 转换（§9.4）与 List 桥
 （§9.6）在可变部分内同样可用。传一个**现成数组**当可变部分（如 `String[]`）走相位 1，
 原样传入不重新打包。注意标量不装箱（§9.2），故 `Object...` 收 `String` 与 Java 引用，
 **收不了 `Int`/`Float`/`Bool`**；`char` 出入参不支持，`char...` 随之不支持。

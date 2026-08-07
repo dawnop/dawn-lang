@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 58c84245b0da6982 -->
+<!-- doc-check: translation-of docs/spec.md @ dee99b03ce7cf731 -->
 
 # Dawn Language Specification
 
@@ -1491,7 +1491,7 @@ impl, `List`/`Map` as above); `Int` division by zero (`/` and `%`) panics — be
 
 ### 9.1 Importing and calling
 
-```dawn
+```dawn compile
 use java "java.nio.file.Files"
 use java "java.nio.file.Path"
 use java "java.lang.StringBuilder"
@@ -1560,9 +1560,20 @@ fn build() -> String !io = {
 **A Java method returning a reference type is always `Option[T]`** — null is stopped at
 the boundary. Unwrap with `!` (§8.2) or handle it with `match`:
 
-```dawn
-let uri = URI.create(url)!          # method: wrapped in Option, unwrapped
-let sb = StringBuilder.new()        # constructor: not wrapped, the object itself
+```dawn run
+use java "java.net.URI"
+use java "java.lang.StringBuilder"
+
+pub fn main() -> Unit !io = {
+  let uri = URI.create("https://dawn-lang.org/spec")!   # method: wrapped in Option, unwrapped
+  let sb = StringBuilder.new()                          # constructor: not wrapped, the object itself
+  sb.append(uri.getHost()!)
+  println(sb.toString()!)
+}
+```
+
+```output
+dawn-lang.org
 ```
 
 **Why methods are wrapped and constructors are not** — these are not two arbitrary
@@ -1598,13 +1609,28 @@ over score** — the score is summed per argument and grows with the argument co
 without phases a packing candidate would overtake an exact match. The variable part is
 spread out inline, as it is written in Java:
 
-```dawn
-let p = Path.of("a", "b", "c")!                  # packed into String[], gives a/b/c
-let l = List.of("a", "b")!                       # phase 1 wins: of(E, E) is chosen
-let e = List.of()!                               # no variable part = pack 0 = empty array
-let b = BodyPublishers.concat(head, file, tail)! # the variable part takes Java references
+```dawn run
+use java "java.nio.file.Path"
+use java "java.util.List"
+use java "java.lang.String"
+
+pub fn main() -> Unit !io = {
+  let p = Path.of("a", "b")!                     # one trailing segment: packed into String[1]
+  let q = Path.of("a", "b", "c")!                # same phase, String[2]
+  let l = List.of("a", "b")!                     # phase 1 wins: of(E, E) is chosen
+  let m = List.of("a", "b", "c")!                # phase 2: packed into E[]
+  let e = List.of()!                             # no variable part = pack 0 = empty array
+  println("${p.toString()!} ${q.toString()!}")
+  println("${String.join(",", l)!} ${String.join(",", m)!} ${to_string(e.size())}")
+}
 ```
 
+```output
+a/b a/b/c
+a,b a,b,c 0
+```
+
+The variable part takes Java references too (`BodyPublishers.concat(head, file, tail)!`).
 The trailing arguments are scored one by one against the **array component type**, by
 the same rules as an ordinary parameter, so SAM conversion (§9.4) and the List bridge
 (§9.6) are equally available inside the variable part. Passing a **ready-made array** as
