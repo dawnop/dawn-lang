@@ -1,5 +1,7 @@
 # Dawn 语言规范
 
+*[English](spec.en.md) —— 本文是正本；英文是它的译本，`scripts/doc-check.py` 盯着两者不脱节。*
+
 > 状态：**normative（权威）**。适用版本：0.57.0（`selfhost/src/version.dawn` 的 `VERSION`）。<!-- doc-check: version -->
 > 实现与本文冲突时，以本文为准并把实现当 bug——除非本文某条被显式标注为「已被 X 取代」。
 >

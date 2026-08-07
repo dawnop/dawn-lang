@@ -3,7 +3,7 @@
 > 状态：**current** —— 全目录的分层索引与状态登记处。**每篇文档的权威状态在它自己的
 > 文件头**；这张索引与文件头冲突时以文件头为准，并请顺手改这里。
 
-`docs/` 下现有 60 篇文档 <!-- doc-check: doc-count -->，按时间叠加，混着**规范、调研、
+`docs/` 下现有 62 篇文档 <!-- doc-check: doc-count -->，按时间叠加，混着**规范、调研、
 设计方案、落地日志、复盘和运维说明**。读者无从判断哪几段还成立——`design.md` 说实现语言
 是 Kotlin，`bootstrap.md` 说 LSP 还在 Kotlin，两者都是当时的事实、现在都不是。
 这份索引把它们分层，并给每篇标状态。**篇数与「每篇都在索引里」这两件事都由
@@ -24,6 +24,7 @@
 | 文档 | 状态 | 说明 |
 |---|---|---|
 | [spec.md](spec.md) | **normative** | 语言的权威定义（词法、类型、效果、comptime、互操作、编译模型）。 |
+| [spec.en.md](spec.en.md) | **normative** | 上面那篇的**英文译本**。改规范先改中文，再改这里；两者不脱节由 `doc-check.py` 的 transl 检查盯着。 |
 | [grammar.ebnf](grammar.ebnf) | historical | 机器可读语法，**已落后于 parser**（2026-08-04 复核仍成立：缺 `use … as`、要求所有函数写 `-> type`、用未定义的 `UPPER_IDENT`、`. IDENT` 不覆盖 `Class.FIELD`）。以 spec.md 与 `selfhost/src/parser.dawn` 为准；可执行的那份期望是 `scripts/grammar-corpus/`（CI 门禁），文法的分叉现在以一个失败用例出现。SYN-02/SYN-03 已从**另一头**关掉——本文件写对了，是实现补上了它，逐条见文件头部。 |
 
 ## 当前架构与流程
@@ -115,6 +116,7 @@
 ## 历史：里程碑与自举过程
 
 [design.md](design.md)（M0–M4 的决策记录；**「实现语言 = Kotlin」等条目已过期**，见文首状态标注）·
+[design.en.md](design.en.md)（上面那篇的英文译本，中文是正本）·
 [selfhost-gaps.md](selfhost-gaps.md) ·
 [selfhost-ast.md](selfhost-ast.md) ·
 [selfhost-checker.md](selfhost-checker.md) ·

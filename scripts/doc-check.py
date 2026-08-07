@@ -142,10 +142,13 @@ check whose blind spot is undocumented gets mistaken for a check:
     here can tell that from a real re-translation -- the marker is a human
     assertion, and every scheme of this shape has that escape. What it does
     remove is the failure that actually happens: the original moving and
-    nobody noticing. Note also the direction. English is the original and
-    Chinese the translation, so rot lands on the Chinese side, whose reader is
-    the author. The other arrangement puts the rot on the side everybody
-    reads and nobody proofreads.
+    nobody noticing. The direction is per pair rather than global, and the
+    reasoning is at TRANSLATIONS: for the outward-facing documents English is
+    the original, so rot lands on the Chinese side, whose reader is the
+    author; the spec and the design notes are edited in Chinese by every
+    language change, so there the Chinese is the original. Either way the
+    digest is what makes drift a failing check rather than a thing somebody
+    notices later.
     The fence half is a *shape* check, not a byte comparison, and the reason
     is measured: README.zh-CN.md translates the comments inside its ```dawn
     and ```bash blocks, which is the convention here -- the code is the same
@@ -199,22 +202,32 @@ DOCS = sorted(
 )
 
 # --- translations ----------------------------------------------------------
-# Which documents are translations, and of what. English is the original: the
-# repository's outward-facing layer is read mostly by people who do not read
-# Chinese, and a derived document rots. Putting the derived one on the side
-# nobody proofreads is the arrangement where the rot is invisible; this way it
-# lands on the Chinese text, whose reader is the author.
+# Which documents are translations, and of what. For the outward-facing layer
+# English is the original: it is read mostly by people who do not read Chinese,
+# and a derived document rots. Putting the derived one on the side nobody
+# proofreads is the arrangement where the rot is invisible; that way it lands
+# on the Chinese text, whose reader is the author.
+#
+# The spec and the design notes run the other way, and the direction is a
+# decision rather than an accident. They are *living* documents: every batch
+# that changes the language edits them, in Chinese, because that is the
+# language the rest of docs/ is written in. Making English their original
+# would mean writing each language change in English first -- and a rule that
+# expensive is a rule that gets skipped, which puts the rot back where it
+# cannot be seen. So the Chinese half is the original, the English half is the
+# translation, and the digest below is what turns drift into a red build
+# either way round.
 #
 # The pairing lives here and not only in the marker, because a marker is the
 # only thing the marker check reads: delete it and a check that exists only in
 # the file it checks stops existing. With the registry, deleting the marker is
 # a failure.
 #
-# Scope, decided rather than drifted into: the outward-facing layer only --
-# the README, the website's front page, the tutorial, and the prose that
-# introduces the standard library reference. Those are the documents whose
-# reader is a stranger. The rest of docs/ is design notes, plans and a
-# specification whose reader is the author; translating them would produce
+# Scope, decided rather than drifted into: everything the website renders --
+# the README, the front page, the tutorial, the standard library's
+# introduction, the specification and the design notes. Those are the
+# documents a stranger reads. The rest of docs/ is design notes, plans and
+# landing logs whose reader is the author; translating them would produce
 # fifty-odd more documents to keep level, and a half-translated corpus is
 # worse than an honestly monolingual one. Every face of the site says so in
 # its own closing paragraph, so a reader is told rather than left to find out
@@ -227,6 +240,8 @@ DOCS = sorted(
 TRANSLATIONS = {
     "README.zh-CN.md": "README.md",
     "docs/tutorial.zh-CN.md": "docs/tutorial.md",
+    "docs/spec.en.md": "docs/spec.md",
+    "docs/design.en.md": "docs/design.md",
     "site/pages/home.zh.md": "site/pages/home.md",
     "site/pages/stdlib.zh.md": "site/pages/stdlib.md",
 }
