@@ -1,0 +1,141 @@
+# Failure in three tiers: `Result` with `?`, `catch_fault`, and `bracket`.
+#
+# Dawn keeps these apart because they answer different questions. A failure you
+# expected is a value and travels in a `Result`. A failure thrown at you from
+# outside the language becomes a value at a barrier, and `catch_fault` is the
+# only place that conversion happens. Giving a resource back is neither of
+# those: `bracket` intercepts nothing at all, it only promises that `release`
+# runs on every way out (spec §9.8).
+#
+# The lease counter is what makes that last promise checkable instead of
+# quoted. Every path through `load` -- the one that succeeds, the one that
+# returns `Err` through `?`, and the one that panics -- leaves it at zero.
+#
+# Run: dawn run examples/errors/barriers.dawn
+
+use std/str
+
+use java "java.lang.Long"
+use java "java.util.concurrent.atomic.AtomicInteger"
+
+type Server = { host: String, port: Int }
+
+## A lease on something pooled: `open` checks one out and counts it, `close`
+## hands it back. The count is the evidence -- a leaked lease is a number that
+## never comes home.
+type Lease = { pool: AtomicInteger, text: String }
+
+const CONFIG: String = "host = db.internal\nport = 5432\n"
+
+# ---- tier 1: an expected failure is a value ----
+
+fn field(text: String, key: String) -> Result[String, String] = {
+  for line in str.split(text, "\n") {
+    match str.index_of(line, "=") {
+      Some(i) ->
+        if str.trim(str.take(line, i)) == key {
+          return Ok(str.trim(str.drop(line, i + 1)))
+        }
+      None -> ()
+    }
+  }
+  Err("no `$key` in the config")
+}
+
+# ---- tier 2: a foreign failure becomes one ----
+
+## `Long.parseLong` throws, and an exception crossing into Dawn ends the
+## program unless a barrier converts it. `ForeignError` carries `kind` as well,
+## but `kind` is the JVM's own vocabulary -- printing it would make this
+## message backend-specific, so only `message` is used.
+##
+## `Result` has no `map_err`, deliberately: crossing from one error type to
+## another is four lines you can read (spec §8.1).
+fn as_int(what: String, s: String) -> Result[Int, String] !io =
+  match catch_fault(() => Long.parseLong(s)) {
+    Ok(n) -> Ok(n)
+    Err(e) -> Err("$what is not a number: ${e.message}")
+  }
+
+# ---- tier 3: release, on every path ----
+
+## Acquiring is ordinary code, before the call. It is not protected and does
+## not need to be: a failure here checked nothing out.
+fn open(pool: AtomicInteger, text: String) -> Lease !io = {
+  let _ = pool.incrementAndGet()
+  Lease { pool: pool, text: text }
+}
+
+fn close(l: Lease) -> Unit !io = {
+  let _ = l.pool.decrementAndGet()
+  ()
+}
+
+## Only the last test uses this. It is a named function rather than a lambda
+## because `panic` has type `Never`, which leaves `bracket`'s result type with
+## nothing to be inferred from -- a declared return type is the annotation.
+fn always_panics(l: Lease) -> Int !io = panic("boom")
+
+## `with` packs everything below it into the `use` closure, so this reads top
+## to bottom and still gets the guarantee. `?` passes straight through: the
+## `Err` becomes this function's answer, and `close` runs on the way out.
+fn load(pool: AtomicInteger, text: String) -> Result[Server, String] !io = {
+  with lease <- bracket(open(pool, text), close)
+  let host = field(lease.text, "host")?
+  let port = as_int("port", field(lease.text, "port")?)?
+  Ok(Server { host: host, port: port })
+}
+
+fn show(pool: AtomicInteger, text: String) -> Unit !io = {
+  match load(pool, text) {
+    Ok(s) -> println("  ${s.host}:${s.port}")
+    Err(m) -> println("  error: $m")
+  }
+  println("  leases still out: ${pool.get()}")
+}
+
+pub fn main() -> Unit !io = {
+  let pool = AtomicInteger.new(0)
+
+  println("a config that parses:")
+  show(pool, CONFIG)
+
+  println("a key that is not there:")
+  show(pool, "host = db.internal\n")
+
+  println("a value the JVM refuses:")
+  show(pool, "host = db.internal\nport = eight\n")
+}
+
+test "the happy path" {
+  let pool = AtomicInteger.new(0)
+  assert load(pool, CONFIG) == Ok(Server { host: "db.internal", port: 5432 })
+  assert pool.get() == 0
+}
+
+test "an Err leaving through `?` still runs release" {
+  let pool = AtomicInteger.new(0)
+  assert load(pool, "host = db.internal\n") == Err("no `port` in the config")
+  assert pool.get() == 0
+}
+
+test "a foreign exception becomes an Err at the barrier" {
+  let pool = AtomicInteger.new(0)
+  match load(pool, "host = x\nport = eight\n") {
+    Ok(_) -> { assert false }
+    Err(m) -> { assert str.starts_with(m, "port is not a number") }
+  }
+  assert pool.get() == 0
+}
+
+test "bracket releases on a panic, and does not catch it" {
+  # `catch_fault` would not do here: a panic is a bug, not a foreign failure,
+  # and it goes straight through that barrier. `catch_panic` is the isolation
+  # point. Either way `close` has already run.
+  let pool = AtomicInteger.new(0)
+  match catch_panic(() => bracket(open(pool, ""), close, always_panics)) {
+    Ok(_) -> { assert false }
+    Err(e) -> { assert e.message == "boom" }
+  }
+  assert pool.get() == 0
+}

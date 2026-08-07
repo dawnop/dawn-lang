@@ -1,0 +1,100 @@
+# Effect handlers: an interpreter that carries no environment parameter.
+#
+# `eval` below reads variables out of thin air. There is no implementation of
+# `lookup` anywhere near it -- only a label, `!Env`, which is the whole of what
+# the signature promises: somebody further up answers. `with handle` is where
+# the answer gets written, and writing a different one changes nothing in
+# `eval`.
+#
+# The alternative is threading the environment: an `env` parameter on `eval`,
+# passed along by each of its three recursive calls, then on `eval_all`, then
+# into the lambda `eval_all` hands to `map`. Five signatures widened so that
+# one line can ask a question. That is the cost a label removes.
+#
+# Run: dawn run examples/effects/handlers.dawn
+
+effect Env {
+  ## The value bound to `name`. Which value is the handler's business.
+  fn lookup(name: String) -> Int
+}
+
+type Expr =
+  | Num(v: Int)
+  | Var(name: String)
+  | Add(l: Expr, r: Expr)
+  | Mul(l: Expr, r: Expr)
+
+## Arithmetic, plus one question it is in no position to answer.
+fn eval(e: Expr) -> Int !Env =
+  match e {
+    Num(v) -> v
+    Var(name) -> lookup(name)
+    Add(l, r) -> eval(l) + eval(r)
+    Mul(l, r) -> eval(l) * eval(r)
+  }
+
+## `map` knows nothing about `Env` and needs no variant that does: the label
+## rides through its effect variable and the lambda carries the evidence.
+## `map(es, eval)` is not the shorter spelling of this -- a labelled function
+## cannot be passed as a value at all, so the lambda is load-bearing.
+fn eval_all(es: List[Expr]) -> List[Int] !Env = map(es, e => eval(e))
+
+## An ordinary association list. Nothing about it knows it is a handler's guts.
+fn value_of(bindings: List[(String, Int)], name: String) -> Int = {
+  for pair in bindings {
+    let (k, v) = pair
+    if k == name { return v }
+  }
+  0
+}
+
+pub fn main() -> Unit !io = {
+  # (x + 3) * y
+  let e = Mul(Add(Var("x"), Num(3)), Var("y"))
+
+  with handle Env { lookup(n) => value_of([("x", 2), ("y", 4)], n) }
+  println("x=2 y=4       -> ${eval(e)}")
+
+  # Everything after a `with handle` is inside it, so the next one shadows
+  # this one for the rest of the block. Which handler answers is settled by
+  # where the call is written, not by what the stack looks like when it runs.
+  with handle Env { lookup(n) => value_of([("x", 10), ("y", 1)], n) }
+  println("x=10 y=1      -> ${eval(e)}")
+
+  # An arm may do io. It is charged to main, which installed the handler, and
+  # not to eval, which only asked -- eval still owes nothing but !Env.
+  with handle Env {
+    lookup(n) => {
+      println("  (asked for $n)")
+      0
+    }
+  }
+  println("nothing bound -> ${eval(e)}")
+  println("through map   -> ${eval_all([Var("x"), Num(7)])}")
+}
+
+test "one evaluator, two environments" {
+  let e = Mul(Add(Var("x"), Num(3)), Var("y"))
+  with handle Env { lookup(n) => value_of([("x", 2), ("y", 4)], n) }
+  assert eval(e) == 20
+}
+
+test "the nearest handler is the one that answers" {
+  with handle Env { lookup(n) => 1 }
+  assert eval(Var("q")) == 1
+  with handle Env { lookup(n) => 10 }
+  assert eval(Var("q")) == 10
+}
+
+test "an arm that asks again reaches the handler outside it" {
+  # Not a loop: a handler does not answer itself, so this is "take the answer
+  # from out there and multiply it by ten".
+  with handle Env { lookup(n) => 3 }
+  with handle Env { lookup(n) => lookup(n) * 10 }
+  assert eval(Var("x")) == 30
+}
+
+test "the label travels through a higher-order function untouched" {
+  with handle Env { lookup(n) => value_of([("x", 5)], n) }
+  assert eval_all([Var("x"), Num(7), Var("nope")]) == [5, 7, 0]
+}

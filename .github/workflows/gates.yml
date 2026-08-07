@@ -78,17 +78,14 @@ jobs:
             ./bin/dawn test "$p"
           done
 
-      # examples/ carries inline test blocks and nothing ran them: the
-      # differentials emit calc.dawn and compare bytes, classfile-verify links
-      # those bytes, and neither executes an assertion. That is the shape
-      # K-A8.3 exists to fix -- interop.dawn's assertions are where `Path.of`
-      # and `List.of`, static methods declared on JDK *interfaces*, are held to
-      # an answer rather than to a byte.
+      # examples/ carries inline test blocks and, until K-A8.3, nothing ran
+      # them: the differentials emit calc.dawn and compare bytes,
+      # classfile-verify links those bytes, and neither executes an assertion.
+      # K-A8.3 fixed that for two files by naming them; the script discovers
+      # every example instead, because a hand-kept list is a thing a new
+      # example gets left off.
       - name: example tests
-        run: |
-          for e in examples/projects/calc.dawn examples/interop/interop.dawn; do
-            ./bin/dawn test "$e"
-          done
+        run: ./scripts/example-tests.sh
 
       # JSONTestSuite as a gate, not a claim: y_ accepted + round-trips,
       # n_ rejected, i_ only counted (scripts/json-suite.sh has the story)
@@ -301,9 +298,11 @@ jobs:
       # list existed, which nothing noticed while std was 3900 lines nobody
       # was adding to -- the first suite written into it arrived unformatted
       # in two modules, and `dawn fmt --check` was green because it was never
-      # pointed at them.
+      # pointed at them. `examples` joined for the same reason: it was the
+      # last Dawn in the repo the formatter was not pointed at, and it is the
+      # code most readers see first.
       - name: formatting
-        run: ./bin/dawn fmt std site selfhost packages --check
+        run: ./bin/dawn fmt std site selfhost packages examples --check
 
   # Acceptance gate 1 of docs/native-backend-plan.md 5. Its own job because it
   # was 390s of the 860s test job (2026-08-07) and shares nothing with the rest

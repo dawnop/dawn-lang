@@ -64,6 +64,16 @@ check "run interop example" "$k" "$d"
 "${SH[@]}" test examples/interop/interop.dawn > "$OUT/d.txt" 2>&1 && d=0 || d=$?
 check "test interop example" "$k" "$d"
 
+# The three youngest language features, each with an example that executes it:
+# a user-declared effect and its handler, Char literals and code points, and
+# the failure barriers. A transcript is the only leg that notices when the
+# bytes still agree and the answer does not.
+for x in effects/handlers text/chars errors/barriers; do
+  "$DAWN" run "examples/$x.dawn" > "$OUT/k.txt" 2>&1 && k=0 || k=$?
+  "${SH[@]}" run "examples/$x.dawn" > "$OUT/d.txt" 2>&1 && d=0 || d=$?
+  check "run $x example" "$k" "$d"
+done
+
 # test: a green multi-module suite
 "$DAWN" test site > "$OUT/k.txt" 2>&1 && k=0 || k=$?
 "${SH[@]}" test site > "$OUT/d.txt" 2>&1 && d=0 || d=$?

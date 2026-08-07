@@ -53,7 +53,7 @@ parser 靠首字母大小写消歧（`TYPEIDENT` 是独立 token），所以改�
 ./bin/dawn run examples/data/shapes.dawn      # 单文件
 ./bin/dawn run examples/projects/hello_mod     # 多模块项目
 ./bin/dawn test site                     # 站点生成器的 Dawn 测试
-./bin/dawn fmt site selfhost packages --check   # Dawn 代码格式检查
+./bin/dawn fmt std site selfhost packages examples --check  # Dawn 代码格式检查
 ./site/build.sh                          # 端到端建站（含 Playground 前端 bundle）
 
 ./scripts/selfhost-fixpoint.sh           # 自举固定点：种子→A→B→C，B==C

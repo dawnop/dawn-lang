@@ -1,0 +1,97 @@
+# Characters and code points: making a slug, and the two traps around Char.
+#
+# A `Char` is one Unicode scalar value and `'a'` is a literal of that type.
+# A string's characters come out of `code_points`; none of this is bytes and
+# none of it is UTF-16 units, which is why the balloon below counts as one
+# character and why slicing never lands in the middle of it.
+#
+# Run: dawn run examples/text/chars.dawn
+
+use std/char
+use std/str
+
+## A slug: folded to lower case, letters and digits kept, every run of anything
+## else one hyphen, and no hyphen at either end.
+##
+## `char.is_alnum` answers Unicode's question, not ASCII's -- CJK is letters,
+## so 世界 survives and the emoji next to it does not.
+fn slug(title: String) -> String = {
+  var out: List[Char] = []
+  var gap = false
+  for c in code_points(str.to_lower(title)) {
+    if char.is_alnum(c) {
+      if gap && len(out) > 0 { out = out ++ ['-'] }
+      out = out ++ [c]
+      gap = false
+    } else {
+      gap = true
+    }
+  }
+  from_code_points(out)
+}
+
+## The first character of each word, upper-cased.
+##
+## There is no `char.to_upper`. Case mapping lives on `String` because it is
+## not in general one character for one character, so the trip out of `Char`
+## is `str.from_char` and the answer comes back as text.
+fn initials(name: String) -> String = {
+  var out = ""
+  for word in str.split(name, " ") {
+    if not str.is_empty(word) {
+      out = out ++ str.to_upper(str.from_char(str.at(word, 0)))
+    }
+  }
+  out
+}
+
+pub fn main() -> Unit !io = {
+  for title in ["Hello, World!", "Dawn v0.57 released", "你好 世界 🎈"] {
+    # No padding here on purpose: a code point count is not a display width,
+    # and lining these up by str.len would put the CJK row in the wrong place.
+    println("$title -> ${slug(title)}")
+  }
+
+  println(initials("ada lovelace"))
+
+  # `"${c}"` renders a Char the way its target type renders: as a number.
+  # `str.from_char` is the one that gives you the character.
+  println("'a' interpolates as ${'a'}, and prints as ${str.from_char('a')}")
+
+  # One balloon: one character, four UTF-8 bytes, two UTF-16 units, and none
+  # of those last two numbers is one this program can observe.
+  let third = str.at("a🎈b", 2)
+  println("\"a🎈b\" is ${str.len("a🎈b")} characters, the third being ${str.from_char(third)}")
+}
+
+test "a slug keeps letters and digits and joins the rest with one hyphen" {
+  assert slug("Hello, World!") == "hello-world"
+  assert slug("  Dawn v0.57 released  ") == "dawn-v0-57-released"
+  assert slug("!!!") == ""
+}
+
+test "letters means Unicode's letters" {
+  assert slug("你好 世界 🎈") == "你好-世界"
+}
+
+test "one emoji is one character" {
+  assert str.len("a🎈b") == 3
+  assert code_points("a🎈b") == ['a', '🎈', 'b']
+  assert str.at("a🎈b", 2) == 'b'
+  assert str.slice("a🎈b", 0, 2) == "a🎈"
+}
+
+test "Char is opaque over Int: comparable, not arithmetic" {
+  assert 'a' < 'b'
+  assert char.code('a') == 97
+  assert char.of(97) == Some('a')
+  # Half a surrogate pair is not a character, so there is no Char for it.
+  assert char.of(0xD800) == None
+  # `'a' + 1` does not compile; going through the code point is the way.
+  assert char.of(char.code('a') + 1) == Some('b')
+}
+
+test "initials take the first character, not the first byte" {
+  assert initials("ada lovelace") == "AL"
+  assert initials("世 界") == "世界"
+}

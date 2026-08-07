@@ -75,7 +75,9 @@ fail=0
 # compiled would not see it -- which is why it is registered here and not only
 # in the emit differential.
 for t in selfhost site packages/json packages/web packages/sha2 packages/inflate \
-    playground examples/projects/calc.dawn examples/interop/interop.dawn; do
+    playground examples/projects/calc.dawn examples/interop/interop.dawn \
+    examples/effects/handlers.dawn examples/text/chars.dawn \
+    examples/errors/barriers.dawn; do
   out="$work/emit/${t//\//_}"
   mkdir -p "$out"
   ./bin/dawn __emit "$t" -o "$out" > /dev/null
