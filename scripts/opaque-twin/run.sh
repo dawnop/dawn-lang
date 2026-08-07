@@ -147,12 +147,14 @@ for c in "${cases[@]}"; do
     continue
   fi
 
-  # the twin, by textual substitution so the two can never drift apart
-  sed 's/^opaque type /alias /' "$src" > "$OUT/$c.twin.dawn"
+  # the twin, by textual substitution so the two can never drift apart.
+  # `_twin`, not `.twin`: a source file's name is its module path, and a module
+  # path segment is [a-z_][a-z0-9_]* -- a dot in it is a compile error.
+  sed 's/^opaque type /alias /' "$src" > "$OUT/${c}_twin.dawn"
 
   "$DAWN" run "$src" > "$OUT/$c.opaque" 2>&1
   opaque_rc=$?
-  "$DAWN" run "$OUT/$c.twin.dawn" > "$OUT/$c.alias" 2>&1
+  "$DAWN" run "$OUT/${c}_twin.dawn" > "$OUT/$c.alias" 2>&1
 
   # The case's own verdict, declared in the case. Without this a case that
   # stops compiling keeps agreeing with itself forever; with it, "rejected" is
@@ -176,7 +178,7 @@ for c in "${cases[@]}"; do
   # the opaque type where the twin names its target
   norm() {
     local f=$1
-    sed -e "s#$OUT/##g" -e "s#$DIR/##g" -e "s#$c\.twin#$c#g" "$f" > "$f.n"
+    sed -e "s#$OUT/##g" -e "s#$DIR/##g" -e "s#${c}_twin#$c#g" "$f" > "$f.n"
     while read -r line; do
       case "$line" in
         *"# twin-normalise:"*)

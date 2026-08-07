@@ -871,6 +871,13 @@ def check_blocks(path: pathlib.Path, text: str,
     checked = recorded = 0
     blocks = fences(text)
     rel = path.relative_to(ROOT)
+    # A block goes to disk under a directory of its document's own, named by
+    # position rather than after the document: a source file's name IS its
+    # module path, and a module path segment is `[a-z_][a-z0-9_]*`, which
+    # `README.zh-CN_3` is not. Directory names above the entry never reach the
+    # module path, so the document stays visible in the temp path.
+    doc_dir = work / rel.as_posix().replace("/", "_")
+    doc_dir.mkdir(parents=True, exist_ok=True)
     for i, (info, body, line) in enumerate(blocks):
         words = info.split()
         if not words or words[0] != "dawn":
@@ -879,7 +886,7 @@ def check_blocks(path: pathlib.Path, text: str,
         if mode not in ("run", "compile"):
             continue
         checked += 1
-        src = work / f"{path.stem}_{i}.dawn"
+        src = doc_dir / f"block_{i}.dawn"
         src.write_text(body, encoding="utf-8")
         cmd = [str(DAWN), "run" if mode == "run" else "check", str(src)]
         r = run_example(cmd)

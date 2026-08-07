@@ -79,25 +79,25 @@ fn seg_ok(s: String) -> Bool = {
 }
 use core.{CValue}
 
-fn sanitize_segment(seg: String) -> String !io = {
-  var cleaned: List[Char] = []
-  for cp in code_points(seg) {
-    if char_is_alnum(cp) || cp == '_' {
-      cleaned = cleaned ++ [cp]
-    } else {
-      cleaned = cleaned ++ ['_']
-    }
+## The segments of a module path that are not legal path segments, in order.
+##
+## A module path IS its class name -- there is no mangling step -- and that
+## holds only because every segment is `[a-z_][a-z0-9_]*`. An imported module
+## gets that guarantee from its `use` path, which the loader checks below. The
+## entry file does not: its name comes from the command line, so it is the one
+## way a path segment the grammar cannot spell reaches class-name derivation,
+## and it is checked here instead.
+##
+## There used to be a folding step -- non-alphanumerics to `_`, an `m_` prefix
+## for a leading digit -- which is why this is a rejection and not a rename:
+## the folding was not injective, so `a-b.dawn` and `a_b.dawn` compiled to the
+## same class, on both backends.
+fn bad_segments(mod_path: String) -> List[String] = {
+  var out: List[String] = []
+  for s in str.split(mod_path, "/") {
+    if not seg_ok(s) { out = out ++ [s] }
   }
-  if len(cleaned) == 0 { return "m_" }
-  let c0 = cleaned[0]
-  let body = from_code_points(cleaned)
-  if c0 >= '0' && c0 <= '9' { "m_" ++ body } else { body }
-}
-
-fn class_name_of(mod_path: String) -> String !io = {
-  var segs: List[String] = []
-  for s in str.split(mod_path, "/") { segs = segs ++ [sanitize_segment(s)] }
-  join(segs, "/")
+  out
 }
 
 ## module path = file path relative to root, minus extension.
@@ -688,13 +688,21 @@ fn resolve(
   for f in seed_files {
     let c = canon(f)
     if not map.has(by_canon, c) {
+      let mod_path = module_path_of(root_abs, c)
+      let bad = bad_segments(mod_path)
+      if len(bad) > 0 {
+        diags = diags ++ [synthetic(f,
+          "`" ++ bad[0] ++ "` is not a valid module path segment",
+          "a source file's name is its module path: rename it so every " ++
+            "segment is a lowercase identifier ([a-z_][a-z0-9_]*)")]
+        continue
+      }
       match read_over(over, c, f) {
         Ok(text) -> {
           let (m, pdiags) = parser.parse_module(text)
-          let mod_path = module_path_of(root_abs, c)
           let mf = LoadedModule {
             mod_path: mod_path,
-            class_name: class_name_of(mod_path),
+            class_name: mod_path,
             path: f,
             text: text,
             m: m,
@@ -812,12 +820,12 @@ fn resolve(
                 Some(p) -> {
                   let internal = module_path_of(p.root, dep_canon)
                   (p.name ++ "/" ++ internal,
-                    "dawn\$pkg\$" ++ p.name ++ "/" ++ class_name_of(internal),
+                    "dawn\$pkg\$" ++ p.name ++ "/" ++ internal,
                     qualify_uses(m2p, p))
                 }
                 None -> {
                   let mp = module_path_of(root_abs, dep_canon)
-                  (mp, class_name_of(mp), m2p)
+                  (mp, mp, m2p)
                 }
               }
               let mf2 = LoadedModule {
@@ -1322,6 +1330,49 @@ test "loader reports cycles and missing modules" {
     if str.contains(ld.d.msg, "cannot find module `nope`") { missing = true }
   }
   assert missing
+}
+
+test "a file whose name is not a path segment is refused, not folded" {
+  # The `use` grammar cannot spell these, so only the entry file -- the one
+  # named on the command line -- can carry them in. The old folding turned
+  # `a-b` and `a_b` into one class name, and `9x` into `m_9x`, which is the
+  # class name `m_9x.dawn` already had.
+  let root = "/tmp/dawn-selfhost-analyze/entryname"
+  mkdirs(root)
+  put(root ++ "/a-b.dawn", "pub fn main() -> Unit !io = ()\n")
+  put(root ++ "/9x.dawn", "pub fn main() -> Unit !io = ()\n")
+  put(root ++ "/ok_name2.dawn", "pub fn main() -> Unit !io = ()\n")
+
+  let hyphen = load_file(root ++ "/a-b.dawn")
+  assert len(hyphen.modules) == 0
+  assert len(hyphen.diags) == 1
+  assert hyphen.diags[0].d.msg == "`a-b` is not a valid module path segment"
+  assert str.contains(hyphen.diags[0].d.hint, "[a-z_][a-z0-9_]*")
+  assert hyphen.diags[0].path == root ++ "/a-b.dawn"
+
+  let digit = load_file(root ++ "/9x.dawn")
+  assert len(digit.modules) == 0
+  assert len(digit.diags) == 1
+  assert digit.diags[0].d.msg == "`9x` is not a valid module path segment"
+
+  # a legal name still loads, and its class name is the module path unchanged
+  let good = load_file(root ++ "/ok_name2.dawn")
+  assert len(good.diags) == 0
+  assert len(good.modules) == 1
+  assert good.modules[0].mod_path == "ok_name2"
+  assert good.modules[0].class_name == "ok_name2"
+}
+
+test "directory mode refuses one badly named module without losing the rest" {
+  let root = "/tmp/dawn-selfhost-analyze/entrydir"
+  mkdirs(root ++ "/src")
+  put(root ++ "/src/main.dawn", "pub fn main() -> Unit !io = ()\n")
+  put(root ++ "/src/bad-name.dawn", "pub fn f() -> Int = 1\n")
+  let loaded = load_directory(root)
+  assert len(loaded.modules) == 1
+  assert loaded.modules[0].mod_path == "main"
+  assert len(loaded.diags) == 1
+  assert loaded.diags[0].d.msg == "`bad-name` is not a valid module path segment"
 }
 
 test "an aliased path dep canonicalizes to the package's real name" {
