@@ -46,7 +46,7 @@ use check/types.{
   adt_self_ty, Ty, TyInt, TyFloat, TyBool, TyString, TyBytes, TyUnit, TyNever,
   TyError, TyVar, TyAssoc, TyAdt, TyList, TyMap, TySet, TyArray, TyJava, TyTuple, TyFn, TyOpaque,
   Eff, EPure, EIo, EffVar, EUnion, ELabeled, eff_union, lub_eff, eff_subsumes, eff_suffix,
-  eff_base, eff_labels, eff_with_labels,
+  eff_base, eff_labels, eff_vars, eff_with_labels,
   Adts, AdtI, CtorI, FieldI, Traits, ImplI, Sym, Sig,
   adt_of, trait_of, ty_show, ctor_render, sig_render, subst, subst_eff, eff_show,
   ty_mentions_var, ty_map_children, ty_any_child,
@@ -5016,16 +5016,21 @@ fn check_call(
 
 ## Instantiate a callee's declared effect at a call site: an unbound effect
 ## variable means pure, and labels ride through unchanged.
-fn instantiate_eff(e: Eff, em: Map[Int, Eff]) -> Eff =
-  match e {
-    EffVar(_, eid) ->
-      match map.get(em, eid) {
-        Some(ef) -> ef
-        None -> EPure
-      }
-    ELabeled(b, ls) -> eff_union([instantiate_eff(b, em), ELabeled(EPure, ls)])
-    _ -> e
+##
+## The substitution itself is `subst_eff`, the one every other caller uses.
+## What is added here is only the call-site default, and it is added by
+## completing the map rather than by walking the row a second time — the second
+## walk is what used to drop `EUnion` on the floor, so a callee declared
+## `!(e1|e2)` handed its own variables to its caller and no pure call site was
+## accepted (audit SEM-02).
+fn instantiate_eff(e: Eff, em: Map[Int, Eff]) -> Eff = {
+  var em1 = em
+  for v in eff_vars(e) {
+    let (eid, _) = v
+    if not map.has(em1, eid) { em1 = map.insert(em1, eid, EPure) }
   }
+  subst_eff(e, em1)
+}
 
 ## Resolve one evidence value per label written in `declared`, in effect-id
 ## order. A label with nothing to answer it is the "nobody is handling this"

@@ -1,0 +1,22 @@
+# A callee declared `!(e1|e2)` has to be instantiated at the call, like any
+# other polymorphic row: with two pure closures the call is pure, with one
+# `!io` closure the call is `!io`. The call site used to walk the row with a
+# substitution that had no `EUnion` arm, so the union came back verbatim and
+# `pure_pair` was refused for an effect nobody could name (audit SEM-02).
+#
+# The golden keeps both directions on purpose: only `leaks` is diagnosed, and
+# what it is diagnosed for is `!io` -- the effect the argument really has, not
+# the callee's own variables.
+
+fn sequence(f: fn() -> Unit !e1, g: fn() -> Unit !e2) -> Unit !(e1 | e2) = {
+  f()
+  g()
+}
+
+fn nothing() -> Unit = ()
+
+fn pure_pair() -> Unit = sequence(() => nothing(), () => nothing())
+
+fn io_pair() -> Unit !io = sequence(() => println("a"), () => nothing())
+
+fn leaks() -> Unit = sequence(() => println("a"), () => nothing())
