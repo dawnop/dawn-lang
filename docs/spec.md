@@ -1554,6 +1554,12 @@ type ForeignError = { kind: String, message: String, cause: Option[String] }
 屏障只有这一对（**拦**失败的只有这一对；§9.8.2 的 `bracket` 什么都不拦），
 载荷只有 `ForeignError`，**不保留 String 版本**。
 
+这一对的效果行**钉死 `!io`，不是变量**——纯闭包也一样：捕获一个 panic 的结果取决于
+调用栈深度、取决于烘进消息里的 `file:line`，也取决于优化器折叠了多少次纯调用，
+三者都不是纯函数允许有的差别。§9.8.2 的 `bracket` 因此可以是效果多态的而它们不能：
+`bracket` 不观察失败。完整论证与重开条件见
+[`docs/audit/error-model-design.md`](audit/error-model-design.md) §七。
+
 > **历史**：把载荷从 String 换成 `ForeignError` 花了三个 release，因为一个内建的
 > **签名**和它的名字一样受种子纪律约束，而且更紧——改名可以一期内让两张表都认识两个
 > 拼法，改载荷类型不行：编译器自己的调用点没法同时满足 `Result[T, String]` 和

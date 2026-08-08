@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ fdbcee01c7b5cbb7 -->
+<!-- doc-check: translation-of docs/spec.md @ 998835808c399cd3 -->
 
 # Dawn Language Specification
 
@@ -1907,6 +1907,14 @@ type ForeignError = { kind: String, message: String, cause: Option[String] }
 There is only this one pair of barriers (only this pair **intercepts** failure; the
 `bracket` of §9.8.2 intercepts nothing), only the `ForeignError` payload, and **the
 String version is not kept**.
+
+This pair's effect row is **pinned to `!io`, not a variable** — a pure closure included:
+what catching a panic yields depends on the depth of the call stack, on the `file:line`
+baked into the message, and on how many times the optimizer folded a pure call. None of
+the three is a difference a pure function is allowed to have. That is why the `bracket`
+of §9.8.2 can be effect-polymorphic and these two cannot: `bracket` does not observe the
+failure. The full argument, and the condition under which it reopens, is in
+[`docs/audit/error-model-design.md`](audit/error-model-design.md) §7.
 
 > **History**: moving the payload from String to `ForeignError` took three releases,
 > because a builtin's **signature** is bound by seed discipline just as its name is, and
