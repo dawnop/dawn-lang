@@ -316,7 +316,7 @@ fn join_with(xs: List[String], sep: String) -> String =
 fn rev[T](xs: List[T]) -> List[T] =
   map(range(0, len(xs)), i => xs[len(xs) - 1 - i])
 
-fn build_request(ex: HttpExchange, meta: Option[RouteMeta], max_body: Int) -> Result[Request, HttpError] !io = {
+fn build_request(ex: HttpExchange, meta: Option[RouteMeta], max_body: Int, errors: ErrorFormat) -> Result[Request, HttpError] !io = {
   let uri = ex.getRequestURI()!
   let no_query: Map[String, String] = map.from([])
   # getRawQuery, not getQuery: the split into parameters must see the encoded
@@ -333,15 +333,25 @@ fn build_request(ex: HttpExchange, meta: Option[RouteMeta], max_body: Int) -> Re
   # client_max_body_size instead), which opt out of it.
   let streaming = meta_has_tag(meta, "stream-body")
   let limit = if meta_has_tag(meta, "raw-body") { 0 } else { max_body }
+  # Every other field is read off the exchange *before* the spill, on purpose:
+  # the spill is the only step that leaves something on disk, so once it has
+  # succeeded nothing between it and the returned Request may fail. All that is
+  # left below is record construction, which cannot. (These reads used to sit
+  # inside the record literal, after the spill — a malformed request line
+  # faulting there left the temp file with no owner.)
+  let method = ex.getRequestMethod()!
+  let path = uri.getPath()!
+  let raw_path = uri.getRawPath()!
+  let hs = read_headers(ex)
   let (body, raw) = if streaming { ("", bytes.utf8("")) } else { read_body(ex, limit)? }
-  let bf: Option[String] = if streaming { Some(spill_body(ex)) } else { None }
+  let bf: Option[String] = if streaming { Some(spill_body(errors, ex)?) } else { None }
   Ok(Request {
-    method: ex.getRequestMethod()!,
-    path: uri.getPath()!,
-    raw_path: uri.getRawPath()!,
+    method: method,
+    path: path,
+    raw_path: raw_path,
     params: no_query,
     query: q,
-    headers: read_headers(ex),
+    headers: hs,
     body: body,
     raw: raw,
     body_file: bf,
@@ -349,24 +359,60 @@ fn build_request(ex: HttpExchange, meta: Option[RouteMeta], max_body: Int) -> Re
   })
 }
 
+# The ownership rule for a spilled body, with its two moving parts passed in so
+# a test can drive them: `make` produces the temp file, `fill` writes the body
+# into it.
+#
+# The file exists from `make` onward, so from that instant every way out of here
+# has to name an owner. `fill` returning normally is the one that hands the path
+# to the caller; every other outcome deletes the file here, before the failure
+# goes on propagating. The bracket underneath only ever owned the *output
+# stream*, so a client hanging up mid-PUT (transferTo throws) closed the stream
+# and left the file on disk forever — interrupted uploads accumulated until the
+# temp directory filled.
+#
+# The failure the client is told about is the application's own 500 wording
+# (ErrorFormat.internal_message), not a fourth string this framework renders on
+# its own; what actually went wrong goes to the log, where it belongs.
+fn spill_with(fmt: ErrorFormat, make: fn() -> File !io, fill: fn(FileOutputStream) -> Unit !io) -> Result[String, HttpError] !io = {
+  let tmp = make()
+  let path = String.valueOf(tmp.getPath()!)!
+  let filled = catch_panic(() => {
+    with out <- bracket(FileOutputStream.new(tmp), close_spill)
+    fill(out)
+  })
+  match filled {
+    Ok(_) -> Ok(path)
+    Err(m) -> {
+      println("request body spill failed: ${m.message}")
+      delete_quietly(path)
+      Err(http_error(500, fmt.internal_message))
+    }
+  }
+}
+
 # Stream the request body to a temp file, 8KB at a time (transferTo's buffer), and
 # return its path. Constant memory whatever the file's size — the point of the
-# whole exercise. The caller deletes it once the handler is done.
-fn spill_body(ex: HttpExchange) -> String !io = {
-  let tmp = File.createTempFile("dawn-put-", ".tmp")!
-  with out <- bracket(FileOutputStream.new(tmp), close_spill)
-  let stream = ex.getRequestBody()!
-  let _n = stream.transferTo(out)
-  String.valueOf(tmp.getPath()!)!
-}
+# whole exercise. The Request owns the path from here on; `drop_body_file`
+# deletes it once the handler is done.
+fn spill_body(fmt: ErrorFormat, ex: HttpExchange) -> Result[String, HttpError] !io =
+  spill_with(fmt, () => File.createTempFile("dawn-put-", ".tmp")!, out => {
+    let stream = ex.getRequestBody()!
+    let _n = stream.transferTo(out)
+    ()
+  })
 
 fn close_spill(o: FileOutputStream) -> Unit !io = o.close()
 
+# A delete that does not abort the request, but does say so. `File.delete`
+# reports failure by returning false, not by throwing, so treating any
+# non-throwing return as success hid exactly the case worth hearing about: a
+# temp file that is still there.
 fn delete_quietly(path: String) -> Unit !io = {
   let r: Result[Bool, ForeignError] = catch_fault(() => File.new(path).delete())
   match r {
-    Ok(_) -> ()
-    Err(m) -> println("temp body file not deleted: ${m.message}")
+    Ok(gone) -> if gone { () } else { println("temp body file not deleted: $path") }
+    Err(m) -> println("temp body file not deleted: $path (${m.message})")
   }
 }
 
@@ -432,20 +478,23 @@ fn handle(routes: List[Route], middleware: List[Middleware], max_body: Int, erro
       # middleware runs: there is no Request to hand them. That costs the 413 its
       # access-log line and its CORS headers, and is the price of the refusal
       # happening early enough to be worth anything.
-      match build_request(ex, meta_of(d), max_body) {
+      match build_request(ex, meta_of(d), max_body, errors) {
         Err(e) -> {
           println("${ex.getRequestMethod()!} ${ex.getRequestURI()!.getPath()!} -> ${e.status} (${e.message})")
           error_response_with(errors, e)
         }
         Ok(req) -> {
+          # the temp body file lives exactly as long as this branch, and the
+          # bracket is what makes that true on every way out — including the ones
+          # the catch_panic below does not see, such as a panic while rendering
+          # the 500 for a panic. It is the *first* thing here so that nothing at
+          # all sits between build_request handing ownership over and this
+          # taking it; build_request itself deletes the file on every path where
+          # it fails.
+          with held <- bracket(req, drop_body_file)
           # first middleware in the list is outermost: [a, b] runs a(b(core)). Middleware
           # still wraps the core, so CORS preflight and logging cover unmatched requests.
           let app = fold(rev(middleware), (rq: Request) => run_dispatch(d, rq), (h, m) => m(h))
-          # the temp body file lives exactly as long as the handler call, and the
-          # bracket is what makes that true on every way out — including the ones
-          # the catch_panic below does not see, such as a panic while rendering
-          # the 500 for a panic.
-          with held <- bracket(req, drop_body_file)
           let served = catch_panic(() => app(held))
           match served {
             Ok(Ok(r)) -> r
@@ -935,4 +984,42 @@ test "a panic is a 500 the application words: default, then configured" {
   assert str.starts_with(r404, "HTTP/1.1 404")
   assert str.contains(r404, "\"detail\"")
   b.stop(0)
+}
+
+# A temp file this test owns, so it can look at the path afterwards and say
+# whether the spill left anything behind.
+fn a_temp_file() -> File !io = File.createTempFile("dawn-spill-test-", ".tmp")!
+
+fn file_exists(path: String) -> Bool !io = File.new(path).exists()
+
+test "an interrupted spill deletes its temp file instead of leaking it" {
+  let tmp = a_temp_file()
+  let path = String.valueOf(tmp.getPath()!)!
+  # transferTo throws when a client hangs up mid-PUT; the bracket underneath
+  # owns only the output stream, so the file used to survive every such upload
+  match spill_with(default_errors(), () => tmp, _out => panic("client hung up mid-upload")) {
+    Ok(_) -> { assert false }
+    Err(e) -> { assert e.status == 500 }
+  }
+  assert file_exists(path) == false
+}
+
+test "a completed spill hands its path over, and the Request is what drops it" {
+  let tmp = a_temp_file()
+  let path = String.valueOf(tmp.getPath()!)!
+  match spill_with(default_errors(), () => tmp, out => out.write(bytes.utf8("hello"))) {
+    Err(_) -> { assert false }
+    Ok(p) -> {
+      # ownership transferred: the file is still there, and it is the caller's
+      assert p == path
+      assert file_exists(p)
+      # ... and the Request holding it is what releases it (`drop_body_file` is
+      # the bracket release `handle` installs around the handler call)
+      drop_body_file(Request {
+        method: "PUT", path: "/x", raw_path: "/x", params: map.empty(), query: map.empty(),
+        headers: map.empty(), body: "", raw: bytes.utf8(""), body_file: Some(p), route: None,
+      })
+      assert file_exists(p) == false
+    }
+  }
 }

@@ -7,7 +7,7 @@ use std/bytes
 use std/list
 use std/map
 use java "java.lang.System"
-use types.{Request, Response, HttpError, Handler, Text, with_header, text, header, http_error}
+use types.{Request, Response, HttpError, Handler, RouteMeta, Text, with_header, text, header, http_error}
 
 ## One access-log line per request: method, path, status, wall time.
 pub fn with_logging(next: Handler) -> Handler =
@@ -65,8 +65,18 @@ pub fn with_body_limit(limit: Int, next: Handler) -> Handler =
 # allow_credentials=True). Routes tagged "no-cors" (WebDAV) are not browser
 # traffic: nothing is stamped and every method, OPTIONS included, reaches the
 # route.
+# The stamp goes on the Err branch too. It used to be written `next(req)?`,
+# which is exactly the shape that skips it: `?` hands the Err straight to the
+# server, which renders it outside the middleware chain, so every 4xx/5xx left
+# without a single Access-Control-* header. A browser then refuses to let the
+# page read the response it just got — the request succeeded at the network
+# level and the error body is unreachable, which is the one case where reading
+# it matters most. An `HttpError` carries its own headers (they ride onto the
+# rendered response, web/types.error_response_with), so the stamp is the same
+# list on both branches.
 ## CORS: answer a browser preflight directly, and stamp Access-Control-* on
-## every other response. Only a real preflight is answered here; any other
+## every other answer — the error ones included, or the browser will not let
+## the page read them. Only a real preflight is answered here; any other
 ## OPTIONS is an ordinary request and reaches the application's routes.
 pub fn with_cors(origins: String, next: Handler) -> Handler =
   req => {
@@ -76,7 +86,10 @@ pub fn with_cors(origins: String, next: Handler) -> Handler =
     } else if is_preflight(req) {
       Ok(cors_headers(origin, text(204, "")))
     } else {
-      Ok(cors_headers(origin, next(req)?))
+      match next(req) {
+        Ok(r) -> Ok(cors_headers(origin, r))
+        Err(e) -> Err(cors_error_headers(origin, e))
+      }
     }
   }
 
@@ -116,20 +129,32 @@ fn pick_origin(req: Request, allowed: List[String]) -> Option[String] =
 # request's Origin — without it a cache keyed on the URL alone will reuse one
 # origin's response for another. It is sent even on the denial path, because
 # "no CORS headers" is itself an Origin-dependent answer.
-fn cors_headers(origin: Option[String], r: Response) -> Response = {
-  let varied = with_header(r, "Vary", "Origin")
+#
+# One list, so the success and error branches cannot drift apart.
+fn cors_pairs(origin: Option[String]) -> List[(String, String)] = {
+  let varied = [("Vary", "Origin")]
   match origin {
     None -> varied
-    Some(o) ->
-      with_header(
-        with_header(
-          with_header(
-            with_header(varied, "Access-Control-Allow-Origin", o),
-            "Access-Control-Allow-Credentials", "true"),
-          "Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS"),
-        "Access-Control-Allow-Headers", "Authorization, Content-Type")
+    Some(o) -> varied ++ [
+      ("Access-Control-Allow-Origin", o),
+      ("Access-Control-Allow-Credentials", "true"),
+      ("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS"),
+      ("Access-Control-Allow-Headers", "Authorization, Content-Type"),
+    ]
   }
 }
+
+fn cors_headers(origin: Option[String], r: Response) -> Response =
+  fold(cors_pairs(origin), r, (acc, h) => {
+    let (k, v) = h
+    with_header(acc, k, v)
+  })
+
+# The same stamp on the error branch. `HttpError.headers` is rendered onto the
+# response by web/types.error_response_with, through the same sanitizing
+# with_header the Ok branch goes through.
+fn cors_error_headers(origin: Option[String], e: HttpError) -> HttpError =
+  HttpError { ..e, headers: e.headers ++ cors_pairs(origin) }
 
 # A bare request with the given method and headers; the fields these middleware
 # never read stay empty.
@@ -218,6 +243,51 @@ test "CORS answers a real preflight and lets every other OPTIONS through" {
       assert list.find(r.headers, h => h == ("Access-Control-Allow-Origin", "https://a.example")) != None
     }
     Err(_) -> { assert false }
+  }
+}
+
+fn failing_handler(_req: Request) -> Result[Response, HttpError] !io =
+  Err(HttpError { ..http_error(404, "no such thing"), headers: [("X-Own", "kept")] })
+
+test "CORS stamps the error branch too, not just the successful one" {
+  let app = with_cors("https://a.example", failing_handler)
+  match app(req_of("GET", map.from([("origin", ["https://a.example"])]))) {
+    Ok(_) -> { assert false }
+    Err(e) -> {
+      # it used to be `next(req)?`, which hands the Err past the stamp: the
+      # server renders it outside the chain, so a cross-origin 404 arrived with
+      # no Access-Control-* at all and the browser would not let the page read
+      # the error body
+      assert e.status == 404
+      assert list.find(e.headers, h => h == ("Access-Control-Allow-Origin", "https://a.example")) != None
+      assert list.find(e.headers, h => h == ("Access-Control-Allow-Credentials", "true")) != None
+      assert list.find(e.headers, h => h == ("Vary", "Origin")) != None
+      # the error's own headers (a 401's challenge) are not displaced
+      assert list.find(e.headers, h => h == ("X-Own", "kept")) != None
+    }
+  }
+  # a disallowed origin gets the same denial on the error branch as on the ok
+  # one: no echo, but still Vary, because the answer depends on Origin
+  match app(req_of("GET", map.from([("origin", ["https://evil.example"])]))) {
+    Ok(_) -> { assert false }
+    Err(e) -> {
+      assert list.find(e.headers, h => {
+        let (k, _) = h
+        k == "Access-Control-Allow-Origin"
+      }) == None
+      assert list.find(e.headers, h => h == ("Vary", "Origin")) != None
+    }
+  }
+  # "no-cors" routes are not browser traffic: the error passes through untouched
+  let dav = with_cors("https://a.example", (rq: Request) =>
+      Err(http_error(401, "unauthorized")))
+  let tagged = Request {
+    ..req_of("GET", map.from([("origin", ["https://a.example"])])),
+    route: Some(RouteMeta { method: "GET", pattern: "/x", tags: ["no-cors"] }),
+  }
+  match dav(tagged) {
+    Ok(_) -> { assert false }
+    Err(e) -> { assert e.headers == [] }
   }
 }
 

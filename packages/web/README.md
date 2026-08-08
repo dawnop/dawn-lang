@@ -44,11 +44,18 @@ never called, so an application's `OPTIONS` route was unreachable unless it
 opted out of CORS entirely (the `no-cors` tag, which also drops the
 `Access-Control-*` stamping).
 
+The stamp covers the `Err` branch as well: an `HttpError` gets the same headers,
+and `error_response_with` renders them onto the response. Until 2.2 the error
+branch was written `next(req)?`, which handed the `Err` past the stamp — a
+cross-origin `4xx`/`5xx` arrived with no `Access-Control-*` at all and the
+browser refused to let the page read the error body.
+
 ## Error wording (2.1)
 
 The framework renders three strings of its own: the JSON key of an error body,
-the `500` it writes when a handler panics, and the separator between a
-parameter's name and the complaint in `query_int_bounded`'s `422`. They are
+the `500` it writes for a failure of its own (a handler panic, a request body it
+could not spill to disk), and the separator between a parameter's name and the
+complaint in `query_int_bounded`'s `422`. They are
 `ErrorFormat`, defaulting to neutral English:
 
 ```
