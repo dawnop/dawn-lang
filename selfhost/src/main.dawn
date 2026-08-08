@@ -506,6 +506,7 @@ fn usage() -> String = join([
   "those from Maven and put them on the class path automatically.",
   "",
   "usage:",
+  "  dawn check <target>...               type-check only; exit 1 if anything is reported",
   "  dawn run <target>                    compile and run (in-process JVM)",
   "  dawn test <target>                   compile with test blocks and run them",
   "  dawn test --stdlib                   run the bundled standard library's own test blocks",
@@ -1634,7 +1635,8 @@ fn run_emitc(rest: List[String]) -> Unit !io = {
   }
 }
 
-fn run_check(rest: List[String]) -> Unit !io = {
+## `[--std <dir>] <target>...`, shared by `check` and `__check`.
+fn check_args(rest: List[String]) -> (String, List[String]) = {
   var std_dir = "std"
   var targets: List[String] = []
   var i = 0
@@ -1647,10 +1649,56 @@ fn run_check(rest: List[String]) -> Unit !io = {
       i = i + 1
     }
   }
-  let std = match load_std(std_dir) {
+  (std_dir, targets)
+}
+
+fn check_std(std_dir: String) -> StdCtx !io =
+  match load_std(std_dir) {
     Ok(sc) -> sc
     Err(e) -> panic("cannot load std from " ++ std_dir ++ ": " ++ e)
   }
+
+## `dawn check [--std <dir>] <target>...` — type-check and report.
+##
+## This is the command the spec points third-party CI at, so its exit status is
+## its answer: `ok` and 0 when clean, rendered diagnostics and 1 when not, 2 for
+## a usage mistake. It used to print the `__check` golden dump and exit 0 no
+## matter what, which made every CI that followed the spec green on a type
+## error. `dawn __check` keeps that dump -- machine format, always 0 -- because
+## the differential compares dumps rather than statuses.
+##
+## Diagnostics from every target are rendered together, so a multi-target run
+## reports all of them rather than the first target's.
+fn run_check(rest: List[String]) -> Unit !io = {
+  let (std_dir, targets) = check_args(rest)
+  if len(targets) == 0 {
+    return cli_error("usage: dawn check [--std <dir>] <target>...")
+  }
+  for t in targets {
+    if not io.exists(t) {
+      return cli_error("no such file or directory: " ++ t)
+    }
+    if not io.is_dir(t) && not str.ends_with(t, ".dawn") {
+      return cli_error("source files must end in .dawn: " ++ t)
+    }
+  }
+  let std = check_std(std_dir)
+  var all: List[LocDiag] = []
+  for t in targets {
+    let loaded = if io.is_dir(t) { load_directory(t) } else { load_file(t) }
+    let prog = analyze_program(loaded, std, ct_default(), jsig_real())
+    all = all ++ prog.diags
+  }
+  if len(all) > 0 { return fail_compile(all) }
+  println("ok")
+}
+
+## `dawn __check` — the golden dump (driver/checkdump.dawn), one block per
+## target, exit 0 either way. Read by scripts/checker-corpus/run.sh and the
+## N vs N-1 differential.
+fn run_checkdump(rest: List[String]) -> Unit !io = {
+  let (std_dir, targets) = check_args(rest)
+  let std = check_std(std_dir)
   for t in targets {
     println("== " ++ t ++ " ==")
     let loaded = if io.is_dir(t) { load_directory(t) } else { load_file(t) }
@@ -1667,8 +1715,10 @@ pub fn main() -> Unit !io = {
       ()
     }
     [mode, ..rest] ->
-      if mode == "check" || mode == "__check" {
+      if mode == "check" {
         run_check(rest)
+      } else if mode == "__check" {
+        run_checkdump(rest)
       } else if mode == "emit" || mode == "emitrt" || mode == "__emit" {
         run_emitrt(rest)
       } else if mode == "__emitc" {

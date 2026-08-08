@@ -1687,7 +1687,8 @@ use java "java.lang.Math"      # Java 互操作（§9），形式不变
 > **加载范围（2026-07-30，LANG-07）**：`dawn run/test/build <dir>` 默认加载 `src/` 下
 > **全部**模块——未被引用的模块也检查（bit-rot 防护，这是对的默认）。`--closure`
 > 收窄为「入口 `src/main.dawn` 的 use 闭包」，供大工程出产物用；`dawn check` 恒为全仓。
-> CI 推荐：`dawn check` 守全仓、`dawn build --closure` 出产物。
+> CI 推荐：`dawn check` 守全仓、`dawn build --closure` 出产物。`dawn check` 有诊断即
+> 退出 1（§12.1），所以这条推荐靠退出码就能落地。
 
 ### 10.5 编译单元与求值顺序
 
@@ -1898,6 +1899,7 @@ hex 与 base64 是纯 Dawn 字节算术（无 `use java`，故两后端同一份
 
 | 命令 | 产物 |
 |------|------|
+| `dawn check <file 或 dir>...` | 只做类型检查。干净时打印 `ok` 退出 0；**有任何诊断则渲染诊断并退出 1**；用法错误退出 2 |
 | `dawn run <file.dawn 或 dir>` | 编译到内存/临时目录，起 JVM 执行 |
 | `dawn build <file 或 dir> -o app.jar` | 可执行 jar（`Main-Class: main` 已设） |
 | `dawn build ... --native -o app` | 前一步 + GraalVM `native-image`，独立二进制（§12.3） |

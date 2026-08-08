@@ -6,8 +6,11 @@
 #   ./scripts/checker-corpus/run.sh --record   # regenerate them
 #
 # Each cases/<name>.dawn (or cases/<name>.d/entry.dawn, for the few that need a
-# second module) is checked with `dawn check`, whose `D` lines carry span, text
-# and hint for every diagnostic in emission order. cases/<name>.expected holds
+# second module) is checked with `dawn __check`, whose `D` lines carry span,
+# text and hint for every diagnostic in emission order. (`dawn check` is the
+# human-facing command and stopped printing the dump when it learned to exit
+# non-zero; the dump lives only under the hidden name now.)
+# cases/<name>.expected holds
 # those lines verbatim, minus the directory part of the path. Order is the
 # point: `cerr` appends, so the golden fails on a reordering that no assertion
 # about individual messages would see.
@@ -61,7 +64,7 @@ for f in "${targets[@]}"; do
 
   # `D <path> <lo> <hi> <msg> <hint>`; drop the directory so the golden does not
   # depend on where the repository sits.
-  ./bin/dawn check "$f" | grep '^D' | sed 's|\t[^\t]*/\([^\t/]*\)\t|\t\1\t|' > "$TMP/$name.got" || true
+  ./bin/dawn __check "$f" | grep '^D' | sed 's|\t[^\t]*/\([^\t/]*\)\t|\t\1\t|' > "$TMP/$name.got" || true
 
   if [ "$mode" = record ]; then
     cp "$TMP/$name.got" "$want"

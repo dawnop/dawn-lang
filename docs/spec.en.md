@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 97df1e39f0d12c6e -->
+<!-- doc-check: translation-of docs/spec.md @ 5a3601a637182a9a -->
 
 # Dawn Language Specification
 
@@ -2075,7 +2075,8 @@ non-`pub` item → error (`` `parse` is private to module json/parser ``, with a
 > protection, and that is the right default). `--closure` narrows it to "the use closure of
 > the entry `src/main.dawn`", for large projects producing an artifact; `dawn check` is
 > always whole-repo. Recommended for CI: `dawn check` guards the whole repo and
-> `dawn build --closure` produces the artifact.
+> `dawn build --closure` produces the artifact. `dawn check` exits 1 on any diagnostic
+> (§12.1), so the exit code alone is enough to act on that recommendation.
 
 ### 10.5 Compilation units and evaluation order
 
@@ -2364,6 +2365,7 @@ it means this one):
 
 | Command | Output |
 |------|------|
+| `dawn check <file or dir>...` | Type checking only. Prints `ok` and exits 0 when clean; **renders the diagnostics and exits 1 if there is any**; exits 2 on a usage mistake |
 | `dawn run <file.dawn or dir>` | Compiles into memory / a temporary directory, starts a JVM and runs it |
 | `dawn build <file or dir> -o app.jar` | An executable jar (`Main-Class: main` is already set) |
 | `dawn build ... --native -o app` | The previous step + GraalVM `native-image`, a standalone binary (§12.3) |
