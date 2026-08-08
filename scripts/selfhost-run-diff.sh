@@ -306,5 +306,27 @@ for case in "run $NOMAIN" "build $NOMAIN" "test $OUT/notest.dawn" \
   check "cli error (${case//$OUT/\$TMP})" "$k" "$d"
 done
 
-[ "$fail" = 0 ] || { echo "FAIL: see the FAIL lines above (an undeclared difference, or a label this script prints that scripts/emit-labels.txt does not list)"; exit 1; }
+# The two commands whose *verdict* is the answer (#189): `check`'s exit status,
+# and `fmt`'s refusal to touch a file it must not rewrite. Both were changed on
+# purpose -- `check` printed the `__check` dump and exited 0 on a type error,
+# `fmt` fed any named file to the formatter -- so these labels differ from the
+# previous release until the seed advances, and each one is declared.
+#
+# Every case here is read-only. The write path is the thing being guarded, and
+# a case that let the reference release rewrite its own fixture would compare
+# the two drivers against different files; `--check` exercises the same refusal
+# without that. The in-place half is pinned by scripts/native-cli-diff.sh,
+# which re-reads the files afterwards.
+printf 'fn f(x: Int) -> String = x\n' > "$OUT/typeerr.dawn"
+printf 'fn main() -> Unit !io = {\n  let x = 1 \\ 2\n}\n' > "$OUT/nolex.dawn"
+for case in "check $OUT/notest.dawn" "check $OUT/typeerr.dawn" "check $OUT/nope" "check" \
+    "fmt --check $OUT/plain.txt" "fmt --check $OUT/nolex.dawn"; do
+  # shellcheck disable=SC2086
+  "$DAWN" $case > "$OUT/k.txt" 2>&1 && k=0 || k=$?
+  # shellcheck disable=SC2086
+  "${SH[@]}" $case > "$OUT/d.txt" 2>&1 && d=0 || d=$?
+  check "verdict (${case//$OUT/\$TMP})" "$k" "$d"
+done
+
+[ "$fail" = 0 ] ||{ echo "FAIL: see the FAIL lines above (an undeclared difference, or a label this script prints that scripts/emit-labels.txt does not list)"; exit 1; }
 echo "OK: selfhost run/test/doc/add/__pkghash and every error path agree with the previous release"

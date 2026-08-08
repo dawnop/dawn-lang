@@ -140,6 +140,31 @@ pair "doc (manifest diagnostics)" doc "$BADMF"
 pair "fmt (missing target)" fmt "$OUT/nowhere"
 pair "fmt (usage)" fmt
 
+# fmt's two refusals (#189). Both are in-place-write guards, so the pairing is
+# not only "same message" but "same file afterwards": the check below re-reads
+# the inputs, which both drivers have now been handed.
+printf 'hello\n' > "$OUT/plain.txt"
+printf 'fn main() -> Unit !io = {\n  let x = 1 \\ 2\n  let a = 1; let b = 2\n}\n' > "$OUT/nolex.dawn"
+cp "$OUT/plain.txt" "$OUT/plain.orig"
+cp "$OUT/nolex.dawn" "$OUT/nolex.orig"
+pair "fmt (a named file that is not .dawn)" fmt "$OUT/plain.txt"
+pair "fmt (a file that does not lex)" fmt "$OUT/nolex.dawn"
+pair "fmt --check (a file that does not lex)" fmt --check "$OUT/nolex.dawn"
+if ! cmp -s "$OUT/plain.txt" "$OUT/plain.orig" || ! cmp -s "$OUT/nolex.dawn" "$OUT/nolex.orig"; then
+  echo "FAIL: fmt rewrote a file it refused (this is the bug the refusals exist to stop)"
+  fail=1
+else
+  echo "OK   fmt left both refused files byte-identical"
+fi
+
+# check, whose exit status is its answer since #189. The JVM driver hands the
+# checker the reflecting `use java` hook and the native one refuses it, so this
+# pairing holds only for a target free of `use java` -- which packages/sha2 and
+# the broken fixture both are.
+pair "check (a clean target)" check packages/sha2
+pair "check (diagnostics)" check "$OUT/broken.dawn"
+pair "check (missing target)" check "$OUT/nowhere"
+
 # ---- leg 3: add, against HEAD's JVM driver ----
 # Both sides edit a fresh copy of the same project, so the summary line and
 # the rewritten dawn.toml must both come out identical.
