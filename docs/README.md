@@ -31,7 +31,7 @@
 
 | 文档 | 状态 | 说明 |
 |---|---|---|
-| [codebase-audit-v2.md](codebase-audit-v2.md) | current | v0.60.0 / `86f6a0f63960` 的精细复审总纲、分级、P1 索引与建议顺序。 |
+| [codebase-audit-v2.md](codebase-audit-v2.md) | current | v0.60 冻结基线 + v0.62 状态层 + 详细证据；原分级、证据与 P1 索引不随后续修复重写。 |
 | [codebase-audit-v2/00-methodology-and-retractions.md](codebase-audit-v2/00-methodology-and-retractions.md) | current | 基线、证据等级、严重度，以及旧审查已修/已驳回结论的撤回边界。 |
 | [codebase-audit-v2/01-syntax-and-formatting.md](codebase-audit-v2/01-syntax-and-formatting.md) | current | lexer、parser、formatter、尾块、pattern 与 VS Code grammar；SYN-14 的旧 `fn` 尾闭包分歧已由 #206 处置。 |
 | [codebase-audit-v2/02-types-effects-and-semantics.md](codebase-audit-v2/02-types-effects-and-semantics.md) | current | 类型、trait、associated type、具名效果、Cursor/Char 与 nominal abstraction。 |

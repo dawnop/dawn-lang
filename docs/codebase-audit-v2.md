@@ -21,6 +21,58 @@ Dawn 已经具备共享 Core IR、JVM/native 双后端、自举固定点、纯 D
   固定 `!io` 的 `catch_fault`/`catch_panic`。下表的 97 项与严重度计数冻结为
   v0.60.0 审查基线，不因后续修复重写历史。
 
+### 截至 v0.62.0 的状态层
+
+> 本节是冻结基线之后的**后续状态**，截至 tag `v0.62.0`（`f2d4e79`）；它不重写、
+> 重判或重新计数原审计的严重度、证据与 P1 索引。下文仍按 v0.60.0 原文阅读。
+
+| 状态 | 本层含义 |
+|---|---|
+| **已修** | 原发现指出的缺陷边界截至 v0.62.0 已关闭。 |
+| **部分** | 已有实质修复，但明细所指出的至少一个边界在当前代码中仍成立，不能冒称关闭。 |
+| **开放** | 截至 v0.62.0 没有足够证据宣告关闭；未改、只做设计或只做前置重构都归此类。 |
+
+**已修（32）**
+
+- 语法（6）：`SYN-01`、`SYN-02`、`SYN-06`、`SYN-07`、`SYN-14`、`SYN-18`。
+- 语义（5）：`SEM-01`、`SEM-02`、`SEM-03`、`SEM-11`、`SEM-17`。
+- 架构（3）：`ARC-03`、`ARC-04`、`ARC-05`。
+- 工具链（9）：`TOOL-01`、`TOOL-02`、`TOOL-09`、`TOOL-11`、`TOOL-12`、
+  `TOOL-14`、`TOOL-15`、`TOOL-16`、`TOOL-17`。
+- 库（4）：`LIB-01`、`LIB-02`、`LIB-03`、`LIB-11`。
+- 治理（5）：`GOV-01`、`GOV-02`、`GOV-06`、`GOV-07`、`GOV-09`。
+
+**部分（4）**
+
+- [`ARC-01`](codebase-audit-v2/03-compiler-and-runtime-architecture.md)：明细要求以 symbol ID 构图；当前 `checker.dawn` 的 `name_refs` 虽已排除词法绑定和模块别名，`EMethod` 仍会把非模块 receiver 的方法名记成本模块函数边，同名真实成员仍可能形成伪循环。
+- [`ARC-02`](codebase-audit-v2/03-compiler-and-runtime-architecture.md)：明细要求覆盖 String、method 与 classfile 硬边界；当前 `ldc_str` 已分块、`class_bytes` 已接住 ASM failure，但 Core finalize 仍没有 span，超限 method/class 只能报 class/ASM method 文本而没有源码位置，仍须用户手工拆分。
+- [`LIB-10`](codebase-audit-v2/05-stdlib-and-packages.md)：明细要求 CORS 包住最终 error response；当前 `with_cors` 已处理 handler 的 `Ok`/`Err`，但 `server.dawn` 的 dot-segment 400 与 body-limit 413 在 Request 和 middleware 之前产生，仍没有 CORS headers。
+- [`GOV-08`](codebase-audit-v2/06-docs-tests-and-governance.md)：明细列出的 release asset 名已更正，但当前 `CONTRIBUTING.md` 的 quick fmt 仍比 `gates.yml` 漏 `std`/`examples`，里程碑文档路径也仍写根目录而非 `docs/history/`。
+
+**开放（61）**
+
+- 语法（13）：`SYN-03`、`SYN-04`、`SYN-05`、`SYN-08`–`SYN-13`、
+  `SYN-15`–`SYN-17`、`SYN-19`。
+- 语义（12）：`SEM-04`–`SEM-10`、`SEM-12`–`SEM-16`。
+- 架构（7）：`ARC-06`–`ARC-12`。
+- 工具链（8）：`TOOL-03`–`TOOL-08`、`TOOL-10`、`TOOL-13`。
+- 库（14）：`LIB-04`–`LIB-09`、`LIB-12`–`LIB-19`。
+- 治理（7）：`GOV-03`、`GOV-04`、`GOV-05`、`GOV-10`–`GOV-13`。
+
+`74b3121` 只完成 #194 knife 1a：把 project dependency resolution 抽成一个 seam；它没有让
+LSP/`doc` 加载 `[java-deps]`，也没有让 source 与 Java dependency 从同一最终图规划，因而
+不关闭 `TOOL-06` 或 `TOOL-10`，两项都保持开放。
+
+代表性提交与验证来源（不取代明细中的原证据）：A1–A3 见 `60256bc`、`cd3cfc1`、
+`a0d7800`、`cfb3bb8`、`dd51afc`、`a18b09a`、`77b0c07` 及 grammar/checker/package/dtoa
+contracts 与 selfhost differential；#188 见 `2d6d61e`、`e154e38`、`50252e8` 及 checker
+corpus；#193 见 `16f508c`、`0a3a4ba`、`3c9472c` 及 `scripts/spike-native/run.sh`、
+`scripts/native-cli-diff.sh`；#206 与 release/bootstrap 收口见 `fde3203`、`2683638`、
+`c4761ce`、`3a3ad4b`、`77374c9`、`086ea95` 及 `scripts/bootstrap-guards/run.sh`。
+
+计数自检：**32 已修 + 4 部分 + 61 开放 = 97**；六专题分别覆盖
+19 / 17 / 12 / 17 / 19 / 13 项，与冻结总数一致且无重复、遗漏。
+
 完整方法、严重度、证据等级和撤回项见[方法与旧结论处置](codebase-audit-v2/00-methodology-and-retractions.md)。
 
 ## 3. 结果总览
