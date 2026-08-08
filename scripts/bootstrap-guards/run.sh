@@ -670,4 +670,122 @@ awk '
 tool18_expect_reject "promoting the std record before the JAR record" \
   "$tool18_dir/advance.wrong-order.sh" "$tool18_dir/action.base.yml" "$tool18_dir/release.base.yml"
 
+# ---------------------------------------------------------------------------
+# TOOL-19: native release publication is reproducible, static, and machine-
+# exact before the old output is replaced.
+#
+# Runtime smoke tests cannot prove that the linker was invoked twice, that the
+# two results met before promotion, or that a runnable binary has no loader or
+# shared-library dependency. Pin those source-level facts and drive every new
+# rejection against a focused mutant.
+# ---------------------------------------------------------------------------
+tool19_validate() {
+  local script_file="$1"
+  local cc_ref_count
+  local static_line_count
+  local compare_line
+  local promote_line
+  local verify_a_line
+  local verify_b_line
+  local errors=0
+
+  # shellcheck disable=SC2016 # literal source in the guarded script
+  cc_ref_count="$(grep -F -c '"${CC:-cc}"' "$script_file")"
+  static_line_count="$(grep -F -c -- '-pthread -static' "$script_file")"
+  if [ "$cc_ref_count" -ne 2 ] || [ "$static_line_count" -ne 2 ]; then
+    echo "release-native.sh must contain exactly two identical static cc invocations" >&2
+    errors=1
+  fi
+
+  # shellcheck disable=SC2016 # literal source in the guarded script
+  for line in \
+    '-I "$ROOT/runtime/c" -o "$CANDIDATE_A" "$WORK/nmain.c" "$ROOT/runtime/c/dawn_rt.c" -lm' \
+    '-I "$ROOT/runtime/c" -o "$CANDIDATE_B" "$WORK/nmain.c" "$ROOT/runtime/c/dawn_rt.c" -lm' \
+    'if ! command -v readelf >/dev/null 2>&1; then' \
+    'if ! elf_header=$(LC_ALL=C readelf -h "$candidate" 2>&1); then' \
+    'if ! program_headers=$(LC_ALL=C readelf -l "$candidate" 2>&1); then' \
+    'if ! dynamic_section=$(LC_ALL=C readelf -d "$candidate" 2>&1); then' \
+    'require_elf_field "$candidate" "$elf_header" Class ELF64' \
+    'require_elf_field "$candidate" "$elf_header" Machine "Advanced Micro Devices X86-64"' \
+    'reject_elf_marker "$candidate" "$program_headers" INTERP' \
+    'reject_elf_marker "$candidate" "$dynamic_section" NEEDED' \
+    'verify_elf_contract "$CANDIDATE_A"' \
+    'verify_elf_contract "$CANDIDATE_B"' \
+    'mv -f "$ARTIFACT" "$OUT"'; do
+    if ! tool17_require_line "$script_file" "$line" \
+        "release-native.sh is missing one exact native release contract: $line"; then
+      errors=1
+    fi
+  done
+  if ! tool17_require_line "$script_file" \
+      "require_elf_field \"\$candidate\" \"\$elf_header\" Data \"2's complement, little endian\"" \
+      "release-native.sh must require readelf's exact little-endian Data value"; then
+    errors=1
+  fi
+
+  # shellcheck disable=SC2016 # literal source in the guarded script
+  compare_line="$(tool17_line_number "$script_file" 'cmp -s "$CANDIDATE_A" "$CANDIDATE_B"')"
+  # shellcheck disable=SC2016 # literal source in the guarded script
+  verify_a_line="$(tool17_line_number "$script_file" 'verify_elf_contract "$CANDIDATE_A"')"
+  # shellcheck disable=SC2016 # literal source in the guarded script
+  verify_b_line="$(tool17_line_number "$script_file" 'verify_elf_contract "$CANDIDATE_B"')"
+  # shellcheck disable=SC2016 # literal source in the guarded script
+  promote_line="$(tool17_line_number "$script_file" 'mv -f "$ARTIFACT" "$OUT"')"
+  if [ -z "$compare_line" ] || [ -z "$verify_a_line" ] || \
+      [ -z "$verify_b_line" ] || [ -z "$promote_line" ] || \
+      [ "$compare_line" -ge "$verify_a_line" ] || \
+      [ "$verify_a_line" -ge "$verify_b_line" ] || \
+      [ "$verify_b_line" -ge "$promote_line" ]; then
+    echo "release-native.sh must compare, verify both ELF candidates, then promote" >&2
+    errors=1
+  fi
+
+  return "$errors"
+}
+
+native_file="$root/scripts/release-native.sh"
+if tool19_validate "$native_file"; then
+  ok "native release links twice and verifies exact static x86-64 ELF bytes before promotion"
+else
+  bad "native release bypasses its reproducibility or machine contract"
+fi
+
+tool19_dir="$work/tool19"
+mkdir -p "$tool19_dir"
+cp "$native_file" "$tool19_dir/native.base.sh"
+
+tool19_expect_reject() {
+  local name="$1"
+  local mutated_script="$2"
+  if tool19_validate "$mutated_script" > "$tool19_dir/control.out" 2>&1; then
+    bad "$name did not trip the native-release guard"
+  else
+    ok "$name trips the native-release guard"
+  fi
+}
+
+sed 's/ -static \\/ \\/' \
+  "$tool19_dir/native.base.sh" > "$tool19_dir/native.no-static.sh"
+tool19_expect_reject "removing -static" "$tool19_dir/native.no-static.sh"
+
+# shellcheck disable=SC2016 # mutate literal source in the guarded script
+sed '/cmp -s "$CANDIDATE_A" "$CANDIDATE_B"/d' \
+  "$tool19_dir/native.base.sh" > "$tool19_dir/native.no-cmp.sh"
+tool19_expect_reject "removing the candidate comparison" "$tool19_dir/native.no-cmp.sh"
+
+# shellcheck disable=SC2016 # mutate literal source in the guarded script
+sed '/require_elf_field "$candidate" "$elf_header" Machine "Advanced Micro Devices X86-64"/d' \
+  "$tool19_dir/native.base.sh" > "$tool19_dir/native.no-machine.sh"
+tool19_expect_reject "removing the x86-64 machine assertion" "$tool19_dir/native.no-machine.sh"
+
+# shellcheck disable=SC2016 # mutate literal source in the guarded script
+sed '/reject_elf_marker "$candidate" "$program_headers" INTERP/d' \
+  "$tool19_dir/native.base.sh" > "$tool19_dir/native.no-interp.sh"
+tool19_expect_reject "removing the INTERP rejection" "$tool19_dir/native.no-interp.sh"
+
+# shellcheck disable=SC2016 # mutate literal source in the guarded script
+sed '/reject_elf_marker "$candidate" "$dynamic_section" NEEDED/d' \
+  "$tool19_dir/native.base.sh" > "$tool19_dir/native.no-needed.sh"
+tool19_expect_reject "removing the NEEDED rejection" "$tool19_dir/native.no-needed.sh"
+
 exit "$fail"
