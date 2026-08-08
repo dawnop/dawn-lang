@@ -545,12 +545,30 @@ fn fetch_into(url: String, work: String) -> Result[(String, String), String] !io
     Err(e) -> return Err(e)
   }
   let target = cache_dir(actual)
+  var adopted = true
   if not io.is_dir(target) {
     # rename into place; a concurrent fetch of the same hash yields the same bytes
     let moved = io.rename(root, target)
     match moved {
-      Ok(_) -> ()
+      Ok(_) -> { adopted = false }
       Err(e) -> { if not io.is_dir(target) { return Err("cannot move into the cache: " ++ e.message) } }
+    }
+  }
+  # An entry that was already there is *adopted*, not written, and adopting it
+  # used to be unconditional: the freshly downloaded tree was dropped and the
+  # directory returned on the strength of its name. The caller then wrote an
+  # origin record saying this url produced these bytes -- for bytes the url had
+  # just been observed not to produce. That is a local cache injection turning
+  # itself into a permanent, trusted fact, and it is exactly the case
+  # `check_origin` exists to catch.
+  #
+  # This is also the one moment where both halves are in hand: a tree whose
+  # hash is known and a directory claiming to be it. Verifying is cheap here
+  # and impossible later.
+  if adopted {
+    match verify_cached(target, actual) {
+      Ok(_) -> ()
+      Err(e) -> return Err(e)
     }
   }
   Ok((target, actual))

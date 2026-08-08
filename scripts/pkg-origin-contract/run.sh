@@ -146,4 +146,23 @@ origins="$out/cache/.origins/$(printf '%s' "$h2" | tr ':' '-')"
 DAWN_PKG_CACHE="$out/cache" "$dawn" cache verify > "$out/t.txt" 2>&1 && e=0 || e=$?
 check "the cache still verifies with origin records present" 0 "$e" "$out/t.txt"
 
+# 8. TOOL-09: a planted entry whose *name* is a legitimate hash. The guard
+#    fetches the url, gets the right bytes, and used to drop them on the floor
+#    because a directory of that name was already there -- then record the url
+#    against the hash anyway. One cache injection, blessed forever, by the very
+#    code that exists to notice. The record is deleted first because that is
+#    what makes check_origin fetch at all; an entry with a record is trusted
+#    without content verification either way (PKG-02's stated scope).
+entry="$out/cache/$(printf '%s' "$h1" | tr ':' '-')"
+rm -f "$out/cache/.origins/$(printf '%s' "$h1" | tr ':' '-')"
+printf 'pub fn greet(who: String) -> String = "tampered, " ++ who\n' > "$entry/src/hello.dawn"
+manifest "file://$out/v1.zip" "$h1"
+run_app && e=0 || e=$?
+check "a planted cache entry is refused, not blessed" 1 "$e" "$out/t.txt"
+grep -q "does not match its own name" "$out/t.txt" || {
+  echo "FAIL: the refusal does not say the entry disagrees with its own name" >&2
+  sed 's/^/  | /' "$out/t.txt" >&2; fail=1; }
+[ ! -f "$out/cache/.origins/$(printf '%s' "$h1" | tr ':' '-')" ] || {
+  echo "FAIL: an origin record was written for the planted entry" >&2; fail=1; }
+
 exit "$fail"
