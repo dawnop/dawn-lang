@@ -1,0 +1,46 @@
+# `to_string(x)` and `${x}` are the *unquoted* rendering; `show` is the nested
+# one, which quotes a String. An opaque type is its target at run time, so with
+# nothing of its own to say it renders as its target -- but an `impl Show`
+# written on the opaque name is what the type was declared for, and it wins in
+# every position, the two unquoted ones included.
+#
+# It used to lose there: `to_string` peeled the whole opaque stack before it
+# asked, saw String, and returned the value verbatim. A redacting `Show` was
+# honoured one field deep and ignored at the top level -- the one place a log
+# line actually calls it (audit SEM-03).
+
+opaque type Secret = String
+opaque type Name = String
+opaque type Meters = Int
+opaque type Layer = Secret
+
+impl Show[Secret] {
+  fn show(x: Secret) -> String = "***"
+}
+
+fn secret_of(s: String) -> Secret = s
+
+fn name_of(s: String) -> Name = s
+
+fn meters_of(n: Int) -> Meters = n
+
+fn layer_of(s: Secret) -> Layer = s
+
+type Card = { who: Name, pin: Secret } derive Show
+
+pub fn main() -> Unit !io = {
+  let s = secret_of("hunter2")
+  # the impl wins at the top level ...
+  println(to_string(s))
+  println("${s}")
+  # ... and one field or one element deep, as it always did
+  println(to_string(Card { who: name_of("ada"), pin: s }))
+  println(to_string([s]))
+  # an opaque type with nothing of its own still renders as its target, and
+  # still unquoted at the top level
+  println(to_string(name_of("ada")))
+  println("${name_of("ada")}")
+  println(to_string(meters_of(7)))
+  # a second layer with no impl of its own reaches the first layer's
+  println(to_string(layer_of(s)))
+}

@@ -248,15 +248,22 @@ fn un_op(op: TUnOp) -> CUnOp =
 ## function and so cannot be found from the type alone.
 fn to_str(st: LSt, e: CExpr, t: Ty, wit: Option[WitRef]) -> (LSt, CExpr) =
   # `to_string` of a String is the String itself, and that is a fact about the
-  # representation -- so an opaque type over String must not pick up the
-  # quoting `show` gives a String *inside* a structure. Peeled here rather
-  # than at the two `==`, because the witness lookup below is keyed on `t`.
-  if peel_opaque(t) == TyString {
+  # *representation* -- so an opaque type over String must not pick up the
+  # quoting `show` gives a String inside a structure. It does not follow that
+  # it inherits the identity: an `impl Show[Secret]` is the whole reason the
+  # type was declared, and it wins here as it does everywhere else (spec §324,
+  # and it already won inside a record). Peeling the whole stack up front is
+  # how a redacting `Show` came to print the plaintext for `to_string(secret)`
+  # while `Box { s: secret }` redacted it (audit SEM-03), so the peel is one
+  # layer at a time with the impl question asked in between.
+  if t == TyString {
     (st, e)
-  } else if peel_opaque(t) == TyUnit {
+  } else if t == TyUnit {
     (st, CStr("()"))
   } else {
     match t {
+      TyOpaque(_, _, _, tgt) ->
+        if has_own_show(st, t) { show_at(st, e, t) } else { to_str(st, e, tgt, wit) }
       TyVar(_, _) ->
         match wit {
           Some(w) -> {
@@ -267,6 +274,15 @@ fn to_str(st: LSt, e: CExpr, t: Ty, wit: Option[WitRef]) -> (LSt, CExpr) =
         }
       _ -> show_at(st, e, t)
     }
+  }
+
+## Does `t` have a `Show` impl written on `t` itself -- the same question
+## `show_at` asks before it lets an opaque type fall through to its target.
+fn has_own_show(st: LSt, t: Ty) -> Bool =
+  if has_impl_at(st.impls, SHOW_ID, t) {
+    provides(impl_for(st, SHOW_ID, t), "show")
+  } else {
+    false
   }
 
 # ---- constructor fields ----
