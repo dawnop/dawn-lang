@@ -1,0 +1,20 @@
+# Positional call arguments evaluate left to right (spec §4.3) -- on both
+# backends. The C emitter used to hand effectful arguments to the C call
+# expression inline, and C leaves that order unspecified: gcc on x86-64 went
+# right to left, so this program printed c, b, a on native and a, b, c on the
+# JVM. The corpus never had a call with two effectful arguments, which is why
+# the divergence sat unseen until the named-arguments batch (#207) pinned
+# written-order evaluation and went looking. `emit_ordered` is the fix.
+use std/io
+
+fn tap(label: String, v: Int) -> Int !io = {
+  io.println("eval " ++ label)
+  v
+}
+
+fn combine(a: Int, b: Int, c: Int) -> Int = a * 100 + b * 10 + c
+
+pub fn main() -> Unit !io = {
+  let r = combine(tap("a", 1), tap("b", 2), tap("c", 3))
+  io.println(to_string(r))
+}

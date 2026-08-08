@@ -966,13 +966,14 @@ fn adapter_name(owner: String, name: String) -> String =
 ## `int64_t` instead compiled fine and segfaulted the moment std read the
 ## field back at `K`, which is what `map_from` does with every key.
 fn emit_alloc(st: CSt, tag: Int, args: List[CExpr], erased: Bool) -> (CSt, String) = {
-  var st1 = st
+  # a constructor keeps its fields: consuming positions (chk k=true)
+  let (st0, row) = emit_ordered(st, args, all_flags(len(args), true))
+  var st1 = st0
   var parts: List[String] = []
+  var ri = 0
   for a in args {
-    # a constructor keeps its fields: consuming positions (chk k=true)
-    let (st2, v) = emit_expr(st1, a, true)
-    st1 = st2
-    parts = parts ++ [if erased { box_call(v, cex_ty(a)) } else { v }]
+    parts = parts ++ [if erased { box_call(row[ri], cex_ty(a)) } else { row[ri] }]
+    ri = ri + 1
   }
   # a tuple boxed every element, so every one of its slots is a pointer
   var bits: List[Bool] = []
@@ -1012,13 +1013,18 @@ fn emit_binary(st: CSt, op: CBinOp, l: CExpr, r: CExpr, ty0: Ty) -> (CSt, String
     let st4 = push(line(st3, "if (" ++ guard ++ ") {"))
     let (st5, rv) = emit_expr(st4, r, false)
     let st6 = pop(line(st5, tmp ++ " = " ++ rv ++ ";"))
-    (line(st6, "}"), tmp)
-  } else if op == CConcat {
+    return (line(st6, "}"), tmp)
+  }
+  # every remaining operator is strict in both operands, so they share one
+  # ordered row: C's operand order is unspecified, and spec §4.3's is not
+  # (both positions borrow: k=false)
+  let (st2, row) = emit_ordered(st, [l, r], [false, false])
+  let lv = row[0]
+  let rv = row[1]
+  if op == CConcat {
     # `++` joins three things and each has its own join. The JVM emitter
     # matches on the same three; a single arm here compiled while nothing
     # concatenated anything but a String.
-    let (st1, lv) = emit_expr(st, l, false)
-    let (st2, rv) = emit_expr(st1, r, false)
     match lt {
       # `std/pvec.concat` is a Dawn function and takes both sides owned; the
       # other two are runtime primitives and borrow. See `own_args`.
@@ -1032,8 +1038,6 @@ fn emit_binary(st: CSt, op: CBinOp, l: CExpr, r: CExpr, ty0: Ty) -> (CSt, String
     # Bytes compares by content (spec §9.5.1). Left to the pointer comparison
     # below it would answer identity -- and answer it silently, which is what
     # eq_bytes.dawn is in the corpus to catch.
-    let (st1, lv) = emit_expr(st, l, false)
-    let (st2, rv) = emit_expr(st1, r, false)
     let f = if lt == TyBytes { "dawn_bytes_eq" } else { "dawn_str_eq" }
     let call = f ++ "(" ++ lv ++ ", " ++ rv ++ ")"
     (st2, if op == CEq { call } else { "(!" ++ call ++ ")" })
@@ -1041,13 +1045,9 @@ fn emit_binary(st: CSt, op: CBinOp, l: CExpr, r: CExpr, ty0: Ty) -> (CSt, String
     # `dawn_str` is a struct, so C's relational operators do not apply to it;
     # the order is the same code-point order `dawn_cmp_str` gives the Ord
     # dictionary.
-    let (st1, lv) = emit_expr(st, l, false)
-    let (st2, rv) = emit_expr(st1, r, false)
     (st2, "(dawn_cmp_str(" ++ lv ++ ", " ++ rv ++ ") " ++ bin_op_c(op) ++ " 0)")
   } else if op == CMod && ty == TyFloat {
     # C's `%` is integer-only. `fmod` is the IEEE remainder the JVM's DREM is.
-    let (st1, lv) = emit_expr(st, l, false)
-    let (st2, rv) = emit_expr(st1, r, false)
     (st2, "fmod(" ++ lv ++ ", " ++ rv ++ ")")
   } else if op == CShl || op == CShr || op == CUshr {
     # A shift takes the low six bits of its count -- spec §4.3 states it as a
@@ -1155,15 +1155,76 @@ fn emit_if(st: CSt, cond: CExpr, thn: CExpr, els: Option[CExpr], ty: Ty, k: Bool
   (st8, if is_value { tmp } else { "DAWN_UNIT" })
 }
 
-fn emit_call(st: CSt, callee: CCallee, args: List[CExpr], ty: Ty) -> (CSt, String) = {
-  var st1 = st
-  var cargs: List[String] = []
-  for a in args {
-    # a callee's parameters arrive owned: consuming positions (chk k=true)
-    let (st2, v) = emit_expr(st1, a, true)
-    st1 = st2
-    cargs = cargs ++ [v]
+## Is the emitted form of this expression a name or a literal, running no
+## code? Anything else may run code -- and any call can panic -- so its order
+## among its siblings is observable. A bare tracked local read at a consuming
+## position is not an atom: it emits a dawn_take, and the take's place in the
+## row is part of the written order.
+fn atom_expr(st: CSt, e: CExpr, k: Bool) -> Bool =
+  match e {
+    CInt(_) -> true
+    CFloat(_) -> true
+    CBool(_) -> true
+    # a cached static pointer; the interning ran at first use, before this
+    CStr(_) -> true
+    CUnit -> true
+    CLocal(sym, _) -> not (k && set.has(st.tracked, sym))
+    _ -> false
   }
+
+fn all_flags(n: Int, v: Bool) -> List[Bool] = {
+  var out: List[Bool] = []
+  for _i in 0..n { out = out ++ [v] }
+  out
+}
+
+## Emit a row of value operands preserving written order. C leaves the
+## evaluation order of call arguments and of binary operands unspecified (gcc
+## goes right to left); the JVM defines left to right, and spec §4.3 makes
+## written order normative. With fewer than two non-atomic operands there is
+## nothing to reorder -- an atom runs no code -- and the row emits inline
+## exactly as it always did; with more, every non-atomic operand is bound to
+## a temporary, in order, and the row becomes those names. A diverging
+## operand stays inline: nothing after it runs, and its C type may not be
+## assignable (`dawn_str t = DAWN_UNIT;` does not compile -- see `no_value`).
+fn emit_ordered(st: CSt, es: List[CExpr], ks: List[Bool]) -> (CSt, List[String]) = {
+  var nontrivial = 0
+  var i0 = 0
+  for e in es {
+    if not atom_expr(st, e, ks[i0]) { nontrivial = nontrivial + 1 }
+    i0 = i0 + 1
+  }
+  var st1 = st
+  var out: List[String] = []
+  var i = 0
+  for e in es {
+    let (st2, v) = emit_expr(st1, e, ks[i])
+    st1 = st2
+    if nontrivial < 2 || atom_expr(st1, e, ks[i]) || no_value(e) {
+      out = out ++ [v]
+    } else {
+      let (st3, t) = fresh(st1)
+      st1 = line(st3, c_type(cex_ty(e)) ++ " " ++ t ++ " = " ++ v ++ ";")
+      out = out ++ [t]
+    }
+    i = i + 1
+  }
+  (st1, out)
+}
+
+fn emit_call(st: CSt, callee: CCallee, args: List[CExpr], ty: Ty) -> (CSt, String) = {
+  # the dictionary / call target evaluates before the arguments, like the
+  # JVM's; it rides at the head of the ordered row
+  let head: List[CExpr] = match callee {
+    CMethod(dict, _, _, _) -> [dict]
+    CDynamic(target) -> [target]
+    _ -> []
+  }
+  # the head borrows (k=false); a callee's parameters arrive owned:
+  # consuming positions (chk k=true)
+  let ks = all_flags(len(head), false) ++ all_flags(len(args), true)
+  let (st1, row) = emit_ordered(st, head ++ args, ks)
+  let cargs = list.drop(row, len(head))
   match callee {
     CDirect(owner, name) ->
       (st1, mangle(owner, name) ++ "(" ++ join(cargs, ", ") ++ ")")
@@ -1172,11 +1233,11 @@ fn emit_call(st: CSt, callee: CCallee, args: List[CExpr], ty: Ty) -> (CSt, Strin
     CDefault(owner, tid, method) ->
       (st1, default_symbol(owner, tid, method) ++ "(" ++ join(cargs, ", ") ++ ")")
     CMethod(dict, _tid, _m, idx) -> {
-      let (st3a, dv0) = emit_expr(st1, dict, false)
+      let dv0 = row[0]
       # A dictionary reaches here as whatever its position carries -- a
       # parameter at a type-variable position is `void*`, which C will not
       # dereference. The JVM's CHECKCAST is this cast.
-      let st3 = st3a
+      let st3 = st1
       let dv = "((dawn_dict*)(" ++ dv0 ++ "))"
       # a dictionary is a flat table of function pointers; the slot index
       # was resolved by lowering, so no trait metadata is needed here
@@ -1192,7 +1253,8 @@ fn emit_call(st: CSt, callee: CCallee, args: List[CExpr], ty: Ty) -> (CSt, Strin
           join(cargs ++ [dv], ", ") ++ "))")
     }
     CDynamic(target) -> {
-      let (st3, tv) = emit_expr(st1, target, false)
+      let st3 = st1
+      let tv = row[0]
       # One indirect call whatever the capture count: the environment is
       # always the first argument, and the adapter unpacks it. Erased in and
       # out, because that is the only shape every adapter has -- see
@@ -1413,18 +1475,16 @@ fn erased_from(e: CExpr) -> Ty =
   }
 
 fn emit_intrinsic(st: CSt, name: String, args: List[CExpr], ty: Ty) -> (CSt, String) = {
-  var st1 = st
-  var cargs: List[String] = []
   # an intrinsic borrows its arguments except at the owned positions the
   # reuse analysis lists -- the same classification chk_walk reads
   let owned = intr_owned_args(name)
+  var ks: List[Bool] = []
   var ai = 0
-  for a in args {
-    let (st2, v) = emit_expr(st1, a, list.contains(owned, ai))
-    st1 = st2
-    cargs = cargs ++ [v]
+  for _a in args {
+    ks = ks ++ [list.contains(owned, ai)]
     ai = ai + 1
   }
+  let (st1, cargs) = emit_ordered(st, args, ks)
   let a0 = if len(cargs) > 0 { cargs[0] } else { "" }
   if name == "panic" {
     (line(st1, "dawn_panic(" ++ a0 ++ ");"), "DAWN_UNIT")
