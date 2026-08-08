@@ -29,22 +29,18 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # The ssh login name and the site's real IP must not enter this public repo:
-  # the redeploy scripts once hardcoded user@dawnop.com and it sat in history (and
-  # the v0.1.0 tag) until a 2026-07-18 cleanup. A convention nothing checks decays,
-  # so it is a check now. Same script the local pre-push hook runs.
+  # Commit-message policy needs branch/PR event history, unlike the tree-only
+  # repository policy in gates.yml. Keep that event-specific check here while
+  # the reusable workflow inspects the checked-out tree.
   secrets:
     runs-on: ubuntu-latest
-    # three greps and a git log; it has never taken more than a few seconds
+    # one git log scan; it has never taken more than a few seconds
     timeout-minutes: 10
     steps:
-      # fetch-depth: 0 so the trailer check can see the pushed commit range's
-      # history; the identity guard only looks at the tree and does not need it.
+      # fetch-depth: 0 so the trailer check can see the pushed commit range.
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: no server identity in the repo
-        run: python3 scripts/check-no-server-identity.py
 
       # No Claude attribution in new commits. Suppressed at the Claude Code
       # settings source, but that is per-machine/per-session — a different machine

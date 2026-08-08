@@ -27,6 +27,18 @@ on:
   workflow_call:
 
 jobs:
+  # The ssh login name and the site's real IP must not enter this public repo:
+  # the redeploy scripts once hardcoded them and they survived in history until
+  # a cleanup. This guard inspects only the checked-out tree, so it belongs in
+  # the reusable gate set that both branch CI and release tags execute.
+  tree-policy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: no server identity in the repo
+        run: python3 scripts/check-no-server-identity.py
+
   test:
     runs-on: ubuntu-latest
     # Every timeout in this file is roughly 3x the job's own measured wall

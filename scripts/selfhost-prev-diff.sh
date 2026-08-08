@@ -36,6 +36,29 @@ OUT=${TMPDIR:-/tmp}/selfhost-prev-diff.$$
 mkdir -p "$OUT"
 trap 'rm -rf "$OUT"' EXIT
 
+# Keep the ecosystem oracle immutable: a release tag must run against the same
+# source tree every time. Mirrors may override the transport URL, but not the
+# revision whose bytes define this gate.
+ECO="$OUT/eco"
+ECO_URL=${DAWNOP_SITE_URL:-https://github.com/dawnop/dawnop-site.git}
+ECO_REV=a72bfc9f6e5063e1015814392099ff3b89938687
+git init --quiet "$ECO"
+git -C "$ECO" remote add origin "$ECO_URL"
+if ! git -C "$ECO" fetch --quiet --depth 1 origin "$ECO_REV"; then
+  echo "ERROR: failed to fetch pinned backend-dawn corpus $ECO_REV" >&2
+  exit 1
+fi
+if ! git -C "$ECO" checkout --quiet --detach FETCH_HEAD; then
+  echo "ERROR: failed to check out pinned backend-dawn corpus $ECO_REV" >&2
+  exit 1
+fi
+ECO_HEAD=$(git -C "$ECO" rev-parse HEAD)
+if [ "$ECO_HEAD" != "$ECO_REV" ]; then
+  echo "ERROR: backend-dawn corpus resolved to $ECO_HEAD, expected $ECO_REV" >&2
+  exit 1
+fi
+echo "OK   pinned backend-dawn corpus $ECO_REV"
+
 # feature discipline: the previous release must compile today's selfhost
 "${PREV[@]}" build selfhost "${PREV_STD[@]}" -o "$OUT/head-by-prev.jar" > /dev/null
 echo "OK   $TAG compiles HEAD selfhost (seed feature discipline)"
@@ -70,31 +93,25 @@ done
 
 # the production ecosystem corpus: front-end dumps + formatter over
 # backend-dawn (its java-deps are not on this class path, so no emit)
-ECO="$OUT/eco"
-if git clone --depth 1 https://github.com/dawnop/dawnop-site "$ECO" > /dev/null 2>&1; then
-  files=$(find "$ECO/backend-dawn/src" -name '*.dawn' | sort)
-  # shellcheck disable=SC2086
-  "${PREV[@]}" __lex $files > "$OUT/eco-lex-prev.txt"
-  # shellcheck disable=SC2086
-  "${HEAD_BIN[@]}" __lex $files > "$OUT/eco-lex-head.txt"
-  if diff "$OUT/eco-lex-prev.txt" "$OUT/eco-lex-head.txt" > /dev/null
-  then gate "lex backend-dawn" 0; else gate "lex backend-dawn" 1; fi
-  # shellcheck disable=SC2086
-  "${PREV[@]}" __parse $files > "$OUT/eco-parse-prev.txt"
-  # shellcheck disable=SC2086
-  "${HEAD_BIN[@]}" __parse $files > "$OUT/eco-parse-head.txt"
-  if diff "$OUT/eco-parse-prev.txt" "$OUT/eco-parse-head.txt" > /dev/null
-  then gate "parse backend-dawn" 0; else gate "parse backend-dawn" 1; fi
-  cp -r "$ECO/backend-dawn/src" "$OUT/fmt-prev"
-  cp -r "$ECO/backend-dawn/src" "$OUT/fmt-head"
-  "${PREV[@]}" fmt "$OUT/fmt-prev" > /dev/null
-  "${HEAD_BIN[@]}" fmt "$OUT/fmt-head" > /dev/null
-  if diff -r "$OUT/fmt-prev" "$OUT/fmt-head" > /dev/null
-  then gate "fmt backend-dawn" 0; else gate "fmt backend-dawn" 1; fi
-else
-  # never let a network hiccup read as coverage
-  echo "SKIP backend-dawn corpus (clone failed — no network?)"
-fi
+files=$(find "$ECO/backend-dawn/src" -name '*.dawn' | sort)
+# shellcheck disable=SC2086
+"${PREV[@]}" __lex $files > "$OUT/eco-lex-prev.txt"
+# shellcheck disable=SC2086
+"${HEAD_BIN[@]}" __lex $files > "$OUT/eco-lex-head.txt"
+if diff "$OUT/eco-lex-prev.txt" "$OUT/eco-lex-head.txt" > /dev/null
+then gate "lex backend-dawn" 0; else gate "lex backend-dawn" 1; fi
+# shellcheck disable=SC2086
+"${PREV[@]}" __parse $files > "$OUT/eco-parse-prev.txt"
+# shellcheck disable=SC2086
+"${HEAD_BIN[@]}" __parse $files > "$OUT/eco-parse-head.txt"
+if diff "$OUT/eco-parse-prev.txt" "$OUT/eco-parse-head.txt" > /dev/null
+then gate "parse backend-dawn" 0; else gate "parse backend-dawn" 1; fi
+cp -r "$ECO/backend-dawn/src" "$OUT/fmt-prev"
+cp -r "$ECO/backend-dawn/src" "$OUT/fmt-head"
+"${PREV[@]}" fmt "$OUT/fmt-prev" > /dev/null
+"${HEAD_BIN[@]}" fmt "$OUT/fmt-head" > /dev/null
+if diff -r "$OUT/fmt-prev" "$OUT/fmt-head" > /dev/null
+then gate "fmt backend-dawn" 0; else gate "fmt backend-dawn" 1; fi
 
 [ "$fail" = 0 ] || exit 1
 echo "OK: HEAD agrees with $TAG on the corpus (undeclared-diff check passed)"
