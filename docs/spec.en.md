@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 6cd66e8e951042a4 -->
+<!-- doc-check: translation-of docs/spec.md @ b6f22c1fa74642f8 -->
 
 # Dawn Language Specification
 
@@ -1904,6 +1904,23 @@ type ForeignError = { kind: String, message: String, cause: Option[String] }
   string if there is none); `cause` is the rendering of the failure underneath, `None` if
   there is none. No stack: rendering a stack costs something at every single barrier.
 
+**The payload contract** (on every backend):
+
+- `message` has **no length limit** and equals, byte for byte, the String the failure
+  was raised with; a failure the language itself raises (`panic(m)`) is byte-identical
+  across backends. Setting a limit means picking a number, and any number will one day
+  be crossed by a legitimate message; truncation would also have to handle character
+  boundaries — so this is "no truncation clause", not "a generous limit".
+- `message` is well-formed UTF-8. A direct consequence of the String invariant (§4.8),
+  written out separately because it has been violated: a payload cut at a byte count
+  landed mid-character.
+- A failure's payload belongs to **the barrier that is going to take it**: from the
+  raise until that barrier builds the `ForeignError` (or `bracket` hands it to the next
+  barrier out), no other barrier can read or write it. A nested catch therefore cannot
+  affect a failure in flight (the unfolding of §9.8.2 guarantee 2).
+- The panic/fault split is **observable** — by which barrier takes the failure, not by
+  the `kind` string (whose values remain the backend's own).
+
 There is only this one pair of barriers (only this pair **intercepts** failure; the
 `bracket` of §9.8.2 intercepts nothing), only the `ForeignError` payload, and **the
 String version is not kept**.
@@ -1971,7 +1988,13 @@ Three guarantees:
   panic is still a panic and a fault is still a fault**. So `catch_fault` still does not
   intercept a panic that passes through bracket (on native that kind bit is restored by
   re-raising, not re-inferred; the measured comparison of the two backends is in
-  `scripts/spike-native/bracket.dawn` and `bracket_fatal.dawn`).
+  `scripts/spike-native/bracket.dawn` and `bracket_fatal.dawn`). A failure `release`
+  catches for itself **does not affect** the one in flight — raising and swallowing a
+  new failure inside a release is legal code, and the crossing failure comes out as it
+  went in (`scripts/spike-native/bracket_release_fails.dawn`). A failure that
+  **escapes** the release itself (raised and not caught) replaces the original, with no
+  suppressed chain: that is what both backends do today, written here so it is a ruling
+  rather than a coincidence.
 - **`bracket` intercepts nothing**, so it returns `B` and not `Result` — guarding and
   intercepting are two orthogonal things (neither Haskell's `bracket`, Kotlin's `use`,
   Koka's `finally` nor Go's `defer` returns a Result). To take the failure as a value,

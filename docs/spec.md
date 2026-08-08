@@ -1551,6 +1551,19 @@ type ForeignError = { kind: String, message: String, cause: Option[String] }
 - `message` 是失败自己说的话（JVM 的 `getMessage()`，无则空串）；`cause` 是底下那层
   失败的渲染，没有则 `None`。不带栈：渲染栈的代价要付在每一次屏障上。
 
+**载荷契约**（对每个后端）：
+
+- `message` **没有长度上限**，逐字节等于失败发出时的那个 String；语言自己发出的失败
+  （`panic(m)`）两后端逐字节相同。设上限就得选一个数字，而任何数字都会被某条合法消息
+  越过；截断还得处理字符边界——所以是「没有截断条款」而不是「上限较大」。
+- `message` 是良构 UTF-8。这是 String 不变式（§4.8）的直接推论，单独写出来是因为
+  它曾被违反：按字节截断的载荷把切点落在字符中间。
+- 一个失败的载荷属于**将要接住它的那个屏障**：从 raise 到该屏障造出 `ForeignError`
+  （或 `bracket` 交给下一个屏障）为止，其它任何屏障读不到也写不到它。嵌套捕获因此
+  不影响正在传播的失败（§9.8.2 保证 2 的展开）。
+- panic/fault 这个二分是**可观察的**——由哪个屏障收得下体现，不由 `kind` 字符串体现
+  （`kind` 的取值仍是后端自有）。
+
 屏障只有这一对（**拦**失败的只有这一对；§9.8.2 的 `bracket` 什么都不拦），
 载荷只有 `ForeignError`，**不保留 String 版本**。
 
@@ -1604,7 +1617,11 @@ with f <- bracket(open(path), close)
 - **原失败原样继续传播**：`kind`/`message` 逐字不变，**panic 仍是 panic、fault 仍是 fault**。
   所以 `catch_fault` 依然不拦一个穿过 bracket 的 panic（native 侧靠 re-raise 复原那个
   种类位，不是重新推断；两个后端的实测比对在 `scripts/spike-native/bracket.dawn` 与
-  `bracket_fatal.dawn`）。
+  `bracket_fatal.dawn`）。`release` 内部自己接住的失败**不影响**正在传播的那个——
+  release 里 raise 并咽下一个新失败是合法代码，穿越中的失败原样出去
+  （`scripts/spike-native/bracket_release_fails.dawn`）。`release` 自己**逃逸**一个
+  失败（raise 而不接）则顶掉原失败、无 suppressed 链：这是两后端的现状，写在这里
+  使它成为裁决而非巧合。
 - **`bracket` 不拦任何东西**，故返回 `B` 而非 `Result`——护与拦是两件正交的事
   （Haskell `bracket`、Kotlin `use`、Koka `finally`、Go `defer` 无一返回 Result）。
   要把失败拿成值就写 `catch_fault(() => bracket(...))`，两个原语各做一件事。

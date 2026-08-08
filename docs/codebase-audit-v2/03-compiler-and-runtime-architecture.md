@@ -26,6 +26,12 @@
 
 ## ARC-03 — P1 — native 捕获失败会把消息截成 512 字节
 
+> **已修**（2026-08-08，#193 刀 1）：失败载荷改为失败自有的堆字符串（`dawn_failure`），
+> `DAWN_FAILURE_MAX` 连同全局 buffer 一起删除；载荷契约进 `docs/spec.md` §9.8.1。
+> 门禁：`scripts/spike-native/failure_message.dawn`（长度 0–5000 + UTF-8 跨界切点）、
+> `native-cli-diff.sh` 的 650 字节消息腿。设计与路线裁决见
+> `docs/native-failure-design.md`。以下为审计时的原文。
+
 - **证据：K。** `DAWN_FAILURE_MAX` 固定 512，raise 只复制 min(length, 512)：`runtime/c/dawn_rt.c:773`、`:798`；`ForeignError.message` 从该 buffer 构造：`runtime/c/dawn_rt.c:829`。注释明确承认 bracket 后 fatal message 也会截断：`runtime/c/dawn_rt.c:866`。
 - **冲突：** 规范称 `ForeignError.message` 是失败自己的 message：`docs/spec.md:1521`，并保证 bracket 的 kind/message 逐字不变：`docs/spec.md:1565`。JVM 保存并重抛原 Throwable：`selfhost/src/jvm/rtclasses.dawn:931`。
 - **影响：** 两后端对合法长消息不同；截断点可落在 UTF-8 code point 中部，native 还可能产生不满足 Dawn String invariant 的文本。
@@ -33,6 +39,13 @@
 - **建议：** failure payload 动态拥有完整 bytes；不要以全局固定 buffer 作为异常对象替代品。
 
 ## ARC-04 — P1 — native 全局 failure payload 会被 nested release 覆盖
+
+> **已修**（2026-08-08，#193 刀 1）：动态验证后比审计记的更重——kind 位翻转能让
+> `catch_fault` 吞 panic、可恢复 fault 变 exit 1。修法：每个屏障落地时把在途载荷
+> **搬进自己的帧**再跑任何用户代码，全局槽只在「raise 到下一次 setjmp 返回」这个
+> 不跑用户代码的窗口内被占用。门禁：`scripts/spike-native/bracket_release_fails.dawn`
+> （2×2 矩阵 + kind 翻转 barrier）、`bracket_release_fatal.dawn`（致命路径）。
+> 以下为审计时的原文。
 
 - **证据：S；未动态验证。** `dawn_failure_buf`、length、kind 与 panic bit 都是 process-global：`runtime/c/dawn_rt.c:768`、`:773`、`:780`、`:789`；handler frame 只保存 `jmp_buf/prev/catches_panic`：`runtime/c/dawn_rt.c:762`。
 - **边界：** bracket 的 use 产生外层 failure；unwind path 先 pop bracket handler，再执行 release：`runtime/c/dawn_rt.c:913`。若 release 内部用 `catch_panic` 捕获另一个 failure，后者会覆盖全局 payload；release 正常返回后 `dawn_reraise`：`runtime/c/dawn_rt.c:871` 重抛的是内层 payload，而不是原 failure。

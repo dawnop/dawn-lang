@@ -399,16 +399,20 @@ pair_report "test (a failing fixture)" test "$OUT/failing.dawn"
 # quote is there because the label and the message travel through two
 # different escapers (LDC on one side, a C string literal on the other).
 #
-# Every message here stays under 512 bytes on purpose: the native runtime
-# truncates a caught failure at DAWN_FAILURE_MAX (dawn_rt.c) and the JVM does
-# not, so a longer one is a real divergence — recorded in
-# docs/native-driver-plan.md, and catch_fault's rather than this runner's.
+# The long one is over 512 bytes on purpose: the native runtime used to
+# truncate a caught failure at a fixed buffer size (#193 ARC-03) and every
+# message here stayed under it, so the runner never saw the divergence. The
+# payload owns a real string now, and this line is what keeps it owning one.
 cat > "$OUT/messages.dawn" <<'EOF'
+use std/str
+
 pub fn lines() -> Int = panic("first line\nsecond line\nthird")
 
 pub fn quoted() -> Int = panic("a \"quoted\" message")
 
 pub fn blank() -> Int = panic("")
+
+pub fn long() -> Int = panic(str.repeat("long-", 130) ++ "|END")
 
 test "a multi-line message is indented a line at a time" {
   assert lines() == 1
@@ -420,6 +424,10 @@ test "a quote survives both escapers" {
 
 test "an empty message is still one line" {
   assert blank() == 1
+}
+
+test "a message past 512 bytes arrives whole" {
+  assert long() == 1
 }
 EOF
 pair_report "test (failure message shapes)" test "$OUT/messages.dawn"
