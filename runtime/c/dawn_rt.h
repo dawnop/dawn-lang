@@ -313,6 +313,35 @@ void *dawn_dup(void *p);
 void dawn_drop(void *p);
 bool dawn_is_unique(const void *p);
 
+/* ---- unwind cleanup (#193 ARC-05) ---------------------------------------
+ *
+ * A raise travels by forced unwind (dawn_rt.c, "landing at a handler"), and
+ * these three are the emitter's half of that contract. Every owned local in
+ * emitted C is declared through DAWN_OWNED, so the C compiler's landing pads
+ * release what a discarded frame still holds; every release the RC pass
+ * placed -- a drop or a transfer -- also clears the slot, so on the ordinary
+ * path the cleanup finds NULL and does nothing, and nothing is ever released
+ * twice. `dawn_take` is the transfer: it hands the reference out and clears
+ * the slot in the same expression, which is what keeps a slot from being
+ * cleaned while its value already belongs to a callee that is unwinding.
+ *
+ * The slot is read through `void **`: every owned slot is an object pointer,
+ * all object pointers share a representation here, and every consumer
+ * compiles with -fno-strict-aliasing (the backend's standing flags). */
+static inline void dawn_unwind_drop(void *slot) {
+  void *v = *(void **)slot;
+  if (v != NULL) dawn_drop(v);
+}
+
+static inline void *dawn_take(void **slot) {
+  void *v = *slot;
+  *slot = NULL;
+  return v;
+}
+
+#define DAWN_CLEANUP(f) __attribute__((cleanup(f)))
+#define DAWN_OWNED DAWN_CLEANUP(dawn_unwind_drop)
+
 /* Take a freshly built object graph out of the ledger for good: every node
  * reachable from `p` gets an immortal header, so dup and drop return
  * immediately on all of them and `dawn_is_unique` is false everywhere in it.

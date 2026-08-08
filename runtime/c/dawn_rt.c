@@ -21,6 +21,7 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <unwind.h>
 
 static int dawn_argc;
 static char **dawn_argv;
@@ -803,11 +804,84 @@ typedef struct dawn_failure {
  * bracket's frame, where a nested handler cannot reach it. */
 static dawn_failure dawn_inflight;
 
+/* A cleanup for a frame-held payload (DAWN_CLEANUP), same NULL discipline as
+ * dawn_unwind_drop: a slot whose message was handed onward is cleared by the
+ * hand-over, so the cleanup only fires when the payload is being abandoned
+ * -- today that is one path, a bracket release escaping (see dawn_bracket). */
+static void dawn_failure_release(dawn_failure *f) {
+  if (f->msg != NULL) dawn_drop(f->msg);
+}
+
 /* The innermost handler that will take a failure of this kind, or NULL. */
 static dawn_handler *dawn_find_handler(bool is_panic) {
   dawn_handler *h = dawn_handlers;
   while (h != NULL && is_panic && !h->catches_panic) h = h->prev;
   return h;
+}
+
+/* ---- landing at a handler: a forced unwind, not a bare longjmp ----------
+ *
+ * A bare `longjmp` discards every C frame between the raise and the handler
+ * without running anything in them, and with it every reference those frames
+ * held (#193 ARC-05, docs/native-failure-design.md route A3). So the trip
+ * down is made by the platform unwinder instead: `_Unwind_ForcedUnwind`
+ * walks the frames one by one and runs each one's cleanups -- the
+ * `__attribute__((cleanup))` slots the C emitter puts on owned locals, real
+ * landing pads because everything here is compiled with `-fexceptions` --
+ * and the stop function ends the walk with a `longjmp` once it reaches the
+ * frame that holds the handler.
+ *
+ * The frame test is a CFA comparison: the stack grows down, so the first
+ * frame whose canonical frame address lies at or above the handler struct's
+ * own address is the frame the struct lives in. That holds whether or not
+ * `dawn_run_caught` was inlined into its caller -- the struct is wherever it
+ * is, and the comparison asks about the frame that contains it, not about a
+ * function name.
+ *
+ * The exception object is static and so is this whole arrangement's
+ * single-threadedness: the program runs on the runtime's one big-stack
+ * thread (dawn_rt.h, "the program's stack"), same assumption the handler
+ * chain itself already makes.
+ *
+ * This is Itanium-ABI machinery (glibc and friends); macOS and musl are
+ * recorded as unverified in the design and route A1 (a shadow cleanup
+ * stack) is the fallback if one of them turns out not to carry it. */
+static struct _Unwind_Exception dawn_uexc;
+
+static void dawn_uexc_cleanup(_Unwind_Reason_Code r, struct _Unwind_Exception *e) {
+  (void)r;
+  (void)e;
+}
+
+static _Unwind_Reason_Code dawn_unwind_stop(int version, _Unwind_Action actions,
+                                            _Unwind_Exception_Class cls,
+                                            struct _Unwind_Exception *exc,
+                                            struct _Unwind_Context *ctx, void *arg) {
+  (void)version;
+  (void)cls;
+  (void)exc;
+  dawn_handler *h = (dawn_handler *)arg;
+  if (actions & _UA_END_OF_STACK) {
+    /* dawn_raise found this handler on the chain, so the walk running out of
+     * stack means the chain and the stack disagree -- a runtime bug, and
+     * answering quietly would turn it into a wrong answer somewhere else. */
+    fflush(stdout);
+    fputs("dawn: unwound past the failure handler\n", stderr);
+    abort();
+  }
+  if (_Unwind_GetCFA(ctx) >= (uintptr_t)(void *)h) longjmp(h->jb, 1);
+  return _URC_NO_REASON;
+}
+
+static _Noreturn void dawn_unwind_to(dawn_handler *h) {
+  memset(&dawn_uexc, 0, sizeof dawn_uexc);
+  dawn_uexc.exception_class = 0x4441574e2d465031ULL; /* "DAWN-FP1" */
+  dawn_uexc.exception_cleanup = dawn_uexc_cleanup;
+  _Unwind_ForcedUnwind(&dawn_uexc, dawn_unwind_stop, h);
+  /* ForcedUnwind only returns when the stop function never stopped it. */
+  fflush(stdout);
+  fputs("dawn: the unwinder returned without reaching its handler\n", stderr);
+  abort();
 }
 
 static void dawn_raise(dawn_str *msg, bool is_panic) {
@@ -818,7 +892,7 @@ static void dawn_raise(dawn_str *msg, bool is_panic) {
     dawn_inflight.msg = dawn_str_copy(msg->p, msg->len);
     dawn_inflight.kind = is_panic ? "panic" : "fault";
     dawn_inflight.is_panic = is_panic;
-    longjmp(h->jb, 1);
+    dawn_unwind_to(h);
   }
   /* Nothing stopped it, so the program is over either way -- which is why
    * both kinds report under the same word. */
@@ -889,7 +963,7 @@ static _Noreturn void dawn_reraise(dawn_failure f) {
   dawn_handler *h = dawn_find_handler(f.is_panic);
   if (h != NULL) {
     dawn_inflight = f;
-    longjmp(h->jb, 1);
+    dawn_unwind_to(h);
   }
   fflush(stdout);
   fputs("panic: ", stderr);
@@ -930,15 +1004,25 @@ void *dawn_bracket(void *resource, dawn_clo *release, dawn_clo *use) {
   h.catches_panic = true;
   dawn_handlers = &h;
   if (setjmp(h.jb) != 0) {
-    /* the crossing failure becomes this frame's before the release runs:
+    /* The crossing failure becomes this frame's before the release runs:
      * `release` is arbitrary user code, and a failure it raises and swallows
      * must find `dawn_inflight` free rather than the one owed onward
-     * (spec 9.8.2 guarantee 2). */
-    dawn_failure crossing = dawn_inflight;
+     * (spec 9.8.2 guarantee 2).
+     *
+     * The cleanup attribute is for the release *escaping* -- raising and not
+     * catching. That failure replaces the crossing one (spec 9.8.2), and the
+     * unwind to whatever stops it passes through this frame, where the
+     * replaced message would otherwise be the one reference nothing
+     * releases. On the ordinary path the slot is handed to `dawn_reraise`
+     * and cleared first, so the cleanup finds nothing to do while the
+     * unwinder walks this frame on the way down. */
+    dawn_failure crossing DAWN_CLEANUP(dawn_failure_release) = dawn_inflight;
     dawn_handlers = h.prev;
     dawn_drop(((void *(*)(dawn_clo *, void *))release->fn)(release,
                                                           dawn_dup(resource)));
-    dawn_reraise(crossing);
+    dawn_failure owed = crossing;
+    crossing.msg = NULL;
+    dawn_reraise(owed);
   }
   void *r = ((void *(*)(dawn_clo *, void *))use->fn)(use, dawn_dup(resource));
   dawn_handlers = h.prev;
