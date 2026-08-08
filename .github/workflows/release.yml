@@ -34,11 +34,45 @@ jobs:
     uses: ./.github/workflows/gates.yml
     secrets: inherit
 
-  release:
+  release-jar:
     needs: gates
+    name: release JAR (JDK ${{ matrix.java-version }})
     runs-on: ubuntu-latest
-    # three jar builds plus the native image; no gate here, so the estimate is
-    # the fixpoint chain's share of the test job (~13 min) with room over it
+    strategy:
+      fail-fast: false
+      matrix:
+        java-version: ['21', '26']
+    # Each matrix leg runs the full seed → A → B → C builder. Keeping the
+    # invocation here once makes the source-level recipe singular while the
+    # matrix proves that both supported JDKs produce the same final B.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ matrix.java-version }}
+
+      # Seed consecration: every release jar is the next bootstrap seed, so
+      # the tag itself must pass the self-hosting gates — ci.yml runs them on
+      # main, but a tag can point anywhere. The canonical builder owns the
+      # seed → A → B → C chain and atomically promotes the verified B.
+      - name: build the toolchain chain from the seed
+        run: ./scripts/build-release-jar.sh -o dawn-selfhost.jar
+
+      - name: retain the JDK candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-jar-jdk-${{ matrix.java-version }}
+          path: dawn-selfhost.jar
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+  release:
+    needs: release-jar
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -49,12 +83,31 @@ jobs:
           distribution: 'graalvm-community'
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
-      # Seed consecration: every release jar is the next bootstrap seed, so
-      # the tag itself must pass the self-hosting gates — ci.yml runs them on
-      # main, but a tag can point anywhere. The canonical builder owns the
-      # seed → A → B → C chain and atomically promotes the verified B.
-      - name: build the toolchain chain from the seed
-        run: ./scripts/build-release-jar.sh -o dawn-selfhost.jar
+      - name: download the JDK 21 candidate
+        uses: actions/download-artifact@v4
+        with:
+          name: release-jar-jdk-21
+          path: release-candidates/jdk-21
+
+      - name: download the JDK 26 candidate
+        uses: actions/download-artifact@v4
+        with:
+          name: release-jar-jdk-26
+          path: release-candidates/jdk-26
+
+      # Neither native compilation nor release creation may see a jar until
+      # the two independently fixed-pointed candidates compare byte for byte.
+      # JDK 21 is the explicit publication candidate; equality makes the choice
+      # semantically immaterial while keeping provenance unambiguous.
+      - name: compare JDK candidates and select the release JAR
+        run: |
+          JDK21_JAR=release-candidates/jdk-21/dawn-selfhost.jar
+          JDK26_JAR=release-candidates/jdk-26/dawn-selfhost.jar
+          test -f "$JDK21_JAR"
+          test -f "$JDK26_JAR"
+          cmp "$JDK21_JAR" "$JDK26_JAR"
+          cp "$JDK21_JAR" dawn-selfhost.jar
+          cmp "$JDK21_JAR" dawn-selfhost.jar
 
       # The tag is what consumers pin, so it must name what is in the jar
       # (VERSION in selfhost/src/version.dawn).
@@ -111,21 +164,41 @@ jobs:
           echo "::notice::add this line to scripts/seed-std-checksums.txt at the same time:"
           echo "::notice::$(seed_tree_sha std)  $GITHUB_REF_NAME"
 
-      # gh is preinstalled on runners — no third-party action in the release path.
-      #
-      # Every asset is named, never globbed: a glob that matches nothing
-      # publishes a release with one file missing and says nothing about it,
-      # while a named file that is absent fails the step. The binary's own
-      # existence check (release-native.sh) is the first line; this is the
-      # second.
+      # A run can stop after creating the release or after uploading only some
+      # assets. Re-running must converge rather than fail on existing state:
+      # create only when absent, replace every named asset, then query GitHub
+      # and require each contract name exactly once. Historical extra assets
+      # are tolerated, but none of the four current assets may be omitted.
       - name: publish
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "$GITHUB_REF_NAME" \
-            dawn-selfhost.jar \
-            dawn-selfhost.jar.sha256 \
-            dawnc-linux-x86_64 \
-            dawnc-linux-x86_64.sha256 \
-            --title "$GITHUB_REF_NAME" \
-            --generate-notes
+          EXPECTED_ASSETS=(
+            dawn-selfhost.jar
+            dawn-selfhost.jar.sha256
+            dawnc-linux-x86_64
+            dawnc-linux-x86_64.sha256
+          )
+          if ! gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
+            gh release create "$GITHUB_REF_NAME" \
+              --title "$GITHUB_REF_NAME" \
+              --generate-notes
+          fi
+          gh release upload "$GITHUB_REF_NAME" --clobber "${EXPECTED_ASSETS[@]}"
+
+          mapfile -t PUBLISHED_ASSETS < <(
+            gh release view "$GITHUB_REF_NAME" --json assets \
+              --jq '.assets[].name'
+          )
+          for EXPECTED in "${EXPECTED_ASSETS[@]}"; do
+            COUNT=0
+            for PUBLISHED in "${PUBLISHED_ASSETS[@]}"; do
+              if [ "$PUBLISHED" = "$EXPECTED" ]; then
+                COUNT=$((COUNT + 1))
+              fi
+            done
+            if [ "$COUNT" -ne 1 ]; then
+              echo "::error::release asset '$EXPECTED' appears $COUNT times; expected exactly once"
+              exit 1
+            fi
+          done

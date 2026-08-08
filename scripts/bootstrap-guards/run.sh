@@ -237,11 +237,14 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# TOOL-17: release and fixed-point gates share one build recipe.
+# TOOL-17: release and fixed-point gates share one build recipe, and release
+# compares that recipe's output across both supported JDKs before publishing.
 #
 # A fixed point only proves the recipe that produced it. If the workflow and
 # local gate each spell the chain independently, both may stay green while the
-# published artifact drifts from the one tested on every push.
+# published artifact drifts from the one tested on every push. Likewise, two
+# fixed points produced by different host JDKs are not one reproducible release
+# until their final jars compare byte for byte.
 # ---------------------------------------------------------------------------
 tool17_count_line() {
   awk -v want="$2" '
@@ -255,11 +258,47 @@ tool17_count_line() {
   ' "$1"
 }
 
+tool17_require_line() {
+  local file="$1"
+  local line="$2"
+  local message="$3"
+  if [ "$(tool17_count_line "$file" "$line")" -ne 1 ]; then
+    echo "$message" >&2
+    return 1
+  fi
+}
+
+tool17_asset_block() {
+  awk '
+    {
+      line = $0
+      sub(/^[[:space:]]+/, "", line)
+      sub(/[[:space:]]+$/, "", line)
+      if (line == "EXPECTED_ASSETS=(") {
+        inside = 1
+        next
+      }
+      if (inside && line == ")") exit
+      if (inside) print line
+    }
+  ' "$1"
+}
+
+tool17_line_number() {
+  grep -nF "$2" "$1" | head -n 1 | cut -d: -f1
+}
+
 tool17_validate() {
   local release_file="$1"
   local wrapper_file="$2"
+  local compare_line
+  local create_line
   local errors=0
   local exact_count
+  local expected_assets
+  local native_line
+  local publish_check_line
+  local publish_upload_line
   local ref_count
 
   exact_count="$(tool17_count_line "$release_file" \
@@ -267,6 +306,94 @@ tool17_validate() {
   ref_count="$(grep -F -c './scripts/build-release-jar.sh' "$release_file")"
   if [ "$exact_count" -ne 1 ] || [ "$ref_count" -ne 1 ]; then
     echo "release.yml must contain exactly one canonical release-JAR builder call" >&2
+    errors=1
+  fi
+
+  if ! tool17_require_line "$release_file" \
+      "java-version: ['21', '26']" \
+      "release.yml must build the canonical jar on exactly JDK 21 and JDK 26"; then
+    errors=1
+  fi
+  # shellcheck disable=SC2016 # literal GitHub expression in workflow source
+  if ! tool17_require_line "$release_file" \
+      'java-version: ${{ matrix.java-version }}' \
+      "release.yml must feed the JDK matrix into the canonical build job"; then
+    errors=1
+  fi
+  # shellcheck disable=SC2016 # literal GitHub expression in workflow source
+  if ! tool17_require_line "$release_file" \
+      'name: release-jar-jdk-${{ matrix.java-version }}' \
+      "release.yml must retain each matrix candidate under its JDK identity"; then
+    errors=1
+  fi
+  if ! tool17_require_line "$release_file" 'needs: release-jar' \
+      "release.yml must wait for both matrix candidates before release"; then
+    errors=1
+  fi
+  # shellcheck disable=SC2016 # literal workflow shell source
+  for line in \
+    'name: release-jar-jdk-21' \
+    'name: release-jar-jdk-26' \
+    'JDK21_JAR=release-candidates/jdk-21/dawn-selfhost.jar' \
+    'JDK26_JAR=release-candidates/jdk-26/dawn-selfhost.jar' \
+    'cmp "$JDK21_JAR" "$JDK26_JAR"' \
+    'cp "$JDK21_JAR" dawn-selfhost.jar' \
+    'cmp "$JDK21_JAR" dawn-selfhost.jar'; do
+    if ! tool17_require_line "$release_file" "$line" \
+        "release.yml is missing one exact cross-JDK comparison or selection step: $line"; then
+      errors=1
+    fi
+  done
+
+  expected_assets="$(printf '%s\n' \
+    dawn-selfhost.jar \
+    dawn-selfhost.jar.sha256 \
+    dawnc-linux-x86_64 \
+    dawnc-linux-x86_64.sha256)"
+  if [ "$(tool17_asset_block "$release_file")" != "$expected_assets" ]; then
+    echo "release.yml must publish exactly the four canonical asset names" >&2
+    errors=1
+  fi
+  # shellcheck disable=SC2016 # literal workflow shell source
+  for line in \
+    'if ! gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then' \
+    'gh release upload "$GITHUB_REF_NAME" --clobber "${EXPECTED_ASSETS[@]}"' \
+    'mapfile -t PUBLISHED_ASSETS < <(' \
+    'for EXPECTED in "${EXPECTED_ASSETS[@]}"; do' \
+    'if [ "$COUNT" -ne 1 ]; then'; do
+    if ! tool17_require_line "$release_file" "$line" \
+        "release.yml is missing one exact idempotent publish assertion: $line"; then
+      errors=1
+    fi
+  done
+  # shellcheck disable=SC2016 # literal workflow shell source
+  ref_count="$(grep -F -c 'gh release create "$GITHUB_REF_NAME"' "$release_file")"
+  if [ "$ref_count" -ne 1 ]; then
+    echo "release.yml must create the release only through its guarded call" >&2
+    errors=1
+  fi
+
+  # Presence is not enough: the release job must consume the comparison before
+  # native compilation, and publication must upload before it checks GitHub's
+  # resulting asset set.
+  # shellcheck disable=SC2016 # literal workflow shell source
+  compare_line="$(tool17_line_number "$release_file" 'cmp "$JDK21_JAR" "$JDK26_JAR"')"
+  native_line="$(tool17_line_number "$release_file" './scripts/release-native.sh')"
+  # shellcheck disable=SC2016 # literal workflow shell source
+  create_line="$(tool17_line_number "$release_file" 'gh release create "$GITHUB_REF_NAME"')"
+  # shellcheck disable=SC2016 # literal workflow shell source
+  publish_upload_line="$(tool17_line_number "$release_file" 'gh release upload "$GITHUB_REF_NAME"')"
+  publish_check_line="$(tool17_line_number "$release_file" 'mapfile -t PUBLISHED_ASSETS')"
+  if [ -z "$compare_line" ] || [ -z "$native_line" ] || \
+      [ "$compare_line" -ge "$native_line" ]; then
+    echo "release.yml must compare JDK candidates before native compilation" >&2
+    errors=1
+  fi
+  if [ -z "$create_line" ] || [ -z "$publish_upload_line" ] || \
+      [ -z "$publish_check_line" ] || \
+      [ "$create_line" -ge "$publish_upload_line" ] || \
+      [ "$publish_upload_line" -ge "$publish_check_line" ]; then
+    echo "release.yml must create, clobber-upload, then verify release assets" >&2
     errors=1
   fi
 
@@ -296,9 +423,9 @@ tool17_validate() {
 release_file="$root/.github/workflows/release.yml"
 wrapper_file="$root/scripts/selfhost-fixpoint.sh"
 if tool17_validate "$release_file" "$wrapper_file"; then
-  ok "release and fixed-point gates use the one release-JAR recipe"
+  ok "release uses one cross-JDK recipe and an idempotent four-asset contract"
 else
-  bad "release or fixed-point gate bypasses the canonical release-JAR builder"
+  bad "release bypasses its canonical build, comparison, or publish contract"
 fi
 
 tool17_dir="$work/tool17"
@@ -323,6 +450,17 @@ sed '/build-release-jar\.sh -o dawn-selfhost\.jar/d' \
 tool17_expect_reject "a missing builder call" \
   "$tool17_dir/release.missing.yml" "$tool17_dir/wrapper.base.sh"
 
+sed "s/java-version: \['21', '26'\]/java-version: ['21']/" \
+  "$tool17_dir/release.base.yml" > "$tool17_dir/release.one-jdk.yml"
+tool17_expect_reject "removing the second release JDK" \
+  "$tool17_dir/release.one-jdk.yml" "$tool17_dir/wrapper.base.sh"
+
+# shellcheck disable=SC2016 # mutate literal workflow shell source
+sed '/cmp "$JDK21_JAR" "$JDK26_JAR"/d' \
+  "$tool17_dir/release.base.yml" > "$tool17_dir/release.no-cross-jdk-cmp.yml"
+tool17_expect_reject "bypassing the cross-JDK comparison" \
+  "$tool17_dir/release.no-cross-jdk-cmp.yml" "$tool17_dir/wrapper.base.sh"
+
 cp "$tool17_dir/release.base.yml" "$tool17_dir/release.double.yml"
 printf '\n      - name: duplicate builder mutation\n        run: ./scripts/build-release-jar.sh -o dawn-selfhost.jar\n' \
   >> "$tool17_dir/release.double.yml"
@@ -339,6 +477,11 @@ sed 's/build-release-jar\.sh -o dawn-selfhost\.jar/build-release-jar.sh -o candi
   "$tool17_dir/release.base.yml" > "$tool17_dir/release.wrong-output.yml"
 tool17_expect_reject "a wrong release output name" \
   "$tool17_dir/release.wrong-output.yml" "$tool17_dir/wrapper.base.sh"
+
+sed 's/^[[:space:]]*dawnc-linux-x86_64\.sha256$/            dawnc-linux-amd64.sha256/' \
+  "$tool17_dir/release.base.yml" > "$tool17_dir/release.wrong-asset.yml"
+tool17_expect_reject "a wrong published asset name" \
+  "$tool17_dir/release.wrong-asset.yml" "$tool17_dir/wrapper.base.sh"
 
 # shellcheck disable=SC2016 # mutate the guarded script's literal $work
 sed 's|\./scripts/build-release-jar\.sh -o "$work/dawn-selfhost\.jar"|java -Xss512m -jar seed.jar build selfhost -o "$work/dawn-selfhost.jar"|' \
