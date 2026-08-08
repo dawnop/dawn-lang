@@ -161,6 +161,48 @@ fn check_corruption() -> Int !io = {
   }
 }
 
+## Every central-directory signature in the archive, in order. The probe needs
+## to reach the *second* record, and finding it by scanning is the only way
+## that does not re-implement the reader being tested.
+fn cd_offsets(b: Bytes) -> List[Int] = {
+  var out: List[Int] = []
+  var i = 0
+  while i + 4 <= bytes.len(b) {
+    let sig = bytes.at(b, i) == 0x50 && bytes.at(b, i + 1) == 0x4B &&
+      bytes.at(b, i + 2) == 1 && bytes.at(b, i + 3) == 2
+    if sig { out = out ++ [i] }
+    i = i + 1
+  }
+  out
+}
+
+## LIB-02: a central directory that stops early is a damaged archive, not a
+## shorter one. Breaking the second record's signature used to yield `Ok` with
+## the first entry and nothing to say the second had gone.
+fn check_short_central_dir() -> Int !io = {
+  let good = java_zip(["a.txt", "b.txt"], ["aaa", "bbb"], 0)
+  let offs = cd_offsets(good)
+  if len(offs) != 2 {
+    io.println("the fixture archive does not have two central directory records")
+    return 1
+  }
+  let broken = flip(good, offs[1] + 3)
+  match zip.entries(broken) {
+    Ok(es) -> {
+      io.println("a truncated central directory was accepted, as " ++
+          to_string(len(es)) ++ " entries")
+      1
+    }
+    Err(e) ->
+      if str.index_of(e, "central directory") == None {
+        io.println("a truncated central directory was refused, but not as one: " ++ e)
+        1
+      } else {
+        0
+      }
+  }
+}
+
 pub fn main() -> Unit !io = {
   var bad = 0
   var cases: List[String] = ["", "a", "hello world", rep("a", 1000)]
@@ -228,6 +270,7 @@ pub fn main() -> Unit !io = {
     Err(_) -> ()
   }
   bad = bad + check_corruption()
+  bad = bad + check_short_central_dir()
 
   io.println("mismatches " ++ to_string(bad))
 }

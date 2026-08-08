@@ -36,6 +36,9 @@ const FLAG_ENCRYPTED: Int = 1
 ## The value a 32-bit field holds when the real one is off in a zip64 record.
 const ZIP64_MARK: Int = 0xFFFFFFFF
 
+## The same, for the 16-bit counts.
+const ZIP64_MARK16: Int = 0xFFFF
+
 const MAX_COMMENT: Int = 65535
 
 fn in_range(b: Bytes, off: Int, n: Int) -> Bool =
@@ -64,16 +67,30 @@ fn find_eocd(b: Bytes) -> Result[Int, String] = {
   Err("zip: no end-of-central-directory record (not a zip archive?)")
 }
 
-## Where the central directory starts. The 32-bit field in the EOCD gives way
-## to the zip64 end record once an archive outgrows 4GB.
-fn central_dir(b: Bytes, eocd: Int) -> Result[Int, String] = {
+## Where the central directory is, how long it is, and how many records it
+## holds. All three, not just the first: the count and the byte size are what
+## make "the directory ended" a checkable claim instead of whatever the scan
+## happened to stop at. A truncated or overwritten directory otherwise reads as
+## a shorter archive, which is a silently missing file rather than an error.
+type End = { start: Int, size: Int, count: Int }
+
+## The end record's contents. The 32- and 16-bit fields in the EOCD give way to
+## the zip64 end record once an archive outgrows 4GB or 65535 entries.
+fn end_record(b: Bytes, eocd: Int) -> Result[End, String] = {
+  let disk = u16(b, eocd + 4)
+  let cd_disk = u16(b, eocd + 6)
+  let here = u16(b, eocd + 8)
+  let total = u16(b, eocd + 10)
+  let size = u32(b, eocd + 12)
   let off = u32(b, eocd + 16)
-  if off != ZIP64_MARK {
-    if not in_range(b, off, 0) { return Err("zip: central directory starts past the end") }
-    return Ok(off)
+  let needs64 = off == ZIP64_MARK || size == ZIP64_MARK ||
+    total == ZIP64_MARK16 || here == ZIP64_MARK16 ||
+    disk == ZIP64_MARK16 || cd_disk == ZIP64_MARK16
+  if not needs64 {
+    return checked_end(b, disk, cd_disk, here, total, size, off)
   }
   # the locator sits immediately before the EOCD and points at the zip64 end
-  # record, which repeats the same field at full width
+  # record, which repeats the same fields at full width
   let loc = eocd - 20
   if not in_range(b, loc, 20) || u32(b, loc) != Z64_LOC_SIG {
     return Err("zip: archive needs zip64 but carries no zip64 locator")
@@ -82,9 +99,32 @@ fn central_dir(b: Bytes, eocd: Int) -> Result[Int, String] = {
   if not in_range(b, z, 56) || u32(b, z) != Z64_EOCD_SIG {
     return Err("zip: zip64 locator does not point at a zip64 end record")
   }
-  let real = u64(b, z + 48)
-  if not in_range(b, real, 0) { return Err("zip: central directory starts past the end") }
-  Ok(real)
+  checked_end(b, u32(b, z + 16), u32(b, z + 20), u64(b, z + 24), u64(b, z + 32),
+    u64(b, z + 40), u64(b, z + 48))
+}
+
+fn checked_end(
+  b: Bytes,
+  disk: Int,
+  cd_disk: Int,
+  here: Int,
+  total: Int,
+  size: Int,
+  off: Int
+) -> Result[End, String] = {
+  # A split archive's directory describes entries whose data is in files this
+  # reader was never handed, so the honest answer is that it cannot read it.
+  if disk != 0 || cd_disk != 0 {
+    return Err("zip: a multi-disk archive is not supported")
+  }
+  if here != total {
+    return Err("zip: the end record says " ++ to_string(here) ++ " entries on this disk and " ++
+        to_string(total) ++ " in total")
+  }
+  if size < 0 || not in_range(b, off, size) {
+    return Err("zip: the central directory runs past the end")
+  }
+  Ok(End { start: off, size: size, count: total })
 }
 
 ## A central directory entry, before its data is read.
@@ -205,15 +245,24 @@ pub fn entries(src: Bytes) -> Result[List[Entry], String] = {
     Ok(i) -> i
     Err(e) -> return Err(e)
   }
-  var p = match central_dir(src, eocd) {
-    Ok(i) -> i
-    Err(e) -> return Err(e)
+  let e = match end_record(src, eocd) {
+    Ok(t) -> t
+    Err(er) -> return Err(er)
   }
   var out: List[Entry] = []
-  while in_range(src, p, 4) && u32(src, p) == CD_SIG {
+  var p = e.start
+  var i = 0
+  while i < e.count {
+    # Reading exactly as many records as the end record declares, and requiring
+    # each one to be there. Stopping at the first byte that is not a signature
+    # would turn a damaged directory into a shorter archive.
+    if not in_range(src, p, 4) || u32(src, p) != CD_SIG {
+      return Err("zip: the central directory ends after " ++ to_string(i) ++ " of " ++
+          to_string(e.count) ++ " entries")
+    }
     let (h, next) = match read_head(src, p) {
       Ok(t) -> t
-      Err(e) -> return Err(e)
+      Err(er) -> return Err(er)
     }
     # A directory is an entry whose name ends in a slash. That is the whole
     # rule -- ZipEntry.isDirectory() is the same test -- and the external
@@ -224,11 +273,16 @@ pub fn entries(src: Bytes) -> Result[List[Entry], String] = {
     if not is_dir {
       data = match entry_data(src, h) {
         Ok(d) -> d
-        Err(e) -> return Err(e)
+        Err(er) -> return Err(er)
       }
     }
     out = out ++ [Entry { name: h.name, is_dir: is_dir, data: data }]
     p = next
+    i = i + 1
+  }
+  if p != e.start + e.size {
+    return Err("zip: the central directory is " ++ to_string(p - e.start) ++
+        " bytes, the end record says " ++ to_string(e.size))
   }
   Ok(out)
 }
