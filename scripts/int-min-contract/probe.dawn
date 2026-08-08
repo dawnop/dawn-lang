@@ -1,0 +1,27 @@
+# The one signed 64-bit value whose magnitude is not itself an Int. Keep both
+# a live Core literal and a comptime value here: the C emitter receives them as
+# CInt and VInt through different paths, while both language backends must
+# still print the same written-down answer.
+use std/io
+
+const FOLDED: Int = comptime { -9223372036854775808 }
+
+fn decimal() -> Int = -9223372036854775808
+
+fn hexadecimal() -> Int = -0x8000_0000_0000_0000
+
+fn binary() -> Int =
+  -0b1000000000000000000000000000000000000000000000000000000000000000
+
+fn recognizes_min(value: Int) -> Bool = match value {
+  -0x8000000000000000 -> true
+  _ -> false
+}
+
+pub fn main() -> Unit !io = {
+  println(to_string(decimal()))
+  println(to_string(hexadecimal()))
+  println(to_string(binary()))
+  println(to_string(FOLDED))
+  println(to_string(recognizes_min(decimal())))
+}

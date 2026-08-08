@@ -63,6 +63,15 @@
 
 ## SYN-08 — P2 — `Int.MIN` 没有直接字面量
 
+- **后续处置（2026-08-09）：已修。** INT token 现在用专用 marker 表示精确 magnitude
+  `2^63`，十进制、十六进制与二进制共用先验 digit、再负值累加的无溢出 parser；非法数字、
+  精确 marker 和越界分别落到不同结果。表达式与 pattern 只在直接 `MINUS + marker` 时折成
+  普通 `EInt(Int.MIN)`，裸 marker 与括号隔开的写法带固定 hint 拒绝，折叠结果仍进入统一
+  postfix tail。C emitter 的 `CInt`/`VInt` 共用 `int_lit`，最小值只输出 `INT64_MIN`。
+  parser/lexer 单测、绝对 grammar corpus 与 JVM/native/C 专项 contract 固定这些边界；
+  放行裸 marker、放宽精确边界、混淆 invalid/overflow、绕过 postfix tail、退回错误 C 宏
+  拼写五类负控均已实跑见红后恢复。
+
 - **证据：V。** lexer 先把 magnitude 当正数并限制 64 位：`selfhost/src/front/lexer.dawn:278`；parser 后续才构造 unary minus：`selfhost/src/front/parser.dawn:1489`。
 - **边界：** `-9223372036854775808` 与 `-0x8000000000000000` 都在 magnitude 阶段越界，尽管它们是合法 Int 值。
 - **影响：** 基础类型有一个值不能直接用于 const、pattern 和边界测试，只能写成 `-9223372036854775807 - 1`。

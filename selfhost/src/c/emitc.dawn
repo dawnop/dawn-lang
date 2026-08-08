@@ -491,6 +491,10 @@ fn emit_str_static(st: CSt, v: String) -> (CSt, String) = {
   (st2, "(&" ++ t ++ "_lit)")
 }
 
+fn int_lit(v: Int) -> String =
+  if v == -9223372036854775807 - 1 { "INT64_MIN" }
+  else { "INT64_C(" ++ to_string(v) ++ ")" }
+
 ## A value the interpreter folded, written back out as C.
 ##
 ## Scalars are literals, exactly as the JVM backend inlines them. Everything
@@ -501,7 +505,7 @@ fn emit_str_static(st: CSt, v: String) -> (CSt, String) = {
 ## once and shared by every reference that names it.
 fn const_literal(v: CValue, ty: Ty, what: String) -> String =
   match v {
-    VInt(x) -> "INT64_C(" ++ to_string(x) ++ ")"
+    VInt(x) -> int_lit(x)
     VFloat(x) -> float_lit(x)
     VBool(x) -> if x { "true" } else { "false" }
     # both callers peel VStr off to `emit_str_static` first -- a stored
@@ -747,7 +751,7 @@ fn bin_op_c(op: CBinOp) -> String =
 ## gate that asks.
 pub fn emit_expr(st: CSt, e: CExpr, k: Bool) -> (CSt, String) =
   match e {
-    CInt(v) -> (st, "INT64_C(" ++ to_string(v) ++ ")")
+    CInt(v) -> (st, int_lit(v))
     CFloat(v) -> (st, float_lit(v))
     CBool(v) -> (st, if v { "true" } else { "false" })
     CStr(v) -> emit_str_static(st, v)
@@ -2320,4 +2324,11 @@ test "a non-finite Float is written as C, not as its spelling" {
   assert const_literal(VFloat(inf), TyFloat, "c") == "(1.0/0.0)"
   assert const_literal(VFloat(0.0 / 0.0), TyFloat, "c") == "(0.0/0.0)"
   assert const_literal(VFloat(-0.0), TyFloat, "c") == "-0.0"
+}
+
+test "Int minimum uses the C standard boundary macro" {
+  let min = -9223372036854775807 - 1
+  assert int_lit(min) == "INT64_MIN"
+  assert int_lit(-1) == "INT64_C(-1)"
+  assert const_literal(VInt(min), TyInt, "test") == "INT64_MIN"
 }

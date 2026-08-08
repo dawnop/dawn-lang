@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 8582a4b81e5e73ec -->
+<!-- doc-check: translation-of docs/spec.md @ 74b1995c51e47441 -->
 
 # Dawn Language Specification
 
@@ -97,6 +97,15 @@ spaced `a < -b` is unaffected, and `dawn fmt` puts a space on both sides of ever
 | `[1, 2, 3]` | `List[Int]` | trailing comma allowed |
 | `(1, "a")` | `(Int, String)` | tuple, 2 to 8 elements |
 | `'a'`, `'\n'`, `'世'`, `'\u{1F600}'` | `Char` | character literal (see below) |
+
+The non-negative magnitude of an integer token must normally be in
+`0..9223372036854775807`. The sole exception is exactly `2^63`, and only when it is the direct
+operand of unary `-`: decimal `-9223372036854775808`, hexadecimal `-0x8000000000000000`, and the
+corresponding 64-bit binary spelling all denote the minimum `Int`. Expressions and literal
+patterns use the same rule. Parentheses around the whole negative value remain valid
+(`(-9223372036854775808)`), but parentheses separating the magnitude from the minus do not
+(`-(9223372036854775808)`), nor does bare `2^63`. A magnitude greater than `2^63` is a range error;
+a digit forbidden by its radix (such as `0b2`) is an invalid literal rather than a range error.
 
 **A character is its own type, `Char`**: one Unicode scalar value (`0..0x10FFFF`, excluding the
 surrogate range `D800..DFFF`). It is an **opaque type** (§2.7) over `Int` whose owner is

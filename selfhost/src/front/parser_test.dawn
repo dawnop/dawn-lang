@@ -7,8 +7,9 @@ use std/str
 use front/parser.{parse_module}
 use front/astdump.{render_module}
 use front/ast.{
-  Expr, EInt, EVar, EApply, EBinary, ECtor, EBlock, ELambda, EMatch,
+  Expr, EInt, EVar, EApply, EBinary, ECtor, EBlock, ELambda, EMatch, EPropagate,
   BinOp, OpAdd, OpMul,
+  PLit,
   Stmt, SWhile,
   Decl, DFn, DConst, DUseModule, DImpl, Module,
   TypeRef, TQual, TNamed
@@ -151,6 +152,105 @@ test "leading `-` does not continue (ambiguous with unary minus)" {
   # unlike &&, a `-` at line start starts fresh — here `- y` strands at top level
   let (m, ds) = parse_module("const A: Int = x\n  - y")
   assert len(ds) > 0
+}
+
+test "direct negative minimum magnitudes fold before postfix parsing" {
+  for literal in [
+    "-9223372036854775808",
+    "-0x8000000000000000",
+    "-0b1000000000000000000000000000000000000000000000000000000000000000",
+    "(-9223372036854775808)"
+  ] {
+    let (m, ds) = parse_module("const MIN: Int = " ++ literal)
+    assert len(ds) == 0
+    match m.decls[0] {
+      DConst(_, _, _, EInt(v, _, _), _, _, _, _) -> {
+        assert v == -9223372036854775807 - 1
+      }
+      _ -> { assert false }
+    }
+  }
+  let (m2, ds2) = parse_module("const MIN: Int = -9223372036854775808?")
+  assert len(ds2) == 0
+  match m2.decls[0] {
+    DConst(_, _, _, EPropagate(EInt(v, _, _), _, _), _, _, _, _) -> {
+      assert v == -9223372036854775807 - 1
+    }
+    _ -> { assert false }
+  }
+}
+
+test "minimum magnitude accepts only a direct unary minus" {
+  for src in [
+    "const BAD: Int = 9223372036854775808",
+    "const BAD: Int = -(9223372036854775808)"
+  ] {
+    let (_, ds) = parse_module(src)
+    assert len(ds) == 1
+    assert ds[0].msg == "integer literal out of 64-bit range: 9223372036854775808"
+    assert str.contains(ds[0].hint, "only directly after unary `-`")
+  }
+}
+
+test "negative minimum magnitude patterns fold to ordinary Int literals" {
+  let src = "fn f(x: Int) -> Int = match x {\n" ++
+    "  -9223372036854775808 -> 1\n" ++
+    "  _ -> 0\n" ++
+    "}"
+  let (m, ds) = parse_module(src)
+  assert len(ds) == 0
+  match m.decls[0] {
+    DFn(f) -> match f.body {
+      EMatch(_, arms, _, _) -> match arms[0].pats[0] {
+        PLit(EInt(v, _, _), _, _) -> { assert v == -9223372036854775807 - 1 }
+        _ -> { assert false }
+      }
+      _ -> { assert false }
+    }
+    _ -> { assert false }
+  }
+}
+
+test "minimum magnitude rejection preserves later syntax" {
+  let src = "fn f() -> Int = {\n" ++
+    "  9223372036854775808\n" ++
+    "  7\n" ++
+    "}\n" ++
+    "const BAD: Int = 9223372036854775808\n" ++
+    "fn kept() -> Int = 3"
+  let (m, ds) = parse_module(src)
+  assert len(ds) == 2
+  assert len(m.decls) == 2
+  match m.decls[0] {
+    DFn(f) -> match f.body {
+      EBlock(_, Some(EInt(v, _, _)), _, _) -> { assert v == 7 }
+      _ -> { assert false }
+    }
+    _ -> { assert false }
+  }
+  match m.decls[1] {
+    DFn(f) -> { assert f.name == "kept" }
+    _ -> { assert false }
+  }
+
+  let (m2, ds2) = parse_module("fn f(x: Int) -> Int = match x {\n" ++
+      "  9223372036854775808 -> 1\n" ++
+      "  _ -> 2\n" ++
+      "}")
+  assert len(ds2) == 1
+  match m2.decls[0] {
+    DFn(f) -> match f.body {
+      EMatch(_, arms, _, _) -> {
+        assert len(arms) == 1
+        match arms[0].body {
+          EInt(v, _, _) -> { assert v == 2 }
+          _ -> { assert false }
+        }
+      }
+      _ -> { assert false }
+    }
+    _ -> { assert false }
+  }
 }
 
 test "a bare assignment arm is reported and later arms/decls still parse" {

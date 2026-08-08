@@ -39,7 +39,7 @@ pub fn render(toks: List[Token], diags: List[Diag]) -> String = {
     var line = kind_name(t.kind) ++ "\t" ++ to_string(t.lo) ++ "\t" ++ to_string(t.hi) ++
       "\t" ++ esc(t.text)
     if t.kind == INT {
-      line = line ++ "\t" ++ to_string(t.ival)
+      line = line ++ "\t" ++ if t.is_min_magnitude { "<2^63>" } else { to_string(t.ival) }
     } else if t.kind == FLOAT {
       line = line ++ "\t" ++ to_string(t.fval)
     } else if t.kind == STRING {
@@ -56,7 +56,18 @@ pub fn render(toks: List[Token], diags: List[Diag]) -> String = {
 }
 
 test "dump escapes and extras" {
-  let t = Token { kind: INT, text: "'a'", lo: 0, hi: 3, ival: 97, fval: 0.0, segs: [] }
+  let t = Token {
+    kind: INT, text: "'a'", lo: 0, hi: 3, ival: 97, is_min_magnitude: false,
+    fval: 0.0, segs: []
+  }
   let d = Diag { msg: "bad\tthing", lo: 1, hi: 2, hint: "" }
   assert render([t], [d]) == "INT\t0\t3\t'a'\t97\n!\t1\t2\tbad\\tthing\t"
+}
+
+test "dump names the minimum magnitude marker" {
+  let t = Token {
+    kind: INT, text: "9223372036854775808", lo: 0, hi: 19, ival: 0,
+    is_min_magnitude: true, fval: 0.0, segs: []
+  }
+  assert render([t], []) == "INT\t0\t19\t9223372036854775808\t<2^63>"
 }

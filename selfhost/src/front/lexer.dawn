@@ -84,13 +84,28 @@ fn no_segs() -> List[Seg] = []
 fn no_cps() -> List[Char] = []
 
 fn tok(k: TokKind, text: String, lo: Int, hi: Int) -> Token =
-  Token { kind: k, text: text, lo: lo, hi: hi, ival: 0, fval: 0.0, segs: no_segs() }
+  Token {
+    kind: k, text: text, lo: lo, hi: hi, ival: 0, is_min_magnitude: false,
+    fval: 0.0, segs: no_segs()
+  }
 
 fn int_tok(text: String, lo: Int, hi: Int, v: Int) -> Token =
-  Token { kind: INT, text: text, lo: lo, hi: hi, ival: v, fval: 0.0, segs: no_segs() }
+  Token {
+    kind: INT, text: text, lo: lo, hi: hi, ival: v, is_min_magnitude: false,
+    fval: 0.0, segs: no_segs()
+  }
+
+fn min_magnitude_tok(text: String, lo: Int, hi: Int) -> Token =
+  Token {
+    kind: INT, text: text, lo: lo, hi: hi, ival: 0, is_min_magnitude: true,
+    fval: 0.0, segs: no_segs()
+  }
 
 fn float_tok(text: String, lo: Int, hi: Int, v: Float) -> Token =
-  Token { kind: FLOAT, text: text, lo: lo, hi: hi, ival: 0, fval: v, segs: no_segs() }
+  Token {
+    kind: FLOAT, text: text, lo: lo, hi: hi, ival: 0, is_min_magnitude: false,
+    fval: v, segs: no_segs()
+  }
 
 fn str_tok(s: Src, a: Int, b: Int, segs: List[Seg]) -> Token =
   Token {
@@ -99,6 +114,7 @@ fn str_tok(s: Src, a: Int, b: Int, segs: List[Seg]) -> Token =
     lo: off(s, a),
     hi: off(s, b),
     ival: 0,
+    is_min_magnitude: false,
     fval: 0.0,
     segs: segs
   }
@@ -256,28 +272,93 @@ fn lex_word(s: Src, start: Int) -> (Int, Token) = {
 
 # ---- numbers ----
 
+type Magnitude =
+  | MagValue(v: Int)
+  | MagMin
+  | MagInvalid
+  | MagOverflow
+
+fn magnitude_digit(c: Char, radix: Int) -> Option[Int] = {
+  let cp = char.code(c)
+  let v = if cp >= char.code('0') && cp <= char.code('9') {
+    cp - char.code('0')
+  } else if cp >= char.code('a') && cp <= char.code('f') {
+    cp - char.code('a') + 10
+  } else if cp >= char.code('A') && cp <= char.code('F') {
+    cp - char.code('A') + 10
+  } else {
+    -1
+  }
+  if v >= 0 && v < radix { Some(v) } else { None }
+}
+
+## Parse an unsigned magnitude while accumulating it as a negative Int. This
+## makes -2^63 representable without overflowing on the positive intermediate.
+fn parse_magnitude(chars: List[Char], radix: Int) -> Magnitude = {
+  let min = -9223372036854775807 - 1
+  let cutoff = min / radix
+  var seen = false
+  for c in chars {
+    if c != '_' {
+      seen = true
+      match magnitude_digit(c, radix) {
+        Some(_) -> ()
+        None -> return MagInvalid
+      }
+    }
+  }
+  if not seen { return MagInvalid }
+
+  var value = 0
+  for c in chars {
+    if c != '_' {
+      let digit = match magnitude_digit(c, radix) {
+        Some(v) -> v
+        None -> 0
+      }
+      if value < cutoff { return MagOverflow }
+      value = value * radix
+      if value < min + digit { return MagOverflow }
+      value = value - digit
+    }
+  }
+  if value == min {
+    MagMin
+  } else {
+    MagValue(-value)
+  }
+}
+
 fn lex_number(s: Src, start: Int) -> (Int, Token, List[Diag]) =
   if s.cps[start] == '0' && (cp_at(s, start + 1) == 'x' || cp_at(s, start + 1) == 'b') {
     let radix = if cp_at(s, start + 1) == 'x' { 16 } else { 2 }
     var i = start + 2
     var ds: List[Char] = []
     while i < s.n && (char_is_alnum(s.cps[i]) || s.cps[i] == '_') {
-      if s.cps[i] != '_' { ds = ds ++ [s.cps[i]] }
+      ds = ds ++ [s.cps[i]]
       i = i + 1
     }
     let text = text_of(s, start, i)
-    match parse_int_radix(from_code_points(ds), radix) {
-      Some(v) -> (i, int_tok(text, off(s, start), off(s, i), v), no_diags())
-      None -> (
+    match parse_magnitude(ds, radix) {
+      MagValue(v) -> (i, int_tok(text, off(s, start), off(s, i), v), no_diags())
+      MagMin -> (i, min_magnitude_tok(text, off(s, start), off(s, i)), no_diags())
+      MagInvalid -> (
         i,
         int_tok(text, off(s, start), off(s, i), 0),
         [mk_diag("invalid integer literal: " ++ text, off(s, start), off(s, i))]
+      )
+      MagOverflow -> (
+        i,
+        int_tok(text, off(s, start), off(s, i), 0),
+        [mk_diag("integer literal out of 64-bit range: " ++ text, off(s, start), off(s, i))]
       )
     }
   } else {
     var i = start
     var ds: List[Char] = []
+    var magnitude: List[Char] = []
     while i < s.n && (char_is_digit(s.cps[i]) || s.cps[i] == '_') {
+      magnitude = magnitude ++ [s.cps[i]]
       if s.cps[i] != '_' { ds = ds ++ [s.cps[i]] }
       i = i + 1
     }
@@ -317,9 +398,15 @@ fn lex_number(s: Src, start: Int) -> (Int, Token, List[Diag]) =
         )
       }
     } else {
-      match parse_int(digits) {
-        Some(v) -> (i, int_tok(text, off(s, start), off(s, i), v), no_diags())
-        None -> (
+      match parse_magnitude(magnitude, 10) {
+        MagValue(v) -> (i, int_tok(text, off(s, start), off(s, i), v), no_diags())
+        MagMin -> (i, min_magnitude_tok(text, off(s, start), off(s, i)), no_diags())
+        MagInvalid -> (
+          i,
+          int_tok(text, off(s, start), off(s, i), 0),
+          [mk_diag("invalid integer literal: " ++ text, off(s, start), off(s, i))]
+        )
+        MagOverflow -> (
           i,
           int_tok(text, off(s, start), off(s, i), 0),
           [mk_diag("integer literal out of 64-bit range: " ++ text, off(s, start), off(s, i))]
@@ -538,6 +625,7 @@ fn lex_char(s: Src, start: Int) -> Result[(Int, Token), (Int, Diag)] = {
     lo: off(s, start),
     hi: off(s, i),
     ival: char.code(cp),
+    is_min_magnitude: false,
     fval: 0.0,
     segs: no_segs()
   }))
@@ -838,7 +926,39 @@ test "int literal forms" {
   assert toks[2].ival == 10
   assert toks[3].ival == 1000000
   assert toks[3].text == "1_000_000"
+  assert not toks[0].is_min_magnitude
   assert len(ds) == 0
+}
+
+test "integer magnitude boundary is shared by every radix" {
+  let (toks, ds) = lex(
+    "9223372036854775807 9_223_372_036_854_775_808 0009223372036854775808 " ++
+      "0x7fffffffffffffff 0x8000_0000_0000_0000 0x00008000000000000000 " ++
+      "0b0111111111111111111111111111111111111111111111111111111111111111 " ++
+      "0b1000000000000000000000000000000000000000000000000000000000000000")
+  assert len(ds) == 0
+  assert toks[0].ival == 9223372036854775807
+  assert not toks[0].is_min_magnitude
+  for i in [1, 2, 4, 5, 7] { assert toks[i].is_min_magnitude }
+  assert toks[3].ival == 9223372036854775807
+  assert toks[6].ival == 9223372036854775807
+}
+
+test "integer overflow and invalid radix digits stay distinct" {
+  for src in [
+    "9223372036854775809",
+    "0x8000000000000001",
+    "0b1000000000000000000000000000000000000000000000000000000000000001"
+  ] {
+    let (_, ds) = lex(src)
+    assert len(ds) == 1
+    assert str.starts_with(ds[0].msg, "integer literal out of 64-bit range: ")
+  }
+  for src in ["0x", "0x_", "0xg", "0b2", "0x80000000000000000g"] {
+    let (_, ds) = lex(src)
+    assert len(ds) == 1
+    assert str.starts_with(ds[0].msg, "invalid integer literal: ")
+  }
 }
 
 test "float literal forms" {

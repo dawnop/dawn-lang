@@ -1510,6 +1510,11 @@ fn unary_expr(p: P, st: St, nb: Bool) -> PR[Expr] = {
     Ok((st2, EUnary(OpNot, operand, t.lo, e_hi(operand))))
   } else if k == MINUS {
     let (st1, t) = adv(p, st)
+    let next = cur(p, st1)
+    if next.kind == INT && next.is_min_magnitude {
+      let value = -9223372036854775807 - 1
+      return postfix_tail(p, adv1(p, st1), EInt(value, t.lo, next.hi), nb)
+    }
     let (st2, operand) = unary_expr(p, st1, nb)?
     Ok((st2, EUnary(OpNeg, operand, t.lo, e_hi(operand))))
   } else if k == TILDE {
@@ -1522,7 +1527,13 @@ fn unary_expr(p: P, st: St, nb: Bool) -> PR[Expr] = {
 }
 
 fn postfix_expr(p: P, st: St, nb: Bool) -> PR[Expr] = {
-  var (st1, e) = primary_expr(p, st, nb)?
+  let (st1, e) = primary_expr(p, st, nb)?
+  postfix_tail(p, st1, e, nb)
+}
+
+fn postfix_tail(p: P, st: St, initial: Expr, nb: Bool) -> PR[Expr] = {
+  var st1 = st
+  var e = initial
   while true {
     let k = kind_of(p, st1)
     if k == QUESTION {
@@ -1653,6 +1664,10 @@ fn primary_expr(p: P, st: St, nb: Bool) -> PR[Expr] = {
   let t = cur(p, st)
   let k = t.kind
   if k == INT {
+    if t.is_min_magnitude {
+      return Err((st, pd_h("integer literal out of 64-bit range: " ++ t.text, t.lo, t.hi,
+        "this magnitude is valid only directly after unary `-`, as in `-9223372036854775808`")))
+    }
     Ok((adv1(p, st), EInt(t.ival, t.lo, t.hi)))
   } else if k == CHAR {
     Ok((adv1(p, st), EChar(t.ival, t.lo, t.hi)))
@@ -2355,6 +2370,10 @@ fn pattern_p(p: P, st: St) -> PR[Pattern] = {
   if k == UNDERSCORE {
     Ok((adv1(p, st), PWild(t.lo, t.hi)))
   } else if k == INT {
+    if t.is_min_magnitude {
+      return Err((st, pd_h("integer literal out of 64-bit range: " ++ t.text, t.lo, t.hi,
+        "this magnitude is valid only directly after unary `-`, as in `-9223372036854775808`")))
+    }
     Ok((adv1(p, st), PLit(EInt(t.ival, t.lo, t.hi), t.lo, t.hi)))
   } else if k == CHAR {
     Ok((adv1(p, st), PLit(EChar(t.ival, t.lo, t.hi), t.lo, t.hi)))
@@ -2366,7 +2385,8 @@ fn pattern_p(p: P, st: St) -> PR[Pattern] = {
     let plo = t.lo
     let phi = nt.hi
     if nt.kind == INT {
-      Ok((adv1(p, st1), PLit(EInt(-nt.ival, plo, phi), plo, phi)))
+      let value = if nt.is_min_magnitude { -9223372036854775807 - 1 } else { -nt.ival }
+      Ok((adv1(p, st1), PLit(EInt(value, plo, phi), plo, phi)))
     } else if nt.kind == FLOAT {
       Ok((adv1(p, st1), PLit(EFloat(-nt.fval, plo, phi), plo, phi)))
     } else {
