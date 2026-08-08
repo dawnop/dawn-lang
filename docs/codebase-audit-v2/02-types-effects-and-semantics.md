@@ -135,8 +135,10 @@
 - **影响：** 与用户对“字符”的基本预期、错误信息和 REPL/调试显示相悖；opaque representation 细节泄漏到语言 UI。
 - **建议：** 让 `Char` 自己实现 user-facing display；若需要 code-point debug，显式使用 `char.code`。如坚持 `Show` 表示结构，可用 `Display[Char]` 处理 interpolation。
 
-## SEM-17 — P3 — Java `char` 诊断仍声称 Dawn 没有 Char
+## SEM-17 — P3（已修）— Java `char` bridge 诊断明确两种字符模型
 
-- **证据：S。** Dawn `Char` 已是 Unicode scalar：`docs/spec.md:88`；拒绝 Java UTF-16 `char` 可以合理，但诊断仍写“Dawn has no char type”：`selfhost/src/check/checker.dawn:5694`。
-- **影响：** 把“Unicode scalar 与 UTF-16 code unit 不同”误报成“没有类型”，妨碍用户理解真正边界。
-- **建议：** 先修诊断；若补 interop，使用 `U16` 或 checked conversion，不能把 surrogate 直接装进 `Char`。
+> **已修（2026-08-09，`3fc1e9e`）。** 原诊断把 bridge 不兼容误报成 Dawn 没有字符类型；当前诊断明确 Java `char` 是一个 UTF-16 code unit，而 Dawn `Char` 是 Unicode scalar，并给出返回解码后 `int` 或 `String` 的 adapter 路径。
+
+- **当前行为：** `map_java_return` 仍有意拒绝把 Java `char` 直接映射为 Dawn `Char`：`selfhost/src/check/checker.dawn:6243`；这保住了 `Char` 的 Unicode scalar invariant，而不是声称 Dawn 缺少该类型。
+- **验证：** checker 单元测试钉住主诊断与 hint：`selfhost/src/check/checker.dawn:7482`；checker corpus 同步钉住对外文本：`scripts/checker-corpus/cases/java_bridge.expected:3`。
+- **剩余边界：** 若以后增加直接 interop，仍应使用 `U16` 或 checked conversion，不能把 surrogate 直接装进 `Char`。
