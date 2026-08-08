@@ -10,8 +10,8 @@
 # of failure (with all diagnostics accumulated so far) — recovery points
 # (declaration and statement boundaries) append the fatal diagnostic and
 # resynchronize from that position, exactly like the Kotlin catch blocks.
-# The Kotlin `noStructLit` member becomes the threaded `ns` flag: true inside
-# if/while/for/match headers, reset by any bracket.
+# The Kotlin `noStructLit` member becomes the threaded `nb` flag (no brace
+# suffix): true inside if/while/for/match headers, reset by any bracket.
 
 use std/str
 use std/list
@@ -1262,17 +1262,17 @@ fn assert_stmt(p: P, st: St) -> PR[Stmt] = {
 
 # ---- expressions (by precedence) ----
 
-fn expression(p: P, st: St, ns: Bool) -> PR[Expr] = pipe_expr(p, st, ns)
+fn expression(p: P, st: St, nb: Bool) -> PR[Expr] = pipe_expr(p, st, nb)
 
-fn pipe_expr(p: P, st: St, ns: Bool) -> PR[Expr] = {
-  var (st1, left) = or_expr(p, st, ns)?
+fn pipe_expr(p: P, st: St, nb: Bool) -> PR[Expr] = {
+  var (st1, left) = or_expr(p, st, nb)?
   while true {
     # vertical pipes: |> may start the next line
     var look = st1.pos
     while p.toks[look].kind == NEWLINE { look = look + 1 }
     if p.toks[look].kind != PIPEGT { break }
     let st2 = skip_nl(p, St { ..st1, pos: look + 1 })
-    let (st3, rhs) = or_expr(p, st2, ns)?
+    let (st3, rhs) = or_expr(p, st2, nb)?
     # `x |> f(a)` is `f(x, a)`: the pipe inserts `left` as the first argument of
     # a *named* call, or applies a bare name / lambda to it. Deliberately not
     # every application node -- `x |> make()(1)` and `x |> Some(1)` stay the
@@ -1320,28 +1320,28 @@ fn lead_op(p: P, st: St, classify: fn(TokKind) -> Option[BinOp]) -> St =
     }
   }
 
-fn or_expr(p: P, st: St, ns: Bool) -> PR[Expr] = {
-  var (st1, left) = and_expr(p, st, ns)?
+fn or_expr(p: P, st: St, nb: Bool) -> PR[Expr] = {
+  var (st1, left) = and_expr(p, st, nb)?
   while true {
     let sta = lead1(p, st1, PIPEPIPE)
     if not at_kind(p, sta, PIPEPIPE) { break }
     let (st2, op) = adv(p, sta)
     let st3 = skip_nl(p, st2)
-    let (st4, right) = and_expr(p, st3, ns)?
+    let (st4, right) = and_expr(p, st3, nb)?
     left = EBinary(OpOr, left, right, op.lo, op.hi, e_lo(left), e_hi(right))
     st1 = st4
   }
   Ok((st1, left))
 }
 
-fn and_expr(p: P, st: St, ns: Bool) -> PR[Expr] = {
-  var (st1, left) = cmp_expr(p, st, ns)?
+fn and_expr(p: P, st: St, nb: Bool) -> PR[Expr] = {
+  var (st1, left) = cmp_expr(p, st, nb)?
   while true {
     let sta = lead1(p, st1, AMPAMP)
     if not at_kind(p, sta, AMPAMP) { break }
     let (st2, op) = adv(p, sta)
     let st3 = skip_nl(p, st2)
-    let (st4, right) = cmp_expr(p, st3, ns)?
+    let (st4, right) = cmp_expr(p, st3, nb)?
     left = EBinary(OpAnd, left, right, op.lo, op.hi, e_lo(left), e_hi(right))
     st1 = st4
   }
@@ -1357,15 +1357,15 @@ fn cmp_op(k: TokKind) -> Option[BinOp] =
   else if k == GE { Some(OpGe) }
   else { None }
 
-fn cmp_expr(p: P, st: St, ns: Bool) -> PR[Expr] = {
-  let (st0, left) = bor_expr(p, st, ns)?
+fn cmp_expr(p: P, st: St, nb: Bool) -> PR[Expr] = {
+  let (st0, left) = bor_expr(p, st, nb)?
   let st1 = lead_op(p, st0, cmp_op)
   match cmp_op(kind_of(p, st1)) {
     None -> Ok((st1, left))
     Some(o) -> {
       let (st2, op) = adv(p, st1)
       let st3 = skip_nl(p, st2)
-      let (st4b, right) = bor_expr(p, st3, ns)?
+      let (st4b, right) = bor_expr(p, st3, nb)?
       let result = EBinary(o, left, right, op.lo, op.hi, e_lo(left), e_hi(right))
       # comparisons are non-associative: a < b < c is an error
       let st4 = lead_op(p, st4b, cmp_op)
@@ -1379,42 +1379,42 @@ fn cmp_expr(p: P, st: St, ns: Bool) -> PR[Expr] = {
 }
 
 # Bitwise sits between comparison and concat (Rust order, spec §4.3).
-fn bor_expr(p: P, st: St, ns: Bool) -> PR[Expr] = {
-  var (st1, left) = bxor_expr(p, st, ns)?
+fn bor_expr(p: P, st: St, nb: Bool) -> PR[Expr] = {
+  var (st1, left) = bxor_expr(p, st, nb)?
   while true {
     let sta = lead1(p, st1, PIPE)
     if not at_kind(p, sta, PIPE) { break }
     let (st2, op) = adv(p, sta)
     let st3 = skip_nl(p, st2)
-    let (st4, right) = bxor_expr(p, st3, ns)?
+    let (st4, right) = bxor_expr(p, st3, nb)?
     left = EBinary(OpBor, left, right, op.lo, op.hi, e_lo(left), e_hi(right))
     st1 = st4
   }
   Ok((st1, left))
 }
 
-fn bxor_expr(p: P, st: St, ns: Bool) -> PR[Expr] = {
-  var (st1, left) = band_expr(p, st, ns)?
+fn bxor_expr(p: P, st: St, nb: Bool) -> PR[Expr] = {
+  var (st1, left) = band_expr(p, st, nb)?
   while true {
     let sta = lead1(p, st1, CARET)
     if not at_kind(p, sta, CARET) { break }
     let (st2, op) = adv(p, sta)
     let st3 = skip_nl(p, st2)
-    let (st4, right) = band_expr(p, st3, ns)?
+    let (st4, right) = band_expr(p, st3, nb)?
     left = EBinary(OpBxor, left, right, op.lo, op.hi, e_lo(left), e_hi(right))
     st1 = st4
   }
   Ok((st1, left))
 }
 
-fn band_expr(p: P, st: St, ns: Bool) -> PR[Expr] = {
-  var (st1, left) = shift_expr(p, st, ns)?
+fn band_expr(p: P, st: St, nb: Bool) -> PR[Expr] = {
+  var (st1, left) = shift_expr(p, st, nb)?
   while true {
     let sta = lead1(p, st1, AMP)
     if not at_kind(p, sta, AMP) { break }
     let (st2, op) = adv(p, sta)
     let st3 = skip_nl(p, st2)
-    let (st4, right) = shift_expr(p, st3, ns)?
+    let (st4, right) = shift_expr(p, st3, nb)?
     left = EBinary(OpBand, left, right, op.lo, op.hi, e_lo(left), e_hi(right))
     st1 = st4
   }
@@ -1427,8 +1427,8 @@ fn shift_op(k: TokKind) -> Option[BinOp] =
   else if k == USHR { Some(OpUshr) }
   else { None }
 
-fn shift_expr(p: P, st: St, ns: Bool) -> PR[Expr] = {
-  var (st1, left) = concat_expr(p, st, ns)?
+fn shift_expr(p: P, st: St, nb: Bool) -> PR[Expr] = {
+  var (st1, left) = concat_expr(p, st, nb)?
   while true {
     let sta = lead_op(p, st1, shift_op)
     match shift_op(kind_of(p, sta)) {
@@ -1436,7 +1436,7 @@ fn shift_expr(p: P, st: St, ns: Bool) -> PR[Expr] = {
       Some(o) -> {
         let (st2, op) = adv(p, sta)
         let st3 = skip_nl(p, st2)
-        let (st4, right) = concat_expr(p, st3, ns)?
+        let (st4, right) = concat_expr(p, st3, nb)?
         left = EBinary(o, left, right, op.lo, op.hi, e_lo(left), e_hi(right))
         st1 = st4
       }
@@ -1445,14 +1445,14 @@ fn shift_expr(p: P, st: St, ns: Bool) -> PR[Expr] = {
   Ok((st1, left))
 }
 
-fn concat_expr(p: P, st: St, ns: Bool) -> PR[Expr] = {
+fn concat_expr(p: P, st: St, nb: Bool) -> PR[Expr] = {
   # right-associative
-  let (st1, left) = add_expr(p, st, ns)?
+  let (st1, left) = add_expr(p, st, nb)?
   let st1b = lead1(p, st1, PLUSPLUS)
   if not at_kind(p, st1b, PLUSPLUS) { return Ok((st1b, left)) }
   let (st2, op) = adv(p, st1b)
   let st3 = skip_nl(p, st2)
-  let (st4, right) = concat_expr(p, st3, ns)?
+  let (st4, right) = concat_expr(p, st3, nb)?
   Ok((st4, EBinary(OpConcat, left, right, op.lo, op.hi, e_lo(left), e_hi(right))))
 }
 
@@ -1461,15 +1461,15 @@ fn add_op(k: TokKind) -> Option[BinOp] =
   else if k == MINUS { Some(OpSub) }
   else { None }
 
-fn add_expr(p: P, st: St, ns: Bool) -> PR[Expr] = {
-  var (st1, left) = mul_expr(p, st, ns)?
+fn add_expr(p: P, st: St, nb: Bool) -> PR[Expr] = {
+  var (st1, left) = mul_expr(p, st, nb)?
   while true {
     match add_op(kind_of(p, st1)) {
       None -> break
       Some(o) -> {
         let (st2, op) = adv(p, st1)
         let st3 = skip_nl(p, st2)
-        let (st4, right) = mul_expr(p, st3, ns)?
+        let (st4, right) = mul_expr(p, st3, nb)?
         left = EBinary(o, left, right, op.lo, op.hi, e_lo(left), e_hi(right))
         st1 = st4
       }
@@ -1484,8 +1484,8 @@ fn mul_op(k: TokKind) -> Option[BinOp] =
   else if k == PERCENT { Some(OpMod) }
   else { None }
 
-fn mul_expr(p: P, st: St, ns: Bool) -> PR[Expr] = {
-  var (st1, left) = unary_expr(p, st, ns)?
+fn mul_expr(p: P, st: St, nb: Bool) -> PR[Expr] = {
+  var (st1, left) = unary_expr(p, st, nb)?
   while true {
     let sta = lead_op(p, st1, mul_op)
     match mul_op(kind_of(p, sta)) {
@@ -1493,7 +1493,7 @@ fn mul_expr(p: P, st: St, ns: Bool) -> PR[Expr] = {
       Some(o) -> {
         let (st2, op) = adv(p, sta)
         let st3 = skip_nl(p, st2)
-        let (st4, right) = unary_expr(p, st3, ns)?
+        let (st4, right) = unary_expr(p, st3, nb)?
         left = EBinary(o, left, right, op.lo, op.hi, e_lo(left), e_hi(right))
         st1 = st4
       }
@@ -1502,27 +1502,27 @@ fn mul_expr(p: P, st: St, ns: Bool) -> PR[Expr] = {
   Ok((st1, left))
 }
 
-fn unary_expr(p: P, st: St, ns: Bool) -> PR[Expr] = {
+fn unary_expr(p: P, st: St, nb: Bool) -> PR[Expr] = {
   let k = kind_of(p, st)
   if k == NOT {
     let (st1, t) = adv(p, st)
-    let (st2, operand) = unary_expr(p, st1, ns)?
+    let (st2, operand) = unary_expr(p, st1, nb)?
     Ok((st2, EUnary(OpNot, operand, t.lo, e_hi(operand))))
   } else if k == MINUS {
     let (st1, t) = adv(p, st)
-    let (st2, operand) = unary_expr(p, st1, ns)?
+    let (st2, operand) = unary_expr(p, st1, nb)?
     Ok((st2, EUnary(OpNeg, operand, t.lo, e_hi(operand))))
   } else if k == TILDE {
     let (st1, t) = adv(p, st)
-    let (st2, operand) = unary_expr(p, st1, ns)?
+    let (st2, operand) = unary_expr(p, st1, nb)?
     Ok((st2, EUnary(OpBnot, operand, t.lo, e_hi(operand))))
   } else {
-    postfix_expr(p, st, ns)
+    postfix_expr(p, st, nb)
   }
 }
 
-fn postfix_expr(p: P, st: St, ns: Bool) -> PR[Expr] = {
-  var (st1, e) = primary_expr(p, st, ns)?
+fn postfix_expr(p: P, st: St, nb: Bool) -> PR[Expr] = {
+  var (st1, e) = primary_expr(p, st, nb)?
   while true {
     let k = kind_of(p, st1)
     if k == QUESTION {
@@ -1572,7 +1572,7 @@ fn postfix_expr(p: P, st: St, ns: Bool) -> PR[Expr] = {
           # generic FN arm below so it lands on the same node `xs.each(...)`
           # does -- attaching to the EFieldAcc would apply the field's value
           # instead of calling the method.
-          let (st6, lam) = lambda_expr(p, st3, ns)?
+          let (st6, lam) = lambda_expr(p, st3, nb)?
           e = EMethod(e, f.text, [pos_arg(lam)], f.lo, f.hi, e_lo(e), e_hi(lam))
           st1 = st6
         } else {
@@ -1616,7 +1616,7 @@ fn postfix_expr(p: P, st: St, ns: Bool) -> PR[Expr] = {
       # surfaces as NEWLINE first, and the arm below only continues a chain for
       # `.`. So `let x = f(a)` followed by a line `fn helper(...) -> T = ...`
       # stays two statements -- the local function is not swallowed.
-      let (st5, lam) = lambda_expr(p, st1, ns)?
+      let (st5, lam) = lambda_expr(p, st1, nb)?
       e = attach_trailing(e, lam)
       st1 = st5
     } else if k == NEWLINE {
@@ -1632,7 +1632,7 @@ fn postfix_expr(p: P, st: St, ns: Bool) -> PR[Expr] = {
   Ok((st1, e))
 }
 
-fn primary_expr(p: P, st: St, ns: Bool) -> PR[Expr] = {
+fn primary_expr(p: P, st: St, nb: Bool) -> PR[Expr] = {
   let t = cur(p, st)
   let k = t.kind
   if k == INT {
@@ -1651,7 +1651,7 @@ fn primary_expr(p: P, st: St, ns: Bool) -> PR[Expr] = {
     # `x => e`: one token of lookahead past a name. Nothing else in the grammar
     # puts `=>` after a bare identifier, so no backtracking is needed.
     if kind_ahead(p, st, 1) == FATARROW {
-      bare_lambda1(p, st, ns)
+      bare_lambda1(p, st, nb)
     } else {
       let (st1, name) = adv(p, st)
       Ok((st1, EVar(name.text, name.lo, name.hi)))
@@ -1666,7 +1666,7 @@ fn primary_expr(p: P, st: St, ns: Bool) -> PR[Expr] = {
     if k1 == NEWLINE || k1 == RBRACE || k1 == RPAREN || k1 == COMMA || k1 == EOF {
       Ok((st1, EReturn(None, t.lo, t.hi)))
     } else {
-      let (st2, v) = expression(p, st1, ns)?
+      let (st2, v) = expression(p, st1, nb)?
       Ok((st2, EReturn(Some(v), t.lo, e_hi(v))))
     }
   } else if k == BREAK {
@@ -1676,7 +1676,7 @@ fn primary_expr(p: P, st: St, ns: Bool) -> PR[Expr] = {
   } else if k == LBRACE {
     block_expr(p, st)
   } else if k == LPAREN {
-    paren_expr(p, st, ns)
+    paren_expr(p, st, nb)
   } else if k == LBRACKET {
     list_lit(p, st)
   } else if k == FN {
@@ -1696,7 +1696,7 @@ fn primary_expr(p: P, st: St, ns: Bool) -> PR[Expr] = {
     let (st2, b) = block_expr(p, st1)?
     Ok((st2, EUnsafePure(b, t.lo, e_hi(b))))
   } else if k == TYPEIDENT {
-    ctor_expr(p, st, ns)
+    ctor_expr(p, st, nb)
   } else if k == WITH {
     # `with` is a statement, not an expression: it needs a rest-of-block to turn
     # into a closure, and only a block has one (spec §4.10).
@@ -1712,9 +1712,9 @@ fn primary_expr(p: P, st: St, ns: Bool) -> PR[Expr] = {
 ## parsed here -- the parenthesised form is the general application postfix
 ## over this bare head (SYN-02), and `check_apply` turns it back into a
 ## construction because that is what the head resolves to.
-fn ctor_expr(p: P, st: St, ns: Bool) -> PR[Expr] = {
+fn ctor_expr(p: P, st: St, nb: Bool) -> PR[Expr] = {
   let (st1, name) = adv(p, st)
-  if at_kind(p, st1, LBRACE) && not ns { return record_lit(p, st1, name) }
+  if at_kind(p, st1, LBRACE) && not nb { return record_lit(p, st1, name) }
   let none: List[Arg] = []
   Ok((st1, ECtor(name.text, none, None, false, name.lo, name.hi, name.lo, name.hi)))
 }
@@ -1875,12 +1875,12 @@ fn param_err(p: P, st: St, bare: Bool, what: String) -> Diag = {
 ## the postfix loop and from `.name fn(...)`: as a prefix on a lambda in any
 ## other position `fn` is retired (spec §4.5), because there `(x) =>` says the
 ## same thing without it.
-fn lambda_expr(p: P, st: St, ns: Bool) -> PR[Expr] = {
+fn lambda_expr(p: P, st: St, nb: Bool) -> PR[Expr] = {
   let (st1, kw) = adv(p, st)
   let (st2, params) = lambda_params(p, st1, false)?
   let (st3, _) = want(p, st2, FATARROW, "`=>` (lambda body)")?
   let st4 = skip_nl(p, st3)
-  let (st5, body) = expression(p, st4, ns)?
+  let (st5, body) = expression(p, st4, nb)?
   Ok((st5, ELambda(params, body, false, kw.lo, e_hi(body))))
 }
 
@@ -1914,21 +1914,21 @@ fn paren_is_lambda(p: P, st: St) -> Bool = {
 
 ## `(a, b) => e` / `(a: Int) => e` / `() => e`. `st` is at the `(`, and
 ## `paren_is_lambda` has already said this is one.
-fn bare_lambda(p: P, st: St, ns: Bool) -> PR[Expr] = {
+fn bare_lambda(p: P, st: St, nb: Bool) -> PR[Expr] = {
   let open = cur(p, st)
   let (st1, params) = lambda_params(p, st, true)?
   let (st2, _) = want(p, st1, FATARROW, "`=>` (lambda body)")?
   let st3 = skip_nl(p, st2)
-  let (st4, body) = expression(p, st3, ns)?
+  let (st4, body) = expression(p, st3, nb)?
   Ok((st4, ELambda(params, body, false, open.lo, e_hi(body))))
 }
 
 ## `x => e`. `st` is at the parameter name, and the caller has checked that
 ## `=>` follows it.
-fn bare_lambda1(p: P, st: St, ns: Bool) -> PR[Expr] = {
+fn bare_lambda1(p: P, st: St, nb: Bool) -> PR[Expr] = {
   let (st1, name) = adv(p, st)
   let st2 = skip_nl(p, adv1(p, st1))
-  let (st3, body) = expression(p, st2, ns)?
+  let (st3, body) = expression(p, st2, nb)?
   let param = LambdaParam { name: name.text, ann: None, lo: name.lo, hi: name.hi }
   Ok((st3, ELambda([param], body, false, name.lo, e_hi(body))))
 }
@@ -1947,13 +1947,13 @@ fn list_lit(p: P, st: St) -> PR[Expr] = {
   Ok((st4, EListLit(elems, open.lo, close.hi)))
 }
 
-fn paren_expr(p: P, st: St, ns: Bool) -> PR[Expr] = {
+fn paren_expr(p: P, st: St, nb: Bool) -> PR[Expr] = {
   # `(a, b) => e` / `(a: Int) => e` / `() => e`: decided before the group is
   # parsed, because a parameter list is not an expression (see
   # `paren_is_lambda`). Only in primary position -- a `(` *after* an expression
   # is an application, which is what keeps `f(a)(x)` from becoming a trailing
   # closure.
-  if paren_is_lambda(p, st) { return bare_lambda(p, st, ns) }
+  if paren_is_lambda(p, st) { return bare_lambda(p, st, nb) }
   let (st1, open) = adv(p, st)
   if at_kind(p, st1, RPAREN) {
     let (st2, close) = adv(p, st1)
