@@ -6241,8 +6241,10 @@ fn map_java_return(cx: Cx, rc: String, nlo: Int, nhi: Int) -> (Cx, Ty) !io =
   } else if rc == "boolean" {
     (cx, TyBool)
   } else if rc == "char" {
-    (cerr_h(cx, "`char` returns are not supported", nlo, nhi,
-      "there is no char type; wrap the call in the standard library instead"), TyError)
+    (cerr_h(cx, "`char` cannot map directly to Dawn `Char`", nlo, nhi,
+      "Java `char` is one UTF-16 code unit, while Dawn `Char` is a Unicode scalar; " ++
+        "use a Java adapter that returns a decoded code point as `int` (then call `char.of`) " ++
+        "or returns `String`"), TyError)
   } else if rc == "java.lang.String" {
     (cx, opt_ty(TyString))
   } else if rc == "[B" {
@@ -7475,6 +7477,17 @@ fn test_jsig() -> Jsig = {
     methods_of: tj_methods_of,
     static_fields_of: tj_fields_of
   }
+}
+
+test "a Java char return explains the incompatible character models" {
+  let (cx, t) = map_java_return(test_cx(), "char", 2, 6)
+  assert t == TyError
+  assert len(cx.diags) == 1
+  assert cx.diags[0].msg == "`char` cannot map directly to Dawn `Char`"
+  assert cx.diags[0].hint ==
+    "Java `char` is one UTF-16 code unit, while Dawn `Char` is a Unicode scalar; " ++
+    "use a Java adapter that returns a decoded code point as `int` (then call `char.of`) " ++
+    "or returns `String`"
 }
 
 test "unsafe_pure masks io and flags redundancy" {
