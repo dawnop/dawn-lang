@@ -44,7 +44,7 @@ fake="$work/root"
 mkdir -p "$fake/bin" "$fake/scripts" "$fake/selfhost"
 cp "$root/bin/dawn" "$fake/bin/dawn"
 cp "$root/scripts/seedjar.sh" "$root/scripts/seed-release.txt" \
-  "$root/scripts/seed-checksums.txt" "$fake/scripts/"
+  "$root/scripts/seed-checksums.txt" "$root/scripts/seed-std-checksums.txt" "$fake/scripts/"
 cp "$root/selfhost/dawn.toml" "$root/selfhost/dawn.lock" "$fake/selfhost/"
 cp -r "$root/selfhost/src" "$fake/selfhost/src"
 cp -r "$root/std" "$fake/std"
@@ -68,6 +68,7 @@ for target in \
   std/str.dawn \
   scripts/seed-release.txt \
   scripts/seed-checksums.txt \
+  scripts/seed-std-checksums.txt \
   scripts/seedjar.sh \
   bin/dawn \
   packages/json/src/parser.dawn \
@@ -168,6 +169,70 @@ if (
   bad "a seed was used on a machine with no way to hash it"
 else
   ok "no way to hash the seed is refused rather than warned about"
+fi
+
+# ---------------------------------------------------------------------------
+# TOOL-15: the seed's std is verified on the same terms as its jar.
+#
+# It used to be verified on no terms at all: `modules.txt` exists, use it. Both
+# are stage-1 inputs and the cache is a writable directory, so half the
+# bootstrap could be swapped with the jar checksum still green.
+# ---------------------------------------------------------------------------
+mkdir -p "$sroot/.dawn/seeds/std-v9.9.9"
+printf 'str\n' > "$sroot/.dawn/seeds/std-v9.9.9/modules.txt"
+printf 'pub fn f() -> Int = 1\n' > "$sroot/.dawn/seeds/std-v9.9.9/str.dawn"
+std_want=$(
+  ROOT="$sroot"
+  export ROOT
+  # shellcheck disable=SC1091
+  . "$sroot/scripts/seedjar.sh"
+  seed_tree_sha "$sroot/.dawn/seeds/std-v9.9.9"
+)
+
+try_std() { # -> exit code, output in $work/std.txt
+  (
+    ROOT="$sroot"
+    export ROOT
+    # shellcheck disable=SC1091
+    . "$sroot/scripts/seedjar.sh"
+    seed_std_dir
+  ) > "$work/std.txt" 2>&1
+}
+
+printf '%s  v9.9.9\n' "$std_want" > "$sroot/scripts/seed-std-checksums.txt"
+if try_std && [ "$(cat "$work/std.txt")" = "$sroot/.dawn/seeds/std-v9.9.9" ]; then
+  ok "a cached seed std with a matching tree hash resolves"
+else
+  bad "the resolver refused a seed std that matches its recorded hash"
+  sed 's/^/  | /' "$work/std.txt" >&2
+fi
+
+# The whole point: a writable cache directory. Edit one byte of it.
+printf 'pub fn f() -> Int = 2\n' > "$sroot/.dawn/seeds/std-v9.9.9/str.dawn"
+if try_std; then
+  bad "an edited seed std was used anyway"
+  sed 's/^/  | /' "$work/std.txt" >&2
+else
+  ok "an edited seed std is refused"
+fi
+printf 'pub fn f() -> Int = 1\n' > "$sroot/.dawn/seeds/std-v9.9.9/str.dawn"
+
+# A file *added* to the tree, which a per-file check would miss and a tree
+# hash cannot.
+printf 'extra\n' > "$sroot/.dawn/seeds/std-v9.9.9/extra.dawn"
+if try_std; then
+  bad "a file added to the seed std went unnoticed"
+else
+  ok "a file added to the seed std is refused"
+fi
+rm -f "$sroot/.dawn/seeds/std-v9.9.9/extra.dawn"
+
+: > "$sroot/scripts/seed-std-checksums.txt"
+if try_std; then
+  bad "a seed std with no recorded hash was used anyway (fail-open)"
+  sed 's/^/  | /' "$work/std.txt" >&2
+else
+  ok "a seed std with no recorded hash is refused"
 fi
 
 exit "$fail"
