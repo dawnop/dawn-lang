@@ -984,7 +984,14 @@ pub fn sig_render(adts: Adts, traits: Traits, s: Sig) -> String = {
       Some(n) -> n
       None -> "_"
     }
-    ps = ps ++ [pn ++ ": " ++ ty_show(adts, pt)]
+    # a defaulted parameter renders `= ...`: the signature does not carry the
+    # expression (it lives in the synthesized f$default$k's body), and what a
+    # caller needs from the rendering is that the argument may be omitted
+    let dm = match get(s.param_defaults, j) {
+      Some(true) -> " = ..."
+      _ -> ""
+    }
+    ps = ps ++ [pn ++ ": " ++ ty_show(adts, pt) ++ dm]
     j = j + 1
   }
   "fn " ++ s.name ++ tp ++ "(" ++ join(ps, ", ") ++ ") -> " ++ ty_show(adts, s.ret) ++
