@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 148502c4549b624c -->
+<!-- doc-check: translation-of docs/spec.md @ 5b51118581aa2b60 -->
 
 # Dawn Language Specification
 
@@ -1169,6 +1169,10 @@ difference of finite sets.
    **not implemented** (left for later).
 4. A pure function is **guaranteed**: same arguments return the same value, no observable side
    effects. The compiler may fold it, deduplicate it, and call it at comptime on that basis.
+   This guarantee did **not** hold for named effects until #188: a closure built under a handler
+   with an io arm could be run from a function whose signature said it was pure. The fix is the
+   boundary clause in §6.5 and
+   [`docs/effects-soundness-design.md`](effects-soundness-design.md).
 5. `panic`/`todo`/`assert` do not count as io — they do not return (divergence is not an effect).
 
 ### 6.3 Effect polymorphism
@@ -1333,13 +1337,18 @@ of its discipline — legal only inside a block, the rest is a real closure, `re
   the effect are all compile errors.
 - One `handle`, one effect; handling the same effect again is inner shadowing outer, which is legal.
 - Handling an effect the block never actually performs is allowed (harmless dead evidence).
-- **Typing rule**: let the rest closure's effect be `(base, L)` and each arm body's effect be
+- **Typing rule**: let the rest closure's effect be `(base, L')` and each arm body's effect be
   `(base_i, L_i)`; then the block that installs the handler is recorded as
-  `(base ∪ ⋃base_i, (L ∖ {E}) ∪ ⋃L_i)`.
-  The subtraction removes only `E` itself; the effects the arm bodies perform themselves (including
-  io, including other labels) are all unioned back onto the block —
+  `(base ∪ ⋃base_i, L' ∪ ⋃L_i)`.
+  That `L'` is already **settled**: the rest is a closure, and a closure's row is settled at its
+  **creation point** — the labels this handler answers came off there, replaced by the effects of
+  this handler's arms. So this node performs no subtraction of its own. The effects the arm bodies
+  perform themselves (including io, including other labels) are all unioned back onto the block —
   an arm runs where the handler is installed, not where the operation is performed.
-  **"Row minus E" happens at this one syntactic node only**, it does not enter unification.
+  **"A row losing a member" happens at the closure creation point and nowhere else**, and it does
+  not enter unification. It moved there from `with handle` because the capture happens at the
+  lambda: subtraction and capture at one node is what keeps a label from being taken off the wrong
+  function ([`docs/effects-soundness-design.md`](effects-soundness-design.md) §4.2).
 
 #### Lexical scope
 
@@ -1350,9 +1359,11 @@ Consequences:
 - **The handler is the creation point's, not the call site's.** A closure built inside a handle
   block that escapes outside the block carrying that handler and is then called is still answered
   by the original handler — in the tail-resumptive tier a handler is just a piece of ordinary code,
-  there is no stack magic to invalidate. The escaping closure's **type** still says `!E`, and
-  wherever it is called that label still has to be owned in the row; escaping decides "which
-  handler answers", not "whether the label is written out".
+  there is no stack magic to invalidate. The escaping closure's **type** does not say `!E`; it says
+  what the arms it captured do. `E` has an answer already, and the arms are the code that really
+  runs when the closure is called. The type states "what happens when you run this", not "who has
+  to supply the handler" — in Dawn the caller never supplies it. So a handler with pure arms yields
+  a pure escaping closure, and one with an io arm yields an `!io` one.
 - Performing **this same effect** inside an arm body binds to the **outer** handler for that effect
   (it does not answer itself); with no outer one the arm owes the label and the error is reported
   as usual.
@@ -1365,8 +1376,14 @@ diagnostic as effect variables:
 - **trait / impl methods**: a method's row is pure or `!io`.
 - **comptime / const initialisers**: compile-time evaluation performs no named effect and cannot
   install a handler either.
-- **Type declaration positions**: `alias` targets, function types in record/variant fields. That
-  means in v1 a labelled closure cannot be stored in a record field.
+- **Written function types**: `fn(…) -> T !E` is illegal in any `TypeRef` position — parameters,
+  return types, `let` annotations, `alias` targets, record/variant fields, generic arguments, tuple
+  elements. A written label reads as "whoever calls me supplies the handler", and Dawn's evidence is
+  only ever captured by a closure at its creation point, so the spelling has no runtime meaning
+  behind it. The migration is an **effect variable** (`fn() -> Int !e`), which takes both labelled
+  and pure closures. A function's **own signature row** (`fn one() -> Int !Ask`) is not a `TypeRef`
+  and stays legal; so does `!io`. A record field can now hold an escaping closure — its row was
+  settled at the creation point.
 - **Function values**: a labelled function (including an operation itself) cannot be passed
   directly as a value — evidence is a hidden parameter and a function value has nowhere to put it.
   Write it as a lambda (`() => ask()`) and the lambda captures the evidence.
@@ -1382,6 +1399,10 @@ out in a signature appends one hidden evidence parameter to the function, **plac
 dictionary parameters**, in ascending effect id order. Labels that flow in through an effect
 variable synthesise no parameter — in that case the evidence sits in the closure's capture, so
 higher-order library functions (`list.map` and its ilk) need zero changes.
+The other half of the evidence flow is its dual: a closure settles its own row at the creation
+point, against the evidence it captured. A signature synthesises the parameter, a closure captures
+the evidence; only the two together are the whole flow — one decides who supplies, the other who
+owns up.
 
 ---
 

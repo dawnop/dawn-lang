@@ -1,0 +1,50 @@
+# checker.dawn: a signature is held to the whole row, not just its base
+# (docs/effects-soundness-design.md §4.3). The label axis used to be left out
+# on the grounds that it answers for itself at the raise site -- which it does,
+# but only for calls that name their callee. A call through a function value
+# never resolves evidence, so nothing checked it.
+use std/io
+
+effect Leak { fn leak() -> Int }
+
+fn raises() -> Int !Leak = leak()
+
+# The reason there is nothing left for the check to catch: a labelled function
+# cannot become a function value in the first place, so a labelled row cannot
+# reach a dynamic call in a body that never declared the label. Take this
+# refusal away and the row check is what stops the program instead.
+pub fn as_value() -> Int = {
+  let g = raises
+  g()
+}
+
+# The laundering shapes this batch closes, written the way ① leaves them. `fwd`
+# installs a handler of its own and takes the closure through an effect
+# variable, which is the only spelling a function type has for "raises
+# something".
+fn fwd(f: fn() -> Int !e) -> Int !e = {
+  with handle Leak { leak() => 0 }
+  f()
+}
+
+pub type Thunk = { run: fn() -> Int }
+
+# e9: the forwarder's own handler no longer takes anything off the closure's
+# row, because the closure was settled where it was built -- under the io arm
+# below. `Thunk.run` is pure, and the thunk is not.
+pub fn launder() -> Thunk !io = {
+  with handle Leak { leak() => {
+    io.println("io arm")
+    3
+  } }
+  Thunk(() => fwd(() => leak()))
+}
+
+# e15, and the half that must keep working: the closure answers to `middle`'s
+# own evidence, `!e` instantiates to `!Leak`, and `middle` declares it. The row
+# is not laundered on the way through `fwd` -- it is reported as what it is.
+pub fn middle() -> Int !Leak = fwd(() => leak())
+
+# ... and the same call from a body that declares nothing is refused, with the
+# label named.
+pub fn undeclared() -> Int = fwd(() => leak())

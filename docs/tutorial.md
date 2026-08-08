@@ -796,8 +796,15 @@ not answer itself — so `with handle Ask { ask() => ask() * 10 }` means "take t
 from outside and multiply it by ten", not an infinite loop.
 
 A closure captures the handler **where it is created**, and carrying it out of the block
-keeps it working. Its type still says `!Ask`: escaping decides who answers, not whether
-the label is written.
+keeps it working. Its type then says what running it will *do*, not what it was written
+under: the label has an answer already, so what goes into the row is the effects of the
+arms it captured. A handler with pure arms yields a pure closure; one with an io arm
+yields an `!io` one.
+
+That is also why a function type may not name an effect. `fn(f: fn() -> Int !Ask)` reads
+as "the caller supplies the handler", and no closure in Dawn works that way — write
+`fn(f: fn() -> Int !e)` instead, which takes a closure raising `Ask` and forwards it into
+your own row.
 
 ### Higher-order functions need no change
 

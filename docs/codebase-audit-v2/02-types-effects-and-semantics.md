@@ -12,6 +12,15 @@
 
 ## SEM-01 — P0 候选 — 逃逸 handler evidence 可能破坏 pure 保证
 
+> **已修（#188，2026-08-08）。** 本条判断成立，且比本文所写更严重——动态复现确认了
+> 两个**独立**缺陷：这里描述的 `eff_minus` 减错人（D2），以及标签轴对**函数值调用**
+> 完全不设防（D1，本文未识别）。修法是「B 极简」三刀：写出来的函数类型禁具名标签、
+> 闭包在创建点结算自己的行、`verify_effects` 核对整行；`eff_minus` 已删除。
+> 逐条设计与实测收据见 [effects-soundness-design.md](../effects-soundness-design.md)。
+> 本文下面的建议段猜中了修法的一半（「逃逸 closure 的类型必须消掉由捕获 evidence
+> 处理的标签，并合入该 evidence 对应 arm 的实际效果」），另一半（禁写出来的标签）
+> 是把它做安全所必需的。
+
 - **证据：S；未动态验证。** 规范保证 pure 无可观察副作用：`docs/spec.md:948`；同时规定 closure 在创建点捕获 handler，逃逸后仍使用原 handler，但类型仍写 `!E`：`docs/spec.md:1096`。
 - checker 把 evidence 当普通可捕获 local：`selfhost/src/check/checker.dawn:3841`、`selfhost/src/check/checker.dawn:7015`。handler arm 的效果只在安装节点计费：`selfhost/src/check/checker.dawn:3910`；remainder 则用 `eff_minus` 去掉 `E`：`selfhost/src/check/checker.dawn:3957`。
 - **静态反例形状：** 函数 A 在 `with handle Leak` 中安装一个 `!io` arm，返回 `fn() -> Unit !Leak`；该 closure 捕获 A 的 evidence。纯函数 B 再安装一个纯 `Leak` handler并调用 closure。B 的类型检查会从 closure row 去掉 `Leak`，但运行时 closure 使用捕获的旧 evidence，执行 A 的 IO arm。

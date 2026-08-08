@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/tutorial.md @ 9d5d1b1ada24876d -->
+<!-- doc-check: translation-of docs/tutorial.md @ ac797f8440512c8e -->
 
 # Dawn 教程
 
@@ -744,8 +744,13 @@ pub fn main() -> Unit !io = {
 臂里再发**本效果**，找的是**外层**的 handler（handler 不答自己）——所以
 `with handle Ask { ask() => ask() * 10 }` 是「把外面那个答案乘十」，不是死循环。
 
-闭包在**创建的地方**捕获 handler，带着它跑出块外也照样有效。它的类型仍写着 `!Ask`：
-逃逸决定的是谁应答，不是标签写不写。
+闭包在**创建的地方**捕获 handler，带着它跑出块外也照样有效。它的类型此后说的是
+「跑它会做什么」，不是「它是在什么下面写的」：标签已经有人应答了，于是进到行里的
+是它捕获的那些臂的效果。纯臂的 handler 造出纯闭包，io 臂的造出 `!io` 闭包。
+
+这也是函数类型不能写具名效果的原因。`fn(f: fn() -> Int !Ask)` 读起来像「调用我的人
+得供 handler」，而 Dawn 里没有闭包是那样工作的——改写成 `fn(f: fn() -> Int !e)`：
+它收一个会发 `Ask` 的闭包，并把这个效果转发进你自己的行。
 
 ### 高阶函数不用改一行
 
