@@ -3,7 +3,7 @@
 > 状态：**current** —— 全目录的分层索引与状态登记处。**每篇文档的权威状态在它自己的
 > 文件头**；这张索引与文件头冲突时以文件头为准，并请顺手改这里。
 
-`docs/` 下现有 62 篇文档 <!-- doc-check: doc-count -->，按时间叠加，混着**规范、调研、
+`docs/` 下现有 70 篇文档 <!-- doc-check: doc-count -->，按时间叠加，混着**规范、调研、
 设计方案、落地日志、复盘和运维说明**。读者无从判断哪几段还成立——`design.md` 说实现语言
 是 Kotlin，`bootstrap.md` 说 LSP 还在 Kotlin，两者都是当时的事实、现在都不是。
 这份索引把它们分层，并给每篇标状态。**篇数与「每篇都在索引里」这两件事都由
@@ -26,6 +26,19 @@
 | [spec.md](spec.md) | **normative** | 语言的权威定义（词法、类型、效果、comptime、互操作、编译模型）。 |
 | [spec.en.md](spec.en.md) | **normative** | 上面那篇的**英文译本**。改规范先改中文，再改这里；两者不脱节由 `doc-check.py` 的 transl 检查盯着。 |
 | [grammar.ebnf](grammar.ebnf) | historical | 机器可读语法，**已落后于 parser**（2026-08-04 复核仍成立：缺 `use … as`、要求所有函数写 `-> type`、用未定义的 `UPPER_IDENT`、`. IDENT` 不覆盖 `Class.FIELD`）。以 spec.md 与 `selfhost/src/front/parser.dawn` 为准；可执行的那份期望是 `scripts/grammar-corpus/`（CI 门禁），文法的分叉现在以一个失败用例出现。SYN-02/SYN-03 已从**另一头**关掉——本文件写对了，是实现补上了它，逐条见文件头部。 |
+
+## 当前全仓审查（v2）
+
+| 文档 | 状态 | 说明 |
+|---|---|---|
+| [codebase-audit-v2.md](codebase-audit-v2.md) | current | v0.60.0 / `86f6a0f63960` 的精细复审总纲、分级、P1 索引与建议顺序。 |
+| [codebase-audit-v2/00-methodology-and-retractions.md](codebase-audit-v2/00-methodology-and-retractions.md) | current | 基线、证据等级、严重度，以及旧审查已修/已驳回结论的撤回边界。 |
+| [codebase-audit-v2/01-syntax-and-formatting.md](codebase-audit-v2/01-syntax-and-formatting.md) | current | lexer、parser、formatter、尾闭包、pattern 与 VS Code grammar。 |
+| [codebase-audit-v2/02-types-effects-and-semantics.md](codebase-audit-v2/02-types-effects-and-semantics.md) | current | 类型、trait、associated type、具名效果、Cursor/Char 与 nominal abstraction。 |
+| [codebase-audit-v2/03-compiler-and-runtime-architecture.md](codebase-audit-v2/03-compiler-and-runtime-architecture.md) | current | checker/Core/comptime、JVM/C 后端、native failure runtime 与阶段契约。 |
+| [codebase-audit-v2/04-cli-lsp-build-and-release.md](codebase-audit-v2/04-cli-lsp-build-and-release.md) | current | CLI、LSP、依赖规划、lock/vendor、自举与发布链。 |
+| [codebase-audit-v2/05-stdlib-and-packages.md](codebase-audit-v2/05-stdlib-and-packages.md) | current | std、inflate、JSON、Web 与 SHA-2 的 API/协议边界。 |
+| [codebase-audit-v2/06-docs-tests-and-governance.md](codebase-audit-v2/06-docs-tests-and-governance.md) | current | normative spec、文档状态、examples/packages/contract gates 与仓库治理。 |
 
 ## 当前架构与流程
 
