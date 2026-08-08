@@ -203,6 +203,26 @@ fn check_short_central_dir() -> Int !io = {
   }
 }
 
+## LIB-03: a deflate stream with its last byte removed must be refused. The
+## fixed table's end-of-block is seven zero bits, so a reader that reads past
+## the end as zeros can decode one out of nothing and call the stream complete.
+fn check_truncated_deflate() -> Int !io = {
+  var bad = 0
+  for lvl in [1, 6, 9] {
+    let raw = java_deflate(bytes.utf8(rep("abcabcabc", 200)), lvl)
+    let cut = bytes.slice(raw, 0, bytes.len(raw) - 1)
+    match deflate.inflate(cut) {
+      Ok(o) -> {
+        io.println("a truncated level " ++ to_string(lvl) ++ " stream was accepted (" ++
+            to_string(bytes.len(o)) ++ " bytes)")
+        bad = bad + 1
+      }
+      Err(_) -> ()
+    }
+  }
+  bad
+}
+
 pub fn main() -> Unit !io = {
   var bad = 0
   var cases: List[String] = ["", "a", "hello world", rep("a", 1000)]
@@ -271,6 +291,7 @@ pub fn main() -> Unit !io = {
   }
   bad = bad + check_corruption()
   bad = bad + check_short_central_dir()
+  bad = bad + check_truncated_deflate()
 
   io.println("mismatches " ++ to_string(bad))
 }

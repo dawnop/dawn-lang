@@ -221,8 +221,18 @@ fn entry_data(b: Bytes, h: Head) -> Result[Bytes, String] = {
   let raw = bytes.slice(b, start, start + h.csize)
   var out = raw
   if h.method == METHOD_DEFLATE {
-    out = match deflate.inflate(raw) {
-      Ok(o) -> o
+    match deflate.inflate_end(raw) {
+      Ok(pr) -> {
+        let (o, used) = pr
+        # The directory says how long the compressed member is, so a member
+        # that ends early has bytes in it nobody read -- the reader must not
+        # decide on its own that the rest was padding.
+        if used != h.csize {
+          return Err("zip: " ++ h.name ++ " read " ++ to_string(used) ++
+              " of its " ++ to_string(h.csize) ++ " compressed bytes")
+        }
+        out = o
+      }
       Err(e) -> return Err("zip: " ++ h.name ++ ": " ++ e)
     }
   } else if h.method != METHOD_STORED {

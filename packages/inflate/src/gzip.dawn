@@ -53,8 +53,18 @@ pub fn gunzip(src: Bytes) -> Result[Bytes, String] = {
 
   # the last eight bytes are CRC-32 and ISIZE, not deflate data
   let body = bytes.slice(src, i, bytes.len(src) - 8)
-  let out = match deflate.inflate(body) {
-    Ok(o) -> o
+  let out = match deflate.inflate_end(body) {
+    Ok(pr) -> {
+      let (o, used) = pr
+      # Everything between the header and the trailer belongs to this member,
+      # so a deflate stream that ends before the trailer leaves bytes nobody
+      # accounted for -- a second member, or damage.
+      if used != bytes.len(body) {
+        return Err("gzip: the member ends " ++ to_string(bytes.len(body) - used) ++
+            " bytes before its trailer")
+      }
+      o
+    }
     Err(e) -> return Err(e)
   }
   let n = bytes.len(src)

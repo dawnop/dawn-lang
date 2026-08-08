@@ -17,21 +17,35 @@
 use std/bytes
 use std/bytes.{Buf}
 use std/list
+use std/str
 
 ## A bit reader over `src`, LSB-first inside each byte (RFC 1951 section 3.1.1).
-## `pos` is the byte index, `bit` how many bits of that byte are spent.
-type Bits = { src: Bytes, pos: Int, bit: Int }
+## `pos` is the byte index, `bit` how many bits of that byte are spent, and
+## `over` whether a read has already run off the end.
+##
+## Past the end still reads as zero -- a `Result` on every bit would cost more
+## than it buys -- but the fabrication is now *recorded* rather than inferred
+## afterwards, because it cannot be inferred afterwards. The end-of-block
+## symbol of the fixed table is seven zero bits, so a fixed block truncated
+## anywhere in its last byte decodes an end-of-block out of bits the stream
+## never carried, and lands the reader exactly where a stream that really
+## ended there would have: `past_end` is true and `bit` is 0 in both cases.
+type Bits = { src: Bytes, pos: Int, bit: Int, over: Bool }
 
-fn bits_of(src: Bytes) -> Bits = Bits { src: src, pos: 0, bit: 0 }
+fn bits_of(src: Bytes) -> Bits = Bits { src: src, pos: 0, bit: 0, over: false }
 
-## `n` bits as an integer, low bit first. Past the end reads as zero, which the
-## callers turn into "truncated" when the stream does not end where it should.
+## `n` bits as an integer, low bit first.
 fn take(b: Bits, n: Int) -> (Int, Bits) = {
   var v = 0
   var st = b
   var i = 0
   while i < n {
-    let byte = if st.pos < bytes.len(st.src) { bytes.at(st.src, st.pos) } else { 0 }
+    var byte = 0
+    if st.pos < bytes.len(st.src) {
+      byte = bytes.at(st.src, st.pos)
+    } else {
+      st = Bits { ..st, over: true }
+    }
     v = v | ((byte >>> st.bit) & 1) << i
     if st.bit == 7 {
       st = Bits { ..st, pos: st.pos + 1, bit: 0 }
@@ -167,8 +181,25 @@ fn dist_extra() -> List[Int] = [
 fn clen_order() -> List[Int] =
   [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15]
 
+## How many whole bytes of `src` the reader has consumed: a partly spent byte
+## counts, because nothing after it can be read independently.
+fn consumed(b: Bits) -> Int = if b.bit == 0 { b.pos } else { b.pos + 1 }
+
 ## Decompress a raw DEFLATE stream.
-pub fn inflate(src: Bytes) -> Result[Bytes, String] = {
+pub fn inflate(src: Bytes) -> Result[Bytes, String] =
+  match inflate_end(src) {
+    Ok(p) -> {
+      let (out, _) = p
+      Ok(out)
+    }
+    Err(e) -> Err(e)
+  }
+
+## Decompress, and say how many bytes of `src` that took. A container knows how
+## long the compressed member is supposed to be and can only check it against
+## something; without this it has to take the decompressor's word that whatever
+## followed the final block was not part of the member.
+pub fn inflate_end(src: Bytes) -> Result[(Bytes, Int), String] = {
   var out = bytes.buf()
   var st = bits_of(src)
   var last = false
@@ -215,7 +246,11 @@ pub fn inflate(src: Bytes) -> Result[Bytes, String] = {
       return Err("deflate: reserved block type 3")
     }
   }
-  Ok(bytes.freeze(out))
+  # The last block can only be trusted once nothing in it was invented: a
+  # decode that ran off the end answered from zero bits the stream does not
+  # contain, and the answer it gives most readily is end-of-block.
+  if st.over { return Err("deflate: truncated (the final block ran past the end)") }
+  Ok((bytes.freeze(out), consumed(st)))
 }
 
 ## An uncompressed block: byte-aligned, then LEN and its complement.
@@ -362,4 +397,35 @@ fn block(out0: Buf, b: Bits, lit: Huff, dist: Huff) -> Result[(Buf, Bits), Strin
     if past_end(st) && st.bit == 0 { return Err("deflate: truncated inside a block") }
   }
   Ok((out, st))
+}
+
+## A `Bytes` from byte values, for the hand-written streams below. Nothing
+## outside the tests needs it: everywhere else the bytes arrive from a file.
+fn raw(xs: List[Int]) -> Bytes = {
+  var b = bytes.buf()
+  for x in xs { b = bytes.put(b, x) }
+  bytes.freeze(b)
+}
+
+# `0x01 0x02 0x00 0xFD 0xFF h i`: BFINAL=1, BTYPE=00, then LEN=2, its
+# one's complement, and the two literal bytes.
+fn stored_hi() -> Bytes = raw([0x01, 0x02, 0x00, 0xFD, 0xFF, 104, 105])
+
+test "a stored block round-trips and reports what it consumed" {
+  assert inflate(stored_hi()) == Ok(bytes.utf8("hi"))
+  assert inflate_end(stored_hi()) == Ok((bytes.utf8("hi"), 7))
+}
+
+test "a truncated fixed block is not finished off with bits that are not there" {
+  # `0x03 0x00` is the shortest legal deflate stream: BFINAL=1, BTYPE=01, then
+  # the seven zero bits the fixed table gives end-of-block. Five of them are
+  # the rest of the first byte, two are the second.
+  assert inflate(raw([0x03, 0x00])) == Ok(bytes.utf8(""))
+  # Drop the byte carrying the last two. The reader still reads them -- as
+  # zeros it invented -- and still decodes end-of-block, landing exactly where
+  # a stream that legitimately ended there would land.
+  match inflate(raw([0x03])) {
+    Err(e) -> { assert str.contains(e, "truncated") }
+    Ok(_) -> { assert false }
+  }
 }
