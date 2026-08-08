@@ -3,7 +3,8 @@
 > 状态：**historical —— 已结账**。本文起初是一次**盘点**（Move 2 的主体已随 Core IR
 > Phase 0 落地），它盘出来的那笔残余也已经结掉：三条开放决策于 2026-07-31 全部裁决，
 > `defer` / `CSProtect` **关档不做**，替代形态（`bracket` intrinsic + `with` 语句 +
-> `fn` 尾闭包）随 v0.39.0 / v0.40.0 发布，落地记在 §6，语义条文进了 spec。
+> 当时的 `fn` 尾闭包）随 v0.39.0 / v0.40.0 发布；该尾闭包拼写后来又被 #206 的唯一
+> 尾块形式取代。发布历史与后续推翻都记在 §6，现行语义以 spec 为准。
 > §2.3–2.5 的图纸存档备用，推翻需新证据。
 >
 > [`runtime-intrinsics-design.md`](runtime-intrinsics-design.md) §8 把「把 emit 里的
@@ -565,6 +566,8 @@ is a name no dispatcher should have an arm for, which is how the three dead arms
 >   **尾闭包位保留 `fn` 拼写**保无歧义（否则与柯里化调用 `f(a)(x)` 撞）。占位符 lambda
 >   （Kotlin `it`/Scala `_`）判不做：边界歧义与显式气质相斥。具名函数裸传（eta 缩减）
 >   今天已可用，是消 lambda 噪音的第一手段。
+>   **这条“尾位保留 `fn`”的后续裁决也已由 #206 期 2 取代**：冲突只属于 `(`；尾位
+>   现在唯一写成 `{ x => ... }`，`fn` 不再出现在任何表达式位置。原文保留为决策链证据。
 > - **match 臂 `->` 与 lambda `=>` 刻意不统一**（spec §4.5 已记原则）：去 `fn` 后 `=>` 接过
 >   「lambda 起点标记」职责，臂体嵌 lambda 时两种箭头是唯一视觉信号（Rust 同款分立，
 >   Scala 式统一反而在最需要区分处失去区分）。`->` = 子句箭头（类型、臂），

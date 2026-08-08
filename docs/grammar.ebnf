@@ -127,14 +127,10 @@ unary_expr      = [ "not" | "-" | "~" ] postfix_expr ;
 postfix_expr    = primary_expr { postfix } ;
 postfix         = "?"                                        (* Result/Option 传播 *)
                 | "!"                                        (* Option 解包, None panic *)
-                | "." IDENT [ call_args | trailing_lambda | tail_block ] (* 字段/方法 *)
+                | "." IDENT [ call_args | tail_block ]             (* 字段/方法 *)
                 | "[" expr "]"                               (* List/Map 下标 *)
                 | call_args                                  (* 应用: 须与 callee 同行 *)
-                | trailing_lambda                            (* 尾闭包: 同上, 见 spec 4.3; #206 期 2 删除 *)
-                | tail_block ;                               (* 尾块: 同上, 见 spec 4.3 *)
-trailing_lambda = "fn" "(" [ lambda_params ] ")" "=>" expr ;
-                  (* 作为最后一个实参附加。"fn" 在 lambda 上仅存的用途:
-                     这里的裸 "(x) =>" 会先被读成柯里化调用 f(a)(x)。 *)
+                | tail_block ;                               (* 唯一尾实参形式, 见 spec 4.3 *)
 tail_block      = "{" [ block_params "=>" ] block_body "}" ;
                   (* 同为最后一个实参 (#206)。EBNF 之外的四条边条件见 spec 4.3:
                      同行才吃; if/while/for/match 头部与 with callee 禁用 (nb);
@@ -161,10 +157,10 @@ record_expr     = TYPEIDENT "{" [ ".." expr "," ] rec_field { "," rec_field } [ 
 rec_field       = IDENT [ ":" expr ] ;                       (* 同名简写 { x } *)
 lambda          = "(" [ lambda_params ] ")" "=>" expr
                 | IDENT "=>" expr ;                          (* 单参数, 括号可省 *)
-                  (* "fn" 前缀已退休 (2026-08-01): lambda 只在 primary 位,
-                     且只有这两种写法; 表达式之后的 "(" 是应用, 故尾闭包位
-                     裸 "(x) =>" 进不来 -- 与 f(a)(x) 撞; 那里写 "fn"(过渡)
-                     或 tail_block 的花括号头 "{ x => ... }" (#206)。
+                  (* "fn" 前缀已彻底退休 (#206 期 2): lambda 只在 primary 位,
+                     且只有这两种写法; 表达式之后的 "(" 是应用, 故尾位的
+                     裸 "(x) =>" 进不来 -- 与 f(a)(x) 撞; 唯一尾实参形式是
+                     tail_block 的花括号头 "{ x => ... }"。
                      "(" 开头时先扫到配对的 ")" 看下一个记号是不是 "=>":
                      "(a: Int)" 是合法参数表而不是合法表达式, 覆盖文法不成立。 *)
 lambda_params   = lambda_param { "," lambda_param } ;

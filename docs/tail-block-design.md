@@ -1,7 +1,10 @@
 # 尾块参数 — 设计 — #206（K3 + K4）
 
 > 状态：current —— 已评审通过（用户终裁 2026-08-08，见 §13），**期 1 已落地**
-> （`c684819..5d7b094`，落地基线 `497f096`；期 2 删旧语法另批）。勘察基线
+> （`c684819..5d7b094`，落地基线 `497f096`）；期 2 的源码迁移、parser 退役与陈旧示例
+> 清理由 `d4cb422`、`fde3203`、`7238851` 落地，实测记录见 §15。期 2 的最终文档口径是：`fn` 不再属于
+> 表达式，尾块是唯一 trailing form；§1–§13 保留方案比较、过渡语法与发布刀法的历史证据，
+> 其中旧 `fn` 示例不是现行语法。勘察基线
 > `main = 50252e8`，行号引用以它为准。上游：#198 UI DSL 勘察（K3/K4 两条）。
 > 本文只管**语法**：裸 `{}` 尾块、它与既有四处花括号语法的互不侵犯、尾块怎么绑形参。
 > 具名实参与默认值在 [`named-args-design.md`](named-args-design.md)（K5，已落地），
@@ -519,7 +522,8 @@ Emit-Change(emit selfhost): the parser is part of the compiler.
 迁移 14 个可执行站点 + 8 个字符串夹具到裸尾块；parser 拒 `fn` 尾闭包并给退役诊断；
 `fn` 从表达式位彻底消失（方案乙）或退守带参尾位（方案甲，则本期只删零参形式）。
 
-预期声明：`Emit-Change(emit selfhost)`。
+历史预期声明：`Emit-Change(emit selfhost)`；§15 的实际测量覆盖这项预测，结果为零差异，
+因此没有写该声明。
 
 **与先例 `4098b93`（v0.43.0 退役 `fn` lambda 前缀）的关键差别**：那次声明了
 `Emit-Change(parse backend-dawn)`，因为跨仓生产语料有 305 处旧写法。
@@ -635,3 +639,47 @@ checker corpus 99 例（新增 `tail_block_named` / `tail_block_arity`，cerr �
 一处实现纪要：fmt 的 `block_arrow` 判「同一行」不能数 NEWLINE 记号——lexer 在每个
 续行记号（`{`、`,`、`=>` 自身）后吞掉 NEWLINE（`lexer.continues_line`），
 行号须从源文本的码点位置数。
+
+---
+
+## 14. 期 2 的最终语法口径
+
+本节只收现行结论；前十三节继续保存调研、被驳回方案、期 1 过渡态与门禁计划：
+
+1. `fn` 只用于具名函数声明与函数类型，不再有任何表达式位置。
+2. 同行追加最后一个实参只写尾块：`f(a) { x => e }`；旧 `f(a) fn(x) => e` 被拒并教迁移。
+3. 裸 `f(a) (x) => e` 仍不成立，因为 `(x)` 已被一般后缀解析成第二次应用；这不影响
+   以 `{` 开头的尾块。
+4. `with` 继续在 AST 层把块剩余部分附成最后一个实参，不依赖任何已退役的 `fn` 拼写。
+
+---
+
+## 15. 期 2 实际落地与实测记录（2026-08-09）
+
+期 2 已落地的三笔源码提交是：
+
+1. `d4cb422`（migration）：把可执行语料与测试夹具从旧 trailing-lambda 拼写迁到尾块。
+2. `fde3203`（parser retirement）：拒绝 `fn` trailing closure，给出迁移诊断，并删除退役的
+   表达式解析路径。
+3. `7238851`（stale-example cleanup）：清理仍把旧拼写当作现行示例的注释与说明。
+
+**Emit-Change 裁决来自测量，不是遗漏**：`scripts/selfhost-prev-diff.sh` 实测
+`emit selfhost` 为零差异，其他检查也通过，因此没有写 §9 历史预测的
+`Emit-Change(emit selfhost)`。`scripts/selfhost-run-diff.sh` 首次运行时，`bin/dawn`
+重建工具链的提示信息进入被比较的 stderr，造成一次瞬态假差异；立即重跑后所有标签通过。
+
+其余已经实际运行的门禁：
+
+- `scripts/selfhost-fmt-diff.sh`：389 files 通过。
+- `scripts/selfhost-lsp-diff.sh`：52 messages 通过。
+- `./bin/dawn test selfhost`：348 tests 通过。
+- `./bin/dawn test site`：82 tests 通过。
+- checker corpus：99 cases / 390 diagnostics 通过。
+- `python3 scripts/doc-check.py`：79 docs / 70 checked blocks 通过。
+
+退役规则的变异负控也实际见红：临时禁用 postfix 中 `k == FN` 的退役分支后，
+`fn_trailing_retired` 的 3 个诊断断言按预期失败；恢复该分支后，grammar corpus
+以 12 accept / 27 reject 全部通过。
+
+本记录不声称期 2 的 selfhost fixpoint、native fixpoint 或 native 全量门禁已经通过；
+这些门禁在实际运行并留痕前仍属于发布收尾项。

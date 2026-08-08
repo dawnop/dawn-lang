@@ -103,7 +103,11 @@
 - **影响：** sequence iteration 与同语言的 binding grammar 不正交，尤其伤害 Map/zip API。
 - **建议：** `for` 接受不可反驳 pattern；可反驳 pattern 在循环头给针对性错误，避免静默跳过语义。
 
-## SYN-14 — P2 — lambda 有一个只在尾调用位置复活的 `fn` 方言
+## SYN-14 — P2 — lambda 有一个只在尾调用位置复活的 `fn` 方言（已由 #206 处置）
+
+- **后续处置（2026-08-09，#206 期 2）：已选择统一 delimiter 方案。** 现行语法以
+  `{ x => e }` 尾块作为唯一尾实参形式，`fn` 不再有表达式位置。以下内容保留 v0.60.0
+  审查基线的证据与当时建议，不把历史改写成“从未存在”。
 
 - **性质：D。** 普通 lambda 的 `fn` 前缀已退休：`docs/spec.md:720`；尾闭包却必须写 `f(a) fn(x) => e`：`docs/spec.md:611`，裸 `(x) => e` 在这里被专门拒绝：`selfhost/src/front/parser.dawn:1581`。
 - **理由虽存在：** `f(a)(x)` 已是 curried application，所以 `(x) => e` 与第二次调用有冲突。

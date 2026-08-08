@@ -33,7 +33,7 @@
 |---|---|---|
 | [codebase-audit-v2.md](codebase-audit-v2.md) | current | v0.60.0 / `86f6a0f63960` 的精细复审总纲、分级、P1 索引与建议顺序。 |
 | [codebase-audit-v2/00-methodology-and-retractions.md](codebase-audit-v2/00-methodology-and-retractions.md) | current | 基线、证据等级、严重度，以及旧审查已修/已驳回结论的撤回边界。 |
-| [codebase-audit-v2/01-syntax-and-formatting.md](codebase-audit-v2/01-syntax-and-formatting.md) | current | lexer、parser、formatter、尾闭包、pattern 与 VS Code grammar。 |
+| [codebase-audit-v2/01-syntax-and-formatting.md](codebase-audit-v2/01-syntax-and-formatting.md) | current | lexer、parser、formatter、尾块、pattern 与 VS Code grammar；SYN-14 的旧 `fn` 尾闭包分歧已由 #206 处置。 |
 | [codebase-audit-v2/02-types-effects-and-semantics.md](codebase-audit-v2/02-types-effects-and-semantics.md) | current | 类型、trait、associated type、具名效果、Cursor/Char 与 nominal abstraction。 |
 | [codebase-audit-v2/03-compiler-and-runtime-architecture.md](codebase-audit-v2/03-compiler-and-runtime-architecture.md) | current | checker/Core/comptime、JVM/C 后端、native failure runtime 与阶段契约。 |
 | [codebase-audit-v2/04-cli-lsp-build-and-release.md](codebase-audit-v2/04-cli-lsp-build-and-release.md) | current | CLI、LSP、依赖规划、lock/vendor、自举与发布链。 |
@@ -47,7 +47,7 @@
 | [bootstrap.md](bootstrap.md) | current | 自举链：种子 → A → B → C、固定点、种子推进协议。 |
 | [package-design.md](package-design.md) | current | 源码包（`[deps]`）与 Maven 依赖（`[java-deps]`）的清单与解析。 |
 | [runtime-intrinsics-design.md](runtime-intrinsics-design.md) | current | 运行时 intrinsic 契约——每个 primitive 归哪个运行时模块。**表已从 `emit.dawn` 的 `(class, method)` 收成 `types.dawn` 的 `Rt`/`Intr`（文中的 `rt_intrinsic_target` 是旧名，已不存在）；§8 的三步 Move 表已被 [core-move2-design.md](core-move2-design.md) 更正**。 |
-| [core-move2-design.md](core-move2-design.md) | historical | 上面那张表里「Move 2 控制流/match」的**结账盘点**：主体已随 Core IR Phase 0 落地；残余 `CSProtect`（error-model 的 C2）已于 2026-07-31 裁决**关档不做**，替代形态 `bracket` + `with` + `fn` 尾闭包随 v0.39.0/v0.40.0 发布。 |
+| [core-move2-design.md](core-move2-design.md) | historical | 上面那张表里「Move 2 控制流/match」的**结账盘点**：主体已随 Core IR Phase 0 落地；残余 `CSProtect`（error-model 的 C2）已于 2026-07-31 裁决**关档不做**。`bracket` + `with` + 当时的 `fn` 尾闭包随 v0.39.0/v0.40.0 发布；尾闭包拼写后来由 #206 尾块取代。 |
 | [trait.md](trait.md) | current | trait/impl/derive 与 `Ord`。§落地记录里 Float 比较那段已被实现取代（见文内标注）。 |
 | [tutorial.md](tutorial.md) | current | 上手教程，**英文正本**。标 `dawn run` 的代码块由 `scripts/doc-check.py` 真编真跑并核对 `output`。 |
 | [tutorial.zh-CN.md](tutorial.zh-CN.md) | current | 上面那篇的**中文译本**。改教程先改英文，再改这里；两者不脱节由 `doc-check.py` 的 transl 检查盯着。 |
@@ -61,7 +61,7 @@
 | [effects-soundness-design.md](effects-soundness-design.md) | current | #188 的修法：具名效果的两个 soundness 缺陷（标签轴对函数值不设防、减标签的人不是应答的人）与「B 极简」三刀——注解位禁标签、闭包创建点结算、`verify_effects` 整行核对。落地后 spec.md §6.5 以它为准。 |
 | [native-failure-design.md](native-failure-design.md) | current | #193 的修法：native 失败运行时的三个 P1（ARC-03 消息截断 / ARC-04 嵌套覆盖 / ARC-05 恢复泄漏）实测是**两件事**——载荷所有权与「longjmp 不跑清理」。刀 1 载荷对象化 + 路线 A3（`-fexceptions` + cleanup + ForcedUnwind）；路线 B（Result ABI）不做，重开条件写在 §4.3。载荷契约随刀 2 进 spec.md §9.8.1。 |
 | [named-args-design.md](named-args-design.md) | current | #207 的方案：具名实参推广到 `Sig` 支持的 callee + 默认参数（合成 `f$default$k` 零元纯函数）。四条用户终裁在其 §9：实参求值顺序改**写序**（本批唯一 Emit-Change）、单层名、默认值任意纯表达式、std 采用另批。 |
-| [tail-block-design.md](tail-block-design.md) | current | #206 的方案：裸 `{ ... }` 尾块（Kotlin 式，含 `{ x => }` 参数头）落到既有 `attach_trailing`，区分机制 = 头部禁记录字面量的开关扩义（`ns`→`nb`）。用户终裁在其 §13：方案乙（`fn` 期 2 从表达式位消失）、guard 位不禁。期 1 已落地，期 2 删旧语法另批。 |
+| [tail-block-design.md](tail-block-design.md) | current | #206 的方案：裸 `{ ... }` 尾块（Kotlin 式，含 `{ x => }` 参数头）落到既有 `attach_trailing`，区分机制 = 头部禁记录字面量的开关扩义（`ns`→`nb`）。用户终裁在其 §13：方案乙、guard 位不禁；期 2 的最终口径是 `fn` 不再属于表达式，尾块是唯一 trailing form。 |
 | [std-audit.md](std-audit.md) | current | std 的交付方式、优雅性判据与欠账台账（S5）。骨架五条已做掉大半，仍在册的欠账逐条写在它的状态行里。 |
 | [stdlib-impl-notes.md](stdlib-impl-notes.md) | current | std 里几个函数**为什么长成这样**：被否掉的写法、实测数字、逼出今天形状的两后端分歧。std 的 `##` 注释只留契约，这些话从那里搬来。 |
 

@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 1fb40e71a0829239 -->
+<!-- doc-check: translation-of docs/spec.md @ fa01467095153ab1 -->
 
 # Dawn Language Specification
 
@@ -827,9 +827,11 @@ From lowest to highest:
   defaults fill the remaining holes (#207): in `column(gap: 12) { text("hi") }` the block
   fills `body` and `align` takes its default. If that parameter is already filled the report
   is "the last parameter `body` is already given; the tail block is what fills it".
-- **The `fn` spelling of the trailing closure (transitional, retired in #206 phase 2)**:
-  `f(a) fn(x) => e` and `f(a) { x => e }` mean the same thing, and the two spellings coexist
-  for one release; new code writes the tail block. A bare arrow lambda still cannot take the
+- **The tail block is the only trailing-argument form (#206 phase 2)**: the transitional
+  `f(a) fn(x) => e` has retired, and the current spelling is only `f(a) { x => e }`. `fn` has
+  no expression position; it is used only by named function declarations (§3.1) and function
+  types (§2.2). The old trailing-closure spelling gets a dedicated migration diagnostic. A bare
+  arrow lambda still cannot take the
   tail position: in `f(a) (x) => e` the `(x)` is already the curried call `f(a)(x)`, and the
   two readings cannot be told apart before the `=>` — that argument is about `(`, not
   braces, and it stands.
@@ -988,13 +990,14 @@ xs |> map(x => x * x)             # parentheses optional for a single parameter
 - **There is exactly one spelling**: `params => expr`. `params` is `x` (the parentheses may
   be dropped for a single unannotated parameter), `(a, b)` or `()`, and each parameter may
   carry `: Type`. `=>` owns the single job of "an anonymous function starts here".
-- **The `fn` prefix has retired** (2026-08-01): `fn(x) => e` no longer parses as a lambda,
-  and a dedicated diagnostic, "a lambda has no `fn` prefix", teaches the new spelling. In an
-  expression `fn` has one position left — the trailing closure.
+- **The `fn` prefix has fully retired**: `fn(x) => e` no longer parses as a lambda, and the
+  former tail-only `f(a) fn(x) => e` retired in #206 phase 2 as well. `fn` now appears only in
+  named function declarations and function types; both old expression spellings have dedicated
+  migration diagnostics.
 - If the body needs several statements, use a block: `(x) => { ... }`.
 - Written after a call (on the same line) it is that call's **last argument** — a tail
-  block, see §4.3: `f(a) { x => e }` (the brace head binds the parameters; the transitional
-  `f(a) fn(x) => e` means the same and retires in #206 phase 2).
+  block, see §4.3: `f(a) { x => e }` (the brace head binds the parameters); this is the only
+  trailing-argument spelling.
   **A bare arrow cannot take the tail position**: in `f(a) (x) => e` the `(x)` is already
   the curried call `f(a)(x)`, and the two readings cannot be told apart before the `=>` is
   reached. The diagnostic names this.
@@ -2616,7 +2619,7 @@ xs |> filter(x => x > 0) |> map(x => to_string(x)) |> join(", ")
 xs[0]                            # subscript: goes through the Index trait; out of range panics, enquire with get (§4.8)
 read_file(path)?                 # Result propagation
 if n < 0 { return "negative" }   # early return (§4.9)
-xs.each fn(x) => println("$x")   # trailing closure: the last argument (§4.3)
+xs.each { x => println("$x") }  # tail block: the last argument (§4.3)
 with f <- bracket(open(p), close)  # the rest of the block becomes the use closure (§4.10)
 comptime { heavy_pure_calc() }   # compile-time evaluation
 

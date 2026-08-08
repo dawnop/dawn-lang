@@ -16,6 +16,8 @@ Dawn 已经具备共享 Core IR、JVM/native 双后端、自举固定点、纯 D
 - 共记录 **97 项**：1 P0 候选、29 P1、55 P2、12 P3。设计争议只有在能指出组合性、无效状态或维护税时才进入 P2。
 - `SEM-01`、native nested failure 与 unsafe boundary 没有做危险动态验证；其余少量 parser/formatter/check 探针只使用临时输入。
 - 旧报告不直接继承严重度。本轮逐项对照当前源码；已修、已合理驳回和 historical EBNF 都列入撤回表。
+- **基线后处置：** `SYN-14` 已由 #206 期 2 选择尾块方案收口；下表的 97 项与严重度计数
+  冻结为 v0.60.0 审查基线，不因后续修复重写历史。
 
 完整方法、严重度、证据等级和撤回项见[方法与旧结论处置](codebase-audit-v2/00-methodology-and-retractions.md)。
 
@@ -89,7 +91,8 @@ Dawn 已经具备共享 Core IR、JVM/native 双后端、自举固定点、纯 D
 
 - member access 不应由大小写在 parser 阶段提前分 field/method；application、pipe、formatter 应共享统一 postfix model。
 - or-pattern 应是 `Pattern` 节点，不是 match-arm 外挂 list；`for` 应复用不可反驳 binding grammar。
-- lambda 不应“普通位置禁 `fn`、尾调用位置只许 `fn`”；要么删尾闭包糖，要么选择不与 curried application 冲突的统一 delimiter。
+- lambda 不应“普通位置禁 `fn`、尾调用位置只许 `fn`”；#206 已选择不与 curried
+  application 冲突的 `{ ... }` 尾块作为唯一 trailing form，本条按期 2 收口。
 - parser 的 builtin type/decl-start inventory、TextMate keyword inventory 与 spec 表格应生成或至少由 contract test 对齐。
 
 ### 6.2 让 effect system 先闭合再继续扩展
