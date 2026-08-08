@@ -1,0 +1,38 @@
+# Recovery through a bracket must not leak the references the unwind path
+# discards (#193, ARC-05, third shape).
+#
+# A bracket whose `use` faults takes the failure, runs the release, and
+# re-raises. On the way it loses what the discarded frames held: the
+# runtime's comment used to admit to "use's reference" alone, while the
+# measured loss was four objects a round -- the use closure's argument dup,
+# the faulting io path's own temporaries, and the message. The resource is
+# 2048 bytes so the total is visible; 100 rounds, every one recovered.
+#
+# No `.leaks-on-catch` marker on purpose: the asan check is the oracle.
+use std/io
+use std/str
+use std/raw
+
+fn n(i: Int) -> Int !io = i
+
+fn close(name: String) -> Unit !io = { let _ = str.len(name) }
+
+fn use_faults(a: String) -> Int !io = str.len(raw.read_file("/no/such/dawn/" ++ a))
+
+fn once(k: Int) -> Int !io = {
+  let res = str.repeat("R", 2048) ++ to_string(k)
+  match catch_fault(() => bracket(res, close, use_faults)) {
+    Ok(v) -> v
+    Err(_) -> 1
+  }
+}
+
+pub fn main() -> Unit !io = {
+  var total = 0
+  var i = 0
+  while i < 100 {
+    total = total + once(n(i))
+    i = i + 1
+  }
+  println("caught " ++ to_string(total))
+}

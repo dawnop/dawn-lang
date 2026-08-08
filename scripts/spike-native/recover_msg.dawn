@@ -1,0 +1,37 @@
+# Recovery must not leak the raise's own message (#193, ARC-05, the second
+# leak source -- distinct from recover_live.dawn's).
+#
+# `panic` is an intrinsic, and an intrinsic borrows its arguments
+# (perceus-design.md 5.1): the caller owns the message and drops it after the
+# call returns. A raise does not return, so the drop never runs -- every
+# recovery loses the message itself, with nothing else live in the frame at
+# all. A fix that only releases the frame's live bindings misses this one;
+# the message here is computed and >1000 bytes so the leak is visible.
+#
+# No `.leaks-on-catch` marker on purpose: the asan check is the oracle.
+use std/io
+use std/str
+
+fn n(i: Int) -> Int !io = i
+
+fn boom(k: Int) -> Unit !io =
+  panic("deliberate-" ++ to_string(k) ++ str.repeat("Q", 1000))
+
+fn caught(k: Int) -> Int !io =
+  match catch_panic(() => {
+    boom(k)
+    n(0)
+  }) {
+    Ok(v) -> v
+    Err(_) -> 1
+  }
+
+pub fn main() -> Unit !io = {
+  var total = 0
+  var i = 0
+  while i < 100 {
+    total = total + caught(n(i))
+    i = i + 1
+  }
+  println("caught " ++ to_string(total))
+}

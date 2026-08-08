@@ -1,0 +1,46 @@
+# Recovery must not leak what the discarded frames held (#193, ARC-05).
+#
+# A reference that is live *across* the raise -- read again after the raising
+# call, so last-use analysis has not already moved it into a consumer -- sits
+# in a C frame that a longjmp discards without running its drops. The leak is
+# proportional to the live data (4096 bytes a round here, 100 rounds), and
+# unbounded: every recovery loses another copy.
+#
+# The shape is deliberate, and fragile in a way worth writing down: bind the
+# string, raise, then *read the binding again*. Drop the read after the raise
+# and the pass moves the string into `str.repeat`'s consumer before `boom()`
+# ever runs, the frame holds nothing at the raise, and this corpus certifies
+# a fix it never tested (perceus-design.md 5.8).
+#
+# This program has no `.leaks-on-catch` marker on purpose: its asan check IS
+# the ARC-05 oracle. Red while recovery leaks, green when the unwind runs the
+# discarded frames' cleanups.
+use std/io
+use std/str
+
+fn n(i: Int) -> Int !io = i
+
+fn boom() -> Unit !io = panic("deliberate")
+
+fn holder(w: Int) -> Int !io = {
+  let big = str.repeat("Z", w)
+  boom()
+  # `big` is read after the raising call, so it is live across the raise
+  str.len(big)
+}
+
+fn caught(w: Int) -> Int !io =
+  match catch_panic(() => holder(w)) {
+    Ok(v) -> v
+    Err(_) -> 1
+  }
+
+pub fn main() -> Unit !io = {
+  var total = 0
+  var i = 0
+  while i < 100 {
+    total = total + caught(n(4096))
+    i = i + 1
+  }
+  println("caught " ++ to_string(total))
+}

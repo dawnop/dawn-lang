@@ -2,10 +2,7 @@
 # unlisted one as fatal -- and it also fails when a *listed* check starts
 # passing, so a fix cannot leave its entry behind.
 #
-# Nothing is listed. Every corpus program compiles with both backends, runs
-# with both, and agrees with a written expectation.
-#
-# It is worth saying what that does and does not mean. It does not mean the
+# It is worth saying what a shrinking list does and does not mean. It does not mean the
 # native backend is finished -- it means the *corpus* no longer catches it out,
 # and the way to keep this file honest is to add programs, not to keep entries.
 # When these corpora were added on 2026-07-25 four of the entries turned out to
@@ -163,3 +160,36 @@
 # Character.toUpperCase per code point -- that *is* the simple mapping -- and
 # the C runtime carries a table generated from the same oracle, tied to it by
 # scripts/case-contract/run.sh.
+
+# --- the failure payload (#193) -------------------------------------------
+# The native runtime keeps a caught failure in process-global state: a fixed
+# 512-byte message buffer (ARC-03: a longer message comes back cut, possibly
+# mid-character, breaking the String well-formedness invariant #113 pinned)
+# that any nested catch overwrites (ARC-04: a bracket's release that swallows
+# a failure of its own replaces the message, the kind, and the panic/fault
+# routing bit of the failure crossing the bracket -- spec 9.8.2 guarantee 2).
+# The JVM has neither defect: a failure is a Throwable of its own, and
+# bracket rethrows the same object. The fix is one payload object per handler
+# frame, owned by the handler that will take it (native-failure-design.md 4.0).
+failure_message:native
+failure_message:diff
+bracket_release_fails:native
+bracket_release_fails:diff
+bracket_release_fails:stderr
+bracket_release_fails:exit
+bracket_release_fatal:stderr
+
+# --- recovery leaks (#193, ARC-05) ----------------------------------------
+# A raise longjmps past the frames between it and the handler, and their
+# drops never run. Three distinct leak sources, one corpus each: a reference
+# live across the raise (recover_live), the raise's own message -- borrowed
+# by the intrinsic, never released by a caller that is gone (recover_msg) --
+# and the references a bracket's unwind path discards (recover_bracket).
+# These three carry no .leaks-on-catch marker on purpose: their asan check is
+# the acceptance oracle for the unwind-cleanup fix, red until the discarded
+# frames' cleanups run, and the ratchet flips them to "FIXED" the day it
+# works. The seven markers that exempt the older catch-taking corpora fall
+# with the same fix.
+recover_live:asan
+recover_msg:asan
+recover_bracket:asan

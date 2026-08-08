@@ -1,0 +1,43 @@
+# The positive half of the payload-ownership contract (#193): a failure's
+# payload belongs to the handler that caught it, from the raise to the
+# `ForeignError` -- and once the record exists, nothing that fails later can
+# reach back into it.
+#
+# bracket_release_fails.dawn asks the case that used to go wrong (a nested
+# catch *between* the raise and the re-raise). This file pins the case that
+# was always right, so the contract has a green corpus on both sides of the
+# line: a handler that already answered `Err(e)` holds a record, and further
+# raises -- caught inside the arm that reads `e`, or caught and re-read in
+# any order -- change nothing about it.
+use std/io
+use std/str
+
+fn n(i: Int) -> Int !io = i
+
+fn taken(f: fn() -> Int !io) -> ForeignError !io =
+  match catch_panic(f) {
+    Ok(_) -> panic("the thunk was supposed to fail")
+    Err(e) -> e
+  }
+
+pub fn main() -> Unit !io = {
+  let first = taken(() => panic("FIRST-" ++ to_string(n(1))))
+
+  # a second failure, raised and caught while `first` is live
+  let second = taken(() => panic("SECOND-" ++ to_string(n(2))))
+
+  println("first   " ++ first.message)
+  println("second  " ++ second.message)
+  # the kind strings are the backend's own (foreign_error.dawn says why), so
+  # only their agreement is portable, not their spelling
+  println("kinds   " ++ to_string(first.kind == second.kind))
+
+  # nested: the inner handler takes its own failure inside the outer thunk,
+  # and the outer takes the one that escapes it
+  let outer = taken(() => {
+    let inner = taken(() => panic("INNER-" ++ to_string(n(3))))
+    println("inner   " ++ inner.message)
+    panic("OUTER-" ++ to_string(n(4)))
+  })
+  println("outer   " ++ outer.message)
+}

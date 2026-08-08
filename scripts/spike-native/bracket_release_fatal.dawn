@@ -1,0 +1,46 @@
+# The fatal path of bracket_release_fails.dawn: the release swallows a
+# failure of its own, and then *nothing* catches the outer panic (#193,
+# ARC-04, plus the fatal half of ARC-03).
+#
+# Two things the caught corpus cannot ask, because a program that dies has no
+# further output to compare:
+#
+#   1. the report names the *outer* failure, not the one the release caught
+#      and disposed of -- the native runtime used to report whatever was
+#      written last into its global failure state;
+#   2. the report is the whole message. The outer message here is longer than
+#      512 bytes on purpose: an unprotected raise never truncated, but a
+#      raise that crossed a bracket reported out of the 512-byte buffer, so
+#      the same failure printed differently depending on whether a bracket
+#      stood in the way.
+#
+# The marker file `bracket_release_fatal.exits-nonzero` says dying is the
+# point; stdout up to the failure is checked against .expect, and stderr and
+# the exit code are compared between the backends.
+use std/io
+use std/str
+
+fn n(i: Int) -> Int !io = i
+
+## A release that raises a panic of its own and swallows it.
+fn close_panics(name: String) -> Unit !io = {
+  println("  release " ++ name)
+  match catch_panic(() => {
+    panic("INNER-FROM-RELEASE")
+    n(0)
+  }) {
+    Ok(_) -> println("  (inner did not fail?)")
+    Err(_) -> println("  release handled its own panic")
+  }
+}
+
+fn use_panics(a: String) -> Int !io =
+  panic("OUTER-" ++ a ++ "-" ++ str.repeat("x", n(600)) ++ "|END")
+
+pub fn main() -> Unit !io = {
+  println("nothing here catches the outer panic")
+  let v = bracket("r1", close_panics, use_panics)
+  # Unreachable: the release above ran, swallowed its own failure, and the
+  # outer panic resumed with no handler left.
+  println("WRONG: bracket swallowed it and answered " ++ to_string(v))
+}

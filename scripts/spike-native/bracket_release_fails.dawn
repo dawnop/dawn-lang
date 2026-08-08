@@ -1,0 +1,96 @@
+# A bracket's release that fails -- and catches it -- must not touch the
+# failure crossing the bracket (#193, ARC-04).
+#
+# Spec 9.8.2 guarantee 2: the failure that leaves a bracket is the one that
+# entered it, kind and message verbatim. A release that raises and *swallows*
+# a failure of its own is perfectly legal code -- `catch_panic` is a
+# value-level barrier, so from the program's point of view nothing escaped
+# the release at all. The JVM gets the guarantee for free (the original
+# Throwable is rethrown, object identity and all). The native runtime used to
+# keep the in-flight failure in process-global state, which the nested
+# catch inside the release overwrote: the outer message came back as the
+# inner one, a fault's kind replaced a panic's, and -- the sharpest form --
+# the panic/fault routing bit flipped, so `catch_fault` took a panic. That
+# last one is the exact defect catch_kinds.dawn exists to keep out.
+#
+# The full 2x2: outer {panic, fault} x release swallows {panic, fault}, and
+# then the barrier question from bracket.dawn's shape: a panic that crossed a
+# bracket whose release swallowed a fault must still pass through the io
+# barrier as a panic ("through", never "caught").
+use std/io
+use std/str
+use std/raw
+
+fn n(i: Int) -> Int !io = i
+
+fn taken_panic(f: fn() -> Int !io) -> ForeignError !io =
+  match catch_panic(f) {
+    Ok(_) -> panic("the thunk was supposed to fail")
+    Err(e) -> e
+  }
+
+fn taken_fault(f: fn() -> Int !io) -> ForeignError !io =
+  match catch_fault(f) {
+    Ok(_) -> panic("the thunk was supposed to fail")
+    Err(e) -> e
+  }
+
+## A release that raises a panic of its own and swallows it.
+fn close_panics(name: String) -> Unit !io = {
+  println("  release " ++ name)
+  match catch_panic(() => {
+    panic("INNER-FROM-RELEASE")
+    n(0)
+  }) {
+    Ok(_) -> println("  (inner did not fail?)")
+    Err(e) -> println("  release handled: " ++ e.message)
+  }
+}
+
+## The same, but the swallowed failure is a fault, so the kind differs too.
+fn close_faults(name: String) -> Unit !io = {
+  println("  release " ++ name)
+  match catch_fault(() => str.len(raw.read_file("/no/such/dawn/path"))) {
+    Ok(_) -> println("  (inner did not fail?)")
+    Err(_) -> println("  release handled a fault")
+  }
+}
+
+fn use_panics(a: String) -> Int !io = panic("OUTER-" ++ a)
+
+fn use_faults(a: String) -> Int !io =
+  str.len(raw.read_file("/no/such/dawn/outer-" ++ a))
+
+## bracket.dawn's barrier shape: which barrier stops a panic that crossed a
+## bracket whose release swallowed a *fault*? "through" is the only right
+## answer; "caught" means the io barrier took a panic.
+fn barrier(name: String, f: fn(String) -> Int !io) -> String !io =
+  match catch_panic(() => match catch_fault(() => bracket(name, close_faults, f)) {
+    Ok(_) -> 0
+    Err(_) -> 1
+  }) {
+    Ok(0) -> "ok"
+    Ok(_) -> "caught"
+    Err(_) -> "through"
+  }
+
+pub fn main() -> Unit !io = {
+  println("-- outer panic, release swallows a panic --")
+  let e1 = taken_panic(() => bracket("r1", close_panics, use_panics))
+  println("outer message  " ++ e1.message)
+
+  println("-- outer panic, release swallows a fault --")
+  let e2 = taken_panic(() => bracket("r2", close_faults, use_panics))
+  println("outer message  " ++ e2.message)
+
+  println("-- outer fault, release swallows a panic --")
+  let e3 = taken_fault(() => bracket("r3", close_panics, use_faults))
+  println("mentions path  " ++ to_string(str.contains(e3.message, "no/such/dawn/outer-r3")))
+
+  println("-- outer fault, release swallows a fault --")
+  let e4 = taken_fault(() => bracket("r4", close_faults, use_faults))
+  println("mentions path  " ++ to_string(str.contains(e4.message, "no/such/dawn/outer-r4")))
+
+  println("-- a panic across a bracket whose release swallowed a fault --")
+  println("verdict        " ++ barrier("r5", use_panics))
+}

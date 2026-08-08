@@ -1,0 +1,61 @@
+# A caught failure's message, byte for byte (#193, ARC-03).
+#
+# The spec gives `ForeignError.message` no length clause (spec 9.8.1), and the
+# JVM backend has none: `getMessage()` is handed back whole. The native
+# runtime used to copy the message into a fixed 512-byte buffer, so a longer
+# message came back cut -- and cut at a *byte*, which could land inside a
+# UTF-8 sequence and hand back a String that breaks the well-formedness
+# invariant #113 pinned ("a String holds no ill-formed UTF-8").
+#
+# Two questions, one file:
+#
+#   1. lengths around and far past the old limit: 0, 1, 511, 512, 513, 5000
+#      byte payloads, each with a "|END" tail the truncation used to eat;
+#   2. a cut point *inside* a character: one ASCII byte then 2-byte
+#      characters, so byte 512 is the lead byte of one. The bytes/chars/last
+#      lines are the JVM's answers; a runtime that truncates answers 512/257
+#      and a dangling lead byte (0xC3 = 195).
+#
+# `!io` on `n` so nothing folds at compile time: both backends fold with the
+# same interpreter, and the question is what the *runtime* hands back.
+use std/io
+use std/str
+use std/bytes
+
+fn n(i: Int) -> Int !io = i
+
+fn taken(f: fn() -> Int !io) -> ForeignError !io =
+  match catch_panic(f) {
+    Ok(_) -> panic("the thunk was supposed to fail")
+    Err(e) -> e
+  }
+
+fn probe(k: Int) -> Unit !io = {
+  let e = taken(() => {
+    let m = str.repeat("x", k) ++ "|END"
+    panic(m)
+  })
+  println("k=" ++ to_string(k) ++
+      " len=" ++ to_string(str.len(e.message)) ++
+      " tail_ok=" ++ to_string(str.ends_with(e.message, "|END")))
+}
+
+pub fn main() -> Unit !io = {
+  probe(n(0))
+  probe(n(1))
+  probe(n(511))
+  probe(n(512))
+  probe(n(513))
+  probe(n(5000))
+
+  # the straddle: 1 ASCII byte + 400 two-byte characters = 801 bytes, and
+  # byte 512 is the lead byte of an "é"
+  let e = taken(() => {
+    let m = "x" ++ str.repeat("é", n(400))
+    panic(m)
+  })
+  let b = bytes.utf8(e.message)
+  println("bytes  " ++ to_string(bytes.len(b)))
+  println("chars  " ++ to_string(str.len(e.message)))
+  println("last   " ++ to_string(bytes.at(b, bytes.len(b) - 1)))
+}
