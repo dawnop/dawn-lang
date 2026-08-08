@@ -942,10 +942,16 @@ fn decl_symbol(qc: QCx, d: Doc, dc: Decl) -> Option[Json] !io = {
 fn handle_formatting(st: LspState, params: Json) -> Json !io = {
   match doc_of(st, params) {
     Some(d) -> {
-      let formatted = fmt.format(d.text)
+      # No edits when the document does not lex. The formatter reprints tokens,
+      # and an unrecognized character produces none, so an edit built from a
+      # failed lex deletes what the lexer skipped -- which format-on-save would
+      # then apply to a file the user is in the middle of typing.
+      let formatted = match fmt.format(d.text) {
+        Ok(s) -> s
+        Err(_) -> return JArr([])
+      }
       if formatted == d.text { return JArr([]) }
-      # replace the whole document (fmt only needs a successful lex, so this
-      # works on broken files too)
+      # replace the whole document
       let lines = str.split(d.text, "\n")
       let last = lines[len(lines) - 1]
       JArr([jobj([

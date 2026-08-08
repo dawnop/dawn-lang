@@ -6,6 +6,15 @@
 # line breaks are preserved, so formatting is token-preserving and idempotent,
 # and only needs a successful lex.
 #
+# "Only needs a successful lex" is a precondition, not a shrug: a character the
+# lexer does not recognize produces a diagnostic and *no token*, and a token is
+# the only thing reflow reprints, so anything the lexer skipped would be deleted
+# from the output. `1 \ 2` formatted to `1 2`; `let a = 1; let b = 2` lost its
+# semicolons. That is not a layout difference, it is silent source destruction,
+# and every caller wrote the result back. So `format` returns the lexer's
+# diagnostics instead of a string whenever there are any, and the precondition
+# is enforced where it is stated rather than assumed.
+#
 # The Kotlin original keys its unary-minus and postfix-bang sets on Token
 # object identity; here a token is identified by its span start (`lo`), which
 # is unique per token in a file.
@@ -15,7 +24,7 @@ use std/list
 use std/set
 use front/lexer
 use front/token.{
-  Token, TokKind,
+  Token, TokKind, Diag,
   INT, CHAR, FLOAT, STRING, IDENT, TYPEIDENT, UNDERSCORE, NEWLINE, EOF, COMMENT,
   USE, ELSE, FN, TRUE, FALSE, NOT, IMPL,
   LPAREN, RPAREN, LBRACE, RBRACE, LBRACKET, RBRACKET,
@@ -26,15 +35,18 @@ use front/token.{
   BANG, AT
 }
 
-pub fn format(source: String) -> String = {
-  let (raw, comments, _) = lexer.lex_with_comments(source)
+## Reformat `source`, or report the lexer diagnostics that make reformatting
+## unsafe. `Err` means the caller must leave the file exactly as it found it.
+pub fn format(source: String) -> Result[String, List[Diag]] = {
+  let (raw, comments, diags) = lexer.lex_with_comments(source)
+  if len(diags) > 0 { return Err(diags) }
   var code: List[Token] = []
   for t in raw {
     if t.kind != NEWLINE && t.kind != EOF { code = code ++ [t] }
   }
   let stream = sort_by(code ++ comments, (a: Token, b: Token) => a.lo - b.lo)
-  if len(stream) == 0 { return "" }
-  reflow(source, stream, unary_minus(code), postfix_bang(raw))
+  if len(stream) == 0 { return Ok("") }
+  Ok(reflow(source, stream, unary_minus(code), postfix_bang(raw)))
 }
 
 ## Span starts of MINUS tokens that are unary (prefix), so they hug the
@@ -290,27 +302,56 @@ fn is_cont_starter(k: TokKind) -> Bool =
   k == AMP || k == CARET || k == SHL || k == SHR || k == USHR ||
   k == EQEQ || k == NEQ || k == LT || k == LE || k == GT || k == GE
 
+## Test helper: the formatted text, or a failure naming the lexer diagnostics
+## that stopped it. Every assertion below is about well-formed input; the
+## refusal path has its own case.
+fn fmt_of(source: String) -> String =
+  match format(source) {
+    Ok(s) -> s
+    Err(ds) -> panic("expected a clean lex, got " ++ to_string(len(ds)) ++ " diagnostics")
+  }
+
+fn lexes(source: String) -> Bool =
+  match format(source) {
+    Ok(_) -> true
+    Err(_) -> false
+  }
+
+test "a source the lexer cannot read whole is refused, not reprinted" {
+  # Both of these once came back as a String, and every caller wrote it over
+  # the file: `\` is not a Dawn token, so it produced a diagnostic and no
+  # token, and `1 \ 2` reprinted as `1 2`. `;` is rejected with a message of
+  # its own but is just as absent from the stream, so `let a = 1; let b = 2`
+  # reprinted as two statements run together on one line.
+  assert not lexes("fn f() -> Int = 1 \\ 2\n")
+  assert not lexes("let a = 1; let b = 2\n")
+  # The same shapes minus the offending character still format, so the refusal
+  # is about what the lexer could not read and not about the surrounding text.
+  assert lexes("fn f() -> Int = 1 + 2\n")
+  assert lexes("let a = 1\nlet b = 2\n")
+}
+
 test "formatting is idempotent and fixes indentation" {
   let src = "fn f(x: Int) -> Int =\nmatch x {\n0 -> 1\n_ -> 2\n}\n"
-  let once = format(src)
+  let once = fmt_of(src)
   assert once == "fn f(x: Int) -> Int =\n  match x {\n    0 -> 1\n    _ -> 2\n  }\n"
-  assert format(once) == once
+  assert fmt_of(once) == once
 }
 
 test "a comment between the arrow and the body is transparent" {
   let src = "fn f(x: Int) -> Int =\n  match x {\n    0 -> 1\n    _ ->\n      # why\n      2\n  }\n"
-  assert format(src) == src
+  assert fmt_of(src) == src
 }
 
 test "a leading else aligns with its if" {
   let src = "fn f(b: Bool) -> Int =\n  if b { 1 }\n  else { 2 }\n"
-  assert format(src) == src
+  assert fmt_of(src) == src
 }
 
 test "use paths print tight and unary minus hugs" {
-  assert format("use std/list.{ take , drop }\n") == "use std/list.{take, drop}\n"
+  assert fmt_of("use std/list.{ take , drop }\n") == "use std/list.{take, drop}\n"
   let src = "fn f() -> Int = { -1 }\n"
-  assert format(src) == src
+  assert fmt_of(src) == src
 }
 
 ## The two sugars are token-level to this file: `with`/`<-` and a trailing `fn`
@@ -320,24 +361,24 @@ test "use paths print tight and unary minus hugs" {
 test "the with statement and trailing lambdas keep their spelling" {
   let w = "fn f(path: String) -> Unit !io = {\n  with h <- bracket(open(path), close)\n" ++
     "  write(h)\n}\n"
-  assert format(w) == w
-  assert format("fn f(path: String) -> Unit !io = {\nwith h <- bracket(open(path), close)\n" ++
+  assert fmt_of(w) == w
+  assert fmt_of("fn f(path: String) -> Unit !io = {\nwith h <- bracket(open(path), close)\n" ++
       "write(h)\n}\n") == w
 
   # `<-` ends a line the way `=` does, so a wrapped header indents once
   let c = "fn f() -> Int !io = {\n  with h <-\n    bracket(open(\"p\"), close)\n  run(h)\n}\n"
-  assert format(c) == c
+  assert fmt_of(c) == c
 
   # a trailing lambda is spaced off the call it follows, and `fn(` stays tight
   let t = "fn f(xs: List[Int]) -> List[Int] = map(xs) fn(x: Int) => x + 1\n"
-  assert format(t) == t
-  assert format("fn f(xs: List[Int]) -> List[Int] = map(xs)  fn( x: Int ) => x+1\n") == t
+  assert fmt_of(t) == t
+  assert fmt_of("fn f(xs: List[Int]) -> List[Int] = map(xs)  fn( x: Int ) => x+1\n") == t
 }
 
 test "a conditional impl's parameters hug the keyword" {
   let src = "impl[T: Eq] Eq[List[T]] {\n  fn eq(a: List[T], b: List[T]) -> Bool = true\n}\n"
-  assert format(src) == src
-  assert format("impl [T: Eq] Eq[List[T]] {\n}\n") == "impl[T: Eq] Eq[List[T]] {\n}\n"
+  assert fmt_of(src) == src
+  assert fmt_of("impl [T: Eq] Eq[List[T]] {\n}\n") == "impl[T: Eq] Eq[List[T]] {\n}\n"
 }
 
 ## The three shapes where a body's `{` lands on a wrapped line. Each is written
@@ -349,13 +390,13 @@ test "a conditional impl's parameters hug the keyword" {
 test "a body under a wrapped header keeps the header's level" {
   # subject wraps: the arms follow the `match`, not the continuation line
   let m = "fn f(x: Int) -> Int =\n  match g(x,\n    x) {\n    0 -> 1\n    _ -> 2\n  }\n"
-  assert format(m) == m
-  assert format("fn f(x: Int) -> Int =\nmatch g(x,\nx) {\n0 -> 1\n_ -> 2\n}\n") == m
+  assert fmt_of(m) == m
+  assert fmt_of("fn f(x: Int) -> Int =\nmatch g(x,\nx) {\n0 -> 1\n_ -> 2\n}\n") == m
 
   # signature wraps: the body is one level in, not two (analyze.dawn's shape)
   let s = "fn h(\n  a: Int\n) -> Int = {\n  let y = a\n  y\n}\n"
-  assert format(s) == s
-  assert format("fn h(\na: Int\n) -> Int = {\nlet y = a\ny\n}\n") == s
+  assert fmt_of(s) == s
+  assert fmt_of("fn h(\na: Int\n) -> Int = {\nlet y = a\ny\n}\n") == s
 
   # but a brace *inside* an unclosed `(` still belongs to its own line: the
   # closure body is three levels in, under the lambda, not two under `map`.
@@ -363,6 +404,6 @@ test "a body under a wrapped header keeps the header's level" {
   # the case above right by anchoring every brace to the construct broke this
   # one -- they need telling apart, so both directions are pinned.
   let c = "fn k(xs: List[Int]) -> List[Int] =\n  map(xs,\n    (x: Int) => {\n      x + 1\n    })\n"
-  assert format(c) == c
-  assert format("fn k(xs: List[Int]) -> List[Int] =\nmap(xs,\n(x: Int) => {\nx + 1\n})\n") == c
+  assert fmt_of(c) == c
+  assert fmt_of("fn k(xs: List[Int]) -> List[Int] =\nmap(xs,\n(x: Int) => {\nx + 1\n})\n") == c
 }

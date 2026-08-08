@@ -622,6 +622,18 @@ fn fail_compile(diags: List[LocDiag]) -> Unit !io = {
   ()
 }
 
+## Render the lexer diagnostics that made `fmt` refuse a file, say plainly that
+## nothing was written, and exit 1. Separate from `fail_compile` because the
+## last line is the whole point: the user asked for a rewrite and did not get
+## one, and a bare diagnostic dump leaves that ambiguous.
+fn fail_fmt(pairs: List[(String, Diag)]) -> Unit !io = {
+  io.eprint(diag.render_all(pairs))
+  io.eprintln(diag.count_line(len(pairs)))
+  io.eprintln("these files do not lex and were left unchanged")
+  let _ = io.exit(1)
+  ()
+}
+
 ## Render diagnostics without the count line and exit 1 (the Kotlin cmdDoc
 ## failure shape).
 fn fail_doc(diags: List[LocDiag]) -> Unit !io = {
@@ -1356,6 +1368,20 @@ fn dawn_files_under(dir: String) -> List[String] !io = {
 
 ## `selfhost fmt [--check] <file.dawn | dir>...` — mirror of `dawn fmt`:
 ## reformat in place, or report unformatted files and exit 1.
+##
+## Two refusals guard the in-place write, because it is the one command whose
+## normal outcome is overwriting the user's file:
+##
+##   * a named file must end in `.dawn`. The directory walk already filtered by
+##     extension; a directly named path did not, so `dawn fmt README.md` fed
+##     Markdown to the Dawn formatter and wrote the result back over it. One
+##     path typo was enough.
+##   * a file the lexer cannot read whole is left exactly as it was. See
+##     `front/fmt.dawn`: an unrecognized character produces no token, and the
+##     formatter reprints tokens, so formatting it deletes it.
+##
+## The lexer refusal is per file: the rest of the batch still formats, and the
+## diagnostics for every refused file are rendered together at the end.
 fn run_fmt(rest: List[String]) -> Unit !io = {
   var check = false
   var paths: List[String] = []
@@ -1369,29 +1395,39 @@ fn run_fmt(rest: List[String]) -> Unit !io = {
     if io.is_dir(p) {
       files = files ++ sort(dawn_files_under(p))
     } else {
+      if not str.ends_with(p, ".dawn") {
+        return cli_error("source files must end in .dawn: " ++ p)
+      }
       files = files ++ [p]
     }
   }
   var unformatted = 0
+  var refused: List[(String, Diag)] = []
   for f in files {
     match io.read_file(f) {
       Ok(original) -> {
-        let formatted = fmt.format(original)
-        if formatted != original {
-          if check {
-            println(f)
-            unformatted = unformatted + 1
-          } else {
-            match io.write_file(f, formatted) {
-              Ok(_) -> println("formatted " ++ f)
-              Err(e) -> panic("cannot write " ++ f ++ ": " ++ e.message)
-            }
+        match fmt.format(original) {
+          Err(ds) -> {
+            for d in ds { refused = refused ++ [(f, d)] }
           }
+          Ok(formatted) ->
+            if formatted != original {
+              if check {
+                println(f)
+                unformatted = unformatted + 1
+              } else {
+                match io.write_file(f, formatted) {
+                  Ok(_) -> println("formatted " ++ f)
+                  Err(e) -> panic("cannot write " ++ f ++ ": " ++ e.message)
+                }
+              }
+            }
         }
       }
       Err(e) -> panic("cannot read " ++ f ++ ": " ++ e.message)
     }
   }
+  if len(refused) > 0 { return fail_fmt(refused) }
   if check && unformatted > 0 { let _ = io.exit(1) }
 }
 

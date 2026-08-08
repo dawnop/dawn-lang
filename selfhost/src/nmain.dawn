@@ -88,6 +88,16 @@ fn cli_error(msg: String) -> Unit !io = {
   ()
 }
 
+## `fmt`'s refusal shape: the lexer diagnostics, the count line, and the fact
+## that nothing was written. Same words as `main.dawn`'s `fail_fmt`.
+fn fail_fmt(pairs: List[(String, Diag)]) -> Unit !io = {
+  io.eprint(diag.render_all(pairs))
+  io.eprintln(diag.count_line(len(pairs)))
+  io.eprintln("these files do not lex and were left unchanged")
+  let _ = io.exit(1)
+  ()
+}
+
 ## Diagnostics without the count line, exit 1 -- `doc`'s failure shape.
 fn fail_doc(diags: List[LocDiag]) -> Unit !io = {
   var pairs: List[(String, Diag)] = []
@@ -300,7 +310,10 @@ fn dawn_files_under(dir: String) -> List[String] !io = {
 }
 
 ## `dawnc fmt [--check] <file.dawn | dir>...` -- reformat in place, or report
-## unformatted files and exit 1.
+## unformatted files and exit 1. Both refusals (a named non-`.dawn` file, a
+## file the lexer cannot read whole) are documented at `main.dawn`'s `run_fmt`;
+## the two drivers' output is compared byte for byte by
+## `scripts/native-cli-diff.sh`, so they refuse in the same words.
 fn cmd_fmt(rest: List[String]) -> Unit !io = {
   var check = false
   var paths: List[String] = []
@@ -314,29 +327,39 @@ fn cmd_fmt(rest: List[String]) -> Unit !io = {
     if io.is_dir(p) {
       files = files ++ sort(dawn_files_under(p))
     } else {
+      if not str.ends_with(p, ".dawn") {
+        return cli_error("source files must end in .dawn: " ++ p)
+      }
       files = files ++ [p]
     }
   }
   var unformatted = 0
+  var refused: List[(String, Diag)] = []
   for f in files {
     match io.read_file(f) {
       Ok(original) -> {
-        let formatted = fmt.format(original)
-        if formatted != original {
-          if check {
-            println(f)
-            unformatted = unformatted + 1
-          } else {
-            match io.write_file(f, formatted) {
-              Ok(_) -> println("formatted " ++ f)
-              Err(e) -> panic("cannot write " ++ f ++ ": " ++ e.message)
-            }
+        match fmt.format(original) {
+          Err(ds) -> {
+            for d in ds { refused = refused ++ [(f, d)] }
           }
+          Ok(formatted) ->
+            if formatted != original {
+              if check {
+                println(f)
+                unformatted = unformatted + 1
+              } else {
+                match io.write_file(f, formatted) {
+                  Ok(_) -> println("formatted " ++ f)
+                  Err(e) -> panic("cannot write " ++ f ++ ": " ++ e.message)
+                }
+              }
+            }
         }
       }
       Err(e) -> panic("cannot read " ++ f ++ ": " ++ e.message)
     }
   }
+  if len(refused) > 0 { return fail_fmt(refused) }
   if check && unformatted > 0 { let _ = io.exit(1) }
 }
 

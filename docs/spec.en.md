@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 092365762999191d -->
+<!-- doc-check: translation-of docs/spec.md @ 97df1e39f0d12c6e -->
 
 # Dawn Language Specification
 
@@ -180,7 +180,17 @@ their source ranges, not a character changed) and only alters the whitespace bet
 intra-line spacing, 2-space indentation, collapsing consecutive blank lines (the author's physical
 line breaks are kept). Formatting therefore **preserves tokens, preserves comments, and is
 idempotent**, and it only needs the lexer to succeed (not the parser), so a file with syntax errors
-can still be formatted. The rules: indent 2 spaces; 1 space on each side of a binary operator /
+can still be formatted.
+
+**A successful lex is a precondition, and failing it is a refusal**: a character the lexer rejects
+produces no token, and tokens are all that get reprinted, so formatting such a file deletes it.
+So `dawn fmt` does not write back a file that does not lex — it renders the diagnostics, exits 1,
+and leaves the file untouched (`--check` likewise); the files in the same batch that do lex are
+formatted as usual. A **directly named non-`.dawn` file** is refused the same way (exit 2):
+directory mode already filters by extension and a named path did not, so one path typo was
+enough to feed Markdown to the Dawn formatter and overwrite it.
+
+The rules: indent 2 spaces; 1 space on each side of a binary operator /
 `->` / `=>` / `=` / `|>`; 1 space after `,`/`:` and none before; nothing inside `(`/`[`; `.`/`?`
 tight; over-long lines are not wrapped (lines the author broke are kept).
 
@@ -2358,7 +2368,7 @@ it means this one):
 | `dawn build <file or dir> -o app.jar` | An executable jar (`Main-Class: main` is already set) |
 | `dawn build ... --native -o app` | The previous step + GraalVM `native-image`, a standalone binary (§12.3) |
 | `dawn test <file or dir>` | Compiles the variant that includes the test blocks and runs it (directory mode aggregates the tests of every module) |
-| `dawn fmt <file or dir>...` | Formatting (directory mode recurses over every `.dawn`) |
+| `dawn fmt <file or dir>...` | Formatting (directory mode recurses over every `.dawn`; a directly named file must end in `.dawn`, or it exits 2) |
 | `dawn __emitc <file or dir> -o out.c` | A C translation unit. A hidden subcommand: this is the C backend's entry point on the JVM toolchain, and `dawnc`'s selfhost and differential comparison both go through it |
 
 **The C backend driver `dawnc`** (a single-file static executable, shipped with each
