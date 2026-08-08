@@ -29,6 +29,32 @@ fi
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
+runtime_input_stamp() {
+  local paths="$work/runtime-inputs.paths"
+  local manifest="$work/runtime-inputs.manifest"
+  local path
+  local relative_path
+  local file_stamp
+
+  if ! find "$root/runtime/c" -type f \( -name '*.c' -o -name '*.h' \) -print \
+      | LC_ALL=C sort > "$paths"; then
+    return 1
+  fi
+  if [ ! -s "$paths" ]; then
+    return 1
+  fi
+
+  : > "$manifest"
+  while IFS= read -r path; do
+    relative_path="${path#"$root"/}"
+    if ! file_stamp="$(digest_file "$path")"; then
+      return 1
+    fi
+    printf '%s\0%s\n' "$relative_path" "$file_stamp" >> "$manifest"
+  done < "$paths"
+  digest_file "$manifest"
+}
+
 # generation A: the JVM toolchain emits the native driver
 "$root/bin/dawn" --version > /dev/null   # rebuild build/dawn-selfhost.jar if stale
 expected_source_stamp="$(DAWN_PRINT_STAMP=1 "$root/bin/dawn")"
@@ -49,30 +75,35 @@ if [ "$built_source_stamp" != "$expected_source_stamp" ]; then
   echo "  source stamp: $expected_source_stamp" >&2
   exit 1
 fi
-expected_runtime_stamp="$(digest_file "$root/runtime/c/dawn_rt.c")"
-expected_input_stamp="$expected_source_stamp:$expected_runtime_stamp"
-
-gate_input_stamp() {
-  local source_stamp
-  local runtime_stamp
-  source_stamp="$(DAWN_PRINT_STAMP=1 "$root/bin/dawn")" || return 1
-  runtime_stamp="$(digest_file "$root/runtime/c/dawn_rt.c")" || return 1
-  printf '%s:%s\n' "$source_stamp" "$runtime_stamp"
-}
+if ! expected_runtime_stamp="$(runtime_input_stamp)"; then
+  echo "FAIL: cannot snapshot native runtime inputs before generation A" >&2
+  exit 1
+fi
 
 assert_inputs_unchanged() {
   local stage="$1"
-  local actual_input_stamp
-  if ! actual_input_stamp="$(gate_input_stamp)"; then
+  local actual_source_stamp
+  local actual_runtime_stamp
+  if ! actual_source_stamp="$(DAWN_PRINT_STAMP=1 "$root/bin/dawn")"; then
     echo "FAIL: inputs changed during gate ($stage)" >&2
-    echo "  expected stamp: $expected_input_stamp" >&2
-    echo "  actual stamp:   unavailable" >&2
+    echo "  source stamp: unavailable" >&2
     exit 1
   fi
-  if [ "$actual_input_stamp" != "$expected_input_stamp" ]; then
+  if ! actual_runtime_stamp="$(runtime_input_stamp)"; then
     echo "FAIL: inputs changed during gate ($stage)" >&2
-    echo "  expected stamp: $expected_input_stamp" >&2
-    echo "  actual stamp:   $actual_input_stamp" >&2
+    echo "  runtime/c stamp: unavailable" >&2
+    exit 1
+  fi
+  if [ "$actual_source_stamp" != "$expected_source_stamp" ]; then
+    echo "FAIL: inputs changed during gate ($stage)" >&2
+    echo "  expected source stamp: $expected_source_stamp" >&2
+    echo "  actual source stamp:   $actual_source_stamp" >&2
+    exit 1
+  fi
+  if [ "$actual_runtime_stamp" != "$expected_runtime_stamp" ]; then
+    echo "FAIL: inputs changed during gate ($stage)" >&2
+    echo "  expected runtime/c stamp: $expected_runtime_stamp" >&2
+    echo "  actual runtime/c stamp:   $actual_runtime_stamp" >&2
     exit 1
   fi
 }
