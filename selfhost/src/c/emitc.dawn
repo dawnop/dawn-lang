@@ -1560,7 +1560,10 @@ pub fn emit_stmt(st: CSt, s: CStmt) -> CSt =
       # a static outside the ledger, and dropping one would read a header it
       # does not have.
       let own = is_ref_ty(ty) && not emit_dictish(init)
-      let st1b = if own {
+      # deduplicated: lowering may bind one symbol in each arm of a branch,
+      # which was two block-scoped declarations before hoisting and must be
+      # one function-scoped slot after it
+      let st1b = if own && not set.has(st1.tracked, sym) {
         CSt {
           ..st1,
           tracked: set.insert(st1.tracked, sym),
