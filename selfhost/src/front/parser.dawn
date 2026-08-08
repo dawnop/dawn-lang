@@ -1803,6 +1803,14 @@ fn record_lit(p: P, st: St, name: Token) -> PR[Expr] = {
       let (st4, value) = expression(p, st3, false)?
       args = args ++ [Arg { name: Some(f.text), e: value, lo: f.lo, hi: e_hi(value) }]
       st1 = st4
+    } else if at_kind(p, st2, LPAREN) {
+      # `Column { text("a") }`: an uppercase name takes its braces as a record
+      # literal (spec §2.3), so this call sits in a field position and the
+      # plain "expected `}`" would point at the consequence, not the decision.
+      return Err((st2, perr_h(p, st2,
+        "`" ++ name.text ++ "` is a type name, so its braces are a record literal, " ++
+          "not a tail block",
+        "a tail block only attaches to a call; component functions use lowercase names")))
     } else {
       # shorthand { x } means { x: x }
       let value = EVar(f.text, f.lo, f.hi)
