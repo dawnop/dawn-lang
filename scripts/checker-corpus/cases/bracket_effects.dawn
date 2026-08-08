@@ -1,0 +1,30 @@
+# `bracket` is effect-polymorphic; the two catch primitives beside it are not
+# (SEM-11, docs/audit/error-model-design.md 六.11). The golden pins both
+# halves: a pure `bracket` produces nothing, and a pure `catch_panic` /
+# `catch_fault` still produces the `!io` complaint they always did.
+effect Ask {
+  fn get() -> Int
+}
+
+fn asks() -> Int !Ask = get()
+
+# pure in, pure out -- protecting a resource is not itself an effect
+fn pure_bracket(n: Int) -> Int = bracket(n, x => (), x => x + 1)
+
+# the row is the closures' row, whatever it is: a label passes through
+fn labelled(n: Int) -> Int !Ask = bracket(n, x => (), x => asks())
+
+# ...and is still checked against the signature. Three ways to under-declare:
+fn label_undeclared(n: Int) -> Int = bracket(n, x => (), x => asks())
+
+fn use_impure(n: Int) -> Unit = bracket(n, x => (), x => println(to_string(x)))
+
+fn release_impure(n: Int) -> Int = bracket(n, x => println("bye"), x => x)
+
+# The catch pair holds `!io`, so these two are refused in a pure signature
+# even though nothing they call is impure.
+fn caught_panic(n: Int) -> Result[Int, ForeignError] = catch_panic(() => n)
+
+fn caught_fault(n: Int) -> Result[Int, ForeignError] = catch_fault(() => n)
+
+pub fn main() -> Unit !io = { println(to_string(pure_bracket(1))) }

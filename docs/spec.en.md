@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 998835808c399cd3 -->
+<!-- doc-check: translation-of docs/spec.md @ 6cd66e8e951042a4 -->
 
 # Dawn Language Specification
 
@@ -1936,7 +1936,7 @@ Dawn has no `try`/`finally`, and does not intend to (the pair of barriers in §9
 back" is carried by a third builtin:
 
 ```dawn
-fn bracket[A, B](resource: A, release: fn(A) -> Unit !io, use: fn(A) -> B !io) -> B !io
+fn bracket[A, B](resource: A, release: fn(A) -> Unit !e, use: fn(A) -> B !e) -> B !e
 ```
 
 ```dawn
@@ -1976,6 +1976,11 @@ Three guarantees:
   intercepting are two orthogonal things (neither Haskell's `bracket`, Kotlin's `use`,
   Koka's `finally` nor Go's `defer` returns a Result). To take the failure as a value,
   write `catch_fault(() => bracket(...))`; each of the two primitives does one thing.
+- **The effect row is a variable `!e`**: `release`, `use` and the call as a whole share
+  one row, and `bracket` adds no effect of its own. So a `bracket` over a pure resource is
+  pure, an `!io` one is `!io`, and a labelled one passes its label straight through. The
+  pair of barriers in §9.8 is **not** like this (they are pinned to `!io`); the reason is
+  in [`docs/audit/error-model-design.md`](audit/error-model-design.md) §7.
 
 > It gets no surface syntax like `defer`: the protected region is always **one closure
 > call**, so `return`/`?`/`break` cannot cross out of it at the language level, and the

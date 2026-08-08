@@ -1679,14 +1679,22 @@ pub fn builtins() -> Map[String, Sig] = {
     # a call is a runtime primitive taking a closure, which is what
     # `catch_fault` already is. That is the intrinsic contract, not a second
     # implementation (docs/core-move2-design.md 2.6).
+    # Effect-polymorphic, unlike its two neighbours above: `release` and `use`
+    # share one row `e` and the call carries exactly that row. Nothing here
+    # observes a failure -- the release runs and the failure carries on -- so
+    # the primitive adds no effect of its own, and pinning it to `!io` would
+    # only mean that protecting a pure resource makes its user impure. The
+    # catch pair cannot follow: what they hand back depends on the panic they
+    # caught, and a panic is not in the row (docs/audit/error-model-design.md
+    # §7).
     eff1(
       Sig {
         ..bsig("bracket",
-          [a, TyFn([a], TyUnit, EIo), TyFn([a], b, EIo)],
+          [a, TyFn([a], TyUnit, e), TyFn([a], b, e)],
           ["resource", "release", "use"], b),
         tparams: [a, b]
       },
-      EIo
+      e
     ),
     # io_* intrinsics: the console/file primitives std/io writes over. All !io.
     # The JVM backend emits them into dawn/rt/Io. read_file/write_file/list_names
@@ -2381,15 +2389,17 @@ test "bracket protects a resource and hands the body's own answer back" {
   #   the failure carries on and a caller who wants it as a value wraps the
   #   whole thing in `catch_fault`;
   #   `release` answers `Unit`, so nothing a caller might read can be dropped
-  #   on the floor by the unwind path.
+  #   on the floor by the unwind path;
+  #   the row is a VARIABLE shared by release, use and the call, so protecting
+  #   a pure resource leaves its user pure (SEM-11).
   let adts = prelude_adts()
   let traits = prelude_traits()
   let bs = builtins()
   match map.get(bs, "bracket") {
     Some(s) -> {
       assert sig_render(adts, traits, s) ==
-        "fn bracket[A, B](resource: A, release: fn(A) -> Unit !io, " ++
-        "use: fn(A) -> B !io) -> B !io"
+        "fn bracket[A, B](resource: A, release: fn(A) -> Unit !e, " ++
+        "use: fn(A) -> B !e) -> B !e"
     }
     None -> { assert false }
   }
@@ -2401,7 +2411,9 @@ test "bracket protects a resource and hands the body's own answer back" {
   assert i.erased
   # and it is language surface, not a std-only backend contract
   assert not i.internal
-  assert i.sig.eff == EIo
+  # the row is erased before either backend sees it, so the same runtime method
+  # serves every instantiation -- effect polymorphism costs the emitters nothing
+  assert i.sig.eff == EffVar("e", -1)
 }
 
 test "ForeignError is a prelude record whose fields every backend can answer" {

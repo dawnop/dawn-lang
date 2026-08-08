@@ -1575,7 +1575,7 @@ Dawn 没有 `try`/`finally`，也不打算有（§9.8 那对屏障是**拦**，�
 「无论怎么退出都要把资源还回去」这件事由第三个内建承担：
 
 ```dawn
-fn bracket[A, B](resource: A, release: fn(A) -> Unit !io, use: fn(A) -> B !io) -> B !io
+fn bracket[A, B](resource: A, release: fn(A) -> Unit !e, use: fn(A) -> B !e) -> B !e
 ```
 
 ```dawn
@@ -1608,6 +1608,10 @@ with f <- bracket(open(path), close)
 - **`bracket` 不拦任何东西**，故返回 `B` 而非 `Result`——护与拦是两件正交的事
   （Haskell `bracket`、Kotlin `use`、Koka `finally`、Go `defer` 无一返回 Result）。
   要把失败拿成值就写 `catch_fault(() => bracket(...))`，两个原语各做一件事。
+- **效果行是变量 `!e`**：`release`、`use` 与整个调用共用同一行，`bracket` 自己不加任何
+  效果。所以纯资源的 `bracket` 是纯的，`!io` 的是 `!io` 的，带标签的把标签原样传出去。
+  §9.8 那对屏障**不**是这样（它们钉死 `!io`），理由见
+  [`docs/audit/error-model-design.md`](audit/error-model-design.md) §七。
 
 > 它不给 `defer` 那样的面语法：受保护的区间恒为**一次闭包调用**，所以
 > `return`/`?`/`break` 在语言层面就跨不出去，编译器也就不欠一套逃逸改写。
