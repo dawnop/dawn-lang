@@ -46,7 +46,7 @@ fn usage() -> String =
     "dawnc " ++ VERSION ++ " -- the Dawn compiler, native backend",
     "",
     "usage:",
-    "  dawnc check [--std <dir>] <target>          type-check, report diagnostics",
+    "  dawnc check [--std <dir>] <target>...       type-check, report diagnostics",
     "  dawnc build [--std <dir>] <target> [-o out] compile to a native binary via cc",
     "  dawnc emitc [--std <dir>] <target> [-o out] emit the C translation unit",
     "  dawnc run   [--std <dir>] <target>          compile and run",
@@ -88,6 +88,27 @@ fn cli_error(msg: String) -> Unit !io = {
   ()
 }
 
+## Refuse a second positional for commands whose contract has one target.
+## The wording matches main.dawn: the native driver is a second parser for the
+## same command contract, not a second place to invent diagnostics.
+fn refuse_second_target(cmd: String, have: String, got: String) -> Unit !io =
+  if have != "" {
+    cli_error(cmd ++ " takes one target, got `" ++ have ++ "` and `" ++ got ++
+        "`; a bare word after the target is not a flag this subcommand knows")
+  }
+
+## Require exactly one input mode after parsing. This is duplicated at the
+## driver boundary on purpose; native-cli-diff is the executable shared fact.
+fn require_one_input(
+  cmd: String,
+  choices: String,
+  usage_text: String,
+  selected: Int
+) -> Unit !io = {
+  if selected == 0 { return cli_error(usage_text) }
+  if selected > 1 { return cli_error(cmd ++ " accepts exactly one of " ++ choices) }
+}
+
 ## `fmt`'s refusal shape: the lexer diagnostics, the count line, and the fact
 ## that nothing was written. Same words as `main.dawn`'s `fail_fmt`.
 fn fail_fmt(pairs: List[(String, Diag)]) -> Unit !io = {
@@ -107,8 +128,9 @@ fn fail_doc(diags: List[LocDiag]) -> Unit !io = {
   ()
 }
 
-## `--std <dir>` and `-o <out>` picked out of the argument tail; the one
-## remaining positional is the target.
+## `run`'s existing tail parser. Extra positionals remain rejected here until
+## TOOL-03 gives run a compiler/program `--` boundary; TOOL-04 deliberately
+## does not change that plumbing.
 fn parse_tail(rest: List[String]) -> (String, String, String) !io = {
   var std_dir = "std"
   var out = ""
@@ -131,6 +153,51 @@ fn parse_tail(rest: List[String]) -> (String, String, String) !io = {
   }
   if target == "" { fail_usage() }
   (std_dir, out, target)
+}
+
+## `--std <dir>` and `-o <out>` plus exactly one target, shared by native
+## build and emitc without changing run's parser.
+fn parse_compile_tail(
+  cmd: String,
+  usage_text: String,
+  rest: List[String]
+) -> (String, String, String) !io = {
+  var std_dir = "std"
+  var out = ""
+  var target = ""
+  var i = 0
+  while i < len(rest) {
+    if rest[i] == "--std" && i + 1 < len(rest) {
+      std_dir = rest[i + 1]
+      i = i + 2
+    } else if rest[i] == "-o" && i + 1 < len(rest) {
+      out = rest[i + 1]
+      i = i + 2
+    } else {
+      refuse_second_target(cmd, target, rest[i])
+      target = rest[i]
+      i = i + 1
+    }
+  }
+  if target == "" { cli_error(usage_text) }
+  (std_dir, out, target)
+}
+
+## `[--std <dir>] <target>...`, matching main.dawn's public check parser.
+fn check_args(rest: List[String]) -> (String, List[String]) = {
+  var std_dir = "std"
+  var targets: List[String] = []
+  var i = 0
+  while i < len(rest) {
+    if rest[i] == "--std" && i + 1 < len(rest) {
+      std_dir = rest[i + 1]
+      i = i + 2
+    } else {
+      targets = targets ++ [rest[i]]
+      i = i + 1
+    }
+  }
+  (std_dir, targets)
 }
 
 fn load_or_die(std_dir: String) -> StdCtx !io =
@@ -222,14 +289,35 @@ fn cc_build(ctext: String, out: String) -> Unit !io = {
 }
 
 fn cmd_check(rest: List[String]) -> Unit !io = {
-  let (std_dir, _out, target) = parse_tail(rest)
+  let (std_dir, targets) = check_args(rest)
+  if len(targets) == 0 {
+    return cli_error("usage: dawn check [--std <dir>] <target>...")
+  }
+  for target in targets {
+    if not io.exists(target) {
+      return cli_error("no such file or directory: " ++ target)
+    }
+    if not io.is_dir(target) && not str.ends_with(target, ".dawn") {
+      return cli_error("source files must end in .dawn: " ++ target)
+    }
+  }
   let std = load_or_die(std_dir)
-  let _ = analyzed(std, target)
+  var all: List[LocDiag] = []
+  for target in targets {
+    let loaded = if io.is_dir(target) { load_directory(target) } else { load_file(target) }
+    let prog = analyze_program(loaded, std, ct_default(), jsig_refused())
+    all = all ++ prog.diags
+  }
+  if len(all) > 0 { return fail_compile(all) }
   println("ok")
 }
 
 fn cmd_emitc(rest: List[String]) -> Unit !io = {
-  let (std_dir, out, target) = parse_tail(rest)
+  let (std_dir, out, target) = parse_compile_tail(
+    "dawn emitc",
+    "usage: dawn emitc [--std <dir>] <file.dawn | project-dir> [-o out]",
+    rest
+  )
   let text = emitted(std_dir, target)
   if out == "" {
     print(text)
@@ -242,7 +330,11 @@ fn cmd_emitc(rest: List[String]) -> Unit !io = {
 }
 
 fn cmd_build(rest: List[String]) -> Unit !io = {
-  let (std_dir, out0, target) = parse_tail(rest)
+  let (std_dir, out0, target) = parse_compile_tail(
+    "dawn build",
+    "usage: dawn build [--cp jars] <file.dawn | project-dir> [-o out] [--native]",
+    rest
+  )
   let out = if out0 == "" { default_out(target) } else { out0 }
   cc_build(emitted(std_dir, target), out)
 }
@@ -386,10 +478,19 @@ fn cmd_doc(rest: List[String]) -> Unit !io = {
       stdlib_mode = true
       i = i + 1
     } else {
+      refuse_second_target("dawn doc", target, rest[i])
       target = rest[i]
       i = i + 1
     }
   }
+  require_one_input(
+    "dawn doc",
+    "a target, --stdlib, or --builtins",
+    "usage: dawn doc <file.dawn | project-dir> | dawn doc --stdlib | dawn doc --builtins",
+    (if target != "" { 1 } else { 0 }) +
+      (if stdlib_mode { 1 } else { 0 }) +
+      (if builtins_mode { 1 } else { 0 })
+  )
   let std = match load_std(std_dir) {
     Ok(sc) -> sc
     Err(e) -> panic("cannot load std from " ++ std_dir ++ ": " ++ e)
@@ -401,10 +502,6 @@ fn cmd_doc(rest: List[String]) -> Unit !io = {
   if builtins_mode {
     print(doc.builtins_json(std))
     return
-  }
-  if target == "" {
-    return cli_error(
-      "usage: dawn doc <file.dawn | project-dir> | dawn doc --stdlib | dawn doc --builtins")
   }
   if not io.exists(target) {
     return cli_error("no such file or directory: " ++ target)
@@ -462,6 +559,7 @@ fn cmd_test(rest: List[String]) -> Unit !io = {
       spec = str.strip_prefix(rest[i], "--cp=").unwrap_or(rest[i])
       i = i + 1
     } else {
+      refuse_second_target("dawn test", target, rest[i])
       target = rest[i]
       i = i + 1
     }
@@ -471,13 +569,12 @@ fn cmd_test(rest: List[String]) -> Unit !io = {
       }
     }
   }
-  if std_tests && target != "" {
-    return cli_error("dawn test --stdlib takes no target: " ++ target)
-  }
-  if target == "" && not std_tests {
-    return cli_error(
-      "usage: dawn test [--cp jars] <file.dawn | project-dir> | dawn test --stdlib")
-  }
+  require_one_input(
+    "dawn test",
+    "a target or --stdlib",
+    "usage: dawn test [--cp jars] <file.dawn | project-dir> | dawn test --stdlib",
+    (if target != "" { 1 } else { 0 }) + (if std_tests { 1 } else { 0 })
+  )
   let std = load_or_die(std_dir)
   let prog = if std_tests { Program { modules: [], diags: [] } } else { analyzed(std, target) }
   # the modules whose test blocks are being run: the target's, or std's own

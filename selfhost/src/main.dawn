@@ -659,6 +659,19 @@ fn refuse_second_target(cmd: String, have: String, got: String) -> Unit !io =
         "`; a bare word after the target is not a flag this subcommand knows")
   }
 
+## Require exactly one input mode after each mode's flags and target have been
+## collected. Keeping this separate from option extraction makes cardinality a
+## single policy point without making the JVM and native argv plumbing shared.
+fn require_one_input(
+  cmd: String,
+  choices: String,
+  usage_text: String,
+  selected: Int
+) -> Unit !io = {
+  if selected == 0 { return cli_error(usage_text) }
+  if selected > 1 { return cli_error(cmd ++ " accepts exactly one of " ++ choices) }
+}
+
 fn cli_error(msg: String) -> Unit !io = {
   io.eprintln("error: " ++ msg)
   let _ = io.exit(2)
@@ -1028,13 +1041,12 @@ fn run_test(rest0: List[String]) -> Unit !io = {
       i = i + 1
     }
   }
-  if std_tests && target != "" {
-    return cli_error("dawn test --stdlib takes no target: " ++ target)
-  }
-  if target == "" && not std_tests {
-    return cli_error(
-      "usage: dawn test [--cp jars] <file.dawn | project-dir> | dawn test --stdlib")
-  }
+  require_one_input(
+    "dawn test",
+    "a target or --stdlib",
+    "usage: dawn test [--cp jars] <file.dawn | project-dir> | dawn test --stdlib",
+    (if target != "" { 1 } else { 0 }) + (if std_tests { 1 } else { 0 })
+  )
   let (classes, _, tests_info) = collect_program(target, std_dir, opts, closure2, std_tests)
   if len(tests_info) == 0 {
     return cli_error(if std_tests { std_dir ++ " has no test blocks" }
@@ -1506,6 +1518,14 @@ fn run_doc(rest: List[String]) -> Unit !io = {
       i = i + 1
     }
   }
+  require_one_input(
+    "dawn doc",
+    "a target, --stdlib, or --builtins",
+    "usage: dawn doc <file.dawn | project-dir> | dawn doc --stdlib | dawn doc --builtins",
+    (if target != "" { 1 } else { 0 }) +
+      (if stdlib_mode { 1 } else { 0 }) +
+      (if builtins_mode { 1 } else { 0 })
+  )
   let std = match load_std(std_dir) {
     Ok(sc) -> sc
     Err(e) -> panic("cannot load std from " ++ std_dir ++ ": " ++ e)
@@ -1517,10 +1537,6 @@ fn run_doc(rest: List[String]) -> Unit !io = {
   if builtins_mode {
     print(doc.builtins_json(std))
     return
-  }
-  if target == "" {
-    return cli_error(
-      "usage: dawn doc <file.dawn | project-dir> | dawn doc --stdlib | dawn doc --builtins")
   }
   if not io.exists(target) {
     return cli_error("no such file or directory: " ++ target)
@@ -1645,7 +1661,7 @@ fn lower_size(m: CModule) -> Int = {
 fn run_emitc(rest: List[String]) -> Unit !io = {
   var std_dir = "std"
   var out = ""
-  var targets: List[String] = []
+  var target = ""
   var i = 0
   while i < len(rest) {
     if rest[i] == "--std" && i + 1 < len(rest) {
@@ -1655,18 +1671,19 @@ fn run_emitc(rest: List[String]) -> Unit !io = {
       out = rest[i + 1]
       i = i + 2
     } else {
-      targets = targets ++ [rest[i]]
+      refuse_second_target("dawn emitc", target, rest[i])
+      target = rest[i]
       i = i + 1
     }
   }
-  if len(targets) != 1 {
-    cli_error("__emitc takes exactly one target")
+  if target == "" {
+    cli_error("usage: dawn emitc [--std <dir>] <file.dawn | project-dir> [-o out]")
   }
   let std = match load_std(std_dir) {
     Ok(sc) -> sc
     Err(e) -> panic("cannot load std from " ++ std_dir ++ ": " ++ e)
   }
-  let t = targets[0]
+  let t = target
   let loaded = if io.is_dir(t) { load_directory(t) } else { load_file(t) }
   let prog = analyze_program(loaded, std, ct_default(), jsig_real())
   if len(prog.diags) > 0 { fail_compile(prog.diags) }

@@ -2033,13 +2033,29 @@ hex 与 base64 是纯 Dawn 字节算术（无 `use java`，故两后端同一份
 
 | 命令 | 产物 |
 |------|------|
-| `dawnc check <target>` | 只做类型检查，报诊断 |
+| `dawnc check <target>...` | 只做类型检查，聚合全部 target 的诊断 |
 | `dawnc emitc <target> [-o out.c]` | C 翻译单元（配 `runtime/c/` 的运行时一起编） |
 | `dawnc build <target> [-o out]` | 前一步 + 调 `cc`（`$CC` 可覆盖），独立可执行文件 |
 | `dawnc run <target>` | 同上，编完直接执行 |
 | `dawnc test <target>` | 编译含 test 块的变体并执行 |
 | `dawnc fmt` / `doc` / `add` / `lsp` | 与 `dawn` 的同名子命令输出**逐字节一致**（`scripts/native-cli-diff.sh` 把这四件钉在 JVM 的字节上） |
 | `dawnc version` | 版本号（自报 `(native)`，故不与 `dawn --version` 逐字相同） |
+
+两个驱动各自解析 argv，但 target 基数是一份共同契约（TOOL-04）：
+
+| 子命令 | target / selector 基数 |
+|---|---|
+| `check` | 1..N 个 target |
+| `test` | 恰一个 target，或 `--stdlib`；两者异或 |
+| `doc` | 恰在“一个 target / `--stdlib` / `--builtins`”中选择一项 |
+| `build` | 恰一个 target |
+| `emitc` | 恰一个 target（JVM 入口拼作隐藏命令 `__emitc`） |
+| `fmt` | 1..N 个 target |
+
+缺参、多 target 或 selector 冲突属于用法错误：在开始加载 target 或生成后端产物前退出 2；
+两个驱动对同一错误使用相同诊断字节。`check` 与 `fmt` 的 N 没有人为上限；写两个 target
+不是“最大为二”，而是证明它们确实是批处理命令。此处只规定基数，不规定 `run` 如何分隔
+编译器 option 与被运行程序的参数。
 
 `dawnc` 少的那几个子命令不是缺口，是后端的边界：**它拒绝 `use java`**（Java 互操作是
 JVM 后端的能力，§9），`build`-to-jar、`lock`、`cache` 同理只在 JVM 侧有意义。

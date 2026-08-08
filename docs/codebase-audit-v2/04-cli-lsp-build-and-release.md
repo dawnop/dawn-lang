@@ -32,12 +32,13 @@
 - **影响：** 用户程序 CLI namespace 不稳定，wrapper/tooling 无法可靠透传参数。
 - **建议：** 统一为 `dawn run [compiler-options] <target> -- [program-args]`；只解析 target 前的 options。
 
-## TOOL-04 — P2 — JVM/native CLI 参数基数已经漂移
+## TOOL-04 — P2 — JVM/native CLI 参数基数已经漂移（已修）
 
-- **证据：S。** JVM `doc` 拒绝第二个 target：`selfhost/src/main.dawn:1417`，native 让最后一个覆盖前一个：`selfhost/src/nmain.dawn:365`；`test` 同样在 `selfhost/src/main.dawn:1013` 与 `selfhost/src/nmain.dawn:441` 分叉。
-- **冲突：** 规范承诺同名工具命令逐字节一致：`docs/spec.md:1910`。
-- **影响：** 多一个 positional 时，一个后端报 usage，另一个成功操作错误 target。
-- **建议：** 建立共享 argv contract fixtures，两个独立 parser 都消费同一 accept/reject/output 表；不要求共享实现，但必须共享可执行契约。
+- **原证据：S。** JVM `doc` / `test` 拒绝第二个 target，native 却让末位覆盖；JVM `check` 接受 1..N，native 的通用 tail parser 只接受一个。旧门禁每例最多一个 positional，且只判断两端相等，无法发现两端共谋接受非法输入。
+- **当前契约：** `check` 与 `fmt` 为 1..N；`test` 为单 target XOR `--stdlib`；`doc` 在单 target / `--stdlib` / `--builtins` 中恰选一项；`build`、`emitc` 恰一个 target。编译器 options 与 `run` 转发不在本刀内，完整理由见 [`cli-arity-design.md`](../cli-arity-design.md)。
+- **实现：** 两个驱动各保留独立 argv plumbing，但分别集中使用单-target拒绝与 selector 计数 helper；native `check` 与 JVM 一样先验证全部路径、再聚合全部诊断。这样没有把 differential 降成同一 parser 自比。
+- **门禁：** `scripts/native-cli-diff.sh` 对六个命令逐项钉最小、合法上边界与冲突边界；reject case 同时核对完整诊断和绝对 exit 2，不再以“两个后端给出同一个错误答案”为绿。`build` 的合法边界分别验证 JAR/native executable，`emitc` 比较 C 文本。
+- **结论：已修。** 第二个 positional 不再被 native 静默覆盖；所有基数错误都在 target load/codegen 前以一致字节与 exit 2 拒绝。
 
 ## TOOL-05 — P1 — 每个 LSP 文档拥有互相矛盾的工程快照
 

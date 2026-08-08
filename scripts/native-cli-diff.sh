@@ -54,21 +54,206 @@ fi
 case "$DAWNC" in /*) ;; *) DAWNC="$ROOT/$DAWNC" ;; esac
 
 fail=0
+PAIR_J=0
+PAIR_N=0
 
 ## Run the same argv through both drivers; stdout, stderr and the exit code
 ## must agree.
 pair() { # label args...
-  label=$1; shift
-  ./bin/dawn "$@" > "$OUT/j.txt" 2>&1 && j=0 || j=$?
-  "$DAWNC" "$@" > "$OUT/n.txt" 2>&1 && n=0 || n=$?
-  if [ "$j" != "$n" ] || ! diff "$OUT/j.txt" "$OUT/n.txt" > "$OUT/d.txt"; then
-    echo "FAIL: $label differs between backends (exits jvm=$j native=$n)"
+  local label=$1
+  shift
+  ./bin/dawn "$@" > "$OUT/j.txt" 2>&1 && PAIR_J=0 || PAIR_J=$?
+  "$DAWNC" "$@" > "$OUT/n.txt" 2>&1 && PAIR_N=0 || PAIR_N=$?
+  if [ "$PAIR_J" != "$PAIR_N" ] || ! diff "$OUT/j.txt" "$OUT/n.txt" > "$OUT/d.txt"; then
+    echo "FAIL: $label differs between backends (exits jvm=$PAIR_J native=$PAIR_N)"
     head -20 "$OUT/d.txt"
     fail=1
   else
-    echo "OK   $label (exit $j)"
+    echo "OK   $label (exit $PAIR_J)"
   fi
 }
+
+## `pair`, plus an independent exit oracle. Equality alone lets both drivers
+## accept the same invalid argv and call that agreement.
+pair_expect_exit() { # exit label args...
+  local want=$1
+  local label=$2
+  shift 2
+  pair "$label" "$@"
+  if [ "$PAIR_J" != "$want" ] || [ "$PAIR_N" != "$want" ]; then
+    echo "FAIL: $label exits jvm=$PAIR_J native=$PAIR_N, want $want"
+    fail=1
+  fi
+}
+
+## A usage rejection has an absolute byte contract as well as exit 2.
+pair_expect_error() { # expected label args...
+  local expected=$1
+  local label=$2
+  shift 2
+  ./bin/dawn "$@" > "$OUT/j.out" 2> "$OUT/j.err" && PAIR_J=0 || PAIR_J=$?
+  "$DAWNC" "$@" > "$OUT/n.out" 2> "$OUT/n.err" && PAIR_N=0 || PAIR_N=$?
+  printf '%s' "$expected" > "$OUT/expected.txt"
+  if [ "$PAIR_J" != 2 ] || [ "$PAIR_N" != 2 ] ||
+    [ -s "$OUT/j.out" ] || [ -s "$OUT/n.out" ] ||
+    ! cmp -s "$OUT/j.err" "$OUT/expected.txt" ||
+    ! cmp -s "$OUT/n.err" "$OUT/expected.txt"
+  then
+    echo "FAIL: $label did not match stdout-empty + stderr-bytes + exit-2"
+    [ ! -s "$OUT/j.out" ] || { echo "--- unexpected JVM stdout"; head -20 "$OUT/j.out"; }
+    [ ! -s "$OUT/n.out" ] || { echo "--- unexpected native stdout"; head -20 "$OUT/n.out"; }
+    diff -u "$OUT/expected.txt" "$OUT/j.err" | head -20 || true
+    diff -u "$OUT/expected.txt" "$OUT/n.err" | head -20 || true
+    fail=1
+  else
+    echo "OK   $label (stdout empty, stderr exact, exit 2)"
+  fi
+}
+
+## JVM spells the hidden C-emitter command `__emitc`; the native driver spells
+## its public backend command `emitc`. Their cardinality and C text are one
+## contract despite that dispatch-name difference.
+emitc_pair() { # label args...
+  local label=$1
+  shift
+  ./bin/dawn __emitc "$@" > "$OUT/j.txt" 2>&1 && PAIR_J=0 || PAIR_J=$?
+  "$DAWNC" emitc "$@" > "$OUT/n.txt" 2>&1 && PAIR_N=0 || PAIR_N=$?
+  if [ "$PAIR_J" != "$PAIR_N" ] || ! diff "$OUT/j.txt" "$OUT/n.txt" > "$OUT/d.txt"; then
+    echo "FAIL: $label differs between backends (exits jvm=$PAIR_J native=$PAIR_N)"
+    head -20 "$OUT/d.txt"
+    fail=1
+  else
+    echo "OK   $label (exit $PAIR_J)"
+  fi
+}
+
+emitc_expect_exit() { # exit label args...
+  local want=$1
+  local label=$2
+  shift 2
+  emitc_pair "$label" "$@"
+  if [ "$PAIR_J" != "$want" ] || [ "$PAIR_N" != "$want" ]; then
+    echo "FAIL: $label exits jvm=$PAIR_J native=$PAIR_N, want $want"
+    fail=1
+  fi
+}
+
+emitc_expect_error() { # expected label args...
+  local expected=$1
+  local label=$2
+  shift 2
+  ./bin/dawn __emitc "$@" > "$OUT/j.out" 2> "$OUT/j.err" && PAIR_J=0 || PAIR_J=$?
+  "$DAWNC" emitc "$@" > "$OUT/n.out" 2> "$OUT/n.err" && PAIR_N=0 || PAIR_N=$?
+  printf '%s' "$expected" > "$OUT/expected.txt"
+  if [ "$PAIR_J" != 2 ] || [ "$PAIR_N" != 2 ] ||
+    [ -s "$OUT/j.out" ] || [ -s "$OUT/n.out" ] ||
+    ! cmp -s "$OUT/j.err" "$OUT/expected.txt" ||
+    ! cmp -s "$OUT/n.err" "$OUT/expected.txt"
+  then
+    echo "FAIL: $label did not match stdout-empty + stderr-bytes + exit-2"
+    [ ! -s "$OUT/j.out" ] || { echo "--- unexpected JVM stdout"; head -20 "$OUT/j.out"; }
+    [ ! -s "$OUT/n.out" ] || { echo "--- unexpected native stdout"; head -20 "$OUT/n.out"; }
+    diff -u "$OUT/expected.txt" "$OUT/j.err" | head -20 || true
+    diff -u "$OUT/expected.txt" "$OUT/n.err" | head -20 || true
+    fail=1
+  else
+    echo "OK   $label (stdout empty, stderr exact, exit 2)"
+  fi
+}
+
+# ---- leg 0: positional arity, against absolute contracts ----
+echo "== command arity, JVM and native vs absolute contracts =="
+ARITY_A="$OUT/arity_a.dawn"
+ARITY_B="$OUT/arity_b.dawn"
+cat > "$ARITY_A" <<'EOF'
+pub fn main() -> Unit !io = ()
+
+test "arity fixture" {
+  assert true
+}
+EOF
+cat > "$ARITY_B" <<'EOF'
+pub fn main() -> Unit !io = ()
+
+test "second arity fixture" {
+  assert true
+}
+EOF
+
+pair_expect_error \
+  $'error: usage: dawn check [--std <dir>] <target>...\n' \
+  "check (zero targets)" check
+pair_expect_exit 0 "check (one target)" check "$ARITY_A"
+pair_expect_exit 0 "check (multiple targets)" check "$ARITY_A" "$ARITY_B"
+
+pair_expect_error \
+  $'error: usage: dawn test [--cp jars] <file.dawn | project-dir> | dawn test --stdlib\n' \
+  "test (zero targets)" test
+pair_expect_exit 0 "test (one target)" test "$ARITY_A"
+pair_expect_exit 0 "test (--stdlib selector)" test --stdlib
+pair_expect_error \
+  "error: dawn test takes one target, got \`$ARITY_A\` and \`$ARITY_B\`; a bare word after the target is not a flag this subcommand knows"$'\n' \
+  "test (multiple targets)" test "$ARITY_A" "$ARITY_B"
+pair_expect_error \
+  $'error: dawn test accepts exactly one of a target or --stdlib\n' \
+  "test (target conflicts with --stdlib)" test --stdlib "$ARITY_A"
+
+pair_expect_error \
+  $'error: usage: dawn doc <file.dawn | project-dir> | dawn doc --stdlib | dawn doc --builtins\n' \
+  "doc (zero targets)" doc
+pair_expect_exit 0 "doc (one target)" doc "$ARITY_A"
+pair_expect_exit 0 "doc (--stdlib selector)" doc --stdlib
+pair_expect_exit 0 "doc (--builtins selector)" doc --builtins
+pair_expect_error \
+  "error: dawn doc takes one target, got \`$ARITY_A\` and \`$ARITY_B\`; a bare word after the target is not a flag this subcommand knows"$'\n' \
+  "doc (multiple targets)" doc "$ARITY_A" "$ARITY_B"
+pair_expect_error \
+  $'error: dawn doc accepts exactly one of a target, --stdlib, or --builtins\n' \
+  "doc (stdlib conflicts with builtins)" doc --stdlib --builtins
+pair_expect_error \
+  $'error: dawn doc accepts exactly one of a target, --stdlib, or --builtins\n' \
+  "doc (target conflicts with stdlib)" doc "$ARITY_A" --stdlib
+pair_expect_error \
+  $'error: dawn doc accepts exactly one of a target, --stdlib, or --builtins\n' \
+  "doc (target conflicts with builtins)" doc "$ARITY_A" --builtins
+
+pair_expect_error \
+  $'error: usage: dawn build [--cp jars] <file.dawn | project-dir> [-o out] [--native]\n' \
+  "build (zero targets)" build
+rm -f "$OUT/arity.jar" "$OUT/arity-bin"
+./bin/dawn build "$ARITY_A" -o "$OUT/arity.jar" > "$OUT/j.txt" 2>&1 && jbuild=0 || jbuild=$?
+"$DAWNC" build "$ARITY_A" -o "$OUT/arity-bin" > "$OUT/n.txt" 2>&1 && nbuild=0 || nbuild=$?
+if [ "$jbuild" != 0 ] || [ "$nbuild" != 0 ] ||
+  [ ! -s "$OUT/arity.jar" ] || [ ! -s "$OUT/arity-bin" ]
+then
+  echo "FAIL: build (one target) must produce both backend-specific artifacts"
+  fail=1
+else
+  echo "OK   build (one target: JVM jar and native executable both exist)"
+fi
+pair_expect_error \
+  "error: dawn build takes one target, got \`$ARITY_A\` and \`$ARITY_B\`; a bare word after the target is not a flag this subcommand knows"$'\n' \
+  "build (multiple targets)" build "$ARITY_A" "$ARITY_B"
+
+emitc_expect_error \
+  $'error: usage: dawn emitc [--std <dir>] <file.dawn | project-dir> [-o out]\n' \
+  "emitc (zero targets)"
+emitc_expect_exit 0 "emitc (one target)" "$ARITY_A"
+emitc_expect_error \
+  "error: dawn emitc takes one target, got \`$ARITY_A\` and \`$ARITY_B\`; a bare word after the target is not a flag this subcommand knows"$'\n' \
+  "emitc (multiple targets)" "$ARITY_A" "$ARITY_B"
+
+pair_expect_error \
+  $'error: usage: dawn fmt [--check] <file.dawn | dir>...\n' \
+  "fmt (zero targets)" fmt
+pair_expect_exit 0 "fmt (one target)" fmt --check "$ARITY_A"
+pair_expect_exit 0 "fmt (multiple targets)" fmt --check "$ARITY_A" "$ARITY_B"
+
+if [ "${NATIVE_CLI_ARITY_ONLY:-}" = 1 ]; then
+  [ "$fail" = 0 ] || { echo "FAIL: command arity contract"; exit 1; }
+  echo "OK: command arity agrees across both backends and matches the absolute contract"
+  exit 0
+fi
 
 # ---- leg 1: fmt, against the previous release ----
 echo "== fmt vs N-1, native backend =="

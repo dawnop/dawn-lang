@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ fa01467095153ab1 -->
+<!-- doc-check: translation-of docs/spec.md @ 15d4334b598123bc -->
 
 # Dawn Language Specification
 
@@ -2538,13 +2538,32 @@ release; it needs neither a JVM nor this repository):
 
 | Command | Output |
 |------|------|
-| `dawnc check <target>` | Type checking only, reports diagnostics |
+| `dawnc check <target>...` | Type checking only, aggregates diagnostics from every target |
 | `dawnc emitc <target> [-o out.c]` | A C translation unit (compiled together with the runtime in `runtime/c/`) |
 | `dawnc build <target> [-o out]` | The previous step + a call to `cc` (`$CC` overrides it), a standalone executable |
 | `dawnc run <target>` | The same, and runs it as soon as it is compiled |
 | `dawnc test <target>` | Compiles the variant that includes the test blocks and runs it |
 | `dawnc fmt` / `doc` / `add` / `lsp` | Output is **byte-for-byte identical** to `dawn`'s subcommands of the same name (`scripts/native-cli-diff.sh` pins these four to the JVM's bytes) |
 | `dawnc version` | The version number (it reports `(native)` itself, so it is not literally identical to `dawn --version`) |
+
+The two drivers parse argv independently, but target cardinality is one shared contract
+(TOOL-04):
+
+| Subcommand | Target / selector cardinality |
+|---|---|
+| `check` | 1..N targets |
+| `test` | Exactly one target, or `--stdlib`; the two are exclusive |
+| `doc` | Exactly one of one target, `--stdlib`, or `--builtins` |
+| `build` | Exactly one target |
+| `emitc` | Exactly one target (the JVM entry point is the hidden command `__emitc`) |
+| `fmt` | 1..N targets |
+
+A missing target, too many targets, or conflicting selectors is a usage error: it exits 2
+before loading a target or producing a backend output, and both drivers use identical
+diagnostic bytes for the same error. N has no artificial upper bound for `check` or `fmt`;
+testing with two targets demonstrates that they really are batch commands, not that their
+maximum is two. This contract covers cardinality only; it does not define how `run`
+separates compiler options from the arguments of the program being run.
 
 The few subcommands `dawnc` lacks are not holes, they are the backend's boundary: **it
 refuses `use java`** (Java interop is a JVM backend capability, §9), and `build`-to-jar,
