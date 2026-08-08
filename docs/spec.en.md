@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ df4a6ebea66dc714 -->
+<!-- doc-check: translation-of docs/spec.md @ 092365762999191d -->
 
 # Dawn Language Specification
 
@@ -2473,8 +2473,10 @@ pub fn dist(a: Point, b: Point) -> Float =
 fn double(x: Int) = x * 2        # a private function may omit the return type (§3.1)
 
 # ---- expressions ----
-let n = 42                       var acc = 0
-let (a, b) = pair                acc = acc + 1
+let n = 42                       # immutable binding
+var acc = 0                      # mutable binding
+acc = acc + 1                    # assignment (var only)
+let (a, b) = pair                # destructuring
 if x > 0 { "pos" } else { "non-pos" }
 match opt { Some(v) -> v, None -> fallback }
 xs |> filter(x => x > 0) |> map(x => to_string(x)) |> join(", ")

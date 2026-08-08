@@ -1993,8 +1993,10 @@ pub fn dist(a: Point, b: Point) -> Float =
 fn double(x: Int) = x * 2        # 私有函数可省返回类型（§3.1）
 
 # ---- 表达式 ----
-let n = 42                       var acc = 0
-let (a, b) = pair                acc = acc + 1
+let n = 42                       # 不可变绑定
+var acc = 0                      # 可变绑定
+acc = acc + 1                    # 赋值（只对 var）
+let (a, b) = pair                # 解构
 if x > 0 { "pos" } else { "non-pos" }
 match opt { Some(v) -> v, None -> fallback }
 xs |> filter(x => x > 0) |> map(x => to_string(x)) |> join(", ")
