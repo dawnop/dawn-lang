@@ -1118,16 +1118,23 @@ fn abs_parent(path: String) -> String !io =
 ## Copy resolved jars next to the output jar, under lib/ — coursier's cache is
 ## a content-addressed path in the user's home, fine to compile against and
 ## useless to a deployed jar. Returns the manifest Class-Path entries.
+##
+## The file name comes from `maven.artifacts`, not from the source path: two
+## coordinates can produce one jar file name, and copying both to
+## `lib/<basename>` dropped one of them without a word — a deployment jar
+## missing a dependency that was on the class path when it compiled.
 fn vendor_jars(jars: List[String], jar_path: String) -> List[String] !io = {
   var entries: List[String] = []
   if len(jars) == 0 { return entries }
+  let found = match maven.artifacts(jars) {
+    Ok(a) -> a
+    Err(e) -> panic(e)
+  }
   let lib_dir = abs_parent(jar_path) ++ "/lib"
   let _ = io.mkdirs(lib_dir)
-  for src in jars {
-    let name = match str.last_index_of(src, "/") {
-      Some(i) -> str.drop(src, i + 1)
-      None -> src
-    }
+  for a in found {
+    let src = a.path
+    let name = a.name
     let dst = lib_dir ++ "/" ++ name
     let bs =
       match io.read_bytes(src) {

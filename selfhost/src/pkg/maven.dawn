@@ -218,6 +218,72 @@ fn basename(path: String) -> String =
     None -> path
   }
 
+## A resolved jar, its content hash, and the name it is filed under -- in the
+## lock, and in the `lib/` directory beside a built jar.
+pub type Artifact = { path: String, name: String, hash: String }
+
+## Twelve hex digits of the content hash. Long enough that a collision is not
+## a thing to plan for, short enough to read in a directory listing.
+fn short_hash(h: String) -> String = str.take(h, 12)
+
+fn count_of(m: Map[String, String], k: String) -> Option[String] = map.get(m, k)
+
+## Name and hash every resolved jar, with names unique across the set.
+##
+## A jar file name is not an identity. `group.a:util:1.0` and `group.b:util:1.0`
+## both produce `util-1.0.jar`, and coursier's Fetch surface hands back files
+## rather than coordinates, so nothing downstream could tell them apart: the
+## lock recorded one name against two hashes and could not verify the set it
+## had itself produced, and vendoring copied both to `lib/util-1.0.jar`, the
+## second silently over the first. A deployment jar then shipped with a
+## dependency that had been on the class path at compile time.
+##
+## So a name that collides is qualified by content, and *every* member of the
+## colliding group is qualified -- not just the later ones -- so the answer
+## does not depend on the order coursier returned them in. Names that do not
+## collide are untouched, which is every name in practice; the same bytes
+## appearing twice is one artifact, not a collision.
+pub fn artifacts(jars: List[String]) -> Result[List[Artifact], String] !io = {
+  var names: List[String] = []
+  var hashes: List[String] = []
+  for j in jars {
+    match io.read_bytes(j) {
+      Ok(bs) -> {
+        names = names ++ [basename(j)]
+        hashes = hashes ++ [sha256.hex(bs)]
+      }
+      Err(e) -> return Err("cannot read " ++ j ++ ": " ++ e.message)
+    }
+  }
+  var first: Map[String, String] = map.empty()
+  var clash: Set[String] = set.empty()
+  var i = 0
+  while i < len(names) {
+    match count_of(first, names[i]) {
+      Some(h) -> { if h != hashes[i] { clash = set.insert(clash, names[i]) } }
+      None -> { first = map.insert(first, names[i], hashes[i]) }
+    }
+    i = i + 1
+  }
+  var out: List[Artifact] = []
+  var seen: Set[String] = set.empty()
+  i = 0
+  while i < len(jars) {
+    let nm = if set.has(clash, names[i]) {
+      short_hash(hashes[i]) ++ "-" ++ names[i]
+    } else {
+      names[i]
+    }
+    let key = nm ++ " " ++ hashes[i]
+    if not set.has(seen, key) {
+      seen = set.insert(seen, key)
+      out = out ++ [Artifact { path: jars[i], name: nm, hash: hashes[i] }]
+    }
+    i = i + 1
+  }
+  Ok(out)
+}
+
 ## The lock's text: schema, the direct coordinates, then the artifacts, all
 ## sorted so the file is a function of the resolution and diffs read cleanly.
 pub fn render_lock(l: Lock) -> String = {
@@ -251,6 +317,15 @@ pub fn parse_lock(text: String) -> Result[Lock, String] = {
       match str.index_of(rest, " ") {
         Some(i) -> {
           let nm = str.trim(str.drop(rest, i + 1))
+          # A name listed twice is a lock that cannot be checked: the
+          # comparison below looks artifacts up by name, so the second entry
+          # would either shadow the first or contradict it forever.
+          for b in arts {
+            let (n2, _) = b
+            if n2 == nm {
+              return Err("dawn.lock lists " ++ nm ++ " twice -- regenerate it with `dawn lock`")
+            }
+          }
           arts = arts ++ [(nm, str.take(rest, i))]
         }
         None -> return Err("malformed artifact line: " ++ t)
@@ -270,13 +345,12 @@ pub fn parse_lock(text: String) -> Result[Lock, String] = {
 pub fn lock_of(coords: List[Coord], jars: List[String]) -> Result[Lock, String] !io = {
   var cs: List[String] = []
   for c in coords { cs = cs ++ [coord_show(c)] }
-  var arts: List[(String, String)] = []
-  for j in jars {
-    match io.read_bytes(j) {
-      Ok(bs) -> { arts = arts ++ [(basename(j), sha256.hex(bs))] }
-      Err(e) -> return Err("cannot read " ++ j ++ ": " ++ e.message)
-    }
+  let found = match artifacts(jars) {
+    Ok(a) -> a
+    Err(e) -> return Err(e)
   }
+  var arts: List[(String, String)] = []
+  for a in found { arts = arts ++ [(a.name, a.hash)] }
   Ok(Lock { coords: cs, arts: arts })
 }
 
@@ -322,6 +396,67 @@ pub fn check_lock(l: Lock, fresh: Lock) -> Result[Unit, String] = {
     }
   }
   Ok(())
+}
+
+## `pkgfetch.delete_tree` is not usable as a value across a module boundary,
+## so the test's cleanup names it here.
+fn rmtree(path: String) -> Unit !io = pkgfetch.delete_tree(path)
+
+test "one jar file name, two artifacts: both survive, distinctly named" {
+  let root = match io.temp_dir("", "dawn-artifacts-") {
+    Ok(d) -> d
+    Err(e) -> panic("temp dir: " ++ e.message)
+  }
+  with r <- bracket(root, rmtree)
+  # `group.a:util:1.0` and `group.b:util:1.0` land in different cache
+  # directories under one file name -- which is the whole hazard, since what
+  # comes back from coursier is a list of paths and nothing else
+  let _ = io.mkdirs(r ++ "/a")
+  let _ = io.mkdirs(r ++ "/b")
+  let _ = io.mkdirs(r ++ "/c")
+  let _ = io.write_file(r ++ "/a/util-1.0.jar", "one")
+  let _ = io.write_file(r ++ "/b/util-1.0.jar", "two")
+  let _ = io.write_file(r ++ "/c/asm-9.jar", "asm")
+  let got = match artifacts([r ++ "/a/util-1.0.jar", r ++ "/b/util-1.0.jar", r ++ "/c/asm-9.jar"]) {
+    Ok(a) -> a
+    Err(e) -> panic(e)
+  }
+  assert len(got) == 3
+  # the name that does not collide is left exactly as it was
+  assert got[2].name == "asm-9.jar"
+  # the one that does is qualified on both sides, so the result does not
+  # depend on which order they arrived in
+  assert got[0].name != got[1].name
+  assert str.ends_with(got[0].name, "-util-1.0.jar")
+  assert str.ends_with(got[1].name, "-util-1.0.jar")
+  # ...and a lock built from that set can verify itself, which is the thing a
+  # name-keyed lock could not do
+  let l = match lock_of([Coord { group: "g", artifact: "a", version: "1" }],
+    [r ++ "/a/util-1.0.jar", r ++ "/b/util-1.0.jar", r ++ "/c/asm-9.jar"]) {
+    Ok(x) -> x
+    Err(e) -> panic(e)
+  }
+  match check_lock(l, l) {
+    Ok(_) -> { assert true }
+    Err(e) -> {
+      println(e)
+      assert false
+    }
+  }
+  # the same bytes reached twice is one artifact, not a collision
+  let same = match artifacts([r ++ "/a/util-1.0.jar", r ++ "/a/util-1.0.jar"]) {
+    Ok(a) -> a
+    Err(e) -> panic(e)
+  }
+  assert len(same) == 1
+  assert same[0].name == "util-1.0.jar"
+}
+
+test "a lock that lists a name twice is refused rather than half-read" {
+  match parse_lock("schema 1\nartifact aa  util-1.0.jar\nartifact bb  util-1.0.jar\n") {
+    Err(e) -> { assert str.contains(e, "twice") }
+    Ok(_) -> { assert false }
+  }
 }
 
 test "a lock round-trips through its text form" {
