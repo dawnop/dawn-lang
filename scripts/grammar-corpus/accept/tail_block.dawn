@@ -1,0 +1,84 @@
+# Every shape of the tail block (#206, spec §4.3): a bare `{ ... }` right
+# after a call, on the same line, is a closure attached as that call's last
+# argument. Parsing only -- what it means is pinned by
+# scripts/spike-native/tail_block.dawn. This file is also the record of the
+# overturned ruling: `map(xs) { x + 1 }` below sat in reject/ as
+# brace_trailing_lambda.dawn ("never will be") until the `nb` switch gave
+# headers and tail blocks the distinction the veto said could not exist.
+
+fn zero_param(xs: List[Int]) -> List[Int] = {
+  map(xs) { x + 1 }
+}
+
+# a bare name is a callee too, and so is an empty block
+fn bare_callee() -> Unit !io = {
+  column { text("hi") }
+  column { }
+}
+
+# `{ x => ... }` binds a parameter; annotated and multi-parameter heads use
+# the parenthesised list, and `{ () => ... }` spells the zero-parameter head
+fn param_heads(xs: List[Int]) -> Int = {
+  items(xs) { item => draw(item) }
+  let a = map(xs) { (x: Int) => x * 2 }
+  let b = fold(xs, 0) { (acc, x) => acc + x }
+  run { () => tick() }
+  len(a) + len(b)
+}
+
+# a dot call grows the argument the way the paren spelling does
+fn dot_calls(xs: List[Int]) -> Unit = {
+  xs.each { x => use_it(x) }
+  xs.walk { step() }
+}
+
+# the block follows a multi-line argument list's `)` on the closing line
+fn wrapped_args() -> Unit !io =
+  column(
+    align: Center,
+    gap: 12,
+  ) {
+    text("hi")
+  }
+
+# nesting, and a single-line spelling
+fn nested() -> Unit !io = {
+  column {
+    row {
+      button("ok")
+    }
+  }
+  row { button("no") }
+}
+
+# expression positions: a let initializer, a match arm body, a guard, the
+# right-hand side of a pipe, and a postfix chain off the block's result
+fn positions(xs: List[Int], n: Int) -> Int = {
+  let a = sum(xs) { x => x }
+  let b = match n {
+    1 -> fold(xs, 0) { (acc, x) => acc + x }
+    k if any(xs) { v => v > k } -> 1
+    _ -> 0
+  }
+  let c = xs |> pick { x => x > 0 }
+  let d = wrap(xs) { }.len()
+  a + b + c + d
+}
+
+# parentheses restore every position `nb` closes: a parenthesised tail block
+# may sit in an `if` header
+fn restored(x: Int) -> Int =
+  if (check(x) { probe() }) { 1 } else { 0 }
+
+# a block whose value is a lambda still exists in tail position: parenthesised,
+# the group no longer closes with `=>`, so no parameter head is read
+fn escape_hatch(xs: List[Int]) -> Unit = {
+  feed(xs) { (x => x + 1) }
+}
+
+# same-line only: a `{ ... }` opening the next line is the statement block it
+# always was, not an argument
+fn boundary(xs: List[Int]) -> Unit !io = {
+  let a = probe(xs)
+  { io.println("bare statement block") }
+}

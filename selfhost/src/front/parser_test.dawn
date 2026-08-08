@@ -7,7 +7,7 @@ use std/str
 use front/parser.{parse_module}
 use front/astdump.{render_module}
 use front/ast.{
-  Expr, EInt, EVar, EApply, EBinary, ECtor, EBlock,
+  Expr, EInt, EVar, EApply, EBinary, ECtor, EBlock, ELambda,
   BinOp, OpAdd, OpMul,
   Stmt, SWhile,
   Decl, DFn, DConst, DUseModule, DImpl, Module,
@@ -450,11 +450,13 @@ test "a trailing `fn` attaches only on the same line" {
   }
 }
 
-test "a bare `{ ... }` after a call is not a trailing lambda" {
-  # permanently refused: a paren-less `if` header could not tell its own body
-  # from a trailing block (docs/core-move2-design.md §6)
+test "a bare `{ ... }` after a call is its tail block" {
+  # This used to assert the opposite ("permanently refused: a paren-less `if`
+  # header could not tell its own body from a trailing block"). The `nb`
+  # switch is that distinction: headers set it, every other position attaches
+  # the block (#206, spec §4.3).
   let (_, ds) = parse_module("fn f(xs: List[Int]) -> Unit = {\n  map(xs) { x }\n}")
-  assert len(ds) > 0
+  assert len(ds) == 0
 }
 
 test "every lambda arity parses to a Lambda node" {
@@ -494,6 +496,98 @@ test "a bare arrow lambda is not a trailing closure" {
   # the `fn` form in the same position still attaches
   let out = rendered("fn f(xs: List[Int]) -> Unit = g(xs) fn(x) => x")
   assert str.contains(out, "Apply nargs=2")
+}
+
+test "a tail block is the call's last argument" {
+  # after a parenthesised call
+  let out = rendered("fn f(xs: List[Int]) -> Unit = map(xs) { x }")
+  assert str.contains(out, "Apply nargs=2")
+  # after a bare name: the zero-argument form falls out of the same node
+  let out2 = rendered("fn f() -> Unit = twice { g() }")
+  assert str.contains(out2, "Apply nargs=1")
+  # after `recv.name`: a method call, not a field applied to a function
+  let out3 = rendered("fn f(xs: List[Int]) -> Unit = xs.each { g() }")
+  assert str.contains(out3, "MethodCall each nargs=1")
+  # and after `recv.name(a)`: the block joins the arguments already there
+  let out4 = rendered("fn f(xs: List[Int]) -> Unit = xs.fold(0) { g() }")
+  assert str.contains(out4, "MethodCall fold nargs=2")
+}
+
+test "a tail block's parameter head binds parameters" {
+  # `{ x => ... }`: one token of lookahead, the bare arrow lambda's own
+  let out = rendered("fn f(xs: List[Int]) -> Unit = items(xs) { item => item }")
+  assert str.contains(out, "Apply nargs=2")
+  assert str.contains(out, "LParam item ann=false")
+  # the parenthesised head takes multiple and annotated parameters
+  let out2 = rendered("fn f(xs: List[Int]) -> Unit = fold(xs, 0) { (acc, x: Int) => acc }")
+  assert str.contains(out2, "LParam acc ann=false")
+  assert str.contains(out2, "LParam x ann=true")
+}
+
+test "a parenthesised arrow in a tail block is the block's value, not its head" {
+  # `{ (x => e) }`: the group no longer closes with `=>`, so no parameter head
+  # is read -- the tail block has no parameters and its body is a lambda
+  let (m, ds) = parse_module("fn f(xs: List[Int]) -> Unit = feed(xs) { (x => x) }")
+  assert len(ds) == 0
+  match m.decls[0] {
+    DFn(fd) ->
+      match fd.body {
+        EApply(_, args, _, _) -> {
+          assert len(args) == 2
+          match args[1].e {
+            ELambda(params, body, _, _, _) -> {
+              assert len(params) == 0
+              match body {
+                EBlock(stmts, tail, _, _) ->
+                  match tail {
+                    Some(ELambda(inner, _, _, _, _)) -> { assert len(inner) == 1 }
+                    _ -> { assert false }
+                  }
+                _ -> { assert false }
+              }
+            }
+            _ -> { assert false }
+          }
+        }
+        _ -> { assert false }
+      }
+    _ -> { assert false }
+  }
+}
+
+test "a tail block attaches only on the same line" {
+  # a `{ ... }` opening the next line is the statement block it always was
+  let (m, ds) = parse_module("fn f() -> Unit = {\n  let y = g(1)\n  { h(y) }\n  ()\n}")
+  assert len(ds) == 0
+  match m.decls[0] {
+    DFn(fd) ->
+      match fd.body {
+        EBlock(stmts, tail, _, _) -> { assert len(stmts) == 2 }
+        _ -> { assert false }
+      }
+    _ -> { assert false }
+  }
+}
+
+test "a header never opens a tail block, and parentheses restore it" {
+  # the header's `nb` keeps `check(x)` off the braces, so the second braces
+  # meet the previous-token-is-`}` refusal
+  let (_, d1) = parse_module("fn f(x: Int) -> Unit = {\n  if check(x) { g() } { h() }\n}")
+  assert len(d1) > 0
+  assert str.contains(d1[0].msg, "a tail block cannot follow `}`")
+  # one call also takes at most one tail block, through the same refusal
+  let (_, d2) = parse_module("fn f(xs: List[Int]) -> Unit = each(xs) { g() } { h() }")
+  assert len(d2) > 0
+  assert str.contains(d2[0].msg, "a tail block cannot follow `}`")
+  # parenthesised, the same call sits in the header fine
+  let (_, d3) = parse_module("fn f(x: Int) -> Int =\n  if (check(x) { g() }) { 1 } else { 0 }")
+  assert len(d3) == 0
+}
+
+test "`with` refuses a tail block on its callee" {
+  let (_, ds) = parse_module("fn f() -> Unit = {\n  with x <- use_it(1) { g() }\n  h(x)\n}")
+  assert len(ds) > 0
+  assert str.contains(ds[0].msg, "`with` already passes the rest of the block to this call")
 }
 
 test "the `fn` prefix on a lambda is retired outside the trailing position" {

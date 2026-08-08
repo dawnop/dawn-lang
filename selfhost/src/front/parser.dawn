@@ -1575,6 +1575,14 @@ fn postfix_expr(p: P, st: St, nb: Bool) -> PR[Expr] = {
           let (st6, lam) = lambda_expr(p, st3, nb)?
           e = EMethod(e, f.text, [pos_arg(lam)], f.lo, f.hi, e_lo(e), e_hi(lam))
           st1 = st6
+        } else if at_kind(p, st3, LBRACE) && not nb {
+          # paren-less tail block on a dot call: `xs.each { ... }` is the
+          # method call `xs.each(() => ...)`, decided here for the same reason
+          # the `fn` arm above is -- attaching to the EFieldAcc would apply
+          # the field's value instead of calling the method.
+          let (st6, lam) = tail_block_lambda(p, st3)?
+          e = EMethod(e, f.text, [pos_arg(lam)], f.lo, f.hi, e_lo(e), e_hi(lam))
+          st1 = st6
         } else {
           e = EFieldAcc(e, f.text, f.lo, f.hi, e_lo(e), f.hi)
           st1 = st3
@@ -1607,10 +1615,9 @@ fn postfix_expr(p: P, st: St, nb: Bool) -> PR[Expr] = {
     } else if k == FN {
       # Trailing lambda (spec §4.5): an `fn` lambda written right after an
       # expression becomes that call's last argument -- `f(a) fn(x) => e` is
-      # `f(a, (x) => e)`, and `f fn(x) => e` is `f((x) => e)`. Only the
-      # `fn`-spelled form; a bare `{ ... }` after a call stays what it was,
-      # because a paren-less `if` header could not then tell its own body from
-      # a trailing block.
+      # `f(a, (x) => e)`, and `f fn(x) => e` is `f((x) => e)`. The tail block
+      # below says the same thing in braces; the two spellings coexist while
+      # the `fn` form is migrated out (#206 phase 2).
       #
       # Same-line only, and for the same reason application is: a line break
       # surfaces as NEWLINE first, and the arm below only continues a chain for
@@ -1619,6 +1626,32 @@ fn postfix_expr(p: P, st: St, nb: Bool) -> PR[Expr] = {
       let (st5, lam) = lambda_expr(p, st1, nb)?
       e = attach_trailing(e, lam)
       st1 = st5
+    } else if k == LBRACE && not nb {
+      # Tail block (spec §4.3): a bare `{ ... }` right after an expression is
+      # a closure attached as that call's last argument -- `f(a) { e }` is
+      # `f(a, () => e)`, and `items(xs) { x => e }` is `items(xs, x => e)`.
+      # "It cannot be told apart from a paren-less `if` header's body" was the
+      # old veto, and `nb` is the distinction it said could not exist: headers
+      # set it, so their `{` never reaches this arm -- the same switch that
+      # keeps `if p == P { x: 1 }` from reading the braces as a record.
+      #
+      # Same-line only, for free: a line break surfaces as a NEWLINE token
+      # first, and that arm only continues a chain for `.` -- so a `{ ... }`
+      # opening the next line stays the statement block it always was.
+      #
+      # A `{` whose previous token is `}` is refused rather than attached:
+      # `if c { 1 } else { 2 } { 3 }`, `match x { ... } { ... }`,
+      # `P { x: 1 } { ... }` and `f(a) { ... } { ... }` would each silently
+      # apply a block to a value nobody reads as a callee, and the last one is
+      # how "one call takes at most one tail block" holds without its own rule.
+      if p.toks[st1.pos - 1].kind == RBRACE {
+        return Err((st1, perr_h(p, st1,
+          "a tail block cannot follow `}`; it attaches to the call before it",
+          "to apply a block to this value anyway, parenthesise the value first: `(...) { ... }`")))
+      }
+      let (st7, lam) = tail_block_lambda(p, st1)?
+      e = attach_trailing(e, lam)
+      st1 = st7
     } else if k == NEWLINE {
       # vertical method chains: `.` may start the next line (spec §1.7)
       var look = st1.pos
@@ -1912,6 +1945,39 @@ fn paren_is_lambda(p: P, st: St) -> Bool = {
   false
 }
 
+## The closure a tail block desugars to: `{ body }`, `{ x => body }` or
+## `{ (a, b) => body }` written right after a call (spec §4.3). `st` is at the
+## `{`; the caller decides where the closure lands (`attach_trailing`, or the
+## dot-call arm building the method call directly).
+##
+## The parameter head is its own production, not a block being reinterpreted:
+## in tail position `{ x => ... }` binds `x`, the way `Point { x }` uses braces
+## without being a block. The block spelled `{ (x => e) }` still means "a block
+## whose value is a lambda" -- the parenthesised group no longer closes with
+## `=>`, so `paren_is_lambda` answers no and no parameter head is read.
+fn tail_block_lambda(p: P, st: St) -> PR[Expr] = {
+  let (st1, open) = adv(p, st)
+  var params: List[LambdaParam] = []
+  var st2 = st1
+  if at_kind(p, st1, IDENT) && kind_ahead(p, st1, 1) == FATARROW {
+    # `{ x => ... }`: the same one-token lookahead the bare arrow lambda uses
+    let (st3, name) = adv(p, st1)
+    st2 = adv1(p, st3)
+    params = [LambdaParam { name: name.text, ann: None, lo: name.lo, hi: name.hi }]
+  } else if at_kind(p, st1, LPAREN) && paren_is_lambda(p, st1) {
+    # `{ (a, b) => ... }` / `{ (x: Int) => ... }` / `{ () => ... }`
+    let (st3, ps) = lambda_params(p, st1, true)?
+    let (st4, _) = want(p, st3, FATARROW, "`=>` (block parameters)")?
+    params = ps
+    st2 = st4
+  }
+  let st5 = skip_nl(p, st2)
+  let (st6, stmts, tail) = block_body(p, st5)?
+  let (st7, close) = want(p, st6, RBRACE, "`}`")?
+  let body = EBlock(stmts, tail, open.lo, close.hi)
+  Ok((st7, ELambda(params, body, false, open.lo, close.hi)))
+}
+
 ## `(a, b) => e` / `(a: Int) => e` / `() => e`. `st` is at the `(`, and
 ## `paren_is_lambda` has already said this is one.
 fn bare_lambda(p: P, st: St, nb: Bool) -> PR[Expr] = {
@@ -2101,7 +2167,18 @@ fn with_stmt(p: P, st: St) -> PR[Expr] = {
   let (st2, name) = want(p, st1, IDENT, "a name to bind (`with x <- f(...)`)")?
   let (st3, _) = want(p, st2, LARROW, "`<-`")?
   let st4 = skip_nl(p, st3)
-  let (st5, callee) = expression(p, st4, false)?
+  # the callee parses with `nb` set: `with` is about to attach the rest of the
+  # block as this call's last argument, so a tail block here would be a second
+  # closure on the same call, one the author only sees as a `{`. Refused with
+  # its own diagnostic rather than left to want_sep, which would point at the
+  # consequence ("expected a newline") instead of the decision.
+  let (st5, callee) = expression(p, st4, true)?
+  if at_kind(p, st5, LBRACE) {
+    return Err((st5, perr_h(p, st5,
+      "`with` already passes the rest of the block to this call as its last argument",
+      "a `{ ... }` here would be a second closure on the same call; " ++
+        "parenthesise the call to attach the block instead, or drop the `with`")))
+  }
   let st6 = want_sep(p, st5)?
   let rest_lo = cur(p, st6).lo
   let (st7, stmts, tail) = block_body(p, st6)?
