@@ -63,17 +63,36 @@ fn close_file(f: FileOutputStream) -> Unit !io = {
   ()
 }
 
-## A manifest Class-Path line, wrapped: physical lines stay under the spec's
+## A manifest Class-Path line, wrapped: physical lines stay inside the spec's
 ## 72-byte cap, continuations start with one space and re-join on read.
+##
+## Bytes of the UTF-8 form, which is what the spec says and what the reader
+## counts. This used to count code points, so any entry with a character
+## outside ASCII made lines longer than the cap while measuring under it -- and
+## the wrap point is not a detail, since a reader that rejects an over-long
+## line rejects the whole Class-Path.
+##
+## The continuation's leading space counts toward its own 72, the same
+## arithmetic java.util.jar.Manifest.make72Safe does. Breaks land on character
+## boundaries: a reader joins the raw bytes and decodes once at the end, so
+## splitting inside a multi-byte sequence would also work, and not doing it
+## keeps this expressible on Strings.
 fn class_path_lines(entries: List[String]) -> String = {
   if len(entries) == 0 { return "" }
-  var rest = "Class-Path: " ++ join(entries, " ")
   var out = ""
-  while str.len(rest) > 70 {
-    out = out ++ str.take(rest, 70) ++ crlf()
-    rest = " " ++ str.drop(rest, 70)
+  var line = ""
+  var width = 0
+  for c in str.chars("Class-Path: " ++ join(entries, " ")) {
+    let w = bytes.len(bytes.utf8(c))
+    if width + w > 72 {
+      out = out ++ line ++ crlf()
+      line = " "
+      width = 1
+    }
+    line = line ++ c
+    width = width + w
   }
-  out ++ rest ++ crlf()
+  out ++ line ++ crlf()
 }
 
 ## Write `classes` (internal name → bytes, no ".class" suffix) as an
@@ -113,12 +132,50 @@ test "dotted turns an internal name into a binary name" {
   assert dotted("a/b/c") == "a.b.c"
 }
 
+## Undo the wrapping the way a manifest reader does: drop the CRLF and the one
+## space that starts each continuation. What comes back must be the value that
+## went in, or the entries the class loader sees are not the entries written.
+fn unwrap_manifest(text: String) -> String = {
+  var out = ""
+  var first = true
+  for line in str.split(str.strip_suffix(text, crlf()).unwrap_or(text), crlf()) {
+    if first {
+      out = line
+      first = false
+    } else {
+      out = out ++ str.strip_prefix(line, " ").unwrap_or(line)
+    }
+  }
+  out
+}
+
 test "class-path lines wrap under the 72-byte cap and stay joinable" {
   let none: List[String] = []
   assert class_path_lines(none) == ""
   assert class_path_lines(["lib/a.jar"]) == "Class-Path: lib/a.jar" ++ crlf()
-  let long = class_path_lines([
-    "lib/a-very-long-artifact-name-1.0.0.jar", "lib/another-quite-long-name-2.3.4.jar"
-  ])
-  for line in str.split(long, crlf()) { assert str.len(line) <= 70 }
+  let entries = [
+    "lib/a-very-long-artifact-name-1.0.0.jar", "lib/another-quite-long-name-2.3.4.jar",
+    "lib/a-third-one-so-the-value-needs-three-physical-lines-4.5.6.jar"
+  ]
+  let long = class_path_lines(entries)
+  for line in str.split(str.strip_suffix(long, crlf()).unwrap_or(long), crlf()) {
+    assert bytes.len(bytes.utf8(line)) <= 72
+  }
+  assert unwrap_manifest(long) == "Class-Path: " ++ join(entries, " ")
+}
+
+test "the cap counts bytes, so a non-ASCII entry does not slip past it" {
+  # Four-byte characters: eighteen of them are 72 bytes but only eighteen code
+  # points, so a code-point count sees a line a quarter of the cap.
+  var name = "lib/"
+  var i = 0
+  while i < 30 {
+    name = name ++ "\u{1F600}"
+    i = i + 1
+  }
+  let text = class_path_lines([name ++ ".jar"])
+  for line in str.split(str.strip_suffix(text, crlf()).unwrap_or(text), crlf()) {
+    assert bytes.len(bytes.utf8(line)) <= 72
+  }
+  assert unwrap_manifest(text) == "Class-Path: " ++ name ++ ".jar"
 }

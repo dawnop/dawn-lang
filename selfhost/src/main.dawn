@@ -1155,9 +1155,51 @@ fn vendor_jars(jars: List[String], jar_path: String) -> List[String] !io = {
         Err(e) -> panic("cannot copy " ++ src ++ " to " ++ dst ++ ": " ++ e.message)
       }
     }
-    entries = entries ++ ["lib/" ++ name]
+    entries = entries ++ ["lib/" ++ uri_path(name)]
   }
   entries
+}
+
+## A path as the URI reference a manifest Class-Path is made of.
+##
+## The attribute is a *space-separated list of URIs*, and a raw path is not
+## one. A space in a directory name split one entry into two, a `#` began a
+## fragment and truncated the rest, and any non-ASCII character was simply not
+## a URI character -- in each case the jar compiled and then could not find its
+## dependencies at run time, which is the worst place to learn it.
+##
+## Everything outside the unreserved set is percent-encoded, `/` kept as the
+## separator it is. That is more than strictly required -- some sub-delimiters
+## are legal unencoded in a path segment -- and it is always decodable back to
+## the original, which the narrower rule is only ever equal to. Ordinary names
+## (`lib/asm-9.7.1.jar`) are unreserved throughout and come through untouched.
+fn uri_path(p: String) -> String = {
+  var out = ""
+  for c in str.chars(p) {
+    if c == "/" || str.contains("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~", c) {
+      out = out ++ c
+    } else {
+      let bs = bytes.utf8(c)
+      var i = 0
+      while i < bytes.len(bs) {
+        out = out ++ "%" ++ str.to_upper(bytes.to_hex(bytes.slice(bs, i, i + 1)))
+        i = i + 1
+      }
+    }
+  }
+  out
+}
+
+test "a class-path entry is a URI reference, not a path" {
+  # the ordinary case, and the reason this is invisible day to day
+  assert uri_path("lib/asm-9.7.1.jar") == "lib/asm-9.7.1.jar"
+  assert uri_path("/opt/build/out.jar") == "/opt/build/out.jar"
+  # a space ended one entry and started another; `#` began a fragment and
+  # discarded the rest of the name
+  assert uri_path("my libs/a b.jar") == "my%20libs/a%20b.jar"
+  assert uri_path("lib/c#1.jar") == "lib/c%231.jar"
+  # non-ASCII is not a URI character at all, and encodes as its UTF-8 bytes
+  assert uri_path("lib/\u{4E2D}.jar") == "lib/%E4%B8%AD.jar"
 }
 
 ## Manifest Class-Path entries for --cp jars: relative when the jar sits
@@ -1169,9 +1211,9 @@ fn rel_entries(jars: List[String], jar_path: String) -> List[String] !io = {
   for j in jars {
     let abs = fspath.absolute(j, io.cwd())
     if str.starts_with(abs, base) {
-      out = out ++ [str.drop(abs, str.len(base))]
+      out = out ++ [uri_path(str.drop(abs, str.len(base)))]
     } else {
-      out = out ++ ["file:" ++ abs]
+      out = out ++ ["file:" ++ uri_path(abs)]
     }
   }
   out
