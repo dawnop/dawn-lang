@@ -1,0 +1,34 @@
+# EBNF string / interp productions (spec §1.5, §1.6): `${ expr }` takes an
+# expression, and an expression may contain any literal the language has. The
+# closing brace is therefore found by skipping literals, not by counting braces
+# in raw text -- the scanner that did the latter knew only about `"`, so a `}`,
+# a `"` or a backtick inside a character or raw-string literal ended the
+# interpolation in the middle of that literal (audit SYN-02).
+#
+# Interpolation is single-line by construction; the multi-line cases below put
+# each `${ ... }` on one line inside a `"""` string, which is the form that has
+# to behave like the single-quoted one.
+
+fn brace_in_char() -> String = "${'}'}"
+
+fn brace_in_raw() -> String = "${`}`}"
+
+fn quote_in_char() -> String = "${'\''}"
+
+fn dquote_in_char() -> String = "${'\"'}"
+
+fn backtick_in_char() -> String = "${'`'}"
+
+fn brace_in_string() -> String = "${"}"}"
+
+fn braces_in_raw() -> String = "${`{ unbalanced`}"
+
+fn nested_interp(n: Int) -> String = "${"inner ${n}"}"
+
+fn braces_in_interp(n: Int) -> String = "${if n > 0 { "+" } else { "-" }}"
+
+fn triple_forms(n: Int) -> String = """
+  brace in char: ${'}'}
+  brace in raw: ${`}`}
+  nested: ${"inner ${n}"}
+"""

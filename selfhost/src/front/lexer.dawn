@@ -388,8 +388,21 @@ fn lex_dollar(
 fn flush(segs: List[Seg], buf: List[Char]) -> List[Seg] =
   if len(buf) == 0 { segs } else { segs ++ [SText(from_code_points(buf))] }
 
-## On entry `at` is the `$` of `${`; scans to the matching `}`. Nested strings
-## are skipped over. Returns the position just past the `}` and the code segment.
+## On entry `at` is the `$` of `${`; scans to the matching `}`. Returns the
+## position just past the `}` and the code segment.
+##
+## A brace inside a literal is not the closing brace, so this has to agree with
+## the main loop about where every literal ends — and it gets that agreement by
+## calling the same functions rather than by keeping its own shorter list of
+## forms. The shorter list is what SYN-02 was: only `"` was recognised, so
+## `"${'}'}"` and ``"${`}`}"`` ended the interpolation inside a character or raw
+## string literal and reported it unterminated. A form added to the main loop
+## now reaches this scanner for free.
+##
+## Line comments are deliberately *not* skipped: interpolation is single-line
+## (below), so a `#` that swallowed the rest of the line could only ever turn
+## into "interpolation cannot span lines". Leaving `#` an ordinary character
+## keeps `"${ x # }"` meaning what it means today.
 fn lex_brace_interp(s: Src, dollar: Int) -> Result[(Int, Seg), (Int, Diag)] = {
   let code_start = dollar + 2
   var i = code_start
@@ -398,15 +411,26 @@ fn lex_brace_interp(s: Src, dollar: Int) -> Result[(Int, Seg), (Int, Diag)] = {
     let c = s.cps[i]
     if c == '{' {
       depth = depth + 1
+      i = i + 1
     } else if c == '}' {
       depth = depth - 1
       if depth == 0 { break }
-    } else if c == '"' {
-      i = skip_inner(s, i)
+      i = i + 1
+    } else if c == '"' || c == '`' || c == '\'' {
+      let r = if c == '"' {
+        lex_string(s, i)
+      } else if c == '`' {
+        lex_raw(s, i)
+      } else {
+        lex_char(s, i)
+      }
+      let (j, _) = r?
+      i = j
     } else if c == '\n' {
       return Err((i, mk_diag("interpolation cannot span lines", off(s, dollar), off(s, dollar) + 1)))
+    } else {
+      i = i + 1
     }
-    i = i + 1
   }
   if depth != 0 {
     return Err((i, mk_diag("unmatched \${ in interpolation", off(s, dollar), off(s, dollar) + 1)))
@@ -416,16 +440,6 @@ fn lex_brace_interp(s: Src, dollar: Int) -> Result[(Int, Seg), (Int, Diag)] = {
     return Err((i, mk_diag("empty interpolation", off(s, dollar), off(s, i) + 1)))
   }
   Ok((i + 1, SCode(code, off(s, code_start))))
-}
-
-## Enters on a `"`; returns the position of the closing quote (or the end).
-fn skip_inner(s: Src, at: Int) -> Int = {
-  var i = at + 1
-  while i < s.n && s.cps[i] != '"' {
-    if s.cps[i] == '\\' { i = i + 1 }
-    i = i + 1
-  }
-  i
 }
 
 ## On entry `at` is the backslash; returns (position after the escape, character).

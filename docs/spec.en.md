@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 5a3601a637182a9a -->
+<!-- doc-check: translation-of docs/spec.md @ 148502c4549b624c -->
 
 # Dawn Language Specification
 
@@ -146,6 +146,12 @@ println("got $n items, first = ${list.get(0)}")
 When `$` is not followed by an identifier or `{` it is a literal dollar sign (`"$5"` needs no
 escaping); to force a literal `$` use `\$`. The effects of the expressions inside an interpolation
 are unioned into the effects of the whole string expression.
+
+A `${...}` **must fit on one line** (spanning lines reports `interpolation cannot span lines`), and
+that holds inside a triple-quoted string too: what may span lines is the string, not one `${...}`
+within it. Otherwise an interpolation takes anything: the `}` that ends it is the one reached
+**after skipping whole literals**, so a `}` inside a string, a triple-quoted string, a raw string or
+a character literal (`"${'}'}"`, ``"${`}`}"``) does not count.
 
 Multi-line strings use triple quotes `"""`; the leading and trailing newline and the common
 indentation are stripped. The interpolation rules are the same.
