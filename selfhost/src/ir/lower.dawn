@@ -2752,9 +2752,32 @@ fn lower_ctor(
       }
       None -> (st, None)
     }
-  let (st1, ws) = lower_all(st0, written)
-  # slots maps field index -> written-arg index, so the constructor's
-  # arguments arrive in field order and backends need no reordering
+  var st1 = st0
+  let (stw, ws0) = lower_all(st1, written)
+  st1 = stw
+  var ws = ws0
+  # Arguments evaluate in written order (spec §4.3). The constructor's
+  # arguments arrive in field order, so when a named argument lands out of
+  # position the written values are bound to temporaries first, in written
+  # order, and the constructor reads the locals. A call whose written order
+  # already IS field order (every call before named arguments could reorder,
+  # and most after) takes no temporaries and emits exactly what it always did.
+  var hoisted: List[CStmt] = []
+  if not slots_monotonic(slots) {
+    var lets: List[CStmt] = []
+    var locs: List[CExpr] = []
+    var wi = 0
+    for w in ws {
+      let (stA, sym) = fresh_sym(st1)
+      st1 = stA
+      let wt = tex_ty(written[wi])
+      lets = lets ++ [CSLet(sym, wt, w)]
+      locs = locs ++ [CLocal(sym, wt)]
+      wi = wi + 1
+    }
+    hoisted = lets
+    ws = locs
+  }
   var args: List[CExpr] = []
   var fi = 0
   for s in slots {
@@ -2778,15 +2801,55 @@ fn lower_ctor(
     }
     fi = fi + 1
   }
-  let built = CCtor(adt, ci, args, ty)
+  var built = CCtor(adt, ci, args, ty)
+  if len(hoisted) > 0 { built = CBlock(hoisted, Some(built), ty) }
   match base {
-    # the base is evaluated once, before any field is read from it
+    # the base is evaluated once, before any field is read from it -- which is
+    # also written order, since `..base` can only be written first
     Some(trip) -> {
       let (bsym, bv, bt) = trip
       (st1, CBlock([CSLet(bsym, bt, bv)], Some(built), ty))
     }
     None -> (st1, built)
   }
+}
+
+## Do the written arguments already arrive in field order? The field-order
+## walk over `slots` visits written indices; if that sequence ascends, field
+## order and written order agree and no temporaries are needed.
+fn slots_monotonic(slots: List[Option[Int]]) -> Bool = {
+  var prev = -1
+  for s in slots {
+    match s {
+      Some(i) -> {
+        if i < prev { return false }
+        prev = i
+      }
+      None -> ()
+    }
+  }
+  true
+}
+
+test "constructor arguments evaluate in written order" {
+  # The semantic pin for spec §4.3's evaluation-order rule (#207 ruling 1):
+  # `ty:` is written first and fills the second field, and it still runs
+  # first. Before the rule, arguments ran in field order and this list came
+  # out backwards.
+  var order: List[String] = []
+  let pm = CParam {
+    ty: {
+      order = order ++ ["ty"]
+      TyInt
+    },
+    sym: {
+      order = order ++ ["sym"]
+      7
+    },
+    mode: COwned
+  }
+  assert order == ["ty", "sym"]
+  assert pm.sym == 7 && pm.ty == TyInt
 }
 
 ## `match` becomes a once-loop: each arm is a guarded test that assigns the

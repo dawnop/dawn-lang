@@ -463,33 +463,33 @@ pub type SlotPick =
 # the field at this index was already filled
   | SlotTaken(idx: Int)
 
-## Which field each of `names` fills, in order: the positional prefix takes
-## fields left to right, a name takes the field it names, and the four ways an
+## Which slot each of `given` fills, in order: the positional prefix takes
+## slots left to right, a name takes the slot it names, and the four ways an
 ## argument can fail to land on one are answered rather than reported.
 ##
-## One rule, two spellings. `C(x, y)` in a pattern and `C(x, y)` in an
-## expression pick their fields the same way, and until this existed they did
-## so through two copies of the loop -- which had already drifted: one took the
-## first field of a given name and the other the last. (Unobservable, as it
-## happens: a constructor with two fields of one name keeps only the first,
-## and the duplicate is a declaration error. Which is the point -- the copies
-## were free to differ and nothing said so.)
+## One rule, three spellings. `C(x, y)` in a pattern, `C(x, y)` in an
+## expression and `f(x, y)` on a function pick their slots the same way, and
+## until this existed the first two did so through two copies of the loop --
+## which had already drifted: one took the first slot of a given name and the
+## other the last. (Unobservable, as it happens: a constructor with two fields
+## of one name keeps only the first, and the duplicate is a declaration error.
+## Which is the point -- the copies were free to differ and nothing said so.)
 ##
 ## What stays at the call sites is what they do with the answer: one binds a
-## sub-pattern and one checks an expression, and their diagnostics say
-## "pattern"/"matched twice" against "argument"/"given twice", at different
-## spans.
-pub fn ctor_slots(fields: List[FieldI], names: List[Option[String]]) -> List[SlotPick] = {
+## sub-pattern and two check an expression, and their diagnostics say
+## "pattern"/"matched twice" against "argument"/"given twice", against
+## "parameter"/"given twice", at different spans.
+pub fn arg_slots(params: List[String], given: List[Option[String]]) -> List[SlotPick] = {
   var out: List[SlotPick] = []
   var filled: Set[Int] = set.empty()
   var saw_named = false
   var i = 0
-  for nm in names {
+  for nm in given {
     var pick = SlotOverflow
     match nm {
       Some(an) -> {
         saw_named = true
-        match field_index(fields, an) {
+        match name_index(params, an) {
           None -> { pick = SlotNoField(an) }
           Some(idx) -> { pick = if set.has(filled, idx) { SlotTaken(idx) } else { SlotAt(idx) } }
         }
@@ -497,7 +497,7 @@ pub fn ctor_slots(fields: List[FieldI], names: List[Option[String]]) -> List[Slo
       None ->
         if saw_named {
           pick = SlotAfterNamed
-        } else if i < len(fields) {
+        } else if i < len(params) {
           pick = if set.has(filled, i) { SlotTaken(i) } else { SlotAt(i) }
         }
     }
@@ -511,10 +511,16 @@ pub fn ctor_slots(fields: List[FieldI], names: List[Option[String]]) -> List[Slo
   out
 }
 
-fn field_index(fields: List[FieldI], name: String) -> Option[Int] = {
+## The constructor spelling of `arg_slots`: slots are the constructor's fields.
+pub fn ctor_slots(fields: List[FieldI], names: List[Option[String]]) -> List[SlotPick] =
+  arg_slots(map(fields, f => f.name), names)
+
+## The first slot of a given name wins -- the rule the two pre-`ctor_slots`
+## copies disagreed on (one scanned forward, one backward).
+fn name_index(params: List[String], name: String) -> Option[Int] = {
   var i = 0
-  for f in fields {
-    if f.name == name { return Some(i) }
+  for p in params {
+    if p == name { return Some(i) }
     i = i + 1
   }
   None
@@ -2128,6 +2134,20 @@ test "an argument lands on the field its position or its name says" {
   let none_fs: List[FieldI] = []
   assert ctor_slots(none_fs, [pos]) == [SlotOverflow]
   assert ctor_slots(none_fs, [some("a")]) == [SlotNoField("a")]
+}
+
+test "arg_slots is the same rule over bare names" {
+  let some: fn(String) -> Option[String] = n => Some(n)
+  let pos: Option[String] = None
+  assert arg_slots(["a", "b"], [pos, some("b")]) == [SlotAt(0), SlotAt(1)]
+  assert arg_slots(["a", "b"], [some("b"), some("a")]) == [SlotAt(1), SlotAt(0)]
+  assert arg_slots(["a", "b"], [some("a"), pos]) == [SlotAt(0), SlotAfterNamed]
+  # the first slot of a given name wins -- the point the two pre-ctor_slots
+  # copies drifted on (one scanned forward, one backward), pinned here because
+  # a duplicate is a declaration error only for constructors, and nothing else
+  # says which copy of the rule a future caller gets
+  assert arg_slots(["x", "x"], [some("x")]) == [SlotAt(0)]
+  assert arg_slots(["x", "x"], [some("x"), some("x")]) == [SlotAt(0), SlotTaken(0)]
 }
 
 test "type rendering" {
