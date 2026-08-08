@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 3b7e5b96b4d65423 -->
+<!-- doc-check: translation-of docs/spec.md @ 1fb40e71a0829239 -->
 
 # Dawn Language Specification
 
@@ -790,19 +790,49 @@ From lowest to highest:
   **A `(` on the next line is not eaten**: a newline ends the postfix chain (only `.` may
   continue a chain across lines, §1.7), so `let x = f` followed by `(1 + 2)` on the next line
   is still two statements — the same discipline as unary `-` not continuing a line.
-- **Trailing closure: an `fn` lambda following on the same line is the last argument**
-  (2026-07-31). `f(a) fn(x) => e` is `f(a, x => e)`, `xs.each fn(x) => e` is
-  `xs.each(x => e)`, `f fn(x) => e` is `f(x => e)` — the landing point is exactly the one
-  `(` has (so a dot call yields a method call and everything else an application); the sugar
-  changes the spelling, not the node.
-  **Only the `fn` spelling is recognised**: a bare `{ ... }` trailing closure (Kotlin style)
-  is permanently out of scope — it cannot be told apart from the body of a parenthesis-free
-  `if`/`while` header (`if c { ... }`).
-  **Same line only**, the same discipline as `(`: `let y = g(1)` followed by
-  `fn h(k: Int) -> Int = k` on the next line is two statements; a local function declaration
-  is not swallowed by the call on the line above.
-  If the body needs several statements, write `f(a) fn(x) => { ... }` (a lambda with a block
-  body, §4.5).
+- **Tail block: a bare `{ ... }` following on the same line is the last argument**
+  (2026-08-08, #206). `f(a) { e }` is `f(a, () => e)`; a parameterised block spells its head
+  in the braces — `items(xs) { item => e }` is `items(xs, item => e)`, and multiple or
+  annotated parameters use the parenthesised list: `fold(xs, 0) { (acc, x) => e }`,
+  `{ (x: Int) => e }`, `{ () => e }`. The landing point is exactly the one `(` has (so
+  `xs.each { e }` yields a method call and a bare name `column { e }` an application); the
+  sugar changes the spelling, not the node.
+  The historical ruling — "a bare `{}` cannot be told apart from the body of a
+  parenthesis-free `if` header, permanently out of scope" — was overturned (2026-08-08): the
+  distinction is the same switch that keeps a record literal out of a header (`nb`, below),
+  and the ruling predates it.
+  Four side conditions:
+  1. **Same line only**, the same discipline as `(`: `let y = g(1)` followed by `{ ... }`
+     on the next line is two statements; a free-standing block statement is not swallowed
+     by the call on the line above.
+  2. **`if`/`while`/`for` headers and a `match` scrutinee open no tail block** (nor does a
+     `with` callee, §4.10): in `if f(x) { ... } { ... }` the first braces are the `if`'s own
+     body. Parentheses restore it — `if (f(x) { ... }) { ... }`. A match arm's guard is
+     **not** restricted: a guard is followed by `->`, not a block, so there is no body to
+     swallow.
+  3. **Refused when the previous token is `}`**: `if c { 1 } else { 2 } { 3 }`,
+     `match x { ... } { ... }`, `P { x: 1 } { ... }` and `f(a) { ... } { ... }` do not mean
+     applying a block to a value; and "one call takes at most one tail block" holds without
+     a rule of its own. To apply a block to a value, parenthesise it first: `(...) { ... }`.
+  4. **An uppercase name's braces belong to the record literal** (§2.3): `Column { ... }` is
+     a construction, so a tail block never lands on a bare TYPEIDENT — component functions
+     are lowercase. `Column(align: c) { ... }` is not affected: the parentheses come first,
+     and the block attaches as usual.
+  **In tail position the block binds parameters**: the head of `{ x => ... }` is its own
+  production, not a block being reinterpreted (the way `Point { x }` uses braces without
+  being a block). To write "a block whose value is a lambda", parenthesise:
+  `f(a) { (x => e) }` — the group no longer closes with `=>`, so no head is read.
+  **The tail block fills the last declared parameter/field** (Kotlin's rule), whatever named
+  arguments came before it — "positional cannot follow named" does not apply to it — and
+  defaults fill the remaining holes (#207): in `column(gap: 12) { text("hi") }` the block
+  fills `body` and `align` takes its default. If that parameter is already filled the report
+  is "the last parameter `body` is already given; the tail block is what fills it".
+- **The `fn` spelling of the trailing closure (transitional, retired in #206 phase 2)**:
+  `f(a) fn(x) => e` and `f(a) { x => e }` mean the same thing, and the two spellings coexist
+  for one release; new code writes the tail block. A bare arrow lambda still cannot take the
+  tail position: in `f(a) (x) => e` the `(x)` is already the curried call `f(a)(x)`, and the
+  two readings cannot be told apart before the `=>` — that argument is about `(`, not
+  braces, and it stands.
 - **Named arguments (`f(a: 1)`) are syntactically legal at every call position**, dot calls
   and applied function values included; whether they are usable is decided by **what the
   callee is** (2026-08-08, #207). **A callee with a signature accepts them**: top-level
@@ -962,12 +992,12 @@ xs |> map(x => x * x)             # parentheses optional for a single parameter
   and a dedicated diagnostic, "a lambda has no `fn` prefix", teaches the new spelling. In an
   expression `fn` has one position left — the trailing closure.
 - If the body needs several statements, use a block: `(x) => { ... }`.
-- Written after a call (on the same line) it is that call's **last argument** — a trailing
-  closure, see §4.3.
-  **The trailing-closure position must be written with `fn`**: in `f(a) (x) => e` the `(x)`
-  is already the curried call `f(a)(x)`, and the two readings cannot be told apart before
-  the `=>` is reached, so what is reserved for that position is exactly the `fn`-prefixed
-  spelling — the only surviving use of `fn` on a lambda. The diagnostic names this.
+- Written after a call (on the same line) it is that call's **last argument** — a tail
+  block, see §4.3: `f(a) { x => e }` (the brace head binds the parameters; the transitional
+  `f(a) fn(x) => e` means the same and retires in #206 phase 2).
+  **A bare arrow cannot take the tail position**: in `f(a) (x) => e` the `(x)` is already
+  the curried call `f(a)(x)`, and the two readings cannot be told apart before the `=>` is
+  reached. The diagnostic names this.
 - A form starting with `(` **is only decided after looking at whether a `=>` follows the
   `)`**: `(a: Int)` is a legal parameter list but not a legal expression, so a cover grammar
   (parse it as an expression first, reinterpret it on seeing `=>`) does not work here. When
@@ -1143,10 +1173,13 @@ bracket(FileOutputStream.new(path), s => s.close(), f => {
   the hint says to add braces).
 - **Several `with`s in one block nest naturally** — the second eats the part after itself.
   With `bracket`, the release order is therefore **inside out** by construction (§9.8.2).
-- **The landing point is the same one as the trailing closure's** (§4.3): `f(a, b)` grows
+- **The landing point is the same one as the tail block's** (§4.3): `f(a, b)` grows
   one argument, `r.m(a)` grows one argument, and a bare name `g` becomes `g(x => ...)`. So
-  `with` combined with an `fn` trailing closure is just an ordinary call; there is no third
-  rule.
+  `with` combined with a tail block is just an ordinary call; there is no third rule.
+- **A `with` callee opens no tail block** (#206): `with x <- f(a) { ... }` is refused —
+  `with` is about to attach the rest of the block as `f`'s last argument, so the `{` would
+  be a second closure on the same call. The diagnostic names this; parenthesise the call to
+  attach the block, or drop the `with`.
 - **`?` passes through transparently**: what the closure hands back is the value of the
   `with` call, and that is the block's value, so an `Err` propagated by `expr?` inside the
   sugared region becomes the return value of the enclosing function — and `bracket`'s
