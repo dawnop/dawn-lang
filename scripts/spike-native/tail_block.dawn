@@ -1,0 +1,57 @@
+# The tail block (#206, spec §4.3): a bare `{ ... }` right after a call, on
+# the same line, is a closure attached as that call's last argument.
+#
+# Like the `fn` trailing lambda it will replace, this is a parser rewrite onto
+# the one postfix-application node (SYN-02), so the two backends have nothing
+# of their own to do -- and that is the claim. What varies across the forms is
+# where the closure lands and what fills the remaining slots:
+#
+#   f(a) { e }            the call grows one argument
+#   f { e }               a bare name is applied to the closure alone
+#   xs.each { e }         a method call, not a field applied to a function
+#   f(gap: 1) { e }       the block fills the *last declared* parameter,
+#                         past named arguments and defaults (#207)
+#   { x => e }            the head binds parameters; effects ride through
+use std/io
+use std/list
+
+pub fn main() -> Unit !io = {
+  let xs = [1, 2, 3]
+
+  println("-- the block joins the arguments already there --")
+  println(to_string(list.map(xs) { (x: Int) => x * 2 }))
+
+  println("-- a parameter head over two parameters --")
+  println(to_string(list.fold(xs, 0) { (acc, x) => acc + x }))
+
+  println("-- a bare name applies to the closure alone --")
+  println(to_string(twice { n => n + 1 }))
+
+  println("-- a dot call grows the argument --")
+  println(to_string(xs.filter { x => x > 1 }))
+
+  println("-- effects ride through the block --")
+  each(xs) { x => println("x=" ++ to_string(x)) }
+
+  println("-- named argument, default, and the block fill their own slots --")
+  column(gap: 12) { println("body") }
+  column() { println("body2") }
+
+  println("-- the block's value is the closure's result --")
+  println(render { title() })
+}
+
+fn twice(f: fn(Int) -> Int) -> Int = f(f(1))
+
+fn each(xs: List[Int], f: fn(Int) -> Unit !io) -> Unit !io = {
+  for x in xs { f(x) }
+}
+
+fn column(gap: Int = 0, align: Int = 1, body: fn() -> Unit !io) -> Unit !io = {
+  println("gap=" ++ to_string(gap) ++ " align=" ++ to_string(align))
+  body()
+}
+
+fn title() -> String = "T"
+
+fn render(body: fn() -> String) -> String = "[" ++ body() ++ "]"
