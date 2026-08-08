@@ -489,4 +489,185 @@ sed 's|\./scripts/build-release-jar\.sh -o "$work/dawn-selfhost\.jar"|java -Xss5
 tool17_expect_reject "a wrapper that bypasses the builder" \
   "$tool17_dir/release.base.yml" "$tool17_dir/wrapper.bypass.sh"
 
+# ---------------------------------------------------------------------------
+# TOOL-18: one entry advances both seed trust records before the pointer.
+#
+# The safe order is not observable after a successful run, and a release notice
+# that prints two hashes looks almost as helpful as the single command while
+# putting the protocol back in human hands. Keep these source-level invariants
+# executable, then mutate each one below.
+# ---------------------------------------------------------------------------
+tool18_validate() {
+  local script_file="$1"
+  local action_file="$2"
+  local release_workflow="$3"
+  local archive_line std_hash_line seed_verify_line std_verify_line
+  local recheck_line checksum_line std_line pointer_line
+  local errors=0
+
+  # shellcheck disable=SC2016 # literal GitHub expression in action source
+  if ! tool17_require_line "$action_file" \
+      "key: dawn-seed-\${{ hashFiles('scripts/seed-release.txt', 'scripts/seed-checksums.txt', 'scripts/seed-std-checksums.txt') }}" \
+      "the seed cache key must cover the pointer and both trust records"; then
+    errors=1
+  fi
+
+  # shellcheck disable=SC2016 # literal workflow shell source
+  if ! tool17_require_line "$release_workflow" \
+      'run: echo "::notice::./scripts/advance-seed.sh $GITHUB_REF_NAME"' \
+      "release.yml must report only the single seed-advance command"; then
+    errors=1
+  fi
+  if [ "$(grep -F -c '::notice::' "$release_workflow")" -ne 1 ]; then
+    echo "release.yml must contain exactly one seed notice" >&2
+    errors=1
+  fi
+
+  # shellcheck disable=SC2016 # literal script source
+  for line in \
+    'git -C "$root" archive "$tag_commit" std | tar -x -C "$archive_dir"' \
+    'std_sha="$(seed_tree_sha "$archive_dir/std")"' \
+    'seed_verify "$jar_file" "$tag"' \
+    'seed_std_verify "$archive_dir/std" "$tag"' \
+    'verify_remote_tag_unchanged' \
+    'promote_file "$checksum_candidate" "$checksum_file"' \
+    'promote_file "$std_checksum_candidate" "$std_checksum_file"' \
+    'promote_file "$seed_release_candidate" "$seed_release_file"'; do
+    if ! tool17_require_line "$script_file" "$line" \
+        "advance-seed.sh is missing one exact trust or promotion step: $line"; then
+      errors=1
+    fi
+  done
+
+  # Presence and source order both matter. The remote-tag check is final only
+  # when it follows both consumer verifiers.
+  # shellcheck disable=SC2016 # literal script source
+  archive_line="$(tool18_line_number "$script_file" 'git -C "$root" archive "$tag_commit" std | tar -x -C "$archive_dir"')"
+  # shellcheck disable=SC2016 # literal script source
+  std_hash_line="$(tool18_line_number "$script_file" 'std_sha="$(seed_tree_sha "$archive_dir/std")"')"
+  # shellcheck disable=SC2016 # literal script source
+  seed_verify_line="$(tool18_line_number "$script_file" 'seed_verify "$jar_file" "$tag"')"
+  # shellcheck disable=SC2016 # literal script source
+  std_verify_line="$(tool18_line_number "$script_file" 'seed_std_verify "$archive_dir/std" "$tag"')"
+  # shellcheck disable=SC2016 # literal script source
+  recheck_line="$(tool18_line_number "$script_file" 'verify_remote_tag_unchanged')"
+  # shellcheck disable=SC2016 # literal script source
+  checksum_line="$(tool18_line_number "$script_file" 'promote_file "$checksum_candidate" "$checksum_file"')"
+  # shellcheck disable=SC2016 # literal script source
+  std_line="$(tool18_line_number "$script_file" 'promote_file "$std_checksum_candidate" "$std_checksum_file"')"
+  # shellcheck disable=SC2016 # literal script source
+  pointer_line="$(tool18_line_number "$script_file" 'promote_file "$seed_release_candidate" "$seed_release_file"')"
+  if [ -z "$archive_line" ] || [ -z "$std_hash_line" ] ||
+      [ -z "$seed_verify_line" ] || [ -z "$std_verify_line" ] ||
+      [ -z "$recheck_line" ] || [ -z "$checksum_line" ] ||
+      [ -z "$std_line" ] || [ -z "$pointer_line" ] ||
+      [ "$archive_line" -ge "$std_hash_line" ] ||
+      [ "$std_hash_line" -ge "$seed_verify_line" ] ||
+      [ "$seed_verify_line" -ge "$std_verify_line" ] ||
+      [ "$std_verify_line" -ge "$recheck_line" ] ||
+      [ "$recheck_line" -ge "$checksum_line" ] ||
+      [ "$checksum_line" -ge "$std_line" ] || [ "$std_line" -ge "$pointer_line" ]; then
+    echo "advance-seed.sh must hash tagged std, run both consumer verifiers, recheck the tag, then promote jar hash, std hash, and pointer" >&2
+    errors=1
+  fi
+
+  return "$errors"
+}
+
+tool18_line_number() {
+  awk -v want="$2" '
+    {
+      line = $0
+      sub(/^[[:space:]]+/, "", line)
+      sub(/[[:space:]]+$/, "", line)
+      if (line == want) {
+        print NR
+        exit
+      }
+    }
+  ' "$1"
+}
+
+advance_file="$root/scripts/advance-seed.sh"
+action_file="$root/.github/actions/dawn-toolchain/action.yml"
+if tool18_validate "$advance_file" "$action_file" "$release_file"; then
+  ok "one entry advances both verified seed inputs before the pointer"
+else
+  bad "the seed-advance protocol is incomplete or manually split"
+fi
+
+tool18_dir="$work/tool18"
+mkdir -p "$tool18_dir"
+cp "$advance_file" "$tool18_dir/advance.base.sh"
+cp "$action_file" "$tool18_dir/action.base.yml"
+cp "$release_file" "$tool18_dir/release.base.yml"
+
+tool18_expect_reject() {
+  local name="$1"
+  local mutated_script="$2"
+  local mutated_action="$3"
+  local mutated_release="$4"
+  if tool18_validate "$mutated_script" "$mutated_action" "$mutated_release" \
+      > "$tool18_dir/control.out" 2>&1; then
+    bad "$name did not trip the seed-advance guard"
+  else
+    ok "$name trips the seed-advance guard"
+  fi
+}
+
+sed "s/, 'scripts\/seed-std-checksums.txt'//" \
+  "$tool18_dir/action.base.yml" > "$tool18_dir/action.no-std.yml"
+tool18_expect_reject "omitting the std checksum from the seed cache key" \
+  "$tool18_dir/advance.base.sh" "$tool18_dir/action.no-std.yml" "$tool18_dir/release.base.yml"
+
+# shellcheck disable=SC2016 # mutate literal workflow shell source
+sed 's|run: echo "::notice::./scripts/advance-seed.sh $GITHUB_REF_NAME"|run: echo "::notice::add hashes to both seed tables by hand"|' \
+  "$tool18_dir/release.base.yml" > "$tool18_dir/release.manual-notice.yml"
+tool18_expect_reject "replacing the command with a manual seed notice" \
+  "$tool18_dir/advance.base.sh" "$tool18_dir/action.base.yml" "$tool18_dir/release.manual-notice.yml"
+
+# shellcheck disable=SC2016 # mutate literal script source
+sed 's/archive "$tag_commit" std/archive HEAD std/' \
+  "$tool18_dir/advance.base.sh" > "$tool18_dir/advance.head-std.sh"
+tool18_expect_reject "hashing HEAD std instead of the tag archive" \
+  "$tool18_dir/advance.head-std.sh" "$tool18_dir/action.base.yml" "$tool18_dir/release.base.yml"
+
+# shellcheck disable=SC2016 # mutate literal script source
+sed '/seed_verify "$jar_file" "$tag"/d' \
+  "$tool18_dir/advance.base.sh" > "$tool18_dir/advance.no-jar-verify.sh"
+tool18_expect_reject "omitting the release JAR consumer verification" \
+  "$tool18_dir/advance.no-jar-verify.sh" "$tool18_dir/action.base.yml" "$tool18_dir/release.base.yml"
+
+# shellcheck disable=SC2016 # mutate literal script source
+sed '/seed_std_verify "$archive_dir\/std" "$tag"/d' \
+  "$tool18_dir/advance.base.sh" > "$tool18_dir/advance.no-std-verify.sh"
+tool18_expect_reject "omitting the tagged std consumer verification" \
+  "$tool18_dir/advance.no-std-verify.sh" "$tool18_dir/action.base.yml" "$tool18_dir/release.base.yml"
+
+# Move the invocation, not the function definition, ahead of both verifiers.
+# shellcheck disable=SC2016 # mutate literal script source
+awk '
+  /^[[:space:]]*seed_verify "\$jar_file" "\$tag"[[:space:]]*$/ {
+    print "verify_remote_tag_unchanged"
+  }
+  /^[[:space:]]*verify_remote_tag_unchanged[[:space:]]*$/ { next }
+  { print }
+' "$tool18_dir/advance.base.sh" > "$tool18_dir/advance.early-recheck.sh"
+tool18_expect_reject "moving the final tag recheck before consumer verification" \
+  "$tool18_dir/advance.early-recheck.sh" "$tool18_dir/action.base.yml" "$tool18_dir/release.base.yml"
+
+awk '
+  /promote_file "\$checksum_candidate" "\$checksum_file"/ {
+    print "promote_file \"$std_checksum_candidate\" \"$std_checksum_file\""
+    next
+  }
+  /promote_file "\$std_checksum_candidate" "\$std_checksum_file"/ {
+    print "promote_file \"$checksum_candidate\" \"$checksum_file\""
+    next
+  }
+  { print }
+' "$tool18_dir/advance.base.sh" > "$tool18_dir/advance.wrong-order.sh"
+tool18_expect_reject "promoting the std record before the JAR record" \
+  "$tool18_dir/advance.wrong-order.sh" "$tool18_dir/action.base.yml" "$tool18_dir/release.base.yml"
+
 exit "$fail"

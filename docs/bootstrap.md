@@ -64,14 +64,26 @@ v0.6.0–v0.8.0 的 release jar 永久保存；`kotlin-final` tag 保有 Kotlin 
    种子→A→B→C（B = HEAD 编 HEAD，即要上传的那份字节），验证 `cmp B C`、独立
    emit、原子提升后的最终路径仍与 C 相同；workflow 再精确核对源码版本、tag 与
    artifact 输出——任一红则 release 不出。push CI（ci.yml）的全金样绿是前置。
+3. **单一推进入口**：release 四件资产齐全后只运行
+   `./scripts/advance-seed.sh <tag>`。脚本从 `origin` 新鲜解析 tag commit，前后复核 tag
+   没有移动，校验 tag 版本、HEAD 祖先关系与版本单调性；再从 GitHub Release 下载
+   `dawn-selfhost.jar` 及 sidecar，严格重算摘要并执行 `--version`。std 摘要来自该 tag
+   commit 的 `git archive`，**不来自当前 HEAD，也不来自 JAR**。JAR 不携带下一代 stage A
+   所需的 std 源树，而 HEAD 的 std 可能已经继续演进，二者都不是这次 release 的另一半。
+   脚本调用 `seed_verify` / `seed_std_verify` 做消费者侧复验后，固定按
+   `seed-checksums.txt` → `seed-std-checksums.txt` → `seed-release.txt` 提升。提升开始前的
+   错误不写文件；提升开始后的普通错误和可捕获信号回滚三者。SIGKILL 最多留下“旧指针 +
+   已验证的未来摘要”，重跑会幂等收敛，不会留下“新指针 + 缺摘要”。三文件已完整指向目标
+   时，重跑仍复验远端，工作树零 diff。sidecar 只证明下载一致，不是独立签名；提交进 Git
+   的摘要仍是 TOFU 信任边界。
    下面的链条表记的是**种子形态变过的那几环**，不是每一次 bump——每次 bump 的记录
-   就是 `scripts/seed-release.txt` 那一行和它的提交，再抄一遍只会过期（这张表一度
-   写着「逐条记」，却停在 v0.8.0，中间二十一个 release 一个没记）。
-3. **特性纪律**：`selfhost/src`（连同它引用的 `std/`）只准用**当前种子已支持**
-   的语言特性。想用新特性：先在 selfhost 实现 → 发 release（过祝圣）→ bump
-   `scripts/seed-release.txt` → 下一轮才能自用。（Rust stage0 的规矩，
+   就是上述三文件和它们的提交，再抄一遍只会过期（这张表一度写着「逐条记」，却停在
+   v0.8.0，中间二十一个 release 一个没记）。
+4. **特性纪律**：`selfhost/src`（连同它引用的 `std/`）只准用**当前种子已支持**
+   的语言特性。想用新特性：先在 selfhost 实现 → 发 release（过祝圣）→
+   用上述单一入口推进三文件 → 下一轮才能自用。（Rust stage0 的规矩，
    CI 机器强制：种子编不动 HEAD 直接红。）
-4. **链条可重放**：`scripts/replay-bootstrap.sh <seed-jar | vX.Y.Z>` 从任一环
+5. **链条可重放**：`scripts/replay-bootstrap.sh <seed-jar | vX.Y.Z>` 从任一环
    种子重放：种子编 selfhost → 固定点（stage2==stage3）→ standalone 闭包 →
    （本地有 HEAD 编译器时）验证收敛到与 HEAD 逐字节一致。**一代洗净种子**：
    stage2 只由 selfhost/src 决定、与谁编译 boot 无关，所以「老种子 + 新源码」

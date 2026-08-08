@@ -12,8 +12,12 @@ name: release
 # scripts/seedjar.sh ever verifies against scripts/seed-checksums.txt is the
 # jar.
 #
-# Releasing is: bump VERSION in selfhost/src/version.dawn, commit, then
-#   git tag v0.9.0 && git push --tags
+# Releasing is: bump VERSION in selfhost/src/version.dawn, commit, push main,
+# wait for main CI, then create and push exactly one tag:
+#   git push origin main
+#   git tag v0.9.0
+#   git push origin refs/tags/v0.9.0
+# Never use `git push --tags`; it can publish unrelated local tags.
 on:
   push:
     tags: ['v*']
@@ -145,24 +149,11 @@ jobs:
           ./scripts/release-native.sh -o dawnc-linux-x86_64 \
             --jar dawn-selfhost.jar --expect "${GITHUB_REF_NAME#v}"
 
-      # Every release jar is the next repo's bootstrap seed, and seedjar.sh
-      # verifies each seed against scripts/seed-checksums.txt before using it.
-      # Publishing the digest next to the jar is what lets the *next* bump fill
-      # that file in from the release rather than from whatever happens to be in
-      # someone's local cache.
+      # Publish the digest beside the jar. advance-seed.sh later downloads and
+      # rechecks both instead of trusting a local build or cache.
       - name: checksum
         run: |
           sha256sum dawn-selfhost.jar | tee dawn-selfhost.jar.sha256
-          echo "::notice::add this line to scripts/seed-checksums.txt when bumping the seed:"
-          echo "::notice::$(cut -d' ' -f1 dawn-selfhost.jar.sha256)  $GITHUB_REF_NAME"
-          # The seed's other half. stage 1 is "this jar + the std this tag
-          # shipped", and seedjar.sh verifies both before using either, so a
-          # bump needs two lines and not one. The tree hash is computed from
-          # the checkout, which is this tag.
-          . scripts/seedjar.sh
-          ROOT=$(pwd)
-          echo "::notice::add this line to scripts/seed-std-checksums.txt at the same time:"
-          echo "::notice::$(seed_tree_sha std)  $GITHUB_REF_NAME"
 
       # A run can stop after creating the release or after uploading only some
       # assets. Re-running must converge rather than fail on existing state:
@@ -202,3 +193,6 @@ jobs:
               exit 1
             fi
           done
+
+      - name: report the seed-advance command
+        run: echo "::notice::./scripts/advance-seed.sh $GITHUB_REF_NAME"

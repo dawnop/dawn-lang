@@ -1,10 +1,10 @@
 # 每个 release 的 `std/` 树哈希 —— 种子 jar 的另一半 bootstrap 输入。
 #
 # 为什么存在：`bin/dawn` 的 stage 1 是「上一个 release 的 jar + 那个 release 的 std」。
-# jar 自 `seed-checksums.txt` 起每次使用前都校验；与它配对的 std 不校验——
-# `seedjar.sh` 只看缓存目录里有没有 `modules.txt`，有就用。于是那半边输入可以被
-# 改写（缓存目录是可写的）或被换掉（tag 可以移动），而 jar 的校验和与整套信任叙事
-# 都看不见。B==C 固定点同样看不见：换掉的 std 会被忠实地复现进下一代。
+# jar 自 `seed-checksums.txt` 起每次使用前都校验；与它配对的 std 曾经不校验——旧版
+# `seedjar.sh` 只看缓存目录里有没有 `modules.txt`，有就用。于是那半边输入可以被改写
+# （缓存目录是可写的）或被换掉（tag 可以移动），而 jar 的校验和与整套信任叙事都
+# 看不见。B==C 固定点同样看不见：换掉的 std 会被忠实地复现进下一代。
 #
 # 格式：`<sha256>  <tag>`。值是 `seedjar.sh` 的 `seed_tree_sha`——每个普通文件按
 # 相对路径排序，逐个贡献「字节数 空格 路径 换行」再加内容，整体过 SHA-256。
@@ -14,9 +14,9 @@
 # 只需要 `seed-release.txt` 当前钉住的那个 tag：`seed_std_dir` 从不问别的。
 # 每个提交记录自己钉住的那一个，所以历史上任何一个提交都自洽。
 #
-# **bump `seed-release.txt` 时同批加一行**：
-#   git archive <tag> std | tar -x -C "$d" && seed_tree_sha "$d/std"
-# release workflow 也会把这一行打进 notice。
+# 新 release 后只运行 `./scripts/advance-seed.sh <tag>`。它从远端 tag commit 的
+# `git archive` 计算并复验本值，在 JAR 清单之后、本指针之前推进本清单；不要改用
+# HEAD 的 std，也不要手工补这一行。
 #
 # 这份清单的信任边界与 `seed-checksums.txt` 相同：它把「以后拿到的 std」钉到
 # 「当时 tag 里的 std」，是 trust-on-first-use，不是来源证明。

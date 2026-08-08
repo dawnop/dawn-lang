@@ -95,9 +95,13 @@
 - 两边一起改的过渡期，那边把 `.dawn-version` 写成 `main` 现编，但**别让它长期留在 main 上**——
   那期间可复现性是没有的。
 
-发布：改 `selfhost/src/version.dawn` 的 `VERSION` → 提交 → `git tag v0.9.0 && git push --tags`，
-发布后 bump `scripts/seed-release.txt`（种子推进协议见 docs/bootstrap.md）。
-`release.yml` 会校验 tag 与 version 一致、跑全量测试、把 `dawn.jar` 传上 Release。
+发布：改 `selfhost/src/version.dawn` 的 `VERSION` → 提交 → `git push origin main` 并等
+main CI 通过 → `git tag v0.9.0` → `git push origin refs/tags/v0.9.0`。禁止
+`git push --tags`，它会把无关 tag 一起发布。`release.yml` 会校验 tag 与 version 一致、
+跑全量测试、把 `dawn-selfhost.jar` 与 native 资产传上 Release。四件资产发布完成后只运行
+`./scripts/advance-seed.sh v0.9.0`；它会校验 GitHub Release 的 JAR 与远端 tag archive
+的 std，并按摘要清单、std 清单、指针的顺序同步推进三份 seed 文件，不得只手改
+`seed-release.txt`（完整协议见 docs/bootstrap.md）。
 `doc-check.py` 会把文档里声称「当前工具链是几」的那几处也一起校到 `version.dawn`，
 所以改完 `VERSION` 那一趟 CI 会点名剩下没跟上的行——README 那句曾经落后 38 个小版本，
 靠人读发现的。

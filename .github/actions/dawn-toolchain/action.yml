@@ -26,18 +26,18 @@ runs:
         distribution: 'graalvm-community'
         github-token: ${{ inputs.github-token }}
 
-    # Keep the seed jar across runs -- it only changes when
-    # scripts/seed-release.txt bumps.
+    # Keep both bootstrap inputs across runs. The pointer selects their release,
+    # and either trust record may invalidate cached bytes for the same tag.
     #
-    # seed-checksums.txt is in the key as well, so a corrected digest for an
-    # unchanged tag misses rather than hits. It would not be unsafe either way
-    # (seedjar.sh verifies the jar on every cache hit, not merely after a
-    # download), but a miss re-fetches and a hit would simply refuse to run.
+    # Both checksum tables are in the key as well, so a corrected jar digest or
+    # std tree hash for an unchanged tag misses rather than restores a cache the
+    # resolver will immediately refuse. seedjar.sh still verifies both inputs
+    # on every cache hit, not merely after a download or extraction.
     - name: cache the bootstrap seed
       uses: actions/cache@v4
       with:
         path: .dawn/seeds
-        key: dawn-seed-${{ hashFiles('scripts/seed-release.txt', 'scripts/seed-checksums.txt') }}
+        key: dawn-seed-${{ hashFiles('scripts/seed-release.txt', 'scripts/seed-checksums.txt', 'scripts/seed-std-checksums.txt') }}
 
     # [java-deps] resolution, so six jobs do not each ask Maven Central for the
     # same asm jar. dawn.lock is the key because it *is* the resolved closure;

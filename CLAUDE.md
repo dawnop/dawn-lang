@@ -149,10 +149,15 @@ Windows 的 WinNAT 保留了大片低端口，8097 bind 会报 "Address already 
 ## 发布与跨仓契约
 
 版本在 `selfhost/src/version.dawn` 的 `VERSION`。发布 = 改它 → 提交 →
-`git tag v0.9.0 && git push --tags`；`release.yml` 在 tag 上调用唯一配方
+`git push origin main` 并等 main CI 通过 → `git tag v0.9.0` →
+`git push origin refs/tags/v0.9.0`；禁止 `git push --tags`，避免顺手发布无关 tag。
+`release.yml` 在 tag 上调用唯一配方
 `scripts/build-release-jar.sh -o dawn-selfhost.jar` 重建种子→A→B→C 链，验证 B==C
 闭包，并精确核对源码版本、tag 与 artifact 输出后发上 GitHub Release。
-**release 即下一个种子**：发布后把 `scripts/seed-release.txt` bump 到新 tag。
+**release 即下一个种子**：四件资产发布完成后运行
+`./scripts/advance-seed.sh v0.9.0`，由它从 GitHub Release 获取 JAR、从远端 tag archive
+获取 std，再依次推进 `seed-checksums.txt`、`seed-std-checksums.txt`、
+`seed-release.txt`，不得手改其中之一。
 `selfhost/src` 只准用当前种子已支持的语言特性（机器强制：种子编不动 HEAD 就红）——
 种子推进协议见 [docs/bootstrap.md](docs/bootstrap.md)，M8（淘汰 Kotlin）的
 决策与落地记录见 [docs/m8-selfhost-only.md](docs/history/m8-selfhost-only.md)。
