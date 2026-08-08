@@ -1,0 +1,45 @@
+# checker.dawn: a written function type cannot name a declared effect
+# (docs/effects-soundness-design.md §4.1). One refusal in cx.dawn covers every
+# position a type can be written in, because they all go through resolve_type.
+use std/list
+
+effect Ask { fn get() -> Int }
+
+# a parameter type
+pub fn as_param(f: fn() -> Int !Ask) -> Int = f()
+
+# a return type
+pub fn as_return() -> fn() -> Int !Ask = () => 1
+
+# a `let` annotation
+pub fn as_let() -> Int = {
+  let g: fn() -> Int !Ask = () => 1
+  g()
+}
+
+# nested inside a generic argument, and inside a tuple
+pub fn as_nested(fs: List[fn() -> Int !Ask], p: (Int, fn() -> Int !Ask)) -> Int = {
+  let (n, _) = p
+  len(fs) + n
+}
+
+# The migration the hint asks for, in the same four positions: an effect
+# variable is not a label, so none of these is refused. Without them the case
+# would prove the refusal fires and nothing about what it fires on.
+pub fn var_param(f: fn() -> Int !e) -> Int !e = f()
+
+pub fn var_return() -> fn() -> Int !e = () => 1
+
+pub fn var_let() -> Int !e = {
+  let g: fn() -> Int !e = () => 1
+  g()
+}
+
+# `!io` is the base axis, which the ban leaves alone
+pub fn io_param(f: fn() -> Int !io) -> Int !io = f()
+
+# a declaration position refuses the whole row earlier, in words that do not
+# depend on knowing which of the two kinds of atom it is
+alias A = fn() -> Int !Ask
+
+pub type Box = { f: fn() -> Int !Ask }

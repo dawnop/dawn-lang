@@ -17,7 +17,7 @@ use check/types.{
   Adts, AdtI, Traits, TraitI, ImplI, Impls, Sig, Sym, Ty, Eff, Effects, EffectI,
   TyInt, TyFloat, TyBool, TyString, TyUnit, TyError, TyVar, TyAssoc, TyAdt,
   TyList, TyMap, TySet, TyArray, TyJava, TyTuple, TyFn, TyOpaque,
-  EPure, EIo, EffVar, ELabeled, eff_union,
+  EPure, EIo, EffVar, ELabeled, eff_union, eff_base, eff_labels,
   adt_of, trait_of, subst, ty_named,
   builtins, internal_builtins,
   prelude_adts, prelude_traits, first_minted_id
@@ -460,6 +460,33 @@ pub fn resolve_alias_target(cx: Cx, al: AliasE, use_lo: Int, use_hi: Int) -> (Cx
   (cx3, t)
 }
 
+## A written function type cannot name a declared effect
+## (docs/effects-soundness-design.md §4.1).
+##
+## Written is the whole of it: this runs on `TypeRef`s the author spelled, and
+## nothing that `unify`, `subst_eff` or `instantiate_eff` builds comes through
+## here. `map(xs, x => x + ask())` still infers `fn(Int) -> Int !Ask` for its
+## argument, because that type is inferred rather than written, and effect
+## polymorphism would be gone if it could not exist.
+##
+## What the ban costs is a spelling with no meaning behind it. `!Ask` on a
+## function type reads as "whoever calls me supplies the handler", and Dawn's
+## evidence never travels that way: it is captured by the closure at the point
+## the closure is built. A signature's own row (`fn one() -> Int !Ask`) is a
+## different thing and stays legal -- it is not a `TypeRef` and never reaches
+## here -- and so does an effect variable, which is what a caller writes when it
+## wants to take such a closure.
+fn refuse_written_label(cx: Cx, eff: Eff, lo: Int, hi: Int) -> Cx = {
+  let ls = eff_labels(eff)
+  if len(ls) == 0 { return cx }
+  let (_, n0) = ls[0]
+  cerr_h(cx, "a function type cannot name the effect `" ++ n0 ++ "`", lo, hi,
+    "use an effect variable: `fn() -> Int !e` accepts a closure that raises `" ++ n0 ++
+      "` and carries it on into this signature's own row. A written label would mean " ++
+      "the caller supplies the handler, and in Dawn a closure carries the handler it " ++
+      "was created under (docs/spec.md §6.5)")
+}
+
 ## Resolve a parsed type reference against the current scope (the Kotlin
 ## resolveType with tparams/effVars defaulted to the current ones).
 pub fn resolve_type(cx: Cx, ref: TypeRef) -> (Cx, Ty) !io =
@@ -478,7 +505,10 @@ pub fn resolve_type(cx: Cx, ref: TypeRef) -> (Cx, Ty) !io =
     }
     TFn(params, ret, effs, lo, hi) -> {
       let (cx1, eff) = resolve_eff_at(cx, effs, lo, hi)
-      var cx2 = cx1
+      var cx2 = refuse_written_label(cx1, eff, lo, hi)
+      # ... and go on with the row the author should have written, so the rest
+      # of the declaration is checked once rather than reported twice
+      let eff2 = eff_base(eff)
       var ps: List[Ty] = []
       for p in params {
         let (cx3, t) = resolve_type(cx2, p)
@@ -486,7 +516,7 @@ pub fn resolve_type(cx: Cx, ref: TypeRef) -> (Cx, Ty) !io =
         ps = ps ++ [t]
       }
       let (cx4, rt) = resolve_type(cx2, ret)
-      (cx4, TyFn(ps, rt, eff))
+      (cx4, TyFn(ps, rt, eff2))
     }
     TNamed(name, targs, lo, hi) -> resolve_named(cx, name, targs, lo, hi)
     TQual(q, name, targs, lo, hi) -> resolve_qual(cx, q, name, targs, lo, hi)

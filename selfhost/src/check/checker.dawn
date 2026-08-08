@@ -8028,28 +8028,28 @@ test "check_module: impl methods and trait defaults check as bodies" {
   assert cx2.diags[0].msg == "function `f` is not declared !io but calls `g` (!io)"
 }
 
-test "check_module: type declarations refuse effect variables" {
+test "check_module: type declarations refuse an effect row" {
   let env: Map[String, ModExports] = map.empty()
   # record field
   let (m1, p1) = parser.parse_module("pub type Box = { f: fn(Int) -> Int !e }\n")
   assert len(p1) == 0
   let (cx1, _) = check_module(test_cx(), m1, env)
   assert len(cx1.diags) == 1
-  assert cx1.diags[0].msg == "a type declaration cannot carry effect variables"
-  assert cx1.diags[0].hint == "write !io, or leave the function type pure"
+  assert cx1.diags[0].msg == "a type declaration cannot carry an effect row"
+  assert str.starts_with(cx1.diags[0].hint, "write !io, or leave the function type pure")
   # variant field
   let (m2, p2) = parser.parse_module("type T2 = | A(f: fn(Int) -> Int !e) | B\n")
   assert len(p2) == 0
   let (cx2, _) = check_module(test_cx(), m2, env)
   assert len(cx2.diags) == 1
-  assert cx2.diags[0].msg == "a type declaration cannot carry effect variables"
+  assert cx2.diags[0].msg == "a type declaration cannot carry an effect row"
   # alias target shares the same words
   let (m3, p3) = parser.parse_module("alias F = fn(Int) -> Int !e\n")
   assert len(p3) == 0
   let (cx3, _) = check_module(test_cx(), m3, env)
   assert len(cx3.diags) == 1
-  assert cx3.diags[0].msg == "a type declaration cannot carry effect variables"
-  assert cx3.diags[0].hint == "write !io, or leave the function type pure"
+  assert cx3.diags[0].msg == "a type declaration cannot carry an effect row"
+  assert str.starts_with(cx3.diags[0].hint, "write !io, or leave the function type pure")
   # a concrete !io in the same positions stays legal
   let (m4, p4) = parser.parse_module(
     "pub type Cb = { f: fn(Int) -> Int !io }\nalias G = fn(Int) -> Int !io\n")
@@ -8220,7 +8220,19 @@ test "the four refusals: trait, impl, comptime, type declaration" {
   # a type declaration refuses a label exactly as it refuses an effect variable
   let (m4, _) = parser.parse_module(base ++ "pub type Box = { f: fn() -> Int !Ask }\n")
   let (cx4, _) = check_module(test_cx(), m4, env)
-  assert cx4.diags[0].msg == "a type declaration cannot carry effect variables"
+  assert cx4.diags[0].msg == "a type declaration cannot carry an effect row"
+  # ... and outside a declaration the label is refused by name, once
+  let (m5, _) = parser.parse_module(base ++ "fn sink(f: fn() -> Int !Ask) -> Int = f()\n")
+  let (cx5, _) = check_module(test_cx(), m5, env)
+  assert len(cx5.diags) == 1
+  assert cx5.diags[0].msg == "a function type cannot name the effect `Ask`"
+  assert str.contains(cx5.diags[0].hint, "use an effect variable")
+  # an effect variable in the same position is what the hint asks for, and it
+  # is accepted: the ban is on the spelling that has no meaning, not on taking
+  # a closure that raises
+  let (m6, _) = parser.parse_module(base ++ "fn sink(f: fn() -> Int !e) -> Int !e = f()\n")
+  let (cx6, _) = check_module(test_cx(), m6, env)
+  assert len(cx6.diags) == 0
 }
 
 test "an operation cannot be a value, and unsafe_pure cannot mask a label" {
