@@ -58,8 +58,13 @@ fn close_faults(name: String) -> Unit !io = {
 
 fn use_panics(a: String) -> Int !io = panic("OUTER-" ++ a)
 
-fn use_faults(a: String) -> Int !io =
-  str.len(raw.read_file("/no/such/dawn/outer-" ++ a))
+## The fault every fault case raises, bracketed or bare: an io fault's
+## message is the backend's own (foreign_error.dawn says why), so the corpus
+## can only ask that the crossed failure equals the same failure raised with
+## no bracket in the way -- the comparison bracket.dawn already uses.
+fn read_missing() -> Int !io = str.len(raw.read_file("/no/such/dawn/path"))
+
+fn use_faults(a: String) -> Int !io = read_missing()
 
 ## bracket.dawn's barrier shape: which barrier stops a panic that crossed a
 ## bracket whose release swallowed a *fault*? "through" is the only right
@@ -83,13 +88,19 @@ pub fn main() -> Unit !io = {
   let e2 = taken_panic(() => bracket("r2", close_faults, use_panics))
   println("outer message  " ++ e2.message)
 
+  # the same fault with no bracket in the way, to compare the crossed ones
+  # against
+  let bare = taken_fault(read_missing)
+
   println("-- outer fault, release swallows a panic --")
   let e3 = taken_fault(() => bracket("r3", close_panics, use_faults))
-  println("mentions path  " ++ to_string(str.contains(e3.message, "no/such/dawn/outer-r3")))
+  println("same kind      " ++ to_string(bare.kind == e3.kind))
+  println("same message   " ++ to_string(bare.message == e3.message))
 
   println("-- outer fault, release swallows a fault --")
   let e4 = taken_fault(() => bracket("r4", close_faults, use_faults))
-  println("mentions path  " ++ to_string(str.contains(e4.message, "no/such/dawn/outer-r4")))
+  println("same kind      " ++ to_string(bare.kind == e4.kind))
+  println("same message   " ++ to_string(bare.message == e4.message))
 
   println("-- a panic across a bracket whose release swallowed a fault --")
   println("verdict        " ++ barrier("r5", use_panics))

@@ -767,26 +767,41 @@ typedef struct dawn_handler {
 
 static dawn_handler *dawn_handlers;
 
-/* The message is copied here rather than kept by pointer: the raiser's frame
- * -- and with it a `dawn_str_lit` compound literal, or a heap message whose
- * owner unwound -- is gone by the time the catcher reads it. */
-#define DAWN_FAILURE_MAX 512
-static char dawn_failure_buf[DAWN_FAILURE_MAX];
-static int64_t dawn_failure_len;
+/* One failure, as a value: what a raise hands to the handler that takes it.
+ *
+ * `msg` is a counted heap string the payload owns -- copied at the raise,
+ * because the raiser's frame (and with it a `dawn_str_lit` compound literal,
+ * or a heap message whose owner unwound) is gone by the time the catcher
+ * reads it. A real string rather than a fixed buffer is the whole of the
+ * ARC-03 fix: no length limit (the spec has no truncation clause), and no
+ * cut mid-character breaking the String well-formedness invariant (#113).
+ *
+ * `kind` stays a static literal, not a copy: the two spellings are
+ * compile-time constants, not something a raiser computes.
+ *
+ * `is_panic` is the kind as a bit, for the one reader that has to *route* by
+ * it rather than report it: `dawn_reraise`. A re-raise that lost this would
+ * offer a panic to the next `catch_fault` down the chain, which is precisely
+ * the failure `catch_fault` is defined not to take (spec 9.8). Comparing the
+ * kind string would work and would also make the routing depend on a name
+ * the design says is the backend's own to change. */
+typedef struct dawn_failure {
+  dawn_str *msg;
+  const char *kind;
+  bool is_panic;
+} dawn_failure;
 
-/* The failure's kind, as the name `ForeignError.kind` hands back. A static
- * string rather than a copy: the two are compile-time literals, not something
- * a raiser computes. */
-static const char *dawn_failure_kind = "panic";
-
-/* The same fact as a bit, for the one reader that has to *route* by it rather
- * than report it: `dawn_reraise`. Written wherever `dawn_failure_kind` is, and
- * the two must stay in lockstep -- a re-raise that lost this would offer a
- * panic to the next `catch_fault` down the chain, which is precisely the
- * failure `catch_fault` is defined not to take (spec 9.8). Comparing the kind
- * string would work and would also make the routing depend on a name the
- * design says is the backend's own to change. */
-static bool dawn_failure_is_panic = true;
+/* The failure in flight, between a raise and the `setjmp` return it lands
+ * on. This is global, and may be: no user code ever runs while it is
+ * occupied. `dawn_raise` fills it and longjmps in the same breath, and every
+ * `setjmp` branch *moves* it into the frame's own locals before doing
+ * anything else. That move is the ARC-04 fix -- the old arrangement kept the
+ * payload global across a bracket's `release`, which is arbitrary user code,
+ * and a failure raised and caught inside the release overwrote the one
+ * crossing the bracket: message, kind, and the routing bit, so `catch_fault`
+ * could end up taking a panic. Now the crossing failure sits in the
+ * bracket's frame, where a nested handler cannot reach it. */
+static dawn_failure dawn_inflight;
 
 /* The innermost handler that will take a failure of this kind, or NULL. */
 static dawn_handler *dawn_find_handler(bool is_panic) {
@@ -800,12 +815,9 @@ static void dawn_raise(dawn_str *msg, bool is_panic) {
   if (h != NULL) {
     /* The skipped frames go with it: they sit above `h`, and `h`'s own
      * setjmp branch restores the list to `h->prev`. */
-    dawn_failure_kind = is_panic ? "panic" : "fault";
-    dawn_failure_is_panic = is_panic;
-    dawn_failure_len = msg->len < DAWN_FAILURE_MAX ? msg->len : DAWN_FAILURE_MAX;
-    if (dawn_failure_len > 0) {
-      memcpy(dawn_failure_buf, msg->p, (size_t)dawn_failure_len);
-    }
+    dawn_inflight.msg = dawn_str_copy(msg->p, msg->len);
+    dawn_inflight.kind = is_panic ? "panic" : "fault";
+    dawn_inflight.is_panic = is_panic;
     longjmp(h->jb, 1);
   }
   /* Nothing stopped it, so the program is over either way -- which is why
@@ -821,15 +833,18 @@ void dawn_panic(dawn_str *msg) { dawn_raise(msg, true); }
 
 void dawn_fault(dawn_str *msg) { dawn_raise(msg, false); }
 
-/* `ForeignError { kind, message, cause }` out of what the raise left behind.
- * Three reference fields, so all three mask bits: the record owns each one
- * and a drop of the whole releases them. */
+/* `ForeignError { kind, message, cause }` out of a failure payload. Three
+ * reference fields, so all three mask bits: the record owns each one and a
+ * drop of the whole releases them. The message *transfers* -- the payload's
+ * reference becomes the record's, no copy -- which is also why every caller
+ * must have moved the payload out of `dawn_inflight` first: this consumes
+ * it. */
 #define DAWN_MASK_THREE_BOXED UINT64_C(7)
 
-static dawn_adt *dawn_foreign_error(void) {
+static dawn_adt *dawn_foreign_error(dawn_failure f) {
   dawn_adt *a = dawn_adt_new(DAWN_TAG_FOREIGN_ERROR, 3, DAWN_MASK_THREE_BOXED);
-  a->fields[0].p = dawn_str_copy(dawn_failure_kind, (int64_t)strlen(dawn_failure_kind));
-  a->fields[1].p = dawn_str_copy(dawn_failure_buf, dawn_failure_len);
+  a->fields[0].p = dawn_str_copy(f.kind, (int64_t)strlen(f.kind));
+  a->fields[1].p = f.msg;
   a->fields[2].p = dawn_none();
   return a;
 }
@@ -842,8 +857,11 @@ static dawn_adt *dawn_run_caught(dawn_clo *f, bool catches_panic) {
   h.catches_panic = catches_panic;
   dawn_handlers = &h;
   if (setjmp(h.jb) != 0) {
+    /* first thing on landing: the in-flight failure becomes this frame's.
+     * Nothing has run between the raise and here, so it is still ours. */
+    dawn_failure mine = dawn_inflight;
     dawn_handlers = h.prev;
-    return dawn_err(dawn_foreign_error());
+    return dawn_err(dawn_foreign_error(mine));
   }
   void *v = ((void *(*)(dawn_clo *))f->fn)(f);
   dawn_handlers = h.prev;
@@ -854,29 +872,30 @@ dawn_adt *dawn_catch_fault(dawn_clo *f) { return dawn_run_caught(f, false); }
 
 dawn_adt *dawn_catch_panic(dawn_clo *f) { return dawn_run_caught(f, true); }
 
-/* Hand the failure that is already in `dawn_failure_*` to the next handler out.
+/* Hand a failure this frame is holding to the next handler out.
  *
  * This is what `bracket` needs and neither barrier does: the barriers stop a
  * failure and turn it into a value, so the failure is over by the time they
  * are. A bracket takes one only to run a release, and then owes the program
- * the *same* failure -- same kind, same message -- as though nothing had been
- * protected. So the buffer is not rewritten; only the routing runs again, and
- * it routes by the saved `is_panic` rather than by the kind string.
+ * the *same* failure -- same kind, same message -- as though nothing had
+ * been protected. The payload travels by value through the bracket's frame:
+ * nothing a release does can touch it, and the routing runs again by the
+ * saved `is_panic` rather than by the kind string.
  *
- * With no handler left, the program is over, and it reports out of the buffer
- * rather than out of a message it no longer has. That truncates at
- * DAWN_FAILURE_MAX where an unprotected raise would not -- the buffer is what
- * survives a longjmp, and 512 bytes of a panic message is the whole of the
- * difference a bracket makes to a fatal one. */
-static _Noreturn void dawn_reraise(void) {
-  dawn_handler *h = dawn_find_handler(dawn_failure_is_panic);
-  if (h != NULL) longjmp(h->jb, 1);
+ * With no handler left, the program is over, and it reports the message
+ * whole -- the payload is a real string now, so a failure that crossed a
+ * bracket prints exactly what an unprotected raise would have printed. */
+static _Noreturn void dawn_reraise(dawn_failure f) {
+  dawn_handler *h = dawn_find_handler(f.is_panic);
+  if (h != NULL) {
+    dawn_inflight = f;
+    longjmp(h->jb, 1);
+  }
   fflush(stdout);
   fputs("panic: ", stderr);
-  if (dawn_failure_len > 0) {
-    fwrite(dawn_failure_buf, 1, (size_t)dawn_failure_len, stderr);
-  }
+  if (f.msg->len > 0) fwrite(f.msg->p, 1, (size_t)f.msg->len, stderr);
   fputc('\n', stderr);
+  dawn_drop(f.msg);
   exit(1);
 }
 
@@ -911,10 +930,15 @@ void *dawn_bracket(void *resource, dawn_clo *release, dawn_clo *use) {
   h.catches_panic = true;
   dawn_handlers = &h;
   if (setjmp(h.jb) != 0) {
+    /* the crossing failure becomes this frame's before the release runs:
+     * `release` is arbitrary user code, and a failure it raises and swallows
+     * must find `dawn_inflight` free rather than the one owed onward
+     * (spec 9.8.2 guarantee 2). */
+    dawn_failure crossing = dawn_inflight;
     dawn_handlers = h.prev;
     dawn_drop(((void *(*)(dawn_clo *, void *))release->fn)(release,
                                                           dawn_dup(resource)));
-    dawn_reraise();
+    dawn_reraise(crossing);
   }
   void *r = ((void *(*)(dawn_clo *, void *))use->fn)(use, dawn_dup(resource));
   dawn_handlers = h.prev;

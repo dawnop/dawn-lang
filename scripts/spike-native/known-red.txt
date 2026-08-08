@@ -162,22 +162,24 @@
 # scripts/case-contract/run.sh.
 
 # --- the failure payload (#193) -------------------------------------------
-# The native runtime keeps a caught failure in process-global state: a fixed
-# 512-byte message buffer (ARC-03: a longer message comes back cut, possibly
-# mid-character, breaking the String well-formedness invariant #113 pinned)
-# that any nested catch overwrites (ARC-04: a bracket's release that swallows
-# a failure of its own replaces the message, the kind, and the panic/fault
-# routing bit of the failure crossing the bracket -- spec 9.8.2 guarantee 2).
-# The JVM has neither defect: a failure is a Throwable of its own, and
-# bracket rethrows the same object. The fix is one payload object per handler
-# frame, owned by the handler that will take it (native-failure-design.md 4.0).
-failure_message:native
-failure_message:diff
-bracket_release_fails:native
-bracket_release_fails:diff
-bracket_release_fails:stderr
-bracket_release_fails:exit
-bracket_release_fatal:stderr
+# failure_message:native/diff, bracket_release_fails:native/diff/stderr/exit
+# and bracket_release_fatal:stderr were here, for one day. The native runtime
+# kept a caught failure in process-global state: a fixed 512-byte message
+# buffer (ARC-03: a longer message came back cut, possibly mid-character,
+# breaking the String well-formedness invariant #113 pinned) that any nested
+# catch overwrote (ARC-04: a bracket's release that swallowed a failure of
+# its own replaced the message, the kind, and the panic/fault routing bit of
+# the failure crossing the bracket -- so `catch_fault` took a panic, and a
+# recoverable fault turned into exit 1). The JVM had neither defect: a
+# failure is a Throwable of its own, and bracket rethrows the same object.
+#
+# Closed by making the payload a value that travels with the failure
+# (native-failure-design.md 4.0): the message is a counted heap string, so
+# no limit and no mid-character cut; the global is only ever occupied between
+# a raise and the very next setjmp return, a window in which no user code
+# runs, and every handler moves the payload into its own frame before
+# anything else -- a bracket's release finds the slot free, and the failure
+# it owes onward sits where nested handlers cannot reach it.
 
 # --- recovery leaks (#193, ARC-05) ----------------------------------------
 # A raise longjmps past the frames between it and the handler, and their
