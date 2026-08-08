@@ -35,7 +35,7 @@ use front/ast.{
   BinOp, OpAdd, OpSub, OpMul, OpDiv, OpMod, OpConcat, OpEq, OpNeq, OpLt, OpLe,
   OpGt, OpGe, OpAnd, OpOr, OpBand, OpBor, OpBxor, OpShl, OpShr, OpUshr,
   UnOp, OpNeg, OpNot, OpBnot,
-  Arg, pos_arg, MatchArm, Expr, EInt, EChar, EFloat, EBool, EUnit, EStr, EVar,
+  Arg, pos_arg, trail_arg, MatchArm, Expr, EInt, EChar, EFloat, EBool, EUnit, EStr, EVar,
   EApply, EMethod, ELambda, ECtor, EFieldAcc, EListLit, ETupleLit, EPropagate,
   EUnwrap, EIndex, EReturn, EBreak, EContinue, EComptime, EUnsafePure,
   EBinary, EUnary, EIf, EMatch, EBlock, EHandle, HandlerArm,
@@ -1573,7 +1573,7 @@ fn postfix_expr(p: P, st: St, nb: Bool) -> PR[Expr] = {
           # does -- attaching to the EFieldAcc would apply the field's value
           # instead of calling the method.
           let (st6, lam) = lambda_expr(p, st3, nb)?
-          e = EMethod(e, f.text, [pos_arg(lam)], f.lo, f.hi, e_lo(e), e_hi(lam))
+          e = EMethod(e, f.text, [trail_arg(lam)], f.lo, f.hi, e_lo(e), e_hi(lam))
           st1 = st6
         } else if at_kind(p, st3, LBRACE) && not nb {
           # paren-less tail block on a dot call: `xs.each { ... }` is the
@@ -1581,7 +1581,7 @@ fn postfix_expr(p: P, st: St, nb: Bool) -> PR[Expr] = {
           # the `fn` arm above is -- attaching to the EFieldAcc would apply
           # the field's value instead of calling the method.
           let (st6, lam) = tail_block_lambda(p, st3)?
-          e = EMethod(e, f.text, [pos_arg(lam)], f.lo, f.hi, e_lo(e), e_hi(lam))
+          e = EMethod(e, f.text, [trail_arg(lam)], f.lo, f.hi, e_lo(e), e_hi(lam))
           st1 = st6
         } else {
           e = EFieldAcc(e, f.text, f.lo, f.hi, e_lo(e), f.hi)
@@ -1764,7 +1764,7 @@ fn call_args(p: P, st: St) -> Result[(St, List[Arg], Token), (St, Diag)] = {
       let (st2, arg_name) = adv(p, st1)
       let st3 = skip_nl(p, adv1(p, st2))
       let (st4, value) = expression(p, st3, false)?
-      args = args ++ [Arg { name: Some(arg_name.text), e: value, lo: arg_name.lo, hi: e_hi(value) }]
+      args = args ++ [Arg { name: Some(arg_name.text), e: value, trailing: false, lo: arg_name.lo, hi: e_hi(value) }]
       st1 = st4
     } else {
       let (st2, value) = expression(p, st1, false)?
@@ -1801,7 +1801,7 @@ fn record_lit(p: P, st: St, name: Token) -> PR[Expr] = {
     if at_kind(p, st2, COLON) {
       let st3 = skip_nl(p, adv1(p, st2))
       let (st4, value) = expression(p, st3, false)?
-      args = args ++ [Arg { name: Some(f.text), e: value, lo: f.lo, hi: e_hi(value) }]
+      args = args ++ [Arg { name: Some(f.text), e: value, trailing: false, lo: f.lo, hi: e_hi(value) }]
       st1 = st4
     } else if at_kind(p, st2, LPAREN) {
       # `Column { text("a") }`: an uppercase name takes its braces as a record
@@ -1814,7 +1814,7 @@ fn record_lit(p: P, st: St, name: Token) -> PR[Expr] = {
     } else {
       # shorthand { x } means { x: x }
       let value = EVar(f.text, f.lo, f.hi)
-      args = args ++ [Arg { name: Some(f.text), e: value, lo: f.lo, hi: f.hi }]
+      args = args ++ [Arg { name: Some(f.text), e: value, trailing: false, lo: f.lo, hi: f.hi }]
       st1 = st2
     }
     st1 = skip_nl(p, st1)
@@ -2260,10 +2260,10 @@ fn handler_arm(p: P, st: St) -> PR[HandlerArm] = {
 ## are the same attachment, reached from two spellings.
 fn attach_trailing(callee: Expr, lam: Expr) -> Expr =
   match callee {
-    EApply(t, args, clo, chi) -> EApply(t, args ++ [pos_arg(lam)], clo, e_hi(lam))
+    EApply(t, args, clo, chi) -> EApply(t, args ++ [trail_arg(lam)], clo, e_hi(lam))
     EMethod(t, n, args, nlo, nhi, clo, chi) ->
-      EMethod(t, n, args ++ [pos_arg(lam)], nlo, nhi, clo, e_hi(lam))
-    other -> EApply(other, [pos_arg(lam)], e_lo(other), e_hi(lam))
+      EMethod(t, n, args ++ [trail_arg(lam)], nlo, nhi, clo, e_hi(lam))
+    other -> EApply(other, [trail_arg(lam)], e_lo(other), e_hi(lam))
   }
 
 fn stmt_and_sep(p: P, st: St) -> PR[Stmt] = {

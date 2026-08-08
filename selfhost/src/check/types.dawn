@@ -479,27 +479,47 @@ pub type SlotPick =
 ## sub-pattern and two check an expression, and their diagnostics say
 ## "pattern"/"matched twice" against "argument"/"given twice", against
 ## "parameter"/"given twice", at different spans.
-pub fn arg_slots(params: List[String], given: List[Option[String]]) -> List[SlotPick] = {
+##
+## `trailing` says the last of `given` is a trailing closure -- a tail block,
+## a trailing `fn` lambda or a `with` rest (spec §4.3/§4.10). It fills the
+## last declared slot, whatever named arguments came before it, so it skips
+## both the positional counter and the after-named refusal; if that slot is
+## already filled the answer is `SlotTaken`, which the call sites report with
+## trailing wording. The pattern side always passes `false` -- a pattern has
+## no tail block -- and the parameter exists here so the expression sides and
+## the pattern side keep sharing the one slot rule.
+pub fn arg_slots(
+  params: List[String],
+  given: List[Option[String]],
+  trailing: Bool
+) -> List[SlotPick] = {
   var out: List[SlotPick] = []
   var filled: Set[Int] = set.empty()
   var saw_named = false
   var i = 0
   for nm in given {
     var pick = SlotOverflow
-    match nm {
-      Some(an) -> {
-        saw_named = true
-        match name_index(params, an) {
-          None -> { pick = SlotNoField(an) }
-          Some(idx) -> { pick = if set.has(filled, idx) { SlotTaken(idx) } else { SlotAt(idx) } }
-        }
+    if trailing && i == len(given) - 1 {
+      let last = len(params) - 1
+      if last >= 0 {
+        pick = if set.has(filled, last) { SlotTaken(last) } else { SlotAt(last) }
       }
-      None ->
-        if saw_named {
-          pick = SlotAfterNamed
-        } else if i < len(params) {
-          pick = if set.has(filled, i) { SlotTaken(i) } else { SlotAt(i) }
+    } else {
+      match nm {
+        Some(an) -> {
+          saw_named = true
+          match name_index(params, an) {
+            None -> { pick = SlotNoField(an) }
+            Some(idx) -> { pick = if set.has(filled, idx) { SlotTaken(idx) } else { SlotAt(idx) } }
+          }
         }
+        None ->
+          if saw_named {
+            pick = SlotAfterNamed
+          } else if i < len(params) {
+            pick = if set.has(filled, i) { SlotTaken(i) } else { SlotAt(i) }
+          }
+      }
     }
     match pick {
       SlotAt(idx) -> { filled = set.insert(filled, idx) }
@@ -512,8 +532,8 @@ pub fn arg_slots(params: List[String], given: List[Option[String]]) -> List[Slot
 }
 
 ## The constructor spelling of `arg_slots`: slots are the constructor's fields.
-pub fn ctor_slots(fields: List[FieldI], names: List[Option[String]]) -> List[SlotPick] =
-  arg_slots(map(fields, f => f.name), names)
+pub fn ctor_slots(fields: List[FieldI], names: List[Option[String]], trailing: Bool) -> List[SlotPick] =
+  arg_slots(map(fields, f => f.name), names, trailing)
 
 ## The first slot of a given name wins -- the rule the two pre-`ctor_slots`
 ## copies disagreed on (one scanned forward, one backward).
@@ -2130,38 +2150,55 @@ test "an argument lands on the field its position or its name says" {
   let pos: Option[String] = None
 
   # the positional prefix takes fields left to right
-  assert ctor_slots(fs, [pos, pos]) == [SlotAt(0), SlotAt(1)]
-  assert ctor_slots(fs, []) == []
+  assert ctor_slots(fs, [pos, pos], false) == [SlotAt(0), SlotAt(1)]
+  assert ctor_slots(fs, [], false) == []
   # a name takes the field it names, in any order, and may follow a position
-  assert ctor_slots(fs, [some("b"), some("a")]) == [SlotAt(1), SlotAt(0)]
-  assert ctor_slots(fs, [pos, some("b")]) == [SlotAt(0), SlotAt(1)]
+  assert ctor_slots(fs, [some("b"), some("a")], false) == [SlotAt(1), SlotAt(0)]
+  assert ctor_slots(fs, [pos, some("b")], false) == [SlotAt(0), SlotAt(1)]
   # but a position may not follow a name -- and the refusal does not fill the
   # field it would have taken, so the "missing field" count stays honest
-  assert ctor_slots(fs, [some("a"), pos]) == [SlotAt(0), SlotAfterNamed]
+  assert ctor_slots(fs, [some("a"), pos], false) == [SlotAt(0), SlotAfterNamed]
   # a name with no field, a position past the last field, and a field filled
   # twice by either spelling
-  assert ctor_slots(fs, [some("zz")]) == [SlotNoField("zz")]
-  assert ctor_slots(fs, [pos, pos, pos]) == [SlotAt(0), SlotAt(1), SlotOverflow]
-  assert ctor_slots(fs, [some("a"), some("a")]) == [SlotAt(0), SlotTaken(0)]
-  assert ctor_slots(fs, [pos, some("a")]) == [SlotAt(0), SlotTaken(0)]
+  assert ctor_slots(fs, [some("zz")], false) == [SlotNoField("zz")]
+  assert ctor_slots(fs, [pos, pos, pos], false) == [SlotAt(0), SlotAt(1), SlotOverflow]
+  assert ctor_slots(fs, [some("a"), some("a")], false) == [SlotAt(0), SlotTaken(0)]
+  assert ctor_slots(fs, [pos, some("a")], false) == [SlotAt(0), SlotTaken(0)]
   # a constructor with no fields has nothing for a positional argument to take
   let none_fs: List[FieldI] = []
-  assert ctor_slots(none_fs, [pos]) == [SlotOverflow]
-  assert ctor_slots(none_fs, [some("a")]) == [SlotNoField("a")]
+  assert ctor_slots(none_fs, [pos], false) == [SlotOverflow]
+  assert ctor_slots(none_fs, [some("a")], false) == [SlotNoField("a")]
 }
 
 test "arg_slots is the same rule over bare names" {
   let some: fn(String) -> Option[String] = n => Some(n)
   let pos: Option[String] = None
-  assert arg_slots(["a", "b"], [pos, some("b")]) == [SlotAt(0), SlotAt(1)]
-  assert arg_slots(["a", "b"], [some("b"), some("a")]) == [SlotAt(1), SlotAt(0)]
-  assert arg_slots(["a", "b"], [some("a"), pos]) == [SlotAt(0), SlotAfterNamed]
+  assert arg_slots(["a", "b"], [pos, some("b")], false) == [SlotAt(0), SlotAt(1)]
+  assert arg_slots(["a", "b"], [some("b"), some("a")], false) == [SlotAt(1), SlotAt(0)]
+  assert arg_slots(["a", "b"], [some("a"), pos], false) == [SlotAt(0), SlotAfterNamed]
   # the first slot of a given name wins -- the point the two pre-ctor_slots
   # copies drifted on (one scanned forward, one backward), pinned here because
   # a duplicate is a declaration error only for constructors, and nothing else
   # says which copy of the rule a future caller gets
-  assert arg_slots(["x", "x"], [some("x")]) == [SlotAt(0)]
-  assert arg_slots(["x", "x"], [some("x"), some("x")]) == [SlotAt(0), SlotTaken(0)]
+  assert arg_slots(["x", "x"], [some("x")], false) == [SlotAt(0)]
+  assert arg_slots(["x", "x"], [some("x"), some("x")], false) == [SlotAt(0), SlotTaken(0)]
+}
+
+test "a trailing closure fills the last declared slot" {
+  let some: fn(String) -> Option[String] = n => Some(n)
+  let pos: Option[String] = None
+  # the last of `given` lands on the last slot, past any named arguments --
+  # the after-named refusal does not apply to it (spec §4.3)
+  assert arg_slots(["gap", "body"], [some("gap"), pos], true) == [SlotAt(0), SlotAt(1)]
+  # positional prefix plus a trailing closure is the identity mapping
+  assert arg_slots(["a", "body"], [pos, pos], true) == [SlotAt(0), SlotAt(1)]
+  # the last slot already filled -- by name or by position -- answers
+  # SlotTaken, which the call sites report with trailing wording
+  assert arg_slots(["a", "body"], [some("body"), pos], true) == [SlotAt(1), SlotTaken(1)]
+  assert arg_slots(["body"], [pos, pos], true) == [SlotAt(0), SlotTaken(0)]
+  # no slots at all: overflow, counted by the arity report
+  let no_params: List[String] = []
+  assert arg_slots(no_params, [pos], true) == [SlotOverflow]
 }
 
 test "type rendering" {

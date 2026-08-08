@@ -124,10 +124,19 @@ pub fn un_op_name(op: UnOp) -> String =
 ## accepted is decided by what the callee is, in the checker
 ## (docs/audit/application-syntax-design.md §3.2). `lo` starts at the name when
 ## there is one, so the span covers what a diagnostic must underline.
-pub type Arg = { name: Option[String], e: Expr, lo: Int, hi: Int }
+##
+## `trailing` marks the closure a tail block, a trailing `fn` lambda or a
+## `with` statement attached (spec §4.3/§4.10): it fills the *last declared*
+## parameter or field, whatever named arguments came before it, and the
+## checker's "positional cannot follow named" rule does not apply to it.
+pub type Arg = { name: Option[String], e: Expr, trailing: Bool, lo: Int, hi: Int }
 
 ## A positional argument around an expression (the common case).
-pub fn pos_arg(e: Expr) -> Arg = Arg { name: None, e: e, lo: e_lo(e), hi: e_hi(e) }
+pub fn pos_arg(e: Expr) -> Arg = Arg { name: None, e: e, trailing: false, lo: e_lo(e), hi: e_hi(e) }
+
+## The trailing-closure argument `attach_trailing` and the dot-call sugar arms
+## build; see `Arg.trailing`.
+pub fn trail_arg(e: Expr) -> Arg = Arg { name: None, e: e, trailing: true, lo: e_lo(e), hi: e_hi(e) }
 
 ## Drop the names: for the callees that reject them, everything downstream
 ## works on plain expressions.

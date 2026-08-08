@@ -2150,7 +2150,7 @@ fn check_ctor_pattern_at(
   # so the names it binds exist for the rest of the arm.
   var pnames: List[Option[String]] = []
   for a in pargs { pnames = pnames ++ [a.name] }
-  let picks = ctor_slots(ci.fields, pnames)
+  let picks = ctor_slots(ci.fields, pnames, false)
   var i = 0
   for a in pargs {
     var idx = -1
@@ -5071,7 +5071,8 @@ fn check_call(
   var args_broken = false
   var given: List[Option[String]] = []
   for a0 in args0 { given = given ++ [a0.name] }
-  let picks = arg_slots(s.param_names, given)
+  let trailing = len(args0) > 0 && args0[len(args0) - 1].trailing
+  let picks = arg_slots(s.param_names, given, trailing)
   var i0 = 0
   for a0 in args0 {
     var idx = -1
@@ -5092,7 +5093,14 @@ fn check_call(
       # counted after the rounds, with the arity wording
       SlotOverflow -> ()
       SlotTaken(at) -> {
-        cx1 = cerr(cx1, "parameter `" ++ s.param_names[at] ++ "` is given twice", a0.lo, a0.hi)
+        if trailing && i0 == len(args0) - 1 {
+          # the trailing closure and an earlier argument both fill the last
+          # parameter; say which parameter the block is for (spec §4.3)
+          cx1 = cerr(cx1, "the last parameter `" ++ s.param_names[at] ++
+              "` is already given; the tail block is what fills it", a0.lo, a0.hi)
+        } else {
+          cx1 = cerr(cx1, "parameter `" ++ s.param_names[at] ++ "` is given twice", a0.lo, a0.hi)
+        }
         args_broken = true
       }
     }
@@ -5667,7 +5675,8 @@ fn check_ctor_call(
   for _k in 0..len(cargs) { atx = atx ++ [no_texpr()] }
   var anames: List[Option[String]] = []
   for a in cargs { anames = anames ++ [a.name] }
-  let picks = ctor_slots(ci.fields, anames)
+  let trailing = len(cargs) > 0 && cargs[len(cargs) - 1].trailing
+  let picks = ctor_slots(ci.fields, anames, trailing)
   var args_broken = false
   var i = 0
   for a in cargs {
@@ -5691,7 +5700,12 @@ fn check_ctor_call(
       # counted below
       SlotOverflow -> ()
       SlotTaken(at) -> {
-        cx1 = cerr(cx1, "field `" ++ ci.fields[at].name ++ "` is given twice", a.lo, a.hi)
+        if trailing && i == len(cargs) - 1 {
+          cx1 = cerr(cx1, "the last field `" ++ ci.fields[at].name ++
+              "` is already given; the tail block is what fills it", a.lo, a.hi)
+        } else {
+          cx1 = cerr(cx1, "field `" ++ ci.fields[at].name ++ "` is given twice", a.lo, a.hi)
+        }
         args_broken = true
       }
     }
@@ -7107,18 +7121,18 @@ test "argument names name a signature or a constructor; a value callee says so" 
   let bare_some = ECtor("Some", [], None, false, 0, 4, 0, 4)
   # (1) a constructor accepts them -- and validates them against its fields
   let named = EApply(bare_some,
-    [Arg { name: Some("value"), e: EInt(1, 12, 13), lo: 5, hi: 13 }], 0, 14)
+    [Arg { name: Some("value"), e: EInt(1, 12, 13), trailing: false, lo: 5, hi: 13 }], 0, 14)
   let (cx1, t1, _) = check_expr(cx, named, Some(opt_ty(TyInt)))
   assert t1 == opt_ty(TyInt)
   assert len(cx1.diags) == 0
   let wrong = EApply(bare_some,
-    [Arg { name: Some("nope"), e: EInt(1, 11, 12), lo: 5, hi: 12 }], 0, 13)
+    [Arg { name: Some("nope"), e: EInt(1, 11, 12), trailing: false, lo: 5, hi: 12 }], 0, 13)
   let (cx2, _, _) = check_expr(cx, wrong, Some(opt_ty(TyInt)))
   assert str.contains(cx2.diags[0].msg, "no field `nope`")
   # (2) a local holding a function is a function *value*: no parameter names
   let (cxf, _) = declare(cx, "f", TyFn([TyInt], TyInt, EPure), false, 0, 1)
   let on_fn = EApply(EVar("f", 0, 1),
-    [Arg { name: Some("a"), e: EInt(1, 5, 6), lo: 2, hi: 6 }], 0, 7)
+    [Arg { name: Some("a"), e: EInt(1, 5, 6), trailing: false, lo: 2, hi: 6 }], 0, 7)
   let (cx3, _, _) = check_expr(cxf, on_fn, no_expected())
   assert cx3.diags[0].msg ==
     "`f` is a function value, and a function type carries no parameter names"
@@ -7127,7 +7141,7 @@ test "argument names name a signature or a constructor; a value callee says so" 
   # (3) an applied expression is a function value too, with no name to quote
   let lam = ELambda([LambdaParam { name: "x", ann: Some(TNamed("Int", [], 4, 7)), lo: 1, hi: 2 }],
     EVar("x", 11, 12), false, 0, 12)
-  let on_value = EApply(lam, [Arg { name: Some("a"), e: EInt(1, 16, 17), lo: 13, hi: 17 }], 0, 18)
+  let on_value = EApply(lam, [Arg { name: Some("a"), e: EInt(1, 16, 17), trailing: false, lo: 13, hi: 17 }], 0, 18)
   let (cx4, _, _) = check_expr(cx, on_value, no_expected())
   assert cx4.diags[0].msg ==
     "this callee is a function value, and a function type carries no parameter names"
@@ -7136,13 +7150,13 @@ test "argument names name a signature or a constructor; a value callee says so" 
     java_classes: map.insert(cx.java_classes, "Long", "java.lang.Long") }
   let jrecv = ECtor("Long", [], None, false, 0, 4, 0, 4)
   let on_java = EApply(EFieldAcc(jrecv, "MAX_VALUE", 5, 14, 0, 14),
-    [Arg { name: Some("a"), e: EInt(1, 18, 19), lo: 15, hi: 19 }], 0, 20)
+    [Arg { name: Some("a"), e: EInt(1, 18, 19), trailing: false, lo: 15, hi: 19 }], 0, 20)
   let (cx5, _, _) = check_expr(cx, on_java, no_expected())
   assert cx5.diags[0].msg == "`Long.MAX_VALUE` is a Java member; " ++
     "Java methods carry no parameter names"
   # (5) a dot call on an undefined method reports the name, not the arguments
   let on_dot = EMethod(EVar("f", 0, 1), "g",
-    [Arg { name: Some("a"), e: EInt(1, 6, 7), lo: 3, hi: 7 }], 2, 3, 0, 8)
+    [Arg { name: Some("a"), e: EInt(1, 6, 7), trailing: false, lo: 3, hi: 7 }], 2, 3, 0, 8)
   let (cx6, _, _) = check_expr(cxf, on_dot, no_expected())
   assert cx6.diags[0].msg == "undefined function: g"
 }
@@ -7166,7 +7180,7 @@ test "named arguments land on a signature's parameters, and evaluate in written 
     inferring: false
   }
   cx = Cx { ..cx, fns: map.insert(cx.fns, "move2", sg) }
-  let named_arg = (n: String, e: Expr) => Arg { name: Some(n), e: e, lo: e_lo(e), hi: e_hi(e) }
+  let named_arg = (n: String, e: Expr) => Arg { name: Some(n), e: e, trailing: false, lo: e_lo(e), hi: e_hi(e) }
   # written in declaration order: a plain call node, no wrapper
   let ok = EApply(EVar("move2", 0, 5),
     [named_arg("dx", EInt(1, 6, 7)), named_arg("wrap", EBool(true, 8, 12))], 0, 13)
