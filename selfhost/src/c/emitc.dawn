@@ -1155,11 +1155,12 @@ fn emit_if(st: CSt, cond: CExpr, thn: CExpr, els: Option[CExpr], ty: Ty, k: Bool
   (st8, if is_value { tmp } else { "DAWN_UNIT" })
 }
 
-## Is the emitted form of this expression a name or a literal, running no
-## code? Anything else may run code -- and any call can panic -- so its order
-## among its siblings is observable. A bare tracked local read at a consuming
-## position is not an atom: it emits a dawn_take, and the take's place in the
-## row is part of the written order.
+## Is the emitted form of this expression free to stay inline -- a name, a
+## literal, or something that runs no observable code? Anything else may run
+## code -- and any call can panic -- so its order among its siblings is
+## observable. A bare tracked local read at a consuming position is not an
+## atom: it emits a dawn_take, and the take's place in the row is part of the
+## written order.
 fn atom_expr(st: CSt, e: CExpr, k: Bool) -> Bool =
   match e {
     CInt(_) -> true
@@ -1169,6 +1170,14 @@ fn atom_expr(st: CSt, e: CExpr, k: Bool) -> Bool =
     CStr(_) -> true
     CUnit -> true
     CLocal(sym, _) -> not (k && set.has(st.tracked, sym))
+    # dictionary expressions run no observable code (a static table, a copy
+    # of one, a slot read) -- and their emitted C type is the concrete
+    # dictionary pointer while Core types them as the type variable they
+    # witness for, so a hoisted temp would be declared at the wrong pointer
+    # type and -Werror=incompatible-pointer-types refuses the file
+    CDictRef(_, _, _, _) -> true
+    CDictApply(_, _, _) -> true
+    CDictArg(_, _, _, _, _) -> true
     _ -> false
   }
 
