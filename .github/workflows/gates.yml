@@ -214,6 +214,19 @@ jobs:
       - name: Inflate contract
         run: ./scripts/inflate-contract/run.sh
 
+      # Float rendering's only independent oracle. std/fmt.dawn says outright
+      # that it does not re-test dtoa because this script pins it byte for
+      # byte -- and until 2026-08-08 the script ran nowhere, so the claim
+      # pointed at nothing. Everything else that touches Float rendering
+      # compares the two backends, and both compile the same Dawn source: a
+      # wrong shortest-round-trip rule is a *shared* wrong answer there and
+      # invisible. The JDK's Schubfach is the outside opinion.
+      #
+      # The full 200,000-sample default runs on every push; it costs ~14s
+      # wall, so there is no reason for a reduced push tier.
+      - name: dtoa contract (Float rendering vs the JDK)
+        run: ./scripts/dtoa-contract/run.sh
+
       # Case folding and classification are the two operations with a table
       # behind them rather than a derivation, so the backends cannot share an
       # implementation -- only the data. This checks that both answer from the

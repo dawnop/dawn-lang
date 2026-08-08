@@ -8,6 +8,9 @@
 #   ./scripts/dtoa-contract/run.sh          # 200_000 random samples
 #   ./scripts/dtoa-contract/run.sh 20000    # quicker
 #
+# The default is what CI runs (.github/workflows/gates.yml): the seed is fixed
+# in the source, so the corpus is the same on every machine and every run.
+#
 # The JDK is a valid oracle only from 19 up (older ones carry the pre-2022
 # FloatingDecimal, whose output is NOT shortest); the script refuses rather
 # than reports a meaningless disagreement. Unlike the Unicode tables this
@@ -22,10 +25,16 @@ here="$root/scripts/dtoa-contract"
 n="${1:-200000}"
 cc_bin="${CC:-cc}"
 
+# A missing oracle fails. It used to `exit 0` with a SKIP line, which was
+# defensible while nothing ran this script; as a gate it would mean the one
+# check that can see a wrong dtoa rule reports success by not running. The
+# repository's own toolchain is JDK 21, so there is no supported configuration
+# in which this branch is reached by accident.
 feature=$(java -version 2>&1 | sed -n 's/.*version "\([0-9]*\).*/\1/p' | head -1)
 if [ -z "$feature" ] || [ "$feature" -lt 19 ]; then
-  echo "SKIP: JDK $feature has the old FloatingDecimal; the oracle needs 19+" >&2
-  exit 0
+  echo "FAIL: JDK ${feature:-?} has the pre-2022 FloatingDecimal (or no java at" >&2
+  echo "      all); the oracle needs 19+. Run this under the repository's JDK." >&2
+  exit 1
 fi
 
 work="$(mktemp -d)"
