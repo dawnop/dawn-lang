@@ -53,13 +53,14 @@ pub type AliasE = {
 ## `check_unsafe_pure` hand-saves `used_effects` and `eff_witness` and nothing
 ## else, and never goes through here.)
 ##
-## These eight are exactly the ones that twin listed: the type is the restore
-## set, so a ninth field added here silently widens what an isolated body
-## restores, and that change is invisible to every byte-level gate in the tree
-## (docs/arch-split-design.md D9 and §5.4). What does see it is the eight
-## `isolated_*` cases in scripts/checker-corpus/ plus the inline test beside
-## `leave_isolated`; the acceptance rule for both is the drop-restore matrix in
-## §5.4 -- drop one field from the restore and at least one of them must go red.
+## These nine are exactly the ones that twin listed, plus `handle_evs`: the
+## type is the restore set, so a tenth field added here silently widens what an
+## isolated body restores, and that change is invisible to every byte-level
+## gate in the tree (docs/arch-split-design.md D9 and §5.4). What does see it is
+## the eight `isolated_*` cases in scripts/checker-corpus/ plus the inline test
+## beside `leave_isolated`; the acceptance rule for both is the drop-restore
+## matrix in §5.4 -- drop one field from the restore and at least one of them
+## must go red.
 ## Fields that look like they belong --
 ## `current_tparams`, `current_tparam_bounds`, `current_eff_vars`, `loop_jumps`,
 ## `in_test` -- stay on `Cx` because today they are not restored, and `enter_fn`
@@ -76,6 +77,15 @@ pub type Frame = {
   dict_syms: Map[(Int, Int), Int],
   lambda_stack: List[LambdaCx],
   loop_stack: List[Int],
+  # evidence symbol id → the union of that handler's arm effects, for every
+  # `with handle` installed in this body. Membership is the whole question a
+  # closure asks at settlement time (docs/effects-soundness-design.md §4.2):
+  # evidence resolved *here* can be discharged from the closure's row, evidence
+  # that came in through the signature cannot. Keyed by symbol id rather than
+  # effect id so a nested handler shadowing an outer one needs no extra rule --
+  # `resolve_local` already picked the inner binding, and ids are never reused,
+  # so an out-of-scope entry can never be reached.
+  handle_evs: Map[Int, Eff],
   # inside a comptime block or a const initializer: no effect of any kind may
   # cross, and v1 refuses declared effects there outright (design §4.5)
   isolated: Bool
@@ -159,8 +169,27 @@ pub type Cx = {
 ## `arm` narrows `sugar`: the closure is a `with handle` arm rather than the
 ## remainder of a `with` block. Both are code the author did not spell as a
 ## lambda, and each has to be named as what it is when a jump tries to leave it.
+##
+## `settled` and `unsettled` are the closure's own answer to "where did the
+## evidence for this label come from" (docs/effects-soundness-design.md §4.2).
+## Every label reaching this closure's row is charged to one of them, and a
+## label in both stays in the row: the two lists are not a partition but a
+## conservative bias, because a label with a second source is still raised
+## against somebody else's handler when the closure runs.
 pub type LambdaCx =
-  { boundary: Int, expected_ret: Option[Ty], captures: List[Int], sugar: Bool, arm: Bool }
+  {
+    boundary: Int,
+    expected_ret: Option[Ty],
+    captures: List[Int],
+    sugar: Bool,
+    arm: Bool,
+    # (effect id, that handler's arm effects), for evidence answered by a
+    # `with handle` inside the function this closure is being built in
+    settled: List[(Int, Eff)],
+    # effect ids whose evidence came from anywhere else: the signature's hidden
+    # parameters, a function value, or an instantiated effect variable
+    unsettled: List[Int]
+  }
 
 ## A fresh checker state for one module.
 pub fn cx_new(owner_class: Option[String], src_path: Option[String]) -> Cx = {
@@ -214,6 +243,7 @@ pub fn cx_new(owner_class: Option[String], src_path: Option[String]) -> Cx = {
       dict_syms: map.empty(),
       lambda_stack: [],
       loop_stack: [],
+      handle_evs: map.empty(),
       isolated: false
     },
     syms: map.empty(),

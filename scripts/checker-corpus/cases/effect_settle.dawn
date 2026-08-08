@@ -1,0 +1,57 @@
+# checker.dawn: a closure's row is settled where the closure is created
+# (docs/effects-soundness-design.md §4.2). Three shapes the criterion has to
+# tell apart, and the row each one ends up with is read off an annotation the
+# closure is then held to.
+use std/io
+
+effect Ask { fn get() -> Int }
+
+pub type Box = { f: fn() -> Int }
+
+# A handler written right here answers the closure, and the closure is charged
+# with that handler's arms instead of the label. The arm does io, so the row
+# says `!io` -- the closure really will print when it is called, which is the
+# whole point of settling rather than subtracting.
+pub fn io_arm() -> Int !io = {
+  with handle Ask { get() => {
+    io.println("arm")
+    8
+  } }
+  let g: fn() -> Int = () => get()
+  g()
+}
+
+# The inner handler is the one `get()` resolves to, so it is the one the
+# closure owes. If the outer handler answered, `g` would be pure and this file
+# would record nothing here.
+pub fn nested() -> Int !io = {
+  with handle Ask { get() => 1 }
+  with handle Ask { get() => {
+    io.println("inner")
+    2
+  } }
+  let g: fn() -> Int = () => get()
+  g()
+}
+
+# Two sources for one label: `k` answers to `mixed`'s own hidden evidence, the
+# bare `get()` answers to the handler above. Settling the label away would hand
+# `k` to the wrong handler, so a label with any second source stays put.
+pub fn mixed() -> Int !Ask = {
+  let k = () => get()
+  with handle Ask { get() => 2 }
+  let m: fn() -> Int = () => k() + get()
+  m()
+}
+
+# The counterexample that decided where the criterion hangs (design §5.3): `m`
+# resolves no evidence at all -- it only calls `k`, whose evidence came from
+# the signature. A criterion that asked the row at the closure's exit would
+# find the handler above in scope and settle `m` to pure, and `m` would then
+# fit a pure field and leave `p2` entirely.
+pub fn p2() -> Box !Ask = {
+  let k = () => get()
+  with handle Ask { get() => 2 }
+  let m = () => k()
+  Box(m)
+}

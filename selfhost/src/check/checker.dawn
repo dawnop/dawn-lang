@@ -159,6 +159,46 @@ pub fn record_effect(cx: Cx, e: Eff, lo: Int, hi: Int, name: String) -> Cx = {
   }
 }
 
+## Where a label reaching the innermost closure got its evidence
+## (docs/effects-soundness-design.md §4.2). `settled` means a `with handle`
+## written inside the function this closure is being built in answered it, so
+## the closure can be charged with that handler's arms instead of the label.
+## `unsettled` means the evidence belongs to somebody else -- the signature's
+## hidden parameter, a function value, an instantiated effect variable -- and
+## the label has to ride out with the closure.
+##
+## Outside any lambda both are no-ops: the row is the function's own, and
+## `verify_effects` holds it to the signature rather than settling it.
+fn mark_settled(cx: Cx, eid: Int, arm_eff: Eff) -> Cx =
+  with_top_lambda(cx, lc => LambdaCx { ..lc, settled: lc.settled ++ [(eid, arm_eff)] })
+
+fn mark_unsettled(cx: Cx, eid: Int) -> Cx =
+  with_top_lambda(cx, lc =>
+      if list.contains(lc.unsettled, eid) { lc } else {
+        LambdaCx { ..lc, unsettled: lc.unsettled ++ [eid] }
+      })
+
+## Every label in `e` arrived through evidence this closure did not resolve --
+## a function value's row, or an effect variable instantiated at a call. The
+## three call sites are the three ways a labelled row is charged to a body
+## without `evidence_args` ever running (design §4.2).
+fn mark_unsettled_labels(cx: Cx, e: Eff) -> Cx = {
+  var cx1 = cx
+  for l in eff_labels(e) {
+    let (eid, _) = l
+    cx1 = mark_unsettled(cx1, eid)
+  }
+  cx1
+}
+
+fn with_top_lambda(cx: Cx, f: fn(LambdaCx) -> LambdaCx) -> Cx = {
+  let stack = cx.frame.lambda_stack
+  let n = len(stack)
+  if n == 0 { return cx }
+  let outer = list.take(stack, n - 1)
+  Cx { ..cx, frame: Frame { ..cx.frame, lambda_stack: outer ++ [f(stack[n - 1])] } }
+}
+
 ## The name of the local that carries an effect's evidence. It is minted from
 ## the id, not just the name, so two modules declaring the same effect name
 ## cannot shadow each other's evidence; `$` keeps it unspellable, so nothing a
@@ -1582,7 +1622,9 @@ test "loop jumps respect lambda boundaries" {
         expected_ret: None,
         captures: [],
         sugar: false,
-        arm: false
+        arm: false,
+        settled: [],
+        unsettled: []
       }]
     }
   }
@@ -2471,6 +2513,7 @@ fn no_lparams() -> List[LambdaParam] = []
 pub fn enter_isolated(cx: Cx) -> (Cx, Frame) = {
   let empty_w: Map[Eff, (Int, Int, String)] = map.empty()
   let empty_d: Map[(Int, Int), Int] = map.empty()
+  let empty_h: Map[Int, Eff] = map.empty()
   let fresh_scope: Map[String, Int] = map.empty()
   (Cx {
     ..cx,
@@ -2484,6 +2527,7 @@ pub fn enter_isolated(cx: Cx) -> (Cx, Frame) = {
       dict_syms: empty_d,
       lambda_stack: [],
       loop_stack: [],
+      handle_evs: empty_h,
       isolated: true
     }
   }, cx.frame)
@@ -2510,7 +2554,7 @@ pub fn leave_isolated(cx: Cx, frame: Frame, what: String, blo: Int, bhi: Int) ->
   Cx { ..cx1, frame: frame }
 }
 
-test "an isolated context reports its own effects, then restores all eight fields" {
+test "an isolated context reports its own effects, then restores all nine fields" {
   var cx = test_cx()
   # The outer frame this enters an isolated context from. Every field differs
   # from what `enter_isolated` installs, including the ones the body then
@@ -2524,6 +2568,7 @@ test "an isolated context reports its own effects, then restores all eight field
   let outer_wit: Map[Eff, (Int, Int, String)] =
     map.insert(map.empty(), EIo, (1, 2, "outer_io"))
   let outer_dicts: Map[(Int, Int), Int] = map.insert(map.empty(), (900, EQ_ID), 77)
+  let outer_hevs: Map[Int, Eff] = map.insert(map.empty(), 55, EIo)
   cx = Cx {
     ..cx,
     frame: Frame {
@@ -2541,9 +2586,11 @@ test "an isolated context reports its own effects, then restores all eight field
       }),
       dict_syms: outer_dicts,
       lambda_stack: [LambdaCx {
-        boundary: 3, expected_ret: None, captures: [], sugar: false, arm: false
+        boundary: 3, expected_ret: None, captures: [], sugar: false, arm: false,
+        settled: [], unsettled: []
       }],
       loop_stack: [7],
+      handle_evs: outer_hevs,
       isolated: false
     }
   }
@@ -2557,6 +2604,7 @@ test "an isolated context reports its own effects, then restores all eight field
   assert map.get(cx1.frame.dict_syms, (900, EQ_ID)) == None
   assert len(cx1.frame.lambda_stack) == 0
   assert len(cx1.frame.loop_stack) == 0
+  assert map.get(cx1.frame.handle_evs, 55) == None
   assert cx1.frame.isolated
   # the body records io of its own, at its own span, and that is what is reported
   let cx2 = record_effect(cx1, EIo, 5, 8, "println")
@@ -2564,7 +2612,7 @@ test "an isolated context reports its own effects, then restores all eight field
   assert len(cx3.diags) == 1
   assert cx3.diags[0].msg == "const initializers must be pure, but `println` is !io"
   assert cx3.diags[0].lo == 5
-  # ... and every one of the eight fields comes back as the outer context left it
+  # ... and every one of the nine fields comes back as the outer context left it
   assert map.get(cx3.frame.scopes[0], "outer") == Some(61)
   assert cx3.frame.used_effects == [EffVar("outer_e", 42)]
   assert map.get(cx3.frame.eff_witness, EIo) == Some((1, 2, "outer_io"))
@@ -2577,6 +2625,7 @@ test "an isolated context reports its own effects, then restores all eight field
   assert len(cx3.frame.lambda_stack) == 1
   assert cx3.frame.lambda_stack[0].boundary == 3
   assert cx3.frame.loop_stack == [7]
+  assert map.get(cx3.frame.handle_evs, 55) == Some(EIo)
   assert not cx3.frame.isolated
 }
 
@@ -3830,6 +3879,57 @@ fn check_unsafe_pure(cx: Cx, body: Expr, expected: Option[Ty], lo: Int, hi: Int)
 
 # ---- lambdas and application ----
 
+## The union of the arm effects of every handler in this closure that answered
+## `eid`. Two entries for one effect is an ordinary shape -- a body may install
+## a handler, raise, install a second one and raise again -- and the closure
+## runs whichever arm each raise reached, so it owes both.
+fn settled_arm_eff(settled: List[(Int, Eff)], eid: Int) -> Option[Eff] = {
+  var found = false
+  var acc: List[Eff] = []
+  for s in settled {
+    let (sid, ae) = s
+    if sid == eid {
+      found = true
+      acc = acc ++ [ae]
+    }
+  }
+  if found { Some(eff_union(acc)) } else { None }
+}
+
+## A closure's row, settled at its creation point
+## (docs/effects-soundness-design.md §4.2).
+##
+## A label answered by a `with handle` written in the same body comes off the
+## row and that handler's arms go on instead: the arms are fields of the
+## evidence record the closure captured, so they run when the closure runs, and
+## the closure's type should say so. A label with any other source stays --
+## including one that *also* has a local handler, because the other source is
+## still answered by somebody else's arms when the closure runs. Over-keeping a
+## label is always safe; dropping one that a signature never admitted is the
+## defect this exists to close.
+##
+## This is the only place in the language where an effect row loses a member,
+## and it is the point where the evidence was captured. That the subtraction
+## and the capture happen at the same node is the whole argument that it cannot
+## be charged to the wrong function.
+fn settle_lambda_eff(lam_eff: Eff, lc: LambdaCx) -> Eff = {
+  var keep: List[(Int, String)] = []
+  var extra: List[Eff] = []
+  for l in eff_labels(lam_eff) {
+    let (eid, _) = l
+    match settled_arm_eff(lc.settled, eid) {
+      Some(ae) ->
+        if list.contains(lc.unsettled, eid) {
+          keep = keep ++ [l]
+        } else {
+          extra = extra ++ [ae]
+        }
+      None -> { keep = keep ++ [l] }
+    }
+  }
+  eff_union([eff_with_labels(eff_base(lam_eff), keep)] ++ extra)
+}
+
 fn check_lambda(
   cx: Cx,
   params: List[LambdaParam],
@@ -3915,7 +4015,9 @@ fn check_lambda(
       expected_ret: exp_ret,
       captures: [],
       sugar: sugar,
-      arm: arm
+      arm: arm,
+      settled: [],
+      unsettled: []
     }
   cx1 = Cx {
     ..cx1,
@@ -3942,7 +4044,7 @@ fn check_lambda(
   let popped = cx3.frame.lambda_stack[len(cx3.frame.lambda_stack) - 1]
   let outer_lams = list.take(cx3.frame.lambda_stack, len(cx3.frame.lambda_stack) - 1)
   cx3 = Cx { ..cx3, frame: Frame { ..cx3.frame, lambda_stack: outer_lams } }
-  let lam_eff = eff_union(cx3.frame.used_effects)
+  let lam_eff = settle_lambda_eff(eff_union(cx3.frame.used_effects), popped)
   cx3 = Cx { ..cx3, frame: Frame { ..cx3.frame, used_effects: saved_used, eff_witness: saved_wit } }
   let t = TyFn(ptys, bt, lam_eff)
   (cx3, t, XLambda(psyms, pnames, bx, popped.captures, lo, hi, t))
@@ -4041,6 +4143,10 @@ fn check_handle(
   # installed, not where the operation was raised
   var arm_nodes: List[TExpr] = []
   var slots: List[Option[Int]] = []
+  # ... and charged to any closure this handler's evidence ends up inside, which
+  # is what makes an escaping closure's type say what it will actually run
+  # (docs/effects-soundness-design.md §4.2)
+  var arms_eff = EPure
   var k = 0
   for o in info.ops {
     let field = rec.fields[k]
@@ -4065,6 +4171,7 @@ fn check_handle(
             e_lo(a.body), e_hi(a.body))
         }
         cxa = record_effect(cxa, aeff, a.nlo, a.nhi, a.name)
+        arms_eff = eff_union([arms_eff, aeff])
         cx1 = cxa
         ax
       }
@@ -4080,7 +4187,10 @@ fn check_handle(
   cx1 = push_scope(cx1)
   let ev_name = ev_local_name(cx1, eid)
   let (cx2, ev_sym) = declare(cx1, ev_name, ev_ty, false, nlo, nhi)
-  cx1 = cx2
+  cx1 = Cx {
+    ..cx2,
+    frame: Frame { ..cx2.frame, handle_evs: map.insert(cx2.frame.handle_evs, ev_sym, arms_eff) }
+  }
   let (cx3, rt, rx) = check_expr(cx1, rest, rest_expected(expected))
   cx1 = pop_scope(cx3)
   let (_, rret, reff) = fn_ty_parts(rt)
@@ -4357,6 +4467,7 @@ fn check_apply(
     }
   }
   cx1 = record_effect(cx1, feff, e_lo(target), e_hi(target), "the applied function")
+  cx1 = mark_unsettled_labels(cx1, feff)
   (cx1, fret, XApply(fx, txs, lo, hi, fret))
 }
 
@@ -4823,6 +4934,7 @@ fn check_call(
         i = i + 1
       }
       cx1 = record_effect(cx1, leff, clo, chi, callee)
+      cx1 = mark_unsettled_labels(cx1, leff)
       return (cx1, lret, XCallDyn(sid, callee, txs, lo, hi, lret))
     }
     None -> ()
@@ -4981,6 +5093,12 @@ fn check_call(
   # instantiate the callee's effect: an unbound effect variable means pure
   let callee_eff = instantiate_eff(s.eff, em)
   cx1 = record_effect(cx1, callee_eff, clo, chi, callee)
+  # a label the callee *wrote* is answered below by `evidence_args`, which
+  # settles or unsettles it from what it resolved. One that arrived by
+  # instantiating an effect variable has no evidence to resolve here at all --
+  # it belongs to a closure the caller handed over (design §5.2 step 4), so
+  # nothing in this body can discharge it from a closure's row.
+  cx1 = mark_unsettled_labels(cx1, eff_with_labels(EPure, instantiated_labels(s.eff, callee_eff)))
   # the one instantiation choke point: a projection whose subject just became
   # concrete reduces here, so no ground type ever carries one (D3)
   let ret = reduce_assoc(cx1, subst(s.ret, m, em))
@@ -5023,6 +5141,24 @@ fn check_call(
 ## walk is what used to drop `EUnion` on the floor, so a callee declared
 ## `!(e1|e2)` handed its own variables to its caller and no pure call site was
 ## accepted (audit SEM-02).
+## The labels in an instantiated row that the callee did not write down: the
+## ones an effect variable brought in. `evidence_args` answers for the written
+## ones and only those, so this is exactly its complement.
+fn instantiated_labels(declared: Eff, instantiated: Eff) -> List[(Int, String)] = {
+  let written = eff_labels(declared)
+  var out: List[(Int, String)] = []
+  for l in eff_labels(instantiated) {
+    let (eid, _) = l
+    var seen = false
+    for w in written {
+      let (wid, _) = w
+      if wid == eid { seen = true }
+    }
+    if not seen { out = out ++ [l] }
+  }
+  out
+}
+
 fn instantiate_eff(e: Eff, em: Map[Int, Eff]) -> Eff = {
   var em1 = em
   for v in eff_vars(e) {
@@ -5045,7 +5181,20 @@ fn evidence_args(cx: Cx, declared: Eff, lo: Int, hi: Int) -> (Cx, List[TExpr]) =
     let (cxa, found) = resolve_local(cx1, nm, lo, hi, false)
     cx1 = cxa
     match found {
-      Some(sid) -> { out = out ++ [XLocal(sid, nm, lo, hi, TyAdt(eid, []))] }
+      Some(sid) -> {
+        # the one place the language resolves evidence, and therefore the one
+        # place that knows whose handler answered: a `with handle` in this very
+        # body can be settled out of an enclosing closure's row, a hidden
+        # parameter of the signature cannot (docs/effects-soundness-design.md
+        # §4.2). Asking the row after the fact instead would settle a label
+        # whose evidence came from the signature and happens to share a name
+        # with a local handler -- the p2 counterexample in §5.3.
+        cx1 = match map.get(cx1.frame.handle_evs, sid) {
+          Some(arm_eff) -> mark_settled(cx1, eid, arm_eff)
+          None -> mark_unsettled(cx1, eid)
+        }
+        out = out ++ [XLocal(sid, nm, lo, hi, TyAdt(eid, []))]
+      }
       None -> {
         # inside comptime the refusal belongs to `leave_isolated`, which says
         # what the construct is; saying "declare it" there would be advice
@@ -6369,6 +6518,7 @@ fn check_method_call(
                 ai = ai + 1
               }
               cx1 = record_effect(cx1, feff, nlo, nhi, name)
+              cx1 = mark_unsettled_labels(cx1, feff)
               return (cx1, fret, XApply(fx, txs, lo, hi, fret))
             }
             _ -> ()
@@ -8113,7 +8263,9 @@ fn arm_cx() -> Cx =
           expected_ret: None,
           captures: [],
           sugar: true,
-          arm: true
+          arm: true,
+          settled: [],
+          unsettled: []
         }]
       }
     }

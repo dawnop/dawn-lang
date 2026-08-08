@@ -1,4 +1,7 @@
-# checker.dawn: a labelled closure at the three assignability doors
+# checker.dawn: a labelled closure at the three assignability doors, and the
+# two shapes that show what the door is really weighing -- not the label the
+# closure was written under, but what running it will actually do
+# (docs/effects-soundness-design.md §4.2).
 use std/io
 
 effect Ask { fn get() -> Int }
@@ -15,5 +18,24 @@ pub fn via_return() -> IoFn = () => get()
 pub fn via_assign() -> Int !Ask = {
   var g: IoFn = () => 1
   g = () => get()
+  g()
+}
+
+# The same escape, but the handler is written here rather than owed to a
+# caller. The arms are pure, so the closure is pure and the door is open: it
+# was never refused for having a label, it was refused for what the label stood
+# for, and here it stands for nothing.
+pub fn handled_pure_arm() -> fn() -> Int = {
+  with handle Ask { get() => 7 }
+  () => get()
+}
+
+# ... and with an io arm the same door is shut again, in the arm's own terms.
+pub fn handled_io_arm() -> Int !io = {
+  with handle Ask { get() => {
+    io.println("arm")
+    7
+  } }
+  let g: fn() -> Int = () => get()
   g()
 }
