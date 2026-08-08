@@ -1,0 +1,44 @@
+# Parameterized tail blocks (spec §4.3): a brace block written right after a
+# call, on the same line, is that call's last argument.
+#
+# This corpus preserves the call-shape and boundary coverage from the retired
+# `fn` trailing-lambda spelling. Like `with`, a tail block is a parser rewrite
+# onto the one postfix-application node (SYN-02), so the two backends have
+# nothing of their own to do -- and that is the claim. What varies across the
+# forms is where the lambda lands:
+#
+#   f(a) { x => e }     the call grows one argument
+#   f { x => e }        a bare name is applied to the closure alone
+#   f(a) { x => ... }   a multiline body is still one closure
+#
+# The boundary is here too: `map` below is followed by a local function
+# declaration on the next line, which must stay a declaration. A tail block is
+# same-line only, exactly as `(` is.
+use std/io
+
+pub fn main() -> Unit !io = {
+  let xs = [1, 2, 3]
+
+  println("-- the lambda joins the arguments already there --")
+  println(to_string(map(xs) { (x: Int) => x * 2 }))
+  println(to_string(filter(xs) { (x: Int) => x > 1 }))
+
+  println("-- a block body is just a lambda with a block --")
+  println(to_string(map(xs) { (x: Int) =>
+    let y = x + 10
+    y * 2
+  }))
+
+  println("-- a bare name applies to the closure alone --")
+  println(to_string(twice { (n: Int) => n + 1 }))
+
+  println("-- three arguments, the third written trailing --")
+  println(to_string(fold(xs, 0) { (acc: Int, x: Int) => acc + x }))
+
+  println("-- the next line is a declaration, not an argument --")
+  let ys = map(xs) { (x: Int) => x + 100 }
+  fn describe(v: List[Int]) -> String = "n=" ++ to_string(len(v))
+  println(describe(ys))
+}
+
+fn twice(f: fn(Int) -> Int) -> Int = f(f(1))
