@@ -7,6 +7,7 @@
 # visit signatures take nulls and Dawn has none — golden = byte-identical
 # .class files (docs/selfhost-codegen.md).
 
+use std/io
 use std/str
 use std/bytes
 use std/list
@@ -227,6 +228,35 @@ test "the ASM interop spike: a class assembles through the shared writer" {
   let bs = cw.toByteArray().expect("bytes")
   assert bytes.len(bs) > 0
 }
+
+# ---- the class file's own limits ----
+
+## Take the bytes of a finished class writer, or report why the class file
+## cannot hold them.
+##
+## Everything ASM refuses for size comes out here: a method over 64 KiB of
+## code, a constant pool past 65,535 entries, a class the format cannot
+## express. None of them is a defect in the program -- the input was accepted
+## by every earlier phase -- but `.expect("bytes")` turned each into a compiler
+## stack trace ending inside `MethodWriter`, with nothing in it naming what had
+## been compiled (audit ARC-02).
+##
+## ASM's own text names the offending method and its descriptor, and that is
+## the finest coordinate available at this point: Core carries no spans, so
+## there is no source position left to report. So the text is kept verbatim and
+## framed by the class it came out of, rather than replaced by a message that
+## knows less than it does.
+pub fn class_bytes(finish: fn() -> Option[Bytes] !io, cls: String) -> Bytes !io =
+  match catch_fault(finish) {
+    Ok(bs) -> bs.expect("bytes")
+    Err(e) -> {
+      io.eprintln("error: `" ++ cls ++ "` does not fit in a JVM class file: " ++ e.message)
+      io.eprintln("  = hint: a method holds at most 64 KiB of bytecode and a class at most " ++
+          "65,535 constant pool entries; split the function, or split the module")
+      let _ = io.exit(1)
+      panic("io.exit returned")
+    }
+  }
 
 # ---- ADT classes (spec §12.2) ----
 
@@ -538,7 +568,7 @@ pub fn gen_ctor_class(
   # dawn/rt/Show; the type checker gates whether it may be called
   gen_to_string_method(cw, adts, sub, ci)
   cw.visitEnd()
-  cw.toByteArray().expect("bytes")
+  class_bytes(() => cw.toByteArray(), sub)
 }
 
 ## The classes of one ADT: (name, bytes) for the base (sums) and each ctor.
@@ -572,7 +602,7 @@ pub fn gen_adt(
   bc.visitMaxs(1, 1)
   bc.visitEnd()
   bw.visitEnd()
-  var out = [(base, bw.toByteArray().expect("bytes"))]
+  var out = [(base, class_bytes(() => bw.toByteArray(), base))]
   for ci in a.ctors {
     out = out ++ [(ctor_jvm_name(adts, ci), gen_ctor_class(supers, adts, base, ci, ov))]
   }

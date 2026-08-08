@@ -9,6 +9,8 @@
 # travel with them because the ten call them and leaving them behind would make
 # a module cycle, which Dawn refuses.
 
+use std/char
+use std/list
 use std/str
 use check/types.{Ty, TyInt, TyFloat, TyBool, TyString, TyBytes, TyJava}
 use check/tast.{TBinOp, BEq, BNeq, BLt, BLe, BGt}
@@ -34,7 +36,94 @@ use jvm/ops.{
 # ---- small emission helpers (output is byte-stable against the previous
 # release; the Kotlin original is archived at kotlin-final) ----
 
+## A class file's `CONSTANT_Utf8` entry holds at most 65,535 bytes of modified
+## UTF-8, where one code point costs at most 6 (a supplementary one is written
+## as its surrogate pair, three bytes each). A longer string literal is legal
+## Dawn -- a generated data table reaches this without trying -- so it is
+## rebuilt at run time from pieces that fit, rather than refused. ASM's own
+## answer was an `IllegalArgumentException` thrown out of `ByteVector.putUTF8`,
+## with nothing in the stack trace naming the literal, its function or its
+## module (audit ARC-02).
+##
+## The test is the *exact* byte count, not an estimate in code points. A slack
+## estimate is tempting and wrong: `embed/stdsrc` and `embed/rtsrc` carry whole
+## source files as single literals, comfortably past any code-point threshold
+## that is safe in the worst case, and comfortably inside 65,535 bytes. Sending
+## those down the new path rewrote two classes that had nothing wrong with
+## them, which `selfhost-prev-diff.sh` caught. So: only a literal that genuinely
+## does not fit is rebuilt, and no existing program's bytes move.
+const LDC_MAX_BYTES: Int = 65535
+
+## Slack enough that an ordinary literal never has its contents walked: at six
+## bytes per code point this many cannot overflow whatever they are.
+const LDC_SAFE_CPS: Int = 10000
+
 pub fn ldc_str(m: MethodVisitor, s: String) -> Unit !io = {
+  if str.len(s) <= LDC_SAFE_CPS {
+    return ldc_str_one(m, s)
+  }
+  let cps = code_points(s)
+  if mutf8_len(cps) <= LDC_MAX_BYTES {
+    return ldc_str_one(m, s)
+  }
+  var rest = cps
+  var joined = false
+  while len(rest) > 0 {
+    let n = mutf8_prefix(rest, LDC_MAX_BYTES)
+    ldc_str_one(m, from_code_points(list.take(rest, n)))
+    # stack: the pieces so far, then this one -- `concat` leaves the join
+    if joined {
+      m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/String", "concat",
+        "(Ljava/lang/String;)Ljava/lang/String;", false)
+    }
+    joined = true
+    rest = list.drop(rest, n)
+  }
+  ()
+}
+
+## What one code point costs in modified UTF-8, which is what a class file
+## counts: NUL takes the two-byte form so that no entry contains a zero byte,
+## and a supplementary code point is written as its surrogate pair, three bytes
+## each.
+fn mutf8_cost(c: Char) -> Int = {
+  let v = char.code(c)
+  if v == 0 {
+    2
+  } else if v < 0x80 {
+    1
+  } else if v < 0x800 {
+    2
+  } else if v < 0x10000 {
+    3
+  } else {
+    6
+  }
+}
+
+fn mutf8_len(cps: List[Char]) -> Int = {
+  var n = 0
+  for c in cps { n = n + mutf8_cost(c) }
+  n
+}
+
+## How many leading code points fit in `budget` bytes -- at least one, so a
+## single code point wider than the budget still makes progress rather than
+## looping (it cannot happen at these sizes, and a scanner that can stall is
+## not worth the argument).
+fn mutf8_prefix(cps: List[Char], budget: Int) -> Int = {
+  var used = 0
+  var n = 0
+  for c in cps {
+    let cost = mutf8_cost(c)
+    if n > 0 && used + cost > budget { return n }
+    used = used + cost
+    n = n + 1
+  }
+  n
+}
+
+fn ldc_str_one(m: MethodVisitor, s: String) -> Unit !io = {
   m.visitLdcInsn(Objects.requireNonNull(s).expect("non-null"))
   ()
 }

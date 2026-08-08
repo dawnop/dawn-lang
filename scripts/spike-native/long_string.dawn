@@ -1,0 +1,35 @@
+# A string constant larger than one class-file `CONSTANT_Utf8` entry.
+#
+# The JVM caps that entry at 65,535 bytes of modified UTF-8, and the emitter
+# used to hand the whole literal to ASM regardless: a legal program ended in an
+# `IllegalArgumentException` thrown out of `ByteVector.putUTF8`, with nothing in
+# the trace naming the literal or its module (audit ARC-02). It is now rebuilt
+# at run time from pieces that fit.
+#
+# The unit is 8 code points and 13 bytes, one of them supplementary -- so this
+# is both over the byte limit (106,496) and over the code-point threshold the
+# emitter tests (65,536), and a chunk boundary that split a surrogate pair
+# would show up as a different string. The native backend has no such limit and
+# emits the constant whole, which is exactly why it belongs here: the two
+# backends have to agree on the value either way.
+
+use std/str
+
+fn grow(seed: String, doublings: Int) -> String = {
+  var out = seed
+  for _i in 0 ..doublings { out = out ++ out }
+  out
+}
+
+const UNIT: String = "ab😀cdefg"
+
+const BIG: String = grow(UNIT, 13)
+
+pub fn main() -> Unit !io = {
+  println(to_string(str.len(BIG)))
+  println(str.take(BIG, 8))
+  println(str.drop(BIG, 65528))
+  # the whole value, not just its ends: the constant the class file carries has
+  # to equal the one built at run time
+  println(to_string(BIG == grow(UNIT, 13)))
+}

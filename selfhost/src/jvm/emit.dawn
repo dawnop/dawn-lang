@@ -34,6 +34,7 @@ use check/types.{
 use check/tast.{TJavaCall, TFun, TModule, TBinOp, BEq, BNeq, BLt, BLe, BGt, BGe}
 use ir/interp.{CtOut}
 use jvm/codegen.{
+  class_bytes,
   desc_of, method_desc, JvmRepr, jvm_repr, RLong, RDouble, RBool, RRef, RBottom, slots_of,
   is_bottom, load_slot, hash_of, dict_class, gen_adt, gen_ctor_class, parameterised_scaffold,
   dict_arg_field, dict_ctor_desc, EqOverride, no_override, singleton_scaffold, subject_name
@@ -775,7 +776,7 @@ fn gen_sam_class(supers: List[String], s: SamC) -> (String, Bytes) !io = {
   m.visitInsn(jreturn_of(rd))
   close_mv(m)
   cw.visitEnd()
-  (s.cls, cw.toByteArray().expect("bytes"))
+  (s.cls, class_bytes(() => cw.toByteArray(), s.cls))
 }
 
 fn adapt_one_java_arg(gx: GenCtx, g: Gen, call: TJavaCall, i: Int, aty: Ty, param: String) -> Gen !io = {
@@ -1233,7 +1234,7 @@ pub fn gen_trait_interface(supers: List[String], adts: Adts, tr: TraitI) -> Byte
     m.visitEnd()
   }
   cw.visitEnd()
-  cw.toByteArray().expect("bytes")
+  class_bytes(() => cw.toByteArray(), tr_iface(tr.owner, tr.name))
 }
 
 ## The return instruction for a value of declared type `t` on the stack.
@@ -1442,7 +1443,7 @@ pub fn emit_module(
   for s in g.sam_classes {
     out = out ++ [gen_sam_class(supers, s)]
   }
-  out ++ [(class_name, cw.toByteArray().expect("bytes"))]
+  out ++ [(class_name, class_bytes(() => cw.toByteArray(), class_name))]
 }
 
 ## One Core dictionary as a JVM singleton.
@@ -1489,7 +1490,7 @@ fn gen_dict_class(gx: GenCtx, supers: List[String], dd: CDictDef) -> (String, By
     i = i + 1
   }
   cw.visitEnd()
-  (cls, cw.toByteArray().expect("bytes"))
+  (cls, class_bytes(() => cw.toByteArray(), cls))
 }
 
 fn slot_target(tr: TraitI, s: CDictSlot) -> (String, String) =
@@ -1725,7 +1726,7 @@ fn gen_closure_class(gx: GenCtx, supers: List[String], g: Gen, b: ClosB) -> (Str
   m.visitInsn(OP_ARETURN)
   close_mv(m)
   cw.visitEnd()
-  (b.cls, cw.toByteArray().expect("bytes"))
+  (b.cls, class_bytes(() => cw.toByteArray(), b.cls))
 }
 
 ## `ty` is the if's own type and `discard` says the value is not wanted.
