@@ -46,18 +46,30 @@ pub fn format(source: String) -> Result[String, List[Diag]] = {
   }
   let stream = sort_by(code ++ comments, (a: Token, b: Token) => a.lo - b.lo)
   if len(stream) == 0 { return Ok("") }
-  Ok(reflow(source, stream, unary_minus(code), postfix_bang(raw)))
+  Ok(reflow(source, stream, unary_minus(raw), postfix_bang(raw)))
 }
 
 ## Span starts of MINUS tokens that are unary (prefix), so they hug the
 ## following operand.
-fn unary_minus(code: List[Token]) -> Set[Int] = {
+##
+## Over the *raw* tokens, the same as `postfix_bang` and for the same reason: a
+## NEWLINE is the evidence, and the NEWLINE-filtered list threw it away. `-` is
+## one of the two operators that cannot lead a continuation line (the other is
+## `+`; parser.lead_op excludes the arithmetic pair because a leading `-` is
+## ambiguous with this very thing), so a `-` after a NEWLINE opens a statement
+## and is prefix -- no matter that the line above ended in a value.
+##
+## Filtered, `print(a)` and a following line `-1` looked adjacent, so the `-`
+## was read as the subtraction it would have been on one line. That cost two
+## things at once: the spacing (`- 1`) and, through `is_continuation`, an
+## indent, so the statement was printed as a continuation of the line above it.
+fn unary_minus(raw: List[Token]) -> Set[Int] = {
   var out: Set[Int] = set.empty()
   var i = 0
-  while i < len(code) {
-    if code[i].kind == MINUS {
-      let after_value = i > 0 && is_value_end(code[i - 1].kind)
-      if not after_value { out = set.insert(out, code[i].lo) }
+  while i < len(raw) {
+    if raw[i].kind == MINUS {
+      let after_value = i > 0 && is_value_end(raw[i - 1].kind)
+      if not after_value { out = set.insert(out, raw[i].lo) }
     }
     i = i + 1
   }
@@ -477,6 +489,27 @@ test "a call hugs its callee even when the callee is not a name" {
   let r = "fn b(g: fn(Int) -> Int) -> Int = { g }(1)\n"
   assert fmt_of(r) == r
   assert fmt_of("fn b(g: fn(Int) -> Int) -> Int = { g } (1)\n") == r
+}
+
+## The oracle here is parser.lead_op, not taste: `-` cannot lead a continuation
+## line, so a `-` at the start of one opens a statement. Both halves of getting
+## that wrong are pinned -- the space, and the indent that made a top-level
+## statement look like it belonged to the line above.
+test "a minus that opens a line is prefix, whatever the line above ended in" {
+  let src = "fn h() -> Int !io = {\n  let a = 1\n  print(a)\n  -1\n}\n"
+  assert fmt_of(src) == src
+  # the same shape with the indentation stripped: it comes back at statement
+  # level, not one in
+  assert fmt_of("fn h() -> Int !io = {\nlet a = 1\nprint(a)\n-1\n}\n") == src
+  # a line that ends in `-` really is continued, and the `-` there is binary.
+  # The continuation sits one level in and does not stack, which is what it did
+  # before this change too -- pinned so the two directions stay told apart.
+  let c = "fn g(a: Int, b: Int) -> Int =\n  a -\n  b\n"
+  assert fmt_of(c) == c
+  # and on one line the same tokens are still a subtraction
+  let o = "fn f(a: Int) -> Int = a - 1\n"
+  assert fmt_of(o) == o
+  assert fmt_of("fn f(a: Int) -> Int = a-1\n") == o
 }
 
 test "a conditional impl's parameters hug the keyword" {
