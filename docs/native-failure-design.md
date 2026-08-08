@@ -572,6 +572,9 @@ ratchet 的双向性（`run.sh:88-112`：列进去的检查一旦转绿也是红
   2. **cleanup 变量的声明必须提升到函数顶**（NULL 初始化，绑定点变纯赋值）：Core 的
      loop 用 `goto` 落 step/end 标签，跳过带 cleanup 变量的初始化是 UB——landing pad
      会释放槽里的垃圾。gcc 的 -Wmaybe-uninitialized 在 -Werror 下当场抓住了它。
+     提升还要按符号去重：lowering 会在分支的两臂各绑一次同一个符号，块作用域时代
+     是两个合法声明，提升后是 C 重定义错——spike 语料全绿也没看见它，第一个大到
+     踩中这形状的语料是 selfhost 驱动自己（native-fixpoint 抓住）。
   3. **转移的记号不进 Core、不动 rc**：emitter 的 `emit_expr` 带上与 `rc_check`
      同一份消费位分类（`k`），bare tracked local 在消费位即发 `dawn_take`。镜像
      不会漂：漏一个 take = 正常路径 cleanup 双释放（asan 全语料立刻红），多一个
@@ -596,6 +599,10 @@ ratchet 的双向性（`run.sh:88-112`：列进去的检查一旦转绿也是红
 - 删 `run.sh` 的 `.leaks-on-catch` 机制（`:45-50`、`:211-213`）。
 - 改 `docs/perceus-design.md:449-453`：那条「设计内例外」到期兑现，删掉。
 - 回填 ARC-05 状态、`docs/native-backend-plan.md` 的相关行。
+- **落地**（2026-08-08）：机制连注释一起删（`detect_leaks=1` 无条件）、perceus
+  的例外段改为关账记录、审计 ARC-05 回填；`native-backend-plan.md` 经查没有
+  直接引用该豁免的行，无需改。`dawn_bracket` 注释里那句「documented cost of
+  the mechanism」同批改写。
 
 ### 护航总表
 
