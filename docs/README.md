@@ -3,7 +3,7 @@
 > 状态：**current** —— 全目录的分层索引与状态登记处。**每篇文档的权威状态在它自己的
 > 文件头**；这张索引与文件头冲突时以文件头为准，并请顺手改这里。
 
-`docs/` 下现有 70 篇文档 <!-- doc-check: doc-count -->，按时间叠加，混着**规范、调研、
+`docs/` 下现有 71 篇文档 <!-- doc-check: doc-count -->，按时间叠加，混着**规范、调研、
 设计方案、落地日志、复盘和运维说明**。读者无从判断哪几段还成立——`design.md` 说实现语言
 是 Kotlin，`bootstrap.md` 说 LSP 还在 Kotlin，两者都是当时的事实、现在都不是。
 这份索引把它们分层，并给每篇标状态。**篇数与「每篇都在索引里」这两件事都由
@@ -58,6 +58,7 @@
 | [native-driver-plan.md](native-driver-plan.md) | current | **B 线**：native 驱动补全 + 把后端契约摆到明面上——K-B 刀表、「5,373 行零 `use java`」的核对、以及那条最重要的更正：几条差分脚本的被测方原本写死 `./bin/dawn`，**接上线不会自动覆盖 native**（已由 `native-cli-diff.sh` 修掉）。**七刀已结**：K-B1–K-B5 与 K-B7 落地（逐刀带红演示与阴性对照），K-B6（`use c` FFI）明确推迟。 |
 | [jvm-base-plan.md](jvm-base-plan.md) | current | **A 线**：收缩 JVM 后端的可信底座——V49（classfile major 61 → 49）可行性审计的结论与三个代价数、九条被推翻的预设、K-A 刀表。**已 done**：K-A0/K-A0.5/K-A1/K-A3/K-A5/K-A4/K-A6 与 K-A7 期 1/2/3 全部落地，K-A2 取消，`dawn/tool` 已退出 jar 与可信底座（`b66f1d7`）；K-A8.1/K-A8.2 把帧 oracle 装回来并升到 major 52（§5.10、§5.11），K-A8.3 把 52 买回来的接口静态方法登成语料与门禁（§5.12）——K-A 刀表至此全部结清。 |
 | [perceus-design.md](perceus-design.md) | current | native 的内存管理（精确 RC + 复用分析）。五刀已全部落地，关账在其 §8；仍是该子系统的权威说明。 |
+| [effects-soundness-design.md](effects-soundness-design.md) | current | #188 的修法：具名效果的两个 soundness 缺陷（标签轴对函数值不设防、减标签的人不是应答的人）与「B 极简」三刀——注解位禁标签、闭包创建点结算、`verify_effects` 整行核对。落地后 spec.md §6.5 以它为准。 |
 | [std-audit.md](std-audit.md) | current | std 的交付方式、优雅性判据与欠账台账（S5）。骨架五条已做掉大半，仍在册的欠账逐条写在它的状态行里。 |
 | [stdlib-impl-notes.md](stdlib-impl-notes.md) | current | std 里几个函数**为什么长成这样**：被否掉的写法、实测数字、逼出今天形状的两后端分歧。std 的 `##` 注释只留契约，这些话从那里搬来。 |
 
