@@ -4,7 +4,7 @@
 
 *[中文](spec.md) — the Chinese text is the original; this is its translation, and `scripts/doc-check.py` watches the two for drift.*
 
-> Status: **normative**. Applies to version: 0.61.0 (the `VERSION` in `selfhost/src/version.dawn`).<!-- doc-check: version -->
+> Status: **normative**. Applies to version: 0.62.0 (the `VERSION` in `selfhost/src/version.dawn`).<!-- doc-check: version -->
 > When the implementation conflicts with this document, this document wins and the implementation
 > is a bug — unless some clause here is explicitly marked "superseded by X".
 >
