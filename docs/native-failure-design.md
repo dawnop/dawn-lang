@@ -534,6 +534,10 @@ ratchet 的双向性（`run.sh:88-112`：列进去的检查一旦转绿也是红
 - 删 `native-cli-diff.sh:397-405` 的 512 自我设限说明。
 - 回填 `docs/codebase-audit-v2/03-...md` 的 ARC-03/04 状态。
 - **oracle**：`doc-check.py`（双语 digest）；无代码改动，无 Emit-Change。
+- **落地**（2026-08-08）：§5.1 条款进 `spec.md` §9.8.1「载荷契约」+ §9.8.2 保证 2
+  的展开句与「release 逃逸顶掉原失败、无 suppressed」的现状裁决；`spec.en.md`
+  同步补译并重登 digest。`native-cli-diff` 的自我设限注释删除、新增 654 字节
+  消息腿（`str.repeat("long-", 130)`），实测两后端逐字节一致。
 
 ### 刀 3 — unwind 清理（ARC-05）
 
@@ -557,6 +561,35 @@ ratchet 的双向性（`run.sh:88-112`：列进去的检查一旦转绿也是红
   `core-golden` 全量重录（`CDup`/`CSDrop` 的形状变了）。
 - **native-fixpoint 必跑**：这刀直接改发射出的 C 的形状，B==C 是唯一能证明
   「新编译器编译自己仍然稳定」的东西，而它不在 CI。
+- **落地**（2026-08-08），与上面的方案有四处实测修正，每处都值得记：
+  1. **CFA 比较被 ASan 实测打破**（§4.1 风险清单第三条料到「粗糙」，没料到全错）：
+     ASan 把局部搬上 fake stack（堆地址），与真栈无任何序关系，stop 函数在**第一帧**
+     就命中比较、longjmp 直达 handler，中间所有 landing pad 被跳过——泄漏原样存在，
+     且恰好只在「本该证明它修好」的 sanitizer 档下复现。改成**身份判定**：handler
+     结构体自带 cleanup（`dawn_handler_landing`），unwind 走到目标帧时由帧自己的
+     landing pad 认领（指针相等）并 longjmp；stop 函数只剩 END_OF_STACK 的响亮 abort。
+     身份不排序，fake stack 与内联都骗不了它。
+  2. **cleanup 变量的声明必须提升到函数顶**（NULL 初始化，绑定点变纯赋值）：Core 的
+     loop 用 `goto` 落 step/end 标签，跳过带 cleanup 变量的初始化是 UB——landing pad
+     会释放槽里的垃圾。gcc 的 -Wmaybe-uninitialized 在 -Werror 下当场抓住了它。
+  3. **转移的记号不进 Core、不动 rc**：emitter 的 `emit_expr` 带上与 `rc_check`
+     同一份消费位分类（`k`），bare tracked local 在消费位即发 `dawn_take`。镜像
+     不会漂：漏一个 take = 正常路径 cleanup 双释放（asan 全语料立刻红），多一个
+     take = 值被提前清掉（立刻错答案）。owned 形参经 `pN` 进入、第一件事搬进
+     DAWN_OWNED 影子（cleanup 属性只能挂自动变量）。
+  4. **Emit-Change 实测为零**（方案预测「全部 emit label」）：prev-diff 的 emit
+     差分是 N−1 jar 与 HEAD jar 编同一份 HEAD 源，emitc.dawn 自己也是被编的源码
+     而不是被对拍的行为——JVM 字节码两边同源同答。C 文本的形状变化由
+     native-fixpoint（B==C）与 spike 差分护住，不经 Emit-Change 机制。
+     `core-golden` 也只有 embed.rtsrc（运行时数据）漂移，`CDup`/`CSDrop` 的
+     Core 形状根本没变——rc pass 一行未动。
+  残留（诚实记账）：**未具名的中间值**——`f(g(x), h(y))` 里 g 的结果不落名字、
+  直接嵌进实参表达式——若同一实参表里更晚的表达式 raise，该中间值仍会漏。全语料
+  LSan 全绿说明现有语料没有这个形状；系统性收口要么 rc A-normalize 所有 owned
+  中间值（顺带修掉 C 实参求值顺序未定的老账），要么等语料先红。负控两枚都红在
+  该红处：去掉 `-fexceptions` → unwinder 走不过无表帧，END_OF_STACK 响亮
+  abort（比静默泄漏更硬）；删一处清槽 → asan heap-use-after-free 在
+  `dawn_drop`。`DAWN_RC_LEAK=1` 二分档照常成立（drop 含 cleanup 全成 no-op）。
 
 ### 刀 4 — 清账
 

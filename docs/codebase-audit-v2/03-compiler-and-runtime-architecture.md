@@ -55,6 +55,14 @@
 
 ## ARC-05 — P1 — native 被捕获的 failure 会泄漏丢弃帧中的引用
 
+> **已修**（2026-08-08，#193 刀 3，路线 A3）：raise 改为 `_Unwind_ForcedUnwind`，
+> emitted C 的 owned 槽位全部 `__attribute__((cleanup))`（`DAWN_OWNED`，函数顶
+> NULL 声明），RC pass 的每个释放点清槽、转移走 `dawn_take` 同表达式清槽；
+> handler 帧以自身 cleanup 的指针身份收网（CFA 比较被 ASan fake stack 实测打破，
+> 见设计文档 §4.1 落地注）。验收 = 三个 recover_* 语料 asan 转绿 + 全部
+> `.leaks-on-catch` 豁免删除后 spike-native 全绿；负控两枚：去 `-fexceptions`
+> 立刻响亮 abort，删一处清槽立刻 heap-use-after-free。以下为审计时的原文。
+
 - **证据：K。** `longjmp` 直接丢弃 C frames：`runtime/c/dawn_rt.c:798`；bracket 注释明确承认 use reference 丢失：`runtime/c/dawn_rt.c:899`。`docs/perceus-design.md:449` 也把 taken barrier leak 作为设计例外。
 - harness 对带 `.leaks-on-catch` 标记的程序关闭 LeakSanitizer：`scripts/spike-native/run.sh:45`、`:211`。目前 catch/bracket/io 等多个语料依赖该豁免。
 - **影响：** `catch_fault`/`catch_panic` 本来用于服务器 request、runner isolation 等可重复路径；每次恢复都可能永久泄漏该动态范围持有的 String/ADT/closure。

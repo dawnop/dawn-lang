@@ -42,14 +42,16 @@
 # half of the memory oracle: double-free and use-after-free produce wrong
 # answers, leaks only ever produce this report.
 #
-# One decided exception rides as a marker file: a program that *takes* a
-# fault barrier (`catch_fault` with the fault actually raised) leaks what
-# the discarded C frames held -- longjmp cannot release them, and that is
-# the documented cost of the mechanism, not a counting hole. Such a corpus
-# file has `<name>.leaks-on-catch` next to it and runs with leak detection
-# off; every other program answers for every byte.
+# Every program answers for every byte, taken barriers included. There used
+# to be a `<name>.leaks-on-catch` marker here -- a taken barrier leaked what
+# the discarded C frames held, "the documented cost of the mechanism" -- and
+# seven corpus files rode it. #193 made a raise a forced unwind that runs the
+# discarded frames' cleanups (recover_live / recover_msg / recover_bracket
+# are the corpora that hold the fix shut), and the marker mechanism went with
+# the last marker: an exemption nobody uses is a hiding place for the next
+# regression, nothing else.
 #
-# A second marker says a program is *supposed* to die: `<name>.exits-nonzero`.
+# One marker says a program is *supposed* to die: `<name>.exits-nonzero`.
 # Without it a non-zero JVM exit is a failed run, which blocks `diff`,
 # `stderr` and `exit` -- and those three are exactly what a program about
 # ending the run has to be checked on. The exit code itself is still compared
@@ -124,7 +126,7 @@ blocked() { printf '  %-28s blocked\n' "$1"; }
 # rather than shared. `continue` was a `for` body's early exit; it is `return`
 # now, and means the same thing.
 run_corpus() {
-  local prog="$1" name expect jvm_rc jvm_ran fatal_ok nat_rc asan_rc leaks c
+  local prog="$1" name expect jvm_rc jvm_ran fatal_ok nat_rc asan_rc c
   name="$(basename "$prog" .dawn)"
   expect="$here/$name.expect"
   echo "$name"
@@ -209,11 +211,7 @@ run_corpus() {
       -o "$work/$name.asan" "$work/$name.c" "$root/runtime/c/dawn_rt.c" -lm \
       >"$work/$name.asan.cc" 2>&1; then
       asan_rc=0
-      leaks=1
-      # a taken fault barrier leaks its discarded frames by design -- see
-      # the header note; the marker is the opt-out, not a default
-      if [ -f "$here/$name.leaks-on-catch" ]; then leaks=0; fi
-      ASAN_OPTIONS=detect_leaks=$leaks "$work/$name.asan" \
+      ASAN_OPTIONS=detect_leaks=1 "$work/$name.asan" \
         >/dev/null 2>"$work/$name.asan.err" </dev/null || asan_rc=$?
       # LeakSanitizer prints its own banner, and a program that already
       # exits 1 (the panic corpus) would hide a leak behind a matching code

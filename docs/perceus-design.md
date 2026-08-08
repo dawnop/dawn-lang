@@ -447,10 +447,12 @@ unbox 一族消费边界上的 wire 格式）、发射器列表字面量与运�
 是契约漏（字符串缓冲、code_points 数组、箱子）堆出来的，真实活数据只有 81 MB。
 
 **门禁收网**：spike-native 的 asan 档 `detect_leaks=1` 常开（连 LeakSanitizer 的
-banner 一起 grep，免得 panic 语料用退出码遮住泄漏）。两类设计内例外写明白：
-带参字典在分配点 `__lsan_ignore_object`（无头、永活，是 §3 的裁决不是漏洞）；
-**被接住的 fault** 会漏掉 longjmp 丢弃的 C 帧所持引用（catch_fault 的机制成本），
-这样的语料程序旁边放 `<name>.leaks-on-catch` 标记、单独关检测。
+banner 一起 grep，免得 panic 语料用退出码遮住泄漏）。设计内例外只剩一类：
+带参字典在分配点 `__lsan_ignore_object`（无头、永活，是 §3 的裁决不是漏洞）。
+第二类例外——**被接住的 fault** 漏掉 longjmp 丢弃的 C 帧所持引用，语料旁放
+`<name>.leaks-on-catch` 标记单独关检测——已于 2026-08-08 到期兑现：#193 把
+raise 改成强制 unwind、owned 槽位挂 cleanup（`docs/native-failure-design.md`
+路线 A3），恢复不再泄漏，标记连同机制一起删除，每个语料对每个字节负责。
 
 **未欠但记下**：`dawn_str` 无容量字段，重复 `++` 追加是 O(n²) 复制——与漏时代
 行为持平，不是回退；唯一时 realloc 扩展 / builder 是将来复用刀的形状。

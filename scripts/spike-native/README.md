@@ -166,7 +166,9 @@ C 侧因此用 `goto` 而不是 `break` 实现。语料 `adt.dawn:first_shape_ov
   也在里面。
 - **释放内存**。Perceus RC 已落地,`dawn_str` 也是计数对象。`run.sh` 把每个语料再用
   `-fsanitize=address` 编一遍、以 `detect_leaks=1` 跑,所以「不 free」在这里是红的;
-  有意泄漏的(取过 fault 屏障的那些)必须放一个 `<name>.leaks-on-catch` 显式豁免。
+  没有任何豁免——取过屏障的语料也对每个字节负责(#193 把 raise 改成跑 cleanup 的
+  强制 unwind,`recover_live`/`recover_msg`/`recover_bracket` 压着恢复路径,
+  曾经的 `<name>.leaks-on-catch` 豁免连同机制一起删了)。
 - **`panic` 与两道屏障**。运行时有 setjmp/longjmp,`catch_panic` 与 `catch_fault` 都在,
   且是**两个**函数——io 屏障不吞 panic。`catch_kinds` 逐条压这个分类。`panic` 仍然以
   退出码 1 结束进程,但两个后端一致,所以那不是不对等。
