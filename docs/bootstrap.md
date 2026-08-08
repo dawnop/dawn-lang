@@ -127,9 +127,12 @@ backend-dawn 生态扫描，未声明的字节差异红灯）加 CLI/格式化/L
 ## 运行注意
 
 - 跑 selfhost 要 `-Xss512m`：comptime 解释器递归吃宿主栈。
-- `selfhost build` 产物的确定性由 `jarw.dawn` 保证（manifest 在先、条目
-  时间戳钉死、同类表必出同字节）——闭包验收能 `cmp` 整 jar 靠这个。
+- `selfhost build` 产物的确定性由 `jarw.dawn` 保证（manifest 在先、条目顺序不变、
+  全部条目显式使用 STORED，并钉死长度、压缩后长度、CRC32 与时间戳）——闭包验收能
+  `cmp` 整 jar 靠这个。STORED 不经过宿主 JDK 的 DEFLATE 实现，故 JDK 升级不会只因
+  压缩器变化而改变产物字节。
 - 条目时间戳走 `ZipEntry.setTimeLocal`（钉死 2020-01-01T00:00:00，无时区参与），
-  故**跨时区、跨机器**重建同一 jar 得同样的字节。此前用的是 `setTime(epoch millis)`，
+  配合上述 STORED 元数据，故**跨 JDK、跨时区、跨机器**重建同一 jar 得同样的字节。
+  此前用的是 `setTime(epoch millis)`，
   它经默认时区换算成 DOS 时间——确定性只按机器成立，而 release 以字节固定点为核心，
   「只有在我的时区才同字节」撑不起这个说法。

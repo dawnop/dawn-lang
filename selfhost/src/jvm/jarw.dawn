@@ -1,15 +1,18 @@
 # Deterministic executable-jar writer for `selfhost build`: manifest first,
-# then each class entry, with every timestamp pinned — so the same class list
-# always produces the same jar bytes. The standalone closure check relies on
-# that: the jar the self-hosted compiler builds of itself must equal, byte for
-# byte, the jar it was launched from.
+# then each class entry, with every timestamp and stored-entry field pinned —
+# so the same class list always produces the same jar bytes across JDKs. The
+# standalone closure check relies on that: the jar the self-hosted compiler
+# builds of itself must equal, byte for byte, the jar it was launched from.
 
 use std/str
 use std/bytes
 use java "java.io.FileOutputStream"
 use java "java.util.zip.ZipOutputStream"
 use java "java.util.zip.ZipEntry"
+use java "java.util.zip.CRC32"
 use java "java.time.LocalDateTime"
+
+const ZIP_METHOD_STORED: Int = 0
 
 # Fixed entry mtime, 2020-01-01T00:00:00 — as a *local* date-time, written with
 # setTimeLocal.
@@ -33,9 +36,21 @@ fn dotted(cls: String) -> String = {
   out
 }
 
-fn put(zos: ZipOutputStream, name: String, bs: Bytes) -> Unit !io = {
+fn stored_entry(name: String, bs: Bytes) -> ZipEntry !io = {
+  let crc = CRC32.new()
+  let _ = crc.update(bs)
+  let size = bytes.len(bs)
   let e = ZipEntry.new(name)
   let _ = e.setTimeLocal(entry_time())
+  let _ = e.setMethod(ZIP_METHOD_STORED)
+  let _ = e.setSize(size)
+  let _ = e.setCompressedSize(size)
+  let _ = e.setCrc(crc.getValue())
+  e
+}
+
+fn put(zos: ZipOutputStream, name: String, bs: Bytes) -> Unit !io = {
+  let e = stored_entry(name, bs)
   let _ = zos.putNextEntry(e)
   let _ = zos.write(bs)
   let _ = zos.closeEntry()
@@ -130,6 +145,14 @@ pub fn write_jar_cp(
 test "dotted turns an internal name into a binary name" {
   assert dotted("main") == "main"
   assert dotted("a/b/c") == "a.b.c"
+}
+
+test "stored entries pin their zip metadata" {
+  let e = stored_entry("abc.txt", bytes.utf8("abc"))
+  assert e.getMethod() == 0
+  assert e.getSize() == 3
+  assert e.getCompressedSize() == 3
+  assert e.getCrc() == 891568578
 }
 
 ## Undo the wrapping the way a manifest reader does: drop the CRLF and the one
