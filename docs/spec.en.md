@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ b6f22c1fa74642f8 -->
+<!-- doc-check: translation-of docs/spec.md @ 3fc5e1fbe1d99cd6 -->
 
 # Dawn Language Specification
 
@@ -764,12 +764,30 @@ From lowest to highest:
   If the body needs several statements, write `f(a) fn(x) => { ... }` (a lambda with a block
   body, §4.5).
 - **Named arguments (`f(a: 1)`) are syntactically legal at every call position**, dot calls
-  and applied function values included; but **only constructors accept them** (constructor
-  fields have names, see §2.3; a function type carries no parameter names). Any other callee
-  reports a **type error**, not a syntax error, for instance
-  "`f` is a function, not a constructor; function calls do not take argument names".
+  and applied function values included; whether they are usable is decided by **what the
+  callee is** (2026-08-08, #207). **A callee with a signature accepts them**: top-level
+  functions, module functions, UFCS/dot calls, pipes, trait methods (the names are the
+  **trait declaration's** parameter names; an impl's own spellings are purely local), effect
+  operations, and constructors (field names, see §2.3). **A function value does not** — a
+  function type carries no parameter names, so after `let g = f`, `g(a: 1)` is a type error
+  ("`g` is a function value, and a function type carries no parameter names"). **A Java
+  member does not** — Java metadata has no parameter names.
+  The slotting rule is the **same one** constructors use: the positional prefix takes slots
+  left to right, a name takes the slot it names, names may come in any order, and a
+  positional argument may not follow a named one; a dot call's receiver has already taken
+  the first slot positionally, so `x.f(self: y)` reports "parameter `self` is given twice".
   `f(1)(2)` parses, and the meaning is still "the result of `f(1)` must be a function" —
-  Dawn has no automatic currying.
+  Dawn has no automatic currying; the second application's callee is a function value, so it
+  cannot take names.
+- **Arguments evaluate in written order** (2026-08-08, #207 ruling): call and constructor
+  arguments evaluate in the order they are **written** (as in Python / C# / Scala / Swift /
+  Kotlin); named arguments reorder the **slotting**, not the evaluation — in
+  `R { b: f(), a: g() }`, `f()` runs before `g()` and each value lands on its own field.
+  `..base` can only be written first, and evaluates first. Binary operators evaluate left to
+  right (`&&`/`||` still short-circuit). Before this rule, constructors evaluated in
+  **declaration order** and the C backend left argument order to C (gcc goes right to left)
+  — both are fixed to this rule, pinned by the two-backend differential
+  (`scripts/spike-native/named_args.dawn`, `eval_order.dawn`).
 - Bitwise `& ^ \|` and the shifts **act on `Int` only** (there is no `Float` bit pattern);
   they bind **tighter than comparison**, so `a & b == c` is `(a & b) == c`, without the
   C-family trap. A shift count takes its low 6 bits (as JVM `LSHL` does).
@@ -1904,34 +1922,9 @@ type ForeignError = { kind: String, message: String, cause: Option[String] }
   string if there is none); `cause` is the rendering of the failure underneath, `None` if
   there is none. No stack: rendering a stack costs something at every single barrier.
 
-**The payload contract** (on every backend):
-
-- `message` has **no length limit** and equals, byte for byte, the String the failure
-  was raised with; a failure the language itself raises (`panic(m)`) is byte-identical
-  across backends. Setting a limit means picking a number, and any number will one day
-  be crossed by a legitimate message; truncation would also have to handle character
-  boundaries — so this is "no truncation clause", not "a generous limit".
-- `message` is well-formed UTF-8. A direct consequence of the String invariant (§4.8),
-  written out separately because it has been violated: a payload cut at a byte count
-  landed mid-character.
-- A failure's payload belongs to **the barrier that is going to take it**: from the
-  raise until that barrier builds the `ForeignError` (or `bracket` hands it to the next
-  barrier out), no other barrier can read or write it. A nested catch therefore cannot
-  affect a failure in flight (the unfolding of §9.8.2 guarantee 2).
-- The panic/fault split is **observable** — by which barrier takes the failure, not by
-  the `kind` string (whose values remain the backend's own).
-
 There is only this one pair of barriers (only this pair **intercepts** failure; the
 `bracket` of §9.8.2 intercepts nothing), only the `ForeignError` payload, and **the
 String version is not kept**.
-
-This pair's effect row is **pinned to `!io`, not a variable** — a pure closure included:
-what catching a panic yields depends on the depth of the call stack, on the `file:line`
-baked into the message, and on how many times the optimizer folded a pure call. None of
-the three is a difference a pure function is allowed to have. That is why the `bracket`
-of §9.8.2 can be effect-polymorphic and these two cannot: `bracket` does not observe the
-failure. The full argument, and the condition under which it reopens, is in
-[`docs/audit/error-model-design.md`](audit/error-model-design.md) §7.
 
 > **History**: moving the payload from String to `ForeignError` took three releases,
 > because a builtin's **signature** is bound by seed discipline just as its name is, and
@@ -1953,7 +1946,7 @@ Dawn has no `try`/`finally`, and does not intend to (the pair of barriers in §9
 back" is carried by a third builtin:
 
 ```dawn
-fn bracket[A, B](resource: A, release: fn(A) -> Unit !e, use: fn(A) -> B !e) -> B !e
+fn bracket[A, B](resource: A, release: fn(A) -> Unit !io, use: fn(A) -> B !io) -> B !io
 ```
 
 ```dawn
@@ -1988,22 +1981,11 @@ Three guarantees:
   panic is still a panic and a fault is still a fault**. So `catch_fault` still does not
   intercept a panic that passes through bracket (on native that kind bit is restored by
   re-raising, not re-inferred; the measured comparison of the two backends is in
-  `scripts/spike-native/bracket.dawn` and `bracket_fatal.dawn`). A failure `release`
-  catches for itself **does not affect** the one in flight — raising and swallowing a
-  new failure inside a release is legal code, and the crossing failure comes out as it
-  went in (`scripts/spike-native/bracket_release_fails.dawn`). A failure that
-  **escapes** the release itself (raised and not caught) replaces the original, with no
-  suppressed chain: that is what both backends do today, written here so it is a ruling
-  rather than a coincidence.
+  `scripts/spike-native/bracket.dawn` and `bracket_fatal.dawn`).
 - **`bracket` intercepts nothing**, so it returns `B` and not `Result` — guarding and
   intercepting are two orthogonal things (neither Haskell's `bracket`, Kotlin's `use`,
   Koka's `finally` nor Go's `defer` returns a Result). To take the failure as a value,
   write `catch_fault(() => bracket(...))`; each of the two primitives does one thing.
-- **The effect row is a variable `!e`**: `release`, `use` and the call as a whole share
-  one row, and `bracket` adds no effect of its own. So a `bracket` over a pure resource is
-  pure, an `!io` one is `!io`, and a labelled one passes its label straight through. The
-  pair of barriers in §9.8 is **not** like this (they are pinned to `!io`); the reason is
-  in [`docs/audit/error-model-design.md`](audit/error-model-design.md) §7.
 
 > It gets no surface syntax like `defer`: the protected region is always **one closure
 > call**, so `return`/`?`/`break` cannot cross out of it at the language level, and the

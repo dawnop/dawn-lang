@@ -1,0 +1,47 @@
+# named arguments on Sig callees (#207): who accepts them, who refuses, and
+# what each refusal says. The accept half is the point -- every ok* function
+# must produce no diagnostic at all.
+use std/list
+use java "java.lang.Integer"
+use java "java.lang.StringBuilder"
+
+fn pad(s: String, width: Int, fill: String) -> String = s ++ fill ++ to_string(width)
+
+type Sq = { side: Int }
+
+trait Area[T] {
+  fn area(self: T, scale: Int) -> Int
+}
+
+impl Area[Sq] {
+  # the impl renames its parameters; the call site uses the trait's names
+  fn area(me: Sq, k: Int) -> Int = me.side * k
+}
+
+effect Ask {
+  fn ask(key: String) -> Int
+}
+
+# accepted: reorder, mixed prefix + named, UFCS, pipe, trait method, effect op
+pub fn ok_reorder() -> String = pad(fill: ".", s: "x", width: 3)
+pub fn ok_mixed() -> String = pad("x", fill: ".", width: 3)
+pub fn ok_ufcs(sq: Sq) -> Int = sq.area(scale: 2)
+pub fn ok_pipe() -> String = "x" |> pad(width: 3, fill: ".")
+pub fn ok_op() -> Int !Ask = ask(key: "k")
+
+# refused: unknown name (with a spelling hint), a parameter given twice, a
+# positional after a named, the receiver named again, a function value, Java
+pub fn bad_unknown() -> String = pad("x", 3, filll: ".")
+pub fn bad_twice() -> String = pad("x", width: 3, width: 4)
+pub fn bad_positional_after() -> String = pad(s: "x", 3, ".")
+pub fn bad_receiver(sq: Sq) -> Int = sq.area(self: sq)
+pub fn bad_value() -> Int = {
+  let g = (x: Int) => x
+  g(x: 1)
+}
+type Holder = { h: fn(Int) -> Int }
+pub fn bad_field(r: Holder) -> Int = r.h(x: 1)
+pub fn bad_java_static() -> Int !io = Integer.parseInt(s: "3")
+pub fn bad_java_instance() -> String !io = StringBuilder.new().append(x: 1).toString()
+# a named call that leaves a required parameter unfilled: the arity range
+pub fn bad_missing() -> String = pad(fill: ".")

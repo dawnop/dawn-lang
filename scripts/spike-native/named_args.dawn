@@ -1,0 +1,35 @@
+# Named arguments on functions (#207), and the evaluation-order rule they
+# surfaced: arguments evaluate in *written* order (spec §4.3), on both
+# backends. The taps are the oracle -- a backend that evaluates in parameter
+# order prints them backwards, and a checker that binds the wrong slot changes
+# the combined digits.
+#
+# The constructor half pins the same rule for record literals (the lowering
+# knife that landed with arg_slots); the pipe half pins that the receiver is
+# an ordinary positional prefix in front of named arguments.
+use std/io
+
+pub type P = { x: Int, y: Int }
+
+fn tap(label: String, v: Int) -> Int !io = {
+  io.println("eval " ++ label)
+  v
+}
+
+fn combine(a: Int, b: Int, c: Int) -> Int = a * 100 + b * 10 + c
+
+pub fn main() -> Unit !io = {
+  # written out of declaration order: taps fire in written order, values land
+  # on the parameters their names say
+  let r = combine(c: tap("c", 3), a: tap("a", 1), b: tap("b", 2))
+  io.println(to_string(r))
+  # written in declaration order: nothing to reorder
+  let r2 = combine(a: tap("a2", 1), b: tap("b2", 2), c: tap("c2", 3))
+  io.println(to_string(r2))
+  # a record literal follows the same rule
+  let p = P { y: tap("y", 5), x: tap("x", 4) }
+  io.println(to_string(p.x * 10 + p.y))
+  # the piped value is the positional prefix; the named rest may reorder
+  let r3 = 7 |> combine(c: tap("c3", 3), b: tap("b3", 2))
+  io.println(to_string(r3))
+}

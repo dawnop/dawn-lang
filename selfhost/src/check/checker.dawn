@@ -33,7 +33,7 @@ use check/tast.{
   TExpr, XInt, XChar, XFloat, XBool, XUnit, XStr, XLocal, XFnValue, XCallDyn,
   XCallBuiltin, XCallFn, XApply, XJava, XLambda, XCtor, XConstRef, XCtorValue, XField,
   XListLit, XTupleLit, XPropagate, XUnwrap, XIndex, XReturn, XBreak, XContinue,
-  XComptime, XUnsafePure, XBinary, XUnary, XIf, XMatch, XBlock, XError,
+  XComptime, XUnsafePure, XBinary, XUnary, XIf, XMatch, XBlock, XError, tex_ty,
   TBinOp, BAdd, BSub, BMul, BDiv, BMod, BConcat, BEq, BNeq, BLt, BLe, BGt, BGe,
   BAnd, BOr, BBand, BBor, BBxor, BShl, BShr, BUshr,
   TUnOp, UNeg, UNot, UBnot, TStrPart, TSPText, TSPInterp, TArm, TJavaCall,
@@ -50,7 +50,7 @@ use check/types.{
   Adts, AdtI, CtorI, FieldI, Traits, ImplI, Sym, Sig,
   adt_of, trait_of, ty_show, ctor_render, sig_render, subst, subst_eff, eff_show,
   ty_mentions_var, ty_map_children, ty_any_child,
-  SlotAt, SlotNoField, SlotAfterNamed, SlotOverflow, SlotTaken, ctor_slots,
+  SlotAt, SlotNoField, SlotAfterNamed, SlotOverflow, SlotTaken, ctor_slots, arg_slots,
   is_numeric, is_errorish, ty_char, peel_opaque,
   prelude_traits, bounds_of,
   prelude_trait_ids,
@@ -4249,44 +4249,52 @@ fn op_index(ops: List[String], name: String) -> Option[Int] = {
 }
 
 fn named_arg_hint() -> String =
-  "only constructor calls take argument names, as in `Rect(2.0, h: 3.0)`"
+  "pass the arguments by position"
 
-fn fn_named_arg_msg(name: String) -> String =
-  "`" ++ name ++ "` is a function, not a constructor; function calls do not take argument names"
+fn fn_value_named_arg_msg(name: String) -> String =
+  "`" ++ name ++ "` is a function value, and a function type carries no parameter names"
 
-fn value_named_arg_msg() -> String =
-  "this callee is a function value, not a constructor; " ++
-  "function calls do not take argument names"
+fn java_named_arg_msg(name: String) -> String =
+  "`" ++ name ++ "` is a Java member; Java methods carry no parameter names"
 
-## What to say about `f(x: 1)` when `f` is not a constructor. Each of the three
-## non-constructor callees says what it is, because that is the thing the
-## author got wrong -- the old syntax error could only say "expected `)`".
-fn named_arg_msg(cx: Cx, target: Expr) -> String =
+## What to say about `f(x: 1)` when the callee cannot take the names. A named
+## callee resolves in check_call, where a signature's parameter names are; what
+## reaches here is a function *value* or a Java member, and each says what it
+## is, because that is the thing the author got wrong.
+fn named_arg_msg(cx: Cx, target: Expr) -> String = {
   match target {
-    EVar(name, _, _) -> fn_named_arg_msg(name)
     EFieldAcc(recv, fname, _, _, _, _) ->
       match recv {
         ECtor(cn, _, _, _, _, _, _, _) ->
           match static_field_target(cx, recv) {
-            Some(_) -> "`" ++ cn ++ "." ++ fname ++
-              "` is a Java member, not a constructor; Java calls do not take argument names"
-            None -> value_named_arg_msg()
+            Some(_) -> return java_named_arg_msg(cn ++ "." ++ fname)
+            None -> ()
           }
-        _ -> value_named_arg_msg()
+        _ -> ()
       }
-    _ -> value_named_arg_msg()
+    _ -> ()
   }
+  "this callee is a function value, and a function type carries no parameter names"
+}
 
-## Argument names name a constructor's fields, so every other callee rejects
-## them. One report per call, at the first named argument: repeating the same
-## sentence once per argument is noise, not information.
+## Stop a call whose named arguments its callee cannot take: the caller has
+## already reported why (one report per call, at the first named argument --
+## repeating the same sentence once per argument is noise, not information).
 ##
 ## And neither is going on. The names already said the callee cannot be what
 ## this call needs it to be, so typing the call anyway reports the same mistake
 ## a second time in different words -- `Integer.MAX_VALUE(cap: 1)` used to say
-## both "Java member, not a constructor" and "cannot call a value of type Int".
-## Hence Some(result), which the caller returns; the argument subtrees are
-## still visited, so their own errors surface.
+## both "Java member" and "cannot call a value of type Int". The argument
+## subtrees are still visited, so their own errors surface.
+fn named_args_stop(cx: Cx, args: List[Arg], lo: Int, hi: Int) -> (Cx, Ty, TExpr) !io = {
+  var cx1 = cx
+  for e in arg_exprs(args) {
+    let (cxa, _, _) = check_expr(cx1, e, no_expected())
+    cx1 = cxa
+  }
+  (cx1, TyError, XError(lo, hi))
+}
+
 fn reject_named_args(
   cx: Cx,
   target: Expr,
@@ -4297,36 +4305,8 @@ fn reject_named_args(
   match first_named(args) {
     None -> None
     Some(a) -> {
-      var cx1 = cerr_h(cx, named_arg_msg(cx, target), a.lo, a.hi, named_arg_hint())
-      for e in arg_exprs(args) {
-        let (cxa, _, _) = check_expr(cx1, e, no_expected())
-        cx1 = cxa
-      }
-      Some((cx1, TyError, XError(lo, hi)))
-    }
-  }
-
-## The same rejection for a dot call: `x.f(a: 1)`. Its callee is a name, so it
-## can be quoted; whether it resolves to UFCS, a module function, a fn-typed
-## field or a Java method, none of them has parameter names to write. It stops
-## for the same reason the paren form does -- `xs.len(n: 1)` went on to count
-## the receiver and the named argument and report an arity of 2.
-fn reject_named_method_args(
-  cx: Cx,
-  name: String,
-  args: List[Arg],
-  lo: Int,
-  hi: Int
-) -> Option[(Cx, Ty, TExpr)] !io =
-  match first_named(args) {
-    None -> None
-    Some(a) -> {
-      var cx1 = cerr_h(cx, fn_named_arg_msg(name), a.lo, a.hi, named_arg_hint())
-      for e in arg_exprs(args) {
-        let (cxa, _, _) = check_expr(cx1, e, no_expected())
-        cx1 = cxa
-      }
-      Some((cx1, TyError, XError(lo, hi)))
+      let cxe = cerr_h(cx, named_arg_msg(cx, target), a.lo, a.hi, named_arg_hint())
+      Some(named_args_stop(cxe, args, lo, hi))
     }
   }
 
@@ -4369,19 +4349,22 @@ fn check_apply(
       }
     _ -> ()
   }
-  # everything below is a call, and a call has no argument names to give
+  # a name: `f(x)`. check_call keeps the split a name has always had -- a local
+  # holding a function value calls dynamically, anything else statically -- and
+  # decides whether argument names are usable: they name a signature's
+  # parameters, so the static path has them and the dynamic one does not.
+  match target {
+    EVar(name, vlo, vhi) ->
+      return check_call(cx, name, args0, expected, None, no_sig(), vlo, vhi, lo, hi)
+    _ -> ()
+  }
+  # everything below applies a function value, and a function type has no
+  # parameter names to give
   match reject_named_args(cx, target, args0, lo, hi) {
     Some(r) -> return r
     None -> ()
   }
   let args = arg_exprs(args0)
-  # a name: `f(x)`. check_call keeps the split a name has always had -- a local
-  # holding a function value calls dynamically, anything else statically.
-  match target {
-    EVar(name, vlo, vhi) ->
-      return check_call(cx, name, args, expected, None, no_sig(), vlo, vhi, lo, hi)
-    _ -> ()
-  }
   # piping into an unannotated lambda: the arguments determine its parameter types
   var lambda_unannotated = false
   match target {
@@ -4895,7 +4878,7 @@ fn bound_arg_span(s: Sig, args: List[Expr], tp: Ty, clo: Int, chi: Int) -> (Int,
 fn check_call(
   cx: Cx,
   callee: String,
-  args: List[Expr],
+  args0: List[Arg],
   expected: Option[Ty],
   pre0: Option[(Ty, TExpr)],
   resolved_sig: Option[Sig],
@@ -4904,6 +4887,7 @@ fn check_call(
   lo: Int,
   hi: Int
 ) -> (Cx, Ty, TExpr) !io = {
+  let args = arg_exprs(args0)
   var cx1 = cx
   var local: Option[Int] = None
   match resolved_sig {
@@ -4916,6 +4900,16 @@ fn check_call(
   }
   match local {
     Some(sid) -> {
+      # a local holds a function *value*, and a function type has no parameter
+      # names -- the boundary named arguments stop at (spec §4.3)
+      match first_named(args0) {
+        Some(a) -> {
+          var cxn = cerr_h(cx1, fn_value_named_arg_msg(callee), a.lo, a.hi, named_arg_hint())
+          let (cxa, _) = check_args_plain(cxn, args, pre0)
+          return (cxa, TyError, XError(lo, hi))
+        }
+        None -> ()
+      }
       let sym = sym_of(cx1, sid)
       let lt = sym.ty
       if is_errorish(lt) {
@@ -4980,7 +4974,13 @@ fn check_call(
         TyError, XError(lo, hi))
     }
   }
-  if len(args) != len(s.param_tys) {
+  # Arity first when every argument is positional -- the historical wording,
+  # order and early return. A call with names resolves slots first, so its
+  # report can name the parameter rather than count to the wrong number
+  # (`xs.len(n: 1)` would otherwise count the receiver and report an arity
+  # of 2).
+  let named_present = first_named(args0) != None
+  if not named_present && len(args) != len(s.param_tys) {
     let (cxa, _) = check_args_plain(cx1, args, pre0)
     let cxb = cerr_h(cxa, "`" ++ callee ++ "` takes " ++ to_string(len(s.param_tys)) ++
         " argument(s), got " ++ to_string(len(args)), lo, hi,
@@ -5014,6 +5014,54 @@ fn check_call(
     at_slots = at_slots ++ [no_expected()]
     tx_slots = tx_slots ++ [no_texpr()]
   }
+  # Which parameter each argument fills: the shared rule (types.arg_slots),
+  # the function-call spelling of the decision constructors make. An
+  # all-positional call of the right arity resolves to the identity mapping
+  # and goes through exactly as before. An argument that landed on no
+  # parameter is checked now, with no expected type, so its own errors are
+  # reported and the rounds below skip it.
+  var pidx: List[Int] = []
+  var slot_of: List[Option[Int]] = []
+  for _k in 0..len(s.param_tys) { slot_of = slot_of ++ [no_int()] }
+  var args_broken = false
+  var given: List[Option[String]] = []
+  for a0 in args0 { given = given ++ [a0.name] }
+  let picks = arg_slots(s.param_names, given)
+  var i0 = 0
+  for a0 in args0 {
+    var idx = -1
+    match picks[i0] {
+      SlotAt(at) -> { idx = at }
+      SlotNoField(an) -> {
+        let h = match suggest.hint(an, s.param_names) {
+          Some(hh) -> hh
+          None -> "signature: " ++ sig_render(cx1.adts, cx1.traits, s)
+        }
+        cx1 = cerr_h(cx1, "`" ++ callee ++ "` has no parameter `" ++ an ++ "`", a0.lo, a0.hi, h)
+        args_broken = true
+      }
+      SlotAfterNamed -> {
+        cx1 = cerr(cx1, "positional arguments cannot follow named arguments", a0.lo, a0.hi)
+        args_broken = true
+      }
+      # counted after the rounds, with the arity wording
+      SlotOverflow -> ()
+      SlotTaken(at) -> {
+        cx1 = cerr(cx1, "parameter `" ++ s.param_names[at] ++ "` is given twice", a0.lo, a0.hi)
+        args_broken = true
+      }
+    }
+    pidx = pidx ++ [idx]
+    if idx >= 0 {
+      slot_of = list.take(slot_of, idx) ++ [Some(i0)] ++ list.drop(slot_of, idx + 1)
+    } else {
+      let (cxa, at, ax) = check_arg_at(cx1, a0.e, i0, pre0, no_expected())
+      cx1 = cxa
+      at_slots = list.take(at_slots, i0) ++ [Some(at)] ++ list.drop(at_slots, i0 + 1)
+      tx_slots = list.take(tx_slots, i0) ++ [Some(ax)] ++ list.drop(tx_slots, i0 + 1)
+    }
+    i0 = i0 + 1
+  }
   for round in 0..2 {
     var i = 0
     for a in args {
@@ -5023,7 +5071,8 @@ fn check_call(
       }
       let skip = round == 0 && needs_expected(cx1, a)
       if not done && not skip {
-        let substd = reduce_assoc(cx1, subst(s.param_tys[i], m, em))
+        let pt = s.param_tys[pidx[i]]
+        let substd = reduce_assoc(cx1, subst(pt, m, em))
         # lambdas only need their parameter types, and function values unify
         # piecewise — a partially concrete expected type still helps
         let exp2: Option[Ty] =
@@ -5032,18 +5081,27 @@ fn check_call(
         cx1 = cxa
         at_slots = list.take(at_slots, i) ++ [Some(at)] ++ list.drop(at_slots, i + 1)
         tx_slots = list.take(tx_slots, i) ++ [Some(ax)] ++ list.drop(tx_slots, i + 1)
-        let (m3, em3, ok) = unify_into(cx1, s.param_tys[i], at, m, em)
+        let (m3, em3, ok) = unify_into(cx1, pt, at, m, em)
         m = m3
         em = em3
         if not ok {
           cx1 = cerr_h(cx1, "argument type mismatch: expected " ++
-              ty_show(cx1.adts, reduce_assoc(cx1, subst(s.param_tys[i], m, em))) ++ ", got " ++
+              ty_show(cx1.adts, reduce_assoc(cx1, subst(pt, m, em))) ++ ", got " ++
               ty_show(cx1.adts, at), e_lo(a), e_hi(a),
             "signature: " ++ sig_render(cx1.adts, cx1.traits, s))
         }
       }
       i = i + 1
     }
+  }
+  # the named-call arity report, after the arguments so their own errors come
+  # first (the all-positional path answered arity above and returned)
+  if named_present && not args_broken && len(args) != len(s.param_tys) {
+    let cxb = cerr_h(cx1, "`" ++ callee ++ "` takes " ++ to_string(len(s.param_tys)) ++
+        " argument(s), got " ++ to_string(len(args)), lo, hi,
+      "signature: " ++ sig_render(cx1.adts, cx1.traits, s))
+    let rt = if len(s.tparams) == 0 { s.ret } else { TyError }
+    return (cxb, rt, XError(lo, hi))
   }
   # return-position inference: let x: Option[Int] = ...
   var unbound_any = false
@@ -5122,11 +5180,71 @@ fn check_call(
   # the one instantiation choke point: a projection whose subject just became
   # concrete reduces here, so no ground type ever carries one (D3)
   let ret = reduce_assoc(cx1, subst(s.ret, m, em))
+  # the call node's arguments are in parameter order; an all-positional call
+  # already is, so this is the identity it always was
   var txs2: List[TExpr] = []
-  for sl in tx_slots {
+  for so in slot_of {
+    let sl = match so {
+      Some(wi) -> tx_slots[wi]
+      None -> no_texpr()
+    }
     match sl {
       Some(ax) -> { txs2 = txs2 ++ [ax] }
       None -> { txs2 = txs2 ++ [XError(lo, hi)] }
+    }
+  }
+  # Arguments evaluate in written order (spec §4.3). When a named argument
+  # landed out of written order, every argument is bound to a local first, in
+  # written order, and the call reads the locals in parameter order. A call
+  # whose written order already is parameter order wraps nothing and emits
+  # exactly what it always did.
+  var arg_lets: List[TStmt] = []
+  if named_present && not args_broken {
+    var mono = true
+    var prev = -1
+    for so in slot_of {
+      match so {
+        Some(wi) -> {
+          if wi < prev { mono = false }
+          prev = wi
+        }
+        None -> ()
+      }
+    }
+    if not mono {
+      # the bindings live in the wrapper block, and in a scope of their own --
+      # two reordered calls in one function must not collide on the names
+      cx1 = push_scope(cx1)
+      var locs: List[Option[TExpr]] = []
+      for _k in 0..len(args0) { locs = locs ++ [no_texpr()] }
+      var wi2 = 0
+      for a0 in args0 {
+        match tx_slots[wi2] {
+          Some(ax) -> {
+            let t = tex_ty(ax)
+            let nm = "arg\$" ++ to_string(wi2)
+            let (cxd, sidw) = declare(cx1, nm, t, false, a0.lo, a0.hi)
+            cx1 = cxd
+            arg_lets = arg_lets ++ [TSLet(Some(sidw), nm, ax, a0.lo, a0.hi)]
+            locs = list.take(locs, wi2) ++ [Some(XLocal(sidw, nm, a0.lo, a0.hi, t))] ++
+              list.drop(locs, wi2 + 1)
+          }
+          None -> ()
+        }
+        wi2 = wi2 + 1
+      }
+      cx1 = pop_scope(cx1)
+      txs2 = []
+      for so in slot_of {
+        let sl = match so {
+          Some(wi) -> locs[wi]
+          None -> no_texpr()
+        }
+        match sl {
+          Some(lx) -> { txs2 = txs2 ++ [lx] }
+          None -> { txs2 = txs2 ++ [XError(lo, hi)] }
+        }
+      }
     }
   }
   # the evidence the callee's *written* labels need, in effect-id order. A
@@ -5160,7 +5278,8 @@ fn check_call(
       None -> XCallFn(s.owner, callee, txs2, wits, evs, s.trait_id, lo, hi, ret)
     }
   }
-  (cx1, ret, node)
+  let out = if len(arg_lets) > 0 { XBlock(arg_lets, Some(node), lo, hi, ret) } else { node }
+  (cx1, ret, out)
 }
 
 ## Instantiate a callee's declared effect at a call site: an unbound effect
@@ -6361,7 +6480,7 @@ fn check_module_call(
   cx: Cx,
   al: String,
   name: String,
-  args: List[Expr],
+  args0: List[Arg],
   expected: Option[Ty],
   nlo: Int,
   nhi: Int,
@@ -6371,9 +6490,9 @@ fn check_module_call(
   var cx1 = cx
   match map.get(cx1.module_fn_sigs, (al, name)) {
     # reuse the ordinary call machinery with the resolved (imported) signature
-    Some(s) -> check_call(cx1, name, args, expected, None, Some(s), nlo, nhi, lo, hi)
+    Some(s) -> check_call(cx1, name, args0, expected, None, Some(s), nlo, nhi, lo, hi)
     None -> {
-      for a in args {
+      for a in arg_exprs(args0) {
         let (cxa, _, _) = check_expr(cx1, a, no_expected())
         cx1 = cxa
       }
@@ -6436,19 +6555,13 @@ fn check_method_call(
   lo: Int,
   hi: Int
 ) -> (Cx, Ty, TExpr) !io = {
-  # a dot call is a call: `x.f(a: 1)` parses (every argument list takes the
-  # `name: value` shape, SYN-03) and is rejected here, by type
-  match reject_named_method_args(cx, name, args0, lo, hi) {
-    Some(r) -> return r
-    None -> ()
-  }
   var cx1 = cx
   let args = arg_exprs(args0)
   # module-qualified call: alias.fn(args), where alias is a whole-module import
   match target {
     EVar(rname, _, _) ->
       if lookup(cx1, rname) == None && map.has(cx1.module_aliases, rname) {
-        return check_module_call(cx1, rname, name, args, expected, nlo, nhi, lo, hi)
+        return check_module_call(cx1, rname, name, args0, expected, nlo, nhi, lo, hi)
       }
     _ -> ()
   }
@@ -6473,9 +6586,18 @@ fn check_method_call(
       if not hp2 && len(cargs2) == 0 && sp2 == None &&
       not map.has(cx1.ctors_by_name, cn) && not map.has(cx1.consts, cn) {
         match map.get(cx1.java_classes, cn) {
-          Some(fq) ->
+          Some(fq) -> {
+            match first_named(args0) {
+              Some(a) -> {
+                let qual = cn ++ "." ++ name
+                let cxe = cerr_h(cx1, java_named_arg_msg(qual), a.lo, a.hi, named_arg_hint())
+                return named_args_stop(cxe, args0, lo, hi)
+              }
+              None -> ()
+            }
             return check_java_call(cx1, cx1.jsig.class_info(fq), None, true, name, args,
               nlo, nhi, lo, hi)
+          }
           None -> ()
         }
       }
@@ -6484,9 +6606,17 @@ fn check_method_call(
   let (cx2, tt, tx) = check_expr(cx1, target, no_expected())
   cx1 = cx2
   match tt {
-    TyJava(fq, _) ->
+    TyJava(fq, _) -> {
+      match first_named(args0) {
+        Some(a) -> {
+          let cxe = cerr_h(cx1, java_named_arg_msg(name), a.lo, a.hi, named_arg_hint())
+          return named_args_stop(cxe, args0, lo, hi)
+        }
+        None -> ()
+      }
       return check_java_call(cx1, cx1.jsig.class_info(fq), Some(tx), false, name, args,
         nlo, nhi, lo, hi)
+    }
     _ -> ()
   }
   if is_errorish(tt) {
@@ -6527,6 +6657,16 @@ fn check_method_call(
           let ftype = subst(ci.fields[fidx].ty, im, em0)
           match ftype {
             TyFn(fps, fret, feff) -> {
+              # the field holds a function value, and a function type carries
+              # no parameter names
+              match first_named(args0) {
+                Some(a) -> {
+                  let cxe = cerr_h(cx1, fn_value_named_arg_msg(name), a.lo, a.hi,
+                    named_arg_hint())
+                  return named_args_stop(cxe, args0, lo, hi)
+                }
+                None -> ()
+              }
               let fn_in_scope = lookup(cx1, name) != None ||
                 lookup_fn_sig(cx1, name) != None
               if fn_in_scope {
@@ -6577,8 +6717,11 @@ fn check_method_call(
     }
     _ -> ()
   }
-  # UFCS: x.f(a) is f(x, a) (spec §4.3); the receiver is already checked
-  check_call(cx1, name, [target] ++ args, expected, Some((tt, tx)), no_sig(), nlo, nhi, lo, hi)
+  # UFCS: x.f(a) is f(x, a) (spec §4.3); the receiver is already checked and
+  # rides as a positional argument at slot 0 -- so a named argument that names
+  # the first parameter reports "given twice", which is the truth
+  check_call(cx1, name, [pos_arg(target)] ++ args0, expected, Some((tt, tx)), no_sig(),
+    nlo, nhi, lo, hi)
 }
 
 # ---- match ----
@@ -6874,7 +7017,7 @@ test "calls: builtins, dynamic targets, arity and undefined" {
   assert cx4.diags[0].msg == "undefined function: nope"
 }
 
-test "argument names are a constructor's business, and every other callee says so" {
+test "argument names name a signature or a constructor; a value callee says so" {
   var cx = seed_prelude(test_cx())
   cx = push_scope(cx)
   let bare_some = ECtor("Some", [], None, false, 0, 4, 0, 4)
@@ -6888,37 +7031,120 @@ test "argument names are a constructor's business, and every other callee says s
     [Arg { name: Some("nope"), e: EInt(1, 11, 12), lo: 5, hi: 12 }], 0, 13)
   let (cx2, _, _) = check_expr(cx, wrong, Some(opt_ty(TyInt)))
   assert str.contains(cx2.diags[0].msg, "no field `nope`")
-  # (2) a function name: named for what it is, and told what names are for
+  # (2) a local holding a function is a function *value*: no parameter names
   let (cxf, _) = declare(cx, "f", TyFn([TyInt], TyInt, EPure), false, 0, 1)
   let on_fn = EApply(EVar("f", 0, 1),
     [Arg { name: Some("a"), e: EInt(1, 5, 6), lo: 2, hi: 6 }], 0, 7)
   let (cx3, _, _) = check_expr(cxf, on_fn, no_expected())
   assert cx3.diags[0].msg ==
-    "`f` is a function, not a constructor; function calls do not take argument names"
-  assert str.contains(cx3.diags[0].hint, "only constructor calls take argument names")
+    "`f` is a function value, and a function type carries no parameter names"
+  assert cx3.diags[0].hint == "pass the arguments by position"
   assert cx3.diags[0].lo == 2
-  # (3) a function value has no parameter names to write
+  # (3) an applied expression is a function value too, with no name to quote
   let lam = ELambda([LambdaParam { name: "x", ann: Some(TNamed("Int", [], 4, 7)), lo: 1, hi: 2 }],
     EVar("x", 11, 12), false, 0, 12)
   let on_value = EApply(lam, [Arg { name: Some("a"), e: EInt(1, 16, 17), lo: 13, hi: 17 }], 0, 18)
   let (cx4, _, _) = check_expr(cx, on_value, no_expected())
-  assert cx4.diags[0].msg == "this callee is a function value, not a constructor; " ++
-    "function calls do not take argument names"
-  # (4) a Java member
+  assert cx4.diags[0].msg ==
+    "this callee is a function value, and a function type carries no parameter names"
+  # (4) a Java member: Java metadata has no parameter names
   cx = Cx { ..cx, jsig: test_jsig(),
     java_classes: map.insert(cx.java_classes, "Long", "java.lang.Long") }
   let jrecv = ECtor("Long", [], None, false, 0, 4, 0, 4)
   let on_java = EApply(EFieldAcc(jrecv, "MAX_VALUE", 5, 14, 0, 14),
     [Arg { name: Some("a"), e: EInt(1, 18, 19), lo: 15, hi: 19 }], 0, 20)
   let (cx5, _, _) = check_expr(cx, on_java, no_expected())
-  assert cx5.diags[0].msg == "`Long.MAX_VALUE` is a Java member, not a constructor; " ++
-    "Java calls do not take argument names"
-  # (5) a dot call is a call too
+  assert cx5.diags[0].msg == "`Long.MAX_VALUE` is a Java member; " ++
+    "Java methods carry no parameter names"
+  # (5) a dot call on an undefined method reports the name, not the arguments
   let on_dot = EMethod(EVar("f", 0, 1), "g",
     [Arg { name: Some("a"), e: EInt(1, 6, 7), lo: 3, hi: 7 }], 2, 3, 0, 8)
   let (cx6, _, _) = check_expr(cxf, on_dot, no_expected())
-  assert cx6.diags[0].msg ==
-    "`g` is a function, not a constructor; function calls do not take argument names"
+  assert cx6.diags[0].msg == "undefined function: g"
+}
+
+test "named arguments land on a signature's parameters, and evaluate in written order" {
+  var cx = seed_prelude(test_cx())
+  cx = push_scope(cx)
+  let sg = Sig {
+    name: "move2",
+    param_tys: [TyInt, TyBool],
+    param_names: ["dx", "wrap"],
+    ret: TyUnit,
+    eff: EPure,
+    is_builtin: false,
+    tparams: [],
+    constraints: [],
+    owner: Some("m"),
+    trait_id: None,
+    op_of: None,
+    inferring: false
+  }
+  cx = Cx { ..cx, fns: map.insert(cx.fns, "move2", sg) }
+  let named_arg = (n: String, e: Expr) => Arg { name: Some(n), e: e, lo: e_lo(e), hi: e_hi(e) }
+  # written in declaration order: a plain call node, no wrapper
+  let ok = EApply(EVar("move2", 0, 5),
+    [named_arg("dx", EInt(1, 6, 7)), named_arg("wrap", EBool(true, 8, 12))], 0, 13)
+  let (cx1, t1, n1) = check_expr(cx, ok, no_expected())
+  assert t1 == TyUnit
+  assert len(cx1.diags) == 0
+  match n1 {
+    XCallFn(_, nm, cargs, ..) -> {
+      assert nm == "move2"
+      assert len(cargs) == 2
+    }
+    _ -> { assert false }
+  }
+  # mixed positional + named, still in order: plain node
+  let mixed = EApply(EVar("move2", 0, 5),
+    [pos_arg(EInt(1, 6, 7)), named_arg("wrap", EBool(true, 8, 12))], 0, 13)
+  let (cx2, _, n2) = check_expr(cx, mixed, no_expected())
+  assert len(cx2.diags) == 0
+  match n2 {
+    XCallFn(..) -> ()
+    _ -> { assert false }
+  }
+  # written out of declaration order: the arguments are bound in written order
+  # and the call reads the locals in parameter order
+  let flipped = EApply(EVar("move2", 0, 5),
+    [named_arg("wrap", EBool(true, 6, 10)), named_arg("dx", EInt(1, 11, 12))], 0, 13)
+  let (cx3, _, n3) = check_expr(cx, flipped, no_expected())
+  assert len(cx3.diags) == 0
+  match n3 {
+    XBlock(stmts, tail, ..) -> {
+      assert len(stmts) == 2
+      # the first binding is the first *written* argument -- the Bool
+      match stmts[0] {
+        TSLet(_, _, init, _, _) -> { assert tex_ty(init) == TyBool }
+        _ -> { assert false }
+      }
+      match tail {
+        # and the call takes the parameters in declaration order
+        Some(XCallFn(_, _, cargs, ..)) -> { assert tex_ty(cargs[0]) == TyInt }
+        _ -> { assert false }
+      }
+    }
+    _ -> { assert false }
+  }
+  # an unknown name, with the spelling pool of the signature
+  let unknown = EApply(EVar("move2", 0, 5), [named_arg("dz", EInt(1, 6, 7))], 0, 8)
+  let (cx4, _, _) = check_expr(cx, unknown, no_expected())
+  assert cx4.diags[0].msg == "`move2` has no parameter `dz`"
+  assert str.contains(cx4.diags[0].hint, "dx")
+  # a parameter given twice
+  let twice = EApply(EVar("move2", 0, 5),
+    [pos_arg(EInt(1, 6, 7)), named_arg("dx", EInt(2, 8, 9))], 0, 10)
+  let (cx5, _, _) = check_expr(cx, twice, no_expected())
+  assert cx5.diags[0].msg == "parameter `dx` is given twice"
+  # a positional argument after a named one is still refused
+  let after = EApply(EVar("move2", 0, 5),
+    [named_arg("dx", EInt(1, 6, 7)), pos_arg(EBool(true, 8, 12))], 0, 13)
+  let (cx6, _, _) = check_expr(cx, after, no_expected())
+  assert cx6.diags[0].msg == "positional arguments cannot follow named arguments"
+  # named with a missing required argument: the arity report, with the range
+  let short = EApply(EVar("move2", 0, 5), [named_arg("wrap", EBool(true, 6, 10))], 0, 11)
+  let (cx7, _, _) = check_expr(cx, short, no_expected())
+  assert cx7.diags[0].msg == "`move2` takes 2 argument(s), got 1"
 }
 
 test "the same call, four callees, four kinds of typed node" {
