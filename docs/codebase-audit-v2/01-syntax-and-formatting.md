@@ -133,7 +133,11 @@
 - **影响：** 用户不能把自然名称 `java` 用作局部、字段或模块 alias；关键字预算被一个上下文语法永久占用。
 - **建议：** 降为 `use` 后的 contextual keyword；lexer 产普通 IDENT，parser 在 import position 判别。
 
-## SYN-18 — P3 — range 的官方格式没有单一答案
+## SYN-18 — P3 — range 的官方格式没有单一答案（已由 `cb2c061` 处置）
+
+- **后续处置（2026-08-08，`cb2c061`）：已采用紧凑 `a..b`。** formatter 仅在 `..`
+  左侧是 value end 时收紧左空格，spread/rest 前缀仍保留开括号或逗号要求的空格；规范、
+  示例与 formatter 内嵌边界测试已同步。以下内容保留 v0.60.0 审查基线的原始证据与建议。
 
 - **证据：V。** formatter 只禁止 `..` 后空格，没有禁止前空格：`selfhost/src/front/fmt.dawn:228`，因此 `0..3` 变成 `0 ..3`；规范和教程普遍写 `a..b`：`docs/spec.md:769`、`docs/tutorial.md:243`。
 - **影响：** formatter、文档与 grammar corpus 对 canonical spelling 不一致。

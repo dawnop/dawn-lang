@@ -89,7 +89,13 @@
 - **影响：** 无法定义泛型 state、parser、service、transaction trait；用户被迫在 trait API 退回 `Result`/`!io`，形成与语言效果系统并行的第二套抽象。
 - **建议：** 先允许 fixed named labels，再引入 trait/method-level effect parameters；dictionary 必须显式携带或捕获 evidence。
 
-## SEM-11 — P2 — panic/resource barriers 被硬编码为 `!io`
+## SEM-11 — P2 — panic/resource barriers 被硬编码为 `!io`（已分拆处置）
+
+> **后续处置（2026-08-08，`407fb41`、`138adb9`）：已按是否观察失败分拆关闭。**
+> `bracket` 不观察失败，现由 `release`、`use` 与调用共享效果变量 `!e`；
+> `catch_fault`/`catch_panic` 会把失败变成值，其结果受调用栈、`file:line` 与纯调用折叠影响，
+> 因而按裁决继续固定 `!io`。checker 语料同时钉住 pure/labelled `bracket` 与两个 catch
+> 在纯签名中的拒绝。以下内容保留 v0.60.0 审查基线的原始证据与建议。
 
 - **证据：S。** `catch_panic` 与 `bracket` 的规范签名固定 `!io`：`docs/spec.md:1484`、`docs/spec.md:1541`；builtin type 同样硬编码：`selfhost/src/check/types.dawn:1605`、`:1670`。
 - **边界：** 捕获确定性 pure panic，或对 pure resource 执行 pure release，仍强迫整个调用方变成 `!io`。

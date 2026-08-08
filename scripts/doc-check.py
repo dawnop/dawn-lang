@@ -7,7 +7,7 @@ and the EBNF disagreed with the parser in several places -- all found by a
 human reading, none by a test. This script is the part of that gap a script
 can close.
 
-Ten checks, each unambiguous on purpose (a doc lint with false positives
+Eleven checks, each unambiguous on purpose (a doc lint with false positives
 gets disabled, and then it protects nothing):
 
   links     every relative Markdown link resolves to a file in the repo
@@ -32,6 +32,9 @@ gets disabled, and then it protects nothing):
   transl    every translated document registers the digest of the original it
             was translated from, that digest is still the original's, and its
             fenced blocks line up one-for-one with the original's
+  contracts  settled failure-barrier clauses occur in both language versions
+             of the spec; this is a targeted semantic pin, not full translation
+             comparison
 
 Blocks are opt-in rather than opt-out: most examples in the spec are
 fragments -- a type declaration, three lines of a match -- and demanding
@@ -157,6 +160,10 @@ check whose blind spot is undocumented gets mistaken for a check:
     documents show the same examples in the same order. A fence added, dropped
     or retyped on one side only is caught; a comment translated inside one is
     not, and must not be.
+  * contracts: only the settled clauses in SPEC_CONTRACTS. It deliberately does
+    not compare whole paragraphs or infer translation quality; it catches the
+    known failure mode where one side silently loses a normative clause while
+    its source digest remains valid.
   * count: the number is read only off lines carrying the
     `<!-- doc-check: doc-count -->` marker, for the same reason version does
     not match a bare semver -- most numbers in this corpus are counts of
@@ -245,6 +252,79 @@ TRANSLATIONS = {
     "site/pages/home.zh.md": "site/pages/home.md",
     "site/pages/stdlib.zh.md": "site/pages/stdlib.md",
 }
+
+SPEC_CONTRACTS = (
+    (
+        "effect-polymorphic bracket signature",
+        (
+            ("docs/spec.md", "fn bracket[A, B](resource: A, release: fn(A) -> "
+             "Unit !e, use: fn(A) -> B !e) -> B !e"),
+            ("docs/spec.en.md", "fn bracket[A, B](resource: A, release: fn(A) -> "
+             "Unit !e, use: fn(A) -> B !e) -> B !e"),
+        ),
+    ),
+    (
+        "failure payload contract",
+        (
+            ("docs/spec.md", "**载荷契约**（对每个后端）："),
+            ("docs/spec.en.md", "**The payload contract** (on every backend):"),
+        ),
+    ),
+    (
+        "unbounded failure message",
+        (
+            ("docs/spec.md", "`message` **没有长度上限**"),
+            ("docs/spec.en.md", "`message` has **no length limit**"),
+        ),
+    ),
+    (
+        "well-formed failure message",
+        (
+            ("docs/spec.md", "`message` 是良构 UTF-8"),
+            ("docs/spec.en.md", "`message` is well-formed UTF-8"),
+        ),
+    ),
+    (
+        "failure payload ownership",
+        (
+            ("docs/spec.md", "一个失败的载荷属于**将要接住它的那个屏障**"),
+            ("docs/spec.en.md", "A failure's payload belongs to **the barrier that "
+             "is going to take it**"),
+        ),
+    ),
+    (
+        "observable panic-fault split",
+        (
+            ("docs/spec.md", "panic/fault 这个二分是**可观察的**——由哪个屏障收得下体现，"
+             "不由 `kind` 字符串体现"),
+            ("docs/spec.en.md", "The panic/fault split is **observable** — by which "
+             "barrier takes the failure, not by the `kind` string"),
+        ),
+    ),
+    (
+        "fixed catch effect row",
+        (
+            ("docs/spec.md", "这一对的效果行**钉死 `!io`，不是变量**"),
+            ("docs/spec.en.md", "This pair's effect row is **pinned to `!io`, not a "
+             "variable**"),
+        ),
+    ),
+    (
+        "release failure precedence",
+        (
+            ("docs/spec.md", "失败（raise 而不接）则顶掉原失败、无 suppressed 链"),
+            ("docs/spec.en.md", "A failure that **escapes** the release itself (raised "
+             "and not caught) replaces the original, with no suppressed chain"),
+        ),
+    ),
+    (
+        "effect-polymorphic bracket explanation",
+        (
+            ("docs/spec.md", "**效果行是变量 `!e`**"),
+            ("docs/spec.en.md", "**The effect row is a variable `!e`**"),
+        ),
+    ),
+)
 
 VERSION_SRC = ROOT / "selfhost" / "src" / "version.dawn"
 
@@ -816,6 +896,26 @@ def check_translations() -> tuple[list[str], int]:
     return bad, seen
 
 
+def check_spec_contracts(texts: dict) -> tuple[list[str], int]:
+    normalized = {path: " ".join(text.split()) for path, text in texts.items()}
+    bad: list[str] = []
+    seen = 0
+    for name, clauses in SPEC_CONTRACTS:
+        for rel, fragment in clauses:
+            path = ROOT / rel
+            text = normalized.get(path)
+            if text is None:
+                bad.append(f"{rel}: cannot check settled spec contract {name!r}; "
+                           "the document is not in the documentation index")
+                continue
+            expected = " ".join(fragment.split())
+            if expected not in text:
+                bad.append(f"{rel}: missing settled spec contract {name!r}")
+                continue
+            seen += 1
+    return bad, seen
+
+
 def fence_shape_mismatch(rel_tr: str, tr_text: str,
                          rel_src: str, src_text: str) -> list[str]:
     """The two documents show the same examples, in the same order.
@@ -1016,7 +1116,7 @@ def main() -> None:
     problems: list[str] = []
     blocks = anchors_seen = sections_seen = claims_seen = recorded = 0
     status_seen = counts_seen = indexed_seen = pages_seen = transl_seen = 0
-    fences_seen = 0
+    contracts_seen = fences_seen = 0
     version = toolchain_version()
     # What docs/README.md's opening sentence counts: the Markdown documents
     # under docs/, which is DOCS minus the top-level files it does not index
@@ -1033,6 +1133,8 @@ def main() -> None:
     bad, pages_seen = check_site_pages()
     problems += bad
     bad, transl_seen = check_translations()
+    problems += bad
+    bad, contracts_seen = check_spec_contracts(texts)
     problems += bad
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -1072,7 +1174,8 @@ def main() -> None:
           f"{anchors_seen} anchor(s), {sections_seen} § reference(s), "
           f"{claims_seen} version claim(s), {status_seen} status line(s), "
           f"{indexed_seen} index entr(ies), {counts_seen} document count(s) "
-          f"and {transl_seen} translation(s) resolved, 0 unknown")
+          f"and {transl_seen} translation(s) resolved; {contracts_seen} pinned "
+          f"spec contract clause(s), 0 unknown")
 
 
 if __name__ == "__main__":

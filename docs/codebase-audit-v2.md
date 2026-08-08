@@ -16,8 +16,10 @@ Dawn 已经具备共享 Core IR、JVM/native 双后端、自举固定点、纯 D
 - 共记录 **97 项**：1 P0 候选、29 P1、55 P2、12 P3。设计争议只有在能指出组合性、无效状态或维护税时才进入 P2。
 - `SEM-01`、native nested failure 与 unsafe boundary 没有做危险动态验证；其余少量 parser/formatter/check 探针只使用临时输入。
 - 旧报告不直接继承严重度。本轮逐项对照当前源码；已修、已合理驳回和 historical EBNF 都列入撤回表。
-- **基线后处置：** `SYN-14` 已由 #206 期 2 选择尾块方案收口；下表的 97 项与严重度计数
-  冻结为 v0.60.0 审查基线，不因后续修复重写历史。
+- **基线后处置：** `SYN-14` 已由 #206 期 2 选择尾块方案收口；`SYN-18` 已由
+  `cb2c061` 统一为紧凑 `a..b`；`SEM-11` 已分拆裁决为效果多态的 `bracket !e` 与
+  固定 `!io` 的 `catch_fault`/`catch_panic`。下表的 97 项与严重度计数冻结为
+  v0.60.0 审查基线，不因后续修复重写历史。
 
 完整方法、严重度、证据等级和撤回项见[方法与旧结论处置](codebase-audit-v2/00-methodology-and-retractions.md)。
 

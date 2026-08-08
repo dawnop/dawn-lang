@@ -1998,9 +1998,34 @@ type ForeignError = { kind: String, message: String, cause: Option[String] }
   string if there is none); `cause` is the rendering of the failure underneath, `None` if
   there is none. No stack: rendering a stack costs something at every single barrier.
 
+**The payload contract** (on every backend):
+
+- `message` has **no length limit** and equals, byte for byte, the String the failure
+  was raised with; a failure the language itself raises (`panic(m)`) is byte-identical
+  across backends. Setting a limit means picking a number, and any number will one day
+  be crossed by a legitimate message; truncation would also have to handle character
+  boundaries — so this is "no truncation clause", not "a generous limit".
+- `message` is well-formed UTF-8. A direct consequence of the String invariant (§4.8),
+  written out separately because it has been violated: a payload cut at a byte count
+  landed mid-character.
+- A failure's payload belongs to **the barrier that is going to take it**: from the
+  raise until that barrier builds the `ForeignError` (or `bracket` hands it to the next
+  barrier out), no other barrier can read or write it. A nested catch therefore cannot
+  affect a failure in flight (the unfolding of §9.8.2 guarantee 2).
+- The panic/fault split is **observable** — by which barrier takes the failure, not by
+  the `kind` string (whose values remain the backend's own).
+
 There is only this one pair of barriers (only this pair **intercepts** failure; the
 `bracket` of §9.8.2 intercepts nothing), only the `ForeignError` payload, and **the
 String version is not kept**.
+
+This pair's effect row is **pinned to `!io`, not a variable** — a pure closure included:
+what catching a panic yields depends on the depth of the call stack, on the `file:line`
+baked into the message, and on how many times the optimizer folded a pure call. None of
+the three is a difference a pure function is allowed to have. That is why the `bracket`
+of §9.8.2 can be effect-polymorphic and these two cannot: `bracket` does not observe the
+failure. The full argument, and the condition under which it reopens, is in
+[`docs/audit/error-model-design.md`](audit/error-model-design.md) §7.
 
 > **History**: moving the payload from String to `ForeignError` took three releases,
 > because a builtin's **signature** is bound by seed discipline just as its name is, and
@@ -2022,7 +2047,7 @@ Dawn has no `try`/`finally`, and does not intend to (the pair of barriers in §9
 back" is carried by a third builtin:
 
 ```dawn
-fn bracket[A, B](resource: A, release: fn(A) -> Unit !io, use: fn(A) -> B !io) -> B !io
+fn bracket[A, B](resource: A, release: fn(A) -> Unit !e, use: fn(A) -> B !e) -> B !e
 ```
 
 ```dawn
@@ -2057,11 +2082,22 @@ Three guarantees:
   panic is still a panic and a fault is still a fault**. So `catch_fault` still does not
   intercept a panic that passes through bracket (on native that kind bit is restored by
   re-raising, not re-inferred; the measured comparison of the two backends is in
-  `scripts/spike-native/bracket.dawn` and `bracket_fatal.dawn`).
+  `scripts/spike-native/bracket.dawn` and `bracket_fatal.dawn`). A failure `release`
+  catches for itself **does not affect** the one in flight — raising and swallowing a
+  new failure inside a release is legal code, and the crossing failure comes out as it
+  went in (`scripts/spike-native/bracket_release_fails.dawn`). A failure that
+  **escapes** the release itself (raised and not caught) replaces the original, with no
+  suppressed chain: that is what both backends do today, written here so it is a ruling
+  rather than a coincidence.
 - **`bracket` intercepts nothing**, so it returns `B` and not `Result` — guarding and
   intercepting are two orthogonal things (neither Haskell's `bracket`, Kotlin's `use`,
   Koka's `finally` nor Go's `defer` returns a Result). To take the failure as a value,
   write `catch_fault(() => bracket(...))`; each of the two primitives does one thing.
+- **The effect row is a variable `!e`**: `release`, `use` and the call as a whole share
+  one row, and `bracket` adds no effect of its own. So a `bracket` over a pure resource is
+  pure, an `!io` one is `!io`, and a labelled one passes its label straight through. The
+  pair of barriers in §9.8 is **not** like this (they are pinned to `!io`); the reason is
+  in [`docs/audit/error-model-design.md`](audit/error-model-design.md) §7.
 
 > It gets no surface syntax like `defer`: the protected region is always **one closure
 > call**, so `return`/`?`/`break` cannot cross out of it at the language level, and the
