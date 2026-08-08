@@ -174,13 +174,15 @@ run_corpus() {
 
   # -fwrapv: Dawn's Int wraps like the JVM's long, and signed overflow is
   # otherwise UB. -fno-strict-aliasing: same reason the real backend needs
-  # it. Both are correctness flags, not tuning.
+  # it. -fexceptions: a raise unwinds (#193 ARC-05), and this is what makes
+  # the cleanup landing pads real; without it recovery silently leaks again.
+  # All three are correctness flags, not tuning.
   #
   # -Werror is a real gate: a Core type that reaches C wrong shows up first
   # as an int-from-pointer warning, long before it shows up as a wrong
   # answer. That is how the pattern-binding types were caught. The three
   # -Wno- flags cover noise a code generator legitimately produces.
-  if "$cc_bin" -std=c11 -O2 -fwrapv -fno-strict-aliasing -pthread \
+  if "$cc_bin" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread \
     -Wall -Wextra -Werror \
     -Wno-unused-variable -Wno-unused-but-set-variable \
     -Wno-unused-parameter -Wno-unused-label \
@@ -201,7 +203,7 @@ run_corpus() {
   # -O0 so the report names the Dawn function rather than whatever it was
   # inlined into; the answer is not being checked here, only the memory.
   if [ "$asan_ok" -eq 1 ]; then
-    if "$cc_bin" -std=c11 -g -O0 -fno-omit-frame-pointer -fwrapv \
+    if "$cc_bin" -std=c11 -g -O0 -fno-omit-frame-pointer -fwrapv -fexceptions \
       -fno-strict-aliasing -fsanitize=address -pthread \
       -I "$root/runtime/c" \
       -o "$work/$name.asan" "$work/$name.c" "$root/runtime/c/dawn_rt.c" -lm \

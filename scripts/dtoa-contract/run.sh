@@ -59,7 +59,7 @@ out_jvm="$("$root/bin/dawn" run "$here/probe.dawn" "$work/oracle.tsv")"
 check jvm "$out_jvm"
 
 "$root/bin/dawn" __emitc "$here/probe.dawn" -o "$work/probe.c"
-"$cc_bin" -std=c11 -O2 -fwrapv -fno-strict-aliasing -pthread \
+"$cc_bin" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread \
   -I "$root/runtime/c" \
   -o "$work/probe" "$work/probe.c" "$root/runtime/c/dawn_rt.c" -lm
 out_native="$("$work/probe" "$work/oracle.tsv")"

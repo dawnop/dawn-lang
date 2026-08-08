@@ -45,7 +45,7 @@ DAWNC=${DAWNC_BIN:-}
 if [ -z "$DAWNC" ]; then
   echo "building the native driver from selfhost/src/nmain.dawn..."
   ./bin/dawn __emitc selfhost/src/nmain.dawn -o "$OUT/nmain.c"
-  "${CC:-cc}" -std=c11 -O2 -fwrapv -fno-strict-aliasing -pthread -I "$ROOT/runtime/c" \
+  "${CC:-cc}" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread -I "$ROOT/runtime/c" \
     -o "$OUT/dawnc" "$OUT/nmain.c" "$ROOT/runtime/c/dawn_rt.c" -lm
   DAWNC="$OUT/dawnc"
 fi

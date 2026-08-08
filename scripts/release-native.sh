@@ -100,7 +100,7 @@ fi
 # side of the release would ever see it. Measured cost on 2026-08-04: 2.9 MB ->
 # 3.7 MB, link time unchanged (15.3 s both ways), zero linker warnings -- the
 # runtime calls nothing that needs NSS or dlopen.
-"${CC:-cc}" -std=c11 -O2 -fwrapv -fno-strict-aliasing -pthread -static \
+"${CC:-cc}" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread -static \
   -I "$ROOT/runtime/c" -o "$OUT" "$WORK/nmain.c" "$ROOT/runtime/c/dawn_rt.c" -lm
 
 # ---- check 1: it exists ----

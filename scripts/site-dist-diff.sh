@@ -93,7 +93,7 @@ echo "== native =="
 "$ROOT/bin/dawn" __emitc "$SNAP/site" -o "$OUT/site.c" > "$OUT/emitc.log" 2>&1 || {
   echo "FAIL: the site generator does not emit to C"; tail -20 "$OUT/emitc.log"; exit 1
 }
-"${CC:-cc}" -std=c11 -O2 -fwrapv -fno-strict-aliasing -pthread \
+"${CC:-cc}" -std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread \
   -I "$ROOT/runtime/c" -o "$OUT/sitegen" "$OUT/site.c" \
   "$ROOT/runtime/c/dawn_rt.c" -lm
 (cd "$SNAP" && "$OUT/sitegen") > "$OUT/native.log" 2>&1 || {

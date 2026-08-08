@@ -15,7 +15,7 @@ cd "$(dirname "$0")/.."
 root=$(pwd)
 
 cc_bin="${CC:-cc}"
-ccflags=(-std=c11 -O2 -fwrapv -fno-strict-aliasing -pthread -I "$root/runtime/c")
+ccflags=(-std=c11 -O2 -fwrapv -fexceptions -fno-strict-aliasing -pthread -I "$root/runtime/c")
 
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
