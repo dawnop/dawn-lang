@@ -77,6 +77,11 @@
 
 ## SYN-10 — P2 — match arm 可由纯空白分隔
 
+- **后续处置（2026-08-09）：已修。** parser 已删除 `can_start_pattern` 与零宽邻接；相邻臂
+  现在只接受物理换行或逗号，逗号后可换行且允许尾逗号。缺分隔符有固定诊断；恢复从坏臂
+  起点重扫并分别追踪 `()`、`[]`、`{}`，只在当前 match 顶层边界停止。绝对 grammar
+  corpus 同时钉住接受、拒绝与恢复，并以恢复旧邻接、破坏嵌套恢复两项负控证明会红。
+
 - **证据：V。** parser 在没有 newline/comma 时，只要下一个 token 看起来像 pattern，就直接开始下一 arm：`selfhost/src/front/parser.dawn:2183`、`selfhost/src/front/parser.dawn:2229`。
 - **边界：** `match x { 0 -> 1 1 -> 2 _ -> 3 }` 可解析；若下一 pattern 以 `[` 或 `(` 开始，它可能被上一 body 吞成 index/application postfix。
 - **影响：** 分隔是否成功取决于下一 pattern 的首 token和当前 expression postfix 集；新增 pattern/postfix 还可能改变旧代码 parse。

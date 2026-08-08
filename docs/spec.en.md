@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ e75b6b76f9b70ff8 -->
+<!-- doc-check: translation-of docs/spec.md @ 8582a4b81e5e73ec -->
 
 # Dawn Language Specification
 
@@ -657,7 +657,7 @@ impl[T] Head[List[T]] {
 }
 
 fn head_or[C: Head](c: C, d: C.Item) -> C.Item =   # the projection reduces at instantiation
-  match first(c) { Some(x) -> x  None -> d }        # head_or([1], 9) is Int
+  match first(c) { Some(x) -> x, None -> d }        # head_or([1], 9) is Int
 ```
 - The built-in `trait Ord[T] { fn cmp(a: T, b: T) -> Int }` and the impls for `Int`/`String`
   (**`Float` has none**: under NaN there is no total order to give — the reasons for refusing are
@@ -1212,6 +1212,13 @@ match shape {
   Point                  -> "point"
 }
 ```
+
+Adjacent match arms must be separated by a **physical newline** or `,`. A comma may be
+followed by a newline, and a trailing comma after the final arm is allowed. Whitespace alone is
+not a separator: `match x { 0 -> 1 1 -> 2 }` reports the missing newline or comma at the second
+`1`, rather than treating a token that looks like a pattern as an implicit boundary. This does
+not change §1.7 newline continuation: a newline nested inside `()`, `[]`, or `{}` still belongs
+to the arm body expression.
 
 ### 5.1 Pattern forms
 

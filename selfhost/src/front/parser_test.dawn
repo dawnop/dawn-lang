@@ -7,7 +7,7 @@ use std/str
 use front/parser.{parse_module}
 use front/astdump.{render_module}
 use front/ast.{
-  Expr, EInt, EVar, EApply, EBinary, ECtor, EBlock, ELambda,
+  Expr, EInt, EVar, EApply, EBinary, ECtor, EBlock, ELambda, EMatch,
   BinOp, OpAdd, OpMul,
   Stmt, SWhile,
   Decl, DFn, DConst, DUseModule, DImpl, Module,
@@ -159,6 +159,58 @@ test "a bare assignment arm is reported and later arms/decls still parse" {
   let (m, ds) = parse_module("fn f() = match x {\n  A -> q = 1\n  B -> 2\n}\n\nfn g() = 3")
   assert len(ds) > 0
   assert str.contains(ds[0].hint, "braces")
+  match m.decls[len(m.decls) - 1] {
+    DFn(f) -> { assert f.name == "g" }
+    _ -> { assert false }
+  }
+}
+
+test "match arms accept newline and comma separators" {
+  for src in [
+    "fn f(x: Int) -> Int = match x { 0 -> 1, _ -> 2 }",
+    "fn f(x: Int) -> Int = match x { 0 -> 1,\n  _ -> 2 }",
+    "fn f(x: Int) -> Int = match x {\n  0 -> 1,\n  _ -> 2,\n}"
+  ] {
+    let (_, ds) = parse_module(src)
+    assert len(ds) == 0
+  }
+}
+
+test "same-line match arms need a comma" {
+  let (_, ds) = parse_module("fn f(x: Int) -> Int = match x { 0 -> 1 1 -> 2 }")
+  assert len(ds) == 1
+  assert ds[0].msg == "expected a newline, `,` or `}` after this match arm"
+}
+
+test "match arm recovery respects every nested delimiter" {
+  let src = "fn f() = match x {\n" ++
+    "  A -> [\n" ++
+    "    Point {\n" ++
+    "      x: bad(\n" ++
+    "        =\n" ++
+    "      )\n" ++
+    "    },\n" ++
+    "  ]\n" ++
+    "  B -> 2\n" ++
+    "}\n\n" ++
+    "fn g() = 3"
+  let (m, ds) = parse_module(src)
+  assert len(ds) == 1
+  assert ds[0].msg == "expected an expression, found `=`"
+  match m.decls[0] {
+    DFn(f) ->
+      match f.body {
+        EMatch(_, arms, _, _) -> {
+          assert len(arms) == 1
+          match arms[0].body {
+            EInt(v, _, _) -> { assert v == 2 }
+            _ -> { assert false }
+          }
+        }
+        _ -> { assert false }
+      }
+    _ -> { assert false }
+  }
   match m.decls[len(m.decls) - 1] {
     DFn(f) -> { assert f.name == "g" }
     _ -> { assert false }

@@ -544,7 +544,7 @@ impl[T] Head[List[T]] {
 }
 
 fn head_or[C: Head](c: C, d: C.Item) -> C.Item =   # 投影随实例化归约
-  match first(c) { Some(x) -> x  None -> d }        # head_or([1], 9) 是 Int
+  match first(c) { Some(x) -> x, None -> d }        # head_or([1], 9) 是 Int
 ```
 - 预置 `trait Ord[T] { fn cmp(a: T, b: T) -> Int }` 及 `Int`/`String` 的 impl
   （**`Float` 没有**，NaN 下无全序可给——拒绝理由见 §4.3 数值边缘语义，2026-07-26
@@ -984,6 +984,11 @@ match shape {
   Point                  -> "point"
 }
 ```
+
+相邻 match 臂必须由**物理换行**或 `,` 分隔；`,` 后可以换行，最后一臂后也允许
+尾逗号。空格不是分隔符：`match x { 0 -> 1 1 -> 2 }` 会在第二个 `1` 处明确报缺少
+换行或逗号，而不会把“下一 token 看起来像 pattern”当作隐式边界。该规则不改变
+§1.7 的换行续接：嵌套在 `()`、`[]`、`{}` 内的换行仍属于臂体表达式。
 
 ### 5.1 模式形式
 
