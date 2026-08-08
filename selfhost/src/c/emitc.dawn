@@ -29,7 +29,7 @@ use check/types.{
   Ty, TyInt, TyFloat, TyBool, TyString, TyUnit, TyNever, TyError, TyVar, TyAssoc,
   TyAdt, TyTuple, TyFn, TyBytes, TyList, TyMap, TySet, TyArray, TyJava, peel_opaque,
   intr_at, Adts, adt_of, prelude_adts, OPTION_ID, RESULT_ID, cast_target,
-  is_ref_ty, Eff, EPure, hash_scalars, ord_scalars
+  is_ref_ty, Eff, EPure, hash_scalars, ord_scalars, intr_owned_args
 }
 use ir/reach.{TableUse}
 use embed/unicode_case
@@ -104,7 +104,20 @@ pub type CSt = {
   # order, and the cache from qualified key to builder name. Spliced ahead of
   # the function bodies by `emit_program`; see `const_builder`.
   cdefs: List[String],
-  cmap: Map[String, String]
+  cmap: Map[String, String],
+  # The current function's owned slots: every binding declared through
+  # DAWN_OWNED (rc-tracked lets plus the owned-parameter shadows), reset per
+  # function. A bare use of one in a consuming position is a transfer and
+  # emits `dawn_take` -- see emit_expr's `k`.
+  tracked: Set[Int],
+  # The declarations for those slots, collected while the body is emitted
+  # and spliced at the top of the function by emit_fn. They cannot sit at
+  # the binding site: Core's loops land `continue`/`break` on labels, and a
+  # goto past a cleanup variable's initializer is undefined -- the landing
+  # pad would release whatever garbage the slot happened to hold. At the
+  # top, NULL-initialized before any label, the binding site is a plain
+  # assignment and every path is covered.
+  decls: List[String]
 }
 
 fn pad(n: Int) -> String = {
@@ -264,6 +277,32 @@ fn mangle(owner: String, name: String) -> String =
   "dawn_" ++ escape_part(owner) ++ "__" ++ escape_part(name)
 
 fn local_name(sym: Int) -> String = "v" ++ to_string(sym)
+
+## The C parameter name behind an owned-parameter shadow: the parameter
+## arrives as `pN`, and the function's first statements move each one into a
+## DAWN_OWNED local named `vN` -- `__attribute__((cleanup))` sits on
+## automatic variables only, never on parameters, and the body was emitted
+## against `vN` either way. Distinct first letter, so it can collide with
+## neither locals (`v`), temps (`t`) nor anything `mangle` mints (`dawn_`).
+fn param_name(sym: Int) -> String = "p" ++ to_string(sym)
+
+## A transfer: the reference moves out and the slot is cleared in the same
+## expression, so the frame's unwind cleanup cannot release a value that
+## already belongs to the callee (dawn_rt.h, "unwind cleanup").
+fn take_expr(sym: Int, ty: Ty) -> String =
+  "((" ++ c_type(ty) ++ ")dawn_take((void**)&" ++ local_name(sym) ++ "))"
+
+## rc.dawn's `dictish`, on the shape this side can see -- the mirror of
+## rc.chk_dictish, and held to it by the same corpus: a dictionary is a
+## static outside the ledger, so a binding initialised from one is neither
+## tracked nor cleaned.
+fn emit_dictish(e: CExpr) -> Bool =
+  match e {
+    CDictRef(_, _, _, _) -> true
+    CDictApply(_, _, _) -> true
+    CDictArg(_, _, _, _, _) -> true
+    _ -> false
+  }
 
 fn loop_end(id: Int) -> String = "L" ++ to_string(id) ++ "_end"
 
@@ -686,18 +725,33 @@ fn bin_op_c(op: CBinOp) -> String =
 
 # ---- expressions ----
 
-pub fn emit_expr(st: CSt, e: CExpr) -> (CSt, String) =
+## `k` marks a consuming position, the same classification `rc.rc_check`
+## walks with (chk_expr's `k`): the value is handed over and the receiver
+## keeps it. Only one arm reads it -- a bare tracked local in a consuming
+## position is a transfer, and a transfer must clear its slot in the same
+## expression (`dawn_take`), or the frame's unwind cleanup would release a
+## value that already belongs to the callee. Every other arm only routes the
+## flag the way the checker does, which is what keeps the two classifications
+## one: a divergence here is a double release (a take the checker called a
+## borrow) or a leak (the reverse), and the spike corpus's asan check is the
+## gate that asks.
+pub fn emit_expr(st: CSt, e: CExpr, k: Bool) -> (CSt, String) =
   match e {
     CInt(v) -> (st, "INT64_C(" ++ to_string(v) ++ ")")
     CFloat(v) -> (st, float_lit(v))
     CBool(v) -> (st, if v { "true" } else { "false" })
     CStr(v) -> emit_str_static(st, v)
     CUnit -> (st, "DAWN_UNIT")
-    CLocal(sym, _) -> (st, local_name(sym))
+    CLocal(sym, ty) ->
+      if k && set.has(st.tracked, sym) {
+        (st, take_expr(sym, ty))
+      } else {
+        (st, local_name(sym))
+      },
     CReturn(v) ->
       match v {
         Some(inner) -> {
-          let (st1, cv) = emit_expr(st, inner)
+          let (st1, cv) = emit_expr(st, inner, true)
           (line(st1, "return " ++ cv ++ ";"), "DAWN_UNIT")
         }
         None -> (line(st, "return DAWN_UNIT;"), "DAWN_UNIT")
@@ -707,7 +761,7 @@ pub fn emit_expr(st: CSt, e: CExpr) -> (CSt, String) =
     CBreak(id) -> (line(st, "goto " ++ loop_end(id) ++ ";"), "DAWN_UNIT")
     CContinue(id) -> (line(st, "goto " ++ loop_step(id) ++ ";"), "DAWN_UNIT")
     CUnary(op, operand, _) -> {
-      let (st1, v) = emit_expr(st, operand)
+      let (st1, v) = emit_expr(st, operand, false)
       match op {
         CNeg -> (st1, "(-(" ++ v ++ "))")
         CNot -> (st1, "(!(" ++ v ++ "))")
@@ -715,14 +769,15 @@ pub fn emit_expr(st: CSt, e: CExpr) -> (CSt, String) =
       }
     }
     CBinary(op, l, r, ty) -> emit_binary(st, op, l, r, ty)
-    CIf(cond, thn, els, ty) -> emit_if(st, cond, thn, els, ty)
+    CIf(cond, thn, els, ty) -> emit_if(st, cond, thn, els, ty, k)
     CBlock(stmts, tail, _) -> {
       var st1 = st
       for s in stmts {
         st1 = emit_stmt(st1, s)
       }
       match tail {
-        Some(t) -> emit_expr(st1, t)
+        # a block's tail hands its value out, transfers included
+        Some(t) -> emit_expr(st1, t, k)
         None -> (st1, "DAWN_UNIT")
       }
     }
@@ -731,32 +786,34 @@ pub fn emit_expr(st: CSt, e: CExpr) -> (CSt, String) =
     CCtor(_, ci, args, _) -> emit_alloc(st, ci, args, false)
     CTuple(elems, _) -> emit_alloc(st, 0, elems, true)
     CField(target, _, _, idx, ty) -> {
-      let (st1, tv) = emit_expr(st, target)
+      let (st1, tv) = emit_expr(st, target, false)
       (st1, adt_ref(tv) ++ "->fields[" ++ to_string(idx) ++ "]." ++ slot_of(ty))
     }
     CTupleGet(target, idx, ty) -> {
       # the other half of the tuple's erasure: every element went in boxed
-      let (st1, tv) = emit_expr(st, target)
+      let (st1, tv) = emit_expr(st, target, false)
       (st1, unbox_expr(adt_ref(tv) ++ "->fields[" ++ to_string(idx) ++ "].p", ty))
     }
     CIsCtor(target, _, ci) -> {
-      let (st1, tv) = emit_expr(st, target)
+      let (st1, tv) = emit_expr(st, target, false)
       (st1, "(" ++ adt_ref(tv) ++ "->tag == " ++ to_string(ci) ++ ")")
     }
     CTagOf(target, _) -> {
-      let (st1, tv) = emit_expr(st, target)
+      let (st1, tv) = emit_expr(st, target, false)
       (st1, "((int64_t)" ++ adt_ref(tv) ++ "->tag)")
     }
     CBox(inner, from) -> {
-      let (st1, v) = emit_expr(st, inner)
+      # a boxed reference is the reference (a boxed scalar allocates fresh),
+      # so the flag passes through exactly when the wrapper is transparent
+      let (st1, v) = emit_expr(st, inner, k && is_ref_ty(from))
       (st1, box_call(v, from))
     }
     CDup(inner, ty) -> {
-      let (st1, v) = emit_expr(st, inner)
+      let (st1, v) = emit_expr(st, inner, false)
       (st1, dup_expr(v, ty))
     }
     CUnbox(inner, to) -> {
-      let (st1, v) = emit_expr(st, inner)
+      let (st1, v) = emit_expr(st, inner, k && is_ref_ty(to))
       (st1, unbox_expr(v, to))
     }
     CFnRef(_, name, _) ->
@@ -772,14 +829,14 @@ pub fn emit_expr(st: CSt, e: CExpr) -> (CSt, String) =
       var st1 = st
       var parts = ["&" ++ dict_symbol(key), to_string(len(args))]
       for a in args {
-        let (st2, v) = emit_expr(st1, a)
+        let (st2, v) = emit_expr(st1, a, false)
         st1 = st2
         parts = parts ++ [v]
       }
       (st1, "dawn_dict_new(" ++ join(parts, ", ") ++ ")")
     }
     CDictArg(dv, _owner, _key, idx, _) -> {
-      let (st1, d) = emit_expr(st, dv)
+      let (st1, d) = emit_expr(st, dv, false)
       (st1, "(((dawn_dict*)(" ++ d ++ "))->args[" ++ to_string(idx) ++ "])")
     }
     CConstRef(owner, name, ty) -> {
@@ -818,7 +875,7 @@ pub fn emit_expr(st: CSt, e: CExpr) -> (CSt, String) =
       let (sta, tmp) = fresh(st1)
       st1 = line(sta, "dawn_array* " ++ tmp ++ " = dawn_array_new();")
       for el in elems {
-        let (st2, v) = emit_expr(st1, el)
+        let (st2, v) = emit_expr(st1, el, true)
         # an Array's element is erased, so it goes in boxed -- the JVM's
         # array_push takes an Object for the same reason. The owning push:
         # elements arrive owned (the pass consumes literal elements), and the
@@ -848,7 +905,8 @@ fn emit_closure(st: CSt, name: String, owner: String, caps: List[CExpr]) -> (CSt
   var st1 = st
   var parts: List[String] = []
   for c in caps {
-    let (st2, v) = emit_expr(st1, c)
+    # the closure keeps its captures: a consuming position (chk_list k=true)
+    let (st2, v) = emit_expr(st1, c, true)
     st1 = st2
     parts = parts ++ [v]
   }
@@ -902,7 +960,8 @@ fn emit_alloc(st: CSt, tag: Int, args: List[CExpr], erased: Bool) -> (CSt, Strin
   var st1 = st
   var parts: List[String] = []
   for a in args {
-    let (st2, v) = emit_expr(st1, a)
+    # a constructor keeps its fields: consuming positions (chk k=true)
+    let (st2, v) = emit_expr(st1, a, true)
     st1 = st2
     parts = parts ++ [if erased { box_call(v, cex_ty(a)) } else { v }]
   }
@@ -937,20 +996,20 @@ fn emit_binary(st: CSt, op: CBinOp, l: CExpr, r: CExpr, ty0: Ty) -> (CSt, String
   # not to C's operators. This is load-bearing for pattern tests, whose
   # nested projections are only valid once the outer test has passed.
   if op == CAnd || op == COr {
-    let (st1, lv) = emit_expr(st, l)
+    let (st1, lv) = emit_expr(st, l, false)
     let (st2, tmp) = fresh(st1)
     let st3 = line(st2, "bool " ++ tmp ++ " = " ++ lv ++ ";")
     let guard = if op == CAnd { tmp } else { "!" ++ tmp }
     let st4 = push(line(st3, "if (" ++ guard ++ ") {"))
-    let (st5, rv) = emit_expr(st4, r)
+    let (st5, rv) = emit_expr(st4, r, false)
     let st6 = pop(line(st5, tmp ++ " = " ++ rv ++ ";"))
     (line(st6, "}"), tmp)
   } else if op == CConcat {
     # `++` joins three things and each has its own join. The JVM emitter
     # matches on the same three; a single arm here compiled while nothing
     # concatenated anything but a String.
-    let (st1, lv) = emit_expr(st, l)
-    let (st2, rv) = emit_expr(st1, r)
+    let (st1, lv) = emit_expr(st, l, false)
+    let (st2, rv) = emit_expr(st1, r, false)
     match lt {
       # `std/pvec.concat` is a Dawn function and takes both sides owned; the
       # other two are runtime primitives and borrow. See `own_args`.
@@ -964,8 +1023,8 @@ fn emit_binary(st: CSt, op: CBinOp, l: CExpr, r: CExpr, ty0: Ty) -> (CSt, String
     # Bytes compares by content (spec §9.5.1). Left to the pointer comparison
     # below it would answer identity -- and answer it silently, which is what
     # eq_bytes.dawn is in the corpus to catch.
-    let (st1, lv) = emit_expr(st, l)
-    let (st2, rv) = emit_expr(st1, r)
+    let (st1, lv) = emit_expr(st, l, false)
+    let (st2, rv) = emit_expr(st1, r, false)
     let f = if lt == TyBytes { "dawn_bytes_eq" } else { "dawn_str_eq" }
     let call = f ++ "(" ++ lv ++ ", " ++ rv ++ ")"
     (st2, if op == CEq { call } else { "(!" ++ call ++ ")" })
@@ -973,13 +1032,13 @@ fn emit_binary(st: CSt, op: CBinOp, l: CExpr, r: CExpr, ty0: Ty) -> (CSt, String
     # `dawn_str` is a struct, so C's relational operators do not apply to it;
     # the order is the same code-point order `dawn_cmp_str` gives the Ord
     # dictionary.
-    let (st1, lv) = emit_expr(st, l)
-    let (st2, rv) = emit_expr(st1, r)
+    let (st1, lv) = emit_expr(st, l, false)
+    let (st2, rv) = emit_expr(st1, r, false)
     (st2, "(dawn_cmp_str(" ++ lv ++ ", " ++ rv ++ ") " ++ bin_op_c(op) ++ " 0)")
   } else if op == CMod && ty == TyFloat {
     # C's `%` is integer-only. `fmod` is the IEEE remainder the JVM's DREM is.
-    let (st1, lv) = emit_expr(st, l)
-    let (st2, rv) = emit_expr(st1, r)
+    let (st1, lv) = emit_expr(st, l, false)
+    let (st2, rv) = emit_expr(st1, r, false)
     (st2, "fmod(" ++ lv ++ ", " ++ rv ++ ")")
   } else if op == CShl || op == CShr || op == CUshr {
     # A shift takes the low six bits of its count -- spec §4.3 states it as a
@@ -993,8 +1052,8 @@ fn emit_binary(st: CSt, op: CBinOp, l: CExpr, r: CExpr, ty0: Ty) -> (CSt, String
     # architecture CI runs. AArch64's `lsl` by 64 answers 0, and `1 << -1`
     # answers whatever the low bits of -1 select, which is `1 << 63` here and
     # need not be there.
-    let (st1, lv) = emit_expr(st, l)
-    let (st2, rv) = emit_expr(st1, r)
+    let (st1, lv) = emit_expr(st, l, false)
+    let (st2, rv) = emit_expr(st1, r, false)
     let n = "((" ++ rv ++ ") & 63)"
     # `<<` also goes through uint64_t: shifting a bit into (or past) the sign
     # bit of a signed type is undefined on its own account (C11 6.5.7p4), and
@@ -1010,16 +1069,16 @@ fn emit_binary(st: CSt, op: CBinOp, l: CExpr, r: CExpr, ty0: Ty) -> (CSt, String
         "((int64_t)((uint64_t)(" ++ lv ++ ")" ++ sh ++ n ++ "))"
       })
   } else if op == CDiv && ty == TyInt {
-    let (st1, lv) = emit_expr(st, l)
-    let (st2, rv) = emit_expr(st1, r)
+    let (st1, lv) = emit_expr(st, l, false)
+    let (st2, rv) = emit_expr(st1, r, false)
     (st2, "dawn_idiv(" ++ lv ++ ", " ++ rv ++ ")")
   } else if op == CMod && ty == TyInt {
-    let (st1, lv) = emit_expr(st, l)
-    let (st2, rv) = emit_expr(st1, r)
+    let (st1, lv) = emit_expr(st, l, false)
+    let (st2, rv) = emit_expr(st1, r, false)
     (st2, "dawn_imod(" ++ lv ++ ", " ++ rv ++ ")")
   } else {
-    let (st1, lv) = emit_expr(st, l)
-    let (st2, rv) = emit_expr(st1, r)
+    let (st1, lv) = emit_expr(st, l, false)
+    let (st2, rv) = emit_expr(st1, r, false)
     (st2, "(" ++ lv ++ " " ++ bin_op_c(op) ++ " " ++ rv ++ ")")
   }
 }
@@ -1047,8 +1106,8 @@ fn no_value(e: CExpr) -> Bool = {
   }
 }
 
-fn emit_if(st: CSt, cond: CExpr, thn: CExpr, els: Option[CExpr], ty: Ty) -> (CSt, String) = {
-  let (st1, cv) = emit_expr(st, cond)
+fn emit_if(st: CSt, cond: CExpr, thn: CExpr, els: Option[CExpr], ty: Ty, k: Bool) -> (CSt, String) = {
+  let (st1, cv) = emit_expr(st, cond, false)
   # peeled for the reason emit_binary is: an opaque type over Unit is still a
   # Unit to the emitter, and asking by name misses it
   let peeled = peel_opaque(ty)
@@ -1061,7 +1120,7 @@ fn emit_if(st: CSt, cond: CExpr, thn: CExpr, els: Option[CExpr], ty: Ty) -> (CSt
       st2
     }
   let st4 = push(line(st3, "if (" ++ cv ++ ") {"))
-  let (st5, tv) = emit_expr(st4, thn)
+  let (st5, tv) = emit_expr(st4, thn, k)
   let st6 =
     if is_value && not no_value(thn) {
       line(st5, tmp ++ " = " ++ tv ++ ";")
@@ -1073,7 +1132,7 @@ fn emit_if(st: CSt, cond: CExpr, thn: CExpr, els: Option[CExpr], ty: Ty) -> (CSt
     match els {
       Some(ee) -> {
         let sa = push(line(st7, "} else {"))
-        let (sb, ev) = emit_expr(sa, ee)
+        let (sb, ev) = emit_expr(sa, ee, k)
         let sc =
           if is_value && not no_value(ee) {
             line(sb, tmp ++ " = " ++ ev ++ ";")
@@ -1091,7 +1150,8 @@ fn emit_call(st: CSt, callee: CCallee, args: List[CExpr], ty: Ty) -> (CSt, Strin
   var st1 = st
   var cargs: List[String] = []
   for a in args {
-    let (st2, v) = emit_expr(st1, a)
+    # a callee's parameters arrive owned: consuming positions (chk k=true)
+    let (st2, v) = emit_expr(st1, a, true)
     st1 = st2
     cargs = cargs ++ [v]
   }
@@ -1103,7 +1163,7 @@ fn emit_call(st: CSt, callee: CCallee, args: List[CExpr], ty: Ty) -> (CSt, Strin
     CDefault(owner, tid, method) ->
       (st1, default_symbol(owner, tid, method) ++ "(" ++ join(cargs, ", ") ++ ")")
     CMethod(dict, _tid, _m, idx) -> {
-      let (st3a, dv0) = emit_expr(st1, dict)
+      let (st3a, dv0) = emit_expr(st1, dict, false)
       # A dictionary reaches here as whatever its position carries -- a
       # parameter at a type-variable position is `void*`, which C will not
       # dereference. The JVM's CHECKCAST is this cast.
@@ -1123,7 +1183,7 @@ fn emit_call(st: CSt, callee: CCallee, args: List[CExpr], ty: Ty) -> (CSt, Strin
           join(cargs ++ [dv], ", ") ++ "))")
     }
     CDynamic(target) -> {
-      let (st3, tv) = emit_expr(st1, target)
+      let (st3, tv) = emit_expr(st1, target, false)
       # One indirect call whatever the capture count: the environment is
       # always the first argument, and the adapter unpacks it. Erased in and
       # out, because that is the only shape every adapter has -- see
@@ -1346,10 +1406,15 @@ fn erased_from(e: CExpr) -> Ty =
 fn emit_intrinsic(st: CSt, name: String, args: List[CExpr], ty: Ty) -> (CSt, String) = {
   var st1 = st
   var cargs: List[String] = []
+  # an intrinsic borrows its arguments except at the owned positions the
+  # reuse analysis lists -- the same classification chk_walk reads
+  let owned = intr_owned_args(name)
+  var ai = 0
   for a in args {
-    let (st2, v) = emit_expr(st1, a)
+    let (st2, v) = emit_expr(st1, a, list.contains(owned, ai))
     st1 = st2
     cargs = cargs ++ [v]
+    ai = ai + 1
   }
   let a0 = if len(cargs) > 0 { cargs[0] } else { "" }
   if name == "panic" {
@@ -1486,18 +1551,36 @@ fn emit_intrinsic(st: CSt, name: String, args: List[CExpr], ty: Ty) -> (CSt, Str
 pub fn emit_stmt(st: CSt, s: CStmt) -> CSt =
   match s {
     CSLet(sym, ty, init) -> {
-      let (st1, v) = emit_expr(st, init)
+      let (st1, v) = emit_expr(st, init, true)
+      # An owned slot: declared through DAWN_OWNED (hoisted to the function
+      # top, see CSt.decls) so the unwinder releases what the frame still
+      # holds when a raise discards it (#193 ARC-05); the binding site is
+      # then a plain assignment. The same bindings rc.dawn tracks (`bind`),
+      # mirrored by the same test (chk_stmt / chk_dictish): a dictionary is
+      # a static outside the ledger, and dropping one would read a header it
+      # does not have.
+      let own = is_ref_ty(ty) && not emit_dictish(init)
+      let st1b = if own {
+        CSt {
+          ..st1,
+          tracked: set.insert(st1.tracked, sym),
+          decls: st1.decls ++ ["DAWN_OWNED " ++ c_type(ty) ++ " " ++ local_name(sym) ++ " = NULL;"]
+        }
+      } else {
+        st1
+      }
+      let lhs = (if own { "" } else { c_type(ty) ++ " " }) ++ local_name(sym)
       if no_value(init) {
         # `let x = panic(...)` binds nothing; the declaration still has to
         # exist because later statements name it, but it cannot be initialised
         # from a value that was never produced
-        line(discard(st1, v), c_type(ty) ++ " " ++ local_name(sym) ++ " = " ++ c_zero(ty) ++ ";")
+        line(discard(st1b, v), lhs ++ " = " ++ c_zero(ty) ++ ";")
       } else {
-        line(st1, c_type(ty) ++ " " ++ local_name(sym) ++ " = " ++ v ++ ";")
+        line(st1b, lhs ++ " = " ++ v ++ ";")
       }
     }
     CSAssign(sym, value) -> {
-      let (st1, v) = emit_expr(st, value)
+      let (st1, v) = emit_expr(st, value, true)
       # Same reason the `let` above tests it: a right-hand side that leaves
       # never reaches the store, and `emit_expr` hands back DAWN_UNIT for it,
       # which does not assign to the variable's type.
@@ -1506,16 +1589,16 @@ pub fn emit_stmt(st: CSt, s: CStmt) -> CSt =
       }
     }
     CSDiscard(e) -> {
-      let (st1, v) = emit_expr(st, e)
+      let (st1, v) = emit_expr(st, e, false)
       discard(st1, v)
     }
     CSIf(cond, thn, els) -> {
-      let (st1, _) = emit_if(st, cond, thn, els, TyUnit)
+      let (st1, _) = emit_if(st, cond, thn, els, TyUnit, false)
       st1
     }
     CSLoop(id, body, step) -> {
       let st1 = push(line(st, "for (;;) {"))
-      let (st2, bv) = emit_expr(st1, body)
+      let (st2, bv) = emit_expr(st1, body, false)
       let st3 = discard(st2, bv)
       # the step label is where CContinue lands, so `continue` runs the
       # increment -- the whole reason CSLoop carries a step
@@ -1523,7 +1606,7 @@ pub fn emit_stmt(st: CSt, s: CStmt) -> CSt =
       let st5 =
         match step {
           Some(sv) -> {
-            let (sa, v) = emit_expr(st4, sv)
+            let (sa, v) = emit_expr(st4, sv, false)
             discard(sa, v)
           }
           None -> st4
@@ -1533,8 +1616,11 @@ pub fn emit_stmt(st: CSt, s: CStmt) -> CSt =
     }
     # `rc.dawn` only names a binding here when its type is a reference, so
     # there is no test to make: a scalar would not compile, which is the loud
-    # failure and the right one.
-    CSDrop(sym) -> line(st, "dawn_drop(" ++ local_name(sym) ++ ");")
+    # failure and the right one. The slot is cleared with the drop -- a
+    # release the pass placed must leave nothing for the unwind cleanup, or
+    # a later raise in the same frame would release the value twice.
+    CSDrop(sym) ->
+      line(st, "dawn_drop(" ++ local_name(sym) ++ "); " ++ local_name(sym) ++ " = NULL;")
   }
 
 # ---- functions and program ----
@@ -1557,6 +1643,27 @@ fn fn_signature(f: CFun) -> String = {
   # parameter of its own C type
   for e in f.evs {
     ps = ps ++ [c_type(e.ty) ++ " " ++ local_name(e.sym)]
+  }
+  let plist = if len(ps) == 0 { "void" } else { join(ps, ", ") }
+  c_type(f.ret) ++ " " ++ fn_symbol(f) ++ "(" ++ plist ++ ")"
+}
+
+## The definition's signature: the owned parameters (emit_fn's shadow set)
+## arrive under `pN` so the body's `vN` can be their DAWN_OWNED shadow. The
+## prototypes keep `fn_signature` -- C ignores a prototype's parameter names,
+## and renaming only where the shadow exists keeps the two visibly paired.
+fn fn_signature_def(f: CFun, shadowed: Set[Int]) -> String = {
+  var ps: List[String] = []
+  for p in f.captures ++ f.params {
+    let n = if set.has(shadowed, p.sym) { param_name(p.sym) } else { local_name(p.sym) }
+    ps = ps ++ [c_type(p.ty) ++ " " ++ n]
+  }
+  for d in f.dicts {
+    ps = ps ++ ["dawn_dict* " ++ local_name(d.sym)]
+  }
+  for e in f.evs {
+    let n = if set.has(shadowed, e.sym) { param_name(e.sym) } else { local_name(e.sym) }
+    ps = ps ++ [c_type(e.ty) ++ " " ++ n]
   }
   let plist = if len(ps) == 0 { "void" } else { join(ps, ", ") }
   c_type(f.ret) ++ " " ++ fn_symbol(f) ++ "(" ++ plist ++ ")"
@@ -1636,8 +1743,25 @@ fn emit_adapter(st: CSt, f: CFun) -> CSt = {
 }
 
 fn emit_fn(st: CSt, f: CFun) -> CSt = {
-  let st1 = push(line(CSt { ..st, tmp: 0 }, fn_signature(f) ++ " {"))
-  let (st2, v) = emit_expr(st1, f.body)
+  # The owned parameters -- captures, params and evidence that arrive as
+  # counted references (rc_fn binds exactly this set). Each is renamed in the
+  # signature and moved into a DAWN_OWNED shadow before the body runs: the
+  # cleanup attribute sits on automatic variables only, and a callee owns its
+  # parameters, so a raise unwinding this frame has to release the ones not
+  # yet dropped or transferred.
+  var shadows: List[CParam] = []
+  var tracked: Set[Int] = set.empty()
+  for p in f.captures ++ f.params ++ f.evs {
+    if is_ref_ty(p.ty) && not set.has(st.dict_syms, p.sym) {
+      shadows = shadows ++ [p]
+      tracked = set.insert(tracked, p.sym)
+    }
+  }
+  # The body is emitted into an empty transcript so the owned-slot
+  # declarations it collects (CSt.decls) can be spliced ahead of it -- they
+  # have to precede every statement and every label, see the field's note.
+  let st1 = CSt { ..st, tmp: 0, tracked: tracked, decls: [], out: [], ind: 1 }
+  let (st2, v) = emit_expr(st1, f.body, true)
   let st3 =
     if peel_opaque(f.ret) == TyUnit {
       line(discard(st2, v), "return DAWN_UNIT;")
@@ -1648,7 +1772,21 @@ fn emit_fn(st: CSt, f: CFun) -> CSt = {
     } else {
       line(st2, "return " ++ v ++ ";")
     }
-  line(pop(st3), "}")
+  var head: List[String] = [fn_signature_def(f, tracked) ++ " {\n"]
+  for p in shadows {
+    head = head ++ [pad(1) ++ "DAWN_OWNED " ++ c_type(p.ty) ++ " " ++
+        local_name(p.sym) ++ " = " ++ param_name(p.sym) ++ ";\n"]
+  }
+  for d in st3.decls {
+    head = head ++ [pad(1) ++ d ++ "\n"]
+  }
+  CSt {
+    ..st3,
+    out: st.out ++ head ++ st3.out ++ ["}\n"],
+    ind: st.ind,
+    decls: [],
+    tracked: set.empty()
+  }
 }
 
 const C_HEX: String = "0123456789ABCDEF"
@@ -1748,7 +1886,9 @@ fn emit_units(units: List[EmitMod], u: TableUse, adts: Adts) -> CSt = {
     adts: adts,
     cur_owner: "",
     cdefs: [],
-    cmap: map.empty()
+    cmap: map.empty(),
+    tracked: set.empty(),
+    decls: []
   }
   st = line(st, "/* generated by dawn __emitc -- Core IR -> C */")
   st = line(st, "#include \"dawn_rt.h\"")

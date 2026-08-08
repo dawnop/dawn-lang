@@ -182,16 +182,24 @@
 # it owes onward sits where nested handlers cannot reach it.
 
 # --- recovery leaks (#193, ARC-05) ----------------------------------------
-# A raise longjmps past the frames between it and the handler, and their
-# drops never run. Three distinct leak sources, one corpus each: a reference
-# live across the raise (recover_live), the raise's own message -- borrowed
-# by the intrinsic, never released by a caller that is gone (recover_msg) --
-# and the references a bracket's unwind path discards (recover_bracket).
-# These three carry no .leaks-on-catch marker on purpose: their asan check is
-# the acceptance oracle for the unwind-cleanup fix, red until the discarded
-# frames' cleanups run, and the ratchet flips them to "FIXED" the day it
-# works. The seven markers that exempt the older catch-taking corpora fall
-# with the same fix.
-recover_live:asan
-recover_msg:asan
-recover_bracket:asan
+# recover_live:asan, recover_msg:asan and recover_bracket:asan were here,
+# for one day -- deliberately, as the acceptance oracle for the unwind
+# cleanups: they carried no .leaks-on-catch marker, so they were red for as
+# long as a raise longjmped past the frames between it and the handler
+# without running their drops. Three distinct leak sources, one corpus each:
+# a reference live across the raise (recover_live), the raise's own message
+# -- borrowed by the intrinsic, never released by a caller that is gone
+# (recover_msg) -- and the references a bracket's unwind path discards
+# (recover_bracket).
+#
+# Closed by making the raise a forced unwind (route A3,
+# native-failure-design.md 4.1): every owned slot in emitted C is a cleanup
+# variable the unwinder releases, every release the RC pass placed also
+# clears its slot, a transfer clears it in the same expression (dawn_take),
+# and the handler frame announces itself by identity -- the CFA-comparison
+# stop function the design sketched was measurably broken under
+# AddressSanitizer, whose fake stack has no ordering relation to the real
+# one, so it stopped the walk at the first frame and skipped every landing
+# pad. The .leaks-on-catch markers of the older catch-taking corpora fell
+# with the same fix, and the marker mechanism itself is gone from run.sh:
+# every program answers for every byte.

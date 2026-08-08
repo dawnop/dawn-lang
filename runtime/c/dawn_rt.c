@@ -827,16 +827,30 @@ static dawn_handler *dawn_find_handler(bool is_panic) {
  * down is made by the platform unwinder instead: `_Unwind_ForcedUnwind`
  * walks the frames one by one and runs each one's cleanups -- the
  * `__attribute__((cleanup))` slots the C emitter puts on owned locals, real
- * landing pads because everything here is compiled with `-fexceptions` --
- * and the stop function ends the walk with a `longjmp` once it reaches the
- * frame that holds the handler.
+ * landing pads because everything here is compiled with `-fexceptions`.
  *
- * The frame test is a CFA comparison: the stack grows down, so the first
- * frame whose canonical frame address lies at or above the handler struct's
- * own address is the frame the struct lives in. That holds whether or not
- * `dawn_run_caught` was inlined into its caller -- the struct is wherever it
- * is, and the comparison asks about the frame that contains it, not about a
- * function name.
+ * The walk ends at the handler's own frame, and the frame announces itself:
+ * the handler struct carries a cleanup of its own (`dawn_handler_landing`,
+ * planted by `dawn_run_caught` and `dawn_bracket`), and when the unwinder
+ * reaches the frame that holds the *target* handler -- pointer identity
+ * against `dawn_unwind_target`, no address arithmetic -- that cleanup
+ * longjmps into the handler's setjmp branch. The design's original stop
+ * function compared the unwinder's CFA against the struct's address and
+ * stopped at the first frame at or above it; AddressSanitizer broke that,
+ * measurably: it moves locals onto its fake stack, a heap region with no
+ * ordering relation to the real stack, so the comparison stopped the walk at
+ * the very first frame and every landing pad between raise and handler was
+ * skipped -- exactly the leak the mechanism exists to fix, visible only
+ * under the sanitizer that was supposed to prove it fixed. Identity does not
+ * order anything, so the fake stack cannot confuse it, and inlining cannot
+ * either -- the cleanup travels with the variable, wherever its frame is.
+ * The stop function is left with one job: abort loudly if the walk runs off
+ * the stack, which would mean the handler chain and the real stack disagree.
+ *
+ * A handler frame that is merely *skipped* -- a panic passing an io barrier
+ * -- runs the same cleanup, fails the identity test, and does nothing; the
+ * target's setjmp branch restores the chain to its own `prev`, which drops
+ * the skipped frames' entries with it, exactly as the longjmp always had.
  *
  * The exception object is static and so is this whole arrangement's
  * single-threadedness: the program runs on the runtime's one big-stack
@@ -848,9 +862,20 @@ static dawn_handler *dawn_find_handler(bool is_panic) {
  * stack) is the fallback if one of them turns out not to carry it. */
 static struct _Unwind_Exception dawn_uexc;
 
+static dawn_handler *dawn_unwind_target;
+
 static void dawn_uexc_cleanup(_Unwind_Reason_Code r, struct _Unwind_Exception *e) {
   (void)r;
   (void)e;
+}
+
+/* The cleanup on every handler struct. On a normal exit the target is NULL
+ * and this is a comparison and nothing else. */
+static void dawn_handler_landing(dawn_handler *h) {
+  if (dawn_unwind_target == h) {
+    dawn_unwind_target = NULL;
+    longjmp(h->jb, 1);
+  }
 }
 
 static _Unwind_Reason_Code dawn_unwind_stop(int version, _Unwind_Action actions,
@@ -860,24 +885,25 @@ static _Unwind_Reason_Code dawn_unwind_stop(int version, _Unwind_Action actions,
   (void)version;
   (void)cls;
   (void)exc;
-  dawn_handler *h = (dawn_handler *)arg;
+  (void)ctx;
+  (void)arg;
   if (actions & _UA_END_OF_STACK) {
-    /* dawn_raise found this handler on the chain, so the walk running out of
+    /* dawn_raise found a handler on the chain, so the walk running out of
      * stack means the chain and the stack disagree -- a runtime bug, and
      * answering quietly would turn it into a wrong answer somewhere else. */
     fflush(stdout);
     fputs("dawn: unwound past the failure handler\n", stderr);
     abort();
   }
-  if (_Unwind_GetCFA(ctx) >= (uintptr_t)(void *)h) longjmp(h->jb, 1);
   return _URC_NO_REASON;
 }
 
 static _Noreturn void dawn_unwind_to(dawn_handler *h) {
+  dawn_unwind_target = h;
   memset(&dawn_uexc, 0, sizeof dawn_uexc);
   dawn_uexc.exception_class = 0x4441574e2d465031ULL; /* "DAWN-FP1" */
   dawn_uexc.exception_cleanup = dawn_uexc_cleanup;
-  _Unwind_ForcedUnwind(&dawn_uexc, dawn_unwind_stop, h);
+  _Unwind_ForcedUnwind(&dawn_uexc, dawn_unwind_stop, NULL);
   /* ForcedUnwind only returns when the stop function never stopped it. */
   fflush(stdout);
   fputs("dawn: the unwinder returned without reaching its handler\n", stderr);
@@ -926,9 +952,12 @@ static dawn_adt *dawn_foreign_error(dawn_failure f) {
 /* The closure returns an erased slot whatever `T` is, so one cast covers
  * every instantiation -- see the header. */
 static dawn_adt *dawn_run_caught(dawn_clo *f, bool catches_panic) {
-  dawn_handler h;
-  h.prev = dawn_handlers;
-  h.catches_panic = catches_panic;
+  /* designated init so the rest (the jmp_buf) is zeroed: the landing cleanup
+   * may run before setjmp has ever filled it, and reads it only behind the
+   * identity test -- but a zeroed struct keeps that path defined either way */
+  dawn_handler h DAWN_CLEANUP(dawn_handler_landing) = {
+    .prev = dawn_handlers, .catches_panic = catches_panic
+  };
   dawn_handlers = &h;
   if (setjmp(h.jb) != 0) {
     /* first thing on landing: the in-flight failure becomes this frame's.
@@ -993,15 +1022,16 @@ static _Noreturn void dawn_reraise(dawn_failure f) {
  * resource stays the caller's and each closure call needs a reference of its
  * own -- a closure's parameters arrive owned and it releases them (see
  * emitc.adapter_signature). Hence one `dawn_dup` per call and none for the
- * caller's. On the unwind path `use`'s reference is lost with the discarded C
- * frames, which is the documented cost of the mechanism and the reason a
- * corpus program that takes this path carries a `.leaks-on-catch` marker.
- * The Unit each release call hands back is a box the emitter made for the
- * erased return, so it is dropped here -- nobody else can see it. */
+ * caller's. On the unwind path `use`'s reference is released by `use`'s own
+ * frame cleanups as the forced unwind walks it -- the leak that used to sit
+ * here, "the documented cost of the mechanism", is what #193 ARC-05 closed,
+ * and scripts/spike-native/recover_bracket.dawn is the corpus that holds it
+ * shut. The Unit each release call hands back is a box the emitter made for
+ * the erased return, so it is dropped here -- nobody else can see it. */
 void *dawn_bracket(void *resource, dawn_clo *release, dawn_clo *use) {
-  dawn_handler h;
-  h.prev = dawn_handlers;
-  h.catches_panic = true;
+  dawn_handler h DAWN_CLEANUP(dawn_handler_landing) = {
+    .prev = dawn_handlers, .catches_panic = true
+  };
   dawn_handlers = &h;
   if (setjmp(h.jb) != 0) {
     /* The crossing failure becomes this frame's before the release runs:
