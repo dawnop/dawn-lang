@@ -161,6 +161,36 @@ emitc_expect_error() { # expected label args...
   fi
 }
 
+## Run one argv through both drivers against absolute stdout, stderr and exit
+## expectations. A backend-to-backend diff cannot detect a shared boundary bug.
+run_expect() { # exit stdout stderr label args...
+  local want=$1
+  local expected_out=$2
+  local expected_err=$3
+  local label=$4
+  shift 4
+  ./bin/dawn "$@" > "$OUT/j.out" 2> "$OUT/j.err" && PAIR_J=0 || PAIR_J=$?
+  "$DAWNC" "$@" > "$OUT/n.out" 2> "$OUT/n.err" && PAIR_N=0 || PAIR_N=$?
+  printf '%s' "$expected_out" > "$OUT/expected.out"
+  printf '%s' "$expected_err" > "$OUT/expected.err"
+  if [ "$PAIR_J" != "$want" ] || [ "$PAIR_N" != "$want" ] ||
+    ! cmp -s "$OUT/j.out" "$OUT/expected.out" ||
+    ! cmp -s "$OUT/n.out" "$OUT/expected.out" ||
+    ! cmp -s "$OUT/j.err" "$OUT/expected.err" ||
+    ! cmp -s "$OUT/n.err" "$OUT/expected.err"
+  then
+    echo "FAIL: $label did not match absolute stdout/stderr/exit $want"
+    echo "--- JVM stdout"; diff -u "$OUT/expected.out" "$OUT/j.out" | head -20 || true
+    echo "--- native stdout"; diff -u "$OUT/expected.out" "$OUT/n.out" | head -20 || true
+    echo "--- JVM stderr"; diff -u "$OUT/expected.err" "$OUT/j.err" | head -20 || true
+    echo "--- native stderr"; diff -u "$OUT/expected.err" "$OUT/n.err" | head -20 || true
+    echo "exits: jvm=$PAIR_J native=$PAIR_N want=$want"
+    fail=1
+  else
+    echo "OK   $label (stdout/stderr exact, exit $want)"
+  fi
+}
+
 # ---- leg 0: positional arity, against absolute contracts ----
 echo "== command arity, JVM and native vs absolute contracts =="
 ARITY_A="$OUT/arity_a.dawn"
@@ -252,6 +282,43 @@ pair_expect_exit 0 "fmt (multiple targets)" fmt --check "$ARITY_A" "$ARITY_B"
 if [ "${NATIVE_CLI_ARITY_ONLY:-}" = 1 ]; then
   [ "$fail" = 0 ] || { echo "FAIL: command arity contract"; exit 1; }
   echo "OK: command arity agrees across both backends and matches the absolute contract"
+  exit 0
+fi
+
+# ---- leg 0b: run argv boundary, against absolute contracts ----
+echo "== run argv boundary, JVM and native vs absolute contracts =="
+RUN_ARGV="$OUT/run_argv.dawn"
+cat > "$RUN_ARGV" <<'EOF'
+use std/str
+
+pub fn main() -> Unit !io = {
+  println("argc=" ++ to_string(len(args())))
+  var i = 0
+  for arg in args() {
+    println(to_string(i) ++ "|" ++ to_string(str.len(arg)) ++ "|" ++ arg)
+    i = i + 1
+  }
+}
+EOF
+
+RUN_EMPTY=$'argc=0\n'
+RUN_OPTION_LIKE=$'argc=4\n0|0|\n1|2|--\n2|14|--comptime-ffi\n3|2|-o\n'
+RUN_ERROR=$'error: usage: dawn run [compiler-options] <target> [-- <program-args>...]\n'
+
+run_expect 0 "$RUN_EMPTY" "" "run (empty argv, omitted separator)" run "$RUN_ARGV"
+run_expect 0 "$RUN_EMPTY" "" "run (empty argv, explicit separator)" run "$RUN_ARGV" --
+run_expect 0 "$RUN_OPTION_LIKE" "" "run (opaque option-like and empty argv)" \
+  run "$RUN_ARGV" -- "" -- --comptime-ffi -o
+run_expect 0 "$RUN_EMPTY" "" "run (compiler option before target)" \
+  run --std "$ROOT/std" "$RUN_ARGV"
+run_expect 2 "" "$RUN_ERROR" "run (bare token after target rejected)" \
+  run "$RUN_ARGV" stray
+run_expect 2 "" "$RUN_ERROR" "run (flag-like token after target rejected)" \
+  run "$RUN_ARGV" --comptime-ffi
+
+if [ "${NATIVE_CLI_RUN_ONLY:-}" = 1 ]; then
+  [ "$fail" = 0 ] || { echo "FAIL: run argv boundary contract"; exit 1; }
+  echo "OK: run argv boundary matches the absolute contract on both backends"
   exit 0
 fi
 

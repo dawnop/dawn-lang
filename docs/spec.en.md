@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 15d4334b598123bc -->
+<!-- doc-check: translation-of docs/spec.md @ e75b6b76f9b70ff8 -->
 
 # Dawn Language Specification
 
@@ -2526,7 +2526,7 @@ it means this one):
 | Command | Output |
 |------|------|
 | `dawn check <file or dir>...` | Type checking only. Prints `ok` and exits 0 when clean; **renders the diagnostics and exits 1 if there is any**; exits 2 on a usage mistake |
-| `dawn run <file.dawn or dir>` | Compiles into memory / a temporary directory, starts a JVM and runs it |
+| `dawn run [compiler-options] <file.dawn or dir> [-- <program-args>...]` | Compiles into memory / a temporary directory, starts a JVM and runs it |
 | `dawn build <file or dir> -o app.jar` | An executable jar (`Main-Class: main` is already set) |
 | `dawn build ... --native -o app` | The previous step + GraalVM `native-image`, a standalone binary (§12.3) |
 | `dawn test <file or dir>` | Compiles the variant that includes the test blocks and runs it (directory mode aggregates the tests of every module) |
@@ -2541,7 +2541,7 @@ release; it needs neither a JVM nor this repository):
 | `dawnc check <target>...` | Type checking only, aggregates diagnostics from every target |
 | `dawnc emitc <target> [-o out.c]` | A C translation unit (compiled together with the runtime in `runtime/c/`) |
 | `dawnc build <target> [-o out]` | The previous step + a call to `cc` (`$CC` overrides it), a standalone executable |
-| `dawnc run <target>` | The same, and runs it as soon as it is compiled |
+| `dawnc run [--std <dir>] <target> [-- <program-args>...]` | The same, and runs it as soon as it is compiled |
 | `dawnc test <target>` | Compiles the variant that includes the test blocks and runs it |
 | `dawnc fmt` / `doc` / `add` / `lsp` | Output is **byte-for-byte identical** to `dawn`'s subcommands of the same name (`scripts/native-cli-diff.sh` pins these four to the JVM's bytes) |
 | `dawnc version` | The version number (it reports `(native)` itself, so it is not literally identical to `dawn --version`) |
@@ -2562,8 +2562,28 @@ A missing target, too many targets, or conflicting selectors is a usage error: i
 before loading a target or producing a backend output, and both drivers use identical
 diagnostic bytes for the same error. N has no artificial upper bound for `check` or `fmt`;
 testing with two targets demonstrates that they really are batch commands, not that their
-maximum is two. This contract covers cardinality only; it does not define how `run`
-separates compiler options from the arguments of the program being run.
+maximum is two.
+
+`run` uses two explicit argv namespaces (TOOL-03):
+
+```text
+dawn run [compiler-options] <target> [-- <program-args>...]
+```
+
+Compiler options are parsed only before the target. The separator may be omitted when the
+program has no arguments; both `run target` and `run target --` pass an empty argv. If any
+token follows the target, the first one must be `--`; otherwise stdout is empty, stderr is
+exactly the following line, and the command exits 2:
+
+```text
+error: usage: dawn run [compiler-options] <target> [-- <program-args>...]
+```
+
+The separator itself is not forwarded. Every token after it reaches the program's `args()`
+verbatim and without further interpretation, including an empty string, `--`,
+`--comptime-ffi`, and `-o`. The JVM and native drivers keep independent parsers and are held
+to one absolute stdout/stderr/exit contract; see `run-argv-boundary-design.md` for the full
+rationale.
 
 The few subcommands `dawnc` lacks are not holes, they are the backend's boundary: **it
 refuses `use java`** (Java interop is a JVM backend capability, §9), and `build`-to-jar,
@@ -2575,7 +2595,7 @@ loads every module under `src/`, with `src/main.dawn` as the entry point; single
 mode walks upwards for a `src` ancestor and takes it as the root. The jar collects every
 module class, and `Main-Class` = the entry module's class `main`.
 
-**Third-party jars: `--cp <jars>`** (works for run/test/build; separated by the path
+**Third-party jars: `--cp <jars>`** (before run's target, and for test/build; separated by the path
 separator, repeatable). Compile-time `use java` resolution and run-time loading share
 this one classpath. `build` records each jar in the manifest's `Class-Path` (relative to
 the output directory, so moving the jars means moving them together), and the output

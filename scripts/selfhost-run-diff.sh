@@ -45,8 +45,8 @@ check() { # name ref-exit head-exit
 }
 
 # run: with and without args (the no-args calc usage path exits 1)
-"$DAWN" run examples/projects/calc.dawn "1 + 2 * 3" > "$OUT/k.txt" 2>&1 && k=0 || k=$?
-"${SH[@]}" run examples/projects/calc.dawn "1 + 2 * 3" > "$OUT/d.txt" 2>&1 && d=0 || d=$?
+"$DAWN" run examples/projects/calc.dawn -- "1 + 2 * 3" > "$OUT/k.txt" 2>&1 && k=0 || k=$?
+"${SH[@]}" run examples/projects/calc.dawn -- "1 + 2 * 3" > "$OUT/d.txt" 2>&1 && d=0 || d=$?
 check "run calc (args)" "$k" "$d"
 
 "$DAWN" run examples/projects/calc.dawn > "$OUT/k.txt" 2>&1 && k=0 || k=$?
@@ -56,8 +56,8 @@ check "run calc (usage)" "$k" "$d"
 # run + test: the interop example, whose calls go to static methods declared on
 # JDK interfaces. `__emit` says the bytes agree and classfile-verify says they
 # link; this is the leg that says they answer the same thing when executed.
-"$DAWN" run examples/interop/interop.dawn /p > "$OUT/k.txt" 2>&1 && k=0 || k=$?
-"${SH[@]}" run examples/interop/interop.dawn /p > "$OUT/d.txt" 2>&1 && d=0 || d=$?
+"$DAWN" run examples/interop/interop.dawn -- /p > "$OUT/k.txt" 2>&1 && k=0 || k=$?
+"${SH[@]}" run examples/interop/interop.dawn -- /p > "$OUT/d.txt" 2>&1 && d=0 || d=$?
 check "run interop example" "$k" "$d"
 
 "$DAWN" test examples/interop/interop.dawn > "$OUT/k.txt" 2>&1 && k=0 || k=$?

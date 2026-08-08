@@ -49,7 +49,8 @@ fn usage() -> String =
     "  dawnc check [--std <dir>] <target>...       type-check, report diagnostics",
     "  dawnc build [--std <dir>] <target> [-o out] compile to a native binary via cc",
     "  dawnc emitc [--std <dir>] <target> [-o out] emit the C translation unit",
-    "  dawnc run   [--std <dir>] <target>          compile and run",
+    "  dawnc run   [--std <dir>] <target> [-- <args>...]",
+    "                                              compile and run",
     "  dawnc test  [--std <dir>] <target>          compile the test blocks and run them",
     "  dawnc test  [--std <dir>] --stdlib          run the bundled std's own test blocks",
     "  dawnc fmt [--check] <file.dawn | dir>...    format files in place",
@@ -128,35 +129,45 @@ fn fail_doc(diags: List[LocDiag]) -> Unit !io = {
   ()
 }
 
-## `run`'s existing tail parser. Extra positionals remain rejected here until
-## TOOL-03 gives run a compiler/program `--` boundary; TOOL-04 deliberately
-## does not change that plumbing.
-fn parse_tail(rest: List[String]) -> (String, String, String) !io = {
+type RunArgs = { std_dir: String, target: String, program_args: List[String] }
+
+fn run_usage() -> String =
+  "usage: dawn run [compiler-options] <target> [-- <program-args>...]"
+
+## Independent native parser: compiler options end at the target.
+fn parse_run_tail(rest: List[String]) -> RunArgs !io = {
   var std_dir = "std"
-  var out = ""
   var target = ""
+  var seen_target = false
+  var program_args: List[String] = []
   var i = 0
-  while i < len(rest) {
-    if rest[i] == "--std" && i + 1 < len(rest) {
+  while i < len(rest) && not seen_target {
+    if rest[i] == "--std" {
+      if i + 1 >= len(rest) { cli_error(run_usage()) }
       std_dir = rest[i + 1]
       i = i + 2
-    } else if rest[i] == "-o" && i + 1 < len(rest) {
-      out = rest[i + 1]
-      i = i + 2
-    } else if target == "" {
-      target = rest[i]
+    } else if rest[i] == "--" {
+      cli_error(run_usage())
       i = i + 1
     } else {
-      fail_usage()
+      target = rest[i]
+      seen_target = true
       i = i + 1
     }
   }
-  if target == "" { fail_usage() }
-  (std_dir, out, target)
+  if not seen_target { cli_error(run_usage()) }
+  if i < len(rest) {
+    if rest[i] != "--" { cli_error(run_usage()) }
+    i = i + 1
+    while i < len(rest) {
+      program_args = program_args ++ [rest[i]]
+      i = i + 1
+    }
+  }
+  RunArgs { std_dir: std_dir, target: target, program_args: program_args }
 }
 
-## `--std <dir>` and `-o <out>` plus exactly one target, shared by native
-## build and emitc without changing run's parser.
+## `--std <dir>` and `-o <out>` plus exactly one target, kept out of run.
 fn parse_compile_tail(
   cmd: String,
   usage_text: String,
@@ -346,7 +357,13 @@ fn cmd_build(rest: List[String]) -> Unit !io = {
 ## spelling because the two callers' messages are compared byte for byte
 ## against the JVM driver's (scripts/native-cli-diff.sh); what is shared is the
 ## staging, not the wording.
-fn build_and_exec(ctext: String, dir_prefix: String, bin_name: String, what: String) -> Unit !io = {
+fn build_and_exec(
+  ctext: String,
+  dir_prefix: String,
+  bin_name: String,
+  what: String,
+  program_args: List[String]
+) -> Unit !io = {
   let work = match io.temp_dir("", dir_prefix) {
     Ok(d) -> d
     Err(e) -> {
@@ -360,7 +377,7 @@ fn build_and_exec(ctext: String, dir_prefix: String, bin_name: String, what: Str
   # to unwind, so a release placed on the way out is a release that never runs.
   # A build that failed keeps its directory -- `cc_build` reports and exits from
   # inside, and the emitted C is the only thing left to look at.
-  match io.run([bin], "", "") {
+  match io.run([bin] ++ program_args, "", "") {
     Ok(code) -> {
       pkgfetch.delete_tree(work)
       let _ = io.exit(code)
@@ -374,8 +391,14 @@ fn build_and_exec(ctext: String, dir_prefix: String, bin_name: String, what: Str
 }
 
 fn cmd_run(rest: List[String]) -> Unit !io = {
-  let (std_dir, _out, target) = parse_tail(rest)
-  build_and_exec(emitted(std_dir, target), "dawnc-run", "program", "program")
+  let run = parse_run_tail(rest)
+  build_and_exec(
+    emitted(run.std_dir, run.target),
+    "dawnc-run",
+    "program",
+    "program",
+    run.program_args
+  )
 }
 
 ## Every .dawn file under `dir`, recursively; paths are `dir`-prefixed.
@@ -616,7 +639,7 @@ fn cmd_test(rest: List[String]) -> Unit !io = {
       ""
     }
   }
-  build_and_exec(ctext, "dawnc-test", "tests", "tests")
+  build_and_exec(ctext, "dawnc-test", "tests", "tests", [])
 }
 
 pub fn main() -> Unit !io = {

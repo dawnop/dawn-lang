@@ -507,7 +507,8 @@ fn usage() -> String = join([
   "",
   "usage:",
   "  dawn check <target>...               type-check only; exit 1 if anything is reported",
-  "  dawn run <target>                    compile and run (in-process JVM)",
+  "  dawn run [options] <target> [-- <args>...]",
+  "                                       compile and run; -- starts program args",
   "  dawn test <target>                   compile with test blocks and run them",
   "  dawn test --stdlib                   run the bundled standard library's own test blocks",
   "  dawn build <target> [-o out.jar]     produce an executable jar (tests stripped)",
@@ -612,6 +613,99 @@ fn extract_cp(rest: List[String]) -> (List[String], List[String]) !io = {
   (jars, out)
 }
 
+## One-pass `run` plan: no later helper may rescan `program_args` as options.
+type RunArgs = {
+  cpjars: List[String],
+  opts: CtOpts,
+  closure: Bool,
+  std_dir: String,
+  target: String,
+  program_args: List[String]
+}
+
+fn run_usage() -> String =
+  "usage: dawn run [compiler-options] <target> [-- <program-args>...]"
+
+## Parse compiler options through the target, then preserve program argv raw.
+fn parse_run_args(rest: List[String]) -> RunArgs !io = {
+  var cpjars: List[String] = []
+  var fuel = DEFAULT_FUEL
+  var ffi = false
+  var closure = false
+  var std_dir = "std"
+  var target = ""
+  var seen_target = false
+  var program_args: List[String] = []
+  var i = 0
+  while i < len(rest) && not seen_target {
+    let a = rest[i]
+    var cp_spec = ""
+    if a == "--cp" {
+      if i + 1 >= len(rest) { cli_error("--cp needs a path") }
+      cp_spec = rest[i + 1]
+      i = i + 2
+    } else if str.starts_with(a, "--cp=") {
+      cp_spec = str.strip_prefix(a, "--cp=").unwrap_or(a)
+      i = i + 1
+    } else if a == "--comptime-fuel" {
+      if i + 1 >= len(rest) { cli_error("--comptime-fuel needs a number") }
+      match parse_int(rest[i + 1]) {
+        Some(n) -> { fuel = n }
+        None -> { cli_error("--comptime-fuel needs a number") }
+      }
+      i = i + 2
+    } else if str.starts_with(a, "--comptime-fuel=") {
+      match parse_int(str.strip_prefix(a, "--comptime-fuel=").unwrap_or(a)) {
+        Some(n) -> { fuel = n }
+        None -> { cli_error("--comptime-fuel needs a number") }
+      }
+      i = i + 1
+    } else if a == "--comptime-ffi" {
+      ffi = true
+      i = i + 1
+    } else if a == "--closure" {
+      closure = true
+      i = i + 1
+    } else if a == "--std" {
+      if i + 1 >= len(rest) { cli_error(run_usage()) }
+      std_dir = rest[i + 1]
+      i = i + 2
+    } else if a == "--" {
+      cli_error(run_usage())
+      i = i + 1
+    } else {
+      target = a
+      seen_target = true
+      i = i + 1
+    }
+    if cp_spec != "" {
+      for pth in str.split(cp_spec, path_sep()) {
+        if pth != "" {
+          if not io.exists(pth) { cli_error("--cp entry not found: " ++ pth) }
+          cpjars = cpjars ++ [pth]
+        }
+      }
+    }
+  }
+  if not seen_target { cli_error(run_usage()) }
+  if i < len(rest) {
+    if rest[i] != "--" { cli_error(run_usage()) }
+    i = i + 1
+    while i < len(rest) {
+      program_args = program_args ++ [rest[i]]
+      i = i + 1
+    }
+  }
+  RunArgs {
+    cpjars: cpjars,
+    opts: CtOpts { fuel: fuel, ffi: ffi, jcall: fold_call },
+    closure: closure,
+    std_dir: std_dir,
+    target: target,
+    program_args: program_args
+  }
+}
+
 ## Render compile diagnostics, the count line, and exit 1 (the Kotlin
 ## compileProject failure shape).
 fn fail_compile(diags: List[LocDiag]) -> Unit !io = {
@@ -651,8 +745,8 @@ fn fail_doc(diags: List[LocDiag]) -> Unit !io = {
 ## `target = rest[i]` in a bare `else` made every one of these subcommands take
 ## the *last* target on the line and say nothing about the others, so a typo'd
 ## flag (`dawn build proj -0 out`) built `out` -- a real directory name to the
-## loop -- and reported success. run takes a second positional on purpose (it
-## forwards the rest to the program), which is why it is not here.
+## loop -- and reported success. run instead owns a `--`-delimited program argv
+## namespace, which is why it is not here.
 fn refuse_second_target(cmd: String, have: String, got: String) -> Unit !io =
   if have != "" {
     cli_error(cmd ++ " takes one target, got `" ++ have ++ "` and `" ++ got ++
@@ -878,17 +972,20 @@ fn deps_from_env() -> List[String] !io = {
   }
 }
 
-## run/test/build with a [java-deps] target: resolve, then re-exec this same
-## invocation with the jars appended to the class path and never return. In
-## the child (env set) this is a no-op.
-fn maybe_with_deps(mode: String, rest: List[String]) -> Unit !io = {
+## Re-exec one invocation after its target and explicit classpath have already
+## been identified. `rest` remains the caller's original list: in particular,
+## a run separator, empty strings and option-looking program arguments are not
+## normalized away while the classpath is extended.
+fn maybe_with_known_deps(
+  mode: String,
+  rest: List[String],
+  target: String,
+  cpjars: List[String]
+) -> Unit !io = {
   match io.getenv("DAWN_SELFHOST_CP") {
     Some(_) -> return
     None -> ()
   }
-  let (cpjars, rest1) = extract_cp(rest)
-  let (_, rest2) = extract_ct_opts(rest1)
-  let target = peek_target(rest2)
   if target == "" && len(cpjars) == 0 { return }
   let no_jars: List[String] = []
   let jars = if target == "" { no_jars } else { resolve_java_deps(target) }
@@ -905,6 +1002,18 @@ fn maybe_with_deps(mode: String, rest: List[String]) -> Unit !io = {
   let code = wait_reaped(pb.start().expect("java process"), "")
   let _ = io.exit(code)
   ()
+}
+
+## test/build have no program argv, so their existing filters remain safe here.
+fn maybe_with_deps(mode: String, rest: List[String]) -> Unit !io = {
+  match io.getenv("DAWN_SELFHOST_CP") {
+    Some(_) -> return
+    None -> ()
+  }
+  let (cpjars, rest1) = extract_cp(rest)
+  let (_, rest2) = extract_ct_opts(rest1)
+  let target = peek_target(rest2)
+  maybe_with_known_deps(mode, rest, target, cpjars)
 }
 
 ## Arrange for `child` to be destroyed -- and for `scratch` (empty for none) to
@@ -979,38 +1088,18 @@ fn spawn_java(cp: String, cls: String, args: List[String], scratch: String) -> I
   wait_reaped(pb.start().expect("java process"), scratch)
 }
 
-## `selfhost run [--std <dir>] <target> [args...]` — mirror of `dawn run`,
+## `selfhost run [compiler-options] <target> [-- <program-args>...]` — mirror
+## of `dawn run`,
 ## via a subprocess over freshly emitted classes (the host class path rides
 ## along so `use java` third-party classes stay visible).
-fn run_run(rest0: List[String]) -> Unit !io = {
-  let (_, rest1) = extract_cp(rest0)
-  let (opts, restb) = extract_ct_opts(rest1)
-  let (closure, rest) = extract_flag(restb, "--closure")
-  var target = ""
-  var std_dir = "std"
-  var args2: List[String] = []
-  var i = 0
-  while i < len(rest) {
-    if rest[i] == "--std" && i + 1 < len(rest) && target == "" {
-      std_dir = rest[i + 1]
-      i = i + 2
-    } else if target == "" {
-      target = rest[i]
-      i = i + 1
-    } else {
-      args2 = args2 ++ [rest[i]]
-      i = i + 1
-    }
-  }
-  if target == "" {
-    return cli_error("usage: dawn run [--cp jars] <file.dawn | project-dir>")
-  }
-  let (classes, entry, _) = collect_program(target, std_dir, opts, closure, false)
+fn run_run(run: RunArgs) -> Unit !io = {
+  let (classes, entry, _) =
+    collect_program(run.target, run.std_dir, run.opts, run.closure, false)
   if entry == "" {
-    return cli_error(target ++ " has no pub fn main() -> Unit !io, nothing to run")
+    return cli_error(run.target ++ " has no pub fn main() -> Unit !io, nothing to run")
   }
   let dir = write_temp_classes(classes)
-  let code = spawn_java(dir ++ path_sep() ++ host_classpath(), entry, args2, dir)
+  let code = spawn_java(dir ++ path_sep() ++ host_classpath(), entry, run.program_args, dir)
   pkgfetch.delete_tree(dir)
   if code != 0 { let _ = io.exit(code) }
 }
@@ -1797,8 +1886,9 @@ pub fn main() -> Unit !io = {
       } else if mode == "fmt" {
         run_fmt(rest)
       } else if mode == "run" {
-        maybe_with_deps(mode, rest)
-        run_run(rest)
+        let run = parse_run_args(rest)
+        maybe_with_known_deps(mode, rest, run.target, run.cpjars)
+        run_run(run)
       } else if mode == "test" {
         maybe_with_deps(mode, rest)
         run_test(rest)

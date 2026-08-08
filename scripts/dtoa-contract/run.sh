@@ -55,7 +55,7 @@ check() { # label, output
   echo "OK   $1 ($(printf '%s\n' "$2" | tail -n 1))"
 }
 
-out_jvm="$("$root/bin/dawn" run "$here/probe.dawn" "$work/oracle.tsv")"
+out_jvm="$("$root/bin/dawn" run "$here/probe.dawn" -- "$work/oracle.tsv")"
 check jvm "$out_jvm"
 
 "$root/bin/dawn" __emitc "$here/probe.dawn" -o "$work/probe.c"

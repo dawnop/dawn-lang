@@ -25,7 +25,7 @@ TOML
 
 # a real source file: hundreds of KB of text, which is what makes the level
 # 6/9 cases dynamic-Huffman rather than a toy
-out="$("$root/bin/dawn" run "$work" "$root/selfhost/src/check/types.dawn")"
+out="$("$root/bin/dawn" run "$work" -- "$root/selfhost/src/check/types.dawn")"
 
 if [ "$(printf '%s\n' "$out" | tail -n 1)" != "mismatches 0" ]; then
   printf '%s\n' "$out" >&2

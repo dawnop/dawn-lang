@@ -64,7 +64,7 @@ retro 引用的 `multipart.dawn` 那句警告（"never code_points on the conten
 
 ## 三、实测（本轮亲自跑，非推测）
 
-基准载体：`dawn run examples/m4/json <file>`，纯 Dawn、多模块、正打在 `code_points` 上。
+基准载体：`dawn run examples/m4/json -- <file>`，纯 Dawn、多模块、正打在 `code_points` 上。
 
 **1) 物化的代价是数量级的**：1.3MB JSON → **peak RSS 467–500MB**（≈ **360× 输入**）。
 
@@ -139,7 +139,7 @@ retro 引用的 `multipart.dawn` 那句警告（"never code_points on the conten
 
 ## 五、建议路线
 
-1. **第 0 步（前置，retro 自己要求的"性能基准护栏"）**：`scripts/bench.sh` —— `dawn run examples/m4/json`
+1. **第 0 步（前置，retro 自己要求的"性能基准护栏"）**：`scripts/bench.sh` —— `dawn run examples/m4/json -- <file>`
    跑生成的语料，`/usr/bin/time` 取 **peak RSS 中位数**（wall 噪声大：0.48–0.71s；RSS 是 460MB 量级，信噪比极高）。
    录基线、超阈值报警。约半天。**没有它，A 的收益和 D 的必要性都只是嘴上说。**
 2. **A1 定稿**（游标 API 的形状是唯一真设计题）→ 落地 A + 顺手补 `index_of(from)`/`replace`/`slice`。

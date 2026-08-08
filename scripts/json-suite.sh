@@ -21,4 +21,4 @@ DAWN=${DAWN_BIN:-./bin/dawn}
 
 "$DAWN" test packages/json
 "$DAWN" test examples/projects/json
-"$DAWN" run examples/projects/json --suite examples/projects/json/suite/test_parsing
+"$DAWN" run examples/projects/json -- --suite examples/projects/json/suite/test_parsing

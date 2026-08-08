@@ -25,12 +25,13 @@
 - **影响：** 一次 path typo 就能破坏非源码文件。结合 `SYN-01` 的 lexer-diagnostic 丢弃，风险更高。
 - **建议：** direct file 也必须拒绝非 `.dawn` 并 exit 2。若要 formatter stdin/任意文本，使用不写回的显式模式。
 
-## TOOL-03 — P2 — `dawn run` 没有 compiler/program 参数边界
+## TOOL-03 — P2 — `dawn run` 没有 compiler/program 参数边界（已修）
 
-- **证据：S。** `extract_ct_opts`、`extract_cp`、`extract_flag` 扫描整个 argv：`selfhost/src/main.dawn:548`、`:582`、`:705`，而它们在确定 target 与转发 program args 前执行：`selfhost/src/main.dawn:959`。
-- **边界：** `dawn run app --comptime-ffi` 无法把该字符串传给 app；未来新增 compiler flag 会追溯性抢占旧程序参数。
-- **影响：** 用户程序 CLI namespace 不稳定，wrapper/tooling 无法可靠透传参数。
-- **建议：** 统一为 `dawn run [compiler-options] <target> -- [program-args]`；只解析 target 前的 options。
+- **原证据：S。** JVM 依次用 `extract_cp`、`extract_ct_opts`、`extract_flag` 扫描完整 argv，确定 target 前就会吞掉同名程序参数；native 的通用 tail parser 则拒绝全部额外 positional。新增 compiler flag 会追溯性抢占旧程序 argv。
+- **当前契约：** `dawn run [compiler-options] <target> [-- <program-args>...]`。无参数可省 `--`，显式 `run target --` 同样传空 argv；target 后若有 token，首个必须是分隔符。分隔符不转发，其后 token 包括空串与 option-like 字符串均逐字转发。完整理由见 [`run-argv-boundary-design.md`](../run-argv-boundary-design.md)。
+- **实现：** JVM 使用专用一次顺序 parser，同时产出编译计划、target 与 program argv；dependency re-exec 只读取该计划，重启仍附回完整原始 rest。native 保留独立 parser，并把 `[bin] ++ program_args` 实际交给执行入口。
+- **门禁：** `scripts/native-cli-diff.sh` 的独立 run absolute leg 分别钉 stdout、stderr 与 exit；覆盖空 argv 两式、target 前 compiler option、空串/option-like 原样透传，以及 target 后裸 token / flag-like token 的固定 usage 拒绝。两端共同接受非法输入也不能靠相等假绿。
+- **结论：已修。** compiler option 只在 target 前生效，程序 argv 的名字空间不再被当前或未来的编译器 flag 抢占。
 
 ## TOOL-04 — P2 — JVM/native CLI 参数基数已经漂移（已修）
 

@@ -2021,7 +2021,7 @@ hex 与 base64 是纯 Dawn 字节算术（无 `use java`，故两后端同一份
 | 命令 | 产物 |
 |------|------|
 | `dawn check <file 或 dir>...` | 只做类型检查。干净时打印 `ok` 退出 0；**有任何诊断则渲染诊断并退出 1**；用法错误退出 2 |
-| `dawn run <file.dawn 或 dir>` | 编译到内存/临时目录，起 JVM 执行 |
+| `dawn run [compiler-options] <file.dawn 或 dir> [-- <program-args>...]` | 编译到内存/临时目录，起 JVM 执行 |
 | `dawn build <file 或 dir> -o app.jar` | 可执行 jar（`Main-Class: main` 已设） |
 | `dawn build ... --native -o app` | 前一步 + GraalVM `native-image`，独立二进制（§12.3） |
 | `dawn test <file 或 dir>` | 编译含 test 块的变体并执行（目录模式聚合全部模块的 test） |
@@ -2036,7 +2036,7 @@ hex 与 base64 是纯 Dawn 字节算术（无 `use java`，故两后端同一份
 | `dawnc check <target>...` | 只做类型检查，聚合全部 target 的诊断 |
 | `dawnc emitc <target> [-o out.c]` | C 翻译单元（配 `runtime/c/` 的运行时一起编） |
 | `dawnc build <target> [-o out]` | 前一步 + 调 `cc`（`$CC` 可覆盖），独立可执行文件 |
-| `dawnc run <target>` | 同上，编完直接执行 |
+| `dawnc run [--std <dir>] <target> [-- <program-args>...]` | 同上，编完直接执行 |
 | `dawnc test <target>` | 编译含 test 块的变体并执行 |
 | `dawnc fmt` / `doc` / `add` / `lsp` | 与 `dawn` 的同名子命令输出**逐字节一致**（`scripts/native-cli-diff.sh` 把这四件钉在 JVM 的字节上） |
 | `dawnc version` | 版本号（自报 `(native)`，故不与 `dawn --version` 逐字相同） |
@@ -2054,8 +2054,25 @@ hex 与 base64 是纯 Dawn 字节算术（无 `use java`，故两后端同一份
 
 缺参、多 target 或 selector 冲突属于用法错误：在开始加载 target 或生成后端产物前退出 2；
 两个驱动对同一错误使用相同诊断字节。`check` 与 `fmt` 的 N 没有人为上限；写两个 target
-不是“最大为二”，而是证明它们确实是批处理命令。此处只规定基数，不规定 `run` 如何分隔
-编译器 option 与被运行程序的参数。
+不是“最大为二”，而是证明它们确实是批处理命令。
+
+`run` 的 argv 使用显式双名字空间（TOOL-03）：
+
+```text
+dawn run [compiler-options] <target> [-- <program-args>...]
+```
+
+compiler option 只在 target 前解析。没有程序参数时可省略 `--`；`run target` 与
+`run target --` 都向程序传空 argv。target 后若还有 token，第一个必须是 `--`，否则 stdout
+为空、stderr 恰为下列一行并退出 2：
+
+```text
+error: usage: dawn run [compiler-options] <target> [-- <program-args>...]
+```
+
+分隔符自身不转发；其后的 token 不再解释，逐字原样进入程序的 `args()`，包括空串、`--`、
+`--comptime-ffi` 与 `-o`。JVM 与 native 驱动各自实现 parser，以共同的绝对
+stdout/stderr/exit 契约保持一致；完整理由见 `run-argv-boundary-design.md`。
 
 `dawnc` 少的那几个子命令不是缺口，是后端的边界：**它拒绝 `use java`**（Java 互操作是
 JVM 后端的能力，§9），`build`-to-jar、`lock`、`cache` 同理只在 JVM 侧有意义。
@@ -2065,7 +2082,7 @@ JVM 后端的能力，§9），`build`-to-jar、`lock`、`cache` 同理只在 JV
 `src/main.dawn`；单文件模式向上找 `src` 祖先为根。jar 收全部模块类，`Main-Class` = 入口
 模块类 `main`。
 
-**第三方 jar：`--cp <jars>`**（run/test/build 通用；路径分隔符分隔、可重复）。
+**第三方 jar：`--cp <jars>`**（run 的 target 前、test/build 通用；路径分隔符分隔、可重复）。
 编译期 `use java` 解析与运行期加载共用这份 classpath。`build` 把各 jar 记入 manifest
 的 `Class-Path`（相对产物目录，jar 挪走要一起挪），产物仍 `java -jar` 直接跑；
 `build --native` 改以 `-cp` 形式调 native-image（第三方库的反射/JNI 是否过
