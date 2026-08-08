@@ -1,0 +1,47 @@
+# Return-type inference orders the inferred functions by a call graph built
+# from the names their bodies mention (see infer_order_shadowing). `with
+# handle` is two pieces of ordinary code -- the arm bodies and the remainder
+# of the block -- and both have to contribute edges, or a callee mentioned
+# only there is checked *after* its caller and still carries the placeholder
+# signature every unchecked inferred function starts with: return type
+# `TyError`, effect `!io`. Neither placeholder is diagnosed at the call site,
+# so the damage surfaces somewhere else entirely -- which is what the two
+# halves below pin down. The golden is empty on purpose: nothing here is
+# recursive and nothing here is impure.
+
+effect Ask {
+  fn get() -> Int
+}
+
+fn asks() -> Int !Ask = get()
+
+# mentioned in an arm body only. Out of order, `bump`'s placeholder effect
+# `!io` is charged to the handler and then to `in_arm`, and the pure
+# `arm_caller` below is rejected for calling it.
+fn in_arm() = {
+  with handle Ask {
+    get() => bump(1)
+  }
+  asks()
+}
+
+fn bump(n: Int) = n + 1
+
+fn arm_caller() -> Int = in_arm()
+
+# mentioned in the remainder only. Out of order, `twice`'s placeholder return
+# type `TyError` becomes `in_rest`'s, and the error lands on whoever needs
+# that type to be a type.
+fn in_rest() = {
+  with handle Ask {
+    get() => 1
+  }
+  twice(asks())
+}
+
+fn twice(n: Int) = n * 2
+
+pub fn main() -> Unit !io = {
+  println(to_string(arm_caller()))
+  println(to_string(in_rest()))
+}

@@ -2412,6 +2412,17 @@ pub fn name_refs(e: Expr, out: Set[String], sc: RefScope) -> Set[String] =
     }
     EComptime(body, _, _) -> name_refs(body, out, sc)
     EUnsafePure(body, _, _) -> name_refs(body, out, sc)
+    # both halves of `with handle E { .. }` are ordinary code the function
+    # runs: the arm bodies (each a lambda over the operation's parameters) and
+    # the remainder of the block, which the parser packed into `rest` as a
+    # parameterless lambda. An arm's *name* is the operation it answers, not a
+    # call, so it is not an edge -- the operation itself is spelled bare at the
+    # site that raises it, and that spelling is an EVar handled above.
+    EHandle(_, arms, rest, _, _, _, _) -> {
+      var o = out
+      for a in arms { o = name_refs(a.body, o, rs_params(sc, a.params)) }
+      name_refs(rest, o, sc)
+    }
     _ -> out
   }
 
@@ -2500,6 +2511,26 @@ test "a module-qualified call is not an edge to a same-named local function" {
   let refs = name_refs(call, set.empty(), ref_scope(set.empty()))
   assert set.has(refs, "take")
   assert set.has(refs, "list")
+}
+
+test "a handler's arms and its remainder are both call positions" {
+  # with handle Ask { get(n) => p(n, q) }  r()
+  let arm = HandlerArm {
+    name: "get",
+    params: [LambdaParam { name: "n", ann: None, lo: 0, hi: 1 }],
+    body: EApply(EVar("p", 0, 1), [pos_arg(EVar("n", 0, 1)), pos_arg(EVar("q", 0, 1))], 0, 1),
+    lo: 0,
+    hi: 1,
+    nlo: 0,
+    nhi: 1
+  }
+  let rest = ELambda(no_lparams(), EApply(EVar("r", 0, 1), [], 0, 1), true, 0, 1)
+  let h = EHandle("Ask", [arm], rest, 0, 1, 0, 1)
+  let refs = name_refs(h, set.empty(), ref_scope(set.empty()))
+  assert set.to_list(refs) == ["p", "q", "r"]
+  # the arm's parameter is bound, and `get` names the operation the arm answers
+  assert not set.has(refs, "n")
+  assert not set.has(refs, "get")
 }
 
 fn no_lparams() -> List[LambdaParam] = []
