@@ -17,7 +17,8 @@ use front/ast.{
   TypeRef, TNamed, TQual, TAssoc, TTuple, TFn, Bound, TypeParamDecl, Module,
   module_java_uses, module_fns, module_types, module_consts, module_traits,
   module_impls, module_uses, DType, TypeDeclR, CtorDecl, FieldDecl, DTrait, TraitMethod,
-  Param, Expr, Decl, DImpl, FnDecl, EBool, DFn, EVar, DConst, EInt, module_effects
+  Param, Expr, Decl, DImpl, FnDecl, EBool, DFn, EVar, DConst, EInt, module_effects,
+  e_lo, e_hi
 }
 
 use check/types.{
@@ -993,6 +994,15 @@ pub fn pass_effects(cx: Cx, m: Module) -> Cx !io = {
       cx1 = Cx { ..cx1, current_tparams: empty_tp, current_eff_vars: empty_ev }
       var ptys: List[Ty] = []
       for p in op.params {
+        # an operation call reads a handler's evidence and calls the arm's
+        # closure -- there is no function to hold a default (#207 §4.6)
+        match p.default {
+          Some(de) -> {
+            cx1 = cerr_h(cx1, "effect operations do not take parameter defaults",
+              e_lo(de), e_hi(de), "take the argument explicitly at every call")
+          }
+          None -> ()
+        }
         let (cxa, t) = resolve_type(cx1, p.tref)
         cx1 = cxa
         ptys = ptys ++ [t]
@@ -1008,6 +1018,7 @@ pub fn pass_effects(cx: Cx, m: Module) -> Cx !io = {
         name: op.name,
         param_tys: ptys,
         param_names: map(op.params, p => p.name),
+        param_defaults: [],
         ret: ret,
         eff: ELabeled(EPure, [(eid, d.name)]),
         is_builtin: false,
@@ -1154,6 +1165,16 @@ pub fn pass_register_traits(cx: Cx, m: Module) -> Cx !io = {
       cx1 = Cx { ..cx1, current_tparams: tp, current_eff_vars: empty_ev }
       var ptys: List[Ty] = []
       for p in me.params {
+        # Dawn already has a trait-level "default" (the default method body),
+        # and an impl could neither inherit nor override a value default under
+        # dictionary passing -- so a trait method takes none (#207 §4.6)
+        match p.default {
+          Some(de) -> {
+            cx1 = cerr_h(cx1, "trait methods do not take parameter defaults",
+              e_lo(de), e_hi(de), "wrap the trait method in a function that has one")
+          }
+          None -> ()
+        }
         let (cx4, t) = resolve_type(cx1, p.tref)
         cx1 = cx4
         ptys = ptys ++ [t]
@@ -1176,6 +1197,7 @@ pub fn pass_register_traits(cx: Cx, m: Module) -> Cx !io = {
         name: me.name,
         param_tys: ptys,
         param_names: map(me.params, p => p.name),
+        param_defaults: [],
         ret: ret,
         eff: eff,
         is_builtin: false,
@@ -1226,8 +1248,8 @@ test "trait registration puts methods in the fn namespace" {
   let m = Module { decls: [DTrait("Eq2", "T", 10, 11, [TraitMethod {
     name: "eq2",
     params: [
-      Param { name: "a", tref: TNamed("T", [], 22, 23), lo: 19, hi: 20 },
-      Param { name: "b", tref: TNamed("T", [], 28, 29), lo: 25, hi: 26 }
+      Param { name: "a", tref: TNamed("T", [], 22, 23), default: None, lo: 19, hi: 20 },
+      Param { name: "b", tref: TNamed("T", [], 28, 29), default: None, lo: 25, hi: 26 }
     ],
     ret: TNamed("Bool", [], 34, 38),
     effs: [],
@@ -1623,6 +1645,15 @@ pub fn pass_register_impls(
       cx1 = Cx { ..cx1, current_eff_vars: empty_ev2 }
       var ptys: List[Ty] = []
       for p in me.params {
+        # calls dispatch through the trait's signature, which has no
+        # defaults; one here could never be consumed (#207 §4.6)
+        match p.default {
+          Some(de) -> {
+            cx1 = cerr_h(cx1, "impl methods do not take parameter defaults",
+              e_lo(de), e_hi(de), "calls dispatch through the trait's signature")
+          }
+          None -> ()
+        }
         let (cx3, t) = resolve_type(cx1, p.tref)
         cx1 = cx3
         ptys = ptys ++ [t]
@@ -1667,6 +1698,7 @@ pub fn pass_register_impls(
         name: me.name,
         param_tys: ptys,
         param_names: map(me.params, p => p.name),
+        param_defaults: [],
         ret: ret,
         eff: eff,
         is_builtin: false,
@@ -1830,8 +1862,8 @@ test "impl registration enforces coherence and signature matching" {
   let tm = TraitMethod {
     name: "eq4",
     params: [
-      Param { name: "a", tref: TNamed("T", [], 22, 23), lo: 19, hi: 20 },
-      Param { name: "b", tref: TNamed("T", [], 28, 29), lo: 25, hi: 26 }
+      Param { name: "a", tref: TNamed("T", [], 22, 23), default: None, lo: 19, hi: 20 },
+      Param { name: "b", tref: TNamed("T", [], 28, 29), default: None, lo: 25, hi: 26 }
     ],
     ret: TNamed("Bool", [], 34, 38),
     effs: [],
@@ -1846,8 +1878,8 @@ test "impl registration enforces coherence and signature matching" {
     name: "eq4",
     tparams: no_tparams(),
     params: [
-      Param { name: "a", tref: TNamed("Int", [], 0, 1), lo: 0, hi: 1 },
-      Param { name: "b", tref: TNamed("Int", [], 2, 3), lo: 2, hi: 3 }
+      Param { name: "a", tref: TNamed("Int", [], 0, 1), default: None, lo: 0, hi: 1 },
+      Param { name: "b", tref: TNamed("Int", [], 2, 3), default: None, lo: 2, hi: 3 }
     ],
     ret: Some(TNamed("Bool", [], 4, 8)),
     effs: no_effs(),
@@ -1993,6 +2025,11 @@ pub fn pass_fn_signatures(cx: Cx, m: Module) -> (Cx, List[Sig], List[Map[String,
       name: d.name,
       param_tys: ptys,
       param_names: map(d.params, p => p.name),
+      param_defaults: map(d.params, p =>
+          match p.default {
+            Some(_) -> true
+            None -> false
+          }),
       ret: ret,
       eff: final_eff,
       is_builtin: false,
@@ -2041,7 +2078,7 @@ test "fn signatures resolve with bounds and worst-effect inference" {
         lo: 6,
         hi: 12
       }],
-      params: [Param { name: "x", tref: TNamed("T", [], 17, 18), lo: 14, hi: 15 }],
+      params: [Param { name: "x", tref: TNamed("T", [], 17, 18), default: None, lo: 14, hi: 15 }],
       ret: Some(TNamed("T", [], 23, 24)),
       effs: no_effs(),
       body: EVar("x", 27, 28),
@@ -2054,7 +2091,7 @@ test "fn signatures resolve with bounds and worst-effect inference" {
       is_pub: false,
       name: "g",
       tparams: no_tparams(),
-      params: [Param { name: "x", tref: TNamed("Int", [], 36, 39), lo: 33, hi: 34 }],
+      params: [Param { name: "x", tref: TNamed("Int", [], 36, 39), default: None, lo: 33, hi: 34 }],
       ret: None,
       effs: no_effs(),
       body: EVar("x", 43, 44),

@@ -1,0 +1,41 @@
+# default parameter values (#207): what refuses them, in each place's own
+# words. Three value constraints -- purity, no type-parameter types, no other
+# parameters in scope -- and three positions that do not take defaults at all.
+use std/list
+
+fn eff() -> Int !io = 1
+
+# an effectful default: the signature's row would depend on the call site
+pub fn bad_pure(a: Int = eff()) -> Int = a
+
+# a parameter whose type mentions the function's type parameter
+pub fn bad_tparam[T](xs: List[T] = [], n: Int) -> Int = n
+
+# a default cannot see the other parameters: they are not in its scope
+pub fn bad_param_ref(a: Int, b: Int = a * 2) -> Int = a + b
+
+# a default whose value has the wrong type
+pub fn bad_ty(a: Int = "x") -> Int = a
+
+trait Tr[T] {
+  fn m(self: T, k: Int = 1) -> Int
+}
+
+effect Ask {
+  fn ask(k: Int = 1) -> Int
+}
+
+type S = { v: Int }
+
+trait Tr2[T] {
+  fn n(self: T, k: Int) -> Int
+}
+
+impl Tr2[S] {
+  fn n(self: S, k: Int = 2) -> Int = self.v + k
+}
+
+# a call in arity range that still leaves a required parameter unfilled
+fn mix(a: Int, b: Int = 1, c: Int) -> Int = a + b + c
+
+pub fn bad_missing() -> Int = mix(2, b: 3)

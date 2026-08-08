@@ -686,8 +686,18 @@ fn typed_params(p: P, st: St, what: String) -> PR[List[Param]] = {
   while not at_kind(p, st1, RPAREN) {
     let (st2, n) = want(p, st1, IDENT, "a parameter name")?
     let (st3, _) = want(p, st2, COLON, "`:` (" ++ what ++ " parameters must be typed)")?
-    let (st4, t) = type_ref(p, st3)?
-    params = params ++ [Param { name: n.text, tref: t, lo: n.lo, hi: n.hi }]
+    let (st4a, t) = type_ref(p, st3)?
+    var st4 = st4a
+    # `= expr` is a default value (#207); which declarations consume one is
+    # the registration passes' decision, not a parse-time special case
+    var dflt: Option[Expr] = None
+    if at_kind(p, st4, EQ) {
+      let st5 = skip_nl(p, adv1(p, st4))
+      let (st6, de) = expression(p, st5, false)?
+      dflt = Some(de)
+      st4 = st6
+    }
+    params = params ++ [Param { name: n.text, tref: t, default: dflt, lo: n.lo, hi: n.hi }]
     st1 = skip_nl(p, st4)
     if at_kind(p, st1, COMMA) { st1 = skip_nl(p, adv1(p, st1)) } else { break }
   }
@@ -1123,6 +1133,12 @@ fn local_fn_stmt(p: P, st: St) -> PR[Stmt] = {
     let (st5, n) = want(p, st4, IDENT, "a parameter name")?
     let (st6, _) = want(p, st5, COLON, "`:` (local function parameters must be typed)")?
     let (st7, t) = type_ref(p, st6)?
+    # a local function is a function value to its callers (no Sig to carry a
+    # default), so the parse refuses what the checker could never honour
+    if at_kind(p, st7, EQ) {
+      return Err((st7, perr_h(p, st7, "local function parameters cannot take default values",
+        "lift the function to the top level")))
+    }
     params = params ++ [LambdaParam { name: n.text, ann: Some(t), lo: n.lo, hi: n.hi }]
     st4 = skip_nl(p, st7)
     if at_kind(p, st4, COMMA) { st4 = skip_nl(p, adv1(p, st4)) } else { break }

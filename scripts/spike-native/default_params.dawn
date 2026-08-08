@@ -1,0 +1,40 @@
+# Default parameter values (#207): a defaulted parameter synthesizes a
+# zero-parameter pure function in the declaring module, and a call that omits
+# the argument calls it -- on both backends, at every call that omits it.
+#
+# `fresh_list` pins the every-call semantics: the default is an expression,
+# not a value, so two omitting calls build two lists (Python's `def f(x=[])`
+# shares one; Dawn does not). `stamp` pins "declared module's scope": the
+# default calls a private function of this module.
+use std/io
+use std/list
+use std/str
+
+fn stamp() -> String = "made-here"
+
+fn greet(name: String, greeting: String = "hello", mark: String = stamp()) -> String =
+  greeting ++ ", " ++ name ++ " [" ++ mark ++ "]"
+
+# a default before a required parameter: legal, reachable only by name
+fn pad(fill: String = ".", s: String) -> String = fill ++ s ++ fill
+
+fn fresh_list(xs: List[Int] = [], n: Int = 0) -> List[Int] = xs ++ [n]
+
+const WIDTH: Int = 4
+
+# a comptime default, and a const default
+fn ruler(w: Int = comptime { 2 + 2 }, c: Int = WIDTH) -> Int = w * 10 + c
+
+pub fn main() -> Unit !io = {
+  io.println(greet("ada"))
+  io.println(greet("ada", greeting: "hi"))
+  io.println(greet("ada", mark: "explicit", greeting: "yo"))
+  io.println(pad(s: "x"))
+  io.println(pad("_", "x"))
+  let a = fresh_list()
+  let b = fresh_list(n: 7)
+  io.println(to_string(a) ++ " " ++ to_string(b))
+  io.println(to_string(ruler()))
+  io.println(to_string(ruler(9)))
+  io.println(to_string(ruler(c: 1)))
+}

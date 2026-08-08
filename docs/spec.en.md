@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 3fc5e1fbe1d99cd6 -->
+<!-- doc-check: translation-of docs/spec.md @ c69981dd29e7e7b4 -->
 
 # Dawn Language Specification
 
@@ -466,7 +466,47 @@ fn greet(name: String) -> Unit !io = {
   **io appearing in the body while the signature does not declare it is an error** — the
   signature is a promise.
 - The function body is the single expression after `=`; a block `{ }` is an expression too (§4.2).
-- No default arguments, no varargs, no overloading.
+- Default parameter values exist (below); no varargs, no overloading.
+
+**Default parameter values** (2026-08-08, #207): a parameter may be written
+`name: Type = expr`; a call that omits the argument evaluates the expression **once per
+call** (not Python's evaluate-once-and-share):
+
+```dawn
+fn column(kids: List[Int], align: Int = 0, gap: Int = 0) -> Int = align + gap * len(kids)
+
+column(kids)
+column(kids, gap: 12)
+column(kids, align: 1, gap: 12)
+```
+
+- **The default expression must be pure** (neither `!io` nor a named effect): otherwise the
+  function's effect row would depend on whether the call site passes the argument — one
+  signature, two rows, which a type system cannot have.
+- **Evaluated in the declaring scope**: it may refer to this module's private functions and
+  `const`s, it **cannot see the function's other parameters** (the default is checked in a
+  scope with no parameters, so referring to one is an ordinary `undefined variable`), and it
+  is **not available on a parameter whose type mentions the function's type parameters**
+  (`fn join[T](xs: List[T] = [])` is refused; `fn join[T](xs: List[T], sep: String = ", ")`
+  is fine). Both restrictions can be lifted later without breaking anything.
+- **A default need not sit at the tail**: `fn f(a: Int = 1, b: Int)` is legal — `a` can only
+  be skipped by naming `b` (the positional prefix takes slots left to right and cannot jump).
+  A skipped required parameter reports "missing argument(s) for `f`: …"; a count outside the
+  range reports "`f` takes 1 to 3 argument(s), got 0".
+- **Implementation shape**: each defaulted parameter synthesizes a zero-parameter pure
+  function `f$default$k` in the declaring module (`$` is not in the identifier lexicon, so
+  source code cannot spell it); a call that omits the argument simply calls it — both
+  backends and the comptime interpreter treat it as an ordinary top-level function.
+- **Using the function as a value loses the defaults**: after `let g = f`, `g`'s type is the
+  full `fn(A, B, C) -> R` — the same discipline as "a bare constructor used as a function
+  value loses its field names" (§2.3).
+- **Scope**: top-level functions only (private and module functions included). Local `fn`
+  (its calls go through the function-value path), lambdas, constructor fields (records
+  already have `{ ..base, x: v }`), trait methods (Dawn already has a thing called "default"
+  — the default method body; and under dictionary passing an impl could not override a value
+  default), effect operations (an operation call reads an evidence field and calls a
+  closure; there is no symbol to hang one on) and Java methods take none, each with its own
+  refusal.
 
 **Local named functions**: a block may contain a `fn name(params) -> T [!io] = body` statement —
 essentially "a lambda whose name is visible inside its own body", so it **can recurse** (a self

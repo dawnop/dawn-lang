@@ -16,7 +16,7 @@ use front/ast.{
   module_fns, module_types, module_consts, module_traits,
   module_impls, module_tests,
   TraitMethod, Expr,
-  FnDecl, EBool, EVar, EInt, EChar,
+  FnDecl, Param, EBool, EVar, EInt, EChar,
   BinOp, UnOp, OpAdd, OpSub, OpMul, OpDiv, OpMod, OpConcat, OpEq, OpNeq, OpLt,
   OpLe, OpGt, OpGe, OpAnd, OpOr, OpBand, OpBor, OpBxor, OpShl, OpShr, OpUshr,
   OpNeg, OpNot, OpBnot,
@@ -1306,9 +1306,15 @@ pub fn lookup_fn_sig(cx: Cx, name: String) -> Option[Sig] =
       }
   }
 
-## The candidate pool for "did you mean" on a function name.
-pub fn fn_pool(cx: Cx) -> List[String] =
-  map.keys(cx.fns) ++ map.keys(cx.std_fns) ++ visible_builtin_names(cx)
+## The candidate pool for "did you mean" on a function name. Synthesized
+## names (`f$default$k`) are not in it: no typo can mean one.
+pub fn fn_pool(cx: Cx) -> List[String] = {
+  var out: List[String] = []
+  for n in map.keys(cx.fns) {
+    if not str.contains(n, "\$") { out = out ++ [n] }
+  }
+  out ++ map.keys(cx.std_fns) ++ visible_builtin_names(cx)
+}
 
 pub fn visible_builtin_names(cx: Cx) -> List[String] = {
   var out: List[String] = []
@@ -1585,6 +1591,7 @@ test "propagate demands matching option and result shapes" {
     name: "f",
     param_tys: [],
     param_names: [],
+    param_defaults: [],
     ret: opt_ty(TyInt),
     eff: EPure,
     is_builtin: false,
@@ -2611,7 +2618,7 @@ test "an isolated context reports its own effects, then restores all nine fields
       # the outer witness, not restoring leaves the body's
       eff_witness: outer_wit,
       current_sig: Some(Sig {
-        name: "outer", param_tys: [], param_names: [], ret: TyInt,
+        name: "outer", param_tys: [], param_names: [], param_defaults: [], ret: TyInt,
         eff: EPure, is_builtin: false, tparams: [], constraints: [],
         owner: None, trait_id: None, op_of: None, inferring: false
       }),
@@ -2871,7 +2878,8 @@ test "fn values instantiate from the expected type" {
   # the ordering family moved to std/list, so the exemplar is hand-built)
   let tv = TyVar("T", 0)
   let bounded = Sig {
-    name: "sortish", param_tys: [TyList(tv)], param_names: ["xs"], ret: TyList(tv),
+    name: "sortish", param_tys: [TyList(tv)], param_names: ["xs"], param_defaults: [],
+    ret: TyList(tv),
     eff: EPure, is_builtin: true, tparams: [tv], constraints: [[ORD_ID]],
     owner: None, trait_id: None, op_of: None, inferring: false
   }
@@ -4871,6 +4879,42 @@ fn bound_arg_span(s: Sig, args: List[Expr], tp: Ty, clo: Int, chi: Int) -> (Int,
   (clo, chi)
 }
 
+fn param_has_default(s: Sig, idx: Int) -> Bool =
+  idx < len(s.param_defaults) && s.param_defaults[idx]
+
+## The parameters a call cannot omit. Not a prefix: a default may sit before
+## a required parameter (spec §4.3), so this counts rather than scans.
+fn required_count(s: Sig) -> Int = {
+  if len(s.param_defaults) == 0 { return len(s.param_tys) }
+  var n = 0
+  var i = 0
+  for t in s.param_tys {
+    if not param_has_default(s, i) { n = n + 1 }
+    i = i + 1
+  }
+  n
+}
+
+## `f takes 2 argument(s), got 3` -- or `2 to 3` when defaults widen it.
+fn arity_msg(callee: String, min_n: Int, max_n: Int, got: Int) -> String = {
+  let takes = if min_n == max_n {
+    to_string(max_n)
+  } else {
+    to_string(min_n) ++ " to " ++ to_string(max_n)
+  }
+  "`" ++ callee ++ "` takes " ++ takes ++ " argument(s), got " ++ to_string(got)
+}
+
+## The call an omitted defaulted argument becomes: `f$default$k()`, resolved
+## to the declaring module. Its result type is the parameter's declared type,
+## which mentions no type parameter (check_param_defaults refused those), so
+## no instantiation applies.
+fn default_call(s: Sig, callee: String, idx: Int, lo: Int, hi: Int) -> TExpr = {
+  let none_tid: Option[Int] = None
+  XCallFn(s.owner, callee ++ "\$default\$" ++ to_string(idx), [], [], [], none_tid,
+    lo, hi, s.param_tys[idx])
+}
+
 ## A named call f(args) (the Kotlin checkCall): a local fn value, else a
 ## top-level / std / builtin signature with two-round argument inference,
 ## trait witnesses and effect instantiation. `resolved_sig` bypasses locals
@@ -4978,12 +5022,13 @@ fn check_call(
   # order and early return. A call with names resolves slots first, so its
   # report can name the parameter rather than count to the wrong number
   # (`xs.len(n: 1)` would otherwise count the receiver and report an arity
-  # of 2).
+  # of 2). With defaults the count is a range; without, min == max and the
+  # sentence is the one it always was.
   let named_present = first_named(args0) != None
-  if not named_present && len(args) != len(s.param_tys) {
+  let min_arity = required_count(s)
+  if not named_present && (len(args) > len(s.param_tys) || len(args) < min_arity) {
     let (cxa, _) = check_args_plain(cx1, args, pre0)
-    let cxb = cerr_h(cxa, "`" ++ callee ++ "` takes " ++ to_string(len(s.param_tys)) ++
-        " argument(s), got " ++ to_string(len(args)), lo, hi,
+    let cxb = cerr_h(cxa, arity_msg(callee, min_arity, len(s.param_tys), len(args)), lo, hi,
       "signature: " ++ sig_render(cxa.adts, cxa.traits, s))
     # The declared return type survives a wrong argument count, so hand it back
     # and let the context judge the body on its own (see check_ctor_call). For a
@@ -5096,12 +5141,35 @@ fn check_call(
   }
   # the named-call arity report, after the arguments so their own errors come
   # first (the all-positional path answered arity above and returned)
-  if named_present && not args_broken && len(args) != len(s.param_tys) {
-    let cxb = cerr_h(cx1, "`" ++ callee ++ "` takes " ++ to_string(len(s.param_tys)) ++
-        " argument(s), got " ++ to_string(len(args)), lo, hi,
-      "signature: " ++ sig_render(cx1.adts, cx1.traits, s))
-    let rt = if len(s.tparams) == 0 { s.ret } else { TyError }
-    return (cxb, rt, XError(lo, hi))
+  if named_present && not args_broken &&
+    (len(args) > len(s.param_tys) || len(args) < min_arity) {
+      let cxb = cerr_h(cx1, arity_msg(callee, min_arity, len(s.param_tys), len(args)), lo, hi,
+        "signature: " ++ sig_render(cx1.adts, cx1.traits, s))
+      let rt = if len(s.tparams) == 0 { s.ret } else { TyError }
+      return (cxb, rt, XError(lo, hi))
+    }
+  # a required parameter a named call skipped while the count stayed in
+  # range, or a default-before-required signature called positionally short
+  if not args_broken {
+    var missing_req: List[String] = []
+    var mi = 0
+    for so in slot_of {
+      let filled = match so {
+        Some(_) -> true
+        None -> false
+      }
+      if not filled && not param_has_default(s, mi) {
+        missing_req = missing_req ++ [s.param_names[mi]]
+      }
+      mi = mi + 1
+    }
+    if len(missing_req) > 0 {
+      let cxb = cerr_h(cx1, "missing argument(s) for `" ++ callee ++ "`: " ++
+          join(missing_req, ", "), lo, hi,
+        "signature: " ++ sig_render(cx1.adts, cx1.traits, s))
+      let rt = if len(s.tparams) == 0 { s.ret } else { TyError }
+      return (cxb, rt, XError(lo, hi))
+    }
   }
   # return-position inference: let x: Option[Int] = ...
   var unbound_any = false
@@ -5180,18 +5248,27 @@ fn check_call(
   # the one instantiation choke point: a projection whose subject just became
   # concrete reduces here, so no ground type ever carries one (D3)
   let ret = reduce_assoc(cx1, subst(s.ret, m, em))
-  # the call node's arguments are in parameter order; an all-positional call
-  # already is, so this is the identity it always was
+  # The call node's arguments are in parameter order; an all-positional call
+  # already is, so this is the identity it always was. An unfilled parameter
+  # with a default becomes a call of its synthesized `f$default$k` -- pure and
+  # zero-parameter, so where it sits in the evaluation order is unobservable.
   var txs2: List[TExpr] = []
+  var pi2 = 0
   for so in slot_of {
     let sl = match so {
       Some(wi) -> tx_slots[wi]
-      None -> no_texpr()
+      None ->
+        if param_has_default(s, pi2) {
+          Some(default_call(s, callee, pi2, lo, hi))
+        } else {
+          no_texpr()
+        }
     }
     match sl {
       Some(ax) -> { txs2 = txs2 ++ [ax] }
       None -> { txs2 = txs2 ++ [XError(lo, hi)] }
     }
+    pi2 = pi2 + 1
   }
   # Arguments evaluate in written order (spec §4.3). When a named argument
   # landed out of written order, every argument is bound to a local first, in
@@ -5235,15 +5312,22 @@ fn check_call(
       }
       cx1 = pop_scope(cx1)
       txs2 = []
+      var pi3 = 0
       for so in slot_of {
         let sl = match so {
           Some(wi) -> locs[wi]
-          None -> no_texpr()
+          None ->
+            if param_has_default(s, pi3) {
+              Some(default_call(s, callee, pi3, lo, hi))
+            } else {
+              no_texpr()
+            }
         }
         match sl {
           Some(lx) -> { txs2 = txs2 ++ [lx] }
           None -> { txs2 = txs2 ++ [XError(lo, hi)] }
         }
+        pi3 = pi3 + 1
       }
     }
   }
@@ -7070,6 +7154,7 @@ test "named arguments land on a signature's parameters, and evaluate in written 
     name: "move2",
     param_tys: [TyInt, TyBool],
     param_names: ["dx", "wrap"],
+    param_defaults: [],
     ret: TyUnit,
     eff: EPure,
     is_builtin: false,
@@ -7145,6 +7230,28 @@ test "named arguments land on a signature's parameters, and evaluate in written 
   let short = EApply(EVar("move2", 0, 5), [named_arg("wrap", EBool(true, 6, 10))], 0, 11)
   let (cx7, _, _) = check_expr(cx, short, no_expected())
   assert cx7.diags[0].msg == "`move2` takes 2 argument(s), got 1"
+  # a defaulted parameter may be omitted: the slot becomes a call of the
+  # synthesized `move2$default$1`, and the range shows in the arity message
+  let sg2 = Sig { ..sg, param_defaults: [false, true] }
+  var cxd = Cx { ..cx, fns: map.insert(cx.fns, "move2", sg2) }
+  let omitted = EApply(EVar("move2", 0, 5), [pos_arg(EInt(1, 6, 7))], 0, 8)
+  let (cx8, t8, n8) = check_expr(cxd, omitted, no_expected())
+  assert t8 == TyUnit
+  assert len(cx8.diags) == 0
+  match n8 {
+    XCallFn(_, _, cargs, ..) ->
+      match cargs[1] {
+        XCallFn(_, dn, dargs, ..) -> {
+          assert dn == "move2\$default\$1"
+          assert len(dargs) == 0
+        }
+        _ -> { assert false }
+      }
+    _ -> { assert false }
+  }
+  let none8 = EApply(EVar("move2", 0, 5), [], 0, 7)
+  let (cx9, _, _) = check_expr(cxd, none8, no_expected())
+  assert cx9.diags[0].msg == "`move2` takes 1 to 2 argument(s), got 0"
 }
 
 test "the same call, four callees, four kinds of typed node" {
@@ -7635,9 +7742,108 @@ fn verify_effects(
   cx1
 }
 
+## The signature of the function a defaulted parameter synthesizes: zero
+## parameters, the parameter's type, pure -- `f$default$k` in f's module.
+## `$` is not in the identifier lexicon, so the name cannot collide.
+fn default_sig(fname: String, k: Int, pty: Ty, owner: Option[String]) -> Sig =
+  Sig {
+    name: fname ++ "\$default\$" ++ to_string(k),
+    param_tys: [],
+    param_names: [],
+    param_defaults: [],
+    ret: pty,
+    eff: EPure,
+    is_builtin: false,
+    tparams: [],
+    constraints: [],
+    owner: owner,
+    trait_id: None,
+    op_of: None,
+    inferring: false
+  }
+
+## Strip parameter defaults off a declaration whose position refuses them
+## (impl methods): registration already reported the refusal, and checking
+## the expressions anyway would report their private mistakes twice.
+pub fn strip_param_defaults(d: FnDecl) -> FnDecl = {
+  var any = false
+  for p in d.params {
+    match p.default {
+      Some(_) -> { any = true }
+      None -> ()
+    }
+  }
+  if not any { return d }
+  let none_e: Option[Expr] = None
+  FnDecl { ..d, params: map(d.params, p => Param { ..p, default: none_e }) }
+}
+
+## Check each parameter default in the declaring module's scope (#207 §4.2):
+## no parameters, no type parameters, a pure frame of its own. The expression
+## becomes the body of the synthesized `f$default$k`, so what is in scope
+## here is exactly what is in scope there -- a reference to a sibling
+## parameter is an ordinary `undefined variable`, by construction rather than
+## by a rule.
+fn check_param_defaults(cx: Cx, d: FnDecl, s: Sig) -> (Cx, List[Option[TExpr]]) !io = {
+  var cx1 = cx
+  var out: List[Option[TExpr]] = []
+  var k = 0
+  for p in d.params {
+    match p.default {
+      None -> { out = out ++ [no_texpr()] }
+      Some(de) -> {
+        let pty = s.param_tys[k]
+        # the default is checked once, outside any instantiation, so its type
+        # cannot mention the function's type parameters (#207 §4.3)
+        var mentions = false
+        for tv in s.tparams {
+          match tv {
+            TyVar(_, vid) -> if ty_mentions_var(pty, vid) { mentions = true }
+            _ -> ()
+          }
+        }
+        if mentions {
+          cx1 = cerr_h(cx1, "parameter `" ++ p.name ++ "` cannot take a default value: its type " ++
+              ty_show(cx1.adts, pty) ++ " mentions the function's type parameters",
+            e_lo(de), e_hi(de), "take the argument explicitly at the call sites")
+          out = out ++ [no_texpr()]
+        } else {
+          let empty_ev: Map[String, Eff] = map.empty()
+          var cxd = enter_fn(cx1, default_sig(d.name, k, pty, s.owner), empty_ev, p.lo, p.hi)
+          let (cxe, dt, dx) = check_expr(cxd, de, Some(pty))
+          cxd = cxe
+          if not assignable(cxd, dt, pty) {
+            cxd = cerr(cxd, "parameter `" ++ p.name ++ "` is " ++ ty_show(cxd.adts, pty) ++
+                " but its default value is " ++ ty_show(cxd.adts, dt), e_lo(de), e_hi(de))
+          }
+          # the row would otherwise depend on whether the call site omits the
+          # argument -- one signature, two effect rows (#207 §4.3)
+          for used in cxd.frame.used_effects {
+            if not eff_subsumes(EPure, used) {
+              let (wlo, whi, wname) = match map.get(cxd.frame.eff_witness, used) {
+                Some(w) -> w
+                None -> (e_lo(de), e_hi(de), "?")
+              }
+              cxd = cerr_h(cxd, "a parameter default must be pure, but it calls `" ++ wname ++
+                  "` (!" ++ eff_show(used) ++ ")", wlo, whi,
+                "the default runs at every call that omits the argument; " ++
+                  "take the argument explicitly, or drop the effect")
+            }
+          }
+          cx1 = pop_scope(cxd)
+          out = out ++ [Some(dx)]
+        }
+      }
+    }
+    k = k + 1
+  }
+  (cx1, out)
+}
+
 ## Check one annotated function body against its signature (the Kotlin checkFn).
 pub fn check_fn(cx: Cx, d: FnDecl, s: Sig, ev: Map[String, Eff]) -> (Cx, TFun) !io = {
-  var cx1 = enter_fn(cx, s, ev, d.nlo, d.nhi)
+  let (cx0, dtxs) = check_param_defaults(cx, d, s)
+  var cx1 = enter_fn(cx0, s, ev, d.nlo, d.nhi)
   var psyms: List[Int] = []
   var i = 0
   for p in d.params {
@@ -7663,6 +7869,7 @@ pub fn check_fn(cx: Cx, d: FnDecl, s: Sig, ev: Map[String, Eff]) -> (Cx, TFun) !
     param_syms: psyms,
     dict_syms: dsyms,
     ev_syms: esyms,
+    defaults: dtxs,
     body: bx,
     is_test: false,
     impl_of: None,
@@ -7674,7 +7881,8 @@ pub fn check_fn(cx: Cx, d: FnDecl, s: Sig, ev: Map[String, Eff]) -> (Cx, TFun) !
 ## ret = the body's type, eff = the body's effects (or the declared one, which
 ## is then enforced as usual). The Kotlin checkFnInferred.
 pub fn check_fn_inferred(cx: Cx, d: FnDecl, s: Sig, ev: Map[String, Eff]) -> (Cx, Sig, TFun) !io = {
-  var cx1 = enter_fn(cx, s, ev, d.nlo, d.nhi)
+  let (cx0, dtxs) = check_param_defaults(cx, d, s)
+  var cx1 = enter_fn(cx0, s, ev, d.nlo, d.nhi)
   var psyms: List[Int] = []
   var i = 0
   for p in d.params {
@@ -7716,6 +7924,7 @@ pub fn check_fn_inferred(cx: Cx, d: FnDecl, s: Sig, ev: Map[String, Eff]) -> (Cx
       param_syms: psyms,
       dict_syms: dsyms,
       ev_syms: esyms,
+      defaults: dtxs,
       body: bx,
       is_test: false,
       impl_of: None,
@@ -7753,6 +7962,7 @@ pub fn check_trait_default(cx: Cx, m2: TraitMethod, s: Sig, body: Expr) -> (Cx, 
     param_syms: psyms,
     dict_syms: dsyms,
     ev_syms: esyms,
+    defaults: [],
     body: bx,
     is_test: false,
     impl_of: None,
@@ -7765,6 +7975,7 @@ fn test_sig(name: String) -> Sig =
     name: name,
     param_tys: [],
     param_names: [],
+    param_defaults: [],
     ret: TyUnit,
     eff: EIo,
     is_builtin: false,
@@ -7814,6 +8025,7 @@ pub fn check_test(cx: Cx, name: String, body: Expr) -> (Cx, TFun) !io = {
     param_syms: [],
     dict_syms: [],
     ev_syms: [],
+    defaults: [],
     body: bx,
     is_test: true,
     impl_of: None,
@@ -7981,7 +8193,9 @@ pub fn check_module(cx: Cx, m: Module, env: Map[String, ModExports]) -> (Cx, TMo
       match msigs[mi] {
         Some(ms) -> {
           let empty_ev: Map[String, Eff] = map.empty()
-          let (cxe, tf) = check_fn(cx1, me, ms, empty_ev)
+          # registration refused any parameter defaults; strip them so the
+          # refusal is not followed by the value's own diagnostics
+          let (cxe, tf) = check_fn(cx1, strip_param_defaults(me), ms, empty_ev)
           cx1 = cxe
           impl_tfuns = impl_tfuns ++ [TFun { ..tf, impl_of: imp_key }]
         }
@@ -8034,7 +8248,39 @@ pub fn check_module(cx: Cx, m: Module, env: Map[String, ModExports]) -> (Cx, TMo
       None -> ()
     }
   }
-  fns_out = fns_out ++ impl_tfuns ++ default_tfuns
+  # Synthesize the default-value functions (#207 §4.4): one zero-parameter
+  # pure function per defaulted parameter, appended as ordinary module
+  # functions -- lowering, both backends and the comptime interpreter treat
+  # them like anything else declared here. The signature is also bound into
+  # the fn table so the drivers' program-wide descriptor tables pick it up;
+  # the name has a `$`, which no source call can spell.
+  var synth: List[TFun] = []
+  for tf in fns_out {
+    var k = 0
+    for dv in tf.defaults {
+      match dv {
+        Some(dx) -> {
+          let ds = default_sig(tf.name, k, tf.sig.param_tys[k], tf.sig.owner)
+          synth = synth ++ [TFun {
+            name: ds.name,
+            sig: ds,
+            param_syms: [],
+            dict_syms: [],
+            ev_syms: [],
+            defaults: [],
+            body: dx,
+            is_test: false,
+            impl_of: None,
+            default_of: None
+          }]
+          cx1 = Cx { ..cx1, fns: map.insert(cx1.fns, ds.name, ds) }
+        }
+        None -> ()
+      }
+      k = k + 1
+    }
+  }
+  fns_out = fns_out ++ synth ++ impl_tfuns ++ default_tfuns
   (cx1, TModule { fns: fns_out, consts: tconsts, tests: ttests, syms: cx1.syms })
 }
 
