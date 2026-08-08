@@ -32,7 +32,12 @@ fn skip_cstr(b: Bytes, from: Int) -> Int = {
 ## Decompress a gzip member. Trailing members (gzip allows concatenation) are
 ## not read: nothing produces them here, and silently dropping data would be
 ## worse than not supporting it.
-pub fn gunzip(src: Bytes) -> Result[Bytes, String] = {
+pub fn gunzip(src: Bytes) -> Result[Bytes, String] = gunzip_bounded(src, None)
+
+## The same, with a ceiling on the uncompressed size -- enforced while the
+## output is being built, so a member that expands to gigabytes is refused
+## instead of materialised and then measured. `None` is no ceiling.
+pub fn gunzip_bounded(src: Bytes, cap: Option[Int]) -> Result[Bytes, String] = {
   if bytes.len(src) < 18 { return Err("gzip: too short to be an archive") }
   if at(src, 0) != MAGIC0 || at(src, 1) != MAGIC1 {
     return Err("gzip: not a gzip archive (bad magic)")
@@ -53,7 +58,7 @@ pub fn gunzip(src: Bytes) -> Result[Bytes, String] = {
 
   # the last eight bytes are CRC-32 and ISIZE, not deflate data
   let body = bytes.slice(src, i, bytes.len(src) - 8)
-  let out = match deflate.inflate_end(body) {
+  let out = match deflate.inflate_end(body, cap) {
     Ok(pr) -> {
       let (o, used) = pr
       # Everything between the header and the trailer belongs to this member,

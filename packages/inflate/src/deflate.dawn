@@ -181,13 +181,47 @@ fn dist_extra() -> List[Int] = [
 fn clen_order() -> List[Int] =
   [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15]
 
+# ---- output ceilings ----
+#
+# A ceiling belongs *inside* the loop that grows the buffer. Checking the size
+# of a finished `Bytes` says nothing about the peak: a few hundred KB of
+# back-references expand to gigabytes, and the machine is out of memory long
+# before there is a length to compare. So every write is preceded by the
+# question "does this one fit", which is the only place the question has an
+# answer that is still worth having.
+#
+# `-1` is the internal spelling of "no ceiling"; the public entry points take
+# `Option[Int]` so that a caller cannot express a negative one, and a negative
+# `Some` is refused rather than read as unlimited.
+
+fn limit_of(cap: Option[Int]) -> Result[Int, String] =
+  match cap {
+    None -> Ok(-1)
+    Some(n) ->
+      if n < 0 { Err("deflate: a negative output limit (" ++ to_string(n) ++ ")") } else { Ok(n) }
+  }
+
+fn over_limit(out: Buf, add: Int, lim: Int) -> Bool = lim >= 0 && bytes.size(out) + add > lim
+
+## The refusal names how much output existed when it fired. That number is the
+## whole difference between this ceiling and the one it replaces: checked
+## before the write, it can never exceed the limit, and a check that ran after
+## the buffer was built would report the full expansion. Two implementations
+## that refuse the same streams are told apart by nothing else.
+fn too_big(out: Buf, lim: Int) -> String =
+  "deflate: the output exceeds the " ++ to_string(lim) ++ " byte limit (stopped at " ++
+  to_string(bytes.size(out)) ++ " bytes)"
+
 ## How many whole bytes of `src` the reader has consumed: a partly spent byte
 ## counts, because nothing after it can be read independently.
 fn consumed(b: Bits) -> Int = if b.bit == 0 { b.pos } else { b.pos + 1 }
 
 ## Decompress a raw DEFLATE stream.
-pub fn inflate(src: Bytes) -> Result[Bytes, String] =
-  match inflate_end(src) {
+pub fn inflate(src: Bytes) -> Result[Bytes, String] = inflate_bounded(src, None)
+
+## Decompress with a ceiling on the uncompressed size. `None` is no ceiling.
+pub fn inflate_bounded(src: Bytes, cap: Option[Int]) -> Result[Bytes, String] =
+  match inflate_end(src, cap) {
     Ok(p) -> {
       let (out, _) = p
       Ok(out)
@@ -199,7 +233,11 @@ pub fn inflate(src: Bytes) -> Result[Bytes, String] =
 ## long the compressed member is supposed to be and can only check it against
 ## something; without this it has to take the decompressor's word that whatever
 ## followed the final block was not part of the member.
-pub fn inflate_end(src: Bytes) -> Result[(Bytes, Int), String] = {
+pub fn inflate_end(src: Bytes, cap: Option[Int]) -> Result[(Bytes, Int), String] = {
+  let lim = match limit_of(cap) {
+    Ok(n) -> n
+    Err(e) -> return Err(e)
+  }
   var out = bytes.buf()
   var st = bits_of(src)
   var last = false
@@ -210,7 +248,7 @@ pub fn inflate_end(src: Bytes) -> Result[(Bytes, Int), String] = {
     last = fin == 1
     st = s2
     if btype == 0 {
-      match stored(out, st) {
+      match stored(out, st, lim) {
         Ok(p) -> {
           let (o2, s3) = p
           out = o2
@@ -219,7 +257,7 @@ pub fn inflate_end(src: Bytes) -> Result[(Bytes, Int), String] = {
         Err(e) -> return Err(e)
       }
     } else if btype == 1 {
-      match block(out, st, fixed_lit(), fixed_dist()) {
+      match block(out, st, fixed_lit(), fixed_dist(), lim) {
         Ok(p) -> {
           let (o2, s3) = p
           out = o2
@@ -231,7 +269,7 @@ pub fn inflate_end(src: Bytes) -> Result[(Bytes, Int), String] = {
       match dynamic_tables(st) {
         Ok(t) -> {
           let (lit, dist, s3) = t
-          match block(out, s3, lit, dist) {
+          match block(out, s3, lit, dist, lim) {
             Ok(p) -> {
               let (o2, s4) = p
               out = o2
@@ -254,7 +292,7 @@ pub fn inflate_end(src: Bytes) -> Result[(Bytes, Int), String] = {
 }
 
 ## An uncompressed block: byte-aligned, then LEN and its complement.
-fn stored(out0: Buf, b: Bits) -> Result[(Buf, Bits), String] = {
+fn stored(out0: Buf, b: Bits, lim: Int) -> Result[(Buf, Bits), String] = {
   var st = align(b)
   let (lo, s1) = take(st, 8)
   let (hi, s2) = take(s1, 8)
@@ -263,6 +301,7 @@ fn stored(out0: Buf, b: Bits) -> Result[(Buf, Bits), String] = {
   let n = lo | (hi << 8)
   let nn = nlo | (nhi << 8)
   if n != (~nn & 0xFFFF) { return Err("deflate: stored block length does not match its complement") }
+  if over_limit(out0, n, lim) { return Err(too_big(out0, lim)) }
   st = s4
   var out = out0
   var i = 0
@@ -347,7 +386,7 @@ fn dynamic_tables(b: Bits) -> Result[(Huff, Huff, Bits), String] = {
 }
 
 ## The literal/length/distance loop shared by fixed and dynamic blocks.
-fn block(out0: Buf, b: Bits, lit: Huff, dist: Huff) -> Result[(Buf, Bits), String] = {
+fn block(out0: Buf, b: Bits, lit: Huff, dist: Huff, lim: Int) -> Result[(Buf, Bits), String] = {
   var out = out0
   var st = b
   let lbase = length_base()
@@ -364,6 +403,7 @@ fn block(out0: Buf, b: Bits, lit: Huff, dist: Huff) -> Result[(Buf, Bits), Strin
       Err(e) -> return Err(e)
     }
     if sym < 256 {
+      if over_limit(out, 1, lim) { return Err(too_big(out, lim)) }
       out = bytes.put(out, sym)
     } else if sym == 256 {
       return Ok((out, st))
@@ -386,6 +426,9 @@ fn block(out0: Buf, b: Bits, lit: Huff, dist: Huff) -> Result[(Buf, Bits), Strin
       st = s2
       let distance = dbase[dsym] + de
       if distance > bytes.size(out) { return Err("deflate: a back-reference before the start") }
+      # the whole run is refused before the first byte of it lands: this is the
+      # loop a compression bomb is made of
+      if over_limit(out, length, lim) { return Err(too_big(out, lim)) }
       # the copy may overlap the write position -- that is how a run is coded,
       # so it has to be byte by byte and not a block move
       var k = 0
@@ -413,7 +456,7 @@ fn stored_hi() -> Bytes = raw([0x01, 0x02, 0x00, 0xFD, 0xFF, 104, 105])
 
 test "a stored block round-trips and reports what it consumed" {
   assert inflate(stored_hi()) == Ok(bytes.utf8("hi"))
-  assert inflate_end(stored_hi()) == Ok((bytes.utf8("hi"), 7))
+  assert inflate_end(stored_hi(), None) == Ok((bytes.utf8("hi"), 7))
 }
 
 test "a truncated fixed block is not finished off with bits that are not there" {
@@ -426,6 +469,27 @@ test "a truncated fixed block is not finished off with bits that are not there" 
   # a stream that legitimately ended there would land.
   match inflate(raw([0x03])) {
     Err(e) -> { assert str.contains(e, "truncated") }
+    Ok(_) -> { assert false }
+  }
+}
+
+test "the output ceiling is checked before the buffer grows, not after" {
+  assert inflate_bounded(stored_hi(), Some(2)) == Ok(bytes.utf8("hi"))
+  # "stopped at 0" is the assertion that matters: the two bytes of this block
+  # never landed. A ceiling applied to the finished output refuses the same
+  # stream and says "stopped at 2", having built it first.
+  match inflate_bounded(stored_hi(), Some(1)) {
+    Err(e) -> { assert e == "deflate: the output exceeds the 1 byte limit (stopped at 0 bytes)" }
+    Ok(_) -> { assert false }
+  }
+  # A ceiling of zero is a ceiling, not "unlimited" -- the two body-limit
+  # spellings that disagreed about 0 and -1 are what this avoids.
+  match inflate_bounded(stored_hi(), Some(0)) {
+    Err(e) -> { assert e == "deflate: the output exceeds the 0 byte limit (stopped at 0 bytes)" }
+    Ok(_) -> { assert false }
+  }
+  match inflate_bounded(stored_hi(), Some(-1)) {
+    Err(e) -> { assert str.contains(e, "negative output limit") }
     Ok(_) -> { assert false }
   }
 }

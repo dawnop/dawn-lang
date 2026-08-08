@@ -29,6 +29,67 @@ fn big_file() -> String !io =
     _ -> ""
   }
 
+## MB of the same byte, deflated by Java: a compression bomb, built by the
+## oracle rather than hand-rolled, so what it is is not in question.
+##
+## Fed a megabyte at a time and drained as it goes, because the point is a
+## small compressed member with a large expansion -- neither side of this
+## process may hold the expansion in memory, including the side making it.
+fn java_bomb(mb: Int) -> Bytes !io = {
+  var chunk = bytes.buf()
+  var i = 0
+  while i < 1048576 {
+    chunk = bytes.put(chunk, 97)
+    i = i + 1
+  }
+  let block = bytes.freeze(chunk)
+  let scratch = bytes.utf8(rep(" ", 8192))
+  let d = Deflater.new(9, true)
+  let bos = ByteArrayOutputStream.new()
+  var n = 0
+  while n < mb {
+    let _ = d.setInput(block)
+    while not d.needsInput() {
+      let k = d.deflate(scratch)
+      let _ = bos.write(bytes.slice(scratch, 0, k))
+    }
+    n = n + 1
+  }
+  let _ = d.finish()
+  while not d.finished() {
+    let k = d.deflate(scratch)
+    let _ = bos.write(bytes.slice(scratch, 0, k))
+  }
+  let _ = d.end()
+  bos.toByteArray().expect("bytes")
+}
+
+## The bomb leg, run by the harness in a JVM whose heap is far smaller than the
+## expansion. A ceiling enforced while the output grows never allocates past
+## it; one applied to the finished output has to build the whole thing first,
+## and in this heap that is an OutOfMemoryError rather than a refusal. The two
+## are indistinguishable at any larger heap -- both "refuse" -- which is why
+## this leg exists and why it is run where it is run.
+fn bomb_case(mb: Int) -> Unit !io = {
+  let bomb = java_bomb(mb)
+  io.println("bomb: " ++ to_string(bytes.len(bomb)) ++ " compressed bytes, " ++
+      to_string(mb) ++ "MB expanded")
+  match deflate.inflate_bounded(bomb, Some(1024)) {
+    Ok(o) -> {
+      io.println("the bomb was decompressed to " ++ to_string(bytes.len(o)) ++ " bytes")
+      io.println("mismatches 1")
+    }
+    Err(e) -> {
+      if str.index_of(e, "exceeds the 1024 byte limit") == None {
+        io.println("the bomb was refused, but not by the ceiling: " ++ e)
+        io.println("mismatches 1")
+      } else {
+        io.println("mismatches 0")
+      }
+    }
+  }
+}
+
 fn rep(c: String, n: Int) -> String = {
   var s = ""
   var i = 0
@@ -223,7 +284,42 @@ fn check_truncated_deflate() -> Int !io = {
   bad
 }
 
-pub fn main() -> Unit !io = {
+## LIB-01: the ceiling is enforced while the output is being built, so it is
+## exact -- one byte under the true size is refused, the true size is not.
+fn check_bounded(src: Bytes) -> Int !io = {
+  let raw = java_deflate(src, 9)
+  let n = bytes.len(src)
+  var bad = 0
+  match deflate.inflate_bounded(raw, Some(n)) {
+    Ok(o) ->
+      if o != src {
+        io.println("a bounded inflate at exactly the output size gave the wrong bytes")
+        bad = bad + 1
+      }
+    Err(e) -> {
+      io.println("a bounded inflate at exactly the output size was refused: " ++ e)
+      bad = bad + 1
+    }
+  }
+  if n > 0 {
+    match deflate.inflate_bounded(raw, Some(n - 1)) {
+      Ok(_) -> {
+        io.println("a bounded inflate one byte under the output size succeeded")
+        bad = bad + 1
+      }
+      Err(_) -> ()
+    }
+  }
+  bad
+}
+
+pub fn main() -> Unit !io =
+  match args() {
+    ["--bomb", n] -> bomb_case(parse_int(n).unwrap_or(512))
+    _ -> differential()
+  }
+
+fn differential() -> Unit !io = {
   var bad = 0
   var cases: List[String] = ["", "a", "hello world", rep("a", 1000)]
   # highly repetitive: long back-references, and runs where the copy overlaps
@@ -292,6 +388,12 @@ pub fn main() -> Unit !io = {
   bad = bad + check_corruption()
   bad = bad + check_short_central_dir()
   bad = bad + check_truncated_deflate()
+  # the big case if there is one, so the ceiling is checked against a stream
+  # that is dynamic Huffman and full of back-references
+  match io.read_file(big_file()) {
+    Ok(t) -> { bad = bad + check_bounded(bytes.utf8(t)) }
+    Err(_) -> { bad = bad + check_bounded(bytes.utf8(rep("abcabcabc", 500))) }
+  }
 
   io.println("mismatches " ++ to_string(bad))
 }

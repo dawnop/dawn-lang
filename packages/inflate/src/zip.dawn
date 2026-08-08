@@ -22,6 +22,20 @@ use crc32
 ## One entry, fully decompressed. Directories carry no data.
 pub type Entry = { name: String, is_dir: Bool, data: Bytes }
 
+## One central directory record, before any data is read. `size` is what the
+## directory *claims* the entry expands to -- a claim, not a measurement, and
+## the only one available to a caller deciding whether to unpack at all.
+pub type Meta = {
+  name: String,
+  is_dir: Bool,
+  flags: Int,
+  method: Int,
+  crc: Int,
+  csize: Int,
+  size: Int,
+  local: Int,
+}
+
 const EOCD_SIG: Int = 0x06054B50
 const CD_SIG: Int = 0x02014B50
 const LOCAL_SIG: Int = 0x04034B50
@@ -127,9 +141,6 @@ fn checked_end(
   Ok(End { start: off, size: size, count: total })
 }
 
-## A central directory entry, before its data is read.
-type Head = { name: String, flags: Int, method: Int, crc: Int, csize: Int, size: Int, local: Int }
-
 ## The three fields a zip64 archive moves out of the fixed record.
 type Sizes = { csize: Int, size: Int, local: Int }
 
@@ -176,7 +187,7 @@ fn zip64(b: Bytes, off: Int, elen: Int, s0: Sizes) -> Result[Sizes, String] = {
 }
 
 ## One central directory entry, and where the next one starts.
-fn read_head(b: Bytes, p: Int) -> Result[(Head, Int), String] = {
+fn read_head(b: Bytes, p: Int) -> Result[(Meta, Int), String] = {
   if not in_range(b, p, 46) { return Err("zip: central directory runs past the end") }
   let nlen = u16(b, p + 28)
   let elen = u16(b, p + 30)
@@ -194,8 +205,13 @@ fn read_head(b: Bytes, p: Int) -> Result[(Head, Int), String] = {
     Ok(t) -> t
     Err(e) -> return Err(e ++ " (" ++ name ++ ")")
   }
-  let h = Head {
+  # A directory is an entry whose name ends in a slash. That is the whole
+  # rule -- ZipEntry.isDirectory() is the same test -- and the external
+  # attributes, which look more authoritative, are written by whatever
+  # operating system made the archive and are not portable.
+  let h = Meta {
     name: name,
+    is_dir: str.ends_with(name, "/"),
     flags: u16(b, p + 8),
     method: u16(b, p + 10),
     crc: u32(b, p + 16),
@@ -206,51 +222,11 @@ fn read_head(b: Bytes, p: Int) -> Result[(Head, Int), String] = {
   Ok((h, p + 46 + nlen + elen + clen))
 }
 
-fn entry_data(b: Bytes, h: Head) -> Result[Bytes, String] = {
-  if h.flags & FLAG_ENCRYPTED != 0 { return Err("zip: encrypted entry: " ++ h.name) }
-  if not in_range(b, h.local, 30) || u32(b, h.local) != LOCAL_SIG {
-    return Err("zip: no local header for " ++ h.name)
-  }
-  # The local header's name and extra lengths need not match the central
-  # directory's -- writers routinely put zip64 padding in one and not the other
-  # -- so where the data starts is a question only the local header answers.
-  let start = h.local + 30 + u16(b, h.local + 26) + u16(b, h.local + 28)
-  if not in_range(b, start, h.csize) {
-    return Err("zip: entry data runs past the end: " ++ h.name)
-  }
-  let raw = bytes.slice(b, start, start + h.csize)
-  var out = raw
-  if h.method == METHOD_DEFLATE {
-    match deflate.inflate_end(raw) {
-      Ok(pr) -> {
-        let (o, used) = pr
-        # The directory says how long the compressed member is, so a member
-        # that ends early has bytes in it nobody read -- the reader must not
-        # decide on its own that the rest was padding.
-        if used != h.csize {
-          return Err("zip: " ++ h.name ++ " read " ++ to_string(used) ++
-              " of its " ++ to_string(h.csize) ++ " compressed bytes")
-        }
-        out = o
-      }
-      Err(e) -> return Err("zip: " ++ h.name ++ ": " ++ e)
-    }
-  } else if h.method != METHOD_STORED {
-    return Err("zip: compression method " ++ to_string(h.method) ++
-        " is not supported (" ++ h.name ++ ")")
-  }
-  if bytes.len(out) != h.size {
-    return Err("zip: " ++ h.name ++ " unpacked to " ++ to_string(bytes.len(out)) ++
-        " bytes, the directory says " ++ to_string(h.size))
-  }
-  if crc32.sum(out) != h.crc { return Err("zip: checksum mismatch for " ++ h.name) }
-  Ok(out)
-}
-
-## Every entry in the archive, in central directory order. An archive with no
-## entries reads as the empty list: that is a legal zip, and whether it is an
-## acceptable one is the caller's question.
-pub fn entries(src: Bytes) -> Result[List[Entry], String] = {
+## Every entry's metadata, in central directory order, without unpacking
+## anything. This is what a caller with a budget needs first: how many entries
+## there are and how big each says it will be, decided before the first byte of
+## the first one is materialised.
+pub fn headers(src: Bytes) -> Result[List[Meta], String] = {
   let eocd = match find_eocd(src) {
     Ok(i) -> i
     Err(e) -> return Err(e)
@@ -259,7 +235,7 @@ pub fn entries(src: Bytes) -> Result[List[Entry], String] = {
     Ok(t) -> t
     Err(er) -> return Err(er)
   }
-  var out: List[Entry] = []
+  var out: List[Meta] = []
   var p = e.start
   var i = 0
   while i < e.count {
@@ -274,25 +250,84 @@ pub fn entries(src: Bytes) -> Result[List[Entry], String] = {
       Ok(t) -> t
       Err(er) -> return Err(er)
     }
-    # A directory is an entry whose name ends in a slash. That is the whole
-    # rule -- ZipEntry.isDirectory() is the same test -- and the external
-    # attributes, which look more authoritative, are written by whatever
-    # operating system made the archive and are not portable.
-    let is_dir = str.ends_with(h.name, "/")
-    var data = bytes.utf8("")
-    if not is_dir {
-      data = match entry_data(src, h) {
-        Ok(d) -> d
-        Err(er) -> return Err(er)
-      }
-    }
-    out = out ++ [Entry { name: h.name, is_dir: is_dir, data: data }]
+    out = out ++ [h]
     p = next
     i = i + 1
   }
   if p != e.start + e.size {
     return Err("zip: the central directory is " ++ to_string(p - e.start) ++
         " bytes, the end record says " ++ to_string(e.size))
+  }
+  Ok(out)
+}
+
+## One entry's bytes, with a ceiling on how big they may get. `None` is no
+## ceiling; a directory entry is empty.
+##
+## The ceiling matters even though `m.size` is right there: that number is the
+## archive's claim about itself, checked afterwards, and a bomb is a small
+## compressed member with a large true expansion and whatever `size` its writer
+## felt like putting in the directory.
+pub fn read_bounded(src: Bytes, m: Meta, cap: Option[Int]) -> Result[Bytes, String] = {
+  if m.is_dir { return Ok(bytes.utf8("")) }
+  if m.flags & FLAG_ENCRYPTED != 0 { return Err("zip: encrypted entry: " ++ m.name) }
+  if not in_range(src, m.local, 30) || u32(src, m.local) != LOCAL_SIG {
+    return Err("zip: no local header for " ++ m.name)
+  }
+  # The local header's name and extra lengths need not match the central
+  # directory's -- writers routinely put zip64 padding in one and not the other
+  # -- so where the data starts is a question only the local header answers.
+  let start = m.local + 30 + u16(src, m.local + 26) + u16(src, m.local + 28)
+  if not in_range(src, start, m.csize) {
+    return Err("zip: entry data runs past the end: " ++ m.name)
+  }
+  let raw = bytes.slice(src, start, start + m.csize)
+  var out = raw
+  if m.method == METHOD_DEFLATE {
+    match deflate.inflate_end(raw, cap) {
+      Ok(pr) -> {
+        let (o, used) = pr
+        # The directory says how long the compressed member is, so a member
+        # that ends early has bytes in it nobody read -- the reader must not
+        # decide on its own that the rest was padding.
+        if used != m.csize {
+          return Err("zip: " ++ m.name ++ " read " ++ to_string(used) ++
+              " of its " ++ to_string(m.csize) ++ " compressed bytes")
+        }
+        out = o
+      }
+      Err(e) -> return Err("zip: " ++ m.name ++ ": " ++ e)
+    }
+  } else if m.method != METHOD_STORED {
+    return Err("zip: compression method " ++ to_string(m.method) ++
+        " is not supported (" ++ m.name ++ ")")
+  }
+  if bytes.len(out) != m.size {
+    return Err("zip: " ++ m.name ++ " unpacked to " ++ to_string(bytes.len(out)) ++
+        " bytes, the directory says " ++ to_string(m.size))
+  }
+  if crc32.sum(out) != m.crc { return Err("zip: checksum mismatch for " ++ m.name) }
+  Ok(out)
+}
+
+## One entry's bytes, however many there turn out to be.
+pub fn read(src: Bytes, m: Meta) -> Result[Bytes, String] = read_bounded(src, m, None)
+
+## Every entry in the archive, fully unpacked, in central directory order. An
+## archive with no entries reads as the empty list: that is a legal zip, and
+## whether it is an acceptable one is the caller's question.
+pub fn entries(src: Bytes) -> Result[List[Entry], String] = {
+  let ms = match headers(src) {
+    Ok(hs) -> hs
+    Err(e) -> return Err(e)
+  }
+  var out: List[Entry] = []
+  for m in ms {
+    let data = match read(src, m) {
+      Ok(d) -> d
+      Err(e) -> return Err(e)
+    }
+    out = out ++ [Entry { name: m.name, is_dir: m.is_dir, data: data }]
   }
   Ok(out)
 }
