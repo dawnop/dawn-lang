@@ -3,8 +3,13 @@
 # Manual — run before consecrating a new seed, or to prove the chain from the
 # trust root (v0.6.0) still reproduces today's compiler. Not in CI.
 #
-#   scripts/replay-bootstrap.sh <seed>
+#   scripts/replay-bootstrap.sh [--allow-unverified] <seed>
 #     seed = a jar path, or a release tag like v0.7.0 (downloads its jar)
+#
+# v0.7.0 and earlier published the Kotlin `dawn.jar` and are deliberately
+# absent from scripts/seed-checksums.txt, so replaying from the trust root
+# needs --allow-unverified. That is the point of the flag: the replay still
+# works, and it says out loud that nothing checked what it downloaded.
 #
 # Both seed shapes work unchanged: a Kotlin dawn.jar and a selfhost
 # dawn-selfhost.jar both answer `build selfhost`, and both carry ASM — which
@@ -18,7 +23,12 @@
 # So an old seed plus today's sources must land byte-identical to HEAD.
 set -euo pipefail
 
-SEED_ARG=${1:?usage: replay-bootstrap.sh <seed-jar | vX.Y.Z>}
+if [ "${1:-}" = "--allow-unverified" ]; then
+  DAWN_SEED_ALLOW_UNVERIFIED=1
+  export DAWN_SEED_ALLOW_UNVERIFIED
+  shift
+fi
+SEED_ARG=${1:?usage: replay-bootstrap.sh [--allow-unverified] <seed-jar | vX.Y.Z>}
 
 OUT=${TMPDIR:-/tmp}/replay-bootstrap.$$
 mkdir -p "$OUT"
@@ -45,10 +55,11 @@ case "$SEED_ARG" in
     echo "fetching seed for $SEED_ARG ..."
     curl -fsSL -o "$SEED" "$base/dawn-selfhost.jar" 2>/dev/null \
       || curl -fsSL -o "$SEED" "$base/dawn.jar"
-    # A tag with no recorded digest warns and passes: v0.7.0 and earlier
-    # published the Kotlin `dawn.jar` and are deliberately absent from
-    # scripts/seed-checksums.txt, so replaying from the trust root still works
-    # — it just says out loud that nothing checked it.
+    # A tag with no recorded digest stops here unless --allow-unverified was
+    # passed. v0.7.0 and earlier published the Kotlin `dawn.jar` and are
+    # deliberately absent from scripts/seed-checksums.txt, so replaying from
+    # the trust root asks for the flag — which is the difference between
+    # "nothing checked this, and I meant that" and "nothing checked this".
     seed_verify "$SEED" "$SEED_ARG"
     ;;
   *)
@@ -59,7 +70,8 @@ case "$SEED_ARG" in
     fi
     # The escape hatch, worded as seedjar.sh words DAWN_SEED: a jar pointed at
     # by hand is not the pinned release, so there is nothing to check it
-    # against. Say so rather than let it pass as if it had been verified.
+    # against. Naming a path is already the explicit act --allow-unverified is
+    # for a tag; say so rather than let it pass as if it had been verified.
     echo "warning: using local seed $SEED (unverified)" >&2
     ;;
 esac

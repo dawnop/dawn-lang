@@ -31,18 +31,49 @@ seed_sha_of() {
   fi
 }
 
+## The opt-out, for the two cases that genuinely cannot verify: replaying a
+## pre-v0.8.0 tag, whose published asset was the Kotlin dawn.jar and is
+## deliberately absent from the table, and a machine with no SHA-256 tool.
+##
+## It has to be spelled out, and that is the whole change. Both cases used to
+## take the default path: a warning on stderr, exit 0, and a bootstrap from an
+## unverified compiler. So the one occurrence that mattered -- bumping
+## seed-release.txt to a new tag and forgetting to add its digest -- silently
+## turned the gate off for every build and every CI job, and looked like a
+## release omission rather than the loss of the trust root that it was.
+seed_unverified_ok() { [ -n "${DAWN_SEED_ALLOW_UNVERIFIED:-}" ]; }
+
+seed_refuse() {
+  echo "error: $1" >&2
+  echo "  This is the compiler that builds every other line of Dawn here, and" >&2
+  echo "  a bootstrap that cannot check it is not one this will run." >&2
+  echo "  Record the digest in scripts/seed-checksums.txt (the release workflow" >&2
+  echo "  prints the line), or set DAWN_SEED_ALLOW_UNVERIFIED=1 to go ahead" >&2
+  echo "  without one." >&2
+  exit 1
+}
+
 ## Verify $1 against the recorded hash for tag $2. A mismatch is fatal — at that
-## point the only choices are to stop or to run an unknown compiler.
+## point the only choices are to stop or to run an unknown compiler. So is a
+## missing precondition: no recorded hash and no hasher are both "this was not
+## checked", which is the state the check exists to prevent.
 seed_verify() {
   _sv_want=$(seed_expected_sha "$2")
   if [ -z "$_sv_want" ]; then
-    echo "warning: no recorded sha256 for seed $2 (scripts/seed-checksums.txt)" >&2
-    return 0
+    if seed_unverified_ok; then
+      echo "warning: no recorded sha256 for seed $2, proceeding unverified" >&2
+      echo "  (DAWN_SEED_ALLOW_UNVERIFIED is set)" >&2
+      return 0
+    fi
+    seed_refuse "no recorded sha256 for seed $2 (scripts/seed-checksums.txt)"
   fi
   _sv_got=$(seed_sha_of "$1")
   if [ -z "$_sv_got" ]; then
-    echo "warning: no sha256sum/shasum on PATH, seed $2 unverified" >&2
-    return 0
+    if seed_unverified_ok; then
+      echo "warning: no sha256sum/shasum on PATH, seed $2 unverified" >&2
+      return 0
+    fi
+    seed_refuse "no sha256sum or shasum on PATH, so seed $2 cannot be verified"
   fi
   if [ "$_sv_got" != "$_sv_want" ]; then
     echo "error: seed $2 failed checksum verification" >&2
