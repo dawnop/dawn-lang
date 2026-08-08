@@ -51,35 +51,34 @@ jobs:
 
       # Seed consecration: every release jar is the next bootstrap seed, so
       # the tag itself must pass the self-hosting gates — ci.yml runs them on
-      # main, but a tag can point anywhere. The chain is seed → A → B → C:
-      # the published jar is B (HEAD compiled by HEAD), proven by cmp B C.
+      # main, but a tag can point anywhere. The canonical builder owns the
+      # seed → A → B → C chain and atomically promotes the verified B.
       - name: build the toolchain chain from the seed
-        run: |
-          . scripts/seedjar.sh
-          ROOT=$(pwd)
-          SEED="$(seed_jar)"
-          # The seed builds A against its own released std (it may not be able
-          # to check today's std/ — see seedjar.sh seed_std_dir); B and C use
-          # today's std. This inline chain is a second copy of the one in
-          # scripts/selfhost-fixpoint.sh — keep them in step.
-          SEED_V="--std $(seed_std_dir) --vendor org/objectweb/asm --vendor coursierapi"
-          V="--std std --vendor org/objectweb/asm --vendor coursierapi"
-          java -Xss512m -jar "$SEED" build selfhost -o a.jar $SEED_V
-          java -Xss512m -jar a.jar build selfhost -o dawn-selfhost.jar $V
-          java -Xss512m -jar dawn-selfhost.jar build selfhost -o c.jar $V
-          cmp dawn-selfhost.jar c.jar
-          echo "closure OK (B == C)"
+        run: ./scripts/build-release-jar.sh -o dawn-selfhost.jar
 
       # The tag is what consumers pin, so it must name what is in the jar
       # (VERSION in selfhost/src/version.dawn).
       - name: the jar reports the version we think it does
         run: |
+          mapfile -t SOURCE_VERSIONS < <(
+            sed -nE 's/^pub const VERSION: String = "([^"]+)"$/\1/p' \
+              selfhost/src/version.dawn
+          )
+          if [ "${#SOURCE_VERSIONS[@]}" -ne 1 ]; then
+            echo "::error::selfhost/src/version.dawn must declare exactly one VERSION"
+            exit 1
+          fi
+          VERSION="${SOURCE_VERSIONS[0]}"
+          if [ "$GITHUB_REF_NAME" != "v$VERSION" ]; then
+            echo "::error::tag '$GITHUB_REF_NAME' does not exactly name source version '$VERSION'"
+            exit 1
+          fi
           OUT=$(java -Xss512m -jar dawn-selfhost.jar --version)
           echo "$OUT"
-          case "$OUT" in
-            "dawn ${GITHUB_REF_NAME#v} ("*) ;;
-            *) echo "::error::--version said '$OUT' (bump selfhost/src/version.dawn)"; exit 1 ;;
-          esac
+          if [ "$OUT" != "dawn $VERSION (selfhost)" ]; then
+            echo "::error::--version said '$OUT', expected 'dawn $VERSION (selfhost)'"
+            exit 1
+          fi
 
       # K-B7: a second artifact, for consumers who would rather not install a
       # JVM. It is *additive* — the bootstrap seed is still the jar

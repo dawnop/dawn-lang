@@ -13,9 +13,10 @@
 **现行形态（M8 后）**：种子 = `scripts/seed-release.txt` 钉住的上一 release 的
 `dawn-selfhost.jar`。`bin/dawn` 首次运行自动下载到 `.dawn/seeds/` 并用它编译
 HEAD 工具链（`DAWN_SEED=<jar>` 指本地 jar 逃生）。种子 jar 自带一切：编译器类、
-`--embed-std` 嵌入的 std 源、vendored 的 ASM / coursier interface——这两样二进制
+由 std 源编译出的 `stdsrc` 模块、vendored 的 ASM / coursier interface；后两样二进制
 像 OCaml 的 `boot/` 一样**随种子逐代续传**（vendor 从当前运行 jar 的类路径拷出），
-在库没有对应源码。
+在库没有对应源码。stage A 的类型检查仍配对使用该 release 的 std 源树，
+`scripts/seedjar.sh` 会从 tag 提取并校验它；独立 jar 运行时不再携带 std 源资源。
 
 > 曾经是三样：`dawn.tool` 的 `AdtClassWriter` shim 也在里面，源码只在 `kotlin-final`
 > tag。**2026-08-03（v0.49.0 之后）它退出了**——那五个 null 适配器改由 `rtclasses.dawn`
@@ -58,9 +59,11 @@ v0.6.0–v0.8.0 的 release jar 永久保存；`kotlin-final` tag 保有 Kotlin 
    `.sha256`、报 0.50.0、并在只有一个 `.dawn` 文件的裸目录里编译运行通过）。
    它也**不是种子**：`scripts/seedjar.sh` 只下载、只校验 jar，
    `scripts/seed-checksums.txt` 里也只有 jar 的摘要。
-2. **祝圣仪式（机器强制）**：`release.yml` 在 tag 上重建整条链
-   种子→A→B→C（B = HEAD 编 HEAD，即要上传的那份字节），验证 `cmp B C` 闭包
-   与版本一致——任一红则 release 不出。push CI（ci.yml）的全金样绿是前置。
+2. **祝圣仪式（机器强制）**：`scripts/build-release-jar.sh -o <jar>` 是唯一构建
+   配方；`release.yml` 与日常 `selfhost-fixpoint.sh` 都只能调用它。它在 tag 上重建
+   种子→A→B→C（B = HEAD 编 HEAD，即要上传的那份字节），验证 `cmp B C`、独立
+   emit、原子提升后的最终路径仍与 C 相同；workflow 再精确核对源码版本、tag 与
+   artifact 输出——任一红则 release 不出。push CI（ci.yml）的全金样绿是前置。
    下面的链条表记的是**种子形态变过的那几环**，不是每一次 bump——每次 bump 的记录
    就是 `scripts/seed-release.txt` 那一行和它的提交，再抄一遍只会过期（这张表一度
    写着「逐条记」，却停在 v0.8.0，中间二十一个 release 一个没记）。
@@ -91,18 +94,16 @@ v0.6.0–v0.8.0 的 release jar 永久保存；`kotlin-final` tag 保有 Kotlin 
 
 # 1) 种子编 HEAD → A；A 编 HEAD → B（HEAD 编 HEAD，规范产物）；
 #    B 编 HEAD → C；cmp B C 逐字节相同 = 固定点 + 闭包一步到位。
-#    每一步都是独立 jar（--embed-std 嵌 std 源，--vendor 续传 shim/ASM/coursier）
+#    A 配对 seed release 的 std，B/C 使用当前 std；vendor 逐代续传。
 ./scripts/selfhost-fixpoint.sh
 
-# 手工展开（release.yml 的祝圣即此链，B 是上传的那份）：
-V="--std std --embed-std std --vendor org/objectweb/asm --vendor coursierapi"
-java -Xss512m -jar seed.jar build selfhost -o a.jar $V
-java -Xss512m -jar a.jar    build selfhost -o b.jar $V
-java -Xss512m -jar b.jar    build selfhost -o c.jar $V
-cmp b.jar c.jar
+# 需要保留规范产物时直接指定输出；release.yml 只做这一调用。
+./scripts/build-release-jar.sh -o /tmp/dawn-selfhost.jar
 ```
 
-`scripts/selfhost-fixpoint.sh` 固化此链，**在 CI**（ci.yml），每次 push 重验；
+`scripts/build-release-jar.sh` 固化此链，且刻意不暴露 seed/std/vendor 等可重组
+recipe 的参数；`scripts/selfhost-fixpoint.sh` 只是丢弃产物的兼容 wrapper，**在 CI**
+（ci.yml）每次 push 重验；
 `scripts/replay-bootstrap.sh <seed|vX.Y.Z>` 从任一环重放（发版前手动过）。
 
 ## 为什么字节级一致做得到

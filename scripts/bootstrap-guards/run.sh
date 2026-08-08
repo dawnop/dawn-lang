@@ -163,6 +163,7 @@ if (
   export ROOT
   # shellcheck disable=SC1091
   . "$sroot/scripts/seedjar.sh"
+  # shellcheck disable=SC2317 # seed_jar invokes this override indirectly
   seed_sha_of() { echo ""; }
   seed_jar
 ) > "$work/seed.txt" 2>&1; then
@@ -234,5 +235,115 @@ if try_std; then
 else
   ok "a seed std with no recorded hash is refused"
 fi
+
+# ---------------------------------------------------------------------------
+# TOOL-17: release and fixed-point gates share one build recipe.
+#
+# A fixed point only proves the recipe that produced it. If the workflow and
+# local gate each spell the chain independently, both may stay green while the
+# published artifact drifts from the one tested on every push.
+# ---------------------------------------------------------------------------
+tool17_count_line() {
+  awk -v want="$2" '
+    {
+      line = $0
+      sub(/^[[:space:]]+/, "", line)
+      sub(/[[:space:]]+$/, "", line)
+      if (line == want) count++
+    }
+    END { print count + 0 }
+  ' "$1"
+}
+
+tool17_validate() {
+  local release_file="$1"
+  local wrapper_file="$2"
+  local errors=0
+  local exact_count
+  local ref_count
+
+  exact_count="$(tool17_count_line "$release_file" \
+    'run: ./scripts/build-release-jar.sh -o dawn-selfhost.jar')"
+  ref_count="$(grep -F -c './scripts/build-release-jar.sh' "$release_file")"
+  if [ "$exact_count" -ne 1 ] || [ "$ref_count" -ne 1 ]; then
+    echo "release.yml must contain exactly one canonical release-JAR builder call" >&2
+    errors=1
+  fi
+
+  # shellcheck disable=SC2016 # $work is literal text in the guarded script
+  exact_count="$(tool17_count_line "$wrapper_file" \
+    './scripts/build-release-jar.sh -o "$work/dawn-selfhost.jar"')"
+  ref_count="$(grep -F -c './scripts/build-release-jar.sh' "$wrapper_file")"
+  if [ "$exact_count" -ne 1 ] || [ "$ref_count" -ne 1 ]; then
+    echo "selfhost-fixpoint.sh must contain exactly one canonical builder call" >&2
+    errors=1
+  fi
+
+  for caller in "$release_file" "$wrapper_file"; do
+    if grep -Eq '(^|[[:space:]])build[[:space:]]+selfhost([[:space:]]|$)' "$caller"; then
+      echo "$caller contains a second inline build selfhost recipe" >&2
+      errors=1
+    fi
+    if grep -Eq '(^|[^[:alnum:]_.-])[ac]\.jar([^[:alnum:]_.-]|$)' "$caller"; then
+      echo "$caller contains stage artifact names outside the canonical builder" >&2
+      errors=1
+    fi
+  done
+
+  return "$errors"
+}
+
+release_file="$root/.github/workflows/release.yml"
+wrapper_file="$root/scripts/selfhost-fixpoint.sh"
+if tool17_validate "$release_file" "$wrapper_file"; then
+  ok "release and fixed-point gates use the one release-JAR recipe"
+else
+  bad "release or fixed-point gate bypasses the canonical release-JAR builder"
+fi
+
+tool17_dir="$work/tool17"
+mkdir -p "$tool17_dir"
+cp "$release_file" "$tool17_dir/release.base.yml"
+cp "$wrapper_file" "$tool17_dir/wrapper.base.sh"
+
+tool17_expect_reject() {
+  local name="$1"
+  local mutated_release="$2"
+  local mutated_wrapper="$3"
+  if tool17_validate "$mutated_release" "$mutated_wrapper" \
+      > "$tool17_dir/control.out" 2>&1; then
+    bad "$name did not trip the release-recipe guard"
+  else
+    ok "$name trips the release-recipe guard"
+  fi
+}
+
+sed '/build-release-jar\.sh -o dawn-selfhost\.jar/d' \
+  "$tool17_dir/release.base.yml" > "$tool17_dir/release.missing.yml"
+tool17_expect_reject "a missing builder call" \
+  "$tool17_dir/release.missing.yml" "$tool17_dir/wrapper.base.sh"
+
+cp "$tool17_dir/release.base.yml" "$tool17_dir/release.double.yml"
+printf '\n      - name: duplicate builder mutation\n        run: ./scripts/build-release-jar.sh -o dawn-selfhost.jar\n' \
+  >> "$tool17_dir/release.double.yml"
+tool17_expect_reject "a duplicate builder call" \
+  "$tool17_dir/release.double.yml" "$tool17_dir/wrapper.base.sh"
+
+cp "$tool17_dir/release.base.yml" "$tool17_dir/release.inline.yml"
+printf '\n      - name: inline recipe mutation\n        run: java -jar seed.jar build selfhost -o candidate.jar\n' \
+  >> "$tool17_dir/release.inline.yml"
+tool17_expect_reject "an appended inline build" \
+  "$tool17_dir/release.inline.yml" "$tool17_dir/wrapper.base.sh"
+
+sed 's/build-release-jar\.sh -o dawn-selfhost\.jar/build-release-jar.sh -o candidate.jar/' \
+  "$tool17_dir/release.base.yml" > "$tool17_dir/release.wrong-output.yml"
+tool17_expect_reject "a wrong release output name" \
+  "$tool17_dir/release.wrong-output.yml" "$tool17_dir/wrapper.base.sh"
+
+# shellcheck disable=SC2016 # mutate the guarded script's literal $work
+sed 's|\./scripts/build-release-jar\.sh -o "$work/dawn-selfhost\.jar"|java -Xss512m -jar seed.jar build selfhost -o "$work/dawn-selfhost.jar"|' \
+  "$tool17_dir/wrapper.base.sh" > "$tool17_dir/wrapper.bypass.sh"
+tool17_expect_reject "a wrapper that bypasses the builder" \
+  "$tool17_dir/release.base.yml" "$tool17_dir/wrapper.bypass.sh"
 
 exit "$fail"

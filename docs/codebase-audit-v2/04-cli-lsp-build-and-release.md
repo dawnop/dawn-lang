@@ -123,6 +123,6 @@
 
 ## TOOL-17 — P2 — release JAR 自举配方是第二份实现
 
-- **证据：S。** 日常 fixpoint 的权威链在 `scripts/selfhost-fixpoint.sh:18`、`:26`；release workflow 再内联一份，并承认是 “second copy—keep them in step”：`.github/workflows/release.yml:63`。
-- **影响：** gate 验证脚本，release artifact 来自另一份 recipe；未来任一方新增 vendor/std/build option 时，两边都可各自 B==C，却不是同一产物配方。
-- **建议：** 抽出支持 output path 的唯一 release-jar builder，gate 与 release 共用；workflow 只做 version、digest、upload。
+- **历史证据：S。** 日常 fixpoint 曾在 `scripts/selfhost-fixpoint.sh` 内联整条链；release workflow 又内联一份，并明确写着 “second copy—keep them in step”。因此两边可以各自 B==C，却发布不同 recipe 的产物。
+- **已处置（2026-08-09）：** `scripts/build-release-jar.sh -o <jar>` 成为唯一、不可重组的 release JAR 接口，固定 seed std/current std/vendor、A/B/C、standalone smoke 与同文件系统原子提升；`scripts/selfhost-fixpoint.sh` 降为薄 wrapper，`release.yml` 只调用 builder，仍独立负责版本、checksum、native 与 upload。
+- **回归门禁：** `scripts/bootstrap-guards/run.sh` 强制 workflow 与 wrapper 各恰好一次 canonical 调用，并拒绝内联 `build selfhost` 或 stage artifact；缺调用、双调用、追加内联、错误输出名与 wrapper 绕过五个变异负控都必须转红。

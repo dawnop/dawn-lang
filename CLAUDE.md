@@ -57,6 +57,7 @@ parser 靠首字母大小写消歧（`TYPEIDENT` 是独立 token），所以改�
 ./site/build.sh                          # 端到端建站（含 Playground 前端 bundle）
 
 ./scripts/selfhost-fixpoint.sh           # 自举固定点：种子→A→B→C，B==C
+./scripts/build-release-jar.sh -o /tmp/dawn-selfhost.jar  # 唯一 release JAR 配方
 ./scripts/selfhost-prev-diff.sh          # N vs N−1 差分（emit 语料 + 生态扫描）
 ./scripts/selfhost-run-diff.sh           # CLI 转写对拍 vs 上一 release
 ./scripts/selfhost-lsp-diff.sh           # LSP 会话对拍 vs 上一 release
@@ -82,7 +83,7 @@ selfhost/src/      分九个目录，依赖单向向下（拓扑序即下面的�
                    c/      native 后端（emitc cdriver ctestrun rc）
                    lsp/    语言服务（server lspc lspq）
                    根：main.dawn nmain.dawn doc.dawn version.dawn
-std/               捆绑标准库源（--embed-std 嵌进独立 jar）
+std/               标准库源（构建 selfhost 时编译进独立 jar 的 stdsrc 模块）
 packages/          源码包（json、web），[deps] 消费
 site/              用 Dawn 自己写的静态站生成器（自举）
 site/play-ui/      Playground 编辑器（TypeScript + Vite + CodeMirror 6）
@@ -148,8 +149,9 @@ Windows 的 WinNAT 保留了大片低端口，8097 bind 会报 "Address already 
 ## 发布与跨仓契约
 
 版本在 `selfhost/src/version.dawn` 的 `VERSION`。发布 = 改它 → 提交 →
-`git tag v0.9.0 && git push --tags`；`release.yml` 在 tag 上重建种子→A→B→C 链、
-验证 B==C 闭包与版本一致，把 `dawn-selfhost.jar` 发上 GitHub Release。
+`git tag v0.9.0 && git push --tags`；`release.yml` 在 tag 上调用唯一配方
+`scripts/build-release-jar.sh -o dawn-selfhost.jar` 重建种子→A→B→C 链，验证 B==C
+闭包，并精确核对源码版本、tag 与 artifact 输出后发上 GitHub Release。
 **release 即下一个种子**：发布后把 `scripts/seed-release.txt` bump 到新 tag。
 `selfhost/src` 只准用当前种子已支持的语言特性（机器强制：种子编不动 HEAD 就红）——
 种子推进协议见 [docs/bootstrap.md](docs/bootstrap.md)，M8（淘汰 Kotlin）的
