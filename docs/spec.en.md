@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 5b51118581aa2b60 -->
+<!-- doc-check: translation-of docs/spec.md @ fdbcee01c7b5cbb7 -->
 
 # Dawn Language Specification
 
@@ -198,7 +198,10 @@ enough to feed Markdown to the Dawn formatter and overwrite it.
 
 The rules: indent 2 spaces; 1 space on each side of a binary operator /
 `->` / `=>` / `=` / `|>`; 1 space after `,`/`:` and none before; nothing inside `(`/`[`; `.`/`?`
-tight; over-long lines are not wrapped (lines the author broke are kept).
+tight; `..` tight on both sides (`a..b`; where it is a prefix instead — the record spread
+`{ ..base }`, the list/constructor/record rest `[x, ..rest]` — the space to its left belongs to
+the opening bracket's or the comma's rule); over-long lines are not wrapped (lines the author
+broke are kept).
 
 ---
 

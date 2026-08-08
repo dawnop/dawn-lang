@@ -237,7 +237,13 @@ fn space(prev: Token, cur: Token, unary: Set[Int], postfix: Set[Int], on_use_lin
   if set.has(postfix, cur.lo) { return false }
   # member access and effect/attribute markers
   if p == DOT || c == DOT { return false }
+  # `..` closes up on both sides when it is the range operator (`0..n`, spec
+  # §777 and the tutorial), so only a token that ends a value pulls it left.
+  # Its other four roles are prefixes -- the record spread `{ ..base }` and the
+  # list/constructor/record rest `[x, ..rest]` -- where what precedes is an
+  # opener or a comma, and the space there belongs to that token's rule.
   if p == DOTDOT { return false }
+  if c == DOTDOT && is_value_end(p) { return false }
   if p == BANG && not set.has(postfix, prev.lo) { return false }
   # `~` is always prefix bitwise-not; it hugs its operand like unary `-`
   if p == TILDE { return false }
@@ -352,6 +358,33 @@ test "use paths print tight and unary minus hugs" {
   assert fmt_of("use std/list.{ take , drop }\n") == "use std/list.{take, drop}\n"
   let src = "fn f() -> Int = { -1 }\n"
   assert fmt_of(src) == src
+}
+
+## `..` is one token wearing five hats, and only the first is an infix operator.
+## Pinning all of them here is what keeps "close the range up" from closing up a
+## comma: the formatter had the tight-on-the-right half since the port, and
+## adding the left half without a value-end guard prints `[x,..rest]`.
+test "the range operator closes up and the spread and rest prefixes do not" {
+  # `a..b` is what spec §5.4 and the tutorial write; the formatter printed
+  # `0 ..n`, so the repository disagreed with both of its own documents.
+  let r = "fn f(n: Int) -> Int = {\n  var s = 0\n  for i in 0..n { s = s + i }\n  s\n}\n"
+  assert fmt_of(r) == r
+  assert fmt_of("fn f(n: Int) -> Int = {\nvar s = 0\nfor i in 0 .. n { s = s+i }\ns\n}\n") == r
+  # a call or an index ends a value too, so the operand can be either side
+  let c = "fn g(xs: List[Int]) -> Int = {\n  for i in lo(xs)..len(xs) { use_it(i) }\n  0\n}\n"
+  assert fmt_of(c) == c
+  # the record spread: the space belongs to the `{`, which is not a value end
+  let s = "fn h(p: Point) -> Point = Point { ..p, y: 0 }\n"
+  assert fmt_of(s) == s
+  # the three rest patterns: the space belongs to the comma
+  let l = "fn k(xs: List[Int]) -> Int =\n  match xs {\n    [x, ..rest] -> x + len(rest)\n" ++
+    "    _ -> 0\n  }\n"
+  assert fmt_of(l) == l
+  # `..}` is the pre-existing right-hug (`p == DOTDOT`) meeting a brace, which
+  # otherwise takes a space. Recorded as it is rather than quietly changed:
+  # tightening the left side is SYN-18, the right side is nobody's finding yet.
+  let n = "fn m(p: Pair) -> Int =\n  match p {\n    Pair(a, ..) -> a\n    Rec { a, ..} -> a\n  }\n"
+  assert fmt_of(n) == n
 }
 
 ## The two sugars are token-level to this file: `with`/`<-` and a trailing `fn`
