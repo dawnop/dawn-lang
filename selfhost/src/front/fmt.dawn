@@ -46,7 +46,60 @@ pub fn format(source: String) -> Result[String, List[Diag]] = {
   }
   let stream = sort_by(code ++ comments, (a: Token, b: Token) => a.lo - b.lo)
   if len(stream) == 0 { return Ok("") }
-  Ok(reflow(source, stream, unary_minus(raw), postfix_bang(raw)))
+  Ok(reflow(source, stream, unary_minus(raw), postfix_bang(raw), block_arrow(source, raw)))
+}
+
+## Span starts of FATARROW tokens that end a brace-block's head line -- the
+## tail block's parameter head, `f(xs) { x =>` (spec §4.3). Same family as
+## `unary_minus`: a token-level fact the spacing pass needs.
+##
+## Without this the `=>` hits `is_cont_ender` and the next line is read as a
+## continuation, +1 level -- and the line after that, not a continuation,
+## steps back, so the block body comes out staggered. The head's `=>` is not
+## continued by the body: the body follows the *block*, like the statements
+## after any `{`. The test is whether the innermost still-open bracket at the
+## arrow is a brace opened on the arrow's own line; a handler arm's `op(a) =>`
+## does not qualify (its brace opened on the `with handle` line above), and a
+## wrapped lambda body `map(xs, x =>` does not either (innermost opener is a
+## paren).
+##
+## Lines are counted from the *source*, not from NEWLINE tokens: the lexer
+## swallows the NEWLINE after every line-continuing token (`{`, `,`, `=>`
+## themselves -- lexer.continues_line), so the token stream cannot say which
+## line a brace was opened on. Spans are code-point indices and the tokens are
+## in order, so one cursor pass answers it.
+fn block_arrow(src: String, raw: List[Token]) -> Set[Int] = {
+  let cps = code_points(src)
+  var out: Set[Int] = set.empty()
+  var opener_kinds: List[TokKind] = []
+  var opener_lines: List[Int] = []
+  var line = 0
+  var cur = 0
+  var i = 0
+  while i < len(raw) {
+    let t = raw[i]
+    while cur < t.lo && cur < len(cps) {
+      if cps[cur] == '\n' { line = line + 1 }
+      cur = cur + 1
+    }
+    let k = t.kind
+    if k == LPAREN || k == LBRACKET || k == LBRACE {
+      opener_kinds = opener_kinds ++ [k]
+      opener_lines = opener_lines ++ [line]
+    } else if k == RPAREN || k == RBRACKET || k == RBRACE {
+      if len(opener_kinds) > 0 {
+        opener_kinds = list.take(opener_kinds, len(opener_kinds) - 1)
+        opener_lines = list.take(opener_lines, len(opener_lines) - 1)
+      }
+    } else if k == FATARROW && len(opener_kinds) > 0 {
+      let top = len(opener_kinds) - 1
+      if opener_kinds[top] == LBRACE && opener_lines[top] == line {
+        out = set.insert(out, t.lo)
+      }
+    }
+    i = i + 1
+  }
+  out
 }
 
 ## Span starts of MINUS tokens that are unary (prefix), so they hug the
@@ -145,7 +198,13 @@ fn is_effect_union(raw: List[Token], start: Int) -> Bool = {
 ## bracket when `reflow` picks an anchor.
 type Opener = { at: Int, brace: Bool }
 
-fn reflow(src: String, toks: List[Token], unary: Set[Int], postfix: Set[Int]) -> String = {
+fn reflow(
+  src: String,
+  toks: List[Token],
+  unary: Set[Int],
+  postfix: Set[Int],
+  barrow: Set[Int]
+) -> String = {
   var out: List[String] = []
   var openers: List[Opener] = []
   var line_indent = 0
@@ -199,7 +258,7 @@ fn reflow(src: String, toks: List[Token], unary: Set[Int], postfix: Set[Int]) ->
         # collapse >=2 blank lines to 1
         out = out ++ [if nl >= 2 { "\n\n" } else { "\n" }]
         let pl = if have_prev_code { prev_code } else { prev }
-        let cont = is_continuation(pl, t, unary)
+        let cont = is_continuation(pl, t, unary, barrow)
         line_indent = indent_of(t, openers, line_indent, cont)
         let lvl = if line_indent < 0 { 0 } else { line_indent }
         out = out ++ [str.repeat("  ", lvl)]
@@ -268,8 +327,13 @@ fn in_block(openers: List[Opener]) -> Bool =
 ## A leading `-` means two different things: `a\n  - b` wraps a subtraction, so
 ## the second line is a continuation, while `{\n  -1\n}` opens an expression
 ## and is not. `unary` already tells them apart for spacing.
-fn is_continuation(prev_line_last: Token, line_start: Token, unary: Set[Int]) -> Bool =
-  is_cont_ender(prev_line_last.kind) ||
+fn is_continuation(
+  prev_line_last: Token,
+  line_start: Token,
+  unary: Set[Int],
+  barrow: Set[Int]
+) -> Bool =
+  (is_cont_ender(prev_line_last.kind) && not set.has(barrow, prev_line_last.lo)) ||
   (is_cont_starter(line_start.kind) && not set.has(unary, line_start.lo))
 
 # ---- spacing between two tokens already known to be on the same line ----
@@ -510,6 +574,35 @@ test "a minus that opens a line is prefix, whatever the line above ended in" {
   let o = "fn f(a: Int) -> Int = a - 1\n"
   assert fmt_of(o) == o
   assert fmt_of("fn f(a: Int) -> Int = a-1\n") == o
+}
+
+## The tail block (spec §4.3). The zero-parameter form needs no rule of its
+## own -- `space()` already separates `column {` and `) {`, and reflow's body
+## anchor already keeps a multi-line argument list's closing `) {` at the
+## statement's level -- but that is a fact worth pinning, not assuming.
+test "a tail block formats like the body it reads as" {
+  let z = "fn f() -> Unit !io = {\n  column {\n    greeting(\"world\")\n    row {\n" ++
+    "      button(\"ok\")\n    }\n  }\n  column(\n    align: Center,\n    gap: 12,\n" ++
+    "  ) {\n    text(\"hi\")\n  }\n}\n"
+  assert fmt_of(z) == z
+  assert fmt_of("fn f() -> Unit !io = {\ncolumn {\ngreeting(\"world\")\nrow {\n" ++
+      "button(\"ok\")\n}\n}\ncolumn(\nalign: Center,\ngap: 12,\n) {\ntext(\"hi\")\n}\n}\n") == z
+}
+
+## A parameter head's line-ending `=>` is not continued by the block body: the
+## body follows the block, like the statements after any `{`. Without the
+## `block_arrow` carve-out the first body line took a continuation indent and
+## the second stepped back -- a staggered body, from a rule about wrapped
+## binary expressions.
+test "a tail block's parameter head does not stagger the body" {
+  let src = "fn f(ys: List[Int]) -> Unit !io = {\n  let a = list.map(ys) { x =>\n" ++
+    "    io.println(\"one\")\n    io.println(\"two\")\n  }\n  use_it(a)\n}\n"
+  assert fmt_of(src) == src
+  assert fmt_of("fn f(ys: List[Int]) -> Unit !io = {\nlet a = list.map(ys) { x =>\n" ++
+      "io.println(\"one\")\nio.println(\"two\")\n}\nuse_it(a)\n}\n") == src
+  # a handler arm's `=>` still continues its line: its brace opened a line up
+  let h = "fn g() -> Int = {\n  with handle Ask {\n    ask() =>\n      42\n  }\n  ask()\n}\n"
+  assert fmt_of(h) == h
 }
 
 test "a conditional impl's parameters hug the keyword" {
