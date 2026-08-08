@@ -1,0 +1,56 @@
+# Return-type inference orders the inferred functions by a call graph built
+# from the names their bodies mention. A name that is *bound* where it is
+# mentioned is not an edge: without that, `fn a(b: Int) = b` reads as a call to
+# the top-level `b`, and both are rejected as mutually recursive (audit
+# ARC-01). Every function below is inferred, and every one of them mentions a
+# bound name that a sibling also spells. The golden is empty on purpose --
+# nothing here is recursive, so nothing here should be diagnosed.
+
+use std/list as list
+
+# a parameter
+fn a(b: Int) = b
+
+fn b() = a(1)
+
+# a module alias's function, whose name a sibling also takes
+fn take(n: Int) = len(list.take([1, 2, 3], n))
+
+# a pattern binding
+fn c(xs: List[Int]) =
+  match xs {
+    [d] -> d
+    _ -> 0
+  }
+
+fn d() = c([2])
+
+# a let binding
+fn e() = {
+  let f = 3
+  f
+}
+
+fn f() = e()
+
+# a loop variable
+fn g() = {
+  var total = 0
+  for h in 0 ..3 { total = total + h }
+  total
+}
+
+fn h() = g()
+
+# a local function's own name
+fn i() = {
+  fn j() -> Int = 4
+  j()
+}
+
+fn j() = i()
+
+# a lambda parameter
+fn k() = map([5], l => l)
+
+fn l() = len(k())

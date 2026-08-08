@@ -2207,111 +2207,195 @@ test "ctor pattern field discipline" {
 
 fn no_pargs() -> List[PatArg] = []
 
-## Every lowercase name mentioned in call/value position — the call-graph
-## over-approximation for return-type inference ordering (Kotlin nameRefs).
-pub fn name_refs(e: Expr, out: Set[String]) -> Set[String] =
+## What a name means at the point the call graph reaches it: the value binders
+## in scope (parameters, `let`s, patterns, loop variables, local functions) and
+## the whole-module aliases. Both answer the same question — is this spelling
+## an edge to a top-level function of *this* module, or does it name something
+## else entirely. Walking without them makes `fn a(b: Int) = b` depend on the
+## top-level `b`, and rejects both as mutually recursive (audit ARC-01).
+pub type RefScope = { bound: Set[String], mods: Set[String] }
+
+## The scope a function body starts in: nothing bound yet, the module's aliases
+## fixed for the whole walk.
+pub fn ref_scope(mods: Set[String]) -> RefScope =
+  RefScope { bound: set.empty(), mods: mods }
+
+pub fn rs_bind(sc: RefScope, name: String) -> RefScope =
+  RefScope { ..sc, bound: set.insert(sc.bound, name) }
+
+fn rs_params(sc: RefScope, ps: List[LambdaParam]) -> RefScope = {
+  var o = sc
+  for p in ps { o = rs_bind(o, p.name) }
+  o
+}
+
+## Every name a pattern binds. `PLit`'s expression is a literal, so nothing in
+## a pattern is a call position — only binders come out of here.
+fn rs_pattern(sc: RefScope, p: Pattern) -> RefScope =
+  match p {
+    PBind(name, _, _) -> rs_bind(sc, name)
+    PCtor(_, args, _, _, _, _, _, _) -> rs_pargs(sc, args)
+    PQual(_, _, args, _, _, _, _, _, _) -> rs_pargs(sc, args)
+    PTuple(elems, _, _) -> {
+      var o = sc
+      for x in elems { o = rs_pattern(o, x) }
+      o
+    }
+    PList(pre, _, rest_name, _, post, _, _) -> {
+      var o = sc
+      for x in pre { o = rs_pattern(o, x) }
+      match rest_name {
+        Some(n) -> { o = rs_bind(o, n) }
+        None -> ()
+      }
+      for x in post { o = rs_pattern(o, x) }
+      o
+    }
+    _ -> sc
+  }
+
+fn rs_pargs(sc: RefScope, args: List[PatArg]) -> RefScope = {
+  var o = sc
+  for a in args { o = rs_pattern(o, a.pat) }
+  o
+}
+
+## Is `target` a whole-module alias — i.e. is `target.f(..)` a call into
+## another module rather than a UFCS rewrite of this module's `f`?
+fn rs_qualified(sc: RefScope, target: Expr) -> Bool =
+  match target {
+    EVar(q, _, _) -> set.has(sc.mods, q)
+    _ -> false
+  }
+
+## Every lowercase name mentioned in call/value position and *not* bound where
+## it is mentioned — the call-graph over-approximation for return-type
+## inference ordering (Kotlin nameRefs). The over-approximation is deliberate
+## and one-sided: a spurious edge only costs ordering, but a spurious *cycle*
+## rejects a legal program, which is why binders and module aliases are
+## subtracted here rather than filtered downstream.
+pub fn name_refs(e: Expr, out: Set[String], sc: RefScope) -> Set[String] =
   match e {
-    EVar(name, _, _) -> set.insert(out, name)
+    EVar(name, _, _) ->
+      if set.has(sc.bound, name) || set.has(sc.mods, name) { out } else { set.insert(out, name) }
     EMethod(target, name, args, _, _, _, _) -> {
-      var o = name_refs(target, set.insert(out, name))
-      for a in args { o = name_refs(a.e, o) }
+      # `x.f(a)` can mean `f(x, a)` (UFCS, spec §4.3), so the method name is an
+      # edge — unless the receiver is a module alias, where `f` lives in that
+      # other module and no local function of this name is reachable.
+      var o = if rs_qualified(sc, target) { out } else { set.insert(out, name) }
+      o = name_refs(target, o, sc)
+      for a in args { o = name_refs(a.e, o, sc) }
       o
     }
     # the callee is walked like any other subexpression: a named call reaches
     # the EVar arm above, which is where its name is recorded
     EApply(target, args, _, _) -> {
-      var o = name_refs(target, out)
-      for a in args { o = name_refs(a.e, o) }
+      var o = name_refs(target, out, sc)
+      for a in args { o = name_refs(a.e, o, sc) }
       o
     }
-    ELambda(_, body, _, _, _) -> name_refs(body, out)
+    ELambda(params, body, _, _, _) -> name_refs(body, out, rs_params(sc, params))
     EBlock(stmts, tail, _, _) -> {
       var o = out
-      for s in stmts { o = stmt_name_refs(s, o) }
+      var s = sc
+      for st in stmts {
+        let (o1, s1) = stmt_name_refs(st, o, s)
+        o = o1
+        s = s1
+      }
       match tail {
-        Some(t) -> name_refs(t, o)
+        Some(t) -> name_refs(t, o, s)
         None -> o
       }
     }
     EIf(cond, thn, els, _, _) -> {
-      var o = name_refs(thn, name_refs(cond, out))
+      var o = name_refs(thn, name_refs(cond, out, sc), sc)
       match els {
-        Some(x) -> name_refs(x, o)
+        Some(x) -> name_refs(x, o, sc)
         None -> o
       }
     }
     EMatch(scrut, arms, _, _) -> {
-      var o = name_refs(scrut, out)
+      var o = name_refs(scrut, out, sc)
       for arm in arms {
+        var asc = sc
+        for p in arm.pats { asc = rs_pattern(asc, p) }
         match arm.guard {
-          Some(g) -> { o = name_refs(g, o) }
+          Some(g) -> { o = name_refs(g, o, asc) }
           None -> ()
         }
-        o = name_refs(arm.body, o)
+        o = name_refs(arm.body, o, asc)
       }
       o
     }
     ECtor(_, cargs, spread, _, _, _, _, _) -> {
       var o = out
       match spread {
-        Some(sp) -> { o = name_refs(sp, o) }
+        Some(sp) -> { o = name_refs(sp, o, sc) }
         None -> ()
       }
-      for a in cargs { o = name_refs(a.e, o) }
+      for a in cargs { o = name_refs(a.e, o, sc) }
       o
     }
-    EFieldAcc(target, _, _, _, _, _) -> name_refs(target, out)
+    EFieldAcc(target, _, _, _, _, _) -> name_refs(target, out, sc)
     EListLit(elems, _, _) -> {
       var o = out
-      for x in elems { o = name_refs(x, o) }
+      for x in elems { o = name_refs(x, o, sc) }
       o
     }
     ETupleLit(elems, _, _) -> {
       var o = out
-      for x in elems { o = name_refs(x, o) }
+      for x in elems { o = name_refs(x, o, sc) }
       o
     }
-    EBinary(_, l, r, _, _, _, _) -> name_refs(r, name_refs(l, out))
-    EUnary(_, operand, _, _) -> name_refs(operand, out)
-    EPropagate(operand, _, _) -> name_refs(operand, out)
-    EUnwrap(operand, _, _) -> name_refs(operand, out)
-    EIndex(target, index, _, _) -> name_refs(index, name_refs(target, out))
+    EBinary(_, l, r, _, _, _, _) -> name_refs(r, name_refs(l, out, sc), sc)
+    EUnary(_, operand, _, _) -> name_refs(operand, out, sc)
+    EPropagate(operand, _, _) -> name_refs(operand, out, sc)
+    EUnwrap(operand, _, _) -> name_refs(operand, out, sc)
+    EIndex(target, index, _, _) -> name_refs(index, name_refs(target, out, sc), sc)
     EReturn(v, _, _) ->
       match v {
-        Some(x) -> name_refs(x, out)
+        Some(x) -> name_refs(x, out, sc)
         None -> out
       }
     EStr(parts, _, _) -> {
       var o = out
       for pt in parts {
         match pt {
-          SPInterp(x) -> { o = name_refs(x, o) }
+          SPInterp(x) -> { o = name_refs(x, o, sc) }
           _ -> ()
         }
       }
       o
     }
-    EComptime(body, _, _) -> name_refs(body, out)
-    EUnsafePure(body, _, _) -> name_refs(body, out)
+    EComptime(body, _, _) -> name_refs(body, out, sc)
+    EUnsafePure(body, _, _) -> name_refs(body, out, sc)
     _ -> out
   }
 
-fn stmt_name_refs(s: Stmt, out: Set[String]) -> Set[String] =
+## A statement's references, plus the scope the *next* statement sees: a block
+## binds left to right, so `let` and `for` have to hand their name forward.
+fn stmt_name_refs(s: Stmt, out: Set[String], sc: RefScope) -> (Set[String], RefScope) =
   match s {
-    SLet(_, _, _, init, _, _) -> name_refs(init, out)
-    SLetPat(_, _, init, _, _) -> name_refs(init, out)
-    SLocalFn(_, _, _, _, body, _, _, _, _) -> name_refs(body, out)
-    SAssign(_, value, _, _, _, _) -> name_refs(value, out)
-    SExpr(e, _, _) -> name_refs(e, out)
-    SAssert(cond, _, _, _) -> name_refs(cond, out)
-    SWhile(cond, body, _, _) -> name_refs(body, name_refs(cond, out))
-    SFor(_, from, to, body, _, _) -> {
-      var o = name_refs(from, out)
+    SLet(name, _, _, init, _, _) -> (name_refs(init, out, sc), rs_bind(sc, name))
+    SLetPat(pat, _, init, _, _) -> (name_refs(init, out, sc), rs_pattern(sc, pat))
+    # a local function is in scope in its own body: it may recurse, and that
+    # recursion is not an edge to a top-level function of the same name
+    SLocalFn(name, params, _, _, body, _, _, _, _) -> {
+      let inner = rs_bind(sc, name)
+      (name_refs(body, out, rs_params(inner, params)), inner)
+    }
+    SAssign(_, value, _, _, _, _) -> (name_refs(value, out, sc), sc)
+    SExpr(e, _, _) -> (name_refs(e, out, sc), sc)
+    SAssert(cond, _, _, _) -> (name_refs(cond, out, sc), sc)
+    SWhile(cond, body, _, _) -> (name_refs(body, name_refs(cond, out, sc), sc), sc)
+    SFor(name, from, to, body, _, _) -> {
+      var o = name_refs(from, out, sc)
       match to {
-        Some(t) -> { o = name_refs(t, o) }
+        Some(t) -> { o = name_refs(t, o, sc) }
         None -> ()
       }
-      name_refs(body, o)
+      (name_refs(body, o, rs_bind(sc, name)), sc)
     }
   }
 
@@ -2324,11 +2408,56 @@ test "name refs walk every call position" {
     0,
     14
   )
-  let refs = name_refs(e, set.empty())
+  let refs = name_refs(e, set.empty(), ref_scope(set.empty()))
   for n in ["g", "y", "m", "h", "z"] {
     assert set.has(refs, n)
   }
   assert not set.has(refs, "x")
+}
+
+test "a bound name is not an edge to the top-level function it shadows" {
+  # fn(b) => { let c = 1; match d { Some(e) -> b(c, e) } } — every lowercase
+  # name here is bound, so nothing but the scrutinee `d` comes out (ARC-01).
+  let arm = MatchArm {
+    pats: [PCtor("Some", [PatArg { name: None, nlo: 0, nhi: 0, pat: PBind("e", 0, 1) }],
+      false, true, 0, 1, 0, 1)],
+    guard: None,
+    body: EApply(EVar("b", 0, 1), [pos_arg(EVar("c", 0, 1)), pos_arg(EVar("e", 0, 1))], 0, 1),
+    lo: 0,
+    hi: 1
+  }
+  let body = EBlock(
+    [SLet("c", false, None, EInt(1, 0, 1), 0, 1)],
+    Some(EMatch(EVar("d", 0, 1), [arm], 0, 1)),
+    0,
+    1
+  )
+  let lam = ELambda([LambdaParam { name: "b", ann: None, lo: 0, hi: 1 }], body, false, 0, 1)
+  let refs = name_refs(lam, set.empty(), ref_scope(set.empty()))
+  assert set.to_list(refs) == ["d"]
+  # a for-loop variable and a local function's own name are binders too
+  let loop_body = EBlock(
+    [SLocalFn("k", no_lparams(), TNamed("Int", [], 0, 1), [], EApply(EVar("k", 0, 1), [], 0, 1),
+      0, 1, 0, 1)],
+    Some(EVar("i", 0, 1)),
+    0,
+    1
+  )
+  let floop = EBlock([SFor("i", EInt(0, 0, 1), Some(EInt(2, 0, 1)), loop_body, 0, 1)], None, 0, 1)
+  assert set.to_list(name_refs(floop, set.empty(), ref_scope(set.empty()))) == []
+}
+
+test "a module-qualified call is not an edge to a same-named local function" {
+  # list.take([], n) mentions `take`, but that `take` is std/list's
+  let call = EMethod(EVar("list", 0, 4), "take",
+    [pos_arg(EListLit([], 0, 1)), pos_arg(EVar("n", 0, 1))], 0, 1, 0, 1)
+  let mods = set.insert(set.empty(), "list")
+  assert set.to_list(name_refs(call, set.empty(), ref_scope(mods))) == ["n"]
+  # with no alias of that name in scope the receiver is a value, and UFCS puts
+  # the edge back
+  let refs = name_refs(call, set.empty(), ref_scope(set.empty()))
+  assert set.has(refs, "take")
+  assert set.has(refs, "list")
 }
 
 fn no_lparams() -> List[LambdaParam] = []
@@ -7325,9 +7454,14 @@ pub fn check_module(cx: Cx, m: Module, env: Map[String, ModExports]) -> (Cx, TMo
     var pending_names: Set[String] = set.empty()
     for idx in pending { pending_names = set.insert(pending_names, fnds[idx].name) }
     var deps: Map[String, List[String]] = map.empty()
+    # the aliases are fixed for the module: pass_imports has already run, and a
+    # local declaration may not shadow one (spec §10.3)
+    let mod_alias_names: Set[String] = set.from(map.keys(cx1.module_aliases))
     for idx in pending {
       let d = fnds[idx]
-      let refs: Set[String] = name_refs(d.body, set.empty())
+      var sc = ref_scope(mod_alias_names)
+      for p in fnds[idx].params { sc = rs_bind(sc, p.name) }
+      let refs: Set[String] = name_refs(d.body, set.empty(), sc)
       var dlist: List[String] = []
       for r in set.to_list(refs) {
         if set.has(pending_names, r) { dlist = dlist ++ [r] }
