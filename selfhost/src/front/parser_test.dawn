@@ -489,13 +489,37 @@ test "every lambda arity parses to a Lambda node" {
 test "a bare arrow lambda is not a trailing closure" {
   # `f(a) (x) => e` cannot be one: the parenthesised group after an expression
   # is already the curried call `f(a)(x)`, and only `=>` distinguishes the two
-  # readings. The `fn` spelling stays mandatory there (spec §4.5).
+  # readings. The tail block occupies a different postfix slot (spec §4.5).
   let (_, ds) = parse_module("fn f(xs: List[Int]) -> Unit = g(xs) (x) => x")
-  assert len(ds) > 0
-  assert str.contains(ds[0].msg, "a trailing closure must be written with `fn`")
+  assert len(ds) == 1
+  assert ds[0].msg == "a trailing closure must use a tail block"
+  assert ds[0].hint == "write `f(a) { x => e }`; `(x)` already makes `f(a)(x)` a curried call"
   # the brace form occupies a different postfix slot and still attaches
   let out = rendered("fn f(xs: List[Int]) -> Unit = g(xs) { x => x }")
   assert str.contains(out, "Apply nargs=2")
+}
+
+test "the `fn` trailing-closure spelling is retired" {
+  let msg = "the `fn` trailing-closure spelling has retired"
+  let hint = "write `f(a) { x => e }`; tail-block parameters go inside the braces"
+
+  # after a parenthesised call
+  let (_, d_call) = parse_module("fn f(xs: List[Int]) -> Unit = map(xs) fn(x) => x")
+  assert len(d_call) == 1
+  assert d_call[0].msg == msg
+  assert d_call[0].hint == hint
+
+  # after a bare name
+  let (_, d_bare) = parse_module("fn f() -> Unit = twice fn(x) => x")
+  assert len(d_bare) == 1
+  assert d_bare[0].msg == msg
+  assert d_bare[0].hint == hint
+
+  # after a paren-less method name; this must not degrade into field access
+  let (_, d_method) = parse_module("fn f(xs: List[Int]) -> Unit = xs.each fn(x) => x")
+  assert len(d_method) == 1
+  assert d_method[0].msg == msg
+  assert d_method[0].hint == hint
 }
 
 test "a tail block is the call's last argument" {
@@ -590,15 +614,19 @@ test "`with` refuses a tail block on its callee" {
   assert str.contains(ds[0].msg, "`with` already passes the rest of the block to this call")
 }
 
-test "the `fn` prefix on a lambda is retired outside the trailing position" {
-  # every non-trailing position takes the bare form only, and the diagnostic
-  # teaches it rather than reporting an unexpected token (spec §4.5)
+test "`fn` marks declarations only in primary position" {
+  # every expression position takes the bare form only, and the diagnostic
+  # names `fn`'s remaining role instead of reporting an unexpected token
+  let msg = "`fn` marks declarations only; a lambda has no `fn` prefix"
+  let hint = "write `(x) => e`, or `x => e` for a single unannotated parameter"
   let (_, d1) = parse_module("fn f(xs: List[Int]) -> Unit = map(xs, fn(x) => x)")
-  assert len(d1) > 0
-  assert str.contains(d1[0].msg, "a lambda has no `fn` prefix")
+  assert len(d1) == 1
+  assert d1[0].msg == msg
+  assert d1[0].hint == hint
   let (_, d2) = parse_module("fn f() -> Unit = {\n  let g = fn(a: Int) => a\n  ()\n}")
-  assert len(d2) > 0
-  assert str.contains(d2[0].msg, "a lambda has no `fn` prefix")
+  assert len(d2) == 1
+  assert d2[0].msg == msg
+  assert d2[0].hint == hint
 }
 
 test "a lambda in a condition is reported as one" {
