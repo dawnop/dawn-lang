@@ -2506,7 +2506,15 @@ pub fn lower_expr(st0: LSt, e: TExpr) -> (LSt, CExpr) = {
       match tail {
         Some(t) -> {
           let (st2, tv) = lower_expr(LSt { ..st1, tail: tl }, t)
-          (st2, CBlock(ss, Some(tv), ty))
+          match t {
+            XJava(_, _, _, tail_ty) ->
+              if ty == TyUnit && tail_ty != TyUnit {
+                (st2, CBlock(ss ++ [CSDiscard(tv)], None, ty))
+              } else {
+                (st2, CBlock(ss, Some(tv), ty))
+              }
+            _ -> (st2, CBlock(ss, Some(tv), ty))
+          }
         }
         None -> (st1, CBlock(ss, None, ty))
       }

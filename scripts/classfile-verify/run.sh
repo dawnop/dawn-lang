@@ -48,7 +48,8 @@
 #   * a NoSuchMethodError from freight pruning that pruned too much: a missing
 #     member of an emitted dawn/rt class is counted, not failed, because
 #     reach.dawn drops those on purpose. scripts/table-freight owns it;
-#   * wrong answers from legal bytes. Nothing emitted is executed here.
+#   * wrong answers from legal bytes. The dedicated Java-tail fixture below is
+#     executed for its side effects; the general corpus is only verified.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 root=$(pwd)
@@ -64,6 +65,7 @@ javac -d "$work" scripts/classfile-verify/Verify.java scripts/classfile-verify/A
 scripts/classfile-verify/selftest.sh "$work"
 
 fail=0
+java_tail_fixture=scripts/classfile-verify/java_tail_unit.dawn
 # examples/interop/interop.dawn is here for check 1, and it is the only corpus entry
 # that exercises it in this direction: `Path.of` and `List.of` are static
 # methods declared on JDK *interfaces*, so the call sites emit `invokestatic`
@@ -77,7 +79,7 @@ fail=0
 for t in selfhost site packages/json packages/web packages/sha2 packages/inflate \
     playground examples/projects/calc.dawn examples/interop/interop.dawn \
     examples/effects/handlers.dawn examples/text/chars.dawn \
-    examples/errors/barriers.dawn; do
+    examples/errors/barriers.dawn "$java_tail_fixture"; do
   out="$work/emit/${t//\//_}"
   mkdir -p "$out"
   ./bin/dawn __emit "$t" -o "$out" > /dev/null
@@ -95,6 +97,9 @@ if [ "$fail" != 0 ]; then
   exit 1
 fi
 echo "OK: every emitted class links, and every reference it names resolves and is reachable"
+
+./bin/dawn test "$java_tail_fixture"
+echo "OK: Java Unit-tail results are evaluated, discarded, and runnable"
 
 # The second mutant, and the one selftest.sh cannot be. Its fixtures live in
 # pkgA/pkgB, names the toolchain jar does not carry, so they would have stayed

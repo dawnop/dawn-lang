@@ -1,0 +1,41 @@
+# Regression for Java results legally discarded from Unit block tails.
+#
+# Both stack categories matter: Java int widens to Dawn Int (a category-2 JVM
+# long), while boolean stays category 1. The effect arm adds the second Unit
+# context that originally exposed the malformed block shape.
+
+use java "java.util.concurrent.atomic.AtomicBoolean"
+use java "java.util.concurrent.atomic.AtomicInteger"
+
+effect Bump {
+  fn bump(counter: AtomicInteger) -> Unit
+}
+
+fn discard_int(counter: AtomicInteger) -> Unit !io = {
+  counter.incrementAndGet()
+}
+
+fn discard_bool(flag: AtomicBoolean) -> Unit !io = {
+  flag.compareAndSet(false, true)
+}
+
+fn discard_in_handler(counter: AtomicInteger) -> Unit !io = {
+  with handle Bump {
+    bump(target) => { target.incrementAndGet() }
+  }
+  bump(counter)
+}
+
+test "Java Unit tails are evaluated and discarded" {
+  let counter = AtomicInteger.new(0)
+  discard_int(counter)
+  assert counter.get() == 1
+
+  let flag = AtomicBoolean.new(false)
+  discard_bool(flag)
+  assert flag.get()
+
+  let handled = AtomicInteger.new(0)
+  discard_in_handler(handled)
+  assert handled.get() == 1
+}
