@@ -569,17 +569,24 @@ ratchet 的双向性（`run.sh:88-112`：列进去的检查一旦转绿也是红
      结构体自带 cleanup（`dawn_handler_landing`），unwind 走到目标帧时由帧自己的
      landing pad 认领（指针相等）并 longjmp；stop 函数只剩 END_OF_STACK 的响亮 abort。
      身份不排序，fake stack 与内联都骗不了它。
-  2. **cleanup 变量的声明必须提升到函数顶**（NULL 初始化，绑定点变纯赋值）：Core 的
-     loop 用 `goto` 落 step/end 标签，跳过带 cleanup 变量的初始化是 UB——landing pad
-     会释放槽里的垃圾。gcc 的 -Wmaybe-uninitialized 在 -Werror 下当场抓住了它。
-     提升还要按符号去重：lowering 会在分支的两臂各绑一次同一个符号，块作用域时代
-     是两个合法声明，提升后是 C 重定义错——spike 语料全绿也没看见它，第一个大到
-     踩中这形状的语料是 selfhost 驱动自己（native-fixpoint 抓住）。
+  2. **每变量一个 cleanup 属性是实测过的死路，槽位收进每帧一个数组**。第一版给每个
+     owned 局部各挂 `__attribute__((cleanup))`：先是撞出「声明必须提升到函数顶」
+     （Core 的 loop 用 `goto` 落标签，跳过 cleanup 变量的初始化是 UB，
+     -Wmaybe-uninitialized 当场抓住）与「按符号去重」（lowering 在分支两臂各绑一次
+     同一符号，提升后成 C 重定义错，native-fixpoint 抓住）两刀，然后在 CI 上撞出
+     致命的一刀：**-O2 编译时间爆炸**——每个调用点都成了拖着 N 条 cleanup 链的独立
+     EH region，gcc 的 sched2/postreload 对其超线性，单个语料 cc 1.1s→8.5s，
+     selfhost 驱动 16s→354s（22 倍），CI 两个 native job 双双超时。终形态：每个函数
+     **一个** `dawn_own` 数组（槽 0 存计数，`dawn_own_drop` 一个 cleanup 走全部槽），
+     整帧一个 EH region，驱动 cc 回到 27s（基线 16s，+70% 是 -fexceptions +
+     landing pad 的真实价格）。运行期代价（槽位落内存，A1 当初被拒的那笔税的
+     缩小版）：实测 fmt --check 场景 ~5%、emitc 场景 ~15%——比 §4.1 对 A1 的
+     预估温和得多，因为热路径的标量与游标本就不进账本。
   3. **转移的记号不进 Core、不动 rc**：emitter 的 `emit_expr` 带上与 `rc_check`
-     同一份消费位分类（`k`），bare tracked local 在消费位即发 `dawn_take`。镜像
+     同一份消费位分类（`k`），有槽符号在消费位即发 `dawn_take`。镜像
      不会漂：漏一个 take = 正常路径 cleanup 双释放（asan 全语料立刻红），多一个
      take = 值被提前清掉（立刻错答案）。owned 形参经 `pN` 进入、第一件事搬进
-     DAWN_OWNED 影子（cleanup 属性只能挂自动变量）。
+     自己的槽（形参本身当不了槽）。
   4. **Emit-Change 实测为零**（方案预测「全部 emit label」）：prev-diff 的 emit
      差分是 N−1 jar 与 HEAD jar 编同一份 HEAD 源，emitc.dawn 自己也是被编的源码
      而不是被对拍的行为——JVM 字节码两边同源同答。C 文本的形状变化由

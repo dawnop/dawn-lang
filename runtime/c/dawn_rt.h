@@ -316,21 +316,32 @@ bool dawn_is_unique(const void *p);
 /* ---- unwind cleanup (#193 ARC-05) ---------------------------------------
  *
  * A raise travels by forced unwind (dawn_rt.c, "landing at a handler"), and
- * these three are the emitter's half of that contract. Every owned local in
- * emitted C is declared through DAWN_OWNED, so the C compiler's landing pads
- * release what a discarded frame still holds; every release the RC pass
- * placed -- a drop or a transfer -- also clears the slot, so on the ordinary
- * path the cleanup finds NULL and does nothing, and nothing is ever released
- * twice. `dawn_take` is the transfer: it hands the reference out and clears
- * the slot in the same expression, which is what keeps a slot from being
- * cleaned while its value already belongs to a callee that is unwinding.
+ * this is the emitter's half of that contract. A function's owned slots live
+ * in one `void *` array -- `dawn_own[0]` holds the count, the slots follow,
+ * NULL-initialized -- and the array carries the one cleanup the unwinder
+ * runs when a raise discards the frame. One cleanup variable per function,
+ * not one per slot, and that is a measured decision, not a style: a cleanup
+ * attribute on every owned local made every call site a distinct EH region
+ * dragging its own chain of landing pads, and the -O2 back end (sched2,
+ * postreload) went superlinear in them -- the selfhost driver's compile went
+ * 16s -> 354s. One cleanup spanning the whole frame collapses that to one
+ * region shared by every call.
  *
- * The slot is read through `void **`: every owned slot is an object pointer,
+ * The discipline that makes the ordinary path correct is unchanged: every
+ * release the RC pass placed -- a drop or a transfer -- clears its slot, so
+ * the cleanup finds NULL everywhere on a normal exit and nothing is ever
+ * released twice. `dawn_take` is the transfer: it hands the reference out
+ * and clears the slot in the same expression, which is what keeps a slot
+ * from being cleaned while its value already belongs to a callee that is
+ * unwinding. Slots are `void *` and every read casts to the slot's C type;
  * all object pointers share a representation here, and every consumer
  * compiles with -fno-strict-aliasing (the backend's standing flags). */
-static inline void dawn_unwind_drop(void *slot) {
-  void *v = *(void **)slot;
-  if (v != NULL) dawn_drop(v);
+static inline void dawn_own_drop(void *frame) {
+  void **s = (void **)frame;
+  int64_t n = (int64_t)(intptr_t)s[0];
+  for (int64_t i = 1; i <= n; i++) {
+    if (s[i] != NULL) dawn_drop(s[i]);
+  }
 }
 
 static inline void *dawn_take(void **slot) {
@@ -340,7 +351,6 @@ static inline void *dawn_take(void **slot) {
 }
 
 #define DAWN_CLEANUP(f) __attribute__((cleanup(f)))
-#define DAWN_OWNED DAWN_CLEANUP(dawn_unwind_drop)
 
 /* Take a freshly built object graph out of the ledger for good: every node
  * reachable from `p` gets an immortal header, so dup and drop return

@@ -105,19 +105,20 @@ pub type CSt = {
   # the function bodies by `emit_program`; see `const_builder`.
   cdefs: List[String],
   cmap: Map[String, String],
-  # The current function's owned slots: every binding declared through
-  # DAWN_OWNED (rc-tracked lets plus the owned-parameter shadows), reset per
-  # function. A bare use of one in a consuming position is a transfer and
-  # emits `dawn_take` -- see emit_expr's `k`.
-  tracked: Set[Int],
-  # The declarations for those slots, collected while the body is emitted
-  # and spliced at the top of the function by emit_fn. They cannot sit at
-  # the binding site: Core's loops land `continue`/`break` on labels, and a
-  # goto past a cleanup variable's initializer is undefined -- the landing
-  # pad would release whatever garbage the slot happened to hold. At the
-  # top, NULL-initialized before any label, the binding site is a plain
-  # assignment and every path is covered.
-  decls: List[String]
+  # The current function's owned slots -- rc-tracked bindings plus the
+  # owned-parameter shadows -- as 1-based indices into the frame's one
+  # `dawn_own` array (dawn_rt.h, "unwind cleanup"), reset per function. One
+  # array with one cleanup rather than a cleanup attribute per local, and
+  # one slot per symbol rather than a declaration at the binding site: the
+  # per-local form made every call a distinct EH region and blew the -O2
+  # back end up 22x, and a binding-site declaration sat after the `goto`
+  # labels Core's loops land on, where jumping past a cleanup variable's
+  # initializer is undefined. An array at the function top, NULL-filled
+  # before any label, has neither problem. A bare use of a slot in a
+  # consuming position is a transfer and emits `dawn_take` -- see
+  # emit_expr's `k`.
+  slots: Map[Int, Int],
+  nslots: Int
 }
 
 fn pad(n: Int) -> String = {
@@ -279,18 +280,27 @@ fn mangle(owner: String, name: String) -> String =
 fn local_name(sym: Int) -> String = "v" ++ to_string(sym)
 
 ## The C parameter name behind an owned-parameter shadow: the parameter
-## arrives as `pN`, and the function's first statements move each one into a
-## DAWN_OWNED local named `vN` -- `__attribute__((cleanup))` sits on
-## automatic variables only, never on parameters, and the body was emitted
-## against `vN` either way. Distinct first letter, so it can collide with
-## neither locals (`v`), temps (`t`) nor anything `mangle` mints (`dawn_`).
+## arrives as `pN`, and the function's first statements move each one into
+## its `dawn_own` slot -- a parameter cannot be a slot, and the body was
+## emitted against the slot either way. Distinct first letter, so it can
+## collide with neither locals (`v`), temps (`t`) nor anything `mangle`
+## mints (`dawn_`).
 fn param_name(sym: Int) -> String = "p" ++ to_string(sym)
+
+## An owned slot, as a C lvalue. `dawn_own` cannot collide with a mangled
+## symbol: everything `mangle` mints carries a `__`.
+fn slot_lv(idx: Int) -> String = "dawn_own[" ++ to_string(idx) ++ "]"
+
+## The slot read back at its type: slots are `void*`, the cast is the same
+## one an erased position already wears everywhere else in this file.
+fn slot_rd(idx: Int, ty: Ty) -> String =
+  "((" ++ c_type(ty) ++ ")" ++ slot_lv(idx) ++ ")"
 
 ## A transfer: the reference moves out and the slot is cleared in the same
 ## expression, so the frame's unwind cleanup cannot release a value that
 ## already belongs to the callee (dawn_rt.h, "unwind cleanup").
-fn take_expr(sym: Int, ty: Ty) -> String =
-  "((" ++ c_type(ty) ++ ")dawn_take((void**)&" ++ local_name(sym) ++ "))"
+fn take_expr(idx: Int, ty: Ty) -> String =
+  "((" ++ c_type(ty) ++ ")dawn_take(&" ++ slot_lv(idx) ++ "))"
 
 ## rc.dawn's `dictish`, on the shape this side can see -- the mirror of
 ## rc.chk_dictish, and held to it by the same corpus: a dictionary is a
@@ -743,10 +753,9 @@ pub fn emit_expr(st: CSt, e: CExpr, k: Bool) -> (CSt, String) =
     CStr(v) -> emit_str_static(st, v)
     CUnit -> (st, "DAWN_UNIT")
     CLocal(sym, ty) ->
-      if k && set.has(st.tracked, sym) {
-        (st, take_expr(sym, ty))
-      } else {
-        (st, local_name(sym))
+      match map.get(st.slots, sym) {
+        Some(idx) -> if k { (st, take_expr(idx, ty)) } else { (st, slot_rd(idx, ty)) }
+        None -> (st, local_name(sym))
       },
     CReturn(v) ->
       match v {
@@ -1552,43 +1561,50 @@ pub fn emit_stmt(st: CSt, s: CStmt) -> CSt =
   match s {
     CSLet(sym, ty, init) -> {
       let (st1, v) = emit_expr(st, init, true)
-      # An owned slot: declared through DAWN_OWNED (hoisted to the function
-      # top, see CSt.decls) so the unwinder releases what the frame still
-      # holds when a raise discards it (#193 ARC-05); the binding site is
-      # then a plain assignment. The same bindings rc.dawn tracks (`bind`),
+      # An owned binding lives in the frame's `dawn_own` array (see
+      # CSt.slots) so the unwinder releases what the frame still holds when
+      # a raise discards it (#193 ARC-05); the binding site is a plain
+      # assignment into the slot. The same bindings rc.dawn tracks (`bind`),
       # mirrored by the same test (chk_stmt / chk_dictish): a dictionary is
       # a static outside the ledger, and dropping one would read a header it
-      # does not have.
+      # does not have. One slot per symbol: lowering may bind one symbol in
+      # each arm of a branch, and both arms mean the same slot.
       let own = is_ref_ty(ty) && not emit_dictish(init)
-      # deduplicated: lowering may bind one symbol in each arm of a branch,
-      # which was two block-scoped declarations before hoisting and must be
-      # one function-scoped slot after it
-      let st1b = if own && not set.has(st1.tracked, sym) {
-        CSt {
-          ..st1,
-          tracked: set.insert(st1.tracked, sym),
-          decls: st1.decls ++ ["DAWN_OWNED " ++ c_type(ty) ++ " " ++ local_name(sym) ++ " = NULL;"]
+      if own {
+        let (st1b, idx) = match map.get(st1.slots, sym) {
+          Some(i) -> (st1, i)
+          None -> {
+            let n = st1.nslots + 1
+            (CSt { ..st1, slots: map.insert(st1.slots, sym, n), nslots: n }, n)
+          }
+        }
+        if no_value(init) {
+          # `let x = panic(...)` binds nothing; the slot still has to be
+          # written because later statements name it, but it cannot hold a
+          # value that was never produced
+          line(discard(st1b, v), slot_lv(idx) ++ " = NULL;")
+        } else {
+          line(st1b, slot_lv(idx) ++ " = " ++ v ++ ";")
         }
       } else {
-        st1
-      }
-      let lhs = (if own { "" } else { c_type(ty) ++ " " }) ++ local_name(sym)
-      if no_value(init) {
-        # `let x = panic(...)` binds nothing; the declaration still has to
-        # exist because later statements name it, but it cannot be initialised
-        # from a value that was never produced
-        line(discard(st1b, v), lhs ++ " = " ++ c_zero(ty) ++ ";")
-      } else {
-        line(st1b, lhs ++ " = " ++ v ++ ";")
+        if no_value(init) {
+          line(discard(st1, v), c_type(ty) ++ " " ++ local_name(sym) ++ " = " ++ c_zero(ty) ++ ";")
+        } else {
+          line(st1, c_type(ty) ++ " " ++ local_name(sym) ++ " = " ++ v ++ ";")
+        }
       }
     }
     CSAssign(sym, value) -> {
       let (st1, v) = emit_expr(st, value, true)
+      let lhs = match map.get(st1.slots, sym) {
+        Some(idx) -> slot_lv(idx)
+        None -> local_name(sym)
+      }
       # Same reason the `let` above tests it: a right-hand side that leaves
       # never reaches the store, and `emit_expr` hands back DAWN_UNIT for it,
       # which does not assign to the variable's type.
       if no_value(value) { discard(st1, v) } else {
-        line(st1, local_name(sym) ++ " = " ++ v ++ ";")
+        line(st1, lhs ++ " = " ++ v ++ ";")
       }
     }
     CSDiscard(e) -> {
@@ -1617,13 +1633,18 @@ pub fn emit_stmt(st: CSt, s: CStmt) -> CSt =
       let st6 = line(pop(st5), "}")
       line(st6, loop_end(id) ++ ": ;")
     }
-    # `rc.dawn` only names a binding here when its type is a reference, so
-    # there is no test to make: a scalar would not compile, which is the loud
-    # failure and the right one. The slot is cleared with the drop -- a
-    # release the pass placed must leave nothing for the unwind cleanup, or
-    # a later raise in the same frame would release the value twice.
+    # `rc.dawn` only names a binding here when it tracks it, and everything
+    # it tracks has a slot; a drop of a symbol without one is this pass and
+    # that one disagreeing, which deserves the loud stop. The slot is
+    # cleared with the drop -- a release the pass placed must leave nothing
+    # for the unwind cleanup, or a later raise in the same frame would
+    # release the value twice.
     CSDrop(sym) ->
-      line(st, "dawn_drop(" ++ local_name(sym) ++ "); " ++ local_name(sym) ++ " = NULL;")
+      match map.get(st.slots, sym) {
+        Some(idx) ->
+          line(st, "dawn_drop(" ++ slot_lv(idx) ++ "); " ++ slot_lv(idx) ++ " = NULL;")
+        None -> panic("emitc: CSDrop of a symbol without an owned slot: v" ++ to_string(sym))
+      }
   }
 
 # ---- functions and program ----
@@ -1747,23 +1768,28 @@ fn emit_adapter(st: CSt, f: CFun) -> CSt = {
 
 fn emit_fn(st: CSt, f: CFun) -> CSt = {
   # The owned parameters -- captures, params and evidence that arrive as
-  # counted references (rc_fn binds exactly this set). Each is renamed in the
-  # signature and moved into a DAWN_OWNED shadow before the body runs: the
-  # cleanup attribute sits on automatic variables only, and a callee owns its
-  # parameters, so a raise unwinding this frame has to release the ones not
-  # yet dropped or transferred.
+  # counted references (rc_fn binds exactly this set). Each is renamed in
+  # the signature and moved into its slot before the body runs: a parameter
+  # cannot live in the frame array, and a callee owns its parameters, so a
+  # raise unwinding this frame has to release the ones not yet dropped or
+  # transferred.
   var shadows: List[CParam] = []
-  var tracked: Set[Int] = set.empty()
+  var slots: Map[Int, Int] = map.empty()
+  var shadowed: Set[Int] = set.empty()
+  var n = 0
   for p in f.captures ++ f.params ++ f.evs {
     if is_ref_ty(p.ty) && not set.has(st.dict_syms, p.sym) {
       shadows = shadows ++ [p]
-      tracked = set.insert(tracked, p.sym)
+      shadowed = set.insert(shadowed, p.sym)
+      n = n + 1
+      slots = map.insert(slots, p.sym, n)
     }
   }
-  # The body is emitted into an empty transcript so the owned-slot
-  # declarations it collects (CSt.decls) can be spliced ahead of it -- they
-  # have to precede every statement and every label, see the field's note.
-  let st1 = CSt { ..st, tmp: 0, tracked: tracked, decls: [], out: [], ind: 1 }
+  # The body is emitted into an empty transcript: how many slots the frame
+  # needs is only known afterwards, and the array that holds them has to
+  # precede every statement and every label -- Core's loops land on `goto`
+  # labels, and jumping past a cleanup variable's initializer is undefined.
+  let st1 = CSt { ..st, tmp: 0, slots: slots, nslots: n, out: [], ind: 1 }
   let (st2, v) = emit_expr(st1, f.body, true)
   let st3 =
     if peel_opaque(f.ret) == TyUnit {
@@ -1775,20 +1801,24 @@ fn emit_fn(st: CSt, f: CFun) -> CSt = {
     } else {
       line(st2, "return " ++ v ++ ";")
     }
-  var head: List[String] = [fn_signature_def(f, tracked) ++ " {\n"]
-  for p in shadows {
-    head = head ++ [pad(1) ++ "DAWN_OWNED " ++ c_type(p.ty) ++ " " ++
-        local_name(p.sym) ++ " = " ++ param_name(p.sym) ++ ";\n"]
+  var head: List[String] = [fn_signature_def(f, shadowed) ++ " {\n"]
+  if st3.nslots > 0 {
+    # slot 0 is the count dawn_own_drop reads; the rest start NULL
+    head = head ++ [pad(1) ++ "DAWN_CLEANUP(dawn_own_drop) void* dawn_own[" ++
+        to_string(st3.nslots + 1) ++ "] = { (void*)(intptr_t)" ++
+        to_string(st3.nslots) ++ " };\n"]
   }
-  for d in st3.decls {
-    head = head ++ [pad(1) ++ d ++ "\n"]
+  for p in shadows {
+    head = head ++ [pad(1) ++
+        slot_lv(map.get(slots, p.sym).expect("shadow slot")) ++ " = " ++
+        param_name(p.sym) ++ ";\n"]
   }
   CSt {
     ..st3,
     out: st.out ++ head ++ st3.out ++ ["}\n"],
     ind: st.ind,
-    decls: [],
-    tracked: set.empty()
+    slots: map.empty(),
+    nslots: 0
   }
 }
 
@@ -1890,8 +1920,8 @@ fn emit_units(units: List[EmitMod], u: TableUse, adts: Adts) -> CSt = {
     cur_owner: "",
     cdefs: [],
     cmap: map.empty(),
-    tracked: set.empty(),
-    decls: []
+    slots: map.empty(),
+    nslots: 0
   }
   st = line(st, "/* generated by dawn __emitc -- Core IR -> C */")
   st = line(st, "#include \"dawn_rt.h\"")

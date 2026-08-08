@@ -56,8 +56,10 @@
 ## ARC-05 — P1 — native 被捕获的 failure 会泄漏丢弃帧中的引用
 
 > **已修**（2026-08-08，#193 刀 3，路线 A3）：raise 改为 `_Unwind_ForcedUnwind`，
-> emitted C 的 owned 槽位全部 `__attribute__((cleanup))`（`DAWN_OWNED`，函数顶
-> NULL 声明），RC pass 的每个释放点清槽、转移走 `dawn_take` 同表达式清槽；
+> 每个函数的 owned 槽位收进**一个**挂 cleanup 的 `dawn_own` 数组（每变量一个
+> cleanup 属性是实测过的死路：EH region 按调用点×变量数爆炸，selfhost 驱动的
+> cc 从 16s 到 354s；单数组收回到 27s，换来的运行期代价实测 fmt 场景 ~5%、
+> emitc 场景 ~15%），RC pass 的每个释放点清槽、转移走 `dawn_take` 同表达式清槽；
 > handler 帧以自身 cleanup 的指针身份收网（CFA 比较被 ASan fake stack 实测打破，
 > 见设计文档 §4.1 落地注）。验收 = 三个 recover_* 语料 asan 转绿 + 全部
 > `.leaks-on-catch` 豁免删除后 spike-native 全绿；负控两枚：去 `-fexceptions`
