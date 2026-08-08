@@ -94,11 +94,58 @@ else
   sha256() { cat >/dev/null; echo "no-sha256"; }
 fi
 
+# The local source packages selfhost [deps] names, resolved against the
+# manifest's own directory.
+#
+# Their contents are build inputs and nothing recorded them: editing
+# packages/json, packages/sha2 or packages/inflate left the stamp unchanged,
+# and every later command went on running a compiler built from the previous
+# version of them -- the exact failure the stamp replaced mtime to avoid, one
+# level down. A url dep needs no entry: its hash is in the manifest, and the
+# manifest is hashed.
+#
+# One `sed`, because a TOML parser is what the compiler is for and this runs
+# before there is one. It reads the shape `[deps]` actually has here --
+# `name = "path"` under a `[deps]` table -- and a shape it cannot read costs a
+# rebuild it did not need, never a stale jar.
+dep_dirs() {
+  sed -n '/^\[deps\]/,/^\[[^d]/p' "$ROOT/selfhost/dawn.toml" 2>/dev/null |
+    sed -n 's/^[A-Za-z0-9_-]* *= *"\([^"]*\)".*/\1/p' |
+    while IFS= read -r d; do
+      case $d in
+        /*) printf '%s\n' "$d" ;;
+        *) printf '%s\n' "$ROOT/selfhost/$d" ;;
+      esac
+    done
+}
+
+# Everything the built jar is a function of.
+#
+# dawn.lock pins the resolved [java-deps] closure, seed-checksums.txt decides
+# which seed is trusted, seedjar.sh resolves it, and this script is the recipe
+# -- change any of them and the jar that comes out is a different jar, or
+# should have been. Withdrawing trust from a seed used not to trigger a
+# rebuild at all.
+stamp_inputs() {
+  printf '%s\n' \
+    "$ROOT/selfhost/src" \
+    "$ROOT/selfhost/dawn.toml" \
+    "$ROOT/selfhost/dawn.lock" \
+    "$STD" \
+    "$ROOT/scripts/seed-release.txt" \
+    "$ROOT/scripts/seed-checksums.txt" \
+    "$ROOT/scripts/seedjar.sh" \
+    "$ROOT/bin/dawn"
+  dep_dirs
+}
+
 source_stamp() {
   # -print0/-exec sort would need GNU find; LC_ALL fixes the collation so the
   # same tree hashes the same on every machine.
-  find "$ROOT/selfhost/src" "$ROOT/selfhost/dawn.toml" "$STD" \
-    "$ROOT/scripts/seed-release.txt" -type f 2>/dev/null |
+  stamp_inputs |
+    while IFS= read -r p; do
+      find "$p" -type f 2>/dev/null
+    done |
     LC_ALL=C sort |
     while IFS= read -r f; do
       printf '%s\n' "$f"
@@ -108,12 +155,23 @@ source_stamp() {
 
 WANT="$(source_stamp)"
 
+# The stamp is the only thing that decides whether a rebuild happens, and it is
+# otherwise unobservable: a missing input looks exactly like an input that did
+# not change. scripts/bootstrap-guards/run.sh reads it here and moves one file
+# at a time.
+if [ -n "${DAWN_PRINT_STAMP:-}" ]; then
+  printf '%s\n' "$WANT"
+  exit 0
+fi
+
 needs_build=0
 if [ ! -f "$SJAR" ]; then
   needs_build=1
 elif [ "$WANT" = "no-sha256" ]; then
-  if [ -n "$(find "$ROOT/selfhost/src" "$ROOT/selfhost/dawn.toml" "$STD" \
-      "$ROOT/scripts/seed-release.txt" -type f -newer "$SJAR" -print -quit 2>/dev/null)" ]; then
+  newer=$(stamp_inputs | while IFS= read -r p; do
+    find "$p" -type f -newer "$SJAR" -print -quit 2>/dev/null
+  done)
+  if [ -n "$newer" ]; then
     needs_build=1
   fi
 elif [ ! -f "$STAMP" ] || [ "$WANT" != "$(cat "$STAMP")" ]; then
