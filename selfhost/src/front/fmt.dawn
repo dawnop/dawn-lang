@@ -74,7 +74,10 @@ fn postfix_bang(raw: List[Token]) -> Set[Int] = {
   var i = 0
   while i < len(raw) {
     if raw[i].kind == BANG {
-      let names_effect = i + 1 < len(raw) && is_effect_start(raw[i + 1].kind)
+      let names_effect =
+        i + 1 < len(raw) &&
+        (is_effect_name(raw[i + 1].kind) ||
+            (raw[i + 1].kind == LPAREN && is_effect_union(raw, i + 2)))
       if not names_effect { out = set.insert(out, raw[i].lo) }
     }
     i = i + 1
@@ -82,11 +85,48 @@ fn postfix_bang(raw: List[Token]) -> Set[Int] = {
   out
 }
 
-## `!io`, `!e`, `!Ask`, `!(e1 | Ask)`. A declared effect is spelled with its
-## own (uppercase) name, so TYPEIDENT starts an effect too -- without this the
-## formatter reads `-> Int !Ask` as the postfix unwrap `Int!` and moves the
-## space to the wrong side of the `!`.
-fn is_effect_start(k: TokKind) -> Bool = k == IDENT || k == TYPEIDENT || k == LPAREN
+## `!io`, `!e`, `!Ask`. A declared effect is spelled with its own (uppercase)
+## name, so TYPEIDENT names an effect too -- without this the formatter reads
+## `-> Int !Ask` as the postfix unwrap `Int!` and moves the space to the wrong
+## side of the `!`.
+fn is_effect_name(k: TokKind) -> Bool = k == IDENT || k == TYPEIDENT
+
+## Whether the `(` a `!` opened holds an effect union rather than a call's
+## arguments. `LPAREN` alone used to answer yes, which made every `o!(1)` an
+## effect marker and printed it `o !(1)` -- the space on the side that says
+## "effect", for an expression that is a postfix unwrap and a call.
+##
+## The grammar decides it wherever it can: a union is effect names separated by
+## `|` and nothing else (parser.effect_group over parser.effect_atom), so
+## `!(1)`, `!()`, `!(f(x))` and `!(a, b)` cannot be one. `!(g)` -- a single bare
+## name -- is a legal union *and* a legal one-argument call, and stays read as
+## the union, which is what it was before this function existed. That residue
+## is the grammar's ambiguity, not a gap here, and a formatter that only lexes
+## cannot close it.
+##
+## NEWLINE is skipped rather than treated as the end: a union wrapped across
+## lines is still a union, and reading it as a call would move a space in code
+## that is not what it looked like.
+fn is_effect_union(raw: List[Token], start: Int) -> Bool = {
+  var i = start
+  var want_name = true
+  while i < len(raw) {
+    let k = raw[i].kind
+    if k == NEWLINE {
+      i = i + 1
+    } else if want_name {
+      if not is_effect_name(k) { return false }
+      want_name = false
+      i = i + 1
+    } else if k == PIPE {
+      want_name = true
+      i = i + 1
+    } else {
+      return k == RPAREN
+    }
+  }
+  false
+}
 
 ## A still-open bracket: the indent (in levels) its closer aligns to, and whether
 ## it is a brace. The brace flag is what tells a *body* from a mid-expression
@@ -288,10 +328,15 @@ fn is_value_end(k: TokKind) -> Bool =
   k == RPAREN || k == RBRACKET || k == TRUE || k == FALSE || k == QUESTION ||
   k == BANG || k == UNDERSCORE
 
-# BANG is deliberately absent: only an identifier can be called, so `x!(y)` is
-# not a thing — a `(` after `!` is always the effect union `!(e1 | e2)`.
+# What the comment here used to say -- "only an identifier can be called, so a
+# `(` after `!` is always the effect union" -- stopped being true when every
+# application became one node: `o!(1)` and `{ g }(1)` both check today, and the
+# formatter printed them `o !(1)` and `{ g } (1)`. BANG is safe to list because
+# the effect marker never reaches this function: `p == BANG && not postfix`
+# returns tight above, so a BANG that gets here is the postfix unwrap.
 fn is_callable_before_paren(k: TokKind) -> Bool =
-  k == IDENT || k == TYPEIDENT || k == RPAREN || k == RBRACKET || k == QUESTION || k == FN
+  k == IDENT || k == TYPEIDENT || k == RPAREN || k == RBRACKET || k == QUESTION ||
+  k == FN || k == BANG || k == RBRACE
 
 # BANG is absent for the same reason as in the lexer's continues_line: a line
 # ending in `!` is a postfix unwrap, and the next line starts a new statement.
@@ -406,6 +451,32 @@ test "the with statement and trailing lambdas keep their spelling" {
   let t = "fn f(xs: List[Int]) -> List[Int] = map(xs) fn(x: Int) => x + 1\n"
   assert fmt_of(t) == t
   assert fmt_of("fn f(xs: List[Int]) -> List[Int] = map(xs)  fn( x: Int ) => x+1\n") == t
+}
+
+## Both callees below type-check (`dawn check` on each is `ok`), so the space
+## the formatter used to insert was not a hint that the code was wrong -- it
+## was the formatter still believing the pre-application-node grammar.
+test "a call hugs its callee even when the callee is not a name" {
+  # postfix unwrap, then call. The effect marker keeps the other spelling:
+  # `!(e1 | e2)` is tight on the left of `!`, and that is the branch above.
+  let b = "fn a(o: Option[fn(Int) -> Int]) -> Int = o!(1)\n"
+  assert fmt_of(b) == b
+  assert fmt_of("fn a(o: Option[fn(Int) -> Int]) -> Int = o! (1)\n") == b
+  let e = "fn s(f: fn() -> Unit !e1, g: fn() -> Unit !e2) -> Unit !(e1 | e2) = f()\n"
+  assert fmt_of(e) == e
+  # the union survives a line break inside it, and a declared effect's
+  # uppercase name is a name like any other
+  let u = "fn s(f: fn() -> Unit !e1) -> Unit !(e1 |\n  Ask) = f()\n"
+  assert fmt_of(u) == u
+  # neither of these can be a union, so both are calls
+  let z = "fn c(o: Option[fn() -> Int]) -> Int = o!()\n"
+  assert fmt_of(z) == z
+  let m = "fn d(o: Option[fn(Int, Int) -> Int]) -> Int = o!(1, 2)\n"
+  assert fmt_of(m) == m
+  # a block is a callee too
+  let r = "fn b(g: fn(Int) -> Int) -> Int = { g }(1)\n"
+  assert fmt_of(r) == r
+  assert fmt_of("fn b(g: fn(Int) -> Int) -> Int = { g } (1)\n") == r
 }
 
 test "a conditional impl's parameters hug the keyword" {
