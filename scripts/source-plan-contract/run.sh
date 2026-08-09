@@ -16,13 +16,6 @@ dawn=${DAWN_BIN:-"$root/bin/dawn"}
 work=$(mktemp -d "${TMPDIR:-/tmp}/source-plan-contract.XXXXXX")
 trap 'rm -rf "$work"' EXIT
 
-# Isolate both source and Maven caches. The mirror is populated below before
-# the first Dawn invocation, so this contract has no public-network fallback
-# and cannot pass because of a package under the real ~/.dawn cache.
-export DAWN_PKG_CACHE="$work/cache"
-export COURSIER_CACHE="$work/coursier-cache"
-export DAWN_MAVEN_MIRROR="file://$work/maven"
-
 fail() {
   echo "FAIL: $*" >&2
   exit 1
@@ -59,6 +52,59 @@ with zipfile.ZipFile(target, "w") as archive:
 PY
 }
 
+make_asm_fixture() {
+  python3 - "$1" "$2" <<'PY'
+import sys
+import zipfile
+
+source, target = sys.argv[1:]
+prefix = "org/objectweb/asm/"
+sentinel = prefix + "Opcodes.class"
+
+try:
+    with zipfile.ZipFile(source) as source_jar:
+        entries = sorted(
+            {
+                name for name in source_jar.namelist()
+                if name.startswith(prefix) and name.endswith(".class")
+            }
+        )
+        if sentinel not in entries:
+            print(f"current toolchain jar is missing {sentinel}", file=sys.stderr)
+            raise SystemExit(1)
+        with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as fixture:
+            for name in entries:
+                fixture.writestr(name, source_jar.read(name))
+except (OSError, zipfile.BadZipFile) as error:
+    print(f"cannot read current toolchain jar: {error}", file=sys.stderr)
+    raise SystemExit(1)
+PY
+}
+
+relock_asm_fixture() {
+  python3 - "$1" "$2" <<'PY'
+import hashlib
+import pathlib
+import re
+import sys
+
+fixture_name, lock_name = sys.argv[1:]
+fixture = pathlib.Path(fixture_name)
+lock = pathlib.Path(lock_name)
+digest = hashlib.sha256(fixture.read_bytes()).hexdigest()
+text = lock.read_text()
+updated, count = re.subn(
+    r"(?m)^artifact [0-9a-f]{64}  asm-9\.7\.1\.jar$",
+    f"artifact {digest}  asm-9.7.1.jar",
+    text,
+)
+if count != 1:
+    print(f"ASM artifact lock entry occurs {count} times in {lock}", file=sys.stderr)
+    raise SystemExit(1)
+lock.write_text(updated)
+PY
+}
+
 make_package() {
   local dir=$1 version=$2 coord=$3 marker=$4
   mkdir -p "$dir/src"
@@ -75,11 +121,20 @@ pub fn marker() -> String = "$marker"
 EOF
 }
 
+toolchain_jar="$root/build/dawn-selfhost.jar"
+if ! "$dawn" --version > "$work/version.out" 2> "$work/version.err"; then
+  cat "$work/version.out" >&2
+  cat "$work/version.err" >&2
+  fail "$dawn could not initialize the current toolchain"
+fi
+test -f "$toolchain_jar" || fail "current toolchain jar is missing after $dawn --version"
+
 mkdir -p "$work/java-src/g" "$work/java-classes" "$work/maven/g/selected/1" \
   "$work/maven/org/ow2/asm/asm/9.7.1"
-test -f "$root/lib/asm-9.7.1.jar" || fail "vendored ASM jar is missing"
-cp "$root/lib/asm-9.7.1.jar" \
-  "$work/maven/org/ow2/asm/asm/9.7.1/asm-9.7.1.jar"
+asm_fixture="$work/maven/org/ow2/asm/asm/9.7.1/asm-9.7.1.jar"
+if ! make_asm_fixture "$toolchain_jar" "$asm_fixture"; then
+  fail "could not build an ASM fixture from $toolchain_jar"
+fi
 cat > "$work/maven/org/ow2/asm/asm/9.7.1/asm-9.7.1.pom" <<'POM'
 <project xmlns="http://maven.apache.org/POM/4.0.0">
   <modelVersion>4.0.0</modelVersion>
@@ -88,6 +143,14 @@ cat > "$work/maven/org/ow2/asm/asm/9.7.1/asm-9.7.1.pom" <<'POM'
   <version>9.7.1</version>
 </project>
 POM
+
+# Isolate both source and Maven caches only after the current toolchain has
+# supplied the local ASM fixture. Every contract invocation below sees only
+# this file:// mirror and cannot fall back to the public network or ~/.dawn.
+export DAWN_PKG_CACHE="$work/cache"
+export COURSIER_CACHE="$work/coursier-cache"
+export DAWN_MAVEN_MIRROR="file://$work/maven"
+
 cat > "$work/java-src/g/Selected.java" <<'JAVA'
 package g;
 
@@ -610,6 +673,9 @@ expect_input_mutant_red() {
   mkdir -p "$mutant"
   cp -R "$root/selfhost" "$mutant/selfhost"
   cp -R "$root/packages" "$mutant/packages"
+  if ! relock_asm_fixture "$asm_fixture" "$mutant/selfhost/dawn.lock"; then
+    fail "$mutation mutant lock could not adopt the local ASM fixture"
+  fi
   mutate_source_inputs "$mutation" "$mutant/selfhost/src/driver/analyze.dawn"
   if ! "$dawn" build "$mutant/selfhost" -o "$mutant/compiler.jar" --std "$root/std" \
       > "$mutant/build.out" 2>&1; then
