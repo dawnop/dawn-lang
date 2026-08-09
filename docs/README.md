@@ -3,7 +3,7 @@
 > 状态：**current** —— 全目录的分层索引与状态登记处。**每篇文档的权威状态在它自己的
 > 文件头**；这张索引与文件头冲突时以文件头为准，并请顺手改这里。
 
-`docs/` 下现有 81 篇文档 <!-- doc-check: doc-count -->，按时间叠加，混着**规范、调研、
+`docs/` 下现有 82 篇文档 <!-- doc-check: doc-count -->，按时间叠加，混着**规范、调研、
 设计方案、落地日志、复盘和运维说明**。读者无从判断哪几段还成立——`design.md` 说实现语言
 是 Kotlin，`bootstrap.md` 说 LSP 还在 Kotlin，两者都是当时的事实、现在都不是。
 这份索引把它们分层，并给每篇标状态。**篇数与「每篇都在索引里」这两件事都由
@@ -45,6 +45,7 @@
 | 文档 | 状态 | 说明 |
 |---|---|---|
 | [bootstrap.md](bootstrap.md) | current | 自举链：种子 → A → B → C、固定点、种子推进协议。 |
+| [bootstrap-input-manifest-design.md](bootstrap-input-manifest-design.md) | current | TOOL-14 的 project-only Producer 协议，以及 launcher consumer 的 fail-closed 摘要与可恢复 commit-marker 边界。 |
 | [package-design.md](package-design.md) | current | 源码包（`[deps]`）与 Maven 依赖（`[java-deps]`）的清单与解析。 |
 | [runtime-intrinsics-design.md](runtime-intrinsics-design.md) | current | 运行时 intrinsic 契约——每个 primitive 归哪个运行时模块。**表已从 `emit.dawn` 的 `(class, method)` 收成 `types.dawn` 的 `Rt`/`Intr`（文中的 `rt_intrinsic_target` 是旧名，已不存在）；§8 的三步 Move 表已被 [core-move2-design.md](core-move2-design.md) 更正**。 |
 | [core-move2-design.md](core-move2-design.md) | historical | 上面那张表里「Move 2 控制流/match」的**结账盘点**：主体已随 Core IR Phase 0 落地；残余 `CSProtect`（error-model 的 C2）已于 2026-07-31 裁决**关档不做**。`bracket` + `with` + 当时的 `fn` 尾闭包随 v0.39.0/v0.40.0 发布；尾闭包拼写后来由 #206 尾块取代。 |

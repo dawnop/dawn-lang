@@ -72,6 +72,10 @@ pub type SourcePlan = {
   diags: List[LocDiag]
 }
 
+type SourceInputKind = InputFile | InputOptional | InputTree
+
+type SourceInput = { kind: SourceInputKind, path: String }
+
 pub type LoadResult = { modules: List[LoadedModule], diags: List[LocDiag] }
 
 ## A path in the one spelling the compiler compares module identities by:
@@ -254,6 +258,173 @@ pub fn source_plan(target: String) -> SourcePlan !io = {
     java_coords: collect_java_coords(root_coords, pkgs),
     diags: sdiags ++ mdiags ++ rdiags
   }
+}
+
+fn source_input_display(path: String) -> String = str.replace(path, "\n", "\\n")
+
+fn source_input_path_ok(path: String) -> Result[Unit, String] !io = {
+  if str.contains(path, "\n") {
+    return Err("source input path contains LF: " ++ source_input_display(path))
+  }
+  var prefix = ""
+  for seg in str.split(path, "/") {
+    if seg == "" { continue }
+    prefix = prefix ++ "/" ++ seg
+    if io.is_symlink(prefix) {
+      return Err("source input path crosses a symbolic link: " ++ source_input_display(prefix))
+    }
+  }
+  Ok(())
+}
+
+fn validate_source_file(path: String, optional: Bool) -> Result[Unit, String] !io = {
+  match source_input_path_ok(path) {
+    Err(e) -> return Err(e)
+    Ok(_) -> ()
+  }
+  if not io.exists(path) {
+    if optional { return Ok(()) }
+    return Err("required source input is missing: " ++ source_input_display(path))
+  }
+  if io.is_dir(path) {
+    return Err("source input must be a file: " ++ source_input_display(path))
+  }
+  match io.read_bytes(path) {
+    Ok(_) -> Ok(())
+    Err(_) -> Err("source input file cannot be read: " ++ source_input_display(path))
+  }
+}
+
+fn validate_source_tree(path: String) -> Result[Unit, String] !io = {
+  match source_input_path_ok(path) {
+    Err(e) -> return Err(e)
+    Ok(_) -> ()
+  }
+  if not io.exists(path) {
+    return Err("required source input is missing: " ++ source_input_display(path))
+  }
+  if not io.is_dir(path) {
+    return Err("source input must be a directory tree: " ++ source_input_display(path))
+  }
+  let names = match io.list_dir(path) {
+    Ok(ns) -> ns
+    Err(_) ->
+      return Err("source input tree cannot be traversed: " ++ source_input_display(path))
+  }
+  for name in names {
+    let child = path ++ "/" ++ name
+    match source_input_path_ok(child) {
+      Err(e) -> return Err(e)
+      Ok(_) -> ()
+    }
+    if io.is_dir(child) {
+      match validate_source_tree(child) {
+        Err(e) -> return Err(e)
+        Ok(_) -> ()
+      }
+    } else if not io.exists(child) {
+      return Err("source input tree entry disappeared: " ++ source_input_display(child))
+    } else {
+      match io.read_bytes(child) {
+        Ok(_) -> ()
+        Err(_) ->
+          return Err("source input file cannot be read: " ++ source_input_display(child))
+      }
+    }
+  }
+  Ok(())
+}
+
+fn validate_source_input(input: SourceInput) -> Result[Unit, String] !io =
+  match input.kind {
+    InputFile -> validate_source_file(input.path, false)
+    InputOptional -> validate_source_file(input.path, true)
+    InputTree -> validate_source_tree(input.path)
+  }
+
+fn collect_source_pkg_inputs(
+  pkg: PkgR,
+  inputs0: List[SourceInput],
+  seen0: Set[String]
+) -> (List[SourceInput], Set[String]) !io = {
+  let root = canon(pkg.root)
+  if set.has(seen0, root) { return (inputs0, seen0) }
+  var inputs = inputs0
+  var seen = set.insert(seen0, root)
+  let parent = fspath.parent(root).expect("package source root has a parent")
+  inputs = inputs ++ [
+    SourceInput { kind: InputFile, path: parent ++ "/dawn.toml" },
+    SourceInput { kind: InputTree, path: root }
+  ]
+  for key in map.keys(pkg.deps) {
+    let child = map.get(pkg.deps, key).expect("resolved package")
+    let (next, visited) = collect_source_pkg_inputs(child, inputs, seen)
+    inputs = next
+    seen = visited
+  }
+  (inputs, seen)
+}
+
+fn source_input_record(base: String, input: SourceInput) -> String = {
+  let scope_path =
+    if input.path == base {
+      ("R", ".")
+    } else {
+      let prefix = if base == "/" { "/" } else { base ++ "/" }
+      if str.starts_with(input.path, prefix) {
+        ("R", str.drop(input.path, str.len(prefix)))
+      } else {
+        ("A", input.path)
+      }
+    }
+  let (scope, path) = scope_path
+  let kind = match input.kind {
+    InputFile -> "F"
+    InputOptional -> "O"
+    InputTree -> "T"
+  }
+  scope ++ "\t" ++ kind ++ "\t" ++ path
+}
+
+pub fn bootstrap_source_input_manifest(
+  plan: SourcePlan,
+  base: String
+) -> Result[String, String] !io = {
+  if len(plan.diags) > 0 {
+    return Err("cannot serialize source inputs from a plan with diagnostics")
+  }
+  if base == "" { return Err("source input base must not be empty") }
+  let base_abs = canon(base)
+  match source_input_path_ok(base_abs) {
+    Err(e) -> return Err(e)
+    Ok(_) -> ()
+  }
+  if not io.is_dir(base_abs) {
+    return Err("source input base must be a directory: " ++ source_input_display(base_abs))
+  }
+
+  let project = canon(plan.project)
+  var inputs: List[SourceInput] = [
+    SourceInput { kind: InputFile, path: project ++ "/dawn.toml" },
+    SourceInput { kind: InputOptional, path: project ++ "/dawn.lock" },
+    SourceInput { kind: InputTree, path: project ++ "/src" }
+  ]
+  var seen: Set[String] = set.empty()
+  for key in map.keys(plan.pkgs) {
+    let pkg = map.get(plan.pkgs, key).expect("resolved package")
+    let (next, visited) = collect_source_pkg_inputs(pkg, inputs, seen)
+    inputs = next
+    seen = visited
+  }
+
+  var records: List[String] = []
+  for input in inputs {
+    match validate_source_input(input) {
+      Err(e) -> return Err(e)
+      Ok(_) -> { records = records ++ [source_input_record(base_abs, input)] }
+    }
+  }
+  Ok("dawn-source-inputs-v1\n" ++ join(sort(records), "\n") ++ "\n")
 }
 
 ## Directory mode: root = <dir>/src, entry = <dir>/src/main.dawn (spec §10.1).

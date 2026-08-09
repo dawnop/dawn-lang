@@ -25,7 +25,10 @@ use front/astdump
 use driver/checkdump
 use ir/coredump
 use driver/stdlib.{StdCtx, load_std}
-use driver/analyze.{CheckedMod, LocDiag, load_directory, load_file, source_plan, analyze_program}
+use driver/analyze.{
+  CheckedMod, LocDiag, load_directory, load_file, source_plan, bootstrap_source_input_manifest,
+  analyze_program
+}
 use pkg/vendor
 use jvm/jarw
 use front/fmt
@@ -814,6 +817,30 @@ fn run_pkghash(rest: List[String]) -> Unit !io = {
   match pkgfetch.tree_hash(dir) {
     Ok(h) -> println(h)
     Err(e) -> cli_error(e)
+  }
+}
+
+fn run_source_inputs(rest: List[String]) -> Unit !io = {
+  if len(rest) != 3 || rest[0] != "--base" {
+    return cli_error("usage: dawn __source-inputs --base <repo> <project-dir>")
+  }
+  let base = rest[1]
+  let target = rest[2]
+  if not io.exists(target) {
+    return cli_error("no such file or directory: " ++ target)
+  }
+  if not io.is_dir(target) {
+    return cli_error("__source-inputs requires a project directory: " ++ target)
+  }
+  let plan = source_plan(target)
+  if len(plan.diags) > 0 { return fail_compile(plan.diags) }
+  match bootstrap_source_input_manifest(plan, base) {
+    Ok(text) -> print(text)
+    Err(e) -> {
+      io.eprintln("error: " ++ e)
+      let _ = io.exit(1)
+      ()
+    }
   }
 }
 
@@ -1898,6 +1925,8 @@ pub fn main() -> Unit !io = {
         run_lock(rest)
       } else if mode == "cache" {
         run_cache(rest)
+      } else if mode == "__source-inputs" {
+        run_source_inputs(rest)
       } else if mode == "__pkghash" {
         run_pkghash(rest)
       } else if mode == "lex" || mode == "__lex" || mode == "parse" || mode == "__parse" {
