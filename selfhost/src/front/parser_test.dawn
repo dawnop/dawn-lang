@@ -129,6 +129,22 @@ test "a broken declaration is reported and the next one still parses" {
   }
 }
 
+test "bare return stops at every delimiter boundary" {
+  for src in [
+    "fn f() -> Unit = (return)",
+    "fn f() -> Unit = [return]",
+    "fn f() -> Unit = g(return)",
+    "fn f() -> Unit = (return, 1)",
+    "fn f() -> Unit = { return }"
+  ] {
+    let (m, ds) = parse_module(src)
+    assert len(ds) == 0
+    let out = render_module(m, ds)
+    assert str.contains(out, "Return has=false")
+    assert not str.contains(out, "Return has=true")
+  }
+}
+
 test "declaration recovery anchors at contextual opaque type" {
   let src = "fn broken( = 0\n\nopaque type UserId = List[Int]"
   let (m, ds) = parse_module(src)

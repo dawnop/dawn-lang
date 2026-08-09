@@ -4,6 +4,7 @@ set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 dawn=${DAWN_BIN:-"$root/bin/dawn"}
 fixture="$root/scripts/grammar-corpus/reject/declaration_recovery_opaque.dawn"
+return_fixture="$root/scripts/grammar-corpus/accept/bare_return_delimiters.dawn"
 work=$(mktemp -d "${TMPDIR:-/tmp}/syntax-small-contract.XXXXXX")
 trap 'rm -rf "$work"' EXIT
 
@@ -32,6 +33,28 @@ grep -Fq 'Type UserId tparams=_ record=false alias=true opaque=true' "$work/fixt
   fail "opaque recovery did not retain UserId as an opaque declaration"
 }
 echo "PASS  contextual opaque recovery retains one diagnostic and one declaration"
+
+"$dawn" __parse "$return_fixture" > "$work/return-fixture.out"
+if grep -q '^!' "$work/return-fixture.out"; then
+  cat "$work/return-fixture.out" >&2
+  fail "bare return delimiter fixture did not parse"
+fi
+return_count=$(grep -c 'Return has=false' "$work/return-fixture.out" || true)
+if [ "$return_count" -ne 5 ]; then
+  cat "$work/return-fixture.out" >&2
+  fail "bare return delimiter fixture retained $return_count bare returns instead of five"
+fi
+
+printf '%s\n' 'fn wrong() -> Int = [return]' > "$work/return_type.dawn"
+if "$dawn" check "$work/return_type.dawn" > "$work/return-type.out" 2>&1; then
+  fail "bare return escaped the function return-type check"
+fi
+grep -Fq '`return` type mismatch: this function returns Int, got Unit' \
+  "$work/return-type.out" || {
+    cat "$work/return-type.out" >&2
+    fail "bare return failed outside its checker-owned return-type rule"
+  }
+echo "PASS  bare return delimiters parse and remain checker-constrained"
 
 mutant="$work/drop-opaque-anchor"
 mkdir -p "$mutant"
@@ -75,3 +98,37 @@ if ! grep -Fxq 'FAIL  front/parser_test :: declaration recovery anchors at conte
   fail "drop-opaque-anchor mutant missed its owning recovery test"
 fi
 echo "PASS  drop-opaque-anchor compiles, then turns the owning recovery test red"
+
+return_mutant="$work/drop-rbracket-return-boundary"
+mkdir -p "$return_mutant"
+cp -R "$root/selfhost" "$return_mutant/selfhost"
+ln -s "$root/packages" "$return_mutant/packages"
+
+python3 - "$return_mutant/selfhost/src/front/parser.dawn" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+old = "  k == NEWLINE || k == RBRACE || k == RPAREN || k == RBRACKET || k == COMMA || k == EOF\n"
+new = "  k == NEWLINE || k == RBRACE || k == RPAREN || k == COMMA || k == EOF\n"
+if text.count(old) != 1:
+    raise SystemExit("drop-rbracket-return-boundary mutation anchor drifted")
+path.write_text(text.replace(old, new))
+PY
+
+if ! "$dawn" build "$return_mutant/selfhost" -o "$return_mutant/compiler.jar" \
+    > "$return_mutant/build.out" 2>&1; then
+  cat "$return_mutant/build.out" >&2
+  fail "drop-rbracket-return-boundary mutant did not compile"
+fi
+
+if "$dawn" test "$return_mutant/selfhost" > "$return_mutant/test.out" 2>&1; then
+  fail "drop-rbracket-return-boundary mutant stayed green"
+fi
+if ! grep -Fxq 'FAIL  front/parser_test :: bare return stops at every delimiter boundary' \
+    "$return_mutant/test.out"; then
+  cat "$return_mutant/test.out" >&2
+  fail "drop-rbracket-return-boundary mutant missed its owning parser test"
+fi
+echo "PASS  drop-rbracket-return-boundary compiles, then turns its owning parser test red"

@@ -1707,6 +1707,9 @@ fn postfix_tail(p: P, st: St, initial: Expr, nb: Bool) -> PR[Expr] = {
   Ok((st1, e))
 }
 
+fn is_bare_return_boundary(k: TokKind) -> Bool =
+  k == NEWLINE || k == RBRACE || k == RPAREN || k == RBRACKET || k == COMMA || k == EOF
+
 fn primary_expr(p: P, st: St, nb: Bool) -> PR[Expr] = {
   let t = cur(p, st)
   let k = t.kind
@@ -1741,8 +1744,7 @@ fn primary_expr(p: P, st: St, nb: Bool) -> PR[Expr] = {
     match_expr(p, st)
   } else if k == RETURN {
     let st1 = adv1(p, st)
-    let k1 = kind_of(p, st1)
-    if k1 == NEWLINE || k1 == RBRACE || k1 == RPAREN || k1 == COMMA || k1 == EOF {
+    if is_bare_return_boundary(kind_of(p, st1)) {
       Ok((st1, EReturn(None, t.lo, t.hi)))
     } else {
       let (st2, v) = expression(p, st1, nb)?
