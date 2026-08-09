@@ -11,8 +11,8 @@ use front/ast.{
   BinOp, OpAdd, OpMul,
   PLit,
   Stmt, SWhile,
-  Decl, DFn, DConst, DUseModule, DImpl, Module,
-  TypeRef, TQual, TNamed
+  Decl, DFn, DType, DConst, DUseModule, DImpl, Module,
+  TypeRef, TQual, TNamed, TFn
 }
 
 fn rendered(src: String) -> String = {
@@ -411,6 +411,74 @@ test "a module-qualified type parses in type position" {
   # a lowercase name with no dot is still an error, and says why
   let (_, ds2) = parse_module("fn f(x: json) -> Int = 1\n")
   assert len(ds2) > 0
+}
+
+test "type grouping disambiguates outer and inner function effects" {
+  let src = "alias OuterIo = fn() -> (fn() -> Int) !io\n" ++
+    "alias InnerIo = fn() -> fn() -> Int !io\n" ++
+    "alias BothIo = fn() -> (fn() -> Int !io) !io\n" ++
+    "alias Grouped = (Int)\n"
+  let (m, ds) = parse_module(src)
+  assert len(ds) == 0
+  assert len(m.decls) == 4
+
+  match m.decls[0] {
+    DType(t) ->
+      match t.alias_target {
+        Some(TFn(_, inner, outer_effs, _, _)) -> {
+          assert outer_effs == ["io"]
+          match inner {
+            TFn(_, TNamed(name, _, _, _), inner_effs, _, _) -> {
+              assert name == "Int"
+              assert len(inner_effs) == 0
+            }
+            _ -> { assert false }
+          }
+        }
+        _ -> { assert false }
+      }
+    _ -> { assert false }
+  }
+  match m.decls[1] {
+    DType(t) ->
+      match t.alias_target {
+        Some(TFn(_, TFn(_, _, inner_effs, _, _), outer_effs, _, _)) -> {
+          assert len(outer_effs) == 0
+          assert inner_effs == ["io"]
+        }
+        _ -> { assert false }
+      }
+    _ -> { assert false }
+  }
+  match m.decls[2] {
+    DType(t) ->
+      match t.alias_target {
+        Some(TFn(_, TFn(_, _, inner_effs, _, _), outer_effs, _, _)) -> {
+          assert outer_effs == ["io"]
+          assert inner_effs == ["io"]
+        }
+        _ -> { assert false }
+      }
+    _ -> { assert false }
+  }
+  match m.decls[3] {
+    DType(t) ->
+      match t.alias_target {
+        Some(TNamed(name, args, _, _)) -> {
+          assert name == "Int"
+          assert len(args) == 0
+        }
+        _ -> { assert false }
+      }
+    _ -> { assert false }
+  }
+
+  let (_, one_tuple) = parse_module("alias Bad = (Int,)\n")
+  assert len(one_tuple) == 1
+  assert str.contains(one_tuple[0].msg, "tuple type needs at least 2 elements")
+  let (_, empty) = parse_module("alias Bad = ()\n")
+  assert len(empty) == 1
+  assert str.contains(empty[0].msg, "tuple type needs at least 2 elements")
 }
 
 test "application is a postfix: call results and groups apply directly" {

@@ -400,7 +400,11 @@ pub fn ctor_jvm_name(adts: Adts, c: CtorI) -> String = {
 
 # ---- rendering ----
 
-pub fn ty_show(adts: Adts, t: Ty) -> String =
+## Render a type in a context that may need a function type grouped. The only
+## ambiguous edge is a function return followed by the outer function's effect:
+## without grouping, that suffix belongs to the inner function. Other type
+## contexts have their own closing delimiter and need no defensive parentheses.
+fn ty_show_at(adts: Adts, t: Ty, group_fn: Bool) -> String =
   match t {
     TyInt -> "Int"
     TyFloat -> "Float"
@@ -416,23 +420,34 @@ pub fn ty_show(adts: Adts, t: Ty) -> String =
       if len(targs) == 0 {
         name
       } else {
-        name ++ "[" ++ join(map(targs, x => ty_show(adts, x)), ", ") ++ "]"
+        name ++ "[" ++ join(map(targs, x => ty_show_at(adts, x, false)), ", ") ++ "]"
       }
     }
-    TyList(e) -> "List[" ++ ty_show(adts, e) ++ "]"
-    TyMap(k, v) -> "Map[" ++ ty_show(adts, k) ++ ", " ++ ty_show(adts, v) ++ "]"
-    TySet(e) -> "Set[" ++ ty_show(adts, e) ++ "]"
-    TyArray(e) -> "Array[" ++ ty_show(adts, e) ++ "]"
+    TyList(e) -> "List[" ++ ty_show_at(adts, e, false) ++ "]"
+    TyMap(k, v) -> "Map[" ++ ty_show_at(adts, k, false) ++ ", " ++
+      ty_show_at(adts, v, false) ++ "]"
+    TySet(e) -> "Set[" ++ ty_show_at(adts, e, false) ++ "]"
+    TyArray(e) -> "Array[" ++ ty_show_at(adts, e, false) ++ "]"
     TyJava(_, display) -> display
     # the name, never the target: a diagnostic outside the declaring module
     # must not leak what the module is hiding
     TyOpaque(_, name, _, _) -> name
-    TyTuple(elems) -> "(" ++ join(map(elems, x => ty_show(adts, x)), ", ") ++ ")"
-    TyFn(params, ret, eff) ->
-      "fn(" ++ join(map(params, x => ty_show(adts, x)), ", ") ++ ") -> " ++
-      ty_show(adts, ret) ++ eff_suffix(eff)
-    TyAssoc(s, _, n) -> ty_show(adts, s) ++ "." ++ n
+    TyTuple(elems) -> "(" ++ join(map(elems, x => ty_show_at(adts, x, false)), ", ") ++ ")"
+    TyFn(params, ret, eff) -> {
+      let shown = "fn(" ++ join(map(params, x => ty_show_at(adts, x, false)), ", ") ++
+        ") -> " ++ ty_show_at(adts, ret, eff != EPure) ++ eff_suffix(eff)
+      if group_fn { "(" ++ shown ++ ")" } else { shown }
+    }
+    TyAssoc(s, _, n) -> ty_show_at(adts, s, false) ++ "." ++ n
   }
+
+pub fn ty_show(adts: Adts, t: Ty) -> String = ty_show_at(adts, t, false)
+
+## Render the return type of a function before appending that function's
+## effect suffix. A non-pure outer function must group a returned function type
+## so parse(show(t)) assigns each effect to the same layer.
+pub fn fn_return_show(adts: Adts, ret: Ty, outer_eff: Eff) -> String =
+  ty_show_at(adts, ret, outer_eff != EPure)
 
 ## Render a constructor like Kotlin CtorInfo.render (used in diagnostics).
 pub fn ctor_render(adts: Adts, c: CtorI) -> String = {
@@ -1014,8 +1029,8 @@ pub fn sig_render(adts: Adts, traits: Traits, s: Sig) -> String = {
     ps = ps ++ [pn ++ ": " ++ ty_show(adts, pt) ++ dm]
     j = j + 1
   }
-  "fn " ++ s.name ++ tp ++ "(" ++ join(ps, ", ") ++ ") -> " ++ ty_show(adts, s.ret) ++
-    eff_suffix(s.eff)
+  "fn " ++ s.name ++ tp ++ "(" ++ join(ps, ", ") ++ ") -> " ++
+    fn_return_show(adts, s.ret, s.eff) ++ eff_suffix(s.eff)
 }
 
 # ---- prelude: Option / Result, Ord, builtins ----
@@ -2204,11 +2219,20 @@ test "a trailing closure fills the last declared slot" {
 
 test "type rendering" {
   let adts = prelude_adts()
+  let traits = prelude_traits()
   assert ty_show(adts, TyMap(TyInt, TyList(TyString))) == "Map[Int, List[String]]"
   assert ty_show(adts, opt_ty(TyInt)) == "Option[Int]"
   assert ty_show(adts, TyAdt(RESULT_ID, [])) == "Result"
   assert ty_show(adts, TyTuple([TyInt, TyBool])) == "(Int, Bool)"
   assert ty_show(adts, TyFn([TyInt], TyUnit, EIo)) == "fn(Int) -> Unit !io"
+  let pure_inner = TyFn([], TyInt, EPure)
+  let io_inner = TyFn([], TyInt, EIo)
+  assert ty_show(adts, TyFn([], pure_inner, EIo)) == "fn() -> (fn() -> Int) !io"
+  assert ty_show(adts, TyFn([], io_inner, EPure)) == "fn() -> fn() -> Int !io"
+  assert ty_show(adts, TyFn([], io_inner, EIo)) == "fn() -> (fn() -> Int !io) !io"
+  assert ty_show(adts, TyList(pure_inner)) == "List[fn() -> Int]"
+  let outer = eff1(bsig("outer", [], [], pure_inner), EIo)
+  assert sig_render(adts, traits, outer) == "fn outer() -> (fn() -> Int) !io"
   assert ty_show(adts, TyError) == "?"
   assert ty_show(adts, TyJava("java.sql.Connection", "Connection")) == "Connection"
 }

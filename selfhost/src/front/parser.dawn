@@ -996,23 +996,36 @@ fn type_args(p: P, st: St, hi0: Int) -> PR[(List[TypeRef], Int)] = {
   Ok((st4, (args, close.hi)))
 }
 
-## (A, B) — tuple type, 2 to 8 elements
+## `(T)` — an AST-erased grouping, or `(A, B)` — a tuple type of 2 to 8 elements.
+## A comma commits to the tuple reading, so `(T,)` remains an invalid
+## one-element tuple rather than silently becoming a group.
 fn tuple_type_ref(p: P, st: St) -> PR[TypeRef] = {
   let (st1, open) = adv(p, st)
   var st2 = st1
   var elems: List[TypeRef] = []
+  var saw_comma = false
   while not at_kind(p, st2, RPAREN) {
     let (st3, t) = type_ref(p, st2)?
     elems = elems ++ [t]
-    if at_kind(p, st3, COMMA) { st2 = adv1(p, st3) } else {
+    if at_kind(p, st3, COMMA) {
+      saw_comma = true
+      st2 = adv1(p, st3)
+    } else {
       st2 = st3
       break
     }
   }
   let (st4, close) = want(p, st2, RPAREN, "`)`")?
-  if len(elems) < 2 {
+  if len(elems) == 1 && not saw_comma {
+    return Ok((st4, elems[0]))
+  }
+  if len(elems) == 0 {
     return Err((st4, pd_h("a tuple type needs at least 2 elements", open.lo, close.hi,
-      "for a single type, drop the parentheses")))
+      "write a type inside the parentheses to group it, or provide at least 2 tuple elements")))
+  }
+  if len(elems) == 1 {
+    return Err((st4, pd_h("a tuple type needs at least 2 elements", open.lo, close.hi,
+      "`(T,)` is not a tuple; drop the comma to group the type as `(T)`")))
   }
   if len(elems) > 8 {
     return Err((st4, pd("tuples have at most 8 elements", open.lo, close.hi)))

@@ -25,7 +25,7 @@ use check/types.{
   Ty, TyInt, TyFloat, TyBool, TyBytes, TyUnit, TyError, TyVar, TyAssoc, TyAdt, TyList,
   TyMap, TySet, TyArray, TyTuple, TyFn, TyOpaque, Eff, EPure, EIo, ELabeled,
   eff_subsumes, eff_suffix, eff_labels, EffectI, ev_record_name, AdtI, CtorI, FieldI,
-  TraitI, ImplI, Sig, MethodSig, adt_of, trait_of, ty_show, sig_render, subst,
+  TraitI, ImplI, Sig, MethodSig, adt_of, trait_of, ty_show, fn_return_show, sig_render, subst,
   reduce_via_bindings, ty_named, peel_opaque, prelude_impls, prelude_trait_ids,
   prelude_trait_names, is_prelude_trait_name, OPTION_ID, RESULT_ID, FOREIGN_ERROR_ID,
   ORD_ID, EQ_ID, HASH_ID, SHOW_ID, eq_scalars, hash_scalars, Head, head_of, impl_at,
@@ -1684,7 +1684,7 @@ pub fn pass_register_impls(
       let want_ret = reduce_via_bindings(subst(msv.sig.ret, inst2, em0), tid2, subject2, ab2)
       let want_render = "fn " ++ me.name ++ "(" ++
         join(map(want, t => ty_show(adts2, t)), ", ") ++ ") -> " ++
-        ty_show(cx1.adts, want_ret) ++ eff_suffix(msv.sig.eff)
+        fn_return_show(cx1.adts, want_ret, msv.sig.eff) ++ eff_suffix(msv.sig.eff)
       if ptys != want || ret != want_ret {
         cx1 = cerr_h(cx1, "`" ++ me.name ++ "` does not match the trait's signature",
           me.nlo, me.nhi, "trait `" ++ tr.name ++ "` declares it as " ++ want_render)
@@ -1741,7 +1741,8 @@ pub fn pass_register_impls(
           i = i + 1
         }
         renders = renders ++ ["fn " ++ msig.sig.name ++ "(" ++ join(ps, ", ") ++ ") -> " ++
-            ty_show(cx1.adts, subst(msig.sig.ret, inst, em0)) ++ eff_suffix(msig.sig.eff)]
+            fn_return_show(cx1.adts, subst(msig.sig.ret, inst, em0), msig.sig.eff) ++
+            eff_suffix(msig.sig.eff)]
       }
       cx1 = cerr_h(cx1, "impl `" ++ tr.name ++ "[" ++ ty_show(cx1.adts, subject) ++
           "]` is missing " ++ join(names2, ", "), d.tlo, d.thi,

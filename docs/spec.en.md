@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 8f59d5206cc2b858 -->
+<!-- doc-check: translation-of docs/spec.md @ 4fcd5ac0aee273a3 -->
 
 # Dawn Language Specification
 
@@ -255,6 +255,20 @@ There are only two exceptions, and neither is a restriction of the representatio
 - `Set[T]` — an immutable set (see below)
 - Tuples `(A, B, ...)`
 - Function types `fn(A, B) -> C !e` (`!e` may be omitted, meaning pure)
+
+In type position, `(T)` is **grouping** only: after parsing it is still `T`, with no extra type
+node. A tuple still has at least two elements: `(A, B)` is a tuple, `(T,)` is not a one-element
+tuple, and empty `()` is not a type either (the unit type is written `Unit`).
+
+Function-type arrows remain right-associative, and a suffix effect belongs to the function layer
+it immediately follows. When the return type is itself a function, parentheses separate an outer
+effect from that returned function:
+
+```dawn
+fn() -> fn() -> Int !io          # pure outer function, !io returned function
+fn() -> (fn() -> Int) !io        # !io outer function, pure returned function
+fn() -> (fn() -> Int !io) !io    # both layers are !io
+```
 
 `Option` and `Result` are ordinary ADTs, defined in the standard library, with no special status
 (the `?` operator has syntactic support for them, see §8.1).

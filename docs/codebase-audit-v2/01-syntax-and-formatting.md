@@ -28,10 +28,20 @@
 
 ## SYN-03 — P2 — 返回函数的函数无法直接标注外层效果
 
-- **证据：S。** `fn_type_ref` 先递归吃完整返回类型，再读取 effect：`selfhost/src/front/parser.dawn:1013`；单类型括号又被当作非法 tuple：`selfhost/src/front/parser.dawn:989`。
-- **边界：** `fn() -> fn() -> Int !io` 只能读成“纯外层，内层 `!io`”；`fn() -> (fn() -> Int) !io` 无法解析。用户必须创建无语义价值的 alias 才能表达外层 `!io`。
-- **影响：** effect 的结合性没有表面语法可消歧，高阶公共 API 难以直接书写。
-- **建议：** 至少支持 parenthesized type。更整齐的破坏性方案是把效果放到参数列表之后、箭头之前，例如 `fn() !io -> T`，使它天然属于这一层函数。
+- **后续处置（2026-08-09）：已修。** 类型 parser 现在用逗号决定 tuple：`(T)` 返回内部
+  `TypeRef`，`(A, B)` 保持 tuple，`(T,)` 与 `()` 继续拒绝；没有增加 `TParen`，箭头仍右结合。
+  因而 `fn() -> (fn() -> Int) !io` 表示“外层 `!io`、内层纯”，原写法
+  `fn() -> fn() -> Int !io` 仍表示“外层纯、内层 `!io`”，双层效果也可逐层书写。
+- **渲染闭环：** `ty_show`、`sig_render`、impl mismatch / missing-method 两处诊断，以及局部
+  函数补写 `!io` 的迁移 hint 共享 `fn_return_show`：仅当外层非纯且返回类型为函数时加括号，
+  不给参数、泛型实参或普通返回类型制造无意义括号。全仓穷举 `->`、`ty_show`、
+  `eff_suffix` 与手写 `!io` 的组合后没有同类 renderer 残留；诊断、文档、check dump 与 LSP
+  共用的显示结果均可按原语义回读。
+- **合同：** parser 结构测试固定外纯内效、外效内纯、双 effect 与 `(Int)`；grammar corpus
+  固定 grouping 正例及 `(Int,)`、`()` 反例；checker 单测固定解析后的 `Sig` 与显示结果，
+  checker corpus 同时覆盖 passes 中两条手写 impl 签名诊断与真实局部函数的 `!io` hint。
+- **裁决：** 采用兼容性的 grouping 方案；不迁移到 `fn() !io -> T`。后者会让函数类型与
+  具名函数声明重新分叉，或迫使全仓迁移，解决同一消歧问题却引入更大的破坏面。
 
 ## SYN-04 — P2 — or-pattern 不是 Pattern，规范承诺也未实现
 
