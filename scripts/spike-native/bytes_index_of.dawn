@@ -1,0 +1,40 @@
+# Cross-backend contract for byte search at the two Int edges and at a long
+# match. The ordinary std tests catch the algorithm; this program also proves
+# that the JVM and native C lowerings run the same implementation and compare
+# it with a handwritten answer rather than with each other alone.
+
+use std/bytes
+use std/io
+use std/str
+
+fn answer(found: Option[Int]) -> String =
+  match found {
+    Some(i) -> to_string(i)
+    None -> "none"
+  }
+
+fn line(label: String, found: Option[Int]) -> Unit !io =
+  io.println(label ++ " = " ++ answer(found))
+
+pub fn main() -> Unit !io = {
+  let empty = bytes.utf8("")
+  let b = bytes.utf8("abcabc")
+  let int_min = -9223372036854775807 - 1
+  let int_max = 9223372036854775807
+
+  line("empty/empty MIN", bytes.index_of(empty, empty, int_min))
+  line("empty/empty MAX", bytes.index_of(empty, empty, int_max))
+  line("nonempty MIN", bytes.index_of(b, bytes.utf8("abc"), int_min))
+  line("nonempty MAX", bytes.index_of(b, bytes.utf8("abc"), int_max))
+  line("empty at end", bytes.index_of(b, empty, bytes.len(b)))
+  line("empty past end", bytes.index_of(b, empty, int_max))
+  line("exact last start", bytes.index_of(bytes.utf8("xxabc"), bytes.utf8("abc"), 2))
+  line("miss last start", bytes.index_of(bytes.utf8("xxabd"), bytes.utf8("abc"), 2))
+  line("needle longer", bytes.index_of(bytes.utf8("ab"), bytes.utf8("abc"), 0))
+
+  let body = str.repeat("a", 100000)
+  let needle = bytes.utf8(body)
+  line("long exact last start", bytes.index_of(bytes.utf8("x" ++ body), needle, 0))
+  line("long mismatch", bytes.index_of(
+    bytes.utf8("x" ++ str.repeat("a", 99999) ++ "b"), needle, 1))
+}

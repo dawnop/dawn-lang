@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 0a3ece2fc96e45b4 -->
+<!-- doc-check: translation-of docs/spec.md @ 8f59d5206cc2b858 -->
 
 # Dawn Language Specification
 
@@ -1874,7 +1874,11 @@ functions (§11, the "bytes" group): `utf8(s) -> Bytes` (the UTF-8 bytes of a st
 `decode_utf8(b) -> String` / `decode_latin1(b) -> String` (decoding, see §11),
 `bytes.len`, `bytes.at(b, i) -> Int` (0..255, out of range panics),
 `bytes.slice(b, start, end)` (`[start,end)`, subscripts clamped into range),
-`bytes.index_of(b, needle, from) -> Option[Int]`. `Bytes ++ Bytes` concatenates,
+`bytes.index_of(b, needle, from) -> Option[Int]`. `index_of` clamps a negative `from`
+to zero; a non-empty `needle` is searched from that byte offset for its first complete
+match. An empty `needle` matches at every valid position in `[0, len(b)]` (so
+`from == len(b)` returns `Some(len(b))`), but `from > len(b)` returns `None` even for an
+empty `needle`. `Bytes ++ Bytes` concatenates,
 `==`/`!=` compare by **content** (`Show` renders a `<N bytes>` summary). The hash of
 `Bytes` is a **content** hash (seed `1`, byte by byte `h = 31*h + the signed byte`,
 wrapping at 32 bits, see §3.5 — the same shape as the composite rule there), consistent

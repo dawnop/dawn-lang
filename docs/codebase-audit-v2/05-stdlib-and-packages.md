@@ -36,12 +36,37 @@
 - **影响：** 格式明确标记的非法 reserved bits 与 header corruption 都被接受。
 - **建议：** `flags & 0xE0 != 0` hard error；存在 FHCRC 时验证 header CRC16。
 
-## LIB-05 — P2 — `bytes.index_of` 的范围判断可 Int overflow
+## LIB-05 — P2 — `bytes.index_of` 的范围判断可 Int overflow（已修）
 
-- **证据：S。** boundary 使用 `i + nlen > hlen`：`std/bytes.dawn:110`，没有先拒绝远大于 length 的 `from`。
-- **边界：** nonempty needle 且 `from = Int.MAX` 时加法 wrap，可绕过 stop condition，继而越界或异常扫描。
-- **影响：** 一个应为 total query 的 API 对合法 Int input panic。
-- **建议：** 先处理 `from > hlen`，再用 `nlen > hlen || i > hlen - nlen` 的无溢出比较；补 MIN/MAX tests。
+> **后续处置（2026-08-09）：已修。** 空 needle 把 `last_start` 设为 `hlen`；非空
+> needle 先拒绝 `start >= hlen`，再以 `remaining = hlen - start` 验证长度，只有验证
+> 通过才计算 `last_start = hlen - nlen`：`std/bytes.dawn:111`。外层先匹配当前起点，
+> 再判断是否已到最后合法起点，故 `i + 1` 只在 `i < last_start` 时发生：
+> `std/bytes.dawn:126`；内层 matcher 也改为显式迭代：`std/bytes.dawn:137`。现行语义已
+> 在规范钉死：负 `from` 钳到 0；空 needle 可命中
+> `[0, len]`，但 `from > len` 返回 `None`：`docs/spec.md:1534`。
+>
+> std tests 与自动发现的 JVM/native fixture 覆盖 Int.MIN/MAX、空 haystack/needle、
+> 最后合法起点命中/不命中、needle 更长，以及 std 的 131072-byte needle 与 fixture
+> 的 100000-byte needle：`std/bytes.dawn:461`、`scripts/spike-native/bytes_index_of.dawn:19`。
+> 关闭 LIB-05 所依赖的两项行为负控实测：恢复 `i + nlen` 后 fixture 在 Int.MAX 超时；
+> 漏掉 last-start 后 JVM/native 都把两个末端命中误报为 `None`。
+>
+> production `std/bytes` 没有为测试新增 `std/str` 依赖；长 Bytes 复用测试原有变量按
+> 长度倍增。隔离 Core 实测中，HEAD 与“仅新增测试”均保持 `calc` 的 `Adt1463`，只有
+> production 实现及完整变更移到 `Adt1467`；因此仅测试引入的 nominal-ID 噪声为 0，
+> 剩余 `+4` 来自实际控制流，并由 Core 的既有 ID normalization 识别为非指令变化。
+>
+> **订正旧结论：** 修复前 `bytes_at` 越界返回 `-1` sentinel，并不会经 `bytes.at`
+> panic；真实症状是 `i + nlen` 与随后 `i + 1` 回绕后重扫巨大 Int 区间，表现为不终止。
+> 同时，旧 matcher 是自尾递归，按 spec §12.4 本来就保证降成循环；100000-byte
+> 行为负控恢复旧写法仍通过，因此没有“旧 matcher 会爆栈”的实证。显式循环保留为局部
+> 可读性与不依赖该优化形状的实现选择，不把这部分冒充成已复现的栈缺陷。Core golden
+> 会抓到恢复递归写法，但那只是结构守卫，不是行为负控，也不是关闭本项的依据。
+
+- **修复前证据：S。** boundary 使用 `i + nlen > hlen`，没有先拒绝远大于 length 的 `from`。
+- **修复前影响：** 一个应为 total query 的 API 对合法 Int input 可能不终止。
+- **处置：** 已以 remaining-length/last-start 算法替换，并由 std、Core 与双后端语料守护。
 
 ## LIB-06 — P2 — UTF-8 API 默认有损且没有 strict 对应项
 

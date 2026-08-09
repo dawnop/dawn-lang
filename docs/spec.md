@@ -1532,6 +1532,9 @@ fn slurp(p: String) -> String !io = {
 `decode_latin1(b) -> String`（解码，见 §11）、
 `bytes.len`、`bytes.at(b, i) -> Int`（0..255，越界 panic）、`bytes.slice(b, start, end)`
 （`[start,end)`，下标 clamp 进范围）、`bytes.index_of(b, needle, from) -> Option[Int]`。
+`index_of` 把负的 `from` 钳到 0；非空 `needle` 从该字节下标起找首次完整命中。
+空 `needle` 在合法位置 `[0, len(b)]` 命中（所以 `from == len(b)` 返回 `Some(len(b))`），
+但 `from > len(b)` 即使对空 `needle` 也返回 `None`。
 `Bytes ++ Bytes` 拼接、`==`/`!=` 按**内容**比较（`Show` 渲染为 `<N bytes>` 摘要）。
 `Bytes` 的哈希是**内容**哈希（种子 `1`，逐字节 `h = 31*h + 有符号 byte`，32 位环绕，
 见 §3.5——与那里的复合规则同形），与内容 `==` 一致，故 `Bytes` **可以**

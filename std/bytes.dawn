@@ -104,33 +104,46 @@ pub fn slice(b: Bytes, start: Int, end: Int) -> Bytes = bytes_slice(b, start, en
 ## Where the first occurrence of `needle` at or after `from` begins, or `None`.
 ##
 ## A *position* in `[0, len]` counted in bytes, not the index of an element: an
-## empty needle matches at the (non-negative) start, and `len(b)` is a legal
-## answer though no byte lives there. Pure Dawn over bytes_len/bytes_at — the
-## search loop is not an intrinsic.
+## empty needle matches at the start when that position exists, and `len(b)` is
+## a legal answer though no byte lives there. A negative `from` is clamped to
+## zero; a `from` past `len(b)` is a miss, including for an empty needle. Pure
+## Dawn over bytes_len/bytes_at — the search loop is not an intrinsic.
 pub fn index_of(b: Bytes, needle: Bytes, from: Int) -> Option[Int] = {
   let hlen = bytes_len(b)
   let nlen = bytes_len(needle)
   let start = if from < 0 { 0 } else { from }
-  index_scan(b, needle, hlen, nlen, start)
+  let last_start: Int = if nlen == 0 {
+    hlen
+  } else if start >= hlen {
+    0 - 1
+  } else {
+    let remaining: Int = hlen - start
+    if nlen > remaining { 0 - 1 } else { hlen - nlen }
+  }
+  index_scan(b, needle, nlen, start, last_start)
 }
 
-fn index_scan(b: Bytes, needle: Bytes, hlen: Int, nlen: Int, i: Int) -> Option[Int] =
-  if i + nlen > hlen {
-    None
-  } else if matches_at(b, needle, nlen, i, 0) {
-    Some(i)
-  } else {
-    index_scan(b, needle, hlen, nlen, i + 1)
+fn index_scan(b: Bytes, needle: Bytes, nlen: Int, start: Int, last_start: Int) -> Option[Int] = {
+  if start > last_start { return None }
+  var i: Int = start
+  while true {
+    if matches_at(b, needle, nlen, i) { return Some(i) }
+    if i >= last_start { return None }
+    i = i + 1
   }
+  None
+}
 
-fn matches_at(b: Bytes, needle: Bytes, nlen: Int, i: Int, k: Int) -> Bool =
-  if k >= nlen {
-    true
-  } else if bytes_at(b, i + k) == bytes_at(needle, k) {
-    matches_at(b, needle, nlen, i, k + 1)
-  } else {
-    false
+fn matches_at(b: Bytes, needle: Bytes, nlen: Int, start: Int) -> Bool = {
+  var hay_index: Int = start
+  var needle_index: Int = 0
+  while needle_index < nlen {
+    if bytes_at(b, hay_index) != bytes_at(needle, needle_index) { return false }
+    needle_index = needle_index + 1
+    if needle_index < nlen { hay_index = hay_index + 1 }
   }
+  true
+}
 
 # ---- text encodings ----
 #
@@ -446,7 +459,7 @@ test "at asserts the index exists; slice names a stretch and clamps" {
 }
 
 test "index_of answers a byte offset, and an empty needle is at every one" {
-  let b = utf8("abcabc")
+  var b: Bytes = utf8("abcabc")
   assert index_of(b, utf8("abc"), 0) == Some(0)
   assert index_of(b, utf8("abc"), 1) == Some(3)
   assert index_of(b, utf8("c"), 0) == Some(2)
@@ -467,6 +480,28 @@ test "index_of answers a byte offset, and an empty needle is at every one" {
   assert index_of(b, utf8(""), 7) == None
   assert index_of(utf8(""), utf8(""), 0) == Some(0)
   assert index_of(utf8(""), utf8("a"), 0) == None
+  # Every negative start, including Int.MIN, is the beginning.
+  assert index_of(b, utf8("abc"), -9223372036854775807 - 1).unwrap_or(0 - 1) == 0
+  assert index_of(b, utf8(""), -9223372036854775807 - 1).unwrap_or(0 - 1) == 0
+  assert index_of(utf8(""), utf8(""), -9223372036854775807 - 1).unwrap_or(0 - 1) == 0
+  # The end is a position only for an empty needle; anything past it is a miss.
+  assert index_of(b, utf8(""), len(b)).unwrap_or(0 - 1) == len(b)
+  assert index_of(b, utf8("a"), len(b)).unwrap_or(0 - 1) == 0 - 1
+  assert index_of(b, utf8(""), 9223372036854775807).unwrap_or(0 - 1) == 0 - 1
+  assert index_of(b, utf8("a"), 9223372036854775807).unwrap_or(0 - 1) == 0 - 1
+  assert index_of(utf8(""), utf8(""), 9223372036854775807).unwrap_or(0 - 1) == 0 - 1
+  assert index_of(utf8(""), utf8("a"), 9223372036854775807).unwrap_or(0 - 1) == 0 - 1
+  # The only legal start is also the last one. It must be tested before the
+  # loop decides whether another increment is possible.
+  assert index_of(utf8("xxabc"), utf8("abc"), 2).unwrap_or(0 - 1) == 2
+  assert index_of(utf8("xxabd"), utf8("abc"), 2).unwrap_or(0 - 1) == 0 - 1
+  assert index_of(utf8("ab"), utf8("abc"), -9223372036854775807 - 1).unwrap_or(0 - 1) == 0 - 1
+  # Doubling constructs a 131072-byte needle in 17 steps, without making this
+  # production module depend on std/str merely for a test helper.
+  b = utf8("a")
+  while len(b) < 100000 { b = b ++ b }
+  assert index_of(utf8("x") ++ b, b, 0).unwrap_or(0 - 1) == 1
+  assert index_of(utf8("x") ++ slice(b, 0, len(b) - 1) ++ utf8("b"), b, 1).unwrap_or(0 - 1) == 0 - 1
 }
 
 test "to_hex writes one case and from_hex reads both, or refuses" {
