@@ -34,6 +34,7 @@ use java "java.net.URLConnection"
 use java "java.net.HttpURLConnection"
 use java "java.io.ByteArrayInputStream"
 use java "java.util.ArrayList"
+use java "java.nio.file.Files"
 
 ## Close an upstream stream, swallowing a close failure (non-fatal — the
 ## response is already committed, or was never sent). Called after pumping a
@@ -404,14 +405,16 @@ fn spill_body(fmt: ErrorFormat, ex: HttpExchange) -> Result[String, HttpError] !
 
 fn close_spill(o: FileOutputStream) -> Unit !io = o.close()
 
-# A delete that does not abort the request, but does say so. `File.delete`
-# reports failure by returning false, not by throwing, so treating any
-# non-throwing return as success hid exactly the case worth hearing about: a
-# temp file that is still there.
+# A delete that does not abort the request, but does say so. This package is an
+# N-1 differential corpus, so until the next seed it cannot name std/io's new
+# DeleteOutcome constructors: the previous release's bundled std still returns
+# Bool. Calling the same Files.deleteIfExists primitive keeps the behavior
+# correct during that one-release bridge without reviving File.delete.
 fn delete_quietly(path: String) -> Unit !io = {
-  let r: Result[Bool, ForeignError] = catch_fault(() => File.new(path).delete())
+  let r: Result[Bool, ForeignError] = catch_fault(() =>
+      Files.deleteIfExists(File.new(path).toPath().expect("path")))
   match r {
-    Ok(gone) -> if gone { () } else { println("temp body file not deleted: $path") }
+    Ok(gone) -> if gone { () } else { println("temp body file was already absent: $path") }
     Err(m) -> println("temp body file not deleted: $path (${m.message})")
   }
 }

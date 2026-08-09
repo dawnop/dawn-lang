@@ -2010,9 +2010,18 @@ url/文件名安全字母表且
 - `io.write_file(path, content)` **自动创建缺失的父目录**。`Ok` 不带值
 - `io.list_dir(path)` 的条目名按**码点序**排序。排序在 std 层做（`list.sort` 走语言自己的
   `Ord[String]`），`io_list_names` 原语不承诺顺序——各后端不再各排各的。path 不是目录时
-  `Err`，`kind` 是 `"io.not_a_directory"`——它与 `io.run` 的 `"io.no_program"` 是 std
-  自己铸的两个 kind，其余都是后端给的
-- `io.is_dir(path)` 不存在或出错都视为 `false`
+  `Err`，`kind` 是 `"io.not_a_directory"`——它与 `io.run` 的 `"io.no_program"`、
+  `io.delete` 的 `"io.invalid_delete_path"` 是 std 自己铸的三个 kind，其余都是后端给的
+- `io.delete(path)` 回 `Result[DeleteOutcome, ForeignError]`：删掉文件或空目录是
+  `Ok(Deleted)`，路径不存在是 `Ok(NotFound)`；非空目录、权限等其他 host refusal 一律
+  是 `Err`，且从不递归删除。空串与以 `/` 结尾的 path 在 std 层直接拒绝，`kind` 为
+  `"io.invalid_delete_path"`，不会交给后端自行规范化；含 U+0000 的 path 同样是 `Err`，
+  绝不能把 NUL 前的前缀当成目标
+- `io.exists(path)`、`io.is_dir(path)`、`io.is_symlink(path)` 都是 Bool 查询：路径不存在、
+  类型不匹配或 host path 无效都回 `false`。特别地，含 U+0000 的 path 不得 fault，也不得把
+  NUL 前缀拿去查询；三者都直接回 `false`
+- `io.getenv(name)` 在变量未设置或 name 不能由 host 环境 API 表示时回 `None`。特别地，含
+  U+0000 的 name 不得 fault，也不得查询 NUL 前缀；它直接回 `None`
 - `io.stdin_ready(timeout_ms)` 只答一件事：**此刻是否至少有一字节可读**。
   **输入结束不算就绪**——写端已关和「连着但静默」给同一个 `false`，两者的区别由
   `io.read_stdin` 报告，它仍是唯一的读者。故**只靠它驱动的循环会在输入结束后空转**：

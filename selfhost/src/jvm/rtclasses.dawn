@@ -1173,6 +1173,7 @@ pub fn gen_io_class(supers: List[String]) -> Bytes !io = {
 
   # io_exists(path) = new File(path).exists()
   let exsv = open_static(cw, "io_exists", "(Ljava/lang/String;)Z")
+  return_false_if_nul_path(exsv, 0)
   exsv.visitTypeInsn(OP_NEW, "java/io/File")
   exsv.visitInsn(OP_DUP)
   exsv.visitVarInsn(OP_ALOAD, 0)
@@ -1199,6 +1200,7 @@ pub fn gen_io_class(supers: List[String]) -> Bytes !io = {
 
   # io_is_dir(path) = new File(path).isDirectory()
   let idv = open_static(cw, "io_is_dir", "(Ljava/lang/String;)Z")
+  return_false_if_nul_path(idv, 0)
   idv.visitTypeInsn(OP_NEW, "java/io/File")
   idv.visitInsn(OP_DUP)
   idv.visitVarInsn(OP_ALOAD, 0)
@@ -1324,6 +1326,20 @@ fn push_path(m: MethodVisitor, local: Int) -> Unit !io = {
   m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/io/File", "toPath", "()Ljava/nio/file/Path;", false)
 }
 
+## Bool path predicates report every invalid host spelling as false. File's
+## exists/isDirectory currently do that for NUL too, but Files.isSymbolicLink
+## reaches Path first and throws; emit the contract explicitly for all three.
+fn return_false_if_nul_path(m: MethodVisitor, local: Int) -> Unit !io = {
+  let no_nul = Label.new()
+  m.visitVarInsn(OP_ALOAD, local)
+  m.visitInsn(OP_ICONST_0)
+  m.visitMethodInsn(OP_INVOKEVIRTUAL, "java/lang/String", "indexOf", "(I)I", false)
+  m.visitJumpInsn(OP_IFLT, no_nul)
+  m.visitInsn(OP_ICONST_0)
+  m.visitInsn(OP_IRETURN)
+  m.visitLabel(no_nul)
+}
+
 ## An empty varargs array of `cls` — the trailing argument java.nio.file takes.
 fn push_empty_options(m: MethodVisitor, cls: String) -> Unit !io = {
   m.visitInsn(OP_ICONST_0)
@@ -1367,15 +1383,12 @@ fn gen_io_bytes_files(cw: ClassWriter) -> Unit !io = {
   return_unit(wv)
   close_mv(wv)
 
-  # io_delete(path) = new File(path).delete() — false for a missing path, and
-  # for a non-empty directory. `Files.deleteIfExists` would throw on the second,
-  # which C's remove(3) does not; this is the shape both backends can hold.
+  # io_delete(path) = Files.deleteIfExists(path). Missing is the sole false;
+  # every other refusal throws across the intrinsic boundary for catch_fault.
   let dv = open_static(cw, "io_delete", "(Ljava/lang/String;)Z")
-  dv.visitTypeInsn(OP_NEW, "java/io/File")
-  dv.visitInsn(OP_DUP)
-  dv.visitVarInsn(OP_ALOAD, 0)
-  dv.visitMethodInsn(OP_INVOKESPECIAL, "java/io/File", "<init>", "(Ljava/lang/String;)V", false)
-  dv.visitMethodInsn(OP_INVOKEVIRTUAL, "java/io/File", "delete", "()Z", false)
+  push_path(dv, 0)
+  dv.visitMethodInsn(OP_INVOKESTATIC, "java/nio/file/Files", "deleteIfExists",
+    "(Ljava/nio/file/Path;)Z", false)
   dv.visitInsn(OP_IRETURN)
   close_mv(dv)
 
@@ -1426,6 +1439,7 @@ fn gen_io_bytes_files(cw: ClassWriter) -> Unit !io = {
 
   # io_is_symlink(path) = Files.isSymbolicLink(path) — does not follow the link
   let sv = open_static(cw, "io_is_symlink", "(Ljava/lang/String;)Z")
+  return_false_if_nul_path(sv, 0)
   push_path(sv, 0)
   sv.visitMethodInsn(OP_INVOKESTATIC, "java/nio/file/Files", "isSymbolicLink",
     "(Ljava/nio/file/Path;)Z", false)

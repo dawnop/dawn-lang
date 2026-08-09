@@ -463,21 +463,21 @@ dawn_unit dawn_io_println(dawn_str *s);
 dawn_unit dawn_io_eprint(dawn_str *s);
 dawn_unit dawn_io_eprintln(dawn_str *s);
 dawn_adt *dawn_io_read_line(void); /* Option[String]; None at EOF */
-bool dawn_io_is_dir(dawn_str *path);
-bool dawn_io_exists(dawn_str *path);
+bool dawn_io_is_dir(dawn_str *path); /* false for absent or invalid paths */
+bool dawn_io_exists(dawn_str *path); /* false for absent or invalid paths */
 dawn_unit dawn_io_mkdirs(dawn_str *path); /* panics on failure */
 dawn_unit dawn_io_exit(int64_t code);    /* returns a Unit it never delivers */
 dawn_str *dawn_io_read_file(dawn_str *path);      /* panics on failure */
 dawn_unit dawn_io_write_file(dawn_str *path, dawn_str *content);
 dawn_array *dawn_io_list_names(dawn_str *path);  /* boxed dawn_str elements */
 dawn_str *dawn_io_cwd(void);
-dawn_adt *dawn_io_getenv(dawn_str *name); /* Option[String] */
+dawn_adt *dawn_io_getenv(dawn_str *name); /* Option[String]; None for invalid names */
 dawn_bytes *dawn_io_read_bytes(dawn_str *path);
 dawn_unit dawn_io_write_bytes(dawn_str *path, const dawn_bytes *content);
-bool dawn_io_delete(dawn_str *path); /* false when there was nothing to delete */
+bool dawn_io_delete(dawn_str *path); /* false only for ENOENT; other failures fault */
 dawn_unit dawn_io_rename(dawn_str *src, dawn_str *dst); /* rename(2): atomic or panic */
 dawn_str *dawn_io_temp_dir(dawn_str *parent, dawn_str *prefix); /* "" parent = $TMPDIR */
-bool dawn_io_is_symlink(dawn_str *path);
+bool dawn_io_is_symlink(dawn_str *path); /* false for absent or invalid paths */
 dawn_bytes *dawn_io_read_stdin(int64_t n); /* short only at end of input */
 /* At least one byte readable now; end of input is not readiness. Both stdin
  * readers above go straight to read(2) so this can ask the kernel and be

@@ -1,4 +1,4 @@
-<!-- doc-check: translation-of docs/spec.md @ 4fcd5ac0aee273a3 -->
+<!-- doc-check: translation-of docs/spec.md @ ca195b6534f0494b -->
 
 # Dawn Language Specification
 
@@ -2504,9 +2504,22 @@ behaviours are:
   done in the std layer (`list.sort` goes through the language's own `Ord[String]`), and
   the `io_list_names` primitive promises no order — the backends no longer each sort their
   own way. When path is not a directory it is an `Err` whose `kind` is
-  `"io.not_a_directory"` — that one and `io.run`'s `"io.no_program"` are the two kinds std
-  mints itself, all the others come from the backend
-- `io.is_dir(path)` treats both "does not exist" and "errored" as `false`
+  `"io.not_a_directory"` — that one, `io.run`'s `"io.no_program"`, and `io.delete`'s
+  `"io.invalid_delete_path"` are the three kinds std mints itself; all the others come from
+  the backend
+- `io.delete(path)` returns `Result[DeleteOutcome, ForeignError]`: deleting a file or empty
+  directory is `Ok(Deleted)`, an absent path is `Ok(NotFound)`, and every other host refusal
+  (including a non-empty directory) is an `Err`. It never deletes recursively. The std layer
+  rejects the empty string and paths ending in `/` with kind `"io.invalid_delete_path"`
+  instead of letting a backend normalize them. A path containing U+0000 is also an `Err` and
+  must never name the prefix before the NUL
+- `io.exists(path)`, `io.is_dir(path)`, and `io.is_symlink(path)` are Bool queries: an absent
+  path, a type mismatch, or an invalid host path returns `false`. In particular, a path
+  containing U+0000 must neither fault nor query the prefix before the NUL; all three return
+  `false` directly
+- `io.getenv(name)` returns `None` when the variable is unset or when the name cannot be
+  represented by the host environment API. In particular, a name containing U+0000 must
+  neither fault nor query the prefix before the NUL; it returns `None` directly
 - `io.stdin_ready(timeout_ms)` answers exactly one thing: **whether at least one byte is
   readable right now**. **End of input does not count as ready** — a write end that is
   already closed and "connected but silent" give the same `false`, and the difference

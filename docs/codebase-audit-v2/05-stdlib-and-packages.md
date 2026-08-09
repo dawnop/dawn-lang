@@ -113,11 +113,18 @@
 - **影响：** invalid UTF-8 JSON/签名输入会在应用看到前被改写；`Request.body` 无法表示 decode failure，raw bytes 也容易丢失。
 - **建议：** 现函数改名 `decode_utf8_lossy`，新增 `decode_utf8_checked -> Result`；Web 对 text media type strict decode，同时始终保留 raw Bytes。
 
-## LIB-07 — P2 — `io.delete` 把不存在与操作失败都压成 false
+## LIB-07 — P2 — `io.delete` 把不存在与操作失败都压成 false（已修）
 
-- **证据：S。** API 返回 Bool，文档把不存在和 nonempty directory 等都写成 false：`std/io.dawn:90`；JVM/C runtime 丢掉具体 host error：`selfhost/src/jvm/rtclasses.dawn:1370`、`runtime/c/dawn_rt.c:1910`。
+- **证据：S。** 修复前 API 返回 Bool，文档把不存在和 nonempty directory 等都写成 false：`std/io.dawn:90`；JVM/C runtime 丢掉具体 host error：`selfhost/src/jvm/rtclasses.dawn:1370`、`runtime/c/dawn_rt.c:1910`。
 - **影响：** permission、busy、nonempty 与 not-found 无法区分；resource cleanup 不知道是否真的释放，直接加剧 Web tempfile 问题。
 - **建议：** `Result[DeleteOutcome, ForeignError]`；至少保证 `Ok(false)` 仅表示 not found。
+- **处置：** 公开 API 已改为 `Result[DeleteOutcome, ForeignError]`，只把不存在映射为
+  `Ok(NotFound)`；JVM `Files.deleteIfExists` 与 C `remove` 的其余失败都穿过 `catch_fault`
+  成为 `Err`。std 在后端前以稳定 `ForeignError` 拒绝空串与尾 `/`，native 路径桥拒绝内嵌
+  NUL，避免 JVM 规范化或 C 截断后删到另一对象。三个 Bool 路径查询在 NUL 上统一直接回
+  `false`，`getenv` 作为同一 C-string bridge 上唯一的 Option 查询统一回 `None`，不会从 native
+  fault 或查询 NUL 前缀；双后端合同与七组可运行 mutant 固定删除结果、查询结果、路径解释及
+  目标不变边界。
 
 ## LIB-08 — P2 — JSON parse error 只有不稳定的 String
 
@@ -146,7 +153,7 @@
 
 ## LIB-11 — P1 — request-body tempfile 有确定泄漏路径
 
-- **证据：S。** temp file 先创建，之后才对 output stream 建 bracket：`packages/web/src/server.dawn:355`；request-level cleanup 只有 Request 构造成功后才安装：`:448`；`File.delete()` false 仍当成功：`:365`。
+- **证据：S。** temp file 先创建，之后才对 output stream 建 bracket：`packages/web/src/server.dawn:355`；request-level cleanup 只有 Request 构造成功后才安装：`:448`。删除结果已由 LIB-07 改为结构化并会记录失败，但它没有补上 ownership 空窗。
 - **边界：** open output stream、transfer 或 Request construction failure 时，path 没有任何 owner；反复 interrupted upload 可积累 temp files。
 - **影响：** 长期 server 可耗尽 temp directory/disk。
 - **建议：** temp path 是最外层 bracket resource；只有 Request 成功接管 ownership 才 disarm cleanup；delete failure 必须 log/return structured error。

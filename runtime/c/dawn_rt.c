@@ -1816,9 +1816,20 @@ dawn_adt *dawn_io_read_line(void) {
   return dawn_some(line);
 }
 
-/* A Dawn string is not NUL-terminated; every path handed to the C library
- * has to be copied to get the terminator. */
+static bool dawn_has_nul(const dawn_str *s) {
+  return s->len > 0 && memchr(s->p, '\0', (size_t)s->len) != NULL;
+}
+
+/* A Dawn string is not NUL-terminated; every path, environment name, or argv
+ * entry handed to the C library has to be copied to get the terminator. A C
+ * string cannot represent an embedded NUL, so reject one before allocating
+ * instead of silently naming a prefix. Bool path queries and getenv check
+ * dawn_has_nul first because their public failure values are false and None;
+ * operations with a Result/fault channel keep this fail-closed default. */
 static char *dawn_cpath(dawn_str *s) {
+  if (dawn_has_nul(s)) {
+    dawn_fault(DAWN_LIT("path contains an embedded NUL byte"));
+  }
   char *p = (char *)dawn_alloc((size_t)s->len + 1);
   if (s->len > 0) memcpy(p, s->p, (size_t)s->len);
   p[s->len] = '\0';
@@ -1873,6 +1884,7 @@ static unsigned char *dawn_slurp(FILE *f, size_t *out_len, bool *out_bad) {
 }
 
 bool dawn_io_is_dir(dawn_str *path) {
+  if (dawn_has_nul(path)) return false;
   char *p = dawn_cpath(path);
   struct stat st;
   bool yes = stat(p, &st) == 0 && S_ISDIR(st.st_mode);
@@ -1881,6 +1893,7 @@ bool dawn_io_is_dir(dawn_str *path) {
 }
 
 bool dawn_io_exists(dawn_str *path) {
+  if (dawn_has_nul(path)) return false;
   char *p = dawn_cpath(path);
   struct stat st;
   bool yes = stat(p, &st) == 0;
@@ -2004,6 +2017,7 @@ dawn_str *dawn_io_cwd(void) {
 }
 
 dawn_adt *dawn_io_getenv(dawn_str *name) {
+  if (dawn_has_nul(name)) return dawn_none();
   char *p = dawn_cpath(name);
   const char *v = getenv(p);
   free(p);
@@ -2045,13 +2059,18 @@ dawn_unit dawn_io_write_bytes(dawn_str *path, const dawn_bytes *content) {
   return DAWN_UNIT;
 }
 
-/* remove(3) takes both files and empty directories, which is what File.delete
- * does; a non-empty directory fails on both sides rather than recursing. */
+/* remove(3) takes both files and empty directories, matching
+ * Files.deleteIfExists without recursing. ENOENT is the sole false result;
+ * every other errno is a fault for std/io's catch_fault barrier. */
 bool dawn_io_delete(dawn_str *path) {
   char *p = dawn_cpath(path);
-  bool gone = remove(p) == 0;
+  int rc = remove(p);
+  int saved_errno = errno;
   free(p);
-  return gone;
+  if (rc == 0) return true;
+  if (saved_errno == ENOENT) return false;
+  dawn_fault(DAWN_LIT("io_delete: cannot delete path"));
+  return false;
 }
 
 dawn_unit dawn_io_rename(dawn_str *src, dawn_str *dst) {
@@ -2097,6 +2116,7 @@ dawn_str *dawn_io_temp_dir(dawn_str *parent, dawn_str *prefix) {
 }
 
 bool dawn_io_is_symlink(dawn_str *path) {
+  if (dawn_has_nul(path)) return false;
   char *p = dawn_cpath(path);
   struct stat st;
   bool yes = lstat(p, &st) == 0 && S_ISLNK(st.st_mode);

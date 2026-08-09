@@ -11,16 +11,24 @@
 # field, so the interop cannot name it and the language server reaches it
 # through a method handle. A channel is not a method handle.
 #
-# The four that can fail -- `temp_dir`, `write_bytes`, `read_bytes`, `rename` --
-# come from `use std/raw` rather than std/io, because the primitive is what the
-# two backends have to agree on and std/io's job is to put it inside
-# `catch_fault`. See stdext/raw.dawn.
+# The four operations exercised at the primitive boundary -- `temp_dir`,
+# `write_bytes`, `read_bytes`, `rename` -- come from `use std/raw` rather than
+# std/io. Delete deliberately goes through std/io because its public
+# Deleted/NotFound/Err split is the contract under test. See stdext/raw.dawn.
 use std/io
+use std/io.{DeleteOutcome, Deleted, NotFound}
 use std/raw
 use std/str
 use std/bytes
 
 fn line(label: String, v: Bool) -> Unit !io = io.println(label ++ " = " ++ to_string(v))
+
+fn delete_line(label: String, r: Result[DeleteOutcome, ForeignError]) -> Unit !io =
+  io.println(label ++ " = " ++ match r {
+    Ok(Deleted) -> "Deleted"
+    Ok(NotFound) -> "NotFound"
+    Err(_) -> "Err"
+  })
 
 fn is_set(o: Option[String]) -> Bool =
   match o {
@@ -59,9 +67,9 @@ pub fn main() -> Unit !io = {
   line("source is gone  ", not io.exists(nested))
   line("target is there ", io.exists(moved))
 
-  io.println("-- delete reports whether there was anything to delete --")
-  line("first delete    ", io.delete(moved))
-  line("second delete   ", io.delete(moved))
+  io.println("-- delete separates deletion, absence and failure --")
+  delete_line("first delete    ", io.delete(moved))
+  delete_line("second delete   ", io.delete(moved))
 
   # the harness runs both backends with stdin at /dev/null, so a short read is
   # the end-of-input signal and both must agree on it
@@ -71,5 +79,5 @@ pub fn main() -> Unit !io = {
   io.println("-- and it cleans up after itself --")
   let _ = io.delete(dir ++ "/one/two")
   let _ = io.delete(dir ++ "/one")
-  line("scratch removed ", io.delete(dir))
+  delete_line("scratch removed ", io.delete(dir))
 }

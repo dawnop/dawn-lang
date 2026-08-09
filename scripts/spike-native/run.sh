@@ -292,9 +292,11 @@ if [ "${SPIKE_WORKER:-}" = 1 ]; then
 fi
 
 # -------------------------------------------------------------- driver
+full_corpus=0
 if [ "$#" -gt 0 ]; then
   progs=("$@")
 else
+  full_corpus=1
   # A corpus entry is a single file, or a project directory when it needs a
   # dependency -- `dawn run` and `__emitc` both take either, and a project is
   # the only way to drive a real package (see json_lib).
@@ -387,6 +389,15 @@ done
 if [ "$xargs_rc" -ne 0 ] && [ "$fail" -eq 0 ]; then
   echo "xargs exited $xargs_rc but every entry reported success -- treating as a failure"
   fail=1
+fi
+
+# The corpus holds the written positive delete outcomes in io_files. A full CI
+# run also rebuilds both historical runtime regressions and requires their
+# behavior to go red; targeted corpus runs stay targeted rather than paying for
+# another selfhost build.
+if [ "$full_corpus" -eq 1 ] && [ "$fail" -eq 0 ]; then
+  echo
+  if ! "$root/scripts/delete-contract/run.sh"; then fail=1; fi
 fi
 
 echo

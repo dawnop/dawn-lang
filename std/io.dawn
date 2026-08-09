@@ -29,6 +29,7 @@
 # `message` — neither has to parse. Rendering one back into a line of text is
 # still a `to_string(e)` away for whoever actually wants the line.
 use std/list
+use std/str
 
 ## Print a string followed by a newline.
 pub fn println(s: String) -> Unit !io = io_println(s)
@@ -53,10 +54,12 @@ pub fn exit(code: Int) -> Unit !io = io_exit(code)
 ## The intrinsic maps Java's `null`-or-line straight onto `Option`.
 pub fn read_line() -> Option[String] !io = io_read_line()
 
-## Whether `path` names a directory.
+## Whether `path` names a directory. Invalid host path spellings, including an
+## embedded NUL, answer `false` rather than escaping this Bool interface.
 pub fn is_dir(path: String) -> Bool !io = io_is_dir(path)
 
-## Whether anything exists at `path` -- a file, a directory, anything.
+## Whether anything exists at `path` -- a file, a directory, anything. Invalid
+## host path spellings, including an embedded NUL, answer `false`.
 pub fn exists(path: String) -> Bool !io = io_exists(path)
 
 ## Create `path` and every missing directory above it.
@@ -76,7 +79,8 @@ pub fn write_file(path: String, content: String) -> Result[Unit, ForeignError] !
 ## The process's working directory, as an absolute path.
 pub fn cwd() -> String !io = io_cwd()
 
-## The value of the environment variable `name`, or `None` when it is unset.
+## The value of the environment variable `name`, or `None` when it is unset or
+## cannot be represented by the host environment API, including an embedded NUL.
 pub fn getenv(name: String) -> Option[String] !io = io_getenv(name)
 
 ## Read a whole file as bytes. The text half is `read_file`.
@@ -87,10 +91,36 @@ pub fn read_bytes(path: String) -> Result[Bytes, ForeignError] !io =
 pub fn write_bytes(path: String, content: Bytes) -> Result[Unit, ForeignError] !io =
   catch_fault(() => io_write_bytes(path, content))
 
-## Delete a file, or an empty directory. `true` when there was something to
-## delete: a missing path is not an error, and a non-empty directory is not
-## deleted.
-pub fn delete(path: String) -> Bool !io = io_delete(path)
+## The two normal outcomes of deleting a path. Host failures are not outcomes:
+## they stay in `delete`'s `Err` branch.
+pub type DeleteOutcome = Deleted | NotFound
+
+## Delete a file or an empty directory. A missing path is `Ok(NotFound)`;
+## every other host refusal, including a non-empty directory, is an `Err`.
+##
+## The empty path and a path ending in `/` are rejected before a backend sees
+## them. Hosts normalize those spellings differently, and delete must never
+## change which filesystem object the caller named as a side effect of choosing
+## a backend.
+pub fn delete(path: String) -> Result[DeleteOutcome, ForeignError] !io =
+  if path == "" {
+    Err(ForeignError {
+      kind: "io.invalid_delete_path",
+      message: "io.delete: path must not be empty",
+      cause: None
+    })
+  } else if str.ends_with(path, "/") {
+    Err(ForeignError {
+      kind: "io.invalid_delete_path",
+      message: "io.delete: path must not end with '/'",
+      cause: None
+    })
+  } else {
+    match catch_fault(() => io_delete(path)) {
+      Ok(gone) -> if gone { Ok(Deleted) } else { Ok(NotFound) }
+      Err(e) -> Err(e)
+    }
+  }
 
 ## Move `src` onto `dst`, replacing it. Atomic when the two are on one
 ## filesystem and an error when they are not -- which is the whole point: the
@@ -106,7 +136,8 @@ pub fn temp_dir(parent: String, prefix: String) -> Result[String, ForeignError] 
   catch_fault(() => io_temp_dir(parent, prefix))
 
 ## Whether `path` is a symbolic link. The link itself is examined, not its
-## target, so a link to a directory is a link and not a directory.
+## target, so a link to a directory is a link and not a directory. Invalid host
+## path spellings, including an embedded NUL, answer `false`.
 pub fn is_symlink(path: String) -> Bool !io = io_is_symlink(path)
 
 ## Exactly `n` bytes of standard input, shorter only at end of input -- so a
@@ -147,9 +178,10 @@ pub fn stdin_ready(timeout_ms: Int) -> Bool !io = io_stdin_ready(timeout_ms)
 ## answers whatever order the OS gave, and one `list.sort` over the language's
 ## own `Ord[String]` is what makes every backend agree.
 ##
-## Its `kind` is `"io.not_a_directory"`, one of the two failure kinds std mints
-## itself (`run`'s `io.no_program` is the other): every other one in this module
-## is whatever the backend called it, and this failure never reaches a backend,
+## Its `kind` is `"io.not_a_directory"`, one of the three failure kinds std
+## mints itself (`run`'s `io.no_program` and `delete`'s
+## `io.invalid_delete_path` are the others): every other one in this module is
+## whatever the backend called it, and this failure never reaches a backend,
 ## because the check happens first. It is spelled as a name rather than a
 ## sentence for the same reason every other `kind` is — a caller may match on it.
 pub fn list_dir(path: String) -> Result[List[String], ForeignError] !io =
@@ -174,9 +206,9 @@ pub fn list_dir(path: String) -> Result[List[String], ForeignError] !io =
 ## path leaves that stream pointing wherever this process's already points.
 ## Files rather than pipes: see the note on the `io_run` intrinsic.
 ##
-## An empty `argv` is `"io.no_program"`, the second failure kind std mints
-## itself, and for `list_dir`'s reason: the check happens first, so the failure
-## never reaches a backend and every backend words it the same.
+## An empty `argv` is `"io.no_program"`, another failure kind std mints itself,
+## and for `list_dir`'s reason: the check happens first, so the failure never
+## reaches a backend and every backend words it the same.
 pub fn run(argv: List[String], out_path: String, err_path: String) -> Result[Int, ForeignError] !io =
   if len(argv) == 0 {
     Err(ForeignError {
@@ -195,10 +227,11 @@ pub fn run(argv: List[String], out_path: String, err_path: String) -> Result[Int
 # compared byte for byte (scripts/native-cli-diff.sh). So a failure that
 # reaches a backend is asserted to *be* an `Err` and nothing more.
 #
-# The exceptions are `list_dir`'s `io.not_a_directory` and `run`'s
-# `io.no_program`, which std mints itself above the barrier and which are the
-# same string on every backend -- and being match-able is the whole reason they
-# are names rather than sentences, so they are the `kind`s worth pinning.
+# The exceptions are `list_dir`'s `io.not_a_directory`, `run`'s
+# `io.no_program`, and `delete`'s `io.invalid_delete_path`, which std mints
+# itself above the barrier and which are the same string on every backend --
+# and being match-able is the whole reason they are names rather than
+# sentences, so they are the `kind`s worth pinning.
 #
 # `Unit` has no equality, so `Result[Unit, ForeignError]` cannot be compared
 # with `==` and the blocks below carry a local `ok` lambda instead of a
@@ -248,13 +281,13 @@ test "temp_dir makes a fresh directory, and a file round trips through it" {
   assert read_file(nested) == Ok("deep")
   assert is_dir(d ++ "/a/b")
 
-  assert delete(f)
-  assert delete(nested)
-  assert delete(d ++ "/a/b")
-  assert delete(d ++ "/a")
-  assert delete(inner)
-  assert delete(d)
-  assert delete(d2)
+  assert delete(f) == Ok(Deleted)
+  assert delete(nested) == Ok(Deleted)
+  assert delete(d ++ "/a/b") == Ok(Deleted)
+  assert delete(d ++ "/a") == Ok(Deleted)
+  assert delete(inner) == Ok(Deleted)
+  assert delete(d) == Ok(Deleted)
+  assert delete(d2) == Ok(Deleted)
   assert not exists(d)
 }
 
@@ -293,12 +326,18 @@ test "a path that is not there is an Err, and never a panic" {
   assert not exists(d ++ "/nope")
   assert not is_dir(d ++ "/nope")
   assert not is_symlink(d ++ "/nope")
-  assert not delete(d ++ "/nope")
+  let nul_path = d ++ "\u{0}suffix"
+  assert not exists(nul_path)
+  assert not is_dir(nul_path)
+  assert not is_symlink(nul_path)
+  assert is_dir(d)
+  assert delete(d ++ "/nope") == Ok(NotFound)
   assert getenv("DAWN_STD_TEST_DEFINITELY_UNSET_VARIABLE") == None
+  assert getenv("DAWN_STD_TEST\u{0}INVALID_VARIABLE") == None
   # cwd is somewhere, and it is a directory
   assert cwd() != ""
   assert is_dir(cwd())
-  assert delete(d)
+  assert delete(d) == Ok(Deleted)
 }
 
 test "list_dir sorts by code point, and names a non-directory itself" {
@@ -318,9 +357,9 @@ test "list_dir sorts by code point, and names a non-directory itself" {
   assert ok(write_file(d ++ "/mid", "1"))
   # not the order the OS handed over, and not case-insensitive: 'A' is 65
   assert list_dir(d) == Ok(["Alpha", "mid", "zeta"])
-  assert delete(d ++ "/zeta")
-  assert delete(d ++ "/Alpha")
-  assert delete(d ++ "/mid")
+  assert delete(d ++ "/zeta") == Ok(Deleted)
+  assert delete(d ++ "/Alpha") == Ok(Deleted)
+  assert delete(d ++ "/mid") == Ok(Deleted)
 
   # The clause the sort exists for. In code-point order U+FFFD (65533) comes
   # before U+1F600 (128512); in UTF-16 unit order it does not, because the
@@ -330,8 +369,8 @@ test "list_dir sorts by code point, and names a non-directory itself" {
   assert ok(write_file(d ++ "/\u{1F600}", "1"))
   assert ok(write_file(d ++ "/\u{FFFD}", "1"))
   assert list_dir(d) == Ok(["\u{FFFD}", "\u{1F600}"])
-  assert delete(d ++ "/\u{1F600}")
-  assert delete(d ++ "/\u{FFFD}")
+  assert delete(d ++ "/\u{1F600}") == Ok(Deleted)
+  assert delete(d ++ "/\u{FFFD}") == Ok(Deleted)
 
   # the one kind std mints, so the one a caller may match on
   assert ok(write_file(d ++ "/plain.txt", "1"))
@@ -345,8 +384,8 @@ test "list_dir sorts by code point, and names a non-directory itself" {
     Ok(_) -> { assert false }
     Err(e) -> { assert e.kind == "io.not_a_directory" }
   }
-  assert delete(d ++ "/plain.txt")
-  assert delete(d)
+  assert delete(d ++ "/plain.txt") == Ok(Deleted)
+  assert delete(d) == Ok(Deleted)
 }
 
 test "mkdirs is idempotent on a directory; delete says what it removed" {
@@ -370,16 +409,62 @@ test "mkdirs is idempotent on a directory; delete says what it removed" {
   assert ok(write_file(d ++ "/f.txt", "x"))
   assert not ok(mkdirs(d ++ "/f.txt"))
 
-  # `delete` answers whether there was something to delete, and refuses to
-  # empty a directory on the caller's behalf
-  assert not delete(d ++ "/nope")
-  assert not delete(d ++ "/m1")
+  # Missing is a normal outcome. A non-empty directory is a host refusal, not
+  # another spelling of absence, and delete never empties it for the caller.
+  assert delete(d ++ "/nope") == Ok(NotFound)
+  match delete(d ++ "/m1") {
+    Ok(_) -> { assert false }
+    Err(_) -> ()
+  }
   assert is_dir(d ++ "/m1")
-  assert delete(d ++ "/m1/m2")
-  assert delete(d ++ "/m1")
+  assert delete(d ++ "/m1/m2") == Ok(Deleted)
+  assert delete(d ++ "/m1") == Ok(Deleted)
   assert not exists(d ++ "/m1")
-  assert delete(d ++ "/f.txt")
-  assert delete(d)
+  assert delete(d ++ "/f.txt") == Ok(Deleted)
+  assert delete(d ++ "/f.txt") == Ok(NotFound)
+  assert delete(d) == Ok(Deleted)
+}
+
+test "delete rejects ambiguous path spellings without changing the target" {
+  let ok = (r: Result[Unit, ForeignError]) => match r {
+    Ok(_) -> true
+    Err(_) -> false
+  }
+  let made = (r: Result[String, ForeignError]) => match r {
+    Ok(p) -> p
+    Err(_) -> ""
+  }
+  let d = made(temp_dir("", "dawn-std-test-"))
+  let f = d ++ "/kept"
+  assert ok(write_file(f, "x"))
+
+  match delete("") {
+    Ok(_) -> { assert false }
+    Err(e) -> {
+      assert e.kind == "io.invalid_delete_path"
+      assert e.message == "io.delete: path must not be empty"
+    }
+  }
+  assert exists(f)
+
+  match delete(f ++ "/") {
+    Ok(_) -> { assert false }
+    Err(e) -> {
+      assert e.kind == "io.invalid_delete_path"
+      assert e.message == "io.delete: path must not end with '/'"
+    }
+  }
+  assert exists(f)
+
+  # A backend may name this failure differently, but it must reject the whole
+  # path rather than silently delete the prefix before the NUL.
+  match delete(f ++ "\u{0}suffix") {
+    Ok(_) -> { assert false }
+    Err(_) -> ()
+  }
+  assert exists(f)
+  assert delete(f) == Ok(Deleted)
+  assert delete(d) == Ok(Deleted)
 }
 
 test "rename replaces the destination; bytes survive what a String need not" {
@@ -415,11 +500,11 @@ test "rename replaces the destination; bytes survive what a String need not" {
   assert ok(write_file(d ++ "/text.txt", "abc"))
   assert read_bytes(d ++ "/text.txt") == Ok(bytes_utf8("abc"))
 
-  assert delete(d ++ "/dst.txt")
-  assert delete(d ++ "/raw.bin")
-  assert delete(d ++ "/empty.bin")
-  assert delete(d ++ "/text.txt")
-  assert delete(d)
+  assert delete(d ++ "/dst.txt") == Ok(Deleted)
+  assert delete(d ++ "/raw.bin") == Ok(Deleted)
+  assert delete(d ++ "/empty.bin") == Ok(Deleted)
+  assert delete(d ++ "/text.txt") == Ok(Deleted)
+  assert delete(d) == Ok(Deleted)
 }
 
 test "run answers the exit status; a program that cannot start is an Err" {
@@ -462,8 +547,8 @@ test "run answers the exit status; a program that cannot start is an Err" {
   assert read_file(out) == Ok("out")
   assert read_file(err) == Ok("err")
   assert ok(write_file(d ++ "/keep.txt", "x"))
-  assert delete(d ++ "/keep.txt")
-  assert delete(out)
-  assert delete(err)
-  assert delete(d)
+  assert delete(d ++ "/keep.txt") == Ok(Deleted)
+  assert delete(out) == Ok(Deleted)
+  assert delete(err) == Ok(Deleted)
+  assert delete(d) == Ok(Deleted)
 }
