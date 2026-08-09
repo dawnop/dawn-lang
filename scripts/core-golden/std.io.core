@@ -120,20 +120,104 @@ fn std/io.write_bytes -> Result[Unit, ForeignError]
         local v2 : fn() -> Unit !io
     drop v2
     local v3 : Result[Unit, ForeignError]
-fn std/io.delete -> Bool
+fn std/io.delete -> Result[DeleteOutcome, ForeignError]
   param v0 : String owned
-  block : Bool
-    let v1 : Bool
-      intrinsic io_delete : Bool
-        local v0 : String
-    drop v0
-    local v1 : Bool
+  if : Result[DeleteOutcome, ForeignError]
+    binary eq : Bool
+      local v0 : String
+      str ""
+    block : Result[DeleteOutcome, ForeignError]
+      let v1 : Result[DeleteOutcome, ForeignError]
+        ctor Result/Err : Result[DeleteOutcome, ForeignError]
+          box from=ForeignError
+            ctor ForeignError/ForeignError : ForeignError
+              str "io.invalid_delete_path"
+              str "io.delete: path must not be empty"
+              ctor Option/None : Option[String]
+      drop v0
+      local v1 : Result[DeleteOutcome, ForeignError]
+    if : Result[DeleteOutcome, ForeignError]
+      call direct std/str.ends_with : Bool
+        dup
+          local v0 : String
+        str "/"
+      block : Result[DeleteOutcome, ForeignError]
+        let v2 : Result[DeleteOutcome, ForeignError]
+          ctor Result/Err : Result[DeleteOutcome, ForeignError]
+            box from=ForeignError
+              ctor ForeignError/ForeignError : ForeignError
+                str "io.invalid_delete_path"
+                str "io.delete: path must not end with '/'"
+                ctor Option/None : Option[String]
+        drop v0
+        local v2 : Result[DeleteOutcome, ForeignError]
+      block : Result[DeleteOutcome, ForeignError]
+        block : Result[DeleteOutcome, ForeignError]
+          let v3 : Result[Bool, ForeignError]
+            block : Result[Bool, ForeignError]
+              let v4 : fn() -> Bool !io
+                closure std/io.lambda$5 : fn() -> Bool !io
+                  local v0 : String
+              let v5 : Result[Bool, ForeignError]
+                intrinsic catch_fault : Result[Bool, ForeignError]
+                  local v4 : fn() -> Bool !io
+              drop v4
+              local v5 : Result[Bool, ForeignError]
+          let v6 : Result[DeleteOutcome, ForeignError]
+            intrinsic null_ref : Result[DeleteOutcome, ForeignError]
+          sif
+            isctor Result/Ok
+              local v3 : Result[Bool, ForeignError]
+            block : Unit
+              let v7 : Bool
+                unbox to=Bool
+                  field Result/Ok.0 : T
+                    local v3 : Result[Bool, ForeignError]
+              drop v3
+              let v8 : Result[DeleteOutcome, ForeignError]
+                if : Result[DeleteOutcome, ForeignError]
+                  local v7 : Bool
+                  block : Result[DeleteOutcome, ForeignError]
+                    ctor Result/Ok : Result[DeleteOutcome, ForeignError]
+                      box from=DeleteOutcome
+                        ctor DeleteOutcome/Deleted : DeleteOutcome
+                  block : Result[DeleteOutcome, ForeignError]
+                    ctor Result/Ok : Result[DeleteOutcome, ForeignError]
+                      box from=DeleteOutcome
+                        ctor DeleteOutcome/NotFound : DeleteOutcome
+              drop v6
+              assign v6
+                local v8 : Result[DeleteOutcome, ForeignError]
+            block : Unit
+              sif
+                isctor Result/Err
+                  local v3 : Result[Bool, ForeignError]
+                block : Unit
+                  let v9 : ForeignError
+                    unbox to=ForeignError
+                      dup
+                        field Result/Err.0 : E
+                          local v3 : Result[Bool, ForeignError]
+                  drop v3
+                  let v10 : Result[DeleteOutcome, ForeignError]
+                    ctor Result/Err : Result[DeleteOutcome, ForeignError]
+                      box from=ForeignError
+                        local v9 : ForeignError
+                  drop v6
+                  assign v6
+                    local v10 : Result[DeleteOutcome, ForeignError]
+                block : Unit
+                  discard
+                    intrinsic panic : Never
+                      str "unreachable match"
+                  drop v3
+          local v6 : Result[DeleteOutcome, ForeignError]
 fn std/io.rename -> Result[Unit, ForeignError]
   param v0 : String owned
   param v1 : String owned
   block : Result[Unit, ForeignError]
     let v2 : fn() -> Unit !io
-      closure std/io.lambda$5 : fn() -> Unit !io
+      closure std/io.lambda$6 : fn() -> Unit !io
         local v0 : String
         local v1 : String
     let v3 : Result[Unit, ForeignError]
@@ -146,7 +230,7 @@ fn std/io.temp_dir -> Result[String, ForeignError]
   param v1 : String owned
   block : Result[String, ForeignError]
     let v2 : fn() -> String !io
-      closure std/io.lambda$6 : fn() -> String !io
+      closure std/io.lambda$7 : fn() -> String !io
         local v0 : String
         local v1 : String
     let v3 : Result[String, ForeignError]
@@ -181,7 +265,7 @@ fn std/io.list_dir -> Result[List[String], ForeignError]
         let v1 : Result[List[String], ForeignError]
           block : Result[List[String], ForeignError]
             let v2 : fn() -> List[String] !io
-              closure std/io.lambda$7 : fn() -> List[String] !io
+              closure std/io.lambda$8 : fn() -> List[String] !io
                 local v0 : String
             let v3 : Result[List[String], ForeignError]
               intrinsic catch_fault : Result[List[String], ForeignError]
@@ -269,7 +353,7 @@ fn std/io.run -> Result[Int, ForeignError]
     block : Result[Int, ForeignError]
       block : Result[Int, ForeignError]
         let v4 : fn() -> Int !io
-          closure std/io.lambda$8 : fn() -> Int !io
+          closure std/io.lambda$9 : fn() -> Int !io
             local v0 : List[String]
             local v1 : String
             local v2 : String
@@ -321,7 +405,15 @@ fn std/io.lambda$4 -> Unit
         local v1 : Bytes
     drop v0
     drop v1
-fn std/io.lambda$5 -> Unit
+fn std/io.lambda$5 -> Bool
+  capture v0 : String owned
+  block : Bool
+    let v1 : Bool
+      intrinsic io_delete : Bool
+        local v0 : String
+    drop v0
+    local v1 : Bool
+fn std/io.lambda$6 -> Unit
   capture v0 : String owned
   capture v1 : String owned
   block : Unit
@@ -331,7 +423,7 @@ fn std/io.lambda$5 -> Unit
         local v1 : String
     drop v0
     drop v1
-fn std/io.lambda$6 -> String
+fn std/io.lambda$7 -> String
   capture v0 : String owned
   capture v1 : String owned
   block : String
@@ -342,7 +434,7 @@ fn std/io.lambda$6 -> String
     drop v0
     drop v1
     local v2 : String
-fn std/io.lambda$7 -> List[String]
+fn std/io.lambda$8 -> List[String]
   capture v0 : String owned
   block : List[String]
     let v1 : List[String]
@@ -364,7 +456,7 @@ fn std/io.prim$0$String$cmp -> Int
     drop v0
     drop v1
     local v3 : Int
-fn std/io.lambda$8 -> Int
+fn std/io.lambda$9 -> Int
   capture v0 : List[String] owned
   capture v1 : String owned
   capture v2 : String owned
